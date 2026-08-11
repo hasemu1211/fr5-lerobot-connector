@@ -1,0 +1,370 @@
+diff --git a/fairino_hardware_v3_9_7/include/fairino_hardware/fairino_hardware_interface.hpp b/fairino_hardware_v3_9_7/include/fairino_hardware/fairino_hardware_interface.hpp
+index cd06d65..238f4e1 100644
+--- a/fairino_hardware_v3_9_7/include/fairino_hardware/fairino_hardware_interface.hpp
++++ b/fairino_hardware_v3_9_7/include/fairino_hardware/fairino_hardware_interface.hpp
+@@ -9,6 +9,10 @@
+ #include "hardware_interface/types/hardware_interface_type_values.hpp"
+ #include "visibility_control.h"
+ #include <vector>
++#include <array>
++#include <string>
++#include <algorithm>
++#include <cmath>
+ #include "libfairino/include/robot.h"
+ 
+ 
+@@ -53,13 +57,23 @@ public:
+   hardware_interface::return_type write(const rclcpp::Time & time, const rclcpp::Duration & period) override;
+   
+ private:
+-  double _jnt_position_command[6];
+-  double _jnt_velocity_command[6];
+-  double _jnt_torque_command[6];
+-  double _jnt_position_state[6];
+-  double _jnt_velocity_state[6];
+-  double _jnt_torque_state[6];
++  std::vector<double> _jnt_position_command;
++  std::vector<double> _jnt_velocity_command;
++  std::vector<double> _jnt_torque_command;
++  std::vector<double> _jnt_position_state;
++  std::vector<double> _jnt_velocity_state;
++  std::vector<double> _jnt_torque_state;
+   int _control_mode;
++  bool _is_gripper{false};
++  bool _has_arm{false};
++  std::array<size_t, 6> _arm_joint_indices{};
++  size_t _gripper_joint_index{0};
++  int _gripper_index{1};
++  int _gripper_velocity{80};
++  int _gripper_force{50};
++  int _gripper_max_time{30000};
++  double _gripper_upper_position{0.021};
++  double _last_gripper_command{-1.0};
+   std::string _controller_ip = CONTROLLER_IP_ADDRESS;
+   std::unique_ptr<FRRobot> _ptr_robot;
+ };
+@@ -67,4 +81,4 @@ private:
+ } //end namespace
+ 
+ 
+-#endif
+\ No newline at end of file
++#endif
+diff --git a/fairino_hardware_v3_9_7/src/CNDE_thread.cpp b/fairino_hardware_v3_9_7/src/CNDE_thread.cpp
+index 6ed2f6a..3d4e0cc 100644
+--- a/fairino_hardware_v3_9_7/src/CNDE_thread.cpp
++++ b/fairino_hardware_v3_9_7/src/CNDE_thread.cpp
+@@ -10,7 +10,12 @@
+  */
+ CNDE_recv_thread::CNDE_recv_thread(const std::string node_name):rclcpp::Node(node_name){
+     using namespace std::chrono_literals;
+-    _controller_ip = CONTROLLER_IP;//控制器默认ip地址
++    this->declare_parameter<std::string>("robot_ip", CONTROLLER_IP);
++    _controller_ip = this->get_parameter("robot_ip").as_string();
++    in_addr controller_address{};
++    if (inet_pton(AF_INET, _controller_ip.c_str(), &controller_address) != 1) {
++        throw std::invalid_argument("robot_ip must be a valid IPv4 address");
++    }
+ 
+     //创建套字
+     _socketfd1 = socket(AF_INET,SOCK_DGRAM,0);//使用UDP通讯
+@@ -119,4 +124,4 @@ void CNDE_recv_thread::_state_recv_callback(){
+         // uint8_t* pt_head = (uint8_t*)_shm_state_data;
+         // std::cout << *(double*)pt_head << "," << shm_shared_data.jnt_cur_pos[0] << std::endl;
+     }
+-}
+\ No newline at end of file
++}
+diff --git a/fairino_hardware_v3_9_7/src/command_server.cpp b/fairino_hardware_v3_9_7/src/command_server.cpp
+index c793c2a..be6389f 100644
+--- a/fairino_hardware_v3_9_7/src/command_server.cpp
++++ b/fairino_hardware_v3_9_7/src/command_server.cpp
+@@ -148,8 +148,14 @@ typedef enum _msg_id{
+  * @param[in] node_name-节点名称，构建ros2 node必须的参数
+  */
+ robot_command_thread::robot_command_thread(const std::string node_name):rclcpp::Node(node_name,
+-           rclcpp::NodeOptions().use_intra_process_comms(true)){
++    rclcpp::NodeOptions().use_intra_process_comms(true)){
+     using namespace std::chrono_literals;
++    this->declare_parameter<std::string>("robot_ip", CONTROLLER_IP);
++    _controller_ip = this->get_parameter("robot_ip").as_string();
++    in_addr controller_address{};
++    if (inet_pton(AF_INET, _controller_ip.c_str(), &controller_address) != 1) {
++        throw std::invalid_argument("robot_ip must be a valid IPv4 address");
++    }
+ 
+     /*******************************************初始化私有变量**************************************/
+ 
+@@ -206,8 +212,7 @@ robot_command_thread::robot_command_thread(const std::string node_name):rclcpp::
+     /*********************************************************************************************/
+ 
+     /********************************尝试使用SDK库连接机械臂******************************************/
+-    _controller_ip = CONTROLLER_IP;//控制器默认ip地址
+-    RCLCPP_INFO(rclcpp::get_logger(LOGGER_NAME),"Robot ip:%s",CONTROLLER_IP);
++    RCLCPP_INFO(rclcpp::get_logger(LOGGER_NAME),"Robot ip:%s",_controller_ip.c_str());
+ 
+     //打印输出版本信息及其他前置信息
+     RCLCPP_INFO(rclcpp::get_logger(LOGGER_NAME),msgout[msg_id(hello)]);
+@@ -11957,11 +11962,11 @@ void robot_command_thread::_state_recv_callback(){
+ void robot_command_thread::_ping_recv_callback(){
+     auto msg = robot_feedback_msg();
+     static ROBOT_STATE_PKG ctrl_state;
+-    bool current_ping_status = _check_ping("192.168.58.2");
++    bool current_ping_status = _check_ping(_controller_ip);
+     int state;
+     int tmpres = _ptr_robot->GetSDKComState(&state);
+     if((!current_ping_status) || (state != 0)){
+-        RCLCPP_INFO(rclcpp::get_logger(LOGGER_NAME),"192.168.58.2 is error: error_code=%d",state);
++        RCLCPP_INFO(rclcpp::get_logger(LOGGER_NAME),"%s is error: error_code=%d",_controller_ip.c_str(),state);
+         msg.reconnect_flag = 1;
+         _state_publisher->publish(msg);
+         
+diff --git a/fairino_hardware_v3_9_7/src/fairino_hardware_interface.cpp b/fairino_hardware_v3_9_7/src/fairino_hardware_interface.cpp
+index ca2d84f..20cf903 100644
+--- a/fairino_hardware_v3_9_7/src/fairino_hardware_interface.cpp
++++ b/fairino_hardware_v3_9_7/src/fairino_hardware_interface.cpp
+@@ -7,6 +7,58 @@ hardware_interface::CallbackReturn FairinoHardwareInterface::on_init(const hardw
+         return hardware_interface::CallbackReturn::ERROR;
+     }
+     info_ = sysinfo;//info_是父类中定义的变量
++    _gripper_joint_index = info_.joints.size();
++    constexpr std::array<const char *, 6> arm_names{"j1", "j2", "j3", "j4", "j5", "j6"};
++    for (size_t arm = 0; arm < arm_names.size(); ++arm) {
++        const auto it = std::find_if(info_.joints.begin(), info_.joints.end(),
++            [name = arm_names[arm]](const auto &joint) { return joint.name == name; });
++        if (it == info_.joints.end()) {
++            RCLCPP_FATAL(rclcpp::get_logger("FairinoHardwareInterface"),
++                "Required arm joint '%s' is missing", arm_names[arm]);
++            return hardware_interface::CallbackReturn::ERROR;
++        }
++        _arm_joint_indices[arm] = static_cast<size_t>(std::distance(info_.joints.begin(), it));
++    }
++    for (size_t i = 0; i < info_.joints.size(); ++i) {
++        if (info_.joints[i].name == "finger_right_joint") {
++            _gripper_joint_index = i;
++            break;
++        }
++    }
++    _is_gripper = _gripper_joint_index < info_.joints.size();
++    _has_arm = true;
++    if (info_.joints.size() != 6 + static_cast<size_t>(_is_gripper)) {
++        RCLCPP_FATAL(rclcpp::get_logger("FairinoHardwareInterface"),
++            "FR5 hardware expects 6 arm joints and optional gripper, got %zu", info_.joints.size());
++        return hardware_interface::CallbackReturn::ERROR;
++    }
++    _jnt_position_command.assign(info_.joints.size(), 0.0);
++    _jnt_velocity_command.assign(info_.joints.size(), 0.0);
++    _jnt_torque_command.assign(info_.joints.size(), 0.0);
++    _jnt_position_state.assign(info_.joints.size(), 0.0);
++    _jnt_velocity_state.assign(info_.joints.size(), 0.0);
++    _jnt_torque_state.assign(info_.joints.size(), 0.0);
++    const auto &params = info_.hardware_parameters;
++    if (auto it = params.find("controller_ip"); it != params.end()) _controller_ip = it->second;
++    if (_is_gripper) {
++        try {
++            if (auto it = params.find("gripper_index"); it != params.end()) _gripper_index = std::stoi(it->second);
++            if (auto it = params.find("gripper_velocity"); it != params.end()) _gripper_velocity = std::stoi(it->second);
++            if (auto it = params.find("gripper_force"); it != params.end()) _gripper_force = std::stoi(it->second);
++            if (auto it = params.find("gripper_max_time"); it != params.end()) _gripper_max_time = std::stoi(it->second);
++            if (auto it = params.find("gripper_upper_position"); it != params.end()) _gripper_upper_position = std::stod(it->second);
++        } catch (const std::exception &error) {
++            RCLCPP_FATAL(rclcpp::get_logger("FairinoHardwareInterface"),
++                "Invalid gripper hardware parameter: %s", error.what());
++            return hardware_interface::CallbackReturn::ERROR;
++        }
++        if (_gripper_index < 1 || _gripper_velocity < 1 || _gripper_velocity > 100 ||
++            _gripper_force < 1 || _gripper_force > 100 || _gripper_max_time <= 0 ||
++            !std::isfinite(_gripper_upper_position) || _gripper_upper_position <= 0.0) {
++            RCLCPP_FATAL(rclcpp::get_logger("FairinoHardwareInterface"), "Gripper parameters are out of range");
++            return hardware_interface::CallbackReturn::ERROR;
++        }
++    }
+     
+     for (const hardware_interface::ComponentInfo& joint : info_.joints) {
+ 
+@@ -108,7 +160,7 @@ hardware_interface::CallbackReturn FairinoHardwareInterface::on_activate(const r
+     RCLCPP_INFO(rclcpp::get_logger("FairinoHardwareInterface"), "Starting ...please wait...");
+     //做变量的初始化工作
+     _ptr_robot = std::make_unique<FRRobot>();//创建机器人实例
+-    for(int i=0;i<6;i++){//初始化变量
++    for(size_t i=0;i<_jnt_position_command.size();i++){//初始化变量
+         _jnt_position_command[i] = 0;
+         _jnt_velocity_command[i] = 0;
+         _jnt_torque_command[i] = 0;
+@@ -125,16 +177,46 @@ hardware_interface::CallbackReturn FairinoHardwareInterface::on_activate(const r
+     }else{
+         RCLCPP_INFO(rclcpp::get_logger("FairinoHardwareInterface"), "机械臂SDK连接成功！");
+     }
+-    //做第一步的工作，读取当前状态数据
+-    JointPos jntpos;
+-    returncode = _ptr_robot->GetActualJointPosDegree(0,&jntpos);
++    if (_is_gripper) {
++        uint16_t fault = 0;
++        uint8_t position = 0;
++        if (_ptr_robot->GetGripperCurPosition(&fault, &position) != 0 || fault != 0) {
++            RCLCPP_ERROR(rclcpp::get_logger("FairinoHardwareInterface"),
++                "Failed to read gripper position, fault=%u", fault);
++            _ptr_robot->CloseRPC();
++            _ptr_robot.reset();
++            return hardware_interface::CallbackReturn::ERROR;
++        }
++        _jnt_position_state[_gripper_joint_index] = _jnt_position_command[_gripper_joint_index] =
++            _gripper_upper_position * static_cast<double>(position) / 100.0;
++        _last_gripper_command = _jnt_position_command[_gripper_joint_index];
++        RCLCPP_INFO(rclcpp::get_logger("FairinoHardwareInterface"),
++            "Real gripper hardware ready (index=%d, position=%u)", _gripper_index, position);
++        if (!_has_arm) return hardware_interface::CallbackReturn::SUCCESS;
++    }
++    JointPos jntpos{};
++    returncode = _has_arm ? _ptr_robot->GetActualJointPosDegree(0, &jntpos) : 0;
+     /*
+     获取反馈位置后同步到指令位置以维持当前状态，如果发现读取失败，那么就无法激活插件，
+     因为错误的反馈位置会导致初始指令位置下发出现严重偏差导致事故
+     */
+     if(returncode == 0){
+-        for(int j=0;j<6;j++){
+-            _jnt_position_command[j] = jntpos.jPos[j]/180.0*M_PI;
++        for(size_t arm = 0; arm < _arm_joint_indices.size(); ++arm) {
++            const size_t joint = _arm_joint_indices[arm];
++            _jnt_position_state[joint] = _jnt_position_command[joint] = jntpos.jPos[arm] / 180.0 * M_PI;
++        }
++        // Clear a stale servo session left by an interrupted controller before restarting.
++        errno_t servoret = 0;
++        if (_has_arm) {
++            _ptr_robot->ServoMoveEnd();
++            rclcpp::sleep_for(100ms);
++            servoret = _ptr_robot->ServoMoveStart();
++        }
++        if(servoret != 0){
++            RCLCPP_INFO(rclcpp::get_logger("FairinoHardwareInterface"), "ServoMoveStart failed, error code: %d", servoret);
++            _ptr_robot->CloseRPC();
++            _ptr_robot.reset();
++            return hardware_interface::CallbackReturn::ERROR;
+         }
+         RCLCPP_INFO(rclcpp::get_logger("FairinoHardwareInterface"),"初始指令位置: %f,%f,%f,%f,%f,%f",_jnt_position_command[0],\
+         _jnt_position_command[1],_jnt_position_command[2],_jnt_position_command[3],_jnt_position_command[4],_jnt_position_command[5]);    
+@@ -142,6 +224,8 @@ hardware_interface::CallbackReturn FairinoHardwareInterface::on_activate(const r
+         return hardware_interface::CallbackReturn::SUCCESS;
+     }else{
+         RCLCPP_INFO(rclcpp::get_logger("FairinoHardwareInterface"), "读取初始关节角度错误，硬件无法启动！请检查通讯内容");
++        _ptr_robot->CloseRPC();
++        _ptr_robot.reset();
+         return hardware_interface::CallbackReturn::ERROR;
+     }
+ }
+@@ -151,9 +235,20 @@ hardware_interface::CallbackReturn FairinoHardwareInterface::on_activate(const r
+ hardware_interface::CallbackReturn FairinoHardwareInterface::on_deactivate(const rclcpp_lifecycle::State& previous_state)
+ {
+     RCLCPP_INFO(rclcpp::get_logger("FairinoHardwareInterface"), "Stopping ...please wait...");
+-    _ptr_robot->StopMotion();//停止机器人
+-    _ptr_robot->CloseRPC();//销毁实例，连接断开
+-    _ptr_robot.release();
++    if (!_ptr_robot) return hardware_interface::CallbackReturn::SUCCESS;
++    if (_has_arm) {
++        const auto servo_result = _ptr_robot->ServoMoveEnd();
++        const auto stop_result = _ptr_robot->StopMotion();//停止机器人
++        if (servo_result != 0 || stop_result != 0) {
++            RCLCPP_WARN(rclcpp::get_logger("FairinoHardwareInterface"),
++                "Robot stop returned ServoMoveEnd=%d StopMotion=%d", servo_result, stop_result);
++        }
++    }
++    const auto close_result = _ptr_robot->CloseRPC();//销毁实例，连接断开
++    if (close_result != 0) {
++        RCLCPP_WARN(rclcpp::get_logger("FairinoHardwareInterface"), "CloseRPC returned %d", close_result);
++    }
++    _ptr_robot.reset();
+     RCLCPP_INFO(rclcpp::get_logger("FairinoHardwareInterface"), "System successfully stopped!");
+     return hardware_interface::CallbackReturn::SUCCESS;
+ }
+@@ -161,44 +256,68 @@ hardware_interface::CallbackReturn FairinoHardwareInterface::on_deactivate(const
+ 
+ 
+ hardware_interface::return_type FairinoHardwareInterface::read(const rclcpp::Time& time,const rclcpp::Duration& period)
+-{//从RTDE反馈数据中获取所需的位置，速度和扭矩信息
+-    JointPos state_data;
+-    error_t returncode = _ptr_robot->GetActualJointPosDegree(1,&state_data);
+-    if(returncode == 0){
+-        for(int i=0;i<6;i++){
+-            _jnt_position_state[i] = state_data.jPos[i]/180.0*M_PI;//注意单位转换，moveit统一用弧度
+-            //_jnt_torque_state[i] = state_data.jt_cur_tor[i];//注意单位转换
++{
++    // 从RTDE反馈数据中获取所需的位置，速度和扭矩信息
++    if (_has_arm) {
++        JointPos state_data{};
++        error_t returncode = _ptr_robot->GetActualJointPosDegree(1, &state_data);
++        if(returncode == 0){
++            for(size_t arm = 0; arm < _arm_joint_indices.size(); ++arm) {
++                _jnt_position_state[_arm_joint_indices[arm]] = state_data.jPos[arm] / 180.0 * M_PI;
++            }
++        } else {
++            return hardware_interface::return_type::ERROR;
+         }
+-    }else{
+-        hardware_interface::return_type::ERROR;
+     }
+-    //RCLCPP_INFO(rclcpp::get_logger("FairinoHardwareInterface"), "System successfully read: %f,%f,%f,%f,%f,%f",_jnt_position_state[0],\
+-    _jnt_position_state[1],_jnt_position_state[2],_jnt_position_state[3],_jnt_position_state[4],_jnt_position_state[5]);
+-
+-  return hardware_interface::return_type::OK;
++    if (_is_gripper) {
++        uint16_t fault = 0;
++        uint8_t position = 0;
++        if (_ptr_robot->GetGripperCurPosition(&fault, &position) != 0 || fault != 0) {
++            return hardware_interface::return_type::ERROR;
++        }
++        _jnt_position_state[_gripper_joint_index] =
++            _gripper_upper_position * static_cast<double>(position) / 100.0;
++    }
++    return hardware_interface::return_type::OK;
+ 
+ }
+ 
+ hardware_interface::return_type FairinoHardwareInterface::write(const rclcpp::Time& time,const rclcpp::Duration& period)
+ {
+-    if(_control_mode == 0){//位置控制模式
+-        if (std::any_of(&_jnt_position_command[0], &_jnt_position_command[5],\
++    if (_is_gripper) {
++        if (_jnt_position_command.size() <= _gripper_joint_index ||
++            !std::isfinite(_jnt_position_command[_gripper_joint_index])) {
++            return hardware_interface::return_type::ERROR;
++        }
++        const double target = std::clamp(
++            _jnt_position_command[_gripper_joint_index], 0.0, _gripper_upper_position);
++        const int position = static_cast<int>(std::lround(100.0 * target / _gripper_upper_position));
++        if (_last_gripper_command < 0.0 || std::abs(target - _last_gripper_command) > 0.0001) {
++            // FAIRINO SDK: block=1 returns after accepting the command; ros2_control must not wait for motion.
++            const int result = _ptr_robot->MoveGripper(
++                _gripper_index, position, _gripper_velocity, _gripper_force,
++                _gripper_max_time, 1, 0, 0, 0, 0);
++            if (result != 0) return hardware_interface::return_type::ERROR;
++            _last_gripper_command = target;
++        }
++    }
++    if (_has_arm && _control_mode == 0){//位置控制模式
++        if (std::any_of(_jnt_position_command.begin(), _jnt_position_command.end(),\
+             [](double c) { return not std::isfinite(c); })) {
+             return hardware_interface::return_type::ERROR;
+         }
+-        JointPos cmd;
++        JointPos cmd{};
+         ExaxisPos extcmd{0,0,0,0};
+-        for(auto j=0;j<6;j++){
+-            cmd.jPos[j] = _jnt_position_command[j]/M_PI*180; //注意单位转换
++        for(size_t arm = 0; arm < _arm_joint_indices.size(); ++arm) {
++            cmd.jPos[arm] = _jnt_position_command[_arm_joint_indices[arm]] / M_PI * 180;
+         }
+-        //RCLCPP_INFO(rclcpp::get_logger("FairinoHardwareInterface"), "ServoJ下发位置:%f,%f,%f,%f,%f,%f",\
+-            cmd.jPos[0],cmd.jPos[1],cmd.jPos[2],cmd.jPos[3],cmd.jPos[4],cmd.jPos[5]);
+         int returncode = _ptr_robot->ServoJ(&cmd,&extcmd,0,0,0.008,0,0);
+         if(returncode != 0){
+-            RCLCPP_INFO(rclcpp::get_logger("FairinoHardwareInterface"), "ServoJ指令下发错误,错误码:%d",returncode);
++            RCLCPP_ERROR(rclcpp::get_logger("FairinoHardwareInterface"), "ServoJ指令下发错误,错误码:%d",returncode);
++            return hardware_interface::return_type::ERROR;
+         }
+-    }else if(_control_mode == 1){//扭矩控制模式
+-        if (std::any_of(&_jnt_torque_command[0], &_jnt_torque_command[5],\
++    }else if(!_has_arm || _control_mode == 1){//扭矩控制模式
++        if (std::any_of(_jnt_torque_command.begin(), _jnt_torque_command.end(),\
+             [](double c) { return not std::isfinite(c); })) {
+             return hardware_interface::return_type::ERROR;
+         }

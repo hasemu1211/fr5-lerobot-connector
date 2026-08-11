@@ -1,0 +1,32 @@
+{
+  "enable": true,
+  "max_num_transforms": 2,
+  "random_order": false,
+  "tfs": {
+    "brightness": {
+      "weight": 1.0,
+      "type": "ColorJitter",
+      "kwargs": {"brightness": [0.9, 1.1]}
+    },
+    "contrast": {
+      "weight": 1.0,
+      "type": "ColorJitter",
+      "kwargs": {"contrast": [0.9, 1.1]}
+    },
+    "saturation": {
+      "weight": 1.0,
+      "type": "ColorJitter",
+      "kwargs": {"saturation": [0.8, 1.2]}
+    },
+    "hue": {
+      "weight": 0.5,
+      "type": "ColorJitter",
+      "kwargs": {"hue": [-0.02, 0.02]}
+    },
+    "sharpness": {
+      "weight": 0.5,
+      "type": "SharpnessJitter",
+      "kwargs": {"sharpness": [0.8, 1.2]}
+    }
+  }
+}

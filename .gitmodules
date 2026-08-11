@@ -1,0 +1,4 @@
+[submodule "src/frcobot_ros2"]
+	path = src/frcobot_ros2
+	url = https://github.com/FAIR-INNOVATION/frcobot_ros2.git
+	shallow = true

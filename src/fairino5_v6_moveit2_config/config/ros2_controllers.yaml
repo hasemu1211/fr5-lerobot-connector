@@ -1,0 +1,43 @@
+# This config file is used by ros2_control
+controller_manager:
+  ros__parameters:
+    update_rate: 100  # Hz
+
+    fairino5_controller:
+      type: joint_trajectory_controller/JointTrajectoryController
+
+    gripper_controller:
+      type: joint_trajectory_controller/JointTrajectoryController
+
+    joint_state_broadcaster:
+      type: joint_state_broadcaster/JointStateBroadcaster
+
+fairino5_controller:
+  ros__parameters:
+    joints:
+      - j1
+      - j2
+      - j3
+      - j4
+      - j5
+      - j6
+    command_interfaces:
+      - position
+    state_interfaces:
+      - position
+
+gripper_controller:
+  ros__parameters:
+    # FAIRINO MoveGripper accepts an endpoint and performs its own velocity profile.
+    # Sending spline intermediates blocks the SDK RPC repeatedly and overruns ros2_control.
+    interpolation_method: none
+    joints:
+      - finger_right_joint
+    command_interfaces:
+      - position
+    state_interfaces:
+      - position
+    constraints:
+      goal_time: 5.0
+      finger_right_joint:
+        goal: 0.001
