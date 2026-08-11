@@ -6,4 +6,4 @@ This repository links FAIRINO's ROS 2 repository as a submodule, applies a local
 - [FAIR-INNOVATION/fairino-cpp-sdk](https://github.com/FAIR-INNOVATION/fairino-cpp-sdk): `libfairino` headers and Linux shared library. The upstream repository declares Apache-2.0.
 - [DH-Robotics PGEA-100-40](https://en.dh-robotics.com/product/pgea): the gripper CAD mesh under `src/fairino_description/meshes/gripper` is included for the current robot description. Confirm the CAD file's redistribution terms with its original provider before granting reuse rights.
 
-No license is granted for original project code until the repository owner adds an explicit top-level `LICENSE`.
+The top-level Apache License 2.0 applies to repository-authored scripts, tools, tests, configuration, and documentation. It does not relicense the third-party submodule, derived robot-description files, vendor patch context, or CAD meshes listed above; those remain subject to their respective owners' terms.

@@ -56,4 +56,8 @@ scripts/validate_dataset.sh --preview pick_red
 
 ## 배포 주의
 
-로봇은 비상정지 접근, 충돌 없는 작업공간, 저속 설정을 확인한 뒤 사용한다. 이 저장소에는 아직 최상위 오픈소스 라이선스가 없으므로 코드는 공개 열람만 가능하다. FAIRINO submodule과 파생 파일의 권리 상태는 [Third-party notices](THIRD_PARTY_NOTICES.md)를 확인한다.
+로봇은 비상정지 접근, 충돌 없는 작업공간, 저속 설정을 확인한 뒤 사용한다.
+
+## 라이선스
+
+이 프로젝트가 직접 작성한 코드와 문서는 [Apache License 2.0](LICENSE)으로 배포한다. FAIRINO submodule, 파생 robot description과 DH-Robotics CAD mesh에는 이 라이선스를 재부여하지 않으며 각각의 권리 조건은 [Third-party notices](THIRD_PARTY_NOTICES.md)를 따른다.
