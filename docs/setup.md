@@ -44,8 +44,8 @@ export FR5_CONTROLLER_IP=192.168.58.2
 export REALSENSE_NAMESPACE=camera
 export REALSENSE_ROLE=up
 export FR5_COLLECTION_FPS=30
-# 기본 수집에서는 설정하지 않는다.
-# export FR5_EXPERIMENTAL_TIME_OFFSET_PROFILE=config/time-offsets.json
+# 필요할 때만 실제 by-id 경로 지정
+# export UVC_DEVICE=/dev/v4l/by-id/usb-...-video-index0
 ```
 
 ### 로봇 제어망과 Wi-Fi
@@ -93,26 +93,37 @@ RGB만 기록할 때 `REALSENSE_ENABLE_SYNC=false`가 기본이다. 이는 한 R
   --metadata /camera/up/color/metadata
 ```
 
-시간 오프셋은 설치 과정에서 생성·적용하지 않는다. experimental visual-motion estimate는 공식 캘리브레이션이 아니며, [data-collection.md](data-collection.md)의 제한과 독립 검증을 이해한 경우에만 명시적으로 시험한다.
+시간 오프셋은 설치 과정에서 생성·적용하지 않는다. 기본값은 0 ms이며 외부에서 독립 측정된 값만 명시적으로 적용한다.
 
 ### RealSense + 다른 제조사 카메라
 
-두 번째 카메라는 RealSense일 필요가 없다. 제조사 ROS 드라이버가 아래 조건의 토픽을 발행하도록 설정하고 리코더의 `--side-image` 또는 `--wrist-image`에 전달한다.
+두 번째 카메라는 RealSense일 필요가 없다. 일반 V4L2/UVC 장치는 공식 ROS `usb_cam`으로 실행한다.
+
+```bash
+UVC_ROLE=side scripts/start_uvc_camera.sh
+# 자동 선택이 불가능하거나 여러 UVC가 있으면 stable by-id를 명시한다.
+UVC_DEVICE=/dev/v4l/by-id/usb-...-video-index0 \
+  UVC_ROLE=wrist scripts/start_uvc_camera.sh
+```
+
+launcher는 `/dev/videoN`을 설정에 저장하지 않고 `by-id`에서 non-RealSense `video-index0`를 선택한 뒤 실제 device를 resolve한다. 기본 토픽은 `/camera/side/color/image_raw`, 기본 형식은 RGB 640×480, 기본 FPS는 `FR5_COLLECTION_FPS`의 30이다. pinned `usb_cam`의 `mmap` 경로는 V4L2 buffer timestamp를 `Image.header.stamp`로 발행한다. Jazzy binary 0.8.1의 epoch microsecond 변환 결함을 피하려고 upstream 수정 commit `ee0a2f7`을 submodule로 빌드한다.
+
+다른 제조사 전용 ROS 드라이버를 사용해도 아래 입력 계약은 같다.
 
 - 메시지 형식: `sensor_msgs/msg/Image` (`CompressedImage`는 직접 입력 불가)
-- 영상: RGB로 변환 가능한 3채널, 640x480. 권장 30fps이며 더 느린 카메라는 300ms transport 한도 안에서 같은 시각의 RGB·state·action bundle을 30Hz dataset row에 재사용한다. target 정합 오차 50ms와 반복률을 품질 보고서에 기록
+- 영상: RGB로 변환 가능한 3채널, 640x480, 기본 30fps. target 정합 오차와 반복률을 품질 보고서에 기록
 - timestamp: 수신 PC의 ROS clock과 같은 시간축
 - 장치 선택: `/dev/videoN` 대신 serial, `/dev/v4l/by-id`, 또는 udev 고정 이름
 
-예:
+UVC 토픽 age는 metadata 인자 없이 측정한다.
 
 ```bash
-scripts/collect.sh pick_red_up_side "pick the red block" \
-  --camera-profile up-side \
-  --side-image /other_camera/color/image_raw
+.venv/bin/python tools/measure_ros_topic_age.py \
+  --duration 30 --reliable-image --image-qos-depth 10 \
+  --image /camera/side/color/image_raw
 ```
 
-카메라 모델이 정해진 뒤 그 제조사의 공식 ROS 드라이버용 시작 스크립트만 추가한다. 미정 장비를 가정한 범용 V4L2 자동 선택은 IR·metadata 노드를 잘못 고를 수 있어 제공하지 않는다.
+`scripts/preflight_collection.sh --live`도 선택된 각 카메라를 5초 측정해 source rate, 음수 timestamp age, age p95를 수집 시작 전에 강제 검사한다. 이 검사는 시작 전 검증이며 recorder loop에는 추가 작업을 넣지 않는다.
 
 ## 수집 노트북 확인
 

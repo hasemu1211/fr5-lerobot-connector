@@ -3,7 +3,6 @@
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
-from tempfile import TemporaryDirectory
 import json
 import sys
 from unittest.mock import patch
@@ -13,16 +12,72 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools"))
 
 from fr5_dataset_schema import CAMERA_PROFILES, dataset_features, smolvla_camera_mapping
-from fr5_lerobot_recorder import FR5LeRobotRecorder, load_time_offset_profile, parse_args
-from time_alignment import estimate_time_offset, interpolate_vector, latest_sample, nearest_sample
+from fr5_lerobot_recorder import FR5LeRobotRecorder, parse_args
+from time_alignment import interpolate_vector, latest_sample, nearest_sample
 from ros_image import image_message_to_rgb
+from measure_ros_topic_age import image_gate_failures
 from validate_lerobot_dataset import has_nonfinite_number
 
 
 class RecorderContractTest(unittest.TestCase):
-    def test_vendor_gripper_call_is_nonblocking(self):
-        source = (Path(__file__).resolve().parents[1] / "src/frcobot_ros2/fairino_hardware_v3_9_7/src/fairino_hardware_interface.cpp").read_text()
-        self.assertRegex(source, r"MoveGripper\([\s\S]{0,300}_gripper_max_time,\s*1,")
+    def test_robot_control_keeps_gripper_off_realtime_xmlrpc_path(self):
+        root = Path(__file__).resolve().parents[1]
+        source = (root / "src/frcobot_ros2/fairino_hardware_v3_9_7/src/fairino_hardware_interface.cpp").read_text()
+        write_body = source.split("FairinoHardwareInterface::write", 1)[1].split(
+            "void FairinoHardwareInterface::gripper_worker", 1
+        )[0]
+        self.assertNotIn("MoveGripper", write_body)
+        self.assertNotIn("SetRobotRealtimeStateConfig", source)
+        self.assertIn("ServoMoveStart(1)", source)
+        self.assertIn("ServoMoveEnd(1)", source)
+        self.assertNotIn("ActGripper", source)
+        read_body = source.split("FairinoHardwareInterface::read", 1)[1].split(
+            "FairinoHardwareInterface::write", 1
+        )[0]
+        deactivate_body = source.split("FairinoHardwareInterface::on_deactivate", 1)[1].split(
+            "FairinoHardwareInterface::read", 1
+        )[0]
+        self.assertNotIn("GetGripperCurPosition", read_body)
+        self.assertLess(deactivate_body.index("ServoMoveEnd(1)"), deactivate_body.index("_gripper_thread.join()"))
+        self.assertIn("_restart_servo_after_gripper.exchange(false)", write_body)
+        worker_body = source.split("void FairinoHardwareInterface::gripper_worker", 1)[1]
+        self.assertLess(worker_body.index("if (result != 0)"), worker_body.index("_restart_servo_after_gripper = true"))
+        self.assertRegex(write_body, r"ServoJ\([^;]+,\s*0,\s*1\)")
+        self.assertRegex(
+            source,
+            r"void FairinoHardwareInterface::gripper_worker\(\)[\s\S]+MoveGripper\([\s\S]{0,300}_gripper_max_time,\s*1,",
+        )
+
+    def test_moveit_and_ros2_control_action_contracts_are_preserved(self):
+        root = Path(__file__).resolve().parents[1]
+        controllers = (root / "src/fairino5_v6_moveit2_config/config/ros2_controllers.yaml").read_text()
+        moveit = (root / "src/fairino5_v6_moveit2_config/config/moveit_controllers.yaml").read_text()
+        hardware = (root / "src/fairino5_v6_moveit2_config/config/fairino5_v6_robot.ros2_control.xacro").read_text()
+        srdf = (root / "src/fairino5_v6_moveit2_config/config/fairino5_v6_robot.srdf").read_text()
+        preflight = (root / "scripts/preflight_collection.sh").read_text()
+        for name in ("fairino5_controller", "gripper_controller"):
+            self.assertIn(name, controllers)
+            self.assertIn(name, moveit)
+        self.assertIn("action_ns: follow_joint_trajectory", moveit)
+        self.assertRegex(
+            moveit,
+            r"gripper_controller:[\s\S]+allowed_goal_duration_margin: 5\.0",
+        )
+        self.assertIn('<joint name="finger_right_joint">', hardware)
+        self.assertRegex(srdf, r'<group_state name="open" group="gripper">\s*<joint name="finger_right_joint" value="0\.021"/>')
+        self.assertRegex(srdf, r'<group_state name="closed" group="gripper">\s*<joint name="finger_right_joint" value="0"/>')
+        self.assertIn("/fr_command_server opens a second FAIRINO SDK session", preflight)
+        self.assertIn('up-side) CAMERA_TOPICS=("$UP_TOPIC" "/camera/side/color/image_raw")', preflight)
+        self.assertIn("--expected-image-hz", preflight)
+        self.assertIn("--max-image-age-ms 300", preflight)
+        self.assertIn("goal: 0.000105", controllers)
+
+    def test_camera_preflight_rejects_bad_clock_domain_or_rate(self):
+        stamps = list(np.arange(150) / 30)
+        self.assertEqual(image_gate_failures(stamps, [0.05] * 150, 5, 30, 0.75, 300), [])
+        self.assertTrue(image_gate_failures(stamps, [-0.01] * 150, 5, 30, 0.75, 300))
+        self.assertTrue(image_gate_failures(stamps[:50], [0.05] * 50, 5, 30, 0.75, 300))
+        self.assertTrue(image_gate_failures(stamps, [0.4] * 150, 5, 30, 0.75, 300))
 
     def test_ros_image_conversion_handles_padding_and_rejects_truncation(self):
         message = SimpleNamespace(
@@ -42,43 +97,6 @@ class RecorderContractTest(unittest.TestCase):
         self.assertEqual(latest_sample(samples, 1.03, 0.05)[0], 1.00)
         self.assertEqual(nearest_sample(samples, 1.03, 0.05)[0], 1.04)
         self.assertIsNone(nearest_sample(samples, 1.20, 0.05))
-
-        robot_times = np.arange(0, 12, 0.005)
-        robot_speed = sum(
-            amplitude * np.exp(-0.5 * ((robot_times - center) / width) ** 2)
-            for center, amplitude, width in ((1, .8, .06), (2.4, 1.2, .08), (4.3, .5, .05), (6.1, 1, .07), (8.8, .7, .06), (10.4, 1.3, .05))
-        )
-        image_times = np.arange(0.2, 11.8, 1 / 30)
-        image_motion = np.interp(image_times + 0.037, robot_times, robot_speed)
-        offset, correlation, margin, peak_width = estimate_time_offset(image_times, image_motion, robot_times, robot_speed)
-        self.assertAlmostEqual(offset, 0.037, delta=0.002)
-        self.assertGreater(correlation, 0.99)
-        self.assertGreater(margin, 0.03)
-        self.assertLess(peak_width, 0.04)
-        for broken in (
-            (image_times[:-1], image_motion, robot_times, robot_speed),
-            (image_times, image_motion, robot_times[::-1], robot_speed),
-            (image_times, np.r_[image_motion[:-1], np.nan], robot_times, robot_speed),
-        ):
-            with self.assertRaises(ValueError):
-                estimate_time_offset(*broken)
-        with self.assertRaises(ValueError):
-            estimate_time_offset(image_times, image_motion, robot_times, robot_speed, 0.02)
-
-    def test_time_offset_profile_is_bound_to_active_stream(self):
-        measurement = {
-            "accepted": True, "camera_role": "up", "image_topic": "/camera/up/color/image_raw",
-            "image_width": 640, "image_height": 480, "method": "dense_optical_flow_farneback_v1",
-            "search_max_offset_ms": 200.0, "offset_ms": 12.0,
-        }
-        with TemporaryDirectory() as directory:
-            path = Path(directory) / "offsets.json"
-            path.write_text(json.dumps({"schema_version": 1, "offsets_ms": {"up": 12.0}, "measurements": {"up": measurement}}))
-            self.assertEqual(load_time_offset_profile(path, {"up": measurement["image_topic"]}, 640, 480), {"up": 12.0})
-            measurement["accepted"] = "yes"
-            path.write_text(json.dumps({"schema_version": 1, "offsets_ms": {"up": 12.0}, "measurements": {"up": measurement}}))
-            with self.assertRaises(SystemExit):
-                load_time_offset_profile(path, {"up": "/camera/up/color/image_raw"}, 640, 480)
 
     def test_camera_profiles_match_features(self):
         for cameras in CAMERA_PROFILES.values():
@@ -147,9 +165,10 @@ class RecorderContractTest(unittest.TestCase):
         self.assertTrue(any("writer queue" in reason for reason in reasons))
         recorder.writer_queue_drops = 0
 
-        recorder.image_metrics = {"up": [(0, 120, 0.01, 100)] * 3}
-        _, reasons = recorder._quality_summary()
-        self.assertTrue(any("monochrome" in reason for reason in reasons))
+        recorder.image_metrics = {"up": [(0, 250, 0.25, 10)] * 3}
+        summary, reasons = recorder._quality_summary()
+        self.assertEqual(reasons, [])
+        self.assertEqual(len(summary["image_quality_warnings"]), 4)
 
         recorder.image_metrics = {"up": [(10, 120, 0.01, 100)] * 3}
         recorder.frame_stamps[45:] = [stamp + 0.14 for stamp in recorder.frame_stamps[45:]]
@@ -165,7 +184,7 @@ class RecorderContractTest(unittest.TestCase):
         recorder.action_samples[0][0] = 0
         recorder.state_samples = [np.zeros(7) for _ in recorder.action_samples]
         _, reasons = recorder._quality_summary()
-        self.assertTrue(any("feedback range" in reason for reason in reasons))
+        self.assertFalse(any("range" in reason for reason in reasons))
 
     def test_nonfinite_quality_option_is_rejected(self):
         with patch.object(sys, "argv", ["recorder", "--task", "test", "--fps-tolerance", "nan"]):
@@ -173,6 +192,30 @@ class RecorderContractTest(unittest.TestCase):
                 parse_args()
         self.assertTrue(has_nonfinite_number({"nested": [1, float("nan")]}))
         self.assertFalse(has_nonfinite_number({"nested": [1, 2.0], "accepted": True}))
+
+    def test_collection_defaults_and_supported_camera_path(self):
+        root = Path(__file__).resolve().parents[1]
+        with patch.object(sys, "argv", ["recorder", "--task", "test"]):
+            args = parse_args()
+        self.assertEqual(args.fps, 30)
+        self.assertEqual(args.writer_queue_size, 128)
+
+        recorder_source = (root / "tools/fr5_lerobot_recorder.py").read_text()
+        collect_source = (root / "scripts/collect.sh").read_text()
+        validator_source = (root / "tools/validate_lerobot_dataset.py").read_text()
+        camera_launcher = (root / "scripts/start_uvc_camera.sh").read_text()
+        setup = (root / "scripts/setup_notebook.sh").read_text()
+        usb_cam_timestamp = (root / "src/usb_cam/include/usb_cam/utils.hpp").read_text()
+        self.assertNotIn("experimental-time-offset", recorder_source + collect_source)
+        self.assertNotIn("estimate_time_offset", (root / "tools/time_alignment.py").read_text())
+        self.assertIn("--require-hil-motion", validator_source)
+        for unsupported_gate in ("max-static-action-ratio", "max-tracking-error-ratio", "max-episode-duration"):
+            self.assertNotIn(unsupported_gate, validator_source)
+        self.assertIn("usb_cam_node_exe", camera_launcher)
+        self.assertIn("FR5_COLLECTION_FPS:-30", camera_launcher)
+        self.assertIn("/dev/v4l/by-id", camera_launcher)
+        self.assertIn("git submodule update --init --recursive", setup)
+        self.assertIn("epoch_time.tv_sec * 1000000 + epoch_time.tv_usec;", usb_cam_timestamp)
 
 if __name__ == "__main__":
     unittest.main()

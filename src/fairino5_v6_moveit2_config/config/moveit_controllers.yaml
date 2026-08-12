@@ -23,5 +23,9 @@ moveit_simple_controller_manager:
     type: FollowJointTrajectory
     action_ns: follow_joint_trajectory
     default: true
+    # Match the physical gripper controller's 5 s goal-time allowance without
+    # relaxing arm trajectory monitoring.
+    allowed_execution_duration_scaling: 1.2
+    allowed_goal_duration_margin: 5.0
     joints:
       - finger_right_joint

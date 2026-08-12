@@ -26,43 +26,6 @@ from sensor_msgs.msg import Image, JointState
 from ros_image import image_message_to_rgb
 from time_alignment import interpolate_vector, latest_sample, nearest_sample
 
-
-def load_time_offset_profile(path: Path, camera_topics: dict[str, str], width: int, height: int) -> dict[str, float]:
-    try:
-        profile = json.loads(path.read_text())
-    except (OSError, json.JSONDecodeError) as exc:
-        raise SystemExit(f"invalid time-offset profile: {exc}") from exc
-    if not isinstance(profile, dict) or profile.get("schema_version") != 1:
-        raise SystemExit("unsupported time-offset profile schema")
-    offsets, measurements = profile.get("offsets_ms"), profile.get("measurements")
-    if not isinstance(offsets, dict) or not isinstance(measurements, dict):
-        raise SystemExit("time-offset profile offsets/measurements must be objects")
-    unknown = set(offsets) - {"up", "side", "wrist"}
-    if unknown:
-        raise SystemExit(f"time-offset profile has unknown roles: {', '.join(sorted(unknown))}")
-    result = {}
-    for camera, topic in camera_topics.items():
-        if camera not in offsets:
-            continue
-        offset, measurement = offsets[camera], measurements.get(camera)
-        valid_number = isinstance(offset, (int, float)) and not isinstance(offset, bool) and np.isfinite(offset)
-        if (
-            not valid_number or not isinstance(measurement, dict)
-            or measurement.get("accepted") is not True
-            or measurement.get("camera_role") != camera
-            or measurement.get("image_topic") != topic
-            or measurement.get("image_width") != width
-            or measurement.get("image_height") != height
-            or measurement.get("method") != "dense_optical_flow_farneback_v1"
-            or not isinstance(measurement.get("search_max_offset_ms"), (int, float))
-            or abs(offset) > measurement.get("search_max_offset_ms")
-            or not np.isclose(offset, measurement.get("offset_ms", np.nan), atol=1e-6)
-        ):
-            raise SystemExit(f"time-offset profile does not match active {camera} stream")
-        result[camera] = float(offset)
-    return result
-
-
 class FR5LeRobotRecorder(Node):
     def __init__(self, args: argparse.Namespace) -> None:
         super().__init__("fr5_lerobot_recorder")
@@ -278,6 +241,7 @@ class FR5LeRobotRecorder(Node):
             "arm_feedback_range_rad": float(np.ptp(finite_states[:, :6], axis=0).max()) if finite_states.size else 0.0,
             "gripper_feedback_range_m": float(np.ptp(finite_states[:, 6])) if finite_states.size else 0.0,
             "cameras": {},
+            "image_quality_warnings": [],
         }
         reasons = []
         if not np.isfinite(actions).all():
@@ -310,14 +274,6 @@ class FR5LeRobotRecorder(Node):
             reasons.append(f"state interpolation distance {max(self.state_ages)*1000:.1f}ms exceeds limit")
         if self.action_ages and max(self.action_ages) > max(self.args.action_sync_slop, self.args.action_max_age):
             reasons.append(f"action alignment distance {max(self.action_ages)*1000:.1f}ms exceeds limit")
-        if summary["arm_action_range_rad"] < self.args.min_arm_range:
-            reasons.append(f"arm action range {summary['arm_action_range_rad']:.4f}rad < {self.args.min_arm_range}")
-        if summary["gripper_action_range_m"] < self.args.min_gripper_range:
-            reasons.append(f"gripper action range {summary['gripper_action_range_m']:.4f}m < {self.args.min_gripper_range}")
-        if summary["arm_feedback_range_rad"] < self.args.min_arm_range:
-            reasons.append(f"arm feedback range {summary['arm_feedback_range_rad']:.4f}rad < {self.args.min_arm_range}")
-        if summary["gripper_feedback_range_m"] < self.args.min_gripper_range:
-            reasons.append(f"gripper feedback range {summary['gripper_feedback_range_m']:.4f}m < {self.args.min_gripper_range}")
         for camera, metrics in self.image_metrics.items():
             samples = np.asarray(metrics, dtype=float)
             stamps = np.asarray(self.camera_stamps[camera], dtype=float)
@@ -348,14 +304,15 @@ class FR5LeRobotRecorder(Node):
             if not samples.size:
                 reasons.append(f"{camera} camera has no quality samples")
                 continue
+            warnings = summary["image_quality_warnings"]
             if camera_summary["color_delta_mean"] < self.args.min_color_delta and not self.args.allow_monochrome:
-                reasons.append(f"{camera} image appears monochrome (color delta {camera_summary['color_delta_mean']:.2f})")
+                warnings.append(f"{camera} image appears monochrome (color delta {camera_summary['color_delta_mean']:.2f})")
             if not self.args.min_brightness <= camera_summary["brightness_mean"] <= self.args.max_brightness:
-                reasons.append(f"{camera} brightness {camera_summary['brightness_mean']:.1f} outside range")
+                warnings.append(f"{camera} brightness {camera_summary['brightness_mean']:.1f} outside diagnostic range")
             if camera_summary["clipping_mean"] > self.args.max_clipping:
-                reasons.append(f"{camera} clipping {camera_summary['clipping_mean']:.1%} exceeds limit")
+                warnings.append(f"{camera} clipping {camera_summary['clipping_mean']:.1%} exceeds diagnostic threshold")
             if camera_summary["sharpness_median"] < self.args.min_sharpness:
-                reasons.append(f"{camera} sharpness {camera_summary['sharpness_median']:.1f} below limit")
+                warnings.append(f"{camera} sharpness {camera_summary['sharpness_median']:.1f} below diagnostic threshold")
             if camera_summary["age_max_ms"] > self.args.sync_slop * 1000:
                 reasons.append(f"{camera} target alignment error exceeds {self.args.sync_slop*1000:.0f}ms")
             if camera_summary["transport_age_max_ms"] > self.args.image_max_age * 1000:
@@ -385,6 +342,8 @@ class FR5LeRobotRecorder(Node):
             return False
         summary, reasons = self._quality_summary()
         attempt = {**summary, "accepted": not reasons, "reasons": reasons}
+        for warning in summary["image_quality_warnings"]:
+            self.get_logger().warning(warning)
         attempts_path = self.args.root / "meta" / "recording_attempts.jsonl"
         if reasons:
             with attempts_path.open("a", encoding="utf-8") as file:
@@ -685,17 +644,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--min-camera-source-fps-ratio", type=float, default=0.75)
     parser.add_argument("--max-image-repeat-ratio", type=float, default=0.25)
     parser.add_argument("--min-frames", type=int, default=60)
-    parser.add_argument("--min-color-delta", type=float, default=1.0)
-    parser.add_argument("--min-brightness", type=float, default=20.0)
-    parser.add_argument("--max-brightness", type=float, default=235.0)
-    parser.add_argument("--max-clipping", type=float, default=0.20)
-    parser.add_argument("--min-sharpness", type=float, default=20.0)
-    parser.add_argument("--min-arm-range", type=float, default=0.01, help="Minimum range of any arm action axis in radians.")
-    parser.add_argument("--min-gripper-range", type=float, default=0.001, help="Minimum gripper action range in metres.")
+    parser.add_argument("--min-color-delta", type=float, default=1.0, help="Diagnostic warning threshold; does not reject an episode.")
+    parser.add_argument("--min-brightness", type=float, default=20.0, help="Diagnostic warning threshold; does not reject an episode.")
+    parser.add_argument("--max-brightness", type=float, default=235.0, help="Diagnostic warning threshold; does not reject an episode.")
+    parser.add_argument("--max-clipping", type=float, default=0.20, help="Diagnostic warning threshold; does not reject an episode.")
+    parser.add_argument("--min-sharpness", type=float, default=20.0, help="Diagnostic warning threshold; does not reject an episode.")
     parser.add_argument("--allow-monochrome", action="store_true")
     parser.add_argument("--image-max-age", type=float, default=0.300, help="Maximum image transport age from ROS header to recorder receipt.")
     parser.add_argument("--state-max-age", type=float, default=0.050, help="Maximum state interpolation distance around a target row.")
-    parser.add_argument("--writer-queue-size", type=int, default=30, help="Rows buffered between aligner and LeRobot writer.")
+    parser.add_argument("--writer-queue-size", type=int, default=128, help="Rows buffered between aligner and LeRobot writer.")
     parser.add_argument("--encoder-threads", type=int, default=2)
     parser.add_argument("--video-codec", default="h264", help="LeRobot RGB codec; use auto only after a local encoder smoke test.")
     parser.add_argument("--video-preset", default=None, help="Codec preset; h264 defaults to ultrafast for capture stability.")
@@ -706,13 +663,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--up-image", default="/camera/up/color/image_raw")
     parser.add_argument("--side-image", default="/camera/side/color/image_raw")
     parser.add_argument("--wrist-image", default="/camera/wrist/color/image_raw")
-    parser.add_argument(
-        "--experimental-time-offset-profile", type=Path,
-        help="Explicit opt-in to a research-inspired visual-motion estimate; disabled by default.",
-    )
-    parser.add_argument("--up-time-offset-ms", type=float, help="Added to the up camera header stamp; overrides profile.")
-    parser.add_argument("--side-time-offset-ms", type=float, help="Added to the side camera header stamp; overrides profile.")
-    parser.add_argument("--wrist-time-offset-ms", type=float, help="Added to the wrist camera header stamp; overrides profile.")
+    parser.add_argument("--up-time-offset-ms", type=float, default=0.0, help="Externally measured correction added to the up camera header stamp.")
+    parser.add_argument("--side-time-offset-ms", type=float, default=0.0, help="Externally measured correction added to the side camera header stamp.")
+    parser.add_argument("--wrist-time-offset-ms", type=float, default=0.0, help="Externally measured correction added to the wrist camera header stamp.")
     parser.add_argument("--camera-profile", choices=CAMERA_PROFILES, default="up")
     parser.add_argument("--image-qos", choices=("reliable", "best-effort"), default="reliable")
     parser.add_argument("--image-qos-depth", type=int, default=10, help="Bounded RGB DDS backlog for short control-loop stalls.")
@@ -722,21 +675,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--resume", action="store_true", help="Append to an existing dataset root in non-interactive mode.")
     parser.add_argument("--interactive", action="store_true", help="Use r/s/c/q episode controls.")
     args = parser.parse_args()
-    configured_topics = {"up": args.up_image, "side": args.side_image, "wrist": args.wrist_image}
-    calibrated_offsets = {}
-    if args.experimental_time_offset_profile:
-        active_topics = {
-            camera: configured_topics[camera]
-            for camera in CAMERA_PROFILES[args.camera_profile]
-            if getattr(args, f"{camera}_time_offset_ms") is None
-        }
-        calibrated_offsets = load_time_offset_profile(
-            args.experimental_time_offset_profile, active_topics, args.width, args.height
-        )
-    for camera in ("up", "side", "wrist"):
-        name = f"{camera}_time_offset_ms"
-        if getattr(args, name) is None:
-            setattr(args, name, float(calibrated_offsets.get(camera, 0.0)))
     if args.profile:
         args.root = args.root / args.profile
     numeric_values = [
@@ -744,7 +682,7 @@ def parse_args() -> argparse.Namespace:
         args.fps_tolerance, args.max_frame_gap_factor, args.max_long_gap_ratio, args.max_pause,
         args.min_camera_source_fps_ratio, args.max_image_repeat_ratio, args.min_color_delta,
         args.min_brightness, args.max_brightness, args.max_clipping, args.min_sharpness,
-        args.min_arm_range, args.min_gripper_range, args.image_max_age, args.state_max_age, args.video_crf,
+        args.image_max_age, args.state_max_age, args.video_crf,
     ]
     if not np.isfinite(numeric_values).all():
         raise SystemExit("all numeric recorder settings must be finite")
@@ -771,7 +709,7 @@ def parse_args() -> argparse.Namespace:
     ):
         if value > QUALITY_LIMITS[key]:
             raise SystemExit(f"{key} exceeds the project hard limit")
-    if not 0 <= args.min_brightness < args.max_brightness <= 255 or not 0 <= args.max_clipping <= 0.20:
+    if not 0 <= args.min_brightness < args.max_brightness <= 255 or not 0 <= args.max_clipping <= 1:
         raise SystemExit("image quality thresholds are out of range")
     if args.alignment_delay < args.image_max_age + args.sync_slop:
         raise SystemExit("alignment delay must cover image max age plus synchronization slop")

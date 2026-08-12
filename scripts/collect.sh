@@ -32,14 +32,11 @@ shift 2
 [[ -f "$ROOT/config/fr5.env" ]] && source "$ROOT/config/fr5.env"
 VIDEO_MODE=()
 [[ "${FR5_STREAMING_ENCODING:-0}" == 1 ]] || VIDEO_MODE+=(--batch-video-encoding)
-OFFSET_PROFILE=()
-[[ -z "${FR5_EXPERIMENTAL_TIME_OFFSET_PROFILE:-}" ]] || \
-  OFFSET_PROFILE+=(--experimental-time-offset-profile "$FR5_EXPERIMENTAL_TIME_OFFSET_PROFILE")
 COMMAND=(
   "$ROOT/.venv/bin/python" "$ROOT/tools/fr5_lerobot_recorder.py"
   --root "$DATASET_ROOT" --profile "$NAME" --interactive --task "$TASK"
   --fps "${FR5_COLLECTION_FPS:-30}" --fps-tolerance 0.10
-  "${VIDEO_MODE[@]}" "${OFFSET_PROFILE[@]}" "$@"
+  "${VIDEO_MODE[@]}" "$@"
 )
 
 if [[ "$DRY_RUN" == 1 ]]; then

@@ -5,7 +5,7 @@
 FR5 수집 데이터가 SmolVLA 학습 후보가 되기 위해 **반드시 통과해야 할 자동 검사**와 사람이 확인할 작업 품질을 정의한다. 아래 수치는 세 종류로 구분한다.
 
 - **공식/공개 데이터 기준**: SmolVLA 문서와 공개 `svla_so100/so101` 원본에서 확인한 값
-- **이 프로젝트 hard gate**: 손상·시간 불일치·무동작 episode를 자동 폐기하기 위한 보수적 한도
+- **이 프로젝트 hard gate**: 손상·시간 불일치를 자동 폐기하기 위한 보수적 한도
 - **사람 확인**: 픽업 과업의 의미는 화소 통계만으로 판정할 수 없어 preview로 확인하는 항목
 
 ## 학습 입력 계약
@@ -40,9 +40,9 @@ dataset           = LeRobot v3, 고정 30 row/s
 - callback에서 RGB 변환, 영상 인코딩, Parquet 쓰기를 하지 않는다. 저자원 노트북 기본값은 episode 종료 후 batch video encoding이다.
 - 모든 row의 원본/보정 image stamp, 수신 stamp, state/action bracket을 `meta/source_provenance/`에 저장한다.
 
-640×480 RGB는 약 0.88 MiB/frame이다. 카메라 입력과 저장 대기열은 모두 bounded queue이므로 메모리가 계속 증가하지 않는다.
+640×480 RGB는 약 0.88 MiB/frame이다. 카메라 입력과 저장 대기열은 모두 bounded queue이므로 메모리가 계속 증가하지 않는다. dual RGB에서 실측으로 통과한 기본 writer queue 128은 raw payload 상한이 약 225 MiB이고, 59.6초 HIL의 전체 최대 RSS는 약 1.23 GB였다. 8 GB 노트북에서도 swap 없이 여유가 있지만 장치·codec 변경 뒤에는 다시 측정한다.
 
-그리퍼 명령은 FAIRINO SDK의 non-blocking 모드(`MoveGripper block=1`)로 보낸다. 이를 통해 gripper 동작을 기다리느라 100 Hz `ros2_control` 갱신이 멈추지 않게 한다.
+그리퍼 명령과 feedback XMLRPC는 단일 non-realtime worker에서 처리한다. `write()`는 최신 endpoint만 enqueue하고 `read()`는 worker의 cached feedback을 읽기 때문에, `MoveGripper block=1`의 실제 RPC 반환이 지연되어도 100 Hz `ros2_control` 갱신을 점유하지 않는다. 정지 시에는 arm UDP `ServoMoveEnd` 를 worker join보다 먼저 보낸다.
 
 ## 시간 정합과 오프셋
 
@@ -52,7 +52,7 @@ dataset           = LeRobot v3, 고정 30 row/s
 corrected_image_stamp = raw_image_header_stamp + camera_offset
 ```
 
-저장소의 visual-motion estimator는 ROS/LeRobot 공식 캘리브레이션이 아닌 **실험 기능**이며 기본 수집에서 꺼져 있다. 독립 검증 전에는 결과를 학습 데이터에 적용하지 않는다. 움직이는 wrist 카메라는 지원하지 않는다. 사용 조건과 명령은 [데이터 수집 문서의 부록](data-collection.md#부록-실험적-카메라-시간-오프셋)을 따른다.
+카메라 오프셋 자동 추정기는 제공하지 않는다. 기본값 `0 ms`를 사용하며, 드라이버·하드웨어 절차로 독립 측정한 값만 카메라별 `--*-time-offset-ms`로 명시한다.
 
 오프셋을 적용해도 raw/corrected/received stamp를 모두 보존한다. 전송 지연은 `received - raw`, 학습 정합 오차는 `abs(corrected - target)`로 서로 다르게 검사한다.
 
@@ -61,22 +61,20 @@ corrected_image_stamp = raw_image_header_stamp + camera_offset
 | 영역 | 통과 기준 | 근거/의미 |
 |---|---:|---|
 | 구조 | LeRobot v3, state/action 각 7D, camera feature 1개 이상 | 모델 입력 계약 |
-| row 주기 | 30 Hz, 유효 FPS 오차 ±10% | 공개 SmolVLA 실물 데이터와 action chunk timebase |
-| row gap | 66.7 ms 초과 비율 ≤1%, 단일 pause ≤250 ms | 평균 FPS만 정상인 끊김 방지 |
+| row 주기 | 데이터셋 설정 FPS, 유효 오차 ±10% (기본/공개 기준 30 Hz) | 고정 action timebase |
+| row gap | 설정 주기의 2배 초과 비율 ≤1%, 단일 pause ≤250 ms | 평균 FPS만 정상인 끊김 방지 |
 | provenance | 저장 row와 1:1, index 연속, NaN/Inf 없음 | 사후 독립 검증 가능성 |
 | writer | queue drop 0, alignment failure 0 | action/image row 유실 금지 |
 | RGB-target | 각 카메라 최대 절대 오차 ≤50 ms | 인접한 실제 frame만 허용 |
 | RGB transport | header→recorder 수신 ≤300 ms | 늦게 도착한 frame을 현재 영상으로 잘못 사용하지 않음 |
-| RGB source | source FPS ≥22.5 Hz, 반복률 ≤25%, source pause ≤250 ms | 공개 SO100 약 25 Hz/16.3% 반복보다 느린 입력 거부 |
+| RGB source | source FPS ≥0.75 × dataset FPS, 반복률 ≤25%, source pause ≤250 ms | 설정한 policy timebase에 비해 너무 느린 입력 거부 |
 | robot state | target 양쪽 sample 거리 각각 ≤50 ms | 100 Hz feedback 단절 탐지 |
 | arm action | target 양쪽 reference 거리 각각 ≤50 ms | 명령 reference 단절 탐지 |
 | gripper action | target 이전 최신 command age ≤50 ms | 미래 command 누출 금지 |
-| RGB 형식 | 각 view RGB uint8 640×480 | 공개 reference와 카메라 구성 계약 |
-| RGB sanity | color delta ≥1, 평균 밝기 20~235, clipping ≤20%, median sharpness ≥20 | IR/흑백·완전 암부/포화·심한 blur 자동 거부용 프로젝트 gate |
-| arm 동작 | episode별 한 축 이상 action/feedback range ≥0.01 rad | 정지·끊긴 팔 데이터 거부 |
-| gripper 동작 | episode별 action/feedback range ≥0.001 m | 파지 명령/feedback 배선 확인 |
+| RGB 규격 | RGB 640×480×3, 전체 frame decode 가능, row 수와 일치 | SmolVLA 카메라 입력 계약; 불일치 시 거부 |
+| RGB 진단 | color delta, 평균 밝기, clipping, sharpness | 배경·조명·노출에 의존하므로 경고와 metadata로만 남기고 저장을 막지 않음 |
 
-RGB 수치 gate는 좋은 작업 장면을 보장하지 않는다. 저장 후 contact sheet에서 다음을 사람이 모두 확인해야 `meta/training_approved.json`을 만든다.
+RGB 진단 수치는 좋은 작업 장면을 보장하지 않으며 자동 폐기 근거로 사용하지 않는다. 저장 후 contact sheet에서 다음을 사람이 모두 확인해야 `meta/training_approved.json`을 만든다.
 
 1. 작업 물체, 목표 영역, 그리퍼 finger가 접촉 전후에 보인다.
 2. 팔이나 사람이 핵심 접촉을 지속적으로 가리지 않는다.
@@ -108,7 +106,7 @@ SmolVLA 공식 문서는 동일 작업의 시작점으로 약 50 episode를 권�
 | `up-side` | 전역 + 접촉/깊이 보완 | side가 up과 같은 가림을 반복하지 않고 finger-object 접촉을 보여줌 |
 | `up-wrist` | 전역 + 근접 정밀 시야 | wrist가 최종 gripper에 강체 고정되고 finger 사이 작업점이 보임 |
 
-FR5와 렌즈 FOV가 다르므로 공개 로봇의 거리/각도를 숫자로 복사하지 않는다. 카메라가 움직이거나 교체되면 새 데이터셋 이름을 사용한다. experimental offset 파일은 재사용하지 않는다.
+FR5와 렌즈 FOV가 다르므로 공개 로봇의 거리/각도를 숫자로 복사하지 않는다. 카메라가 움직이거나 교체되면 새 데이터셋 이름을 사용한다.
 
 ## 저장 후 승인 절차
 
@@ -116,7 +114,7 @@ FR5와 렌즈 FOV가 다르므로 공개 로봇의 거리/각도를 숫자로 �
 scripts/validate_dataset.sh <dataset-name>
 ```
 
-LeRobot 0.6.1에는 별도 dataset validate CLI가 없다. 이 wrapper는 metadata와 Parquet row 수, episode/frame/task index, timestamp, MP4 frame 수, provenance, timing, 7D command↔feedback motion, RGB 표본을 검사한 뒤 공식 `LeRobotDataset`으로 실제 로딩한다. `--visualize`는 공식 `lerobot-dataset-viz`에 연결한다.
+LeRobot 0.6.1에는 별도 dataset validate CLI가 없다. 이 wrapper는 metadata와 Parquet row 수, episode/frame/task index, timestamp, MP4 frame 수, provenance, timing, 7D finite action/state, RGB 표본을 검사한 뒤 공식 `LeRobotDataset`으로 실제 로딩한다. HIL에서만 `--require-hil-motion`으로 arm·gripper action/feedback range를 추가 확인한다. `--visualize`는 공식 `lerobot-dataset-viz`에 연결한다.
 
 학습 가능한 profile이 되려면 다음 두 조건이 모두 필요하다.
 
@@ -134,6 +132,5 @@ HIL episode는 연결과 시간 정합을 확인하는 시험 데이터다. 실�
 - [ROS2 control 비동기 hardware component](https://control.ros.org/rolling/doc/ros2_control/hardware_interface/doc/asynchronous_components.html)
 - [FAIRINO C++ robot movement API](https://fairino-doc-en.readthedocs.io/3.6.7/SDKManual/CPPRobotMovement.html)
 - [SmolVLA 논문](https://arxiv.org/abs/2506.01844)
-- [SST-Calib: optical-flow velocity를 이용한 temporal calibration](https://arxiv.org/abs/2207.03704)
 - [공개 SO101 pick-place](https://huggingface.co/datasets/lerobot/svla_so101_pickplace)
 - [LeRobot rename map과 empty cameras](https://huggingface.co/docs/lerobot/rename_map)

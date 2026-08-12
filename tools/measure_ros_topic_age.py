@@ -3,6 +3,7 @@
 
 import argparse
 import json
+import sys
 import time
 
 import numpy as np
@@ -32,6 +33,28 @@ def report(name: str, stamps: list[float], ages: list[float], duration: float) -
     )
 
 
+def image_gate_failures(
+    stamps: list[float],
+    ages: list[float],
+    duration: float,
+    expected_hz: float,
+    min_fps_ratio: float,
+    max_age_ms: float,
+) -> list[str]:
+    if not stamps:
+        return ["no image messages"]
+    source_hz = (1 + int(np.count_nonzero(np.diff(stamps)))) / duration
+    age_ms = np.asarray(ages) * 1000
+    failures = []
+    if source_hz < expected_hz * min_fps_ratio:
+        failures.append(f"source rate {source_hz:.2f}Hz below {expected_hz * min_fps_ratio:.2f}Hz")
+    if age_ms.min() < 0:
+        failures.append(f"negative image age {age_ms.min():.2f}ms")
+    if np.percentile(age_ms, 95) > max_age_ms:
+        failures.append(f"image age p95 {np.percentile(age_ms, 95):.2f}ms exceeds {max_age_ms:.2f}ms")
+    return failures
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--image", default="/camera/up/color/image_raw")
@@ -40,7 +63,16 @@ def main() -> None:
     parser.add_argument("--duration", type=float, default=15.0)
     parser.add_argument("--reliable-image", action="store_true")
     parser.add_argument("--image-qos-depth", type=int, default=10)
+    parser.add_argument("--expected-image-hz", type=float)
+    parser.add_argument("--min-image-fps-ratio", type=float, default=0.75)
+    parser.add_argument("--max-image-age-ms", type=float, default=300.0)
     args = parser.parse_args()
+    if args.duration <= 0 or args.image_qos_depth <= 0:
+        parser.error("duration and image-qos-depth must be positive")
+    if args.expected_image_hz is not None and (
+        args.expected_image_hz <= 0 or not 0 < args.min_image_fps_ratio <= 1 or args.max_image_age_ms <= 0
+    ):
+        parser.error("image gate values must be positive and min-image-fps-ratio must be <= 1")
     rclpy.init()
     node = Node("fr5_topic_age_probe")
     samples = {"image": ([], []), "joint": ([], [])}
@@ -83,8 +115,17 @@ def main() -> None:
             f"metadata: received={len(frame_counters)}, counter_skips={int((differences - 1).clip(min=0).sum())}, "
             f"max_counter_step={int(differences.max())}"
         )
+    failures = []
+    if args.expected_image_hz is not None:
+        failures = image_gate_failures(
+            *samples["image"], actual_duration, args.expected_image_hz,
+            args.min_image_fps_ratio, args.max_image_age_ms,
+        )
     node.destroy_node()
     rclpy.shutdown()
+    if failures:
+        print("FAIL: " + "; ".join(failures), file=sys.stderr)
+        raise SystemExit(1)
 
 
 if __name__ == "__main__":

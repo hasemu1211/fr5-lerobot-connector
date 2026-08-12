@@ -7,8 +7,9 @@ FAIRINO FR5의 ROS 2 state/action과 RGB 영상을 시간 정합하여 LeRobot v
 - FR5 6축 + 평행 그리퍼 1축의 7D state/action 기록
 - `up`, `up-side`, `up-wrist` 1·2카메라 프로파일
 - source timestamp 기반 30 Hz row 생성과 provenance 저장
+- [2026-08-12 데이터 파이프라인 감사](docs/data-pipeline-audit-2026-08-12.md)
 - 키 기반 episode 시작·저장·폐기 및 자동 디렉터리 구성
-- LeRobot v3 구조·시간·동작·RGB 품질 검사와 사람 승인 gate
+- LeRobot v3 구조·시간·RGB 검사, 명시적 HIL 동작 검사와 사람 승인 gate
 - 공식 `lerobot-train` 학습 wrapper와 held-out episode 오프라인 loss 평가
 
 실물 정책 rollout은 아직 제공하지 않는다. `scripts/evaluate_smolvla.sh`는 로봇을 움직이지 않는 오프라인 검사다.

@@ -2,3 +2,7 @@
 	path = src/frcobot_ros2
 	url = https://github.com/FAIR-INNOVATION/frcobot_ros2.git
 	shallow = true
+[submodule "src/usb_cam"]
+	path = src/usb_cam
+	url = https://github.com/ros-drivers/usb_cam.git
+	shallow = true

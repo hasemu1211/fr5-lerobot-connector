@@ -70,24 +70,24 @@ REALSENSE_ROLE=side REALSENSE_SERIAL=<serial-2> scripts/start_realsense_camera.s
 두 번째 카메라가 다른 제조사여도 raw `sensor_msgs/msg/Image` 토픽이면 사용할 수 있다. 녹화할 때 해당 토픽을 `--side-image` 또는 `--wrist-image`로 지정한다.
 
 ```bash
-scripts/collect.sh pick_red_up_side "pick the red block" \
-  --camera-profile up-side \
-  --side-image /other_camera/color/image_raw
+UVC_ROLE=side scripts/start_uvc_camera.sh
 ```
 
-두 카메라는 RGB 640×480, 같은 설정 FPS와 ROS clock을 사용해야 한다. 색 변환, 노출, USB frame drop을 먼저 점검하고 episode 사이에는 설치 위치를 움직이지 않는다. 장치별 실행 방법은 [설치 문서](setup.md#realsense--다른-제조사-카메라)를 따른다.
+이 저장소의 UVC launcher는 공식 ROS `usb_cam`을 사용하고 V4L2 acquisition timestamp를 보존한다. 다른 제조사 전용 ROS 드라이버를 쓰면 해당 토픽을 `--side-image` 또는 `--wrist-image`로 지정한다.
+
+두 카메라는 RGB 640×480과 같은 ROS clock을 사용해야 한다. 각 source FPS는 dataset FPS의 75% 이상이어야 하며 반복률은 25% 이하여야 한다. 색 변환, 노출, USB frame drop을 먼저 점검하고 episode 사이에는 설치 위치를 움직이지 않는다. 장치별 실행 방법은 [설치 문서](setup.md#realsense--다른-제조사-카메라)를 따른다.
 
 카메라 위치나 조합을 바꾸면 기존 데이터에 섞지 말고 새 데이터셋 이름을 사용한다.
 
 ## 3. 녹화 전 live 점검
 
 ```bash
-scripts/preflight_collection.sh --live
+scripts/preflight_collection.sh --live --camera-profile up-side
 ```
 
-이 명령이 로봇 route, controller 상태, ROS 토픽, `REALSENSE_ROLE`로 지정한 카메라 하나, Python/LeRobot 환경을 확인한다. 2카메라 profile은 두 번째 토픽도 `ros2 topic hz <topic>`로 별도 확인한다. 실패 항목이 있으면 녹화하지 않는다.
+이 명령이 로봇 route, controller 상태, ROS 토픽, 선택한 모든 카메라의 source rate와 timestamp age, Python/LeRobot 환경을 확인한다. 실패 항목이 있으면 녹화하지 않는다.
 
-한 데이터셋 안에서는 기본 30 row/s를 바꾸지 않는다. 카메라 source FPS와 반복 frame 허용 근거는 [품질 기준](architecture-and-quality.md#공개-실데이터와-맞춘-기준)을 따른다. 저자원 노트북은 row 주기를 낮추는 대신 episode 종료 후 batch video encoding을 사용한다.
+한 데이터셋 안에서는 row rate를 바꾸지 않는다. 기본값은 공개 SmolVLA 데이터와 같은 30 row/s다. 저자원 노트북은 row 주기를 낮추는 대신 episode 종료 후 batch video encoding과 기본 queue 128을 사용하며 frame을 합성하지 않는다.
 
 ## 4. episode 녹화
 
@@ -129,9 +129,17 @@ HIL은 Hardware-In-the-Loop의 약자다. 학습 데이터를 만들기 전에 �
 
 HIL episode는 실제 pick 학습 데이터와 다른 데이터셋 이름으로 저장한다.
 
+저장 후 HIL 동작 범위를 별도로 검사한다.
+
+```bash
+scripts/validate_dataset.sh --require-hil-motion <HIL_DATASET_NAME>
+```
+
 ### 자동 저장 조건
 
-`s`는 주기, 시간 정합, queue drop, RGB 형식과 밝기, 팔·그리퍼 동작, provenance를 검사한다. 하나라도 실패하면 episode를 저장하지 않는다. 전체 수치와 의미는 [입력 구조와 품질 기준](architecture-and-quality.md#반드시-지킬-hard-gate)을 따른다.
+`s`는 주기, 시간 정합, queue drop, RGB 규격·decode, finite action/state, provenance를 검사한다. 하나라도 실패하면 episode를 저장하지 않는다. 밝기·clipping·sharpness·color delta와 action/feedback range는 원본을 변형하지 않고 진단값으로 남긴다. 전체 수치와 의미는 [입력 구조와 품질 기준](architecture-and-quality.md#반드시-지킬-hard-gate)을 따른다.
+
+8 GB 수집 노트북에서는 episode당 70초 이하를 운영 목표로 한다. 이는 작업자에게 episode 분할 시점을 안내하는 기준이며 리코더를 멈추거나 validator를 실패시키는 학습 적합성 gate가 아니다.
 
 오류를 허용하려고 시간 한도를 늘리지 않는다. 원인이 된 controller, 카메라, USB 또는 네트워크를 고친다.
 
@@ -183,27 +191,6 @@ scripts/train_smolvla.sh --check-env
 
 학습 wrapper와 오프라인 checkpoint 검사는 제공하지만, 파라미터 선택과 실물 rollout 평가는 과업별로 별도 검증해야 한다. [학습 문서](training.md)를 따른다.
 
-## 부록: 실험적 카메라 시간 오프셋
+## 부록: 외부 측정 카메라 시간 오프셋
 
-기본값은 `0 ms`이며 일반 수집에서는 사용하지 않는다. 아래 도구는 ROS/LeRobot 공식 캘리브레이션이 아니라 optical-flow와 관절속도를 비교하는 **experimental estimate**다. 카메라와 로봇의 `header.stamp`에 일정한 차이가 의심되고 결과를 독립적으로 검증할 수 있을 때만 시험한다.
-
-```bash
-source /opt/ros/jazzy/setup.bash
-source config/fr5.env
-source install/setup.bash
-.venv/bin/python tools/estimate_experimental_time_offset.py \
-  --camera-role up --duration 20 \
-  --output config/time-offsets.json
-```
-
-고정된 up/side 카메라와 정적 배경에서 화면에 보이는 관절을 저속으로 여러 번 왕복한다. `REJECTED`면 값을 사용하지 않는다. `ACCEPTED`여도 독립 검증 전에는 학습 데이터에 적용하지 않는다. wrist 카메라는 ego-motion 때문에 지원하지 않는다.
-
-검증한 값을 시험할 때만 명시적으로 켠다.
-
-```bash
-export FR5_EXPERIMENTAL_TIME_OFFSET_PROFILE=config/time-offsets.json
-scripts/collect.sh pick_red_up \
-  "pick the red block and place it in the tray" --camera-profile up
-```
-
-카메라, 드라이버, FPS, USB 경로 또는 ROS clock 설정이 바뀌면 기존 값을 폐기한다. `config/time-offsets.json`은 장비 고유 파일이므로 Git에 포함하지 않는다.
+기본값은 `0 ms`다. 저장소는 영상 motion으로 오프셋을 추정하지 않는다. 카메라 제조사나 검증된 하드웨어 절차로 일정 오프셋을 독립 측정한 경우에만 `--up-time-offset-ms`, `--side-time-offset-ms`, `--wrist-time-offset-ms`를 직접 지정한다. 카메라·드라이버·FPS·USB 경로·clock 설정이 바뀌면 값을 다시 측정한다.

@@ -12,8 +12,9 @@ Options:
   --root PATH              Dataset parent directory (default: datasets/fr5_episodes)
   --repo-id ID             Local LeRobot identifier
   --expected-fps N         Require an exact dataset FPS
-  --min-arm-range RAD      Override minimum arm motion gate
-  --min-gripper-range M    Override minimum gripper motion gate
+  --require-hil-motion     Require arm and gripper action/feedback motion for HIL
+  --min-arm-range RAD      Override HIL arm motion threshold
+  --min-gripper-range M    Override HIL gripper motion threshold
   --require-approved       Require meta/training_approved.json
   --preview                Write outputs/previews/DATASET_NAME.jpg
   --visualize EPISODE_INDEX  Open the official lerobot-dataset-viz
@@ -36,6 +37,7 @@ while [[ $# -gt 0 ]]; do
     --expected-fps|--min-arm-range|--min-gripper-range)
       [[ $# -ge 2 ]] || { echo "$1 requires a value" >&2; exit 2; }
       VALIDATOR_ARGS+=("$1" "$2"); shift 2 ;;
+    --require-hil-motion) VALIDATOR_ARGS+=(--require-hil-motion); shift ;;
     --require-approved) REQUIRE_APPROVED=1; shift ;;
     --preview) [[ -z "$MODE" ]] || { echo "choose only one display mode" >&2; exit 2; }; MODE=preview; shift ;;
     --visualize)

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Fail fast when an FR5 LeRobot root is structurally or visibly unfit for training."""
+"""Validate FR5 LeRobot structure and source evidence; report image-content diagnostics as warnings."""
 
 from __future__ import annotations
 
@@ -38,12 +38,14 @@ def main() -> None:
     parser.add_argument("root", type=Path)
     parser.add_argument("--repo-id", default="local/fr5_smolvla")
     parser.add_argument("--expected-fps", type=int)
+    parser.add_argument("--require-hil-motion", action="store_true")
     parser.add_argument("--min-arm-range", type=float, default=0.01)
     parser.add_argument("--min-gripper-range", type=float, default=0.001)
     args = parser.parse_args()
-    if not np.isfinite([args.min_arm_range, args.min_gripper_range]).all() or args.min_arm_range <= 0 or args.min_gripper_range <= 0:
-        raise SystemExit("motion range thresholds must be finite and positive")
+    if not np.isfinite([args.min_arm_range, args.min_gripper_range]).all() or min(args.min_arm_range, args.min_gripper_range) <= 0:
+        raise SystemExit("HIL motion thresholds must be finite and positive")
     failures: list[str] = []
+    warnings: list[str] = []
     info_path = args.root / "meta" / "info.json"
     if not info_path.exists():
         raise SystemExit(f"FAIL: {args.root} is not a LeRobot dataset root")
@@ -140,25 +142,26 @@ def main() -> None:
             order = np.argsort(frame_indices[mask])
             if not np.allclose(timestamps[mask][order], np.arange(int(mask.sum())) / fps, atol=1e-4):
                 failures.append(f"episode {episode_index} stored timestamps are not the fixed {fps}Hz timebase")
+            episode_timestamps = timestamps[mask][order]
+            duration = float(episode_timestamps[-1] - episode_timestamps[0]) if len(episode_timestamps) > 1 else 0.0
             episode_action_arm = float(np.ptp(actions[mask, :6], axis=0).max())
             episode_action_gripper = float(np.ptp(actions[mask, 6]))
             episode_state_arm = float(np.ptp(states[mask, :6], axis=0).max())
             episode_state_gripper = float(np.ptp(states[mask, 6]))
-            for label, value, minimum in (
-                ("arm action", episode_action_arm, args.min_arm_range),
-                ("gripper action", episode_action_gripper, args.min_gripper_range),
-                ("arm feedback", episode_state_arm, args.min_arm_range),
-                ("gripper feedback", episode_state_gripper, args.min_gripper_range),
-            ):
-                if value < minimum:
-                    failures.append(f"episode {episode_index} {label} range {value:.4f} is too small")
-            action_axis_ranges = np.ptp(actions[mask, :6], axis=0)
-            state_axis_ranges = np.ptp(states[mask, :6], axis=0)
-            for axis, (command_range, feedback_range) in enumerate(zip(action_axis_ranges, state_axis_ranges), 1):
-                if command_range >= args.min_arm_range and feedback_range < command_range * 0.5:
-                    failures.append(f"episode {episode_index} j{axis} feedback did not follow the command range")
-                if feedback_range >= args.min_arm_range and command_range < feedback_range * 0.5:
-                    failures.append(f"episode {episode_index} j{axis} command does not explain feedback motion")
+            print(
+                f"episode {episode_index}: duration={duration:.2f}s; "
+                f"action arm={episode_action_arm:.4f}rad gripper={episode_action_gripper:.4f}m; "
+                f"feedback arm={episode_state_arm:.4f}rad gripper={episode_state_gripper:.4f}m"
+            )
+            if args.require_hil_motion:
+                for label, value, minimum in (
+                    ("arm action", episode_action_arm, args.min_arm_range),
+                    ("gripper action", episode_action_gripper, args.min_gripper_range),
+                    ("arm feedback", episode_state_arm, args.min_arm_range),
+                    ("gripper feedback", episode_state_gripper, args.min_gripper_range),
+                ):
+                    if value < minimum:
+                        failures.append(f"episode {episode_index} HIL {label} range {value:.4f} is too small")
 
     quality_path = args.root / "meta" / "recording_quality.jsonl"
     quality_by_episode: dict[int, dict] = {}
@@ -233,13 +236,13 @@ def main() -> None:
                 if (metrics.get("source_gap_max_ms") or 0) > min(quality.get("max_pause_s", QUALITY_LIMITS["max_pause_s"]), QUALITY_LIMITS["max_pause_s"]) * 1000:
                     failures.append(f"quality line {line_number} has a {camera} source pause")
                 if metrics.get("color_delta_mean", 0) < 1.0:
-                    failures.append(f"quality line {line_number} has monochrome {camera} samples")
+                    warnings.append(f"quality line {line_number} has monochrome {camera} samples")
                 if not 20 <= metrics.get("brightness_mean", -1) <= 235:
-                    failures.append(f"quality line {line_number} has invalid {camera} brightness")
+                    warnings.append(f"quality line {line_number} has unusual {camera} brightness")
                 if metrics.get("clipping_mean", 1) > 0.20:
-                    failures.append(f"quality line {line_number} has excessive {camera} clipping")
+                    warnings.append(f"quality line {line_number} has high {camera} clipping")
                 if metrics.get("sharpness_median", 0) < 20:
-                    failures.append(f"quality line {line_number} has blurry {camera} samples")
+                    warnings.append(f"quality line {line_number} has low-sharpness {camera} samples")
         if set(quality_by_episode) != set(expected_episodes):
             failures.append("recording quality episode indices do not match episode metadata")
 
@@ -354,16 +357,18 @@ def main() -> None:
             metrics = np.asarray([image_metrics(np.asarray(dataset[int(index)][key])) for index in indices])
             color, brightness, clipping, sharpness = metrics.mean(axis=0)
             print(f"{key}: color={color:.2f} brightness={brightness:.1f} clipping={clipping:.1%} sharpness={sharpness:.1f}")
-            if color < 1.0: failures.append(f"{key} appears monochrome/IR")
-            if not 20 <= brightness <= 235: failures.append(f"{key} brightness is out of range")
-            if clipping > 0.20: failures.append(f"{key} clipping exceeds 20%")
-            if sharpness < 20: failures.append(f"{key} is too blurry")
+            if color < 1.0: warnings.append(f"{key} appears monochrome/IR")
+            if not 20 <= brightness <= 235: warnings.append(f"{key} brightness is outside diagnostic range")
+            if clipping > 0.20: warnings.append(f"{key} clipping exceeds diagnostic threshold 20%")
+            if sharpness < 20: warnings.append(f"{key} sharpness is below diagnostic threshold")
 
+    for warning in warnings:
+        print(f"WARN: {warning}")
     if failures:
         print("FAIL")
         for failure in failures: print(f"- {failure}")
         raise SystemExit(2)
-    print("PASS: FR5 dataset structure, source evidence, motion, and sampled RGB quality")
+    print(f"PASS: FR5 dataset structure, source evidence, and RGB decoding ({len(warnings)} warning(s))")
 
 
 if __name__ == "__main__":

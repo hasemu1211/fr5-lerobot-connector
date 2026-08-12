@@ -40,4 +40,5 @@ gripper_controller:
     constraints:
       goal_time: 5.0
       finger_right_joint:
-        goal: 0.001
+        # Below one 1% SDK feedback step: full-open goals require 100% feedback.
+        goal: 0.000105
