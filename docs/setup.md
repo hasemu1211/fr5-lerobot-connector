@@ -150,12 +150,12 @@ cd fr5-lerobot-connector
 scripts/setup_training.sh
 ```
 
-스크립트는 `.venv`에 GPU PyTorch와 `lerobot[dataset,smolvla]==0.6.1`을 설치하고 CUDA·SmolVLA CLI를 검사한다. 이미 올바른 CUDA PyTorch가 있으면 다시 설치하지 않는다.
+스크립트는 `.venv`에 GPU PyTorch와 `lerobot[dataset,smolvla]==0.6.1`을 설치하고 CUDA와 지원 policy CLI를 검사한다. 이미 올바른 CUDA PyTorch가 있으면 다시 설치하지 않는다.
 
 설치 확인:
 
 ```bash
-scripts/train_smolvla.sh --check-env
+scripts/train_policy.sh --check-env
 scripts/evaluate_smolvla.sh --check-env
 ```
 

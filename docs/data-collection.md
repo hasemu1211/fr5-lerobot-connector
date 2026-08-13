@@ -99,6 +99,8 @@ scripts/collect.sh pick_red_up \
 
 기본 저장 위치는 `datasets/fr5_episodes/pick_red_up`이다. 이 디렉터리 하나가 여러 episode를 포함하는 하나의 학습 데이터셋이다.
 
+`task` 문자열의 작성법, 지원 가능한 작업 유형, 단일·다중 물체와 빈피킹 장면 구성은 [자연어 작업 지시와 데이터셋 설계](task-and-dataset-design.md)를 따른다.
+
 ### 키 조작
 
 - `r`: 새 episode 녹화 시작
@@ -180,16 +182,6 @@ datasets/fr5_episodes/pick_red_up/
 │   └── training_approved.json
 └── videos/
 ```
-
-## 6. 학습 환경 확인
-
-학습 컴퓨터에서는 다음 명령으로 LeRobot, PyTorch, CUDA와 SmolVLA CLI를 확인한다.
-
-```bash
-scripts/train_smolvla.sh --check-env
-```
-
-학습 wrapper와 오프라인 checkpoint 검사는 제공하지만, 파라미터 선택과 실물 rollout 평가는 과업별로 별도 검증해야 한다. [학습 문서](training.md)를 따른다.
 
 ## 부록: 외부 측정 카메라 시간 오프셋
 

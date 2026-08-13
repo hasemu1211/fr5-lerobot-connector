@@ -11,4 +11,4 @@ if ! .venv/bin/python -c 'import torch; raise SystemExit(0 if torch.cuda.is_avai
   .venv/bin/python -m pip install "${TORCH_ARGS[@]}"
 fi
 .venv/bin/python -m pip install -r requirements-lerobot.txt
-scripts/train_smolvla.sh --check-env
+scripts/train_policy.sh --check-env

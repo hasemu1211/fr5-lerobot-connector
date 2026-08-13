@@ -1,8 +1,8 @@
-# SmolVLA 입력 구조와 데이터 품질 기준
+# 입력 구조와 데이터 품질 기준
 
 ## 목적
 
-FR5 수집 데이터가 SmolVLA 학습 후보가 되기 위해 **반드시 통과해야 할 자동 검사**와 사람이 확인할 작업 품질을 정의한다. 아래 수치는 세 종류로 구분한다.
+FR5 수집 데이터가 지원 policy의 학습 후보가 되기 위해 **반드시 통과해야 할 자동 검사**와 사람이 확인할 작업 품질을 정의한다. 아래 수치는 세 종류로 구분한다.
 
 - **공식/공개 데이터 기준**: SmolVLA 문서와 공개 `svla_so100/so101` 원본에서 확인한 값
 - **이 프로젝트 hard gate**: 손상·시간 불일치를 자동 폐기하기 위한 보수적 한도
@@ -40,7 +40,7 @@ dataset           = LeRobot v3, 고정 30 row/s
 - callback에서 RGB 변환, 영상 인코딩, Parquet 쓰기를 하지 않는다. 저자원 노트북 기본값은 episode 종료 후 batch video encoding이다.
 - 모든 row의 원본/보정 image stamp, 수신 stamp, state/action bracket을 `meta/source_provenance/`에 저장한다.
 
-640×480 RGB는 약 0.88 MiB/frame이다. 카메라 입력과 저장 대기열은 모두 bounded queue이므로 메모리가 계속 증가하지 않는다. dual RGB에서 실측으로 통과한 기본 writer queue 128은 raw payload 상한이 약 225 MiB이고, 59.6초 HIL의 전체 최대 RSS는 약 1.23 GB였다. 8 GB 노트북에서도 swap 없이 여유가 있지만 장치·codec 변경 뒤에는 다시 측정한다.
+640×480 RGB는 약 0.88 MiB/frame이다. 카메라 입력과 저장 대기열은 모두 bounded queue이며, dual RGB의 기본 writer queue 128은 raw payload 상한이 약 225 MiB다. 장치·codec 변경 뒤에는 peak RSS와 queue drop을 다시 측정한다.
 
 그리퍼 명령과 feedback XMLRPC는 단일 non-realtime worker에서 처리한다. `write()`는 최신 endpoint만 enqueue하고 `read()`는 worker의 cached feedback을 읽기 때문에, `MoveGripper block=1`의 실제 RPC 반환이 지연되어도 100 Hz `ros2_control` 갱신을 점유하지 않는다. 정지 시에는 arm UDP `ServoMoveEnd` 를 worker join보다 먼저 보낸다.
 
@@ -71,7 +71,7 @@ corrected_image_stamp = raw_image_header_stamp + camera_offset
 | robot state | target 양쪽 sample 거리 각각 ≤50 ms | 100 Hz feedback 단절 탐지 |
 | arm action | target 양쪽 reference 거리 각각 ≤50 ms | 명령 reference 단절 탐지 |
 | gripper action | target 이전 최신 command age ≤50 ms | 미래 command 누출 금지 |
-| RGB 규격 | RGB 640×480×3, 전체 frame decode 가능, row 수와 일치 | SmolVLA 카메라 입력 계약; 불일치 시 거부 |
+| RGB 규격 | RGB 640×480×3, 전체 frame decode 가능, row 수와 일치 | 지원 policy 카메라 입력 계약; 불일치 시 거부 |
 | RGB 진단 | color delta, 평균 밝기, clipping, sharpness | 배경·조명·노출에 의존하므로 경고와 metadata로만 남기고 저장을 막지 않음 |
 
 RGB 진단 수치는 좋은 작업 장면을 보장하지 않으며 자동 폐기 근거로 사용하지 않는다. 저장 후 contact sheet에서 다음을 사람이 모두 확인해야 `meta/training_approved.json`을 만든다.
