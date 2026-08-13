@@ -4,16 +4,16 @@
 
 SmolVLA 학습·평가·데이터 수집 정책을 결정하기 전에 조사와 로컬 실험을 누적한다. 현재 사용법은 [정책 학습과 오프라인 검사](training.md), 수집 절차는 [데이터 수집 따라 하기](data-collection.md)에 두며, 이 문서는 근거와 판단 변화만 기록한다.
 
-새 결과는 기존 항목을 지우지 않고 날짜, 환경, 입력 데이터, 명령 또는 출처, 측정값, 해석, 정책 영향과 함께 추가한다. 실제 FR5 결과와 공개 데이터 결과를 섞지 않고 HIL 배선 시험도 과업 성공 근거로 사용하지 않는다.
+새 결과는 기존 항목을 지우지 않고 날짜, 환경, 입력 데이터, 명령 또는 출처, 측정값, 해석, 정책 영향과 함께 추가한다. 실제 FR5 결과와 공개 데이터 결과를 섞지 않고 HIL 배선 시험도 작업 성공 근거로 사용하지 않는다.
 
 ## 현재 상태 — 2026-08-13
 
-- 학습 승인된 task-ready FR5 데이터셋: 없음
+- 실제 작업을 담은 학습 승인 FR5 데이터셋: 없음
 - FR5 HIL 데이터: 1 episode, 1,040 frames, 30 Hz. 7D·영상·저장 배선 확인용
 - 로컬 FR5 학습 출력과 실물 rollout 결과: 없음
 - 현재 `best` checkpoint: 없음
 
-따라서 아래의 학습값과 checkpoint 기준은 **초기 비교 기준**이지 최종 최적값이 아니다. 최종 `best`는 task-ready FR5 데이터와 실물 평가가 생긴 뒤에만 정한다.
+따라서 아래의 학습값과 checkpoint 기준은 **초기 비교 기준**이지 최종 최적값이 아니다. 최종 `best`는 실제 작업 FR5 데이터와 실물 평가가 생긴 뒤에만 정한다.
 
 ## 현재 판단
 
@@ -25,11 +25,11 @@ SmolVLA 학습·평가·데이터 수집 정책을 결정하기 전에 조사와
 4. validator `PASS`와 contact sheet 사람 검토를 모두 통과한 데이터만 학습한다.
 5. 새 episode가 추가되면 기존 `training_approved.json`은 무효화하고 전체를 다시 승인한다.
 
-수집 품질의 판단 순서는 작업 완결성, task-행동 일치, 조건별 반복 품질, 일반화 조건 coverage, 시간·영상·7D 수치 gate다. 단순 episode 수가 이 항목들을 대신하지 않는다.
+수집 품질의 판단 순서는 작업 완결성, task-행동 일치, 조건별 반복 품질, 일반화 조건의 포함 범위, 시간·영상·7D 수치 통과 기준이다. 단순 episode 수가 이 항목들을 대신하지 않는다.
 
 ### 첫 학습과 optimizer
 
-첫 task-ready FR5 run은 최종 모델 생산보다 학습곡선 파악을 우선한다. `max_epochs=10`을 종료 상한으로 고정하지 않고 epoch 5와 10을 관찰 지점으로 사용한다.
+첫 실제 작업 FR5 학습은 최종 모델 생산보다 학습곡선 파악을 우선한다. `max_epochs=10`을 종료 상한으로 고정하지 않고 epoch 5와 10을 관찰 지점으로 사용한다.
 
 비교 가능한 첫 기준선은 LeRobot 0.6.1 SmolVLA preset을 유지한다.
 
@@ -45,15 +45,15 @@ SmolVLA 학습·평가·데이터 수집 정책을 결정하기 전에 조사와
 | AMP | `false` | 현재 환경에서만 검증 |
 | 학습 범위 | action expert + state projection | 첫 비교 기준 |
 
-첫 곡선을 보기 전에 LR, batch, 학습 범위와 증강을 동시에 바꾸지 않는다. 기준선이 불안정하거나 학습되지 않을 때만 새 run에서 한 요인씩 비교한다.
+첫 곡선을 보기 전에 LR, batch, 학습 범위와 증강을 동시에 바꾸지 않는다. 기준선이 불안정하거나 학습되지 않을 때만 새 학습에서 한 요인씩 비교한다.
 
 LeRobot 0.6.1은 총 steps가 30,000보다 짧으면 warmup과 cosine decay를 그 길이에 맞게 축소한다. 짧은 schedule을 완료한 뒤 총 steps만 늘려 resume하면 다른 LR 곡선이 되므로 같은 run의 단순 연장으로 비교하지 않는다.
 
 ### loss와 validation
 
-고정한 held-out episode에서 각 후보를 같은 seed와 카메라 mapping으로 평가한다.
+고정한 검증 episode에서 각 후보를 같은 seed와 카메라 mapping으로 평가한다.
 
-- train loss와 held-out `loss_mean`, `loss_std`, `loss_p95`
+- train loss와 검증용 `loss_mean`, `loss_std`, `loss_p95`
 - LR, gradient norm, clipping 발생 여부
 - 7개 action축별 normalized loss와 saturation
 - update/data 시간과 peak GPU memory
@@ -63,7 +63,7 @@ LeRobot 0.6.1은 총 steps가 30,000보다 짧으면 warmup과 cosine decay를 �
 
 `dataset.eval_split`은 task별 마지막 episode를 보류하지만 위치·물체·조명을 자동 균형화하지 않는다. 수집 단계에서 조건표를 만들고 실제 보류 episode가 그 표를 만족하는지 확인해야 한다.
 
-한 run 안에서 validation episode를 순환하면 checkpoint마다 측정 표본이 달라지므로 적용하지 않는다. 작은 데이터에서 split 민감도를 확인할 필요가 생기면 episode·조건 묶음 단위 fold를 만든 별도 완전 학습 run으로 비교하고 최종 ID/OOD test는 계속 격리한다.
+한 학습 안에서 validation episode를 순환하면 checkpoint마다 측정 표본이 달라지므로 적용하지 않는다. 작은 데이터에서 split 민감도를 확인할 필요가 생기면 episode·조건 묶음 단위 fold를 만든 별도 완전 학습으로 비교하고 최종 ID/OOD test는 계속 격리한다.
 
 ### test와 최종 best
 
@@ -72,11 +72,11 @@ validation은 checkpoint 후보를 줄이는 용도다. 반복해서 보며 선�
 현재 `best` 판정 순서는 다음과 같다.
 
 1. 데이터 fingerprint, split, 7D 계약과 checkpoint reload가 유효해야 한다.
-2. held-out loss가 안정적이고 early/middle/late 곡선에서 열등하지 않은 checkpoint를 후보로 남긴다.
+2. 검증 loss가 안정적이고 초기·중간·후반 곡선에서 열등하지 않은 checkpoint를 후보로 남긴다.
 3. 같은 ID/OOD 조건에서 파지·들기·놓기 부분 성공과 전체 성공률을 비교한다.
 4. 성공률이 비슷하면 충돌·진동·action saturation이 적고 완료시간 변동이 작은 checkpoint를 선택한다.
 
-실물 rollout 지원과 결과가 없으므로 현재는 2단계의 `offline candidate`까지만 판단할 수 있다. 가장 낮은 offline loss를 곧바로 `best`라고 부르지 않는다.
+실물 rollout 지원과 결과가 없으므로 현재는 2단계의 오프라인 후보까지만 판단할 수 있다. 가장 낮은 offline loss를 곧바로 `best`라고 부르지 않는다.
 
 ### checkpoint 저장
 
@@ -84,7 +84,7 @@ validation은 checkpoint 후보를 줄이는 용도다. 반복해서 보며 선�
 
 2026-08-13 현재 학습 PC의 여유 공간은 약 28 GiB다. LeRobot 0.6.1 기본 `save_freq=20,000`을 유지하면 30k-step run은 20k와 final 30k 두 개, 80k-step run은 20k·40k·60k·80k 네 개를 저장한다. `last`는 최신 checkpoint를 가리키는 symlink라 용량을 복제하지 않는다.
 
-로컬 실측 full checkpoint 약 1.319 GB를 적용하면 각각 약 2.64 GB와 5.28 GB다. 따라서 첫 탐색에서는 LeRobot 기본 저장 간격을 우선하고, 촘촘한 곡선은 checkpoint가 아니라 `log_freq`와 `eval_steps`로 관측한다. 1,000–5,000 steps마다 full checkpoint를 남기는 방식은 특정 turning point를 좁혀야 하는 후속 run에서만 검토한다.
+로컬 실측 full checkpoint 약 1.319 GB를 적용하면 각각 약 2.64 GB와 5.28 GB다. 따라서 첫 탐색에서는 LeRobot 기본 저장 간격을 우선하고, 촘촘한 곡선은 checkpoint가 아니라 `log_freq`와 `eval_steps`로 관측한다. 1,000–5,000 steps마다 full checkpoint를 남기는 방식은 특정 변곡점을 좁혀야 하는 후속 학습에서만 검토한다.
 
 곡선을 확인한 뒤에는 역할이 겹치는 파일을 복제하지 않고 다음만 보존 후보로 삼는다.
 
@@ -95,7 +95,7 @@ validation은 checkpoint 후보를 줄이는 용도다. 반복해서 보며 선�
 
 새 checkpoint는 독립 reload, metric 기록과 hash 확인이 끝난 뒤에만 이전 임시 checkpoint를 정리한다. 로컬 실측 full checkpoint는 약 1.319 GB, policy 부분은 약 0.907 GB였다.
 
-여러 run을 병렬로 쌓지 않는다. 한 run의 offline 후보를 줄인 뒤 다음 optimizer·학습범위 비교를 시작하며, task-ready FR5 rollout 전에는 checkpoint를 `best`로 명명하지 않는다.
+여러 학습을 병렬로 쌓지 않는다. 한 학습의 오프라인 후보를 줄인 뒤 다음 optimizer·학습범위 비교를 시작하며, 실제 작업 FR5 rollout 전에는 checkpoint를 `best`로 명명하지 않는다.
 
 ## 누적 근거
 
@@ -120,7 +120,7 @@ validation은 checkpoint 후보를 줄이는 용도다. 반복해서 보며 선�
 
 ## 보류된 결정
 
-- FR5 task-ready 데이터의 첫 총 steps와 checkpoint 간격
+- 실제 작업 FR5 데이터의 첫 총 steps와 checkpoint 간격
 - `min_delta`, `patience`와 early stopping 도입 시점
 - action축별 loss가 rollout 성공과 갖는 관계
 - vision encoder/VLM unfreeze 또는 LoRA 필요성

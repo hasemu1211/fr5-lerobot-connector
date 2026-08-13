@@ -8,11 +8,11 @@ FAIRINO FR5의 ROS 2 state/action과 RGB 영상을 시간 정합하여 LeRobot v
 - `up`, `up-side`, `up-wrist` 1·2카메라 프로파일
 - source timestamp 기반 30 Hz row 생성과 provenance 저장
 - 키 기반 episode 시작·저장·폐기 및 자동 디렉터리 구성
-- LeRobot v3 구조·시간·RGB 검사, 명시적 HIL 동작 검사와 사람 승인 gate
+- LeRobot v3 구조·시간·RGB 검사, 명시적 HIL 동작 검사와 사람 승인 절차
 - SmolVLA·ACT·VQ-BeT용 공식 `lerobot-train` 학습 profile
-- SmolVLA held-out episode 오프라인 loss 평가
+- SmolVLA 검증 episode의 오프라인 loss 평가
 
-실물 정책 rollout은 아직 제공하지 않는다. `scripts/evaluate_smolvla.sh`는 로봇을 움직이지 않는 오프라인 검사다.
+실물 정책 실행(rollout)은 아직 제공하지 않는다. `scripts/evaluate_smolvla.sh`는 로봇을 움직이지 않는 오프라인 검사다.
 
 ## 빠른 시작
 
@@ -32,7 +32,7 @@ scripts/collect.sh pick_red "pick the red block and place it in the tray" --came
 scripts/validate_dataset.sh --preview pick_red
 ```
 
-기본 저장 위치는 `datasets/fr5_episodes/<dataset-name>`이다. 하나의 디렉터리에 같은 과업의 여러 episode를 저장한다.
+기본 저장 위치는 `datasets/fr5_episodes/<dataset-name>`이다. 하나의 디렉터리에 같은 작업의 여러 episode를 저장한다.
 
 ## 명령
 
@@ -42,7 +42,7 @@ scripts/validate_dataset.sh --preview pick_red
 | `scripts/validate_dataset.sh` | 학습 전 구조·시간·동작·RGB 품질 검사 |
 | `scripts/train_policy.sh` | 검사된 데이터셋을 정책별 공식 `lerobot-train` profile에 전달 |
 | `scripts/train_smolvla.sh` | 기존 SmolVLA 명령 호환 wrapper |
-| `scripts/evaluate_smolvla.sh` | held-out episode의 오프라인 SmolVLA loss 계산 |
+| `scripts/evaluate_smolvla.sh` | 검증용으로 분리한 episode의 오프라인 SmolVLA loss 계산 |
 
 모든 wrapper는 `--help`, 경로 지정 옵션, `--dry-run`을 제공한다.
 
@@ -65,7 +65,7 @@ episode별 Parquet/MP4와 LeRobot v3 metadata 외에 source timestamp와 정합 
 | `act` | 수집된 모든 view | 사용하지 않음 | 7D scratch 학습과 checkpoint resume |
 | `vqbet-up`, `vqbet-side`, `vqbet-wrist` | 선택한 한 view | 사용하지 않음 | 7D scratch 학습과 checkpoint resume |
 
-profile은 FR5의 절대 joint-position action, 7D state/action과 카메라 키를 정책 계약에 맞춘다. 실물 policy rollout은 아직 지원하지 않으며, VQ-BeT 카메라 profile의 선택은 실제 과업의 held-out episode 결과로 결정해야 한다. 명령과 검증 범위는 [정책 학습과 오프라인 검사](docs/training.md)에 정리한다.
+profile은 FR5의 절대 joint-position action, 7D state/action과 카메라 키를 정책 계약에 맞춘다. 실물 정책 실행은 아직 지원하지 않으며, VQ-BeT 카메라 profile은 실제 작업에서 검증용으로 분리한 episode의 결과로 선택해야 한다. 명령과 검증 범위는 [정책 학습과 오프라인 검사](docs/training.md)에 정리한다.
 
 ## 문서
 
@@ -73,7 +73,7 @@ profile은 FR5의 절대 joint-position action, 7D state/action과 카메라 키
 |---|---|
 | 새 수집 노트북·학습 PC 설치 | [설치와 이식](docs/setup.md) |
 | 장비 실행과 episode 녹화 | [데이터 수집 따라 하기](docs/data-collection.md) |
-| 첫 수집 조건·split·본 학습 실행계획 | [첫 FR5 본 학습 계획서](docs/first-training-plan.md) |
+| 첫 학습 전 필수·권장 확인 | [첫 FR5 학습 체크리스트](docs/first-training-checklist.md) |
 | FR5·PGEA-100-40 제원과 소프트웨어 단위 | [하드웨어 계약](docs/hardware.md) |
 | 저장 형식·시간 정합·통과 기준 | [입력 구조와 품질 기준](docs/architecture-and-quality.md) |
 | 자연어 지시와 물체·장면 구성 | [작업 지시와 데이터셋 설계](docs/task-and-dataset-design.md) |

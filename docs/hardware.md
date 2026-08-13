@@ -86,4 +86,4 @@ tip 변경 뒤에는 기존 카메라에서 접촉점이 계속 보이는지 다
 2. 새 fingertip의 질량·무게중심·TCP·collision을 반영한다.
 3. 그리퍼 본체/전달기구를 바꾼 경우에만 완전 열림/닫힘을 실측해 `FR5_GRIPPER_UPPER_POSITION`을 조정한다.
 4. `/gripper_controller/controller_state`의 command와 feedback이 같은 방향·단위인지 확인한다.
-5. HIL 전용 데이터셋에서 최소 1 mm action/feedback range와 queue drop 0을 통과한 뒤 실제 과업을 수집한다.
+5. HIL 전용 데이터셋에서 최소 1 mm action/feedback range와 queue drop 0을 통과한 뒤 실제 작업을 수집한다.

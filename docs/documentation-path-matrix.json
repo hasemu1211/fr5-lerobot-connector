@@ -24,7 +24,7 @@
         "docs/hardware.md",
         "docs/data-collection.md",
         "docs/task-and-dataset-design.md",
-        "docs/first-training-plan.md"
+        "docs/first-training-checklist.md"
       ],
       "allowed_index_names": ["README.md"],
       "requires_index": false,

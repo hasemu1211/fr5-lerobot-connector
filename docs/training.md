@@ -8,13 +8,13 @@
 
 | profile | 시작 모델 | 영상 입력 | 자연어 `task` | 제공 기능 |
 |---|---|---|---|---|
-| `smolvla` | `lerobot/smolvla_base` | 수집된 view를 `camera1..3`에 매핑 | 사용 | 학습, 저장·재로딩, held-out loss |
+| `smolvla` | `lerobot/smolvla_base` | 수집된 view를 `camera1..3`에 매핑 | 사용 | 학습, 저장·재로딩, 검증 episode loss |
 | `act` | scratch | 수집된 모든 view | 사용하지 않음 | 학습, 저장·resume |
 | `vqbet-up` | scratch | `up` 한 개 | 사용하지 않음 | 학습, 저장·resume |
 | `vqbet-side` | scratch | `side` 한 개 | 사용하지 않음 | 학습, 저장 |
 | `vqbet-wrist` | scratch | `wrist` 한 개 | 사용하지 않음 | 입력 계약과 wrapper 검사 |
 
-실물 policy rollout은 아직 지원하지 않는다. 위 검증은 데이터와 모델의 배선 확인이며 과업 성공률이나 최적 profile을 뜻하지 않는다.
+실물 정책 실행(rollout)은 아직 지원하지 않는다. 위 검증은 데이터와 모델의 배선 확인이며 작업 성공률이나 최적 profile을 뜻하지 않는다.
 
 ## 환경과 데이터 gate
 
@@ -81,7 +81,7 @@ SmolVLA는 각 row에 연결된 `task` 문자열을 조건으로 사용한다. �
 
 첫 학습은 pretrained `smolvla_base`의 기본값인 `freeze_vision_encoder=true`, `train_expert_only=true`를 유지한다. 이 경로는 vision-language backbone을 고정하고 action expert와 FR5 state/action projection을 적응시킨다.
 
-새 물체를 잘 찾지 못하더라도 바로 LLM/VLM 전체를 학습하지 않는다. 먼저 카메라 시야, 지시-물체 일치, 위치·조명 coverage를 확인한다. 그 문제가 아닌 것이 실물 평가에서 반복 확인된 뒤에만 LoRA 또는 vision/VLM unfreeze를 별도 run으로 비교한다. 이 저장소는 아직 해당 고급 profile과 8 GB 메모리 검증을 제공하지 않는다.
+새 물체를 잘 찾지 못하더라도 바로 LLM/VLM 전체를 학습하지 않는다. 먼저 카메라 시야, 지시-물체 일치, 위치·조명 포함 범위를 확인한다. 이 항목들이 원인이 아님을 실물 평가에서 반복 확인한 뒤에만 LoRA 또는 vision/VLM unfreeze를 별도 학습으로 비교한다. 이 저장소는 아직 해당 고급 profile과 8 GB 메모리 검증을 제공하지 않는다.
 
 LeRobot 0.6.1 학습 loop에는 gradient accumulation 제어가 없다. accumulation은 작은 micro-batch로 effective batch를 모사하는 메모리 기법일 뿐 품질 보장이 아니므로 wrapper 옵션으로 제공하지 않는다.
 
@@ -91,8 +91,8 @@ LeRobot 0.6.1 학습 loop에는 gradient accumulation 제어가 없다. accumula
 
 - 같은 학습·평가 episode 분할
 - 같은 seed, steps, batch size와 증강
-- held-out action loss
-- 최종적으로 같은 실물 과업의 성공률
+- 검증용으로 분리한 episode의 action loss
+- 최종적으로 같은 실물 작업의 성공률
 
 `vqbet-wrist`는 wrist 영상이 실제로 포함된 데이터셋에서만 실행된다. 선택한 view가 없으면 wrapper가 학습 전에 거부한다.
 
@@ -112,7 +112,7 @@ LeRobot 0.6.1 학습 loop에는 gradient accumulation 제어가 없다. accumula
 
 평가 episode는 학습에서 제외해야 한다. LeRobot 0.6.1은 task별 마지막 `ceil(episode 수 × eval_split)` episodes를 보류한다. 따라서 `0.2`를 지정하는 것만으로 물체·위치 조건이 자동 균형화되지는 않는다. wrapper가 `${output_dir}/fr5_training_split.json`에 실제 보류 episode와 데이터셋 크기를 기록하며, task별 학습 episode가 하나도 남지 않는 분할은 거부한다.
 
-한 run에서는 이 episode 목록을 고정한다. validation을 바꾸며 비교하려면 [첫 FR5 본 학습 계획서](first-training-plan.md)에 따라 fold마다 처음부터 학습하는 별도 교차검증 run으로 취급한다. 최종 ID/OOD test는 validation으로 사용하지 않는다.
+한 학습 실행에서는 이 episode 목록을 고정한다. validation을 바꾸며 비교하려면 [첫 FR5 학습 체크리스트](first-training-checklist.md)를 참고해 fold마다 처음부터 학습하는 별도 교차검증으로 취급한다. 최종 ID/OOD test는 validation으로 사용하지 않는다.
 
 ```bash
 scripts/evaluate_smolvla.sh \
@@ -124,19 +124,19 @@ scripts/evaluate_smolvla.sh \
 
 ## 학습 길이와 checkpoint 선택
 
-첫 task-ready FR5 학습은 loss 곡선과 실제 평가의 관계를 확인하는 탐색 run으로 취급한다. `max_epochs=10`을 종료 상한으로 고정하지 않고 epoch 5와 10을 관찰 지점으로 사용한다. LeRobot 0.6.1 SmolVLA의 30,000-step cosine decay는 비교 가능한 첫 scheduler horizon이며 최종 학습 길이가 아니다. 실제 총 steps와 간격은 수집 전에 [첫 FR5 본 학습 계획서](first-training-plan.md)에 기록한다.
+첫 실제 작업 FR5 학습은 loss 곡선과 실제 평가의 관계를 확인하는 탐색 학습으로 취급한다. `max_epochs=10`을 종료 상한으로 고정하지 않고 epoch 5와 10을 관찰 지점으로 사용한다. LeRobot 0.6.1 SmolVLA의 30,000-step cosine decay는 비교 가능한 첫 scheduler horizon이며 최종 학습 길이가 아니다. 실제 총 steps와 간격은 [첫 FR5 학습 체크리스트](first-training-checklist.md)를 참고해 정한다.
 
 wrapper는 `eval_steps`와 `save_freq`를 명시하게 한다. 현재 full checkpoint는 약 1.319 GB이므로 한 run의 기본 예산은 최대 6개, 약 7.9 GiB다. 더 촘촘한 loss 곡선은 `log_freq`와 `eval_steps`로 기록하고 full checkpoint를 불필요하게 늘리지 않는다.
 
-held-out loss는 다음 checkpoint를 고르는 보조지표로만 사용한다.
+검증 episode loss는 다음 checkpoint를 고르는 보조지표로만 사용한다.
 
 1. loss가 발산하거나 finite가 아니면 중단하고 action 단위·정규화·데이터를 고친다.
 2. 첫 곡선을 해석하기 전에는 비교 지점을 충분히 남기고, 이후 안정된 early·middle·late 또는 turning-point checkpoint를 후보로 줄인다.
 3. [FR5 실물 정책 평가 프로토콜](real-robot-evaluation.md)의 같은 ID/OOD 초기조건에서 성공률과 부분 성공 단계(파지·들기·놓기)를 비교한다.
-4. late checkpoint의 held-out 지표와 rollout이 계속 개선되면 10 epochs 이후도 학습한다.
+4. 후반 checkpoint의 검증 지표와 rollout이 계속 개선되면 10 epochs 이후도 학습한다.
 5. 개선이 없으면 실패 단계의 성공 시연과 variation을 보완한다.
 
-학습 loss가 낮거나 plateau에 도달했다는 이유만으로 최적 checkpoint 또는 조기 종료를 결정하지 않는다. 시각 기반 imitation learning의 offline loss는 closed-loop dynamics와 충돌·누적 오차를 직접 측정하지 못한다. 이 저장소는 아직 실물 policy rollout을 지원하지 않으므로 최종 checkpoint 승인은 별도의 안전한 실물 평가 절차가 마련된 뒤 수행한다.
+학습 loss가 낮거나 plateau에 도달했다는 이유만으로 최적 checkpoint 또는 조기 종료를 결정하지 않는다. 시각 기반 imitation learning의 offline loss는 closed-loop dynamics와 충돌·누적 오차를 직접 측정하지 못한다. 이 저장소는 아직 실물 정책 실행을 지원하지 않으므로 최종 checkpoint 승인은 별도의 안전한 실물 평가 절차가 마련된 뒤 수행한다.
 
 ## 중도 종료와 resume
 
@@ -149,7 +149,7 @@ scripts/train_policy.sh \
   --resume-from outputs/smolvla/pick_red_up/none/checkpoints/last/pretrained_model
 ```
 
-resume는 저장된 batch, 총 steps, scheduler와 split을 그대로 사용한다. 값을 바꾸려면 resume가 아니라 새 output의 비교 run으로 실행한다. 강제 종료 시 최대 유실량은 `save_freq - 1` updates이므로 간격은 저장공간뿐 아니라 허용할 재학습 시간도 함께 고려한다.
+resume는 저장된 batch, 총 steps, scheduler와 split을 그대로 사용한다. 값을 바꾸려면 resume가 아니라 새 output의 비교 학습으로 실행한다. 강제 종료 시 최대 유실량은 `save_freq - 1` updates이므로 간격은 저장공간뿐 아니라 허용할 재학습 시간도 함께 고려한다.
 
 ## 환경 재현
 
