@@ -1,6 +1,6 @@
 # FR5 LeRobot Connector
 
-FAIRINO FR5의 ROS 2 state/action과 RGB 영상을 시간 정합하여 LeRobot v3 데이터셋으로 저장하는 커넥터다. 수집 데이터는 검사·승인 후 공식 `lerobot-train` 기반 SmolVLA 파인튜닝 입력으로 바로 사용할 수 있다.
+FAIRINO FR5의 ROS 2 state/action과 RGB 영상을 시간 정합하여 LeRobot v3 데이터셋으로 저장하는 커넥터다. 수집 데이터는 검사·승인 후 공식 `lerobot-train` 기반 SmolVLA 파인튜닝 입력으로 바로 사용할 수 있다. 저장 형식 자체는 SmolVLA 전용이 아니며, 아래 정책의 입력이나 변환 원본으로도 사용할 수 있다.
 
 ## 제공 기능
 
@@ -45,6 +45,35 @@ scripts/validate_dataset.sh --preview pick_red
 
 모든 wrapper는 `--help`, 경로 지정 옵션, `--dry-run`을 제공한다.
 
+## 데이터 형식과 다른 모델 후보
+
+각 30 Hz row에 다음 값이 함께 저장된다.
+
+```text
+observation.state = [j1..j6 feedback(rad), gripper feedback(m)]  # float32[7]
+action            = [j1..j6 reference(rad), gripper reference(m)] # float32[7]
+observation.images.up|side|wrist = RGB 640x480
+task              = 자연어 작업 지시
+```
+
+episode별 Parquet/MP4와 LeRobot v3 metadata 외에 source timestamp와 정합 품질을 `meta/source_provenance/`와 `meta/recording_quality.jsonl`에 보존한다. 후보별 `직접`은 LeRobot 데이터 로더가 이 구조를 읽는다는 뜻이며, FR5용 학습 설정·카메라 매핑·실물 rollout까지 이 저장소가 지원한다는 뜻은 아니다. 현재 제공하는 학습·평가 wrapper는 **SmolVLA 전용**이다.
+
+현재 장비는 RTX 5060 8 GB다. 아래 메모리는 공식/upstream의 대략적 학습 기준이며, 이 데이터의 640x480 다중 카메라로 실측한 값은 아니다.
+
+| 후보 | 데이터 연결 | RTX 5060 8 GB 판단 |
+|---|---|---|
+| [ACT](https://huggingface.co/docs/lerobot/main/act), VQ-BeT | LeRobot v3에서 직접 학습 후보 | 공식 경량 BC 기준 2–6 GB로 **우선 후보** |
+| Diffusion Policy, Multi-task DiT | LeRobot v3에서 직접 학습 후보 | 공식 기준 8–14 GB라 여유가 없다. batch 1 단기 측정부터 필요 |
+| SmolVLA | 현재 wrapper로 직접 파인튜닝 | 공식 batch 8 기준 10–16 GB. 이 장비는 batch 1부터 측정 |
+| π0/π0-FAST/π0.5 | LeRobot 또는 OpenPI에서 dataset mapping 후 파인튜닝 | 공식 LeRobot 기준 24–40 GB로 로컬 학습 대상 아님 |
+| NVIDIA Isaac GR00T N1.7 | LeRobot dataset에 modality/embodiment mapping 추가 | upstream 권장 fine-tune 40 GB+, inference 16 GB+ |
+| Octo, robomimic | 각각 RLDS, HDF5로 episode 변환 필요 | 소형 Octo/BC는 후보지만 8 GB 보장은 없어 변환 후 측정 |
+| OpenVLA-7B | RLDS 변환 또는 custom loader 필요 | upstream LoRA 최소 약 27 GB로 로컬 학습 대상 아님 |
+
+따라서 이 8 GB 환경에서는 ACT/VQ-BeT를 먼저 비교하고, 대형 VLA는 24–40 GB+ GPU나 원격 학습 환경에서 검토한다. 어떤 모델이든 FR5의 **절대 joint-position action**, 단위, 정규화, 카메라 키를 해당 모델 계약에 맞춰야 한다. GPU가 다른 장비에서는 `nvidia-smi --query-gpu=name,memory.total --format=csv`로 VRAM을 먼저 확인한다.
+
+메모리 기준과 변환 계약: [LeRobot compute hardware guide](https://huggingface.co/docs/lerobot/main/hardware_guide), [OpenPI](https://github.com/Physical-Intelligence/openpi), [Isaac GR00T](https://github.com/NVIDIA/Isaac-GR00T), [Octo](https://github.com/octo-models/octo), [robomimic datasets](https://robomimic.github.io/docs/datasets/overview.html), [OpenVLA](https://github.com/openvla/openvla).
+
 ## 문서
 
 | 목적 | 문서 |
@@ -53,7 +82,7 @@ scripts/validate_dataset.sh --preview pick_red
 | 장비 실행과 episode 녹화 | [데이터 수집 따라 하기](docs/data-collection.md) |
 | FR5·PGEA-100-40 제원과 소프트웨어 단위 | [하드웨어 계약](docs/hardware.md) |
 | 저장 형식·시간 정합·통과 기준 | [입력 구조와 품질 기준](docs/architecture-and-quality.md) |
-| 학습 wrapper와 오프라인 checkpoint 검사 | [SmolVLA 학습 준비](docs/training.md) |
+| SmolVLA 학습 wrapper와 오프라인 checkpoint 검사 | [SmolVLA 학습 준비](docs/training.md) |
 
 ## 배포 주의
 
