@@ -1,10 +1,14 @@
 #!/usr/bin/env python3
 
 import unittest
+from io import BytesIO
 from pathlib import Path
 from types import SimpleNamespace
 import json
+import subprocess
 import sys
+import tarfile
+import tempfile
 from unittest.mock import patch
 
 import numpy as np
@@ -215,7 +219,26 @@ class RecorderContractTest(unittest.TestCase):
         self.assertIn("FR5_COLLECTION_FPS:-30", camera_launcher)
         self.assertIn("/dev/v4l/by-id", camera_launcher)
         self.assertIn("git submodule update --init --recursive", setup)
+        self.assertNotIn("rm -rf src/frcobot_ros2", setup)
         self.assertIn("epoch_time.tv_sec * 1000000 + epoch_time.tv_usec;", usb_cam_timestamp)
+
+    def test_vendor_patch_applies_to_the_pinned_submodule(self):
+        root = Path(__file__).resolve().parents[1]
+        submodule = root / "src/frcobot_ros2"
+        pinned = subprocess.check_output(
+            ["git", "ls-tree", "HEAD", "src/frcobot_ros2"], cwd=root, text=True
+        ).split()[2]
+        archive = subprocess.check_output(["git", "archive", pinned], cwd=submodule)
+        with tempfile.TemporaryDirectory() as directory:
+            with tarfile.open(fileobj=BytesIO(archive)) as source:
+                source.extractall(directory, filter="data")
+            result = subprocess.run(
+                ["git", "apply", "--check", root / "patches/frcobot_ros2.patch"],
+                cwd=directory,
+                text=True,
+                capture_output=True,
+            )
+        self.assertEqual(result.returncode, 0, result.stderr)
 
 if __name__ == "__main__":
     unittest.main()

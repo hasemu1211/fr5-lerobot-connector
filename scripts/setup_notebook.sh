@@ -17,8 +17,6 @@ cd "$ROOT"
 git submodule update --init --recursive
 git -C src/frcobot_ros2 sparse-checkout init --cone
 git -C src/frcobot_ros2 sparse-checkout set fairino_hardware_v3_9_7 fairino_msgs
-rm -rf src/frcobot_ros2/fairino_hardware_v3_9_7/.vscode \
-  src/frcobot_ros2/fairino_hardware_v3_9_7/src/command_server.cpp.bak
 VENDOR_PATCH="patches/frcobot_ros2.patch"
 if git -C src/frcobot_ros2 apply --reverse --check "../../${VENDOR_PATCH}" 2>/dev/null; then
   echo "FR5 vendor patch already applied"
