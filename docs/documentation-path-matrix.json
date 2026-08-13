@@ -1,0 +1,116 @@
+{
+  "schema_version": "1.1",
+  "conformance_version": "1",
+  "rules": [
+    {
+      "rule_id": "root-entrypoint",
+      "document_type": "entrypoint",
+      "subject": "project overview and navigation",
+      "path_globs": ["README.md"],
+      "allowed_index_names": ["README.md"],
+      "requires_index": false,
+      "required_markdown_metadata": ["h1"],
+      "review_only_content_rule": "Keep only the supported scope, shortest usable start, and links to canonical documents.",
+      "lifecycle": "current",
+      "content_ownership": "convenience",
+      "canonical_rule_ids": ["operator-guides", "training-guides", "architecture-reference", "evidence-ledger"]
+    },
+    {
+      "rule_id": "operator-guides",
+      "document_type": "guide",
+      "subject": "setup, hardware, collection, and dataset planning",
+      "path_globs": [
+        "docs/setup.md",
+        "docs/hardware.md",
+        "docs/data-collection.md",
+        "docs/task-and-dataset-design.md",
+        "docs/first-training-plan.md"
+      ],
+      "allowed_index_names": ["README.md"],
+      "requires_index": false,
+      "required_markdown_metadata": ["h1"],
+      "review_only_content_rule": "Keep each procedure task-focused; put prerequisites and safety conditions before commands.",
+      "lifecycle": "current",
+      "content_ownership": "canonical",
+      "canonical_rule_ids": []
+    },
+    {
+      "rule_id": "training-guides",
+      "document_type": "guide",
+      "subject": "policy training and real-robot evaluation",
+      "path_globs": ["docs/training.md", "docs/real-robot-evaluation.md"],
+      "allowed_index_names": ["README.md"],
+      "requires_index": false,
+      "required_markdown_metadata": ["h1"],
+      "review_only_content_rule": "State the supported wrapper, fixed evaluation contract, checkpoint rules, and physical safety boundary without mixing research history.",
+      "lifecycle": "current",
+      "content_ownership": "canonical",
+      "canonical_rule_ids": []
+    },
+    {
+      "rule_id": "architecture-reference",
+      "document_type": "reference",
+      "subject": "connector architecture and data quality contract",
+      "path_globs": ["docs/architecture-and-quality.md"],
+      "allowed_index_names": ["README.md"],
+      "requires_index": false,
+      "required_markdown_metadata": ["h1"],
+      "review_only_content_rule": "Describe the current architecture and verified contracts; move dated investigations to history.",
+      "lifecycle": "current",
+      "content_ownership": "canonical",
+      "canonical_rule_ids": []
+    },
+    {
+      "rule_id": "evidence-ledger",
+      "document_type": "evidence",
+      "subject": "training research and experiment evidence",
+      "path_globs": ["docs/training-evidence.md"],
+      "allowed_index_names": ["README.md"],
+      "requires_index": false,
+      "required_markdown_metadata": ["h1"],
+      "review_only_content_rule": "Separate external evidence, local synthetic checks, HIL results, physical results, decisions, and unresolved questions.",
+      "lifecycle": "current",
+      "content_ownership": "canonical",
+      "canonical_rule_ids": []
+    },
+    {
+      "rule_id": "history",
+      "document_type": "history",
+      "subject": "dated audits and superseded records",
+      "path_globs": ["docs/data-pipeline-audit-2026-08-12.md", "docs/history/*.md"],
+      "allowed_index_names": ["README.md"],
+      "requires_index": false,
+      "required_markdown_metadata": ["h1"],
+      "review_only_content_rule": "Keep only records with traceability value and do not present them as current instructions.",
+      "lifecycle": "history",
+      "content_ownership": "canonical",
+      "canonical_rule_ids": []
+    },
+    {
+      "rule_id": "legal-notices",
+      "document_type": "legal",
+      "subject": "third-party notices",
+      "path_globs": ["THIRD_PARTY_NOTICES.md"],
+      "allowed_index_names": ["README.md"],
+      "requires_index": false,
+      "required_markdown_metadata": ["h1"],
+      "review_only_content_rule": "Preserve attribution and license notices without editorial rewriting.",
+      "lifecycle": "vendor",
+      "content_ownership": "canonical",
+      "canonical_rule_ids": []
+    }
+  ],
+  "ignored_generated_globs": [
+    ".git/**",
+    ".docs-governance/**",
+    ".omx/**",
+    "omx_wiki/**",
+    "node_modules/**",
+    "build/**",
+    "dist/**"
+  ],
+  "content_qa": {
+    "enabled": true,
+    "language": "ko"
+  }
+}

@@ -4,6 +4,7 @@
 /.venv/
 /.omx/
 /omx_wiki/
+/.docs-governance/
 /datasets/
 /outputs/
 *.zip
