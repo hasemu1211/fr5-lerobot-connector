@@ -101,6 +101,19 @@ scripts/collect.sh pick_red_up \
 
 `task` 문자열의 작성법, 지원 가능한 작업 유형, 단일·다중 물체와 빈피킹 장면 구성은 [자연어 작업 지시와 데이터셋 설계](task-and-dataset-design.md)를 따른다.
 
+### 학습용 episode 구성
+
+episode 수만 채우지 말고 학습 뒤 평가할 조건부터 정한다. SmolVLA 공식 pick-place 예시는 물체 시작 위치 5개를 정하고 위치마다 성공 시연 10회, 총 50 episodes를 수집했다. 이 수치는 출발점이며 과업 성공을 보장하는 하한은 아니다.
+
+1. 같은 데이터셋에는 같은 과업을 끝까지 완료한 성공 시연만 저장한다.
+2. 일반화할 축을 물체 위치·자세·종류·배경·조명 중에서 먼저 고른다.
+3. 각 조건을 한 번씩만 수집하지 말고 일관된 동작으로 여러 번 반복한다.
+4. 접근 → 파지 → 들기 → 운반 → 놓기 전 구간이 영상과 7D action에 포함되게 한다.
+5. 지시가 특정 물체를 가리키면 장면의 물체와 실제로 집는 물체가 항상 일치해야 한다.
+6. 학습에 쓸 조건과 별도로, 같은 분포의 ID 평가 조건과 수집에 없던 OOD 위치·물체 조건을 남긴다.
+
+일반화 성능은 단순 episode 총량보다 물체와 환경의 다양성에 크게 좌우된다. 다만 한 조건당 반복이 부족하면 그 조건 자체를 학습하기 어렵다. 실패한 episode를 성공 시연 수에 포함하거나, 서로 다른 과업·카메라 설치를 episode 수를 늘리기 위해 한 데이터셋에 섞지 않는다.
+
 ### 키 조작
 
 - `r`: 새 episode 녹화 시작
@@ -168,6 +181,8 @@ scripts/validate_dataset.sh --visualize 0 pick_red_up
 
 승인하면 `meta/training_approved.json`이 만들어진다. 이 파일이 없으면 학습 스크립트가 실행되지 않는다. 화면이 천장이나 모니터만 보거나 작업이 중간에 끝났다면 수치 검사를 통과해도 승인하지 않는다.
 
+승인 전에는 각 조건별 성공 episode 수와 보류할 ID/OOD 조건을 함께 확인한다. `dataset.eval_split`은 평가 조건의 의미를 자동으로 설계하지 않으므로, 학습 문서의 checkpoint 비교 절차에 맞게 수집 순서와 episode 구성을 기록한다.
+
 어두운 영상 비교가 필요할 때만 `make_rgb_preview.py --clahe`로 미리보기를 만든다. 원본 학습 영상은 바꾸지 않는다. IR·흑백 입력은 RGB로 복원하지 말고 카메라 토픽과 조명을 고쳐 다시 수집한다.
 
 저장 구조:
@@ -186,3 +201,8 @@ datasets/fr5_episodes/pick_red_up/
 ## 부록: 외부 측정 카메라 시간 오프셋
 
 기본값은 `0 ms`다. 저장소는 영상 motion으로 오프셋을 추정하지 않는다. 카메라 제조사나 검증된 하드웨어 절차로 일정 오프셋을 독립 측정한 경우에만 `--up-time-offset-ms`, `--side-time-offset-ms`, `--wrist-time-offset-ms`를 직접 지정한다. 카메라·드라이버·FPS·USB 경로·clock 설정이 바뀌면 값을 다시 측정한다.
+
+## 근거
+
+- [SmolVLA 공식 데이터 수집 안내](https://huggingface.co/docs/lerobot/smolvla)
+- [Data Scaling Laws in Imitation Learning for Robotic Manipulation](https://proceedings.iclr.cc/paper_files/paper/2025/hash/88b7b2c896506daabc8d3fd587055167-Abstract-Conference.html)
