@@ -3,6 +3,7 @@
 /log/
 /.venv/
 /.omx/
+/omx_wiki/
 /datasets/
 /outputs/
 *.zip
