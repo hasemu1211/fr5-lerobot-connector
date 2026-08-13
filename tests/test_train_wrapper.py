@@ -3,6 +3,7 @@
 import subprocess
 import unittest
 from pathlib import Path
+from tempfile import TemporaryDirectory
 
 
 class CliWrapperTest(unittest.TestCase):
@@ -20,15 +21,58 @@ class CliWrapperTest(unittest.TestCase):
         self.assertIn("--check-env", help_result.stdout)
         self.assertIn("--dry-run", help_result.stdout)
         self.assertIn("--dataset.eval_split", help_result.stdout)
+        self.assertIn("--resume-from", help_result.stdout)
+        self.assertIn("--eval_steps", help_result.stdout)
+        self.assertIn("--save_freq", help_result.stdout)
         self.assertIn("--root", help_result.stdout)
 
         guard_result = subprocess.run([script, "missing-dataset"], text=True, capture_output=True)
         self.assertEqual(guard_result.returncode, 2)
-        self.assertIn("--batch_size, --steps, and --dataset.eval_split explicitly", guard_result.stderr)
+        self.assertIn("--batch_size, --steps, --dataset.eval_split, --eval_steps, and --save_freq explicitly", guard_result.stderr)
 
         profile_guard = subprocess.run([policy_script, "missing-dataset"], text=True, capture_output=True)
         self.assertEqual(profile_guard.returncode, 2)
         self.assertIn("--profile is required", profile_guard.stderr)
+
+        resume_guard = subprocess.run(
+            [policy_script, "--resume-from", "/missing/checkpoint", "--dry-run"],
+            text=True,
+            capture_output=True,
+        )
+        self.assertEqual(resume_guard.returncode, 2)
+        self.assertIn("checkpoint must be under", resume_guard.stderr)
+
+        with TemporaryDirectory() as directory:
+            existing_output = Path(directory) / "existing"
+            existing_output.mkdir()
+            output_guard = subprocess.run(
+                [
+                    policy_script,
+                    "--profile", "smolvla",
+                    "--output", existing_output,
+                    "missing-dataset",
+                    "--batch_size=8", "--steps=200", "--dataset.eval_split=0.2",
+                    "--eval_steps=200", "--save_freq=200",
+                ],
+                text=True,
+                capture_output=True,
+            )
+            self.assertEqual(output_guard.returncode, 2)
+            self.assertIn("Output already exists", output_guard.stderr)
+
+        managed_guard = subprocess.run(
+            [
+                policy_script,
+                "--profile", "smolvla",
+                "missing-dataset",
+                "--batch_size=8", "--steps=200", "--dataset.eval_split=0.2",
+                "--eval_steps=200", "--save_freq=200", "--save_checkpoint=false",
+            ],
+            text=True,
+            capture_output=True,
+        )
+        self.assertEqual(managed_guard.returncode, 2)
+        self.assertIn("--save_checkpoint is managed", managed_guard.stderr)
 
         validate_help = subprocess.run(
             [root / "scripts/validate_dataset.sh", "--help"], text=True, capture_output=True

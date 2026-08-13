@@ -4,6 +4,8 @@
 
 검사·승인된 FR5 LeRobot v3 데이터셋을 공식 `lerobot-train`에 연결한다. profile은 정책 종류, 7D state/action, 카메라 입력을 고정하고 batch size·steps·평가 분할은 사용자가 명시하게 한다.
 
+조사와 로컬 실험, 반증 및 아직 결정하지 않은 값은 [학습 정책 근거 장부](training-evidence.md)에 누적한다. 이 문서는 현재 실행 방법과 승인된 기준만 설명한다.
+
 | profile | 시작 모델 | 영상 입력 | 자연어 `task` | 제공 기능 |
 |---|---|---|---|---|
 | `smolvla` | `lerobot/smolvla_base` | 수집된 view를 `camera1..3`에 매핑 | 사용 | 학습, 저장·재로딩, held-out loss |
@@ -40,6 +42,8 @@ scripts/train_policy.sh --profile <profile> <dataset> <augmentation> \
   --batch_size=<measured-batch> \
   --steps=<selected-steps> \
   --dataset.eval_split=0.2 \
+  --eval_steps=<selected-eval-interval> \
+  --save_freq=<selected-save-interval> \
   --policy.device=cuda
 ```
 
@@ -47,13 +51,13 @@ scripts/train_policy.sh --profile <profile> <dataset> <augmentation> \
 
 ```bash
 scripts/train_policy.sh --profile smolvla pick_red_up none \
-  --batch_size=8 --steps=200 --dataset.eval_split=0.2
+  --batch_size=8 --steps=200 --dataset.eval_split=0.2 --eval_steps=200 --save_freq=200
 
 scripts/train_policy.sh --profile act pick_red_up none \
-  --batch_size=4 --steps=200 --dataset.eval_split=0.2
+  --batch_size=4 --steps=200 --dataset.eval_split=0.2 --eval_steps=200 --save_freq=200
 
 scripts/train_policy.sh --profile vqbet-up pick_red_up none \
-  --batch_size=4 --steps=200 --dataset.eval_split=0.2
+  --batch_size=4 --steps=200 --dataset.eval_split=0.2 --eval_steps=200 --save_freq=200
 ```
 
 SmolVLA의 `batch_size=8`은 현재 RTX 5060 8 GB에서 7D up/side 입력과 50-episode 참조 데이터의 FP32 backward를 통과한 시작값이다. batch 4도 실행되지만 steady sample 처리량 차이는 작아, 추가 카메라나 튜닝 범위 확대로 메모리가 부족할 때의 fallback으로 둔다. `steps=200`은 저장·재로딩 확인용이며 최종 학습 길이가 아니다. `--dry-run`으로 실제 명령을 먼저 확인할 수 있다. 기존 `scripts/train_smolvla.sh` 명령은 `--profile smolvla`로 전달되는 호환 경로다.
@@ -108,6 +112,8 @@ LeRobot 0.6.1 학습 loop에는 gradient accumulation 제어가 없다. accumula
 
 평가 episode는 학습에서 제외해야 한다. LeRobot 0.6.1은 task별 마지막 `ceil(episode 수 × eval_split)` episodes를 보류한다. 따라서 `0.2`를 지정하는 것만으로 물체·위치 조건이 자동 균형화되지는 않는다. wrapper가 `${output_dir}/fr5_training_split.json`에 실제 보류 episode와 데이터셋 크기를 기록하며, task별 학습 episode가 하나도 남지 않는 분할은 거부한다.
 
+한 run에서는 이 episode 목록을 고정한다. validation을 바꾸며 비교하려면 [첫 FR5 본 학습 계획서](first-training-plan.md)에 따라 fold마다 처음부터 학습하는 별도 교차검증 run으로 취급한다. 최종 ID/OOD test는 validation으로 사용하지 않는다.
+
 ```bash
 scripts/evaluate_smolvla.sh \
   outputs/smolvla/pick_red_up/none/checkpoints/last/pretrained_model \
@@ -118,17 +124,32 @@ scripts/evaluate_smolvla.sh \
 
 ## 학습 길이와 checkpoint 선택
 
-처음에는 episode 수와 frame 수로 5 epochs에 해당하는 step을 계산해 baseline budget으로 삼는다. 짧은 run에서는 scheduler decay와 checkpoint 간격도 전체 step에 맞춘다. 현재 장비의 50-episode, 11,939-frame up/side 참조 데이터는 batch 8에서 steady 약 24–25 samples/s였으며, 단순 계산상 5 epochs는 약 40분이다. 저장·평가와 실제 FR5 데이터 크기에 따라 달라지므로 본 학습 전 짧은 profile로 다시 잰다.
+첫 task-ready FR5 학습은 loss 곡선과 실제 평가의 관계를 확인하는 탐색 run으로 취급한다. `max_epochs=10`을 종료 상한으로 고정하지 않고 epoch 5와 10을 관찰 지점으로 사용한다. LeRobot 0.6.1 SmolVLA의 30,000-step cosine decay는 비교 가능한 첫 scheduler horizon이며 최종 학습 길이가 아니다. 실제 총 steps와 간격은 수집 전에 [첫 FR5 본 학습 계획서](first-training-plan.md)에 기록한다.
+
+wrapper는 `eval_steps`와 `save_freq`를 명시하게 한다. 현재 full checkpoint는 약 1.319 GB이므로 한 run의 기본 예산은 최대 6개, 약 7.9 GiB다. 더 촘촘한 loss 곡선은 `log_freq`와 `eval_steps`로 기록하고 full checkpoint를 불필요하게 늘리지 않는다.
 
 held-out loss는 다음 checkpoint를 고르는 보조지표로만 사용한다.
 
 1. loss가 발산하거나 finite가 아니면 중단하고 action 단위·정규화·데이터를 고친다.
-2. 안정된 early·middle·late checkpoint 세 개만 후보로 남긴다.
-3. 같은 ID/OOD 초기조건에서 성공률과 부분 성공 단계(파지·들기·놓기)를 비교한다.
-4. late checkpoint가 계속 개선될 때만 학습을 연장한다.
+2. 첫 곡선을 해석하기 전에는 비교 지점을 충분히 남기고, 이후 안정된 early·middle·late 또는 turning-point checkpoint를 후보로 줄인다.
+3. [FR5 실물 정책 평가 프로토콜](real-robot-evaluation.md)의 같은 ID/OOD 초기조건에서 성공률과 부분 성공 단계(파지·들기·놓기)를 비교한다.
+4. late checkpoint의 held-out 지표와 rollout이 계속 개선되면 10 epochs 이후도 학습한다.
 5. 개선이 없으면 실패 단계의 성공 시연과 variation을 보완한다.
 
 학습 loss가 낮거나 plateau에 도달했다는 이유만으로 최적 checkpoint 또는 조기 종료를 결정하지 않는다. 시각 기반 imitation learning의 offline loss는 closed-loop dynamics와 충돌·누적 오차를 직접 측정하지 못한다. 이 저장소는 아직 실물 policy rollout을 지원하지 않으므로 최종 checkpoint 승인은 별도의 안전한 실물 평가 절차가 마련된 뒤 수행한다.
+
+## 중도 종료와 resume
+
+LeRobot 0.6.1은 `save_freq` 시점과 정상 final step에만 checkpoint를 저장한다. `Ctrl-C`, `SIGTERM`, 전원 장애 직전에 새 checkpoint를 만들지 않으므로 마지막 완료 저장 이후의 update는 유실된다.
+
+계획된 중단은 로그의 `Checkpoint policy after step ...` 저장이 끝나고 `checkpoints/last`가 새 숫자 디렉터리를 가리킨 뒤 수행한다. 저장 로그가 출력되는 동안에는 중단하지 않는다. 비상 중단 후 숫자 디렉터리가 일부 남아도 직접 resume하지 않는다. `last`가 가리키는 checkpoint의 model, optimizer, scheduler, RNG, step과 dataset split을 wrapper가 검사하고, 전원 장애로 output 옆에 남은 split sidecar를 복구한 뒤에만 다음 명령을 실행한다.
+
+```bash
+scripts/train_policy.sh \
+  --resume-from outputs/smolvla/pick_red_up/none/checkpoints/last/pretrained_model
+```
+
+resume는 저장된 batch, 총 steps, scheduler와 split을 그대로 사용한다. 값을 바꾸려면 resume가 아니라 새 output의 비교 run으로 실행한다. 강제 종료 시 최대 유실량은 `save_freq - 1` updates이므로 간격은 저장공간뿐 아니라 허용할 재학습 시간도 함께 고려한다.
 
 ## 환경 재현
 

@@ -7,8 +7,10 @@ usage() {
   cat <<'EOF'
 Usage:
   scripts/train_policy.sh --check-env [--profile PROFILE]
+  scripts/train_policy.sh --resume-from CHECKPOINT [--dry-run]
   scripts/train_policy.sh --profile PROFILE [--root PATH] [--output PATH] [--dry-run] \
     DATASET_NAME [AUGMENTATION] --batch_size=N --steps=N --dataset.eval_split=FRACTION \
+    --eval_steps=N --save_freq=N \
     [lerobot-train options]
 
 PROFILE: smolvla | act | vqbet-up | vqbet-side | vqbet-wrist
@@ -23,10 +25,12 @@ DATASET_ROOT="${FR5_DATASET_ROOT:-$ROOT/datasets/fr5_episodes}"
 OUTPUT=""
 DRY_RUN=0
 CHECK_ENV=0
+RESUME_FROM=""
 while [[ $# -gt 0 ]]; do
   case "$1" in
     -h|--help) usage; exit 0 ;;
     --check-env) CHECK_ENV=1; shift ;;
+    --resume-from) [[ $# -ge 2 ]] || { echo "--resume-from requires a value" >&2; exit 2; }; RESUME_FROM="$2"; shift 2 ;;
     --profile) [[ $# -ge 2 ]] || { echo "--profile requires a value" >&2; exit 2; }; PROFILE="$2"; shift 2 ;;
     --root) [[ $# -ge 2 ]] || { echo "--root requires a path" >&2; exit 2; }; DATASET_ROOT="$2"; shift 2 ;;
     --output) [[ $# -ge 2 ]] || { echo "--output requires a path" >&2; exit 2; }; OUTPUT="$2"; shift 2 ;;
@@ -35,6 +39,39 @@ while [[ $# -gt 0 ]]; do
     *) break ;;
   esac
 done
+
+if [[ -n "$RESUME_FROM" ]]; then
+  [[ "$CHECK_ENV" == 0 && -z "$PROFILE" && -z "$OUTPUT" && "$DATASET_ROOT" == "${FR5_DATASET_ROOT:-$ROOT/datasets/fr5_episodes}" && $# -eq 0 ]] || {
+    echo "--resume-from is a standalone mode; only --dry-run may accompany it." >&2
+    exit 2
+  }
+  RESUME_INFO_FILE="$(mktemp)"
+  if ! "$ROOT/.venv/bin/python" "$ROOT/tools/validate_training_checkpoint.py" "$RESUME_FROM" --shell >"$RESUME_INFO_FILE"; then
+    rm -f "$RESUME_INFO_FILE"
+    exit 2
+  fi
+  mapfile -d '' -t RESUME_INFO <"$RESUME_INFO_FILE"
+  rm -f "$RESUME_INFO_FILE"
+  [[ ${#RESUME_INFO[@]} -eq 2 ]] || { echo "Could not resolve resume checkpoint paths." >&2; exit 2; }
+  RESUME_COMMAND=(
+    "$ROOT/.venv/bin/lerobot-train"
+    --resume=true
+    --config_path="${RESUME_INFO[0]}"
+    --output_dir="${RESUME_INFO[1]}"
+  )
+  if [[ "$DRY_RUN" == 1 ]]; then
+    printf 'Command: '
+    printf '%q ' "${RESUME_COMMAND[@]}"
+    printf '\n'
+    exit 0
+  fi
+  RESUME_SPLIT="${RESUME_INFO[1]}/fr5_training_split.json"
+  PENDING_SPLIT="${RESUME_INFO[1]}.fr5_training_split.json.pending"
+  if [[ ! -f "$RESUME_SPLIT" && -f "$PENDING_SPLIT" ]]; then
+    mv "$PENDING_SPLIT" "$RESUME_SPLIT"
+  fi
+  exec "${RESUME_COMMAND[@]}"
+fi
 
 case "$PROFILE" in
   ""|smolvla|act|vqbet-up|vqbet-side|vqbet-wrist) ;;
@@ -91,28 +128,35 @@ option_value() {
   return 1
 }
 
-if ! has_option --batch_size "$@" || ! has_option --steps "$@" || ! has_option --dataset.eval_split "$@"; then
-  echo "Specify --batch_size, --steps, and --dataset.eval_split explicitly." >&2
+if ! has_option --batch_size "$@" || ! has_option --steps "$@" || ! has_option --dataset.eval_split "$@" || ! has_option --eval_steps "$@" || ! has_option --save_freq "$@"; then
+  echo "Specify --batch_size, --steps, --dataset.eval_split, --eval_steps, and --save_freq explicitly." >&2
   exit 2
 fi
-for managed in --policy.path --policy.type --policy.input_features --policy.output_features --rename_map --policy.empty_cameras; do
+for managed in --policy.path --policy.type --policy.input_features --policy.output_features --rename_map --policy.empty_cameras --dataset.repo_id --dataset.root --output_dir --save_checkpoint --resume --config_path; do
   if has_option "$managed" "$@"; then
     echo "$managed is managed by --profile $PROFILE" >&2
     exit 2
   fi
 done
 EVAL_SPLIT="$(option_value --dataset.eval_split "$@")"
-"$ROOT/.venv/bin/python" - "$EVAL_SPLIT" <<'PY'
+STEPS="$(option_value --steps "$@")"
+EVAL_STEPS="$(option_value --eval_steps "$@")"
+SAVE_FREQ="$(option_value --save_freq "$@")"
+"$ROOT/.venv/bin/python" - "$EVAL_SPLIT" "$STEPS" "$EVAL_STEPS" "$SAVE_FREQ" <<'PY'
 import sys
 value = float(sys.argv[1])
 if not 0 < value < 1:
     raise SystemExit("--dataset.eval_split must be between 0 and 1")
+steps, eval_steps, save_freq = map(int, sys.argv[2:])
+if steps < 1 or not 1 <= eval_steps <= steps or not 1 <= save_freq <= steps:
+    raise SystemExit("--steps must be positive; --eval_steps and --save_freq must be between 1 and steps")
 PY
 
 DATASET="$DATASET_ROOT/$NAME"
 TRANSFORMS="$ROOT/config/image_transforms/$AUGMENTATION.json"
 [[ -f "$TRANSFORMS" ]] || { echo "Unknown augmentation setting: $AUGMENTATION" >&2; exit 2; }
 [[ -n "$OUTPUT" ]] || OUTPUT="${FR5_TRAIN_OUTPUT:-$ROOT/outputs/$PROFILE/$NAME/$AUGMENTATION}"
+[[ ! -e "$OUTPUT" && ! -L "$OUTPUT" ]] || { echo "Output already exists; choose --output or use --resume-from: $OUTPUT" >&2; exit 2; }
 
 "$ROOT/scripts/validate_dataset.sh" --root "$DATASET_ROOT" --require-approved "$NAME"
 
@@ -154,8 +198,11 @@ if [[ "$DRY_RUN" == 1 ]]; then
   exit 0
 fi
 
-mkdir -p "$OUTPUT"
-"$ROOT/.venv/bin/python" - "$ROOT" "$DATASET" "${FR5_REPO_ID:-local/fr5_connector}" "$EVAL_SPLIT" "$OUTPUT/fr5_training_split.json" <<'PY'
+OUTPUT_PARENT="$(dirname "$OUTPUT")"
+mkdir -p "$OUTPUT_PARENT"
+SPLIT_TMP="${OUTPUT}.fr5_training_split.json.pending"
+[[ ! -e "$SPLIT_TMP" ]] || { echo "Stale training split sidecar exists: $SPLIT_TMP" >&2; exit 2; }
+"$ROOT/.venv/bin/python" - "$ROOT" "$DATASET" "${FR5_REPO_ID:-local/fr5_connector}" "$EVAL_SPLIT" "$SPLIT_TMP" <<'PY'
 import json, sys
 from pathlib import Path
 sys.path.insert(0, sys.argv[1] + "/tools")
@@ -177,4 +224,20 @@ temporary = path.with_suffix(".tmp")
 temporary.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n")
 temporary.replace(path)
 PY
-exec "${COMMAND[@]}"
+
+finalize_split() {
+  if [[ -f "$SPLIT_TMP" ]]; then
+    if [[ -d "$OUTPUT" ]]; then
+      mv "$SPLIT_TMP" "$OUTPUT/fr5_training_split.json"
+    else
+      rm -f "$SPLIT_TMP"
+    fi
+  fi
+}
+trap finalize_split EXIT
+status=0
+"${COMMAND[@]}" || status=$?
+if [[ $status -ne 0 ]]; then
+  echo "Training stopped. Resume only from the last completed checkpoint with --resume-from." >&2
+  exit "$status"
+fi

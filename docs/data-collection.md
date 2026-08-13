@@ -103,7 +103,7 @@ scripts/collect.sh pick_red_up \
 
 ### 학습용 episode 구성
 
-episode 수만 채우지 말고 학습 뒤 평가할 조건부터 정한다. SmolVLA 공식 pick-place 예시는 물체 시작 위치 5개를 정하고 위치마다 성공 시연 10회, 총 50 episodes를 수집했다. 이 수치는 출발점이며 과업 성공을 보장하는 하한은 아니다.
+episode 수만 채우지 말고 [첫 FR5 본 학습 계획서](first-training-plan.md)의 조건표와 train·validation·ID/OOD test 역할부터 작성한다. 본 학습 dataset에는 train/validation만 두고 ID/OOD test는 별도 dataset 이름으로 수집한다. SmolVLA 공식 pick-place 예시는 물체 시작 위치 5개를 정하고 위치마다 성공 시연 10회, 총 50 episodes를 수집했다. 이 수치는 출발점이며 과업 성공을 보장하는 하한은 아니다.
 
 1. 같은 데이터셋에는 같은 과업을 끝까지 완료한 성공 시연만 저장한다.
 2. 일반화할 축을 물체 위치·자세·종류·배경·조명 중에서 먼저 고른다.

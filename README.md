@@ -73,10 +73,13 @@ profile은 FR5의 절대 joint-position action, 7D state/action과 카메라 키
 |---|---|
 | 새 수집 노트북·학습 PC 설치 | [설치와 이식](docs/setup.md) |
 | 장비 실행과 episode 녹화 | [데이터 수집 따라 하기](docs/data-collection.md) |
+| 첫 수집 조건·split·본 학습 실행계획 | [첫 FR5 본 학습 계획서](docs/first-training-plan.md) |
 | FR5·PGEA-100-40 제원과 소프트웨어 단위 | [하드웨어 계약](docs/hardware.md) |
 | 저장 형식·시간 정합·통과 기준 | [입력 구조와 품질 기준](docs/architecture-and-quality.md) |
 | 자연어 지시와 물체·장면 구성 | [작업 지시와 데이터셋 설계](docs/task-and-dataset-design.md) |
 | SmolVLA·ACT·VQ-BeT 학습과 checkpoint 검사 | [정책 학습과 오프라인 검사](docs/training.md) |
+| 학습 조사·실험·반증과 미결정 항목 | [학습 정책 근거 장부](docs/training-evidence.md) |
+| checkpoint 실물 비교와 안전 판정 | [FR5 실물 정책 평가 프로토콜](docs/real-robot-evaluation.md) |
 
 ## 배포 주의
 
