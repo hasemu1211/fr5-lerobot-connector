@@ -2,18 +2,25 @@
 """Deterministic lifecycle tests; no ROS node or hardware is started."""
 
 import json
+import os
 import queue
+import signal
+import shutil
+import subprocess
 import sys
 import tempfile
 import threading
 import time
 import unittest
+from unittest import mock
 from pathlib import Path
 from types import SimpleNamespace
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools"))
 
 from fr5_lerobot_recorder import FR5LeRobotRecorder
+import data_factory_recovery as recovery
+from data_factory_recovery import DatasetTransactionLock, RecoveryError, canonical_json_digest, dataset_snapshot, recover_orphaned_transaction
 
 
 class _Logger:
@@ -42,6 +49,11 @@ class _Dataset:
         self.clears += 1
         if self.clear_error:
             raise self.clear_error
+        for camera in self.camera_names:
+            shutil.rmtree(
+                self.root / "images" / f"observation.images.{camera}" / f"episode-{self.meta.total_episodes:06d}",
+                ignore_errors=True,
+            )
 
     def finalize(self):
         if self.finalized:
@@ -60,16 +72,24 @@ class RecorderTransactionTest(unittest.TestCase):
             writer_queue_size=8, streaming_encoding=False, no_videos=False,
         )
         recorder.args.root.mkdir(parents=True, exist_ok=True)
+        meta = recorder.args.root / "meta"
+        meta.mkdir(exist_ok=True)
+        info = meta / "info.json"
+        if not info.exists():
+            info.write_text(json.dumps({"total_episodes": 7, "total_frames": 123}))
         recorder.lock = threading.Lock()
         recorder.stop_threads = threading.Event()
         recorder.writer_queue = queue.Queue()
         recorder.writer_thread = threading.Thread()
         recorder.dataset = _Dataset(save_error, clear_error, finalize_error)
+        recorder.dataset.root = recorder.args.root
+        recorder.dataset.camera_names = ("up", "side")
         recorder.camera_names = ("up", "side")
         recorder.camera_offsets = {"up": 0.0, "side": 0.0}
         recorder.episode_state = recorder.IDLE
         recorder.recording = False
         recorder._transaction = None
+        recorder._transaction_lock = None
         recorder._buffer_cleared = False
         recorder.frames = 0
         recorder.started = 0.0
@@ -129,13 +149,16 @@ class RecorderTransactionTest(unittest.TestCase):
                 json.loads((recorder.args.root / "meta" / "quarantine.json").read_text())["state"],
                 recorder.RECORDING,
             )
+            marker = json.loads((recorder.args.root / "meta" / "quarantine.json").read_text())
+            self.assertEqual(marker["schema_version"], "data_factory.commit_guard.v2")
+            self.assertEqual(marker["staging_manifest_digest"], canonical_json_digest(manifest))
 
     def test_factory_streaming_rejected_without_side_effects(self):
         with tempfile.TemporaryDirectory() as directory:
             recorder = self.make_recorder(directory)
             recorder.args.streaming_encoding = True
             approval = recorder.args.root / "meta" / "training_approved.json"
-            approval.parent.mkdir()
+            approval.parent.mkdir(exist_ok=True)
             approval.write_text("{}")
             result = recorder.begin_episode(self.transaction(directory))
             self.assertEqual(result["reason_code"], "UNSUPPORTED_STAGING_MODE")
@@ -155,7 +178,7 @@ class RecorderTransactionTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             recorder = self.make_recorder(directory)
             approval = recorder.args.root / "meta" / "training_approved.json"
-            approval.parent.mkdir()
+            approval.parent.mkdir(exist_ok=True)
             approval.write_text("{}")
             self.assertTrue(recorder.begin_episode(self.transaction(directory))["ok"])
             self.assertFalse(approval.exists())
@@ -208,7 +231,7 @@ class RecorderTransactionTest(unittest.TestCase):
             recorder._append_event = lambda *_: (_ for _ in ()).throw(OSError("journal unavailable"))
             result = recorder.begin_episode(self.transaction(directory))
             self.assertEqual(result["reason_code"], "BEGIN_JOURNAL_FAILED")
-            self.assertEqual(recorder.episode_state, recorder.IDLE)
+            self.assertEqual(recorder.episode_state, recorder.QUARANTINED_COMMIT)
             self.assertFalse(recorder.recording)
             self.assertTrue((recorder.args.root / "meta" / "quarantine.json").exists())
 
@@ -350,7 +373,7 @@ class RecorderTransactionTest(unittest.TestCase):
             recorder.frames = 1
             recorder._quality_summary = lambda: ({"episode_index": 7, "effective_fps": 30.0, "image_quality_warnings": []}, ["quality failed"])
             attempts = recorder.args.root / "meta" / "recording_attempts.jsonl"
-            attempts.parent.mkdir()
+            attempts.parent.mkdir(exist_ok=True)
             attempts.mkdir()
             recorder.freeze_episode()
             result = recorder.commit_episode()
@@ -412,7 +435,7 @@ class RecorderTransactionTest(unittest.TestCase):
                 recorder = self.make_recorder(directory)
                 recorder.begin_episode(self.transaction(directory))
                 if mutation == "staging":
-                    Path(recorder._transaction["staging_dirs"][0]).mkdir(parents=True)
+                    recorder.dataset.clear_episode_buffer = lambda: None
                 else:
                     data = recorder.args.root / "data" / "chunk-000" / "file-000.parquet"
                     data.parent.mkdir(parents=True)
@@ -425,7 +448,7 @@ class RecorderTransactionTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             recorder = self.make_recorder(directory)
             marker = recorder.args.root / "meta" / "quarantine.json"
-            marker.parent.mkdir()
+            marker.parent.mkdir(exist_ok=True)
             marker.write_text("{}")
             with self.assertRaisesRegex(ValueError, "unresolved data factory commit guard"):
                 recorder.begin_episode(self.transaction(directory))
@@ -437,11 +460,321 @@ class RecorderTransactionTest(unittest.TestCase):
             second = self.make_recorder(directory)
             context = self.transaction(directory)
             context["run_id"] = "run-002"
-            with self.assertRaisesRegex(ValueError, "unresolved data factory commit guard"):
-                second.begin_episode(context)
+            self.assertEqual(second.begin_episode(context)["reason_code"], "DATASET_TRANSACTION_BUSY")
             first.freeze_episode()
-            with self.assertRaisesRegex(ValueError, "unresolved data factory commit guard"):
-                second.begin_episode(context)
+            self.assertEqual(second.begin_episode(context)["reason_code"], "DATASET_TRANSACTION_BUSY")
+
+    def test_factory_lock_is_held_until_clean_abort_and_guard_tracks_frozen(self):
+        with tempfile.TemporaryDirectory() as directory:
+            recorder = self.make_recorder(directory)
+            self.assertTrue(recorder.begin_episode(self.transaction(directory))["ok"])
+            contender = DatasetTransactionLock(recorder.args.root)
+            with self.assertRaises(RecoveryError) as caught:
+                contender.acquire()
+            self.assertEqual(caught.exception.code, "DATASET_TRANSACTION_BUSY")
+            self.assertTrue(recorder.freeze_episode()["ok"])
+            marker = json.loads((recorder.args.root / "meta" / "quarantine.json").read_text())
+            self.assertEqual(marker["state"], recorder.FROZEN)
+            self.assertTrue(recorder.abort_episode()["ok"])
+            contender.acquire()
+            contender.release()
+
+    def test_factory_refuses_preexisting_episode_staging(self):
+        with tempfile.TemporaryDirectory() as directory:
+            recorder = self.make_recorder(directory)
+            staging = recorder.args.root / "images" / "observation.images.up" / "episode-000007"
+            staging.mkdir(parents=True)
+            sentinel = staging / "user-file.bin"
+            sentinel.write_bytes(b"keep")
+            with self.assertRaisesRegex(ValueError, "pre-existing or unsafe episode staging"):
+                recorder.begin_episode(self.transaction(directory))
+            self.assertEqual(sentinel.read_bytes(), b"keep")
+            self.assertFalse(recorder.args.run_root.exists())
+            lock = DatasetTransactionLock(recorder.args.root)
+            lock.acquire()
+            lock.release()
+
+    def test_recording_and_frozen_orphans_recover_only_manifest_staging(self):
+        for frozen in (False, True):
+            with self.subTest(frozen=frozen), tempfile.TemporaryDirectory() as directory:
+                recorder = self.make_recorder(directory)
+                self.assertTrue(recorder.begin_episode(self.transaction(directory))["ok"])
+                if frozen:
+                    self.assertTrue(recorder.freeze_episode()["ok"])
+                for staging in recorder._transaction["staging_dirs"]:
+                    path = Path(staging)
+                    (path / "frame.png").write_bytes(b"staged")
+                unrelated = recorder.args.root / "images" / "keep" / "sentinel.bin"
+                unrelated.parent.mkdir(parents=True)
+                unrelated.write_bytes(b"keep")
+                before = dataset_snapshot(recorder.args.root)
+                recorder._release_transaction_lock()  # Simulated abrupt process death.
+
+                result = recover_orphaned_transaction(recorder.args.root, recorder.args.run_root)
+                self.assertEqual(result["reason_code"], "RECOVERED_ABORT")
+                self.assertFalse((recorder.args.root / "meta" / "quarantine.json").exists())
+                self.assertTrue(all(not Path(path).exists() for path in recorder._transaction["staging_dirs"]))
+                self.assertEqual(unrelated.read_bytes(), b"keep")
+                self.assertEqual(dataset_snapshot(recorder.args.root), before)
+                run_dir = recorder.args.run_root / "run-001"
+                self.assertEqual(json.loads((run_dir / "result.json").read_text())["state"], recorder.ABORTED)
+                events = [json.loads(line) for line in (run_dir / "events.jsonl").read_text().splitlines()]
+                self.assertEqual(sum(event["reason_code"] == "RECOVERED_ABORT" for event in events), 1)
+                self.assertEqual(recover_orphaned_transaction(recorder.args.root, recorder.args.run_root)["reason_code"], "NO_ORPHAN")
+                if not frozen:
+                    cli = subprocess.run(
+                        [sys.executable, str(Path(__file__).resolve().parents[1] / "tools/data_factory_recovery.py"), "--dataset-root", str(recorder.args.root), "--run-root", str(recorder.args.run_root)],
+                        text=True,
+                        capture_output=True,
+                    )
+                    self.assertEqual(cli.returncode, 0, cli.stderr)
+                    self.assertEqual(json.loads(cli.stdout)["reason_code"], "NO_ORPHAN")
+
+    def test_recovery_requires_complete_journal_and_owned_staging(self):
+        for failure in ("journal", "owner"):
+            with self.subTest(failure=failure), tempfile.TemporaryDirectory() as directory:
+                recorder = self.make_recorder(directory)
+                recorder.begin_episode(self.transaction(directory))
+                staging = Path(recorder._transaction["staging_dirs"][0])
+                sentinel = staging / "user-file.bin"
+                sentinel.write_bytes(b"keep")
+                if failure == "journal":
+                    (recorder.args.run_root / "run-001" / "events.jsonl").write_text("not-json\n")
+                else:
+                    (staging / ".data_factory_staging_owner.json").unlink()
+                recorder._release_transaction_lock()
+
+                result = recover_orphaned_transaction(recorder.args.root, recorder.args.run_root)
+                self.assertEqual(result["reason_code"], "RECOVERY_EVENT" if failure == "journal" else "RECOVERY_STAGING_OWNER")
+                self.assertEqual(sentinel.read_bytes(), b"keep")
+                self.assertTrue((recorder.args.root / "meta" / "quarantine.json").exists())
+
+    def test_recovery_detects_same_size_committed_mutation(self):
+        with tempfile.TemporaryDirectory() as directory:
+            recorder = self.make_recorder(directory)
+            data = recorder.args.root / "data" / "chunk-000" / "file-000.parquet"
+            data.parent.mkdir(parents=True)
+            data.write_bytes(b"old-data")
+            recorder.begin_episode(self.transaction(directory))
+            before = data.stat()
+            data.write_bytes(b"new-data")
+            os.utime(data, ns=(before.st_atime_ns, before.st_mtime_ns + 1_000_000))
+            recorder._release_transaction_lock()
+
+            result = recover_orphaned_transaction(recorder.args.root, recorder.args.run_root)
+            self.assertEqual(result["reason_code"], "RECOVERY_SNAPSHOT_CHANGED")
+            self.assertEqual(data.read_bytes(), b"new-data")
+            self.assertTrue(Path(recorder._transaction["staging_dirs"][0]).exists())
+
+    def test_recovery_atomic_writes_ignore_predictable_temp_symlinks(self):
+        with tempfile.TemporaryDirectory() as directory:
+            recorder = self.make_recorder(directory)
+            recorder.begin_episode(self.transaction(directory))
+            Path(recorder._transaction["staging_dirs"][0], "frame.png").write_bytes(b"staged")
+            external = Path(directory) / "outside.txt"
+            external.write_text("keep")
+            guard = recorder.args.root / "meta" / "quarantine.json"
+            result_path = recorder.args.run_root / "run-001" / "result.json"
+            guard.with_name(guard.name + ".tmp").symlink_to(external)
+            result_path.with_name(result_path.name + ".tmp").symlink_to(external)
+            recorder._release_transaction_lock()
+
+            self.assertEqual(recover_orphaned_transaction(recorder.args.root, recorder.args.run_root)["reason_code"], "RECOVERED_ABORT")
+            self.assertEqual(external.read_text(), "keep")
+
+    def test_recovery_delete_is_anchored_against_parent_swap(self):
+        with tempfile.TemporaryDirectory() as directory:
+            recorder = self.make_recorder(directory)
+            recorder.begin_episode(self.transaction(directory))
+            Path(recorder._transaction["staging_dirs"][0], "frame.png").write_bytes(b"staged")
+            recorder._release_transaction_lock()
+            original_validate = recovery._validate_manifest
+            moved = Path(directory) / "owned-images"
+            outside = Path(directory) / "outside-images"
+            outside_episode = outside / "observation.images.up" / "episode-000007"
+            outside_episode.mkdir(parents=True)
+            outside_sentinel = outside_episode / "sentinel.bin"
+            outside_sentinel.write_bytes(b"keep")
+
+            def validate_then_swap(*args):
+                paths = original_validate(*args)
+                (recorder.args.root / "images").rename(moved)
+                (recorder.args.root / "images").symlink_to(outside, target_is_directory=True)
+                return paths
+
+            with mock.patch.object(recovery, "_validate_manifest", side_effect=validate_then_swap):
+                result = recover_orphaned_transaction(recorder.args.root, recorder.args.run_root)
+            self.assertEqual(result["reason_code"], "RECOVERY_ABORT_FAILED")
+            self.assertEqual(outside_sentinel.read_bytes(), b"keep")
+            self.assertTrue((moved / "observation.images.up" / "episode-000007" / "frame.png").exists())
+
+    def test_recovery_guard_is_anchored_against_late_meta_swap(self):
+        with tempfile.TemporaryDirectory() as directory:
+            recorder = self.make_recorder(directory)
+            recorder.begin_episode(self.transaction(directory))
+            Path(recorder._transaction["staging_dirs"][0], "frame.png").write_bytes(b"staged")
+            recorder._release_transaction_lock()
+            original_snapshot = recovery.dataset_snapshot
+            calls = 0
+            moved = Path(directory) / "owned-meta"
+            outside = Path(directory) / "outside-meta"
+            outside.mkdir()
+            outside_guard = outside / "quarantine.json"
+            outside_guard.write_text("keep")
+
+            def snapshot_then_swap(root):
+                nonlocal calls
+                snapshot = original_snapshot(root)
+                calls += 1
+                if calls == 2:
+                    (recorder.args.root / "meta").rename(moved)
+                    (recorder.args.root / "meta").symlink_to(outside, target_is_directory=True)
+                return snapshot
+
+            with mock.patch.object(recovery, "dataset_snapshot", side_effect=snapshot_then_swap):
+                result = recover_orphaned_transaction(recorder.args.root, recorder.args.run_root)
+            self.assertEqual(result["reason_code"], "RECOVERY_DIRECTORY_CHANGED")
+            self.assertEqual(outside_guard.read_text(), "keep")
+            self.assertEqual(json.loads((moved / "quarantine.json").read_text())["state"], "QUARANTINED_COMMIT")
+
+    def test_recovery_pins_run_directory_before_manifest_read(self):
+        with tempfile.TemporaryDirectory() as directory:
+            recorder = self.make_recorder(directory)
+            recorder.begin_episode(self.transaction(directory))
+            staging = Path(recorder._transaction["staging_dirs"][0])
+            (staging / "frame.png").write_bytes(b"staged")
+            recorder._release_transaction_lock()
+            run_dir = recorder.args.run_root / "run-001"
+            moved = recorder.args.run_root / "moved-run"
+            original_json_at = recovery._json_at
+
+            def read_then_swap(directory_fd, name, code):
+                value = original_json_at(directory_fd, name, code)
+                if name == "staging_manifest.json":
+                    run_dir.rename(moved)
+                    run_dir.mkdir()
+                return value
+
+            with mock.patch.object(recovery, "_json_at", side_effect=read_then_swap):
+                result = recover_orphaned_transaction(recorder.args.root, recorder.args.run_root)
+            self.assertEqual(result["reason_code"], "RECOVERY_DIRECTORY_CHANGED")
+            self.assertTrue(staging.exists())
+            self.assertTrue((recorder.args.root / "meta" / "quarantine.json").exists())
+
+    def test_recovery_pins_dataset_root_before_snapshot(self):
+        with tempfile.TemporaryDirectory() as directory:
+            recorder = self.make_recorder(directory)
+            recorder.begin_episode(self.transaction(directory))
+            Path(recorder._transaction["staging_dirs"][0], "frame.png").write_bytes(b"owned")
+            recorder._release_transaction_lock()
+            original_snapshot = recovery.dataset_snapshot
+            moved = Path(directory) / "owned-dataset"
+            replacement_sentinel = recorder.args.root / "images" / "observation.images.up" / "episode-000007" / "sentinel.bin"
+            swapped = False
+
+            def snapshot_then_swap(root):
+                nonlocal swapped
+                snapshot = original_snapshot(root)
+                if not swapped:
+                    recorder.args.root.rename(moved)
+                    replacement_sentinel.parent.mkdir(parents=True)
+                    replacement_sentinel.write_bytes(b"keep")
+                    swapped = True
+                return snapshot
+
+            with mock.patch.object(recovery, "dataset_snapshot", side_effect=snapshot_then_swap):
+                result = recover_orphaned_transaction(recorder.args.root, recorder.args.run_root)
+            self.assertEqual(result["reason_code"], "RECOVERY_DIRECTORY_CHANGED")
+            self.assertEqual(replacement_sentinel.read_bytes(), b"keep")
+            self.assertTrue((moved / "images" / "observation.images.up" / "episode-000007" / "frame.png").exists())
+            self.assertEqual(json.loads((moved / "meta" / "quarantine.json").read_text())["state"], "QUARANTINED_COMMIT")
+
+    def test_recovery_keeps_ambiguous_changed_and_unsafe_transactions_quarantined(self):
+        for failure in ("committing", "snapshot", "outside", "symlink", "meta_symlink"):
+            with self.subTest(failure=failure), tempfile.TemporaryDirectory() as directory:
+                recorder = self.make_recorder(directory)
+                recorder.begin_episode(self.transaction(directory))
+                staging = Path(recorder._transaction["staging_dirs"][0])
+                (staging / "frame.png").write_bytes(b"staged")
+                if failure == "committing":
+                    recorder._write_commit_guard(recorder.COMMITTING, "COMMIT_STARTED")
+                elif failure == "snapshot":
+                    data = recorder.args.root / "data" / "chunk-000" / "file-000.parquet"
+                    data.parent.mkdir(parents=True)
+                    data.write_bytes(b"committed delta")
+                elif failure == "outside":
+                    manifest_path = recorder.args.run_root / "run-001" / "staging_manifest.json"
+                    manifest = json.loads(manifest_path.read_text())
+                    outside = Path(directory) / "outside"
+                    outside.mkdir()
+                    (outside / "sentinel").write_text("keep")
+                    manifest["camera_staging_dirs"]["up"] = str(outside)
+                    recorder._write_json_atomic(manifest_path, manifest)
+                    marker_path = recorder.args.root / "meta" / "quarantine.json"
+                    marker = json.loads(marker_path.read_text())
+                    marker["staging_manifest_digest"] = canonical_json_digest(manifest)
+                    recorder._write_json_atomic(marker_path, marker)
+                elif failure == "symlink":
+                    outside = Path(directory) / "outside"
+                    outside.mkdir()
+                    (outside / "sentinel").write_text("keep")
+                    shutil.rmtree(staging)
+                    staging.symlink_to(outside, target_is_directory=True)
+                else:
+                    outside = Path(directory) / "outside-meta"
+                    meta = recorder.args.root / "meta"
+                    meta.rename(outside)
+                    (outside / "sentinel").write_text("keep")
+                    meta.symlink_to(outside, target_is_directory=True)
+                recorder._release_transaction_lock()
+
+                result = recover_orphaned_transaction(recorder.args.root, recorder.args.run_root)
+                expected = {
+                    "committing": "RECOVERY_COMMIT_UNCERTAIN",
+                    "snapshot": "RECOVERY_SNAPSHOT_CHANGED",
+                    "outside": "RECOVERY_MANIFEST",
+                    "symlink": "RECOVERY_SYMLINK",
+                    "meta_symlink": "RECOVERY_SYMLINK",
+                }[failure]
+                self.assertEqual(result["reason_code"], expected)
+                self.assertTrue((recorder.args.root / "meta" / "quarantine.json").exists())
+                self.assertTrue(staging.exists())
+                if failure in ("outside", "symlink", "meta_symlink"):
+                    self.assertEqual((outside / "sentinel").read_text(), "keep")
+
+    def test_dataset_lock_is_released_by_sigkill(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "dataset"
+            script = """
+from data_factory_recovery import DatasetTransactionLock
+import sys, time
+lock = DatasetTransactionLock(sys.argv[1])
+lock.acquire()
+print('LOCKED', flush=True)
+time.sleep(60)
+"""
+            process = subprocess.Popen(
+                [sys.executable, "-c", script, str(root)],
+                cwd=Path(__file__).resolve().parents[1] / "tools",
+                text=True,
+                stdout=subprocess.PIPE,
+            )
+            try:
+                self.assertEqual(process.stdout.readline().strip(), "LOCKED")
+                with self.assertRaises(RecoveryError) as caught:
+                    DatasetTransactionLock(root).acquire()
+                self.assertEqual(caught.exception.code, "DATASET_TRANSACTION_BUSY")
+                os.kill(process.pid, signal.SIGKILL)
+                process.wait(timeout=2)
+                lock = DatasetTransactionLock(root)
+                lock.acquire()
+                lock.release()
+            finally:
+                if process.poll() is None:
+                    process.kill()
+                    process.wait(timeout=2)
+                if process.stdout is not None:
+                    process.stdout.close()
 
     def test_final_commit_event_fault_quarantines(self):
         with tempfile.TemporaryDirectory() as directory:

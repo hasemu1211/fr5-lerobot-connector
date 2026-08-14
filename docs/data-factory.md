@@ -135,6 +135,16 @@ validate
 - commit 중 부분 장애는 자동 삭제하지 않고 `QUARANTINED_COMMIT`으로 격리한다.
 - 실패 진단은 digest, reason code, timestamp, high-water mark와 마지막 수치 snapshot만 기본 보존한다. 전체 영상·bag·trace는 명시적 opt-in 없이는 남기지 않는다.
 
+factory recorder는 transaction 동안 dataset 전용 커널 lock을 유지한다. 정상 종료는 lock을 명시적으로 해제하고 `SIGKILL`은 운영체제가 자동 해제한다. 중단 뒤에는 다음 명령으로 orphan 여부를 검사한다.
+
+```bash
+python3 tools/data_factory_recovery.py \
+  --dataset-root <LeRobot-dataset-root> \
+  --run-root <outputs/data_factory/runs>
+```
+
+복구 도구는 `RECORDING` 또는 `FROZEN` guard, 완전한 event journal, manifest digest, staging ownership marker와 시작 snapshot(파일 크기·수정 시각)이 모두 일치할 때만 manifest에 열거된 해당 episode의 image staging 디렉터리를 삭제하고 `RECOVERED_ABORT`로 끝낸다. `COMMITTING`, committed snapshot 변화, manifest 밖 경로, symlink와 불완전한 진단은 자동 삭제하지 않고 quarantine을 유지한다. 살아 있는 recorder가 lock을 보유하면 복구는 아무 파일도 변경하지 않는다.
+
 dataset 단위 `meta/training_approved.json`은 새 수집 시작 시 무효화하고, validator와 preview를 다시 통과한 뒤 사람만 발급한다.
 
 ## 안전과 현재 하드웨어 경계

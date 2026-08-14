@@ -21,6 +21,14 @@ import cv2
 import numpy as np
 import rclpy
 from control_msgs.msg import JointTrajectoryControllerState
+from data_factory_recovery import (
+    DatasetTransactionLock,
+    RecoveryError,
+    canonical_json_digest,
+    claim_staging_directories,
+    dataset_snapshot,
+    write_json_atomic,
+)
 from fr5_dataset_schema import ARM_NAMES, CAMERA_PROFILES, GRIPPER_NAME, QUALITY_LIMITS, dataset_features
 from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy, qos_profile_sensor_data
@@ -60,6 +68,7 @@ class FR5LeRobotRecorder(Node):
         self.recording = False
         self.episode_state = self.IDLE
         self._transaction: dict | None = None
+        self._transaction_lock: DatasetTransactionLock | None = None
         self._buffer_cleared = False
         self.next_target_stamp: float | None = None
         self.frames = 0
@@ -228,18 +237,7 @@ class FR5LeRobotRecorder(Node):
 
     @staticmethod
     def _write_json_atomic(path: Path, payload: dict) -> None:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        temporary = path.with_name(path.name + ".tmp")
-        with temporary.open("w", encoding="utf-8") as file:
-            json.dump(payload, file, separators=(",", ":"), allow_nan=False)
-            file.flush()
-            os.fsync(file.fileno())
-        temporary.replace(path)
-        directory_fd = os.open(path.parent, os.O_RDONLY)
-        try:
-            os.fsync(directory_fd)
-        finally:
-            os.close(directory_fd)
+        write_json_atomic(path, payload)
 
     @staticmethod
     def _unlink_durable(path: Path) -> None:
@@ -253,25 +251,13 @@ class FR5LeRobotRecorder(Node):
             os.close(directory_fd)
 
     def _dataset_snapshot(self) -> dict:
-        root = self.args.root.resolve()
+        return dataset_snapshot(self.args.root)
 
-        def files(directory: str, pattern: str) -> dict[str, int]:
-            base = root / directory
-            if not base.exists():
-                return {}
-            snapshot = {}
-            for path in sorted(base.rglob(pattern)):
-                if path.is_file():
-                    snapshot[str(path.relative_to(root))] = path.stat().st_size
-            return snapshot
-
-        return {
-            "total_episodes": self.dataset.meta.total_episodes,
-            "total_frames": getattr(self.dataset.meta, "total_frames", 0),
-            "data_parquet": files("data", "*.parquet"),
-            "committed_videos": files("videos", "*"),
-            "episode_metadata": files("meta/episodes", "*.parquet"),
-        }
+    def _release_transaction_lock(self) -> None:
+        lock = getattr(self, "_transaction_lock", None)
+        if lock is not None:
+            lock.release()
+            self._transaction_lock = None
 
     def _prepare_transaction(self, context: dict | None) -> dict | None:
         if context is None:
@@ -308,12 +294,14 @@ class FR5LeRobotRecorder(Node):
         guard_path = root / "meta" / "quarantine.json"
         if guard_path.exists() or guard_path.is_symlink():
             raise ValueError("dataset has unresolved data factory commit guard")
-        directory.mkdir(parents=True)
         episode_index = self.dataset.meta.total_episodes
         staging_dirs = {
             camera: str(root / "images" / f"observation.images.{camera}" / f"episode-{episode_index:06d}")
             for camera in self.camera_names
         }
+        if (root / "images").is_symlink() or any(Path(path).exists() or Path(path).is_symlink() for path in staging_dirs.values()):
+            raise ValueError("dataset has pre-existing or unsafe episode staging")
+        directory.mkdir(parents=True)
         manifest_path = directory / "staging_manifest.json"
         manifest = {
             "schema_version": "data_factory.staging_manifest.v1",
@@ -326,6 +314,7 @@ class FR5LeRobotRecorder(Node):
             "begin_snapshot": self._dataset_snapshot(),
         }
         self._write_json_atomic(manifest_path, manifest)
+        manifest_digest = canonical_json_digest(manifest)
         self._unlink_durable(root / "meta" / "training_approved.json")
         result_path = directory / "result.json"
         return {
@@ -336,6 +325,7 @@ class FR5LeRobotRecorder(Node):
             "result_path": result_path,
             "guard_path": guard_path,
             "begin_snapshot": manifest["begin_snapshot"],
+            "staging_manifest_digest": manifest_digest,
             "staging_dirs": tuple(staging_dirs.values()),
             "artifacts": {
                 "staging_manifest": str(manifest_path),
@@ -364,7 +354,7 @@ class FR5LeRobotRecorder(Node):
         if not transaction and state != self.QUARANTINED_COMMIT:
             return
         self._write_json_atomic(transaction.get("guard_path", self.args.root / "meta" / "quarantine.json"), {
-            "schema_version": "data_factory.commit_guard.v1",
+            "schema_version": "data_factory.commit_guard.v2",
             "run_id": transaction.get("run_id"),
             "transaction_id": transaction.get("transaction_id"),
             "episode_index": transaction.get("episode_index", self.dataset.meta.total_episodes),
@@ -372,6 +362,7 @@ class FR5LeRobotRecorder(Node):
             "reason_code": reason_code,
             "detail": detail,
             "staging_manifest": transaction.get("artifacts", {}).get("staging_manifest"),
+            "staging_manifest_digest": transaction.get("staging_manifest_digest"),
         })
 
     def _abort_cleanup_error(self) -> str:
@@ -425,6 +416,7 @@ class FR5LeRobotRecorder(Node):
                 with self.lock:
                     self.episode_state = self.QUARANTINED_COMMIT
                 return self._persist_quarantine("ABORT_GUARD_RELEASE_FAILED", str(exc))
+            self._release_transaction_lock()
         return self._result(ok, reason_code, detail=detail)
 
     def begin_episode(self, transaction: dict | None = None) -> dict:
@@ -437,20 +429,46 @@ class FR5LeRobotRecorder(Node):
                 getattr(self.args, "streaming_encoding", False) or getattr(self.args, "no_videos", False)
             ):
                 return self._result(False, "UNSUPPORTED_STAGING_MODE")
-            self._transaction = self._prepare_transaction(transaction)
+            if transaction is not None:
+                try:
+                    self._transaction_lock = DatasetTransactionLock(self.args.root)
+                    self._transaction_lock.acquire()
+                except RecoveryError as exc:
+                    self._transaction_lock = None
+                    return self._result(False, exc.code, detail=str(exc))
+            try:
+                self._transaction = self._prepare_transaction(transaction)
+            except Exception:
+                self._release_transaction_lock()
+                raise
             self._reset_episode()
             self.episode_state = self.RECORDING
             try:
                 self._write_commit_guard(self.RECORDING, "BEGIN")
             except Exception as exc:
                 self.episode_state = self.IDLE
+                self._release_transaction_lock()
                 return self._result(False, "BEGIN_GUARD_FAILED", detail=str(exc))
+            if self._transaction:
+                try:
+                    claim_staging_directories(
+                        self.args.root,
+                        list(self.camera_names),
+                        self._transaction["run_id"],
+                        self._transaction["transaction_id"],
+                        self._transaction["episode_index"],
+                        self._transaction["staging_manifest_digest"],
+                    )
+                except Exception as exc:
+                    self.recording = False
+                    self.episode_state = self.QUARANTINED_COMMIT
+                    return self._persist_quarantine("BEGIN_STAGING_CLAIM_FAILED", str(exc))
             try:
                 self._append_event("BEGIN")
             except Exception as exc:
                 self.recording = False
-                self.episode_state = self.IDLE
-                return self._result(False, "BEGIN_JOURNAL_FAILED", detail=str(exc))
+                self.episode_state = self.QUARANTINED_COMMIT
+                return self._persist_quarantine("BEGIN_JOURNAL_FAILED", str(exc))
             self.recording = True
             self.started = time.perf_counter()
             self.next_target_stamp = self.get_clock().now().nanoseconds * 1e-9
@@ -613,9 +631,11 @@ class FR5LeRobotRecorder(Node):
                 return self._result(False, "STATE_FREEZE_INTERRUPTED")
             self.episode_state = self.FROZEN
             try:
+                self._write_commit_guard(self.FROZEN, "FROZEN")
                 self._append_event("FROZEN")
             except Exception as exc:
-                return self._result(False, "FREEZE_JOURNAL_FAILED", detail=str(exc))
+                self.episode_state = self.QUARANTINED_COMMIT
+                return self._persist_quarantine("FREEZE_DURABILITY_FAILED", str(exc))
             return self._result(True)
 
     def _clear_episode_buffer_once(self) -> None:
@@ -744,6 +764,7 @@ class FR5LeRobotRecorder(Node):
             self._write_run_result(self.COMMITTED, "COMMITTED")
             if self._transaction:
                 self._unlink_durable(self._transaction["guard_path"])
+                self._release_transaction_lock()
         except Exception as exc:
             with self.lock:
                 self.episode_state = self.QUARANTINED_COMMIT
@@ -1030,7 +1051,10 @@ class FR5LeRobotRecorder(Node):
         self.stop_threads.set()
         self.sampler_thread.join(timeout=2)
         self.writer_thread.join(timeout=2)
-        self.dataset.finalize()
+        try:
+            self.dataset.finalize()
+        finally:
+            self._release_transaction_lock()
 
 
 def parse_args() -> argparse.Namespace:
