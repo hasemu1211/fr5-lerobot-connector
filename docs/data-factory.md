@@ -71,6 +71,19 @@ brightness, clipping, sharpness와 색 변화량은 정성 검토를 돕는 warn
 
 사람과 AI는 profile digest를 직접 복사하지 않는다. validator가 `cell_calibration_id`와 각 profile ID를 검토된 config에 해석하고 canonical digest를 `ResolvedJob`에 기록한다. config가 바뀌면 resolved digest도 바뀌므로 이전 승인은 재사용할 수 없다.
 
+사람은 JSON을 직접 작성하지 않고 같은 도구의 대화형 builder를 사용할 수 있다.
+
+```bash
+python3 tools/fr5_data_factory.py build-job --interactive \
+  --selected-sheet <선택한-yaw-manifest.json> \
+  --yaw0-sheet <같은-family의-yaw0-manifest.json> \
+  --config-root <검토된-config-root>
+```
+
+대화형 point 입력은 화면의 1-based 번호, `GRID_1` 같은 정확한 `point_id`, `-30,30` 같은 `(x_mm,y_mm)`를 모두 받는다. profile도 후보가 여러 개면 번호 또는 정확한 ID를 받는다. AI agent는 대화형 prompt 대신 같은 command에 `--point-id` 또는 `--x-mm/--y-mm`와 모든 profile ID를 명시한다. 직접 좌표는 격자점 사이의 연속값을 허용하되 현재 A4에 표시된 local 격자 범위와 인쇄 가능 영역 안에 있어야 한다.
+
+builder의 stdout은 기존 `validate-job --job -`에 바로 전달할 수 있는 canonical JobSpec JSON 한 줄이다. prompt는 stderr에만 출력한다. builder 실행은 motion 승인이나 training 승격이 아니다.
+
 ## A4 pose와 로봇 좌표
 
 A4 한 장은 사람이 다음 값을 읽고 로봇이 같은 값으로 변환하게 한다.

@@ -266,4 +266,98 @@ class DataFactoryTest(unittest.TestCase):
         baseline = factory.resolve_pose(self._validated(calibration=self.calibration))
         self.assertEqual(pose["position_base_m"], baseline["position_base_m"])
 
+    def test_build_job_accepts_id_coordinates_and_interactive_number(self):
+        self.assertEqual(factory._select_id_or_number("1", ["0", "1"]), "1")
+        self.assertEqual(factory._select_id_or_number("2", ["A", "B"]), "B")
+        selected = self._write("selected.json", self.selected)
+        yaw0 = self._write("yaw0.json", self.yaw0)
+        base = [
+            sys.executable,
+            str(ROOT / "tools/fr5_data_factory.py"),
+            "build-job",
+            "--selected-sheet", str(selected),
+            "--yaw0-sheet", str(yaw0),
+            "--config-root", str(self.root),
+            "--job-id", "job-1",
+            "--robot-system-id", "fr5-lab-a",
+            "--collection-profile-id", "fr5-dual-rgb-30hz-v1",
+            "--cell-calibration-id", "cal-a",
+            "--object-profile-id", "OBJECT_A",
+            "--grasp-profile-id", "top_center",
+            "--operator-or-agent-id", "operator-1",
+            "--approval-expiry", "2099-01-01T00:00:00Z",
+        ]
+        by_id = subprocess.run(base + ["--point-id", "GRID_1"], text=True, capture_output=True)
+        continuous_job = {**self.job, "x_mm": -30, "y_mm": 30}
+        by_xy = subprocess.run(base + ["--x-mm", "-30", "--y-mm", "30"], text=True, capture_output=True)
+        interactive = subprocess.run(base + ["--interactive"], input="2\n", text=True, capture_output=True)
+        interactive_id = subprocess.run(base + ["--interactive"], input="GRID_1\n", text=True, capture_output=True)
+        interactive_xy = subprocess.run(base + ["--interactive"], input="-30,30\n", text=True, capture_output=True)
+        for result in (by_id, interactive, interactive_id):
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(json.loads(result.stdout), self.job)
+        for result in (by_xy, interactive_xy):
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(json.loads(result.stdout), continuous_job)
+        self.assertIn("GRID_1", interactive.stderr)
+        self.assertEqual(interactive.stdout.count("\n"), 1)
+
+        self._write("collection_profiles/z-profile.json", {"schema_version":"data_factory.collection_profile.v1","collection_profile_id":"z-profile","qualification_status":"QUALIFIED","quality_contract_digest":digest("z-quality")})
+        profile_base = base.copy()
+        profile_index = profile_base.index("--collection-profile-id")
+        del profile_base[profile_index:profile_index + 2]
+        by_profile_number = subprocess.run(profile_base + ["--interactive", "--point-id", "GRID_1"], input="1\n", text=True, capture_output=True)
+        by_profile_id = subprocess.run(profile_base + ["--interactive", "--point-id", "GRID_1"], input="fr5-dual-rgb-30hz-v1\n", text=True, capture_output=True)
+        for result in (by_profile_number, by_profile_id):
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(json.loads(result.stdout), self.job)
+
+        validate = [
+            sys.executable,
+            str(ROOT / "tools/fr5_data_factory.py"),
+            "validate-job",
+            "--job", "-",
+            "--selected-sheet", str(selected),
+            "--yaw0-sheet", str(yaw0),
+            "--config-root", str(self.root),
+        ]
+        piped = subprocess.run(validate, input=by_xy.stdout, text=True, capture_output=True)
+        self.assertEqual(piped.returncode, 0, piped.stderr)
+        self.assertEqual(json.loads(piped.stdout)["normalized_job"], continuous_job)
+
+    def test_build_job_rejects_missing_conflicting_and_unknown_points(self):
+        selected = self._write("selected.json", self.selected)
+        yaw0 = self._write("yaw0.json", self.yaw0)
+        base = [
+            sys.executable,
+            str(ROOT / "tools/fr5_data_factory.py"),
+            "build-job",
+            "--selected-sheet", str(selected),
+            "--yaw0-sheet", str(yaw0),
+            "--config-root", str(self.root),
+            "--job-id", "job-1",
+            "--robot-system-id", "fr5-lab-a",
+            "--collection-profile-id", "fr5-dual-rgb-30hz-v1",
+            "--cell-calibration-id", "cal-a",
+            "--object-profile-id", "OBJECT_A",
+            "--grasp-profile-id", "top_center",
+            "--operator-or-agent-id", "operator-1",
+            "--approval-expiry", "2099-01-01T00:00:00Z",
+        ]
+        cases = (
+            ([], "CLI_INPUT_REQUIRED"),
+            (["--x-mm", "-35"], "JOB_BUILDER_INPUT"),
+            (["--point-id", "GRID_1", "--x-mm", "-35", "--y-mm", "35"], "JOB_BUILDER_INPUT"),
+            (["--point-id", "GRID_999"], "JOB_POINT"),
+            (["--x-mm", "36", "--y-mm", "0"], "JOB_COORDINATE_BOUNDS"),
+            (["--x-mm", "nope", "--y-mm", "0"], "JOB_BUILDER_INPUT"),
+        )
+        for extra, code in cases:
+            with self.subTest(code=code):
+                result = subprocess.run(base + extra, text=True, capture_output=True)
+                self.assertEqual(result.returncode, 2)
+                self.assertEqual(result.stdout, "")
+                self.assertEqual(json.loads(result.stderr)["error"]["code"], code)
+        self._error("JOB_COORDINATE_BOUNDS", job={**self.job, "x_mm": 36, "y_mm": 0})
+
 if __name__ == "__main__": unittest.main()

@@ -40,6 +40,11 @@ class ContractError(ValueError):
         super().__init__(message or code)
 
 
+class ContractArgumentParser(argparse.ArgumentParser):
+    def error(self, message):
+        raise ContractError("CLI_USAGE", message)
+
+
 def _pairs(pairs):
     result = {}
     for key, value in pairs:
@@ -83,6 +88,15 @@ def _number(value, code):
     if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
         raise ContractError(code, "finite number required")
     return float(value)
+
+
+def _input_number(value, code):
+    if isinstance(value, str):
+        try:
+            value = float(value)
+        except ValueError as exc:
+            raise ContractError(code, value) from exc
+    return _number(value, code)
 
 
 def _id(value, code="ID_INVALID"):
@@ -306,11 +320,21 @@ def _sheet_contract(selected, yaw0, job):
     if _number(yaw0.get("yaw_deg"), "SHEET_YAW") != 0: raise ContractError("SHEET_YAW0")
     yaw = _number(selected.get("yaw_deg"), "SHEET_YAW")
     if yaw != job["yaw_deg"]: raise ContractError("SHEET_YAW")
-    matches = 0
-    for point in selected["grid_points"]:
-        if point["job_pose"] == {"place_id": job["place_id"], "yaw_deg": job["yaw_deg"], "x_mm": job["x_mm"], "y_mm": job["y_mm"]}:
-            matches += 1
-    if matches != 1: raise ContractError("SHEET_GRID_MATCH")
+    _continuous_coordinate(selected, job["x_mm"], job["y_mm"])
+
+
+def _continuous_coordinate(sheet, x_mm, y_mm):
+    x, y = _input_number(x_mm, "JOB_BUILDER_INPUT"), _input_number(y_mm, "JOB_BUILDER_INPUT")
+    u_values = [_number(point["local_uv_mm"][0], "SHEET_GRID") for point in sheet["grid_points"]]
+    v_values = [_number(point["local_uv_mm"][1], "SHEET_GRID") for point in sheet["grid_points"]]
+    if not (min(u_values) <= x <= max(u_values) and min(v_values) <= y <= max(v_values)):
+        raise ContractError("JOB_COORDINATE_BOUNDS", str((x_mm, y_mm)))
+    angle = math.radians(_number(sheet["yaw_deg"], "SHEET_YAW"))
+    sheet_x = PLACE0_XY_MM[0] + math.cos(angle) * x - math.sin(angle) * y
+    sheet_y = PLACE0_XY_MM[1] + math.sin(angle) * x + math.cos(angle) * y
+    if not (PRINT_X_MARGIN_MM <= sheet_x <= PAGE_W_MM - PRINT_X_MARGIN_MM and PRINT_Y_MARGIN_MM <= sheet_y <= PAGE_H_MM - PRINT_Y_MARGIN_MM):
+        raise ContractError("JOB_COORDINATE_BOUNDS", str((x_mm, y_mm)))
+    return x, y
 
 
 def _calibration(calibration, job, yaw0, robot, grasp, now):
@@ -408,8 +432,112 @@ def resolve_pose(validated):
     return {"frame_id": robot["base_frame"], "position_base_m": position, "rotation_base_columns": [x_col, y_col, cal["z"]], "resolved_job_digest": validated["resolved_job_digest"], "input_digests": validated["input_digests"]}
 
 
+def build_job_spec(selected_sheet, *, point_id=None, x_mm=None, y_mm=None, job_id, robot_system_id, collection_profile_id, cell_calibration_id, object_profile_id, grasp_profile_id, operator_or_agent_id, approval_expiry, now=None):
+    """Build the fixed pickup JobSpec from an A4 point or bounded coordinate."""
+    sheet = _document(selected_sheet, "INPUT_SELECTED_SHEET")
+    _validate_sheet(sheet)
+    has_xy = x_mm is not None or y_mm is not None
+    if (x_mm is None) != (y_mm is None) or (point_id is not None and has_xy):
+        raise ContractError("JOB_BUILDER_INPUT", "use point_id or an x_mm/y_mm pair")
+    if point_id is None and not has_xy:
+        raise ContractError("CLI_INPUT_REQUIRED", "point")
+    if point_id is not None:
+        matches = [point for point in sheet["grid_points"] if point["point_id"] == point_id]
+        if len(matches) != 1:
+            raise ContractError("JOB_POINT", str(point_id))
+        pose = matches[0]["job_pose"]
+    else:
+        x_value, y_value = _continuous_coordinate(sheet, x_mm, y_mm)
+        pose = {"place_id": sheet["place_id"], "yaw_deg": sheet["yaw_deg"], "x_mm": x_value, "y_mm": y_value}
+    return normalize_job_spec({
+        "schema_version": "data_factory.job.v1",
+        "job_id": job_id,
+        "task": "pickup_e2e",
+        "robot_system_id": robot_system_id,
+        "collection_profile_id": collection_profile_id,
+        "place_id": pose["place_id"],
+        "cell_calibration_id": cell_calibration_id,
+        "sheet_manifest_digest": canonical_digest(sheet),
+        "yaw_deg": pose["yaw_deg"],
+        "x_mm": pose["x_mm"],
+        "y_mm": pose["y_mm"],
+        "object_profile_id": object_profile_id,
+        "grasp_profile_id": grasp_profile_id,
+        "instruction": "pick up the object",
+        "episode_intent": "nominal pickup",
+        "operator_or_agent_id": operator_or_agent_id,
+        "approval_expiry": approval_expiry,
+        "dry_run_required": True,
+    }, now=now)
+
+
+def _prompt(label):
+    print(f"{label}: ", end="", file=sys.stderr, flush=True)
+    value = sys.stdin.readline()
+    if not value or not value.strip():
+        raise ContractError("CLI_INPUT_REQUIRED", label)
+    return value.strip()
+
+
+def _required(value, label, interactive):
+    if value is not None:
+        return value
+    if not interactive:
+        raise ContractError("CLI_INPUT_REQUIRED", label)
+    return _prompt(label)
+
+
+def _select_id_or_number(choice, options):
+    if choice in options:
+        return choice
+    if choice.isdecimal() and 1 <= int(choice) <= len(options):
+        return options[int(choice) - 1]
+    return None
+
+
+def _profile_choice(value, *, label, root, folder, interactive):
+    if value is not None:
+        return value
+    if not interactive:
+        raise ContractError("CLI_INPUT_REQUIRED", label)
+    directory = Path(root) / folder
+    options = sorted(path.stem for path in directory.glob("*.json") if SAFE_ID.fullmatch(path.stem)) if directory.is_dir() else []
+    if not options:
+        raise ContractError("PROFILE_NOT_FOUND", folder)
+    if len(options) == 1:
+        return options[0]
+    print(f"{label} (number or exact ID)", file=sys.stderr)
+    for index, option in enumerate(options, 1):
+        print(f"  {index}) {option}", file=sys.stderr)
+    choice = _prompt(label)
+    selected = _select_id_or_number(choice, options)
+    if selected is not None:
+        return selected
+    raise ContractError("CLI_SELECTION", choice)
+
+
+def _interactive_point(sheet):
+    print(f"sheet={sheet['sheet_id']} place={sheet['place_id']} yaw={sheet['yaw_deg']}", file=sys.stderr)
+    for index, point in enumerate(sheet["grid_points"], 1):
+        pose = point["job_pose"]
+        print(f"  {index}) {point['point_id']} ({pose['x_mm']},{pose['y_mm']})", file=sys.stderr)
+    choice = _prompt("point (number, exact ID, or x,y)")
+    point_id = _select_id_or_number(choice, [point["point_id"] for point in sheet["grid_points"]])
+    if point_id is not None:
+        return point_id, None, None
+    if "," not in choice:
+        return choice, None, None
+    parts = [part.strip() for part in choice.split(",")]
+    if len(parts) != 2:
+        raise ContractError("JOB_POINT", choice)
+    try:
+        return None, float(parts[0]), float(parts[1])
+    except ValueError as exc:
+        raise ContractError("JOB_POINT", choice) from exc
+
+
 def _cli():
-    parser = argparse.ArgumentParser(description=__doc__)
+    parser = ContractArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest="command", required=True)
     for name in ("validate-job", "resolve-pose"):
         command = sub.add_parser(name)
@@ -417,8 +545,45 @@ def _cli():
         command.add_argument("--selected-sheet", required=True)
         command.add_argument("--yaw0-sheet", required=True)
         command.add_argument("--config-root", required=True)
-    args = parser.parse_args()
+    builder = sub.add_parser("build-job")
+    builder.add_argument("--selected-sheet", required=True)
+    builder.add_argument("--yaw0-sheet", required=True)
+    builder.add_argument("--config-root", required=True)
+    builder.add_argument("--interactive", action="store_true")
+    builder.add_argument("--point-id")
+    builder.add_argument("--x-mm")
+    builder.add_argument("--y-mm")
+    for name in ("job-id", "robot-system-id", "collection-profile-id", "cell-calibration-id", "object-profile-id", "grasp-profile-id", "operator-or-agent-id", "approval-expiry"):
+        builder.add_argument(f"--{name}")
     try:
+        args = parser.parse_args()
+        if args.command == "build-job":
+            selected = _document(args.selected_sheet, "INPUT_SELECTED_SHEET")
+            _validate_sheet(selected)
+            point_id, x_mm, y_mm = args.point_id, args.x_mm, args.y_mm
+            if point_id is None and x_mm is None and y_mm is None:
+                if not args.interactive:
+                    raise ContractError("CLI_INPUT_REQUIRED", "point")
+                point_id, x_mm, y_mm = _interactive_point(selected)
+            root = Path(args.config_root)
+            job = build_job_spec(
+                selected,
+                point_id=point_id,
+                x_mm=x_mm,
+                y_mm=y_mm,
+                job_id=_required(args.job_id, "job_id", args.interactive),
+                robot_system_id=_profile_choice(args.robot_system_id, label="robot_system_id", root=root, folder="robot_systems", interactive=args.interactive),
+                collection_profile_id=_profile_choice(args.collection_profile_id, label="collection_profile_id", root=root, folder="collection_profiles", interactive=args.interactive),
+                cell_calibration_id=_profile_choice(args.cell_calibration_id, label="cell_calibration_id", root=root, folder="cells", interactive=args.interactive),
+                object_profile_id=_profile_choice(args.object_profile_id, label="object_profile_id", root=root, folder="objects", interactive=args.interactive),
+                grasp_profile_id=_profile_choice(args.grasp_profile_id, label="grasp_profile_id", root=root, folder="grasps", interactive=args.interactive),
+                operator_or_agent_id=_required(args.operator_or_agent_id, "operator_or_agent_id", args.interactive),
+                approval_expiry=_required(args.approval_expiry, "approval_expiry", args.interactive),
+            )
+            yaw0 = _document(args.yaw0_sheet, "INPUT_YAW0_SHEET")
+            validated = validate_job_spec(job, data={"selected_sheet": selected, "yaw0_sheet": yaw0}, config_root=args.config_root)
+            print(json.dumps(validated["normalized_job"], sort_keys=True, separators=(",", ":"), allow_nan=False))
+            return 0
         text = sys.stdin.read() if args.job == "-" else Path(args.job).read_text()
         job = load_json_strict(text)
         validated = validate_job_spec(
