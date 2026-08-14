@@ -77,6 +77,7 @@ A4 한 장은 사람이 다음 값을 읽고 로봇이 같은 값으로 변환�
 ```
 
 - A4 manifest의 `grid_points[].local_uv_mm`가 각각 JobSpec의 `(x_mm, y_mm)`다.
+- yaw 0 보정은 선택 sheet의 `a4_family_digest`가 yaw 0 sheet와 같을 때만 재사용한다.
 - 한 장은 하나의 `place_id`와 yaw를 나타낸다.
 - 격자는 종이의 `CENTER`를 중심으로 회전한다.
 - yaw 0의 `CENTER`와 `X_REF`를 TCP로 반복 측정한다.

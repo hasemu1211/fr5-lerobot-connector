@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import math
 import re
@@ -46,6 +47,17 @@ def safe_id(value: str) -> str:
     if not cleaned:
         raise ValueError("sheet prefix must contain at least one safe character")
     return cleaned
+
+
+def canonical_digest(value: object) -> str:
+    payload = json.dumps(
+        value,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    ).encode()
+    return "sha256:" + hashlib.sha256(payload).hexdigest()
 
 
 def build_places(cols: int, rows: int, spacing_mm: float, yaw_deg: float) -> list[dict]:
@@ -181,8 +193,24 @@ def make_manifest(place_id: str, sheet_id: str, yaw_deg: float, places: list[dic
         }
         for place in places
     ]
+    family = {
+        "schema_version": "a4_place_yaw.v1",
+        "place_id": place_id,
+        "page_mm": {"width": PAGE_W_MM, "height": PAGE_H_MM},
+        "place_spacing_mm": spacing_mm,
+        "registration_sheet_xy_mm": {
+            "origin": list(PLACE0_XY_MM),
+            "x_ref": list(X_REF_XY_MM),
+            "verify": list(Y_CHECK_XY_MM),
+        },
+        "grid_local_uv_mm": [
+            {"point_id": place["point_id"], "local_uv_mm": place["local_uv_mm"]}
+            for place in places
+        ],
+    }
     return {
         "schema_version": "a4_place_yaw.v1",
+        "a4_family_digest": canonical_digest(family),
         "place_id": place_id,
         "sheet_id": sheet_id,
         "page_mm": {"width": PAGE_W_MM, "height": PAGE_H_MM},
@@ -224,6 +252,8 @@ def self_check() -> None:
         "x_mm": places_30[1]["local_uv_mm"][0],
         "y_mm": places_30[1]["local_uv_mm"][1],
     }
+    manifest_0 = make_manifest("PLACE_A", "PLACE_A_YAW_P000_00", 0, places_0, 20)
+    assert manifest["a4_family_digest"] == manifest_0["a4_family_digest"]
 
 
 def main() -> None:

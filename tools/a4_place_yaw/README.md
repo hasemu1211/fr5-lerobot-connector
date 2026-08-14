@@ -17,3 +17,4 @@ python3 generate_place_yaw_a4.py \
 기본 구성은 A4 가로, 5×3 grid, 35 mm 간격이다. 인쇄할 때 실제 크기/100%를 사용하고 페이지 맞춤을 끈다. 출력 후 100 mm scale bar가 실제 10 cm인지 확인한다.
 
 각 JSON `grid_points[].job_pose`가 데이터팩토리에 넣는 `(place_id, yaw_deg, x_mm, y_mm)`이며, `x_mm/y_mm`는 종이에 표시된 `(u,v)`와 같다.
+같은 `place_id`·페이지·격자·기준점 계열의 yaw 시트는 동일한 `a4_family_digest`를 가진다.
