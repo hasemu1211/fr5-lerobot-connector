@@ -6,7 +6,9 @@ from __future__ import annotations
 import argparse
 from collections import deque
 import json
+import os
 import queue
+import re
 import select
 import sys
 import threading
@@ -27,6 +29,15 @@ from ros_image import image_message_to_rgb
 from time_alignment import interpolate_vector, latest_sample, nearest_sample
 
 class FR5LeRobotRecorder(Node):
+    IDLE = "IDLE"
+    RECORDING = "RECORDING"
+    FREEZING = "FREEZING"
+    FROZEN = "FROZEN"
+    COMMITTING = "COMMITTING"
+    COMMITTED = "COMMITTED"
+    ABORTED = "ABORTED"
+    QUARANTINED_COMMIT = "QUARANTINED_COMMIT"
+
     def __init__(self, args: argparse.Namespace) -> None:
         super().__init__("fr5_lerobot_recorder")
         from lerobot.datasets.lerobot_dataset import LeRobotDataset
@@ -46,7 +57,10 @@ class FR5LeRobotRecorder(Node):
         self.gripper_actions: deque[tuple[float, float]] = deque(maxlen=400)
         self.camera_frames: dict[str, deque] = {name: deque(maxlen=90) for name in self.camera_names}
         self.dataset = self._open_dataset()
-        self.recording = not args.interactive
+        self.recording = False
+        self.episode_state = self.IDLE
+        self._transaction: dict | None = None
+        self._buffer_cleared = False
         self.next_target_stamp: float | None = None
         self.frames = 0
         self.started = 0.0
@@ -99,6 +113,8 @@ class FR5LeRobotRecorder(Node):
             f"image_tolerance={args.sync_slop}s; joint={args.joint_states}; cameras={image_topics}; "
             f"camera_offsets_ms={{{', '.join(f'{name}: {self.camera_offsets[name]*1000:.1f}' for name in self.camera_names)}}}"
         )
+        if not args.interactive:
+            self.begin_episode()
 
     def _features(self) -> dict:
         return dataset_features(
@@ -115,6 +131,7 @@ class FR5LeRobotRecorder(Node):
         expected = self._features()
         encoder_options = {
             "streaming_encoding": self.args.streaming_encoding and not self.args.no_videos,
+            "batch_encoding_size": 1,
             "encoder_threads": self.args.encoder_threads,
             "image_writer_processes": 0,
         }
@@ -176,18 +193,277 @@ class FR5LeRobotRecorder(Node):
         self.alignment_failure_sources.update({f"image.{name}": 0 for name in self.camera_names})
         self.writer_error = None
         self.next_target_stamp = None
+        self._buffer_cleared = False
 
-    def start_episode(self) -> None:
-        if self.recording:
-            self.get_logger().warning("episode already recording; press s or c first")
+    def _result(self, ok: bool, reason_code: str = "OK", **extra) -> dict:
+        return {
+            "ok": ok,
+            "state": self.episode_state,
+            "reason_code": reason_code,
+            "run_id": self._transaction["run_id"] if self._transaction else None,
+            "transaction_id": self._transaction["transaction_id"] if self._transaction else None,
+            "episode_index": self._transaction["episode_index"] if self._transaction else self.dataset.meta.total_episodes,
+            "metrics": {"rows": self.frames, "writer_queue": self.writer_queue.qsize()},
+            "artifacts": self._transaction["artifacts"] if self._transaction else {},
+            "detail": "",
+            **extra,
+        }
+
+    def _append_event(self, reason_code: str) -> None:
+        if not self._transaction:
             return
-        self._reset_episode()
-        self.recording = True
-        self.started = time.perf_counter()
-        self.next_target_stamp = self.get_clock().now().nanoseconds * 1e-9
+        event = {
+            "run_id": self._transaction["run_id"],
+            "state": self.episode_state,
+            "reason_code": reason_code,
+            "episode_index": self._transaction["episode_index"],
+            "rows": self.frames,
+            "monotonic_ns": time.monotonic_ns(),
+        }
+        path = self._transaction["events_path"]
+        with path.open("a", encoding="utf-8") as file:
+            file.write(json.dumps(event, separators=(",", ":"), allow_nan=False) + "\n")
+            file.flush()
+            os.fsync(file.fileno())
+
+    @staticmethod
+    def _write_json_atomic(path: Path, payload: dict) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        temporary = path.with_name(path.name + ".tmp")
+        with temporary.open("w", encoding="utf-8") as file:
+            json.dump(payload, file, separators=(",", ":"), allow_nan=False)
+            file.flush()
+            os.fsync(file.fileno())
+        temporary.replace(path)
+        directory_fd = os.open(path.parent, os.O_RDONLY)
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
+
+    @staticmethod
+    def _unlink_durable(path: Path) -> None:
+        if not path.exists() and not path.is_symlink():
+            return
+        path.unlink(missing_ok=True)
+        directory_fd = os.open(path.parent, os.O_RDONLY)
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
+
+    def _dataset_snapshot(self) -> dict:
+        root = self.args.root.resolve()
+
+        def files(directory: str, pattern: str) -> dict[str, int]:
+            base = root / directory
+            if not base.exists():
+                return {}
+            snapshot = {}
+            for path in sorted(base.rglob(pattern)):
+                if path.is_file():
+                    snapshot[str(path.relative_to(root))] = path.stat().st_size
+            return snapshot
+
+        return {
+            "total_episodes": self.dataset.meta.total_episodes,
+            "total_frames": getattr(self.dataset.meta, "total_frames", 0),
+            "data_parquet": files("data", "*.parquet"),
+            "committed_videos": files("videos", "*"),
+            "episode_metadata": files("meta/episodes", "*.parquet"),
+        }
+
+    def _prepare_transaction(self, context: dict | None) -> dict | None:
+        if context is None:
+            return None
+        if not isinstance(context, dict):
+            raise ValueError("transaction context must be a mapping")
+        if set(context) != {"run_id", "binding_digests"}:
+            raise ValueError("transaction context has unsupported fields")
+        run_id = context.get("run_id")
+        bindings = context.get("binding_digests")
+        if not isinstance(run_id, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}", run_id):
+            raise ValueError("transaction context requires safe run_id")
+        if not getattr(self.args, "run_root", None):
+            raise ValueError("transaction context requires configured run_root")
+        required = {
+            "resolved_job_digest", "selected_sheet_digest", "yaw0_sheet_digest", "cell_calibration_digest",
+            "robot_system_digest", "collection_profile_digest", "object_profile_digest", "grasp_profile_digest",
+        }
+        if not isinstance(bindings, dict) or set(bindings) != required or any(
+            not isinstance(value, str) or not re.fullmatch(r"sha256:[0-9a-f]{64}", value) for value in bindings.values()
+        ):
+            raise ValueError("transaction context requires exact sha256 binding_digests")
+        root = self.args.root.resolve()
+        run_root = Path(self.args.run_root).resolve()
+        if root == run_root or root in run_root.parents or run_root in root.parents:
+            raise ValueError("run_root and dataset root must be separate")
+        directory = (run_root / run_id).resolve()
+        try:
+            directory.relative_to(run_root)
+        except ValueError as exc:
+            raise ValueError("transaction run_dir must be under configured run_root") from exc
+        if directory.exists():
+            raise ValueError("transaction run_id already exists")
+        guard_path = root / "meta" / "quarantine.json"
+        if guard_path.exists() or guard_path.is_symlink():
+            raise ValueError("dataset has unresolved data factory commit guard")
+        directory.mkdir(parents=True)
+        episode_index = self.dataset.meta.total_episodes
+        staging_dirs = {
+            camera: str(root / "images" / f"observation.images.{camera}" / f"episode-{episode_index:06d}")
+            for camera in self.camera_names
+        }
+        manifest_path = directory / "staging_manifest.json"
+        manifest = {
+            "schema_version": "data_factory.staging_manifest.v1",
+            "run_id": run_id,
+            "dataset_root": str(root),
+            "episode_index": episode_index,
+            "staging_mode": "batch",
+            "binding_digests": dict(bindings),
+            "camera_staging_dirs": staging_dirs,
+            "begin_snapshot": self._dataset_snapshot(),
+        }
+        self._write_json_atomic(manifest_path, manifest)
+        self._unlink_durable(root / "meta" / "training_approved.json")
+        result_path = directory / "result.json"
+        return {
+            "run_id": run_id,
+            "transaction_id": f"{run_id}:episode-{episode_index:06d}",
+            "episode_index": episode_index,
+            "events_path": directory / "events.jsonl",
+            "result_path": result_path,
+            "guard_path": guard_path,
+            "begin_snapshot": manifest["begin_snapshot"],
+            "staging_dirs": tuple(staging_dirs.values()),
+            "artifacts": {
+                "staging_manifest": str(manifest_path),
+                "events": str(directory / "events.jsonl"),
+                "result": str(result_path),
+                "dataset_commit_guard": str(guard_path),
+            },
+        }
+
+    def _write_run_result(self, state: str, reason_code: str, detail: str = "") -> None:
+        if not self._transaction:
+            return
+        self._write_json_atomic(self._transaction["result_path"], {
+            "schema_version": "data_factory.recorder_result.v1",
+            "run_id": self._transaction["run_id"],
+            "transaction_id": self._transaction["transaction_id"],
+            "episode_index": self._transaction["episode_index"],
+            "state": state,
+            "reason_code": reason_code,
+            "rows": self.frames,
+            "detail": detail,
+        })
+
+    def _write_commit_guard(self, state: str, reason_code: str, detail: str = "") -> None:
+        transaction = self._transaction or {}
+        if not transaction and state != self.QUARANTINED_COMMIT:
+            return
+        self._write_json_atomic(transaction.get("guard_path", self.args.root / "meta" / "quarantine.json"), {
+            "schema_version": "data_factory.commit_guard.v1",
+            "run_id": transaction.get("run_id"),
+            "transaction_id": transaction.get("transaction_id"),
+            "episode_index": transaction.get("episode_index", self.dataset.meta.total_episodes),
+            "state": state,
+            "reason_code": reason_code,
+            "detail": detail,
+            "staging_manifest": transaction.get("artifacts", {}).get("staging_manifest"),
+        })
+
+    def _abort_cleanup_error(self) -> str:
+        if not self._transaction:
+            return ""
+        remaining = [path for path in self._transaction["staging_dirs"] if Path(path).exists()]
+        current = self._dataset_snapshot()
+        problems = []
+        if remaining:
+            problems.append("staging remains: " + ", ".join(remaining))
+        if current != self._transaction["begin_snapshot"]:
+            problems.append("committed dataset snapshot changed")
+        return "; ".join(problems)
+
+    def _persist_quarantine(self, reason_code: str, detail: str) -> dict:
+        errors = []
+        try:
+            self._unlink_durable(self.args.root / "meta" / "training_approved.json")
+        except Exception as exc:
+            errors.append(f"approval invalidation failed: {exc}")
+        try:
+            self._write_commit_guard(self.QUARANTINED_COMMIT, reason_code, detail)
+        except Exception as exc:
+            errors.append(f"commit guard update failed: {exc}")
+        try:
+            self._write_run_result(self.QUARANTINED_COMMIT, reason_code, detail)
+        except Exception as exc:
+            errors.append(f"result write failed: {exc}")
+        try:
+            self._append_event(reason_code)
+        except Exception as exc:
+            errors.append(f"quarantine journal failed: {exc}")
+        if errors:
+            detail = "; ".join([detail, *errors])
+        return self._result(False, reason_code, detail=detail)
+
+    def _finish_abort(self, ok: bool, reason_code: str, detail: str = "") -> dict:
+        try:
+            self._write_run_result(self.ABORTED, reason_code, detail)
+            self._append_event(reason_code)
+        except Exception as exc:
+            with self.lock:
+                self.episode_state = self.QUARANTINED_COMMIT
+            return self._persist_quarantine(
+                "ABORT_DIAGNOSTIC_FAILED", "; ".join(filter(None, (detail, str(exc))))
+            )
+        if self._transaction:
+            try:
+                self._unlink_durable(self._transaction["guard_path"])
+            except Exception as exc:
+                with self.lock:
+                    self.episode_state = self.QUARANTINED_COMMIT
+                return self._persist_quarantine("ABORT_GUARD_RELEASE_FAILED", str(exc))
+        return self._result(ok, reason_code, detail=detail)
+
+    def begin_episode(self, transaction: dict | None = None) -> dict:
+        with self.lock:
+            if self.episode_state not in (self.IDLE, self.ABORTED, self.COMMITTED):
+                return self._result(False, "STATE_BEGIN_NOT_ALLOWED")
+            if self._transaction is not None:
+                return self._result(False, "PROCESS_TRANSACTION_ALREADY_USED")
+            if transaction is not None and (
+                getattr(self.args, "streaming_encoding", False) or getattr(self.args, "no_videos", False)
+            ):
+                return self._result(False, "UNSUPPORTED_STAGING_MODE")
+            self._transaction = self._prepare_transaction(transaction)
+            self._reset_episode()
+            self.episode_state = self.RECORDING
+            try:
+                self._write_commit_guard(self.RECORDING, "BEGIN")
+            except Exception as exc:
+                self.episode_state = self.IDLE
+                return self._result(False, "BEGIN_GUARD_FAILED", detail=str(exc))
+            try:
+                self._append_event("BEGIN")
+            except Exception as exc:
+                self.recording = False
+                self.episode_state = self.IDLE
+                return self._result(False, "BEGIN_JOURNAL_FAILED", detail=str(exc))
+            self.recording = True
+            self.started = time.perf_counter()
+            self.next_target_stamp = self.get_clock().now().nanoseconds * 1e-9
+            result = self._result(True)
         self.get_logger().info(
             f"recording episode_index={self.dataset.meta.total_episodes} (s=save, c=discard, q=discard+quit)"
         )
+        return result
+
+    def start_episode(self) -> None:
+        result = self.begin_episode()
+        if not result["ok"]:
+            self.get_logger().warning("episode already recording; press s or c first")
 
     def _quality_summary(self) -> tuple[dict, list[str]]:
         intervals = np.diff(self.frame_stamps)
@@ -325,59 +601,180 @@ class FR5LeRobotRecorder(Node):
                 reasons.append(f"{camera} source pause {source_gaps.max()*1000:.1f}ms exceeds limit")
         return summary, reasons
 
-    def stop_episode(self, discard: bool = False) -> bool:
+    def freeze_episode(self) -> dict:
         with self.lock:
-            if not self.recording:
-                return True
+            if self.episode_state != self.RECORDING:
+                return self._result(False, "STATE_FREEZE_NOT_RECORDING")
             self.recording = False
+            self.episode_state = self.FREEZING
         self.writer_queue.join()
-        if discard:
+        with self.lock:
+            if self.episode_state != self.FREEZING:
+                return self._result(False, "STATE_FREEZE_INTERRUPTED")
+            self.episode_state = self.FROZEN
+            try:
+                self._append_event("FROZEN")
+            except Exception as exc:
+                return self._result(False, "FREEZE_JOURNAL_FAILED", detail=str(exc))
+            return self._result(True)
+
+    def _clear_episode_buffer_once(self) -> None:
+        if not self._buffer_cleared:
             self.dataset.clear_episode_buffer()
-            self.get_logger().info(f"episode discarded, frames={self.frames}")
-            return True
-        if not self.frames:
-            self.dataset.clear_episode_buffer()
-            self.get_logger().error("episode not saved: no synchronized frames")
+            self._buffer_cleared = True
+
+    def abort_episode(self) -> dict:
+        if self.episode_state == self.RECORDING:
+            self.freeze_episode()
+        cleanup_error = None
+        with self.lock:
+            if self.episode_state != self.FROZEN:
+                return self._result(False, "STATE_ABORT_NOT_ALLOWED")
+            try:
+                self._clear_episode_buffer_once()
+            except Exception as exc:
+                cleanup_error = exc
+                self.recording = False
+                self.episode_state = self.QUARANTINED_COMMIT
+            else:
+                verification_error = self._abort_cleanup_error()
+                if verification_error:
+                    cleanup_error = RuntimeError(verification_error)
+                    self.episode_state = self.QUARANTINED_COMMIT
+                else:
+                    self.episode_state = self.ABORTED
+        if cleanup_error is not None:
+            return self._persist_quarantine("ABORT_CLEANUP_FAILED", str(cleanup_error))
+        result = self._finish_abort(True, "ABORTED")
+        self.get_logger().info(f"episode discarded, frames={self.frames}")
+        return result
+
+    def _abort_precommit(self, reason_code: str, exc: Exception, temporary_path: Path | None = None) -> dict:
+        detail = str(exc)
+        cleanup_error = None
+        if temporary_path is not None:
+            try:
+                temporary_path.unlink(missing_ok=True)
+            except Exception as cleanup_exc:
+                detail = f"{detail}; temporary cleanup failed: {cleanup_exc}"
+                cleanup_error = cleanup_exc
+        with self.lock:
+            try:
+                self._clear_episode_buffer_once()
+            except Exception as cleanup_exc:
+                cleanup_error = cleanup_error or cleanup_exc
+                detail = f"{detail}; buffer cleanup failed: {cleanup_exc}"
+                self.episode_state = self.QUARANTINED_COMMIT
+            else:
+                verification_error = self._abort_cleanup_error()
+                if verification_error:
+                    cleanup_error = cleanup_error or RuntimeError(verification_error)
+                    detail = f"{detail}; {verification_error}"
+                    self.episode_state = self.QUARANTINED_COMMIT
+                elif cleanup_error is not None:
+                    self.episode_state = self.QUARANTINED_COMMIT
+                else:
+                    self.episode_state = self.ABORTED
             self.recording = False
-            return False
-        summary, reasons = self._quality_summary()
+        if cleanup_error is not None:
+            return self._persist_quarantine("PRECOMMIT_CLEANUP_FAILED", detail)
+        return self._finish_abort(False, reason_code, detail)
+
+    def commit_episode(self) -> dict:
+        with self.lock:
+            if self.episode_state != self.FROZEN:
+                return self._result(False, "STATE_COMMIT_NOT_FROZEN")
+            self.episode_state = self.COMMITTING
+        if not self.frames:
+            with self.lock:
+                self.episode_state = self.FROZEN
+                return self._result(False, "QUALITY_NO_SYNCHRONIZED_FRAMES")
+        try:
+            summary, reasons = self._quality_summary()
+        except Exception as exc:
+            with self.lock:
+                self.episode_state = self.FROZEN
+                return self._result(False, "QUALITY_EVALUATION_FAILED", detail=str(exc))
         attempt = {**summary, "accepted": not reasons, "reasons": reasons}
         for warning in summary["image_quality_warnings"]:
             self.get_logger().warning(warning)
         attempts_path = self.args.root / "meta" / "recording_attempts.jsonl"
         if reasons:
-            with attempts_path.open("a", encoding="utf-8") as file:
-                file.write(json.dumps(attempt, ensure_ascii=False, allow_nan=False) + "\n")
+            try:
+                with attempts_path.open("a", encoding="utf-8") as file:
+                    file.write(json.dumps(attempt, ensure_ascii=False, allow_nan=False) + "\n")
+            except Exception as exc:
+                return self._abort_precommit("PRECOMMIT_DIAGNOSTIC_FAILED", exc)
             self.get_logger().error("episode rejected and discarded: " + "; ".join(reasons) + ". Press r to retry.")
             self.get_logger().info(
                 f"rejected diagnostics: stale_skips={self.stale_sample_skips}, "
                 f"missing_action_skips={self.missing_action_skips}, queue_drops={self.writer_queue_drops}, "
                 f"alignment_sources={self.alignment_failure_sources}"
             )
-            self.dataset.clear_episode_buffer()
-            return False
-        provenance_dir = self.args.root / "meta" / "source_provenance"
-        provenance_dir.mkdir(exist_ok=True)
-        provenance_path = provenance_dir / f"episode-{summary['episode_index']:06d}.jsonl"
-        temporary_path = provenance_path.with_suffix(".jsonl.tmp")
-        with temporary_path.open("w", encoding="utf-8") as file:
-            for row in self.source_provenance:
-                file.write(json.dumps(row, separators=(",", ":"), allow_nan=False) + "\n")
+            with self.lock:
+                self.episode_state = self.FROZEN
+                return self._result(False, "QUALITY_REJECTED", quality=attempt)
+        try:
+            provenance_dir = self.args.root / "meta" / "source_provenance"
+            provenance_dir.mkdir(parents=True, exist_ok=True)
+            provenance_path = provenance_dir / f"episode-{summary['episode_index']:06d}.jsonl"
+            temporary_path = provenance_path.with_suffix(".jsonl.tmp")
+            with temporary_path.open("w", encoding="utf-8") as file:
+                for row in self.source_provenance:
+                    file.write(json.dumps(row, separators=(",", ":"), allow_nan=False) + "\n")
+        except Exception as exc:
+            return self._abort_precommit("PRECOMMIT_PROVENANCE_FAILED", exc, locals().get("temporary_path"))
+        try:
+            self._write_commit_guard(self.COMMITTING, "COMMIT_STARTED")
+        except Exception as exc:
+            return self._abort_precommit("PRECOMMIT_GUARD_FAILED", exc, temporary_path)
         try:
             self.dataset.save_episode()
             temporary_path.replace(provenance_path)
-        except Exception:
-            temporary_path.unlink(missing_ok=True)
-            raise
-        quality_path = self.args.root / "meta" / "recording_quality.jsonl"
-        with quality_path.open("a", encoding="utf-8") as file:
-            file.write(json.dumps(summary, ensure_ascii=False, allow_nan=False) + "\n")
-        with attempts_path.open("a", encoding="utf-8") as file:
-            file.write(json.dumps(attempt, ensure_ascii=False, allow_nan=False) + "\n")
+            quality_path = self.args.root / "meta" / "recording_quality.jsonl"
+            with quality_path.open("a", encoding="utf-8") as file:
+                file.write(json.dumps(summary, ensure_ascii=False, allow_nan=False) + "\n")
+            with attempts_path.open("a", encoding="utf-8") as file:
+                file.write(json.dumps(attempt, ensure_ascii=False, allow_nan=False) + "\n")
+            if self._transaction:
+                self.dataset.finalize()
+            with self.lock:
+                self.episode_state = self.COMMITTED
+                self._append_event("COMMITTED")
+            self._write_run_result(self.COMMITTED, "COMMITTED")
+            if self._transaction:
+                self._unlink_durable(self._transaction["guard_path"])
+        except Exception as exc:
+            with self.lock:
+                self.episode_state = self.QUARANTINED_COMMIT
+            self.get_logger().error(f"episode save quarantined: {exc}")
+            return self._persist_quarantine("QUARANTINED_COMMIT", str(exc))
         self.get_logger().info(
             f"episode saved: index={summary['episode_index']}, frames={self.frames}, row_fps={summary['effective_fps']:.2f}"
         )
-        return True
+        return self._result(True, quality=attempt)
+
+    def episode_status(self) -> dict:
+        with self.lock:
+            return self._result(
+                True,
+                writer_error=str(self.writer_error) if self.writer_error else None,
+                writer_alive=self.writer_thread.is_alive(),
+            )
+
+    def stop_episode(self, discard: bool = False) -> bool:
+        if self.episode_state in (self.IDLE, self.COMMITTED, self.ABORTED):
+            return True
+        if self.episode_state == self.QUARANTINED_COMMIT:
+            return False
+        if self.episode_state == self.RECORDING:
+            self.freeze_episode()
+        if discard:
+            return self.abort_episode()["ok"]
+        result = self.commit_episode()
+        if not result["ok"] and result["state"] == self.FROZEN:
+            self.abort_episode()
+        return result["ok"]
 
     @staticmethod
     def _stamp(msg) -> float:
@@ -507,7 +904,7 @@ class FR5LeRobotRecorder(Node):
             max_age = max(self.image_ages[camera], default=0.0) * 1000
             camera_status.append(f"{camera}:repeat={ratio:.1%},max_age={max_age:.1f}ms")
         self.get_logger().info(
-            f"STATUS recording={self.recording} episode_index={self.dataset.meta.total_episodes} "
+            f"STATUS state={self.episode_state} recording={self.recording} episode_index={self.dataset.meta.total_episodes} "
             f"rows={self.frames} row_fps={row_fps:.2f} queue={self.writer_queue.qsize()}/{self.args.writer_queue_size} "
             + " ".join(camera_status)
         )
@@ -563,7 +960,8 @@ class FR5LeRobotRecorder(Node):
             try:
                 self._write_frame(*item)
             except Exception as exc:
-                self.writer_error = exc
+                with self.lock:
+                    self.writer_error = exc
                 self.get_logger().error(f"dataset writer failed: {exc}")
             finally:
                 self.writer_queue.task_done()
@@ -571,6 +969,9 @@ class FR5LeRobotRecorder(Node):
     def _write_frame(
         self, state, action, images, provenance, sync_span, action_age, state_age, enqueue_attempt_index,
     ) -> None:
+        with self.lock:
+            if self.episode_state not in (self.RECORDING, self.FREEZING):
+                return
         images = tuple(image_message_to_rgb(message) for message in images)
         row_stamp = provenance["target_ros_s"]
         frame = {"observation.state": state, "action": action, "task": self.args.task}
@@ -611,12 +1012,21 @@ class FR5LeRobotRecorder(Node):
         return not self.args.interactive and self.started > 0 and time.perf_counter() - self.started >= self.args.duration
 
     def close(self) -> None:
-        if self.recording and not self.stop_episode():
-            with self.lock:
-                self.recording = False
+        if self.episode_state == self.FREEZING:
             self.writer_queue.join()
-            self.dataset.clear_episode_buffer()
+            with self.lock:
+                if self.episode_state == self.FREEZING:
+                    self.episode_state = self.FROZEN
+        if self._transaction and self.episode_state == self.RECORDING:
+            self.freeze_episode()
+        if self._transaction and self.episode_state == self.FROZEN:
+            self.abort_episode()
+        elif self.episode_state == self.RECORDING and not self.stop_episode():
+            self.abort_episode()
+            self.writer_queue.join()
             self.get_logger().error("invalid unsaved episode discarded during shutdown")
+        elif self.episode_state == self.FROZEN:
+            self.abort_episode()
         self.stop_threads.set()
         self.sampler_thread.join(timeout=2)
         self.writer_thread.join(timeout=2)

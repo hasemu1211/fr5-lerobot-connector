@@ -82,6 +82,36 @@ class CliWrapperTest(unittest.TestCase):
         self.assertIn("--require-approved", validate_help.stdout)
         self.assertIn("--root", validate_help.stdout)
 
+        with TemporaryDirectory() as directory:
+            dataset = Path(directory) / "blocked" / "meta"
+            dataset.mkdir(parents=True)
+            (dataset / "quarantine.json").write_text("{}")
+            quarantine_guard = subprocess.run(
+                [root / "scripts/validate_dataset.sh", "--root", directory, "blocked"],
+                text=True, capture_output=True,
+            )
+            self.assertEqual(quarantine_guard.returncode, 4)
+            self.assertIn("Dataset is quarantined", quarantine_guard.stderr)
+            direct_guard = subprocess.run(
+                [root / ".venv/bin/python", root / "tools/validate_lerobot_dataset.py", dataset.parent],
+                text=True, capture_output=True,
+            )
+            self.assertEqual(direct_guard.returncode, 1)
+            self.assertIn("dataset is quarantined", direct_guard.stderr)
+            (dataset / "quarantine.json").unlink()
+            (dataset / "quarantine.json").symlink_to("missing-target")
+            dangling_guard = subprocess.run(
+                [root / "scripts/validate_dataset.sh", "--root", directory, "blocked"],
+                text=True, capture_output=True,
+            )
+            self.assertEqual(dangling_guard.returncode, 4)
+            direct_dangling_guard = subprocess.run(
+                [root / ".venv/bin/python", root / "tools/validate_lerobot_dataset.py", dataset.parent],
+                text=True, capture_output=True,
+            )
+            self.assertEqual(direct_dangling_guard.returncode, 1)
+            self.assertIn("dataset is quarantined", direct_dangling_guard.stderr)
+
         collect_help = subprocess.run(
             [root / "scripts/collect.sh", "--help"], text=True, capture_output=True
         )

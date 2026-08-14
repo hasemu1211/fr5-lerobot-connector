@@ -64,6 +64,10 @@ if [[ "$DRY_RUN" == 1 ]]; then
   exit 0
 fi
 
+if [[ -e "$DATASET/meta/quarantine.json" || -L "$DATASET/meta/quarantine.json" ]]; then
+  echo "Dataset is quarantined and cannot be validated for training: $DATASET/meta/quarantine.json" >&2
+  exit 4
+fi
 if [[ "$REQUIRE_APPROVED" == 1 && ! -f "$DATASET/meta/training_approved.json" ]]; then
   echo "Dataset is not approved for training/evaluation: $DATASET/meta/training_approved.json" >&2
   exit 3

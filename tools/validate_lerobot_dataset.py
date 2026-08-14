@@ -42,6 +42,9 @@ def main() -> None:
     parser.add_argument("--min-arm-range", type=float, default=0.01)
     parser.add_argument("--min-gripper-range", type=float, default=0.001)
     args = parser.parse_args()
+    quarantine = args.root / "meta" / "quarantine.json"
+    if quarantine.exists() or quarantine.is_symlink():
+        raise SystemExit(f"FAIL: dataset is quarantined: {quarantine}")
     if not np.isfinite([args.min_arm_range, args.min_gripper_range]).all() or min(args.min_arm_range, args.min_gripper_range) <= 0:
         raise SystemExit("HIL motion thresholds must be finite and positive")
     failures: list[str] = []
