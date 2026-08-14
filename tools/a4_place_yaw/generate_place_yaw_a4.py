@@ -17,6 +17,8 @@ PAGE_H_MM = 210.0
 PLACE0_XY_MM = (148.5, 105.0)
 X_REF_XY_MM = (277.0, 105.0)
 Y_CHECK_XY_MM = (20.0, 185.0)
+SCHEMA_VERSION = "a4_place_yaw.v2"
+NOMINAL_SCALE_BAR_MM = 100.0
 
 
 def rotate(u: float, v: float, yaw_deg: float) -> tuple[float, float]:
@@ -58,6 +60,43 @@ def canonical_digest(value: object) -> str:
         allow_nan=False,
     ).encode()
     return "sha256:" + hashlib.sha256(payload).hexdigest()
+
+
+def print_calibration(measured_scale_mm: float) -> dict:
+    if not math.isfinite(measured_scale_mm) or measured_scale_mm <= 0:
+        raise ValueError("--measured-scale-mm must be a positive finite number")
+    canonical_measurement = round(measured_scale_mm, 2)
+    if canonical_measurement <= 0:
+        raise ValueError("--measured-scale-mm must be at least 0.01")
+    if not math.isclose(measured_scale_mm, canonical_measurement, rel_tol=0.0, abs_tol=1e-9):
+        raise ValueError("--measured-scale-mm supports at most two decimal places")
+    return {
+        "nominal_scale_bar_mm": NOMINAL_SCALE_BAR_MM,
+        "measured_scale_bar_mm": canonical_measurement,
+        "content_scale_percent": round(NOMINAL_SCALE_BAR_MM / canonical_measurement * 100.0, 6),
+    }
+
+
+def family_digest_from_manifest(manifest: dict) -> str:
+    """Digest the yaw-invariant page, registration, and local-grid contract."""
+    registration = manifest["registration"]
+    family = {
+        "schema_version": manifest["schema_version"],
+        "place_id": manifest["place_id"],
+        "page_mm": manifest["page_mm"],
+        "place_spacing_mm": manifest["place_spacing_mm"],
+        "print_calibration": manifest["print_calibration"],
+        "registration_sheet_xy_mm": {
+            "origin": registration["origin"]["sheet_xy_mm"],
+            "x_ref": registration["x_ref"]["sheet_xy_mm"],
+            "verify": registration["verify"]["sheet_xy_mm"],
+        },
+        "grid_local_uv_mm": [
+            {"point_id": point["point_id"], "local_uv_mm": point["local_uv_mm"]}
+            for point in manifest["grid_points"]
+        ],
+    }
+    return canonical_digest(family)
 
 
 def build_places(cols: int, rows: int, spacing_mm: float, yaw_deg: float) -> list[dict]:
@@ -107,19 +146,33 @@ def svg_text(x: float, y: float, text: str, size: float, **attrs: str) -> str:
     return f'<text x="{fmt(x)}" y="{fmt(y)}" font-size="{fmt(size)}" {attributes}>{escape(text)}</text>'
 
 
-def make_svg(sheet_id: str, yaw_deg: float, places: list[dict], spacing_mm: float) -> str:
+def make_svg(
+    sheet_id: str,
+    yaw_deg: float,
+    places: list[dict],
+    spacing_mm: float,
+    measured_scale_mm: float = NOMINAL_SCALE_BAR_MM,
+) -> str:
+    calibration = print_calibration(measured_scale_mm)
+    content_scale = calibration["content_scale_percent"] / 100.0
     yaw_label = f"{yaw_deg:+.1f}°"
+    print_label = (
+        "PRINT 100% / FIT OFF"
+        if measured_scale_mm == NOMINAL_SCALE_BAR_MM
+        else f"PRINT CAL {measured_scale_mm:.2f} -> {NOMINAL_SCALE_BAR_MM:.0f} mm / CONTENT {calibration['content_scale_percent']:.3f}%"
+    )
     lines = [
         '<?xml version="1.0" encoding="UTF-8"?>',
         f'<svg xmlns="http://www.w3.org/2000/svg" width="{PAGE_W_MM}mm" height="{PAGE_H_MM}mm" viewBox="0 0 {PAGE_W_MM} {PAGE_H_MM}">',
         '<defs><clipPath id="workspace"><rect x="12" y="20" width="273" height="170"/></clipPath></defs>',
         '<rect width="297" height="210" fill="white"/>',
+        f'<g transform="translate({fmt(PAGE_W_MM / 2)} {fmt(PAGE_H_MM / 2)}) scale({content_scale:.9f}) translate(-{fmt(PAGE_W_MM / 2)} -{fmt(PAGE_H_MM / 2)})">',
         '<rect x="3" y="3" width="291" height="204" fill="none" stroke="#111" stroke-width="0.6"/>',
         '<rect x="7" y="5" width="283" height="13" fill="#111"/>',
         svg_text(11, 14, "A4 PLACE / YAW BOARD", 6.3, fill="white", font_weight="700"),
         svg_text(286, 13.5, f"{sheet_id}   YAW {yaw_label}", 4.2, fill="white", font_weight="700", text_anchor="end"),
         svg_text(10, 202, "PLACE OBJECT DATUM ON MARK / ALIGN FRONT WITH RED GUIDE", 3.3, fill="#111", font_weight="700"),
-        svg_text(287, 202, "PRINT 100% / FIT TO PAGE OFF", 3.3, fill="#8a5500", font_weight="700", text_anchor="end"),
+        svg_text(287, 202, print_label, 3.3, fill="#8a5500", font_weight="700", text_anchor="end"),
     ]
 
     max_extent = 260.0
@@ -174,13 +227,21 @@ def make_svg(sheet_id: str, yaw_deg: float, places: list[dict], spacing_mm: floa
             '<line x1="120" y1="193.5" x2="120" y2="198.5" stroke="#111" stroke-width="0.6"/>',
             svg_text(70, 192, "100 mm SCALE CHECK", 2.8, fill="#111", font_weight="700", text_anchor="middle"),
             svg_text(287, 196, "REGISTER: CENTER + X-REF  /  VERIFY: Y-CHECK", 2.9, fill="#111", font_weight="700", text_anchor="end"),
+            "</g>",
             "</svg>",
         ]
     )
     return "\n".join(lines)
 
 
-def make_manifest(place_id: str, sheet_id: str, yaw_deg: float, places: list[dict], spacing_mm: float) -> dict:
+def make_manifest(
+    place_id: str,
+    sheet_id: str,
+    yaw_deg: float,
+    places: list[dict],
+    spacing_mm: float,
+    measured_scale_mm: float = NOMINAL_SCALE_BAR_MM,
+) -> dict:
     grid_points = [
         {
             **place,
@@ -193,29 +254,14 @@ def make_manifest(place_id: str, sheet_id: str, yaw_deg: float, places: list[dic
         }
         for place in places
     ]
-    family = {
-        "schema_version": "a4_place_yaw.v1",
-        "place_id": place_id,
-        "page_mm": {"width": PAGE_W_MM, "height": PAGE_H_MM},
-        "place_spacing_mm": spacing_mm,
-        "registration_sheet_xy_mm": {
-            "origin": list(PLACE0_XY_MM),
-            "x_ref": list(X_REF_XY_MM),
-            "verify": list(Y_CHECK_XY_MM),
-        },
-        "grid_local_uv_mm": [
-            {"point_id": place["point_id"], "local_uv_mm": place["local_uv_mm"]}
-            for place in places
-        ],
-    }
-    return {
-        "schema_version": "a4_place_yaw.v1",
-        "a4_family_digest": canonical_digest(family),
+    manifest = {
+        "schema_version": SCHEMA_VERSION,
         "place_id": place_id,
         "sheet_id": sheet_id,
         "page_mm": {"width": PAGE_W_MM, "height": PAGE_H_MM},
         "yaw_deg": round(yaw_deg, 3),
         "place_spacing_mm": spacing_mm,
+        "print_calibration": print_calibration(measured_scale_mm),
         "registration": {
             "origin": {"id": "CENTER", "sheet_xy_mm": list(PLACE0_XY_MM)},
             "x_ref": {"id": "X_REF", "sheet_xy_mm": list(X_REF_XY_MM)},
@@ -231,6 +277,8 @@ def make_manifest(place_id: str, sheet_id: str, yaw_deg: float, places: list[dic
         },
         "grid_points": grid_points,
     }
+    manifest["a4_family_digest"] = family_digest_from_manifest(manifest)
+    return manifest
 
 
 def self_check() -> None:
@@ -254,6 +302,17 @@ def self_check() -> None:
     }
     manifest_0 = make_manifest("PLACE_A", "PLACE_A_YAW_P000_00", 0, places_0, 20)
     assert manifest["a4_family_digest"] == manifest_0["a4_family_digest"]
+    compensated = make_manifest("PLACE_A", "PLACE_A_YAW_P000_00_PRINTCAL_096_00MM", 0, places_0, 20, 96)
+    assert compensated["print_calibration"]["content_scale_percent"] == 104.166667
+    assert compensated["a4_family_digest"] != manifest_0["a4_family_digest"]
+    assert print_calibration(100)["content_scale_percent"] == 100.0
+    for invalid_measurement in (96.001, 1e-10):
+        try:
+            print_calibration(invalid_measurement)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("invalid measurements must not share an output identity")
 
 
 def main() -> None:
@@ -263,15 +322,29 @@ def main() -> None:
     parser.add_argument("--cols", type=int, default=5)
     parser.add_argument("--rows", type=int, default=3)
     parser.add_argument("--spacing-mm", type=float, default=35.0)
+    parser.add_argument(
+        "--measured-scale-mm",
+        type=float,
+        default=NOMINAL_SCALE_BAR_MM,
+        help="measured length of this generator's 100 mm scale bar; compensated outputs are isolated automatically",
+    )
     parser.add_argument("--pdf", action="store_true", help="also render A4 PDF (requires svglib and reportlab)")
     parser.add_argument("--output-dir", type=Path, default=Path(__file__).resolve().parent)
     args = parser.parse_args()
 
     self_check()
-    args.output_dir.mkdir(parents=True, exist_ok=True)
-    svg_dir = args.output_dir / "svg"
-    json_dir = args.output_dir / "json"
-    pdf_dir = args.output_dir / "pdf"
+    measured_scale_mm = print_calibration(args.measured_scale_mm)["measured_scale_bar_mm"]
+    is_compensated = measured_scale_mm != NOMINAL_SCALE_BAR_MM
+    measurement_tag = f"{measured_scale_mm:06.2f}".replace(".", "_")
+    output_root = (
+        args.output_dir / "print_calibration" / f"scale_bar_{measurement_tag}mm"
+        if is_compensated
+        else args.output_dir
+    )
+    output_root.mkdir(parents=True, exist_ok=True)
+    svg_dir = output_root / "svg"
+    json_dir = output_root / "json"
+    pdf_dir = output_root / "pdf"
     svg_dir.mkdir(exist_ok=True)
     json_dir.mkdir(exist_ok=True)
     pdf_dir.mkdir(exist_ok=True)
@@ -279,14 +352,23 @@ def main() -> None:
 
     for yaw_deg in args.yaw_deg:
         tag = yaw_tag(yaw_deg)
-        sheet_id = f"{place_id}_YAW_{tag}"
+        suffix = f"_PRINTCAL_{measurement_tag}MM" if is_compensated else ""
+        sheet_id = f"{place_id}_YAW_{tag}{suffix}"
         places = build_places(args.cols, args.rows, args.spacing_mm, yaw_deg)
         stem = sheet_id.lower()
         svg_path = svg_dir / f"{stem}.svg"
         json_path = json_dir / f"{stem}.json"
-        svg_path.write_text(make_svg(sheet_id, yaw_deg, places, args.spacing_mm), encoding="utf-8")
+        svg_path.write_text(
+            make_svg(sheet_id, yaw_deg, places, args.spacing_mm, measured_scale_mm),
+            encoding="utf-8",
+        )
         json_path.write_text(
-            json.dumps(make_manifest(place_id, sheet_id, yaw_deg, places, args.spacing_mm), ensure_ascii=False, indent=2) + "\n",
+            json.dumps(
+                make_manifest(place_id, sheet_id, yaw_deg, places, args.spacing_mm, measured_scale_mm),
+                ensure_ascii=False,
+                indent=2,
+            )
+            + "\n",
             encoding="utf-8",
         )
         print(svg_path)

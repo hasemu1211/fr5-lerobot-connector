@@ -11,6 +11,7 @@
 /tools/a4_place_yaw/json/
 /tools/a4_place_yaw/pdf/
 /tools/a4_place_yaw/svg/
+/tools/a4_place_yaw/print_calibration/
 *.zip
 __pycache__/
 *.py[cod]
