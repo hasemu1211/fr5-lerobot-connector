@@ -17,6 +17,16 @@ PAGE_H_MM = 210.0
 PLACE0_XY_MM = (148.5, 105.0)
 X_REF_XY_MM = (277.0, 105.0)
 Y_CHECK_XY_MM = (20.0, 185.0)
+PRINT_X_MARGIN_MM = 15.0
+PRINT_Y_MARGIN_MM = 20.0
+REGISTRATION_FIRST_INSTALL = "measure CENTER and X_REF; verify Y_CHECK"
+REGISTRATION_FIXED_SHEET_SWAP = "verify CENTER translation; reuse orientation only if the physical sheet locator is unchanged"
+TRANSFORM_CONTRACT = {
+    "yaw0_place": "T_C_place_yaw0 = Trans(u,v,0)",
+    "robot_pose": "T_base_place_yaw = T_base_C * Rz(yaw_deg) * T_C_place_yaw0",
+    "position": "p_sheet(place,yaw) = C + Rz(yaw_deg) * [u,v]",
+    "object_pose": "T_base_object = T_base_place_yaw * T_place_object_datum",
+}
 SCHEMA_VERSION = "a4_place_yaw.v2"
 NOMINAL_SCALE_BAR_MM = 100.0
 
@@ -121,7 +131,7 @@ def build_places(cols: int, rows: int, spacing_mm: float, yaw_deg: float) -> lis
         dx, dy = rotate(u, v, yaw_deg)
         sheet_x = PLACE0_XY_MM[0] + dx
         sheet_y = PLACE0_XY_MM[1] + dy
-        if not (15 <= sheet_x <= PAGE_W_MM - 15 and 20 <= sheet_y <= PAGE_H_MM - 20):
+        if not (PRINT_X_MARGIN_MM <= sheet_x <= PAGE_W_MM - PRINT_X_MARGIN_MM and PRINT_Y_MARGIN_MM <= sheet_y <= PAGE_H_MM - PRINT_Y_MARGIN_MM):
             raise ValueError(
                 f"{point_id} leaves the printable workspace at yaw={yaw_deg}: "
                 f"({sheet_x:.1f}, {sheet_y:.1f}) mm; reduce rows/cols/spacing"
@@ -266,15 +276,10 @@ def make_manifest(
             "origin": {"id": "CENTER", "sheet_xy_mm": list(PLACE0_XY_MM)},
             "x_ref": {"id": "X_REF", "sheet_xy_mm": list(X_REF_XY_MM)},
             "verify": {"id": "Y_CHECK", "sheet_xy_mm": list(Y_CHECK_XY_MM)},
-            "first_install": "measure CENTER and X_REF; verify Y_CHECK",
-            "fixed_sheet_swap": "verify CENTER translation; reuse orientation only if the physical sheet locator is unchanged",
+            "first_install": REGISTRATION_FIRST_INSTALL,
+            "fixed_sheet_swap": REGISTRATION_FIXED_SHEET_SWAP,
         },
-        "transform_contract": {
-            "yaw0_place": "T_C_place_yaw0 = Trans(u,v,0)",
-            "robot_pose": "T_base_place_yaw = T_base_C * Rz(yaw_deg) * T_C_place_yaw0",
-            "position": "p_sheet(place,yaw) = C + Rz(yaw_deg) * [u,v]",
-            "object_pose": "T_base_object = T_base_place_yaw * T_place_object_datum",
-        },
+        "transform_contract": dict(TRANSFORM_CONTRACT),
         "grid_points": grid_points,
     }
     manifest["a4_family_digest"] = family_digest_from_manifest(manifest)

@@ -52,6 +52,7 @@ brightness, clipping, sharpness와 색 변화량은 정성 검토를 돕는 warn
   "robot_system_id": "fr5-lab-a",
   "collection_profile_id": "fr5-dual-rgb-30hz-v1",
   "place_id": "PLACE_A",
+  "cell_calibration_id": "PLACE_A-r001",
   "sheet_manifest_digest": "sha256:...",
   "yaw_deg": 30,
   "x_mm": 35,
@@ -67,6 +68,8 @@ brightness, clipping, sharpness와 색 변화량은 정성 검토를 돕는 warn
 ```
 
 필수 필드 누락, unknown field, 등록되지 않은 ID, digest 불일치와 만료된 승인은 motion과 recording 전에 거부한다. 첫 schema에는 `destination`, behavior mode, recovery, alternate approach와 grasp ranking 필드를 넣지 않는다.
+
+사람과 AI는 profile digest를 직접 복사하지 않는다. validator가 `cell_calibration_id`와 각 profile ID를 검토된 config에 해석하고 canonical digest를 `ResolvedJob`에 기록한다. config가 바뀌면 resolved digest도 바뀌므로 이전 승인은 재사용할 수 없다.
 
 ## A4 pose와 로봇 좌표
 
@@ -91,6 +94,8 @@ T_base_target = T_base_place0
               · Trans(x_mm, y_mm, 0)
               · T_target_offset
 ```
+
+원본 출력의 100 mm 막대 실측값과 PDF 내용 보정률은 인쇄 생성 이력과 올바른 sheet family 확인에만 쓴다. 보정한 실물 막대는 100 mm 좌표계로 적격성을 판정하며, `CENTER→X_REF` 거리와 100 mm 막대의 residual은 허용오차 이탈 시 거부하는 gate이다. runtime pose는 이 오차를 배율로 흡수하지 않고 항상 강체 변환과 `x_mm/1000`, `y_mm/1000`을 사용한다.
 
 인쇄 scale, A4 재배치, TCP 반복 측정과 물체 배치의 결합 오차가 `top_center` grasp margin 이하여야 live pickup을 허용한다. 충족하지 못하면 vision 보정부터 추가하지 않고 물리 locator를 보강한다.
 
@@ -167,7 +172,8 @@ tools/a4_place_yaw/
 ├── README.md                            # 추적
 ├── json/                                # 무시: manifest
 ├── pdf/                                 # 무시: 인쇄물
-└── svg/                                 # 무시: 벡터 원본
+├── svg/                                 # 무시: 벡터 원본
+└── print_calibration/<scale_bar_mm>/    # 무시: 보정 계열별 json/pdf/svg
 ```
 
 생성기의 기본 output root는 `tools/a4_place_yaw/`이고 CLI option으로 다른 root를 지정할 수 있다.
