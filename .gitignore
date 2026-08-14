@@ -7,6 +7,10 @@
 /.docs-governance/
 /datasets/
 /outputs/
+/RESEARCH/
+/tools/a4_place_yaw/json/
+/tools/a4_place_yaw/pdf/
+/tools/a4_place_yaw/svg/
 *.zip
 __pycache__/
 *.py[cod]
