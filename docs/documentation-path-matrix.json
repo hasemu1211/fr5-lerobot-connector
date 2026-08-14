@@ -13,7 +13,7 @@
       "review_only_content_rule": "Keep only the supported scope, shortest usable start, and links to canonical documents.",
       "lifecycle": "current",
       "content_ownership": "convenience",
-      "canonical_rule_ids": ["operator-guides", "training-guides", "architecture-reference", "evidence-ledger"]
+      "canonical_rule_ids": ["operator-guides", "training-guides", "architecture-reference", "data-factory-contract", "evidence-ledger"]
     },
     {
       "rule_id": "operator-guides",
@@ -59,6 +59,32 @@
       "lifecycle": "current",
       "content_ownership": "canonical",
       "canonical_rule_ids": []
+    },
+    {
+      "rule_id": "data-factory-contract",
+      "document_type": "reference",
+      "subject": "deterministic pose data-factory plan, contracts, safety gates, and filesystem ownership",
+      "path_globs": ["docs/data-factory.md"],
+      "allowed_index_names": ["README.md"],
+      "requires_index": false,
+      "required_markdown_metadata": ["h1"],
+      "review_only_content_rule": "Keep the current deterministic pose and grasp contract, staged implementation boundary, output ownership, safety gates, and acceptance criteria in one canonical document.",
+      "lifecycle": "current",
+      "content_ownership": "canonical",
+      "canonical_rule_ids": []
+    },
+    {
+      "rule_id": "tool-guides",
+      "document_type": "guide",
+      "subject": "reusable tool quick starts",
+      "path_globs": ["tools/*/README.md"],
+      "allowed_index_names": ["README.md"],
+      "requires_index": false,
+      "required_markdown_metadata": ["h1"],
+      "review_only_content_rule": "Keep only commands and operator checks local to the tool; link to the canonical contract instead of duplicating it.",
+      "lifecycle": "current",
+      "content_ownership": "convenience",
+      "canonical_rule_ids": ["data-factory-contract"]
     },
     {
       "rule_id": "evidence-ledger",

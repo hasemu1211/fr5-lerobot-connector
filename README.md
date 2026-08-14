@@ -77,6 +77,7 @@ profile은 FR5의 절대 joint-position action, 7D state/action과 카메라 키
 | FR5·PGEA-100-40 제원과 소프트웨어 단위 | [하드웨어 계약](docs/hardware.md) |
 | 저장 형식·시간 정합·통과 기준 | [입력 구조와 품질 기준](docs/architecture-and-quality.md) |
 | 자연어 지시와 물체·장면 구성 | [작업 지시와 데이터셋 설계](docs/task-and-dataset-design.md) |
+| A4 pose·JobSpec·품질·안전·산출물 소유권 | [FR5 데이터팩토리 계약](docs/data-factory.md) |
 | SmolVLA·ACT·VQ-BeT 학습과 checkpoint 검사 | [정책 학습과 오프라인 검사](docs/training.md) |
 | 학습 조사·실험·반증과 미결정 항목 | [학습 정책 근거 장부](docs/training-evidence.md) |
 | checkpoint 실물 비교와 안전 판정 | [FR5 실물 정책 평가 프로토콜](docs/real-robot-evaluation.md) |
