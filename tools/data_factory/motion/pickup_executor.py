@@ -122,6 +122,9 @@ class UnavailableTransport:
     def plan_arm(self, *args):
         raise ContractError("OFFLINE_TRANSPORT_UNAVAILABLE")
 
+    def snapshot(self, *args):
+        raise ContractError("OFFLINE_TRANSPORT_UNAVAILABLE")
+
     def build_gripper_goal(self, *args):
         raise ContractError("OFFLINE_TRANSPORT_UNAVAILABLE")
 
@@ -143,7 +146,7 @@ class PickupExecutor:
             request = _exact(request, COMMAND_FIELDS, "COMMAND_SCHEMA")
             op_id, op = request["op_id"], request["op"]
             if (
-                request["schema_version"] != "fr5.pickup_executor.command.v3"
+                request["schema_version"] != "fr5.pickup_executor.command.v4"
                 or not isinstance(op_id, str)
                 or not SAFE_ID.fullmatch(op_id)
                 or op not in COMMAND_OPS
@@ -190,7 +193,7 @@ class PickupExecutor:
         return _response(code="PREFLIGHT_OK", ok=True, state="PREFLIGHT", data=facts)
 
     def _plan(self, payload):
-        _exact(payload, {"run_id", "motion_program", "initial_joint_state"}, "PLAN_SCHEMA")
+        _exact(payload, {"run_id", "motion_program"}, "PLAN_SCHEMA")
         run_id = payload["run_id"]
         if not isinstance(run_id, str) or not SAFE_ID.fullmatch(run_id):
             raise ContractError("PLAN_SCHEMA")
@@ -201,7 +204,22 @@ class PickupExecutor:
 
         motion_program = validate_motion_program(copy.deepcopy(payload["motion_program"]))
         action_graph = self._validated_preflight(motion_program)
-        state = _joint_positions(payload["initial_joint_state"])
+        observed = self.transport.snapshot(motion_program["planning"]["max_joint_state_age_s"])
+        observed = _exact(
+            observed,
+            {"joint_positions", "joint_state_age_s", "arm_controller", "gripper_controller"},
+            "SNAPSHOT_SCHEMA",
+        )
+        for controller in ("arm_controller", "gripper_controller"):
+            controller_state = _exact(
+                observed[controller],
+                {"endpoint", "type", "publisher_count", "ready", "age_s", "speed_scaling"},
+                "SNAPSHOT_SCHEMA",
+            )
+            if controller_state["ready"] is not True:
+                raise ContractError("CONTROLLER_NOT_READY")
+        initial_state = _joint_positions(observed.get("joint_positions"))
+        state = initial_state
         planned_steps = []
         for step in motion_program["steps"]:
             phase = step["phase"]
@@ -263,7 +281,7 @@ class PickupExecutor:
             state = final_state
 
         plan = {
-            "schema_version": "fr5.pickup_plan.v1",
+            "schema_version": "fr5.pickup_plan.v2",
             "run_id": run_id,
             "motion_program_digest": canonical_digest(motion_program),
             "action_graph": action_graph,
@@ -273,7 +291,7 @@ class PickupExecutor:
             "frames": motion_program["frames"],
             "planning": motion_program["planning"],
             "execution_timeouts_s": motion_program["execution_timeouts_s"],
-            "initial_joint_state": _joint_positions(payload["initial_joint_state"]),
+            "initial_joint_state": initial_state,
             "steps": planned_steps,
         }
         plan_digest = canonical_digest(plan)

@@ -137,14 +137,21 @@ class TestExecutionTransport(unittest.TestCase):
             transport.start_phase(gripper)
         self.assertEqual(caught.exception.code, "ROS_EXEC_ACTIVE")
 
-        node.callbacks["/joint_states"](SimpleNamespace(name=["finger", "j6", "j5", "j4", "j3", "j2", "j1"], position=[0., 6., 5., 4., 3., 2., 1.]))
         point = SimpleNamespace(positions=[0.])
-        node.callbacks["/fairino5_controller/controller_state"](SimpleNamespace(joint_names=["j1"], reference=point, feedback=point, speed_scaling_factor=0.5))
-        node.callbacks["/gripper_controller/controller_state"](SimpleNamespace(joint_names=["finger"], reference=point, feedback=point, speed_scaling_factor=1.0))
+        def populate(*_, **__):
+            node.callbacks["/joint_states"](SimpleNamespace(name=["finger", "j6", "j5", "j4", "j3", "j2", "j1"], position=[0., 6., 5., 4., 3., 2., 1.]))
+            node.callbacks["/fairino5_controller/controller_state"](SimpleNamespace(joint_names=["j1"], reference=point, feedback=point, speed_scaling_factor=0.5))
+            node.callbacks["/gripper_controller/controller_state"](SimpleNamespace(joint_names=["finger"], reference=point, feedback=point, speed_scaling_factor=1.0))
+        transport._rclpy = SimpleNamespace(spin_until_future_complete=lambda *args, **kwargs: None, spin_once=populate)
         snapshot = transport.snapshot(1.0)
         self.assertEqual(snapshot["joint_positions"], [1., 2., 3., 4., 5., 6.])
         self.assertEqual((snapshot["arm_controller"]["ready"], snapshot["arm_controller"]["speed_scaling"]), (True, 0.5))
         clock[0] = 12.0
+        transport.graph_timeout_s = 0.0
+        transport._rclpy.spin_once = lambda *args, **kwargs: None
+        with self.assertRaisesRegex(ContractError, "ROS_JOINT_STATE_STALE"):
+            transport.snapshot(1.0)
+        transport._joint_state_received_at = transport._arm_controller_received_at = transport._gripper_controller_received_at = None
         with self.assertRaisesRegex(ContractError, "ROS_JOINT_STATE_STALE"):
             transport.snapshot(1.0)
 

@@ -322,6 +322,21 @@ class RosMoveItTransport:
         ):
             raise ContractError("ROS_SNAPSHOT_AGE")
         max_age_s = float(max_age_s)
+        deadline = time.monotonic() + self.graph_timeout_s
+        while (
+            self._joint_state_received_at is None
+            or self._arm_controller_received_at is None
+            or self._gripper_controller_received_at is None
+            or any(
+                self._clock() - received_at > max_age_s
+                for received_at in (
+                    self._joint_state_received_at,
+                    self._arm_controller_received_at,
+                    self._gripper_controller_received_at,
+                )
+            )
+        ) and time.monotonic() < deadline:
+            self._rclpy.spin_once(self.node, timeout_sec=max(0.0, min(0.05, deadline - time.monotonic())))
         joint_age = self._fresh(self._joint_state_received_at, max_age_s, "ROS_JOINT_STATE_STALE")
         arm_age = self._fresh(self._arm_controller_received_at, max_age_s, "ROS_ARM_CONTROLLER_STALE")
         gripper_age = self._fresh(self._gripper_controller_received_at, max_age_s, "ROS_GRIPPER_CONTROLLER_STALE")
