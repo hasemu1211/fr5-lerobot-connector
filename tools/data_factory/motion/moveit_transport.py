@@ -1,7 +1,10 @@
 """ROS Jazzy plan-only transport for the FR5 pickup executor."""
 from __future__ import annotations
 
+import base64
 import math
+import time
+from dataclasses import dataclass
 
 from tools.fr5_data_factory import ContractError
 
@@ -13,6 +16,15 @@ ACTION_TYPES = {
     "/gripper_controller/follow_joint_trajectory":
         "control_msgs/action/FollowJointTrajectory",
 }
+
+
+@dataclass(slots=True)
+class _ActivePhase:
+    phase: str
+    type: str
+    goal_handle: object
+    result_future: object
+    deadline: float
 
 
 def _rotation_quaternion(columns):
@@ -61,13 +73,13 @@ def _rotation_quaternion(columns):
 class RosMoveItTransport:
     """Build plan-only MoveGroup requests and serialized gripper goals."""
 
-    def __init__(self, node, *, graph_timeout_s=1.0):
+    def __init__(self, node, *, graph_timeout_s=1.0, clock=time.monotonic):
         try:
             import rclpy
             from action_msgs.msg import GoalStatus
             from builtin_interfaces.msg import Duration
             from control_msgs.action import FollowJointTrajectory
-            from control_msgs.msg import JointTolerance
+            from control_msgs.msg import JointTolerance, JointTrajectoryControllerState
             from geometry_msgs.msg import Pose
             from moveit_msgs.action import ExecuteTrajectory, MoveGroup
             from moveit_msgs.msg import (
@@ -76,10 +88,11 @@ class RosMoveItTransport:
                 OrientationConstraint,
                 PositionConstraint,
                 RobotState,
+                RobotTrajectory,
                 MoveItErrorCodes,
             )
             from rclpy.action import ActionClient, get_action_names_and_types
-            from rclpy.serialization import serialize_message
+            from rclpy.serialization import deserialize_message, serialize_message
             from sensor_msgs.msg import JointState
             from shape_msgs.msg import SolidPrimitive
             from trajectory_msgs.msg import JointTrajectoryPoint
@@ -88,13 +101,19 @@ class RosMoveItTransport:
 
         self.node = node
         self.graph_timeout_s = graph_timeout_s
+        self._clock = clock
         self._rclpy = rclpy
         self._get_action_names_and_types = get_action_names_and_types
         self._serialize_message = serialize_message
+        self._deserialize_message = deserialize_message
         self._Duration = Duration
         self._FollowJointTrajectory = FollowJointTrajectory
+        self._ExecuteTrajectory = ExecuteTrajectory
+        self._RobotTrajectory = RobotTrajectory
         self._goal_succeeded = GoalStatus.STATUS_SUCCEEDED
+        self._goal_canceled = GoalStatus.STATUS_CANCELED
         self._moveit_success = MoveItErrorCodes.SUCCESS
+        self._gripper_success = FollowJointTrajectory.Result.SUCCESSFUL
         self._JointTolerance = JointTolerance
         self._Pose = Pose
         self._MoveGroup = MoveGroup
@@ -104,6 +123,7 @@ class RosMoveItTransport:
         self._PositionConstraint = PositionConstraint
         self._RobotState = RobotState
         self._JointState = JointState
+        self._JointTrajectoryControllerState = JointTrajectoryControllerState
         self._SolidPrimitive = SolidPrimitive
         self._JointTrajectoryPoint = JointTrajectoryPoint
         self.move_group = ActionClient(node, MoveGroup, "/move_action")
@@ -115,6 +135,258 @@ class RosMoveItTransport:
             FollowJointTrajectory,
             "/gripper_controller/follow_joint_trajectory",
         )
+        self._joint_state = None
+        self._joint_state_received_at = None
+        self._arm_controller_state = None
+        self._arm_controller_received_at = None
+        self._gripper_controller_state = None
+        self._gripper_controller_received_at = None
+        self._active = None
+        self._execution_locked = False
+        self._joint_state_subscription = None
+        self._arm_controller_subscription = None
+        self._gripper_controller_subscription = None
+        if hasattr(node, "create_subscription"):
+            self._joint_state_subscription = node.create_subscription(
+                JointState, "/joint_states", self._on_joint_state, 10
+            )
+            self._arm_controller_subscription = node.create_subscription(
+                JointTrajectoryControllerState,
+                "/fairino5_controller/controller_state",
+                self._on_arm_controller_state,
+                10,
+            )
+            self._gripper_controller_subscription = node.create_subscription(
+                JointTrajectoryControllerState,
+                "/gripper_controller/controller_state",
+                self._on_gripper_controller_state,
+                10,
+            )
+
+    def _on_joint_state(self, message):
+        self._joint_state = message
+        self._joint_state_received_at = self._clock()
+
+    def _on_arm_controller_state(self, message):
+        self._arm_controller_state = message
+        self._arm_controller_received_at = self._clock()
+
+    def _on_gripper_controller_state(self, message):
+        self._gripper_controller_state = message
+        self._gripper_controller_received_at = self._clock()
+
+    def _compiled_execution_goal(self, compiled_step):
+        if not isinstance(compiled_step, dict):
+            raise ContractError("ROS_EXEC_STEP")
+        phase = compiled_step.get("phase")
+        step_type = compiled_step.get("type")
+        encoded = compiled_step.get("trajectory_b64")
+        limits = compiled_step.get("limits")
+        if (
+            not isinstance(phase, str)
+            or not phase
+            or step_type not in {"ARM", "GRIPPER"}
+            or not isinstance(encoded, str)
+            or not isinstance(limits, dict)
+        ):
+            raise ContractError("ROS_EXEC_STEP")
+        timeout = limits.get("execution_timeout_s")
+        if (
+            isinstance(timeout, bool)
+            or not isinstance(timeout, (int, float))
+            or not math.isfinite(timeout)
+            or timeout <= 0
+        ):
+            raise ContractError("ROS_EXEC_STEP")
+        try:
+            serialized = base64.b64decode(encoded, validate=True)
+        except (ValueError, TypeError) as exc:
+            raise ContractError("ROS_EXEC_B64", str(exc)) from exc
+        if not serialized:
+            raise ContractError("ROS_EXEC_B64")
+        try:
+            if step_type == "ARM":
+                goal = self._ExecuteTrajectory.Goal()
+                goal.trajectory = self._deserialize_message(
+                    serialized, self._RobotTrajectory
+                )
+                client = self.execute_trajectory
+            else:
+                goal = self._deserialize_message(serialized, self._FollowJointTrajectory.Goal)
+                client = self.gripper
+        except RuntimeError as exc:
+            raise ContractError("ROS_EXEC_DESERIALIZATION", str(exc)) from exc
+        return phase, step_type, goal, client, float(timeout)
+
+    def start_phase(self, compiled_step):
+        """Start one approved serialized action and retain its sole active handle."""
+        if self._execution_locked or self._active is not None:
+            raise ContractError("ROS_EXEC_ACTIVE")
+        phase, step_type, goal, client, timeout = self._compiled_execution_goal(compiled_step)
+        try:
+            sent = client.send_goal_async(goal)
+        except RuntimeError as exc:
+            raise ContractError("ROS_EXEC_GOAL_FAILED", str(exc)) from exc
+        self._execution_locked = True
+        handle = self._wait(sent, self.graph_timeout_s, "ROS_EXEC_GOAL_TIMEOUT")
+        accepted = getattr(handle, "accepted", None)
+        if accepted is False:
+            self._execution_locked = False
+            raise ContractError("ROS_EXEC_REJECTED")
+        if accepted is not True:
+            raise ContractError("ROS_EXEC_GOAL_RESPONSE_INVALID")
+        try:
+            result_future = handle.get_result_async()
+        except RuntimeError as exc:
+            raise ContractError("ROS_EXEC_RESULT_FAILED", str(exc)) from exc
+        self._execution_locked = False
+        self._active = _ActivePhase(
+            phase, step_type, handle, result_future, self._clock() + timeout
+        )
+        return self._active
+
+    def poll_active(self):
+        """Return None while active, or a successful phase handle when terminal."""
+        active = getattr(self, "_active", None)
+        if active is None:
+            raise ContractError("ROS_EXEC_NO_ACTIVE")
+        if self._clock() > active.deadline:
+            raise ContractError("ROS_EXEC_RESULT_TIMEOUT")
+        try:
+            if not active.result_future.done():
+                self._rclpy.spin_once(self.node, timeout_sec=0.0)
+            if not active.result_future.done():
+                return None
+            result = active.result_future.result()
+        except RuntimeError as exc:
+            raise ContractError("ROS_EXEC_RESULT_FAILED", str(exc)) from exc
+        self._active = None
+        if result.status != self._goal_succeeded:
+            self._execution_locked = True
+            raise ContractError("ROS_EXEC_FAILED")
+        if active.type == "ARM":
+            succeeded = result.result.error_code.val == self._moveit_success
+        else:
+            succeeded = result.result.error_code == self._gripper_success
+        if not succeeded:
+            self._execution_locked = True
+            raise ContractError("ROS_EXEC_FAILED")
+        return active
+
+    def cancel_active(self, cancel_timeout_s):
+        """Cancel the active action; it is never exposed as active again."""
+        active = getattr(self, "_active", None)
+        if active is None:
+            raise ContractError("ROS_EXEC_NO_ACTIVE")
+        if (
+            isinstance(cancel_timeout_s, bool)
+            or not isinstance(cancel_timeout_s, (int, float))
+            or not math.isfinite(cancel_timeout_s)
+            or cancel_timeout_s <= 0
+        ):
+            raise ContractError("ROS_EXEC_CANCEL_TIMEOUT")
+        self._execution_locked = True
+        try:
+            canceled = active.goal_handle.cancel_goal_async()
+            response = self._wait(canceled, float(cancel_timeout_s), "ROS_EXEC_CANCEL_ACK_TIMEOUT")
+            if not response.goals_canceling:
+                raise ContractError("ROS_EXEC_CANCEL_REJECTED")
+            result = self._wait(
+                active.result_future, float(cancel_timeout_s), "ROS_EXEC_CANCEL_RESULT_TIMEOUT"
+            )
+        except ContractError:
+            raise
+        except RuntimeError as exc:
+            raise ContractError("ROS_EXEC_CANCEL_FAILED", str(exc)) from exc
+        if result.status != self._goal_canceled:
+            self._active = None
+            raise ContractError("ROS_EXEC_CANCEL_NOT_CANCELED")
+        self._active = None
+        return active
+
+    def _fresh(self, received_at, max_age_s, code):
+        if received_at is None:
+            raise ContractError(code)
+        age = self._clock() - received_at
+        if age < 0 or age > max_age_s:
+            raise ContractError(code)
+        return age
+
+    def snapshot(self, max_age_s):
+        """Return a fresh, complete observation for execution safety checks."""
+        if (
+            isinstance(max_age_s, bool)
+            or not isinstance(max_age_s, (int, float))
+            or not math.isfinite(max_age_s)
+            or max_age_s < 0
+        ):
+            raise ContractError("ROS_SNAPSHOT_AGE")
+        max_age_s = float(max_age_s)
+        joint_age = self._fresh(self._joint_state_received_at, max_age_s, "ROS_JOINT_STATE_STALE")
+        arm_age = self._fresh(self._arm_controller_received_at, max_age_s, "ROS_ARM_CONTROLLER_STALE")
+        gripper_age = self._fresh(self._gripper_controller_received_at, max_age_s, "ROS_GRIPPER_CONTROLLER_STALE")
+        names = list(self._joint_state.name)
+        positions = list(self._joint_state.position)
+        if len(names) != len(set(names)) or not set(JOINT_ORDER).issubset(names) or len(positions) != len(names):
+            raise ContractError("ROS_JOINT_STATE")
+        by_name = dict(zip(names, positions))
+        if any(isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) for value in by_name.values()):
+            raise ContractError("ROS_JOINT_STATE")
+        try:
+            arm_publishers = self.node.count_publishers("/fairino5_controller/controller_state")
+            gripper_publishers = self.node.count_publishers("/gripper_controller/controller_state")
+            topics = dict(self.node.get_topic_names_and_types())
+        except RuntimeError as exc:
+            raise ContractError("ROS_GRAPH_FAILED", str(exc)) from exc
+        controller_type = "control_msgs/msg/JointTrajectoryControllerState"
+        arm_type = topics.get("/fairino5_controller/controller_state", [])
+        gripper_type = topics.get("/gripper_controller/controller_state", [])
+        self._controller_values(self._arm_controller_state, "ROS_ARM_CONTROLLER_STATE")
+        self._controller_values(self._gripper_controller_state, "ROS_GRIPPER_CONTROLLER_STATE")
+        arm_speed = self._arm_controller_state.speed_scaling_factor
+        if not isinstance(arm_speed, (int, float)) or not math.isfinite(arm_speed):
+            raise ContractError("ROS_ARM_CONTROLLER_STATE")
+        gripper_speed = self._gripper_controller_state.speed_scaling_factor
+        if not isinstance(gripper_speed, (int, float)) or not math.isfinite(gripper_speed):
+            raise ContractError("ROS_GRIPPER_CONTROLLER_STATE")
+        return {
+            "joint_positions": [by_name[name] for name in JOINT_ORDER],
+            "joint_state_age_s": joint_age,
+            "arm_controller": {
+                "endpoint": "/fairino5_controller/controller_state",
+                "type": controller_type if arm_type == [controller_type] else "|".join(sorted(arm_type)),
+                "publisher_count": arm_publishers,
+                "ready": arm_type == [controller_type] and arm_publishers > 0,
+                "age_s": arm_age,
+                "speed_scaling": float(arm_speed),
+            },
+            "gripper_controller": {
+                "endpoint": "/gripper_controller/controller_state",
+                "type": controller_type if gripper_type == [controller_type] else "|".join(sorted(gripper_type)),
+                "publisher_count": gripper_publishers,
+                "ready": gripper_type == [controller_type] and gripper_publishers > 0,
+                "age_s": gripper_age,
+                "speed_scaling": float(gripper_speed),
+            },
+        }
+
+    @staticmethod
+    def _controller_values(message, code):
+        names = list(message.joint_names)
+        if not names or len(names) != len(set(names)):
+            raise ContractError(code)
+        for point in (message.reference, message.feedback):
+            positions = list(point.positions)
+            if positions:
+                if len(positions) != len(names) or any(
+                    isinstance(value, bool)
+                    or not isinstance(value, (int, float))
+                    or not math.isfinite(value)
+                    for value in positions
+                ):
+                    raise ContractError(code)
+                return
+        raise ContractError(code)
 
     def preflight(self):
         try:
