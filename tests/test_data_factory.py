@@ -29,7 +29,7 @@ class DataFactoryTest(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory(); self.root = Path(self.temp.name)
         for directory in ("robot_systems", "collection_profiles", "objects", "grasps", "cells"): (self.root / directory).mkdir()
-        self._write("robot_systems/fr5-lab-a.json", {"schema_version":"data_factory.robot_system.v1","robot_system_id":"fr5-lab-a","qualification_status":"QUALIFIED","base_frame":"fr5_base","tcp_digest":digest("tcp"),"state_action_schema_digest":digest("state")})
+        self._write("robot_systems/fr5-lab-a.json", {"schema_version":"data_factory.robot_system.v1","robot_system_id":"fr5-lab-a","qualification_status":"QUALIFIED","base_frame":"base_link","tcp_digest":digest("tcp"),"state_action_schema_digest":digest("state")})
         self._write("collection_profiles/fr5-dual-rgb-30hz-v1.json", {"schema_version":"data_factory.collection_profile.v1","collection_profile_id":"fr5-dual-rgb-30hz-v1","qualification_status":"QUALIFIED","quality_contract_digest":digest("quality")})
         self._write("objects/OBJECT_A.json", {"schema_version":"data_factory.object_profile.v1","object_profile_id":"OBJECT_A","qualification_status":"QUALIFIED","object_datum_digest":digest("datum")})
         self._write("grasps/top_center.json", {"schema_version":"data_factory.grasp_profile.v1","grasp_profile_id":"top_center","qualification_status":"QUALIFIED","object_profile_id":"OBJECT_A","grasp_margin_mm":20,"grasp_contract_digest":digest("grasp")})
@@ -84,6 +84,30 @@ class DataFactoryTest(unittest.TestCase):
         invalid_utf8 = subprocess.run(command[:command.index("--candidate") + 1] + ["-"] + command[command.index("--candidate") + 2:], input=b"\xff", capture_output=True)
         self.assertEqual(invalid_utf8.returncode, 2)
         self.assertEqual(json.loads(invalid_utf8.stderr)["error"]["code"], "JSON_IO")
+
+    def test_motion_qualification_resolves_only_bound_evidence(self):
+        urdf = ROOT / "src/fairino_description/urdf/fairino5_v6.urdf"
+        candidate = {"schema_version":"data_factory.home_candidate.v1","home_candidate_id":"fr5-lab-a-home-r001","robot_system_id":"fr5-lab-a","robot_model_name":"fairino5_v6_robot","robot_description_digest":"sha256:" + hashlib.sha256(urdf.read_bytes()).hexdigest(),"joint_order":["j1","j2","j3","j4","j5","j6"],"ui_observation_deg":[-89.913,-90.001,90,-90,-90,0],"nominal_target_deg":[-90,-90,90,-90,-90,0],"observation_source":"controller_web_ui","feedback_capture_status":"NOT_CAPTURED","qualification_status":"CANDIDATE","safety_status":"NOT_SAFE_FOR_MOTION","intended_use_after_qualification":"SAFE_POSE_PTP"}
+        validated = self._validated()
+        arm = {"velocity_scaling":.1,"acceleration_scaling":.1,"planning_timeout_s":1,"execution_timeout_s":2}
+        grip = {"command_duration_s":1,"execution_timeout_s":2,"completion_tolerance_m":.001}
+        qualification = {"schema_version":"data_factory.motion_qualification.v1","motion_qualification_id":"motion-q1","qualification_status":"QUALIFIED","robot_system_id":"fr5-lab-a","cell_calibration_id":"cal-a","object_profile_id":"OBJECT_A","grasp_profile_id":"top_center","profile_digests":{key:validated["input_digests"][key] for key in ("robot_system","cell_calibration","object_profile","grasp_profile")},"home_candidate_digest":factory.canonical_digest(candidate),"robot_description_digest":candidate["robot_description_digest"],"moveit_config_digest":digest("moveit"),"planning_scene_digest":digest("scene"),"frames":{"planning_frame":"base_link","planning_group":"fairino5_v6_group","tool_link":"wrist3_link"},"tool_to_tcp":{"translation_m":[.01,.02,.03],"rotation_columns":[[0,1,0],[-1,0,0],[0,0,1]]},"datum_to_tcp_grasp":{"translation_m":[.1,.2,.3],"rotation_columns":[[1,0,0],[0,0,1],[0,-1,0]]},"offsets_m":{"pregrasp":.1,"approach_stop":.02,"lift":.04,"retreat":.1},"gripper_positions_m":{"open":.02,"closed":.005},"qualified_safe_joint_positions_rad":[math.radians(v) for v in candidate["nominal_target_deg"]],"phase_limits":{phase:(grip if phase.startswith("GRIPPER") else arm) for phase in factory.MOTION_PHASES},"goal_tolerances":{"position_m":.001,"orientation_rad":.01,"joint_rad":.01},"max_joint_state_age_s":.1,"qualified_at":"2026-08-13T00:00:00Z"}
+        program = factory.resolve_motion_program(validated, qualification, candidate, urdf=urdf, expected_robot_system_id="fr5-lab-a", now=NOW)
+        self.assertEqual([step["phase"] for step in program["steps"]], list(factory.MOTION_PHASES))
+        final = program["steps"][2]["target"]["base_tcp"]["translation_m"]
+        for observed, expected in zip(final, [.9387916513, 2.236016, 3.3]): self.assertAlmostEqual(observed, expected, places=7)
+        self.assertNotEqual(program["steps"][1]["target"], program["steps"][2]["target"])
+        self.assertEqual(program["planning"]["goal_tolerances"], qualification["goal_tolerances"])
+        self.assertEqual(program["steps"][2]["requires_confirmation"], "PRECONTACT_HUMAN")
+        self.assertEqual(program["steps"][4]["pause_after"], "SEMANTIC_VERDICT")
+        selected, yaw0, job, qualification_path, candidate_path = (self._write(name, value) for name, value in (("selected.json", self.selected), ("yaw0.json", self.yaw0), ("job.json", self.job), ("motion.json", qualification), ("home.json", candidate)))
+        run = subprocess.run([sys.executable, str(ROOT / "tools/fr5_data_factory.py"), "resolve-motion", "--job", str(job), "--selected-sheet", str(selected), "--yaw0-sheet", str(yaw0), "--config-root", str(self.root), "--motion-qualification", str(qualification_path), "--home-candidate", str(candidate_path), "--urdf", str(urdf), "--expected-robot-system-id", "fr5-lab-a"], text=True, capture_output=True)
+        self.assertEqual(run.returncode, 0, run.stderr)
+        self.assertEqual(json.loads(run.stdout), factory.resolve_motion_program(factory.validate_job_spec(self.job, paths={"selected_sheet": selected, "yaw0_sheet": yaw0}, config_root=self.root), qualification, candidate, urdf=urdf, expected_robot_system_id="fr5-lab-a"))
+        for bad, code in (({**qualification,"qualification_status":"CANDIDATE"},"MOTION_STATUS"), ({**qualification,"home_candidate_digest":digest("wrong")},"MOTION_HOME_BINDING"), ({key:value for key,value in qualification.items() if key != "goal_tolerances"},"MOTION_KEYS"), ({**qualification,"frames":{**qualification["frames"],"planning_frame":"bogus"}},"MOTION_FRAMES"), ({**qualification,"goal_tolerances":{**qualification["goal_tolerances"],"joint_rad":0}},"MOTION_TOLERANCES"), ({**qualification,"phase_limits":{**qualification["phase_limits"],"LIFT_LIN":{**arm,"velocity_scaling":.2}}},"MOTION_PHASE_LIMITS"), ({**qualification,"datum_to_tcp_grasp":{"translation_m":[0,0,0],"rotation_columns":[[1,0,0],[0,1,0],[0,0,-1]]}},"MOTION_TRANSFORM")):
+            with self.subTest(code=code):
+                with self.assertRaises(factory.ContractError) as caught: factory.resolve_motion_program(validated, bad, candidate, urdf=urdf, expected_robot_system_id="fr5-lab-a", now=NOW)
+                self.assertEqual(caught.exception.code, code)
     def _write(self, relative, value):
         path = self.root / relative; path.parent.mkdir(exist_ok=True); path.write_text(json.dumps(value)); return path
     def _sheet(self, yaw, measured_scale_mm=100):

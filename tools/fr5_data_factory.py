@@ -35,6 +35,12 @@ PROFILE_KEYS = {
 }
 HOME_CANDIDATE_KEYS = {"schema_version", "home_candidate_id", "robot_system_id", "robot_model_name", "robot_description_digest", "joint_order", "ui_observation_deg", "nominal_target_deg", "observation_source", "feedback_capture_status", "qualification_status", "safety_status", "intended_use_after_qualification"}
 HOME_JOINT_ORDER = ["j1", "j2", "j3", "j4", "j5", "j6"]
+MOTION_PHASES = ("PREGRASP_PTP", "APPROACH_STOP_LIN", "FINAL_APPROACH_LIN", "GRIPPER_CLOSE", "LIFT_LIN", "LOWER_LIN", "GRIPPER_OPEN", "RETREAT_LIN", "SAFE_POSE_PTP")
+MOTION_QUALIFICATION_KEYS = {"schema_version", "motion_qualification_id", "qualification_status", "robot_system_id", "cell_calibration_id", "object_profile_id", "grasp_profile_id", "profile_digests", "home_candidate_digest", "robot_description_digest", "moveit_config_digest", "planning_scene_digest", "frames", "tool_to_tcp", "datum_to_tcp_grasp", "offsets_m", "gripper_positions_m", "qualified_safe_joint_positions_rad", "goal_tolerances", "max_joint_state_age_s", "phase_limits", "qualified_at"}
+MOTION_PROFILE_DIGESTS = {"robot_system", "cell_calibration", "object_profile", "grasp_profile"}
+MOTION_FRAMES = {"planning_frame", "planning_group", "tool_link"}
+MOTION_OFFSETS = {"pregrasp", "approach_stop", "lift", "retreat"}
+MOTION_GOAL_TOLERANCES = {"position_m", "orientation_rad", "joint_rad"}
 
 
 class ContractError(ValueError):
@@ -484,6 +490,128 @@ def resolve_pose(validated):
     return {"frame_id": robot["base_frame"], "position_base_m": position, "rotation_base_columns": [x_col, y_col, cal["z"]], "resolved_job_digest": validated["resolved_job_digest"], "input_digests": validated["input_digests"]}
 
 
+def _rotation(columns, code):
+    if not isinstance(columns, list) or len(columns) != 3:
+        raise ContractError(code)
+    result = [_vec(column, code) for column in columns]
+    if any(abs(_dot(column, column) - 1) > 1e-9 for column in result) or any(abs(_dot(result[a], result[b])) > 1e-9 for a, b in ((0, 1), (0, 2), (1, 2))) or _norm(_sub(_cross(result[0], result[1]), result[2])) > 1e-9:
+        raise ContractError(code)
+    return result
+
+
+def _transform(value, code):
+    value = _exact(value, {"translation_m", "rotation_columns"}, code)
+    return {"translation_m": _vec(value["translation_m"], code), "rotation_columns": _rotation(value["rotation_columns"], code)}
+
+
+def _matvec(columns, vector):
+    return [sum(columns[column][row] * vector[column] for column in range(3)) for row in range(3)]
+
+
+def _compose(left, right):
+    rotation = [_matvec(left["rotation_columns"], column) for column in right["rotation_columns"]]
+    return {"translation_m": _add(left["translation_m"], _matvec(left["rotation_columns"], right["translation_m"])), "rotation_columns": rotation}
+
+
+def _inverse(transform):
+    rotation = [[transform["rotation_columns"][row][column] for row in range(3)] for column in range(3)]
+    return {"translation_m": _mul(_matvec(rotation, transform["translation_m"]), -1), "rotation_columns": rotation}
+
+
+def _urdf_motion_limits(urdf):
+    try:
+        root = ET.fromstring(Path(urdf).read_bytes())
+    except (OSError, ET.ParseError) as exc:
+        raise ContractError("MOTION_URDF", str(exc)) from exc
+    gripper = []
+    for joint in root.findall("joint"):
+        limit = joint.find("limit")
+        if limit is not None and ("finger" in (joint.get("name") or "") or "gripper" in (joint.get("name") or "")):
+            try: gripper.append((float(limit.attrib["lower"]), float(limit.attrib["upper"])))
+            except (KeyError, ValueError) as exc: raise ContractError("MOTION_URDF_LIMITS") from exc
+    if not gripper or any(not math.isfinite(n) or lower > upper for lower, upper in gripper for n in (lower, upper)):
+        raise ContractError("MOTION_URDF_LIMITS")
+    return max(lower for lower, _ in gripper), min(upper for _, upper in gripper)
+
+
+def _validate_motion_qualification(qualification, validated, home, *, urdf, now=None):
+    qualification = _exact(qualification, MOTION_QUALIFICATION_KEYS, "MOTION_KEYS")
+    if qualification["schema_version"] != "data_factory.motion_qualification.v1": raise ContractError("MOTION_SCHEMA")
+    _id(qualification["motion_qualification_id"], "MOTION_ID")
+    if qualification["qualification_status"] != "QUALIFIED": raise ContractError("MOTION_STATUS")
+    job, digests = validated["normalized_job"], validated["input_digests"]
+    for key in ("robot_system_id", "cell_calibration_id", "object_profile_id", "grasp_profile_id"):
+        if qualification[key] != job[key]: raise ContractError("MOTION_BINDING")
+    profiles = _exact(qualification["profile_digests"], MOTION_PROFILE_DIGESTS, "MOTION_DIGESTS")
+    for key, expected in (("robot_system", digests["robot_system"]), ("cell_calibration", digests["cell_calibration"]), ("object_profile", digests["object_profile"]), ("grasp_profile", digests["grasp_profile"])):
+        if _digest(profiles[key], "MOTION_DIGESTS") != expected: raise ContractError("MOTION_BINDING")
+    if _digest(qualification["home_candidate_digest"], "MOTION_DIGESTS") != home["candidate_digest"]: raise ContractError("MOTION_HOME_BINDING")
+    for key in ("robot_description_digest", "moveit_config_digest", "planning_scene_digest"):
+        _digest(qualification[key], "MOTION_DIGESTS")
+    if qualification["robot_description_digest"] != home["robot_description_digest"]: raise ContractError("MOTION_HOME_BINDING")
+    frames = _exact(qualification["frames"], MOTION_FRAMES, "MOTION_FRAMES")
+    if (frames["planning_frame"] != "base_link" or frames["planning_frame"] != validated["robot"]["base_frame"] or frames["planning_group"] != "fairino5_v6_group" or
+            frames["tool_link"] != "wrist3_link" or any(not isinstance(value, str) or not value for value in frames.values())):
+        raise ContractError("MOTION_FRAMES")
+    transforms = {key: _transform(qualification[key], "MOTION_TRANSFORM") for key in ("tool_to_tcp", "datum_to_tcp_grasp")}
+    offsets = _exact(qualification["offsets_m"], MOTION_OFFSETS, "MOTION_OFFSETS")
+    offsets = {key: _number(value, "MOTION_OFFSETS") for key, value in offsets.items()}
+    if not (offsets["pregrasp"] > offsets["approach_stop"] > 0 and offsets["lift"] > 0 and offsets["retreat"] > 0): raise ContractError("MOTION_OFFSETS")
+    gripper = _exact(qualification["gripper_positions_m"], {"open", "closed"}, "MOTION_GRIPPER")
+    gripper = {key: _number(value, "MOTION_GRIPPER") for key, value in gripper.items()}
+    lower, upper = _urdf_motion_limits(urdf)
+    if any(not lower <= value <= upper for value in gripper.values()) or gripper["open"] <= gripper["closed"]: raise ContractError("MOTION_GRIPPER")
+    safe = qualification["qualified_safe_joint_positions_rad"]
+    if not isinstance(safe, list) or len(safe) != len(HOME_JOINT_ORDER) or any(abs(_number(value, "MOTION_SAFE_JOINTS") - expected) > 1e-12 for value, expected in zip(safe, home["nominal_target_rad"])): raise ContractError("MOTION_SAFE_JOINTS")
+    tolerance = _exact(qualification["goal_tolerances"], MOTION_GOAL_TOLERANCES, "MOTION_TOLERANCES")
+    tolerance = {key: _number(value, "MOTION_TOLERANCES") for key, value in tolerance.items()}
+    if any(value <= 0 for value in tolerance.values()): raise ContractError("MOTION_TOLERANCES")
+    max_joint_state_age_s = _number(qualification["max_joint_state_age_s"], "MOTION_JOINT_STATE_AGE")
+    if max_joint_state_age_s <= 0: raise ContractError("MOTION_JOINT_STATE_AGE")
+    phase_limits = _exact(qualification["phase_limits"], set(MOTION_PHASES), "MOTION_PHASE_LIMITS")
+    normalized_limits = {}
+    for phase in MOTION_PHASES:
+        limit = phase_limits[phase]
+        if phase.startswith("GRIPPER"):
+            limit = _exact(limit, {"command_duration_s", "execution_timeout_s", "completion_tolerance_m"}, "MOTION_PHASE_LIMITS")
+            values = {key: _number(value, "MOTION_PHASE_LIMITS") for key, value in limit.items()}
+        else:
+            limit = _exact(limit, {"velocity_scaling", "acceleration_scaling", "planning_timeout_s", "execution_timeout_s"}, "MOTION_PHASE_LIMITS")
+            values = {key: _number(value, "MOTION_PHASE_LIMITS") for key, value in limit.items()}
+            if values["velocity_scaling"] > .1 or values["acceleration_scaling"] > .1: raise ContractError("MOTION_PHASE_LIMITS")
+        if any(value <= 0 for value in values.values()): raise ContractError("MOTION_PHASE_LIMITS")
+        normalized_limits[phase] = values
+    _timestamp(qualification["qualified_at"], "MOTION_QUALIFIED_AT", now=now)
+    return {"digest": canonical_digest(qualification), "frames": frames, "transforms": transforms, "offsets": offsets, "gripper": gripper, "safe": [_number(v, "MOTION_SAFE_JOINTS") for v in safe], "limits": normalized_limits, "tolerances": tolerance, "max_joint_state_age_s": max_joint_state_age_s, "pins": {key: qualification[key] for key in ("robot_description_digest", "moveit_config_digest", "planning_scene_digest")}}
+
+
+def resolve_motion_program(validated, motion_qualification, home_candidate, *, urdf, expected_robot_system_id, now=None):
+    """Resolve a qualification-bound, offline-only motion program; it authorizes no execution."""
+    home_raw = load_json_strict(json.dumps(home_candidate, allow_nan=False)) if isinstance(home_candidate, dict) else load_json_strict(home_candidate)
+    home = validate_home_candidate(home_raw, urdf=urdf, expected_robot_system_id=expected_robot_system_id)
+    qualification_raw = load_json_strict(json.dumps(motion_qualification, allow_nan=False)) if isinstance(motion_qualification, dict) else load_json_strict(motion_qualification)
+    q = _validate_motion_qualification(qualification_raw, validated, {**home, "robot_description_digest": home_raw["robot_description_digest"]}, urdf=urdf, now=now)
+    pose = resolve_pose(validated)
+    datum = {"translation_m": pose["position_base_m"], "rotation_columns": pose["rotation_base_columns"]}
+    tcp = _compose(datum, q["transforms"]["datum_to_tcp_grasp"])
+    tool_inverse = _inverse(q["transforms"]["tool_to_tcp"])
+    def target(offset):
+        shifted = {"translation_m": _add(tcp["translation_m"], _mul(datum["rotation_columns"][2], offset)), "rotation_columns": tcp["rotation_columns"]}
+        return {"base_tcp": shifted, "base_tool": _compose(shifted, tool_inverse)}
+    offsets = {"PREGRASP_PTP": q["offsets"]["pregrasp"], "APPROACH_STOP_LIN": q["offsets"]["approach_stop"], "FINAL_APPROACH_LIN": 0, "LIFT_LIN": q["offsets"]["lift"], "LOWER_LIN": 0, "RETREAT_LIN": q["offsets"]["retreat"]}
+    steps = []
+    for phase in MOTION_PHASES:
+        step = {"phase": phase, "limits": q["limits"][phase]}
+        if phase in offsets: step["target"] = target(offsets[phase])
+        elif phase.startswith("GRIPPER"): step["gripper_position_m"] = q["gripper"]["closed" if phase == "GRIPPER_CLOSE" else "open"]
+        else: step["joint_positions_rad"] = q["safe"]
+        if phase == "FINAL_APPROACH_LIN": step["requires_confirmation"] = "PRECONTACT_HUMAN"
+        if phase == "LIFT_LIN": step["pause_after"] = "SEMANTIC_VERDICT"
+        steps.append(step)
+    binding_digests = {**validated["input_digests"], **q["pins"], "motion_qualification": q["digest"], "home_candidate": home["candidate_digest"]}
+    return {"schema_version": "fr5.motion_program.v1", "resolved_job_digest": validated["resolved_job_digest"], "binding_digests": binding_digests, "frames": q["frames"], "planning": {"pipeline_id": "pilz_industrial_motion_planner", "ptp_planner_id": "PTP", "lin_planner_id": "LIN", "goal_tolerances": q["tolerances"], "max_joint_state_age_s": q["max_joint_state_age_s"]}, "steps": steps}
+
+
 def build_job_spec(selected_sheet, *, point_id=None, x_mm=None, y_mm=None, job_id, robot_system_id, collection_profile_id, cell_calibration_id, object_profile_id, grasp_profile_id, operator_or_agent_id, approval_expiry, now=None):
     """Build the fixed pickup JobSpec from an A4 point or bounded coordinate."""
     sheet = _document(selected_sheet, "INPUT_SELECTED_SHEET")
@@ -597,6 +725,9 @@ def _cli():
         command.add_argument("--selected-sheet", required=True)
         command.add_argument("--yaw0-sheet", required=True)
         command.add_argument("--config-root", required=True)
+    motion = sub.add_parser("resolve-motion")
+    for name in ("job", "selected-sheet", "yaw0-sheet", "config-root", "motion-qualification", "home-candidate", "urdf", "expected-robot-system-id"):
+        motion.add_argument(f"--{name}", required=True)
     home = sub.add_parser("validate-home-candidate")
     home.add_argument("--candidate", required=True)
     home.add_argument("--urdf", required=True)
@@ -650,6 +781,10 @@ def _cli():
             paths={"selected_sheet": args.selected_sheet, "yaw0_sheet": args.yaw0_sheet},
             config_root=args.config_root,
         )
+        if args.command == "resolve-motion":
+            qualification = load_json_strict(sys.stdin.read() if args.motion_qualification == "-" else Path(args.motion_qualification).read_text())
+            candidate = load_json_strict(sys.stdin.read() if args.home_candidate == "-" else Path(args.home_candidate).read_text())
+            print(json.dumps(resolve_motion_program(validated, qualification, candidate, urdf=args.urdf, expected_robot_system_id=args.expected_robot_system_id), sort_keys=True, separators=(",", ":"), allow_nan=False)); return 0
         output = resolve_pose(validated) if args.command == "resolve-pose" else {"normalized_job": validated["normalized_job"], "input_digests": validated["input_digests"], "resolved_job_digest": validated["resolved_job_digest"]}
         print(json.dumps(output, sort_keys=True, separators=(",", ":"), allow_nan=False)); return 0
     except (ContractError, OSError, UnicodeError) as exc:
