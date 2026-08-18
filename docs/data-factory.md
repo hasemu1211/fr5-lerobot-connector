@@ -59,7 +59,7 @@ brightness, clipping, sharpness와 색 변화량은 정성 검토를 돕는 warn
   "y_mm": 0,
   "object_profile_id": "OBJECT_A",
   "grasp_profile_id": "top_center",
-  "instruction": "pick up the object",
+  "instruction": "pick up the wooden cube",
   "episode_intent": "nominal pickup",
   "operator_or_agent_id": "operator-id",
   "approval_expiry": "RFC3339 timestamp",
@@ -70,6 +70,8 @@ brightness, clipping, sharpness와 색 변화량은 정성 검토를 돕는 warn
 필수 필드 누락, unknown field, 등록되지 않은 ID, digest 불일치와 만료된 승인은 motion과 recording 전에 거부한다. 첫 schema에는 `destination`, behavior mode, recovery, alternate approach와 grasp ranking 필드를 넣지 않는다.
 
 사람과 AI는 profile digest를 직접 복사하지 않는다. validator가 `cell_calibration_id`와 각 profile ID를 검토된 config에 해석하고 canonical digest를 `ResolvedJob`에 기록한다. config가 바뀌면 resolved digest도 바뀌므로 이전 승인은 재사용할 수 없다.
+
+object profile은 VLA용 자연어 `description`과 제어용 치수를 분리한다. builder는 검토된 description에서 `pick up the wooden cube` 같은 instruction을 자동 파생하고 validator가 정확히 결속한다. grasp profile의 ROS 미터 단위 닫힘 명령·허용 피드백 범위와 velocity/force는 VLA 언어 입력에 넣지 않는다.
 
 사람은 JSON을 직접 작성하지 않고 같은 도구의 대화형 builder를 사용할 수 있다.
 
@@ -119,7 +121,11 @@ validate
   → human setup approval
   → full forward/reset dry-run
   → human motion approval
-  → record and execute pickup
+  → record and approach
+  → human pre-contact confirmation
+  → close and verify object-specific feedback window
+  → human grasp verdict
+  → lift
   → freeze
   → human semantic verdict
   → reset outside recording
