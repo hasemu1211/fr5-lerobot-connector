@@ -370,19 +370,17 @@ def _validate_sheet(sheet):
 
 def _sheet_contract(selected, yaw0, job):
     for sheet in (selected, yaw0):
-        _validate_sheet(sheet)
-        if sheet["a4_family_digest"] != _family_digest(sheet):
-            raise ContractError("SHEET_FAMILY_DIGEST")
+        validate_sheet_manifest(sheet)
     if canonical_digest(selected) != job["sheet_manifest_digest"]: raise ContractError("SHEET_DIGEST")
     if selected["a4_family_digest"] != yaw0["a4_family_digest"]: raise ContractError("SHEET_FAMILY")
     if selected.get("place_id") != job["place_id"] or yaw0.get("place_id") != job["place_id"]: raise ContractError("SHEET_PLACE")
     if _number(yaw0.get("yaw_deg"), "SHEET_YAW") != 0: raise ContractError("SHEET_YAW0")
     yaw = _number(selected.get("yaw_deg"), "SHEET_YAW")
     if yaw != job["yaw_deg"]: raise ContractError("SHEET_YAW")
-    _continuous_coordinate(selected, job["x_mm"], job["y_mm"])
+    bounded_place_coordinate(selected, job["x_mm"], job["y_mm"])
 
 
-def _continuous_coordinate(sheet, x_mm, y_mm):
+def bounded_place_coordinate(sheet, x_mm, y_mm):
     x, y = _input_number(x_mm, "JOB_BUILDER_INPUT"), _input_number(y_mm, "JOB_BUILDER_INPUT")
     u_values = [_number(point["local_uv_mm"][0], "SHEET_GRID") for point in sheet["grid_points"]]
     v_values = [_number(point["local_uv_mm"][1], "SHEET_GRID") for point in sheet["grid_points"]]
@@ -396,15 +394,71 @@ def _continuous_coordinate(sheet, x_mm, y_mm):
     return x, y
 
 
-def _calibration(calibration, job, yaw0, robot, grasp, now):
+def fit_place_calibration(center_base_m, x_ref_base_m, table_normal_base, registration, scale_bar_mm, y_check_base_m=None):
+    """Fit the CENTER/X_REF datum axes and independently assess optional Y_CHECK."""
+    center, xref, normal = (_vec(value, "CALIBRATION_VECTOR") for value in (center_base_m, x_ref_base_m, table_normal_base))
+    z = _unit(normal, "CALIBRATION_NORMAL")
+    try:
+        origin, ref, verify = (registration[key]["sheet_xy_mm"] for key in ("origin", "x_ref", "verify"))
+        if registration["origin"]["id"] != "CENTER" or registration["x_ref"]["id"] != "X_REF" or registration["verify"]["id"] != "Y_CHECK": raise KeyError
+        ou, ov, ru, rv, vu, vv = (_number(n, "SHEET_REGISTRATION") for n in (*origin, *ref, *verify))
+    except (KeyError, TypeError, ContractError):
+        raise ContractError("SHEET_REGISTRATION") from None
+    nominal_x = ru - ou
+    if nominal_x <= 0 or abs(rv - ov) > 1e-6: raise ContractError("SHEET_REGISTRATION")
+    delta = _sub(xref, center); out_plane_mm = abs(_dot(delta, z)) * 1000
+    plane_x = _sub(delta, _mul(z, _dot(delta, z))); x = _unit(plane_x, "CALIBRATION_X_DEGENERATE"); y = _unit(_cross(z, x), "CALIBRATION_Y_DEGENERATE")
+    metrics = {"xref_observed_mm": _norm(plane_x) * 1000, "xref_distance_error_mm": abs(_norm(plane_x) * 1000 - nominal_x), "xref_out_of_plane_mm": out_plane_mm, "scale_error_mm": abs(_number(scale_bar_mm, "CALIBRATION_SCALE") - 100)}
+    ycheck = None
+    if y_check_base_m is not None:
+        ycheck = _vec(y_check_base_m, "CALIBRATION_VECTOR")
+        expected = _add(center, _add(_mul(x, (vu - ou) / 1000), _mul(y, (vv - ov) / 1000)))
+        metrics["y_check_residual_mm"] = _norm(_sub(ycheck, expected)) * 1000
+    return {"center": center, "x_ref": xref, "y_check": ycheck, "x": x, "y": y, "z": z, "nominal_x_ref_mm": nominal_x, "metrics": metrics}
+
+
+def validate_sheet_manifest(sheet):
+    """Validate one canonical A4 v2 sheet and its recomputed family digest."""
+    _validate_sheet(sheet)
+    if sheet["a4_family_digest"] != _family_digest(sheet):
+        raise ContractError("SHEET_FAMILY_DIGEST")
+    return sheet
+
+
+def validate_yaw0_sheet(sheet):
+    """Validate the canonical A4 v2 yaw-zero sheet used for place calibration."""
+    validate_sheet_manifest(sheet)
+    if _number(sheet["yaw_deg"], "SHEET_YAW") != 0:
+        raise ContractError("SHEET_YAW0")
+    return sheet
+
+
+def resolve_place_pose(center_base_m, x_axis_base, y_axis_base, normal_base, yaw_deg, x_mm, y_mm):
+    """Resolve a local place coordinate into base_link without authorizing motion."""
+    center = _vec(center_base_m, "PLACE_CALIBRATION_VECTOR")
+    x_axis, y_axis, normal = (_unit(value, "PLACE_CALIBRATION_AXIS") for value in (x_axis_base, y_axis_base, normal_base))
+    if abs(_dot(x_axis, y_axis)) > 1e-9 or abs(_dot(x_axis, normal)) > 1e-9 or abs(_dot(y_axis, normal)) > 1e-9 or _norm(_sub(_cross(x_axis, y_axis), normal)) > 1e-9:
+        raise ContractError("PLACE_CALIBRATION_AXIS")
+    angle = math.radians(_input_number(yaw_deg, "PLACE_COORDINATE"))
+    x_col = _add(_mul(x_axis, math.cos(angle)), _mul(y_axis, math.sin(angle)))
+    y_col = _add(_mul(x_axis, -math.sin(angle)), _mul(y_axis, math.cos(angle)))
+    position = _add(center, _add(_mul(x_col, _input_number(x_mm, "PLACE_COORDINATE") / 1000), _mul(y_col, _input_number(y_mm, "PLACE_COORDINATE") / 1000)))
+    return {"position_base_m": position, "rotation_base_columns": [x_col, y_col, normal]}
+
+
+def validate_cell_calibration_document(calibration, *, yaw0, robot, required_status, now=None):
+    """Validate one cell document independently of a specific JobSpec or grasp."""
     calibration = _exact(calibration, CALIBRATION_KEYS, "CALIBRATION_KEYS")
     limits = _exact(calibration["limits"], LIMIT_KEYS, "CALIBRATION_LIMITS")
     if calibration["schema_version"] != "data_factory.cell_calibration.v1":
         raise ContractError("CALIBRATION_ID")
-    if calibration["calibration_id"] != job["cell_calibration_id"] or calibration["qualification_status"] != "QUALIFIED":
+    for key in ("calibration_id", "robot_system_id", "place_id"):
+        _id(calibration[key], "CALIBRATION_ID")
+    if calibration["qualification_status"] != required_status:
         raise ContractError("CALIBRATION_ID")
-    if calibration["robot_system_id"] != job["robot_system_id"] or calibration["place_id"] != job["place_id"]:
+    if calibration["robot_system_id"] != robot.get("robot_system_id"):
         raise ContractError("CALIBRATION_ID")
+    validate_yaw0_sheet(yaw0)
     for key in ("yaw0_manifest_digest", "a4_family_digest", "tcp_digest", "measurement_report_digest", "table_plane_measurement_digest"):
         _digest(calibration[key], "CALIBRATION_DIGEST")
     if calibration["yaw0_manifest_digest"] != canonical_digest(yaw0) or calibration["a4_family_digest"] != yaw0["a4_family_digest"]:
@@ -418,40 +472,29 @@ def _calibration(calibration, job, yaw0, robot, grasp, now):
     if abs(measured_print_scale - manifest_scale) > 0.001:
         raise ContractError("CALIBRATION_PRINT_SCALE")
     _timestamp(calibration["measured_at"], "CALIBRATION_TIMESTAMP", now=now)
-    center, xref, ycheck, normal = (_vec(calibration[key], "CALIBRATION_VECTOR") for key in ("center_base_m", "x_ref_base_m", "y_check_base_m", "table_normal_base"))
-    z = _unit(normal, "CALIBRATION_NORMAL")
-    xdelta = _sub(xref, center)
-    out_plane_mm = abs(_dot(xdelta, z)) * 1000
-    plane_x = _sub(xdelta, _mul(z, _dot(xdelta, z)))
-    x = _unit(plane_x, "CALIBRATION_X_DEGENERATE")
-    y = _unit(_cross(z, x), "CALIBRATION_Y_DEGENERATE")
-    registration = yaw0.get("registration")
-    try:
-        origin, ref, verify = (registration[key]["sheet_xy_mm"] for key in ("origin", "x_ref", "verify"))
-        if registration["origin"]["id"] != "CENTER" or registration["x_ref"]["id"] != "X_REF" or registration["verify"]["id"] != "Y_CHECK": raise KeyError
-        ou, ov, ru, rv, vu, vv = (_number(n, "SHEET_REGISTRATION") for n in (*origin, *ref, *verify))
-    except (KeyError, TypeError, ContractError):
-        raise ContractError("SHEET_REGISTRATION") from None
-    nominal_x, nominal_y = ru-ou, rv-ov
-    if nominal_x <= 0 or abs(nominal_y) > 1e-6: raise ContractError("SHEET_REGISTRATION")
-    observed_mm = _norm(plane_x) * 1000
-    expected_ycheck = _add(center, _add(_mul(x, (vu-ou)/1000), _mul(y, (vv-ov)/1000)))
-    y_residual_mm = _norm(_sub(ycheck, expected_ycheck))*1000
+    fit = fit_place_calibration(calibration["center_base_m"], calibration["x_ref_base_m"], calibration["table_normal_base"], yaw0["registration"], calibration["scale_bar_measured_mm"], calibration["y_check_base_m"])
+    center, x, y, z, metrics = fit["center"], fit["x"], fit["y"], fit["z"], fit["metrics"]
     values = {key: _number(value, "CALIBRATION_LIMITS") for key, value in limits.items()}
     if any(v < 0 for v in values.values()) or values["min_x_ref_separation_mm"] <= 0: raise ContractError("CALIBRATION_LIMITS")
-    scale_error = abs(_number(calibration["scale_bar_measured_mm"], "CALIBRATION_SCALE") - 100)
-    distance_error = abs(observed_mm-nominal_x)
-    if observed_mm < values["min_x_ref_separation_mm"]: raise ContractError("CALIBRATION_SEPARATION")
-    if scale_error > values["max_scale_error_mm"]: raise ContractError("CALIBRATION_SCALE")
-    if distance_error > values["max_x_ref_distance_error_mm"]: raise ContractError("CALIBRATION_DISTANCE")
-    if out_plane_mm > values["max_x_ref_out_of_plane_mm"]: raise ContractError("CALIBRATION_OUT_OF_PLANE")
-    if y_residual_mm > values["max_y_check_residual_mm"]: raise ContractError("CALIBRATION_Y_CHECK")
+    if metrics["xref_observed_mm"] < values["min_x_ref_separation_mm"]: raise ContractError("CALIBRATION_SEPARATION")
+    if metrics["scale_error_mm"] > values["max_scale_error_mm"]: raise ContractError("CALIBRATION_SCALE")
+    if metrics["xref_distance_error_mm"] > values["max_x_ref_distance_error_mm"]: raise ContractError("CALIBRATION_DISTANCE")
+    if metrics["xref_out_of_plane_mm"] > values["max_x_ref_out_of_plane_mm"]: raise ContractError("CALIBRATION_OUT_OF_PLANE")
+    if metrics["y_check_residual_mm"] > values["max_y_check_residual_mm"]: raise ContractError("CALIBRATION_Y_CHECK")
+    combined = sum(value for key, value in metrics.items() if key != "xref_observed_mm")
+    if combined > values["combined_error_bound_mm"]: raise ContractError("CALIBRATION_COMBINED_ERROR")
+    return {"center": center, "x": x, "y": y, "z": z, "limits": values, "combined_error_mm": combined, "document": calibration}
+
+
+def _calibration(calibration, job, yaw0, robot, grasp, now):
+    resolved = validate_cell_calibration_document(calibration, yaw0=yaw0, robot=robot, required_status="QUALIFIED", now=now)
+    if calibration["calibration_id"] != job["cell_calibration_id"] or calibration["robot_system_id"] != job["robot_system_id"] or calibration["place_id"] != job["place_id"]:
+        raise ContractError("CALIBRATION_ID")
     margin = _number(grasp.get("grasp_margin_mm"), "GRASP_MARGIN")
     if margin <= 0: raise ContractError("GRASP_MARGIN")
-    if values["combined_error_bound_mm"] > margin: raise ContractError("CALIBRATION_COMBINED_LIMIT")
-    combined = scale_error + distance_error + out_plane_mm + y_residual_mm
-    if combined > values["combined_error_bound_mm"] or combined > margin: raise ContractError("CALIBRATION_COMBINED_ERROR")
-    return {"center": center, "x": x, "y": y, "z": z, "document": calibration}
+    if resolved["limits"]["combined_error_bound_mm"] > margin: raise ContractError("CALIBRATION_COMBINED_LIMIT")
+    if resolved["combined_error_mm"] > margin: raise ContractError("CALIBRATION_COMBINED_ERROR")
+    return {key: resolved[key] for key in ("center", "x", "y", "z", "document")}
 
 
 def validate_job_spec(job, *, paths=None, data=None, config_root, now=None):
@@ -484,11 +527,8 @@ def validate_job_spec(job, *, paths=None, data=None, config_root, now=None):
 
 def resolve_pose(validated):
     job, cal, robot = validated["normalized_job"], validated["calibration"], validated["robot"]
-    angle = math.radians(job["yaw_deg"])
-    x_col = _add(_mul(cal["x"], math.cos(angle)), _mul(cal["y"], math.sin(angle)))
-    y_col = _add(_mul(cal["x"], -math.sin(angle)), _mul(cal["y"], math.cos(angle)))
-    position = _add(cal["center"], _add(_mul(x_col, job["x_mm"] / 1000), _mul(y_col, job["y_mm"] / 1000)))
-    return {"frame_id": robot["base_frame"], "position_base_m": position, "rotation_base_columns": [x_col, y_col, cal["z"]], "resolved_job_digest": validated["resolved_job_digest"], "input_digests": validated["input_digests"]}
+    pose = resolve_place_pose(cal["center"], cal["x"], cal["y"], cal["z"], job["yaw_deg"], job["x_mm"], job["y_mm"])
+    return {"frame_id": robot["base_frame"], **pose, "resolved_job_digest": validated["resolved_job_digest"], "input_digests": validated["input_digests"]}
 
 
 def _rotation(columns, code):
@@ -500,7 +540,7 @@ def _rotation(columns, code):
     return result
 
 
-def _transform(value, code):
+def validate_rigid_transform(value, code="TRANSFORM"):
     value = _exact(value, {"translation_m", "rotation_columns"}, code)
     return {"translation_m": _vec(value["translation_m"], code), "rotation_columns": _rotation(value["rotation_columns"], code)}
 
@@ -509,12 +549,12 @@ def _matvec(columns, vector):
     return [sum(columns[column][row] * vector[column] for column in range(3)) for row in range(3)]
 
 
-def _compose(left, right):
+def compose_rigid_transform(left, right):
     rotation = [_matvec(left["rotation_columns"], column) for column in right["rotation_columns"]]
     return {"translation_m": _add(left["translation_m"], _matvec(left["rotation_columns"], right["translation_m"])), "rotation_columns": rotation}
 
 
-def _inverse(transform):
+def inverse_rigid_transform(transform):
     rotation = [[transform["rotation_columns"][row][column] for row in range(3)] for column in range(3)]
     return {"translation_m": _mul(_matvec(rotation, transform["translation_m"]), -1), "rotation_columns": rotation}
 
@@ -554,7 +594,7 @@ def _validate_motion_qualification(qualification, validated, home, *, urdf, now=
     if (frames["planning_frame"] != "base_link" or frames["planning_frame"] != validated["robot"]["base_frame"] or frames["planning_group"] != "fairino5_v6_group" or
             frames["tool_link"] != "wrist3_link" or any(not isinstance(value, str) or not value for value in frames.values())):
         raise ContractError("MOTION_FRAMES")
-    transforms = {key: _transform(qualification[key], "MOTION_TRANSFORM") for key in ("tool_to_tcp", "datum_to_tcp_grasp")}
+    transforms = {key: validate_rigid_transform(qualification[key], "MOTION_TRANSFORM") for key in ("tool_to_tcp", "datum_to_tcp_grasp")}
     offsets = _exact(qualification["offsets_m"], MOTION_OFFSETS, "MOTION_OFFSETS")
     offsets = {key: _number(value, "MOTION_OFFSETS") for key, value in offsets.items()}
     if not (offsets["pregrasp"] > offsets["approach_stop"] > 0 and offsets["lift"] > 0 and offsets["retreat"] > 0): raise ContractError("MOTION_OFFSETS")
@@ -598,11 +638,11 @@ def resolve_motion_program(validated, motion_qualification, home_candidate, *, u
     q = _validate_motion_qualification(qualification_raw, validated, {**home, "robot_description_digest": home_raw["robot_description_digest"]}, urdf=urdf, now=now)
     pose = resolve_pose(validated)
     datum = {"translation_m": pose["position_base_m"], "rotation_columns": pose["rotation_base_columns"]}
-    tcp = _compose(datum, q["transforms"]["datum_to_tcp_grasp"])
-    tool_inverse = _inverse(q["transforms"]["tool_to_tcp"])
+    tcp = compose_rigid_transform(datum, q["transforms"]["datum_to_tcp_grasp"])
+    tool_inverse = inverse_rigid_transform(q["transforms"]["tool_to_tcp"])
     def target(offset):
         shifted = {"translation_m": _add(tcp["translation_m"], _mul(datum["rotation_columns"][2], offset)), "rotation_columns": tcp["rotation_columns"]}
-        return {"base_tcp": shifted, "base_tool": _compose(shifted, tool_inverse)}
+        return {"base_tcp": shifted, "base_tool": compose_rigid_transform(shifted, tool_inverse)}
     offsets = {"PREGRASP_PTP": q["offsets"]["pregrasp"], "APPROACH_STOP_LIN": q["offsets"]["approach_stop"], "FINAL_APPROACH_LIN": 0, "LIFT_LIN": q["offsets"]["lift"], "LOWER_LIN": 0, "RETREAT_LIN": q["offsets"]["retreat"]}
     steps = []
     for phase in MOTION_PHASES:
@@ -658,7 +698,7 @@ def validate_motion_program(value):
             raise ContractError("MOTION_PROGRAM_LIMITS")
         if "target" in step:
             target = _exact(step["target"], {"base_tcp", "base_tool"}, "MOTION_PROGRAM_TARGET")
-            _transform(target["base_tcp"], "MOTION_PROGRAM_TARGET"); _transform(target["base_tool"], "MOTION_PROGRAM_TARGET")
+            validate_rigid_transform(target["base_tcp"], "MOTION_PROGRAM_TARGET"); validate_rigid_transform(target["base_tool"], "MOTION_PROGRAM_TARGET")
         if "joint_positions_rad" in step:
             if not isinstance(step["joint_positions_rad"], list) or len(step["joint_positions_rad"]) != 6: raise ContractError("MOTION_PROGRAM_JOINTS")
             [_number(item, "MOTION_PROGRAM_JOINTS") for item in step["joint_positions_rad"]]
@@ -671,7 +711,7 @@ def validate_motion_program(value):
 def build_job_spec(selected_sheet, *, point_id=None, x_mm=None, y_mm=None, job_id, robot_system_id, collection_profile_id, cell_calibration_id, object_profile_id, grasp_profile_id, operator_or_agent_id, approval_expiry, now=None):
     """Build the fixed pickup JobSpec from an A4 point or bounded coordinate."""
     sheet = _document(selected_sheet, "INPUT_SELECTED_SHEET")
-    _validate_sheet(sheet)
+    validate_sheet_manifest(sheet)
     has_xy = x_mm is not None or y_mm is not None
     if (x_mm is None) != (y_mm is None) or (point_id is not None and has_xy):
         raise ContractError("JOB_BUILDER_INPUT", "use point_id or an x_mm/y_mm pair")
@@ -683,7 +723,7 @@ def build_job_spec(selected_sheet, *, point_id=None, x_mm=None, y_mm=None, job_i
             raise ContractError("JOB_POINT", str(point_id))
         pose = matches[0]["job_pose"]
     else:
-        x_value, y_value = _continuous_coordinate(sheet, x_mm, y_mm)
+        x_value, y_value = bounded_place_coordinate(sheet, x_mm, y_mm)
         pose = {"place_id": sheet["place_id"], "yaw_deg": sheet["yaw_deg"], "x_mm": x_value, "y_mm": y_value}
     return normalize_job_spec({
         "schema_version": "data_factory.job.v1",
