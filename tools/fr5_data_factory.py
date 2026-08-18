@@ -36,11 +36,12 @@ PROFILE_KEYS = {
 HOME_CANDIDATE_KEYS = {"schema_version", "home_candidate_id", "robot_system_id", "robot_model_name", "robot_description_digest", "joint_order", "ui_observation_deg", "nominal_target_deg", "observation_source", "feedback_capture_status", "qualification_status", "safety_status", "intended_use_after_qualification"}
 HOME_JOINT_ORDER = ["j1", "j2", "j3", "j4", "j5", "j6"]
 MOTION_PHASES = ("PREGRASP_PTP", "APPROACH_STOP_LIN", "FINAL_APPROACH_LIN", "GRIPPER_CLOSE", "LIFT_LIN", "LOWER_LIN", "GRIPPER_OPEN", "RETREAT_LIN", "SAFE_POSE_PTP")
-MOTION_QUALIFICATION_KEYS = {"schema_version", "motion_qualification_id", "qualification_status", "robot_system_id", "cell_calibration_id", "object_profile_id", "grasp_profile_id", "profile_digests", "home_candidate_digest", "robot_description_digest", "moveit_config_digest", "planning_scene_digest", "frames", "tool_to_tcp", "datum_to_tcp_grasp", "offsets_m", "gripper_positions_m", "qualified_safe_joint_positions_rad", "goal_tolerances", "max_joint_state_age_s", "phase_limits", "qualified_at"}
+MOTION_QUALIFICATION_KEYS = {"schema_version", "motion_qualification_id", "qualification_status", "robot_system_id", "cell_calibration_id", "object_profile_id", "grasp_profile_id", "profile_digests", "home_candidate_digest", "robot_description_digest", "moveit_config_digest", "planning_scene_digest", "frames", "tool_to_tcp", "datum_to_tcp_grasp", "offsets_m", "gripper_positions_m", "qualified_safe_joint_positions_rad", "goal_tolerances", "max_joint_state_age_s", "execution_timeouts_s", "phase_limits", "qualified_at"}
 MOTION_PROFILE_DIGESTS = {"robot_system", "cell_calibration", "object_profile", "grasp_profile"}
 MOTION_FRAMES = {"planning_frame", "planning_group", "tool_link"}
 MOTION_OFFSETS = {"pregrasp", "approach_stop", "lift", "retreat"}
 MOTION_GOAL_TOLERANCES = {"position_m", "orientation_rad", "joint_rad"}
+MOTION_EXECUTION_TIMEOUTS = {"heartbeat_lease", "cancel", "precontact_confirmation", "semantic_verdict"}
 
 
 class ContractError(ValueError):
@@ -568,6 +569,9 @@ def _validate_motion_qualification(qualification, validated, home, *, urdf, now=
     if any(value <= 0 for value in tolerance.values()): raise ContractError("MOTION_TOLERANCES")
     max_joint_state_age_s = _number(qualification["max_joint_state_age_s"], "MOTION_JOINT_STATE_AGE")
     if max_joint_state_age_s <= 0: raise ContractError("MOTION_JOINT_STATE_AGE")
+    execution_timeouts = _exact(qualification["execution_timeouts_s"], MOTION_EXECUTION_TIMEOUTS, "MOTION_EXECUTION_TIMEOUTS")
+    execution_timeouts = {key: _number(value, "MOTION_EXECUTION_TIMEOUTS") for key, value in execution_timeouts.items()}
+    if any(value <= 0 for value in execution_timeouts.values()): raise ContractError("MOTION_EXECUTION_TIMEOUTS")
     phase_limits = _exact(qualification["phase_limits"], set(MOTION_PHASES), "MOTION_PHASE_LIMITS")
     normalized_limits = {}
     for phase in MOTION_PHASES:
@@ -583,7 +587,7 @@ def _validate_motion_qualification(qualification, validated, home, *, urdf, now=
         if any(value <= 0 for value in values.values()): raise ContractError("MOTION_PHASE_LIMITS")
         normalized_limits[phase] = values
     _timestamp(qualification["qualified_at"], "MOTION_QUALIFIED_AT", now=now)
-    return {"digest": canonical_digest(qualification), "frames": frames, "transforms": transforms, "offsets": offsets, "gripper": gripper, "safe": [_number(v, "MOTION_SAFE_JOINTS") for v in safe], "limits": normalized_limits, "tolerances": tolerance, "max_joint_state_age_s": max_joint_state_age_s, "pins": {key: qualification[key] for key in ("robot_description_digest", "moveit_config_digest", "planning_scene_digest")}}
+    return {"digest": canonical_digest(qualification), "frames": frames, "transforms": transforms, "offsets": offsets, "gripper": gripper, "safe": [_number(v, "MOTION_SAFE_JOINTS") for v in safe], "limits": normalized_limits, "tolerances": tolerance, "max_joint_state_age_s": max_joint_state_age_s, "execution_timeouts_s": execution_timeouts, "pins": {key: qualification[key] for key in ("robot_description_digest", "moveit_config_digest", "planning_scene_digest")}}
 
 
 def resolve_motion_program(validated, motion_qualification, home_candidate, *, urdf, expected_robot_system_id, now=None):
@@ -610,14 +614,15 @@ def resolve_motion_program(validated, motion_qualification, home_candidate, *, u
         if phase == "LIFT_LIN": step["pause_after"] = "SEMANTIC_VERDICT"
         steps.append(step)
     binding_digests = {**validated["input_digests"], **q["pins"], "motion_qualification": q["digest"], "home_candidate": home["candidate_digest"]}
-    return {"schema_version": "fr5.motion_program.v1", "resolved_job_digest": validated["resolved_job_digest"], "binding_digests": binding_digests, "frames": q["frames"], "planning": {"pipeline_id": "pilz_industrial_motion_planner", "ptp_planner_id": "PTP", "lin_planner_id": "LIN", "goal_tolerances": q["tolerances"], "max_joint_state_age_s": q["max_joint_state_age_s"]}, "steps": steps}
+    return {"schema_version": "fr5.motion_program.v1", "robot_system_id": validated["normalized_job"]["robot_system_id"], "resolved_job_digest": validated["resolved_job_digest"], "binding_digests": binding_digests, "frames": q["frames"], "planning": {"pipeline_id": "pilz_industrial_motion_planner", "ptp_planner_id": "PTP", "lin_planner_id": "LIN", "goal_tolerances": q["tolerances"], "max_joint_state_age_s": q["max_joint_state_age_s"]}, "execution_timeouts_s": q["execution_timeouts_s"], "steps": steps}
 
 
 def validate_motion_program(value):
     """Validate the exact offline motion-program contract emitted above."""
-    keys = {"schema_version", "resolved_job_digest", "binding_digests", "frames", "planning", "steps"}
+    keys = {"schema_version", "robot_system_id", "resolved_job_digest", "binding_digests", "frames", "planning", "execution_timeouts_s", "steps"}
     value = _exact(value, keys, "MOTION_PROGRAM_SCHEMA")
     if value["schema_version"] != "fr5.motion_program.v1": raise ContractError("MOTION_PROGRAM_SCHEMA")
+    _id(value["robot_system_id"], "MOTION_PROGRAM_ROBOT_ID")
     _digest(value["resolved_job_digest"], "MOTION_PROGRAM_DIGEST")
     binding_keys = {"selected_sheet", "yaw0_sheet", "cell_calibration", "robot_system", "collection_profile", "object_profile", "grasp_profile", "robot_description_digest", "moveit_config_digest", "planning_scene_digest", "motion_qualification", "home_candidate"}
     bindings = _exact(value["binding_digests"], binding_keys, "MOTION_PROGRAM_BINDING")
@@ -630,6 +635,8 @@ def validate_motion_program(value):
     for item in planning["goal_tolerances"].values():
         if _number(item, "MOTION_PROGRAM_PLANNING") <= 0: raise ContractError("MOTION_PROGRAM_PLANNING")
     if _number(planning["max_joint_state_age_s"], "MOTION_PROGRAM_PLANNING") <= 0: raise ContractError("MOTION_PROGRAM_PLANNING")
+    execution_timeouts = _exact(value["execution_timeouts_s"], MOTION_EXECUTION_TIMEOUTS, "MOTION_PROGRAM_TIMEOUTS")
+    if any(_number(item, "MOTION_PROGRAM_TIMEOUTS") <= 0 for item in execution_timeouts.values()): raise ContractError("MOTION_PROGRAM_TIMEOUTS")
     if not isinstance(value["steps"], list) or [step.get("phase") if isinstance(step, dict) else None for step in value["steps"]] != list(MOTION_PHASES): raise ContractError("MOTION_PROGRAM_PHASES")
     for step in value["steps"]:
         phase = step["phase"]
