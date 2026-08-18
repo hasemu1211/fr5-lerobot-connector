@@ -8,7 +8,10 @@ import copy
 import json
 import math
 import os
+import queue
 import sys
+import threading
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -40,7 +43,7 @@ PHASES = (
 ARM_PHASES = frozenset(PHASES) - {"GRIPPER_CLOSE", "GRIPPER_OPEN"}
 JOINT_ORDER = ["j1", "j2", "j3", "j4", "j5", "j6"]
 COMMAND_FIELDS = {"schema_version", "op_id", "op", "payload"}
-COMMAND_OPS = {"preflight", "plan", "approve", "execute", "status"}
+COMMAND_OPS = {"preflight", "plan", "approve", "execute", "heartbeat", "confirm", "semantic_verdict", "cancel", "status"}
 EXPECTED_GRAPH = {
     "move_action": ("/move_action", "moveit_msgs/action/MoveGroup"),
     "execute_trajectory": ("/execute_trajectory", "moveit_msgs/action/ExecuteTrajectory"),
@@ -124,11 +127,14 @@ class UnavailableTransport:
 
 
 class PickupExecutor:
-    """Compile and approve one full plan; live execution is deliberately blocked."""
+    """Compile and approve plans; real execution stays opt-in for tests only."""
 
-    def __init__(self, transport=None, clock=None):
+    def __init__(self, transport=None, clock=None, monotonic_clock=None, cell_state_store=None, execution_enabled=False):
         self.transport = transport or UnavailableTransport()
         self.clock = clock or (lambda: datetime.now(timezone.utc))
+        self.monotonic_clock = monotonic_clock or time.monotonic
+        self.cell_state_store = cell_state_store
+        self.execution_enabled = execution_enabled
         self.cache = {}
         self.runs = {}
 
@@ -153,6 +159,7 @@ class PickupExecutor:
                 return copy.deepcopy(previous[1])
             return _response(op_id=op_id, op=op, code="OP_ID_CONFLICT")
 
+        self.tick()
         try:
             result = getattr(self, f"_{op}")(request["payload"])
         except ContractError as exc:
@@ -189,6 +196,8 @@ class PickupExecutor:
             raise ContractError("PLAN_SCHEMA")
         if run_id in self.runs:
             raise ContractError("RUN_ID_REUSED")
+        if self.runs:
+            raise ContractError("ONE_JOB_ONLY")
 
         motion_program = validate_motion_program(copy.deepcopy(payload["motion_program"]))
         action_graph = self._validated_preflight(motion_program)
@@ -260,8 +269,10 @@ class PickupExecutor:
             "action_graph": action_graph,
             "resolved_job_digest": motion_program["resolved_job_digest"],
             "binding_digests": motion_program["binding_digests"],
+            "robot_system_id": motion_program["robot_system_id"],
             "frames": motion_program["frames"],
             "planning": motion_program["planning"],
+            "execution_timeouts_s": motion_program["execution_timeouts_s"],
             "initial_joint_state": _joint_positions(payload["initial_joint_state"]),
             "steps": planned_steps,
         }
@@ -314,28 +325,185 @@ class PickupExecutor:
             state="APPROVED",
         )
 
+    def _execution_payload(self, payload, fields, code):
+        _exact(payload, fields, code)
+        if not isinstance(payload["run_id"], str) or not SAFE_ID.fullmatch(payload["run_id"]):
+            raise ContractError(code)
+        return self._bound(payload)
+
     def _execute(self, payload):
-        _exact(payload, {"run_id", "plan_digest"}, "EXECUTE_SCHEMA")
-        run = self._bound(payload)
+        run = self._execution_payload(payload, {"run_id", "plan_digest", "lease_id"}, "EXECUTE_SCHEMA")
+        if not isinstance(payload["lease_id"], str) or not SAFE_ID.fullmatch(payload["lease_id"]):
+            raise ContractError("EXECUTE_SCHEMA")
         if run["state"] != "APPROVED":
             raise ContractError("NOT_APPROVED")
         _future_timestamp(run["approval"]["approval_expiry"], self.clock())
-        return _response(
-            code="LIVE_EXECUTION_BLOCKED",
-            run_id=payload["run_id"],
-            plan_digest=payload["plan_digest"],
-            state="APPROVED",
-        )
+        if not self.execution_enabled:
+            return _response(code="LIVE_EXECUTION_BLOCKED", run_id=payload["run_id"], plan_digest=payload["plan_digest"], state="APPROVED")
+        if self.cell_state_store is None:
+            raise ContractError("CELL_NOT_READY")
+        cell = self.cell_state_store.read()
+        if cell["robot_system_id"] != run["plan"]["robot_system_id"] or not cell["cell_ready"]:
+            raise ContractError("CELL_NOT_READY")
+        try:
+            self.cell_state_store.mark_blocked("EXECUTION_IN_PROGRESS", run["plan"]["run_id"], run["digest"])
+        except Exception:
+            return _response(code="CELL_STATE_ARMING_FAILED", run_id=payload["run_id"], plan_digest=payload["plan_digest"], state="APPROVED")
+        run["execution"] = {"lease_id": payload["lease_id"], "lease_deadline": self.monotonic_clock() + run["plan"]["execution_timeouts_s"]["heartbeat_lease"], "step_index": 0, "semantic_verdict": None, "snapshot": None, "active": False}
+        run["state"] = "EXECUTING"
+        self._start_current_step(run)
+        return self._execution_response(run, payload["run_id"], payload["plan_digest"], "EXECUTING")
+
+    def _execution_response(self, run, run_id, plan_digest, success_code):
+        if run["state"] == "BLOCKED":
+            return _response(code=run["failure_code"], run_id=run_id, plan_digest=plan_digest, state="BLOCKED", data=self._execution_data(run))
+        if run["state"] == "COMPLETED":
+            return _response(code="COMPLETE", ok=True, run_id=run_id, plan_digest=plan_digest, state="COMPLETED", data=self._execution_data(run))
+        return _response(code=success_code, ok=True, run_id=run_id, plan_digest=plan_digest, state=run["state"], data=self._execution_data(run))
+
+    @staticmethod
+    def _execution_data(run):
+        data = {key: copy.deepcopy(run["execution"].get(key)) for key in ("step_index", "semantic_verdict", "snapshot", "snapshot_error", "cancel_error", "durable_blocked", "cell_state_error") if key in run["execution"]}
+        if "failure_code" in run:
+            data["failure_code"] = run["failure_code"]
+        return data
+
+    def _start_current_step(self, run):
+        execution, steps = run["execution"], run["plan"]["steps"]
+        if execution["step_index"] >= len(steps):
+            run["state"] = "COMPLETED"
+            return "COMPLETED"
+        step = steps[execution["step_index"]]
+        if step.get("requires_confirmation") == "PRECONTACT_HUMAN" and execution.get("confirmed_step") != execution["step_index"]:
+            run["state"] = "PRECONTACT_HUMAN"
+            execution["wait_deadline"] = self.monotonic_clock() + run["plan"]["execution_timeouts_s"]["precontact_confirmation"]
+            return "PRECONTACT_HUMAN"
+        try:
+            observed = self.transport.snapshot(run["plan"]["planning"]["max_joint_state_age_s"])
+            if not observed["arm_controller"]["ready"] or not observed["gripper_controller"]["ready"]:
+                raise ContractError("CONTROLLER_NOT_READY")
+            expected = step["start_joint_state"]
+            actual = _joint_positions(observed["joint_positions"])
+            tolerance = run["plan"]["planning"]["goal_tolerances"]["joint_rad"]
+            if any(abs(a - b) > tolerance for a, b in zip(actual, expected)):
+                raise ContractError("START_STATE_MISMATCH")
+            execution["active"] = True
+            self.transport.start_phase(step)
+        except (ContractError, KeyError, TypeError) as exc:
+            self._fault(run, exc.code if isinstance(exc, ContractError) else "SNAPSHOT_SCHEMA")
+        return run["state"]
+
+    def _fault(self, run, code):
+        if run["state"] == "BLOCKED":
+            return run["failure_code"]
+        run["failure_code"] = code
+        execution = run["execution"]
+        if execution.get("active"):
+            try:
+                self.transport.cancel_active(run["plan"]["execution_timeouts_s"]["cancel"])
+            except Exception as exc:
+                execution["cancel_error"] = exc.code if isinstance(exc, ContractError) else "CANCEL_FAILED"
+            execution["active"] = False
+        try:
+            execution["snapshot"] = self.transport.snapshot(run["plan"]["planning"]["max_joint_state_age_s"])
+        except Exception as exc:
+            execution["snapshot"] = None
+            execution["snapshot_error"] = exc.code if isinstance(exc, ContractError) else "SNAPSHOT_FAILED"
+        execution["durable_blocked"] = False
+        try:
+            if self.cell_state_store is not None:
+                self.cell_state_store.mark_blocked(code, run["plan"]["run_id"], run["digest"])
+                execution["durable_blocked"] = True
+            else:
+                execution["cell_state_error"] = "CELL_STATE_STORE_MISSING"
+        except Exception as exc:
+            execution["cell_state_error"] = exc.code if isinstance(exc, ContractError) else "CELL_STATE_WRITE_FAILED"
+        run["state"] = "BLOCKED"
+        return code
+
+    def tick(self):
+        for run in self.runs.values():
+            if run["state"] not in {"EXECUTING", "PRECONTACT_HUMAN", "SEMANTIC_VERDICT"}:
+                continue
+            execution, now = run["execution"], self.monotonic_clock()
+            if now > execution["lease_deadline"]:
+                self._fault(run, "HEARTBEAT_TIMEOUT")
+            elif run["state"] in {"PRECONTACT_HUMAN", "SEMANTIC_VERDICT"}:
+                if now > execution["wait_deadline"]:
+                    self._fault(run, "PRECONTACT_TIMEOUT" if run["state"] == "PRECONTACT_HUMAN" else "SEMANTIC_TIMEOUT")
+            else:
+                try:
+                    active = self.transport.poll_active()
+                except Exception as exc:
+                    self._fault(run, exc.code if isinstance(exc, ContractError) else "ROS_EXEC_POLL_FAILED")
+                    continue
+                if active is not None:
+                    execution["active"] = False
+                    execution["step_index"] += 1
+                    if run["plan"]["steps"][execution["step_index"] - 1].get("pause_after") == "SEMANTIC_VERDICT":
+                        run["state"] = "SEMANTIC_VERDICT"
+                        execution["wait_deadline"] = now + run["plan"]["execution_timeouts_s"]["semantic_verdict"]
+                    else:
+                        self._start_current_step(run)
+
+    def _heartbeat(self, payload):
+        run = self._execution_payload(payload, {"run_id", "plan_digest", "lease_id", "recorder_health"}, "HEARTBEAT_SCHEMA")
+        health = _exact(payload["recorder_health"], {"writer_alive", "writer_error"}, "HEARTBEAT_SCHEMA")
+        if not isinstance(payload["lease_id"], str) or not SAFE_ID.fullmatch(payload["lease_id"]) or payload["lease_id"] != run.get("execution", {}).get("lease_id"):
+            raise ContractError("LEASE_BINDING")
+        if type(health["writer_alive"]) is not bool or health["writer_error"] is not None and not isinstance(health["writer_error"], str):
+            raise ContractError("HEARTBEAT_SCHEMA")
+        if run["state"] in {"BLOCKED", "COMPLETED"}:
+            return self._execution_response(run, payload["run_id"], payload["plan_digest"], "HEARTBEAT_OK")
+        if run["state"] not in {"EXECUTING", "PRECONTACT_HUMAN", "SEMANTIC_VERDICT"}:
+            raise ContractError("EXECUTION_STATE")
+        if not health["writer_alive"] or health["writer_error"] is not None:
+            self._fault(run, "RECORDER_WRITER_FAULT")
+            return self._execution_response(run, payload["run_id"], payload["plan_digest"], "HEARTBEAT_OK")
+        run["execution"]["lease_deadline"] = self.monotonic_clock() + run["plan"]["execution_timeouts_s"]["heartbeat_lease"]
+        return _response(code="HEARTBEAT_OK", ok=True, run_id=payload["run_id"], plan_digest=payload["plan_digest"], state=run["state"])
+
+    def _confirm(self, payload):
+        run = self._execution_payload(payload, {"run_id", "plan_digest", "confirmed_by", "source"}, "CONFIRM_SCHEMA")
+        if payload["source"] != "HUMAN" or not isinstance(payload["confirmed_by"], str) or not SAFE_ID.fullmatch(payload["confirmed_by"]):
+            raise ContractError("CONFIRM_SCHEMA")
+        if run["state"] != "PRECONTACT_HUMAN":
+            raise ContractError("CONFIRM_STATE")
+        run["execution"]["confirmed_step"] = run["execution"]["step_index"]
+        run["state"] = "EXECUTING"
+        self._start_current_step(run)
+        return self._execution_response(run, payload["run_id"], payload["plan_digest"], "CONFIRMED")
+
+    def _semantic_verdict(self, payload):
+        run = self._execution_payload(payload, {"run_id", "plan_digest", "verdict", "decided_by", "source"}, "VERDICT_SCHEMA")
+        if payload["source"] != "HUMAN" or payload["verdict"] not in {"PASS", "FAIL"} or not isinstance(payload["decided_by"], str) or not SAFE_ID.fullmatch(payload["decided_by"]):
+            raise ContractError("VERDICT_SCHEMA")
+        if run["state"] != "SEMANTIC_VERDICT":
+            raise ContractError("VERDICT_STATE")
+        run["execution"]["semantic_verdict"] = payload["verdict"]
+        run["state"] = "EXECUTING"
+        self._start_current_step(run)
+        return self._execution_response(run, payload["run_id"], payload["plan_digest"], "VERDICT_ACCEPTED")
+
+    def _cancel(self, payload):
+        run = self._execution_payload(payload, {"run_id", "plan_digest", "lease_id"}, "CANCEL_SCHEMA")
+        if not isinstance(payload["lease_id"], str) or not SAFE_ID.fullmatch(payload["lease_id"]) or payload["lease_id"] != run.get("execution", {}).get("lease_id"):
+            raise ContractError("LEASE_BINDING")
+        if run["state"] in {"BLOCKED", "COMPLETED"}:
+            return self._execution_response(run, payload["run_id"], payload["plan_digest"], "CANCELLED_BY_OPERATOR")
+        self._fault(run, "CANCELLED_BY_OPERATOR")
+        return self._execution_response(run, payload["run_id"], payload["plan_digest"], "CANCELLED_BY_OPERATOR")
 
     def _status(self, payload):
         _exact(payload, {"run_id", "plan_digest"}, "STATUS_SCHEMA")
         run = self._bound(payload)
+        data = self._execution_data(run) if "execution" in run else None
         return _response(
             code="STATUS",
             ok=True,
             run_id=payload["run_id"],
             plan_digest=payload["plan_digest"],
-            state=run["state"],
+            state=run["state"], data=data,
         )
 
     def _bound(self, payload):
@@ -349,16 +517,49 @@ class PickupExecutor:
 
 
 def run_jsonl(input_stream, output_stream, executor):
-    for line in input_stream:
+    """Keep ticking while stdin is quiet so a lease cannot be bypassed."""
+    events = queue.Queue()
+    def read_lines():
         try:
-            result = executor.process(load_json_strict(line))
-        except ContractError as exc:
-            result = _response(code=exc.code)
-        output_stream.write(
-            json.dumps(result, sort_keys=True, separators=(",", ":"), allow_nan=False)
-            + "\n"
-        )
+            for line in input_stream:
+                events.put(("line", line))
+            events.put(("eof", None))
+        except Exception:
+            events.put(("error", None))
+    threading.Thread(target=read_lines, daemon=True).start()
+    def terminal(run):
+        result = executor._execution_response(run, run["plan"]["run_id"], run["digest"], "TERMINAL")
+        output_stream.write(json.dumps(result, sort_keys=True, separators=(",", ":"), allow_nan=False) + "\n")
         output_stream.flush()
+        return result["state"] == "COMPLETED"
+    while True:
+        try:
+            kind, value = events.get(timeout=0.05)
+        except queue.Empty:
+            executor.tick()
+            for run in executor.runs.values():
+                if run["state"] in {"BLOCKED", "COMPLETED"}:
+                    return terminal(run)
+            continue
+        if kind == "line":
+            try:
+                result = executor.process(load_json_strict(value))
+            except ContractError as exc:
+                result = _response(code=exc.code)
+            output_stream.write(json.dumps(result, sort_keys=True, separators=(",", ":"), allow_nan=False) + "\n")
+            output_stream.flush()
+            if result["state"] in {"BLOCKED", "COMPLETED"}:
+                return result["state"] == "COMPLETED"
+            executor.tick()
+            for run in executor.runs.values():
+                if run["state"] in {"BLOCKED", "COMPLETED"}:
+                    return terminal(run)
+            continue
+        for run in executor.runs.values():
+            if run["state"] in {"EXECUTING", "PRECONTACT_HUMAN", "SEMANTIC_VERDICT"}:
+                executor._fault(run, "INPUT_READER_ERROR" if kind == "error" else "INPUT_EOF")
+                return terminal(run)
+        return not any(run["state"] == "BLOCKED" for run in executor.runs.values())
 
 
 def main(argv=None):
@@ -397,8 +598,7 @@ def main(argv=None):
                 rclpy.shutdown()
             return 2
     try:
-        run_jsonl(sys.stdin, sys.stdout, PickupExecutor(transport))
-        return 0
+        return 0 if run_jsonl(sys.stdin, sys.stdout, PickupExecutor(transport)) else 2
     finally:
         if node is not None:
             node.destroy_node()
