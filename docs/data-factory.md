@@ -147,6 +147,21 @@ python3 tools/data_factory_recovery.py \
 
 dataset 단위 `meta/training_approved.json`은 새 수집 시작 시 무효화하고, validator와 preview를 다시 통과한 뒤 사람만 발급한다.
 
+`cell_ready`는 static config가 아니라 `outputs/data_factory/cells/<robot_system_id>/state.json`의 runtime interlock이다. `acknowledge-ready`는 로봇 정지, 주변 clearance와 복귀 pose를 사람이 직접 확인한 뒤에만 실행한다.
+
+```bash
+python3 tools/data_factory/cell_state.py status \
+  --root outputs/data_factory/cells \
+  --robot-system-id fr5-lab-a
+
+python3 tools/data_factory/cell_state.py acknowledge-ready \
+  --root outputs/data_factory/cells \
+  --robot-system-id fr5-lab-a \
+  --acknowledged-by <operator-id>
+```
+
+`status`는 경로가 없어도 `cell_ready=false` JSON을 출력하며 파일을 만들지 않는다. `acknowledge-ready`는 pipe 입력을 거부하고 로컬 controlling TTY에서 `ACKNOWLEDGE fr5-lab-a`를 정확히 입력한 경우에만 상태를 기록한다. 성공 JSON은 stdout, 오류 JSON은 stderr로 분리한다.
+
 ## 안전과 현재 하드웨어 경계
 
 E-stop, protective stop, 속도·힘·작업영역 제한은 FR5 안전 하드웨어와 controller가 소유한다. PC, ROS, 오케스트레이터와 safe pose는 안전 기능으로 간주하지 않는다.
@@ -206,6 +221,7 @@ tools/a4_place_yaw/
 ```text
 outputs/
 ├── data_factory/
+│   ├── cells/<robot_system_id>/state.json # 사람 확인과 실행 fault의 영속 interlock
 │   ├── runs/<run_id>/
 │   │   ├── job.json
 │   │   ├── resolved_pose.json
