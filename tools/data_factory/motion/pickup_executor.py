@@ -43,7 +43,7 @@ PHASES = (
 ARM_PHASES = frozenset(PHASES) - {"GRIPPER_CLOSE", "GRIPPER_OPEN"}
 JOINT_ORDER = ["j1", "j2", "j3", "j4", "j5", "j6"]
 COMMAND_FIELDS = {"schema_version", "op_id", "op", "payload"}
-COMMAND_OPS = {"preflight", "plan", "approve", "execute", "heartbeat", "confirm", "semantic_verdict", "cancel", "status"}
+COMMAND_OPS = {"preflight", "plan", "approve", "execute", "heartbeat", "confirm", "grasp_verdict", "semantic_verdict", "cancel", "status"}
 EXPECTED_GRAPH = {
     "move_action": ("/move_action", "moveit_msgs/action/MoveGroup"),
     "execute_trajectory": ("/execute_trajectory", "moveit_msgs/action/ExecuteTrajectory"),
@@ -59,6 +59,18 @@ def _exact(value, fields, code):
     if not isinstance(value, dict) or set(value) != fields:
         raise ContractError(code)
     return value
+
+
+def _gripper_settings(value):
+    value = _exact(value, {"hardware_plugin", "velocity_percent", "force_percent", "settle_time_ms"}, "GRIPPER_SETTINGS_UNVERIFIED")
+    if (
+        value["hardware_plugin"] not in {"fairino_hardware/FairinoHardwareInterface", "mock_components/GenericSystem"}
+        or any(type(value[key]) is not int or not 1 <= value[key] <= 100 for key in ("velocity_percent", "force_percent"))
+        or type(value["settle_time_ms"]) is not int
+        or not 50 <= value["settle_time_ms"] <= 10000
+    ):
+        raise ContractError("GRIPPER_SETTINGS_UNVERIFIED")
+    return dict(value)
 
 
 def _joint_positions(value):
@@ -210,13 +222,20 @@ class PickupExecutor:
         observed = self.transport.snapshot(motion_program["planning"]["max_joint_state_age_s"])
         observed = _exact(
             observed,
-            {"joint_positions", "joint_state_age_s", "arm_controller", "gripper_controller"},
+            {"joint_positions", "joint_state_age_s", "gripper_settings", "arm_controller", "gripper_controller"},
             "SNAPSHOT_SCHEMA",
         )
+        settings = _gripper_settings(observed["gripper_settings"])
+        required = motion_program["gripper_requirements"]
+        if settings["velocity_percent"] != required["velocity_percent"] or settings["force_percent"] != required["force_percent"]:
+            raise ContractError("GRIPPER_SETTINGS_MISMATCH")
         for controller in ("arm_controller", "gripper_controller"):
+            fields = {"endpoint", "type", "publisher_count", "ready", "age_s", "speed_scaling"}
+            if controller == "gripper_controller":
+                fields |= {"reference_position_m", "feedback_position_m"}
             controller_state = _exact(
                 observed[controller],
-                {"endpoint", "type", "publisher_count", "ready", "age_s", "speed_scaling"},
+                fields,
                 "SNAPSHOT_SCHEMA",
             )
             if controller_state["ready"] is not True:
@@ -294,6 +313,8 @@ class PickupExecutor:
             "frames": motion_program["frames"],
             "planning": motion_program["planning"],
             "execution_timeouts_s": motion_program["execution_timeouts_s"],
+            "gripper_requirements": motion_program["gripper_requirements"],
+            "active_gripper_settings": settings,
             "initial_joint_state": initial_state,
             "steps": planned_steps,
         }
@@ -361,6 +382,15 @@ class PickupExecutor:
         _future_timestamp(run["approval"]["approval_expiry"], self.clock())
         if not self.execution_enabled:
             return _response(code="LIVE_EXECUTION_BLOCKED", run_id=payload["run_id"], plan_digest=payload["plan_digest"], state="APPROVED")
+        try:
+            observed = self.transport.snapshot(run["plan"]["planning"]["max_joint_state_age_s"])
+            settings = _gripper_settings(observed["gripper_settings"])
+        except ContractError as exc:
+            return _response(code=exc.code, run_id=payload["run_id"], plan_digest=payload["plan_digest"], state="APPROVED")
+        except (KeyError, TypeError):
+            return _response(code="GRIPPER_SETTINGS_UNVERIFIED", run_id=payload["run_id"], plan_digest=payload["plan_digest"], state="APPROVED")
+        if settings != run["plan"]["active_gripper_settings"] or settings["hardware_plugin"] != "fairino_hardware/FairinoHardwareInterface":
+            return _response(code="GRIPPER_SETTINGS_MISMATCH", run_id=payload["run_id"], plan_digest=payload["plan_digest"], state="APPROVED")
         if self.cell_state_store is None:
             raise ContractError("CELL_NOT_READY")
         cell = self.cell_state_store.read()
@@ -370,7 +400,7 @@ class PickupExecutor:
             self.cell_state_store.mark_blocked("EXECUTION_IN_PROGRESS", run["plan"]["run_id"], run["digest"])
         except Exception:
             return _response(code="CELL_STATE_ARMING_FAILED", run_id=payload["run_id"], plan_digest=payload["plan_digest"], state="APPROVED")
-        run["execution"] = {"lease_id": payload["lease_id"], "lease_deadline": self.monotonic_clock() + run["plan"]["execution_timeouts_s"]["heartbeat_lease"], "step_index": 0, "semantic_verdict": None, "snapshot": None, "active": False}
+        run["execution"] = {"lease_id": payload["lease_id"], "lease_deadline": self.monotonic_clock() + run["plan"]["execution_timeouts_s"]["heartbeat_lease"], "step_index": 0, "grasp_verdict": None, "semantic_verdict": None, "snapshot": None, "active": False}
         run["state"] = "EXECUTING"
         self._start_current_step(run)
         return self._execution_response(run, payload["run_id"], payload["plan_digest"], "EXECUTING")
@@ -387,7 +417,7 @@ class PickupExecutor:
 
     @staticmethod
     def _execution_data(run):
-        data = {key: copy.deepcopy(run["execution"].get(key)) for key in ("step_index", "semantic_verdict", "snapshot", "snapshot_error", "cancel_error", "durable_blocked", "cell_state_error") if key in run["execution"]}
+        data = {key: copy.deepcopy(run["execution"].get(key)) for key in ("step_index", "grasp_verdict", "semantic_verdict", "gripper_feedback_m", "gripper_reference_m", "snapshot", "snapshot_error", "cancel_error", "durable_blocked", "cell_state_error") if key in run["execution"]}
         if "failure_code" in run:
             data["failure_code"] = run["failure_code"]
         return data
@@ -447,14 +477,14 @@ class PickupExecutor:
 
     def tick(self):
         for run in self.runs.values():
-            if run["state"] not in {"EXECUTING", "PRECONTACT_HUMAN", "SEMANTIC_VERDICT"}:
+            if run["state"] not in {"EXECUTING", "PRECONTACT_HUMAN", "GRASP_VERDICT", "SEMANTIC_VERDICT"}:
                 continue
             execution, now = run["execution"], self.monotonic_clock()
             if now > execution["lease_deadline"]:
                 self._fault(run, "HEARTBEAT_TIMEOUT")
-            elif run["state"] in {"PRECONTACT_HUMAN", "SEMANTIC_VERDICT"}:
+            elif run["state"] in {"PRECONTACT_HUMAN", "GRASP_VERDICT", "SEMANTIC_VERDICT"}:
                 if now > execution["wait_deadline"]:
-                    self._fault(run, "PRECONTACT_TIMEOUT" if run["state"] == "PRECONTACT_HUMAN" else "SEMANTIC_TIMEOUT")
+                    self._fault(run, {"PRECONTACT_HUMAN": "PRECONTACT_TIMEOUT", "GRASP_VERDICT": "GRASP_VERDICT_TIMEOUT", "SEMANTIC_VERDICT": "SEMANTIC_TIMEOUT"}[run["state"]])
             else:
                 try:
                     active = self.transport.poll_active()
@@ -463,10 +493,32 @@ class PickupExecutor:
                     continue
                 if active is not None:
                     execution["active"] = False
+                    completed_step = run["plan"]["steps"][execution["step_index"]]
+                    if completed_step["phase"] == "GRIPPER_CLOSE":
+                        try:
+                            observed = self.transport.snapshot(run["plan"]["planning"]["max_joint_state_age_s"])
+                            controller = observed["gripper_controller"]
+                            feedback = float(controller["feedback_position_m"])
+                            reference = float(controller["reference_position_m"])
+                            required = run["plan"]["gripper_requirements"]
+                            if (
+                                not controller["ready"]
+                                or not math.isfinite(feedback)
+                                or not math.isfinite(reference)
+                                or abs(reference - required["command_position_m"]) > 1e-9
+                                or not required["acceptable_feedback_m"]["min"] <= feedback <= required["acceptable_feedback_m"]["max"]
+                            ):
+                                raise ContractError("GRIPPER_FEEDBACK_OUT_OF_RANGE")
+                            execution["gripper_feedback_m"] = feedback
+                            execution["gripper_reference_m"] = reference
+                        except (ContractError, KeyError, TypeError, ValueError):
+                            self._fault(run, "GRIPPER_FEEDBACK_OUT_OF_RANGE")
+                            continue
                     execution["step_index"] += 1
-                    if run["plan"]["steps"][execution["step_index"] - 1].get("pause_after") == "SEMANTIC_VERDICT":
-                        run["state"] = "SEMANTIC_VERDICT"
-                        execution["wait_deadline"] = now + run["plan"]["execution_timeouts_s"]["semantic_verdict"]
+                    pause_after = run["plan"]["steps"][execution["step_index"] - 1].get("pause_after")
+                    if pause_after in {"GRASP_VERDICT", "SEMANTIC_VERDICT"}:
+                        run["state"] = pause_after
+                        execution["wait_deadline"] = now + run["plan"]["execution_timeouts_s"][pause_after.lower()]
                     else:
                         self._start_current_step(run)
 
@@ -479,7 +531,7 @@ class PickupExecutor:
             raise ContractError("HEARTBEAT_SCHEMA")
         if run["state"] in {"BLOCKED", "COMPLETED"}:
             return self._execution_response(run, payload["run_id"], payload["plan_digest"], "HEARTBEAT_OK")
-        if run["state"] not in {"EXECUTING", "PRECONTACT_HUMAN", "SEMANTIC_VERDICT"}:
+        if run["state"] not in {"EXECUTING", "PRECONTACT_HUMAN", "GRASP_VERDICT", "SEMANTIC_VERDICT"}:
             raise ContractError("EXECUTION_STATE")
         if not health["writer_alive"] or health["writer_error"] is not None:
             self._fault(run, "RECORDER_WRITER_FAULT")
@@ -508,6 +560,20 @@ class PickupExecutor:
         run["state"] = "EXECUTING"
         self._start_current_step(run)
         return self._execution_response(run, payload["run_id"], payload["plan_digest"], "VERDICT_ACCEPTED")
+
+    def _grasp_verdict(self, payload):
+        run = self._execution_payload(payload, {"run_id", "plan_digest", "verdict", "decided_by", "source"}, "GRASP_VERDICT_SCHEMA")
+        if payload["source"] != "HUMAN" or payload["verdict"] not in {"PASS", "FAIL"} or not isinstance(payload["decided_by"], str) or not SAFE_ID.fullmatch(payload["decided_by"]):
+            raise ContractError("GRASP_VERDICT_SCHEMA")
+        if run["state"] != "GRASP_VERDICT":
+            raise ContractError("GRASP_VERDICT_STATE")
+        run["execution"]["grasp_verdict"] = payload["verdict"]
+        if payload["verdict"] == "FAIL":
+            self._fault(run, "GRASP_REJECTED")
+        else:
+            run["state"] = "EXECUTING"
+            self._start_current_step(run)
+        return self._execution_response(run, payload["run_id"], payload["plan_digest"], "GRASP_VERDICT_ACCEPTED")
 
     def _cancel(self, payload):
         run = self._execution_payload(payload, {"run_id", "plan_digest", "lease_id"}, "CANCEL_SCHEMA")
@@ -580,7 +646,7 @@ def run_jsonl(input_stream, output_stream, executor):
                     return terminal(run)
             continue
         for run in executor.runs.values():
-            if run["state"] in {"EXECUTING", "PRECONTACT_HUMAN", "SEMANTIC_VERDICT"}:
+            if run["state"] in {"EXECUTING", "PRECONTACT_HUMAN", "GRASP_VERDICT", "SEMANTIC_VERDICT"}:
                 executor._fault(run, "INPUT_READER_ERROR" if kind == "error" else "INPUT_EOF")
                 return terminal(run)
         return not any(run["state"] == "BLOCKED" for run in executor.runs.values())

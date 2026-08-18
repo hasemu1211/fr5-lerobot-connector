@@ -31,10 +31,10 @@ class DataFactoryTest(unittest.TestCase):
         for directory in ("robot_systems", "collection_profiles", "objects", "grasps", "cells"): (self.root / directory).mkdir()
         self._write("robot_systems/fr5-lab-a.json", {"schema_version":"data_factory.robot_system.v1","robot_system_id":"fr5-lab-a","qualification_status":"QUALIFIED","base_frame":"base_link","tcp_digest":digest("tcp"),"state_action_schema_digest":digest("state")})
         self._write("collection_profiles/fr5-dual-rgb-30hz-v1.json", {"schema_version":"data_factory.collection_profile.v1","collection_profile_id":"fr5-dual-rgb-30hz-v1","qualification_status":"QUALIFIED","quality_contract_digest":digest("quality")})
-        self._write("objects/OBJECT_A.json", {"schema_version":"data_factory.object_profile.v1","object_profile_id":"OBJECT_A","qualification_status":"QUALIFIED","object_datum_digest":digest("datum")})
-        self._write("grasps/top_center.json", {"schema_version":"data_factory.grasp_profile.v1","grasp_profile_id":"top_center","qualification_status":"QUALIFIED","object_profile_id":"OBJECT_A","grasp_margin_mm":20,"grasp_contract_digest":digest("grasp")})
+        self._write("objects/OBJECT_A.json", {"schema_version":"data_factory.object_profile.v2","object_profile_id":"OBJECT_A","qualification_status":"QUALIFIED","description":"test object","dimensions_mm":[40,30,20],"datum":"center"})
+        self._write("grasps/top_center.json", {"schema_version":"data_factory.grasp_profile.v2","grasp_profile_id":"top_center","qualification_status":"QUALIFIED","object_profile_id":"OBJECT_A","grasp_kind":"top_center","gripper_close":{"command_position_m":.012,"acceptable_feedback_m":{"min":.012,"max":.014},"velocity_percent":20,"force_percent":30,"evidence_digest":digest("grasp")}})
         self.yaw0, self.selected = self._sheet(0), self._sheet(30)
-        self.job = {"schema_version":"data_factory.job.v1","job_id":"job-1","task":"pickup_e2e","robot_system_id":"fr5-lab-a","collection_profile_id":"fr5-dual-rgb-30hz-v1","place_id":"PLACE_A","cell_calibration_id":"cal-a","sheet_manifest_digest":factory.canonical_digest(self.selected),"yaw_deg":30,"x_mm":-35,"y_mm":35,"object_profile_id":"OBJECT_A","grasp_profile_id":"top_center","instruction":"pick up the object","episode_intent":"nominal pickup","operator_or_agent_id":"operator-1","approval_expiry":"2099-01-01T00:00:00Z","dry_run_required":True}
+        self.job = {"schema_version":"data_factory.job.v1","job_id":"job-1","task":"pickup_e2e","robot_system_id":"fr5-lab-a","collection_profile_id":"fr5-dual-rgb-30hz-v1","place_id":"PLACE_A","cell_calibration_id":"cal-a","sheet_manifest_digest":factory.canonical_digest(self.selected),"yaw_deg":30,"x_mm":-35,"y_mm":35,"object_profile_id":"OBJECT_A","grasp_profile_id":"top_center","instruction":"pick up the test object","episode_intent":"nominal pickup","operator_or_agent_id":"operator-1","approval_expiry":"2099-01-01T00:00:00Z","dry_run_required":True}
         self.calibration = {"schema_version":"data_factory.cell_calibration.v1","calibration_id":"cal-a","qualification_status":"QUALIFIED","robot_system_id":"fr5-lab-a","place_id":"PLACE_A","yaw0_manifest_digest":factory.canonical_digest(self.yaw0),"a4_family_digest":self.yaw0["a4_family_digest"],"tcp_digest":digest("tcp"),"measurement_report_digest":digest("measurements"),"table_plane_measurement_digest":digest("plane"),"center_base_m":[1,2,3],"x_ref_base_m":[1.1285,2,3],"y_check_base_m":[0.8715,2.08,3],"table_normal_base":[0,0,1],"print_source_scale_bar_measured_mm":100,"scale_bar_measured_mm":100,"limits":{"max_scale_error_mm":1,"min_x_ref_separation_mm":100,"max_x_ref_distance_error_mm":1,"max_x_ref_out_of_plane_mm":1,"max_y_check_residual_mm":1,"combined_error_bound_mm":10},"measured_at":"2026-08-13T00:00:00Z"}
         self.cell_path = self._write("cells/cal-a.json", self.calibration)
 
@@ -90,10 +90,12 @@ class DataFactoryTest(unittest.TestCase):
         candidate = {"schema_version":"data_factory.home_candidate.v1","home_candidate_id":"fr5-lab-a-home-r001","robot_system_id":"fr5-lab-a","robot_model_name":"fairino5_v6_robot","robot_description_digest":"sha256:" + hashlib.sha256(urdf.read_bytes()).hexdigest(),"joint_order":["j1","j2","j3","j4","j5","j6"],"ui_observation_deg":[-89.913,-90.001,90,-90,-90,0],"nominal_target_deg":[-90,-90,90,-90,-90,0],"observation_source":"controller_web_ui","feedback_capture_status":"NOT_CAPTURED","qualification_status":"CANDIDATE","safety_status":"NOT_SAFE_FOR_MOTION","intended_use_after_qualification":"SAFE_POSE_PTP"}
         validated = self._validated()
         arm = {"velocity_scaling":.1,"acceleration_scaling":.1,"planning_timeout_s":1,"execution_timeout_s":2}
-        grip = {"command_duration_s":1,"execution_timeout_s":2,"completion_tolerance_m":.001}
-        qualification = {"schema_version":"data_factory.motion_qualification.v1","motion_qualification_id":"motion-q1","qualification_status":"QUALIFIED","robot_system_id":"fr5-lab-a","cell_calibration_id":"cal-a","object_profile_id":"OBJECT_A","grasp_profile_id":"top_center","profile_digests":{key:validated["input_digests"][key] for key in ("robot_system","cell_calibration","object_profile","grasp_profile")},"home_candidate_digest":factory.canonical_digest(candidate),"robot_description_digest":candidate["robot_description_digest"],"moveit_config_digest":digest("moveit"),"planning_scene_digest":digest("scene"),"frames":{"planning_frame":"base_link","planning_group":"fairino5_v6_group","tool_link":"wrist3_link"},"tool_to_tcp":{"translation_m":[.01,.02,.03],"rotation_columns":[[0,1,0],[-1,0,0],[0,0,1]]},"datum_to_tcp_grasp":{"translation_m":[.1,.2,.3],"rotation_columns":[[1,0,0],[0,0,1],[0,-1,0]]},"offsets_m":{"pregrasp":.1,"approach_stop":.02,"lift":.04,"retreat":.1},"gripper_positions_m":{"open":.021,"closed":.01239},"qualified_safe_joint_positions_rad":[math.radians(v) for v in candidate["nominal_target_deg"]],"execution_timeouts_s":{"heartbeat_lease":1,"cancel":1,"precontact_confirmation":30,"semantic_verdict":30},"phase_limits":{phase:(grip if phase.startswith("GRIPPER") else arm) for phase in factory.MOTION_PHASES},"goal_tolerances":{"position_m":.001,"orientation_rad":.01,"joint_rad":.01},"max_joint_state_age_s":.1,"qualified_at":"2026-08-13T00:00:00Z"}
+        grip = {"command_duration_s":1,"execution_timeout_s":2,"completion_tolerance_m":.002}
+        qualification = {"schema_version":"data_factory.motion_qualification.v1","motion_qualification_id":"motion-q1","qualification_status":"QUALIFIED","robot_system_id":"fr5-lab-a","cell_calibration_id":"cal-a","object_profile_id":"OBJECT_A","grasp_profile_id":"top_center","profile_digests":{key:validated["input_digests"][key] for key in ("robot_system","cell_calibration","object_profile","grasp_profile")},"home_candidate_digest":factory.canonical_digest(candidate),"robot_description_digest":candidate["robot_description_digest"],"moveit_config_digest":digest("moveit"),"planning_scene_digest":digest("scene"),"frames":{"planning_frame":"base_link","planning_group":"fairino5_v6_group","tool_link":"wrist3_link"},"tool_to_tcp":{"translation_m":[.01,.02,.03],"rotation_columns":[[0,1,0],[-1,0,0],[0,0,1]]},"datum_to_tcp_grasp":{"translation_m":[.1,.2,.3],"rotation_columns":[[1,0,0],[0,0,1],[0,-1,0]]},"offsets_m":{"pregrasp":.1,"approach_stop":.02,"lift":.04,"retreat":.1},"gripper_positions_m":{"open":.021,"closed":.012},"qualified_safe_joint_positions_rad":[math.radians(v) for v in candidate["nominal_target_deg"]],"execution_timeouts_s":{"heartbeat_lease":1,"cancel":1,"precontact_confirmation":30,"grasp_verdict":30,"semantic_verdict":30},"phase_limits":{phase:(grip if phase.startswith("GRIPPER") else arm) for phase in factory.MOTION_PHASES},"goal_tolerances":{"position_m":.001,"orientation_rad":.01,"joint_rad":.01},"max_joint_state_age_s":.1,"qualified_at":"2026-08-13T00:00:00Z"}
         program = factory.resolve_motion_program(validated, qualification, candidate, urdf=urdf, expected_robot_system_id="fr5-lab-a", now=NOW)
         self.assertEqual(factory.validate_motion_program(program), program)
+        self.assertEqual(program["schema_version"], "fr5.motion_program.v2")
+        self.assertEqual(program["gripper_requirements"], validated["grasp_profile"]["gripper_close"])
         self.assertEqual([step["phase"] for step in program["steps"]], list(factory.MOTION_PHASES))
         final = program["steps"][2]["target"]["base_tcp"]["translation_m"]
         for observed, expected in zip(final, [.9387916513, 2.236016, 3.3]): self.assertAlmostEqual(observed, expected, places=7)
@@ -101,15 +103,25 @@ class DataFactoryTest(unittest.TestCase):
         self.assertEqual(program["planning"]["goal_tolerances"], qualification["goal_tolerances"])
         self.assertEqual(program["robot_system_id"], "fr5-lab-a")
         self.assertEqual(program["execution_timeouts_s"], qualification["execution_timeouts_s"])
-        self.assertEqual(program["steps"][3]["gripper_position_m"], .01239)
+        self.assertEqual(program["steps"][3]["gripper_position_m"], .012)
         self.assertEqual(program["steps"][6]["gripper_position_m"], .021)
         self.assertEqual(program["steps"][2]["requires_confirmation"], "PRECONTACT_HUMAN")
+        self.assertEqual(program["steps"][3]["pause_after"], "GRASP_VERDICT")
         self.assertEqual(program["steps"][4]["pause_after"], "SEMANTIC_VERDICT")
+        bad_limits = copy.deepcopy(qualification["phase_limits"])
+        bad_limits["GRIPPER_CLOSE"]["completion_tolerance_m"] = .001
+        with self.assertRaises(factory.ContractError) as caught:
+            factory.resolve_motion_program(validated, {**qualification, "phase_limits": bad_limits}, candidate, urdf=urdf, expected_robot_system_id="fr5-lab-a", now=NOW)
+        self.assertEqual(caught.exception.code, "MOTION_PHASE_LIMITS")
+        bad_program = copy.deepcopy(program)
+        bad_program["steps"][3]["pause_after"] = "SEMANTIC_VERDICT"
+        with self.assertRaises(factory.ContractError) as caught: factory.validate_motion_program(bad_program)
+        self.assertEqual(caught.exception.code, "MOTION_PROGRAM_GRIPPER")
         selected, yaw0, job, qualification_path, candidate_path = (self._write(name, value) for name, value in (("selected.json", self.selected), ("yaw0.json", self.yaw0), ("job.json", self.job), ("motion.json", qualification), ("home.json", candidate)))
         run = subprocess.run([sys.executable, str(ROOT / "tools/fr5_data_factory.py"), "resolve-motion", "--job", str(job), "--selected-sheet", str(selected), "--yaw0-sheet", str(yaw0), "--config-root", str(self.root), "--motion-qualification", str(qualification_path), "--home-candidate", str(candidate_path), "--urdf", str(urdf), "--expected-robot-system-id", "fr5-lab-a"], text=True, capture_output=True)
         self.assertEqual(run.returncode, 0, run.stderr)
         self.assertEqual(json.loads(run.stdout), factory.resolve_motion_program(factory.validate_job_spec(self.job, paths={"selected_sheet": selected, "yaw0_sheet": yaw0}, config_root=self.root), qualification, candidate, urdf=urdf, expected_robot_system_id="fr5-lab-a"))
-        for bad, code in (({**qualification,"qualification_status":"CANDIDATE"},"MOTION_STATUS"), ({**qualification,"home_candidate_digest":digest("wrong")},"MOTION_HOME_BINDING"), ({key:value for key,value in qualification.items() if key != "goal_tolerances"},"MOTION_KEYS"), ({**qualification,"frames":{**qualification["frames"],"planning_frame":"bogus"}},"MOTION_FRAMES"), ({**qualification,"goal_tolerances":{**qualification["goal_tolerances"],"joint_rad":0}},"MOTION_TOLERANCES"), ({**qualification,"execution_timeouts_s":{**qualification["execution_timeouts_s"],"cancel":0}},"MOTION_EXECUTION_TIMEOUTS"), ({**qualification,"phase_limits":{**qualification["phase_limits"],"LIFT_LIN":{**arm,"velocity_scaling":.2}}},"MOTION_PHASE_LIMITS"), ({**qualification,"gripper_positions_m":{"open":0,"closed":.01239}},"MOTION_GRIPPER"), ({**qualification,"datum_to_tcp_grasp":{"translation_m":[0,0,0],"rotation_columns":[[1,0,0],[0,1,0],[0,0,-1]]}},"MOTION_TRANSFORM")):
+        for bad, code in (({**qualification,"qualification_status":"CANDIDATE"},"MOTION_STATUS"), ({**qualification,"home_candidate_digest":digest("wrong")},"MOTION_HOME_BINDING"), ({key:value for key,value in qualification.items() if key != "goal_tolerances"},"MOTION_KEYS"), ({**qualification,"frames":{**qualification["frames"],"planning_frame":"bogus"}},"MOTION_FRAMES"), ({**qualification,"goal_tolerances":{**qualification["goal_tolerances"],"joint_rad":0}},"MOTION_TOLERANCES"), ({**qualification,"execution_timeouts_s":{**qualification["execution_timeouts_s"],"cancel":0}},"MOTION_EXECUTION_TIMEOUTS"), ({**qualification,"phase_limits":{**qualification["phase_limits"],"LIFT_LIN":{**arm,"velocity_scaling":.2}}},"MOTION_PHASE_LIMITS"), ({**qualification,"gripper_positions_m":{"open":0,"closed":.012}},"MOTION_GRIPPER"), ({**qualification,"datum_to_tcp_grasp":{"translation_m":[0,0,0],"rotation_columns":[[1,0,0],[0,1,0],[0,0,-1]]}},"MOTION_TRANSFORM")):
             with self.subTest(code=code):
                 with self.assertRaises(factory.ContractError) as caught: factory.resolve_motion_program(validated, bad, candidate, urdf=urdf, expected_robot_system_id="fr5-lab-a", now=NOW)
                 self.assertEqual(caught.exception.code, code)
@@ -156,17 +168,19 @@ class DataFactoryTest(unittest.TestCase):
                 with self.assertRaises(factory.ContractError) as caught:
                     factory.load_json_strict(json.dumps(value, allow_nan=True) if isinstance(value,dict) else value)
                 self.assertEqual(caught.exception.code, code)
-        for job, code in (({**self.job,"extra":1},"JOB_KEYS"), ({key:value for key,value in self.job.items() if key!="x_mm"},"JOB_KEYS"), ({**self.job,"task":"pick_place"},"JOB_TASK"), ({**self.job,"grasp_profile_id":"side"},"JOB_GRASP"), ({**self.job,"instruction":"pick up"},"JOB_TEXT"), ({**self.job,"x_mm":float("nan")},"JOB_NUMBER"), ({**self.job,"approval_expiry":"2026-08-15 00:00:00Z"},"JOB_EXPIRY"), ({**self.job,"approval_expiry":"2026-08-13T00:00:00Z"},"JOB_EXPIRED")):
+        for job, code in (({**self.job,"extra":1},"JOB_KEYS"), ({key:value for key,value in self.job.items() if key!="x_mm"},"JOB_KEYS"), ({**self.job,"task":"pick_place"},"JOB_TASK"), ({**self.job,"grasp_profile_id":"bad/id"},"JOB_ID"), ({**self.job,"instruction":"bad\ninstruction"},"JOB_TEXT"), ({**self.job,"x_mm":float("nan")},"JOB_NUMBER"), ({**self.job,"approval_expiry":"2026-08-15 00:00:00Z"},"JOB_EXPIRY"), ({**self.job,"approval_expiry":"2026-08-13T00:00:00Z"},"JOB_EXPIRED")):
             with self.subTest(code=code):
                 with self.assertRaises(factory.ContractError) as caught: factory.normalize_job_spec(job,now=NOW)
                 self.assertEqual(caught.exception.code,code)
+        self._error("JOB_TEXT", job={**self.job, "instruction": "pick up another object"})
         offset_job = {**self.job, "approval_expiry": "2099-01-01T09:00:00+09:00"}
         self.assertEqual(factory.normalize_job_spec(offset_job, now=NOW)["approval_expiry"], self.job["approval_expiry"])
+        self.assertEqual(factory.normalize_job_spec({**self.job, "grasp_profile_id": "another-safe-profile"}, now=NOW)["grasp_profile_id"], "another-safe-profile")
         self._write("objects/OBJECT_A.json", {"schema_version":"wrong","object_profile_id":"OBJECT_A","qualification_status":"QUALIFIED"}); self._error("PROFILE_SCHEMA")
-        self._write("objects/OBJECT_A.json", {"schema_version":"data_factory.object_profile.v1","object_profile_id":"OBJECT_A","qualification_status":"QUALIFIED"})
+        self._write("objects/OBJECT_A.json", {"schema_version":"data_factory.object_profile.v2","object_profile_id":"OBJECT_A","qualification_status":"QUALIFIED","description":"test object","dimensions_mm":[40,30,20],"datum":"center"})
         with tempfile.TemporaryDirectory() as external_root:
             outside = Path(external_root) / "outside.json"
-            outside.write_text(json.dumps({"schema_version":"data_factory.object_profile.v1","object_profile_id":"OBJECT_A","qualification_status":"QUALIFIED"}))
+            outside.write_text(json.dumps({"schema_version":"data_factory.object_profile.v2","object_profile_id":"OBJECT_A","qualification_status":"QUALIFIED","description":"test object","dimensions_mm":[40,30,20],"datum":"center"}))
             (self.root/"objects/OBJECT_A.json").unlink()
             (self.root/"objects/OBJECT_A.json").symlink_to(outside)
             self._error("PROFILE_PATH")
@@ -205,7 +219,6 @@ class DataFactoryTest(unittest.TestCase):
             ("CALIBRATION_SCALE", {"scale_bar_measured_mm": 102}),
             ("CALIBRATION_PRINT_SCALE", {"print_source_scale_bar_measured_mm": 0}),
             ("CALIBRATION_Y_CHECK", {"y_check_base_m": [.8715, 2.09, 3]}),
-            ("CALIBRATION_COMBINED_LIMIT", {"limits": {**self.calibration["limits"], "combined_error_bound_mm": 21}}),
             ("CALIBRATION_COMBINED_ERROR", {"limits": {**self.calibration["limits"], "max_y_check_residual_mm": 100}, "y_check_base_m": [.8715, 2.095, 3]}),
         )
         for code, change in cases:
@@ -261,16 +274,16 @@ class DataFactoryTest(unittest.TestCase):
         validated = self._validated()
         baseline = validated["resolved_job_digest"]
         mutations = (
-            ("robot_systems/fr5-lab-a.json", "state_action_schema_digest"),
-            ("collection_profiles/fr5-dual-rgb-30hz-v1.json", "quality_contract_digest"),
-            ("objects/OBJECT_A.json", "object_datum_digest"),
-            ("grasps/top_center.json", "grasp_contract_digest"),
+            ("robot_systems/fr5-lab-a.json", lambda value: {**value, "state_action_schema_digest": digest("robot")} ),
+            ("collection_profiles/fr5-dual-rgb-30hz-v1.json", lambda value: {**value, "quality_contract_digest": digest("collection")} ),
+            ("objects/OBJECT_A.json", lambda value: {**value, "dimensions_mm": [41, 30, 20]}),
+            ("grasps/top_center.json", lambda value: {**value, "gripper_close": {**value["gripper_close"], "force_percent": 31}}),
         )
-        for relative, field in mutations:
+        for relative, mutate in mutations:
             with self.subTest(relative=relative):
                 path = self.root / relative
                 original = json.loads(path.read_text())
-                changed = {**original, field: digest(relative + field)}
+                changed = mutate(original)
                 self._write(relative, changed)
                 self.assertNotEqual(baseline, self._validated()["resolved_job_digest"])
                 self._write(relative, original)
@@ -292,11 +305,16 @@ class DataFactoryTest(unittest.TestCase):
     def test_profile_shape_and_symlink_confinement(self):
         path = self.root / "grasps/top_center.json"
         profile = json.loads(path.read_text())
-        for label, changed in (("extra", {**profile, "future": True}), ("missing", {key: value for key, value in profile.items() if key != "grasp_contract_digest"}), ("type", {**profile, "grasp_margin_mm": "20"}), ("digest", {**profile, "grasp_contract_digest": "bad"})):
+        for label, changed, code in (("extra", {**profile, "future": True}, "PROFILE_SCHEMA"), ("missing", {key: value for key, value in profile.items() if key != "gripper_close"}, "PROFILE_SCHEMA"), ("kind", {**profile, "grasp_kind": "side"}, "GRASP_KIND"), ("type", {**profile, "gripper_close": {**profile["gripper_close"], "velocity_percent": "20"}}, "GRASP_CLOSE"), ("range", {**profile, "gripper_close": {**profile["gripper_close"], "acceptable_feedback_m": {"min": .011, "max": .014}}}, "GRASP_CLOSE"), ("digest", {**profile, "gripper_close": {**profile["gripper_close"], "evidence_digest": "bad"}}, "GRASP_CLOSE")):
             with self.subTest(label=label):
                 self._write("grasps/top_center.json", changed)
-                self._error("PROFILE_SCHEMA" if label in ("extra", "missing") else "PROFILE_DIGEST" if label == "digest" else "GRASP_MARGIN")
+                self._error(code)
                 self._write("grasps/top_center.json", profile)
+        for label, changed, code in (("dimensions", {"schema_version":"data_factory.object_profile.v2","object_profile_id":"OBJECT_A","qualification_status":"QUALIFIED","description":"test object","dimensions_mm":[40,0,20],"datum":"center"}, "OBJECT_DIMENSIONS"), ("datum", {"schema_version":"data_factory.object_profile.v2","object_profile_id":"OBJECT_A","qualification_status":"QUALIFIED","description":"test object","dimensions_mm":[40,30,20],"datum":"corner"}, "OBJECT_DATUM"), ("description", {"schema_version":"data_factory.object_profile.v2","object_profile_id":"OBJECT_A","qualification_status":"QUALIFIED","description":"bad\nobject","dimensions_mm":[40,30,20],"datum":"center"}, "OBJECT_DESCRIPTION")):
+            with self.subTest(label=label):
+                self._write("objects/OBJECT_A.json", changed)
+                self._error(code)
+                self._write("objects/OBJECT_A.json", {"schema_version":"data_factory.object_profile.v2","object_profile_id":"OBJECT_A","qualification_status":"QUALIFIED","description":"test object","dimensions_mm":[40,30,20],"datum":"center"})
         with tempfile.TemporaryDirectory() as outside_root:
             outside = Path(outside_root) / "outside.json"
             outside.write_text(path.read_text())

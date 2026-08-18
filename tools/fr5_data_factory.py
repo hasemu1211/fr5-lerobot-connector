@@ -30,8 +30,8 @@ RELATIVE_KEYS = {"x_mm", "y_mm", "yaw_deg"}
 PROFILE_KEYS = {
     "robot_system": {"schema_version", "robot_system_id", "qualification_status", "base_frame", "tcp_digest", "state_action_schema_digest"},
     "collection_profile": {"schema_version", "collection_profile_id", "qualification_status", "quality_contract_digest"},
-    "object_profile": {"schema_version", "object_profile_id", "qualification_status", "object_datum_digest"},
-    "grasp_profile": {"schema_version", "grasp_profile_id", "qualification_status", "object_profile_id", "grasp_margin_mm", "grasp_contract_digest"},
+    "object_profile": {"schema_version", "object_profile_id", "qualification_status", "description", "dimensions_mm", "datum"},
+    "grasp_profile": {"schema_version", "grasp_profile_id", "qualification_status", "object_profile_id", "grasp_kind", "gripper_close"},
 }
 HOME_CANDIDATE_KEYS = {"schema_version", "home_candidate_id", "robot_system_id", "robot_model_name", "robot_description_digest", "joint_order", "ui_observation_deg", "nominal_target_deg", "observation_source", "feedback_capture_status", "qualification_status", "safety_status", "intended_use_after_qualification"}
 HOME_JOINT_ORDER = ["j1", "j2", "j3", "j4", "j5", "j6"]
@@ -41,7 +41,7 @@ MOTION_PROFILE_DIGESTS = {"robot_system", "cell_calibration", "object_profile", 
 MOTION_FRAMES = {"planning_frame", "planning_group", "tool_link"}
 MOTION_OFFSETS = {"pregrasp", "approach_stop", "lift", "retreat"}
 MOTION_GOAL_TOLERANCES = {"position_m", "orientation_rad", "joint_rad"}
-MOTION_EXECUTION_TIMEOUTS = {"heartbeat_lease", "cancel", "precontact_confirmation", "semantic_verdict"}
+MOTION_EXECUTION_TIMEOUTS = {"heartbeat_lease", "cancel", "precontact_confirmation", "grasp_verdict", "semantic_verdict"}
 
 
 class ContractError(ValueError):
@@ -174,10 +174,14 @@ def normalize_job_spec(job: object, *, now: datetime | None = None) -> dict:
     for key in ("job_id", "robot_system_id", "collection_profile_id", "place_id", "cell_calibration_id", "object_profile_id", "grasp_profile_id", "operator_or_agent_id"):
         result[key] = _id(result[key], "JOB_ID")
     if result["task"] != "pickup_e2e": raise ContractError("JOB_TASK")
-    if result["grasp_profile_id"] != "top_center": raise ContractError("JOB_GRASP")
     if result["episode_intent"] != "nominal pickup": raise ContractError("JOB_INTENT")
     if result["dry_run_required"] is not True: raise ContractError("JOB_DRY_RUN")
-    if result["instruction"] != "pick up the object":
+    if (
+        not isinstance(result["instruction"], str)
+        or not 1 <= len(result["instruction"]) <= 120
+        or result["instruction"].strip() != result["instruction"]
+        or not result["instruction"].isprintable()
+    ):
         raise ContractError("JOB_TEXT")
     _digest(result["sheet_manifest_digest"], "JOB_DIGEST")
     for key in ("yaw_deg", "x_mm", "y_mm"):
@@ -251,14 +255,40 @@ def _safe_profile_path(root: Path, folder: str, ident: str) -> Path:
 
 def _profile(root, folder, ident, id_key, schema):
     value = load_json_strict(_safe_profile_path(Path(root), folder, ident))
-    kind = schema.removeprefix("data_factory.").removesuffix(".v1")
+    kind = schema.removeprefix("data_factory.").rsplit(".v", 1)[0]
     _exact(value, PROFILE_KEYS[kind], "PROFILE_SCHEMA")
     if value.get("schema_version") != schema: raise ContractError("PROFILE_SCHEMA")
     if value.get(id_key) != ident or value.get("qualification_status") != "QUALIFIED": raise ContractError("PROFILE_QUALIFICATION")
-    for key, item in value.items():
-        if key.endswith("_digest"):
-            _digest(item, "PROFILE_DIGEST")
+    if kind == "object_profile":
+        if value["datum"] != "center": raise ContractError("OBJECT_DATUM")
+        description = value["description"]
+        if not isinstance(description, str) or not 1 <= len(description) <= 80 or description.strip() != description or not description.isprintable():
+            raise ContractError("OBJECT_DESCRIPTION")
+        dimensions = value["dimensions_mm"]
+        if not isinstance(dimensions, list) or len(dimensions) != 3 or any(_number(item, "OBJECT_DIMENSIONS") <= 0 for item in dimensions):
+            raise ContractError("OBJECT_DIMENSIONS")
+    elif kind == "grasp_profile":
+        if value["grasp_kind"] != "top_center": raise ContractError("GRASP_KIND")
+        value = {**value, "gripper_close": _gripper_close(value["gripper_close"], "GRASP_CLOSE")}
+    else:
+        for key, item in value.items():
+            if key.endswith("_digest"):
+                _digest(item, "PROFILE_DIGEST")
     return value
+
+
+def _gripper_close(value, code):
+    value = _exact(value, {"command_position_m", "acceptable_feedback_m", "velocity_percent", "force_percent", "evidence_digest"}, code)
+    feedback = _exact(value["acceptable_feedback_m"], {"min", "max"}, code)
+    command = _number(value["command_position_m"], code)
+    minimum, maximum = (_number(feedback[key], code) for key in ("min", "max"))
+    if any(item <= 0 for item in (command, minimum, maximum)) or not command <= minimum <= maximum:
+        raise ContractError(code)
+    for key in ("velocity_percent", "force_percent"):
+        if isinstance(value[key], bool) or not isinstance(value[key], int) or not 1 <= value[key] <= 100:
+            raise ContractError(code)
+    _digest(value["evidence_digest"], code)
+    return {"command_position_m": command, "acceptable_feedback_m": {"min": minimum, "max": maximum}, "velocity_percent": value["velocity_percent"], "force_percent": value["force_percent"], "evidence_digest": value["evidence_digest"]}
 
 
 def _document(source, code):
@@ -486,14 +516,10 @@ def validate_cell_calibration_document(calibration, *, yaw0, robot, required_sta
     return {"center": center, "x": x, "y": y, "z": z, "limits": values, "combined_error_mm": combined, "document": calibration}
 
 
-def _calibration(calibration, job, yaw0, robot, grasp, now):
+def _calibration(calibration, job, yaw0, robot, now):
     resolved = validate_cell_calibration_document(calibration, yaw0=yaw0, robot=robot, required_status="QUALIFIED", now=now)
     if calibration["calibration_id"] != job["cell_calibration_id"] or calibration["robot_system_id"] != job["robot_system_id"] or calibration["place_id"] != job["place_id"]:
         raise ContractError("CALIBRATION_ID")
-    margin = _number(grasp.get("grasp_margin_mm"), "GRASP_MARGIN")
-    if margin <= 0: raise ContractError("GRASP_MARGIN")
-    if resolved["limits"]["combined_error_bound_mm"] > margin: raise ContractError("CALIBRATION_COMBINED_LIMIT")
-    if resolved["combined_error_mm"] > margin: raise ContractError("CALIBRATION_COMBINED_ERROR")
     return {key: resolved[key] for key in ("center", "x", "y", "z", "document")}
 
 
@@ -509,20 +535,22 @@ def validate_job_spec(job, *, paths=None, data=None, config_root, now=None):
     root = Path(config_root)
     robot = _profile(root, "robot_systems", normalized["robot_system_id"], "robot_system_id", "data_factory.robot_system.v1")
     collection = _profile(root, "collection_profiles", normalized["collection_profile_id"], "collection_profile_id", "data_factory.collection_profile.v1")
-    object_profile = _profile(root, "objects", normalized["object_profile_id"], "object_profile_id", "data_factory.object_profile.v1")
-    grasp = _profile(root, "grasps", normalized["grasp_profile_id"], "grasp_profile_id", "data_factory.grasp_profile.v1")
+    object_profile = _profile(root, "objects", normalized["object_profile_id"], "object_profile_id", "data_factory.object_profile.v2")
+    grasp = _profile(root, "grasps", normalized["grasp_profile_id"], "grasp_profile_id", "data_factory.grasp_profile.v2")
     if not isinstance(robot.get("base_frame"), str):
         raise ContractError("ROBOT_CONTRACT")
     _digest(robot.get("tcp_digest"), "ROBOT_CONTRACT")
     if grasp.get("object_profile_id") != normalized["object_profile_id"]:
         raise ContractError("GRASP_OBJECT")
+    if normalized["instruction"] != f"pick up the {object_profile['description']}":
+        raise ContractError("JOB_TEXT")
     cell_path = _safe_profile_path(root, "cells", normalized["cell_calibration_id"])
     calibration = load_json_strict(cell_path)
     _sheet_contract(selected, yaw0, normalized)
-    resolved_calibration = _calibration(calibration, normalized, yaw0, robot, grasp, now)
+    resolved_calibration = _calibration(calibration, normalized, yaw0, robot, now)
     input_digests = {"selected_sheet": canonical_digest(selected), "yaw0_sheet": canonical_digest(yaw0), "cell_calibration": canonical_digest(calibration), "robot_system": canonical_digest(robot), "collection_profile": canonical_digest(collection), "object_profile": canonical_digest(object_profile), "grasp_profile": canonical_digest(grasp)}
     resolved_job_digest = canonical_digest({"job": normalized, "input_digests": input_digests})
-    return {"normalized_job": normalized, "input_digests": input_digests, "resolved_job_digest": resolved_job_digest, "robot": robot, "calibration": resolved_calibration}
+    return {"normalized_job": normalized, "input_digests": input_digests, "resolved_job_digest": resolved_job_digest, "robot": robot, "calibration": resolved_calibration, "grasp_profile": grasp}
 
 
 def resolve_pose(validated):
@@ -602,6 +630,8 @@ def _validate_motion_qualification(qualification, validated, home, *, urdf, now=
     gripper = {key: _number(value, "MOTION_GRIPPER") for key, value in gripper.items()}
     lower, upper = _urdf_motion_limits(urdf)
     if any(not lower <= value <= upper for value in gripper.values()) or gripper["open"] <= gripper["closed"]: raise ContractError("MOTION_GRIPPER")
+    close = validated["grasp_profile"]["gripper_close"]
+    if gripper["closed"] != close["command_position_m"]: raise ContractError("MOTION_GRIPPER")
     safe = qualification["qualified_safe_joint_positions_rad"]
     if not isinstance(safe, list) or len(safe) != len(HOME_JOINT_ORDER) or any(abs(_number(value, "MOTION_SAFE_JOINTS") - expected) > 1e-12 for value, expected in zip(safe, home["nominal_target_rad"])): raise ContractError("MOTION_SAFE_JOINTS")
     tolerance = _exact(qualification["goal_tolerances"], MOTION_GOAL_TOLERANCES, "MOTION_TOLERANCES")
@@ -620,6 +650,7 @@ def _validate_motion_qualification(qualification, validated, home, *, urdf, now=
             limit = _exact(limit, {"command_duration_s", "execution_timeout_s", "completion_tolerance_m"}, "MOTION_PHASE_LIMITS")
             values = {key: _number(value, "MOTION_PHASE_LIMITS") for key, value in limit.items()}
             if values["execution_timeout_s"] <= values["command_duration_s"]: raise ContractError("MOTION_PHASE_LIMITS")
+            if phase == "GRIPPER_CLOSE" and (close["acceptable_feedback_m"]["max"] <= close["command_position_m"] or values["completion_tolerance_m"] != close["acceptable_feedback_m"]["max"] - close["command_position_m"]): raise ContractError("MOTION_PHASE_LIMITS")
         else:
             limit = _exact(limit, {"velocity_scaling", "acceleration_scaling", "planning_timeout_s", "execution_timeout_s"}, "MOTION_PHASE_LIMITS")
             values = {key: _number(value, "MOTION_PHASE_LIMITS") for key, value in limit.items()}
@@ -627,7 +658,7 @@ def _validate_motion_qualification(qualification, validated, home, *, urdf, now=
         if any(value <= 0 for value in values.values()): raise ContractError("MOTION_PHASE_LIMITS")
         normalized_limits[phase] = values
     _timestamp(qualification["qualified_at"], "MOTION_QUALIFIED_AT", now=now)
-    return {"digest": canonical_digest(qualification), "frames": frames, "transforms": transforms, "offsets": offsets, "gripper": gripper, "safe": [_number(v, "MOTION_SAFE_JOINTS") for v in safe], "limits": normalized_limits, "tolerances": tolerance, "max_joint_state_age_s": max_joint_state_age_s, "execution_timeouts_s": execution_timeouts, "pins": {key: qualification[key] for key in ("robot_description_digest", "moveit_config_digest", "planning_scene_digest")}}
+    return {"digest": canonical_digest(qualification), "frames": frames, "transforms": transforms, "offsets": offsets, "gripper": gripper, "gripper_requirements": close, "safe": [_number(v, "MOTION_SAFE_JOINTS") for v in safe], "limits": normalized_limits, "tolerances": tolerance, "max_joint_state_age_s": max_joint_state_age_s, "execution_timeouts_s": execution_timeouts, "pins": {key: qualification[key] for key in ("robot_description_digest", "moveit_config_digest", "planning_scene_digest")}}
 
 
 def resolve_motion_program(validated, motion_qualification, home_candidate, *, urdf, expected_robot_system_id, now=None):
@@ -651,22 +682,25 @@ def resolve_motion_program(validated, motion_qualification, home_candidate, *, u
         elif phase.startswith("GRIPPER"): step["gripper_position_m"] = q["gripper"]["closed" if phase == "GRIPPER_CLOSE" else "open"]
         else: step["joint_positions_rad"] = q["safe"]
         if phase == "FINAL_APPROACH_LIN": step["requires_confirmation"] = "PRECONTACT_HUMAN"
+        if phase == "GRIPPER_CLOSE": step["pause_after"] = "GRASP_VERDICT"
         if phase == "LIFT_LIN": step["pause_after"] = "SEMANTIC_VERDICT"
         steps.append(step)
     binding_digests = {**validated["input_digests"], **q["pins"], "motion_qualification": q["digest"], "home_candidate": home["candidate_digest"]}
-    return {"schema_version": "fr5.motion_program.v1", "robot_system_id": validated["normalized_job"]["robot_system_id"], "resolved_job_digest": validated["resolved_job_digest"], "binding_digests": binding_digests, "frames": q["frames"], "planning": {"pipeline_id": "pilz_industrial_motion_planner", "ptp_planner_id": "PTP", "lin_planner_id": "LIN", "goal_tolerances": q["tolerances"], "max_joint_state_age_s": q["max_joint_state_age_s"]}, "execution_timeouts_s": q["execution_timeouts_s"], "steps": steps}
+    return {"schema_version": "fr5.motion_program.v2", "robot_system_id": validated["normalized_job"]["robot_system_id"], "resolved_job_digest": validated["resolved_job_digest"], "binding_digests": binding_digests, "frames": q["frames"], "planning": {"pipeline_id": "pilz_industrial_motion_planner", "ptp_planner_id": "PTP", "lin_planner_id": "LIN", "goal_tolerances": q["tolerances"], "max_joint_state_age_s": q["max_joint_state_age_s"]}, "gripper_requirements": q["gripper_requirements"], "execution_timeouts_s": q["execution_timeouts_s"], "steps": steps}
 
 
 def validate_motion_program(value):
     """Validate the exact offline motion-program contract emitted above."""
-    keys = {"schema_version", "robot_system_id", "resolved_job_digest", "binding_digests", "frames", "planning", "execution_timeouts_s", "steps"}
+    keys = {"schema_version", "robot_system_id", "resolved_job_digest", "binding_digests", "frames", "planning", "gripper_requirements", "execution_timeouts_s", "steps"}
     value = _exact(value, keys, "MOTION_PROGRAM_SCHEMA")
-    if value["schema_version"] != "fr5.motion_program.v1": raise ContractError("MOTION_PROGRAM_SCHEMA")
+    if value["schema_version"] != "fr5.motion_program.v2": raise ContractError("MOTION_PROGRAM_SCHEMA")
     _id(value["robot_system_id"], "MOTION_PROGRAM_ROBOT_ID")
     _digest(value["resolved_job_digest"], "MOTION_PROGRAM_DIGEST")
     binding_keys = {"selected_sheet", "yaw0_sheet", "cell_calibration", "robot_system", "collection_profile", "object_profile", "grasp_profile", "robot_description_digest", "moveit_config_digest", "planning_scene_digest", "motion_qualification", "home_candidate"}
     bindings = _exact(value["binding_digests"], binding_keys, "MOTION_PROGRAM_BINDING")
     for item in bindings.values(): _digest(item, "MOTION_PROGRAM_BINDING")
+    requirements = _gripper_close(value["gripper_requirements"], "MOTION_PROGRAM_GRIPPER")
+    if requirements["acceptable_feedback_m"]["max"] <= requirements["command_position_m"]: raise ContractError("MOTION_PROGRAM_GRIPPER")
     frames = _exact(value["frames"], MOTION_FRAMES, "MOTION_PROGRAM_FRAMES")
     if frames != {"planning_frame": "base_link", "planning_group": "fairino5_v6_group", "tool_link": "wrist3_link"}: raise ContractError("MOTION_PROGRAM_FRAMES")
     planning = _exact(value["planning"], {"pipeline_id", "ptp_planner_id", "lin_planner_id", "goal_tolerances", "max_joint_state_age_s"}, "MOTION_PROGRAM_PLANNING")
@@ -682,6 +716,7 @@ def validate_motion_program(value):
         phase = step["phase"]
         extras = {"phase", "limits", "target"} if phase in {"PREGRASP_PTP", "APPROACH_STOP_LIN", "FINAL_APPROACH_LIN", "LIFT_LIN", "LOWER_LIN", "RETREAT_LIN"} else {"phase", "limits", "joint_positions_rad"} if phase == "SAFE_POSE_PTP" else {"phase", "limits", "gripper_position_m"}
         if phase == "FINAL_APPROACH_LIN": extras.add("requires_confirmation")
+        if phase == "GRIPPER_CLOSE": extras.add("pause_after")
         if phase == "LIFT_LIN": extras.add("pause_after")
         _exact(step, extras, "MOTION_PROGRAM_STEP")
         limit = step["limits"]
@@ -702,14 +737,20 @@ def validate_motion_program(value):
         if "joint_positions_rad" in step:
             if not isinstance(step["joint_positions_rad"], list) or len(step["joint_positions_rad"]) != 6: raise ContractError("MOTION_PROGRAM_JOINTS")
             [_number(item, "MOTION_PROGRAM_JOINTS") for item in step["joint_positions_rad"]]
-        if "gripper_position_m" in step: _number(step["gripper_position_m"], "MOTION_PROGRAM_GRIPPER")
+        if "gripper_position_m" in step:
+            position = _number(step["gripper_position_m"], "MOTION_PROGRAM_GRIPPER")
+            if phase == "GRIPPER_CLOSE" and position != requirements["command_position_m"]: raise ContractError("MOTION_PROGRAM_GRIPPER")
+        if phase == "GRIPPER_CLOSE":
+            if step["pause_after"] != "GRASP_VERDICT" or _number(step["limits"]["completion_tolerance_m"], "MOTION_PROGRAM_LIMITS") != requirements["acceptable_feedback_m"]["max"] - requirements["command_position_m"]: raise ContractError("MOTION_PROGRAM_GRIPPER")
         if phase == "FINAL_APPROACH_LIN" and step["requires_confirmation"] != "PRECONTACT_HUMAN": raise ContractError("MOTION_PROGRAM_MARKER")
         if phase == "LIFT_LIN" and step["pause_after"] != "SEMANTIC_VERDICT": raise ContractError("MOTION_PROGRAM_MARKER")
     return value
 
 
-def build_job_spec(selected_sheet, *, point_id=None, x_mm=None, y_mm=None, job_id, robot_system_id, collection_profile_id, cell_calibration_id, object_profile_id, grasp_profile_id, operator_or_agent_id, approval_expiry, now=None):
+def build_job_spec(selected_sheet, *, point_id=None, x_mm=None, y_mm=None, job_id, robot_system_id, collection_profile_id, cell_calibration_id, object_profile_id, object_description, grasp_profile_id, operator_or_agent_id, approval_expiry, now=None):
     """Build the fixed pickup JobSpec from an A4 point or bounded coordinate."""
+    if not isinstance(object_description, str) or not 1 <= len(object_description) <= 80 or object_description.strip() != object_description or not object_description.isprintable():
+        raise ContractError("OBJECT_DESCRIPTION")
     sheet = _document(selected_sheet, "INPUT_SELECTED_SHEET")
     validate_sheet_manifest(sheet)
     has_xy = x_mm is not None or y_mm is not None
@@ -739,7 +780,7 @@ def build_job_spec(selected_sheet, *, point_id=None, x_mm=None, y_mm=None, job_i
         "y_mm": pose["y_mm"],
         "object_profile_id": object_profile_id,
         "grasp_profile_id": grasp_profile_id,
-        "instruction": "pick up the object",
+        "instruction": f"pick up the {object_description}",
         "episode_intent": "nominal pickup",
         "operator_or_agent_id": operator_or_agent_id,
         "approval_expiry": approval_expiry,
@@ -852,6 +893,8 @@ def _cli():
                     raise ContractError("CLI_INPUT_REQUIRED", "point")
                 point_id, x_mm, y_mm = _interactive_point(selected)
             root = Path(args.config_root)
+            object_profile_id = _profile_choice(args.object_profile_id, label="object_profile_id", root=root, folder="objects", interactive=args.interactive)
+            object_description = _profile(root, "objects", object_profile_id, "object_profile_id", "data_factory.object_profile.v2")["description"]
             job = build_job_spec(
                 selected,
                 point_id=point_id,
@@ -861,7 +904,8 @@ def _cli():
                 robot_system_id=_profile_choice(args.robot_system_id, label="robot_system_id", root=root, folder="robot_systems", interactive=args.interactive),
                 collection_profile_id=_profile_choice(args.collection_profile_id, label="collection_profile_id", root=root, folder="collection_profiles", interactive=args.interactive),
                 cell_calibration_id=_profile_choice(args.cell_calibration_id, label="cell_calibration_id", root=root, folder="cells", interactive=args.interactive),
-                object_profile_id=_profile_choice(args.object_profile_id, label="object_profile_id", root=root, folder="objects", interactive=args.interactive),
+                object_profile_id=object_profile_id,
+                object_description=object_description,
                 grasp_profile_id=_profile_choice(args.grasp_profile_id, label="grasp_profile_id", root=root, folder="grasps", interactive=args.interactive),
                 operator_or_agent_id=_required(args.operator_or_agent_id, "operator_or_agent_id", args.interactive),
                 approval_expiry=_required(args.approval_expiry, "approval_expiry", args.interactive),

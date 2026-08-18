@@ -4,6 +4,7 @@ from __future__ import annotations
 import base64
 import math
 import time
+import xml.etree.ElementTree as ET
 from dataclasses import dataclass
 
 from tools.fr5_data_factory import ContractError
@@ -92,9 +93,11 @@ class RosMoveItTransport:
                 MoveItErrorCodes,
             )
             from rclpy.action import ActionClient, get_action_names_and_types
+            from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
             from rclpy.serialization import deserialize_message, serialize_message
             from sensor_msgs.msg import JointState
             from shape_msgs.msg import SolidPrimitive
+            from std_msgs.msg import String
             from trajectory_msgs.msg import JointTrajectoryPoint
         except ImportError as exc:
             raise ContractError("ROS_JAZZY_UNAVAILABLE", str(exc)) from exc
@@ -141,11 +144,13 @@ class RosMoveItTransport:
         self._arm_controller_received_at = None
         self._gripper_controller_state = None
         self._gripper_controller_received_at = None
+        self._robot_description = None
         self._active = None
         self._execution_locked = False
         self._joint_state_subscription = None
         self._arm_controller_subscription = None
         self._gripper_controller_subscription = None
+        self._robot_description_subscription = None
         if hasattr(node, "create_subscription"):
             self._joint_state_subscription = node.create_subscription(
                 JointState, "/joint_states", self._on_joint_state, 10
@@ -162,6 +167,16 @@ class RosMoveItTransport:
                 self._on_gripper_controller_state,
                 10,
             )
+            self._robot_description_subscription = node.create_subscription(
+                String,
+                "/robot_description",
+                self._on_robot_description,
+                QoSProfile(
+                    depth=1,
+                    durability=DurabilityPolicy.TRANSIENT_LOCAL,
+                    reliability=ReliabilityPolicy.RELIABLE,
+                ),
+            )
 
     def _on_joint_state(self, message):
         self._joint_state = message
@@ -174,6 +189,9 @@ class RosMoveItTransport:
     def _on_gripper_controller_state(self, message):
         self._gripper_controller_state = message
         self._gripper_controller_received_at = self._clock()
+
+    def _on_robot_description(self, message):
+        self._robot_description = message.data
 
     def _compiled_execution_goal(self, compiled_step):
         if not isinstance(compiled_step, dict):
@@ -327,6 +345,7 @@ class RosMoveItTransport:
             self._joint_state_received_at is None
             or self._arm_controller_received_at is None
             or self._gripper_controller_received_at is None
+            or self._robot_description is None
             or any(
                 self._clock() - received_at > max_age_s
                 for received_at in (
@@ -357,7 +376,11 @@ class RosMoveItTransport:
         arm_type = topics.get("/fairino5_controller/controller_state", [])
         gripper_type = topics.get("/gripper_controller/controller_state", [])
         self._controller_values(self._arm_controller_state, "ROS_ARM_CONTROLLER_STATE")
-        self._controller_values(self._gripper_controller_state, "ROS_GRIPPER_CONTROLLER_STATE")
+        gripper_values = self._controller_values(
+            self._gripper_controller_state, "ROS_GRIPPER_CONTROLLER_STATE"
+        )
+        if "finger_right_joint" not in gripper_values["reference"]:
+            raise ContractError("ROS_GRIPPER_CONTROLLER_STATE")
         arm_speed = self._arm_controller_state.speed_scaling_factor
         if not isinstance(arm_speed, (int, float)) or not math.isfinite(arm_speed):
             raise ContractError("ROS_ARM_CONTROLLER_STATE")
@@ -367,6 +390,7 @@ class RosMoveItTransport:
         return {
             "joint_positions": [by_name[name] for name in JOINT_ORDER],
             "joint_state_age_s": joint_age,
+            "gripper_settings": self._gripper_settings(),
             "arm_controller": {
                 "endpoint": "/fairino5_controller/controller_state",
                 "type": controller_type if arm_type == [controller_type] else "|".join(sorted(arm_type)),
@@ -382,26 +406,68 @@ class RosMoveItTransport:
                 "ready": gripper_type == [controller_type] and gripper_publishers > 0,
                 "age_s": gripper_age,
                 "speed_scaling": float(gripper_speed),
+                "reference_position_m": gripper_values["reference"]["finger_right_joint"],
+                "feedback_position_m": gripper_values["feedback"]["finger_right_joint"],
             },
         }
+
+    def _gripper_settings(self):
+        try:
+            root = ET.fromstring(self._robot_description)
+        except (TypeError, ET.ParseError) as exc:
+            raise ContractError("ROS_GRIPPER_SETTINGS_UNVERIFIED", str(exc)) from exc
+        blocks = []
+        for control in root.findall(".//ros2_control"):
+            if control.find("./joint[@name='finger_right_joint']") is None:
+                continue
+            hardware = control.find("hardware")
+            if hardware is not None:
+                blocks.append(hardware)
+        if len(blocks) != 1:
+            raise ContractError("ROS_GRIPPER_SETTINGS_UNVERIFIED")
+        plugin = (blocks[0].findtext("plugin") or "").strip()
+        params = {
+            item.get("name"): (item.text or "").strip()
+            for item in blocks[0].findall("param")
+        }
+        try:
+            settings = {
+                "hardware_plugin": plugin,
+                "velocity_percent": int(params["gripper_velocity"]),
+                "force_percent": int(params["gripper_force"]),
+                "settle_time_ms": int(params["gripper_settle_time_ms"]),
+            }
+        except (KeyError, ValueError) as exc:
+            raise ContractError("ROS_GRIPPER_SETTINGS_UNVERIFIED", str(exc)) from exc
+        if (
+            plugin not in {
+                "fairino_hardware/FairinoHardwareInterface",
+                "mock_components/GenericSystem",
+            }
+            or not 1 <= settings["velocity_percent"] <= 100
+            or not 1 <= settings["force_percent"] <= 100
+            or not 50 <= settings["settle_time_ms"] <= 10000
+        ):
+            raise ContractError("ROS_GRIPPER_SETTINGS_UNVERIFIED")
+        return settings
 
     @staticmethod
     def _controller_values(message, code):
         names = list(message.joint_names)
         if not names or len(names) != len(set(names)):
             raise ContractError(code)
-        for point in (message.reference, message.feedback):
+        result = {}
+        for label, point in (("reference", message.reference), ("feedback", message.feedback)):
             positions = list(point.positions)
-            if positions:
-                if len(positions) != len(names) or any(
-                    isinstance(value, bool)
-                    or not isinstance(value, (int, float))
-                    or not math.isfinite(value)
-                    for value in positions
-                ):
-                    raise ContractError(code)
-                return
-        raise ContractError(code)
+            if len(positions) != len(names) or any(
+                isinstance(value, bool)
+                or not isinstance(value, (int, float))
+                or not math.isfinite(value)
+                for value in positions
+            ):
+                raise ContractError(code)
+            result[label] = {name: float(value) for name, value in zip(names, positions)}
+        return result
 
     def preflight(self):
         deadline = time.monotonic() + self.graph_timeout_s

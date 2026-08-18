@@ -138,14 +138,18 @@ class TestExecutionTransport(unittest.TestCase):
         self.assertEqual(caught.exception.code, "ROS_EXEC_ACTIVE")
 
         point = SimpleNamespace(positions=[0.])
+        gripper_point = SimpleNamespace(positions=[0.01])
         def populate(*_, **__):
             node.callbacks["/joint_states"](SimpleNamespace(name=["finger", "j6", "j5", "j4", "j3", "j2", "j1"], position=[0., 6., 5., 4., 3., 2., 1.]))
             node.callbacks["/fairino5_controller/controller_state"](SimpleNamespace(joint_names=["j1"], reference=point, feedback=point, speed_scaling_factor=0.5))
-            node.callbacks["/gripper_controller/controller_state"](SimpleNamespace(joint_names=["finger"], reference=point, feedback=point, speed_scaling_factor=1.0))
+            node.callbacks["/gripper_controller/controller_state"](SimpleNamespace(joint_names=["finger_right_joint"], reference=gripper_point, feedback=gripper_point, speed_scaling_factor=1.0))
+            node.callbacks["/robot_description"](SimpleNamespace(data="<robot><ros2_control><hardware><plugin>fairino_hardware/FairinoHardwareInterface</plugin><param name='gripper_velocity'>20</param><param name='gripper_force'>50</param><param name='gripper_settle_time_ms'>500</param></hardware><joint name='finger_right_joint'/></ros2_control></robot>"))
         transport._rclpy = SimpleNamespace(spin_until_future_complete=lambda *args, **kwargs: None, spin_once=populate)
         snapshot = transport.snapshot(1.0)
         self.assertEqual(snapshot["joint_positions"], [1., 2., 3., 4., 5., 6.])
         self.assertEqual((snapshot["arm_controller"]["ready"], snapshot["arm_controller"]["speed_scaling"]), (True, 0.5))
+        self.assertEqual((snapshot["gripper_controller"]["reference_position_m"], snapshot["gripper_controller"]["feedback_position_m"]), (0.01, 0.01))
+        self.assertEqual(snapshot["gripper_settings"]["velocity_percent"], 20)
         clock[0] = 12.0
         transport.graph_timeout_s = 0.0
         transport._rclpy.spin_once = lambda *args, **kwargs: None
