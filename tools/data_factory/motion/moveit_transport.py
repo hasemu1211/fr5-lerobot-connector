@@ -404,12 +404,25 @@ class RosMoveItTransport:
         raise ContractError(code)
 
     def preflight(self):
-        try:
-            actions = dict(self._get_action_names_and_types(self.node))
-            topics = dict(self.node.get_topic_names_and_types())
-            publisher_count = self.node.count_publishers("/joint_states")
-        except RuntimeError as exc:
-            raise ContractError("ROS_GRAPH_FAILED", str(exc)) from exc
+        deadline = time.monotonic() + self.graph_timeout_s
+        while True:
+            try:
+                actions = dict(self._get_action_names_and_types(self.node))
+                topics = dict(self.node.get_topic_names_and_types())
+                publisher_count = self.node.count_publishers("/joint_states")
+            except RuntimeError as exc:
+                raise ContractError("ROS_GRAPH_FAILED", str(exc)) from exc
+            graph_ready = (
+                all(actions.get(endpoint) == [kind] for endpoint, kind in ACTION_TYPES.items())
+                and topics.get("/joint_states") == ["sensor_msgs/msg/JointState"]
+                and publisher_count > 0
+            )
+            if graph_ready or time.monotonic() >= deadline:
+                break
+            self._rclpy.spin_once(
+                self.node,
+                timeout_sec=max(0.0, min(0.05, deadline - time.monotonic())),
+            )
 
         clients = {
             "/move_action": self.move_group,

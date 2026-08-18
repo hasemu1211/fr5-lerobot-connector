@@ -155,14 +155,19 @@ class Test(unittest.TestCase):
    def wait_for_server(self,timeout_sec):return timeout_sec>0
    def send_goal_async(self,goal):self.goals.append(goal);return Future(self.handle)
   class Node:
+   def __init__(self):self.publisher_ready,self.spins=False,0
    def get_topic_names_and_types(self):return [("/joint_states",["sensor_msgs/msg/JointState"])]
-   def count_publishers(self,topic):return int(topic=="/joint_states")
+   def count_publishers(self,topic):return int(self.publisher_ready and topic=="/joint_states")
   clients={}
   def client_factory(node,action_type,endpoint):del node,action_type;clients[endpoint]=Client(endpoint);return clients[endpoint]
   actions=[(endpoint,[kind]) for endpoint,kind in ACTION_TYPES.items()]
-  with mock.patch("rclpy.action.ActionClient",side_effect=client_factory),mock.patch("rclpy.action.get_action_names_and_types",return_value=actions):transport=RosMoveItTransport(Node())
+  node=Node()
+  with mock.patch("rclpy.action.ActionClient",side_effect=client_factory),mock.patch("rclpy.action.get_action_names_and_types",return_value=actions):transport=RosMoveItTransport(node)
+  def discover(*args,**kwargs):del args,kwargs;node.publisher_ready=True;node.spins+=1
+  transport._rclpy.spin_once=discover
   self.assertTrue(all(not client.goals for client in clients.values()))
   self.assertTrue(all(item["ready"] for key,item in transport.preflight().items() if key!="joint_order"))
+  self.assertEqual(node.spins,1)
   trajectory=RobotTrajectory();trajectory.joint_trajectory.joint_names=["j3","j1","j6","j2","j5","j4"];trajectory.joint_trajectory.points=[JointTrajectoryPoint(positions=[3.,1.,6.,2.,5.,4.])]
   move_result=transport._MoveGroup.Result();move_result.error_code.val=MoveItErrorCodes.SUCCESS;move_result.planned_trajectory=trajectory;handle=Handle(Future(SimpleNamespace(status=GoalStatus.STATUS_SUCCEEDED,result=move_result)));clients["/move_action"].handle=handle
   program=motion();step=program["steps"][2];target={"base_tcp":step["target"]["base_tcp"],"base_tool":{"translation_m":[.1,.2,.3],"rotation_columns":[[0,1,0],[-1,0,0],[0,0,1]]}}
