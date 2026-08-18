@@ -27,6 +27,7 @@ from data_factory_recovery import (
     canonical_json_digest,
     claim_staging_directories,
     dataset_snapshot,
+    decode_json_strict,
     write_json_atomic,
 )
 from fr5_dataset_schema import ARM_NAMES, CAMERA_PROFILES, GRIPPER_NAME, QUALITY_LIMITS, dataset_features
@@ -122,7 +123,7 @@ class FR5LeRobotRecorder(Node):
             f"image_tolerance={args.sync_slop}s; joint={args.joint_states}; cameras={image_topics}; "
             f"camera_offsets_ms={{{', '.join(f'{name}: {self.camera_offsets[name]*1000:.1f}' for name in self.camera_names)}}}"
         )
-        if not args.interactive:
+        if not args.interactive and not getattr(args, "factory_jsonl", False):
             self.begin_episode()
 
     def _features(self) -> dict:
@@ -1057,6 +1058,129 @@ class FR5LeRobotRecorder(Node):
             self._release_transaction_lock()
 
 
+_CONTROL_SCHEMA = "data_factory.recorder_command.v1"
+_CONTROL_RESPONSE_SCHEMA = "data_factory.recorder_response.v1"
+_CONTROL_OPS = {"begin", "freeze", "commit", "abort", "status"}
+
+
+def _control_response(node: FR5LeRobotRecorder, op_id, op, result: dict) -> dict:
+    return {
+        "schema_version": _CONTROL_RESPONSE_SCHEMA,
+        "op_id": op_id,
+        "op": op,
+        **result,
+    }
+
+
+def _control_failure(node: FR5LeRobotRecorder, code: str, detail: str, op_id=None, op=None) -> dict:
+    abort_result = None
+    if node.episode_state in (node.RECORDING, node.FROZEN):
+        abort_result = node.abort_episode()
+    result = node._result(False, code, detail=detail)
+    if abort_result is not None:
+        result["abort_reason_code"] = abort_result["reason_code"]
+    return _control_response(node, op_id, op, result)
+
+
+def _validated_control_request(value: object) -> dict:
+    if not isinstance(value, dict):
+        raise RecoveryError("CONTROL_REQUEST_TYPE", "JSON object required")
+    if value.get("schema_version") != _CONTROL_SCHEMA:
+        raise RecoveryError("CONTROL_SCHEMA", f"schema_version must be {_CONTROL_SCHEMA}")
+    op_id = value.get("op_id")
+    if not isinstance(op_id, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}", op_id):
+        raise RecoveryError("CONTROL_OP_ID", "op_id must be a safe non-empty identifier")
+    op = value.get("op")
+    if op not in _CONTROL_OPS:
+        raise RecoveryError("CONTROL_OP", f"op must be one of {sorted(_CONTROL_OPS)}")
+    expected = {"schema_version", "op_id", "op", "transaction"} if op == "begin" else {
+        "schema_version", "op_id", "op"
+    }
+    if set(value) != expected:
+        raise RecoveryError("CONTROL_FIELDS", f"{op} requires exact fields {sorted(expected)}")
+    if op == "begin" and not isinstance(value["transaction"], dict):
+        raise RecoveryError("CONTROL_TRANSACTION", "begin transaction must be a JSON object")
+    return value
+
+
+def process_recorder_control_line(
+    node: FR5LeRobotRecorder,
+    line: str,
+    cache: dict[str, tuple[str, dict]],
+) -> dict:
+    try:
+        request = _validated_control_request(decode_json_strict(line, "CONTROL_INVALID_JSON", "stdin"))
+    except RecoveryError as exc:
+        return _control_failure(node, exc.code, exc.message)
+
+    op_id, op = request["op_id"], request["op"]
+    request_digest = canonical_json_digest(request)
+    previous = cache.get(op_id)
+    if previous is not None:
+        if previous[0] == request_digest:
+            return previous[1]
+        return _control_failure(node, "CONTROL_OP_ID_CONFLICT", "op_id was reused for a different command", op_id, op)
+
+    try:
+        if op == "begin":
+            result = node.begin_episode(request["transaction"])
+        elif op == "freeze":
+            result = node.freeze_episode()
+        elif op == "commit":
+            result = node.commit_episode()
+        elif op == "abort":
+            result = node.abort_episode()
+        else:
+            result = node.episode_status()
+    except Exception as exc:
+        response = _control_failure(node, "CONTROL_COMMAND_FAILED", str(exc), op_id, op)
+    else:
+        response = _control_response(node, op_id, op, result)
+    cache[op_id] = (request_digest, response)
+    return response
+
+
+def run_recorder_control_jsonl(node, input_stream, output_stream, spin_once) -> bool:
+    lines: queue.Queue[str | Exception | None] = queue.Queue(maxsize=32)
+
+    def read_lines() -> None:
+        try:
+            for line in input_stream:
+                lines.put(line)
+        except Exception as exc:
+            lines.put(exc)
+        else:
+            lines.put(None)
+
+    threading.Thread(target=read_lines, name="fr5-recorder-control-stdin", daemon=True).start()
+    cache: dict[str, tuple[str, dict]] = {}
+    seen_command = False
+    status_only = True
+    while True:
+        try:
+            line = lines.get_nowait()
+        except queue.Empty:
+            spin_once()
+            continue
+        if isinstance(line, Exception):
+            response = _control_failure(node, "CONTROL_INPUT_FAILED", str(line))
+            output_stream.write(json.dumps(response, sort_keys=True, separators=(",", ":"), allow_nan=False) + "\n")
+            output_stream.flush()
+            return False
+        if line is None:
+            if node.episode_state in (node.RECORDING, node.FROZEN):
+                node.abort_episode()
+                return False
+            return seen_command and status_only
+        response = process_recorder_control_line(node, line, cache)
+        output_stream.write(json.dumps(response, sort_keys=True, separators=(",", ":"), allow_nan=False) + "\n")
+        output_stream.flush()
+        seen_command = True
+        status_only = status_only and response["ok"] and response["op"] == "status"
+        if response["state"] in (node.COMMITTED, node.ABORTED, node.QUARANTINED_COMMIT):
+            return bool(response["ok"])
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--root", type=Path, default=Path("datasets/fr5_episodes"))
@@ -1107,7 +1231,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--gripper-state", default="/gripper_controller/controller_state")
     parser.add_argument("--no-videos", action="store_true")
     parser.add_argument("--resume", action="store_true", help="Append to an existing dataset root in non-interactive mode.")
-    parser.add_argument("--interactive", action="store_true", help="Use r/s/c/q episode controls.")
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument("--interactive", action="store_true", help="Use r/s/c/q episode controls.")
+    mode.add_argument("--factory-jsonl", action="store_true", help="Read one strict recorder command per stdin line; stdout is JSONL only.")
+    parser.add_argument("--run-root", type=Path, help="Control-plane run metadata root required by --factory-jsonl.")
     args = parser.parse_args()
     if args.profile:
         args.root = args.root / args.profile
@@ -1151,6 +1278,10 @@ def parse_args() -> argparse.Namespace:
         raise SystemExit("camera time offsets must be finite")
     if args.writer_queue_size <= 0 or args.image_qos_depth <= 0 or args.encoder_threads < 0:
         raise SystemExit("queue depths must be positive and encoder threads non-negative")
+    if args.factory_jsonl and args.run_root is None:
+        raise SystemExit("--factory-jsonl requires --run-root")
+    if args.factory_jsonl and (args.streaming_encoding or args.no_videos):
+        raise SystemExit("--factory-jsonl requires batch video encoding")
     if not args.interactive and not args.resume and (args.root / "meta" / "info.json").exists():
         raise SystemExit(f"Dataset already exists; use --resume or a new --profile: {args.root}")
     return args
@@ -1158,12 +1289,21 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
+    if args.factory_jsonl:
+        os.environ["RCUTILS_LOGGING_USE_STDOUT"] = "0"
     rclpy.init()
     node = FR5LeRobotRecorder(args)
     old_terminal = None
     quality_ok = True
     try:
-        if args.interactive:
+        if args.factory_jsonl:
+            quality_ok = run_recorder_control_jsonl(
+                node,
+                sys.stdin,
+                sys.stdout,
+                lambda: rclpy.spin_once(node, timeout_sec=0.05),
+            )
+        elif args.interactive:
             if not sys.stdin.isatty():
                 raise SystemExit("--interactive requires a terminal stdin")
             old_terminal = termios.tcgetattr(sys.stdin)

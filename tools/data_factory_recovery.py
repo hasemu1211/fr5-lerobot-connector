@@ -90,7 +90,7 @@ def canonical_json_digest(value) -> str:
     return "sha256:" + hashlib.sha256(encoded).hexdigest()
 
 
-def _decode_json(text: str, code: str, source: Path | str) -> object:
+def decode_json_strict(text: str, code: str, source: Path | str) -> object:
     def pairs(items):
         value = {}
         for key, item in items:
@@ -112,7 +112,7 @@ def _json(path: Path, code: str) -> dict:
     if path.is_symlink() or not path.is_file():
         raise RecoveryError(code, f"not a regular file: {path}")
     try:
-        value = _decode_json(path.read_text(encoding="utf-8"), code, path)
+        value = decode_json_strict(path.read_text(encoding="utf-8"), code, path)
     except OSError as exc:
         raise RecoveryError(code, f"cannot read JSON: {path}: {exc}") from exc
     if not isinstance(value, dict):
@@ -291,7 +291,7 @@ def _json_at(directory_fd: int, name: str, code: str) -> dict:
     try:
         fd = os.open(name, flags, dir_fd=directory_fd)
         with os.fdopen(fd, encoding="utf-8") as file:
-            value = _decode_json(file.read(), code, name)
+            value = decode_json_strict(file.read(), code, name)
     except OSError as exc:
         raise RecoveryError(code, f"cannot read JSON file {name}: {exc}") from exc
     if not isinstance(value, dict):
@@ -441,7 +441,7 @@ def _recovery_events(path: Path, guard: dict, directory_fd: int | None = None) -
         raise RecoveryError("RECOVERY_EVENT", f"cannot read event log: {path}: {exc}") from exc
     events = []
     for index, line in enumerate(lines, 1):
-        value = _decode_json(line, "RECOVERY_EVENT", f"{path}:{index}")
+        value = decode_json_strict(line, "RECOVERY_EVENT", f"{path}:{index}")
         if not isinstance(value, dict) or set(value) != _EVENT_FIELDS:
             raise RecoveryError("RECOVERY_EVENT", f"invalid event schema: {path}:{index}")
         if (

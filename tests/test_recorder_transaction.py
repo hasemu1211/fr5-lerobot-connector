@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Deterministic lifecycle tests; no ROS node or hardware is started."""
 
+import io
 import json
 import os
 import queue
@@ -14,11 +15,17 @@ import time
 import unittest
 from unittest import mock
 from pathlib import Path
-from types import SimpleNamespace
+from types import ModuleType, SimpleNamespace
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools"))
 
-from fr5_lerobot_recorder import FR5LeRobotRecorder
+from fr5_lerobot_recorder import (
+    FR5LeRobotRecorder,
+    parse_args,
+    process_recorder_control_line,
+    run_recorder_control_jsonl,
+)
+import fr5_lerobot_recorder as recorder_module
 import data_factory_recovery as recovery
 from data_factory_recovery import DatasetTransactionLock, RecoveryError, canonical_json_digest, dataset_snapshot, recover_orphaned_transaction
 
@@ -65,6 +72,11 @@ class _Dataset:
 
 
 class RecorderTransactionTest(unittest.TestCase):
+    CONTROL_RESPONSE_FIELDS = {
+        "schema_version", "op_id", "op", "ok", "state", "reason_code", "run_id",
+        "transaction_id", "episode_index", "metrics", "artifacts", "detail",
+    }
+
     def make_recorder(self, directory, save_error=None, clear_error=None, finalize_error=None):
         recorder = FR5LeRobotRecorder.__new__(FR5LeRobotRecorder)
         recorder.args = SimpleNamespace(
@@ -197,6 +209,289 @@ class RecorderTransactionTest(unittest.TestCase):
             self.assertEqual(status["state"], recorder.RECORDING)
             self.assertIn("writer_alive", status)
             self.assertEqual(recorder.dataset.clears, 0)
+
+    def test_jsonl_commands_are_strict_idempotent_core_calls(self):
+        with tempfile.TemporaryDirectory() as directory:
+            recorder = self.make_recorder(directory)
+            cache = {}
+            begin = {
+                "schema_version": "data_factory.recorder_command.v1",
+                "op_id": "begin-1",
+                "op": "begin",
+                "transaction": self.transaction(directory),
+            }
+            first = process_recorder_control_line(recorder, json.dumps(begin), cache)
+            self.assertTrue(first["ok"])
+            self.assertEqual(first, process_recorder_control_line(recorder, json.dumps(begin), cache))
+            self.assertEqual(recorder.episode_state, recorder.RECORDING)
+
+            freeze = {"schema_version": begin["schema_version"], "op_id": "freeze-1", "op": "freeze"}
+            self.assertTrue(process_recorder_control_line(recorder, json.dumps(freeze), cache)["ok"])
+            abort = {"schema_version": begin["schema_version"], "op_id": "abort-1", "op": "abort"}
+            result = process_recorder_control_line(recorder, json.dumps(abort), cache)
+            self.assertTrue(result["ok"])
+            self.assertEqual(result["state"], recorder.ABORTED)
+            self.assertEqual(recorder.dataset.clears, 1)
+
+    def test_jsonl_response_schema_is_exact(self):
+        with tempfile.TemporaryDirectory() as directory:
+            recorder = self.make_recorder(directory)
+            status = process_recorder_control_line(recorder, json.dumps({
+                "schema_version": "data_factory.recorder_command.v1",
+                "op_id": "status-1",
+                "op": "status",
+            }), {})
+            self.assertEqual(set(status), self.CONTROL_RESPONSE_FIELDS | {"writer_error", "writer_alive"})
+            self.assertIsInstance(status["ok"], bool)
+            self.assertIsInstance(status["metrics"], dict)
+            failure = process_recorder_control_line(recorder, "[]", {})
+            self.assertEqual(set(failure), self.CONTROL_RESPONSE_FIELDS)
+            self.assertIsNone(failure["op_id"])
+            self.assertIsNone(failure["op"])
+
+    def test_jsonl_protocol_violation_aborts_active_transaction(self):
+        with tempfile.TemporaryDirectory() as directory:
+            recorder = self.make_recorder(directory)
+            begin = {
+                "schema_version": "data_factory.recorder_command.v1",
+                "op_id": "begin-1",
+                "op": "begin",
+                "transaction": self.transaction(directory),
+            }
+            cache = {}
+            process_recorder_control_line(recorder, json.dumps(begin), cache)
+            response = process_recorder_control_line(
+                recorder,
+                '{"schema_version":"data_factory.recorder_command.v1","op_id":"x","op":"status","op":"abort"}',
+                cache,
+            )
+            self.assertEqual(response["reason_code"], "CONTROL_INVALID_JSON")
+            self.assertEqual(response["state"], recorder.ABORTED)
+            self.assertEqual(set(response), self.CONTROL_RESPONSE_FIELDS | {"abort_reason_code"})
+            self.assertEqual(recorder.dataset.clears, 1)
+
+    def test_jsonl_rejects_nonfinite_extra_and_nonobject_requests(self):
+        with tempfile.TemporaryDirectory() as directory:
+            recorder = self.make_recorder(directory)
+            cache = {}
+            cases = (
+                ("[]", "CONTROL_REQUEST_TYPE"),
+                ('{"schema_version":"data_factory.recorder_command.v1","op_id":"x","op":"status","extra":1}', "CONTROL_FIELDS"),
+                ('{"schema_version":"data_factory.recorder_command.v1","op_id":"x","op":"status","value":NaN}', "CONTROL_INVALID_JSON"),
+            )
+            for line, code in cases:
+                self.assertEqual(process_recorder_control_line(recorder, line, cache)["reason_code"], code)
+            self.assertEqual(recorder.episode_state, recorder.IDLE)
+            self.assertEqual(recorder.dataset.clears, 0)
+
+    def test_jsonl_op_id_conflict_is_fail_closed(self):
+        with tempfile.TemporaryDirectory() as directory:
+            recorder = self.make_recorder(directory)
+            cache = {}
+            begin = {
+                "schema_version": "data_factory.recorder_command.v1",
+                "op_id": "same-id",
+                "op": "begin",
+                "transaction": self.transaction(directory),
+            }
+            process_recorder_control_line(recorder, json.dumps(begin), cache)
+            conflict = {
+                "schema_version": "data_factory.recorder_command.v1",
+                "op_id": "same-id",
+                "op": "status",
+            }
+            response = process_recorder_control_line(recorder, json.dumps(conflict), cache)
+            self.assertEqual(response["reason_code"], "CONTROL_OP_ID_CONFLICT")
+            self.assertEqual(response["state"], recorder.ABORTED)
+            self.assertEqual(recorder.dataset.clears, 1)
+
+    def test_jsonl_loop_emits_only_responses_and_eof_aborts(self):
+        schema = "data_factory.recorder_command.v1"
+        with tempfile.TemporaryDirectory() as directory:
+            recorder = self.make_recorder(directory)
+            commands = [
+                {"schema_version": schema, "op_id": "begin-1", "op": "begin", "transaction": self.transaction(directory)},
+                {"schema_version": schema, "op_id": "status-1", "op": "status"},
+                {"schema_version": schema, "op_id": "abort-1", "op": "abort"},
+            ]
+            output = io.StringIO()
+            self.assertTrue(run_recorder_control_jsonl(
+                recorder,
+                io.StringIO("".join(json.dumps(command) + "\n" for command in commands)),
+                output,
+                lambda: time.sleep(0.001),
+            ))
+            responses = [json.loads(line) for line in output.getvalue().splitlines()]
+            self.assertEqual([item["op_id"] for item in responses], ["begin-1", "status-1", "abort-1"])
+            self.assertTrue(all(item["schema_version"] == "data_factory.recorder_response.v1" for item in responses))
+
+        with tempfile.TemporaryDirectory() as directory:
+            recorder = self.make_recorder(directory)
+            begin = {"schema_version": schema, "op_id": "begin-1", "op": "begin", "transaction": self.transaction(directory)}
+            self.assertFalse(run_recorder_control_jsonl(
+                recorder,
+                io.StringIO(json.dumps(begin) + "\n"),
+                io.StringIO(),
+                lambda: time.sleep(0.001),
+            ))
+            self.assertEqual(recorder.episode_state, recorder.ABORTED)
+            self.assertEqual(recorder.dataset.clears, 1)
+
+        with tempfile.TemporaryDirectory() as directory:
+            recorder = self.make_recorder(directory)
+            status = {"schema_version": schema, "op_id": "status-1", "op": "status"}
+            self.assertTrue(run_recorder_control_jsonl(
+                recorder,
+                io.StringIO(json.dumps(status) + "\n"),
+                io.StringIO(),
+                lambda: time.sleep(0.001),
+            ))
+
+    def test_jsonl_loop_commit_is_terminal_and_saves_once(self):
+        schema = "data_factory.recorder_command.v1"
+        with tempfile.TemporaryDirectory() as directory:
+            recorder = self.make_recorder(directory)
+            begin = {"schema_version": schema, "op_id": "begin-1", "op": "begin", "transaction": self.transaction(directory)}
+            freeze = {"schema_version": schema, "op_id": "freeze-1", "op": "freeze"}
+            commit = {"schema_version": schema, "op_id": "commit-1", "op": "commit"}
+            release = threading.Event()
+
+            def commands():
+                yield json.dumps(begin) + "\n"
+                release.wait(timeout=1)
+                yield json.dumps(freeze) + "\n"
+                yield json.dumps(commit) + "\n"
+
+            def spin_once():
+                if recorder.episode_state == recorder.RECORDING:
+                    recorder.frames = 1
+                    recorder._quality_summary = lambda: ({
+                        "episode_index": 7,
+                        "effective_fps": 30.0,
+                        "image_quality_warnings": [],
+                    }, [])
+                    release.set()
+                time.sleep(0.001)
+
+            output = io.StringIO()
+            self.assertTrue(run_recorder_control_jsonl(recorder, commands(), output, spin_once))
+            responses = [json.loads(line) for line in output.getvalue().splitlines()]
+            self.assertEqual([item["state"] for item in responses], [recorder.RECORDING, recorder.FROZEN, recorder.COMMITTED])
+            self.assertEqual(set(responses[-1]), self.CONTROL_RESPONSE_FIELDS | {"quality"})
+            self.assertIsInstance(responses[-1]["quality"], dict)
+            self.assertEqual(recorder.dataset.saves, 1)
+            self.assertEqual(recorder.dataset.finalizes, 1)
+
+    def test_jsonl_input_error_is_not_clean_eof(self):
+        schema = "data_factory.recorder_command.v1"
+
+        def broken_after(command):
+            yield json.dumps(command) + "\n"
+            raise OSError("pipe read failed")
+
+        with tempfile.TemporaryDirectory() as directory:
+            recorder = self.make_recorder(directory)
+            status = {"schema_version": schema, "op_id": "status-1", "op": "status"}
+            output = io.StringIO()
+            self.assertFalse(run_recorder_control_jsonl(
+                recorder, broken_after(status), output, lambda: time.sleep(0.001)
+            ))
+            self.assertEqual(json.loads(output.getvalue().splitlines()[-1])["reason_code"], "CONTROL_INPUT_FAILED")
+
+        with tempfile.TemporaryDirectory() as directory:
+            recorder = self.make_recorder(directory)
+            begin = {"schema_version": schema, "op_id": "begin-1", "op": "begin", "transaction": self.transaction(directory)}
+            self.assertFalse(run_recorder_control_jsonl(
+                recorder, broken_after(begin), io.StringIO(), lambda: time.sleep(0.001)
+            ))
+            self.assertEqual(recorder.episode_state, recorder.ABORTED)
+            self.assertEqual(recorder.dataset.clears, 1)
+
+    def test_factory_jsonl_cli_requires_run_root_and_batch_video(self):
+        base = ["recorder", "--task", "pick up", "--factory-jsonl"]
+        with mock.patch.object(sys, "argv", base):
+            with self.assertRaisesRegex(SystemExit, "requires --run-root"):
+                parse_args()
+        with tempfile.TemporaryDirectory() as directory:
+            with mock.patch.object(sys, "argv", base + ["--run-root", str(Path(directory) / "runs")]):
+                with self.assertRaisesRegex(SystemExit, "requires batch video encoding"):
+                    parse_args()
+            with mock.patch.object(sys, "argv", base + [
+                "--run-root", str(Path(directory) / "runs"),
+                "--root", str(Path(directory) / "dataset"),
+                "--batch-video-encoding",
+            ]):
+                self.assertTrue(parse_args().factory_jsonl)
+        with mock.patch.object(sys, "argv", base + ["--interactive"]), mock.patch.object(sys, "stderr", io.StringIO()):
+            with self.assertRaises(SystemExit):
+                parse_args()
+
+    def test_factory_jsonl_main_reserves_stdout_for_protocol(self):
+        with tempfile.TemporaryDirectory() as directory:
+            recorder = self.make_recorder(directory)
+            recorder.close = lambda: None
+            recorder.destroy_node = lambda: None
+            status = json.dumps({
+                "schema_version": "data_factory.recorder_command.v1",
+                "op_id": "status-1",
+                "op": "status",
+            }) + "\n"
+            output = io.StringIO()
+            args = SimpleNamespace(factory_jsonl=True, interactive=False)
+            with (
+                mock.patch.object(recorder_module, "parse_args", return_value=args),
+                mock.patch.object(recorder_module, "FR5LeRobotRecorder", return_value=recorder),
+                mock.patch.object(recorder_module.rclpy, "init"),
+                mock.patch.object(recorder_module.rclpy, "spin_once", side_effect=lambda *_args, **_kwargs: time.sleep(0.001)),
+                mock.patch.object(recorder_module.rclpy, "ok", return_value=False),
+                mock.patch.object(recorder_module.sys, "stdin", io.StringIO(status)),
+                mock.patch.object(recorder_module.sys, "stdout", output),
+                mock.patch.dict(os.environ, {}, clear=False),
+            ):
+                recorder_module.main()
+                self.assertEqual(os.environ["RCUTILS_LOGGING_USE_STDOUT"], "0")
+            lines = output.getvalue().splitlines()
+            self.assertEqual(len(lines), 1)
+            self.assertEqual(json.loads(lines[0])["op_id"], "status-1")
+
+    def test_constructor_preserves_legacy_autostart_and_defers_factory_begin(self):
+        with tempfile.TemporaryDirectory() as directory:
+            def arguments(*extra):
+                argv = [
+                    "recorder", "--task", "pick up", "--root", str(Path(directory) / "dataset"),
+                    *extra,
+                ]
+                with mock.patch.object(sys, "argv", argv):
+                    return parse_args()
+
+            thread = SimpleNamespace(start=lambda: None, is_alive=lambda: True)
+            lerobot = ModuleType("lerobot")
+            lerobot.__path__ = []
+            datasets = ModuleType("lerobot.datasets")
+            datasets.__path__ = []
+            dataset_module = ModuleType("lerobot.datasets.lerobot_dataset")
+            dataset_module.LeRobotDataset = object
+            patches = (
+                mock.patch.dict(sys.modules, {
+                    "lerobot": lerobot,
+                    "lerobot.datasets": datasets,
+                    "lerobot.datasets.lerobot_dataset": dataset_module,
+                }),
+                mock.patch.object(recorder_module.Node, "__init__", return_value=None),
+                mock.patch.object(FR5LeRobotRecorder, "_open_dataset", return_value=_Dataset()),
+                mock.patch.object(FR5LeRobotRecorder, "create_subscription", return_value=None),
+                mock.patch.object(FR5LeRobotRecorder, "get_logger", return_value=_Logger()),
+                mock.patch.object(recorder_module.threading, "Thread", return_value=thread),
+                mock.patch.object(FR5LeRobotRecorder, "begin_episode", return_value={"ok": True}),
+            )
+            with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5], patches[6] as begin:
+                FR5LeRobotRecorder(arguments())
+                begin.assert_called_once_with()
+                begin.reset_mock()
+                FR5LeRobotRecorder(arguments(
+                    "--factory-jsonl", "--batch-video-encoding", "--run-root", str(Path(directory) / "runs")
+                ))
+                begin.assert_not_called()
 
     def test_transaction_rejects_invalid_digest_contract(self):
         with tempfile.TemporaryDirectory() as directory:
