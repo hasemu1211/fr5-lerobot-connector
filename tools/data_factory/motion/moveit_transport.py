@@ -575,12 +575,12 @@ class RosMoveItTransport:
         )
         request.group_name = frames["planning_group"]
         request.num_planning_attempts = 1
-        request.allowed_planning_time = limits["planning_timeout_s"]
-        request.max_velocity_scaling_factor = limits["velocity_scaling"]
-        request.max_acceleration_scaling_factor = limits["acceleration_scaling"]
+        request.allowed_planning_time = float(limits["planning_timeout_s"])
+        request.max_velocity_scaling_factor = float(limits["velocity_scaling"])
+        request.max_acceleration_scaling_factor = float(limits["acceleration_scaling"])
         request.start_state = self._RobotState(
             joint_state=self._JointState(
-                name=list(JOINT_ORDER), position=list(start_joint_state)
+                name=list(JOINT_ORDER), position=list(map(float, start_joint_state))
             ),
             is_diff=True,
         )
@@ -599,9 +599,9 @@ class RosMoveItTransport:
             constraints.joint_constraints = [
                 self._JointConstraint(
                     joint_name=name,
-                    position=value,
-                    tolerance_above=tolerances["joint_rad"],
-                    tolerance_below=tolerances["joint_rad"],
+                    position=float(value),
+                    tolerance_above=float(tolerances["joint_rad"]),
+                    tolerance_below=float(tolerances["joint_rad"]),
                     weight=1.0,
                 )
                 for name, value in zip(JOINT_ORDER, joint_target)
@@ -611,11 +611,11 @@ class RosMoveItTransport:
         pose = target["base_tool"]
         primitive = self._SolidPrimitive(
             type=self._SolidPrimitive.SPHERE,
-            dimensions=[tolerances["position_m"]],
+            dimensions=[float(tolerances["position_m"])],
         )
         region_pose = self._Pose()
         region_pose.position.x, region_pose.position.y, region_pose.position.z = (
-            pose["translation_m"]
+            map(float, pose["translation_m"])
         )
         region_pose.orientation.w = 1.0
         position = self._PositionConstraint()
@@ -635,9 +635,9 @@ class RosMoveItTransport:
             orientation.orientation.z,
             orientation.orientation.w,
         ) = quaternion
-        orientation.absolute_x_axis_tolerance = tolerances["orientation_rad"]
-        orientation.absolute_y_axis_tolerance = tolerances["orientation_rad"]
-        orientation.absolute_z_axis_tolerance = tolerances["orientation_rad"]
+        orientation.absolute_x_axis_tolerance = float(tolerances["orientation_rad"])
+        orientation.absolute_y_axis_tolerance = float(tolerances["orientation_rad"])
+        orientation.absolute_z_axis_tolerance = float(tolerances["orientation_rad"])
         orientation.weight = 1.0
         constraints.position_constraints = [position]
         constraints.orientation_constraints = [orientation]
@@ -648,13 +648,13 @@ class RosMoveItTransport:
         goal = self._FollowJointTrajectory.Goal()
         goal.trajectory.joint_names = ["finger_right_joint"]
         point = self._JointTrajectoryPoint()
-        point.positions = [position]
+        point.positions = [float(position)]
         point.time_from_start = self._duration(limits["command_duration_s"])
         goal.trajectory.points = [point]
         goal.goal_tolerance = [
             self._JointTolerance(
                 name="finger_right_joint",
-                position=limits["completion_tolerance_m"],
+                position=float(limits["completion_tolerance_m"]),
             )
         ]
         goal.goal_time_tolerance = self._duration(
