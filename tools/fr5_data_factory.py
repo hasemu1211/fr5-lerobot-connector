@@ -612,6 +612,53 @@ def resolve_motion_program(validated, motion_qualification, home_candidate, *, u
     return {"schema_version": "fr5.motion_program.v1", "resolved_job_digest": validated["resolved_job_digest"], "binding_digests": binding_digests, "frames": q["frames"], "planning": {"pipeline_id": "pilz_industrial_motion_planner", "ptp_planner_id": "PTP", "lin_planner_id": "LIN", "goal_tolerances": q["tolerances"], "max_joint_state_age_s": q["max_joint_state_age_s"]}, "steps": steps}
 
 
+def validate_motion_program(value):
+    """Validate the exact offline motion-program contract emitted above."""
+    keys = {"schema_version", "resolved_job_digest", "binding_digests", "frames", "planning", "steps"}
+    value = _exact(value, keys, "MOTION_PROGRAM_SCHEMA")
+    if value["schema_version"] != "fr5.motion_program.v1": raise ContractError("MOTION_PROGRAM_SCHEMA")
+    _digest(value["resolved_job_digest"], "MOTION_PROGRAM_DIGEST")
+    binding_keys = {"selected_sheet", "yaw0_sheet", "cell_calibration", "robot_system", "collection_profile", "object_profile", "grasp_profile", "robot_description_digest", "moveit_config_digest", "planning_scene_digest", "motion_qualification", "home_candidate"}
+    bindings = _exact(value["binding_digests"], binding_keys, "MOTION_PROGRAM_BINDING")
+    for item in bindings.values(): _digest(item, "MOTION_PROGRAM_BINDING")
+    frames = _exact(value["frames"], MOTION_FRAMES, "MOTION_PROGRAM_FRAMES")
+    if frames != {"planning_frame": "base_link", "planning_group": "fairino5_v6_group", "tool_link": "wrist3_link"}: raise ContractError("MOTION_PROGRAM_FRAMES")
+    planning = _exact(value["planning"], {"pipeline_id", "ptp_planner_id", "lin_planner_id", "goal_tolerances", "max_joint_state_age_s"}, "MOTION_PROGRAM_PLANNING")
+    if planning["pipeline_id"] != "pilz_industrial_motion_planner" or planning["ptp_planner_id"] != "PTP" or planning["lin_planner_id"] != "LIN": raise ContractError("MOTION_PROGRAM_PLANNING")
+    _exact(planning["goal_tolerances"], MOTION_GOAL_TOLERANCES, "MOTION_PROGRAM_PLANNING")
+    for item in planning["goal_tolerances"].values():
+        if _number(item, "MOTION_PROGRAM_PLANNING") <= 0: raise ContractError("MOTION_PROGRAM_PLANNING")
+    if _number(planning["max_joint_state_age_s"], "MOTION_PROGRAM_PLANNING") <= 0: raise ContractError("MOTION_PROGRAM_PLANNING")
+    if not isinstance(value["steps"], list) or [step.get("phase") if isinstance(step, dict) else None for step in value["steps"]] != list(MOTION_PHASES): raise ContractError("MOTION_PROGRAM_PHASES")
+    for step in value["steps"]:
+        phase = step["phase"]
+        extras = {"phase", "limits", "target"} if phase in {"PREGRASP_PTP", "APPROACH_STOP_LIN", "FINAL_APPROACH_LIN", "LIFT_LIN", "LOWER_LIN", "RETREAT_LIN"} else {"phase", "limits", "joint_positions_rad"} if phase == "SAFE_POSE_PTP" else {"phase", "limits", "gripper_position_m"}
+        if phase == "FINAL_APPROACH_LIN": extras.add("requires_confirmation")
+        if phase == "LIFT_LIN": extras.add("pause_after")
+        _exact(step, extras, "MOTION_PROGRAM_STEP")
+        limit = step["limits"]
+        if phase.startswith("GRIPPER"):
+            _exact(limit, {"command_duration_s", "execution_timeout_s", "completion_tolerance_m"}, "MOTION_PROGRAM_LIMITS")
+        else:
+            _exact(limit, {"velocity_scaling", "acceleration_scaling", "planning_timeout_s", "execution_timeout_s"}, "MOTION_PROGRAM_LIMITS")
+        for item in limit.values():
+            if _number(item, "MOTION_PROGRAM_LIMITS") <= 0: raise ContractError("MOTION_PROGRAM_LIMITS")
+        if not phase.startswith("GRIPPER") and (
+                _number(limit["velocity_scaling"], "MOTION_PROGRAM_LIMITS") > .1 or
+                _number(limit["acceleration_scaling"], "MOTION_PROGRAM_LIMITS") > .1):
+            raise ContractError("MOTION_PROGRAM_LIMITS")
+        if "target" in step:
+            target = _exact(step["target"], {"base_tcp", "base_tool"}, "MOTION_PROGRAM_TARGET")
+            _transform(target["base_tcp"], "MOTION_PROGRAM_TARGET"); _transform(target["base_tool"], "MOTION_PROGRAM_TARGET")
+        if "joint_positions_rad" in step:
+            if not isinstance(step["joint_positions_rad"], list) or len(step["joint_positions_rad"]) != 6: raise ContractError("MOTION_PROGRAM_JOINTS")
+            [_number(item, "MOTION_PROGRAM_JOINTS") for item in step["joint_positions_rad"]]
+        if "gripper_position_m" in step: _number(step["gripper_position_m"], "MOTION_PROGRAM_GRIPPER")
+        if phase == "FINAL_APPROACH_LIN" and step["requires_confirmation"] != "PRECONTACT_HUMAN": raise ContractError("MOTION_PROGRAM_MARKER")
+        if phase == "LIFT_LIN" and step["pause_after"] != "SEMANTIC_VERDICT": raise ContractError("MOTION_PROGRAM_MARKER")
+    return value
+
+
 def build_job_spec(selected_sheet, *, point_id=None, x_mm=None, y_mm=None, job_id, robot_system_id, collection_profile_id, cell_calibration_id, object_profile_id, grasp_profile_id, operator_or_agent_id, approval_expiry, now=None):
     """Build the fixed pickup JobSpec from an A4 point or bounded coordinate."""
     sheet = _document(selected_sheet, "INPUT_SELECTED_SHEET")
