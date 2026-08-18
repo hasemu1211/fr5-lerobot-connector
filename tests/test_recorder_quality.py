@@ -50,6 +50,12 @@ class RecorderContractTest(unittest.TestCase):
             "if (motion_done == 1 || feedback != static_cast<uint8_t>(*position))",
             worker_body,
         )
+        settle_branch = worker_body.split(
+            "if (observed_movement && feedback != static_cast<uint8_t>(*position))", 1
+        )[1].split("if (now >= deadline)", 1)[0]
+        self.assertIn("Gripper motion settled away from target", settle_branch)
+        self.assertIn("_restart_servo_after_gripper = true", settle_branch)
+        self.assertNotIn("_gripper_error =", settle_branch)
         self.assertRegex(write_body, r"ServoJ\([^;]+,\s*0,\s*1\)")
         self.assertRegex(
             source,
@@ -72,6 +78,7 @@ class RecorderContractTest(unittest.TestCase):
             r"gripper_controller:[\s\S]+allowed_goal_duration_margin: 5\.0",
         )
         self.assertIn('<joint name="finger_right_joint">', hardware)
+        self.assertIn('name="gripper_settle_time_ms"', hardware)
         self.assertRegex(srdf, r'<group_state name="open" group="gripper">\s*<joint name="finger_right_joint" value="0\.021"/>')
         self.assertRegex(srdf, r'<group_state name="closed" group="gripper">\s*<joint name="finger_right_joint" value="0"/>')
         self.assertIn("/fr_command_server opens a second FAIRINO SDK session", preflight)

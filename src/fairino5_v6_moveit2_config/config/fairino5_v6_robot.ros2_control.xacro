@@ -12,11 +12,12 @@
                     <plugin>fairino_hardware/FairinoHardwareInterface</plugin>
                     <param name="controller_ip">$(optenv FR5_CONTROLLER_IP 192.168.58.2)</param>
                     <param name="gripper_index">$(optenv FR5_GRIPPER_INDEX 1)</param>
-                    <param name="gripper_velocity">$(optenv FR5_GRIPPER_VELOCITY 80)</param>
-                    <param name="gripper_force">$(optenv FR5_GRIPPER_FORCE 50)</param>
                     <param name="gripper_max_time">$(optenv FR5_GRIPPER_MAX_TIME 30000)</param>
                     <param name="gripper_upper_position">$(optenv FR5_GRIPPER_UPPER_POSITION 0.021)</param>
                 </xacro:unless>
+                <param name="gripper_velocity">$(optenv FR5_GRIPPER_VELOCITY 20)</param>
+                <param name="gripper_force">$(optenv FR5_GRIPPER_FORCE 50)</param>
+                <param name="gripper_settle_time_ms">$(optenv FR5_GRIPPER_SETTLE_TIME_MS 500)</param>
             </hardware>
             <joint name="j1">
                 <command_interface name="position"/>
