@@ -54,6 +54,13 @@ action[6]              = finger_right_joint reference [m]
 - `FR5_GRIPPER_VELOCITY`와 `FR5_GRIPPER_FORCE`는 SI 단위가 아니라 FAIRINO `MoveGripper`의 1–100 설정값이다.
 - 명령은 전용 non-realtime worker가 `MoveGripper(..., block=1)`로 접수하며, `ros2_control` update loop에서 SDK RPC 반환이나 물리 동작 완료를 기다리지 않는다. `block=1`의 RPC 반환 시간은 realtime으로 보장되지 않는다.
 
+### 좌표 권위와 TCP
+
+- 데이터 팩토리의 위치·자세 권위는 ROS `base_link`다. SDK/WebApp의 현재 TCP pose는 JobSpec, A4 calibration 또는 motion target의 좌표 권위로 사용하지 않는다.
+- MoveIt planning link는 `wrist3_link`로 고정하고, grasp TCP는 motion qualification digest에 포함된 exact `tool_to_tcp` 강체변환으로 계산한다. 따라서 기록·검토 좌표는 `base_link -> grasp TCP`, 실제 MoveIt constraint는 같은 목표를 변환한 `base_link -> wrist3_link`다.
+- 현재 validator는 transform 값과 qualification digest를 고정하지만 그 값의 실측 provenance까지 증명하지는 않는다. 따라서 운영자는 설치된 adapter·gripper·fingertip 기준점의 검토된 측정 증거가 없으면 URDF 계산값이나 자세 추정값을 plan-only candidate로만 취급해야 한다. 이 릴리스 정책은 아직 validator가 자동 강제하지 않는다.
+- fingertip을 교체한 경우 운영자는 기존 TCP digest와 그에 묶인 cell calibration·planning scene·motion qualification을 폐기하고 다시 검토해야 한다. 이 교체 감지도 아직 자동화되지 않았다.
+
 ### 그리퍼 활성화 안전 규칙
 
 hardware interface의 activate 단계에서 `ActGripper`를 자동 호출하지 않는다. 활성화 뒤 첫 위치 명령은 전체 stroke 초기화 동작을 만들 수 있으므로 controller 시작만으로 finger를 움직여서는 안 된다.
