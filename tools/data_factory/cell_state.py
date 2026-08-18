@@ -1,15 +1,34 @@
 """Durable, fail-closed cell readiness state."""
 from __future__ import annotations
 
+import argparse
+import json
+import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
+if __package__ in (None, ""):
+    sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+
 from tools.data_factory_recovery import RecoveryError, decode_json_strict, write_json_atomic
-from tools.fr5_data_factory import ContractError, DIGEST, RFC3339, SAFE_ID
+from tools.fr5_data_factory import ContractArgumentParser, ContractError, DIGEST, RFC3339, SAFE_ID
 
 
 STATE_KEYS = {"schema_version", "robot_system_id", "cell_ready", "reason_code", "run_id", "plan_digest", "acknowledged_by", "updated_at"}
 SCHEMA_VERSION = "data_factory.cell_state.v1"
+
+
+def _confirm_local_operator(robot_system_id: str) -> None:
+    confirmation = f"ACKNOWLEDGE {robot_system_id}"
+    try:
+        with open("/dev/tty", "r+", encoding="utf-8", buffering=1) as tty:
+            if not tty.isatty():
+                raise ContractError("HUMAN_TTY_REQUIRED")
+            tty.write(f"Type '{confirmation}' after physically checking the cell:\n")
+            if tty.readline().rstrip("\r\n") != confirmation:
+                raise ContractError("HUMAN_CONFIRMATION_FAILED")
+    except OSError as exc:
+        raise ContractError("HUMAN_TTY_REQUIRED") from exc
 
 
 class CellStateStore:
@@ -106,3 +125,34 @@ class CellStateStore:
         value = {**current, "cell_ready": True, "reason_code": "HUMAN_ACKNOWLEDGED", "acknowledged_by": acknowledged_by, "updated_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")}
         write_json_atomic(self._path(create_robot=True), value)
         return value
+
+
+def main(argv=None) -> int:
+    parser = ContractArgumentParser()
+    common = argparse.ArgumentParser(add_help=False)
+    common.add_argument("--root", required=True)
+    common.add_argument("--robot-system-id", required=True)
+    commands = parser.add_subparsers(dest="command", required=True)
+    commands.add_parser("status", parents=[common])
+    acknowledge = commands.add_parser("acknowledge-ready", parents=[common])
+    acknowledge.add_argument("--acknowledged-by", required=True)
+    try:
+        args = parser.parse_args(argv)
+        store = CellStateStore(args.root, args.robot_system_id)
+        if args.command == "status":
+            result = store.read()
+        else:
+            _confirm_local_operator(args.robot_system_id)
+            result = store.acknowledge_ready(args.acknowledged_by)
+    except ContractError as exc:
+        print(json.dumps({"error": {"code": exc.code, "message": str(exc)}}, sort_keys=True, separators=(",", ":")), file=sys.stderr)
+        return 2
+    except OSError as exc:
+        print(json.dumps({"error": {"code": "STATE_IO", "message": str(exc)}}, sort_keys=True, separators=(",", ":")), file=sys.stderr)
+        return 2
+    print(json.dumps(result, sort_keys=True, separators=(",", ":"), allow_nan=False))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

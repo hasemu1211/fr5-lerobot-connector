@@ -96,10 +96,32 @@ class Test(unittest.TestCase):
    with self.assertRaisesRegex(RuntimeError,"destroy"):e.main(("--factory-jsonl","--ros-live","--robot-system-id","fr5-lab-a","--cell-state-root","/tmp/cells"))
    self.assertEqual(created[:2],["init","fr5_pickup_live"]);self.assertEqual(created[-2:],["destroyed","shutdown"])
  def test_cell_state_is_fail_closed_and_durable(self):
+  from contextlib import redirect_stderr, redirect_stdout
+  from unittest import mock
+  from tools.data_factory import cell_state
   from tools.data_factory.cell_state import CellStateStore
   from tools.fr5_data_factory import ContractError
   with tempfile.TemporaryDirectory() as directory:
-   root=Path(directory)/"outputs/data_factory/cells";store=CellStateStore(root,"fr5-lab-a");self.assertEqual((store.read()["cell_ready"],store.read()["reason_code"]),(False,"STATE_MISSING"));self.assertFalse(root.exists());ready=store.acknowledge_ready("operator-1");self.assertTrue(ready["cell_ready"]);self.assertTrue((root/"fr5-lab-a/state.json").is_file());blocked=store.mark_blocked("PRECONTACT_TIMEOUT","run-1","sha256:"+"a"*64);self.assertFalse(CellStateStore(root,"fr5-lab-a").read()["cell_ready"]);self.assertEqual(blocked["reason_code"],"PRECONTACT_TIMEOUT")
+   root=Path(directory)/"outputs/data_factory/cells";store=CellStateStore(root,"fr5-lab-a");out=io.StringIO()
+   with redirect_stdout(out):self.assertEqual(cell_state.main(("status","--root",str(root),"--robot-system-id","fr5-lab-a")),0)
+   self.assertEqual((__import__("json").loads(out.getvalue())["cell_ready"],store.read()["reason_code"]),(False,"STATE_MISSING"));self.assertFalse(root.exists());out=io.StringIO();err=io.StringIO()
+   with mock.patch("builtins.open",side_effect=OSError("no tty")),redirect_stdout(out),redirect_stderr(err):self.assertEqual(cell_state.main(("acknowledge-ready","--root",str(root),"--robot-system-id","fr5-lab-a","--acknowledged-by","operator-1")),2)
+   self.assertEqual((out.getvalue(),__import__("json").loads(err.getvalue())["error"]["code"]),("","HUMAN_TTY_REQUIRED"));out=io.StringIO();err=io.StringIO()
+   class HumanTTY:
+    def __init__(self,response):self.response=response
+    def __enter__(self):return self
+    def __exit__(self,*_):pass
+    def isatty(self):return True
+    def write(self,_):pass
+    def readline(self):return self.response
+   out=io.StringIO();err=io.StringIO()
+   with mock.patch("builtins.open",return_value=HumanTTY("ACKNOWLEDGE wrong-cell\n")),redirect_stdout(out),redirect_stderr(err):self.assertEqual(cell_state.main(("acknowledge-ready","--root",str(root),"--robot-system-id","fr5-lab-a","--acknowledged-by","operator-1")),2)
+   self.assertEqual((out.getvalue(),__import__("json").loads(err.getvalue())["error"]["code"],root.exists()),("","HUMAN_CONFIRMATION_FAILED",False));out=io.StringIO();err=io.StringIO()
+   with mock.patch("builtins.open",return_value=HumanTTY("ACKNOWLEDGE fr5-lab-a\n")),redirect_stdout(out),redirect_stderr(err):self.assertEqual(cell_state.main(("acknowledge-ready","--root",str(root),"--robot-system-id","fr5-lab-a","--acknowledged-by","operator-1")),0)
+   ready=__import__("json").loads(out.getvalue());self.assertEqual(err.getvalue(),"");self.assertTrue(ready["cell_ready"]);self.assertTrue((root/"fr5-lab-a/state.json").is_file());blocked=store.mark_blocked("PRECONTACT_TIMEOUT","run-1","sha256:"+"a"*64);self.assertFalse(CellStateStore(root,"fr5-lab-a").read()["cell_ready"]);self.assertEqual(blocked["reason_code"],"PRECONTACT_TIMEOUT")
+   out=io.StringIO();err=io.StringIO()
+   with mock.patch("builtins.open",return_value=HumanTTY("ACKNOWLEDGE fr5-lab-a\n")),mock.patch.object(cell_state.CellStateStore,"acknowledge_ready",side_effect=OSError("disk")),redirect_stdout(out),redirect_stderr(err):self.assertEqual(cell_state.main(("acknowledge-ready","--root",str(root),"--robot-system-id","fr5-lab-a","--acknowledged-by","operator-1")),2)
+   self.assertEqual((out.getvalue(),__import__("json").loads(err.getvalue())["error"]["code"]),("","STATE_IO"))
    for bad in (".", "..", "../fr5-lab-a", "operator/1"):
     with self.assertRaises(ContractError):CellStateStore(root,bad)
    state=root/"fr5-lab-a/state.json";state.write_text("{}")
