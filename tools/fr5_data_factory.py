@@ -575,6 +575,7 @@ def _validate_motion_qualification(qualification, validated, home, *, urdf, now=
         if phase.startswith("GRIPPER"):
             limit = _exact(limit, {"command_duration_s", "execution_timeout_s", "completion_tolerance_m"}, "MOTION_PHASE_LIMITS")
             values = {key: _number(value, "MOTION_PHASE_LIMITS") for key, value in limit.items()}
+            if values["execution_timeout_s"] <= values["command_duration_s"]: raise ContractError("MOTION_PHASE_LIMITS")
         else:
             limit = _exact(limit, {"velocity_scaling", "acceleration_scaling", "planning_timeout_s", "execution_timeout_s"}, "MOTION_PHASE_LIMITS")
             values = {key: _number(value, "MOTION_PHASE_LIMITS") for key, value in limit.items()}
@@ -643,6 +644,7 @@ def validate_motion_program(value):
             _exact(limit, {"velocity_scaling", "acceleration_scaling", "planning_timeout_s", "execution_timeout_s"}, "MOTION_PROGRAM_LIMITS")
         for item in limit.values():
             if _number(item, "MOTION_PROGRAM_LIMITS") <= 0: raise ContractError("MOTION_PROGRAM_LIMITS")
+        if phase.startswith("GRIPPER") and _number(limit["execution_timeout_s"], "MOTION_PROGRAM_LIMITS") <= _number(limit["command_duration_s"], "MOTION_PROGRAM_LIMITS"): raise ContractError("MOTION_PROGRAM_LIMITS")
         if not phase.startswith("GRIPPER") and (
                 _number(limit["velocity_scaling"], "MOTION_PROGRAM_LIMITS") > .1 or
                 _number(limit["acceleration_scaling"], "MOTION_PROGRAM_LIMITS") > .1):

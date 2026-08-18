@@ -27,7 +27,7 @@ import lerobot
 import cv2
 print(f"LeRobot={lerobot.__version__} Torch={torch.__version__} CUDA={torch.cuda.is_available()} OpenCV={cv2.__version__}")
 PY
-"$ROOT/.venv/bin/python" -m py_compile "$ROOT"/tools/*.py
+"$ROOT/.venv/bin/python" -m compileall -q "$ROOT/tools"
 "$ROOT/.venv/bin/python" -m unittest discover -s "$ROOT/tests" -q
 "$ROOT/.venv/bin/python" - <<PY
 from pathlib import Path

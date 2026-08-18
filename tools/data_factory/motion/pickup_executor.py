@@ -7,27 +7,22 @@ import base64
 import copy
 import json
 import math
+import os
 import sys
 from datetime import datetime, timezone
+from pathlib import Path
 
-try:
-    from fr5_data_factory import (
-        RFC3339,
-        SAFE_ID,
-        ContractError,
-        canonical_digest,
-        load_json_strict,
-        validate_motion_program,
-    )
-except ImportError:
-    from tools.fr5_data_factory import (
-        RFC3339,
-        SAFE_ID,
-        ContractError,
-        canonical_digest,
-        load_json_strict,
-        validate_motion_program,
-    )
+if __package__ in (None, ""):
+    sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
+
+from tools.fr5_data_factory import (
+    RFC3339,
+    SAFE_ID,
+    ContractError,
+    canonical_digest,
+    load_json_strict,
+    validate_motion_program,
+)
 
 
 MODE = "PRE_LIVE"
@@ -369,11 +364,46 @@ def run_jsonl(input_stream, output_stream, executor):
 def main(argv=None):
     parser = argparse.ArgumentParser()
     parser.add_argument("--factory-jsonl", action="store_true")
+    parser.add_argument("--ros-plan-only", action="store_true")
     args = parser.parse_args(argv)
     if not args.factory_jsonl:
         parser.error("--factory-jsonl required; PRE_LIVE only")
-    run_jsonl(sys.stdin, sys.stdout, PickupExecutor())
-    return 0
+    transport = None
+    node = None
+    rclpy = None
+    if args.ros_plan_only:
+        os.environ.setdefault("RCUTILS_LOGGING_USE_STDOUT", "0")
+        try:
+            import rclpy
+            if __package__ in (None, ""):
+                from tools.data_factory.motion.moveit_transport import RosMoveItTransport
+            else:
+                from .moveit_transport import RosMoveItTransport
+            rclpy.init()
+            node = rclpy.create_node("fr5_pickup_plan_only")
+            transport = RosMoveItTransport(node)
+        except (ContractError, ImportError, RuntimeError) as exc:
+            print(
+                json.dumps(
+                    {"error": {"code": "ROS_PLAN_ONLY_UNAVAILABLE", "message": str(exc)}},
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ),
+                file=sys.stderr,
+            )
+            if node is not None:
+                node.destroy_node()
+            if rclpy is not None and rclpy.ok():
+                rclpy.shutdown()
+            return 2
+    try:
+        run_jsonl(sys.stdin, sys.stdout, PickupExecutor(transport))
+        return 0
+    finally:
+        if node is not None:
+            node.destroy_node()
+        if rclpy is not None and rclpy.ok():
+            rclpy.shutdown()
 
 
 if __name__ == "__main__":
