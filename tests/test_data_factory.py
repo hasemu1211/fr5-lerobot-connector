@@ -39,6 +39,51 @@ class DataFactoryTest(unittest.TestCase):
         self.cell_path = self._write("cells/cal-a.json", self.calibration)
 
     def tearDown(self): self.temp.cleanup()
+    def test_home_candidate_is_non_executable_and_urdf_bounded(self):
+        candidate = {
+            "schema_version": "data_factory.home_candidate.v1", "home_candidate_id": "fr5-lab-a-home-r001", "robot_system_id": "fr5-lab-a",
+            "robot_model_name": "fairino5_v6_robot", "robot_description_digest": "sha256:" + hashlib.sha256((ROOT / "src/fairino_description/urdf/fairino5_v6.urdf").read_bytes()).hexdigest(),
+            "joint_order": ["j1", "j2", "j3", "j4", "j5", "j6"],
+            "ui_observation_deg": [-89.913, -90.001, 90, -90, -90, 0],
+            "nominal_target_deg": [-90, -90, 90, -90, -90, 0],
+            "observation_source": "controller_web_ui", "feedback_capture_status": "NOT_CAPTURED", "qualification_status": "CANDIDATE",
+            "safety_status": "NOT_SAFE_FOR_MOTION", "intended_use_after_qualification": "SAFE_POSE_PTP",
+        }
+        urdf = ROOT / "src/fairino_description/urdf/fairino5_v6.urdf"
+        validated = factory.validate_home_candidate(candidate, urdf=urdf, expected_robot_system_id="fr5-lab-a")
+        self.assertFalse(validated["motion_allowed"])
+        self.assertEqual(candidate["ui_observation_deg"], [-89.913, -90.001, 90, -90, -90, 0])
+        self.assertEqual(validated["nominal_target_rad"], [math.radians(value) for value in candidate["nominal_target_deg"]])
+        self.assertEqual(validated["candidate_digest"], factory.canonical_digest(candidate))
+        for changed, code in (
+            ({**candidate, "unknown": True}, "HOME_KEYS"),
+            ({key: value for key, value in candidate.items() if key != "feedback_capture_status"}, "HOME_KEYS"),
+            ({**candidate, "ui_observation_deg": [float("nan")] * 6}, "HOME_JOINT_VALUES"),
+            ({**candidate, "joint_order": ["j2", "j1", "j3", "j4", "j5", "j6"]}, "HOME_JOINT_ORDER"),
+            ({**candidate, "nominal_target_deg": [180, -90, 90, -90, -90, 0]}, "HOME_JOINT_LIMIT"),
+            ({**candidate, "robot_system_id": "other-robot"}, "HOME_ROBOT_BINDING"),
+            ({**candidate, "robot_description_digest": digest("other-urdf")}, "HOME_ROBOT_BINDING"),
+        ):
+            with self.subTest(code=code):
+                with self.assertRaises(factory.ContractError) as caught: factory.validate_home_candidate(changed, urdf=urdf, expected_robot_system_id="fr5-lab-a")
+                self.assertEqual(caught.exception.code, code)
+        relabelled = {**candidate, "robot_system_id": "other-robot", "home_candidate_id": "other-robot-home-r001"}
+        with self.assertRaises(factory.ContractError) as caught:
+            factory.validate_home_candidate(relabelled, urdf=urdf, expected_robot_system_id="fr5-lab-a")
+        self.assertEqual(caught.exception.code, "HOME_ROBOT_BINDING")
+        candidate_path = self._write("home.json", candidate)
+        command = [sys.executable, str(ROOT / "tools/fr5_data_factory.py"), "validate-home-candidate", "--candidate", str(candidate_path), "--urdf", str(urdf), "--expected-robot-system-id", "fr5-lab-a"]
+        run = subprocess.run(command, text=True, capture_output=True)
+        self.assertEqual(run.returncode, 0, run.stderr)
+        self.assertEqual(json.loads(run.stdout), validated)
+        missing_urdf = command.copy()
+        missing_urdf[missing_urdf.index("--urdf") + 1] = str(urdf.with_name("missing.urdf"))
+        failed = subprocess.run(missing_urdf, text=True, capture_output=True)
+        self.assertEqual(failed.returncode, 2)
+        self.assertEqual(json.loads(failed.stderr)["error"]["code"], "HOME_URDF")
+        invalid_utf8 = subprocess.run(command[:command.index("--candidate") + 1] + ["-"] + command[command.index("--candidate") + 2:], input=b"\xff", capture_output=True)
+        self.assertEqual(invalid_utf8.returncode, 2)
+        self.assertEqual(json.loads(invalid_utf8.stderr)["error"]["code"], "JSON_IO")
     def _write(self, relative, value):
         path = self.root / relative; path.parent.mkdir(exist_ok=True); path.write_text(json.dumps(value)); return path
     def _sheet(self, yaw, measured_scale_mm=100):

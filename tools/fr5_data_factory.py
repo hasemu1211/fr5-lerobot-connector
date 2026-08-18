@@ -8,6 +8,7 @@ import json
 import math
 import re
 import sys
+import xml.etree.ElementTree as ET
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -32,6 +33,8 @@ PROFILE_KEYS = {
     "object_profile": {"schema_version", "object_profile_id", "qualification_status", "object_datum_digest"},
     "grasp_profile": {"schema_version", "grasp_profile_id", "qualification_status", "object_profile_id", "grasp_margin_mm", "grasp_contract_digest"},
 }
+HOME_CANDIDATE_KEYS = {"schema_version", "home_candidate_id", "robot_system_id", "robot_model_name", "robot_description_digest", "joint_order", "ui_observation_deg", "nominal_target_deg", "observation_source", "feedback_capture_status", "qualification_status", "safety_status", "intended_use_after_qualification"}
+HOME_JOINT_ORDER = ["j1", "j2", "j3", "j4", "j5", "j6"]
 
 
 class ContractError(ValueError):
@@ -175,6 +178,55 @@ def normalize_job_spec(job: object, *, now: datetime | None = None) -> dict:
         result[key] = int(number) if number.is_integer() else number
     result["approval_expiry"] = _timestamp(result["approval_expiry"], "JOB_EXPIRY", future=True, now=now)
     return result
+
+
+def validate_home_candidate(candidate: object, *, urdf: str | Path, expected_robot_system_id: str) -> dict:
+    """Validate a non-executable home-pose candidate against URDF hard limits."""
+    candidate = _exact(candidate, HOME_CANDIDATE_KEYS, "HOME_KEYS")
+    result = dict(candidate)
+    if result["schema_version"] != "data_factory.home_candidate.v1": raise ContractError("HOME_SCHEMA")
+    result["home_candidate_id"] = _id(result["home_candidate_id"], "HOME_ID")
+    result["robot_system_id"] = _id(result["robot_system_id"], "HOME_ROBOT_ID")
+    if result["robot_system_id"] != _id(expected_robot_system_id, "HOME_ROBOT_ID"):
+        raise ContractError("HOME_ROBOT_BINDING")
+    result["robot_model_name"] = _id(result["robot_model_name"], "HOME_ROBOT_ID")
+    _digest(result["robot_description_digest"], "HOME_ROBOT_BINDING")
+    if not result["home_candidate_id"].startswith(result["robot_system_id"] + "-home-r"):
+        raise ContractError("HOME_ROBOT_BINDING")
+    if result["joint_order"] != HOME_JOINT_ORDER: raise ContractError("HOME_JOINT_ORDER")
+    for key in ("ui_observation_deg", "nominal_target_deg"):
+        if not isinstance(result[key], list) or len(result[key]) != len(HOME_JOINT_ORDER):
+            raise ContractError("HOME_JOINT_VALUES")
+        result[key] = [_number(value, "HOME_JOINT_VALUES") for value in result[key]]
+    if result["observation_source"] != "controller_web_ui": raise ContractError("HOME_SOURCE")
+    if result["feedback_capture_status"] != "NOT_CAPTURED": raise ContractError("HOME_FEEDBACK")
+    if result["qualification_status"] != "CANDIDATE": raise ContractError("HOME_QUALIFICATION")
+    if result["safety_status"] != "NOT_SAFE_FOR_MOTION": raise ContractError("HOME_SAFETY")
+    if result["intended_use_after_qualification"] != "SAFE_POSE_PTP": raise ContractError("HOME_INTENDED_MOTION")
+    try:
+        urdf_bytes = Path(urdf).read_bytes()
+        root = ET.fromstring(urdf_bytes)
+    except (OSError, ET.ParseError) as exc:
+        raise ContractError("HOME_URDF", str(exc)) from exc
+    if root.get("name") != result["robot_model_name"] or "sha256:" + hashlib.sha256(urdf_bytes).hexdigest() != result["robot_description_digest"]:
+        raise ContractError("HOME_ROBOT_BINDING")
+    limits = {}
+    for joint in root.findall("joint"):
+        name, limit = joint.get("name"), joint.find("limit")
+        if name in HOME_JOINT_ORDER and limit is not None:
+            try:
+                limits[name] = (float(limit.attrib["lower"]), float(limit.attrib["upper"]))
+            except (KeyError, ValueError) as exc:
+                raise ContractError("HOME_URDF_LIMITS", name) from exc
+    if set(limits) != set(HOME_JOINT_ORDER): raise ContractError("HOME_URDF_LIMITS")
+    if any(not math.isfinite(value) or lower > upper for lower, upper in limits.values() for value in (lower, upper)):
+        raise ContractError("HOME_URDF_LIMITS")
+    for key in ("ui_observation_deg", "nominal_target_deg"):
+        for name, degrees in zip(HOME_JOINT_ORDER, result[key]):
+            radians = math.radians(degrees)
+            lower, upper = limits[name]
+            if not lower <= radians <= upper: raise ContractError("HOME_JOINT_LIMIT", name)
+    return {"candidate_digest": canonical_digest(candidate), "motion_allowed": False, "nominal_target_rad": [math.radians(value) for value in result["nominal_target_deg"]]}
 
 
 def _safe_profile_path(root: Path, folder: str, ident: str) -> Path:
@@ -545,6 +597,10 @@ def _cli():
         command.add_argument("--selected-sheet", required=True)
         command.add_argument("--yaw0-sheet", required=True)
         command.add_argument("--config-root", required=True)
+    home = sub.add_parser("validate-home-candidate")
+    home.add_argument("--candidate", required=True)
+    home.add_argument("--urdf", required=True)
+    home.add_argument("--expected-robot-system-id", required=True)
     builder = sub.add_parser("build-job")
     builder.add_argument("--selected-sheet", required=True)
     builder.add_argument("--yaw0-sheet", required=True)
@@ -557,6 +613,9 @@ def _cli():
         builder.add_argument(f"--{name}")
     try:
         args = parser.parse_args()
+        if args.command == "validate-home-candidate":
+            text = sys.stdin.read() if args.candidate == "-" else Path(args.candidate).read_text()
+            print(json.dumps(validate_home_candidate(load_json_strict(text), urdf=args.urdf, expected_robot_system_id=args.expected_robot_system_id), sort_keys=True, separators=(",", ":"), allow_nan=False)); return 0
         if args.command == "build-job":
             selected = _document(args.selected_sheet, "INPUT_SELECTED_SHEET")
             _validate_sheet(selected)
@@ -593,8 +652,8 @@ def _cli():
         )
         output = resolve_pose(validated) if args.command == "resolve-pose" else {"normalized_job": validated["normalized_job"], "input_digests": validated["input_digests"], "resolved_job_digest": validated["resolved_job_digest"]}
         print(json.dumps(output, sort_keys=True, separators=(",", ":"), allow_nan=False)); return 0
-    except (ContractError, OSError) as exc:
-        code = exc.code if isinstance(exc, ContractError) else "JOB_IO"
+    except (ContractError, OSError, UnicodeError) as exc:
+        code = exc.code if isinstance(exc, ContractError) else "JSON_IO" if isinstance(exc, UnicodeError) else "JOB_IO"
         print(json.dumps({"error": {"code": code, "message": str(exc)}}, sort_keys=True), file=sys.stderr); return 2
 
 
