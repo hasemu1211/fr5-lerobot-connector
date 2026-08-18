@@ -50,7 +50,7 @@ class Test(unittest.TestCase):
   n,t,s,p=ready("PASS");n.runs["r"]["state"]="EXECUTING";n.runs["r"]["execution"]["lease_deadline"]=-1;n.tick();self.assertEqual((n.runs["r"]["failure_code"],t.cancelled,s.blocked[-1][0]),("HEARTBEAT_TIMEOUT",0,"HEARTBEAT_TIMEOUT"));n._fault(n.runs["r"],"LATER");self.assertEqual(n.runs["r"]["failure_code"],"HEARTBEAT_TIMEOUT")
   t=Live();s=Store();n=e.PickupExecutor(t,clock=lambda:datetime(2026,1,1,tzinfo=timezone.utc),cell_state_store=s,execution_enabled=True);p=n.process(self.req("plan",{"run_id":"r","motion_program":motion()}));n.process(self.req("approve",{"approval_id":"approval-1","approved_by":"operator-1","run_id":"r","resolved_job_digest":"sha256:"+"a"*64,"plan_digest":p["plan_digest"],"approval_expiry":"2026-01-02T00:00:00Z"},"a2"));n.process(self.req("execute",{"run_id":"r","plan_digest":p["plan_digest"],"lease_id":"lease-1"},"e2"));t.cancel_active=lambda *_:(_ for _ in ()).throw(e.ContractError("ROS_EXEC_CANCEL_ACK_TIMEOUT"));n.process(self.req("heartbeat",{"run_id":"r","plan_digest":p["plan_digest"],"lease_id":"lease-1","recorder_health":{"writer_alive":False,"writer_error":None}},"h"));self.assertEqual((n.runs["r"]["failure_code"],n.runs["r"]["state"],bool(n.runs["r"]["execution"]["snapshot"]),n.runs["r"]["execution"]["cancel_error"]),("RECORDER_WRITER_FAULT","BLOCKED",True,"ROS_EXEC_CANCEL_ACK_TIMEOUT"));self.assertEqual(n.process(self.req("heartbeat",{"run_id":"r","plan_digest":p["plan_digest"],"lease_id":"bad","recorder_health":{"writer_alive":True,"writer_error":None}},"badlease"))["code"],"LEASE_BINDING")
   clock=[0];t=Live();s=Store();n=e.PickupExecutor(t,clock=lambda:datetime(2026,1,1,tzinfo=timezone.utc),monotonic_clock=lambda:clock[0],cell_state_store=s,execution_enabled=True);p=n.process(self.req("plan",{"run_id":"r","motion_program":motion()}));n.process(self.req("approve",{"approval_id":"approval-1","approved_by":"operator-1","run_id":"r","resolved_job_digest":"sha256:"+"a"*64,"plan_digest":p["plan_digest"],"approval_expiry":"2026-01-02T00:00:00Z"},"a4"));n.process(self.req("execute",{"run_id":"r","plan_digest":p["plan_digest"],"lease_id":"lease-1"},"e4"));clock[0]=2;n.tick();self.assertEqual((n.runs["r"]["failure_code"],t.cancelled,t.started),("HEARTBEAT_TIMEOUT",1,["PREGRASP_PTP"]))
-  t=Live();s=Store();n=e.PickupExecutor(t,clock=lambda:datetime(2026,1,1,tzinfo=timezone.utc),cell_state_store=s,execution_enabled=True);p=n.process(self.req("plan",{"run_id":"r","motion_program":motion()}));n.process(self.req("approve",{"approval_id":"approval-1","approved_by":"operator-1","run_id":"r","resolved_job_digest":"sha256:"+"a"*64,"plan_digest":p["plan_digest"],"approval_expiry":"2026-01-02T00:00:00Z"},"a5"));n.process(self.req("execute",{"run_id":"r","plan_digest":p["plan_digest"],"lease_id":"lease-1"},"e5"));out=io.StringIO();self.assertFalse(e.run_jsonl(io.StringIO(),out,n));self.assertEqual((len(out.getvalue().splitlines()),__import__("json").loads(out.getvalue())["state"],t.started),(1,"BLOCKED",["PREGRASP_PTP"]))
+  t=Live();s=Store();n=e.PickupExecutor(t,clock=lambda:datetime(2026,1,1,tzinfo=timezone.utc),cell_state_store=s,execution_enabled=True);p=n.process(self.req("plan",{"run_id":"r","motion_program":motion()}));n.process(self.req("approve",{"approval_id":"approval-1","approved_by":"operator-1","run_id":"r","resolved_job_digest":"sha256:"+"a"*64,"plan_digest":p["plan_digest"],"approval_expiry":"2026-01-02T00:00:00Z"},"a5"));n.process(self.req("execute",{"run_id":"r","plan_digest":p["plan_digest"],"lease_id":"lease-1"},"e5"));out=io.StringIO();self.assertFalse(e.run_jsonl(io.StringIO(),out,n));self.assertEqual((len(out.getvalue().splitlines()),__import__("json").loads(out.getvalue())["state"],__import__("json").loads(out.getvalue())["mode"],t.started),(1,"BLOCKED","LIVE",["PREGRASP_PTP"]))
   class Quiet:
    def __iter__(self):time.sleep(.2);return iter(())
   clock=[0];t=Live();s=Store();n=e.PickupExecutor(t,clock=lambda:datetime(2026,1,1,tzinfo=timezone.utc),monotonic_clock=lambda:clock[0],cell_state_store=s,execution_enabled=True);p=n.process(self.req("plan",{"run_id":"r","motion_program":motion()}));n.process(self.req("approve",{"approval_id":"approval-1","approved_by":"operator-1","run_id":"r","resolved_job_digest":"sha256:"+"a"*64,"plan_digest":p["plan_digest"],"approval_expiry":"2026-01-02T00:00:00Z"},"a6"));n.process(self.req("execute",{"run_id":"r","plan_digest":p["plan_digest"],"lease_id":"lease-1"},"e6"));clock[0]=2;out=io.StringIO();self.assertFalse(e.run_jsonl(Quiet(),out,n));self.assertEqual((len(out.getvalue().splitlines()),__import__("json").loads(out.getvalue())["code"],t.cancelled,t.started),(1,"HEARTBEAT_TIMEOUT",1,["PREGRASP_PTP"]))
@@ -60,7 +60,41 @@ class Test(unittest.TestCase):
    if len(writes)>1:raise e.ContractError("STATE_WRITE_FAILED")
   s.mark_blocked=mark;n=e.PickupExecutor(t,clock=lambda:datetime(2026,1,1,tzinfo=timezone.utc),cell_state_store=s,execution_enabled=True);p=n.process(self.req("plan",{"run_id":"r","motion_program":motion()}));t.snapshot=lambda *_:(_ for _ in ()).throw(e.ContractError("ROS_JOINT_STATE_STALE"));self.assertEqual(n.process(self.req("plan",{"run_id":"r2","motion_program":motion()},"one"))["code"],"ONE_JOB_ONLY");n.process(self.req("approve",{"approval_id":"approval-1","approved_by":"operator-1","run_id":"r","resolved_job_digest":"sha256:"+"a"*64,"plan_digest":p["plan_digest"],"approval_expiry":"2026-01-02T00:00:00Z"},"a3"));bad=n.process(self.req("execute",{"run_id":"r","plan_digest":p["plan_digest"],"lease_id":"lease-1"},"e3"));self.assertEqual((bad["code"],bad["state"],bad["data"]["cell_state_error"],t.started),("ROS_JOINT_STATE_STALE","BLOCKED","STATE_WRITE_FAILED",[]))
  def test_jsonl_schema_idempotency_preflight(self):
-  n=e.PickupExecutor(T());q=self.req("preflight",{"motion_program":motion()},"x");a=n.process(q);self.assertTrue(a["ok"]);a["data"]["move_action"]["ready"]=False;replayed=n.process(q);self.assertTrue(replayed["data"]["move_action"]["ready"]);self.assertEqual(n.process(self.req("status",{"run_id":"z","plan_digest":"x"},"x"))["code"],"OP_ID_CONFLICT");o=io.StringIO();e.run_jsonl(io.StringIO("{}\n"),o,n);self.assertEqual(set(__import__("json").loads(o.getvalue())),set(replayed));script=Path(__file__).resolve().parents[2]/"tools/data_factory/motion/pickup_executor.py";cli=subprocess.run([sys.executable,str(script),"--factory-jsonl"],input="{}\n",text=True,capture_output=True);self.assertEqual((cli.returncode,__import__("json").loads(cli.stdout)["code"]),(0,"COMMAND_SCHEMA"))
+  from types import SimpleNamespace
+  from unittest import mock
+  n=e.PickupExecutor(T());q=self.req("preflight",{"motion_program":motion()},"x");a=n.process(q);self.assertTrue(a["ok"]);a["data"]["move_action"]["ready"]=False;replayed=n.process(q);self.assertTrue(replayed["data"]["move_action"]["ready"]);self.assertEqual(n.process(self.req("status",{"run_id":"z","plan_digest":"x"},"x"))["code"],"OP_ID_CONFLICT");o=io.StringIO();e.run_jsonl(io.StringIO("{}\n"),o,n);self.assertEqual(set(__import__("json").loads(o.getvalue())),set(replayed));script=Path(__file__).resolve().parents[2]/"tools/data_factory/motion/pickup_executor.py";cli=subprocess.run([sys.executable,str(script),"--factory-jsonl"],input="{}\n",text=True,capture_output=True);self.assertEqual((cli.returncode,__import__("json").loads(cli.stdout)["code"]),(0,"COMMAND_SCHEMA"));self.assertEqual(e.PickupExecutor(T(),execution_enabled=True).process({})["mode"],"LIVE")
+  with mock.patch.dict(sys.modules,{"rclpy":SimpleNamespace(init=lambda:self.fail("ROS initialized"))}),mock.patch("sys.stderr",new_callable=io.StringIO):
+   for args in (("--factory-jsonl","--ros-live"),("--factory-jsonl","--ros-plan-only","--ros-live"),("--factory-jsonl","--robot-system-id","fr5-lab-a")):
+    with self.subTest(args=args),self.assertRaises(SystemExit) as caught:e.main(args)
+    self.assertEqual(caught.exception.code,2)
+  created=[];stores=[]
+  fail_destroy=[False];fail_transport=[False];ros_ok=[False]
+  class Node:
+   def destroy_node(self):
+    created.append("destroyed")
+    if fail_destroy[0]:raise RuntimeError("destroy")
+  class Transport:
+   def __init__(self,node):
+    created.append(node)
+    if fail_transport[0]:raise e.ContractError("TRANSPORT")
+  class Store:
+   def __init__(self,root,robot_system_id):stores.append((root,robot_system_id))
+  fake_rclpy=SimpleNamespace(init=lambda:created.append("init"),create_node=lambda name:(created.append(name) or Node()),ok=lambda:ros_ok[0],shutdown=lambda:created.append("shutdown"))
+  def capture(_input,_output,executor):
+   self.assertTrue(executor.execution_enabled);self.assertIsInstance(executor.transport,Transport);self.assertIsInstance(executor.cell_state_store,Store);return True
+  with mock.patch.dict(os.environ,{"RCUTILS_LOGGING_USE_STDOUT":"1"}),mock.patch.dict(sys.modules,{"rclpy":fake_rclpy}),mock.patch("sys.stderr",new_callable=io.StringIO) as errors,mock.patch("tools.data_factory.motion.moveit_transport.RosMoveItTransport",Transport),mock.patch("tools.data_factory.cell_state.CellStateStore",Store),mock.patch.object(e,"run_jsonl",side_effect=capture):
+   self.assertEqual(e.main(("--factory-jsonl","--ros-live","--robot-system-id","fr5-lab-a","--cell-state-root","/tmp/cells")),0)
+   self.assertEqual(os.environ["RCUTILS_LOGGING_USE_STDOUT"],"0")
+   self.assertEqual(stores,[("/tmp/cells","fr5-lab-a")]);self.assertEqual(created[:2],["init","fr5_pickup_live"]);self.assertIsInstance(created[2],Node);self.assertEqual(created[3:],["destroyed"])
+   created.clear();fail_destroy[0]=True;ros_ok[0]=True
+   with self.assertRaisesRegex(RuntimeError,"destroy"):e.main(("--factory-jsonl","--ros-live","--robot-system-id","fr5-lab-a","--cell-state-root","/tmp/cells"))
+   self.assertEqual(created[:2],["init","fr5_pickup_live"]);self.assertEqual(created[-2:],["destroyed","shutdown"])
+   created.clear();fail_destroy[0]=False;fail_transport[0]=True
+   self.assertEqual(e.main(("--factory-jsonl","--ros-live","--robot-system-id","fr5-lab-a","--cell-state-root","/tmp/cells")),2)
+   self.assertEqual(__import__("json").loads(errors.getvalue().splitlines()[-1])["error"]["code"],"ROS_LIVE_UNAVAILABLE")
+   created.clear();fail_destroy[0]=True
+   with self.assertRaisesRegex(RuntimeError,"destroy"):e.main(("--factory-jsonl","--ros-live","--robot-system-id","fr5-lab-a","--cell-state-root","/tmp/cells"))
+   self.assertEqual(created[:2],["init","fr5_pickup_live"]);self.assertEqual(created[-2:],["destroyed","shutdown"])
  def test_cell_state_is_fail_closed_and_durable(self):
   from tools.data_factory.cell_state import CellStateStore
   from tools.fr5_data_factory import ContractError
@@ -105,6 +139,7 @@ class Test(unittest.TestCase):
   def client_factory(node,action_type,endpoint):del node,action_type;clients[endpoint]=Client(endpoint);return clients[endpoint]
   actions=[(endpoint,[kind]) for endpoint,kind in ACTION_TYPES.items()]
   with mock.patch("rclpy.action.ActionClient",side_effect=client_factory),mock.patch("rclpy.action.get_action_names_and_types",return_value=actions):transport=RosMoveItTransport(Node())
+  self.assertTrue(all(not client.goals for client in clients.values()))
   self.assertTrue(all(item["ready"] for key,item in transport.preflight().items() if key!="joint_order"))
   trajectory=RobotTrajectory();trajectory.joint_trajectory.joint_names=["j3","j1","j6","j2","j5","j4"];trajectory.joint_trajectory.points=[JointTrajectoryPoint(positions=[3.,1.,6.,2.,5.,4.])]
   move_result=transport._MoveGroup.Result();move_result.error_code.val=MoveItErrorCodes.SUCCESS;move_result.planned_trajectory=trajectory;handle=Handle(Future(SimpleNamespace(status=GoalStatus.STATUS_SUCCEEDED,result=move_result)));clients["/move_action"].handle=handle

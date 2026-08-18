@@ -100,10 +100,11 @@ def _response(
     plan_digest=None,
     state="IDLE",
     data=None,
+    mode=MODE,
 ):
     return {
         "schema_version": "fr5.pickup_executor.response.v3",
-        "mode": MODE,
+        "mode": mode,
         "op_id": op_id,
         "op": op,
         "ok": ok,
@@ -138,6 +139,7 @@ class PickupExecutor:
         self.monotonic_clock = monotonic_clock or time.monotonic
         self.cell_state_store = cell_state_store
         self.execution_enabled = execution_enabled
+        self.mode = "LIVE" if execution_enabled else MODE
         self.cache = {}
         self.runs = {}
 
@@ -154,19 +156,20 @@ class PickupExecutor:
                 raise ContractError("COMMAND_SCHEMA")
             request_digest = canonical_digest(request)
         except ContractError as exc:
-            return _response(code=exc.code)
+            return _response(code=exc.code, mode=self.mode)
 
         previous = self.cache.get(op_id)
         if previous is not None:
             if previous[0] == request_digest:
                 return copy.deepcopy(previous[1])
-            return _response(op_id=op_id, op=op, code="OP_ID_CONFLICT")
+            return _response(op_id=op_id, op=op, code="OP_ID_CONFLICT", mode=self.mode)
 
         self.tick()
         try:
             result = getattr(self, f"_{op}")(request["payload"])
         except ContractError as exc:
             result = _response(code=exc.code)
+        result["mode"] = self.mode
         result["op_id"], result["op"] = op_id, op
         snapshot = copy.deepcopy(result)
         self.cache[op_id] = (request_digest, snapshot)
@@ -374,10 +377,13 @@ class PickupExecutor:
 
     def _execution_response(self, run, run_id, plan_digest, success_code):
         if run["state"] == "BLOCKED":
-            return _response(code=run["failure_code"], run_id=run_id, plan_digest=plan_digest, state="BLOCKED", data=self._execution_data(run))
-        if run["state"] == "COMPLETED":
-            return _response(code="COMPLETE", ok=True, run_id=run_id, plan_digest=plan_digest, state="COMPLETED", data=self._execution_data(run))
-        return _response(code=success_code, ok=True, run_id=run_id, plan_digest=plan_digest, state=run["state"], data=self._execution_data(run))
+            response = _response(code=run["failure_code"], run_id=run_id, plan_digest=plan_digest, state="BLOCKED", data=self._execution_data(run))
+        elif run["state"] == "COMPLETED":
+            response = _response(code="COMPLETE", ok=True, run_id=run_id, plan_digest=plan_digest, state="COMPLETED", data=self._execution_data(run))
+        else:
+            response = _response(code=success_code, ok=True, run_id=run_id, plan_digest=plan_digest, state=run["state"], data=self._execution_data(run))
+        response["mode"] = self.mode
+        return response
 
     @staticmethod
     def _execution_data(run):
@@ -563,7 +569,7 @@ def run_jsonl(input_stream, output_stream, executor):
             try:
                 result = executor.process(load_json_strict(value))
             except ContractError as exc:
-                result = _response(code=exc.code)
+                result = _response(code=exc.code, mode=executor.mode)
             output_stream.write(json.dumps(result, sort_keys=True, separators=(",", ":"), allow_nan=False) + "\n")
             output_stream.flush()
             if result["state"] in {"BLOCKED", "COMPLETED"}:
@@ -583,15 +589,34 @@ def run_jsonl(input_stream, output_stream, executor):
 def main(argv=None):
     parser = argparse.ArgumentParser()
     parser.add_argument("--factory-jsonl", action="store_true")
-    parser.add_argument("--ros-plan-only", action="store_true")
+    ros_mode = parser.add_mutually_exclusive_group()
+    ros_mode.add_argument("--ros-plan-only", action="store_true")
+    ros_mode.add_argument("--ros-live", action="store_true")
+    parser.add_argument("--robot-system-id")
+    parser.add_argument("--cell-state-root")
     args = parser.parse_args(argv)
     if not args.factory_jsonl:
-        parser.error("--factory-jsonl required; PRE_LIVE only")
+        parser.error("--factory-jsonl required")
+    if args.ros_live:
+        if not args.robot_system_id or not args.cell_state_root:
+            parser.error("--ros-live requires --robot-system-id and --cell-state-root")
+        try:
+            if __package__ in (None, ""):
+                from tools.data_factory.cell_state import CellStateStore
+            else:
+                from ..cell_state import CellStateStore
+            cell_state_store = CellStateStore(args.cell_state_root, args.robot_system_id)
+        except ContractError as exc:
+            parser.error(exc.code)
+    elif args.robot_system_id or args.cell_state_root:
+        parser.error("--robot-system-id and --cell-state-root require --ros-live")
+    else:
+        cell_state_store = None
     transport = None
     node = None
     rclpy = None
-    if args.ros_plan_only:
-        os.environ.setdefault("RCUTILS_LOGGING_USE_STDOUT", "0")
+    if args.ros_plan_only or args.ros_live:
+        os.environ["RCUTILS_LOGGING_USE_STDOUT"] = "0"
         try:
             import rclpy
             if __package__ in (None, ""):
@@ -599,29 +624,41 @@ def main(argv=None):
             else:
                 from .moveit_transport import RosMoveItTransport
             rclpy.init()
-            node = rclpy.create_node("fr5_pickup_plan_only")
+            node = rclpy.create_node("fr5_pickup_live" if args.ros_live else "fr5_pickup_plan_only")
             transport = RosMoveItTransport(node)
         except (ContractError, ImportError, RuntimeError) as exc:
             print(
                 json.dumps(
-                    {"error": {"code": "ROS_PLAN_ONLY_UNAVAILABLE", "message": str(exc)}},
+                    {"error": {"code": "ROS_LIVE_UNAVAILABLE" if args.ros_live else "ROS_PLAN_ONLY_UNAVAILABLE", "message": str(exc)}},
                     sort_keys=True,
                     separators=(",", ":"),
                 ),
                 file=sys.stderr,
             )
-            if node is not None:
-                node.destroy_node()
-            if rclpy is not None and rclpy.ok():
-                rclpy.shutdown()
+            try:
+                if node is not None:
+                    node.destroy_node()
+            finally:
+                if rclpy is not None and rclpy.ok():
+                    rclpy.shutdown()
             return 2
     try:
-        return 0 if run_jsonl(sys.stdin, sys.stdout, PickupExecutor(transport)) else 2
+        return 0 if run_jsonl(
+            sys.stdin,
+            sys.stdout,
+            PickupExecutor(
+                transport,
+                cell_state_store=cell_state_store,
+                execution_enabled=args.ros_live,
+            ),
+        ) else 2
     finally:
-        if node is not None:
-            node.destroy_node()
-        if rclpy is not None and rclpy.ok():
-            rclpy.shutdown()
+        try:
+            if node is not None:
+                node.destroy_node()
+        finally:
+            if rclpy is not None and rclpy.ok():
+                rclpy.shutdown()
 
 
 if __name__ == "__main__":
