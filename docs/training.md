@@ -60,7 +60,7 @@ scripts/train_policy.sh --profile vqbet-up pick_red_up none \
   --batch_size=4 --steps=200 --dataset.eval_split=0.2 --eval_steps=200 --save_freq=200
 ```
 
-SmolVLA의 `batch_size=8`은 현재 RTX 5060 8 GB에서 7D up/side 입력과 50-episode 참조 데이터의 FP32 backward를 통과한 시작값이다. batch 4도 실행되지만 steady sample 처리량 차이는 작아, 추가 카메라나 튜닝 범위 확대로 메모리가 부족할 때의 fallback으로 둔다. `steps=200`은 저장·재로딩 확인용이며 최종 학습 길이가 아니다. `--dry-run`으로 실제 명령을 먼저 확인할 수 있다. 기존 `scripts/train_smolvla.sh` 명령은 `--profile smolvla`로 전달되는 호환 경로다.
+SmolVLA의 `batch_size=8`은 현재 RTX 5060 8 GB에서 7D up/side 입력과 50-episode 참조 데이터의 FP32 backward를 통과한 시작값이다. batch 4도 실행되지만 steady sample 처리량 차이는 작아, 추가 카메라나 튜닝 범위 확대로 메모리가 부족할 때의 fallback으로 둔다. `steps=200`은 저장·재로딩 확인용이며 최종 학습 길이가 아니다. `--dry-run`으로 실제 명령을 먼저 확인할 수 있다.
 
 profile은 다음 계약을 강제한다.
 

@@ -41,7 +41,6 @@ scripts/validate_dataset.sh --preview pick_red
 | `scripts/collect.sh` | 이 저장소의 ROS 2 → LeRobot v3 대화형 리코더 실행 |
 | `scripts/validate_dataset.sh` | 학습 전 구조·시간·동작·RGB 품질 검사 |
 | `scripts/train_policy.sh` | 검사된 데이터셋을 정책별 공식 `lerobot-train` profile에 전달 |
-| `scripts/train_smolvla.sh` | 기존 SmolVLA 명령 호환 wrapper |
 | `scripts/evaluate_smolvla.sh` | 검증용으로 분리한 episode의 오프라인 SmolVLA loss 계산 |
 
 모든 wrapper는 `--help`, 경로 지정 옵션, `--dry-run`을 제공한다.

@@ -222,6 +222,9 @@ outputs/
 ├── pipeline/                            # 기존 독립 pipeline의 새 경량 산출물 목표
 │   ├── previews/
 │   └── diagnostics/<run_id>/
+├── evaluation/                          # evaluate_smolvla.sh의 오프라인 평가 JSON
+├── <training-profile>/<dataset>/<augmentation>/
+│                                         # train_policy.sh의 checkpoint·학습 로그
 └── legacy/                              # migration inventory로만 이동한 과거 산출물
 
 datasets/fr5_episodes/<dataset_name>/    # LeRobot dataset; accepted episode의 유일한 heavy copy
