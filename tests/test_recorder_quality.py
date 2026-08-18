@@ -42,10 +42,14 @@ class RecorderContractTest(unittest.TestCase):
             "FairinoHardwareInterface::read", 1
         )[0]
         self.assertNotIn("GetGripperCurPosition", read_body)
-        self.assertLess(deactivate_body.index("ServoMoveEnd(1)"), deactivate_body.index("_gripper_thread.join()"))
+        self.assertLess(deactivate_body.index("ServoMoveEnd(1)"), deactivate_body.index("stop_gripper_worker()"))
         self.assertIn("_restart_servo_after_gripper.exchange(false)", write_body)
         worker_body = source.split("void FairinoHardwareInterface::gripper_worker", 1)[1]
         self.assertLess(worker_body.index("if (result != 0)"), worker_body.index("_restart_servo_after_gripper = true"))
+        self.assertIn(
+            "if (motion_done == 1 || feedback != static_cast<uint8_t>(*position))",
+            worker_body,
+        )
         self.assertRegex(write_body, r"ServoJ\([^;]+,\s*0,\s*1\)")
         self.assertRegex(
             source,

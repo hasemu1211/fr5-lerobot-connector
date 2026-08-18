@@ -647,10 +647,12 @@ class RosMoveItTransport:
         del phase
         goal = self._FollowJointTrajectory.Goal()
         goal.trajectory.joint_names = ["finger_right_joint"]
-        point = self._JointTrajectoryPoint()
-        point.positions = [float(position)]
-        point.time_from_start = self._duration(limits["command_duration_s"])
-        goal.trajectory.points = [point]
+        endpoint = self._JointTrajectoryPoint()
+        endpoint.positions = [float(position)]
+        completion_check = self._JointTrajectoryPoint()
+        completion_check.positions = [float(position)]
+        completion_check.time_from_start = self._duration(limits["command_duration_s"])
+        goal.trajectory.points = [endpoint, completion_check]
         goal.goal_tolerance = [
             self._JointTolerance(
                 name="finger_right_joint",
