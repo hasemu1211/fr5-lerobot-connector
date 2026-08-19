@@ -9,10 +9,11 @@ FAIRINO FR5의 ROS 2 state/action과 RGB 영상을 시간 정합하여 LeRobot v
 - source timestamp 기반 30 Hz row 생성과 provenance 저장
 - 키 기반 episode 시작·저장·폐기 및 자동 디렉터리 구성
 - LeRobot v3 구조·시간·RGB 검사, 명시적 HIL 동작 검사와 사람 승인 절차
+- A4 `(place,yaw,x,y)` Job, scene/cell state와 한-episode pickup 조정 계약
 - SmolVLA·ACT·VQ-BeT용 공식 `lerobot-train` 학습 profile
 - SmolVLA 검증 episode의 오프라인 loss 평가
 
-실물 정책 실행(rollout)은 아직 제공하지 않는다. `scripts/evaluate_smolvla.sh`는 로봇을 움직이지 않는 오프라인 검사다.
+학습된 정책의 실물 실행(rollout)은 아직 제공하지 않는다. `scripts/evaluate_smolvla.sh`는 로봇을 움직이지 않는 오프라인 검사다. 데이터팩토리의 scripted pickup은 실물 HIL까지 검증했지만 아직 공개 수집 명령이 아닌 library/contract 단계이며, 학습 승인을 뜻하지 않는다.
 
 ## 빠른 시작
 

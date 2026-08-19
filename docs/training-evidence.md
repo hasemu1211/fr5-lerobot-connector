@@ -6,10 +6,11 @@ SmolVLA 학습·평가·데이터 수집 정책을 결정하기 전에 조사와
 
 새 결과는 기존 항목을 지우지 않고 날짜, 환경, 입력 데이터, 명령 또는 출처, 측정값, 해석, 정책 영향과 함께 추가한다. 실제 FR5 결과와 공개 데이터 결과를 섞지 않고 HIL 배선 시험도 작업 성공 근거로 사용하지 않는다.
 
-## 현재 상태 — 2026-08-13
+## 현재 상태 — 2026-08-19
 
 - 실제 작업을 담은 학습 승인 FR5 데이터셋: 없음
-- FR5 HIL 데이터: 1 episode, 1,040 frames, 30 Hz. 7D·영상·저장 배선 확인용
+- 기존 FR5 배선 HIL: 1 episode, 1,040 frames, 30 Hz
+- scripted pickup 통합 HIL: 1 episode, 726 frames, 30 Hz. 물리 경로·그리퍼·한-job·저장 검증용이며 training 미승인
 - 로컬 FR5 학습 출력과 실물 rollout 결과: 없음
 - 현재 `best` checkpoint: 없음
 
@@ -110,6 +111,8 @@ validation은 checkpoint 후보를 줄이는 용도다. 반복해서 보며 선�
 | `LOCAL-007` | 저장공간 | 여유 약 28 GiB; LeRobot 기본 `save_freq=20,000`이면 30k run 약 2.64 GB, 80k run 약 5.28 GB | metric 관측과 full checkpoint 저장 주기를 분리 |
 | `LOCAL-008` | wrapper 반증 | wrapper가 split 기록을 위해 output을 먼저 만들면 LeRobot 0.6.1이 기존 output을 거부함 | split을 임시 경로에 기록하고 trainer 종료 시 output으로 이동 |
 | `LOCAL-009` | 중단·resume | LeRobot 0.6.1은 signal handler 저장이 없고 `save_freq`/final에만 저장하며 `last`는 완료 뒤 갱신 | 중단 즉시 저장을 주장하지 않고 완전한 `last`만 구조·split 검사 후 resume |
+| `LOCAL-010` | 실물 pickup HIL | 2026-08-19 `hil_pickup_xref_live_r008`: scene-bound plan의 1,838 collision sample 전부 valid, executor pickup/reset 완료, 726 rows·24.17 s·30.000 Hz, dual RGB 각 726 frames, sync max 16.68 ms, queue drop·stale skip·action 누락·alignment failure 0 | scripted 경로·그리퍼 continuity·recorder/OneJob 통합 근거. `HIL_NUMERIC_PROXY`와 임시 카메라를 사용했으므로 영상 의미 성공·학습 품질 근거가 아니며 `training_authorized=false` 유지 |
+| `LOCAL-011` | recorder commit 반증 | 선행 r007은 multithreaded ROS process에서 LeRobot camera encoder의 기본 process fork가 commit 중 정지해 quarantine됨. camera encode를 recorder process에서 순차 실행한 r008은 Parquet·두 MP4·metadata commit과 validator를 통과 | capture 30 Hz 경로는 유지하고 factory commit에서 `parallel_encoding=False`를 고정; commit 불확실 데이터는 보존하지 않고 quarantine/recovery 계약 적용 |
 | `METHOD-001` | validation | 한 run의 고정 validation과 fold마다 재학습하는 교차검증은 다른 절차이며 final test는 별도 유지 | 동적 episode 교체는 기각; 필요할 때만 별도 group CV |
 | `LOCAL-DOC-001` | 외부 조사문 검토 | `ML 에이전트 학습 프레임워크 조사.md`의 full-state resume, top-k, seed·metric 기록 원칙은 유효하지만 Lightning·TRL·SB3·MLflow 중심 제안은 LeRobot SmolVLA 경로와 맞지 않음 | 원칙만 채택하고 새 trainer/runtime는 도입하지 않음 |
 | `SKILL-001` | 스킬 검토 | AREX/Auto-ML-Skills는 별도 DisCo·Node 22.19+·provider와 대형 범용 skill graph를 요구하고, Trackio는 새 로깅 통합이 필요함 | 현재는 미설치; LeRobot 기본 W&B와 기존 연구 스킬 우선 |

@@ -4,7 +4,9 @@
 
 이 문서는 FR5 데이터팩토리의 현재 범위, 입력·좌표·품질·안전 계약과 파일 소유권의 정본이다. 운영자, 구현자와 AI agent는 같은 계약을 사용한다. 로컬 workflow가 만드는 세부 계획·검토 파일은 실행 보조 자료이며 이 정본을 대체하지 않는다.
 
-현재 구현된 것은 기존 대화형 LeRobot 녹화·검증 파이프라인과 A4 생성기다. 데이터팩토리 실행기와 오케스트레이터는 단계적으로 구현한다.
+현재 A4 생성·place calibration·Job/pose/motion resolve, scene/cell runtime state, plan-only/live pickup executor, transaction recorder/recovery와 한-job 조정 library까지 구현했다. 기존 `scripts/collect.sh`는 독립 대화형 수집 경로로 계속 사용할 수 있다.
+
+2026-08-19에는 25 mm 나무 큐브의 scripted `pickup_e2e`를 scene binding, collision check, executor, recorder와 한-job 조정기로 실물 HIL했다. 물리 경로와 30 Hz dataset 정량 gate는 통과했지만 카메라는 cell에 고정되지 않았고 `training_approved.json`도 만들지 않았다. 이 실행에 쓴 run별 harness는 ignored evidence이며 공개 운영 명령이 아니다. 현재 재사용 표면은 각 strict JSONL module과 `OneJob` library이고, 정상 종료 뒤 물체 pose 갱신과 `cell_ready` 확인은 호출자가 명시적으로 수행한다.
 
 - 첫 live task: `pickup_e2e`
 - 첫 grasp profile: `top_center` 하나
@@ -122,12 +124,12 @@ validate
   → full forward/reset dry-run
   → human motion approval
   → record and approach
-  → human pre-contact confirmation
+  → pre-contact confirmation
   → close and verify object-specific feedback window
-  → human grasp verdict
+  → grasp verdict
   → lift
   → freeze
-  → human semantic verdict
+  → semantic verdict
   → reset outside recording
   → commit or abort
   → human cell-ready confirmation
@@ -135,6 +137,8 @@ validate
 
 - 오케스트레이터는 승인된 한 job만 소유하고 다음 job을 자동 시작하지 않는다.
 - recorder의 기술 gate와 사람의 의미 성공 판정은 서로 대신하지 않는다.
+- 기본 `HUMAN_GATED`는 pre-contact, grasp와 semantic 판정을 사람이 입력한다. `HIL_NUMERIC_PROXY`는 미리 승인된 HIL 한 run에서 close/lift 뒤 profile-bound gripper reference·feedback 연속성만 판정하며, 물체 식별·영상 의미 성공이나 training 승인을 증명하지 않는다.
+- 2026-08-19 evidence harness는 같은 run에 미리 발급된 motion approval로 pre-contact token을 제출했다. core executor의 confirmation gate를 없앤 것이 아니며 공개 무인 실행 계약도 아니다.
 - 정상 reset까지 통과한 semantic success만 commit한다.
 - reset-only failure도 episode를 abort하고 `cell_ready=false`로 남긴다.
 - commit 전 실패는 LeRobot episode/video/Parquet로 보존하지 않는다.
@@ -142,6 +146,8 @@ validate
 - 실패 진단은 digest, reason code, timestamp, high-water mark와 마지막 수치 snapshot만 기본 보존한다. 전체 영상·bag·trace는 명시적 opt-in 없이는 남기지 않는다.
 
 factory recorder는 transaction 동안 dataset 전용 커널 lock을 유지한다. 정상 종료는 lock을 명시적으로 해제하고 `SIGKILL`은 운영체제가 자동 해제한다. 중단 뒤에는 다음 명령으로 orphan 여부를 검사한다.
+
+factory commit은 LeRobot의 camera encode를 현재 recorder process에서 순차 실행한다. multithreaded ROS process에서 `fork` 기반 encoder worker를 만들지 않아 capture loop와 저장 phase를 분리하고, commit 실패는 기존 quarantine 계약으로 처리한다.
 
 ```bash
 python3 tools/data_factory_recovery.py \
@@ -168,6 +174,25 @@ python3 tools/data_factory/cell_state.py acknowledge-ready \
 
 `status`는 경로가 없어도 `cell_ready=false` JSON을 출력하며 파일을 만들지 않는다. `acknowledge-ready`는 pipe 입력을 거부하고 로컬 controlling TTY에서 `ACKNOWLEDGE fr5-lab-a`를 정확히 입력한 경우에만 상태를 기록한다. 성공 JSON은 stdout, 오류 JSON은 stderr로 분리한다.
 
+물체의 외부 개입과 episode 사이 상태는 같은 runtime root의 `scene_state.json`에 revision과 digest로 저장한다.
+
+```bash
+python3 tools/data_factory/scene_state.py show \
+  --root outputs/data_factory/cells \
+  --robot-system-id fr5-lab-a
+
+python3 tools/data_factory/scene_state.py set-surface \
+  --root outputs/data_factory/cells \
+  --robot-system-id fr5-lab-a \
+  --instance-id wood-cube-25mm-1 \
+  --object-profile-id wood-cube-25mm-r001 \
+  --place-id PLACE_A --yaw-deg 0 --x-mm 128.5 --y-mm 0 \
+  --source HUMAN --updated-by project-owner \
+  --expect-revision <현재-revision>
+```
+
+AI agent도 같은 CLI/JSON schema를 사용하며 `--expect-revision` 충돌 시 다시 읽어야 한다. OneJob은 scene binding을 executor plan에 묶고 executor는 시작 시 exact digest·revision과 `ON_SURFACE`를 확인한 뒤 cell을 block한다. fault 뒤 pose는 `UNKNOWN`이 된다. 정상 release의 `(place,yaw,x,y)` 갱신과 그 뒤의 cell-ready 확인은 현재 외부 post-run resolver의 책임이다. 이를 수행하지 않으면 다음 job을 시작하지 않는다.
+
 ## 안전과 현재 하드웨어 경계
 
 E-stop, protective stop, 속도·힘·작업영역 제한은 FR5 안전 하드웨어와 controller가 소유한다. PC, ROS, 오케스트레이터와 safe pose는 안전 기능으로 간주하지 않는다.
@@ -177,6 +202,7 @@ E-stop, protective stop, 속도·힘·작업영역 제한은 FR5 안전 하드�
 - A4 metrology, collision scene, TCP/fingertip clearance와 위험성 평가 전에는 table/floor 하강과 물체 접촉을 금지한다.
 - 첫 top-pick은 pre-contact pose에서 정지해 사람 확인을 받고, 유한 stroke의 저속 LIN 한 번만 허용한다.
 - 현재 ros2_control은 position/`FollowJointTrajectory` 경로다. 외장 6축 F/T, 영점, payload/CoM와 단일 motion owner가 검증되기 전에는 force/impedance를 사용하지 않는다.
+- 현재 live cell은 ROS domain에 authoritative `robot_state_publisher`가 하나라는 전제를 쓴다. topic/parameter fallback은 활성 gripper 설정을 검증하지만 robot-description digest의 live attestation은 아니다. shared-domain·multi-robot 배포 전에는 active digest를 motion binding과 직접 비교하는 gate가 필요하다.
 
 카메라가 cell에 설치되기 전에는 USB/FPS/latency/resource 정량 검사만 수행한다. 구도·물체 가시성·semantic/contact-sheet 정성 평가는 하지 않는다.
 

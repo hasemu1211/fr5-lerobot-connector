@@ -32,6 +32,8 @@ scripts/setup_notebook.sh
 
 수집 노트북에는 SmolVLA·CUDA 패키지를 설치하지 않는다. 낮은 사양의 노트북에서도 ROS 수집과 LeRobot v3 저장에 필요한 패키지만 준비한다. 오프라인 사전점검에는 Python 문법, 리코더 단위 테스트, LeRobot 이미지 설정 검사가 포함된다.
 
+vendor patch는 hardware header, `CNDE_thread.cpp`, `command_server.cpp`, `fairino_hardware_interface.cpp` 네 production file만 포함한다. patch 계약 test는 pinned 전체 tree와 setup이 쓰는 sparse tree에서 forward/reverse 적용을 검사한다. IDE 설정이나 backup source는 patch에 넣지 않는다.
+
 비밀번호는 저장하지 않으며 `sudo`가 직접 요청한다.
 
 ## 장비 설정
