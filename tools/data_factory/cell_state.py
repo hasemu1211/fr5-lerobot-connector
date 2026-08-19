@@ -21,11 +21,13 @@ SCHEMA_VERSION = "data_factory.cell_state.v1"
 def _confirm_local_operator(robot_system_id: str) -> None:
     confirmation = f"ACKNOWLEDGE {robot_system_id}"
     try:
-        with open("/dev/tty", "r+", encoding="utf-8", buffering=1) as tty:
-            if not tty.isatty():
+        with open("/dev/tty", "r", encoding="utf-8", buffering=1) as tty_in, open(
+            "/dev/tty", "w", encoding="utf-8", buffering=1
+        ) as tty_out:
+            if not tty_in.isatty() or not tty_out.isatty():
                 raise ContractError("HUMAN_TTY_REQUIRED")
-            tty.write(f"Type '{confirmation}' after physically checking the cell:\n")
-            if tty.readline().rstrip("\r\n") != confirmation:
+            tty_out.write(f"Type '{confirmation}' after physically checking the cell:\n")
+            if tty_in.readline().rstrip("\r\n") != confirmation:
                 raise ContractError("HUMAN_CONFIRMATION_FAILED")
     except OSError as exc:
         raise ContractError("HUMAN_TTY_REQUIRED") from exc
@@ -56,19 +58,20 @@ class CellStateStore:
                 raise ContractError("STATE_PATH")
         return True
 
-    def _path(self, *, create_robot: bool = False) -> Path:
+    def runtime_path(self, filename: str, *, create_robot: bool = False) -> Path:
+        filename = self._safe_id(filename, "STATE_PATH")
         if not self._root_exists(create=create_robot):
-            return self.root / self.robot_system_id / "state.json"
+            return self.root / self.robot_system_id / filename
         robot = self.root / self.robot_system_id
         if robot.is_symlink():
             raise ContractError("STATE_PATH")
         if not robot.exists() and create_robot:
             robot.mkdir(mode=0o700)
         if not robot.exists():
-            return robot / "state.json"
+            return robot / filename
         if not robot.is_dir() or robot.is_symlink():
             raise ContractError("STATE_PATH")
-        state = robot / "state.json"
+        state = robot / filename
         if state.is_symlink():
             raise ContractError("STATE_PATH")
         try:
@@ -99,7 +102,7 @@ class CellStateStore:
         return value
 
     def read(self) -> dict:
-        state = self._path()
+        state = self.runtime_path("state.json")
         if not state.exists():
             return {"schema_version": SCHEMA_VERSION, "robot_system_id": self.robot_system_id, "cell_ready": False, "reason_code": "STATE_MISSING", "run_id": "NONE", "plan_digest": "sha256:" + "0" * 64, "acknowledged_by": "UNACKNOWLEDGED", "updated_at": "1970-01-01T00:00:00Z"}
         if not state.is_file():
@@ -114,7 +117,7 @@ class CellStateStore:
         run_id = self._safe_id(run_id, "STATE_RUN_ID")
         if not isinstance(plan_digest, str) or not DIGEST.fullmatch(plan_digest):
             raise ContractError("STATE_PLAN_DIGEST")
-        state = self._path(create_robot=True)
+        state = self.runtime_path("state.json", create_robot=True)
         value = {"schema_version": SCHEMA_VERSION, "robot_system_id": self.robot_system_id, "cell_ready": False, "reason_code": reason_code, "run_id": run_id, "plan_digest": plan_digest, "acknowledged_by": "UNACKNOWLEDGED", "updated_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")}
         write_json_atomic(state, value)
         return value
@@ -123,7 +126,7 @@ class CellStateStore:
         acknowledged_by = self._safe_id(acknowledged_by, "STATE_ACKNOWLEDGER")
         current = self.read()
         value = {**current, "cell_ready": True, "reason_code": "HUMAN_ACKNOWLEDGED", "acknowledged_by": acknowledged_by, "updated_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")}
-        write_json_atomic(self._path(create_robot=True), value)
+        write_json_atomic(self.runtime_path("state.json", create_robot=True), value)
         return value
 
 

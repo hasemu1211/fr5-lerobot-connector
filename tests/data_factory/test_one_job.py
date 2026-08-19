@@ -14,14 +14,16 @@ PHASES = ("PREGRASP_PTP","APPROACH_STOP_LIN","FINAL_APPROACH_LIN","GRIPPER_CLOSE
 BINDINGS = {key: "sha256:" + "c" * 64 for key in ("selected_sheet", "yaw0_sheet", "cell_calibration", "robot_system", "collection_profile", "object_profile", "grasp_profile")}
 RESOLVED = "sha256:" + "b" * 64
 SETUP_APPROVAL = {"source":"HUMAN", "approval_id":"setup-1", "approved_by":"operator", "approval_expiry":"2099-01-01T00:00:00Z", "resolved_job_digest":RESOLVED}
-PLAN = {"run_id":"run", "motion_program":PROGRAM, "setup_approval":SETUP_APPROVAL}
+SCENE = {"scene_state_digest":"sha256:" + "8" * 64, "revision":1, "object_instance_id":"cube-1"}
+PLAN = {"run_id":"run", "motion_program":PROGRAM, "scene_binding":SCENE, "setup_approval":SETUP_APPROVAL}
+MOTION_APPROVAL = {"source":"HUMAN", "approval_id":"a", "approved_by":"operator", "approval_expiry":"2099-01-01T00:00:00Z", "approval_scope":"HUMAN_GATED"}
 
 
 class OneJobTest(unittest.TestCase):
     def make(self, recorder_states, executor_states):
         calls = []
-        normalized = {**PROGRAM, "robot_system_id":"fr5-lab-a", "resolved_job_digest":RESOLVED, "binding_digests":BINDINGS, "execution_timeouts_s":{"heartbeat_lease":1}, "steps":[{"phase":phase} for phase in PHASES]}
-        planned = {"schema_version":"fr5.pickup_plan.v2", "run_id":"run", "motion_program_digest":canonical_digest(normalized), "resolved_job_digest":RESOLVED, "binding_digests":BINDINGS, "steps":[{"phase":phase, "start_joint_state":[0]*6, "final_joint_state":[0]*6} for phase in PHASES]}
+        normalized = {**PROGRAM, "robot_system_id":"fr5-lab-a", "resolved_job_digest":RESOLVED, "binding_digests":BINDINGS, "execution_timeouts_s":{"heartbeat_lease":1,"semantic_verdict":30}, "gripper_requirements":{"command_position_m":.01,"acceptable_feedback_m":{"min":.01,"max":.012}}, "steps":[{"phase":phase} for phase in PHASES]}
+        planned = {"schema_version":"fr5.pickup_plan.v3", "run_id":"run", "scene_binding":SCENE, "motion_program_digest":canonical_digest(normalized), "resolved_job_digest":RESOLVED, "binding_digests":BINDINGS, "steps":[{"phase":phase, "start_joint_state":[0]*6, "final_joint_state":[0]*6} for phase in PHASES]}
         plan_digest = canonical_digest(planned)
         def recorder(request):
             calls.append(("recorder", request["op"])); item = recorder_states.pop(0)
@@ -33,7 +35,8 @@ class OneJobTest(unittest.TestCase):
             calls.append(("executor", request["op"])); state = executor_states.pop(0)
             if isinstance(state, dict): return state
             if state == "COMPLETED": calls.append(("executor_completed",))
-            return {"schema_version":"fr5.pickup_executor.response.v3", "mode":"PRE_LIVE", "op_id":request["op_id"], "op":request["op"], "ok":state != "BLOCKED", "code":state, "run_id":"run", "plan_digest":plan_digest, "state":state, "data":planned if state == "PLANNED" else {"durable_blocked":True} if state == "BLOCKED" else None}
+            data = planned if state == "PLANNED" else {"durable_blocked":True} if state == "BLOCKED" else {"gripper_feedback_m":.011,"gripper_reference_m":.01} if state == "GRASP_VERDICT" else {"gripper_feedback_m":.011,"gripper_reference_m":.01,"post_lift_gripper_feedback_m":.011} if state == "SEMANTIC_VERDICT" else None
+            return {"schema_version":"fr5.pickup_executor.response.v3", "mode":"PRE_LIVE", "op_id":request["op_id"], "op":request["op"], "ok":state != "BLOCKED", "code":state, "run_id":"run", "plan_digest":plan_digest, "state":state, "data":data}
         patcher = patch("tools.data_factory.one_job.validate_motion_program", lambda _: normalized)
         patcher.start(); self.addCleanup(patcher.stop)
         job = None
@@ -45,7 +48,7 @@ class OneJobTest(unittest.TestCase):
     @staticmethod
     def prepare_and_start(job):
         job.prepare(PLAN)
-        job.approve({"source":"HUMAN", "approval_id":"a", "approved_by":"operator", "approval_expiry":"2099-01-01T00:00:00Z"})
+        job.approve(MOTION_APPROVAL)
         job.start()
 
     def test_happy_pass_orders_begin_before_execute_and_commits(self):
@@ -112,9 +115,55 @@ class OneJobTest(unittest.TestCase):
         def keep_alive(_):
             decision_gate.set()
             time.sleep(.001)
-        result = run_one_job(job, PLAN, {"source":"HUMAN", "approval_id":"a", "approved_by":"operator", "approval_expiry":"2099-01-01T00:00:00Z"}, decide, operator_id="operator", poll_interval_s=.001, sleep=keep_alive)
+        result = run_one_job(job, PLAN, MOTION_APPROVAL, decide, operator_id="operator", poll_interval_s=.001, sleep=keep_alive)
         self.assertEqual(result["state"], "COMPLETE")
         self.assertGreaterEqual(calls.count(("executor", "heartbeat")), 4)
+        job, calls = self.make(["RECORDING", "RECORDING", "RECORDING", "RECORDING", "FROZEN", "FROZEN", "COMMITTED"], ["PLANNED", "APPROVED", "EXECUTING", "PRECONTACT_HUMAN", "EXECUTING", "GRASP_VERDICT", "EXECUTING", "SEMANTIC_VERDICT", "EXECUTING", "COMPLETED"])
+        result = run_one_job(job, PLAN, {**MOTION_APPROVAL, "approval_scope":"HIL_NUMERIC_PROXY"}, lambda state, _: {"PRECONTACT_HUMAN":"CONFIRM", "AWAITING_CELL_READY":"READY"}.get(state), operator_id="operator", poll_interval_s=.001, sleep=lambda _: None)
+        self.assertEqual(result["state"], "COMPLETE")
         job, _ = self.make([], ["PLANNED"])
         with self.assertRaisesRegex(ContractError, "ONE_JOB_POLL_INTERVAL"):
             run_one_job(job, PLAN, {}, lambda *_: None, operator_id="operator", poll_interval_s=.5)
+
+        heartbeats = []
+        def slow_recorder(request):
+            time.sleep(.12)
+            return {"schema_version":"data_factory.recorder_response.v1", "op_id":request["op_id"], "op":"freeze", "ok":True, "state":"FROZEN", "reason_code":"FROZEN", "run_id":"run", "transaction_id":"tx", "episode_index":0, "metrics":{}, "artifacts":{}, "detail":""}
+        def live_executor(request):
+            heartbeats.append(request["op"])
+            return {"schema_version":"fr5.pickup_executor.response.v3", "mode":"LIVE", "op_id":request["op_id"], "op":"heartbeat", "ok":True, "code":"SEMANTIC_VERDICT", "run_id":"run", "plan_digest":"sha256:" + "d"*64, "state":"SEMANTIC_VERDICT", "data":{}}
+        job = OneJob(slow_recorder, live_executor)
+        job.run_id, job.plan_digest, job.lease_id = "run", "sha256:" + "d"*64, "lease"
+        job.transaction_id, job.episode_index, job.recorder_state = "tx", 0, "RECORDING"
+        job._program = {"execution_timeouts_s":{"heartbeat_lease":.1,"semantic_verdict":1}}
+        job._freeze_recorder_with_heartbeats({"writer_alive":True, "writer_error":None})
+        self.assertEqual(job.recorder_state, "FROZEN")
+        self.assertGreaterEqual(heartbeats.count("heartbeat"), 2)
+
+        calls, preserved = [], []
+        def stuck_recorder(request):
+            calls.append(("recorder", request["op"]))
+            if request["op"] == "freeze":
+                time.sleep(.2)
+                state = "FROZEN"
+            else:
+                state = "RECORDING"
+            return {"schema_version":"data_factory.recorder_response.v1", "op_id":request["op_id"], "op":request["op"], "ok":True, "state":state, "reason_code":state, "run_id":"run", "transaction_id":"tx", "episode_index":0, "metrics":{}, "artifacts":{}, "detail":"", "writer_alive":True, "writer_error":None}
+        stuck_recorder.preserve = lambda: preserved.append(True)
+        def blocking_executor(request):
+            calls.append(("executor", request["op"]))
+            state = "BLOCKED" if request["op"] == "cancel" else "SEMANTIC_VERDICT"
+            return {"schema_version":"fr5.pickup_executor.response.v3", "mode":"LIVE", "op_id":request["op_id"], "op":request["op"], "ok":state != "BLOCKED", "code":state, "run_id":"run", "plan_digest":"sha256:" + "d"*64, "state":state, "data":{"durable_blocked":True} if state == "BLOCKED" else {}}
+        job = OneJob(stuck_recorder, blocking_executor)
+        job.run_id, job.plan_digest, job.lease_id = "run", "sha256:" + "d"*64, "lease"
+        job.transaction_id, job.episode_index = "tx", 0
+        job.state, job.grasp, job.recorder_state, job.executor_state = "EXECUTING", "PASS", "RECORDING", "EXECUTING"
+        job._program = {"execution_timeouts_s":{"heartbeat_lease":.03,"semantic_verdict":.05}}
+        started = time.monotonic()
+        result = job.poll()
+        self.assertLess(time.monotonic() - started, .15)
+        self.assertEqual((result["state"], result["code"], result["cancel_error"]), ("BLOCKED", "RECORDER_FREEZE_TIMEOUT", "RECORDER_FREEZE_TIMEOUT"))
+        self.assertTrue(preserved)
+        self.assertNotIn(("recorder", "abort"), calls)
+        time.sleep(.2)
+        self.assertEqual(job.recorder_state, "FREEZE_UNCERTAIN")

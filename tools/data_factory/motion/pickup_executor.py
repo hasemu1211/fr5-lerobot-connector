@@ -26,6 +26,7 @@ from tools.fr5_data_factory import (
     load_json_strict,
     validate_motion_program,
 )
+from tools.data_factory.scene_state import validate_scene_binding
 
 
 MODE = "PRE_LIVE"
@@ -145,11 +146,12 @@ class UnavailableTransport:
 class PickupExecutor:
     """Compile and approve plans; real execution stays opt-in for tests only."""
 
-    def __init__(self, transport=None, clock=None, monotonic_clock=None, cell_state_store=None, execution_enabled=False):
+    def __init__(self, transport=None, clock=None, monotonic_clock=None, cell_state_store=None, scene_state_store=None, execution_enabled=False):
         self.transport = transport or UnavailableTransport()
         self.clock = clock or (lambda: datetime.now(timezone.utc))
         self.monotonic_clock = monotonic_clock or time.monotonic
         self.cell_state_store = cell_state_store
+        self.scene_state_store = scene_state_store
         self.execution_enabled = execution_enabled
         self.mode = "LIVE" if execution_enabled else MODE
         self.cache = {}
@@ -208,7 +210,7 @@ class PickupExecutor:
         return _response(code="PREFLIGHT_OK", ok=True, state="PREFLIGHT", data=facts)
 
     def _plan(self, payload):
-        _exact(payload, {"run_id", "motion_program"}, "PLAN_SCHEMA")
+        _exact(payload, {"run_id", "motion_program", "scene_binding"}, "PLAN_SCHEMA")
         run_id = payload["run_id"]
         if not isinstance(run_id, str) or not SAFE_ID.fullmatch(run_id):
             raise ContractError("PLAN_SCHEMA")
@@ -218,6 +220,7 @@ class PickupExecutor:
             raise ContractError("ONE_JOB_ONLY")
 
         motion_program = validate_motion_program(copy.deepcopy(payload["motion_program"]))
+        scene_binding = validate_scene_binding(payload["scene_binding"])
         action_graph = self._validated_preflight(motion_program)
         observed = self.transport.snapshot(motion_program["planning"]["max_joint_state_age_s"])
         observed = _exact(
@@ -303,8 +306,9 @@ class PickupExecutor:
             state = final_state
 
         plan = {
-            "schema_version": "fr5.pickup_plan.v2",
+            "schema_version": "fr5.pickup_plan.v3",
             "run_id": run_id,
+            "scene_binding": scene_binding,
             "motion_program_digest": canonical_digest(motion_program),
             "action_graph": action_graph,
             "resolved_job_digest": motion_program["resolved_job_digest"],
@@ -343,6 +347,7 @@ class PickupExecutor:
                 "resolved_job_digest",
                 "plan_digest",
                 "approval_expiry",
+                "approval_scope",
             },
             "APPROVAL_SCHEMA",
         )
@@ -351,6 +356,8 @@ class PickupExecutor:
             for key in ("approval_id", "approved_by")
         ):
             raise ContractError("APPROVAL_SCHEMA")
+        if payload["approval_scope"] not in {"HUMAN_GATED", "HIL_NUMERIC_PROXY"}:
+            raise ContractError("APPROVAL_SCOPE")
         run = self._bound(payload)
         if run["state"] != "PLANNED":
             raise ContractError("APPROVAL_STATE")
@@ -393,16 +400,31 @@ class PickupExecutor:
             return _response(code="GRIPPER_SETTINGS_MISMATCH", run_id=payload["run_id"], plan_digest=payload["plan_digest"], state="APPROVED")
         if self.cell_state_store is None:
             raise ContractError("CELL_NOT_READY")
-        cell = self.cell_state_store.read()
-        if cell["robot_system_id"] != run["plan"]["robot_system_id"] or not cell["cell_ready"]:
-            raise ContractError("CELL_NOT_READY")
+        if self.scene_state_store is None:
+            raise ContractError("SCENE_STATE_REQUIRED")
         try:
-            self.cell_state_store.mark_blocked("EXECUTION_IN_PROGRESS", run["plan"]["run_id"], run["digest"])
+            binding = run["plan"]["scene_binding"]
+            with self.scene_state_store.locked_snapshot(binding["scene_state_digest"]) as snapshot:
+                scene = snapshot["scene_state"]
+                item = scene["objects"].get(binding["object_instance_id"])
+                if snapshot["scene_state_digest"] != binding["scene_state_digest"] or scene["revision"] != binding["revision"]:
+                    raise ContractError("SCENE_STATE_CHANGED")
+                if not isinstance(item, dict) or item.get("state") != "ON_SURFACE":
+                    raise ContractError("SCENE_OBJECT_NOT_READY")
+                cell = self.cell_state_store.read()
+                if cell["robot_system_id"] != run["plan"]["robot_system_id"] or not cell["cell_ready"]:
+                    raise ContractError("CELL_NOT_READY")
+                try:
+                    self.cell_state_store.mark_blocked("EXECUTION_IN_PROGRESS", run["plan"]["run_id"], run["digest"])
+                except Exception as exc:
+                    raise ContractError("CELL_STATE_ARMING_FAILED") from exc
+                run["execution"] = {"lease_id": payload["lease_id"], "lease_deadline": self.monotonic_clock() + run["plan"]["execution_timeouts_s"]["heartbeat_lease"], "step_index": 0, "grasp_verdict": None, "semantic_verdict": None, "snapshot": None, "active": False, "scene_object": copy.deepcopy(item)}
+                run["state"] = "EXECUTING"
+                self._start_current_step(run)
+        except ContractError as exc:
+            return _response(code=exc.code, run_id=payload["run_id"], plan_digest=payload["plan_digest"], state="APPROVED")
         except Exception:
             return _response(code="CELL_STATE_ARMING_FAILED", run_id=payload["run_id"], plan_digest=payload["plan_digest"], state="APPROVED")
-        run["execution"] = {"lease_id": payload["lease_id"], "lease_deadline": self.monotonic_clock() + run["plan"]["execution_timeouts_s"]["heartbeat_lease"], "step_index": 0, "grasp_verdict": None, "semantic_verdict": None, "snapshot": None, "active": False}
-        run["state"] = "EXECUTING"
-        self._start_current_step(run)
         return self._execution_response(run, payload["run_id"], payload["plan_digest"], "EXECUTING")
 
     def _execution_response(self, run, run_id, plan_digest, success_code):
@@ -417,7 +439,7 @@ class PickupExecutor:
 
     @staticmethod
     def _execution_data(run):
-        data = {key: copy.deepcopy(run["execution"].get(key)) for key in ("step_index", "grasp_verdict", "semantic_verdict", "gripper_feedback_m", "gripper_reference_m", "snapshot", "snapshot_error", "cancel_error", "durable_blocked", "cell_state_error") if key in run["execution"]}
+        data = {key: copy.deepcopy(run["execution"].get(key)) for key in ("step_index", "grasp_verdict", "semantic_verdict", "precontact_confirmation", "grasp_decision", "semantic_decision", "gripper_feedback_m", "gripper_reference_m", "post_lift_gripper_feedback_m", "snapshot", "snapshot_error", "cancel_error", "durable_blocked", "cell_state_error", "scene_state_error") if key in run["execution"]}
         if "failure_code" in run:
             data["failure_code"] = run["failure_code"]
         return data
@@ -472,8 +494,37 @@ class PickupExecutor:
                 execution["cell_state_error"] = "CELL_STATE_STORE_MISSING"
         except Exception as exc:
             execution["cell_state_error"] = exc.code if isinstance(exc, ContractError) else "CELL_STATE_WRITE_FAILED"
+        try:
+            item = execution.get("scene_object")
+            if self.scene_state_store is not None and isinstance(item, dict):
+                self.scene_state_store.update_object(
+                    instance_id=run["plan"]["scene_binding"]["object_instance_id"],
+                    object_profile_id=item["object_profile_id"],
+                    state="UNKNOWN",
+                    source="ROBOT_ACTION",
+                    updated_by="pickup-executor",
+                    expected_revision=run["plan"]["scene_binding"]["revision"],
+                )
+        except Exception as exc:
+            execution["scene_state_error"] = exc.code if isinstance(exc, ContractError) else "SCENE_STATE_WRITE_FAILED"
         run["state"] = "BLOCKED"
         return code
+
+    def _verified_gripper_feedback(self, run):
+        observed = self.transport.snapshot(run["plan"]["planning"]["max_joint_state_age_s"])
+        controller = observed["gripper_controller"]
+        feedback = float(controller["feedback_position_m"])
+        reference = float(controller["reference_position_m"])
+        required = run["plan"]["gripper_requirements"]
+        if (
+            not controller["ready"]
+            or not math.isfinite(feedback)
+            or not math.isfinite(reference)
+            or abs(reference - required["command_position_m"]) > 1e-9
+            or not required["acceptable_feedback_m"]["min"] <= feedback <= required["acceptable_feedback_m"]["max"]
+        ):
+            raise ContractError("GRIPPER_FEEDBACK_OUT_OF_RANGE")
+        return feedback, reference
 
     def tick(self):
         for run in self.runs.values():
@@ -494,23 +545,14 @@ class PickupExecutor:
                 if active is not None:
                     execution["active"] = False
                     completed_step = run["plan"]["steps"][execution["step_index"]]
-                    if completed_step["phase"] == "GRIPPER_CLOSE":
+                    if completed_step["phase"] in {"GRIPPER_CLOSE", "LIFT_LIN"}:
                         try:
-                            observed = self.transport.snapshot(run["plan"]["planning"]["max_joint_state_age_s"])
-                            controller = observed["gripper_controller"]
-                            feedback = float(controller["feedback_position_m"])
-                            reference = float(controller["reference_position_m"])
-                            required = run["plan"]["gripper_requirements"]
-                            if (
-                                not controller["ready"]
-                                or not math.isfinite(feedback)
-                                or not math.isfinite(reference)
-                                or abs(reference - required["command_position_m"]) > 1e-9
-                                or not required["acceptable_feedback_m"]["min"] <= feedback <= required["acceptable_feedback_m"]["max"]
-                            ):
-                                raise ContractError("GRIPPER_FEEDBACK_OUT_OF_RANGE")
-                            execution["gripper_feedback_m"] = feedback
-                            execution["gripper_reference_m"] = reference
+                            feedback, reference = self._verified_gripper_feedback(run)
+                            if completed_step["phase"] == "GRIPPER_CLOSE":
+                                execution["gripper_feedback_m"] = feedback
+                                execution["gripper_reference_m"] = reference
+                            else:
+                                execution["post_lift_gripper_feedback_m"] = feedback
                         except (ContractError, KeyError, TypeError, ValueError):
                             self._fault(run, "GRIPPER_FEEDBACK_OUT_OF_RANGE")
                             continue
@@ -537,7 +579,7 @@ class PickupExecutor:
             self._fault(run, "RECORDER_WRITER_FAULT")
             return self._execution_response(run, payload["run_id"], payload["plan_digest"], "HEARTBEAT_OK")
         run["execution"]["lease_deadline"] = self.monotonic_clock() + run["plan"]["execution_timeouts_s"]["heartbeat_lease"]
-        return _response(code="HEARTBEAT_OK", ok=True, run_id=payload["run_id"], plan_digest=payload["plan_digest"], state=run["state"])
+        return self._execution_response(run, payload["run_id"], payload["plan_digest"], "HEARTBEAT_OK")
 
     def _confirm(self, payload):
         run = self._execution_payload(payload, {"run_id", "plan_digest", "confirmed_by", "source"}, "CONFIRM_SCHEMA")
@@ -545,6 +587,7 @@ class PickupExecutor:
             raise ContractError("CONFIRM_SCHEMA")
         if run["state"] != "PRECONTACT_HUMAN":
             raise ContractError("CONFIRM_STATE")
+        run["execution"]["precontact_confirmation"] = {"source": payload["source"], "decided_by": payload["confirmed_by"], "decided_at": self.clock().isoformat().replace("+00:00", "Z")}
         run["execution"]["confirmed_step"] = run["execution"]["step_index"]
         run["state"] = "EXECUTING"
         self._start_current_step(run)
@@ -552,22 +595,28 @@ class PickupExecutor:
 
     def _semantic_verdict(self, payload):
         run = self._execution_payload(payload, {"run_id", "plan_digest", "verdict", "decided_by", "source"}, "VERDICT_SCHEMA")
-        if payload["source"] != "HUMAN" or payload["verdict"] not in {"PASS", "FAIL"} or not isinstance(payload["decided_by"], str) or not SAFE_ID.fullmatch(payload["decided_by"]):
+        if payload["source"] not in {"HUMAN", "HIL_PROXY"} or payload["verdict"] not in {"PASS", "FAIL"} or not isinstance(payload["decided_by"], str) or not SAFE_ID.fullmatch(payload["decided_by"]):
             raise ContractError("VERDICT_SCHEMA")
+        if payload["source"] == "HIL_PROXY" and run["approval"]["approval_scope"] != "HIL_NUMERIC_PROXY":
+            raise ContractError("VERDICT_SOURCE")
         if run["state"] != "SEMANTIC_VERDICT":
             raise ContractError("VERDICT_STATE")
         run["execution"]["semantic_verdict"] = payload["verdict"]
+        run["execution"]["semantic_decision"] = {"source": payload["source"], "decided_by": payload["decided_by"], "decided_at": self.clock().isoformat().replace("+00:00", "Z")}
         run["state"] = "EXECUTING"
         self._start_current_step(run)
         return self._execution_response(run, payload["run_id"], payload["plan_digest"], "VERDICT_ACCEPTED")
 
     def _grasp_verdict(self, payload):
         run = self._execution_payload(payload, {"run_id", "plan_digest", "verdict", "decided_by", "source"}, "GRASP_VERDICT_SCHEMA")
-        if payload["source"] != "HUMAN" or payload["verdict"] not in {"PASS", "FAIL"} or not isinstance(payload["decided_by"], str) or not SAFE_ID.fullmatch(payload["decided_by"]):
+        if payload["source"] not in {"HUMAN", "HIL_PROXY"} or payload["verdict"] not in {"PASS", "FAIL"} or not isinstance(payload["decided_by"], str) or not SAFE_ID.fullmatch(payload["decided_by"]):
             raise ContractError("GRASP_VERDICT_SCHEMA")
+        if payload["source"] == "HIL_PROXY" and run["approval"]["approval_scope"] != "HIL_NUMERIC_PROXY":
+            raise ContractError("GRASP_VERDICT_SOURCE")
         if run["state"] != "GRASP_VERDICT":
             raise ContractError("GRASP_VERDICT_STATE")
         run["execution"]["grasp_verdict"] = payload["verdict"]
+        run["execution"]["grasp_decision"] = {"source": payload["source"], "decided_by": payload["decided_by"], "decided_at": self.clock().isoformat().replace("+00:00", "Z")}
         if payload["verdict"] == "FAIL":
             self._fault(run, "GRASP_REJECTED")
         else:
@@ -628,7 +677,7 @@ def run_jsonl(input_stream, output_stream, executor):
         except queue.Empty:
             executor.tick()
             for run in executor.runs.values():
-                if run["state"] in {"BLOCKED", "COMPLETED"}:
+                if run["state"] == "BLOCKED":
                     return terminal(run)
             continue
         if kind == "line":
@@ -642,7 +691,7 @@ def run_jsonl(input_stream, output_stream, executor):
                 return result["state"] == "COMPLETED"
             executor.tick()
             for run in executor.runs.values():
-                if run["state"] in {"BLOCKED", "COMPLETED"}:
+                if run["state"] == "BLOCKED":
                     return terminal(run)
             continue
         for run in executor.runs.values():
@@ -669,15 +718,19 @@ def main(argv=None):
         try:
             if __package__ in (None, ""):
                 from tools.data_factory.cell_state import CellStateStore
+                from tools.data_factory.scene_state import SceneStateStore
             else:
                 from ..cell_state import CellStateStore
+                from ..scene_state import SceneStateStore
             cell_state_store = CellStateStore(args.cell_state_root, args.robot_system_id)
+            scene_state_store = SceneStateStore(args.cell_state_root, args.robot_system_id)
         except ContractError as exc:
             parser.error(exc.code)
     elif args.robot_system_id or args.cell_state_root:
         parser.error("--robot-system-id and --cell-state-root require --ros-live")
     else:
         cell_state_store = None
+        scene_state_store = None
     transport = None
     node = None
     rclpy = None
@@ -715,6 +768,7 @@ def main(argv=None):
             PickupExecutor(
                 transport,
                 cell_state_store=cell_state_store,
+                scene_state_store=scene_state_store,
                 execution_enabled=args.ros_live,
             ),
         ) else 2

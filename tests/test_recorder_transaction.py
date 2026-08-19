@@ -46,9 +46,11 @@ class _Dataset:
         self.clears = 0
         self.finalizes = 0
         self.finalized = False
+        self.parallel_encoding = None
 
-    def save_episode(self):
+    def save_episode(self, parallel_encoding=True):
         self.saves += 1
+        self.parallel_encoding = parallel_encoding
         if self.save_error:
             raise self.save_error
 
@@ -123,6 +125,7 @@ class RecorderTransactionTest(unittest.TestCase):
         recorder.writer_error = None
         recorder.get_logger = lambda: _Logger()
         recorder.get_clock = lambda: SimpleNamespace(now=lambda: SimpleNamespace(nanoseconds=1_000_000_000))
+        recorder._wait_for_sources = lambda: True
         return recorder
 
     @staticmethod
@@ -144,8 +147,13 @@ class RecorderTransactionTest(unittest.TestCase):
     def test_begin_writes_manifest_and_event_before_recording(self):
         with tempfile.TemporaryDirectory() as directory:
             recorder = self.make_recorder(directory)
-            result = recorder.begin_episode(self.transaction(directory))
+            del recorder._wait_for_sources
+            ready = []
+            recorder._sources_ready = lambda: bool(ready)
+            with mock.patch.object(recorder_module.rclpy, "spin_once", side_effect=lambda *_args, **_kwargs: ready.append(True)):
+                result = recorder.begin_episode(self.transaction(directory))
             self.assertTrue(result["ok"])
+            self.assertEqual(ready, [True])
             run_dir = Path(directory) / "runs" / "run-001"
             manifest = json.loads((run_dir / "staging_manifest.json").read_text())
             self.assertEqual(manifest["episode_index"], 7)
@@ -569,6 +577,7 @@ class RecorderTransactionTest(unittest.TestCase):
             recorder.freeze_episode()
             self.assertTrue(recorder.commit_episode()["ok"])
             self.assertEqual(recorder.dataset.saves, 1)
+            self.assertFalse(recorder.dataset.parallel_encoding)
             self.assertFalse((recorder.args.root / "meta" / "quarantine.json").exists())
             self.assertFalse(recorder.commit_episode()["ok"])
             self.assertEqual(recorder.dataset.saves, 1)
@@ -582,8 +591,9 @@ class RecorderTransactionTest(unittest.TestCase):
             entered = threading.Event()
             release = threading.Event()
 
-            def save():
+            def save(parallel_encoding=True):
                 recorder.dataset.saves += 1
+                recorder.dataset.parallel_encoding = parallel_encoding
                 entered.set()
                 release.wait(1)
 
@@ -652,8 +662,9 @@ class RecorderTransactionTest(unittest.TestCase):
             recorder.frames = 1
             recorder._quality_summary = lambda: ({"episode_index": 7, "effective_fps": 30.0, "image_quality_warnings": []}, [])
 
-            def save_then_block_quality_sidecar():
+            def save_then_block_quality_sidecar(parallel_encoding=True):
                 recorder.dataset.saves += 1
+                recorder.dataset.parallel_encoding = parallel_encoding
                 (recorder.args.root / "meta" / "recording_quality.jsonl").mkdir()
 
             recorder.dataset.save_episode = save_then_block_quality_sidecar

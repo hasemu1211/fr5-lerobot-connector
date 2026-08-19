@@ -11,6 +11,7 @@ import time
 from datetime import datetime, timezone
 
 from tools.fr5_data_factory import ContractError, DIGEST, RFC3339, SAFE_ID, canonical_digest, load_json_strict, validate_motion_program
+from tools.data_factory.scene_state import validate_scene_binding
 
 
 class JsonlProcess:
@@ -86,11 +87,16 @@ class OneJob:
         self.transaction_id = self.episode_index = None
         self.cancel_error = None
         self.dry_run_digest = None
+        self.scene_binding = None
+        self.approval_scope = None
+        self.execution_evidence = None
         self._sequence = 0
+        self._sequence_lock = threading.Lock()
 
     def _op_id(self, op):
-        self._sequence += 1
-        return "%02d-%s" % (self._sequence, op)
+        with self._sequence_lock:
+            self._sequence += 1
+            return "%02d-%s" % (self._sequence, op)
 
     def _result(self, ok=True, code="OK", **extra):
         return {"ok": ok, "code": code, "state": self.state, "run_id": self.run_id,
@@ -98,18 +104,25 @@ class OneJob:
                 "executor_state": self.executor_state, "grasp_verdict": self.grasp,
                 "semantic_verdict": self.semantic, "cancel_error": self.cancel_error,
                 "dry_run_digest": self.dry_run_digest,
+                "scene_binding": copy.deepcopy(self.scene_binding),
+                "approval_scope": self.approval_scope,
+                "execution_evidence": copy.deepcopy(self.execution_evidence),
                 **extra}
 
     def _approval(self, value, *, resolved_job_digest, include_digest):
         fields = {"source", "approval_id", "approved_by", "approval_expiry"}
         if include_digest:
             fields.add("resolved_job_digest")
+        else:
+            fields.add("approval_scope")
         if not isinstance(value, dict) or set(value) != fields or value.get("source") != "HUMAN":
             raise ContractError("APPROVAL_SCHEMA")
         if any(not isinstance(value[key], str) or not SAFE_ID.fullmatch(value[key]) for key in ("approval_id", "approved_by")):
             raise ContractError("APPROVAL_SCHEMA")
         if include_digest and value["resolved_job_digest"] != resolved_job_digest:
             raise ContractError("APPROVAL_BINDING")
+        if not include_digest and value["approval_scope"] not in {"HUMAN_GATED", "HIL_NUMERIC_PROXY"}:
+            raise ContractError("APPROVAL_SCOPE")
         expiry = value["approval_expiry"]
         if not isinstance(expiry, str) or not RFC3339.fullmatch(expiry):
             raise ContractError("APPROVAL_EXPIRY")
@@ -121,7 +134,7 @@ class OneJob:
             raise ContractError("APPROVAL_EXPIRED")
         return value
 
-    def _request(self, target, op, payload=None, transaction=None, allowed_failure=False):
+    def _request(self, target, op, payload=None, transaction=None, allowed_failure=False, update_state=True):
         request = {"schema_version": "data_factory.recorder_command.v1", "op_id": self._op_id(op), "op": op}
         if target == "executor":
             request = {"schema_version": "fr5.pickup_executor.command.v4", "op_id": request["op_id"], "op": op, "payload": payload}
@@ -163,7 +176,8 @@ class OneJob:
                 raise ContractError("RECORDER_BINDING")
             elif self.transaction_id is None and response["run_id"] not in {None, self.run_id}:
                 raise ContractError("RECORDER_BINDING")
-            self.recorder_state = response["state"]
+            if update_state:
+                self.recorder_state = response["state"]
         else:
             if not isinstance(response["mode"], str) or not isinstance(response["code"], str):
                 raise ContractError("EXECUTOR_RESPONSE")
@@ -173,6 +187,8 @@ class OneJob:
             if self.plan_digest is not None and response["plan_digest"] not in ({self.plan_digest} if response["ok"] else {None, self.plan_digest}):
                 raise ContractError("EXECUTOR_BINDING")
             self.executor_state = response["state"]
+            if op != "plan" and isinstance(response.get("data"), dict):
+                self.execution_evidence = copy.deepcopy(response["data"])
         if not response["ok"] and not allowed_failure:
             raise ContractError(response.get("reason_code" if target == "recorder" else "code") or "%s_RESPONSE" % target.upper())
         return response
@@ -215,15 +231,16 @@ class OneJob:
     def prepare(self, plan):
         if self.state != "IDLE":
             return self._result(False, "ONE_JOB_ONLY")
-        if not isinstance(plan, dict) or set(plan) != {"run_id", "motion_program", "setup_approval"}:
+        if not isinstance(plan, dict) or set(plan) != {"run_id", "motion_program", "scene_binding", "setup_approval"}:
             return self._result(False, "PLAN_SCHEMA")
         program, run_id = plan["motion_program"], plan["run_id"]
         try:
             if not isinstance(run_id, str) or not SAFE_ID.fullmatch(run_id):
                 raise ContractError("PLAN_SCHEMA")
             program = validate_motion_program(copy.deepcopy(program))
+            scene_binding = validate_scene_binding(plan["scene_binding"])
             self._approval(plan["setup_approval"], resolved_job_digest=program["resolved_job_digest"], include_digest=True)
-            response = self._request("executor", "plan", {"run_id": run_id, "motion_program": program})
+            response = self._request("executor", "plan", {"run_id": run_id, "motion_program": program, "scene_binding": scene_binding})
             digest = response.get("plan_digest")
             dry_run = response.get("data")
             if (
@@ -232,8 +249,9 @@ class OneJob:
                 or not DIGEST.fullmatch(digest)
                 or not isinstance(dry_run, dict)
                 or canonical_digest(dry_run) != digest
-                or dry_run.get("schema_version") != "fr5.pickup_plan.v2"
+                or dry_run.get("schema_version") != "fr5.pickup_plan.v3"
                 or dry_run.get("run_id") != run_id
+                or dry_run.get("scene_binding") != scene_binding
                 or dry_run.get("motion_program_digest") != canonical_digest(program)
                 or dry_run.get("resolved_job_digest") != program["resolved_job_digest"]
                 or dry_run.get("binding_digests") != program["binding_digests"]
@@ -244,7 +262,7 @@ class OneJob:
         except ContractError as exc:
             self.state = "BLOCKED"
             return self._result(False, exc.code)
-        self.run_id, self.plan_digest, self.dry_run_digest, self._program, self.state = run_id, digest, digest, program, "PLANNED"
+        self.run_id, self.plan_digest, self.dry_run_digest, self._program, self.scene_binding, self.state = run_id, digest, digest, program, scene_binding, "PLANNED"
         return self._result(True, "PLANNED")
 
     def approve(self, approval):
@@ -254,13 +272,13 @@ class OneJob:
             self._approval(approval, resolved_job_digest=self._program["resolved_job_digest"], include_digest=False)
             payload = {key: approval[key] for key in ("approval_id", "approved_by", "approval_expiry")}
             payload.update(run_id=self.run_id, plan_digest=self.plan_digest,
-                           resolved_job_digest=self._program["resolved_job_digest"])
+                           resolved_job_digest=self._program["resolved_job_digest"], approval_scope=approval["approval_scope"])
             response = self._request("executor", "approve", payload)
             if response["state"] != "APPROVED":
                 raise ContractError("APPROVAL_STATE")
         except (ContractError, KeyError) as exc:
             return self._result(False, exc.code if isinstance(exc, ContractError) else "APPROVAL_SCHEMA")
-        self.state = "APPROVED"
+        self.approval_scope, self.state = approval["approval_scope"], "APPROVED"
         return self._result(True, "APPROVED")
 
     def start(self, lease_id="one-job-lease"):
@@ -311,7 +329,7 @@ class OneJob:
                 if self.grasp != "PASS":
                     raise ContractError("GRASP_GUARD")
                 if self.recorder_state == "RECORDING":
-                    self._request("recorder", "freeze")
+                    self._freeze_recorder_with_heartbeats(health)
                 if self.recorder_state != "FROZEN":
                     raise ContractError("RECORDER_FREEZE")
                 self.state = state
@@ -324,11 +342,55 @@ class OneJob:
             return self._abort(exc.code)
         return self._result(True, "EXECUTING")
 
-    def confirm(self, confirmed_by):
+    def _freeze_recorder_with_heartbeats(self, health):
+        outcome = queue.Queue(maxsize=1)
+
+        def freeze():
+            try:
+                outcome.put(self._request("recorder", "freeze", update_state=False))
+            except Exception as exc:
+                outcome.put(exc)
+
+        worker = threading.Thread(target=freeze, daemon=True)
+        worker.start()
+        interval = min(0.1, self._program["execution_timeouts_s"]["heartbeat_lease"] / 3)
+        deadline = time.monotonic() + self._program["execution_timeouts_s"]["semantic_verdict"]
+        heartbeat_error = None
+        while worker.is_alive():
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                self.recorder_state = "FREEZE_UNCERTAIN"
+                self.cancel_error = "RECORDER_FREEZE_TIMEOUT"
+                preserve = getattr(self.recorder_call, "preserve", None)
+                if callable(preserve):
+                    preserve()
+                raise ContractError("RECORDER_FREEZE_TIMEOUT")
+            worker.join(min(interval, remaining))
+            if worker.is_alive() and heartbeat_error is None:
+                try:
+                    self._request("executor", "heartbeat", {
+                        "run_id": self.run_id,
+                        "plan_digest": self.plan_digest,
+                        "lease_id": self.lease_id,
+                        "recorder_health": health,
+                    })
+                except ContractError as exc:
+                    heartbeat_error = exc
+        result = outcome.get()
+        if heartbeat_error is not None:
+            raise heartbeat_error
+        if isinstance(result, Exception):
+            raise result
+        self.recorder_state = result["state"]
+        return result
+
+    def confirm(self, confirmed_by, source="HUMAN"):
         if self.state != "PRECONTACT_HUMAN" or not isinstance(confirmed_by, str) or not SAFE_ID.fullmatch(confirmed_by):
             return self._result(False, "CONFIRM_STATE")
+        if source != "HUMAN":
+            return self._result(False, "CONFIRM_SOURCE")
         try:
-            response = self._request("executor", "confirm", {"run_id": self.run_id, "plan_digest": self.plan_digest, "confirmed_by": confirmed_by, "source": "HUMAN"})
+            response = self._request("executor", "confirm", {"run_id": self.run_id, "plan_digest": self.plan_digest, "confirmed_by": confirmed_by, "source": source})
             if response["state"] != "EXECUTING":
                 raise ContractError("EXECUTOR_STATE")
         except ContractError as exc:
@@ -336,12 +398,14 @@ class OneJob:
         self.state = "EXECUTING"
         return self._result(True, "CONFIRMED")
 
-    def grasp_verdict(self, verdict, decided_by):
+    def grasp_verdict(self, verdict, decided_by, source="HUMAN"):
         if self.state != "GRASP_VERDICT" or verdict not in {"PASS", "FAIL"} or not isinstance(decided_by, str) or not SAFE_ID.fullmatch(decided_by):
             return self._result(False, "GRASP_VERDICT_STATE")
+        if source not in {"HUMAN", "HIL_PROXY"} or source == "HIL_PROXY" and self.approval_scope != "HIL_NUMERIC_PROXY":
+            return self._result(False, "GRASP_VERDICT_SOURCE")
         self.grasp = verdict
         try:
-            response = self._request("executor", "grasp_verdict", {"run_id": self.run_id, "plan_digest": self.plan_digest, "verdict": verdict, "decided_by": decided_by, "source": "HUMAN"})
+            response = self._request("executor", "grasp_verdict", {"run_id": self.run_id, "plan_digest": self.plan_digest, "verdict": verdict, "decided_by": decided_by, "source": source})
             if response["state"] != "EXECUTING":
                 raise ContractError("EXECUTOR_STATE")
         except ContractError as exc:
@@ -349,11 +413,13 @@ class OneJob:
         self.state = "EXECUTING"
         return self._result(True, "GRASP_VERDICT_ACCEPTED")
 
-    def semantic_verdict(self, verdict, decided_by):
+    def semantic_verdict(self, verdict, decided_by, source="HUMAN"):
         if self.state != "SEMANTIC_VERDICT" or verdict not in {"PASS", "FAIL"} or not isinstance(decided_by, str) or not SAFE_ID.fullmatch(decided_by):
             return self._result(False, "VERDICT_STATE")
+        if source not in {"HUMAN", "HIL_PROXY"} or source == "HIL_PROXY" and self.approval_scope != "HIL_NUMERIC_PROXY":
+            return self._result(False, "VERDICT_SOURCE")
         try:
-            response = self._request("executor", "semantic_verdict", {"run_id": self.run_id, "plan_digest": self.plan_digest, "verdict": verdict, "decided_by": decided_by, "source": "HUMAN"})
+            response = self._request("executor", "semantic_verdict", {"run_id": self.run_id, "plan_digest": self.plan_digest, "verdict": verdict, "decided_by": decided_by, "source": source})
             if response["state"] != "EXECUTING":
                 raise ContractError("EXECUTOR_STATE")
         except ContractError as exc:
@@ -439,6 +505,17 @@ def run_one_job(job, plan, motion_approval, decision_call, *, operator_id, lease
         except Exception as exc:
             decisions.put((state, exc))
 
+    def hil_numeric_verdict(state, result):
+        evidence = result.get("execution_evidence") or {}
+        required = job._program["gripper_requirements"]
+        try:
+            feedback = float(evidence["gripper_feedback_m" if state == "GRASP_VERDICT" else "post_lift_gripper_feedback_m"])
+            if state == "GRASP_VERDICT" and abs(float(evidence["gripper_reference_m"]) - required["command_position_m"]) > 1e-9:
+                return "FAIL"
+        except (KeyError, TypeError, ValueError):
+            return "FAIL"
+        return "PASS" if required["acceptable_feedback_m"]["min"] <= feedback <= required["acceptable_feedback_m"]["max"] else "FAIL"
+
     while True:
         if job.state == "AWAITING_CELL_READY":
             if pending_state != job.state:
@@ -464,6 +541,13 @@ def run_one_job(job, plan, motion_approval, decision_call, *, operator_id, lease
         if result["state"] == "AWAITING_CELL_READY":
             continue
         if result["state"] not in {"PRECONTACT_HUMAN", "GRASP_VERDICT", "SEMANTIC_VERDICT"}:
+            sleep(poll_interval_s)
+            continue
+        if result["state"] in {"GRASP_VERDICT", "SEMANTIC_VERDICT"} and job.approval_scope == "HIL_NUMERIC_PROXY":
+            decision = hil_numeric_verdict(result["state"], result)
+            result = (job.grasp_verdict if result["state"] == "GRASP_VERDICT" else job.semantic_verdict)(decision, operator_id, source="HIL_PROXY")
+            if not result["ok"]:
+                return result
             sleep(poll_interval_s)
             continue
         if pending_state != result["state"]:

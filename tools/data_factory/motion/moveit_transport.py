@@ -93,7 +93,9 @@ class RosMoveItTransport:
                 MoveItErrorCodes,
             )
             from rclpy.action import ActionClient, get_action_names_and_types
+            from rclpy.parameter_client import AsyncParameterClient
             from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
+            from rcl_interfaces.msg import ParameterType
             from rclpy.serialization import deserialize_message, serialize_message
             from sensor_msgs.msg import JointState
             from shape_msgs.msg import SolidPrimitive
@@ -117,6 +119,7 @@ class RosMoveItTransport:
         self._goal_canceled = GoalStatus.STATUS_CANCELED
         self._moveit_success = MoveItErrorCodes.SUCCESS
         self._gripper_success = FollowJointTrajectory.Result.SUCCESSFUL
+        self._parameter_string = ParameterType.PARAMETER_STRING
         self._JointTolerance = JointTolerance
         self._Pose = Pose
         self._MoveGroup = MoveGroup
@@ -151,6 +154,7 @@ class RosMoveItTransport:
         self._arm_controller_subscription = None
         self._gripper_controller_subscription = None
         self._robot_description_subscription = None
+        self._robot_description_client = None
         if hasattr(node, "create_subscription"):
             self._joint_state_subscription = node.create_subscription(
                 JointState, "/joint_states", self._on_joint_state, 10
@@ -176,6 +180,10 @@ class RosMoveItTransport:
                     durability=DurabilityPolicy.TRANSIENT_LOCAL,
                     reliability=ReliabilityPolicy.RELIABLE,
                 ),
+            )
+        if hasattr(node, "create_client"):
+            self._robot_description_client = AsyncParameterClient(
+                node, "/robot_state_publisher"
             )
 
     def _on_joint_state(self, message):
@@ -341,6 +349,7 @@ class RosMoveItTransport:
             raise ContractError("ROS_SNAPSHOT_AGE")
         max_age_s = float(max_age_s)
         deadline = time.monotonic() + self.graph_timeout_s
+        self._load_robot_description_parameter(deadline)
         while (
             self._joint_state_received_at is None
             or self._arm_controller_received_at is None
@@ -410,6 +419,29 @@ class RosMoveItTransport:
                 "feedback_position_m": gripper_values["feedback"]["finger_right_joint"],
             },
         }
+
+    def _load_robot_description_parameter(self, deadline):
+        client = self._robot_description_client
+        if self._robot_description is not None or client is None:
+            return
+        remaining = max(0.0, deadline - time.monotonic())
+        if remaining == 0 or not client.wait_for_services(timeout_sec=min(0.2, remaining)):
+            return
+        response = self._wait(
+            client.get_parameters(["robot_description"]),
+            max(0.0, deadline - time.monotonic()),
+            "ROS_GRIPPER_SETTINGS_UNVERIFIED",
+        )
+        values = getattr(response, "values", None)
+        if (
+            not isinstance(values, (list, tuple))
+            or len(values) != 1
+            or values[0].type != self._parameter_string
+            or not isinstance(values[0].string_value, str)
+            or not values[0].string_value
+        ):
+            raise ContractError("ROS_GRIPPER_SETTINGS_UNVERIFIED")
+        self._robot_description = values[0].string_value
 
     def _gripper_settings(self):
         try:

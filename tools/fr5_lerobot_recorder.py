@@ -421,6 +421,8 @@ class FR5LeRobotRecorder(Node):
         return self._result(ok, reason_code, detail=detail)
 
     def begin_episode(self, transaction: dict | None = None) -> dict:
+        if transaction is not None and not self._wait_for_sources():
+            return self._result(False, "SOURCES_NOT_READY")
         with self.lock:
             if self.episode_state not in (self.IDLE, self.ABORTED, self.COMMITTED):
                 return self._result(False, "STATE_BEGIN_NOT_ALLOWED")
@@ -478,6 +480,15 @@ class FR5LeRobotRecorder(Node):
             f"recording episode_index={self.dataset.meta.total_episodes} (s=save, c=discard, q=discard+quit)"
         )
         return result
+
+    def _wait_for_sources(self) -> bool:
+        deadline = time.monotonic() + 5.0
+        while not self._sources_ready():
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return False
+            rclpy.spin_once(self, timeout_sec=min(0.05, remaining))
+        return True
 
     def start_episode(self) -> None:
         result = self.begin_episode()
@@ -750,7 +761,7 @@ class FR5LeRobotRecorder(Node):
         except Exception as exc:
             return self._abort_precommit("PRECOMMIT_GUARD_FAILED", exc, temporary_path)
         try:
-            self.dataset.save_episode()
+            self.dataset.save_episode(parallel_encoding=False)
             temporary_path.replace(provenance_path)
             quality_path = self.args.root / "meta" / "recording_quality.jsonl"
             with quality_path.open("a", encoding="utf-8") as file:
