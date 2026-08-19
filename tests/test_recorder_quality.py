@@ -27,6 +27,7 @@ class RecorderContractTest(unittest.TestCase):
     def test_robot_control_keeps_gripper_off_realtime_xmlrpc_path(self):
         root = Path(__file__).resolve().parents[1]
         source = (root / "src/frcobot_ros2/fairino_hardware_v3_9_7/src/fairino_hardware_interface.cpp").read_text()
+        command_source = (root / "src/frcobot_ros2/fairino_hardware_v3_9_7/src/command_server.cpp").read_text()
         write_body = source.split("FairinoHardwareInterface::write", 1)[1].split(
             "void FairinoHardwareInterface::gripper_worker", 1
         )[0]
@@ -61,6 +62,13 @@ class RecorderContractTest(unittest.TestCase):
             source,
             r"void FairinoHardwareInterface::gripper_worker\(\)[\s\S]+MoveGripper\([\s\S]{0,300}_gripper_max_time,\s*1,",
         )
+        self.assertNotIn("_ptr_robot->~FRRobot()", command_source)
+        self.assertNotIn("_ptr_robot.reset()", source + command_source)
+        self.assertIn("(void)_ptr_robot.release()", source)
+        self.assertIn("(void)_ptr_robot.release()", command_source)
+        rpc_failure = source.split("if(returncode != 0){", 1)[1].split("}else{", 1)[0]
+        self.assertIn("_ptr_robot->CloseRPC()", rpc_failure)
+        self.assertIn("(void)_ptr_robot.release()", rpc_failure)
 
     def test_moveit_and_ros2_control_action_contracts_are_preserved(self):
         root = Path(__file__).resolve().parents[1]
@@ -236,20 +244,35 @@ class RecorderContractTest(unittest.TestCase):
     def test_vendor_patch_applies_to_the_pinned_submodule(self):
         root = Path(__file__).resolve().parents[1]
         submodule = root / "src/frcobot_ros2"
+        patch_path = root / "patches/frcobot_ros2.patch"
+        headers = [
+            line.split(" b/", 1)[1]
+            for line in patch_path.read_text().splitlines()
+            if line.startswith("diff --git ")
+        ]
+        self.assertEqual(headers, [
+            "fairino_hardware_v3_9_7/include/fairino_hardware/fairino_hardware_interface.hpp",
+            "fairino_hardware_v3_9_7/src/CNDE_thread.cpp",
+            "fairino_hardware_v3_9_7/src/command_server.cpp",
+            "fairino_hardware_v3_9_7/src/fairino_hardware_interface.cpp",
+        ])
         pinned = subprocess.check_output(
             ["git", "ls-tree", "HEAD", "src/frcobot_ros2"], cwd=root, text=True
         ).split()[2]
-        archive = subprocess.check_output(["git", "archive", pinned], cwd=submodule)
-        with tempfile.TemporaryDirectory() as directory:
-            with tarfile.open(fileobj=BytesIO(archive)) as source:
-                source.extractall(directory, filter="data")
-            result = subprocess.run(
-                ["git", "apply", "--check", root / "patches/frcobot_ros2.patch"],
-                cwd=directory,
-                text=True,
-                capture_output=True,
-            )
-        self.assertEqual(result.returncode, 0, result.stderr)
+        for paths in ([], ["fairino_hardware_v3_9_7", "fairino_msgs"]):
+            archive = subprocess.check_output(["git", "archive", pinned, *paths], cwd=submodule)
+            with tempfile.TemporaryDirectory() as directory:
+                with tarfile.open(fileobj=BytesIO(archive)) as source:
+                    source.extractall(directory, filter="data")
+                for command in (
+                    ["git", "apply", "--check", patch_path],
+                    ["git", "apply", patch_path],
+                    ["git", "apply", "--reverse", "--check", patch_path],
+                    ["git", "apply", "--reverse", patch_path],
+                    ["git", "apply", "--check", patch_path],
+                ):
+                    result = subprocess.run(command, cwd=directory, text=True, capture_output=True)
+                    self.assertEqual(result.returncode, 0, result.stderr)
 
 if __name__ == "__main__":
     unittest.main()
