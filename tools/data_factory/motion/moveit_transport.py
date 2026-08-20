@@ -7,7 +7,7 @@ import time
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass
 
-from tools.fr5_data_factory import ContractError
+from tools.fr5_data_factory import ContractError, canonical_digest
 
 
 JOINT_ORDER = ["j1", "j2", "j3", "j4", "j5", "j6"]
@@ -84,14 +84,18 @@ class RosMoveItTransport:
             from geometry_msgs.msg import Pose
             from moveit_msgs.action import ExecuteTrajectory, MoveGroup
             from moveit_msgs.msg import (
+                CollisionObject,
                 Constraints,
                 JointConstraint,
                 OrientationConstraint,
                 PositionConstraint,
                 RobotState,
                 RobotTrajectory,
+                PlanningScene,
+                PlanningSceneComponents,
                 MoveItErrorCodes,
             )
+            from moveit_msgs.srv import ApplyPlanningScene, GetPlanningScene, GetStateValidity
             from rclpy.action import ActionClient, get_action_names_and_types
             from rclpy.parameter_client import AsyncParameterClient
             from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
@@ -115,6 +119,12 @@ class RosMoveItTransport:
         self._FollowJointTrajectory = FollowJointTrajectory
         self._ExecuteTrajectory = ExecuteTrajectory
         self._RobotTrajectory = RobotTrajectory
+        self._CollisionObject = CollisionObject
+        self._PlanningScene = PlanningScene
+        self._PlanningSceneComponents = PlanningSceneComponents
+        self._ApplyPlanningScene = ApplyPlanningScene
+        self._GetPlanningScene = GetPlanningScene
+        self._GetStateValidity = GetStateValidity
         self._goal_succeeded = GoalStatus.STATUS_SUCCEEDED
         self._goal_canceled = GoalStatus.STATUS_CANCELED
         self._moveit_success = MoveItErrorCodes.SUCCESS
@@ -150,6 +160,9 @@ class RosMoveItTransport:
         self._robot_description = None
         self._active = None
         self._execution_locked = False
+        self._execute_goal_count = 0
+        self._gripper_goal_count = 0
+        self._service_clients = {}
         self._joint_state_subscription = None
         self._arm_controller_subscription = None
         self._gripper_controller_subscription = None
@@ -200,6 +213,116 @@ class RosMoveItTransport:
 
     def _on_robot_description(self, message):
         self._robot_description = message.data
+
+    def _service(self, service_type, endpoint, request, code):
+        if not hasattr(self.node, "create_client"):
+            raise ContractError(code)
+        client = self._service_clients.get(endpoint)
+        if client is None:
+            client = self.node.create_client(service_type, endpoint)
+            self._service_clients[endpoint] = client
+        try:
+            if not client.wait_for_service(timeout_sec=self.graph_timeout_s):
+                raise ContractError(code)
+            return self._wait(client.call_async(request), self.graph_timeout_s, code)
+        except ContractError:
+            raise
+        except RuntimeError as exc:
+            raise ContractError(code, str(exc)) from exc
+
+    def _collision_object(self, identifier, dimensions, position, frame_id):
+        if (
+            not isinstance(identifier, str) or not identifier
+            or not isinstance(dimensions, list) or len(dimensions) != 3
+            or not isinstance(position, list) or len(position) != 3
+            or any(isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or value <= 0 for value in dimensions)
+            or any(isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) for value in position)
+        ):
+            raise ContractError("PLANNING_SCENE_SCHEMA")
+        item = self._CollisionObject()
+        item.header.frame_id = frame_id
+        item.id = identifier
+        item.pose.position.x, item.pose.position.y, item.pose.position.z = map(float, position)
+        item.pose.orientation.w = 1.0
+        primitive = self._SolidPrimitive(type=self._SolidPrimitive.BOX, dimensions=list(map(float, dimensions)))
+        pose = self._Pose()
+        pose.orientation.w = 1.0
+        item.primitives, item.primitive_poses = [primitive], [pose]
+        item.operation = self._CollisionObject.ADD
+        return item
+
+    def _planning_scene_objects(self, spec):
+        if not isinstance(spec, dict) or set(spec) != {"frame_id", "floor", "wall"}:
+            raise ContractError("PLANNING_SCENE_SCHEMA")
+        frame_id, floor, wall = spec["frame_id"], spec["floor"], spec["wall"]
+        if not isinstance(frame_id, str) or not frame_id:
+            raise ContractError("PLANNING_SCENE_SCHEMA")
+        if not isinstance(floor, dict) or not isinstance(wall, dict):
+            raise ContractError("PLANNING_SCENE_SCHEMA")
+        try:
+            floor_position = [0.0, 0.0, float(floor["surface_z_m"]) - float(floor["dimensions_m"][2]) / 2]
+            wall_position = [0.0, float(wall["near_face_y_m"]) - float(wall["dimensions_m"][1]) / 2, 0.0]
+            return [
+                self._collision_object(floor["id"], floor["dimensions_m"], floor_position, frame_id),
+                self._collision_object(wall["id"], wall["dimensions_m"], wall_position, frame_id),
+            ]
+        except (KeyError, TypeError, ValueError, IndexError) as exc:
+            raise ContractError("PLANNING_SCENE_SCHEMA", str(exc)) from exc
+
+    def _apply_and_readback_scene(self, spec, expected_digest):
+        if canonical_digest(spec) != expected_digest:
+            raise ContractError("PLANNING_SCENE_BINDING")
+        expected = self._planning_scene_objects(spec)
+        request = self._ApplyPlanningScene.Request()
+        request.scene = self._PlanningScene(is_diff=True)
+        request.scene.world.collision_objects = expected
+        response = self._service(self._ApplyPlanningScene, "/apply_planning_scene", request, "PLANNING_SCENE_APPLY")
+        if not getattr(response, "success", False):
+            raise ContractError("PLANNING_SCENE_APPLY")
+        query = self._GetPlanningScene.Request()
+        query.components = self._PlanningSceneComponents(components=self._PlanningSceneComponents.WORLD_OBJECT_GEOMETRY)
+        response = self._service(self._GetPlanningScene, "/get_planning_scene", query, "PLANNING_SCENE_READ")
+        observed = getattr(getattr(getattr(response, "scene", None), "world", None), "collision_objects", None)
+        by_id = {item.id: item for item in observed or []}
+        if set(by_id) != {item.id for item in expected}:
+            raise ContractError("PLANNING_SCENE_MISMATCH")
+        readback = []
+        for item in expected:
+            actual = by_id[item.id]
+            if (
+                actual.header.frame_id != item.header.frame_id
+                or len(actual.primitives) != 1 or len(actual.primitive_poses) != 1
+                or actual.primitives[0].type != item.primitives[0].type
+                or list(actual.primitives[0].dimensions) != list(item.primitives[0].dimensions)
+                or any(abs(a - b) > 1e-9 for a, b in zip(
+                    (actual.pose.position.x, actual.pose.position.y, actual.pose.position.z),
+                    (item.pose.position.x, item.pose.position.y, item.pose.position.z),
+                ))
+                or any(abs(a - b) > 1e-9 for a, b in zip(
+                    (actual.pose.orientation.x, actual.pose.orientation.y, actual.pose.orientation.z, actual.pose.orientation.w),
+                    (item.pose.orientation.x, item.pose.orientation.y, item.pose.orientation.z, item.pose.orientation.w),
+                ))
+                or any(abs(a - b) > 1e-9 for a, b in zip(
+                    (actual.primitive_poses[0].position.x, actual.primitive_poses[0].position.y, actual.primitive_poses[0].position.z),
+                    (item.primitive_poses[0].position.x, item.primitive_poses[0].position.y, item.primitive_poses[0].position.z),
+                ))
+                or any(abs(a - b) > 1e-9 for a, b in zip(
+                    (actual.primitive_poses[0].orientation.x, actual.primitive_poses[0].orientation.y, actual.primitive_poses[0].orientation.z, actual.primitive_poses[0].orientation.w),
+                    (item.primitive_poses[0].orientation.x, item.primitive_poses[0].orientation.y, item.primitive_poses[0].orientation.z, item.primitive_poses[0].orientation.w),
+                ))
+            ):
+                raise ContractError("PLANNING_SCENE_MISMATCH")
+            readback.append({
+                "id": item.id,
+                "frame_id": item.header.frame_id,
+                "primitive_type": int(item.primitives[0].type),
+                "dimensions_m": list(item.primitives[0].dimensions),
+                "pose_position_m": [item.pose.position.x, item.pose.position.y, item.pose.position.z],
+                "pose_orientation_xyzw": [item.pose.orientation.x, item.pose.orientation.y, item.pose.orientation.z, item.pose.orientation.w],
+                "primitive_pose_position_m": [item.primitive_poses[0].position.x, item.primitive_poses[0].position.y, item.primitive_poses[0].position.z],
+                "primitive_pose_orientation_xyzw": [item.primitive_poses[0].orientation.x, item.primitive_poses[0].orientation.y, item.primitive_poses[0].orientation.z, item.primitive_poses[0].orientation.w],
+            })
+        return readback
 
     def _compiled_execution_goal(self, compiled_step):
         if not isinstance(compiled_step, dict):
@@ -253,6 +376,10 @@ class RosMoveItTransport:
             sent = client.send_goal_async(goal)
         except RuntimeError as exc:
             raise ContractError("ROS_EXEC_GOAL_FAILED", str(exc)) from exc
+        if step_type == "ARM":
+            self._execute_goal_count += 1
+        else:
+            self._gripper_goal_count += 1
         self._execution_locked = True
         handle = self._wait(sent, self.graph_timeout_s, "ROS_EXEC_GOAL_TIMEOUT")
         accepted = getattr(handle, "accepted", None)
@@ -589,6 +716,134 @@ class RosMoveItTransport:
         )
         if not response.goals_canceling:
             raise ContractError("ROS_PLAN_CANCEL_REJECTED")
+
+    def _check_plan_collision(self, plan, initial_gripper):
+        request_type = self._GetStateValidity.Request
+        gripper = float(initial_gripper)
+        samples, failures = [], []
+
+        def check(label, joints):
+            if len(joints) != len(JOINT_ORDER) or any(not math.isfinite(value) for value in joints):
+                raise ContractError("COLLISION_STATE")
+            request = request_type()
+            request.group_name = plan["frames"]["planning_group"]
+            request.robot_state = self._RobotState(
+                joint_state=self._JointState(
+                    name=[*JOINT_ORDER, "finger_right_joint"],
+                    position=[*map(float, joints), float(gripper)],
+                )
+            )
+            response = self._service(self._GetStateValidity, "/check_state_validity", request, "COLLISION_SERVICE")
+            evidence = {"label": label, "joints_rad": list(map(float, joints)), "finger_right_joint_m": float(gripper), "valid": bool(getattr(response, "valid", False))}
+            samples.append(evidence)
+            if not evidence["valid"]:
+                failures.append(evidence)
+
+        check("initial", plan["initial_joint_state"])
+        for step in plan["steps"]:
+            if step["type"] == "GRIPPER":
+                gripper = step.get("gripper_position_m", plan["gripper_requirements"]["command_position_m"])
+                check(step["phase"], step["final_joint_state"])
+                continue
+            try:
+                trajectory = self._deserialize_message(
+                    base64.b64decode(step["trajectory_b64"], validate=True), self._RobotTrajectory
+                ).joint_trajectory
+                names, points = list(trajectory.joint_names), list(trajectory.points)
+            except (ValueError, RuntimeError, TypeError) as exc:
+                raise ContractError("COLLISION_TRAJECTORY", str(exc)) from exc
+            if names != JOINT_ORDER or not points:
+                raise ContractError("COLLISION_TRAJECTORY")
+            previous, previous_time = step["start_joint_state"], -1.0
+            for index, point in enumerate(points):
+                current = list(point.positions)
+                seconds = point.time_from_start.sec + point.time_from_start.nanosec / 1e9
+                if len(current) != len(JOINT_ORDER) or seconds <= previous_time:
+                    raise ContractError("COLLISION_TRAJECTORY")
+                for part in range(1, 5):
+                    ratio = part / 5
+                    check(f"{step['phase']}:interp:{index}:{part}", [a + (b - a) * ratio for a, b in zip(previous, current)])
+                check(f"{step['phase']}:point:{index}", current)
+                previous, previous_time = current, seconds
+        report = {"schema_version": "data_factory.collision_report.v1", "plan_digest": canonical_digest(plan), "sample_count": len(samples), "samples": samples, "failure_count": len(failures), "all_valid": not failures}
+        if failures:
+            raise ContractError("COLLISION_DETECTED")
+        return report
+
+    def precommit_safety(self, plan, planning_scene, before_snapshot):
+        """Prove scene/readback, serialized-plan collision, and plan-only no-motion."""
+        if not isinstance(plan, dict) or not isinstance(before_snapshot, dict):
+            raise ContractError("PRECOMMIT_SAFETY_SCHEMA")
+        expected = plan["binding_digests"]["planning_scene_digest"]
+        readback = self._apply_and_readback_scene(planning_scene, expected)
+        try:
+            before_gripper = before_snapshot["gripper_controller"]
+            initial_gripper = float(before_gripper["feedback_position_m"])
+            initial_reference = float(before_gripper["reference_position_m"])
+            open_step = next(step for step in plan["steps"] if step["phase"] == "GRIPPER_OPEN")
+            open_target = float(open_step["gripper_position_m"])
+            gripper_tolerance = float(open_step["limits"]["completion_tolerance_m"])
+            if abs(initial_gripper - open_target) > gripper_tolerance or abs(initial_reference - open_target) > gripper_tolerance:
+                raise ContractError("GRIPPER_INITIAL_NOT_OPEN")
+            collision = self._check_plan_collision(plan, initial_gripper)
+            after_snapshot = self.snapshot(plan["planning"]["max_joint_state_age_s"])
+            before_joints, after_joints = before_snapshot["joint_positions"], after_snapshot["joint_positions"]
+            joint_delta = max(abs(a - b) for a, b in zip(before_joints, after_joints))
+            gripper_delta = abs(
+                float(before_snapshot["gripper_controller"]["feedback_position_m"])
+                - float(after_snapshot["gripper_controller"]["feedback_position_m"])
+            )
+            tolerance = float(plan["planning"]["goal_tolerances"]["joint_rad"])
+        except ContractError:
+            raise
+        except (KeyError, TypeError, ValueError, StopIteration) as exc:
+            raise ContractError("PRECOMMIT_SAFETY_SCHEMA", str(exc)) from exc
+        plan_digest = canonical_digest(plan)
+        readback_payload = {
+            "schema_version": "data_factory.planning_scene_readback.v1",
+            "run_id": plan["run_id"],
+            "plan_digest": plan_digest,
+            "expected_planning_scene_digest": expected,
+            "objects": readback,
+        }
+        no_motion = {
+            "schema_version": "data_factory.plan_only_no_motion.v1",
+            "run_id": plan["run_id"],
+            "plan_digest": plan_digest,
+            "before_snapshot": before_snapshot,
+            "after_snapshot": after_snapshot,
+            "max_joint_delta_rad": joint_delta,
+            "gripper_delta_m": gripper_delta,
+            "execute_goal_count": self._execute_goal_count,
+            "gripper_goal_count": self._gripper_goal_count,
+        }
+        if joint_delta > tolerance or gripper_delta > gripper_tolerance or self._execute_goal_count or self._gripper_goal_count:
+            raise ContractError("PLAN_ONLY_MOVED_ROBOT")
+        safety = {
+            "schema_version": "data_factory.precommit_safety.v1",
+            "run_id": plan["run_id"],
+            "approved_plan_digest": plan_digest,
+            "scene_binding_digest": canonical_digest(plan["scene_binding"]),
+            "expected_planning_scene_digest": expected,
+            "planning_scene_readback_digest": canonical_digest(readback_payload),
+            "collision_report_digest": canonical_digest(collision),
+            "plan_only_no_motion_digest": canonical_digest(no_motion),
+            "post_reset_safe_snapshot_digest": None,
+            "status": "PENDING",
+        }
+        return {
+            "precommit_safety": safety,
+            "precommit_evidence": {
+                "schema_version": "data_factory.precommit_evidence.v1",
+                "run_id": plan["run_id"],
+                "approved_plan_digest": plan_digest,
+                "scene_binding_digest": canonical_digest(plan["scene_binding"]),
+                "expected_planning_scene_digest": expected,
+                "planning_scene_readback": readback_payload,
+                "collision_report": collision,
+                "plan_only_no_motion": no_motion,
+            },
+        }
 
     def plan_arm(
         self,

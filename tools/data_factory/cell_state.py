@@ -2,7 +2,9 @@
 from __future__ import annotations
 
 import argparse
+import fcntl
 import json
+import os
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -118,16 +120,37 @@ class CellStateStore:
         if not isinstance(plan_digest, str) or not DIGEST.fullmatch(plan_digest):
             raise ContractError("STATE_PLAN_DIGEST")
         state = self.runtime_path("state.json", create_robot=True)
-        value = {"schema_version": SCHEMA_VERSION, "robot_system_id": self.robot_system_id, "cell_ready": False, "reason_code": reason_code, "run_id": run_id, "plan_digest": plan_digest, "acknowledged_by": "UNACKNOWLEDGED", "updated_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")}
-        write_json_atomic(state, value)
-        return value
+        lock_path = self.runtime_path("state.lock", create_robot=True)
+        descriptor = os.open(lock_path, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
+        try:
+            fcntl.flock(descriptor, fcntl.LOCK_EX)
+            value = {"schema_version": SCHEMA_VERSION, "robot_system_id": self.robot_system_id, "cell_ready": False, "reason_code": reason_code, "run_id": run_id, "plan_digest": plan_digest, "acknowledged_by": "UNACKNOWLEDGED", "updated_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")}
+            write_json_atomic(state, value)
+            return value
+        finally:
+            os.close(descriptor)
 
-    def acknowledge_ready(self, acknowledged_by: str) -> dict:
+    def acknowledge_ready(self, acknowledged_by: str, *, expected_run_id: str | None = None,
+                          expected_plan_digest: str | None = None) -> dict:
         acknowledged_by = self._safe_id(acknowledged_by, "STATE_ACKNOWLEDGER")
-        current = self.read()
-        value = {**current, "cell_ready": True, "reason_code": "HUMAN_ACKNOWLEDGED", "acknowledged_by": acknowledged_by, "updated_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")}
-        write_json_atomic(self.runtime_path("state.json", create_robot=True), value)
-        return value
+        if (expected_run_id is None) != (expected_plan_digest is None):
+            raise ContractError("STATE_EXPECTED_BINDING")
+        if expected_run_id is not None:
+            expected_run_id = self._safe_id(expected_run_id, "STATE_EXPECTED_BINDING")
+            if not isinstance(expected_plan_digest, str) or not DIGEST.fullmatch(expected_plan_digest):
+                raise ContractError("STATE_EXPECTED_BINDING")
+        lock_path = self.runtime_path("state.lock", create_robot=True)
+        descriptor = os.open(lock_path, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
+        try:
+            fcntl.flock(descriptor, fcntl.LOCK_EX)
+            current = self.read()
+            if expected_run_id is not None and (current["run_id"] != expected_run_id or current["plan_digest"] != expected_plan_digest):
+                raise ContractError("STATE_CHANGED")
+            value = {**current, "cell_ready": True, "reason_code": "HUMAN_ACKNOWLEDGED", "acknowledged_by": acknowledged_by, "updated_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")}
+            write_json_atomic(self.runtime_path("state.json", create_robot=True), value)
+            return value
+        finally:
+            os.close(descriptor)
 
 
 def main(argv=None) -> int:

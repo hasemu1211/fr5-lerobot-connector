@@ -79,6 +79,26 @@ class RecorderTransactionTest(unittest.TestCase):
         "transaction_id", "episode_index", "metrics", "artifacts", "detail",
     }
 
+    def test_resume_preserves_the_configured_video_encoder(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "dataset"
+            (root / "meta").mkdir(parents=True)
+            (root / "meta" / "info.json").write_text("{}")
+            features = {"observation.images.up": {"dtype": "video", "shape": [480, 640, 3], "names": None}}
+            dataset = SimpleNamespace(meta=SimpleNamespace(fps=30, features=features))
+            api = SimpleNamespace(resume=mock.Mock(return_value=dataset))
+            recorder = FR5LeRobotRecorder.__new__(FR5LeRobotRecorder)
+            recorder.LeRobotDataset = api
+            recorder.args = SimpleNamespace(
+                root=root, repo_id="local/test", fps=30, no_videos=False,
+                streaming_encoding=False, encoder_threads=2,
+                video_preset=None, video_codec="h264", video_crf=23,
+            )
+            recorder._features = lambda: features
+            self.assertIs(recorder._open_dataset(), dataset)
+            encoder = api.resume.call_args.kwargs["rgb_encoder"]
+            self.assertEqual((encoder.vcodec, encoder.preset, encoder.crf), ("h264", "ultrafast", 23))
+
     def make_recorder(self, directory, save_error=None, clear_error=None, finalize_error=None):
         recorder = FR5LeRobotRecorder.__new__(FR5LeRobotRecorder)
         recorder.args = SimpleNamespace(
@@ -173,6 +193,147 @@ class RecorderTransactionTest(unittest.TestCase):
             self.assertEqual(marker["schema_version"], "data_factory.commit_guard.v2")
             self.assertEqual(marker["staging_manifest_digest"], canonical_json_digest(manifest))
 
+    def test_factory_storage_reserve_device_and_boundary_matrix(self):
+        for same_device, required, dataset_free, temp_free, accepted in (
+            (True, (110, 110), 109, 109, False),
+            (True, (110, 110), 110, 110, True),
+            (True, (110, 110), 111, 111, True),
+            (False, (60, 70), 59, 70, False),
+            (False, (60, 70), 60, 69, False),
+            (False, (60, 70), 60, 70, True),
+            (False, (60, 70), 61, 71, True),
+        ):
+            with self.subTest(same_device=same_device, dataset_free=dataset_free, temp_free=temp_free), tempfile.TemporaryDirectory() as directory:
+                recorder = self.make_recorder(directory)
+                recorder.args.dataset_incremental_peak_bytes = 40
+                recorder.args.encoder_temp_peak_bytes = 50
+                recorder.args.disk_reserve_bytes = 20
+                recorder.args.encoder_temp_dir = recorder.args.root
+                sample = {
+                    "dataset": {"path": str(recorder.args.root), "device": 1, "free_bytes": dataset_free, "total_bytes": 1000},
+                    "encoder_temp": {"path": str(recorder.args.root), "device": 1 if same_device else 2, "free_bytes": temp_free, "total_bytes": 1000},
+                }
+                with mock.patch.object(recorder, "_storage_sample", return_value=sample):
+                    result = recorder.begin_episode(self.transaction(directory))
+                self.assertEqual(result["ok"], accepted)
+                if accepted:
+                    self.assertEqual(recorder._storage_monitor["required_free_bytes_by_device"], {
+                        "1": required[0], **({} if same_device else {"2": required[1]})
+                    })
+                else:
+                    self.assertEqual(result["reason_code"], "DISK_RESERVE")
+                    self.assertFalse((Path(directory) / "runs" / "run-001").exists())
+
+    def test_committed_factory_result_exposes_storage_usage(self):
+        with tempfile.TemporaryDirectory() as directory:
+            recorder = self.make_recorder(directory)
+            recorder.args.dataset_incremental_peak_bytes = 40
+            recorder.args.encoder_temp_peak_bytes = 50
+            recorder.args.disk_reserve_bytes = 20
+            sample = {
+                "dataset": {"path": str(recorder.args.root), "device": 1, "free_bytes": 200, "total_bytes": 1000},
+                "encoder_temp": {"path": str(recorder.args.root), "device": 1, "free_bytes": 200, "total_bytes": 1000},
+            }
+            with mock.patch.object(recorder, "_storage_sample", return_value=sample), mock.patch.object(recorder, "_tree_bytes", return_value=123):
+                self.assertTrue(recorder.begin_episode(self.transaction(directory))["ok"])
+                recorder.frames = 1
+                recorder._quality_summary = lambda: ({"episode_index": 7, "effective_fps": 30.0, "image_quality_warnings": []}, [])
+                recorder.freeze_episode()
+                result = recorder.commit_episode()
+            self.assertTrue(result["ok"])
+            storage = result["metrics"]["storage_usage"]
+            self.assertEqual(
+                {key: storage[key] for key in ("episode_index", "transaction_id", "staging_manifest_digest")},
+                {"episode_index": 7, "transaction_id": "run-001:episode-000007", "staging_manifest_digest": recorder._transaction["staging_manifest_digest"]},
+            )
+            self.assertEqual((storage["dataset_bytes_before"], storage["dataset_bytes_after"]), (123, 123))
+            self.assertEqual(storage["free_bytes_before_by_device"], {"1": 200})
+            self.assertEqual(storage["free_bytes_by_device"], {"1": 200})
+            self.assertEqual(storage["temp_peak_bytes_by_device"], {"1": 0})
+
+    def test_commit_probe_captures_transient_encoder_temp_peak(self):
+        with tempfile.TemporaryDirectory() as directory:
+            recorder = self.make_recorder(directory)
+            temp_dir = Path(directory) / "encoder-temp"
+            temp_dir.mkdir()
+            recorder.args.dataset_incremental_peak_bytes = 1
+            recorder.args.encoder_temp_peak_bytes = 1
+            sample = {
+                "dataset": {"path": str(recorder.args.root), "device": 1, "free_bytes": 200, "total_bytes": 1000},
+                "encoder_temp": {"path": str(temp_dir), "device": 1, "free_bytes": 200, "total_bytes": 1000},
+            }
+            transient = temp_dir / "encode.tmp"
+            observed = threading.Event()
+            tree_bytes = recorder._tree_bytes
+
+            def observe_temp(path):
+                value = tree_bytes(path)
+                if Path(path) == temp_dir and transient.exists():
+                    observed.set()
+                return value
+
+            def save_with_transient(parallel_encoding=True):
+                transient.write_bytes(b"x" * 4096)
+                self.assertTrue(observed.wait(1))
+                transient.unlink()
+                recorder.dataset.saves += 1
+
+            recorder.dataset.save_episode = save_with_transient
+            with mock.patch.object(recorder, "_storage_sample", return_value=sample), mock.patch.object(recorder, "_tree_bytes", side_effect=observe_temp):
+                self.assertTrue(recorder.begin_episode(self.transaction(directory))["ok"])
+                recorder.frames = 1
+                recorder._quality_summary = lambda: ({"episode_index": 7, "effective_fps": 30.0, "image_quality_warnings": []}, [])
+                recorder.freeze_episode()
+                result = recorder.commit_episode()
+            self.assertTrue(result["ok"])
+            self.assertGreaterEqual(result["metrics"]["storage_usage"]["temp_peak_bytes_by_device"]["1"], 4096)
+
+    def test_storage_status_latches_existing_writer_error_off_hot_path(self):
+        with tempfile.TemporaryDirectory() as directory:
+            recorder = self.make_recorder(directory)
+            recorder._storage_monitor = {
+                "reserve_bytes": 20, "dataset_incremental_peak_bytes": 40,
+                "encoder_temp_peak_bytes": 50, "required_free_bytes_by_device": {"1": 110},
+                "begin": {}, "dataset_bytes_before": 0, "temp_bytes_before_by_device": {"1": 0}, "temp_peak_bytes_by_device": {"1": 0},
+                "last_check_monotonic": 0.0,
+            }
+            sample = {
+                "dataset": {"path": str(recorder.args.root), "device": 1, "free_bytes": 109, "total_bytes": 1000},
+                "encoder_temp": {"path": str(recorder.args.root), "device": 1, "free_bytes": 109, "total_bytes": 1000},
+            }
+            with mock.patch.object(recorder, "_storage_sample", return_value=sample), mock.patch.object(recorder, "_tree_bytes", return_value=0):
+                recorder.episode_status()
+            self.assertEqual(str(recorder.writer_error), "DISK_RESERVE_LOW")
+
+    def test_post_encode_disk_reserve_low_quarantines_retained_payload(self):
+        with tempfile.TemporaryDirectory() as directory:
+            recorder = self.make_recorder(directory)
+            recorder.args.dataset_incremental_peak_bytes = 40
+            recorder.args.encoder_temp_peak_bytes = 50
+            recorder.args.disk_reserve_bytes = 20
+            healthy = {
+                "dataset": {"path": str(recorder.args.root), "device": 1, "free_bytes": 110, "total_bytes": 1000},
+                "encoder_temp": {"path": str(recorder.args.root), "device": 1, "free_bytes": 110, "total_bytes": 1000},
+            }
+            low = {
+                "dataset": {"path": str(recorder.args.root), "device": 1, "free_bytes": 109, "total_bytes": 1000},
+                "encoder_temp": {"path": str(recorder.args.root), "device": 1, "free_bytes": 109, "total_bytes": 1000},
+            }
+            with mock.patch.object(recorder, "_storage_sample", side_effect=(healthy, low)), mock.patch.object(recorder, "_tree_bytes", return_value=123):
+                self.assertTrue(recorder.begin_episode(self.transaction(directory))["ok"])
+                recorder.frames = 1
+                recorder._quality_summary = lambda: ({"episode_index": 7, "effective_fps": 30.0, "image_quality_warnings": []}, [])
+                recorder.freeze_episode()
+                result = recorder.commit_episode()
+            self.assertFalse(result["ok"])
+            self.assertEqual(result["reason_code"], "DISK_RESERVE_LOW")
+            self.assertEqual(recorder.episode_state, recorder.QUARANTINED_COMMIT)
+            self.assertEqual(recorder.dataset.saves, 1)
+            self.assertEqual(recorder.dataset.clears, 0)
+            self.assertTrue((recorder.args.root / "meta" / "source_provenance" / "episode-000007.jsonl").exists())
+            self.assertEqual(json.loads((recorder.args.root / "meta" / "quarantine.json").read_text())["reason_code"], "DISK_RESERVE_LOW")
+            self.assertEqual(json.loads((Path(directory) / "runs" / "run-001" / "result.json").read_text())["reason_code"], "DISK_RESERVE_LOW")
+
     def test_factory_streaming_rejected_without_side_effects(self):
         with tempfile.TemporaryDirectory() as directory:
             recorder = self.make_recorder(directory)
@@ -218,7 +379,7 @@ class RecorderTransactionTest(unittest.TestCase):
             self.assertIn("writer_alive", status)
             self.assertEqual(
                 set(status["metrics"]),
-                {"rows", "writer_queue", "writer_queue_drops", "alignment_failures", "observed_monotonic_ns"},
+                {"rows", "writer_queue", "writer_queue_high_water", "writer_queue_drops", "alignment_failures", "observed_monotonic_ns"},
             )
             self.assertEqual(recorder.dataset.clears, 0)
 
@@ -525,12 +686,43 @@ class RecorderTransactionTest(unittest.TestCase):
                 "PROCESS_TRANSACTION_ALREADY_USED",
             )
             resumed = self.make_recorder(directory)
-            with self.assertRaisesRegex(ValueError, "already exists"):
+            with self.assertRaises(RecoveryError) as conflict:
                 resumed.begin_episode(context)
+            self.assertEqual(conflict.exception.code, "RUN_EVIDENCE_DIRECTORY_CONFLICT")
             nested = self.make_recorder(directory)
             nested.args.run_root = nested.args.root / "runs"
             with self.assertRaisesRegex(ValueError, "must be separate"):
                 nested.begin_episode(self.transaction(directory))
+
+    def test_transaction_accepts_only_bound_runner_preapproval_directory(self):
+        with tempfile.TemporaryDirectory() as directory:
+            run_dir = Path(directory) / "runs" / "run-001"
+            run_dir.mkdir(parents=True)
+            evidence = {
+                "camera_warmup.json": "data_factory.camera_warmup.v1",
+                "preapproval_evidence.json": "data_factory.preapproval_evidence.v1",
+            }
+            for name, schema in evidence.items():
+                (run_dir / name).write_text(json.dumps({"schema_version": schema, "run_id": "run-001"}))
+            recorder = self.make_recorder(directory)
+            self.assertTrue(recorder.begin_episode(self.transaction(directory))["ok"])
+            self.assertTrue((run_dir / "staging_manifest.json").is_file())
+            self.assertEqual(set(evidence), {path.name for path in run_dir.iterdir() if path.name in evidence})
+            self.assertTrue(recorder.abort_episode()["ok"])
+
+            conflict_dir = Path(directory) / "runs" / "run-002"
+            conflict_dir.mkdir()
+            (conflict_dir / "unexpected.json").write_text("{}")
+            conflict = self.make_recorder(directory)
+            request = {
+                "schema_version": "data_factory.recorder_command.v1",
+                "op_id": "begin-conflict",
+                "op": "begin",
+                "transaction": {**self.transaction(directory), "run_id": "run-002"},
+            }
+            response = process_recorder_control_line(conflict, json.dumps(request), {})
+            self.assertEqual(response["reason_code"], "RUN_EVIDENCE_DIRECTORY_CONFLICT")
+            self.assertEqual(conflict.episode_state, conflict.IDLE)
 
     def test_begin_journal_failure_is_fail_closed(self):
         with tempfile.TemporaryDirectory() as directory:

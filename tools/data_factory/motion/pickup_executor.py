@@ -63,6 +63,57 @@ def _exact(value, fields, code):
     return value
 
 
+_PRECOMMIT_SAFETY_FIELDS = {
+    "schema_version", "run_id", "approved_plan_digest", "scene_binding_digest",
+    "expected_planning_scene_digest", "planning_scene_readback_digest",
+    "collision_report_digest", "plan_only_no_motion_digest",
+    "post_reset_safe_snapshot_digest", "status",
+}
+_PRECOMMIT_EVIDENCE_FIELDS = {
+    "schema_version", "run_id", "approved_plan_digest", "scene_binding_digest",
+    "expected_planning_scene_digest", "planning_scene_readback", "collision_report",
+    "plan_only_no_motion",
+}
+
+
+def _precommit_evidence(value, safety, *, run_id, plan_digest, scene_binding, planning_scene_digest):
+    value = _exact(value, _PRECOMMIT_EVIDENCE_FIELDS, "PRECOMMIT_EVIDENCE_SCHEMA")
+    if (
+        value["schema_version"] != "data_factory.precommit_evidence.v1"
+        or value["run_id"] != run_id
+        or value["approved_plan_digest"] != plan_digest
+        or value["scene_binding_digest"] != canonical_digest(scene_binding)
+        or value["expected_planning_scene_digest"] != planning_scene_digest
+    ):
+        raise ContractError("PRECOMMIT_EVIDENCE_BINDING")
+    readback, collision, no_motion = (
+        value["planning_scene_readback"], value["collision_report"], value["plan_only_no_motion"],
+    )
+    if (
+        not isinstance(readback, dict)
+        or set(readback) != {"schema_version", "run_id", "plan_digest", "expected_planning_scene_digest", "objects"}
+        or readback["schema_version"] != "data_factory.planning_scene_readback.v1"
+        or readback["run_id"] != run_id
+        or readback["plan_digest"] != plan_digest
+        or readback["expected_planning_scene_digest"] != planning_scene_digest
+        or not isinstance(readback["objects"], list)
+        or not isinstance(collision, dict)
+        or set(collision) != {"schema_version", "plan_digest", "sample_count", "samples", "failure_count", "all_valid"}
+        or collision["schema_version"] != "data_factory.collision_report.v1"
+        or collision["plan_digest"] != plan_digest
+        or not isinstance(no_motion, dict)
+        or set(no_motion) != {"schema_version", "run_id", "plan_digest", "before_snapshot", "after_snapshot", "max_joint_delta_rad", "gripper_delta_m", "execute_goal_count", "gripper_goal_count"}
+        or no_motion["schema_version"] != "data_factory.plan_only_no_motion.v1"
+        or no_motion["run_id"] != run_id
+        or no_motion["plan_digest"] != plan_digest
+        or canonical_digest(readback) != safety["planning_scene_readback_digest"]
+        or canonical_digest(collision) != safety["collision_report_digest"]
+        or canonical_digest(no_motion) != safety["plan_only_no_motion_digest"]
+    ):
+        raise ContractError("PRECOMMIT_EVIDENCE_BINDING")
+    return copy.deepcopy(value)
+
+
 def _gripper_settings(value):
     value = _exact(value, {"hardware_plugin", "velocity_percent", "force_percent", "settle_time_ms"}, "GRIPPER_SETTINGS_UNVERIFIED")
     if (
@@ -141,6 +192,9 @@ class UnavailableTransport:
         raise ContractError("OFFLINE_TRANSPORT_UNAVAILABLE")
 
     def build_gripper_goal(self, *args):
+        raise ContractError("OFFLINE_TRANSPORT_UNAVAILABLE")
+
+    def precommit_safety(self, *args):
         raise ContractError("OFFLINE_TRANSPORT_UNAVAILABLE")
 
 
@@ -341,6 +395,7 @@ class PickupExecutor:
             for key in (
                 "target",
                 "joint_positions_rad",
+                "gripper_position_m",
                 "requires_confirmation",
                 "pause_after",
             ):
@@ -367,9 +422,75 @@ class PickupExecutor:
             "steps": planned_steps,
         }
         plan_digest = canonical_digest(plan)
+        precommit_response = self.transport.precommit_safety(
+            copy.deepcopy(plan), motion_program["planning_scene"], copy.deepcopy(observed)
+        )
+        precommit_response = _exact(
+            precommit_response, {"precommit_safety", "precommit_evidence"}, "PRECOMMIT_EVIDENCE_SCHEMA"
+        )
+        precommit = precommit_response["precommit_safety"]
+        precommit = _exact(
+            precommit,
+            _PRECOMMIT_SAFETY_FIELDS,
+            "PRECOMMIT_SAFETY_SCHEMA",
+        )
+        if (
+            precommit["schema_version"] != "data_factory.precommit_safety.v1"
+            or precommit["run_id"] != run_id
+            or precommit["approved_plan_digest"] != plan_digest
+            or precommit["scene_binding_digest"] != canonical_digest(scene_binding)
+            or precommit["expected_planning_scene_digest"]
+                != motion_program["binding_digests"]["planning_scene_digest"]
+            or precommit["post_reset_safe_snapshot_digest"] is not None
+            or precommit["status"] != "PENDING"
+            or any(
+                not isinstance(precommit[key], str) or not precommit[key].startswith("sha256:")
+                for key in (
+                    "planning_scene_readback_digest", "collision_report_digest",
+                    "plan_only_no_motion_digest",
+                )
+            )
+        ):
+            raise ContractError("PRECOMMIT_SAFETY_BINDING")
+        evidence = _precommit_evidence(
+            precommit_response["precommit_evidence"], precommit,
+            run_id=run_id, plan_digest=plan_digest, scene_binding=scene_binding,
+            planning_scene_digest=motion_program["binding_digests"]["planning_scene_digest"],
+        )
+        operator_summary = {
+            "path": [step["phase"] for step in planned_steps],
+            "flow": {
+                "continuous_through": (
+                    "APPROACH_STOP_LIN"
+                    if any(step.get("requires_confirmation") == "PRECONTACT_HUMAN" for step in planned_steps)
+                    else "LIFT_LIN"
+                ),
+                "next_human_hold": (
+                    "PRECONTACT_HUMAN"
+                    if any(step.get("requires_confirmation") == "PRECONTACT_HUMAN" for step in planned_steps)
+                    else "POST_LIFT_SEMANTIC"
+                ),
+            },
+            "speed": {
+                "max_velocity_scaling": max(
+                step["limits"]["velocity_scaling"]
+                for step in planned_steps if step["type"] == "ARM"
+            ),
+                "max_acceleration_scaling": max(
+                step["limits"]["acceleration_scaling"]
+                for step in planned_steps if step["type"] == "ARM"
+            ),
+            },
+            "clearance": {
+                "status": "COLLISION_CHECKED_NO_DISTANCE",
+                "collision_report_digest": precommit["collision_report_digest"],
+            },
+        }
         self.runs[run_id] = {
             "plan": copy.deepcopy(plan),
             "digest": plan_digest,
+            "precommit_safety": copy.deepcopy(precommit),
+            "precommit_evidence": copy.deepcopy(evidence),
             "state": "PLANNED",
         }
         return _response(
@@ -378,7 +499,12 @@ class PickupExecutor:
             run_id=run_id,
             plan_digest=plan_digest,
             state="PLANNED",
-            data=copy.deepcopy(plan),
+            data={
+                "plan": copy.deepcopy(plan),
+                "precommit_safety": copy.deepcopy(precommit),
+                "precommit_evidence": copy.deepcopy(evidence),
+                "operator_summary": operator_summary,
+            },
         )
 
     def _approve(self, payload):
@@ -430,6 +556,8 @@ class PickupExecutor:
             raise ContractError("EXECUTE_SCHEMA")
         if run["state"] != "APPROVED":
             raise ContractError("NOT_APPROVED")
+        if run.get("precommit_safety", {}).get("status") != "PENDING":
+            raise ContractError("PRECOMMIT_SAFETY_REQUIRED")
         _future_timestamp(run["approval"]["approval_expiry"], self.clock())
         if not self.execution_enabled:
             return _response(code="LIVE_EXECUTION_BLOCKED", run_id=payload["run_id"], plan_digest=payload["plan_digest"], state="APPROVED")
@@ -498,6 +626,7 @@ class PickupExecutor:
             elif self._phase_event_writer.ready:
                 execution["behavior_report_status"] = "AVAILABLE"
         data = {key: copy.deepcopy(execution.get(key)) for key in ("step_index", "grasp_verdict", "semantic_verdict", "precontact_confirmation", "grasp_decision", "semantic_decision", "gripper_feedback_m", "gripper_reference_m", "post_lift_gripper_feedback_m", "snapshot", "snapshot_error", "cancel_error", "durable_blocked", "cell_state_error", "scene_state_error", "phase_events_path", "behavior_report_status") if key in execution}
+        data["precommit_safety"] = copy.deepcopy(run.get("precommit_safety"))
         if "failure_code" in run:
             data["failure_code"] = run["failure_code"]
         return data
@@ -505,7 +634,36 @@ class PickupExecutor:
     def _start_current_step(self, run):
         execution, steps = run["execution"], run["plan"]["steps"]
         if execution["step_index"] >= len(steps):
-            run["state"] = "COMPLETED"
+            try:
+                observed = self.transport.snapshot(run["plan"]["planning"]["max_joint_state_age_s"])
+                joints = _joint_positions(observed["joint_positions"])
+                tolerance = run["plan"]["planning"]["goal_tolerances"]["joint_rad"]
+                safe = steps[-1]["final_joint_state"]
+                gripper = observed["gripper_controller"]
+                open_step = next(step for step in steps if step["phase"] == "GRIPPER_OPEN")
+                open_target = open_step.get("gripper_position_m")
+                open_tolerance = open_step["limits"]["completion_tolerance_m"]
+                settings = _gripper_settings(observed["gripper_settings"])
+                if (
+                    not observed["arm_controller"]["ready"]
+                    or not gripper["ready"]
+                    or settings != run["plan"]["active_gripper_settings"]
+                    or any(abs(actual - target) > tolerance for actual, target in zip(joints, safe))
+                    or not isinstance(open_target, (int, float))
+                    or abs(float(gripper["feedback_position_m"]) - open_target) > open_tolerance
+                    or abs(float(gripper["reference_position_m"]) - open_target) > open_tolerance
+                ):
+                    raise ContractError("POST_RESET_SAFE_SNAPSHOT")
+                safety = run["precommit_safety"]
+                safety["post_reset_safe_snapshot_digest"] = canonical_digest({
+                    "joint_positions": joints,
+                    "gripper_feedback_position_m": float(gripper["feedback_position_m"]),
+                    "gripper_reference_position_m": float(gripper["reference_position_m"]),
+                })
+                safety["status"] = "PASS"
+                run["state"] = "COMPLETED"
+            except (ContractError, KeyError, TypeError, ValueError):
+                self._fault(run, "POST_RESET_SAFE_SNAPSHOT")
             return "COMPLETED"
         step = steps[execution["step_index"]]
         if step.get("requires_confirmation") == "PRECONTACT_HUMAN" and execution.get("confirmed_step") != execution["step_index"]:

@@ -1,4 +1,5 @@
 import json
+import subprocess
 import sys
 import tempfile
 import threading
@@ -16,6 +17,16 @@ from tools.data_factory import run_job
 
 
 JOB = {"task": "pickup_e2e", "robot_system_id": "fr5-lab-a"}
+PROFILE = {
+    "schema_version": "data_factory.collection_profile.v2", "collection_profile_id": "test",
+    "qualification_status": "QUALIFIED", "quality_contract_digest": "sha256:" + "7" * 64,
+    "camera_profile": "up", "camera_roles": ["up"], "camera_serials": {"up": "serial-up"},
+    "camera_topics": {"up": "/camera/up/color/image_raw"}, "fps": 30, "width": 640, "height": 480,
+    "image_qos": "reliable", "image_qos_depth": 10, "writer_queue_size": 128, "encoder_threads": 2,
+    "encoding_mode": "batch", "repo_id": "local/test", "encoder_temp_policy": "DATASET_LOCAL",
+    "dataset_incremental_peak_bytes": 100, "encoder_temp_peak_bytes": 200, "disk_reserve_bytes": 300,
+    "portability_status": "QUALIFICATION_REQUIRED",
+}
 
 
 def payload(mode="plan_only"):
@@ -62,7 +73,538 @@ class Executor:
 
 
 class RunJobTest(unittest.TestCase):
-    def test_human_and_ai_share_plan_only_contract_and_live_is_inert(self):
+    def test_live_collection_profile_binds_camera_and_recorder_settings(self):
+        profile = dict(PROFILE)
+        validated = {"collection_profile": profile}
+        self.assertEqual(run_job._collection_profile(validated, payload("live"))["fps"], 30)
+        bad = payload("live"); bad["camera_profile"] = "up-side"
+        with self.assertRaisesRegex(run_job.ContractError, "COLLECTION_PROFILE_MISMATCH"):
+            run_job._collection_profile(validated, bad)
+        with self.assertRaisesRegex(run_job.ContractError, "COLLECTION_PROFILE_V2_REQUIRED"):
+            run_job._collection_profile({"collection_profile": {"schema_version": "data_factory.collection_profile.v1"}}, payload("live"))
+        with self.assertRaisesRegex(run_job.ContractError, "COLLECTION_FPS_REQUIRED"):
+            run_job._collection_profile({"collection_profile": {**profile, "fps": 15}}, payload("live"))
+        with tempfile.TemporaryDirectory() as directory, mock.patch.object(run_job, "JsonlProcess", side_effect=lambda command, timeout_s: (command, timeout_s)):
+            live_payload = payload("live"); live_payload["dataset_root"] = str(Path(directory) / "dataset")
+            command_line, _ = run_job._recorder(live_payload, "pick up", profile, 12)
+            self.assertFalse(Path(live_payload["dataset_root"]).exists())
+            self.assertEqual(
+                Path(command_line[command_line.index("--encoder-temp-dir") + 1]),
+                Path(directory) / ".dataset.encoder_tmp",
+            )
+        for flag, value in (("--fps", "30"), ("--min-camera-source-fps-ratio", "0.95"), ("--width", "640"), ("--height", "480"), ("--writer-queue-size", "128"), ("--encoder-threads", "2"), ("--camera-profile", "up"), ("--up-image", "/camera/up/color/image_raw"), ("--repo-id", "local/test"), ("--disk-reserve-bytes", "300"), ("--batch-video-encoding", None), ("--resume", None)):
+            self.assertIn(flag, command_line)
+            if value is not None:
+                self.assertEqual(command_line[command_line.index(flag) + 1], value)
+        completed = SimpleNamespace(returncode=0, stdout="PASS")
+        with mock.patch.object(run_job.subprocess, "run", return_value=completed) as invoked:
+            self.assertEqual(run_job._technical_validator("dataset", {}, profile)["code"], "PASS")
+        validator_command = invoked.call_args.args[0]
+        self.assertEqual(validator_command[validator_command.index("--expected-fps") + 1], "30")
+        self.assertIn("--require-hil-motion", validator_command)
+
+    def test_camera_warmup_retries_only_the_camera_gate_and_preserves_compact_evidence(self):
+        with tempfile.TemporaryDirectory() as directory:
+            live_payload = payload("live")
+            live_payload["run_root"] = directory
+            run_job._prepare_run_dir(live_payload)
+            failed = SimpleNamespace(returncode=1, stdout="source rate 14Hz below gate\n")
+            passed = SimpleNamespace(returncode=0, stdout="image: source=30Hz\n")
+            with mock.patch.object(run_job.subprocess, "run", side_effect=(failed, passed)) as invoked:
+                evidence = run_job._camera_warmup(live_payload, PROFILE, threading.Event())
+            saved = json.loads((Path(directory) / live_payload["run_id"] / "camera_warmup.json").read_text(encoding="utf-8"))
+        self.assertEqual([attempt["status"] for attempt in evidence["attempts"]], ["FAIL", "PASS"])
+        self.assertEqual(saved, evidence)
+        self.assertEqual(invoked.call_count, 2)
+        command = invoked.call_args.args[0]
+        self.assertEqual(command[command.index("--image") + 1], PROFILE["camera_topics"]["up"])
+        self.assertEqual(command[command.index("--expected-image-hz") + 1], "30")
+        self.assertEqual(command[command.index("--min-image-fps-ratio") + 1], "0.95")
+        self.assertEqual(command[command.index("--max-image-age-ms") + 1], "300.0")
+        self.assertEqual(command[command.index("--image-qos-depth") + 1], "10")
+        self.assertIn("--reliable-image", command)
+        self.assertEqual(invoked.call_args.kwargs["timeout"], run_job.CAMERA_WARMUP_TIMEOUT_S)
+
+    def test_camera_warmup_all_fail_or_timeout_blocks_before_executor_recorder_or_goal(self):
+        validated = {"collection_profile": dict(PROFILE)}
+        with tempfile.TemporaryDirectory() as directory:
+            live_payload = payload("live")
+            live_payload["run_root"] = directory
+            timeout = subprocess.TimeoutExpired(["probe"], run_job.CAMERA_WARMUP_TIMEOUT_S, output="probe timed out")
+            executor_factory = mock.Mock()
+            recorder_factory = mock.Mock()
+            with mock.patch.object(run_job.subprocess, "run", side_effect=(timeout, timeout)):
+                result = run_job.run_live(
+                    live_payload, threading.Event(), lambda _: None,
+                    resolver=lambda _: (validated, motion(), SCENE), executor_factory=executor_factory,
+                    recorder_factory=recorder_factory,
+                )
+            evidence = json.loads((Path(directory) / live_payload["run_id"] / "camera_warmup.json").read_text(encoding="utf-8"))
+        self.assertEqual((result["ok"], result["code"], result["state"]), (False, "CAMERA_WARMUP_FAILED", "BLOCKED"))
+        self.assertEqual([attempt["status"] for attempt in evidence["attempts"]], ["FAIL", "FAIL"])
+        self.assertEqual([role["status"] for attempt in evidence["attempts"] for role in attempt["roles"]], ["TIMEOUT", "TIMEOUT"])
+        executor_factory.assert_not_called()
+        recorder_factory.assert_not_called()
+
+    def test_camera_warmup_cancel_is_bounded_and_starts_nothing(self):
+        validated = {"collection_profile": dict(PROFILE)}
+        cancel = threading.Event()
+        executor_factory = mock.Mock()
+        recorder_factory = mock.Mock()
+        with tempfile.TemporaryDirectory() as directory:
+            live_payload = payload("live")
+            live_payload["run_root"] = directory
+            result = run_job.run_live(
+                live_payload, cancel, lambda _: None,
+                resolver=lambda _: (validated, motion(), SCENE), executor_factory=executor_factory,
+                recorder_factory=recorder_factory,
+                camera_warmup_call=lambda *_: (cancel.set(), {"schema_version": "data_factory.camera_warmup.v1", "attempts": []})[1],
+            )
+        self.assertEqual((result["ok"], result["code"], result["state"]), (False, "CANCELLED", "CANCELLED"))
+        executor_factory.assert_not_called()
+        recorder_factory.assert_not_called()
+
+    def test_live_preserves_executor_preflight_failure_code(self):
+        class Process:
+            def request(self, *_):
+                return {"ok": False, "code": "CONTROLLER_ACTION_GRAPH"}
+
+            def close(self, **_):
+                return None
+
+        recorder_factory = mock.Mock()
+        with tempfile.TemporaryDirectory() as directory:
+            live_payload = payload("live")
+            live_payload["run_root"] = directory
+            result = run_job.run_live(
+                live_payload, threading.Event(), lambda _: None,
+                resolver=lambda _: ({"collection_profile": dict(PROFILE)}, motion(), SCENE),
+                executor_factory=lambda *_: Process(), recorder_factory=recorder_factory,
+                camera_warmup_call=lambda *_: {"schema_version": "data_factory.camera_warmup.v1", "attempts": []},
+            )
+        self.assertEqual((result["ok"], result["code"], result["state"]), (False, "CONTROLLER_ACTION_GRAPH", "BLOCKED"))
+        recorder_factory.assert_not_called()
+
+    def test_live_tty_path_plans_before_recorder_then_validates_without_training_authority(self):
+        calls, prompts = [], []
+        plan = {"schema_version": "fr5.pickup_plan.v3", "run_id": "runner-test", "evidence": "fake"}
+        digest = run_job.canonical_digest(plan)
+        summary = {
+            "path": list(PHASES),
+            "flow": {"continuous_through": "LIFT_LIN", "next_human_hold": "POST_LIFT_SEMANTIC"},
+            "speed": {"max_velocity_scaling": 0.1, "max_acceleration_scaling": 0.1},
+            "clearance": {"status": "COLLISION_CHECKED_NO_DISTANCE", "collision_report_digest": "sha256:" + "8" * 64},
+        }
+
+        class Process:
+            def request(self, request, *_):
+                calls.append(("executor", request["op"]))
+                return {"ok": True, "code": "PREFLIGHT_OK"}
+            def close(self, **_):
+                calls.append(("executor", "close"))
+
+        class Recorder:
+            def __init__(self):
+                calls.append(("recorder", "spawn"))
+            def close(self, **_):
+                calls.append(("recorder", "close"))
+
+        class Resource:
+            def __init__(self, *_): self.round_trips = []
+            def start(self): return self
+            def set_pid(self, *_): return self
+            def record_control_round_trip(self, value): self.round_trips.append(value)
+            def finish(self, metrics, collection_settings=None):
+                return {"schema_version": "data_factory.resource_usage.v1", "sampling": {"status": "AVAILABLE"}, "recorder": metrics, "collection_settings": collection_settings}
+
+        class Cell:
+            def __init__(self): self.value = {"cell_ready": False, "run_id": "runner-test", "plan_digest": digest}
+            def read(self): return dict(self.value)
+            def acknowledge_ready(self, operator, *, expected_run_id=None, expected_plan_digest=None):
+                if (expected_run_id, expected_plan_digest) != ("runner-test", digest):
+                    raise run_job.ContractError("STATE_CHANGED")
+                self.value.update(cell_ready=True, reason_code="HUMAN_ACKNOWLEDGED", acknowledged_by=operator)
+                return dict(self.value)
+
+        class Scene:
+            def update_object(self, **value):
+                calls.append(("scene", value["state"], value["expected_revision"]))
+                return {"scene_state_digest": "sha256:" + "5" * 64}
+
+        class FakeJob:
+            def __init__(self, recorder_call, _executor_call, cell_state_call=None):
+                self.recorder_call = recorder_call
+                self.cell_state_call = cell_state_call
+                self.state = "IDLE"
+                self.phase = "SEMANTIC_VERDICT"
+            def poll(self):
+                if self.phase == "SEMANTIC_VERDICT":
+                    value = {"ok": True, "state": self.phase, "execution_evidence": {"post_lift_gripper_feedback_m": .011}}
+                else:
+                    value = {"ok": True, "state": "COMMITTED", "recorder_evidence": {"metrics": {"writer_queue_high_water": 3, "writer_queue_drops": 0, "alignment_failures": 0, "storage_usage": {
+                        "episode_index": 7, "transaction_id": "runner-test:episode-000007", "staging_manifest_digest": "sha256:" + "4" * 64,
+                        "disk_reserve_bytes": 300, "dataset_incremental_peak_bytes": 100, "encoder_temp_peak_bytes": 200,
+                        "required_free_bytes_by_device": {"1": 600}, "dataset_bytes_before": 1000, "dataset_bytes_after": 1200,
+                        "free_bytes_before_by_device": {"1": 5000}, "free_bytes_by_device": {"1": 4800}, "temp_peak_bytes_by_device": {"1": 150},
+                        "filesystems": {"dataset": {"path": "/dataset", "device": 1, "free_bytes": 4800, "total_bytes": 10000}, "encoder_temp": {"path": "/dataset/.encoder_tmp", "device": 1, "free_bytes": 4800, "total_bytes": 10000}},
+                    }}}}
+                self.state = value["state"]
+                return value
+            def plan_only(self, run_id, *_):
+                self.state = "PLANNED"
+                evidence = {
+                    "schema_version": "data_factory.precommit_evidence.v1", "run_id": run_id,
+                    "approved_plan_digest": digest, "scene_binding_digest": run_job.canonical_digest(SCENE),
+                    "expected_planning_scene_digest": "sha256:" + "1" * 64,
+                    "planning_scene_readback": {"schema_version": "data_factory.planning_scene_readback.v1", "run_id": run_id, "plan_digest": digest, "expected_planning_scene_digest": "sha256:" + "1" * 64, "objects": []},
+                    "collision_report": {"schema_version": "data_factory.collision_report.v1", "plan_digest": digest, "sample_count": 0, "samples": [], "failure_count": 0, "all_valid": True},
+                    "plan_only_no_motion": {"schema_version": "data_factory.plan_only_no_motion.v1", "run_id": run_id, "plan_digest": digest, "before_snapshot": {}, "after_snapshot": {}, "max_joint_delta_rad": 0.0, "gripper_delta_m": 0.0, "execute_goal_count": 0, "gripper_goal_count": 0},
+                }
+                safety = {
+                    "schema_version": "data_factory.precommit_safety.v1", "run_id": run_id,
+                    "approved_plan_digest": digest, "scene_binding_digest": run_job.canonical_digest(SCENE),
+                    "expected_planning_scene_digest": "sha256:" + "1" * 64,
+                    "planning_scene_readback_digest": run_job.canonical_digest(evidence["planning_scene_readback"]),
+                    "collision_report_digest": run_job.canonical_digest(evidence["collision_report"]),
+                    "plan_only_no_motion_digest": run_job.canonical_digest(evidence["plan_only_no_motion"]),
+                    "post_reset_safe_snapshot_digest": None, "status": "PENDING",
+                }
+                return {"ok": True, "code": "PLANNED", "state": "PLANNED", "run_id": run_id, "plan_digest": digest, "plan_envelope": {"plan": plan, "precommit_safety": safety, "precommit_evidence": evidence, "operator_summary": summary}}
+            def approve(self, approval):
+                calls.append(("job", "approve", approval["approval_scope"])); self.state = "APPROVED"
+                return {"ok": True, "code": "APPROVED", "state": self.state}
+            def start(self):
+                calls.append(("job", "start")); self.state = "EXECUTING"
+                return {"ok": True, "code": "EXECUTING", "state": self.state}
+            def confirm(self, _):
+                calls.append(("job", "confirm")); self.phase = "GRASP_VERDICT"; self.state = "EXECUTING"
+                return {"ok": True, "code": "CONFIRMED", "state": self.state}
+            def grasp_verdict(self, value, _, source=None):
+                calls.append(("job", "grasp", value, source))
+                if value == "FAIL":
+                    self.state = "ABORTED"
+                    return {"ok": False, "code": "GRASP_REJECTED", "state": self.state}
+                calls.append(("job", "lift")); self.phase = "SEMANTIC_VERDICT"; self.state = "EXECUTING"
+                return {"ok": True, "code": "GRASP_VERDICT_ACCEPTED", "state": self.state}
+            def semantic_verdict(self, value, _, source=None):
+                calls.append(("job", "semantic", value, source))
+                if value == "FAIL":
+                    self.state = "ABORTED"
+                    return {"ok": False, "code": "SEMANTIC_REJECTED", "state": self.state}
+                self.phase = "COMMITTED"; self.state = "EXECUTING"
+                return {"ok": True, "code": "VERDICT_ACCEPTED", "state": self.state}
+            def cancel(self):
+                return {"ok": False, "code": "CANCELLED", "state": "ABORTED"}
+            def finish(self):
+                calls.append(("job", "finish")); self.state = "COMPLETE"
+                return {"ok": True, "code": "COMPLETE", "state": self.state}
+
+        profile = dict(PROFILE)
+        validated = {"normalized_job": {**JOB, "operator_or_agent_id": "operator", "instruction": "pick up", "place_id": "PLACE_A", "yaw_deg": 0, "x_mm": -70, "y_mm": 35, "object_profile_id": "wood-cube"}, "resolved_job_digest": motion()["resolved_job_digest"], "input_digests": {"collection_profile": "sha256:" + "7" * 64}, "collection_profile": profile}
+        cell, scene = Cell(), Scene()
+        semantic_reply = "PASS"
+        def decide(prompt, expected):
+            prompts.append((prompt, expected))
+            if expected == ("PASS", "FAIL"):
+                self.assertNotIn(("job", "confirm"), calls)
+                self.assertFalse(any(call[:2] == ("job", "grasp") for call in calls))
+                return semantic_reply
+            return None
+
+        with tempfile.TemporaryDirectory() as directory:
+            live_payload = payload("live")
+            live_payload["run_root"] = directory
+            with mock.patch.object(run_job, "OneJob", FakeJob), mock.patch.object(run_job, "ResourceMonitor", Resource), mock.patch.object(run_job, "CellStateStore", return_value=cell), mock.patch.object(run_job, "SceneStateStore", return_value=scene):
+                result = run_job.run_live(
+                    live_payload, threading.Event(), lambda _: None,
+                    resolver=lambda _: (validated, motion(True), SCENE), executor_factory=lambda *_: Process(), recorder_factory=lambda *_: Recorder(),
+                    validator_call=lambda *_: {"ok": True, "code": "PASS", "result_digest": "sha256:" + "6" * 64}, tty_decision=decide,
+                    camera_warmup_call=lambda *_: (calls.append(("camera_warmup", "PASS")), {"schema_version": "data_factory.camera_warmup.v1", "attempts": []})[1],
+                )
+            reference = json.loads((Path(directory) / live_payload["run_id"] / "technical_validator.json").read_text(encoding="utf-8"))
+            preapproval = json.loads((Path(directory) / live_payload["run_id"] / "preapproval_evidence.json").read_text(encoding="utf-8"))
+            storage = json.loads((Path(directory) / live_payload["run_id"] / "storage_usage.json").read_text(encoding="utf-8"))
+            resource = json.loads((Path(directory) / live_payload["run_id"] / "resource_usage.json").read_text(encoding="utf-8"))
+        self.assertEqual((result["ok"], result["code"], result["state"]), (True, "VALIDATED", "COMPLETE"))
+        self.assertEqual([item[:2] for item in calls[:4]], [("camera_warmup", "PASS"), ("executor", "preflight"), ("job", "approve"), ("recorder", "spawn")])
+        self.assertIn(("job", "approve", "HUMAN_GATED"), calls)
+        self.assertLess(calls.index(("camera_warmup", "PASS")), calls.index(("recorder", "spawn")))
+        self.assertEqual([expected for _, expected in prompts], [f"APPROVE {digest}", ("PASS", "FAIL"), f"SCENE_READY {digest}"])
+        self.assertEqual(summary["flow"], {"continuous_through": "LIFT_LIN", "next_human_hold": "POST_LIFT_SEMANTIC"})
+        self.assertNotIn(("job", "confirm"), calls)
+        self.assertFalse(any(call[:2] == ("job", "grasp") for call in calls))
+        self.assertIn(("job", "semantic", "PASS", "HUMAN"), calls)
+        self.assertFalse(result["data"]["camera_semantic_authority"])
+        self.assertFalse(result["data"]["training_authorized"])
+        self.assertEqual((reference["status"], reference["expected_fps"], reference["plan_digest"]), ("PASS", 30, digest))
+        self.assertEqual((preapproval["plan_digest"], preapproval["plan_envelope_digest"]), (digest, run_job.canonical_digest(preapproval["plan_envelope"])))
+        self.assertEqual(run_job.canonical_digest(preapproval["plan_envelope"]["precommit_evidence"]["collision_report"]), preapproval["plan_envelope"]["precommit_safety"]["collision_report_digest"])
+        self.assertEqual((storage["episode_ref"]["repo_id"], storage["dataset_delta_bytes"], storage["reference_scan_status"], storage["dataset_prunable"]), ("local/test", 200, "NOT_AVAILABLE", []))
+        self.assertEqual(resource["sampling"]["status"], "AVAILABLE")
+        self.assertIn(("scene", "ON_SURFACE", SCENE["revision"]), calls)
+        self.assertIn(("job", "finish"), calls)
+
+        calls.clear()
+        prompts.clear()
+        semantic_reply = "FAIL"
+        with tempfile.TemporaryDirectory() as directory:
+            live_payload = payload("live")
+            live_payload["run_root"] = directory
+            with mock.patch.object(run_job, "OneJob", FakeJob), mock.patch.object(run_job, "ResourceMonitor", Resource), mock.patch.object(run_job, "CellStateStore", return_value=Cell()), mock.patch.object(run_job, "SceneStateStore", return_value=Scene()):
+                rejected = run_job.run_live(
+                    live_payload, threading.Event(), lambda _: None,
+                    resolver=lambda _: (validated, motion(True), SCENE), executor_factory=lambda *_: Process(), recorder_factory=lambda *_: Recorder(),
+                    validator_call=lambda *_: {"ok": True, "code": "PASS", "result_digest": "sha256:" + "6" * 64}, tty_decision=decide,
+                    camera_warmup_call=lambda *_: ({"schema_version": "data_factory.camera_warmup.v1", "attempts": []}),
+                )
+        self.assertEqual((rejected["ok"], rejected["code"], rejected["state"]), (False, "SEMANTIC_REJECTED", "ABORTED"))
+        self.assertIn(("job", "semantic", "FAIL", "HUMAN"), calls)
+        self.assertNotIn(("job", "finish"), calls)
+
+    def test_postcommit_validation_or_evidence_failure_keeps_cell_blocked_without_scene_ack(self):
+        plan = {"schema_version": "fr5.pickup_plan.v3", "run_id": "runner-test", "evidence": "fake"}
+        digest = run_job.canonical_digest(plan)
+        evidence = {
+            "schema_version": "data_factory.precommit_evidence.v1", "run_id": "runner-test",
+            "approved_plan_digest": digest, "scene_binding_digest": run_job.canonical_digest(SCENE),
+            "expected_planning_scene_digest": "sha256:" + "1" * 64,
+            "planning_scene_readback": {"schema_version": "data_factory.planning_scene_readback.v1", "run_id": "runner-test", "plan_digest": digest, "expected_planning_scene_digest": "sha256:" + "1" * 64, "objects": []},
+            "collision_report": {"schema_version": "data_factory.collision_report.v1", "plan_digest": digest, "sample_count": 0, "samples": [], "failure_count": 0, "all_valid": True},
+            "plan_only_no_motion": {"schema_version": "data_factory.plan_only_no_motion.v1", "run_id": "runner-test", "plan_digest": digest, "before_snapshot": {}, "after_snapshot": {}, "max_joint_delta_rad": 0.0, "gripper_delta_m": 0.0, "execute_goal_count": 0, "gripper_goal_count": 0},
+        }
+        safety = {
+            "schema_version": "data_factory.precommit_safety.v1", "run_id": "runner-test", "approved_plan_digest": digest,
+            "scene_binding_digest": run_job.canonical_digest(SCENE), "expected_planning_scene_digest": "sha256:" + "1" * 64,
+            "planning_scene_readback_digest": run_job.canonical_digest(evidence["planning_scene_readback"]),
+            "collision_report_digest": run_job.canonical_digest(evidence["collision_report"]),
+            "plan_only_no_motion_digest": run_job.canonical_digest(evidence["plan_only_no_motion"]),
+            "post_reset_safe_snapshot_digest": None, "status": "PENDING",
+        }
+        validated = {
+            "normalized_job": {**JOB, "operator_or_agent_id": "operator", "instruction": "pick up", "place_id": "PLACE_A", "yaw_deg": 0, "x_mm": -70, "y_mm": 35, "object_profile_id": "wood-cube"},
+            "resolved_job_digest": motion()["resolved_job_digest"], "input_digests": {"collection_profile": "sha256:" + "7" * 64}, "collection_profile": dict(PROFILE),
+        }
+
+        class Process:
+            def request(self, request, *_):
+                return {"ok": True, "code": "PREFLIGHT_OK"} if request["op"] == "preflight" else {"ok": True}
+            def close(self, **_):
+                return None
+
+        class Recorder:
+            def close(self, **_):
+                return None
+
+        class Resource:
+            def __init__(self, *_):
+                pass
+            def start(self):
+                return self
+            def set_pid(self, *_):
+                return self
+            def record_control_round_trip(self, _):
+                return None
+            def finish(self, metrics, collection_settings=None):
+                return {"schema_version": "data_factory.resource_usage.v1", "sampling": {"status": "AVAILABLE"}, "recorder": metrics, "collection_settings": collection_settings}
+
+        class Cell:
+            def __init__(self):
+                self.value = {"cell_ready": False, "run_id": "runner-test", "plan_digest": digest}
+                self.blocked = []
+                self.acks = 0
+            def read(self):
+                return dict(self.value)
+            def mark_blocked(self, reason_code, run_id, plan_digest):
+                self.blocked.append((reason_code, run_id, plan_digest))
+                self.value.update(cell_ready=False, reason_code=reason_code, run_id=run_id, plan_digest=plan_digest)
+                return self.read()
+            def acknowledge_ready(self, *_args, **_kwargs):
+                self.acks += 1
+                raise AssertionError("must not acknowledge failed evidence")
+
+        class Scene:
+            def update_object(self, **_):
+                raise AssertionError("must not update physical scene on failed evidence")
+
+        class FailedCommitJob:
+            instances = []
+            def __init__(self, *_args, **_kwargs):
+                self.finish_calls = 0
+                self.__class__.instances.append(self)
+            def plan_only(self, run_id, *_):
+                return {"ok": True, "code": "PLANNED", "state": "PLANNED", "run_id": run_id, "plan_digest": digest, "plan_envelope": {"plan": plan, "precommit_safety": safety, "precommit_evidence": evidence, "operator_summary": {"path": list(PHASES), "flow": {"continuous_through": "LIFT_LIN", "next_human_hold": "POST_LIFT_SEMANTIC"}, "speed": {"max_velocity_scaling": 0.1}, "clearance": {"status": "COLLISION_CHECKED_NO_DISTANCE"}}}}
+            def approve(self, _):
+                return {"ok": True, "code": "APPROVED", "state": "APPROVED"}
+            def start(self):
+                return {"ok": True, "code": "EXECUTING", "state": "EXECUTING"}
+            def poll(self):
+                return {"ok": True, "state": "COMMITTED", "recorder_evidence": {"metrics": {}}}
+            def finish(self):
+                self.finish_calls += 1
+                return {"ok": True, "state": "COMPLETE"}
+
+        for label, validator, storage_error, expected in (
+            ("validator", {"ok": False, "code": "FAIL", "result_digest": "sha256:" + "6" * 64}, False, "TECHNICAL_VALIDATOR_FAILED"),
+            ("storage", {"ok": True, "code": "PASS", "result_digest": "sha256:" + "6" * 64}, True, "STORAGE_REFERENCE_ERROR"),
+        ):
+            with self.subTest(label=label), tempfile.TemporaryDirectory() as directory:
+                live_payload = payload("live")
+                live_payload["run_root"] = directory
+                cell, prompts = Cell(), []
+                with mock.patch.object(run_job, "OneJob", FailedCommitJob), mock.patch.object(run_job, "ResourceMonitor", Resource), mock.patch.object(run_job, "CellStateStore", return_value=cell), mock.patch.object(run_job, "SceneStateStore", return_value=Scene()):
+                    if storage_error:
+                        storage_patch = mock.patch.object(run_job, "_write_storage_reference", side_effect=run_job.ContractError("STORAGE_REFERENCE_ERROR"))
+                    else:
+                        storage_patch = mock.patch.object(run_job, "_write_storage_reference", return_value={"preserved": True})
+                    with storage_patch:
+                        result = run_job.run_live(
+                            live_payload, threading.Event(), lambda _: None,
+                            resolver=lambda _: (validated, motion(True), SCENE), executor_factory=lambda *_: Process(), recorder_factory=lambda *_: Recorder(),
+                            validator_call=lambda *_: validator, tty_decision=lambda prompt, expected_text: prompts.append((prompt, expected_text)),
+                            camera_warmup_call=lambda *_: {"schema_version": "data_factory.camera_warmup.v1", "attempts": []},
+                        )
+                self.assertEqual((result["ok"], result["code"], result["state"]), (False, expected, "BLOCKED"))
+                self.assertFalse(result["data"]["training_authorized"])
+                self.assertEqual(cell.blocked, [(expected, "runner-test", digest)])
+                self.assertEqual(cell.acks, 0)
+                self.assertEqual(FailedCommitJob.instances[-1].finish_calls, 0)
+                self.assertEqual([expected_text for _, expected_text in prompts], [f"APPROVE {digest}"])
+
+    def test_live_composed_one_job_commits_before_validator_without_camera_semantics(self):
+        """The public runner drives the real coordinator; fakes replace only child processes."""
+        helper = one_job_test.OneJobTest()
+        self.addCleanup(helper.doCleanups)
+        recorder_call, executor_call = None, None
+        job, calls = helper.make(
+            ["RECORDING", "RECORDING", "FROZEN", "FROZEN", "COMMITTED"],
+            ["PLANNED", "APPROVED", "EXECUTING", "SEMANTIC_VERDICT", "EXECUTING", "COMPLETED"],
+            continuous=True,
+        )
+        recorder_call, executor_call = job.recorder_call, job.executor_call
+        timeline, validator_calls, test_case = [], [], self
+
+        storage = {
+            "episode_index": 0, "transaction_id": "tx", "staging_manifest_digest": "sha256:" + "4" * 64,
+            "disk_reserve_bytes": 300, "dataset_incremental_peak_bytes": 100, "encoder_temp_peak_bytes": 200,
+            "required_free_bytes_by_device": {"1": 600}, "dataset_bytes_before": 1000, "dataset_bytes_after": 1200,
+            "free_bytes_before_by_device": {"1": 5000}, "free_bytes_by_device": {"1": 4800}, "temp_peak_bytes_by_device": {"1": 150},
+            "filesystems": {"dataset": {"path": "/dataset", "device": 1, "free_bytes": 4800, "total_bytes": 10000}, "encoder_temp": {"path": "/dataset/.encoder_tmp", "device": 1, "free_bytes": 4800, "total_bytes": 10000}},
+        }
+
+        class Recorder:
+            def __call__(self, request):
+                return self.request(request)
+
+            def request(self, request, **_):
+                response = recorder_call(request)
+                response = {**response, "metrics": dict(response["metrics"])}
+                if request["op"] == "status":
+                    response["metrics"].update(writer_queue=0, writer_queue_drops=0, alignment_failures=0, observed_monotonic_ns=time.monotonic_ns())
+                    timeline.append(("recorder", "status", response["metrics"]["rows"]))
+                else:
+                    timeline.append(("recorder", request["op"]))
+                if request["op"] == "commit":
+                    response["metrics"]["storage_usage"] = storage
+                return response
+
+            def close(self, **_):
+                timeline.append(("recorder", "close"))
+
+            def preserve(self):
+                recorder_call.preserve()
+
+        class Executor:
+            def request(self, request, *_):
+                if request["op"] == "preflight":
+                    timeline.append(("executor", "preflight"))
+                    return {"ok": True, "code": "PREFLIGHT_OK"}
+                response = executor_call(request)
+                timeline.append(("executor", request["op"]))
+                if request["op"] == "plan":
+                    response["data"]["operator_summary"] = {
+                        "path": list(PHASES),
+                        "flow": {"continuous_through": "LIFT_LIN", "next_human_hold": "POST_LIFT_SEMANTIC"},
+                        "speed": {"max_velocity_scaling": 0.1},
+                        "clearance": {"status": "COLLISION_CHECKED_NO_DISTANCE"},
+                    }
+                    cell.plan_digest = response["plan_digest"]
+                return response
+
+            def close(self, **_):
+                timeline.append(("executor", "close"))
+
+        class Resource:
+            def __init__(self, *_):
+                pass
+
+            def start(self):
+                return self
+
+            def set_pid(self, *_):
+                return self
+
+            def record_control_round_trip(self, _):
+                pass
+
+            def finish(self, metrics, collection_settings=None):
+                return {"schema_version": "data_factory.resource_usage.v1", "sampling": {"status": "AVAILABLE"}, "recorder": metrics, "collection_settings": collection_settings}
+
+        class Cell:
+            def __init__(self):
+                self.plan_digest = None
+                self.value = {"robot_system_id": "fr5-lab-a", "cell_ready": False, "reason_code": "EXECUTION_IN_PROGRESS", "run_id": "run", "plan_digest": None, "acknowledged_by": "UNACKNOWLEDGED"}
+
+            def read(self):
+                return {**self.value, "plan_digest": self.plan_digest}
+
+            def acknowledge_ready(self, operator, *, expected_run_id=None, expected_plan_digest=None):
+                test_case.assertEqual((expected_run_id, expected_plan_digest), ("run", self.plan_digest))
+                self.value.update(cell_ready=True, reason_code="HUMAN_ACKNOWLEDGED", acknowledged_by=operator)
+                timeline.append(("cell", "ack"))
+                return self.read()
+
+        class Scene:
+            def update_object(self, **value):
+                test_case.assertEqual(value["expected_revision"], SCENE["revision"])
+                timeline.append(("scene", value["state"]))
+                return {"scene_state_digest": "sha256:" + "5" * 64}
+
+        cell, scene = Cell(), Scene()
+        validated = {
+            "normalized_job": {**JOB, "operator_or_agent_id": "operator", "instruction": "pick up", "place_id": "PLACE_A", "yaw_deg": 0, "x_mm": -70, "y_mm": 35, "object_profile_id": "wood-cube"},
+            "resolved_job_digest": one_job_test.RESOLVED,
+            "input_digests": {"collection_profile": "sha256:" + "7" * 64},
+            "collection_profile": dict(PROFILE),
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            live_payload = payload("live")
+            live_payload.update(run_id="run", run_root=directory, dataset_root=str(Path(directory) / "dataset"))
+            with mock.patch.object(run_job, "ResourceMonitor", Resource), mock.patch.object(run_job, "CellStateStore", return_value=cell), mock.patch.object(run_job, "SceneStateStore", return_value=scene):
+                result = run_job.run_live(
+                    live_payload, threading.Event(), lambda _: None,
+                    resolver=lambda _: (validated, motion(True), SCENE), executor_factory=lambda *_: Executor(), recorder_factory=lambda *_: Recorder(),
+                    validator_call=lambda *_: (validator_calls.append("validator"), timeline.append(("validator", "PASS")), {"ok": True, "code": "PASS", "result_digest": "sha256:" + "6" * 64})[2],
+                    tty_decision=lambda _prompt, expected: "PASS" if expected == ("PASS", "FAIL") else None,
+                    camera_warmup_call=lambda *_: {"schema_version": "data_factory.camera_warmup.v1", "run_id": "run", "camera_profile": "up", "attempts": []},
+                )
+                preapproval = json.loads((Path(directory) / "run" / "preapproval_evidence.json").read_text(encoding="utf-8"))
+
+        self.assertEqual((result["ok"], result["code"], result["state"]), (True, "VALIDATED", "COMPLETE"))
+        self.assertEqual(preapproval["plan_digest"], result["plan_digest"])
+        self.assertLess(timeline.index(("executor", "plan")), timeline.index(("executor", "approve")))
+        self.assertLess(timeline.index(("recorder", "begin")), timeline.index(("recorder", "status", 1)))
+        self.assertLess(timeline.index(("recorder", "status", 1)), timeline.index(("executor", "execute")))
+        self.assertLess(timeline.index(("recorder", "commit")), timeline.index(("validator", "PASS")))
+        self.assertLess(timeline.index(("recorder", "commit")), timeline.index(("scene", "ON_SURFACE")))
+        self.assertEqual(validator_calls, ["validator"])
+        self.assertLess(timeline.index(("recorder", "commit")), len(timeline) - 1 - timeline[::-1].index(("recorder", "close")))
+        self.assertFalse(result["data"]["camera_semantic_authority"])
+        self.assertFalse(result["data"]["training_authorized"])
+        self.assertNotIn("rgb", result["data"])
+        self.assertNotIn("frames", result["data"])
+        self.assertIn(("cell", "ack"), timeline)
+
+    def test_human_and_ai_share_plan_only_contract_and_jsonl_live_uses_same_session(self):
         with tempfile.TemporaryDirectory() as directory:
             job_path = Path(directory) / "job.json"
             job_path.write_text(json.dumps(JOB), encoding="utf-8")
@@ -101,10 +643,15 @@ class RunJobTest(unittest.TestCase):
         self.assertEqual(created[0].transport.calls, list(PHASES))
 
         called = []
-        live = run_job.RunSession(lambda *_: called.append(True))
-        rejected = live.process(command(value=payload("live")))
-        self.assertEqual((rejected["code"], rejected["state"], called), ("LIVE_NOT_QUALIFIED", "REJECTED", []))
-        self.assertFalse(rejected["data"]["camera_semantic_authority"])
+        def live_fake(value, _cancel, _publish):
+            called.append(value["mode"])
+            return run_job._response(ok=True, code="PLANNED", state="PLANNED", run_id=value["run_id"])
+        live = run_job.RunSession(live_fake)
+        started = live.process(command(value=payload("live")))
+        self.assertEqual((started["ok"], started["state"], started["data"]), (True, "RUNNING", {"mode": "live"}))
+        event = live.events.get(timeout=1)
+        live.worker.join(1)
+        self.assertEqual((called, event["event"], event["origin_op_id"], event["code"]), (["live"], "RESULT", "run-1", "PLANNED"))
 
     def test_jsonl_status_cancel_eof_and_exactly_one_result(self):
         started = threading.Event()
@@ -280,9 +827,9 @@ class RunJobTest(unittest.TestCase):
                 recorder_states = ["RECORDING", "RECORDING"] if elapsed < .5 else ["RECORDING", "RECORDING", "ABORTED"]
                 executor_states = ["PLANNED", "APPROVED", "EXECUTING", "EXECUTING"] if elapsed < .5 else ["PLANNED", "APPROVED", "EXECUTING", "BLOCKED"]
                 bounded, _ = helper.make(recorder_states, executor_states)
+                helper.prepare_and_start(bounded)
                 ticks = iter((0, elapsed))
                 bounded.monotonic_clock = lambda: next(ticks)
-                helper.prepare_and_start(bounded)
                 observed = bounded.poll()
                 self.assertEqual((observed["ok"], observed["state"] if observed["ok"] else observed["code"]), expected)
 

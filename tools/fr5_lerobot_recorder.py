@@ -10,7 +10,9 @@ import os
 import queue
 import re
 import select
+import shutil
 import sys
+import tempfile
 import threading
 import termios
 import time
@@ -90,12 +92,14 @@ class FR5LeRobotRecorder(Node):
         self.enqueue_attempts = 0
         self.writer_queue: queue.Queue = queue.Queue(maxsize=args.writer_queue_size)
         self.writer_queue_drops = 0
+        self.writer_queue_high_water = 0
         self.stale_sample_skips = 0
         self.missing_action_skips = 0
         self.alignment_failures = 0
         self.alignment_failure_sources = {"state": 0, "arm_action": 0, "gripper_action": 0, "transport": 0}
         self.alignment_failure_sources.update({f"image.{name}": 0 for name in self.camera_names})
         self.writer_error: Exception | None = None
+        self._storage_monitor: dict | None = None
         self.ready_logged = False
 
         self.create_subscription(JointState, args.joint_states, self._on_joint_state, qos_profile_sensor_data)
@@ -139,6 +143,11 @@ class FR5LeRobotRecorder(Node):
         root = self.args.root
         info = root / "meta" / "info.json"
         expected = self._features()
+        from lerobot.configs.video import RGBEncoderConfig
+        preset = self.args.video_preset or ("ultrafast" if self.args.video_codec == "h264" else None)
+        rgb_encoder = RGBEncoderConfig(
+            vcodec=self.args.video_codec, preset=preset, crf=self.args.video_crf
+        ) if not self.args.no_videos else None
         encoder_options = {
             "streaming_encoding": self.args.streaming_encoding and not self.args.no_videos,
             "batch_encoding_size": 1,
@@ -148,6 +157,7 @@ class FR5LeRobotRecorder(Node):
         if info.exists():
             dataset = self.LeRobotDataset.resume(
                 self.args.repo_id, root=root, image_writer_threads=0,
+                rgb_encoder=rgb_encoder,
                 **encoder_options,
             )
             if dataset.meta.fps != self.args.fps:
@@ -163,8 +173,6 @@ class FR5LeRobotRecorder(Node):
             )
         if root.exists():
             root.rmdir()
-        from lerobot.configs.video import RGBEncoderConfig
-        preset = self.args.video_preset or ("ultrafast" if self.args.video_codec == "h264" else None)
         return self.LeRobotDataset.create(
             repo_id=self.args.repo_id,
             fps=self.args.fps,
@@ -173,9 +181,7 @@ class FR5LeRobotRecorder(Node):
             features=expected,
             use_videos=not self.args.no_videos,
             image_writer_threads=0,
-            rgb_encoder=RGBEncoderConfig(
-                vcodec=self.args.video_codec, preset=preset, crf=self.args.video_crf
-            ) if not self.args.no_videos else None,
+            rgb_encoder=rgb_encoder,
             **encoder_options,
         )
 
@@ -196,6 +202,7 @@ class FR5LeRobotRecorder(Node):
         self.source_provenance.clear()
         self.enqueue_attempts = 0
         self.writer_queue_drops = 0
+        self.writer_queue_high_water = 0
         self.stale_sample_skips = 0
         self.missing_action_skips = 0
         self.alignment_failures = 0
@@ -206,6 +213,7 @@ class FR5LeRobotRecorder(Node):
         self._buffer_cleared = False
 
     def _result(self, ok: bool, reason_code: str = "OK", **extra) -> dict:
+        storage_usage = self._storage_usage()
         return {
             "ok": ok,
             "state": self.episode_state,
@@ -216,9 +224,11 @@ class FR5LeRobotRecorder(Node):
             "metrics": {
                 "rows": self.frames,
                 "writer_queue": self.writer_queue.qsize(),
+                "writer_queue_high_water": getattr(self, "writer_queue_high_water", 0),
                 "writer_queue_drops": self.writer_queue_drops,
                 "alignment_failures": self.alignment_failures,
                 "observed_monotonic_ns": time.monotonic_ns(),
+                **({"storage_usage": storage_usage} if storage_usage is not None else {}),
             },
             "artifacts": self._transaction["artifacts"] if self._transaction else {},
             "detail": "",
@@ -260,6 +270,141 @@ class FR5LeRobotRecorder(Node):
     def _dataset_snapshot(self) -> dict:
         return dataset_snapshot(self.args.root)
 
+    @staticmethod
+    def _tree_bytes(path: Path) -> int:
+        """Return regular-file bytes below one explicitly configured directory."""
+        total = 0
+        for directory, _, names in os.walk(path):
+            for name in names:
+                try:
+                    stat = (Path(directory) / name).stat()
+                except FileNotFoundError:
+                    continue
+                if stat and not os.path.islink(Path(directory) / name):
+                    total += stat.st_size
+        return total
+
+    def _storage_paths(self) -> tuple[Path, Path]:
+        dataset_root = self.args.root.resolve()
+        configured_temp = getattr(self.args, "encoder_temp_dir", None)
+        temp_root = Path(configured_temp or tempfile.gettempdir()).resolve()
+        return dataset_root, temp_root
+
+    def _storage_sample(self) -> dict:
+        dataset_root, temp_root = self._storage_paths()
+        samples = {}
+        for role, path in (("dataset", dataset_root), ("encoder_temp", temp_root)):
+            usage = shutil.disk_usage(path)
+            samples[role] = {
+                "path": str(path), "device": os.stat(path).st_dev,
+                "free_bytes": usage.free, "total_bytes": usage.total,
+            }
+        return samples
+
+    def _storage_preflight(self) -> dict | None:
+        reserve = getattr(self.args, "disk_reserve_bytes", 0)
+        dataset_peak = getattr(self.args, "dataset_incremental_peak_bytes", 0)
+        temp_peak = getattr(self.args, "encoder_temp_peak_bytes", 0)
+        if not (reserve or dataset_peak or temp_peak):
+            return None
+        try:
+            sample = self._storage_sample()
+        except OSError as exc:
+            return self._result(False, "DISK_RESERVE", detail=str(exc))
+        required_by_device = {}
+        for role, peak in (("dataset", dataset_peak), ("encoder_temp", temp_peak)):
+            device = str(sample[role]["device"])
+            required_by_device[device] = required_by_device.get(device, reserve) + peak
+        if any(sample[role]["free_bytes"] < required_by_device[str(entry["device"])] for role, entry in sample.items()):
+            return self._result(False, "DISK_RESERVE")
+        self._storage_monitor = {
+            "reserve_bytes": reserve,
+            "dataset_incremental_peak_bytes": dataset_peak,
+            "encoder_temp_peak_bytes": temp_peak,
+            "required_free_bytes_by_device": required_by_device,
+            "begin": sample,
+            "dataset_bytes_before": self._tree_bytes(self.args.root),
+            "temp_bytes_before_by_device": {str(sample["encoder_temp"]["device"]): self._tree_bytes(Path(sample["encoder_temp"]["path"]))},
+            "temp_peak_bytes_by_device": {str(sample["encoder_temp"]["device"]): 0},
+            "last_check_monotonic": 0.0,
+        }
+        return None
+
+    def _storage_status_check(self, force: bool = False) -> None:
+        monitor = getattr(self, "_storage_monitor", None)
+        if not monitor or (not force and time.monotonic() - monitor["last_check_monotonic"] < 1.0):
+            return
+        monitor["last_check_monotonic"] = time.monotonic()
+        try:
+            sample = self._storage_sample()
+            device = str(sample["encoder_temp"]["device"])
+            current_temp_bytes = self._tree_bytes(Path(sample["encoder_temp"]["path"]))
+            monitor["temp_peak_bytes_by_device"][device] = max(
+                monitor["temp_peak_bytes_by_device"].get(device, 0),
+                max(0, current_temp_bytes - monitor["temp_bytes_before_by_device"].get(device, 0)),
+            )
+            monitor["latest"] = sample
+            low = any(
+                entry["free_bytes"] < monitor["required_free_bytes_by_device"][str(entry["device"])]
+                for entry in sample.values()
+            )
+        except OSError:
+            low = True
+        if low and self.writer_error is None:
+            self.writer_error = RuntimeError("DISK_RESERVE_LOW")
+
+    def _start_encoder_temp_probe(self) -> tuple[threading.Event, threading.Thread] | None:
+        monitor = getattr(self, "_storage_monitor", None)
+        if not monitor:
+            return None
+        path = Path(monitor["begin"]["encoder_temp"]["path"])
+        device = str(monitor["begin"]["encoder_temp"]["device"])
+        stop = threading.Event()
+
+        def probe() -> None:
+            while not stop.is_set():
+                try:
+                    used = max(0, self._tree_bytes(path) - monitor["temp_bytes_before_by_device"].get(device, 0))
+                    monitor["temp_peak_bytes_by_device"][device] = max(
+                        monitor["temp_peak_bytes_by_device"].get(device, 0), used
+                    )
+                except OSError:
+                    pass
+                stop.wait(0.01)
+
+        thread = threading.Thread(target=probe, name="fr5-encoder-temp-probe", daemon=True)
+        thread.start()
+        return stop, thread
+
+    @staticmethod
+    def _stop_encoder_temp_probe(probe: tuple[threading.Event, threading.Thread] | None) -> None:
+        if probe is not None:
+            probe[0].set()
+            probe[1].join()
+
+    def _storage_usage(self) -> dict | None:
+        monitor = getattr(self, "_storage_monitor", None)
+        if not monitor:
+            return None
+        latest = monitor.get("latest", monitor["begin"])
+        return {
+            "episode_index": self._transaction["episode_index"] if self._transaction else self.dataset.meta.total_episodes,
+            "transaction_id": self._transaction["transaction_id"] if self._transaction else None,
+            "staging_manifest_digest": self._transaction["staging_manifest_digest"] if self._transaction else None,
+            "disk_reserve_bytes": monitor["reserve_bytes"],
+            "dataset_incremental_peak_bytes": monitor["dataset_incremental_peak_bytes"],
+            "encoder_temp_peak_bytes": monitor["encoder_temp_peak_bytes"],
+            "required_free_bytes_by_device": dict(monitor["required_free_bytes_by_device"]),
+            "dataset_bytes_before": monitor["dataset_bytes_before"],
+            "dataset_bytes_after": monitor.get("dataset_bytes_after", monitor["dataset_bytes_before"]),
+            "free_bytes_before_by_device": {
+                str(entry["device"]): entry["free_bytes"] for entry in monitor["begin"].values()
+            },
+            "free_bytes_by_device": {str(entry["device"]): entry["free_bytes"] for entry in latest.values()},
+            "temp_peak_bytes_by_device": dict(monitor["temp_peak_bytes_by_device"]),
+            "filesystems": latest,
+        }
+
     def _release_transaction_lock(self) -> None:
         lock = getattr(self, "_transaction_lock", None)
         if lock is not None:
@@ -291,13 +436,35 @@ class FR5LeRobotRecorder(Node):
         run_root = Path(self.args.run_root).resolve()
         if root == run_root or root in run_root.parents or run_root in root.parents:
             raise ValueError("run_root and dataset root must be separate")
-        directory = (run_root / run_id).resolve()
+        candidate = run_root / run_id
+        if candidate.is_symlink():
+            raise RecoveryError("RUN_EVIDENCE_DIRECTORY_CONFLICT", "transaction run_dir must not be a symlink")
+        directory = candidate.resolve()
         try:
             directory.relative_to(run_root)
         except ValueError as exc:
             raise ValueError("transaction run_dir must be under configured run_root") from exc
         if directory.exists():
-            raise ValueError("transaction run_id already exists")
+            expected = {
+                "camera_warmup.json": "data_factory.camera_warmup.v1",
+                "preapproval_evidence.json": "data_factory.preapproval_evidence.v1",
+            }
+            try:
+                entries = {entry.name: entry for entry in directory.iterdir()}
+                if set(entries) != set(expected):
+                    raise ValueError("unexpected files")
+                for name, schema in expected.items():
+                    path = entries[name]
+                    if path.is_symlink() or not path.is_file():
+                        raise ValueError("unsafe evidence path")
+                    value = decode_json_strict(path.read_text(encoding="utf-8"), "RUN_EVIDENCE_JSON", path)
+                    if not isinstance(value, dict) or value.get("schema_version") != schema or value.get("run_id") != run_id:
+                        raise ValueError("evidence binding mismatch")
+            except (OSError, RecoveryError, ValueError) as exc:
+                raise RecoveryError(
+                    "RUN_EVIDENCE_DIRECTORY_CONFLICT",
+                    "transaction run_dir is not the exact runner preapproval directory",
+                ) from exc
         guard_path = root / "meta" / "quarantine.json"
         if guard_path.exists() or guard_path.is_symlink():
             raise ValueError("dataset has unresolved data factory commit guard")
@@ -308,7 +475,7 @@ class FR5LeRobotRecorder(Node):
         }
         if (root / "images").is_symlink() or any(Path(path).exists() or Path(path).is_symlink() for path in staging_dirs.values()):
             raise ValueError("dataset has pre-existing or unsafe episode staging")
-        directory.mkdir(parents=True)
+        directory.mkdir(parents=True, exist_ok=True)
         manifest_path = directory / "staging_manifest.json"
         manifest = {
             "schema_version": "data_factory.staging_manifest.v1",
@@ -427,6 +594,10 @@ class FR5LeRobotRecorder(Node):
         return self._result(ok, reason_code, detail=detail)
 
     def begin_episode(self, transaction: dict | None = None) -> dict:
+        if transaction is not None:
+            reserve_failure = self._storage_preflight()
+            if reserve_failure is not None:
+                return reserve_failure
         if transaction is not None and not self._wait_for_sources():
             return self._result(False, "SOURCES_NOT_READY")
         with self.lock:
@@ -540,6 +711,7 @@ class FR5LeRobotRecorder(Node):
             "state_age_p95_ms": float(np.percentile(self.state_ages, 95) * 1000) if self.state_ages else None,
             "state_age_max_ms": float(max(self.state_ages) * 1000) if self.state_ages else None,
             "writer_queue_drops": self.writer_queue_drops,
+            "writer_queue_high_water": getattr(self, "writer_queue_high_water", 0),
             "stale_sample_skips": self.stale_sample_skips,
             "missing_action_skips": self.missing_action_skips,
             "alignment_failures": self.alignment_failures,
@@ -767,15 +939,24 @@ class FR5LeRobotRecorder(Node):
         except Exception as exc:
             return self._abort_precommit("PRECOMMIT_GUARD_FAILED", exc, temporary_path)
         try:
-            self.dataset.save_episode(parallel_encoding=False)
-            temporary_path.replace(provenance_path)
-            quality_path = self.args.root / "meta" / "recording_quality.jsonl"
-            with quality_path.open("a", encoding="utf-8") as file:
-                file.write(json.dumps(summary, ensure_ascii=False, allow_nan=False) + "\n")
-            with attempts_path.open("a", encoding="utf-8") as file:
-                file.write(json.dumps(attempt, ensure_ascii=False, allow_nan=False) + "\n")
-            if self._transaction:
-                self.dataset.finalize()
+            probe = self._start_encoder_temp_probe()
+            try:
+                self.dataset.save_episode(parallel_encoding=False)
+                temporary_path.replace(provenance_path)
+                quality_path = self.args.root / "meta" / "recording_quality.jsonl"
+                with quality_path.open("a", encoding="utf-8") as file:
+                    file.write(json.dumps(summary, ensure_ascii=False, allow_nan=False) + "\n")
+                with attempts_path.open("a", encoding="utf-8") as file:
+                    file.write(json.dumps(attempt, ensure_ascii=False, allow_nan=False) + "\n")
+                if self._transaction:
+                    self.dataset.finalize()
+            finally:
+                self._stop_encoder_temp_probe(probe)
+            if getattr(self, "_storage_monitor", None):
+                self._storage_monitor["dataset_bytes_after"] = self._tree_bytes(self.args.root)
+                self._storage_status_check(force=True)
+                if str(self.writer_error) == "DISK_RESERVE_LOW":
+                    raise self.writer_error
             with self.lock:
                 self.episode_state = self.COMMITTED
                 self._append_event("COMMITTED")
@@ -787,13 +968,15 @@ class FR5LeRobotRecorder(Node):
             with self.lock:
                 self.episode_state = self.QUARANTINED_COMMIT
             self.get_logger().error(f"episode save quarantined: {exc}")
-            return self._persist_quarantine("QUARANTINED_COMMIT", str(exc))
+            reason_code = "DISK_RESERVE_LOW" if str(exc) == "DISK_RESERVE_LOW" else "QUARANTINED_COMMIT"
+            return self._persist_quarantine(reason_code, str(exc))
         self.get_logger().info(
             f"episode saved: index={summary['episode_index']}, frames={self.frames}, row_fps={summary['effective_fps']:.2f}"
         )
         return self._result(True, quality=attempt)
 
     def episode_status(self) -> dict:
+        self._storage_status_check()
         with self.lock:
             return self._result(
                 True,
@@ -966,6 +1149,7 @@ class FR5LeRobotRecorder(Node):
                 self.writer_queue.put_nowait(
                     (state, action, images, provenance, sync_span, action_age, state_age, enqueue_attempt_index)
                 )
+                self.writer_queue_high_water = max(self.writer_queue_high_water, self.writer_queue.qsize())
             except queue.Full:
                 self.writer_queue_drops += 1
 
@@ -1149,6 +1333,8 @@ def process_recorder_control_line(
             result = node.abort_episode()
         else:
             result = node.episode_status()
+    except RecoveryError as exc:
+        response = _control_failure(node, exc.code, exc.message, op_id, op)
     except Exception as exc:
         response = _control_failure(node, "CONTROL_COMMAND_FAILED", str(exc), op_id, op)
     else:
@@ -1229,6 +1415,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--state-max-age", type=float, default=0.050, help="Maximum state interpolation distance around a target row.")
     parser.add_argument("--writer-queue-size", type=int, default=128, help="Rows buffered between aligner and LeRobot writer.")
     parser.add_argument("--encoder-threads", type=int, default=2)
+    parser.add_argument("--encoder-temp-dir", type=Path, help="Resolved encoder temporary-directory filesystem to monitor.")
+    parser.add_argument("--dataset-incremental-peak-bytes", type=int, default=0, help="Qualified per-episode dataset peak bytes.")
+    parser.add_argument("--encoder-temp-peak-bytes", type=int, default=0, help="Qualified per-episode encoder temporary-space peak bytes.")
+    parser.add_argument("--disk-reserve-bytes", type=int, default=0, help="Qualified free-byte reserve on each filesystem.")
     parser.add_argument("--video-codec", default="h264", help="LeRobot RGB codec; use auto only after a local encoder smoke test.")
     parser.add_argument("--video-preset", default=None, help="Codec preset; h264 defaults to ultrafast for capture stability.")
     parser.add_argument("--video-crf", type=float, default=23)
@@ -1293,12 +1483,17 @@ def parse_args() -> argparse.Namespace:
         raise SystemExit("alignment delay must cover image max age plus synchronization slop")
     if not np.isfinite([args.up_time_offset_ms, args.side_time_offset_ms, args.wrist_time_offset_ms]).all():
         raise SystemExit("camera time offsets must be finite")
-    if args.writer_queue_size <= 0 or args.image_qos_depth <= 0 or args.encoder_threads < 0:
-        raise SystemExit("queue depths must be positive and encoder threads non-negative")
+    if args.writer_queue_size <= 0 or args.image_qos_depth <= 0 or args.encoder_threads < 0 or min(
+        args.dataset_incremental_peak_bytes, args.encoder_temp_peak_bytes, args.disk_reserve_bytes
+    ) < 0:
+        raise SystemExit("queue depths must be positive and encoder/storage values non-negative")
     if args.factory_jsonl and args.run_root is None:
         raise SystemExit("--factory-jsonl requires --run-root")
     if args.factory_jsonl and (args.streaming_encoding or args.no_videos):
         raise SystemExit("--factory-jsonl requires batch video encoding")
+    if args.factory_jsonl and any((args.dataset_incremental_peak_bytes, args.encoder_temp_peak_bytes, args.disk_reserve_bytes)):
+        if args.encoder_temp_dir is None or not args.encoder_temp_dir.is_dir() or args.encoder_temp_dir.is_symlink():
+            raise SystemExit("qualified factory storage checks require an existing --encoder-temp-dir")
     if not args.interactive and not args.resume and (args.root / "meta" / "info.json").exists():
         raise SystemExit(f"Dataset already exists; use --resume or a new --profile: {args.root}")
     return args
@@ -1308,6 +1503,11 @@ def main() -> None:
     args = parse_args()
     if args.factory_jsonl:
         os.environ["RCUTILS_LOGGING_USE_STDOUT"] = "0"
+    encoder_temp_dir = getattr(args, "encoder_temp_dir", None)
+    if encoder_temp_dir is not None:
+        resolved_temp = str(encoder_temp_dir.resolve())
+        os.environ["TMPDIR"] = resolved_temp
+        tempfile.tempdir = resolved_temp
     rclpy.init()
     node = FR5LeRobotRecorder(args)
     old_terminal = None

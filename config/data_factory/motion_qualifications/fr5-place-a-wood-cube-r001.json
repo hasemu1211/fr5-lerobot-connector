@@ -16,6 +16,23 @@
   "robot_description_digest": "sha256:a9108b594739b64eac42a39d9aa961ece688ffd8d06ff5af03df99cbf63ab345",
   "moveit_config_digest": "sha256:b5ad9867bf309c347fd2c92a8f7016359e2b7ea2f7ccc73d68ece1d9c326fef8",
   "planning_scene_digest": "sha256:8d980d6bbb6a30d6aea6a6c46a4d8326c4d578de444a908b96fd71ff1709a4cc",
+  "planning_scene": {
+    "frame_id": "base_link",
+    "floor": {
+      "id": "place_a_floor_candidate",
+      "dimensions_m": [2.0, 2.0, 0.05],
+      "surface_z_m": -0.019208584290053496,
+      "source": "operator_current_tcp_is_0.016m_above_flat_floor"
+    },
+    "wall": {
+      "id": "home_back_wall_candidate",
+      "dimensions_m": [2.0, 0.05, 2.0],
+      "near_face_y_m": -0.3,
+      "wall_side": "opposite_home_arm_protrusion",
+      "home_arm_protrusion_base_xy": [0.0, 1.0],
+      "j1_home_deg": -90.0
+    }
+  },
   "frames": {
     "planning_frame": "base_link",
     "planning_group": "fairino5_v6_group",

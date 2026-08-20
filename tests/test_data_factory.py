@@ -30,7 +30,7 @@ class DataFactoryTest(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory(); self.root = Path(self.temp.name)
         for directory in ("robot_systems", "collection_profiles", "objects", "grasps", "cells"): (self.root / directory).mkdir()
         self._write("robot_systems/fr5-lab-a.json", {"schema_version":"data_factory.robot_system.v1","robot_system_id":"fr5-lab-a","qualification_status":"QUALIFIED","base_frame":"base_link","tcp_digest":digest("tcp"),"state_action_schema_digest":digest("state")})
-        self._write("collection_profiles/fr5-dual-rgb-30hz-v1.json", {"schema_version":"data_factory.collection_profile.v1","collection_profile_id":"fr5-dual-rgb-30hz-v1","qualification_status":"QUALIFIED","quality_contract_digest":digest("quality")})
+        self._write("collection_profiles/fr5-dual-rgb-30hz-v1.json", {"schema_version":"data_factory.collection_profile.v2","collection_profile_id":"fr5-dual-rgb-30hz-v1","qualification_status":"QUALIFIED","camera_profile":"up-side","camera_roles":["up","side"],"camera_serials":{"up":"up-serial","side":"side-serial"},"camera_topics":{"up":"/camera/up/color/image_raw","side":"/camera/side/color/image_raw"},"fps":30,"width":640,"height":480,"image_qos":"reliable","image_qos_depth":10,"writer_queue_size":128,"encoder_threads":2,"encoding_mode":"batch","repo_id":"local/test","encoder_temp_policy":"DATASET_LOCAL","dataset_incremental_peak_bytes":1,"encoder_temp_peak_bytes":1,"disk_reserve_bytes":1,"portability_status":"QUALIFICATION_REQUIRED","quality_contract_digest":digest("quality")})
         self._write("objects/OBJECT_A.json", {"schema_version":"data_factory.object_profile.v2","object_profile_id":"OBJECT_A","qualification_status":"QUALIFIED","description":"test object","dimensions_mm":[40,30,20],"datum":"center"})
         self._write("grasps/top_center.json", {"schema_version":"data_factory.grasp_profile.v2","grasp_profile_id":"top_center","qualification_status":"QUALIFIED","object_profile_id":"OBJECT_A","grasp_kind":"top_center","gripper_close":{"command_position_m":.012,"acceptable_feedback_m":{"min":.012,"max":.014},"velocity_percent":20,"force_percent":30,"evidence_digest":digest("grasp")}})
         self.yaw0, self.selected = self._sheet(0), self._sheet(30)
@@ -91,7 +91,8 @@ class DataFactoryTest(unittest.TestCase):
         validated = self._validated()
         arm = {"velocity_scaling":.1,"acceleration_scaling":.1,"planning_timeout_s":1,"execution_timeout_s":2}
         grip = {"command_duration_s":1,"execution_timeout_s":2,"completion_tolerance_m":.002}
-        qualification = {"schema_version":"data_factory.motion_qualification.v1","motion_qualification_id":"motion-q1","qualification_status":"QUALIFIED","robot_system_id":"fr5-lab-a","cell_calibration_id":"cal-a","object_profile_id":"OBJECT_A","grasp_profile_id":"top_center","profile_digests":{key:validated["input_digests"][key] for key in ("robot_system","cell_calibration","object_profile","grasp_profile")},"home_candidate_digest":factory.canonical_digest(candidate),"robot_description_digest":candidate["robot_description_digest"],"moveit_config_digest":digest("moveit"),"planning_scene_digest":digest("scene"),"frames":{"planning_frame":"base_link","planning_group":"fairino5_v6_group","tool_link":"wrist3_link"},"tool_to_tcp":{"translation_m":[.01,.02,.03],"rotation_columns":[[0,1,0],[-1,0,0],[0,0,1]]},"datum_to_tcp_grasp":{"translation_m":[.1,.2,.3],"rotation_columns":[[1,0,0],[0,0,1],[0,-1,0]]},"offsets_m":{"pregrasp":.1,"approach_stop":.02,"lift":.04,"retreat":.1},"gripper_positions_m":{"open":.021,"closed":.012},"qualified_safe_joint_positions_rad":[math.radians(v) for v in candidate["nominal_target_deg"]],"execution_timeouts_s":{"heartbeat_lease":1,"cancel":1,"precontact_confirmation":30,"grasp_verdict":30,"semantic_verdict":30},"phase_limits":{phase:(grip if phase.startswith("GRIPPER") else arm) for phase in factory.MOTION_PHASES},"goal_tolerances":{"position_m":.001,"orientation_rad":.01,"joint_rad":.01},"max_joint_state_age_s":.1,"qualified_at":"2026-08-13T00:00:00Z"}
+        scene = {"frame_id":"base_link","floor":{"id":"floor","dimensions_m":[2.0,2.0,.05],"surface_z_m":0.0,"source":"test"},"wall":{"id":"wall","dimensions_m":[2.0,.05,2.0],"near_face_y_m":-.3,"wall_side":"opposite_home_arm_protrusion","home_arm_protrusion_base_xy":[0.0,1.0],"j1_home_deg":-90.0}}
+        qualification = {"schema_version":"data_factory.motion_qualification.v1","motion_qualification_id":"motion-q1","qualification_status":"QUALIFIED","robot_system_id":"fr5-lab-a","cell_calibration_id":"cal-a","object_profile_id":"OBJECT_A","grasp_profile_id":"top_center","profile_digests":{key:validated["input_digests"][key] for key in ("robot_system","cell_calibration","object_profile","grasp_profile")},"home_candidate_digest":factory.canonical_digest(candidate),"robot_description_digest":candidate["robot_description_digest"],"moveit_config_digest":digest("moveit"),"planning_scene_digest":factory.canonical_digest(scene),"planning_scene":scene,"frames":{"planning_frame":"base_link","planning_group":"fairino5_v6_group","tool_link":"wrist3_link"},"tool_to_tcp":{"translation_m":[.01,.02,.03],"rotation_columns":[[0,1,0],[-1,0,0],[0,0,1]]},"datum_to_tcp_grasp":{"translation_m":[.1,.2,.3],"rotation_columns":[[1,0,0],[0,0,1],[0,-1,0]]},"offsets_m":{"pregrasp":.1,"approach_stop":.02,"lift":.04,"retreat":.1},"gripper_positions_m":{"open":.021,"closed":.012},"qualified_safe_joint_positions_rad":[math.radians(v) for v in candidate["nominal_target_deg"]],"execution_timeouts_s":{"heartbeat_lease":1,"cancel":1,"precontact_confirmation":30,"grasp_verdict":30,"semantic_verdict":30},"phase_limits":{phase:(grip if phase.startswith("GRIPPER") else arm) for phase in factory.MOTION_PHASES},"goal_tolerances":{"position_m":.001,"orientation_rad":.01,"joint_rad":.01},"max_joint_state_age_s":.1,"qualified_at":"2026-08-13T00:00:00Z"}
         program = factory.resolve_motion_program(validated, qualification, candidate, urdf=urdf, expected_robot_system_id="fr5-lab-a", now=NOW)
         self.assertEqual(factory.validate_motion_program(program), program)
         self.assertEqual(program["schema_version"], "fr5.motion_program.v2")
@@ -105,15 +106,26 @@ class DataFactoryTest(unittest.TestCase):
         self.assertEqual(program["execution_timeouts_s"], qualification["execution_timeouts_s"])
         self.assertEqual(program["steps"][3]["gripper_position_m"], .012)
         self.assertEqual(program["steps"][6]["gripper_position_m"], .021)
-        self.assertEqual(program["steps"][2]["requires_confirmation"], "PRECONTACT_HUMAN")
-        self.assertEqual(program["steps"][3]["pause_after"], "GRASP_VERDICT")
+        self.assertNotIn("requires_confirmation", program["steps"][2])
+        self.assertNotIn("pause_after", program["steps"][3])
         self.assertEqual(program["steps"][4]["pause_after"], "SEMANTIC_VERDICT")
+        legacy_program = copy.deepcopy(program)
+        legacy_program["steps"][2]["requires_confirmation"] = "PRECONTACT_HUMAN"
+        legacy_program["steps"][3]["pause_after"] = "GRASP_VERDICT"
+        self.assertEqual(factory.validate_motion_program(legacy_program), legacy_program)
+        for modified in (
+            {**copy.deepcopy(program), "steps": [*program["steps"][:2], {**program["steps"][2], "requires_confirmation": "PRECONTACT_HUMAN"}, *program["steps"][3:]]},
+            {**copy.deepcopy(program), "steps": [*program["steps"][:3], {**program["steps"][3], "pause_after": "GRASP_VERDICT"}, *program["steps"][4:]]},
+            {**copy.deepcopy(legacy_program), "steps": [*legacy_program["steps"][:2], {**legacy_program["steps"][2], "requires_confirmation": "HUMAN"}, *legacy_program["steps"][3:]]},
+            {**copy.deepcopy(program), "steps": [program["steps"][0], {**program["steps"][1], "requires_confirmation": "PRECONTACT_HUMAN"}, *program["steps"][2:]]},
+        ):
+            with self.assertRaises(factory.ContractError): factory.validate_motion_program(modified)
         bad_limits = copy.deepcopy(qualification["phase_limits"])
         bad_limits["GRIPPER_CLOSE"]["completion_tolerance_m"] = .001
         with self.assertRaises(factory.ContractError) as caught:
             factory.resolve_motion_program(validated, {**qualification, "phase_limits": bad_limits}, candidate, urdf=urdf, expected_robot_system_id="fr5-lab-a", now=NOW)
         self.assertEqual(caught.exception.code, "MOTION_PHASE_LIMITS")
-        bad_program = copy.deepcopy(program)
+        bad_program = copy.deepcopy(legacy_program)
         bad_program["steps"][3]["pause_after"] = "SEMANTIC_VERDICT"
         with self.assertRaises(factory.ContractError) as caught: factory.validate_motion_program(bad_program)
         self.assertEqual(caught.exception.code, "MOTION_PROGRAM_GRIPPER")
@@ -303,6 +315,11 @@ class DataFactoryTest(unittest.TestCase):
         self.assertNotEqual(baseline, changed["resolved_job_digest"])
 
     def test_profile_shape_and_symlink_confinement(self):
+        collection_path = self.root / "collection_profiles/fr5-dual-rgb-30hz-v1.json"
+        collection = json.loads(collection_path.read_text())
+        self._write("collection_profiles/fr5-dual-rgb-30hz-v1.json", {**collection, "fps": 15})
+        self._error("COLLECTION_PROFILE")
+        self._write("collection_profiles/fr5-dual-rgb-30hz-v1.json", collection)
         path = self.root / "grasps/top_center.json"
         profile = json.loads(path.read_text())
         for label, changed, code in (("extra", {**profile, "future": True}, "PROFILE_SCHEMA"), ("missing", {key: value for key, value in profile.items() if key != "gripper_close"}, "PROFILE_SCHEMA"), ("kind", {**profile, "grasp_kind": "side"}, "GRASP_KIND"), ("type", {**profile, "gripper_close": {**profile["gripper_close"], "velocity_percent": "20"}}, "GRASP_CLOSE"), ("range", {**profile, "gripper_close": {**profile["gripper_close"], "acceptable_feedback_m": {"min": .011, "max": .014}}}, "GRASP_CLOSE"), ("digest", {**profile, "gripper_close": {**profile["gripper_close"], "evidence_digest": "bad"}}, "GRASP_CLOSE")):

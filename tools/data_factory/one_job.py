@@ -100,6 +100,8 @@ class JsonlProcess:
 class OneJob:
     """Coordinate injected command callables; this module never starts live services."""
 
+    RECORDER_FIRST_ROW_TIMEOUT_S = 5.0
+
     def __init__(self, recorder_call, executor_call, cell_state_call=None, clock=None, monotonic_clock=None):
         if not callable(recorder_call) or not callable(executor_call):
             raise ContractError("ONE_JOB_CALLABLE")
@@ -118,6 +120,8 @@ class OneJob:
         self.scene_binding = None
         self.approval_scope = None
         self.execution_evidence = None
+        self.recorder_evidence = None
+        self.plan_envelope = None
         self._sequence = 0
         self._sequence_lock = threading.Lock()
 
@@ -134,8 +138,89 @@ class OneJob:
                 "dry_run_digest": self.dry_run_digest,
                 "scene_binding": copy.deepcopy(self.scene_binding),
                 "approval_scope": self.approval_scope,
+                "plan_envelope": copy.deepcopy(self.plan_envelope),
                 "execution_evidence": copy.deepcopy(self.execution_evidence),
+                "recorder_evidence": copy.deepcopy(self.recorder_evidence),
                 **extra}
+
+    def _precommit_safety(self, value, *, terminal):
+        fields = {
+            "schema_version", "run_id", "approved_plan_digest", "scene_binding_digest",
+            "expected_planning_scene_digest", "planning_scene_readback_digest",
+            "collision_report_digest", "plan_only_no_motion_digest",
+            "post_reset_safe_snapshot_digest", "status",
+        }
+        if not isinstance(value, dict) or set(value) != fields or value.get("schema_version") != "data_factory.precommit_safety.v1":
+            raise ContractError("PRECOMMIT_SAFETY_SCHEMA")
+        if value["run_id"] != self.run_id or value["approved_plan_digest"] != self.plan_digest:
+            raise ContractError("PRECOMMIT_SAFETY_BINDING")
+        if value["scene_binding_digest"] != canonical_digest(self.scene_binding):
+            raise ContractError("PRECOMMIT_SAFETY_BINDING")
+        if value["expected_planning_scene_digest"] != self._program["binding_digests"]["planning_scene_digest"]:
+            raise ContractError("PRECOMMIT_SAFETY_BINDING")
+        for key in (
+            "planning_scene_readback_digest", "collision_report_digest", "plan_only_no_motion_digest",
+        ):
+            if not isinstance(value[key], str) or not DIGEST.fullmatch(value[key]):
+                raise ContractError("PRECOMMIT_SAFETY_SCHEMA")
+        if not isinstance(value["status"], str):
+            raise ContractError("PRECOMMIT_SAFETY_SCHEMA")
+        post_reset = value["post_reset_safe_snapshot_digest"]
+        if terminal and (not isinstance(post_reset, str) or not DIGEST.fullmatch(post_reset) or value["status"] != "PASS"):
+            raise ContractError("PRECOMMIT_SAFETY")
+        if not terminal and (value["status"] != "PENDING" or post_reset is not None):
+            raise ContractError("PRECOMMIT_SAFETY")
+        return copy.deepcopy(value)
+
+    def _precommit_evidence(self, value, safety):
+        fields = {
+            "schema_version", "run_id", "approved_plan_digest", "scene_binding_digest",
+            "expected_planning_scene_digest", "planning_scene_readback", "collision_report",
+            "plan_only_no_motion",
+        }
+        if not isinstance(value, dict) or set(value) != fields or value.get("schema_version") != "data_factory.precommit_evidence.v1":
+            raise ContractError("PRECOMMIT_EVIDENCE_SCHEMA")
+        if (
+            value["run_id"] != self.run_id
+            or value["approved_plan_digest"] != self.plan_digest
+            or value["scene_binding_digest"] != canonical_digest(self.scene_binding)
+            or value["expected_planning_scene_digest"] != self._program["binding_digests"]["planning_scene_digest"]
+        ):
+            raise ContractError("PRECOMMIT_EVIDENCE_BINDING")
+        readback, collision, no_motion = value["planning_scene_readback"], value["collision_report"], value["plan_only_no_motion"]
+        if (
+            not isinstance(readback, dict)
+            or set(readback) != {"schema_version", "run_id", "plan_digest", "expected_planning_scene_digest", "objects"}
+            or readback.get("schema_version") != "data_factory.planning_scene_readback.v1"
+            or readback.get("run_id") != self.run_id
+            or readback.get("plan_digest") != self.plan_digest
+            or readback.get("expected_planning_scene_digest") != self._program["binding_digests"]["planning_scene_digest"]
+            or not isinstance(readback.get("objects"), list)
+            or not isinstance(collision, dict)
+            or set(collision) != {"schema_version", "plan_digest", "sample_count", "samples", "failure_count", "all_valid"}
+            or collision.get("schema_version") != "data_factory.collision_report.v1"
+            or collision.get("plan_digest") != self.plan_digest
+            or not isinstance(no_motion, dict)
+            or set(no_motion) != {"schema_version", "run_id", "plan_digest", "before_snapshot", "after_snapshot", "max_joint_delta_rad", "gripper_delta_m", "execute_goal_count", "gripper_goal_count"}
+            or no_motion.get("schema_version") != "data_factory.plan_only_no_motion.v1"
+            or no_motion.get("run_id") != self.run_id
+            or no_motion.get("plan_digest") != self.plan_digest
+            or canonical_digest(readback) != safety["planning_scene_readback_digest"]
+            or canonical_digest(collision) != safety["collision_report_digest"]
+            or canonical_digest(no_motion) != safety["plan_only_no_motion_digest"]
+        ):
+            raise ContractError("PRECOMMIT_EVIDENCE_BINDING")
+        if (
+            collision["all_valid"] is not True
+            or type(collision["failure_count"]) is not int
+            or collision["failure_count"] != 0
+            or type(no_motion["execute_goal_count"]) is not int
+            or no_motion["execute_goal_count"] != 0
+            or type(no_motion["gripper_goal_count"]) is not int
+            or no_motion["gripper_goal_count"] != 0
+        ):
+            raise ContractError("PRECOMMIT_EVIDENCE_UNSAFE")
+        return copy.deepcopy(value)
 
     def _approval(self, value, *, resolved_job_digest, include_digest):
         fields = {"source", "approval_id", "approved_by", "approval_expiry"}
@@ -179,7 +264,7 @@ class OneJob:
             if target == "recorder" and op == "status" and exc.code == "JSONL_RESPONSE_TIMEOUT":
                 self.recorder_state = "STATUS_UNCERTAIN"
                 preserve = getattr(self.recorder_call, "preserve", None)
-                if callable(preserve):
+                if self.lease_id is not None and callable(preserve):
                     preserve()
                 raise ContractError("RECORDER_STATUS_TIMEOUT") from exc
             raise ContractError("%s_CALL_FAILED" % target.upper(), str(exc)) from exc
@@ -196,6 +281,7 @@ class OneJob:
                 or not isinstance(response.get("reason_code" if target == "recorder" else "code"), str)):
             raise ContractError("%s_RESPONSE" % target.upper())
         if target == "recorder":
+            self.recorder_evidence = copy.deepcopy(response)
             if (
                 response["run_id"] is not None and not isinstance(response["run_id"], str)
                 or response["transaction_id"] is not None and not isinstance(response["transaction_id"], str)
@@ -267,7 +353,7 @@ class OneJob:
                 preserve()
             self.state = "BLOCKED"
             return self._result(False, code)
-        if self.recorder_state == "STATUS_UNCERTAIN":
+        if self.recorder_state == "STATUS_UNCERTAIN" and self.lease_id is not None:
             preserve = getattr(self.recorder_call, "preserve", None)
             if callable(preserve):
                 preserve()
@@ -295,7 +381,10 @@ class OneJob:
                 self._approval(setup_approval, resolved_job_digest=program["resolved_job_digest"], include_digest=True)
             response = self._request("executor", "plan", {"run_id": run_id, "motion_program": program, "scene_binding": scene_binding})
             digest = response.get("plan_digest")
-            dry_run = response.get("data")
+            envelope = response.get("data")
+            if not isinstance(envelope, dict) or set(envelope) != {"plan", "precommit_safety", "precommit_evidence", "operator_summary"} or not isinstance(envelope["operator_summary"], dict):
+                raise ContractError("EXECUTOR_RESPONSE")
+            dry_run = envelope["plan"]
             if (
                 response["state"] != "PLANNED"
                 or not isinstance(digest, str)
@@ -312,10 +401,19 @@ class OneJob:
                 or dry_run["steps"][-1]["phase"] != "SAFE_POSE_PTP"
             ):
                 raise ContractError("EXECUTOR_RESPONSE")
+            if not isinstance(envelope["precommit_safety"], dict) or envelope["precommit_safety"].get("run_id") != run_id or envelope["precommit_safety"].get("approved_plan_digest") != digest:
+                raise ContractError("PRECOMMIT_SAFETY_BINDING")
+            previous_run, previous_plan, previous_program, previous_scene = self.run_id, self.plan_digest, getattr(self, "_program", None), self.scene_binding
+            self.run_id, self.plan_digest, self._program, self.scene_binding = run_id, digest, program, scene_binding
+            try:
+                safety = self._precommit_safety(envelope["precommit_safety"], terminal=False)
+                evidence = self._precommit_evidence(envelope["precommit_evidence"], safety)
+            finally:
+                self.run_id, self.plan_digest, self._program, self.scene_binding = previous_run, previous_plan, previous_program, previous_scene
         except ContractError as exc:
             self.state = "BLOCKED"
             return self._result(False, exc.code)
-        self.run_id, self.plan_digest, self.dry_run_digest, self._program, self.scene_binding, self.state = run_id, digest, digest, program, scene_binding, "PLANNED"
+        self.run_id, self.plan_digest, self.dry_run_digest, self._program, self.scene_binding, self.plan_envelope, self.state = run_id, digest, digest, program, scene_binding, {**copy.deepcopy(envelope), "precommit_safety": safety, "precommit_evidence": evidence}, "PLANNED"
         return self._result(True, "PLANNED")
 
     def plan_only(self, run_id, motion_program, scene_binding):
@@ -343,9 +441,51 @@ class OneJob:
         self.approval_scope, self.state = approval["approval_scope"], "APPROVED"
         return self._result(True, "APPROVED")
 
-    def start(self, lease_id="one-job-lease"):
+    @staticmethod
+    def _cancel_requested(cancel):
+        if cancel is None:
+            return False
+        check = getattr(cancel, "is_set", cancel)
+        if not callable(check):
+            raise ContractError("START_CANCEL")
+        try:
+            requested = check()
+        except Exception as exc:
+            raise ContractError("START_CANCEL") from exc
+        if type(requested) is not bool:
+            raise ContractError("START_CANCEL")
+        return requested
+
+    def _wait_for_first_recorder_row(self, cancel=None):
+        """Do not arm robot motion until the recorder has durably written a hold row."""
+        deadline = self.monotonic_clock() + self.RECORDER_FIRST_ROW_TIMEOUT_S
+        while True:
+            if self._cancel_requested(cancel):
+                raise ContractError("START_CANCELLED")
+            status = self._request("recorder", "status")
+            if self._cancel_requested(cancel):
+                raise ContractError("START_CANCELLED")
+            if status["state"] != "RECORDING":
+                raise ContractError("RECORDER_STATE")
+            if status.get("writer_alive") is not True or status.get("writer_error") is not None:
+                raise ContractError("RECORDER_WRITER_FAULT")
+            rows = status["metrics"].get("rows")
+            if type(rows) is not int or rows < 0:
+                raise ContractError("RECORDER_HEALTH_SCHEMA")
+            if rows >= 1:
+                return status
+            if self.monotonic_clock() >= deadline:
+                raise ContractError("RECORDER_FIRST_ROW_TIMEOUT")
+            time.sleep(0.01)
+
+    def start(self, lease_id="one-job-lease", cancel_event=None):
         if self.state != "APPROVED" or not isinstance(lease_id, str) or not SAFE_ID.fullmatch(lease_id):
             return self._result(False, "START_STATE")
+        try:
+            if self._cancel_requested(cancel_event):
+                return self._result(False, "START_CANCELLED")
+        except ContractError as exc:
+            return self._result(False, exc.code)
         bindings = self._program["binding_digests"]
         transaction = {"run_id": self.run_id, "binding_digests": {
             "resolved_job_digest": self._program["resolved_job_digest"],
@@ -358,7 +498,10 @@ class OneJob:
             response = self._request("recorder", "begin", transaction=transaction)  # Recording precedes motion.
             if response["state"] != "RECORDING":
                 raise ContractError("RECORDER_BEGIN")
-            self.lease_id = lease_id
+            self._wait_for_first_recorder_row(cancel_event)
+            if self._cancel_requested(cancel_event):
+                raise ContractError("START_CANCELLED")
+            self.lease_id = lease_id  # Arm only when the execute request is about to leave this process.
             response = self._request("executor", "execute", {"run_id": self.run_id, "plan_digest": self.plan_digest, "lease_id": lease_id})
             if response["state"] != "EXECUTING":
                 raise ContractError("EXECUTOR_STATE")
@@ -391,7 +534,7 @@ class OneJob:
                 self.state = state
                 return self._result(True, state)
             if state == "SEMANTIC_VERDICT":
-                if self.grasp != "PASS":
+                if self._grasp_verdict_required() and self.grasp != "PASS":
                     raise ContractError("GRASP_GUARD")
                 if self.recorder_state == "RECORDING":
                     self._freeze_recorder_with_heartbeats(health)
@@ -406,6 +549,9 @@ class OneJob:
         except ContractError as exc:
             return self._abort(exc.code)
         return self._result(True, "EXECUTING")
+
+    def _grasp_verdict_required(self):
+        return any(step.get("pause_after") == "GRASP_VERDICT" for step in self._program["steps"])
 
     def _freeze_recorder_with_heartbeats(self, health):
         outcome = queue.Queue(maxsize=1)
@@ -496,9 +642,21 @@ class OneJob:
     def _finalize(self):
         if self.semantic == "FAIL":
             return self._abort("SEMANTIC_FAIL")
-        if self.grasp != "PASS" or self.semantic != "PASS" or self.recorder_state != "FROZEN":
+        if (self._grasp_verdict_required() and self.grasp != "PASS") or self.semantic != "PASS" or self.recorder_state != "FROZEN":
             return self._abort("COMMIT_GUARD")
         try:
+            evidence = self.execution_evidence
+            if not isinstance(evidence, dict):
+                raise ContractError("PRECOMMIT_SAFETY")
+            safety = self._precommit_safety(evidence.get("precommit_safety"), terminal=True)
+            planned_safety = self.plan_envelope["precommit_safety"] if isinstance(self.plan_envelope, dict) else None
+            if not isinstance(planned_safety, dict) or any(
+                safety[key] != planned_safety[key] for key in (
+                    "approved_plan_digest", "scene_binding_digest", "expected_planning_scene_digest",
+                    "planning_scene_readback_digest", "collision_report_digest", "plan_only_no_motion_digest",
+                )
+            ):
+                raise ContractError("PRECOMMIT_SAFETY_BINDING")
             response = self._request("recorder", "commit", allowed_failure=True)
             if response.get("state") == "QUARANTINED_COMMIT":
                 self.recorder_state = "QUARANTINED_COMMIT"
