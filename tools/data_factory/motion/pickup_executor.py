@@ -531,7 +531,7 @@ class PickupExecutor:
             if run["state"] not in {"EXECUTING", "PRECONTACT_HUMAN", "GRASP_VERDICT", "SEMANTIC_VERDICT"}:
                 continue
             execution, now = run["execution"], self.monotonic_clock()
-            if now > execution["lease_deadline"]:
+            if now >= execution["lease_deadline"]:
                 self._fault(run, "HEARTBEAT_TIMEOUT")
             elif run["state"] in {"PRECONTACT_HUMAN", "GRASP_VERDICT", "SEMANTIC_VERDICT"}:
                 if now > execution["wait_deadline"]:

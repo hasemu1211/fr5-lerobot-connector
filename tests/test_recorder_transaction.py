@@ -216,6 +216,10 @@ class RecorderTransactionTest(unittest.TestCase):
             status = recorder.episode_status()
             self.assertEqual(status["state"], recorder.RECORDING)
             self.assertIn("writer_alive", status)
+            self.assertEqual(
+                set(status["metrics"]),
+                {"rows", "writer_queue", "writer_queue_drops", "alignment_failures", "observed_monotonic_ns"},
+            )
             self.assertEqual(recorder.dataset.clears, 0)
 
     def test_jsonl_commands_are_strict_idempotent_core_calls(self):

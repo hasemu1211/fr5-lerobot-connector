@@ -28,7 +28,7 @@ class JsonlProcess:
         self.selector = selectors.DefaultSelector()
         self.selector.register(self.process.stdout, selectors.EVENT_READ)
 
-    def __call__(self, request):
+    def request(self, request, cancel_event=None, timeout_s=None):
         if self.process.poll() is not None:
             raise ContractError("JSONL_PROCESS_EXIT", str(self.process.returncode))
         try:
@@ -36,24 +36,51 @@ class JsonlProcess:
             self.process.stdin.flush()
         except (BrokenPipeError, OSError, TypeError, ValueError) as exc:
             raise ContractError("JSONL_WRITE", str(exc)) from exc
-        if not self.selector.select(self.timeout_s):
-            raise ContractError("JSONL_RESPONSE_TIMEOUT")
+        wait_s = self.timeout_s if timeout_s is None else timeout_s
+        if not isinstance(wait_s, (int, float)) or isinstance(wait_s, bool) or wait_s <= 0:
+            raise ContractError("JSONL_TIMEOUT")
+        deadline = time.monotonic() + min(self.timeout_s, float(wait_s))
+        while True:
+            if cancel_event is not None and cancel_event.is_set():
+                raise ContractError("JSONL_REQUEST_CANCELLED")
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise ContractError("JSONL_RESPONSE_TIMEOUT")
+            if self.selector.select(min(remaining, 0.05) if cancel_event is not None else remaining):
+                break
         line = self.process.stdout.readline()
         if not line:
             raise ContractError("JSONL_PROCESS_EXIT", str(self.process.poll()))
         return load_json_strict(line)
 
-    def close(self):
+    def __call__(self, request):
+        return self.request(request)
+
+    def close(self, timeout_s=None):
         if self._preserved:
             return None
+        wait_s = self.timeout_s if timeout_s is None else timeout_s
+        if not isinstance(wait_s, (int, float)) or isinstance(wait_s, bool) or wait_s <= 0:
+            raise ContractError("JSONL_TIMEOUT")
+        wait_s = min(self.timeout_s, float(wait_s))
         if self.process.stdin and not self.process.stdin.closed:
             self.process.stdin.close()  # EOF is the recorder/executor fail-safe signal.
+        timed_out = False
         try:
-            return_code = self.process.wait(self.timeout_s)
-        except subprocess.TimeoutExpired as exc:
-            raise ContractError("JSONL_EXIT_TIMEOUT") from exc
-        self.selector.close()
-        self.process.stdout.close()
+            return_code = self.process.wait(wait_s)
+        except subprocess.TimeoutExpired:
+            timed_out = True
+            self.process.terminate()
+            try:
+                return_code = self.process.wait(min(1.0, wait_s))
+            except subprocess.TimeoutExpired:
+                self.process.kill()
+                return_code = self.process.wait()
+        finally:
+            self.selector.close()
+            self.process.stdout.close()
+        if timed_out:
+            raise ContractError("JSONL_EXIT_TIMEOUT", str(return_code))
         return return_code
 
     def preserve(self):
@@ -73,7 +100,7 @@ class JsonlProcess:
 class OneJob:
     """Coordinate injected command callables; this module never starts live services."""
 
-    def __init__(self, recorder_call, executor_call, cell_state_call=None, clock=None):
+    def __init__(self, recorder_call, executor_call, cell_state_call=None, clock=None, monotonic_clock=None):
         if not callable(recorder_call) or not callable(executor_call):
             raise ContractError("ONE_JOB_CALLABLE")
         if cell_state_call is not None and not callable(cell_state_call):
@@ -81,6 +108,7 @@ class OneJob:
         self.recorder_call, self.executor_call = recorder_call, executor_call
         self.cell_state_call = cell_state_call
         self.clock = clock or (lambda: datetime.now(timezone.utc))
+        self.monotonic_clock = monotonic_clock or time.monotonic
         self.run_id = self.plan_digest = self.lease_id = None
         self.state, self.grasp, self.semantic = "IDLE", None, None
         self.recorder_state = self.executor_state = None
@@ -140,8 +168,21 @@ class OneJob:
             request = {"schema_version": "fr5.pickup_executor.command.v4", "op_id": request["op_id"], "op": op, "payload": payload}
         elif transaction is not None:
             request["transaction"] = transaction
+        caller = self.executor_call if target == "executor" else self.recorder_call
+        transported_status = target == "recorder" and op == "status" and callable(getattr(caller, "request", None))
         try:
-            response = (self.executor_call if target == "executor" else self.recorder_call)(request)
+            if transported_status:
+                response = caller.request(request, timeout_s=self._program["execution_timeouts_s"]["heartbeat_lease"] / 2)
+            else:
+                response = caller(request)
+        except ContractError as exc:
+            if target == "recorder" and op == "status" and exc.code == "JSONL_RESPONSE_TIMEOUT":
+                self.recorder_state = "STATUS_UNCERTAIN"
+                preserve = getattr(self.recorder_call, "preserve", None)
+                if callable(preserve):
+                    preserve()
+                raise ContractError("RECORDER_STATUS_TIMEOUT") from exc
+            raise ContractError("%s_CALL_FAILED" % target.upper(), str(exc)) from exc
         except Exception as exc:
             raise ContractError("%s_CALL_FAILED" % target.upper(), str(exc)) from exc
         fields = ({"schema_version", "op_id", "op", "ok", "state", "reason_code", "run_id", "transaction_id", "episode_index", "metrics", "artifacts", "detail"}
@@ -178,6 +219,14 @@ class OneJob:
                 raise ContractError("RECORDER_BINDING")
             if update_state:
                 self.recorder_state = response["state"]
+            if transported_status:
+                metrics = response["metrics"]
+                required = {"rows", "writer_queue", "writer_queue_drops", "alignment_failures", "observed_monotonic_ns"}
+                if not required <= set(metrics) or any(type(metrics[key]) is not int or metrics[key] < 0 for key in required):
+                    raise ContractError("RECORDER_HEALTH_SCHEMA")
+                age_ns = time.monotonic_ns() - metrics["observed_monotonic_ns"]
+                if age_ns < 0 or age_ns >= self._program["execution_timeouts_s"]["heartbeat_lease"] * 500_000_000:
+                    raise ContractError("RECORDER_HEALTH_STALE")
         else:
             if not isinstance(response["mode"], str) or not isinstance(response["code"], str):
                 raise ContractError("EXECUTOR_RESPONSE")
@@ -218,6 +267,12 @@ class OneJob:
                 preserve()
             self.state = "BLOCKED"
             return self._result(False, code)
+        if self.recorder_state == "STATUS_UNCERTAIN":
+            preserve = getattr(self.recorder_call, "preserve", None)
+            if callable(preserve):
+                preserve()
+            self.state = "BLOCKED"
+            return self._result(False, code)
         try:
             response = self._request("recorder", "abort", allowed_failure=True)
         except ContractError:
@@ -228,18 +283,16 @@ class OneJob:
         else: self.state = "BLOCKED"
         return self._result(False, code)
 
-    def prepare(self, plan):
+    def _prepare_plan(self, run_id, program, scene_binding, setup_approval=None):
         if self.state != "IDLE":
             return self._result(False, "ONE_JOB_ONLY")
-        if not isinstance(plan, dict) or set(plan) != {"run_id", "motion_program", "scene_binding", "setup_approval"}:
-            return self._result(False, "PLAN_SCHEMA")
-        program, run_id = plan["motion_program"], plan["run_id"]
         try:
             if not isinstance(run_id, str) or not SAFE_ID.fullmatch(run_id):
                 raise ContractError("PLAN_SCHEMA")
             program = validate_motion_program(copy.deepcopy(program))
-            scene_binding = validate_scene_binding(plan["scene_binding"])
-            self._approval(plan["setup_approval"], resolved_job_digest=program["resolved_job_digest"], include_digest=True)
+            scene_binding = validate_scene_binding(scene_binding)
+            if setup_approval is not None:
+                self._approval(setup_approval, resolved_job_digest=program["resolved_job_digest"], include_digest=True)
             response = self._request("executor", "plan", {"run_id": run_id, "motion_program": program, "scene_binding": scene_binding})
             digest = response.get("plan_digest")
             dry_run = response.get("data")
@@ -264,6 +317,15 @@ class OneJob:
             return self._result(False, exc.code)
         self.run_id, self.plan_digest, self.dry_run_digest, self._program, self.scene_binding, self.state = run_id, digest, digest, program, scene_binding, "PLANNED"
         return self._result(True, "PLANNED")
+
+    def plan_only(self, run_id, motion_program, scene_binding):
+        """Compile a non-moving plan without manufacturing a human approval."""
+        return self._prepare_plan(run_id, motion_program, scene_binding)
+
+    def prepare(self, plan):
+        if not isinstance(plan, dict) or set(plan) != {"run_id", "motion_program", "scene_binding", "setup_approval"}:
+            return self._result(False, "PLAN_SCHEMA")
+        return self._prepare_plan(plan["run_id"], plan["motion_program"], plan["scene_binding"], plan["setup_approval"])
 
     def approve(self, approval):
         if self.state != "PLANNED" or not isinstance(approval, dict):
@@ -309,7 +371,10 @@ class OneJob:
         if self.state not in {"EXECUTING", "PRECONTACT_HUMAN", "GRASP_VERDICT", "SEMANTIC_VERDICT"}:
             return self._result(False, "POLL_STATE")
         try:
+            status_started = self.monotonic_clock()
             status = self._request("recorder", "status")
+            if self.monotonic_clock() - status_started >= self._program["execution_timeouts_s"]["heartbeat_lease"] / 2:
+                raise ContractError("RECORDER_HEALTH_STALE")
             if status["state"] != ("FROZEN" if self.state == "SEMANTIC_VERDICT" or self.semantic is not None else "RECORDING"):
                 raise ContractError("RECORDER_STATE")
             health = {key: status.get(key) for key in ("writer_alive", "writer_error")}
