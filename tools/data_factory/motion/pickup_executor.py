@@ -27,6 +27,7 @@ from tools.fr5_data_factory import (
     validate_motion_program,
 )
 from tools.data_factory.scene_state import validate_scene_binding
+from tools.data_factory.quality.phase_events import PhaseEventWriter
 
 
 MODE = "PRE_LIVE"
@@ -146,16 +147,59 @@ class UnavailableTransport:
 class PickupExecutor:
     """Compile and approve plans; real execution stays opt-in for tests only."""
 
-    def __init__(self, transport=None, clock=None, monotonic_clock=None, cell_state_store=None, scene_state_store=None, execution_enabled=False):
+    def __init__(self, transport=None, clock=None, monotonic_clock=None, cell_state_store=None, scene_state_store=None, execution_enabled=False, phase_events_root=None, event_clock=None):
         self.transport = transport or UnavailableTransport()
         self.clock = clock or (lambda: datetime.now(timezone.utc))
         self.monotonic_clock = monotonic_clock or time.monotonic
         self.cell_state_store = cell_state_store
         self.scene_state_store = scene_state_store
         self.execution_enabled = execution_enabled
+        self.phase_events_root = Path(phase_events_root) if phase_events_root is not None else None
+        self.event_clock = event_clock or (lambda: (time.time_ns(), "SYSTEM_TIME"))
         self.mode = "LIVE" if execution_enabled else MODE
         self.cache = {}
         self.runs = {}
+        self._phase_event_writer = None
+
+    def close(self):
+        if self._phase_event_writer is None:
+            return True
+        ok = self._phase_event_writer.close()
+        if not ok:
+            for run in self.runs.values():
+                if "execution" in run:
+                    run["execution"]["behavior_report_status"] = "BEHAVIOR_REPORT_UNAVAILABLE"
+        return ok
+
+    def _emit_phase_event(self, run, event, step, action_status, evidence):
+        writer = self._phase_event_writer
+        if writer is None:
+            return
+        execution = run["execution"]
+        sequence = execution["phase_event_sequence"]
+        execution["phase_event_sequence"] += 1
+        try:
+            event_ros_time_ns, ros_clock_type = self.event_clock()
+            record = {
+                "schema_version": "data_factory.phase_event.v1",
+                "run_id": run["plan"]["run_id"],
+                "plan_digest": run["digest"],
+                "sequence": sequence,
+                "phase": step["phase"],
+                "segment_index": None if event in {"HOLD_ENTERED", "DECISION_RECEIVED"} else 0,
+                "segment_count": None if event in {"HOLD_ENTERED", "DECISION_RECEIVED"} else 1,
+                "event": event,
+                "event_ros_time_ns": event_ros_time_ns,
+                "monotonic_time_ns": int(round(self.monotonic_clock() * 1_000_000_000)),
+                "ros_clock_type": ros_clock_type,
+                "event_source": "pickup_executor",
+                "action_status": action_status,
+                "evidence_digest": canonical_digest(evidence),
+            }
+            if not writer.emit(record):
+                execution["behavior_report_status"] = "BEHAVIOR_REPORT_UNAVAILABLE"
+        except (ContractError, KeyError, TypeError, ValueError, OverflowError):
+            execution["behavior_report_status"] = "BEHAVIOR_REPORT_UNAVAILABLE"
 
     def process(self, request):
         try:
@@ -418,7 +462,16 @@ class PickupExecutor:
                     self.cell_state_store.mark_blocked("EXECUTION_IN_PROGRESS", run["plan"]["run_id"], run["digest"])
                 except Exception as exc:
                     raise ContractError("CELL_STATE_ARMING_FAILED") from exc
-                run["execution"] = {"lease_id": payload["lease_id"], "lease_deadline": self.monotonic_clock() + run["plan"]["execution_timeouts_s"]["heartbeat_lease"], "step_index": 0, "grasp_verdict": None, "semantic_verdict": None, "snapshot": None, "active": False, "scene_object": copy.deepcopy(item)}
+                run["execution"] = {"lease_id": payload["lease_id"], "lease_deadline": self.monotonic_clock() + run["plan"]["execution_timeouts_s"]["heartbeat_lease"], "step_index": 0, "grasp_verdict": None, "semantic_verdict": None, "snapshot": None, "active": False, "scene_object": copy.deepcopy(item), "phase_event_sequence": 0}
+                if self.phase_events_root is not None:
+                    path = self.phase_events_root / run["plan"]["run_id"] / "phase_events.jsonl"
+                    try:
+                        self._phase_event_writer = PhaseEventWriter(path)
+                        run["execution"]["phase_events_path"] = str(path)
+                        run["execution"]["behavior_report_status"] = "PENDING"
+                    except Exception:
+                        self._phase_event_writer = None
+                        run["execution"]["behavior_report_status"] = "BEHAVIOR_REPORT_UNAVAILABLE"
                 run["state"] = "EXECUTING"
                 self._start_current_step(run)
         except ContractError as exc:
@@ -437,9 +490,14 @@ class PickupExecutor:
         response["mode"] = self.mode
         return response
 
-    @staticmethod
-    def _execution_data(run):
-        data = {key: copy.deepcopy(run["execution"].get(key)) for key in ("step_index", "grasp_verdict", "semantic_verdict", "precontact_confirmation", "grasp_decision", "semantic_decision", "gripper_feedback_m", "gripper_reference_m", "post_lift_gripper_feedback_m", "snapshot", "snapshot_error", "cancel_error", "durable_blocked", "cell_state_error", "scene_state_error") if key in run["execution"]}
+    def _execution_data(self, run):
+        execution = run["execution"]
+        if self._phase_event_writer is not None:
+            if self._phase_event_writer.error_code:
+                execution["behavior_report_status"] = "BEHAVIOR_REPORT_UNAVAILABLE"
+            elif self._phase_event_writer.ready:
+                execution["behavior_report_status"] = "AVAILABLE"
+        data = {key: copy.deepcopy(execution.get(key)) for key in ("step_index", "grasp_verdict", "semantic_verdict", "precontact_confirmation", "grasp_decision", "semantic_decision", "gripper_feedback_m", "gripper_reference_m", "post_lift_gripper_feedback_m", "snapshot", "snapshot_error", "cancel_error", "durable_blocked", "cell_state_error", "scene_state_error", "phase_events_path", "behavior_report_status") if key in execution}
         if "failure_code" in run:
             data["failure_code"] = run["failure_code"]
         return data
@@ -453,6 +511,7 @@ class PickupExecutor:
         if step.get("requires_confirmation") == "PRECONTACT_HUMAN" and execution.get("confirmed_step") != execution["step_index"]:
             run["state"] = "PRECONTACT_HUMAN"
             execution["wait_deadline"] = self.monotonic_clock() + run["plan"]["execution_timeouts_s"]["precontact_confirmation"]
+            self._emit_phase_event(run, "HOLD_ENTERED", step, None, {"hold": "PRECONTACT_HUMAN", "step": step})
             return "PRECONTACT_HUMAN"
         try:
             observed = self.transport.snapshot(run["plan"]["planning"]["max_joint_state_age_s"])
@@ -464,7 +523,9 @@ class PickupExecutor:
             if any(abs(a - b) > tolerance for a, b in zip(actual, expected)):
                 raise ContractError("START_STATE_MISMATCH")
             execution["active"] = True
+            self._emit_phase_event(run, "DISPATCH_REQUESTED", step, "REQUESTED", {"step": step})
             self.transport.start_phase(step)
+            self._emit_phase_event(run, "GOAL_ACCEPTED", step, "ACCEPTED", {"accepted": True, "step": step})
         except (ContractError, KeyError, TypeError) as exc:
             self._fault(run, exc.code if isinstance(exc, ContractError) else "SNAPSHOT_SCHEMA")
         return run["state"]
@@ -477,6 +538,8 @@ class PickupExecutor:
         if execution.get("active"):
             try:
                 self.transport.cancel_active(run["plan"]["execution_timeouts_s"]["cancel"])
+                step = run["plan"]["steps"][execution["step_index"]]
+                self._emit_phase_event(run, "ACTION_TERMINAL", step, "CANCELLED", {"failure_code": code, "step": step, "terminal_status": "CANCELLED"})
             except Exception as exc:
                 execution["cancel_error"] = exc.code if isinstance(exc, ContractError) else "CANCEL_FAILED"
             execution["active"] = False
@@ -545,6 +608,7 @@ class PickupExecutor:
                 if active is not None:
                     execution["active"] = False
                     completed_step = run["plan"]["steps"][execution["step_index"]]
+                    self._emit_phase_event(run, "ACTION_TERMINAL", completed_step, "SUCCEEDED", {"step": completed_step, "terminal_status": "SUCCEEDED"})
                     if completed_step["phase"] in {"GRIPPER_CLOSE", "LIFT_LIN"}:
                         try:
                             feedback, reference = self._verified_gripper_feedback(run)
@@ -561,6 +625,7 @@ class PickupExecutor:
                     if pause_after in {"GRASP_VERDICT", "SEMANTIC_VERDICT"}:
                         run["state"] = pause_after
                         execution["wait_deadline"] = now + run["plan"]["execution_timeouts_s"][pause_after.lower()]
+                        self._emit_phase_event(run, "HOLD_ENTERED", completed_step, None, {"hold": pause_after, "step": completed_step})
                     else:
                         self._start_current_step(run)
 
@@ -588,6 +653,7 @@ class PickupExecutor:
         if run["state"] != "PRECONTACT_HUMAN":
             raise ContractError("CONFIRM_STATE")
         run["execution"]["precontact_confirmation"] = {"source": payload["source"], "decided_by": payload["confirmed_by"], "decided_at": self.clock().isoformat().replace("+00:00", "Z")}
+        self._emit_phase_event(run, "DECISION_RECEIVED", run["plan"]["steps"][run["execution"]["step_index"]], None, {"decision": "PRECONTACT_HUMAN", **run["execution"]["precontact_confirmation"]})
         run["execution"]["confirmed_step"] = run["execution"]["step_index"]
         run["state"] = "EXECUTING"
         self._start_current_step(run)
@@ -603,6 +669,7 @@ class PickupExecutor:
             raise ContractError("VERDICT_STATE")
         run["execution"]["semantic_verdict"] = payload["verdict"]
         run["execution"]["semantic_decision"] = {"source": payload["source"], "decided_by": payload["decided_by"], "decided_at": self.clock().isoformat().replace("+00:00", "Z")}
+        self._emit_phase_event(run, "DECISION_RECEIVED", run["plan"]["steps"][run["execution"]["step_index"] - 1], None, {"decision": "SEMANTIC_VERDICT", "verdict": payload["verdict"], **run["execution"]["semantic_decision"]})
         run["state"] = "EXECUTING"
         self._start_current_step(run)
         return self._execution_response(run, payload["run_id"], payload["plan_digest"], "VERDICT_ACCEPTED")
@@ -617,6 +684,7 @@ class PickupExecutor:
             raise ContractError("GRASP_VERDICT_STATE")
         run["execution"]["grasp_verdict"] = payload["verdict"]
         run["execution"]["grasp_decision"] = {"source": payload["source"], "decided_by": payload["decided_by"], "decided_at": self.clock().isoformat().replace("+00:00", "Z")}
+        self._emit_phase_event(run, "DECISION_RECEIVED", run["plan"]["steps"][run["execution"]["step_index"] - 1], None, {"decision": "GRASP_VERDICT", "verdict": payload["verdict"], **run["execution"]["grasp_decision"]})
         if payload["verdict"] == "FAIL":
             self._fault(run, "GRASP_REJECTED")
         else:
@@ -667,6 +735,7 @@ def run_jsonl(input_stream, output_stream, executor):
             events.put(("error", None))
     threading.Thread(target=read_lines, daemon=True).start()
     def terminal(run):
+        executor.close()
         result = executor._execution_response(run, run["plan"]["run_id"], run["digest"], "TERMINAL")
         output_stream.write(json.dumps(result, sort_keys=True, separators=(",", ":"), allow_nan=False) + "\n")
         output_stream.flush()
@@ -685,6 +754,10 @@ def run_jsonl(input_stream, output_stream, executor):
                 result = executor.process(load_json_strict(value))
             except ContractError as exc:
                 result = _response(code=exc.code, mode=executor.mode)
+            if result["state"] in {"BLOCKED", "COMPLETED"} and result.get("run_id") in executor.runs:
+                executor.close()
+                run = executor.runs[result["run_id"]]
+                result["data"] = executor._execution_data(run)
             output_stream.write(json.dumps(result, sort_keys=True, separators=(",", ":"), allow_nan=False) + "\n")
             output_stream.flush()
             if result["state"] in {"BLOCKED", "COMPLETED"}:
@@ -709,12 +782,13 @@ def main(argv=None):
     ros_mode.add_argument("--ros-live", action="store_true")
     parser.add_argument("--robot-system-id")
     parser.add_argument("--cell-state-root")
+    parser.add_argument("--phase-events-root")
     args = parser.parse_args(argv)
     if not args.factory_jsonl:
         parser.error("--factory-jsonl required")
     if args.ros_live:
-        if not args.robot_system_id or not args.cell_state_root:
-            parser.error("--ros-live requires --robot-system-id and --cell-state-root")
+        if not args.robot_system_id or not args.cell_state_root or not args.phase_events_root:
+            parser.error("--ros-live requires --robot-system-id, --cell-state-root, and --phase-events-root")
         try:
             if __package__ in (None, ""):
                 from tools.data_factory.cell_state import CellStateStore
@@ -726,8 +800,8 @@ def main(argv=None):
             scene_state_store = SceneStateStore(args.cell_state_root, args.robot_system_id)
         except ContractError as exc:
             parser.error(exc.code)
-    elif args.robot_system_id or args.cell_state_root:
-        parser.error("--robot-system-id and --cell-state-root require --ros-live")
+    elif args.robot_system_id or args.cell_state_root or args.phase_events_root:
+        parser.error("--robot-system-id, --cell-state-root, and --phase-events-root require --ros-live")
     else:
         cell_state_store = None
         scene_state_store = None
@@ -761,24 +835,26 @@ def main(argv=None):
                 if rclpy is not None and rclpy.ok():
                     rclpy.shutdown()
             return 2
+    executor = PickupExecutor(
+        transport,
+        cell_state_store=cell_state_store,
+        scene_state_store=scene_state_store,
+        execution_enabled=args.ros_live,
+        phase_events_root=args.phase_events_root,
+        event_clock=(lambda: (node.get_clock().now().nanoseconds, "ROS_TIME")) if node is not None else None,
+    )
     try:
-        return 0 if run_jsonl(
-            sys.stdin,
-            sys.stdout,
-            PickupExecutor(
-                transport,
-                cell_state_store=cell_state_store,
-                scene_state_store=scene_state_store,
-                execution_enabled=args.ros_live,
-            ),
-        ) else 2
+        return 0 if run_jsonl(sys.stdin, sys.stdout, executor) else 2
     finally:
         try:
-            if node is not None:
-                node.destroy_node()
+            executor.close()
         finally:
-            if rclpy is not None and rclpy.ok():
-                rclpy.shutdown()
+            try:
+                if node is not None:
+                    node.destroy_node()
+            finally:
+                if rclpy is not None and rclpy.ok():
+                    rclpy.shutdown()
 
 
 if __name__ == "__main__":
