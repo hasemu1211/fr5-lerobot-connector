@@ -13,7 +13,7 @@ FAIRINO FR5의 ROS 2 state/action과 RGB 영상을 시간 정합하여 LeRobot v
 - SmolVLA·ACT·VQ-BeT용 공식 `lerobot-train` 학습 profile
 - SmolVLA 검증 episode의 오프라인 loss 평가
 
-학습된 정책의 실물 실행(rollout)은 아직 제공하지 않는다. `scripts/evaluate_smolvla.sh`는 로봇을 움직이지 않는 오프라인 검사다. 데이터팩토리의 scripted pickup은 실물 HIL까지 검증했지만 아직 공개 수집 명령이 아닌 library/contract 단계이며, 학습 승인을 뜻하지 않는다.
+학습된 정책의 실물 실행(rollout)은 아직 제공하지 않는다. `scripts/evaluate_smolvla.sh`는 로봇을 움직이지 않는 오프라인 검사다. 데이터팩토리는 체크인된 one-job runner의 plan-only 경로를 제공하지만 live 수집은 아직 공개하지 않으며, plan 성공은 학습 승인을 뜻하지 않는다.
 
 ## 빠른 시작
 
@@ -43,8 +43,9 @@ scripts/validate_dataset.sh --preview pick_red
 | `scripts/validate_dataset.sh` | 학습 전 구조·시간·동작·RGB 품질 검사 |
 | `scripts/train_policy.sh` | 검사된 데이터셋을 정책별 공식 `lerobot-train` profile에 전달 |
 | `scripts/evaluate_smolvla.sh` | 검증용으로 분리한 episode의 오프라인 SmolVLA loss 계산 |
+| `python3 -m tools.data_factory.run_job` | 사람/AI 공통 one-job plan-only runner ([사용법](docs/data-factory.md#one-job-runner)) |
 
-모든 wrapper는 `--help`, 경로 지정 옵션, `--dry-run`을 제공한다.
+표의 `scripts/` wrapper는 `--help`, 경로 지정 옵션, `--dry-run`을 제공한다. factory runner의 공개 동작은 자체가 비실행 `plan_only`다.
 
 ## 데이터 형식과 공식 학습 경로
 

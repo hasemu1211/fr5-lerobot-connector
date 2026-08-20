@@ -88,6 +88,34 @@ python3 tools/fr5_data_factory.py build-job --interactive \
 
 builder의 stdout은 기존 `validate-job --job -`에 바로 전달할 수 있는 canonical JobSpec JSON 한 줄이다. prompt는 stderr에만 출력한다. builder 실행은 motion 승인이나 training 승격이 아니다.
 
+## One-job runner
+
+현재 공개 범위는 `plan_only`다. 사람은 아래 한 명령을 실행하고 누락된 값만 TTY에서 입력할 수 있다. stdout은 machine JSON 한 줄, prompt는 stderr에만 나온다.
+
+```bash
+python3 -m tools.data_factory.run_job --mode plan_only \
+  --run-id <고유-run-id> \
+  --selected-sheet <선택한-yaw-manifest.json> \
+  --yaw0-sheet <같은-family의-yaw0-manifest.json> \
+  --config-root <검토된-config-root> \
+  --motion-qualification <qualification.json> \
+  --home-candidate <home-candidate.json> \
+  --urdf <robot.urdf> \
+  --expected-robot-system-id <robot-system-id>
+```
+
+TTY에서 `--job`을 생략하면 기존 `build-job --interactive`가 이어서 실행되어 point/연속 좌표와 profile을 선택한다. 이미 만든 JobSpec을 재사용할 때만 `--job <canonical-job.json>`을 추가한다. runner가 별도 builder 규칙을 복제하지 않으므로 두 입력은 같은 validator와 digest 경로로 수렴한다.
+
+AI는 같은 모듈의 `--factory-jsonl`을 사용한다. command envelope는 exact `schema_version,op_id,op,payload`이고 `op`는 `run`, `status`, `cancel`이다. `run`은 즉시 `RUNNING`을 응답하고 terminal `RESULT` event를 정확히 한 번 낸다. `status`는 child pipe를 건드리지 않는 cached snapshot이며 `cancel`과 stdin EOF는 worker가 소유한 bounded child 종료로 수렴한다.
+
+```bash
+python3 -m tools.data_factory.run_job --factory-jsonl
+```
+
+`plan_only`는 scene state에서 JobSpec의 object profile과 `(place_id,yaw_deg,x_mm,y_mm)`가 정확히 일치하는 `ON_SURFACE` instance 하나를 결속한다. executor plan만 만들며 recorder begin, dataset 생성, 카메라 접근, execute action은 수행하지 않는다. 결과의 `camera_semantic_authority=false`는 현재 떨어져 임시 배치된 카메라를 물체·파지 정성 판정에 사용하지 않는다는 뜻이다.
+
+`live` payload는 schema만 검사한 뒤 `LIVE_NOT_QUALIFIED`로 부작용 없이 거부한다. 실제 live 공개는 planning-scene readback, collision/no-motion evidence, cached-plan approval, recorder/commit/validator와 post-reset scene/cell 처리를 같은 runner에 결속하는 다음 qualification 뒤에만 한다.
+
 ## A4 pose와 로봇 좌표
 
 A4 한 장은 사람이 다음 값을 읽고 로봇이 같은 값으로 변환하게 한다.
