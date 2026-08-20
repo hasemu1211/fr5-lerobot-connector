@@ -63,12 +63,12 @@
     {
       "rule_id": "data-factory-contract",
       "document_type": "reference",
-      "subject": "deterministic pose data-factory plan, contracts, safety gates, and filesystem ownership",
-      "path_globs": ["docs/data-factory.md"],
+      "subject": "deterministic pose data-factory, collection-feedback, safety, and filesystem contracts",
+      "path_globs": ["docs/data-factory.md", "docs/data-collection-and-feedback.md"],
       "allowed_index_names": ["README.md"],
       "requires_index": false,
       "required_markdown_metadata": ["h1"],
-      "review_only_content_rule": "Keep the current deterministic pose and grasp contract, staged implementation boundary, output ownership, safety gates, and acceptance criteria in one canonical document.",
+      "review_only_content_rule": "Keep pose/runtime ownership in data-factory.md and collection, feedback, retention, and human-intervention ownership in data-collection-and-feedback.md; link instead of duplicating.",
       "lifecycle": "current",
       "content_ownership": "canonical",
       "canonical_rule_ids": []

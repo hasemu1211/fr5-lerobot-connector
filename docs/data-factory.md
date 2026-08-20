@@ -4,6 +4,8 @@
 
 이 문서는 FR5 데이터팩토리의 현재 범위, 입력·좌표·품질·안전 계약과 파일 소유권의 정본이다. 운영자, 구현자와 AI agent는 같은 계약을 사용한다. 로컬 workflow가 만드는 세부 계획·검토 파일은 실행 보조 자료이며 이 정본을 대체하지 않는다.
 
+수집할 증거, feedback 소비자, 보존 정책과 사람 개입 지점은 [데이터 수집·학습·피드백 운영 계약](data-collection-and-feedback.md)이 소유한다. 이 문서에는 runtime·pose·safety 계약만 유지한다.
+
 현재 A4 생성·place calibration·Job/pose/motion resolve, scene/cell runtime state, plan-only/live pickup executor, transaction recorder/recovery와 한-job 조정 library까지 구현했다. 기존 `scripts/collect.sh`는 독립 대화형 수집 경로로 계속 사용할 수 있다.
 
 2026-08-19에는 25 mm 나무 큐브의 scripted `pickup_e2e`를 scene binding, collision check, executor, recorder와 한-job 조정기로 실물 HIL했다. 물리 경로와 30 Hz dataset 정량 gate는 통과했지만 카메라는 cell에 고정되지 않았고 `training_approved.json`도 만들지 않았다. 이 실행에 쓴 run별 harness는 ignored evidence이며 공개 운영 명령이 아니다. 현재 재사용 표면은 각 strict JSONL module과 `OneJob` library이고, 정상 종료 뒤 물체 pose 갱신과 `cell_ready` 확인은 호출자가 명시적으로 수행한다.
@@ -255,6 +257,7 @@ E-stop, protective stop, 속도·힘·작업영역 제한은 FR5 안전 하드�
 ```text
 docs/
 ├── data-factory.md                     # 이 계약
+├── data-collection-and-feedback.md     # 수집·feedback·retention·사람 개입 정본
 ├── architecture-and-quality.md         # 기존 pipeline 품질 SSOT 설명
 ├── data-collection.md                  # 기존 독립 pipeline 운영 절차
 ├── training-evidence.md                # 검토된 evidence index
