@@ -216,7 +216,7 @@ def _cell_target(config_root, calibration_id):
     if target.is_symlink(): raise ContractError("CALIBRATION_PATH")
     return target
 
-def qualify_place(artifact, config_root, confirm):
+def qualify_place(artifact, config_root):
     root=Path(artifact); files=_load_artifact(root); manifest,result=files["manifest.json"],files["result.json"]
     try: candidate=files["cell_calibration_candidate.json"]
     except KeyError as exc: raise ContractError("CALIBRATION_PROMOTION") from exc
@@ -243,11 +243,10 @@ def qualify_place(artifact, config_root, confirm):
     validate_cell_calibration_document(candidate,yaw0=sheet,robot=robot,required_status="CANDIDATE")
     qualified={**candidate,"qualification_status":"QUALIFIED"}; relative=f"cells/{candidate['calibration_id']}.json"; target=_cell_target(config_root,candidate["calibration_id"])
     promotion={"schema_version":"data_factory.place_promotion.v1","calibration_id":candidate["calibration_id"],"manifest_digest":canonical_digest(manifest),"candidate_digest":canonical_digest(candidate),"qualified_digest":canonical_digest(qualified),"target_relative_path":relative}
-    promotion_path=root/"promotion.json"; phrase=f"QUALIFY {candidate['calibration_id']} {promotion['candidate_digest']}"
+    promotion_path=root/"promotion.json"
     if promotion_path.exists():
         if load_json_strict(promotion_path)!=promotion: raise ContractError("CALIBRATION_PROMOTION")
     else:
-        if confirm(phrase) is not True: raise ContractError("CALIBRATION_CONFIRMATION")
         try: _write_json_exclusive(promotion_path,promotion)
         except FileExistsError:
             if load_json_strict(promotion_path)!=promotion: raise ContractError("CALIBRATION_PROMOTION")
@@ -262,7 +261,7 @@ def qualify_place(artifact, config_root, confirm):
 def main(argv=None):
     parser=ContractArgumentParser(); commands=parser.add_subparsers(dest="command",required=True); common=argparse.ArgumentParser(add_help=False);common.add_argument("--timeout-s",type=float,default=2.);common.add_argument("--max-age-s",type=float,default=.5);common.add_argument("--tcp-candidate-manifest");common.add_argument("--format",choices=("json","text"),default="json")
     commands.add_parser("capture",parents=[common])
-    calibration=commands.add_parser("calibrate-place",parents=[common]); calibration.add_argument("--center-snapshot"); calibration.add_argument("--x-ref-snapshot"); calibration.add_argument("--y-check-snapshot"); calibration.add_argument("--interactive",action="store_true"); calibration.add_argument("--y-check",action="store_true"); calibration.add_argument("--calibration-id",required=True); calibration.add_argument("--place-id",required=True); calibration.add_argument("--operator-or-agent-id",required=True); calibration.add_argument("--robot-system-id",default="fr5-lab-a"); calibration.add_argument("--yaw0-sheet",required=True); calibration.add_argument("--table-normal",nargs=3,type=float,default=(0.,0.,1.)); calibration.add_argument("--tolerance-mm",type=float,default=1.); calibration.add_argument("--scale-bar-mm",type=float,required=True); calibration.add_argument("--output-root",default=str(Path(__file__).resolve().parents[3]/"outputs/data_factory/qualifications"))
+    calibration=commands.add_parser("calibrate-place",parents=[common]); calibration.add_argument("--center-snapshot"); calibration.add_argument("--x-ref-snapshot"); calibration.add_argument("--y-check-snapshot"); calibration.add_argument("--interactive",action="store_true"); calibration.add_argument("--y-check",action="store_true"); calibration.add_argument("--calibration-id",required=True); calibration.add_argument("--place-id",required=True); calibration.add_argument("--operator-or-agent-id",required=True); calibration.add_argument("--robot-system-id",default="fr5-lab-a"); calibration.add_argument("--yaw0-sheet",required=True); calibration.add_argument("--table-normal",nargs=3,type=float,default=(0.,0.,1.)); calibration.add_argument("--tolerance-mm",type=float,default=1.); calibration.add_argument("--scale-bar-mm",type=float,required=True); calibration.add_argument("--output-root",default=str(Path(__file__).resolve().parents[3]/"outputs/data_factory/qualifications")); calibration.add_argument("--config-root",default=str(Path(__file__).resolve().parents[3]/"config/data_factory"))
     preview=commands.add_parser("resolve-place"); preview.add_argument("--artifact",required=True); preview.add_argument("--selected-sheet",required=True); preview.add_argument("--place-id"); preview.add_argument("--yaw-deg",type=float,required=True); preview.add_argument("--x-mm",type=float,required=True); preview.add_argument("--y-mm",type=float,required=True); preview.add_argument("--format",choices=("json","text"),default="json")
     promotion=commands.add_parser("qualify-place"); promotion.add_argument("--artifact",required=True); promotion.add_argument("--config-root",required=True); promotion.add_argument("--format",choices=("json","text"),default="json")
     node=rclpy=None
@@ -270,12 +269,7 @@ def main(argv=None):
         args=parser.parse_args(argv)
         if args.command=="resolve-place": output=resolve_place(args.artifact,selected_sheet=args.selected_sheet,place_id=args.place_id,yaw_deg=args.yaw_deg,x_mm=args.x_mm,y_mm=args.y_mm)
         elif args.command=="qualify-place":
-            def confirm(phrase):
-                try:
-                    with open("/dev/tty") as tty:
-                        print(f"Type {phrase} to promote this candidate:",file=sys.stderr,flush=True); return tty.readline().strip()==phrase
-                except OSError as exc: raise ContractError("CALIBRATION_CONFIRMATION",str(exc))
-            output=qualify_place(args.artifact,args.config_root,confirm)
+            output=qualify_place(args.artifact,args.config_root)
         else:
             if not math.isfinite(args.timeout_s) or args.timeout_s<=0 or not math.isfinite(args.max_age_s) or args.max_age_s<0: raise ContractError("CLI_USAGE")
             snapshots = []
@@ -302,6 +296,7 @@ def main(argv=None):
                 output=snapshots[0]
             if args.command=="calibrate-place":
                 output=calibrate_place(snapshots[0],snapshots[1],calibration_id=args.calibration_id,place_id=args.place_id,operator_or_agent_id=args.operator_or_agent_id,robot_system_id=args.robot_system_id,yaw0_sheet=args.yaw0_sheet,tcp_candidate_manifest=args.tcp_candidate_manifest,output_root=args.output_root,tolerance_mm=args.tolerance_mm,scale_bar_mm=args.scale_bar_mm,table_normal=args.table_normal,ycheck_snapshot=snapshots[2] if len(snapshots)>2 else None)
+                if output["status"]=="CANDIDATE_WITHIN_TOLERANCE": output=qualify_place(Path(args.output_root)/args.calibration_id,args.config_root)
     except ContractError as exc:
         print(json.dumps({"error":{"code":exc.code,"message":str(exc)}},sort_keys=True,separators=(",",":")),file=sys.stderr);return 2
     except (ImportError,RuntimeError,OSError) as exc:

@@ -8,7 +8,7 @@ from types import SimpleNamespace as NS
 from tools import fr5_data_factory as factory
 from tools.fr5_data_factory import ContractError, canonical_digest
 from tools.a4_place_yaw.generate_place_yaw_a4 import build_places, make_manifest
-from tools.data_factory.motion.pose_snapshot import RosCapture, build_pose_snapshot, calibrate_place, joint_positions, quaternion_to_rotation_columns, qualify_place, render_text, resolve_place, tcp_candidate
+from tools.data_factory.motion.pose_snapshot import RosCapture, build_pose_snapshot, calibrate_place, joint_positions, main as pose_snapshot_main, quaternion_to_rotation_columns, qualify_place, render_text, resolve_place, tcp_candidate
 
 
 class PoseSnapshotTest(unittest.TestCase):
@@ -89,11 +89,19 @@ class PoseSnapshotTest(unittest.TestCase):
             write("collection_profiles/collection.json",{"schema_version":"data_factory.collection_profile.v1","collection_profile_id":"collection","qualification_status":"QUALIFIED","quality_contract_digest":digest("quality")})
             write("objects/OBJECT_A.json",{"schema_version":"data_factory.object_profile.v2","object_profile_id":"OBJECT_A","qualification_status":"QUALIFIED","description":"test object","dimensions_mm":[40,30,20],"datum":"center"})
             write("grasps/top_center.json",{"schema_version":"data_factory.grasp_profile.v2","grasp_profile_id":"top_center","qualification_status":"QUALIFIED","object_profile_id":"OBJECT_A","grasp_kind":"top_center","gripper_close":{"command_position_m":.012,"acceptable_feedback_m":{"min":.012,"max":.014},"velocity_percent":20,"force_percent":30,"evidence_digest":digest("grasp")}})
-            confirmations=[]
-            qualified=qualify_place(root/"out"/"cal-3",config,lambda phrase:confirmations.append(phrase) or True)
+            import io
+            from contextlib import redirect_stdout
+            snapshot_paths=[]
+            for label,value in (("center",center),("xref",xref),("ycheck",ycheck)):
+                path=root/f"{label}.json";path.write_text(json.dumps(value));snapshot_paths.append(path)
+            output=io.StringIO()
+            with redirect_stdout(output):
+                self.assertEqual(pose_snapshot_main(("calibrate-place","--center-snapshot",str(snapshot_paths[0]),"--x-ref-snapshot",str(snapshot_paths[1]),"--y-check-snapshot",str(snapshot_paths[2]),"--calibration-id","cal-auto","--place-id","PLACE_A","--operator-or-agent-id","op","--yaw0-sheet",str(sheet),"--tcp-candidate-manifest",str(tcp),"--tolerance-mm","1","--scale-bar-mm","100","--output-root",str(root/"out"),"--config-root",str(config))),0)
+            self.assertEqual(json.loads(output.getvalue())["qualification_status"],"QUALIFIED")
+            self.assertTrue((config/"cells/cal-auto.json").is_file())
+            qualified=qualify_place(root/"out"/"cal-3",config)
             self.assertEqual(qualified["qualification_status"],"QUALIFIED")
-            self.assertEqual(confirmations,[f"QUALIFY cal-3 {canonical_digest({**qualified,'qualification_status':'CANDIDATE'})}"])
-            self.assertEqual(qualify_place(root/"out"/"cal-3",config,lambda _phrase:False),qualified)
+            self.assertEqual(qualify_place(root/"out"/"cal-3",config),qualified)
             selected30=make_manifest("PLACE_A","selected-30",30,build_places(3,3,20,30),20)
             job=factory.build_job_spec(selected30,x_mm=10,y_mm=5,job_id="job-1",robot_system_id="fr5-lab-a",collection_profile_id="collection",cell_calibration_id="cal-3",object_profile_id="OBJECT_A",object_description="test object",grasp_profile_id="top_center",operator_or_agent_id="op",approval_expiry="2099-01-01T00:00:00Z")
             validated=factory.validate_job_spec(job,data={"selected_sheet":selected30,"yaw0_sheet":json.loads(sheet.read_text())},config_root=config)
@@ -102,11 +110,11 @@ class PoseSnapshotTest(unittest.TestCase):
             for actual,want in zip(resolved["position_base_m"],[1.0061602540378444,2.009330127018922,3.]): self.assertAlmostEqual(actual,want,places=8)
 
             robot_path=config/"robot_systems/fr5-lab-a.json"; robot=json.loads(robot_path.read_text()); robot_path.write_text(json.dumps({**robot,"tcp_digest":digest("wrong")}))
-            with self.assertRaisesRegex(ContractError,"CALIBRATION_TCP"): qualify_place(root/"out"/"cal-3",config,lambda _phrase:True)
+            with self.assertRaisesRegex(ContractError,"CALIBRATION_TCP"): qualify_place(root/"out"/"cal-3",config)
             robot_path.write_text(json.dumps(robot))
             escaped=root/"escaped"; escaped.mkdir(); unsafe=root/"unsafe"
             (unsafe/"robot_systems").mkdir(parents=True); (unsafe/"robot_systems/fr5-lab-a.json").write_text(json.dumps(robot)); (unsafe/"cells").symlink_to(escaped,target_is_directory=True)
-            with self.assertRaisesRegex(ContractError,"CALIBRATION_PATH"): qualify_place(root/"out"/"cal-3",unsafe,lambda _phrase:True)
+            with self.assertRaisesRegex(ContractError,"CALIBRATION_PATH"): qualify_place(root/"out"/"cal-3",unsafe)
 
             mismatch=root/"out"/"cal-mismatch"; shutil.copytree(root/"out"/"cal-3",mismatch); (mismatch/"promotion.json").unlink()
             docs={name:json.loads((mismatch/name).read_text()) for name in ("manifest.json","result.json","cell_calibration_candidate.json","_complete.json")}
@@ -114,7 +122,7 @@ class PoseSnapshotTest(unittest.TestCase):
             changed_digest=canonical_digest(docs["cell_calibration_candidate.json"]); docs["manifest.json"]["cell_calibration_candidate_digest"]=changed_digest; docs["result.json"]["cell_calibration_candidate_digest"]=changed_digest; docs["result.json"]["calibration_digest"]=canonical_digest(docs["manifest.json"])
             for name in ("manifest.json","result.json","cell_calibration_candidate.json"): docs["_complete.json"]["files"][name]=canonical_digest(docs[name]); (mismatch/name).write_text(json.dumps(docs[name]))
             (mismatch/"_complete.json").write_text(json.dumps(docs["_complete.json"]))
-            with self.assertRaisesRegex(ContractError,"CALIBRATION_PROMOTION"): qualify_place(mismatch,config,lambda _phrase:True)
+            with self.assertRaisesRegex(ContractError,"CALIBRATION_PROMOTION"): qualify_place(mismatch,config)
 
             manifest=root/"out"/"cal-3"/"manifest.json"; value=json.loads(manifest.read_text()); value["place_id"]="OTHER"; manifest.write_text(json.dumps(value))
             with self.assertRaises(ContractError): resolve_place(root/"out"/"cal-3",selected_sheet=sheet,place_id="PLACE_A",yaw_deg=0,x_mm=0,y_mm=0)

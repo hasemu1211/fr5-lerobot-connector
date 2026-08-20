@@ -1,0 +1,6 @@
+{
+  "schema_version": "data_factory.collection_profile.v1",
+  "collection_profile_id": "fr5-dual-rgb-30hz-v1",
+  "qualification_status": "QUALIFIED",
+  "quality_contract_digest": "sha256:73e3c83d30867db024020302b3a28f4d039321fac72dc7f9a1535bfb5faf324f"
+}

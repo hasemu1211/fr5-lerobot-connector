@@ -1,0 +1,8 @@
+{
+  "schema_version": "data_factory.robot_system.v1",
+  "robot_system_id": "fr5-lab-a",
+  "qualification_status": "QUALIFIED",
+  "base_frame": "base_link",
+  "tcp_digest": "sha256:5ecc779a26905471c0d7ea792361fe5c81756fd072138851d95ab9f2cab31eb3",
+  "state_action_schema_digest": "sha256:5ff9a0e471163d6e60a66d3eef67c99564eee8869311d5203769262c0063ef34"
+}

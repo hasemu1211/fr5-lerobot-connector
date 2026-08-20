@@ -1,0 +1,54 @@
+{
+  "schema_version": "data_factory.motion_qualification.v1",
+  "motion_qualification_id": "fr5-place-a-wood-cube-r001",
+  "qualification_status": "QUALIFIED",
+  "robot_system_id": "fr5-lab-a",
+  "cell_calibration_id": "place-a-yaw0-r002",
+  "object_profile_id": "wood-cube-25mm-r001",
+  "grasp_profile_id": "wood-cube-25mm-top-center-r001",
+  "profile_digests": {
+    "robot_system": "sha256:56c58f09c222822ef0cfeb6cc4c401f0e8f19f9885ef0a51ecd6f3fa2e70caf3",
+    "cell_calibration": "sha256:dd085aee8a65916325f111fb212fc3c47a002b642b88ddcd1b65723b5c360f1b",
+    "object_profile": "sha256:29a1e156aea1e85aa4204df81c0bb3427d5a255b3f35504f5f4138f47e59512a",
+    "grasp_profile": "sha256:262af862eb62c54312ec084a11ee6616852f332b0d07e2fe076f41cc84f4f4e2"
+  },
+  "home_candidate_digest": "sha256:e6db98e17dc596dd178f1a858461fe4ae9663a440077fe46ceef71fdbf769cd8",
+  "robot_description_digest": "sha256:a9108b594739b64eac42a39d9aa961ece688ffd8d06ff5af03df99cbf63ab345",
+  "moveit_config_digest": "sha256:b5ad9867bf309c347fd2c92a8f7016359e2b7ea2f7ccc73d68ece1d9c326fef8",
+  "planning_scene_digest": "sha256:8d980d6bbb6a30d6aea6a6c46a4d8326c4d578de444a908b96fd71ff1709a4cc",
+  "frames": {
+    "planning_frame": "base_link",
+    "planning_group": "fairino5_v6_group",
+    "tool_link": "wrist3_link"
+  },
+  "tool_to_tcp": {
+    "translation_m": [0, 0, 0.256],
+    "rotation_columns": [[1, 0, 0], [0, 1, 0], [0, 0, 1]]
+  },
+  "datum_to_tcp_grasp": {
+    "translation_m": [-0.00009243761090366176, -0.00012339865373545145, 0.0009233984679082874],
+    "rotation_columns": [
+      [0.9997592065818978, -0.021444164865804787, 0.004655818718837562],
+      [-0.021446742632311097, -0.9997698649036663, 0.000504441244329574],
+      [0.004643929930339674, -0.0006041719240037257, -0.9999890343854221]
+    ]
+  },
+  "offsets_m": {"pregrasp": 0.1, "approach_stop": 0.02, "lift": 0.04, "retreat": 0.1},
+  "gripper_positions_m": {"open": 0.021, "closed": 0.01134},
+  "qualified_safe_joint_positions_rad": [-1.5707963267948966, -1.5707963267948966, 1.5707963267948966, -1.5707963267948966, -1.5707963267948966, 0],
+  "goal_tolerances": {"position_m": 0.001, "orientation_rad": 0.01, "joint_rad": 0.01},
+  "max_joint_state_age_s": 0.1,
+  "execution_timeouts_s": {"heartbeat_lease": 1.0, "cancel": 3.0, "precontact_confirmation": 120.0, "grasp_verdict": 120.0, "semantic_verdict": 120.0},
+  "phase_limits": {
+    "PREGRASP_PTP": {"velocity_scaling": 0.03, "acceleration_scaling": 0.03, "planning_timeout_s": 5.0, "execution_timeout_s": 20.0},
+    "APPROACH_STOP_LIN": {"velocity_scaling": 0.03, "acceleration_scaling": 0.03, "planning_timeout_s": 5.0, "execution_timeout_s": 20.0},
+    "FINAL_APPROACH_LIN": {"velocity_scaling": 0.03, "acceleration_scaling": 0.03, "planning_timeout_s": 5.0, "execution_timeout_s": 20.0},
+    "GRIPPER_CLOSE": {"command_duration_s": 6.0, "execution_timeout_s": 15.0, "completion_tolerance_m": 0.0008400000000000005},
+    "LIFT_LIN": {"velocity_scaling": 0.03, "acceleration_scaling": 0.03, "planning_timeout_s": 5.0, "execution_timeout_s": 20.0},
+    "LOWER_LIN": {"velocity_scaling": 0.03, "acceleration_scaling": 0.03, "planning_timeout_s": 5.0, "execution_timeout_s": 20.0},
+    "GRIPPER_OPEN": {"command_duration_s": 6.0, "execution_timeout_s": 15.0, "completion_tolerance_m": 0.000105},
+    "RETREAT_LIN": {"velocity_scaling": 0.03, "acceleration_scaling": 0.03, "planning_timeout_s": 5.0, "execution_timeout_s": 20.0},
+    "SAFE_POSE_PTP": {"velocity_scaling": 0.03, "acceleration_scaling": 0.03, "planning_timeout_s": 5.0, "execution_timeout_s": 20.0}
+  },
+  "qualified_at": "2026-08-20T06:56:05Z"
+}
