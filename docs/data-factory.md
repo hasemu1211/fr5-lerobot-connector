@@ -8,6 +8,8 @@
 
 2026-08-19에는 25 mm 나무 큐브의 scripted `pickup_e2e`를 scene binding, collision check, executor, recorder와 한-job 조정기로 실물 HIL했다. 물리 경로와 30 Hz dataset 정량 gate는 통과했지만 카메라는 cell에 고정되지 않았고 `training_approved.json`도 만들지 않았다. 이 실행에 쓴 run별 harness는 ignored evidence이며 공개 운영 명령이 아니다. 현재 재사용 표면은 각 strict JSONL module과 `OneJob` library이고, 정상 종료 뒤 물체 pose 갱신과 `cell_ready` 확인은 호출자가 명시적으로 수행한다.
 
+2026-08-20에는 체크인된 `run_job --mode plan_only`를 G1=`(PLACE_A, 0°, -70 mm, +35 mm)`에서 실제 ROS graph로 검증했다. scene revision 11에 결속된 결과는 `PLANNED`였고 execute·gripper action status와 recorder·camera process는 관측되지 않았다. dataset 크기는 전후 105,140,855 byte로 같고 gripper feedback은 동일했으며 arm feedback의 최대 차이는 3.73 µrad였다. 이는 현재 MoveIt graph의 계획 성공과 비실행 경로의 근거일 뿐 physical motion, runtime planning-scene digest attestation, 녹화·카메라 판정 또는 학습 승인을 뜻하지 않는다.
+
 - 첫 live task: `pickup_e2e`
 - 첫 grasp profile: `top_center` 하나
 - pose 권위: A4/물리 기준과 등록된 TCP 좌표
@@ -41,6 +43,14 @@
 brightness, clipping, sharpness와 색 변화량은 정성 검토를 돕는 warning이다. 이 값만으로 episode를 폐기하지 않는다. 학습 승격은 실제 dataset의 validator `PASS`와 사람 preview 승인을 모두 요구한다.
 
 2026-08-14의 8초 UVC raw probe에서는 약 14.5 Hz가 관찰됐다. 이는 30 Hz profile의 startup 최소 22.5 Hz보다 낮은 **해당 probe 경로의 경고/실패**다. 카메라 연결이 불안정하다는 판정이나 dataset validator 결과가 아니다. 실제 ROS camera profile은 `scripts/preflight_collection.sh --live`와 저장된 `recording_quality.jsonl`·provenance를 사용하는 validator로 다시 판정한다. probe에 맞춰 기존 threshold를 낮추거나 dataset FPS를 자동 변경하지 않는다.
+
+## P3 behavior quality (report-only)
+
+기존 technical validator는 변경하지 않고 versioned result digest를 read-only prerequisite로 참조한다. executor-owned `phase_events.jsonl`은 phase, sequence, ROS control-event time, monotonic time과 action terminal evidence를 bounded queue로 기록한다. recorder row join은 qualified same-clock의 accepted-to-terminal interval에 row index만 배정하며 clock mismatch, sequence gap, overlap과 missing terminal을 추정하지 않고 `NOT_AVAILABLE` 또는 flag로 남긴다.
+
+`quality/`의 post-run 순수 함수는 compiled plan의 chain·endpoint scalar, joint tracking/progress/stall, gripper close window와 lift continuity를 attribute로 만든다. serialized trajectory shape와 TCP/FK/TF metric은 적격화 전 `NOT_AVAILABLE`이며 현재 `camera_semantic_authority=false`이므로 visual/object semantic 판정은 만들지 않는다. `episode_quality.json`은 이 attribute와 기존 technical-validator reference를 묶을 뿐 weighted score, 자동 삭제 또는 training approval을 만들지 않는다.
+
+sidecar queue·disk 실패는 `BEHAVIOR_REPORT_UNAVAILABLE`로만 남고 motion, heartbeat와 recorder를 기다리거나 취소시키지 않는다. 현재 executor에는 sidecar writer가 연결됐고 post-run report는 pure API로 제공된다. 공개 runner의 live lifecycle과 자동 report 생성은 P4 qualification 전까지 제공하지 않는다. v1 writer resource contract는 queue 64개, UTF-8 text field 128 byte, JSONL line 4096 byte로 versioned report에 기록하며 실제 8 GB 장비 qualification은 P4 `RES-01`에서 별도로 수행한다.
 
 ## 첫 JobSpec
 
@@ -116,6 +126,8 @@ python3 -m tools.data_factory.run_job --factory-jsonl
 
 `live` payload는 schema만 검사한 뒤 `LIVE_NOT_QUALIFIED`로 부작용 없이 거부한다. 실제 live 공개는 planning-scene readback, collision/no-motion evidence, cached-plan approval, recorder/commit/validator와 post-reset scene/cell 처리를 같은 runner에 결속하는 다음 qualification 뒤에만 한다.
 
+`config/data_factory/`의 robot, collection, cell과 motion qualification은 resolver 입력을 canonical digest로 고정하는 정적 계약이다. 현재 `fr5-place-a-wood-cube-r001`은 tracked URDF·MoveIt 설정과 기존 HIL binding에서 새 revision으로 재구성한 plan-only 입력이며 설치된 TCP나 runtime planning scene의 독립 실측·readback을 대체하지 않는다. coordinate/profile `QUALIFIED`, physical execution approval, `cell_ready`, motion approval과 training approval은 서로 다른 gate다.
+
 ## A4 pose와 로봇 좌표
 
 A4 한 장은 사람이 다음 값을 읽고 로봇이 같은 값으로 변환하게 한다.
@@ -141,6 +153,8 @@ T_base_target = T_base_place0
 ```
 
 원본 출력의 100 mm 막대 실측값과 PDF 내용 보정률은 인쇄 생성 이력과 올바른 sheet family 확인에만 쓴다. 보정한 실물 막대는 100 mm 좌표계로 적격성을 판정하며, `CENTER→X_REF` 거리와 100 mm 막대의 residual은 허용오차 이탈 시 거부하는 gate이다. runtime pose는 이 오차를 배율로 흡수하지 않고 항상 강체 변환과 `x_mm/1000`, `y_mm/1000`을 사용한다.
+
+`pose_snapshot.py calibrate-place`는 같은 TCP binding의 `CENTER`, `X_REF`, `Y_CHECK` 3점과 artifact digest가 모두 일치하고 지정 tolerance를 통과하면 `config/data_factory/cells/<calibration_id>.json`으로 자동 승격한다. 이는 coordinate-only qualification이며 calibration evidence의 `execution_authorized=false`와 `training_approved=false`는 유지한다. 2점, tolerance 이탈 또는 binding 불일치는 승격하지 않으며 `qualify-place`는 같은 artifact의 noninteractive idempotent replay/recovery 경로다.
 
 인쇄 scale, A4 재배치, TCP 반복 측정과 물체 배치의 결합 오차가 `top_center` grasp margin 이하여야 live pickup을 허용한다. 충족하지 못하면 vision 보정부터 추가하지 않고 물리 locator를 보강한다.
 
@@ -251,7 +265,9 @@ config/data_factory/                    # 구현 시 필요한 검토된 JSON만
 ├── cells/
 ├── objects/
 ├── grasps/
-└── collection_profiles/
+├── collection_profiles/
+├── home_candidates/
+└── motion_qualifications/
 
 tools/                                  # 재사용 가능한 library/CLI
 scripts/                                # 사람용 entry point와 bringup wrapper
@@ -287,6 +303,8 @@ outputs/
 │   │   ├── resolved_pose.json
 │   │   ├── plan.json
 │   │   ├── events.jsonl
+│   │   ├── phase_events.jsonl         # executor control event; RGB/row를 복사하지 않음
+│   │   ├── episode_quality.json       # validator reference와 scalar report
 │   │   ├── result.json
 │   │   ├── staging_manifest.json       # 실제 LeRobot staging 경로의 한정된 목록
 │   │   ├── diagnostic.json             # 실패 시 최소 봉투 하나
@@ -309,6 +327,8 @@ build/ install/ log/                     # colcon/ROS 산출물; factory evidenc
 ```
 
 run 디렉터리는 control-plane metadata만 소유한다. RGB/video/Parquet를 복사하지 않는다. 실제 batch staging은 LeRobot dataset root 아래에 유지하고 `staging_manifest.json`은 허용된 정확한 경로만 가리킨다. quarantine도 무거운 파일을 복제하지 않고 dataset marker와 `result.json`으로 표시한다.
+
+P3 sidecar와 quality report는 digest, row count와 phase scalar만 저장하며 recorder row, RGB, MP4와 Parquet를 복제하지 않는다.
 
 기존 `datasets/fr5_episodes/hil_usb_cam_30hz_20260812/`는 과거 HIL dataset으로 그대로 보존한다. 현재 평평한 `outputs/diagnostics/`와 `outputs/previews/`도 삭제하지 않는다. 새 factory run은 그 경로에 쓰지 않으며, 별도 inventory·checksum·참조 검사를 통과한 뒤에만 `outputs/legacy/`로 이동한다. 기존 dataset은 새 layout으로 복사하거나 이름을 바꾸지 않는다.
 

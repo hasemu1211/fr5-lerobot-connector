@@ -33,6 +33,8 @@ ros2 launch fairino5_v6_moveit2_config real_robot.launch.py \
 
 `fairino5_controller`, `gripper_controller`, `joint_state_broadcaster`가 모두 `active`여야 한다. `ServoMoveStart` 또는 `ServoJ`가 0이 아닌 코드를 내면 녹화를 시작하지 않는다.
 
+기동 로그가 gripper activation 실패를 보고하면 재시도로 우회하지 않는다. 빈 gripper와 완전히 종료된 ros2_control을 확인한 maintenance 상태에서만 `ActGripper(1,0)` 후 `ActGripper(1,1)`을 수행한다. 평상시 기동은 상태 확인만 강제하고 해당 명령을 자동 전송하지 않는다. 이유와 제어 소유권은 [하드웨어 계약](hardware.md#그리퍼-활성화-안전-규칙)을 따른다.
+
 ## 2. 카메라 구성 선택과 실행
 
 먼저 수집에 사용할 카메라 구성을 고른다.
