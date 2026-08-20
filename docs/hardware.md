@@ -54,7 +54,7 @@ action[6]              = finger_right_joint reference [m]
 - 이 21 mm 값은 현재 actuator와 feedback의 **소프트웨어 스케일**이다. 그리퍼 본체나 전달기구가 바뀔 때만 실측 후 바꾼다.
 - `FR5_GRIPPER_VELOCITY`와 `FR5_GRIPPER_FORCE`는 SI 단위가 아니라 FAIRINO `MoveGripper`의 1–100 설정값이다.
 - 명령은 전용 non-realtime worker가 `MoveGripper(..., block=1)`로 접수하며, `ros2_control` update loop에서 SDK RPC 반환이나 물리 동작 완료를 기다리지 않는다. `block=1`의 RPC 반환 시간은 realtime으로 보장되지 않는다.
-- 물체 접촉 후 피드백이 명령점 밖에서 500 ms 안정되면 worker는 이를 전송 완료로만 처리한다. 이는 파지 성공 판정이 아니다. 기본 `HUMAN_GATED`는 profile 피드백 확인 뒤 리프트 전에 사람의 `GRASP_VERDICT=PASS`를 요구한다. 명시적으로 승인한 `HIL_NUMERIC_PROXY`는 같은 수치 범위만 자동 판정하며 물체 식별·영상 의미 성공이나 training 승인을 대신하지 않는다.
+- 물체 접촉 후 피드백이 명령점 밖에서 500 ms 안정되면 worker는 이를 전송 완료로만 처리한다. 이는 파지 성공 판정이 아니다. 공개 pickup은 exact plan 승인 뒤 close/lift의 profile 피드백을 제어 gate로 검사하고 lift까지 연속 실행한 다음, post-lift 사람 semantic 판정만 받는다. 수치 범위나 과거 `HIL_NUMERIC_PROXY` evidence는 물체 식별·영상 의미 성공이나 training 승인을 대신하지 않는다.
 - LIVE 계획과 실행은 활성 `/robot_description`의 hardware plugin·velocity·force·settle 설정을 읽어 plan digest에 묶는다. profile과 다르거나 실물 FAIRINO plugin을 확인할 수 없으면 실행하지 않는다.
 
 ### 좌표 권위와 TCP
@@ -69,6 +69,8 @@ action[6]              = finger_right_joint reference [m]
 hardware interface의 activate 단계에서 `ActGripper`를 자동 호출하지 않는다. 활성화 뒤 첫 위치 명령은 전체 stroke 초기화 동작을 만들 수 있으므로 controller 시작만으로 finger를 움직여서는 안 된다.
 
 활성화가 필요할 때만 빈 그리퍼를 확인한 maintenance/bringup 절차에서 `ActGripper(index,0)` 후 `ActGripper(index,1)`을 명시적으로 수행하고, 첫 위치 명령에서 초기화 동작이 발생할 수 있다고 취급한다. 평상시 controller activation은 현재 위치를 읽어 동기화할 뿐 열림·닫힘 명령을 만들지 않는다.
+
+기동 판정은 세 경우로 나눈다. activation bit가 inactive면 ros2_control을 완전히 종료한 maintenance 상태에서만 `0→1`을 수행한다. active지만 ROS feedback이 open 목표 `0.021 m`가 아니면 reset을 반복하지 말고, 빈 작업공간에서 승인된 `/gripper_controller` open 명령 한 번으로 정규화한 뒤 reference와 feedback을 확인한다. active이고 open이면 추가 `ActGripper`나 숨은 시작 motion 없이 job preflight로 간다.
 
 ### 제어 소유권
 

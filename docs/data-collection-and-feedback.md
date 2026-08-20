@@ -164,7 +164,8 @@ failure 직전 영상은 새 MP4를 복사하는 대신 가능한 한 기존 평
 | place calibration | 로봇을 CENTER/X_REF/Y_CHECK에 물리적으로 이동하고 캡처 시점을 선택 | digest/tolerance 재검증과 within-tolerance coordinate qualification; 별도 승격 문구 없음 |
 | episode 준비 | 물체를 제안된 qualified coordinate에 놓고 주변·E-stop을 확인 | JobSpec/scene/profile binding과 camera 연결·FPS·지연 정량 preflight; 현재 구도 정성 판정은 하지 않음 |
 | 첫 live motion | exact plan summary를 보고 해당 plan digest를 한 번 승인 | planning scene/readback/collision/no-motion/start-state gate와 cached-plan 실행 |
-| precontact/grasp | 현재 camera가 semantic authority가 아니므로 실제 접촉·파지의 최종 의미 판단 | fresh controller/gripper numeric evidence와 timeout/cancel/block |
+| exact live plan | path/flow/clearance/speed와 plan digest를 한 번 승인 | scene/readback/collision/no-motion과 cached-plan binding |
+| post-lift semantic | 현재 camera가 semantic authority가 아니므로 실제 pickup 성공/실패를 한 번 판정 | close/lift controller·gripper evidence, recorder freeze와 timeout/cancel/block |
 | run 종료 | released object pose/scene 상태를 입력하고 cell ready를 acknowledge | commit→validator, report와 coverage 갱신; scene 갱신 전 다음 job 차단 |
 | training admission | 사용할 episode와 split/ID-OOD 정의 승인 | v2 split/provenance 생성과 checkpoint reload 검증 |
 | variant HIL | P6 plan-only pair 검토 뒤 제한된 실물 비교 승인 | DIRECT/TWO_STAGE_ALIGN plan·metric·lineage 비교 |

@@ -35,6 +35,8 @@ ros2 launch fairino5_v6_moveit2_config real_robot.launch.py \
 
 기동 로그가 gripper activation 실패를 보고하면 재시도로 우회하지 않는다. 빈 gripper와 완전히 종료된 ros2_control을 확인한 maintenance 상태에서만 `ActGripper(1,0)` 후 `ActGripper(1,1)`을 수행한다. 평상시 기동은 상태 확인만 강제하고 해당 명령을 자동 전송하지 않는다. 이유와 제어 소유권은 [하드웨어 계약](hardware.md#그리퍼-활성화-안전-규칙)을 따른다.
 
+activation은 active지만 feedback이 open `0.021 m`가 아니면 `ActGripper`를 반복하지 않는다. 빈 작업공간에서 승인된 ROS gripper open 명령 한 번을 보내 reference/feedback을 확인한 뒤 수집한다.
+
 ## 2. 카메라 구성 선택과 실행
 
 먼저 수집에 사용할 카메라 구성을 고른다.
@@ -92,6 +94,12 @@ scripts/preflight_collection.sh --live --camera-profile up-side
 한 데이터셋 안에서는 row rate를 바꾸지 않는다. 기본값은 공개 SmolVLA 데이터와 같은 30 row/s다. 저자원 노트북은 row 주기를 낮추는 대신 episode 종료 후 batch video encoding과 기본 queue 128을 사용하며 frame을 합성하지 않는다.
 
 ## 4. episode 녹화
+
+### 데이터팩토리 one-job pickup
+
+qualified JobSpec과 scene/cell을 쓸 때는 [one-job runner](data-factory.md#one-job-runner)의 `--mode live`를 사용한다. 승인 화면은 path, `LIFT_LIN`까지의 연속 flow, collision-check 상태, 속도와 exact plan digest를 보여준다. 승인 뒤 recorder의 첫 aligned row부터 pregrasp→approach→close→lift까지 자동 녹화하며 중간 prompt를 넣지 않는다. 들기 뒤 녹화를 freeze하고 실제 성공 여부를 `PASS/FAIL`로 한 번 묻는다. reset·commit·validator 뒤 물체 위치와 빈 gripper를 확인해 `SCENE_READY`를 입력하면 끝난다.
+
+임시 camera profile은 정량 기록만 하며 화면으로 성공을 자동 판정하지 않는다. validator `PASS`도 `training_approved.json`을 만들지 않는다.
 
 ```bash
 scripts/collect.sh pick_red_up \

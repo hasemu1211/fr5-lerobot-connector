@@ -12,6 +12,10 @@
 
 2026-08-20에는 체크인된 `run_job --mode plan_only`를 G1=`(PLACE_A, 0°, -70 mm, +35 mm)`에서 실제 ROS graph로 검증했다. scene revision 11에 결속된 결과는 `PLANNED`였고 execute·gripper action status와 recorder·camera process는 관측되지 않았다. dataset 크기는 전후 105,140,855 byte로 같고 gripper feedback은 동일했으며 arm feedback의 최대 차이는 3.73 µrad였다. 이는 현재 MoveIt graph의 계획 성공과 비실행 경로의 근거일 뿐 physical motion, runtime planning-scene digest attestation, 녹화·카메라 판정 또는 학습 승인을 뜻하지 않는다.
 
+같은 날 공개 `run_job --mode live`의 G1 r007은 exact cached plan 승인 뒤 `PREGRASP_PTP → APPROACH_STOP_LIN → FINAL_APPROACH_LIN → GRIPPER_CLOSE → LIFT_LIN`을 중간 사람 hold 없이 실행했다. phase terminal→다음 dispatch 간격은 최대 2.120 ms였고, post-lift에서 recorder를 freeze한 뒤 사람 semantic `PASS`를 받았다. reset은 녹화 밖에서 끝났으며 678 rows·22.57 s·30.00 Hz, H.264 640×480 678 frames, alignment failure·queue drop 0으로 commit/validator를 통과했다. 임시 single camera의 visual semantic 권한과 `training_authorized`는 모두 false이며 8 GB 이식성은 아직 `QUALIFICATION_REQUIRED`다.
+
+r007의 체감 정지는 runner queue 적체와 구분한다. terminal 뒤 다음 dispatch는 최대 2.120 ms였지만 `GRIPPER_CLOSE`와 `GRIPPER_OPEN` goal 자체가 qualification의 `command_duration_s=6.0`을 사용해 각각 약 6.06 s와 6.04 s 뒤 terminal이 됐다. 다음 최적화는 이 command/controller terminal 시간과 arm phase의 stop-to-stop 궤적을 별도로 측정·재적격화해야 하며, 현재 안전 qualification 값을 임의로 줄이지 않는다.
+
 - 첫 live task: `pickup_e2e`
 - 첫 grasp profile: `top_center` 하나
 - pose 권위: A4/물리 기준과 등록된 TCP 좌표
@@ -36,7 +40,7 @@
 - row FPS: 설정 FPS의 ±10%
 - 설정 주기의 2배를 넘는 row gap: 전체의 1% 이하
 - row와 camera source pause: 250 ms 이하
-- camera source FPS: dataset FPS의 75% 이상; 30 Hz profile에서는 22.5 Hz 이상
+- 저장 후 camera source FPS: dataset FPS의 75% 이상; 공개 live 시작 gate는 30 Hz profile을 95%인 28.5 Hz 이상으로 더 엄격하게 검사
 - camera frame 반복률: 25% 이하
 - target alignment: 50 ms 이하
 - camera transport age: 300 ms 이하
@@ -52,7 +56,7 @@ brightness, clipping, sharpness와 색 변화량은 정성 검토를 돕는 warn
 
 `quality/`의 post-run 순수 함수는 compiled plan의 chain·endpoint scalar, joint tracking/progress/stall, gripper close window와 lift continuity를 attribute로 만든다. serialized trajectory shape와 TCP/FK/TF metric은 적격화 전 `NOT_AVAILABLE`이며 현재 `camera_semantic_authority=false`이므로 visual/object semantic 판정은 만들지 않는다. `episode_quality.json`은 이 attribute와 기존 technical-validator reference를 묶을 뿐 weighted score, 자동 삭제 또는 training approval을 만들지 않는다.
 
-sidecar queue·disk 실패는 `BEHAVIOR_REPORT_UNAVAILABLE`로만 남고 motion, heartbeat와 recorder를 기다리거나 취소시키지 않는다. 현재 executor에는 sidecar writer가 연결됐고 post-run report는 pure API로 제공된다. 공개 runner의 live lifecycle과 자동 report 생성은 P4 qualification 전까지 제공하지 않는다. v1 writer resource contract는 queue 64개, UTF-8 text field 128 byte, JSONL line 4096 byte로 versioned report에 기록하며 실제 8 GB 장비 qualification은 P4 `RES-01`에서 별도로 수행한다.
+sidecar queue·disk 실패는 `BEHAVIOR_REPORT_UNAVAILABLE`로만 남고 motion, heartbeat와 recorder를 기다리거나 취소시키지 않는다. 현재 executor에는 sidecar writer가 연결됐고 post-run report는 pure API로 제공된다. 공개 runner의 live lifecycle은 sidecar를 기다리지 않으며 자동 report 생성은 아직 하지 않는다. v1 writer resource contract는 queue 64개, UTF-8 text field 128 byte, JSONL line 4096 byte로 versioned report에 기록한다. r007 `RES-01`은 현재 16 GB 호스트에서 sampling error·swap I/O·queue drop 0을 보였지만 실제 8 GB 장비 qualification을 대체하지 않는다.
 
 ## 첫 JobSpec
 
@@ -102,7 +106,7 @@ builder의 stdout은 기존 `validate-job --job -`에 바로 전달할 수 있�
 
 ## One-job runner
 
-현재 공개 범위는 `plan_only`다. 사람은 아래 한 명령을 실행하고 누락된 값만 TTY에서 입력할 수 있다. stdout은 machine JSON 한 줄, prompt는 stderr에만 나온다.
+공개 범위는 `plan_only`와 qualified `pickup_e2e` live다. 사람은 아래 한 명령을 실행하고 누락된 값만 TTY에서 입력할 수 있다. stdout은 machine JSON 한 줄, prompt는 stderr에만 나온다.
 
 ```bash
 python3 -m tools.data_factory.run_job --mode plan_only \
@@ -116,9 +120,27 @@ python3 -m tools.data_factory.run_job --mode plan_only \
   --expected-robot-system-id <robot-system-id>
 ```
 
+live는 같은 입력에 qualified camera와 저장 위치만 추가한다.
+
+```bash
+python3 -m tools.data_factory.run_job --mode live \
+  --run-id <고유-run-id> \
+  --job <canonical-job.json> \
+  --selected-sheet <선택한-yaw-manifest.json> \
+  --yaw0-sheet <같은-family의-yaw0-manifest.json> \
+  --config-root <검토된-config-root> \
+  --motion-qualification <qualification.json> \
+  --home-candidate <home-candidate.json> \
+  --urdf <robot.urdf> \
+  --expected-robot-system-id <robot-system-id> \
+  --camera-profile up \
+  --dataset-root datasets/fr5_episodes/<dataset-name> \
+  --run-root outputs/data_factory/runs
+```
+
 TTY에서 `--job`을 생략하면 기존 `build-job --interactive`가 이어서 실행되어 point/연속 좌표와 profile을 선택한다. 이미 만든 JobSpec을 재사용할 때만 `--job <canonical-job.json>`을 추가한다. runner가 별도 builder 규칙을 복제하지 않으므로 두 입력은 같은 validator와 digest 경로로 수렴한다.
 
-AI는 같은 모듈의 `--factory-jsonl`을 사용한다. command envelope는 exact `schema_version,op_id,op,payload`이고 `op`는 `run`, `status`, `cancel`이다. `run`은 즉시 `RUNNING`을 응답하고 terminal `RESULT` event를 정확히 한 번 낸다. `status`는 child pipe를 건드리지 않는 cached snapshot이며 `cancel`과 stdin EOF는 worker가 소유한 bounded child 종료로 수렴한다.
+AI는 같은 모듈의 `--factory-jsonl`을 사용한다. command envelope는 exact `schema_version,op_id,op,payload`이고 `op`는 `run`, `status`, `cancel`이다. `run`은 즉시 `RUNNING`을 응답하고 terminal `RESULT` event를 정확히 한 번 낸다. `status`는 child pipe를 건드리지 않는 cached snapshot이며 `cancel`과 stdin EOF는 worker가 소유한 bounded child 종료로 수렴한다. live의 plan/semantic/scene 결정은 JSONL이 대신 만들지 않고 로컬 `/dev/tty`에서 받는다.
 
 ```bash
 python3 -m tools.data_factory.run_job --factory-jsonl
@@ -126,9 +148,9 @@ python3 -m tools.data_factory.run_job --factory-jsonl
 
 `plan_only`는 scene state에서 JobSpec의 object profile과 `(place_id,yaw_deg,x_mm,y_mm)`가 정확히 일치하는 `ON_SURFACE` instance 하나를 결속한다. executor plan만 만들며 recorder begin, dataset 생성, 카메라 접근, execute action은 수행하지 않는다. 결과의 `camera_semantic_authority=false`는 현재 떨어져 임시 배치된 카메라를 물체·파지 정성 판정에 사용하지 않는다는 뜻이다.
 
-`live` payload는 schema만 검사한 뒤 `LIVE_NOT_QUALIFIED`로 부작용 없이 거부한다. 실제 live 공개는 planning-scene readback, collision/no-motion evidence, cached-plan approval, recorder/commit/validator와 post-reset scene/cell 처리를 같은 runner에 결속하는 다음 qualification 뒤에만 한다.
+`live`는 30 Hz camera warm-up, planning-scene apply/readback, dense collision sampling, plan-only no-motion evidence와 exact cached-plan summary를 먼저 만든다. exact digest 승인 전에는 recorder나 motion을 시작하지 않는다. 승인 뒤 recorder의 첫 aligned row를 확인하고 pickup을 실행하며, post-lift freeze 뒤 사람 semantic 판정, 녹화 밖 reset, precommit safety, commit, validator와 postcommit scene/cell 확인 순으로 끝낸다. 어느 gate든 실패하면 다음 job을 허용하지 않는다.
 
-`config/data_factory/`의 robot, collection, cell과 motion qualification은 resolver 입력을 canonical digest로 고정하는 정적 계약이다. 현재 `fr5-place-a-wood-cube-r001`은 tracked URDF·MoveIt 설정과 기존 HIL binding에서 새 revision으로 재구성한 plan-only 입력이며 설치된 TCP나 runtime planning scene의 독립 실측·readback을 대체하지 않는다. coordinate/profile `QUALIFIED`, physical execution approval, `cell_ready`, motion approval과 training approval은 서로 다른 gate다.
+`config/data_factory/`의 robot, collection, cell과 motion qualification은 resolver 입력을 canonical digest로 고정하는 정적 계약이다. 현재 `fr5-place-a-wood-cube-r001`은 tracked URDF·MoveIt 설정과 기존 HIL binding에서 재구성한 qualification이며, live에서도 설치된 TCP·활성 robot description·planning-scene readback과 exact plan 승인을 다시 요구한다. coordinate/profile `QUALIFIED`, physical execution approval, `cell_ready`, motion approval과 training approval은 서로 다른 gate다.
 
 ## A4 pose와 로봇 좌표
 
@@ -164,25 +186,22 @@ T_base_target = T_base_place0
 
 ```text
 validate
-  → human setup approval
-  → full forward/reset dry-run
-  → human motion approval
-  → record and approach
-  → pre-contact confirmation
-  → close and verify object-specific feedback window
-  → grasp verdict
-  → lift
+  → planning-scene/readback/collision/no-motion preflight
+  → exact plan approval
+  → recorder first aligned row
+  → record: pregrasp → approach → final approach → close → lift
   → freeze
-  → semantic verdict
+  → human semantic verdict
   → reset outside recording
   → commit or abort
-  → human cell-ready confirmation
+  → validator
+  → human scene/cell-ready confirmation
 ```
 
 - 오케스트레이터는 승인된 한 job만 소유하고 다음 job을 자동 시작하지 않는다.
 - recorder의 기술 gate와 사람의 의미 성공 판정은 서로 대신하지 않는다.
-- 기본 `HUMAN_GATED`는 pre-contact, grasp와 semantic 판정을 사람이 입력한다. `HIL_NUMERIC_PROXY`는 미리 승인된 HIL 한 run에서 close/lift 뒤 profile-bound gripper reference·feedback 연속성만 판정하며, 물체 식별·영상 의미 성공이나 training 승인을 증명하지 않는다.
-- 2026-08-19 evidence harness는 같은 run에 미리 발급된 motion approval로 pre-contact token을 제출했다. core executor의 confirmation gate를 없앤 것이 아니며 공개 무인 실행 계약도 아니다.
+- 공개 resolver의 `HUMAN_GATED` 프로그램은 exact plan을 한 번 승인한 뒤 lift까지 연속 실행하고 post-lift semantic 판정만 사람에게 받는다. close/lift의 profile-bound gripper reference·feedback은 제어 안전 evidence일 뿐 파지 성공 label이 아니다.
+- 이전 exact legacy marker pair(`PRECONTACT_HUMAN`, `GRASP_VERDICT`)를 가진 v2 program은 재현을 위해 validator가 계속 읽지만 새 resolver는 만들지 않는다. `HIL_NUMERIC_PROXY` evidence도 물체 식별·영상 의미 성공이나 training 승인을 증명하지 않는다.
 - 정상 reset까지 통과한 semantic success만 commit한다.
 - reset-only failure도 episode를 abort하고 `cell_ready=false`로 남긴다.
 - commit 전 실패는 LeRobot episode/video/Parquet로 보존하지 않는다.
