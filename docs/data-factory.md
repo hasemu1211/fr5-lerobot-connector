@@ -358,7 +358,7 @@ outputs/
 └── legacy/                              # migration inventory로만 이동한 과거 산출물
 
 datasets/fr5_episodes/<dataset_name>/    # LeRobot dataset; accepted episode의 유일한 heavy copy
-RESEARCH/                                # 외부 원문·임시 분석; 운영 근거의 정본 아님
+.agent-local/work/research/              # 외부 원문·임시 분석; 검증 사실을 승격한 뒤 세션 삭제
 build/ install/ log/                     # colcon/ROS 산출물; factory evidence가 아님
 ```
 
