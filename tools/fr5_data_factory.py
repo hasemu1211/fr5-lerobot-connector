@@ -42,7 +42,7 @@ COLLECTION_PROFILE_V2_KEYS = PROFILE_KEYS["collection_profile"] | {
 }
 HOME_CANDIDATE_KEYS = {"schema_version", "home_candidate_id", "robot_system_id", "robot_model_name", "robot_description_digest", "joint_order", "ui_observation_deg", "nominal_target_deg", "observation_source", "feedback_capture_status", "qualification_status", "safety_status", "intended_use_after_qualification"}
 HOME_JOINT_ORDER = ["j1", "j2", "j3", "j4", "j5", "j6"]
-MOTION_PHASES = ("PREGRASP_PTP", "APPROACH_STOP_LIN", "FINAL_APPROACH_LIN", "GRIPPER_CLOSE", "LIFT_LIN", "LOWER_LIN", "GRIPPER_OPEN", "RETREAT_LIN", "SAFE_POSE_PTP")
+MOTION_PHASES = ("PREGRASP_PTP", "APPROACH_STOP_LIN", "FINAL_APPROACH_LIN", "GRIPPER_CLOSE", "LIFT_LIN", "RECYCLE_APPROACH_PTP", "LOWER_LIN", "GRIPPER_OPEN", "RETREAT_LIN", "SAFE_POSE_PTP")
 MOTION_QUALIFICATION_KEYS = {"schema_version", "motion_qualification_id", "qualification_status", "robot_system_id", "cell_calibration_id", "object_profile_id", "grasp_profile_id", "profile_digests", "home_candidate_digest", "robot_description_digest", "moveit_config_digest", "planning_scene_digest", "planning_scene", "frames", "tool_to_tcp", "datum_to_tcp_grasp", "offsets_m", "gripper_positions_m", "qualified_safe_joint_positions_rad", "goal_tolerances", "max_joint_state_age_s", "execution_timeouts_s", "phase_limits", "qualified_at"}
 MOTION_PROFILE_DIGESTS = {"robot_system", "cell_calibration", "object_profile", "grasp_profile"}
 MOTION_FRAMES = {"planning_frame", "planning_group", "tool_link"}
@@ -593,7 +593,7 @@ def validate_job_spec(job, *, paths=None, data=None, config_root, now=None):
     resolved_calibration = _calibration(calibration, normalized, yaw0, robot, now)
     input_digests = {"selected_sheet": canonical_digest(selected), "yaw0_sheet": canonical_digest(yaw0), "cell_calibration": canonical_digest(calibration), "robot_system": canonical_digest(robot), "collection_profile": canonical_digest(collection), "object_profile": canonical_digest(object_profile), "grasp_profile": canonical_digest(grasp)}
     resolved_job_digest = canonical_digest({"job": normalized, "input_digests": input_digests})
-    return {"normalized_job": normalized, "input_digests": input_digests, "resolved_job_digest": resolved_job_digest, "robot": robot, "collection_profile": collection, "calibration": resolved_calibration, "grasp_profile": grasp}
+    return {"normalized_job": normalized, "input_digests": input_digests, "resolved_job_digest": resolved_job_digest, "robot": robot, "collection_profile": collection, "calibration": resolved_calibration, "object_profile": object_profile, "grasp_profile": grasp}
 
 
 def resolve_pose(validated):
@@ -735,24 +735,45 @@ def _validate_motion_qualification(qualification, validated, home, *, urdf, now=
     return {"digest": canonical_digest(qualification), "frames": frames, "planning_scene": planning_scene, "transforms": transforms, "offsets": offsets, "gripper": gripper, "gripper_requirements": close, "safe": [_number(v, "MOTION_SAFE_JOINTS") for v in safe], "limits": normalized_limits, "tolerances": tolerance, "max_joint_state_age_s": max_joint_state_age_s, "execution_timeouts_s": execution_timeouts, "pins": {key: qualification[key] for key in ("robot_description_digest", "moveit_config_digest", "planning_scene_digest")}}
 
 
-def resolve_motion_program(validated, motion_qualification, home_candidate, *, urdf, expected_robot_system_id, now=None):
+def resolve_motion_program(validated, motion_qualification, home_candidate, *, urdf, expected_robot_system_id, release_pose=None, now=None):
     """Resolve a qualification-bound, offline-only motion program; it authorizes no execution."""
     home_raw = load_json_strict(json.dumps(home_candidate, allow_nan=False)) if isinstance(home_candidate, dict) else load_json_strict(home_candidate)
     home = validate_home_candidate(home_raw, urdf=urdf, expected_robot_system_id=expected_robot_system_id)
     qualification_raw = load_json_strict(json.dumps(motion_qualification, allow_nan=False)) if isinstance(motion_qualification, dict) else load_json_strict(motion_qualification)
     q = _validate_motion_qualification(qualification_raw, validated, {**home, "robot_description_digest": home_raw["robot_description_digest"]}, urdf=urdf, now=now)
     pose = resolve_pose(validated)
+    job = validated["normalized_job"]
+    if release_pose is None:
+        release_pose = {key: job[key] for key in ("place_id", "yaw_deg", "x_mm", "y_mm")}
+    release_pose = _exact(release_pose, {"place_id", "yaw_deg", "x_mm", "y_mm"}, "MOTION_RELEASE_POSE")
+    if release_pose["place_id"] != job["place_id"]:
+        raise ContractError("MOTION_RELEASE_POSE")
+    release_resolved = resolve_place_pose(
+        validated["calibration"]["center"], validated["calibration"]["x"], validated["calibration"]["y"], validated["calibration"]["z"],
+        _number(release_pose["yaw_deg"], "MOTION_RELEASE_POSE"),
+        _number(release_pose["x_mm"], "MOTION_RELEASE_POSE"),
+        _number(release_pose["y_mm"], "MOTION_RELEASE_POSE"),
+    )
     datum = {"translation_m": pose["position_base_m"], "rotation_columns": pose["rotation_base_columns"]}
-    tcp = compose_rigid_transform(datum, q["transforms"]["datum_to_tcp_grasp"])
+    release_datum = {"translation_m": release_resolved["position_base_m"], "rotation_columns": release_resolved["rotation_base_columns"]}
     tool_inverse = inverse_rigid_transform(q["transforms"]["tool_to_tcp"])
-    def target(offset):
-        shifted = {"translation_m": _add(tcp["translation_m"], _mul(datum["rotation_columns"][2], offset)), "rotation_columns": tcp["rotation_columns"]}
+    def target(frame, offset):
+        tcp = compose_rigid_transform(frame, q["transforms"]["datum_to_tcp_grasp"])
+        shifted = {"translation_m": _add(tcp["translation_m"], _mul(frame["rotation_columns"][2], offset)), "rotation_columns": tcp["rotation_columns"]}
         return {"base_tcp": shifted, "base_tool": compose_rigid_transform(shifted, tool_inverse)}
-    offsets = {"PREGRASP_PTP": q["offsets"]["pregrasp"], "APPROACH_STOP_LIN": q["offsets"]["approach_stop"], "FINAL_APPROACH_LIN": 0, "LIFT_LIN": q["offsets"]["lift"], "LOWER_LIN": 0, "RETREAT_LIN": q["offsets"]["retreat"]}
+    offsets = {
+        "PREGRASP_PTP": (datum, q["offsets"]["pregrasp"]),
+        "APPROACH_STOP_LIN": (datum, q["offsets"]["approach_stop"]),
+        "FINAL_APPROACH_LIN": (datum, 0),
+        "LIFT_LIN": (datum, q["offsets"]["lift"]),
+        "RECYCLE_APPROACH_PTP": (release_datum, q["offsets"]["pregrasp"]),
+        "LOWER_LIN": (release_datum, 0),
+        "RETREAT_LIN": (release_datum, q["offsets"]["retreat"]),
+    }
     steps = []
     for phase in MOTION_PHASES:
         step = {"phase": phase, "limits": q["limits"][phase]}
-        if phase in offsets: step["target"] = target(offsets[phase])
+        if phase in offsets: step["target"] = target(*offsets[phase])
         elif phase.startswith("GRIPPER"): step["gripper_position_m"] = q["gripper"]["closed" if phase == "GRIPPER_CLOSE" else "open"]
         else: step["joint_positions_rad"] = q["safe"]
         if phase == "LIFT_LIN": step["pause_after"] = "SEMANTIC_VERDICT"
@@ -797,7 +818,7 @@ def validate_motion_program(value):
         raise ContractError("MOTION_PROGRAM_GRIPPER")
     for step in value["steps"]:
         phase = step["phase"]
-        extras = {"phase", "limits", "target"} if phase in {"PREGRASP_PTP", "APPROACH_STOP_LIN", "FINAL_APPROACH_LIN", "LIFT_LIN", "LOWER_LIN", "RETREAT_LIN"} else {"phase", "limits", "joint_positions_rad"} if phase == "SAFE_POSE_PTP" else {"phase", "limits", "gripper_position_m"}
+        extras = {"phase", "limits", "target"} if phase in {"PREGRASP_PTP", "APPROACH_STOP_LIN", "FINAL_APPROACH_LIN", "LIFT_LIN", "RECYCLE_APPROACH_PTP", "LOWER_LIN", "RETREAT_LIN"} else {"phase", "limits", "joint_positions_rad"} if phase == "SAFE_POSE_PTP" else {"phase", "limits", "gripper_position_m"}
         if legacy_precontact and phase == "FINAL_APPROACH_LIN": extras.add("requires_confirmation")
         if legacy_grasp_verdict and phase == "GRIPPER_CLOSE": extras.add("pause_after")
         if phase == "LIFT_LIN": extras.add("pause_after")

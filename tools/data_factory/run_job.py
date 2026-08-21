@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import copy
 import json
+import math
 import queue
 import subprocess
 import sys
@@ -19,13 +20,14 @@ from tools.data_factory.one_job import JsonlProcess, OneJob
 from tools.data_factory.cell_state import CellStateStore
 from tools.data_factory.resource_usage import ResourceMonitor
 from tools.data_factory_recovery import write_json_atomic
-from tools.data_factory.scene_state import SceneStateStore
+from tools.data_factory.scene_state import SceneStateStore, release_slot
 from tools.fr5_data_factory import (
     COLLECTION_PROFILE_V2_KEYS,
     ContractArgumentParser,
     ContractError,
     DIGEST,
     SAFE_ID,
+    bounded_place_coordinate,
     canonical_digest,
     load_json_strict,
     resolve_motion_program,
@@ -47,10 +49,12 @@ COMMON_RUN_KEYS = {
     "mode", "run_id", "job", "selected_sheet", "yaw0_sheet", "config_root",
     "motion_qualification", "home_candidate", "urdf", "expected_robot_system_id",
 }
+RECYCLE_COORD_KEYS = {"recycle_x_mm", "recycle_y_mm"}
 LIVE_RUN_KEYS = COMMON_RUN_KEYS | {"camera_profile", "dataset_root", "run_root"}
 RESPONSE_KEYS = {"schema_version", "op_id", "op", "ok", "code", "state", "run_id", "plan_digest", "data"}
 EVENT_KEYS = {"schema_version", "event", "sequence", "origin_op_id", "ok", "code", "state", "run_id", "plan_digest", "data"}
 ROOT = Path(__file__).resolve().parents[2]
+DATA_PYTHON = str(ROOT / ".venv/bin/python")
 
 
 def _exact(value, keys, code):
@@ -100,13 +104,21 @@ def _event(response, origin_op_id):
 def _run_payload(value):
     if not isinstance(value, dict) or value.get("mode") not in {"plan_only", "live"}:
         raise ContractError("RUN_PAYLOAD")
-    keys = COMMON_RUN_KEYS if value["mode"] == "plan_only" else LIVE_RUN_KEYS
+    keys = set(COMMON_RUN_KEYS if value["mode"] == "plan_only" else LIVE_RUN_KEYS)
+    supplied_recycle = set(value) & RECYCLE_COORD_KEYS
+    if supplied_recycle:
+        if supplied_recycle != RECYCLE_COORD_KEYS:
+            raise ContractError("RUN_PAYLOAD")
+        keys |= RECYCLE_COORD_KEYS
     _exact(value, keys, "RUN_PAYLOAD")
     _identifier(value["run_id"], "RUN_ID")
     if not isinstance(value["job"], dict):
         raise ContractError("RUN_JOB")
-    for key in keys - {"job"}:
+    for key in keys - {"job"} - RECYCLE_COORD_KEYS:
         _text(value[key], "RUN_PAYLOAD")
+    for key in supplied_recycle:
+        if isinstance(value[key], bool) or not isinstance(value[key], (int, float)) or not math.isfinite(value[key]):
+            raise ContractError("RUN_PAYLOAD")
     return copy.deepcopy(value)
 
 
@@ -139,7 +151,7 @@ def _load(path, code):
         raise ContractError(code, str(exc)) from exc
 
 
-def _scene_binding(validated, root=ROOT / "outputs/data_factory/cells"):
+def _scene_binding(validated, release_pose, root=ROOT / "outputs/data_factory/cells"):
     job = validated["normalized_job"]
     snapshot = SceneStateStore(root, job["robot_system_id"]).snapshot()
     pose = {key: job[key] for key in ("place_id", "yaw_deg", "x_mm", "y_mm")}
@@ -151,10 +163,23 @@ def _scene_binding(validated, root=ROOT / "outputs/data_factory/cells"):
     ]
     if len(matches) != 1:
         raise ContractError("SCENE_OBJECT_NOT_READY" if not matches else "SCENE_OBJECT_AMBIGUOUS")
+    slot = release_slot(
+        robot_system_id=job["robot_system_id"],
+        pose=release_pose,
+        object_profile_id=job["object_profile_id"],
+        exclusion_geometry_digest=canonical_digest({
+            "shape": "BOX",
+            "dimensions_mm": validated["object_profile"]["dimensions_mm"],
+        }),
+    )
+    allocation = snapshot["scene_state"].get("slot_allocations", {}).get(slot["slot_id"])
+    if allocation is not None and allocation.get("state") not in {"AVAILABLE", "LANDED_FOR_NEXT_SOURCE"}:
+        raise ContractError("SCENE_SLOT_NOT_READY")
     return {
         "scene_state_digest": snapshot["scene_state_digest"],
         "revision": snapshot["scene_state"]["revision"],
         "object_instance_id": matches[0]["instance_id"],
+        "release_slot": slot,
     }
 
 
@@ -166,14 +191,20 @@ def resolve_inputs(payload, *, scene_binding_call=_scene_binding):
     )
     if validated["normalized_job"]["task"] != "pickup_e2e":
         raise ContractError("TASK_NOT_SUPPORTED")
+    release_pose = {key: validated["normalized_job"][key] for key in ("place_id", "yaw_deg", "x_mm", "y_mm")}
+    if RECYCLE_COORD_KEYS <= set(payload):
+        sheet = _load(payload["selected_sheet"], "INPUT_SELECTED_SHEET")
+        x_mm, y_mm = bounded_place_coordinate(sheet, payload["recycle_x_mm"], payload["recycle_y_mm"])
+        release_pose.update(x_mm=x_mm, y_mm=y_mm)
     program = resolve_motion_program(
         validated,
         _load(payload["motion_qualification"], "MOTION_QUALIFICATION_IO"),
         _load(payload["home_candidate"], "HOME_CANDIDATE_IO"),
         urdf=payload["urdf"],
         expected_robot_system_id=payload["expected_robot_system_id"],
+        release_pose=release_pose,
     )
-    return validated, program, scene_binding_call(validated)
+    return validated, program, scene_binding_call(validated, release_pose)
 
 
 def _executor(timeout_s):
@@ -220,7 +251,7 @@ def _recorder(payload, task, profile, timeout_s):
         camera_topics += [f"--{role}-image", profile["camera_topics"][role]]
     return JsonlProcess(
         [
-            sys.executable, "-u", str(ROOT / "tools/fr5_lerobot_recorder.py"),
+            DATA_PYTHON, "-u", str(ROOT / "tools/fr5_lerobot_recorder.py"),
             "--root", str(dataset_root), "--repo-id", profile["repo_id"], "--task", task, "--resume",
             "--fps", str(profile["fps"]), "--width", str(profile["width"]), "--height", str(profile["height"]),
             "--min-camera-source-fps-ratio", str(LIVE_CAMERA_MIN_FPS_RATIO),
@@ -344,7 +375,7 @@ def _operator_summary(result):
     if not isinstance(summary, dict):
         raise ContractError("OPERATOR_SUMMARY_UNAVAILABLE")
     required = {"path", "flow", "speed", "clearance"}
-    if set(summary) != required or not isinstance(summary["path"], list) or not all(isinstance(value, str) for value in summary["path"]):
+    if frozenset(summary) not in {frozenset(required), frozenset(required | {"recycle"})} or not isinstance(summary["path"], list) or not all(isinstance(value, str) for value in summary["path"]):
         raise ContractError("OPERATOR_SUMMARY_SCHEMA")
     if not isinstance(summary["speed"], dict) or not summary["speed"]:
         raise ContractError("OPERATOR_SUMMARY_SCHEMA")
@@ -355,11 +386,21 @@ def _operator_summary(result):
         raise ContractError("OPERATOR_SUMMARY_SCHEMA")
     if not isinstance(summary["clearance"], dict) or summary["clearance"].get("status") != "COLLISION_CHECKED_NO_DISTANCE":
         raise ContractError("OPERATOR_SUMMARY_SCHEMA")
+    if "recycle" in summary:
+        recycle = summary["recycle"]
+        if (
+            not isinstance(recycle, dict)
+            or set(recycle) != {"recording_boundary_after", "path", "release_slot_id", "release_target", "safe_staging_joint_positions_rad", "plan_digest"}
+            or recycle["recording_boundary_after"] != "LIFT_LIN"
+            or recycle["path"] != ["RECYCLE_APPROACH_PTP", "LOWER_LIN", "GRIPPER_OPEN", "RETREAT_LIN", "SAFE_POSE_PTP"]
+            or not all(isinstance(recycle[key], str) and DIGEST.fullmatch(recycle[key]) for key in ("release_slot_id", "plan_digest"))
+        ):
+            raise ContractError("OPERATOR_SUMMARY_SCHEMA")
     return copy.deepcopy(summary)
 
 
 def _technical_validator(dataset_root, _payload, profile):
-    command = [sys.executable, str(ROOT / "tools/validate_lerobot_dataset.py"), dataset_root, "--expected-fps", str(profile["fps"]), "--require-hil-motion"]
+    command = [DATA_PYTHON, str(ROOT / "tools/validate_lerobot_dataset.py"), dataset_root, "--expected-fps", str(profile["fps"]), "--require-hil-motion"]
     completed = subprocess.run(
         command,
         stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, timeout=180,
@@ -554,6 +595,12 @@ def run_plan_only(payload, cancel, publish, *, resolver=resolve_inputs, executor
                     raise
         if cancel.is_set():
             return _response(ok=False, code="CANCELLED", state="CANCELLED", run_id=payload["run_id"])
+        if not result["ok"]:
+            return _response(ok=False, code=result["code"], state=result["state"], run_id=payload["run_id"], plan_digest=result["plan_digest"])
+        envelope = result["plan_envelope"]
+        safety = envelope["precommit_safety"]
+        collision = envelope["precommit_evidence"]["collision_report"]
+        no_motion = envelope["precommit_evidence"]["plan_only_no_motion"]
         return _response(
             ok=result["ok"],
             code=result["code"],
@@ -566,6 +613,17 @@ def run_plan_only(payload, cancel, publish, *, resolver=resolve_inputs, executor
                 "resolved_job_digest": validated["resolved_job_digest"],
                 "motion_program_digest": canonical_digest(program),
                 "scene_binding": scene_binding,
+                "operator_summary": _operator_summary(result),
+                "recycle_plan_digest": result["plan_envelope"]["operator_summary"].get("recycle", {}).get("plan_digest"),
+                "plan_only_checks": {
+                    "planning_scene_readback_digest": safety["planning_scene_readback_digest"],
+                    "collision_report_digest": safety["collision_report_digest"],
+                    "collision_sample_count": collision["sample_count"],
+                    "collision_failure_count": collision["failure_count"],
+                    "all_valid": collision["all_valid"],
+                    "plan_only_no_motion_digest": safety["plan_only_no_motion_digest"],
+                    **{key: no_motion[key] for key in ("max_joint_delta_rad", "gripper_delta_m", "execute_goal_count", "gripper_goal_count")},
+                },
                 "camera_semantic_authority": False,
                 "training_authorized": False,
             },
@@ -622,9 +680,10 @@ def run_live(payload, cancel, publish, *, resolver=resolve_inputs, executor_fact
             "camera_semantic_authority": False, "training_authorized": False,
         }))
         operator_id = validated["normalized_job"]["operator_or_agent_id"]
+        recycle_text = f" recycle={summary['recycle']}" if "recycle" in summary else ""
         tty_decision(
             f"Plan {planned['plan_digest']} path={' > '.join(summary['path'])} flow={summary['flow']} "
-            f"clearance={summary['clearance']} speed={summary['speed']}",
+            f"clearance={summary['clearance']} speed={summary['speed']}{recycle_text}",
             f"APPROVE {planned['plan_digest']}",
         )
         if cancel.is_set():
@@ -689,6 +748,35 @@ def run_live(payload, cancel, publish, *, resolver=resolve_inputs, executor_fact
                         "postcommit_cell_state": cell,
                         "camera_semantic_authority": False, "training_authorized": False,
                     })
+                if "recycle" in summary:
+                    execution = result.get("execution_evidence")
+                    release_evidence = execution.get("release_evidence") if isinstance(execution, dict) else None
+                    transition = execution.get("scene_transition") if isinstance(execution, dict) else None
+                    if (
+                        not isinstance(release_evidence, dict)
+                        or release_evidence.get("human_verdict") != "LANDED"
+                        or release_evidence.get("release_slot_id") != summary["recycle"]["release_slot_id"]
+                        or not isinstance(transition, dict)
+                        or not isinstance(transition.get("scene_state_digest"), str)
+                        or not DIGEST.fullmatch(transition["scene_state_digest"])
+                        or transition.get("release_evidence_digest") != canonical_digest(release_evidence)
+                        or result.get("frozen_rows") != result.get("rows_after_recycle")
+                    ):
+                        raise ContractError("RECYCLE_EVIDENCE")
+                    cell = cell_store.acknowledge_ready(
+                        operator_id, expected_run_id=payload["run_id"], expected_plan_digest=planned["plan_digest"],
+                    )
+                    finished = job.finish()
+                    if not finished["ok"] or finished["state"] != "COMPLETE":
+                        raise ContractError("CELL_READY_REQUIRED")
+                    return _response(ok=True, code="VALIDATED", state="COMPLETE", run_id=payload["run_id"], plan_digest=planned["plan_digest"], data={
+                        "mode": "live", "operator_summary": summary, "technical_validator": validator_reference,
+                        "storage_usage": storage_reference, "resource_usage": resource_reference,
+                        "camera_warmup_digest": canonical_digest(camera_warmup),
+                        "postcommit_scene_state_digest": transition["scene_state_digest"], "postcommit_cell_state": cell,
+                        "frozen_rows": result["frozen_rows"], "rows_after_recycle": result["rows_after_recycle"],
+                        "camera_semantic_authority": False, "training_authorized": False,
+                    })
                 target = validated["normalized_job"]
                 tty_decision(
                     "Confirm the robot is stopped, gripper is empty, path is clear, and the object is reset at "
@@ -744,6 +832,37 @@ def run_live(payload, cancel, publish, *, resolver=resolve_inputs, executor_fact
                     cancelled = job.cancel()
                     return _response(ok=False, code=cancelled["code"], state=cancelled["state"], run_id=payload["run_id"], plan_digest=planned["plan_digest"])
                 acted = (job.grasp_verdict if state == "GRASP_VERDICT" else job.semantic_verdict)(decision, operator_id, source="HUMAN")
+                if not acted["ok"]:
+                    return _response(ok=False, code=acted["code"], state=acted["state"], run_id=payload["run_id"], plan_digest=planned["plan_digest"])
+                continue
+            if result["state"] == "RELEASE_VERDICT":
+                if "recycle" not in summary:
+                    raise ContractError("RECYCLE_EVIDENCE")
+                recycle = summary["recycle"]
+                if pending is None:
+                    pending = result["state"]
+
+                    def release_in_background():
+                        try:
+                            decision = tty_decision(
+                                f"Confirm object inside release slot {recycle['release_target']}, gripper empty, retreat complete, and safe staging {recycle['safe_staging_joint_positions_rad']}; recycle={recycle['plan_digest']}",
+                                (f"LANDED {recycle['plan_digest']}", "OFF_SLOT", "UNCERTAIN"),
+                            )
+                            decisions.put(("RELEASE_VERDICT", "LANDED" if decision.startswith("LANDED ") else decision))
+                        except Exception as exc:
+                            decisions.put(("RELEASE_VERDICT", exc))
+
+                    threading.Thread(target=release_in_background, daemon=True).start()
+                try:
+                    state, decision = decisions.get_nowait()
+                except queue.Empty:
+                    time.sleep(0.05)
+                    continue
+                pending = None
+                if state != result["state"] or isinstance(decision, Exception):
+                    cancelled = job.cancel()
+                    return _response(ok=False, code=cancelled["code"], state=cancelled["state"], run_id=payload["run_id"], plan_digest=planned["plan_digest"])
+                acted = job.release_verdict(decision, operator_id)
                 if not acted["ok"]:
                     return _response(ok=False, code=acted["code"], state=acted["state"], run_id=payload["run_id"], plan_digest=planned["plan_digest"])
                 continue
@@ -949,6 +1068,11 @@ def _human_payload(args):
     else:
         job = load_json_strict(sys.stdin.read() if args.job == "-" else Path(args.job).read_text(encoding="utf-8"))
     payload = {"mode": args.mode, **values, "job": job}
+    recycle = {name: getattr(args, name, None) for name in ("recycle_x_mm", "recycle_y_mm")}
+    if any(value is not None for value in recycle.values()):
+        if any(value is None for value in recycle.values()):
+            raise ContractError("RUN_PAYLOAD")
+        payload.update(recycle)
     if args.mode == "live":
         for name in ("camera_profile", "dataset_root", "run_root"):
             payload[name] = getattr(args, name) or _prompt(name)
@@ -963,6 +1087,8 @@ def _parser():
     parser.add_argument("--mode", choices=("plan_only", "live"), default="plan_only")
     for name in ("run-id", "job", "selected-sheet", "yaw0-sheet", "config-root", "motion-qualification", "home-candidate", "urdf", "expected-robot-system-id", "camera-profile", "dataset-root", "run-root"):
         parser.add_argument(f"--{name}")
+    parser.add_argument("--recycle-x-mm", type=float)
+    parser.add_argument("--recycle-y-mm", type=float)
     return parser
 
 

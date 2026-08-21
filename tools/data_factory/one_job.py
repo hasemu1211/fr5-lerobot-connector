@@ -64,7 +64,10 @@ class JsonlProcess:
             raise ContractError("JSONL_TIMEOUT")
         wait_s = min(self.timeout_s, float(wait_s))
         if self.process.stdin and not self.process.stdin.closed:
-            self.process.stdin.close()  # EOF is the recorder/executor fail-safe signal.
+            try:
+                self.process.stdin.close()  # EOF is the recorder/executor fail-safe signal.
+            except (BrokenPipeError, OSError):
+                pass
         timed_out = False
         try:
             return_code = self.process.wait(wait_s)
@@ -122,6 +125,7 @@ class OneJob:
         self.execution_evidence = None
         self.recorder_evidence = None
         self.plan_envelope = None
+        self.frozen_rows = self.rows_after_recycle = None
         self._sequence = 0
         self._sequence_lock = threading.Lock()
 
@@ -141,6 +145,8 @@ class OneJob:
                 "plan_envelope": copy.deepcopy(self.plan_envelope),
                 "execution_evidence": copy.deepcopy(self.execution_evidence),
                 "recorder_evidence": copy.deepcopy(self.recorder_evidence),
+                "frozen_rows": self.frozen_rows,
+                "rows_after_recycle": self.rows_after_recycle,
                 **extra}
 
     def _precommit_safety(self, value, *, terminal):
@@ -511,7 +517,7 @@ class OneJob:
         return self._result(True, "EXECUTING")
 
     def poll(self):
-        if self.state not in {"EXECUTING", "PRECONTACT_HUMAN", "GRASP_VERDICT", "SEMANTIC_VERDICT"}:
+        if self.state not in {"EXECUTING", "PRECONTACT_HUMAN", "GRASP_VERDICT", "SEMANTIC_VERDICT", "RELEASE_VERDICT"}:
             return self._result(False, "POLL_STATE")
         try:
             status_started = self.monotonic_clock()
@@ -525,6 +531,15 @@ class OneJob:
                 raise ContractError("RECORDER_HEALTH_SCHEMA")
             if not health["writer_alive"] or health["writer_error"] is not None:
                 raise ContractError("RECORDER_WRITER_FAULT")
+            if status["state"] == "FROZEN":
+                rows = status["metrics"].get("rows")
+                if type(rows) is not int or rows < 0:
+                    raise ContractError("RECORDER_HEALTH_SCHEMA")
+                if self.frozen_rows is None:
+                    self.frozen_rows = rows
+                elif rows != self.frozen_rows:
+                    raise ContractError("RECORDER_ROWS_AFTER_FREEZE")
+                self.rows_after_recycle = rows
             response = self._request("executor", "heartbeat", {"run_id": self.run_id, "plan_digest": self.plan_digest, "lease_id": self.lease_id, "recorder_health": health})
             state = response.get("state")
             if state == "PRECONTACT_HUMAN":
@@ -540,6 +555,9 @@ class OneJob:
                     self._freeze_recorder_with_heartbeats(health)
                 if self.recorder_state != "FROZEN":
                     raise ContractError("RECORDER_FREEZE")
+                self.state = state
+                return self._result(True, state)
+            if state == "RELEASE_VERDICT":
                 self.state = state
                 return self._result(True, state)
             if state == "COMPLETED":
@@ -593,6 +611,11 @@ class OneJob:
         if isinstance(result, Exception):
             raise result
         self.recorder_state = result["state"]
+        rows = result.get("metrics", {}).get("rows")
+        if rows is not None and (type(rows) is not int or rows < 0):
+            raise ContractError("RECORDER_HEALTH_SCHEMA")
+        if rows is not None:
+            self.frozen_rows = self.rows_after_recycle = rows
         return result
 
     def confirm(self, confirmed_by, source="HUMAN"):
@@ -638,6 +661,23 @@ class OneJob:
         self.semantic = verdict
         self.state = "EXECUTING"
         return self._result(True, "VERDICT_ACCEPTED")
+
+    def release_verdict(self, verdict, decided_by, source="HUMAN"):
+        if self.state != "RELEASE_VERDICT" or verdict not in {"LANDED", "OFF_SLOT", "UNCERTAIN"} or not isinstance(decided_by, str) or not SAFE_ID.fullmatch(decided_by):
+            return self._result(False, "RELEASE_VERDICT_STATE")
+        if source != "HUMAN":
+            return self._result(False, "RELEASE_VERDICT_SOURCE")
+        try:
+            response = self._request("executor", "release_verdict", {
+                "run_id": self.run_id, "plan_digest": self.plan_digest, "verdict": verdict,
+                "decided_by": decided_by, "source": source,
+            }, allowed_failure=verdict != "LANDED")
+        except ContractError as exc:
+            return self._abort(exc.code)
+        if verdict == "LANDED" and response["state"] != "COMPLETED":
+            return self._abort("EXECUTOR_STATE")
+        self.state = "EXECUTING" if response["state"] == "COMPLETED" else response["state"]
+        return self._result(response["ok"], response["code"])
 
     def _finalize(self):
         if self.semantic == "FAIL":
@@ -763,7 +803,7 @@ def run_one_job(job, plan, motion_approval, decision_call, *, operator_id, lease
             return result
         if result["state"] == "AWAITING_CELL_READY":
             continue
-        if result["state"] not in {"PRECONTACT_HUMAN", "GRASP_VERDICT", "SEMANTIC_VERDICT"}:
+        if result["state"] not in {"PRECONTACT_HUMAN", "GRASP_VERDICT", "SEMANTIC_VERDICT", "RELEASE_VERDICT"}:
             sleep(poll_interval_s)
             continue
         if result["state"] in {"GRASP_VERDICT", "SEMANTIC_VERDICT"} and job.approval_scope == "HIL_NUMERIC_PROXY":
@@ -792,6 +832,8 @@ def run_one_job(job, plan, motion_approval, decision_call, *, operator_id, lease
             result = job.grasp_verdict(decision, operator_id)
         elif result["state"] == "SEMANTIC_VERDICT" and decision in {"PASS", "FAIL"}:
             result = job.semantic_verdict(decision, operator_id)
+        elif result["state"] == "RELEASE_VERDICT" and decision in {"LANDED", "OFF_SLOT", "UNCERTAIN"}:
+            result = job.release_verdict(decision, operator_id)
         else:
             return job.cancel()
         if not result["ok"]:

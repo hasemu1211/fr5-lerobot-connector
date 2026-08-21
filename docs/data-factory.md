@@ -16,6 +16,10 @@
 
 r007의 체감 정지는 runner queue 적체와 구분한다. terminal 뒤 다음 dispatch는 최대 2.120 ms였지만 `GRIPPER_CLOSE`와 `GRIPPER_OPEN` goal 자체가 qualification의 `command_duration_s=6.0`을 사용해 각각 약 6.06 s와 6.04 s 뒤 terminal이 됐다. 다음 최적화는 이 command/controller terminal 시간과 arm phase의 stop-to-stop 궤적을 별도로 측정·재적격화해야 하며, 현재 안전 qualification 값을 임의로 줄이지 않는다.
 
+2026-08-21에는 같은 ROS `FollowJointTrajectory` 경로와 feedback/timeout gate를 유지하고 gripper duration만 1.0 s로 재적격화했다. 독립 HIL에서 close는 1.0509 s, open은 1.7011 s에 성공했고 두 goal 사이 coordinator gap은 0.179 ms, arm 최대 drift는 7.59 µrad였다. 근거는 `outputs/data_factory/qualifications/p45-gripper-latency-r001/evidence.json`이며 SHA-256은 `8ebef58209dcbdb7ef60e46cb8d483f319deba313888033df16bdbee7e51f0f9`다.
+
+같은 날 공개 `run_job --mode live`의 P4.5 r003은 CENTER source에서 GRID_1=`(-70 mm,+35 mm,0°)` release까지 10개 phase를 모두 실행했다. 2,023개 collision sample은 전부 valid였고 close/open accepted→terminal은 1.051/1.096 s, gripper terminal→다음 arm dispatch는 1.374/1.418 ms였다. recorder는 lift 직후 537 rows에서 freeze되어 recycle 뒤에도 537 rows였고, scene v2 revision 14의 `ROBOT_RELEASE` object+slot 전이가 commit보다 먼저 durable해진 뒤 technical validator가 `PASS`했다. plan은 `sha256:c2e5668c…a9ce1`, recycle은 `sha256:434fca4c…4b10d`이며 원본은 `outputs/data_factory/runs/p45-public-live-20260821-r003/`와 `datasets/fr5_episodes/p45_public_recycle_20260821_r003/`다. 이 single-camera HIL의 `camera_semantic_authority`와 `training_authorized`는 모두 false다.
+
 - 첫 live task: `pickup_e2e`
 - 첫 grasp profile: `top_center` 하나
 - pose 권위: A4/물리 기준과 등록된 TCP 좌표
@@ -135,8 +139,12 @@ python3 -m tools.data_factory.run_job --mode live \
   --expected-robot-system-id <robot-system-id> \
   --camera-profile up \
   --dataset-root datasets/fr5_episodes/<dataset-name> \
-  --run-root outputs/data_factory/runs
+  --run-root outputs/data_factory/runs \
+  --recycle-x-mm <release-local-x-mm> \
+  --recycle-y-mm <release-local-y-mm>
 ```
+
+recycle 좌표는 두 flag를 exact pair로 주거나 둘 다 생략한다. 생략하면 source local 좌표로 release하고, pair를 주면 같은 A4 local bound 안의 target을 기존 resolver로 계산한다. 어느 경우든 현재 full scene/start에서 pickup+recycle 전체를 다시 plan/collision-check하며 이미 소진·격리된 release slot은 거부한다.
 
 TTY에서 `--job`을 생략하면 기존 `build-job --interactive`가 이어서 실행되어 point/연속 좌표와 profile을 선택한다. 이미 만든 JobSpec을 재사용할 때만 `--job <canonical-job.json>`을 추가한다. runner가 별도 builder 규칙을 복제하지 않으므로 두 입력은 같은 validator와 digest 경로로 수렴한다.
 
@@ -146,9 +154,11 @@ AI는 같은 모듈의 `--factory-jsonl`을 사용한다. command envelope는 ex
 python3 -m tools.data_factory.run_job --factory-jsonl
 ```
 
+현재 편한 사람 인터페이스의 검증 범위는 interactive builder→공개 one-job CLI→TTY exact approval/PASS/LANDED까지다. 다음 조건을 제안하는 P5 coverage가 다음 software Goal이고, 여러 episode를 순차 운용하는 같은-entrypoint bounded campaign은 P5.2다. 별도 GUI는 구현·검증하지 않았다.
+
 `plan_only`는 scene state에서 JobSpec의 object profile과 `(place_id,yaw_deg,x_mm,y_mm)`가 정확히 일치하는 `ON_SURFACE` instance 하나를 결속한다. executor plan만 만들며 recorder begin, dataset 생성, 카메라 접근, execute action은 수행하지 않는다. 결과의 `camera_semantic_authority=false`는 현재 떨어져 임시 배치된 카메라를 물체·파지 정성 판정에 사용하지 않는다는 뜻이다.
 
-`live`는 30 Hz camera warm-up, planning-scene apply/readback, dense collision sampling, plan-only no-motion evidence와 exact cached-plan summary를 먼저 만든다. exact digest 승인 전에는 recorder나 motion을 시작하지 않는다. 승인 뒤 recorder의 첫 aligned row를 확인하고 pickup을 실행하며, post-lift freeze 뒤 사람 semantic 판정, 녹화 밖 reset, precommit safety, commit, validator와 postcommit scene/cell 확인 순으로 끝낸다. 어느 gate든 실패하면 다음 job을 허용하지 않는다.
+`live`는 30 Hz camera warm-up, planning-scene apply/readback, dense collision sampling, plan-only no-motion evidence와 exact cached pickup/recycle summary를 먼저 만든다. exact digest 승인 전에는 recorder나 motion을 시작하지 않는다. 승인 뒤 recorder의 첫 aligned row를 확인하고 pickup을 실행하며, post-lift freeze와 사람 semantic 판정 뒤 녹화 밖 recycle을 수행한다. `LANDED` evidence가 맞으면 executor가 scene v2 object+slot을 원자 갱신하고 `COMPLETED`를 낸 뒤에만 coordinator가 commit→validator→cell-ready를 수행한다. scene 전이 뒤 commit/validator가 실패해도 물리 scene을 과거로 rollback하지 않고 cell을 block한다. 어느 gate든 실패하면 다음 job을 허용하지 않는다.
 
 `config/data_factory/`의 robot, collection, cell과 motion qualification은 resolver 입력을 canonical digest로 고정하는 정적 계약이다. 현재 `fr5-place-a-wood-cube-r001`은 tracked URDF·MoveIt 설정과 기존 HIL binding에서 재구성한 qualification이며, live에서도 설치된 TCP·활성 robot description·planning-scene readback과 exact plan 승인을 다시 요구한다. coordinate/profile `QUALIFIED`, physical execution approval, `cell_ready`, motion approval과 training approval은 서로 다른 gate다.
 
@@ -168,6 +178,8 @@ A4 한 장은 사람이 다음 값을 읽고 로봇이 같은 값으로 변환�
 - +Z는 별도로 검증한 table-plane normal을 사용한다.
 - `Y_CHECK`는 fit에 넣지 않고 축 방향·뒤집힘·residual의 독립 검증점으로 사용한다.
 - 다른 위치에 놓인 A4는 새 `place_id`와 calibration revision을 가진다.
+
+현재 공개 HIL qualification은 yaw 0만 증명했다. 대칭 물체·grasp도 profile이 180° equivalence를 명시한 경우에만 coverage에서 등가로 다루고 JobSpec/scene에는 입력 `yaw_deg` 원값을 보존한다. non-yaw0 live 전에는 fresh actual start에서 qualified equivalent IK/grasp branch를 유한 비교해 full-path joint travel이 가장 작은 branch를 선택하고, ±2π wrist wrap·joint discontinuity·limit margin·endpoint velocity gate를 통과하지 못하면 plan을 거부해야 한다. 입력 yaw를 맞추기 위해 팔을 뒤트는 fallback은 허용하지 않는다.
 
 ```text
 T_base_target = T_base_place0
@@ -192,18 +204,20 @@ validate
   → record: pregrasp → approach → final approach → close → lift
   → freeze
   → human semantic verdict
-  → reset outside recording
-  → commit or abort
+  → outside recording: recycle approach → lower → open → retreat → safe staging
+  → human release verdict
+  → scene v2 object+slot atomic transition
+  → commit or abort; scene transition은 rollback하지 않음
   → validator
-  → human scene/cell-ready confirmation
+  → cell-ready
 ```
 
 - 오케스트레이터는 승인된 한 job만 소유하고 다음 job을 자동 시작하지 않는다.
 - recorder의 기술 gate와 사람의 의미 성공 판정은 서로 대신하지 않는다.
 - 공개 resolver의 `HUMAN_GATED` 프로그램은 exact plan을 한 번 승인한 뒤 lift까지 연속 실행하고 post-lift semantic 판정만 사람에게 받는다. close/lift의 profile-bound gripper reference·feedback은 제어 안전 evidence일 뿐 파지 성공 label이 아니다.
 - 이전 exact legacy marker pair(`PRECONTACT_HUMAN`, `GRASP_VERDICT`)를 가진 v2 program은 재현을 위해 validator가 계속 읽지만 새 resolver는 만들지 않는다. `HIL_NUMERIC_PROXY` evidence도 물체 식별·영상 의미 성공이나 training 승인을 증명하지 않는다.
-- 정상 reset까지 통과한 semantic success만 commit한다.
-- reset-only failure도 episode를 abort하고 `cell_ready=false`로 남긴다.
+- 정상 recycle·release scene 전이까지 통과한 semantic success만 commit한다.
+- recycle 또는 release-only failure도 episode를 abort하고 `cell_ready=false`로 남긴다.
 - commit 전 실패는 LeRobot episode/video/Parquet로 보존하지 않는다.
 - commit 중 부분 장애는 자동 삭제하지 않고 `QUARANTINED_COMMIT`으로 격리한다.
 - 실패 진단은 digest, reason code, timestamp, high-water mark와 마지막 수치 snapshot만 기본 보존한다. 전체 영상·bag·trace는 명시적 opt-in 없이는 남기지 않는다.
@@ -254,7 +268,7 @@ python3 tools/data_factory/scene_state.py set-surface \
   --expect-revision <현재-revision>
 ```
 
-AI agent도 같은 CLI/JSON schema를 사용하며 `--expect-revision` 충돌 시 다시 읽어야 한다. OneJob은 scene binding을 executor plan에 묶고 executor는 시작 시 exact digest·revision과 `ON_SURFACE`를 확인한 뒤 cell을 block한다. fault 뒤 pose는 `UNKNOWN`이 된다. 정상 release의 `(place,yaw,x,y)` 갱신과 그 뒤의 cell-ready 확인은 현재 외부 post-run resolver의 책임이다. 이를 수행하지 않으면 다음 job을 시작하지 않는다.
+AI agent도 같은 CLI/JSON schema를 사용하며 `--expect-revision` 충돌 시 다시 읽어야 한다. OneJob은 scene binding을 executor plan에 묶고 executor는 시작 시 exact digest·revision과 `ON_SURFACE`를 확인한 뒤 cell을 block한다. fault 뒤 pose는 `UNKNOWN`이 된다. P4.5 recycle에서는 executor가 expected revision에 대해 정상 `LANDED` object+slot을 scene v2 한 revision으로 쓰며, 이 write가 성공하기 전 `COMPLETED`와 recorder commit은 0이다. runner는 raw scene JSON을 쓰지 않고 exact transition evidence를 검증한 뒤 cell-ready를 기록한다.
 
 ## 안전과 현재 하드웨어 경계
 

@@ -37,6 +37,7 @@ PHASES = (
     "FINAL_APPROACH_LIN",
     "GRIPPER_CLOSE",
     "LIFT_LIN",
+    "RECYCLE_APPROACH_PTP",
     "LOWER_LIN",
     "GRIPPER_OPEN",
     "RETREAT_LIN",
@@ -45,7 +46,9 @@ PHASES = (
 ARM_PHASES = frozenset(PHASES) - {"GRIPPER_CLOSE", "GRIPPER_OPEN"}
 JOINT_ORDER = ["j1", "j2", "j3", "j4", "j5", "j6"]
 COMMAND_FIELDS = {"schema_version", "op_id", "op", "payload"}
-COMMAND_OPS = {"preflight", "plan", "approve", "execute", "heartbeat", "confirm", "grasp_verdict", "semantic_verdict", "cancel", "status"}
+COMMAND_OPS = {"preflight", "plan", "approve", "execute", "heartbeat", "confirm", "grasp_verdict", "semantic_verdict", "release_verdict", "cancel", "status"}
+ACTIVE_STATES = {"EXECUTING", "PRECONTACT_HUMAN", "GRASP_VERDICT", "SEMANTIC_VERDICT", "RELEASE_VERDICT"}
+RECYCLE_PHASES = ("RECYCLE_APPROACH_PTP", "LOWER_LIN", "GRIPPER_OPEN", "RETREAT_LIN", "SAFE_POSE_PTP")
 EXPECTED_GRAPH = {
     "move_action": ("/move_action", "moveit_msgs/action/MoveGroup"),
     "execute_trajectory": ("/execute_trajectory", "moveit_msgs/action/ExecuteTrajectory"),
@@ -486,11 +489,29 @@ class PickupExecutor:
                 "collision_report_digest": precommit["collision_report_digest"],
             },
         }
+        recycle_plan_digest = None
+        if "release_slot" in scene_binding:
+            recycle_steps = [step for step in planned_steps if step["phase"] in RECYCLE_PHASES]
+            recycle_plan_digest = canonical_digest({
+                "schema_version": "fr5.recycle_plan.v1",
+                "scene_binding": scene_binding,
+                "recording_boundary_after": "LIFT_LIN",
+                "steps": recycle_steps,
+            })
+            operator_summary["recycle"] = {
+                "recording_boundary_after": "LIFT_LIN",
+                "path": list(RECYCLE_PHASES),
+                "release_slot_id": scene_binding["release_slot"]["slot_id"],
+                "release_target": copy.deepcopy(scene_binding["release_slot"]["pose"]),
+                "safe_staging_joint_positions_rad": copy.deepcopy(planned_steps[-1]["final_joint_state"]),
+                "plan_digest": recycle_plan_digest,
+            }
         self.runs[run_id] = {
             "plan": copy.deepcopy(plan),
             "digest": plan_digest,
             "precommit_safety": copy.deepcopy(precommit),
             "precommit_evidence": copy.deepcopy(evidence),
+            "recycle_plan_digest": recycle_plan_digest,
             "state": "PLANNED",
         }
         return _response(
@@ -590,7 +611,7 @@ class PickupExecutor:
                     self.cell_state_store.mark_blocked("EXECUTION_IN_PROGRESS", run["plan"]["run_id"], run["digest"])
                 except Exception as exc:
                     raise ContractError("CELL_STATE_ARMING_FAILED") from exc
-                run["execution"] = {"lease_id": payload["lease_id"], "lease_deadline": self.monotonic_clock() + run["plan"]["execution_timeouts_s"]["heartbeat_lease"], "step_index": 0, "grasp_verdict": None, "semantic_verdict": None, "snapshot": None, "active": False, "scene_object": copy.deepcopy(item), "phase_event_sequence": 0}
+                run["execution"] = {"lease_id": payload["lease_id"], "lease_deadline": self.monotonic_clock() + run["plan"]["execution_timeouts_s"]["heartbeat_lease"], "step_index": 0, "grasp_verdict": None, "semantic_verdict": None, "release_verdict": None, "snapshot": None, "active": False, "scene_object": copy.deepcopy(item), "terminal_phases": [], "phase_event_sequence": 0}
                 if self.phase_events_root is not None:
                     path = self.phase_events_root / run["plan"]["run_id"] / "phase_events.jsonl"
                     try:
@@ -625,7 +646,9 @@ class PickupExecutor:
                 execution["behavior_report_status"] = "BEHAVIOR_REPORT_UNAVAILABLE"
             elif self._phase_event_writer.ready:
                 execution["behavior_report_status"] = "AVAILABLE"
-        data = {key: copy.deepcopy(execution.get(key)) for key in ("step_index", "grasp_verdict", "semantic_verdict", "precontact_confirmation", "grasp_decision", "semantic_decision", "gripper_feedback_m", "gripper_reference_m", "post_lift_gripper_feedback_m", "snapshot", "snapshot_error", "cancel_error", "durable_blocked", "cell_state_error", "scene_state_error", "phase_events_path", "behavior_report_status") if key in execution}
+        data = {key: copy.deepcopy(execution.get(key)) for key in ("step_index", "grasp_verdict", "semantic_verdict", "release_verdict", "precontact_confirmation", "grasp_decision", "semantic_decision", "release_decision", "gripper_feedback_m", "gripper_reference_m", "post_lift_gripper_feedback_m", "release_evidence", "scene_transition", "snapshot", "snapshot_error", "cancel_error", "durable_blocked", "cell_state_error", "scene_state_error", "phase_events_path", "behavior_report_status") if key in execution}
+        if run.get("recycle_plan_digest") is not None:
+            data["recycle_plan_digest"] = run["recycle_plan_digest"]
         data["precommit_safety"] = copy.deepcopy(run.get("precommit_safety"))
         if "failure_code" in run:
             data["failure_code"] = run["failure_code"]
@@ -661,10 +684,32 @@ class PickupExecutor:
                     "gripper_reference_position_m": float(gripper["reference_position_m"]),
                 })
                 safety["status"] = "PASS"
-                run["state"] = "COMPLETED"
+                slot = run["plan"]["scene_binding"].get("release_slot")
+                if slot is None:
+                    run["state"] = "COMPLETED"
+                else:
+                    terminals = [phase for phase in execution["terminal_phases"] if phase in RECYCLE_PHASES]
+                    if terminals != list(RECYCLE_PHASES):
+                        raise ContractError("RECYCLE_TERMINAL_EVIDENCE")
+                    execution["release_evidence"] = {
+                        "schema_version": "data_factory.recycle_release_evidence.v1",
+                        "run_id": run["plan"]["run_id"],
+                        "plan_digest": run["digest"],
+                        "release_slot_id": slot["slot_id"],
+                        "expected_scene_state_digest": run["plan"]["scene_binding"]["scene_state_digest"],
+                        "expected_scene_revision": run["plan"]["scene_binding"]["revision"],
+                        "gripper_reference_m": float(gripper["reference_position_m"]),
+                        "gripper_feedback_m": float(gripper["feedback_position_m"]),
+                        "terminal_phases": terminals,
+                        "post_retreat_snapshot_digest": safety["post_reset_safe_snapshot_digest"],
+                        "next_start_tolerance_rad": tolerance,
+                        "human_verdict": None,
+                    }
+                    run["state"] = "RELEASE_VERDICT"
+                    execution["wait_deadline"] = self.monotonic_clock() + run["plan"]["execution_timeouts_s"]["semantic_verdict"]
             except (ContractError, KeyError, TypeError, ValueError):
                 self._fault(run, "POST_RESET_SAFE_SNAPSHOT")
-            return "COMPLETED"
+            return run["state"]
         step = steps[execution["step_index"]]
         if step.get("requires_confirmation") == "PRECONTACT_HUMAN" and execution.get("confirmed_step") != execution["step_index"]:
             run["state"] = "PRECONTACT_HUMAN"
@@ -717,15 +762,44 @@ class PickupExecutor:
             execution["cell_state_error"] = exc.code if isinstance(exc, ContractError) else "CELL_STATE_WRITE_FAILED"
         try:
             item = execution.get("scene_object")
+            binding = run["plan"]["scene_binding"]
             if self.scene_state_store is not None and isinstance(item, dict):
-                self.scene_state_store.update_object(
-                    instance_id=run["plan"]["scene_binding"]["object_instance_id"],
-                    object_profile_id=item["object_profile_id"],
-                    state="UNKNOWN",
-                    source="ROBOT_ACTION",
-                    updated_by="pickup-executor",
-                    expected_revision=run["plan"]["scene_binding"]["revision"],
-                )
+                slot = binding.get("release_slot")
+                if slot is None:
+                    self.scene_state_store.update_object(
+                        instance_id=binding["object_instance_id"],
+                        object_profile_id=item["object_profile_id"],
+                        state="UNKNOWN",
+                        source="ROBOT_ACTION",
+                        updated_by="pickup-executor",
+                        expected_revision=binding["revision"],
+                    )
+                else:
+                    snapshot = execution.get("snapshot")
+                    gripper = snapshot.get("gripper_controller") if isinstance(snapshot, dict) else None
+                    evidence = {
+                        "schema_version": "data_factory.recycle_release_evidence.v1",
+                        "run_id": run["plan"]["run_id"],
+                        "plan_digest": run["digest"],
+                        "release_slot_id": slot["slot_id"],
+                        "expected_scene_state_digest": binding["scene_state_digest"],
+                        "expected_scene_revision": binding["revision"],
+                        "gripper_reference_m": gripper.get("reference_position_m") if isinstance(gripper, dict) else None,
+                        "gripper_feedback_m": gripper.get("feedback_position_m") if isinstance(gripper, dict) else None,
+                        "terminal_phases": [phase for phase in execution["terminal_phases"] if phase in RECYCLE_PHASES],
+                        "post_retreat_snapshot_digest": canonical_digest(snapshot if isinstance(snapshot, dict) else {"status": "UNAVAILABLE", "failure_code": code}),
+                        "next_start_tolerance_rad": run["plan"]["planning"]["goal_tolerances"]["joint_rad"],
+                        "human_verdict": "UNCERTAIN",
+                    }
+                    execution["release_evidence"] = evidence
+                    execution["scene_transition"] = self.scene_state_store.transition_release(
+                        instance_id=binding["object_instance_id"],
+                        release_slot=slot,
+                        evidence=evidence,
+                        updated_by="pickup-executor",
+                        expected_digest=binding["scene_state_digest"],
+                        expected_revision=binding["revision"],
+                    )
         except Exception as exc:
             execution["scene_state_error"] = exc.code if isinstance(exc, ContractError) else "SCENE_STATE_WRITE_FAILED"
         run["state"] = "BLOCKED"
@@ -749,14 +823,14 @@ class PickupExecutor:
 
     def tick(self):
         for run in self.runs.values():
-            if run["state"] not in {"EXECUTING", "PRECONTACT_HUMAN", "GRASP_VERDICT", "SEMANTIC_VERDICT"}:
+            if run["state"] not in ACTIVE_STATES:
                 continue
             execution, now = run["execution"], self.monotonic_clock()
             if now >= execution["lease_deadline"]:
                 self._fault(run, "HEARTBEAT_TIMEOUT")
-            elif run["state"] in {"PRECONTACT_HUMAN", "GRASP_VERDICT", "SEMANTIC_VERDICT"}:
+            elif run["state"] in {"PRECONTACT_HUMAN", "GRASP_VERDICT", "SEMANTIC_VERDICT", "RELEASE_VERDICT"}:
                 if now > execution["wait_deadline"]:
-                    self._fault(run, {"PRECONTACT_HUMAN": "PRECONTACT_TIMEOUT", "GRASP_VERDICT": "GRASP_VERDICT_TIMEOUT", "SEMANTIC_VERDICT": "SEMANTIC_TIMEOUT"}[run["state"]])
+                    self._fault(run, {"PRECONTACT_HUMAN": "PRECONTACT_TIMEOUT", "GRASP_VERDICT": "GRASP_VERDICT_TIMEOUT", "SEMANTIC_VERDICT": "SEMANTIC_TIMEOUT", "RELEASE_VERDICT": "RELEASE_VERDICT_TIMEOUT"}[run["state"]])
             else:
                 try:
                     active = self.transport.poll_active()
@@ -766,6 +840,7 @@ class PickupExecutor:
                 if active is not None:
                     execution["active"] = False
                     completed_step = run["plan"]["steps"][execution["step_index"]]
+                    execution["terminal_phases"].append(completed_step["phase"])
                     self._emit_phase_event(run, "ACTION_TERMINAL", completed_step, "SUCCEEDED", {"step": completed_step, "terminal_status": "SUCCEEDED"})
                     if completed_step["phase"] in {"GRIPPER_CLOSE", "LIFT_LIN"}:
                         try:
@@ -796,7 +871,7 @@ class PickupExecutor:
             raise ContractError("HEARTBEAT_SCHEMA")
         if run["state"] in {"BLOCKED", "COMPLETED"}:
             return self._execution_response(run, payload["run_id"], payload["plan_digest"], "HEARTBEAT_OK")
-        if run["state"] not in {"EXECUTING", "PRECONTACT_HUMAN", "GRASP_VERDICT", "SEMANTIC_VERDICT"}:
+        if run["state"] not in ACTIVE_STATES:
             raise ContractError("EXECUTION_STATE")
         if not health["writer_alive"] or health["writer_error"] is not None:
             self._fault(run, "RECORDER_WRITER_FAULT")
@@ -850,6 +925,61 @@ class PickupExecutor:
             self._start_current_step(run)
         return self._execution_response(run, payload["run_id"], payload["plan_digest"], "GRASP_VERDICT_ACCEPTED")
 
+    def _release_verdict(self, payload):
+        run = self._execution_payload(payload, {"run_id", "plan_digest", "verdict", "decided_by", "source"}, "RELEASE_VERDICT_SCHEMA")
+        if (
+            payload["source"] != "HUMAN"
+            or payload["verdict"] not in {"LANDED", "OFF_SLOT", "UNCERTAIN"}
+            or not isinstance(payload["decided_by"], str)
+            or not SAFE_ID.fullmatch(payload["decided_by"])
+            or run["state"] != "RELEASE_VERDICT"
+        ):
+            raise ContractError("RELEASE_VERDICT_SCHEMA")
+        execution = run["execution"]
+        evidence = copy.deepcopy(execution.get("release_evidence"))
+        if not isinstance(evidence, dict):
+            raise ContractError("RELEASE_EVIDENCE")
+        evidence["human_verdict"] = payload["verdict"]
+        execution["release_verdict"] = payload["verdict"]
+        execution["release_decision"] = {
+            "source": "HUMAN",
+            "decided_by": payload["decided_by"],
+            "decided_at": self.clock().isoformat().replace("+00:00", "Z"),
+        }
+        try:
+            transition = self.scene_state_store.transition_release(
+                instance_id=run["plan"]["scene_binding"]["object_instance_id"],
+                release_slot=run["plan"]["scene_binding"]["release_slot"],
+                evidence=evidence,
+                updated_by="pickup-executor",
+                expected_digest=run["plan"]["scene_binding"]["scene_state_digest"],
+                expected_revision=run["plan"]["scene_binding"]["revision"],
+            )
+            execution["release_evidence"] = evidence
+            execution["scene_transition"] = transition
+        except ContractError as exc:
+            return self._block_release(run, exc.code)
+        except Exception:
+            return self._block_release(run, "SCENE_TRANSITION_WRITE_FAILED")
+        if payload["verdict"] == "LANDED":
+            run["state"] = "COMPLETED"
+            return self._execution_response(run, payload["run_id"], payload["plan_digest"], "RELEASE_CONFIRMED")
+        return self._block_release(run, "RELEASE_OFF_SLOT" if payload["verdict"] == "OFF_SLOT" else "RELEASE_UNCONFIRMED")
+
+    def _block_release(self, run, code):
+        run["failure_code"] = code
+        execution = run["execution"]
+        execution["durable_blocked"] = False
+        try:
+            if self.cell_state_store is None:
+                raise ContractError("CELL_STATE_STORE_MISSING")
+            self.cell_state_store.mark_blocked(code, run["plan"]["run_id"], run["digest"])
+            execution["durable_blocked"] = True
+        except Exception as exc:
+            execution["cell_state_error"] = exc.code if isinstance(exc, ContractError) else "CELL_STATE_WRITE_FAILED"
+        run["state"] = "BLOCKED"
+        return self._execution_response(run, run["plan"]["run_id"], run["digest"], code)
+
     def _cancel(self, payload):
         run = self._execution_payload(payload, {"run_id", "plan_digest", "lease_id"}, "CANCEL_SCHEMA")
         if not isinstance(payload["lease_id"], str) or not SAFE_ID.fullmatch(payload["lease_id"]) or payload["lease_id"] != run.get("execution", {}).get("lease_id"):
@@ -884,6 +1014,7 @@ class PickupExecutor:
 def run_jsonl(input_stream, output_stream, executor):
     """Keep ticking while stdin is quiet so a lease cannot be bypassed."""
     events = queue.Queue()
+    terminal_ok = None
     def read_lines():
         try:
             for line in input_stream:
@@ -919,17 +1050,18 @@ def run_jsonl(input_stream, output_stream, executor):
             output_stream.write(json.dumps(result, sort_keys=True, separators=(",", ":"), allow_nan=False) + "\n")
             output_stream.flush()
             if result["state"] in {"BLOCKED", "COMPLETED"}:
-                return result["state"] == "COMPLETED"
+                terminal_ok = result["state"] == "COMPLETED"
+                continue
             executor.tick()
             for run in executor.runs.values():
                 if run["state"] == "BLOCKED":
                     return terminal(run)
             continue
         for run in executor.runs.values():
-            if run["state"] in {"EXECUTING", "PRECONTACT_HUMAN", "GRASP_VERDICT", "SEMANTIC_VERDICT"}:
+            if run["state"] in ACTIVE_STATES:
                 executor._fault(run, "INPUT_READER_ERROR" if kind == "error" else "INPUT_EOF")
                 return terminal(run)
-        return not any(run["state"] == "BLOCKED" for run in executor.runs.values())
+        return terminal_ok if terminal_ok is not None else not any(run["state"] == "BLOCKED" for run in executor.runs.values())
 
 
 def main(argv=None):

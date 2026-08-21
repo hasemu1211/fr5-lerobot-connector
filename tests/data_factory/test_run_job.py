@@ -73,6 +73,32 @@ class Executor:
 
 
 class RunJobTest(unittest.TestCase):
+    def test_recycle_coordinates_are_an_exact_pair_and_reach_the_resolver(self):
+        value = payload()
+        value.update(recycle_x_mm=60, recycle_y_mm=-20)
+        self.assertEqual(run_job._run_payload(value)["recycle_x_mm"], 60)
+        for bad in (
+            {**payload(), "recycle_x_mm": 60},
+            {**value, "recycle_y_mm": float("nan")},
+            {**value, "recycle_x_mm": True},
+        ):
+            with self.assertRaisesRegex(run_job.ContractError, "RUN_PAYLOAD"):
+                run_job._run_payload(bad)
+
+        validated = {"normalized_job": {
+            **JOB, "place_id": "PLACE_A", "yaw_deg": 0, "x_mm": -60, "y_mm": 20,
+        }}
+        with (
+            mock.patch.object(run_job, "validate_job_spec", return_value=validated),
+            mock.patch.object(run_job, "_load", side_effect=lambda path, _: {"selected.json": {}, "motion.json": {}, "home.json": {}}[path]),
+            mock.patch.object(run_job, "bounded_place_coordinate", return_value=(60, -20)) as bounded,
+            mock.patch.object(run_job, "resolve_motion_program", return_value={}) as resolve,
+        ):
+            _, _, binding = run_job.resolve_inputs(value, scene_binding_call=lambda _, pose: pose)
+        bounded.assert_called_once_with({}, 60, -20)
+        self.assertEqual(binding, {"place_id": "PLACE_A", "yaw_deg": 0, "x_mm": 60, "y_mm": -20})
+        self.assertEqual(resolve.call_args.kwargs["release_pose"], binding)
+
     def test_live_collection_profile_binds_camera_and_recorder_settings(self):
         profile = dict(PROFILE)
         validated = {"collection_profile": profile}
@@ -88,6 +114,7 @@ class RunJobTest(unittest.TestCase):
             live_payload = payload("live"); live_payload["dataset_root"] = str(Path(directory) / "dataset")
             command_line, _ = run_job._recorder(live_payload, "pick up", profile, 12)
             self.assertFalse(Path(live_payload["dataset_root"]).exists())
+            self.assertEqual(command_line[0], run_job.DATA_PYTHON)
             self.assertEqual(
                 Path(command_line[command_line.index("--encoder-temp-dir") + 1]),
                 Path(directory) / ".dataset.encoder_tmp",
@@ -100,6 +127,7 @@ class RunJobTest(unittest.TestCase):
         with mock.patch.object(run_job.subprocess, "run", return_value=completed) as invoked:
             self.assertEqual(run_job._technical_validator("dataset", {}, profile)["code"], "PASS")
         validator_command = invoked.call_args.args[0]
+        self.assertEqual(validator_command[0], run_job.DATA_PYTHON)
         self.assertEqual(validator_command[validator_command.index("--expected-fps") + 1], "30")
         self.assertIn("--require-hil-motion", validator_command)
 
@@ -639,8 +667,22 @@ class RunJobTest(unittest.TestCase):
         self.assertEqual(set(result), run_job.EVENT_KEYS)
         self.assertEqual((result["ok"], result["state"], result["origin_op_id"]), (True, "PLANNED", "run-1"))
         self.assertEqual(result["data"]["motion_program_digest"], run_job.canonical_digest(motion()))
+        self.assertEqual(
+            {key: result["data"]["plan_only_checks"][key] for key in ("all_valid", "execute_goal_count", "gripper_goal_count")},
+            {"all_valid": True, "execute_goal_count": 0, "gripper_goal_count": 0},
+        )
         self.assertFalse(result["data"]["camera_semantic_authority"])
         self.assertEqual(created[0].transport.calls, list(PHASES))
+
+        failed = Executor()
+        failed.request = lambda request, _cancel=None: {
+            "schema_version":"fr5.pickup_executor.response.v3", "mode":"PRE_LIVE",
+            "op_id":request["op_id"], "op":request["op"], "ok":False,
+            "code":"PLAN_NOT_COMPLETE", "run_id":None, "plan_digest":None,
+            "state":"IDLE", "data":None,
+        }
+        rejected = run_job.run_plan_only(payload(), threading.Event(), lambda _: None, resolver=resolver, executor_factory=lambda _: failed)
+        self.assertEqual((rejected["code"], rejected["state"], rejected["data"]), ("PLAN_NOT_COMPLETE", "BLOCKED", None))
 
         called = []
         def live_fake(value, _cancel, _publish):
@@ -712,6 +754,10 @@ class RunJobTest(unittest.TestCase):
             stubborn.close()
         self.assertEqual(raised.exception.code, "JSONL_EXIT_TIMEOUT")
         self.assertIsNotNone(stubborn.process.poll())
+
+        exited = JsonlProcess([sys.executable, "-u", "-c", "pass"])
+        exited.process.wait(1)
+        self.assertEqual(exited.close(), 0)
 
         processes = []
         def hanging_factory(_timeout):

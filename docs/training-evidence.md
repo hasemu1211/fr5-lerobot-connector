@@ -6,11 +6,12 @@ SmolVLA 학습·평가·데이터 수집 정책을 결정하기 전에 조사와
 
 새 결과는 기존 항목을 지우지 않고 날짜, 환경, 입력 데이터, 명령 또는 출처, 측정값, 해석, 정책 영향과 함께 추가한다. 실제 FR5 결과와 공개 데이터 결과를 섞지 않고 HIL 배선 시험도 작업 성공 근거로 사용하지 않는다.
 
-## 현재 상태 — 2026-08-19
+## 현재 상태 — 2026-08-21
 
 - 실제 작업을 담은 학습 승인 FR5 데이터셋: 없음
 - 기존 FR5 배선 HIL: 1 episode, 1,040 frames, 30 Hz
 - scripted pickup 통합 HIL: 1 episode, 726 frames, 30 Hz. 물리 경로·그리퍼·한-job·저장 검증용이며 training 미승인
+- 공개 P4.5 pickup+recycle HIL: 1 episode, 537 frames, 30 Hz. scene transition·공개 인터페이스·지연 검증용이며 training 미승인
 - 로컬 FR5 학습 출력과 실물 rollout 결과: 없음
 - 현재 `best` checkpoint: 없음
 
@@ -115,7 +116,10 @@ validation은 checkpoint 후보를 줄이는 용도다. 반복해서 보며 선�
 | `LOCAL-011` | recorder commit 반증 | 선행 r007은 multithreaded ROS process에서 LeRobot camera encoder의 기본 process fork가 commit 중 정지해 quarantine됨. camera encode를 recorder process에서 순차 실행한 r008은 Parquet·두 MP4·metadata commit과 validator를 통과 | capture 30 Hz 경로는 유지하고 factory commit에서 `parallel_encoding=False`를 고정; commit 불확실 데이터는 보존하지 않고 quarantine/recovery 계약 적용 |
 | `LOCAL-012` | real ROS plan-only | 2026-08-20 G1 `(PLACE_A, 0°, -70 mm, +35 mm)`에서 공개 runner가 `PLANNED`; execute·gripper action status 0, dataset byte 전후 동일, gripper feedback 동일, arm feedback 최대 차이 3.73 µrad | plan resolution·scene binding과 no-command side-effect 근거. physical motion, runtime scene attestation, recorder/validator, camera semantics와 training approval 근거는 아님 |
 | `LOCAL-013` | 공개 single-job live pickup | 2026-08-20 G1 r007: exact plan `sha256:56ee…171ad`, scene/readback/collision/no-motion preapproval 뒤 접근→close→lift를 연속 실행; phase terminal→다음 dispatch 최대 2.120 ms. 사람 post-lift PASS 뒤 녹화 밖 reset, 678 rows·22.57 s·30.00 Hz, H.264 640×480 678 frames, alignment failure·queue drop 0, validator PASS, resource sampling error·swap I/O 0 | public `run_job --mode live`의 one-job 관통과 data/control 비결속 근거. 임시 1-camera의 clipping/sharpness warning은 정성 판정하지 않았고 `camera_semantic_authority=false`, `training_authorized=false`; 측정 호스트는 16 GB이므로 8 GB 이식성은 미승격 |
-| `LOCAL-014` | phase latency 분해 | r007 terminal→next dispatch는 최대 2.120 ms였지만 gripper close/open goal은 qualification의 6.0 s duration 때문에 accepted→terminal이 각각 약 6.06/6.04 s였다 | runner backlog는 관측되지 않음. 다음 Goal에서 controller terminal 시간과 arm stop-to-stop 경계를 별도로 줄이고 재적격화하며 현재 수치를 무근거로 변경하지 않음 |
+| `LOCAL-014` | phase latency 분해 | r007 terminal→next dispatch는 최대 2.120 ms였지만 gripper close/open goal은 qualification의 6.0 s duration 때문에 accepted→terminal이 각각 약 6.06/6.04 s였다 | runner backlog는 관측되지 않음. `LOCAL-015/016`에서 같은 ROS 경로의 timing 재적격화와 공개 관통을 완료함 |
+| `LOCAL-015` | gripper timing 재적격화 | 2026-08-21 `p45-gripper-latency-r001`: 기존 ROS action/velocity 20%/force 50%/settle 500 ms와 timeout·feedback gate를 유지하고 1.0 s command로 close 1.0509 s, open 1.7011 s, terminal→다음 dispatch 0.179 ms, arm drift 7.59 µrad, 최종 ref/fb 0.021 m. evidence SHA-256 `8ebef582…1f0f9` | 6 s 정지는 제어 queue 병목이 아니라 qualification duration이었다. feedback/timeout을 완화하지 않고 gripper 전후 체감 대기를 제거한 근거 |
+| `LOCAL-016` | 공개 P4.5 recycle/scene HIL | 2026-08-21 `p45-public-live-20260821-r003`: public CLI plan `sha256:c2e5668c…a9ce1`, recycle `sha256:434fca4c…4b10d`, collision 2,023 sample all-valid, CENTER pickup→GRID_1 release 10 phase terminal 성공. close/open 1.051/1.096 s, 각 다음 arm dispatch 1.374/1.418 ms; freeze 537=row-after-recycle 537; scene v2 revision 14 `ROBOT_RELEASE`→commit→technical validator PASS | P4.5 exact GRID_1 mechanism과 사용자가 쓰는 공개 interface의 실물 근거. single-camera semantic authority와 `training_authorized=false`; 다른 target/yaw/무인 campaign으로 일반화하지 않음 |
+| `LOCAL-017` | terminal response 실패 격리·수정 | 선행 r002는 10 phase와 scene revision 13 전이는 끝났지만 executor가 terminal JSON을 flush한 직후 teardown하며 parent가 `EXECUTOR_CALL_FAILED`로 abort했다. terminal child가 parent EOF까지 살아 있도록 shared JSONL boundary를 수정했고 r003에서 scene 전이 동안 child 생존→537-row commit→validator terminal을 확인 | 이미 바뀐 physical scene을 rollback하지 않고 r002 payload를 폐기한 fail-close가 맞았음. 수정 뒤 같은 목적의 추가 물리 cycle 없이 r003 한 번으로 경계를 증명 |
 | `METHOD-001` | validation | 한 run의 고정 validation과 fold마다 재학습하는 교차검증은 다른 절차이며 final test는 별도 유지 | 동적 episode 교체는 기각; 필요할 때만 별도 group CV |
 | `LOCAL-DOC-001` | 외부 조사문 검토 | `ML 에이전트 학습 프레임워크 조사.md`의 full-state resume, top-k, seed·metric 기록 원칙은 유효하지만 Lightning·TRL·SB3·MLflow 중심 제안은 LeRobot SmolVLA 경로와 맞지 않음 | 원칙만 채택하고 새 trainer/runtime는 도입하지 않음 |
 | `SKILL-001` | 스킬 검토 | AREX/Auto-ML-Skills는 별도 DisCo·Node 22.19+·provider와 대형 범용 skill graph를 요구하고, Trackio는 새 로깅 통합이 필요함 | 현재는 미설치; LeRobot 기본 W&B와 기존 연구 스킬 우선 |

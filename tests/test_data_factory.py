@@ -105,7 +105,7 @@ class DataFactoryTest(unittest.TestCase):
         self.assertEqual(program["robot_system_id"], "fr5-lab-a")
         self.assertEqual(program["execution_timeouts_s"], qualification["execution_timeouts_s"])
         self.assertEqual(program["steps"][3]["gripper_position_m"], .012)
-        self.assertEqual(program["steps"][6]["gripper_position_m"], .021)
+        self.assertEqual(next(step for step in program["steps"] if step["phase"] == "GRIPPER_OPEN")["gripper_position_m"], .021)
         self.assertNotIn("requires_confirmation", program["steps"][2])
         self.assertNotIn("pause_after", program["steps"][3])
         self.assertEqual(program["steps"][4]["pause_after"], "SEMANTIC_VERDICT")

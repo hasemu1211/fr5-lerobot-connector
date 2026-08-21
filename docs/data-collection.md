@@ -35,7 +35,20 @@ ros2 launch fairino5_v6_moveit2_config real_robot.launch.py \
 
 기동 로그가 gripper activation 실패를 보고하면 재시도로 우회하지 않는다. 빈 gripper와 완전히 종료된 ros2_control을 확인한 maintenance 상태에서만 `ActGripper(1,0)` 후 `ActGripper(1,1)`을 수행한다. 평상시 기동은 상태 확인만 강제하고 해당 명령을 자동 전송하지 않는다. 이유와 제어 소유권은 [하드웨어 계약](hardware.md#그리퍼-활성화-안전-규칙)을 따른다.
 
-activation은 active지만 feedback이 open `0.021 m`가 아니면 `ActGripper`를 반복하지 않는다. 빈 작업공간에서 승인된 ROS gripper open 명령 한 번을 보내 reference/feedback을 확인한 뒤 수집한다.
+전원을 새로 켠 뒤에는 activation과 position을 별도로 판정한다. `ActGripper` 성공 직후 `GetGripperCurPosition()`이 물리 open과 달리 stale `0%`를 낼 수 있다. 사람이 gripper가 비어 있고 실제 open임을 확인했을 때만 ros2_control이 없는 maintenance session에서 `MoveGripper(1,100)`을 한 번 보내 상태를 갱신한다. `GetGripperMotionDone()`=`0,0,1`과 `GetGripperCurPosition()`=`0,0,100`을 모두 확인하고 command server를 종료한 뒤 정식 bringup을 시작한다. bringup 로그의 `Real gripper hardware ready (index=1, position=100)`이 최종 시작 근거다.
+
+maintenance terminal에서 `ros2 run fairino_hardware_v3_9_7 ros2_cmd_server --ros-args -p robot_ip:="$FR5_CONTROLLER_IP"`를 띄운 뒤 다른 sourced terminal에서 아래 순서만 사용한다. 첫 두 mutation은 inactive일 때만, `MoveGripper`는 사람이 실제 open을 확인했을 때만 실행한다.
+
+```bash
+ros2 service call /fairino_remote_command_service fairino_msgs/srv/RemoteCmdInterface "{cmd_str: 'GetGripperActivateStatus()'}"
+ros2 service call /fairino_remote_command_service fairino_msgs/srv/RemoteCmdInterface "{cmd_str: 'ActGripper(1,0)'}"
+ros2 service call /fairino_remote_command_service fairino_msgs/srv/RemoteCmdInterface "{cmd_str: 'ActGripper(1,1)'}"
+ros2 service call /fairino_remote_command_service fairino_msgs/srv/RemoteCmdInterface "{cmd_str: 'MoveGripper(1,100)'}"
+ros2 service call /fairino_remote_command_service fairino_msgs/srv/RemoteCmdInterface "{cmd_str: 'GetGripperMotionDone()'}"
+ros2 service call /fairino_remote_command_service fairino_msgs/srv/RemoteCmdInterface "{cmd_str: 'GetGripperCurPosition()'}"
+```
+
+activation은 active이고 position도 실제 non-open을 나타내면 `ActGripper`를 반복하지 않는다. 빈 작업공간에서 승인된 ROS `/gripper_controller` open 명령 한 번으로 정규화한 뒤 reference/feedback을 확인한다. 실제 위치가 불명확하면 SDK 숫자를 물리 진실로 추측하거나 refresh 명령을 보내지 않는다.
 
 ## 2. 카메라 구성 선택과 실행
 
@@ -97,7 +110,11 @@ scripts/preflight_collection.sh --live --camera-profile up-side
 
 ### 데이터팩토리 one-job pickup
 
-qualified JobSpec과 scene/cell을 쓸 때는 [one-job runner](data-factory.md#one-job-runner)의 `--mode live`를 사용한다. 승인 화면은 path, `LIFT_LIN`까지의 연속 flow, collision-check 상태, 속도와 exact plan digest를 보여준다. 승인 뒤 recorder의 첫 aligned row부터 pregrasp→approach→close→lift까지 자동 녹화하며 중간 prompt를 넣지 않는다. 들기 뒤 녹화를 freeze하고 실제 성공 여부를 `PASS/FAIL`로 한 번 묻는다. reset·commit·validator 뒤 물체 위치와 빈 gripper를 확인해 `SCENE_READY`를 입력하면 끝난다.
+qualified JobSpec과 scene/cell을 쓸 때는 [one-job runner](data-factory.md#one-job-runner)의 `--mode live`를 사용한다. 승인 화면에는 pickup과 녹화 밖 recycle 경로·target·digest가 같이 나온다. `--recycle-x-mm`와 `--recycle-y-mm`를 함께 주면 그 local release 좌표를 쓰고, 둘 다 생략하면 pickup source 좌표로 되돌린다. 한쪽만 주는 입력은 거부한다. 승인 뒤 recorder의 첫 aligned row부터 pregrasp→approach→close→lift까지 자동 녹화하며 중간 prompt를 넣지 않는다. 들기 뒤 녹화를 freeze하고 실제 성공 여부를 `PASS/FAIL`로 한 번 판정한다.
+
+`PASS` 뒤에는 recorder row를 늘리지 않고 release slot approach→lower→open→retreat→safe staging을 실행한다. 물체가 표시 slot 안에 있고 gripper가 비었으며 retreat/safe staging이 끝났으면 exact recycle digest가 붙은 `LANDED`를 입력한다. executor가 object+slot을 scene v2 한 revision으로 먼저 기록한 뒤에만 recorder commit과 validator가 진행된다. `OFF_SLOT`/`UNCERTAIN`, terminal evidence 불일치 또는 scene write 실패에서는 commit과 다음 motion을 막고 object=`UNKNOWN`, slot=`QUARANTINED`로 격리한다.
+
+현재 사람용 표면은 같은 interactive Job builder와 이 one-job CLI다. 여러 episode를 한 화면에서 운용하는 bounded campaign UX는 후속 P5.2 범위이며, 현재 명령이 성공했다고 별도 GUI나 무인 연속 수집이 검증된 것은 아니다.
 
 임시 camera profile은 정량 기록만 하며 화면으로 성공을 자동 판정하지 않는다. validator `PASS`도 `training_approved.json`을 만들지 않는다.
 

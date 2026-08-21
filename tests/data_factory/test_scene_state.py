@@ -55,6 +55,83 @@ class SceneStateTest(unittest.TestCase):
             with self.assertRaisesRegex(ContractError, "STATE_PATH"):
                 store.read()
 
+    def test_release_transition_updates_object_and_slot_atomically(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "outputs/data_factory/cells"
+            store = scene_state.SceneStateStore(root, "fr5-lab-a")
+            start = store.update_object(
+                instance_id="cube-1",
+                object_profile_id="wood-cube-25mm-r001",
+                state="ON_SURFACE",
+                pose={"place_id": "place-a", "yaw_deg": 0, "x_mm": -60, "y_mm": 0},
+                source="HUMAN",
+                updated_by="project-owner",
+                expected_revision=0,
+            )
+            slot = scene_state.release_slot(
+                robot_system_id="fr5-lab-a",
+                pose={"place_id": "place-a", "yaw_deg": 0, "x_mm": 60, "y_mm": 0},
+                object_profile_id="wood-cube-25mm-r001",
+                exclusion_geometry_digest="sha256:" + "e" * 64,
+            )
+
+            def evidence(verdict, terminals, snapshot_digest="sha256:" + "4" * 64):
+                return {
+                    "schema_version": "data_factory.recycle_release_evidence.v1",
+                    "run_id": "run-1",
+                    "plan_digest": "sha256:" + "a" * 64,
+                    "release_slot_id": slot["slot_id"],
+                    "expected_scene_state_digest": start["scene_state_digest"],
+                    "expected_scene_revision": start["scene_state"]["revision"],
+                    "gripper_reference_m": 0.021 if verdict == "LANDED" else None,
+                    "gripper_feedback_m": 0.021 if verdict == "LANDED" else None,
+                    "terminal_phases": terminals,
+                    "post_retreat_snapshot_digest": snapshot_digest,
+                    "next_start_tolerance_rad": 0.01,
+                    "human_verdict": verdict,
+                }
+
+            terminals = ["RECYCLE_APPROACH_PTP", "LOWER_LIN", "GRIPPER_OPEN", "RETREAT_LIN", "SAFE_POSE_PTP"]
+            landed = store.transition_release(
+                instance_id="cube-1", release_slot=slot, evidence=evidence("LANDED", terminals),
+                updated_by="pickup-executor", expected_digest=start["scene_state_digest"],
+                expected_revision=start["scene_state"]["revision"],
+            )
+            scene = landed["scene_state"]
+            self.assertEqual((scene["schema_version"], scene["revision"]), (scene_state.SCHEMA_VERSION, 2))
+            self.assertEqual((scene["objects"]["cube-1"]["pose"], scene["slot_allocations"][slot["slot_id"]]["state"]), (slot["pose"], "CONSUMED_PENDING_REVIEW"))
+            persisted = (root / "fr5-lab-a/scene_state.json").read_bytes()
+            with self.assertRaisesRegex(ContractError, "SCENE_STATE_CHANGED"):
+                store.transition_release(
+                    instance_id="cube-1", release_slot=slot, evidence=evidence("UNCERTAIN", []),
+                    updated_by="pickup-executor", expected_digest=start["scene_state_digest"],
+                    expected_revision=start["scene_state"]["revision"],
+                )
+            self.assertEqual((root / "fr5-lab-a/scene_state.json").read_bytes(), persisted)
+
+            second = scene_state.SceneStateStore(root, "fr5-lab-b")
+            second_start = second.update_object(
+                instance_id="cube-1", object_profile_id="wood-cube-25mm-r001", state="ON_SURFACE",
+                pose={"place_id": "place-a", "yaw_deg": 0, "x_mm": -60, "y_mm": 0},
+                source="HUMAN", updated_by="project-owner", expected_revision=0,
+            )
+            second_slot = scene_state.release_slot(
+                robot_system_id="fr5-lab-b", pose=slot["pose"],
+                object_profile_id="wood-cube-25mm-r001", exclusion_geometry_digest="sha256:" + "e" * 64,
+            )
+            uncertain_evidence = evidence("UNCERTAIN", [])
+            uncertain_evidence.update(
+                release_slot_id=second_slot["slot_id"],
+                expected_scene_state_digest=second_start["scene_state_digest"],
+                expected_scene_revision=second_start["scene_state"]["revision"],
+            )
+            uncertain = second.transition_release(
+                instance_id="cube-1", release_slot=second_slot, evidence=uncertain_evidence,
+                updated_by="pickup-executor", expected_digest=second_start["scene_state_digest"],
+                expected_revision=second_start["scene_state"]["revision"],
+            )["scene_state"]
+            self.assertEqual((uncertain["objects"]["cube-1"]["state"], uncertain["slot_allocations"][second_slot["slot_id"]]["state"]), ("UNKNOWN", "QUARANTINED"))
+
 
 if __name__ == "__main__":
     unittest.main()

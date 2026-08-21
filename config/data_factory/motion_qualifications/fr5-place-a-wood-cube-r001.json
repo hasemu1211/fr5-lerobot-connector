@@ -60,10 +60,11 @@
     "PREGRASP_PTP": {"velocity_scaling": 0.03, "acceleration_scaling": 0.03, "planning_timeout_s": 5.0, "execution_timeout_s": 20.0},
     "APPROACH_STOP_LIN": {"velocity_scaling": 0.03, "acceleration_scaling": 0.03, "planning_timeout_s": 5.0, "execution_timeout_s": 20.0},
     "FINAL_APPROACH_LIN": {"velocity_scaling": 0.03, "acceleration_scaling": 0.03, "planning_timeout_s": 5.0, "execution_timeout_s": 20.0},
-    "GRIPPER_CLOSE": {"command_duration_s": 6.0, "execution_timeout_s": 15.0, "completion_tolerance_m": 0.0008400000000000005},
+    "GRIPPER_CLOSE": {"command_duration_s": 1.0, "execution_timeout_s": 15.0, "completion_tolerance_m": 0.0008400000000000005},
     "LIFT_LIN": {"velocity_scaling": 0.03, "acceleration_scaling": 0.03, "planning_timeout_s": 5.0, "execution_timeout_s": 20.0},
+    "RECYCLE_APPROACH_PTP": {"velocity_scaling": 0.03, "acceleration_scaling": 0.03, "planning_timeout_s": 5.0, "execution_timeout_s": 20.0},
     "LOWER_LIN": {"velocity_scaling": 0.03, "acceleration_scaling": 0.03, "planning_timeout_s": 5.0, "execution_timeout_s": 20.0},
-    "GRIPPER_OPEN": {"command_duration_s": 6.0, "execution_timeout_s": 15.0, "completion_tolerance_m": 0.000105},
+    "GRIPPER_OPEN": {"command_duration_s": 1.0, "execution_timeout_s": 15.0, "completion_tolerance_m": 0.000105},
     "RETREAT_LIN": {"velocity_scaling": 0.03, "acceleration_scaling": 0.03, "planning_timeout_s": 5.0, "execution_timeout_s": 20.0},
     "SAFE_POSE_PTP": {"velocity_scaling": 0.03, "acceleration_scaling": 0.03, "planning_timeout_s": 5.0, "execution_timeout_s": 20.0}
   },

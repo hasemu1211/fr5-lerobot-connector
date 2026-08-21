@@ -70,7 +70,13 @@ hardware interface의 activate 단계에서 `ActGripper`를 자동 호출하지 
 
 활성화가 필요할 때만 빈 그리퍼를 확인한 maintenance/bringup 절차에서 `ActGripper(index,0)` 후 `ActGripper(index,1)`을 명시적으로 수행하고, 첫 위치 명령에서 초기화 동작이 발생할 수 있다고 취급한다. 평상시 controller activation은 현재 위치를 읽어 동기화할 뿐 열림·닫힘 명령을 만들지 않는다.
 
-기동 판정은 세 경우로 나눈다. activation bit가 inactive면 ros2_control을 완전히 종료한 maintenance 상태에서만 `0→1`을 수행한다. active지만 ROS feedback이 open 목표 `0.021 m`가 아니면 reset을 반복하지 말고, 빈 작업공간에서 승인된 `/gripper_controller` open 명령 한 번으로 정규화한 뒤 reference와 feedback을 확인한다. active이고 open이면 추가 `ActGripper`나 숨은 시작 motion 없이 job preflight로 간다.
+기동 판정은 세 경우로 나눈다.
+
+- activation bit가 inactive면 ros2_control을 완전히 종료한 maintenance 상태에서만 `0→1`을 수행한다. activation 직후 SDK position은 물리 위치와 달리 stale `0%`일 수 있으므로 activation bit만 보고 bringup하지 않는다. 사람이 실제 gripper가 비어 있고 open임을 확인한 경우에만 같은 maintenance session에서 open `MoveGripper(index,100)`을 한 번 보내고 `motion_done=1`, `position=100`을 확인해 상태를 복원한다.
+- active이고 실제 gripper도 open이지만 SDK position만 `0%`이면 reset을 반복하지 않고 위 open refresh만 수행한다. 실제 위치를 사람이 확인하지 못했으면 명령을 보내지 않고 정지한다.
+- active이고 position이 유효하지만 open 목표 `0.021 m`가 아니면 reset하지 않는다. ros2_control bringup 뒤 빈 작업공간에서 승인된 `/gripper_controller` open 명령 한 번으로 정규화하고 reference와 feedback을 확인한다. active이고 open이면 추가 `ActGripper`나 숨은 시작 motion 없이 job preflight로 간다.
+
+maintenance command server는 상태 복원 직후 종료한다. ros2_control이 active인 동안 direct `MoveGripper`로 값을 맞추지 않는다.
 
 ### 제어 소유권
 

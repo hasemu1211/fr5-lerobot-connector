@@ -3,6 +3,7 @@ from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 sys.path.insert(0,str(Path(__file__).resolve().parents[2])); from tools.data_factory.motion import pickup_executor as e
+from tools.data_factory.scene_state import release_slot
 from tools.fr5_data_factory import canonical_digest
 SCENE={"scene_state_digest":"sha256:"+"8"*64,"revision":1,"object_instance_id":"cube-1"}
 SCENE_SPEC={"frame_id":"base_link","floor":{"id":"floor","dimensions_m":[2.,2.,.05],"surface_z_m":-.02,"source":"test"},"wall":{"id":"wall","dimensions_m":[2.,.05,2.],"near_face_y_m":-.3,"wall_side":"opposite_home_arm_protrusion","home_arm_protrusion_base_xy":[0.,1.],"j1_home_deg":-90.}}
@@ -42,7 +43,7 @@ class Test(unittest.TestCase):
   if op=="approve" and "approval_scope" not in p:p["approval_scope"]="HUMAN_GATED"
   return {"schema_version":"fr5.pickup_executor.command.v4","op_id":i or op,"op":op,"payload":p}
  def test_golden_plan_digest_chain_markers(self):
-  t=T();t.snapshot=lambda *_:snapshot([.25]*6);n=e.PickupExecutor(t,clock=lambda:datetime(2026,1,1,tzinfo=timezone.utc));r=n.process(self.req("plan",{"run_id":"r","motion_program":motion()}));plan=r["data"]["plan"];self.assertEqual(set(r["data"]),{"plan","precommit_safety","precommit_evidence","operator_summary"});self.assertEqual(r["data"]["precommit_safety"]["status"],"PENDING");self.assertEqual(r["data"]["precommit_evidence"]["approved_plan_digest"],r["plan_digest"]);self.assertEqual(plan["scene_binding"],SCENE);self.assertEqual([x["phase"] for x in plan["steps"]],list(e.PHASES));self.assertEqual(plan["initial_joint_state"],[.25]*6);self.assertEqual(plan["steps"][0]["start_joint_state"],[.25]*6);self.assertEqual(plan["steps"][1]["final_joint_state"],plan["steps"][2]["start_joint_state"]);self.assertEqual(plan["steps"][2]["requires_confirmation"],"PRECONTACT_HUMAN");self.assertEqual(plan["steps"][3]["pause_after"],"GRASP_VERDICT");self.assertEqual(plan["steps"][4]["pause_after"],"SEMANTIC_VERDICT");self.assertEqual(plan["gripper_requirements"],motion()["gripper_requirements"]);self.assertEqual(len(t.calls),9);injected={"schema_version":"fr5.pickup_executor.command.v4","op_id":"injected","op":"plan","payload":{"run_id":"i","motion_program":motion(),"initial_joint_state":[0]*6}};self.assertEqual(n.process(injected)["code"],"PLAN_SCHEMA")
+  t=T();t.snapshot=lambda *_:snapshot([.25]*6);n=e.PickupExecutor(t,clock=lambda:datetime(2026,1,1,tzinfo=timezone.utc));r=n.process(self.req("plan",{"run_id":"r","motion_program":motion()}));plan=r["data"]["plan"];self.assertEqual(set(r["data"]),{"plan","precommit_safety","precommit_evidence","operator_summary"});self.assertEqual(r["data"]["precommit_safety"]["status"],"PENDING");self.assertEqual(r["data"]["precommit_evidence"]["approved_plan_digest"],r["plan_digest"]);self.assertEqual(plan["scene_binding"],SCENE);self.assertEqual([x["phase"] for x in plan["steps"]],list(e.PHASES));self.assertEqual(plan["initial_joint_state"],[.25]*6);self.assertEqual(plan["steps"][0]["start_joint_state"],[.25]*6);self.assertEqual(plan["steps"][1]["final_joint_state"],plan["steps"][2]["start_joint_state"]);self.assertEqual(plan["steps"][2]["requires_confirmation"],"PRECONTACT_HUMAN");self.assertEqual(plan["steps"][3]["pause_after"],"GRASP_VERDICT");self.assertEqual(plan["steps"][4]["pause_after"],"SEMANTIC_VERDICT");self.assertEqual(plan["gripper_requirements"],motion()["gripper_requirements"]);self.assertEqual(len(t.calls),len(e.PHASES));injected={"schema_version":"fr5.pickup_executor.command.v4","op_id":"injected","op":"plan","payload":{"run_id":"i","motion_program":motion(),"initial_joint_state":[0]*6}};self.assertEqual(n.process(injected)["code"],"PLAN_SCHEMA")
   self.assertEqual(r["data"]["operator_summary"]["flow"],{"continuous_through":"APPROACH_STOP_LIN","next_human_hold":"PRECONTACT_HUMAN"})
   t=T();t.snapshot=lambda *_:snapshot([.25]*6);n=e.PickupExecutor(t,clock=lambda:datetime(2026,1,1,tzinfo=timezone.utc));continuous=n.process(self.req("plan",{"run_id":"continuous","motion_program":motion(True)}));self.assertTrue(continuous["ok"]);self.assertEqual(continuous["data"]["operator_summary"]["flow"],{"continuous_through":"LIFT_LIN","next_human_hold":"POST_LIFT_SEMANTIC"});self.assertNotIn("requires_confirmation",continuous["data"]["plan"]["steps"][2]);self.assertNotIn("pause_after",continuous["data"]["plan"]["steps"][3])
  def test_failures_reuse_approval_live_no_later(self):
@@ -84,16 +85,16 @@ class Test(unittest.TestCase):
    if n.runs["r"]["state"]=="BLOCKED":return n,t,s,p,None
    self.assertEqual(n.runs["r"]["state"],"GRASP_VERDICT");hb=n.process(self.req("heartbeat",{"run_id":"r","plan_digest":p["plan_digest"],"lease_id":"lease-1","recorder_health":{"writer_alive":True,"writer_error":None}},"grasp-evidence"));self.assertEqual(hb["data"]["gripper_feedback_m"],gripper_position);g=n.process(self.req("grasp_verdict",{"run_id":"r","plan_digest":p["plan_digest"],"verdict":grasp_verdict,"decided_by":"operator-1","source":"HIL_PROXY"},"g"));
    if grasp_verdict == "FAIL": return n,t,s,p,g
-   n.tick();self.assertEqual(n.runs["r"]["state"],"SEMANTIC_VERDICT");hb=n.process(self.req("heartbeat",{"run_id":"r","plan_digest":p["plan_digest"],"lease_id":"lease-1","recorder_health":{"writer_alive":True,"writer_error":None}},"lift-evidence"));self.assertEqual(hb["data"]["post_lift_gripper_feedback_m"],gripper_position);n.process(self.req("semantic_verdict",{"run_id":"r","plan_digest":p["plan_digest"],"verdict":semantic_verdict,"decided_by":"operator-1","source":"HIL_PROXY"},"v"));[n.tick() for _ in range(4)];return n,t,s,p,g
+   n.tick();self.assertEqual(n.runs["r"]["state"],"SEMANTIC_VERDICT");hb=n.process(self.req("heartbeat",{"run_id":"r","plan_digest":p["plan_digest"],"lease_id":"lease-1","recorder_health":{"writer_alive":True,"writer_error":None}},"lift-evidence"));self.assertEqual(hb["data"]["post_lift_gripper_feedback_m"],gripper_position);n.process(self.req("semantic_verdict",{"run_id":"r","plan_digest":p["plan_digest"],"verdict":semantic_verdict,"decided_by":"operator-1","source":"HIL_PROXY"},"v"));[n.tick() for _ in range(5)];return n,t,s,p,g
   def continuous(gripper_position=.01):
    clock=[0];t=Live();t.gripper_position=gripper_position;s=Store();n=e.PickupExecutor(t,clock=lambda:datetime(2026,1,1,tzinfo=timezone.utc),monotonic_clock=lambda:clock[0],cell_state_store=s,scene_state_store=s,execution_enabled=True);p=n.process(self.req("plan",{"run_id":"r","motion_program":motion(True)}));a={"approval_id":"approval-1","approved_by":"operator-1","run_id":"r","resolved_job_digest":"sha256:"+"a"*64,"plan_digest":p["plan_digest"],"approval_expiry":"2026-01-02T00:00:00Z","approval_scope":"HUMAN_GATED"};n.process(self.req("approve",a,"continuous-a"));n.process(self.req("execute",{"run_id":"r","plan_digest":p["plan_digest"],"lease_id":"lease-1"},"continuous-e"));[n.tick() for _ in range(5)];return n,t,s,p
-  n,t,s,p=continuous();self.assertEqual((n.runs["r"]["state"],t.started,n.runs["r"]["execution"]["grasp_verdict"]),("SEMANTIC_VERDICT",list(e.PHASES[:5]),None));n.process(self.req("semantic_verdict",{"run_id":"r","plan_digest":p["plan_digest"],"verdict":"PASS","decided_by":"operator-1","source":"HUMAN"},"continuous-v"));[n.tick() for _ in range(4)];self.assertEqual((n.runs["r"]["state"],t.started),("COMPLETED",list(e.PHASES)))
+  n,t,s,p=continuous();self.assertEqual((n.runs["r"]["state"],t.started,n.runs["r"]["execution"]["grasp_verdict"]),("SEMANTIC_VERDICT",list(e.PHASES[:5]),None));n.process(self.req("semantic_verdict",{"run_id":"r","plan_digest":p["plan_digest"],"verdict":"PASS","decided_by":"operator-1","source":"HUMAN"},"continuous-v"));[n.tick() for _ in range(5)];self.assertEqual((n.runs["r"]["state"],t.started),("COMPLETED",list(e.PHASES)))
   n,t,s,p=continuous(.009);self.assertEqual((n.runs["r"]["failure_code"],t.started,s.blocked[-1][0]),("GRIPPER_FEEDBACK_OUT_OF_RANGE",list(e.PHASES[:4]),"GRIPPER_FEEDBACK_OUT_OF_RANGE"))
   for verdict in ("PASS","FAIL"):
    n,t,s,p,g=ready("PASS",verdict);self.assertEqual((n.runs["r"]["state"],n.runs["r"]["execution"]["grasp_verdict"],n.runs["r"]["execution"]["semantic_verdict"],t.started), ("COMPLETED","PASS",verdict,list(e.PHASES)));self.assertEqual([item[0] for item in s.blocked],["EXECUTION_IN_PROGRESS"])
   from tools.data_factory.quality.phase_events import read_phase_events
   with tempfile.TemporaryDirectory() as directory:
-   root=Path(directory);(root/"r").mkdir();n,t,s,p,g=ready("PASS",phase_events_root=root);self.assertTrue(n.close());events=read_phase_events(root/"r/phase_events.jsonl");self.assertEqual([event["sequence"] for event in events],list(range(33)));self.assertEqual({event["action_status"] for event in events if event["event"]=="GOAL_ACCEPTED"},{"ACCEPTED"});self.assertEqual(sum(event["event"]=="DECISION_RECEIVED" for event in events),3)
+   root=Path(directory);(root/"r").mkdir();n,t,s,p,g=ready("PASS",phase_events_root=root);self.assertTrue(n.close());events=read_phase_events(root/"r/phase_events.jsonl");self.assertEqual([event["sequence"] for event in events],list(range(len(e.PHASES)*3+6)));self.assertEqual({event["action_status"] for event in events if event["event"]=="GOAL_ACCEPTED"},{"ACCEPTED"});self.assertEqual(sum(event["event"]=="DECISION_RECEIVED" for event in events),3)
   with tempfile.TemporaryDirectory() as directory:
    root=Path(directory);(root/"r").mkdir();(root/"r/phase_events.jsonl").write_text("owned\n");n,t,s,p,g=ready("PASS",phase_events_root=root);self.assertEqual(n.runs["r"]["state"],"COMPLETED");out=io.StringIO();request=self.req("status",{"run_id":"r","plan_digest":p["plan_digest"]},"report-status");self.assertTrue(e.run_jsonl(io.StringIO(__import__("json").dumps(request)+"\n"),out,n));self.assertEqual(__import__("json").loads(out.getvalue())["data"]["behavior_report_status"],"BEHAVIOR_REPORT_UNAVAILABLE")
   with tempfile.TemporaryDirectory() as directory, __import__("unittest").mock.patch.object(e,"PhaseEventWriter",side_effect=RuntimeError("thread")):
@@ -121,6 +122,28 @@ class Test(unittest.TestCase):
   s.mark_blocked=mark;n=e.PickupExecutor(t,clock=lambda:datetime(2026,1,1,tzinfo=timezone.utc),cell_state_store=s,scene_state_store=s,execution_enabled=True);p=n.process(self.req("plan",{"run_id":"r","motion_program":motion()}));calls=[0]
   def start_fail(*_):calls[0]+=1;return snapshot() if calls[0]==1 else (_ for _ in ()).throw(e.ContractError("ROS_JOINT_STATE_STALE"))
   t.snapshot=start_fail;self.assertEqual(n.process(self.req("plan",{"run_id":"r2","motion_program":motion()},"one"))["code"],"ONE_JOB_ONLY");n.process(self.req("approve",{"approval_id":"approval-1","approved_by":"operator-1","run_id":"r","resolved_job_digest":"sha256:"+"a"*64,"plan_digest":p["plan_digest"],"approval_expiry":"2026-01-02T00:00:00Z"},"a3"));bad=n.process(self.req("execute",{"run_id":"r","plan_digest":p["plan_digest"],"lease_id":"lease-1"},"e3"));self.assertEqual((bad["code"],bad["state"],bad["data"]["cell_state_error"],t.started),("ROS_JOINT_STATE_STALE","BLOCKED","STATE_WRITE_FAILED",[]))
+ def test_recycle_release_transition_and_failure_quarantine(self):
+  slot=release_slot(robot_system_id="fr5-lab-a",pose={"place_id":"place-a","yaw_deg":0,"x_mm":60,"y_mm":0},object_profile_id="wood-cube-25mm-r001",exclusion_geometry_digest="sha256:"+"e"*64);binding={**SCENE,"release_slot":slot}
+  class Live(T):
+   def __init__(self):super().__init__();self.position=[0.]*6;self.started=[];self.cancelled=0;self.fail_poll=False
+   def snapshot(self,*_):return snapshot(self.position)
+   def start_phase(self,step):self.started.append(step["phase"]);self.position=step["final_joint_state"]
+   def poll_active(self):
+    if self.fail_poll:raise e.ContractError("ROS_EXEC_RESULT_FAILED")
+    return object()
+   def cancel_active(self,*_):self.cancelled+=1
+  class Store:
+   def __init__(self):self.blocked=[];self.transitions=[]
+   def read(self):return {"robot_system_id":"fr5-lab-a","cell_ready":True}
+   def mark_blocked(self,*args):self.blocked.append(args)
+   @contextmanager
+   def locked_snapshot(self,digest):yield {"scene_state_digest":digest,"scene_state":{"revision":1,"objects":{"cube-1":{"object_profile_id":"wood-cube-25mm-r001","state":"ON_SURFACE"}}}}
+   def transition_release(self,**value):self.transitions.append(value);return {"scene_state_digest":"sha256:"+"9"*64,"release_evidence_digest":canonical_digest(value["evidence"])}
+  def ready():
+   t,s=Live(),Store();n=e.PickupExecutor(t,clock=lambda:datetime(2026,1,1,tzinfo=timezone.utc),monotonic_clock=lambda:0,cell_state_store=s,scene_state_store=s,execution_enabled=True);p=n.process(self.req("plan",{"run_id":"r","motion_program":motion(True),"scene_binding":binding}));n.process(self.req("approve",{"approval_id":"approval-1","approved_by":"operator-1","run_id":"r","resolved_job_digest":"sha256:"+"a"*64,"plan_digest":p["plan_digest"],"approval_expiry":"2026-01-02T00:00:00Z"},"release-a"));n.process(self.req("execute",{"run_id":"r","plan_digest":p["plan_digest"],"lease_id":"lease-1"},"release-e"));[n.tick() for _ in range(5)];n.process(self.req("semantic_verdict",{"run_id":"r","plan_digest":p["plan_digest"],"verdict":"PASS","decided_by":"operator-1","source":"HUMAN"},"release-v"));return n,t,s,p
+  n,t,s,p=ready();[n.tick() for _ in range(5)];self.assertEqual((n.runs["r"]["state"],s.transitions), ("RELEASE_VERDICT",[]));result=n.process(self.req("release_verdict",{"run_id":"r","plan_digest":p["plan_digest"],"verdict":"LANDED","decided_by":"operator-1","source":"HUMAN"},"landed"));self.assertEqual((result["state"],s.transitions[0]["evidence"]["human_verdict"]),("COMPLETED","LANDED"))
+  n,t,s,p=ready();[n.tick() for _ in range(5)];s.transition_release=lambda **_:(_ for _ in ()).throw(e.ContractError("SCENE_STATE_CHANGED"));result=n.process(self.req("release_verdict",{"run_id":"r","plan_digest":p["plan_digest"],"verdict":"LANDED","decided_by":"operator-1","source":"HUMAN"},"stale-scene"));self.assertEqual((result["state"],result["code"],result["data"]["durable_blocked"],s.blocked[-1][0]),("BLOCKED","SCENE_STATE_CHANGED",True,"SCENE_STATE_CHANGED"))
+  n,t,s,p=ready();n.tick();t.fail_poll=True;n.tick();self.assertEqual((n.runs["r"]["state"],n.runs["r"]["failure_code"],t.started,s.transitions[0]["evidence"]["terminal_phases"],s.transitions[0]["evidence"]["human_verdict"]),("BLOCKED","ROS_EXEC_RESULT_FAILED",list(e.PHASES[:7]),["RECYCLE_APPROACH_PTP"],"UNCERTAIN"))
  def test_jsonl_schema_idempotency_preflight(self):
   from types import SimpleNamespace
   from unittest import mock
@@ -157,6 +180,18 @@ class Test(unittest.TestCase):
    created.clear();fail_destroy[0]=True
    with self.assertRaisesRegex(RuntimeError,"destroy"):e.main(("--factory-jsonl","--ros-live","--robot-system-id","fr5-lab-a","--cell-state-root","/tmp/cells","--phase-events-root","/tmp/runs"))
    self.assertEqual(created[:2],["init","fr5_pickup_live"]);self.assertEqual(created[-2:],["destroyed","shutdown"])
+ def test_jsonl_terminal_response_waits_for_parent_eof(self):
+  class Terminal:
+   mode="LIVE";digest="sha256:"+"1"*64
+   def __init__(self):self.runs={"r":{"state":"COMPLETED","plan":{"run_id":"r"},"digest":self.digest}}
+   def process(self,_):return e._response(ok=True,code="COMPLETE",run_id="r",plan_digest=self.digest,state="COMPLETED",mode=self.mode)
+   def tick(self):pass
+   def close(self):return True
+   def _execution_data(self,_):return {}
+  read_fd,write_fd=os.pipe();reader=os.fdopen(read_fd,"r");writer=os.fdopen(write_fd,"w");flushed=__import__("threading").Event();result=[]
+  class Output(io.StringIO):
+   def flush(self):flushed.set();return super().flush()
+  output=Output();worker=__import__("threading").Thread(target=lambda:result.append(e.run_jsonl(reader,output,Terminal())));worker.start();writer.write("{}\n");writer.flush();self.assertTrue(flushed.wait(1));self.assertTrue(worker.is_alive());writer.close();worker.join(1);reader.close();self.assertEqual((worker.is_alive(),result),(False,[True]))
  def test_cell_state_is_fail_closed_and_durable(self):
   from contextlib import redirect_stderr, redirect_stdout
   from unittest import mock

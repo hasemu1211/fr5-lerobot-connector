@@ -6,35 +6,44 @@ import unittest
 from unittest.mock import patch
 
 from tools.data_factory.one_job import JsonlProcess, OneJob, run_one_job
+from tools.data_factory.scene_state import release_slot
 from tools.fr5_data_factory import ContractError, canonical_digest
 
 
 PROGRAM = {"schema_version": "fr5.motion_program.v2"}
-PHASES = ("PREGRASP_PTP","APPROACH_STOP_LIN","FINAL_APPROACH_LIN","GRIPPER_CLOSE","LIFT_LIN","LOWER_LIN","GRIPPER_OPEN","RETREAT_LIN","SAFE_POSE_PTP")
+PHASES = ("PREGRASP_PTP","APPROACH_STOP_LIN","FINAL_APPROACH_LIN","GRIPPER_CLOSE","LIFT_LIN","RECYCLE_APPROACH_PTP","LOWER_LIN","GRIPPER_OPEN","RETREAT_LIN","SAFE_POSE_PTP")
 BINDINGS = {key: "sha256:" + "c" * 64 for key in ("selected_sheet", "yaw0_sheet", "cell_calibration", "robot_system", "collection_profile", "object_profile", "grasp_profile", "planning_scene_digest")}
 RESOLVED = "sha256:" + "b" * 64
 SETUP_APPROVAL = {"source":"HUMAN", "approval_id":"setup-1", "approved_by":"operator", "approval_expiry":"2099-01-01T00:00:00Z", "resolved_job_digest":RESOLVED}
 SCENE = {"scene_state_digest":"sha256:" + "8" * 64, "revision":1, "object_instance_id":"cube-1"}
+RELEASE_SCENE = {**SCENE, "release_slot": release_slot(
+    robot_system_id="fr5-lab-a",
+    pose={"place_id":"place-a", "yaw_deg":0, "x_mm":60, "y_mm":0},
+    object_profile_id="wood-cube-25mm-r001",
+    exclusion_geometry_digest="sha256:" + "e" * 64,
+)}
 PLAN = {"run_id":"run", "motion_program":PROGRAM, "scene_binding":SCENE, "setup_approval":SETUP_APPROVAL}
+RELEASE_PLAN = {**PLAN, "scene_binding":RELEASE_SCENE}
 MOTION_APPROVAL = {"source":"HUMAN", "approval_id":"a", "approved_by":"operator", "approval_expiry":"2099-01-01T00:00:00Z", "approval_scope":"HUMAN_GATED"}
 
 
 class OneJobTest(unittest.TestCase):
-    def make(self, recorder_states, executor_states, *, first_row_rows=1, continuous=False):
+    def make(self, recorder_states, executor_states, *, first_row_rows=1, continuous=False, release=False):
         calls = []
+        scene = RELEASE_SCENE if release else SCENE
         steps = [{"phase":phase} for phase in PHASES]
         if not continuous:
             steps[2]["requires_confirmation"] = "PRECONTACT_HUMAN"
             steps[3]["pause_after"] = "GRASP_VERDICT"
         steps[4]["pause_after"] = "SEMANTIC_VERDICT"
         normalized = {**PROGRAM, "robot_system_id":"fr5-lab-a", "resolved_job_digest":RESOLVED, "binding_digests":BINDINGS, "execution_timeouts_s":{"heartbeat_lease":1,"semantic_verdict":30}, "gripper_requirements":{"command_position_m":.01,"acceptable_feedback_m":{"min":.01,"max":.012}}, "steps":steps}
-        planned = {"schema_version":"fr5.pickup_plan.v3", "run_id":"run", "scene_binding":SCENE, "motion_program_digest":canonical_digest(normalized), "resolved_job_digest":RESOLVED, "binding_digests":BINDINGS, "steps":[{"phase":phase, "start_joint_state":[0]*6, "final_joint_state":[0]*6} for phase in PHASES]}
+        planned = {"schema_version":"fr5.pickup_plan.v3", "run_id":"run", "scene_binding":scene, "motion_program_digest":canonical_digest(normalized), "resolved_job_digest":RESOLVED, "binding_digests":BINDINGS, "steps":[{"phase":phase, "start_joint_state":[0]*6, "final_joint_state":[0]*6} for phase in PHASES]}
         plan_digest = canonical_digest(planned)
         readback = {"schema_version":"data_factory.planning_scene_readback.v1", "run_id":"run", "plan_digest":plan_digest, "expected_planning_scene_digest":BINDINGS["planning_scene_digest"], "objects":[]}
         collision = {"schema_version":"data_factory.collision_report.v1", "plan_digest":plan_digest, "sample_count":0, "samples":[], "failure_count":0, "all_valid":True}
         no_motion = {"schema_version":"data_factory.plan_only_no_motion.v1", "run_id":"run", "plan_digest":plan_digest, "before_snapshot":{}, "after_snapshot":{}, "max_joint_delta_rad":0., "gripper_delta_m":0., "execute_goal_count":0, "gripper_goal_count":0}
-        safety = {"schema_version":"data_factory.precommit_safety.v1", "run_id":"run", "approved_plan_digest":plan_digest, "scene_binding_digest":canonical_digest(SCENE), "expected_planning_scene_digest":BINDINGS["planning_scene_digest"], "planning_scene_readback_digest":canonical_digest(readback), "collision_report_digest":canonical_digest(collision), "plan_only_no_motion_digest":canonical_digest(no_motion), "post_reset_safe_snapshot_digest":None, "status":"PENDING"}
-        evidence = {"schema_version":"data_factory.precommit_evidence.v1", "run_id":"run", "approved_plan_digest":plan_digest, "scene_binding_digest":canonical_digest(SCENE), "expected_planning_scene_digest":BINDINGS["planning_scene_digest"], "planning_scene_readback":readback, "collision_report":collision, "plan_only_no_motion":no_motion}
+        safety = {"schema_version":"data_factory.precommit_safety.v1", "run_id":"run", "approved_plan_digest":plan_digest, "scene_binding_digest":canonical_digest(scene), "expected_planning_scene_digest":BINDINGS["planning_scene_digest"], "planning_scene_readback_digest":canonical_digest(readback), "collision_report_digest":canonical_digest(collision), "plan_only_no_motion_digest":canonical_digest(no_motion), "post_reset_safe_snapshot_digest":None, "status":"PENDING"}
+        evidence = {"schema_version":"data_factory.precommit_evidence.v1", "run_id":"run", "approved_plan_digest":plan_digest, "scene_binding_digest":canonical_digest(scene), "expected_planning_scene_digest":BINDINGS["planning_scene_digest"], "planning_scene_readback":readback, "collision_report":collision, "plan_only_no_motion":no_motion}
         envelope = {"plan":planned, "precommit_safety":safety, "precommit_evidence":evidence, "operator_summary":{}}
         first_status_after_begin = False
         def recorder(request):
@@ -95,6 +104,23 @@ class OneJobTest(unittest.TestCase):
         self.assertNotIn(("executor", "confirm"), calls)
         self.assertNotIn(("executor", "grasp_verdict"), calls)
         self.assertLess(calls.index(("recorder", "freeze")), calls.index(("executor", "semantic_verdict")))
+
+    def test_recycle_stays_frozen_until_release_transition_then_commits(self):
+        job, calls = self.make(
+            ["RECORDING", "RECORDING", "FROZEN", "FROZEN", "FROZEN", "COMMITTED"],
+            ["PLANNED", "APPROVED", "EXECUTING", "SEMANTIC_VERDICT", "EXECUTING", "RELEASE_VERDICT", "COMPLETED", "COMPLETED"],
+            continuous=True,
+            release=True,
+        )
+        job.prepare(RELEASE_PLAN); job.approve(MOTION_APPROVAL); job.start()
+        self.assertEqual(job.poll()["state"], "SEMANTIC_VERDICT")
+        job.semantic_verdict("PASS", "operator")
+        self.assertEqual(job.poll()["state"], "RELEASE_VERDICT")
+        self.assertEqual((job.frozen_rows, job.rows_after_recycle), (1, 1))
+        self.assertTrue(job.release_verdict("LANDED", "operator")["ok"])
+        self.assertEqual(job.poll()["state"], "AWAITING_CELL_READY")
+        self.assertEqual(job.finish()["state"], "COMPLETE")
+        self.assertLess(calls.index(("executor", "release_verdict")), calls.index(("recorder", "commit")))
 
     def test_first_row_timeout_never_executes(self):
         job, calls = self.make(["RECORDING", "ABORTED"], ["PLANNED", "APPROVED"], first_row_rows=0)
