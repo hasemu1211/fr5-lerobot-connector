@@ -1,0 +1,150 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Operator fixture browser regressions</title>
+  <base href="../">
+</head>
+<body>
+  <label for="language-select">Language</label>
+  <select id="language-select" aria-describedby="language-current"><option value="en">English</option><option value="ko">한국어</option></select>
+  <span id="language-current">Current language: English</span>
+  <select id="fixture-select"></select>
+  <ol id="workflow-steps"></ol>
+  <dl id="setup-details"></dl>
+  <main id="state-content"></main>
+  <ul id="evidence-list"></ul>
+  <span id="authority-copy"></span>
+  <div id="announcer" role="status"></div>
+  <pre id="results">Waiting for fixtures…</pre>
+  <script>
+    const forcedLoadFailure = new URLSearchParams(location.search).has("force-load-error");
+    if (forcedLoadFailure) window.fetch = () => Promise.resolve(new Response("", {status: 503}));
+  </script>
+  <script src="messages.js"></script>
+  <script src="app.js"></script>
+  <script>
+    const results = document.querySelector("#results");
+    const checks = [];
+    const check = (condition, label) => {
+      if (!condition) throw new Error(label);
+      checks.push(label);
+    };
+    const setLanguage = (language) => {
+      languageSelect.value = language;
+      languageSelect.dispatchEvent(new Event("change", {bubbles: true}));
+    };
+
+    function run() {
+      if (!states && !loadError) return setTimeout(run, 10);
+      try {
+        if (forcedLoadFailure) {
+          const initialLanguage = currentLanguage;
+          const initialUi = MESSAGE_CATALOG[initialLanguage].ui;
+          const initialError = initialUi.fixtureErrorStatus.replace("{status}", "503");
+          check(!states && document.querySelector("#state-title").textContent === initialUi.fixtureUnavailable && document.querySelector("#state-content").textContent.includes(initialError), `${initialLanguage} forced load failure renders localized error copy`);
+          check(announcer.textContent === `${initialUi.fixtureUnavailable}. ${initialError}`, `${initialLanguage} initial load failure is announced`);
+
+          const alternateLanguage = initialLanguage === "en" ? "ko" : "en";
+          setLanguage(alternateLanguage);
+          const alternateUi = MESSAGE_CATALOG[alternateLanguage].ui;
+          check(document.querySelector("#state-title").textContent === alternateUi.fixtureUnavailable && document.querySelector("#state-content").textContent.includes(alternateUi.fixtureErrorStatus.replace("{status}", "503")), `${alternateLanguage} error copy updates after language switch`);
+          check(announcer.textContent === alternateUi.languageChanged, `${alternateLanguage} language switch announcement is preserved after load failure`);
+          document.body.dataset.result = "pass";
+          results.textContent = `${checks.length} checks passed\n${checks.join("\n")}`;
+          return;
+        }
+
+        const activeStep = document.querySelector("#workflow-steps .active");
+        check(document.querySelector("#fixture-select").value === "setup" && activeStep.textContent.includes("Setup") && activeStep.getAttribute("aria-current") === "step", "setup is the default active fixture");
+
+        for (const language of ["en", "ko"]) {
+          setLanguage(language);
+          check(document.documentElement.lang === language && languageSelect.value === language, `${language} updates html lang and exposes current value`);
+          check(announcer.textContent === MESSAGE_CATALOG[language].ui.languageChanged, `${language} language change is announced`);
+
+          for (const [key, source] of Object.entries(states)) {
+            render(key);
+            const expected = MESSAGE_CATALOG[language].states?.[key]?.title ?? source.title;
+            check(document.querySelector("#state-title").textContent === expected && announcer.textContent.includes(expected) && announcer.textContent.includes(source.status), `${language} renders and announces ${key} fixture copy`);
+          }
+
+          loadError = {status: 503};
+          renderError();
+          const expectedError = MESSAGE_CATALOG[language].ui.fixtureErrorStatus.replace("{status}", "503");
+          check(document.querySelector("#state-title").textContent === MESSAGE_CATALOG[language].ui.fixtureUnavailable && document.querySelector("#state-content").textContent.includes(expectedError) && announcer.textContent === `${MESSAGE_CATALOG[language].ui.fixtureUnavailable}. ${expectedError}`, `${language} renders and announces localized fixture error copy`);
+          loadError = undefined;
+
+          const validProgress = states.running.progress;
+          const invalidProgress = ['<img id="xss-probe" src="x" onerror="document.body.dataset.xss=1">', -1, 101, NaN, Infinity];
+          const rejected = invalidProgress.every((value) => {
+            states.running.progress = value;
+            try { render("running", false); } catch (error) { return error instanceof TypeError; }
+            return false;
+          });
+          states.running.progress = validProgress;
+          check(rejected && !document.querySelector("#xss-probe") && !document.body.dataset.xss, `${language} hostile progress is rejected without markup execution`);
+
+          render("approval", false);
+          let input = document.querySelector("#approval-input");
+          check(input instanceof HTMLInputElement && document.querySelector("#approval-form button") instanceof HTMLButtonElement, `${language} approval keeps native keyboard controls`);
+          input.value = "APPROVE wrong";
+          document.querySelector("#approval-form").requestSubmit();
+          check(!input.validity.valid && announcer.textContent === MESSAGE_CATALOG[language].ui.approvalMismatchAnnouncement, `${language} wrong exact phrase is rejected`);
+          input.value = input.dataset.expected;
+          input.dispatchEvent(new Event("input", {bubbles: true}));
+          check(input.validity.valid, `${language} corrected exact phrase clears stale validity`);
+          document.querySelector("#approval-form").requestSubmit();
+          const runningTitle = MESSAGE_CATALOG[language].states?.running.title ?? states.running.title;
+          check(document.querySelector("#state-title").textContent === runningTitle && announcer.textContent === MESSAGE_CATALOG[language].ui.approvalMatched, `${language} corrected exact phrase advances only the local fixture`);
+
+          render("review", false);
+          let form = document.querySelector("#review-form");
+          let reason = document.querySelector("#review-reason");
+          check(form.querySelector('[name="review"]') instanceof HTMLInputElement && reason instanceof HTMLSelectElement && form.querySelector("button") instanceof HTMLButtonElement, `${language} review keeps native keyboard controls`);
+          check(reason.disabled && getComputedStyle(document.querySelector("#review-reason-field")).display === "none", `${language} review reason starts hidden and disabled`);
+          for (const decision of ["FAIL", "UNCERTAIN"]) {
+            form.querySelector(`[value="${decision}"]`).click();
+            check(reason.required && !reason.disabled && !document.querySelector("#review-reason-field").hidden && announcer.textContent === message("reviewNeedsReason", {decision}), `${language} ${decision} reveals, requires, and announces reason`);
+          }
+
+          for (const decision of ["PASS", "SKIP"]) {
+            render("review", false);
+            form = document.querySelector("#review-form");
+            reason = document.querySelector("#review-reason");
+            form.querySelector(`[value="${decision}"]`).click();
+            check(reason.disabled && getComputedStyle(document.querySelector("#review-reason-field")).display === "none" && !new FormData(form).has("reason") && announcer.textContent === message("reviewNoReason", {decision}), `${language} ${decision} omits reason and announces selection`);
+            form.requestSubmit();
+            check(announcer.textContent === message("reviewPreviewed", {decision, reason: ""}), `${language} ${decision} review preview is announced without a backend effect`);
+          }
+        }
+
+        setLanguage("ko");
+        const untranslated = ["not bound", "suggestion not selected", "qualified collection profile", "camera binding + current scene", "side effects", "up → stale", "campaign + scene revision", "fresh snapshot", "within tolerance", "qualified envelope", "recorder healthy", "remaining", "sequence 18", "not authorized", "dataset-local evidence reference", "terminal evidence"];
+        for (const [key, source] of Object.entries(states)) {
+          render(key, false);
+          const visible = document.body.innerText;
+          const sourceProse = [source.title, source.summary, source.authority, source.nextAction?.title].filter(Boolean);
+          check(!sourceProse.some((text) => visible.includes(text)) && !untranslated.some((text) => visible.includes(text)), `ko ${key} has no untranslated operator prose`);
+        }
+
+        const digest = states.approval.digest;
+        check(localizedState("approval").digest === digest && localizedState("approval").approval.command === `APPROVE ${digest}`, "Korean approval phrase and digest preserve canonical bytes");
+        check(localizedState("ready").nextAction.command === states.ready.nextAction.command && localizedState("recovery").nextAction.command === states.recovery.nextAction.command, "Korean commands and paths preserve canonical bytes");
+        check(Object.keys(states).every((key) => localizedState(key).status === states[key].status) && JSON.stringify(localizedState("review").review) === JSON.stringify(states.review.review), "Korean status and reason codes preserve canonical bytes");
+        check(Object.keys(states).every((key) => states[key].evidence.every((item, index) => !item.value.includes("sha256:") || localizedState(key).evidence[index].value.includes(item.value.match(/sha256:[^ ·]+/)[0]))), "Korean evidence digests preserve canonical bytes");
+        check(localizedState("blocked").evidence[1].value === "/camera/up/color/image_raw" && localizedState("ready").setup["프로필"].startsWith("fr5-up-rgb-30hz-v1"), "Korean topic and profile identifiers preserve canonical bytes");
+        check(languageSelect instanceof HTMLSelectElement && select instanceof HTMLSelectElement, "language and state controls keep native keyboard semantics");
+
+        document.body.dataset.result = "pass";
+        results.textContent = `${checks.length} checks passed\n${checks.join("\n")}`;
+      } catch (error) {
+        document.body.dataset.result = "fail";
+        results.textContent = `FAIL: ${error.message}`;
+        throw error;
+      }
+    }
+    run();
+  </script>
+</body>
+</html>
