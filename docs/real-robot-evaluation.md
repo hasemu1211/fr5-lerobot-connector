@@ -26,7 +26,7 @@
 
 ## 조건과 trial 구성
 
-첫 비교는 checkpoint마다 같은 ID 10 trials와 OOD 10 trials를 시작 기준으로 사용하고, 각 조건의 횟수를 균형화한다. 이는 최종 통계 보증이 아니라 후보를 줄이는 기준이다. 결과가 비슷한 두 후보의 최종 비교는 사전에 trial 상한과 판정 규칙을 추가하거나 순차 비교 절차를 사용한다.
+FR5에 보편적으로 맞는 `ID 10 + OOD 10` 최소치는 근거가 없으므로 고정하지 않는다. 첫 checkpoint의 pipeline 진단은 승인된 finite manifest가 각 declared condition에 positive trial 수를 주고, 적은 표본은 reload·binding·failure taxonomy를 관통했다는 주장만 허용한다. useful baseline이나 checkpoint 비교는 결과를 보기 전에 condition별 균형 예산, 전체 trial 상한, randomized order, 판정 규칙과 보고 interval을 고정한다. 후보가 비슷하면 그 사전 계약 안의 순차 비교 절차를 사용하거나 새 revision을 승인하며, 완료된 결과를 보고 trial을 임의로 늘리지 않는다.
 
 checkpoint 순서로 인한 배터리·온도·작업자 편향을 줄이기 위해 trial 순서를 교차한다.
 

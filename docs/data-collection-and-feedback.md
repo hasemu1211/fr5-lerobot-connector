@@ -61,7 +61,7 @@ failure condition → targeted recollection recommendation
 | `OBJ-01` | 시작 시 declared `T_base_object_datum`, datum/frame/truth scope와 source digests | ResolvedJob, cell calibration, object/grasp/motion qualification | `object_frame_context` attribute 한 건 | Object–EE 계산의 provenance | offline V0 구현됨; declared static provenance만 `AVAILABLE` |
 | `OBJ-02` | `T_base_tcp(t)`, `T_object_tcp(t)`와 grasp-close relative error | recorder joints에서 offline FK; `OBJ-01` | per-row 저장 없이 필요 시 계산, close row reference+transform/scalar만 보존 | grasp consistency와 P6 source 적격성 | `NOT_AVAILABLE`; `FK_TF_QUALIFICATION_MISSING` |
 | `LIFT-01` | `+table_normal_base` TCP progress/drift, gripper continuity | FK/TCP + lift row window | phase scalar만 | lift 안정성 후보 | FK/TF 뒤 미구현 |
-| `COVER-01` | condition별 attempted/technical-pass/human-training-approved/semantic-pass/human-rejected | JobSpec/profile/calibration/recipe digests + result references | `coverage_report.json` | under-covered qualified condition 제안 | P5 미구현 |
+| `COVER-01` | condition별 attempted/technical-pass/human-training-approved/semantic-pass/human-rejected | JobSpec/profile/calibration/recipe digests + result references | `coverage_report.json` | under-covered qualified condition 제안 | offline v1 `REPORT_ONLY` 구현됨; production semantic PASS를 별도 `HUMAN_TRAINING_APPROVED` inventory로 승격하는 producer는 미구현 |
 | `VARIANT-01` | trajectory variant, finite parameter tuple, plan/observed evidence lineage | P6 catalog + plan/report digests | catalog에는 tuple 1회, episode에는 ID/digest만 | 동일 조건 안의 품질 경계 다양성 | P6 미구현 |
 
 ### 기술 품질의 정확한 피드백
@@ -177,7 +177,7 @@ failure 직전 영상은 새 MP4를 복사하는 대신 가능한 한 기존 평
 | variant HIL | P6 plan-only pair 검토 뒤 제한된 실물 비교 승인 | DIRECT/TWO_STAGE_ALIGN plan·metric·lineage 비교 |
 | policy rollout | trial 시작 승인, terminal/partial/failure label | checkpoint/condition/telemetry와 metric 결속 |
 
-카메라가 임시 1대이고 object semantic authority가 없으므로 현재 agent는 영상으로 성공·파지·실패를 자율 판정하지 않는다. numeric gripper evidence는 HIL continuity 근거일 뿐 training semantic label을 대체하지 않는다.
+현재 연결 카메라는 임시 1대이고 object semantic authority가 없으므로 agent는 영상으로 성공·파지·실패를 자율 판정하지 않는다. 첫 학습 seed는 과거 적격 dual-camera acquisition/mapping을 재사용하되 intended 두 장치의 exact binding과 최종 구도를 고정한 뒤 별도 수집한다. 현재 single-camera episode나 numeric gripper evidence는 training semantic label을 대체하지 않는다.
 
 ## 9. 다음 수집 추천 규칙
 

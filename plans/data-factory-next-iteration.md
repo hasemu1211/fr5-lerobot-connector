@@ -2,8 +2,8 @@
 
 > 상태: `PROPOSED`. 구현·운영 정본은 `docs/`와 executable schema/validator이며, 이 계획만으로 기능 또는 실물 실행이 승인되지 않는다.
 
-- 상태: `P5_2_SUPERVISED_CAMPAIGN_HIL_COMPLETE_P5_5_NEXT`
-- 기준: `main@ae09c3dd8d9ea7be31305d50b0199dc37da708c3`
+- 상태: `P5_5_AND_UI_FIXTURE_COMPLETE_P5_8_SOFTWARE_NEXT`
+- 기준: `main@85cd516bacd264b6dae33b0f9d73d88aef8e6318`
 - 작성일: 2026-08-20
 - 재검토일: 2026-08-24
 - 장기 기준선: `plans/archive/data-factory-pipeline-integration.md`
@@ -13,7 +13,7 @@
 
 **목표:** 끊김이 적은 연속 수집을 안전하게 증명하고, 대량 수집 전에 baseline/rollout으로 다음 데이터의 가치를 측정하는 재현 가능한 FR5 데이터 flywheel을 만든다.
 
-**아키텍처:** 기존 `run_job.py`와 fresh `OneJob`을 재사용해 episode를 직렬 실행하고, 수집 hot path와 admission·behavior·coverage·training/evaluation 분석을 분리한다. P5.5는 진단 metadata이며 gate나 model input이 아니고, P6.5 반복 수집은 고정된 평가 계약·첫 diagnostic rollout·bounded P6 diversity qualification 뒤에만 열린다.
+**아키텍처:** 기존 `run_job.py`와 fresh `OneJob`을 재사용해 episode를 직렬 실행하고, 수집 hot path와 admission·behavior·coverage·training/evaluation 분석을 분리한다. P5.5는 진단 metadata이며 gate나 model input이 아니다. 첫 checkpoint 전에는 고정된 `DIRECT` recipe에서 관측 가능한 object pose 조건과 finite robot start configuration을 교차한 bounded initial-seed campaign을 수행하고, checkpoint 뒤 failure-targeted P6.5 recollection과 evidence-triggered P6 variant experiment를 별도 branch로 연다.
 
 **기술 스택:** Python 3, ROS 2/MoveIt, LeRobot/SmolVLA, JSON/JSONL digest-bound artifacts, 기존 `unittest` 회귀.
 
@@ -36,8 +36,9 @@
 - P5.2 실물 근거: `p52-c-grid3-20260821-r004`와 `p52-d-grid4-20260821-r004`가 `(0,35)→(35,35)→(70,35) mm`, yaw 0의 `DESTINATION_THEN_NEXT_SOURCE`→`RELEASE_DESTINATION` role을 순차 실행했다. plan digest는 각각 `sha256:88195d4f…85310`, `sha256:7c0f091c…bc33`이고 technical validator와 사람 semantic review가 모두 `PASS`다.
 - P5.2 저장 근거: `p52-g1-grid2-grid3-20260821-r002`에 독립 episode 2개, 528+544=1,072 frames, 30 Hz가 commit됐다. 두 run 모두 alignment failure·queue drop 0이고 final scene revision 23은 `(70,35,0°)` `ROBOT_RELEASE`, cell은 final run에 `HUMAN_ACKNOWLEDGED`/ready다.
 - P5.2 제한: 두 episode는 mechanism qualification이며 통계적 신뢰도, camera semantic authority, training approval, non-yaw0 또는 다른 slot 적격성을 만들지 않는다. `training_authorized=false`를 유지한다.
-- 남은 핵심: P5.5 static Object–EE 진단 metadata를 offline으로 구현한다. 이 작업과 frontend architecture review+fixture vertical slice는 서로의 파일을 쓰지 않고 병렬 진행할 수 있다. Frontend lead는 현재 backend와 P5.5/P6/P8 계획을 read-only로 검토하고 UX·contract 개선을 제안할 수 있다. 이후 bounded nominal seed→고정 평가 계약→첫 SmolVLA baseline/diagnostic ID·OOD rollout을 phase variant 반복 수집보다 먼저 수행한다.
-- 현재 카메라: 1대. single-view 기능·정량 검증은 가능하지만 dual-view 또는 영상 정성 품질을 주장하지 않는다.
+- 완료된 다음 단계: P5.5 static Object–EE offline diagnostic과 backend-free frontend fixture/Korean mode/accessibility slice가 `main@85cd516`에 통합됐다. P5.5는 declared static context만 `AVAILABLE`이고 FK/TF close geometry와 post-close object pose는 계속 stable `NOT_AVAILABLE`이며 어느 training/campaign gate도 소유하지 않는다.
+- 남은 핵심: P5.8 software contract와 bounded initial-seed path를 먼저 완성한다. episode-level training-approved inventory, immutable split/evaluation v2, `object condition × robot_start_pose_id` finite `DIRECT` seed manifest, train/reload/offline-eval receipt와 learned-action adapter의 fake/stop harness는 서로 독립인 범위에서 병렬화할 수 있다. P6 plan-only compiler도 병렬 가능하지만 첫 baseline의 hard prerequisite는 아니다.
+- 현재 물리 상태: 카메라 1대가 연결돼 있으나 최종 구도로 고정되지 않았다. 첫 학습 입력은 고정 dual-camera `up-side`로 정한다. 과거 dual-camera acquisition은 1,040 rows/34.63 s/30.00003 Hz, queue drop·alignment failure 0, peak recorder RSS 1.23 GB의 mechanism evidence와 `up-side`→SmolVLA `camera1/camera2` mapping이 있으므로 재구현·전체 재적격화하지 않는다. 실제 seed 직전 intended device 두 대의 exact role/profile binding, 최종 배치, framing/occlusion/source-rate만 짧게 현재 확인한다. device/topic/profile identity가 바뀌면 새 revision을 요구한다.
 - 이식 지원 하한: 8 GB RAM 수집 노트북. 현재 개발 PC의 약 16 GB 메모리는 개발 편의 환경일 뿐 지원 하한을 대체하지 않는다.
 - 다음 live task는 계속 `pickup_e2e`다. `pick_place`는 같은 runner 위에 별도 task schema/recipe로 추가한다.
 
@@ -53,7 +54,7 @@
 4. timestamped phase event와 해석 가능한 `episode_quality.json`.
 5. 명시된 안전 condition 집합만 집계하는 `coverage_report.json`과 다음 수집 제안.
 6. 기존 Job/scene/calibration으로부터 중복 30 Hz payload 없이 Object–EE 파생 증거를 보존한다.
-7. finite qualified `(x_mm, y_mm, yaw_deg) × trajectory_variant` 조건을 균형 있게 수집하고, 정성·정량 품질 경계 안의 phase별 궤적군과 object-relative plan-only 증강을 준비한다.
+7. 첫 seed는 finite qualified object `(x_mm, y_mm, yaw_deg) × robot_start_pose_id` 조건을 고정 `DIRECT`로 균형 수집한다. 현재 task의 yaw는 resolved grasp/TCP 방향을 바꾸므로 필수축이며 fixed dual-camera에서 식별 가능해야 한다. alternate grasp/pre-grasp/trajectory family는 같은 첫 index에 섞지 않고 evidence-triggered P6 plan-only와 별도 lineage로만 준비한다.
 8. 유한 campaign이 condition·slot·예산만 제한하고, 매 episode는 최신 full scene으로 새 plan·보통의 exact human 승인을 받아 fresh `OneJob`으로 실행하는 bounded continuous collection.
 9. 반복 수집 전에 bounded nominal seed, immutable evaluation contract, reload 가능한 첫 baseline과 diagnostic ID/OOD rollout으로 학습·평가 경로를 관통한다.
 
@@ -127,7 +128,7 @@ approved episode refs ── training split v2 ── baseline checkpoint
 14. **좌표 점유 보존:** 사람 semantic 확인을 생략한 release target은 같은 campaign에서 일반 pick/place target이나 통과 가능한 빈 공간으로 재사용하지 않는다. 유일한 예외는 `ROBOT_RELEASE` evidence로 `LANDED_FOR_NEXT_SOURCE`가 된 slot을 same-scene-digest `HUMAN` dispatch confirmation 또는 qualified verifier가 허용하고 manifest의 바로 다음 run이 source로 한 번 소비하는 경우이며, 그 즉시 `CONSUMED_PENDING_REVIEW`다. slot 예약은 scene truth를 대신하지 않는다.
 15. **검증 경계 분리:** v1은 recycle/post-reset evidence→commit 뒤 active motion이 없는 episode 경계에서 technical validator를 끝내고 다음 recorder를 시작한다. behavior/Object–EE/coverage report는 campaign 종료 후 offline으로 돌리며 heartbeat/ROS callback을 점유하지 않는다. 실측으로 validator 경계가 병목일 때에만 immutable frozen-data overlap을 별도 qualification한다.
 16. **비동기 범위 제한:** 비동기는 recorder sampling/writer, health cache, bounded phase event, TTY와 offline report의 진행 독립성을 뜻한다. robot phase, begin/freeze/commit과 scene transition은 한 coordinator가 직렬화하며 두 motion goal을 병렬 dispatch하지 않는다.
-17. **평가 선행:** P6.5 반복 수집은 P5.2 mechanism, training-approved nominal seed, immutable split/evaluation contract, reload 가능한 checkpoint, 최소 한 번의 declared ID/OOD diagnostic rollout과 bounded P6 diversity qualification 뒤에만 열린다. checkpoint를 만들지 못하면 데이터·feature·runtime 결함을 먼저 고치며 quota를 늘리지 않는다.
+17. **초기 seed와 사후 보강 분리:** checkpoint 전 P5.8 initial-seed campaign은 고정 dual-camera·`DIRECT`에서 선언된 object pose condition과 finite qualified robot start configuration을 균형 반복한다. learned-policy rollout은 reload 가능한 checkpoint와 action-adapter safety qualification 뒤에만 열린다. rollout failure와 coverage가 같은 condition을 지목하면 nominal P6.5를 열 수 있고, variant-targeted P6.5만 추가로 P6 decision digest를 요구한다. P6 plan-only compiler와 별도 승인된 expert HIL은 checkpoint에 종속되지 않지만 첫 baseline의 critical path도 아니다.
 18. **통계 단위 보존:** 30 Hz frame을 독립 표본으로 세지 않는다. 비교 단위는 episode·training seed·physical rollout이고, variant 비교는 같은 condition·scene/start/object/grasp와 같은 수집·rollout 예산을 사용하며 순서를 무작위화한다.
 19. **진단과 권위 분리:** P5.5 Object–EE와 phase metric은 원인 추적·층화에만 사용한다. baseline ablation과 held-out rollout 관계가 적격화되기 전에는 training admission, 자동 삭제, quota 확대 또는 SmolVLA input을 바꾸지 않는다.
 
@@ -548,11 +549,11 @@ executor terminal data의 `precommit_safety` exact key는 `schema_version`, `run
 | `P5 coverage` | JobSpec condition과 validator/semantic outcome이 digest-bound artifact로 존재 | 무작위 최대 다양성보다 명시 조건의 균형과 다음 수집 추천 | [DROID](https://droid-dataset.github.io/), [Data Quality in Imitation Learning](https://papers.neurips.cc/paper_files/paper/2023/hash/fe692980c5d9732cf153ce27947653a7-Abstract-Conference.html) | 유한 qualified domain의 count/outcome 편향은 FR5 proxy이며 논문의 exact bin rule이 아님 | declared-domain 밖 추천 0, task/profile/revision 혼합 0; episode 종료 뒤 offline, frame copy 0 |
 | `P5.2 bounded campaign` | `OneJob`, full scene revision, recorder transaction은 단일 episode를 이미 fail-close로 소유 | 물체 배치→finite 조건 선택→episode별 exact plan 승인→release/next-plan 한 키→종료 후 batch review | [AutoEval](https://proceedings.mlr.press/v305/zhou25a.html)은 reset policy와 자동 success detection을 함께 사용하고 [MimicGen](https://mimicgen.github.io/docs/tutorials/datagen_custom.html)은 subtask 시작 object pose를 요구함 | 현 FR5는 sensorless 무인을 주장하지 않고 current full scene 재계획·slot ledger의 supervised mechanism HIL로 축소 | semantic hot-path prompt 0, episode transaction/digest 독립, technical PASS 전 next plan 0, offline admission/report, any fault/unknown에 no-later-goal, leak 0 |
 | `P5.5 Object–EE analysis` | A4/Job/cell/object/grasp/TCP binding과 recorder joint rows가 존재; FK/TF timeline은 아직 미적격 | 파지 전 interaction geometry를 잃지 않되 SmolVLA feature와 raw dataset은 변경하지 않음 | [MimicGen](https://arxiv.org/abs/2310.17596), [공식 TaskSpec](https://mimicgen.github.io/docs/modules/task_spec.html), [SkillGen](https://skillgen.github.io/) | declared static object datum+offline FK의 derived analysis이며 actual vision pose나 학습 효용 주장이 아님 | datum=`center`, PREGRASP→CLOSE만 truth scope, FK/TF 전 `NOT_AVAILABLE`, per-row pose copy 0 |
-| `P5.8 seed baseline/evaluation` | 기존 approved episode refs와 training split v1 경로는 있으나 고정 ID/OOD contract와 reloadable baseline rollout은 없음 | 대량·variant 수집 전에 학습 가능성과 실제 약점을 확인 | LeRobot/SmolVLA pinned runtime과 일반적인 held-out evaluation 원칙; FR5 trial 수의 보편 표준은 `N/A` | 논문 수치를 episode quota로 복사하지 않고 operator-approved finite manifest로 최소 seed를 채운다 | split v2 digest, checkpoint reload, declared ID/OOD trial order·seed·label·interval; 이 결과는 diagnostic이며 model ranking 주장은 반복 seed 전 0 |
-| `P6 quality-bounded diversity` | resolved object/grasp pose, phase recipe, collision/IK/scene pin과 P3 phase metric이 존재 | 같은 목표를 안전·품질 범위 안에서 여러 접근 전략과 parameter로 수집 | [MimicGen](https://mimicgen.github.io/), [SkillMimicGen](https://skillgen.github.io/), [Data Quality in Imitation Learning](https://papers.neurips.cc/paper_files/paper/2023/hash/fe692980c5d9732cf153ce27947653a7-Abstract-Conference.html), [SCIZOR](https://ut-austin-rpl.github.io/SCIZOR/) | exact 분화 축·필터·확률은 FR5 engineering proposal이며 human-like 분포라고 자동 주장하지 않음 | plan-only 뒤 same-condition/equal-budget paired HIL·training-seed·held-out rollout 비교; 독립 가치 전 catalog 확대 0 |
-| `P6.5 repeated collection` | P5.2 finite mechanism, P5 coverage, P5.8 diagnostic baseline/rollout과 bounded P6 diversity qualification이 prerequisite; variant quota에는 P6 observed-eligible 근거도 필요 | candidate throughput과 human review burden을 분리하고 측정된 약점의 좌표 slot만 소진 | 보편 episode quota·checklist UX의 외부 표준은 `N/A`; P5.2/P6/P5.8의 근거를 재사용 | 새 subsystem 없이 같은 campaign을 failure-condition evidence가 가리킨 finite target에만 재적용 | finite quota, slot/backlog/storage stop, semantic pending 분리, 8 GB burn-in; 무근거 균등 확대 0 |
+| `P5.8 initial seed/baseline` | dual-camera acquisition/mapping과 split/train/offline-loss v1은 있으나 episode-level training-approved inventory, start-pose-aware evaluation v2, reload receipt와 rollout adapter는 없음 | 첫 학습은 fixed dual-camera·grasp·`DIRECT`를 유지하고 object X/Y/Yaw와 robot initial configuration을 균형 반복; 같은 condition의 임의 전략 혼합은 하지 않음 | [LeRobot SmolVLA guide](https://github.com/huggingface/lerobot/blob/main/docs/source/smolvla.mdx)는 introduced variation마다 반복하고 약 50 episode/5 positions×10을 시작 예로 들지만 FR5 minimum은 아님; [BridgeData V2](https://proceedings.mlr.press/v229/walke23a.html), [LIBERO-Plus](https://openaccess.thecvf.com/content/CVPR2026/html/Fei_LIBERO-Plus_A_Progressive_Robustness_Benchmark_for_Visual-Language-Action_Models_CVPR_2026_paper.html)와 [Data Quality in IL](https://papers.neurips.cc/paper_files/paper/2023/hash/fe692980c5d9732cf153ce27947653a7-Abstract-Conference.html)은 object layout·robot initial state·amount/diversity와 consistency를 factor별로 다룰 필요를 보여 줌 | 현재 yaw는 grasp/TCP 방향을 바꾸므로 필수축이고 fixed dual view에서 식별 가능해야 한다. exact X/Y/Yaw/start pose/repeat/holdout 수는 사전 승인할 FR5 hypothesis이며 같은 cell 반복은 repeatability와 bounded natural variation을 측정한다 | approval inventory, split/evaluation v2, fixed camera binding, balanced object×start matrix와 yaw-observability check, independent checkpoint reload |
+| `P6 evidence-triggered phase variant` | resolved object/grasp pose, phase recipe, collision/IK/scene pin과 P3 phase metric이 존재 | `DIRECT` flow/rollout failure 또는 사전 선언한 연구 질문이 있을 때만 `TWO_STAGE_ALIGN`을 별도 lineage로 비교 | [MimicGen](https://mimicgen.github.io/), [SkillMimicGen](https://skillgen.github.io/), [Data Quality in Imitation Learning](https://papers.neurips.cc/paper_files/paper/2023/hash/fe692980c5d9732cf153ce27947653a7-Abstract-Conference.html), [SCIZOR](https://ut-austin-rpl.github.io/SCIZOR/) | generative action model의 multimodality 수용 능력은 무조건 variant pooling의 효용 증거가 아니다. exact 분화 축·효과 threshold는 FR5 experiment decision이다 | plan-only는 offline 병렬 가능; paired HIL과 DIRECT-only/TWO_STAGE-only multi-seed held-out 비교 뒤에만 catalog 승격 |
+| `P6.5 post-rollout targeted recollection` | P5.2 finite mechanism과 P5 coverage가 존재; nominal branch에는 baseline failure+matching coverage, variant branch에는 추가 P6 decision이 필요 | pre-checkpoint initial seed와 구분하고 실제 약점의 qualified slot만 보강 | 보편 episode quota·checklist UX의 외부 표준은 `N/A`; P5.2/P5.8과 필요 시 P6 근거를 재사용 | nominal 보강은 P6를 기다리지 않고 variant 보강만 P6에 종속 | finite quota, slot/backlog/storage stop, semantic pending 분리, 8 GB burn-in; 무근거 균등 확대 0 |
 | `P7 closed loop` | P5.8 첫 checkpoint/rollout 뒤부터 시작 | policy가 약한 condition에 다음 수집을 집중하고 nominal 성능을 보존 | [AdaDemo](https://arxiv.org/abs/2404.07428), [Demo-SCORE](https://www.roboticsproceedings.org/rss21/p071.html), [CUPID](https://cupid-curation.github.io/) | rollout 전 learned score/자동 삭제는 근거 부족; approved cumulative data와 fixed nominal anchor를 유지 | evaluation→recommendation provenance, human admission, retrain seed/interval, nominal safety-regression 거부 |
-| `P8 task/perception expansion` | pickup recipe와 single-camera 기능 경로만 현재 qualification됨 | 같은 runner에서 pick_place·dual-camera·`PERCEPTION_OBSERVED` scene을 별도 계약으로 확장 | task별 녹화 경계와 camera 수의 universal 표준은 `N/A`; MoveIt PSM은 sensor/user world update를 지원하지만 FR5 object identity/오차를 보장하지 않음 | task schema/recipe/camera-profile/pose-observation digest를 분리하고 공통 runner를 유지 | 새 task/profile/perception마다 P1~P7 해당 gate 재평가; 구현 전 `QUALIFICATION_REQUIRED` |
+| `P8 task/perception expansion` | pickup recipe와 dual-camera acquisition mechanism/mapping은 존재하지만 현재 camera 기반 pose/scene authority는 없음 | 같은 runner에서 pick_place, 새 camera geometry/profile과 `PERCEPTION_OBSERVED` scene을 별도 계약으로 확장 | task별 녹화 경계와 camera 수의 universal 표준은 `N/A`; MoveIt PSM은 sensor/user world update를 지원하지만 FR5 object identity/오차를 보장하지 않음 | 첫 seed의 exact dual-camera binding/고정 배치는 P5.8 data validity이고, camera-shift generalization·새 sensor/profile·perception authority만 P8이다 | 새 task/profile/perception마다 P1~P7 해당 gate 재평가; 구현 전 `QUALIFICATION_REQUIRED` |
 
 LeRobot `main` 문서는 저장 형식·resource knob의 방향 근거일 뿐 현재 설치 버전의 기능 pin이 아니다. 실행 시 installed version과 local schema를 함께 기록한다.
 
@@ -744,9 +745,9 @@ Object–EE는 새 학습 feature나 per-frame sidecar가 아니라 기존 repor
 
 위 `학습 기록` 경계는 `pickup_e2e`에만 해당한다. `pick_place`는 destination transit/lower/open과 task 성공에 필요한 retreat까지 별도 motion recipe가 기록 구간으로 선언한다. pickup의 reset phase를 이름만 바꿔 학습 구간으로 재사용하지 않으며, task/recipe digest가 다른 episode는 coverage와 behavior report에서도 분리한다.
 
-### 품질 경계 안의 phase별 다양성 분화
+### P6가 열린 뒤 품질 경계 안의 phase별 다양성 분화
 
-목표는 같은 시작·물체·grasp endpoint를 매번 같은 serialized trajectory로 반복하는 것도, waypoint에 무작위 noise를 넣는 것도 아니다. 안전·task semantics·phase quality와 사람이 판정한 `trajectory_flow`를 먼저 고정한 뒤 그 안에서 의미 있는 trajectory family와 parameter를 분화한다. 여기서 `human-like`는 `pickup-v2`의 사람이 직접 본 자연스러운 흐름 통과를 뜻하며, 충분한 분포·rollout ablation 전 인간 궤적 확률분포를 재현했다는 주장은 아니다.
+이 절은 P5.8 첫 `DIRECT` index가 아니라 DIRECT flow/rollout failure 또는 사전 연구 질문으로 P6가 열린 뒤의 별도 branch다. 목표는 waypoint에 무작위 noise를 넣는 것이 아니라 안전·task semantics·phase quality와 사람이 판정한 `trajectory_flow`를 먼저 고정한 뒤 그 안에서 의미 있는 trajectory family와 parameter를 비교하는 것이다. 여기서 `human-like`는 `pickup-v2`의 사람이 직접 본 자연스러운 흐름 통과를 뜻하며, 충분한 분포·rollout ablation 전 인간 궤적 확률분포를 재현했다는 주장은 아니다.
 
 필터 순서는 바꾸지 않는다.
 
@@ -764,7 +765,7 @@ non-yaw0 live 전에 planner는 fresh actual start에서 같은 TCP/grasp를 만
 
 evidence에는 commanded yaw, equivalence class/period, 열거한 branch ID, 선택 branch, joint별 travel·최대 step·limit margin과 endpoint velocity를 남긴다. 적격 branch가 없으면 plan 0이며, 180°를 넘는 입력을 맞추기 위해 팔을 뒤트는 fallback은 없다.
 
-초기 분화 축은 다음처럼 phase 의미가 있는 것만 허용한다.
+P6 첫 catalog의 분화 축은 다음처럼 phase 의미가 있는 것만 허용한다.
 
 | Phase | 허용하는 분화 | 고정하거나 금지하는 것 |
 |---|---|---|
@@ -787,7 +788,7 @@ evidence에는 commanded yaw, equivalence class/period, 열거한 branch ID, 선
 
 실제 실행 뒤 observed evidence는 `episode_quality.json`에 별도 결속하고 candidate evidence를 덮어쓰지 않는다. technical·semantic·observed attribute가 모두 적격인 episode만 `OBSERVED_ELIGIBLE`이며 같은 입력과 seed는 같은 candidate specification을 만든다. MoveIt의 live plan digest 자체는 별도 승인에 결속한다.
 
-초기에는 versioned finite `phase_variant_catalog`의 검토된 variant와 representative parameter만 균형 수집한다. catalog는 tuple 값을 한 번 소유하고 episode/report는 `trajectory_variant_id`와 digest만 반복 저장한다.
+P6가 evidence-triggered로 열린 경우에만 versioned finite `phase_variant_catalog`의 검토된 DIRECT/TWO_STAGE pair와 representative parameter를 equal-budget ablation으로 수집한다. 이는 P5.8 첫 seed와 별도 training index이며, catalog는 tuple 값을 한 번 소유하고 episode/report는 `trajectory_variant_id`와 digest만 반복 저장한다.
 
 technical·semantic gate와 observed phase report를 통과한 demonstration이 충분해진 뒤에만 condition별 empirical parameter 분포를 추정하고, P6 coverage v2가 under-covered `(condition, trajectory_variant_id)`를 우선 선택한다. 확률 weight는 accepted data와 rollout 근거 없이 만들지 않으며, 그 전 결과를 `human-like distribution`이라고 부르지 않는다.
 
@@ -823,14 +824,16 @@ technical·semantic gate와 observed phase report를 통과한 demonstration이 
 | `P4.5` | 녹화 밖 qualified recycle·safe staging·scene transition HIL — 2026-08-21 r003 완료 | 완료 | exact GRID_1 밖 target 일반화는 하지 않음 |
 | `P5` | explicit coverage report + suggest-next | 가능 | 실행할 next job은 사람 선택/승인 |
 | `P5.2` | 2-episode supervised campaign mechanism HIL — 2026-08-21 C→D→E 완료 | 완료 | exact yaw 0 세 slot 밖으로 일반화하지 않음; training authority 0 |
-| `P5.5` | Object–EE static context + qualified offline close geometry | static context 가능 | FK/TF tolerance 승인; actual object pose 주장은 금지 |
-| `P5.8` | bounded nominal seed + immutable split/evaluation contract + 첫 reloadable SmolVLA baseline/diagnostic ID·OOD rollout | 일부 | finite seed manifest, training admission, rollout plan 승인·terminal/partial/failure label |
-| `P6` | same-condition/equal-budget phase variant ablation + canonical/object-relative plan-only | 가능 | paired HIL·training/rollout 비교 전 별도 승인; 독립 가치 없으면 variant 삭제 |
-| `P6.5` | rollout failure evidence가 지정한 qualified finite repeated collection | 일부 | campaign quota/variant 승인, release verifier가 없으면 한-key scene 확인, batch semantic review |
+| `P5.5` | Object–EE declared-static offline context — 2026-08-24 완료 | 완료 | FK/TF와 post-close pose는 `NOT_AVAILABLE`; actual object pose·gate 주장은 금지 |
+| `P5.8a` | episode approval inventory + fixed dual-camera binding contract + immutable split/evaluation v2 + seed/rollout manifest schema와 fake checks | 가능 | live/training authority 없음; contract revision·training admission은 사람 검토 |
+| `P5.8b` | fixed `DIRECT` initial-seed campaign: declared object X/Y/Yaw × finite robot start-pose matrix, same-condition ID episodes와 factor-held-out OOD | software/fake 가능 | yaw별 grasp/TCP binding·dual-view observability, 각 start pose joint target/tolerance·plan-only qualification, final camera short check, exact plan/semantic/training approval |
+| `P5.8c` | 첫 SmolVLA train→checkpoint digest→independent reload→offline diagnostics→진단 rollout | 일부 | train은 approved seed/compute, 실물 rollout은 action adapter·safety와 trial별 승인 필요 |
+| `P6` | evidence-triggered same-condition/equal-budget phase variant ablation + canonical/object-relative plan-only | plan-only 가능 | paired HIL·training/rollout 비교 전 별도 승인; 첫 baseline prerequisite 아님 |
+| `P6.5` | rollout failure와 coverage가 지정한 qualified finite recollection | 일부 | nominal은 failure+coverage, variant는 추가 P6 decision; campaign quota와 batch review |
 | `P7` | cumulative retrain→ID/OOD rollout→targeted recollection loop | 일부 | 실물 trial, next-round quota, nominal regression 판정 |
-| `P8` | `pick_place`, dual-camera, `PERCEPTION_OBSERVED` scene qualification | 일부 | 각각 별도 qualification |
+| `P8` | `pick_place`, 새 camera/profile·camera-shift OOD, `PERCEPTION_OBSERVED` scene qualification | 일부 | 첫 seed용 기존 dual-camera acquisition 재구현은 제외; 새 범위만 별도 qualification |
 
-현재 카메라 1대는 `P1`, `P2`, `P3`, `P5`, `P5.5`, plan-only `P6`의 blocker가 아니다. `P4`는 single-view 정량 기능증거로만 수행한다. `P4.5`/`P5.2`는 vision scene-understanding이 아닌 qualified target, scene v2 slot evidence와 사람 release 확인 범위의 supervised HIL이며 training admission은 발급하지 않는다. P5.8의 ID/OOD 범위는 현재 single-camera profile이 실제 관측 가능한 조건으로 제한한다. 반복 수집은 P5.8 diagnostic rollout 뒤, variant 수집은 P6의 독립 가치가 확인된 뒤 `P6.5`에서만 시작한다.
+현재 카메라 1대와 미확정 구도는 offline P5.8a, train/reload fake, learned-action stop harness와 plan-only P6의 blocker가 아니다. 그러나 첫 학습 입력은 fixed dual-camera이므로 현재 single-camera episode를 seed로 승격하지 않는다. seed 직전에 intended device 두 대를 기존 qualified `fr5-dual-rgb-30hz-v1`/`up-side` 역할에 exact bind하고 최종 구도를 고정해 짧은 framing·occlusion·source-rate check를 통과한다. 과거 dual acquisition mechanism과 SmolVLA mapping은 재사용하고, full acquisition qualification은 identity/profile이 바뀐 경우에만 반복한다. P5.8b initial seed는 checkpoint 전에 필요하며, P6.5는 rollout 뒤 failure-targeted recollection이다. P6 variant는 별도 evidence-triggered branch이고, broader perception/camera-shift authority는 P8에 남긴다.
 
 ### 사람 개입 예산
 
@@ -932,33 +935,37 @@ collision sample 2,023개 all-valid, 10개 phase terminal 성공, freeze 537=row
 2. P5.5는 기존 accepted episode를 읽는 offline diagnostic이라 P5.2 구현과 병렬 진행할 수 있다. FK/TF가 미적격이면 stable `NOT_AVAILABLE`을 내며 P5.8 baseline·training admission·campaign 실행을 막지 않는다.
 3. Object–EE와 phase metric은 rollout failure를 설명하거나 P6 paired comparison을 층화하는 데만 쓴다. model input, 자동 quality score, 자동 삭제와 quota authority는 계속 0이다.
 
-`P5.8 bounded nominal seed와 첫 baseline/evaluation`
+`P5.8a–c fixed-dual-camera initial seed와 첫 baseline/evaluation`
 
-1. 새 파일/service 대신 기존 `fr5_training_split.json` v2의 nested `evaluation_contract.v1`이 ID/OOD condition, task/phase success, safety stop, `TERMINAL|PARTIAL|FAILURE` label, condition별 `trials_per_condition`, randomized trial order seed, training seed 목록, manifest별 최대 episode·시간·저장량, 프로그램 누적 `max_rounds`·physical episode·rollout trial·HIL prompt·pending review 상한과 dataset/checkpoint digest 규칙을 고정한다. 실행 중 값을 자동 확대하거나 결과를 보고 OOD 정의를 바꾸지 않는다.
-2. seed dataset은 `HUMAN_TRAINING_APPROVED` nominal episode만 참조한다. coverage v1이 evaluation contract의 ID cell 중 비어 있는 곳만 제안하고, 사람이 승인한 positive `max_episodes`의 finite seed campaign으로 부족분을 채운다. P5.2 mechanism HIL은 별도 semantic/training admission 없이는 포함하지 않는다.
-3. 보편적인 `N`을 논문에서 복사하지 않는다. 첫 gate는 model ranking이 아니라 split→train→checkpoint reload→physical rollout 경로의 가능성 검증이며, manifest의 `max_episodes`를 소진해도 approved seed가 부족하면 `INSUFFICIENT_APPROVED_SEED`로 멈춘다.
-4. 새 tracking service 대신 기존 `fr5_training_split.json`을 v2로 확장해 dataset/repo identity, approved episode refs, validator·training-approval·feature/profile digests, train/eval/ID/OOD split, normalized command/config/seed, LeRobot/Torch/CUDA, repo commit, checkpoint digest와 independent reload 결과를 결속한다. 기존 v1은 validation/resume용 read-only compatibility로 유지하고 자동 rewrite/backfill하지 않는다.
-5. local installed LeRobot `0.6.1` 문자열만으로 기능을 가정하지 않고 exact package source/commit과 active feature schema를 기록한다. 첫 feasibility baseline은 pinned seed 한 개를 허용하지만 model/variant 우열을 주장하지 않는다.
-6. checkpoint independent reload 뒤 승인된 trial manifest로 declared ID/OOD condition을 최소 한 번씩 실행한다. demonstration과 같은 approach/close/lift raw metric, task/phase success, safety stop, completion evidence와 사람 terminal label을 기록하되 작은 표본은 diagnostic으로만 보고한다.
-7. checkpoint 생성·reload 또는 safe rollout이 실패하면 training/runtime/data 계약을 수리하고 P6/P6.5로 진행하지 않는다. 통과하면 bounded P6 diversity qualification을 수행하고, failure-condition evidence는 그와 별도로 P6.5 nominal 보강 필요 여부와 최소 cell을 제안한다. 사람 승인 전 motion은 0이다.
+1. `P5.8a SOFTWARE_CONTRACT`는 새 service 없이 episode-level training-approval inventory, 기존 `fr5_training_split.json`의 immutable v2와 nested `evaluation_contract.v1`, finite seed/rollout manifest를 구현한다. exact schema/digest, dataset/repo identity, camera feature/profile binding, base coverage-condition digest와 `robot_start_pose_id`/joint-target/tolerance digest, train/ID/OOD group, task/phase success, safety stop, `TERMINAL|PARTIAL|FAILURE`, randomized order seed, manifest별·프로그램 누적 episode/trial/HIL/review/storage 상한을 고정한다. P5 coverage v1의 condition key를 조용히 바꾸거나 서로 다른 start pose를 같은 seed cell로 합치지 않으며 plan-only/fake에서 robot·recorder·dataset side effect는 0이다.
+2. seed index는 technical PASS와 human semantic evidence를 통과한 뒤 별도 `HUMAN_TRAINING_APPROVED`가 발급된 exact episode ref만 소비한다. 현재 coverage production은 semantic PASS까지만 만들므로 approval inventory의 producer/validator를 먼저 명시한다. P5.2 mechanism HIL은 새 admission 없이 포함하지 않는다.
+3. 첫 useful baseline의 고정축은 FR5 한 대, `pickup_e2e`, canonical instruction, 한 object/grasp/scene/calibration family, 최종 고정 dual-camera `up-side` geometry와 `DIRECT` recipe다. 초기 condition 축은 qualified object X/Y/Yaw와 finite `robot_start_pose_id`다. 현재 yaw는 resolved grasp/TCP 방향을 바꾸므로 각 yaw의 object/grasp binding과 dual-view 식별 가능성을 함께 고정한다. 각 start pose는 exact 6-joint target/tolerance·home-candidate/qualification digest로 식별하고 policy의 proprioceptive state에서 구분 가능해야 한다. 현재 한 home candidate의 존재는 추가 start pose의 안전 적격성을 대신하지 않는다.
+4. 첫 궤적 다양성은 이 관측 가능한 `object condition × robot start pose` matrix로 만든다. 특정 start pose가 특정 object cell에만 나타나 shortcut이 되지 않도록 승인된 balanced matrix를 반복하고, ID는 같은 declared factor cell의 별도 episode, OOD는 training에서 완전히 뺀 qualified object 또는 start-pose value로 고정한다. 같은 factor cell 반복의 작은 pose·sensor·timing 차이는 repeatability와 bounded natural execution variation이지 별도 quota나 alternate-path label이 아니다.
+5. object yaw는 현재 grasp/TCP action을 바꾸므로 첫 seed의 필수축이다. 모든 declared yaw는 fixed dual-camera에서 방향 단서가 식별되고 exact grasp endpoint/action 차이를 설명해야 한다. 물체가 대칭이어서 영상은 등가인데 action만 다르면 해당 yaw episode를 같은 index에 넣지 않고 camera cue·물체 방향 표식·grasp 계약 중 하나를 먼저 수정한다. P5.5 Object–EE/phase metadata는 현 SmolVLA input이 아니므로 observability를 대신하지 않는다. alternate grasp profile, pre-grasp offset, waypoint와 recovery는 명시적 policy condition이 없는 한 첫 index에서 고정하고 P6 lineage로 보낸다.
+6. [LeRobot SmolVLA guide](https://github.com/huggingface/lerobot/blob/main/docs/source/smolvla.mdx)의 약 50 episode와 5 positions×10은 introduced variation마다 반복하라는 공식 시작 예이지 FR5 minimum이 아니다. start pose 축을 추가하면 각 introduced factor cell에도 반복이 필요하다. exact cell·repeat·holdout 수는 결과를 보기 전에 finite manifest에 정하는 `FR5_HYPOTHESIS`다. 한 cell의 thin pilot은 framing/reset/review flow feasibility만 증명하고 useful baseline이나 generalization을 주장하지 않는다.
+7. 과거 dual-camera 30 Hz acquisition과 `up-side`→`camera1/camera2` mapping은 재사용한다. `P5.8b DATA_VALIDITY` live 직전 intended device 두 대의 exact role/profile identity, 최종 placement, framing/occlusion과 source rate만 짧게 확인한다. identity/topic/profile이 달라지면 revision하고, 그렇지 않으면 전체 acquisition qualification을 반복하지 않는다. 현재 임시 single-camera episode는 첫 seed index에 넣지 않는다.
+8. `P5.8b INITIAL_SEED_CAMPAIGN`은 먼저 operator-approved thin pilot, 이어서 declared train/holdout factor matrix의 bounded repeated `DIRECT` seed를 기존 fresh-`OneJob` 경로로 직렬 수집한다. 모든 live episode는 기존 scene/cell/start/collision/E-stop/readback, exact plan digest approval, technical/semantic review와 별도 training admission을 그대로 통과한다. manifest가 motion authority, start-pose safety authority나 미래 plan 사전승인을 만들지 않는다.
+9. `P5.8c BASELINE`은 approved inventory를 freeze한 뒤 normalized command/config/training seed, exact LeRobot/Torch/CUDA source, dataset/split/checkpoint digest와 independent reload receipt를 결속한다. 기존 v1은 validation/resume용 read-only compatibility로 유지하며 auto rewrite/backfill하지 않는다. 한 training seed의 feasibility checkpoint는 허용하지만 model/variant 우열은 주장하지 않는다.
+10. independent reload와 7D+dual-camera binding, offline diagnostics를 통과한 뒤에만 별도 승인된 fixed trial manifest로 diagnostic physical rollout을 연다. learned-action adapter, single command owner, watchdog/cancel/E-stop/stale-camera/controller gate가 먼저 적격해야 하며 작은 ID/OOD 표본은 pipeline 진단일 뿐 ranking이나 promotion 근거가 아니다.
+11. approved seed 부족은 training을, checkpoint/reload 실패는 learned rollout과 model claim을, action-adapter/safety 실패는 physical rollout을 각각 막는다. 이 실패들은 offline P6 compiler나 별도 safety/plan 승인을 받은 expert HIL을 자동 차단하지 않는다. nominal P6.5는 rollout failure와 coverage가 같은 cell을 지목한 뒤에만 연다.
 
 `P6 paired phase-variant ablation`
 
-1. 구현 직전 고기능 research worker 한 명이 코드베이스·현재 ledger·최신 1차 논문/공식 문서를 삼각검증한다. 범위는 `(x,y,yaw)` 다양성, phase parameterization, continuous/blended transition, demonstration naturalness proxy와 downstream VLA 관계뿐이다. 기존 근거를 다시 요약하지 않고 exact FR5 parameter/threshold의 직접 근거가 없으면 `FR5_HYPOTHESIS`를 유지한다.
+1. 2026-08-24 외부 1차 근거·내부 dependency audit·독립 critic의 삼각검증은 P6를 첫 baseline의 필수 gate에서 evidence-triggered branch로 교정했다. 구현 직전 stack/version이나 실험 질문이 바뀐 경우에만 좁은 research refresh를 수행하고 exact FR5 parameter/threshold의 직접 근거가 없으면 `FR5_HYPOTHESIS`를 유지한다.
 2. research 원문 메모와 도구 산출물은 `.agent-local/work/research/`에 두고, 재현 가능한 citation·판정·실험 변경만 이 ledger에 승격한다. 연구자 swarm, 새 framework와 근거 없는 threshold 복사는 0이며 이 refresh는 P5/P5.2/P5.8을 막지 않는다.
-3. P5.8을 통과하면 궤적 다양성의 일반화 가치를 확인하기 위한 bounded P6 ablation을 반드시 한 번 수행한다. 첫 실험은 `DIRECT`와 `TWO_STAGE_ALIGN`만 비교하며, P5.8에서 특정 약점이 보이지 않았다는 이유만으로 diversity qualification 자체를 생략하지 않는다.
+3. P6는 `DIRECT` trajectory-flow/diagnostic rollout 실패가 관측되거나 사용자가 causal research question을 사전 선언한 경우에 연다. plan-only compiler는 P5.8a와 병렬 구현할 수 있지만 `TWO_STAGE_ALIGN` 수집·학습은 첫 `DIRECT` seed와 baseline의 prerequisite가 아니다.
 4. versioned finite `phase_variant_catalog`는 variant ID, allowed parameter tuple, plan-time bound, qualification status와 digest를 고정한다. 구현은 두 variant를 hard-code한 분기 framework가 아니라 유한 목록을 순회하되, 세 번째 이후 N개 variant는 catalog revision·새 실험 질문·동일한 plan-only→paired HIL→multi-seed held-out rollout gate를 각각 요구한다. 지원되지 않는 planner/homotopy knob는 넣지 않는다.
 5. `tools/data_factory/motion/trajectory_variants.py` 한 모듈이 validated v2 program을 입력으로 받아 v3 plan-only candidate를 compile/validate한다. `DIRECT`는 기존 single segment를 재사용하고 `TWO_STAGE_ALIGN`은 existing `plan_arm`을 `NEAR_GRASP→FINAL_ALIGN` 순서로 호출해 final state를 다음 start state로 chain한다. execute/gripper goal API는 호출하지 않는다.
 6. hard safety와 task semantics 뒤 `plan_metrics.py`의 plan-time attribute만 candidate filter에 사용하고 `PRECHECK_ELIGIBLE`을 발급한다. observed metric은 값이 있는 것처럼 채우지 않는다.
-7. 별도 승인된 paired HIL은 같은 Job/scene/start/object/grasp, 같은 condition별 episode 예산을 쓰고 DIRECT/TWO_STAGE_ALIGN 순서를 manifest seed로 무작위화한다. technical·semantic·observed attribute와 `pickup-v2 trajectory_flow`가 적격인 episode만 ablation dataset 후보가 된다.
-8. variant 학습 비교는 같은 cumulative nominal anchor, 동일 feature/training recipe와 동일한 최소 3개 training seed를 사용한다. held-out rollout은 같은 condition·trial 예산과 무작위 순서를 사용하고 episode/seed/rollout 단위 결과 및 95% interval을 보고한다.
-9. 사전에 고정한 `minimum_effect_pp`를 넘는 held-out task/phase success 개선이 있고 safety-critical condition 회귀가 없을 때만 `TWO_STAGE_ALIGN`을 `OBSERVED_ELIGIBLE` collection catalog에 유지한다. 그렇지 않으면 삭제하며 smoothness나 frame 수만으로 살리지 않는다.
+7. 별도 승인된 paired expert HIL은 checkpoint 전에도 가능하지만 같은 Job/scene/start/object/grasp, 같은 condition별 episode 예산을 쓰고 DIRECT/TWO_STAGE_ALIGN 순서를 manifest seed로 무작위화한다. technical·semantic·observed attribute와 `pickup-v2 trajectory_flow`가 적격인 episode만 ablation 후보가 되며 ordinary physical-safety와 exact plan approval을 모두 유지한다.
+8. raw episode는 한 heavy dataset root에 variant lineage를 보존할 수 있지만 첫 training index는 `DIRECT`만 참조한다. causal comparison은 DIRECT-only와 TWO_STAGE_ALIGN-only manifest/index를 분리하고, mixed arm이 필요하면 explicit strategy condition을 추가한 세 번째 실험으로 비교한다. 관측상 같은 상태의 unconditioned pooling은 효용이 입증되지 않은 `FR5_HYPOTHESIS`다.
+9. local comparison contract는 같은 cumulative nominal anchor, 동일 feature/training recipe, 최소 3개 training seed, 같은 held-out condition/trial budget, randomized order와 episode/seed/rollout 단위 95% interval을 시작 설계로 둔다. `3 seeds`와 `minimum_effect_pp`는 보편 표준이 아니라 결과 전에 revision 가능한 FR5 decision contract다. 사전 effect를 넘고 safety-critical regression이 없을 때만 `TWO_STAGE_ALIGN`을 `OBSERVED_ELIGIBLE`로 유지한다.
 10. selector는 qualified coverage lowest count→exact duplicate 제거→canonical tie-break만 수행한다. P6 metadata는 catalog tuple 한 벌과 episode당 variant/catalog/plan/evidence digest 및 phase scalar/event만 저장해 크기를 `O(episodes × phases)`로 제한한다.
 
-`P6.5 evidence-targeted repeated collection`
+`P6.5 post-rollout evidence-targeted recollection`
 
-1. P5.2 mechanism HIL, P5 coverage, P5.8 baseline/diagnostic rollout과 bounded P6 diversity qualification이 통과한 뒤에만 finite campaign을 제안한다. nominal 보강은 non-DIRECT variant 승격을 요구하지 않지만, variant quota에는 P6 `OBSERVED_ELIGIBLE`과 ablation decision digest가 필요하다. P5.5 availability는 hard prerequisite가 아니다.
-2. coverage와 failure-condition evidence가 함께 가리키는 부족 cell만 제안한다. weak condition이 없거나 expected decision을 바꿀 수 없는 추가 데이터면 campaign을 만들지 않으며 same trajectory를 편의상 대량 복제하지 않는다.
+1. P6.5는 checkpoint 전 useful seed를 만드는 P5.8b와 다른 사후 단계다. nominal branch는 P5.2 mechanism, P5 coverage와 P5.8 diagnostic rollout의 failure evidence가 같은 qualified condition을 지목하면 열며 P6 결정을 요구하지 않는다. variant-targeted branch만 추가로 P6 `OBSERVED_ELIGIBLE`과 ablation decision digest를 요구한다. P5.5 availability는 둘의 hard prerequisite가 아니다.
+2. coverage와 failure-condition evidence가 함께 가리키는 부족 cell만 제안한다. weak condition이 없거나 expected decision을 바꿀 수 없는 추가 데이터면 campaign을 만들지 않으며 same trajectory를 편의상 대량 복제하지 않는다. 첫 seed의 balanced coverage 부족은 P5.8b manifest 안에서 해소하고 post-rollout failure로 위장하지 않는다.
 3. current no-sensor cell에서는 `SUPERVISED_CAMPAIGN`으로 inter-episode release+next-plan 한 키를 유지한다. `CANDIDATE_AUTOMATED` multi-episode는 qualified containment/release verifier/perception profile digest가 manifest와 scene v2 evidence에 결속될 때만 켠다.
 4. 각 사용 slot은 `CONSUMED_PENDING_REVIEW` 또는 `QUARANTINED`로 소진하며 human physical clear confirmation 없이는 재사용하지 않는다. slot 부족, reserve 부족, pending review 수가 manifest의 `max_pending_reviews`에 도달, campaign expiry 중 하나라도 닿으면 새 goal 없이 정상 정지한다.
 5. campaign 종료 후 offline behavior/Object–EE/coverage와 candidate admission review를 실행한다. 승인된 새 episode는 다음 P7 training round에만 들어가며 raw candidate 수집과 training admission을 계속 분리한다.
@@ -1010,10 +1017,10 @@ collision sample 2,023개 all-valid, 10개 phase terminal 성공, freeze 537=row
 - coverage는 declared domain 밖 조건을 제안하지 않고 profile/revision을 합치지 않는다. v1/v2 report를 합치거나 기존 episode에 variant lineage를 backfill하지 않는다.
 - `HIL_PROXY` operational PASS는 `candidate-pending-review`만 증가시키고 `human-semantic-pass`/eligible coverage/training count는 0이다. pending condition·variant는 backlog 해제 전 `suggest-next` 중복 추천 0이다.
 - P5 완료 gate는 pure report 시험만으로 충족되지 않는다. live single-job의 run-local pending admission 생성, coverage module CLI의 valid output, missing/mismatched evidence fail-close와 문서화된 production command가 함께 통과해야 한다.
-- P5.8은 evaluation contract digest 뒤 ID/OOD 정의·trial order·training seed·quota를 바꾸면 새 contract revision을 요구한다. reload 불가 checkpoint, unsafe rollout 또는 `INSUFFICIENT_APPROVED_SEED`에서는 P6/P6.5 campaign 생성과 goal이 0이다.
+- P5.8은 evaluation contract digest 뒤 ID/OOD 정의·trial order·training seed·quota를 바꾸면 새 contract revision을 요구한다. `INSUFFICIENT_APPROVED_SEED`에서는 training/learned rollout이 0이고, reload 불가 checkpoint에서는 learned rollout/model claim이 0이며, unsafe adapter/rollout에서는 다음 physical policy goal이 0이다. offline P6 plan-only와 별도 safety·exact-plan 승인을 받은 expert HIL까지 phase 번호만으로 막지 않는다.
 - P5.8/P7 누적 counter가 `max_rounds`, total physical episode, rollout trial, HIL prompt 또는 pending-review ceiling 중 하나에 닿으면 새 manifest/recorder/goal 0으로 정상 정지한다. 기존 contract의 ceiling은 실행 중 수정할 수 없다.
-- 첫 feasibility baseline/각 condition 1회 diagnostic rollout은 pipeline 관통 근거일 뿐 model/variant 우열 근거가 아니다. 우열 판정은 동일 cumulative nominal anchor, 동일 recipe, 최소 3개 training seed, 동일 held-out condition/trial budget과 episode/seed/rollout 단위 95% interval을 요구한다.
-- P5.8 통과 뒤 P6는 DIRECT/TWO_STAGE_ALIGN bounded comparison을 한 번 수행한다. 세 번째 이후 variant는 같은 qualification gate를 반복하며, 독립 가치가 없는 variant는 P6.5 catalog에 남기지 않는다.
+- one-factor-cell thin pilot은 collection/review feasibility, 한 training seed와 condition별 최소 diagnostic rollout은 pipeline feasibility 근거일 뿐 useful baseline·model/variant 우열·promotion 근거가 아니다. useful baseline은 사전 선언한 balanced object pose×robot start-pose train matrix와 factor-held-out OOD를 채워야 하고, 우열 판정은 동일 cumulative nominal anchor/recipe, 사전 고정한 multi-seed·held-out trial contract와 episode/seed/rollout 단위 interval을 요구한다.
+- P6 DIRECT/TWO_STAGE_ALIGN 비교는 DIRECT flow failure, diagnostic weakness 또는 사전 선언한 연구 질문이 있을 때만 연다. 세 번째 이후 variant는 같은 qualification gate를 반복하며, 독립 가치가 없는 variant는 P6.5 catalog에 남기지 않는다.
 - phase variant는 declared family/parameter/seed로 재현 가능하고 hard safety→task semantics→qualified plan-time phase quality 순서를 모두 통과해야 한다. 실행 뒤 observed phase quality는 별도 report/admission evidence이며, 어느 쪽의 quality 미달도 diversity score로 상쇄하지 않는다.
 - `fr5.motion_program.v2` 결과는 byte-stable하게 유지하고 v3 `DIRECT`/`TWO_STAGE_ALIGN` segment schema는 plan-only에서만 생성·검증되며 qualification 전 live goal은 0이다.
 - v3 multi-segment plan-only는 segment별 current `plan_arm` final→next start chain과 exact segment event/evidence를 보존하고 execute/gripper goal call은 0이다. `PRECHECK_ELIGIBLE`은 observed metric을 포함하지 않는다.
@@ -1024,7 +1031,7 @@ collision sample 2,023개 all-valid, 10개 phase terminal 성공, freeze 537=row
 - `RES-01`: active camera/collection profile의 exact visual features와 encoder 설정, peak RSS/CPU, `MemAvailable`, swap I/O, thread/FD, heartbeat latency, queue high-water/drop, alignment failure를 같은 run evidence에 기록한다. 8 GB 지원 판정은 실제 8 GB 대상 노트북의 대표 최대 episode·연속 job 30분 burn-in에서만 발급한다.
 - training split v2는 selected episode, approval/validator/dataset-feature/profile/command/runtime/checkpoint digest와 reload result를 결속하고 heavy payload를 복제하지 않는다. RTC/chunk/critic evidence는 checkpoint rollout 전 생성하지 않는다.
 - split 회귀는 legacy v1 validation/resume read-only 호환, v2 exact schema/digest mismatch 거부와 v1 auto-rewrite 0을 검증한다.
-- P6.5 nominal quota는 P5.8 failure-condition evidence와 coverage가 같은 cell을 지목할 때만 열리고, variant quota는 추가로 P6 ablation decision digest를 요구한다. P5.5 report unavailable은 둘을 막지 않는다.
+- P6.5 nominal quota는 P5.8 diagnostic failure evidence와 coverage가 같은 cell을 지목할 때만 열리고, variant quota는 추가로 P6 ablation decision digest를 요구한다. checkpoint 전 balanced initial seed는 P5.8b가 소유하며 P6.5를 기다리지 않는다. P5.5 report unavailable은 어느 branch도 막지 않는다.
 - P7 retrain은 fixed nominal anchor를 보존하고 nominal/correction/recovery lineage를 합치지 않는다. 이전 accepted checkpoint보다 safety-critical ID condition이 회귀하면 새 checkpoint 승격과 다음 자동 추천은 0이다.
 
 ## 14. 다음 Goal handoff
@@ -1039,7 +1046,9 @@ P4 public single-job live는 r007, gripper timing 재적격화는 `p45-gripper-l
 
 P5.5 `Object–EE offline diagnostic`과 backend-free frontend fixture, Korean mode, accessibility slice는 완료됐다. P5.5는 declared static `object_frame_context`만 제공하며 FK/TF와 post-close pose는 계속 `NOT_AVAILABLE`이다. Frontend fixture는 backend proposal을 구현하지 않았고 `run_job.py`, Python operator core와 preflight를 연결하지 않는다.
 
-다음 backend Goal은 evaluation-first `P5.8 bounded nominal seed와 첫 baseline/evaluation`이다. 별도 training approval로 실제 approved episode inventory와 immutable evaluation contract가 생기기 전 seed quota를 늘리지 않으며, frontend backend bridge는 계속 후속 제안으로 둔다.
+다음 backend Goal은 offline-first `P5.8a SOFTWARE_CONTRACT`다. episode-level training-approved inventory, immutable split/evaluation v2, fixed dual-camera `DIRECT`의 object-condition×robot-start-pose seed manifest와 train/reload/action-adapter fake contract를 독립 범위에서 먼저 완성한다. P6 plan-only compiler는 병렬 가능하지만 critical path가 아니며, frontend backend bridge는 계속 후속 제안으로 둔다.
+
+그다음 critical path는 `각 robot start pose plan-only qualification + 최종 dual-camera exact binding·구도 short check → operator-approved thin DIRECT pilot → balanced object pose×robot start-pose initial seed와 별도 training admission → train/checkpoint digest/independent reload/offline diagnostics → action-adapter safety qualification 뒤 diagnostic ID/OOD rollout`이다. rollout 뒤 nominal failure+coverage는 곧바로 P6.5로, trajectory strategy 문제가 있으면 `P6 DIRECT/TWO_STAGE/recovery experiment → variant-targeted P6.5`로 분기한다. 이 순서는 첫 seed를 post-rollout P6.5에 의존시키는 순환을 제거하고, 이미 검증된 dual-camera acquisition의 불필요한 재구현/HIL을 반복하지 않는다.
 
 이전 `main@479a758` P4 handoff는 `1b3bc97`/`f4069aa`와 r007로 완료됐다. 이를 현재 다음 Goal로 다시 사용하지 않는다.
 
@@ -1071,6 +1080,9 @@ P5.5 `Object–EE offline diagnostic`과 backend-free frontend fixture, Korean m
 | self-review-continuous | `APPROVE` | recorder data-plane 독립, serial OneJob authority, single/2-episode UX, camera semantic false, 8 GB/storage | 없음 |
 | final-verifier-continuous | `APPROVE` | 최신 단순화 요구·상태·테스트·문서 정합, `.venv` 104-test와 whitespace/fence | 없음 |
 | independent-architecture-recheck-20260821 | `APPROVE_WITH_CHANGES_APPLIED` | P5 production 관통, chain-state producer, P5.5 non-authority, 누적 HIL budget, speculative schema, P5.8→P6→P6.5 dependency | 없음 |
+| external-vla-evidence-20260824 | `APPROVE_WITH_BOUNDARIES_APPLIED` | official LeRobot episode guidance, BridgeData/Data Quality/SmolVLA의 amount·condition diversity·multimodality 경계 | FR5 cell·repeat 수는 local hypothesis |
+| internal-dependency-audit-20260824 | `APPROVE_WITH_CORRECTIONS_APPLIED` | approval inventory/split v2/reload/adapter gap, seed campaign과 post-rollout recollection의 순환 의존성 | 없음 |
+| independent-vla-critic-20260824 | `APPROVE_WITH_CORRECTIONS_APPLIED` | fixed dual-camera DIRECT-first seed, optional P6, hard/decision/promotion gate 분리 | effect·seed·trial 수는 사전 실험 계약 필요 |
 
 ### 자체 감사에서 확인한 불변조건
 
@@ -1079,8 +1091,8 @@ P5.5 `Object–EE offline diagnostic`과 backend-free frontend fixture, Korean m
 - P4의 scene/readback/collision/no-motion/cached-plan/post-reset 근거는 commit 전 exact binding이고, 실제 scene/cell resolution은 commit 뒤 다음 job만 차단한다.
 - pickup과 pick_place는 runner를 공유하지만 task schema, recipe digest와 녹화 종료 경계는 공유하지 않는다.
 - 기존 technical validator는 안정된 독립 prerequisite로 보호하고 phase/plan/execution/interaction/visual/coverage 속성은 source별 산출물과 digest-only aggregator로 분리한다.
-- DIRECT/TWO_STAGE_ALIGN은 same-dataset lineage로 비교하고, FR5 hypothesis는 plan-only→소수 HIL→observed evidence 순서 없이 수집·학습 catalog로 승격하지 않는다.
-- P6 diversity qualification은 P5.8 뒤 bounded comparison으로 반드시 수행하되, 개별 variant의 반복 수집은 multi-seed held-out rollout 가치가 확인될 때만 허용한다.
+- 첫 seed의 다양성은 fixed `DIRECT` 안의 qualified object X/Y/Yaw×robot start-pose factor와 반복으로 만든다. 현재 yaw는 grasp/TCP 방향을 바꾸므로 dual-view observability와 함께 필수화하고, 같은 관측에서 다른 grasp/pre-grasp/trajectory 전략을 unconditioned label로 섞지 않는다.
+- DIRECT/TWO_STAGE_ALIGN은 separate training index의 same-dataset lineage로 비교한다. P6는 evidence-triggered이며 FR5 hypothesis는 plan-only→별도 승인 HIL→multi-seed held-out evidence 순서 없이 수집·학습 catalog로 승격하지 않는다.
 - P5.5 Object–EE는 기존 episode report의 진단 attribute이고 P5.8/P6 source eligibility의 권위나 blocker가 아니다.
 - manifest별 budget과 program-level round/physical episode/rollout/HIL prompt/review backlog 누적 상한을 모두 지키며, exhaustion 뒤 자동 증액은 0이다.
 - 저장공간은 dataset/temp filesystem별 peak를 검증하고 first version에서 heavy copy·single-episode prune·repo-wide scan을 하지 않는다.

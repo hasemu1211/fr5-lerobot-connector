@@ -1,10 +1,10 @@
 # FR5 수집 UX 코어와 프런트엔드 경계 구현 계획
 
-> **For agentic workers:** 이 계획은 현재 P5.5/P6 작업을 막지 않는 후속 작업이다. 아래 Python Task는 backend/integration 소유이며, frontend architecture review와 첫 browser vertical slice는 별도 Orca Task와 write scope로 실행한다.
+> **For agentic workers:** P5.5와 backend-free browser vertical slice는 완료됐다. 남은 Python/backend bridge는 P5.8a와 plan-only P6를 막지 않는 integration 후속 작업이며, 기존 safety/lifecycle authority를 그대로 재사용한다.
 
 **Goal:** 한 개의 기존 `run_job.py` 진입점에 재사용 가능한 operator setup core와 TTY fallback을 제공하고, 독립 browser frontend가 같은 artifact를 안전하게 표시할 수 있는 경계를 고정한다.
 
-**Architecture:** frontend lead가 현재 `run_job.py`, artifact 흐름과 P5.5/P6/P8 계획을 먼저 검토해 operator journey, 정보구조와 필요한 backend contract를 제안한다. React/TypeScript/Vite는 현재 baseline이지만 더 작은 비용으로 같은 UX·검증성을 내는 대안은 evidence와 migration cost를 제시해 바꿀 수 있다. motion·recorder·scene·cell lifecycle은 기존 `run_plan_only`, `run_live`, `run_campaign`만 소유하고, shared backend 변경은 frontend prototype과 P5.5가 끝난 뒤 integration owner 한 명이 수행한다.
+**Architecture:** accepted fixture는 현재 `run_job.py`, artifact 흐름과 P5.8/P6/P8 계획을 반영한 replaceable read-only view다. motion·recorder·scene·cell lifecycle은 기존 `run_plan_only`, `run_live`, `run_campaign`만 소유하고, shared backend 변경은 실제 contract 병목이 확인됐을 때 integration owner 한 명이 수행한다. 현재 fixture acceptance는 backend 연결을 요구하지 않는다.
 
 **Tech Stack:** Python 3 표준 라이브러리, 기존 ROS 2/MoveIt/LeRobot CLI, Bash `preflight_collection.sh`, JSON digest, `unittest`. Frontend의 비교 baseline은 React, TypeScript, Vite와 repository-owned test command이며, 아래 acceptance를 더 작고 재현 가능하게 만족하는 선택으로 교체할 수 있다.
 
@@ -16,11 +16,11 @@ Backend-free fixture, Korean mode와 accessibility slice는 accepted다. Python 
 
 ## Global Constraints
 
-- 상태: `PROPOSED_FOLLOW_UP_NON_BLOCKING`; 현재 P5.5/P6 gate보다 앞선 필수조건으로 만들지 않는다.
+- 상태: `FIXTURE_ACCEPTED_BACKEND_FOLLOW_UP_NON_BLOCKING`; 현재 P5.8a/P6 plan-only gate보다 앞선 필수조건으로 만들지 않는다.
 - 단일 lifecycle owner와 한 active motion goal을 유지한다.
 - `plan_only`는 robot, recorder, dataset side effect가 모두 0이어야 한다.
 - 카메라 선택은 현재 장비에서 qualification된 collection profile만 live로 허용한다.
-- legacy `fr5-dual-rgb-30hz-v1`은 role/topic binding이 없는 동안 wizard에서 disabled로 표시하고 live profile로 추측 승격하지 않는다.
+- `fr5-dual-rgb-30hz-v1`의 과거 dual-camera acquisition/mapping evidence는 재사용하되, intended physical device의 exact role/topic binding과 최종 placement가 없는 동안 wizard live 선택은 disabled다. 최종 binding을 추측하거나 전체 mechanism qualification을 불필요하게 반복하지 않는다.
 - 카메라 profile/binding이 바뀌면 기존 dataset에 섞지 않고 새 dataset root를 요구한다.
 - runtime receipt는 `outputs/data_factory/sessions/`, heavy payload는 `datasets/fr5_episodes/`만 소유한다.
 - Python Task의 첫 버전은 TTY fallback까지 제공한다. browser frontend는 fixture로 안전하게 시작하되 현재 backend와 미래 계획을 읽고 workflow·contract·stack을 비판할 수 있다. live API bridge는 integration gate 전 추가하지 않는다.
@@ -47,7 +47,7 @@ Frontend의 첫 acceptance는 화면 수를 미리 고정하는 것이 아니다
 Frontend lead는 구현 전에 다음을 함께 검토한다.
 
 1. 현재 one-job/campaign, camera profile, scene/cell, coverage와 candidate review의 실제 입력·출력·실패 복구 흐름.
-2. P5.5 Object–EE 진단, P6 condition/trajectory diversity, P8 dual-camera와 사람이 배치하는 multi-object scene이 UI에 요구할 정보 구조. 미래 기능은 표현 공간만 확보하고 지금 구현하지 않는다.
+2. P5.5 Object–EE 진단, P5.8 fixed dual-camera seed binding, evidence-triggered P6 trajectory variant와 P8의 새 camera/perception·multi-object scene이 UI에 요구할 정보 구조. 기존 dual-camera acquisition과 미래 perception authority를 같은 미구현 기능으로 합치지 않는다.
 3. 사용자가 물체와 카메라를 배치한 뒤 수집을 시작하기까지의 시간, 승인 round-trip 수, 중복 입력 수, 실패 원인과 다음 행동을 이해하는 데 필요한 단계.
 4. AI worker가 fixture로 화면을 재현하고 Orca browser에서 상태·console·network를 검증할 수 있는가.
 5. React/Vite baseline이 실제로 가장 작은 유지비를 갖는가. 대안은 동일 acceptance, 테스트 경로, backend 독립성과 향후 scene 시각화 비용을 함께 비교한다.
@@ -284,7 +284,7 @@ Expected: exit `0`
 - readiness는 반복 개발검사를 제거하지만 `run_live`의 camera warmup·plan/collision·human digest gate를 우회하지 않는다.
 - 첫 browser vertical slice는 backend 없이 fixture로 실행·검증되고 P5.5 또는 Python hotspot을 수정하지 않는다.
 - frontend와 backend가 결합될 때에도 frontend 요청은 기존 canonical validator와 exact human digest gate로 수렴한다.
-- 현재 P5.5/P6 진행은 이 UX가 없어도 계속 가능하다.
+- 현재 P5.8a와 plan-only P6 진행은 backend bridge가 없어도 계속 가능하다.
 
 ## 명시적 후순위
 
