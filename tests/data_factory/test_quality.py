@@ -1,10 +1,11 @@
+import hashlib
 import json
 import tempfile
 import unittest
 from pathlib import Path
 
 from tools.fr5_data_factory import ContractError, canonical_digest
-from tools.data_factory.quality.episode_report import aggregate_episode_report, build_episode_report, write_episode_report
+from tools.data_factory.quality.episode_report import aggregate_episode_report, build_episode_report, object_frame_context_attribute, write_episode_report
 from tools.data_factory.quality.execution_metrics import joint_execution_attribute
 from tools.data_factory.quality.interaction_metrics import interaction_quality_attribute
 from tools.data_factory.quality.plan_metrics import plan_quality_attribute
@@ -24,6 +25,60 @@ class QualityTest(unittest.TestCase):
             value["segment_index"] = value["segment_count"] = None
         value.update(overrides)
         return value
+
+    def accepted_object_context(self, root, robot_description_digest):
+        run_id = "run-1"
+        tcp_digest = digest("tcp")
+        job = {
+            "schema_version": "data_factory.job.v1", "job_id": run_id, "task": "pickup_e2e",
+            "robot_system_id": "fr5-a", "collection_profile_id": "profile-r1", "place_id": "place-a",
+            "cell_calibration_id": "cell-r1", "sheet_manifest_digest": digest("selected-sheet"), "yaw_deg": 0,
+            "x_mm": 10, "y_mm": 20, "object_profile_id": "cube-r1", "grasp_profile_id": "grasp-r1",
+            "instruction": "pick up the test cube", "episode_intent": "nominal pickup",
+            "operator_or_agent_id": "operator-1", "approval_expiry": "2099-01-01T00:00:00Z", "dry_run_required": True,
+        }
+        robot = {"schema_version": "data_factory.robot_system.v1", "robot_system_id": "fr5-a", "base_frame": "base_link", "tcp_digest": tcp_digest}
+        collection = {"schema_version": "data_factory.collection_profile.v1", "collection_profile_id": "profile-r1"}
+        object_profile = {"schema_version": "data_factory.object_profile.v2", "object_profile_id": "cube-r1", "datum": "center", "description": "test cube"}
+        grasp = {"schema_version": "data_factory.grasp_profile.v2", "grasp_profile_id": "grasp-r1", "object_profile_id": "cube-r1"}
+        cell = {"schema_version": "data_factory.cell_calibration.v1", "calibration_id": "cell-r1", "robot_system_id": "fr5-a", "place_id": "place-a", "tcp_digest": tcp_digest}
+        input_digests = {
+            "selected_sheet": job["sheet_manifest_digest"], "yaw0_sheet": digest("yaw0-sheet"),
+            "cell_calibration": digest(cell), "robot_system": digest(robot), "collection_profile": digest(collection),
+            "object_profile": digest(object_profile), "grasp_profile": digest(grasp),
+        }
+        resolved_job_digest = digest({"job": job, "input_digests": input_digests})
+        resolved_job = {
+            "normalized_job": job, "input_digests": input_digests, "resolved_job_digest": resolved_job_digest,
+            "robot": robot, "collection_profile": collection,
+            "calibration": {"center": [.1, .2, .3], "x": [1., 0., 0.], "y": [0., 1., 0.], "z": [0., 0., 1.], "document": cell},
+            "object_profile": object_profile, "grasp_profile": grasp,
+        }
+        identity = {"translation_m": [0., 0., 0.], "rotation_columns": [[1., 0., 0.], [0., 1., 0.], [0., 0., 1.]]}
+        motion = {
+            "schema_version": "data_factory.motion_qualification.v1", "qualification_status": "QUALIFIED",
+            "robot_system_id": "fr5-a", "cell_calibration_id": "cell-r1", "object_profile_id": "cube-r1", "grasp_profile_id": "grasp-r1",
+            "profile_digests": {key: input_digests[key] for key in ("robot_system", "cell_calibration", "object_profile", "grasp_profile")},
+            "robot_description_digest": robot_description_digest, "frames": {"planning_frame": "base_link", "planning_group": "fairino5_v6_group", "tool_link": "wrist3_link"},
+            "tool_to_tcp": identity, "datum_to_tcp_grasp": identity,
+        }
+        bindings = {
+            **input_digests, "robot_description_digest": motion["robot_description_digest"], "moveit_config_digest": digest("moveit"),
+            "planning_scene_digest": digest("scene"), "motion_qualification": digest(motion), "home_candidate": digest("home"),
+        }
+        plan = {"schema_version": "fr5.pickup_plan.v3", "run_id": run_id, "resolved_job_digest": resolved_job_digest, "robot_system_id": "fr5-a", "binding_digests": bindings}
+        plan_digest = digest(plan)
+        envelope = {"plan": plan, "precommit_safety": {"schema_version": "data_factory.precommit_safety.v1", "run_id": run_id, "approved_plan_digest": plan_digest}, "precommit_evidence": {"schema_version": "data_factory.precommit_evidence.v1", "run_id": run_id, "approved_plan_digest": plan_digest}, "operator_summary": {}}
+        preapproval = {"schema_version": "data_factory.preapproval_evidence.v1", "run_id": run_id, "resolved_job_digest": resolved_job_digest, "plan_digest": plan_digest, "plan_envelope": envelope, "plan_envelope_digest": digest(envelope)}
+        technical = {"schema_version": "data_factory.technical_validator_result.v1", "run_id": run_id, "resolved_job_digest": resolved_job_digest, "plan_digest": plan_digest, "dataset_root": "/dataset", "expected_fps": 30, "status": "PASS", "result_digest": digest("technical-result")}
+        admission = {"schema_version": "data_factory.candidate_admission.v1", "run_id": run_id, "operational_gate": "PASS", "operational_source": "HUMAN_GATED", "checklist_id": "pickup-v2", "review_context_digest": digest({"run_id": run_id, "resolved_job_digest": resolved_job_digest, "plan_digest": plan_digest, "technical_validator_digest": digest(technical)}), "semantic_status": "PASS", "reviewed_by": "operator-1", "reviewed_at": "2026-08-24T00:00:00Z", "reason": None}
+        accepted = {"episode_id": run_id}
+        for name, value in (("job_spec", job), ("preapproval_evidence", preapproval), ("technical_validator", technical), ("candidate_admission", admission)):
+            path = root / f"{name}.json"
+            path.write_text(json.dumps(value))
+            accepted[f"{name}_path"] = path
+            accepted[f"{name}_digest"] = digest(value)
+        return accepted, resolved_job, motion, plan_digest, bindings
 
     def test_strict_event_sidecar_and_same_clock_join(self):
         events = [self.event(0,"DISPATCH_REQUESTED",100),self.event(1,"GOAL_ACCEPTED",200),self.event(2,"ACTION_TERMINAL",500,action_status="SUCCEEDED")]
@@ -64,6 +119,64 @@ class QualityTest(unittest.TestCase):
         self.assertEqual(phase_timing_attribute(run_id="run-1",resolved_job_digest=digest("job"),plan_digest=digest("plan"),events=mixed)["status"],"NOT_AVAILABLE")
         truncated = [self.event(3,"GOAL_ACCEPTED",100),self.event(4,"ACTION_TERMINAL",200)]
         self.assertEqual(phase_timing_attribute(run_id="run-1",resolved_job_digest=digest("job"),plan_digest=digest("plan"),events=truncated)["status"],"NOT_AVAILABLE")
+
+    def test_object_frame_context_is_static_available_and_fk_tf_fail_closed(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            urdf = root / "robot.urdf"
+            links = ["base_link", "link1", "link2", "link3", "link4", "link5", "wrist3_link"]
+            urdf.write_text("<robot name='test'>" + "".join(f"<link name='{link}'/>" for link in links) + "".join(f"<joint name='j{index}' type='{'prismatic' if index == 1 else 'revolute'}'><parent link='{links[index - 1]}'/><child link='{links[index]}'/><origin xyz='0 0 0' rpy='0 0 0'/><axis xyz='{'1 0 0' if index == 1 else '0 0 1'}'/></joint>" for index in range(1, 7)) + "</robot>")
+            urdf_digest = "sha256:" + hashlib.sha256(urdf.read_bytes()).hexdigest()
+            accepted, resolved, motion, plan_digest, bindings = self.accepted_object_context(root, urdf_digest)
+            rows = [{"target_ros_s": value / 1e9, "observation.state": [index / 100.] + [0.] * 6} for index, value in enumerate((100, 200, 300, 400, 500, 600, 700, 800))]
+            rows_digest = digest("rows")
+            events = []
+            for index, (phase, begin, end) in enumerate((("PREGRASP_PTP", 100, 200), ("APPROACH_STOP_LIN", 300, 400), ("FINAL_APPROACH_LIN", 500, 600), ("GRIPPER_CLOSE", 700, 800))):
+                events.extend((self.event(index * 2, "GOAL_ACCEPTED", begin, phase=phase, plan_digest=plan_digest), self.event(index * 2 + 1, "ACTION_TERMINAL", end, phase=phase, plan_digest=plan_digest)))
+            common = {"accepted_episode": accepted, "resolved_job": resolved, "motion_qualification": motion, "recorder_rows": rows, "recorder_rows_digest": rows_digest, "recorder_ros_clock_type": "ROS_TIME", "events": events}
+            attribute = object_frame_context_attribute(**common)
+            self.assertEqual(attribute["status"], "AVAILABLE")
+            self.assertEqual(attribute["metrics"]["frame_id"], "base_link")
+            self.assertEqual(attribute["metrics"]["object_datum"], "center")
+            self.assertEqual(attribute["metrics"]["pose_source"], "A4_CALIBRATION_AND_JOB")
+            self.assertEqual(attribute["metrics"]["truth_scope"], "DECLARED_STATIC_PREGRASP_TO_CLOSE")
+            self.assertEqual(attribute["metrics"]["pose_observation"], "DECLARED_PLACEMENT_NOT_CAMERA_OBSERVED_ACTUAL_TRUTH")
+            self.assertEqual(attribute["metrics"]["T_base_object_datum_at_begin"]["translation_m"], [.11, .22, .3])
+            self.assertEqual(attribute["source_digests"]["binding_object_profile"], bindings["object_profile"])
+            self.assertEqual(attribute["metrics"]["fk_tf_metrics"], {"status": "NOT_AVAILABLE", "reason": "FK_TF_QUALIFICATION_MISSING"})
+            self.assertEqual(attribute["metrics"]["post_close_object_pose"], {"status": "NOT_AVAILABLE", "reason": "POST_CLOSE_OBJECT_POSE_UNQUALIFIED"})
+            self.assertNotIn("authority", json.dumps(attribute))
+            self.assertNotIn("per_row", json.dumps(attribute))
+            report = aggregate_episode_report([attribute], technical_validator={"schema_version": "data_factory.technical_validator_ref.v1", "status": "PASS", "result_digest": digest("technical-result")})
+            self.assertEqual(report["attributes"], [attribute])
+            qualification = {
+                "schema_version": "data_factory.fk_tf_qualification.v1", "qualification_status": "QUALIFIED",
+                "resolved_job_digest": resolved["resolved_job_digest"], "plan_digest": plan_digest,
+                "robot_description_digest": bindings["robot_description_digest"], "tcp_digest": digest("tcp"),
+                "motion_qualification_digest": bindings["motion_qualification"], "recorder_rows_digest": rows_digest,
+                "recorder_ros_clock_type": "ROS_TIME", "phase_events_digest": digest(events), "joint_order": ["j1", "j2", "j3", "j4", "j5", "j6"],
+                "same_sample_tf_agreement": {"status": "PASS", "sample_count": 12, "position_tolerance_m": .001, "orientation_tolerance_rad": .01, "max_position_error_m": .0001, "max_orientation_error_rad": .001},
+            }
+            qualified = object_frame_context_attribute(**common, fk_tf_qualification=qualification, urdf=urdf)
+            metric = qualified["metrics"]["fk_tf_metrics"]
+            self.assertEqual(metric["status"], "AVAILABLE")
+            self.assertEqual(metric["close_row_reference"], {"row_index": 7, "target_ros_s": rows[7]["target_ros_s"]})
+            for actual, expected in zip(metric["T_object_tcp_at_close"]["translation_m"], (-.04, -.22, -.3)):
+                self.assertAlmostEqual(actual, expected)
+            self.assertEqual([item["phase"] for item in metric["phase_scalars"]], ["PREGRASP_PTP", "APPROACH_STOP_LIN", "FINAL_APPROACH_LIN", "GRIPPER_CLOSE"])
+            self.assertNotIn("T_base_tcp", json.dumps(qualified))
+            rebound = {**qualification, "plan_digest": digest("wrong")}
+            self.assertEqual(object_frame_context_attribute(**common, fk_tf_qualification=rebound, urdf=urdf)["metrics"]["fk_tf_metrics"], {"status": "NOT_AVAILABLE", "reason": "FK_TF_QUALIFICATION_BINDING_MISMATCH"})
+            self.assertEqual(object_frame_context_attribute(**common, fk_tf_qualification={}, urdf=urdf)["metrics"]["fk_tf_metrics"], {"status": "NOT_AVAILABLE", "reason": "FK_TF_QUALIFICATION_INVALID"})
+            self.assertEqual(object_frame_context_attribute(**common, fk_tf_qualification={**qualification, "qualification_status": "CANDIDATE"}, urdf=urdf)["metrics"]["fk_tf_metrics"], {"status": "NOT_AVAILABLE", "reason": "FK_TF_QUALIFICATION_NOT_QUALIFIED"})
+            changed = {**resolved, "input_digests": {**resolved["input_digests"], "object_profile": digest("wrong")}}
+            with self.assertRaisesRegex(ContractError, "OBJECT_FRAME_BINDING"):
+                object_frame_context_attribute(**{**common, "resolved_job": changed})
+            preapproval_path = Path(accepted["preapproval_evidence_path"])
+            malformed = {**json.loads(preapproval_path.read_text()), "plan_envelope": []}
+            preapproval_path.write_text(json.dumps(malformed))
+            with self.assertRaises(ContractError):
+                object_frame_context_attribute(**{**common, "accepted_episode": {**accepted, "preapproval_evidence_digest": digest(malformed)}})
 
     def test_nonblocking_writer_latches_failure_without_raising(self):
         with tempfile.TemporaryDirectory() as directory:
