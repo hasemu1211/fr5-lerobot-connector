@@ -1,4 +1,3 @@
-import hashlib
 import json
 import tempfile
 import unittest
@@ -122,20 +121,11 @@ class QualityTest(unittest.TestCase):
         truncated = [self.event(3,"GOAL_ACCEPTED",100),self.event(4,"ACTION_TERMINAL",200)]
         self.assertEqual(phase_timing_attribute(run_id="run-1",resolved_job_digest=digest("job"),plan_digest=digest("plan"),events=truncated)["status"],"NOT_AVAILABLE")
 
-    def test_object_frame_context_is_static_available_and_fk_tf_fail_closed(self):
+    def test_object_frame_context_is_static_and_fk_tf_unavailable(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            urdf = root / "robot.urdf"
-            links = ["base_link", "link1", "link2", "link3", "link4", "link5", "wrist3_link"]
-            urdf.write_text("<robot name='test'>" + "".join(f"<link name='{link}'/>" for link in links) + "".join(f"<joint name='j{index}' type='{'prismatic' if index == 1 else 'revolute'}'><parent link='{links[index - 1]}'/><child link='{links[index]}'/><origin xyz='0 0 0' rpy='0 0 0'/><axis xyz='{'1 0 0' if index == 1 else '0 0 1'}'/></joint>" for index in range(1, 7)) + "</robot>")
-            urdf_digest = "sha256:" + hashlib.sha256(urdf.read_bytes()).hexdigest()
-            accepted, resolved, motion, plan_digest, bindings = self.accepted_object_context(root, urdf_digest)
-            rows = [{"target_ros_s": value / 1e9, "observation.state": [index / 100.] + [0.] * 6} for index, value in enumerate((100, 200, 300, 400, 500, 600, 700, 800))]
-            rows_digest = digest(rows)
-            events = []
-            for index, (phase, begin, end) in enumerate((("PREGRASP_PTP", 100, 200), ("APPROACH_STOP_LIN", 300, 400), ("FINAL_APPROACH_LIN", 500, 600), ("GRIPPER_CLOSE", 700, 800))):
-                events.extend((self.event(index * 2, "GOAL_ACCEPTED", begin, phase=phase, plan_digest=plan_digest), self.event(index * 2 + 1, "ACTION_TERMINAL", end, phase=phase, plan_digest=plan_digest)))
-            common = {"accepted_episode": accepted, "resolved_job": resolved, "motion_qualification": motion, "recorder_rows": rows, "recorder_rows_digest": rows_digest, "recorder_ros_clock_type": "ROS_TIME", "events": events}
+            accepted, resolved, motion, _, bindings = self.accepted_object_context(root, digest("robot-description"))
+            common = {"accepted_episode": accepted, "resolved_job": resolved, "motion_qualification": motion}
             attribute = object_frame_context_attribute(**common)
             self.assertEqual(attribute["status"], "AVAILABLE")
             self.assertEqual(attribute["metrics"]["frame_id"], "base_link")
@@ -147,60 +137,27 @@ class QualityTest(unittest.TestCase):
             self.assertEqual(attribute["source_digests"]["binding_object_profile"], bindings["object_profile"])
             self.assertEqual(attribute["metrics"]["fk_tf_metrics"], {"status": "NOT_AVAILABLE", "reason": "FK_TF_QUALIFICATION_MISSING"})
             self.assertEqual(attribute["metrics"]["post_close_object_pose"], {"status": "NOT_AVAILABLE", "reason": "POST_CLOSE_OBJECT_POSE_UNQUALIFIED"})
-            self.assertNotIn("authority", json.dumps(attribute))
-            self.assertNotIn("per_row", json.dumps(attribute))
+            serialized = json.dumps(attribute)
+            for forbidden in ("close_row_reference", "T_object_tcp_at_close", "phase_scalars", "per_row", "model", "score", "authority"):
+                self.assertNotIn(forbidden, serialized)
+            self.assertTrue({"recorder_rows", "recorder_rows_payload", "phase_events", "fk_tf_qualification"}.isdisjoint(attribute["source_digests"]))
             report = aggregate_episode_report([attribute], technical_validator={"schema_version": "data_factory.technical_validator_ref.v1", "status": "PASS", "result_digest": digest("technical-result")})
             self.assertEqual(report["attributes"], [attribute])
-            qualification = {
-                "schema_version": "data_factory.fk_tf_qualification.v1", "qualification_status": "QUALIFIED",
-                "resolved_job_digest": resolved["resolved_job_digest"], "plan_digest": plan_digest,
-                "robot_description_digest": bindings["robot_description_digest"], "tcp_digest": digest("tcp"),
-                "motion_qualification_digest": bindings["motion_qualification"], "recorder_rows_digest": rows_digest,
-                "recorder_ros_clock_type": "ROS_TIME", "phase_events_digest": digest(events), "joint_order": ["j1", "j2", "j3", "j4", "j5", "j6"],
-                "same_sample_tf_agreement": {"status": "PASS", "sample_count": 12, "position_tolerance_m": .001, "orientation_tolerance_rad": .01, "max_position_error_m": .0001, "max_orientation_error_rad": .001},
-            }
-            self.assertEqual(object_frame_context_attribute(**common, fk_tf_qualification=qualification, urdf=urdf)["metrics"]["fk_tf_metrics"], {"status": "NOT_AVAILABLE", "reason": "FK_TF_QUALIFICATION_REFERENCE_INVALID"})
-            def qualification_reference(value, name="fk_tf_qualification.json"):
-                path = root / name
-                path.write_text(json.dumps(value))
-                return {"path": path, "digest": digest(value)}
-
-            reference = qualification_reference(qualification)
-            persisted = object_frame_context_attribute(**common, fk_tf_qualification=reference, urdf=urdf)
-            self.assertEqual(persisted["metrics"]["fk_tf_metrics"], {"status": "NOT_AVAILABLE", "reason": "FK_TF_QUALIFICATION_PROVENANCE_UNAVAILABLE"})
-            self.assertEqual(persisted["source_digests"]["fk_tf_qualification"], reference["digest"])
-            self.assertNotIn("T_base_tcp", json.dumps(persisted))
-            self.assertNotIn("close_row_reference", json.dumps(persisted))
-            self.assertNotIn("phase_scalars", json.dumps(persisted))
-            accepted_qualified = {**accepted, "fk_tf_qualification_path": reference["path"], "fk_tf_qualification_digest": reference["digest"]}
-            qualified_common = {**common, "accepted_episode": accepted_qualified}
-            qualified = object_frame_context_attribute(**qualified_common, fk_tf_qualification=reference, urdf=urdf)
-            metric = qualified["metrics"]["fk_tf_metrics"]
-            self.assertEqual(metric["status"], "AVAILABLE")
-            self.assertEqual(metric["close_row_reference"], {"row_index": 7, "target_ros_s": rows[7]["target_ros_s"]})
-            for actual, expected in zip(metric["T_object_tcp_at_close"]["translation_m"], (-.04, -.22, -.3)):
-                self.assertAlmostEqual(actual, expected)
-            self.assertEqual([item["phase"] for item in metric["phase_scalars"]], ["PREGRASP_PTP", "APPROACH_STOP_LIN", "FINAL_APPROACH_LIN", "GRIPPER_CLOSE"])
-            self.assertEqual(qualified["source_digests"]["accepted_fk_tf_qualification"], reference["digest"])
-            self.assertNotIn("T_base_tcp", json.dumps(qualified))
-            mismatch = {**reference, "digest": digest("wrong")}
-            self.assertEqual(object_frame_context_attribute(**qualified_common, fk_tf_qualification=mismatch, urdf=urdf)["metrics"]["fk_tf_metrics"], {"status": "NOT_AVAILABLE", "reason": "FK_TF_QUALIFICATION_DIGEST_MISMATCH"})
+            for extension in (
+                {"fk_tf_qualification_path": root / "qualification.json", "fk_tf_qualification_digest": digest("qualification")},
+                {"fk_tf_qualification_path": root / "qualification.json"},
+                {"fk_tf_qualification_path": root / "qualification.json", "fk_tf_qualification_digest": digest("qualification"), "extra": True},
+            ):
+                with self.subTest(accepted_extension=extension), self.assertRaisesRegex(ContractError, "OBJECT_FRAME_ACCEPTED_EPISODE"):
+                    object_frame_context_attribute(**{**common, "accepted_episode": {**accepted, **extension}})
+            for name in ("job_spec", "preapproval_evidence", "technical_validator", "candidate_admission"):
+                with self.subTest(inline_source=name), self.assertRaisesRegex(ContractError, "OBJECT_FRAME_SOURCE_DIGEST"):
+                    object_frame_context_attribute(**{**common, "accepted_episode": {**accepted, f"{name}_path": Path(accepted[f"{name}_path"]).read_text()}})
             with self.assertRaisesRegex(ContractError, "OBJECT_FRAME_SOURCE_DIGEST"):
-                object_frame_context_attribute(**{**qualified_common, "accepted_episode": {**accepted_qualified, "fk_tf_qualification_digest": mismatch["digest"]}}, fk_tf_qualification=mismatch, urdf=urdf)
-            other_path_reference = qualification_reference(qualification, "other_fk_tf_qualification.json")
-            self.assertEqual(object_frame_context_attribute(**qualified_common, fk_tf_qualification=other_path_reference, urdf=urdf)["metrics"]["fk_tf_metrics"], {"status": "NOT_AVAILABLE", "reason": "FK_TF_QUALIFICATION_PROVENANCE_UNAVAILABLE"})
-            changed_rows = [{**rows[0], "observation.state": [9.] * 7}, *rows[1:]]
-            self.assertEqual(object_frame_context_attribute(**{**qualified_common, "recorder_rows": changed_rows}, fk_tf_qualification=reference, urdf=urdf)["metrics"]["fk_tf_metrics"], {"status": "NOT_AVAILABLE", "reason": "FK_TF_RECORDER_ROWS_DIGEST_MISMATCH"})
-            other_run_events = [{**event, "run_id": "run-2"} for event in events]
-            other_run_qualification = {**qualification, "phase_events_digest": digest(other_run_events)}
-            other_run_reference = qualification_reference(other_run_qualification, "other_run_qualification.json")
-            self.assertEqual(object_frame_context_attribute(**{**qualified_common, "events": other_run_events}, fk_tf_qualification=other_run_reference, urdf=urdf)["metrics"]["fk_tf_metrics"], {"status": "NOT_AVAILABLE", "reason": "FK_TF_PHASE_EVENT_BINDING_MISMATCH"})
-            other_plan_events = [{**event, "plan_digest": digest("other-plan")} for event in events]
-            other_plan_qualification = {**qualification, "phase_events_digest": digest(other_plan_events)}
-            other_plan_reference = qualification_reference(other_plan_qualification, "other_plan_qualification.json")
-            self.assertEqual(object_frame_context_attribute(**{**qualified_common, "events": other_plan_events}, fk_tf_qualification=other_plan_reference, urdf=urdf)["metrics"]["fk_tf_metrics"], {"status": "NOT_AVAILABLE", "reason": "FK_TF_PHASE_EVENT_BINDING_MISMATCH"})
-            with self.assertRaisesRegex(ContractError, "OBJECT_FRAME_ACCEPTED_EPISODE"):
-                object_frame_context_attribute(**{**qualified_common, "accepted_episode": {**accepted_qualified, "extra": True}}, fk_tf_qualification=reference, urdf=urdf)
+                object_frame_context_attribute(**{**common, "accepted_episode": {**accepted, "job_spec_digest": digest("wrong")}})
+            for key, value in (("recorder_rows", []), ("recorder_rows_digest", digest("rows")), ("recorder_ros_clock_type", "ROS_TIME"), ("events", []), ("fk_tf_qualification", {}), ("urdf", root / "robot.urdf")):
+                with self.subTest(public_fk_input=key), self.assertRaises(TypeError):
+                    object_frame_context_attribute(**common, **{key: value})
             changed = {**resolved, "input_digests": {**resolved["input_digests"], "object_profile": digest("wrong")}}
             with self.assertRaisesRegex(ContractError, "OBJECT_FRAME_BINDING"):
                 object_frame_context_attribute(**{**common, "resolved_job": changed})
@@ -263,7 +220,7 @@ class QualityTest(unittest.TestCase):
             events_path = Path(directory)/"phase_events.jsonl"
             events_path.write_text("".join(json.dumps(event)+"\n" for event in events))
             object_inputs = {"accepted_episode": {}, "resolved_job": {}, "motion_qualification": {}}
-            for key, value in (("events", []), ("recorder_rows", []), ("recorder_rows_digest", digest("other")), ("recorder_ros_clock_type", "SYSTEM_TIME")):
+            for key, value in (("events", []), ("recorder_rows", []), ("recorder_rows_digest", digest("other")), ("recorder_ros_clock_type", "SYSTEM_TIME"), ("fk_tf_qualification", {}), ("urdf", Path(directory) / "robot.urdf")):
                 with self.subTest(shared_object_input=key), self.assertRaisesRegex(ContractError, "OBJECT_FRAME_CONTEXT_INPUTS"):
                     build_episode_report(Path(directory)/"divergent.json",run_id="run-1",resolved_job_digest=job_digest,plan_digest=plan_digest,plan=plan,phase_events_path=events_path,recorder_rows=rows,recorder_rows_digest=rows_digest,recorder_ros_clock_type="ROS_TIME",execution_evidence={"grasp_verdict":"PASS","semantic_verdict":"PASS"},technical_validator=technical,stall_epsilon_rad=.001,object_frame_context_inputs={**object_inputs, key: value})
             report = build_episode_report(path,run_id="run-1",resolved_job_digest=job_digest,plan_digest=plan_digest,plan=plan,phase_events_path=events_path,recorder_rows=rows,recorder_rows_digest=rows_digest,recorder_ros_clock_type="ROS_TIME",execution_evidence={"grasp_verdict":"PASS","semantic_verdict":"PASS"},technical_validator=technical,stall_epsilon_rad=.001)

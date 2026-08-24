@@ -1,19 +1,16 @@
 """Read-only aggregation of quality attributes; never a training-admission gate."""
 from __future__ import annotations
 
-import hashlib
 import json
 import math
 import os
-import xml.etree.ElementTree as ET
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
-from tools.fr5_data_factory import ContractError, DIGEST, SAFE_ID, canonical_digest, compose_rigid_transform, inverse_rigid_transform, load_json_strict, normalize_job_spec, resolve_pose, validate_rigid_transform
+from tools.fr5_data_factory import ContractError, DIGEST, SAFE_ID, canonical_digest, load_json_strict, normalize_job_spec, resolve_pose, validate_rigid_transform
 from tools.data_factory.quality.coverage_report import CANDIDATE_FIELDS, PLAN_BINDING_DIGEST_FIELDS, RESOLVED_INPUT_DIGEST_FIELDS, STORED_EPISODE_FIELDS, TECHNICAL_FIELDS
-from tools.data_factory.quality.phase_events import validate_phase_event
-from tools.data_factory.quality.phase_metrics import ATTRIBUTE_SCHEMA, STATUS, phase_row_windows, quality_attribute
+from tools.data_factory.quality.phase_metrics import ATTRIBUTE_SCHEMA, STATUS, quality_attribute
 
 
 REPORT_SCHEMA = "data_factory.episode_quality.v1"
@@ -21,12 +18,6 @@ REPORT_KEYS = frozenset({"schema_version", "run_id", "resolved_job_digest", "pla
 ATTRIBUTE_KEYS = frozenset({"schema_version", "attribute", "run_id", "resolved_job_digest", "plan_digest", "source_digests", "status", "metrics", "flags"})
 TECHNICAL_REFERENCE_KEYS = frozenset({"schema_version", "status", "result_digest"})
 TECHNICAL_REFERENCE_SCHEMA = "data_factory.technical_validator_ref.v1"
-FK_TF_QUALIFICATION_KEYS = frozenset({"schema_version", "qualification_status", "resolved_job_digest", "plan_digest", "robot_description_digest", "tcp_digest", "motion_qualification_digest", "recorder_rows_digest", "recorder_ros_clock_type", "phase_events_digest", "joint_order", "same_sample_tf_agreement"})
-FK_TF_QUALIFICATION_REFERENCE_KEYS = frozenset({"path", "digest"})
-FK_TF_ACCEPTED_EPISODE_FIELDS = STORED_EPISODE_FIELDS | {"fk_tf_qualification_path", "fk_tf_qualification_digest"}
-FK_TF_AGREEMENT_KEYS = frozenset({"status", "sample_count", "position_tolerance_m", "orientation_tolerance_rad", "max_position_error_m", "max_orientation_error_rad"})
-OBJECT_PHASES = ("PREGRASP_PTP", "APPROACH_STOP_LIN", "FINAL_APPROACH_LIN", "GRIPPER_CLOSE")
-JOINT_ORDER = ("j1", "j2", "j3", "j4", "j5", "j6")
 
 
 def validate_attribute_record(value: Mapping[str, Any]) -> dict[str, Any]:
@@ -55,26 +46,27 @@ def _technical_reference(value: Mapping[str, Any]) -> dict[str, Any]:
 
 
 def _accepted_episode_sources(reference: Mapping[str, Any]) -> dict[str, dict[str, Any]]:
-    if not isinstance(reference, Mapping) or set(reference) not in (STORED_EPISODE_FIELDS, FK_TF_ACCEPTED_EPISODE_FIELDS) or not isinstance(reference["episode_id"], str) or not SAFE_ID.fullmatch(reference["episode_id"]):
+    if not isinstance(reference, Mapping) or set(reference) != STORED_EPISODE_FIELDS or not isinstance(reference["episode_id"], str) or not SAFE_ID.fullmatch(reference["episode_id"]):
         raise ContractError("OBJECT_FRAME_ACCEPTED_EPISODE")
     values = {}
     for name in ("job_spec", "preapproval_evidence", "technical_validator", "candidate_admission"):
         expected = reference[f"{name}_digest"]
         if not isinstance(expected, str) or not DIGEST.fullmatch(expected):
             raise ContractError("OBJECT_FRAME_SOURCE_DIGEST")
-        value = load_json_strict(reference[f"{name}_path"])
+        path = reference[f"{name}_path"]
+        try:
+            if not isinstance(path, (str, Path)) or not Path(path).is_file():
+                raise ContractError("OBJECT_FRAME_SOURCE_DIGEST")
+        except (OSError, TypeError, ValueError) as exc:
+            raise ContractError("OBJECT_FRAME_SOURCE_DIGEST") from exc
+        value = load_json_strict(Path(path))
         if canonical_digest(value) != expected:
             raise ContractError("OBJECT_FRAME_SOURCE_DIGEST")
         values[name] = value
-    if set(reference) == FK_TF_ACCEPTED_EPISODE_FIELDS:
-        qualification, _, error = _fk_tf_qualification_reference({"path": reference["fk_tf_qualification_path"], "digest": reference["fk_tf_qualification_digest"]})
-        if error is not None:
-            raise ContractError("OBJECT_FRAME_SOURCE_DIGEST")
-        values["fk_tf_qualification"] = qualification
     return values
 
 
-def _object_frame_binding(accepted_episode: Mapping[str, Any], resolved_job: Mapping[str, Any], motion_qualification: Mapping[str, Any], fk_tf_qualification: Mapping[str, Any] | None) -> tuple[dict[str, Any], dict[str, str], str, str]:
+def _object_frame_binding(accepted_episode: Mapping[str, Any], resolved_job: Mapping[str, Any], motion_qualification: Mapping[str, Any]) -> tuple[dict[str, Any], dict[str, str], str, str]:
     values = _accepted_episode_sources(accepted_episode)
     episode_id = accepted_episode["episode_id"]
     job, preapproval, technical, admission = (values[name] for name in ("job_spec", "preapproval_evidence", "technical_validator", "candidate_admission"))
@@ -185,9 +177,7 @@ def _object_frame_binding(accepted_episode: Mapping[str, Any], resolved_job: Map
     validate_rigid_transform(motion_qualification.get("datum_to_tcp_grasp"), "OBJECT_FRAME_BINDING")
     pose = resolve_pose(resolved_job)
     transform = validate_rigid_transform({"translation_m": pose["position_base_m"], "rotation_columns": pose["rotation_base_columns"]}, "OBJECT_FRAME_BINDING")
-    source_digests = {f"accepted_{name}": accepted_episode[f"{name}_digest"] for name in ("job_spec", "preapproval_evidence", "technical_validator", "candidate_admission")}
-    if "fk_tf_qualification" in values and isinstance(fk_tf_qualification, Mapping) and set(fk_tf_qualification) == FK_TF_QUALIFICATION_REFERENCE_KEYS and fk_tf_qualification["path"] == accepted_episode["fk_tf_qualification_path"] and fk_tf_qualification["digest"] == accepted_episode["fk_tf_qualification_digest"]:
-        source_digests["accepted_fk_tf_qualification"] = accepted_episode["fk_tf_qualification_digest"]
+    source_digests = {f"accepted_{name}": accepted_episode[f"{name}_digest"] for name in values}
     source_digests.update({f"binding_{key}": value for key, value in bindings.items()})
     source_digests["tcp"] = robot["tcp_digest"]
     return transform, source_digests, resolved_job["resolved_job_digest"], preapproval["plan_digest"]
@@ -197,197 +187,17 @@ def _not_available(reason: str) -> dict[str, str]:
     return {"status": "NOT_AVAILABLE", "reason": reason}
 
 
-def _fk_tf_qualification_reference(reference: Mapping[str, Any] | None) -> tuple[dict[str, Any] | None, str | None, str | None]:
-    if reference is None:
-        return None, None, "FK_TF_QUALIFICATION_MISSING"
-    if not isinstance(reference, Mapping) or set(reference) != FK_TF_QUALIFICATION_REFERENCE_KEYS or not isinstance(reference.get("path"), (str, Path)) or not isinstance(reference.get("digest"), str) or not DIGEST.fullmatch(reference["digest"]):
-        return None, None, "FK_TF_QUALIFICATION_REFERENCE_INVALID"
-    path = Path(reference["path"])
-    if not path.is_file():
-        return None, None, "FK_TF_QUALIFICATION_REFERENCE_INVALID"
-    try:
-        qualification = load_json_strict(path)
-        if canonical_digest(qualification) != reference["digest"]:
-            return None, None, "FK_TF_QUALIFICATION_DIGEST_MISMATCH"
-    except (ContractError, OSError, TypeError, ValueError):
-        return None, None, "FK_TF_QUALIFICATION_REFERENCE_INVALID"
-    return qualification, reference["digest"], None
-
-
-def _numbers(text: str | None, default: tuple[float, float, float]) -> list[float]:
-    try:
-        values = [float(value) for value in text.split()] if text is not None else list(default)
-    except (AttributeError, ValueError) as exc:
-        raise ContractError("FK_TF_URDF") from exc
-    if len(values) != 3 or any(not math.isfinite(value) for value in values):
-        raise ContractError("FK_TF_URDF")
-    return values
-
-
-def _rpy_transform(xyz: Sequence[float], rpy: Sequence[float]) -> dict[str, Any]:
-    roll, pitch, yaw = rpy
-    cr, sr, cp, sp, cy, sy = math.cos(roll), math.sin(roll), math.cos(pitch), math.sin(pitch), math.cos(yaw), math.sin(yaw)
-    rows = [[cy * cp, cy * sp * sr - sy * cr, cy * sp * cr + sy * sr], [sy * cp, sy * sp * sr + cy * cr, sy * sp * cr - cy * sr], [-sp, cp * sr, cp * cr]]
-    return {"translation_m": list(xyz), "rotation_columns": [[rows[row][column] for row in range(3)] for column in range(3)]}
-
-
-def _joint_transform(axis: Sequence[float], value: float, joint_type: str) -> dict[str, Any]:
-    length = math.sqrt(sum(component * component for component in axis))
-    if length <= 1e-12 or not math.isfinite(value):
-        raise ContractError("FK_TF_URDF")
-    x, y, z = (component / length for component in axis)
-    if joint_type == "prismatic":
-        return _rpy_transform([value * x, value * y, value * z], [0., 0., 0.])
-    cosine, sine, one_minus = math.cos(value), math.sin(value), 1 - math.cos(value)
-    rows = [[cosine + x * x * one_minus, x * y * one_minus - z * sine, x * z * one_minus + y * sine], [y * x * one_minus + z * sine, cosine + y * y * one_minus, y * z * one_minus - x * sine], [z * x * one_minus - y * sine, z * y * one_minus + x * sine, cosine + z * z * one_minus]]
-    return {"translation_m": [0., 0., 0.], "rotation_columns": [[rows[row][column] for row in range(3)] for column in range(3)]}
-
-
-def _urdf_chain(urdf: str | Path, expected_digest: str, tool_link: str) -> list[tuple[str, str, dict[str, Any], list[float]]]:
-    try:
-        data = Path(urdf).read_bytes()
-        root = ET.fromstring(data)
-    except (OSError, ET.ParseError, TypeError, ValueError) as exc:
-        raise ContractError("FK_TF_URDF") from exc
-    if "sha256:" + hashlib.sha256(data).hexdigest() != expected_digest or root.tag != "robot":
-        raise ContractError("FK_TF_URDF")
-    by_child = {}
-    for joint in root.findall("joint"):
-        parent, child = joint.find("parent"), joint.find("child")
-        if parent is None or child is None or "link" not in parent.attrib or "link" not in child.attrib or child.attrib["link"] in by_child:
-            raise ContractError("FK_TF_URDF")
-        origin, axis = joint.find("origin"), joint.find("axis")
-        transform = _rpy_transform(_numbers(origin.get("xyz") if origin is not None else None, (0., 0., 0.)), _numbers(origin.get("rpy") if origin is not None else None, (0., 0., 0.)))
-        by_child[child.attrib["link"]] = (parent.attrib["link"], joint.get("name") or "", joint.get("type") or "", transform, _numbers(axis.get("xyz") if axis is not None else None, (1., 0., 0.)))
-    chain, child, seen = [], tool_link, set()
-    while child != "base_link":
-        if child in seen or child not in by_child:
-            raise ContractError("FK_TF_URDF")
-        seen.add(child)
-        parent, name, joint_type, origin, axis = by_child[child]
-        if joint_type not in {"fixed", "revolute", "continuous", "prismatic"}:
-            raise ContractError("FK_TF_URDF")
-        chain.append((name, joint_type, origin, axis))
-        child = parent
-    chain.reverse()
-    if tuple(name for name, joint_type, _, _ in chain if joint_type != "fixed") != JOINT_ORDER:
-        raise ContractError("FK_TF_URDF")
-    return chain
-
-
-def _base_tcp_rows(*, urdf: str | Path, robot_description_digest: str, tool_link: str, tool_to_tcp: Mapping[str, Any], recorder_rows: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
-    chain = _urdf_chain(urdf, robot_description_digest, tool_link)
-    tcp = validate_rigid_transform(tool_to_tcp, "FK_TF_TCP")
-    transforms = []
-    for row in recorder_rows:
-        state = row.get("observation.state") if isinstance(row, Mapping) else None
-        if not isinstance(state, Sequence) or isinstance(state, (str, bytes)) or len(state) < len(JOINT_ORDER):
-            raise ContractError("FK_TF_RECORDER_ROW")
-        values = {name: value for name, value in zip(JOINT_ORDER, state)}
-        transform = _rpy_transform([0., 0., 0.], [0., 0., 0.])
-        for name, joint_type, origin, axis in chain:
-            transform = compose_rigid_transform(transform, origin)
-            if joint_type != "fixed":
-                value = values[name]
-                if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
-                    raise ContractError("FK_TF_RECORDER_ROW")
-                transform = compose_rigid_transform(transform, _joint_transform(axis, float(value), joint_type))
-        transforms.append(compose_rigid_transform(transform, tcp))
-    return transforms
-
-
-def _fk_tf_metrics(*, qualification: Mapping[str, Any] | None, qualification_digest: str | None, qualification_error: str | None, urdf: str | Path | None, motion_qualification: Mapping[str, Any], recorder_rows: Sequence[Mapping[str, Any]], recorder_rows_digest: str, recorder_ros_clock_type: str, events: Sequence[Mapping[str, Any]], object_transform: Mapping[str, Any], run_id: str, resolved_job_digest: str, plan_digest: str, source_digests: Mapping[str, str]) -> dict[str, Any]:
-    if qualification_error is not None:
-        return _not_available(qualification_error)
-    if not isinstance(qualification, Mapping) or set(qualification) != FK_TF_QUALIFICATION_KEYS or qualification.get("schema_version") != "data_factory.fk_tf_qualification.v1":
-        return _not_available("FK_TF_QUALIFICATION_INVALID")
-    if qualification.get("qualification_status") != "QUALIFIED":
-        return _not_available("FK_TF_QUALIFICATION_NOT_QUALIFIED")
-    try:
-        parsed_rows = list(recorder_rows)
-        if any(not isinstance(row, Mapping) for row in parsed_rows):
-            return _not_available("FK_TF_RECORDER_ROW_INVALID")
-        recorder_rows_payload_digest = canonical_digest(parsed_rows)
-    except (ContractError, TypeError, ValueError):
-        return _not_available("FK_TF_RECORDER_ROW_INVALID")
-    if not isinstance(recorder_rows_digest, str) or not DIGEST.fullmatch(recorder_rows_digest) or recorder_rows_payload_digest != recorder_rows_digest:
-        return _not_available("FK_TF_RECORDER_ROWS_DIGEST_MISMATCH")
-    try:
-        parsed_events = [validate_phase_event(event) for event in events]
-        phase_events_digest = canonical_digest(parsed_events)
-    except (ContractError, TypeError, ValueError):
-        return _not_available("FK_TF_PHASE_EVENTS_INVALID")
-    if any(event["run_id"] != run_id or event["plan_digest"] != plan_digest for event in parsed_events):
-        return _not_available("FK_TF_PHASE_EVENT_BINDING_MISMATCH")
-    try:
-        expected = {
-            "resolved_job_digest": resolved_job_digest, "plan_digest": plan_digest,
-            "robot_description_digest": source_digests["binding_robot_description_digest"], "tcp_digest": source_digests["tcp"],
-            "motion_qualification_digest": source_digests["binding_motion_qualification"], "recorder_rows_digest": recorder_rows_digest,
-            "recorder_ros_clock_type": recorder_ros_clock_type,
-            "phase_events_digest": phase_events_digest, "joint_order": list(JOINT_ORDER),
-        }
-    except (ContractError, KeyError, TypeError, ValueError):
-        return _not_available("FK_TF_QUALIFICATION_BINDING_MISMATCH")
-    if any(qualification.get(key) != value for key, value in expected.items()):
-        return _not_available("FK_TF_QUALIFICATION_BINDING_MISMATCH")
-    agreement = qualification.get("same_sample_tf_agreement")
-    if not isinstance(agreement, Mapping) or set(agreement) != FK_TF_AGREEMENT_KEYS:
-        return _not_available("FK_TF_QUALIFICATION_INVALID")
-    numbers = [agreement[key] for key in ("position_tolerance_m", "orientation_tolerance_rad", "max_position_error_m", "max_orientation_error_rad")]
-    if agreement.get("status") != "PASS" or isinstance(agreement.get("sample_count"), bool) or not isinstance(agreement.get("sample_count"), int) or any(isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) for value in numbers):
-        return _not_available("FK_TF_AGREEMENT_NOT_QUALIFIED")
-    if agreement["sample_count"] <= 0 or numbers[0] <= 0 or numbers[1] <= 0 or numbers[2] < 0 or numbers[3] < 0 or numbers[2] > numbers[0] or numbers[3] > numbers[1]:
-        return _not_available("FK_TF_AGREEMENT_NOT_QUALIFIED")
-    if source_digests.get("accepted_fk_tf_qualification") != qualification_digest:
-        return _not_available("FK_TF_QUALIFICATION_PROVENANCE_UNAVAILABLE")
-    if urdf is None:
-        return _not_available("FK_TF_QUALIFICATION_BINDING_MISMATCH")
-    try:
-        windows, flags, _ = phase_row_windows(events=parsed_events, recorder_rows=parsed_rows, recorder_ros_clock_type=recorder_ros_clock_type)
-    except (ContractError, KeyError, TypeError, ValueError):
-        return _not_available("FK_TF_PHASE_ROWS_NOT_AVAILABLE")
-    selected = [window for phase in OBJECT_PHASES for window in windows if window["phase"] == phase]
-    if flags or len(selected) != len(OBJECT_PHASES) or any(not window["row_indices"] for window in selected):
-        return _not_available("FK_TF_PHASE_ROWS_NOT_AVAILABLE")
-    indices = sorted({index for window in selected for index in window["row_indices"]})
-    try:
-        parsed = dict(zip(indices, _base_tcp_rows(urdf=urdf, robot_description_digest=qualification["robot_description_digest"], tool_link=motion_qualification["frames"]["tool_link"], tool_to_tcp=motion_qualification["tool_to_tcp"], recorder_rows=[parsed_rows[index] for index in indices])))
-    except ContractError as exc:
-        return _not_available("FK_TF_QUALIFICATION_BINDING_MISMATCH" if exc.code in {"FK_TF_URDF", "FK_TF_TCP"} else "FK_TF_SAMPLE_BINDING_MISMATCH")
-    inverse_object = inverse_rigid_transform(object_transform)
-    object_tcp = {index: compose_rigid_transform(inverse_object, transform) for index, transform in parsed.items()}
-    scalars = []
-    for phase, window in zip(OBJECT_PHASES, selected):
-        indices = window["row_indices"]
-        path_m = sum(math.dist(object_tcp[left]["translation_m"], object_tcp[right]["translation_m"]) for left, right in zip(indices, indices[1:]))
-        scalars.append({"phase": phase, "start_row_index": indices[0], "end_row_index": indices[-1], "tcp_translation_path_m": path_m})
-    close_index = selected[-1]["row_indices"][-1]
-    return {"status": "AVAILABLE", "close_row_reference": {"row_index": close_index, "target_ros_s": parsed_rows[close_index]["target_ros_s"]}, "T_object_tcp_at_close": object_tcp[close_index], "phase_scalars": scalars}
-
-
-def object_frame_context_attribute(*, accepted_episode: Mapping[str, Any], resolved_job: Mapping[str, Any], motion_qualification: Mapping[str, Any], recorder_rows: Sequence[Mapping[str, Any]], recorder_rows_digest: str, recorder_ros_clock_type: str, events: Sequence[Mapping[str, Any]], fk_tf_qualification: Mapping[str, Any] | None = None, urdf: str | Path | None = None) -> dict[str, Any]:
-    """Build declared static Object–EE context; per-row FK transforms stay transient."""
-    transform, source_digests, resolved_job_digest, plan_digest = _object_frame_binding(accepted_episode, resolved_job, motion_qualification, fk_tf_qualification)
-    if isinstance(recorder_rows_digest, str) and DIGEST.fullmatch(recorder_rows_digest):
-        source_digests["recorder_rows"] = recorder_rows_digest
-    try:
-        source_digests["recorder_rows_payload"] = canonical_digest(list(recorder_rows))
-        source_digests["phase_events"] = canonical_digest([validate_phase_event(event) for event in events])
-    except (ContractError, TypeError, ValueError):
-        pass
-    qualification, qualification_digest, qualification_error = _fk_tf_qualification_reference(fk_tf_qualification)
-    if qualification_digest is not None:
-        source_digests["fk_tf_qualification"] = qualification_digest
-    fk_metrics = _fk_tf_metrics(qualification=qualification, qualification_digest=qualification_digest, qualification_error=qualification_error, urdf=urdf, motion_qualification=motion_qualification, recorder_rows=recorder_rows, recorder_rows_digest=recorder_rows_digest, recorder_ros_clock_type=recorder_ros_clock_type, events=events, object_transform=transform, run_id=accepted_episode["episode_id"], resolved_job_digest=resolved_job_digest, plan_digest=plan_digest, source_digests=source_digests)
+def object_frame_context_attribute(*, accepted_episode: Mapping[str, Any], resolved_job: Mapping[str, Any], motion_qualification: Mapping[str, Any]) -> dict[str, Any]:
+    """Build declared static Object context without unowned FK/TF claims."""
+    transform, source_digests, resolved_job_digest, plan_digest = _object_frame_binding(accepted_episode, resolved_job, motion_qualification)
+    fk_metrics = _not_available("FK_TF_QUALIFICATION_MISSING")
     metrics = {
         "frame_id": "base_link", "object_datum": "center", "pose_source": "A4_CALIBRATION_AND_JOB",
         "truth_scope": "DECLARED_STATIC_PREGRASP_TO_CLOSE", "pose_observation": "DECLARED_PLACEMENT_NOT_CAMERA_OBSERVED_ACTUAL_TRUTH",
         "T_base_object_datum_at_begin": transform, "fk_tf_metrics": fk_metrics,
         "post_close_object_pose": _not_available("POST_CLOSE_OBJECT_POSE_UNQUALIFIED"),
     }
-    flags = [] if fk_metrics["status"] == "AVAILABLE" else [fk_metrics["reason"]]
-    return quality_attribute(attribute="object_frame_context", run_id=accepted_episode["episode_id"], resolved_job_digest=resolved_job_digest, plan_digest=plan_digest, source_digests=source_digests, status="AVAILABLE", metrics=metrics, flags=flags)
+    return quality_attribute(attribute="object_frame_context", run_id=accepted_episode["episode_id"], resolved_job_digest=resolved_job_digest, plan_digest=plan_digest, source_digests=source_digests, status="AVAILABLE", metrics=metrics, flags=[fk_metrics["reason"]])
 
 
 def aggregate_episode_report(attributes: Sequence[Mapping[str, Any]], *, technical_validator: Mapping[str, Any]) -> dict[str, Any]:
@@ -457,8 +267,7 @@ def build_episode_report(
     events = read_phase_events(phase_events_path)
     if object_frame_context_inputs is not None:
         required = {"accepted_episode", "resolved_job", "motion_qualification"}
-        allowed = required | {"fk_tf_qualification", "urdf"}
-        if not isinstance(object_frame_context_inputs, Mapping) or not required <= set(object_frame_context_inputs) <= allowed:
+        if not isinstance(object_frame_context_inputs, Mapping) or set(object_frame_context_inputs) != required:
             raise ContractError("OBJECT_FRAME_CONTEXT_INPUTS")
     common = {"run_id": run_id, "resolved_job_digest": resolved_job_digest, "plan_digest": plan_digest}
     row_common = {**common, "plan": plan, "events": events, "recorder_rows": recorder_rows, "recorder_rows_digest": recorder_rows_digest, "recorder_ros_clock_type": recorder_ros_clock_type}
@@ -469,7 +278,7 @@ def build_episode_report(
         interaction_quality_attribute(**row_common, execution_evidence=execution_evidence),
     ]
     if object_frame_context_inputs is not None:
-        attributes.append(object_frame_context_attribute(**object_frame_context_inputs, recorder_rows=recorder_rows, recorder_rows_digest=recorder_rows_digest, recorder_ros_clock_type=recorder_ros_clock_type, events=events))
+        attributes.append(object_frame_context_attribute(**object_frame_context_inputs))
     report = aggregate_episode_report(attributes, technical_validator=technical_validator)
     write_episode_report(path, report)
     return report
