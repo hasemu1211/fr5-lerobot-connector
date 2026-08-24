@@ -132,6 +132,67 @@ class SceneStateTest(unittest.TestCase):
             )["scene_state"]
             self.assertEqual((uncertain["objects"]["cube-1"]["state"], uncertain["slot_allocations"][second_slot["slot_id"]]["state"]), ("UNKNOWN", "QUARANTINED"))
 
+    def test_chain_release_is_consumed_once_by_the_exact_next_run(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "outputs/data_factory/cells"
+            store = scene_state.SceneStateStore(root, "fr5-lab-a")
+            start = store.update_object(
+                instance_id="cube-1", object_profile_id="wood-cube-25mm-r001", state="ON_SURFACE",
+                pose={"place_id": "place-a", "yaw_deg": 0, "x_mm": -60, "y_mm": 0},
+                source="HUMAN", updated_by="project-owner", expected_revision=0,
+            )
+            slot = scene_state.release_slot(
+                robot_system_id="fr5-lab-a",
+                pose={"place_id": "place-a", "yaw_deg": 0, "x_mm": 0, "y_mm": 0},
+                object_profile_id="wood-cube-25mm-r001", exclusion_geometry_digest="sha256:" + "e" * 64,
+                role="DESTINATION_THEN_NEXT_SOURCE",
+            )
+            terminals = ["RECYCLE_APPROACH_PTP", "LOWER_LIN", "GRIPPER_OPEN", "RETREAT_LIN", "SAFE_POSE_PTP"]
+            evidence = {
+                "schema_version": "data_factory.recycle_release_evidence.v1", "run_id": "run-1",
+                "plan_digest": "sha256:" + "a" * 64, "release_slot_id": slot["slot_id"],
+                "expected_scene_state_digest": start["scene_state_digest"],
+                "expected_scene_revision": start["scene_state"]["revision"],
+                "gripper_reference_m": 0.021, "gripper_feedback_m": 0.021,
+                "terminal_phases": terminals, "post_retreat_snapshot_digest": "sha256:" + "4" * 64,
+                "next_start_tolerance_rad": 0.01, "human_verdict": "LANDED",
+            }
+            with self.assertRaisesRegex(ContractError, "SCENE_SLOT_NEXT_RUN"):
+                store.transition_release(
+                    instance_id="cube-1", release_slot=slot, evidence=evidence,
+                    updated_by="pickup-executor", expected_digest=start["scene_state_digest"],
+                    expected_revision=start["scene_state"]["revision"],
+                )
+
+            landed = store.transition_release(
+                instance_id="cube-1", release_slot=slot, evidence=evidence,
+                updated_by="pickup-executor", expected_digest=start["scene_state_digest"],
+                expected_revision=start["scene_state"]["revision"], allowed_next_run_id="run-2",
+            )
+            slot_value = landed["scene_state"]["slot_allocations"][slot["slot_id"]]
+            self.assertEqual((slot_value["state"], slot_value["role"], slot_value["allowed_run_id"]), ("LANDED_FOR_NEXT_SOURCE", "DESTINATION_THEN_NEXT_SOURCE", "run-2"))
+            with self.assertRaisesRegex(ContractError, "SCENE_SLOT_CHANGED"):
+                store.consume_next_source(
+                    slot_id=slot["slot_id"], run_id="run-2",
+                    expected_scene_digest=landed["scene_state_digest"], expected_slot_digest="sha256:" + "9" * 64,
+                )
+            with self.assertRaisesRegex(ContractError, "SCENE_SLOT_NEXT_RUN"):
+                store.consume_next_source(
+                    slot_id=slot["slot_id"], run_id="run-3",
+                    expected_scene_digest=landed["scene_state_digest"], expected_slot_digest=canonical_digest(slot_value),
+                )
+            consumed = store.consume_next_source(
+                slot_id=slot["slot_id"], run_id="run-2",
+                expected_scene_digest=landed["scene_state_digest"], expected_slot_digest=canonical_digest(slot_value),
+            )
+            self.assertEqual(consumed["scene_state"]["slot_allocations"][slot["slot_id"]]["state"], "CONSUMED_PENDING_REVIEW")
+            with self.assertRaisesRegex(ContractError, "SCENE_SLOT_NEXT_RUN"):
+                store.consume_next_source(
+                    slot_id=slot["slot_id"], run_id="run-2",
+                    expected_scene_digest=consumed["scene_state_digest"],
+                    expected_slot_digest=canonical_digest(consumed["scene_state"]["slot_allocations"][slot["slot_id"]]),
+                )
+
 
 if __name__ == "__main__":
     unittest.main()

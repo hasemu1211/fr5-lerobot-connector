@@ -360,6 +360,7 @@ class FR5LeRobotRecorder(Node):
         path = Path(monitor["begin"]["encoder_temp"]["path"])
         device = str(monitor["begin"]["encoder_temp"]["device"])
         stop = threading.Event()
+        sampled = threading.Event()
 
         def probe() -> None:
             while not stop.is_set():
@@ -370,10 +371,16 @@ class FR5LeRobotRecorder(Node):
                     )
                 except OSError:
                     pass
+                finally:
+                    sampled.set()
                 stop.wait(0.01)
 
         thread = threading.Thread(target=probe, name="fr5-encoder-temp-probe", daemon=True)
         thread.start()
+        if not sampled.wait(1.0):
+            stop.set()
+            thread.join(1.0)
+            raise RuntimeError("encoder temp probe startup timed out")
         return stop, thread
 
     @staticmethod

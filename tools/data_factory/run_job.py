@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import copy
+import fcntl
 import json
 import math
+import os
 import queue
 import subprocess
 import sys
@@ -30,12 +32,14 @@ from tools.fr5_data_factory import (
     bounded_place_coordinate,
     canonical_digest,
     load_json_strict,
+    normalize_job_spec,
     resolve_motion_program,
     validate_job_spec,
 )
 
 
 COMMAND_SCHEMA = "data_factory.run_job.command.v1"
+CAMPAIGN_SCHEMA = "data_factory.campaign.v1"
 RESPONSE_SCHEMA = "data_factory.run_job.response.v1"
 EVENT_SCHEMA = "data_factory.run_job.event.v1"
 CONTROL_QUEUE_MAX = 32
@@ -53,6 +57,14 @@ RECYCLE_COORD_KEYS = {"recycle_x_mm", "recycle_y_mm"}
 LIVE_RUN_KEYS = COMMON_RUN_KEYS | {"camera_profile", "dataset_root", "run_root"}
 RESPONSE_KEYS = {"schema_version", "op_id", "op", "ok", "code", "state", "run_id", "plan_digest", "data"}
 EVENT_KEYS = {"schema_version", "event", "sequence", "origin_op_id", "ok", "code", "state", "run_id", "plan_digest", "data"}
+CANDIDATE_ADMISSION_KEYS = {
+    "schema_version", "run_id", "operational_gate", "operational_source", "checklist_id",
+    "review_context_digest", "semantic_status", "reviewed_by", "reviewed_at", "reason",
+}
+REVIEW_REASONS = (
+    "WRONG_OBJECT_OR_START", "GRASP_OR_LIFT", "TRAJECTORY_FLOW", "TASK_GOAL",
+    "UNMODELED_CONTACT", "RELEASE_SCENE", "UNKNOWN",
+)
 ROOT = Path(__file__).resolve().parents[2]
 DATA_PYTHON = str(ROOT / ".venv/bin/python")
 
@@ -122,6 +134,43 @@ def _run_payload(value):
     return copy.deepcopy(value)
 
 
+def _campaign_manifest(value):
+    _exact(value, {"schema_version", "campaign_id", "max_episodes", "episodes"}, "CAMPAIGN_SCHEMA")
+    if value["schema_version"] != CAMPAIGN_SCHEMA or value["max_episodes"] != 2 or not isinstance(value["episodes"], list) or len(value["episodes"]) != 2:
+        raise ContractError("CAMPAIGN_SCHEMA")
+    campaign_id = _identifier(value["campaign_id"], "CAMPAIGN_SCHEMA")
+    episodes = []
+    for index, item in enumerate(value["episodes"]):
+        _exact(item, {"run", "release_role"}, "CAMPAIGN_EPISODE")
+        expected_role = "DESTINATION_THEN_NEXT_SOURCE" if index == 0 else "RELEASE_DESTINATION"
+        if item["release_role"] != expected_role:
+            raise ContractError("CAMPAIGN_EPISODE")
+        run = _run_payload(item["run"])
+        if run["mode"] != "live" or not RECYCLE_COORD_KEYS <= set(run):
+            raise ContractError("CAMPAIGN_EPISODE")
+        run["job"] = normalize_job_spec(run["job"])
+        if run["job"]["job_id"] != run["run_id"] or run["job"]["robot_system_id"] != run["expected_robot_system_id"]:
+            raise ContractError("CAMPAIGN_EPISODE")
+        episodes.append({"run": run, "release_role": expected_role})
+    first, second = (item["run"] for item in episodes)
+    if first["run_id"] == second["run_id"] or any(first[key] != second[key] for key in LIVE_RUN_KEYS - {"run_id", "job"}):
+        raise ContractError("CAMPAIGN_CHAIN")
+    fixed_job = ("robot_system_id", "collection_profile_id", "place_id", "cell_calibration_id", "object_profile_id", "grasp_profile_id")
+    if any(first["job"][key] != second["job"][key] for key in fixed_job) or any(
+        first[recycle] != second["job"][coordinate]
+        for recycle, coordinate in (("recycle_x_mm", "x_mm"), ("recycle_y_mm", "y_mm"))
+    ):
+        raise ContractError("CAMPAIGN_CHAIN")
+    poses = {
+        (first["job"]["x_mm"], first["job"]["y_mm"]),
+        (first["recycle_x_mm"], first["recycle_y_mm"]),
+        (second["recycle_x_mm"], second["recycle_y_mm"]),
+    }
+    if len(poses) != 3:
+        raise ContractError("CAMPAIGN_CHAIN")
+    return {"schema_version": CAMPAIGN_SCHEMA, "campaign_id": campaign_id, "max_episodes": 2, "episodes": episodes}
+
+
 def _command(value):
     _exact(value, COMMAND_KEYS, "COMMAND_SCHEMA")
     if value["schema_version"] != COMMAND_SCHEMA:
@@ -151,8 +200,9 @@ def _load(path, code):
         raise ContractError(code, str(exc)) from exc
 
 
-def _scene_binding(validated, release_pose, root=ROOT / "outputs/data_factory/cells"):
+def _scene_binding(validated, release_pose, run_id, root=ROOT / "outputs/data_factory/cells"):
     job = validated["normalized_job"]
+    run_id = _identifier(run_id, "SCENE_SLOT_NEXT_RUN")
     snapshot = SceneStateStore(root, job["robot_system_id"]).snapshot()
     pose = {key: job[key] for key in ("place_id", "yaw_deg", "x_mm", "y_mm")}
     matches = [
@@ -163,24 +213,45 @@ def _scene_binding(validated, release_pose, root=ROOT / "outputs/data_factory/ce
     ]
     if len(matches) != 1:
         raise ContractError("SCENE_OBJECT_NOT_READY" if not matches else "SCENE_OBJECT_AMBIGUOUS")
+    exclusion_geometry_digest = canonical_digest({
+        "shape": "BOX",
+        "dimensions_mm": validated["object_profile"]["dimensions_mm"],
+    })
     slot = release_slot(
         robot_system_id=job["robot_system_id"],
         pose=release_pose,
         object_profile_id=job["object_profile_id"],
-        exclusion_geometry_digest=canonical_digest({
-            "shape": "BOX",
-            "dimensions_mm": validated["object_profile"]["dimensions_mm"],
-        }),
+        exclusion_geometry_digest=exclusion_geometry_digest,
     )
     allocation = snapshot["scene_state"].get("slot_allocations", {}).get(slot["slot_id"])
     if allocation is not None and allocation.get("state") not in {"AVAILABLE", "LANDED_FOR_NEXT_SOURCE"}:
         raise ContractError("SCENE_SLOT_NOT_READY")
-    return {
+    binding = {
         "scene_state_digest": snapshot["scene_state_digest"],
         "revision": snapshot["scene_state"]["revision"],
         "object_instance_id": matches[0]["instance_id"],
         "release_slot": slot,
     }
+    if matches[0].get("source") == "ROBOT_RELEASE":
+        source_slot = release_slot(
+            robot_system_id=job["robot_system_id"], pose=pose,
+            object_profile_id=job["object_profile_id"],
+            exclusion_geometry_digest=exclusion_geometry_digest,
+        )
+        source_allocation = snapshot["scene_state"].get("slot_allocations", {}).get(source_slot["slot_id"])
+        if (
+            not isinstance(source_allocation, dict)
+            or source_allocation.get("state") != "LANDED_FOR_NEXT_SOURCE"
+            or source_allocation.get("role") != "DESTINATION_THEN_NEXT_SOURCE"
+            or source_allocation.get("allowed_run_id") != run_id
+        ):
+            raise ContractError("SCENE_SLOT_NEXT_RUN")
+        binding["source_slot"] = {
+            "slot_id": source_slot["slot_id"],
+            "slot_digest": canonical_digest(source_allocation),
+            "allowed_run_id": run_id,
+        }
+    return binding
 
 
 def resolve_inputs(payload, *, scene_binding_call=_scene_binding):
@@ -204,7 +275,7 @@ def resolve_inputs(payload, *, scene_binding_call=_scene_binding):
         expected_robot_system_id=payload["expected_robot_system_id"],
         release_pose=release_pose,
     )
-    return validated, program, scene_binding_call(validated, release_pose)
+    return validated, program, scene_binding_call(validated, release_pose, payload["run_id"])
 
 
 def _executor(timeout_s):
@@ -399,6 +470,34 @@ def _operator_summary(result):
     return copy.deepcopy(summary)
 
 
+def _recover_quality_rejected_recycle(result, summary, cell_store, operator_id, payload, plan_digest):
+    execution = result.get("execution_evidence")
+    release_evidence = execution.get("release_evidence") if isinstance(execution, dict) else None
+    transition = execution.get("scene_transition") if isinstance(execution, dict) else None
+    if (
+        result.get("code") != "QUALITY_REJECTED"
+        or result.get("state") != "ABORTED"
+        or result.get("executor_state") != "COMPLETED"
+        or result.get("recorder_state") != "ABORTED"
+        or not isinstance(summary.get("recycle"), dict)
+        or not isinstance(release_evidence, dict)
+        or release_evidence.get("human_verdict") != "LANDED"
+        or release_evidence.get("release_slot_id") != summary["recycle"]["release_slot_id"]
+        or not isinstance(transition, dict)
+        or not isinstance(transition.get("scene_state_digest"), str)
+        or not DIGEST.fullmatch(transition["scene_state_digest"])
+        or transition.get("release_evidence_digest") != canonical_digest(release_evidence)
+        or result.get("frozen_rows") != result.get("rows_after_recycle")
+    ):
+        raise ContractError("RECYCLE_EVIDENCE")
+    cell = cell_store.read()
+    if cell.get("cell_ready") is not False or cell.get("run_id") != payload["run_id"] or cell.get("plan_digest") != plan_digest:
+        raise ContractError("POSTREJECT_CELL_STATE")
+    return transition["scene_state_digest"], cell_store.acknowledge_ready(
+        operator_id, expected_run_id=payload["run_id"], expected_plan_digest=plan_digest,
+    )
+
+
 def _technical_validator(dataset_root, _payload, profile):
     command = [DATA_PYTHON, str(ROOT / "tools/validate_lerobot_dataset.py"), dataset_root, "--expected-fps", str(profile["fps"]), "--require-hil-motion"]
     completed = subprocess.run(
@@ -500,6 +599,152 @@ def _write_validator_reference(payload, validated, plan_digest, profile, technic
     }
     write_json_atomic(run_dir / "technical_validator.json", reference)
     return reference
+
+
+def _write_candidate_admission(payload, validated, technical_reference):
+    if technical_reference.get("status") != "PASS":
+        raise ContractError("CANDIDATE_ADMISSION_TECHNICAL_PASS")
+    admission = {
+        "schema_version": "data_factory.candidate_admission.v1",
+        "run_id": payload["run_id"],
+        "operational_gate": "PASS",
+        "operational_source": "HUMAN_GATED",
+        "checklist_id": "pickup-v2",
+        "review_context_digest": canonical_digest({
+            "run_id": payload["run_id"],
+            "resolved_job_digest": validated["resolved_job_digest"],
+            "plan_digest": technical_reference["plan_digest"],
+            "technical_validator_digest": canonical_digest(technical_reference),
+        }),
+        "semantic_status": "PENDING",
+        "reviewed_by": None,
+        "reviewed_at": None,
+        "reason": None,
+    }
+    write_json_atomic(_run_dir(payload) / "candidate_admission.json", admission)
+    return admission
+
+
+def review_candidate_admission(
+    path, *, expected_file_digest, expected_review_context_digest, checklist_id,
+    semantic_status, reviewed_by, reason=None, clock=lambda: datetime.now(timezone.utc),
+):
+    """Atomically consume one exact pending candidate review."""
+    path = Path(path)
+    if (
+        path.name != "candidate_admission.json"
+        or not isinstance(expected_file_digest, str) or not DIGEST.fullmatch(expected_file_digest)
+        or not isinstance(expected_review_context_digest, str) or not DIGEST.fullmatch(expected_review_context_digest)
+        or checklist_id != "pickup-v2"
+        or semantic_status not in {"PASS", "FAIL", "UNCERTAIN"}
+        or not isinstance(reviewed_by, str) or reviewed_by == "HUMAN" or not SAFE_ID.fullmatch(reviewed_by)
+        or (semantic_status == "PASS" and reason is not None)
+        or (semantic_status != "PASS" and reason not in REVIEW_REASONS)
+    ):
+        raise ContractError("CANDIDATE_REVIEW_SCHEMA")
+    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(path.parent, flags)
+    except OSError as exc:
+        raise ContractError("CANDIDATE_REVIEW_PATH") from exc
+    try:
+        fcntl.flock(descriptor, fcntl.LOCK_EX)
+        if path.is_symlink() or not path.is_file():
+            raise ContractError("CANDIDATE_REVIEW_PATH")
+        current = _load(path, "CANDIDATE_REVIEW_IO")
+        if canonical_digest(current) != expected_file_digest:
+            raise ContractError("CANDIDATE_REVIEW_FILE_CHANGED")
+        if (
+            not isinstance(current, dict) or set(current) != CANDIDATE_ADMISSION_KEYS
+            or current.get("schema_version") != "data_factory.candidate_admission.v1"
+            or not isinstance(current.get("run_id"), str) or not SAFE_ID.fullmatch(current["run_id"])
+            or current.get("operational_gate") != "PASS"
+            or current.get("operational_source") not in {"HUMAN_GATED", "HIL_PROXY"}
+            or current.get("checklist_id") != checklist_id
+            or current.get("review_context_digest") != expected_review_context_digest
+            or current.get("semantic_status") != "PENDING"
+            or any(current.get(key) is not None for key in ("reviewed_by", "reviewed_at", "reason"))
+        ):
+            raise ContractError("CANDIDATE_REVIEW_STATE")
+        reviewed_at = clock()
+        if not isinstance(reviewed_at, datetime) or reviewed_at.tzinfo is None or reviewed_at.utcoffset() is None:
+            raise ContractError("CANDIDATE_REVIEW_TIME")
+        updated = {
+            **current, "semantic_status": semantic_status, "reviewed_by": reviewed_by,
+            "reviewed_at": reviewed_at.astimezone(timezone.utc).isoformat().replace("+00:00", "Z"),
+            "reason": reason,
+        }
+        write_json_atomic(path, updated)
+        return updated
+    finally:
+        os.close(descriptor)
+
+
+def _campaign_candidate_reviews(campaign, tty_decision=_tty_decision):
+    """Review campaign candidates after their live calls have returned and closed children."""
+    reviews = []
+    review_enabled = True
+    for index, episode in enumerate(campaign["episodes"], 1):
+        run = episode["run"]
+        run_dir = _run_dir(run)
+        path = run_dir / "candidate_admission.json"
+        technical = _load(run_dir / "technical_validator.json", "CANDIDATE_REVIEW_IO")
+        expected_context = canonical_digest({
+            "run_id": run["run_id"],
+            "resolved_job_digest": technical.get("resolved_job_digest"),
+            "plan_digest": technical.get("plan_digest"),
+            "technical_validator_digest": canonical_digest(technical),
+        })
+        current = _load(path, "CANDIDATE_REVIEW_IO")
+        current_digest = canonical_digest(current)
+        pending = current.get("semantic_status") == "PENDING" if isinstance(current, dict) else False
+        passed = current.get("semantic_status") == "PASS" if isinstance(current, dict) else False
+        if (
+            not isinstance(current, dict) or set(current) != CANDIDATE_ADMISSION_KEYS
+            or current.get("schema_version") != "data_factory.candidate_admission.v1"
+            or current.get("run_id") != run["run_id"]
+            or current.get("operational_gate") != "PASS"
+            or current.get("operational_source") not in {"HUMAN_GATED", "HIL_PROXY"}
+            or current.get("checklist_id") != "pickup-v2"
+            or current.get("review_context_digest") != expected_context
+            or current.get("semantic_status") not in {"PENDING", "PASS", "FAIL", "UNCERTAIN"}
+            or pending and any(current.get(key) is not None for key in ("reviewed_by", "reviewed_at", "reason"))
+            or not pending and (
+                not isinstance(current.get("reviewed_by"), str)
+                or current["reviewed_by"] == "HUMAN"
+                or not SAFE_ID.fullmatch(current["reviewed_by"])
+                or not isinstance(current.get("reviewed_at"), str)
+                or not current["reviewed_at"]
+            )
+            or passed and current.get("reason") is not None
+            or not pending and not passed and current.get("reason") not in REVIEW_REASONS
+        ):
+            raise ContractError("CANDIDATE_REVIEW_STATE")
+        if pending and review_enabled:
+            try:
+                decision = tty_decision(
+                    f"Review episode {index}/2 run={run['run_id']} technical={technical.get('status')} evidence={run_dir}",
+                    ("PASS", "FAIL", "UNCERTAIN", "SKIP"),
+                )
+                if decision != "SKIP":
+                    reason = None if decision == "PASS" else tty_decision("Choose the primary review reason", REVIEW_REASONS)
+                    current = review_candidate_admission(
+                        path, expected_file_digest=current_digest,
+                        expected_review_context_digest=expected_context, checklist_id="pickup-v2",
+                        semantic_status=decision, reviewed_by=run["job"]["operator_or_agent_id"], reason=reason,
+                    )
+                    current_digest = canonical_digest(current)
+            except KeyboardInterrupt:
+                review_enabled = False
+            except ContractError as exc:
+                if exc.code != "HUMAN_TTY_REQUIRED":
+                    raise
+                review_enabled = False
+        reviews.append({
+            "run_id": run["run_id"], "path": str(path), "file_digest": current_digest,
+            "semantic_status": current["semantic_status"],
+        })
+    return reviews
 
 
 def _write_storage_reference(payload, validated, profile, recorder_evidence):
@@ -636,7 +881,7 @@ def run_plan_only(payload, cancel, publish, *, resolver=resolve_inputs, executor
 
 def run_live(payload, cancel, publish, *, resolver=resolve_inputs, executor_factory=_live_executor,
              recorder_factory=_recorder, validator_call=_technical_validator, tty_decision=_tty_decision,
-             camera_warmup_call=_camera_warmup):
+             camera_warmup_call=_camera_warmup, before_approval=None):
     """Public single HIL run: plan and human approval precede recorder begin and motion."""
     executor = recorder = resource_monitor = None
     resource_finished = False
@@ -646,6 +891,12 @@ def run_live(payload, cancel, publish, *, resolver=resolve_inputs, executor_fact
         profile = _collection_profile(validated, payload)
         if cancel.is_set():
             return _response(ok=False, code="CANCELLED", state="CANCELLED", run_id=payload["run_id"])
+        cell_root = ROOT / "outputs/data_factory/cells"
+        cell_store = CellStateStore(cell_root, payload["expected_robot_system_id"])
+        scene_store = SceneStateStore(cell_root, payload["expected_robot_system_id"])
+        cell = cell_store.read()
+        if cell.get("robot_system_id") != payload["expected_robot_system_id"] or cell.get("cell_ready") is not True:
+            return _response(ok=False, code="CELL_NOT_READY", state="BLOCKED", run_id=payload["run_id"])
         _prepare_run_dir(payload)
         camera_warmup = camera_warmup_call(payload, profile, cancel)
         if cancel.is_set():
@@ -664,9 +915,6 @@ def run_live(payload, cancel, publish, *, resolver=resolve_inputs, executor_fact
         if preflight.get("code") != "PREFLIGHT_OK":
             raise ContractError("PREFLIGHT_RESPONSE")
         forbidden = lambda _request: (_ for _ in ()).throw(ContractError("LIVE_RECORDER_NOT_STARTED"))
-        cell_root = ROOT / "outputs/data_factory/cells"
-        cell_store = CellStateStore(cell_root, payload["expected_robot_system_id"])
-        scene_store = SceneStateStore(cell_root, payload["expected_robot_system_id"])
         job = OneJob(forbidden, lambda request: executor.request(request, cancel), cell_state_call=cell_store.read)
         planned = job.plan_only(payload["run_id"], program, scene_binding)
         if not planned["ok"]:
@@ -681,11 +929,14 @@ def run_live(payload, cancel, publish, *, resolver=resolve_inputs, executor_fact
         }))
         operator_id = validated["normalized_job"]["operator_or_agent_id"]
         recycle_text = f" recycle={summary['recycle']}" if "recycle" in summary else ""
-        tty_decision(
+        approval_prompt = (
             f"Plan {planned['plan_digest']} path={' > '.join(summary['path'])} flow={summary['flow']} "
-            f"clearance={summary['clearance']} speed={summary['speed']}{recycle_text}",
-            f"APPROVE {planned['plan_digest']}",
+            f"clearance={summary['clearance']} speed={summary['speed']}{recycle_text}"
         )
+        if before_approval is None:
+            tty_decision(approval_prompt, f"APPROVE {planned['plan_digest']}")
+        else:
+            before_approval(approval_prompt, planned)
         if cancel.is_set():
             return _response(ok=False, code="CANCELLED", state="CANCELLED", run_id=payload["run_id"], plan_digest=planned["plan_digest"])
         approved = job.approve(_approval(payload["run_id"], planned["plan_digest"], operator_id, "HUMAN_GATED"))
@@ -713,10 +964,28 @@ def run_live(payload, cancel, publish, *, resolver=resolve_inputs, executor_fact
             result = job.poll()
             resource_monitor.record_control_round_trip(time.monotonic() - poll_started)
             if not result["ok"]:
+                if result["code"] == "QUALITY_REJECTED" and "recycle" in summary:
+                    transition_digest, cell = _recover_quality_rejected_recycle(
+                        result, summary, cell_store, operator_id, payload, planned["plan_digest"],
+                    )
+                    return _response(ok=False, code=result["code"], state=result["state"], run_id=payload["run_id"], plan_digest=planned["plan_digest"], data={
+                        "mode": "live", "operator_summary": summary,
+                        "camera_warmup_digest": canonical_digest(camera_warmup),
+                        "postreject_scene_state_digest": transition_digest, "postreject_cell_state": cell,
+                        "frozen_rows": result["frozen_rows"], "rows_after_recycle": result["rows_after_recycle"],
+                        "camera_semantic_authority": False, "training_authorized": False,
+                    })
                 return _response(ok=False, code=result["code"], state=result["state"], run_id=payload["run_id"], plan_digest=planned["plan_digest"])
             if result["state"] in {"AWAITING_CELL_READY", "COMMITTED"}:
                 technical = validator_call(payload["dataset_root"], payload, profile)
-                if not isinstance(technical, dict) or type(technical.get("ok")) is not bool or technical.get("code") not in {"PASS", "FAIL"} or not isinstance(technical.get("result_digest"), str):
+                if (
+                    not isinstance(technical, dict)
+                    or type(technical.get("ok")) is not bool
+                    or technical.get("code") not in {"PASS", "FAIL"}
+                    or technical["ok"] != (technical["code"] == "PASS")
+                    or not isinstance(technical.get("result_digest"), str)
+                    or not DIGEST.fullmatch(technical["result_digest"])
+                ):
                     raise ContractError("TECHNICAL_VALIDATOR_SCHEMA")
                 validator_reference = _write_validator_reference(payload, validated, planned["plan_digest"], profile, technical)
                 cell = cell_store.read()
@@ -769,6 +1038,7 @@ def run_live(payload, cancel, publish, *, resolver=resolve_inputs, executor_fact
                     finished = job.finish()
                     if not finished["ok"] or finished["state"] != "COMPLETE":
                         raise ContractError("CELL_READY_REQUIRED")
+                    _write_candidate_admission(payload, validated, validator_reference)
                     return _response(ok=True, code="VALIDATED", state="COMPLETE", run_id=payload["run_id"], plan_digest=planned["plan_digest"], data={
                         "mode": "live", "operator_summary": summary, "technical_validator": validator_reference,
                         "storage_usage": storage_reference, "resource_usage": resource_reference,
@@ -796,6 +1066,7 @@ def run_live(payload, cancel, publish, *, resolver=resolve_inputs, executor_fact
                 finished = job.finish()
                 if not finished["ok"] or finished["state"] != "COMPLETE":
                     raise ContractError("CELL_READY_REQUIRED")
+                _write_candidate_admission(payload, validated, validator_reference)
                 return _response(ok=True, code="VALIDATED", state="COMPLETE", run_id=payload["run_id"], plan_digest=planned["plan_digest"], data={
                     "mode": "live", "operator_summary": summary, "technical_validator": validator_reference,
                     "storage_usage": storage_reference, "resource_usage": resource_reference,
@@ -907,6 +1178,164 @@ def run_live(payload, cancel, publish, *, resolver=resolve_inputs, executor_fact
                 except ContractError:
                     if not cancel.is_set():
                         raise
+
+
+def _campaign_episode(payload, cancel, publish, release_role, next_run_id, source_slot=None, before_approval=None):
+    def campaign_resolver(value):
+        validated, program, binding = resolve_inputs(value)
+        slot = binding.get("release_slot")
+        if not isinstance(slot, dict):
+            raise ContractError("CAMPAIGN_RELEASE_SLOT")
+        binding = {**binding, "release_slot": {**slot, "role": release_role}}
+        if next_run_id is not None:
+            binding["allowed_next_run_id"] = next_run_id
+        if source_slot is not None and binding.get("source_slot") != source_slot:
+            raise ContractError("SCENE_SLOT_NEXT_RUN")
+        return validated, program, binding
+
+    return run_live(payload, cancel, publish, resolver=campaign_resolver, before_approval=before_approval)
+
+
+def run_campaign(payload, cancel, publish, *, episode_call=_campaign_episode,
+                 scene_store_factory=SceneStateStore, tty_decision=_tty_decision):
+    """Run exactly two ordinary live episodes, stopping before any later episode on fault."""
+    campaign_id = payload.get("campaign_id") if isinstance(payload, dict) else None
+    try:
+        campaign = _campaign_manifest(payload)
+        campaign_id = campaign["campaign_id"]
+        digest = canonical_digest(campaign)
+        results = []
+        runs = campaign["episodes"]
+        source_slot = None
+        next_plan_digest = None
+        approval_used = False
+        rejected_episode = False
+        for index, episode in enumerate(runs):
+            if cancel.is_set():
+                return _response(code="CANCELLED", state="CANCELLED", run_id=campaign_id, data={
+                    "campaign_digest": digest, "episodes": results, "training_authorized": False,
+                })
+            next_run_id = runs[1]["run"]["run_id"] if index == 0 else None
+            before_approval = None
+            if index == 1:
+                def approve_next(approval_prompt, planned):
+                    nonlocal approval_used, next_plan_digest
+                    envelope = planned.get("plan_envelope") if isinstance(planned, dict) else None
+                    plan = envelope.get("plan") if isinstance(envelope, dict) else None
+                    binding = plan.get("scene_binding") if isinstance(plan, dict) else None
+                    plan_digest = planned.get("plan_digest") if isinstance(planned, dict) else None
+                    if (
+                        approval_used
+                        or not isinstance(plan_digest, str)
+                        or not DIGEST.fullmatch(plan_digest)
+                        or not isinstance(binding, dict)
+                        or binding.get("source_slot") != source_slot
+                    ):
+                        raise ContractError("CAMPAIGN_NEXT_PLAN")
+                    tty_decision(
+                        f"{approval_prompt}; confirm the chain slot landing, empty gripper, and clear next path",
+                        f"LANDED_AND_APPROVE_NEXT {plan_digest}",
+                    )
+                    approval_used, next_plan_digest = True, plan_digest
+
+                before_approval = approve_next
+            result = episode_call(
+                episode["run"], cancel, publish, episode["release_role"], next_run_id,
+                source_slot, before_approval,
+            )
+            _exact(result, RESPONSE_KEYS, "CAMPAIGN_EPISODE_RESULT")
+            if result["run_id"] != episode["run"]["run_id"]:
+                raise ContractError("CAMPAIGN_EPISODE_RESULT")
+            results.append(copy.deepcopy(result))
+            if (
+                index == 0
+                and not result["ok"]
+                and result["code"] == "QUALITY_REJECTED"
+                and result["state"] == "ABORTED"
+                and isinstance(result["plan_digest"], str)
+                and DIGEST.fullmatch(result["plan_digest"])
+            ):
+                store = scene_store_factory(ROOT / "outputs/data_factory/cells", episode["run"]["expected_robot_system_id"])
+                snapshot = store.snapshot()
+                next_job = runs[1]["run"]["job"]
+                source_pose = {key: next_job[key] for key in ("place_id", "yaw_deg", "x_mm", "y_mm")}
+                objects = [
+                    item for item in snapshot["scene_state"]["objects"].values()
+                    if item.get("object_profile_id") == next_job["object_profile_id"]
+                    and item.get("state") == "ON_SURFACE"
+                    and item.get("source") == "ROBOT_RELEASE"
+                    and item.get("pose") == source_pose
+                ]
+                slots = [
+                    (slot_id, slot) for slot_id, slot in snapshot["scene_state"].get("slot_allocations", {}).items()
+                    if slot.get("state") == "LANDED_FOR_NEXT_SOURCE"
+                    and slot.get("role") == "DESTINATION_THEN_NEXT_SOURCE"
+                    and slot.get("allowed_run_id") == next_run_id
+                    and slot.get("evidence_run_id") == episode["run"]["run_id"]
+                    and slot.get("evidence_plan_digest") == result["plan_digest"]
+                ]
+                if len(objects) != 1 or len(slots) != 1:
+                    return _response(code=result["code"], state=result["state"], run_id=campaign_id, data={
+                        "campaign_digest": digest, "episodes": results, "training_authorized": False,
+                    })
+                slot_id, slot = slots[0]
+                source_slot = {"slot_id": slot_id, "slot_digest": canonical_digest(slot), "allowed_run_id": next_run_id}
+                rejected_episode = True
+                publish(_response(
+                    ok=True, code="EPISODE_REJECTED_CONTINUING", state="RUNNING", run_id=campaign_id,
+                    data={"campaign_digest": digest, "rejected_episodes": 1, "training_authorized": False},
+                ))
+                continue
+            if not result["ok"] or result["code"] != "VALIDATED" or result["state"] != "COMPLETE":
+                return _response(code=result["code"], state=result["state"], run_id=campaign_id, data={
+                    "campaign_digest": digest, "episodes": results, "training_authorized": False,
+                })
+            data = result["data"]
+            technical = data.get("technical_validator") if isinstance(data, dict) else None
+            if not isinstance(technical, dict) or technical.get("run_id") != episode["run"]["run_id"] or technical.get("status") != "PASS":
+                raise ContractError("CAMPAIGN_TECHNICAL_PASS")
+            if index == 0:
+                summary = data.get("operator_summary")
+                recycle = summary.get("recycle") if isinstance(summary, dict) else None
+                slot_id = recycle.get("release_slot_id") if isinstance(recycle, dict) else None
+                store = scene_store_factory(ROOT / "outputs/data_factory/cells", episode["run"]["expected_robot_system_id"])
+                snapshot = store.snapshot()
+                if data.get("postcommit_scene_state_digest") != snapshot["scene_state_digest"]:
+                    raise ContractError("SCENE_STATE_CHANGED")
+                slot = snapshot["scene_state"].get("slot_allocations", {}).get(slot_id)
+                if (
+                    not isinstance(slot, dict)
+                    or slot.get("state") != "LANDED_FOR_NEXT_SOURCE"
+                    or slot.get("role") != "DESTINATION_THEN_NEXT_SOURCE"
+                    or slot.get("allowed_run_id") != next_run_id
+                ):
+                    raise ContractError("SCENE_SLOT_NEXT_RUN")
+                source_slot = {"slot_id": slot_id, "slot_digest": canonical_digest(slot), "allowed_run_id": next_run_id}
+            else:
+                if not approval_used:
+                    raise ContractError("CAMPAIGN_NEXT_PLAN")
+                store = scene_store_factory(ROOT / "outputs/data_factory/cells", episode["run"]["expected_robot_system_id"])
+                snapshot = store.snapshot()
+                consumed = snapshot["scene_state"].get("slot_allocations", {}).get(source_slot["slot_id"])
+                if (
+                    data.get("postcommit_scene_state_digest") != snapshot["scene_state_digest"]
+                    or not isinstance(consumed, dict)
+                    or consumed.get("state") != "CONSUMED_PENDING_REVIEW"
+                    or consumed.get("allowed_run_id") != episode["run"]["run_id"]
+                ):
+                    raise ContractError("SCENE_SLOT_NEXT_RUN")
+            publish(_response(
+                ok=True, code="EPISODE_COMPLETE", state="RUNNING", run_id=campaign_id,
+                data={"campaign_digest": digest, "completed_episodes": len(results), "training_authorized": False},
+            ))
+        return _response(ok=not rejected_episode, code="CAMPAIGN_PARTIAL" if rejected_episode else "CAMPAIGN_COMPLETE", state="COMPLETE", run_id=campaign_id, data={
+            "campaign_digest": digest, "next_plan_digest": next_plan_digest,
+            "episodes": results, "training_authorized": False,
+        })
+    except ContractError as exc:
+        return _response(code=exc.code, state="BLOCKED", run_id=campaign_id)
+    except Exception as exc:
+        return _response(code="RUNNER_FAILED", state="BLOCKED", run_id=campaign_id, data={"detail": str(exc)})
 
 
 def _run_mode(payload, cancel, publish):
@@ -1092,9 +1521,44 @@ def _parser():
     return parser
 
 
+def _campaign_parser():
+    parser = ContractArgumentParser(description="Run one bounded two-episode supervised campaign.")
+    parser.add_argument("--manifest", required=True)
+    return parser
+
+
+def _review_parser():
+    parser = ContractArgumentParser(description="Review one completed campaign without starting live children.")
+    parser.add_argument("--campaign", required=True)
+    return parser
+
+
 def main(argv=None):
     try:
-        args = _parser().parse_args(argv)
+        arguments = list(sys.argv[1:] if argv is None else argv)
+        if arguments[:1] == ["campaign"]:
+            args = _campaign_parser().parse_args(arguments[1:])
+            payload = _campaign_manifest(load_json_strict(Path(args.manifest).read_text(encoding="utf-8")))
+            result = run_campaign(payload, threading.Event(), lambda _: None)
+            if result["ok"]:
+                reviews = _campaign_candidate_reviews(payload)
+                result["data"]["candidate_admissions"] = reviews
+                if any(item["semantic_status"] == "PENDING" for item in reviews):
+                    result["code"] = "CANDIDATE_SEMANTIC_PENDING"
+            print(json.dumps(result, sort_keys=True, separators=(",", ":"), allow_nan=False))
+            return 0 if result["ok"] else 2
+        if arguments[:1] == ["review"]:
+            args = _review_parser().parse_args(arguments[1:])
+            payload = _campaign_manifest(load_json_strict(Path(args.campaign).read_text(encoding="utf-8")))
+            reviews = _campaign_candidate_reviews(payload)
+            pending = any(item["semantic_status"] == "PENDING" for item in reviews)
+            result = _response(
+                ok=True, code="CANDIDATE_SEMANTIC_PENDING" if pending else "REVIEW_COMPLETE", state="COMPLETE",
+                run_id=payload["campaign_id"], data={"candidate_admissions": reviews, "training_authorized": False},
+            )
+            print(json.dumps(result, sort_keys=True, separators=(",", ":"), allow_nan=False))
+            return 0
+        args = _parser().parse_args(arguments)
         if args.factory_jsonl:
             if any(getattr(args, name) is not None for name in vars(args) if name not in {"factory_jsonl", "mode"}) or args.mode != "plan_only":
                 raise ContractError("CLI_USAGE")

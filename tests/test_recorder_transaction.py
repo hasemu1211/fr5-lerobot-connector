@@ -263,16 +263,20 @@ class RecorderTransactionTest(unittest.TestCase):
                 "encoder_temp": {"path": str(temp_dir), "device": 1, "free_bytes": 200, "total_bytes": 1000},
             }
             transient = temp_dir / "encode.tmp"
+            initial_sample = threading.Event()
             observed = threading.Event()
             tree_bytes = recorder._tree_bytes
 
             def observe_temp(path):
                 value = tree_bytes(path)
-                if Path(path) == temp_dir and transient.exists():
-                    observed.set()
+                if Path(path) == temp_dir:
+                    initial_sample.set()
+                    if transient.exists():
+                        observed.set()
                 return value
 
             def save_with_transient(parallel_encoding=True):
+                self.assertTrue(initial_sample.is_set())
                 transient.write_bytes(b"x" * 4096)
                 self.assertTrue(observed.wait(1))
                 transient.unlink()
@@ -287,6 +291,62 @@ class RecorderTransactionTest(unittest.TestCase):
                 result = recorder.commit_episode()
             self.assertTrue(result["ok"])
             self.assertGreaterEqual(result["metrics"]["storage_usage"]["temp_peak_bytes_by_device"]["1"], 4096)
+
+    def test_encoder_temp_probe_start_waits_for_initial_sample(self):
+        with tempfile.TemporaryDirectory() as directory:
+            recorder = self.make_recorder(directory)
+            recorder._storage_monitor = {
+                "begin": {"encoder_temp": {"path": directory, "device": 1}},
+                "temp_bytes_before_by_device": {"1": 0}, "temp_peak_bytes_by_device": {"1": 0},
+            }
+            entered, release, returned = threading.Event(), threading.Event(), threading.Event()
+
+            def blocked_sample(_path):
+                entered.set()
+                release.wait(1)
+                return 0
+
+            probe = []
+
+            def start_probe():
+                probe.append(recorder._start_encoder_temp_probe())
+                returned.set()
+
+            with mock.patch.object(recorder, "_tree_bytes", side_effect=blocked_sample):
+                starter = threading.Thread(target=start_probe)
+                starter.start()
+                self.assertTrue(entered.wait(1))
+                self.assertFalse(returned.wait(0.1))
+                release.set()
+                starter.join(1)
+                self.assertTrue(returned.is_set())
+                recorder._stop_encoder_temp_probe(probe[0])
+
+    def test_encoder_temp_probe_start_timeout_joins_probe(self):
+        with tempfile.TemporaryDirectory() as directory:
+            recorder = self.make_recorder(directory)
+            recorder._storage_monitor = {
+                "begin": {"encoder_temp": {"path": directory, "device": 1}},
+                "temp_bytes_before_by_device": {"1": 0}, "temp_peak_bytes_by_device": {"1": 0},
+            }
+            threads = []
+            real_thread = threading.Thread
+
+            def capture_thread(*args, **kwargs):
+                thread = real_thread(*args, **kwargs)
+                threads.append(thread)
+                return thread
+
+            def slow_sample(_path):
+                time.sleep(1.1)
+                return 0
+
+            with mock.patch.object(recorder_module.threading, "Thread", side_effect=capture_thread), \
+                    mock.patch.object(recorder, "_tree_bytes", side_effect=slow_sample):
+                with self.assertRaisesRegex(RuntimeError, "encoder temp probe startup timed out"):
+                    recorder._start_encoder_temp_probe()
+            self.assertEqual(len(threads), 1)
+            self.assertFalse(threads[0].is_alive())
 
     def test_storage_status_latches_existing_writer_error_off_hot_path(self):
         with tempfile.TemporaryDirectory() as directory:

@@ -596,22 +596,34 @@ class PickupExecutor:
         if self.scene_state_store is None:
             raise ContractError("SCENE_STATE_REQUIRED")
         try:
+            cell = self.cell_state_store.read()
+            if cell["robot_system_id"] != run["plan"]["robot_system_id"] or not cell["cell_ready"]:
+                raise ContractError("CELL_NOT_READY")
             binding = run["plan"]["scene_binding"]
-            with self.scene_state_store.locked_snapshot(binding["scene_state_digest"]) as snapshot:
+            execution_scene_digest = binding["scene_state_digest"]
+            execution_scene_revision = binding["revision"]
+            source_slot = binding.get("source_slot")
+            if source_slot is not None:
+                if source_slot["allowed_run_id"] != run["plan"]["run_id"]:
+                    raise ContractError("SCENE_SLOT_NEXT_RUN")
+                consumed = self.scene_state_store.consume_next_source(
+                    slot_id=source_slot["slot_id"], run_id=run["plan"]["run_id"],
+                    expected_scene_digest=binding["scene_state_digest"], expected_slot_digest=source_slot["slot_digest"],
+                )
+                execution_scene_digest = consumed["scene_state_digest"]
+                execution_scene_revision = consumed["scene_state"]["revision"]
+            with self.scene_state_store.locked_snapshot(execution_scene_digest) as snapshot:
                 scene = snapshot["scene_state"]
                 item = scene["objects"].get(binding["object_instance_id"])
-                if snapshot["scene_state_digest"] != binding["scene_state_digest"] or scene["revision"] != binding["revision"]:
+                if snapshot["scene_state_digest"] != execution_scene_digest or scene["revision"] != execution_scene_revision:
                     raise ContractError("SCENE_STATE_CHANGED")
                 if not isinstance(item, dict) or item.get("state") != "ON_SURFACE":
                     raise ContractError("SCENE_OBJECT_NOT_READY")
-                cell = self.cell_state_store.read()
-                if cell["robot_system_id"] != run["plan"]["robot_system_id"] or not cell["cell_ready"]:
-                    raise ContractError("CELL_NOT_READY")
                 try:
                     self.cell_state_store.mark_blocked("EXECUTION_IN_PROGRESS", run["plan"]["run_id"], run["digest"])
                 except Exception as exc:
                     raise ContractError("CELL_STATE_ARMING_FAILED") from exc
-                run["execution"] = {"lease_id": payload["lease_id"], "lease_deadline": self.monotonic_clock() + run["plan"]["execution_timeouts_s"]["heartbeat_lease"], "step_index": 0, "grasp_verdict": None, "semantic_verdict": None, "release_verdict": None, "snapshot": None, "active": False, "scene_object": copy.deepcopy(item), "terminal_phases": [], "phase_event_sequence": 0}
+                run["execution"] = {"lease_id": payload["lease_id"], "lease_deadline": self.monotonic_clock() + run["plan"]["execution_timeouts_s"]["heartbeat_lease"], "step_index": 0, "grasp_verdict": None, "semantic_verdict": None, "release_verdict": None, "snapshot": None, "active": False, "scene_object": copy.deepcopy(item), "scene_state_digest": execution_scene_digest, "scene_revision": execution_scene_revision, "terminal_phases": [], "phase_event_sequence": 0}
                 if self.phase_events_root is not None:
                     path = self.phase_events_root / run["plan"]["run_id"] / "phase_events.jsonl"
                     try:
@@ -696,8 +708,8 @@ class PickupExecutor:
                         "run_id": run["plan"]["run_id"],
                         "plan_digest": run["digest"],
                         "release_slot_id": slot["slot_id"],
-                        "expected_scene_state_digest": run["plan"]["scene_binding"]["scene_state_digest"],
-                        "expected_scene_revision": run["plan"]["scene_binding"]["revision"],
+                        "expected_scene_state_digest": execution["scene_state_digest"],
+                        "expected_scene_revision": execution["scene_revision"],
                         "gripper_reference_m": float(gripper["reference_position_m"]),
                         "gripper_feedback_m": float(gripper["feedback_position_m"]),
                         "terminal_phases": terminals,
@@ -782,8 +794,8 @@ class PickupExecutor:
                         "run_id": run["plan"]["run_id"],
                         "plan_digest": run["digest"],
                         "release_slot_id": slot["slot_id"],
-                        "expected_scene_state_digest": binding["scene_state_digest"],
-                        "expected_scene_revision": binding["revision"],
+                        "expected_scene_state_digest": execution.get("scene_state_digest", binding["scene_state_digest"]),
+                        "expected_scene_revision": execution.get("scene_revision", binding["revision"]),
                         "gripper_reference_m": gripper.get("reference_position_m") if isinstance(gripper, dict) else None,
                         "gripper_feedback_m": gripper.get("feedback_position_m") if isinstance(gripper, dict) else None,
                         "terminal_phases": [phase for phase in execution["terminal_phases"] if phase in RECYCLE_PHASES],
@@ -797,8 +809,9 @@ class PickupExecutor:
                         release_slot=slot,
                         evidence=evidence,
                         updated_by="pickup-executor",
-                        expected_digest=binding["scene_state_digest"],
-                        expected_revision=binding["revision"],
+                        expected_digest=execution.get("scene_state_digest", binding["scene_state_digest"]),
+                        expected_revision=execution.get("scene_revision", binding["revision"]),
+                        allowed_next_run_id=binding.get("allowed_next_run_id"),
                     )
         except Exception as exc:
             execution["scene_state_error"] = exc.code if isinstance(exc, ContractError) else "SCENE_STATE_WRITE_FAILED"
@@ -952,8 +965,9 @@ class PickupExecutor:
                 release_slot=run["plan"]["scene_binding"]["release_slot"],
                 evidence=evidence,
                 updated_by="pickup-executor",
-                expected_digest=run["plan"]["scene_binding"]["scene_state_digest"],
-                expected_revision=run["plan"]["scene_binding"]["revision"],
+                expected_digest=run["execution"].get("scene_state_digest", run["plan"]["scene_binding"]["scene_state_digest"]),
+                expected_revision=run["execution"].get("scene_revision", run["plan"]["scene_binding"]["revision"]),
+                allowed_next_run_id=run["plan"]["scene_binding"].get("allowed_next_run_id"),
             )
             execution["release_evidence"] = evidence
             execution["scene_transition"] = transition

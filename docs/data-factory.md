@@ -154,7 +154,40 @@ AI는 같은 모듈의 `--factory-jsonl`을 사용한다. command envelope는 ex
 python3 -m tools.data_factory.run_job --factory-jsonl
 ```
 
-현재 편한 사람 인터페이스의 검증 범위는 interactive builder→공개 one-job CLI→TTY exact approval/PASS/LANDED까지다. 다음 조건을 제안하는 P5 coverage가 다음 software Goal이고, 여러 episode를 순차 운용하는 같은-entrypoint bounded campaign은 P5.2다. 별도 GUI는 구현·검증하지 않았다.
+technical validator가 `PASS`한 live run은 같은 run directory에 `candidate_admission.json`을 atomic 생성한다. 이 파일은 `checklist_id=pickup-v2`, `operational_source=HUMAN_GATED`, `semantic_status=PENDING`이며 reviewer/time/reason은 `null`이다. 기존 executor의 사람 verdict를 semantic 또는 training approval로 승격하지 않는다.
+
+P5 coverage는 finite domain과 저장 episode reference를 명시한 두 JSON manifest만 offline으로 읽는다. domain manifest의 exact key는 `schema_version=data_factory.coverage_domain.v1`, `collection_profile_id`, `conditions`, `slots`이고 stored manifest의 exact key는 `schema_version=data_factory.coverage_stored_episodes.v2`, `episodes`다.
+
+각 episode reference는 JobSpec, preapproval evidence, technical validator, candidate admission의 path와 expected canonical digest를 모두 포함한다. v2 validator는 normalized Job과 승인 전 plan의 binding digest로 resolved Job digest를 독립 재계산하고 exact plan digest를 확인한 뒤 review context를 다시 계산한다.
+
+plan evidence가 없는 v1 reference는 이 결속을 증명할 수 없으므로 허용하지 않는다.
+
+```bash
+python3 -m tools.data_factory.quality.coverage_report \
+  --domain-manifest <coverage-domain.json> \
+  --stored-episodes <stored-episodes.json> \
+  --output-root outputs/data_factory/coverage
+```
+
+명령은 report JSON을 stdout에 출력하고 `<output-root>/<collection_profile_id>/coverage_report.json`을 atomic publish한다. malformed/missing/digest-mismatched evidence는 report를 만들지 않고 실패하며, pending review condition은 backlog가 해제되기 전 `suggest_next`에서 제외된다.
+
+P5.2 software mechanism은 같은 entrypoint의 `campaign` command다. manifest exact key는 `schema_version=data_factory.campaign.v1`, `campaign_id`, `max_episodes=2`, `episodes`이고, 두 episode는 각각 exact `run`, `release_role`을 가진다. role 순서는 `DESTINATION_THEN_NEXT_SOURCE`, `RELEASE_DESTINATION`이며 첫 recycle pose가 두 번째 JobSpec source와 같고 A/B/C pose가 서로 달라야 한다.
+
+```bash
+python3 -m tools.data_factory.run_job campaign --manifest <campaign.json>
+```
+
+첫 episode가 `VALIDATED`/technical `PASS`한 뒤 updated full scene으로 두 번째 exact plan을 새로 만든다. 사람이 `LANDED_AND_APPROVE_NEXT <fresh-plan-digest>`로 그 plan을 확인해야 exact allowed next run의 executor dispatch가 expected scene/slot digest CAS로 chain slot을 한 번 소비하고 motion을 시작한다. fault, cancel, expired JobSpec, storage 또는 scene mismatch면 later goal은 0이다.
+
+2026-08-21 target-specific HIL은 yaw 0 C `(0,35)`→D `(35,35)`→E `(70,35) mm`에서 이 경로를 완료했다.
+
+- `p52-c-grid3-20260821-r004`와 `p52-d-grid4-20260821-r004`는 각각 528·544 frames를 독립 transaction으로 commit했다.
+- 두 technical validator와 두 human semantic review는 `PASS`다.
+- 첫 run의 chain slot은 exact next dispatch에서 한 번 소비됐고 final scene revision 23과 cell acknowledgement가 남았다.
+
+이 결과는 정확히 실행한 두 release role의 mechanism 근거다. 다른 slot, non-yaw0, camera semantic authority 또는 training approval로 일반화하지 않으며 별도 GUI는 구현·검증하지 않았다.
+
+campaign이 완료되고 episode별 motion/recorder child가 모두 닫힌 뒤에만 TTY batch review가 시작한다. `PASS|FAIL|UNCERTAIN`은 `pickup-v2` checklist, immutable review-context digest, expected current file digest를 한번 CAS해 atomic 저장하고 `SKIP`/Ctrl-C는 `PENDING`을 보존한다. 후속 review는 `python3 -m tools.data_factory.run_job review --campaign <campaign.json>`을 사용하며 JSONL은 HUMAN review를 발급할 수 없다. semantic PASS는 training approval이 아니며 모든 결과의 `training_authorized=false`는 그대로다.
 
 `plan_only`는 scene state에서 JobSpec의 object profile과 `(place_id,yaw_deg,x_mm,y_mm)`가 정확히 일치하는 `ON_SURFACE` instance 하나를 결속한다. executor plan만 만들며 recorder begin, dataset 생성, 카메라 접근, execute action은 수행하지 않는다. 결과의 `camera_semantic_authority=false`는 현재 떨어져 임시 배치된 카메라를 물체·파지 정성 판정에 사용하지 않는다는 뜻이다.
 
@@ -338,13 +371,16 @@ outputs/
 │   │   ├── job.json
 │   │   ├── resolved_pose.json
 │   │   ├── plan.json
+│   │   ├── preapproval_evidence.json  # 사람이 본 exact plan envelope
 │   │   ├── events.jsonl
 │   │   ├── phase_events.jsonl         # executor control event; RGB/row를 복사하지 않음
 │   │   ├── episode_quality.json       # validator reference와 scalar report
+│   │   ├── candidate_admission.json   # technical PASS 뒤 semantic PENDING
 │   │   ├── result.json
 │   │   ├── staging_manifest.json       # 실제 LeRobot staging 경로의 한정된 목록
 │   │   ├── diagnostic.json             # 실패 시 최소 봉투 하나
 │   │   └── previews/                   # 허용된 경우만
+│   ├── coverage/<collection_profile_id>/coverage_report.json
 │   └── qualifications/<qualification_id>/
 │       ├── manifest.json
 │       ├── measurements.jsonl

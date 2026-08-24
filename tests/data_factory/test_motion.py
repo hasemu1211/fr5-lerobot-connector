@@ -64,6 +64,15 @@ class Test(unittest.TestCase):
     def precommit_safety(self,*_):raise e.ContractError(code)
    self.assertEqual(e.PickupExecutor(Unsafe()).process(self.req("plan",{"run_id":"r","motion_program":motion()}))["code"],code)
   t=T();n=e.PickupExecutor(t,clock=lambda:datetime(2026,1,1,tzinfo=timezone.utc));p=n.process(self.req("plan",{"run_id":"r","motion_program":motion()}));n.runs["r"]["precommit_safety"]["status"]="TAMPERED";a={"approval_id":"approval-1","approved_by":"operator-1","run_id":"r","resolved_job_digest":"sha256:"+"a"*64,"plan_digest":p["plan_digest"],"approval_expiry":"2026-01-02T00:00:00Z"};self.assertTrue(n.process(self.req("approve",a,"approve"))["ok"]);self.assertEqual(n.process(self.req("execute",{"run_id":"r","plan_digest":p["plan_digest"],"lease_id":"lease-1"},"execute"))["code"],"PRECOMMIT_SAFETY_REQUIRED");self.assertEqual(t.calls,list(e.PHASES))
+ def test_cell_ready_is_checked_before_chained_source_slot_is_consumed(self):
+  source={"slot_id":"sha256:"+"1"*64,"slot_digest":"sha256:"+"2"*64,"allowed_run_id":"r"};target=release_slot(robot_system_id="fr5-lab-a",pose={"place_id":"place-a","yaw_deg":0,"x_mm":60,"y_mm":0},object_profile_id="wood-cube-25mm-r001",exclusion_geometry_digest="sha256:"+"e"*64);binding={**SCENE,"release_slot":target,"source_slot":source}
+  class Store:
+   def __init__(self):self.consumed=[]
+   def read(self):return {"robot_system_id":"fr5-lab-a","cell_ready":False}
+   def consume_next_source(self,**value):self.consumed.append(value);return {"scene_state_digest":"sha256:"+"9"*64,"scene_state":{"revision":2}}
+   @contextmanager
+   def locked_snapshot(self,digest):yield {"scene_state_digest":digest,"scene_state":{"revision":2,"objects":{"cube-1":{"object_profile_id":"wood-cube-25mm-r001","state":"ON_SURFACE"}}}}
+  store=Store();node=e.PickupExecutor(T(),clock=lambda:datetime(2026,1,1,tzinfo=timezone.utc),cell_state_store=store,scene_state_store=store,execution_enabled=True);planned=node.process(self.req("plan",{"run_id":"r","motion_program":motion(True),"scene_binding":binding}));approval={"approval_id":"approval-1","approved_by":"operator-1","run_id":"r","resolved_job_digest":"sha256:"+"a"*64,"plan_digest":planned["plan_digest"],"approval_expiry":"2026-01-02T00:00:00Z"};self.assertTrue(node.process(self.req("approve",approval,"slot-a"))["ok"]);result=node.process(self.req("execute",{"run_id":"r","plan_digest":planned["plan_digest"],"lease_id":"lease-1"},"slot-e"));self.assertEqual((result["code"],store.consumed),("CELL_NOT_READY",[]))
  def test_fake_execution_holds_reset_and_faults(self):
   class Live(T):
    def __init__(self):super().__init__();self.position=[0.]*6;self.gripper_position=.01;self.velocity=20;self.force=50;self.plugin="fairino_hardware/FairinoHardwareInterface";self.started=[];self.cancelled=0;self.bad_cancel=False

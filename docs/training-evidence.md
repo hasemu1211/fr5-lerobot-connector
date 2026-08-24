@@ -12,6 +12,7 @@ SmolVLA 학습·평가·데이터 수집 정책을 결정하기 전에 조사와
 - 기존 FR5 배선 HIL: 1 episode, 1,040 frames, 30 Hz
 - scripted pickup 통합 HIL: 1 episode, 726 frames, 30 Hz. 물리 경로·그리퍼·한-job·저장 검증용이며 training 미승인
 - 공개 P4.5 pickup+recycle HIL: 1 episode, 537 frames, 30 Hz. scene transition·공개 인터페이스·지연 검증용이며 training 미승인
+- 공개 P5.2 supervised campaign HIL: 2 episodes, 1,072 frames, 30 Hz. exact yaw 0 C→D→E chain/final role mechanism 검증용이며 training 미승인
 - 로컬 FR5 학습 출력과 실물 rollout 결과: 없음
 - 현재 `best` checkpoint: 없음
 
@@ -120,6 +121,7 @@ validation은 checkpoint 후보를 줄이는 용도다. 반복해서 보며 선�
 | `LOCAL-015` | gripper timing 재적격화 | 2026-08-21 `p45-gripper-latency-r001`: 기존 ROS action/velocity 20%/force 50%/settle 500 ms와 timeout·feedback gate를 유지하고 1.0 s command로 close 1.0509 s, open 1.7011 s, terminal→다음 dispatch 0.179 ms, arm drift 7.59 µrad, 최종 ref/fb 0.021 m. evidence SHA-256 `8ebef582…1f0f9` | 6 s 정지는 제어 queue 병목이 아니라 qualification duration이었다. feedback/timeout을 완화하지 않고 gripper 전후 체감 대기를 제거한 근거 |
 | `LOCAL-016` | 공개 P4.5 recycle/scene HIL | 2026-08-21 `p45-public-live-20260821-r003`: public CLI plan `sha256:c2e5668c…a9ce1`, recycle `sha256:434fca4c…4b10d`, collision 2,023 sample all-valid, CENTER pickup→GRID_1 release 10 phase terminal 성공. close/open 1.051/1.096 s, 각 다음 arm dispatch 1.374/1.418 ms; freeze 537=row-after-recycle 537; scene v2 revision 14 `ROBOT_RELEASE`→commit→technical validator PASS | P4.5 exact GRID_1 mechanism과 사용자가 쓰는 공개 interface의 실물 근거. single-camera semantic authority와 `training_authorized=false`; 다른 target/yaw/무인 campaign으로 일반화하지 않음 |
 | `LOCAL-017` | terminal response 실패 격리·수정 | 선행 r002는 10 phase와 scene revision 13 전이는 끝났지만 executor가 terminal JSON을 flush한 직후 teardown하며 parent가 `EXECUTOR_CALL_FAILED`로 abort했다. terminal child가 parent EOF까지 살아 있도록 shared JSONL boundary를 수정했고 r003에서 scene 전이 동안 child 생존→537-row commit→validator terminal을 확인 | 이미 바뀐 physical scene을 rollback하지 않고 r002 payload를 폐기한 fail-close가 맞았음. 수정 뒤 같은 목적의 추가 물리 cycle 없이 r003 한 번으로 경계를 증명 |
+| `LOCAL-018` | 공개 P5.2 two-episode campaign HIL | 2026-08-21 yaw 0 C `(0,35)`→D `(35,35)`→E `(70,35) mm`: `p52-c-grid3-20260821-r004` plan `sha256:88195d4f…85310`이 528 rows, `p52-d-grid4-20260821-r004` plan `sha256:7c0f091c…bc33`이 544 rows를 같은 dataset의 독립 episode로 commit했다. 두 technical validator와 human semantic review가 PASS, alignment failure·queue drop 0, final scene revision 23과 cell acknowledgement가 남았다 | role-bound release→scene/slot digest CAS→fresh next plan approval→독립 transaction→technical-PASS-before-next의 실물 mechanism 근거. exact 세 slot/yaw 0 밖, camera semantic authority, 통계적 신뢰도와 training approval로 일반화하지 않으며 `training_authorized=false`를 유지 |
 | `METHOD-001` | validation | 한 run의 고정 validation과 fold마다 재학습하는 교차검증은 다른 절차이며 final test는 별도 유지 | 동적 episode 교체는 기각; 필요할 때만 별도 group CV |
 | `LOCAL-DOC-001` | 외부 조사문 검토 | `ML 에이전트 학습 프레임워크 조사.md`의 full-state resume, top-k, seed·metric 기록 원칙은 유효하지만 Lightning·TRL·SB3·MLflow 중심 제안은 LeRobot SmolVLA 경로와 맞지 않음 | 원칙만 채택하고 새 trainer/runtime는 도입하지 않음 |
 | `SKILL-001` | 스킬 검토 | AREX/Auto-ML-Skills는 별도 DisCo·Node 22.19+·provider와 대형 범용 skill graph를 요구하고, Trackio는 새 로깅 통합이 필요함 | 현재는 미설치; LeRobot 기본 W&B와 기존 연구 스킬 우선 |

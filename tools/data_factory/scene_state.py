@@ -30,6 +30,7 @@ OBJECT_STATES = {"ON_SURFACE", "HELD", "UNKNOWN"}
 SOURCES = {"HUMAN", "AI", "ROBOT_ACTION", "ROBOT_RELEASE", "PERCEPTION"}
 SCENE_BINDING_KEYS = {"scene_state_digest", "revision", "object_instance_id"}
 RELEASE_SLOT_KEYS = {"slot_id", "robot_system_id", "pose", "object_profile_id", "exclusion_geometry_digest", "role"}
+SOURCE_SLOT_KEYS = {"slot_id", "slot_digest", "allowed_run_id"}
 SLOT_KEYS = {"state", "role", "allowed_run_id", "evidence_run_id", "evidence_plan_digest", "evidence_digest", "updated_at"}
 SLOT_STATES = {"AVAILABLE", "RESERVED", "LANDED_FOR_NEXT_SOURCE", "CONSUMED_PENDING_REVIEW", "QUARANTINED"}
 SLOT_ROLES = {"PICK_SOURCE", "RELEASE_DESTINATION", "DESTINATION_THEN_NEXT_SOURCE"}
@@ -162,6 +163,8 @@ def _validate(value: object, robot_system_id: str) -> dict:
 def validate_scene_binding(value: object) -> dict:
     if not isinstance(value, dict) or frozenset(value) not in {
         frozenset(SCENE_BINDING_KEYS), frozenset(SCENE_BINDING_KEYS | {"release_slot"}),
+        frozenset(SCENE_BINDING_KEYS | {"release_slot", "allowed_next_run_id"}),
+        frozenset(SCENE_BINDING_KEYS | {"release_slot", "source_slot"}),
     }:
         raise ContractError("SCENE_BINDING")
     if not isinstance(value["scene_state_digest"], str) or not DIGEST.fullmatch(value["scene_state_digest"]):
@@ -174,6 +177,19 @@ def validate_scene_binding(value: object) -> dict:
         if not isinstance(value["release_slot"], dict):
             raise ContractError("SCENE_BINDING")
         result["release_slot"] = validate_release_slot(value["release_slot"], value["release_slot"].get("robot_system_id"))
+    if "allowed_next_run_id" in value:
+        result["allowed_next_run_id"] = _id(value["allowed_next_run_id"], "SCENE_SLOT_NEXT_RUN")
+        if result["release_slot"]["role"] != "DESTINATION_THEN_NEXT_SOURCE":
+            raise ContractError("SCENE_SLOT_NEXT_RUN")
+    if "source_slot" in value:
+        source = value["source_slot"]
+        if not isinstance(source, dict) or set(source) != SOURCE_SLOT_KEYS:
+            raise ContractError("SCENE_SLOT_NEXT_RUN")
+        for key in ("slot_id", "slot_digest"):
+            if not isinstance(source[key], str) or not DIGEST.fullmatch(source[key]):
+                raise ContractError("SCENE_SLOT_NEXT_RUN")
+        _id(source["allowed_run_id"], "SCENE_SLOT_NEXT_RUN")
+        result["source_slot"] = dict(source)
     return result
 
 
@@ -224,6 +240,7 @@ class SceneStateStore:
         updated_by: str,
         expected_digest: str,
         expected_revision: int,
+        allowed_next_run_id: str | None = None,
     ) -> dict:
         """Publish the physical object and its slot in one scene-v2 revision."""
         instance_id = _id(instance_id, "SCENE_OBJECT")
@@ -233,6 +250,13 @@ class SceneStateStore:
             raise ContractError("SCENE_BINDING")
         if not isinstance(evidence, dict) or set(evidence) != RELEASE_EVIDENCE_KEYS:
             raise ContractError("RELEASE_EVIDENCE")
+        chain = release_slot["role"] == "DESTINATION_THEN_NEXT_SOURCE"
+        if chain:
+            allowed_next_run_id = _id(allowed_next_run_id, "SCENE_SLOT_NEXT_RUN")
+            if allowed_next_run_id == evidence.get("run_id"):
+                raise ContractError("SCENE_SLOT_NEXT_RUN")
+        elif allowed_next_run_id is not None:
+            raise ContractError("SCENE_SLOT_NEXT_RUN")
         expected_terminals = ["RECYCLE_APPROACH_PTP", "LOWER_LIN", "GRIPPER_OPEN", "RETREAT_LIN", "SAFE_POSE_PTP"]
         if (
             evidence["schema_version"] != "data_factory.recycle_release_evidence.v1"
@@ -286,9 +310,9 @@ class SceneStateStore:
                 "updated_at": now,
             }
             slots[release_slot["slot_id"]] = {
-                "state": "CONSUMED_PENDING_REVIEW" if landed else "QUARANTINED",
+                "state": "LANDED_FOR_NEXT_SOURCE" if landed and chain else "CONSUMED_PENDING_REVIEW" if landed else "QUARANTINED",
                 "role": release_slot["role"],
-                "allowed_run_id": evidence["run_id"],
+                "allowed_run_id": allowed_next_run_id if chain else evidence["run_id"],
                 "evidence_run_id": evidence["run_id"],
                 "evidence_plan_digest": evidence["plan_digest"],
                 "evidence_digest": evidence_digest,
@@ -308,6 +332,49 @@ class SceneStateStore:
                 "scene_state_digest": canonical_digest(scene),
                 "release_evidence_digest": evidence_digest,
             }
+        finally:
+            os.close(descriptor)
+
+    def consume_next_source(
+        self,
+        *,
+        slot_id: str,
+        run_id: str,
+        expected_scene_digest: str,
+        expected_slot_digest: str,
+    ) -> dict:
+        """Consume one chain landing for its exact next run using scene and slot CAS."""
+        if not isinstance(slot_id, str) or not DIGEST.fullmatch(slot_id):
+            raise ContractError("SCENE_SLOT_NEXT_RUN")
+        run_id = _id(run_id, "SCENE_SLOT_NEXT_RUN")
+        for value in (expected_scene_digest, expected_slot_digest):
+            if not isinstance(value, str) or not DIGEST.fullmatch(value):
+                raise ContractError("SCENE_SLOT_NEXT_RUN")
+        lock_path = self._cell.runtime_path("scene_state.lock", create_robot=True)
+        descriptor = os.open(lock_path, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
+        try:
+            fcntl.flock(descriptor, fcntl.LOCK_EX)
+            current = self.read()
+            if canonical_digest(current) != expected_scene_digest:
+                raise ContractError("SCENE_STATE_CHANGED")
+            slot = current.get("slot_allocations", {}).get(slot_id)
+            if not isinstance(slot, dict) or canonical_digest(slot) != expected_slot_digest:
+                raise ContractError("SCENE_SLOT_CHANGED")
+            if (
+                slot["state"] != "LANDED_FOR_NEXT_SOURCE"
+                or slot["role"] != "DESTINATION_THEN_NEXT_SOURCE"
+                or slot["allowed_run_id"] != run_id
+            ):
+                raise ContractError("SCENE_SLOT_NEXT_RUN")
+            now = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+            slots = dict(current["slot_allocations"])
+            slots[slot_id] = {**slot, "state": "CONSUMED_PENDING_REVIEW", "updated_at": now}
+            scene = _validate({
+                **current, "revision": current["revision"] + 1,
+                "slot_allocations": slots, "updated_at": now,
+            }, self.robot_system_id)
+            write_json_atomic(self._path(create=True), scene)
+            return {"scene_state": scene, "scene_state_digest": canonical_digest(scene)}
         finally:
             os.close(descriptor)
 
