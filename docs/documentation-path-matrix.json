@@ -100,10 +100,23 @@
       "canonical_rule_ids": []
     },
     {
+      "rule_id": "implementation-plans",
+      "document_type": "plan",
+      "subject": "proposed implementation sequencing and review gates",
+      "path_globs": ["plans/*.md"],
+      "allowed_index_names": ["README.md"],
+      "requires_index": false,
+      "required_markdown_metadata": ["h1"],
+      "review_only_content_rule": "Treat plans as proposed work; current behavior and operational authority remain in docs and executable contracts.",
+      "lifecycle": "current",
+      "content_ownership": "canonical",
+      "canonical_rule_ids": []
+    },
+    {
       "rule_id": "history",
       "document_type": "history",
       "subject": "dated audits and superseded records",
-      "path_globs": ["docs/data-pipeline-audit-2026-08-12.md", "docs/history/*.md"],
+      "path_globs": ["docs/data-pipeline-audit-2026-08-12.md", "docs/history/*.md", "plans/archive/*.md"],
       "allowed_index_names": ["README.md"],
       "requires_index": false,
       "required_markdown_metadata": ["h1"],
