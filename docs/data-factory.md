@@ -62,6 +62,19 @@ brightness, clipping, sharpness와 색 변화량은 정성 검토를 돕는 warn
 
 sidecar queue·disk 실패는 `BEHAVIOR_REPORT_UNAVAILABLE`로만 남고 motion, heartbeat와 recorder를 기다리거나 취소시키지 않는다. 현재 executor에는 sidecar writer가 연결됐고 post-run report는 pure API로 제공된다. 공개 runner의 live lifecycle은 sidecar를 기다리지 않으며 자동 report 생성은 아직 하지 않는다. v1 writer resource contract는 queue 64개, UTF-8 text field 128 byte, JSONL line 4096 byte로 versioned report에 기록한다. r007 `RES-01`은 현재 16 GB 호스트에서 sampling error·swap I/O·queue drop 0을 보였지만 실제 8 GB 장비 qualification을 대체하지 않는다.
 
+## P5.5 object-frame context (report-only)
+
+`object_frame_context`는 accepted episode를 offline으로 읽어 만드는 static declared context다. `status=AVAILABLE`은 다음 binding이 모두 맞는다는 뜻이다.
+
+- digest가 일치하는 JobSpec, preapproval evidence, technical validator `PASS`, candidate admission semantic `PASS`
+- 같은 run의 resolved Job와 plan digest, plan envelope·safety evidence와 resolved input/plan binding digests
+- Job·cell calibration·object/grasp·TCP identity, 재계산한 calibration basis와 A4 pose
+- `QUALIFIED` motion qualification의 profile, robot-description, frame와 transform binding
+
+attribute는 accepted 네 artifact digest, plan의 selected/yaw0 sheet·cell·robot·collection·object·grasp·robot-description·MoveIt·planning-scene·motion-qualification·home-candidate binding digest와 TCP digest를 `source_digests`에 보존한다. metric은 `base_link`, datum `center`, source `A4_CALIBRATION_AND_JOB`, scope `DECLARED_STATIC_PREGRASP_TO_CLOSE`, observation `DECLARED_PLACEMENT_NOT_CAMERA_OBSERVED_ACTUAL_TRUTH`와 시작 `T_base_object_datum_at_begin`만 제공한다.
+
+FK/TF 입력과 recorder row/phase event는 이 V0 계약에 포함되지 않는다. 따라서 `fk_tf_metrics`는 `NOT_AVAILABLE`/`FK_TF_QUALIFICATION_MISSING`, `post_close_object_pose`는 `NOT_AVAILABLE`/`POST_CLOSE_OBJECT_POSE_UNQUALIFIED`다. 이 attribute는 model input, quality score, 자동 삭제, quota, training admission 또는 다른 authority를 만들지 않는다.
+
 ## 첫 JobSpec
 
 사람 UI와 AI agent는 같은 strict JSON을 만든다.

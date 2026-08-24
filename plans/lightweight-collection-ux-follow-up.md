@@ -10,6 +10,10 @@
 
 **Spec:** `plans/data-factory-next-iteration.md`
 
+## 2026-08-24 상태
+
+Backend-free fixture, Korean mode와 accessibility slice는 accepted다. Python operator core, readiness와 backend bridge Task는 계속 `PROPOSED_FOLLOW_UP_NON_BLOCKING`이며 live-connected API나 one-click execution은 통합되지 않았다.
+
 ## Global Constraints
 
 - 상태: `PROPOSED_FOLLOW_UP_NON_BLOCKING`; 현재 P5.5/P6 gate보다 앞선 필수조건으로 만들지 않는다.

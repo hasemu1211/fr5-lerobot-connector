@@ -1,7 +1,7 @@
 # FR5 데이터 수집·학습·피드백 최소 운영 계약
 
 - 상태: `CURRENT_CANONICAL_WITH_PROPOSED_STAGES`
-- 확인일: 2026-08-20
+- 확인일: 2026-08-24
 - 목적: 수집할 증거, 피드백 소비자, 보존 규칙과 사람 개입 지점을 한 곳에 고정한다.
 - 비목적: 기존 recorder/validator schema 변경, 새 대시보드·broker·database·per-frame JSON 복제.
 
@@ -58,8 +58,8 @@ failure condition → targeted recollection recommendation
 | `BEHAV-01` | joint endpoint/tracking, target progress, negative progress, stall | recorder rows + joined phase window | `episode_quality.json` attribute | 성공 시연 안의 이상치 후보와 후속 비교 | offline V0 구현됨 |
 | `INTERACT-01` | gripper command/feedback/close timing, lift 뒤 gripper continuity, human/numeric verdict provenance | gripper controller rows + executor result | `episode_quality.json` attribute | 파지 candidate와 drop/feedback 이상 flag | offline V0 구현됨; visual truth 아님 |
 | `POSE-01` | endpoint position/rotation, approach-axis, lateral correction | qualified FK timeline + same-sample TF check | phase scalar만 | phase별 geometric report | FK/TF qualification 전 `NOT_AVAILABLE` |
-| `OBJ-01` | 시작 시 declared `T_base_object_datum`, datum/frame/truth scope와 source digests | ResolvedJob, cell calibration, object/grasp/motion qualification | `object_frame_context` attribute 한 건 | Object–EE 계산의 provenance | 미구현 |
-| `OBJ-02` | `T_base_tcp(t)`, `T_object_tcp(t)`와 grasp-close relative error | recorder joints에서 offline FK; `OBJ-01` | per-row 저장 없이 필요 시 계산, close row reference+transform/scalar만 보존 | grasp consistency와 P6 source 적격성 | FK/TF 뒤 미구현 |
+| `OBJ-01` | 시작 시 declared `T_base_object_datum`, datum/frame/truth scope와 source digests | ResolvedJob, cell calibration, object/grasp/motion qualification | `object_frame_context` attribute 한 건 | Object–EE 계산의 provenance | offline V0 구현됨; declared static provenance만 `AVAILABLE` |
+| `OBJ-02` | `T_base_tcp(t)`, `T_object_tcp(t)`와 grasp-close relative error | recorder joints에서 offline FK; `OBJ-01` | per-row 저장 없이 필요 시 계산, close row reference+transform/scalar만 보존 | grasp consistency와 P6 source 적격성 | `NOT_AVAILABLE`; `FK_TF_QUALIFICATION_MISSING` |
 | `LIFT-01` | `+table_normal_base` TCP progress/drift, gripper continuity | FK/TCP + lift row window | phase scalar만 | lift 안정성 후보 | FK/TF 뒤 미구현 |
 | `COVER-01` | condition별 attempted/technical-pass/human-training-approved/semantic-pass/human-rejected | JobSpec/profile/calibration/recipe digests + result references | `coverage_report.json` | under-covered qualified condition 제안 | P5 미구현 |
 | `VARIANT-01` | trajectory variant, finite parameter tuple, plan/observed evidence lineage | P6 catalog + plan/report digests | catalog에는 tuple 1회, episode에는 ID/digest만 | 동일 조건 안의 품질 경계 다양성 | P6 미구현 |
@@ -90,9 +90,15 @@ object_datum    = center
 pose_source     = A4_CALIBRATION_AND_JOB
 truth_scope     = DECLARED_STATIC_PREGRASP_TO_CLOSE
 T_base_object_datum_at_begin
-resolved_job / cell / object / grasp / tcp / motion qualification digest
+accepted job_spec / preapproval_evidence / technical_validator / candidate_admission digests
+resolved_job / plan / selected_sheet / yaw0_sheet / cell_calibration / robot_system
+collection_profile / object_profile / grasp_profile / robot_description / MoveIt config
+planning_scene / motion_qualification / home_candidate / tcp digests
 ```
 
+- `object_frame_context.status=AVAILABLE`은 위 declared static context와 exact source binding이 검증됐다는 뜻뿐이다.
+- `fk_tf_metrics`는 적격화 전 `{"status":"NOT_AVAILABLE","reason":"FK_TF_QUALIFICATION_MISSING"}`다.
+- `post_close_object_pose`는 rigid-grasp 또는 vision truth 적격화 전 `{"status":"NOT_AVAILABLE","reason":"POST_CLOSE_OBJECT_POSE_UNQUALIFIED"}`다.
 - A4/Job 값은 vision으로 관측한 실제 object pose가 아니라 검증된 배치의 declared pose다.
 - `T_base_tcp(t)`는 pinned URDF FK와 same-sample live TF 허용오차 검증 뒤에만 사용한다.
 - `T_object_tcp(t)=inv(T_base_object)·T_base_tcp(t)`는 `PREGRASP`부터 `GRIPPER_CLOSE` joined window까지만 유효하다.

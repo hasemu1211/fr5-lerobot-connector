@@ -1031,19 +1031,15 @@ collision sample 2,023개 all-valid, 10개 phase terminal 성공, freeze 537=row
 
 - r007에서 분리한 gripper 병목은 `p45-gripper-latency-r001`과 r003에서 재적격화가 끝났다. close/open duration은 1.0 s이고 실제 accepted→terminal과 terminal→dispatch 증거를 보존한다. 이 항목은 다음 Goal이 아니다.
 
-### 2026-08-24 P5.2 종료와 다음 Goal
+### 2026-08-24 P5.5·frontend fixture 종료와 다음 Goal
 
 P4 public single-job live는 r007, gripper timing 재적격화는 `p45-gripper-latency-r001`, P4.5 public recycle/scene은 r003으로 완료됐다. P5.2는 C→D→E supervised campaign으로 완료됐다. 같은 목적의 추가 gripper, P4.5 또는 P5.2 물리 cycle은 하지 않는다.
 
 `tools/data_factory/quality/coverage_report.py`의 public module CLI와 live pending candidate-admission production caller가 cohesive fake로 연결됐다. P5는 production-closed이며 semantic/training authority, backfill, service나 wrapper는 추가하지 않았다.
 
-다음 backend Goal은 `P5.5 Object–EE offline diagnostic`이다. Frontend architecture review와 fixture vertical slice는 P5.5와 독립적으로 병렬 진행할 수 있다.
+P5.5 `Object–EE offline diagnostic`과 backend-free frontend fixture, Korean mode, accessibility slice는 완료됐다. P5.5는 declared static `object_frame_context`만 제공하며 FK/TF와 post-close pose는 계속 `NOT_AVAILABLE`이다. Frontend fixture는 backend proposal을 구현하지 않았고 `run_job.py`, Python operator core와 preflight를 연결하지 않는다.
 
-1. P5.5 writer는 기존 accepted episode와 resolved Job/cell/object/grasp/TCP binding만 읽고 `episode_quality.json`의 `object_frame_context` attribute를 확장한다. ROS, motion, recorder, scene, cell과 candidate admission write는 0이다.
-2. FK/TF qualification 전 transform metric은 stable `NOT_AVAILABLE`이다. P5.5 실패는 P5.8 baseline, training admission 또는 campaign 실행을 막지 않는다.
-3. Frontend lead는 current backend와 P5.5/P6/P8 계획 전체를 읽고 operator journey, 정보구조, API 요구와 기술 선택을 검토한다. write scope는 frontend와 fixture에 한정하고 `run_job.py`, Python operator core, preflight와 운영 문서는 후속 integration writer 한 명만 수정한다.
-4. 프런트엔드는 기존 coverage/campaign/profile artifact를 출발점으로 삼되 더 나은 UX contract를 제안할 수 있다. motion approval, scene/cell transition과 training approval은 기존 backend gate를 그대로 사용한다.
-5. P5.8의 seed quota를 미리 늘리지 않는다. 별도 training approval로 실제 approved episode inventory가 생긴 뒤 finite manifest를 승인한다.
+다음 backend Goal은 evaluation-first `P5.8 bounded nominal seed와 첫 baseline/evaluation`이다. 별도 training approval로 실제 approved episode inventory와 immutable evaluation contract가 생기기 전 seed quota를 늘리지 않으며, frontend backend bridge는 계속 후속 제안으로 둔다.
 
 이전 `main@479a758` P4 handoff는 `1b3bc97`/`f4069aa`와 r007로 완료됐다. 이를 현재 다음 Goal로 다시 사용하지 않는다.
 
