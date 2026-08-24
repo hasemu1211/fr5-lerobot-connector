@@ -40,7 +40,10 @@ class QualityTest(unittest.TestCase):
         collection = {"schema_version": "data_factory.collection_profile.v1", "collection_profile_id": "profile-r1"}
         object_profile = {"schema_version": "data_factory.object_profile.v2", "object_profile_id": "cube-r1", "datum": "center", "description": "test cube"}
         grasp = {"schema_version": "data_factory.grasp_profile.v2", "grasp_profile_id": "grasp-r1", "object_profile_id": "cube-r1"}
-        cell = {"schema_version": "data_factory.cell_calibration.v1", "calibration_id": "cell-r1", "robot_system_id": "fr5-a", "place_id": "place-a", "tcp_digest": tcp_digest}
+        cell = {
+            "schema_version": "data_factory.cell_calibration.v1", "calibration_id": "cell-r1", "robot_system_id": "fr5-a", "place_id": "place-a", "tcp_digest": tcp_digest,
+            "center_base_m": [.1, .2, .3], "x_ref_base_m": [.2, .2, .3], "y_check_base_m": [.1, .3, .3], "table_normal_base": [0., 0., 1.],
+        }
         input_digests = {
             "selected_sheet": job["sheet_manifest_digest"], "yaw0_sheet": digest("yaw0-sheet"),
             "cell_calibration": digest(cell), "robot_system": digest(robot), "collection_profile": digest(collection),
@@ -133,7 +136,7 @@ class QualityTest(unittest.TestCase):
             self.assertEqual(attribute["metrics"]["pose_source"], "A4_CALIBRATION_AND_JOB")
             self.assertEqual(attribute["metrics"]["truth_scope"], "DECLARED_STATIC_PREGRASP_TO_CLOSE")
             self.assertEqual(attribute["metrics"]["pose_observation"], "DECLARED_PLACEMENT_NOT_CAMERA_OBSERVED_ACTUAL_TRUTH")
-            self.assertEqual(attribute["metrics"]["T_base_object_datum_at_begin"]["translation_m"], [.11, .22, .3])
+            self.assertEqual(attribute["metrics"]["T_base_object_datum_at_begin"], {"translation_m": [.11, .22, .3], "rotation_columns": [[1., 0., 0.], [0., 1., 0.], [0., 0., 1.]]})
             self.assertEqual(attribute["source_digests"]["binding_object_profile"], bindings["object_profile"])
             self.assertEqual(attribute["metrics"]["fk_tf_metrics"], {"status": "NOT_AVAILABLE", "reason": "FK_TF_QUALIFICATION_MISSING"})
             self.assertEqual(attribute["metrics"]["post_close_object_pose"], {"status": "NOT_AVAILABLE", "reason": "POST_CLOSE_OBJECT_POSE_UNQUALIFIED"})
@@ -161,6 +164,12 @@ class QualityTest(unittest.TestCase):
             changed = {**resolved, "input_digests": {**resolved["input_digests"], "object_profile": digest("wrong")}}
             with self.assertRaisesRegex(ContractError, "OBJECT_FRAME_BINDING"):
                 object_frame_context_attribute(**{**common, "resolved_job": changed})
+            changed_center = {**resolved, "calibration": {**resolved["calibration"], "center": [1.1, .2, .3]}}
+            with self.assertRaisesRegex(ContractError, "OBJECT_FRAME_BINDING"):
+                object_frame_context_attribute(**{**common, "resolved_job": changed_center})
+            changed_basis = {**resolved, "calibration": {**resolved["calibration"], "x": [0., 1., 0.], "y": [-1., 0., 0.]}}
+            with self.assertRaisesRegex(ContractError, "OBJECT_FRAME_BINDING"):
+                object_frame_context_attribute(**{**common, "resolved_job": changed_basis})
             preapproval_path = Path(accepted["preapproval_evidence_path"])
             malformed = {**json.loads(preapproval_path.read_text()), "plan_envelope": []}
             preapproval_path.write_text(json.dumps(malformed))

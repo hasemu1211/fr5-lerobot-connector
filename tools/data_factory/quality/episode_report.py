@@ -8,7 +8,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
-from tools.fr5_data_factory import ContractError, DIGEST, SAFE_ID, canonical_digest, load_json_strict, normalize_job_spec, resolve_pose, validate_rigid_transform
+from tools.fr5_data_factory import ContractError, DIGEST, SAFE_ID, _cross, _dot, _mul, _sub, _unit, _vec, canonical_digest, load_json_strict, normalize_job_spec, resolve_pose, validate_rigid_transform
 from tools.data_factory.quality.coverage_report import CANDIDATE_FIELDS, PLAN_BINDING_DIGEST_FIELDS, RESOLVED_INPUT_DIGEST_FIELDS, STORED_EPISODE_FIELDS, TECHNICAL_FIELDS
 from tools.data_factory.quality.phase_metrics import ATTRIBUTE_SCHEMA, STATUS, quality_attribute
 
@@ -144,6 +144,7 @@ def _object_frame_binding(accepted_episode: Mapping[str, Any], resolved_job: Map
         or any(canonical_digest(resolved_job[key]) != inputs[digest_key] for key, digest_key in (("robot", "robot_system"), ("collection_profile", "collection_profile"), ("object_profile", "object_profile"), ("grasp_profile", "grasp_profile")))
         or not isinstance(calibration, Mapping)
         or set(calibration) != {"center", "x", "y", "z", "document"}
+        or not isinstance(calibration["document"], Mapping)
         or canonical_digest(calibration["document"]) != inputs["cell_calibration"]
         or canonical_digest({"job": job, "input_digests": dict(inputs)}) != resolved_job["resolved_job_digest"]
         or resolved_job["resolved_job_digest"] != preapproval["resolved_job_digest"]
@@ -161,6 +162,17 @@ def _object_frame_binding(accepted_episode: Mapping[str, Any], resolved_job: Map
         or robot.get("tcp_digest") != calibration["document"].get("tcp_digest")
     ):
         raise ContractError("OBJECT_FRAME_BINDING")
+    document = calibration["document"]
+    try:
+        center, x_ref, _, normal = (_vec(document[key], "OBJECT_FRAME_BINDING") for key in ("center_base_m", "x_ref_base_m", "y_check_base_m", "table_normal_base"))
+        z = _unit(normal, "OBJECT_FRAME_BINDING")
+        delta = _sub(x_ref, center)
+        x = _unit(_sub(delta, _mul(z, _dot(delta, z))), "OBJECT_FRAME_BINDING")
+        derived = {"center": center, "x": x, "y": _unit(_cross(z, x), "OBJECT_FRAME_BINDING"), "z": z}
+        if any(not math.isclose(actual, expected, rel_tol=0., abs_tol=1e-12) for key, expected_values in derived.items() for actual, expected in zip(_vec(calibration[key], "OBJECT_FRAME_BINDING"), expected_values)):
+            raise ContractError("OBJECT_FRAME_BINDING")
+    except (ContractError, KeyError, TypeError, ValueError) as exc:
+        raise ContractError("OBJECT_FRAME_BINDING") from exc
     if (
         not isinstance(motion_qualification, Mapping)
         or motion_qualification.get("schema_version") != "data_factory.motion_qualification.v1"
@@ -175,7 +187,7 @@ def _object_frame_binding(accepted_episode: Mapping[str, Any], resolved_job: Map
         raise ContractError("OBJECT_FRAME_BINDING")
     validate_rigid_transform(motion_qualification.get("tool_to_tcp"), "OBJECT_FRAME_BINDING")
     validate_rigid_transform(motion_qualification.get("datum_to_tcp_grasp"), "OBJECT_FRAME_BINDING")
-    pose = resolve_pose(resolved_job)
+    pose = resolve_pose({**resolved_job, "calibration": {**calibration, **derived}})
     transform = validate_rigid_transform({"translation_m": pose["position_base_m"], "rotation_columns": pose["rotation_base_columns"]}, "OBJECT_FRAME_BINDING")
     source_digests = {f"accepted_{name}": accepted_episode[f"{name}_digest"] for name in values}
     source_digests.update({f"binding_{key}": value for key, value in bindings.items()})
