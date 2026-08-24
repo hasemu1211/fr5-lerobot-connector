@@ -78,6 +78,8 @@ def _bind_inventory_split(inventory: Mapping, split: Mapping) -> None:
         )
         _require(
             canonical_digest(provenance) == provenance_ref["artifact_digest"]
+            and provenance["seed_manifest_digest"]
+            == split["bindings"]["episode_manifest_digest"]
             and episode["episode_ref_digest"] == source["episode_content_digest"]
             and episode["training_approval_digest"]
             == source["training_approval"]["artifact_digest"],

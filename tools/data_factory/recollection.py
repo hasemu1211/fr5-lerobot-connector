@@ -5,6 +5,7 @@ import copy
 from datetime import datetime, timezone
 from typing import Any, Mapping, Sequence
 
+from tools.data_factory.motion.trajectory_variants import phase_variant_catalog
 from tools.data_factory.quality.coverage_report import validate_coverage_report
 from tools.fr5_data_factory import ContractError, DIGEST, RFC3339, SAFE_ID, canonical_digest
 
@@ -14,6 +15,12 @@ DECISION_SCHEMA = "data_factory.p6_decision_evidence.v1"
 SELECTION_SCHEMA = "data_factory.recollection_selection.v1"
 MANIFEST_SCHEMA = "data_factory.recollection_manifest.v1"
 MODES = frozenset({"NOMINAL", "VARIANT_TARGETED"})
+_MODE_VARIANTS = {"NOMINAL": "DIRECT", "VARIANT_TARGETED": "TWO_STAGE_ALIGN"}
+_VARIANT_CATALOG = phase_variant_catalog()
+_VARIANT_DIGESTS = {
+    item["trajectory_variant_id"]: item["variation_profile_digest"]
+    for item in _VARIANT_CATALOG["variants"]
+}
 FAILURE_FIELDS = frozenset({
     "schema_version", "source", "dataset_digest", "checkpoint_digest",
     "coverage_report_digest", "mode", "variant_id", "variant_digest",
@@ -118,8 +125,10 @@ def validate_rollout_failure_evidence(value: object) -> dict[str, Any]:
     if mode not in MODES:
         raise ContractError("RECOLLECTION_MODE")
     _id(result["variant_id"], "RECOLLECTION_VARIANT_ID")
-    if (mode == "NOMINAL") != (result["variant_id"] == "DIRECT"):
+    if result["variant_id"] != _MODE_VARIANTS[mode]:
         raise ContractError("RECOLLECTION_VARIANT_MODE")
+    if result["variant_digest"] != _VARIANT_DIGESTS[result["variant_id"]]:
+        raise ContractError("RECOLLECTION_VARIANT_BINDING")
     _count(result["under_covered_below"], "RECOLLECTION_COVERAGE_TARGET", positive=True)
     if not isinstance(result["failures"], list):
         raise ContractError("RECOLLECTION_FAILURES")
@@ -141,13 +150,18 @@ def validate_p6_decision_evidence(value: object) -> dict[str, Any]:
     ):
         raise ContractError("RECOLLECTION_DECISION_INELIGIBLE")
     _id(result["variant_id"], "RECOLLECTION_DECISION_VARIANT")
-    if result["variant_id"] == "DIRECT":
+    if result["variant_id"] != "TWO_STAGE_ALIGN":
         raise ContractError("RECOLLECTION_DECISION_VARIANT")
     for field in (
         "dataset_digest", "checkpoint_digest", "variant_digest",
         "variant_catalog_digest", "ablation_evidence_digest",
     ):
         _digest(result[field], "RECOLLECTION_DECISION_DIGEST")
+    if (
+        result["variant_digest"] != _VARIANT_DIGESTS[result["variant_id"]]
+        or result["variant_catalog_digest"] != _VARIANT_CATALOG["catalog_digest"]
+    ):
+        raise ContractError("RECOLLECTION_DECISION_VARIANT_BINDING")
     _self_digest(result, "decision_digest", "RECOLLECTION_DECISION_DIGEST_MISMATCH")
     return result
 
@@ -334,6 +348,8 @@ def validate_recollection_manifest(
     if check_now.tzinfo is None:
         raise ContractError("RECOLLECTION_NOW")
     budget = _budget(result["budget"], check_now)
+    if budget != result["budget"]:
+        raise ContractError("RECOLLECTION_BUDGET_CANONICAL")
     usage = _usage(slots)
     if _exact(result["planned_usage"], USAGE_FIELDS, "RECOLLECTION_USAGE") != usage:
         raise ContractError("RECOLLECTION_USAGE")

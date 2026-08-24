@@ -5,6 +5,7 @@ import json
 import unittest
 from datetime import datetime, timezone
 
+from tools.data_factory.motion.trajectory_variants import phase_variant_catalog
 from tools.data_factory.quality.coverage_report import build_coverage_report
 from tools.data_factory.recollection import (
     compile_recollection_manifest,
@@ -15,6 +16,8 @@ from tools.fr5_data_factory import ContractError, canonical_digest
 
 
 NOW = datetime(2026, 8, 24, tzinfo=timezone.utc)
+CATALOG = phase_variant_catalog()
+VARIANTS = {item["trajectory_variant_id"]: item for item in CATALOG["variants"]}
 
 
 def digest(value: object) -> str:
@@ -71,7 +74,8 @@ def failure_evidence(value: dict, *, mode: str = "NOMINAL", failures: list[dict]
         "source": "SYNTHETIC_TEST_ONLY", "dataset_digest": digest("dataset"),
         "checkpoint_digest": digest("checkpoint"),
         "coverage_report_digest": digest(value), "mode": mode,
-        "variant_id": variant_id, "variant_digest": digest(variant_id),
+        "variant_id": variant_id,
+        "variant_digest": VARIANTS[variant_id]["variation_profile_digest"],
         "under_covered_below": 2,
         "failures": sorted(failures or [], key=digest),
     }
@@ -86,7 +90,7 @@ def decision(evidence: dict) -> dict:
         "dataset_digest": evidence["dataset_digest"],
         "checkpoint_digest": evidence["checkpoint_digest"],
         "variant_id": evidence["variant_id"], "variant_digest": evidence["variant_digest"],
-        "variant_catalog_digest": digest("variant-catalog"),
+        "variant_catalog_digest": CATALOG["catalog_digest"],
         "eligibility_status": "OBSERVED_ELIGIBLE",
         "ablation_evidence_digest": digest("ablation"),
     }
@@ -224,14 +228,50 @@ class RecollectionTests(unittest.TestCase):
             select_recollection_target(failure_evidence=tampered, coverage_report=value)
 
         variant = failure_evidence(value, mode="VARIANT_TARGETED", failures=[base_failure])
-        for field in ("dataset_digest", "checkpoint_digest", "variant_id", "variant_digest"):
+        mismatch_codes = {
+            "dataset_digest": "RECOLLECTION_P6_DECISION_BINDING",
+            "checkpoint_digest": "RECOLLECTION_P6_DECISION_BINDING",
+            "variant_id": "RECOLLECTION_DECISION_VARIANT",
+            "variant_digest": "RECOLLECTION_DECISION_VARIANT_BINDING",
+        }
+        for field, code in mismatch_codes.items():
             p6 = decision(variant)
             p6[field] = "OTHER" if field == "variant_id" else digest(["wrong", field])
             p6["decision_digest"] = digest({key: item for key, item in p6.items() if key != "decision_digest"})
-            with self.subTest(field=field), self.assertRaisesRegex(ContractError, "RECOLLECTION_P6_DECISION_BINDING"):
+            with self.subTest(field=field), self.assertRaisesRegex(ContractError, code):
                 select_recollection_target(
                     failure_evidence=variant, coverage_report=value, p6_decision_evidence=p6,
                 )
+
+        joint_evidence = copy.deepcopy(variant)
+        joint_evidence["variant_id"] = "THIRD_VARIANT"
+        joint_evidence["variant_digest"] = digest("third-variant")
+        joint_evidence["failure_evidence_digest"] = digest({
+            key: item for key, item in joint_evidence.items() if key != "failure_evidence_digest"
+        })
+        joint_decision = copy.deepcopy(decision(variant))
+        joint_decision["variant_id"] = joint_evidence["variant_id"]
+        joint_decision["variant_digest"] = joint_evidence["variant_digest"]
+        joint_decision["variant_catalog_digest"] = digest("third-catalog")
+        joint_decision["decision_digest"] = digest({
+            key: item for key, item in joint_decision.items() if key != "decision_digest"
+        })
+        with self.assertRaisesRegex(ContractError, "RECOLLECTION_VARIANT_MODE"):
+            select_recollection_target(
+                failure_evidence=joint_evidence, coverage_report=value,
+                p6_decision_evidence=joint_decision,
+            )
+
+        wrong_catalog = decision(variant)
+        wrong_catalog["variant_catalog_digest"] = digest("wrong-catalog")
+        wrong_catalog["decision_digest"] = digest({
+            key: item for key, item in wrong_catalog.items() if key != "decision_digest"
+        })
+        with self.assertRaisesRegex(ContractError, "RECOLLECTION_DECISION_VARIANT_BINDING"):
+            select_recollection_target(
+                failure_evidence=variant, coverage_report=value,
+                p6_decision_evidence=wrong_catalog,
+            )
 
     def test_every_manifest_binding_and_finite_budget_fails_closed(self) -> None:
         value = report()
@@ -268,6 +308,18 @@ class RecollectionTests(unittest.TestCase):
         expired["expires_at"] = "2026-08-24T00:00:00Z"
         with self.assertRaisesRegex(ContractError, "RECOLLECTION_EXPIRED"):
             compile_nominal(value=value, evidence=evidence, limits=expired)
+
+        manifest = compile_nominal(value=value, evidence=evidence)
+        assert manifest is not None
+        offset = copy.deepcopy(manifest)
+        offset["budget"]["expires_at"] = "2026-08-25T09:00:00+09:00"
+        offset["manifest_digest"] = digest({
+            key: item for key, item in offset.items() if key != "manifest_digest"
+        })
+        with self.assertRaisesRegex(ContractError, "RECOLLECTION_BUDGET_CANONICAL"):
+            validate_recollection_manifest(
+                offset, failure_evidence=evidence, coverage_report=value, now=NOW,
+            )
 
     def test_offline_compiler_has_zero_production_side_effects_or_authority(self) -> None:
         sentinel = {

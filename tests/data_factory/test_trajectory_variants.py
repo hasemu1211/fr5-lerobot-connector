@@ -122,6 +122,10 @@ class TrajectoryVariantTest(unittest.TestCase):
         self.assertEqual(candidate["plan"]["steps"][-1]["target"], endpoint)
         self.assertEqual(candidate["plan"]["steps"][-1]["final_joint_state"], [2.0] * 6)
         self.assertEqual(
+            [item["segment_index"] for item in candidate["plan_quality"]["metrics"]["phase_metrics"]],
+            [0, 1],
+        )
+        self.assertEqual(
             candidate,
             validate_plan_only_candidate(
                 candidate, motion_program_v2=source,

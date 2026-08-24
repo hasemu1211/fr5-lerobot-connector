@@ -46,10 +46,20 @@ def plan_quality_attribute(*, run_id: str, resolved_job_digest: str, plan_digest
             raise ContractError("PLAN_QUALITY_TRAJECTORY") from exc
         if payload_bytes == 0:
             raise ContractError("PLAN_QUALITY_TRAJECTORY")
+        has_index = "segment_index" in step
+        if has_index != ("segment_count" in step):
+            raise ContractError("PLAN_QUALITY_SEGMENT")
+        segment_index = step.get("segment_index", 0)
+        segment_count = step.get("segment_count")
+        if has_index and (
+            type(segment_index) is not int or type(segment_count) is not int
+            or segment_index < 0 or segment_count <= segment_index
+        ):
+            raise ContractError("PLAN_QUALITY_SEGMENT")
         metrics.append({
             "phase": step["phase"],
             "type": step["type"],
-            "segment_index": 0,
+            "segment_index": segment_index,
             "serialized_bytes": payload_bytes,
             "start_to_final_joint_distance_rad": math.dist(start, final),
         })

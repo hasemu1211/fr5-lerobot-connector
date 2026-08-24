@@ -167,6 +167,19 @@ class TrainingOrchestrationTest(unittest.TestCase):
         with TemporaryDirectory() as directory:
             request, train, reload_receipt = case(Path(directory))
 
+            manifest_request = copy.deepcopy(request)
+            manifest_request["split"]["bindings"]["episode_manifest_digest"] = receipt_digest(
+                "other-manifest"
+            )
+            manifest_request["split"]["split_digest"] = canonical_digest({
+                key: value for key, value in manifest_request["split"].items()
+                if key != "split_digest"
+            })
+            backend = FakeBackend(train, reload_receipt)
+            with self.assertRaisesRegex(ContractError, "TRAINING_ORCHESTRATION_EPISODE_BINDING"):
+                run(manifest_request, backend)
+            self.assertEqual(backend.timeline, [])
+
             dataset_request = copy.deepcopy(request)
             dataset_request["split"]["dataset"]["dataset_root_identity_digest"] = receipt_digest("other")
             dataset_request["split"]["split_digest"] = canonical_digest({
