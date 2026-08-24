@@ -13,6 +13,8 @@ STATUS = frozenset({"AVAILABLE", "FLAGGED", "NOT_AVAILABLE", "ERROR"})
 
 
 def _target_ns(row: Mapping[str, Any]) -> int:
+    if not isinstance(row, Mapping):
+        raise ContractError("RECORDER_TARGET_ROS_TIME")
     value = row.get("target_ros_s")
     if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or value < 0:
         raise ContractError("RECORDER_TARGET_ROS_TIME")

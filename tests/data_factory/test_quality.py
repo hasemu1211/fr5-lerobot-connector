@@ -10,7 +10,7 @@ from tools.data_factory.quality.execution_metrics import joint_execution_attribu
 from tools.data_factory.quality.interaction_metrics import interaction_quality_attribute
 from tools.data_factory.quality.plan_metrics import plan_quality_attribute
 from tools.data_factory.quality.phase_events import MAX_LINE_BYTES, PhaseEventWriter, read_phase_events, validate_phase_event, writer_resource_contract
-from tools.data_factory.quality.phase_metrics import phase_timing_attribute
+from tools.data_factory.quality.phase_metrics import phase_row_windows, phase_timing_attribute
 
 
 def digest(value):
@@ -96,6 +96,8 @@ class QualityTest(unittest.TestCase):
         mismatched = phase_timing_attribute(run_id="run-1",resolved_job_digest=digest("job"),plan_digest=digest("plan"),events=events,recorder_rows=[],recorder_rows_digest=digest("rows"),recorder_ros_clock_type="SYSTEM_TIME")
         self.assertIn("RECORDER_CLOCK_UNQUALIFIED",mismatched["flags"])
         self.assertEqual(mismatched["metrics"]["row_window_status"],"NOT_AVAILABLE")
+        with self.assertRaisesRegex(ContractError, "RECORDER_TARGET_ROS_TIME"):
+            phase_row_windows(events=events, recorder_rows=[None], recorder_ros_clock_type="ROS_TIME")
         self.assertEqual(attribute["metrics"]["writer_resource_contract"],writer_resource_contract())
         with self.assertRaisesRegex(ContractError,"PHASE_EVENT_ROS_TIME"):
             validate_phase_event(self.event(0,"GOAL_ACCEPTED",0))
@@ -129,7 +131,7 @@ class QualityTest(unittest.TestCase):
             urdf_digest = "sha256:" + hashlib.sha256(urdf.read_bytes()).hexdigest()
             accepted, resolved, motion, plan_digest, bindings = self.accepted_object_context(root, urdf_digest)
             rows = [{"target_ros_s": value / 1e9, "observation.state": [index / 100.] + [0.] * 6} for index, value in enumerate((100, 200, 300, 400, 500, 600, 700, 800))]
-            rows_digest = digest("rows")
+            rows_digest = digest(rows)
             events = []
             for index, (phase, begin, end) in enumerate((("PREGRASP_PTP", 100, 200), ("APPROACH_STOP_LIN", 300, 400), ("FINAL_APPROACH_LIN", 500, 600), ("GRIPPER_CLOSE", 700, 800))):
                 events.extend((self.event(index * 2, "GOAL_ACCEPTED", begin, phase=phase, plan_digest=plan_digest), self.event(index * 2 + 1, "ACTION_TERMINAL", end, phase=phase, plan_digest=plan_digest)))
@@ -157,18 +159,32 @@ class QualityTest(unittest.TestCase):
                 "recorder_ros_clock_type": "ROS_TIME", "phase_events_digest": digest(events), "joint_order": ["j1", "j2", "j3", "j4", "j5", "j6"],
                 "same_sample_tf_agreement": {"status": "PASS", "sample_count": 12, "position_tolerance_m": .001, "orientation_tolerance_rad": .01, "max_position_error_m": .0001, "max_orientation_error_rad": .001},
             }
-            qualified = object_frame_context_attribute(**common, fk_tf_qualification=qualification, urdf=urdf)
-            metric = qualified["metrics"]["fk_tf_metrics"]
-            self.assertEqual(metric["status"], "AVAILABLE")
-            self.assertEqual(metric["close_row_reference"], {"row_index": 7, "target_ros_s": rows[7]["target_ros_s"]})
-            for actual, expected in zip(metric["T_object_tcp_at_close"]["translation_m"], (-.04, -.22, -.3)):
-                self.assertAlmostEqual(actual, expected)
-            self.assertEqual([item["phase"] for item in metric["phase_scalars"]], ["PREGRASP_PTP", "APPROACH_STOP_LIN", "FINAL_APPROACH_LIN", "GRIPPER_CLOSE"])
-            self.assertNotIn("T_base_tcp", json.dumps(qualified))
-            rebound = {**qualification, "plan_digest": digest("wrong")}
-            self.assertEqual(object_frame_context_attribute(**common, fk_tf_qualification=rebound, urdf=urdf)["metrics"]["fk_tf_metrics"], {"status": "NOT_AVAILABLE", "reason": "FK_TF_QUALIFICATION_BINDING_MISMATCH"})
-            self.assertEqual(object_frame_context_attribute(**common, fk_tf_qualification={}, urdf=urdf)["metrics"]["fk_tf_metrics"], {"status": "NOT_AVAILABLE", "reason": "FK_TF_QUALIFICATION_INVALID"})
-            self.assertEqual(object_frame_context_attribute(**common, fk_tf_qualification={**qualification, "qualification_status": "CANDIDATE"}, urdf=urdf)["metrics"]["fk_tf_metrics"], {"status": "NOT_AVAILABLE", "reason": "FK_TF_QUALIFICATION_NOT_QUALIFIED"})
+            self.assertEqual(object_frame_context_attribute(**common, fk_tf_qualification=qualification, urdf=urdf)["metrics"]["fk_tf_metrics"], {"status": "NOT_AVAILABLE", "reason": "FK_TF_QUALIFICATION_REFERENCE_INVALID"})
+            qualification_path = root / "fk_tf_qualification.json"
+
+            def qualification_reference(value):
+                qualification_path.write_text(json.dumps(value))
+                return {"path": qualification_path, "digest": digest(value)}
+
+            reference = qualification_reference(qualification)
+            persisted = object_frame_context_attribute(**common, fk_tf_qualification=reference, urdf=urdf)
+            self.assertEqual(persisted["metrics"]["fk_tf_metrics"], {"status": "NOT_AVAILABLE", "reason": "FK_TF_QUALIFICATION_PROVENANCE_UNAVAILABLE"})
+            self.assertEqual(persisted["source_digests"]["fk_tf_qualification"], reference["digest"])
+            self.assertNotIn("T_base_tcp", json.dumps(persisted))
+            self.assertNotIn("close_row_reference", json.dumps(persisted))
+            self.assertNotIn("phase_scalars", json.dumps(persisted))
+            mismatch = {**reference, "digest": digest("wrong")}
+            self.assertEqual(object_frame_context_attribute(**common, fk_tf_qualification=mismatch, urdf=urdf)["metrics"]["fk_tf_metrics"], {"status": "NOT_AVAILABLE", "reason": "FK_TF_QUALIFICATION_DIGEST_MISMATCH"})
+            changed_rows = [{**rows[0], "observation.state": [9.] * 7}, *rows[1:]]
+            self.assertEqual(object_frame_context_attribute(**{**common, "recorder_rows": changed_rows}, fk_tf_qualification=reference, urdf=urdf)["metrics"]["fk_tf_metrics"], {"status": "NOT_AVAILABLE", "reason": "FK_TF_RECORDER_ROWS_DIGEST_MISMATCH"})
+            other_run_events = [{**event, "run_id": "run-2"} for event in events]
+            other_run_qualification = {**qualification, "phase_events_digest": digest(other_run_events)}
+            other_run_reference = qualification_reference(other_run_qualification)
+            self.assertEqual(object_frame_context_attribute(**{**common, "events": other_run_events}, fk_tf_qualification=other_run_reference, urdf=urdf)["metrics"]["fk_tf_metrics"], {"status": "NOT_AVAILABLE", "reason": "FK_TF_PHASE_EVENT_BINDING_MISMATCH"})
+            other_plan_events = [{**event, "plan_digest": digest("other-plan")} for event in events]
+            other_plan_qualification = {**qualification, "phase_events_digest": digest(other_plan_events)}
+            other_plan_reference = qualification_reference(other_plan_qualification)
+            self.assertEqual(object_frame_context_attribute(**{**common, "events": other_plan_events}, fk_tf_qualification=other_plan_reference, urdf=urdf)["metrics"]["fk_tf_metrics"], {"status": "NOT_AVAILABLE", "reason": "FK_TF_PHASE_EVENT_BINDING_MISMATCH"})
             changed = {**resolved, "input_digests": {**resolved["input_digests"], "object_profile": digest("wrong")}}
             with self.assertRaisesRegex(ContractError, "OBJECT_FRAME_BINDING"):
                 object_frame_context_attribute(**{**common, "resolved_job": changed})
@@ -230,6 +246,10 @@ class QualityTest(unittest.TestCase):
             path = Path(directory)/"episode_quality.json"
             events_path = Path(directory)/"phase_events.jsonl"
             events_path.write_text("".join(json.dumps(event)+"\n" for event in events))
+            object_inputs = {"accepted_episode": {}, "resolved_job": {}, "motion_qualification": {}}
+            for key, value in (("events", []), ("recorder_rows", []), ("recorder_rows_digest", digest("other")), ("recorder_ros_clock_type", "SYSTEM_TIME")):
+                with self.subTest(shared_object_input=key), self.assertRaisesRegex(ContractError, "OBJECT_FRAME_CONTEXT_INPUTS"):
+                    build_episode_report(Path(directory)/"divergent.json",run_id="run-1",resolved_job_digest=job_digest,plan_digest=plan_digest,plan=plan,phase_events_path=events_path,recorder_rows=rows,recorder_rows_digest=rows_digest,recorder_ros_clock_type="ROS_TIME",execution_evidence={"grasp_verdict":"PASS","semantic_verdict":"PASS"},technical_validator=technical,stall_epsilon_rad=.001,object_frame_context_inputs={**object_inputs, key: value})
             report = build_episode_report(path,run_id="run-1",resolved_job_digest=job_digest,plan_digest=plan_digest,plan=plan,phase_events_path=events_path,recorder_rows=rows,recorder_rows_digest=rows_digest,recorder_ros_clock_type="ROS_TIME",execution_evidence={"grasp_verdict":"PASS","semantic_verdict":"PASS"},technical_validator=technical,stall_epsilon_rad=.001)
             self.assertEqual(len(report["attributes"]),4)
             with self.assertRaises(ContractError) as caught:
