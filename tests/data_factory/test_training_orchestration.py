@@ -8,8 +8,8 @@ from tempfile import TemporaryDirectory
 import unittest
 
 try:
-    from tests.data_factory.test_software_contract import synthetic_bundle
-except ModuleNotFoundError:  # unittest discovery loads this directory as top-level modules.
+    from .test_software_contract import synthetic_bundle
+except ImportError:  # Focused discovery loads this directory as top-level modules.
     from test_software_contract import synthetic_bundle
 from tools.data_factory.training_approval import SYNTHETIC_SCOPE
 from tools.data_factory.training_orchestration import (

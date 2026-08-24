@@ -3,8 +3,8 @@ import json
 import unittest
 
 try:
-    from tests.data_factory.test_motion import motion
-except ModuleNotFoundError:
+    from .test_motion import motion
+except ImportError:  # Focused discovery loads this directory as top-level modules.
     from test_motion import motion
 from tools.data_factory.motion.trajectory_variants import (
     compile_motion_program_v3,
