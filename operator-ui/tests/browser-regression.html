@@ -1,0 +1,81 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Operator fixture browser regressions</title>
+  <base href="../">
+</head>
+<body>
+  <select id="fixture-select"></select>
+  <ol id="workflow-steps"></ol>
+  <dl id="setup-details"></dl>
+  <main id="state-content"></main>
+  <ul id="evidence-list"></ul>
+  <span id="authority-copy"></span>
+  <div id="announcer" role="status"></div>
+  <pre id="results">Waiting for fixtures…</pre>
+  <script src="app.js"></script>
+  <script>
+    const results = document.querySelector("#results");
+    const checks = [];
+    const check = (condition, label) => {
+      if (!condition) throw new Error(label);
+      checks.push(label);
+    };
+
+    function run() {
+      if (!states) return setTimeout(run, 10);
+      try {
+        const activeStep = document.querySelector("#workflow-steps .active");
+        check(document.querySelector("#fixture-select").value === "setup" && activeStep.textContent.includes("Setup") && activeStep.getAttribute("aria-current") === "step", "setup is the default active fixture");
+
+        const validProgress = states.running.progress;
+        const invalidProgress = ['<img id="xss-probe" src="x" onerror="document.body.dataset.xss=1">', -1, 101, NaN, Infinity];
+        const rejected = invalidProgress.every((value) => {
+          states.running.progress = value;
+          try { render("running", false); } catch (error) { return error instanceof TypeError; }
+          return false;
+        });
+        states.running.progress = validProgress;
+        check(rejected && !document.querySelector("#xss-probe") && !document.body.dataset.xss, "hostile progress is rejected without markup execution");
+
+        render("approval", false);
+        let input = document.querySelector("#approval-input");
+        input.value = "APPROVE wrong";
+        document.querySelector("#approval-form").requestSubmit();
+        check(!input.validity.valid, "wrong exact phrase is rejected");
+        input.value = input.dataset.expected;
+        input.dispatchEvent(new Event("input", {bubbles: true}));
+        check(input.validity.valid, "corrected exact phrase clears stale validity");
+        document.querySelector("#approval-form").requestSubmit();
+        check(document.querySelector("#state-title").textContent === "Pickup is in progress" && announcer.textContent.includes("no backend approval receipt or effect occurred"), "corrected exact phrase advances only the local fixture");
+
+        render("review", false);
+        let form = document.querySelector("#review-form");
+        let reason = document.querySelector("#review-reason");
+        check(reason.disabled && getComputedStyle(document.querySelector("#review-reason-field")).display === "none", "review reason starts hidden and disabled");
+        for (const decision of ["FAIL", "UNCERTAIN"]) {
+          form.querySelector(`[value="${decision}"]`).click();
+          check(reason.required && !reason.disabled && !document.querySelector("#review-reason-field").hidden, `${decision} reveals and requires reason`);
+        }
+
+        for (const decision of ["PASS", "SKIP"]) {
+          render("review", false);
+          form = document.querySelector("#review-form");
+          reason = document.querySelector("#review-reason");
+          form.querySelector(`[value="${decision}"]`).click();
+          check(reason.disabled && getComputedStyle(document.querySelector("#review-reason-field")).display === "none" && !new FormData(form).has("reason"), `${decision} omits reason`);
+        }
+
+        document.body.dataset.result = "pass";
+        results.textContent = `${checks.length} checks passed\n${checks.join("\n")}`;
+      } catch (error) {
+        document.body.dataset.result = "fail";
+        results.textContent = `FAIL: ${error.message}`;
+        throw error;
+      }
+    }
+    run();
+  </script>
+</body>
+</html>

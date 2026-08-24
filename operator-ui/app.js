@@ -34,21 +34,29 @@ function approvalControl(state) {
 
 function reviewControl(state) {
   if (!state.review) return "";
-  return `<fieldset class="review-control">
+  return `<form id="review-form"><fieldset class="review-control">
     <legend>Preview a semantic review intent</legend>
-    ${state.review.options.map((option) => `<button type="button" data-review="${escapeHtml(option)}">${escapeHtml(option)}</button>`).join("")}
-    <label for="review-reason">Primary reason for FAIL or UNCERTAIN
-      <select id="review-reason">${state.review.reasons.map((reason) => `<option>${escapeHtml(reason)}</option>`).join("")}</select>
+    <div class="review-options">${state.review.options.map((option) => `<label><input type="radio" name="review" value="${escapeHtml(option)}" required>${escapeHtml(option)}</label>`).join("")}</div>
+    <label id="review-reason-field" for="review-reason" hidden>Primary reason for FAIL or UNCERTAIN
+      <select id="review-reason" name="reason" required disabled>
+        <option value="">Choose one reason</option>
+        ${state.review.reasons.map((reason) => `<option>${escapeHtml(reason)}</option>`).join("")}
+      </select>
     </label>
+    <button type="submit">Preview review intent</button>
     <p class="support-copy">No candidate file is changed. A future bridge must submit the exact file and review-context digests to backend compare-and-swap.</p>
-  </fieldset>`;
+  </fieldset></form>`;
 }
 
 function progress(state) {
   if (state.progress === undefined) return "";
+  if (typeof state.progress !== "number" || !Number.isFinite(state.progress) || state.progress < 0 || state.progress > 100) {
+    throw new TypeError("Progress must be a finite number from 0 to 100.");
+  }
+  const percent = escapeHtml(state.progress);
   return `<div class="progress-block">
-    <div><span>Episode ${escapeHtml(state.episode)}</span><strong>${state.progress}%</strong></div>
-    <progress max="100" value="${state.progress}">${state.progress}%</progress>
+    <div><span>Episode ${escapeHtml(state.episode)}</span><strong>${percent}%</strong></div>
+    <progress max="100" value="${percent}">${percent}%</progress>
     <p>${escapeHtml(state.phase)}</p>
   </div>`;
 }
@@ -88,12 +96,30 @@ function bindControls() {
       return;
     }
     input.setCustomValidity("");
-    render("running");
+    render("running", false);
+    announcer.textContent = "Exact phrase matched. Only the running fixture preview changed; no backend approval receipt or effect occurred.";
   });
-  document.querySelectorAll("[data-review]").forEach((button) => button.addEventListener("click", () => {
-    const reason = ["FAIL", "UNCERTAIN"].includes(button.dataset.review) ? ` with reason ${document.querySelector("#review-reason").value}` : "";
-    announcer.textContent = `${button.dataset.review}${reason} review intent previewed. No backend or candidate artifact was changed.`;
-  }));
+  document.querySelector("#approval-input")?.addEventListener("input", (event) => event.currentTarget.setCustomValidity(""));
+  const reviewForm = document.querySelector("#review-form");
+  reviewForm?.addEventListener("change", (event) => {
+    if (event.target.name !== "review") return;
+    const needsReason = ["FAIL", "UNCERTAIN"].includes(event.target.value);
+    const reasonField = document.querySelector("#review-reason-field");
+    const reason = document.querySelector("#review-reason");
+    reasonField.hidden = !needsReason;
+    reason.disabled = !needsReason;
+    reason.value = "";
+    announcer.textContent = needsReason
+      ? `${event.target.value} selected. Choose one required primary reason.`
+      : `${event.target.value} selected. No reason is requested.`;
+  });
+  reviewForm?.addEventListener("submit", (event) => {
+    event.preventDefault();
+    const data = new FormData(reviewForm);
+    const decision = data.get("review");
+    const reason = data.has("reason") ? ` with reason ${data.get("reason")}` : "";
+    announcer.textContent = `${decision}${reason} review intent previewed. No backend or candidate artifact was changed.`;
+  });
 }
 
 fetch("fixtures/states.json")
@@ -106,7 +132,7 @@ fetch("fixtures/states.json")
     Object.entries(states).forEach(([key, state]) => select.add(new Option(state.label, key)));
     select.addEventListener("change", () => render(select.value));
     const requestedState = new URLSearchParams(location.search).get("state");
-    render(Object.hasOwn(states, requestedState) ? requestedState : "ready", false);
+    render(Object.hasOwn(states, requestedState) ? requestedState : "setup", false);
   })
   .catch((error) => {
     document.querySelector("#state-content").innerHTML = `<h2 id="state-title">Fixture unavailable</h2><p>${escapeHtml(error.message)}</p><p>Preview with <code>make -C operator-ui preview</code>; opening index.html directly cannot load JSON fixtures.</p>`;

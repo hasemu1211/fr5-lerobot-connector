@@ -8,7 +8,7 @@ Use semantic HTML, CSS, browser JavaScript, JSON fixtures, Python's `http.server
 
 The React/TypeScript/Vite baseline would add a package graph and build pipeline before the slice needs component reuse, type sharing, routing, or a scene canvas. Vercel's React rules therefore have no runtime target here; their useful constraint is satisfied structurally by shipping no React bundle, waterfall, hydration, or client cache.
 
-If richer P8 scene visualization becomes qualified, migrate by keeping `states.json`/the proposed snapshot contract, porting the six render states into React components, and replacing only `app.js`. The concrete cost is a locked Node toolchain and CI cache, schema-to-TypeScript generation or duplicated types, six interaction checks, and a canvas/SVG scene component—roughly two focused engineering days before visualization qualification work. Do that only when dynamic object/slot selection or canvas interaction makes direct DOM rendering measurably hard.
+If richer P8 scene visualization becomes qualified, migrate by keeping `states.json`/the proposed snapshot contract, porting the seven render states into React components, and replacing only `app.js`. The concrete cost is a locked Node toolchain and CI cache, schema-to-TypeScript generation or duplicated types, seven interaction checks, and a canvas/SVG scene component—roughly two focused engineering days before visualization qualification work. Do that only when dynamic object/slot selection or canvas interaction makes direct DOM rendering measurably hard.
 
 ## Operator and single job
 
@@ -20,7 +20,7 @@ The visual direction is a calibration bench: slate paper (`#f7f9fb`), blueprint 
 
 Current production authority is split across qualified config and runtime artifacts:
 
-1. The operator prepares a campaign manifest containing ordered runs, release roles, profile, paths, budgets, and scene-bound job input, then invokes `python3 -m tools.data_factory.run_job campaign --manifest …`.
+1. The operator prepares a campaign manifest containing ordered runs, release roles, profile, paths, budgets, and scene-bound job input, then invokes `direnv exec . python3 -m tools.data_factory.run_job campaign --manifest …`.
 2. `run_job.py` validates the exact two-episode campaign, checks cell/readiness and camera warmup, resolves the current scene/start state, plans, and emits `AWAITING_HUMAN_APPROVAL` with the exact plan digest.
 3. The operator types the exact digest approval. For the second episode, `LANDED_AND_APPROVE_NEXT <digest>` combines physical landing/clear-path confirmation with that episode's fresh plan approval; campaign selection never substitutes for motion approval.
 4. The runner owns recorder/motion/progress, technical validation, scene/cell transitions, and candidate creation. Failures return stable code/state, but normalized preservation and next-action fields are inconsistent.

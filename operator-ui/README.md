@@ -16,6 +16,8 @@ make -C operator-ui test
 
 Both targets load the repository environment through `direnv`. In a new worktree whose `.envrc` the user has not approved, pass an already-approved checkout explicitly: `make -C operator-ui DIRENV_ROOT=/path/to/approved/checkout test`. Never run `direnv allow` on the user's behalf.
 
-The fixture selector exposes all acceptance states. In “Exact digest approval,” typing the displayed phrase previews the running fixture locally; it does not create an approval receipt. The semantic review buttons likewise announce an intent preview without changing any artifact.
+The fixture begins at active Setup and the selector exposes every acceptance state. In “Exact digest approval,” typing the displayed phrase previews the running fixture locally; it does not create an approval receipt. Semantic review exposes a required reason only for FAIL or UNCERTAIN and announces an intent preview without changing any artifact.
+
+While the preview is running, `http://127.0.0.1:4173/tests/browser-regression.html` runs the dependency-free DOM regressions for hostile progress, corrected exact approval, setup default, and conditional review reasons.
 
 See [architecture.md](architecture.md) for the operator journey and stack decision, and [backend-contract-proposal.md](backend-contract-proposal.md) for the integration boundary.

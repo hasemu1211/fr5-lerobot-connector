@@ -2,7 +2,11 @@
 
 This proposal is frontend-owned and unimplemented. It does not change the current backend, add an API, or grant authority to the browser.
 
-## Required minimum after fixture validation
+## Fixture acceptance boundary
+
+This backend-free fixture requires no snapshot, API, or other backend change for acceptance. Its fixtures and browser checks are sufficient for the current UI slice; live integration is a separate decision.
+
+## Candidate minimum for a later live integration decision
 
 ### 1. Canonical operator snapshot
 
@@ -52,6 +56,8 @@ Verification: contract tests map ready, camera failure, planned, running, techni
 
 ### 2. Digest-bound intent envelope for a later local bridge
 
+This intent bridge remains deferred and is not required for fixture acceptance or for deciding whether the read-only snapshot is worth implementing.
+
 Current bottleneck: a browser integration could otherwise invent ad hoc endpoints and accidentally treat displayed state as permission. Approval and review need explicit stale-write rejection while retaining backend authority.
 
 User impact: without one narrow intent contract, operators either return to TTY for every decision or risk ambiguous duplicate submissions.
@@ -80,7 +86,7 @@ Safety impact: motion approval still requires exact digest, current scene/start/
 
 Verification: replay, wrong revision, wrong digest, expired plan, changed scene/start, duplicate review, forged `reviewed_by=HUMAN`, missing local-human channel, and process restart all fail closed with `consumed=false` and zero later goals. Success must traverse the existing approval/CAS core rather than a second implementation.
 
-## Speculative P6/P8 space — not required
+## Deferred P5.5/P6/P8 space — not required
 
 - P5.5 Object–EE diagnostic panels until qualified FK/TF evidence exists; never use declared pose as observed truth.
 - P6 variation scheduling, quotas, or canonical/object-relative generation controls until an approved equal-budget ablation proves independent value.
@@ -88,3 +94,5 @@ Verification: replay, wrong revision, wrong digest, expired plan, changed scene/
 - WebSockets, optimistic updates, offline queues, resumable campaign leases, global stores, one-click execution, and training approval endpoints.
 
 Add these only when a measured integration need exceeds atomic snapshot polling and the existing backend lifecycle owner remains singular.
+
+The intent bridge and every P5.5/P6/P8 item above remain deferred; none is part of this fixture's acceptance contract.

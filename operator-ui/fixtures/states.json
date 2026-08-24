@@ -1,4 +1,17 @@
 {
+  "setup": {
+    "label": "Setup required",
+    "step": 0,
+    "kicker": "Setup · no campaign bound",
+    "title": "Bind the collection inputs before readiness",
+    "status": "SETUP",
+    "tone": "info",
+    "summary": "This fixture shows the qualified inputs that readiness will need. It cannot discover a camera, author scene truth, or create a campaign.",
+    "setup": {"Profile": "not bound", "Camera": "not bound", "Object": "not bound", "Condition": "not bound", "Coverage": "REPORT_ONLY · suggestion not selected"},
+    "nextAction": {"title": "Prepare the setup artifacts outside this fixture", "detail": "Use an existing qualified profile plus the current human-authored scene and campaign procedures. Continue only when backend artifacts bind the camera, object, condition, and coverage provenance."},
+    "evidence": [{"label": "required", "value": "qualified collection profile"}, {"label": "required", "value": "camera binding + current scene"}, {"label": "side effects", "value": "artifacts=0 · recorder=0 · motion goals=0"}],
+    "authority": "Only existing backend and human procedures may establish setup truth. This fixture cannot bind or persist it."
+  },
   "ready": {
     "label": "Ready to plan",
     "step": 1,
@@ -8,7 +21,7 @@
     "tone": "good",
     "summary": "One qualified camera binding, a known scene revision, and an eligible coverage suggestion are bound to this session. Planning has not started.",
     "setup": {"Profile": "fr5-up-rgb-30hz-v1 · QUALIFIED", "Camera": "up → /camera/up/color/image_raw", "Object": "wood cube 25 mm", "Condition": "PLACE_A · GRID_3 · yaw 0°", "Coverage": "suggest_next · REPORT_ONLY"},
-    "nextAction": {"title": "Create a fresh plan in the backend", "detail": "Use the bound condition once. The backend must re-read the current scene and start state before it can show an approval digest.", "command": "python3 -m tools.data_factory.run_job campaign --manifest …/campaign.json"},
+    "nextAction": {"title": "Create a fresh plan in the backend", "detail": "Use the bound condition once. The backend must re-read the current scene and start state before it can show an approval digest.", "command": "direnv exec . python3 -m tools.data_factory.run_job campaign --manifest …/campaign.json"},
     "evidence": [{"label": "camera binding", "value": "camera_binding.json · sha256:2f8a…17d4"}, {"label": "campaign", "value": "campaign.json · sha256:44c1…db80"}, {"label": "coverage", "value": "coverage_report.json · REPORT_ONLY"}],
     "authority": "Readiness is backend-derived. This fixture cannot mark the cell ready or create a plan."
   },
@@ -21,7 +34,7 @@
     "tone": "bad",
     "summary": "The expected topic exists, but its latest source timestamp is outside the qualified freshness window. Recorder begin and robot goals remain at zero.",
     "setup": {"Profile": "fr5-up-rgb-30hz-v1 · QUALIFIED", "Camera": "up → stale", "Object": "wood cube 25 mm", "Condition": "PLACE_A · GRID_3 · yaw 0°", "Preserved": "campaign + scene revision"},
-    "nextAction": {"title": "Restore the up-camera stream, then re-run readiness", "detail": "Check the bound physical device and topic. Do not change the campaign or reuse an old readiness result.", "command": "scripts/preflight_collection.sh --ready --camera-profile up"},
+    "nextAction": {"title": "Restore the up-camera stream, then obtain fresh backend readiness", "detail": "Check the bound physical device and topic, restore a fresh source frame, and have the backend re-evaluate current state. Do not change the campaign or reuse an old readiness result."},
     "evidence": [{"label": "failure code", "value": "CAMERA_WARMUP_FAILED"}, {"label": "topic", "value": "/camera/up/color/image_raw"}, {"label": "side effects", "value": "recorder=0 · motion goals=0"}],
     "authority": "Only backend readiness can clear this block after a fresh sample."
   },
