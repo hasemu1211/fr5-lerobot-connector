@@ -160,11 +160,10 @@ class QualityTest(unittest.TestCase):
                 "same_sample_tf_agreement": {"status": "PASS", "sample_count": 12, "position_tolerance_m": .001, "orientation_tolerance_rad": .01, "max_position_error_m": .0001, "max_orientation_error_rad": .001},
             }
             self.assertEqual(object_frame_context_attribute(**common, fk_tf_qualification=qualification, urdf=urdf)["metrics"]["fk_tf_metrics"], {"status": "NOT_AVAILABLE", "reason": "FK_TF_QUALIFICATION_REFERENCE_INVALID"})
-            qualification_path = root / "fk_tf_qualification.json"
-
-            def qualification_reference(value):
-                qualification_path.write_text(json.dumps(value))
-                return {"path": qualification_path, "digest": digest(value)}
+            def qualification_reference(value, name="fk_tf_qualification.json"):
+                path = root / name
+                path.write_text(json.dumps(value))
+                return {"path": path, "digest": digest(value)}
 
             reference = qualification_reference(qualification)
             persisted = object_frame_context_attribute(**common, fk_tf_qualification=reference, urdf=urdf)
@@ -173,18 +172,35 @@ class QualityTest(unittest.TestCase):
             self.assertNotIn("T_base_tcp", json.dumps(persisted))
             self.assertNotIn("close_row_reference", json.dumps(persisted))
             self.assertNotIn("phase_scalars", json.dumps(persisted))
+            accepted_qualified = {**accepted, "fk_tf_qualification_path": reference["path"], "fk_tf_qualification_digest": reference["digest"]}
+            qualified_common = {**common, "accepted_episode": accepted_qualified}
+            qualified = object_frame_context_attribute(**qualified_common, fk_tf_qualification=reference, urdf=urdf)
+            metric = qualified["metrics"]["fk_tf_metrics"]
+            self.assertEqual(metric["status"], "AVAILABLE")
+            self.assertEqual(metric["close_row_reference"], {"row_index": 7, "target_ros_s": rows[7]["target_ros_s"]})
+            for actual, expected in zip(metric["T_object_tcp_at_close"]["translation_m"], (-.04, -.22, -.3)):
+                self.assertAlmostEqual(actual, expected)
+            self.assertEqual([item["phase"] for item in metric["phase_scalars"]], ["PREGRASP_PTP", "APPROACH_STOP_LIN", "FINAL_APPROACH_LIN", "GRIPPER_CLOSE"])
+            self.assertEqual(qualified["source_digests"]["accepted_fk_tf_qualification"], reference["digest"])
+            self.assertNotIn("T_base_tcp", json.dumps(qualified))
             mismatch = {**reference, "digest": digest("wrong")}
-            self.assertEqual(object_frame_context_attribute(**common, fk_tf_qualification=mismatch, urdf=urdf)["metrics"]["fk_tf_metrics"], {"status": "NOT_AVAILABLE", "reason": "FK_TF_QUALIFICATION_DIGEST_MISMATCH"})
+            self.assertEqual(object_frame_context_attribute(**qualified_common, fk_tf_qualification=mismatch, urdf=urdf)["metrics"]["fk_tf_metrics"], {"status": "NOT_AVAILABLE", "reason": "FK_TF_QUALIFICATION_DIGEST_MISMATCH"})
+            with self.assertRaisesRegex(ContractError, "OBJECT_FRAME_SOURCE_DIGEST"):
+                object_frame_context_attribute(**{**qualified_common, "accepted_episode": {**accepted_qualified, "fk_tf_qualification_digest": mismatch["digest"]}}, fk_tf_qualification=mismatch, urdf=urdf)
+            other_path_reference = qualification_reference(qualification, "other_fk_tf_qualification.json")
+            self.assertEqual(object_frame_context_attribute(**qualified_common, fk_tf_qualification=other_path_reference, urdf=urdf)["metrics"]["fk_tf_metrics"], {"status": "NOT_AVAILABLE", "reason": "FK_TF_QUALIFICATION_PROVENANCE_UNAVAILABLE"})
             changed_rows = [{**rows[0], "observation.state": [9.] * 7}, *rows[1:]]
-            self.assertEqual(object_frame_context_attribute(**{**common, "recorder_rows": changed_rows}, fk_tf_qualification=reference, urdf=urdf)["metrics"]["fk_tf_metrics"], {"status": "NOT_AVAILABLE", "reason": "FK_TF_RECORDER_ROWS_DIGEST_MISMATCH"})
+            self.assertEqual(object_frame_context_attribute(**{**qualified_common, "recorder_rows": changed_rows}, fk_tf_qualification=reference, urdf=urdf)["metrics"]["fk_tf_metrics"], {"status": "NOT_AVAILABLE", "reason": "FK_TF_RECORDER_ROWS_DIGEST_MISMATCH"})
             other_run_events = [{**event, "run_id": "run-2"} for event in events]
             other_run_qualification = {**qualification, "phase_events_digest": digest(other_run_events)}
-            other_run_reference = qualification_reference(other_run_qualification)
-            self.assertEqual(object_frame_context_attribute(**{**common, "events": other_run_events}, fk_tf_qualification=other_run_reference, urdf=urdf)["metrics"]["fk_tf_metrics"], {"status": "NOT_AVAILABLE", "reason": "FK_TF_PHASE_EVENT_BINDING_MISMATCH"})
+            other_run_reference = qualification_reference(other_run_qualification, "other_run_qualification.json")
+            self.assertEqual(object_frame_context_attribute(**{**qualified_common, "events": other_run_events}, fk_tf_qualification=other_run_reference, urdf=urdf)["metrics"]["fk_tf_metrics"], {"status": "NOT_AVAILABLE", "reason": "FK_TF_PHASE_EVENT_BINDING_MISMATCH"})
             other_plan_events = [{**event, "plan_digest": digest("other-plan")} for event in events]
             other_plan_qualification = {**qualification, "phase_events_digest": digest(other_plan_events)}
-            other_plan_reference = qualification_reference(other_plan_qualification)
-            self.assertEqual(object_frame_context_attribute(**{**common, "events": other_plan_events}, fk_tf_qualification=other_plan_reference, urdf=urdf)["metrics"]["fk_tf_metrics"], {"status": "NOT_AVAILABLE", "reason": "FK_TF_PHASE_EVENT_BINDING_MISMATCH"})
+            other_plan_reference = qualification_reference(other_plan_qualification, "other_plan_qualification.json")
+            self.assertEqual(object_frame_context_attribute(**{**qualified_common, "events": other_plan_events}, fk_tf_qualification=other_plan_reference, urdf=urdf)["metrics"]["fk_tf_metrics"], {"status": "NOT_AVAILABLE", "reason": "FK_TF_PHASE_EVENT_BINDING_MISMATCH"})
+            with self.assertRaisesRegex(ContractError, "OBJECT_FRAME_ACCEPTED_EPISODE"):
+                object_frame_context_attribute(**{**qualified_common, "accepted_episode": {**accepted_qualified, "extra": True}}, fk_tf_qualification=reference, urdf=urdf)
             changed = {**resolved, "input_digests": {**resolved["input_digests"], "object_profile": digest("wrong")}}
             with self.assertRaisesRegex(ContractError, "OBJECT_FRAME_BINDING"):
                 object_frame_context_attribute(**{**common, "resolved_job": changed})

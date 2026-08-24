@@ -23,6 +23,7 @@ TECHNICAL_REFERENCE_KEYS = frozenset({"schema_version", "status", "result_digest
 TECHNICAL_REFERENCE_SCHEMA = "data_factory.technical_validator_ref.v1"
 FK_TF_QUALIFICATION_KEYS = frozenset({"schema_version", "qualification_status", "resolved_job_digest", "plan_digest", "robot_description_digest", "tcp_digest", "motion_qualification_digest", "recorder_rows_digest", "recorder_ros_clock_type", "phase_events_digest", "joint_order", "same_sample_tf_agreement"})
 FK_TF_QUALIFICATION_REFERENCE_KEYS = frozenset({"path", "digest"})
+FK_TF_ACCEPTED_EPISODE_FIELDS = STORED_EPISODE_FIELDS | {"fk_tf_qualification_path", "fk_tf_qualification_digest"}
 FK_TF_AGREEMENT_KEYS = frozenset({"status", "sample_count", "position_tolerance_m", "orientation_tolerance_rad", "max_position_error_m", "max_orientation_error_rad"})
 OBJECT_PHASES = ("PREGRASP_PTP", "APPROACH_STOP_LIN", "FINAL_APPROACH_LIN", "GRIPPER_CLOSE")
 JOINT_ORDER = ("j1", "j2", "j3", "j4", "j5", "j6")
@@ -54,7 +55,7 @@ def _technical_reference(value: Mapping[str, Any]) -> dict[str, Any]:
 
 
 def _accepted_episode_sources(reference: Mapping[str, Any]) -> dict[str, dict[str, Any]]:
-    if not isinstance(reference, Mapping) or set(reference) != STORED_EPISODE_FIELDS or not isinstance(reference["episode_id"], str) or not SAFE_ID.fullmatch(reference["episode_id"]):
+    if not isinstance(reference, Mapping) or set(reference) not in (STORED_EPISODE_FIELDS, FK_TF_ACCEPTED_EPISODE_FIELDS) or not isinstance(reference["episode_id"], str) or not SAFE_ID.fullmatch(reference["episode_id"]):
         raise ContractError("OBJECT_FRAME_ACCEPTED_EPISODE")
     values = {}
     for name in ("job_spec", "preapproval_evidence", "technical_validator", "candidate_admission"):
@@ -65,10 +66,15 @@ def _accepted_episode_sources(reference: Mapping[str, Any]) -> dict[str, dict[st
         if canonical_digest(value) != expected:
             raise ContractError("OBJECT_FRAME_SOURCE_DIGEST")
         values[name] = value
+    if set(reference) == FK_TF_ACCEPTED_EPISODE_FIELDS:
+        qualification, _, error = _fk_tf_qualification_reference({"path": reference["fk_tf_qualification_path"], "digest": reference["fk_tf_qualification_digest"]})
+        if error is not None:
+            raise ContractError("OBJECT_FRAME_SOURCE_DIGEST")
+        values["fk_tf_qualification"] = qualification
     return values
 
 
-def _object_frame_binding(accepted_episode: Mapping[str, Any], resolved_job: Mapping[str, Any], motion_qualification: Mapping[str, Any]) -> tuple[dict[str, Any], dict[str, str], str, str]:
+def _object_frame_binding(accepted_episode: Mapping[str, Any], resolved_job: Mapping[str, Any], motion_qualification: Mapping[str, Any], fk_tf_qualification: Mapping[str, Any] | None) -> tuple[dict[str, Any], dict[str, str], str, str]:
     values = _accepted_episode_sources(accepted_episode)
     episode_id = accepted_episode["episode_id"]
     job, preapproval, technical, admission = (values[name] for name in ("job_spec", "preapproval_evidence", "technical_validator", "candidate_admission"))
@@ -179,7 +185,9 @@ def _object_frame_binding(accepted_episode: Mapping[str, Any], resolved_job: Map
     validate_rigid_transform(motion_qualification.get("datum_to_tcp_grasp"), "OBJECT_FRAME_BINDING")
     pose = resolve_pose(resolved_job)
     transform = validate_rigid_transform({"translation_m": pose["position_base_m"], "rotation_columns": pose["rotation_base_columns"]}, "OBJECT_FRAME_BINDING")
-    source_digests = {f"accepted_{name}": accepted_episode[f"{name}_digest"] for name in values}
+    source_digests = {f"accepted_{name}": accepted_episode[f"{name}_digest"] for name in ("job_spec", "preapproval_evidence", "technical_validator", "candidate_admission")}
+    if "fk_tf_qualification" in values and isinstance(fk_tf_qualification, Mapping) and set(fk_tf_qualification) == FK_TF_QUALIFICATION_REFERENCE_KEYS and fk_tf_qualification["path"] == accepted_episode["fk_tf_qualification_path"] and fk_tf_qualification["digest"] == accepted_episode["fk_tf_qualification_digest"]:
+        source_digests["accepted_fk_tf_qualification"] = accepted_episode["fk_tf_qualification_digest"]
     source_digests.update({f"binding_{key}": value for key, value in bindings.items()})
     source_digests["tcp"] = robot["tcp_digest"]
     return transform, source_digests, resolved_job["resolved_job_digest"], preapproval["plan_digest"]
@@ -360,7 +368,7 @@ def _fk_tf_metrics(*, qualification: Mapping[str, Any] | None, qualification_dig
 
 def object_frame_context_attribute(*, accepted_episode: Mapping[str, Any], resolved_job: Mapping[str, Any], motion_qualification: Mapping[str, Any], recorder_rows: Sequence[Mapping[str, Any]], recorder_rows_digest: str, recorder_ros_clock_type: str, events: Sequence[Mapping[str, Any]], fk_tf_qualification: Mapping[str, Any] | None = None, urdf: str | Path | None = None) -> dict[str, Any]:
     """Build declared static Object–EE context; per-row FK transforms stay transient."""
-    transform, source_digests, resolved_job_digest, plan_digest = _object_frame_binding(accepted_episode, resolved_job, motion_qualification)
+    transform, source_digests, resolved_job_digest, plan_digest = _object_frame_binding(accepted_episode, resolved_job, motion_qualification, fk_tf_qualification)
     if isinstance(recorder_rows_digest, str) and DIGEST.fullmatch(recorder_rows_digest):
         source_digests["recorder_rows"] = recorder_rows_digest
     try:
