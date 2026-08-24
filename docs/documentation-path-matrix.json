@@ -10,7 +10,7 @@
       "allowed_index_names": ["README.md"],
       "requires_index": false,
       "required_markdown_metadata": ["h1"],
-      "review_only_content_rule": "Keep only the supported scope, shortest usable start, and links to canonical documents.",
+      "review_only_content_rule": "Keep only the supported scope, shortest usable start, and links to canonical documents. Distinguish supported, offline-only, report-only, and deferred scope. Name current capabilities directly; do not use implementation-plan milestone labels such as P5.x, P6, or P8 as deployed product vocabulary.",
       "lifecycle": "current",
       "content_ownership": "convenience",
       "canonical_rule_ids": ["operator-guides", "training-guides", "architecture-reference", "data-factory-contract", "evidence-ledger"]
@@ -29,7 +29,7 @@
       "allowed_index_names": ["README.md"],
       "requires_index": false,
       "required_markdown_metadata": ["h1"],
-      "review_only_content_rule": "Keep each procedure task-focused; put prerequisites and safety conditions before commands.",
+      "review_only_content_rule": "Keep each procedure task-focused; put prerequisites and safety conditions before commands. Distinguish supported, offline-only, report-only, and deferred scope. Name current capabilities directly; do not use implementation-plan milestone labels such as P5.x, P6, or P8 as deployed product vocabulary.",
       "lifecycle": "current",
       "content_ownership": "canonical",
       "canonical_rule_ids": []
@@ -42,7 +42,7 @@
       "allowed_index_names": ["README.md"],
       "requires_index": false,
       "required_markdown_metadata": ["h1"],
-      "review_only_content_rule": "State the supported wrapper, fixed evaluation contract, checkpoint rules, and physical safety boundary without mixing research history.",
+      "review_only_content_rule": "State the supported wrapper, offline-only contract APIs, deferred physical rollout, fixed evaluation contract, checkpoint rules, and safety boundary without mixing research history. Name current capabilities directly; do not use implementation-plan milestone labels such as P5.x, P6, or P8 as deployed product vocabulary.",
       "lifecycle": "current",
       "content_ownership": "canonical",
       "canonical_rule_ids": []
@@ -55,7 +55,7 @@
       "allowed_index_names": ["README.md"],
       "requires_index": false,
       "required_markdown_metadata": ["h1"],
-      "review_only_content_rule": "Describe the current architecture and verified contracts; move dated investigations to history.",
+      "review_only_content_rule": "Describe the current architecture and verified contracts; mark capabilities as supported, offline-only, report-only, or deferred; move dated investigations to history. Name current capabilities directly; do not use implementation-plan milestone labels such as P5.x, P6, or P8 as deployed product vocabulary.",
       "lifecycle": "current",
       "content_ownership": "canonical",
       "canonical_rule_ids": []
@@ -68,7 +68,7 @@
       "allowed_index_names": ["README.md"],
       "requires_index": false,
       "required_markdown_metadata": ["h1"],
-      "review_only_content_rule": "Keep pose/runtime ownership in data-factory.md and collection, feedback, retention, and human-intervention ownership in data-collection-and-feedback.md; link instead of duplicating.",
+      "review_only_content_rule": "Keep pose/runtime ownership in data-factory.md and collection, feedback, retention, and human-intervention ownership in data-collection-and-feedback.md; link instead of duplicating. Mark each capability as supported, offline-only, report-only, or deferred. Name current capabilities directly; do not use implementation-plan milestone labels such as P5.x, P6, or P8 as deployed product vocabulary. Preserve literal schema/API/status values only when they are part of the executable contract.",
       "lifecycle": "current",
       "content_ownership": "canonical",
       "canonical_rule_ids": []
@@ -81,7 +81,7 @@
       "allowed_index_names": ["README.md"],
       "requires_index": false,
       "required_markdown_metadata": ["h1"],
-      "review_only_content_rule": "Keep backend-free preview and test instructions concise, link to the fixture decision and backend proposal, and never present fixture interactions as runtime authority.",
+      "review_only_content_rule": "Keep backend-free preview and test instructions concise, link to the fixture decision and backend proposal, and never present fixture interactions as runtime authority. Distinguish fixture-only, supported, offline-only, and deferred behavior. Name current capabilities directly; do not use implementation-plan milestone labels such as P5.x, P6, or P8 as deployed product vocabulary.",
       "lifecycle": "current",
       "content_ownership": "convenience",
       "canonical_rule_ids": ["operator-ui-fixture-adr", "operator-ui-backend-proposal", "data-factory-contract"]
@@ -94,7 +94,7 @@
       "allowed_index_names": ["README.md"],
       "requires_index": true,
       "required_markdown_metadata": ["h1"],
-      "review_only_content_rule": "Keep the accepted dependency-free fixture decision and measured interaction targets separate from future backend, runtime, and safety authority.",
+      "review_only_content_rule": "Keep the accepted dependency-free fixture decision and measured interaction targets separate from future backend, runtime, and safety authority. Distinguish fixture-only, supported, offline-only, and deferred behavior. Name capabilities and deferred boundaries directly; do not use implementation-plan milestone labels such as P5.x, P6, or P8 as product vocabulary.",
       "lifecycle": "current",
       "content_ownership": "canonical",
       "canonical_rule_ids": []
@@ -107,7 +107,7 @@
       "allowed_index_names": ["README.md"],
       "requires_index": true,
       "required_markdown_metadata": ["h1"],
-      "review_only_content_rule": "Keep the unimplemented proposal status explicit, preserve existing backend authority, and do not present deferred API or execution work as current behavior.",
+      "review_only_content_rule": "Keep the unimplemented proposal status explicit, preserve existing backend authority, and do not present deferred API or execution work as current behavior. Milestone labels may describe proposal sequencing but must not be presented as deployed product terminology.",
       "lifecycle": "current",
       "content_ownership": "canonical",
       "canonical_rule_ids": []
@@ -120,7 +120,7 @@
       "allowed_index_names": ["README.md"],
       "requires_index": false,
       "required_markdown_metadata": ["h1"],
-      "review_only_content_rule": "Keep only commands and operator checks local to the tool; link to the canonical contract instead of duplicating it.",
+      "review_only_content_rule": "Keep only commands and operator checks local to the tool; link to the canonical contract instead of duplicating it. Distinguish supported commands from offline-only, report-only, or deferred behavior. Name current capabilities directly; do not use implementation-plan milestone labels such as P5.x, P6, or P8 as deployed product vocabulary.",
       "lifecycle": "current",
       "content_ownership": "convenience",
       "canonical_rule_ids": ["data-factory-contract"]
@@ -133,7 +133,7 @@
       "allowed_index_names": ["README.md"],
       "requires_index": false,
       "required_markdown_metadata": ["h1"],
-      "review_only_content_rule": "Separate external evidence, local synthetic checks, HIL results, physical results, decisions, and unresolved questions.",
+      "review_only_content_rule": "Separate external evidence, local synthetic checks, HIL results, physical results, decisions, and unresolved questions. Preserve exact run IDs and digests. Use milestone codes only when they are part of an exact historical label or provenance; describe evidence meaning with capability names.",
       "lifecycle": "current",
       "content_ownership": "canonical",
       "canonical_rule_ids": []
@@ -146,7 +146,7 @@
       "allowed_index_names": ["README.md"],
       "requires_index": false,
       "required_markdown_metadata": ["h1"],
-      "review_only_content_rule": "Treat plans as proposed work; current behavior and operational authority remain in docs and executable contracts.",
+      "review_only_content_rule": "Treat plans as proposed work; current behavior and operational authority remain in docs and executable contracts. Milestone labels are allowed for sequencing inside plans but must not leak into current deployment terminology.",
       "lifecycle": "current",
       "content_ownership": "canonical",
       "canonical_rule_ids": []
@@ -159,7 +159,7 @@
       "allowed_index_names": ["README.md"],
       "requires_index": false,
       "required_markdown_metadata": ["h1"],
-      "review_only_content_rule": "Keep only records with traceability value and do not present them as current instructions.",
+      "review_only_content_rule": "Keep only records with traceability value and do not present them as current instructions. Preserve milestone codes only when they are required historical provenance, never as current deployment terminology.",
       "lifecycle": "history",
       "content_ownership": "canonical",
       "canonical_rule_ids": []

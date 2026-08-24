@@ -8,7 +8,7 @@ Use semantic HTML, CSS, browser JavaScript, JSON fixtures, one bundled English/K
 
 The React/TypeScript/Vite baseline would add a package graph and build pipeline before the slice needs component reuse, type sharing, routing, or a scene canvas. Vercel's React rules therefore have no runtime target here; their useful constraint is satisfied structurally by shipping no React bundle, waterfall, hydration, or client cache.
 
-If richer P8 scene visualization becomes qualified, migrate by keeping `states.json`/the proposed snapshot contract, porting the seven render states into React components, and replacing only `app.js`. The concrete cost is a locked Node toolchain and CI cache, schema-to-TypeScript generation or duplicated types, seven interaction checks, and a canvas/SVG scene component—roughly two focused engineering days before visualization qualification work. Do that only when dynamic object/slot selection or canvas interaction makes direct DOM rendering measurably hard.
+If richer scene visualization becomes qualified, migrate by keeping `states.json`/the proposed snapshot contract, porting the seven render states into React components, and replacing only `app.js`. The concrete cost is a locked Node toolchain and CI cache, schema-to-TypeScript generation or duplicated types, seven interaction checks, and a canvas/SVG scene component—roughly two focused engineering days before visualization qualification work. Do that only when dynamic object/slot selection or canvas interaction makes direct DOM rendering measurably hard.
 
 ## Operator and single job
 
@@ -57,4 +57,4 @@ Measure these from backend event timestamps and UI interaction events without re
 
 ## Future information, not future UI
 
-P5.5 Object–EE data is offline diagnostic context (`DECLARED_STATIC_PREGRASP_TO_CLOSE`), not actual observed object pose or an admission gate; show it later as evidence, never readiness. P6 condition/trajectory variants need explicit profile/recipe provenance and equal-budget comparison, not a generic variation toggle. P8 pick-place, dual-camera, and human-authored multi-object scenes require separate qualified contracts and recording boundaries. This fixture reserves evidence labels and a setup receipt but deliberately implements none of those controls.
+Object–EE data is offline diagnostic context (`DECLARED_STATIC_PREGRASP_TO_CLOSE`), not actual observed object pose or an admission gate; show it later as evidence, never readiness. Condition/trajectory variants need explicit profile/recipe provenance and equal-budget comparison, not a generic variation toggle. Pick-place, dual-camera, and human-authored multi-object scenes require separate qualified contracts and recording boundaries. This fixture reserves evidence labels and a setup receipt but deliberately implements none of those controls.

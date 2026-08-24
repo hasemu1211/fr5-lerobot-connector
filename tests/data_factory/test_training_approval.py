@@ -143,6 +143,14 @@ class TrainingApprovalTest(unittest.TestCase):
             self.assertEqual(
                 validate_training_approved_inventory(inventory, expected_scope=SYNTHETIC_SCOPE), inventory,
             )
+            approval_digest = inventory["episodes"][1]["training_approval"]["artifact_digest"]
+            first["training_approval"]["artifact_digest"] = D3
+            self.assertEqual(
+                inventory["episodes"][1]["training_approval"]["artifact_digest"], approval_digest,
+            )
+            self.assertEqual(
+                validate_training_approved_inventory(inventory, expected_scope=SYNTHETIC_SCOPE), inventory,
+            )
             target = root / "training_approved_inventory.SYNTHETIC_TEST_ONLY.json"
             self.assertEqual(
                 write_training_approved_inventory(target, inventory, expected_scope=SYNTHETIC_SCOPE), target,
@@ -257,8 +265,7 @@ class TrainingApprovalTest(unittest.TestCase):
             root = Path(directory)
             dataset, _, _, _, entry = synthetic_fixture(root)
             target = root / "mocked-production-output.json"
-            phrase = f"{PROVENANCE} {dataset['dataset_id']} {entry['episode_id']} {entry['episode_index']}"
-            with mock.patch("builtins.open", side_effect=[FakeTTY(phrase + "\n"), FakeTTY()]), mock.patch.object(
+            with mock.patch.object(training_approval, "_confirm_human_training_approval") as confirmation, mock.patch.object(
                 training_approval, "_write_exclusive"
             ) as writer:
                 approval = issue_training_approval(
@@ -276,7 +283,37 @@ class TrainingApprovalTest(unittest.TestCase):
                     clock=lambda: datetime(2026, 8, 24, tzinfo=timezone.utc),
                 )
             self.assertEqual((approval["scope"], approval["provenance"]), (PRODUCTION_SCOPE, PROVENANCE))
+            confirmation.assert_called_once_with(
+                f"{PROVENANCE} {dataset['dataset_id']} {entry['episode_id']} "
+                f"{entry['episode_index']} {canonical_digest(approval)}"
+            )
             writer.assert_called_once()
+            self.assertFalse(target.exists())
+
+    def test_tty_confirmation_mismatch_never_calls_writer_or_creates_artifact(self):
+        with tempfile.TemporaryDirectory(prefix="SYNTHETIC_TEST_ONLY-") as directory:
+            root = Path(directory)
+            dataset, _, _, _, entry = synthetic_fixture(root)
+            target = root / "must-not-exist.json"
+            with mock.patch("builtins.open", side_effect=[FakeTTY("wrong-digest\n"), FakeTTY()]), mock.patch.object(
+                training_approval, "_write_exclusive"
+            ) as writer:
+                with self.assertRaisesRegex(ContractError, "HUMAN_CONFIRMATION_FAILED"):
+                    issue_training_approval(
+                        target,
+                        scope=PRODUCTION_SCOPE,
+                        dataset_identity=dataset,
+                        episode_id=entry["episode_id"],
+                        episode_index=entry["episode_index"],
+                        episode_content_digest=entry["episode_content_digest"],
+                        technical_validator_path=entry["technical_validator"]["artifact_path"],
+                        technical_validator_digest=entry["technical_validator"]["artifact_digest"],
+                        human_semantic_evidence_path=entry["human_semantic_evidence"]["artifact_path"],
+                        human_semantic_evidence_digest=entry["human_semantic_evidence"]["artifact_digest"],
+                        approved_by="synthetic-approver-1",
+                        clock=lambda: datetime(2026, 8, 24, tzinfo=timezone.utc),
+                    )
+            writer.assert_not_called()
             self.assertFalse(target.exists())
 
     def test_existing_approval_target_fails_before_tty_and_is_unchanged(self):

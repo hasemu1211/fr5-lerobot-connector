@@ -18,7 +18,7 @@ r007의 체감 정지는 runner queue 적체와 구분한다. terminal 뒤 다�
 
 2026-08-21에는 같은 ROS `FollowJointTrajectory` 경로와 feedback/timeout gate를 유지하고 gripper duration만 1.0 s로 재적격화했다. 독립 HIL에서 close는 1.0509 s, open은 1.7011 s에 성공했고 두 goal 사이 coordinator gap은 0.179 ms, arm 최대 drift는 7.59 µrad였다. 근거는 `outputs/data_factory/qualifications/p45-gripper-latency-r001/evidence.json`이며 SHA-256은 `8ebef58209dcbdb7ef60e46cb8d483f319deba313888033df16bdbee7e51f0f9`다.
 
-같은 날 공개 `run_job --mode live`의 P4.5 r003은 CENTER source에서 GRID_1=`(-70 mm,+35 mm,0°)` release까지 10개 phase를 모두 실행했다. 2,023개 collision sample은 전부 valid였고 close/open accepted→terminal은 1.051/1.096 s, gripper terminal→다음 arm dispatch는 1.374/1.418 ms였다. recorder는 lift 직후 537 rows에서 freeze되어 recycle 뒤에도 537 rows였고, scene v2 revision 14의 `ROBOT_RELEASE` object+slot 전이가 commit보다 먼저 durable해진 뒤 technical validator가 `PASS`했다. plan은 `sha256:c2e5668c…a9ce1`, recycle은 `sha256:434fca4c…4b10d`이며 원본은 `outputs/data_factory/runs/p45-public-live-20260821-r003/`와 `datasets/fr5_episodes/p45_public_recycle_20260821_r003/`다. 이 single-camera HIL의 `camera_semantic_authority`와 `training_authorized`는 모두 false다.
+같은 날 공개 `run_job --mode live`의 pickup+recycle HIL은 CENTER source에서 GRID_1=`(-70 mm,+35 mm,0°)` release까지 10개 phase를 모두 실행했다. 2,023개 collision sample은 전부 valid였고 close/open accepted→terminal은 1.051/1.096 s, gripper terminal→다음 arm dispatch는 1.374/1.418 ms였다. recorder는 lift 직후 537 rows에서 freeze되어 recycle 뒤에도 537 rows였고, scene v2 revision 14의 `ROBOT_RELEASE` object+slot 전이가 commit보다 먼저 durable해진 뒤 technical validator가 `PASS`했다. plan은 `sha256:c2e5668c…a9ce1`, recycle은 `sha256:434fca4c…4b10d`이며 원본은 `outputs/data_factory/runs/p45-public-live-20260821-r003/`와 `datasets/fr5_episodes/p45_public_recycle_20260821_r003/`다. 이 single-camera HIL의 `camera_semantic_authority`와 `training_authorized`는 모두 false다.
 
 - 첫 live task: `pickup_e2e`
 - 첫 grasp profile: `top_center` 하나
@@ -54,15 +54,15 @@ brightness, clipping, sharpness와 색 변화량은 정성 검토를 돕는 warn
 
 2026-08-14의 8초 UVC raw probe에서는 약 14.5 Hz가 관찰됐다. 이는 30 Hz profile의 startup 최소 22.5 Hz보다 낮은 **해당 probe 경로의 경고/실패**다. 카메라 연결이 불안정하다는 판정이나 dataset validator 결과가 아니다. 실제 ROS camera profile은 `scripts/preflight_collection.sh --live`와 저장된 `recording_quality.jsonl`·provenance를 사용하는 validator로 다시 판정한다. probe에 맞춰 기존 threshold를 낮추거나 dataset FPS를 자동 변경하지 않는다.
 
-## P3 behavior quality (report-only)
+## Behavior quality sidecar와 offline report
 
 기존 technical validator는 변경하지 않고 versioned result digest를 read-only prerequisite로 참조한다. executor-owned `phase_events.jsonl`은 phase, sequence, ROS control-event time, monotonic time과 action terminal evidence를 bounded queue로 기록한다. recorder row join은 qualified same-clock의 accepted-to-terminal interval에 row index만 배정하며 clock mismatch, sequence gap, overlap과 missing terminal을 추정하지 않고 `NOT_AVAILABLE` 또는 flag로 남긴다.
 
 `quality/`의 post-run 순수 함수는 compiled plan의 chain·endpoint scalar, joint tracking/progress/stall, gripper close window와 lift continuity를 attribute로 만든다. serialized trajectory shape와 TCP/FK/TF metric은 적격화 전 `NOT_AVAILABLE`이며 현재 `camera_semantic_authority=false`이므로 visual/object semantic 판정은 만들지 않는다. `episode_quality.json`은 이 attribute와 기존 technical-validator reference를 묶을 뿐 weighted score, 자동 삭제 또는 training approval을 만들지 않는다.
 
-sidecar queue·disk 실패는 `BEHAVIOR_REPORT_UNAVAILABLE`로만 남고 motion, heartbeat와 recorder를 기다리거나 취소시키지 않는다. 현재 executor에는 sidecar writer가 연결됐고 post-run report는 pure API로 제공된다. 공개 runner의 live lifecycle은 sidecar를 기다리지 않으며 자동 report 생성은 아직 하지 않는다. v1 writer resource contract는 queue 64개, UTF-8 text field 128 byte, JSONL line 4096 byte로 versioned report에 기록한다. r007 `RES-01`은 현재 16 GB 호스트에서 sampling error·swap I/O·queue drop 0을 보였지만 실제 8 GB 장비 qualification을 대체하지 않는다.
+sidecar queue·disk 실패는 `BEHAVIOR_REPORT_UNAVAILABLE`로만 남고 motion, heartbeat와 recorder를 기다리거나 취소시키지 않는다. 현재 executor에는 sidecar writer가 연결됐고 post-run report는 side-effect-free offline API로 제공된다. 공개 runner의 live lifecycle은 sidecar를 기다리지 않으며 자동 report 생성은 아직 하지 않는다. v1 writer resource contract는 queue 64개, UTF-8 text field 128 byte, JSONL line 4096 byte로 versioned report에 기록한다. r007 `RES-01`은 현재 16 GB 호스트에서 sampling error·swap I/O·queue drop 0을 보였지만 실제 8 GB 장비 qualification을 대체하지 않는다.
 
-## P5.5 object-frame context (report-only)
+## Object-frame context (offline report-only)
 
 `object_frame_context`는 accepted episode를 offline으로 읽어 만드는 static declared context다. `status=AVAILABLE`은 다음 binding이 모두 맞는다는 뜻이다.
 
@@ -169,7 +169,7 @@ python3 -m tools.data_factory.run_job --factory-jsonl
 
 technical validator가 `PASS`한 live run은 같은 run directory에 `candidate_admission.json`을 atomic 생성한다. 이 파일은 `checklist_id=pickup-v2`, `operational_source=HUMAN_GATED`, `semantic_status=PENDING`이며 reviewer/time/reason은 `null`이다. 기존 executor의 사람 verdict를 semantic 또는 training approval로 승격하지 않는다.
 
-P5 coverage는 finite domain과 저장 episode reference를 명시한 두 JSON manifest만 offline으로 읽는다. domain manifest의 exact key는 `schema_version=data_factory.coverage_domain.v1`, `collection_profile_id`, `conditions`, `slots`이고 stored manifest의 exact key는 `schema_version=data_factory.coverage_stored_episodes.v2`, `episodes`다.
+Coverage reporting은 finite domain과 저장 episode reference를 명시한 두 JSON manifest만 offline으로 읽는다. domain manifest의 exact key는 `schema_version=data_factory.coverage_domain.v1`, `collection_profile_id`, `conditions`, `slots`이고 stored manifest의 exact key는 `schema_version=data_factory.coverage_stored_episodes.v2`, `episodes`다.
 
 각 episode reference는 JobSpec, preapproval evidence, technical validator, candidate admission의 path와 expected canonical digest를 모두 포함한다. v2 validator는 normalized Job과 승인 전 plan의 binding digest로 resolved Job digest를 독립 재계산하고 exact plan digest를 확인한 뒤 review context를 다시 계산한다.
 
@@ -184,7 +184,7 @@ python3 -m tools.data_factory.quality.coverage_report \
 
 명령은 report JSON을 stdout에 출력하고 `<output-root>/<collection_profile_id>/coverage_report.json`을 atomic publish한다. malformed/missing/digest-mismatched evidence는 report를 만들지 않고 실패하며, pending review condition은 backlog가 해제되기 전 `suggest_next`에서 제외된다.
 
-P5.2 software mechanism은 같은 entrypoint의 `campaign` command다. manifest exact key는 `schema_version=data_factory.campaign.v1`, `campaign_id`, `max_episodes=2`, `episodes`이고, 두 episode는 각각 exact `run`, `release_role`을 가진다. role 순서는 `DESTINATION_THEN_NEXT_SOURCE`, `RELEASE_DESTINATION`이며 첫 recycle pose가 두 번째 JobSpec source와 같고 A/B/C pose가 서로 달라야 한다.
+Bounded two-episode campaign은 같은 entrypoint의 `campaign` command다. manifest exact key는 `schema_version=data_factory.campaign.v1`, `campaign_id`, `max_episodes=2`, `episodes`이고, 두 episode는 각각 exact `run`, `release_role`을 가진다. role 순서는 `DESTINATION_THEN_NEXT_SOURCE`, `RELEASE_DESTINATION`이며 첫 recycle pose가 두 번째 JobSpec source와 같고 A/B/C pose가 서로 달라야 한다.
 
 ```bash
 python3 -m tools.data_factory.run_job campaign --manifest <campaign.json>
@@ -314,7 +314,7 @@ python3 tools/data_factory/scene_state.py set-surface \
   --expect-revision <현재-revision>
 ```
 
-AI agent도 같은 CLI/JSON schema를 사용하며 `--expect-revision` 충돌 시 다시 읽어야 한다. OneJob은 scene binding을 executor plan에 묶고 executor는 시작 시 exact digest·revision과 `ON_SURFACE`를 확인한 뒤 cell을 block한다. fault 뒤 pose는 `UNKNOWN`이 된다. P4.5 recycle에서는 executor가 expected revision에 대해 정상 `LANDED` object+slot을 scene v2 한 revision으로 쓰며, 이 write가 성공하기 전 `COMPLETED`와 recorder commit은 0이다. runner는 raw scene JSON을 쓰지 않고 exact transition evidence를 검증한 뒤 cell-ready를 기록한다.
+AI agent도 같은 CLI/JSON schema를 사용하며 `--expect-revision` 충돌 시 다시 읽어야 한다. OneJob은 scene binding을 executor plan에 묶고 executor는 시작 시 exact digest·revision과 `ON_SURFACE`를 확인한 뒤 cell을 block한다. fault 뒤 pose는 `UNKNOWN`이 된다. pickup+recycle live path에서는 executor가 expected revision에 대해 정상 `LANDED` object+slot을 scene v2 한 revision으로 쓰며, 이 write가 성공하기 전 `COMPLETED`와 recorder commit은 0이다. runner는 raw scene JSON을 쓰지 않고 exact transition evidence를 검증한 뒤 cell-ready를 기록한다.
 
 ## 안전과 현재 하드웨어 경계
 
@@ -413,20 +413,6 @@ build/ install/ log/                     # colcon/ROS 산출물; factory evidenc
 
 run 디렉터리는 control-plane metadata만 소유한다. RGB/video/Parquet를 복사하지 않는다. 실제 batch staging은 LeRobot dataset root 아래에 유지하고 `staging_manifest.json`은 허용된 정확한 경로만 가리킨다. quarantine도 무거운 파일을 복제하지 않고 dataset marker와 `result.json`으로 표시한다.
 
-P3 sidecar와 quality report는 digest, row count와 phase scalar만 저장하며 recorder row, RGB, MP4와 Parquet를 복제하지 않는다.
+Phase-event sidecar와 behavior quality report는 digest, row count와 phase scalar만 저장하며 recorder row, RGB, MP4와 Parquet를 복제하지 않는다.
 
 기존 `datasets/fr5_episodes/hil_usb_cam_30hz_20260812/`는 과거 HIL dataset으로 그대로 보존한다. 현재 평평한 `outputs/diagnostics/`와 `outputs/previews/`도 삭제하지 않는다. 새 factory run은 그 경로에 쓰지 않으며, 별도 inventory·checksum·참조 검사를 통과한 뒤에만 `outputs/legacy/`로 이동한다. 기존 dataset은 새 layout으로 복사하거나 이름을 바꾸지 않는다.
-
-## 단계적 구현
-
-1. 이 계약과 검증 계약을 기준으로 기존 문서 충돌을 닫는다.
-2. `pickup_e2e` JobSpec, profile/calibration validator와 motion 없는 `resolve-pose`를 구현한다.
-3. 기존 recorder core에 `begin/freeze/commit/abort/status`를 추가하고 기존 UI가 같은 core를 사용하게 한다.
-4. `known_safe_hil_v1`부터 FR5 action surface와 cancel/fault 처리를 검증한다.
-5. 한-job orchestrator로 validation, recording, pickup, human verdict, reset, commit/abort를 연결한다.
-6. 실제 pipeline preflight와 dataset validator를 포함한 자원 번인 후 첫 training approval을 검토한다.
-7. nominal pickup이 반복 검증된 뒤에만 alternate grasp, recovery와 pattern sampler를 새 schema version으로 추가한다.
-8. source pickup이 안정된 다음 별도 수직 슬라이스로 `pick_place`를 추가한다.
-9. 두 번째 실제 로봇이 들어올 때만 공통 robot adapter를 추출한다.
-
-각 단계는 코드베이스·승인된 계약·외부 1차 근거와 수용시험을 함께 가져야 한다. 한 축이라도 없으면 `QUALIFICATION_REQUIRED` 또는 `DEFERRED`이며 지원으로 표시하지 않는다.

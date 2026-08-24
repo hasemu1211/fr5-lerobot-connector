@@ -53,7 +53,8 @@ def compile_valid() -> dict:
             "collection_profile_digest": digest("profile"),
             "normalized_command_digest": digest("command"),
             "runtime_digest": digest("runtime"),
-            "approved_episode_manifest_digest": digest("approved-manifest"),
+            "approved_episode_inventory_digest": digest("approved-inventory"),
+            "episode_manifest_digest": digest("episode-manifest"),
         },
         episode_groups={
             "TRAIN": [episode(0, "a", "pose-1"), episode(1, "a", "pose-2")],
@@ -112,7 +113,8 @@ class TrainingSplitTests(unittest.TestCase):
             ("bindings", "collection_profile_digest"),
             ("bindings", "normalized_command_digest"),
             ("bindings", "runtime_digest"),
-            ("bindings", "approved_episode_manifest_digest"),
+            ("bindings", "approved_episode_inventory_digest"),
+            ("bindings", "episode_manifest_digest"),
         ):
             changed = copy.deepcopy(split)
             changed[path[0]][path[1]] = digest(["changed", path])

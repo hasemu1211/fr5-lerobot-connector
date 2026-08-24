@@ -1,5 +1,6 @@
 """Synthetic tests for strict training and independent reload receipts."""
 
+import copy
 import hashlib
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -46,6 +47,7 @@ def training_receipt() -> dict:
         "source_digest": digest("5"),
         "profile_id": "smolvla-fr5-up-side-v1",
         "profile_digest": digest("6"),
+        "collection_profile_digest": digest("c"),
         "normalized_argv": argv,
         "argv_digest": canonical_digest(argv),
         "config_digest": digest("7"),
@@ -64,6 +66,7 @@ def training_receipt() -> dict:
 
 
 def reload_receipt(train: dict) -> dict:
+    argv = ["python3", "-m", "tools.reload_smolvla", "--checkpoint=checkpoints/000100"]
     return {
         "schema_version": RELOAD_RECEIPT_SCHEMA,
         "reload_receipt_id": "reload-receipt-1",
@@ -73,6 +76,14 @@ def reload_receipt(train: dict) -> dict:
         "train_session_id": train["session_id"],
         "reload_process_id": "reload-process-200",
         "reload_session_id": "reload-session-b",
+        "repository_commit": train["repository_commit"],
+        "source_digest": train["source_digest"],
+        "profile_id": train["profile_id"],
+        "profile_digest": train["profile_digest"],
+        "collection_profile_digest": train["collection_profile_digest"],
+        "normalized_argv": argv,
+        "argv_digest": canonical_digest(argv),
+        "runtime_versions": copy.deepcopy(train["runtime_versions"]),
         "checkpoint_id": train["checkpoint_id"],
         "checkpoint_tree_digest": train["checkpoint_tree_digest"],
         "split_digest": train["split_digest"],
@@ -150,6 +161,12 @@ class TrainingReceiptTest(unittest.TestCase):
             ("split_digest", digest("f")),
             ("runtime_digest", digest("f")),
             ("feature_digest", digest("f")),
+            ("repository_commit", "b" * 40),
+            ("source_digest", digest("f")),
+            ("profile_id", "other-profile"),
+            ("profile_digest", digest("f")),
+            ("collection_profile_digest", digest("f")),
+            ("argv_digest", digest("f")),
             ("train_process_id", "other-train-process"),
             ("train_session_id", "other-train-session"),
             ("reload_process_id", train["process_id"]),

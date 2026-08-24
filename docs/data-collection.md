@@ -114,7 +114,7 @@ qualified JobSpec과 scene/cell을 쓸 때는 [one-job runner](data-factory.md#o
 
 `PASS` 뒤에는 recorder row를 늘리지 않고 release slot approach→lower→open→retreat→safe staging을 실행한다. 물체가 표시 slot 안에 있고 gripper가 비었으며 retreat/safe staging이 끝났으면 exact recycle digest가 붙은 `LANDED`를 입력한다. executor가 object+slot을 scene v2 한 revision으로 먼저 기록한 뒤에만 recorder commit과 validator가 진행된다. `OFF_SLOT`/`UNCERTAIN`, terminal evidence 불일치 또는 scene write 실패에서는 commit과 다음 motion을 막고 object=`UNKNOWN`, slot=`QUARANTINED`로 격리한다.
 
-현재 사람용 표면은 같은 interactive Job builder와 이 one-job CLI다. 여러 episode를 한 화면에서 운용하는 bounded campaign UX는 후속 P5.2 범위이며, 현재 명령이 성공했다고 별도 GUI나 무인 연속 수집이 검증된 것은 아니다.
+현재 사람용 표면은 같은 interactive Job builder와 이 one-job CLI다. bounded two-episode campaign은 manifest 기반 CLI로 운용하며 여러 episode를 한 화면에서 다루는 별도 GUI나 무인 연속 수집은 검증되지 않았다.
 
 임시 camera profile은 정량 기록만 하며 화면으로 성공을 자동 판정하지 않는다. validator `PASS`도 `training_approved.json`을 만들지 않는다.
 

@@ -28,7 +28,7 @@ DATASET_FIELDS = frozenset({
 })
 BINDING_FIELDS = frozenset({
     "collection_profile_digest", "normalized_command_digest", "runtime_digest",
-    "approved_episode_manifest_digest",
+    "approved_episode_inventory_digest", "episode_manifest_digest",
 })
 EPISODE_FIELDS = frozenset({
     "episode_index", "episode_ref_digest", "training_approval_digest",

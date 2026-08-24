@@ -825,8 +825,8 @@ technical·semantic gate와 observed phase report를 통과한 demonstration이 
 | `P5` | explicit coverage report + suggest-next | 가능 | 실행할 next job은 사람 선택/승인 |
 | `P5.2` | 2-episode supervised campaign mechanism HIL — 2026-08-21 C→D→E 완료 | 완료 | exact yaw 0 세 slot 밖으로 일반화하지 않음; training authority 0 |
 | `P5.5` | Object–EE declared-static offline context — 2026-08-24 완료 | 완료 | FK/TF와 post-close pose는 `NOT_AVAILABLE`; actual object pose·gate 주장은 금지 |
-| `P5.8a` | episode approval inventory + fixed dual-camera binding contract + immutable split/evaluation v2 + seed/rollout manifest schema와 fake checks | 가능 | live/training authority 없음; contract revision·training admission은 사람 검토 |
-| `P5.8b` | fixed `DIRECT` initial-seed campaign: declared object X/Y/Yaw × finite robot start-pose matrix, same-condition ID episodes와 factor-held-out OOD | software/fake 가능 | yaw별 grasp/TCP binding·dual-view observability, 각 start pose joint target/tolerance·plan-only qualification, final camera short check, exact plan/semantic/training approval |
+| `P5.8a` | episode approval inventory + fixed dual-camera binding contract + immutable split/evaluation v2 + seed/rollout manifest schema와 fake checks — 2026-08-24 `CONTRACT_READY` | 완료 | live/training authority 없음; contract revision·production training admission은 사람 검토 |
+| `P5.8b` | fixed `DIRECT` initial-seed campaign: declared object X/Y/Yaw × finite robot start-pose matrix, same-condition ID episodes와 factor-held-out OOD | software/fake 가능 | yaw→grasp/TCP binding, 각 start pose joint target/tolerance·plan-only qualification, declared yaw 범위를 포함한 final camera short check 한 번, exact plan/semantic/training approval; yaw별 camera 승인 없음 |
 | `P5.8c` | 첫 SmolVLA train→checkpoint digest→independent reload→offline diagnostics→진단 rollout | 일부 | train은 approved seed/compute, 실물 rollout은 action adapter·safety와 trial별 승인 필요 |
 | `P6` | evidence-triggered same-condition/equal-budget phase variant ablation + canonical/object-relative plan-only | plan-only 가능 | paired HIL·training/rollout 비교 전 별도 승인; 첫 baseline prerequisite 아님 |
 | `P6.5` | rollout failure와 coverage가 지정한 qualified finite recollection | 일부 | nominal은 failure+coverage, variant는 추가 P6 decision; campaign quota와 batch review |
@@ -837,9 +837,9 @@ technical·semantic gate와 observed phase report를 통과한 demonstration이 
 
 ### 사람 개입 예산
 
-- P5와 P5.5는 offline이라 실물 작업이 없다.
+- P5, P5.5와 P5.8a는 offline이라 실물 작업이 없다.
 - P5.2는 물체 최초 배치, episode별 exact digest 승인 2회, inter-episode landing 판정 한 번, final scene 확인과 종료 batch review만 요구한다. 기존 HIL 사전승인은 이 시험을 준비할 권한이며 exact digest 승인을 생략하지 않는다.
-- P5.8의 기존 `fr5_training_split.json` v2 안 evaluation contract는 manifest별 한도뿐 아니라 `max_rounds`, `max_total_physical_episodes`, `max_total_rollout_trials`, `max_total_hil_prompts`, `max_pending_reviews`의 프로그램 누적 상한과 현재 누적값을 결속한다. 하나라도 소진되면 정상 정지하며, 상한 증가는 새 contract revision과 사람의 별도 승인이 필요하다.
+- P5.8의 `fr5_training_split.json` v2 안 evaluation contract는 manifest별 한도뿐 아니라 `max_rounds`, `max_total_physical_episodes`, `max_total_rollout_trials`, `max_total_hil_prompts`, `max_total_reviews`, `max_pending_reviews`, `max_total_storage_bytes`의 프로그램 누적 상한과 현재 누적값을 결속한다. 하나라도 소진되면 정상 정지하며, 상한 증가는 새 contract revision과 사람의 별도 승인이 필요하다.
 - P5.8 이후 모든 수집·rollout은 시작 전에 condition, 최대 episode/trial 수, 최대 시간·저장량과 stop condition이 들어간 finite manifest를 사람이 승인한다. 실행 중 quota나 프로그램 누적 상한을 자동 확대하지 않는다.
 - P6.5는 P5.8 failure-condition evidence로 필요한 cell만 제안한다. 사용자는 제안을 승인·거부할 수 있고, 새로운 variant나 condition은 별도 승인 없이는 추가되지 않는다.
 - 따라서 새 고정 수동 절차를 늘리지 않는다. 향후 실물 trial은 앞당겨지지만 무가치한 대량 수집을 먼저 하는 대신 의사결정당 최소한으로 제한한다.
@@ -1046,7 +1046,7 @@ P4 public single-job live는 r007, gripper timing 재적격화는 `p45-gripper-l
 
 P5.5 `Object–EE offline diagnostic`과 backend-free frontend fixture, Korean mode, accessibility slice는 완료됐다. P5.5는 declared static `object_frame_context`만 제공하며 FK/TF와 post-close pose는 계속 `NOT_AVAILABLE`이다. Frontend fixture는 backend proposal을 구현하지 않았고 `run_job.py`, Python operator core와 preflight를 연결하지 않는다.
 
-다음 backend Goal은 offline-first `P5.8a SOFTWARE_CONTRACT`다. episode-level training-approved inventory, immutable split/evaluation v2, fixed dual-camera `DIRECT`의 object-condition×robot-start-pose seed manifest와 train/reload/action-adapter fake contract를 독립 범위에서 먼저 완성한다. P6 plan-only compiler는 병렬 가능하지만 critical path가 아니며, frontend backend bridge는 계속 후속 제안으로 둔다.
+offline-first `P5.8a SOFTWARE_CONTRACT`는 2026-08-24 `CONTRACT_READY`로 완료됐다. episode-level training-approved inventory와 human-only issuance boundary, immutable split/evaluation v2, fixed dual-camera `DIRECT`의 finite object-condition×robot-start-pose seed/rollout manifest, train/checkpoint·independent reload receipt와 7D dual-camera/action-adapter fake contract를 구현했다. 실제 production approval/inventory/manifest/receipt/checkpoint, dataset/training output과 hardware/live action은 만들지 않았다. P6 plan-only compiler와 frontend backend bridge는 구현하지 않았고 계속 non-critical 후속 제안이다.
 
 그다음 critical path는 `각 robot start pose plan-only qualification + 최종 dual-camera exact binding·구도 short check → operator-approved thin DIRECT pilot → balanced object pose×robot start-pose initial seed와 별도 training admission → train/checkpoint digest/independent reload/offline diagnostics → action-adapter safety qualification 뒤 diagnostic ID/OOD rollout`이다. rollout 뒤 nominal failure+coverage는 곧바로 P6.5로, trajectory strategy 문제가 있으면 `P6 DIRECT/TWO_STAGE/recovery experiment → variant-targeted P6.5`로 분기한다. 이 순서는 첫 seed를 post-rollout P6.5에 의존시키는 순환을 제거하고, 이미 검증된 dual-camera acquisition의 불필요한 재구현/HIL을 반복하지 않는다.
 

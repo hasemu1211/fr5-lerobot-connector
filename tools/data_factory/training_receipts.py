@@ -17,7 +17,7 @@ _COMMIT = re.compile(r"[0-9a-f]{40}(?:[0-9a-f]{24})?\Z")
 _TRAINING_KEYS = {
     "schema_version", "receipt_id", "process_id", "session_id", "dataset_id",
     "dataset_digest", "repository_commit", "source_digest", "profile_id",
-    "profile_digest", "normalized_argv", "argv_digest", "config_digest",
+    "profile_digest", "collection_profile_digest", "normalized_argv", "argv_digest", "config_digest",
     "runtime_versions", "runtime_digest", "approved_episode_inventory_digest",
     "episode_manifest_digest", "split_digest", "training_seed", "feature_binding",
     "feature_digest", "checkpoint_id", "checkpoint_tree_digest", "status",
@@ -25,7 +25,10 @@ _TRAINING_KEYS = {
 _RELOAD_KEYS = {
     "schema_version", "reload_receipt_id", "train_receipt_id", "train_receipt_digest",
     "train_process_id", "train_session_id", "reload_process_id", "reload_session_id",
-    "checkpoint_id", "checkpoint_tree_digest", "split_digest", "runtime_digest",
+    "repository_commit", "source_digest", "profile_id", "profile_digest",
+    "collection_profile_digest", "normalized_argv", "argv_digest",
+    "runtime_versions", "runtime_digest",
+    "checkpoint_id", "checkpoint_tree_digest", "split_digest",
     "feature_digest", "reload_status", "task_success_claimed",
 }
 _RUNTIME_KEYS = {
@@ -166,7 +169,8 @@ def validate_training_receipt(
     ):
         raise ReceiptError("REPOSITORY_COMMIT")
     for key in (
-        "dataset_digest", "source_digest", "profile_digest", "argv_digest", "config_digest",
+        "dataset_digest", "source_digest", "profile_digest", "collection_profile_digest",
+        "argv_digest", "config_digest",
         "runtime_digest", "approved_episode_inventory_digest", "episode_manifest_digest",
         "split_digest", "feature_digest", "checkpoint_tree_digest",
     ):
@@ -203,19 +207,35 @@ def validate_reload_receipt(value: object, train_receipt: object) -> dict:
         raise ReceiptError("RELOAD_STATUS")
     for key in (
         "reload_receipt_id", "train_receipt_id", "train_process_id", "train_session_id",
-        "reload_process_id", "reload_session_id", "checkpoint_id",
+        "reload_process_id", "reload_session_id", "profile_id", "checkpoint_id",
     ):
         _text(receipt[key], "RELOAD_IDENTITY")
+    if not isinstance(receipt["repository_commit"], str) or not _COMMIT.fullmatch(
+        receipt["repository_commit"]
+    ):
+        raise ReceiptError("RELOAD_REPOSITORY_COMMIT")
     for key in (
-        "train_receipt_digest", "checkpoint_tree_digest", "split_digest", "runtime_digest",
-        "feature_digest",
+        "train_receipt_digest", "source_digest", "profile_digest",
+        "collection_profile_digest", "argv_digest", "checkpoint_tree_digest",
+        "split_digest", "runtime_digest", "feature_digest",
     ):
         _digest(receipt[key], "RELOAD_DIGEST")
+    argv = normalize_argv(receipt["normalized_argv"])
+    if canonical_digest(argv) != receipt["argv_digest"]:
+        raise ReceiptError("RELOAD_ARGV_DIGEST")
+    runtime = _runtime(receipt["runtime_versions"])
+    if canonical_digest(runtime) != receipt["runtime_digest"]:
+        raise ReceiptError("RELOAD_RUNTIME_DIGEST")
     expected = {
         "train_receipt_id": train["receipt_id"],
         "train_receipt_digest": canonical_digest(train),
         "train_process_id": train["process_id"],
         "train_session_id": train["session_id"],
+        "repository_commit": train["repository_commit"],
+        "source_digest": train["source_digest"],
+        "profile_id": train["profile_id"],
+        "profile_digest": train["profile_digest"],
+        "collection_profile_digest": train["collection_profile_digest"],
         "checkpoint_id": train["checkpoint_id"],
         "checkpoint_tree_digest": train["checkpoint_tree_digest"],
         "split_digest": train["split_digest"],

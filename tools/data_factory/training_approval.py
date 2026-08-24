@@ -1,6 +1,7 @@
 """Offline episode training admission; no dataset or training mutation authority."""
 from __future__ import annotations
 
+import copy
 import json
 import math
 import os
@@ -271,7 +272,10 @@ def issue_training_approval(
         "provenance": PROVENANCE,
     }
     validate_training_approval(approval)
-    confirmation = f"{PROVENANCE} {dataset['dataset_id']} {episode_id} {episode_index}"
+    confirmation = (
+        f"{PROVENANCE} {dataset['dataset_id']} {episode_id} {episode_index} "
+        f"{canonical_digest(approval)}"
+    )
     _confirm_human_training_approval(confirmation)
     _write_exclusive(target, approval, "TRAINING_APPROVAL_EXISTS")
     return approval
@@ -279,7 +283,7 @@ def issue_training_approval(
 
 def _episode(value: object, *, dataset: Mapping[str, Any], scope: str) -> dict[str, Any]:
     value = _exact(value, EPISODE_KEYS, "TRAINING_INVENTORY_EPISODE_FIELDS")
-    result = dict(value)
+    result = copy.deepcopy(dict(value))
     episode_id, episode_index, content_digest = _episode_identity(
         result["episode_id"], result["episode_index"], result["episode_content_digest"],
     )
