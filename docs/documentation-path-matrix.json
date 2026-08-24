@@ -74,6 +74,45 @@
       "canonical_rule_ids": []
     },
     {
+      "rule_id": "operator-ui-guide",
+      "document_type": "guide",
+      "subject": "backend-free operator collection fixture preview and checks",
+      "path_globs": ["operator-ui/README.md"],
+      "allowed_index_names": ["README.md"],
+      "requires_index": false,
+      "required_markdown_metadata": ["h1"],
+      "review_only_content_rule": "Keep backend-free preview and test instructions concise, link to the fixture decision and backend proposal, and never present fixture interactions as runtime authority.",
+      "lifecycle": "current",
+      "content_ownership": "convenience",
+      "canonical_rule_ids": ["operator-ui-fixture-adr", "operator-ui-backend-proposal", "data-factory-contract"]
+    },
+    {
+      "rule_id": "operator-ui-fixture-adr",
+      "document_type": "reference",
+      "subject": "accepted backend-free operator collection fixture architecture decision",
+      "path_globs": ["operator-ui/architecture.md"],
+      "allowed_index_names": ["README.md"],
+      "requires_index": true,
+      "required_markdown_metadata": ["h1"],
+      "review_only_content_rule": "Keep the accepted dependency-free fixture decision and measured interaction targets separate from future backend, runtime, and safety authority.",
+      "lifecycle": "current",
+      "content_ownership": "canonical",
+      "canonical_rule_ids": []
+    },
+    {
+      "rule_id": "operator-ui-backend-proposal",
+      "document_type": "plan",
+      "subject": "proposed operator UI backend integration contract",
+      "path_globs": ["operator-ui/backend-contract-proposal.md"],
+      "allowed_index_names": ["README.md"],
+      "requires_index": true,
+      "required_markdown_metadata": ["h1"],
+      "review_only_content_rule": "Keep the unimplemented proposal status explicit, preserve existing backend authority, and do not present deferred API or execution work as current behavior.",
+      "lifecycle": "current",
+      "content_ownership": "canonical",
+      "canonical_rule_ids": []
+    },
+    {
       "rule_id": "tool-guides",
       "document_type": "guide",
       "subject": "reusable tool quick starts",
