@@ -1,0 +1,21 @@
+# FR5 collection desk fixture
+
+A backend-free view of setup → readiness → exact digest approval → progress → semantic review/recovery. It never sends robot, camera, recorder, dataset, scene/cell, candidate-admission, or training-approval effects.
+
+Preview in one visible terminal:
+
+```sh
+make -C operator-ui preview
+```
+
+Open `http://127.0.0.1:4173`. Run the repository-owned frontend check with:
+
+```sh
+make -C operator-ui test
+```
+
+Both targets load the repository environment through `direnv`. In a new worktree whose `.envrc` the user has not approved, pass an already-approved checkout explicitly: `make -C operator-ui DIRENV_ROOT=/path/to/approved/checkout test`. Never run `direnv allow` on the user's behalf.
+
+The fixture selector exposes all acceptance states. In “Exact digest approval,” typing the displayed phrase previews the running fixture locally; it does not create an approval receipt. The semantic review buttons likewise announce an intent preview without changing any artifact.
+
+See [architecture.md](architecture.md) for the operator journey and stack decision, and [backend-contract-proposal.md](backend-contract-proposal.md) for the integration boundary.

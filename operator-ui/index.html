@@ -1,0 +1,69 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <title>FR5 collection desk — fixture</title>
+  <link rel="stylesheet" href="styles.css">
+  <script src="app.js" defer></script>
+</head>
+<body>
+  <a class="skip-link" href="#workspace">Skip to collection state</a>
+  <header class="masthead">
+    <div>
+      <p class="eyebrow">FR5 · collection desk</p>
+      <h1>One scene. One exact decision.</h1>
+    </div>
+    <div class="fixture-stamp" aria-label="Fixture mode; no backend is connected">
+      <strong>FIXTURE</strong>
+      <span>No commands sent</span>
+    </div>
+  </header>
+
+  <main id="workspace" tabindex="-1">
+    <section class="workflow" aria-labelledby="workflow-heading">
+      <div class="section-heading">
+        <div>
+          <p class="eyebrow">Campaign c-grid-07</p>
+          <h2 id="workflow-heading">Collection path</h2>
+        </div>
+        <label class="fixture-picker">Inspect fixture
+          <select id="fixture-select" aria-describedby="fixture-help"></select>
+        </label>
+      </div>
+      <p id="fixture-help" class="support-copy">Changes only the local view. It never changes robot, scene, cell, candidate, or training state.</p>
+      <ol id="workflow-steps" class="workflow-steps" aria-label="Collection workflow"></ol>
+    </section>
+
+    <div class="desk-grid">
+      <aside class="setup-panel" aria-labelledby="setup-heading">
+        <p class="eyebrow">Bound inputs</p>
+        <h2 id="setup-heading">Setup receipt</h2>
+        <dl id="setup-details" class="setup-details"></dl>
+        <div class="authority-note">
+          <span aria-hidden="true">◇</span>
+          <p><strong>View only.</strong> Backend artifacts remain authoritative for every value shown here.</p>
+        </div>
+      </aside>
+
+      <article id="state-panel" class="state-panel" aria-labelledby="state-title">
+        <div id="state-content"></div>
+      </article>
+
+      <aside class="evidence-panel" aria-labelledby="evidence-heading">
+        <p class="eyebrow">Evidence chain</p>
+        <h2 id="evidence-heading">What this view reads</h2>
+        <ul id="evidence-list" class="evidence-list"></ul>
+        <p class="authority-boundary"><strong>Authority boundary</strong><br><span id="authority-copy"></span></p>
+      </aside>
+    </div>
+  </main>
+
+  <footer>
+    <span>Backend-free UX fixture</span>
+    <span>Motion approval stays with <code>run_job.py</code></span>
+  </footer>
+  <div id="announcer" class="sr-only" role="status" aria-live="polite"></div>
+</body>
+</html>
