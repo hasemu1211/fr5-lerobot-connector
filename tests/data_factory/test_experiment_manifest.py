@@ -416,6 +416,15 @@ class ExperimentManifestTests(unittest.TestCase):
                 fixed_contract=mixed, coverage_report=report, resolver_results=resolvers,
                 qualification_catalog=mixed_catalog,
             )
+        aliased_action = copy.deepcopy(bases)
+        aliased_action[1]["yaw_action_binding_digest"] = aliased_action[0]["yaw_action_binding_digest"]
+        redigest(aliased_action[1], "qualification_digest")
+        aliased_action_catalog = catalog(fixed, report, resolvers, aliased_action, poses)
+        with self.assertRaisesRegex(ContractError, "HYPOTHESIS_YAW_ACTION_BINDING_ALIASED"):
+            compile_fr5_hypothesis(
+                fixed_contract=fixed, coverage_report=report, resolver_results=resolvers,
+                qualification_catalog=aliased_action_catalog,
+            )
         aliased = copy.deepcopy(bases)
         aliased[1]["dual_view_observability_digest"] = aliased[0]["dual_view_observability_digest"]
         redigest(aliased[1], "qualification_digest")

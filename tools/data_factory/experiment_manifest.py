@@ -438,6 +438,7 @@ def _validate_design(
     poses: Sequence[Mapping[str, Any]], pairs: Sequence[Mapping[str, Any]],
 ) -> None:
     yaw_bindings: dict[int | float, tuple[str, str]] = {}
+    action_yaws: dict[str, int | float] = {}
     observations: dict[str, tuple[str, str, str, str, str]] = {}
     policy = (
         fixed["grasp_profile_id"], fixed["pregrasp_digest"],
@@ -449,6 +450,9 @@ def _validate_design(
         if yaw in yaw_bindings and yaw_bindings[yaw] != binding:
             raise ContractError("HYPOTHESIS_YAW_BINDING_MIXED")
         yaw_bindings[yaw] = binding
+        prior_yaw = action_yaws.setdefault(item["yaw_action_binding_digest"], yaw)
+        if prior_yaw != yaw:
+            raise ContractError("HYPOTHESIS_YAW_ACTION_BINDING_ALIASED")
         observed_policy = (*policy, item["yaw_action_binding_digest"])
         prior = observations.setdefault(item["dual_view_observability_digest"], observed_policy)
         if prior != observed_policy:
