@@ -74,10 +74,8 @@ def file_digest(path: str | Path) -> str:
     source = Path(path)
     if source.is_symlink() or not source.is_file():
         raise ReceiptError("FILE_PATH")
-    digest = hashlib.sha256()
     with source.open("rb") as stream:
-        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
-            digest.update(chunk)
+        digest = hashlib.file_digest(stream, "sha256")
     return "sha256:" + digest.hexdigest()
 
 

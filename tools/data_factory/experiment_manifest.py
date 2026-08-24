@@ -479,6 +479,3 @@ def compile_seed_manifest(**kwargs: Any) -> dict[str, Any]:
 
 def compile_rollout_manifest(**kwargs: Any) -> dict[str, Any]:
     return compile_experiment_manifest(kind="rollout", **kwargs)
-
-
-validate_hypothesis = validate_fr5_hypothesis

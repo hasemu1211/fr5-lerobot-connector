@@ -272,8 +272,3 @@ def compile_training_split(
     }
     draft["split_digest"] = canonical_digest(draft)
     return validate_training_split(draft)
-
-
-validate_training_split_v1 = _validate_v1
-validate_training_split_v2 = _validate_v2
-compile_training_split_v2 = compile_training_split
