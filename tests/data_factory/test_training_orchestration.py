@@ -86,7 +86,7 @@ class FakeBackend:
 
     def evaluator(self, context: dict) -> dict:
         if self._start("evaluate", context):
-            return {}
+            return {"metric": "synthetic_offline_loss", "samples": 3}
         return {
             "status": "PASS",
             "metric": "synthetic_offline_loss",

@@ -265,6 +265,7 @@ class SeedCampaignTests(unittest.TestCase):
         quota_cases = {
             "rounds": "max_rounds",
             "physical_episodes": "max_total_physical_episodes",
+            "rollout_trials": "max_total_rollout_trials",
             "hil_prompts": "max_total_hil_prompts",
             "reviews": "max_total_reviews",
             "storage_bytes": "max_total_storage_bytes",
@@ -277,12 +278,6 @@ class SeedCampaignTests(unittest.TestCase):
                 with self.assertRaises(ContractError):
                     self.start(campaign, FakeOneJob(sentinels), 0, digest("scene-0"))
                 self.assertEqual(campaign.state, "BLOCKED")
-
-        current = usage(manifest)
-        current["rollout_trials"] = manifest["program_budget"]["max_total_rollout_trials"]
-        _, _, seed_campaign = self.make_campaign(current_usage=current)
-        self.start(seed_campaign, FakeOneJob(sentinels), 0, digest("scene-0"))
-        self.assertEqual(seed_campaign.state, "ACTIVE")
 
         malformed = copy.deepcopy(manifest)
         malformed["manifest_budget"]["max_hil_prompts"] = 1

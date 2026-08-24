@@ -37,7 +37,11 @@ HIL 연결 시험과 실제 성공 시연을 같은 데이터셋에 섞지 않�
 
 Offline-only contract API는 episode-level approved inventory와 human-only issuance boundary, immutable split/evaluation v2, finite `FR5_HYPOTHESIS` seed/rollout manifest, train/checkpoint와 independent reload receipt, fixed 7D·dual-camera binding 및 learned-action stop/fault 입력 계약을 제공한다. `validate_software_contract`는 exact cross-artifact binding이 모두 맞을 때만 검증에 성공한다.
 
-현재 이 계약은 `scripts/train_policy.sh`, `tools/evaluate_smolvla_offline.py` 또는 실물 rollout에 연결되지 않는다. 기존 `fr5_training_split.json` schema v1은 기존 checkpoint validation/resume용 read-only 입력으로 그대로 읽으며 v2로 자동 rewrite하거나 없는 digest를 backfill하지 않는다. 실제 v2 artifact freeze, 학습, checkpoint와 independent reload 발급은 approved fixed-dual-camera seed를 준비한 뒤 별도 실행 범위에서 수행해야 한다.
+`tools.data_factory.training_orchestration`은 이 계약의 approved inventory/split v2와 normalized command/config/runtime/training seed를 injected trainer, checkpoint validator, independent reloader와 offline evaluator에 순서대로 결속한다.
+
+이 경로는 fake backend로만 적격화됐고 `scripts/train_policy.sh`, `tools/evaluate_smolvla_offline.py` 또는 실물 rollout을 직접 호출하지 않는다. 기존 `fr5_training_split.json` schema v1은 기존 checkpoint validation/resume용 read-only 입력으로 그대로 읽으며 v2로 자동 rewrite하거나 없는 digest를 backfill하지 않는다.
+
+실제 v2 artifact freeze, 학습, checkpoint와 independent reload 발급은 approved fixed-dual-camera seed를 준비한 뒤 별도 실행 범위에서 수행해야 한다.
 
 ## profile 사용법
 
@@ -116,7 +120,9 @@ LeRobot 0.6.1 학습 loop에는 gradient accumulation 제어가 없다. accumula
 
 ## SmolVLA checkpoint 오프라인 검사
 
-현재 legacy wrapper에서 평가 episode는 학습에서 제외해야 한다. LeRobot 0.6.1은 task별 마지막 `ceil(episode 수 × eval_split)` episodes를 보류한다. 따라서 `0.2`를 지정하는 것만으로 물체·위치 조건이 자동 균형화되지는 않는다. wrapper가 schema v1 `${output_dir}/fr5_training_split.json`에 실제 보류 episode와 데이터셋 크기를 기록하며, task별 학습 episode가 하나도 남지 않는 분할은 거부한다. 새 digest-bound baseline은 이 positional v1 split을 새 데이터에 재사용하지 않고, 사전 고정한 TRAIN/같은-cell ID/factor-held-out OOD와 누적 budget을 가진 v2를 소비해야 한다.
+현재 legacy wrapper에서 평가 episode는 학습에서 제외해야 한다. LeRobot 0.6.1은 task별 마지막 `ceil(episode 수 × eval_split)` episodes를 보류한다. 따라서 `0.2`를 지정하는 것만으로 물체·위치 조건이 자동 균형화되지는 않는다. wrapper가 schema v1 `${output_dir}/fr5_training_split.json`에 실제 보류 episode와 데이터셋 크기를 기록하며, task별 학습 episode가 하나도 남지 않는 분할은 거부한다.
+
+새 digest-bound baseline은 이 positional v1 split을 새 데이터에 재사용하지 않고, 사전 고정한 TRAIN/같은-cell ID/factor-held-out OOD와 누적 budget을 가진 v2를 소비해야 한다.
 
 한 학습 실행에서는 이 episode 목록을 고정한다. validation을 바꾸며 비교하려면 [첫 FR5 학습 체크리스트](first-training-checklist.md)를 참고해 fold마다 처음부터 학습하는 별도 교차검증으로 취급한다. 최종 ID/OOD test는 validation으로 사용하지 않는다.
 

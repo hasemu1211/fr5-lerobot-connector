@@ -303,6 +303,12 @@ class SeedCampaign:
             self._fail("SEED_CAMPAIGN_ROUND_QUOTA")
         if self._program_usage["pending_reviews"] >= budget["max_pending_reviews"]:
             self._fail("SEED_CAMPAIGN_PENDING_REVIEW_CEILING")
+        if any(
+            self._program_usage[resource] >= budget[limit]
+            for resource, limit in PROGRAM_LIMITS.items()
+            if resource != "pending_reviews"
+        ):
+            self._fail("SEED_CAMPAIGN_PROGRAM_QUOTA")
         demand = self._demand(slot)
         for resource, amount in demand.items():
             if self._manifest_usage[resource] + amount > self.manifest["manifest_budget"]["max_" + resource]:

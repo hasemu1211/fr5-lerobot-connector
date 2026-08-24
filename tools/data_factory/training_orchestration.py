@@ -208,7 +208,7 @@ def _evaluation(value: object) -> dict:
     result = _mapping(value, "TRAINING_ORCHESTRATION_EVALUATION_RESULT")
     samples = result.get("samples")
     _require(
-        result.get("status", "PASS") == "PASS"
+        result.get("status") == "PASS"
         and isinstance(result.get("metric"), str)
         and bool(result["metric"])
         and type(samples) is int

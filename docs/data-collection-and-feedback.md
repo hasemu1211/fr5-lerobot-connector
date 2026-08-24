@@ -62,7 +62,7 @@ failure condition → targeted recollection recommendation
 | `OBJ-02` | `T_base_tcp(t)`, `T_object_tcp(t)`와 grasp-close relative error | recorder joints에서 offline FK; `OBJ-01` | per-row 저장 없이 필요 시 계산, close row reference+transform/scalar만 보존 | grasp consistency와 향후 trajectory-variant source 적격성 | `NOT_AVAILABLE`; `FK_TF_QUALIFICATION_MISSING` |
 | `LIFT-01` | `+table_normal_base` TCP progress/drift, gripper continuity | FK/TCP + lift row window | phase scalar만 | lift 안정성 후보 | FK/TF 뒤 미구현 |
 | `COVER-01` | condition별 attempted/technical-pass/human-training-approved/semantic-pass/human-rejected | JobSpec/profile/calibration/recipe digests + result references | `coverage_report.json` | under-covered qualified condition 제안 | coverage v1은 `REPORT_ONLY`; episode inventory compiler/validator와 human-only issuer는 offline-only API로 제공되며 coverage report는 production approval을 발급하지 않음 |
-| `VARIANT-01` | trajectory variant, finite parameter tuple, plan/observed evidence lineage | trajectory-variant catalog + plan/report digests | catalog에는 tuple 1회, episode에는 ID/digest만 | 동일 조건 안의 품질 경계 다양성 | 미구현 |
+| `VARIANT-01` | trajectory variant, finite parameter tuple, plan/observed evidence lineage | trajectory-variant catalog + plan/report digests | catalog에는 tuple 1회, episode에는 ID/digest만 | 동일 조건 안의 품질 경계 다양성 | `DIRECT`/`TWO_STAGE_ALIGN` offline plan-only compiler 구현됨; production HIL·observed eligibility는 미발급 |
 
 ### 기술 품질의 정확한 피드백
 
@@ -127,7 +127,15 @@ motion_recipe_digest, collection_profile_digest
 
 ## 6. SmolVLA baseline 전달 증거
 
-운영 중인 `scripts/train_policy.sh` writer와 checkpoint/evaluator consumer는 계속 schema v1이다. 별도 offline-only API는 episode-level approved inventory, digest-bound `fr5_training_split.json` v2와 nested `evaluation_contract.v1`, finite seed/rollout manifest, train/checkpoint와 independent reload receipt를 검증한다. 이 계약은 runner나 training wrapper에 아직 연결되지 않았고 새 service도 만들지 않는다.
+운영 중인 `scripts/train_policy.sh` writer와 checkpoint/evaluator consumer는 계속 schema v1이다. 별도 offline-only API는 episode-level approved inventory, digest-bound `fr5_training_split.json` v2와 nested `evaluation_contract.v1`, finite seed/rollout manifest, train/checkpoint와 independent reload receipt를 검증한다.
+
+`tools.data_factory.training_orchestration`은 이 입력과 normalized command/config/runtime/training seed를 injected trainer→checkpoint validator→independent reloader→offline evaluator 순서에 결속한다. production wrapper를 직접 호출하거나 receipt·checkpoint를 발급하지 않는다.
+
+- `tools.data_factory.seed_campaign`은 finite seed manifest slot을 fresh idle `OneJob` lifecycle의 non-authoritative intent에 한 번씩 결속하며 technical PASS 전 다음 intent를 만들지 않는다.
+- `tools.data_factory.motion.trajectory_variants`는 validated `fr5.motion_program.v2`에서 exact `DIRECT` 또는 `TWO_STAGE_ALIGN` v3 plan-only candidate만 만들고 execute/gripper authority를 갖지 않는다.
+- `tools.data_factory.recollection`은 synthetic rollout failure와 coverage가 함께 지목한 qualified weak cell에 대해서만 nominal/variant-targeted finite manifest를 반환하며 production campaign artifact나 live caller를 만들지 않는다.
+
+새 service는 없고 `run_job.py`와 production training wrapper는 이 offline 구현에서 바꾸지 않았다.
 
 새 digest-bound baseline은 v2만 사용한다. 기존 schema v1은 기존 checkpoint 검증·resume을 위한 read-only compatibility로 유지하고 자동 재작성하지 않는다. v1에 없는 digest를 추정해 채우지 않으며, 새 provenance가 필요하면 현재 source에서 별도 v2를 생성한다. offline compiler/validator는 production inventory, seed manifest, checkpoint 또는 reload receipt를 스스로 발급하지 않는다.
 
@@ -141,7 +149,9 @@ motion_recipe_digest, collection_profile_digest
 - LeRobot/Torch/CUDA version, repository commit
 - checkpoint digest와 독립 reload 결과
 
-`tools.data_factory.software_contract.validate_software_contract`는 inventory의 exact episode/content/approval digest와 TRAIN/ID/OOD split, finite seed cell, dataset/repo, collection profile, normalized command, runtime, split, checkpoint와 independent reload binding을 함께 검증한다. technical `PASS`, human semantic `PASS`, 별도 `HUMAN_TRAINING_APPROVED` provenance 중 하나라도 없거나 stale/mismatched이면 bundle을 거부한다. production approval issuer는 `/dev/tty`의 exact human confirmation과 exclusive create를 요구하며 AI/JSONL, non-TTY, synthetic scope와 overwrite에는 쓰기 전에 실패한다.
+`tools.data_factory.software_contract.validate_software_contract`는 inventory의 exact episode/content/approval digest와 TRAIN/ID/OOD split, finite seed cell, dataset/repo, collection profile, normalized command, runtime, split, checkpoint와 independent reload binding을 함께 검증한다.
+
+technical `PASS`, human semantic `PASS`, 별도 `HUMAN_TRAINING_APPROVED` provenance 중 하나라도 없거나 stale/mismatched이면 bundle을 거부한다. production approval issuer는 `/dev/tty`의 exact human confirmation과 exclusive create를 요구하며 AI/JSONL, non-TTY, synthetic scope와 overwrite에는 쓰기 전에 실패한다.
 
 첫 fixed-dual-camera seed 직전에는 intended camera 두 대의 device role/profile identity를 기존 `fr5-dual-rgb-30hz-v1`/`up-side`와 exact bind하고, 최종 placement의 framing·occlusion·source rate가 declared yaw 범위를 한 번에 지원하는지 짧게 확인한다. 이는 새 semantic authority나 yaw별 승인, recurring prompt가 아니며 identity/topic/profile이 바뀌지 않으면 acquisition qualification 전체를 반복하지 않는다.
 

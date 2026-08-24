@@ -2,8 +2,8 @@
 
 > 상태: `PROPOSED`. 구현·운영 정본은 `docs/`와 executable schema/validator이며, 이 계획만으로 기능 또는 실물 실행이 승인되지 않는다.
 
-- 상태: `P5_5_AND_UI_FIXTURE_COMPLETE_P5_8_SOFTWARE_NEXT`
-- 기준: `main@85cd516bacd264b6dae33b0f9d73d88aef8e6318`
+- 상태: `OFFLINE_IMPLEMENTATION_COMPLETE_THROUGH_P6_5`
+- 기준: `main@0c5e53e06940d866ea26f7ec147ca5989d763ce8`
 - 작성일: 2026-08-20
 - 재검토일: 2026-08-24
 - 장기 기준선: `plans/archive/data-factory-pipeline-integration.md`
@@ -13,13 +13,17 @@
 
 **목표:** 끊김이 적은 연속 수집을 안전하게 증명하고, 대량 수집 전에 baseline/rollout으로 다음 데이터의 가치를 측정하는 재현 가능한 FR5 데이터 flywheel을 만든다.
 
+**대상 독자:** 다음 software Goal을 구현·통합·검증하는 coordinator와 worker, 이후 production activation을 승인하는 운영자다.
+
 **아키텍처:** 기존 `run_job.py`와 fresh `OneJob`을 재사용해 episode를 직렬 실행하고, 수집 hot path와 admission·behavior·coverage·training/evaluation 분석을 분리한다. P5.5는 진단 metadata이며 gate나 model input이 아니다. 첫 checkpoint 전에는 고정된 `DIRECT` recipe에서 관측 가능한 object pose 조건과 finite robot start configuration을 교차한 bounded initial-seed campaign을 수행하고, checkpoint 뒤 failure-targeted P6.5 recollection과 evidence-triggered P6 variant experiment를 별도 branch로 연다.
+
+이 운영 순서와 소프트웨어 구현 순서는 분리한다. P5.8b부터 P6.5까지의 compiler·selector·orchestration·fail-close 경로는 hardware 없이 synthetic/fake로 먼저 구현할 수 있고, production artifact 발급과 live activation만 각 단계의 실물·사람·evidence gate를 기다린다.
 
 **기술 스택:** Python 3, ROS 2/MoveIt, LeRobot/SmolVLA, JSON/JSONL digest-bound artifacts, 기존 `unittest` 회귀.
 
 **정본 계약:** `docs/data-collection-and-feedback.md`와 해당 executable schema/validator. 이 계획의 새 상태·명령·schema는 정본에 승격되기 전까지 제안이다.
 
-**계획 동결 규칙:** 아래 독립 재검토의 correction을 반영한 뒤에는 executable evidence가 계약을 반증하거나 사용자가 목표를 바꾸지 않는 한 계획-only 반복을 중단하고 다음 Goal을 구현한다.
+**계획 동결 규칙:** 아래 독립 재검토의 correction을 반영한 뒤에는 executable evidence가 계약을 반증하거나 사용자가 목표를 바꾸지 않는 한 계획-only 반복을 중단하고 다음 Goal을 구현한다. hardware·production evidence가 아직 없다는 사실은 live activation을 닫지만, synthetic/fake로 가능한 뒤 단계 software 구현을 멈추거나 같은 계약 조사를 반복할 이유가 아니다.
 
 이 계획의 exact key·status·stage는 구현 제안이다. 제품·운영 SSOT는 `docs/`와 executable schema/validator이며, 새 계약은 `docs/data-collection-and-feedback.md`와 해당 코드에 함께 승격되기 전 `PROPOSED`다.
 
@@ -37,8 +41,9 @@
 - P5.2 저장 근거: `p52-g1-grid2-grid3-20260821-r002`에 독립 episode 2개, 528+544=1,072 frames, 30 Hz가 commit됐다. 두 run 모두 alignment failure·queue drop 0이고 final scene revision 23은 `(70,35,0°)` `ROBOT_RELEASE`, cell은 final run에 `HUMAN_ACKNOWLEDGED`/ready다.
 - P5.2 제한: 두 episode는 mechanism qualification이며 통계적 신뢰도, camera semantic authority, training approval, non-yaw0 또는 다른 slot 적격성을 만들지 않는다. `training_authorized=false`를 유지한다.
 - 완료된 다음 단계: P5.5 static Object–EE offline diagnostic과 backend-free frontend fixture/Korean mode/accessibility slice가 `main@85cd516`에 통합됐다. P5.5는 declared static context만 `AVAILABLE`이고 FK/TF close geometry와 post-close object pose는 계속 stable `NOT_AVAILABLE`이며 어느 training/campaign gate도 소유하지 않는다.
-- 남은 핵심: P5.8 software contract와 bounded initial-seed path를 먼저 완성한다. episode-level training-approved inventory, immutable split/evaluation v2, `object condition × robot_start_pose_id` finite `DIRECT` seed manifest, train/reload/offline-eval receipt와 learned-action adapter의 fake/stop harness는 서로 독립인 범위에서 병렬화할 수 있다. P6 plan-only compiler도 병렬 가능하지만 첫 baseline의 hard prerequisite는 아니다.
-- 현재 물리 상태: 카메라 1대가 연결돼 있으나 최종 구도로 고정되지 않았다. 첫 학습 입력은 고정 dual-camera `up-side`로 정한다. 과거 dual-camera acquisition은 1,040 rows/34.63 s/30.00003 Hz, queue drop·alignment failure 0, peak recorder RSS 1.23 GB의 mechanism evidence와 `up-side`→SmolVLA `camera1/camera2` mapping이 있으므로 재구현·전체 재적격화하지 않는다. 실제 seed 직전 intended device 두 대의 exact role/profile binding, 최종 배치, framing/occlusion/source-rate만 짧게 현재 확인한다. device/topic/profile identity가 바뀌면 새 revision을 요구한다.
+- 완료된 software contract: P5.8a의 episode-level training-approved inventory, immutable split/evaluation v2, `object condition × robot_start_pose_id` finite `DIRECT` manifest, train/reload receipt와 learned-action adapter fake/stop contract가 `CONTRACT_READY`다.
+- 완료된 offline software 핵심: P5.8a를 frozen dependency로 재사용해 P5.8b seed intent/lifecycle, P5.8c trainer→checkpoint→independent reload→offline-evaluation orchestration, P6 finite plan-only variant compiler와 P6.5 evidence-targeted recollection selector/compiler를 synthetic/fake로 구현했다. `run_job.py`, production training wrapper와 live caller는 추가하지 않았고 P6/P6.5 production branch는 계속 evidence-triggered이며 첫 baseline의 hard prerequisite가 아니다.
+- 현재 물리 상태: camera candidate는 PC 근처에 0~2대가 연결될 수 있고, 가끔 한 대만 연결된다. 연결된 장치도 로봇을 바라보도록 장착·배치되지 않은 `CONNECTED_UNPLACED`다. 어두운 곳을 향할 때가 있어 negotiated 또는 observed source rate가 약 15 fps로 내려갈 수 있다. 일반 RGB camera는 wrist 후보이고 별도 RealSense는 up 후보지만 연결 수와 역할은 확정하지 않았다. 이 상태에서는 실제로 연결된 각 device의 identity/profile negotiation, observed source-rate·drop·timestamp와 transport/preview 기능만 개발용으로 진단한다. 한 대뿐이면 dual-camera sync/mapping을 평가하지 않는다. 영상 내용의 정성 평가, wrist/up 역할, framing/occlusion, 조명 적합성, 30 Hz data validity나 seed authority는 판정하지 않는다. 첫 학습 입력은 최종 배치 뒤 고정 dual-camera `up-side`로 정한다. 과거 dual-camera acquisition은 1,040 rows/34.63 s/30.00003 Hz, queue drop·alignment failure 0, peak recorder RSS 1.23 GB의 mechanism evidence와 `up-side`→SmolVLA `camera1/camera2` mapping이 있으므로 재구현·전체 재적격화하지 않는다. 실제 seed 직전 intended device 두 대의 exact role/profile binding, 최종 배치, framing/occlusion/source-rate만 짧게 현재 확인한다. device/topic/profile identity가 바뀌면 새 revision을 요구한다.
 - 이식 지원 하한: 8 GB RAM 수집 노트북. 현재 개발 PC의 약 16 GB 메모리는 개발 편의 환경일 뿐 지원 하한을 대체하지 않는다.
 - 다음 live task는 계속 `pickup_e2e`다. `pick_place`는 같은 runner 위에 별도 task schema/recipe로 추가한다.
 
@@ -128,7 +133,7 @@ approved episode refs ── training split v2 ── baseline checkpoint
 14. **좌표 점유 보존:** 사람 semantic 확인을 생략한 release target은 같은 campaign에서 일반 pick/place target이나 통과 가능한 빈 공간으로 재사용하지 않는다. 유일한 예외는 `ROBOT_RELEASE` evidence로 `LANDED_FOR_NEXT_SOURCE`가 된 slot을 same-scene-digest `HUMAN` dispatch confirmation 또는 qualified verifier가 허용하고 manifest의 바로 다음 run이 source로 한 번 소비하는 경우이며, 그 즉시 `CONSUMED_PENDING_REVIEW`다. slot 예약은 scene truth를 대신하지 않는다.
 15. **검증 경계 분리:** v1은 recycle/post-reset evidence→commit 뒤 active motion이 없는 episode 경계에서 technical validator를 끝내고 다음 recorder를 시작한다. behavior/Object–EE/coverage report는 campaign 종료 후 offline으로 돌리며 heartbeat/ROS callback을 점유하지 않는다. 실측으로 validator 경계가 병목일 때에만 immutable frozen-data overlap을 별도 qualification한다.
 16. **비동기 범위 제한:** 비동기는 recorder sampling/writer, health cache, bounded phase event, TTY와 offline report의 진행 독립성을 뜻한다. robot phase, begin/freeze/commit과 scene transition은 한 coordinator가 직렬화하며 두 motion goal을 병렬 dispatch하지 않는다.
-17. **초기 seed와 사후 보강 분리:** checkpoint 전 P5.8 initial-seed campaign은 고정 dual-camera·`DIRECT`에서 선언된 object pose condition과 finite qualified robot start configuration을 균형 반복한다. learned-policy rollout은 reload 가능한 checkpoint와 action-adapter safety qualification 뒤에만 열린다. rollout failure와 coverage가 같은 condition을 지목하면 nominal P6.5를 열 수 있고, variant-targeted P6.5만 추가로 P6 decision digest를 요구한다. P6 plan-only compiler와 별도 승인된 expert HIL은 checkpoint에 종속되지 않지만 첫 baseline의 critical path도 아니다.
+17. **초기 seed와 사후 보강 분리:** checkpoint 전 P5.8 initial-seed campaign은 고정 dual-camera·`DIRECT`에서 선언된 object pose condition과 finite qualified robot start configuration을 균형 반복한다. learned-policy rollout은 reload 가능한 checkpoint와 action-adapter safety qualification 뒤에만 열린다. rollout failure와 coverage가 같은 condition을 지목하면 nominal P6.5를 열 수 있고, variant-targeted P6.5만 추가로 P6 decision digest를 요구한다. P6 plan-only compiler와 별도 승인된 expert HIL은 checkpoint에 종속되지 않으며 첫 baseline의 production critical path도 아니다. 다만 compiler·selector의 synthetic 구현은 현재 offline Goal에 포함한다.
 18. **통계 단위 보존:** 30 Hz frame을 독립 표본으로 세지 않는다. 비교 단위는 episode·training seed·physical rollout이고, variant 비교는 같은 condition·scene/start/object/grasp와 같은 수집·rollout 예산을 사용하며 순서를 무작위화한다.
 19. **진단과 권위 분리:** P5.5 Object–EE와 phase metric은 원인 추적·층화에만 사용한다. baseline ablation과 held-out rollout 관계가 적격화되기 전에는 training admission, 자동 삭제, quota 확대 또는 SmolVLA input을 바꾸지 않는다.
 
@@ -747,7 +752,9 @@ Object–EE는 새 학습 feature나 per-frame sidecar가 아니라 기존 repor
 
 ### P6가 열린 뒤 품질 경계 안의 phase별 다양성 분화
 
-이 절은 P5.8 첫 `DIRECT` index가 아니라 DIRECT flow/rollout failure 또는 사전 연구 질문으로 P6가 열린 뒤의 별도 branch다. 목표는 waypoint에 무작위 noise를 넣는 것이 아니라 안전·task semantics·phase quality와 사람이 판정한 `trajectory_flow`를 먼저 고정한 뒤 그 안에서 의미 있는 trajectory family와 parameter를 비교하는 것이다. 여기서 `human-like`는 `pickup-v2`의 사람이 직접 본 자연스러운 흐름 통과를 뜻하며, 충분한 분포·rollout ablation 전 인간 궤적 확률분포를 재현했다는 주장은 아니다.
+이 절은 P5.8 첫 `DIRECT` index가 아니라 DIRECT flow/rollout failure 또는 사전 연구 질문으로 P6가 열린 뒤의 별도 branch다. 목표는 waypoint에 무작위 noise를 넣는 것이 아니라 안전·task semantics·phase quality와 사람이 판정한 `trajectory_flow`를 먼저 고정한 뒤 그 안에서 의미 있는 trajectory family와 parameter를 비교하는 것이다.
+
+여기서 `human-like`는 `pickup-v2`의 사람이 직접 본 자연스러운 흐름 통과를 뜻하며, 충분한 분포·rollout ablation 전 인간 궤적 확률분포를 재현했다는 주장은 아니다.
 
 필터 순서는 바꾸지 않는다.
 
@@ -814,7 +821,17 @@ technical·semantic gate와 observed phase report를 통과한 demonstration이 
 
 ## 12. 작업 순서와 정지점
 
-| 단계 | 산출물 | agent 단독 | 사람 개입/정지점 |
+이 절은 `오프라인 구현`과 `production 활성화`를 별도 축으로 읽는다. 단계 번호는 실제 dataset·checkpoint·rollout evidence의 운영 순서를 나타내지만, 뒤 단계의 pure compiler·selector·orchestration을 synthetic fixture로 미리 구현하는 일을 막지 않는다. evidence가 아직 없으면 production artifact 발급과 live caller만 fail-close로 닫고 software 구현·fake 회귀는 계속한다. 현재 개발 목표는 P5.8a를 다시 작성하는 것이 아니라 P5.8b부터 P6.5까지의 오프라인 구현을 먼저 끝내는 것이다.
+
+실물 readiness는 장치별로 다음 세 상태를 구분한다. 이는 계획용 분류이며 executable authority나 qualification status가 아니다. 전체 시스템을 한 상태로 뭉치지 않으므로 camera는 `CONNECTED_UNPLACED`여도 robot은 `NO_HARDWARE_USE`로 유지할 수 있다.
+
+| 실물 상태 | 의미 | 지금 허용하는 일 | 만들지 못하는 근거·행동 |
+|---|---|---|---|
+| `NO_HARDWARE_USE` | 실물을 연결하지 않거나 입력으로 사용하지 않음 | source contract, compiler, selector, orchestration과 pure fake/synthetic E2E | device measurement, live artifact, robot/camera/recorder/dataset side effect |
+| `CONNECTED_UNPLACED` | candidate camera 0~2대가 PC 근처에 연결될 수 있고, 연결된 장치도 로봇을 보도록 장착·배치되지 않았으며 조명이 불안정함 | 실제 연결된 device별 topic/profile negotiation, observed source-rate·drop·timestamp·resolution과 transport/preview 기능 진단; 두 대가 있을 때만 development-only sync path 확인 | 연결되지 않은 camera의 추정, 한 대일 때 dual-view 판정, 영상 내용의 정성 평가, wrist/up 역할·framing·occlusion·조명 판정, 30 Hz data-validity PASS, production approval, recorder/dataset/run-state write, seed 수집; robot controller·motion 사용 |
+| `PLACED_AND_QUALIFIED` | intended dual camera가 최종 배치되고 robot/cell/start/safety 조건까지 별도 적격화됨 | 승인된 manifest에 따른 pilot·수집·training/rollout activation | 기존 human·scene·cell·plan-digest·training gate의 생략 또는 자동 발급 |
+
+| 단계 | 산출물 | 오프라인 구현 | production 활성화·정지점 |
 |---|---|---:|---|
 | `P0` | 현재 계획 정본·review 기록 | 가능 | 계획 승인 뒤 Goal 시작 |
 | `P1` | 단일 runner + TTY/JSONL + fake E2E | 가능 | live 전 정지 |
@@ -826,18 +843,24 @@ technical·semantic gate와 observed phase report를 통과한 demonstration이 
 | `P5.2` | 2-episode supervised campaign mechanism HIL — 2026-08-21 C→D→E 완료 | 완료 | exact yaw 0 세 slot 밖으로 일반화하지 않음; training authority 0 |
 | `P5.5` | Object–EE declared-static offline context — 2026-08-24 완료 | 완료 | FK/TF와 post-close pose는 `NOT_AVAILABLE`; actual object pose·gate 주장은 금지 |
 | `P5.8a` | episode approval inventory + fixed dual-camera binding contract + immutable split/evaluation v2 + seed/rollout manifest schema와 fake checks — 2026-08-24 `CONTRACT_READY` | 완료 | live/training authority 없음; contract revision·production training admission은 사람 검토 |
-| `P5.8b` | fixed `DIRECT` initial-seed campaign: declared object X/Y/Yaw × finite robot start-pose matrix, same-condition ID episodes와 factor-held-out OOD | software/fake 가능 | yaw→grasp/TCP binding, 각 start pose joint target/tolerance·plan-only qualification, declared yaw 범위를 포함한 final camera short check 한 번, exact plan/semantic/training approval; yaw별 camera 승인 없음 |
-| `P5.8c` | 첫 SmolVLA train→checkpoint digest→independent reload→offline diagnostics→진단 rollout | 일부 | train은 approved seed/compute, 실물 rollout은 action adapter·safety와 trial별 승인 필요 |
-| `P6` | evidence-triggered same-condition/equal-budget phase variant ablation + canonical/object-relative plan-only | plan-only 가능 | paired HIL·training/rollout 비교 전 별도 승인; 첫 baseline prerequisite 아님 |
-| `P6.5` | rollout failure와 coverage가 지정한 qualified finite recollection | 일부 | nominal은 failure+coverage, variant는 추가 P6 decision; campaign quota와 batch review |
+| `P5.8b` | fixed `DIRECT` initial-seed campaign: declared object X/Y/Yaw × finite robot start-pose matrix, same-condition ID episodes와 factor-held-out OOD | 지금 구현: manifest slot→fresh-`OneJob` intent, serial lifecycle, budget/review/stop fake | yaw→grasp/TCP binding, 각 start pose joint target/tolerance·plan-only qualification, declared yaw 범위를 포함한 final camera short check 한 번, exact plan/semantic/training approval; yaw별 camera 승인 없음 |
+| `P5.8c` | 첫 SmolVLA train→checkpoint digest→independent reload→offline diagnostics→진단 rollout | 지금 구현: 기존 trainer 연결, train/reload/offline-evaluation orchestration과 fake backend | 실제 train은 approved seed/compute, 실물 rollout은 action adapter·safety와 trial별 승인 필요 |
+| `P6` | evidence-triggered same-condition/equal-budget phase variant ablation + canonical/object-relative plan-only | 지금 구현: finite catalog, v2→v3 compiler와 pure fake planner; live authority 0 | paired HIL·training/rollout 비교 전 별도 승인; 첫 baseline prerequisite 아님 |
+| `P6.5` | rollout failure와 coverage가 지정한 qualified finite recollection | 지금 구현: synthetic failure+coverage selector, recollection manifest/compiler와 quota·expiry fake | nominal production은 failure+coverage, variant production은 추가 P6 decision; campaign 승인과 batch review |
 | `P7` | cumulative retrain→ID/OOD rollout→targeted recollection loop | 일부 | 실물 trial, next-round quota, nominal regression 판정 |
 | `P8` | `pick_place`, 새 camera/profile·camera-shift OOD, `PERCEPTION_OBSERVED` scene qualification | 일부 | 첫 seed용 기존 dual-camera acquisition 재구현은 제외; 새 범위만 별도 qualification |
 
-현재 카메라 1대와 미확정 구도는 offline P5.8a, train/reload fake, learned-action stop harness와 plan-only P6의 blocker가 아니다. 현재 연결된 장치는 wrist 후보이고 별도 RealSense는 up 후보지만 둘 다 최종 역할이 아니므로 계약이나 fixture에 hard-code하지 않는다. 첫 학습 입력은 fixed dual-camera이므로 현재 single-camera episode를 seed로 승격하지 않는다. 실제 수집 준비 직전에 intended device 두 대를 기존 qualified `fr5-dual-rgb-30hz-v1`/`up-side` 역할에 exact bind하고 최종 구도를 고정해 짧은 framing·occlusion·source-rate check를 통과한다. 이 확인은 일반 개발·offline test 단계나 P5.8a 종료 직후에는 실행하지 않는다. 과거 dual acquisition mechanism과 SmolVLA mapping은 재사용하고, full acquisition qualification은 identity/profile이 바뀐 경우에만 반복한다. P5.8b initial seed는 checkpoint 전에 필요하며, P6.5는 rollout 뒤 failure-targeted recollection이다. P6 variant는 별도 evidence-triggered branch이고, broader perception/camera-shift authority는 P8에 남긴다.
+현재 camera의 `CONNECTED_UNPLACED` 상태와 연결 수 0~2의 변동은 P5.8b–P6.5 오프라인 software 구현의 blocker가 아니다. 일반 RGB camera는 wrist 후보이고 별도 RealSense는 up 후보지만 둘 다 최종 역할이 아니므로 계약이나 fixture에 hard-code하지 않는다. 개발 중에는 실제 연결된 장치마다 profile negotiation과 transport 정량 지표를 선택적으로 확인하고, 한 대만 연결됐으면 dual-camera sync/mapping 평가는 `NOT_AVAILABLE`로 남긴다.
+
+현재 camera는 로봇을 보지 않고 조명이 불안정해 약 15 fps가 관측될 수 있으므로 image quality, framing, occlusion, 역할 적합성과 30 Hz data-validity를 정성·정량 판정하지 않는다. camera가 없어도 fake로 같은 software Goal을 완료할 수 있어야 하며 현재 single-camera frame이나 episode는 첫 seed index에 넣지 않는다.
+
+실제 수집 준비 직전에 intended device 두 대를 기존 qualified `fr5-dual-rgb-30hz-v1`/`up-side` 역할에 exact bind하고 최종 구도와 조명을 고정해 짧은 framing·occlusion·source-rate check를 통과한다. 과거 dual acquisition mechanism과 SmolVLA mapping은 재사용하고, full acquisition qualification은 identity/profile이 바뀐 경우에만 반복한다.
+
+P5.8b initial seed는 checkpoint 전에 필요하고 P6.5 production recollection은 rollout evidence 뒤에만 열리지만, 두 단계의 compiler와 fail-close fake를 미리 구현할 수 있다. P6 variant의 production 적격화는 별도 evidence-triggered branch이고, broader perception/camera-shift authority는 P8에 남긴다.
 
 ### 사람 개입 예산
 
-- P5, P5.5와 P5.8a는 offline이라 실물 작업이 없다.
+- P5, P5.5와 P5.8a는 offline이라 실물 작업이 없다. P5.8b–P6.5의 synthetic compiler·selector·orchestration 구현도 hardware나 사람 승인을 요구하지 않는다. `CONNECTED_UNPLACED` camera는 연결된 수만큼 device-local transport/preview 기능 확인만 가능하고, 한 대만 있을 때 dual-view 평가나 현재 영상에 대한 사람의 정성 평가는 받지 않는다. semantic review, training approval와 data-validity approval은 `PLACED_AND_QUALIFIED` 전환 뒤에만 시작한다.
 - P5.2는 물체 최초 배치, episode별 exact digest 승인 2회, inter-episode landing 판정 한 번, final scene 확인과 종료 batch review만 요구한다. 기존 HIL 사전승인은 이 시험을 준비할 권한이며 exact digest 승인을 생략하지 않는다.
 - P5.8의 `fr5_training_split.json` v2 안 evaluation contract는 manifest별 한도뿐 아니라 `max_rounds`, `max_total_physical_episodes`, `max_total_rollout_trials`, `max_total_hil_prompts`, `max_total_reviews`, `max_pending_reviews`, `max_total_storage_bytes`의 프로그램 누적 상한과 현재 누적값을 결속한다. 하나라도 소진되면 정상 정지하며, 상한 증가는 새 contract revision과 사람의 별도 승인이 필요하다.
 - P5.8 이후 모든 수집·rollout은 시작 전에 condition, 최대 episode/trial 수, 최대 시간·저장량과 stop condition이 들어간 finite manifest를 사람이 승인한다. 실행 중 quota나 프로그램 누적 상한을 자동 확대하지 않는다.
@@ -915,7 +938,9 @@ collision sample 2,023개 all-valid, 10개 phase terminal 성공, freeze 537=row
 
 `P5.2 bounded campaign`
 
-구현 근거: `SceneStateStore`는 successful `DESTINATION_THEN_NEXT_SOURCE`만 `LANDED_FOR_NEXT_SOURCE`로 만들고 expected scene/slot digest와 exact next run을 한 번 CAS해 `CONSUMED_PENDING_REVIEW`로 바꾼다. `run_job.py campaign --manifest`는 exact source→chain→final, `max_episodes=2`, role 순서와 fresh run/Job ID를 fail-close 검증하고 episode 1 technical PASS 뒤 updated scene의 episode 2 plan digest를 `LANDED_AND_APPROVE_NEXT`에 묶으며 exact executor dispatch에서 slot CAS를 소비한다. 모든 child 종료 뒤 candidate review core는 exact checklist/context/file digest로 `PENDING→PASS|FAIL|UNCERTAIN` one-shot atomic CAS만 허용하고 TTY batch/review subcommand만 HUMAN identity를 발급한다. fake는 success, named fault matrix, stale scene, SKIP/Ctrl-C, terminal overwrite와 AI JSONL forgery에서 fail-close를 고정하며 training authority를 만들지 않는다.
+구현 근거: `SceneStateStore`는 successful `DESTINATION_THEN_NEXT_SOURCE`만 `LANDED_FOR_NEXT_SOURCE`로 만들고 expected scene/slot digest와 exact next run을 한 번 CAS해 `CONSUMED_PENDING_REVIEW`로 바꾼다. `run_job.py campaign --manifest`는 exact source→chain→final, `max_episodes=2`, role 순서와 fresh run/Job ID를 fail-close 검증하고 episode 1 technical PASS 뒤 updated scene의 episode 2 plan digest를 `LANDED_AND_APPROVE_NEXT`에 묶으며 exact executor dispatch에서 slot CAS를 소비한다.
+
+모든 child 종료 뒤 candidate review core는 exact checklist/context/file digest로 `PENDING→PASS|FAIL|UNCERTAIN` one-shot atomic CAS만 허용하고 TTY batch/review subcommand만 HUMAN identity를 발급한다. fake는 success, named fault matrix, stale scene, SKIP/Ctrl-C, terminal overwrite와 AI JSONL forgery에서 fail-close를 고정하며 training authority를 만들지 않는다.
 
 실물 종료 근거: 2026-08-21 C→D→E yaw 0 campaign에서 첫 run `p52-c-grid3-20260821-r004`가 chain role과 plan `sha256:88195d4f…85310`으로 528 frames를, 둘째 `p52-d-grid4-20260821-r004`가 final role과 plan `sha256:7c0f091c…bc33`으로 544 frames를 commit했다. 두 technical validator와 두 human semantic review가 `PASS`이고 scene slot CAS, independent transaction, technical-PASS-before-next, final scene/cell acknowledgement가 모두 남았다. 이 exact role mechanism으로 P5.2를 닫으며 같은 목적의 추가 HIL은 하지 않는다.
 
@@ -937,23 +962,27 @@ collision sample 2,023개 all-valid, 10개 phase terminal 성공, freeze 537=row
 
 `P5.8a–c fixed-dual-camera initial seed와 첫 baseline/evaluation`
 
+오프라인 구현 lane은 P5.8a 계약을 frozen dependency로 소비해 P5.8b seed intent/campaign, P5.8c training/reload/evaluation orchestration을 synthetic fixture와 fake backend로 먼저 완성한다. 이때 production approval·inventory·manifest·receipt·checkpoint를 발급하지 않고 robot·camera·recorder·dataset·run state를 바꾸지 않는다. 실제 evidence가 없는 상태는 live activation을 닫는 근거이지 software 구현을 뒤로 미루는 근거가 아니다.
+
 1. `P5.8a SOFTWARE_CONTRACT`는 새 service 없이 episode-level training-approval inventory, 기존 `fr5_training_split.json`의 immutable v2와 nested `evaluation_contract.v1`, finite seed/rollout manifest를 구현한다. exact schema/digest, dataset/repo identity, camera feature/profile binding, base coverage-condition digest와 `robot_start_pose_id`/joint-target/tolerance digest, train/ID/OOD group, task/phase success, safety stop, `TERMINAL|PARTIAL|FAILURE`, randomized order seed, manifest별·프로그램 누적 episode/trial/HIL/review/storage 상한을 고정한다. P5 coverage v1의 condition key를 조용히 바꾸거나 서로 다른 start pose를 같은 seed cell로 합치지 않으며 plan-only/fake에서 robot·recorder·dataset side effect는 0이다.
 2. seed index는 technical PASS와 human semantic evidence를 통과한 뒤 별도 `HUMAN_TRAINING_APPROVED`가 발급된 exact episode ref만 소비한다. 현재 coverage production은 semantic PASS까지만 만들므로 approval inventory의 producer/validator를 먼저 명시한다. P5.2 mechanism HIL은 새 admission 없이 포함하지 않는다.
 3. 첫 useful baseline의 고정축은 FR5 한 대, `pickup_e2e`, canonical instruction, 한 object/grasp/scene/calibration family, 최종 고정 dual-camera `up-side` geometry와 `DIRECT` recipe다. 초기 condition 축은 qualified object X/Y/Yaw와 finite `robot_start_pose_id`다. 현재 yaw는 resolved grasp/TCP 방향을 바꾸므로 각 yaw의 object/grasp binding과 dual-view 식별 가능성을 함께 고정한다. 각 start pose는 exact 6-joint target/tolerance·home-candidate/qualification digest로 식별하고 policy의 proprioceptive state에서 구분 가능해야 한다. 현재 한 home candidate의 존재는 추가 start pose의 안전 적격성을 대신하지 않는다.
 4. 첫 궤적 다양성은 이 관측 가능한 `object condition × robot start pose` matrix로 만든다. 특정 start pose가 특정 object cell에만 나타나 shortcut이 되지 않도록 승인된 balanced matrix를 반복하고, ID는 같은 declared factor cell의 별도 episode, OOD는 training에서 완전히 뺀 qualified object 또는 start-pose value로 고정한다. 같은 factor cell 반복의 작은 pose·sensor·timing 차이는 repeatability와 bounded natural execution variation이지 별도 quota나 alternate-path label이 아니다.
 5. object yaw는 현재 grasp/TCP action을 바꾸므로 첫 seed의 필수축이다. 모든 declared yaw는 fixed dual-camera에서 방향 단서가 식별되고 exact grasp endpoint/action 차이를 설명해야 한다. 물체가 대칭이어서 영상은 등가인데 action만 다르면 해당 yaw episode를 같은 index에 넣지 않고 camera cue·물체 방향 표식·grasp 계약 중 하나를 먼저 수정한다. P5.5 Object–EE/phase metadata는 현 SmolVLA input이 아니므로 observability를 대신하지 않는다. alternate grasp profile, pre-grasp offset, waypoint와 recovery는 명시적 policy condition이 없는 한 첫 index에서 고정하고 P6 lineage로 보낸다.
 6. [LeRobot SmolVLA guide](https://github.com/huggingface/lerobot/blob/main/docs/source/smolvla.mdx)의 약 50 episode와 5 positions×10은 introduced variation마다 반복하라는 공식 시작 예이지 FR5 minimum이 아니다. start pose 축을 추가하면 각 introduced factor cell에도 반복이 필요하다. exact cell·repeat·holdout 수는 결과를 보기 전에 finite manifest에 정하는 `FR5_HYPOTHESIS`다. 한 cell의 thin pilot은 framing/reset/review flow feasibility만 증명하고 useful baseline이나 generalization을 주장하지 않는다.
-7. 과거 dual-camera 30 Hz acquisition과 `up-side`→`camera1/camera2` mapping은 재사용한다. `P5.8b DATA_VALIDITY` live 직전 intended device 두 대의 exact role/profile identity, 최종 placement, framing/occlusion과 source rate만 짧게 확인한다. identity/topic/profile이 달라지면 revision하고, 그렇지 않으면 전체 acquisition qualification을 반복하지 않는다. 현재 임시 single-camera episode는 첫 seed index에 넣지 않는다.
-8. `P5.8b INITIAL_SEED_CAMPAIGN`은 먼저 operator-approved thin pilot, 이어서 declared train/holdout factor matrix의 bounded repeated `DIRECT` seed를 기존 fresh-`OneJob` 경로로 직렬 수집한다. 모든 live episode는 기존 scene/cell/start/collision/E-stop/readback, exact plan digest approval, technical/semantic review와 별도 training admission을 그대로 통과한다. manifest가 motion authority, start-pose safety authority나 미래 plan 사전승인을 만들지 않는다.
-9. `P5.8c BASELINE`은 approved inventory를 freeze한 뒤 normalized command/config/training seed, exact LeRobot/Torch/CUDA source, dataset/split/checkpoint digest와 independent reload receipt를 결속한다. 기존 v1은 validation/resume용 read-only compatibility로 유지하며 auto rewrite/backfill하지 않는다. 한 training seed의 feasibility checkpoint는 허용하지만 model/variant 우열은 주장하지 않는다.
-10. independent reload와 7D+dual-camera binding, offline diagnostics를 통과한 뒤에만 별도 승인된 fixed trial manifest로 diagnostic physical rollout을 연다. learned-action adapter, single command owner, watchdog/cancel/E-stop/stale-camera/controller gate가 먼저 적격해야 하며 작은 ID/OOD 표본은 pipeline 진단일 뿐 ranking이나 promotion 근거가 아니다.
-11. approved seed 부족은 training을, checkpoint/reload 실패는 learned rollout과 model claim을, action-adapter/safety 실패는 physical rollout을 각각 막는다. 이 실패들은 offline P6 compiler나 별도 safety/plan 승인을 받은 expert HIL을 자동 차단하지 않는다. nominal P6.5는 rollout failure와 coverage가 같은 cell을 지목한 뒤에만 연다.
+7. `P5.8b OFFLINE_IMPLEMENTATION`은 validated seed manifest의 slot을 기존 fresh-`OneJob`의 non-authoritative execution intent로 연결하고 base condition, start pose, split group, repeat, qualification과 budget digest를 보존한다. synthetic campaign은 한 lifecycle owner와 한 active goal, technical PASS 전 next intent 0, cancel/fault/stale evidence/quota/review backlog에서 no-later-intent를 검증한다. manifest는 motion authority, start-pose safety authority, future plan 사전승인이나 human/training approval을 만들지 않는다.
+8. 과거 dual-camera 30 Hz acquisition과 `up-side`→`camera1/camera2` mapping은 재사용한다. `CONNECTED_UNPLACED`에서는 실제 연결된 0~2대 중 각 camera의 candidate identity/profile negotiation과 observed source-rate·drop·timestamp·resolution, transport/preview 기능만 개발용으로 진단한다. 한 대만 연결됐으면 dual-camera sync/mapping은 `NOT_AVAILABLE`이다. camera가 로봇을 보지 않고 조명이 불안정한 현재 약 15 fps 관측은 final 30 Hz PASS/FAIL 근거가 아니며 image quality·role·framing·occlusion 정성 평가도 하지 않는다. `P5.8b DATA_VALIDITY` production activation 직전 intended device 두 대의 exact role/profile identity, 최종 placement, lighting, framing/occlusion과 source rate만 짧게 확인한다. identity/topic/profile이 달라지면 revision하고, 그렇지 않으면 전체 acquisition qualification을 반복하지 않는다. 현재 임시 single-camera episode는 첫 seed index에 넣지 않는다.
+9. `P5.8b INITIAL_SEED_CAMPAIGN` production activation은 먼저 operator-approved thin pilot, 이어서 declared train/holdout factor matrix의 bounded repeated `DIRECT` seed를 기존 fresh-`OneJob` 경로로 직렬 수집한다. 모든 live episode는 기존 scene/cell/start/collision/E-stop/readback, exact plan digest approval, technical/semantic review와 별도 training admission을 그대로 통과한다.
+10. `P5.8c OFFLINE_IMPLEMENTATION`은 approved-inventory/split 입력 계약을 기존 trainer entrypoint, normalized command/config/runtime/training seed, checkpoint/reload/offline-evaluation orchestration에 결속한다. fake trainer/checkpoint/reloader로 성공·중단·digest mismatch를 검증하고 실제 dataset, training output, checkpoint와 inference는 만들지 않는다. P5.8a의 receipt·adapter 계약을 재구현하지 않는다.
+11. `P5.8c BASELINE` production activation은 approved inventory를 freeze한 뒤 exact LeRobot/Torch/CUDA source, dataset/split/checkpoint digest와 independent reload receipt를 발급한다. 기존 v1은 validation/resume용 read-only compatibility로 유지하며 auto rewrite/backfill하지 않는다. 한 training seed의 feasibility checkpoint는 허용하지만 model/variant 우열은 주장하지 않는다.
+12. independent reload와 7D+dual-camera binding, offline diagnostics를 통과한 뒤에만 별도 승인된 fixed trial manifest로 diagnostic physical rollout을 연다. learned-action adapter, single command owner, watchdog/cancel/E-stop/stale-camera/controller gate가 먼저 적격해야 하며 작은 ID/OOD 표본은 pipeline 진단일 뿐 ranking이나 promotion 근거가 아니다.
+13. approved seed 부족은 production training을, checkpoint/reload 실패는 learned rollout과 model claim을, action-adapter/safety 실패는 physical rollout을 각각 막는다. 이 실패들은 P5.8b–P6.5 offline implementation이나 별도 safety/plan 승인을 받은 expert HIL을 자동 차단하지 않는다. nominal P6.5 production activation은 rollout failure와 coverage가 같은 cell을 지목한 뒤에만 연다.
 
 `P6 paired phase-variant ablation`
 
 1. 2026-08-24 외부 1차 근거·내부 dependency audit·독립 critic의 삼각검증은 P6를 첫 baseline의 필수 gate에서 evidence-triggered branch로 교정했다. 구현 직전 stack/version이나 실험 질문이 바뀐 경우에만 좁은 research refresh를 수행하고 exact FR5 parameter/threshold의 직접 근거가 없으면 `FR5_HYPOTHESIS`를 유지한다.
 2. research 원문 메모와 도구 산출물은 `.agent-local/work/research/`에 두고, 재현 가능한 citation·판정·실험 변경만 이 ledger에 승격한다. 연구자 swarm, 새 framework와 근거 없는 threshold 복사는 0이며 이 refresh는 P5/P5.2/P5.8을 막지 않는다.
-3. P6는 `DIRECT` trajectory-flow/diagnostic rollout 실패가 관측되거나 사용자가 causal research question을 사전 선언한 경우에 연다. plan-only compiler는 P5.8a와 병렬 구현할 수 있지만 `TWO_STAGE_ALIGN` 수집·학습은 첫 `DIRECT` seed와 baseline의 prerequisite가 아니다.
+3. P6 production experiment는 `DIRECT` trajectory-flow/diagnostic rollout 실패가 관측되거나 사용자가 causal research question을 사전 선언한 경우에 연다. finite catalog, plan-only compiler와 pure fake planner 회귀는 그 evidence 전에 구현할 수 있으며 lack of evidence에서는 production candidate·HIL·training authority를 발급하지 않는다. `TWO_STAGE_ALIGN` 수집·학습은 첫 `DIRECT` seed와 baseline의 prerequisite가 아니다.
 4. versioned finite `phase_variant_catalog`는 variant ID, allowed parameter tuple, plan-time bound, qualification status와 digest를 고정한다. 구현은 두 variant를 hard-code한 분기 framework가 아니라 유한 목록을 순회하되, 세 번째 이후 N개 variant는 catalog revision·새 실험 질문·동일한 plan-only→paired HIL→multi-seed held-out rollout gate를 각각 요구한다. 지원되지 않는 planner/homotopy knob는 넣지 않는다.
 5. `tools/data_factory/motion/trajectory_variants.py` 한 모듈이 validated v2 program을 입력으로 받아 v3 plan-only candidate를 compile/validate한다. `DIRECT`는 기존 single segment를 재사용하고 `TWO_STAGE_ALIGN`은 existing `plan_arm`을 `NEAR_GRASP→FINAL_ALIGN` 순서로 호출해 final state를 다음 start state로 chain한다. execute/gripper goal API는 호출하지 않는다.
 6. hard safety와 task semantics 뒤 `plan_metrics.py`의 plan-time attribute만 candidate filter에 사용하고 `PRECHECK_ELIGIBLE`을 발급한다. observed metric은 값이 있는 것처럼 채우지 않는다.
@@ -964,11 +993,12 @@ collision sample 2,023개 all-valid, 10개 phase terminal 성공, freeze 537=row
 
 `P6.5 post-rollout evidence-targeted recollection`
 
-1. P6.5는 checkpoint 전 useful seed를 만드는 P5.8b와 다른 사후 단계다. nominal branch는 P5.2 mechanism, P5 coverage와 P5.8 diagnostic rollout의 failure evidence가 같은 qualified condition을 지목하면 열며 P6 결정을 요구하지 않는다. variant-targeted branch만 추가로 P6 `OBSERVED_ELIGIBLE`과 ablation decision digest를 요구한다. P5.5 availability는 둘의 hard prerequisite가 아니다.
-2. coverage와 failure-condition evidence가 함께 가리키는 부족 cell만 제안한다. weak condition이 없거나 expected decision을 바꿀 수 없는 추가 데이터면 campaign을 만들지 않으며 same trajectory를 편의상 대량 복제하지 않는다. 첫 seed의 balanced coverage 부족은 P5.8b manifest 안에서 해소하고 post-rollout failure로 위장하지 않는다.
-3. current no-sensor cell에서는 `SUPERVISED_CAMPAIGN`으로 inter-episode release+next-plan 한 키를 유지한다. `CANDIDATE_AUTOMATED` multi-episode는 qualified containment/release verifier/perception profile digest가 manifest와 scene v2 evidence에 결속될 때만 켠다.
-4. 각 사용 slot은 `CONSUMED_PENDING_REVIEW` 또는 `QUARANTINED`로 소진하며 human physical clear confirmation 없이는 재사용하지 않는다. slot 부족, reserve 부족, pending review 수가 manifest의 `max_pending_reviews`에 도달, campaign expiry 중 하나라도 닿으면 새 goal 없이 정상 정지한다.
-5. campaign 종료 후 offline behavior/Object–EE/coverage와 candidate admission review를 실행한다. 승인된 새 episode는 다음 P7 training round에만 들어가며 raw candidate 수집과 training admission을 계속 분리한다.
+1. `P6.5 OFFLINE_IMPLEMENTATION`은 synthetic rollout-failure, coverage와 선택적 P6 decision fixture를 입력으로 받아 qualified 부족 cell만 고르는 selector와 finite recollection manifest/compiler를 구현한다. evidence/dataset/checkpoint/condition/variant/decision digest, slot·episode·HIL·review·pending-review·storage·expiry budget과 canonical tie-break를 fake로 검증한다. 실제 evidence가 없으면 production campaign artifact와 live caller는 0이다.
+2. P6.5 production activation은 checkpoint 전 useful seed를 만드는 P5.8b와 다른 사후 단계다. nominal branch는 P5.2 mechanism, P5 coverage와 P5.8 diagnostic rollout의 failure evidence가 같은 qualified condition을 지목하면 열며 P6 결정을 요구하지 않는다. variant-targeted branch만 추가로 P6 `OBSERVED_ELIGIBLE`과 ablation decision digest를 요구한다. P5.5 availability는 둘의 hard prerequisite가 아니다.
+3. coverage와 failure-condition evidence가 함께 가리키는 부족 cell만 제안한다. weak condition이 없거나 expected decision을 바꿀 수 없는 추가 데이터면 campaign을 만들지 않으며 same trajectory를 편의상 대량 복제하지 않는다. 첫 seed의 balanced coverage 부족은 P5.8b manifest 안에서 해소하고 post-rollout failure로 위장하지 않는다.
+4. current no-sensor cell에서는 `SUPERVISED_CAMPAIGN`으로 inter-episode release+next-plan 한 키를 유지한다. `CANDIDATE_AUTOMATED` multi-episode는 qualified containment/release verifier/perception profile digest가 manifest와 scene v2 evidence에 결속될 때만 켠다.
+5. 각 사용 slot은 `CONSUMED_PENDING_REVIEW` 또는 `QUARANTINED`로 소진하며 human physical clear confirmation 없이는 재사용하지 않는다. slot 부족, reserve 부족, pending review 수가 manifest의 `max_pending_reviews`에 도달, campaign expiry 중 하나라도 닿으면 새 goal 없이 정상 정지한다.
+6. campaign 종료 후 offline behavior/Object–EE/coverage와 candidate admission review를 실행한다. 승인된 새 episode는 다음 P7 training round에만 들어가며 raw candidate 수집과 training admission을 계속 분리한다.
 
 `P7 cumulative retrain과 rollout feedback`
 
@@ -1031,6 +1061,8 @@ collision sample 2,023개 all-valid, 10개 phase terminal 성공, freeze 537=row
 - `RES-01`: active camera/collection profile의 exact visual features와 encoder 설정, peak RSS/CPU, `MemAvailable`, swap I/O, thread/FD, heartbeat latency, queue high-water/drop, alignment failure를 같은 run evidence에 기록한다. 8 GB 지원 판정은 실제 8 GB 대상 노트북의 대표 최대 episode·연속 job 30분 burn-in에서만 발급한다.
 - training split v2는 selected episode, approval/validator/dataset-feature/profile/command/runtime/checkpoint digest와 reload result를 결속하고 heavy payload를 복제하지 않는다. RTC/chunk/critic evidence는 checkpoint rollout 전 생성하지 않는다.
 - split 회귀는 legacy v1 validation/resume read-only 호환, v2 exact schema/digest mismatch 거부와 v1 auto-rewrite 0을 검증한다.
+- P5.8b–P6.5 offline completion은 production evidence를 합성하거나 기다리지 않는다. 각 compiler·selector·orchestration은 synthetic-only fixture에서 success와 fail-close를 검증하고, evidence가 없는 production issuance/live caller는 0이어야 한다. hardware 준비 부족을 이유로 P5.8a 계약 재작성, 전면 계획 재검토 또는 동일 caller 감사를 반복하지 않는다.
+- `tools/data_factory/seed_campaign.py`, `training_orchestration.py`, `motion/trajectory_variants.py`, `recollection.py`와 네 cohesive fake test는 통합 tree에서 26개 focused test를 통과한다. 이 근거의 acceptance는 `NO_HARDWARE_USE`이며 production approval/inventory/manifest/receipt, robot·gripper goal, recorder/dataset/run-state write, 실제 training/checkpoint/reload/inference는 모두 0이다.
 - P6.5 nominal quota는 P5.8 diagnostic failure evidence와 coverage가 같은 cell을 지목할 때만 열리고, variant quota는 추가로 P6 ablation decision digest를 요구한다. checkpoint 전 balanced initial seed는 P5.8b가 소유하며 P6.5를 기다리지 않는다. P5.5 report unavailable은 어느 branch도 막지 않는다.
 - P7 retrain은 fixed nominal anchor를 보존하고 nominal/correction/recovery lineage를 합치지 않는다. 이전 accepted checkpoint보다 safety-critical ID condition이 회귀하면 새 checkpoint 승격과 다음 자동 추천은 0이다.
 
@@ -1038,7 +1070,7 @@ collision sample 2,023개 all-valid, 10개 phase terminal 성공, freeze 537=row
 
 - r007에서 분리한 gripper 병목은 `p45-gripper-latency-r001`과 r003에서 재적격화가 끝났다. close/open duration은 1.0 s이고 실제 accepted→terminal과 terminal→dispatch 증거를 보존한다. 이 항목은 다음 Goal이 아니다.
 
-### 2026-08-24 P5.5·frontend fixture 종료와 다음 Goal
+### 2026-08-24 P5.8b–P6.5 offline 종료와 다음 production activation
 
 P4 public single-job live는 r007, gripper timing 재적격화는 `p45-gripper-latency-r001`, P4.5 public recycle/scene은 r003으로 완료됐다. P5.2는 C→D→E supervised campaign으로 완료됐다. 같은 목적의 추가 gripper, P4.5 또는 P5.2 물리 cycle은 하지 않는다.
 
@@ -1046,9 +1078,34 @@ P4 public single-job live는 r007, gripper timing 재적격화는 `p45-gripper-l
 
 P5.5 `Object–EE offline diagnostic`과 backend-free frontend fixture, Korean mode, accessibility slice는 완료됐다. P5.5는 declared static `object_frame_context`만 제공하며 FK/TF와 post-close pose는 계속 `NOT_AVAILABLE`이다. Frontend fixture는 backend proposal을 구현하지 않았고 `run_job.py`, Python operator core와 preflight를 연결하지 않는다.
 
-offline-first `P5.8a SOFTWARE_CONTRACT`는 2026-08-24 `CONTRACT_READY`로 완료됐다. episode-level training-approved inventory와 human-only issuance boundary, immutable split/evaluation v2, fixed dual-camera `DIRECT`의 finite object-condition×robot-start-pose seed/rollout manifest, train/checkpoint·independent reload receipt와 7D dual-camera/action-adapter fake contract를 구현했다. 실제 production approval/inventory/manifest/receipt/checkpoint, dataset/training output과 hardware/live action은 만들지 않았다. P6 plan-only compiler와 frontend backend bridge는 구현하지 않았고 계속 non-critical 후속 제안이다.
+offline-first `P5.8a SOFTWARE_CONTRACT`는 2026-08-24 `CONTRACT_READY`로 완료됐다. episode-level training-approved inventory와 human-only issuance boundary, immutable split/evaluation v2, fixed dual-camera `DIRECT`의 finite object-condition×robot-start-pose seed/rollout manifest, train/checkpoint·independent reload receipt와 7D dual-camera/action-adapter fake contract를 구현했다.
 
-그다음 critical path는 `각 robot start pose plan-only qualification + 최종 dual-camera exact binding·구도 short check → operator-approved thin DIRECT pilot → balanced object pose×robot start-pose initial seed와 별도 training admission → train/checkpoint digest/independent reload/offline diagnostics → action-adapter safety qualification 뒤 diagnostic ID/OOD rollout`이다. rollout 뒤 nominal failure+coverage는 곧바로 P6.5로, trajectory strategy 문제가 있으면 `P6 DIRECT/TWO_STAGE/recovery experiment → variant-targeted P6.5`로 분기한다. 이 순서는 첫 seed를 post-rollout P6.5에 의존시키는 순환을 제거하고, 이미 검증된 dual-camera acquisition의 불필요한 재구현/HIL을 반복하지 않는다.
+실제 production approval/inventory/manifest/receipt/checkpoint, dataset/training output과 hardware/live action은 만들지 않았다. 이 계약은 다음 Goal의 frozen dependency이며 같은 schema·trust-boundary 조사를 다시 시작하지 않는다. Frontend backend bridge는 계속 non-blocking이다.
+
+`P5_8B_TO_P6_5_OFFLINE_IMPLEMENTATION`은 `OFFLINE_IMPLEMENTATION_COMPLETE_THROUGH_P6_5`로 종료됐다.
+
+- P5.8b는 validated seed slot을 caller-provided fresh idle `OneJob` lifecycle의 non-authoritative intent에 직렬 결속하고 technical PASS 전 later intent를 닫는다.
+- P5.8c는 approved inventory/split v2와 normalized command/config/runtime/seed를 injected trainer, checkpoint validator, independent reloader와 evaluator에 결속한다.
+- P6는 exact `DIRECT`/`TWO_STAGE_ALIGN` catalog와 v2→v3 plan-only chain을 제공한다.
+- P6.5는 nominal/variant evidence와 finite budget을 결속한 non-authoritative recollection manifest만 반환한다.
+
+네 경로 모두 production issuer와 live caller가 없으며 legacy split v1을 rewrite/backfill하지 않는다.
+
+구현은 source mapping 한 번 뒤 disjoint writer 네 명에게 파일 소유권을 분리하고, 6+7+5+8 focused test 뒤 P5.8b→P5.8c→P6→P6.5 순서로 직렬 통합했다. coordinator는 shared fail-close와 문서만 보강하며 material한 integrated cutoff를 fresh read-only verifier와 worker 0 stable-tree full suite로 확인한다. 전면 계획 재작성, 동일 계약 리서치와 이미 닫힌 P5.8a 검토는 반복하지 않았다.
+
+다음 Goal `P5_8B_PRODUCTION_ACTIVATION`의 critical path는 다음과 같다.
+
+```text
+각 robot start pose plan-only qualification
+→ intended camera 두 대의 최종 장착·조명·exact role/profile binding
+→ framing/occlusion·30 Hz source-rate short check + robot/cell/start/safety qualification
+→ operator-approved thin DIRECT pilot
+→ balanced object pose×robot start-pose initial seed와 별도 training admission
+→ train/checkpoint digest/independent reload/offline diagnostics
+→ action-adapter safety qualification 뒤 diagnostic ID/OOD rollout
+```
+
+rollout 뒤 nominal failure+coverage는 P6.5 production recollection으로, trajectory strategy 문제가 있으면 `P6 DIRECT/TWO_STAGE/recovery experiment → variant-targeted P6.5`로 분기한다. 이 순서는 첫 seed를 post-rollout P6.5에 의존시키는 순환을 제거하고, 이미 검증된 dual-camera acquisition의 불필요한 재구현/HIL을 반복하지 않는다.
 
 이전 `main@479a758` P4 handoff는 `1b3bc97`/`f4069aa`와 r007로 완료됐다. 이를 현재 다음 Goal로 다시 사용하지 않는다.
 
