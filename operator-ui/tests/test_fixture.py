@@ -12,6 +12,7 @@ class FixtureTest(unittest.TestCase):
         cls.states = json.loads((ROOT / "fixtures/states.json").read_text())
         cls.html = (ROOT / "index.html").read_text()
         cls.js = (ROOT / "app.js").read_text()
+        cls.messages = (ROOT / "messages.js").read_text()
         cls.css = (ROOT / "styles.css").read_text()
         cls.makefile = (ROOT / "Makefile").read_text()
         cls.architecture = (ROOT / "architecture.md").read_text()
@@ -52,13 +53,34 @@ class FixtureTest(unittest.TestCase):
     def test_accessibility_basics_are_present(self):
         for text in ('<main id="workspace"', 'role="status"', 'aria-live="polite"', 'aria-current="step"'):
             self.assertIn(text, self.html + self.js)
+        for text in ('for="language-select"', 'aria-describedby="language-current"', 'data-message-aria-label="fixtureMode"'):
+            self.assertIn(text, self.html)
         self.assertIn(":focus-visible", self.css)
         self.assertIn("prefers-reduced-motion", self.css)
+
+    def test_static_language_catalog_covers_all_states(self):
+        self.assertLess(self.html.index('src="messages.js"'), self.html.index('src="app.js"'))
+        self.assertIn('new URLSearchParams(location.search).get("lang")', self.js)
+        self.assertIn('document.documentElement.lang = currentLanguage', self.js)
+        self.assertIn('announcer.textContent = message("languageChanged")', self.js)
+        for key in self.states:
+            self.assertIn(f"      {key}: {{", self.messages)
+        for text in ("설정 필요", "셀에서 새 계획을 만들 준비가 되었습니다", "상단 카메라에 최신 프레임이 없습니다", "여기에 표시된 계획만 승인하세요", "픽업이 진행 중입니다", "성공적인 픽업 시연입니까?", "다시 계획하기 전에 실제 장면을 복구하세요"):
+            self.assertIn(text, self.messages)
+
+    def test_korean_catalog_keeps_protected_tokens(self):
+        self.assertIn("const localized = {...source, ...copy}", self.js)
+        self.assertIn("localized.nextAction.command = source.nextAction.command", self.js)
+        for token in ("/camera/up/color/image_raw", "fr5-up-rgb-30hz-v1", "RELEASE_UNCONFIRMED", "CAMERA_WARMUP_FAILED"):
+            self.assertIn(token, self.messages)
+        self.assertIn("Korean status and reason codes preserve canonical bytes", self.browser_regression)
 
     def test_no_package_toolchain_or_external_asset(self):
         self.assertFalse((ROOT / "package.json").exists())
         self.assertNotIn("https://", self.html)
         self.assertNotIn("http://", self.html)
+        self.assertNotIn("localStorage", self.js + self.messages)
+        self.assertNotIn("fetch(\"http", self.js)
 
     def test_fixture_query_uses_own_property_lookup(self):
         self.assertIn("Object.hasOwn(states, requestedState)", self.js)

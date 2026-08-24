@@ -4,7 +4,7 @@ Status: accepted for the backend-free vertical slice, 2026-08-24.
 
 ## Decision
 
-Use semantic HTML, CSS, browser JavaScript, JSON fixtures, Python's `http.server`, and `unittest`. There is no package manifest, lockfile, build step, client store, router, component framework, or live API. Frontend state is always a replaceable rendering of one fixture/backend snapshot.
+Use semantic HTML, CSS, browser JavaScript, JSON fixtures, one bundled English/Korean message catalog, Python's `http.server`, and `unittest`. There is no package manifest, lockfile, build step, client store, router, component framework, translation service, or live API. English is the deterministic default; `?lang=ko` and the native language control change presentation and `html lang` only. Frontend state is always a replaceable rendering of one fixture/backend snapshot, while commands, paths, digests, codes, identifiers, and backend authority remain canonical.
 
 The React/TypeScript/Vite baseline would add a package graph and build pipeline before the slice needs component reuse, type sharing, routing, or a scene canvas. Vercel's React rules therefore have no runtime target here; their useful constraint is satisfied structurally by shipping no React bundle, waterfall, hydration, or client cache.
 

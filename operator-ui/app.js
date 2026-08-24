@@ -1,14 +1,46 @@
-const steps = ["Setup", "Readiness", "Exact approval", "Progress", "Review", "Recovery"];
 const select = document.querySelector("#fixture-select");
+const languageSelect = document.querySelector("#language-select");
 const announcer = document.querySelector("#announcer");
+const requestedLanguage = new URLSearchParams(location.search).get("lang");
+let currentLanguage = Object.hasOwn(MESSAGE_CATALOG, requestedLanguage) ? requestedLanguage : "en";
 let states;
+let loadError;
 
 const escapeHtml = (value) => String(value).replace(/[&<>"']/g, (char) => ({
   "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
 })[char]);
 
+function message(key, values = {}) {
+  return MESSAGE_CATALOG[currentLanguage].ui[key].replace(/\{(\w+)\}/g, (_, name) => String(values[name] ?? ""));
+}
+
+function localizedState(key) {
+  const source = states[key];
+  const copy = MESSAGE_CATALOG[currentLanguage].states?.[key];
+  if (!copy) return source;
+  const localized = {...source, ...copy};
+  if (source.nextAction) {
+    localized.nextAction = {...source.nextAction, ...copy.nextAction};
+    localized.nextAction.command = source.nextAction.command;
+  }
+  return localized;
+}
+
+function applyStaticMessages() {
+  document.documentElement.lang = currentLanguage;
+  document.title = message("pageTitle");
+  languageSelect.value = currentLanguage;
+  document.querySelector("#language-current").textContent = message("currentLanguage");
+  document.querySelectorAll("[data-message]").forEach((element) => {
+    element.textContent = message(element.dataset.message);
+  });
+  document.querySelectorAll("[data-message-aria-label]").forEach((element) => {
+    element.setAttribute("aria-label", message(element.dataset.messageAriaLabel));
+  });
+}
+
 function renderSteps(active) {
-  document.querySelector("#workflow-steps").innerHTML = steps.map((step, index) => `
+  document.querySelector("#workflow-steps").innerHTML = MESSAGE_CATALOG[currentLanguage].ui.steps.map((step, index) => `
     <li class="${index === active ? "active" : index < active ? "complete" : ""}"
         ${index === active ? 'aria-current="step"' : ""}>
       <span>${String(index + 1).padStart(2, "0")}</span>${escapeHtml(step)}
@@ -23,28 +55,28 @@ function renderSetup(setup) {
 function approvalControl(state) {
   if (!state.approval) return "";
   return `<form id="approval-form" class="approval-form">
-    <label for="approval-input">Type the exact approval phrase</label>
+    <label for="approval-input">${escapeHtml(message("approvalLabel"))}</label>
     <code>${escapeHtml(state.approval.command)}</code>
     <input id="approval-input" autocomplete="off" spellcheck="false"
       aria-describedby="approval-hint" data-expected="${escapeHtml(state.approval.command)}">
-    <p id="approval-hint" class="support-copy">This only checks text and previews the running fixture. The backend must still validate scene, start state, expiry, and digest.</p>
-    <button type="submit">Verify fixture phrase</button>
+    <p id="approval-hint" class="support-copy">${escapeHtml(message("approvalHint"))}</p>
+    <button type="submit">${escapeHtml(message("approvalButton"))}</button>
   </form>`;
 }
 
 function reviewControl(state) {
   if (!state.review) return "";
   return `<form id="review-form"><fieldset class="review-control">
-    <legend>Preview a semantic review intent</legend>
+    <legend>${escapeHtml(message("reviewLegend"))}</legend>
     <div class="review-options">${state.review.options.map((option) => `<label><input type="radio" name="review" value="${escapeHtml(option)}" required>${escapeHtml(option)}</label>`).join("")}</div>
-    <label id="review-reason-field" for="review-reason" hidden>Primary reason for FAIL or UNCERTAIN
+    <label id="review-reason-field" for="review-reason" hidden>${escapeHtml(message("reviewReason"))}
       <select id="review-reason" name="reason" required disabled>
-        <option value="">Choose one reason</option>
+        <option value="">${escapeHtml(message("reviewReasonPlaceholder"))}</option>
         ${state.review.reasons.map((reason) => `<option>${escapeHtml(reason)}</option>`).join("")}
       </select>
     </label>
-    <button type="submit">Preview review intent</button>
-    <p class="support-copy">No candidate file is changed. A future bridge must submit the exact file and review-context digests to backend compare-and-swap.</p>
+    <button type="submit">${escapeHtml(message("reviewButton"))}</button>
+    <p class="support-copy">${escapeHtml(message("reviewHelp"))}</p>
   </fieldset></form>`;
 }
 
@@ -55,14 +87,14 @@ function progress(state) {
   }
   const percent = escapeHtml(state.progress);
   return `<div class="progress-block">
-    <div><span>Episode ${escapeHtml(state.episode)}</span><strong>${percent}%</strong></div>
+    <div><span>${escapeHtml(message("episode"))} ${escapeHtml(state.episode)}</span><strong>${percent}%</strong></div>
     <progress max="100" value="${percent}">${percent}%</progress>
     <p>${escapeHtml(state.phase)}</p>
   </div>`;
 }
 
 function render(key, announce = true) {
-  const state = states[key];
+  const state = localizedState(key);
   select.value = key;
   renderSteps(state.step);
   renderSetup(state.setup);
@@ -76,8 +108,8 @@ function render(key, announce = true) {
     </header>
     <p class="state-summary">${escapeHtml(state.summary)}</p>
     ${progress(state)}
-    ${state.digest ? `<div class="digest"><span>Exact plan digest</span><code>${escapeHtml(state.digest)}</code></div>` : ""}
-    ${state.nextAction ? `<section class="next-action" aria-labelledby="next-heading"><p class="eyebrow">Next safe action</p><h3 id="next-heading">${escapeHtml(state.nextAction.title)}</h3><p>${escapeHtml(state.nextAction.detail)}</p>${state.nextAction.command ? `<code>${escapeHtml(state.nextAction.command)}</code>` : ""}</section>` : ""}
+    ${state.digest ? `<div class="digest"><span>${escapeHtml(message("exactDigest"))}</span><code>${escapeHtml(state.digest)}</code></div>` : ""}
+    ${state.nextAction ? `<section class="next-action" aria-labelledby="next-heading"><p class="eyebrow">${escapeHtml(message("nextAction"))}</p><h3 id="next-heading">${escapeHtml(state.nextAction.title)}</h3><p>${escapeHtml(state.nextAction.detail)}</p>${state.nextAction.command ? `<code>${escapeHtml(state.nextAction.command)}</code>` : ""}</section>` : ""}
     ${approvalControl(state)}${reviewControl(state)}`;
   document.querySelector("#evidence-list").innerHTML = state.evidence.map((item) => `<li><span>${escapeHtml(item.label)}</span><code>${escapeHtml(item.value)}</code></li>`).join("");
   document.querySelector("#authority-copy").textContent = state.authority;
@@ -90,14 +122,14 @@ function bindControls() {
     event.preventDefault();
     const input = document.querySelector("#approval-input");
     if (input.value !== input.dataset.expected) {
-      input.setCustomValidity("The phrase must match the displayed digest exactly.");
+      input.setCustomValidity(message("approvalMismatch"));
       input.reportValidity();
-      announcer.textContent = "Approval phrase does not match the exact plan digest.";
+      announcer.textContent = message("approvalMismatchAnnouncement");
       return;
     }
     input.setCustomValidity("");
     render("running", false);
-    announcer.textContent = "Exact phrase matched. Only the running fixture preview changed; no backend approval receipt or effect occurred.";
+    announcer.textContent = message("approvalMatched");
   });
   document.querySelector("#approval-input")?.addEventListener("input", (event) => event.currentTarget.setCustomValidity(""));
   const reviewForm = document.querySelector("#review-form");
@@ -109,32 +141,61 @@ function bindControls() {
     reasonField.hidden = !needsReason;
     reason.disabled = !needsReason;
     reason.value = "";
-    announcer.textContent = needsReason
-      ? `${event.target.value} selected. Choose one required primary reason.`
-      : `${event.target.value} selected. No reason is requested.`;
+    announcer.textContent = message(needsReason ? "reviewNeedsReason" : "reviewNoReason", {decision: event.target.value});
   });
   reviewForm?.addEventListener("submit", (event) => {
     event.preventDefault();
     const data = new FormData(reviewForm);
     const decision = data.get("review");
-    const reason = data.has("reason") ? ` with reason ${data.get("reason")}` : "";
-    announcer.textContent = `${decision}${reason} review intent previewed. No backend or candidate artifact was changed.`;
+    const reason = data.has("reason") ? message("reviewWithReason", {reason: data.get("reason")}) : "";
+    announcer.textContent = message("reviewPreviewed", {decision, reason});
   });
 }
 
+function renderError() {
+  const errorMessage = message(loadError.status ? "fixtureErrorStatus" : "fixtureError", {status: loadError.status});
+  document.querySelector("#state-content").innerHTML = `<h2 id="state-title">${escapeHtml(message("fixtureUnavailable"))}</h2><p>${escapeHtml(errorMessage)}</p><p>${escapeHtml(message("fixturePreviewHelp"))}</p>`;
+}
+
+function applyLanguage(announce = true) {
+  applyStaticMessages();
+  if (states) {
+    const key = Object.hasOwn(states, select.value) ? select.value : "setup";
+    select.replaceChildren(...Object.entries(states).map(([stateKey]) => new Option(localizedState(stateKey).label, stateKey)));
+    render(key, false);
+  } else if (loadError) {
+    renderError();
+  }
+  if (announce) announcer.textContent = message("languageChanged");
+}
+
+languageSelect.addEventListener("change", () => {
+  currentLanguage = languageSelect.value;
+  const url = new URL(location.href);
+  url.searchParams.set("lang", currentLanguage);
+  history.replaceState(null, "", url);
+  applyLanguage();
+});
+applyLanguage(false);
+
 fetch("fixtures/states.json")
   .then((response) => {
-    if (!response.ok) throw new Error(`Fixture request failed: ${response.status}`);
+    if (!response.ok) {
+      const error = new Error(`Fixture request failed: ${response.status}`);
+      error.status = response.status;
+      throw error;
+    }
     return response.json();
   })
   .then((fixtureStates) => {
     states = fixtureStates;
-    Object.entries(states).forEach(([key, state]) => select.add(new Option(state.label, key)));
     select.addEventListener("change", () => render(select.value));
     const requestedState = new URLSearchParams(location.search).get("state");
+    select.replaceChildren(...Object.entries(states).map(([key]) => new Option(localizedState(key).label, key)));
     render(Object.hasOwn(states, requestedState) ? requestedState : "setup", false);
   })
   .catch((error) => {
-    document.querySelector("#state-content").innerHTML = `<h2 id="state-title">Fixture unavailable</h2><p>${escapeHtml(error.message)}</p><p>Preview with <code>make -C operator-ui preview</code>; opening index.html directly cannot load JSON fixtures.</p>`;
+    loadError = error;
+    renderError();
     console.error(error);
   });

@@ -6,18 +6,28 @@
   <meta name="color-scheme" content="light">
   <title>FR5 collection desk — fixture</title>
   <link rel="stylesheet" href="styles.css">
+  <script src="messages.js" defer></script>
   <script src="app.js" defer></script>
 </head>
 <body>
-  <a class="skip-link" href="#workspace">Skip to collection state</a>
+  <a class="skip-link" href="#workspace" data-message="skip">Skip to collection state</a>
   <header class="masthead">
     <div>
-      <p class="eyebrow">FR5 · collection desk</p>
-      <h1>One scene. One exact decision.</h1>
+      <p class="eyebrow" data-message="product">FR5 · collection desk</p>
+      <h1 data-message="headline">One scene. One exact decision.</h1>
     </div>
-    <div class="fixture-stamp" aria-label="Fixture mode; no backend is connected">
-      <strong>FIXTURE</strong>
-      <span>No commands sent</span>
+    <div class="masthead-tools">
+      <label class="language-picker" for="language-select"><span data-message="language">Language</span>
+        <select id="language-select" aria-describedby="language-current">
+          <option value="en">English</option>
+          <option value="ko">한국어</option>
+        </select>
+      </label>
+      <span id="language-current" class="sr-only">Current language: English</span>
+      <div class="fixture-stamp" aria-label="Fixture mode; no backend is connected" data-message-aria-label="fixtureMode">
+        <strong data-message="fixture">FIXTURE</strong>
+        <span data-message="noCommands">No commands sent</span>
+      </div>
     </div>
   </header>
 
@@ -25,25 +35,25 @@
     <section class="workflow" aria-labelledby="workflow-heading">
       <div class="section-heading">
         <div>
-          <p class="eyebrow">Campaign c-grid-07</p>
-          <h2 id="workflow-heading">Collection path</h2>
+          <p class="eyebrow" data-message="campaign">Campaign c-grid-07</p>
+          <h2 id="workflow-heading" data-message="collectionPath">Collection path</h2>
         </div>
-        <label class="fixture-picker">Inspect fixture
+        <label class="fixture-picker"><span data-message="inspectFixture">Inspect fixture</span>
           <select id="fixture-select" aria-describedby="fixture-help"></select>
         </label>
       </div>
-      <p id="fixture-help" class="support-copy">Changes only the local view. It never changes robot, scene, cell, candidate, or training state.</p>
-      <ol id="workflow-steps" class="workflow-steps" aria-label="Collection workflow"></ol>
+      <p id="fixture-help" class="support-copy" data-message="fixtureHelp">Changes only the local view. It never changes robot, scene, cell, candidate, or training state.</p>
+      <ol id="workflow-steps" class="workflow-steps" aria-label="Collection workflow" data-message-aria-label="workflowLabel"></ol>
     </section>
 
     <div class="desk-grid">
       <aside class="setup-panel" aria-labelledby="setup-heading">
-        <p class="eyebrow">Bound inputs</p>
-        <h2 id="setup-heading">Setup receipt</h2>
+        <p class="eyebrow" data-message="boundInputs">Bound inputs</p>
+        <h2 id="setup-heading" data-message="setupReceipt">Setup receipt</h2>
         <dl id="setup-details" class="setup-details"></dl>
         <div class="authority-note">
           <span aria-hidden="true">◇</span>
-          <p><strong>View only.</strong> Backend artifacts remain authoritative for every value shown here.</p>
+          <p><strong data-message="viewOnly">View only.</strong> <span data-message="backendAuthority">Backend artifacts remain authoritative for every value shown here.</span></p>
         </div>
       </aside>
 
@@ -52,17 +62,17 @@
       </article>
 
       <aside class="evidence-panel" aria-labelledby="evidence-heading">
-        <p class="eyebrow">Evidence chain</p>
-        <h2 id="evidence-heading">What this view reads</h2>
+        <p class="eyebrow" data-message="evidenceChain">Evidence chain</p>
+        <h2 id="evidence-heading" data-message="viewReads">What this view reads</h2>
         <ul id="evidence-list" class="evidence-list"></ul>
-        <p class="authority-boundary"><strong>Authority boundary</strong><br><span id="authority-copy"></span></p>
+        <p class="authority-boundary"><strong data-message="authorityBoundary">Authority boundary</strong><br><span id="authority-copy"></span></p>
       </aside>
     </div>
   </main>
 
   <footer>
-    <span>Backend-free UX fixture</span>
-    <span>Motion approval stays with <code>run_job.py</code></span>
+    <span data-message="backendFree">Backend-free UX fixture</span>
+    <span><span data-message="motionApproval">Motion approval stays with</span> <code>run_job.py</code></span>
   </footer>
   <div id="announcer" class="sr-only" role="status" aria-live="polite"></div>
 </body>

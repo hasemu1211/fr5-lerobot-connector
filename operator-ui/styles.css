@@ -38,6 +38,8 @@ h2 { font-size: 1.35rem; letter-spacing: -.02em; }
 .fixture-stamp strong, .fixture-stamp span { display: block; }
 .fixture-stamp strong { letter-spacing: .15em; }
 .fixture-stamp span { margin-top: .25rem; font-size: .8rem; }
+.masthead-tools { display: flex; align-items: end; gap: 1rem; }
+.language-picker { display: grid; gap: .35rem; color: var(--muted); font-size: .82rem; font-weight: 700; }
 
 main { padding: 2rem clamp(1rem, 5vw, 5rem) 3rem; }
 .workflow { padding-bottom: 2rem; }
@@ -109,6 +111,7 @@ footer { display: flex; justify-content: space-between; gap: 1rem; padding: 1rem
 }
 @media (max-width: 620px) {
   .masthead, .section-heading, .state-heading, footer { align-items: stretch; flex-direction: column; }
+  .masthead-tools { align-items: start; justify-content: space-between; }
   .fixture-stamp { align-self: start; }
   .workflow-steps { grid-template-columns: repeat(3, 1fr); gap: .85rem 0; }
   .fixture-picker select { width: 100%; }
