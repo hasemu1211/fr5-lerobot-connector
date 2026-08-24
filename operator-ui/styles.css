@@ -48,7 +48,7 @@ main { padding: 2rem clamp(1rem, 5vw, 5rem) 3rem; }
 select, input { min-height: 2.75rem; border: 1px solid #8293a3; background: white; color: var(--ink); padding: .55rem .7rem; }
 .support-copy { color: var(--muted); font-size: .84rem; line-height: 1.5; }
 .workflow-steps { display: grid; grid-template-columns: repeat(6, 1fr); list-style: none; margin: 1.25rem 0 0; padding: 0; border-top: 1px solid var(--line); }
-.workflow-steps li { padding: .8rem .5rem 0 0; color: #6c7b89; font-size: .82rem; }
+.workflow-steps li { padding: .8rem .5rem 0 0; color: var(--muted); font-size: .82rem; }
 .workflow-steps li span { display: block; margin-bottom: .35rem; font: 700 .7rem "SFMono-Regular", Consolas, monospace; }
 .workflow-steps li.active { border-top: 4px solid var(--blue); margin-top: -2px; color: var(--ink); font-weight: 700; }
 .workflow-steps li.complete { border-top: 2px solid var(--green); margin-top: -1px; color: var(--green); }

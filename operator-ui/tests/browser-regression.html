@@ -17,6 +17,10 @@
   <span id="authority-copy"></span>
   <div id="announcer" role="status"></div>
   <pre id="results">Waiting for fixtures…</pre>
+  <script>
+    const forcedLoadFailure = new URLSearchParams(location.search).has("force-load-error");
+    if (forcedLoadFailure) window.fetch = () => Promise.resolve(new Response("", {status: 503}));
+  </script>
   <script src="messages.js"></script>
   <script src="app.js"></script>
   <script>
@@ -32,8 +36,25 @@
     };
 
     function run() {
-      if (!states) return setTimeout(run, 10);
+      if (!states && !loadError) return setTimeout(run, 10);
       try {
+        if (forcedLoadFailure) {
+          const initialLanguage = currentLanguage;
+          const initialUi = MESSAGE_CATALOG[initialLanguage].ui;
+          const initialError = initialUi.fixtureErrorStatus.replace("{status}", "503");
+          check(!states && document.querySelector("#state-title").textContent === initialUi.fixtureUnavailable && document.querySelector("#state-content").textContent.includes(initialError), `${initialLanguage} forced load failure renders localized error copy`);
+          check(announcer.textContent === `${initialUi.fixtureUnavailable}. ${initialError}`, `${initialLanguage} initial load failure is announced`);
+
+          const alternateLanguage = initialLanguage === "en" ? "ko" : "en";
+          setLanguage(alternateLanguage);
+          const alternateUi = MESSAGE_CATALOG[alternateLanguage].ui;
+          check(document.querySelector("#state-title").textContent === alternateUi.fixtureUnavailable && document.querySelector("#state-content").textContent.includes(alternateUi.fixtureErrorStatus.replace("{status}", "503")), `${alternateLanguage} error copy updates after language switch`);
+          check(announcer.textContent === alternateUi.languageChanged, `${alternateLanguage} language switch announcement is preserved after load failure`);
+          document.body.dataset.result = "pass";
+          results.textContent = `${checks.length} checks passed\n${checks.join("\n")}`;
+          return;
+        }
+
         const activeStep = document.querySelector("#workflow-steps .active");
         check(document.querySelector("#fixture-select").value === "setup" && activeStep.textContent.includes("Setup") && activeStep.getAttribute("aria-current") === "step", "setup is the default active fixture");
 
@@ -50,7 +71,8 @@
 
           loadError = {status: 503};
           renderError();
-          check(document.querySelector("#state-title").textContent === MESSAGE_CATALOG[language].ui.fixtureUnavailable && document.querySelector("#state-content").textContent.includes(MESSAGE_CATALOG[language].ui.fixtureErrorStatus.replace("{status}", "503")), `${language} renders localized fixture error copy`);
+          const expectedError = MESSAGE_CATALOG[language].ui.fixtureErrorStatus.replace("{status}", "503");
+          check(document.querySelector("#state-title").textContent === MESSAGE_CATALOG[language].ui.fixtureUnavailable && document.querySelector("#state-content").textContent.includes(expectedError) && announcer.textContent === `${MESSAGE_CATALOG[language].ui.fixtureUnavailable}. ${expectedError}`, `${language} renders and announces localized fixture error copy`);
           loadError = undefined;
 
           const validProgress = states.running.progress;

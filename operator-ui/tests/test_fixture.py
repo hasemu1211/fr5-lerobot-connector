@@ -58,6 +58,15 @@ class FixtureTest(unittest.TestCase):
         self.assertIn(":focus-visible", self.css)
         self.assertIn("prefers-reduced-motion", self.css)
 
+    def test_errors_are_announced_and_inactive_steps_use_aa_color(self):
+        self.assertIn("forcedLoadFailure", self.browser_regression)
+        self.assertIn("initial load failure is announced", self.browser_regression)
+        self.assertIn("language switch announcement is preserved after load failure", self.browser_regression)
+        self.assertIn('function renderError(announce = true)', self.js)
+        self.assertIn('renderError(false)', self.js)
+        self.assertIn('.workflow-steps li { padding: .8rem .5rem 0 0; color: var(--muted);', self.css)
+        self.assertNotIn("color: #6c7b89", self.css)
+
     def test_static_language_catalog_covers_all_states(self):
         self.assertLess(self.html.index('src="messages.js"'), self.html.index('src="app.js"'))
         self.assertIn('new URLSearchParams(location.search).get("lang")', self.js)

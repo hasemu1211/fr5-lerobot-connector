@@ -152,9 +152,11 @@ function bindControls() {
   });
 }
 
-function renderError() {
+function renderError(announce = true) {
+  const errorTitle = message("fixtureUnavailable");
   const errorMessage = message(loadError.status ? "fixtureErrorStatus" : "fixtureError", {status: loadError.status});
-  document.querySelector("#state-content").innerHTML = `<h2 id="state-title">${escapeHtml(message("fixtureUnavailable"))}</h2><p>${escapeHtml(errorMessage)}</p><p>${escapeHtml(message("fixturePreviewHelp"))}</p>`;
+  document.querySelector("#state-content").innerHTML = `<h2 id="state-title">${escapeHtml(errorTitle)}</h2><p>${escapeHtml(errorMessage)}</p><p>${escapeHtml(message("fixturePreviewHelp"))}</p>`;
+  if (announce) announcer.textContent = `${errorTitle}. ${errorMessage}`;
 }
 
 function applyLanguage(announce = true) {
@@ -164,7 +166,7 @@ function applyLanguage(announce = true) {
     select.replaceChildren(...Object.entries(states).map(([stateKey]) => new Option(localizedState(stateKey).label, stateKey)));
     render(key, false);
   } else if (loadError) {
-    renderError();
+    renderError(false);
   }
   if (announce) announcer.textContent = message("languageChanged");
 }
