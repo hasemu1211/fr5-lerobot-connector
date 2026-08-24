@@ -3,19 +3,21 @@ import io
 import json
 import tempfile
 import unittest
-from datetime import datetime, timezone
 from pathlib import Path
 from unittest import mock
 
 from tools.data_factory import training_approval
 from tools.data_factory.training_approval import (
     APPROVAL_SCHEMA,
+    EPISODE_PROVENANCE_SCHEMA,
     INVENTORY_SCHEMA,
     PRODUCTION_SCOPE,
     PROVENANCE,
     SYNTHETIC_SCOPE,
     build_training_approved_inventory,
+    compile_episode_training_provenance,
     issue_training_approval,
+    validate_episode_training_provenance,
     validate_training_approved_inventory,
     write_training_approved_inventory,
 )
@@ -68,6 +70,35 @@ def synthetic_fixture(root, episode_id="episode-1", episode_index=0):
         "result_digest": D3,
     }
     technical_path, technical_digest = write_json(root / f"{episode_id}.technical.SYNTHETIC_TEST_ONLY.json", technical)
+    slot = {
+        "slot_id": f"slot-{episode_id}",
+        "base_condition_digest": canonical_digest(["base-condition", episode_id]),
+        "robot_start_pose_id": f"start-{episode_id}",
+        "split_group": ("TRAIN", "ID", "OOD")[episode_index % 3],
+        "repeat_index": episode_index // 3,
+        "hil_prompts": 1,
+        "reviews": 1,
+        "pending_reviews": 0,
+        "storage_bytes": 100,
+        "order_index": 0,
+    }
+    manifest = {
+        "schema_version": "data_factory.seed_manifest.v1",
+        "manifest_id": f"seed-{episode_id}",
+        "kind": "seed",
+        "hypothesis_digest": canonical_digest(["hypothesis", episode_id]),
+        "fixed_contract_digest": canonical_digest(["fixed-contract", episode_id]),
+        "randomization_seed": episode_index,
+        "slots": [slot],
+        "manifest_budget": {"SYNTHETIC_TEST_ONLY": 1},
+        "program_budget": {"SYNTHETIC_TEST_ONLY": 1},
+        "planned_usage": {"SYNTHETIC_TEST_ONLY": 1},
+        "authority": "NO_EXECUTION_AUTHORITY",
+    }
+    manifest["manifest_digest"] = canonical_digest(manifest)
+    manifest_path, _ = write_json(
+        root / f"{episode_id}.seed-manifest.SYNTHETIC_TEST_ONLY.json", manifest,
+    )
     semantic = {
         "schema_version": "data_factory.candidate_admission.v1",
         "run_id": episode_id,
@@ -86,6 +117,20 @@ def synthetic_fixture(root, episode_id="episode-1", episode_index=0):
         "reason": None,
     }
     semantic_path, semantic_digest = write_json(root / f"{episode_id}.semantic.SYNTHETIC_TEST_ONLY.json", semantic)
+    episode_provenance = compile_episode_training_provenance(
+        scope=SYNTHETIC_SCOPE,
+        dataset_identity=dataset,
+        episode_id=episode_id,
+        episode_index=episode_index,
+        episode_content_digest=D2,
+        technical_validator_path=technical_path,
+        technical_validator_digest=technical_digest,
+        seed_manifest=manifest_path,
+        manifest_slot_id=slot["slot_id"],
+    )
+    provenance_path, provenance_digest = write_json(
+        root / f"{episode_id}.provenance.SYNTHETIC_TEST_ONLY.json", episode_provenance,
+    )
     approval = {
         "schema_version": APPROVAL_SCHEMA,
         "scope": SYNTHETIC_SCOPE,
@@ -95,6 +140,7 @@ def synthetic_fixture(root, episode_id="episode-1", episode_index=0):
         "episode_content_digest": D2,
         "technical_validator_digest": technical_digest,
         "human_semantic_evidence_digest": semantic_digest,
+        "episode_provenance_digest": provenance_digest,
         "approved_by": "synthetic-approver-1",
         "approved_at": "2026-08-24T00:01:00Z",
         "provenance": PROVENANCE,
@@ -111,6 +157,10 @@ def synthetic_fixture(root, episode_id="episode-1", episode_index=0):
             "artifact_digest": semantic_digest,
             "status": "PASS",
             "reviewer_id": "synthetic-reviewer-1",
+        },
+        "episode_provenance": {
+            "artifact_path": provenance_path,
+            "artifact_digest": provenance_digest,
         },
         "training_approval": {
             "artifact_path": approval_path,
@@ -135,6 +185,12 @@ class TrainingApprovalTest(unittest.TestCase):
                 scope=SYNTHETIC_SCOPE, dataset_identity=dataset, episodes=[first, second],
             )
             self.assertEqual(inventory["schema_version"], INVENTORY_SCHEMA)
+            provenance = load_json_strict(inventory["episodes"][0]["episode_provenance"]["artifact_path"])
+            self.assertEqual(provenance["schema_version"], EPISODE_PROVENANCE_SCHEMA)
+            self.assertEqual(
+                (provenance["manifest_slot_id"], provenance["split_group"], provenance["repeat_index"]),
+                ("slot-episode-0", "TRAIN", 0),
+            )
             self.assertEqual([item["episode_index"] for item in inventory["episodes"]], [0, 1])
             self.assertEqual(
                 inventory["inventory_digest"],
@@ -160,6 +216,34 @@ class TrainingApprovalTest(unittest.TestCase):
             with self.assertRaisesRegex(ContractError, "TRAINING_INVENTORY_EXISTS"):
                 write_training_approved_inventory(target, inventory, expected_scope=SYNTHETIC_SCOPE)
             self.assertEqual(target.read_bytes(), original)
+
+    def test_provenance_is_derived_from_exact_technical_and_seed_sources(self):
+        with tempfile.TemporaryDirectory(prefix="SYNTHETIC_TEST_ONLY-") as directory:
+            root = Path(directory)
+            dataset, technical, _, _, entry = synthetic_fixture(root, "episode-4", 4)
+            provenance = load_json_strict(entry["episode_provenance"]["artifact_path"])
+            self.assertEqual(
+                validate_episode_training_provenance(provenance, expected_scope=SYNTHETIC_SCOPE),
+                provenance,
+            )
+            self.assertEqual(provenance["dataset_identity_digest"], canonical_digest(dataset))
+            self.assertEqual(provenance["resolved_job_digest"], technical["resolved_job_digest"])
+            self.assertEqual(
+                (
+                    provenance["seed_manifest_id"], provenance["manifest_slot_id"],
+                    provenance["split_group"], provenance["repeat_index"],
+                    provenance["base_condition_digest"], provenance["robot_start_pose_id"],
+                ),
+                (
+                    "seed-episode-4", "slot-episode-4", "ID", 1,
+                    canonical_digest(["base-condition", "episode-4"]), "start-episode-4",
+                ),
+            )
+            with self.assertRaisesRegex(ContractError, "TRAINING_EPISODE_PROVENANCE_FIELDS"):
+                validate_episode_training_provenance(
+                    {**provenance, "caller_annotation": "untrusted"},
+                    expected_scope=SYNTHETIC_SCOPE,
+                )
 
     def test_exact_keys_and_nonfinite_fail_before_output(self):
         with tempfile.TemporaryDirectory(prefix="SYNTHETIC_TEST_ONLY-") as directory:
@@ -225,6 +309,51 @@ class TrainingApprovalTest(unittest.TestCase):
                 build_training_approved_inventory(scope=SYNTHETIC_SCOPE, dataset_identity=dataset, episodes=[entry])
             self.assertEqual(snapshot(root), before)
 
+    def test_provenance_artifact_is_reloaded_and_exactly_bound_by_approval(self):
+        with tempfile.TemporaryDirectory(prefix="SYNTHETIC_TEST_ONLY-") as directory:
+            root = Path(directory)
+            dataset, _, _, _, entry = synthetic_fixture(root)
+            provenance_path = Path(entry["episode_provenance"]["artifact_path"])
+            provenance = load_json_strict(provenance_path)
+            provenance["base_condition_digest"] = D3
+            write_json(provenance_path, provenance)
+            before = snapshot(root)
+            with self.assertRaisesRegex(ContractError, "TRAINING_EPISODE_PROVENANCE_ARTIFACT"):
+                build_training_approved_inventory(
+                    scope=SYNTHETIC_SCOPE, dataset_identity=dataset, episodes=[entry],
+                )
+            self.assertEqual(snapshot(root), before)
+
+            dataset, _, _, approval, entry = synthetic_fixture(root, "episode-5", 5)
+            provenance_path = Path(entry["episode_provenance"]["artifact_path"])
+            provenance = load_json_strict(provenance_path)
+            provenance["base_condition_digest"] = D3
+            _, provenance_digest = write_json(provenance_path, provenance)
+            entry["episode_provenance"]["artifact_digest"] = provenance_digest
+            before = snapshot(root)
+            with self.assertRaisesRegex(ContractError, "TRAINING_APPROVAL_BINDING"):
+                build_training_approved_inventory(
+                    scope=SYNTHETIC_SCOPE, dataset_identity=dataset, episodes=[entry],
+                )
+            self.assertEqual(snapshot(root), before)
+
+            dataset, _, _, approval, entry = synthetic_fixture(root, "episode-6", 6)
+            provenance_path = Path(entry["episode_provenance"]["artifact_path"])
+            provenance = load_json_strict(provenance_path)
+            provenance["resolved_job_digest"] = D3
+            _, provenance_digest = write_json(provenance_path, provenance)
+            entry["episode_provenance"]["artifact_digest"] = provenance_digest
+            approval["episode_provenance_digest"] = provenance_digest
+            approval_path = Path(entry["training_approval"]["artifact_path"])
+            _, approval_digest = write_json(approval_path, approval)
+            entry["training_approval"]["artifact_digest"] = approval_digest
+            before = snapshot(root)
+            with self.assertRaisesRegex(ContractError, "TRAINING_EPISODE_PROVENANCE_BINDING"):
+                build_training_approved_inventory(
+                    scope=SYNTHETIC_SCOPE, dataset_identity=dataset, episodes=[entry],
+                )
+            self.assertEqual(snapshot(root), before)
+
     def test_duplicate_episode_id_or_index_is_rejected(self):
         with tempfile.TemporaryDirectory(prefix="SYNTHETIC_TEST_ONLY-") as directory:
             root = Path(directory)
@@ -234,7 +363,33 @@ class TrainingApprovalTest(unittest.TestCase):
                 build_training_approved_inventory(scope=SYNTHETIC_SCOPE, dataset_identity=dataset, episodes=[entry, copy.deepcopy(entry)])
             self.assertEqual(snapshot(root), before)
 
-    def test_issuance_rejects_synthetic_scope_and_non_tty_without_writes(self):
+    def test_duplicate_seed_slot_binding_is_rejected(self):
+        with tempfile.TemporaryDirectory(prefix="SYNTHETIC_TEST_ONLY-") as directory:
+            root = Path(directory)
+            dataset, _, _, _, first = synthetic_fixture(root, "episode-1", 1)
+            _, _, _, second_approval, second = synthetic_fixture(root, "episode-2", 2)
+            first_provenance = load_json_strict(first["episode_provenance"]["artifact_path"])
+            second_provenance_path = Path(second["episode_provenance"]["artifact_path"])
+            second_provenance = load_json_strict(second_provenance_path)
+            for field in (
+                "seed_manifest_id", "seed_manifest_digest", "manifest_slot_id", "split_group",
+                "repeat_index", "base_condition_digest", "robot_start_pose_id",
+            ):
+                second_provenance[field] = first_provenance[field]
+            _, provenance_digest = write_json(second_provenance_path, second_provenance)
+            second["episode_provenance"]["artifact_digest"] = provenance_digest
+            second_approval["episode_provenance_digest"] = provenance_digest
+            approval_path = Path(second["training_approval"]["artifact_path"])
+            _, approval_digest = write_json(approval_path, second_approval)
+            second["training_approval"]["artifact_digest"] = approval_digest
+            before = snapshot(root)
+            with self.assertRaisesRegex(ContractError, "TRAINING_INVENTORY_DUPLICATE"):
+                build_training_approved_inventory(
+                    scope=SYNTHETIC_SCOPE, dataset_identity=dataset, episodes=[first, second],
+                )
+            self.assertEqual(snapshot(root), before)
+
+    def test_issuance_rejects_synthetic_scope_or_provenance_without_writes(self):
         with tempfile.TemporaryDirectory(prefix="SYNTHETIC_TEST_ONLY-") as directory:
             root = Path(directory)
             dataset, _, _, _, entry = synthetic_fixture(root)
@@ -248,73 +403,30 @@ class TrainingApprovalTest(unittest.TestCase):
                 "technical_validator_digest": entry["technical_validator"]["artifact_digest"],
                 "human_semantic_evidence_path": entry["human_semantic_evidence"]["artifact_path"],
                 "human_semantic_evidence_digest": entry["human_semantic_evidence"]["artifact_digest"],
+                "episode_provenance_path": entry["episode_provenance"]["artifact_path"],
+                "episode_provenance_digest": entry["episode_provenance"]["artifact_digest"],
                 "approved_by": "synthetic-approver-1",
-                "clock": lambda: datetime(2026, 8, 24, tzinfo=timezone.utc),
             }
             before = snapshot(root)
-            with self.assertRaisesRegex(ContractError, "TRAINING_APPROVAL_SCOPE"):
-                issue_training_approval(target, scope=SYNTHETIC_SCOPE, **arguments)
-            with mock.patch("builtins.open", side_effect=[FakeTTY(tty=False), FakeTTY(tty=False)]):
-                with self.assertRaisesRegex(ContractError, "HUMAN_TTY_REQUIRED"):
+            with mock.patch.object(training_approval, "_confirm_human_training_approval") as confirmation, mock.patch.object(
+                training_approval, "_write_exclusive",
+            ) as writer:
+                with self.assertRaisesRegex(ContractError, "TRAINING_APPROVAL_SCOPE"):
+                    issue_training_approval(target, scope=SYNTHETIC_SCOPE, **arguments)
+                with self.assertRaisesRegex(ContractError, "TRAINING_APPROVAL_SCOPE"):
                     issue_training_approval(target, scope=PRODUCTION_SCOPE, **arguments)
+            confirmation.assert_not_called()
+            writer.assert_not_called()
             self.assertFalse(target.exists())
             self.assertEqual(snapshot(root), before)
 
-    def test_valid_tty_path_reaches_exclusive_writer_without_creating_production_artifact(self):
-        with tempfile.TemporaryDirectory(prefix="SYNTHETIC_TEST_ONLY-") as directory:
-            root = Path(directory)
-            dataset, _, _, _, entry = synthetic_fixture(root)
-            target = root / "mocked-production-output.json"
-            with mock.patch.object(training_approval, "_confirm_human_training_approval") as confirmation, mock.patch.object(
-                training_approval, "_write_exclusive"
-            ) as writer:
-                approval = issue_training_approval(
-                    target,
-                    scope=PRODUCTION_SCOPE,
-                    dataset_identity=dataset,
-                    episode_id=entry["episode_id"],
-                    episode_index=entry["episode_index"],
-                    episode_content_digest=entry["episode_content_digest"],
-                    technical_validator_path=entry["technical_validator"]["artifact_path"],
-                    technical_validator_digest=entry["technical_validator"]["artifact_digest"],
-                    human_semantic_evidence_path=entry["human_semantic_evidence"]["artifact_path"],
-                    human_semantic_evidence_digest=entry["human_semantic_evidence"]["artifact_digest"],
-                    approved_by="synthetic-approver-1",
-                    clock=lambda: datetime(2026, 8, 24, tzinfo=timezone.utc),
-                )
-            self.assertEqual((approval["scope"], approval["provenance"]), (PRODUCTION_SCOPE, PROVENANCE))
-            confirmation.assert_called_once_with(
-                f"{PROVENANCE} {dataset['dataset_id']} {entry['episode_id']} "
-                f"{entry['episode_index']} {canonical_digest(approval)}"
-            )
-            writer.assert_called_once()
-            self.assertFalse(target.exists())
-
-    def test_tty_confirmation_mismatch_never_calls_writer_or_creates_artifact(self):
-        with tempfile.TemporaryDirectory(prefix="SYNTHETIC_TEST_ONLY-") as directory:
-            root = Path(directory)
-            dataset, _, _, _, entry = synthetic_fixture(root)
-            target = root / "must-not-exist.json"
-            with mock.patch("builtins.open", side_effect=[FakeTTY("wrong-digest\n"), FakeTTY()]), mock.patch.object(
-                training_approval, "_write_exclusive"
-            ) as writer:
-                with self.assertRaisesRegex(ContractError, "HUMAN_CONFIRMATION_FAILED"):
-                    issue_training_approval(
-                        target,
-                        scope=PRODUCTION_SCOPE,
-                        dataset_identity=dataset,
-                        episode_id=entry["episode_id"],
-                        episode_index=entry["episode_index"],
-                        episode_content_digest=entry["episode_content_digest"],
-                        technical_validator_path=entry["technical_validator"]["artifact_path"],
-                        technical_validator_digest=entry["technical_validator"]["artifact_digest"],
-                        human_semantic_evidence_path=entry["human_semantic_evidence"]["artifact_path"],
-                        human_semantic_evidence_digest=entry["human_semantic_evidence"]["artifact_digest"],
-                        approved_by="synthetic-approver-1",
-                        clock=lambda: datetime(2026, 8, 24, tzinfo=timezone.utc),
-                    )
-            writer.assert_not_called()
-            self.assertFalse(target.exists())
+    def test_human_confirmation_is_tty_only_and_exact(self):
+        with mock.patch("builtins.open", side_effect=[FakeTTY(tty=False), FakeTTY(tty=False)]):
+            with self.assertRaisesRegex(ContractError, "HUMAN_TTY_REQUIRED"):
+                training_approval._confirm_human_training_approval("synthetic-confirmation")
+        with mock.patch("builtins.open", side_effect=[FakeTTY("wrong-digest\n"), FakeTTY()]):
+            with self.assertRaisesRegex(ContractError, "HUMAN_CONFIRMATION_FAILED"):
+                training_approval._confirm_human_training_approval("synthetic-confirmation")
 
     def test_existing_approval_target_fails_before_tty_and_is_unchanged(self):
         with tempfile.TemporaryDirectory(prefix="SYNTHETIC_TEST_ONLY-") as directory:
@@ -335,6 +447,8 @@ class TrainingApprovalTest(unittest.TestCase):
                         technical_validator_digest=entry["technical_validator"]["artifact_digest"],
                         human_semantic_evidence_path=entry["human_semantic_evidence"]["artifact_path"],
                         human_semantic_evidence_digest=entry["human_semantic_evidence"]["artifact_digest"],
+                        episode_provenance_path=entry["episode_provenance"]["artifact_path"],
+                        episode_provenance_digest=entry["episode_provenance"]["artifact_digest"],
                         approved_by="synthetic-approver-1",
                     )
             confirmation.assert_not_called()

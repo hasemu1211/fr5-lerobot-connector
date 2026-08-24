@@ -13,8 +13,9 @@ from tools.data_factory.quality.coverage_report import CANDIDATE_FIELDS, TECHNIC
 from tools.fr5_data_factory import ContractError, DIGEST, RFC3339, SAFE_ID, canonical_digest, load_json_strict
 
 
-APPROVAL_SCHEMA = "data_factory.training_approval.v1"
-INVENTORY_SCHEMA = "data_factory.training_approved_inventory.v1"
+APPROVAL_SCHEMA = "data_factory.training_approval.v2"
+EPISODE_PROVENANCE_SCHEMA = "data_factory.episode_training_provenance.v1"
+INVENTORY_SCHEMA = "data_factory.training_approved_inventory.v2"
 PRODUCTION_SCOPE = "PRODUCTION"
 SYNTHETIC_SCOPE = "SYNTHETIC_TEST_ONLY"
 PROVENANCE = "HUMAN_TRAINING_APPROVED"
@@ -23,16 +24,36 @@ DATASET_KEYS = frozenset({"dataset_id", "repo_id", "dataset_root", "dataset_dige
 APPROVAL_KEYS = frozenset({
     "schema_version", "scope", "dataset_identity", "episode_id", "episode_index",
     "episode_content_digest", "technical_validator_digest",
-    "human_semantic_evidence_digest", "approved_by", "approved_at", "provenance",
+    "human_semantic_evidence_digest", "episode_provenance_digest",
+    "approved_by", "approved_at", "provenance",
+})
+EPISODE_PROVENANCE_KEYS = frozenset({
+    "schema_version", "scope", "dataset_identity_digest", "episode_id",
+    "episode_index", "episode_content_digest", "technical_validator_digest",
+    "resolved_job_digest", "seed_manifest_id", "seed_manifest_digest",
+    "manifest_slot_id", "split_group", "repeat_index",
+    "base_condition_digest", "robot_start_pose_id",
 })
 TECHNICAL_REF_KEYS = frozenset({"artifact_path", "artifact_digest", "status"})
 SEMANTIC_REF_KEYS = frozenset({"artifact_path", "artifact_digest", "status", "reviewer_id"})
+EPISODE_PROVENANCE_REF_KEYS = frozenset({"artifact_path", "artifact_digest"})
 APPROVAL_REF_KEYS = frozenset({"artifact_path", "artifact_digest", "provenance"})
 EPISODE_KEYS = frozenset({
     "dataset_identity_digest", "episode_id", "episode_index", "episode_content_digest",
-    "technical_validator", "human_semantic_evidence", "training_approval",
+    "technical_validator", "human_semantic_evidence", "episode_provenance",
+    "training_approval",
 })
 INVENTORY_KEYS = frozenset({"schema_version", "scope", "dataset_identity", "episodes", "inventory_digest"})
+SEED_MANIFEST_KEYS = frozenset({
+    "schema_version", "manifest_id", "kind", "hypothesis_digest",
+    "fixed_contract_digest", "randomization_seed", "slots", "manifest_budget",
+    "program_budget", "planned_usage", "authority", "manifest_digest",
+})
+SEED_SLOT_KEYS = frozenset({
+    "slot_id", "base_condition_digest", "robot_start_pose_id", "split_group",
+    "repeat_index", "hil_prompts", "reviews", "pending_reviews", "storage_bytes",
+    "order_index",
+})
 
 
 def _document(source: Mapping[str, Any] | str | Path) -> dict[str, Any]:
@@ -106,6 +127,12 @@ def _episode_identity(episode_id: object, episode_index: object, content_digest:
     return ident, episode_index, _digest(content_digest, "TRAINING_EPISODE_DIGEST")
 
 
+def _count(value: object, code: str, *, positive: bool = False) -> int:
+    if type(value) is not int or value < (1 if positive else 0):
+        raise ContractError(code)
+    return value
+
+
 def _artifact(path: object, digest: object, code: str) -> dict[str, Any]:
     if not isinstance(path, str) or not path or "\x00" in path:
         raise ContractError(code)
@@ -166,6 +193,118 @@ def _semantic(path: object, digest: object, *, episode_id: str, technical: Mappi
     return value
 
 
+def _seed_manifest_slot(
+    source: Mapping[str, Any] | str | Path, *, manifest_slot_id: str,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Load the exact seed source and derive its named slot without caller annotations."""
+    manifest = _document(source)
+    _exact(manifest, SEED_MANIFEST_KEYS, "TRAINING_SEED_MANIFEST_FIELDS")
+    if (
+        manifest["schema_version"] != "data_factory.seed_manifest.v1"
+        or manifest["kind"] != "seed"
+        or manifest["authority"] != "NO_EXECUTION_AUTHORITY"
+    ):
+        raise ContractError("TRAINING_SEED_MANIFEST_SCHEMA")
+    _id(manifest["manifest_id"], "TRAINING_SEED_MANIFEST_ID")
+    _digest(manifest["hypothesis_digest"], "TRAINING_SEED_MANIFEST_DIGEST")
+    _digest(manifest["fixed_contract_digest"], "TRAINING_SEED_MANIFEST_DIGEST")
+    _count(manifest["randomization_seed"], "TRAINING_SEED_MANIFEST_SEED")
+    expected_digest = canonical_digest({key: manifest[key] for key in manifest if key != "manifest_digest"})
+    if _digest(manifest["manifest_digest"], "TRAINING_SEED_MANIFEST_DIGEST") != expected_digest:
+        raise ContractError("TRAINING_SEED_MANIFEST_DIGEST")
+    if not isinstance(manifest["slots"], list) or not manifest["slots"]:
+        raise ContractError("TRAINING_SEED_MANIFEST_SLOTS")
+
+    slots = []
+    for order_index, source_slot in enumerate(manifest["slots"]):
+        slot = dict(_exact(source_slot, SEED_SLOT_KEYS, "TRAINING_SEED_SLOT_FIELDS"))
+        _id(slot["slot_id"], "TRAINING_SEED_SLOT_ID")
+        _digest(slot["base_condition_digest"], "TRAINING_SEED_SLOT_DIGEST")
+        _id(slot["robot_start_pose_id"], "TRAINING_SEED_SLOT_POSE")
+        if slot["split_group"] not in {"TRAIN", "ID", "OOD"}:
+            raise ContractError("TRAINING_SEED_SLOT_GROUP")
+        for field in ("repeat_index", "hil_prompts", "reviews", "pending_reviews"):
+            _count(slot[field], "TRAINING_SEED_SLOT_COUNT")
+        _count(slot["storage_bytes"], "TRAINING_SEED_SLOT_COUNT", positive=True)
+        if _count(slot["order_index"], "TRAINING_SEED_SLOT_ORDER") != order_index:
+            raise ContractError("TRAINING_SEED_SLOT_ORDER")
+        slots.append(slot)
+    slot_ids = [slot["slot_id"] for slot in slots]
+    slot_keys = [
+        (slot["split_group"], slot["base_condition_digest"], slot["robot_start_pose_id"], slot["repeat_index"])
+        for slot in slots
+    ]
+    if len(slot_ids) != len(set(slot_ids)) or len(slot_keys) != len(set(slot_keys)):
+        raise ContractError("TRAINING_SEED_SLOT_DUPLICATE")
+    manifest_slot_id = _id(manifest_slot_id, "TRAINING_SEED_SLOT_ID")
+    selected = [slot for slot in slots if slot["slot_id"] == manifest_slot_id]
+    if len(selected) != 1:
+        raise ContractError("TRAINING_SEED_SLOT_MISSING")
+    return manifest, selected[0]
+
+
+def validate_episode_training_provenance(
+    source: Mapping[str, Any] | str | Path, *, expected_scope: str = PRODUCTION_SCOPE,
+) -> dict[str, Any]:
+    """Validate one immutable episode-to-seed-slot provenance artifact."""
+    value = _document(source)
+    _exact(value, EPISODE_PROVENANCE_KEYS, "TRAINING_EPISODE_PROVENANCE_FIELDS")
+    if value["schema_version"] != EPISODE_PROVENANCE_SCHEMA:
+        raise ContractError("TRAINING_EPISODE_PROVENANCE_SCHEMA")
+    _scope(value["scope"], expected_scope)
+    _digest(value["dataset_identity_digest"], "TRAINING_EPISODE_PROVENANCE_DATASET")
+    _episode_identity(value["episode_id"], value["episode_index"], value["episode_content_digest"])
+    _digest(value["technical_validator_digest"], "TRAINING_EPISODE_PROVENANCE_TECHNICAL")
+    _digest(value["resolved_job_digest"], "TRAINING_EPISODE_PROVENANCE_TECHNICAL")
+    _id(value["seed_manifest_id"], "TRAINING_EPISODE_PROVENANCE_MANIFEST")
+    _digest(value["seed_manifest_digest"], "TRAINING_EPISODE_PROVENANCE_MANIFEST")
+    _id(value["manifest_slot_id"], "TRAINING_EPISODE_PROVENANCE_SLOT")
+    if value["split_group"] not in {"TRAIN", "ID", "OOD"}:
+        raise ContractError("TRAINING_EPISODE_PROVENANCE_GROUP")
+    _count(value["repeat_index"], "TRAINING_EPISODE_PROVENANCE_REPEAT")
+    _digest(value["base_condition_digest"], "TRAINING_EPISODE_PROVENANCE_CONDITION")
+    _id(value["robot_start_pose_id"], "TRAINING_EPISODE_PROVENANCE_POSE")
+    canonical_digest(value)
+    return value
+
+
+def compile_episode_training_provenance(
+    *, scope: str, dataset_identity: Mapping[str, Any], episode_id: str,
+    episode_index: int, episode_content_digest: str,
+    technical_validator_path: str | Path, technical_validator_digest: str,
+    seed_manifest: Mapping[str, Any] | str | Path, manifest_slot_id: str,
+) -> dict[str, Any]:
+    """Purely derive an episode binding from exact technical and seed sources."""
+    scope = _scope(scope)
+    dataset = _dataset(dataset_identity)
+    episode_id, episode_index, episode_content_digest = _episode_identity(
+        episode_id, episode_index, episode_content_digest,
+    )
+    technical = _technical(
+        str(technical_validator_path), technical_validator_digest,
+        episode_id=episode_id, dataset_root=dataset["dataset_root"],
+    )
+    manifest, slot = _seed_manifest_slot(seed_manifest, manifest_slot_id=manifest_slot_id)
+    provenance = {
+        "schema_version": EPISODE_PROVENANCE_SCHEMA,
+        "scope": scope,
+        "dataset_identity_digest": canonical_digest(dataset),
+        "episode_id": episode_id,
+        "episode_index": episode_index,
+        "episode_content_digest": episode_content_digest,
+        "technical_validator_digest": technical_validator_digest,
+        "resolved_job_digest": technical["resolved_job_digest"],
+        "seed_manifest_id": manifest["manifest_id"],
+        "seed_manifest_digest": manifest["manifest_digest"],
+        "manifest_slot_id": slot["slot_id"],
+        "split_group": slot["split_group"],
+        "repeat_index": slot["repeat_index"],
+        "base_condition_digest": slot["base_condition_digest"],
+        "robot_start_pose_id": slot["robot_start_pose_id"],
+    }
+    return validate_episode_training_provenance(provenance, expected_scope=scope)
+
+
 def validate_training_approval(
     source: Mapping[str, Any] | str | Path, *, expected_scope: str = PRODUCTION_SCOPE,
 ) -> dict[str, Any]:
@@ -179,6 +318,7 @@ def validate_training_approval(
     _episode_identity(value["episode_id"], value["episode_index"], value["episode_content_digest"])
     _digest(value["technical_validator_digest"], "TRAINING_APPROVAL_BINDING")
     _digest(value["human_semantic_evidence_digest"], "TRAINING_APPROVAL_BINDING")
+    _digest(value["episode_provenance_digest"], "TRAINING_APPROVAL_BINDING")
     _id(value["approved_by"], "TRAINING_APPROVER_ID")
     _timestamp(value["approved_at"], "TRAINING_APPROVAL_TIME")
     canonical_digest(value)
@@ -242,6 +382,7 @@ def issue_training_approval(
     episode_id: str, episode_index: int, episode_content_digest: str,
     technical_validator_path: str | Path, technical_validator_digest: str,
     human_semantic_evidence_path: str | Path, human_semantic_evidence_digest: str,
+    episode_provenance_path: str | Path, episode_provenance_digest: str,
     approved_by: str, clock=lambda: datetime.now(timezone.utc),
 ) -> dict[str, Any]:
     """Issue one production approval after all bindings pass and a human confirms on /dev/tty."""
@@ -255,6 +396,20 @@ def issue_training_approval(
     semantic_path = str(human_semantic_evidence_path)
     technical = _technical(technical_path, technical_validator_digest, episode_id=episode_id, dataset_root=dataset["dataset_root"])
     _semantic(semantic_path, human_semantic_evidence_digest, episode_id=episode_id, technical=technical)
+    provenance_raw = _artifact(
+        str(episode_provenance_path), episode_provenance_digest,
+        "TRAINING_EPISODE_PROVENANCE_ARTIFACT",
+    )
+    episode_provenance = validate_episode_training_provenance(provenance_raw)
+    if (
+        episode_provenance["dataset_identity_digest"] != canonical_digest(dataset)
+        or episode_provenance["episode_id"] != episode_id
+        or episode_provenance["episode_index"] != episode_index
+        or episode_provenance["episode_content_digest"] != episode_content_digest
+        or episode_provenance["technical_validator_digest"] != technical_validator_digest
+        or episode_provenance["resolved_job_digest"] != technical["resolved_job_digest"]
+    ):
+        raise ContractError("TRAINING_EPISODE_PROVENANCE_BINDING")
     approved_at = clock()
     if not isinstance(approved_at, datetime) or approved_at.tzinfo is None or approved_at.utcoffset() is None:
         raise ContractError("TRAINING_APPROVAL_TIME")
@@ -267,6 +422,7 @@ def issue_training_approval(
         "episode_content_digest": episode_content_digest,
         "technical_validator_digest": technical_validator_digest,
         "human_semantic_evidence_digest": human_semantic_evidence_digest,
+        "episode_provenance_digest": episode_provenance_digest,
         "approved_by": approved_by,
         "approved_at": approved_at.astimezone(timezone.utc).isoformat().replace("+00:00", "Z"),
         "provenance": PROVENANCE,
@@ -281,7 +437,9 @@ def issue_training_approval(
     return approval
 
 
-def _episode(value: object, *, dataset: Mapping[str, Any], scope: str) -> dict[str, Any]:
+def _episode(
+    value: object, *, dataset: Mapping[str, Any], scope: str,
+) -> tuple[dict[str, Any], dict[str, Any]]:
     value = _exact(value, EPISODE_KEYS, "TRAINING_INVENTORY_EPISODE_FIELDS")
     result = copy.deepcopy(dict(value))
     episode_id, episode_index, content_digest = _episode_identity(
@@ -308,6 +466,27 @@ def _episode(value: object, *, dataset: Mapping[str, Any], scope: str) -> dict[s
     if semantic_ref.get("reviewer_id") != semantic["reviewed_by"]:
         raise ContractError("TRAINING_SEMANTIC_REVIEWER")
 
+    provenance_ref = _exact(
+        result["episode_provenance"], EPISODE_PROVENANCE_REF_KEYS,
+        "TRAINING_EPISODE_PROVENANCE_REFERENCE",
+    )
+    provenance_raw = _artifact(
+        provenance_ref.get("artifact_path"), provenance_ref.get("artifact_digest"),
+        "TRAINING_EPISODE_PROVENANCE_ARTIFACT",
+    )
+    episode_provenance = validate_episode_training_provenance(
+        provenance_raw, expected_scope=scope,
+    )
+    if (
+        episode_provenance["dataset_identity_digest"] != canonical_digest(dataset)
+        or episode_provenance["episode_id"] != episode_id
+        or episode_provenance["episode_index"] != episode_index
+        or episode_provenance["episode_content_digest"] != content_digest
+        or episode_provenance["technical_validator_digest"] != technical_ref["artifact_digest"]
+        or episode_provenance["resolved_job_digest"] != technical["resolved_job_digest"]
+    ):
+        raise ContractError("TRAINING_EPISODE_PROVENANCE_BINDING")
+
     approval_ref = _exact(result["training_approval"], APPROVAL_REF_KEYS, "TRAINING_APPROVAL_REFERENCE")
     if approval_ref.get("provenance") != PROVENANCE:
         raise ContractError("TRAINING_APPROVAL_PROVENANCE")
@@ -322,10 +501,37 @@ def _episode(value: object, *, dataset: Mapping[str, Any], scope: str) -> dict[s
         or approval["episode_content_digest"] != content_digest
         or approval["technical_validator_digest"] != technical_ref["artifact_digest"]
         or approval["human_semantic_evidence_digest"] != semantic_ref["artifact_digest"]
+        or approval["episode_provenance_digest"] != provenance_ref["artifact_digest"]
     ):
         raise ContractError("TRAINING_APPROVAL_BINDING")
     canonical_digest(result)
-    return result
+    return result, episode_provenance
+
+
+def _unique_episodes(
+    episodes: Sequence[Mapping[str, Any]], provenances: Sequence[Mapping[str, Any]],
+) -> None:
+    ids = [value["episode_id"] for value in episodes]
+    indices = [value["episode_index"] for value in episodes]
+    slot_ids = [
+        (value["seed_manifest_id"], value["seed_manifest_digest"], value["manifest_slot_id"])
+        for value in provenances
+    ]
+    slot_keys = [
+        (
+            value["seed_manifest_id"], value["seed_manifest_digest"],
+            value["split_group"], value["base_condition_digest"],
+            value["robot_start_pose_id"], value["repeat_index"],
+        )
+        for value in provenances
+    ]
+    if (
+        len(ids) != len(set(ids))
+        or len(indices) != len(set(indices))
+        or len(slot_ids) != len(set(slot_ids))
+        or len(slot_keys) != len(set(slot_keys))
+    ):
+        raise ContractError("TRAINING_INVENTORY_DUPLICATE")
 
 
 def build_training_approved_inventory(
@@ -336,11 +542,9 @@ def build_training_approved_inventory(
     dataset = _dataset(dataset_identity)
     if not isinstance(episodes, Sequence) or isinstance(episodes, (str, bytes)) or not episodes:
         raise ContractError("TRAINING_INVENTORY_EPISODES")
-    parsed = [_episode(value, dataset=dataset, scope=scope) for value in episodes]
-    ids = [value["episode_id"] for value in parsed]
-    indices = [value["episode_index"] for value in parsed]
-    if len(ids) != len(set(ids)) or len(indices) != len(set(indices)):
-        raise ContractError("TRAINING_INVENTORY_DUPLICATE")
+    checked = [_episode(value, dataset=dataset, scope=scope) for value in episodes]
+    parsed = [value for value, _ in checked]
+    _unique_episodes(parsed, [provenance for _, provenance in checked])
     parsed.sort(key=lambda value: (value["episode_index"], value["episode_id"]))
     body = {
         "schema_version": INVENTORY_SCHEMA,
@@ -364,11 +568,9 @@ def validate_training_approved_inventory(
     episodes = value["episodes"]
     if not isinstance(episodes, list) or not episodes:
         raise ContractError("TRAINING_INVENTORY_EPISODES")
-    parsed = [_episode(item, dataset=dataset, scope=value["scope"]) for item in episodes]
-    ids = [item["episode_id"] for item in parsed]
-    indices = [item["episode_index"] for item in parsed]
-    if len(ids) != len(set(ids)) or len(indices) != len(set(indices)):
-        raise ContractError("TRAINING_INVENTORY_DUPLICATE")
+    checked = [_episode(item, dataset=dataset, scope=value["scope"]) for item in episodes]
+    parsed = [item for item, _ in checked]
+    _unique_episodes(parsed, [provenance for _, provenance in checked])
     if parsed != sorted(parsed, key=lambda item: (item["episode_index"], item["episode_id"])):
         raise ContractError("TRAINING_INVENTORY_ORDER")
     body = {key: value[key] for key in ("schema_version", "scope", "dataset_identity", "episodes")}
