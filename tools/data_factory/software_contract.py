@@ -1,4 +1,4 @@
-"""Cross-artifact readiness validation for the offline P5.8a contract."""
+"""Cross-artifact readiness validation for the offline software contract."""
 
 from __future__ import annotations
 
@@ -11,6 +11,7 @@ from tools.data_factory.experiment_manifest import (
 )
 from tools.data_factory.training_approval import (
     PRODUCTION_SCOPE,
+    validate_episode_training_provenance,
     validate_training_approved_inventory,
 )
 from tools.data_factory.training_receipts import (
@@ -63,6 +64,23 @@ def _validate_feature_binding(split: Mapping[str, Any], train: Mapping[str, Any]
     )
 
 
+def _episode_provenances(
+    inventory: Mapping[str, Any], *, expected_scope: str,
+) -> dict[int, dict[str, Any]]:
+    provenances = {}
+    for episode in inventory["episodes"]:
+        reference = episode["episode_provenance"]
+        provenance = validate_episode_training_provenance(
+            reference["artifact_path"], expected_scope=expected_scope,
+        )
+        _require(
+            canonical_digest(provenance) == reference["artifact_digest"],
+            "SOFTWARE_CONTRACT_EPISODE_PROVENANCE_DIGEST",
+        )
+        provenances[episode["episode_index"]] = provenance
+    return provenances
+
+
 def validate_software_contract(
     *,
     approved_inventory: Mapping[str, Any] | str | Path,
@@ -79,8 +97,8 @@ def validate_software_contract(
     )
     split_v2 = validate_training_split(split)
     _require(split_v2["schema_version"] == 2, "SOFTWARE_CONTRACT_SPLIT_V2_REQUIRED")
-    hypothesis_v1 = validate_fr5_hypothesis(hypothesis)
-    manifest = validate_experiment_manifest(seed_manifest, hypothesis=hypothesis_v1)
+    hypothesis_value = validate_fr5_hypothesis(hypothesis)
+    manifest = validate_experiment_manifest(seed_manifest, hypothesis=hypothesis_value)
     _require(manifest["kind"] == "seed", "SOFTWARE_CONTRACT_SEED_REQUIRED")
     train, reloaded = _validate_receipts(training_receipt, reload_receipt)
 
@@ -99,8 +117,12 @@ def validate_software_contract(
         bindings["approved_episode_inventory_digest"] == inventory["inventory_digest"]
         and bindings["episode_manifest_digest"] == manifest["manifest_digest"]
         and bindings["collection_profile_digest"]
-        == hypothesis_v1["fixed_contract"]["collection_profile_digest"],
+        == hypothesis_value["fixed_contract"]["collection_profile_digest"],
         "SOFTWARE_CONTRACT_SPLIT_BINDING",
+    )
+    _require(
+        split_v2["evaluation_contract"]["program_budget"] == manifest["program_budget"],
+        "SOFTWARE_CONTRACT_PROGRAM_BUDGET",
     )
     expected_receipt = {
         "dataset_id": dataset["dataset_id"],
@@ -118,6 +140,31 @@ def validate_software_contract(
     )
 
     approved = {item["episode_index"]: item for item in inventory["episodes"]}
+    provenances = _episode_provenances(inventory, expected_scope=expected_scope)
+    manifest_slots = {item["slot_id"]: item for item in manifest["slots"]}
+    base_conditions = {
+        item["base_condition_digest"]: item for item in hypothesis_value["base_conditions"]
+    }
+    _require(
+        len(provenances) == len(manifest_slots)
+        and {item["manifest_slot_id"] for item in provenances.values()} == set(manifest_slots),
+        "SOFTWARE_CONTRACT_MANIFEST_SLOT_SET",
+    )
+    for provenance in provenances.values():
+        slot = manifest_slots[provenance["manifest_slot_id"]]
+        base = base_conditions.get(provenance["base_condition_digest"])
+        _require(
+            provenance["seed_manifest_id"] == manifest["manifest_id"]
+            and provenance["seed_manifest_digest"] == manifest["manifest_digest"]
+            and provenance["split_group"] == slot["split_group"]
+            and provenance["repeat_index"] == slot["repeat_index"]
+            and provenance["base_condition_digest"] == slot["base_condition_digest"]
+            and provenance["robot_start_pose_id"] == slot["robot_start_pose_id"]
+            and base is not None
+            and provenance["resolved_job_digest"] == base["resolved_job_digest"],
+            "SOFTWARE_CONTRACT_MANIFEST_SLOT_BINDING",
+        )
+
     grouped = [
         (group, item)
         for group, episodes in split_v2["episode_groups"].items()
@@ -127,32 +174,21 @@ def validate_software_contract(
         {item["episode_index"] for _, item in grouped} == set(approved),
         "SOFTWARE_CONTRACT_EPISODE_SET",
     )
-    for _, item in grouped:
+    for group, item in grouped:
         source = approved[item["episode_index"]]
+        provenance = provenances[item["episode_index"]]
         _require(
             item["episode_ref_digest"] == source["episode_content_digest"]
             and item["training_approval_digest"]
             == source["training_approval"]["artifact_digest"],
             "SOFTWARE_CONTRACT_EPISODE_BINDING",
         )
-
-    allowed = {
-        (group, pair["base_condition_digest"], pair["robot_start_pose_id"])
-        for pair in hypothesis_v1["allowed_pairs"]
-        for group in pair["split_groups"]
-    }
-    planned = {
-        (slot["split_group"], slot["base_condition_digest"], slot["robot_start_pose_id"])
-        for slot in manifest["slots"]
-    }
-    _require(
-        all(
-            (group, item["base_condition_digest"], item["robot_start_pose_id"])
-            in allowed & planned
-            for group, item in grouped
-        ),
-        "SOFTWARE_CONTRACT_CELL_BINDING",
-    )
+        _require(
+            group == provenance["split_group"]
+            and item["base_condition_digest"] == provenance["base_condition_digest"]
+            and item["robot_start_pose_id"] == provenance["robot_start_pose_id"],
+            "SOFTWARE_CONTRACT_CELL_BINDING",
+        )
     _validate_feature_binding(split_v2, train)
 
     body = {
@@ -161,7 +197,7 @@ def validate_software_contract(
         "scope": inventory["scope"],
         "dataset_identity_digest": canonical_digest(dataset),
         "approved_episode_inventory_digest": inventory["inventory_digest"],
-        "hypothesis_digest": hypothesis_v1["hypothesis_digest"],
+        "hypothesis_digest": hypothesis_value["hypothesis_digest"],
         "seed_manifest_digest": manifest["manifest_digest"],
         "split_digest": split_v2["split_digest"],
         "training_receipt_digest": receipt_digest(train),
