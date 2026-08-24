@@ -52,6 +52,7 @@ class FakeBackend:
         self.fail_stage: str | None = None
         self.partial_stage: str | None = None
         self.checkpoint_overrides: dict = {}
+        self.evaluation_overrides: dict = {}
 
     def _start(self, stage: str, context: dict) -> bool:
         self.timeline.append(stage)
@@ -87,11 +88,17 @@ class FakeBackend:
     def evaluator(self, context: dict) -> dict:
         if self._start("evaluate", context):
             return {"metric": "synthetic_offline_loss", "samples": 3}
+        request = context["request"]
         return {
             "status": "PASS",
             "metric": "synthetic_offline_loss",
             "samples": 3,
-            "loss_mean": 0.25,
+            "request_digest": receipt_digest(request),
+            "dataset_digest": request["dataset"]["dataset_digest"],
+            "split_digest": request["split_digest"],
+            "checkpoint_tree_digest": context["checkpoint_validation"]["checkpoint_tree_digest"],
+            "reload_receipt_digest": receipt_digest(context["reload_receipt"]),
+            **self.evaluation_overrides,
         }
 
 
@@ -203,6 +210,12 @@ class TrainingOrchestrationTest(unittest.TestCase):
             with self.assertRaisesRegex(ContractError, "TRAINING_ORCHESTRATION_CHECKPOINT_BINDING"):
                 run(request, backend)
             self.assertEqual(backend.timeline, ["trainer", "checkpoint"])
+
+            backend = FakeBackend(train, reload_receipt)
+            backend.evaluation_overrides["request_digest"] = receipt_digest("stale-request")
+            with self.assertRaisesRegex(ContractError, "TRAINING_ORCHESTRATION_EVALUATION_BINDING"):
+                run(request, backend)
+            self.assertEqual(backend.timeline, ["trainer", "checkpoint", "reload", "evaluate"])
 
     def test_injected_stage_failures_never_call_later_stages(self) -> None:
         expected_timelines = {

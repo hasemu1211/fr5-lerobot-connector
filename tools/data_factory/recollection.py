@@ -36,10 +36,6 @@ DECISION_FIELDS = frozenset({
     "variant_id", "variant_digest", "variant_catalog_digest",
     "eligibility_status", "ablation_evidence_digest", "decision_digest",
 })
-SELECTION_FIELDS = frozenset({
-    "schema_version", "mode", "target_condition", "coverage_count",
-    "bindings", "authority", "selection_digest",
-})
 BINDING_FIELDS = frozenset({
     "dataset_digest", "checkpoint_digest", "coverage_report_digest",
     "failure_evidence_digest", "selected_failure_digest",

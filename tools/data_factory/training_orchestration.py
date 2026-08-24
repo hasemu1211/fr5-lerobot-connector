@@ -32,6 +32,10 @@ _REQUEST_KEYS = frozenset({
 _CHECKPOINT_KEYS = frozenset({
     "status", "checkpoint_id", "checkpoint_tree_digest", "dataset_digest", "split_digest",
 })
+_EVALUATION_KEYS = frozenset({
+    "status", "metric", "samples", "request_digest", "dataset_digest", "split_digest",
+    "checkpoint_tree_digest", "reload_receipt_digest",
+})
 
 
 def _require(condition: bool, code: str) -> None:
@@ -206,16 +210,21 @@ def _checkpoint(value: object, train: Mapping[str, object], request: Mapping[str
     return result
 
 
-def _evaluation(value: object) -> dict:
+def _evaluation(value: object, expected: Mapping[str, object]) -> dict:
     result = _mapping(value, "TRAINING_ORCHESTRATION_EVALUATION_RESULT")
     samples = result.get("samples")
     _require(
-        result.get("status") == "PASS"
+        set(result) == _EVALUATION_KEYS
+        and result.get("status") == "PASS"
         and isinstance(result.get("metric"), str)
         and bool(result["metric"])
         and type(samples) is int
         and samples > 0,
         "TRAINING_ORCHESTRATION_EVALUATION_RESULT",
+    )
+    _require(
+        all(result[key] == value for key, value in expected.items()),
+        "TRAINING_ORCHESTRATION_EVALUATION_BINDING",
     )
     return result
 
@@ -278,7 +287,16 @@ def orchestrate_training(
 
     evaluation_context = {**reload_context, "reload_receipt": reload_receipt}
     _cancelled(cancelled)
-    evaluation = _evaluation(_invoke("EVALUATOR", evaluator, evaluation_context))
+    evaluation = _evaluation(
+        _invoke("EVALUATOR", evaluator, evaluation_context),
+        {
+            "request_digest": request_digest,
+            "dataset_digest": request["dataset"]["dataset_digest"],
+            "split_digest": request["split_digest"],
+            "checkpoint_tree_digest": checkpoint["checkpoint_tree_digest"],
+            "reload_receipt_digest": receipts.canonical_digest(reload_receipt),
+        },
+    )
     _cancelled(cancelled)
     return {
         "status": "PASS",
