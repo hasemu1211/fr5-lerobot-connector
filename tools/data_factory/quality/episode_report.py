@@ -8,7 +8,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
-from tools.fr5_data_factory import ContractError, DIGEST, SAFE_ID, _cross, _dot, _mul, _sub, _unit, _vec, canonical_digest, load_json_strict, normalize_job_spec, resolve_pose, validate_rigid_transform
+from tools.fr5_data_factory import ContractError, DIGEST, SAFE_ID, _cross, _dot, _mul, _sub, _timestamp, _unit, _vec, canonical_digest, load_json_strict, normalize_job_spec, resolve_pose, validate_rigid_transform
 from tools.data_factory.quality.coverage_report import CANDIDATE_FIELDS, PLAN_BINDING_DIGEST_FIELDS, RESOLVED_INPUT_DIGEST_FIELDS, STORED_EPISODE_FIELDS, TECHNICAL_FIELDS
 from tools.data_factory.quality.phase_metrics import ATTRIBUTE_SCHEMA, STATUS, quality_attribute
 
@@ -71,6 +71,8 @@ def _object_frame_binding(accepted_episode: Mapping[str, Any], resolved_job: Map
     episode_id = accepted_episode["episode_id"]
     job, preapproval, technical, admission = (values[name] for name in ("job_spec", "preapproval_evidence", "technical_validator", "candidate_admission"))
     job = normalize_job_spec(job, now=datetime.min.replace(tzinfo=timezone.utc))
+    if job["job_id"] != episode_id:
+        raise ContractError("OBJECT_FRAME_ACCEPTED_EPISODE")
     envelope = preapproval.get("plan_envelope") if isinstance(preapproval, Mapping) else None
     plan = envelope.get("plan") if isinstance(envelope, Mapping) else None
     bindings = plan.get("binding_digests") if isinstance(plan, Mapping) else None
@@ -86,6 +88,7 @@ def _object_frame_binding(accepted_episode: Mapping[str, Any], resolved_job: Map
         or not isinstance(plan, Mapping)
         or plan.get("schema_version") != "fr5.pickup_plan.v3"
         or plan.get("run_id") != episode_id
+        or plan.get("robot_system_id") != job["robot_system_id"]
         or canonical_digest(plan) != preapproval.get("plan_digest")
         or plan.get("resolved_job_digest") != preapproval.get("resolved_job_digest")
         or not isinstance(safety, Mapping)
@@ -122,6 +125,7 @@ def _object_frame_binding(accepted_episode: Mapping[str, Any], resolved_job: Map
         or admission.get("checklist_id") != "pickup-v2"
         or admission.get("semantic_status") != "PASS"
         or not isinstance(admission.get("reviewed_by"), str)
+        or admission["reviewed_by"] == "HUMAN"
         or not SAFE_ID.fullmatch(admission["reviewed_by"])
         or not isinstance(admission.get("reviewed_at"), str)
         or not admission["reviewed_at"]
@@ -129,6 +133,7 @@ def _object_frame_binding(accepted_episode: Mapping[str, Any], resolved_job: Map
         or admission.get("review_context_digest") != canonical_digest({"run_id": episode_id, "resolved_job_digest": preapproval["resolved_job_digest"], "plan_digest": preapproval["plan_digest"], "technical_validator_digest": canonical_digest(technical)})
     ):
         raise ContractError("OBJECT_FRAME_ACCEPTED_EPISODE")
+    _timestamp(admission["reviewed_at"], "OBJECT_FRAME_ACCEPTED_EPISODE", now=datetime.max.replace(tzinfo=timezone.utc))
     if not isinstance(resolved_job, Mapping) or set(resolved_job) != {"normalized_job", "input_digests", "resolved_job_digest", "robot", "collection_profile", "calibration", "object_profile", "grasp_profile"}:
         raise ContractError("OBJECT_FRAME_BINDING")
     inputs = resolved_job["input_digests"]
