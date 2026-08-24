@@ -181,8 +181,8 @@ def build_coverage_report(
     }
 
 
-def write_coverage_report(report: Mapping[str, Any], *, root: str | Path = "outputs/data_factory/coverage") -> Path:
-    """Atomically publish only the canonical profile-owned coverage report."""
+def validate_coverage_report(report: Mapping[str, Any]) -> dict[str, Any]:
+    """Validate one canonical report without publishing it."""
     if not isinstance(report, Mapping) or set(report) != REPORT_FIELDS or report.get("schema_version") != REPORT_SCHEMA or report.get("authority") != "REPORT_ONLY":
         raise ContractError("COVERAGE_REPORT_SCHEMA")
     profile = report.get("collection_profile_id")
@@ -218,9 +218,15 @@ def write_coverage_report(report: Mapping[str, Any], *, root: str | Path = "outp
     if suggestion is not None and _key(_condition(suggestion)) not in {_key(item) for item in conditions}:
         raise ContractError("COVERAGE_REPORT_SUGGESTION")
     canonical_digest(report)
-    target = Path(root) / profile / "coverage_report.json"
+    return copy.deepcopy(dict(report))
+
+
+def write_coverage_report(report: Mapping[str, Any], *, root: str | Path = "outputs/data_factory/coverage") -> Path:
+    """Atomically publish only the canonical profile-owned coverage report."""
+    value = validate_coverage_report(report)
+    target = Path(root) / value["collection_profile_id"] / "coverage_report.json"
     target.parent.mkdir(parents=True, exist_ok=True)
-    write_json_atomic(target, dict(report))
+    write_json_atomic(target, value)
     return target
 
 

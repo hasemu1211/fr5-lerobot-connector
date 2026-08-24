@@ -288,11 +288,11 @@ class ExperimentManifestTests(unittest.TestCase):
         _, report, resolvers, qualifications, _, _ = qualification_inputs()
         malformed = copy.deepcopy(report)
         malformed["extra"] = True
-        with self.assertRaisesRegex(ContractError, "HYPOTHESIS_COVERAGE_REPORT_FIELDS"):
+        with self.assertRaisesRegex(ContractError, "COVERAGE_REPORT_SCHEMA"):
             compile_base_condition(coverage_report=malformed, resolver_result=resolvers[0], qualification=qualifications[0])
         noncanonical = copy.deepcopy(report)
         noncanonical["cells"].reverse()
-        with self.assertRaisesRegex(ContractError, "HYPOTHESIS_COVERAGE_REPORT_DOMAIN"):
+        with self.assertRaisesRegex(ContractError, "COVERAGE_REPORT_DOMAIN"):
             compile_base_condition(coverage_report=noncanonical, resolver_result=resolvers[0], qualification=qualifications[0])
         unbound = copy.deepcopy(qualifications[0])
         unbound["coverage_condition_digest"] = digest("outside")

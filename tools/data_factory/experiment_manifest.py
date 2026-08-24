@@ -9,14 +9,9 @@ from datetime import datetime, timezone
 from typing import Any, Mapping, Sequence
 
 from tools.data_factory.quality.coverage_report import (
-    CONTINUITY_FIELDS,
-    COUNTS,
-    REPORT_FIELDS,
-    REPORT_SCHEMA,
     RESOLVED_INPUT_DIGEST_FIELDS,
-    _condition as validate_coverage_condition,
-    _continuity as validate_coverage_continuity,
     _key as coverage_key,
+    validate_coverage_report,
 )
 from tools.data_factory.training_split import FR5_FEATURE_CONTRACT, GROUPS, validate_program_budget
 from tools.fr5_data_factory import ContractError, DIGEST, SAFE_ID, canonical_digest, normalize_job_spec
@@ -166,47 +161,6 @@ def _qualification_source(value: object, code: str) -> str:
     return value
 
 
-def _coverage_report(value: object) -> dict[str, Any]:
-    result = copy.deepcopy(dict(_exact(value, REPORT_FIELDS, "HYPOTHESIS_COVERAGE_REPORT_FIELDS")))
-    if result["schema_version"] != REPORT_SCHEMA or result["authority"] != "REPORT_ONLY":
-        raise ContractError("HYPOTHESIS_COVERAGE_REPORT_SCHEMA")
-    _id(result["collection_profile_id"], "HYPOTHESIS_COVERAGE_PROFILE")
-    if not isinstance(result["cells"], list) or not result["cells"]:
-        raise ContractError("HYPOTHESIS_COVERAGE_REPORT_CELLS")
-    conditions = []
-    for cell in result["cells"]:
-        cell = _exact(cell, frozenset({"condition", "counts", "trajectory_continuity"}), "HYPOTHESIS_COVERAGE_REPORT_CELLS")
-        condition = validate_coverage_condition(cell["condition"])
-        counts, continuity = cell["counts"], cell["trajectory_continuity"]
-        if (
-            not isinstance(counts, Mapping) or set(counts) != set(COUNTS)
-            or any(type(item) is not int or item < 0 for item in counts.values())
-            or not isinstance(continuity, list)
-        ):
-            raise ContractError("HYPOTHESIS_COVERAGE_REPORT_CELLS")
-        for item in continuity:
-            item = _exact(item, frozenset({"episode_id", *CONTINUITY_FIELDS}), "HYPOTHESIS_COVERAGE_REPORT_CELLS")
-            _id(item["episode_id"], "HYPOTHESIS_COVERAGE_REPORT_CELLS")
-            validate_coverage_continuity({field: item[field] for field in CONTINUITY_FIELDS})
-        conditions.append(condition)
-    keys = [coverage_key(item) for item in conditions]
-    if keys != sorted(keys) or len(keys) != len(set(keys)) or result["domain_digest"] != canonical_digest(conditions):
-        raise ContractError("HYPOTHESIS_COVERAGE_REPORT_DOMAIN")
-    fixed_fields = (
-        "task_schema_version", "task", "robot_system_id", "cell_calibration_id",
-        "cell_calibration_digest", "collection_profile_digest",
-    )
-    if any(
-        tuple(item[field] for field in fixed_fields) != tuple(conditions[0][field] for field in fixed_fields)
-        for item in conditions[1:]
-    ):
-        raise ContractError("HYPOTHESIS_COVERAGE_REPORT_DOMAIN")
-    suggestion = result["suggest_next"]
-    if suggestion is not None and coverage_key(validate_coverage_condition(suggestion)) not in set(keys):
-        raise ContractError("HYPOTHESIS_COVERAGE_REPORT_SUGGESTION")
-    return result
-
-
 def _resolver_receipt(value: object) -> dict[str, Any]:
     result = copy.deepcopy(dict(_exact(value, RESOLVER_RECEIPT_FIELDS, "HYPOTHESIS_RESOLVER_RECEIPT_FIELDS")))
     if not isinstance(result["normalized_job"], Mapping):
@@ -335,7 +289,7 @@ def compile_base_condition(
     qualification: Mapping[str, Any],
 ) -> dict[str, Any]:
     """Compile a compact condition binding from exact resolver and coverage evidence."""
-    return _base_from(_coverage_report(coverage_report), _resolver_result(resolver_result), qualification)
+    return _base_from(validate_coverage_report(coverage_report), _resolver_result(resolver_result), qualification)
 
 
 def _pose_qualification(value: object) -> dict[str, Any]:
@@ -526,7 +480,7 @@ def validate_fr5_hypothesis(value: object) -> dict[str, Any]:
     if value["schema_version"] != "data_factory.fr5_hypothesis.v2":
         raise ContractError("HYPOTHESIS_SCHEMA")
     fixed = _fixed_contract(value["fixed_contract"])
-    report = _coverage_report(value["coverage_report"])
+    report = validate_coverage_report(value["coverage_report"])
     if not isinstance(value["resolver_receipts"], list) or not value["resolver_receipts"]:
         raise ContractError("HYPOTHESIS_RESOLVER_RECEIPTS")
     receipts = [_resolver_receipt(item) for item in value["resolver_receipts"]]
@@ -555,7 +509,7 @@ def compile_fr5_hypothesis(
     resolver_results: Sequence[Mapping[str, Any]], qualification_catalog: Mapping[str, Any],
 ) -> dict[str, Any]:
     fixed = _fixed_contract(fixed_contract)
-    report = _coverage_report(coverage_report)
+    report = validate_coverage_report(coverage_report)
     if not isinstance(resolver_results, (list, tuple)) or not resolver_results:
         raise ContractError("HYPOTHESIS_RESOLVER_RESULTS")
     receipts = sorted(

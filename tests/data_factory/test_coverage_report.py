@@ -3,7 +3,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from tools.data_factory.quality.coverage_report import build_and_publish_coverage_report, build_coverage_report, write_coverage_report
+from tools.data_factory.quality.coverage_report import build_and_publish_coverage_report, build_coverage_report, validate_coverage_report, write_coverage_report
 from tools.fr5_data_factory import ContractError, canonical_digest, load_json_strict
 
 
@@ -74,6 +74,10 @@ class CoverageReportTest(unittest.TestCase):
 
     def test_canonical_atomic_output(self):
         report = build_coverage_report(collection_profile_id="profile-r1", domain=[condition(0)], episodes=[])
+        validated = validate_coverage_report(report)
+        self.assertEqual(validated, report)
+        validated["cells"][0]["counts"]["collected"] = 99
+        self.assertEqual(report["cells"][0]["counts"]["collected"], 0)
         with tempfile.TemporaryDirectory() as directory:
             path = write_coverage_report(report, root=directory)
             self.assertEqual(path, Path(directory) / "profile-r1" / "coverage_report.json")
