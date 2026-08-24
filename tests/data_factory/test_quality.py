@@ -82,6 +82,41 @@ class QualityTest(unittest.TestCase):
             accepted[f"{name}_digest"] = digest(value)
         return accepted, resolved_job, motion, plan_digest, bindings
 
+    def rebind_object_context(self, accepted, resolved, *, job_changes=None, plan_changes=None, admission_changes=None):
+        job = {**json.loads(Path(accepted["job_spec_path"]).read_text()), **(job_changes or {})}
+        preapproval = json.loads(Path(accepted["preapproval_evidence_path"]).read_text())
+        technical = json.loads(Path(accepted["technical_validator_path"]).read_text())
+        admission = json.loads(Path(accepted["candidate_admission_path"]).read_text())
+        resolved_job_digest = digest({"job": job, "input_digests": resolved["input_digests"]})
+        envelope = preapproval["plan_envelope"]
+        plan = {**envelope["plan"], "resolved_job_digest": resolved_job_digest, **(plan_changes or {})}
+        plan_digest = digest(plan)
+        envelope = {
+            **envelope,
+            "plan": plan,
+            "precommit_safety": {**envelope["precommit_safety"], "approved_plan_digest": plan_digest},
+            "precommit_evidence": {**envelope["precommit_evidence"], "approved_plan_digest": plan_digest},
+        }
+        preapproval = {
+            **preapproval, "resolved_job_digest": resolved_job_digest, "plan_digest": plan_digest,
+            "plan_envelope": envelope, "plan_envelope_digest": digest(envelope),
+        }
+        technical = {**technical, "resolved_job_digest": resolved_job_digest, "plan_digest": plan_digest}
+        admission = {
+            **admission,
+            "review_context_digest": digest({
+                "run_id": accepted["episode_id"], "resolved_job_digest": resolved_job_digest,
+                "plan_digest": plan_digest, "technical_validator_digest": digest(technical),
+            }),
+            **(admission_changes or {}),
+        }
+        values = {"job_spec": job, "preapproval_evidence": preapproval, "technical_validator": technical, "candidate_admission": admission}
+        rebound = dict(accepted)
+        for name, value in values.items():
+            Path(rebound[f"{name}_path"]).write_text(json.dumps(value))
+            rebound[f"{name}_digest"] = digest(value)
+        return rebound, {**resolved, "normalized_job": job, "resolved_job_digest": resolved_job_digest}
+
     def test_strict_event_sidecar_and_same_clock_join(self):
         events = [self.event(0,"DISPATCH_REQUESTED",100),self.event(1,"GOAL_ACCEPTED",200),self.event(2,"ACTION_TERMINAL",500,action_status="SUCCEEDED")]
         with tempfile.TemporaryDirectory() as directory:
@@ -175,6 +210,39 @@ class QualityTest(unittest.TestCase):
             preapproval_path.write_text(json.dumps(malformed))
             with self.assertRaises(ContractError):
                 object_frame_context_attribute(**{**common, "accepted_episode": {**accepted, "preapproval_evidence_digest": digest(malformed)}})
+
+    def test_object_frame_rejects_rebound_job_episode_mismatch(self):
+        with tempfile.TemporaryDirectory() as directory:
+            accepted, resolved, motion, _, _ = self.accepted_object_context(Path(directory), digest("robot-description"))
+            accepted, resolved = self.rebind_object_context(accepted, resolved, job_changes={"job_id": "other-run"})
+            with self.assertRaises(ContractError) as caught:
+                object_frame_context_attribute(accepted_episode=accepted, resolved_job=resolved, motion_qualification=motion)
+            self.assertEqual(caught.exception.code, "OBJECT_FRAME_ACCEPTED_EPISODE")
+
+    def test_object_frame_rejects_rebound_plan_robot_mismatch(self):
+        with tempfile.TemporaryDirectory() as directory:
+            accepted, resolved, motion, _, _ = self.accepted_object_context(Path(directory), digest("robot-description"))
+            accepted, resolved = self.rebind_object_context(accepted, resolved, plan_changes={"robot_system_id": "fr5-other"})
+            with self.assertRaises(ContractError) as caught:
+                object_frame_context_attribute(accepted_episode=accepted, resolved_job=resolved, motion_qualification=motion)
+            self.assertEqual(caught.exception.code, "OBJECT_FRAME_PLAN_BINDING")
+
+    def test_object_frame_rejects_rebound_reserved_reviewer(self):
+        with tempfile.TemporaryDirectory() as directory:
+            accepted, resolved, motion, _, _ = self.accepted_object_context(Path(directory), digest("robot-description"))
+            accepted, resolved = self.rebind_object_context(accepted, resolved, admission_changes={"reviewed_by": "HUMAN"})
+            with self.assertRaises(ContractError) as caught:
+                object_frame_context_attribute(accepted_episode=accepted, resolved_job=resolved, motion_qualification=motion)
+            self.assertEqual(caught.exception.code, "OBJECT_FRAME_ACCEPTED_EPISODE")
+
+    def test_object_frame_rejects_rebound_invalid_review_timestamp(self):
+        for reviewed_at in ("not-a-timestamp", "2026-08-24T00:00:00", "2026-02-30T00:00:00Z"):
+            with self.subTest(reviewed_at=reviewed_at), tempfile.TemporaryDirectory() as directory:
+                accepted, resolved, motion, _, _ = self.accepted_object_context(Path(directory), digest("robot-description"))
+                accepted, resolved = self.rebind_object_context(accepted, resolved, admission_changes={"reviewed_at": reviewed_at})
+                with self.assertRaises(ContractError) as caught:
+                    object_frame_context_attribute(accepted_episode=accepted, resolved_job=resolved, motion_qualification=motion)
+                self.assertEqual(caught.exception.code, "OBJECT_FRAME_ACCEPTED_EPISODE")
 
     def test_nonblocking_writer_latches_failure_without_raising(self):
         with tempfile.TemporaryDirectory() as directory:
