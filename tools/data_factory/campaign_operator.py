@@ -13,6 +13,10 @@ from tools.data_factory.campaign_authoring import (
 from tools.data_factory.campaign_session import CampaignSession, DISPOSITIONS
 from tools.data_factory.experiment_manifest import validate_fr5_hypothesis
 from tools.data_factory.operator_bridge import OperatorIntentCore
+from tools.data_factory.operator_setup import (
+    validate_test_only_root_binding,
+    validate_test_only_start_binding,
+)
 from tools.fr5_data_factory import ContractError
 
 
@@ -160,7 +164,7 @@ class CampaignOperator:
                 "capability": "AUTHOR_ONLY",
                 "reason": blocked["reason"],
             }
-        if self._callback() is None:
+        if not callable(self._callback()):
             return {
                 "readiness": "NOT_AVAILABLE",
                 "capability": "AUTHOR_ONLY",
@@ -265,8 +269,6 @@ class CampaignOperator:
     def _activate_physical(self) -> None:
         if self.effect_scope != "PHYSICAL" or self._physical_activated:
             return
-        if self.physical_activation_gate is None:
-            raise ContractError("CAMPAIGN_OPERATOR_PHYSICAL_ACTIVATION_REQUIRED")
         try:
             activated = self.physical_activation_gate()
         except Exception as exc:
@@ -275,7 +277,7 @@ class CampaignOperator:
             raise ContractError("CAMPAIGN_OPERATOR_PHYSICAL_ACTIVATION_FAILED")
         self._physical_activated = True
 
-    def _ensure_session(self) -> CampaignSession:
+    def _ensure_session(self, run_id: str) -> tuple[CampaignSession, dict[str, Any]]:
         if self._cancelled:
             raise ContractError("CAMPAIGN_OPERATOR_CANCELLED")
         if self._session is not None and self._session.status()["campaign"]["state"] != "READY":
@@ -287,13 +289,36 @@ class CampaignOperator:
         blocked = next((item for item in self.subsystems.values() if item["readiness"] != "READY"), None)
         if blocked is not None:
             raise ContractError("CAMPAIGN_OPERATOR_SUBSYSTEM_NOT_READY")
-        if self._callback() is None:
+        if not callable(self._callback()):
             raise ContractError("CAMPAIGN_OPERATOR_CALLBACK_NOT_AVAILABLE")
+        bindings = {}
+        if self.effect_scope == "PHYSICAL":
+            if not callable(self.physical_activation_gate):
+                raise ContractError("CAMPAIGN_OPERATOR_PHYSICAL_ACTIVATION_REQUIRED")
+            if not callable(self.physical_lifecycle_factory):
+                raise ContractError("CAMPAIGN_OPERATOR_PHYSICAL_PORTS_REQUIRED")
+            try:
+                repository_root = Path(self.repository_root).resolve(strict=True)
+            except (OSError, TypeError) as exc:
+                raise ContractError("CAMPAIGN_OPERATOR_PHYSICAL_PORTS_REQUIRED") from exc
+            if not repository_root.is_dir():
+                raise ContractError("CAMPAIGN_OPERATOR_PHYSICAL_PORTS_REQUIRED")
+            if self.lifecycle_action == "LIVE_COLLECT":
+                if not callable(self.physical_bindings_call):
+                    raise ContractError("CAMPAIGN_OPERATOR_PHYSICAL_BINDINGS_REQUIRED")
+                value = self.physical_bindings_call(run_id)
+                if not isinstance(value, Mapping) or set(value) != {"roots", "start_binding"}:
+                    raise ContractError("CAMPAIGN_OPERATOR_PHYSICAL_BINDINGS_REQUIRED")
+                bindings = {
+                    "roots": validate_test_only_root_binding(
+                        value["roots"], repository_root=repository_root,
+                    ),
+                    "start_binding": validate_test_only_start_binding(
+                        value["start_binding"], manifest=self.manifest,
+                        hypothesis=self.hypothesis,
+                    ),
+                }
         self._activate_physical()
-        if self.effect_scope == "PHYSICAL" and (
-            self.physical_lifecycle_factory is None or self.repository_root is None
-        ):
-            raise ContractError("CAMPAIGN_OPERATOR_PHYSICAL_PORTS_REQUIRED")
         if self._session is None:
             self._session = CampaignSession(
                 session_id=self.session_id,
@@ -313,7 +338,7 @@ class CampaignOperator:
                 current_usage=self.current_usage,
                 clock=self.clock,
             )
-        return self._session
+        return self._session, bindings
 
     def _episode(self, intent, lifecycle, cancel_event, episode_context):
         before = self._counter_snapshot()
@@ -336,16 +361,8 @@ class CampaignOperator:
         with self._lock:
             if set(payload) != {"run_id"}:
                 raise ContractError("CAMPAIGN_OPERATOR_RUN_FIELDS")
-            session = self._ensure_session()
             run_id = payload["run_id"]
-            bindings = {}
-            if self.effect_scope == "PHYSICAL" and self.lifecycle_action == "LIVE_COLLECT":
-                if self.physical_bindings_call is None:
-                    raise ContractError("CAMPAIGN_OPERATOR_PHYSICAL_BINDINGS_REQUIRED")
-                value = self.physical_bindings_call(run_id)
-                if not isinstance(value, Mapping) or set(value) != {"roots", "start_binding"}:
-                    raise ContractError("CAMPAIGN_OPERATOR_PHYSICAL_BINDINGS_REQUIRED")
-                bindings = copy.deepcopy(dict(value))
+            session, bindings = self._ensure_session(run_id)
             scene_evidence = self.scene_evidence_call(run_id)
         try:
             result = session.run_next(

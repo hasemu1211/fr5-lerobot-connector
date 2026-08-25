@@ -71,6 +71,7 @@ class PureFakePorts:
     def __init__(self, *, technical_status: str = "PASS"):
         self.counters = {name: 0 for name in SIDE_EFFECT_COUNTERS}
         self.fake_factory_calls = 0
+        self.activation_calls = 0
         self.children = []
         self.technical_status = technical_status
         self.scene_digest = canonical_digest("SYNTHETIC-scene-0")
@@ -87,6 +88,10 @@ class PureFakePorts:
     def physical_factory(self):
         self.counters["physical_factory"] += 1
         raise AssertionError("Goal 1 must not construct a physical lifecycle")
+
+    def activate(self):
+        self.activation_calls += 1
+        return True
 
     def scene(self, _run_id: str):
         value = {
@@ -186,6 +191,36 @@ def make_operator(
 
 
 class CampaignOperatorTests(unittest.TestCase):
+    def test_invalid_physical_ports_never_activate_or_allow_a_later_intent(self):
+        cases = (
+            ("callback", "PLAN_ONLY", "physical_plan_call", object()),
+            ("factory", "PLAN_ONLY", "physical_lifecycle_factory", object()),
+            ("root", "PLAN_ONLY", "repository_root", object()),
+            (
+                "binding", "LIVE_COLLECT", "physical_bindings_call",
+                lambda _run_id: {"roots": {}, "start_binding": {}},
+            ),
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            for name, action, field, invalid in cases:
+                with self.subTest(port=name):
+                    model, ports = make_operator(
+                        directory, effect_scope="PHYSICAL", lifecycle_action=action,
+                    )
+                    model.physical_activation_gate = ports.activate
+                    setattr(model, field, invalid)
+                    send(model, "compile_draft", {}, f"compile-invalid-{name}")
+
+                    for attempt in range(2):
+                        with self.assertRaises(ContractError):
+                            send(
+                                model, "run_next", {"run_id": f"SYNTHETIC-run-{attempt}"},
+                                f"run-invalid-{name}-{attempt}",
+                            )
+                        self.assertEqual(ports.activation_calls, 0)
+                        self.assertEqual(ports.fake_factory_calls, 0)
+                        self.assertEqual(sum(ports.counters.values()), 0)
+
     def test_assisted_and_direct_edit_share_effect_neutral_draft_and_reconnect(self):
         with tempfile.TemporaryDirectory() as directory:
             model, ports = make_operator(directory, lifecycle_action="AUTHOR_ONLY", count=1)
