@@ -31,7 +31,7 @@ MOTION_APPROVAL = {"source":"HUMAN", "approval_id":"a", "approved_by":"operator"
 
 class OneJobTest(unittest.TestCase):
     def make(self, recorder_states, executor_states, *, first_row_rows=1, continuous=False, release=False,
-             readiness_contract=None, status_mutation=None):
+             readiness_contract=None, status_mutation=None, allow_synthetic_test_operator=False):
         calls = []
         scene = RELEASE_SCENE if release else SCENE
         steps = [{"phase":phase} for phase in PHASES]
@@ -89,7 +89,10 @@ class OneJobTest(unittest.TestCase):
         job = None
         def cell():
             return {"robot_system_id":"fr5-lab-a", "cell_ready":True, "reason_code":"HUMAN_ACKNOWLEDGED", "run_id":job.run_id, "plan_digest":job.plan_digest, "acknowledged_by":"operator"}
-        job = OneJob(recorder, executor, cell, readiness_contract=readiness_contract)
+        job = OneJob(
+            recorder, executor, cell, readiness_contract=readiness_contract,
+            allow_synthetic_test_operator=allow_synthetic_test_operator,
+        )
         return job, calls
 
     @staticmethod
@@ -151,6 +154,7 @@ class OneJobTest(unittest.TestCase):
             continuous=True,
             release=True,
             readiness_contract=TEST_ONLY_READINESS_CONTRACT,
+            allow_synthetic_test_operator=True,
         )
         job.prepare(RELEASE_PLAN); job.approve(local_approval); job.start()
         self.assertEqual(job.poll()["state"], "SEMANTIC_VERDICT")
@@ -182,6 +186,18 @@ class OneJobTest(unittest.TestCase):
         }
         self.assertEqual(production.finish()["code"], "CELL_READY_REQUIRED")
         self.assertEqual(production_calls, [])
+
+        readiness_only, readiness_calls = self.make(
+            [], [], readiness_contract=TEST_ONLY_READINESS_CONTRACT,
+        )
+        readiness_only.state = "RELEASE_VERDICT"
+        self.assertEqual(
+            readiness_only.release_verdict("LANDED", "test-operator", source="TEST_OPERATOR")["code"],
+            "RELEASE_VERDICT_SOURCE",
+        )
+        self.assertEqual(readiness_calls, [])
+        with self.assertRaisesRegex(ContractError, "TEST_OPERATOR_SCOPE"):
+            OneJob(lambda _: None, lambda _: None, allow_synthetic_test_operator=True)
 
     def test_first_row_timeout_never_executes(self):
         job, calls = self.make(["RECORDING", "ABORTED"], ["PLANNED", "APPROVED"], first_row_rows=0)

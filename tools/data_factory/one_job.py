@@ -141,7 +141,7 @@ class OneJob:
     RECORDER_FIRST_ROW_TIMEOUT_S = 5.0
 
     def __init__(self, recorder_call, executor_call, cell_state_call=None, clock=None, monotonic_clock=None,
-                 readiness_contract=None):
+                 readiness_contract=None, allow_synthetic_test_operator=False):
         if not callable(recorder_call) or not callable(executor_call):
             raise ContractError("ONE_JOB_CALLABLE")
         if cell_state_call is not None and not callable(cell_state_call):
@@ -154,7 +154,12 @@ class OneJob:
             not isinstance(readiness_contract, dict) or readiness_contract != TEST_ONLY_READINESS_CONTRACT
         ):
             raise ContractError("RECORDER_READINESS_CONTRACT")
+        if type(allow_synthetic_test_operator) is not bool or (
+            allow_synthetic_test_operator and readiness_contract != TEST_ONLY_READINESS_CONTRACT
+        ):
+            raise ContractError("TEST_OPERATOR_SCOPE")
         self.readiness_contract = copy.deepcopy(readiness_contract)
+        self.allow_synthetic_test_operator = allow_synthetic_test_operator
         self.run_id = self.plan_digest = self.lease_id = None
         self.state, self.grasp, self.semantic = "IDLE", None, None
         self.recorder_state = self.executor_state = None
@@ -823,7 +828,7 @@ class OneJob:
         if self.state != "RELEASE_VERDICT" or verdict not in {"LANDED", "OFF_SLOT", "UNCERTAIN"} or not isinstance(decided_by, str) or not SAFE_ID.fullmatch(decided_by):
             return self._result(False, "RELEASE_VERDICT_STATE")
         if source != "HUMAN" and not (
-            source == "TEST_OPERATOR" and self.readiness_contract == TEST_ONLY_READINESS_CONTRACT
+            source == "TEST_OPERATOR" and self.allow_synthetic_test_operator
         ):
             return self._result(False, "RELEASE_VERDICT_SOURCE")
         try:
@@ -885,7 +890,7 @@ class OneJob:
         reason_code = value.get("reason_code") if isinstance(value, dict) else None
         reason_allowed = reason_code == "HUMAN_ACKNOWLEDGED" or (
             reason_code == "TEST_OPERATOR_ACKNOWLEDGED"
-            and self.readiness_contract == TEST_ONLY_READINESS_CONTRACT
+            and self.allow_synthetic_test_operator
         )
         if (
             not isinstance(value, dict)
