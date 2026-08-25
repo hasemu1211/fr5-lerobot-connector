@@ -189,6 +189,25 @@ function renderInspector(view) {
     <div><dt>${escapeHtml(name)}</dt><dd>${escapeHtml(count)}</dd></div>`).join("");
 }
 
+function renderEpisodeResult(result) {
+  if (result == null) return "";
+  if (!result || typeof result !== "object" || Array.isArray(result)
+      || typeof result.outcome !== "string" || typeof result.code !== "string"
+      || typeof result.human_semantic !== "string" || !DIGEST_PATTERN.test(result.result_digest)) {
+    throw new TypeError("EPISODE_RESULT_INVALID");
+  }
+  const technical = result.technical_evidence?.status ?? "NOT_AVAILABLE";
+  let rows = `<div><dt>technical</dt><dd>${escapeHtml(technical)}</dd></div>
+    <div><dt>human semantic</dt><dd>${escapeHtml(result.human_semantic)}</dd></div>`;
+  if (result.synthetic_review) {
+    rows += `<div><dt>synthetic review</dt><dd>${escapeHtml(result.synthetic_review.reviewed_by)} · ${escapeHtml(result.synthetic_review.review_source)}</dd></div>`;
+  }
+  if (result.synthetic_coverage_update) {
+    rows += `<div><dt>synthetic coverage</dt><dd>${escapeHtml(result.synthetic_coverage_update.source)} · +${escapeHtml(result.synthetic_coverage_update.synthetic_review_delta)} · production +${escapeHtml(result.synthetic_coverage_update.production_coverage_delta)}</dd></div>`;
+  }
+  return `<div class="approval-card result-card" aria-label="마지막 TEST_ONLY 결과"><p><strong>${escapeHtml(result.outcome)} · ${escapeHtml(result.code)}</strong></p><dl>${rows}</dl><code>${escapeHtml(result.result_digest)}</code></div>`;
+}
+
 function renderRuntime(view) {
   const runtime = view.runtime;
   const status = message("status", runtime.workflow_state);
@@ -205,6 +224,7 @@ function renderRuntime(view) {
     if (typeof progress !== "number" || !Number.isFinite(progress) || progress < 0 || progress > 100) throw new TypeError("PROGRESS_INVALID");
     body += `<div class="progress-block"><div><span>${escapeHtml(runtime.phase)}</span><strong>${escapeHtml(progress)}%</strong></div><progress max="100" value="${escapeHtml(progress)}">${escapeHtml(progress)}%</progress><p>${escapeHtml(runtime.detail)}</p></div>`;
   }
+  body += renderEpisodeResult(view.episode_result);
   document.querySelector("#runtime-content").innerHTML = body;
 
   const buttons = [];

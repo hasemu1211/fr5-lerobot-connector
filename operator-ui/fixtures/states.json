@@ -140,8 +140,24 @@
       "effect_scope": "PHYSICAL",
       "available_ops": ["set_effect_scope", "set_lifecycle_action", "update_draft", "compile_draft"]
     },
-    "unknown_enum": {
+    "terminal": {
       "revision": 9,
+      "view_digest": "sha256:6666666666666666666666666666666666666666666666666666666666666666",
+      "available_ops": [],
+      "runtime": {"workflow_state": "TERMINAL", "measurement_outcome": "PASS", "reason_codes": [], "active_child_id": null},
+      "episode_result": {
+        "schema_version": "data_factory.fake_episode_result.v1",
+        "outcome": "PASS",
+        "code": "TECHNICAL_PASS",
+        "technical_evidence": {"status": "PASS"},
+        "human_semantic": "NOT_MEASURED",
+        "synthetic_review": {"reviewed_by": "TEST_OPERATOR", "review_source": "LOCAL_TEST_OPERATOR"},
+        "synthetic_coverage_update": {"source": "SYNTHETIC_TEST_ONLY", "synthetic_review_delta": 1, "production_coverage_delta": 0},
+        "result_digest": "sha256:7777777777777777777777777777777777777777777777777777777777777777"
+      }
+    },
+    "unknown_enum": {
+      "revision": 10,
       "view_digest": "sha256:5555555555555555555555555555555555555555555555555555555555555555",
       "effect_scope": "UNDECLARED_EFFECT"
     }

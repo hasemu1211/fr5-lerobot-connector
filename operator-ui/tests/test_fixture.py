@@ -95,7 +95,7 @@ class GoalOneOperatorUiTest(unittest.TestCase):
     def test_fail_close_matrix_does_not_queue_or_replay_intents(self):
         self.assertEqual(set(self.fixture["states"]), {
             "draft", "approval", "running", "cancel_pending", "blocked", "stale",
-            "reconnecting", "physical_toggle", "unknown_enum",
+            "reconnecting", "physical_toggle", "terminal", "unknown_enum",
         })
         for marker in (
             "BRIDGE_UNAVAILABLE", "VIEW_STALE", "INTENT_REPLAYED", "CANCEL_PENDING",
@@ -105,6 +105,15 @@ class GoalOneOperatorUiTest(unittest.TestCase):
         self.assertNotIn("setInterval", self.js)
         self.assertIn("setTimeout(loadView, 250)", self.js)
         self.assertNotIn("indexedDB", self.js)
+
+    def test_terminal_result_keeps_technical_and_synthetic_provenance_visible(self):
+        terminal = self.fixture["states"]["terminal"]["episode_result"]
+        self.assertEqual(terminal["technical_evidence"]["status"], "PASS")
+        self.assertEqual(terminal["human_semantic"], "NOT_MEASURED")
+        self.assertEqual(terminal["synthetic_review"]["reviewed_by"], "TEST_OPERATOR")
+        self.assertEqual(terminal["synthetic_coverage_update"]["production_coverage_delta"], 0)
+        for marker in ("result-card", "human semantic", "synthetic review", "synthetic coverage"):
+            self.assertIn(marker, self.js)
 
     def test_fake_and_authority_side_effect_counts_are_zero(self):
         counts = self.view["effect_counts"]

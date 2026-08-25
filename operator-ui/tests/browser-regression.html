@@ -80,7 +80,7 @@
     const show = async (key) => {
       stateKey = key;
       await loadView();
-      await waitFor(() => currentView?.revision === (key === "draft" ? 1 : ({approval: 2, running: 3, cancel_pending: 4, blocked: 5, stale: 6, reconnecting: 7, physical_toggle: 8}[key])) || !currentView);
+      await waitFor(() => currentView?.revision === (key === "draft" ? 1 : ({approval: 2, running: 3, cancel_pending: 4, blocked: 5, stale: 6, reconnecting: 7, physical_toggle: 8, terminal: 9}[key])) || !currentView);
     };
 
     async function run() {
@@ -141,6 +141,11 @@
 
         await show("physical_toggle");
         check(document.querySelector("#open-workspace").disabled && document.querySelectorAll("#capture-buttons button:not(:disabled)").length === 0, "workspace capture is FAKE-only");
+
+        await show("terminal");
+        const resultCard = document.querySelector(".result-card");
+        check(resultCard.textContent.includes("PASS · TECHNICAL_PASS") && resultCard.textContent.includes("human semanticNOT_MEASURED"), "terminal view keeps technical PASS separate from human semantic NOT_MEASURED");
+        check(resultCard.textContent.includes("TEST_OPERATOR · LOCAL_TEST_OPERATOR") && resultCard.textContent.includes("production +0"), "terminal view exposes synthetic review and zero production coverage");
 
         stateKey = "unknown_enum";
         await loadView();
