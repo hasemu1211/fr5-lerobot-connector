@@ -11,8 +11,15 @@ from pathlib import Path
 from typing import Any, Mapping
 
 from tools.data_factory.campaign_authoring import validate_collection_campaign_manifest
-from tools.data_factory.motion.pose_snapshot import JOINTS, _validate_snapshot
-from tools.fr5_data_factory import ContractError, DIGEST, SAFE_ID, canonical_digest
+from tools.data_factory.motion.pose_snapshot import JOINTS, _validate_snapshot, calibrate_place
+from tools.fr5_data_factory import (
+    ContractError,
+    DIGEST,
+    SAFE_ID,
+    canonical_digest,
+    load_json_strict,
+    validate_yaw0_sheet,
+)
 
 
 ROOT_FIELDS = frozenset({
@@ -27,7 +34,8 @@ START_FIELDS = frozenset({
     "binding_digest",
 })
 PLANE_FIELDS = frozenset({
-    "source_artifact_id", "source_calibration_id", "table_normal_base",
+    "source_artifact_id", "source_calibration_id", "robot_system_id", "place_id",
+    "a4_family_digest", "tcp_digest", "table_normal_base",
     "source_artifact_digest", "status", "reference_digest",
 })
 CAMERA_FIELDS = frozenset({
@@ -248,6 +256,10 @@ def qualified_table_plane_reference(cell_calibration: Mapping[str, Any]) -> dict
     value = {
         "source_artifact_id": _identifier(cell_calibration.get("calibration_id"), "WORKSPACE_PLANE"),
         "source_calibration_id": cell_calibration["calibration_id"],
+        "robot_system_id": _identifier(cell_calibration.get("robot_system_id"), "WORKSPACE_PLANE"),
+        "place_id": _identifier(cell_calibration.get("place_id"), "WORKSPACE_PLANE"),
+        "a4_family_digest": _digest(cell_calibration.get("a4_family_digest"), "WORKSPACE_PLANE"),
+        "tcp_digest": _digest(cell_calibration.get("tcp_digest"), "WORKSPACE_PLANE"),
         "table_normal_base": [float(item) for item in normal],
         "source_artifact_digest": canonical_digest(cell_calibration),
         "status": "QUALIFIED_REFERENCE",
@@ -260,8 +272,10 @@ def validate_table_plane_reference(value: object) -> dict[str, Any]:
     result = copy.deepcopy(dict(_exact(value, PLANE_FIELDS, "WORKSPACE_PLANE_FIELDS")))
     if result["status"] != "QUALIFIED_REFERENCE" or result["source_artifact_id"] != result["source_calibration_id"]:
         raise ContractError("WORKSPACE_PLANE")
-    _identifier(result["source_artifact_id"], "WORKSPACE_PLANE")
-    _digest(result["source_artifact_digest"], "WORKSPACE_PLANE")
+    for field in ("source_artifact_id", "robot_system_id", "place_id"):
+        _identifier(result[field], "WORKSPACE_PLANE")
+    for field in ("source_artifact_digest", "a4_family_digest", "tcp_digest"):
+        _digest(result[field], "WORKSPACE_PLANE")
     if not isinstance(result["table_normal_base"], list) or len(result["table_normal_base"]) != 3:
         raise ContractError("WORKSPACE_PLANE")
     normal = [_finite(item, "WORKSPACE_PLANE") for item in result["table_normal_base"]]
@@ -295,6 +309,62 @@ def validate_print_measurements(
     }
     value["measurement_digest"] = canonical_digest(value)
     return value
+
+
+def compile_workspace_registration_candidate(
+    *, center_snapshot: Mapping[str, Any], x_ref_snapshot: Mapping[str, Any],
+    y_check_snapshot: Mapping[str, Any], plane_reference: Mapping[str, Any],
+    print_measurements: Mapping[str, Any], calibration_id: str, place_id: str,
+    operator_or_agent_id: str, yaw0_sheet: str | Path,
+    tcp_candidate_manifest: str | Path, output_root: str | Path,
+    tolerance_mm: float, robot_system_id: str = "fr5-lab-a",
+    max_snapshot_age_s: float = 0.5,
+) -> dict[str, Any]:
+    """Validate the three-point wizard inputs, then reuse the preview-only calibrator."""
+    plane = validate_table_plane_reference(plane_reference)
+    try:
+        measured = validate_print_measurements(
+            source_scale_bar_mm=print_measurements["source_scale_bar_measured_mm"],
+            final_scale_bar_mm=print_measurements["final_scale_bar_measured_mm"],
+            nominal_mm=print_measurements["nominal_scale_bar_mm"],
+            max_final_error_mm=print_measurements["max_final_error_mm"],
+        )
+    except (KeyError, TypeError) as exc:
+        raise ContractError("WORKSPACE_PRINT_MEASUREMENT") from exc
+    if dict(print_measurements) != measured:
+        raise ContractError("WORKSPACE_PRINT_MEASUREMENT_DIGEST_MISMATCH")
+    max_age = _finite(max_snapshot_age_s, "WORKSPACE_SNAPSHOT_AGE")
+    if max_age <= 0:
+        raise ContractError("WORKSPACE_SNAPSHOT_AGE")
+    snapshots = []
+    for snapshot in (center_snapshot, x_ref_snapshot, y_check_snapshot):
+        checked = _validate_snapshot(copy.deepcopy(dict(snapshot)))
+        if max(checked["joint_state_age_s"], checked["ros_sample_age_s"]) > max_age:
+            raise ContractError("WORKSPACE_SNAPSHOT_STALE")
+        snapshots.append(checked)
+    sheet = validate_yaw0_sheet(load_json_strict(yaw0_sheet))
+    if (
+        plane["place_id"] != place_id
+        or plane["robot_system_id"] != robot_system_id
+        or sheet["place_id"] != place_id
+        or sheet["a4_family_digest"] != plane["a4_family_digest"]
+        or float(sheet["print_calibration"]["measured_scale_bar_mm"])
+        != measured["source_scale_bar_measured_mm"]
+        or any(snapshot["base_tcp"]["candidate_source_sha256"] != plane["tcp_digest"] for snapshot in snapshots)
+    ):
+        raise ContractError("WORKSPACE_REGISTRATION_BINDING")
+    result = calibrate_place(
+        snapshots[0], snapshots[1], ycheck_snapshot=snapshots[2],
+        calibration_id=calibration_id, place_id=place_id,
+        operator_or_agent_id=operator_or_agent_id, yaw0_sheet=yaw0_sheet,
+        tcp_candidate_manifest=tcp_candidate_manifest, output_root=output_root,
+        tolerance_mm=tolerance_mm,
+        scale_bar_mm=measured["final_scale_bar_measured_mm"],
+        table_normal=plane["table_normal_base"], robot_system_id=robot_system_id,
+    )
+    if result.get("execution_authorized") is not False or result.get("training_approved") is not False:
+        raise ContractError("WORKSPACE_REGISTRATION_AUTHORITY")
+    return result
 
 
 def build_camera_binding_candidate(

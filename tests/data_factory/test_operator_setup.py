@@ -18,12 +18,14 @@ from tools.data_factory.operator_setup import (
     build_camera_binding_candidate,
     build_test_only_root_binding,
     build_test_only_start_binding,
+    compile_workspace_registration_candidate,
     gripper_setup_projection,
     qualified_table_plane_reference,
     validate_print_measurements,
     validate_test_only_root_binding,
     validate_test_only_start_binding,
 )
+from tools.a4_place_yaw.generate_place_yaw_a4 import build_places, make_manifest
 from tools.fr5_data_factory import ContractError, canonical_digest
 
 
@@ -188,6 +190,99 @@ class OperatorSetupTests(unittest.TestCase):
                 "maintenance_call_count": 0,
             },
         )
+
+    def test_workspace_wizard_reuses_three_point_preview_and_fails_closed(self):
+        candidate = {
+            "translation_m": [0.0, 0.0, 0.0],
+            "rotation_columns": [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
+            "status": "CANDIDATE",
+        }
+        tcp_digest = canonical_digest(candidate)
+        sheet = make_manifest("PLACE_A", "yaw0", 0, build_places(3, 3, 20, 0), 20)
+        cell = {
+            **load("config/data_factory/cells/place-a-yaw0-r002.json"),
+            "a4_family_digest": sheet["a4_family_digest"],
+            "tcp_digest": tcp_digest,
+        }
+        plane = qualified_table_plane_reference(cell)
+        measurements = validate_print_measurements(
+            source_scale_bar_mm=100.0, final_scale_bar_mm=100.0,
+        )
+
+        def at(point, *, age=0.05):
+            value = pose_snapshot([0.0] * 6, age=age)
+            value["base_tcp"].update(
+                translation_m=point,
+                candidate_source_sha256=tcp_digest,
+            )
+            return value
+
+        points = (
+            at([1.0, 2.0, 3.0]),
+            at([1.1285, 2.0, 3.0]),
+            at([0.8715, 2.08, 3.0]),
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            yaw0 = root / "yaw0.json"
+            tcp = root / "tcp.json"
+            yaw0.write_text(json.dumps(sheet), encoding="utf-8")
+            tcp_manifest = {"tcp_candidate": candidate, "tcp_candidate_digest": tcp_digest}
+            tcp.write_text(json.dumps(tcp_manifest), encoding="utf-8")
+            for value in points:
+                value["base_tcp"]["manifest_source_sha256"] = canonical_digest(tcp_manifest)
+            result = compile_workspace_registration_candidate(
+                center_snapshot=points[0], x_ref_snapshot=points[1],
+                y_check_snapshot=points[2], plane_reference=plane,
+                print_measurements=measurements, calibration_id="synthetic-place-r001",
+                place_id="PLACE_A", operator_or_agent_id="TEST_OPERATOR",
+                yaw0_sheet=yaw0, tcp_candidate_manifest=tcp,
+                output_root=root / "candidates", tolerance_mm=1.0,
+            )
+            self.assertEqual(
+                (result["status"], result["execution_authorized"], result["training_approved"]),
+                ("CANDIDATE_WITHIN_TOLERANCE", False, False),
+            )
+            candidate_path = root / "candidates/synthetic-place-r001/cell_calibration_candidate.json"
+            stored = json.loads(candidate_path.read_text(encoding="utf-8"))
+            self.assertEqual(
+                (stored["table_normal_base"], stored["print_source_scale_bar_measured_mm"], stored["scale_bar_measured_mm"]),
+                ([0.0, 0.0, 1.0], 100.0, 100.0),
+            )
+            with self.assertRaisesRegex(ContractError, "CALIBRATION_EXISTS"):
+                compile_workspace_registration_candidate(
+                    center_snapshot=points[0], x_ref_snapshot=points[1],
+                    y_check_snapshot=points[2], plane_reference=plane,
+                    print_measurements=measurements, calibration_id="synthetic-place-r001",
+                    place_id="PLACE_A", operator_or_agent_id="TEST_OPERATOR",
+                    yaw0_sheet=yaw0, tcp_candidate_manifest=tcp,
+                    output_root=root / "candidates", tolerance_mm=1.0,
+                )
+            stale = copy.deepcopy(points[0])
+            stale["joint_state_age_s"] = 0.51
+            with self.assertRaisesRegex(ContractError, "WORKSPACE_SNAPSHOT_STALE"):
+                compile_workspace_registration_candidate(
+                    center_snapshot=stale, x_ref_snapshot=points[1],
+                    y_check_snapshot=points[2], plane_reference=plane,
+                    print_measurements=measurements, calibration_id="synthetic-stale-r001",
+                    place_id="PLACE_A", operator_or_agent_id="TEST_OPERATOR",
+                    yaw0_sheet=yaw0, tcp_candidate_manifest=tcp,
+                    output_root=root / "candidates", tolerance_mm=1.0,
+                )
+            wrong = copy.deepcopy(plane)
+            wrong["a4_family_digest"] = canonical_digest("wrong-family")
+            wrong["reference_digest"] = canonical_digest({
+                key: wrong[key] for key in wrong if key != "reference_digest"
+            })
+            with self.assertRaisesRegex(ContractError, "WORKSPACE_REGISTRATION_BINDING"):
+                compile_workspace_registration_candidate(
+                    center_snapshot=points[0], x_ref_snapshot=points[1],
+                    y_check_snapshot=points[2], plane_reference=wrong,
+                    print_measurements=measurements, calibration_id="synthetic-wrong-r001",
+                    place_id="PLACE_A", operator_or_agent_id="TEST_OPERATOR",
+                    yaw0_sheet=yaw0, tcp_candidate_manifest=tcp,
+                    output_root=root / "candidates", tolerance_mm=1.0,
+                )
 
 
 if __name__ == "__main__":
