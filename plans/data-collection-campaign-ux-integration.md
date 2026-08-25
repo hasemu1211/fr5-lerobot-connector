@@ -3,7 +3,7 @@
 > 상태: `OFFLINE_COLLECTION_CAMPAIGN_UX_COMPLETE`. Goal 1 software와 비실물 검증을 완료했으며 이 문서는 Goal 2 handoff 정본이다. 현재 동작과 실물 권한의 정본은 `docs/`, `config/`와 executable validator이며, 이 문서만으로 robot motion, recorder, dataset, training 또는 production approval이 허용되지 않는다.
 
 - 작성일: 2026-08-25
-- Goal 1 software integration 기준: `HEAD=53cf2e742071251c4bb7cba1a1289aa313a405c5`, tree `d3b94aff013d463c1c9ad4712d9f2d4ae89e528b`
+- Goal 1 software integration 기준: code `HEAD=fe438296a4034dc66e8e4e2a568ed6132a6458e4`, tree `ef6b2b3d1f4ea192d17c246a992a60409bc4b742`
 - 비교 기준: `origin/main=0c5e53e06940d866ea26f7ec147ca5989d763ce8`
 - 상위 software 상태: `OFFLINE_IMPLEMENTATION_COMPLETE_THROUGH_P6_5`
 - 동결 계획 원본 SHA256: `6501694bc23a1e34dd35b9638431582612fdf7918fa4b0cab3a75a60f00dc810`
@@ -397,7 +397,9 @@ UI/ledger에 resolved absolute path를 표시한다. repository root 밖, symlin
 
 여기서 current `run_job campaign`은 정확히 두 episode의 pickup/recycle scene chain일 뿐 일반 N-episode campaign이 아니다. 일반화하지 않고 보존한다. P5.8 `SeedCampaign`은 arbitrary finite slot을 serial intent로 만들지만 현재 production `run_job`/`OneJob` caller가 없고 `NO_EXECUTION_AUTHORITY`다. UI campaign은 이 기존 manifest/serial-intent owner를 재사용하되, 실행 adapter가 실제로 구현·검증된 effect scope만 진행한다.
 
-### 7.2 현재 누락 또는 수정 후보
+### 7.2 Goal 1 시작 시 누락 또는 수정 후보
+
+아래 목록은 구현 전 gap snapshot이며 현재 capability 표가 아니다. Goal 1은 campaign authoring/session, same-origin bridge, 버튼 결정, TEST_ONLY root/start와 recorder-readiness seam을 구현했고, 남은 physical/production 항목은 10.3 handoff ledger와 12절 dependency가 소유한다.
 
 - backend-free fixture와 실제 lifecycle 사이 local bridge가 없다.
 - atomic `operator_session_view` producer가 없다.
@@ -414,6 +416,8 @@ UI/ledger에 resolved absolute path를 표시한다. repository root 밖, symlin
 - `RunSession`은 one-run `run/status/cancel`만 소유하며 current exact-two campaign은 이를 우회한다. browser N-campaign의 atomic status/cancel과 active-child ownership을 기존 `SeedCampaign + fresh OneJob` 위에서 명시적으로 연결해야 한다.
 - P5.8 seed intent의 `robot_start_pose_id`를 current start 검증 또는 안전한 이동에 연결한 caller가 없다. `PHYSICAL`은 이 edge가 닫히기 전 선택·실행을 거부하고, `FAKE`만 pure adapter로 전 흐름을 검증한다.
 - Goal 2에 쓸 tracked `robot_start_pose_qualification.v1`은 없다. Goal 1은 production qualification을 조작하지 않고, `TEST_ONLY` exact one-slot에만 session-local `MOTION_Q_SAFE_START`를 허용하는 narrow binding을 구현한다. 이 binding은 source motion-qualification/home digest, safe 6-joint target, 0.01 rad tolerance, ≤0.1 s fresh current snapshot digest를 함께 결속하고 current가 범위 내일 때만 normalized slot을 fresh `OneJob`에 연결한다. collection manifest의 `NO_EXECUTION_AUTHORITY`를 바꾸지 않고, production seed/start/split/coverage/training evidence로 export되지 않는다. current가 HOME 범위 밖이면 자동 homing을 추측해 추가하지 않고 Goal 2를 멈춘다.
+- `MOTION_Q_SAFE_START` 자체는 configuration lineage이고 반복 사용할 live-current 증거가 아니다. TEST_ONLY `run_live`는 actual executor의 `plan_only` 응답 뒤 UI publish/결정 전에 plan의 fresh `initial_joint_state`를 qualified target과 0.01 rad 이내로 비교하고, motion/home/start/episode digest와 `max_joint_state_age_s≤0.1`을 `data_factory.test_only_planned_start_evidence.v1`로 묶는다. 그 evidence와 plan digest가 같은 button decision binding에 들어간다. mismatch면 preapproval publish·button offer·approve·recorder·execute가 모두 0이며, 승인 뒤 drift는 existing execute-time `START_STATE_MISMATCH`가 다시 차단한다.
+- PHYSICAL ordering은 static root/config 검증과 owner/run/expiry/scene freshness+digest/quota preflight를 activation 전에 수행하고, activation 뒤에만 current-start port를 읽는다. `CampaignSession`은 child factory 직전에 같은 campaign preflight를 다시 수행한다. invalid static/scene/budget은 activation/factory 0, invalid dynamic start는 activation만 1일 수 있고 factory/episode/robot/recorder/dataset/run-state/training은 0이다.
 - P6 v3 candidate를 current v2 `OneJob`가 실행하지 않으며 P6.5 recollection manifest에도 production caller가 없다. UI는 plan-only/unsupported를 명시하고 live capability로 이름 바꾸지 않는다.
 - current launcher의 “첫 camera 자동 선택”은 stable qualified binding이 아니다. v1 dual profile은 role/device binding이 없고 live v2 profile도 generic serial 문자열이므로, zero-touch physical attach에는 narrow v2 device-role binding receipt와 ambiguity handling이 필요하다.
 - current `run_live` 일반 경로는 `outputs/data_factory/cells`를 hard-code하고 `HUMAN_GATED` approval을 생성하며 완료 후 `candidate_admission.json`을 쓴다. Goal 1은 이 함수를 복제하지 않고 session-sealed state/run/dataset roots, decision/approval-scope port와 candidate-admission writer enable flag를 주입하는 최소 seam으로 refactor한다. production default/TTY behavior는 byte-for-byte 의미를 보존하고, `TEST_ONLY`에서만 isolated roots + optional `HIL_NUMERIC_PROXY` + candidate/coverage/inventory/training writer 0을 강제한다. `TestPilotRunner`를 따로 만들지 않는다.
@@ -799,12 +803,12 @@ Goal 1 구현자가 아래 표를 실제 값으로 채운다. 이 표는 product
 
 | 항목 | Goal 1 완료 값 |
 |---|---|
-| implementation commit / tree digest | code integration `53cf2e742071251c4bb7cba1a1289aa313a405c5` / `d3b94aff013d463c1c9ad4712d9f2d4ae89e528b`; verifier-correction commits `7fb378e`, `da8ef86`, `98e10bf`, `5dd1bb5`, `53cf2e7`; push 0 |
-| schema versions/digests | `campaign_draft.v1`, `collection_campaign_manifest.v1`, `campaign_compilation_receipt.v1`, `campaign_episode_context.v1`, `operator_session_view.v1`, `operator_intent.v1`, `operator_intent_result.v1`, `test_only_state_initialization.v1`, `test_only_episode_binding.v1`, `fake_episode_result.v1`; canonical digest/replay checks PASS; frozen plan SHA256 `6501694b…810` |
-| focused tests / full suite / browser QA | final post-correction focused 69 unique tests (`authoring 4 + session 4 + operator 7 + fake console 11 + run_job 23 + bridge 6 + UI 13 + UTF-8 CLI 1`) exit 0; full 286 tests exit 0; real browser success/cancel flows + regression 27 checks PASS; mobile Lighthouse accessibility 100 |
-| forbidden production side-effect counts | browser success 4 synthetic episodes(수정 후 1회 포함)와 cancel-before-approval 2회 모두 `physical_factory/robot/gripper/camera/production_recorder/dataset/production_run_state/HUMAN/candidate/inventory/production_coverage/training=0`; success의 fake `begin/readiness/freeze/commit=4/4/4/4`, cancel은 항상 `0/0/0/0` |
+| implementation commit / tree digest | final code integration `fe438296a4034dc66e8e4e2a568ed6132a6458e4` / `ef6b2b3d1f4ea192d17c246a992a60409bc4b742`; second-verifier correction commits `115fdf2`, writer `eb1c707`→integration `a6bc5ba`, expectation integration `fe43829`; push 0 |
+| schema versions/digests | `campaign_draft.v1`, `collection_campaign_manifest.v1`, `campaign_compilation_receipt.v1`, `campaign_episode_context.v1`, `operator_session_view.v1`, `operator_intent.v1`, `operator_intent_result.v1`, `test_only_state_initialization.v1`, `test_only_episode_binding.v1`, `test_only_planned_start_evidence.v1`, `fake_episode_result.v1`; canonical digest/replay checks PASS; frozen plan SHA256 `6501694b…810` |
+| focused tests / full suite / browser QA | final focused 89 tests (`authoring 4 + seed 8 + session 6 + operator 9 + setup 9 + fake console 11 + run_job 23 + bridge 6 + UI 13`) exit 0; full 293 tests exit 0; post-correction real browser success/cancel + regression 27 checks PASS; unchanged UI mobile Lighthouse accessibility 100 |
+| forbidden production side-effect counts | latest browser success와 fresh-process cancel-before-approval 모두 `physical_factory/robot/gripper/camera/production_recorder/dataset/production_run_state/HUMAN/candidate/inventory/production_coverage/training=0`; success의 fake `begin/readiness/freeze/commit=1/1/1/1`, cancel은 `0/0/0/0`; preflight failure matrix는 invalid static/scene/budget에서 activation/factory 0, invalid postactivation start에서 activation 1/factory와 later effect 0 |
 | capability matrix | `FAKE×AUTHOR/PLAN/LIVE`는 temp draft/synthetic plan/fake ports만; `PHYSICAL×AUTHOR`는 session-only, `PHYSICAL×PLAN/LIVE`는 Goal 1 construction/dispatch 0이고 Goal 2 gate 뒤에만 열림 |
-| TEST_ONLY roots / start binding / numeric scope | browser artifact `/tmp/fake-operator-console-*`는 종료 시 삭제; foreground FAKE context의 root/start는 `null`이고 별도 `CampaignSession→run_live` pure-port 통합 test가 temporary exact roots, `MOTION_Q_SAFE_START` ≤0.1 s/≤0.01 rad, episode binding, single-camera v2 profile와 `HIL_NUMERIC_PROXY`를 실제 `OneJob` API까지 전달함; default resolver는 bound cell root만 읽고 authority는 전부 `NONE` |
+| TEST_ONLY roots / start binding / numeric scope | browser artifact `/tmp/fake-operator-console-*`는 종료 시 삭제; foreground FAKE context의 root/start는 `null`이고 별도 `CampaignSession→run_live` pure-port 통합 test가 temporary exact roots, `MOTION_Q_SAFE_START` ≤0.1 s/≤0.01 rad, episode binding, single-camera v2 profile와 `HIL_NUMERIC_PROXY`를 실제 `OneJob` API까지 전달함; actual plan initial state를 같은 target/tolerance에 비교한 no-authority planned-start evidence가 UI publish 전 만들어져 button decision에 결속되며 mismatch는 publish/approval/recorder/execute 0; default resolver는 bound cell root만 읽고 authority는 전부 `NONE` |
 | recorder/recovery ordering trace | `plan→button→approve→begin→60-row readiness→execute→post-lift freeze→HIL proxy→녹화 밖 recycle/release/return→scene transition→commit→validator/cell-ready`; frozen rows `60→60`; failure/cancel은 later intent 0 |
 | exact unresolved physical dependencies | fresh robot/controller/gripper state, stable one-camera ID/profile와 5 s warmup, HOME joint snapshot, exact alias/cube/cell/E-stop 현장 확인, optional gripper maintenance, real plan-only, actual recorder readiness, dispatch-terminal 감시, release/landing/final scene-ready |
 | dirty `src/frcobot_ros2` preservation | 시작과 동일한 `60755d44d521a5ad6bee8494cc19522f8801aa20-dirty`; read-only pointer verification만 수행, edit/stage/clean 0 |
@@ -967,7 +971,11 @@ B. Runtime/lifecycle integration
 - Goal 2 one-slot을 위해 session-local `MOTION_Q_SAFE_START`를 구현하되
   exact motion/home digest, safe vector, 0.01 rad tolerance, ≤0.1 s current snapshot에 결속하고
   TEST_ONLY exact one-slot 외에서 거부한다.
+  actual executor plan의 fresh initial joint state와 같은 target/tolerance/digest를 UI publish 전에 다시 검증하고
+  그 plan-bound evidence를 exact button decision에 포함한다.
   persistent start qualification, seed/split/coverage/training authority는 발급하지 않는다.
+- owner/run/expiry/scene/quota preflight는 physical activation 전에, current-start read는 activation 뒤에,
+  같은 preflight 재검증은 child factory 전에 수행한다.
 
 C. TEST_ONLY integration seam
 - `run_live` production default/TTY behavior를 보존하면서 caller-provided fresh OneJob,
@@ -1144,9 +1152,9 @@ Goal 1의 같은 UI/handler/`CampaignSession`/fresh `OneJob`을 사용해
    - `datasets/test_only_physical/<session_id>/<run_id>`
    traversal/symlink/collision/production prefix면 즉시 거부한다.
 5. `place1→PLACE_A`, cube/yaw0/(0,0), source=recycle same cell, object/grasp/motion/profile digest를 resolve한다.
-6. exact qualified motion digest/safe vector와 ≤0.1 s current snapshot의 joint delta ≤0.01 rad를 확인한다.
+6. exact qualified motion digest/safe vector와 activation 뒤 획득한 ≤0.1 s current snapshot의 joint delta ≤0.01 rad를 확인한다.
    current가 범위 밖이면 자동 homing을 새로 만들지 않고 `BLOCKED + FAIL`로 멈춘다.
-7. full v2 return cycle의 plan/collision/constraint/endpoint/phase-chain과 plan-only no-motion snapshot을 통과한다.
+7. full v2 return cycle의 plan/collision/constraint/endpoint/phase-chain과 plan-only no-motion snapshot을 통과한다. actual executor plan의 initial joint state와 motion/home/start/episode digest를 다시 검증한 `test_only_planned_start_evidence.v1`가 exact button decision에 결속돼야 한다.
    execute/gripper/recorder/dataset effect는 이 단계에서 0이다.
 8. approval/recorder begin 전 existing 5 s single-camera topic warmup으로 exact device/profile의
    source FPS와 age를 측정한다. 이는 actual recorder readiness를 대신하지 않는다.
@@ -1266,3 +1274,9 @@ Goal 1의 같은 UI/handler/`CampaignSession`/fresh `OneJob`을 사용해
 - rejected view는 자동 재전송하지 않되 명시적 retry에서 같은 view를 다시 읽을 수 있게 했고, fresh view GET이 끝나기 전 다음 intent가 열리는 race를 닫았다. trailing whitespace를 제거하고 browser regression을 27 checks로 갱신했다.
 - stable full suite에서 발견한 기존 stdin surrogate-escape portability defect는 UTF-8 strict decode 한 줄로 닫았다. 최종 full suite는 286 tests exit 0이며 이 correction 동안에도 hardware/device/ROS/recorder/dataset/training/inference action은 0이었다.
 - 수정 후 foreground real-browser smoke를 다시 실행했다. plan button→동의는 `technical PASS / human semantic NOT_MEASURED`, fake recorder `begin/readiness/freeze/commit=1/1/1/1`, forbidden effect 0이었고, fresh restart의 승인 전 cancel은 `PLAN_CANCELED`와 모든 recorder/forbidden effect 0이었다. 두 temporary fixture는 foreground server 종료 시 삭제했다.
+
+### 2026-08-25 second completion-verifier correction
+
+- 두 번째 fresh verifier가 reusable `MOTION_Q_SAFE_START` document와 actual executor plan의 fresh initial state가 approval binding에서 분리돼 있던 문제를 blocker로 판정해 이전 완료 판정을 무효화했다. `115fdf2`에서 actual plan initial state, motion/home/start/episode digest와 max-age를 UI publish 전에 검증하는 no-authority evidence를 추가했고 mismatch의 publish/approval/recorder/execute를 0으로 고정했다.
+- 같은 verifier가 SeedCampaign scene/expiry/quota validation보다 physical activation 또는 child factory가 먼저 일어날 수 있음을 지적했다. writer `eb1c707`을 `a6bc5ba`로 통합해 non-mutating campaign preflight를 재사용하고 static root/preflight→activation→dynamic current-start→session re-preflight→fresh lifecycle factory 순서를 고정했다. stale/expiry/scene-digest/quota는 activation/factory 0, invalid dynamic start는 activation 1/factory와 later effect 0이다.
+- integration expectation `fe43829` 뒤 focused 89 tests, stable full 293 tests와 browser regression 27 checks가 exit 0이었다. foreground real-browser success는 technical PASS/human semantic NOT_MEASURED와 fake recorder `1/1/1/1`, fresh-process cancel은 `PLAN_CANCELED`와 recorder 0이었고 양쪽 모두 forbidden production/hardware effect 0이었다. hardware/device/ROS/real recorder/dataset/training/inference를 호출하지 않았고 temporary fixture/server를 정리했다.
