@@ -3,7 +3,7 @@
 > 상태: `OFFLINE_COLLECTION_CAMPAIGN_UX_COMPLETE`. Goal 1 software와 비실물 검증을 완료했으며 이 문서는 Goal 2 handoff 정본이다. 현재 동작과 실물 권한의 정본은 `docs/`, `config/`와 executable validator이며, 이 문서만으로 robot motion, recorder, dataset, training 또는 production approval이 허용되지 않는다.
 
 - 작성일: 2026-08-25
-- Goal 1 software integration 기준: `HEAD=7b7bc7b5373e79ff8aa573c11a2a2b2e5a171a00`, tree `debc580a642fc7745ce74e8d740a947af8cbf00e`
+- Goal 1 software integration 기준: `HEAD=53cf2e742071251c4bb7cba1a1289aa313a405c5`, tree `d3b94aff013d463c1c9ad4712d9f2d4ae89e528b`
 - 비교 기준: `origin/main=0c5e53e06940d866ea26f7ec147ca5989d763ce8`
 - 상위 software 상태: `OFFLINE_IMPLEMENTATION_COMPLETE_THROUGH_P6_5`
 - 동결 계획 원본 SHA256: `6501694bc23a1e34dd35b9638431582612fdf7918fa4b0cab3a75a60f00dc810`
@@ -799,12 +799,12 @@ Goal 1 구현자가 아래 표를 실제 값으로 채운다. 이 표는 product
 
 | 항목 | Goal 1 완료 값 |
 |---|---|
-| implementation commit / tree digest | code integration `7b7bc7b5373e79ff8aa573c11a2a2b2e5a171a00` / `debc580a642fc7745ce74e8d740a947af8cbf00e`; push 0 |
+| implementation commit / tree digest | code integration `53cf2e742071251c4bb7cba1a1289aa313a405c5` / `d3b94aff013d463c1c9ad4712d9f2d4ae89e528b`; verifier-correction commits `7fb378e`, `da8ef86`, `98e10bf`, `5dd1bb5`, `53cf2e7`; push 0 |
 | schema versions/digests | `campaign_draft.v1`, `collection_campaign_manifest.v1`, `campaign_compilation_receipt.v1`, `campaign_episode_context.v1`, `operator_session_view.v1`, `operator_intent.v1`, `operator_intent_result.v1`, `test_only_state_initialization.v1`, `test_only_episode_binding.v1`, `fake_episode_result.v1`; canonical digest/replay checks PASS; frozen plan SHA256 `6501694b…810` |
-| focused tests / full suite / browser QA | final focused 61 tests (`session 4 + operator 6 + run_job 21 + bridge 6 + fake console 11 + UI 13`) exit 0; full 283 tests exit 0; real browser success/cancel flows + regression 26 checks PASS; mobile Lighthouse accessibility 100 |
-| forbidden production side-effect counts | success 3 synthetic episodes와 cancel-before-approval 모두 `physical_factory/robot/gripper/camera/production_recorder/dataset/production_run_state/HUMAN/candidate/inventory/production_coverage/training=0`; success의 fake `begin/readiness/freeze/commit=3/3/3/3`, cancel은 `0/0/0/0` |
+| focused tests / full suite / browser QA | final post-correction focused 69 unique tests (`authoring 4 + session 4 + operator 7 + fake console 11 + run_job 23 + bridge 6 + UI 13 + UTF-8 CLI 1`) exit 0; full 286 tests exit 0; real browser success/cancel flows + regression 27 checks PASS; mobile Lighthouse accessibility 100 |
+| forbidden production side-effect counts | browser success 4 synthetic episodes(수정 후 1회 포함)와 cancel-before-approval 2회 모두 `physical_factory/robot/gripper/camera/production_recorder/dataset/production_run_state/HUMAN/candidate/inventory/production_coverage/training=0`; success의 fake `begin/readiness/freeze/commit=4/4/4/4`, cancel은 항상 `0/0/0/0` |
 | capability matrix | `FAKE×AUTHOR/PLAN/LIVE`는 temp draft/synthetic plan/fake ports만; `PHYSICAL×AUTHOR`는 session-only, `PHYSICAL×PLAN/LIVE`는 Goal 1 construction/dispatch 0이고 Goal 2 gate 뒤에만 열림 |
-| TEST_ONLY roots / start binding / numeric scope | browser artifact `/tmp/fake-operator-console-*`는 종료 시 삭제; FAKE episode context의 root/start는 `null`; physical root template 3종과 `MOTION_Q_SAFE_START` ≤0.1 s/≤0.01 rad validator, `HIL_NUMERIC_PROXY`를 pure fixture로 검증; authority 전부 `NONE` |
+| TEST_ONLY roots / start binding / numeric scope | browser artifact `/tmp/fake-operator-console-*`는 종료 시 삭제; foreground FAKE context의 root/start는 `null`이고 별도 `CampaignSession→run_live` pure-port 통합 test가 temporary exact roots, `MOTION_Q_SAFE_START` ≤0.1 s/≤0.01 rad, episode binding, single-camera v2 profile와 `HIL_NUMERIC_PROXY`를 실제 `OneJob` API까지 전달함; default resolver는 bound cell root만 읽고 authority는 전부 `NONE` |
 | recorder/recovery ordering trace | `plan→button→approve→begin→60-row readiness→execute→post-lift freeze→HIL proxy→녹화 밖 recycle/release/return→scene transition→commit→validator/cell-ready`; frozen rows `60→60`; failure/cancel은 later intent 0 |
 | exact unresolved physical dependencies | fresh robot/controller/gripper state, stable one-camera ID/profile와 5 s warmup, HOME joint snapshot, exact alias/cube/cell/E-stop 현장 확인, optional gripper maintenance, real plan-only, actual recorder readiness, dispatch-terminal 감시, release/landing/final scene-ready |
 | dirty `src/frcobot_ros2` preservation | 시작과 동일한 `60755d44d521a5ad6bee8494cc19522f8801aa20-dirty`; read-only pointer verification만 수행, edit/stage/clean 0 |
@@ -1257,3 +1257,12 @@ Goal 1의 같은 UI/handler/`CampaignSession`/fresh `OneJob`을 사용해
 - focused 61 tests, full 283 tests, browser regression 26 checks와 mobile Lighthouse accessibility 100을 통과했다. synthetic success의 fake recorder 네 단계는 각 3회, cancel은 0회였고 모든 physical/production/HUMAN/training effect는 0이었다.
 - `NO_HARDWARE_USE`를 유지해 robot/camera/gripper/ROS/MoveIt/real recorder/dataset/training/inference를 호출하지 않았고 두 temporary fixture와 foreground console을 종료·정리했다.
 - 사용자의 이번 한정 exact-plan button 위임을 Goal 2에 추가했다. scope 또는 digest 변경 시 무효이며 semantic `PASS`, `LANDED`, final scene-ready와 gripper maintenance에는 적용되지 않는다.
+
+### 2026-08-25 completion-verifier correction
+
+- fresh verifier가 `c47481e` 완료 판정을 무효화한 뒤 `7fb378e..53cf2e7`에서 네 blocker와 두 residual을 최소 수정했다. Goal 1의 FAKE/PHYSICAL disposition을 모두 `TEST_ONLY`로 통일했고 `SYNTHETIC_FIXTURE`는 fixture identity/source로만 남겼다.
+- TEST_ONLY default resolver가 production scene root를 읽지 않고 bound cell root를 사용하도록 고쳤다. temporary roots/start/episode binding, caller-provided actual `OneJob`, pure executor/recorder/validator와 candidate-writer 0을 잇는 `CampaignSession→run_live` 성공 test를 추가했으며 synthetic release source는 `TEST_OPERATOR`, human semantic은 `NOT_MEASURED`다.
+- PHYSICAL callback/factory/repository/LIVE binding의 invalid configuration은 activation 0에서 fail-close한다. foreground fake console의 후보 셀 전개는 `campaign_authoring`의 canonical enumerator를 재사용해 중복을 제거했다.
+- rejected view는 자동 재전송하지 않되 명시적 retry에서 같은 view를 다시 읽을 수 있게 했고, fresh view GET이 끝나기 전 다음 intent가 열리는 race를 닫았다. trailing whitespace를 제거하고 browser regression을 27 checks로 갱신했다.
+- stable full suite에서 발견한 기존 stdin surrogate-escape portability defect는 UTF-8 strict decode 한 줄로 닫았다. 최종 full suite는 286 tests exit 0이며 이 correction 동안에도 hardware/device/ROS/recorder/dataset/training/inference action은 0이었다.
+- 수정 후 foreground real-browser smoke를 다시 실행했다. plan button→동의는 `technical PASS / human semantic NOT_MEASURED`, fake recorder `begin/readiness/freeze/commit=1/1/1/1`, forbidden effect 0이었고, fresh restart의 승인 전 cancel은 `PLAN_CANCELED`와 모든 recorder/forbidden effect 0이었다. 두 temporary fixture는 foreground server 종료 시 삭제했다.
