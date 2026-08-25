@@ -46,6 +46,7 @@ const MESSAGE_CATALOG = {
   action: {
     compile_draft: "선택 셀로 TEST_ONLY 계획 만들기",
     approve_exact_plan: "이 최신 계획에 동의",
+    reject_plan: "이 계획 거절",
     cancel_session: "TEST_ONLY 수집 취소",
     retry_view: "최신 화면 다시 읽기",
   },

@@ -94,7 +94,7 @@
     "approval": {
       "revision": 2,
       "view_digest": "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
-      "available_ops": ["approve_exact_plan"],
+      "available_ops": ["approve_exact_plan", "reject_plan"],
       "runtime": {"workflow_state": "AWAITING_APPROVAL", "measurement_outcome": "NOT_MEASURED", "reason_codes": [], "active_child_id": null},
       "approval": {
         "plan_digest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",

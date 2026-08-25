@@ -108,6 +108,7 @@
 
         await show("approval");
         check(!document.querySelector("#approval-input") && !document.querySelector('#runtime-content input[type="text"]'), "approval never renders a typed digest input");
+        check(document.querySelector('[data-op="reject_plan"]'), "approval view exposes a native reject button without typed input");
         check(document.querySelector(".approval-card").textContent.includes("신원 인증이 아닙니다"), "approval button does not claim authentication");
         postResult = "replay";
         document.querySelector('[data-op="approve_exact_plan"]').click();

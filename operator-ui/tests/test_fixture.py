@@ -52,6 +52,7 @@ class GoalOneOperatorUiTest(unittest.TestCase):
         approval = self.fixture["states"]["approval"]["approval"]
         self.assertRegex(approval["plan_digest"], r"^sha256:[0-9a-f]{64}$")
         self.assertIn('data-op="approve_exact_plan"', self.js)
+        self.assertIn('data-op="reject_plan"', self.js)
         self.assertIn("view_digest: boundView.view_digest", self.js)
         self.assertIn("plan_digest: currentView.approval.plan_digest", self.js)
         self.assertNotIn("approval-input", self.html + self.js)
@@ -102,6 +103,7 @@ class GoalOneOperatorUiTest(unittest.TestCase):
         ):
             self.assertIn(marker, self.messages + self.js + self.browser)
         self.assertNotIn("setInterval", self.js)
+        self.assertIn("setTimeout(loadView, 250)", self.js)
         self.assertNotIn("indexedDB", self.js)
 
     def test_fake_and_authority_side_effect_counts_are_zero(self):

@@ -20,6 +20,7 @@ let lastRevision = -1;
 let lastDigest;
 let intentBusy = false;
 let rejectedBinding;
+let refreshTimer;
 
 const escapeHtml = (value) => String(value).replace(/[&<>"']/g, (character) => ({
   "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
@@ -87,6 +88,8 @@ function setBanner(text, tone = "info", announce = true) {
 }
 
 function failClose(code, detail = "") {
+  clearTimeout(refreshTimer);
+  refreshTimer = undefined;
   currentView = undefined;
   document.body.dataset.bridge = "blocked";
   document.querySelector("#connection-dot").className = "connection-dot blocked";
@@ -207,8 +210,17 @@ function renderRuntime(view) {
   const buttons = [];
   if (canIntent("compile_draft")) buttons.push(`<button type="button" data-op="compile_draft">${message("action", "compile_draft")}</button>`);
   if (canIntent("approve_exact_plan")) buttons.push(`<button type="button" data-op="approve_exact_plan">${message("action", "approve_exact_plan")}</button>`);
+  if (canIntent("reject_plan")) buttons.push(`<button class="danger-button" type="button" data-op="reject_plan">${message("action", "reject_plan")}</button>`);
   if (canIntent("cancel_session")) buttons.push(`<button class="danger-button" type="button" data-op="cancel_session">${message("action", "cancel_session")}</button>`);
   document.querySelector("#intent-buttons").innerHTML = buttons.join("");
+}
+
+function scheduleStatusRefresh(view) {
+  clearTimeout(refreshTimer);
+  refreshTimer = undefined;
+  if (view.connection_state === "READY" && ["RUNNING", "CANCELLING"].includes(view.runtime.workflow_state)) {
+    refreshTimer = setTimeout(loadView, 250);
+  }
 }
 
 function renderWizard(view) {
@@ -240,11 +252,12 @@ function render(view) {
   renderInspector(view);
   renderRuntime(view);
   renderWizard(view);
+  scheduleStatusRefresh(view);
 }
 
 function intentPayload(op) {
   if (op === "compile_draft") return {draft_id: currentView.draft.draft_id, data_disposition: "TEST_ONLY"};
-  if (op === "approve_exact_plan") return {
+  if (["approve_exact_plan", "reject_plan"].includes(op)) return {
     plan_digest: currentView.approval.plan_digest,
     approval_scope: currentView.approval.approval_scope,
     data_disposition: "TEST_ONLY",
