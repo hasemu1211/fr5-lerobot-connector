@@ -341,19 +341,20 @@ class CampaignOperator:
                 if not isinstance(value, Mapping) or set(value) != {"roots", "start_binding"}:
                     raise ContractError("CAMPAIGN_OPERATOR_PHYSICAL_BINDINGS_REQUIRED")
                 bindings = copy.deepcopy(dict(value))
-            try:
-                result = session.run_next(
-                    run_id=run_id,
-                    scene_evidence=self.scene_evidence_call(run_id),
-                    episode_call=self._episode,
-                    **bindings,
-                )
-            except ContractError as exc:
-                status = session.status()
-                if status["campaign"]["state"] in {"BLOCKED", "CANCELLED"}:
-                    return {"ok": False, "code": exc.code, "campaign": status}
-                raise
-            return {"ok": True, **result}
+            scene_evidence = self.scene_evidence_call(run_id)
+        try:
+            result = session.run_next(
+                run_id=run_id,
+                scene_evidence=scene_evidence,
+                episode_call=self._episode,
+                **bindings,
+            )
+        except ContractError as exc:
+            status = session.status()
+            if status["campaign"]["state"] in {"BLOCKED", "CANCELLED"}:
+                return {"ok": False, "code": exc.code, "campaign": status}
+            raise
+        return {"ok": True, **result}
 
     def cancel_campaign(self, payload: dict[str, Any], _view: dict[str, Any]) -> dict[str, Any]:
         with self._lock:

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import tempfile
+import threading
 import unittest
 from datetime import datetime, timezone
 
@@ -308,6 +309,37 @@ class CampaignOperatorTests(unittest.TestCase):
                 ))
             self.assertEqual(ports.fake_factory_calls, 0)
             self.assertEqual(sum(ports.counters.values()), 0)
+
+    def test_projection_and_cancel_remain_available_while_episode_is_active(self):
+        with tempfile.TemporaryDirectory() as directory:
+            model, ports = make_operator(directory)
+            entered = threading.Event()
+
+            def waiting(_intent, lifecycle, cancel_event):
+                lifecycle.begin()
+                lifecycle.readiness_status()
+                lifecycle.state = "RUNNING"
+                entered.set()
+                if not cancel_event.wait(1):
+                    raise AssertionError("cancel did not reach the active fake episode")
+                raise ContractError("SYNTHETIC_CANCELLED")
+
+            model.fake_live_call = waiting
+            send(model, "compile_draft", {}, "compile-active-r001")
+            outcome = {}
+            worker = threading.Thread(
+                target=lambda: outcome.update(model.run_next(
+                    {"run_id": "SYNTHETIC-run-0"}, model.core.snapshot(),
+                )),
+            )
+            worker.start()
+            self.assertTrue(entered.wait(1))
+            self.assertTrue(model.projection()["campaign"]["active_child"])
+            self.assertEqual(model.cancel_campaign({}, {})["campaign"]["state"], "CANCELLED")
+            worker.join(1)
+            self.assertFalse(worker.is_alive())
+            self.assertEqual(outcome["code"], "SYNTHETIC_CANCELLED")
+            self.assertTrue(all(ports.counters[name] == 0 for name in FORBIDDEN_FAKE_COUNTERS))
 
 
 if __name__ == "__main__":
