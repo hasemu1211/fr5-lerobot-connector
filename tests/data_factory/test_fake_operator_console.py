@@ -440,7 +440,7 @@ class FakeOperatorConsoleTests(unittest.TestCase):
                     self.addCleanup(console.close)
                     failed = send(console, "compile_draft", compile_payload(console), f"compile-{name}")
                     self.assertEqual((failed["outcome"], failed["code"]), ("FAIL", code))
-                    self.assertEqual(console.factory_calls, 1)
+                    self.assertEqual(console.factory_calls, 0)
                     self.assertEqual(console.session.status()["campaign"]["state"], "BLOCKED")
                     self.assertFalse(console.session.status()["active_child"])
                     self.assert_no_later_intent(console, name)
