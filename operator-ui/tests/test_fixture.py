@@ -35,6 +35,8 @@ class GoalOneOperatorUiTest(unittest.TestCase):
         self.assertIn('fetch("/api/view"', self.js)
         self.assertIn('fetch("/api/intent"', self.js)
         self.assertEqual(self.js.count('"X-Operator-Token"'), 1)
+        self.assertIn("function unwrapViewEnvelope(value)", self.js)
+        self.assertIn('"VIEW_ENVELOPE_INVALID"', self.js)
         self.assertNotIn("Access-Control-Allow-Origin", self.html + self.js)
         self.assertNotIn("WebSocket", self.html + self.js)
 

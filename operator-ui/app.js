@@ -37,7 +37,24 @@ function assertEnum(name, value) {
   if (!ENUMS[name].has(value)) throw new TypeError(`UNKNOWN_VIEW_ENUM:${name}:${value}`);
 }
 
-function validateView(view) {
+function unwrapViewEnvelope(value) {
+  if (!value?.projection) return value;
+  const fields = new Set(Object.keys(value));
+  const expected = ["schema_version", "session_id", "revision", "projection", "generated_at", "view_digest", "authority"];
+  if (fields.size !== expected.length || expected.some((field) => !fields.has(field))) throw new TypeError("VIEW_ENVELOPE_INVALID");
+  if (!value.projection || typeof value.projection !== "object" || Array.isArray(value.projection)) throw new TypeError("VIEW_PROJECTION_INVALID");
+  return {
+    ...value.projection,
+    schema_version: value.schema_version,
+    session_id: value.session_id,
+    revision: value.revision,
+    generated_at: value.generated_at,
+    view_digest: value.view_digest,
+  };
+}
+
+function validateView(value) {
+  const view = unwrapViewEnvelope(value);
   if (!view || view.schema_version !== VIEW_SCHEMA) throw new TypeError("VIEW_SCHEMA_MISMATCH");
   if (!view.session_id || !Number.isInteger(view.revision) || !DIGEST_PATTERN.test(view.view_digest)) throw new TypeError("VIEW_IDENTITY_INVALID");
   assertEnum("connection_state", view.connection_state);

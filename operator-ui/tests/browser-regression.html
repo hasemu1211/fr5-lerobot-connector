@@ -40,7 +40,12 @@
     };
     const fixtureView = async () => {
       const fixture = await fixturePromise;
-      return merge(clone(fixture.base_view), fixture.states[stateKey]);
+      const flat = merge(clone(fixture.base_view), fixture.states[stateKey]);
+      const {schema_version, session_id, revision, generated_at, view_digest, ...projection} = flat;
+      return {
+        schema_version, session_id, revision, generated_at, view_digest, projection,
+        authority: {browser: "INTENT_ONLY", lifecycle_owner: "BACKEND", human_identity: "NOT_AUTHENTICATED", training_approval: "SEPARATE"},
+      };
     };
     window.fetch = async (input, init = {}) => {
       const path = new URL(typeof input === "string" ? input : input.url, location.href).pathname;
