@@ -42,6 +42,9 @@ FORBIDDEN_FAKE_COUNTERS = (
     "training",
 )
 SIDE_EFFECT_COUNTERS = FAKE_RECORDER_COUNTERS + FORBIDDEN_FAKE_COUNTERS
+EpisodeCall = Callable[
+    [dict[str, Any], object, threading.Event, dict[str, Any]], Mapping[str, Any],
+]
 
 
 def _subsystems(value: object) -> dict[str, dict[str, str]]:
@@ -68,12 +71,12 @@ class CampaignOperator:
         scene_evidence_call: Callable[[str], Mapping[str, Any]],
         side_effect_counter_call: Callable[[], Mapping[str, int]],
         fake_lifecycle_factory: Callable[[], object],
-        fake_plan_call: Callable[[dict[str, Any], object, threading.Event], Mapping[str, Any]] | None = None,
-        fake_live_call: Callable[[dict[str, Any], object, threading.Event], Mapping[str, Any]] | None = None,
+        fake_plan_call: EpisodeCall | None = None,
+        fake_live_call: EpisodeCall | None = None,
         physical_activation_gate: Callable[[], bool] | None = None,
         physical_lifecycle_factory: Callable[[], object] | None = None,
-        physical_plan_call: Callable[[dict[str, Any], object, threading.Event], Mapping[str, Any]] | None = None,
-        physical_live_call: Callable[[dict[str, Any], object, threading.Event], Mapping[str, Any]] | None = None,
+        physical_plan_call: EpisodeCall | None = None,
+        physical_live_call: EpisodeCall | None = None,
         physical_bindings_call: Callable[[str], Mapping[str, Any]] | None = None,
         repository_root: str | Path | None = None, clock=None,
     ):
