@@ -8,6 +8,14 @@ Goal 1 UI는 한 화면에서 작업영역/place, X/Y/yaw 셀, object/grasp, tas
 
 ## 확인
 
+실제 Goal 1 경로는 다음 foreground 명령으로 실행한다. 내장 synthetic fixture는 임시 디렉터리에서만 살아 있고 종료 시 정리되며, 명령이 출력한 loopback URL을 연다. 이 경로는 실제 `LoopbackBridge → CampaignOperator → CampaignSession → fresh OneJob`을 사용하지만 hardware와 production writer는 구성하지 않는다.
+
+```sh
+direnv exec . python3 -m tools.data_factory.fake_operator_console
+```
+
+종료는 터미널에서 `Ctrl-C`로 수행한다. episode thread와 HTTP handler가 모두 join된 뒤에만 process가 끝난다. UI는 `RUNNING|CANCELLING` 동안 GET snapshot만 짧게 polling하며 intent를 queue하거나 자동 재전송하지 않는다.
+
 정적 fixture와 계약 검사는 다음 한 명령으로 실행한다.
 
 ```sh
@@ -24,11 +32,13 @@ make -C operator-ui preview
 
 ## 10분 FAKE QA
 
-1. 기본 header가 `FAKE · LIVE_COLLECT · TEST_ONLY`이고 금지 효과 일곱 항목이 모두 0인지 확인한다.
-2. 자동 설계와 직접 편집을 오가며 같은 draft ID가 유지되고 셀을 키보드로 선택할 수 있는지 확인한다.
-3. `PHYSICAL`만 선택해도 계획·승인·실행이 시작되지 않고 workspace capture가 비활성인지 확인한다.
-4. workspace wizard에서 qualified plane 설명, source 100 mm, compensated final 100 mm와 `CENTER/X_REF/Y_CHECK` FAKE capture를 확인한다.
-5. approval fixture에서 typed input이 없고 digest-bound button만 있는지 확인한다.
-6. stale/reconnect/blocked/cancel fixtures에서 intent가 자동 재전송되지 않고 이후 action이 사라지는지 확인한다.
+1. 기본 header가 `FAKE · LIVE_COLLECT · TEST_ONLY`이고 표시된 모든 금지 효과가 0인지 확인한다.
+2. 자동 설계의 횟수를 바꾸고 직접 편집으로 전환해 같은 draft ID에서 셀 하나를 선택·해제한다.
+3. workspace wizard에 source/final 100 mm를 넣고 `CENTER/X_REF/Y_CHECK`를 FAKE capture한 뒤 synthetic revision을 저장한다.
+4. 계획 만들기를 한 번 누르고 typed input 없이 digest-bound 승인 또는 거절 버튼만 보이는지 확인한다.
+5. 승인하면 `RUNNING`을 거쳐 technical PASS, human semantic `NOT_MEASURED`, synthetic review/coverage와 terminal projection이 보이는지 확인한다.
+6. 새 process에서 계획 승인 전 취소하고, 새 intent·execute·commit·candidate·inventory·training effect가 생기지 않는지 확인한다.
+
+`PHYSICAL` 선택과 six-cell capability matrix는 focused contract test에서 construction/dispatch 0으로 검증한다. foreground FAKE console 자체는 scope가 sealed된 synthetic session이므로 PHYSICAL process나 device를 여는 control을 제공하지 않는다.
 
 `FAKE`는 robot, gripper, production recorder, dataset, run-state를 호출하지 않는다. `TEST_ONLY`는 production approval과 training authority를 만들지 않으며 `PHYSICAL` 토글만으로 어떤 process나 hardware도 시작하지 않는다.

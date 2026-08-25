@@ -1,6 +1,6 @@
 # Operator UI local bridge contract
 
-Status: Goal 1 frontend contract; backend producer/consumer is not implemented in this worktree.
+Status: Goal 1 loopback transport, CAS core and pure-FAKE producer/consumer are implemented. PHYSICAL ports and production activation remain deferred.
 
 ## Transport boundary
 
@@ -12,6 +12,8 @@ The foreground local server exposes exactly two same-origin routes:
 The server binds only loopback (`127.0.0.1` and/or `::1`), rejects unexpected `Host` and `Origin`, and replaces the exact HTML marker `<!-- OPERATOR_TOKEN -->` with `<meta name="operator-token" content="PROCESS_RANDOM_TOKEN">`. The client sends that value as `X-Operator-Token` on both routes. No CORS, WebSocket, cookie authentication, database, broker, offline queue, passkey or OS authentication is part of this contract.
 
 The token proves possession of the foreground local page channel; the approval button itself does not claim identity authentication. The backend remains responsible for human-channel qualification and all current scene/start/expiry/safety checks.
+
+The executable offline composition is `python3 -m tools.data_factory.fake_operator_console`. It serves the existing UI from a foreground process, uses a temporary synthetic fixture by default, and composes the existing `CampaignOperator`, `CampaignSession`, `SeedCampaign`, `ButtonDecisionPort` and fresh `OneJob`. It does not provide a second lifecycle owner or a physical adapter.
 
 ## View
 
@@ -124,6 +126,8 @@ The backend must compare session, revision, view digest, plan digest, sealed sco
 
 `FAKE` must keep robot, gripper, production recorder, dataset and run-state call counts at zero. `PHYSICAL` selection alone keeps construction/dispatch at zero. This UI has no op for production approval, candidate admission or training authority, and accepted TEST_ONLY intents must keep those writers at zero.
 
-## Remaining backend assumptions
+## Remaining physical/backend work
 
-The future backend must decide the exact canonical serialization for `view_digest`, expiry/freshness bounds, stable reason enum ownership and accepted op-to-owner mapping. It must reuse the existing campaign/session/OneJob lifecycle and approval/CAS core rather than create a browser-owned runner. Those assumptions remain unresolved here because backend Python was explicitly outside this writer's scope.
+Canonical view serialization, revision/replay CAS, token/Host/Origin checks, bounded op mapping and the pure-FAKE owner chain are implemented. The UI uses bounded GET polling only for active status; it never retries an intent.
+
+Goal 2 must inject the existing physical `run_live`/OneJob ports, fresh root/start/scene bindings and device evidence behind the same operator projection. It must not add a browser-owned runner. Actual robot/camera/gripper discovery, plan truth, TEST_ONLY recorder output, physical semantic/landing checkpoints and every production activation decision remain unresolved until that separate bounded physical Goal runs.
