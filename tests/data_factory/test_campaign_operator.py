@@ -1,0 +1,314 @@
+from __future__ import annotations
+
+import tempfile
+import unittest
+from datetime import datetime, timezone
+
+try:
+    from .test_campaign_authoring import draft
+    from .test_experiment_manifest import hypothesis
+except ImportError:
+    from test_campaign_authoring import draft
+    from test_experiment_manifest import hypothesis
+
+from tools.data_factory.campaign_operator import (
+    FAKE_RECORDER_COUNTERS,
+    FORBIDDEN_FAKE_COUNTERS,
+    SIDE_EFFECT_COUNTERS,
+    CampaignOperator,
+)
+from tools.data_factory.experiment_manifest import SLOT_INPUT_FIELDS
+from tools.data_factory.operator_bridge import INTENT_SCHEMA
+from tools.fr5_data_factory import ContractError, canonical_digest
+
+
+NOW = datetime(2026, 8, 25, 1, 0, tzinfo=timezone.utc)
+EXPIRES = "2026-08-25T02:00:00Z"
+
+
+def operator_intent(view: dict, op: str, payload: dict, name: str) -> dict:
+    return {
+        "schema_version": INTENT_SCHEMA,
+        "intent_id": name,
+        "session_id": view["session_id"],
+        "view_revision": view["revision"],
+        "view_digest": view["view_digest"],
+        "op": op,
+        "payload": payload,
+    }
+
+
+def send(model: CampaignOperator, op: str, payload: dict, name: str) -> dict:
+    return model.core.consume(operator_intent(model.core.snapshot(), op, payload, name))
+
+
+class FakeLifecycle:
+    def __init__(self, counters: dict[str, int]):
+        self.state = "IDLE"
+        self.counters = counters
+        self.cancel_calls = 0
+
+    def begin(self):
+        self.counters["fake_recorder_begin"] += 1
+
+    def readiness_status(self):
+        self.counters["fake_recorder_readiness_status"] += 1
+
+    def freeze(self):
+        self.counters["fake_recorder_freeze"] += 1
+
+    def commit(self):
+        self.counters["fake_recorder_commit"] += 1
+
+    def cancel(self):
+        self.cancel_calls += 1
+        self.state = "CANCELLED"
+        return {"state": self.state}
+
+
+class PureFakePorts:
+    def __init__(self, *, technical_status: str = "PASS"):
+        self.counters = {name: 0 for name in SIDE_EFFECT_COUNTERS}
+        self.fake_factory_calls = 0
+        self.children = []
+        self.technical_status = technical_status
+        self.scene_digest = canonical_digest("SYNTHETIC-scene-0")
+
+    def counter_snapshot(self):
+        return self.counters
+
+    def fake_factory(self):
+        self.fake_factory_calls += 1
+        child = FakeLifecycle(self.counters)
+        self.children.append(child)
+        return child
+
+    def physical_factory(self):
+        self.counters["physical_factory"] += 1
+        raise AssertionError("Goal 1 must not construct a physical lifecycle")
+
+    def scene(self, _run_id: str):
+        value = {
+            "schema_version": "data_factory.scene_freshness_evidence.v1",
+            "scene_digest": self.scene_digest,
+            "observed_at": NOW.isoformat().replace("+00:00", "Z"),
+        }
+        value["evidence_digest"] = canonical_digest(value)
+        return value
+
+    def _technical(self, intent: dict):
+        post_scene = canonical_digest(["SYNTHETIC-scene", intent["run_id"]])
+        value = {
+            "schema_version": "data_factory.seed_technical_result.v1",
+            "intent_digest": intent["intent_digest"],
+            "run_id": intent["run_id"],
+            "manifest_digest": intent["manifest_digest"],
+            "slot_id": intent["slot"]["slot_id"],
+            "status": self.technical_status,
+            "technical_result_digest": canonical_digest([
+                "SYNTHETIC-technical", intent["run_id"], self.technical_status,
+            ]),
+            "post_scene_digest": post_scene,
+            "observed_at": NOW.isoformat().replace("+00:00", "Z"),
+        }
+        value["evidence_digest"] = canonical_digest(value)
+        self.scene_digest = post_scene
+        return value
+
+    def plan(self, intent, lifecycle, cancel_event):
+        if cancel_event.is_set():
+            raise ContractError("SYNTHETIC_CANCELLED")
+        lifecycle.state = "COMPLETE"
+        technical = self._technical(intent)
+        return {
+            "result": {"path": "SYNTHETIC_PLAN", "technical_evidence": technical},
+            "technical_evidence": technical,
+        }
+
+    def live(self, intent, lifecycle, cancel_event):
+        if cancel_event.is_set():
+            raise ContractError("SYNTHETIC_CANCELLED")
+        lifecycle.begin()
+        lifecycle.readiness_status()
+        lifecycle.freeze()
+        lifecycle.commit()
+        lifecycle.state = "COMPLETE"
+        technical = self._technical(intent)
+        return {
+            "result": {"path": "SYNTHETIC_LIVE", "technical_evidence": technical},
+            "technical_evidence": technical,
+        }
+
+
+def make_operator(
+    directory: str, *, effect_scope: str = "FAKE",
+    lifecycle_action: str = "LIVE_COLLECT", count: int = 1,
+    technical_status: str = "PASS",
+) -> tuple[CampaignOperator, PureFakePorts]:
+    contract = hypothesis()
+    ports = PureFakePorts(technical_status=technical_status)
+    model = CampaignOperator(
+        session_id=f"campaign-{effect_scope.lower()}-{lifecycle_action.lower()}",
+        lifecycle_owner="TEST_OPERATOR",
+        workspace={
+            "workspace_id": "SYNTHETIC-workspace",
+            "identity": "SYNTHETIC",
+            "fixture_root": directory,
+        },
+        hypothesis=contract,
+        draft=draft(contract, count=count),
+        effect_scope=effect_scope,
+        lifecycle_action=lifecycle_action,
+        data_disposition="SYNTHETIC_FIXTURE" if effect_scope == "FAKE" else "TEST_ONLY",
+        subsystems={
+            "workspace": {"readiness": "READY", "capability": "AUTHOR", "reason": "SYNTHETIC"},
+            "planner": {"readiness": "READY", "capability": "PLAN", "reason": "SYNTHETIC"},
+            "recorder": {"readiness": "READY", "capability": "FAKE_ONLY", "reason": "SYNTHETIC"},
+        },
+        expires_at=EXPIRES,
+        initial_scene_digest=ports.scene_digest,
+        scene_evidence_call=ports.scene,
+        side_effect_counter_call=ports.counter_snapshot,
+        fake_lifecycle_factory=ports.fake_factory,
+        fake_plan_call=ports.plan,
+        fake_live_call=ports.live,
+        physical_lifecycle_factory=ports.physical_factory,
+        physical_plan_call=ports.plan,
+        physical_live_call=ports.live,
+        repository_root=directory,
+        clock=lambda: NOW,
+    )
+    return model, ports
+
+
+class CampaignOperatorTests(unittest.TestCase):
+    def test_assisted_and_direct_edit_share_effect_neutral_draft_and_reconnect(self):
+        with tempfile.TemporaryDirectory() as directory:
+            model, ports = make_operator(directory, lifecycle_action="AUTHOR_ONLY", count=1)
+            first = model.core.snapshot()
+            original_id = first["projection"]["draft"]["draft_id"]
+            assisted = send(model, "update_draft", {
+                "authoring_mode": "ASSISTED",
+                "requested_count": 2,
+                "normalized_seed": 17,
+                "pinned": [],
+                "excluded": [],
+                "direct_slots": [],
+            }, "assisted-r001")
+            self.assertEqual(assisted["result"]["selector"], "BALANCED_INITIAL")
+            send(model, "compile_draft", {}, "compile-r001")
+            compiled_view = model.core.snapshot()
+            slots = [
+                {key: item[key] for key in SLOT_INPUT_FIELDS}
+                for item in compiled_view["projection"]["compiled"]["manifest"]["slots"]
+            ]
+            direct = send(model, "update_draft", {
+                "authoring_mode": "DIRECT_EDIT",
+                "requested_count": len(slots),
+                "normalized_seed": 17,
+                "pinned": [],
+                "excluded": [],
+                "direct_slots": slots,
+            }, "direct-r001")
+            self.assertEqual(direct["result"]["selector"], "DIRECT_LIST")
+            with self.assertRaisesRegex(ContractError, "OPERATOR_INTENT_STALE_VIEW"):
+                model.core.consume(operator_intent(compiled_view, "compile_draft", {}, "stale-r001"))
+
+            reconnected = model.core.snapshot()["projection"]
+            self.assertEqual((reconnected["draft"]["draft_id"], reconnected["draft"]["selector"]), (original_id, "DIRECT_LIST"))
+            self.assertFalse({"effect_scope", "lifecycle_action", "approval", "scene_truth"} & set(reconnected["draft"]))
+            send(model, "compile_draft", {}, "compile-r002")
+            final = model.core.snapshot()["projection"]
+            self.assertEqual(final["compiled"]["manifest"]["authority"], "NO_EXECUTION_AUTHORITY")
+            self.assertEqual(set(final["authority"].values()), {"NONE"})
+            self.assertEqual(final["operator_identity"], "TEST_OPERATOR")
+            self.assertTrue(final["workspace"]["fixture_root"].startswith(directory))
+            self.assertTrue(final["catalog"])
+            self.assertEqual(sum(ports.counters.values()), 0)
+
+            for index, forbidden in enumerate(("source", "reviewed_by", "scene_truth"), 1):
+                view = model.core.snapshot()
+                with self.subTest(forbidden=forbidden), self.assertRaisesRegex(ContractError, "OPERATOR_INTENT_AUTHORITY"):
+                    model.core.consume(operator_intent(
+                        view, "update_draft", {forbidden: "HUMAN"}, f"forbidden-r00{index}",
+                    ))
+
+    def test_six_cell_matrix_is_pure_fake_or_fails_before_physical_factory(self):
+        with tempfile.TemporaryDirectory() as directory:
+            for effect_scope in ("FAKE", "PHYSICAL"):
+                for action in ("AUTHOR_ONLY", "PLAN_ONLY", "LIVE_COLLECT"):
+                    with self.subTest(effect_scope=effect_scope, action=action):
+                        model, ports = make_operator(
+                            directory, effect_scope=effect_scope, lifecycle_action=action,
+                        )
+                        send(model, "compile_draft", {}, f"compile-{effect_scope.lower()}-{action.lower()}")
+                        if action == "AUTHOR_ONLY":
+                            view = model.core.snapshot()
+                            with self.assertRaisesRegex(ContractError, "CAMPAIGN_OPERATOR_AUTHOR_ONLY"):
+                                model.core.consume(operator_intent(
+                                    view, "run_next", {"run_id": "SYNTHETIC-run-0"},
+                                    f"run-{effect_scope.lower()}-{action.lower()}",
+                                ))
+                            self.assertEqual(model.core.snapshot()["projection"]["campaign"]["state"], "AUTHOR_ONLY")
+                        elif effect_scope == "PHYSICAL":
+                            view = model.core.snapshot()
+                            self.assertEqual(view["projection"]["aggregate"]["reason"], "PHYSICAL_ACTIVATION_REQUIRED")
+                            with self.assertRaisesRegex(ContractError, "CAMPAIGN_OPERATOR_PHYSICAL_ACTIVATION_REQUIRED"):
+                                model.core.consume(operator_intent(
+                                    view, "run_next", {"run_id": "SYNTHETIC-run-0"},
+                                    f"run-{effect_scope.lower()}-{action.lower()}",
+                                ))
+                        else:
+                            result = send(
+                                model, "run_next", {"run_id": "SYNTHETIC-run-0"},
+                                f"run-{effect_scope.lower()}-{action.lower()}",
+                            )["result"]
+                            self.assertTrue(result["ok"])
+                            self.assertEqual(result["campaign"]["state"], "COMPLETE")
+                            self.assertEqual(
+                                result["result"]["technical_evidence"]["status"], "PASS",
+                            )
+
+                        counters = model.core.snapshot()["projection"]["side_effect_counters"]
+                        expected = 1 if effect_scope == "FAKE" and action == "LIVE_COLLECT" else 0
+                        self.assertTrue(all(counters[name] == expected for name in FAKE_RECORDER_COUNTERS))
+                        self.assertTrue(all(counters[name] == 0 for name in FORBIDDEN_FAKE_COUNTERS))
+                        self.assertEqual(ports.fake_factory_calls, int(effect_scope == "FAKE" and action != "AUTHOR_ONLY"))
+
+    def test_technical_fail_returns_evidence_then_blocks_later_intent(self):
+        with tempfile.TemporaryDirectory() as directory:
+            model, ports = make_operator(directory, count=2, technical_status="FAIL")
+            send(model, "compile_draft", {}, "compile-fail-r001")
+            failed = send(model, "run_next", {"run_id": "SYNTHETIC-run-0"}, "run-fail-r001")["result"]
+            self.assertFalse(failed["ok"])
+            self.assertEqual(failed["code"], "SEED_CAMPAIGN_TECHNICAL_NOT_PASS")
+            reconnected = model.core.snapshot()
+            self.assertEqual(reconnected["projection"]["campaign"]["campaign"]["state"], "BLOCKED")
+            self.assertEqual(ports.fake_factory_calls, 1)
+            self.assertTrue(all(ports.counters[name] == 1 for name in FAKE_RECORDER_COUNTERS))
+
+            with self.assertRaisesRegex(ContractError, "CAMPAIGN_OPERATOR_TERMINAL"):
+                model.core.consume(operator_intent(
+                    reconnected, "run_next", {"run_id": "SYNTHETIC-run-1"}, "later-r001",
+                ))
+            self.assertEqual(ports.fake_factory_calls, 1)
+            self.assertTrue(all(ports.counters[name] == 0 for name in FORBIDDEN_FAKE_COUNTERS))
+
+    def test_cancel_seals_compiled_campaign_without_constructing_a_child(self):
+        with tempfile.TemporaryDirectory() as directory:
+            model, ports = make_operator(directory, count=2)
+            send(model, "compile_draft", {}, "compile-cancel-r001")
+            cancelled = send(model, "cancel_campaign", {}, "cancel-r001")["result"]
+            self.assertEqual(cancelled["campaign"]["state"], "CANCELLED")
+            reconnected = model.core.snapshot()
+            self.assertEqual(reconnected["projection"]["campaign"]["state"], "CANCELLED")
+            with self.assertRaisesRegex(ContractError, "CAMPAIGN_OPERATOR_CANCELLED"):
+                model.core.consume(operator_intent(
+                    reconnected, "run_next", {"run_id": "SYNTHETIC-run-0"}, "later-cancel-r001",
+                ))
+            self.assertEqual(ports.fake_factory_calls, 0)
+            self.assertEqual(sum(ports.counters.values()), 0)
+
+
+if __name__ == "__main__":
+    unittest.main()
