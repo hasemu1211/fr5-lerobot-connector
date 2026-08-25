@@ -980,7 +980,8 @@ def run_live(payload, cancel, publish, *, resolver=resolve_inputs, executor_fact
              camera_warmup_call=_camera_warmup, before_approval=None, one_job=None,
              decision_provider=None, approval_scope="HUMAN_GATED",
              decision_timeout_s=None, test_only_root_binding=None,
-             test_only_episode_binding=None, candidate_writer_enabled=True):
+             test_only_episode_binding=None, candidate_writer_enabled=True,
+             repository_root=ROOT):
     """Public single HIL run: plan and human approval precede recorder begin and motion."""
     executor = recorder = resource_monitor = None
     resource_finished = False
@@ -992,7 +993,9 @@ def run_live(payload, cancel, publish, *, resolver=resolve_inputs, executor_fact
             raise ContractError("PLAN_DECISION_AMBIGUOUS")
         test_only = test_only_root_binding is not None
         if test_only:
-            roots = validate_test_only_root_binding(test_only_root_binding, repository_root=ROOT)
+            roots = validate_test_only_root_binding(
+                test_only_root_binding, repository_root=repository_root,
+            )
             if (
                 roots["run_id"] != payload.get("run_id")
                 or roots["run_root"] != str(Path(payload.get("run_root", "")).resolve())

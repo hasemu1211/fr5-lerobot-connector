@@ -310,10 +310,10 @@ class CampaignOperator:
             )
         return self._session
 
-    def _episode(self, intent, lifecycle, cancel_event):
+    def _episode(self, intent, lifecycle, cancel_event, episode_context):
         before = self._counter_snapshot()
         try:
-            result = self._callback()(intent, lifecycle, cancel_event)
+            result = self._callback()(intent, lifecycle, cancel_event, episode_context)
         except ContractError:
             raise
         except Exception as exc:

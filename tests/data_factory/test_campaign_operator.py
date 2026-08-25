@@ -116,9 +116,10 @@ class PureFakePorts:
         self.scene_digest = post_scene
         return value
 
-    def plan(self, intent, lifecycle, cancel_event):
+    def plan(self, intent, lifecycle, cancel_event, episode_context):
         if cancel_event.is_set():
             raise ContractError("SYNTHETIC_CANCELLED")
+        self.assert_context = episode_context
         lifecycle.state = "COMPLETE"
         technical = self._technical(intent)
         return {
@@ -126,9 +127,10 @@ class PureFakePorts:
             "technical_evidence": technical,
         }
 
-    def live(self, intent, lifecycle, cancel_event):
+    def live(self, intent, lifecycle, cancel_event, episode_context):
         if cancel_event.is_set():
             raise ContractError("SYNTHETIC_CANCELLED")
+        self.assert_context = episode_context
         lifecycle.begin()
         lifecycle.readiness_status()
         lifecycle.freeze()
@@ -315,7 +317,7 @@ class CampaignOperatorTests(unittest.TestCase):
             model, ports = make_operator(directory)
             entered = threading.Event()
 
-            def waiting(_intent, lifecycle, cancel_event):
+            def waiting(_intent, lifecycle, cancel_event, _episode_context):
                 lifecycle.begin()
                 lifecycle.readiness_status()
                 lifecycle.state = "RUNNING"

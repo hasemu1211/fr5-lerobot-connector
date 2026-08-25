@@ -132,9 +132,20 @@ class CampaignSessionTests(unittest.TestCase):
         for index in range(2):
             next_scene = canonical_digest(["scene", index + 1])
 
-            def episode(intent, lifecycle, cancel, destination=next_scene):
+            def episode(intent, lifecycle, cancel, episode_context, destination=next_scene):
                 self.assertFalse(cancel.is_set())
                 self.assertIs(lifecycle, session.active_lifecycle)
+                self.assertEqual(episode_context["run_id"], intent["run_id"])
+                self.assertEqual(episode_context["intent_digest"], intent["intent_digest"])
+                self.assertIsNone(episode_context["root_binding"])
+                self.assertIsNone(episode_context["start_binding"])
+                self.assertEqual(
+                    episode_context["context_digest"],
+                    canonical_digest({
+                        key: value for key, value in episode_context.items()
+                        if key != "context_digest"
+                    }),
+                )
                 lifecycle.state = "COMPLETE"
                 return {
                     "result": {"ok": True, "technical": "PASS"},
@@ -198,11 +209,48 @@ class CampaignSessionTests(unittest.TestCase):
             session.run_next(
                 run_id="fake-run-0",
                 scene_evidence=scene(canonical_digest("scene-0")),
-                episode_call=lambda intent, lifecycle, cancel: {"unexpected": True},
+                episode_call=lambda intent, lifecycle, cancel, context: {"unexpected": True},
             )
         self.assertEqual(session.status()["campaign"]["state"], "BLOCKED")
         self.assertFalse(session.status()["active_child"])
         self.assertEqual(factories.fake_calls, 1)
+        self.assertEqual(factories.children[0].cancel_calls, 1)
+
+        class UncertainOneJob(FakeOneJob):
+            def cancel(self):
+                self.cancel_calls += 1
+                raise RuntimeError("synthetic cancel uncertainty")
+
+        _, _, _, uncertain = make_session(2)
+        child = UncertainOneJob()
+        uncertain._factory = lambda: child
+
+        def invalid_while_running(intent, lifecycle, cancel, context):
+            lifecycle.state = "RUNNING"
+            return {"unexpected": True}
+
+        with self.assertRaisesRegex(ContractError, "CAMPAIGN_SESSION_EPISODE_RESULT"):
+            uncertain.run_next(
+                run_id="fake-run-uncertain",
+                scene_evidence=scene(canonical_digest("scene-0")),
+                episode_call=invalid_while_running,
+            )
+        status = uncertain.status()
+        self.assertEqual(status["campaign"]["state"], "BLOCKED")
+        self.assertTrue(status["active_child"])
+        self.assertEqual(status["termination_error"], "CAMPAIGN_SESSION_CHILD_TERMINATION_UNCERTAIN")
+        self.assertEqual(child.cancel_calls, 1)
+
+        _, _, factories, raised = make_session(2)
+        with self.assertRaisesRegex(ContractError, "CAMPAIGN_SESSION_EPISODE"):
+            raised.run_next(
+                run_id="fake-run-raised",
+                scene_evidence=scene(canonical_digest("scene-0")),
+                episode_call=lambda intent, lifecycle, cancel, context: 1 / 0,
+            )
+        self.assertEqual(raised.status()["campaign"]["state"], "BLOCKED")
+        self.assertFalse(raised.status()["active_child"])
+        self.assertEqual(factories.children[0].cancel_calls, 1)
 
 
 if __name__ == "__main__":

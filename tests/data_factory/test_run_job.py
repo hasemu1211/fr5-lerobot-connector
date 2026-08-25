@@ -209,7 +209,9 @@ class RunJobTest(unittest.TestCase):
             executor = PlannedExecutor()
             recorder = mock.Mock()
             with (
-                mock.patch.object(run_job, "validate_test_only_root_binding", return_value=roots),
+                mock.patch.object(
+                    run_job, "validate_test_only_root_binding", return_value=roots,
+                ) as root_validator,
                 mock.patch.object(
                     run_job, "validate_test_only_episode_binding",
                     return_value=episode_binding,
@@ -230,7 +232,11 @@ class RunJobTest(unittest.TestCase):
                     test_only_root_binding={"fixture": True},
                     test_only_episode_binding={"fixture": True},
                     candidate_writer_enabled=False,
+                    repository_root=root,
                 )
+            root_validator.assert_called_once_with(
+                {"fixture": True}, repository_root=root,
+            )
             return result, observed, executor.ops, recorder
 
         for choice, code, state in (

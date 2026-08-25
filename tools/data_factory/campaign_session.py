@@ -19,12 +19,16 @@ from tools.data_factory.operator_setup import (
     validate_test_only_start_binding,
 )
 from tools.data_factory.seed_campaign import SeedCampaign
-from tools.fr5_data_factory import ContractError, SAFE_ID
+from tools.fr5_data_factory import ContractError, SAFE_ID, canonical_digest
 
 
 EFFECT_SCOPES = frozenset({"FAKE", "PHYSICAL"})
 LIFECYCLE_ACTIONS = frozenset({"AUTHOR_ONLY", "PLAN_ONLY", "LIVE_COLLECT"})
 DISPOSITIONS = {"FAKE": "SYNTHETIC_FIXTURE", "PHYSICAL": "TEST_ONLY"}
+EPISODE_CONTEXT_SCHEMA = "data_factory.campaign_episode_context.v1"
+TERMINAL_CHILD_STATES = frozenset({
+    "ABORTED", "BLOCKED", "CANCELLED", "COMPLETE", "IDLE", "QUARANTINED_COMMIT",
+})
 
 
 class CampaignSession:
@@ -71,6 +75,8 @@ class CampaignSession:
         self._active_run_id = None
         self._active_roots = None
         self._active_start = None
+        self._active_cancel_attempted = False
+        self._termination_error = None
         self._revision = 0
         self._campaign = SeedCampaign(
             manifest=self.manifest,
@@ -97,6 +103,55 @@ class CampaignSession:
 
     def _bump(self) -> None:
         self._revision += 1
+
+    def _clear_active(self) -> None:
+        self._active = self._active_intent = self._active_run_id = None
+        self._active_roots = self._active_start = None
+        self._active_cancel_attempted = False
+
+    def _terminate_active(self) -> tuple[dict[str, Any] | None, bool]:
+        """Attempt one bounded child cancel; retain an uncertain child handle."""
+        child = self._active
+        if child is None:
+            return None, True
+        self._cancel.set()
+        result = None
+        settled_without_cancel = TERMINAL_CHILD_STATES - {"IDLE"}
+        if getattr(child, "state", None) not in settled_without_cancel and not self._active_cancel_attempted:
+            self._active_cancel_attempted = True
+            cancel = getattr(child, "cancel", None)
+            if callable(cancel):
+                try:
+                    value = cancel()
+                    if isinstance(value, Mapping):
+                        result = copy.deepcopy(dict(value))
+                except Exception:
+                    result = None
+        terminal = (
+            getattr(child, "state", None) in TERMINAL_CHILD_STATES
+            or isinstance(result, dict) and result.get("state") in TERMINAL_CHILD_STATES
+        )
+        if terminal:
+            self._termination_error = None
+            self._clear_active()
+        else:
+            self._termination_error = "CAMPAIGN_SESSION_CHILD_TERMINATION_UNCERTAIN"
+        return result, terminal
+
+    def _episode_context(self) -> dict[str, Any]:
+        value = {
+            "schema_version": EPISODE_CONTEXT_SCHEMA,
+            "session_id": self.session_id,
+            "run_id": self._active_run_id,
+            "intent_digest": self._active_intent["intent_digest"],
+            "effect_scope": self.effect_scope,
+            "lifecycle_action": self.lifecycle_action,
+            "data_disposition": self.data_disposition,
+            "root_binding": copy.deepcopy(self._active_roots),
+            "start_binding": copy.deepcopy(self._active_start),
+        }
+        value["context_digest"] = canonical_digest(value)
+        return value
 
     def _physical_bindings(
         self, run_id: str, roots: Mapping[str, Any] | None,
@@ -144,6 +199,8 @@ class CampaignSession:
             self._active_run_id = run_id
             self._active_roots = checked_roots
             self._active_start = checked_start
+            self._active_cancel_attempted = False
+            self._termination_error = None
             self._bump()
             return copy.deepcopy(intent)
 
@@ -158,18 +215,19 @@ class CampaignSession:
                     evidence=technical_evidence,
                 )
             except ContractError:
-                self._active = self._active_intent = self._active_run_id = None
-                self._active_roots = self._active_start = None
+                self._terminate_active()
                 self._bump()
                 raise
-            self._active = self._active_intent = self._active_run_id = None
-            self._active_roots = self._active_start = None
+            self._clear_active()
             self._bump()
             return copy.deepcopy(status)
 
     def run_next(
         self, *, run_id: str, scene_evidence: Mapping[str, Any],
-        episode_call: Callable[[dict[str, Any], object, threading.Event], Mapping[str, Any]],
+        episode_call: Callable[
+            [dict[str, Any], object, threading.Event, dict[str, Any]],
+            Mapping[str, Any],
+        ],
         roots: Mapping[str, Any] | None = None,
         start_binding: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
@@ -180,26 +238,37 @@ class CampaignSession:
             run_id=run_id, scene_evidence=scene_evidence,
             roots=roots, start_binding=start_binding,
         )
-        lifecycle = self.active_lifecycle
+        with self._lock:
+            lifecycle = self._active
+            episode_context = self._episode_context()
         try:
-            outcome = episode_call(copy.deepcopy(intent), lifecycle, self._cancel)
+            outcome = episode_call(
+                copy.deepcopy(intent), lifecycle, self._cancel,
+                copy.deepcopy(episode_context),
+            )
             if not isinstance(outcome, Mapping) or set(outcome) != {"result", "technical_evidence"}:
                 raise ContractError("CAMPAIGN_SESSION_EPISODE_RESULT")
             campaign = self.complete_active(outcome["technical_evidence"])
             return {"result": copy.deepcopy(outcome["result"]), "campaign": campaign}
-        except ContractError as exc:
+        except Exception as exc:
+            error = exc if isinstance(exc, ContractError) else ContractError(
+                "CAMPAIGN_SESSION_EPISODE",
+            )
             with self._lock:
                 changed = False
+                _, terminal = self._terminate_active()
                 if self._campaign.state in {"READY", "ACTIVE"}:
-                    self._campaign.fault(owner=self.lifecycle_owner, code=exc.code)
+                    self._campaign.fault(
+                        owner=self.lifecycle_owner,
+                        code=error.code if terminal else self._termination_error,
+                    )
                     changed = True
-                if self._active is not None:
-                    self._active = self._active_intent = self._active_run_id = None
-                    self._active_roots = self._active_start = None
-                    changed = True
+                changed = changed or self._active is not None
                 if changed:
                     self._bump()
-            raise
+            if error is exc:
+                raise
+            raise error from exc
 
     def cancel(self) -> dict[str, Any]:
         """Route cancellation through the sole active child, then seal the campaign."""
@@ -207,13 +276,13 @@ class CampaignSession:
             if self._campaign.state not in {"READY", "ACTIVE"}:
                 raise ContractError("CAMPAIGN_SESSION_TERMINAL")
             self._cancel.set()
-            child_result = None
-            child = self._active
-            if child is not None and callable(getattr(child, "cancel", None)):
-                child_result = child.cancel()
-            campaign = self._campaign.cancel(owner=self.lifecycle_owner)
-            self._active = self._active_intent = self._active_run_id = None
-            self._active_roots = self._active_start = None
+            child_result, terminal = self._terminate_active()
+            campaign = (
+                self._campaign.cancel(owner=self.lifecycle_owner)
+                if terminal else self._campaign.fault(
+                    owner=self.lifecycle_owner, code=self._termination_error,
+                )
+            )
             self._bump()
             return {"campaign": campaign, "child": copy.deepcopy(child_result)}
 
@@ -232,6 +301,7 @@ class CampaignSession:
                 "active_intent_digest": None if self._active_intent is None else self._active_intent["intent_digest"],
                 "root_binding_digest": None if self._active_roots is None else self._active_roots["binding_digest"],
                 "start_binding_digest": None if self._active_start is None else self._active_start["binding_digest"],
+                "termination_error": self._termination_error,
                 "authority": {
                     "browser": "VIEW_AND_INTENT_ONLY",
                     "execution": "ONE_JOB_ONLY",
