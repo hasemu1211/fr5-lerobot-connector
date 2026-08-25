@@ -807,7 +807,7 @@ Goal 1 구현자가 아래 표를 실제 값으로 채운다. 이 표는 product
 | TEST_ONLY roots / start binding / numeric scope | browser artifact `/tmp/fake-operator-console-*`는 종료 시 삭제; FAKE episode context의 root/start는 `null`; physical root template 3종과 `MOTION_Q_SAFE_START` ≤0.1 s/≤0.01 rad validator, `HIL_NUMERIC_PROXY`를 pure fixture로 검증; authority 전부 `NONE` |
 | recorder/recovery ordering trace | `plan→button→approve→begin→60-row readiness→execute→post-lift freeze→HIL proxy→녹화 밖 recycle/release/return→scene transition→commit→validator/cell-ready`; frozen rows `60→60`; failure/cancel은 later intent 0 |
 | exact unresolved physical dependencies | fresh robot/controller/gripper state, stable one-camera ID/profile와 5 s warmup, HOME joint snapshot, exact alias/cube/cell/E-stop 현장 확인, optional gripper maintenance, real plan-only, actual recorder readiness, dispatch-terminal 감시, release/landing/final scene-ready |
-| dirty `src/frcobot_ros2` preservation | 시작과 동일한 `60755d44d521a5ad6bee8494cc19522f8801aa20-dirty`; edit/stage/clean/submodule command 0 |
+| dirty `src/frcobot_ros2` preservation | 시작과 동일한 `60755d44d521a5ad6bee8494cc19522f8801aa20-dirty`; read-only pointer verification만 수행, edit/stage/clean 0 |
 
 Goal 2는 ledger를 authority로 신뢰하지 않고 commit/config/hardware를 fresh recheck한다. 그 목적은 재설계·반복 리서치를 없애고 drift를 빠르게 찾는 것이다.
 
