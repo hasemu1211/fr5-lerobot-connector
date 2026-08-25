@@ -3,7 +3,7 @@
 > 상태: `OFFLINE_COLLECTION_CAMPAIGN_UX_COMPLETE`. Goal 1 software와 비실물 검증을 완료했으며 이 문서는 Goal 2 handoff 정본이다. 현재 동작과 실물 권한의 정본은 `docs/`, `config/`와 executable validator이며, 이 문서만으로 robot motion, recorder, dataset, training 또는 production approval이 허용되지 않는다.
 
 - 작성일: 2026-08-25
-- Goal 1 software integration 기준: code `HEAD=fe438296a4034dc66e8e4e2a568ed6132a6458e4`, tree `ef6b2b3d1f4ea192d17c246a992a60409bc4b742`
+- Goal 1 software integration 기준: code `HEAD=c1d439d92bfa7809e7171f67168f02159c15f681`, tree `3944442c9a3fcbc18733c5463c8f27e7884d4c26`
 - 비교 기준: `origin/main=0c5e53e06940d866ea26f7ec147ca5989d763ce8`
 - 상위 software 상태: `OFFLINE_IMPLEMENTATION_COMPLETE_THROUGH_P6_5`
 - 동결 계획 원본 SHA256: `6501694bc23a1e34dd35b9638431582612fdf7918fa4b0cab3a75a60f00dc810`
@@ -803,9 +803,9 @@ Goal 1 구현자가 아래 표를 실제 값으로 채운다. 이 표는 product
 
 | 항목 | Goal 1 완료 값 |
 |---|---|
-| implementation commit / tree digest | final code integration `fe438296a4034dc66e8e4e2a568ed6132a6458e4` / `ef6b2b3d1f4ea192d17c246a992a60409bc4b742`; second-verifier correction commits `115fdf2`, writer `eb1c707`→integration `a6bc5ba`, expectation integration `fe43829`; push 0 |
+| implementation commit / tree digest | final code integration `c1d439d92bfa7809e7171f67168f02159c15f681` / `3944442c9a3fcbc18733c5463c8f27e7884d4c26`; second-verifier correction commits `115fdf2`, writer `eb1c707`→integration `a6bc5ba`, expectation integration `fe43829`; third-verifier projection correction `c1d439d`; push 0 |
 | schema versions/digests | `campaign_draft.v1`, `collection_campaign_manifest.v1`, `campaign_compilation_receipt.v1`, `campaign_episode_context.v1`, `operator_session_view.v1`, `operator_intent.v1`, `operator_intent_result.v1`, `test_only_state_initialization.v1`, `test_only_episode_binding.v1`, `test_only_planned_start_evidence.v1`, `fake_episode_result.v1`; canonical digest/replay checks PASS; frozen plan SHA256 `6501694b…810` |
-| focused tests / full suite / browser QA | final focused 89 tests (`authoring 4 + seed 8 + session 6 + operator 9 + setup 9 + fake console 11 + run_job 23 + bridge 6 + UI 13`) exit 0; full 293 tests exit 0; post-correction real browser success/cancel + regression 27 checks PASS; unchanged UI mobile Lighthouse accessibility 100 |
+| focused tests / full suite / browser QA | final focused 89 tests (`authoring 4 + seed 8 + session 6 + operator 9 + setup 9 + fake console 11 + run_job 23 + bridge 6 + UI 13`) exit 0; third correction focused fake console 11 tests exit 0; final full 293 tests exit 0; post-correction real browser success/cancel + regression 27 checks PASS; final live projection browser snapshot에서 `TWO_STAGE_ALIGN / NOT_AVAILABLE / NO_PRODUCTION_CALLER` 확인; unchanged UI mobile Lighthouse accessibility 100 |
 | forbidden production side-effect counts | latest browser success와 fresh-process cancel-before-approval 모두 `physical_factory/robot/gripper/camera/production_recorder/dataset/production_run_state/HUMAN/candidate/inventory/production_coverage/training=0`; success의 fake `begin/readiness/freeze/commit=1/1/1/1`, cancel은 `0/0/0/0`; preflight failure matrix는 invalid static/scene/budget에서 activation/factory 0, invalid postactivation start에서 activation 1/factory와 later effect 0 |
 | capability matrix | `FAKE×AUTHOR/PLAN/LIVE`는 temp draft/synthetic plan/fake ports만; `PHYSICAL×AUTHOR`는 session-only, `PHYSICAL×PLAN/LIVE`는 Goal 1 construction/dispatch 0이고 Goal 2 gate 뒤에만 열림 |
 | TEST_ONLY roots / start binding / numeric scope | browser artifact `/tmp/fake-operator-console-*`는 종료 시 삭제; foreground FAKE context의 root/start는 `null`이고 별도 `CampaignSession→run_live` pure-port 통합 test가 temporary exact roots, `MOTION_Q_SAFE_START` ≤0.1 s/≤0.01 rad, episode binding, single-camera v2 profile와 `HIL_NUMERIC_PROXY`를 실제 `OneJob` API까지 전달함; actual plan initial state를 같은 target/tolerance에 비교한 no-authority planned-start evidence가 UI publish 전 만들어져 button decision에 결속되며 mismatch는 publish/approval/recorder/execute 0; default resolver는 bound cell root만 읽고 authority는 전부 `NONE` |
@@ -1280,3 +1280,9 @@ Goal 1의 같은 UI/handler/`CampaignSession`/fresh `OneJob`을 사용해
 - 두 번째 fresh verifier가 reusable `MOTION_Q_SAFE_START` document와 actual executor plan의 fresh initial state가 approval binding에서 분리돼 있던 문제를 blocker로 판정해 이전 완료 판정을 무효화했다. `115fdf2`에서 actual plan initial state, motion/home/start/episode digest와 max-age를 UI publish 전에 검증하는 no-authority evidence를 추가했고 mismatch의 publish/approval/recorder/execute를 0으로 고정했다.
 - 같은 verifier가 SeedCampaign scene/expiry/quota validation보다 physical activation 또는 child factory가 먼저 일어날 수 있음을 지적했다. writer `eb1c707`을 `a6bc5ba`로 통합해 non-mutating campaign preflight를 재사용하고 static root/preflight→activation→dynamic current-start→session re-preflight→fresh lifecycle factory 순서를 고정했다. stale/expiry/scene-digest/quota는 activation/factory 0, invalid dynamic start는 activation 1/factory와 later effect 0이다.
 - integration expectation `fe43829` 뒤 focused 89 tests, stable full 293 tests와 browser regression 27 checks가 exit 0이었다. foreground real-browser success는 technical PASS/human semantic NOT_MEASURED와 fake recorder `1/1/1/1`, fresh-process cancel은 `PLAN_CANCELED`와 recorder 0이었고 양쪽 모두 forbidden production/hardware effect 0이었다. hardware/device/ROS/real recorder/dataset/training/inference를 호출하지 않았고 temporary fixture/server를 정리했다.
+
+### 2026-08-25 third completion-verifier correction
+
+- 세 번째 fresh verifier가 정적 browser fixture에는 있던 P6 `TWO_STAGE_ALIGN` 미지원 상태가 실제 foreground bridge의 동적 projection에는 빠져 있음을 blocker로 판정해 이전 완료 판정을 무효화했다.
+- `c1d439d`에서 별도 caller나 framework 없이 실제 capability projection에 `Motion variant · TWO_STAGE_ALIGN / NOT_AVAILABLE / NO_PRODUCTION_CALLER` 한 행을 추가하고, 정적 fixture가 아니라 `FakeOperatorConsole.projection()`을 직접 검증하는 회귀 단언을 추가했다.
+- focused fake-console 11 tests와 stable full 293 tests가 exit 0이었다. 실제 foreground loopback server를 연 browser accessibility snapshot에서도 같은 행과 forbidden effect 전부 0을 확인했고 server, tab과 temporary fixture를 종료·정리했다. hardware/device/ROS/real recorder/dataset/training/inference action은 0이었다.
