@@ -38,6 +38,8 @@ No intent is queued or automatically retried. Bridge unavailable, revision rollb
 
 The reading order is scope → workspace grid → current checkpoint → fixed lane/capability/effect receipt. All interaction uses native buttons, radios, number inputs and dialog semantics. Cell buttons expose full coordinate and state names, selected cells use `aria-pressed`, dynamic connection status uses a polite live region, focus is visible at 3 px, targets are at least 44 px where controls are custom, color is never the sole status cue, and reduced-motion preferences suppress transitions and animation. The layout collapses to one column without changing DOM order.
 
-## Deferred integration assumption
+## Implemented integration boundary
 
-This worktree does not implement backend Python. A local loopback server still must produce the canonical view, inject the token meta, enforce exact Host/Origin/token checks and single-use compare-and-swap, and map accepted ops into the existing sole lifecycle owner. Until it does, a static preview correctly renders `BRIDGE_UNAVAILABLE` and sends no intent.
+Goal 1 implements the foreground standard-library Python loopback in `tools/data_factory/operator_bridge.py` and `tools/data_factory/fake_operator_console.py`. It produces the canonical view, injects the token meta, enforces exact Host/Origin/token checks and single-use compare-and-swap, and maps accepted ops through the existing `CampaignOperator → CampaignSession → fresh OneJob` lifecycle path. This composition is `FAKE`/`TEST_ONLY` and constructs no physical port.
+
+PHYSICAL port construction and activation, hardware adapters and production authority remain deferred. A standalone static preview has no loopback bridge, so it correctly renders `BRIDGE_UNAVAILABLE` and sends no intent.

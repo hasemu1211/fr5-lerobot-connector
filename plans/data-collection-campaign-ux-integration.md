@@ -803,7 +803,7 @@ Goal 1 구현자가 아래 표를 실제 값으로 채운다. 이 표는 product
 
 | 항목 | Goal 1 완료 값 |
 |---|---|
-| implementation commit / tree digest | final code integration `c1d439d92bfa7809e7171f67168f02159c15f681` / `3944442c9a3fcbc18733c5463c8f27e7884d4c26`; second-verifier correction commits `115fdf2`, writer `eb1c707`→integration `a6bc5ba`, expectation integration `fe43829`; third-verifier projection correction `c1d439d`; push 0 |
+| implementation commit / tree digest | final code integration `c1d439d92bfa7809e7171f67168f02159c15f681` / `3944442c9a3fcbc18733c5463c8f27e7884d4c26`; second-verifier correction commits `115fdf2`, writer `eb1c707`→integration `a6bc5ba`, expectation integration `fe43829`; third-verifier projection correction `c1d439d`; fourth-verifier documentation reconciliation in `operator-ui/architecture.md` and this ledger; push 0 |
 | schema versions/digests | `campaign_draft.v1`, `collection_campaign_manifest.v1`, `campaign_compilation_receipt.v1`, `campaign_episode_context.v1`, `operator_session_view.v1`, `operator_intent.v1`, `operator_intent_result.v1`, `test_only_state_initialization.v1`, `test_only_episode_binding.v1`, `test_only_planned_start_evidence.v1`, `fake_episode_result.v1`; canonical digest/replay checks PASS; frozen plan SHA256 `6501694b…810` |
 | focused tests / full suite / browser QA | final focused 89 tests (`authoring 4 + seed 8 + session 6 + operator 9 + setup 9 + fake console 11 + run_job 23 + bridge 6 + UI 13`) exit 0; third correction focused fake console 11 tests exit 0; final full 293 tests exit 0; post-correction real browser success/cancel + regression 27 checks PASS; final live projection browser snapshot에서 `TWO_STAGE_ALIGN / NOT_AVAILABLE / NO_PRODUCTION_CALLER` 확인; unchanged UI mobile Lighthouse accessibility 100 |
 | forbidden production side-effect counts | latest browser success와 fresh-process cancel-before-approval 모두 `physical_factory/robot/gripper/camera/production_recorder/dataset/production_run_state/HUMAN/candidate/inventory/production_coverage/training=0`; success의 fake `begin/readiness/freeze/commit=1/1/1/1`, cancel은 `0/0/0/0`; preflight failure matrix는 invalid static/scene/budget에서 activation/factory 0, invalid postactivation start에서 activation 1/factory와 later effect 0 |
@@ -1286,3 +1286,8 @@ Goal 1의 같은 UI/handler/`CampaignSession`/fresh `OneJob`을 사용해
 - 세 번째 fresh verifier가 정적 browser fixture에는 있던 P6 `TWO_STAGE_ALIGN` 미지원 상태가 실제 foreground bridge의 동적 projection에는 빠져 있음을 blocker로 판정해 이전 완료 판정을 무효화했다.
 - `c1d439d`에서 별도 caller나 framework 없이 실제 capability projection에 `Motion variant · TWO_STAGE_ALIGN / NOT_AVAILABLE / NO_PRODUCTION_CALLER` 한 행을 추가하고, 정적 fixture가 아니라 `FakeOperatorConsole.projection()`을 직접 검증하는 회귀 단언을 추가했다.
 - focused fake-console 11 tests와 stable full 293 tests가 exit 0이었다. 실제 foreground loopback server를 연 browser accessibility snapshot에서도 같은 행과 forbidden effect 전부 0을 확인했고 server, tab과 temporary fixture를 종료·정리했다. hardware/device/ROS/real recorder/dataset/training/inference action은 0이었다.
+
+### 2026-08-25 fourth completion-verifier correction
+
+- 네 번째 fresh verifier가 실제 foreground loopback/CAS/lifecycle 통합은 구현됐지만 `operator-ui/architecture.md`의 마지막 절만 backend Python을 future로 기술하는 문서 drift를 blocker로 판정해 이전 완료 판정을 무효화했다.
+- 해당 절만 현재 경계로 교체했다. Goal 1은 stdlib loopback, token/Host/Origin 검증, single-use CAS와 `CampaignOperator → CampaignSession → fresh OneJob` FAKE/TEST_ONLY 경로를 구현했고, PHYSICAL port construction/activation, hardware adapter와 production authority만 deferred다. standalone static preview의 `BRIDGE_UNAVAILABLE` fail-close는 그대로 유지한다.
