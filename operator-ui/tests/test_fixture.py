@@ -100,6 +100,7 @@ class GoalOneOperatorUiTest(unittest.TestCase):
         for marker in (
             "BRIDGE_UNAVAILABLE", "VIEW_STALE", "INTENT_REPLAYED", "CANCEL_PENDING",
             "VIEW_REVISION_ROLLBACK", 'window.addEventListener("online"', "reconnect refetches view without replaying an intent",
+            "explicit retry may refetch the same rejected view without replaying its intent",
         ):
             self.assertIn(marker, self.messages + self.js + self.browser)
         self.assertNotIn("setInterval", self.js)

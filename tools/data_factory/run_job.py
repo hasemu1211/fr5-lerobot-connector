@@ -1010,7 +1010,15 @@ def run_live(payload, cancel, publish, *, resolver=resolve_inputs, executor_fact
             if candidate_writer_enabled is not True or test_only_episode_binding is not None:
                 raise ContractError("CANDIDATE_WRITER_SCOPE")
             cell_root = ROOT / "outputs/data_factory/cells"
-        validated, program, scene_binding = resolver(payload)
+        if test_only and resolver is resolve_inputs:
+            validated, program, scene_binding = resolve_inputs(
+                payload,
+                scene_binding_call=lambda validated, release_pose, run_id: _scene_binding(
+                    validated, release_pose, run_id, root=cell_root,
+                ),
+            )
+        else:
+            validated, program, scene_binding = resolver(payload)
         episode_binding = None
         if test_only:
             episode_binding = validate_test_only_episode_binding(
@@ -1362,7 +1370,11 @@ def run_live(payload, cancel, publish, *, resolver=resolve_inputs, executor_fact
                 if state != result["state"] or isinstance(decision, Exception):
                     cancelled = job.cancel()
                     return _response(ok=False, code=cancelled["code"], state=cancelled["state"], run_id=payload["run_id"], plan_digest=planned["plan_digest"])
-                acted = job.release_verdict(decision, operator_id)
+                acted = (
+                    job.release_verdict(decision, operator_id, source="TEST_OPERATOR")
+                    if test_only and getattr(job, "allow_synthetic_test_operator", False)
+                    else job.release_verdict(decision, operator_id)
+                )
                 if not acted["ok"]:
                     return _response(ok=False, code=acted["code"], state=acted["state"], run_id=payload["run_id"], plan_digest=planned["plan_digest"])
                 continue

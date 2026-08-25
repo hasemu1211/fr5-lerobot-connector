@@ -119,6 +119,9 @@
         check(approvalIntent.body.schema_version === "data_factory.operator_intent.v1" && approvalIntent.body.session_id && approvalIntent.body.intent_id && approvalIntent.body.view_revision === 2, "intent envelope carries schema intent session and revision");
         check(approvalIntent.body.view_digest === expectedApproval.view_digest && approvalIntent.body.payload.plan_digest === expectedApproval.approval.plan_digest, "native approval button binds view and plan digests");
         check(posted.filter((request) => request.body.op === "approve_exact_plan").length === 1 && !document.querySelector('[data-op="approve_exact_plan"]'), "replay failure does not retry or re-enable stale approval");
+        document.querySelector("#retry-view").click();
+        await waitFor(() => currentView?.revision === 2);
+        check(document.querySelector('[data-op="approve_exact_plan"]') && posted.length === 4, "explicit retry may refetch the same rejected view without replaying its intent");
 
         postResult = "accepted";
         await show("running");

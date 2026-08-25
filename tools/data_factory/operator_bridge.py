@@ -386,7 +386,7 @@ class LoopbackBridge:
                 if relative == "index.html":
                     marker = b"<!-- OPERATOR_TOKEN -->"
                     injection = (
-                        '<meta name="operator-token" content="' + bridge.token + '">' 
+                        '<meta name="operator-token" content="' + bridge.token + '">'
                     ).encode()
                     if marker not in payload:
                         return self._error(HTTPStatus.INTERNAL_SERVER_ERROR, "BRIDGE_TOKEN_MARKER")

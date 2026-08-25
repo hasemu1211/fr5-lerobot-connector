@@ -101,7 +101,10 @@ function failClose(code, detail = "") {
   document.querySelector("#runtime-content").innerHTML = `<p class="runtime-state bad"><strong>${escapeHtml(code)}</strong><span>bridge unavailable/stale/unknown 상태에서는 모든 campaign intent가 0입니다.</span></p>`;
   document.querySelector("#intent-buttons").innerHTML = '<button id="retry-view" type="button">최신 화면 다시 읽기</button>';
   document.querySelector("#retry-view").disabled = false;
-  document.querySelector("#retry-view").addEventListener("click", loadView, {once: true});
+  document.querySelector("#retry-view").addEventListener("click", () => {
+    rejectedBinding = undefined;
+    loadView();
+  }, {once: true});
 }
 
 function renderConnection(view) {
@@ -322,11 +325,10 @@ async function submitIntent(op, payload = intentPayload(op)) {
     failClose("BRIDGE_UNAVAILABLE", error.message);
     return;
   }
-  intentBusy = false;
-  await loadView();
+  await loadView({releaseIntent: true});
 }
 
-async function loadView() {
+async function loadView({releaseIntent = false} = {}) {
   setBanner("최신 화면을 다시 읽고 있습니다. 이 동안 intent는 0입니다.", "info", false);
   try {
     const response = await fetch("/api/view", {
@@ -337,9 +339,11 @@ async function loadView() {
     });
     if (!response.ok) throw new Error(`HTTP_${response.status}`);
     const view = validateView(await response.json());
+    if (releaseIntent) intentBusy = false;
     render(view);
     if (view.connection_state !== "READY") announcer.textContent = `${message("status", view.connection_state)}. 모든 intent가 차단되었습니다.`;
   } catch (error) {
+    if (releaseIntent) intentBusy = false;
     const stale = ["VIEW_REVISION_ROLLBACK", "REJECTED_VIEW_NOT_ADVANCED"].includes(error.message);
     const code = error.message.startsWith("UNKNOWN_VIEW_ENUM") ? "UNKNOWN_VIEW_ENUM" : stale ? "VIEW_STALE" : "BRIDGE_UNAVAILABLE";
     failClose(code, error.message);

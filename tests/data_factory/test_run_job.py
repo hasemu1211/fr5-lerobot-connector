@@ -5,6 +5,7 @@ import tempfile
 import threading
 import time
 import unittest
+from datetime import datetime, timezone
 from unittest import mock
 from pathlib import Path
 from types import SimpleNamespace
@@ -14,6 +15,21 @@ from . import test_one_job as one_job_test
 from tools.data_factory.motion.pickup_executor import PHASES, PickupExecutor
 from tools.data_factory.one_job import JsonlProcess, run_one_job
 from tools.data_factory import run_job
+from tools.data_factory.campaign_authoring import compile_collection_campaign
+from tools.data_factory.campaign_session import CampaignSession
+from tools.data_factory.fake_operator_console import (
+    _motion_program,
+    make_fake_one_job,
+    new_effect_counters,
+)
+from tools.data_factory.operator_setup import (
+    build_test_only_episode_binding,
+    build_test_only_root_binding,
+    build_test_only_start_binding,
+    initialize_test_only_state_from_user_declaration,
+)
+from .test_campaign_authoring import draft as campaign_draft
+from .test_operator_setup import compatible_start_fixture, pose_snapshot
 
 
 JOB = {"task": "pickup_e2e", "robot_system_id": "fr5-lab-a"}
@@ -292,6 +308,343 @@ class RunJobTest(unittest.TestCase):
             self.assertFalse(Path(live_payload["run_root"]).exists())
         self.assertEqual((result["code"], result["state"]), ("TEST_ONLY_RUN_BINDING", "BLOCKED"))
         resolver.assert_not_called()
+
+    def test_test_only_default_resolver_reads_only_the_bound_scene_root(self):
+        validated = {
+            "normalized_job": {
+                **JOB, "place_id": "PLACE_A", "yaw_deg": 0,
+                "x_mm": 0, "y_mm": 0, "object_profile_id": "wood-cube",
+            },
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            repository = Path(directory).resolve()
+            live_payload = payload("live")
+            live_payload.update(
+                run_root=str(repository / "runs"),
+                dataset_root=str(repository / "dataset"),
+            )
+            roots = {
+                "run_id": live_payload["run_id"],
+                "run_root": str(Path(live_payload["run_root"]).resolve()),
+                "dataset_root": str(Path(live_payload["dataset_root"]).resolve()),
+                "cell_root": str((repository / "isolated-cells").resolve()),
+                "binding_digest": "sha256:" + "1" * 64,
+            }
+            with (
+                mock.patch.object(run_job, "validate_test_only_root_binding", return_value=roots),
+                mock.patch.object(run_job, "validate_job_spec", return_value=validated),
+                mock.patch.object(run_job, "_load", return_value={}),
+                mock.patch.object(run_job, "resolve_motion_program", return_value=motion()),
+                mock.patch.object(
+                    run_job, "_scene_binding",
+                    side_effect=run_job.ContractError("ISOLATED_SCENE_SENTINEL"),
+                ) as scene_binding,
+            ):
+                result = run_job.run_live(
+                    live_payload, threading.Event(), lambda _: None,
+                    decision_provider=lambda _: None,
+                    test_only_root_binding={"fixture": True},
+                    test_only_episode_binding={"fixture": True},
+                    candidate_writer_enabled=False,
+                    repository_root=repository,
+                )
+        self.assertEqual((result["code"], result["state"]), ("ISOLATED_SCENE_SENTINEL", "BLOCKED"))
+        self.assertEqual(scene_binding.call_args.kwargs["root"], Path(roots["cell_root"]))
+        self.assertNotEqual(scene_binding.call_args.kwargs["root"], run_job.ROOT / "outputs/data_factory/cells")
+
+    def test_campaign_session_reaches_run_live_through_pure_test_only_ports(self):
+        contract, motion_qualification, home_candidate = compatible_start_fixture()
+        source = campaign_draft(contract, count=1)
+        manifest, receipt = compile_collection_campaign(source, hypothesis=contract)
+        now = lambda: datetime.now(timezone.utc)
+        trace, counters = [], new_effect_counters()
+
+        with tempfile.TemporaryDirectory() as directory:
+            repository = Path(directory).resolve()
+            roots = build_test_only_root_binding(
+                repository, session_id="integrated-session", run_id="integrated-run",
+            )
+            slot = manifest["slots"][0]
+            base = next(
+                item for item in contract["base_conditions"]
+                if item["base_condition_digest"] == slot["base_condition_digest"]
+            )
+            resolved = next(
+                item for item in contract["resolver_receipts"]
+                if item["resolver_result_digest"] == base["resolver_result_digest"]
+            )
+            normalized_job = resolved["normalized_job"]
+            initialized = initialize_test_only_state_from_user_declaration(
+                roots, repository_root=repository,
+                robot_system_id=normalized_job["robot_system_id"],
+                object_instance_id="synthetic-object",
+                object_profile_id=normalized_job["object_profile_id"],
+                place_id=normalized_job["place_id"], yaw_deg=normalized_job["yaw_deg"],
+                x_mm=normalized_job["x_mm"], y_mm=normalized_job["y_mm"],
+                declared_by="test-operator",
+            )
+            start_binding = build_test_only_start_binding(
+                manifest=manifest, hypothesis=contract,
+                motion_qualification=motion_qualification,
+                home_candidate=home_candidate,
+                current_snapshot=pose_snapshot(
+                    motion_qualification["qualified_safe_joint_positions_rad"],
+                ),
+            )
+            lifecycle = make_fake_one_job(trace=trace, counters=counters, clock=now)
+            session = CampaignSession(
+                session_id=roots["session_id"], source_draft=source,
+                manifest=manifest, compilation_receipt=receipt,
+                hypothesis=contract, lifecycle_owner="TEST_OPERATOR",
+                expires_at="2099-01-01T00:00:00Z",
+                initial_scene_digest=initialized["scene_state_digest"],
+                effect_scope="PHYSICAL", lifecycle_action="LIVE_COLLECT",
+                data_disposition="TEST_ONLY",
+                fake_lifecycle_factory=lambda: (_ for _ in ()).throw(
+                    AssertionError("fake fallback must not be selected"),
+                ),
+                physical_lifecycle_factory=lambda: lifecycle,
+                repository_root=repository, clock=now,
+            )
+            scene_evidence = {
+                "schema_version": "data_factory.scene_freshness_evidence.v1",
+                "scene_digest": initialized["scene_state_digest"],
+                "observed_at": now().isoformat().replace("+00:00", "Z"),
+            }
+            scene_evidence["evidence_digest"] = run_job.canonical_digest(scene_evidence)
+
+            class Cell:
+                def __init__(self):
+                    self.value = {
+                        "robot_system_id": normalized_job["robot_system_id"],
+                        "cell_ready": True, "reason_code": "TEST_OPERATOR_ACKNOWLEDGED",
+                        "run_id": "NONE", "plan_digest": "sha256:" + "0" * 64,
+                        "acknowledged_by": "TEST_OPERATOR",
+                    }
+
+                def read(self):
+                    return dict(self.value)
+
+                def mark_active(self, plan_digest):
+                    self.value.update(
+                        cell_ready=False, reason_code="EXECUTION_IN_PROGRESS",
+                        run_id=roots["run_id"], plan_digest=plan_digest,
+                        acknowledged_by="UNACKNOWLEDGED",
+                    )
+
+                def acknowledge_ready(self, operator, *, expected_run_id=None, expected_plan_digest=None):
+                    if (expected_run_id, expected_plan_digest) != (
+                        self.value["run_id"], self.value["plan_digest"],
+                    ):
+                        raise run_job.ContractError("STATE_CHANGED")
+                    self.value.update(
+                        cell_ready=True, reason_code="TEST_OPERATOR_ACKNOWLEDGED",
+                        acknowledged_by=operator,
+                    )
+                    return self.read()
+
+            cell = Cell()
+            original_executor = lifecycle.executor_call
+            original_recorder = lifecycle.recorder_call
+            program_holder = {}
+
+            class ExecutorPort:
+                process = None
+
+                def request(self, request, _cancel=None):
+                    trace.append(f"run_live_executor:{request['op']}")
+                    if request["op"] == "preflight":
+                        return {"ok": True, "code": "PREFLIGHT_OK"}
+                    response = original_executor(request)
+                    if request["op"] == "plan" and response.get("ok"):
+                        envelope = response["data"]
+                        release = program_holder["scene_binding"]["release_slot"]
+                        envelope["operator_summary"] = {
+                            "path": [step["phase"] for step in program_holder["program"]["steps"]],
+                            "flow": {
+                                "continuous_through": "LIFT_LIN",
+                                "next_human_hold": "POST_LIFT_SEMANTIC",
+                            },
+                            "speed": {
+                                "max_velocity_scaling": 0.1,
+                                "max_acceleration_scaling": 0.1,
+                            },
+                            "clearance": {
+                                "status": "COLLISION_CHECKED_NO_DISTANCE",
+                                "collision_report_digest": envelope["precommit_safety"]["collision_report_digest"],
+                            },
+                            "recycle": {
+                                "recording_boundary_after": "LIFT_LIN",
+                                "path": [
+                                    "RECYCLE_APPROACH_PTP", "LOWER_LIN", "GRIPPER_OPEN",
+                                    "RETREAT_LIN", "SAFE_POSE_PTP",
+                                ],
+                                "release_slot_id": release["slot_id"],
+                                "release_target": normalized_job,
+                                "safe_staging_joint_positions_rad": [0.0] * 6,
+                                "plan_digest": run_job.canonical_digest("synthetic-recycle"),
+                            },
+                        }
+                    if request["op"] == "execute" and response.get("ok"):
+                        cell.mark_active(response["plan_digest"])
+                    if request["op"] == "heartbeat" and response.get("state") == "COMPLETED":
+                        release_evidence = {
+                            "human_verdict": "LANDED",
+                            "release_slot_id": program_holder["scene_binding"]["release_slot"]["slot_id"],
+                            "source": "TEST_OPERATOR",
+                        }
+                        response["data"].update(
+                            release_evidence=release_evidence,
+                            scene_transition={
+                                "scene_state_digest": run_job.canonical_digest("synthetic-post-scene"),
+                                "release_evidence_digest": run_job.canonical_digest(release_evidence),
+                            },
+                        )
+                    return response
+
+                def close(self, **_):
+                    return None
+
+            class RecorderPort:
+                process = None
+
+                def __call__(self, request):
+                    return original_recorder(request)
+
+                def close(self, **_):
+                    return None
+
+            class Resource:
+                def start(self):
+                    return self
+
+                def set_pid(self, *_):
+                    return self
+
+                def record_control_round_trip(self, _value):
+                    return None
+
+                def finish(self, *_args, **_kwargs):
+                    return {"sampling": {"status": "AVAILABLE"}}
+
+            def episode(intent, child, cancel_event, episode_context):
+                self.assertIs(child, lifecycle)
+                self.assertEqual(
+                    episode_context["root_binding"]["binding_digest"],
+                    roots["binding_digest"],
+                )
+                self.assertEqual(
+                    episode_context["start_binding"]["binding_digest"],
+                    start_binding["binding_digest"],
+                )
+                episode_binding = build_test_only_episode_binding(
+                    roots=episode_context["root_binding"], repository_root=repository,
+                    manifest=manifest, hypothesis=contract, intent=intent,
+                    start_binding=episode_context["start_binding"],
+                    state_initialization=initialized, resolved_job=resolved,
+                    place_alias="place1",
+                )
+                live_payload = payload("live")
+                live_payload.update(
+                    run_id=roots["run_id"], job=normalized_job,
+                    expected_robot_system_id=normalized_job["robot_system_id"],
+                    camera_profile=PROFILE["camera_profile"],
+                    run_root=roots["run_root"], dataset_root=roots["dataset_root"],
+                )
+                program_holder["program"] = _motion_program(intent, contract)
+                validated = {
+                    **resolved, "collection_profile": dict(PROFILE),
+                    "object_profile": {"dimensions_mm": [40, 30, 20]},
+                }
+                release_pose = {
+                    key: normalized_job[key] for key in ("place_id", "yaw_deg", "x_mm", "y_mm")
+                }
+                program_holder["scene_binding"] = run_job._scene_binding(
+                    validated, release_pose,
+                    roots["run_id"], root=Path(roots["cell_root"]),
+                )
+
+                def approve(request):
+                    return {
+                        "choice": "APPROVE", "run_id": request["run_id"],
+                        "plan_digest": request["plan_digest"],
+                        "approval_scope": request["approval_scope"],
+                        "decision_binding_digest": run_job.canonical_digest({
+                            "run_id": request["run_id"],
+                            "plan_digest": request["plan_digest"],
+                            "approval_scope": request["approval_scope"],
+                            "decision_binding": request["decision_binding"],
+                        }),
+                        "decision_source": "LOCAL_UI_BUTTON",
+                        "operator_label": normalized_job["operator_or_agent_id"],
+                    }
+
+                with (
+                    mock.patch.object(run_job, "CellStateStore", return_value=cell) as cell_store,
+                    mock.patch.object(run_job, "ResourceMonitor", return_value=Resource()),
+                    mock.patch.object(run_job, "_write_storage_reference", return_value={"status": "SYNTHETIC"}),
+                    mock.patch.object(run_job, "_write_resource_reference", return_value={"sampling": {"status": "AVAILABLE"}}),
+                    mock.patch.object(run_job, "_write_candidate_admission") as candidate_writer,
+                ):
+                    live_result = run_job.run_live(
+                        live_payload, cancel_event, lambda _event: None,
+                        resolver=lambda _payload: (
+                            validated,
+                            program_holder["program"], program_holder["scene_binding"],
+                        ),
+                        executor_factory=lambda *_: ExecutorPort(),
+                        recorder_factory=lambda *_: RecorderPort(),
+                        validator_call=lambda *_: {
+                            "ok": True, "code": "PASS",
+                            "result_digest": run_job.canonical_digest("synthetic-validator"),
+                        },
+                        tty_decision=lambda _prompt, expected: expected[0],
+                        camera_warmup_call=lambda *_: {
+                            "schema_version": "data_factory.camera_warmup.v1", "attempts": [],
+                        },
+                        one_job=child, decision_provider=approve,
+                        approval_scope="HIL_NUMERIC_PROXY", decision_timeout_s=0,
+                        test_only_root_binding=episode_context["root_binding"],
+                        test_only_episode_binding=episode_binding,
+                        candidate_writer_enabled=False, repository_root=repository,
+                    )
+                cell_store.assert_called_once_with(
+                    Path(roots["cell_root"]), normalized_job["robot_system_id"],
+                )
+                candidate_writer.assert_not_called()
+                self.assertEqual(
+                    (live_result["ok"], live_result["code"], live_result["state"]),
+                    (True, "VALIDATED", "COMPLETE"),
+                )
+                technical = {
+                    "schema_version": "data_factory.seed_technical_result.v1",
+                    "intent_digest": intent["intent_digest"], "run_id": intent["run_id"],
+                    "manifest_digest": intent["manifest_digest"],
+                    "slot_id": intent["slot"]["slot_id"], "status": "PASS",
+                    "technical_result_digest": live_result["data"]["technical_validator"]["result_digest"],
+                    "post_scene_digest": live_result["data"]["postcommit_scene_state_digest"],
+                    "observed_at": now().isoformat().replace("+00:00", "Z"),
+                }
+                technical["evidence_digest"] = run_job.canonical_digest(technical)
+                return {"result": live_result, "technical_evidence": technical}
+
+            result = session.run_next(
+                run_id=roots["run_id"], scene_evidence=scene_evidence,
+                episode_call=episode, roots=roots, start_binding=start_binding,
+            )
+
+        self.assertEqual(result["campaign"]["state"], "COMPLETE")
+        self.assertEqual(result["result"]["data"]["data_disposition"], "TEST_ONLY")
+        self.assertEqual(result["result"]["data"]["human_semantic_outcome"], "NOT_MEASURED")
+        self.assertFalse(result["result"]["data"]["candidate_admission_written"])
+        self.assertTrue(all(counters[name] == 1 for name in (
+            "fake_recorder_begin", "fake_recorder_readiness_status",
+            "fake_recorder_freeze", "fake_recorder_commit",
+        )))
+        self.assertTrue(all(counters[name] == 0 for name in counters if name not in {
+            "fake_recorder_begin", "fake_recorder_readiness_status",
+            "fake_recorder_freeze", "fake_recorder_commit",
+        }))
 
     def test_hil_numeric_proxy_uses_only_checked_gripper_range(self):
         program = motion()
