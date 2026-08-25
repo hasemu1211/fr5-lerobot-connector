@@ -167,7 +167,7 @@ def make_operator(
         draft=draft(contract, count=count),
         effect_scope=effect_scope,
         lifecycle_action=lifecycle_action,
-        data_disposition="SYNTHETIC_FIXTURE" if effect_scope == "FAKE" else "TEST_ONLY",
+        data_disposition="TEST_ONLY",
         subsystems={
             "workspace": {"readiness": "READY", "capability": "AUTHOR", "reason": "SYNTHETIC"},
             "planner": {"readiness": "READY", "capability": "PLAN", "reason": "SYNTHETIC"},
