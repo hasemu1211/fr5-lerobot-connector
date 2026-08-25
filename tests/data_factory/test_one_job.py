@@ -192,6 +192,26 @@ class OneJobTest(unittest.TestCase):
         with self.assertRaisesRegex(ContractError, "RECORDER_READINESS_CONTRACT"):
             OneJob(lambda _: None, lambda _: None, readiness_contract={})
 
+    def test_local_button_approval_is_test_only_and_does_not_claim_human_source(self):
+        local = {
+            **MOTION_APPROVAL,
+            "source": "LOCAL_UI_BUTTON",
+            "approval_scope": "HIL_NUMERIC_PROXY",
+        }
+        test_only, calls = self.make(
+            ["RECORDING"], ["PLANNED", "APPROVED"], first_row_rows=60,
+            readiness_contract=TEST_ONLY_READINESS_CONTRACT,
+        )
+        self.assertTrue(test_only.prepare(PLAN)["ok"])
+        self.assertTrue(test_only.approve(local)["ok"])
+        self.assertIn(("executor", "approve"), calls)
+
+        production, calls = self.make(["RECORDING"], ["PLANNED"])
+        self.assertTrue(production.prepare(PLAN)["ok"])
+        rejected = production.approve(local)
+        self.assertEqual((rejected["ok"], rejected["code"]), (False, "APPROVAL_SCHEMA"))
+        self.assertNotIn(("executor", "approve"), calls)
+
     def test_test_only_readiness_failures_abort_without_execute(self):
         cases = {
             "stale": (lambda status: status["metrics"].update(

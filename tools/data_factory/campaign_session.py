@@ -111,7 +111,9 @@ class CampaignSession:
         roots = validate_test_only_root_binding(roots, repository_root=self.repository_root)
         if roots["session_id"] != self.session_id or roots["run_id"] != run_id:
             raise ContractError("CAMPAIGN_SESSION_ROOT_BINDING")
-        start = validate_test_only_start_binding(start_binding, manifest=self.manifest)
+        start = validate_test_only_start_binding(
+            start_binding, manifest=self.manifest, hypothesis=self._campaign.hypothesis,
+        )
         return roots, start
 
     def open_next(

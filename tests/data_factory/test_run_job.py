@@ -159,7 +159,7 @@ class RunJobTest(unittest.TestCase):
                 self.ops.append(request["op"])
                 return super().request(request, cancel)
 
-        def run(choice, *, stale=False):
+        def run(choice, *, stale=False, expired=False):
             directory = tempfile.TemporaryDirectory()
             self.addCleanup(directory.cleanup)
             root = Path(directory.name)
@@ -177,6 +177,10 @@ class RunJobTest(unittest.TestCase):
                 "production_writers_enabled": False,
             }
             roots["binding_digest"] = run_job.canonical_digest(roots)
+            episode_binding = {
+                "binding_digest": run_job.canonical_digest("episode-binding"),
+                "expires_at": "2000-01-01T00:00:00Z" if expired else "2099-01-01T00:00:00Z",
+            }
             observed = []
 
             def decide(request):
@@ -206,6 +210,10 @@ class RunJobTest(unittest.TestCase):
             recorder = mock.Mock()
             with (
                 mock.patch.object(run_job, "validate_test_only_root_binding", return_value=roots),
+                mock.patch.object(
+                    run_job, "validate_test_only_episode_binding",
+                    return_value=episode_binding,
+                ),
                 mock.patch.object(run_job, "CellStateStore", return_value=Cell()),
                 mock.patch.object(run_job, "SceneStateStore"),
             ):
@@ -220,6 +228,7 @@ class RunJobTest(unittest.TestCase):
                     decision_provider=decide,
                     decision_timeout_s=0,
                     test_only_root_binding={"fixture": True},
+                    test_only_episode_binding={"fixture": True},
                     candidate_writer_enabled=False,
                 )
             return result, observed, executor.ops, recorder
@@ -237,10 +246,19 @@ class RunJobTest(unittest.TestCase):
                 recorder.assert_not_called()
                 self.assertEqual(observed[0]["decision_binding"]["data_disposition"], "TEST_ONLY")
                 self.assertIsNotNone(observed[0]["decision_binding"]["root_binding_digest"])
+                self.assertEqual(
+                    observed[0]["decision_binding"]["episode_binding"]["binding_digest"],
+                    run_job.canonical_digest("episode-binding"),
+                )
 
         result, _, ops, recorder = run("APPROVE", stale=True)
         self.assertEqual((result["code"], result["state"]), ("PLAN_DECISION_BINDING", "BLOCKED"))
         self.assertEqual(ops, ["preflight", "plan"])
+        recorder.assert_not_called()
+
+        result, observed, ops, recorder = run("APPROVE", expired=True)
+        self.assertEqual((result["code"], result["state"]), ("TEST_ONLY_EPISODE_EXPIRED", "BLOCKED"))
+        self.assertEqual((observed, ops), ([], []))
         recorder.assert_not_called()
 
     def test_test_only_scope_rejects_before_resolver_or_filesystem_side_effect(self):

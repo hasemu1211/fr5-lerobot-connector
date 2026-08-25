@@ -277,7 +277,15 @@ class OneJob:
             fields.add("resolved_job_digest")
         else:
             fields.add("approval_scope")
-        if not isinstance(value, dict) or set(value) != fields or value.get("source") != "HUMAN":
+        if not isinstance(value, dict) or set(value) != fields:
+            raise ContractError("APPROVAL_SCHEMA")
+        source = value.get("source")
+        local_button = (
+            source == "LOCAL_UI_BUTTON"
+            and not include_digest
+            and self.readiness_contract == TEST_ONLY_READINESS_CONTRACT
+        )
+        if source != "HUMAN" and not local_button:
             raise ContractError("APPROVAL_SCHEMA")
         if any(not isinstance(value[key], str) or not SAFE_ID.fullmatch(value[key]) for key in ("approval_id", "approved_by")):
             raise ContractError("APPROVAL_SCHEMA")

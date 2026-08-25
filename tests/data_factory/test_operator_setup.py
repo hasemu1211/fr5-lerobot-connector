@@ -5,17 +5,21 @@ import json
 import math
 import tempfile
 import unittest
+from datetime import datetime, timezone
 from pathlib import Path
+from types import SimpleNamespace
 
 try:
     from .test_campaign_authoring import draft
-    from .test_experiment_manifest import hypothesis
+    from .test_experiment_manifest import catalog, hypothesis, qualification_inputs, redigest
 except ImportError:
     from test_campaign_authoring import draft
-    from test_experiment_manifest import hypothesis
+    from test_experiment_manifest import catalog, hypothesis, qualification_inputs, redigest
 from tools.data_factory.campaign_authoring import compile_collection_campaign
+from tools.data_factory.experiment_manifest import compile_fr5_hypothesis
 from tools.data_factory.operator_setup import (
     build_camera_binding_candidate,
+    build_test_only_episode_binding,
     build_test_only_root_binding,
     build_test_only_start_binding,
     compile_workspace_registration_candidate,
@@ -24,9 +28,11 @@ from tools.data_factory.operator_setup import (
     qualified_table_plane_reference,
     validate_print_measurements,
     validate_test_only_root_binding,
+    validate_test_only_episode_binding,
     validate_test_only_state_initialization,
     validate_test_only_start_binding,
 )
+from tools.data_factory.seed_campaign import SeedCampaign
 from tools.a4_place_yaw.generate_place_yaw_a4 import build_places, make_manifest
 from tools.fr5_data_factory import ContractError, canonical_digest
 
@@ -61,7 +67,110 @@ def pose_snapshot(target: list[float], *, age: float = 0.05) -> dict:
     }
 
 
+def compatible_start_fixture() -> tuple[dict, dict, dict]:
+    fixed, report, resolvers, base_qualifications, poses, _ = qualification_inputs()
+    home = load("config/data_factory/home_candidates/fr5-lab-a-home-r001.json")
+    home["robot_system_id"] = fixed["robot_system_id"]
+    motion = load("config/data_factory/motion_qualifications/fr5-place-a-wood-cube-r001.json")
+    motion.update(
+        robot_system_id=fixed["robot_system_id"],
+        cell_calibration_id=fixed["cell_calibration_id"],
+        object_profile_id=fixed["object_profile_id"],
+        grasp_profile_id=fixed["grasp_profile_id"],
+        home_candidate_digest=canonical_digest(home),
+    )
+    target = motion["qualified_safe_joint_positions_rad"]
+    tolerance = motion["goal_tolerances"]["joint_rad"]
+    for pose in poses:
+        pose.update(
+            robot_system_id=fixed["robot_system_id"],
+            joint_order=["j1", "j2", "j3", "j4", "j5", "j6"],
+            target_rad=dict(zip(pose["joint_order"], target)),
+            tolerance_rad={joint: tolerance for joint in pose["joint_order"]},
+            home_candidate_digest=canonical_digest(home),
+        )
+        redigest(pose, "qualification_digest")
+    qualification_catalog = catalog(
+        fixed, report, resolvers, base_qualifications, poses,
+    )
+    contract = compile_fr5_hypothesis(
+        fixed_contract=fixed, coverage_report=report, resolver_results=resolvers,
+        qualification_catalog=qualification_catalog,
+    )
+    return contract, motion, home
+
+
 class OperatorSetupTests(unittest.TestCase):
+    def test_episode_binding_joins_intent_start_scene_job_and_budgets(self):
+        contract, motion, home = compatible_start_fixture()
+        source = draft(contract, count=1)
+        manifest, receipt = compile_collection_campaign(source, hypothesis=contract)
+        with tempfile.TemporaryDirectory() as directory:
+            repository = Path(directory).resolve()
+            roots = build_test_only_root_binding(
+                repository, session_id="session-r001", run_id="run-r001",
+            )
+            selected = manifest["slots"][0]["base_condition_digest"]
+            base = next(item for item in contract["base_conditions"] if item["base_condition_digest"] == selected)
+            resolved = next(
+                item for item in contract["resolver_receipts"]
+                if item["resolver_result_digest"] == base["resolver_result_digest"]
+            )
+            job = resolved["normalized_job"]
+            initialized = initialize_test_only_state_from_user_declaration(
+                roots, repository_root=repository,
+                robot_system_id=job["robot_system_id"], object_instance_id="synthetic-object-r001",
+                object_profile_id=job["object_profile_id"], place_id=job["place_id"],
+                yaw_deg=job["yaw_deg"], x_mm=job["x_mm"], y_mm=job["y_mm"],
+                declared_by="test-operator",
+            )
+            start = build_test_only_start_binding(
+                manifest=manifest, hypothesis=contract, motion_qualification=motion,
+                home_candidate=home,
+                current_snapshot=pose_snapshot(motion["qualified_safe_joint_positions_rad"]),
+            )
+            campaign = SeedCampaign(
+                manifest=manifest, hypothesis=contract, lifecycle_owner="TEST_OPERATOR",
+                expires_at="2099-01-01T00:00:00Z",
+                initial_scene_digest=initialized["scene_state_digest"],
+                source_draft=source, compilation_receipt=receipt,
+            )
+            observed_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+            scene = {
+                "schema_version": "data_factory.scene_freshness_evidence.v1",
+                "scene_digest": initialized["scene_state_digest"],
+                "observed_at": observed_at,
+            }
+            scene["evidence_digest"] = canonical_digest(scene)
+            intent = campaign.start_intent(
+                owner="TEST_OPERATOR", run_id=roots["run_id"],
+                lifecycle=SimpleNamespace(state="IDLE"), scene_evidence=scene,
+            )
+            binding = build_test_only_episode_binding(
+                roots=roots, repository_root=repository, manifest=manifest,
+                hypothesis=contract, intent=intent, start_binding=start,
+                state_initialization=initialized, resolved_job=resolved,
+                place_alias="place1",
+            )
+            self.assertEqual(
+                binding,
+                validate_test_only_episode_binding(
+                    binding, roots=roots, normalized_job=resolved,
+                ),
+            )
+            self.assertEqual(binding["budget_digests"], intent["budget_digests"])
+            self.assertEqual(binding["start_binding_digest"], start["binding_digest"])
+            self.assertEqual(set(binding["authority"].values()), {"NONE"})
+
+            for changed, code in (
+                ({**binding, "place_id": "other-place"}, "TEST_ONLY_EPISODE_JOB"),
+                ({**binding, "binding_digest": canonical_digest("other")}, "TEST_ONLY_EPISODE_DIGEST_MISMATCH"),
+            ):
+                with self.subTest(code=code), self.assertRaisesRegex(ContractError, code):
+                    validate_test_only_episode_binding(
+                        changed, roots=roots, normalized_job=resolved,
+                    )
+
     def test_test_only_roots_are_exact_isolated_and_effect_free(self):
         with tempfile.TemporaryDirectory() as directory:
             repository = Path(directory).resolve()
@@ -153,17 +262,20 @@ class OperatorSetupTests(unittest.TestCase):
                 )
 
     def test_motion_q_safe_start_binds_one_slot_and_fresh_home_snapshot(self):
-        contract = hypothesis()
+        contract, motion, home = compatible_start_fixture()
         source = draft(contract, count=1)
         manifest, _ = compile_collection_campaign(source, hypothesis=contract)
-        motion = load("config/data_factory/motion_qualifications/fr5-place-a-wood-cube-r001.json")
-        home = load("config/data_factory/home_candidates/fr5-lab-a-home-r001.json")
         target = motion["qualified_safe_joint_positions_rad"]
         binding = build_test_only_start_binding(
             manifest=manifest, hypothesis=contract, motion_qualification=motion,
             home_candidate=home, current_snapshot=pose_snapshot(target),
         )
-        self.assertEqual(binding, validate_test_only_start_binding(binding, manifest=manifest))
+        self.assertEqual(
+            binding,
+            validate_test_only_start_binding(
+                binding, manifest=manifest, hypothesis=contract,
+            ),
+        )
         self.assertEqual(binding["scope"], "MOTION_Q_SAFE_START")
         self.assertEqual(set(binding["authority"].values()), {"NONE"})
         self.assertEqual(binding["home_candidate_digest"], canonical_digest(home))
@@ -183,6 +295,13 @@ class OperatorSetupTests(unittest.TestCase):
             build_test_only_start_binding(
                 manifest=manifest, hypothesis=contract, motion_qualification=motion,
                 home_candidate=wrong_home, current_snapshot=pose_snapshot(target),
+            )
+        wrong_motion = {**motion, "robot_system_id": "other-robot"}
+        with self.assertRaisesRegex(ContractError, "TEST_ONLY_START_QUALIFICATION"):
+            build_test_only_start_binding(
+                manifest=manifest, hypothesis=contract,
+                motion_qualification=wrong_motion, home_candidate=home,
+                current_snapshot=pose_snapshot(target),
             )
 
     def test_start_binding_rejects_multi_slot_and_never_invents_homing(self):

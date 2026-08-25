@@ -25,7 +25,10 @@ from tools.data_factory.one_job import (
     hil_numeric_gripper_verdict,
 )
 from tools.data_factory.cell_state import CellStateStore
-from tools.data_factory.operator_setup import validate_test_only_root_binding
+from tools.data_factory.operator_setup import (
+    validate_test_only_episode_binding,
+    validate_test_only_root_binding,
+)
 from tools.data_factory.resource_usage import ResourceMonitor
 from tools.data_factory_recovery import write_json_atomic
 from tools.data_factory.scene_state import SceneStateStore, release_slot
@@ -438,10 +441,10 @@ def _tty_decision(prompt, expected):
         raise ContractError("HUMAN_TTY_REQUIRED") from exc
 
 
-def _approval(run_id, digest, operator_id, scope):
+def _approval(run_id, digest, operator_id, scope, *, source="HUMAN"):
     expiry = (datetime.now(timezone.utc) + timedelta(minutes=5)).isoformat().replace("+00:00", "Z")
     return {
-        "source": "HUMAN", "approval_id": f"{run_id}-approval", "approved_by": operator_id,
+        "source": source, "approval_id": f"{run_id}-approval", "approved_by": operator_id,
         "approval_expiry": expiry, "approval_scope": scope,
     }
 
@@ -977,7 +980,7 @@ def run_live(payload, cancel, publish, *, resolver=resolve_inputs, executor_fact
              camera_warmup_call=_camera_warmup, before_approval=None, one_job=None,
              decision_provider=None, approval_scope="HUMAN_GATED",
              decision_timeout_s=None, test_only_root_binding=None,
-             candidate_writer_enabled=True):
+             test_only_episode_binding=None, candidate_writer_enabled=True):
     """Public single HIL run: plan and human approval precede recorder begin and motion."""
     executor = recorder = resource_monitor = None
     resource_finished = False
@@ -996,14 +999,28 @@ def run_live(payload, cancel, publish, *, resolver=resolve_inputs, executor_fact
                 or roots["dataset_root"] != str(Path(payload.get("dataset_root", "")).resolve())
                 or candidate_writer_enabled is not False
                 or decision_provider is None
+                or test_only_episode_binding is None
             ):
                 raise ContractError("TEST_ONLY_RUN_BINDING")
             cell_root = Path(roots["cell_root"])
         else:
-            if candidate_writer_enabled is not True:
+            if candidate_writer_enabled is not True or test_only_episode_binding is not None:
                 raise ContractError("CANDIDATE_WRITER_SCOPE")
             cell_root = ROOT / "outputs/data_factory/cells"
         validated, program, scene_binding = resolver(payload)
+        episode_binding = None
+        if test_only:
+            episode_binding = validate_test_only_episode_binding(
+                test_only_episode_binding, roots=roots, normalized_job=validated,
+            )
+            try:
+                expires_at = datetime.fromisoformat(
+                    episode_binding["expires_at"].replace("Z", "+00:00")
+                )
+            except (AttributeError, ValueError) as exc:
+                raise ContractError("TEST_ONLY_EPISODE_EXPIRY") from exc
+            if expires_at.astimezone(timezone.utc) <= datetime.now(timezone.utc):
+                raise ContractError("TEST_ONLY_EPISODE_EXPIRED")
         profile = _collection_profile(validated, payload)
         if cancel.is_set():
             return _response(ok=False, code="CANCELLED", state="CANCELLED", run_id=payload["run_id"])
@@ -1062,6 +1079,7 @@ def run_live(payload, cancel, publish, *, resolver=resolve_inputs, executor_fact
             "mode": "live", "operator_summary": summary, "resolved_job_digest": validated["resolved_job_digest"],
             "scene_binding": scene_binding, "preapproval_evidence_digest": canonical_digest(preapproval_evidence),
             "camera_warmup_digest": canonical_digest(camera_warmup),
+            **({"test_only_episode_binding_digest": episode_binding["binding_digest"]} if test_only else {}),
             "camera_semantic_authority": False, "training_authorized": False,
         }))
         operator_id = validated["normalized_job"]["operator_or_agent_id"]
@@ -1082,19 +1100,24 @@ def run_live(payload, cancel, publish, *, resolver=resolve_inputs, executor_fact
                     "operator_summary_digest": canonical_digest(summary),
                     "data_disposition": "TEST_ONLY" if test_only else "PRODUCTION",
                     "root_binding_digest": roots["binding_digest"] if test_only else None,
+                    "episode_binding": copy.deepcopy(episode_binding),
                 },
                 operator_id=operator_id, timeout_s=decision_timeout_s,
             )
             if decision is None:
                 return _response(ok=False, code="PAUSED_AWAITING_OPERATOR", state="PLANNED", run_id=payload["run_id"], plan_digest=planned["plan_digest"], data={
                     "measurement_outcome": "NOT_MEASURED", "recorder_goal_count": 0,
-                    "execute_goal_count": 0, "training_authorized": False,
+                    "execute_goal_count": 0,
+                    **({"test_only_episode_binding_digest": episode_binding["binding_digest"]} if test_only else {}),
+                    "training_authorized": False,
                 })
             if decision["choice"] != "APPROVE":
                 code = "PLAN_REJECTED" if decision["choice"] == "REJECT" else "CANCELLED"
                 return _response(ok=False, code=code, state="CANCELLED", run_id=payload["run_id"], plan_digest=planned["plan_digest"], data={
                     "measurement_outcome": "NOT_MEASURED", "recorder_goal_count": 0,
-                    "execute_goal_count": 0, "training_authorized": False,
+                    "execute_goal_count": 0,
+                    **({"test_only_episode_binding_digest": episode_binding["binding_digest"]} if test_only else {}),
+                    "training_authorized": False,
                 })
             decision_source = decision["decision_source"]
         elif before_approval is not None:
@@ -1103,7 +1126,11 @@ def run_live(payload, cancel, publish, *, resolver=resolve_inputs, executor_fact
             tty_decision(approval_prompt, f"APPROVE {planned['plan_digest']}")
         if cancel.is_set():
             return _response(ok=False, code="CANCELLED", state="CANCELLED", run_id=payload["run_id"], plan_digest=planned["plan_digest"])
-        approved = job.approve(_approval(payload["run_id"], planned["plan_digest"], operator_id, approval_scope))
+        approval_source = decision_source if test_only else "HUMAN"
+        approved = job.approve(_approval(
+            payload["run_id"], planned["plan_digest"], operator_id,
+            approval_scope, source=approval_source,
+        ))
         if not approved["ok"]:
             return _response(ok=False, code=approved["code"], state=approved["state"], run_id=payload["run_id"], plan_digest=planned["plan_digest"])
         resource_monitor = ResourceMonitor(
@@ -1223,6 +1250,7 @@ def run_live(payload, cancel, publish, *, resolver=resolve_inputs, executor_fact
                         "postcommit_scene_state_digest": transition["scene_state_digest"], "postcommit_cell_state": cell,
                         "frozen_rows": result["frozen_rows"], "rows_after_recycle": result["rows_after_recycle"],
                         **test_only_projection,
+                        **({"test_only_episode_binding_digest": episode_binding["binding_digest"]} if test_only else {}),
                         "camera_semantic_authority": False, "training_authorized": False,
                     })
                 target = validated["normalized_job"]
@@ -1252,6 +1280,7 @@ def run_live(payload, cancel, publish, *, resolver=resolve_inputs, executor_fact
                     "camera_warmup_digest": canonical_digest(camera_warmup),
                     "postcommit_scene_state_digest": scene["scene_state_digest"], "postcommit_cell_state": cell,
                     **test_only_projection,
+                    **({"test_only_episode_binding_digest": episode_binding["binding_digest"]} if test_only else {}),
                     "camera_semantic_authority": False, "training_authorized": False,
                 })
             if result["state"] in {"GRASP_VERDICT", "SEMANTIC_VERDICT"}:
