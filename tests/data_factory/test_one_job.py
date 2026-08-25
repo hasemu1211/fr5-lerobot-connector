@@ -5,7 +5,9 @@ import time
 import unittest
 from unittest.mock import patch
 
-from tools.data_factory.one_job import JsonlProcess, OneJob, run_one_job
+from tools.data_factory.one_job import (
+    JsonlProcess, OneJob, TEST_ONLY_READINESS_CONTRACT, hil_numeric_gripper_verdict, run_one_job,
+)
 from tools.data_factory.scene_state import release_slot
 from tools.fr5_data_factory import ContractError, canonical_digest
 
@@ -28,7 +30,8 @@ MOTION_APPROVAL = {"source":"HUMAN", "approval_id":"a", "approved_by":"operator"
 
 
 class OneJobTest(unittest.TestCase):
-    def make(self, recorder_states, executor_states, *, first_row_rows=1, continuous=False, release=False):
+    def make(self, recorder_states, executor_states, *, first_row_rows=1, continuous=False, release=False,
+             readiness_contract=None, status_mutation=None):
         calls = []
         scene = RELEASE_SCENE if release else SCENE
         steps = [{"phase":phase} for phase in PHASES]
@@ -54,13 +57,26 @@ class OneJobTest(unittest.TestCase):
             if request["op"] == "status" and first_status_after_begin:
                 first_status_after_begin = False
                 item = "RECORDING"
-                metrics = {"rows":first_row_rows}
+                rows = first_row_rows
             else:
                 item = recorder_states.pop(0)
-                metrics = {"rows":1}
+                rows = 1
             if isinstance(item, dict): return item
             rejected = item == "QUALITY_REJECTED"
-            return {"schema_version":"data_factory.recorder_response.v1", "op_id":request["op_id"], "op":request["op"], "ok":not rejected, "state":"FROZEN" if rejected else item, "reason_code":item, "run_id":"run", "transaction_id":"tx", "episode_index":0, "metrics":metrics, "artifacts":{}, "detail":"", "writer_alive":True, "writer_error":None}
+            quality_reasons = [] if rows >= 60 else [f"frames {rows} < minimum 60"]
+            metrics = {
+                "rows":rows, "writer_queue":0, "writer_queue_drops":0, "alignment_failures":0,
+                "observed_monotonic_ns":time.monotonic_ns(),
+                "quality_snapshot":{
+                    "accepted":not quality_reasons, "reasons":quality_reasons, "frames":rows,
+                    "target_fps":30, "effective_fps":30.0, "cameras":{"up":{"source_fps":30.0}},
+                    "writer_queue_drops":0, "alignment_failures":0, "image_quality_warnings":[],
+                },
+            }
+            response = {"schema_version":"data_factory.recorder_response.v1", "op_id":request["op_id"], "op":request["op"], "ok":not rejected, "state":"FROZEN" if rejected else item, "reason_code":item, "run_id":"run", "transaction_id":"tx", "episode_index":0, "metrics":metrics, "artifacts":{}, "detail":"", "writer_alive":True, "writer_error":None}
+            if request["op"] == "status" and status_mutation is not None:
+                status_mutation(response)
+            return response
         recorder.preserve = lambda: calls.append(("recorder", "preserve"))
         def executor(request):
             calls.append(("executor", request["op"])); state = executor_states.pop(0)
@@ -73,7 +89,7 @@ class OneJobTest(unittest.TestCase):
         job = None
         def cell():
             return {"robot_system_id":"fr5-lab-a", "cell_ready":True, "reason_code":"HUMAN_ACKNOWLEDGED", "run_id":job.run_id, "plan_digest":job.plan_digest, "acknowledged_by":"operator"}
-        job = OneJob(recorder, executor, cell)
+        job = OneJob(recorder, executor, cell, readiness_contract=readiness_contract)
         return job, calls
 
     @staticmethod
@@ -153,6 +169,94 @@ class OneJobTest(unittest.TestCase):
         self.assertNotIn(("executor", "cancel"), calls)
         self.assertEqual(calls.count(("recorder", "abort")), 1)
         self.assertNotIn(("recorder", "preserve"), calls)
+
+    def test_test_only_readiness_records_evidence_then_executes_once(self):
+        def warnings_are_diagnostic(status):
+            status["metrics"]["quality_snapshot"]["image_quality_warnings"] = ["up brightness warning"]
+
+        job, calls = self.make(
+            ["RECORDING"], ["PLANNED", "APPROVED", "EXECUTING"], first_row_rows=60,
+            readiness_contract=TEST_ONLY_READINESS_CONTRACT, status_mutation=warnings_are_diagnostic,
+        )
+        self.prepare_and_start(job)
+        evidence = job._result()["readiness_evidence"]
+        self.assertEqual(evidence["run_id"], "run")
+        self.assertEqual(evidence["transaction_id"], "tx")
+        self.assertEqual(evidence["collection_profile_digest"], BINDINGS["collection_profile"])
+        self.assertEqual(evidence["quality_contract_digest"], canonical_digest(TEST_ONLY_READINESS_CONTRACT))
+        self.assertEqual(evidence["metrics"]["durable_rows"], 60)
+        self.assertEqual(evidence["metrics"]["camera_source_fps"], {"up":30.0})
+        self.assertEqual(evidence["metrics"]["image_quality_warnings"], ["up brightness warning"])
+        self.assertEqual(calls.count(("executor", "execute")), 1)
+        self.assertLess(calls.index(("recorder", "begin")), calls.index(("executor", "execute")))
+        with self.assertRaisesRegex(ContractError, "RECORDER_READINESS_CONTRACT"):
+            OneJob(lambda _: None, lambda _: None, readiness_contract={})
+
+    def test_test_only_readiness_failures_abort_without_execute(self):
+        cases = {
+            "stale": (lambda status: status["metrics"].update(
+                observed_monotonic_ns=time.monotonic_ns() - 600_000_000
+            ), "RECORDER_READINESS_STALE"),
+            "row_fps": (lambda status: status["metrics"]["quality_snapshot"].update(
+                effective_fps=26.9
+            ), "RECORDER_READINESS_ROW_FPS"),
+            "camera_fps": (lambda status: status["metrics"]["quality_snapshot"]["cameras"]["up"].update(
+                source_fps=28.4
+            ), "RECORDER_READINESS_CAMERA_FPS"),
+            "drops": (lambda status: status["metrics"].update(writer_queue_drops=1), "RECORDER_READINESS_DROPS"),
+            "alignment": (lambda status: status["metrics"].update(alignment_failures=1), "RECORDER_READINESS_ALIGNMENT"),
+            "writer_fault": (lambda status: status.update(writer_error="disk fault"), "RECORDER_WRITER_FAULT"),
+            "quality_reason": (lambda status: status["metrics"]["quality_snapshot"].update(
+                accepted=False, reasons=["up image repeat ratio is too high"]
+            ), "RECORDER_READINESS_QUALITY"),
+            "prefix_mismatch": (lambda status: status["metrics"]["quality_snapshot"].update(
+                frames=59
+            ), "RECORDER_READINESS_MISMATCH"),
+        }
+        for name, (mutation, code) in cases.items():
+            with self.subTest(name=name):
+                job, calls = self.make(
+                    ["RECORDING", "ABORTED"], ["PLANNED", "APPROVED"], first_row_rows=60,
+                    readiness_contract=TEST_ONLY_READINESS_CONTRACT, status_mutation=mutation,
+                )
+                job.prepare(PLAN); job.approve(MOTION_APPROVAL)
+                result = job.start()
+                self.assertEqual((result["state"], result["code"]), ("ABORTED", code))
+                self.assertEqual(job.transaction_id, "tx")
+                self.assertEqual(calls.count(("recorder", "abort")), 1)
+                self.assertEqual(calls.count(("executor", "execute")), 0)
+
+        job, calls = self.make(
+            ["RECORDING", "ABORTED"], ["PLANNED", "APPROVED"], first_row_rows=59,
+            readiness_contract=TEST_ONLY_READINESS_CONTRACT,
+        )
+        ticks = iter((0.0, 6.0))
+        job.monotonic_clock = lambda: next(ticks)
+        job.prepare(PLAN); job.approve(MOTION_APPROVAL)
+        result = job.start()
+        self.assertEqual((result["state"], result["code"]), ("ABORTED", "RECORDER_READINESS_TIMEOUT"))
+        self.assertEqual(calls.count(("executor", "execute")), 0)
+
+    def test_test_only_readiness_cancel_aborts_without_execute(self):
+        job, calls = self.make(
+            ["RECORDING", "ABORTED"], ["PLANNED", "APPROVED"], first_row_rows=60,
+            readiness_contract=TEST_ONLY_READINESS_CONTRACT,
+        )
+        cancelled = [False]
+        recorder = job.recorder_call
+
+        def cancel_after_status(request):
+            response = recorder(request)
+            if request["op"] == "status":
+                cancelled[0] = True
+            return response
+
+        job.recorder_call = cancel_after_status
+        job.prepare(PLAN); job.approve(MOTION_APPROVAL)
+        result = job.start(cancel_event=lambda: cancelled[0])
+        self.assertEqual((result["state"], result["code"]), ("ABORTED", "START_CANCELLED"))
+        self.assertEqual(calls.count(("recorder", "abort")), 1)
+        self.assertEqual(calls.count(("executor", "execute")), 0)
 
     def test_semantic_fail_waits_for_executor_and_rejections_abort_once(self):
         job, calls = self.make(["RECORDING", "RECORDING", "RECORDING", "RECORDING", "FROZEN", "FROZEN", "ABORTED"], ["PLANNED", "APPROVED", "EXECUTING", "PRECONTACT_HUMAN", "EXECUTING", "GRASP_VERDICT", "EXECUTING", "SEMANTIC_VERDICT", "EXECUTING", "COMPLETED"])
@@ -318,3 +422,12 @@ class OneJobTest(unittest.TestCase):
         self.assertNotIn(("recorder", "abort"), calls)
         time.sleep(.2)
         self.assertEqual(job.recorder_state, "FREEZE_UNCERTAIN")
+
+    def test_hil_numeric_gripper_verdict_is_a_pure_mechanical_proxy(self):
+        required = {"command_position_m":.01, "acceptable_feedback_m":{"min":.01, "max":.012}}
+        evidence = {"gripper_reference_m":.01, "gripper_feedback_m":.011, "post_lift_gripper_feedback_m":.012}
+        self.assertEqual(hil_numeric_gripper_verdict("GRASP_VERDICT", evidence, required), "PASS")
+        self.assertEqual(hil_numeric_gripper_verdict("SEMANTIC_VERDICT", evidence, required), "PASS")
+        self.assertEqual(hil_numeric_gripper_verdict("GRASP_VERDICT", {**evidence, "gripper_reference_m":.02}, required), "FAIL")
+        self.assertEqual(hil_numeric_gripper_verdict("SEMANTIC_VERDICT", {}, required), "FAIL")
+        self.assertEqual(hil_numeric_gripper_verdict("HUMAN", evidence, required), "FAIL")

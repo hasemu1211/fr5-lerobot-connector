@@ -816,6 +816,10 @@ class FR5LeRobotRecorder(Node):
                 reasons.append(f"{camera} source pause {source_gaps.max()*1000:.1f}ms exceeds limit")
         return summary, reasons
 
+    def _quality_snapshot(self) -> dict:
+        summary, reasons = self._quality_summary()
+        return {**summary, "accepted": not reasons, "reasons": reasons}
+
     def freeze_episode(self) -> dict:
         with self.lock:
             if self.episode_state != self.RECORDING:
@@ -907,12 +911,13 @@ class FR5LeRobotRecorder(Node):
                 self.episode_state = self.FROZEN
                 return self._result(False, "QUALITY_NO_SYNCHRONIZED_FRAMES")
         try:
-            summary, reasons = self._quality_summary()
+            attempt = self._quality_snapshot()
         except Exception as exc:
             with self.lock:
                 self.episode_state = self.FROZEN
                 return self._result(False, "QUALITY_EVALUATION_FAILED", detail=str(exc))
-        attempt = {**summary, "accepted": not reasons, "reasons": reasons}
+        reasons = attempt["reasons"]
+        summary = {key: value for key, value in attempt.items() if key not in {"accepted", "reasons"}}
         for warning in summary["image_quality_warnings"]:
             self.get_logger().warning(warning)
         attempts_path = self.args.root / "meta" / "recording_attempts.jsonl"
@@ -985,11 +990,13 @@ class FR5LeRobotRecorder(Node):
     def episode_status(self) -> dict:
         self._storage_status_check()
         with self.lock:
-            return self._result(
+            result = self._result(
                 True,
                 writer_error=str(self.writer_error) if self.writer_error else None,
                 writer_alive=self.writer_thread.is_alive(),
             )
+            result["metrics"]["quality_snapshot"] = self._quality_snapshot()
+            return result
 
     def stop_episode(self, discard: bool = False) -> bool:
         if self.episode_state in (self.IDLE, self.COMMITTED, self.ABORTED):
@@ -1076,6 +1083,12 @@ class FR5LeRobotRecorder(Node):
             and all(self.camera_frames[camera] for camera in self.camera_names)
         )
 
+    def _record_alignment_failure(self, sources) -> None:
+        with self.lock:
+            self.alignment_failures += 1
+            for source in sources:
+                self.alignment_failure_sources[source] += 1
+
     def _aligned_sample(self, target_stamp: float):
         with self.lock:
             state = interpolate_vector(self.joint_states, target_stamp, self.args.state_max_age)
@@ -1091,8 +1104,7 @@ class FR5LeRobotRecorder(Node):
         if gripper is None: missing.append("gripper_action")
         missing.extend(f"image.{camera}" for camera, sample in camera_samples.items() if sample is None)
         if missing:
-            for source in missing:
-                self.alignment_failure_sources[source] += 1
+            self._record_alignment_failure(missing)
             return None
         state_value, state_before, state_after = state
         arm_value, arm_before, arm_after = arm
@@ -1101,7 +1113,7 @@ class FR5LeRobotRecorder(Node):
             camera: sample[3] - sample[2] for camera, sample in camera_samples.items()
         }
         if any(age < 0 or age > self.args.image_max_age for age in transport_ages.values()):
-            self.alignment_failure_sources["transport"] += 1
+            self._record_alignment_failure(("transport",))
             return None
         images = tuple(camera_samples[camera][1] for camera in self.camera_names)
         action = np.r_[arm_value, gripper_value].astype(np.float32)
@@ -1144,7 +1156,6 @@ class FR5LeRobotRecorder(Node):
                 return
         sample = self._aligned_sample(target_stamp)
         if sample is None:
-            self.alignment_failures += 1
             return
         state, action, images, provenance, sync_span, action_age, state_age = sample
         with self.lock:
@@ -1208,35 +1219,36 @@ class FR5LeRobotRecorder(Node):
         for camera, image in zip(self.camera_names, images):
             frame[f"observation.images.{camera}"] = image
         self.dataset.add_frame(frame)
-        self.frames += 1
-        self.frame_stamps.append(row_stamp)
-        self.sync_spans.append(sync_span)
-        self.action_ages.append(action_age)
-        self.state_ages.append(state_age)
-        self.action_samples.append(action.copy())
-        self.state_samples.append(state.copy())
-        self.source_provenance.append({
-            **provenance,
-            "frame_index": self.frames - 1,
-            "enqueue_attempt_index": enqueue_attempt_index,
-        })
-        for camera, image in zip(self.camera_names, images):
-            raw_stamp = provenance["image_raw_ros_s"][camera]
-            corrected_stamp = provenance["image_corrected_ros_s"][camera]
-            received_stamp = provenance["image_received_ros_s"][camera]
-            self.camera_stamps[camera].append(raw_stamp)
-            self.image_ages[camera].append(abs(corrected_stamp - row_stamp))
-            self.image_transport_ages[camera].append(received_stamp - raw_stamp)
-            self._sample_image_quality(camera, image)
-        if self.frames % self.args.fps == 0:
-            elapsed = self.frame_stamps[-1] - self.frame_stamps[0] if self.frames > 1 else 0.0
-            row_fps = (self.frames - 1) / elapsed if elapsed > 0 else 0.0
-            self.get_logger().info(
-                f"frames={self.frames}, row_fps={row_fps:.2f}, image_align={sync_span*1000:.1f}ms, "
-                f"action_align={action_age*1000:.1f}ms, j4={action[3]:.4f}, j5={action[4]:.4f}, "
-                f"gripper={action[6]:.4f}, "
-                f"alignment_failures={self.alignment_failures}"
-            )
+        with self.lock:
+            self.frames += 1
+            self.frame_stamps.append(row_stamp)
+            self.sync_spans.append(sync_span)
+            self.action_ages.append(action_age)
+            self.state_ages.append(state_age)
+            self.action_samples.append(action.copy())
+            self.state_samples.append(state.copy())
+            self.source_provenance.append({
+                **provenance,
+                "frame_index": self.frames - 1,
+                "enqueue_attempt_index": enqueue_attempt_index,
+            })
+            for camera, image in zip(self.camera_names, images):
+                raw_stamp = provenance["image_raw_ros_s"][camera]
+                corrected_stamp = provenance["image_corrected_ros_s"][camera]
+                received_stamp = provenance["image_received_ros_s"][camera]
+                self.camera_stamps[camera].append(raw_stamp)
+                self.image_ages[camera].append(abs(corrected_stamp - row_stamp))
+                self.image_transport_ages[camera].append(received_stamp - raw_stamp)
+                self._sample_image_quality(camera, image)
+            if self.frames % self.args.fps == 0:
+                elapsed = self.frame_stamps[-1] - self.frame_stamps[0] if self.frames > 1 else 0.0
+                row_fps = (self.frames - 1) / elapsed if elapsed > 0 else 0.0
+                self.get_logger().info(
+                    f"frames={self.frames}, row_fps={row_fps:.2f}, image_align={sync_span*1000:.1f}ms, "
+                    f"action_align={action_age*1000:.1f}ms, j4={action[3]:.4f}, j5={action[4]:.4f}, "
+                    f"gripper={action[6]:.4f}, "
+                    f"alignment_failures={self.alignment_failures}"
+                )
 
     def finished(self) -> bool:
         return not self.args.interactive and self.started > 0 and time.perf_counter() - self.started >= self.args.duration

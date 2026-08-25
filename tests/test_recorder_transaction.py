@@ -104,6 +104,12 @@ class RecorderTransactionTest(unittest.TestCase):
         recorder.args = SimpleNamespace(
             root=Path(directory) / "dataset", run_root=Path(directory) / "runs", fps=30,
             writer_queue_size=8, streaming_encoding=False, no_videos=False,
+            min_frames=60, fps_tolerance=0.10, max_frame_gap_factor=2.0,
+            max_long_gap_ratio=0.01, max_pause=0.25, min_camera_source_fps_ratio=0.75,
+            max_image_repeat_ratio=0.25, sync_slop=0.05, action_sync_slop=0.05,
+            alignment_delay=0.35, image_max_age=0.30, state_max_age=0.05,
+            action_max_age=0.05, min_color_delta=1.0, allow_monochrome=False,
+            min_brightness=20, max_brightness=235, max_clipping=0.20, min_sharpness=20,
         )
         recorder.args.root.mkdir(parents=True, exist_ok=True)
         meta = recorder.args.root / "meta"
@@ -439,9 +445,16 @@ class RecorderTransactionTest(unittest.TestCase):
             self.assertIn("writer_alive", status)
             self.assertEqual(
                 set(status["metrics"]),
-                {"rows", "writer_queue", "writer_queue_high_water", "writer_queue_drops", "alignment_failures", "observed_monotonic_ns"},
+                {"rows", "writer_queue", "writer_queue_high_water", "writer_queue_drops", "alignment_failures", "observed_monotonic_ns", "quality_snapshot"},
             )
+            snapshot = status["metrics"]["quality_snapshot"]
+            self.assertFalse(snapshot["accepted"])
+            self.assertTrue(any("minimum 60" in reason for reason in snapshot["reasons"]))
+            recorder.frames = 1
+            self.assertEqual(snapshot["frames"], 0)
             self.assertEqual(recorder.dataset.clears, 0)
+            self.assertEqual(recorder.dataset.saves, 0)
+            self.assertEqual(recorder.episode_state, recorder.RECORDING)
 
     def test_jsonl_commands_are_strict_idempotent_core_calls(self):
         with tempfile.TemporaryDirectory() as directory:

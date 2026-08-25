@@ -182,6 +182,11 @@ class RecorderContractTest(unittest.TestCase):
         summary, reasons = recorder._quality_summary()
         self.assertEqual(reasons, [])
         self.assertGreater(summary["cameras"]["up"]["repeat_ratio"], 0.10)
+        snapshot = recorder._quality_snapshot()
+        recorder.frame_stamps.append(99.0)
+        self.assertTrue(snapshot["accepted"])
+        self.assertEqual(snapshot["frames"], 90)
+        recorder.frame_stamps.pop()
 
         recorder.writer_queue_drops = 1
         _, reasons = recorder._quality_summary()
@@ -189,9 +194,10 @@ class RecorderContractTest(unittest.TestCase):
         recorder.writer_queue_drops = 0
 
         recorder.image_metrics = {"up": [(0, 250, 0.25, 10)] * 3}
-        summary, reasons = recorder._quality_summary()
-        self.assertEqual(reasons, [])
-        self.assertEqual(len(summary["image_quality_warnings"]), 4)
+        snapshot = recorder._quality_snapshot()
+        self.assertTrue(snapshot["accepted"])
+        self.assertEqual(snapshot["reasons"], [])
+        self.assertEqual(len(snapshot["image_quality_warnings"]), 4)
 
         recorder.image_metrics = {"up": [(10, 120, 0.01, 100)] * 3}
         recorder.frame_stamps[45:] = [stamp + 0.14 for stamp in recorder.frame_stamps[45:]]

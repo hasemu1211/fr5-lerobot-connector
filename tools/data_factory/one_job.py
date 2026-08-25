@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import copy
 import json
+import math
 import queue
 import selectors
 import subprocess
@@ -12,6 +13,40 @@ from datetime import datetime, timezone
 
 from tools.fr5_data_factory import ContractError, DIGEST, RFC3339, SAFE_ID, canonical_digest, load_json_strict, validate_motion_program
 from tools.data_factory.scene_state import validate_scene_binding
+
+
+TEST_ONLY_READINESS_CONTRACT = {
+    "schema_version": "data_factory.recorder_readiness_contract.v1",
+    "deadline_s": 5.0,
+    "min_durable_rows": 60,
+    "target_fps": 30,
+    "row_fps_min": 27.0,
+    "row_fps_max": 33.0,
+    "min_camera_source_fps": 28.5,
+    "status_max_age_heartbeat_fraction": 0.5,
+    "require_writer_alive": True,
+    "max_writer_queue_drops": 0,
+    "max_alignment_failures": 0,
+    "require_quality_accepted": True,
+}
+
+
+def hil_numeric_gripper_verdict(state, execution_evidence, gripper_requirements):
+    """Return the existing TEST_ONLY mechanical proxy verdict without semantic authority."""
+    if state not in {"GRASP_VERDICT", "SEMANTIC_VERDICT"}:
+        return "FAIL"
+    try:
+        feedback = float(execution_evidence[
+            "gripper_feedback_m" if state == "GRASP_VERDICT" else "post_lift_gripper_feedback_m"
+        ])
+        if state == "GRASP_VERDICT" and abs(
+            float(execution_evidence["gripper_reference_m"]) - gripper_requirements["command_position_m"]
+        ) > 1e-9:
+            return "FAIL"
+        acceptable = gripper_requirements["acceptable_feedback_m"]
+        return "PASS" if acceptable["min"] <= feedback <= acceptable["max"] else "FAIL"
+    except (KeyError, TypeError, ValueError):
+        return "FAIL"
 
 
 class JsonlProcess:
@@ -105,7 +140,8 @@ class OneJob:
 
     RECORDER_FIRST_ROW_TIMEOUT_S = 5.0
 
-    def __init__(self, recorder_call, executor_call, cell_state_call=None, clock=None, monotonic_clock=None):
+    def __init__(self, recorder_call, executor_call, cell_state_call=None, clock=None, monotonic_clock=None,
+                 readiness_contract=None):
         if not callable(recorder_call) or not callable(executor_call):
             raise ContractError("ONE_JOB_CALLABLE")
         if cell_state_call is not None and not callable(cell_state_call):
@@ -114,6 +150,11 @@ class OneJob:
         self.cell_state_call = cell_state_call
         self.clock = clock or (lambda: datetime.now(timezone.utc))
         self.monotonic_clock = monotonic_clock or time.monotonic
+        if readiness_contract is not None and (
+            not isinstance(readiness_contract, dict) or readiness_contract != TEST_ONLY_READINESS_CONTRACT
+        ):
+            raise ContractError("RECORDER_READINESS_CONTRACT")
+        self.readiness_contract = copy.deepcopy(readiness_contract)
         self.run_id = self.plan_digest = self.lease_id = None
         self.state, self.grasp, self.semantic = "IDLE", None, None
         self.recorder_state = self.executor_state = None
@@ -124,6 +165,7 @@ class OneJob:
         self.approval_scope = None
         self.execution_evidence = None
         self.recorder_evidence = None
+        self.readiness_evidence = None
         self.plan_envelope = None
         self.frozen_rows = self.rows_after_recycle = None
         self._sequence = 0
@@ -145,6 +187,7 @@ class OneJob:
                 "plan_envelope": copy.deepcopy(self.plan_envelope),
                 "execution_evidence": copy.deepcopy(self.execution_evidence),
                 "recorder_evidence": copy.deepcopy(self.recorder_evidence),
+                "readiness_evidence": copy.deepcopy(self.readiness_evidence),
                 "frozen_rows": self.frozen_rows,
                 "rows_after_recycle": self.rows_after_recycle,
                 **extra}
@@ -464,11 +507,16 @@ class OneJob:
 
     def _wait_for_first_recorder_row(self, cancel=None):
         """Do not arm robot motion until the recorder has durably written a hold row."""
-        deadline = self.monotonic_clock() + self.RECORDER_FIRST_ROW_TIMEOUT_S
+        deadline = self.monotonic_clock() + (
+            self.readiness_contract["deadline_s"]
+            if self.readiness_contract is not None else self.RECORDER_FIRST_ROW_TIMEOUT_S
+        )
         while True:
             if self._cancel_requested(cancel):
                 raise ContractError("START_CANCELLED")
+            status_started_ns = time.monotonic_ns()
             status = self._request("recorder", "status")
+            status_received_ns = time.monotonic_ns()
             if self._cancel_requested(cancel):
                 raise ContractError("START_CANCELLED")
             if status["state"] != "RECORDING":
@@ -478,11 +526,112 @@ class OneJob:
             rows = status["metrics"].get("rows")
             if type(rows) is not int or rows < 0:
                 raise ContractError("RECORDER_HEALTH_SCHEMA")
-            if rows >= 1:
+            if self.readiness_contract is None and rows >= 1:
                 return status
+            if self.readiness_contract is not None:
+                evidence = self._test_only_readiness(status, status_started_ns, status_received_ns)
+                if evidence is not None:
+                    self.readiness_evidence = evidence
+                    return status
             if self.monotonic_clock() >= deadline:
-                raise ContractError("RECORDER_FIRST_ROW_TIMEOUT")
+                raise ContractError(
+                    "RECORDER_READINESS_TIMEOUT" if self.readiness_contract is not None
+                    else "RECORDER_FIRST_ROW_TIMEOUT"
+                )
             time.sleep(0.01)
+
+    def _test_only_readiness(self, status, started_ns, received_ns):
+        contract = self.readiness_contract
+        metrics = status["metrics"]
+        quality = metrics.get("quality_snapshot")
+        observed_ns = metrics.get("observed_monotonic_ns")
+        required_quality = {
+            "accepted", "reasons", "frames", "target_fps", "effective_fps", "cameras",
+            "writer_queue_drops", "alignment_failures", "image_quality_warnings",
+        }
+        if (
+            not isinstance(quality, dict)
+            or not required_quality <= set(quality)
+            or type(observed_ns) is not int
+            or not isinstance(quality["reasons"], list)
+            or any(not isinstance(reason, str) for reason in quality["reasons"])
+            or not isinstance(quality["image_quality_warnings"], list)
+            or any(not isinstance(warning, str) for warning in quality["image_quality_warnings"])
+            or type(quality["accepted"]) is not bool
+        ):
+            raise ContractError("RECORDER_READINESS_SCHEMA")
+        max_age_ns = int(
+            self._program["execution_timeouts_s"]["heartbeat_lease"]
+            * contract["status_max_age_heartbeat_fraction"] * 1_000_000_000
+        )
+        age_ns = received_ns - observed_ns
+        if age_ns < 0 or age_ns >= max_age_ns or received_ns - started_ns >= max_age_ns:
+            raise ContractError("RECORDER_READINESS_STALE")
+        drops, failures = metrics.get("writer_queue_drops"), metrics.get("alignment_failures")
+        if type(drops) is not int or type(failures) is not int:
+            raise ContractError("RECORDER_READINESS_SCHEMA")
+        if drops != contract["max_writer_queue_drops"]:
+            raise ContractError("RECORDER_READINESS_DROPS")
+        if failures != contract["max_alignment_failures"]:
+            raise ContractError("RECORDER_READINESS_ALIGNMENT")
+        rows = metrics["rows"]
+        if rows < contract["min_durable_rows"]:
+            return None
+        if (
+            type(quality["frames"]) is not int
+            or quality["frames"] != rows
+            or type(quality["writer_queue_drops"]) is not int
+            or type(quality["alignment_failures"]) is not int
+            or quality["writer_queue_drops"] != drops
+            or quality["alignment_failures"] != failures
+            or quality["target_fps"] != contract["target_fps"]
+        ):
+            raise ContractError("RECORDER_READINESS_MISMATCH")
+        row_fps = quality["effective_fps"]
+        if (
+            not isinstance(row_fps, (int, float)) or isinstance(row_fps, bool)
+            or not math.isfinite(row_fps)
+            or not contract["row_fps_min"] <= row_fps <= contract["row_fps_max"]
+        ):
+            raise ContractError("RECORDER_READINESS_ROW_FPS")
+        cameras = quality["cameras"]
+        if not isinstance(cameras, dict) or not cameras:
+            raise ContractError("RECORDER_READINESS_SCHEMA")
+        camera_fps = {}
+        for name, camera in cameras.items():
+            source_fps = camera.get("source_fps") if isinstance(camera, dict) else None
+            if (
+                not isinstance(name, str) or not name
+                or not isinstance(source_fps, (int, float)) or isinstance(source_fps, bool)
+                or not math.isfinite(source_fps)
+            ):
+                raise ContractError("RECORDER_READINESS_SCHEMA")
+            if source_fps < contract["min_camera_source_fps"]:
+                raise ContractError("RECORDER_READINESS_CAMERA_FPS")
+            camera_fps[name] = float(source_fps)
+        if contract["require_quality_accepted"] and (quality["accepted"] is not True or quality["reasons"]):
+            raise ContractError("RECORDER_READINESS_QUALITY")
+        return {
+            "schema_version": "data_factory.recorder_readiness_evidence.v1",
+            "run_id": self.run_id,
+            "transaction_id": self.transaction_id,
+            "episode_index": self.episode_index,
+            "collection_profile_digest": self._program["binding_digests"]["collection_profile"],
+            "quality_contract_digest": canonical_digest(contract),
+            "observed_monotonic_ns": observed_ns,
+            "metrics": {
+                "durable_rows": rows,
+                "effective_fps": float(row_fps),
+                "camera_source_fps": camera_fps,
+                "writer_alive": True,
+                "writer_error": None,
+                "writer_queue_drops": drops,
+                "alignment_failures": failures,
+                "quality_accepted": True,
+                "quality_reasons": [],
+                "image_quality_warnings": list(quality["image_quality_warnings"]),
+            },
+        }
 
     def start(self, lease_id="one-job-lease", cancel_event=None):
         if self.state != "APPROVED" or not isinstance(lease_id, str) or not SAFE_ID.fullmatch(lease_id):
@@ -768,17 +917,6 @@ def run_one_job(job, plan, motion_approval, decision_call, *, operator_id, lease
         except Exception as exc:
             decisions.put((state, exc))
 
-    def hil_numeric_verdict(state, result):
-        evidence = result.get("execution_evidence") or {}
-        required = job._program["gripper_requirements"]
-        try:
-            feedback = float(evidence["gripper_feedback_m" if state == "GRASP_VERDICT" else "post_lift_gripper_feedback_m"])
-            if state == "GRASP_VERDICT" and abs(float(evidence["gripper_reference_m"]) - required["command_position_m"]) > 1e-9:
-                return "FAIL"
-        except (KeyError, TypeError, ValueError):
-            return "FAIL"
-        return "PASS" if required["acceptable_feedback_m"]["min"] <= feedback <= required["acceptable_feedback_m"]["max"] else "FAIL"
-
     while True:
         if job.state == "AWAITING_CELL_READY":
             if pending_state != job.state:
@@ -807,7 +945,9 @@ def run_one_job(job, plan, motion_approval, decision_call, *, operator_id, lease
             sleep(poll_interval_s)
             continue
         if result["state"] in {"GRASP_VERDICT", "SEMANTIC_VERDICT"} and job.approval_scope == "HIL_NUMERIC_PROXY":
-            decision = hil_numeric_verdict(result["state"], result)
+            decision = hil_numeric_gripper_verdict(
+                result["state"], result.get("execution_evidence") or {}, job._program["gripper_requirements"]
+            )
             result = (job.grasp_verdict if result["state"] == "GRASP_VERDICT" else job.semantic_verdict)(decision, operator_id, source="HIL_PROXY")
             if not result["ok"]:
                 return result
