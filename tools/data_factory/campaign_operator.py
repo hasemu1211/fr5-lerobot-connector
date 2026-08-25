@@ -78,7 +78,7 @@ class CampaignOperator:
         physical_plan_call: EpisodeCall | None = None,
         physical_live_call: EpisodeCall | None = None,
         physical_bindings_call: Callable[[str], Mapping[str, Any]] | None = None,
-        repository_root: str | Path | None = None, clock=None,
+        repository_root: str | Path | None = None, current_usage=None, clock=None,
     ):
         if effect_scope not in DISPOSITIONS or lifecycle_action not in {
             "AUTHOR_ONLY", "PLAN_ONLY", "LIVE_COLLECT",
@@ -114,6 +114,7 @@ class CampaignOperator:
         self.physical_live_call = physical_live_call
         self.physical_bindings_call = physical_bindings_call
         self.repository_root = repository_root
+        self.current_usage = copy.deepcopy(current_usage)
         self.clock = clock
         self.manifest = None
         self.compilation_receipt = None
@@ -309,6 +310,7 @@ class CampaignOperator:
                 fake_lifecycle_factory=self.fake_lifecycle_factory,
                 physical_lifecycle_factory=self.physical_lifecycle_factory,
                 repository_root=self.repository_root,
+                current_usage=self.current_usage,
                 clock=self.clock,
             )
         return self._session

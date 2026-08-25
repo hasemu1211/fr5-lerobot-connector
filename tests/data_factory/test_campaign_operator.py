@@ -146,7 +146,7 @@ class PureFakePorts:
 def make_operator(
     directory: str, *, effect_scope: str = "FAKE",
     lifecycle_action: str = "LIVE_COLLECT", count: int = 1,
-    technical_status: str = "PASS",
+    technical_status: str = "PASS", current_usage=None,
 ) -> tuple[CampaignOperator, PureFakePorts]:
     contract = hypothesis()
     ports = PureFakePorts(technical_status=technical_status)
@@ -179,6 +179,7 @@ def make_operator(
         physical_plan_call=ports.plan,
         physical_live_call=ports.live,
         repository_root=directory,
+        current_usage=current_usage,
         clock=lambda: NOW,
     )
     return model, ports
@@ -310,6 +311,30 @@ class CampaignOperatorTests(unittest.TestCase):
                     reconnected, "run_next", {"run_id": "SYNTHETIC-run-0"}, "later-cancel-r001",
                 ))
             self.assertEqual(ports.fake_factory_calls, 0)
+            self.assertEqual(sum(ports.counters.values()), 0)
+
+    def test_usage_is_enforced_by_the_seed_campaign_owner(self):
+        with tempfile.TemporaryDirectory() as directory:
+            contract = hypothesis()
+            program = draft(contract, count=1)["program_budget"]
+            usage = {
+                "rounds": 0, "physical_episodes": 0, "rollout_trials": 0,
+                "hil_prompts": 0, "reviews": 0,
+                "pending_reviews": program["max_pending_reviews"],
+                "storage_bytes": 0,
+            }
+            model, ports = make_operator(directory, current_usage=usage)
+            send(model, "compile_draft", {}, "compile-usage-r001")
+            blocked = send(
+                model, "run_next", {"run_id": "SYNTHETIC-run-0"}, "run-usage-r001",
+            )["result"]
+            self.assertEqual(
+                (blocked["ok"], blocked["code"]),
+                (False, "SEED_CAMPAIGN_PENDING_REVIEW_CEILING"),
+            )
+            self.assertEqual(
+                model.projection()["campaign"]["campaign"]["state"], "BLOCKED",
+            )
             self.assertEqual(sum(ports.counters.values()), 0)
 
     def test_projection_and_cancel_remain_available_while_episode_is_active(self):
