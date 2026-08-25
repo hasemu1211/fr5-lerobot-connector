@@ -530,6 +530,18 @@ class FakeOperatorConsoleTests(unittest.TestCase):
         contract, source = synthetic_fixture()
         self.assertEqual(contract["qualification_catalog"]["source"], "SYNTHETIC_TEST_ONLY")
         self.assertEqual(source["schema_version"], "data_factory.campaign_draft.v1")
+        with tempfile.TemporaryDirectory() as root:
+            capabilities = {
+                item["label"]: item for item in self.make(root).projection()["capabilities"]
+            }
+            self.assertEqual(
+                capabilities["Motion variant · TWO_STAGE_ALIGN"],
+                {
+                    "label": "Motion variant · TWO_STAGE_ALIGN",
+                    "status": "NOT_AVAILABLE",
+                    "reason_codes": ["NO_PRODUCTION_CALLER"],
+                },
+            )
         output = io.StringIO()
         with patch.object(LoopbackBridge, "serve_forever", autospec=True), contextlib.redirect_stdout(output):
             self.assertEqual(main(["--port", "0"]), 0)
