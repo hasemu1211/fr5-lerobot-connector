@@ -822,7 +822,9 @@ class OneJob:
     def release_verdict(self, verdict, decided_by, source="HUMAN"):
         if self.state != "RELEASE_VERDICT" or verdict not in {"LANDED", "OFF_SLOT", "UNCERTAIN"} or not isinstance(decided_by, str) or not SAFE_ID.fullmatch(decided_by):
             return self._result(False, "RELEASE_VERDICT_STATE")
-        if source != "HUMAN":
+        if source != "HUMAN" and not (
+            source == "TEST_OPERATOR" and self.readiness_contract == TEST_ONLY_READINESS_CONTRACT
+        ):
             return self._result(False, "RELEASE_VERDICT_SOURCE")
         try:
             response = self._request("executor", "release_verdict", {
@@ -880,11 +882,16 @@ class OneJob:
             value = self.cell_state_call()
         except Exception as exc:
             return self._result(False, "CELL_STATE_CALL_FAILED", detail=str(exc))
+        reason_code = value.get("reason_code") if isinstance(value, dict) else None
+        reason_allowed = reason_code == "HUMAN_ACKNOWLEDGED" or (
+            reason_code == "TEST_OPERATOR_ACKNOWLEDGED"
+            and self.readiness_contract == TEST_ONLY_READINESS_CONTRACT
+        )
         if (
             not isinstance(value, dict)
             or value.get("robot_system_id") != self._program["robot_system_id"]
             or value.get("cell_ready") is not True
-            or value.get("reason_code") != "HUMAN_ACKNOWLEDGED"
+            or not reason_allowed
             or value.get("run_id") != self.run_id
             or value.get("plan_digest") != self.plan_digest
             or not isinstance(value.get("acknowledged_by"), str)

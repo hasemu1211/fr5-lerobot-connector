@@ -138,6 +138,51 @@ class OneJobTest(unittest.TestCase):
         self.assertEqual(job.finish()["state"], "COMPLETE")
         self.assertLess(calls.index(("executor", "release_verdict")), calls.index(("recorder", "commit")))
 
+    def test_test_operator_release_and_cell_ack_are_test_only(self):
+        local_approval = {
+            **MOTION_APPROVAL,
+            "source": "LOCAL_UI_BUTTON",
+            "approval_scope": "HIL_NUMERIC_PROXY",
+        }
+        job, calls = self.make(
+            ["RECORDING", "RECORDING", "FROZEN", "FROZEN", "FROZEN", "COMMITTED"],
+            ["PLANNED", "APPROVED", "EXECUTING", "SEMANTIC_VERDICT", "EXECUTING", "RELEASE_VERDICT", "COMPLETED", "COMPLETED"],
+            first_row_rows=60,
+            continuous=True,
+            release=True,
+            readiness_contract=TEST_ONLY_READINESS_CONTRACT,
+        )
+        job.prepare(RELEASE_PLAN); job.approve(local_approval); job.start()
+        self.assertEqual(job.poll()["state"], "SEMANTIC_VERDICT")
+        self.assertTrue(job.semantic_verdict("PASS", "test-operator", source="HIL_PROXY")["ok"])
+        self.assertEqual(job.poll()["state"], "RELEASE_VERDICT")
+        self.assertTrue(job.release_verdict("LANDED", "test-operator", source="TEST_OPERATOR")["ok"])
+        self.assertEqual(job.poll()["state"], "AWAITING_CELL_READY")
+        job.cell_state_call = lambda: {
+            "robot_system_id": "fr5-lab-a", "cell_ready": True,
+            "reason_code": "TEST_OPERATOR_ACKNOWLEDGED", "run_id": job.run_id,
+            "plan_digest": job.plan_digest, "acknowledged_by": "test-operator",
+        }
+        self.assertEqual(job.finish()["state"], "COMPLETE")
+        self.assertLess(calls.index(("executor", "release_verdict")), calls.index(("recorder", "commit")))
+
+        production, production_calls = self.make([], [])
+        production.state = "RELEASE_VERDICT"
+        self.assertEqual(
+            production.release_verdict("LANDED", "test-operator", source="TEST_OPERATOR")["code"],
+            "RELEASE_VERDICT_SOURCE",
+        )
+        production.state = "AWAITING_CELL_READY"
+        production._program = {"robot_system_id": "fr5-lab-a"}
+        production.run_id, production.plan_digest = "run", "sha256:" + "1" * 64
+        production.cell_state_call = lambda: {
+            "robot_system_id": "fr5-lab-a", "cell_ready": True,
+            "reason_code": "TEST_OPERATOR_ACKNOWLEDGED", "run_id": production.run_id,
+            "plan_digest": production.plan_digest, "acknowledged_by": "test-operator",
+        }
+        self.assertEqual(production.finish()["code"], "CELL_READY_REQUIRED")
+        self.assertEqual(production_calls, [])
+
     def test_first_row_timeout_never_executes(self):
         job, calls = self.make(["RECORDING", "ABORTED"], ["PLANNED", "APPROVED"], first_row_rows=0)
         ticks = iter((0.0, 6.0))
