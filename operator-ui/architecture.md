@@ -1,60 +1,43 @@
-# ADR-001: dependency-free collection UX fixture
+# ADR-001: dependency-free unified collection desk
 
-Status: accepted for the backend-free vertical slice, 2026-08-24.
+Status: accepted for Goal 1 frontend integration, 2026-08-25.
 
 ## Decision
 
-Use semantic HTML, CSS, browser JavaScript, JSON fixtures, one bundled English/Korean message catalog, Python's `http.server`, and `unittest`. There is no package manifest, lockfile, build step, client store, router, component framework, translation service, or live API. English is the deterministic default; `?lang=ko` and the native language control change presentation and `html lang` only. Frontend state is always a replaceable rendering of one fixture/backend snapshot, while commands, paths, digests, codes, identifiers, and backend authority remain canonical.
+Use semantic HTML, CSS, browser JavaScript, JSON fixtures and Python `unittest`; add no package graph, framework, router, client store, WebSocket, CORS path, persistence, optimizer or template system. The local backend remains the only lifecycle owner. The browser renders one atomic `data_factory.operator_session_view.v1` and sends a narrow `data_factory.operator_intent.v1` envelope to the same origin.
 
-The React/TypeScript/Vite baseline would add a package graph and build pipeline before the slice needs component reuse, type sharing, routing, or a scene canvas. Vercel's React rules therefore have no runtime target here; their useful constraint is satisfied structurally by shipping no React bundle, waterfall, hydration, or client cache.
+The page is Korean-default and has one job: let a single lab operator understand and edit one finite campaign draft without confusing authoring, planning, collection, production admission or training authority. `ASSISTED` and `DIRECT_EDIT` therefore send the same `update_draft` op with the same `draft_id`; `BALANCED_INITIAL` and `DIRECT_LIST` are selectors on that draft, not parallel schedulers. V1 deliberately omits lasso selection, LHS/SciPy, optimization, saved templates, arbitrary waypoint editing and a second runner.
 
-If richer scene visualization becomes qualified, migrate by keeping `states.json`/the proposed snapshot contract, porting the seven render states into React components, and replacing only `app.js`. The concrete cost is a locked Node toolchain and CI cache, schema-to-TypeScript generation or duplicated types, seven interaction checks, and a canvas/SVG scene component—roughly two focused engineering days before visualization qualification work. Do that only when dynamic object/slot selection or canvas interaction makes direct DOM rendering measurably hard.
+## Visual system
 
-## Operator and single job
+The visual subject is a calibration bench rather than a generic dashboard. Slate paper (`#f4f7fa`), blueprint ink (`#10243c`), instrument cyan (`#0d6176`), qualified green (`#176246`), warning amber (`#8d4300`) and fault red (`#982b2b`) preserve the earlier fixture's measured technical character. System Korean sans carries operator copy and system mono carries IDs, digests and reason codes, so the desk remains offline-safe.
 
-The user is a lab operator standing near an FR5 cell. The page's single job is to show what is true now, why the next motion is or is not allowed, and the one safe next action without making the browser a second lifecycle owner.
+The signature is the qualified-plane top view: a blueprint coordinate crosshair containing native cell buttons. Each button states X/Y/yaw, split, repeat, coverage, selection and stable reason codes, so the visual grid is also a keyboard and screen-reader representation. The surrounding inspector stays quiet and exposes the fixed lane, capability matrix and zero-side-effect receipt.
 
-The visual direction is a calibration bench: slate paper (`#f7f9fb`), blueprint ink (`#10243c`), instrument cyan (`#12647a`), verified green (`#1c6b50`), and safety amber/red (`#a64b00`/`#a52d2d`). System sans is paired with system monospace for digests and evidence; no font request can fail offline. The signature element is the six-station evidence rail, whose numbering is functional because collection order and stale-state invalidation matter. The deliberately imperfect fixture stamp resembles a physical inspection mark; the rest remains quiet.
+## Information and authority
 
-## Current journey and bottlenecks
+The persistent header keeps three independent axes visible:
 
-Current production authority is split across qualified config and runtime artifacts:
+- effect scope: `FAKE | PHYSICAL`
+- lifecycle action: `AUTHOR_ONLY | PLAN_ONLY | LIVE_COLLECT`
+- data disposition: fixed `TEST_ONLY`
 
-1. The operator prepares a campaign manifest containing ordered runs, release roles, profile, paths, budgets, and scene-bound job input, then invokes `direnv exec . python3 -m tools.data_factory.run_job campaign --manifest …`.
-2. `run_job.py` validates the exact two-episode campaign, checks cell/readiness and camera warmup, resolves the current scene/start state, plans, and emits `AWAITING_HUMAN_APPROVAL` with the exact plan digest.
-3. The operator types the exact digest approval. For the second episode, `LANDED_AND_APPROVE_NEXT <digest>` combines physical landing/clear-path confirmation with that episode's fresh plan approval; campaign selection never substitutes for motion approval.
-4. The runner owns recorder/motion/progress, technical validation, scene/cell transitions, and candidate creation. Failures return stable code/state, but normalized preservation and next-action fields are inconsistent.
-5. After children close, candidate review reads `technical_validator.json` plus `candidate_admission.json`; a backend file/context-digest CAS alone may change `PENDING` to `PASS|FAIL|UNCERTAIN`. Training approval remains separate.
-6. Coverage is an offline `REPORT_ONLY` artifact whose `suggest_next` excludes blocked or pending-review conditions; choosing it does not schedule motion.
+The fixed lane shows workspace/place revision, object, grasp, task, motion, start pose and camera/profile. Only X/Y/yaw condition, start selection, split/repeat and coverage selection vary inside a draft. `pickup_e2e`/`DIRECT` show the current capability; `pick_place` and `TWO_STAGE_ALIGN` remain `NOT_AVAILABLE` with stable reason codes. Changing `PHYSICAL` sends only `set_effect_scope`; it never compiles, approves, dispatches, opens hardware or starts a process.
 
-The primary bottlenecks are manual assembly/re-entry of values already present in profile, scene, coverage, campaign, and run artifacts; switching between commands/artifact paths to understand readiness; one terse blocked code without a consistently colocated preservation/next-action description; and review prompts that make operators reconstruct condition/evidence context. Exact per-episode approval is intentional safety work, not removable friction.
+The three-point workspace dialog is available only in `FAKE`. It requires an explicit qualified table-plane artifact and digest, explains nominal print → source 100 mm measurement → compensated reprint → final 100 mm measurement, and captures `CENTER`, `X_REF`, `Y_CHECK` synthetic snapshots. It exposes no arbitrary normal and grants no config promotion, coordinate qualification, motion qualification, production or training authority.
 
-## Information architecture
+## Bridge and fail-close behavior
 
-- Persistent context: fixture/live mode, campaign/session, and the fact that no command was sent.
-- Evidence rail: setup, readiness, exact approval, progress, review, recovery.
-- Setup receipt: qualified profile, camera role/topic, object, condition, and coverage provenance; values are not editable after binding.
-- Primary state: one status, plain-language reason, exact digest or progress when relevant, and one safe next action.
-- Evidence chain: artifact names/digests and the authority boundary for the current state.
-- Review: semantic checklist decision once; technical status and training approval are visibly separate.
+The server replaces `<!-- OPERATOR_TOKEN -->` with the operator-token meta element. The client requires that token for both `GET /api/view` and `POST /api/intent`, uses `credentials: same-origin`, and never stores the token. Each intent includes a random `intent_id`, session ID, exact view revision/digest, op and payload. Approval payload additionally includes exact plan digest, sealed approval scope and `TEST_ONLY` disposition.
 
-On narrow screens the same reading order becomes setup → primary state → evidence. Native buttons, inputs, labels, landmarks, keyboard focus, a polite status region, sufficient palette contrast, and reduced-motion handling form the accessibility floor.
+No intent is queued or automatically retried. Bridge unavailable, revision rollback, same-revision digest change, unknown enum, server `STALE|RECONNECTING|BLOCKED`, replay rejection and cancel-pending all disable mutation. Reconnect performs GET only. Cancel is single-submit, then the UI waits for the backend's executor-terminal projection; uncertain state leaves later actions at zero.
 
-## Measured interaction targets
+`FAKE` fixtures assert robot, gripper, recorder, dataset and run-state calls are zero. Production approval and training authority are always zero. The UI never renders controls that can grant either authority.
 
-These are acceptance targets for later instrumented integration, not claims about current field timing:
+## Accessibility floor
 
-| Measure | Target | Fixture evidence |
-|---|---:|---|
-| Artifact-ready setup to exact approval view | ≤ 90 seconds, excluding physical placement | One setup receipt and one backend plan action |
-| Duplicate operator entry | 0 fields already present in profile/binding/coverage/scene | Setup values are bound, not editable |
-| Normal approval round trips | Exactly 1 per episode | Exact digest form; no campaign-wide shortcut |
-| Block diagnosis | Code, preserved state, and next action visible together | Blocked/recovery fixtures |
-| Normal semantic review | 1 decision; 1 reason only for FAIL/UNCERTAIN | Review fixture |
-| Unknown scene recovery | 0 later goals until fresh scene + plan + approval | Recovery fixture |
+The reading order is scope → workspace grid → current checkpoint → fixed lane/capability/effect receipt. All interaction uses native buttons, radios, number inputs and dialog semantics. Cell buttons expose full coordinate and state names, selected cells use `aria-pressed`, dynamic connection status uses a polite live region, focus is visible at 3 px, targets are at least 44 px where controls are custom, color is never the sole status cue, and reduced-motion preferences suppress transitions and animation. The layout collapses to one column without changing DOM order.
 
-Measure these from backend event timestamps and UI interaction events without recording typed approval text. If the 90-second target misses, first remove duplicate setup entry and artifact hunting; do not weaken readiness or exact approval.
+## Deferred integration assumption
 
-## Future information, not future UI
-
-Object–EE data is offline diagnostic context (`DECLARED_STATIC_PREGRASP_TO_CLOSE`), not actual observed object pose or an admission gate; show it later as evidence, never readiness. Condition/trajectory variants need explicit profile/recipe provenance and equal-budget comparison, not a generic variation toggle. Pick-place, dual-camera, and human-authored multi-object scenes require separate qualified contracts and recording boundaries. This fixture reserves evidence labels and a setup receipt but deliberately implements none of those controls.
+This worktree does not implement backend Python. A local loopback server still must produce the canonical view, inject the token meta, enforce exact Host/Origin/token checks and single-use compare-and-swap, and map accepted ops into the existing sole lifecycle owner. Until it does, a static preview correctly renders `BRIDGE_UNAVAILABLE` and sends no intent.

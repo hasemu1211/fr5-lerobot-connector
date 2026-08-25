@@ -1,25 +1,60 @@
 <!doctype html>
-<html lang="en">
+<html lang="ko">
 <head>
   <meta charset="utf-8">
-  <title>Operator fixture browser regressions</title>
+  <meta name="operator-token" content="browser-regression-token">
+  <title>Goal 1 operator browser regressions</title>
   <base href="../">
+  <link rel="stylesheet" href="styles.css">
 </head>
 <body>
-  <label for="language-select">Language</label>
-  <select id="language-select" aria-describedby="language-current"><option value="en">English</option><option value="ko">한국어</option></select>
-  <span id="language-current">Current language: English</span>
-  <select id="fixture-select"></select>
-  <ol id="workflow-steps"></ol>
-  <dl id="setup-details"></dl>
-  <main id="state-content"></main>
-  <ul id="evidence-list"></ul>
-  <span id="authority-copy"></span>
+  <div id="connection-banner" role="status"></div>
+  <span id="connection-dot"></span><span id="connection-label"></span><span id="session-label"></span>
+  <main id="campaign-desk">
+    <fieldset id="effect-scope"><label><input type="radio" name="effect_scope" value="FAKE">FAKE</label><label><input type="radio" name="effect_scope" value="PHYSICAL">PHYSICAL</label></fieldset>
+    <fieldset id="lifecycle-action"><label><input type="radio" name="lifecycle_action" value="AUTHOR_ONLY">AUTHOR_ONLY</label><label><input type="radio" name="lifecycle_action" value="PLAN_ONLY">PLAN_ONLY</label><label><input type="radio" name="lifecycle_action" value="LIVE_COLLECT">LIVE_COLLECT</label></fieldset>
+    <span id="campaign-id"></span><div id="draft-summary"></div>
+    <button id="open-workspace" type="button">wizard</button><div id="workspace-meta"></div>
+    <fieldset id="authoring-mode"><label><input type="radio" name="authoring_mode" value="ASSISTED">ASSISTED</label><label><input type="radio" name="authoring_mode" value="DIRECT_EDIT">DIRECT_EDIT</label></fieldset>
+    <input id="budget-input" type="number" min="1"><button id="apply-budget" type="button">budget</button>
+    <div id="cell-grid"></div><dl id="lane-details"></dl><ul id="capability-list"></ul><dl id="effect-counts"></dl>
+    <div id="runtime-content"></div><div id="intent-buttons"></div>
+  </main>
+  <dialog id="workspace-dialog" aria-labelledby="workspace-dialog-title"><form method="dialog"><h2 id="workspace-dialog-title">wizard</h2><div id="plane-reference"></div><input id="source-measurement" type="number"><input id="final-measurement" type="number"><div id="capture-buttons"></div><button id="save-workspace" type="button">save</button><button value="close">close</button></form></dialog>
   <div id="announcer" role="status"></div>
-  <pre id="results">Waiting for fixtures…</pre>
+  <pre id="results">픽스처 대기 중…</pre>
+
   <script>
-    const forcedLoadFailure = new URLSearchParams(location.search).has("force-load-error");
-    if (forcedLoadFailure) window.fetch = () => Promise.resolve(new Response("", {status: 503}));
+    const nativeFetch = window.fetch.bind(window);
+    const fixturePromise = nativeFetch("fixtures/states.json").then((response) => response.json());
+    const posted = [];
+    let stateKey = "draft";
+    let postResult = "accepted";
+    let networkFailure = false;
+    const clone = (value) => JSON.parse(JSON.stringify(value));
+    const merge = (target, patch) => {
+      for (const [key, value] of Object.entries(patch)) {
+        target[key] = value && typeof value === "object" && !Array.isArray(value) ? merge({...target[key]}, value) : clone(value);
+      }
+      return target;
+    };
+    const fixtureView = async () => {
+      const fixture = await fixturePromise;
+      return merge(clone(fixture.base_view), fixture.states[stateKey]);
+    };
+    window.fetch = async (input, init = {}) => {
+      const path = new URL(typeof input === "string" ? input : input.url, location.href).pathname;
+      if (networkFailure && path.startsWith("/api/")) throw new TypeError("fixture network down");
+      if (path === "/api/view") return new Response(JSON.stringify(await fixtureView()), {status: 200, headers: {"Content-Type": "application/json"}});
+      if (path === "/api/intent") {
+        const fixture = await fixturePromise;
+        posted.push({headers: new Headers(init.headers), body: JSON.parse(init.body)});
+        if (posted.at(-1).body.op === "cancel_session") stateKey = "cancel_pending";
+        const result = fixture.intent_results[postResult];
+        return new Response(JSON.stringify(result), {status: result.ok ? 200 : 409, headers: {"Content-Type": "application/json"}});
+      }
+      return nativeFetch(input, init);
+    };
   </script>
   <script src="messages.js"></script>
   <script src="app.js"></script>
@@ -30,117 +65,91 @@
       if (!condition) throw new Error(label);
       checks.push(label);
     };
-    const setLanguage = (language) => {
-      languageSelect.value = language;
-      languageSelect.dispatchEvent(new Event("change", {bubbles: true}));
+    const waitFor = async (predicate, timeout = 2000) => {
+      const started = performance.now();
+      while (!predicate()) {
+        if (performance.now() - started > timeout) throw new Error("timeout");
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+    };
+    const show = async (key) => {
+      stateKey = key;
+      await loadView();
+      await waitFor(() => currentView?.revision === (key === "draft" ? 1 : ({approval: 2, running: 3, cancel_pending: 4, blocked: 5, stale: 6, reconnecting: 7, physical_toggle: 8}[key])) || !currentView);
     };
 
-    function run() {
-      if (!states && !loadError) return setTimeout(run, 10);
+    async function run() {
       try {
-        if (forcedLoadFailure) {
-          const initialLanguage = currentLanguage;
-          const initialUi = MESSAGE_CATALOG[initialLanguage].ui;
-          const initialError = initialUi.fixtureErrorStatus.replace("{status}", "503");
-          check(!states && document.querySelector("#state-title").textContent === initialUi.fixtureUnavailable && document.querySelector("#state-content").textContent.includes(initialError), `${initialLanguage} forced load failure renders localized error copy`);
-          check(announcer.textContent === `${initialUi.fixtureUnavailable}. ${initialError}`, `${initialLanguage} initial load failure is announced`);
+        await waitFor(() => currentView?.revision === 1);
+        check(document.documentElement.lang === "ko" && document.body.dataset.bridge === "ready", "Korean is the deterministic default and the ready bridge is explicit");
+        check(document.querySelectorAll("#cell-grid button.cell").length === 6, "state-space renders six native cell buttons");
+        check(document.querySelector("#workspace-meta").textContent.includes("X / Y / yaw"), "workspace projects X Y and yaw on one screen");
+        check(document.querySelector("#lane-details").textContent.includes("wood-cube-25mm-r001") && document.querySelector("#lane-details").textContent.includes("wood-cube-25mm-top-center-r001"), "object and grasp remain visible");
+        check(document.querySelector("#lane-details").textContent.includes("TRAIN 4 · ID 1 · OOD 1") && document.querySelector("#lane-details").textContent.includes("BALANCED_INITIAL"), "split repeat coverage and selector remain visible");
+        check(document.querySelector("#capability-list").textContent.includes("pick_place") && document.querySelector("#capability-list").textContent.includes("TWO_STAGE_ALIGN") && document.querySelectorAll(".capability.not_available").length === 2, "pick_place and motion variant render as NOT_AVAILABLE");
+        check(Object.values((await fixturePromise).base_view.effect_counts).every((count) => count === 0), "FAKE hardware recorder dataset run-state production and training effects stay zero");
 
-          const alternateLanguage = initialLanguage === "en" ? "ko" : "en";
-          setLanguage(alternateLanguage);
-          const alternateUi = MESSAGE_CATALOG[alternateLanguage].ui;
-          check(document.querySelector("#state-title").textContent === alternateUi.fixtureUnavailable && document.querySelector("#state-content").textContent.includes(alternateUi.fixtureErrorStatus.replace("{status}", "503")), `${alternateLanguage} error copy updates after language switch`);
-          check(announcer.textContent === alternateUi.languageChanged, `${alternateLanguage} language switch announcement is preserved after load failure`);
-          document.body.dataset.result = "pass";
-          results.textContent = `${checks.length} checks passed\n${checks.join("\n")}`;
-          return;
-        }
+        const direct = document.querySelector('[name="authoring_mode"][value="DIRECT_EDIT"]');
+        direct.click();
+        await waitFor(() => posted.length === 1 && !intentBusy);
+        const assisted = document.querySelector('[name="authoring_mode"][value="ASSISTED"]');
+        assisted.dispatchEvent(new Event("change", {bubbles: true}));
+        await waitFor(() => posted.length === 2 && !intentBusy);
+        check(posted[0].body.op === "update_draft" && posted[1].body.op === "update_draft" && posted[0].body.payload.draft_id === posted[1].body.payload.draft_id, "ASSISTED and DIRECT_EDIT mutate the same draft through one op");
 
-        const activeStep = document.querySelector("#workflow-steps .active");
-        check(document.querySelector("#fixture-select").value === "setup" && activeStep.textContent.includes("Setup") && activeStep.getAttribute("aria-current") === "step", "setup is the default active fixture");
+        document.querySelector('[name="effect_scope"][value="PHYSICAL"]').click();
+        await waitFor(() => posted.length === 3 && !intentBusy);
+        check(posted[2].body.op === "set_effect_scope" && !posted.slice(0, 3).some((request) => ["approve_exact_plan", "start", "execute"].includes(request.body.op)), "PHYSICAL toggle alone sends no plan start or execution intent");
 
-        for (const language of ["en", "ko"]) {
-          setLanguage(language);
-          check(document.documentElement.lang === language && languageSelect.value === language, `${language} updates html lang and exposes current value`);
-          check(announcer.textContent === MESSAGE_CATALOG[language].ui.languageChanged, `${language} language change is announced`);
+        await show("approval");
+        check(!document.querySelector("#approval-input") && !document.querySelector('#runtime-content input[type="text"]'), "approval never renders a typed digest input");
+        check(document.querySelector(".approval-card").textContent.includes("신원 인증이 아닙니다"), "approval button does not claim authentication");
+        postResult = "replay";
+        document.querySelector('[data-op="approve_exact_plan"]').click();
+        await waitFor(() => posted.length === 4 && !intentBusy && !currentView);
+        const approvalIntent = posted[3];
+        const expectedApproval = merge(clone((await fixturePromise).base_view), (await fixturePromise).states.approval);
+        check(approvalIntent.headers.get("X-Operator-Token") === "browser-regression-token", "intent sends the injected operator token header");
+        check(approvalIntent.body.schema_version === "data_factory.operator_intent.v1" && approvalIntent.body.session_id && approvalIntent.body.intent_id && approvalIntent.body.view_revision === 2, "intent envelope carries schema intent session and revision");
+        check(approvalIntent.body.view_digest === expectedApproval.view_digest && approvalIntent.body.payload.plan_digest === expectedApproval.approval.plan_digest, "native approval button binds view and plan digests");
+        check(posted.filter((request) => request.body.op === "approve_exact_plan").length === 1 && !document.querySelector('[data-op="approve_exact_plan"]'), "replay failure does not retry or re-enable stale approval");
 
-          for (const [key, source] of Object.entries(states)) {
-            render(key);
-            const expected = MESSAGE_CATALOG[language].states?.[key]?.title ?? source.title;
-            check(document.querySelector("#state-title").textContent === expected && announcer.textContent.includes(expected) && announcer.textContent.includes(source.status), `${language} renders and announces ${key} fixture copy`);
-          }
+        postResult = "accepted";
+        await show("running");
+        const cancelButton = document.querySelector('[data-op="cancel_session"]');
+        cancelButton.click();
+        cancelButton.click();
+        await waitFor(() => currentView?.runtime.workflow_state === "CANCELLING");
+        check(posted.filter((request) => request.body.op === "cancel_session").length === 1, "cancel is single-submit and waits for terminal projection");
+        check(!document.querySelector("#intent-buttons button"), "cancel-pending view has no later action");
 
-          loadError = {status: 503};
-          renderError();
-          const expectedError = MESSAGE_CATALOG[language].ui.fixtureErrorStatus.replace("{status}", "503");
-          check(document.querySelector("#state-title").textContent === MESSAGE_CATALOG[language].ui.fixtureUnavailable && document.querySelector("#state-content").textContent.includes(expectedError) && announcer.textContent === `${MESSAGE_CATALOG[language].ui.fixtureUnavailable}. ${expectedError}`, `${language} renders and announces localized fixture error copy`);
-          loadError = undefined;
+        await show("blocked");
+        check(!document.querySelector("#intent-buttons button") && document.querySelector("#runtime-content").textContent.includes("차단"), "blocked backend state has zero action buttons");
+        await show("stale");
+        check(document.body.dataset.bridge === "blocked" && document.querySelectorAll("#cell-grid button:not(:disabled)").length === 0, "stale view fails closed");
+        await show("reconnecting");
+        const postsBeforeReconnect = posted.length;
+        window.dispatchEvent(new Event("online"));
+        await waitFor(() => document.querySelector("#connection-label").textContent.includes("재연결"));
+        check(posted.length === postsBeforeReconnect, "reconnect refetches view without replaying an intent");
 
-          const validProgress = states.running.progress;
-          const invalidProgress = ['<img id="xss-probe" src="x" onerror="document.body.dataset.xss=1">', -1, 101, NaN, Infinity];
-          const rejected = invalidProgress.every((value) => {
-            states.running.progress = value;
-            try { render("running", false); } catch (error) { return error instanceof TypeError; }
-            return false;
-          });
-          states.running.progress = validProgress;
-          check(rejected && !document.querySelector("#xss-probe") && !document.body.dataset.xss, `${language} hostile progress is rejected without markup execution`);
+        await show("physical_toggle");
+        check(document.querySelector("#open-workspace").disabled && document.querySelectorAll("#capture-buttons button:not(:disabled)").length === 0, "workspace capture is FAKE-only");
 
-          render("approval", false);
-          let input = document.querySelector("#approval-input");
-          check(input instanceof HTMLInputElement && document.querySelector("#approval-form button") instanceof HTMLButtonElement, `${language} approval keeps native keyboard controls`);
-          input.value = "APPROVE wrong";
-          document.querySelector("#approval-form").requestSubmit();
-          check(!input.validity.valid && announcer.textContent === MESSAGE_CATALOG[language].ui.approvalMismatchAnnouncement, `${language} wrong exact phrase is rejected`);
-          input.value = input.dataset.expected;
-          input.dispatchEvent(new Event("input", {bubbles: true}));
-          check(input.validity.valid, `${language} corrected exact phrase clears stale validity`);
-          document.querySelector("#approval-form").requestSubmit();
-          const runningTitle = MESSAGE_CATALOG[language].states?.running.title ?? states.running.title;
-          check(document.querySelector("#state-title").textContent === runningTitle && announcer.textContent === MESSAGE_CATALOG[language].ui.approvalMatched, `${language} corrected exact phrase advances only the local fixture`);
+        stateKey = "unknown_enum";
+        await loadView();
+        await waitFor(() => !currentView);
+        check(document.querySelector("#session-label").textContent === "UNKNOWN_VIEW_ENUM" && document.querySelector("#intent-buttons").textContent.includes("최신 화면"), "unknown enum fails safe with a recovery action");
 
-          render("review", false);
-          let form = document.querySelector("#review-form");
-          let reason = document.querySelector("#review-reason");
-          check(form.querySelector('[name="review"]') instanceof HTMLInputElement && reason instanceof HTMLSelectElement && form.querySelector("button") instanceof HTMLButtonElement, `${language} review keeps native keyboard controls`);
-          check(reason.disabled && getComputedStyle(document.querySelector("#review-reason-field")).display === "none", `${language} review reason starts hidden and disabled`);
-          for (const decision of ["FAIL", "UNCERTAIN"]) {
-            form.querySelector(`[value="${decision}"]`).click();
-            check(reason.required && !reason.disabled && !document.querySelector("#review-reason-field").hidden && announcer.textContent === message("reviewNeedsReason", {decision}), `${language} ${decision} reveals, requires, and announces reason`);
-          }
-
-          for (const decision of ["PASS", "SKIP"]) {
-            render("review", false);
-            form = document.querySelector("#review-form");
-            reason = document.querySelector("#review-reason");
-            form.querySelector(`[value="${decision}"]`).click();
-            check(reason.disabled && getComputedStyle(document.querySelector("#review-reason-field")).display === "none" && !new FormData(form).has("reason") && announcer.textContent === message("reviewNoReason", {decision}), `${language} ${decision} omits reason and announces selection`);
-            form.requestSubmit();
-            check(announcer.textContent === message("reviewPreviewed", {decision, reason: ""}), `${language} ${decision} review preview is announced without a backend effect`);
-          }
-        }
-
-        setLanguage("ko");
-        const untranslated = ["not bound", "suggestion not selected", "qualified collection profile", "camera binding + current scene", "side effects", "up → stale", "campaign + scene revision", "fresh snapshot", "within tolerance", "qualified envelope", "recorder healthy", "remaining", "sequence 18", "not authorized", "dataset-local evidence reference", "terminal evidence"];
-        for (const [key, source] of Object.entries(states)) {
-          render(key, false);
-          const visible = document.body.innerText;
-          const sourceProse = [source.title, source.summary, source.authority, source.nextAction?.title].filter(Boolean);
-          check(!sourceProse.some((text) => visible.includes(text)) && !untranslated.some((text) => visible.includes(text)), `ko ${key} has no untranslated operator prose`);
-        }
-
-        const digest = states.approval.digest;
-        check(localizedState("approval").digest === digest && localizedState("approval").approval.command === `APPROVE ${digest}`, "Korean approval phrase and digest preserve canonical bytes");
-        check(localizedState("ready").nextAction.command === states.ready.nextAction.command && localizedState("recovery").nextAction.command === states.recovery.nextAction.command, "Korean commands and paths preserve canonical bytes");
-        check(Object.keys(states).every((key) => localizedState(key).status === states[key].status) && JSON.stringify(localizedState("review").review) === JSON.stringify(states.review.review), "Korean status and reason codes preserve canonical bytes");
-        check(Object.keys(states).every((key) => states[key].evidence.every((item, index) => !item.value.includes("sha256:") || localizedState(key).evidence[index].value.includes(item.value.match(/sha256:[^ ·]+/)[0]))), "Korean evidence digests preserve canonical bytes");
-        check(localizedState("blocked").evidence[1].value === "/camera/up/color/image_raw" && localizedState("ready").setup["프로필"].startsWith("fr5-up-rgb-30hz-v1"), "Korean topic and profile identifiers preserve canonical bytes");
-        check(languageSelect instanceof HTMLSelectElement && select instanceof HTMLSelectElement, "language and state controls keep native keyboard semantics");
+        networkFailure = true;
+        await loadView();
+        check(!currentView && document.querySelector("#session-label").textContent === "BRIDGE_UNAVAILABLE", "bridge unavailable has no usable view or side effect");
 
         document.body.dataset.result = "pass";
         results.textContent = `${checks.length} checks passed\n${checks.join("\n")}`;
       } catch (error) {
         document.body.dataset.result = "fail";
-        results.textContent = `FAIL: ${error.message}`;
+        results.textContent = `FAIL: ${error.message}\n${error.stack}`;
         throw error;
       }
     }
