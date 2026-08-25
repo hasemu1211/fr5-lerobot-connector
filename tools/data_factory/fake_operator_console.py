@@ -15,7 +15,8 @@ from typing import Any, Callable, Mapping
 
 from tools.data_factory.campaign_authoring import (
     DRAFT_SCHEMA,
-    campaign_cell_id,
+    _candidate_slots as _authoring_candidate_slots,
+    _slot_template,
     compile_collection_campaign,
     direct_draft_from_manifest,
     validate_campaign_draft,
@@ -434,7 +435,7 @@ class FakeOperatorConsole:
             },
             hypothesis=self.hypothesis, draft=checked_draft,
             effect_scope="FAKE", lifecycle_action="LIVE_COLLECT",
-            data_disposition="SYNTHETIC_FIXTURE",
+            data_disposition="TEST_ONLY",
             subsystems={
                 "workspace": {"readiness": "READY", "capability": "AUTHOR", "reason": "SYNTHETIC"},
                 "planner": {"readiness": "READY", "capability": "PLAN", "reason": "SYNTHETIC"},
@@ -585,7 +586,7 @@ class FakeOperatorConsole:
             or result["intent_digest"] != intent["intent_digest"]
             or result["effect_scope"] != "FAKE"
             or result["lifecycle_action"] != "LIVE_COLLECT"
-            or result["data_disposition"] != "SYNTHETIC_FIXTURE"
+            or result["data_disposition"] != "TEST_ONLY"
             or result["root_binding"] is not None
             or result["start_binding"] is not None
             or result["context_digest"] != canonical_digest({
@@ -923,29 +924,12 @@ class FakeOperatorConsole:
             return {"outcome": "CANCELLING", "decision": decision, **cancelled}
 
     def _candidate_slots(self, count: int | None = None) -> dict[str, dict[str, Any]]:
-        count = self.draft["requested_count"] if count is None else count
-        budget = self.draft["manifest_budget"]
-        template = {
-            "hil_prompts": min(1, budget["max_hil_prompts"] // count),
-            "reviews": min(1, budget["max_reviews"] // count),
-            "pending_reviews": 0,
-            "storage_bytes": max(1, budget["max_storage_bytes"] // count),
+        draft = self.draft if count is None else {**self.draft, "requested_count": count}
+        return {
+            item["slot_id"]: item for item in _authoring_candidate_slots(
+                self.hypothesis, draft["requested_count"], _slot_template(draft),
+            )
         }
-        result = {}
-        for repeat_index in range(count):
-            for pair in self.hypothesis["allowed_pairs"]:
-                for split in pair["split_groups"]:
-                    cell_id = campaign_cell_id(
-                        pair["base_condition_digest"], pair["robot_start_pose_id"],
-                        split, repeat_index,
-                    )
-                    result[cell_id] = {
-                        "slot_id": cell_id,
-                        "base_condition_digest": pair["base_condition_digest"],
-                        "robot_start_pose_id": pair["robot_start_pose_id"],
-                        "split_group": split, "repeat_index": repeat_index, **template,
-                    }
-        return result
 
     def _full_update(self, authoring_mode: str, **changes: Any) -> dict[str, Any]:
         payload = {

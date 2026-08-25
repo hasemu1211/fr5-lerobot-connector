@@ -24,7 +24,7 @@ from tools.fr5_data_factory import ContractError, SAFE_ID, canonical_digest
 
 EFFECT_SCOPES = frozenset({"FAKE", "PHYSICAL"})
 LIFECYCLE_ACTIONS = frozenset({"AUTHOR_ONLY", "PLAN_ONLY", "LIVE_COLLECT"})
-DISPOSITIONS = {"FAKE": "SYNTHETIC_FIXTURE", "PHYSICAL": "TEST_ONLY"}
+DISPOSITIONS = {"FAKE": "TEST_ONLY", "PHYSICAL": "TEST_ONLY"}
 EPISODE_CONTEXT_SCHEMA = "data_factory.campaign_episode_context.v1"
 TERMINAL_CHILD_STATES = frozenset({
     "ABORTED", "BLOCKED", "CANCELLED", "COMPLETE", "IDLE", "QUARANTINED_COMMIT",

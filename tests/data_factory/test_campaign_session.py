@@ -94,7 +94,7 @@ def make_session(count: int = 2, *, factories=None, action="LIVE_COLLECT"):
         initial_scene_digest=canonical_digest("scene-0"),
         effect_scope="FAKE",
         lifecycle_action=action,
-        data_disposition="SYNTHETIC_FIXTURE",
+        data_disposition="TEST_ONLY",
         fake_lifecycle_factory=factories.fake,
         physical_lifecycle_factory=factories.physical,
         clock=lambda: NOW,
@@ -137,6 +137,10 @@ class CampaignSessionTests(unittest.TestCase):
                 self.assertIs(lifecycle, session.active_lifecycle)
                 self.assertEqual(episode_context["run_id"], intent["run_id"])
                 self.assertEqual(episode_context["intent_digest"], intent["intent_digest"])
+                self.assertEqual(
+                    (episode_context["effect_scope"], episode_context["data_disposition"]),
+                    ("FAKE", "TEST_ONLY"),
+                )
                 self.assertIsNone(episode_context["root_binding"])
                 self.assertIsNone(episode_context["start_binding"])
                 self.assertEqual(

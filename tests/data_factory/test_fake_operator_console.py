@@ -157,7 +157,7 @@ class FakeOperatorConsoleTests(unittest.TestCase):
                 context["context_digest"],
                 canonical_digest({key: value for key, value in context.items() if key != "context_digest"}),
             )
-            self.assertEqual((context["effect_scope"], context["data_disposition"]), ("FAKE", "SYNTHETIC_FIXTURE"))
+            self.assertEqual((context["effect_scope"], context["data_disposition"]), ("FAKE", "TEST_ONLY"))
             self.assertEqual((context["root_binding"], context["start_binding"]), (None, None))
             tampered = {**context, "effect_scope": "PHYSICAL"}
             with self.assertRaisesRegex(ContractError, "FAKE_CONSOLE_EPISODE_CONTEXT"):
