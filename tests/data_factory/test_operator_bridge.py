@@ -106,6 +106,38 @@ class OperatorIntentCoreTests(unittest.TestCase):
             ))
         self.assertIsNone(other.wait(0))
 
+    def test_button_port_callable_round_trip_uses_the_same_cas_core(self):
+        port = ButtonDecisionPort(
+            session_id="session-r003", operator_label="local-operator", clock=lambda: NOW,
+        )
+        request = {
+            "schema_version": "data_factory.plan_decision_request.v1",
+            "run_id": "run-r003",
+            "plan_digest": canonical_digest("plan-r003"),
+            "approval_scope": "HIL_NUMERIC_PROXY",
+            "decision_binding": {"data_disposition": "TEST_ONLY"},
+            "timeout_s": 1,
+        }
+        observed = []
+        thread = threading.Thread(target=lambda: observed.append(port(request)))
+        thread.start()
+        for _ in range(100):
+            snapshot = port.core.snapshot()
+            pending = snapshot["projection"]["pending_plan"]
+            if pending is not None:
+                break
+            threading.Event().wait(0.001)
+        else:
+            self.fail("button request was not offered")
+        port.core.consume(intent(
+            snapshot, "approve_exact_plan",
+            {"decision_binding_digest": pending["decision_binding_digest"]},
+            "intent-r003",
+        ))
+        thread.join(timeout=1)
+        self.assertFalse(thread.is_alive())
+        self.assertEqual((observed[0]["choice"], observed[0]["plan_digest"]), ("APPROVE", request["plan_digest"]))
+
 
 class LoopbackBridgeTests(unittest.TestCase):
     def setUp(self):

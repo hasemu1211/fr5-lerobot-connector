@@ -271,6 +271,25 @@ class ButtonDecisionPort:
                 self._condition.wait(remaining)
             return copy.deepcopy(self._decision)
 
+    def __call__(self, request: Mapping[str, Any]) -> dict[str, Any] | None:
+        """Adapt the button core to the narrow run_live decision callback."""
+        fields = {
+            "schema_version", "run_id", "plan_digest", "approval_scope",
+            "decision_binding", "timeout_s",
+        }
+        if (
+            not isinstance(request, Mapping)
+            or set(request) != fields
+            or request.get("schema_version") != "data_factory.plan_decision_request.v1"
+        ):
+            raise ContractError("BUTTON_DECISION_REQUEST")
+        self.offer(
+            run_id=request["run_id"], plan_digest=request["plan_digest"],
+            decision_binding=request["decision_binding"],
+            approval_scope=request["approval_scope"],
+        )
+        return self.wait(request["timeout_s"])
+
 
 class _IPv6ThreadingHTTPServer(ThreadingHTTPServer):
     address_family = socket.AF_INET6

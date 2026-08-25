@@ -73,6 +73,232 @@ class Executor:
 
 
 class RunJobTest(unittest.TestCase):
+    def test_test_only_terminal_projection_binds_readiness_and_keeps_semantics_separate(self):
+        profile_digest = "sha256:" + "7" * 64
+        readiness = {
+            "schema_version": "data_factory.recorder_readiness_evidence.v1",
+            "run_id": "runner-test",
+            "transaction_id": "tx-r001",
+            "episode_index": 0,
+            "collection_profile_digest": profile_digest,
+            "quality_contract_digest": run_job.canonical_digest(
+                run_job.TEST_ONLY_READINESS_CONTRACT
+            ),
+            "observed_monotonic_ns": 1,
+            "metrics": {"quality_accepted": True},
+        }
+        projected = run_job._test_only_terminal_projection(
+            readiness,
+            run_id="runner-test",
+            collection_profile_digest=profile_digest,
+            approval_scope="HIL_NUMERIC_PROXY",
+            decision_source="LOCAL_UI_BUTTON",
+            mechanical_proxy="MECHANICAL_GRASP_PROXY_PASS",
+            human_semantic_outcome="NOT_MEASURED",
+        )
+        self.assertEqual(projected["recorder_readiness_digest"], run_job.canonical_digest(readiness))
+        self.assertEqual(projected["human_semantic_outcome"], "NOT_MEASURED")
+        self.assertFalse(projected["candidate_admission_written"])
+
+        for field in ("collection_profile_digest", "quality_contract_digest"):
+            with self.subTest(field=field):
+                mismatched = dict(readiness)
+                mismatched[field] = "sha256:" + "0" * 64
+                with self.assertRaisesRegex(run_job.ContractError, "TEST_ONLY_READINESS_EVIDENCE"):
+                    run_job._test_only_terminal_projection(
+                        mismatched,
+                        run_id="runner-test",
+                        collection_profile_digest=profile_digest,
+                        approval_scope="HIL_NUMERIC_PROXY",
+                        decision_source="LOCAL_UI_BUTTON",
+                        mechanical_proxy="MECHANICAL_GRASP_PROXY_PASS",
+                        human_semantic_outcome="NOT_MEASURED",
+                    )
+
+        with self.assertRaisesRegex(run_job.ContractError, "TEST_ONLY_PROXY_EVIDENCE"):
+            run_job._test_only_terminal_projection(
+                readiness,
+                run_id="runner-test",
+                collection_profile_digest=profile_digest,
+                approval_scope="HIL_NUMERIC_PROXY",
+                decision_source="LOCAL_UI_BUTTON",
+                mechanical_proxy=None,
+                human_semantic_outcome="NOT_MEASURED",
+            )
+        with self.assertRaisesRegex(run_job.ContractError, "TEST_ONLY_HUMAN_SEMANTIC_EVIDENCE"):
+            run_job._test_only_terminal_projection(
+                readiness,
+                run_id="runner-test",
+                collection_profile_digest=profile_digest,
+                approval_scope="HUMAN_GATED",
+                decision_source="LOCAL_UI_BUTTON",
+                mechanical_proxy=None,
+                human_semantic_outcome="NOT_MEASURED",
+            )
+
+    def test_test_only_button_gate_binds_exact_plan_before_recorder_or_execute(self):
+        validated = {
+            "normalized_job": {
+                **JOB, "operator_or_agent_id": "operator", "instruction": "pick up",
+            },
+            "resolved_job_digest": "sha256:" + "a" * 64,
+            "input_digests": {"collection_profile": "sha256:" + "7" * 64},
+            "collection_profile": dict(PROFILE),
+        }
+
+        class Cell:
+            def read(self):
+                return {"robot_system_id": "fr5-lab-a", "cell_ready": True}
+
+        class PlannedExecutor(Executor):
+            def __init__(self):
+                super().__init__()
+                self.ops = []
+
+            def request(self, request, cancel=None):
+                self.ops.append(request["op"])
+                return super().request(request, cancel)
+
+        def run(choice, *, stale=False):
+            directory = tempfile.TemporaryDirectory()
+            self.addCleanup(directory.cleanup)
+            root = Path(directory.name)
+            live_payload = payload("live")
+            live_payload.update(
+                run_root=str(root / "runs"),
+                dataset_root=str(root / "dataset"),
+            )
+            roots = {
+                "session_id": "session-r001", "run_id": live_payload["run_id"],
+                "data_disposition": "TEST_ONLY",
+                "run_root": str((root / "runs").resolve()),
+                "cell_root": str((root / "cells").resolve()),
+                "dataset_root": str((root / "dataset").resolve()),
+                "production_writers_enabled": False,
+            }
+            roots["binding_digest"] = run_job.canonical_digest(roots)
+            observed = []
+
+            def decide(request):
+                observed.append(request)
+                if choice is None:
+                    return None
+                bound = {
+                    "run_id": request["run_id"],
+                    "plan_digest": request["plan_digest"],
+                    "approval_scope": request["approval_scope"],
+                    "decision_binding": request["decision_binding"],
+                }
+                return {
+                    "choice": choice,
+                    "run_id": request["run_id"],
+                    "plan_digest": request["plan_digest"],
+                    "approval_scope": request["approval_scope"],
+                    "decision_binding_digest": (
+                        "sha256:" + "0" * 64 if stale
+                        else run_job.canonical_digest(bound)
+                    ),
+                    "decision_source": "LOCAL_UI_BUTTON",
+                    "operator_label": "operator",
+                }
+
+            executor = PlannedExecutor()
+            recorder = mock.Mock()
+            with (
+                mock.patch.object(run_job, "validate_test_only_root_binding", return_value=roots),
+                mock.patch.object(run_job, "CellStateStore", return_value=Cell()),
+                mock.patch.object(run_job, "SceneStateStore"),
+            ):
+                result = run_job.run_live(
+                    live_payload, threading.Event(), lambda _: None,
+                    resolver=lambda _: (validated, motion(), SCENE),
+                    executor_factory=lambda *_: executor,
+                    recorder_factory=recorder,
+                    camera_warmup_call=lambda *_: {
+                        "schema_version": "data_factory.camera_warmup.v1", "attempts": [],
+                    },
+                    decision_provider=decide,
+                    decision_timeout_s=0,
+                    test_only_root_binding={"fixture": True},
+                    candidate_writer_enabled=False,
+                )
+            return result, observed, executor.ops, recorder
+
+        for choice, code, state in (
+            (None, "PAUSED_AWAITING_OPERATOR", "PLANNED"),
+            ("REJECT", "PLAN_REJECTED", "CANCELLED"),
+            ("CANCEL", "CANCELLED", "CANCELLED"),
+        ):
+            with self.subTest(choice=choice):
+                result, observed, ops, recorder = run(choice)
+                self.assertEqual((result["code"], result["state"]), (code, state))
+                self.assertEqual((result["data"]["recorder_goal_count"], result["data"]["execute_goal_count"]), (0, 0))
+                self.assertEqual(ops, ["preflight", "plan"])
+                recorder.assert_not_called()
+                self.assertEqual(observed[0]["decision_binding"]["data_disposition"], "TEST_ONLY")
+                self.assertIsNotNone(observed[0]["decision_binding"]["root_binding_digest"])
+
+        result, _, ops, recorder = run("APPROVE", stale=True)
+        self.assertEqual((result["code"], result["state"]), ("PLAN_DECISION_BINDING", "BLOCKED"))
+        self.assertEqual(ops, ["preflight", "plan"])
+        recorder.assert_not_called()
+
+    def test_test_only_scope_rejects_before_resolver_or_filesystem_side_effect(self):
+        resolver = mock.Mock()
+        with tempfile.TemporaryDirectory() as directory:
+            live_payload = payload("live")
+            live_payload.update(
+                run_root=str(Path(directory) / "runs"),
+                dataset_root=str(Path(directory) / "dataset"),
+            )
+            roots = {
+                "run_id": live_payload["run_id"],
+                "run_root": str(Path(live_payload["run_root"]).resolve()),
+                "dataset_root": str(Path(live_payload["dataset_root"]).resolve()),
+                "cell_root": str((Path(directory) / "cells").resolve()),
+                "binding_digest": "sha256:" + "1" * 64,
+            }
+            with mock.patch.object(run_job, "validate_test_only_root_binding", return_value=roots):
+                result = run_job.run_live(
+                    live_payload, threading.Event(), lambda _: None,
+                    resolver=resolver,
+                    decision_provider=lambda _: None,
+                    test_only_root_binding={"fixture": True},
+                )
+            self.assertFalse(Path(live_payload["run_root"]).exists())
+        self.assertEqual((result["code"], result["state"]), ("TEST_ONLY_RUN_BINDING", "BLOCKED"))
+        resolver.assert_not_called()
+
+    def test_hil_numeric_proxy_uses_only_checked_gripper_range(self):
+        program = motion()
+        for state, key in (
+            ("GRASP_VERDICT", "gripper_feedback_m"),
+            ("SEMANTIC_VERDICT", "post_lift_gripper_feedback_m"),
+        ):
+            with self.subTest(state=state):
+                evidence = {key: 0.011, "gripper_reference_m": 0.01}
+                self.assertEqual(
+                    run_job.hil_numeric_gripper_verdict(
+                        state, evidence, program["gripper_requirements"],
+                    ),
+                    "PASS",
+                )
+                evidence[key] = 0.02
+                self.assertEqual(
+                    run_job.hil_numeric_gripper_verdict(
+                        state, evidence, program["gripper_requirements"],
+                    ),
+                    "FAIL",
+                )
+        self.assertEqual(
+            run_job.hil_numeric_gripper_verdict(
+                "GRASP_VERDICT",
+                {"gripper_feedback_m": 0.011, "gripper_reference_m": 0.011},
+                program["gripper_requirements"],
+            ),
+            "FAIL",
+        )
+
     def test_quality_rejected_recycle_reopens_only_the_exact_safe_cell(self):
         plan_digest = "sha256:" + "1" * 64
         slot_id = "sha256:" + "2" * 64

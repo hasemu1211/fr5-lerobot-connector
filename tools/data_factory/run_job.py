@@ -18,8 +18,14 @@ from pathlib import Path
 if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from tools.data_factory.one_job import JsonlProcess, OneJob
+from tools.data_factory.one_job import (
+    JsonlProcess,
+    OneJob,
+    TEST_ONLY_READINESS_CONTRACT,
+    hil_numeric_gripper_verdict,
+)
 from tools.data_factory.cell_state import CellStateStore
+from tools.data_factory.operator_setup import validate_test_only_root_binding
 from tools.data_factory.resource_usage import ResourceMonitor
 from tools.data_factory_recovery import write_json_atomic
 from tools.data_factory.scene_state import SceneStateStore, release_slot
@@ -285,12 +291,13 @@ def _executor(timeout_s):
     )
 
 
-def _live_executor(payload, timeout_s):
+def _live_executor(payload, timeout_s, *, cell_root=None):
+    cell_root = ROOT / "outputs/data_factory/cells" if cell_root is None else Path(cell_root)
     return JsonlProcess(
         [
             sys.executable, "-u", str(ROOT / "tools/data_factory/motion/pickup_executor.py"),
             "--factory-jsonl", "--ros-live", "--robot-system-id", payload["expected_robot_system_id"],
-            "--cell-state-root", str(ROOT / "outputs/data_factory/cells"),
+            "--cell-state-root", str(cell_root),
             "--phase-events-root", payload["run_root"],
         ],
         timeout_s=timeout_s,
@@ -436,6 +443,92 @@ def _approval(run_id, digest, operator_id, scope):
     return {
         "source": "HUMAN", "approval_id": f"{run_id}-approval", "approved_by": operator_id,
         "approval_expiry": expiry, "approval_scope": scope,
+    }
+
+
+def _button_plan_decision(
+    provider, *, run_id, plan_digest, approval_scope, decision_binding,
+    operator_id, timeout_s,
+):
+    request = {
+        "schema_version": "data_factory.plan_decision_request.v1",
+        "run_id": run_id,
+        "plan_digest": plan_digest,
+        "approval_scope": approval_scope,
+        "decision_binding": copy.deepcopy(decision_binding),
+        "timeout_s": timeout_s,
+    }
+    try:
+        value = provider(copy.deepcopy(request))
+    except ContractError:
+        raise
+    except Exception as exc:
+        raise ContractError("PLAN_DECISION_FAILED") from exc
+    if value is None:
+        return None
+    fields = {
+        "choice", "run_id", "plan_digest", "approval_scope",
+        "decision_binding_digest", "decision_source", "operator_label",
+    }
+    expected_digest = canonical_digest({
+        "run_id": run_id,
+        "plan_digest": plan_digest,
+        "approval_scope": approval_scope,
+        "decision_binding": decision_binding,
+    })
+    if (
+        not isinstance(value, dict)
+        or set(value) != fields
+        or value.get("choice") not in {"APPROVE", "REJECT", "CANCEL"}
+        or value.get("run_id") != run_id
+        or value.get("plan_digest") != plan_digest
+        or value.get("approval_scope") != approval_scope
+        or value.get("decision_binding_digest") != expected_digest
+        or value.get("decision_source") != "LOCAL_UI_BUTTON"
+        or value.get("operator_label") != operator_id
+    ):
+        raise ContractError("PLAN_DECISION_BINDING")
+    return copy.deepcopy(value)
+
+
+def _test_only_terminal_projection(
+    readiness, *, run_id, collection_profile_digest, approval_scope,
+    decision_source, mechanical_proxy, human_semantic_outcome,
+):
+    fields = {
+        "schema_version", "run_id", "transaction_id", "episode_index",
+        "collection_profile_digest", "quality_contract_digest",
+        "observed_monotonic_ns", "metrics",
+    }
+    if (
+        not isinstance(readiness, dict)
+        or set(readiness) != fields
+        or readiness.get("schema_version") != "data_factory.recorder_readiness_evidence.v1"
+        or readiness.get("run_id") != run_id
+        or readiness.get("collection_profile_digest") != collection_profile_digest
+        or readiness.get("quality_contract_digest") != canonical_digest(TEST_ONLY_READINESS_CONTRACT)
+        or not isinstance(readiness.get("transaction_id"), str)
+        or not readiness["transaction_id"]
+        or type(readiness.get("episode_index")) is not int
+        or readiness["episode_index"] < 0
+        or type(readiness.get("observed_monotonic_ns")) is not int
+        or not isinstance(readiness.get("metrics"), dict)
+        or readiness["metrics"].get("quality_accepted") is not True
+    ):
+        raise ContractError("TEST_ONLY_READINESS_EVIDENCE")
+    if approval_scope == "HIL_NUMERIC_PROXY":
+        if mechanical_proxy != "MECHANICAL_GRASP_PROXY_PASS" or human_semantic_outcome != "NOT_MEASURED":
+            raise ContractError("TEST_ONLY_PROXY_EVIDENCE")
+    elif human_semantic_outcome != "PASS":
+        raise ContractError("TEST_ONLY_HUMAN_SEMANTIC_EVIDENCE")
+    return {
+        "data_disposition": "TEST_ONLY",
+        "candidate_admission_written": False,
+        "decision_source": decision_source,
+        "human_semantic_outcome": human_semantic_outcome,
+        "mechanical_grasp_proxy": mechanical_proxy,
+        "recorder_readiness": copy.deepcopy(readiness),
+        "recorder_readiness_digest": canonical_digest(readiness),
     }
 
 
@@ -881,17 +974,39 @@ def run_plan_only(payload, cancel, publish, *, resolver=resolve_inputs, executor
 
 def run_live(payload, cancel, publish, *, resolver=resolve_inputs, executor_factory=_live_executor,
              recorder_factory=_recorder, validator_call=_technical_validator, tty_decision=_tty_decision,
-             camera_warmup_call=_camera_warmup, before_approval=None):
+             camera_warmup_call=_camera_warmup, before_approval=None, one_job=None,
+             decision_provider=None, approval_scope="HUMAN_GATED",
+             decision_timeout_s=None, test_only_root_binding=None,
+             candidate_writer_enabled=True):
     """Public single HIL run: plan and human approval precede recorder begin and motion."""
     executor = recorder = resource_monitor = None
     resource_finished = False
     profile = None
     try:
+        if approval_scope not in {"HUMAN_GATED", "HIL_NUMERIC_PROXY"}:
+            raise ContractError("APPROVAL_SCOPE")
+        if before_approval is not None and decision_provider is not None:
+            raise ContractError("PLAN_DECISION_AMBIGUOUS")
+        test_only = test_only_root_binding is not None
+        if test_only:
+            roots = validate_test_only_root_binding(test_only_root_binding, repository_root=ROOT)
+            if (
+                roots["run_id"] != payload.get("run_id")
+                or roots["run_root"] != str(Path(payload.get("run_root", "")).resolve())
+                or roots["dataset_root"] != str(Path(payload.get("dataset_root", "")).resolve())
+                or candidate_writer_enabled is not False
+                or decision_provider is None
+            ):
+                raise ContractError("TEST_ONLY_RUN_BINDING")
+            cell_root = Path(roots["cell_root"])
+        else:
+            if candidate_writer_enabled is not True:
+                raise ContractError("CANDIDATE_WRITER_SCOPE")
+            cell_root = ROOT / "outputs/data_factory/cells"
         validated, program, scene_binding = resolver(payload)
         profile = _collection_profile(validated, payload)
         if cancel.is_set():
             return _response(ok=False, code="CANCELLED", state="CANCELLED", run_id=payload["run_id"])
-        cell_root = ROOT / "outputs/data_factory/cells"
         cell_store = CellStateStore(cell_root, payload["expected_robot_system_id"])
         scene_store = SceneStateStore(cell_root, payload["expected_robot_system_id"])
         cell = cell_store.read()
@@ -902,7 +1017,11 @@ def run_live(payload, cancel, publish, *, resolver=resolve_inputs, executor_fact
         if cancel.is_set():
             return _response(ok=False, code="CANCELLED", state="CANCELLED", run_id=payload["run_id"])
         timeout_s = _timeout_s(program)
-        executor = executor_factory(payload, timeout_s)
+        executor = (
+            executor_factory(payload, timeout_s, cell_root=cell_root)
+            if executor_factory is _live_executor
+            else executor_factory(payload, timeout_s)
+        )
         preflight = executor.request({
             "schema_version": "fr5.pickup_executor.command.v4", "op_id": "00-preflight", "op": "preflight",
             "payload": {"motion_program": program},
@@ -915,7 +1034,25 @@ def run_live(payload, cancel, publish, *, resolver=resolve_inputs, executor_fact
         if preflight.get("code") != "PREFLIGHT_OK":
             raise ContractError("PREFLIGHT_RESPONSE")
         forbidden = lambda _request: (_ for _ in ()).throw(ContractError("LIVE_RECORDER_NOT_STARTED"))
-        job = OneJob(forbidden, lambda request: executor.request(request, cancel), cell_state_call=cell_store.read)
+        if one_job is None:
+            arguments = (forbidden, lambda request: executor.request(request, cancel))
+            job = (
+                OneJob(*arguments, cell_state_call=cell_store.read,
+                       readiness_contract=TEST_ONLY_READINESS_CONTRACT)
+                if test_only else OneJob(*arguments, cell_state_call=cell_store.read)
+            )
+        else:
+            if getattr(one_job, "state", None) != "IDLE":
+                raise ContractError("ONE_JOB_NOT_FRESH")
+            if (
+                test_only and getattr(one_job, "readiness_contract", None) != TEST_ONLY_READINESS_CONTRACT
+                or not test_only and getattr(one_job, "readiness_contract", None) is not None
+            ):
+                raise ContractError("ONE_JOB_READINESS_SCOPE")
+            job = one_job
+            job.recorder_call = forbidden
+            job.executor_call = lambda request: executor.request(request, cancel)
+            job.cell_state_call = cell_store.read
         planned = job.plan_only(payload["run_id"], program, scene_binding)
         if not planned["ok"]:
             return _response(ok=False, code=planned["code"], state=planned["state"], run_id=payload["run_id"], plan_digest=planned["plan_digest"])
@@ -933,13 +1070,40 @@ def run_live(payload, cancel, publish, *, resolver=resolve_inputs, executor_fact
             f"Plan {planned['plan_digest']} path={' > '.join(summary['path'])} flow={summary['flow']} "
             f"clearance={summary['clearance']} speed={summary['speed']}{recycle_text}"
         )
-        if before_approval is None:
-            tty_decision(approval_prompt, f"APPROVE {planned['plan_digest']}")
-        else:
+        decision_source = "TTY"
+        if decision_provider is not None:
+            decision = _button_plan_decision(
+                decision_provider,
+                run_id=payload["run_id"], plan_digest=planned["plan_digest"],
+                approval_scope=approval_scope,
+                decision_binding={
+                    "resolved_job_digest": validated["resolved_job_digest"],
+                    "scene_binding_digest": canonical_digest(scene_binding),
+                    "operator_summary_digest": canonical_digest(summary),
+                    "data_disposition": "TEST_ONLY" if test_only else "PRODUCTION",
+                    "root_binding_digest": roots["binding_digest"] if test_only else None,
+                },
+                operator_id=operator_id, timeout_s=decision_timeout_s,
+            )
+            if decision is None:
+                return _response(ok=False, code="PAUSED_AWAITING_OPERATOR", state="PLANNED", run_id=payload["run_id"], plan_digest=planned["plan_digest"], data={
+                    "measurement_outcome": "NOT_MEASURED", "recorder_goal_count": 0,
+                    "execute_goal_count": 0, "training_authorized": False,
+                })
+            if decision["choice"] != "APPROVE":
+                code = "PLAN_REJECTED" if decision["choice"] == "REJECT" else "CANCELLED"
+                return _response(ok=False, code=code, state="CANCELLED", run_id=payload["run_id"], plan_digest=planned["plan_digest"], data={
+                    "measurement_outcome": "NOT_MEASURED", "recorder_goal_count": 0,
+                    "execute_goal_count": 0, "training_authorized": False,
+                })
+            decision_source = decision["decision_source"]
+        elif before_approval is not None:
             before_approval(approval_prompt, planned)
+        else:
+            tty_decision(approval_prompt, f"APPROVE {planned['plan_digest']}")
         if cancel.is_set():
             return _response(ok=False, code="CANCELLED", state="CANCELLED", run_id=payload["run_id"], plan_digest=planned["plan_digest"])
-        approved = job.approve(_approval(payload["run_id"], planned["plan_digest"], operator_id, "HUMAN_GATED"))
+        approved = job.approve(_approval(payload["run_id"], planned["plan_digest"], operator_id, approval_scope))
         if not approved["ok"]:
             return _response(ok=False, code=approved["code"], state=approved["state"], run_id=payload["run_id"], plan_digest=planned["plan_digest"])
         resource_monitor = ResourceMonitor(
@@ -956,6 +1120,8 @@ def run_live(payload, cancel, publish, *, resolver=resolve_inputs, executor_fact
             return _response(ok=False, code=started["code"], state=started["state"], run_id=payload["run_id"], plan_digest=planned["plan_digest"])
         decisions = queue.Queue(maxsize=1)
         pending = None
+        mechanical_proxy = None
+        human_semantic_outcome = "NOT_MEASURED"
         while True:
             if cancel.is_set():
                 result = job.cancel()
@@ -977,6 +1143,16 @@ def run_live(payload, cancel, publish, *, resolver=resolve_inputs, executor_fact
                     })
                 return _response(ok=False, code=result["code"], state=result["state"], run_id=payload["run_id"], plan_digest=planned["plan_digest"])
             if result["state"] in {"AWAITING_CELL_READY", "COMMITTED"}:
+                test_only_projection = (
+                    _test_only_terminal_projection(
+                        result.get("readiness_evidence"), run_id=payload["run_id"],
+                        collection_profile_digest=validated["input_digests"]["collection_profile"],
+                        approval_scope=approval_scope, decision_source=decision_source,
+                        mechanical_proxy=mechanical_proxy,
+                        human_semantic_outcome=human_semantic_outcome,
+                    )
+                    if test_only else {}
+                )
                 technical = validator_call(payload["dataset_root"], payload, profile)
                 if (
                     not isinstance(technical, dict)
@@ -1038,13 +1214,15 @@ def run_live(payload, cancel, publish, *, resolver=resolve_inputs, executor_fact
                     finished = job.finish()
                     if not finished["ok"] or finished["state"] != "COMPLETE":
                         raise ContractError("CELL_READY_REQUIRED")
-                    _write_candidate_admission(payload, validated, validator_reference)
+                    if candidate_writer_enabled:
+                        _write_candidate_admission(payload, validated, validator_reference)
                     return _response(ok=True, code="VALIDATED", state="COMPLETE", run_id=payload["run_id"], plan_digest=planned["plan_digest"], data={
                         "mode": "live", "operator_summary": summary, "technical_validator": validator_reference,
                         "storage_usage": storage_reference, "resource_usage": resource_reference,
                         "camera_warmup_digest": canonical_digest(camera_warmup),
                         "postcommit_scene_state_digest": transition["scene_state_digest"], "postcommit_cell_state": cell,
                         "frozen_rows": result["frozen_rows"], "rows_after_recycle": result["rows_after_recycle"],
+                        **test_only_projection,
                         "camera_semantic_authority": False, "training_authorized": False,
                     })
                 target = validated["normalized_job"]
@@ -1066,15 +1244,32 @@ def run_live(payload, cancel, publish, *, resolver=resolve_inputs, executor_fact
                 finished = job.finish()
                 if not finished["ok"] or finished["state"] != "COMPLETE":
                     raise ContractError("CELL_READY_REQUIRED")
-                _write_candidate_admission(payload, validated, validator_reference)
+                if candidate_writer_enabled:
+                    _write_candidate_admission(payload, validated, validator_reference)
                 return _response(ok=True, code="VALIDATED", state="COMPLETE", run_id=payload["run_id"], plan_digest=planned["plan_digest"], data={
                     "mode": "live", "operator_summary": summary, "technical_validator": validator_reference,
                     "storage_usage": storage_reference, "resource_usage": resource_reference,
                     "camera_warmup_digest": canonical_digest(camera_warmup),
                     "postcommit_scene_state_digest": scene["scene_state_digest"], "postcommit_cell_state": cell,
+                    **test_only_projection,
                     "camera_semantic_authority": False, "training_authorized": False,
                 })
             if result["state"] in {"GRASP_VERDICT", "SEMANTIC_VERDICT"}:
+                if approval_scope == "HIL_NUMERIC_PROXY":
+                    decision = hil_numeric_gripper_verdict(
+                        result["state"], result.get("execution_evidence"),
+                        program.get("gripper_requirements"),
+                    )
+                    acted = (job.grasp_verdict if result["state"] == "GRASP_VERDICT" else job.semantic_verdict)(
+                        decision, operator_id, source="HIL_PROXY",
+                    )
+                    if not acted["ok"]:
+                        return _response(ok=False, code=acted["code"], state=acted["state"], run_id=payload["run_id"], plan_digest=planned["plan_digest"], data={
+                            "mechanical_grasp_proxy": "MECHANICAL_GRASP_PROXY_FAIL",
+                            "human_semantic_outcome": "NOT_MEASURED", "training_authorized": False,
+                        })
+                    mechanical_proxy = "MECHANICAL_GRASP_PROXY_PASS"
+                    continue
                 if pending is None:
                     pending = result["state"]
                     prompt = (
@@ -1105,6 +1300,8 @@ def run_live(payload, cancel, publish, *, resolver=resolve_inputs, executor_fact
                 acted = (job.grasp_verdict if state == "GRASP_VERDICT" else job.semantic_verdict)(decision, operator_id, source="HUMAN")
                 if not acted["ok"]:
                     return _response(ok=False, code=acted["code"], state=acted["state"], run_id=payload["run_id"], plan_digest=planned["plan_digest"])
+                if state == "SEMANTIC_VERDICT":
+                    human_semantic_outcome = decision
                 continue
             if result["state"] == "RELEASE_VERDICT":
                 if "recycle" not in summary:
