@@ -20,9 +20,11 @@ from tools.data_factory.operator_setup import (
     build_test_only_start_binding,
     compile_workspace_registration_candidate,
     gripper_setup_projection,
+    initialize_test_only_state_from_user_declaration,
     qualified_table_plane_reference,
     validate_print_measurements,
     validate_test_only_root_binding,
+    validate_test_only_state_initialization,
     validate_test_only_start_binding,
 )
 from tools.a4_place_yaw.generate_place_yaw_a4 import build_places, make_manifest
@@ -110,6 +112,45 @@ class OperatorSetupTests(unittest.TestCase):
             value["production_writers_enabled"] = True
             with self.assertRaisesRegex(ContractError, "TEST_ONLY_ROOT_AUTHORITY"):
                 validate_test_only_root_binding(value, repository_root=repository)
+
+    def test_user_declared_state_is_initialized_only_under_bound_test_roots(self):
+        with tempfile.TemporaryDirectory() as directory:
+            repository = Path(directory).resolve()
+            roots = build_test_only_root_binding(
+                repository, session_id="session-r001", run_id="run-r001",
+            )
+            initialized = initialize_test_only_state_from_user_declaration(
+                roots, repository_root=repository, robot_system_id="fr5-lab-a",
+                object_instance_id="wood-cube-r001",
+                object_profile_id="wood-cube-25mm-r001", place_id="PLACE_A",
+                yaw_deg=0, x_mm=0, y_mm=0, declared_by="local-operator",
+            )
+            self.assertEqual(
+                initialized,
+                validate_test_only_state_initialization(initialized, roots=roots),
+            )
+            self.assertEqual(
+                (initialized["data_disposition"], initialized["cell_ready"], initialized["declaration_source"]),
+                ("TEST_ONLY", True, "USER_PROVIDED_OUT_OF_BAND"),
+            )
+            self.assertEqual(set(initialized["authority"].values()), {"NONE"})
+            cell_root = Path(roots["cell_root"]) / "fr5-lab-a"
+            self.assertTrue((cell_root / "state.json").is_file())
+            self.assertTrue((cell_root / "scene_state.json").is_file())
+            self.assertFalse((repository / "outputs/data_factory/cells").exists())
+            self.assertFalse(Path(roots["run_root"]).exists())
+            self.assertFalse(Path(roots["dataset_root"]).exists())
+            with self.assertRaisesRegex(ContractError, "TEST_ONLY_STATE_COLLISION"):
+                initialize_test_only_state_from_user_declaration(
+                    roots, repository_root=repository, robot_system_id="fr5-lab-a",
+                    object_instance_id="wood-cube-r001",
+                    object_profile_id="wood-cube-25mm-r001", place_id="PLACE_A",
+                    yaw_deg=0, x_mm=0, y_mm=0, declared_by="local-operator",
+                )
+            with self.assertRaisesRegex(ContractError, "TEST_ONLY_ROOT_COLLISION"):
+                build_test_only_root_binding(
+                    repository, session_id="session-r001", run_id="run-r001",
+                )
 
     def test_motion_q_safe_start_binds_one_slot_and_fresh_home_snapshot(self):
         contract = hypothesis()

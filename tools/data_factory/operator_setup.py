@@ -11,7 +11,9 @@ from pathlib import Path
 from typing import Any, Mapping
 
 from tools.data_factory.campaign_authoring import validate_collection_campaign_manifest
+from tools.data_factory.cell_state import CellStateStore
 from tools.data_factory.motion.pose_snapshot import JOINTS, _validate_snapshot, calibrate_place
+from tools.data_factory.scene_state import SceneStateStore
 from tools.fr5_data_factory import (
     ContractError,
     DIGEST,
@@ -48,6 +50,13 @@ NO_AUTHORITY = {
     "execution": "NONE", "human_approval": "NONE", "semantic_pass": "NONE",
     "training_approval": "NONE", "persistent_start_qualification": "NONE",
 }
+TEST_STATE_FIELDS = frozenset({
+    "schema_version", "session_id", "run_id", "root_binding_digest",
+    "robot_system_id", "data_disposition", "object_instance_id",
+    "object_profile_id", "pose", "declared_by", "declaration_source",
+    "scene_state_digest", "scene_revision", "cell_ready",
+    "production_writers_enabled", "authority", "initialization_digest",
+})
 
 
 def _exact(value: object, fields: frozenset[str], code: str) -> Mapping[str, Any]:
@@ -111,6 +120,8 @@ def build_test_only_root_binding(
             raise ContractError("TEST_ONLY_ROOT_OUTSIDE_REPOSITORY") from exc
         _no_symlink_components(repository, resolved)
         normalized.append(str(resolved))
+    if any(path.exists() for path in expected):
+        raise ContractError("TEST_ONLY_ROOT_COLLISION")
     value = {
         "session_id": session_id,
         "run_id": run_id,
@@ -145,6 +156,91 @@ def validate_test_only_root_binding(
         _no_symlink_components(repository, target)
     if result["binding_digest"] != canonical_digest({key: result[key] for key in result if key != "binding_digest"}):
         raise ContractError("TEST_ONLY_ROOT_DIGEST_MISMATCH")
+    return result
+
+
+def initialize_test_only_state_from_user_declaration(
+    roots: Mapping[str, Any], *, repository_root: str | Path,
+    robot_system_id: str, object_instance_id: str, object_profile_id: str,
+    place_id: str, yaw_deg: int | float, x_mm: int | float, y_mm: int | float,
+    declared_by: str,
+) -> dict[str, Any]:
+    """Seed only isolated TEST_ONLY scene/cell state from an out-of-band user declaration."""
+    roots = validate_test_only_root_binding(roots, repository_root=repository_root)
+    for value, code in (
+        (robot_system_id, "TEST_ONLY_STATE_ROBOT"),
+        (object_instance_id, "TEST_ONLY_STATE_OBJECT"),
+        (object_profile_id, "TEST_ONLY_STATE_OBJECT"),
+        (place_id, "TEST_ONLY_STATE_POSE"),
+        (declared_by, "TEST_ONLY_STATE_DECLARER"),
+    ):
+        _identifier(value, code)
+    pose = {
+        "place_id": place_id,
+        "yaw_deg": _finite(yaw_deg, "TEST_ONLY_STATE_POSE"),
+        "x_mm": _finite(x_mm, "TEST_ONLY_STATE_POSE"),
+        "y_mm": _finite(y_mm, "TEST_ONLY_STATE_POSE"),
+    }
+    cell_store = CellStateStore(roots["cell_root"], robot_system_id)
+    scene_store = SceneStateStore(roots["cell_root"], robot_system_id)
+    if cell_store.read()["reason_code"] != "STATE_MISSING" or scene_store.read()["revision"] != 0:
+        raise ContractError("TEST_ONLY_STATE_COLLISION")
+    scene = scene_store.update_object(
+        instance_id=object_instance_id, object_profile_id=object_profile_id,
+        state="ON_SURFACE", pose=pose, source="HUMAN", updated_by=declared_by,
+        expected_revision=0,
+    )
+    cell = cell_store.acknowledge_ready(declared_by)
+    value = {
+        "schema_version": "data_factory.test_only_state_initialization.v1",
+        "session_id": roots["session_id"],
+        "run_id": roots["run_id"],
+        "root_binding_digest": roots["binding_digest"],
+        "robot_system_id": robot_system_id,
+        "data_disposition": "TEST_ONLY",
+        "object_instance_id": object_instance_id,
+        "object_profile_id": object_profile_id,
+        "pose": pose,
+        "declared_by": declared_by,
+        "declaration_source": "USER_PROVIDED_OUT_OF_BAND",
+        "scene_state_digest": scene["scene_state_digest"],
+        "scene_revision": scene["scene_state"]["revision"],
+        "cell_ready": cell["cell_ready"],
+        "production_writers_enabled": False,
+        "authority": copy.deepcopy(NO_AUTHORITY),
+    }
+    value["initialization_digest"] = canonical_digest(value)
+    return validate_test_only_state_initialization(value, roots=roots)
+
+
+def validate_test_only_state_initialization(
+    value: object, *, roots: Mapping[str, Any],
+) -> dict[str, Any]:
+    result = copy.deepcopy(dict(_exact(value, TEST_STATE_FIELDS, "TEST_ONLY_STATE_FIELDS")))
+    if (
+        result["schema_version"] != "data_factory.test_only_state_initialization.v1"
+        or result["session_id"] != roots.get("session_id")
+        or result["run_id"] != roots.get("run_id")
+        or result["root_binding_digest"] != roots.get("binding_digest")
+        or result["data_disposition"] != "TEST_ONLY"
+        or result["declaration_source"] != "USER_PROVIDED_OUT_OF_BAND"
+        or result["cell_ready"] is not True
+        or result["production_writers_enabled"] is not False
+        or result["authority"] != NO_AUTHORITY
+    ):
+        raise ContractError("TEST_ONLY_STATE_BINDING")
+    for field in ("robot_system_id", "object_instance_id", "object_profile_id", "declared_by"):
+        _identifier(result[field], "TEST_ONLY_STATE_BINDING")
+    _digest(result["scene_state_digest"], "TEST_ONLY_STATE_BINDING")
+    if type(result["scene_revision"]) is not int or result["scene_revision"] != 1:
+        raise ContractError("TEST_ONLY_STATE_BINDING")
+    if not isinstance(result["pose"], Mapping) or set(result["pose"]) != {"place_id", "yaw_deg", "x_mm", "y_mm"}:
+        raise ContractError("TEST_ONLY_STATE_BINDING")
+    _identifier(result["pose"]["place_id"], "TEST_ONLY_STATE_BINDING")
+    for field in ("yaw_deg", "x_mm", "y_mm"):
+        _finite(result["pose"][field], "TEST_ONLY_STATE_BINDING")
+    if result["initialization_digest"] != canonical_digest({key: result[key] for key in result if key != "initialization_digest"}):
+        raise ContractError("TEST_ONLY_STATE_DIGEST_MISMATCH")
     return result
 
 
