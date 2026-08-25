@@ -1,15 +1,16 @@
 # FR5 통합 데이터 수집 캠페인 UX와 작업영역 등록 계획
 
-> 상태: `REVIEWED_READY_FOR_GOAL_PROMPT`. 이 문서는 다음 구현 Goal을 만들기 위한 계획 정본이다. 현재 동작과 실물 권한의 정본은 `docs/`, `config/`와 executable validator이며, 이 문서만으로 robot motion, recorder, dataset, training 또는 production approval이 허용되지 않는다.
+> 상태: `OFFLINE_COLLECTION_CAMPAIGN_UX_COMPLETE`. Goal 1 software와 비실물 검증을 완료했으며 이 문서는 Goal 2 handoff 정본이다. 현재 동작과 실물 권한의 정본은 `docs/`, `config/`와 executable validator이며, 이 문서만으로 robot motion, recorder, dataset, training 또는 production approval이 허용되지 않는다.
 
 - 작성일: 2026-08-25
-- 현재 작업 기준: `HEAD=f79c158785de3ee1ec2f14061cccf411437e54a7`
+- Goal 1 software integration 기준: `HEAD=7b7bc7b5373e79ff8aa573c11a2a2b2e5a171a00`, tree `debc580a642fc7745ce74e8d740a947af8cbf00e`
 - 비교 기준: `origin/main=0c5e53e06940d866ea26f7ec147ca5989d763ce8`
 - 상위 software 상태: `OFFLINE_IMPLEMENTATION_COMPLETE_THROUGH_P6_5`
-- 기존 backend-free UI 상태: fixture만 accepted, local backend bridge는 미구현
+- 동결 계획 원본 SHA256: `6501694bc23a1e34dd35b9638431582612fdf7918fa4b0cab3a75a60f00dc810`
+- Goal 1 UI 상태: foreground stdlib loopback bridge와 synthetic campaign console을 실제 UI 버튼으로 완주함
 - 관련 계획: [데이터 팩토리 다음 반복](data-factory-next-iteration.md), [수집 UX 후속](lightweight-collection-ux-follow-up.md)
 - 관련 계약: [데이터 팩토리](../docs/data-factory.md), [수집·피드백](../docs/data-collection-and-feedback.md), [UI backend proposal](../operator-ui/backend-contract-proposal.md)
-- 문서 수명주기: 제안 상태의 구현·검증 계획. 기능 구현 뒤 current 운영 계약은 `docs/`와 코드로 승격하고, 이 문서는 이력 또는 다음 반복 계획으로 재분류한다.
+- 문서 수명주기: Goal 1 구현 이력과 Goal 2 handoff 계획. current 운영 계약은 `docs/`와 executable code가 소유하고 이 문서는 production authority가 아니다.
 
 ## 1. 목적과 대상 독자
 
@@ -320,6 +321,8 @@ checked-in hardware interface activation은 servo mode를 restart하고 current-
 
 사용자의 사전 허용은 **새 좌표계 등록 없이**, operator alias `place1`이 exact checked-in `PLACE_A@place-a-yaw0-r002`와 일치한다는 한 번의 확인 후, yaw 0°/local `(0,0)`의 `wood-cube-25mm-r001` 하나에 대한 기존 v2 `DIRECT` 기준선 시험에만 적용한다. 첫 live는 정확히 한 episode다.
 
+이번 Goal 2에 한해 사용자는 최종 digest-locked `TEST_ONLY` 계획이 정확히 `HOME ↔ place1 (PLACE_A@place-a-yaw0-r002)`, yaw 0°, local `(0,0)`, wood cube, v2 `DIRECT` pickup + same-cell recycle, 한 episode일 때 coordinator가 exact-plan 승인 버튼을 누르는 것을 명시적으로 위임했다. 이는 개인용 local button 조작 위임이지 authenticated `HUMAN` provenance가 아니다. scope가 조금이라도 바뀌거나 fresh replan으로 plan digest가 바뀌면 위임은 즉시 무효이며 새 사용자 승인이 필요하다. 이 위임은 semantic `PASS`, release `LANDED`, final scene-ready 또는 gripper maintenance의 empty/clear 확인·승인으로 확장되지 않는다.
+
 resolved program의 source와 recycle target이 모두 같은 `(0,0)` cell이고 모든 intermediate pose가 exact qualified planning scene에서 통과할 때만 다음 반환 cycle를 보여 준다.
 
 `PREGRASP_PTP → APPROACH_STOP_LIN → FINAL_APPROACH_LIN → GRIPPER_CLOSE → LIFT_LIN → RECYCLE_APPROACH_PTP → LOWER_LIN → GRIPPER_OPEN → RETREAT_LIN → SAFE_POSE_PTP`
@@ -353,7 +356,7 @@ UI/report는 그 결과를 `MECHANICAL_GRASP_PROXY_PASS|FAIL`, source `HIL_PROXY
 | cube yaw 0°, `(0,0)` | operator scene declaration + fresh scene/cell binding | digest/CAS는 자동, 실물 배치는 사람 | 어떤 scene claim으로 계획했는지 | external metrology 정확도, 물체 정체 | 확인 전 `PAUSED_AWAITING_OPERATOR`; mismatch는 blocked |
 | controller/current start/HOME | qualified motion digest/safe vector, ≤0.1 s joint/controller readback, HOME-start delta ≤0.01 rad, plan/readback | 자동 | 이 exact program의 current-start/safe-return binding | 미지 영역의 안전성, standalone home candidate 실행 자격 | 실측 위반은 `BLOCKED + FAIL`; source 부재는 `BLOCKED + NOT_AVAILABLE` |
 | plan-only | collision/constraint/endpoint, phase-chain, source=recycle=`(0,0)`, plan digest, no-motion snapshot | 자동 technical PASS/FAIL | exact model/scene의 계획 일관성과 side-effect 0 | 실물 collision이 없음, 실행 성공 | 어떤 technical failure도 later goal 0 |
-| exact plan·cell clear·contract-emitted hold | UI의 digest-bound 한 번 button과 실행 전 fresh recheck | AI 대신 승인 0 | 표시된 exact plan/scope에 대한 local operator checkpoint | 인증된 정체, 미래 plan 승인 | dispatch 전 미응답은 `PAUSED + NOT_MEASURED`; stale/expiry는 plan 폐기·replan |
+| exact plan·cell clear·contract-emitted hold | UI의 digest-bound 한 번 button과 실행 전 fresh recheck | human cell-clear evidence가 별도로 있을 때 위 exact scope/digest의 plan button만 coordinator 1; 그 밖에는 0 | 표시된 exact plan/scope에 대한 local operator checkpoint | 인증된 정체, 미래·변경 plan 승인, scene/cell/semantic truth | cell-clear 부재·위임 무효·미응답은 `PAUSED + NOT_MEASURED`; stale/expiry/replan은 위임 폐기 |
 | arm/gripper execution | action terminal status, phase event, timestamps, endpoint readback | 자동 technical PASS/FAIL | dispatched action의 terminal/endpoint 결과 | cube semantic success | failure/stale/heartbeat loss는 cancel·block |
 | grasp mechanical signal | reference `0.01134 m`, close/post-lift feedback `[0.01134,0.01218] m`, existing requirement digest | toggle ON에서 `MECHANICAL_GRASP_PROXY_PASS|FAIL` | gripper signal이 checked-in grasp requirement과 일치함 | cube를 실제로 잡아 유지했는지; empty-close 분리 | 범위 밖은 `BLOCKED + FAIL`; 범위 내는 mechanical proxy만 PASS |
 | semantic grasp / release landing | proxy OFF의 사람 `PASS|FAIL`; release는 항상 `LANDED|OFF_SLOT|UNCERTAIN`; mechanical/phase evidence를 UI에 표시 | proxy ON은 human semantic `NOT_MEASURED`; AI semantic PASS/LANDED 0 | operator가 입력한 항목의 현장 판단 | production data validity/training value | 미응답은 pause/incomplete; post-dispatch timeout은 `BLOCKED + NOT_MEASURED` |
@@ -774,7 +777,7 @@ Goal 2는 architecture 재설계나 production qualification Goal이 아니다. 
 2. **G2-S1 scoped setup:** passive discovery로 robot/gripper/camera state를 먼저 투영한다. 사전 허용된 Goal 2를 명시적으로 시작한 뒤에만 configured foreground graph/profile을 대상으로 attach/bring-up하며 hidden process를 만들지 않는다. active/valid subsystem은 재활성화하지 않고, gripper exception은 빈 finger/cell-clear 한 번 버튼 뒤만 maintenance한다.
 3. **G2-S2 exact binding:** 새 workspace capture 없이 `place1 → PLACE_A@place-a-yaw0-r002`, wood cube/yaw 0°/local `(0,0)`, source=recycle same cell, existing object/grasp/motion/profile digest를 한 화면에 표시한다. alias/scene 의미는 별도 ceremony가 아니라 exact-plan checklist에 포함한다.
 4. **G2-S3 current-start + physical plan-only:** qualified motion safe vector와 ≤0.1 s current snapshot의 delta ≤0.01 rad를 확인한다. 범위 밖이면 사용자가 HOME 영역 motion을 사전 허용했어도 standalone homing caller를 추측해 만들지 않고 exact dependency로 멈춘다. 범위 내에서 v2 `DIRECT` 반환 cycle plan/collision/constraint/endpoint/no-motion snapshot을 통과한다.
-5. **G2-S4 topic/approval gate:** stable one-camera binding과 existing v2 30 Hz test profile의 기존 5 s topic warmup을 측정한다. 필수 범위 위반은 recorder begin/motion 0 + `BLOCKED + FAIL`이다. 그 뒤 exact plan/TEST_ONLY paths/numeric-proxy ON을 사람이 한 번 승인한다.
+5. **G2-S4 topic/approval gate:** stable one-camera binding과 existing v2 30 Hz test profile의 기존 5 s topic warmup을 측정한다. 필수 범위 위반은 recorder begin/motion 0 + `BLOCKED + FAIL`이다. 그 뒤 exact plan/TEST_ONLY paths/numeric-proxy ON을 6.4의 변경 없는 digest에 한해 coordinator가 이번 한 번 버튼 승인할 수 있고, 그 밖에는 사람이 승인한다. cell-clear와 현장 감시는 위임되지 않는다.
 6. **G2-S5 bounded live:** recorder begin 뒤 5 s/60 durable-row actual-recorder readiness가 same quality bound로 PASS해야 한 active child를 dispatch한다. 그 뒤 7.5 ordering대로 close/lift→freeze→numeric proxy→녹화 밖 recycle/release/return→human landing→scene/commit/validator/cell-ready를 수행한다. 어떤 readiness/후속 차단·FAIL에서도 later intent는 0이다.
 7. **G2-S6 evidence/report:** workflow/outcome을 분리하고 device/profile/topic warmup, recorder-readiness digest/FPS/drop/alignment/timestamp, plan/no-motion, phase/action, gripper reference/close/post-lift, frozen rows, release/scene, transaction/validator, 허용/금지 side-effect count를 보고한다. 모든 mandatory 항목이 통과했을 때만 `PHYSICAL_TEST_ONLY_HOME_PLACE1_PILOT_COMPLETE`를 쓴다.
 
@@ -782,7 +785,7 @@ Goal 2는 architecture 재설계나 production qualification Goal이 아니다. 
 
 - gripper maintenance가 필요한 경우의 empty/clear 확인
 - 실물 cube/alias/cell/E-stop 확인
-- exact plan/scope 승인
+- exact plan/scope 승인. 단, 위 6.4의 변경 없는 최종 digest에 한해서만 coordinator가 이번 한 번 버튼을 대신 누를 수 있음
 - dispatch부터 terminal까지 안전 감시
 - release/landing과 final scene-ready
 
@@ -796,15 +799,15 @@ Goal 1 구현자가 아래 표를 실제 값으로 채운다. 이 표는 product
 
 | 항목 | Goal 1 완료 값 |
 |---|---|
-| implementation commit / tree digest | `PENDING_GOAL_1` |
-| schema versions/digests | `PENDING_GOAL_1` |
-| focused tests / full suite / browser QA | `PENDING_GOAL_1` |
-| forbidden production side-effect counts | `PENDING_GOAL_1` |
-| capability matrix | `PENDING_GOAL_1` |
-| TEST_ONLY roots / start binding / numeric scope | `PENDING_GOAL_1` |
-| recorder/recovery ordering trace | `PENDING_GOAL_1` |
-| exact unresolved physical dependencies | `PENDING_GOAL_1` |
-| dirty `src/frcobot_ros2` preservation | `PENDING_GOAL_1` |
+| implementation commit / tree digest | code integration `7b7bc7b5373e79ff8aa573c11a2a2b2e5a171a00` / `debc580a642fc7745ce74e8d740a947af8cbf00e`; push 0 |
+| schema versions/digests | `campaign_draft.v1`, `collection_campaign_manifest.v1`, `campaign_compilation_receipt.v1`, `campaign_episode_context.v1`, `operator_session_view.v1`, `operator_intent.v1`, `operator_intent_result.v1`, `test_only_state_initialization.v1`, `test_only_episode_binding.v1`, `fake_episode_result.v1`; canonical digest/replay checks PASS; frozen plan SHA256 `6501694b…810` |
+| focused tests / full suite / browser QA | final focused 61 tests (`session 4 + operator 6 + run_job 21 + bridge 6 + fake console 11 + UI 13`) exit 0; full 283 tests exit 0; real browser success/cancel flows + regression 26 checks PASS; mobile Lighthouse accessibility 100 |
+| forbidden production side-effect counts | success 3 synthetic episodes와 cancel-before-approval 모두 `physical_factory/robot/gripper/camera/production_recorder/dataset/production_run_state/HUMAN/candidate/inventory/production_coverage/training=0`; success의 fake `begin/readiness/freeze/commit=3/3/3/3`, cancel은 `0/0/0/0` |
+| capability matrix | `FAKE×AUTHOR/PLAN/LIVE`는 temp draft/synthetic plan/fake ports만; `PHYSICAL×AUTHOR`는 session-only, `PHYSICAL×PLAN/LIVE`는 Goal 1 construction/dispatch 0이고 Goal 2 gate 뒤에만 열림 |
+| TEST_ONLY roots / start binding / numeric scope | browser artifact `/tmp/fake-operator-console-*`는 종료 시 삭제; FAKE episode context의 root/start는 `null`; physical root template 3종과 `MOTION_Q_SAFE_START` ≤0.1 s/≤0.01 rad validator, `HIL_NUMERIC_PROXY`를 pure fixture로 검증; authority 전부 `NONE` |
+| recorder/recovery ordering trace | `plan→button→approve→begin→60-row readiness→execute→post-lift freeze→HIL proxy→녹화 밖 recycle/release/return→scene transition→commit→validator/cell-ready`; frozen rows `60→60`; failure/cancel은 later intent 0 |
+| exact unresolved physical dependencies | fresh robot/controller/gripper state, stable one-camera ID/profile와 5 s warmup, HOME joint snapshot, exact alias/cube/cell/E-stop 현장 확인, optional gripper maintenance, real plan-only, actual recorder readiness, dispatch-terminal 감시, release/landing/final scene-ready |
+| dirty `src/frcobot_ros2` preservation | 시작과 동일한 `60755d44d521a5ad6bee8494cc19522f8801aa20-dirty`; edit/stage/clean/submodule command 0 |
 
 Goal 2는 ledger를 authority로 신뢰하지 않고 commit/config/hardware를 fresh recheck한다. 그 목적은 재설계·반복 리서치를 없애고 drift를 빠르게 찾는 것이다.
 
@@ -868,7 +871,7 @@ Goal 2는 ledger를 authority로 신뢰하지 않고 commit/config/hardware를 f
 
 ## 13. 계획 acceptance
 
-다음 조건을 모두 만족할 때 이 문서를 `REVIEWED_READY_FOR_GOAL_PROMPT`로 바꾼다.
+아래 계획 acceptance를 충족했고 Goal 1 executable acceptance까지 통과해 이 문서를 `OFFLINE_COLLECTION_CAMPAIGN_UX_COMPLETE`로 닫았다. Goal 2의 실물 측정은 별도다.
 
 - 사용자 의도와 물리환경 snapshot이 누락 없이 기록됨
 - state-space axes와 UI single-screen projection이 합의됨
@@ -1103,6 +1106,12 @@ Goal 1의 같은 UI/handler/`CampaignSession`/fresh `OneJob`을 사용해
 - 사용자는 HOME과 위 exact place target 사이의 bounded physical motion을 사전 허용했다.
   이는 미래 plan digest, 다른 X/Y/yaw, second episode, P6 variant, `pick_place`, jog,
   semantic/landing/training approval을 포함하지 않는다.
+- 이번 한 번에 한해 최종 digest-locked `TEST_ONLY` 계획이 정확히
+  `HOME ↔ place1 (PLACE_A@place-a-yaw0-r002)`, yaw 0°, local `(0,0)`, wood cube,
+  v2 `DIRECT` pickup + same-cell recycle, 한 episode이면 coordinator가 exact-plan 승인 버튼을 누를 수 있다.
+  이는 authenticated `HUMAN` provenance가 아닌 명시적 local button 위임이다.
+  scope 변경 또는 fresh replan으로 digest가 바뀌는 즉시 위임은 무효다.
+  semantic `PASS`, `LANDED`, final scene-ready와 gripper maintenance 승인은 위임되지 않았다.
 
 허용된 exact physical effect:
 - configured known robot/controller/camera graph의 foreground bring-up/attach와 technical preflight
@@ -1146,7 +1155,8 @@ Goal 1의 같은 UI/handler/`CampaignSession`/fresh `OneJob`을 사용해
 9. 한 화면에 alias/scene checklist, exact plan digest/path/clearance/speed,
    TEST_ONLY paths와 `TEST_ONLY 기계적 그리퍼 판정` toggle를 보여 준다.
    toggle은 사용자 의도대로 기본 ON이지만 exact approval scope에 sealed한다.
-   사람이 버튼을 누르지 않으면 robot/recorder goal 0의
+   위임된 exact scope와 마지막 revalidation의 digest가 모두 동일하면 coordinator가 이번 한 번 승인 버튼을 누른다.
+   scope/digest가 다르거나 위임 조건을 증명하지 못하면 버튼을 누르지 않고 robot/recorder goal 0의
    `PAUSED_AWAITING_OPERATOR + NOT_MEASURED`로 대기한다.
 10. 승인 후 recorder begin→bounded actual-recorder readiness→one executor dispatch를 exact order로 수행한다.
     readiness deadline은 5.0 s, 최소 window는 60 durable rows다.
@@ -1188,8 +1198,10 @@ Goal 1의 같은 UI/handler/`CampaignSession`/fresh `OneJob`을 사용해
 사람 현장 checkpoint:
 - 사용자는 passive discovery, digest/config 검증, plan generation/report 동안에는 자리를 비워도 된다.
 - 다음 순간에는 반드시 현장에 있다:
-  gripper maintenance가 필요한 경우, cube/alias/cell/E-stop 확인, exact plan/scope 승인,
+  gripper maintenance가 필요한 경우, cube/alias/cell/E-stop 확인,
   dispatch부터 terminal까지 안전 감시, release/landing/final scene-ready.
+- exact plan/scope 버튼만 위의 변경 없는 최종 digest에 대해 이번 한 번 coordinator에게 위임됐다.
+  이 예외가 현장 확인·감시·결과 판정을 대체하지 않는다.
 - 사람 부재를 번거로운 hardware FAIL로 오판하지 않되,
   active motion 중 감시 부재를 안전하다고 가정해 계속하지 않는다.
 
@@ -1237,3 +1249,11 @@ Goal 1의 같은 UI/handler/`CampaignSession`/fresh `OneJob`을 사용해
 - TEST_ONLY에서만 existing recorder status/`OneJob.start()` seam을 5 s/60 durable-row bounded readiness로 확장하고, same commit-quality rejector·digest evidence·abort/executor-0 계약을 두 Goal prompt와 test matrix에 추가했다.
 - production default, recorder/lifecycle owner와 품질 threshold를 복제하지 않고, readiness prefix는 same TEST_ONLY episode에 보존하도록 고정했다.
 - `run_job.py` plan-only/live/campaign source range citation을 현재 정의 위치로 바로잡았다.
+
+### 2026-08-25 Goal 1 implementation completion
+
+- `6c0ac39..7b7bc7b`에서 campaign draft/compiler, session/setup/TEST_ONLY seams, recorder readiness, button bridge, 통합 UI와 foreground fake console을 구현했다. existing `SeedCampaign`, fresh `OneJob`, `run_live`, recorder quality와 pickup recovery backbone을 재사용했고 별도 runner/recorder/lifecycle framework는 만들지 않았다.
+- real loopback browser에서 automatic budget, direct cell edit, 100 mm three-point wizard, 세 episode button flow와 cancel-before-approval을 수행했다. browser QA 중 terminal evidence가 보이지 않는 결함을 수정해 technical, human semantic, synthetic review/coverage를 한 카드에서 분리 표시한다.
+- focused 61 tests, full 283 tests, browser regression 26 checks와 mobile Lighthouse accessibility 100을 통과했다. synthetic success의 fake recorder 네 단계는 각 3회, cancel은 0회였고 모든 physical/production/HUMAN/training effect는 0이었다.
+- `NO_HARDWARE_USE`를 유지해 robot/camera/gripper/ROS/MoveIt/real recorder/dataset/training/inference를 호출하지 않았고 두 temporary fixture와 foreground console을 종료·정리했다.
+- 사용자의 이번 한정 exact-plan button 위임을 Goal 2에 추가했다. scope 또는 digest 변경 시 무효이며 semantic `PASS`, `LANDED`, final scene-ready와 gripper maintenance에는 적용되지 않는다.
