@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import unittest
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 try:
     from .test_campaign_authoring import draft
@@ -80,7 +80,10 @@ def compiled(count: int = 2):
     return contract, source, manifest, receipt
 
 
-def make_session(count: int = 2, *, factories=None, action="LIVE_COLLECT"):
+def make_session(
+    count: int = 2, *, factories=None, action="LIVE_COLLECT",
+    current_usage=None, clock=None,
+):
     contract, source, manifest, receipt = compiled(count)
     factories = factories or Factories()
     return contract, manifest, factories, CampaignSession(
@@ -97,7 +100,8 @@ def make_session(count: int = 2, *, factories=None, action="LIVE_COLLECT"):
         data_disposition="TEST_ONLY",
         fake_lifecycle_factory=factories.fake,
         physical_lifecycle_factory=factories.physical,
-        clock=lambda: NOW,
+        current_usage=current_usage,
+        clock=clock or (lambda: NOW),
     )
 
 
@@ -170,6 +174,59 @@ class CampaignSessionTests(unittest.TestCase):
         self.assertEqual(set(session.status()["authority"].values()), {
             "VIEW_AND_INTENT_ONLY", "ONE_JOB_ONLY", "NONE",
         })
+
+    def test_campaign_preflight_blocks_before_lifecycle_factory(self):
+        contract = hypothesis()
+        program = draft(contract, count=1)["program_budget"]
+        full = {
+            "rounds": 0, "physical_episodes": 0, "rollout_trials": 0,
+            "hil_prompts": 0, "reviews": 0,
+            "pending_reviews": program["max_pending_reviews"],
+            "storage_bytes": 0,
+        }
+        cases = (
+            (
+                "stale", make_session(1),
+                scene(canonical_digest("scene-0")) | {
+                    "observed_at": (NOW - timedelta(seconds=6)).isoformat().replace("+00:00", "Z"),
+                },
+            ),
+            (
+                "expired", make_session(1, clock=lambda: datetime(2026, 8, 25, 2, 0, tzinfo=timezone.utc)),
+                scene(canonical_digest("scene-0")),
+            ),
+            (
+                "quota", make_session(1, current_usage=full),
+                scene(canonical_digest("scene-0")),
+            ),
+        )
+        for name, (_, _, factories, session), evidence in cases:
+            if name == "stale":
+                evidence["evidence_digest"] = canonical_digest({
+                    key: value for key, value in evidence.items()
+                    if key != "evidence_digest"
+                })
+            with self.subTest(case=name), self.assertRaises(ContractError):
+                session.open_next(
+                    run_id=f"fake-run-{name}", scene_evidence=evidence,
+                )
+            self.assertEqual((factories.fake_calls, factories.physical_calls), (0, 0))
+            self.assertEqual(session.status()["campaign"]["state"], "BLOCKED")
+
+    def test_used_run_is_rejected_before_a_second_factory_call(self):
+        _, _, factories, session = make_session(2)
+        intent = session.open_next(
+            run_id="fake-run-0", scene_evidence=scene(canonical_digest("scene-0")),
+        )
+        session.active_lifecycle.state = "COMPLETE"
+        next_scene = canonical_digest("scene-1")
+        session.complete_active(technical(intent, next_scene))
+        with self.assertRaisesRegex(ContractError, "SEED_CAMPAIGN_RUN_REUSED"):
+            session.open_next(
+                run_id="fake-run-0", scene_evidence=scene(next_scene),
+            )
+        self.assertEqual(factories.fake_calls, 1)
+        self.assertEqual(session.status()["campaign"]["state"], "BLOCKED")
 
     def test_active_child_nonpass_cancel_and_author_only_emit_no_later_intent(self):
         _, _, factories, session = make_session(2)

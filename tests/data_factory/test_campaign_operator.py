@@ -3,7 +3,7 @@ from __future__ import annotations
 import tempfile
 import threading
 import unittest
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 try:
     from .test_campaign_authoring import draft
@@ -20,6 +20,7 @@ from tools.data_factory.campaign_operator import (
 )
 from tools.data_factory.experiment_manifest import SLOT_INPUT_FIELDS
 from tools.data_factory.operator_bridge import INTENT_SCHEMA
+from tools.data_factory.operator_setup import build_test_only_root_binding
 from tools.fr5_data_factory import ContractError, canonical_digest
 
 
@@ -151,7 +152,7 @@ class PureFakePorts:
 def make_operator(
     directory: str, *, effect_scope: str = "FAKE",
     lifecycle_action: str = "LIVE_COLLECT", count: int = 1,
-    technical_status: str = "PASS", current_usage=None,
+    technical_status: str = "PASS", current_usage=None, clock=None,
 ) -> tuple[CampaignOperator, PureFakePorts]:
     contract = hypothesis()
     ports = PureFakePorts(technical_status=technical_status)
@@ -185,7 +186,7 @@ def make_operator(
         physical_live_call=ports.live,
         repository_root=directory,
         current_usage=current_usage,
-        clock=lambda: NOW,
+        clock=clock or (lambda: NOW),
     )
     return model, ports
 
@@ -196,10 +197,8 @@ class CampaignOperatorTests(unittest.TestCase):
             ("callback", "PLAN_ONLY", "physical_plan_call", object()),
             ("factory", "PLAN_ONLY", "physical_lifecycle_factory", object()),
             ("root", "PLAN_ONLY", "repository_root", object()),
-            (
-                "binding", "LIVE_COLLECT", "physical_bindings_call",
-                lambda _run_id: {"roots": {}, "start_binding": {}},
-            ),
+            ("start-port", "PLAN_ONLY", "physical_start_binding_call", object()),
+            ("root-port", "LIVE_COLLECT", "physical_root_binding_call", lambda _run_id: {}),
         )
         with tempfile.TemporaryDirectory() as directory:
             for name, action, field, invalid in cases:
@@ -208,6 +207,7 @@ class CampaignOperatorTests(unittest.TestCase):
                         directory, effect_scope="PHYSICAL", lifecycle_action=action,
                     )
                     model.physical_activation_gate = ports.activate
+                    model.physical_start_binding_call = lambda _run_id: {}
                     setattr(model, field, invalid)
                     send(model, "compile_draft", {}, f"compile-invalid-{name}")
 
@@ -220,6 +220,91 @@ class CampaignOperatorTests(unittest.TestCase):
                         self.assertEqual(ports.activation_calls, 0)
                         self.assertEqual(ports.fake_factory_calls, 0)
                         self.assertEqual(sum(ports.counters.values()), 0)
+
+    def test_physical_campaign_gates_run_before_activation(self):
+        with tempfile.TemporaryDirectory() as directory:
+            contract = hypothesis()
+            program = draft(contract, count=1)["program_budget"]
+            full = {
+                "rounds": 0, "physical_episodes": 0, "rollout_trials": 0,
+                "hil_prompts": 0, "reviews": 0,
+                "pending_reviews": program["max_pending_reviews"],
+                "storage_bytes": 0,
+            }
+            for case in ("expired", "stale", "scene-digest", "quota"):
+                with self.subTest(case=case):
+                    model, ports = make_operator(
+                        directory, effect_scope="PHYSICAL", lifecycle_action="PLAN_ONLY",
+                        current_usage=full if case == "quota" else None,
+                        clock=(
+                            (lambda: datetime(2026, 8, 25, 2, 0, tzinfo=timezone.utc))
+                            if case == "expired" else None
+                        ),
+                    )
+                    model.physical_activation_gate = ports.activate
+                    start_calls = []
+                    model.physical_start_binding_call = lambda run_id: start_calls.append(run_id) or {}
+                    if case in {"stale", "scene-digest"}:
+                        observed = NOW - timedelta(seconds=6) if case == "stale" else NOW
+
+                        def invalid_scene(_run_id, observed=observed, case=case):
+                            value = {
+                                "schema_version": "data_factory.scene_freshness_evidence.v1",
+                                "scene_digest": canonical_digest("wrong") if case == "scene-digest" else ports.scene_digest,
+                                "observed_at": observed.isoformat().replace("+00:00", "Z"),
+                            }
+                            value["evidence_digest"] = canonical_digest(value)
+                            return value
+
+                        model.scene_evidence_call = invalid_scene
+                    send(model, "compile_draft", {}, f"compile-{case}")
+                    blocked = send(
+                        model, "run_next", {"run_id": f"SYNTHETIC-run-{case}"},
+                        f"run-{case}",
+                    )["result"]
+                    self.assertFalse(blocked["ok"])
+                    self.assertEqual(ports.activation_calls, 0)
+                    self.assertEqual(start_calls, [])
+                    self.assertEqual(ports.fake_factory_calls, 0)
+                    self.assertEqual(sum(ports.counters.values()), 0)
+
+    def test_current_start_port_runs_only_after_physical_activation(self):
+        with tempfile.TemporaryDirectory() as directory:
+            for action in ("PLAN_ONLY", "LIVE_COLLECT"):
+                with self.subTest(action=action):
+                    model, ports = make_operator(
+                        directory, effect_scope="PHYSICAL", lifecycle_action=action,
+                    )
+                    timeline = []
+
+                    def activate():
+                        timeline.append("activate")
+                        return ports.activate()
+
+                    model.physical_activation_gate = activate
+                    model.physical_start_binding_call = (
+                        lambda _run_id: timeline.append("start") or {}
+                    )
+                    if action == "LIVE_COLLECT":
+                        model.physical_root_binding_call = lambda run_id: (
+                            timeline.append("root")
+                            or build_test_only_root_binding(
+                                directory, session_id=model.session_id, run_id=run_id,
+                            )
+                        )
+                    send(model, "compile_draft", {}, f"compile-start-{action}")
+                    with self.assertRaisesRegex(ContractError, "TEST_ONLY_START_FIELDS"):
+                        send(
+                            model, "run_next", {"run_id": "SYNTHETIC-run-start"},
+                            f"run-start-{action}",
+                        )
+                    self.assertEqual(
+                        timeline,
+                        (["root"] if action == "LIVE_COLLECT" else []) + ["activate", "start"],
+                    )
+                    self.assertEqual(ports.activation_calls, 1)
+                    self.assertEqual(ports.fake_factory_calls, 0)
+                    self.assertEqual(sum(ports.counters.values()), 0)
 
     def test_assisted_and_direct_edit_share_effect_neutral_draft_and_reconnect(self):
         with tempfile.TemporaryDirectory() as directory:

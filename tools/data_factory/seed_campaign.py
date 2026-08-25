@@ -275,43 +275,48 @@ class SeedCampaign:
             self._active = self._active_lifecycle = None
         raise error
 
-    def _owner(self, owner: object) -> None:
-        if owner != self.lifecycle_owner:
-            self._fail("SEED_CAMPAIGN_OWNER_MISMATCH")
+    def _reject(self, code: str, *, mutate: bool) -> None:
+        if mutate:
+            self._fail(code)
+        raise ContractError(code)
 
-    def _now(self) -> datetime:
+    def _owner(self, owner: object, *, mutate: bool = True) -> None:
+        if owner != self.lifecycle_owner:
+            self._reject("SEED_CAMPAIGN_OWNER_MISMATCH", mutate=mutate)
+
+    def _now(self, *, mutate: bool = True) -> datetime:
         try:
             value = self.clock()
         except Exception:
-            self._fail("SEED_CAMPAIGN_CLOCK")
+            self._reject("SEED_CAMPAIGN_CLOCK", mutate=mutate)
         if not isinstance(value, datetime) or value.tzinfo is None or value.utcoffset() is None:
-            self._fail("SEED_CAMPAIGN_CLOCK")
+            self._reject("SEED_CAMPAIGN_CLOCK", mutate=mutate)
         return value.astimezone(timezone.utc)
 
-    def _open(self, owner: object) -> datetime:
-        self._owner(owner)
+    def _open(self, owner: object, *, mutate: bool = True) -> datetime:
+        self._owner(owner, mutate=mutate)
         if self.state != "READY":
             if self.state == "ACTIVE":
-                self._fail("SEED_CAMPAIGN_ACTIVE_INTENT")
+                self._reject("SEED_CAMPAIGN_ACTIVE_INTENT", mutate=mutate)
             raise ContractError("SEED_CAMPAIGN_TERMINAL")
-        now = self._now()
+        now = self._now(mutate=mutate)
         if now >= self._expiry:
-            self._fail("SEED_CAMPAIGN_EXPIRED")
+            self._reject("SEED_CAMPAIGN_EXPIRED", mutate=mutate)
         return now
 
-    def _scene(self, value: object, now: datetime) -> None:
+    def _scene(self, value: object, now: datetime, *, mutate: bool = True) -> None:
         evidence = _exact(value, SCENE_EVIDENCE_FIELDS, "SEED_CAMPAIGN_SCENE_EVIDENCE")
         if evidence["schema_version"] != "data_factory.scene_freshness_evidence.v1":
-            self._fail("SEED_CAMPAIGN_SCENE_EVIDENCE")
+            self._reject("SEED_CAMPAIGN_SCENE_EVIDENCE", mutate=mutate)
         _digest(evidence["scene_digest"], "SEED_CAMPAIGN_SCENE_EVIDENCE")
         expected = canonical_digest({key: item for key, item in evidence.items() if key != "evidence_digest"})
         if _digest(evidence["evidence_digest"], "SEED_CAMPAIGN_SCENE_EVIDENCE") != expected:
-            self._fail("SEED_CAMPAIGN_EVIDENCE_DIGEST_MISMATCH")
+            self._reject("SEED_CAMPAIGN_EVIDENCE_DIGEST_MISMATCH", mutate=mutate)
         observed = _timestamp(evidence["observed_at"], "SEED_CAMPAIGN_SCENE_EVIDENCE")
         if observed > now or now - observed > self.max_evidence_age:
-            self._fail("SEED_CAMPAIGN_STALE_SCENE")
+            self._reject("SEED_CAMPAIGN_STALE_SCENE", mutate=mutate)
         if evidence["scene_digest"] != self._expected_scene_digest:
-            self._fail("SEED_CAMPAIGN_SCENE_DIGEST_MISMATCH")
+            self._reject("SEED_CAMPAIGN_SCENE_DIGEST_MISMATCH", mutate=mutate)
 
     def _demand(self, slot: Mapping[str, Any]) -> dict[str, int]:
         return {
@@ -320,25 +325,46 @@ class SeedCampaign:
             **_slot_budget(slot),
         }
 
-    def _quota(self, slot: Mapping[str, Any]) -> dict[str, int]:
+    def _quota(self, slot: Mapping[str, Any], *, mutate: bool = True) -> dict[str, int]:
         budget = self.manifest["program_budget"]
         if not self._round_reserved and self._program_usage["rounds"] + 1 > budget["max_rounds"]:
-            self._fail("SEED_CAMPAIGN_ROUND_QUOTA")
+            self._reject("SEED_CAMPAIGN_ROUND_QUOTA", mutate=mutate)
         if self._program_usage["pending_reviews"] >= budget["max_pending_reviews"]:
-            self._fail("SEED_CAMPAIGN_PENDING_REVIEW_CEILING")
+            self._reject("SEED_CAMPAIGN_PENDING_REVIEW_CEILING", mutate=mutate)
         if any(
             self._program_usage[resource] >= budget[limit]
             for resource, limit in PROGRAM_LIMITS.items()
             if resource != "pending_reviews"
         ):
-            self._fail("SEED_CAMPAIGN_PROGRAM_QUOTA")
+            self._reject("SEED_CAMPAIGN_PROGRAM_QUOTA", mutate=mutate)
         demand = self._demand(slot)
         for resource, amount in demand.items():
             if self._manifest_usage[resource] + amount > self.manifest["manifest_budget"]["max_" + resource]:
-                self._fail("SEED_CAMPAIGN_MANIFEST_QUOTA")
+                self._reject("SEED_CAMPAIGN_MANIFEST_QUOTA", mutate=mutate)
             if self._program_usage[resource] + amount > budget[PROGRAM_LIMITS[resource]]:
-                self._fail("SEED_CAMPAIGN_PROGRAM_QUOTA")
+                self._reject("SEED_CAMPAIGN_PROGRAM_QUOTA", mutate=mutate)
         return demand
+
+    def _preflight_intent(
+        self, *, owner: str, run_id: str, scene_evidence: Mapping[str, Any],
+        mutate: bool,
+    ) -> tuple[str, Mapping[str, Any], dict[str, int]]:
+        now = self._open(owner, mutate=mutate)
+        run_id = _identifier(run_id, "SEED_CAMPAIGN_RUN_ID")
+        if run_id in self._used_run_ids:
+            self._reject("SEED_CAMPAIGN_RUN_REUSED", mutate=mutate)
+        self._scene(scene_evidence, now, mutate=mutate)
+        slot = self.manifest["slots"][self._index]
+        return run_id, slot, self._quota(slot, mutate=mutate)
+
+    def preflight_intent(
+        self, *, owner: str, run_id: str, scene_evidence: Mapping[str, Any],
+    ) -> None:
+        """Validate the next intent without reserving state, usage, or a lifecycle."""
+        self._preflight_intent(
+            owner=owner, run_id=run_id, scene_evidence=scene_evidence,
+            mutate=False,
+        )
 
     def _build_intent(self, slot: Mapping[str, Any], run_id: str) -> dict[str, Any]:
         base = self._bases[slot["base_condition_digest"]]
@@ -389,15 +415,12 @@ class SeedCampaign:
     def _start_intent(
         self, *, owner: str, run_id: str, lifecycle: object, scene_evidence: Mapping[str, Any],
     ) -> dict[str, Any]:
-        now = self._open(owner)
-        run_id = _identifier(run_id, "SEED_CAMPAIGN_RUN_ID")
-        if run_id in self._used_run_ids:
-            self._fail("SEED_CAMPAIGN_RUN_REUSED")
+        run_id, slot, demand = self._preflight_intent(
+            owner=owner, run_id=run_id, scene_evidence=scene_evidence,
+            mutate=True,
+        )
         if any(item is lifecycle for item in self._used_lifecycles) or getattr(lifecycle, "state", None) != "IDLE":
             self._fail("SEED_CAMPAIGN_ONE_JOB_NOT_FRESH")
-        self._scene(scene_evidence, now)
-        slot = self.manifest["slots"][self._index]
-        demand = self._quota(slot)
         intent = self._build_intent(slot, run_id)
         if not self._round_reserved:
             self._program_usage["rounds"] += 1

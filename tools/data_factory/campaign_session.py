@@ -157,19 +157,52 @@ class CampaignSession:
         self, run_id: str, roots: Mapping[str, Any] | None,
         start_binding: Mapping[str, Any] | None,
     ) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
-        if self.effect_scope != "PHYSICAL" or self.lifecycle_action != "LIVE_COLLECT":
+        if self.effect_scope != "PHYSICAL":
             if roots is not None or start_binding is not None:
                 raise ContractError("CAMPAIGN_SESSION_UNUSED_PHYSICAL_BINDING")
             return None, None
-        if roots is None or start_binding is None:
+        if self.lifecycle_action == "PLAN_ONLY" and roots is not None:
+            raise ContractError("CAMPAIGN_SESSION_UNUSED_PHYSICAL_BINDING")
+        if self.lifecycle_action == "LIVE_COLLECT" and roots is None:
             raise ContractError("CAMPAIGN_SESSION_PHYSICAL_BINDING_REQUIRED")
-        roots = validate_test_only_root_binding(roots, repository_root=self.repository_root)
-        if roots["session_id"] != self.session_id or roots["run_id"] != run_id:
-            raise ContractError("CAMPAIGN_SESSION_ROOT_BINDING")
+        if start_binding is None:
+            raise ContractError("CAMPAIGN_SESSION_PHYSICAL_BINDING_REQUIRED")
+        if roots is not None:
+            roots = validate_test_only_root_binding(roots, repository_root=self.repository_root)
+            if roots["session_id"] != self.session_id or roots["run_id"] != run_id:
+                raise ContractError("CAMPAIGN_SESSION_ROOT_BINDING")
         start = validate_test_only_start_binding(
             start_binding, manifest=self.manifest, hypothesis=self._campaign.hypothesis,
         )
         return roots, start
+
+    def _preflight_next(
+        self, *, run_id: str, scene_evidence: Mapping[str, Any],
+    ) -> None:
+        if self.lifecycle_action == "AUTHOR_ONLY":
+            raise ContractError("CAMPAIGN_SESSION_AUTHOR_ONLY")
+        if self._cancel.is_set():
+            raise ContractError("CAMPAIGN_SESSION_CANCELLED")
+        if self._active is not None:
+            raise ContractError("CAMPAIGN_SESSION_ACTIVE_CHILD")
+        if not isinstance(run_id, str) or not SAFE_ID.fullmatch(run_id):
+            raise ContractError("CAMPAIGN_SESSION_RUN_ID")
+        try:
+            self._campaign.preflight_intent(
+                owner=self.lifecycle_owner, run_id=run_id,
+                scene_evidence=scene_evidence,
+            )
+        except ContractError as exc:
+            if self._campaign.state == "READY":
+                self._campaign.fault(owner=self.lifecycle_owner, code=exc.code)
+            raise
+
+    def preflight_next(
+        self, *, run_id: str, scene_evidence: Mapping[str, Any],
+    ) -> None:
+        """Fail closed on campaign gates without constructing a child lifecycle."""
+        with self._lock:
+            self._preflight_next(run_id=run_id, scene_evidence=scene_evidence)
 
     def open_next(
         self, *, run_id: str, scene_evidence: Mapping[str, Any],
@@ -178,14 +211,7 @@ class CampaignSession:
     ) -> dict[str, Any]:
         """Create and bind one fresh child after all session gates pass."""
         with self._lock:
-            if self.lifecycle_action == "AUTHOR_ONLY":
-                raise ContractError("CAMPAIGN_SESSION_AUTHOR_ONLY")
-            if self._cancel.is_set():
-                raise ContractError("CAMPAIGN_SESSION_CANCELLED")
-            if self._active is not None:
-                raise ContractError("CAMPAIGN_SESSION_ACTIVE_CHILD")
-            if not isinstance(run_id, str) or not SAFE_ID.fullmatch(run_id):
-                raise ContractError("CAMPAIGN_SESSION_RUN_ID")
+            self._preflight_next(run_id=run_id, scene_evidence=scene_evidence)
             checked_roots, checked_start = self._physical_bindings(run_id, roots, start_binding)
             lifecycle = self._factory()
             if getattr(lifecycle, "state", None) != "IDLE":

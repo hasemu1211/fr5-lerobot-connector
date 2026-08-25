@@ -197,6 +197,53 @@ class SeedCampaignTests(unittest.TestCase):
                 self.assertIsNone(campaign.active_lifecycle)
         self.assert_no_side_effects(sentinels)
 
+    def test_preflight_validates_without_reserving_or_sealing(self) -> None:
+        sentinels = SideEffectSentinels()
+        _, manifest, campaign = self.make_campaign()
+        before = (campaign.status(), campaign.usage)
+        campaign.preflight_intent(
+            owner="offline-seed-owner", run_id="seed-run-0",
+            scene_evidence=scene(digest("scene-0")),
+        )
+        self.assertEqual((campaign.status(), campaign.usage), before)
+        self.start(campaign, FakeOneJob(sentinels), 0, digest("scene-0"))
+        self.assertEqual(campaign.usage["physical_episodes"], before[1]["physical_episodes"] + 1)
+
+        maximum = manifest["program_budget"]["max_pending_reviews"]
+        cases = []
+        cases.append(("owner", self.make_campaign()[2], "other-owner", scene(digest("scene-0"))))
+        expired_clock = Clock(datetime(2026, 1, 2, tzinfo=timezone.utc))
+        cases.append(("expired", self.make_campaign(clock=expired_clock)[2], "offline-seed-owner", scene(digest("scene-0"))))
+        cases.append(("stale", self.make_campaign()[2], "offline-seed-owner", scene(digest("scene-0"), NOW - timedelta(seconds=6))))
+        cases.append(("scene", self.make_campaign()[2], "offline-seed-owner", scene(digest("wrong-scene"))))
+        full = usage(manifest)
+        full["pending_reviews"] = maximum
+        cases.append(("quota", self.make_campaign(current_usage=full)[2], "offline-seed-owner", scene(digest("scene-0"))))
+        for name, checked, owner, evidence in cases:
+            with self.subTest(case=name):
+                before = (checked.status(), checked.usage)
+                with self.assertRaises(ContractError):
+                    checked.preflight_intent(
+                        owner=owner, run_id="seed-run-0", scene_evidence=evidence,
+                    )
+                self.assertEqual((checked.status(), checked.usage), before)
+        self.assert_no_side_effects(sentinels)
+
+    def test_preflight_rejects_used_run_without_constructing_or_mutating(self) -> None:
+        sentinels = SideEffectSentinels()
+        _, _, campaign = self.make_campaign()
+        lifecycle = FakeOneJob(sentinels)
+        intent = self.start(campaign, lifecycle, 0, digest("scene-0"))
+        next_scene = self.pass_intent(campaign, lifecycle, intent, 0)
+        before = (campaign.status(), campaign.usage)
+        with self.assertRaisesRegex(ContractError, "SEED_CAMPAIGN_RUN_REUSED"):
+            campaign.preflight_intent(
+                owner="offline-seed-owner", run_id="seed-run-0",
+                scene_evidence=scene(next_scene),
+            )
+        self.assertEqual((campaign.status(), campaign.usage), before)
+        self.assert_no_side_effects(sentinels)
+
     def test_cancel_fault_and_non_pass_never_emit_a_later_intent(self) -> None:
         sentinels = SideEffectSentinels()
         for case in ("cancel", "fault", "technical-fail", "incomplete"):
