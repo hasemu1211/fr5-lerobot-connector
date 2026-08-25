@@ -199,7 +199,8 @@ class LoopbackBridgeTests(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertIn(b'<meta name="operator-token" content="fixed-test-token-that-is-long-enough">', body)
         self.assertIn(("Cache-Control", "no-store"), headers)
-        status, _, body = self.request("GET", "/api/view")
+        view_headers = {"X-Operator-Token": self.bridge.token}
+        status, _, body = self.request("GET", "/api/view", headers=view_headers)
         self.assertEqual(status, 200)
         snapshot = json.loads(body)
         status, _, body = self.post(intent(
@@ -207,11 +208,16 @@ class LoopbackBridgeTests(unittest.TestCase):
         ))
         result = json.loads(body)
         self.assertEqual((status, result["consumed"], self.state), (200, True, {"mode": "FAKE", "hardware_calls": 0, "value": 2}))
-        status, _, body = self.request("GET", "/api/view")
+        status, _, body = self.request("GET", "/api/view", headers=view_headers)
         reconnected = json.loads(body)
         self.assertEqual((reconnected["revision"], reconnected["projection"]["value"]), (1, 2))
 
     def test_origin_token_host_stale_replay_and_malformed_json_are_rejected(self):
+        for token in (None, "wrong-token-that-is-still-long-enough"):
+            headers = {} if token is None else {"X-Operator-Token": token}
+            status, _, body = self.request("GET", "/api/view", headers=headers)
+            self.assertEqual((status, json.loads(body)["code"]), (403, "BRIDGE_TOKEN"))
+
         snapshot = self.core.snapshot()
         valid = intent(snapshot, "update_fixture", {"value": 2}, "http-intent-r001")
         cases = (

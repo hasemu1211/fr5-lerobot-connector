@@ -363,6 +363,8 @@ class LoopbackBridge:
                     return self._error(HTTPStatus.BAD_REQUEST, "BRIDGE_HOST")
                 path = urlsplit(self.path).path
                 if path == "/api/view":
+                    if self.headers.get("X-Operator-Token") != bridge.token:
+                        return self._error(HTTPStatus.FORBIDDEN, "BRIDGE_TOKEN")
                     try:
                         return self._json(HTTPStatus.OK, bridge.core.snapshot())
                     except ContractError as exc:
