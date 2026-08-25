@@ -984,7 +984,7 @@ def _cli():
     try:
         args = parser.parse_args()
         if args.command == "validate-home-candidate":
-            text = sys.stdin.read() if args.candidate == "-" else Path(args.candidate).read_text()
+            text = sys.stdin.buffer.read().decode("utf-8") if args.candidate == "-" else Path(args.candidate).read_text()
             print(json.dumps(validate_home_candidate(load_json_strict(text), urdf=args.urdf, expected_robot_system_id=args.expected_robot_system_id), sort_keys=True, separators=(",", ":"), allow_nan=False)); return 0
         if args.command == "build-job":
             selected = _document(args.selected_sheet, "INPUT_SELECTED_SHEET")
