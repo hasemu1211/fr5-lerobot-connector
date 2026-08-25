@@ -114,15 +114,20 @@ def _recorder_response(request: Mapping[str, Any], state: str, run_id: str | Non
 
 def _plan_envelope(run_id: str, program: Mapping[str, Any],
                    scene_binding: Mapping[str, Any]) -> tuple[str, dict[str, Any], dict[str, Any]]:
+    initial = next(
+        step["joint_positions_rad"] for step in program["steps"]
+        if step["phase"] == "SAFE_POSE_PTP"
+    )
     planned = {
         "schema_version": "fr5.pickup_plan.v3", "run_id": run_id,
         "scene_binding": copy.deepcopy(dict(scene_binding)),
         "motion_program_digest": canonical_digest(program),
         "resolved_job_digest": program["resolved_job_digest"],
         "binding_digests": copy.deepcopy(program["binding_digests"]),
+        "initial_joint_state": copy.deepcopy(initial),
         "steps": [
-            {"phase": phase, "start_joint_state": [0.0] * 6,
-             "final_joint_state": [0.0] * 6}
+            {"phase": phase, "start_joint_state": copy.deepcopy(initial),
+             "final_joint_state": copy.deepcopy(initial)}
             for phase in PHASES
         ],
     }
@@ -299,7 +304,10 @@ def make_fake_one_job(*, trace: list[str], counters: dict[str, int],
     return job
 
 
-def _motion_program(intent: Mapping[str, Any], hypothesis: Mapping[str, Any]) -> dict[str, Any]:
+def _motion_program(
+    intent: Mapping[str, Any], hypothesis: Mapping[str, Any],
+    start_binding: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
     resolver = next(
         item for item in hypothesis["resolver_receipts"]
         if item["resolver_result_digest"] == intent["base_condition"]["resolver_result_digest"]
@@ -320,6 +328,11 @@ def _motion_program(intent: Mapping[str, Any], hypothesis: Mapping[str, Any]) ->
         "motion_qualification": canonical_digest("synthetic-motion-qualification"),
         "home_candidate": intent["robot_start_pose"]["home_candidate_digest"],
     }
+    if start_binding is not None:
+        bindings.update(
+            motion_qualification=start_binding["motion_qualification_digest"],
+            home_candidate=start_binding["home_candidate_digest"],
+        )
     target = {
         "translation_m": [0.0, 0.0, 0.1],
         "rotation_columns": [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],

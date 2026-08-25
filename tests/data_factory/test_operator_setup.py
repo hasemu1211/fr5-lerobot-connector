@@ -29,6 +29,7 @@ from tools.data_factory.operator_setup import (
     validate_print_measurements,
     validate_test_only_root_binding,
     validate_test_only_episode_binding,
+    validate_test_only_planned_start,
     validate_test_only_state_initialization,
     validate_test_only_start_binding,
 )
@@ -302,6 +303,50 @@ class OperatorSetupTests(unittest.TestCase):
                 manifest=manifest, hypothesis=contract,
                 motion_qualification=wrong_motion, home_candidate=home,
                 current_snapshot=pose_snapshot(target),
+            )
+
+    def test_planned_start_rechecks_fresh_executor_state_and_binds_evidence(self):
+        contract, motion, home = compatible_start_fixture()
+        manifest, _ = compile_collection_campaign(draft(contract, count=1), hypothesis=contract)
+        start = build_test_only_start_binding(
+            manifest=manifest, hypothesis=contract, motion_qualification=motion,
+            home_candidate=home,
+            current_snapshot=pose_snapshot(motion["qualified_safe_joint_positions_rad"]),
+        )
+        bindings = {
+            "motion_qualification": start["motion_qualification_digest"],
+            "home_candidate": start["home_candidate_digest"],
+        }
+        program = {
+            "binding_digests": bindings,
+            "planning": {"max_joint_state_age_s": start["max_snapshot_age_s"]},
+        }
+        plan = {
+            "binding_digests": bindings,
+            "initial_joint_state": list(start["target_rad"]),
+        }
+        evidence = validate_test_only_planned_start(
+            start_binding=start,
+            episode_binding={"start_binding_digest": start["binding_digest"]},
+            motion_program=program,
+            plan=plan,
+        )
+        self.assertEqual(
+            (evidence["status"], evidence["start_binding_digest"], evidence["max_joint_delta_rad"]),
+            ("PASS", start["binding_digest"], 0.0),
+        )
+        self.assertEqual(set(evidence["authority"].values()), {"NONE"})
+
+        outside = {**plan, "initial_joint_state": [
+            plan["initial_joint_state"][0] + start["tolerance_rad"] + 0.001,
+            *plan["initial_joint_state"][1:],
+        ]}
+        with self.assertRaisesRegex(ContractError, "TEST_ONLY_PLANNED_START_MISMATCH"):
+            validate_test_only_planned_start(
+                start_binding=start,
+                episode_binding={"start_binding_digest": start["binding_digest"]},
+                motion_program=program,
+                plan=outside,
             )
 
     def test_start_binding_rejects_multi_slot_and_never_invents_homing(self):

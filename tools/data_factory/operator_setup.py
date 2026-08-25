@@ -74,6 +74,7 @@ EPISODE_BINDING_FIELDS = frozenset({
     "split_group", "repeat_index", "budget_digests", "expires_at",
     "data_disposition", "authority", "binding_digest",
 })
+PLANNED_START_EVIDENCE_SCHEMA = "data_factory.test_only_planned_start_evidence.v1"
 
 
 def _exact(value: object, fields: frozenset[str], code: str) -> Mapping[str, Any]:
@@ -487,43 +488,110 @@ def validate_test_only_start_binding(
 ) -> dict[str, Any]:
     hypothesis = validate_fr5_hypothesis(hypothesis)
     manifest = validate_collection_campaign_manifest(manifest, hypothesis=hypothesis)
-    result = copy.deepcopy(dict(_exact(value, START_FIELDS, "TEST_ONLY_START_FIELDS")))
+    result = _validate_test_only_start_shape(value)
     poses = [
         item for item in hypothesis["robot_start_poses"]
         if item["robot_start_pose_id"] == result.get("robot_start_pose_id")
     ]
     if (
-        result["scope"] != "MOTION_Q_SAFE_START"
-        or result["data_disposition"] != "TEST_ONLY"
-        or result["status"] != "BOUND_TEST_ONLY"
-        or result["authority"] != NO_AUTHORITY
-        or len(manifest.get("slots", [])) != 1
+        len(manifest.get("slots", [])) != 1
         or result["manifest_digest"] != manifest.get("manifest_digest")
         or result["slot_digest"] != canonical_digest(manifest["slots"][0])
         or result["robot_start_pose_id"] != manifest["slots"][0]["robot_start_pose_id"]
         or len(poses) != 1
         or result["robot_start_pose_qualification_digest"] != poses[0]["qualification_digest"]
-        or result["joint_order"] != list(JOINTS)
     ):
         raise ContractError("TEST_ONLY_START_BINDING")
+    return result
+
+
+def _validate_test_only_start_shape(value: object) -> dict[str, Any]:
+    """Validate the sealed target binding without claiming its old snapshot is current."""
+    result = copy.deepcopy(dict(_exact(value, START_FIELDS, "TEST_ONLY_START_FIELDS")))
+    if (
+        result["scope"] != "MOTION_Q_SAFE_START"
+        or result["data_disposition"] != "TEST_ONLY"
+        or result["status"] != "BOUND_TEST_ONLY"
+        or result["authority"] != NO_AUTHORITY
+    ):
+        raise ContractError("TEST_ONLY_START_BINDING")
+    for field in ("robot_start_pose_id", "motion_qualification_id"):
+        _identifier(result[field], "TEST_ONLY_START_BINDING")
     for field in (
         "manifest_digest", "slot_digest", "robot_start_pose_qualification_digest",
         "motion_qualification_digest", "home_candidate_digest", "snapshot_digest",
     ):
         _digest(result[field], "TEST_ONLY_START_BINDING")
-    tolerance_value = _finite(result["tolerance_rad"], "TEST_ONLY_START_BINDING")
-    age_value = _finite(result["max_snapshot_age_s"], "TEST_ONLY_START_BINDING")
+    tolerance = _finite(result["tolerance_rad"], "TEST_ONLY_START_BINDING")
+    max_age = _finite(result["max_snapshot_age_s"], "TEST_ONLY_START_BINDING")
     if (
-        not isinstance(result["target_rad"], list) or not isinstance(result["current_rad"], list)
-        or len(result["target_rad"]) != len(JOINTS) or len(result["current_rad"]) != len(JOINTS)
-        or not 0 < tolerance_value <= 0.01
-        or not 0 < age_value <= 0.1
-        or any(abs(_finite(actual, "TEST_ONLY_START_BINDING") - _finite(expected, "TEST_ONLY_START_BINDING")) > result["tolerance_rad"] for actual, expected in zip(result["current_rad"], result["target_rad"]))
+        result["joint_order"] != list(JOINTS)
+        or not isinstance(result["target_rad"], list)
+        or not isinstance(result["current_rad"], list)
+        or len(result["target_rad"]) != len(JOINTS)
+        or len(result["current_rad"]) != len(JOINTS)
+        or not 0 < tolerance <= 0.01
+        or not 0 < max_age <= 0.1
     ):
+        raise ContractError("TEST_ONLY_START_BINDING")
+    target = [_finite(item, "TEST_ONLY_START_BINDING") for item in result["target_rad"]]
+    current = [_finite(item, "TEST_ONLY_START_BINDING") for item in result["current_rad"]]
+    if any(abs(actual - expected) > tolerance for actual, expected in zip(current, target)):
         raise ContractError("TEST_ONLY_START_BINDING")
     if result["binding_digest"] != canonical_digest({key: result[key] for key in result if key != "binding_digest"}):
         raise ContractError("TEST_ONLY_START_DIGEST_MISMATCH")
     return result
+
+
+def validate_test_only_planned_start(
+    *, start_binding: Mapping[str, Any], episode_binding: Mapping[str, Any],
+    motion_program: Mapping[str, Any], plan: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Prove the executor's fresh plan snapshot still matches the qualified HOME target."""
+    start = _validate_test_only_start_shape(start_binding)
+    if (
+        not isinstance(episode_binding, Mapping)
+        or episode_binding.get("start_binding_digest") != start["binding_digest"]
+        or not isinstance(motion_program, Mapping)
+        or not isinstance(motion_program.get("binding_digests"), Mapping)
+        or not isinstance(motion_program.get("planning"), Mapping)
+        or not isinstance(plan, Mapping)
+        or plan.get("binding_digests") != motion_program["binding_digests"]
+        or not isinstance(plan.get("initial_joint_state"), list)
+        or len(plan["initial_joint_state"]) != len(JOINTS)
+    ):
+        raise ContractError("TEST_ONLY_PLANNED_START")
+    bindings = motion_program["binding_digests"]
+    max_age = _finite(
+        motion_program["planning"].get("max_joint_state_age_s"),
+        "TEST_ONLY_PLANNED_START",
+    )
+    if (
+        bindings.get("motion_qualification") != start["motion_qualification_digest"]
+        or bindings.get("home_candidate") != start["home_candidate_digest"]
+        or not 0 < max_age <= start["max_snapshot_age_s"]
+    ):
+        raise ContractError("TEST_ONLY_PLANNED_START")
+    initial = [_finite(item, "TEST_ONLY_PLANNED_START") for item in plan["initial_joint_state"]]
+    maximum = max(abs(actual - target) for actual, target in zip(initial, start["target_rad"]))
+    if maximum > start["tolerance_rad"]:
+        raise ContractError("TEST_ONLY_PLANNED_START_MISMATCH")
+    evidence = {
+        "schema_version": PLANNED_START_EVIDENCE_SCHEMA,
+        "start_binding_digest": start["binding_digest"],
+        "motion_qualification_digest": start["motion_qualification_digest"],
+        "home_candidate_digest": start["home_candidate_digest"],
+        "plan_digest": canonical_digest(plan),
+        "initial_joint_state": initial,
+        "target_rad": copy.deepcopy(start["target_rad"]),
+        "max_joint_delta_rad": maximum,
+        "tolerance_rad": start["tolerance_rad"],
+        "max_joint_state_age_s": max_age,
+        "status": "PASS",
+        "authority": copy.deepcopy(NO_AUTHORITY),
+    }
+    evidence["evidence_digest"] = canonical_digest(evidence)
+    return evidence
 
 
 def qualified_table_plane_reference(cell_calibration: Mapping[str, Any]) -> dict[str, Any]:

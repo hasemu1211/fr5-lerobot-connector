@@ -175,7 +175,7 @@ class RunJobTest(unittest.TestCase):
                 self.ops.append(request["op"])
                 return super().request(request, cancel)
 
-        def run(choice, *, stale=False, expired=False):
+        def run(choice, *, stale=False, expired=False, start_mismatch=False):
             directory = tempfile.TemporaryDirectory()
             self.addCleanup(directory.cleanup)
             root = Path(directory.name)
@@ -195,7 +195,13 @@ class RunJobTest(unittest.TestCase):
             roots["binding_digest"] = run_job.canonical_digest(roots)
             episode_binding = {
                 "binding_digest": run_job.canonical_digest("episode-binding"),
+                "start_binding_digest": run_job.canonical_digest("start-binding"),
                 "expires_at": "2000-01-01T00:00:00Z" if expired else "2099-01-01T00:00:00Z",
+            }
+            planned_start = {
+                "start_binding_digest": episode_binding["start_binding_digest"],
+                "evidence_digest": run_job.canonical_digest("planned-start"),
+                "status": "PASS",
             }
             observed = []
 
@@ -232,6 +238,14 @@ class RunJobTest(unittest.TestCase):
                     run_job, "validate_test_only_episode_binding",
                     return_value=episode_binding,
                 ),
+                mock.patch.object(
+                    run_job, "validate_test_only_planned_start",
+                    side_effect=(
+                        run_job.ContractError("TEST_ONLY_PLANNED_START_MISMATCH")
+                        if start_mismatch else None
+                    ),
+                    return_value=planned_start,
+                ),
                 mock.patch.object(run_job, "CellStateStore", return_value=Cell()),
                 mock.patch.object(run_job, "SceneStateStore"),
             ):
@@ -247,6 +261,7 @@ class RunJobTest(unittest.TestCase):
                     decision_timeout_s=0,
                     test_only_root_binding={"fixture": True},
                     test_only_episode_binding={"fixture": True},
+                    test_only_start_binding={"fixture": True},
                     candidate_writer_enabled=False,
                     repository_root=root,
                 )
@@ -272,6 +287,17 @@ class RunJobTest(unittest.TestCase):
                     observed[0]["decision_binding"]["episode_binding"]["binding_digest"],
                     run_job.canonical_digest("episode-binding"),
                 )
+                self.assertEqual(
+                    observed[0]["decision_binding"]["start_binding_digest"],
+                    run_job.canonical_digest("start-binding"),
+                )
+                self.assertEqual(
+                    (
+                        observed[0]["decision_binding"]["planned_start_evidence"]["status"],
+                        observed[0]["decision_binding"]["planned_start_evidence"]["evidence_digest"],
+                    ),
+                    ("PASS", run_job.canonical_digest("planned-start")),
+                )
 
         result, _, ops, recorder = run("APPROVE", stale=True)
         self.assertEqual((result["code"], result["state"]), ("PLAN_DECISION_BINDING", "BLOCKED"))
@@ -281,6 +307,14 @@ class RunJobTest(unittest.TestCase):
         result, observed, ops, recorder = run("APPROVE", expired=True)
         self.assertEqual((result["code"], result["state"]), ("TEST_ONLY_EPISODE_EXPIRED", "BLOCKED"))
         self.assertEqual((observed, ops), ([], []))
+        recorder.assert_not_called()
+
+        result, observed, ops, recorder = run("APPROVE", start_mismatch=True)
+        self.assertEqual(
+            (result["code"], result["state"]),
+            ("TEST_ONLY_PLANNED_START_MISMATCH", "BLOCKED"),
+        )
+        self.assertEqual((observed, ops), ([], ["preflight", "plan"]))
         recorder.assert_not_called()
 
     def test_test_only_scope_rejects_before_resolver_or_filesystem_side_effect(self):
@@ -345,6 +379,7 @@ class RunJobTest(unittest.TestCase):
                     decision_provider=lambda _: None,
                     test_only_root_binding={"fixture": True},
                     test_only_episode_binding={"fixture": True},
+                    test_only_start_binding={"fixture": True},
                     candidate_writer_enabled=False,
                     repository_root=repository,
                 )
@@ -551,7 +586,9 @@ class RunJobTest(unittest.TestCase):
                     camera_profile=PROFILE["camera_profile"],
                     run_root=roots["run_root"], dataset_root=roots["dataset_root"],
                 )
-                program_holder["program"] = _motion_program(intent, contract)
+                program_holder["program"] = _motion_program(
+                    intent, contract, episode_context["start_binding"],
+                )
                 validated = {
                     **resolved, "collection_profile": dict(PROFILE),
                     "object_profile": {"dimensions_mm": [40, 30, 20]},
@@ -606,6 +643,7 @@ class RunJobTest(unittest.TestCase):
                         approval_scope="HIL_NUMERIC_PROXY", decision_timeout_s=0,
                         test_only_root_binding=episode_context["root_binding"],
                         test_only_episode_binding=episode_binding,
+                        test_only_start_binding=episode_context["start_binding"],
                         candidate_writer_enabled=False, repository_root=repository,
                     )
                 cell_store.assert_called_once_with(
