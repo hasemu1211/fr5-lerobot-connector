@@ -61,6 +61,15 @@ PROGRAM_LIMITS = {
 }
 
 
+def _campaign_manifest(value: Mapping[str, Any], hypothesis: Mapping[str, Any]) -> dict[str, Any]:
+    """Read legacy seed v1 or the narrow subset campaign adapter."""
+    if isinstance(value, Mapping) and value.get("schema_version") == "data_factory.collection_campaign_manifest.v1":
+        from tools.data_factory.campaign_authoring import validate_collection_campaign_manifest
+
+        return validate_collection_campaign_manifest(value, hypothesis=hypothesis)
+    return validate_experiment_manifest(value, hypothesis=hypothesis)
+
+
 def _exact(value: object, fields: frozenset[str], code: str) -> Mapping[str, Any]:
     if not isinstance(value, Mapping) or set(value) != fields:
         raise ContractError(code)
@@ -122,8 +131,8 @@ def validate_seed_episode_intent(
     """Validate an emitted intent without granting it any live authority."""
     intent = copy.deepcopy(dict(_exact(value, INTENT_FIELDS, "SEED_INTENT_FIELDS")))
     hypothesis = validate_fr5_hypothesis(hypothesis)
-    manifest = validate_experiment_manifest(manifest, hypothesis=hypothesis)
-    if manifest["kind"] != "seed" or intent["schema_version"] != "data_factory.seed_episode_intent.v1":
+    manifest = _campaign_manifest(manifest, hypothesis)
+    if manifest["kind"] not in {"seed", "collection"} or intent["schema_version"] != "data_factory.seed_episode_intent.v1":
         raise ContractError("SEED_INTENT_SCHEMA")
     _identifier(intent["lifecycle_owner"], "SEED_INTENT_OWNER")
     _identifier(intent["run_id"], "SEED_INTENT_RUN_ID")
@@ -184,12 +193,26 @@ class SeedCampaign:
         self, *, manifest: Mapping[str, Any], hypothesis: Mapping[str, Any],
         lifecycle_owner: str, expires_at: str, initial_scene_digest: str,
         current_usage: Mapping[str, int] | None = None, max_evidence_age_s: float = 5.0,
-        clock=None,
+        clock=None, source_draft: Mapping[str, Any] | None = None,
+        compilation_receipt: Mapping[str, Any] | None = None,
     ):
         self.hypothesis = validate_fr5_hypothesis(hypothesis)
-        self.manifest = validate_experiment_manifest(manifest, hypothesis=self.hypothesis)
-        if self.manifest["kind"] != "seed":
+        self.manifest = _campaign_manifest(manifest, self.hypothesis)
+        if self.manifest["kind"] not in {"seed", "collection"}:
             raise ContractError("SEED_CAMPAIGN_MANIFEST")
+        if self.manifest["kind"] == "collection":
+            if source_draft is None or compilation_receipt is None:
+                raise ContractError("SEED_CAMPAIGN_COMPILATION_RECEIPT_REQUIRED")
+            from tools.data_factory.campaign_authoring import validate_campaign_compilation_receipt
+
+            self.compilation_receipt = validate_campaign_compilation_receipt(
+                compilation_receipt, draft=source_draft, manifest=self.manifest,
+                hypothesis=self.hypothesis,
+            )
+        elif source_draft is not None or compilation_receipt is not None:
+            raise ContractError("SEED_CAMPAIGN_LEGACY_ADAPTER")
+        else:
+            self.compilation_receipt = None
         self.lifecycle_owner = _identifier(lifecycle_owner, "SEED_CAMPAIGN_OWNER")
         self.expires_at = expires_at
         self._expiry = _timestamp(expires_at, "SEED_CAMPAIGN_EXPIRY")
