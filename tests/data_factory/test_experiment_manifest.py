@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+import json
 import unittest
 
 from tools.data_factory.experiment_manifest import (
@@ -9,6 +10,7 @@ from tools.data_factory.experiment_manifest import (
     compile_robot_start_pose,
     compile_rollout_manifest,
     compile_seed_manifest,
+    FR5_TEST_ONLY_FEATURE_CONTRACT,
     validate_experiment_manifest,
     validate_fr5_hypothesis,
 )
@@ -29,16 +31,19 @@ def redigest(value: dict, field: str) -> dict:
     return value
 
 
-def documents() -> dict[str, dict]:
+def documents(
+    feature_contract: dict = FR5_FEATURE_CONTRACT,
+    collection_profile: dict | None = None,
+) -> dict[str, dict]:
     return {
         "robot_system": {
             "schema_version": "data_factory.robot_system.v1",
             "robot_system_id": "fr5-r1", "qualification_status": "QUALIFIED",
             "base_frame": "base_link", "tcp_digest": digest("synthetic-tcp"),
         },
-        "collection_profile": {
+        "collection_profile": copy.deepcopy(collection_profile) if collection_profile is not None else {
             "schema_version": "data_factory.collection_profile.v1",
-            "collection_profile_id": "fr5-dual-rgb-30hz-v1",
+            "collection_profile_id": feature_contract["collection_profile_id"],
             "qualification_status": "QUALIFIED",
         },
         "object_profile": {
@@ -59,14 +64,17 @@ def documents() -> dict[str, dict]:
     }
 
 
-def fixed_contract() -> dict:
-    docs = documents()
+def fixed_contract(
+    feature_contract: dict = FR5_FEATURE_CONTRACT,
+    collection_profile: dict | None = None,
+) -> dict:
+    docs = documents(feature_contract, collection_profile)
     return {
         "schema_version": "data_factory.fr5_fixed_contract.v1",
         "robot_system_id": "fr5-r1", "task": "pickup_e2e",
         "instruction": "pick up the test object",
         "collection_profile_digest": digest(docs["collection_profile"]),
-        "feature_contract": copy.deepcopy(FR5_FEATURE_CONTRACT),
+        "feature_contract": copy.deepcopy(feature_contract),
         "object_profile_id": "object-r1", "grasp_profile_id": "grasp-r1",
         "scene_digest": digest("synthetic-scene"),
         "cell_calibration_id": "calibration-r1",
@@ -78,8 +86,11 @@ def fixed_contract() -> dict:
     }
 
 
-def condition(*, yaw: int, x_mm: int) -> dict:
-    fixed = fixed_contract()
+def condition(
+    *, yaw: int, x_mm: int, feature_contract: dict = FR5_FEATURE_CONTRACT,
+    collection_profile: dict | None = None,
+) -> dict:
+    fixed = fixed_contract(feature_contract, collection_profile)
     return {
         "task_schema_version": "data_factory.job.v1", "task": "pickup_e2e",
         "robot_system_id": "fr5-r1", "place_id": "place-r1",
@@ -92,13 +103,16 @@ def condition(*, yaw: int, x_mm: int) -> dict:
     }
 
 
-def resolver(at: dict, name: str) -> dict:
-    docs = documents()
+def resolver(
+    at: dict, name: str, feature_contract: dict = FR5_FEATURE_CONTRACT,
+    collection_profile: dict | None = None,
+) -> dict:
+    docs = documents(feature_contract, collection_profile)
     sheet_digest = digest(["synthetic-sheet", name])
     job = {
         "schema_version": "data_factory.job.v1", "job_id": f"job-{name}",
         "task": at["task"], "robot_system_id": at["robot_system_id"],
-        "collection_profile_id": "fr5-dual-rgb-30hz-v1", "place_id": at["place_id"],
+        "collection_profile_id": feature_contract["collection_profile_id"], "place_id": at["place_id"],
         "cell_calibration_id": at["cell_calibration_id"],
         "sheet_manifest_digest": sheet_digest, "yaw_deg": at["yaw_deg"],
         "x_mm": at["x_mm"], "y_mm": at["y_mm"],
@@ -209,6 +223,55 @@ def qualification_inputs() -> tuple[dict, dict, list[dict], list[dict], list[dic
     )
 
 
+def single_qualification_inputs(
+    source: str = "SYNTHETIC_TEST_ONLY",
+    collection_profile: dict | None = None,
+) -> tuple[dict, dict, list[dict], list[dict], list[dict], dict]:
+    feature = FR5_TEST_ONLY_FEATURE_CONTRACT
+    fixed = fixed_contract(feature, collection_profile)
+    at = condition(
+        yaw=0, x_mm=10, feature_contract=feature,
+        collection_profile=collection_profile,
+    )
+    report = build_coverage_report(
+        collection_profile_id=feature["collection_profile_id"], domain=[at], episodes=[],
+    )
+    resolvers = [resolver(at, "single", feature, collection_profile)]
+    base = base_qualification(report, resolvers[0], at, "single")
+    base["source"] = source
+    base["dual_view_observability_digest"] = digest({
+        "single_view": "AVAILABLE", "dual_view": "NOT_AVAILABLE",
+    })
+    redigest(base, "qualification_digest")
+    pose = pose_qualification("start-1")
+    pose["source"] = source
+    redigest(pose, "qualification_digest")
+    qualification_catalog = redigest({
+        "schema_version": "data_factory.fr5_qualification_catalog.v1",
+        "source": source, "qualification_status": "QUALIFIED",
+        "fixed_contract_digest": digest(fixed),
+        "coverage_report_digest": digest(report),
+        "coverage_domain_digest": report["domain_digest"],
+        "resolver_result_digests": [digest(resolvers[0])],
+        "base_condition_qualifications": [base],
+        "robot_start_pose_qualifications": [pose],
+        "allowed_pairs": [{
+            "base_condition_qualification_digest": base["qualification_digest"],
+            "robot_start_pose_qualification_digest": pose["qualification_digest"],
+            "split_groups": ["TRAIN"],
+        }],
+    }, "catalog_digest")
+    return fixed, report, resolvers, [base], [pose], qualification_catalog
+
+
+def single_hypothesis(source: str = "SYNTHETIC_TEST_ONLY") -> dict:
+    fixed, report, resolvers, _, _, qualification_catalog = single_qualification_inputs(source)
+    return compile_fr5_hypothesis(
+        fixed_contract=fixed, coverage_report=report, resolver_results=resolvers,
+        qualification_catalog=qualification_catalog,
+    )
+
+
 def hypothesis() -> dict:
     fixed, report, resolvers, _, _, qualification_catalog = qualification_inputs()
     return compile_fr5_hypothesis(
@@ -270,6 +333,139 @@ class ExperimentManifestTests(unittest.TestCase):
         self.assertEqual(value["fixed_contract"]["feature_contract"], FR5_FEATURE_CONTRACT)
         self.assertEqual(value, validate_fr5_hypothesis(value))
         self.assertNotIn("robot", value["resolver_receipts"][0])
+
+    def test_single_camera_test_only_hypothesis_is_byte_stable_and_roundtrips(self) -> None:
+        first, second = single_hypothesis(), single_hypothesis()
+        encoded = json.dumps(first, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        validated = validate_fr5_hypothesis(json.loads(encoded))
+        self.assertEqual(first, second)
+        self.assertEqual(first["fixed_contract"]["feature_contract"], FR5_TEST_ONLY_FEATURE_CONTRACT)
+        self.assertEqual(
+            (len(first["base_conditions"]), len(first["robot_start_poses"]), len(first["allowed_pairs"])),
+            (1, 1, 1),
+        )
+        self.assertEqual(first["allowed_pairs"][0]["split_groups"], ["TRAIN"])
+        self.assertEqual(
+            json.dumps(validated, ensure_ascii=False, sort_keys=True, separators=(",", ":")),
+            encoded,
+        )
+
+    def test_single_camera_profile_is_exact_and_synthetic_only(self) -> None:
+        for name, mutate in (
+            ("profile_id", lambda feature: feature.update(collection_profile_id="wrong-profile")),
+            ("mapping", lambda feature: feature.update(camera_mapping={"up": "camera2"})),
+            ("extra_camera", lambda feature: feature.update(camera_mapping={"up": "camera1", "side": "camera2"})),
+            ("state_dimension", lambda feature: feature.update(state_dimension=6)),
+            ("action_dimension", lambda feature: feature.update(action_dimension=6)),
+        ):
+            fixed, report, resolvers, _, _, qualification_catalog = single_qualification_inputs()
+            mutate(fixed["feature_contract"])
+            with self.subTest(name=name), self.assertRaisesRegex(ContractError, "HYPOTHESIS_FIXED_CONTRACT"):
+                compile_fr5_hypothesis(
+                    fixed_contract=fixed, coverage_report=report, resolver_results=resolvers,
+                    qualification_catalog=qualification_catalog,
+                )
+
+        fixed, report, resolvers, _, _, qualification_catalog = single_qualification_inputs(
+            "QUALIFICATION_ARTIFACT",
+        )
+        with self.assertRaisesRegex(ContractError, "HYPOTHESIS_TEST_ONLY_PROFILE_SOURCE"):
+            compile_fr5_hypothesis(
+                fixed_contract=fixed, coverage_report=report, resolver_results=resolvers,
+                qualification_catalog=qualification_catalog,
+            )
+
+    def test_single_camera_compile_rejects_cross_profile_evidence(self) -> None:
+        for mismatch, code in (
+            ("normalized_job_id", "HYPOTHESIS_RESOLVER_SOURCE_BINDING"),
+            ("profile_document_id", "HYPOTHESIS_RESOLVER_SOURCE_BINDING"),
+            ("coverage_report_id", "HYPOTHESIS_COLLECTION_PROFILE_BINDING"),
+            ("fixed_profile_digest", "HYPOTHESIS_COLLECTION_PROFILE_BINDING"),
+            ("resolver_profile_digest", "HYPOTHESIS_RESOLVER_SOURCE_BINDING"),
+        ):
+            fixed, report, resolvers, _, _, qualification_catalog = single_qualification_inputs()
+            if mismatch == "normalized_job_id":
+                resolvers[0]["normalized_job"]["collection_profile_id"] = "wrong-profile"
+                resolvers[0]["resolved_job_digest"] = digest({
+                    "job": resolvers[0]["normalized_job"],
+                    "input_digests": resolvers[0]["input_digests"],
+                })
+            elif mismatch == "profile_document_id":
+                profile = resolvers[0]["collection_profile"]
+                profile["collection_profile_id"] = "wrong-profile"
+                resolvers[0]["input_digests"]["collection_profile"] = digest(profile)
+                resolvers[0]["resolved_job_digest"] = digest({
+                    "job": resolvers[0]["normalized_job"],
+                    "input_digests": resolvers[0]["input_digests"],
+                })
+            elif mismatch == "coverage_report_id":
+                report["collection_profile_id"] = "wrong-profile"
+                qualification_catalog["coverage_report_digest"] = digest(report)
+                redigest(qualification_catalog, "catalog_digest")
+            elif mismatch == "fixed_profile_digest":
+                fixed["collection_profile_digest"] = digest("wrong-profile-document")
+                qualification_catalog["fixed_contract_digest"] = digest(fixed)
+                redigest(qualification_catalog, "catalog_digest")
+            else:
+                resolvers[0]["input_digests"]["collection_profile"] = digest("wrong-profile-document")
+                resolvers[0]["resolved_job_digest"] = digest({
+                    "job": resolvers[0]["normalized_job"],
+                    "input_digests": resolvers[0]["input_digests"],
+                })
+            with self.subTest(mismatch=mismatch), self.assertRaisesRegex(ContractError, code):
+                compile_fr5_hypothesis(
+                    fixed_contract=fixed, coverage_report=report, resolver_results=resolvers,
+                    qualification_catalog=qualification_catalog,
+                )
+
+    def test_single_camera_serialized_validation_rejects_redigested_profile_mismatch(self) -> None:
+        for mismatch in (
+            "normalized_job_id", "resolver_profile_digest",
+            "coverage_report_id", "fixed_profile_digest",
+        ):
+            value = single_hypothesis()
+            receipt = value["resolver_receipts"][0]
+            if mismatch == "normalized_job_id":
+                receipt["normalized_job"]["collection_profile_id"] = "wrong-profile"
+                receipt["resolved_job_digest"] = digest({
+                    "job": receipt["normalized_job"], "input_digests": receipt["input_digests"],
+                })
+            elif mismatch == "resolver_profile_digest":
+                receipt["input_digests"]["collection_profile"] = digest("wrong-profile-document")
+                receipt["resolved_job_digest"] = digest({
+                    "job": receipt["normalized_job"], "input_digests": receipt["input_digests"],
+                })
+            elif mismatch == "coverage_report_id":
+                value["coverage_report"]["collection_profile_id"] = "wrong-profile"
+                value["qualification_catalog"]["coverage_report_digest"] = digest(value["coverage_report"])
+                redigest(value["qualification_catalog"], "catalog_digest")
+            else:
+                value["fixed_contract"]["collection_profile_digest"] = digest("wrong-profile-document")
+                value["qualification_catalog"]["fixed_contract_digest"] = digest(value["fixed_contract"])
+                redigest(value["qualification_catalog"], "catalog_digest")
+            redigest(value, "hypothesis_digest")
+            with self.subTest(mismatch=mismatch), self.assertRaisesRegex(
+                ContractError, "HYPOTHESIS_COLLECTION_PROFILE_BINDING",
+            ):
+                validate_fr5_hypothesis(value)
+
+    def test_single_camera_design_rejects_extra_pose_and_non_train_pair(self) -> None:
+        for mismatch in ("extra_pose", "non_train_pair"):
+            fixed, report, resolvers, _, _, qualification_catalog = single_qualification_inputs()
+            if mismatch == "extra_pose":
+                qualification_catalog["robot_start_pose_qualifications"].append(
+                    pose_qualification("start-2"),
+                )
+            else:
+                qualification_catalog["allowed_pairs"][0]["split_groups"] = ["TRAIN", "ID"]
+            redigest(qualification_catalog, "catalog_digest")
+            with self.subTest(mismatch=mismatch), self.assertRaisesRegex(
+                ContractError, "HYPOTHESIS_TEST_ONLY_PROFILE_DESIGN",
+            ):
+                compile_fr5_hypothesis(
+                    fixed_contract=fixed, coverage_report=report, resolver_results=resolvers,
+                    qualification_catalog=qualification_catalog,
+                )
 
     def test_base_condition_requires_exact_coverage_resolver_and_qualification(self) -> None:
         _, report, resolvers, qualifications, _, _ = qualification_inputs()

@@ -1,0 +1,111 @@
+{
+  "collision_report": {
+    "all_samples_valid": true,
+    "digest": "sha256:b85460ca41fcdbb6fd8829338a1f28000a9585935a91d0a6b6d43675dffdea6c",
+    "file": "collision_report.json",
+    "mode": "FAKE_MOVEIT_READ_ONLY_STATE_VALIDITY",
+    "total_state_validity_samples": 1217
+  },
+  "coordinate_authority": "ROS",
+  "created_at": "2026-08-18T07:25:22.189288Z",
+  "execution_authorized": false,
+  "gripper_pick_candidate": {
+    "included_in_motion_plan": false,
+    "position_m": 0.01239,
+    "ros_joint": "finger_right_joint",
+    "source": "operator_empirical_59_percent_of_0.021m"
+  },
+  "home_candidate_digest": "sha256:e6db98e17dc596dd178f1a858461fe4ae9663a440077fe46ceef71fdbf769cd8",
+  "home_status": "CANDIDATE",
+  "place_binding": {
+    "candidate_sheet_digests": [
+      "sha256:60de245b7578a22b20892fe3757837adc9ca3bd39c5610a3c3943b7d862ad025",
+      "sha256:b93b18d7b816385b0f9deb8a4462d72e53e65d3fefd94234c4bd4ae109370e34"
+    ],
+    "canonical_place_id": "PLACE_A",
+    "center_invariant_across_print_scale": true,
+    "operator_alias": "place1-temporary",
+    "physical_sheet_manifest_status": "UNCONFIRMED",
+    "x_mm": 0.0,
+    "y_mm": 0.0,
+    "yaw_deg": 0.0
+  },
+  "planning_frame": "base_link",
+  "planning_link": "wrist3_link",
+  "planning_scene": {
+    "floor": {
+      "dimensions_m": [
+        2.0,
+        2.0,
+        0.05
+      ],
+      "id": "place_a_floor_candidate",
+      "source": "operator_current_tcp_is_0.016m_above_flat_floor",
+      "surface_z_m": -0.019208584290053496
+    },
+    "frame_id": "base_link",
+    "wall": {
+      "dimensions_m": [
+        2.0,
+        0.05,
+        2.0
+      ],
+      "home_arm_protrusion_base_xy": [
+        0.0,
+        1.0
+      ],
+      "id": "home_back_wall_candidate",
+      "j1_home_deg": -90.0,
+      "near_face_y_m": -0.3,
+      "wall_side": "opposite_home_arm_protrusion"
+    }
+  },
+  "planning_scene_digest": "sha256:8d980d6bbb6a30d6aea6a6c46a4d8326c4d578de444a908b96fd71ff1709a4cc",
+  "qualification_id": "place-a-center-wall-planonly-20260818T072522Z",
+  "robot_system_id": "fr5-lab-a",
+  "schema_version": "data_factory.place_plan_qualification.v1",
+  "sdk_tcp_pose_authority": false,
+  "speed_scaling": {
+    "LIN": 0.03,
+    "PTP": 0.05
+  },
+  "status": "CANDIDATE_PLAN_ONLY",
+  "supersedes_qualification_id": "place-a-center-planonly-20260818T072324Z",
+  "tcp_candidate": {
+    "definition": "midpoint_between_fingers_at_collision_box_center",
+    "logical_frame": "grasp_tcp",
+    "parent_frame": "wrist3_link",
+    "rotation_columns": [
+      [
+        1.0,
+        0.0,
+        0.0
+      ],
+      [
+        0.0,
+        1.0,
+        0.0
+      ],
+      [
+        0.0,
+        0.0,
+        1.0
+      ]
+    ],
+    "schema_version": "data_factory.tcp_candidate.v1",
+    "status": "CANDIDATE_MODEL_DERIVED",
+    "translation_m": [
+      0.0,
+      0.0,
+      0.256
+    ],
+    "urdf_offset_sum_m": {
+      "adapter_to_gripper": 0.01,
+      "finger_joint_to_collision_center": 0.009,
+      "gripper_to_finger_joint": 0.138,
+      "wrist_to_adapter": 0.099
+    }
+  },
+  "tcp_candidate_digest": "sha256:5ecc779a26905471c0d7ea792361fe5c81756fd072138851d95ab9f2cab31eb3",
+  "training_approved": false
+}

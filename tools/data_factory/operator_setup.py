@@ -9,7 +9,7 @@ import copy
 import math
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Mapping, Sequence
 
 from tools.data_factory.campaign_authoring import validate_collection_campaign_manifest
 from tools.data_factory.cell_state import CellStateStore
@@ -20,6 +20,7 @@ from tools.data_factory.seed_campaign import (
     BUDGET_DIGEST_FIELDS as SEED_BUDGET_DIGEST_FIELDS,
     validate_seed_episode_intent,
 )
+from tools.data_factory_recovery import write_json_atomic
 from tools.fr5_data_factory import (
     ContractError,
     DIGEST,
@@ -75,6 +76,7 @@ EPISODE_BINDING_FIELDS = frozenset({
     "data_disposition", "authority", "binding_digest",
 })
 PLANNED_START_EVIDENCE_SCHEMA = "data_factory.test_only_planned_start_evidence.v1"
+CAMERA_BINDING_RECEIPT = Path("outputs/data_factory/operator_setup/camera_binding.json")
 
 
 def _exact(value: object, fields: frozenset[str], code: str) -> Mapping[str, Any]:
@@ -86,6 +88,21 @@ def _exact(value: object, fields: frozenset[str], code: str) -> Mapping[str, Any
 def _identifier(value: object, code: str) -> str:
     if not isinstance(value, str) or not SAFE_ID.fullmatch(value):
         raise ContractError(code)
+    return value
+
+
+def _stable_device_id(device_kind: str, value: object) -> str:
+    if (
+        not isinstance(value, str)
+        or not value
+        or len(value) > 255
+        or value in {".", ".."}
+        or "/" in value
+        or "\\" in value
+        or any(ord(character) < 33 or ord(character) == 127 for character in value)
+        or (device_kind == "UVC" and not value.startswith("usb-"))
+    ):
+        raise ContractError("CAMERA_BINDING_DEVICE_ID")
     return value
 
 
@@ -726,7 +743,7 @@ def build_camera_binding_candidate(
     if device_kind not in {"UVC", "REALSENSE"}:
         raise ContractError("CAMERA_BINDING_DEVICE_KIND")
     _identifier(binding_id, "CAMERA_BINDING_ID")
-    _identifier(stable_device_id, "CAMERA_BINDING_DEVICE_ID")
+    _stable_device_id(device_kind, stable_device_id)
     _identifier(intended_role, "CAMERA_BINDING_ROLE")
     if (
         not isinstance(collection_profile, Mapping)
@@ -762,28 +779,152 @@ def validate_camera_binding_candidate(value: object) -> dict[str, Any]:
         or result["production_qualified"] is not False
     ):
         raise ContractError("CAMERA_BINDING_AUTHORITY")
-    for field in ("binding_id", "stable_device_id", "intended_role", "collection_profile_id"):
+    for field in ("binding_id", "intended_role", "collection_profile_id"):
         _identifier(result[field], "CAMERA_BINDING_ID")
+    _stable_device_id(result["device_kind"], result["stable_device_id"])
     _digest(result["collection_profile_digest"], "CAMERA_BINDING_DIGEST")
     if result["binding_digest"] != canonical_digest({key: result[key] for key in result if key != "binding_digest"}):
         raise ContractError("CAMERA_BINDING_DIGEST_MISMATCH")
     return result
 
 
-def gripper_setup_projection(readback: Mapping[str, Any] | None) -> dict[str, Any]:
-    """Describe attach vs maintenance exception without invoking activation."""
+def build_camera_binding_from_discovery(
+    *, binding_id: str, device_kind: str, discovered_device_ids: Sequence[str],
+    intended_role: str, collection_profile: Mapping[str, Any],
+    selected_device_id: str | None = None,
+) -> dict[str, Any]:
+    """Bind one passive-discovery token; multiple devices require an explicit choice."""
+    if device_kind not in {"UVC", "REALSENSE"}:
+        raise ContractError("CAMERA_BINDING_DEVICE_KIND")
+    if isinstance(discovered_device_ids, (str, bytes)) or not isinstance(discovered_device_ids, Sequence):
+        raise ContractError("CAMERA_BINDING_DISCOVERY")
+    discovered = [_stable_device_id(device_kind, item) for item in discovered_device_ids]
+    if selected_device_id is None:
+        if not discovered:
+            raise ContractError("CAMERA_BINDING_DISCOVERY_ZERO")
+        if len(discovered) != 1:
+            raise ContractError("CAMERA_BINDING_DISCOVERY_AMBIGUOUS")
+        selected_device_id = discovered[0]
+    else:
+        selected_device_id = _stable_device_id(device_kind, selected_device_id)
+        if discovered.count(selected_device_id) == 0:
+            raise ContractError("CAMERA_BINDING_DISCOVERY_ZERO")
+        if discovered.count(selected_device_id) != 1:
+            raise ContractError("CAMERA_BINDING_DISCOVERY_AMBIGUOUS")
+    return build_camera_binding_candidate(
+        binding_id=binding_id,
+        device_kind=device_kind,
+        stable_device_id=selected_device_id,
+        intended_role=intended_role,
+        collection_profile=collection_profile,
+        connected=True,
+    )
+
+
+def reuse_camera_binding_receipt(
+    value: object, *, discovered_device_ids: Sequence[str],
+    collection_profile: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Reuse a stored stable token only when passive discovery finds it exactly once."""
+    binding = validate_camera_binding_candidate(value)
+    if (
+        not isinstance(collection_profile, Mapping)
+        or binding["collection_profile_id"] != collection_profile.get("collection_profile_id")
+        or binding["collection_profile_digest"] != canonical_digest(collection_profile)
+    ):
+        raise ContractError("CAMERA_BINDING_PROFILE")
+    return build_camera_binding_from_discovery(
+        binding_id=binding["binding_id"],
+        device_kind=binding["device_kind"],
+        discovered_device_ids=discovered_device_ids,
+        selected_device_id=binding["stable_device_id"],
+        intended_role=binding["intended_role"],
+        collection_profile=collection_profile,
+    )
+
+
+def write_camera_binding_receipt(
+    value: object, *, repository_root: str | Path,
+) -> Path:
+    """Atomically store the validated candidate under the already-ignored outputs root."""
+    binding = validate_camera_binding_candidate(value)
+    repository = Path(repository_root).resolve(strict=True)
+    receipt = repository / CAMERA_BINDING_RECEIPT
+    _no_symlink_components(repository, receipt)
+    receipt.parent.mkdir(parents=True, exist_ok=True)
+    _no_symlink_components(repository, receipt)
+    write_json_atomic(receipt, binding)
+    return receipt
+
+
+def load_camera_binding_receipt(*, repository_root: str | Path) -> dict[str, Any]:
+    repository = Path(repository_root).resolve(strict=True)
+    receipt = repository / CAMERA_BINDING_RECEIPT
+    _no_symlink_components(repository, receipt)
+    if receipt.is_symlink() or not receipt.is_file():
+        raise ContractError("CAMERA_BINDING_RECEIPT")
+    return validate_camera_binding_candidate(load_json_strict(receipt))
+
+
+def gripper_setup_projection(
+    readback: Mapping[str, Any] | None, *,
+    open_target_m: float = 0.021, tolerance_m: float = 0.000105,
+) -> dict[str, Any]:
+    """Classify one fresh controller readback without invoking activation."""
     if readback is None:
         return {"state": "NOT_AVAILABLE", "supported_action": "NONE", "maintenance_call_count": 0}
-    if not isinstance(readback, Mapping) or set(readback) != {"active", "position_valid", "gripper_index"}:
+    fields = {
+        "active", "position_valid", "gripper_index", "reference_position_m",
+        "feedback_position_m", "sample_age_s", "max_age_s", "source",
+    }
+    if not isinstance(readback, Mapping) or set(readback) != fields:
         raise ContractError("GRIPPER_SETUP_READBACK")
-    if type(readback["active"]) is not bool or type(readback["position_valid"]) is not bool or type(readback["gripper_index"]) is not int:
+    if (
+        type(readback["active"]) is not bool
+        or type(readback["position_valid"]) is not bool
+        or type(readback["gripper_index"]) is not int
+        or readback["source"] not in {"CONTROLLER_STATE", "COMMAND_SERVER_MAINTENANCE"}
+        or isinstance(open_target_m, bool) or not isinstance(open_target_m, (int, float))
+        or isinstance(tolerance_m, bool) or not isinstance(tolerance_m, (int, float))
+        or not math.isfinite(open_target_m) or not math.isfinite(tolerance_m)
+        or open_target_m <= 0 or tolerance_m <= 0
+    ):
         raise ContractError("GRIPPER_SETUP_READBACK")
+    age, max_age = readback["sample_age_s"], readback["max_age_s"]
+    if (
+        isinstance(age, bool) or not isinstance(age, (int, float)) or not math.isfinite(age)
+        or isinstance(max_age, bool) or not isinstance(max_age, (int, float)) or not math.isfinite(max_age)
+        or age < 0 or max_age <= 0 or max_age > 0.1 or age > max_age
+    ):
+        return {"state": "NOT_AVAILABLE", "supported_action": "NONE", "maintenance_call_count": 0}
+    reference, feedback = readback["reference_position_m"], readback["feedback_position_m"]
+    positions_valid = all(
+        not isinstance(value, bool)
+        and isinstance(value, (int, float))
+        and math.isfinite(value)
+        and 0 <= value <= open_target_m
+        for value in (reference, feedback)
+    )
+    if readback["position_valid"] is not positions_valid:
+        raise ContractError("GRIPPER_SETUP_READBACK")
+    readback_digest = canonical_digest(dict(readback))
     if readback["gripper_index"] != 1:
-        return {"state": "BLOCKED_BINDING", "supported_action": "NONE", "maintenance_call_count": 0}
-    if readback["active"] and readback["position_valid"]:
-        return {"state": "ATTACHED", "supported_action": "VERIFY", "maintenance_call_count": 0}
+        return {
+            "state": "BLOCKED_BINDING", "supported_action": "NONE",
+            "maintenance_call_count": 0, "readback_digest": readback_digest,
+        }
+    if (
+        readback["active"] and positions_valid
+        and abs(float(reference) - float(open_target_m)) <= float(tolerance_m)
+        and abs(float(feedback) - float(open_target_m)) <= float(tolerance_m)
+    ):
+        return {
+            "state": "ATTACHED", "supported_action": "VERIFY",
+            "maintenance_call_count": 0, "readback_digest": readback_digest,
+        }
     return {
         "state": "MAINTENANCE_APPROVAL_REQUIRED",
-        "supported_action": "REQUEST_ACTIVATE_AND_NORMALIZE",
+        "supported_action": "REQUEST_OPEN_NORMALIZATION",
         "maintenance_call_count": 0,
+        "readback_digest": readback_digest,
     }

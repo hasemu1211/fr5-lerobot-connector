@@ -11,13 +11,20 @@ from types import SimpleNamespace
 
 try:
     from .test_campaign_authoring import draft
-    from .test_experiment_manifest import catalog, hypothesis, qualification_inputs, redigest
+    from .test_experiment_manifest import (
+        catalog, hypothesis, qualification_inputs, redigest,
+        single_qualification_inputs,
+    )
 except ImportError:
     from test_campaign_authoring import draft
-    from test_experiment_manifest import catalog, hypothesis, qualification_inputs, redigest
+    from test_experiment_manifest import (
+        catalog, hypothesis, qualification_inputs, redigest,
+        single_qualification_inputs,
+    )
 from tools.data_factory.campaign_authoring import compile_collection_campaign
 from tools.data_factory.experiment_manifest import compile_fr5_hypothesis
 from tools.data_factory.operator_setup import (
+    build_camera_binding_from_discovery,
     build_camera_binding_candidate,
     build_test_only_episode_binding,
     build_test_only_root_binding,
@@ -25,13 +32,16 @@ from tools.data_factory.operator_setup import (
     compile_workspace_registration_candidate,
     gripper_setup_projection,
     initialize_test_only_state_from_user_declaration,
+    load_camera_binding_receipt,
     qualified_table_plane_reference,
+    reuse_camera_binding_receipt,
     validate_print_measurements,
     validate_test_only_root_binding,
     validate_test_only_episode_binding,
     validate_test_only_planned_start,
     validate_test_only_state_initialization,
     validate_test_only_start_binding,
+    write_camera_binding_receipt,
 )
 from tools.data_factory.seed_campaign import SeedCampaign
 from tools.a4_place_yaw.generate_place_yaw_a4 import build_places, make_manifest
@@ -68,8 +78,18 @@ def pose_snapshot(target: list[float], *, age: float = 0.05) -> dict:
     }
 
 
-def compatible_start_fixture() -> tuple[dict, dict, dict]:
-    fixed, report, resolvers, base_qualifications, poses, _ = qualification_inputs()
+def compatible_start_fixture(
+    *, collection_profile: dict | None = None,
+) -> tuple[dict, dict, dict]:
+    if collection_profile is None:
+        fixed, report, resolvers, base_qualifications, poses, _ = qualification_inputs()
+        qualification_catalog = None
+    else:
+        profile = copy.deepcopy(collection_profile)
+        (
+            fixed, report, resolvers, base_qualifications, poses,
+            qualification_catalog,
+        ) = single_qualification_inputs(collection_profile=profile)
     home = load("config/data_factory/home_candidates/fr5-lab-a-home-r001.json")
     home["robot_system_id"] = fixed["robot_system_id"]
     motion = load("config/data_factory/motion_qualifications/fr5-place-a-wood-cube-r001.json")
@@ -91,9 +111,22 @@ def compatible_start_fixture() -> tuple[dict, dict, dict]:
             home_candidate_digest=canonical_digest(home),
         )
         redigest(pose, "qualification_digest")
-    qualification_catalog = catalog(
-        fixed, report, resolvers, base_qualifications, poses,
-    )
+    if qualification_catalog is None:
+        qualification_catalog = catalog(
+            fixed, report, resolvers, base_qualifications, poses,
+        )
+    else:
+        qualification_catalog.update(
+            fixed_contract_digest=canonical_digest(fixed),
+            resolver_result_digests=[canonical_digest(resolvers[0])],
+            base_condition_qualifications=copy.deepcopy(base_qualifications),
+            robot_start_pose_qualifications=copy.deepcopy(poses),
+        )
+        qualification_catalog["allowed_pairs"][0].update(
+            base_condition_qualification_digest=base_qualifications[0]["qualification_digest"],
+            robot_start_pose_qualification_digest=poses[0]["qualification_digest"],
+        )
+        redigest(qualification_catalog, "catalog_digest")
     contract = compile_fr5_hypothesis(
         fixed_contract=fixed, coverage_report=report, resolver_results=resolvers,
         qualification_catalog=qualification_catalog,
@@ -383,18 +416,110 @@ class OperatorSetupTests(unittest.TestCase):
             (camera["connection_state"], camera["placement_status"], camera["production_qualified"]),
             ("CONNECTED", "UNPLACED", False),
         )
+        def readback(reference=0.021, feedback=0.021, **changes):
+            return {
+                "active": True, "position_valid": True, "gripper_index": 1,
+                "reference_position_m": reference, "feedback_position_m": feedback,
+                "sample_age_s": 0.01, "max_age_s": 0.1,
+                "source": "CONTROLLER_STATE", **changes,
+            }
+
+        attached = gripper_setup_projection(readback())
+        self.assertEqual(attached["state"], "ATTACHED")
+        self.assertRegex(attached["readback_digest"], r"^sha256:[0-9a-f]{64}$")
+        maintenance = gripper_setup_projection(readback(reference=0.012, feedback=0.012))
         self.assertEqual(
-            gripper_setup_projection({"active": True, "position_valid": True, "gripper_index": 1})["state"],
-            "ATTACHED",
+            (maintenance["state"], maintenance["supported_action"],
+             maintenance["maintenance_call_count"]),
+            ("MAINTENANCE_APPROVAL_REQUIRED", "REQUEST_OPEN_NORMALIZATION", 0),
         )
         self.assertEqual(
-            gripper_setup_projection({"active": False, "position_valid": False, "gripper_index": 1}),
-            {
-                "state": "MAINTENANCE_APPROVAL_REQUIRED",
-                "supported_action": "REQUEST_ACTIVATE_AND_NORMALIZE",
-                "maintenance_call_count": 0,
-            },
+            gripper_setup_projection(readback(sample_age_s=0.11))["state"],
+            "NOT_AVAILABLE",
         )
+        self.assertEqual(
+            gripper_setup_projection(readback(gripper_index=2))["state"],
+            "BLOCKED_BINDING",
+        )
+
+    def test_stable_camera_binding_uses_exact_tokens_and_ignored_receipt(self):
+        profile = load("config/data_factory/collection_profiles/fr5-up-rgb-30hz-v1.json")
+        original_profile = copy.deepcopy(profile)
+        uvc_token = "usb-Sonix_Technology_USB_2.0_Camera:SN0001-video-index0"
+        binding = build_camera_binding_from_discovery(
+            binding_id="camera-binding-r001", device_kind="UVC",
+            discovered_device_ids=[uvc_token], intended_role="up",
+            collection_profile=profile,
+        )
+        self.assertEqual(binding["stable_device_id"], uvc_token)
+        self.assertEqual(profile, original_profile)
+        selected = build_camera_binding_from_discovery(
+            binding_id="camera-binding-selected-r001", device_kind="UVC",
+            discovered_device_ids=["usb-other-camera-video-index0", uvc_token],
+            selected_device_id=uvc_token, intended_role="up", collection_profile=profile,
+        )
+        self.assertEqual(selected["stable_device_id"], uvc_token)
+
+        with tempfile.TemporaryDirectory() as directory:
+            repository = Path(directory)
+            receipt = write_camera_binding_receipt(binding, repository_root=repository)
+            self.assertEqual(
+                receipt,
+                repository.resolve() / "outputs/data_factory/operator_setup/camera_binding.json",
+            )
+            stored = load_camera_binding_receipt(repository_root=repository)
+            self.assertEqual(stored, binding)
+            self.assertEqual(
+                reuse_camera_binding_receipt(
+                    stored,
+                    discovered_device_ids=["usb-other-camera-video-index0", uvc_token],
+                    collection_profile=profile,
+                ),
+                binding,
+            )
+            self.assertFalse((repository / "config").exists())
+
+        realsense = build_camera_binding_from_discovery(
+            binding_id="camera-binding-rs-r001", device_kind="REALSENSE",
+            discovered_device_ids=["142322070538"], intended_role="up",
+            collection_profile=profile,
+        )
+        self.assertEqual(realsense["stable_device_id"], "142322070538")
+
+        for devices, selected, code in (
+            ([], None, "CAMERA_BINDING_DISCOVERY_ZERO"),
+            ([uvc_token, "usb-other-camera-video-index0"], None, "CAMERA_BINDING_DISCOVERY_AMBIGUOUS"),
+            ([uvc_token, uvc_token], uvc_token, "CAMERA_BINDING_DISCOVERY_AMBIGUOUS"),
+        ):
+            with self.subTest(code=code), self.assertRaisesRegex(ContractError, code):
+                build_camera_binding_from_discovery(
+                    binding_id="camera-binding-r001", device_kind="UVC",
+                    discovered_device_ids=devices, selected_device_id=selected,
+                    intended_role="up", collection_profile=profile,
+                )
+
+        for invalid in (
+            "/dev/v4l/by-id/usb-camera-video-index0",
+            "../usb-camera-video-index0",
+            "usb-camera\x00video-index0",
+            "camera-without-usb-prefix",
+        ):
+            with self.subTest(invalid=repr(invalid)), self.assertRaisesRegex(
+                ContractError, "CAMERA_BINDING_DEVICE_ID",
+            ):
+                build_camera_binding_candidate(
+                    binding_id="camera-binding-r001", device_kind="UVC",
+                    stable_device_id=invalid, intended_role="up",
+                    collection_profile=profile, connected=True,
+                )
+
+        wrong_profile = {**profile, "camera_roles": ["side"]}
+        with self.assertRaisesRegex(ContractError, "CAMERA_BINDING_PROFILE"):
+            build_camera_binding_from_discovery(
+                binding_id="camera-binding-r001", device_kind="UVC",
+                discovered_device_ids=[uvc_token], intended_role="up",
+                collection_profile=wrong_profile,
+            )
 
     def test_workspace_wizard_reuses_three_point_preview_and_fails_closed(self):
         candidate = {

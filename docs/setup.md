@@ -8,7 +8,7 @@
 
 - Ubuntu 24.04와 ROS 2 Jazzy
 - FR5 제어기와 통신 가능한 유선 LAN
-- RealSense 1대 이상
+- RealSense 또는 stable by-id UVC 1대 이상
 - NVIDIA 학습을 할 경우 호환 드라이버. CUDA Python 패키지는 시스템 Python이 아니라 `.venv`에 설치된다.
 
 ## 수집 노트북 설치
@@ -35,6 +35,18 @@ scripts/setup_notebook.sh
 vendor patch는 hardware header, `CNDE_thread.cpp`, `command_server.cpp`, `fairino_hardware_interface.cpp` 네 production file만 포함한다. patch 계약 test는 pinned 전체 tree와 setup이 쓰는 sparse tree에서 forward/reverse 적용을 검사한다. IDE 설정이나 backup source는 patch에 넣지 않는다.
 
 비밀번호는 저장하지 않으며 `sudo`가 직접 요청한다.
+
+### 설치 후 읽기 전용 확인
+
+설치나 장치를 변경하지 않는 setup doctor로 현재 checkout을 먼저 확인한다.
+
+```bash
+direnv exec . scripts/setup_doctor.sh
+```
+
+결과의 `actions_performed`는 항상 빈 배열이어야 한다. Ubuntu, Python, ROS, LeRobot, submodule, single-camera profile과 `config/data_factory/test_only_physical/goal2-place1/`의 휴대 입력이 유효하면 `OFFLINE_READY`다. `local_physical_config`와 `robot_gripper_cameras`의 `PHYSICAL_DEPENDENCY`는 doctor가 장치를 열거나 process를 시작하지 않았다는 뜻이다.
+
+휴대 입력은 exact `place1 → PLACE_A`, yaw 0°, local `(0,0)` 테스트를 재현하기 위한 job, yaw0 sheet와 TCP candidate 사본이다. TCP와 HOME 상태는 `CANDIDATE`, execution/training authority는 false로 유지된다. 다른 노트북의 로봇·controller·start pose·cell·카메라는 현장에서 다시 적격화해야 한다.
 
 ## 장비 설정
 
@@ -126,6 +138,32 @@ UVC 토픽 age는 metadata 인자 없이 측정한다.
 ```
 
 `scripts/preflight_collection.sh --live`도 선택된 각 카메라를 5초 측정해 source rate, 음수 timestamp age, age p95를 수집 시작 전에 강제 검사한다. 이 검사는 시작 전 검증이며 recorder loop에는 추가 작업을 넣지 않는다.
+
+### Portable foreground operator console
+
+하드웨어를 사용하지 않는 UI·lifecycle 확인은 unified console의 FAKE scope로 실행한다.
+
+```bash
+direnv exec . python3 -m tools.data_factory.operator_console --effect-scope FAKE
+```
+
+명령이 출력한 loopback URL을 열고, 종료할 때 같은 터미널에서 `Ctrl-C`를 누른다. 별도 daemon이나 browser-owned runner는 없다.
+
+현재 PHYSICAL 경로는 stable `/dev/v4l/by-id/*-video-index0`로 식별되는 UVC 한 대와 `fr5-up-rgb-30hz-v1`의 `up` 역할만 지원한다. camera는 `CONNECTED_UNPLACED`일 수 있으며 영상의 framing, visibility, lighting 또는 production data validity를 판정하지 않는다. RealSense, 두 번째 camera, 새 role/profile은 별도 requalification 대상이다.
+
+PHYSICAL start 전에 foreground ROS robot/controller/camera graph, HOME 선언, clear cell, gripper empty와 E-stop 감시를 현장에서 확인한다. 그다음 exact TEST_ONLY scene declaration을 명시적으로 허용한다. console은 dispatch 직전에 HOME joint snapshot의 freshness와 tolerance를 측정한다.
+
+```bash
+direnv exec . python3 -m tools.data_factory.operator_console \
+  --effect-scope PHYSICAL \
+  --camera-device-id <by-id-basename>
+```
+
+UVC가 정확히 한 대면 `--camera-device-id`를 생략할 수 있다. 선택은 ignored local receipt `outputs/data_factory/operator_setup/camera_binding.json`에 저장되고 다음 실행에서 exact device/profile이 다시 발견될 때만 재사용된다. 명시적인 `--effect-scope PHYSICAL` 시작은 local binding과 격리된 `outputs/data_factory/test_only_physical/` 및 `datasets/test_only_physical/` 상태만 준비한다. browser는 plan 뒤에 `place1`, cube, 빈 gripper, clear cell과 E-stop 감시를 `READY | CANCEL`로 다시 확인하고, 그 다음 exact plan 승인 버튼을 별도로 제공한다.
+
+기존 `gripper_controller`가 active이고 fresh reference/feedback이 open `0.021 m ± 0.000105 m`이면 추가 동작 없이 자동 attach한다. active지만 open이 아니면 빈 gripper·clear finger 확인에 결속된 `GRIPPER_MAINTENANCE` 버튼 한 번만 `/gripper_controller` open-normalization을 보낸다. activation bit가 inactive여서 사람이 별도로 foreground maintenance command-server graph를 연 경우에만 그 버튼이 `ActGripper(1,0) → ActGripper(1,1) → open`을 수행하고, 정상 ros2_control graph 전환을 `PAUSED`로 요구한다. console은 process를 launch/stop/restart하거나 두 SDK owner를 동시에 열지 않는다.
+
+이 경로의 episode와 판정은 `TEST_ONLY`다. production candidate writer와 training approval writer는 비활성이고, 실제 수집 노트북으로 옮긴 tracked 입력이 hardware qualification이나 production authority를 전달하지 않는다.
 
 ## 수집 노트북 확인
 

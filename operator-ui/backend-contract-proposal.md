@@ -1,6 +1,6 @@
 # Operator UI local bridge contract
 
-Status: Goal 1 loopback transport, CAS core and pure-FAKE producer/consumer are implemented. PHYSICAL ports and production activation remain deferred.
+Status: the loopback transport, FAKE/PHYSICAL TEST_ONLY composition, checkpoint CAS and isolated candidate-review CAS are implemented. Production activation remains out of scope.
 
 ## Transport boundary
 
@@ -13,7 +13,7 @@ The server binds only loopback (`127.0.0.1` and/or `::1`), rejects unexpected `H
 
 The token proves possession of the foreground local page channel; the approval button itself does not claim identity authentication. The backend remains responsible for human-channel qualification and all current scene/start/expiry/safety checks.
 
-The executable offline composition is `python3 -m tools.data_factory.fake_operator_console`. It serves the existing UI from a foreground process, uses a temporary synthetic fixture by default, and composes the existing `CampaignOperator`, `CampaignSession`, `SeedCampaign`, `ButtonDecisionPort` and fresh `OneJob`. It does not provide a second lifecycle owner or a physical adapter.
+The executable composition is `python3 -m tools.data_factory.operator_console --effect-scope FAKE|PHYSICAL`. It serves the existing UI from one foreground process and composes the existing `CampaignOperator`, `CampaignSession`, `SeedCampaign`, decision/checkpoint ports and fresh `OneJob`. FAKE uses a temporary synthetic fixture. PHYSICAL is limited to the tracked exact place1 inputs, ignored machine-local one-UVC binding and isolated TEST_ONLY roots.
 
 ## View
 
@@ -103,6 +103,8 @@ Approval is a native button intent, not typed text:
 
 The backend must compare session, revision, view digest, plan digest, sealed scope, exact TEST_ONLY paths, scene/start binding and expiry immediately before single-use consumption. A button event never mints an approval receipt client-side.
 
+The fixed PHYSICAL place1 session seals `approval_scope=HIL_NUMERIC_PROXY`; the disabled UI toggle reports that binding and cannot change it during the session.
+
 ## Result and no-side-effect matrix
 
 ```json
@@ -124,10 +126,16 @@ The backend must compare session, revision, view digest, plan digest, sealed sco
 | cancel | accept once, project `CANCELLING` | wait for executor terminal; no second cancel | 0 after cancel |
 | reconnect | fresh GET only | never replay a pre-disconnect POST | 0 until new decision |
 
-`FAKE` must keep robot, gripper, production recorder, dataset and run-state call counts at zero. `PHYSICAL` selection alone keeps construction/dispatch at zero. This UI has no op for production approval, candidate admission or training authority, and accepted TEST_ONLY intents must keep those writers at zero.
+`FAKE` must keep robot, gripper, production recorder, dataset and run-state call counts at zero. `PHYSICAL` selection in a FAKE session keeps construction/dispatch at zero. Starting the separate foreground PHYSICAL process is the explicit local TEST_ONLY setup action; motion still requires a fresh site-confirmation checkpoint, bound plan approval intent and runtime gates.
 
-## Remaining physical/backend work
+`resolve_checkpoint` accepts only a currently offered semantic/grasp, combined release/final-scene or `SCENE_READY` choice with the exact binding digest. `review_candidate` accepts `PASS | FAIL | UNCERTAIN` only for an existing isolated candidate review offer and reuses the existing compare-and-swap. The current physical TEST_ONLY episode exposes candidate review as `NOT_APPLICABLE`. No intent grants production approval or training authority.
 
-Canonical view serialization, revision/replay CAS, token/Host/Origin checks, bounded op mapping and the pure-FAKE owner chain are implemented. The UI uses bounded GET polling only for active status; it never retries an intent.
+## Current PHYSICAL TEST_ONLY boundary
 
-Goal 2 must inject the existing physical `run_live`/OneJob ports, fresh root/start/scene bindings and device evidence behind the same operator projection. It must not add a browser-owned runner. Actual robot/camera/gripper discovery, plan truth, TEST_ONLY recorder output, physical semantic/landing checkpoints and every production activation decision remain unresolved until that separate bounded physical Goal runs.
+Canonical view serialization, revision/replay CAS, token/Host/Origin checks, bounded op mapping and the FAKE/PHYSICAL owner chain are implemented. The UI uses bounded GET polling only for active status; it never retries an intent.
+
+PHYSICAL construction reads tracked `config/data_factory/test_only_physical/goal2-place1/` inputs, binds exactly one local UVC device, writes only ignored local binding plus isolated TEST_ONLY state, and passively reads the already-running foreground gripper graph. Fresh/open controller state auto-attaches; only a non-open state exposes the digest-bound maintenance checkpoint. Process launch/restart remains outside the browser.
+
+Fresh HOME/current state, controller/device↔publisher/topic checks, plan truth, recorder readiness and field checkpoints remain runtime measurements; setup doctor never probes them.
+
+Another host, camera/profile or physical layout requires requalification. The path does not qualify image semantics, production data validity, dual-camera sync, RealSense/depth, candidate production admission or training.

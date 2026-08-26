@@ -1,3 +1,4 @@
+import copy
 import json
 import subprocess
 import sys
@@ -60,6 +61,34 @@ def payload(mode="plan_only"):
     }
     if mode == "live":
         value.update(camera_profile="up", dataset_root="datasets/test", run_root="outputs/data_factory/runs")
+    return value
+
+
+def runtime_validated(*, job=None, profile=None, input_digests=None, **extra):
+    """Build the minimum resolver-shaped value accepted at the live boundary."""
+    profile = copy.deepcopy(PROFILE if profile is None else profile)
+    normalized_job = copy.deepcopy(JOB if job is None else job)
+    normalized_job["collection_profile_id"] = profile["collection_profile_id"]
+    inputs = copy.deepcopy(input_digests or {})
+    inputs["collection_profile"] = run_job.canonical_digest(profile)
+    return {
+        "normalized_job": normalized_job,
+        "input_digests": inputs,
+        "resolved_job_digest": run_job.canonical_digest({
+            "job": normalized_job, "input_digests": inputs,
+        }),
+        "collection_profile": profile,
+        **copy.deepcopy(extra),
+    }
+
+
+def runtime_motion(validated, *, continuous=False):
+    """Bind the synthetic motion program to the resolver receipt under test."""
+    value = motion(continuous)
+    value["resolved_job_digest"] = validated["resolved_job_digest"]
+    value["binding_digests"]["collection_profile"] = validated["input_digests"][
+        "collection_profile"
+    ]
     return value
 
 
@@ -153,29 +182,29 @@ class RunJobTest(unittest.TestCase):
             )
 
     def test_test_only_button_gate_binds_exact_plan_before_recorder_or_execute(self):
-        validated = {
-            "normalized_job": {
-                **JOB, "operator_or_agent_id": "operator", "instruction": "pick up",
-            },
-            "resolved_job_digest": "sha256:" + "a" * 64,
-            "input_digests": {"collection_profile": "sha256:" + "7" * 64},
-            "collection_profile": dict(PROFILE),
-        }
+        validated = runtime_validated(job={
+            **JOB, "operator_or_agent_id": "operator", "instruction": "pick up",
+        })
 
         class Cell:
             def read(self):
                 return {"robot_system_id": "fr5-lab-a", "cell_ready": True}
 
         class PlannedExecutor(Executor):
-            def __init__(self):
+            def __init__(self, events):
                 super().__init__()
                 self.ops = []
+                self.events = events
 
             def request(self, request, cancel=None):
                 self.ops.append(request["op"])
+                self.events.append(f"executor:{request['op']}")
                 return super().request(request, cancel)
 
-        def run(choice, *, stale=False, expired=False, start_mismatch=False):
+        def run(
+            choice, *, stale=False, expired=False, start_mismatch=False,
+            with_site=False, site_choice="READY", warmup_error=False,
+        ):
             directory = tempfile.TemporaryDirectory()
             self.addCleanup(directory.cleanup)
             root = Path(directory.name)
@@ -204,8 +233,11 @@ class RunJobTest(unittest.TestCase):
                 "status": "PASS",
             }
             observed = []
+            site_requests = []
+            events = []
 
             def decide(request):
+                events.append("decision")
                 observed.append(request)
                 if choice is None:
                     return None
@@ -228,7 +260,33 @@ class RunJobTest(unittest.TestCase):
                     "operator_label": "operator",
                 }
 
-            executor = PlannedExecutor()
+            def checkpoint(request):
+                events.append(f"checkpoint:{request['kind']}")
+                site_requests.append(request)
+                if site_choice is None:
+                    return None
+                bound = {
+                    key: request[key]
+                    for key in (
+                        "kind", "run_id", "plan_digest", "prompt", "choices", "evidence",
+                    )
+                }
+                return {
+                    "kind": request["kind"], "choice": site_choice,
+                    "run_id": request["run_id"], "plan_digest": request["plan_digest"],
+                    "checkpoint_binding_digest": run_job.canonical_digest(bound),
+                    "decision_source": "LOCAL_UI_BUTTON", "operator_label": "operator",
+                }
+
+            def warmup(*_):
+                events.append("camera_warmup")
+                if warmup_error:
+                    raise run_job.ContractError("CAMERA_WARMUP_RATE")
+                return {
+                    "schema_version": "data_factory.camera_warmup.v1", "attempts": [],
+                }
+
+            executor = PlannedExecutor(events)
             recorder = mock.Mock()
             with (
                 mock.patch.object(
@@ -251,24 +309,34 @@ class RunJobTest(unittest.TestCase):
             ):
                 result = run_job.run_live(
                     live_payload, threading.Event(), lambda _: None,
-                    resolver=lambda _: (validated, motion(), SCENE),
+                    resolver=lambda _: (validated, runtime_motion(validated), SCENE),
                     executor_factory=lambda *_: executor,
                     recorder_factory=recorder,
-                    camera_warmup_call=lambda *_: {
-                        "schema_version": "data_factory.camera_warmup.v1", "attempts": [],
-                    },
+                    camera_warmup_call=warmup,
                     decision_provider=decide,
+                    checkpoint_provider=checkpoint if with_site else None,
                     decision_timeout_s=0,
                     test_only_root_binding={"fixture": True},
                     test_only_episode_binding={"fixture": True},
                     test_only_start_binding={"fixture": True},
                     candidate_writer_enabled=False,
+                    preapproval_checklist=(
+                        {
+                            "place_alias": "place1", "place_id": "PLACE_A",
+                            "yaw_deg": 0, "x_mm": 0, "y_mm": 0,
+                            "cube_at_target": "OPERATOR_CONFIRM_REQUIRED",
+                            "gripper_empty": "OPERATOR_CONFIRM_REQUIRED",
+                            "cell_clear": "OPERATOR_CONFIRM_REQUIRED",
+                            "estop_monitored": "OPERATOR_CONFIRM_REQUIRED",
+                        }
+                        if with_site else None
+                    ),
                     repository_root=root,
                 )
             root_validator.assert_called_once_with(
                 {"fixture": True}, repository_root=root,
             )
-            return result, observed, executor.ops, recorder
+            return result, observed, executor.ops, recorder, events, site_requests
 
         for choice, code, state in (
             (None, "PAUSED_AWAITING_OPERATOR", "PLANNED"),
@@ -276,10 +344,14 @@ class RunJobTest(unittest.TestCase):
             ("CANCEL", "CANCELLED", "CANCELLED"),
         ):
             with self.subTest(choice=choice):
-                result, observed, ops, recorder = run(choice)
+                result, observed, ops, recorder, events, _ = run(choice)
                 self.assertEqual((result["code"], result["state"]), (code, state))
                 self.assertEqual((result["data"]["recorder_goal_count"], result["data"]["execute_goal_count"]), (0, 0))
                 self.assertEqual(ops, ["preflight", "plan"])
+                self.assertEqual(
+                    events,
+                    ["executor:preflight", "executor:plan", "camera_warmup", "decision"],
+                )
                 recorder.assert_not_called()
                 self.assertEqual(observed[0]["decision_binding"]["data_disposition"], "TEST_ONLY")
                 self.assertIsNotNone(observed[0]["decision_binding"]["root_binding_digest"])
@@ -299,22 +371,99 @@ class RunJobTest(unittest.TestCase):
                     ("PASS", run_job.canonical_digest("planned-start")),
                 )
 
-        result, _, ops, recorder = run("APPROVE", stale=True)
+        result, _, ops, recorder, _, _ = run("APPROVE", stale=True)
         self.assertEqual((result["code"], result["state"]), ("PLAN_DECISION_BINDING", "BLOCKED"))
         self.assertEqual(ops, ["preflight", "plan"])
         recorder.assert_not_called()
 
-        result, observed, ops, recorder = run("APPROVE", expired=True)
+        result, observed, ops, recorder, events, _ = run("APPROVE", expired=True)
         self.assertEqual((result["code"], result["state"]), ("TEST_ONLY_EPISODE_EXPIRED", "BLOCKED"))
         self.assertEqual((observed, ops), ([], []))
+        self.assertEqual(events, [])
         recorder.assert_not_called()
 
-        result, observed, ops, recorder = run("APPROVE", start_mismatch=True)
+        result, observed, ops, recorder, events, _ = run("APPROVE", start_mismatch=True)
         self.assertEqual(
             (result["code"], result["state"]),
             ("TEST_ONLY_PLANNED_START_MISMATCH", "BLOCKED"),
         )
         self.assertEqual((observed, ops), ([], ["preflight", "plan"]))
+        self.assertEqual(events, ["executor:preflight", "executor:plan"])
+        recorder.assert_not_called()
+
+        result, observed, ops, recorder, events, site_requests = run(
+            None, with_site=True, site_choice="CANCEL",
+        )
+        self.assertEqual(
+            (result["code"], result["state"]),
+            ("PAUSED_AWAITING_OPERATOR", "PLANNED"),
+            result,
+        )
+        self.assertEqual(result["data"]["measurement_outcome"], "NOT_MEASURED")
+        self.assertEqual(observed, [])
+        self.assertEqual(ops, ["preflight", "plan"])
+        self.assertEqual(
+            events,
+            [
+                "executor:preflight", "executor:plan", "camera_warmup",
+                "checkpoint:PHYSICAL_SCENE_CONFIRMATION",
+            ],
+        )
+        self.assertEqual(site_requests[0]["kind"], "PHYSICAL_SCENE_CONFIRMATION")
+        self.assertEqual(site_requests[0]["evidence"]["checklist"]["place_alias"], "place1")
+        recorder.assert_not_called()
+
+        result, observed, ops, recorder, events, site_requests = run(
+            "REJECT", with_site=True,
+        )
+        self.assertEqual((result["code"], result["state"]), ("PLAN_REJECTED", "CANCELLED"))
+        self.assertEqual(
+            events,
+            [
+                "executor:preflight", "executor:plan", "camera_warmup",
+                "checkpoint:PHYSICAL_SCENE_CONFIRMATION", "decision",
+            ],
+        )
+        binding = observed[0]["decision_binding"]
+        self.assertEqual(
+            binding["operator_summary"]["flow"]["next_human_hold"],
+            "PRECONTACT_HUMAN",
+        )
+        self.assertGreaterEqual(len(binding["operator_summary"]["path"]), 1)
+        self.assertEqual(binding["preapproval_checklist"]["place_id"], "PLACE_A")
+        self.assertEqual(
+            binding["site_confirmation_digest"], run_job.canonical_digest({
+                "kind": site_requests[0]["kind"], "choice": "READY",
+                "run_id": site_requests[0]["run_id"],
+                "plan_digest": site_requests[0]["plan_digest"],
+                "checkpoint_binding_digest": run_job.canonical_digest({
+                    key: site_requests[0][key]
+                    for key in (
+                        "kind", "run_id", "plan_digest", "prompt", "choices", "evidence",
+                    )
+                }),
+                "decision_source": "LOCAL_UI_BUTTON", "operator_label": "operator",
+            }),
+        )
+        recorder.assert_not_called()
+
+        result, observed, ops, recorder, events, _ = run(
+            "APPROVE", with_site=True, warmup_error=True,
+        )
+        self.assertEqual(
+            (result["code"], result["state"], result["data"]["measurement_outcome"]),
+            ("CAMERA_WARMUP_RATE", "BLOCKED", "FAIL"),
+        )
+        self.assertRegex(result["plan_digest"], r"^sha256:[0-9a-f]{64}$")
+        self.assertEqual(observed, [])
+        self.assertEqual(ops, ["preflight", "plan"])
+        self.assertEqual(
+            events, ["executor:preflight", "executor:plan", "camera_warmup"],
+        )
+        self.assertEqual(
+            (result["data"]["recorder_goal_count"], result["data"]["execute_goal_count"]),
+            (0, 0),
+        )
         recorder.assert_not_called()
 
     def test_test_only_scope_rejects_before_resolver_or_filesystem_side_effect(self):
@@ -342,6 +491,52 @@ class RunJobTest(unittest.TestCase):
             self.assertFalse(Path(live_payload["run_root"]).exists())
         self.assertEqual((result["code"], result["state"]), ("TEST_ONLY_RUN_BINDING", "BLOCKED"))
         resolver.assert_not_called()
+
+    def test_runtime_collection_substitution_blocks_before_every_live_side_effect(self):
+        for name in (
+            "job_profile_id", "profile_document", "resolved_job_digest",
+            "motion_resolved_job", "motion_profile_digest",
+        ):
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as directory:
+                validated = runtime_validated()
+                program = runtime_motion(validated)
+                if name == "job_profile_id":
+                    validated["normalized_job"]["collection_profile_id"] = "other-profile"
+                elif name == "profile_document":
+                    validated["collection_profile"]["camera_topics"]["up"] = "/substituted"
+                elif name == "resolved_job_digest":
+                    validated["resolved_job_digest"] = run_job.canonical_digest("substituted")
+                elif name == "motion_resolved_job":
+                    program["resolved_job_digest"] = run_job.canonical_digest("substituted")
+                else:
+                    program["binding_digests"]["collection_profile"] = run_job.canonical_digest(
+                        "substituted"
+                    )
+                live_payload = payload("live")
+                live_payload["run_root"] = str(Path(directory) / "runs")
+                live_payload["dataset_root"] = str(Path(directory) / "dataset")
+                cell_store = mock.Mock()
+                executor = mock.Mock()
+                recorder = mock.Mock()
+                warmup = mock.Mock()
+                candidate = mock.Mock()
+                with (
+                    mock.patch.object(run_job, "CellStateStore", cell_store),
+                    mock.patch.object(run_job, "_write_candidate_admission", candidate),
+                ):
+                    result = run_job.run_live(
+                        live_payload, threading.Event(), lambda _: None,
+                        resolver=lambda _: (validated, program, SCENE),
+                        executor_factory=executor, recorder_factory=recorder,
+                        camera_warmup_call=warmup,
+                    )
+                self.assertEqual(
+                    (result["code"], result["state"]),
+                    ("COLLECTION_PROFILE_BINDING", "BLOCKED"),
+                )
+                self.assertEqual(list(Path(directory).iterdir()), [])
+                for side_effect in (cell_store, executor, recorder, warmup, candidate):
+                    side_effect.assert_not_called()
 
     def test_test_only_default_resolver_reads_only_the_bound_scene_root(self):
         validated = {
@@ -388,11 +583,16 @@ class RunJobTest(unittest.TestCase):
         self.assertNotEqual(scene_binding.call_args.kwargs["root"], run_job.ROOT / "outputs/data_factory/cells")
 
     def test_campaign_session_reaches_run_live_through_pure_test_only_ports(self):
-        contract, motion_qualification, home_candidate = compatible_start_fixture()
+        physical_profile = {
+            **PROFILE, "collection_profile_id": "fr5-up-rgb-30hz-v1",
+        }
+        contract, motion_qualification, home_candidate = compatible_start_fixture(
+            collection_profile=physical_profile,
+        )
         source = campaign_draft(contract, count=1)
         manifest, receipt = compile_collection_campaign(source, hypothesis=contract)
         now = lambda: datetime.now(timezone.utc)
-        trace, counters = [], new_effect_counters()
+        trace, counters, checkpoint_requests = [], new_effect_counters(), []
 
         with tempfile.TemporaryDirectory() as directory:
             repository = Path(directory).resolve()
@@ -583,14 +783,14 @@ class RunJobTest(unittest.TestCase):
                 live_payload.update(
                     run_id=roots["run_id"], job=normalized_job,
                     expected_robot_system_id=normalized_job["robot_system_id"],
-                    camera_profile=PROFILE["camera_profile"],
+                    camera_profile=physical_profile["camera_profile"],
                     run_root=roots["run_root"], dataset_root=roots["dataset_root"],
                 )
                 program_holder["program"] = _motion_program(
                     intent, contract, episode_context["start_binding"],
                 )
                 validated = {
-                    **resolved, "collection_profile": dict(PROFILE),
+                    **resolved, "collection_profile": copy.deepcopy(physical_profile),
                     "object_profile": {"dimensions_mm": [40, 30, 20]},
                 }
                 release_pose = {
@@ -616,6 +816,22 @@ class RunJobTest(unittest.TestCase):
                         "operator_label": normalized_job["operator_or_agent_id"],
                     }
 
+                def checkpoint(request):
+                    checkpoint_requests.append(copy.deepcopy(request))
+                    bound = {
+                        key: request[key]
+                        for key in (
+                            "kind", "run_id", "plan_digest", "prompt", "choices", "evidence",
+                        )
+                    }
+                    return {
+                        "kind": request["kind"], "choice": request["choices"][0],
+                        "run_id": request["run_id"], "plan_digest": request["plan_digest"],
+                        "checkpoint_binding_digest": run_job.canonical_digest(bound),
+                        "decision_source": "LOCAL_UI_BUTTON",
+                        "operator_label": normalized_job["operator_or_agent_id"],
+                    }
+
                 with (
                     mock.patch.object(run_job, "CellStateStore", return_value=cell) as cell_store,
                     mock.patch.object(run_job, "ResourceMonitor", return_value=Resource()),
@@ -635,11 +851,14 @@ class RunJobTest(unittest.TestCase):
                             "ok": True, "code": "PASS",
                             "result_digest": run_job.canonical_digest("synthetic-validator"),
                         },
-                        tty_decision=lambda _prompt, expected: expected[0],
+                        tty_decision=lambda *_: (_ for _ in ()).throw(
+                            AssertionError("browser checkpoint must replace the TTY")
+                        ),
                         camera_warmup_call=lambda *_: {
                             "schema_version": "data_factory.camera_warmup.v1", "attempts": [],
                         },
                         one_job=child, decision_provider=approve,
+                        checkpoint_provider=checkpoint,
                         approval_scope="HIL_NUMERIC_PROXY", decision_timeout_s=0,
                         test_only_root_binding=episode_context["root_binding"],
                         test_only_episode_binding=episode_binding,
@@ -675,6 +894,10 @@ class RunJobTest(unittest.TestCase):
         self.assertEqual(result["result"]["data"]["data_disposition"], "TEST_ONLY")
         self.assertEqual(result["result"]["data"]["human_semantic_outcome"], "NOT_MEASURED")
         self.assertFalse(result["result"]["data"]["candidate_admission_written"])
+        self.assertEqual(
+            [(item["kind"], item["choices"]) for item in checkpoint_requests],
+            [("RELEASE_VERDICT", ["LANDED", "OFF_SLOT", "UNCERTAIN"])],
+        )
         self.assertTrue(all(counters[name] == 1 for name in (
             "fake_recorder_begin", "fake_recorder_readiness_status",
             "fake_recorder_freeze", "fake_recorder_commit",
@@ -927,7 +1150,7 @@ class RunJobTest(unittest.TestCase):
         self.assertEqual(invoked.call_args.kwargs["timeout"], run_job.CAMERA_WARMUP_TIMEOUT_S)
 
     def test_camera_warmup_all_fail_or_timeout_blocks_before_executor_recorder_or_goal(self):
-        validated = {"collection_profile": dict(PROFILE)}
+        validated = runtime_validated()
         ready_cell = SimpleNamespace(read=lambda: {"robot_system_id": "fr5-lab-a", "cell_ready": True})
         with tempfile.TemporaryDirectory() as directory:
             live_payload = payload("live")
@@ -938,7 +1161,7 @@ class RunJobTest(unittest.TestCase):
             with mock.patch.object(run_job.subprocess, "run", side_effect=(timeout, timeout)), mock.patch.object(run_job, "CellStateStore", return_value=ready_cell):
                 result = run_job.run_live(
                     live_payload, threading.Event(), lambda _: None,
-                    resolver=lambda _: (validated, motion(), SCENE), executor_factory=executor_factory,
+                    resolver=lambda _: (validated, runtime_motion(validated), SCENE), executor_factory=executor_factory,
                     recorder_factory=recorder_factory,
                 )
             evidence = json.loads((Path(directory) / live_payload["run_id"] / "camera_warmup.json").read_text(encoding="utf-8"))
@@ -949,7 +1172,7 @@ class RunJobTest(unittest.TestCase):
         recorder_factory.assert_not_called()
 
     def test_camera_warmup_cancel_is_bounded_and_starts_nothing(self):
-        validated = {"collection_profile": dict(PROFILE)}
+        validated = runtime_validated()
         ready_cell = SimpleNamespace(read=lambda: {"robot_system_id": "fr5-lab-a", "cell_ready": True})
         cancel = threading.Event()
         executor_factory = mock.Mock()
@@ -960,7 +1183,7 @@ class RunJobTest(unittest.TestCase):
             with mock.patch.object(run_job, "CellStateStore", return_value=ready_cell):
                 result = run_job.run_live(
                     live_payload, cancel, lambda _: None,
-                    resolver=lambda _: (validated, motion(), SCENE), executor_factory=executor_factory,
+                    resolver=lambda _: (validated, runtime_motion(validated), SCENE), executor_factory=executor_factory,
                     recorder_factory=recorder_factory,
                     camera_warmup_call=lambda *_: (cancel.set(), {"schema_version": "data_factory.camera_warmup.v1", "attempts": []})[1],
                 )
@@ -970,6 +1193,7 @@ class RunJobTest(unittest.TestCase):
 
     def test_live_preserves_executor_preflight_failure_code(self):
         ready_cell = SimpleNamespace(read=lambda: {"robot_system_id": "fr5-lab-a", "cell_ready": True})
+        validated = runtime_validated()
         class Process:
             def request(self, *_):
                 return {"ok": False, "code": "CONTROLLER_ACTION_GRAPH"}
@@ -984,7 +1208,7 @@ class RunJobTest(unittest.TestCase):
             with mock.patch.object(run_job, "CellStateStore", return_value=ready_cell):
                 result = run_job.run_live(
                     live_payload, threading.Event(), lambda _: None,
-                    resolver=lambda _: ({"collection_profile": dict(PROFILE)}, motion(), SCENE),
+                    resolver=lambda _: (validated, runtime_motion(validated), SCENE),
                     executor_factory=lambda *_: Process(), recorder_factory=recorder_factory,
                     camera_warmup_call=lambda *_: {"schema_version": "data_factory.camera_warmup.v1", "attempts": []},
                 )
@@ -1001,14 +1225,17 @@ class RunJobTest(unittest.TestCase):
             "grasp_profile_id": "grasp-r1", "instruction": "pick up", "episode_intent": "nominal pickup",
             "operator_or_agent_id": "operator", "approval_expiry": "2026-08-21T00:00:00Z", "dry_run_required": True,
         }
-        bindings = motion()["binding_digests"]
-        resolved_job_digest = run_job.canonical_digest({
-            "job": job,
-            "input_digests": {name: bindings[name] for name in (
+        profile = dict(PROFILE)
+        inputs = {
+            name: motion()["binding_digests"][name] for name in (
                 "selected_sheet", "yaw0_sheet", "cell_calibration", "robot_system",
                 "collection_profile", "object_profile", "grasp_profile",
-            )},
-        })
+            )
+        }
+        validated = runtime_validated(job=job, profile=profile, input_digests=inputs)
+        resolved_job_digest = validated["resolved_job_digest"]
+        bindings = dict(motion()["binding_digests"])
+        bindings["collection_profile"] = validated["input_digests"]["collection_profile"]
         plan = {
             "schema_version": "fr5.pickup_plan.v3", "run_id": "runner-test",
             "resolved_job_digest": resolved_job_digest, "binding_digests": bindings,
@@ -1127,8 +1354,6 @@ class RunJobTest(unittest.TestCase):
                 calls.append(("job", "finish")); self.state = "COMPLETE"
                 return {"ok": True, "code": "COMPLETE", "state": self.state}
 
-        profile = dict(PROFILE)
-        validated = {"normalized_job": {**JOB, "operator_or_agent_id": "operator", "instruction": "pick up", "place_id": "PLACE_A", "yaw_deg": 0, "x_mm": -70, "y_mm": 35, "object_profile_id": "wood-cube"}, "resolved_job_digest": resolved_job_digest, "input_digests": {"collection_profile": "sha256:" + "7" * 64}, "collection_profile": profile}
         cell, scene = Cell(), Scene()
         semantic_reply = "PASS"
         def decide(prompt, expected):
@@ -1145,7 +1370,7 @@ class RunJobTest(unittest.TestCase):
             with mock.patch.object(run_job, "OneJob", FakeJob), mock.patch.object(run_job, "ResourceMonitor", Resource), mock.patch.object(run_job, "CellStateStore", return_value=cell), mock.patch.object(run_job, "SceneStateStore", return_value=scene):
                 result = run_job.run_live(
                     live_payload, threading.Event(), lambda _: None,
-                    resolver=lambda _: (validated, motion(True), SCENE), executor_factory=lambda *_: Process(), recorder_factory=lambda *_: Recorder(),
+                    resolver=lambda _: (validated, runtime_motion(validated, continuous=True), SCENE), executor_factory=lambda *_: Process(), recorder_factory=lambda *_: Recorder(),
                     validator_call=lambda *_: {"ok": True, "code": "PASS", "result_digest": "sha256:" + "6" * 64}, tty_decision=decide,
                     camera_warmup_call=lambda *_: (calls.append(("camera_warmup", "PASS")), {"schema_version": "data_factory.camera_warmup.v1", "attempts": []})[1],
                 )
@@ -1159,7 +1384,7 @@ class RunJobTest(unittest.TestCase):
                 "task_schema_version": "data_factory.job.v1", "task": "pickup_e2e", "robot_system_id": "fr5-lab-a",
                 "place_id": "PLACE_A", "cell_calibration_id": "cell-r1", "cell_calibration_digest": bindings["cell_calibration"],
                 "yaw_deg": 0, "x_mm": -70, "y_mm": 35, "object_profile_id": "wood-cube", "grasp_profile_id": "grasp-r1",
-                "motion_recipe_digest": bindings["motion_qualification"], "collection_profile_digest": bindings["collection_profile"],
+                "motion_recipe_digest": bindings["motion_qualification"], "collection_profile_digest": validated["input_digests"]["collection_profile"],
             }
             root = Path(directory)
             job_path = root / "job.json"
@@ -1250,7 +1475,7 @@ class RunJobTest(unittest.TestCase):
             with mock.patch.object(run_job, "OneJob", FakeJob), mock.patch.object(run_job, "ResourceMonitor", Resource), mock.patch.object(run_job, "CellStateStore", return_value=Cell()), mock.patch.object(run_job, "SceneStateStore", return_value=Scene()):
                 rejected = run_job.run_live(
                     live_payload, threading.Event(), lambda _: None,
-                    resolver=lambda _: (validated, motion(True), SCENE), executor_factory=lambda *_: Process(), recorder_factory=lambda *_: Recorder(),
+                    resolver=lambda _: (validated, runtime_motion(validated, continuous=True), SCENE), executor_factory=lambda *_: Process(), recorder_factory=lambda *_: Recorder(),
                     validator_call=lambda *_: {"ok": True, "code": "PASS", "result_digest": "sha256:" + "6" * 64}, tty_decision=decide,
                     camera_warmup_call=lambda *_: ({"schema_version": "data_factory.camera_warmup.v1", "attempts": []}),
                 )
@@ -1277,10 +1502,11 @@ class RunJobTest(unittest.TestCase):
             "plan_only_no_motion_digest": run_job.canonical_digest(evidence["plan_only_no_motion"]),
             "post_reset_safe_snapshot_digest": None, "status": "PENDING",
         }
-        validated = {
-            "normalized_job": {**JOB, "operator_or_agent_id": "operator", "instruction": "pick up", "place_id": "PLACE_A", "yaw_deg": 0, "x_mm": -70, "y_mm": 35, "object_profile_id": "wood-cube"},
-            "resolved_job_digest": motion()["resolved_job_digest"], "input_digests": {"collection_profile": "sha256:" + "7" * 64}, "collection_profile": dict(PROFILE),
-        }
+        validated = runtime_validated(job={
+            **JOB, "operator_or_agent_id": "operator", "instruction": "pick up",
+            "place_id": "PLACE_A", "yaw_deg": 0, "x_mm": -70, "y_mm": 35,
+            "object_profile_id": "wood-cube",
+        })
 
         class Process:
             def request(self, request, *_):
@@ -1361,7 +1587,7 @@ class RunJobTest(unittest.TestCase):
                     with storage_patch, mock.patch.object(run_job, "_write_resource_reference", return_value={"sampling": {"status": "AVAILABLE" if resource_available else "NOT_AVAILABLE"}}):
                         result = run_job.run_live(
                             live_payload, threading.Event(), lambda _: None,
-                            resolver=lambda _: (validated, motion(True), SCENE), executor_factory=lambda *_: Process(), recorder_factory=lambda *_: Recorder(),
+                            resolver=lambda _: (validated, runtime_motion(validated, continuous=True), SCENE), executor_factory=lambda *_: Process(), recorder_factory=lambda *_: Recorder(),
                             validator_call=lambda *_: validator, tty_decision=lambda prompt, expected_text: prompts.append((prompt, expected_text)),
                             camera_warmup_call=lambda *_: {"schema_version": "data_factory.camera_warmup.v1", "attempts": []},
                         )
@@ -1476,19 +1702,18 @@ class RunJobTest(unittest.TestCase):
                 return {"scene_state_digest": "sha256:" + "5" * 64}
 
         cell, scene = Cell(), Scene()
-        validated = {
-            "normalized_job": {**JOB, "operator_or_agent_id": "operator", "instruction": "pick up", "place_id": "PLACE_A", "yaw_deg": 0, "x_mm": -70, "y_mm": 35, "object_profile_id": "wood-cube"},
-            "resolved_job_digest": one_job_test.RESOLVED,
-            "input_digests": {"collection_profile": "sha256:" + "7" * 64},
-            "collection_profile": dict(PROFILE),
-        }
+        validated = runtime_validated(job={
+            **JOB, "operator_or_agent_id": "operator", "instruction": "pick up",
+            "place_id": "PLACE_A", "yaw_deg": 0, "x_mm": -70, "y_mm": 35,
+            "object_profile_id": "wood-cube",
+        })
         with tempfile.TemporaryDirectory() as directory:
             live_payload = payload("live")
             live_payload.update(run_id="run", run_root=directory, dataset_root=str(Path(directory) / "dataset"))
             with mock.patch.object(run_job, "ResourceMonitor", Resource), mock.patch.object(run_job, "CellStateStore", return_value=cell), mock.patch.object(run_job, "SceneStateStore", return_value=scene):
                 result = run_job.run_live(
                     live_payload, threading.Event(), lambda _: None,
-                    resolver=lambda _: (validated, motion(True), SCENE), executor_factory=lambda *_: Executor(), recorder_factory=lambda *_: Recorder(),
+                    resolver=lambda _: (validated, runtime_motion(validated, continuous=True), SCENE), executor_factory=lambda *_: Executor(), recorder_factory=lambda *_: Recorder(),
                     validator_call=lambda *_: (validator_calls.append("validator"), timeline.append(("validator", "PASS")), {"ok": True, "code": "PASS", "result_digest": "sha256:" + "6" * 64})[2],
                     tty_decision=lambda _prompt, expected: "PASS" if expected == ("PASS", "FAIL") else None,
                     camera_warmup_call=lambda *_: {"schema_version": "data_factory.camera_warmup.v1", "run_id": "run", "camera_profile": "up", "attempts": []},

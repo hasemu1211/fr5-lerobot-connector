@@ -153,6 +153,7 @@ def make_operator(
     directory: str, *, effect_scope: str = "FAKE",
     lifecycle_action: str = "LIVE_COLLECT", count: int = 1,
     technical_status: str = "PASS", current_usage=None, clock=None,
+    operator_label: str = "TEST_OPERATOR",
 ) -> tuple[CampaignOperator, PureFakePorts]:
     contract = hypothesis()
     ports = PureFakePorts(technical_status=technical_status)
@@ -187,11 +188,22 @@ def make_operator(
         repository_root=directory,
         current_usage=current_usage,
         clock=clock or (lambda: NOW),
+        operator_label=operator_label,
     )
     return model, ports
 
 
 class CampaignOperatorTests(unittest.TestCase):
+    def test_operator_label_is_caller_provided_without_human_authority(self):
+        with tempfile.TemporaryDirectory() as directory:
+            model, _ = make_operator(
+                directory, effect_scope="PHYSICAL", lifecycle_action="PLAN_ONLY",
+                operator_label="local-operator",
+            )
+            projection = model.projection()
+            self.assertEqual(projection["operator_identity"], "local-operator")
+            self.assertEqual(projection["authority"]["human_review"], "NONE")
+
     def test_invalid_physical_ports_never_activate_or_allow_a_later_intent(self):
         cases = (
             ("callback", "PLAN_ONLY", "physical_plan_call", object()),

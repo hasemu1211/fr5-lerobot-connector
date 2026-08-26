@@ -36,6 +36,20 @@ FORBIDDEN_BROWSER_FIELDS = frozenset({
     "current_scene", "transition_target", "training_approved", "semantic_pass",
 })
 MAX_BODY_BYTES = 65_536
+CHECKPOINT_REQUEST_SCHEMA = "data_factory.operator_checkpoint_request.v1"
+CHECKPOINT_CHOICES = {
+    "GRASP_VERDICT": ("PASS", "FAIL"),
+    "SEMANTIC_VERDICT": ("PASS", "FAIL"),
+    "RELEASE_VERDICT": ("LANDED", "OFF_SLOT", "UNCERTAIN"),
+    "SCENE_READY": ("SCENE_READY",),
+    "GRIPPER_MAINTENANCE": ("READY", "CANCEL"),
+    "PHYSICAL_SCENE_CONFIRMATION": ("READY", "CANCEL"),
+}
+CANDIDATE_REVIEW_CHOICES = ("PASS", "FAIL", "UNCERTAIN")
+CANDIDATE_REVIEW_REASONS = (
+    "WRONG_OBJECT_OR_START", "GRASP_OR_LIFT", "TRAJECTORY_FLOW", "TASK_GOAL",
+    "UNMODELED_CONTACT", "RELEASE_SCENE", "UNKNOWN",
+)
 
 
 def _json_loads(payload: bytes) -> Any:
@@ -289,6 +303,223 @@ class ButtonDecisionPort:
             approval_scope=request["approval_scope"],
         )
         return self.wait(request["timeout_s"])
+
+
+class OperatorCheckpointPort:
+    """Expose one backend-issued operator checkpoint at a time."""
+
+    def __init__(self, *, operator_label: str):
+        if not isinstance(operator_label, str) or not SAFE_ID.fullmatch(operator_label):
+            raise ContractError("CHECKPOINT_OPERATOR_LABEL")
+        self.operator_label = operator_label
+        self._pending = None
+        self._decision = None
+        self._closed = False
+        self._condition = threading.Condition()
+
+    def projection(self) -> dict[str, Any] | None:
+        with self._condition:
+            return copy.deepcopy(self._pending)
+
+    def _offer(self, request: Mapping[str, Any]) -> None:
+        fields = {
+            "schema_version", "kind", "run_id", "plan_digest", "prompt",
+            "choices", "evidence", "timeout_s",
+        }
+        if not isinstance(request, Mapping) or set(request) != fields:
+            raise ContractError("CHECKPOINT_REQUEST")
+        kind = request.get("kind")
+        choices = request.get("choices")
+        timeout_s = request.get("timeout_s")
+        if (
+            request.get("schema_version") != CHECKPOINT_REQUEST_SCHEMA
+            or kind not in CHECKPOINT_CHOICES
+            or not isinstance(request.get("run_id"), str)
+            or not SAFE_ID.fullmatch(request["run_id"])
+            or not isinstance(request.get("plan_digest"), str)
+            or not DIGEST.fullmatch(request["plan_digest"])
+            or not isinstance(request.get("prompt"), str)
+            or not request["prompt"]
+            or "\x00" in request["prompt"]
+            or not isinstance(choices, list)
+            or tuple(choices) != CHECKPOINT_CHOICES[kind]
+            or not isinstance(request.get("evidence"), Mapping)
+            or timeout_s is not None and (
+                isinstance(timeout_s, bool)
+                or not isinstance(timeout_s, (int, float))
+                or timeout_s < 0
+            )
+        ):
+            raise ContractError("CHECKPOINT_REQUEST")
+        bound = {
+            key: copy.deepcopy(request[key])
+            for key in ("kind", "run_id", "plan_digest", "prompt", "choices", "evidence")
+        }
+        pending = {
+            **bound,
+            "binding_digest": canonical_digest(bound),
+        }
+        with self._condition:
+            if self._closed:
+                raise ContractError("CHECKPOINT_CLOSED")
+            if self._pending is not None or self._decision is not None:
+                raise ContractError("CHECKPOINT_ACTIVE")
+            self._pending = pending
+            self._condition.notify_all()
+
+    def offer(self, request: Mapping[str, Any]) -> dict[str, Any]:
+        """Publish one backend-issued checkpoint before its caller waits."""
+        self._offer(request)
+        return self.projection()
+
+    def resolve(self, payload: dict[str, Any], _view=None) -> dict[str, Any]:
+        with self._condition:
+            if self._closed or self._pending is None or self._decision is not None:
+                raise ContractError("CHECKPOINT_STATE")
+            if set(payload) != {"checkpoint_binding_digest", "choice"}:
+                raise ContractError("CHECKPOINT_FIELDS")
+            if payload["checkpoint_binding_digest"] != self._pending["binding_digest"]:
+                raise ContractError("CHECKPOINT_DIGEST_MISMATCH")
+            if payload["choice"] not in self._pending["choices"]:
+                raise ContractError("CHECKPOINT_CHOICE")
+            self._decision = {
+                "kind": self._pending["kind"],
+                "choice": payload["choice"],
+                "run_id": self._pending["run_id"],
+                "plan_digest": self._pending["plan_digest"],
+                "checkpoint_binding_digest": self._pending["binding_digest"],
+                "decision_source": "LOCAL_UI_BUTTON",
+                "operator_label": self.operator_label,
+            }
+            self._pending = None
+            self._condition.notify_all()
+            return copy.deepcopy(self._decision)
+
+    def wait(self, timeout_s: float | None = None) -> dict[str, Any] | None:
+        deadline = None if timeout_s is None else time.monotonic() + float(timeout_s)
+        with self._condition:
+            while self._decision is None and not self._closed:
+                remaining = None if deadline is None else deadline - time.monotonic()
+                if remaining is not None and remaining <= 0:
+                    self._pending = None
+                    return None
+                self._condition.wait(remaining)
+            if self._decision is None:
+                return None
+            decision = copy.deepcopy(self._decision)
+            self._decision = None
+            return decision
+
+    def close(self) -> None:
+        with self._condition:
+            self._closed = True
+            self._pending = None
+            self._condition.notify_all()
+
+    def __call__(self, request: Mapping[str, Any]) -> dict[str, Any] | None:
+        self._offer(request)
+        return self.wait(request["timeout_s"])
+
+
+class CandidateReviewPort:
+    """Project one exact backend-owned candidate CAS without exposing its path."""
+
+    def __init__(self, *, operator_label: str, review_call: Callable[..., Mapping[str, Any]]):
+        if not isinstance(operator_label, str) or not SAFE_ID.fullmatch(operator_label):
+            raise ContractError("CANDIDATE_REVIEW_OPERATOR")
+        if not callable(review_call):
+            raise ContractError("CANDIDATE_REVIEW_CALL")
+        self.operator_label = operator_label
+        self.review_call = review_call
+        self._pending = None
+        self._public = None
+        self._lock = threading.RLock()
+
+    def offer(
+        self, *, candidate_path: str | Path, run_id: str,
+        expected_file_digest: str, expected_review_context_digest: str,
+        checklist_id: str = "pickup-v2",
+    ) -> dict[str, Any]:
+        path = Path(candidate_path)
+        if (
+            self._pending is not None
+            or path.name != "candidate_admission.json"
+            or not path.is_absolute()
+            or not isinstance(run_id, str)
+            or not SAFE_ID.fullmatch(run_id)
+            or not isinstance(expected_file_digest, str)
+            or not DIGEST.fullmatch(expected_file_digest)
+            or not isinstance(expected_review_context_digest, str)
+            or not DIGEST.fullmatch(expected_review_context_digest)
+            or checklist_id != "pickup-v2"
+        ):
+            raise ContractError("CANDIDATE_REVIEW_OFFER")
+        bound = {
+            "run_id": run_id,
+            "file_digest": expected_file_digest,
+            "review_context_digest": expected_review_context_digest,
+            "checklist_id": checklist_id,
+            "path_digest": canonical_digest(str(path)),
+        }
+        with self._lock:
+            if self._pending is not None:
+                raise ContractError("CANDIDATE_REVIEW_ACTIVE")
+            binding_digest = canonical_digest(bound)
+            self._pending = {**bound, "path": path, "review_binding_digest": binding_digest}
+            self._public = {
+                "review_binding_digest": binding_digest,
+                "run_id": run_id,
+                "status": "PENDING",
+                "choices": list(CANDIDATE_REVIEW_CHOICES),
+                "reasons": list(CANDIDATE_REVIEW_REASONS),
+            }
+            return copy.deepcopy(self._public)
+
+    def projection(self) -> dict[str, Any] | None:
+        with self._lock:
+            return copy.deepcopy(self._public)
+
+    def resolve(self, payload: dict[str, Any], _view=None) -> dict[str, Any]:
+        with self._lock:
+            if self._pending is None or self._public is None:
+                raise ContractError("CANDIDATE_REVIEW_STATE")
+            if set(payload) != {"review_binding_digest", "choice", "reason"}:
+                raise ContractError("CANDIDATE_REVIEW_FIELDS")
+            choice, reason = payload["choice"], payload["reason"]
+            if payload["review_binding_digest"] != self._pending["review_binding_digest"]:
+                raise ContractError("CANDIDATE_REVIEW_DIGEST_MISMATCH")
+            if (
+                choice not in CANDIDATE_REVIEW_CHOICES
+                or choice == "PASS" and reason is not None
+                or choice != "PASS" and reason not in CANDIDATE_REVIEW_REASONS
+            ):
+                raise ContractError("CANDIDATE_REVIEW_CHOICE")
+            updated = self.review_call(
+                self._pending["path"],
+                expected_file_digest=self._pending["file_digest"],
+                expected_review_context_digest=self._pending["review_context_digest"],
+                checklist_id=self._pending["checklist_id"],
+                semantic_status=choice,
+                reviewed_by=self.operator_label,
+                reason=reason,
+            )
+            if (
+                not isinstance(updated, Mapping)
+                or updated.get("run_id") != self._pending["run_id"]
+                or updated.get("semantic_status") != choice
+                or updated.get("reviewed_by") != self.operator_label
+            ):
+                raise ContractError("CANDIDATE_REVIEW_RESULT")
+            self._public["status"] = choice
+            binding_digest = self._pending["review_binding_digest"]
+            run_id = self._pending["run_id"]
+            self._pending = None
+            return {
+                "review_binding_digest": binding_digest,
+                "run_id": run_id,
+                "status": choice,
+                "training_authorized": False,
+            }
 
 
 class _IPv6ThreadingHTTPServer(ThreadingHTTPServer):

@@ -7,7 +7,7 @@ from pathlib import Path
 ROOT = Path(__file__).parents[1]
 
 
-class GoalOneOperatorUiTest(unittest.TestCase):
+class GoalTwoOperatorUiTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.fixture = json.loads((ROOT / "fixtures/states.json").read_text())
@@ -58,6 +58,65 @@ class GoalOneOperatorUiTest(unittest.TestCase):
         self.assertNotIn("approval-input", self.html + self.js)
         self.assertNotIn("typed_phrase", self.html + self.js + self.docs)
         self.assertIn("신원 인증이 아닙니다", self.js)
+        self.assertIn("TEST_ONLY 기계적 그리퍼 판정", self.js)
+        self.assertIn('approval_scope === "HIL_NUMERIC_PROXY"', self.js)
+        self.assertIn('type="checkbox" ${mechanicalProxy ? "checked" : ""} disabled', self.js)
+        self.assertEqual(len(approval["operator_summary"]["path"]), 10)
+        self.assertEqual(approval["operator_summary"]["path"][-1], "SAFE_POSE_PTP")
+        self.assertEqual(
+            (approval["preapproval_checklist"]["place_alias"],
+             approval["preapproval_checklist"]["place_id"],
+             approval["preapproval_checklist"]["full_return_step_count"]),
+            ("place1", "PLACE_A", 10),
+        )
+        self.assertRegex(approval["site_confirmation_digest"], r"^sha256:[0-9a-f]{64}$")
+        for marker in ("summary.path.length", "collision_report_digest", "현장 READY 확인 완료"):
+            self.assertIn(marker, self.js)
+
+    def test_setup_projection_is_exact_and_exception_is_one_checkpoint(self):
+        self.assertEqual(set(self.view["setup"]), {"host_status", "operator_label", "subsystems"})
+        self.assertTrue(self.view["setup"]["subsystems"])
+        self.assertTrue(all(set(row) == {"label", "status", "detail"} for row in self.view["setup"]["subsystems"]))
+        exception = self.fixture["states"]["setup_exception"]
+        self.assertEqual(exception["setup"]["host_status"], "READY_WITH_EXCEPTION")
+        self.assertEqual(exception["operator_checkpoint"]["kind"], "GRIPPER_MAINTENANCE")
+        self.assertEqual(exception["available_ops"], ["resolve_checkpoint"])
+        for marker in ('id="setup-panel"', "setup-subsystems", "authenticated HUMAN 아님"):
+            self.assertIn(marker, self.html + self.js)
+
+    def test_operator_checkpoints_are_exact_digest_bound_and_not_duplicated(self):
+        expected_keys = {"kind", "prompt", "binding_digest", "choices", "evidence"}
+        semantic = self.fixture["states"]["semantic"]["operator_checkpoint"]
+        release = self.fixture["states"]["release"]["operator_checkpoint"]
+        scene_ready = self.fixture["states"]["scene_ready"]["operator_checkpoint"]
+        for checkpoint in (semantic, release, scene_ready):
+            self.assertEqual(set(checkpoint), expected_keys)
+            self.assertRegex(checkpoint["binding_digest"], r"^sha256:[0-9a-f]{64}$")
+        self.assertEqual(semantic["kind"], "SEMANTIC_VERDICT")
+        self.assertEqual(semantic["choices"], ["PASS", "FAIL"])
+        self.assertEqual(release["kind"], "RELEASE_VERDICT")
+        self.assertEqual(release["choices"], ["LANDED", "OFF_SLOT", "UNCERTAIN"])
+        self.assertIn("착지", release["prompt"])
+        self.assertIn("그리퍼 비움", release["prompt"])
+        self.assertIn("후퇴", release["prompt"])
+        self.assertIn("안전 스테이징", release["prompt"])
+        self.assertEqual(scene_ready["kind"], "SCENE_READY")
+        self.assertEqual(scene_ready["choices"], ["SCENE_READY"])
+        self.assertIn('canIntent("resolve_checkpoint")', self.js)
+        self.assertIn("checkpoint_binding_digest: currentView.operator_checkpoint.binding_digest", self.js)
+        self.assertNotIn("checkpoint_binding_digest:", self.html)
+
+    def test_candidate_review_is_exact_and_separate_from_training_approval(self):
+        review = self.fixture["states"]["candidate_review"]["candidate_review"]
+        self.assertEqual(set(review), {"review_binding_digest", "run_id", "status", "choices", "reasons"})
+        self.assertEqual(review["choices"], ["PASS", "FAIL", "UNCERTAIN"])
+        self.assertEqual(review["status"], "PENDING")
+        self.assertRegex(review["review_binding_digest"], r"^sha256:[0-9a-f]{64}$")
+        self.assertIn('canIntent("review_candidate")', self.js)
+        self.assertIn("review_binding_digest: currentView.candidate_review.review_binding_digest", self.js)
+        self.assertIn('const reason = choice === "PASS" ? null', self.js)
+        self.assertIn("TRAINING APPROVAL 아님", self.js)
+        self.assertNotIn("training_approval", self.js)
 
     def test_assisted_and_direct_edit_share_one_draft_and_no_extra_tools(self):
         self.assertEqual(self.view["draft"]["authoring_mode"], "ASSISTED")
@@ -94,7 +153,8 @@ class GoalOneOperatorUiTest(unittest.TestCase):
 
     def test_fail_close_matrix_does_not_queue_or_replay_intents(self):
         self.assertEqual(set(self.fixture["states"]), {
-            "draft", "approval", "running", "cancel_pending", "blocked", "stale",
+            "draft", "setup_exception", "approval", "semantic", "release", "scene_ready",
+            "candidate_review", "running", "cancel_pending", "blocked", "stale",
             "reconnecting", "physical_toggle", "terminal", "unknown_enum",
         })
         for marker in (
@@ -115,6 +175,7 @@ class GoalOneOperatorUiTest(unittest.TestCase):
         self.assertEqual(terminal["synthetic_coverage_update"]["production_coverage_delta"], 0)
         for marker in ("result-card", "human semantic", "synthetic review", "synthetic coverage"):
             self.assertIn(marker, self.js)
+        self.assertIn("candidate review</dt><dd>NOT_APPLICABLE (TEST_ONLY)", self.js)
 
     def test_fake_and_authority_side_effect_counts_are_zero(self):
         counts = self.view["effect_counts"]
@@ -131,6 +192,8 @@ class GoalOneOperatorUiTest(unittest.TestCase):
             '<a class="skip-link"', '<main id="campaign-desk" tabindex="-1">',
             'role="status" aria-live="polite"', '<dialog id="workspace-dialog"',
             'aria-pressed="${selected}"', 'type="radio"', 'type="number"',
+            'data-checkpoint-choice="${escapeHtml(choice)}"', 'data-review-choice="${escapeHtml(choice)}"',
+            '<select id="candidate-reason" required>',
         ):
             self.assertIn(marker, self.html + self.js)
         self.assertIn(":focus-visible", self.css)

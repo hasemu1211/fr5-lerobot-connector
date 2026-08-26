@@ -17,7 +17,7 @@ from tools.data_factory.operator_setup import (
     validate_test_only_root_binding,
     validate_test_only_start_binding,
 )
-from tools.fr5_data_factory import ContractError
+from tools.fr5_data_factory import ContractError, SAFE_ID
 
 
 PROJECTION_SCHEMA = "data_factory.campaign_operator_projection.v1"
@@ -84,6 +84,7 @@ class CampaignOperator:
         physical_root_binding_call: Callable[[str], Mapping[str, Any]] | None = None,
         physical_start_binding_call: Callable[[str], Mapping[str, Any]] | None = None,
         repository_root: str | Path | None = None, current_usage=None, clock=None,
+        operator_label: str = "TEST_OPERATOR",
     ):
         if effect_scope not in DISPOSITIONS or lifecycle_action not in {
             "AUTHOR_ONLY", "PLAN_ONLY", "LIVE_COLLECT",
@@ -95,6 +96,8 @@ class CampaignOperator:
             raise ContractError("CAMPAIGN_OPERATOR_WORKSPACE")
         if not callable(scene_evidence_call) or not callable(side_effect_counter_call) or not callable(fake_lifecycle_factory):
             raise ContractError("CAMPAIGN_OPERATOR_CALLBACK")
+        if not isinstance(operator_label, str) or not SAFE_ID.fullmatch(operator_label):
+            raise ContractError("CAMPAIGN_OPERATOR_LABEL")
 
         self._lock = threading.RLock()
         self.hypothesis = validate_fr5_hypothesis(hypothesis)
@@ -103,6 +106,7 @@ class CampaignOperator:
         self.subsystems = _subsystems(subsystems)
         self.session_id = session_id
         self.lifecycle_owner = lifecycle_owner
+        self.operator_label = operator_label
         self.effect_scope = effect_scope
         self.lifecycle_action = lifecycle_action
         self.data_disposition = data_disposition
@@ -224,7 +228,7 @@ class CampaignOperator:
                 "aggregate": self._capability(),
                 "campaign": self._campaign_status(),
                 "side_effect_counters": self._counter_snapshot(),
-                "operator_identity": "TEST_OPERATOR",
+                "operator_identity": self.operator_label,
                 "authority": {
                     "execution": "NONE",
                     "scene_truth": "NONE",
@@ -273,6 +277,8 @@ class CampaignOperator:
             return
         try:
             activated = self.physical_activation_gate()
+        except ContractError:
+            raise
         except Exception as exc:
             raise ContractError("CAMPAIGN_OPERATOR_PHYSICAL_ACTIVATION_FAILED") from exc
         if activated is not True:

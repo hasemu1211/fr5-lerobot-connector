@@ -1,7 +1,7 @@
 {
   "base_view": {
     "schema_version": "data_factory.operator_session_view.v1",
-    "session_id": "session-fake-g1-r001",
+    "session_id": "session-fake-g2-r001",
     "revision": 1,
     "view_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
     "generated_at": "2026-08-25T04:00:00Z",
@@ -17,6 +17,18 @@
       "capture_workspace_point",
       "save_workspace_revision"
     ],
+    "setup": {
+      "host_status": "READY",
+      "operator_label": "TEST_OPERATOR",
+      "subsystems": [
+        {"label": "호스트", "status": "READY", "detail": "Ubuntu 24.04 · Python 3.12 · local foreground"},
+        {"label": "로봇", "status": "FAKE", "detail": "physical transport construction 0"},
+        {"label": "그리퍼", "status": "FAKE", "detail": "maintenance call 0"},
+        {"label": "카메라", "status": "CONNECTED · UNPLACED", "detail": "role qualification NOT_AVAILABLE"}
+      ]
+    },
+    "operator_checkpoint": null,
+    "candidate_review": null,
     "fixed_lane": {
       "workspace": {
         "display_name": "놓기 영역 A",
@@ -91,57 +103,148 @@
   },
   "states": {
     "draft": {},
-    "approval": {
+    "setup_exception": {
       "revision": 2,
+      "view_digest": "sha256:8888888888888888888888888888888888888888888888888888888888888888",
+      "available_ops": ["resolve_checkpoint"],
+      "setup": {
+        "host_status": "READY_WITH_EXCEPTION",
+        "operator_label": "LOCAL_OPERATOR",
+        "subsystems": [
+          {"label": "호스트", "status": "READY", "detail": "foreground console"},
+          {"label": "로봇", "status": "ATTACHED", "detail": "read-only setup projection"},
+          {"label": "그리퍼", "status": "MAINTENANCE_APPROVAL_REQUIRED", "detail": "빈 finger와 cell-clear 확인 필요"}
+        ]
+      },
+      "operator_checkpoint": {
+        "kind": "GRIPPER_MAINTENANCE",
+        "prompt": "빈 그리퍼와 셀 안전을 직접 확인했습니까?",
+        "binding_digest": "sha256:8989898989898989898989898989898989898989898989898989898989898989",
+        "choices": ["READY", "CANCEL"],
+        "evidence": {"active": false, "position_valid": false, "maintenance_call_count": 0}
+      },
+      "runtime": {"workflow_state": "AUTHORING", "measurement_outcome": "NOT_MEASURED", "reason_codes": ["MAINTENANCE_APPROVAL_REQUIRED"], "active_child_id": null}
+    },
+    "approval": {
+      "revision": 3,
       "view_digest": "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
       "available_ops": ["approve_exact_plan", "reject_plan"],
       "runtime": {"workflow_state": "AWAITING_APPROVAL", "measurement_outcome": "NOT_MEASURED", "reason_codes": [], "active_child_id": null},
       "approval": {
         "plan_digest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-        "approval_scope": "HUMAN_GATED",
-        "test_only_paths": "outputs/data_factory/test_only_physical/session-fake-g1-r001 · datasets/test_only_physical/session-fake-g1-r001"
+        "approval_scope": "HIL_NUMERIC_PROXY",
+        "test_only_paths": "outputs/data_factory/test_only_physical/session-fake-g2-r001 · datasets/test_only_physical/session-fake-g2-r001",
+        "operator_summary": {
+          "path": ["PREGRASP_PTP", "APPROACH_STOP_LIN", "FINAL_APPROACH_LIN", "GRIPPER_CLOSE", "LIFT_LIN", "RECYCLE_APPROACH_PTP", "LOWER_LIN", "GRIPPER_OPEN", "RETREAT_LIN", "SAFE_POSE_PTP"],
+          "flow": {"continuous_through": "LIFT_LIN", "next_human_hold": "POST_LIFT_SEMANTIC"},
+          "clearance": {"status": "COLLISION_CHECKED_NO_DISTANCE", "collision_report_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},
+          "speed": {"max_velocity_scaling": 0.03, "max_acceleration_scaling": 0.03}
+        },
+        "preapproval_checklist": {
+          "place_alias": "place1", "place_id": "PLACE_A", "cell_calibration_id": "place-a-yaw0-r002",
+          "yaw_deg": 0, "x_mm": 0, "y_mm": 0, "object_profile_id": "wood-cube-25mm-r001",
+          "grasp_profile_id": "wood-cube-25mm-top-center-r001", "task": "pickup_e2e",
+          "motion_recipe": "DIRECT", "full_return_step_count": 10, "robot_start_pose_id": "test-only-home-r001",
+          "gripper_empty": "OPERATOR_CONFIRMED", "cell_clear": "OPERATOR_CONFIRMED",
+          "estop_monitoring": "OPERATOR_CONFIRMED", "camera_state": "CONNECTED_UNPLACED",
+          "camera_profile_id": "fr5-up-rgb-30hz-v1", "camera_transport_binding_digest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+          "episode_limit": 1, "data_disposition": "TEST_ONLY"
+        },
+        "site_confirmation_digest": "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+      }
+    },
+    "semantic": {
+      "revision": 4,
+      "view_digest": "sha256:9090909090909090909090909090909090909090909090909090909090909090",
+      "available_ops": ["resolve_checkpoint", "cancel_session"],
+      "runtime": {"workflow_state": "RUNNING", "measurement_outcome": "NOT_MEASURED", "reason_codes": [], "active_child_id": "run-fake-r001", "progress": 68, "phase": "POST_LIFT_SEMANTIC", "detail": "recorder frozen · operational verdict 대기"},
+      "operator_checkpoint": {
+        "kind": "SEMANTIC_VERDICT",
+        "prompt": "물체가 의도대로 파지되어 들어 올려졌습니까?",
+        "binding_digest": "sha256:9191919191919191919191919191919191919191919191919191919191919191",
+        "choices": ["PASS", "FAIL"],
+        "evidence": {"run_id": "run-fake-r001", "plan_digest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "frozen_rows": 328}
+      }
+    },
+    "release": {
+      "revision": 5,
+      "view_digest": "sha256:9292929292929292929292929292929292929292929292929292929292929292",
+      "available_ops": ["resolve_checkpoint", "cancel_session"],
+      "runtime": {"workflow_state": "RUNNING", "measurement_outcome": "PASS", "reason_codes": [], "active_child_id": "run-fake-r001", "progress": 86, "phase": "RECYCLE_RELEASE_CHECK", "detail": "recording frozen · 현장 combined checkpoint 대기"},
+      "operator_checkpoint": {
+        "kind": "RELEASE_VERDICT",
+        "prompt": "착지, 그리퍼 비움, 후퇴 완료와 안전 스테이징을 함께 확인하십시오.",
+        "binding_digest": "sha256:9393939393939393939393939393939393939393939393939393939393939393",
+        "choices": ["LANDED", "OFF_SLOT", "UNCERTAIN"],
+        "evidence": {"release_evidence_digest": "sha256:9898989898989898989898989898989898989898989898989898989898989898", "landing_target": "PLACE_A", "gripper_empty": true, "retreat_safe_staging": true}
+      }
+    },
+    "scene_ready": {
+      "revision": 6,
+      "view_digest": "sha256:9494949494949494949494949494949494949494949494949494949494949494",
+      "available_ops": ["resolve_checkpoint"],
+      "runtime": {"workflow_state": "TERMINAL", "measurement_outcome": "PASS", "reason_codes": [], "active_child_id": null},
+      "operator_checkpoint": {
+        "kind": "SCENE_READY",
+        "prompt": "non-recycle 장면이 다음 실행을 시작할 준비가 되었습니까?",
+        "binding_digest": "sha256:9595959595959595959595959595959595959595959595959595959595959595",
+        "choices": ["SCENE_READY"],
+        "evidence": {"technical_status": "PASS", "post_scene_digest": "sha256:9999999999999999999999999999999999999999999999999999999999999999", "cell_acknowledgement": "PENDING"}
+      }
+    },
+    "candidate_review": {
+      "revision": 7,
+      "view_digest": "sha256:9696969696969696969696969696969696969696969696969696969696969696",
+      "available_ops": ["review_candidate"],
+      "runtime": {"workflow_state": "TERMINAL", "measurement_outcome": "PASS", "reason_codes": [], "active_child_id": null},
+      "candidate_review": {
+        "review_binding_digest": "sha256:9797979797979797979797979797979797979797979797979797979797979797",
+        "run_id": "run-candidate-r001",
+        "status": "PENDING",
+        "choices": ["PASS", "FAIL", "UNCERTAIN"],
+        "reasons": ["WRONG_OBJECT_OR_START", "GRASP_OR_LIFT", "TRAJECTORY_FLOW", "TASK_GOAL", "UNMODELED_CONTACT", "RELEASE_SCENE", "UNKNOWN"]
       }
     },
     "running": {
-      "revision": 3,
+      "revision": 8,
       "view_digest": "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
       "available_ops": ["cancel_session"],
       "runtime": {"workflow_state": "RUNNING", "measurement_outcome": "NOT_MEASURED", "reason_codes": [], "active_child_id": "run-fake-r001", "progress": 62, "phase": "LIFT_LIN · recorder readiness PASS", "detail": "328 aligned fake rows · hardware/production effect 0"}
     },
     "cancel_pending": {
-      "revision": 4,
+      "revision": 9,
       "view_digest": "sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
       "available_ops": [],
       "runtime": {"workflow_state": "CANCELLING", "measurement_outcome": "NOT_MEASURED", "reason_codes": ["CANCEL_PENDING"], "active_child_id": "run-fake-r001", "progress": 62, "phase": "executor terminal 확인", "detail": "확인 뒤 recorder abort; 상태가 불확실하면 preserve/quarantine"}
     },
     "blocked": {
-      "revision": 5,
+      "revision": 10,
       "view_digest": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
       "available_ops": [],
       "runtime": {"workflow_state": "BLOCKED", "measurement_outcome": "NOT_AVAILABLE", "reason_codes": ["SLOT_BLOCKED"], "active_child_id": null}
     },
     "stale": {
-      "revision": 6,
+      "revision": 11,
       "view_digest": "sha256:2222222222222222222222222222222222222222222222222222222222222222",
       "connection_state": "STALE",
       "available_ops": [],
       "runtime": {"workflow_state": "BLOCKED", "measurement_outcome": "NOT_AVAILABLE", "reason_codes": ["VIEW_STALE"], "active_child_id": null}
     },
     "reconnecting": {
-      "revision": 7,
+      "revision": 12,
       "view_digest": "sha256:3333333333333333333333333333333333333333333333333333333333333333",
       "connection_state": "RECONNECTING",
       "available_ops": [],
       "runtime": {"workflow_state": "BLOCKED", "measurement_outcome": "NOT_AVAILABLE", "reason_codes": ["BRIDGE_UNAVAILABLE"], "active_child_id": null}
     },
     "physical_toggle": {
-      "revision": 8,
+      "revision": 13,
       "view_digest": "sha256:4444444444444444444444444444444444444444444444444444444444444444",
       "effect_scope": "PHYSICAL",
       "available_ops": ["set_effect_scope", "set_lifecycle_action", "update_draft", "compile_draft"]
     },
     "terminal": {
-      "revision": 9,
+      "revision": 14,
       "view_digest": "sha256:6666666666666666666666666666666666666666666666666666666666666666",
       "available_ops": [],
       "runtime": {"workflow_state": "TERMINAL", "measurement_outcome": "PASS", "reason_codes": [], "active_child_id": null},
@@ -157,7 +260,7 @@
       }
     },
     "unknown_enum": {
-      "revision": 10,
+      "revision": 15,
       "view_digest": "sha256:5555555555555555555555555555555555555555555555555555555555555555",
       "effect_scope": "UNDECLARED_EFFECT"
     }

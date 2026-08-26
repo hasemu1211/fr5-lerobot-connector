@@ -1,6 +1,6 @@
 # ADR-001: dependency-free unified collection desk
 
-Status: accepted for Goal 1 frontend integration, 2026-08-25.
+Status: accepted for portable foreground integration, 2026-08-26.
 
 ## Decision
 
@@ -40,6 +40,10 @@ The reading order is scope → workspace grid → current checkpoint → fixed l
 
 ## Implemented integration boundary
 
-Goal 1 implements the foreground standard-library Python loopback in `tools/data_factory/operator_bridge.py` and `tools/data_factory/fake_operator_console.py`. It produces the canonical view, injects the token meta, enforces exact Host/Origin/token checks and single-use compare-and-swap, and maps accepted ops through the existing `CampaignOperator → CampaignSession → fresh OneJob` lifecycle path. This composition is `FAKE`/`TEST_ONLY` and constructs no physical port.
+`tools/data_factory/operator_console.py` is the unified foreground entry point. Its FAKE scope reuses the synthetic fixture composition. Its PHYSICAL scope injects exact TEST_ONLY roots, stable one-UVC local binding, fresh HOME snapshot, passive existing-graph activation and `run_live` into the same `CampaignOperator → CampaignSession → fresh OneJob` lifecycle path. It does not create a second lifecycle owner, recorder or service.
 
-PHYSICAL port construction and activation, hardware adapters and production authority remain deferred. A standalone static preview has no loopback bridge, so it correctly renders `BRIDGE_UNAVAILABLE` and sends no intent.
+The PHYSICAL fixed lane is limited to `place1 → PLACE_A@place-a-yaw0-r002`, yaw 0°, local `(0,0)`, `pickup_e2e`, v2 `DIRECT`, one episode and `fr5-up-rgb-30hz-v1` with one `up` UVC camera. The tracked inputs under `config/data_factory/test_only_physical/goal2-place1/` preserve CANDIDATE/non-authoritative truth; machine-local camera binding and episode outputs remain ignored. A new host must requalify its robot/controller/start/cell and camera.
+
+The generic checkpoint projection covers semantic/grasp, combined release/final-scene and non-recycle `SCENE_READY`; each choice is bound to current evidence and consumed once. Candidate `PASS | FAIL | UNCERTAIN` reuses the existing review compare-and-swap only in isolated fixtures. A physical TEST_ONLY episode has candidate review `NOT_APPLICABLE`, production writers disabled and no training authority.
+
+A standalone static preview has no loopback bridge, so it correctly renders `BRIDGE_UNAVAILABLE` and sends no intent. The current one-camera path does not assess image semantics or qualify dual-camera, RealSense/depth, production data validity or training admission.

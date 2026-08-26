@@ -12,6 +12,7 @@ import subprocess
 import sys
 import threading
 import time
+from collections.abc import Mapping
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -321,6 +322,29 @@ def _collection_profile(validated, payload):
     return copy.deepcopy(profile)
 
 
+def _validate_runtime_collection_binding(validated, program):
+    """Reject resolver/profile substitution before any live side effect."""
+    if not isinstance(validated, dict):
+        raise ContractError("COLLECTION_PROFILE_BINDING")
+    job = validated.get("normalized_job")
+    inputs = validated.get("input_digests")
+    profile = validated.get("collection_profile")
+    bindings = program.get("binding_digests") if isinstance(program, dict) else None
+    if (
+        not isinstance(job, dict)
+        or not isinstance(inputs, dict)
+        or not isinstance(profile, dict)
+        or not isinstance(bindings, dict)
+        or job.get("collection_profile_id") != profile.get("collection_profile_id")
+        or inputs.get("collection_profile") != canonical_digest(profile)
+        or validated.get("resolved_job_digest")
+        != canonical_digest({"job": job, "input_digests": inputs})
+        or program.get("resolved_job_digest") != validated.get("resolved_job_digest")
+        or bindings.get("collection_profile") != inputs.get("collection_profile")
+    ):
+        raise ContractError("COLLECTION_PROFILE_BINDING")
+
+
 def _recorder(payload, task, profile, timeout_s):
     dataset_root = Path(payload["dataset_root"]).resolve()
     encoder_temp = dataset_root.parent / f".{dataset_root.name}.encoder_tmp"
@@ -492,6 +516,51 @@ def _button_plan_decision(
         or value.get("operator_label") != operator_id
     ):
         raise ContractError("PLAN_DECISION_BINDING")
+    return copy.deepcopy(value)
+
+
+def _operator_checkpoint(
+    provider, *, kind, run_id, plan_digest, prompt, choices, evidence,
+    operator_id, timeout_s,
+):
+    request = {
+        "schema_version": "data_factory.operator_checkpoint_request.v1",
+        "kind": kind,
+        "run_id": run_id,
+        "plan_digest": plan_digest,
+        "prompt": prompt,
+        "choices": list(choices),
+        "evidence": copy.deepcopy(evidence),
+        "timeout_s": timeout_s,
+    }
+    try:
+        value = provider(copy.deepcopy(request))
+    except ContractError:
+        raise
+    except Exception as exc:
+        raise ContractError("OPERATOR_CHECKPOINT_FAILED") from exc
+    if value is None:
+        return None
+    fields = {
+        "kind", "choice", "run_id", "plan_digest", "checkpoint_binding_digest",
+        "decision_source", "operator_label",
+    }
+    bound = {
+        key: request[key]
+        for key in ("kind", "run_id", "plan_digest", "prompt", "choices", "evidence")
+    }
+    if (
+        not isinstance(value, dict)
+        or set(value) != fields
+        or value.get("kind") != kind
+        or value.get("choice") not in choices
+        or value.get("run_id") != run_id
+        or value.get("plan_digest") != plan_digest
+        or value.get("checkpoint_binding_digest") != canonical_digest(bound)
+        or value.get("decision_source") != "LOCAL_UI_BUTTON"
+        or value.get("operator_label") != operator_id
+    ):
+        raise ContractError("OPERATOR_CHECKPOINT_BINDING")
     return copy.deepcopy(value)
 
 
@@ -980,8 +1049,10 @@ def run_live(payload, cancel, publish, *, resolver=resolve_inputs, executor_fact
              recorder_factory=_recorder, validator_call=_technical_validator, tty_decision=_tty_decision,
              camera_warmup_call=_camera_warmup, before_approval=None, one_job=None,
              decision_provider=None, approval_scope="HUMAN_GATED",
-             decision_timeout_s=None, test_only_root_binding=None,
+             decision_timeout_s=None, checkpoint_provider=None,
+             checkpoint_timeout_s=None, test_only_root_binding=None,
              test_only_episode_binding=None, test_only_start_binding=None,
+             preapproval_checklist=None,
              candidate_writer_enabled=True,
              repository_root=ROOT):
     """Public single HIL run: plan and human approval precede recorder begin and motion."""
@@ -991,6 +1062,14 @@ def run_live(payload, cancel, publish, *, resolver=resolve_inputs, executor_fact
     try:
         if approval_scope not in {"HUMAN_GATED", "HIL_NUMERIC_PROXY"}:
             raise ContractError("APPROVAL_SCOPE")
+        if checkpoint_provider is not None and not callable(checkpoint_provider):
+            raise ContractError("OPERATOR_CHECKPOINT_PROVIDER")
+        if checkpoint_timeout_s is not None and (
+            isinstance(checkpoint_timeout_s, bool)
+            or not isinstance(checkpoint_timeout_s, (int, float))
+            or checkpoint_timeout_s < 0
+        ):
+            raise ContractError("OPERATOR_CHECKPOINT_TIMEOUT")
         if before_approval is not None and decision_provider is not None:
             raise ContractError("PLAN_DECISION_AMBIGUOUS")
         test_only = test_only_root_binding is not None
@@ -1017,6 +1096,13 @@ def run_live(payload, cancel, publish, *, resolver=resolve_inputs, executor_fact
             ):
                 raise ContractError("CANDIDATE_WRITER_SCOPE")
             cell_root = ROOT / "outputs/data_factory/cells"
+        if preapproval_checklist is not None and (
+            not test_only
+            or checkpoint_provider is None
+            or not isinstance(preapproval_checklist, Mapping)
+            or not preapproval_checklist
+        ):
+            raise ContractError("PREAPPROVAL_CHECKLIST_SCOPE")
         if test_only and resolver is resolve_inputs:
             validated, program, scene_binding = resolve_inputs(
                 payload,
@@ -1027,6 +1113,7 @@ def run_live(payload, cancel, publish, *, resolver=resolve_inputs, executor_fact
         else:
             validated, program, scene_binding = resolver(payload)
         episode_binding = None
+        _validate_runtime_collection_binding(validated, program)
         if test_only:
             episode_binding = validate_test_only_episode_binding(
                 test_only_episode_binding, roots=roots, normalized_job=validated,
@@ -1048,9 +1135,11 @@ def run_live(payload, cancel, publish, *, resolver=resolve_inputs, executor_fact
         if cell.get("robot_system_id") != payload["expected_robot_system_id"] or cell.get("cell_ready") is not True:
             return _response(ok=False, code="CELL_NOT_READY", state="BLOCKED", run_id=payload["run_id"])
         _prepare_run_dir(payload)
-        camera_warmup = camera_warmup_call(payload, profile, cancel)
-        if cancel.is_set():
-            return _response(ok=False, code="CANCELLED", state="CANCELLED", run_id=payload["run_id"])
+        camera_warmup = None
+        if not test_only:
+            camera_warmup = camera_warmup_call(payload, profile, cancel)
+            if cancel.is_set():
+                return _response(ok=False, code="CANCELLED", state="CANCELLED", run_id=payload["run_id"])
         timeout_s = _timeout_s(program)
         executor = (
             executor_factory(payload, timeout_s, cell_root=cell_root)
@@ -1102,6 +1191,69 @@ def run_live(payload, cancel, publish, *, resolver=resolve_inputs, executor_fact
         )
         summary = _operator_summary(planned)
         preapproval_evidence = _write_preapproval_evidence(payload, validated, planned)
+        operator_id = validated["normalized_job"]["operator_or_agent_id"]
+        if test_only:
+            try:
+                camera_warmup = camera_warmup_call(payload, profile, cancel)
+            except ContractError as exc:
+                return _response(
+                    ok=False, code=exc.code, state="BLOCKED",
+                    run_id=payload["run_id"], plan_digest=planned["plan_digest"],
+                    data={
+                        "mode": "live", "measurement_outcome": "FAIL",
+                        "operator_summary": summary,
+                        "preapproval_evidence_digest": canonical_digest(preapproval_evidence),
+                        "test_only_episode_binding_digest": episode_binding["binding_digest"],
+                        "test_only_planned_start": copy.deepcopy(planned_start),
+                        "recorder_goal_count": 0, "execute_goal_count": 0,
+                        "camera_semantic_authority": False,
+                        "training_authorized": False,
+                    },
+                )
+            if cancel.is_set():
+                return _response(
+                    ok=False, code="CANCELLED", state="CANCELLED",
+                    run_id=payload["run_id"], plan_digest=planned["plan_digest"],
+                    data={
+                        "measurement_outcome": "NOT_MEASURED",
+                        "preapproval_evidence_digest": canonical_digest(preapproval_evidence),
+                        "recorder_goal_count": 0, "execute_goal_count": 0,
+                        "training_authorized": False,
+                    },
+                )
+        site_confirmation = None
+        if preapproval_checklist is not None:
+            site_confirmation = _operator_checkpoint(
+                checkpoint_provider,
+                kind="PHYSICAL_SCENE_CONFIRMATION", run_id=payload["run_id"],
+                plan_digest=planned["plan_digest"],
+                prompt=(
+                    "Confirm the displayed place1 binding, cube pose, empty gripper, "
+                    "clear cell, and E-stop monitoring before this one TEST_ONLY dispatch."
+                ),
+                choices=("READY", "CANCEL"), operator_id=operator_id,
+                timeout_s=checkpoint_timeout_s,
+                evidence={
+                    "checklist": copy.deepcopy(dict(preapproval_checklist)),
+                    "operator_summary": copy.deepcopy(summary),
+                    "planned_start_evidence_digest": canonical_digest(planned_start),
+                    "data_disposition": "TEST_ONLY",
+                },
+            )
+            if site_confirmation is None or site_confirmation["choice"] != "READY":
+                return _response(
+                    ok=False, code="PAUSED_AWAITING_OPERATOR", state="PLANNED",
+                    run_id=payload["run_id"], plan_digest=planned["plan_digest"],
+                    data={
+                        "measurement_outcome": "NOT_MEASURED",
+                        "operator_summary": summary,
+                        "preapproval_evidence_digest": canonical_digest(preapproval_evidence),
+                        "test_only_episode_binding_digest": episode_binding["binding_digest"],
+                        "test_only_planned_start": copy.deepcopy(planned_start),
+                        "recorder_goal_count": 0, "execute_goal_count": 0,
+                        "training_authorized": False,
+                    },
+                )
         publish(_response(ok=True, code="AWAITING_HUMAN_APPROVAL", state="PLANNED", run_id=payload["run_id"], plan_digest=planned["plan_digest"], data={
             "mode": "live", "operator_summary": summary, "resolved_job_digest": validated["resolved_job_digest"],
             "scene_binding": scene_binding, "preapproval_evidence_digest": canonical_digest(preapproval_evidence),
@@ -1112,7 +1264,6 @@ def run_live(payload, cancel, publish, *, resolver=resolve_inputs, executor_fact
             } if test_only else {}),
             "camera_semantic_authority": False, "training_authorized": False,
         }))
-        operator_id = validated["normalized_job"]["operator_or_agent_id"]
         recycle_text = f" recycle={summary['recycle']}" if "recycle" in summary else ""
         approval_prompt = (
             f"Plan {planned['plan_digest']} path={' > '.join(summary['path'])} flow={summary['flow']} "
@@ -1128,6 +1279,15 @@ def run_live(payload, cancel, publish, *, resolver=resolve_inputs, executor_fact
                     "resolved_job_digest": validated["resolved_job_digest"],
                     "scene_binding_digest": canonical_digest(scene_binding),
                     "operator_summary_digest": canonical_digest(summary),
+                    "operator_summary": copy.deepcopy(summary),
+                    "preapproval_checklist": (
+                        None if preapproval_checklist is None
+                        else copy.deepcopy(dict(preapproval_checklist))
+                    ),
+                    "site_confirmation_digest": (
+                        None if site_confirmation is None
+                        else canonical_digest(site_confirmation)
+                    ),
                     "data_disposition": "TEST_ONLY" if test_only else "PRODUCTION",
                     "root_binding_digest": roots["binding_digest"] if test_only else None,
                     "episode_binding": copy.deepcopy(episode_binding),
@@ -1297,11 +1457,32 @@ def run_live(payload, cancel, publish, *, resolver=resolve_inputs, executor_fact
                         "camera_semantic_authority": False, "training_authorized": False,
                     })
                 target = validated["normalized_job"]
-                tty_decision(
+                scene_prompt = (
                     "Confirm the robot is stopped, gripper is empty, path is clear, and the object is reset at "
-                    f"({target['place_id']},{target['yaw_deg']},{target['x_mm']},{target['y_mm']})",
-                    f"SCENE_READY {planned['plan_digest']}",
+                    f"({target['place_id']},{target['yaw_deg']},{target['x_mm']},{target['y_mm']})"
                 )
+                if checkpoint_provider is None:
+                    tty_decision(scene_prompt, f"SCENE_READY {planned['plan_digest']}")
+                else:
+                    checkpoint = _operator_checkpoint(
+                        checkpoint_provider,
+                        kind="SCENE_READY", run_id=payload["run_id"],
+                        plan_digest=planned["plan_digest"], prompt=scene_prompt,
+                        choices=("SCENE_READY",), operator_id=operator_id,
+                        timeout_s=checkpoint_timeout_s,
+                        evidence={
+                            "scene_binding_digest": canonical_digest(scene_binding),
+                            "target_pose": {
+                                key: target[key]
+                                for key in ("place_id", "yaw_deg", "x_mm", "y_mm")
+                            },
+                            "technical_result_digest": technical["result_digest"],
+                            "validator_reference_digest": canonical_digest(validator_reference),
+                            "data_disposition": "TEST_ONLY" if test_only else "PRODUCTION",
+                        },
+                    )
+                    if checkpoint is None:
+                        raise ContractError("OPERATOR_CHECKPOINT_TIMEOUT")
                 scene = scene_store.update_object(
                     instance_id=scene_binding["object_instance_id"],
                     object_profile_id=target["object_profile_id"], state="ON_SURFACE", source="HUMAN",
@@ -1352,10 +1533,32 @@ def run_live(payload, cancel, publish, *, resolver=resolve_inputs, executor_fact
                         if result["state"] == "GRASP_VERDICT"
                         else "Confirm the completed episode; PASS commits, FAIL discards"
                     )
+                    checkpoint_evidence = {
+                        "execution_evidence": copy.deepcopy(result.get("execution_evidence")),
+                        "operator_summary_digest": canonical_digest(summary),
+                        "approval_scope": approval_scope,
+                        "data_disposition": "TEST_ONLY" if test_only else "PRODUCTION",
+                    }
 
-                    def verdict_in_background(state=result["state"], text=prompt):
+                    def verdict_in_background(
+                        state=result["state"], text=prompt,
+                        evidence=checkpoint_evidence,
+                    ):
                         try:
-                            decision = tty_decision(text, ("PASS", "FAIL"))
+                            if checkpoint_provider is None:
+                                decision = tty_decision(text, ("PASS", "FAIL"))
+                            else:
+                                checkpoint = _operator_checkpoint(
+                                    checkpoint_provider,
+                                    kind=state, run_id=payload["run_id"],
+                                    plan_digest=planned["plan_digest"], prompt=text,
+                                    choices=("PASS", "FAIL"), operator_id=operator_id,
+                                    timeout_s=checkpoint_timeout_s,
+                                    evidence=evidence,
+                                )
+                                if checkpoint is None:
+                                    raise ContractError("OPERATOR_CHECKPOINT_TIMEOUT")
+                                decision = checkpoint["choice"]
                             if decision not in {"PASS", "FAIL"}:
                                 raise ContractError("HUMAN_CONFIRMATION_FAILED")
                             decisions.put((state, decision))
@@ -1384,14 +1587,44 @@ def run_live(payload, cancel, publish, *, resolver=resolve_inputs, executor_fact
                 recycle = summary["recycle"]
                 if pending is None:
                     pending = result["state"]
+                    release_prompt = (
+                        f"Confirm object inside release slot {recycle['release_target']}, gripper empty, "
+                        f"retreat complete, and safe staging {recycle['safe_staging_joint_positions_rad']}; "
+                        f"recycle={recycle['plan_digest']}"
+                    )
+                    release_checkpoint_evidence = {
+                        "release_target": copy.deepcopy(recycle["release_target"]),
+                        "safe_staging_joint_positions_rad": copy.deepcopy(
+                            recycle["safe_staging_joint_positions_rad"]
+                        ),
+                        "recycle_plan_digest": recycle["plan_digest"],
+                        "execution_evidence_digest": canonical_digest(
+                            result.get("execution_evidence")
+                        ),
+                        "data_disposition": "TEST_ONLY" if test_only else "PRODUCTION",
+                    }
 
-                    def release_in_background():
+                    def release_in_background(evidence=release_checkpoint_evidence):
                         try:
-                            decision = tty_decision(
-                                f"Confirm object inside release slot {recycle['release_target']}, gripper empty, retreat complete, and safe staging {recycle['safe_staging_joint_positions_rad']}; recycle={recycle['plan_digest']}",
-                                (f"LANDED {recycle['plan_digest']}", "OFF_SLOT", "UNCERTAIN"),
-                            )
-                            decisions.put(("RELEASE_VERDICT", "LANDED" if decision.startswith("LANDED ") else decision))
+                            if checkpoint_provider is None:
+                                decision = tty_decision(
+                                    release_prompt,
+                                    (f"LANDED {recycle['plan_digest']}", "OFF_SLOT", "UNCERTAIN"),
+                                )
+                                decision = "LANDED" if decision.startswith("LANDED ") else decision
+                            else:
+                                checkpoint = _operator_checkpoint(
+                                    checkpoint_provider,
+                                    kind="RELEASE_VERDICT", run_id=payload["run_id"],
+                                    plan_digest=planned["plan_digest"], prompt=release_prompt,
+                                    choices=("LANDED", "OFF_SLOT", "UNCERTAIN"),
+                                    operator_id=operator_id, timeout_s=checkpoint_timeout_s,
+                                    evidence=evidence,
+                                )
+                                if checkpoint is None:
+                                    raise ContractError("OPERATOR_CHECKPOINT_TIMEOUT")
+                                decision = checkpoint["choice"]
+                            decisions.put(("RELEASE_VERDICT", decision))
                         except Exception as exc:
                             decisions.put(("RELEASE_VERDICT", exc))
 

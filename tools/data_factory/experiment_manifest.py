@@ -18,6 +18,14 @@ from tools.fr5_data_factory import ContractError, DIGEST, SAFE_ID, canonical_dig
 
 
 JOINTS = ("j1", "j2", "j3", "j4", "j5", "j6")
+FR5_TEST_ONLY_FEATURE_CONTRACT = {
+    "schema_version": "data_factory.fr5_feature_contract.v1",
+    "collection_profile_id": "fr5-up-rgb-30hz-v1",
+    "camera_profile": "up",
+    "camera_mapping": {"up": "camera1"},
+    "state_dimension": 7,
+    "action_dimension": 7,
+}
 FIXED_FIELDS = frozenset({
     "schema_version", "robot_system_id", "task", "instruction",
     "collection_profile_digest", "feature_contract", "object_profile_id",
@@ -132,7 +140,9 @@ def _fixed_contract(value: object) -> dict[str, Any]:
         result["schema_version"] != "data_factory.fr5_fixed_contract.v1"
         or result["task"] != "pickup_e2e"
         or result["motion_recipe"] != "DIRECT"
-        or result["feature_contract"] != FR5_FEATURE_CONTRACT
+        or result["feature_contract"] not in (
+            FR5_FEATURE_CONTRACT, FR5_TEST_ONLY_FEATURE_CONTRACT,
+        )
     ):
         raise ContractError("HYPOTHESIS_FIXED_CONTRACT")
     for field in (
@@ -179,7 +189,10 @@ def _resolver_receipt(value: object) -> dict[str, Any]:
     return result
 
 
-def _resolver_result(value: object) -> dict[str, Any]:
+def _resolver_result(
+    value: object, *,
+    collection_profile_id: str = FR5_FEATURE_CONTRACT["collection_profile_id"],
+) -> dict[str, Any]:
     result = copy.deepcopy(dict(_exact(value, RESOLVER_RESULT_FIELDS, "HYPOTHESIS_RESOLVER_FIELDS")))
     receipt = _resolver_receipt({
         "normalized_job": result["normalized_job"],
@@ -215,11 +228,30 @@ def _resolver_result(value: object) -> dict[str, Any]:
         or document.get("place_id") != job["place_id"]
         or inputs["cell_calibration"] != canonical_digest(document)
         or inputs["selected_sheet"] != job["sheet_manifest_digest"]
-        or result["collection_profile"].get("collection_profile_id") != FR5_FEATURE_CONTRACT["collection_profile_id"]
+        or job["collection_profile_id"] != collection_profile_id
         or result["grasp_profile"].get("object_profile_id") != job["object_profile_id"]
     ):
         raise ContractError("HYPOTHESIS_RESOLVER_SOURCE_BINDING")
     return receipt
+
+
+def _profile_contract(
+    fixed: Mapping[str, Any], report: Mapping[str, Any],
+    receipts: Sequence[Mapping[str, Any]], source: str,
+) -> None:
+    feature = fixed["feature_contract"]
+    profile_id = feature["collection_profile_id"]
+    if feature == FR5_TEST_ONLY_FEATURE_CONTRACT and source != "SYNTHETIC_TEST_ONLY":
+        raise ContractError("HYPOTHESIS_TEST_ONLY_PROFILE_SOURCE")
+    if (
+        report["collection_profile_id"] != profile_id
+        or any(
+            receipt["normalized_job"]["collection_profile_id"] != profile_id
+            or receipt["input_digests"]["collection_profile"] != fixed["collection_profile_digest"]
+            for receipt in receipts
+        )
+    ):
+        raise ContractError("HYPOTHESIS_COLLECTION_PROFILE_BINDING")
 
 
 def _base_qualification(value: object) -> dict[str, Any]:
@@ -368,6 +400,7 @@ def _qualification_catalog(
         or result["coverage_domain_digest"] != report["domain_digest"]
     ):
         raise ContractError("HYPOTHESIS_CATALOG_BINDING")
+    _profile_contract(fixed, report, receipts, source)
     receipt_lookup = {item["resolver_result_digest"]: item for item in receipts}
     if (
         len(receipt_lookup) != len(receipts)
@@ -469,6 +502,13 @@ def _validate_design(
         pair_keys.add(key)
         for group in item["split_groups"]:
             eligibility[group].add(key)
+    if fixed["feature_contract"] == FR5_TEST_ONLY_FEATURE_CONTRACT:
+        if (
+            len(bases) != 1 or len(poses) != 1 or len(pairs) != 1
+            or pairs[0]["split_groups"] != ["TRAIN"]
+        ):
+            raise ContractError("HYPOTHESIS_TEST_ONLY_PROFILE_DESIGN")
+        return
     if any(not eligibility[group] for group in GROUPS):
         raise ContractError("HYPOTHESIS_SPLIT_GROUP_EMPTY")
     if not eligibility["ID"].issubset(eligibility["TRAIN"]):
@@ -517,7 +557,13 @@ def compile_fr5_hypothesis(
     if not isinstance(resolver_results, (list, tuple)) or not resolver_results:
         raise ContractError("HYPOTHESIS_RESOLVER_RESULTS")
     receipts = sorted(
-        (_resolver_result(item) for item in resolver_results),
+        (
+            _resolver_result(
+                item,
+                collection_profile_id=fixed["feature_contract"]["collection_profile_id"],
+            )
+            for item in resolver_results
+        ),
         key=lambda item: item["resolver_result_digest"],
     )
     catalog, bases, poses, pairs = _qualification_catalog(

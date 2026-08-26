@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="operator-token" content="browser-regression-token">
-  <title>Goal 1 operator browser regressions</title>
+  <title>Goal 2 operator browser regressions</title>
   <base href="../">
   <link rel="stylesheet" href="styles.css">
 </head>
@@ -13,6 +13,7 @@
   <main id="campaign-desk">
     <fieldset id="effect-scope"><label><input type="radio" name="effect_scope" value="FAKE">FAKE</label><label><input type="radio" name="effect_scope" value="PHYSICAL">PHYSICAL</label></fieldset>
     <fieldset id="lifecycle-action"><label><input type="radio" name="lifecycle_action" value="AUTHOR_ONLY">AUTHOR_ONLY</label><label><input type="radio" name="lifecycle_action" value="PLAN_ONLY">PLAN_ONLY</label><label><input type="radio" name="lifecycle_action" value="LIVE_COLLECT">LIVE_COLLECT</label></fieldset>
+    <section id="setup-panel" hidden><p id="setup-summary"></p><dl id="setup-subsystems"></dl></section>
     <span id="campaign-id"></span><div id="draft-summary"></div>
     <button id="open-workspace" type="button">wizard</button><div id="workspace-meta"></div>
     <fieldset id="authoring-mode"><label><input type="radio" name="authoring_mode" value="ASSISTED">ASSISTED</label><label><input type="radio" name="authoring_mode" value="DIRECT_EDIT">DIRECT_EDIT</label></fieldset>
@@ -80,7 +81,7 @@
     const show = async (key) => {
       stateKey = key;
       await loadView();
-      await waitFor(() => currentView?.revision === (key === "draft" ? 1 : ({approval: 2, running: 3, cancel_pending: 4, blocked: 5, stale: 6, reconnecting: 7, physical_toggle: 8, terminal: 9}[key])) || !currentView);
+      await waitFor(() => currentView?.revision === (key === "draft" ? 1 : ({setup_exception: 2, approval: 3, semantic: 4, release: 5, scene_ready: 6, candidate_review: 7, running: 8, cancel_pending: 9, blocked: 10, stale: 11, reconnecting: 12, physical_toggle: 13, terminal: 14}[key])) || !currentView);
     };
 
     async function run() {
@@ -92,6 +93,7 @@
         check(document.querySelector("#lane-details").textContent.includes("wood-cube-25mm-r001") && document.querySelector("#lane-details").textContent.includes("wood-cube-25mm-top-center-r001"), "object and grasp remain visible");
         check(document.querySelector("#lane-details").textContent.includes("TRAIN 4 · ID 1 · OOD 1") && document.querySelector("#lane-details").textContent.includes("BALANCED_INITIAL"), "split repeat coverage and selector remain visible");
         check(document.querySelector("#capability-list").textContent.includes("pick_place") && document.querySelector("#capability-list").textContent.includes("TWO_STAGE_ALIGN") && document.querySelectorAll(".capability.not_available").length === 2, "pick_place and motion variant render as NOT_AVAILABLE");
+        check(document.querySelector("#setup-summary").textContent.includes("READY") && document.querySelectorAll("#setup-subsystems div").length === 4, "setup projects host operator label and subsystem rows");
         check(Object.values((await fixturePromise).base_view.effect_counts).every((count) => count === 0), "FAKE hardware recorder dataset run-state production and training effects stay zero");
 
         const direct = document.querySelector('[name="authoring_mode"][value="DIRECT_EDIT"]');
@@ -106,22 +108,73 @@
         await waitFor(() => posted.length === 3 && !intentBusy);
         check(posted[2].body.op === "set_effect_scope" && !posted.slice(0, 3).some((request) => ["approve_exact_plan", "start", "execute"].includes(request.body.op)), "PHYSICAL toggle alone sends no plan start or execution intent");
 
+        await show("setup_exception");
+        check(document.querySelector("#setup-summary").textContent.includes("READY_WITH_EXCEPTION") && document.querySelector("#setup-subsystems").textContent.includes("MAINTENANCE_APPROVAL_REQUIRED"), "setup exception is visible without automatic maintenance");
+        const setupChoice = document.querySelector('[data-checkpoint-choice="READY"]');
+        const beforeSetup = posted.length;
+        setupChoice.click();
+        await waitFor(() => posted.length === beforeSetup + 1 && !intentBusy);
+        const setupIntent = posted.at(-1).body;
+        check(setupIntent.op === "resolve_checkpoint" && Object.keys(setupIntent.payload).sort().join() === "checkpoint_binding_digest,choice", "setup exception uses the exact generic checkpoint payload");
+
         await show("approval");
         check(!document.querySelector("#approval-input") && !document.querySelector('#runtime-content input[type="text"]'), "approval never renders a typed digest input");
         check(document.querySelector('[data-op="reject_plan"]'), "approval view exposes a native reject button without typed input");
         check(document.querySelector(".approval-card").textContent.includes("신원 인증이 아닙니다"), "approval button does not claim authentication");
+        const approvalText = document.querySelector(".approval-card").textContent;
+        check(approvalText.includes("10 phases") && approvalText.includes("SAFE_POSE_PTP") && approvalText.includes("velocity 0.03"), "approval displays the exact 10-phase return path and speed bound");
+        check(approvalText.includes("COLLISION_CHECKED_NO_DISTANCE") && approvalText.includes("place1") && approvalText.includes("PLACE_A") && approvalText.includes("place-a-yaw0-r002"), "approval displays clearance plus the confirmed exact site binding");
+        check(document.querySelector('.sealed-toggle input[type="checkbox"]')?.checked, "mechanical gripper proxy toggle is visibly sealed ON for this TEST_ONLY plan");
         postResult = "replay";
+        const beforeApproval = posted.length;
         document.querySelector('[data-op="approve_exact_plan"]').click();
-        await waitFor(() => posted.length === 4 && !intentBusy && !currentView);
-        const approvalIntent = posted[3];
+        await waitFor(() => posted.length === beforeApproval + 1 && !intentBusy && !currentView);
+        const approvalIntent = posted.at(-1);
         const expectedApproval = merge(clone((await fixturePromise).base_view), (await fixturePromise).states.approval);
         check(approvalIntent.headers.get("X-Operator-Token") === "browser-regression-token", "intent sends the injected operator token header");
-        check(approvalIntent.body.schema_version === "data_factory.operator_intent.v1" && approvalIntent.body.session_id && approvalIntent.body.intent_id && approvalIntent.body.view_revision === 2, "intent envelope carries schema intent session and revision");
+        check(approvalIntent.body.schema_version === "data_factory.operator_intent.v1" && approvalIntent.body.session_id && approvalIntent.body.intent_id && approvalIntent.body.view_revision === 3, "intent envelope carries schema intent session and revision");
         check(approvalIntent.body.view_digest === expectedApproval.view_digest && approvalIntent.body.payload.plan_digest === expectedApproval.approval.plan_digest, "native approval button binds view and plan digests");
         check(posted.filter((request) => request.body.op === "approve_exact_plan").length === 1 && !document.querySelector('[data-op="approve_exact_plan"]'), "replay failure does not retry or re-enable stale approval");
         document.querySelector("#retry-view").click();
-        await waitFor(() => currentView?.revision === 2);
-        check(document.querySelector('[data-op="approve_exact_plan"]') && posted.length === 4, "explicit retry may refetch the same rejected view without replaying its intent");
+        await waitFor(() => currentView?.revision === 3);
+        check(document.querySelector('[data-op="approve_exact_plan"]') && posted.length === beforeApproval + 1, "explicit retry may refetch the same rejected view without replaying its intent");
+
+        postResult = "accepted";
+        await show("semantic");
+        check(document.querySelectorAll("[data-checkpoint-choice]").length === 2 && document.querySelector(".checkpoint-card").textContent.includes("SEMANTIC_VERDICT"), "semantic PASS FAIL is one evidence-bound operator checkpoint");
+        const beforeSemantic = posted.length;
+        document.querySelector('[data-checkpoint-choice="PASS"]').click();
+        await waitFor(() => posted.length === beforeSemantic + 1 && !intentBusy);
+        check(posted.at(-1).body.op === "resolve_checkpoint" && Object.keys(posted.at(-1).body.payload).sort().join() === "checkpoint_binding_digest,choice", "semantic choice sends only checkpoint digest and choice");
+
+        await show("release");
+        const releaseCard = document.querySelector(".checkpoint-card");
+        check(document.querySelectorAll("[data-checkpoint-choice]").length === 3 && ["착지", "그리퍼 비움", "후퇴", "안전 스테이징"].every((word) => releaseCard.textContent.includes(word)), "recycle renders one combined landing gripper-empty retreat safe-staging checkpoint");
+        const beforeRelease = posted.length;
+        document.querySelector('[data-checkpoint-choice="LANDED"]').click();
+        await waitFor(() => posted.length === beforeRelease + 1 && !intentBusy);
+
+        await show("scene_ready");
+        check(document.querySelectorAll("[data-checkpoint-choice]").length === 1 && document.querySelector(".checkpoint-card").textContent.includes("non-recycle"), "non-recycle SCENE_READY stays a distinct checkpoint");
+        const beforeScene = posted.length;
+        document.querySelector('[data-checkpoint-choice="SCENE_READY"]').click();
+        await waitFor(() => posted.length === beforeScene + 1 && !intentBusy);
+
+        await show("candidate_review");
+        check(document.querySelectorAll("[data-review-choice]").length === 3 && document.querySelector(".candidate-review-card").textContent.includes("TRAINING APPROVAL 아님"), "candidate PASS FAIL UNCERTAIN is visibly separate from training approval");
+        document.querySelector("#candidate-reason").value = "RELEASE_SCENE";
+        postResult = "stale";
+        const beforeCandidate = posted.length;
+        const candidateFail = document.querySelector('[data-review-choice="FAIL"]');
+        candidateFail.click();
+        candidateFail.click();
+        await waitFor(() => posted.length === beforeCandidate + 1 && !intentBusy && !currentView);
+        const candidateIntent = posted.at(-1).body;
+        check(candidateIntent.op === "review_candidate" && Object.keys(candidateIntent.payload).sort().join() === "choice,reason,review_binding_digest" && candidateIntent.payload.reason === "RELEASE_SCENE", "candidate review sends the exact digest choice nullable-reason payload");
+        check(posted.filter((request) => request.body.op === "review_candidate").length === 1, "stale candidate review is single-submit and never replayed");
+        document.querySelector("#retry-view").click();
+        await waitFor(() => currentView?.revision === 7);
+        check(posted.length === beforeCandidate + 1, "candidate retry refetches the view without replaying review intent");
 
         postResult = "accepted";
         await show("running");
@@ -149,6 +202,7 @@
         const resultCard = document.querySelector(".result-card");
         check(resultCard.textContent.includes("PASS · TECHNICAL_PASS") && resultCard.textContent.includes("human semanticNOT_MEASURED"), "terminal view keeps technical PASS separate from human semantic NOT_MEASURED");
         check(resultCard.textContent.includes("TEST_OPERATOR · LOCAL_TEST_OPERATOR") && resultCard.textContent.includes("production +0"), "terminal view exposes synthetic review and zero production coverage");
+        check(resultCard.textContent.includes("candidate reviewNOT_APPLICABLE (TEST_ONLY)"), "TEST_ONLY terminal marks candidate review NOT_APPLICABLE");
 
         stateKey = "unknown_enum";
         await loadView();
