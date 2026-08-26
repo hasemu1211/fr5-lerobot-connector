@@ -1673,3 +1673,18 @@ admission과 retention은 독립 상태다.
 - terminal 뒤 같은 process에서 복사된 새 계획을 그대로 사용하거나 편집해 새 campaign을 만들 수 있는가.
 - UI 문장이 측정된 사실, 필요한 한 행동 또는 행동 뒤 예상 상태만 말하며 내부 테마 문구를 노출하지 않는가.
 - 비실물 N=3·실제 browser·side-effect sentinel이 통과하기 전 hardware를 재개하지 않았는가.
+
+## 19. 2026-08-26 physical state-connection evidence
+
+이 기록은 Goal 2의 실물 campaign 증거가 아니라, 사용자가 허용한 환경 연결·상태 readback 결과다. 팔 경로 실행, recorder begin, dataset/run-state write와 semantic 판정은 수행하지 않았다.
+
+- FR5 controller `192.168.58.2`는 ping 2/2, packet loss 0%, 평균 0.199 ms로 응답했다.
+- UVC identity는 `usb-Generic_USB2.0_PC_CAMERA-video-index0` 한 대였고 `/dev/video0`에 결속됐다. publisher 설정은 640×480 YUYV 변환, 30 fps였다.
+- foreground 환경 준비 뒤 `fairino5_controller`, `gripper_controller`, `joint_state_broadcaster`가 모두 `active`였다. HOME readback은 `[-1.570690, -1.570792, 1.570777, -1.570622, -1.570762, -0.000046]` rad였다.
+- gripper index 1은 activation status 1, position 100이었다. controller reference와 feedback은 모두 `0.021 m`였다. 첫 연결에서 허용된 open normalization을 수행했고, 재연결에서는 이미 open인 fresh readback을 재사용해 gripper command를 보내지 않았다.
+- 같은 physical backend를 Orca browser에서 열었을 때 environment `READY`, editable catalog와 registered `PLACE_A` X/Y/yaw domain이 authoring 화면에 표시됐다. campaign compile/authorization은 호출하지 않았다.
+- camera topic의 7초 transport 측정은 30-frame window에서 평균 14.500–26.600 fps였다. 현재 recorder readiness의 bound source `>=28.5 fps`를 충족하지 않으므로 recorder와 robot motion을 열지 않았다. threshold를 낮추지 않았고 image quality, object visibility, framing, lighting 또는 data validity를 판정하지 않았다.
+- 실제 foreground 종료 QA에서 발견한 ROS CLI wrapper/child orphan을 process-group 전체 소유·bounded TERM→KILL로 수정했다. 이미 active/open인 gripper는 재정규화하지 않으며 daemon-capable discovery 명령은 Jazzy의 `--no-daemon`을 사용한다.
+- 수정 뒤 재사용 연결→종료에서 command server, launch, MoveIt, ros2_control, UVC, recorder와 training process 잔여는 모두 0이었다. 기존 ROS CLI daemon을 종료한 뒤 `ros2 node list --no-daemon`은 daemon을 다시 만들지 않았다. focused lifecycle/operator tests 33개와 전체 offline suite 416개가 exit 0으로 통과했다.
+
+따라서 `PORTABLE_COLLECTION_OPERATOR_PATH_COMPLETE`와 offline product QA는 유지한다. `PHYSICAL_TEST_ONLY_HOME_PLACE1_PILOT_COMPLETE`, `DATA_COLLECTION_UX_PROJECT_COMPLETE`, `REUSABLE_COLLECTION_OPERATOR_PATH_COMPLETE`는 기록하지 않는다. 다음 실물 campaign의 정확한 선행조건은 동일 profile에서 안정적인 bound source `>=28.5 fps`, 현장 E-stop 감시와 기존 HOME/place1/cube 배치의 fresh 확인이다.

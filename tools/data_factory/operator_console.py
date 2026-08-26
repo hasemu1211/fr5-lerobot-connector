@@ -1388,7 +1388,7 @@ def capture_gripper_setup_readback() -> dict[str, Any]:
     nodes = set(
         line.strip()
         for line in _readonly_command(
-            ["ros2", "node", "list"], "GRIPPER_SETUP_NODE_GRAPH",
+            ["ros2", "node", "list", "--no-daemon"], "GRIPPER_SETUP_NODE_GRAPH",
         ).splitlines()
         if line.strip()
     )
@@ -1411,7 +1411,7 @@ def capture_gripper_setup_readback() -> dict[str, Any]:
         output = _readonly_command([
             "ros2", "topic", "echo", "/gripper_controller/controller_state",
             "control_msgs/msg/JointTrajectoryControllerState", "--once",
-            "--timeout", "2", "--flow-style",
+            "--timeout", "2", "--flow-style", "--no-daemon",
         ], "GRIPPER_SETUP_READBACK")
         try:
             import yaml
@@ -1527,19 +1527,26 @@ def passive_physical_gate(
     for name in ("fairino5_controller", "gripper_controller", "joint_state_broadcaster"):
         if not any(line.split()[:1] == [name] and "active" in line.split() for line in controllers.splitlines()):
             raise ContractError("PHYSICAL_CONTROLLER_STATE_MISMATCH")
-    nodes = _readonly_command(["ros2", "node", "list"], "PHYSICAL_NODE_GRAPH")
+    nodes = _readonly_command(
+        ["ros2", "node", "list", "--no-daemon"], "PHYSICAL_NODE_GRAPH",
+    )
     if "/fr_command_server" in nodes.splitlines():
         raise ContractError("PHYSICAL_SECOND_MOTION_OWNER")
     if _readonly_command(
-        ["ros2", "topic", "type", "/joint_states"], "PHYSICAL_JOINT_TOPIC",
+        ["ros2", "topic", "type", "/joint_states", "--no-daemon"],
+        "PHYSICAL_JOINT_TOPIC",
     ).strip() != "sensor_msgs/msg/JointState":
         raise ContractError("PHYSICAL_JOINT_TOPIC_MISMATCH")
     if _readonly_command(
-        ["ros2", "topic", "type", camera_topic], "PHYSICAL_CAMERA_TOPIC",
+        ["ros2", "topic", "type", camera_topic, "--no-daemon"],
+        "PHYSICAL_CAMERA_TOPIC",
     ).strip() != "sensor_msgs/msg/Image":
         raise ContractError("PHYSICAL_CAMERA_TOPIC_MISMATCH")
     configured_device = _readonly_command(
-        ["ros2", "param", "get", camera_node, "video_device", "--hide-type"],
+        [
+            "ros2", "param", "get", camera_node, "video_device",
+            "--hide-type", "--no-daemon",
+        ],
         "PHYSICAL_CAMERA_DEVICE_PARAMETER",
     ).strip()
     try:

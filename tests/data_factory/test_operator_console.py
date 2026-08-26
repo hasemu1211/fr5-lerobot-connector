@@ -434,8 +434,10 @@ class OperatorConsoleTests(unittest.TestCase):
             device_root = Path(directory)
             token = "usb-Goal2_Camera-video-index0"
             (device_root / token).symlink_to("/dev/null")
+            commands = []
 
             def command(args, _code):
+                commands.append(args)
                 if args[:3] == ["ros2", "control", "list_controllers"]:
                     return (
                         "fairino5_controller active\n"
@@ -444,9 +446,11 @@ class OperatorConsoleTests(unittest.TestCase):
                     )
                 if args[:3] == ["ros2", "node", "list"]:
                     return "/camera/up/color/uvc_up_camera\n"
-                if args[-1] == "/joint_states":
+                if args[:4] == ["ros2", "topic", "type", "/joint_states"]:
                     return "sensor_msgs/msg/JointState\n"
-                if args[-1] == "/camera/up/color/image_raw":
+                if args[:4] == [
+                    "ros2", "topic", "type", "/camera/up/color/image_raw",
+                ]:
                     return "sensor_msgs/msg/Image\n"
                 if args[:4] == ["ros2", "param", "get", "/camera/up/color/uvc_up_camera"]:
                     return "/dev/null\n"
@@ -466,6 +470,11 @@ class OperatorConsoleTests(unittest.TestCase):
             self.assertEqual(evidence["resolved_device"], "/dev/null")
             self.assertEqual(evidence["reported_video_device"], "/dev/null")
             self.assertEqual(evidence["authority"], "TEST_ONLY_TRANSPORT")
+            self.assertTrue(all(
+                "--no-daemon" in args
+                for args in commands
+                if args[1] in {"node", "topic", "param"}
+            ))
             self.assertEqual(
                 evidence["binding_digest"],
                 canonical_digest({

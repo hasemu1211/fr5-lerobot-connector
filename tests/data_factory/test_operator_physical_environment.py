@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import signal
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import Mock, patch
 
 from tools.data_factory.operator_physical_environment import (
+    _default_process,
     build_physical_operator_environment,
 )
 
@@ -35,11 +38,43 @@ class FakeProcess:
 
 
 class PhysicalEnvironmentTests(unittest.TestCase):
-    def build(self, root, state, *, external_ready=False, external_command_server=False):
+    @patch("tools.data_factory.operator_physical_environment.os.killpg")
+    @patch("tools.data_factory.operator_physical_environment.subprocess.Popen")
+    def test_default_process_stops_the_ros_wrapper_and_children_as_one_group(
+        self, popen, killpg,
+    ):
+        child = Mock(pid=4242, args=("ros2", "run", "pkg", "node"))
+        child.poll.return_value = 0
+        child.wait.return_value = -15
+        popen.return_value = child
+        killpg.side_effect = [None, None, ProcessLookupError, None]
+        process = _default_process(Path("/tmp/repository"))(("ros2", "run", "pkg", "node"))
+
+        self.assertIsNone(process.poll())
+        process.terminate()
+        self.assertEqual(process.wait(0.1), -15)
+        process.kill()
+
+        popen.assert_called_once_with(
+            ("ros2", "run", "pkg", "node"),
+            cwd=Path("/tmp/repository"), process_group=0,
+        )
+        self.assertEqual(
+            [call.args for call in killpg.call_args_list],
+            [
+                (4242, 0), (4242, signal.SIGTERM),
+                (4242, 0), (4242, signal.SIGKILL),
+            ],
+        )
+
+    def build(
+        self, root, state, *, external_ready=False,
+        external_command_server=False, maintenance_open=False,
+    ):
         calls = {"process": [], "maintenance": []}
 
         def command(argv):
-            if argv == ("ros2", "node", "list"):
+            if argv == ("ros2", "node", "list", "--no-daemon"):
                 nodes = []
                 if external_command_server or state["maintenance"]:
                     nodes.append("/fr_command_server")
@@ -70,7 +105,7 @@ class PhysicalEnvironmentTests(unittest.TestCase):
         def readback():
             maintenance = external_command_server or state["maintenance"]
             return {
-                "active": not maintenance,
+                "active": maintenance_open or not maintenance,
                 "position_valid": True,
                 "gripper_index": 1,
                 "reference_position_m": 0.021,
@@ -138,6 +173,17 @@ class PhysicalEnvironmentTests(unittest.TestCase):
 
             self.assertEqual(projected["state"], "READY")
             self.assertEqual(calls, {"process": [], "maintenance": []})
+
+    def test_missing_environment_does_not_reopen_an_already_open_gripper(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / DEVICE).symlink_to("/dev/null")
+            state = {"maintenance": False, "robot": False, "camera": False}
+            environment, calls = self.build(root, state, maintenance_open=True)
+
+            self.assertEqual(environment.prepare_environment()["state"], "READY")
+            self.assertEqual(calls["maintenance"], [])
+            environment.stop()
 
     def test_external_command_server_is_ambiguous_and_never_mutated(self):
         with tempfile.TemporaryDirectory() as directory:

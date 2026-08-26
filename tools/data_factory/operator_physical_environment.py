@@ -6,6 +6,7 @@ robot joints, starts a recorder, or writes a dataset.
 from __future__ import annotations
 
 import os
+import signal
 import subprocess
 import time
 from pathlib import Path
@@ -25,6 +26,42 @@ EXPECTED_CONTROLLERS = frozenset({
 CAMERA_NODE = "/camera/up/color/uvc_up_camera"
 
 
+class _ForegroundProcessGroup:
+    """Keep CLI wrappers and their ROS children under one stoppable owner."""
+
+    def __init__(self, argv: tuple[str, ...], *, cwd: Path) -> None:
+        self._process = subprocess.Popen(
+            argv, cwd=cwd, process_group=0,
+        )
+
+    def poll(self):
+        returncode = self._process.poll()
+        return None if returncode is not None and self._running() else returncode
+
+    def _running(self) -> bool:
+        try:
+            os.killpg(self._process.pid, 0)
+        except ProcessLookupError:
+            return False
+        return True
+
+    def wait(self, timeout):
+        deadline = time.monotonic() + timeout
+        returncode = self._process.wait(timeout)
+        while self._running():
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise subprocess.TimeoutExpired(self._process.args, timeout)
+            time.sleep(min(0.05, remaining))
+        return returncode
+
+    def terminate(self) -> None:
+        os.killpg(self._process.pid, signal.SIGTERM)
+
+    def kill(self) -> None:
+        os.killpg(self._process.pid, signal.SIGKILL)
+
+
 def _default_command(argv: tuple[str, ...]) -> str:
     try:
         completed = subprocess.run(
@@ -38,7 +75,7 @@ def _default_command(argv: tuple[str, ...]) -> str:
 
 
 def _default_process(repository: Path) -> Callable[[tuple[str, ...]], object]:
-    return lambda argv: subprocess.Popen(argv, cwd=repository)
+    return lambda argv: _ForegroundProcessGroup(argv, cwd=repository)
 
 
 def bounded_settle(
@@ -98,7 +135,8 @@ def build_physical_operator_environment(
 
     def nodes() -> set[str]:
         return {
-            line.strip() for line in command_call(("ros2", "node", "list")).splitlines()
+            line.strip()
+            for line in command_call(("ros2", "node", "list", "--no-daemon")).splitlines()
             if line.strip().startswith("/")
         }
 
@@ -111,7 +149,7 @@ def build_physical_operator_environment(
 
     def camera_target(node: str) -> Path:
         value = command_call((
-            "ros2", "param", "get", node, "video_device", "--hide-type",
+            "ros2", "param", "get", node, "video_device", "--hide-type", "--no-daemon",
         )).strip()
         try:
             return Path(value).resolve(strict=True)
@@ -233,8 +271,12 @@ def build_physical_operator_environment(
             readback = gripper_readback_call()
             if readback.get("source") != "COMMAND_SERVER_MAINTENANCE":
                 raise ContractError("OPERATOR_ENVIRONMENT_GRIPPER_OWNER")
-            result = gripper_maintenance_call(readback)
-            if result != {"status": "NORMALIZED", "requires_graph_switch": True}:
+            projection = gripper_setup_projection(readback)
+            if projection["state"] == "MAINTENANCE_APPROVAL_REQUIRED":
+                result = gripper_maintenance_call(readback)
+                if result != {"status": "NORMALIZED", "requires_graph_switch": True}:
+                    raise ContractError("OPERATOR_ENVIRONMENT_GRIPPER_SETUP")
+            elif projection["state"] != "ATTACHED":
                 raise ContractError("OPERATOR_ENVIRONMENT_GRIPPER_SETUP")
         finally:
             _stop_owned_process(process)
