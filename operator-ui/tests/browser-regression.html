@@ -81,7 +81,7 @@
     const show = async (key) => {
       stateKey = key;
       await loadView();
-      await waitFor(() => currentView?.revision === (key === "draft" ? 1 : ({setup_exception: 2, approval: 3, semantic: 4, release: 5, scene_ready: 6, candidate_review: 7, running: 8, cancel_pending: 9, blocked: 10, stale: 11, reconnecting: 12, physical_toggle: 13, terminal: 14}[key])) || !currentView);
+      await waitFor(() => currentView?.revision === (key === "draft" ? 1 : ({setup_exception: 2, gripper_normal_graph_required: 16, approval: 3, semantic: 4, release: 5, scene_ready: 6, candidate_review: 7, running: 8, cancel_pending: 9, blocked: 10, stale: 11, reconnecting: 12, physical_toggle: 13, terminal: 14}[key])) || !currentView);
     };
 
     async function run() {
@@ -116,6 +116,11 @@
         await waitFor(() => posted.length === beforeSetup + 1 && !intentBusy);
         const setupIntent = posted.at(-1).body;
         check(setupIntent.op === "resolve_checkpoint" && Object.keys(setupIntent.payload).sort().join() === "checkpoint_binding_digest,choice", "setup exception uses the exact generic checkpoint payload");
+
+        await show("gripper_normal_graph_required");
+        const gripperTransition = document.querySelector("#runtime-content").textContent;
+        check(gripperTransition.includes("그리퍼 초기 셋업 완료") && gripperTransition.includes("활성화와 open 정규화가 완료") && gripperTransition.includes("정상 제어 graph") && gripperTransition.includes("로봇 동작과 데이터 수집은 아직 시작되지 않았습니다"), "gripper graph transition states the completed setup and exact next action");
+        check(!gripperTransition.includes("현장 확인이 없어"), "gripper graph transition never hides behind a generic operator-wait message");
 
         await show("approval");
         check(!document.querySelector("#approval-input") && !document.querySelector('#runtime-content input[type="text"]'), "approval never renders a typed digest input");

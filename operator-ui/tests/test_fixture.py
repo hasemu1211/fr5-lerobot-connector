@@ -153,7 +153,7 @@ class GoalTwoOperatorUiTest(unittest.TestCase):
 
     def test_fail_close_matrix_does_not_queue_or_replay_intents(self):
         self.assertEqual(set(self.fixture["states"]), {
-            "draft", "setup_exception", "approval", "semantic", "release", "scene_ready",
+            "draft", "setup_exception", "gripper_normal_graph_required", "approval", "semantic", "release", "scene_ready",
             "candidate_review", "running", "cancel_pending", "blocked", "stale",
             "reconnecting", "physical_toggle", "terminal", "unknown_enum",
         })

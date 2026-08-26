@@ -511,7 +511,11 @@ class OperatorConsoleTests(unittest.TestCase):
                             (device_root / token).symlink_to("/dev/null")
 
     def test_gripper_ros_adapter_reads_one_owner_and_runs_only_sealed_normalization(self):
-        controller_message = """
+        controller_message = """A message was lost!!!
+    total count change:1
+    total count: 1---
+header:
+  stamp: {sec: 1, nanosec: 0}
 joint_names: [finger_right_joint]
 reference:
   positions: [0.012]
@@ -543,6 +547,21 @@ feedback:
              readback["reference_position_m"], readback["feedback_position_m"]),
             ("CONTROLLER_STATE", True, 0.012, 0.012),
         )
+        with (
+            mock.patch(
+                "tools.data_factory.operator_console._readonly_command",
+                side_effect=lambda args, _code: (
+                    "/controller_manager\n"
+                    if args[:3] == ["ros2", "node", "list"] else
+                    "fairino5_controller active\ngripper_controller active\n"
+                    "joint_state_broadcaster active\n"
+                    if args[:3] == ["ros2", "control", "list_controllers"] else
+                    "A message was lost!!!\n"
+                ),
+            ),
+            self.assertRaisesRegex(ContractError, "GRIPPER_SETUP_READBACK"),
+        ):
+            capture_gripper_setup_readback()
         with mock.patch(
             "tools.data_factory.operator_console._bounded_command",
             return_value="Result:\n  error_code: 0\nGoal finished with status: SUCCEEDED\n",
@@ -564,7 +583,7 @@ feedback:
                 side_effect=(
                     lambda args, _code: "/fr_command_server\n"
                     if args[:3] == ["ros2", "node", "list"]
-                    else ""
+                    else (_ for _ in ()).throw(AssertionError(args))
                 ),
             ),
             mock.patch(
@@ -583,7 +602,7 @@ feedback:
             mock.patch(
                 "tools.data_factory.operator_console._readonly_command",
                 side_effect=(
-                    lambda args, _code: "/fr_command_server\n"
+                    lambda args, _code: "/controller_manager\n/fr_command_server\n"
                     if args[:3] == ["ros2", "node", "list"]
                     else (_ for _ in ()).throw(
                         ContractError("GRIPPER_SETUP_CONTROLLER_GRAPH")
@@ -604,7 +623,7 @@ feedback:
             mock.patch(
                 "tools.data_factory.operator_console._readonly_command",
                 side_effect=(
-                    lambda args, _code: "/fr_command_server\n"
+                    lambda args, _code: "/controller_manager\n/fr_command_server\n"
                     if args[:3] == ["ros2", "node", "list"]
                     else "gripper_controller inactive\n"
                 ),

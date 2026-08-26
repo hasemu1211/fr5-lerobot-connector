@@ -1419,3 +1419,118 @@ physical 실행 순서:
 - existing camera-binding builder가 generic `SAFE_ID`를 쓰는 constraint를 기록했다. raw `/dev` path나 새 schema 대신 UVC by-id basename/RealSense serial을 existing candidate에 결속하고 valid real token에 필요한 field-specific validation만 최소 보정하도록 acceptance를 추가했다.
 - 2026-08-26 physical snapshot에 robot HOME, cube `place1` yaw0/(0,0), one connected-unplaced camera, optional unused second camera, gripper empty/cell clear와 E-stop monitoring 가능 확인을 기록했다. second camera/RealSense/depth는 current Goal dependency가 아니다.
 - portable clean-checkout rehearsal, full physical-shaped fake browser checkpoints, Orca human QA와 actual one-pilot을 분리하고 `PORTABLE_COLLECTION_OPERATOR_PATH_COMPLETE`, `PHYSICAL_TEST_ONLY_HOME_PLACE1_PILOT_COMPLETE`, 두 표식의 conjunction인 `DATA_COLLECTION_UX_PROJECT_COMPLETE`를 정의했다. 실제 노트북 hardware와 production/data/training authority는 여전히 별도다.
+
+## 16. 2026-08-26 reusable personal deployment correction
+
+### 16.1 사용자 의도 정정
+
+이 절은 위 frozen baseline을 구현하던 중 실제 UI와 PHYSICAL composition이 Goal 2의 one-pilot preset을 제품 전체로 잘못 축소한 것을 바로잡는다. 최신 사용자 지시는 다음과 같다.
+
+- 최종 산출물은 한 episode를 실행하고 끝나는 검증 harness가 아니라 개인 노트북에 설치해 계속 사용하는 데이터 수집 애플리케이션이다.
+- `place1`, wood cube, HOME, `DIRECT`, 한 episode는 첫 실물 검증 preset이었을 뿐 제품의 고정값이 아니다.
+- 실물 검증 권한은 재사용 경로를 입증하는 데 필요한 bounded 연속 episode로 확장됐다. 위의 “first episode terminal에서 중단”, “second episode 0” 문장은 제품·검증 acceptance로서 이 절에 의해 폐기된다.
+- 안전·digest·single-owner 검증은 내부에서 유지하되, schema 이름과 개발자용 권한 문구를 주 operator 화면의 사용 절차로 만들지 않는다.
+- 현재 검증 산출물은 실제 dataset namespace를 오염시키지 않도록 `TEST_ONLY`로 격리한다. 배포 수집과 training admission은 별개이며, 수집 버튼이 training approval을 만들지는 않는다.
+
+### 16.2 catalog가 소유하는 전체 상태공간
+
+frontend에 값 목록을 하드코딩하지 않는다. backend는 현재 repository와 machine-local binding에서 validator를 통과한 finite catalog를 투영한다. 새 항목은 validated artifact/catalog record를 추가하면 같은 UI에 나타나야 하며 frontend 변경을 요구하지 않는다.
+
+| 축 | catalog 선택 단위 | 조합 규칙 |
+|---|---|---|
+| robot/cell | robot system, scene/cell state | 같은 robot과 qualified cell만 결합 |
+| 작업영역 | place alias, canonical `place_id`, calibration revision, 좌표계 | calibration·sheet·plane digest가 일치해야 함 |
+| task | `pickup_e2e`, future `pick_place`와 source/destination role | 실제 recipe/caller가 있는 capability만 실행 가능 |
+| object | object profile과 현장 object instance | scene instance가 선택 profile과 일치해야 함 |
+| grasp | grasp profile | 선택 object와 호환되는 profile만 가능 |
+| 위치 조건 | finite X/Y/yaw/cell | selected workspace의 qualified bounds/domain 안에서만 가능 |
+| 시작 상태 | finite `robot_start_pose_id` 집합 | robot/motion/home binding과 allowed pair가 일치해야 함 |
+| 동작 방식 | baseline motion recipe, qualified variant/policy option | caller·qualification에 따라 executable/plan-only/unavailable 표시 |
+| camera | collection profile, role, stable device binding | profile schema와 현재 device/role 조합이 일치해야 함 |
+| 작성 방식 | 자동 선택, 직접 편집 | 같은 selected lane의 한 draft만 수정 |
+| 수집 전략 | balanced/coverage-first와 evidence가 있는 후속 전략 | strategy별 finite prerequisite가 있어야 함 |
+| 반복·평가 | 총 episode 수, cell별 repeat, TRAIN/ID/OOD | manifest/program/storage/review budget 안에서만 가능 |
+| evidence branch | initial, nominal recollection, variant recollection | 필요한 dataset/checkpoint/decision evidence를 가진 branch만 가능 |
+| 실행 상태 | scene/cell ready, occupied, review pending, blocked | 매 episode 직전 fresh evidence로 다시 계산 |
+| 저장 대상 | simulation/test/local collection과 dataset identity | 실행 effect와 training approval을 합치지 않음 |
+
+catalog는 독립 dropdown의 Cartesian product가 아니라 **검증된 compatible combination**을 소유한다. UI는 모든 기존 값을 보여주되 invalid·unqualified·caller 부재 조합은 선택 불가 상태와 짧은 이유를 표시한다. raw digest와 schema code는 기본 화면이 아니라 접힌 기술 정보에서만 제공한다.
+
+### 16.3 fixed lane은 app 고정값이 아니라 한 draft의 선택 결과
+
+한 campaign이 exact 한 fixed lane을 갖는 기존 invariant는 유지한다. 달라지는 것은 app 전체가 한 lane만 갖지 않는다는 점이다.
+
+1. operator가 workspace/place, task, object, grasp, motion, camera profile을 catalog에서 고른다.
+2. backend가 compatible combination digest를 검증하고 새 `draft_id`/revision 0을 만든다.
+3. 그 draft 안에서 finite X/Y/yaw × selected start pose, count/repeat/split과 자동/직접 선택을 편집한다.
+4. fixed-lane 축을 바꾸면 sealed/기존 draft를 mutate하지 않고 predecessor와 selection digest에 결속된 새 draft lineage를 만든다.
+5. stale 이전 화면/button은 single-use CAS에서 거부한다.
+
+### 16.4 계속 사용하는 campaign lifecycle
+
+별도 scheduler를 만들지 않고 existing `CampaignOperator → CampaignSession → SeedCampaign → fresh OneJob`을 그대로 사용한다.
+
+- compile된 manifest의 N slot을 한 lifecycle owner가 직렬 처리한다.
+- 각 episode는 서로 다른 run ID, fresh scene/start/root/plan binding, fresh `OneJob`과 single-use plan decision을 가진다.
+- technical PASS와 terminal child evidence 전에는 다음 slot을 열지 않는다.
+- PASS 후 campaign state가 `READY`이면 같은 foreground process에서 다음 plan/checkpoint로 진행한다. 모든 slot이 끝났을 때만 campaign `COMPLETE`다.
+- cancel, fault, digest mismatch, stale scene/evidence, quota/expiry/review ceiling, ambiguous release나 uncertain child termination은 다음 episode를 0으로 만든다. 이미 완료된 episode 결과는 보존한다.
+- campaign `COMPLETE|CANCELLED|BLOCKED` 뒤 같은 app에서 `같은 설정으로 새 캠페인` 또는 `조건을 바꿔 새 캠페인`을 만들 수 있다. terminal `SeedCampaign`이나 사용한 `OneJob`을 다시 열지 않는다.
+- foreground process 재시작은 정상적인 다음 campaign 절차가 아니다.
+
+### 16.5 operator 여정과 문구
+
+제품은 모든 상태를 한 화면에 밀어 넣는 console이 아니다. 사용자가 생각하는 순서를 그대로 따르는 짧은 단계형 여정이다. 뒤로 이동해 설정을 검토할 수 있지만 실행을 시작한 campaign의 계약은 mutate하지 않는다.
+
+1. `환경 준비`: robot, gripper, camera의 자동 연결 결과와 실제로 필요한 조치만 표시한다.
+2. `수집 계획`: 작업영역, task, object, grasp, motion, start, camera와 수집 범위를 catalog에서 고른다.
+3. `계획 확인`: 무엇을 어느 조건에서 몇 회 수집할지 사람이 읽는 요약으로 확인한다.
+4. `실행`: 매 episode의 최신 plan과 현장 조건을 확인하고 필요한 사람 결정 뒤 한 번 실행한다.
+5. `결과`: 성공·실패, 완료/남은 횟수와 정확한 복구 또는 다음 행동을 표시한다.
+6. `다음 수집`: 같은 설정 또는 변경한 설정으로 process restart 없이 새 campaign을 만든다.
+
+각 단계는 별도 화면 또는 짧은 step으로 나눌 수 있다. 한 화면이어야 한다는 요구는 없다. 사용자가 현재 어느 단계에 있고 무엇을 마치면 다음으로 가는지가 명확한 것이 acceptance다.
+
+- 제품 제목은 `데이터 수집`이고 첫 단계는 `환경 준비`다.
+- `통합 상태공간`, `한 평면에서`, `하나의 초안`, `FIXED LANE`, `CURRENT CHECKPOINT`, `NO-SIDE-EFFECT RECEIPT` 같은 설계 설명·테마 문구를 operator 동선에서 제거한다.
+- 내부 enum은 `모의 실행|실물 수집`, `계획 작성|계획 확인|데이터 수집`처럼 사람이 통제하는 동작으로 표시한다.
+- `수집 계획`에는 catalog 기반 작업영역, 물체, 잡는 방법, 작업, 로봇 동작, 시작 자세, 카메라 설정을 둔다.
+- `수집 범위`에는 자동 선택/직접 선택, 수집할 episode 수, 조건별 repeat, split과 `수집 위치와 각도` canvas를 둔다.
+- `이번 캠페인`에는 완료 `n/N`, 남은 수, 현재/다음 episode, 정확한 현재 상태와 다음 행동을 표시한다.
+- plan button은 `에피소드 n/N 계획 확인`과 `이 계획으로 1회 실행`, cancel은 `남은 실행을 포함해 캠페인 중단`처럼 실제 효과를 말한다.
+- gripper setup처럼 예외가 해결되면 `활성화·open 완료 / 정상 제어 graph 재시작 필요 / 수집 미시작`을 단정적으로 표시한다. 일반적인 “operator 확인 대기” 문구로 실제 상태를 숨기지 않는다.
+- campaign 완료 뒤 `같은 설정으로 새 캠페인`과 `조건을 바꿔 새 캠페인`을 제공한다.
+- 기본 화면의 모든 문장은 `현재 확인된 사실`, `사용자가 할 한 가지 행동`, `행동 뒤 예상 상태` 중 하나여야 한다. 사실을 측정하지 않았다면 측정한 것처럼 쓰지 않고, 이미 측정한 사실을 일반적인 대기 문구로 흐리지 않는다.
+- `campaign`, `draft`, `manifest`, `fixed lane`, digest, reason code, lifecycle owner, side-effect count는 기본 사용자 용어가 아니다. 필요한 내부 식별자는 접힌 `기술 정보`에서만 제공한다.
+
+### 16.6 다회 PHYSICAL binding 보정
+
+상위 campaign만 N개로 바꾸고 기존 one-slot setup binding을 우회해서는 안 된다. 기존 fail-close 검증을 유지한 채 다음 경계를 episode 단위로 다시 결속한다.
+
+- session-owned run/cell root는 첫 episode에서 한 번 생성·검증하고 이후 같은 session에서만 재사용한다. episode-owned dataset/run root는 매번 새 경로여야 하며 기존 경로, symlink, 다른 session root는 거부한다.
+- start snapshot은 manifest 전체가 한 slot인지 검사하지 않고 backend가 preflight한 정확한 next slot의 start pose와 slot digest에 결속한다.
+- 첫 episode의 초기 scene declaration을 이후 episode에 재사용하지 않는다. 직전 technical PASS의 `post_scene_digest`와 일치하는 fresh scene observation을 매회 받는다.
+- resolved job과 live payload는 현재 intent의 `resolver_result_digest`로 찾는다. 첫 slot의 captured payload를 다음 slot에 재사용하지 않는다.
+- 결정·checkpoint port, run ID, root/start/scene/plan binding과 `OneJob`은 episode마다 새로 만든다. 성공 뒤 SeedCampaign이 `READY`이면 다음 episode 준비로, remaining 0일 때만 완료로 전환한다.
+
+### 16.7 구현·검증 acceptance
+
+software/fake/browser:
+
+1. catalog inventory, compatible-combination digest와 selection CAS를 검증한다. forged ID, invalid object↔grasp, cell↔robot, motion↔start, profile↔device 조합은 plan/activation/recorder/dataset effect 0에서 거부한다.
+2. lane 변경은 새 draft ID/revision 0/manifest 없음 상태를 만들고 이전 draft/receipt를 변경하지 않는다.
+3. count와 finite state-space를 편집한 N=3 physical-shaped fake campaign이 서로 다른 run/plan/root/start/OneJob으로 serial PASS한다. active child는 항상 최대 1이다.
+4. episode k의 cancel/fault/technical non-PASS/release ambiguity/scene failure/review ceiling은 k+1을 열지 않고 prior result를 보존한다.
+5. refresh/reconnect 중 같은 campaign progress가 복원되고 stale 이전 버튼은 거부된다.
+6. 완료 후 같은 process에서 same-settings와 changed-settings 새 campaign을 각각 만들고 전부 새 lineage를 사용한다.
+7. simulation/test 검증의 robot/production candidate/inventory/production coverage/training effect는 0이다.
+
+physical reuse:
+
+1. current qualified HOME↔`place1`/wood-cube/`DIRECT`/same-cell recycle 조합으로 한 compiled manifest의 연속 2 episode를 최소 증거로 수행한다. `2`는 제품 default가 아니라 reuse acceptance의 최소치다.
+2. episode마다 fresh plan/start/scene/root binding, distinct run ID, fresh `OneJob`, recorder readiness와 single-use decision을 확인한다.
+3. 첫 PASS 뒤 process가 종료되지 않고 campaign `READY`/remaining 1이 되며, second PASS 뒤 `COMPLETE`/remaining 0이 된다.
+4. 이후 같은 UI에서 새 campaign authoring 상태로 돌아오는 것을 확인한다. 추가 motion은 이 흐름을 반증한 결함 수정에 필요할 때만 수행한다.
+5. 현재 연결되지 않았거나 qualification/caller가 없는 future catalog 축을 보이게 하는 것과 실물로 실행하는 것을 혼동하지 않는다.
+
+이 correction의 완료 표식은 `REUSABLE_COLLECTION_OPERATOR_PATH_COMPLETE`다. 기존 portable/setup/browser와 bounded physical evidence를 포함하되 one-shot PHYSICAL composition, process restart 의존, hardcoded lane/count 또는 terminal 뒤 새 campaign 불가 상태가 하나라도 남으면 사용할 수 없다.

@@ -125,6 +125,12 @@
       },
       "runtime": {"workflow_state": "AUTHORING", "measurement_outcome": "NOT_MEASURED", "reason_codes": ["MAINTENANCE_APPROVAL_REQUIRED"], "active_child_id": null}
     },
+    "gripper_normal_graph_required": {
+      "revision": 16,
+      "view_digest": "sha256:1616161616161616161616161616161616161616161616161616161616161616",
+      "available_ops": [],
+      "runtime": {"workflow_state": "PAUSED_AWAITING_OPERATOR", "measurement_outcome": "NOT_MEASURED", "reason_codes": ["GRIPPER_NORMAL_GRAPH_REQUIRED"], "active_child_id": null}
+    },
     "approval": {
       "revision": 3,
       "view_digest": "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",

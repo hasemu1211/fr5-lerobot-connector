@@ -305,8 +305,10 @@ function renderCandidateReview(view) {
 
 function renderRuntime(view) {
   const runtime = view.runtime;
-  const status = message("status", runtime.workflow_state);
-  let body = `<p class="runtime-state"><strong>${escapeHtml(status)}</strong><span>${escapeHtml(message("workflow", runtime.workflow_state))}</span></p>`;
+  const reason = runtime.reason_codes?.[0];
+  const status = message("status", reason, message("status", runtime.workflow_state));
+  const detail = message("workflow", reason, message("workflow", runtime.workflow_state));
+  let body = `<p class="runtime-state"><strong>${escapeHtml(status)}</strong><span>${escapeHtml(detail)}</span></p>`;
   if (runtime.reason_codes?.length) body += `<p class="reason-line"><span>reason</span><code>${escapeHtml(runtime.reason_codes.join(" · "))}</code></p>`;
   if (runtime.workflow_state === "AWAITING_APPROVAL") {
     if (!DIGEST_PATTERN.test(view.approval?.plan_digest)) throw new TypeError("APPROVAL_DIGEST_INVALID");

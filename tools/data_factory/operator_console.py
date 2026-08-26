@@ -912,15 +912,19 @@ def capture_gripper_setup_readback() -> dict[str, Any]:
         ).splitlines()
         if line.strip()
     )
-    controller_listing = _readonly_command(
-        ["ros2", "control", "list_controllers"],
-        "GRIPPER_SETUP_CONTROLLER_GRAPH",
+    command_server = "/fr_command_server" in nodes
+    controller_listing = (
+        ""
+        if command_server and "/controller_manager" not in nodes
+        else _readonly_command(
+            ["ros2", "control", "list_controllers"],
+            "GRIPPER_SETUP_CONTROLLER_GRAPH",
+        )
     )
     controllers = _controller_names(controller_listing)
     normal = {
         "fairino5_controller", "gripper_controller", "joint_state_broadcaster",
     } <= controllers
-    command_server = "/fr_command_server" in nodes
     if normal and command_server:
         raise ContractError("PHYSICAL_SECOND_MOTION_OWNER")
     if normal:
@@ -931,14 +935,20 @@ def capture_gripper_setup_readback() -> dict[str, Any]:
         ], "GRIPPER_SETUP_READBACK")
         try:
             import yaml
-            message = next(yaml.safe_load_all(output))
+        except ImportError as exc:
+            raise ContractError("GRIPPER_SETUP_READBACK") from exc
+        message_start = re.search(r"(?m)^joint_names:\s*", output)
+        if message_start is None:
+            raise ContractError("GRIPPER_SETUP_READBACK")
+        try:
+            message = next(yaml.safe_load_all(output[message_start.start():]))
             names = message["joint_names"]
             reference = message["reference"]["positions"]
             feedback = message["feedback"]["positions"]
             if names != ["finger_right_joint"] or len(reference) != 1 or len(feedback) != 1:
                 raise ValueError
             reference_m, feedback_m = float(reference[0]), float(feedback[0])
-        except (ImportError, KeyError, StopIteration, TypeError, ValueError) as exc:
+        except (KeyError, StopIteration, TypeError, ValueError, yaml.YAMLError) as exc:
             raise ContractError("GRIPPER_SETUP_READBACK") from exc
         if not all(math.isfinite(value) for value in (reference_m, feedback_m)):
             raise ContractError("GRIPPER_SETUP_READBACK")
