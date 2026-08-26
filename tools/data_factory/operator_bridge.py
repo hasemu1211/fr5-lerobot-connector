@@ -592,8 +592,12 @@ class LoopbackBridge:
 
             def _json(self, status: int, value: Mapping[str, Any]):
                 payload = json.dumps(value, sort_keys=True, separators=(",", ":"), allow_nan=False).encode()
-                self._headers(status, "application/json; charset=utf-8", len(payload))
-                self.wfile.write(payload)
+                try:
+                    self._headers(status, "application/json; charset=utf-8", len(payload))
+                    self.wfile.write(payload)
+                except (BrokenPipeError, ConnectionResetError):
+                    # The browser may leave while a long snapshot is being built.
+                    return
 
             def _error(self, status: int, code: str):
                 self._json(status, {

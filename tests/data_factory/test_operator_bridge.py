@@ -305,6 +305,17 @@ class LoopbackBridgeTests(unittest.TestCase):
         }
         return self.request("POST", "/api/intent", body=payload, headers=headers)
 
+    def test_client_disconnect_during_response_is_quiet(self):
+        handler = object.__new__(self.bridge._handler())
+        handler._headers = lambda *_args: None
+
+        class DisconnectedClient:
+            def write(self, _payload):
+                raise BrokenPipeError
+
+        handler.wfile = DisconnectedClient()
+        self.assertIsNone(handler._json(200, {"ok": True}))
+
     def test_real_loopback_static_snapshot_and_intent_round_trip(self):
         status, headers, body = self.request("GET", "/")
         self.assertEqual(status, 200)

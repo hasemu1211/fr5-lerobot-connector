@@ -378,8 +378,10 @@ class CampaignOperator:
                     slot = session.next_slot
                     if slot is None:
                         raise ContractError("CAMPAIGN_OPERATOR_NEXT_SLOT")
+                    start_binding = self.physical_start_binding_call(run_id, slot)
+                    scene_evidence = self.scene_evidence_call(run_id)
                     bindings["start_binding"] = validate_test_only_start_binding(
-                        self.physical_start_binding_call(run_id, slot),
+                        start_binding,
                         manifest=self.manifest, hypothesis=self.hypothesis,
                         slot=slot,
                     )

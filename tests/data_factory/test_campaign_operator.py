@@ -284,15 +284,29 @@ class CampaignOperatorTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             for action in ("PLAN_ONLY", "LIVE_COLLECT"):
                 with self.subTest(action=action):
+                    current = [NOW]
                     model, ports = make_operator(
                         directory, effect_scope="PHYSICAL", lifecycle_action=action,
+                        clock=lambda: current[0],
                     )
                     timeline = []
 
+                    def scene(_run_id):
+                        timeline.append("scene")
+                        value = {
+                            "schema_version": "data_factory.scene_freshness_evidence.v1",
+                            "scene_digest": ports.scene_digest,
+                            "observed_at": current[0].isoformat().replace("+00:00", "Z"),
+                        }
+                        value["evidence_digest"] = canonical_digest(value)
+                        return value
+
                     def activate():
                         timeline.append("activate")
+                        current[0] += timedelta(seconds=6)
                         return ports.activate()
 
+                    model.scene_evidence_call = scene
                     model.physical_activation_gate = activate
                     model.physical_start_binding_call = (
                         lambda _run_id, _slot: timeline.append("start") or {}
@@ -312,7 +326,8 @@ class CampaignOperatorTests(unittest.TestCase):
                         )
                     self.assertEqual(
                         timeline,
-                        (["root"] if action == "LIVE_COLLECT" else []) + ["activate", "start"],
+                        (["root"] if action == "LIVE_COLLECT" else [])
+                        + ["scene", "activate", "start", "scene"],
                     )
                     self.assertEqual(ports.activation_calls, 1)
                     self.assertEqual(ports.fake_factory_calls, 0)
