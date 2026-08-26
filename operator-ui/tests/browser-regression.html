@@ -3,25 +3,56 @@
 <head>
   <meta charset="utf-8">
   <meta name="operator-token" content="browser-regression-token">
-  <title>Goal 2 operator browser regressions</title>
+  <title>FR5 data factory browser regressions</title>
   <base href="../">
   <link rel="stylesheet" href="styles.css">
 </head>
 <body>
-  <div id="connection-banner" role="status"></div>
+  <div id="connection-banner" role="status" aria-live="polite"></div>
   <span id="connection-dot"></span><span id="connection-label"></span><span id="session-label"></span>
-  <main id="campaign-desk">
-    <fieldset id="effect-scope"><label><input type="radio" name="effect_scope" value="FAKE">FAKE</label><label><input type="radio" name="effect_scope" value="PHYSICAL">PHYSICAL</label></fieldset>
-    <fieldset id="lifecycle-action"><label><input type="radio" name="lifecycle_action" value="AUTHOR_ONLY">AUTHOR_ONLY</label><label><input type="radio" name="lifecycle_action" value="PLAN_ONLY">PLAN_ONLY</label><label><input type="radio" name="lifecycle_action" value="LIVE_COLLECT">LIVE_COLLECT</label></fieldset>
-    <section id="setup-panel" hidden><p id="setup-summary"></p><dl id="setup-subsystems"></dl></section>
-    <span id="campaign-id"></span><div id="draft-summary"></div>
-    <button id="open-workspace" type="button">wizard</button><div id="workspace-meta"></div>
-    <fieldset id="authoring-mode"><label><input type="radio" name="authoring_mode" value="ASSISTED">ASSISTED</label><label><input type="radio" name="authoring_mode" value="DIRECT_EDIT">DIRECT_EDIT</label></fieldset>
-    <input id="budget-input" type="number" min="1"><button id="apply-budget" type="button">budget</button>
-    <div id="cell-grid"></div><dl id="lane-details"></dl><ul id="capability-list"></ul><dl id="effect-counts"></dl>
-    <div id="runtime-content"></div><div id="intent-buttons"></div>
+  <main id="collection-app">
+    <nav class="step-rail"><ol>
+      <li><button data-step-target="environment">environment</button></li><li><button data-step-target="plan">plan</button></li>
+      <li><button data-step-target="review">review</button></li><li><button data-step-target="execution">execution</button></li>
+      <li><button data-step-target="results">results</button></li><li><button data-step-target="next">next</button></li>
+    </ol></nav>
+    <div class="work-area">
+      <section id="campaign-facts" hidden></section><button id="cancel-campaign" type="button" hidden>cancel</button>
+      <div id="step-content">
+        <section id="step-environment" class="flow-step" data-step="environment" tabindex="-1"><p id="setup-summary"></p><ul id="setup-subsystems"></ul><button id="prepare-environment" hidden>prepare</button><button id="environment-next">next</button></section>
+        <section id="step-plan" class="flow-step" data-step="plan" tabindex="-1" hidden>
+          <div id="workspace-entry" hidden><button id="open-workspace" type="button">workspace</button></div>
+          <fieldset id="catalog-fields">
+            <select data-axis="workspace"></select><small data-axis-hint="workspace"></small><select id="frame-select" data-axis="frame"></select><small data-axis-hint="frame"></small>
+            <select data-axis="task"></select><small data-axis-hint="task"></small><select data-axis="object"></select><small data-axis-hint="object"></small>
+            <select data-axis="grasp"></select><small data-axis-hint="grasp"></small><select data-axis="start"></select><small data-axis-hint="start"></small>
+            <select data-axis="motion"></select><small data-axis-hint="motion"></small><select data-axis="variant"></select><small data-axis-hint="variant"></small>
+            <select data-axis="camera"></select><small data-axis-hint="camera"></small><select data-axis="data_mode"></select><small data-axis-hint="data_mode"></small>
+          </fieldset>
+          <fieldset id="authoring-mode"><label><input type="radio" name="authoring_mode" value="ASSISTED">assisted</label><label><input type="radio" name="authoring_mode" value="DIRECT_EDIT">direct</label></fieldset>
+          <label>count<input id="count-input" type="number" min="1" max="100"></label><label>repeat<input id="repeat-input" type="number" min="1" max="100"></label><select id="split-select" data-axis="split"></select>
+          <p id="workspace-domain-summary"></p>
+          <section id="direct-pose-editor" hidden><p id="direct-domain-status"></p><form id="direct-pose-form"><label>X<input id="direct-x-input" type="number" step="any" required></label><label>Y<input id="direct-y-input" type="number" step="any" required></label><label>yaw<input id="direct-yaw-input" type="number" step="any" required></label><button id="add-direct-pose" type="submit">add</button></form><ol id="direct-pose-list"></ol></section>
+          <p id="plan-lock-reason"></p><div id="cell-grid"></div><button id="plan-back">back</button><button id="compile-campaign">compile</button>
+        </section>
+        <section id="step-review" class="flow-step" data-step="review" tabindex="-1" hidden><dl id="review-summary"></dl><section id="review-plan" hidden><h3 id="review-plan-title">plan</h3><ol id="review-plan-list"></ol></section><button id="review-back">back</button><div id="review-actions"></div></section>
+        <section id="step-execution" class="flow-step" data-step="execution" tabindex="-1" hidden><div id="runtime-content"></div></section>
+        <section id="step-results" class="flow-step" data-step="results" tabindex="-1" hidden><ol id="episode-results"></ol><div id="coverage-summary"></div><div id="review-queue"></div><button id="results-next">next</button></section>
+        <section id="step-next" class="flow-step" data-step="next" tabindex="-1" hidden><div id="same-settings-action"></div></section>
+      </div>
+      <details id="technical-details"><summary>technical</summary><dl id="technical-content"></dl></details>
+    </div>
   </main>
-  <dialog id="workspace-dialog" aria-labelledby="workspace-dialog-title"><form method="dialog"><h2 id="workspace-dialog-title">wizard</h2><div id="plane-reference"></div><input id="source-measurement" type="number"><input id="final-measurement" type="number"><div id="capture-buttons"></div><button id="save-workspace" type="button">save</button><button value="close">close</button></form></dialog>
+  <dialog id="workspace-dialog">
+    <button id="close-workspace" type="button">close</button>
+    <dl id="workspace-selection"></dl><p id="workspace-next-action" role="status"></p><ol id="workspace-captures"></ol>
+    <form id="workspace-preview-form" hidden>
+      <input id="source-scale-bar" type="number" min="0.01" step="any" required>
+      <input id="final-scale-bar" type="number" min="96" max="104" step="any" required>
+      <button id="preview-workspace" type="submit">preview</button>
+    </form>
+    <div id="workspace-preview-status"></div><div id="workspace-promotion"></div>
+  </dialog>
   <div id="announcer" role="status"></div>
   <pre id="results">픽스처 대기 중…</pre>
 
@@ -29,24 +60,61 @@
     const nativeFetch = window.fetch.bind(window);
     const fixturePromise = nativeFetch("fixtures/states.json").then((response) => response.json());
     const posted = [];
-    let stateKey = "draft";
+    let stateKey = "authoring";
     let postResult = "accepted";
     let networkFailure = false;
+    let sessionIdOverride;
+    let draftAuthoringMode;
+    let draftRequestedCount;
+    let draftRepeat;
+    let directPoses = [];
+    let workspaceDomainAvailable = true;
+    let workspaceRegistrationVisible = true;
+    let workspaceOperationsEnabled = true;
+    let workspaceRegistrationState;
+    let workspaceCatalogRefreshed = false;
+    const snapshotProbe = "RAW_SNAPSHOT_MUST_NOT_RENDER";
+    const workspaceDomain = {
+      workspace_id: "PLACE_A", frame_id: "place-a-frame-r002", coordinate_mode: "CONTINUOUS_A4_PLANE",
+      x_mm: {minimum: -70, maximum: 70}, y_mm: {minimum: -35, maximum: 35}, yaw_deg: {minimum: 0, maximum_exclusive: 360},
+    };
     const clone = (value) => JSON.parse(JSON.stringify(value));
     const merge = (target, patch) => {
-      for (const [key, value] of Object.entries(patch)) {
-        target[key] = value && typeof value === "object" && !Array.isArray(value) ? merge({...target[key]}, value) : clone(value);
-      }
+      for (const [key, value] of Object.entries(patch)) target[key] = value && typeof value === "object" && !Array.isArray(value) ? merge({...target[key]}, value) : clone(value);
       return target;
     };
     const fixtureView = async () => {
       const fixture = await fixturePromise;
       const flat = merge(clone(fixture.base_view), fixture.states[stateKey]);
+      if (stateKey === "authoring") {
+        flat.draft.authoring_mode = draftAuthoringMode ?? flat.draft.authoring_mode;
+        flat.draft.requested_count = draftRequestedCount ?? flat.draft.requested_count;
+        flat.draft.repeat = draftRepeat ?? flat.draft.repeat;
+        flat.draft.direct_poses = clone(directPoses);
+        if (workspaceDomainAvailable) flat.catalog.workspace_domain = clone(workspaceDomain);
+        else delete flat.catalog.workspace_domain;
+        workspaceRegistrationState ??= clone(flat.workspace_registration);
+        flat.workspace_registration = workspaceRegistrationVisible ? {...clone(workspaceRegistrationState), raw_joint_snapshot: snapshotProbe} : null;
+        const workspaceOps = [];
+        if (workspaceRegistrationVisible && workspaceOperationsEnabled) {
+          if (workspaceRegistrationState.promotion) workspaceOps.push("new_workspace_registration");
+          else if (workspaceRegistrationState.preview?.status === "CANDIDATE_WITHIN_TOLERANCE") workspaceOps.push("save_workspace_revision");
+          else {
+            workspaceOps.push("capture_workspace_point");
+            if (Object.values(workspaceRegistrationState.captures).every(Boolean)) workspaceOps.push("preview_workspace");
+          }
+        }
+        flat.available_ops = ["update_draft", "compile_draft", ...workspaceOps];
+        if (workspaceCatalogRefreshed && !flat.catalog.axes.frame.some((item) => item.id === workspaceRegistrationState.calibration_id)) {
+          flat.catalog.axes.frame.push({id: workspaceRegistrationState.calibration_id, label: "새 작업영역 좌표계 r1", available: true, reason: null, description: "같은 프로세스에서 새로고침됨"});
+        }
+      }
+      if (stateKey === "workspace_motion_required" && !flat.catalog.axes.frame.some((item) => item.id === flat.draft.selection.frame)) {
+        flat.catalog.axes.frame.push({id: flat.draft.selection.frame, label: "새 작업영역 좌표계 r1", available: true, reason: null, description: "저장됨"});
+      }
+      if (sessionIdOverride) flat.session_id = sessionIdOverride;
       const {schema_version, session_id, revision, generated_at, view_digest, ...projection} = flat;
-      return {
-        schema_version, session_id, revision, generated_at, view_digest, projection,
-        authority: {browser: "INTENT_ONLY", lifecycle_owner: "BACKEND", human_identity: "NOT_AUTHENTICATED", training_approval: "SEPARATE"},
-      };
+      return {schema_version, session_id, revision, generated_at, view_digest, projection, authority: {browser: "INTENT_ONLY", training_approval: "SEPARATE"}};
     };
     window.fetch = async (input, init = {}) => {
       const path = new URL(typeof input === "string" ? input : input.url, location.href).pathname;
@@ -54,8 +122,36 @@
       if (path === "/api/view") return new Response(JSON.stringify(await fixtureView()), {status: 200, headers: {"Content-Type": "application/json"}});
       if (path === "/api/intent") {
         const fixture = await fixturePromise;
-        posted.push({headers: new Headers(init.headers), body: JSON.parse(init.body)});
-        if (posted.at(-1).body.op === "cancel_session") stateKey = "cancel_pending";
+        const request = {headers: new Headers(init.headers), body: JSON.parse(init.body)};
+        posted.push(request);
+        if (postResult === "accepted") {
+          if (request.body.op === "update_draft") {
+            const payload = request.body.payload;
+            if (payload.authoring_mode === "DIRECT_EDIT" && draftAuthoringMode !== "DIRECT_EDIT") directPoses = [
+              {place_id: "PLACE_A", x_mm: 10, y_mm: 10, yaw_deg: 90},
+              {place_id: "PLACE_A", x_mm: -10, y_mm: -10, yaw_deg: 180},
+            ];
+            if (payload.authoring_mode === "ASSISTED") directPoses = [];
+            if (payload.authoring_mode) draftAuthoringMode = payload.authoring_mode;
+            if (payload.requested_count) draftRequestedCount = payload.requested_count;
+            if (payload.repeat) draftRepeat = payload.repeat;
+            if (payload.add_pose) directPoses.push({...payload.add_pose, yaw_deg: ((payload.add_pose.yaw_deg % 360) + 360) % 360});
+            if (payload.remove_pose) directPoses = directPoses.filter((pose) => !["place_id", "x_mm", "y_mm", "yaw_deg"].every((field) => pose[field] === payload.remove_pose[field]));
+          }
+          if (request.body.op === "capture_workspace_point") workspaceRegistrationState.captures[request.body.payload.label] = true;
+          if (request.body.op === "preview_workspace") workspaceRegistrationState.preview = clone(fixture.states.workspace_previewed.workspace_registration.preview);
+          if (request.body.op === "save_workspace_revision") {
+            workspaceRegistrationState = clone(fixture.states.workspace_saved.workspace_registration);
+            workspaceCatalogRefreshed = true;
+          }
+          if (request.body.op === "new_workspace_registration") {
+            workspaceRegistrationState = clone(fixture.base_view.workspace_registration);
+          }
+          if (request.body.op === "compile_draft") stateKey = "review_campaign";
+          if (request.body.op === "authorize_campaign") stateKey = "running";
+          if (request.body.op === "cancel_session") stateKey = "cancelling";
+          if (request.body.op === "review_candidate") stateKey = "complete";
+        }
         const result = fixture.intent_results[postResult];
         return new Response(JSON.stringify(result), {status: result.ok ? 200 : 409, headers: {"Content-Type": "application/json"}});
       }
@@ -65,13 +161,10 @@
   <script src="messages.js"></script>
   <script src="app.js"></script>
   <script>
-    const results = document.querySelector("#results");
+    const output = document.querySelector("#results");
     const checks = [];
-    const check = (condition, label) => {
-      if (!condition) throw new Error(label);
-      checks.push(label);
-    };
-    const waitFor = async (predicate, timeout = 2000) => {
+    const check = (condition, label) => { if (!condition) throw new Error(label); checks.push(label); };
+    const waitFor = async (predicate, timeout = 2500) => {
       const started = performance.now();
       while (!predicate()) {
         if (performance.now() - started > timeout) throw new Error("timeout");
@@ -81,151 +174,173 @@
     const show = async (key) => {
       stateKey = key;
       await loadView();
-      await waitFor(() => currentView?.revision === (key === "draft" ? 1 : ({setup_exception: 2, gripper_normal_graph_required: 16, approval: 3, semantic: 4, release: 5, scene_ready: 6, candidate_review: 7, running: 8, cancel_pending: 9, blocked: 10, stale: 11, reconnecting: 12, physical_toggle: 13, terminal: 14}[key])) || !currentView);
+      const expected = {authoring: 1, review_campaign: 2, running: 3, cancelling: 4, results: 5, complete: 6, blocked: 7, stale: 8, workspace_motion_required: 12}[key];
+      await waitFor(() => currentView?.revision === expected || !currentView);
     };
 
     async function run() {
       try {
         await waitFor(() => currentView?.revision === 1);
-        check(document.documentElement.lang === "ko" && document.body.dataset.bridge === "ready", "Korean is the deterministic default and the ready bridge is explicit");
-        check(document.querySelectorAll("#cell-grid button.cell").length === 6, "state-space renders six native cell buttons");
-        check(document.querySelector("#workspace-meta").textContent.includes("X / Y / yaw"), "workspace projects X Y and yaw on one screen");
-        check(document.querySelector("#lane-details").textContent.includes("wood-cube-25mm-r001") && document.querySelector("#lane-details").textContent.includes("wood-cube-25mm-top-center-r001"), "object and grasp remain visible");
-        check(document.querySelector("#lane-details").textContent.includes("TRAIN 4 · ID 1 · OOD 1") && document.querySelector("#lane-details").textContent.includes("BALANCED_INITIAL"), "split repeat coverage and selector remain visible");
-        check(document.querySelector("#capability-list").textContent.includes("pick_place") && document.querySelector("#capability-list").textContent.includes("TWO_STAGE_ALIGN") && document.querySelectorAll(".capability.not_available").length === 2, "pick_place and motion variant render as NOT_AVAILABLE");
-        check(document.querySelector("#setup-summary").textContent.includes("READY") && document.querySelectorAll("#setup-subsystems div").length === 4, "setup projects host operator label and subsystem rows");
-        check(Object.values((await fixturePromise).base_view.effect_counts).every((count) => count === 0), "FAKE hardware recorder dataset run-state production and training effects stay zero");
+        check(document.body.dataset.bridge === "ready", "ready view is explicit");
+        check(document.querySelectorAll("[data-step-target]").length === 6, "six-step product flow renders");
+        check(document.querySelector("#step-environment").hidden && !document.querySelector("#step-plan").hidden, "AUTHORING enters collection plan directly");
+        check(!document.querySelector('[data-step-target="plan"]').disabled, "ready environment unlocks collection planning");
+        check(document.querySelectorAll('#catalog-fields select:not([data-axis="split"])').length === 10, "catalog renders workspace frame task object grasp start motion variant camera and data mode");
+        check([...document.querySelector('[data-axis="task"]').options].some((option) => option.value === "pick_place" && option.disabled), "unavailable catalog combination is disabled with a reason");
+        check(document.querySelector("#count-input").valueAsNumber === 3 && document.querySelector("#count-input").min === "1", "editable episode count supports one through one hundred");
+        check(document.querySelectorAll("#cell-grid .cell").length === 6, "finite position and angle cells render");
 
-        const direct = document.querySelector('[name="authoring_mode"][value="DIRECT_EDIT"]');
-        direct.click();
-        await waitFor(() => posted.length === 1 && !intentBusy);
-        const assisted = document.querySelector('[name="authoring_mode"][value="ASSISTED"]');
-        assisted.dispatchEvent(new Event("change", {bubbles: true}));
-        await waitFor(() => posted.length === 2 && !intentBusy);
-        check(posted[0].body.op === "update_draft" && posted[1].body.op === "update_draft" && posted[0].body.payload.draft_id === posted[1].body.payload.draft_id, "ASSISTED and DIRECT_EDIT mutate the same draft through one op");
-
-        document.querySelector('[name="effect_scope"][value="PHYSICAL"]').click();
-        await waitFor(() => posted.length === 3 && !intentBusy);
-        check(posted[2].body.op === "set_effect_scope" && !posted.slice(0, 3).some((request) => ["approve_exact_plan", "start", "execute"].includes(request.body.op)), "PHYSICAL toggle alone sends no plan start or execution intent");
-
-        await show("setup_exception");
-        check(document.querySelector("#setup-summary").textContent.includes("READY_WITH_EXCEPTION") && document.querySelector("#setup-subsystems").textContent.includes("MAINTENANCE_APPROVAL_REQUIRED"), "setup exception is visible without automatic maintenance");
-        const setupChoice = document.querySelector('[data-checkpoint-choice="READY"]');
-        const beforeSetup = posted.length;
-        setupChoice.click();
-        await waitFor(() => posted.length === beforeSetup + 1 && !intentBusy);
-        const setupIntent = posted.at(-1).body;
-        check(setupIntent.op === "resolve_checkpoint" && Object.keys(setupIntent.payload).sort().join() === "checkpoint_binding_digest,choice", "setup exception uses the exact generic checkpoint payload");
-
-        await show("gripper_normal_graph_required");
-        const gripperTransition = document.querySelector("#runtime-content").textContent;
-        check(gripperTransition.includes("그리퍼 초기 셋업 완료") && gripperTransition.includes("활성화와 open 정규화가 완료") && gripperTransition.includes("정상 제어 graph") && gripperTransition.includes("로봇 동작과 데이터 수집은 아직 시작되지 않았습니다"), "gripper graph transition states the completed setup and exact next action");
-        check(!gripperTransition.includes("현장 확인이 없어"), "gripper graph transition never hides behind a generic operator-wait message");
-
-        await show("approval");
-        check(!document.querySelector("#approval-input") && !document.querySelector('#runtime-content input[type="text"]'), "approval never renders a typed digest input");
-        check(document.querySelector('[data-op="reject_plan"]'), "approval view exposes a native reject button without typed input");
-        check(document.querySelector(".approval-card").textContent.includes("신원 인증이 아닙니다"), "approval button does not claim authentication");
-        const approvalText = document.querySelector(".approval-card").textContent;
-        check(approvalText.includes("10 phases") && approvalText.includes("SAFE_POSE_PTP") && approvalText.includes("velocity 0.03"), "approval displays the exact 10-phase return path and speed bound");
-        check(approvalText.includes("COLLISION_CHECKED_NO_DISTANCE") && approvalText.includes("place1") && approvalText.includes("PLACE_A") && approvalText.includes("place-a-yaw0-r002"), "approval displays clearance plus the confirmed exact site binding");
-        check(document.querySelector('.sealed-toggle input[type="checkbox"]')?.checked, "mechanical gripper proxy toggle is visibly sealed ON for this TEST_ONLY plan");
-        postResult = "replay";
-        const beforeApproval = posted.length;
-        document.querySelector('[data-op="approve_exact_plan"]').click();
-        await waitFor(() => posted.length === beforeApproval + 1 && !intentBusy && !currentView);
-        const approvalIntent = posted.at(-1);
-        const expectedApproval = merge(clone((await fixturePromise).base_view), (await fixturePromise).states.approval);
-        check(approvalIntent.headers.get("X-Operator-Token") === "browser-regression-token", "intent sends the injected operator token header");
-        check(approvalIntent.body.schema_version === "data_factory.operator_intent.v1" && approvalIntent.body.session_id && approvalIntent.body.intent_id && approvalIntent.body.view_revision === 3, "intent envelope carries schema intent session and revision");
-        check(approvalIntent.body.view_digest === expectedApproval.view_digest && approvalIntent.body.payload.plan_digest === expectedApproval.approval.plan_digest, "native approval button binds view and plan digests");
-        check(posted.filter((request) => request.body.op === "approve_exact_plan").length === 1 && !document.querySelector('[data-op="approve_exact_plan"]'), "replay failure does not retry or re-enable stale approval");
-        document.querySelector("#retry-view").click();
-        await waitFor(() => currentView?.revision === 3);
-        check(document.querySelector('[data-op="approve_exact_plan"]') && posted.length === beforeApproval + 1, "explicit retry may refetch the same rejected view without replaying its intent");
-
-        postResult = "accepted";
-        await show("semantic");
-        check(document.querySelectorAll("[data-checkpoint-choice]").length === 2 && document.querySelector(".checkpoint-card").textContent.includes("SEMANTIC_VERDICT"), "semantic PASS FAIL is one evidence-bound operator checkpoint");
-        const beforeSemantic = posted.length;
-        document.querySelector('[data-checkpoint-choice="PASS"]').click();
-        await waitFor(() => posted.length === beforeSemantic + 1 && !intentBusy);
-        check(posted.at(-1).body.op === "resolve_checkpoint" && Object.keys(posted.at(-1).body.payload).sort().join() === "checkpoint_binding_digest,choice", "semantic choice sends only checkpoint digest and choice");
-
-        await show("release");
-        const releaseCard = document.querySelector(".checkpoint-card");
-        check(document.querySelectorAll("[data-checkpoint-choice]").length === 3 && ["착지", "그리퍼 비움", "후퇴", "안전 스테이징"].every((word) => releaseCard.textContent.includes(word)), "recycle renders one combined landing gripper-empty retreat safe-staging checkpoint");
-        const beforeRelease = posted.length;
-        document.querySelector('[data-checkpoint-choice="LANDED"]').click();
-        await waitFor(() => posted.length === beforeRelease + 1 && !intentBusy);
-
-        await show("scene_ready");
-        check(document.querySelectorAll("[data-checkpoint-choice]").length === 1 && document.querySelector(".checkpoint-card").textContent.includes("non-recycle"), "non-recycle SCENE_READY stays a distinct checkpoint");
-        const beforeScene = posted.length;
-        document.querySelector('[data-checkpoint-choice="SCENE_READY"]').click();
-        await waitFor(() => posted.length === beforeScene + 1 && !intentBusy);
-
-        await show("candidate_review");
-        check(document.querySelectorAll("[data-review-choice]").length === 3 && document.querySelector(".candidate-review-card").textContent.includes("TRAINING APPROVAL 아님"), "candidate PASS FAIL UNCERTAIN is visibly separate from training approval");
-        document.querySelector("#candidate-reason").value = "RELEASE_SCENE";
-        postResult = "stale";
-        const beforeCandidate = posted.length;
-        const candidateFail = document.querySelector('[data-review-choice="FAIL"]');
-        candidateFail.click();
-        candidateFail.click();
-        await waitFor(() => posted.length === beforeCandidate + 1 && !intentBusy && !currentView);
-        const candidateIntent = posted.at(-1).body;
-        check(candidateIntent.op === "review_candidate" && Object.keys(candidateIntent.payload).sort().join() === "choice,reason,review_binding_digest" && candidateIntent.payload.reason === "RELEASE_SCENE", "candidate review sends the exact digest choice nullable-reason payload");
-        check(posted.filter((request) => request.body.op === "review_candidate").length === 1, "stale candidate review is single-submit and never replayed");
-        document.querySelector("#retry-view").click();
-        await waitFor(() => currentView?.revision === 7);
-        check(posted.length === beforeCandidate + 1, "candidate retry refetches the view without replaying review intent");
-
-        postResult = "accepted";
-        await show("running");
-        const cancelButton = document.querySelector('[data-op="cancel_session"]');
-        cancelButton.click();
-        cancelButton.click();
-        await waitFor(() => currentView?.runtime.workflow_state === "CANCELLING");
-        check(posted.filter((request) => request.body.op === "cancel_session").length === 1, "cancel is single-submit and waits for terminal projection");
-        check(!document.querySelector("#intent-buttons button"), "cancel-pending view has no later action");
-
-        await show("blocked");
-        check(!document.querySelector("#intent-buttons button") && document.querySelector("#runtime-content").textContent.includes("차단"), "blocked backend state has zero action buttons");
-        await show("stale");
-        check(document.body.dataset.bridge === "blocked" && document.querySelectorAll("#cell-grid button:not(:disabled)").length === 0, "stale view fails closed");
-        await show("reconnecting");
-        const postsBeforeReconnect = posted.length;
-        window.dispatchEvent(new Event("online"));
-        await waitFor(() => document.querySelector("#connection-label").textContent.includes("재연결"));
-        check(posted.length === postsBeforeReconnect, "reconnect refetches view without replaying an intent");
-
-        await show("physical_toggle");
-        check(document.querySelector("#open-workspace").disabled && document.querySelectorAll("#capture-buttons button:not(:disabled)").length === 0, "workspace capture is FAKE-only");
-
-        await show("terminal");
-        const resultCard = document.querySelector(".result-card");
-        check(resultCard.textContent.includes("PASS · TECHNICAL_PASS") && resultCard.textContent.includes("human semanticNOT_MEASURED"), "terminal view keeps technical PASS separate from human semantic NOT_MEASURED");
-        check(resultCard.textContent.includes("TEST_OPERATOR · LOCAL_TEST_OPERATOR") && resultCard.textContent.includes("production +0"), "terminal view exposes synthetic review and zero production coverage");
-        check(resultCard.textContent.includes("candidate reviewNOT_APPLICABLE (TEST_ONLY)"), "TEST_ONLY terminal marks candidate review NOT_APPLICABLE");
-
-        stateKey = "unknown_enum";
+        workspaceRegistrationVisible = false;
         await loadView();
-        await waitFor(() => !currentView);
-        check(document.querySelector("#session-label").textContent === "UNKNOWN_VIEW_ENUM" && document.querySelector("#intent-buttons").textContent.includes("최신 화면"), "unknown enum fails safe with a recovery action");
+        check(document.querySelector("#workspace-entry").hidden && !document.querySelector("#workspace-captures [data-capture-label]"), "workspace hidden when absent");
+        workspaceRegistrationVisible = true;
+        workspaceOperationsEnabled = false;
+        await loadView();
+        check(!document.querySelector("#workspace-entry").hidden && !document.querySelector("#workspace-captures [data-capture-label]"), "unavailable workspace op exposes no capture button or intent");
+        workspaceOperationsEnabled = true;
+        await loadView();
+        document.querySelector("#open-workspace").click();
+        check(document.querySelector("#workspace-dialog").open, "plan authoring opens native workspace management");
+        check(document.querySelector("#workspace-selection").textContent.includes("PLACE_A") && document.querySelector("#workspace-selection").textContent.includes("place-a-frame-r002"), "workspace flow shows exact selected workspace and frame");
+        check(!document.querySelector("#workspace-dialog").textContent.includes(snapshotProbe) && !document.querySelector("#technical-content").textContent.includes(snapshotProbe), "snapshot content never rendered");
+        check([...document.querySelectorAll("#workspace-captures [data-capture-role]")].map((item) => item.dataset.captureRole).join(",") === "CENTER,X_REF,Y_CHECK", "three ordered workspace captures");
+        check(document.querySelector("#workspace-next-action").textContent.includes("CENTER"), "workspace states the exact next capture");
+
+        const workspacePostStart = posted.length;
+        for (const label of ["CENTER", "X_REF", "Y_CHECK"]) {
+          document.querySelector(`[data-capture-label="${label}"]`).click();
+          await waitFor(() => currentView?.workspace_registration?.captures[label] && !intentBusy);
+        }
+        const capturePosts = posted.slice(workspacePostStart).filter((item) => item.body.op === "capture_workspace_point");
+        check(capturePosts.map((item) => item.body.payload.label).join(",") === "CENTER,X_REF,Y_CHECK" && capturePosts.every((item) => Object.keys(item.body.payload).length === 1), "capture_workspace_point posts exact ordered labels");
+        check(!document.querySelector("#workspace-preview-form").hidden, "three captures expose two native measurements");
+        document.querySelector("#source-scale-bar").value = "100";
+        document.querySelector("#final-scale-bar").value = "104.01";
+        const beforeInvalidWorkspace = posted.length;
+        document.querySelector("#workspace-preview-form").requestSubmit();
+        check(document.querySelector("#final-scale-bar").validity.rangeOverflow && posted.length === beforeInvalidWorkspace, "invalid workspace measurement is rejected by browser validation");
+        document.querySelector("#final-scale-bar").value = "100";
+        document.querySelector("#workspace-preview-form").requestSubmit();
+        await waitFor(() => currentView?.workspace_registration?.preview && !intentBusy);
+        const previewPost = posted.find((item) => item.body.op === "preview_workspace");
+        check(JSON.stringify(previewPost.body.payload) === JSON.stringify({source_scale_bar_mm: 100, final_scale_bar_mm: 100}), "preview_workspace posts exact measured scale bars");
+        check(document.querySelector("#workspace-preview-status").textContent.includes("미리보기 통과"), "workspace preview status is plain language");
+        const saveButton = document.querySelector('[data-workspace-op="save_workspace_revision"]');
+        check(saveButton, "save is exposed only for the current saveable preview");
+        const expectedPreviewDigest = currentView.workspace_registration.preview.preview_digest;
+        saveButton.click();
+        await waitFor(() => currentView?.workspace_registration?.promotion && !intentBusy);
+        const savePost = posted.find((item) => item.body.op === "save_workspace_revision");
+        check(savePost.body.payload.preview_digest === expectedPreviewDigest, "digest-bound workspace save");
+        check(document.querySelector("#workspace-promotion").textContent.includes("변경 불가능한 좌표계 개정본") && document.querySelector("#workspace-promotion").textContent.includes("같은 프로세스"), "saved workspace reports immutable revision and catalog refresh");
+        check([...document.querySelector("#frame-select").options].some((item) => item.value === workspaceRegistrationState.calibration_id), "saved workspace refreshes catalog in the same process");
+        check(document.querySelector('[data-workspace-op="new_workspace_registration"]'), "promotion offers another workspace registration");
+        document.querySelector('[data-workspace-op="new_workspace_registration"]').click();
+        await waitFor(() => currentView?.workspace_registration && Object.values(currentView.workspace_registration.captures).every((value) => value === false) && !intentBusy);
+        const newWorkspacePost = posted.find((item) => item.body.op === "new_workspace_registration");
+        check(Object.keys(newWorkspacePost.body.payload).length === 0, "new_workspace_registration posts an exact empty payload");
+        const workspacePosts = posted.slice(workspacePostStart);
+        check(workspacePosts.every((item) => ["capture_workspace_point", "preview_workspace", "save_workspace_revision", "new_workspace_registration"].includes(item.body.op)), "workspace flow posts no motion intent");
+        document.querySelector("#close-workspace").click();
+        check(!document.querySelector("#workspace-dialog").open && !document.querySelector("#step-plan").hidden && !document.querySelector("#compile-campaign").hidden, "catalog refresh returns to usable collection plan in the same process");
+
+        check(document.querySelector("#direct-pose-editor").hidden, "assisted mode keeps direct-pose editor hidden");
+        document.querySelector("#count-input").value = "5";
+        document.querySelector("#count-input").dispatchEvent(new Event("change", {bubbles: true}));
+        await waitFor(() => currentView?.draft.requested_count === 5 && !intentBusy);
+        document.querySelector("#repeat-input").value = "2";
+        document.querySelector("#repeat-input").dispatchEvent(new Event("change", {bubbles: true}));
+        await waitFor(() => currentView?.draft.repeat === 2 && !intentBusy);
+        document.querySelector('[name="authoring_mode"][value="DIRECT_EDIT"]').click();
+        await waitFor(() => currentView?.draft.authoring_mode === "DIRECT_EDIT" && !document.querySelector("#direct-pose-editor").hidden);
+        check(currentView.draft.requested_count === 5 && currentView.draft.repeat === 2 && document.querySelectorAll("#direct-pose-list [data-pose-index]").length === 2, "assisted A,B,C,A,B materializes ordered direct B,C without changing N or repeat");
+        check(document.querySelector("#direct-x-input").min === "-70" && document.querySelector("#direct-y-input").max === "35", "direct-pose bounds come from projected workspace domain");
+        const preset = [...document.querySelectorAll("#cell-grid [data-cell-id]")].find((item) => !item.disabled && item.getAttribute("aria-pressed") === "false");
+        preset.click();
+        await waitFor(() => document.querySelectorAll("#direct-pose-list [data-pose-index]").length === 3);
+        check(posted.some((item) => item.body.payload.add_pose && item.body.payload.add_pose.x_mm === 0 && item.body.payload.add_pose.y_mm === 50), "preset cell adds the same direct pose used by numeric input");
+        document.querySelector(`#cell-grid [data-cell-id="${preset.dataset.cellId}"]`).click();
+        await waitFor(() => document.querySelectorAll("#direct-pose-list [data-pose-index]").length === 2);
+        check(posted.some((item) => item.body.payload.remove_pose && item.body.payload.remove_pose.x_mm === 0 && item.body.payload.remove_pose.y_mm === 50), "selected preset cell removes the exact direct pose");
+        document.querySelector("#direct-x-input").value = "12.5";
+        document.querySelector("#direct-y-input").value = "-7.25";
+        document.querySelector("#direct-yaw-input").value = "483.5";
+        document.querySelector("#direct-pose-form").requestSubmit();
+        await waitFor(() => document.querySelectorAll("#direct-pose-list [data-pose-index]").length === 3);
+        const addPost = posted.find((item) => item.body.payload.add_pose?.yaw_deg === 483.5);
+        check(addPost.body.payload.add_pose.yaw_deg === 483.5 && document.querySelector("#direct-pose-list").textContent.includes("123.5°"), "raw yaw reaches backend and returned normalization renders");
+        const beforeInvalid = posted.length;
+        document.querySelector("#direct-x-input").value = "70.001";
+        document.querySelector("#direct-pose-form").requestSubmit();
+        check(document.querySelector("#direct-x-input").validity.rangeOverflow && posted.length === beforeInvalid, "native validity blocks out-of-range pose without an intent");
+        document.querySelectorAll("#direct-pose-list [data-pose-index]")[2].click();
+        await waitFor(() => document.querySelectorAll("#direct-pose-list [data-pose-index]").length === 2);
+        check(posted.some((item) => item.body.payload.remove_pose?.yaw_deg === 123.5), "remove uses exact projected pose");
+        workspaceDomainAvailable = false;
+        await loadView();
+        check(document.querySelector("#direct-x-input").disabled && document.querySelector("#direct-domain-status").textContent.includes("사용할 수 없습니다"), "unavailable direct-pose domain disables input");
+        workspaceDomainAvailable = true;
+        await loadView();
+        document.querySelector("#count-input").value = "3";
+        document.querySelector("#count-input").dispatchEvent(new Event("change", {bubbles: true}));
+        await waitFor(() => currentView?.draft.requested_count === 3 && !intentBusy);
+        document.querySelector("#compile-campaign").click();
+        await waitFor(() => currentView?.runtime.workflow_state === "REVIEW_CAMPAIGN");
+        const authorize = document.querySelector('[data-op="authorize_campaign"]');
+        check(authorize && document.querySelector("#review-summary").textContent.includes("3회"), "REVIEW_CAMPAIGN shows one authorization and readable count");
+        check(!document.querySelector("#review-plan").hidden && document.querySelectorAll("#review-plan-list li").length === 3, "review shows the exact finite episode sequence");
+        authorize.click();
+        await waitFor(() => currentView?.runtime.workflow_state === "RUNNING");
+        const authorizationPost = posted.find((item) => item.body.op === "authorize_campaign");
+        check(authorizationPost.body.payload.manifest_digest && authorizationPost.body.payload.envelope_digest, "authorize_campaign binds manifest and envelope digests");
+        check(document.querySelector('[data-fact="completed"]').textContent.includes("1/3") && document.querySelector('[data-fact="current"]').textContent.includes("2/3"), "three serial episodes project completed total and current facts");
+        check(!document.querySelector("#cancel-campaign").hidden && !document.querySelector("#cancel-campaign").disabled, "negative cancel remains reachable during execution");
+
+        const beforeCancel = posted.length;
+        document.querySelector("#cancel-campaign").click();
+        document.querySelector("#cancel-campaign").click();
+        await waitFor(() => currentView?.runtime.workflow_state === "CANCELLING");
+        check(posted.length === beforeCancel + 1, "cancel is single-submit and stops later intent");
+
+        await show("results");
+        check(document.querySelectorAll("#episode-results li").length === 3, "results preserve three completed episodes");
+        check(document.querySelector("#episode-results").textContent.includes("사후 검토를 수행하지 않음"), "NOT_MEASURED states that post-review was not performed");
+        check(document.querySelectorAll("[data-review-choice]").length === 3 && ["작업 성공", "작업 실패", "판정 보류"].every((label) => document.querySelector("#review-queue").textContent.includes(label)) && document.querySelector("#review-queue").textContent.includes("데이터 보존 상태와 학습 사용 승인"), "semantic review labels task outcome without changing retention or training authority");
+        check(document.querySelectorAll("#coverage-summary progress").length === 3, "coverage renders without a chart dependency");
+        check(!document.querySelector("#technical-details").open && document.querySelector("#technical-content").textContent.includes("manifest_digest"), "raw digests stay in collapsed technical details");
+
+        document.querySelector('[data-review-choice="PASS"]').click();
+        await waitFor(() => currentView?.runtime.workflow_state === "TERMINAL");
+        check(document.querySelector('[data-op="new_campaign_same_settings"]'), "same-process next campaign opens one editable copied plan");
+
+        await show("workspace_motion_required");
+        check(!document.querySelector("#compile-campaign").hidden && document.querySelector("#compile-campaign").disabled, "non-executable draft keeps compile visible and disabled");
+        check(document.querySelector("#plan-lock-reason").textContent.includes("실물 동작 적격화"), "non-executable draft renders its projected reason");
+
+        postResult = "stale";
+        sessionIdOverride = "collection-operator-r002";
+        stateKey = "review_campaign";
+        await loadView();
+        await waitFor(() => currentView?.revision === 2);
+        document.querySelector('[data-op="authorize_campaign"]').click();
+        await waitFor(() => currentView?.revision === 2 && !intentBusy);
+        check(document.body.dataset.bridge === "ready" && document.querySelector("#connection-banner").textContent.includes("요청은 실행되지 않았습니다"), "stale conflict keeps the current view usable and does not execute");
+        check(posted.filter((item) => item.body.op === "authorize_campaign").length === 2, "stale authorization is never replayed");
 
         networkFailure = true;
         await loadView();
-        check(!currentView && document.querySelector("#session-label").textContent === "BRIDGE_UNAVAILABLE", "bridge unavailable has no usable view or side effect");
+        await waitFor(() => !currentView && document.body.dataset.bridge === "blocked");
+        check(document.querySelector("#connection-label").textContent === "복구 필요", "bridge failure remains fail closed");
 
         document.body.dataset.result = "pass";
-        results.textContent = `${checks.length} checks passed\n${checks.join("\n")}`;
+        output.textContent = `${checks.length} checks passed\n${checks.join("\n")}`;
       } catch (error) {
         document.body.dataset.result = "fail";
-        results.textContent = `FAIL: ${error.message}\n${error.stack}`;
+        output.textContent = `FAIL: ${error.message}\n${error.stack}`;
         throw error;
       }
     }
+    // REVIEW_CAMPAIGN / authorize_campaign / AUTHORING enters collection plan directly / non-executable draft keeps compile visible and disabled / semantic review labels task outcome / raw yaw reaches backend / unavailable direct-pose domain disables input / three serial episodes / same-process next campaign / workspace hidden when absent / three ordered workspace captures / digest-bound workspace save / workspace flow posts no motion intent
     run();
   </script>
 </body>

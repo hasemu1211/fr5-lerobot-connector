@@ -839,6 +839,41 @@ class FR5LeRobotRecorder(Node):
                 return self._persist_quarantine("FREEZE_DURABILITY_FAILED", str(exc))
             return self._result(True)
 
+    def trim_readiness_prefix(self) -> dict:
+        """Discard readiness rows while keeping the sealed transaction recording.
+
+        The source rings keep running, so the alignment delay still preserves the
+        action onset.  Only rows accumulated to prove transport/writer readiness
+        are removed from the episode buffer.
+        """
+        with self.lock:
+            if self.episode_state != self.RECORDING or not self.recording:
+                return self._result(False, "STATE_TRIM_NOT_RECORDING")
+            self.recording = False
+        self.writer_queue.join()
+        with self.lock:
+            if self.episode_state != self.RECORDING:
+                return self._result(False, "STATE_TRIM_INTERRUPTED")
+            if self.writer_error is not None or self.writer_queue_drops or self.alignment_failures:
+                self.recording = True
+                return self._result(False, "READINESS_PREFIX_UNSAFE")
+            try:
+                self.dataset.clear_episode_buffer()
+            except Exception as exc:
+                self.recording = True
+                return self._result(False, "READINESS_PREFIX_CLEAR_FAILED", detail=str(exc))
+            self._reset_episode()
+            self.recording = True
+            self.started = time.perf_counter()
+            self.next_target_stamp = self.get_clock().now().nanoseconds * 1e-9
+            try:
+                self._append_event("READINESS_PREFIX_TRIMMED")
+            except Exception as exc:
+                self.recording = False
+                self.episode_state = self.QUARANTINED_COMMIT
+                return self._persist_quarantine("READINESS_PREFIX_JOURNAL_FAILED", str(exc))
+            return self._result(True, "READINESS_PREFIX_TRIMMED")
+
     def _clear_episode_buffer_once(self) -> None:
         if not self._buffer_cleared:
             self.dataset.clear_episode_buffer()
@@ -1280,7 +1315,7 @@ class FR5LeRobotRecorder(Node):
 
 _CONTROL_SCHEMA = "data_factory.recorder_command.v1"
 _CONTROL_RESPONSE_SCHEMA = "data_factory.recorder_response.v1"
-_CONTROL_OPS = {"begin", "freeze", "commit", "abort", "status"}
+_CONTROL_OPS = {"begin", "trim_readiness_prefix", "freeze", "commit", "abort", "status"}
 
 
 def _control_response(node: FR5LeRobotRecorder, op_id, op, result: dict) -> dict:
@@ -1344,6 +1379,8 @@ def process_recorder_control_line(
     try:
         if op == "begin":
             result = node.begin_episode(request["transaction"])
+        elif op == "trim_readiness_prefix":
+            result = node.trim_readiness_prefix()
         elif op == "freeze":
             result = node.freeze_episode()
         elif op == "commit":

@@ -99,6 +99,7 @@ class OperatorIntentCore:
         self.handlers = dict(handlers)
         self.clock = clock or (lambda: datetime.now(timezone.utc))
         self._revision = 0
+        self._projection_digest = None
         self._consumed: set[str] = set()
         self._lock = threading.RLock()
 
@@ -108,11 +109,19 @@ class OperatorIntentCore:
             raise ContractError("OPERATOR_VIEW_PROJECTION")
         return copy.deepcopy(dict(value))
 
-    def _snapshot_locked(self) -> dict[str, Any]:
+    def _snapshot_locked(self, *, observe_external: bool = True) -> dict[str, Any]:
         generated = self.clock()
         if not isinstance(generated, datetime) or generated.tzinfo is None or generated.utcoffset() is None:
             raise ContractError("OPERATOR_VIEW_CLOCK")
         projection = self._projection()
+        projection_digest = canonical_digest(projection)
+        if (
+            observe_external
+            and self._projection_digest is not None
+            and projection_digest != self._projection_digest
+        ):
+            self._revision += 1
+        self._projection_digest = projection_digest
         bound = {
             "session_id": self.session_id,
             "revision": self._revision,
@@ -142,7 +151,7 @@ class OperatorIntentCore:
         with self._lock:
             change()
             self._revision += 1
-            return self._snapshot_locked()
+            return self._snapshot_locked(observe_external=False)
 
     def consume(self, value: object) -> dict[str, Any]:
         with self._lock:
@@ -165,7 +174,13 @@ class OperatorIntentCore:
             ):
                 raise ContractError("OPERATOR_INTENT_STALE_VIEW")
             op = intent["op"]
-            if not isinstance(op, str) or op not in self.handlers:
+            available_ops = current["projection"].get("available_ops")
+            if (
+                not isinstance(op, str)
+                or op not in self.handlers
+                or available_ops is not None
+                and (not isinstance(available_ops, list) or op not in available_ops)
+            ):
                 raise ContractError("OPERATOR_INTENT_OP")
             payload = intent["payload"]
             if not isinstance(payload, dict) or _forbidden(payload):
@@ -175,7 +190,7 @@ class OperatorIntentCore:
                 raise ContractError("OPERATOR_INTENT_RESULT")
             self._consumed.add(intent_id)
             self._revision += 1
-            latest = self._snapshot_locked()
+            latest = self._snapshot_locked(observe_external=False)
             return {
                 "schema_version": RESULT_SCHEMA,
                 "ok": True,

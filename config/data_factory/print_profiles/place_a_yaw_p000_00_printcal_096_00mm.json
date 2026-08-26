@@ -1,0 +1,380 @@
+{
+  "schema_version": "a4_place_yaw.v2",
+  "place_id": "PLACE_A",
+  "sheet_id": "PLACE_A_YAW_P000_00_PRINTCAL_096_00MM",
+  "page_mm": {
+    "width": 297.0,
+    "height": 210.0
+  },
+  "yaw_deg": 0.0,
+  "place_spacing_mm": 35.0,
+  "print_calibration": {
+    "nominal_scale_bar_mm": 100.0,
+    "measured_scale_bar_mm": 96.0,
+    "content_scale_percent": 104.166667
+  },
+  "registration": {
+    "origin": {
+      "id": "CENTER",
+      "sheet_xy_mm": [
+        148.5,
+        105.0
+      ]
+    },
+    "x_ref": {
+      "id": "X_REF",
+      "sheet_xy_mm": [
+        277.0,
+        105.0
+      ]
+    },
+    "verify": {
+      "id": "Y_CHECK",
+      "sheet_xy_mm": [
+        20.0,
+        185.0
+      ]
+    },
+    "first_install": "measure CENTER and X_REF; verify Y_CHECK",
+    "fixed_sheet_swap": "verify CENTER translation; reuse orientation only if the physical sheet locator is unchanged"
+  },
+  "transform_contract": {
+    "yaw0_place": "T_C_place_yaw0 = Trans(u,v,0)",
+    "robot_pose": "T_base_place_yaw = T_base_C * Rz(yaw_deg) * T_C_place_yaw0",
+    "position": "p_sheet(place,yaw) = C + Rz(yaw_deg) * [u,v]",
+    "object_pose": "T_base_object = T_base_place_yaw * T_place_object_datum"
+  },
+  "grid_points": [
+    {
+      "point_id": "CENTER",
+      "local_uv_mm": [
+        0.0,
+        0.0
+      ],
+      "relative_pose_place0": {
+        "x_mm": 0.0,
+        "y_mm": 0.0,
+        "yaw_deg": 0.0
+      },
+      "sheet_xy_mm": [
+        148.5,
+        105.0
+      ],
+      "job_pose": {
+        "place_id": "PLACE_A",
+        "yaw_deg": 0.0,
+        "x_mm": 0.0,
+        "y_mm": 0.0
+      }
+    },
+    {
+      "point_id": "GRID_1",
+      "local_uv_mm": [
+        -70.0,
+        35.0
+      ],
+      "relative_pose_place0": {
+        "x_mm": -70.0,
+        "y_mm": 35.0,
+        "yaw_deg": 0.0
+      },
+      "sheet_xy_mm": [
+        78.5,
+        140.0
+      ],
+      "job_pose": {
+        "place_id": "PLACE_A",
+        "yaw_deg": 0.0,
+        "x_mm": -70.0,
+        "y_mm": 35.0
+      }
+    },
+    {
+      "point_id": "GRID_2",
+      "local_uv_mm": [
+        -35.0,
+        35.0
+      ],
+      "relative_pose_place0": {
+        "x_mm": -35.0,
+        "y_mm": 35.0,
+        "yaw_deg": 0.0
+      },
+      "sheet_xy_mm": [
+        113.5,
+        140.0
+      ],
+      "job_pose": {
+        "place_id": "PLACE_A",
+        "yaw_deg": 0.0,
+        "x_mm": -35.0,
+        "y_mm": 35.0
+      }
+    },
+    {
+      "point_id": "GRID_3",
+      "local_uv_mm": [
+        0.0,
+        35.0
+      ],
+      "relative_pose_place0": {
+        "x_mm": 0.0,
+        "y_mm": 35.0,
+        "yaw_deg": 0.0
+      },
+      "sheet_xy_mm": [
+        148.5,
+        140.0
+      ],
+      "job_pose": {
+        "place_id": "PLACE_A",
+        "yaw_deg": 0.0,
+        "x_mm": 0.0,
+        "y_mm": 35.0
+      }
+    },
+    {
+      "point_id": "GRID_4",
+      "local_uv_mm": [
+        35.0,
+        35.0
+      ],
+      "relative_pose_place0": {
+        "x_mm": 35.0,
+        "y_mm": 35.0,
+        "yaw_deg": 0.0
+      },
+      "sheet_xy_mm": [
+        183.5,
+        140.0
+      ],
+      "job_pose": {
+        "place_id": "PLACE_A",
+        "yaw_deg": 0.0,
+        "x_mm": 35.0,
+        "y_mm": 35.0
+      }
+    },
+    {
+      "point_id": "GRID_5",
+      "local_uv_mm": [
+        70.0,
+        35.0
+      ],
+      "relative_pose_place0": {
+        "x_mm": 70.0,
+        "y_mm": 35.0,
+        "yaw_deg": 0.0
+      },
+      "sheet_xy_mm": [
+        218.5,
+        140.0
+      ],
+      "job_pose": {
+        "place_id": "PLACE_A",
+        "yaw_deg": 0.0,
+        "x_mm": 70.0,
+        "y_mm": 35.0
+      }
+    },
+    {
+      "point_id": "GRID_6",
+      "local_uv_mm": [
+        -70.0,
+        0.0
+      ],
+      "relative_pose_place0": {
+        "x_mm": -70.0,
+        "y_mm": 0.0,
+        "yaw_deg": 0.0
+      },
+      "sheet_xy_mm": [
+        78.5,
+        105.0
+      ],
+      "job_pose": {
+        "place_id": "PLACE_A",
+        "yaw_deg": 0.0,
+        "x_mm": -70.0,
+        "y_mm": 0.0
+      }
+    },
+    {
+      "point_id": "GRID_7",
+      "local_uv_mm": [
+        -35.0,
+        0.0
+      ],
+      "relative_pose_place0": {
+        "x_mm": -35.0,
+        "y_mm": 0.0,
+        "yaw_deg": 0.0
+      },
+      "sheet_xy_mm": [
+        113.5,
+        105.0
+      ],
+      "job_pose": {
+        "place_id": "PLACE_A",
+        "yaw_deg": 0.0,
+        "x_mm": -35.0,
+        "y_mm": 0.0
+      }
+    },
+    {
+      "point_id": "GRID_8",
+      "local_uv_mm": [
+        35.0,
+        0.0
+      ],
+      "relative_pose_place0": {
+        "x_mm": 35.0,
+        "y_mm": 0.0,
+        "yaw_deg": 0.0
+      },
+      "sheet_xy_mm": [
+        183.5,
+        105.0
+      ],
+      "job_pose": {
+        "place_id": "PLACE_A",
+        "yaw_deg": 0.0,
+        "x_mm": 35.0,
+        "y_mm": 0.0
+      }
+    },
+    {
+      "point_id": "GRID_9",
+      "local_uv_mm": [
+        70.0,
+        0.0
+      ],
+      "relative_pose_place0": {
+        "x_mm": 70.0,
+        "y_mm": 0.0,
+        "yaw_deg": 0.0
+      },
+      "sheet_xy_mm": [
+        218.5,
+        105.0
+      ],
+      "job_pose": {
+        "place_id": "PLACE_A",
+        "yaw_deg": 0.0,
+        "x_mm": 70.0,
+        "y_mm": 0.0
+      }
+    },
+    {
+      "point_id": "GRID_10",
+      "local_uv_mm": [
+        -70.0,
+        -35.0
+      ],
+      "relative_pose_place0": {
+        "x_mm": -70.0,
+        "y_mm": -35.0,
+        "yaw_deg": 0.0
+      },
+      "sheet_xy_mm": [
+        78.5,
+        70.0
+      ],
+      "job_pose": {
+        "place_id": "PLACE_A",
+        "yaw_deg": 0.0,
+        "x_mm": -70.0,
+        "y_mm": -35.0
+      }
+    },
+    {
+      "point_id": "GRID_11",
+      "local_uv_mm": [
+        -35.0,
+        -35.0
+      ],
+      "relative_pose_place0": {
+        "x_mm": -35.0,
+        "y_mm": -35.0,
+        "yaw_deg": 0.0
+      },
+      "sheet_xy_mm": [
+        113.5,
+        70.0
+      ],
+      "job_pose": {
+        "place_id": "PLACE_A",
+        "yaw_deg": 0.0,
+        "x_mm": -35.0,
+        "y_mm": -35.0
+      }
+    },
+    {
+      "point_id": "GRID_12",
+      "local_uv_mm": [
+        0.0,
+        -35.0
+      ],
+      "relative_pose_place0": {
+        "x_mm": 0.0,
+        "y_mm": -35.0,
+        "yaw_deg": 0.0
+      },
+      "sheet_xy_mm": [
+        148.5,
+        70.0
+      ],
+      "job_pose": {
+        "place_id": "PLACE_A",
+        "yaw_deg": 0.0,
+        "x_mm": 0.0,
+        "y_mm": -35.0
+      }
+    },
+    {
+      "point_id": "GRID_13",
+      "local_uv_mm": [
+        35.0,
+        -35.0
+      ],
+      "relative_pose_place0": {
+        "x_mm": 35.0,
+        "y_mm": -35.0,
+        "yaw_deg": 0.0
+      },
+      "sheet_xy_mm": [
+        183.5,
+        70.0
+      ],
+      "job_pose": {
+        "place_id": "PLACE_A",
+        "yaw_deg": 0.0,
+        "x_mm": 35.0,
+        "y_mm": -35.0
+      }
+    },
+    {
+      "point_id": "GRID_14",
+      "local_uv_mm": [
+        70.0,
+        -35.0
+      ],
+      "relative_pose_place0": {
+        "x_mm": 70.0,
+        "y_mm": -35.0,
+        "yaw_deg": 0.0
+      },
+      "sheet_xy_mm": [
+        218.5,
+        70.0
+      ],
+      "job_pose": {
+        "place_id": "PLACE_A",
+        "yaw_deg": 0.0,
+        "x_mm": 70.0,
+        "y_mm": -35.0
+      }
+    }
+  ],
+  "a4_family_digest": "sha256:7ff8ab3d81cce4086519e9c8b290b192b5d1fbe0664a005e3f093e7241439b3f"
+}

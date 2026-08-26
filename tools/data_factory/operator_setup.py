@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import copy
 import math
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
@@ -15,7 +15,7 @@ from tools.data_factory.campaign_authoring import validate_collection_campaign_m
 from tools.data_factory.cell_state import CellStateStore
 from tools.data_factory.experiment_manifest import validate_fr5_hypothesis
 from tools.data_factory.motion.pose_snapshot import JOINTS, _validate_snapshot, calibrate_place
-from tools.data_factory.scene_state import SceneStateStore
+from tools.data_factory.scene_state import SceneStateStore, validate_scene_binding
 from tools.data_factory.seed_campaign import (
     BUDGET_DIGEST_FIELDS as SEED_BUDGET_DIGEST_FIELDS,
     validate_seed_episode_intent,
@@ -66,11 +66,21 @@ TEST_STATE_FIELDS = frozenset({
     "scene_state_digest", "scene_revision", "cell_ready",
     "production_writers_enabled", "authority", "initialization_digest",
 })
+SCENE_OBSERVATION_FIELDS = frozenset({
+    "schema_version", "session_id", "run_id", "root_binding_digest",
+    "manifest_digest", "slot_digest", "resolver_result_digest",
+    "resolved_job_digest", "robot_system_id", "object_instance_id",
+    "object_profile_id", "pose", "scene_binding", "scene_binding_digest",
+    "scene_evidence", "scene_state_digest", "scene_revision", "observed_by",
+    "data_disposition", "production_writers_enabled", "authority",
+    "binding_digest",
+})
 EPISODE_BINDING_FIELDS = frozenset({
     "schema_version", "session_id", "run_id", "intent_digest",
     "manifest_digest", "slot_digest", "resolved_job_digest",
     "root_binding_digest", "start_binding_digest",
-    "state_initialization_digest", "scene_state_digest", "place_alias",
+    "state_initialization_digest", "scene_observation_digest",
+    "scene_state_digest", "place_alias",
     "place_id", "yaw_deg", "x_mm", "y_mm", "robot_start_pose_id",
     "split_group", "repeat_index", "budget_digests", "expires_at",
     "data_disposition", "authority", "binding_digest",
@@ -138,6 +148,94 @@ def _no_symlink_components(root: Path, target: Path) -> None:
             raise ContractError("TEST_ONLY_ROOT_SYMLINK")
 
 
+def _root_targets(repository: Path, session_id: str, run_id: str) -> dict[str, Path]:
+    run_root = repository / "outputs/data_factory/test_only_physical" / session_id / "runs"
+    return {
+        "run_root": run_root,
+        "cell_root": repository / "outputs/data_factory/test_only_physical" / session_id / "cells",
+        "dataset_root": repository / "datasets/test_only_physical" / session_id / run_id,
+        "run_dir": run_root / run_id,
+    }
+
+
+def _manifest_slot(manifest: Mapping[str, Any], slot: Mapping[str, Any] | None) -> dict[str, Any]:
+    slots = manifest["slots"]
+    if slot is None:
+        if len(slots) != 1:
+            raise ContractError("TEST_ONLY_START_SLOT_REQUIRED")
+        return copy.deepcopy(slots[0])
+    matches = [item for item in slots if item == slot]
+    if len(matches) != 1:
+        raise ContractError("TEST_ONLY_START_SLOT")
+    return copy.deepcopy(matches[0])
+
+
+def _resolved_job_for_slot(
+    *, manifest: Mapping[str, Any], hypothesis: Mapping[str, Any],
+    slot: Mapping[str, Any], resolved_job: Mapping[str, Any],
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    bases = [
+        item for item in hypothesis["base_conditions"]
+        if item["base_condition_digest"] == slot["base_condition_digest"]
+    ]
+    if len(bases) != 1:
+        raise ContractError("TEST_ONLY_EPISODE_JOB")
+    receipts = [
+        item for item in hypothesis["resolver_receipts"]
+        if item["resolver_result_digest"] == bases[0]["resolver_result_digest"]
+    ]
+    if len(receipts) != 1 or not isinstance(resolved_job, Mapping):
+        raise ContractError("TEST_ONLY_EPISODE_JOB")
+    receipt = receipts[0]
+    if any(
+        resolved_job.get(field) != receipt[field]
+        for field in (
+            "normalized_job", "resolved_job_digest", "resolver_result_digest",
+            "input_digests",
+        )
+    ):
+        raise ContractError("TEST_ONLY_EPISODE_JOB")
+    return receipt, receipt["normalized_job"]
+
+
+def _fresh_scene_evidence(
+    value: object, *, expected_scene_digest: str,
+    max_evidence_age_s: float, clock,
+) -> dict[str, Any]:
+    evidence = copy.deepcopy(dict(_exact(
+        value,
+        frozenset({"schema_version", "scene_digest", "observed_at", "evidence_digest"}),
+        "TEST_ONLY_SCENE_OBSERVATION_EVIDENCE",
+    )))
+    if evidence["schema_version"] != "data_factory.scene_freshness_evidence.v1":
+        raise ContractError("TEST_ONLY_SCENE_OBSERVATION_EVIDENCE")
+    for field in ("scene_digest", "evidence_digest"):
+        _digest(evidence[field], "TEST_ONLY_SCENE_OBSERVATION_EVIDENCE")
+    if evidence["evidence_digest"] != canonical_digest({
+        key: item for key, item in evidence.items() if key != "evidence_digest"
+    }):
+        raise ContractError("TEST_ONLY_SCENE_OBSERVATION_EVIDENCE")
+    if evidence["scene_digest"] != expected_scene_digest:
+        raise ContractError("TEST_ONLY_SCENE_OBSERVATION_SCENE")
+    observed = _timestamp(evidence["observed_at"], "TEST_ONLY_SCENE_OBSERVATION_EVIDENCE")
+    max_age = _finite(max_evidence_age_s, "TEST_ONLY_SCENE_OBSERVATION_AGE")
+    try:
+        now = datetime.now(timezone.utc) if clock is None else clock()
+    except Exception as exc:
+        raise ContractError("TEST_ONLY_SCENE_OBSERVATION_CLOCK") from exc
+    if (
+        max_age <= 0
+        or not isinstance(now, datetime)
+        or now.tzinfo is None
+        or now.utcoffset() is None
+    ):
+        raise ContractError("TEST_ONLY_SCENE_OBSERVATION_CLOCK")
+    now = now.astimezone(timezone.utc)
+    if observed > now or now - observed > timedelta(seconds=max_age):
+        raise ContractError("TEST_ONLY_SCENE_OBSERVATION_STALE")
+    return evidence
+
+
 def build_test_only_root_binding(
     repository_root: str | Path, *, session_id: str, run_id: str,
     run_root: str | Path | None = None, cell_root: str | Path | None = None,
@@ -147,9 +245,10 @@ def build_test_only_root_binding(
     session_id = _identifier(session_id, "TEST_ONLY_SESSION_ID")
     run_id = _identifier(run_id, "TEST_ONLY_RUN_ID")
     repository = Path(repository_root).resolve(strict=True)
-    expected_run = repository / "outputs/data_factory/test_only_physical" / session_id / "runs"
-    expected_cell = repository / "outputs/data_factory/test_only_physical" / session_id / "cells"
-    expected_dataset = repository / "datasets/test_only_physical" / session_id / run_id
+    targets = _root_targets(repository, session_id, run_id)
+    expected_run = targets["run_root"]
+    expected_cell = targets["cell_root"]
+    expected_dataset = targets["dataset_root"]
     supplied = (
         expected_run if run_root is None else Path(run_root),
         expected_cell if cell_root is None else Path(cell_root),
@@ -167,8 +266,6 @@ def build_test_only_root_binding(
             raise ContractError("TEST_ONLY_ROOT_OUTSIDE_REPOSITORY") from exc
         _no_symlink_components(repository, resolved)
         normalized.append(str(resolved))
-    if any(path.exists() for path in expected):
-        raise ContractError("TEST_ONLY_ROOT_COLLISION")
     value = {
         "session_id": session_id,
         "run_id": run_id,
@@ -191,16 +288,18 @@ def validate_test_only_root_binding(
     _identifier(result["session_id"], "TEST_ONLY_SESSION_ID")
     _identifier(result["run_id"], "TEST_ONLY_RUN_ID")
     repository = Path(repository_root).resolve(strict=True)
-    wanted = {
-        "run_root": repository / "outputs/data_factory/test_only_physical" / result["session_id"] / "runs",
-        "cell_root": repository / "outputs/data_factory/test_only_physical" / result["session_id"] / "cells",
-        "dataset_root": repository / "datasets/test_only_physical" / result["session_id"] / result["run_id"],
-    }
+    targets = _root_targets(repository, result["session_id"], result["run_id"])
+    wanted = {field: targets[field] for field in ("run_root", "cell_root", "dataset_root")}
     for field, target in wanted.items():
         path = Path(result[field])
         if not path.is_absolute() or path.resolve(strict=False) != target:
             raise ContractError("TEST_ONLY_ROOT_MISMATCH")
         _no_symlink_components(repository, target)
+        if field != "dataset_root" and target.exists() and not target.is_dir():
+            raise ContractError("TEST_ONLY_ROOT_COLLISION")
+    _no_symlink_components(repository, targets["run_dir"])
+    if targets["dataset_root"].exists() or targets["run_dir"].exists():
+        raise ContractError("TEST_ONLY_ROOT_COLLISION")
     if result["binding_digest"] != canonical_digest({key: result[key] for key in result if key != "binding_digest"}):
         raise ContractError("TEST_ONLY_ROOT_DIGEST_MISMATCH")
     return result
@@ -291,44 +390,171 @@ def validate_test_only_state_initialization(
     return result
 
 
+def build_test_only_scene_observation_binding(
+    *, roots: Mapping[str, Any], repository_root: str | Path,
+    manifest: Mapping[str, Any], hypothesis: Mapping[str, Any],
+    slot: Mapping[str, Any], resolved_job: Mapping[str, Any],
+    scene_binding: Mapping[str, Any], scene_evidence: Mapping[str, Any],
+    observed_by: str, max_evidence_age_s: float = 5.0, clock=None,
+) -> dict[str, Any]:
+    """Seal a fresh later-episode scene observation without changing scene state."""
+    roots = validate_test_only_root_binding(roots, repository_root=repository_root)
+    hypothesis = validate_fr5_hypothesis(hypothesis)
+    manifest = validate_collection_campaign_manifest(manifest, hypothesis=hypothesis)
+    slot = _manifest_slot(manifest, slot)
+    receipt, job = _resolved_job_for_slot(
+        manifest=manifest, hypothesis=hypothesis, slot=slot,
+        resolved_job=resolved_job,
+    )
+    binding = validate_scene_binding(copy.deepcopy(scene_binding))
+    evidence = _fresh_scene_evidence(
+        scene_evidence, expected_scene_digest=binding["scene_state_digest"],
+        max_evidence_age_s=max_evidence_age_s, clock=clock,
+    )
+    value = {
+        "schema_version": "data_factory.test_only_scene_observation.v1",
+        "session_id": roots["session_id"],
+        "run_id": roots["run_id"],
+        "root_binding_digest": roots["binding_digest"],
+        "manifest_digest": manifest["manifest_digest"],
+        "slot_digest": canonical_digest(slot),
+        "resolver_result_digest": receipt["resolver_result_digest"],
+        "resolved_job_digest": receipt["resolved_job_digest"],
+        "robot_system_id": job["robot_system_id"],
+        "object_instance_id": binding["object_instance_id"],
+        "object_profile_id": job["object_profile_id"],
+        "pose": {key: job[key] for key in ("place_id", "yaw_deg", "x_mm", "y_mm")},
+        "scene_binding": binding,
+        "scene_binding_digest": canonical_digest(binding),
+        "scene_evidence": evidence,
+        "scene_state_digest": binding["scene_state_digest"],
+        "scene_revision": binding["revision"],
+        "observed_by": _identifier(observed_by, "TEST_ONLY_SCENE_OBSERVATION_OBSERVER"),
+        "data_disposition": "TEST_ONLY",
+        "production_writers_enabled": False,
+        "authority": copy.deepcopy(NO_AUTHORITY),
+    }
+    value["binding_digest"] = canonical_digest(value)
+    return validate_test_only_scene_observation_binding(
+        value, roots=roots, manifest=manifest, hypothesis=hypothesis, slot=slot,
+        normalized_job=resolved_job, max_evidence_age_s=max_evidence_age_s,
+        clock=clock,
+    )
+
+
+def validate_test_only_scene_observation_binding(
+    value: object, *, roots: Mapping[str, Any], manifest: Mapping[str, Any],
+    hypothesis: Mapping[str, Any], slot: Mapping[str, Any],
+    normalized_job: Mapping[str, Any], max_evidence_age_s: float = 5.0,
+    clock=None,
+) -> dict[str, Any]:
+    result = copy.deepcopy(dict(_exact(
+        value, SCENE_OBSERVATION_FIELDS, "TEST_ONLY_SCENE_OBSERVATION_FIELDS",
+    )))
+    hypothesis = validate_fr5_hypothesis(hypothesis)
+    manifest = validate_collection_campaign_manifest(manifest, hypothesis=hypothesis)
+    slot = _manifest_slot(manifest, slot)
+    receipt, job = _resolved_job_for_slot(
+        manifest=manifest, hypothesis=hypothesis, slot=slot,
+        resolved_job=normalized_job,
+    )
+    binding = validate_scene_binding(result["scene_binding"])
+    evidence = _fresh_scene_evidence(
+        result["scene_evidence"], expected_scene_digest=binding["scene_state_digest"],
+        max_evidence_age_s=max_evidence_age_s, clock=clock,
+    )
+    pose = {key: job[key] for key in ("place_id", "yaw_deg", "x_mm", "y_mm")}
+    if (
+        result["schema_version"] != "data_factory.test_only_scene_observation.v1"
+        or result["session_id"] != roots.get("session_id")
+        or result["run_id"] != roots.get("run_id")
+        or result["root_binding_digest"] != roots.get("binding_digest")
+        or result["manifest_digest"] != manifest["manifest_digest"]
+        or result["slot_digest"] != canonical_digest(slot)
+        or result["resolver_result_digest"] != receipt["resolver_result_digest"]
+        or result["resolved_job_digest"] != receipt["resolved_job_digest"]
+        or result["robot_system_id"] != job["robot_system_id"]
+        or result["object_instance_id"] != binding["object_instance_id"]
+        or result["object_profile_id"] != job["object_profile_id"]
+        or result["pose"] != pose
+        or result["scene_binding_digest"] != canonical_digest(binding)
+        or result["scene_evidence"] != evidence
+        or result["scene_state_digest"] != binding["scene_state_digest"]
+        or result["scene_revision"] != binding["revision"]
+        or result["data_disposition"] != "TEST_ONLY"
+        or result["production_writers_enabled"] is not False
+        or result["authority"] != NO_AUTHORITY
+    ):
+        raise ContractError("TEST_ONLY_SCENE_OBSERVATION_BINDING")
+    for field in (
+        "session_id", "run_id", "robot_system_id", "object_instance_id",
+        "object_profile_id", "observed_by",
+    ):
+        _identifier(result[field], "TEST_ONLY_SCENE_OBSERVATION_BINDING")
+    for field in (
+        "root_binding_digest", "manifest_digest", "slot_digest",
+        "resolver_result_digest", "resolved_job_digest", "scene_binding_digest",
+        "scene_state_digest",
+    ):
+        _digest(result[field], "TEST_ONLY_SCENE_OBSERVATION_BINDING")
+    if type(result["scene_revision"]) is not int or result["scene_revision"] < 1:
+        raise ContractError("TEST_ONLY_SCENE_OBSERVATION_BINDING")
+    if result["binding_digest"] != canonical_digest({
+        key: item for key, item in result.items() if key != "binding_digest"
+    }):
+        raise ContractError("TEST_ONLY_SCENE_OBSERVATION_DIGEST_MISMATCH")
+    return result
+
+
 def build_test_only_episode_binding(
     *, roots: Mapping[str, Any], repository_root: str | Path,
     manifest: Mapping[str, Any], hypothesis: Mapping[str, Any],
     intent: Mapping[str, Any], start_binding: Mapping[str, Any],
-    state_initialization: Mapping[str, Any], resolved_job: Mapping[str, Any],
-    place_alias: str,
+    resolved_job: Mapping[str, Any], place_alias: str,
+    state_initialization: Mapping[str, Any] | None = None,
+    scene_observation: Mapping[str, Any] | None = None,
+    max_scene_evidence_age_s: float = 5.0, clock=None,
 ) -> dict[str, Any]:
     """Join one exact campaign intent to its TEST_ONLY run context."""
     roots = validate_test_only_root_binding(roots, repository_root=repository_root)
     manifest = validate_collection_campaign_manifest(manifest, hypothesis=hypothesis)
     intent = validate_seed_episode_intent(intent, manifest=manifest, hypothesis=hypothesis)
     start = validate_test_only_start_binding(
-        start_binding, manifest=manifest, hypothesis=hypothesis,
+        start_binding, manifest=manifest, hypothesis=hypothesis, slot=intent["slot"],
     )
-    initialized = validate_test_only_state_initialization(state_initialization, roots=roots)
+    if (state_initialization is None) == (scene_observation is None):
+        raise ContractError("TEST_ONLY_EPISODE_SCENE_SOURCE")
+    if intent["order_index"] == 0:
+        if state_initialization is None:
+            raise ContractError("TEST_ONLY_EPISODE_SCENE_SOURCE")
+        source = validate_test_only_state_initialization(state_initialization, roots=roots)
+        initialization_digest = source["initialization_digest"]
+        observation_digest = None
+    else:
+        if scene_observation is None:
+            raise ContractError("TEST_ONLY_EPISODE_SCENE_SOURCE")
+        source = validate_test_only_scene_observation_binding(
+            scene_observation, roots=roots, manifest=manifest,
+            hypothesis=hypothesis, slot=intent["slot"], normalized_job=resolved_job,
+            max_evidence_age_s=max_scene_evidence_age_s, clock=clock,
+        )
+        initialization_digest = None
+        observation_digest = source["binding_digest"]
     place_alias = _identifier(place_alias, "TEST_ONLY_EPISODE_ALIAS")
-    if not isinstance(resolved_job, Mapping):
-        raise ContractError("TEST_ONLY_EPISODE_JOB")
-    receipts = [
-        item for item in hypothesis.get("resolver_receipts", [])
-        if item.get("resolver_result_digest") == intent["base_condition"]["resolver_result_digest"]
-    ]
-    if len(receipts) != 1:
-        raise ContractError("TEST_ONLY_EPISODE_JOB")
-    receipt = receipts[0]
-    job = receipt["normalized_job"]
+    receipt, job = _resolved_job_for_slot(
+        manifest=manifest, hypothesis=hypothesis, slot=intent["slot"],
+        resolved_job=resolved_job,
+    )
     if (
-        resolved_job.get("normalized_job") != job
-        or resolved_job.get("resolved_job_digest") != receipt["resolved_job_digest"]
-        or resolved_job.get("input_digests") != receipt["input_digests"]
+        intent["base_condition"]["resolver_result_digest"] != receipt["resolver_result_digest"]
         or intent["run_id"] != roots["run_id"]
         or intent["manifest_digest"] != manifest["manifest_digest"]
         or start["slot_digest"] != intent["slot_digest"]
         or start["robot_start_pose_id"] != intent["robot_start_pose"]["robot_start_pose_id"]
-        or initialized["scene_state_digest"] != intent["required_scene_digest"]
-        or initialized["robot_system_id"] != job["robot_system_id"]
-        or initialized["object_profile_id"] != job["object_profile_id"]
-        or initialized["pose"] != {
+        or source["scene_state_digest"] != intent["required_scene_digest"]
+        or source["robot_system_id"] != job["robot_system_id"]
+        or source["object_profile_id"] != job["object_profile_id"]
+        or source["pose"] != {
             key: job[key] for key in ("place_id", "yaw_deg", "x_mm", "y_mm")
         }
     ):
@@ -344,8 +570,9 @@ def build_test_only_episode_binding(
         "resolved_job_digest": receipt["resolved_job_digest"],
         "root_binding_digest": roots["binding_digest"],
         "start_binding_digest": start["binding_digest"],
-        "state_initialization_digest": initialized["initialization_digest"],
-        "scene_state_digest": initialized["scene_state_digest"],
+        "state_initialization_digest": initialization_digest,
+        "scene_observation_digest": observation_digest,
+        "scene_state_digest": source["scene_state_digest"],
         "place_alias": place_alias,
         "place_id": job["place_id"],
         "yaw_deg": job["yaw_deg"],
@@ -389,10 +616,15 @@ def validate_test_only_episode_binding(
         _identifier(result[field], "TEST_ONLY_EPISODE_BINDING")
     for field in (
         "intent_digest", "manifest_digest", "slot_digest", "resolved_job_digest",
-        "root_binding_digest", "start_binding_digest", "state_initialization_digest",
-        "scene_state_digest",
+        "root_binding_digest", "start_binding_digest", "scene_state_digest",
     ):
         _digest(result[field], "TEST_ONLY_EPISODE_BINDING")
+    sources = (
+        result["state_initialization_digest"], result["scene_observation_digest"],
+    )
+    if sum(item is not None for item in sources) != 1:
+        raise ContractError("TEST_ONLY_EPISODE_SCENE_SOURCE")
+    _digest(next(item for item in sources if item is not None), "TEST_ONLY_EPISODE_BINDING")
     for field in ("yaw_deg", "x_mm", "y_mm"):
         _finite(result[field], "TEST_ONLY_EPISODE_BINDING")
     if (
@@ -413,16 +645,67 @@ def validate_test_only_episode_binding(
     return result
 
 
+def build_test_only_runtime_episode_binding(
+    *, roots: Mapping[str, Any], repository_root: str | Path,
+    manifest: Mapping[str, Any], hypothesis: Mapping[str, Any],
+    intent: Mapping[str, Any], start_binding: Mapping[str, Any],
+    resolved_job: Mapping[str, Any], place_alias: str,
+    state_initialization: Mapping[str, Any] | None = None,
+    scene_binding: Mapping[str, Any] | None = None,
+    scene_evidence: Mapping[str, Any] | None = None,
+    observed_by: str | None = None,
+    max_scene_evidence_age_s: float = 5.0, clock=None,
+) -> dict[str, Any]:
+    """Build the first declared or later freshly observed TEST_ONLY episode edge."""
+    order_index = intent.get("order_index") if isinstance(intent, Mapping) else None
+    if order_index == 0:
+        if (
+            state_initialization is None
+            or scene_binding is not None
+            or scene_evidence is not None
+            or observed_by is not None
+        ):
+            raise ContractError("TEST_ONLY_EPISODE_SCENE_SOURCE")
+        source = {"state_initialization": state_initialization}
+    elif type(order_index) is int and order_index > 0:
+        if (
+            state_initialization is not None
+            or scene_binding is None
+            or scene_evidence is None
+            or observed_by is None
+        ):
+            raise ContractError("TEST_ONLY_EPISODE_SCENE_SOURCE")
+        source = {
+            "scene_observation": build_test_only_scene_observation_binding(
+                roots=roots, repository_root=repository_root,
+                manifest=manifest, hypothesis=hypothesis, slot=intent["slot"],
+                resolved_job=resolved_job, scene_binding=scene_binding,
+                scene_evidence=scene_evidence, observed_by=observed_by,
+                max_evidence_age_s=max_scene_evidence_age_s, clock=clock,
+            ),
+        }
+    else:
+        raise ContractError("TEST_ONLY_EPISODE_SCENE_SOURCE")
+    return build_test_only_episode_binding(
+        roots=roots, repository_root=repository_root,
+        manifest=manifest, hypothesis=hypothesis, intent=intent,
+        start_binding=start_binding, resolved_job=resolved_job,
+        place_alias=place_alias,
+        max_scene_evidence_age_s=max_scene_evidence_age_s, clock=clock,
+        **source,
+    )
+
+
 def build_test_only_start_binding(
     *, manifest: Mapping[str, Any], hypothesis: Mapping[str, Any],
     motion_qualification: Mapping[str, Any], home_candidate: Mapping[str, Any],
-    current_snapshot: Mapping[str, Any], max_snapshot_age_s: float = 0.1,
+    current_snapshot: Mapping[str, Any], slot: Mapping[str, Any] | None = None,
+    max_snapshot_age_s: float = 0.1,
 ) -> dict[str, Any]:
     """Bind one fresh HOME-range snapshot to one exact TEST_ONLY slot."""
     hypothesis = validate_fr5_hypothesis(hypothesis)
     manifest = validate_collection_campaign_manifest(manifest, hypothesis=hypothesis)
-    if len(manifest["slots"]) != 1:
-        raise ContractError("TEST_ONLY_START_EXACT_ONE_SLOT")
+    slot = _manifest_slot(manifest, slot)
     if not isinstance(motion_qualification, Mapping) or motion_qualification.get("schema_version") != "data_factory.motion_qualification.v1" or motion_qualification.get("qualification_status") != "QUALIFIED":
         raise ContractError("TEST_ONLY_START_MOTION_QUALIFICATION")
     if not isinstance(home_candidate, Mapping) or home_candidate.get("schema_version") != "data_factory.home_candidate.v1":
@@ -431,7 +714,6 @@ def build_test_only_start_binding(
     if motion_qualification.get("home_candidate_digest") != home_digest:
         raise ContractError("TEST_ONLY_START_HOME_DIGEST")
     fixed = hypothesis["fixed_contract"]
-    slot = manifest["slots"][0]
     poses = [
         item for item in hypothesis["robot_start_poses"]
         if item["robot_start_pose_id"] == slot["robot_start_pose_id"]
@@ -497,24 +779,27 @@ def build_test_only_start_binding(
         "authority": copy.deepcopy(NO_AUTHORITY),
     }
     value["binding_digest"] = canonical_digest(value)
-    return validate_test_only_start_binding(value, manifest=manifest, hypothesis=hypothesis)
+    return validate_test_only_start_binding(
+        value, manifest=manifest, hypothesis=hypothesis, slot=slot,
+    )
 
 
 def validate_test_only_start_binding(
     value: object, *, manifest: Mapping[str, Any], hypothesis: Mapping[str, Any],
+    slot: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     hypothesis = validate_fr5_hypothesis(hypothesis)
     manifest = validate_collection_campaign_manifest(manifest, hypothesis=hypothesis)
+    slot = _manifest_slot(manifest, slot)
     result = _validate_test_only_start_shape(value)
     poses = [
         item for item in hypothesis["robot_start_poses"]
         if item["robot_start_pose_id"] == result.get("robot_start_pose_id")
     ]
     if (
-        len(manifest.get("slots", [])) != 1
-        or result["manifest_digest"] != manifest.get("manifest_digest")
-        or result["slot_digest"] != canonical_digest(manifest["slots"][0])
-        or result["robot_start_pose_id"] != manifest["slots"][0]["robot_start_pose_id"]
+        result["manifest_digest"] != manifest.get("manifest_digest")
+        or result["slot_digest"] != canonical_digest(slot)
+        or result["robot_start_pose_id"] != slot["robot_start_pose_id"]
         or len(poses) != 1
         or result["robot_start_pose_qualification_digest"] != poses[0]["qualification_digest"]
     ):
@@ -680,6 +965,34 @@ def validate_print_measurements(
     return value
 
 
+def select_yaw0_print_profile(
+    repository_root: str | Path, *, place_id: str, source_scale_bar_mm: float,
+) -> Path:
+    """Resolve one checked-in yaw-zero sheet for the measured print source."""
+    _identifier(place_id, "WORKSPACE_PRINT_PROFILE")
+    source = _finite(source_scale_bar_mm, "WORKSPACE_PRINT_PROFILE")
+    if source <= 0:
+        raise ContractError("WORKSPACE_PRINT_PROFILE")
+    root = Path(repository_root)
+    matches: dict[str, Path] = {}
+    for path in sorted((root / "config/data_factory").rglob("*.json")):
+        try:
+            sheet = validate_yaw0_sheet(load_json_strict(path))
+        except (ContractError, OSError):
+            continue
+        if (
+            sheet["place_id"] == place_id
+            and abs(float(sheet["print_calibration"]["measured_scale_bar_mm"]) - source) <= 1e-9
+        ):
+            matches.setdefault(canonical_digest(sheet), path)
+    if len(matches) != 1:
+        raise ContractError(
+            "WORKSPACE_PRINT_PROFILE_UNAVAILABLE" if not matches
+            else "WORKSPACE_PRINT_PROFILE_AMBIGUOUS"
+        )
+    return next(iter(matches.values()))
+
+
 def compile_workspace_registration_candidate(
     *, center_snapshot: Mapping[str, Any], x_ref_snapshot: Mapping[str, Any],
     y_check_snapshot: Mapping[str, Any], plane_reference: Mapping[str, Any],
@@ -712,11 +1025,13 @@ def compile_workspace_registration_candidate(
             raise ContractError("WORKSPACE_SNAPSHOT_STALE")
         snapshots.append(checked)
     sheet = validate_yaw0_sheet(load_json_strict(yaw0_sheet))
+    # The qualified plane supplies robot/TCP/table provenance.  A compensated
+    # print profile has its own family digest, so bind it by place and the exact
+    # measured print-source value instead of pretending it is the old sheet.
     if (
         plane["place_id"] != place_id
         or plane["robot_system_id"] != robot_system_id
         or sheet["place_id"] != place_id
-        or sheet["a4_family_digest"] != plane["a4_family_digest"]
         or float(sheet["print_calibration"]["measured_scale_bar_mm"])
         != measured["source_scale_bar_measured_mm"]
         or any(snapshot["base_tcp"]["candidate_source_sha256"] != plane["tcp_digest"] for snapshot in snapshots)

@@ -504,8 +504,10 @@ def _validate_design(
             eligibility[group].add(key)
     if fixed["feature_contract"] == FR5_TEST_ONLY_FEATURE_CONTRACT:
         if (
-            len(bases) != 1 or len(poses) != 1 or len(pairs) != 1
-            or pairs[0]["split_groups"] != ["TRAIN"]
+            len(poses) != 1 or len(pairs) != len(bases)
+            or any(item["split_groups"] != ["TRAIN"] for item in pairs)
+            or {item["base_condition_digest"] for item in pairs} != condition_ids
+            or {item["robot_start_pose_id"] for item in pairs} != pose_ids
         ):
             raise ContractError("HYPOTHESIS_TEST_ONLY_PROFILE_DESIGN")
         return

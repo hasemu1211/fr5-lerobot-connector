@@ -724,9 +724,10 @@ class RunJobTest(unittest.TestCase):
                         cell.mark_active(response["plan_digest"])
                     if request["op"] == "heartbeat" and response.get("state") == "COMPLETED":
                         release_evidence = {
-                            "human_verdict": "LANDED",
+                            "schema_version": "data_factory.recycle_release_evidence.v2",
+                            "release_outcome": "LANDED",
+                            "outcome_source": "LOCAL_UI_BUTTON",
                             "release_slot_id": program_holder["scene_binding"]["release_slot"]["slot_id"],
-                            "source": "TEST_OPERATOR",
                         }
                         response["data"].update(
                             release_evidence=release_evidence,
@@ -941,7 +942,12 @@ class RunJobTest(unittest.TestCase):
         plan_digest = "sha256:" + "1" * 64
         slot_id = "sha256:" + "2" * 64
         scene_digest = "sha256:" + "3" * 64
-        release = {"human_verdict": "LANDED", "release_slot_id": slot_id}
+        release = {
+            "schema_version": "data_factory.recycle_release_evidence.v2",
+            "release_outcome": "EXPECTED_LANDED",
+            "outcome_source": "CAMPAIGN_CONTROL_PROXY",
+            "release_slot_id": slot_id,
+        }
         result = {
             "code": "QUALITY_REJECTED", "state": "ABORTED", "executor_state": "COMPLETED", "recorder_state": "ABORTED",
             "execution_evidence": {"release_evidence": release, "scene_transition": {
@@ -972,6 +978,7 @@ class RunJobTest(unittest.TestCase):
         self.assertEqual(run_job._run_payload(value)["recycle_x_mm"], 60)
         for bad in (
             {**payload(), "recycle_x_mm": 60},
+            {**payload(), "recycle_yaw_deg": 90},
             {**value, "recycle_y_mm": float("nan")},
             {**value, "recycle_x_mm": True},
         ):
@@ -990,6 +997,23 @@ class RunJobTest(unittest.TestCase):
             _, _, binding = run_job.resolve_inputs(value, scene_binding_call=lambda _, pose, _run_id: pose)
         bounded.assert_called_once_with({}, 60, -20)
         self.assertEqual(binding, {"place_id": "PLACE_A", "yaw_deg": 0, "x_mm": 60, "y_mm": -20})
+        self.assertEqual(resolve.call_args.kwargs["release_pose"], binding)
+
+        rotated = {**value, "recycle_yaw_deg": 450}
+        with (
+            mock.patch.object(run_job, "validate_job_spec", return_value=validated),
+            mock.patch.object(run_job, "_load", side_effect=lambda path, _: {"selected.json": {}, "motion.json": {}, "home.json": {}}[path]),
+            mock.patch.object(run_job, "bounded_place_coordinate", return_value=(60, -20)) as bounded,
+            mock.patch.object(run_job, "resolve_motion_program", return_value={}) as resolve,
+        ):
+            _, _, binding = run_job.resolve_inputs(
+                rotated, scene_binding_call=lambda _, pose, _run_id: pose,
+            )
+        bounded.assert_called_once_with({}, 60, -20, yaw_deg=90)
+        self.assertEqual(
+            binding,
+            {"place_id": "PLACE_A", "yaw_deg": 90, "x_mm": 60, "y_mm": -20},
+        )
         self.assertEqual(resolve.call_args.kwargs["release_pose"], binding)
 
     def test_chain_landed_source_is_bound_by_the_root_resolver_before_live_side_effects(self):

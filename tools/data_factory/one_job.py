@@ -169,6 +169,7 @@ class OneJob:
         self.scene_binding = None
         self.approval_scope = None
         self.execution_evidence = None
+        self.execution_response = None
         self.recorder_evidence = None
         self.readiness_evidence = None
         self.plan_envelope = None
@@ -290,7 +291,12 @@ class OneJob:
             and not include_digest
             and self.readiness_contract == TEST_ONLY_READINESS_CONTRACT
         )
-        if source != "HUMAN" and not local_button:
+        campaign_authorization = (
+            source == "CAMPAIGN_AUTHORIZATION"
+            and not include_digest
+            and value.get("approval_scope") == "HIL_NUMERIC_PROXY"
+        )
+        if source != "HUMAN" and not local_button and not campaign_authorization:
             raise ContractError("APPROVAL_SCHEMA")
         if any(not isinstance(value[key], str) or not SAFE_ID.fullmatch(value[key]) for key in ("approval_id", "approved_by")):
             raise ContractError("APPROVAL_SCHEMA")
@@ -386,6 +392,7 @@ class OneJob:
             self.executor_state = response["state"]
             if op != "plan" and isinstance(response.get("data"), dict):
                 self.execution_evidence = copy.deepcopy(response["data"])
+                self.execution_response = copy.deepcopy(response)
         if not response["ok"] and not allowed_failure:
             raise ContractError(response.get("reason_code" if target == "recorder" else "code") or "%s_RESPONSE" % target.upper())
         return response
@@ -669,6 +676,10 @@ class OneJob:
             self._wait_for_first_recorder_row(cancel_event)
             if self._cancel_requested(cancel_event):
                 raise ContractError("START_CANCELLED")
+            if self.readiness_contract == TEST_ONLY_READINESS_CONTRACT:
+                response = self._request("recorder", "trim_readiness_prefix")
+                if response["state"] != "RECORDING" or response["metrics"].get("rows") != 0:
+                    raise ContractError("RECORDER_READINESS_TRIM")
             self.lease_id = lease_id  # Arm only when the execute request is about to leave this process.
             response = self._request("executor", "execute", {"run_id": self.run_id, "plan_digest": self.plan_digest, "lease_id": lease_id})
             if response["state"] != "EXECUTING":
@@ -783,7 +794,10 @@ class OneJob:
     def confirm(self, confirmed_by, source="HUMAN"):
         if self.state != "PRECONTACT_HUMAN" or not isinstance(confirmed_by, str) or not SAFE_ID.fullmatch(confirmed_by):
             return self._result(False, "CONFIRM_STATE")
-        if source != "HUMAN":
+        if source not in {"HUMAN", "CAMPAIGN_AUTHORIZATION"} or (
+            source == "CAMPAIGN_AUTHORIZATION"
+            and self.approval_scope != "HIL_NUMERIC_PROXY"
+        ):
             return self._result(False, "CONFIRM_SOURCE")
         try:
             response = self._request("executor", "confirm", {"run_id": self.run_id, "plan_digest": self.plan_digest, "confirmed_by": confirmed_by, "source": source})
@@ -827,9 +841,9 @@ class OneJob:
     def release_verdict(self, verdict, decided_by, source="HUMAN"):
         if self.state != "RELEASE_VERDICT" or verdict not in {"LANDED", "OFF_SLOT", "UNCERTAIN"} or not isinstance(decided_by, str) or not SAFE_ID.fullmatch(decided_by):
             return self._result(False, "RELEASE_VERDICT_STATE")
-        if source != "HUMAN" and not (
+        if source not in {"HUMAN", "LOCAL_UI_BUTTON", "CAMPAIGN_CONTROL_PROXY"} and not (
             source == "TEST_OPERATOR" and self.allow_synthetic_test_operator
-        ):
+        ) or source == "CAMPAIGN_CONTROL_PROXY" and self.approval_scope != "HIL_NUMERIC_PROXY":
             return self._result(False, "RELEASE_VERDICT_SOURCE")
         try:
             response = self._request("executor", "release_verdict", {

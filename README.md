@@ -1,6 +1,6 @@
-# FR5 LeRobot Connector
+# FR5 Robot Learning Data Factory
 
-FAIRINO FR5의 ROS 2 state/action과 RGB 영상을 시간 정합하여 LeRobot v3 데이터셋으로 저장하는 커넥터다. 검사·승인된 데이터셋을 SmolVLA, ACT, VQ-BeT 학습에 연결하는 공식 `lerobot-train` wrapper profile을 제공한다.
+FAIRINO FR5의 학습용 demonstration을 계획·실행·시간 정합·검증·추적하여 LeRobot v3 데이터셋으로 만드는 로봇 학습 데이터 팩토리다. ROS 2↔LeRobot 연결을 기반으로 source provenance, transaction 품질, finite campaign과 학습 진입 계약을 함께 관리한다.
 
 ## 제공 기능
 
@@ -9,11 +9,12 @@ FAIRINO FR5의 ROS 2 state/action과 RGB 영상을 시간 정합하여 LeRobot v
 - source timestamp 기반 30 Hz row 생성과 provenance 저장
 - 키 기반 episode 시작·저장·폐기 및 자동 디렉터리 구성
 - LeRobot v3 구조·시간·RGB 검사, 명시적 HIL 동작 검사와 사람 승인 절차
-- A4 `(place,yaw,x,y)` Job, scene/cell state와 한-episode pickup 조정 계약
+- catalog 기반 상태공간 작성, finite campaign 한 번 승인과 fresh `OneJob` 직렬 실행
+- A4 `(place,yaw,x,y)` Job, scene/cell state, episode ledger와 TEST_ONLY 격리
 - SmolVLA·ACT·VQ-BeT용 공식 `lerobot-train` 학습 profile
 - SmolVLA 검증 episode의 오프라인 loss 평가
 
-학습된 정책의 실물 실행(rollout)은 아직 제공하지 않는다. `scripts/evaluate_smolvla.sh`는 로봇을 움직이지 않는 오프라인 검사다. 데이터팩토리의 체크인된 one-job runner는 `pickup_e2e`의 plan-only와 qualified live 수집을 제공한다. live 성공도 자동 학습 승인을 만들지 않는다.
+학습된 정책의 실물 실행(rollout)은 아직 제공하지 않는다. `scripts/evaluate_smolvla.sh`는 로봇을 움직이지 않는 오프라인 검사다. 현재 browser operator의 실물 경로는 격리된 `TEST_ONLY` 수집이며, 일반 수집과 training admission은 별도 qualification을 유지한다. live 성공도 자동 학습 승인을 만들지 않는다.
 
 ## 빠른 시작
 
@@ -44,6 +45,7 @@ scripts/validate_dataset.sh --preview pick_red
 | `scripts/train_policy.sh` | 검사된 데이터셋을 정책별 공식 `lerobot-train` profile에 전달 |
 | `scripts/evaluate_smolvla.sh` | 검증용으로 분리한 episode의 오프라인 SmolVLA loss 계산 |
 | `python3 -m tools.data_factory.run_job` | 사람/AI 공통 one-job plan-only/live pickup runner ([사용법](docs/data-factory.md#one-job-runner)) |
+| `python3 -m tools.data_factory.operator_console` | 환경 준비→상태공간 계획→연속 TEST_ONLY campaign을 제공하는 foreground browser operator |
 
 표의 `scripts/` wrapper는 `--help`, 경로 지정 옵션, `--dry-run`을 제공한다. factory runner의 live는 qualified profile·scene·cell과 exact plan 승인을 요구하는 별도 경로다.
 

@@ -406,8 +406,22 @@ def _compile_documents(
         selected_ids = {item["slot_id"] for item in selected}
 
     selected = copy.deepcopy(selected)
-    selected.sort(key=lambda item: item["slot_id"])
-    random.Random(draft["normalized_seed"]).shuffle(selected)
+    if draft["selector"] == "DIRECT_LIST":
+        # Direct authoring is an explicit sequence; canonical validation makes
+        # the caller's order byte-stable without silently reshuffling it.
+        pass
+    else:
+        pinned_ids = set(draft["pinned"])
+        anchors = sorted(
+            (item for item in selected if item["slot_id"] in pinned_ids),
+            key=lambda item: item["slot_id"],
+        )
+        remainder = sorted(
+            (item for item in selected if item["slot_id"] not in pinned_ids),
+            key=lambda item: item["slot_id"],
+        )
+        random.Random(draft["normalized_seed"]).shuffle(remainder)
+        selected = anchors + remainder
     ordered = [{**item, "order_index": index} for index, item in enumerate(selected)]
     manifest = {
         "schema_version": MANIFEST_SCHEMA,

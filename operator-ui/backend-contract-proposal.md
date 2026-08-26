@@ -1,141 +1,200 @@
-# Operator UI local bridge contract
+# Operator UI loopback integration contract
 
-Status: the loopback transport, FAKE/PHYSICAL TEST_ONLY composition, checkpoint CAS and isolated candidate-review CAS are implemented. Production activation remains out of scope.
+Status: implemented for the reusable FAKE product and the current PHYSICAL TEST_ONLY caller. GENERAL/PRODUCTION activation remains unavailable.
 
-## Transport boundary
+This document is for backend and UI maintainers. It specifies the current same-origin transport, atomic view, public product operations and campaign boundary. Inner `OneJob` ports remain implementation details and are not browser APIs.
 
-The foreground local server exposes exactly two same-origin routes:
+## Transport
 
-- `GET /api/view`: return one atomic `data_factory.operator_session_view.v1`
-- `POST /api/intent`: accept one `data_factory.operator_intent.v1`
+The foreground local server exposes two same-origin routes:
 
-The server binds only loopback (`127.0.0.1` and/or `::1`), rejects unexpected `Host` and `Origin`, and replaces the exact HTML marker `<!-- OPERATOR_TOKEN -->` with `<meta name="operator-token" content="PROCESS_RANDOM_TOKEN">`. The client sends that value as `X-Operator-Token` on both routes. No CORS, WebSocket, cookie authentication, database, broker, offline queue, passkey or OS authentication is part of this contract.
+- `GET /api/view` returns one atomic `data_factory.operator_session_view.v1` envelope.
+- `POST /api/intent` accepts one `data_factory.operator_intent.v1` envelope.
 
-The token proves possession of the foreground local page channel; the approval button itself does not claim identity authentication. The backend remains responsible for human-channel qualification and all current scene/start/expiry/safety checks.
+The server binds only `127.0.0.1` or `::1`, rejects unexpected `Host` and POST `Origin`, and replaces the exact HTML marker `<!-- OPERATOR_TOKEN -->` with an in-memory `<meta name="operator-token" content="…">`. The client sends that value as `X-Operator-Token` on both routes. Responses use `no-store`; the UI persists no token.
 
-The executable composition is `python3 -m tools.data_factory.operator_console --effect-scope FAKE|PHYSICAL`. It serves the existing UI from one foreground process and composes the existing `CampaignOperator`, `CampaignSession`, `SeedCampaign`, decision/checkpoint ports and fresh `OneJob`. FAKE uses a temporary synthetic fixture. PHYSICAL is limited to the tracked exact place1 inputs, ignored machine-local one-UVC binding and isolated TEST_ONLY roots.
+There is no CORS route, WebSocket, cookie authentication, database, broker or offline queue. The token proves possession of the current local page channel. It does not prove OS user presence or authenticated human identity.
 
-## View
+The supported entry point is:
 
-Minimum shape:
+```sh
+direnv exec . python3 -m tools.data_factory.operator_console \
+  --effect-scope FAKE|PHYSICAL
+```
+
+The process serves static UI and one `CollectionOperatorApplication`. FAKE injects a temporary synthetic product fixture. PHYSICAL injects repository/machine catalog facts, foreground environment preparation and the current exact TEST_ONLY campaign factory.
+
+## Atomic view
+
+`GET /api/view` returns this outer envelope:
 
 ```json
 {
   "schema_version": "data_factory.operator_session_view.v1",
-  "session_id": "session-fake-g1-r001",
+  "session_id": "collection-application-r001",
   "revision": 12,
+  "projection": {},
+  "generated_at": "2026-08-26T04:00:00Z",
   "view_digest": "sha256:…",
-  "generated_at": "2026-08-25T04:00:00Z",
-  "connection_state": "READY",
-  "effect_scope": "FAKE",
-  "lifecycle_action": "LIVE_COLLECT",
-  "data_disposition": "TEST_ONLY",
-  "available_ops": ["update_draft", "compile_draft"],
-  "fixed_lane": {
-    "workspace": {"place_id": "PLACE_A", "revision": "place-a-yaw0-r002"},
-    "object_id": "wood-cube-25mm-r001",
-    "grasp_id": "wood-cube-25mm-top-center-r001",
-    "task": {"id": "pickup_e2e", "capability": "PHYSICAL_EXECUTABLE"},
-    "motion": {"id": "DIRECT", "capability": "PHYSICAL_EXECUTABLE"},
-    "start_pose_id": "fr5-lab-a-home-r001"
-  },
-  "draft": {
-    "draft_id": "campaign-draft-r001",
-    "authoring_mode": "ASSISTED",
-    "selector": "BALANCED_INITIAL",
-    "cells": []
-  },
-  "capabilities": [
-    {"label": "Task · pick_place", "status": "NOT_AVAILABLE", "reason_codes": ["FUTURE_TASK_RECIPE"]}
-  ],
-  "runtime": {"workflow_state": "AUTHORING", "measurement_outcome": "NOT_MEASURED", "reason_codes": []},
-  "effect_counts": {
-    "robot_calls": 0,
-    "gripper_calls": 0,
-    "recorder_calls": 0,
-    "dataset_writes": 0,
-    "run_state_writes": 0,
-    "production_approvals": 0,
-    "training_authority": 0
+  "authority": {
+    "browser": "INTENT_ONLY",
+    "lifecycle_owner": "BACKEND",
+    "human_identity": "NOT_AUTHENTICATED",
+    "training_approval": "SEPARATE"
   }
 }
 ```
 
-`revision` is monotonic within a session. `view_digest` covers the canonical authority-relevant projection, including available ops, fixed lane, draft revision, current runtime binding, approval binding and TEST_ONLY roots. The browser rejects revision rollback, a changed digest at the same revision, unknown enums and any disposition other than `TEST_ONLY`.
+`projection` contains the current product state:
 
-`connection_state` is `READY | STALE | RECONNECTING | BLOCKED`. Only `READY` can expose mutable ops. Capability is `PHYSICAL_EXECUTABLE | PLAN_ONLY | OFFLINE_ONLY | NOT_AVAILABLE`; it describes availability and never grants current execution authority. `pick_place` and unqualified variants remain `NOT_AVAILABLE`.
+| Field | Current meaning |
+| --- | --- |
+| `connection_state` | `READY`, `STALE`, `RECONNECTING` or `BLOCKED` |
+| `effect_scope` | `FAKE` or `PHYSICAL` |
+| `lifecycle_action` | Current product uses `LIVE_COLLECT` |
+| `data_disposition` | Executable caller currently uses `TEST_ONLY`; `PRODUCTION` may be visible but unavailable |
+| `setup` | Factual host summary and robot/controller/gripper/camera subsystem states |
+| `catalog.axes` | Workspace, frame, task, object, grasp, start, motion, variant, camera, data mode and split options with availability reasons |
+| `draft` | Draft ID/revision, authoring mode, requested count, repeat, coherent selection and cells |
+| `runtime` | Workflow, measurement outcome, reason codes, progress and active child |
+| `campaign_envelope` | Finite manifest/envelope binding after compile |
+| `campaign_authorization` | Present only after one successful campaign authorization |
+| `episode_history` | Ordered terminal episode results and ledger references |
+| `coverage` | Planned/completed counts and per-cell projection |
+| `candidate_review` | Optional separately bound review offer; absent in current PHYSICAL TEST_ONLY caller |
+| `available_ops` | The only operations the browser may currently send |
+| `technical_details` | Catalog/combination identities and nested backend projection for diagnostics |
 
-## Intent
+`revision` is monotonic within the application session. `view_digest` covers session ID, revision and the complete projection. The backend increments revision when the owner-side projection changes. The browser rejects revision rollback, a different digest at the same revision, unknown enums, invalid catalog selection and malformed runtime state.
 
-Every POST body contains exactly the shared envelope fields:
+Catalog options are not independent strings. The selected workspace/frame/task/object/grasp/start/motion/variant/camera combination must match one catalog `combination_digest` and be executable for the selected data mode. Changing one axis may atomically resolve other axes to a coherent executable combination. Disabled options remain visible with a reason.
+
+## Intent envelope
+
+Every POST body has exactly these fields:
 
 ```json
 {
   "schema_version": "data_factory.operator_intent.v1",
   "intent_id": "f02097f1-b7db-46ba-8520-eb301dc21e7a",
-  "session_id": "session-fake-g1-r001",
+  "session_id": "collection-application-r001",
   "view_revision": 12,
   "view_digest": "sha256:…",
   "op": "update_draft",
-  "payload": {"draft_id": "campaign-draft-r001", "authoring_mode": "DIRECT_EDIT"}
+  "payload": {
+    "draft_id": "collection-application-r001-campaign-0001-draft",
+    "requested_count": 6
+  }
 }
 ```
 
-`ASSISTED` and `DIRECT_EDIT` both use `update_draft` and the same draft ID. `set_effect_scope` changes only the session scope; selecting `PHYSICAL` cannot imply compile, approval, recorder begin, process construction or dispatch. Workspace `capture_workspace_point` and `save_workspace_revision` payloads must say `mode=FAKE`, include the qualified plane digest and source/final measurement binding, and may write only synthetic candidate roots.
+The backend compare-and-swaps session, revision and view digest before dispatch. `intent_id` is single-use. A recursively supplied authority field such as `source`, `approved_by`, `reviewed_by`, `semantic_pass` or `training_approved` is rejected.
 
-Approval is a native button intent, not typed text:
+The application exposes operations by workflow:
+
+| Workflow | Public operations | Payload |
+| --- | --- | --- |
+| environment not ready | `prepare_environment` | `{}` |
+| `AUTHORING` | `update_draft` | `draft_id` plus exactly one selection/draft change |
+| `AUTHORING` | `compile_draft` | `draft_id`, exact `data_disposition` |
+| `REVIEW_CAMPAIGN` | `edit_campaign_draft` | `{}` |
+| `REVIEW_CAMPAIGN` | `authorize_campaign` | `draft_id`, `manifest_digest`, `envelope_digest`, `data_disposition` |
+| `RUNNING` | `cancel_session` | current `active_child_id` |
+| terminal with offered review | `review_candidate` | offered `review_binding_digest`, choice and reason |
+| `TERMINAL` | `new_campaign_same_settings` | `{}` |
+
+Supported single-field `update_draft` changes are:
+
+- `selection: {axis: option_id}` for workspace, frame, task, object, grasp, start, motion, variant, camera or data mode;
+- `authoring_mode: ASSISTED|DIRECT_EDIT`;
+- `requested_count` (total finite episodes) or `repeat` (ASSISTED per-condition maximum), each 1~100;
+- `split: TRAIN|ID|OOD`, subject to catalog availability;
+- `add_pose` with one bounded `{place_id, x_mm, y_mm, yaw_deg}` pose, or `remove_pose` with one exact projected pose, in direct-edit mode.
+
+`direct_poses` is the canonical ordered, non-anchor condition list. Switching from assisted to direct authoring materializes the assisted sequence's first-seen unique conditions into that list; the fixed source anchor remains first. Compile repeats the full `[anchor, ...direct_poses]` list to exact `requested_count`. No separate cell-toggle operation is public.
+
+`available_ops` is authoritative. A handler existing inside the Python process does not make it a public operation in the current workflow.
+
+## Compile and campaign authorization
+
+`compile_draft` requires an executable catalog selection and at least one included cell. It creates a fresh campaign owner, finite collection manifest and campaign envelope. The current PHYSICAL campaign factory can write its ignored machine-local camera binding and isolated TEST_ONLY cell/scene setup state during construction; compile does not authorize motion, recorder begin or a dataset episode. `edit_campaign_draft` closes that compiled owner and returns a new draft ID so the stale manifest cannot be reused.
+
+The browser authorizes the whole finite campaign with one intent:
 
 ```json
 {
   "schema_version": "data_factory.operator_intent.v1",
   "intent_id": "982fb0dc-d0f3-4b02-aedb-4c7992a9af08",
-  "session_id": "session-fake-g1-r001",
+  "session_id": "collection-application-r001",
   "view_revision": 18,
   "view_digest": "sha256:…",
-  "op": "approve_exact_plan",
+  "op": "authorize_campaign",
   "payload": {
-    "plan_digest": "sha256:…",
-    "approval_scope": "HUMAN_GATED",
+    "draft_id": "collection-application-r001-campaign-0001-draft",
+    "manifest_digest": "sha256:…",
+    "envelope_digest": "sha256:…",
     "data_disposition": "TEST_ONLY"
   }
 }
 ```
 
-The backend must compare session, revision, view digest, plan digest, sealed scope, exact TEST_ONLY paths, scene/start binding and expiry immediately before single-use consumption. A button event never mints an approval receipt client-side.
+The backend builds `data_factory.campaign_authorization.v1` from that exact envelope, operator label, approval time and expiry. The browser never creates an authorization receipt and never asks the operator to type a digest.
 
-The fixed PHYSICAL place1 session seals `approval_scope=HIL_NUMERIC_PROXY`; the disabled UI toggle reports that binding and cannot change it during the session.
+Within the authorized campaign, each fresh `OneJob` still produces an exact plan. The inner console validates run ID, active intent, slot, root binding, start binding, scene, plan digest, data disposition, envelope, expiry and budget against the campaign authorization before returning the internal `CAMPAIGN_AUTHORIZATION` decision. `approve_exact_plan` remains an inner compatibility port for non-campaign paths; the reusable outer application does not expose it as a normal browser operation.
 
-## Result and no-side-effect matrix
+Expected PHYSICAL TEST_ONLY scene-ready and release-positive checkpoints may be resolved only after the same exact scope validation. Any mismatch, negative outcome, technical failure, cancel, stale evidence or expiry stops the serial loop. A technical PASS and campaign state `READY` are both required before the next intent opens.
+
+## Results and authority separation
+
+Each terminal episode result can contain technical evidence, `human_semantic`, campaign counters, a result digest and an `episode_ledger` reference. The results page projects these alongside coverage, but does not merge them.
+
+The ledger reference points to an immutable episode ledger and a separate state sidecar. The initial state preserves the episode, keeps semantic status `NOT_MEASURED` when no candidate review exists, keeps training `NOT_AUTHORIZED`, and reports reclaim independently. No UI intent performs physical deletion or shared-chunk repack.
+
+`review_candidate` is accepted only for an existing review offer and exact review binding. It records `PASS | FAIL | UNCERTAIN` through the existing compare-and-swap port and still returns `training_authorized=false`. Current PHYSICAL TEST_ONLY does not offer candidate review. Campaign authorization, technical PASS, candidate review, production admission and training approval remain separate authorities.
+
+## Intent result and fail-close behavior
+
+A consumed intent returns:
 
 ```json
 {
   "schema_version": "data_factory.operator_intent_result.v1",
-  "ok": false,
-  "code": "VIEW_STALE",
-  "consumed": false,
-  "current_view_revision": 19
+  "ok": true,
+  "code": "INTENT_CONSUMED",
+  "consumed": true,
+  "intent_id": "f02097f1-b7db-46ba-8520-eb301dc21e7a",
+  "op": "update_draft",
+  "result": {},
+  "current_view_revision": 13,
+  "current_view_digest": "sha256:…"
 }
 ```
 
-| Case | Required result | Client behavior | Later effect |
-|---|---|---|---:|
-| bridge unavailable | no response | discard pending UI action; show blocked | 0 |
-| stale revision/digest | `consumed=false` | GET fresh view; never retry intent | 0 |
-| replay/duplicate ID or consumed plan | `INTENT_REPLAYED`, `consumed=false` | display reason; never retry | 0 |
-| backend blocked | stable reason, `consumed=false` | remove action controls | 0 |
-| cancel | accept once, project `CANCELLING` | wait for executor terminal; no second cancel | 0 after cancel |
-| reconnect | fresh GET only | never replay a pre-disconnect POST | 0 until new decision |
+Rejected HTTP intents use the same schema with `ok=false` and `consumed=false`.
 
-`FAKE` must keep robot, gripper, production recorder, dataset and run-state call counts at zero. `PHYSICAL` selection in a FAKE session keeps construction/dispatch at zero. Starting the separate foreground PHYSICAL process is the explicit local TEST_ONLY setup action; motion still requires a fresh site-confirmation checkpoint, bound plan approval intent and runtime gates.
+| Case | Backend/client behavior | Later effect |
+| --- | --- | ---: |
+| bridge unavailable | UI disables mutation and offers GET-only refresh | 0 |
+| stale session/revision/digest | reject without consumption; client fetches a fresh view and never retries POST | 0 |
+| replayed intent ID | reject; never replay automatically | 0 |
+| invalid or unavailable catalog combination | reject before campaign construction | 0 |
+| compiled plan edited before authorization | close compiled owner; create fresh draft/campaign lineage | 0 from old compile |
+| cancel while running | accept once, project cancelling/terminal, prevent next episode | 0 after active cancel completes |
+| episode failure or binding mismatch | seal failure/block state; do not open next intent | 0 for later episodes |
+| reconnect | fresh GET only | 0 until a new explicit operation |
 
-`resolve_checkpoint` accepts only a currently offered semantic/grasp, combined release/final-scene or `SCENE_READY` choice with the exact binding digest. `review_candidate` accepts `PASS | FAIL | UNCERTAIN` only for an existing isolated candidate review offer and reuses the existing compare-and-swap. The current physical TEST_ONLY episode exposes candidate review as `NOT_APPLICABLE`. No intent grants production approval or training authority.
+The browser polls only while environment preparation or execution is active. Polling reads snapshots and does not queue operations.
 
 ## Current PHYSICAL TEST_ONLY boundary
 
-Canonical view serialization, revision/replay CAS, token/Host/Origin checks, bounded op mapping and the FAKE/PHYSICAL owner chain are implemented. The UI uses bounded GET polling only for active status; it never retries an intent.
+The current PHYSICAL application reads the repository catalog but marks a combination executable only when it matches the tracked place1 workspace/frame, motion qualification, start pose and one-camera profile supported by the injected caller. The coherent lane uses wood-cube top-center grasp, `pickup_e2e`, `DIRECT`, `fr5-lab-a-home-r001` and `fr5-up-rgb-30hz-v1`.
 
-PHYSICAL construction reads tracked `config/data_factory/test_only_physical/goal2-place1/` inputs, binds exactly one local UVC device, writes only ignored local binding plus isolated TEST_ONLY state, and passively reads the already-running foreground gripper graph. Fresh/open controller state auto-attaches; only a non-open state exposes the digest-bound maintenance checkpoint. Process launch/restart remains outside the browser.
+Qualified `PLACE_A@place-a-yaw0-r002` contributes bounded continuous X/Y and normalized yaw. Checked-in cells and HOME/origin/yaw0 are convenient presets rather than the product limit. Count is editable from 1 to 100, and compile seals automatic deterministic spread or direct ordered poses as exact serial slots.
 
-Fresh HOME/current state, controller/device↔publisher/topic checks, plan truth, recorder readiness and field checkpoints remain runtime measurements; setup doctor never probes them.
+Startup discovers stable UVC identities, chooses the explicit `--camera-device-id` or the canonical first compatible identity, and prepares the corresponding foreground environment by default. Only that process-start identity is executable. Other matching identities remain visible with `CAMERA_REBIND_REQUIRED`; no browser intent reconfigures the camera owner. Starting a new process with an explicit identity is the supported rebind path. With zero compatible cameras the server still opens a blocked factual shell and exposes no compile or campaign operation.
 
-Another host, camera/profile or physical layout requires requalification. The path does not qualify image semantics, production data validity, dual-camera sync, RealSense/depth, candidate production admission or training.
+The environment can attach to one existing robot/controller/gripper owner, bootstrap configured missing owners, perform required gripper open normalization and start the selected UVC node. Ambiguous owner, partial owner, unreadable query, incompatible device or setup timeout blocks the application. `Ctrl-C` closes the campaign, bridge and processes owned by the environment.
+
+Camera identity and transport are bound during environment preparation and compiled-campaign construction. Every selected cell gets a fresh HOME snapshot and scene/start/plan validation before its episode, followed by recorder readiness and technical validation. The camera may remain `CONNECTED_UNPLACED`; no image-quality, object-visibility, role-placement, dual-camera-sync, depth or production-data-validity judgment is issued.
+
+GENERAL/PRODUCTION mode, new physical workspace or unregistered-cell/task/object/grasp/start/motion/variant callers, `pick_place`, `TWO_STAGE_ALIGN`, ID/OOD collection, dual-camera/RealSense support, production candidate issuance and training approval require separate qualified combinations and runtime callers. Declared cells inside the qualified place1 registration do not require point-by-point workspace requalification. Catalog visibility alone is not execution authority.

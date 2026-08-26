@@ -101,6 +101,12 @@ class CampaignSession:
     def cancel_event(self) -> threading.Event:
         return self._cancel
 
+    @property
+    def next_slot(self) -> dict[str, Any] | None:
+        """Expose the next immutable campaign slot without reserving it."""
+        with self._lock:
+            return self._campaign.next_slot
+
     def _bump(self) -> None:
         self._revision += 1
 
@@ -173,6 +179,7 @@ class CampaignSession:
                 raise ContractError("CAMPAIGN_SESSION_ROOT_BINDING")
         start = validate_test_only_start_binding(
             start_binding, manifest=self.manifest, hypothesis=self._campaign.hypothesis,
+            slot=self._campaign.next_slot,
         )
         return roots, start
 

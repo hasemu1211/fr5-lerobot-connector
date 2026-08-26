@@ -237,6 +237,35 @@ class DataFactoryTest(unittest.TestCase):
             with self.subTest(code=code):
                 bad=copy.deepcopy(self.calibration); bad.update(change); self._error(code,calibration=bad)
 
+    def test_registered_a4_domain_accepts_continuous_xy_and_canonical_yaw(self):
+        base = {
+            **self.job,
+            "sheet_manifest_digest": factory.canonical_digest(self.yaw0),
+            "yaw_deg": 22.5,
+            "x_mm": 12.5,
+            "y_mm": -7.25,
+        }
+        first = self._validated(job=base, selected=self.yaw0)
+        wrapped = self._validated(
+            job={**base, "yaw_deg": 382.5}, selected=self.yaw0,
+        )
+        negative = self._validated(
+            job={**base, "yaw_deg": -337.5}, selected=self.yaw0,
+        )
+        self.assertEqual(first["normalized_job"]["yaw_deg"], 22.5)
+        self.assertEqual(first["resolved_job_digest"], wrapped["resolved_job_digest"])
+        self.assertEqual(first["resolved_job_digest"], negative["resolved_job_digest"])
+        self.assertEqual(
+            factory.bounded_place_coordinate(
+                self.yaw0, 12.5, -7.25, yaw_deg=22.5,
+            ),
+            (12.5, -7.25),
+        )
+        self._error(
+            "JOB_COORDINATE_BOUNDS",
+            job={**base, "x_mm": 71}, selected=self.yaw0,
+        )
+
     def test_cli_missing_job_is_stable(self):
         result=subprocess.run([sys.executable,str(ROOT/"tools/fr5_data_factory.py"),"validate-job","--job",str(self.root/"none.json"),"--selected-sheet","x","--yaw0-sheet","x","--config-root",str(self.root)],text=True,capture_output=True)
         self.assertEqual(result.returncode,2); self.assertEqual(json.loads(result.stderr)["error"]["code"],"JOB_IO")

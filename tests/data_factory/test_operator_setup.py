@@ -3,9 +3,11 @@ from __future__ import annotations
 import copy
 import json
 import math
+import shutil
+import subprocess
 import tempfile
 import unittest
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -22,12 +24,14 @@ except ImportError:
         single_qualification_inputs,
     )
 from tools.data_factory.campaign_authoring import compile_collection_campaign
+from tools.data_factory.campaign_session import CampaignSession
 from tools.data_factory.experiment_manifest import compile_fr5_hypothesis
 from tools.data_factory.operator_setup import (
     build_camera_binding_from_discovery,
     build_camera_binding_candidate,
     build_test_only_episode_binding,
     build_test_only_root_binding,
+    build_test_only_scene_observation_binding,
     build_test_only_start_binding,
     compile_workspace_registration_candidate,
     gripper_setup_projection,
@@ -35,8 +39,10 @@ from tools.data_factory.operator_setup import (
     load_camera_binding_receipt,
     qualified_table_plane_reference,
     reuse_camera_binding_receipt,
+    select_yaw0_print_profile,
     validate_print_measurements,
     validate_test_only_root_binding,
+    validate_test_only_scene_observation_binding,
     validate_test_only_episode_binding,
     validate_test_only_planned_start,
     validate_test_only_state_initialization,
@@ -45,7 +51,7 @@ from tools.data_factory.operator_setup import (
 )
 from tools.data_factory.seed_campaign import SeedCampaign
 from tools.a4_place_yaw.generate_place_yaw_a4 import build_places, make_manifest
-from tools.fr5_data_factory import ContractError, canonical_digest
+from tools.fr5_data_factory import ContractError, canonical_digest, load_json_strict
 
 
 ROOT = Path(__file__).parents[2]
@@ -225,6 +231,7 @@ class OperatorSetupTests(unittest.TestCase):
 
             for outside in (
                 repository / "outputs/data_factory/runs",
+                repository / "outputs/data_factory/test_only_physical/other-session/runs",
                 repository / "datasets/fr5_episodes/run-r001",
                 repository.parent / "escape",
             ):
@@ -290,10 +297,21 @@ class OperatorSetupTests(unittest.TestCase):
                     object_profile_id="wood-cube-25mm-r001", place_id="PLACE_A",
                     yaw_deg=0, x_mm=0, y_mm=0, declared_by="local-operator",
                 )
+            later = build_test_only_root_binding(
+                repository, session_id="session-r001", run_id="run-r002",
+            )
+            self.assertEqual(later["run_root"], roots["run_root"])
+            self.assertEqual(later["cell_root"], roots["cell_root"])
+            self.assertNotEqual(later["dataset_root"], roots["dataset_root"])
+            Path(later["dataset_root"]).mkdir(parents=True)
             with self.assertRaisesRegex(ContractError, "TEST_ONLY_ROOT_COLLISION"):
-                build_test_only_root_binding(
-                    repository, session_id="session-r001", run_id="run-r001",
-                )
+                validate_test_only_root_binding(later, repository_root=repository)
+            third = build_test_only_root_binding(
+                repository, session_id="session-r001", run_id="run-r003",
+            )
+            (Path(third["run_root"]) / third["run_id"]).mkdir(parents=True)
+            with self.assertRaisesRegex(ContractError, "TEST_ONLY_ROOT_COLLISION"):
+                validate_test_only_root_binding(third, repository_root=repository)
 
     def test_motion_q_safe_start_binds_one_slot_and_fresh_home_snapshot(self):
         contract, motion, home = compatible_start_fixture()
@@ -382,17 +400,253 @@ class OperatorSetupTests(unittest.TestCase):
                 plan=outside,
             )
 
-    def test_start_binding_rejects_multi_slot_and_never_invents_homing(self):
-        contract = hypothesis()
+    def test_start_binding_requires_and_binds_the_exact_multi_slot(self):
+        contract, motion, home = compatible_start_fixture()
         manifest, _ = compile_collection_campaign(draft(contract, count=2), hypothesis=contract)
-        motion = load("config/data_factory/motion_qualifications/fr5-place-a-wood-cube-r001.json")
-        home = load("config/data_factory/home_candidates/fr5-lab-a-home-r001.json")
-        with self.assertRaisesRegex(ContractError, "TEST_ONLY_START_EXACT_ONE_SLOT"):
+        target = motion["qualified_safe_joint_positions_rad"]
+        with self.assertRaisesRegex(ContractError, "TEST_ONLY_START_SLOT_REQUIRED"):
             build_test_only_start_binding(
                 manifest=manifest, hypothesis=contract, motion_qualification=motion,
-                home_candidate=home,
+                home_candidate=home, current_snapshot=pose_snapshot(target),
+            )
+        first, second = manifest["slots"]
+        binding = build_test_only_start_binding(
+            manifest=manifest, hypothesis=contract, slot=first,
+            motion_qualification=motion, home_candidate=home,
+            current_snapshot=pose_snapshot(target),
+        )
+        self.assertEqual(binding["slot_digest"], canonical_digest(first))
+        self.assertEqual(
+            binding,
+            validate_test_only_start_binding(
+                binding, manifest=manifest, hypothesis=contract, slot=first,
+            ),
+        )
+        with self.assertRaisesRegex(ContractError, "TEST_ONLY_START_BINDING"):
+            validate_test_only_start_binding(
+                binding, manifest=manifest, hypothesis=contract, slot=second,
+            )
+
+    def test_session_exposes_detached_next_slot_and_rejects_wrong_start_before_factory(self):
+        contract, motion, home = compatible_start_fixture()
+        source = draft(contract, count=2)
+        manifest, receipt = compile_collection_campaign(source, hypothesis=contract)
+        with tempfile.TemporaryDirectory() as directory:
+            repository = Path(directory).resolve()
+            roots = build_test_only_root_binding(
+                repository, session_id="session-r001", run_id="run-r001",
+            )
+            wrong_start = build_test_only_start_binding(
+                manifest=manifest, hypothesis=contract, slot=manifest["slots"][1],
+                motion_qualification=motion, home_candidate=home,
                 current_snapshot=pose_snapshot(motion["qualified_safe_joint_positions_rad"]),
             )
+            factory_calls = []
+            now = datetime.now(timezone.utc)
+            session = CampaignSession(
+                session_id=roots["session_id"], source_draft=source,
+                manifest=manifest, compilation_receipt=receipt,
+                hypothesis=contract, lifecycle_owner="TEST_OPERATOR",
+                expires_at="2099-01-01T00:00:00Z",
+                initial_scene_digest=canonical_digest("scene-0"),
+                effect_scope="PHYSICAL", lifecycle_action="LIVE_COLLECT",
+                data_disposition="TEST_ONLY", fake_lifecycle_factory=lambda: None,
+                physical_lifecycle_factory=lambda: factory_calls.append(True),
+                repository_root=repository, clock=lambda: now,
+            )
+            exposed = session.next_slot
+            self.assertEqual(exposed, manifest["slots"][0])
+            exposed["slot_id"] = "forged-slot"
+            self.assertEqual(session.next_slot, manifest["slots"][0])
+            evidence = {
+                "schema_version": "data_factory.scene_freshness_evidence.v1",
+                "scene_digest": canonical_digest("scene-0"),
+                "observed_at": now.isoformat().replace("+00:00", "Z"),
+            }
+            evidence["evidence_digest"] = canonical_digest(evidence)
+            with self.assertRaisesRegex(ContractError, "TEST_ONLY_START_BINDING"):
+                session.open_next(
+                    run_id=roots["run_id"], scene_evidence=evidence,
+                    roots=roots, start_binding=wrong_start,
+                )
+            self.assertEqual(factory_calls, [])
+            self.assertFalse(session.status()["active_child"])
+
+    def test_later_episode_uses_fresh_observation_and_rejects_replayed_or_forged_sources(self):
+        contract, motion, home = compatible_start_fixture()
+        source = draft(contract, count=2)
+        manifest, receipt = compile_collection_campaign(source, hypothesis=contract)
+        now = datetime.now(timezone.utc)
+
+        def evidence(scene_digest: str, observed_at: datetime = now) -> dict:
+            value = {
+                "schema_version": "data_factory.scene_freshness_evidence.v1",
+                "scene_digest": scene_digest,
+                "observed_at": observed_at.isoformat().replace("+00:00", "Z"),
+            }
+            value["evidence_digest"] = canonical_digest(value)
+            return value
+
+        def resolved(slot: dict) -> dict:
+            base = next(
+                item for item in contract["base_conditions"]
+                if item["base_condition_digest"] == slot["base_condition_digest"]
+            )
+            return next(
+                item for item in contract["resolver_receipts"]
+                if item["resolver_result_digest"] == base["resolver_result_digest"]
+            )
+
+        with tempfile.TemporaryDirectory() as directory:
+            repository = Path(directory).resolve()
+            first_slot, second_slot = manifest["slots"]
+            first_resolved = resolved(first_slot)
+            first_job = first_resolved["normalized_job"]
+            first_roots = build_test_only_root_binding(
+                repository, session_id="session-r001", run_id="run-r001",
+            )
+            initialized = initialize_test_only_state_from_user_declaration(
+                first_roots, repository_root=repository,
+                robot_system_id=first_job["robot_system_id"],
+                object_instance_id="object-r001",
+                object_profile_id=first_job["object_profile_id"],
+                place_id=first_job["place_id"], yaw_deg=first_job["yaw_deg"],
+                x_mm=first_job["x_mm"], y_mm=first_job["y_mm"],
+                declared_by="test-operator",
+            )
+            campaign = SeedCampaign(
+                manifest=manifest, hypothesis=contract, lifecycle_owner="TEST_OPERATOR",
+                expires_at="2099-01-01T00:00:00Z",
+                initial_scene_digest=initialized["scene_state_digest"],
+                source_draft=source, compilation_receipt=receipt, clock=lambda: now,
+            )
+            first_start = build_test_only_start_binding(
+                manifest=manifest, hypothesis=contract, slot=campaign.next_slot,
+                motion_qualification=motion, home_candidate=home,
+                current_snapshot=pose_snapshot(motion["qualified_safe_joint_positions_rad"]),
+            )
+            first_child = SimpleNamespace(state="IDLE")
+            first_intent = campaign.start_intent(
+                owner="TEST_OPERATOR", run_id=first_roots["run_id"],
+                lifecycle=first_child,
+                scene_evidence=evidence(initialized["scene_state_digest"]),
+            )
+            first_binding = build_test_only_episode_binding(
+                roots=first_roots, repository_root=repository, manifest=manifest,
+                hypothesis=contract, intent=first_intent, start_binding=first_start,
+                state_initialization=initialized, resolved_job=first_resolved,
+                place_alias="place1", clock=lambda: now,
+            )
+            self.assertIsNotNone(first_binding["state_initialization_digest"])
+            self.assertIsNone(first_binding["scene_observation_digest"])
+
+            next_scene = canonical_digest("scene-after-run-r001")
+            first_child.state = "COMPLETE"
+            technical = {
+                "schema_version": "data_factory.seed_technical_result.v1",
+                "intent_digest": first_intent["intent_digest"],
+                "run_id": first_intent["run_id"],
+                "manifest_digest": first_intent["manifest_digest"],
+                "slot_id": first_intent["slot"]["slot_id"],
+                "status": "PASS",
+                "technical_result_digest": canonical_digest("technical-r001"),
+                "post_scene_digest": next_scene,
+                "observed_at": now.isoformat().replace("+00:00", "Z"),
+            }
+            technical["evidence_digest"] = canonical_digest(technical)
+            campaign.record_technical_result(
+                owner="TEST_OPERATOR", lifecycle=first_child, evidence=technical,
+            )
+
+            second_resolved = resolved(second_slot)
+            second_roots = build_test_only_root_binding(
+                repository, session_id="session-r001", run_id="run-r002",
+            )
+            self.assertEqual(second_roots["cell_root"], first_roots["cell_root"])
+            scene_binding = {
+                "scene_state_digest": next_scene,
+                "revision": initialized["scene_revision"] + 1,
+                "object_instance_id": initialized["object_instance_id"],
+            }
+            second_evidence = evidence(next_scene)
+            observation = build_test_only_scene_observation_binding(
+                roots=second_roots, repository_root=repository, manifest=manifest,
+                hypothesis=contract, slot=campaign.next_slot,
+                resolved_job=second_resolved, scene_binding=scene_binding,
+                scene_evidence=second_evidence, observed_by="test-operator",
+                clock=lambda: now,
+            )
+            self.assertEqual(
+                observation,
+                validate_test_only_scene_observation_binding(
+                    observation, roots=second_roots, manifest=manifest,
+                    hypothesis=contract, slot=second_slot,
+                    normalized_job=second_resolved, clock=lambda: now,
+                ),
+            )
+            second_start = build_test_only_start_binding(
+                manifest=manifest, hypothesis=contract, slot=campaign.next_slot,
+                motion_qualification=motion, home_candidate=home,
+                current_snapshot=pose_snapshot(motion["qualified_safe_joint_positions_rad"]),
+            )
+            second_child = SimpleNamespace(state="IDLE")
+            second_intent = campaign.start_intent(
+                owner="TEST_OPERATOR", run_id=second_roots["run_id"],
+                lifecycle=second_child, scene_evidence=second_evidence,
+            )
+            second_binding = build_test_only_episode_binding(
+                roots=second_roots, repository_root=repository, manifest=manifest,
+                hypothesis=contract, intent=second_intent, start_binding=second_start,
+                scene_observation=observation, resolved_job=second_resolved,
+                place_alias="place1", clock=lambda: now,
+            )
+            self.assertIsNone(second_binding["state_initialization_digest"])
+            self.assertEqual(
+                second_binding["scene_observation_digest"], observation["binding_digest"],
+            )
+
+            for changes in (
+                {"state_initialization": initialized},
+                {"state_initialization": initialized, "scene_observation": observation},
+            ):
+                with self.subTest(source=set(changes)), self.assertRaisesRegex(
+                    ContractError, "TEST_ONLY_EPISODE_SCENE_SOURCE",
+                ):
+                    build_test_only_episode_binding(
+                        roots=second_roots, repository_root=repository,
+                        manifest=manifest, hypothesis=contract, intent=second_intent,
+                        start_binding=second_start, resolved_job=second_resolved,
+                        place_alias="place1", clock=lambda: now, **changes,
+                    )
+
+            forged_resolver = {
+                **second_resolved,
+                "resolver_result_digest": canonical_digest("wrong-resolver"),
+            }
+            with self.assertRaisesRegex(ContractError, "TEST_ONLY_EPISODE_JOB"):
+                build_test_only_scene_observation_binding(
+                    roots=second_roots, repository_root=repository, manifest=manifest,
+                    hypothesis=contract, slot=second_slot,
+                    resolved_job=forged_resolver, scene_binding=scene_binding,
+                    scene_evidence=second_evidence, observed_by="test-operator",
+                    clock=lambda: now,
+                )
+            with self.assertRaisesRegex(ContractError, "TEST_ONLY_SCENE_OBSERVATION_STALE"):
+                build_test_only_scene_observation_binding(
+                    roots=second_roots, repository_root=repository, manifest=manifest,
+                    hypothesis=contract, slot=second_slot,
+                    resolved_job=second_resolved, scene_binding=scene_binding,
+                    scene_evidence=evidence(next_scene, now - timedelta(seconds=6)),
+                    observed_by="test-operator", clock=lambda: now,
+                )
+            with self.assertRaisesRegex(ContractError, "TEST_ONLY_SCENE_OBSERVATION_SCENE"):
+                build_test_only_scene_observation_binding(
+                    roots=second_roots, repository_root=repository, manifest=manifest,
+                    hypothesis=contract, slot=second_slot,
+                    resolved_job=second_resolved, scene_binding=scene_binding,
+                    scene_evidence=evidence(canonical_digest("wrong-scene")),
+                    observed_by="test-operator", clock=lambda: now,
+                )
 
     def test_workspace_plane_print_camera_and_gripper_are_non_authoritative(self):
         cell = load("config/data_factory/cells/place-a-yaw0-r002.json")
@@ -441,6 +695,129 @@ class OperatorSetupTests(unittest.TestCase):
             gripper_setup_projection(readback(gripper_index=2))["state"],
             "BLOCKED_BINDING",
         )
+
+    def test_workspace_print_profile_resolves_exact_checked_in_source_measurement(self):
+        standard = select_yaw0_print_profile(
+            ROOT, place_id="PLACE_A", source_scale_bar_mm=100.0,
+        )
+        compensated = select_yaw0_print_profile(
+            ROOT, place_id="PLACE_A", source_scale_bar_mm=96.0,
+        )
+        self.assertEqual(
+            load(standard.relative_to(ROOT).as_posix())["print_calibration"][
+                "measured_scale_bar_mm"
+            ],
+            100.0,
+        )
+        self.assertEqual(
+            compensated.name, "place_a_yaw_p000_00_printcal_096_00mm.json",
+        )
+        self.assertEqual(
+            compensated.parent.relative_to(ROOT),
+            Path("config/data_factory/print_profiles"),
+        )
+        with self.assertRaisesRegex(
+            ContractError, "WORKSPACE_PRINT_PROFILE_UNAVAILABLE",
+        ):
+            select_yaw0_print_profile(
+                ROOT, place_id="PLACE_A", source_scale_bar_mm=97.0,
+            )
+
+    def test_workspace_print_profile_is_clean_checkout_portable_and_fails_closed(self):
+        def clean_repository(directory: str) -> Path:
+            repository = Path(directory)
+            listed = subprocess.run(
+                ["git", "ls-files", "--", "config/data_factory"],
+                cwd=ROOT,
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            tracked = [Path(value) for value in listed.stdout.splitlines() if value]
+            expected = Path(
+                "config/data_factory/print_profiles/"
+                "place_a_yaw_p000_00_printcal_096_00mm.json"
+            )
+            self.assertIn(expected, tracked)
+            for relative in tracked:
+                source = ROOT / relative
+                if not source.is_file():
+                    continue
+                target = repository / relative
+                target.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(source, target)
+            self.assertFalse((repository / "tools/a4_place_yaw").exists())
+            return repository
+
+        with tempfile.TemporaryDirectory() as directory:
+            repository = clean_repository(directory)
+            selected = select_yaw0_print_profile(
+                repository, place_id="PLACE_A", source_scale_bar_mm=96.0,
+            )
+            self.assertEqual(
+                selected.relative_to(repository),
+                Path(
+                    "config/data_factory/print_profiles/"
+                    "place_a_yaw_p000_00_printcal_096_00mm.json"
+                ),
+            )
+            duplicate = repository / "config/data_factory/workspace_sheets/copy.json"
+            duplicate.parent.mkdir(parents=True)
+            duplicate.write_bytes(selected.read_bytes())
+            self.assertEqual(
+                load_json_strict(select_yaw0_print_profile(
+                    repository, place_id="PLACE_A", source_scale_bar_mm=96.0,
+                )),
+                load_json_strict(selected),
+            )
+            selected_sheet = json.loads(selected.read_text(encoding="utf-8"))
+            self.assertEqual(
+                (
+                    selected_sheet["sheet_id"], selected_sheet["yaw_deg"],
+                    selected_sheet["print_calibration"],
+                ),
+                (
+                    "PLACE_A_YAW_P000_00_PRINTCAL_096_00MM", 0.0,
+                    {
+                        "nominal_scale_bar_mm": 100.0,
+                        "measured_scale_bar_mm": 96.0,
+                        "content_scale_percent": 104.166667,
+                    },
+                ),
+            )
+            self.assertFalse((repository / "outputs").exists())
+
+            alternate = make_manifest(
+                "PLACE_A", "PLACE_A_YAW_P000_00_PRINTCAL_096_00MM_ALT", 0,
+                build_places(3, 3, 20, 0), 20, 96,
+            )
+            (repository / "config/data_factory/print_profiles/alternate.json").write_text(
+                json.dumps(alternate), encoding="utf-8",
+            )
+            with self.assertRaisesRegex(
+                ContractError, "WORKSPACE_PRINT_PROFILE_AMBIGUOUS",
+            ):
+                select_yaw0_print_profile(
+                    repository, place_id="PLACE_A", source_scale_bar_mm=96.0,
+                )
+            self.assertFalse((repository / "outputs").exists())
+
+        with tempfile.TemporaryDirectory() as directory:
+            repository = clean_repository(directory)
+            profile = (
+                repository / "config/data_factory/print_profiles/"
+                "place_a_yaw_p000_00_printcal_096_00mm.json"
+            )
+            tampered = json.loads(profile.read_text(encoding="utf-8"))
+            tampered["print_calibration"]["content_scale_percent"] = 100.0
+            profile.write_text(json.dumps(tampered), encoding="utf-8")
+            with self.assertRaisesRegex(
+                ContractError, "WORKSPACE_PRINT_PROFILE_UNAVAILABLE",
+            ):
+                select_yaw0_print_profile(
+                    repository, place_id="PLACE_A", source_scale_bar_mm=96.0,
+                )
+            self.assertFalse((repository / "outputs").exists())
 
     def test_stable_camera_binding_uses_exact_tokens_and_ignored_receipt(self):
         profile = load("config/data_factory/collection_profiles/fr5-up-rgb-30hz-v1.json")
@@ -600,7 +977,7 @@ class OperatorSetupTests(unittest.TestCase):
                     output_root=root / "candidates", tolerance_mm=1.0,
                 )
             wrong = copy.deepcopy(plane)
-            wrong["a4_family_digest"] = canonical_digest("wrong-family")
+            wrong["place_id"] = "OTHER_PLACE"
             wrong["reference_digest"] = canonical_digest({
                 key: wrong[key] for key in wrong if key != "reference_digest"
             })

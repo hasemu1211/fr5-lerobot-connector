@@ -826,6 +826,29 @@ class RecorderTransactionTest(unittest.TestCase):
             recorder.stop_threads.set()
             recorder.writer_thread.join(1)
 
+    def test_readiness_prefix_is_discarded_without_reopening_the_transaction(self):
+        with tempfile.TemporaryDirectory() as directory:
+            recorder = self.make_recorder(directory)
+            self.assertTrue(recorder.begin_episode(self.transaction(directory))["ok"])
+            transaction_id = recorder._transaction["transaction_id"]
+            recorder.frames = 60
+            recorder.frame_stamps = [index / 30 for index in range(60)]
+            recorder.source_provenance = [{} for _ in range(60)]
+            result = recorder.trim_readiness_prefix()
+            self.assertEqual(
+                (result["ok"], result["state"], result["reason_code"], result["metrics"]["rows"]),
+                (True, recorder.RECORDING, "READINESS_PREFIX_TRIMMED", 0),
+            )
+            self.assertEqual(recorder.dataset.clears, 1)
+            self.assertEqual(recorder._transaction["transaction_id"], transaction_id)
+            self.assertTrue(recorder.recording)
+            self.assertEqual(recorder.next_target_stamp, 1.0)
+
+            recorder.writer_error = RuntimeError("writer failed")
+            blocked = recorder.trim_readiness_prefix()
+            self.assertEqual((blocked["ok"], blocked["reason_code"]), (False, "READINESS_PREFIX_UNSAFE"))
+            self.assertEqual(recorder.dataset.clears, 1)
+
     def test_abort_is_idempotent_and_recorder_is_reusable(self):
         with tempfile.TemporaryDirectory() as directory:
             recorder = self.make_recorder(directory)

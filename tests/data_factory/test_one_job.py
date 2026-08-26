@@ -54,7 +54,12 @@ class OneJobTest(unittest.TestCase):
             calls.append(("recorder", request["op"]))
             if request["op"] == "begin":
                 first_status_after_begin = True
-            if request["op"] == "status" and first_status_after_begin:
+            if request["op"] == "trim_readiness_prefix":
+                if readiness_contract != TEST_ONLY_READINESS_CONTRACT:
+                    raise AssertionError("production recorder must not trim readiness prefix")
+                item = "RECORDING"
+                rows = 0
+            elif request["op"] == "status" and first_status_after_begin:
                 first_status_after_begin = False
                 item = "RECORDING"
                 rows = first_row_rows
@@ -248,10 +253,21 @@ class OneJobTest(unittest.TestCase):
         self.assertEqual(evidence["metrics"]["durable_rows"], 60)
         self.assertEqual(evidence["metrics"]["camera_source_fps"], {"up":30.0})
         self.assertEqual(evidence["metrics"]["image_quality_warnings"], ["up brightness warning"])
+        self.assertEqual(calls.count(("recorder", "trim_readiness_prefix")), 1)
         self.assertEqual(calls.count(("executor", "execute")), 1)
-        self.assertLess(calls.index(("recorder", "begin")), calls.index(("executor", "execute")))
+        self.assertLess(calls.index(("recorder", "begin")), calls.index(("recorder", "status")))
+        self.assertLess(calls.index(("recorder", "status")), calls.index(("recorder", "trim_readiness_prefix")))
+        self.assertLess(calls.index(("recorder", "trim_readiness_prefix")), calls.index(("executor", "execute")))
         with self.assertRaisesRegex(ContractError, "RECORDER_READINESS_CONTRACT"):
             OneJob(lambda _: None, lambda _: None, readiness_contract={})
+
+    def test_production_start_does_not_trim_readiness_prefix(self):
+        job, calls = self.make(["RECORDING"], ["PLANNED", "APPROVED", "EXECUTING"])
+        self.prepare_and_start(job)
+        self.assertEqual(job.state, "EXECUTING")
+        self.assertIsNone(job._result()["readiness_evidence"])
+        self.assertNotIn(("recorder", "trim_readiness_prefix"), calls)
+        self.assertLess(calls.index(("recorder", "begin")), calls.index(("executor", "execute")))
 
     def test_local_button_approval_is_test_only_and_does_not_claim_human_source(self):
         local = {

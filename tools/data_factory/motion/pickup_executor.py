@@ -704,7 +704,7 @@ class PickupExecutor:
                     if terminals != list(RECYCLE_PHASES):
                         raise ContractError("RECYCLE_TERMINAL_EVIDENCE")
                     execution["release_evidence"] = {
-                        "schema_version": "data_factory.recycle_release_evidence.v1",
+                        "schema_version": "data_factory.recycle_release_evidence.v2",
                         "run_id": run["plan"]["run_id"],
                         "plan_digest": run["digest"],
                         "release_slot_id": slot["slot_id"],
@@ -715,7 +715,10 @@ class PickupExecutor:
                         "terminal_phases": terminals,
                         "post_retreat_snapshot_digest": safety["post_reset_safe_snapshot_digest"],
                         "next_start_tolerance_rad": tolerance,
-                        "human_verdict": None,
+                        "release_outcome": None,
+                        "outcome_source": None,
+                        "decided_by": None,
+                        "decided_at": None,
                     }
                     run["state"] = "RELEASE_VERDICT"
                     execution["wait_deadline"] = self.monotonic_clock() + run["plan"]["execution_timeouts_s"]["semantic_verdict"]
@@ -790,7 +793,7 @@ class PickupExecutor:
                     snapshot = execution.get("snapshot")
                     gripper = snapshot.get("gripper_controller") if isinstance(snapshot, dict) else None
                     evidence = {
-                        "schema_version": "data_factory.recycle_release_evidence.v1",
+                        "schema_version": "data_factory.recycle_release_evidence.v2",
                         "run_id": run["plan"]["run_id"],
                         "plan_digest": run["digest"],
                         "release_slot_id": slot["slot_id"],
@@ -801,7 +804,10 @@ class PickupExecutor:
                         "terminal_phases": [phase for phase in execution["terminal_phases"] if phase in RECYCLE_PHASES],
                         "post_retreat_snapshot_digest": canonical_digest(snapshot if isinstance(snapshot, dict) else {"status": "UNAVAILABLE", "failure_code": code}),
                         "next_start_tolerance_rad": run["plan"]["planning"]["goal_tolerances"]["joint_rad"],
-                        "human_verdict": "UNCERTAIN",
+                        "release_outcome": "UNCERTAIN",
+                        "outcome_source": "EXECUTOR_FAILURE",
+                        "decided_by": "pickup-executor",
+                        "decided_at": self.clock().isoformat().replace("+00:00", "Z"),
                     }
                     execution["release_evidence"] = evidence
                     execution["scene_transition"] = self.scene_state_store.transition_release(
@@ -894,7 +900,13 @@ class PickupExecutor:
 
     def _confirm(self, payload):
         run = self._execution_payload(payload, {"run_id", "plan_digest", "confirmed_by", "source"}, "CONFIRM_SCHEMA")
-        if payload["source"] != "HUMAN" or not isinstance(payload["confirmed_by"], str) or not SAFE_ID.fullmatch(payload["confirmed_by"]):
+        if (
+            payload["source"] not in {"HUMAN", "CAMPAIGN_AUTHORIZATION"}
+            or payload["source"] == "CAMPAIGN_AUTHORIZATION"
+            and run["approval"]["approval_scope"] != "HIL_NUMERIC_PROXY"
+            or not isinstance(payload["confirmed_by"], str)
+            or not SAFE_ID.fullmatch(payload["confirmed_by"])
+        ):
             raise ContractError("CONFIRM_SCHEMA")
         if run["state"] != "PRECONTACT_HUMAN":
             raise ContractError("CONFIRM_STATE")
@@ -941,8 +953,15 @@ class PickupExecutor:
     def _release_verdict(self, payload):
         run = self._execution_payload(payload, {"run_id", "plan_digest", "verdict", "decided_by", "source"}, "RELEASE_VERDICT_SCHEMA")
         if (
-            payload["source"] != "HUMAN"
+            payload["source"] not in {
+                "HUMAN", "LOCAL_UI_BUTTON", "CAMPAIGN_CONTROL_PROXY",
+            }
             or payload["verdict"] not in {"LANDED", "OFF_SLOT", "UNCERTAIN"}
+            or payload["source"] == "CAMPAIGN_CONTROL_PROXY"
+            and (
+                payload["verdict"] != "LANDED"
+                or run["approval"]["approval_scope"] != "HIL_NUMERIC_PROXY"
+            )
             or not isinstance(payload["decided_by"], str)
             or not SAFE_ID.fullmatch(payload["decided_by"])
             or run["state"] != "RELEASE_VERDICT"
@@ -950,12 +969,27 @@ class PickupExecutor:
             raise ContractError("RELEASE_VERDICT_SCHEMA")
         execution = run["execution"]
         evidence = copy.deepcopy(execution.get("release_evidence"))
-        if not isinstance(evidence, dict):
+        if (
+            not isinstance(evidence, dict)
+            or evidence.get("schema_version")
+            != "data_factory.recycle_release_evidence.v2"
+        ):
             raise ContractError("RELEASE_EVIDENCE")
-        evidence["human_verdict"] = payload["verdict"]
+        evidence["release_outcome"] = (
+            "EXPECTED_LANDED"
+            if payload["source"] == "CAMPAIGN_CONTROL_PROXY"
+            else payload["verdict"]
+        )
+        evidence["outcome_source"] = {
+            "HUMAN": "HUMAN_TTY",
+            "LOCAL_UI_BUTTON": "LOCAL_UI_BUTTON",
+            "CAMPAIGN_CONTROL_PROXY": "CAMPAIGN_CONTROL_PROXY",
+        }[payload["source"]]
+        evidence["decided_by"] = payload["decided_by"]
+        evidence["decided_at"] = self.clock().isoformat().replace("+00:00", "Z")
         execution["release_verdict"] = payload["verdict"]
         execution["release_decision"] = {
-            "source": "HUMAN",
+            "source": payload["source"],
             "decided_by": payload["decided_by"],
             "decided_at": self.clock().isoformat().replace("+00:00", "Z"),
         }

@@ -196,6 +196,8 @@ def normalize_job_spec(job: object, *, now: datetime | None = None) -> dict:
     _digest(result["sheet_manifest_digest"], "JOB_DIGEST")
     for key in ("yaw_deg", "x_mm", "y_mm"):
         number = _number(result[key], "JOB_NUMBER")
+        if key == "yaw_deg":
+            number %= 360.0
         result[key] = int(number) if number.is_integer() else number
     result["approval_expiry"] = _timestamp(result["approval_expiry"], "JOB_EXPIRY", future=True, now=now)
     return result
@@ -448,23 +450,41 @@ def _sheet_contract(selected, yaw0, job):
     if selected["a4_family_digest"] != yaw0["a4_family_digest"]: raise ContractError("SHEET_FAMILY")
     if selected.get("place_id") != job["place_id"] or yaw0.get("place_id") != job["place_id"]: raise ContractError("SHEET_PLACE")
     if _number(yaw0.get("yaw_deg"), "SHEET_YAW") != 0: raise ContractError("SHEET_YAW0")
-    yaw = _number(selected.get("yaw_deg"), "SHEET_YAW")
-    if yaw != job["yaw_deg"]: raise ContractError("SHEET_YAW")
-    bounded_place_coordinate(selected, job["x_mm"], job["y_mm"])
+    bounded_place_coordinate(
+        selected, job["x_mm"], job["y_mm"], yaw_deg=job["yaw_deg"],
+    )
 
 
-def bounded_place_coordinate(sheet, x_mm, y_mm):
+def bounded_a4_coordinate(*, x_bounds, y_bounds, yaw_deg, x_mm, y_mm):
+    """Validate one continuous pose against the shared A4 printable domain."""
     x, y = _input_number(x_mm, "JOB_BUILDER_INPUT"), _input_number(y_mm, "JOB_BUILDER_INPUT")
-    u_values = [_number(point["local_uv_mm"][0], "SHEET_GRID") for point in sheet["grid_points"]]
-    v_values = [_number(point["local_uv_mm"][1], "SHEET_GRID") for point in sheet["grid_points"]]
-    if not (min(u_values) <= x <= max(u_values) and min(v_values) <= y <= max(v_values)):
+    try:
+        x_min = _input_number(x_bounds["minimum"], "JOB_BUILDER_INPUT")
+        x_max = _input_number(x_bounds["maximum"], "JOB_BUILDER_INPUT")
+        y_min = _input_number(y_bounds["minimum"], "JOB_BUILDER_INPUT")
+        y_max = _input_number(y_bounds["maximum"], "JOB_BUILDER_INPUT")
+    except (KeyError, TypeError) as exc:
+        raise ContractError("JOB_BUILDER_INPUT") from exc
+    if x_min > x_max or y_min > y_max or not (x_min <= x <= x_max and y_min <= y <= y_max):
         raise ContractError("JOB_COORDINATE_BOUNDS", str((x_mm, y_mm)))
-    angle = math.radians(_number(sheet["yaw_deg"], "SHEET_YAW"))
+    angle = math.radians(_input_number(yaw_deg, "SHEET_YAW"))
     sheet_x = PLACE0_XY_MM[0] + math.cos(angle) * x - math.sin(angle) * y
     sheet_y = PLACE0_XY_MM[1] + math.sin(angle) * x + math.cos(angle) * y
     if not (PRINT_X_MARGIN_MM <= sheet_x <= PAGE_W_MM - PRINT_X_MARGIN_MM and PRINT_Y_MARGIN_MM <= sheet_y <= PAGE_H_MM - PRINT_Y_MARGIN_MM):
         raise ContractError("JOB_COORDINATE_BOUNDS", str((x_mm, y_mm)))
     return x, y
+
+
+def bounded_place_coordinate(sheet, x_mm, y_mm, *, yaw_deg=None):
+    """Validate one continuous local coordinate inside a registered A4 domain."""
+    u_values = [_number(point["local_uv_mm"][0], "SHEET_GRID") for point in sheet["grid_points"]]
+    v_values = [_number(point["local_uv_mm"][1], "SHEET_GRID") for point in sheet["grid_points"]]
+    return bounded_a4_coordinate(
+        x_bounds={"minimum": min(u_values), "maximum": max(u_values)},
+        y_bounds={"minimum": min(v_values), "maximum": max(v_values)},
+        yaw_deg=sheet["yaw_deg"] if yaw_deg is None else yaw_deg,
+        x_mm=x_mm, y_mm=y_mm,
+    )
 
 
 def fit_place_calibration(center_base_m, x_ref_base_m, table_normal_base, registration, scale_bar_mm, y_check_base_m=None):

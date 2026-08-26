@@ -27,7 +27,10 @@ SCENE_KEYS = SCENE_V1_KEYS | {"slot_allocations"}
 OBJECT_KEYS = {"instance_id", "object_profile_id", "state", "pose", "source", "updated_by", "updated_at"}
 POSE_KEYS = {"place_id", "yaw_deg", "x_mm", "y_mm"}
 OBJECT_STATES = {"ON_SURFACE", "HELD", "UNKNOWN"}
-SOURCES = {"HUMAN", "AI", "ROBOT_ACTION", "ROBOT_RELEASE", "PERCEPTION"}
+SOURCES = {
+    "HUMAN", "AI", "ROBOT_ACTION", "ROBOT_RELEASE",
+    "ROBOT_RELEASE_PROXY", "PERCEPTION",
+}
 SCENE_BINDING_KEYS = {"scene_state_digest", "revision", "object_instance_id"}
 RELEASE_SLOT_KEYS = {"slot_id", "robot_system_id", "pose", "object_profile_id", "exclusion_geometry_digest", "role"}
 SOURCE_SLOT_KEYS = {"slot_id", "slot_digest", "allowed_run_id"}
@@ -39,6 +42,13 @@ RELEASE_EVIDENCE_KEYS = {
     "expected_scene_state_digest", "expected_scene_revision",
     "gripper_reference_m", "gripper_feedback_m", "terminal_phases",
     "post_retreat_snapshot_digest", "next_start_tolerance_rad", "human_verdict",
+}
+RELEASE_EVIDENCE_V2_KEYS = {
+    "schema_version", "run_id", "plan_digest", "release_slot_id",
+    "expected_scene_state_digest", "expected_scene_revision",
+    "gripper_reference_m", "gripper_feedback_m", "terminal_phases",
+    "post_retreat_snapshot_digest", "next_start_tolerance_rad",
+    "release_outcome", "outcome_source", "decided_by", "decided_at",
 }
 
 
@@ -248,7 +258,7 @@ class SceneStateStore:
         release_slot = validate_release_slot(release_slot, self.robot_system_id)
         if not isinstance(expected_digest, str) or not DIGEST.fullmatch(expected_digest) or type(expected_revision) is not int or expected_revision < 0:
             raise ContractError("SCENE_BINDING")
-        if not isinstance(evidence, dict) or set(evidence) != RELEASE_EVIDENCE_KEYS:
+        if not isinstance(evidence, dict):
             raise ContractError("RELEASE_EVIDENCE")
         chain = release_slot["role"] == "DESTINATION_THEN_NEXT_SOURCE"
         if chain:
@@ -258,15 +268,46 @@ class SceneStateStore:
         elif allowed_next_run_id is not None:
             raise ContractError("SCENE_SLOT_NEXT_RUN")
         expected_terminals = ["RECYCLE_APPROACH_PTP", "LOWER_LIN", "GRIPPER_OPEN", "RETREAT_LIN", "SAFE_POSE_PTP"]
+        schema = evidence.get("schema_version")
+        if schema == "data_factory.recycle_release_evidence.v1":
+            if set(evidence) != RELEASE_EVIDENCE_KEYS:
+                raise ContractError("RELEASE_EVIDENCE")
+            outcome = evidence.get("human_verdict")
+            outcome_source = "HUMAN_TTY"
+        elif schema == "data_factory.recycle_release_evidence.v2":
+            if set(evidence) != RELEASE_EVIDENCE_V2_KEYS:
+                raise ContractError("RELEASE_EVIDENCE")
+            outcome = evidence.get("release_outcome")
+            outcome_source = evidence.get("outcome_source")
+            if (
+                outcome_source not in {
+                    "HUMAN_TTY", "LOCAL_UI_BUTTON",
+                    "CAMPAIGN_CONTROL_PROXY", "EXECUTOR_FAILURE",
+                }
+                or outcome not in {
+                    "LANDED", "EXPECTED_LANDED", "OFF_SLOT", "UNCERTAIN",
+                }
+                or outcome_source == "CAMPAIGN_CONTROL_PROXY"
+                and outcome != "EXPECTED_LANDED"
+                or outcome_source == "EXECUTOR_FAILURE" and outcome != "UNCERTAIN"
+                or outcome_source in {"HUMAN_TTY", "LOCAL_UI_BUTTON"}
+                and outcome == "EXPECTED_LANDED"
+            ):
+                raise ContractError("RELEASE_EVIDENCE")
+            _id(evidence.get("decided_by"), "RELEASE_EVIDENCE")
+            _timestamp(evidence.get("decided_at"))
+        else:
+            raise ContractError("RELEASE_EVIDENCE")
+        if outcome not in {"LANDED", "EXPECTED_LANDED", "OFF_SLOT", "UNCERTAIN"}:
+            raise ContractError("RELEASE_EVIDENCE")
+        landed = outcome in {"LANDED", "EXPECTED_LANDED"}
         if (
-            evidence["schema_version"] != "data_factory.recycle_release_evidence.v1"
-            or evidence["release_slot_id"] != release_slot["slot_id"]
+            evidence["release_slot_id"] != release_slot["slot_id"]
             or evidence["expected_scene_state_digest"] != expected_digest
             or evidence["expected_scene_revision"] != expected_revision
-            or evidence["human_verdict"] not in {"LANDED", "OFF_SLOT", "UNCERTAIN"}
             or not isinstance(evidence["terminal_phases"], list)
             or evidence["terminal_phases"] != expected_terminals[:len(evidence["terminal_phases"])]
-            or evidence["human_verdict"] == "LANDED" and evidence["terminal_phases"] != expected_terminals
+            or landed and evidence["terminal_phases"] != expected_terminals
         ):
             raise ContractError("RELEASE_EVIDENCE")
         _id(evidence["run_id"], "RELEASE_EVIDENCE")
@@ -274,7 +315,7 @@ class SceneStateStore:
             if not isinstance(evidence[key], str) or not DIGEST.fullmatch(evidence[key]):
                 raise ContractError("RELEASE_EVIDENCE")
         for key in ("gripper_reference_m", "gripper_feedback_m"):
-            if evidence[key] is None and evidence["human_verdict"] != "LANDED":
+            if evidence[key] is None and not landed:
                 continue
             if _number(evidence[key], "RELEASE_EVIDENCE") < 0:
                 raise ContractError("RELEASE_EVIDENCE")
@@ -297,7 +338,6 @@ class SceneStateStore:
                 raise ContractError("SCENE_SLOT_UNAVAILABLE")
 
             now = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
-            landed = evidence["human_verdict"] == "LANDED"
             evidence_digest = canonical_digest(evidence)
             objects = dict(current["objects"])
             objects[instance_id] = {
@@ -305,7 +345,11 @@ class SceneStateStore:
                 "object_profile_id": release_slot["object_profile_id"],
                 "state": "ON_SURFACE" if landed else "UNKNOWN",
                 "pose": release_slot["pose"] if landed else None,
-                "source": "ROBOT_RELEASE" if landed else "ROBOT_ACTION",
+                "source": (
+                    "ROBOT_RELEASE_PROXY"
+                    if outcome_source == "CAMPAIGN_CONTROL_PROXY" and landed
+                    else "ROBOT_RELEASE" if landed else "ROBOT_ACTION"
+                ),
                 "updated_by": updated_by,
                 "updated_at": now,
             }

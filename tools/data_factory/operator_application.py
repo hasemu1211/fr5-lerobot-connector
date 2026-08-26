@@ -1,0 +1,834 @@
+"""Application-lifetime coordinator for reusable collection campaigns.
+
+The application owns selection and campaign replacement.  It deliberately does
+not own robot, recorder, dataset, or motion lifecycles; each campaign keeps the
+existing single-owner chain.
+"""
+from __future__ import annotations
+
+import copy
+from typing import Any, Callable, Mapping
+
+from tools.data_factory.operator_bridge import INTENT_SCHEMA, OperatorIntentCore
+from tools.data_factory.operator_catalog import (
+    project_assisted_poses,
+    validate_operator_pose,
+    validate_operator_selection,
+)
+from tools.data_factory.operator_product_view import (
+    AXIS_BINDINGS,
+    DISPOSITION_TO_MODE,
+    MODE_TO_DISPOSITION,
+    browser_selection,
+    camera_choice,
+    project_catalog,
+    project_cells,
+    project_environment,
+)
+from tools.fr5_data_factory import ContractError, SAFE_ID, canonical_digest
+
+
+class CollectionOperatorApplication:
+    """Keep one desktop session alive across fresh, serial campaigns."""
+
+    def __init__(
+        self, *, session_id: str, operator_label: str,
+        catalog: Mapping[str, Any], initial_selection: Mapping[str, Any],
+        environment_call: Callable[[], Mapping[str, Any]],
+        prepare_environment_call: Callable[[], Mapping[str, Any]],
+        campaign_factory: Callable[[str, dict[str, Any], dict[str, Any]], Any],
+        workspace_manager_factory: Callable[[], Any] | None = None,
+        workspace_snapshot_call: Callable[[], Mapping[str, Any]] | None = None,
+        workspace_preview_call: Callable[[Any, Mapping[str, Any]], Mapping[str, Any]] | None = None,
+        catalog_reload_call: Callable[[], Mapping[str, Any]] | None = None,
+        effect_scope: str = "FAKE",
+    ):
+        if (
+            not isinstance(operator_label, str)
+            or not SAFE_ID.fullmatch(operator_label)
+            or not callable(environment_call)
+            or not callable(prepare_environment_call)
+            or not callable(campaign_factory)
+            or effect_scope not in {"FAKE", "PHYSICAL"}
+        ):
+            raise ContractError("OPERATOR_APPLICATION_INPUT")
+        workspace_calls = (
+            workspace_manager_factory, workspace_snapshot_call,
+            workspace_preview_call, catalog_reload_call,
+        )
+        if any(call is not None for call in workspace_calls) and not all(
+            callable(call) for call in workspace_calls
+        ):
+            raise ContractError("OPERATOR_APPLICATION_WORKSPACE")
+        self.session_id = session_id
+        self.operator_label = operator_label
+        self.effect_scope = effect_scope
+        self.catalog = copy.deepcopy(dict(catalog))
+        self.selection = validate_operator_selection(self.catalog, initial_selection)
+        self.environment_call = environment_call
+        self.prepare_environment_call = prepare_environment_call
+        self.campaign_factory = campaign_factory
+        self.workspace_manager_factory = workspace_manager_factory
+        self.workspace_snapshot_call = workspace_snapshot_call
+        self.workspace_preview_call = workspace_preview_call
+        self.catalog_reload_call = catalog_reload_call
+        self._workspace_manager = self._new_workspace_manager()
+        self._workspace_history: list[dict[str, Any]] = []
+        self._generation = 1
+        self._inner_intent_sequence = 0
+        self._campaign = None
+        self._closed = False
+        self._environment_prepare_baseline = None
+        self._environment_view = self._read_environment()
+        self.draft = self._new_draft(None)
+        self.core = OperatorIntentCore(
+            session_id=session_id,
+            projection_call=self.projection,
+            handlers={
+                "prepare_environment": self.prepare_environment,
+                "update_draft": self.update_draft,
+                "compile_draft": self.compile_draft,
+                "edit_campaign_draft": self.edit_campaign_draft,
+                "authorize_campaign": self.authorize_campaign,
+                "cancel_session": self.cancel_session,
+                "review_candidate": self.review_candidate,
+                "new_campaign_same_settings": self.new_campaign_same_settings,
+                "capture_workspace_point": self.capture_workspace_point,
+                "preview_workspace": self.preview_workspace,
+                "save_workspace_revision": self.save_workspace_revision,
+                "new_workspace_registration": self.new_workspace_registration,
+            },
+        )
+
+    @property
+    def bridge_core(self) -> OperatorIntentCore:
+        return self.core
+
+    def _id(self, kind: str) -> str:
+        return f"{self.session_id}-{kind}-{self._generation:04d}"
+
+    def _new_draft(self, previous: Mapping[str, Any] | None) -> dict[str, Any]:
+        values = copy.deepcopy(dict(previous or {}))
+        requested_count = values.get("requested_count", 3)
+        direct_poses = values.get("direct_poses")
+        if direct_poses is None:
+            direct_poses = []
+        if not isinstance(direct_poses, list):
+            raise ContractError("OPERATOR_APPLICATION_DRAFT")
+        direct_poses = [
+            validate_operator_pose(self.catalog, self.selection, value)
+            for value in direct_poses
+        ]
+        if len({tuple(value.items()) for value in direct_poses}) != len(direct_poses):
+            raise ContractError("OPERATOR_APPLICATION_DRAFT")
+        return {
+            "draft_id": f"{self._id('campaign')}-draft",
+            "revision": 0,
+            "authoring_mode": values.get("authoring_mode", "ASSISTED"),
+            "requested_count": requested_count,
+            "repeat": values.get("repeat", 1),
+            "split": values.get("split", "TRAIN"),
+            "normalized_seed": values.get("normalized_seed", 0),
+            "pinned": copy.deepcopy(values.get("pinned", [])),
+            "excluded": copy.deepcopy(values.get("excluded", [])),
+            "direct_poses": copy.deepcopy(direct_poses),
+            "included_cells": copy.deepcopy(
+                values.get("included_cells", [self.selection["cell_id"]])
+            ),
+            "cells": [{
+                "cell_id": self.selection["cell_id"],
+                "selected": True,
+                "sequence": 1,
+            }],
+        }
+
+    @staticmethod
+    def _validated_environment(value: object) -> dict[str, Any]:
+        if not isinstance(value, Mapping) or value.get("state") not in {
+            "READY", "SETUP_REQUIRED", "BLOCKED",
+        }:
+            raise ContractError("OPERATOR_APPLICATION_ENVIRONMENT")
+        return copy.deepcopy(dict(value))
+
+    def _read_environment(self) -> dict[str, Any]:
+        return self._validated_environment(self.environment_call())
+
+    @staticmethod
+    def _environment_facts(value: Mapping[str, Any]) -> dict[str, Any]:
+        return {
+            field: copy.deepcopy(item)
+            for field, item in value.items() if field != "observed_at"
+        }
+
+    def _direct_anchor(self) -> dict[str, Any] | None:
+        option = next((
+            item for item in self.catalog["axes"]["cell"]
+            if item["id"] == self.selection["cell_id"]
+        ), None)
+        metadata = option.get("metadata") if isinstance(option, Mapping) else None
+        if not isinstance(metadata, Mapping) or any(
+            field not in metadata for field in (
+                "place_id", "yaw_deg", "x_mm", "y_mm",
+            )
+        ):
+            return None
+        return validate_operator_pose(self.catalog, self.selection, {
+            field: metadata[field] for field in (
+                "place_id", "yaw_deg", "x_mm", "y_mm",
+            )
+        })
+
+    def _direct_draft_ready(self) -> bool:
+        if self.draft["authoring_mode"] != "DIRECT_EDIT":
+            return True
+        anchor = self._direct_anchor()
+        if anchor is None:
+            return False
+        required = 1 + sum(pose != anchor for pose in self.draft["direct_poses"])
+        return required <= self.draft["requested_count"]
+
+    def _new_workspace_manager(self):
+        if self.workspace_manager_factory is None:
+            return None
+        manager = self.workspace_manager_factory()
+        if not all(callable(getattr(manager, name, None)) for name in (
+            "projection", "capture", "save",
+        )):
+            raise ContractError("OPERATOR_APPLICATION_WORKSPACE")
+        return manager
+
+    def _workspace_projection(self) -> dict[str, Any] | None:
+        if self._workspace_manager is None:
+            return None
+        value = self._workspace_manager.projection()
+        if not isinstance(value, Mapping):
+            raise ContractError("OPERATOR_APPLICATION_WORKSPACE")
+        return {
+            **copy.deepcopy(dict(value)),
+            "history": copy.deepcopy(self._workspace_history),
+        }
+
+    def _workspace_ops(self, workflow: str) -> list[str]:
+        workspace = self._workspace_projection()
+        if workflow != "AUTHORING" or workspace is None:
+            return []
+        preview, promotion = workspace.get("preview"), workspace.get("promotion")
+        captures = workspace.get("captures")
+        if promotion is not None:
+            return ["new_workspace_registration"]
+        if preview is not None:
+            return (
+                ["save_workspace_revision"]
+                if preview.get("status") == "CANDIDATE_WITHIN_TOLERANCE" else []
+            )
+        result = ["capture_workspace_point"]
+        if isinstance(captures, Mapping) and captures and all(
+            value is True for value in captures.values()
+        ):
+            result.append("preview_workspace")
+        return result
+
+    def _environment(self) -> dict[str, Any]:
+        current = self._read_environment()
+        if (
+            self._environment_prepare_baseline is not None
+            and self._environment_facts(current)
+            == self._environment_facts(self._environment_prepare_baseline)
+        ):
+            return copy.deepcopy(self._environment_view)
+        self._environment_prepare_baseline = None
+        if self._environment_facts(current) != self._environment_facts(
+            self._environment_view
+        ):
+            self._environment_view = current
+        return copy.deepcopy(self._environment_view)
+
+    @staticmethod
+    def _disposition(data_mode: str) -> str:
+        return "TEST_ONLY" if data_mode == "TEST_COLLECTION" else "PRODUCTION"
+
+    def _campaign_snapshot(self) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
+        if self._campaign is None:
+            return None, None
+        core = getattr(self._campaign, "bridge_core", None)
+        if not isinstance(core, OperatorIntentCore):
+            raise ContractError("OPERATOR_APPLICATION_CAMPAIGN")
+        snapshot = core.snapshot()
+        return snapshot, snapshot["projection"]
+
+    def _forward(self, op: str, payload: dict[str, Any]) -> dict[str, Any]:
+        snapshot, _projection = self._campaign_snapshot()
+        if snapshot is None or op not in self._campaign.bridge_core.handlers:
+            raise ContractError("OPERATOR_APPLICATION_STATE")
+        self._inner_intent_sequence += 1
+        result = self._campaign.bridge_core.consume({
+            "schema_version": INTENT_SCHEMA,
+            "intent_id": f"app-forward-{self._generation:04d}-{self._inner_intent_sequence:06d}",
+            "session_id": snapshot["session_id"],
+            "view_revision": snapshot["revision"],
+            "view_digest": snapshot["view_digest"],
+            "op": op,
+            "payload": copy.deepcopy(payload),
+        })
+        return result["result"]
+
+    def _workflow(self, environment: Mapping[str, Any], inner: Mapping[str, Any] | None) -> str:
+        if self._campaign is None:
+            return "AUTHORING" if environment["state"] == "READY" else "ENVIRONMENT"
+        runtime = inner.get("runtime") if isinstance(inner, Mapping) else None
+        state = runtime.get("workflow_state") if isinstance(runtime, Mapping) else None
+        if state not in {
+            "AUTHORING", "REVIEW_CAMPAIGN", "RUNNING", "CANCELLING",
+            "PAUSED_AWAITING_OPERATOR", "BLOCKED", "TERMINAL",
+        }:
+            raise ContractError("OPERATOR_APPLICATION_CAMPAIGN_STATE")
+        return state
+
+    def projection(self) -> dict[str, Any]:
+        environment = self._environment()
+        _snapshot, inner = self._campaign_snapshot()
+        workflow = self._workflow(environment, inner)
+        envelope = inner.get("campaign_envelope") if isinstance(inner, Mapping) else None
+        session = inner.get("campaign_session") if isinstance(inner, Mapping) else None
+        campaign_state = session.get("campaign") if isinstance(session, Mapping) else None
+        history = inner.get("episode_history", []) if isinstance(inner, Mapping) else []
+        total = (
+            envelope.get("episode_count")
+            if isinstance(envelope, Mapping) and type(envelope.get("episode_count")) is int
+            else self.draft["requested_count"]
+        )
+        completed = (
+            campaign_state.get("completed_intents")
+            if isinstance(campaign_state, Mapping)
+            and type(campaign_state.get("completed_intents")) is int
+            else len(history) if isinstance(history, list) else 0
+        )
+        runtime = inner.get("runtime", {}) if isinstance(inner, Mapping) else {}
+        selected_combination = next((
+            item for item in self.catalog["combinations"]
+            if item["combination_digest"] == self.selection["combination_digest"]
+        ), None)
+        if not isinstance(selected_combination, Mapping):
+            raise ContractError("OPERATOR_APPLICATION_SELECTION")
+        selection_execution = selected_combination["execution"][
+            self.selection["data_mode"]
+        ]
+        campaign = None if self._campaign is None else {
+            "campaign_id": self._id("campaign"),
+            "state": workflow,
+            "completed": completed,
+            "total": total,
+            "remaining": max(0, total - completed),
+            "active_child_id": runtime.get("active_child_id"),
+            "measurement_outcome": runtime.get("measurement_outcome", "NOT_MEASURED"),
+            "reason_codes": copy.deepcopy(runtime.get("reason_codes", [])),
+        }
+        campaign_review = None if not isinstance(envelope, Mapping) else {
+            "episode_count": total,
+            "manifest_digest": envelope.get("manifest_digest"),
+            "envelope_digest": envelope.get("envelope_digest"),
+            "data_disposition": self._disposition(self.selection["data_mode"]),
+        }
+        if workflow == "ENVIRONMENT":
+            operations = (
+                ["prepare_environment"]
+                if environment["state"] == "SETUP_REQUIRED" else []
+            )
+        elif workflow == "AUTHORING":
+            operations = ["update_draft"]
+            if (
+                selection_execution["executable"] is True
+                and self._direct_draft_ready()
+            ):
+                operations.append("compile_draft")
+            operations.extend(self._workspace_ops(workflow))
+        elif workflow == "REVIEW_CAMPAIGN":
+            operations = ["edit_campaign_draft", "authorize_campaign"]
+        elif workflow == "RUNNING":
+            operations = ["cancel_session"]
+        elif workflow == "TERMINAL":
+            operations = []
+            if isinstance(inner, Mapping) and "review_candidate" in inner.get("available_ops", []):
+                operations.append("review_candidate")
+            operations.append("new_campaign_same_settings")
+        else:
+            operations = []
+        cells = project_cells(
+            self.catalog, self.selection, split=self.draft["split"],
+            repeat=self.draft["repeat"],
+        )
+        included = set(self.draft["included_cells"])
+        for cell in cells:
+            if cell["eligibility_status"] == "ELIGIBLE":
+                cell["selection_state"] = (
+                    "SELECTED" if cell["cell_id"] in included else "AVAILABLE"
+                )
+        browser_draft = {
+            "draft_id": self.draft["draft_id"],
+            "revision": self.draft["revision"],
+            "authoring_mode": self.draft["authoring_mode"],
+            "requested_count": self.draft["requested_count"],
+            "repeat": self.draft["repeat"],
+            "direct_poses": copy.deepcopy(self.draft["direct_poses"]),
+            "execution_ready": selection_execution["executable"],
+            "execution_reason": (
+                None if selection_execution["executable"]
+                else selection_execution["reason"]
+            ),
+            "draft_ready": self._direct_draft_ready(),
+            "draft_reason": (
+                None if self._direct_draft_ready()
+                else "DIRECT_POSE_COUNT_EXCEEDS_EPISODES"
+            ),
+            "selection": browser_selection(
+                self.selection, split=self.draft["split"],
+            ),
+            "cells": cells,
+        }
+        ui_state = (
+            (
+                "PREPARING"
+                if environment["state"] == "SETUP_REQUIRED" else "BLOCKED"
+            ) if workflow == "ENVIRONMENT"
+            else runtime.get("workflow_state", workflow)
+        )
+        if workflow == "TERMINAL":
+            ui_state = "TERMINAL"
+        ui_runtime = copy.deepcopy(dict(runtime))
+        ui_runtime.update({
+            "workflow_state": ui_state,
+            "measurement_outcome": runtime.get("measurement_outcome", "NOT_MEASURED"),
+            "reason_codes": copy.deepcopy(runtime.get("reason_codes", [])),
+            "active_child_id": runtime.get("active_child_id"),
+            "progress": 0 if total == 0 else min(100, 100 * completed / total),
+            "current_episode": (
+                completed + 1 if ui_state == "RUNNING" and completed < total else None
+            ),
+            "next_episode": (
+                completed + 2 if ui_state == "RUNNING" and completed + 1 < total else None
+            ),
+        })
+        campaign_coverage = (
+            inner.get("campaign_coverage") if isinstance(inner, Mapping) else None
+        )
+        coverage_sequence: list[dict[str, Any]] = []
+        if isinstance(campaign_coverage, list) and campaign_coverage:
+            grouped: dict[str, dict[str, Any]] = {}
+            for planned in campaign_coverage:
+                if not isinstance(planned, Mapping):
+                    raise ContractError("OPERATOR_APPLICATION_COVERAGE")
+                condition = planned.get("coverage_condition")
+                digest = planned.get("coverage_condition_digest")
+                if (
+                    not isinstance(condition, Mapping)
+                    or canonical_digest(condition) != digest
+                    or any(field not in condition for field in (
+                        "place_id", "x_mm", "y_mm", "yaw_deg",
+                    ))
+                    or planned.get("order_index") != len(coverage_sequence)
+                ):
+                    raise ContractError("OPERATOR_APPLICATION_COVERAGE")
+                coverage_sequence.append({
+                    "order_index": planned["order_index"] + 1,
+                    "place_id": condition["place_id"],
+                    "x_mm": condition["x_mm"],
+                    "y_mm": condition["y_mm"],
+                    "yaw_deg": condition["yaw_deg"],
+                    "coverage_condition_digest": digest,
+                })
+                cell = grouped.setdefault(digest, {
+                    "cell_id": f"campaign-{digest.removeprefix('sha256:')[:20]}",
+                    "x_mm": condition["x_mm"],
+                    "y_mm": condition["y_mm"],
+                    "yaw_deg": condition["yaw_deg"],
+                    "split": self.draft["split"],
+                    "repeat": 0,
+                    "coverage_count": 0,
+                    "selection_state": "SELECTED",
+                    "eligibility_status": "ELIGIBLE",
+                    "reason_codes": ["EXACT_CAMPAIGN_SLOT"],
+                    "target_count": 0,
+                    "collected_count": 0,
+                    "coverage_condition_digest": digest,
+                })
+                cell["repeat"] += 1
+                cell["target_count"] += 1
+            for item in history if isinstance(history, list) else []:
+                binding = item.get("intent_binding") if isinstance(item, Mapping) else None
+                digest = (
+                    binding.get("coverage_condition_digest")
+                    if isinstance(binding, Mapping) else None
+                )
+                if item.get("outcome") == "PASS" and digest in grouped:
+                    grouped[digest]["coverage_count"] += 1
+                    grouped[digest]["collected_count"] += 1
+            coverage_cells = list(grouped.values())
+        else:
+            coverage_cells = copy.deepcopy(cells)
+            for cell in coverage_cells:
+                cell["collected_count"] = 0
+                cell["target_count"] = (
+                    total
+                    if cell["cell_id"] == self.selection["cell_id"]
+                    else cell["repeat"]
+                )
+        browser_catalog = project_catalog(
+            self.catalog, self.selection, split=self.draft["split"],
+        )
+        for option in browser_catalog["axes"]["camera"]:
+            if option["available"]:
+                continue
+            combination = next((
+                value for value in self.catalog["combinations"]
+                if camera_choice(value) == option["id"]
+            ), None)
+            if isinstance(combination, Mapping):
+                option["reason"] = combination["execution"][
+                    self.selection["data_mode"]
+                ]["reason"]
+        return {
+            "connection_state": "READY",
+            "effect_scope": self.effect_scope,
+            "lifecycle_action": "LIVE_COLLECT",
+            "data_disposition": self._disposition(self.selection["data_mode"]),
+            "runtime": ui_runtime,
+            "setup": project_environment(environment),
+            "catalog": browser_catalog,
+            "draft": browser_draft,
+            "campaign_envelope": copy.deepcopy(envelope),
+            "campaign_authorization": (
+                copy.deepcopy(inner.get("campaign_authorization"))
+                if isinstance(inner, Mapping) else None
+            ),
+            "campaign_session": copy.deepcopy(session),
+            "campaign_operator": (
+                copy.deepcopy(inner.get("campaign_operator"))
+                if isinstance(inner, Mapping) else None
+            ),
+            "candidate_review": (
+                copy.deepcopy(inner.get("candidate_review"))
+                if isinstance(inner, Mapping) else None
+            ),
+            "episode_history": copy.deepcopy(history if isinstance(history, list) else []),
+            "effect_counts": (
+                copy.deepcopy(inner.get("effect_counts", {}))
+                if isinstance(inner, Mapping) else {}
+            ),
+            "data_mode": self.selection["data_mode"],
+            "workflow_state": workflow,
+            "environment": environment,
+            "selection": copy.deepcopy(self.selection),
+            "campaign_review": campaign_review,
+            "campaign": campaign,
+            "episodes": copy.deepcopy(history if isinstance(history, list) else []),
+            "coverage": {
+                "cells": coverage_cells, "sequence": coverage_sequence,
+                "completed": completed, "planned": total,
+            },
+            "available_ops": operations,
+            "technical_details": {
+                "application_generation": self._generation,
+                "catalog_digest": self.catalog.get("catalog_digest"),
+                "combination_digest": self.selection["combination_digest"],
+                "campaign_projection": copy.deepcopy(inner),
+            },
+            "workspace_registration": self._workspace_projection(),
+        }
+
+    def _require(self, expected: str, payload: Mapping[str, Any], fields: set[str]) -> None:
+        if self.projection()["workflow_state"] != expected or set(payload) != fields:
+            raise ContractError("OPERATOR_APPLICATION_STATE")
+
+    def prepare_environment(self, payload: dict[str, Any], _view: dict[str, Any]) -> dict[str, Any]:
+        self._require("ENVIRONMENT", payload, set())
+        baseline = copy.deepcopy(self._environment_view)
+        self._environment_view = self._validated_environment(
+            self.prepare_environment_call()
+        )
+        self._environment_prepare_baseline = baseline
+        return {
+            "outcome": self._environment_view["state"],
+            "environment": copy.deepcopy(self._environment_view),
+        }
+
+    def _update_browser_selection(self, axis: str, value: object) -> None:
+        browser_catalog = project_catalog(
+            self.catalog, self.selection, split=self.draft["split"],
+        )
+        options = browser_catalog["axes"].get(axis)
+        chosen = next(
+            (item for item in options or [] if item["id"] == value), None,
+        )
+        if chosen is None or chosen["available"] is not True:
+            raise ContractError("OPERATOR_APPLICATION_SELECTION")
+        if axis == "split":
+            self.draft["split"] = value
+            return
+        if axis == "data_mode":
+            self.selection["data_mode"] = DISPOSITION_TO_MODE[value]
+            return
+        if axis == "camera":
+            profile_id, device_id = value.split("@", 1)
+            field, expected = None, None
+        else:
+            _domain_axis, field = AXIS_BINDINGS[axis]
+            expected = value
+            profile_id = device_id = None
+        candidates = []
+        for combination in self.catalog["combinations"]:
+            if axis == "camera":
+                changed = (
+                    combination.get("camera_profile_id") == profile_id
+                    and combination.get("camera_device_id") == device_id
+                )
+            else:
+                changed = combination.get(field) == expected
+            if not changed:
+                continue
+            execution = combination.get("execution", {}).get(
+                self.selection["data_mode"], {},
+            )
+            if axis == "camera":
+                selectable = (
+                    combination.get("authoring", {}).get("selectable") is True
+                    and execution.get("reason") not in {
+                        "CAMERA_REBIND_REQUIRED", "DEVICE_NOT_CONNECTED",
+                    }
+                )
+            else:
+                selectable = (
+                    combination.get("authoring", {}).get("selectable") is True
+                )
+            if selectable:
+                preserved = sum(
+                    ui_axis == axis
+                    or combination.get(binding_field) == self.selection[binding_field]
+                    for ui_axis, (_domain, binding_field) in AXIS_BINDINGS.items()
+                )
+                preserved += int(
+                    axis == "camera"
+                    or combination.get("camera_profile_id") == self.selection["camera_profile_id"]
+                    and combination.get("camera_device_id") == self.selection["camera_device_id"]
+                )
+                preserved += int(
+                    combination.get("cell_id") == self.selection["cell_id"]
+                )
+                candidates.append((
+                    execution.get("executable") is True,
+                    preserved, combination["combination_digest"], combination,
+                ))
+        if not candidates:
+            raise ContractError("OPERATOR_APPLICATION_SELECTION")
+        combination = sorted(
+            candidates, key=lambda item: (-int(item[0]), -item[1], item[2]),
+        )[0][3]
+        for _ui_axis, (_domain, binding_field) in AXIS_BINDINGS.items():
+            self.selection[binding_field] = combination[binding_field]
+        self.selection.update(
+            combination_digest=combination["combination_digest"],
+            cell_id=combination["cell_id"],
+            camera_profile_id=combination["camera_profile_id"],
+            camera_device_id=combination["camera_device_id"],
+        )
+        self.draft["included_cells"] = [combination["cell_id"]]
+
+    def update_draft(self, payload: dict[str, Any], _view: dict[str, Any]) -> dict[str, Any]:
+        if (
+            self.projection()["workflow_state"] != "AUTHORING"
+            or payload.get("draft_id") != self.draft["draft_id"]
+            or len(payload) != 2
+        ):
+            raise ContractError("OPERATOR_APPLICATION_STATE")
+        field = next(name for name in payload if name != "draft_id")
+        value = payload[field]
+        if field == "selection" and isinstance(value, Mapping) and len(value) == 1:
+            axis, selected = next(iter(value.items()))
+            self._update_browser_selection(axis, selected)
+        elif field == "authoring_mode" and value in {"ASSISTED", "DIRECT_EDIT"}:
+            if value == "DIRECT_EDIT" and self.draft[field] == "ASSISTED":
+                anchor = self._direct_anchor()
+                if anchor is None:
+                    raise ContractError("OPERATOR_APPLICATION_DRAFT")
+                direct_poses = []
+                for pose in project_assisted_poses(
+                    self.catalog, self.selection, anchor,
+                    self.draft["requested_count"], repeat=self.draft["repeat"],
+                ):
+                    if pose != anchor and pose not in direct_poses:
+                        direct_poses.append(pose)
+                self.draft["direct_poses"] = direct_poses
+            elif value == "ASSISTED":
+                self.draft["direct_poses"] = []
+            self.draft[field] = value
+            self.selection["policy_id"] = (
+                "DETERMINISTIC_SPREAD" if value == "ASSISTED" else "DIRECT_SELECTION"
+            )
+        elif field in {"requested_count", "repeat"} and type(value) is int and 1 <= value <= 100:
+            self.draft[field] = value
+        elif field == "split" and value in {"TRAIN", "ID", "OOD"}:
+            self._update_browser_selection("split", value)
+        elif field == "add_pose" and isinstance(value, Mapping):
+            checked = validate_operator_pose(self.catalog, self.selection, value)
+            if (
+                checked == self._direct_anchor()
+                or checked in self.draft["direct_poses"]
+                or 1 + len(self.draft["direct_poses"]) >= self.draft["requested_count"]
+            ):
+                raise ContractError("OPERATOR_APPLICATION_DRAFT")
+            self.draft["direct_poses"].append(checked)
+            self.draft["authoring_mode"] = "DIRECT_EDIT"
+            self.selection["policy_id"] = "DIRECT_SELECTION"
+        elif field == "remove_pose" and isinstance(value, Mapping):
+            checked = validate_operator_pose(self.catalog, self.selection, value)
+            if checked not in self.draft["direct_poses"]:
+                raise ContractError("OPERATOR_APPLICATION_DRAFT")
+            self.draft["direct_poses"].remove(checked)
+        else:
+            raise ContractError("OPERATOR_APPLICATION_DRAFT")
+        self.draft["revision"] += 1
+        return {"outcome": "DRAFT_UPDATED", "draft": copy.deepcopy(self.draft)}
+
+    def compile_draft(self, payload: dict[str, Any], _view: dict[str, Any]) -> dict[str, Any]:
+        self._require("AUTHORING", payload, {"draft_id", "data_disposition"})
+        if (
+            payload["draft_id"] != self.draft["draft_id"]
+            or payload["data_disposition"] != self._disposition(self.selection["data_mode"])
+            or not self.draft["included_cells"]
+            or not self._direct_draft_ready()
+        ):
+            raise ContractError("OPERATOR_APPLICATION_DRAFT")
+        validate_operator_selection(self.catalog, self.selection, require_executable=True)
+        campaign_id = self._id("campaign")
+        campaign = self.campaign_factory(
+            campaign_id, copy.deepcopy(self.selection), copy.deepcopy(self.draft),
+        )
+        if not isinstance(getattr(campaign, "bridge_core", None), OperatorIntentCore):
+            close = getattr(campaign, "close", None)
+            if callable(close):
+                close()
+            raise ContractError("OPERATOR_APPLICATION_CAMPAIGN")
+        self._campaign = campaign
+        return self._forward("compile_draft", copy.deepcopy(payload))
+
+    def capture_workspace_point(
+        self, payload: dict[str, Any], _view: dict[str, Any],
+    ) -> dict[str, Any]:
+        if (
+            self.projection()["workflow_state"] != "AUTHORING"
+            or "capture_workspace_point" not in self.projection()["available_ops"]
+            or set(payload) != {"label"}
+        ):
+            raise ContractError("OPERATOR_APPLICATION_WORKSPACE_STATE")
+        snapshot = self.workspace_snapshot_call()
+        if not isinstance(snapshot, Mapping):
+            raise ContractError("OPERATOR_APPLICATION_WORKSPACE_CAPTURE")
+        projection = self._workspace_manager.capture(payload["label"], snapshot)
+        return {"outcome": "WORKSPACE_POINT_CAPTURED", "workspace": projection}
+
+    def preview_workspace(
+        self, payload: dict[str, Any], _view: dict[str, Any],
+    ) -> dict[str, Any]:
+        if (
+            self.projection()["workflow_state"] != "AUTHORING"
+            or "preview_workspace" not in self.projection()["available_ops"]
+            or set(payload) != {"source_scale_bar_mm", "final_scale_bar_mm"}
+        ):
+            raise ContractError("OPERATOR_APPLICATION_WORKSPACE_STATE")
+        value = self.workspace_preview_call(
+            self._workspace_manager, copy.deepcopy(payload),
+        )
+        if not isinstance(value, Mapping):
+            raise ContractError("OPERATOR_APPLICATION_WORKSPACE_PREVIEW")
+        return {"outcome": "WORKSPACE_PREVIEW_READY", "preview": copy.deepcopy(dict(value))}
+
+    def save_workspace_revision(
+        self, payload: dict[str, Any], _view: dict[str, Any],
+    ) -> dict[str, Any]:
+        if (
+            self.projection()["workflow_state"] != "AUTHORING"
+            or "save_workspace_revision" not in self.projection()["available_ops"]
+            or set(payload) != {"preview_digest"}
+        ):
+            raise ContractError("OPERATOR_APPLICATION_WORKSPACE_STATE")
+        promotion = self._workspace_manager.save(payload["preview_digest"])
+        refreshed = self.catalog_reload_call()
+        if not isinstance(refreshed, Mapping):
+            raise ContractError("OPERATOR_APPLICATION_WORKSPACE_CATALOG")
+        previous = self.catalog
+        self.catalog = copy.deepcopy(dict(refreshed))
+        try:
+            self.selection = validate_operator_selection(self.catalog, self.selection)
+        except ContractError:
+            self.catalog = previous
+            raise
+        self._workspace_history.append(copy.deepcopy(dict(promotion)))
+        return {"outcome": "WORKSPACE_REVISION_SAVED", "promotion": copy.deepcopy(dict(promotion))}
+
+    def new_workspace_registration(
+        self, payload: dict[str, Any], _view: dict[str, Any],
+    ) -> dict[str, Any]:
+        if (
+            self.projection()["workflow_state"] != "AUTHORING"
+            or "new_workspace_registration" not in self.projection()["available_ops"]
+            or payload
+        ):
+            raise ContractError("OPERATOR_APPLICATION_WORKSPACE_STATE")
+        self._workspace_manager = self._new_workspace_manager()
+        return {
+            "outcome": "WORKSPACE_REGISTRATION_READY",
+            "workspace": self._workspace_manager.projection(),
+        }
+
+    def authorize_campaign(self, payload: dict[str, Any], _view: dict[str, Any]) -> dict[str, Any]:
+        self._require("REVIEW_CAMPAIGN", payload, {
+            "draft_id", "manifest_digest", "envelope_digest", "data_disposition",
+        })
+        return self._forward("authorize_campaign", payload)
+
+    def edit_campaign_draft(self, payload: dict[str, Any], _view: dict[str, Any]) -> dict[str, Any]:
+        self._require("REVIEW_CAMPAIGN", payload, set())
+        previous = copy.deepcopy(self.draft)
+        close = getattr(self._campaign, "close", None)
+        if callable(close):
+            close()
+        self._campaign = None
+        self._generation += 1
+        self.draft = self._new_draft(previous)
+        return {"outcome": "AUTHORING", "draft_id": self.draft["draft_id"]}
+
+    def cancel_session(self, payload: dict[str, Any], _view: dict[str, Any]) -> dict[str, Any]:
+        self._require("RUNNING", payload, {"active_child_id"})
+        return self._forward("cancel_session", payload)
+
+    def review_candidate(self, payload: dict[str, Any], _view: dict[str, Any]) -> dict[str, Any]:
+        if self.projection()["workflow_state"] != "TERMINAL":
+            raise ContractError("OPERATOR_APPLICATION_STATE")
+        return self._forward("review_candidate", payload)
+
+    def _replace_campaign(self) -> dict[str, Any]:
+        if self.projection()["workflow_state"] != "TERMINAL":
+            raise ContractError("OPERATOR_APPLICATION_STATE")
+        previous = copy.deepcopy(self.draft)
+        close = getattr(self._campaign, "close", None)
+        if callable(close):
+            close()
+        self._campaign = None
+        self._generation += 1
+        self.draft = self._new_draft(previous)
+        return {"outcome": "AUTHORING", "draft_id": self.draft["draft_id"]}
+
+    def new_campaign_same_settings(self, payload: dict[str, Any], _view: dict[str, Any]) -> dict[str, Any]:
+        if payload:
+            raise ContractError("OPERATOR_APPLICATION_STATE")
+        return self._replace_campaign()
+
+    def close(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        close = getattr(self._campaign, "close", None)
+        if callable(close):
+            close()
+
+
+__all__ = ["CollectionOperatorApplication"]

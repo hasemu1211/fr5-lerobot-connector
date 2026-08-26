@@ -1,55 +1,64 @@
-# FR5 통합 데이터 수집 데스크
+# FR5 Robot Learning Data Factory 운영 UI
 
-UI는 한 화면에서 작업영역/place, X/Y/yaw 셀, object/grasp, task, motion, start, split/repeat, coverage/selector와 실행 범위를 편집한다. 한국어가 기본이며 `ASSISTED`와 `DIRECT_EDIT`는 같은 `campaign_draft.v1`을 수정한다. `pick_place`와 `TWO_STAGE_ALIGN`은 capability/reason과 함께 `NOT_AVAILABLE`로만 표시한다.
+이 문서는 로컬 운영자가 한 프로세스에서 여러 데이터 수집 캠페인을 계획하고 실행하는 방법을 설명한다. 현재 브라우저 제품은 환경 준비, 카탈로그 기반 계획 작성, 캠페인 단위 시작, 직렬 에피소드 실행, 결과·커버리지·보관 상태 확인, 다음 캠페인 작성을 한 흐름으로 제공한다.
 
-브라우저는 lifecycle owner가 아니다. 같은 origin의 `GET /api/view`를 읽고 `POST /api/intent`만 보내며, HTML의 정확한 `<!-- OPERATOR_TOKEN -->` marker는 local server가 `<meta name="operator-token" content="…">`로 치환해야 한다. 두 요청 모두 meta 값을 `X-Operator-Token`으로 전송한다.
+브라우저는 로봇이나 recorder의 lifecycle owner가 아니다. 같은 origin의 `GET /api/view`로 backend 상태를 읽고, 현재 `view_revision`과 `view_digest`에 결속된 `POST /api/intent`만 보낸다. 정확한 transport와 intent 필드는 [backend-contract-proposal.md](backend-contract-proposal.md), 모듈 책임과 authority 경계는 [architecture.md](architecture.md)가 정본이다.
 
-승인은 native button 하나가 `view_revision`, `view_digest`, exact `plan_digest`를 결속한 intent를 보낸다. digest 문구 입력은 없고 버튼은 신원 인증을 주장하지 않는다. backend가 stale/scene/start/expiry/replay를 검증하고 single-use로 소비하기 전에는 어떤 실행 권한도 생기지 않는다.
+## 현재 운영 흐름
 
-설계 경계는 [architecture.md](architecture.md), exact transport와 intent 계약은 [backend-contract-proposal.md](backend-contract-proposal.md)가 정본이다.
+1. 앱이 로봇, controller, gripper와 camera의 현재 연결 상태를 읽는다. PHYSICAL 실행은 기본적으로 필요한 foreground owner를 준비하고, 준비되지 않은 항목이나 충돌한 owner는 화면에 그대로 표시한다.
+2. 등록된 조합에서 작업영역, 좌표계, task, object, grasp, 시작 자세, motion, variant, camera와 데이터 모드를 고른다. 서로 결속되지 않은 조합은 선택할 수 없고 이유가 표시된다.
+3. 자동 선택 또는 직접 입력으로 registered X/Y/yaw domain의 자세를 정하고, 총 에피소드 수·조건별 최대 반복·split을 편집한다. 현재 입력 범위는 1~100회다. 자동 모드는 exact N을 만들고 한 condition의 반복을 지정한 최대치 이하로 제한한다. 직접 모드는 원점 anchor와 preset/numeric pose 전체 목록을 표시 순서로 반복한다. 자동 결과를 직접 모드로 바꾸면 고유 조건 목록이 그대로 열려 즉시 추가·제외할 수 있다.
+4. `계획 확인으로 이동`이 선택과 예산을 finite manifest와 campaign envelope로 고정한다. 이때 만들어진 내부 lane은 한 manifest 안에서 exact하다. 조건을 바꾸면 기존 compile 결과를 버리고 새 draft를 만든다.
+5. `이 캠페인 시작`을 한 번 누르면 draft, manifest digest, envelope digest와 데이터 모드에 결속된 finite campaign authorization이 생성된다. SHA-256 문자열을 사용자가 입력하지 않는다.
+6. backend는 매번 fresh `OneJob`을 만들고 한 번에 한 에피소드만 실행한다. 현재 에피소드가 technical PASS로 끝난 경우에만 다음 intent를 연다. cancel, fault, stale binding, digest mismatch나 quota 종료는 다음 에피소드를 시작하지 않는다.
+7. 결과 화면은 기술 검사, 선택적 사후 검토, cell coverage와 episode ledger의 보관 상태를 구분해 표시한다. 수집 완료나 `PRESERVE`는 semantic PASS 또는 training approval이 아니다.
+8. terminal 상태의 `다음 캠페인 계획`은 설정을 새 draft로 복사한다. 그대로 사용하거나 같은 계획 화면에서 필요한 조건을 바꿔, 프로세스를 재시작하지 않고 fresh campaign/run lineage로 계속한다.
 
-## 확인
+실행 중 정상 진행을 위한 에피소드별 승인 버튼은 없다. 운영자는 문제가 보이면 `문제 있음 · 즉시 중단`을 사용한다. backend는 각 episode의 exact plan, start, scene, root와 slot binding을 campaign authorization 범위 안에서 다시 검증하며, 검증 실패를 정상 진행으로 바꾸지 않는다.
 
-통합 foreground 명령의 FAKE scope로 시작한다. 내장 synthetic fixture는 임시 디렉터리에서만 살아 있고 종료 시 정리되며, 명령이 출력한 loopback URL을 연다. 이 경로는 실제 `LoopbackBridge → CampaignOperator → CampaignSession → fresh OneJob`을 사용하지만 hardware와 production writer는 구성하지 않는다.
+## FAKE 제품 QA
+
+내장 synthetic fixture는 임시 디렉터리에서만 생성되고 종료할 때 정리된다. 이 경로는 실제 `LoopbackBridge → CollectionOperatorApplication → CampaignOperator → CampaignSession → fresh OneJob` 흐름을 사용하지만 hardware, production recorder, production dataset과 run-state writer를 구성하지 않는다.
 
 ```sh
 direnv exec . python3 -m tools.data_factory.operator_console --effect-scope FAKE
 ```
 
-종료는 터미널에서 `Ctrl-C`로 수행한다. episode thread와 HTTP handler가 모두 join된 뒤에만 process가 끝난다. UI는 `RUNNING|CANCELLING` 동안 GET snapshot만 짧게 polling하며 intent를 queue하거나 자동 재전송하지 않는다.
+명령이 출력한 loopback URL을 열고 다음을 확인한다.
 
-정적 fixture와 계약 검사는 다음 한 명령으로 실행한다.
+1. 환경 준비 후 plan 단계가 열리는지 확인한다.
+2. 작업영역부터 데이터 모드까지 각 카탈로그 축이 보이고, 사용할 수 없는 항목은 disabled reason과 함께 남는지 확인한다.
+3. 총 에피소드 수와 자동 모드의 조건별 최대 반복을 바꾸고, 자동 선택과 직접 선택이 같은 draft를 수정하는지 확인한다. 직접 모드에서는 preset click과 numeric X/Y/yaw가 같은 ordered pose list에 나타나는지도 확인한다.
+4. 계획을 compile한 뒤 다시 편집하면 새 draft ID가 생기고 이전 envelope를 재사용하지 않는지 확인한다.
+5. 캠페인을 한 번 시작해 에피소드가 한 개씩 직렬로 실행되고 목표 횟수만큼 끝나는지 확인한다.
+6. 결과에서 technical result, coverage, semantic/training 상태와 retention 상태가 합쳐지지 않는지 확인한다.
+7. `다음 캠페인 계획`을 열어 설정을 그대로 쓰거나 편집했을 때 모두 새 campaign/run lineage가 생기는지 확인한다.
+8. 별도 실행에서 진행 중 cancel을 한 번 보내고, 뒤 episode와 production/training effect가 모두 0인지 확인한다.
 
-```sh
-make -C operator-ui test
-```
+종료는 실행한 터미널에서 `Ctrl-C`로 수행한다. episode worker와 HTTP handler가 join된 뒤 프로세스가 끝난다. UI polling은 현재 상태를 읽기만 하며 intent를 queue하거나 자동 재전송하지 않는다.
 
-브라우저 회귀는 mock same-origin bridge를 포함한 `tests/browser-regression.html`이다. 정적 preview 서버만 띄우면 실제 `/api/view`가 없으므로 메인 화면이 `BRIDGE_UNAVAILABLE`로 fail-close하는 것이 정상이다.
+## PHYSICAL TEST_ONLY
 
-```sh
-make -C operator-ui preview
-```
+현재 PHYSICAL caller는 배포 가능한 카탈로그 UI를 사용하되, 실제 실행은 다음 tracked 조합으로 제한한다.
 
-`http://127.0.0.1:4173/tests/browser-regression.html`에서 결과가 `pass`인지 확인한다. `.envrc`가 승인되지 않은 새 worktree에서는 사용자가 이미 승인한 checkout을 `DIRENV_ROOT=/path/to/approved/checkout`으로 넘긴다. 사용자를 대신해 `direnv allow`를 실행하지 않는다.
+- qualified `place1 / PLACE_A@place-a-yaw0-r002`와 그 registration의 bounded continuous X/Y·normalized yaw domain
+- `pickup_e2e`, `DIRECT`, `fr5-lab-a-home-r001`
+- qualified wood-cube object/grasp와 `fr5-up-rgb-30hz-v1`
+- stable `/dev/v4l/by-id/*-video-index0` UVC identity 한 개
+- isolated `TEST_ONLY` roots와 production writer disabled
 
-## 10분 FAKE QA
+현재 catalog에는 workspace/frame/task/object/grasp/start/motion/variant/camera/data mode 축이 모두 나타난다. Qualified place1 registration의 bounded continuous X/Y와 normalized yaw를 자동 설계 또는 직접 입력으로 선택할 수 있다. checked-in cells와 HOME·원점·yaw 0은 빠른 preset과 현재 physical test의 시작점이며 product/catalog 한계가 아니다. Compile만 exact finite slots를 만들고, 각 slot은 fresh scene/start/plan 검증을 거친다.
 
-1. 기본 header가 `FAKE · LIVE_COLLECT · TEST_ONLY`이고 표시된 모든 금지 효과가 0인지 확인한다.
-2. 자동 설계의 횟수를 바꾸고 직접 편집으로 전환해 같은 draft ID에서 셀 하나를 선택·해제한다.
-3. workspace wizard에 source/final 100 mm를 넣고 `CENTER/X_REF/Y_CHECK`를 FAKE capture한 뒤 synthetic revision을 저장한다.
-4. 계획 만들기를 한 번 누르고 typed input 없이 digest-bound 승인 또는 거절 버튼만 보이는지 확인한다.
-5. 승인하면 `RUNNING`을 거쳐 technical PASS, human semantic `NOT_MEASURED`, synthetic review/coverage와 terminal projection이 보이는지 확인한다.
-6. 새 process에서 계획 승인 전 취소하고, 새 intent·execute·commit·candidate·inventory·training effect가 생기지 않는지 확인한다.
+좌표계 wizard는 인쇄 source와 최종 100 mm 막대 실측을 분리한다. 현재 실물 sheet의 `96 → 100 mm` 보정 이력은 exact checked-in print profile로 기록되며 별도 좌표계나 기존 `place1` 재등록 조건이 아니다.
 
-FAKE process는 scope가 sealed된 synthetic session이므로 PHYSICAL process나 device를 여는 control을 제공하지 않는다.
+Tracked qualification과 current physical caller가 함께 존재하는 coherent combination만 실행 가능하다. `pick_place`, `TWO_STAGE_ALIGN`, ID/OOD split, GENERAL/PRODUCTION, 새 workspace 또는 등록되지 않은 cell은 qualification과 caller가 갖춰질 때까지 이유와 함께 비활성이다.
 
-`FAKE`는 robot, gripper, production recorder, dataset, run-state를 호출하지 않는다. `TEST_ONLY`는 production approval과 training authority를 만들지 않으며 `PHYSICAL` 토글만으로 어떤 process나 hardware도 시작하지 않는다.
+연결된 같은 profile의 camera identity가 여러 개면 catalog에 각각 나타나지만, 현재 foreground environment는 process 시작 시 고른 한 장치만 실행 가능하게 표시한다. 나머지는 `CAMERA_REBIND_REQUIRED`로 남고 process 안에서 camera를 다시 bind하지 않는다. 사용할 장치를 바꾸려면 `--camera-device-id`로 새 process를 시작한다. 호환 camera가 0대여도 앱은 종료하지 않고 camera 미연결을 표시하는 blocked shell을 연다.
 
-## PHYSICAL TEST_ONLY 시작
+카메라는 `CONNECTED_UNPLACED`로 사용할 수 있다. 이 UI는 framing, object visibility, occlusion, lighting, image semantics, dual-camera sync 또는 data validity를 판정하지 않는다. 한 대의 transport 결과는 dual-camera qualification이나 30 Hz production PASS를 만들지 않는다.
 
-현재 foreground PHYSICAL composition은 UVC 한 대를 stable `/dev/v4l/by-id/*-video-index0` basename으로 local binding하고 `fr5-up-rgb-30hz-v1`의 `up` 역할만 사용한다. camera가 PC 주변의 `CONNECTED_UNPLACED` 상태여도 transport test는 가능하지만, 화면은 framing, object visibility, lighting 또는 data validity를 판정하지 않는다. 두 번째 camera와 RealSense/depth profile은 현재 console 범위가 아니다.
-
-시작 전에 foreground ROS graph, robot HOME 선언, gripper empty, clear cell, exact `place1 → PLACE_A@place-a-yaw0-r002` yaw 0° `(0,0)` cube와 E-stop 감시를 확인한다. console은 dispatch 직전에 HOME joint snapshot을 새로 측정한다. setup doctor는 이 확인을 대신하지 않는다.
+시작 전에는 foreground ROS graph, 로봇 HOME, 빈 gripper, clear cell, `place1` 원점의 물체와 E-stop 감시 조건을 사람이 확인한다. 앱은 기본적으로 missing foreground owner를 준비하고 gripper readback이 요구할 때 초기 활성화·open normalization을 수행한 뒤 상태를 다시 읽는다. controller IP와 장치 binding을 확인할 수 없거나 owner가 중복되면 fail-close한다.
 
 ```sh
 direnv exec . scripts/setup_doctor.sh
@@ -58,6 +67,29 @@ direnv exec . python3 -m tools.data_factory.operator_console \
   --camera-device-id <by-id-basename>
 ```
 
-장치가 정확히 한 대면 camera 인자를 생략할 수 있다. 명령은 session, `PHYSICAL`, `TEST_ONLY`, local binding과 격리 root를 출력하고 foreground에서만 server를 유지한다. active/fresh/open gripper는 자동 attach하고, open-normalization이 필요할 때만 빈 gripper와 clear cell에 결속된 `GRIPPER_MAINTENANCE` 버튼을 한 번 표시한다. 정상 graph와 maintenance graph의 process 전환은 숨겨서 수행하지 않는다. `Ctrl-C`는 episode worker와 HTTP server를 닫는다.
+호환되는 장치가 있으면 `--camera-device-id`를 생략할 수 있고, 현재 구현은 canonical order의 첫 장치를 process binding으로 선택한다. `--no-auto-prepare`는 자동 준비 없이 발견 사실부터 보고 싶을 때만 사용한다. 새 host는 robot/controller/start, workspace/frame binding과 camera 조건을 다시 확인해야 하며 tracked test input이 그 host의 production qualification을 대신하지 않는다. 같은 qualified place1의 registered bounds 안에서는 좌표마다 workspace를 다시 등록하지 않는다.
 
-계획 생성 뒤 먼저 현장 `place1`, cube, 빈 gripper, clear cell과 E-stop 감시를 `READY | CANCEL`로 확인한다. 이어지는 계획 화면에서 exact plan digest, `DIRECT` 10단계, clearance/speed, `HIL_NUMERIC_PROXY`와 TEST_ONLY paths를 확인한 뒤 승인하거나 취소한다. 실행 중에는 E-stop과 cell을 감시하고, release checkpoint에서 `LANDED | OFF_SLOT | UNCERTAIN`를 한 번 선택한다. 현재 TEST_ONLY episode의 candidate review는 `NOT_APPLICABLE`이며 production candidate와 training approval은 생성되지 않는다. candidate `PASS | FAIL | UNCERTAIN` UI는 isolated fixture에서만 검증한다.
+한 캠페인 안에서는 campaign authorization이 예상되는 positive path를 결속한다. Camera identity/transport는 environment 준비와 compile 시 결속하고, 각 episode의 HOME snapshot, scene freshness, plan digest, recorder readiness와 technical validator는 runtime에서 새로 측정한다. 실행 중 cancel은 항상 다음 intent를 막는다. 현재 PHYSICAL TEST_ONLY 결과는 candidate admission을 만들지 않고 `human semantic=NOT_MEASURED`, `training=NOT_AUTHORIZED`를 유지한다.
+
+## 데이터와 authority 경계
+
+- `FAKE`는 robot, gripper, production recorder, dataset과 run-state effect가 0이다.
+- PHYSICAL authoring은 run root, dataset episode와 motion을 만들지 않는다. Compile은 current caller와 machine-local camera binding을 확인하고 isolated TEST_ONLY cell/scene setup state를 만들 수 있지만, motion·recorder·dataset episode는 campaign authorization 뒤에만 시작한다.
+- immutable episode ledger와 rewritable ledger-state sidecar는 provenance, technical admission과 retention을 분리한다. 초기 retention은 `PRESERVE`; shared chunk의 물리 삭제는 UI가 허가하지 않는다.
+- browser button은 local page channel의 operator intent다. OS 인증이나 신원 증명을 주장하지 않는다.
+- candidate `PASS | FAIL | UNCERTAIN`는 별도 compare-and-swap review가 제공된 경우에만 보인다. 현재 PHYSICAL TEST_ONLY caller는 candidate review를 만들지 않는다.
+- technical PASS, human semantic evidence, production admission과 training approval은 서로 다른 상태다. UI intent는 production 또는 training authority를 생성하지 않는다.
+
+## 정적·계약 검사
+
+```sh
+make -C operator-ui test
+```
+
+브라우저 회귀 fixture는 `operator-ui/tests/browser-regression.html`에 있다. 정적 preview에는 `/api/view`가 없으므로 메인 제품 화면이 `BRIDGE_UNAVAILABLE`로 fail-close하는 것이 정상이다.
+
+```sh
+make -C operator-ui preview
+```
+
+`http://127.0.0.1:4173/tests/browser-regression.html`에서 결과가 `pass`인지 확인한다. `.envrc`가 승인되지 않은 새 worktree에서는 이미 승인한 checkout을 `DIRENV_ROOT=/path/to/approved/checkout`으로 넘긴다. 사용자를 대신해 `direnv allow`를 실행하지 않는다.

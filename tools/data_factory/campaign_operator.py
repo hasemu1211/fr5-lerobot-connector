@@ -82,7 +82,7 @@ class CampaignOperator:
         physical_plan_call: EpisodeCall | None = None,
         physical_live_call: EpisodeCall | None = None,
         physical_root_binding_call: Callable[[str], Mapping[str, Any]] | None = None,
-        physical_start_binding_call: Callable[[str], Mapping[str, Any]] | None = None,
+        physical_start_binding_call: Callable[[str, Mapping[str, Any]], Mapping[str, Any]] | None = None,
         repository_root: str | Path | None = None, current_usage=None, clock=None,
         operator_label: str = "TEST_OPERATOR",
     ):
@@ -375,9 +375,13 @@ class CampaignOperator:
                         run_id=run_id, scene_evidence=scene_evidence,
                     )
                     self._activate_physical()
+                    slot = session.next_slot
+                    if slot is None:
+                        raise ContractError("CAMPAIGN_OPERATOR_NEXT_SLOT")
                     bindings["start_binding"] = validate_test_only_start_binding(
-                        self.physical_start_binding_call(run_id),
+                        self.physical_start_binding_call(run_id, slot),
                         manifest=self.manifest, hypothesis=self.hypothesis,
+                        slot=slot,
                     )
             result = session.run_next(
                 run_id=run_id,

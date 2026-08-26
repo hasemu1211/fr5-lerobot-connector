@@ -261,6 +261,13 @@ class SeedCampaign:
         return self._active_lifecycle
 
     @property
+    def next_slot(self) -> dict[str, Any] | None:
+        """Return a detached snapshot of the exact slot that may open next."""
+        if self.state != "READY" or self._index >= len(self.manifest["slots"]):
+            return None
+        return copy.deepcopy(self.manifest["slots"][self._index])
+
+    @property
     def usage(self) -> dict[str, int]:
         return copy.deepcopy(self._program_usage)
 

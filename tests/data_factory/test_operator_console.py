@@ -8,6 +8,7 @@ import threading
 import unittest
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any, Mapping
 from unittest import mock
 
 from tools.data_factory.campaign_operator import CampaignOperator, SIDE_EFFECT_COUNTERS
@@ -17,16 +18,19 @@ from tools.data_factory.operator_bridge import (
     LoopbackBridge,
     OperatorIntentCore,
 )
+from tools.data_factory.operator_catalog import project_assisted_poses
 from tools.data_factory.operator_console import (
     OperatorConsole,
+    build_physical_operator_application,
     build_physical_operator_console,
     build_physical_test_contract,
     capture_gripper_setup_readback,
+    main as operator_console_main,
     normalize_gripper_after_operator_ready,
     passive_physical_gate,
 )
 from tools.data_factory.operator_setup import NO_AUTHORITY, build_test_only_root_binding
-from tools.fr5_data_factory import ContractError, canonical_digest
+from tools.fr5_data_factory import ContractError, canonical_digest, load_json_strict
 
 try:
     from .test_campaign_authoring import draft as campaign_draft
@@ -102,9 +106,8 @@ class Harness:
         self.children.append(child)
         return child
 
-    def start_binding(self, _run_id: str) -> dict:
+    def start_binding(self, _run_id: str, slot: Mapping[str, Any]) -> dict:
         manifest = self.operator.manifest
-        slot = manifest["slots"][0]
         pose = next(
             item for item in self.hypothesis["robot_start_poses"]
             if item["robot_start_pose_id"] == slot["robot_start_pose_id"]
@@ -547,6 +550,7 @@ feedback:
              readback["reference_position_m"], readback["feedback_position_m"]),
             ("CONTROLLER_STATE", True, 0.012, 0.012),
         )
+        malformed_read_remote = mock.Mock()
         with (
             mock.patch(
                 "tools.data_factory.operator_console._readonly_command",
@@ -559,9 +563,14 @@ feedback:
                     "A message was lost!!!\n"
                 ),
             ),
+            mock.patch(
+                "tools.data_factory.operator_console._remote_gripper_command",
+                malformed_read_remote,
+            ),
             self.assertRaisesRegex(ContractError, "GRIPPER_SETUP_READBACK"),
         ):
             capture_gripper_setup_readback()
+        malformed_read_remote.assert_not_called()
         with mock.patch(
             "tools.data_factory.operator_console._bounded_command",
             return_value="Result:\n  error_code: 0\nGoal finished with status: SUCCEEDED\n",
@@ -814,6 +823,515 @@ feedback:
             finally:
                 console.close()
 
+    def test_product_application_defers_campaign_roots_until_environment_and_compile(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.portable_repository(root)
+            environment = {
+                "schema_version": "data_factory.operator_environment.v1",
+                "state": "SETUP_REQUIRED",
+                "observed_at": "2026-08-26T03:00:00Z",
+                "components": {
+                    name: {"state": "MISSING", "owner": None, "reason": "NOT_PREPARED"}
+                    for name in ("robot", "controller", "gripper", "camera")
+                },
+            }
+
+            def prepare():
+                environment["state"] = "READY"
+                environment["components"] = {
+                    name: {"state": "READY", "owner": f"owner-{name}", "reason": "ATTACHED"}
+                    for name in environment["components"]
+                }
+                return copy.deepcopy(environment)
+
+            opened = {
+                "active": True, "position_valid": True, "gripper_index": 1,
+                "reference_position_m": 0.021, "feedback_position_m": 0.021,
+                "sample_age_s": 0.0, "max_age_s": 0.1,
+                "source": "CONTROLLER_STATE",
+            }
+            device = "usb-Generic_USB2.0_PC_CAMERA-video-index0"
+            other_device = "usb-Generic_USB2.0_PC_CAMERA_2-video-index0"
+            application, context = build_physical_operator_application(
+                repository_root=root,
+                session_id="product-application-r001",
+                operator_label="local-operator",
+                environment_call=lambda: copy.deepcopy(environment),
+                prepare_environment_call=prepare,
+                selected_camera_device_id=device,
+                discovery_call=lambda: [device, other_device],
+                activation_call=lambda: True,
+                gripper_readback_call=lambda: copy.deepcopy(opened),
+                run_live_call=mock.Mock(side_effect=AssertionError("live before authorization")),
+                clock=lambda: NOW,
+            )
+            try:
+                self.assertFalse((root / "outputs").exists())
+                initial = application.bridge_core.snapshot()
+                self.assertEqual(
+                    initial["projection"]["runtime"]["workflow_state"], "PREPARING",
+                )
+                application.bridge_core.consume(envelope(
+                    initial, "prepare_environment", {}, "prepare-product-r001",
+                ))
+                self.assertFalse((root / "outputs").exists())
+                authoring = application.bridge_core.snapshot()
+                draft = authoring["projection"]["draft"]
+                camera_options = authoring["projection"]["catalog"]["axes"]["camera"]
+                self.assertEqual(
+                    {item["id"] for item in camera_options},
+                    {
+                        f"fr5-up-rgb-30hz-v1@{device}",
+                        f"fr5-up-rgb-30hz-v1@{other_device}",
+                    },
+                )
+                camera_by_id = {item["id"]: item for item in camera_options}
+                self.assertTrue(
+                    camera_by_id[f"fr5-up-rgb-30hz-v1@{device}"]["available"],
+                )
+                inactive = camera_by_id[f"fr5-up-rgb-30hz-v1@{other_device}"]
+                self.assertFalse(inactive["available"])
+                self.assertEqual(inactive["reason"], "CAMERA_REBIND_REQUIRED")
+                with self.assertRaisesRegex(
+                    ContractError, "OPERATOR_APPLICATION_SELECTION",
+                ):
+                    application.bridge_core.consume(envelope(
+                        authoring, "update_draft", {
+                            "draft_id": draft["draft_id"],
+                            "selection": {
+                                "camera": f"fr5-up-rgb-30hz-v1@{other_device}",
+                            },
+                        }, "switch-unprepared-camera-r001",
+                    ))
+                self.assertFalse((root / "outputs").exists())
+                authoring = application.bridge_core.snapshot()
+                direct_poses = [
+                    {"place_id": "PLACE_A", "yaw_deg": 45, "x_mm": 10, "y_mm": 5},
+                    {"place_id": "PLACE_A", "yaw_deg": 180, "x_mm": -10, "y_mm": -5},
+                ]
+                for index, pose in enumerate(direct_poses, 1):
+                    application.bridge_core.consume(envelope(
+                        authoring, "update_draft", {
+                            "draft_id": authoring["projection"]["draft"]["draft_id"],
+                            "add_pose": pose,
+                        }, f"add-direct-pose-r{index:03d}",
+                    ))
+                    authoring = application.bridge_core.snapshot()
+                compiled = application.bridge_core.consume(envelope(
+                    authoring, "compile_draft", {
+                        "draft_id": draft["draft_id"],
+                        "data_disposition": "TEST_ONLY",
+                    }, "compile-product-r001",
+                ))["result"]
+                self.assertEqual(compiled["outcome"], "REVIEW_CAMPAIGN")
+                self.assertTrue((
+                    root / "outputs/data_factory/test_only_physical"
+                    / "product-application-r001-campaign-0001"
+                ).is_dir())
+                campaign = application._campaign.campaign_operator
+                bases = {
+                    item["base_condition_digest"]: item
+                    for item in campaign.hypothesis["base_conditions"]
+                }
+                resolvers = {
+                    item["resolved_job_digest"]: item
+                    for item in campaign.hypothesis["resolver_receipts"]
+                }
+                observed = []
+                for slot in campaign.manifest["slots"]:
+                    job = resolvers[
+                        bases[slot["base_condition_digest"]]["resolved_job_digest"]
+                    ]["normalized_job"]
+                    observed.append({
+                        key: job[key]
+                        for key in ("place_id", "yaw_deg", "x_mm", "y_mm")
+                    })
+                self.assertEqual(observed, [
+                    {"place_id": "PLACE_A", "yaw_deg": 0, "x_mm": 0, "y_mm": 0},
+                    *direct_poses,
+                ])
+                coverage = application.bridge_core.snapshot()["projection"][
+                    "coverage"
+                ]["cells"]
+                self.assertEqual([
+                    {
+                        key: cell[key]
+                        for key in ("x_mm", "y_mm", "yaw_deg", "target_count")
+                    }
+                    for cell in coverage
+                ], [
+                    {"x_mm": 0, "y_mm": 0, "yaw_deg": 0, "target_count": 1},
+                    {"x_mm": 10, "y_mm": 5, "yaw_deg": 45, "target_count": 1},
+                    {"x_mm": -10, "y_mm": -5, "yaw_deg": 180, "target_count": 1},
+                ])
+                self.assertEqual(context["production_writers_enabled"], False)
+                self.assertIsNone(application._campaign.episode_worker)
+            finally:
+                application.close()
+
+    def test_physical_application_uses_shared_continuous_assisted_projection(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.portable_repository(root)
+            environment = {
+                "schema_version": "data_factory.operator_environment.v1",
+                "state": "SETUP_REQUIRED",
+                "observed_at": "2026-08-26T03:00:00Z",
+                "components": {
+                    name: {"state": "MISSING", "owner": None, "reason": "NOT_PREPARED"}
+                    for name in ("robot", "controller", "gripper", "camera")
+                },
+            }
+
+            def prepare():
+                environment["state"] = "READY"
+                environment["components"] = {
+                    name: {"state": "READY", "owner": f"owner-{name}", "reason": "ATTACHED"}
+                    for name in environment["components"]
+                }
+                return copy.deepcopy(environment)
+
+            opened = {
+                "active": True, "position_valid": True, "gripper_index": 1,
+                "reference_position_m": 0.021, "feedback_position_m": 0.021,
+                "sample_age_s": 0.0, "max_age_s": 0.1,
+                "source": "CONTROLLER_STATE",
+            }
+            device = "usb-Generic_USB2.0_PC_CAMERA-video-index0"
+            live = mock.Mock(side_effect=AssertionError("live before authorization"))
+            application, _context = build_physical_operator_application(
+                repository_root=root,
+                session_id="assisted-projection-physical-r001",
+                operator_label="local-operator",
+                environment_call=lambda: copy.deepcopy(environment),
+                prepare_environment_call=prepare,
+                selected_camera_device_id=device,
+                discovery_call=lambda: [device],
+                activation_call=lambda: True,
+                gripper_readback_call=lambda: copy.deepcopy(opened),
+                run_live_call=live,
+                clock=lambda: NOW,
+            )
+            try:
+                current = application.bridge_core.snapshot()
+                application.bridge_core.consume(envelope(
+                    current, "prepare_environment", {}, "assisted-prepare-r001",
+                ))
+                authoring = application.bridge_core.snapshot()
+                draft = authoring["projection"]["draft"]
+                with mock.patch(
+                    "tools.data_factory.operator_console.project_assisted_poses",
+                    wraps=project_assisted_poses,
+                ) as assisted_projection:
+                    compiled = application.bridge_core.consume(envelope(
+                        authoring, "compile_draft", {
+                            "draft_id": draft["draft_id"],
+                            "data_disposition": "TEST_ONLY",
+                        }, "assisted-compile-r001",
+                    ))["result"]
+                assisted_projection.assert_called_once()
+                self.assertEqual(assisted_projection.call_args.args[3], 3)
+                self.assertEqual(assisted_projection.call_args.kwargs, {"repeat": 1})
+                self.assertEqual(compiled["episode_count"], 3)
+                campaign = application._campaign.campaign_operator
+                bases = {
+                    item["base_condition_digest"]: item["coverage_condition"]
+                    for item in campaign.hypothesis["base_conditions"]
+                }
+                selected = [
+                    bases[item["base_condition_digest"]]
+                    for item in campaign.manifest["slots"]
+                ]
+                poses = [
+                    tuple(item[key] for key in ("place_id", "yaw_deg", "x_mm", "y_mm"))
+                    for item in selected
+                ]
+                presets = {
+                    tuple(item["metadata"][key] for key in (
+                        "place_id", "yaw_deg", "x_mm", "y_mm",
+                    ))
+                    for item in application.catalog["axes"]["cell"]
+                    if item["metadata"].get("place_id") == "PLACE_A"
+                }
+                self.assertEqual(poses[0], ("PLACE_A", 0, 0, 0))
+                self.assertEqual(len(set(poses)), 3)
+                self.assertTrue(all(item not in presets for item in poses[1:]))
+                self.assertIsNone(application._campaign.episode_worker)
+                live.assert_not_called()
+            finally:
+                application.close()
+
+    def test_product_workspace_registration_captures_previews_saves_and_refreshes_catalog(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.portable_repository(root)
+            device = "usb-Generic_USB2.0_PC_CAMERA-video-index0"
+            environment = {
+                "schema_version": "data_factory.operator_environment.v1",
+                "state": "SETUP_REQUIRED",
+                "observed_at": "2026-08-26T03:00:00Z",
+                "components": {
+                    name: {"state": "MISSING", "owner": None, "reason": "NOT_PREPARED"}
+                    for name in ("robot", "controller", "gripper", "camera")
+                },
+            }
+
+            def prepare():
+                environment["state"] = "READY"
+                environment["components"] = {
+                    name: {"state": "READY", "owner": f"owner-{name}", "reason": "ATTACHED"}
+                    for name in environment["components"]
+                }
+                return copy.deepcopy(environment)
+
+            tcp_manifest = json.loads((
+                root / "config/data_factory/test_only_physical/goal2-place1/"
+                "tcp_candidate_manifest.json"
+            ).read_text(encoding="utf-8"))
+            tcp_digest = tcp_manifest["tcp_candidate_digest"]
+            manifest_digest = canonical_digest(tcp_manifest)
+            identity = {
+                "translation_m": [0.0, 0.0, 0.0],
+                "rotation_columns": [
+                    [1.0, 0.0, 0.0],
+                    [0.0, 1.0, 0.0],
+                    [0.0, 0.0, 1.0],
+                ],
+            }
+
+            def pose(point):
+                return {
+                    "schema_version": "data_factory.pose_snapshot.v1",
+                    "frames": {"base": "base_link", "wrist": "wrist3_link"},
+                    "joint_positions_rad": {
+                        name: 0.0 for name in ("j1", "j2", "j3", "j4", "j5", "j6")
+                    },
+                    "base_wrist": copy.deepcopy(identity),
+                    "base_tcp": {
+                        **copy.deepcopy(identity),
+                        "translation_m": point,
+                        "candidate_status": "CANDIDATE_MODEL_DERIVED",
+                        "candidate_source_sha256": tcp_digest,
+                        "manifest_source_sha256": manifest_digest,
+                    },
+                    "joint_state_age_s": 0.05,
+                    "joint_stamp_ns": 1_000_000_000,
+                    "transform_stamp_ns": 1_000_000_000,
+                    "ros_sample_age_s": 0.05,
+                }
+
+            snapshots = iter((
+                pose([1.0, 2.0, 3.0]),
+                pose([1.1285, 2.0, 3.0]),
+                pose([0.8715, 2.08, 3.0]),
+            ))
+            live = mock.Mock(side_effect=AssertionError("workspace registration called live"))
+            application, _context = build_physical_operator_application(
+                repository_root=root,
+                session_id="workspace-physical-application-r001",
+                operator_label="local-operator",
+                environment_call=lambda: copy.deepcopy(environment),
+                prepare_environment_call=prepare,
+                selected_camera_device_id=device,
+                discovery_call=lambda: [device],
+                snapshot_call=lambda: next(snapshots),
+                run_live_call=live,
+                clock=lambda: NOW,
+            )
+            try:
+                current = application.bridge_core.snapshot()
+                application.bridge_core.consume(envelope(
+                    current, "prepare_environment", {}, "workspace-prepare-r001",
+                ))
+                self.assertFalse((root / "outputs").exists())
+
+                for label in ("CENTER", "X_REF", "Y_CHECK"):
+                    current = application.bridge_core.snapshot()
+                    application.bridge_core.consume(envelope(
+                        current, "capture_workspace_point", {"label": label},
+                        f"workspace-capture-{label.lower()}-r001",
+                    ))
+                captured = application.bridge_core.snapshot()
+                registration = captured["projection"]["workspace_registration"]
+                self.assertTrue(all(registration["captures"].values()))
+                self.assertNotIn("joint_positions_rad", str(registration))
+
+                application.bridge_core.consume(envelope(
+                    captured, "preview_workspace", {
+                        "source_scale_bar_mm": 96.0,
+                        "final_scale_bar_mm": 100.0,
+                    }, "workspace-preview-r001",
+                ))
+                previewed = application.bridge_core.snapshot()
+                preview = previewed["projection"]["workspace_registration"]["preview"]
+                self.assertEqual(preview["status"], "CANDIDATE_WITHIN_TOLERANCE")
+                self.assertFalse(preview["execution_authorized"])
+
+                application.bridge_core.consume(envelope(
+                    previewed, "save_workspace_revision", {
+                        "preview_digest": preview["preview_digest"],
+                    }, "workspace-save-r001",
+                ))
+                saved = application.bridge_core.snapshot()["projection"]
+                calibration_id = saved["workspace_registration"]["promotion"][
+                    "calibration_id"
+                ]
+                self.assertIn(
+                    calibration_id,
+                    {item["id"] for item in saved["catalog"]["axes"]["frame"]},
+                )
+                self.assertEqual(len(saved["workspace_registration"]["history"]), 1)
+                frame = next(
+                    item for item in saved["catalog"]["axes"]["frame"]
+                    if item["id"] == calibration_id
+                )
+                self.assertTrue(frame["available"])
+                self.assertFalse(frame["execution_ready"])
+                self.assertEqual(
+                    frame["execution_reason"], "MOTION_QUALIFICATION_REQUIRED",
+                )
+                promotion = saved["workspace_registration"]["promotion"]
+                self.assertEqual(
+                    load_json_strict(
+                        root / "config/data_factory"
+                        / promotion["yaw0_sheet_relative_path"],
+                    )["print_calibration"]["measured_scale_bar_mm"],
+                    96.0,
+                )
+
+                current = application.bridge_core.snapshot()
+                application.bridge_core.consume(envelope(
+                    current, "update_draft", {
+                        "draft_id": current["projection"]["draft"]["draft_id"],
+                        "selection": {"frame": calibration_id},
+                    }, "workspace-select-r001",
+                ))
+                selected = application.bridge_core.snapshot()
+                self.assertEqual(
+                    selected["projection"]["selection"]["frame_id"], calibration_id,
+                )
+                self.assertFalse(selected["projection"]["draft"]["execution_ready"])
+                self.assertNotIn(
+                    "compile_draft", selected["projection"]["available_ops"],
+                )
+                application.bridge_core.consume(envelope(
+                    selected, "update_draft", {
+                        "draft_id": selected["projection"]["draft"]["draft_id"],
+                        "add_pose": {
+                            "place_id": "PLACE_A", "yaw_deg": 33,
+                            "x_mm": 10, "y_mm": 5,
+                        },
+                    }, "workspace-pose-r001",
+                ))
+                blocked = application.bridge_core.snapshot()
+                with self.assertRaisesRegex(
+                    ContractError, "OPERATOR_INTENT_OP",
+                ):
+                    application.bridge_core.consume(envelope(
+                        blocked, "compile_draft", {
+                            "draft_id": blocked["projection"]["draft"]["draft_id"],
+                            "data_disposition": "TEST_ONLY",
+                        }, "workspace-compile-blocked-r001",
+                    ))
+                self.assertFalse((
+                    root / "outputs/data_factory/test_only_physical"
+                ).exists())
+                live.assert_not_called()
+            finally:
+                application.close()
+
+    def test_physical_main_serves_blocked_shell_with_zero_cameras_and_zero_effects(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.portable_repository(root)
+            captured = {}
+
+            class ShellBridge:
+                def __init__(self, *, core, **_kwargs):
+                    captured["view"] = core.snapshot()["projection"]
+                    self.origin = "http://127.0.0.1:4174"
+                    self.server = mock.Mock()
+
+                def serve_forever(self):
+                    captured["served"] = True
+
+            physical_environment = mock.Mock(
+                side_effect=AssertionError("zero-camera shell started hardware"),
+            )
+            with (
+                mock.patch(
+                    "tools.data_factory.operator_console.discover_uvc_device_ids",
+                    return_value=[],
+                ),
+                mock.patch(
+                    "tools.data_factory.operator_console.LoopbackBridge", ShellBridge,
+                ),
+                mock.patch(
+                    "tools.data_factory.operator_physical_environment."
+                    "build_physical_operator_environment",
+                    physical_environment,
+                ),
+                mock.patch("builtins.print"),
+            ):
+                result = operator_console_main([
+                    "--effect-scope", "PHYSICAL",
+                    "--repository-root", str(root),
+                    "--session-id", "zero-camera-shell-r001",
+                ])
+
+            self.assertEqual(result, 0)
+            self.assertTrue(captured["served"])
+            view = captured["view"]
+            self.assertEqual(view["runtime"]["workflow_state"], "BLOCKED")
+            self.assertEqual(view["available_ops"], [])
+            self.assertEqual(view["environment"]["components"]["camera"], {
+                "state": "MISSING", "owner": None,
+                "reason": "DEVICE_NOT_CONNECTED",
+            })
+            camera = view["catalog"]["axes"]["camera"]
+            self.assertEqual(
+                [(item["available"], item["reason"]) for item in camera],
+                [(False, "DEVICE_NOT_CONNECTED")],
+            )
+            self.assertIsNone(view["campaign"])
+            self.assertEqual(view["effect_counts"], {})
+            self.assertFalse((root / "outputs").exists())
+            physical_environment.assert_not_called()
+
+    def test_product_application_auto_selects_one_stable_camera_without_effects(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.portable_repository(root)
+            device = "usb-Generic_USB2.0_PC_CAMERA-video-index0"
+            blocked = {
+                "schema_version": "data_factory.operator_environment.v1",
+                "state": "BLOCKED", "observed_at": "2026-08-26T03:00:00Z",
+                "components": {
+                    name: {"state": "BLOCKED", "owner": None, "reason": "TEST_BLOCK"}
+                    for name in ("robot", "controller", "gripper", "camera")
+                },
+            }
+            application, context = build_physical_operator_application(
+                repository_root=root,
+                session_id="one-camera-auto-select-r001",
+                operator_label="local-operator",
+                environment_call=lambda: copy.deepcopy(blocked),
+                prepare_environment_call=lambda: self.fail("prepare was exposed"),
+                discovery_call=lambda: [device],
+                run_live_call=mock.Mock(side_effect=AssertionError("live was called")),
+                clock=lambda: NOW,
+            )
+            try:
+                view = application.bridge_core.snapshot()["projection"]
+                self.assertEqual(context["camera_device_id"], device)
+                self.assertEqual(view["selection"]["camera_device_id"], device)
+                self.assertTrue(view["catalog"]["axes"]["camera"][0]["available"])
+                self.assertEqual(view["available_ops"], [])
+                self.assertFalse((root / "outputs").exists())
+            finally:
+                application.close()
+
     def test_preplan_site_checkpoint_returns_to_browser_before_plan_approval(self):
         with tempfile.TemporaryDirectory() as root:
             harness = Harness(root, preplan_checkpoint=True)
@@ -890,7 +1408,7 @@ feedback:
             release = threading.Event()
 
             def slow_episode(*args):
-                release.wait(1.0)
+                release.wait()
                 return harness.episode(*args)
 
             console = harness.console(
@@ -908,7 +1426,42 @@ feedback:
                     "outcome": "RUNNING",
                     "active_child_id": "physical-console-r001-run-0",
                 })
+                qualification = json.loads((
+                    Path(__file__).resolve().parents[2]
+                    / "config/data_factory/motion_qualifications/fr5-place-a-wood-cube-r001.json"
+                ).read_text())
+                contract_bound_s = (
+                    10.0
+                    + sum(
+                        float(limit.get("planning_timeout_s", 0.0))
+                        for limit in qualification["phase_limits"].values()
+                    )
+                    + 2 * 8.0
+                )
+                observation_window_s = 8.05
+                self.assertLess(observation_window_s, contract_bound_s)
+                started = time.monotonic()
+                self.assertFalse(release.wait(observation_window_s))
+                self.assertGreaterEqual(time.monotonic() - started, 8.0)
+
+                projection = console.bridge_core.snapshot()["projection"]
+                self.assertEqual(projection["runtime"]["workflow_state"], "RUNNING")
                 self.assertEqual(harness.operator_counters["physical_factory"], 1)
+                self.assertEqual(len(harness.children), 1)
+                self.assertIs(
+                    harness.operator._session.active_lifecycle,
+                    harness.children[0],
+                )
+                self.assertFalse(harness.operator._session.cancel_event.is_set())
+                self.assertTrue(console.episode_worker.is_alive())
+                self.assertIsNone(projection["approval"])
+                self.assertIsNone(projection["operator_checkpoint"])
+                self.assertTrue(all(value == 0 for value in harness.forbidden.values()))
+                self.assertTrue(all(
+                    value == 0
+                    for name, value in harness.operator_counters.items()
+                    if name != "physical_factory"
+                ))
                 release.set()
                 approval_view = self.wait_for(console, "approval")
                 self.assertEqual(
@@ -929,10 +1482,11 @@ feedback:
                 console.close()
 
     def test_measured_physical_activation_mismatch_projects_fail(self):
-        for code in (
-            "PHYSICAL_SECOND_MOTION_OWNER",
-            "PHYSICAL_CAMERA_BINDING_MISMATCH",
-            "PHYSICAL_CAMERA_DEVICE_MISMATCH",
+        for code, expected_measurement in (
+            ("PHYSICAL_SECOND_MOTION_OWNER", "FAIL"),
+            ("PHYSICAL_CAMERA_BINDING_MISMATCH", "FAIL"),
+            ("PHYSICAL_CAMERA_DEVICE_MISMATCH", "FAIL"),
+            ("PHYSICAL_CAMERA_TOPIC", "NOT_AVAILABLE"),
         ):
             with self.subTest(code=code), tempfile.TemporaryDirectory() as directory:
                 root = Path(directory)
@@ -944,8 +1498,7 @@ feedback:
                     "source": "CONTROLLER_STATE",
                 }
 
-                def fail_activation(code=code):
-                    raise ContractError(code)
+                activation = mock.Mock(side_effect=ContractError(code))
 
                 console, context = build_physical_operator_console(
                     repository_root=root,
@@ -953,28 +1506,26 @@ feedback:
                     run_id=f"goal2-place1-fail-{code.lower()}",
                     operator_label="local-operator",
                     discovery_call=lambda: ["usb-Goal2_Camera-video-index0"],
-                    activation_call=fail_activation,
+                    activation_call=activation,
                     gripper_readback_call=lambda: copy.deepcopy(opened),
                     clock=lambda: NOW,
                 )
                 try:
-                    initial = console.bridge_core.snapshot()
-                    result = console.bridge_core.consume(envelope(
-                        initial, "compile_draft", {
-                            "draft_id": initial["projection"]["draft"]["draft_id"],
-                            "data_disposition": "TEST_ONLY",
-                        }, f"compile-{code.lower()}",
-                    ))["result"]
                     projection = console.bridge_core.snapshot()["projection"]
                     self.assertEqual(
-                        (result["outcome"], projection["runtime"]["workflow_state"],
+                        (projection["runtime"]["workflow_state"],
                          projection["runtime"]["measurement_outcome"],
                          projection["available_ops"]),
-                        ("FAIL", "BLOCKED", "FAIL", []),
+                        ("BLOCKED", expected_measurement, []),
                     )
                     self.assertEqual(
                         projection["runtime"]["reason_codes"], [code],
                     )
+                    activation.assert_called_once_with()
+                    self.assertIsNone(console.episode_worker)
+                    self.assertTrue(all(
+                        value == 0 for value in projection["effect_counts"].values()
+                    ))
                     self.assertEqual(context["production_writers_enabled"], False)
                 finally:
                     console.close()
@@ -1148,6 +1699,19 @@ feedback:
 
             result = console.wait_for_episode(1.0)
             self.assertEqual((result["outcome"], result["code"]), ("PASS", "TECHNICAL_PASS"))
+            condition = harness.hypothesis["base_conditions"][0]["coverage_condition"]
+            self.assertEqual(result["intent_binding"]["coverage_condition"], condition)
+            self.assertEqual(
+                result["intent_binding"]["coverage_condition_digest"],
+                canonical_digest(condition),
+            )
+            self.assertEqual(
+                result["intent_binding"]["binding_digest"],
+                canonical_digest({
+                    key: value for key, value in result["intent_binding"].items()
+                    if key != "binding_digest"
+                }),
+            )
             self.assertFalse(console.episode_worker.is_alive())
             self.assertFalse(harness.operator._session.status()["active_child"])
             self.assertEqual(harness.operator_counters["physical_factory"], 1)

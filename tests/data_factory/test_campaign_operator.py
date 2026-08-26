@@ -219,7 +219,7 @@ class CampaignOperatorTests(unittest.TestCase):
                         directory, effect_scope="PHYSICAL", lifecycle_action=action,
                     )
                     model.physical_activation_gate = ports.activate
-                    model.physical_start_binding_call = lambda _run_id: {}
+                    model.physical_start_binding_call = lambda _run_id, _slot: {}
                     setattr(model, field, invalid)
                     send(model, "compile_draft", {}, f"compile-invalid-{name}")
 
@@ -255,7 +255,7 @@ class CampaignOperatorTests(unittest.TestCase):
                     )
                     model.physical_activation_gate = ports.activate
                     start_calls = []
-                    model.physical_start_binding_call = lambda run_id: start_calls.append(run_id) or {}
+                    model.physical_start_binding_call = lambda run_id, _slot: start_calls.append(run_id) or {}
                     if case in {"stale", "scene-digest"}:
                         observed = NOW - timedelta(seconds=6) if case == "stale" else NOW
 
@@ -295,7 +295,7 @@ class CampaignOperatorTests(unittest.TestCase):
 
                     model.physical_activation_gate = activate
                     model.physical_start_binding_call = (
-                        lambda _run_id: timeline.append("start") or {}
+                        lambda _run_id, _slot: timeline.append("start") or {}
                     )
                     if action == "LIVE_COLLECT":
                         model.physical_root_binding_call = lambda run_id: (

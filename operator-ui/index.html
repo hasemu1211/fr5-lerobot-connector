@@ -5,181 +5,186 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="color-scheme" content="light">
   <!-- OPERATOR_TOKEN -->
-  <title>FR5 데이터 수집 데스크</title>
+  <title>FR5 Robot Learning Data Factory</title>
   <link rel="stylesheet" href="styles.css">
   <script src="messages.js" defer></script>
   <script src="app.js" defer></script>
 </head>
 <body>
-  <a class="skip-link" href="#campaign-desk">캠페인 편집으로 건너뛰기</a>
+  <a class="skip-link" href="#step-content">현재 단계로 건너뛰기</a>
 
-  <header class="masthead">
-    <div>
-      <p class="eyebrow">FR5 · TEST_ONLY COLLECTION DESK</p>
-      <h1>한 평면에서<br>수집 전체를 봅니다.</h1>
-      <p class="masthead-copy">하나의 초안, 하나의 상태공간, 실행 전마다 하나의 최신 결정.</p>
-    </div>
-    <div class="session-block" aria-label="세션 연결 상태">
-      <span id="connection-dot" class="connection-dot" aria-hidden="true"></span>
+  <header class="app-header">
+    <div class="brand">
+      <span class="brand-mark" aria-hidden="true">FR5</span>
       <div>
-        <strong id="connection-label">브리지 확인 중</strong>
-        <span id="session-label">세션 정보 없음</span>
+        <p>FR5 · ROBOT LEARNING DATA FACTORY</p>
+        <h1>로봇 학습 데이터 수집</h1>
       </div>
+    </div>
+    <div class="header-status" aria-label="연결 상태">
+      <span id="connection-dot" class="connection-dot" aria-hidden="true"></span>
+      <div><strong id="connection-label">연결 확인 중</strong><span id="session-label">최신 상태를 읽고 있습니다</span></div>
     </div>
   </header>
 
   <div id="connection-banner" class="connection-banner" role="status" aria-live="polite">
-    로컬 브리지에서 최신 화면을 읽고 있습니다.
+    로컬 수집 서비스에 연결하고 있습니다.
   </div>
 
-  <main id="campaign-desk" tabindex="-1">
-    <section class="scope-strip" aria-label="현재 캠페인 범위">
-      <fieldset id="effect-scope" class="segmented-control">
-        <legend>실행 효과</legend>
-        <label><input type="radio" name="effect_scope" value="FAKE"> FAKE</label>
-        <label><input type="radio" name="effect_scope" value="PHYSICAL"> PHYSICAL</label>
-      </fieldset>
-      <fieldset id="lifecycle-action" class="segmented-control">
-        <legend>작업 범위</legend>
-        <label><input type="radio" name="lifecycle_action" value="AUTHOR_ONLY"> AUTHOR_ONLY</label>
-        <label><input type="radio" name="lifecycle_action" value="PLAN_ONLY"> PLAN_ONLY</label>
-        <label><input type="radio" name="lifecycle_action" value="LIVE_COLLECT"> LIVE_COLLECT</label>
-      </fieldset>
-      <div class="locked-scope">
-        <span>데이터 용도</span>
-        <strong>TEST_ONLY</strong>
-        <small>생산·학습 권한 0</small>
-      </div>
-    </section>
+  <main id="collection-app">
+    <nav class="step-rail" aria-label="데이터 수집 단계">
+      <ol>
+        <li><button type="button" data-step-target="environment"><span>01</span><strong>환경 준비</strong><small>장치와 실행 환경</small></button></li>
+        <li><button type="button" data-step-target="plan"><span>02</span><strong>수집 계획</strong><small>조건과 횟수</small></button></li>
+        <li><button type="button" data-step-target="review"><span>03</span><strong>계획 확인</strong><small>실행 승인</small></button></li>
+        <li><button type="button" data-step-target="execution"><span>04</span><strong>실행</strong><small>연속 에피소드</small></button></li>
+        <li><button type="button" data-step-target="results"><span>05</span><strong>결과</strong><small>검토와 커버리지</small></button></li>
+        <li><button type="button" data-step-target="next"><span>06</span><strong>다음 수집</strong><small>새 캠페인</small></button></li>
+      </ol>
+    </nav>
 
-    <section id="setup-panel" class="setup-panel" aria-labelledby="setup-title" hidden>
-      <div>
-        <p class="eyebrow">LOCAL HOST · PASSIVE STATUS</p>
-        <h2 id="setup-title">운영 환경</h2>
-        <p id="setup-summary" class="setup-summary"></p>
-      </div>
-      <dl id="setup-subsystems" class="setup-subsystems"></dl>
-    </section>
+    <div class="work-area">
+      <section id="campaign-facts" class="campaign-facts" aria-label="이번 캠페인 진행 상황" hidden></section>
+      <button id="cancel-campaign" class="stop-button" type="button" hidden>문제 있음 · 즉시 중단</button>
 
-    <section class="desk-heading" aria-labelledby="desk-title">
-      <div>
-        <p class="eyebrow" id="campaign-id">CAMPAIGN DRAFT</p>
-        <h2 id="desk-title">통합 상태공간</h2>
-      </div>
-      <div id="draft-summary" class="draft-summary" aria-label="초안 요약"></div>
-    </section>
+      <div id="step-content" tabindex="-1">
+        <section id="step-environment" class="flow-step" data-step="environment" aria-labelledby="environment-title" tabindex="-1">
+          <header class="step-heading">
+            <div><p class="step-number">01 · 먼저 확인</p><h2 id="environment-title">환경 준비</h2></div>
+            <p>앱이 로봇, 그리퍼, 카메라 상태를 확인합니다. 필요한 조치만 아래에 표시됩니다.</p>
+          </header>
+          <p id="setup-summary" class="setup-summary"></p>
+          <ul id="setup-subsystems" class="device-list"></ul>
+          <div class="step-actions"><button id="prepare-environment" type="button" hidden>환경 준비</button><button id="environment-next" type="button">수집 계획 보기</button></div>
+        </section>
 
-    <div class="desk-layout">
-      <section class="state-space-panel" aria-labelledby="state-space-title">
-        <header class="panel-heading">
-          <div>
-            <p class="eyebrow">QUALIFIED PLANE · TOP VIEW</p>
-            <h2 id="state-space-title">작업영역과 수집 셀</h2>
+        <section id="step-plan" class="flow-step" data-step="plan" aria-labelledby="plan-title" tabindex="-1" hidden>
+          <header class="step-heading">
+            <div><p class="step-number">02 · 조건 선택</p><h2 id="plan-title">수집 계획</h2></div>
+            <p>등록된 항목에서 한 조합을 고릅니다. 현재 사용할 수 없는 항목에는 이유가 표시됩니다.</p>
+          </header>
+
+          <div id="workspace-entry" class="workspace-entry" hidden>
+            <div><strong>작업영역과 좌표계</strong><span>TCP 위치를 세 점에서 읽어 새 좌표계를 등록합니다.</span></div>
+            <button id="open-workspace" class="secondary-button" type="button">작업영역 관리</button>
           </div>
-          <button id="open-workspace" class="secondary-button" type="button">새 작업영역 등록</button>
-        </header>
 
-        <div id="workspace-meta" class="workspace-meta"></div>
-
-        <div class="authoring-bar">
-          <fieldset id="authoring-mode" class="segmented-control">
-            <legend>작성 방식 · 같은 초안</legend>
-            <label><input type="radio" name="authoring_mode" value="ASSISTED"> 자동 설계</label>
-            <label><input type="radio" name="authoring_mode" value="DIRECT_EDIT"> 직접 편집</label>
+          <fieldset id="catalog-fields" class="catalog-fields">
+            <legend>수집 조건</legend>
+            <label for="workspace-select">작업영역<select id="workspace-select" data-axis="workspace"></select><small data-axis-hint="workspace"></small></label>
+            <label for="frame-select">좌표계<select id="frame-select" data-axis="frame"></select><small data-axis-hint="frame"></small></label>
+            <label for="task-select">작업<select id="task-select" data-axis="task"></select><small data-axis-hint="task"></small></label>
+            <label for="object-select">물체<select id="object-select" data-axis="object"></select><small data-axis-hint="object"></small></label>
+            <label for="grasp-select">잡는 방법<select id="grasp-select" data-axis="grasp"></select><small data-axis-hint="grasp"></small></label>
+            <label for="start-select">시작 자세<select id="start-select" data-axis="start"></select><small data-axis-hint="start"></small></label>
+            <label for="motion-select">로봇 동작<select id="motion-select" data-axis="motion"></select><small data-axis-hint="motion"></small></label>
+            <label for="variant-select">동작 변형<select id="variant-select" data-axis="variant"></select><small data-axis-hint="variant"></small></label>
+            <label for="camera-select">카메라 설정<select id="camera-select" data-axis="camera"></select><small data-axis-hint="camera"></small></label>
+            <label for="data-mode-select">데이터 모드<select id="data-mode-select" data-axis="data_mode"></select><small data-axis-hint="data_mode"></small></label>
           </fieldset>
-          <label class="budget-field" for="budget-input">목표 횟수
-            <input id="budget-input" type="number" min="1" step="1" inputmode="numeric">
-          </label>
-          <button id="apply-budget" class="secondary-button" type="button">초안에 반영</button>
-        </div>
+          <p class="cell-help">항목을 바꾸면 호환되지 않는 다른 항목도 함께 조정될 수 있습니다.</p>
 
-        <div class="coordinate-frame">
-          <span class="axis axis-y" aria-hidden="true">+Y ↑</span>
-          <span class="axis axis-x" aria-hidden="true">−X ← X → +X</span>
-          <div id="cell-grid" class="cell-grid" role="group" aria-label="X Y yaw 수집 셀"></div>
-        </div>
-        <div class="cell-legend" aria-label="셀 범례">
-          <span><i class="dot enough"></i> 충분</span>
-          <span><i class="dot missing"></i> 미수집</span>
-          <span><i class="dot selected"></i> 선택</span>
-          <span><i class="dot blocked"></i> 차단</span>
-        </div>
+          <section class="range-panel" aria-labelledby="range-title">
+            <div class="section-title"><div><p class="step-number">수집 범위</p><h3 id="range-title">수집 위치와 각도</h3></div><p id="plan-lock-reason"></p></div>
+            <div class="range-controls">
+              <fieldset id="authoring-mode" class="segmented-control"><legend>작성 방식</legend>
+                <label><input type="radio" name="authoring_mode" value="ASSISTED"> 자동 선택</label>
+                <label><input type="radio" name="authoring_mode" value="DIRECT_EDIT"> 직접 선택</label>
+              </fieldset>
+              <label for="count-input">에피소드 수<input id="count-input" type="number" min="1" max="100" step="1" inputmode="numeric"></label>
+              <label for="repeat-input">조건별 최대 반복<input id="repeat-input" type="number" min="1" max="100" step="1" inputmode="numeric"></label>
+              <label for="split-select">데이터 구분<select id="split-select" data-axis="split"></select></label>
+            </div>
+            <p id="workspace-domain-summary" class="cell-help"></p>
+            <section id="direct-pose-editor" class="direct-pose-editor" aria-labelledby="direct-pose-title" hidden>
+              <div><h4 id="direct-pose-title">직접 자세</h4><p id="direct-domain-status" role="status"></p></div>
+              <form id="direct-pose-form">
+                <label for="direct-x-input">X (mm)<input id="direct-x-input" name="x_mm" type="number" step="any" inputmode="decimal" required aria-describedby="direct-domain-status"></label>
+                <label for="direct-y-input">Y (mm)<input id="direct-y-input" name="y_mm" type="number" step="any" inputmode="decimal" required aria-describedby="direct-domain-status"></label>
+                <label for="direct-yaw-input">Yaw (°)<input id="direct-yaw-input" name="yaw_deg" type="number" step="any" inputmode="decimal" required aria-describedby="direct-domain-status"></label>
+                <button id="add-direct-pose" type="submit">자세 추가</button>
+              </form>
+              <ol id="direct-pose-list" class="direct-pose-list" aria-label="입력된 직접 자세 순서" aria-live="polite"></ol>
+            </section>
+            <div id="cell-grid" class="cell-grid" role="group" aria-label="수집 위치와 각도"></div>
+            <p class="cell-help">등록된 셀은 빠른 선택용입니다. 직접 입력 범위는 현재 작업영역 값으로 정합니다.</p>
+          </section>
+          <div class="step-actions"><button id="plan-back" class="secondary-button" type="button">환경 다시 보기</button><button id="compile-campaign" type="button" aria-describedby="plan-lock-reason">계획 확인</button></div>
+        </section>
 
-        <section class="runtime-panel" aria-labelledby="runtime-title">
-          <div>
-            <p class="eyebrow">CURRENT CHECKPOINT</p>
-            <h3 id="runtime-title">현재 상태</h3>
+        <section id="step-review" class="flow-step" data-step="review" aria-labelledby="review-title" tabindex="-1" hidden>
+          <header class="step-heading">
+            <div><p class="step-number">03 · 실행 승인</p><h2 id="review-title">계획 확인</h2></div>
+            <p>표시된 범위에서 에피소드를 순서대로 실행합니다. 조건을 바꾸면 새 계획이 필요합니다.</p>
+          </header>
+          <dl id="review-summary" class="review-summary"></dl>
+          <section id="review-plan" class="review-plan" aria-labelledby="review-plan-title" hidden>
+            <h3 id="review-plan-title">에피소드 실행 순서</h3>
+            <ol id="review-plan-list"></ol>
+          </section>
+          <div class="notice"><strong>이 승인은 이번 계획에만 적용됩니다.</strong><span>수집 결과를 학습에 사용할지는 결과 검토 뒤 별도로 결정합니다.</span></div>
+          <div class="step-actions"><button id="review-back" class="secondary-button" type="button">계획 수정</button><div id="review-actions"></div></div>
+        </section>
+
+        <section id="step-execution" class="flow-step" data-step="execution" aria-labelledby="execution-title" tabindex="-1" hidden>
+          <header class="step-heading">
+            <div><p class="step-number">04 · 자동 연속 실행</p><h2 id="execution-title">실행</h2></div>
+            <p>각 에피소드 완료를 앱이 확인하면 다음 에피소드가 자동으로 시작됩니다.</p>
+          </header>
+          <div id="runtime-content" class="runtime-content"></div>
+        </section>
+
+        <section id="step-results" class="flow-step" data-step="results" aria-labelledby="results-title" tabindex="-1" hidden>
+          <header class="step-heading">
+            <div><p class="step-number">05 · 수집 뒤 확인</p><h2 id="results-title">결과</h2></div>
+            <p>기술 결과와 사후 검토는 별개입니다. 측정하지 않은 항목은 실패로 표시하지 않습니다.</p>
+          </header>
+          <div class="result-layout"><div><h3>에피소드 결과</h3><ol id="episode-results" class="episode-results"></ol></div><div><h3>수집 커버리지</h3><div id="coverage-summary" class="coverage-summary"></div></div></div>
+          <div id="review-queue"></div>
+          <div class="step-actions"><button id="results-next" type="button">다음 수집 보기</button></div>
+        </section>
+
+        <section id="step-next" class="flow-step" data-step="next" aria-labelledby="next-title" tabindex="-1" hidden>
+          <header class="step-heading">
+            <div><p class="step-number">06 · 프로세스 재시작 없음</p><h2 id="next-title">다음 수집</h2></div>
+            <p>완료한 실행은 그대로 보존하고 새 캠페인을 시작합니다.</p>
+          </header>
+          <div class="next-options">
+            <article><h3>다음 캠페인 계획</h3><p>현재 조건을 복사합니다. 그대로 사용하거나 계획 화면에서 필요한 항목만 바꿀 수 있습니다.</p><div id="same-settings-action"></div></article>
           </div>
-          <div id="runtime-content"></div>
-          <div id="intent-buttons" class="intent-buttons"></div>
         </section>
-      </section>
+      </div>
 
-      <aside class="inspector" aria-label="캠페인 세부정보">
-        <section aria-labelledby="lane-title">
-          <p class="eyebrow">FIXED LANE</p>
-          <h2 id="lane-title">고정 수집 조건</h2>
-          <dl id="lane-details" class="detail-list"></dl>
-        </section>
-
-        <section aria-labelledby="capability-title">
-          <p class="eyebrow">CAPABILITY / REASON</p>
-          <h2 id="capability-title">현재 사용 가능성</h2>
-          <ul id="capability-list" class="capability-list"></ul>
-        </section>
-
-        <section aria-labelledby="effect-title">
-          <p class="eyebrow">NO-SIDE-EFFECT RECEIPT</p>
-          <h2 id="effect-title">금지 효과 계수</h2>
-          <dl id="effect-counts" class="effect-counts"></dl>
-        </section>
-      </aside>
+      <details id="technical-details" class="technical-details">
+        <summary>기술 정보</summary>
+        <dl id="technical-content"></dl>
+      </details>
     </div>
   </main>
 
   <dialog id="workspace-dialog" aria-labelledby="workspace-dialog-title">
-    <form method="dialog" class="dialog-shell">
-      <header class="dialog-heading">
-        <div>
-          <p class="eyebrow">FAKE WORKSPACE WIZARD · 3 POINT</p>
-          <h2 id="workspace-dialog-title">새 작업영역 등록</h2>
-        </div>
-        <button class="icon-button" value="close" aria-label="작업영역 등록 닫기">×</button>
+    <section class="workspace-dialog-shell">
+      <header class="workspace-dialog-heading">
+        <div><p class="step-number">CENTER → X_REF → Y_CHECK</p><h2 id="workspace-dialog-title">작업영역 관리</h2></div>
+        <button id="close-workspace" class="secondary-button" type="button">수집 계획으로 돌아가기</button>
       </header>
-      <p class="wizard-warning"><strong>적격 평면이 먼저입니다.</strong> 출처 artifact, <code>table_normal_base</code>, exact digest가 있는 같은 고정 table plane만 재사용합니다. 임의 normal과 기본값은 허용하지 않습니다.</p>
-      <div id="plane-reference" class="plane-reference"></div>
-
-      <ol class="wizard-flow">
-        <li>
-          <span>01</span>
-          <div><h3>출력 원본 100 mm 측정</h3><p>nominal sheet를 인쇄해 자로 잰 source measurement를 입력합니다. 이 값으로 compensated family를 만듭니다.</p>
-            <label for="source-measurement">출처 실측값 (mm)<input id="source-measurement" type="number" min="95" max="105" step="0.01" inputmode="decimal"></label>
-          </div>
-        </li>
-        <li>
-          <span>02</span>
-          <div><h3>보정 출력의 최종 100 mm 재측정</h3><p>보정본을 다시 인쇄하고 final physical bar를 다시 잽니다. 허용 범위를 통과한 exact printed family만 point capture에 사용합니다.</p>
-            <label for="final-measurement">최종 실측값 (mm)<input id="final-measurement" type="number" min="99" max="101" step="0.01" inputmode="decimal"></label>
-          </div>
-        </li>
-        <li>
-          <span>03</span>
-          <div><h3>CENTER → X_REF → Y_CHECK 캡처</h3><p>FAKE fresh snapshot만 캡처합니다. Y_CHECK는 새 +Z를 만들지 않고 기존 적격 평면 위의 축과 residual을 독립 검증합니다.</p>
-            <div id="capture-buttons" class="capture-buttons"></div>
-          </div>
-        </li>
-      </ol>
-      <div class="dialog-actions">
-        <button id="save-workspace" type="button">preview를 새 revision으로 저장</button>
-        <p>저장은 fake candidate만 만듭니다. config promotion, motion qualification, 생산·학습 승인은 만들지 않습니다.</p>
-      </div>
-    </form>
+      <dl id="workspace-selection" class="workspace-selection"></dl>
+      <p class="workspace-manual-note"><strong>이 화면은 로봇 동작 명령을 보내지 않습니다.</strong> 티치 펜던트 또는 수동 방식으로 TCP를 표시된 위치에 놓으세요. 캡처 버튼은 현재 자세만 읽습니다.</p>
+      <p id="workspace-next-action" class="workspace-next-action" role="status"></p>
+      <ol id="workspace-captures" class="workspace-captures" aria-label="좌표계 캡처 순서"></ol>
+      <form id="workspace-preview-form" class="workspace-preview-form" hidden>
+        <div>
+          <label for="source-scale-bar">원본 100 mm 눈금 실측값 (mm)<input id="source-scale-bar" name="source_scale_bar_mm" type="number" min="0.01" step="any" inputmode="decimal" required></label>
+          <label for="final-scale-bar">최종 100 mm 눈금 실측값 (mm)<input id="final-scale-bar" name="final_scale_bar_mm" type="number" min="96" max="104" step="any" inputmode="decimal" required></label>
+        </div>
+        <button id="preview-workspace" type="submit">좌표계 미리보기</button>
+      </form>
+      <div id="workspace-preview-status" class="workspace-preview-status"></div>
+      <div id="workspace-promotion" class="workspace-promotion"></div>
+    </section>
   </dialog>
 
-  <footer>
-    <span>브라우저는 lifecycle owner가 아닙니다.</span>
-    <span>same-origin <code>GET /api/view</code> · <code>POST /api/intent</code></span>
-  </footer>
+  <footer><span>화면은 현재 상태를 표시하고 요청만 보냅니다.</span><span>수집 완료는 학습 사용 승인이 아닙니다.</span></footer>
   <div id="announcer" class="sr-only" role="status" aria-live="polite" aria-atomic="true"></div>
 </body>
 </html>

@@ -25,7 +25,16 @@ from tools.data_factory.one_job import (
     TEST_ONLY_READINESS_CONTRACT,
     hil_numeric_gripper_verdict,
 )
+from tools.data_factory.campaign_authorization import (
+    validate_campaign_authorization,
+    validate_runtime_campaign_scope,
+)
 from tools.data_factory.cell_state import CellStateStore
+from tools.data_factory.episode_ledger import (
+    build_lerobot_v3_episode_locator,
+    compile_episode_ledger,
+    project_episode_state,
+)
 from tools.data_factory.operator_setup import (
     validate_test_only_episode_binding,
     validate_test_only_planned_start,
@@ -65,6 +74,7 @@ COMMON_RUN_KEYS = {
     "motion_qualification", "home_candidate", "urdf", "expected_robot_system_id",
 }
 RECYCLE_COORD_KEYS = {"recycle_x_mm", "recycle_y_mm"}
+RECYCLE_YAW_KEY = "recycle_yaw_deg"
 LIVE_RUN_KEYS = COMMON_RUN_KEYS | {"camera_profile", "dataset_root", "run_root"}
 RESPONSE_KEYS = {"schema_version", "op_id", "op", "ok", "code", "state", "run_id", "plan_digest", "data"}
 EVENT_KEYS = {"schema_version", "event", "sequence", "origin_op_id", "ok", "code", "state", "run_id", "plan_digest", "data"}
@@ -76,6 +86,7 @@ REVIEW_REASONS = (
     "WRONG_OBJECT_OR_START", "GRASP_OR_LIFT", "TRAJECTORY_FLOW", "TASK_GOAL",
     "UNMODELED_CONTACT", "RELEASE_SCENE", "UNKNOWN",
 )
+EPISODE_LEDGER_CONTEXT_FIELDS = frozenset({"manifest", "intent"})
 ROOT = Path(__file__).resolve().parents[2]
 DATA_PYTHON = str(ROOT / ".venv/bin/python")
 
@@ -129,17 +140,22 @@ def _run_payload(value):
         raise ContractError("RUN_PAYLOAD")
     keys = set(COMMON_RUN_KEYS if value["mode"] == "plan_only" else LIVE_RUN_KEYS)
     supplied_recycle = set(value) & RECYCLE_COORD_KEYS
+    supplied_recycle_yaw = RECYCLE_YAW_KEY in value
     if supplied_recycle:
         if supplied_recycle != RECYCLE_COORD_KEYS:
             raise ContractError("RUN_PAYLOAD")
         keys |= RECYCLE_COORD_KEYS
+    if supplied_recycle_yaw:
+        if not supplied_recycle:
+            raise ContractError("RUN_PAYLOAD")
+        keys.add(RECYCLE_YAW_KEY)
     _exact(value, keys, "RUN_PAYLOAD")
     _identifier(value["run_id"], "RUN_ID")
     if not isinstance(value["job"], dict):
         raise ContractError("RUN_JOB")
-    for key in keys - {"job"} - RECYCLE_COORD_KEYS:
+    for key in keys - {"job"} - RECYCLE_COORD_KEYS - {RECYCLE_YAW_KEY}:
         _text(value[key], "RUN_PAYLOAD")
-    for key in supplied_recycle:
+    for key in supplied_recycle | ({RECYCLE_YAW_KEY} if supplied_recycle_yaw else set()):
         if isinstance(value[key], bool) or not isinstance(value[key], (int, float)) or not math.isfinite(value[key]):
             raise ContractError("RUN_PAYLOAD")
     return copy.deepcopy(value)
@@ -243,7 +259,7 @@ def _scene_binding(validated, release_pose, run_id, root=ROOT / "outputs/data_fa
         "object_instance_id": matches[0]["instance_id"],
         "release_slot": slot,
     }
-    if matches[0].get("source") == "ROBOT_RELEASE":
+    if matches[0].get("source") in {"ROBOT_RELEASE", "ROBOT_RELEASE_PROXY"}:
         source_slot = release_slot(
             robot_system_id=job["robot_system_id"], pose=pose,
             object_profile_id=job["object_profile_id"],
@@ -276,7 +292,17 @@ def resolve_inputs(payload, *, scene_binding_call=_scene_binding):
     release_pose = {key: validated["normalized_job"][key] for key in ("place_id", "yaw_deg", "x_mm", "y_mm")}
     if RECYCLE_COORD_KEYS <= set(payload):
         sheet = _load(payload["selected_sheet"], "INPUT_SELECTED_SHEET")
-        x_mm, y_mm = bounded_place_coordinate(sheet, payload["recycle_x_mm"], payload["recycle_y_mm"])
+        if RECYCLE_YAW_KEY in payload:
+            recycle_yaw = payload[RECYCLE_YAW_KEY] % 360
+            x_mm, y_mm = bounded_place_coordinate(
+                sheet, payload["recycle_x_mm"], payload["recycle_y_mm"],
+                yaw_deg=recycle_yaw,
+            )
+            release_pose["yaw_deg"] = recycle_yaw
+        else:
+            x_mm, y_mm = bounded_place_coordinate(
+                sheet, payload["recycle_x_mm"], payload["recycle_y_mm"],
+            )
         release_pose.update(x_mm=x_mm, y_mm=y_mm)
     program = resolve_motion_program(
         validated,
@@ -476,7 +502,7 @@ def _approval(run_id, digest, operator_id, scope, *, source="HUMAN"):
 
 def _button_plan_decision(
     provider, *, run_id, plan_digest, approval_scope, decision_binding,
-    operator_id, timeout_s,
+    operator_id, timeout_s, expected_source="LOCAL_UI_BUTTON",
 ):
     request = {
         "schema_version": "data_factory.plan_decision_request.v1",
@@ -512,7 +538,7 @@ def _button_plan_decision(
         or value.get("plan_digest") != plan_digest
         or value.get("approval_scope") != approval_scope
         or value.get("decision_binding_digest") != expected_digest
-        or value.get("decision_source") != "LOCAL_UI_BUTTON"
+        or value.get("decision_source") != expected_source
         or value.get("operator_label") != operator_id
     ):
         raise ContractError("PLAN_DECISION_BINDING")
@@ -521,7 +547,7 @@ def _button_plan_decision(
 
 def _operator_checkpoint(
     provider, *, kind, run_id, plan_digest, prompt, choices, evidence,
-    operator_id, timeout_s,
+    operator_id, timeout_s, expected_source="LOCAL_UI_BUTTON",
 ):
     request = {
         "schema_version": "data_factory.operator_checkpoint_request.v1",
@@ -557,7 +583,7 @@ def _operator_checkpoint(
         or value.get("run_id") != run_id
         or value.get("plan_digest") != plan_digest
         or value.get("checkpoint_binding_digest") != canonical_digest(bound)
-        or value.get("decision_source") != "LOCAL_UI_BUTTON"
+        or value.get("decision_source") != expected_source
         or value.get("operator_label") != operator_id
     ):
         raise ContractError("OPERATOR_CHECKPOINT_BINDING")
@@ -647,7 +673,7 @@ def _recover_quality_rejected_recycle(result, summary, cell_store, operator_id, 
         or result.get("recorder_state") != "ABORTED"
         or not isinstance(summary.get("recycle"), dict)
         or not isinstance(release_evidence, dict)
-        or release_evidence.get("human_verdict") != "LANDED"
+        or not _release_outcome_landed(release_evidence)
         or release_evidence.get("release_slot_id") != summary["recycle"]["release_slot_id"]
         or not isinstance(transition, dict)
         or not isinstance(transition.get("scene_state_digest"), str)
@@ -661,6 +687,20 @@ def _recover_quality_rejected_recycle(result, summary, cell_store, operator_id, 
         raise ContractError("POSTREJECT_CELL_STATE")
     return transition["scene_state_digest"], cell_store.acknowledge_ready(
         operator_id, expected_run_id=payload["run_id"], expected_plan_digest=plan_digest,
+    )
+
+
+def _release_outcome_landed(evidence):
+    if not isinstance(evidence, Mapping):
+        return False
+    if evidence.get("schema_version") == "data_factory.recycle_release_evidence.v1":
+        return evidence.get("human_verdict") == "LANDED"
+    return (
+        evidence.get("schema_version") == "data_factory.recycle_release_evidence.v2"
+        and evidence.get("release_outcome") in {"LANDED", "EXPECTED_LANDED"}
+        and evidence.get("outcome_source") in {
+            "HUMAN_TTY", "LOCAL_UI_BUTTON", "CAMPAIGN_CONTROL_PROXY",
+        }
     )
 
 
@@ -978,6 +1018,235 @@ def _write_resource_reference(payload, monitor, recorder_evidence, profile):
     return report
 
 
+def _validate_episode_ledger_context(value, *, episode_binding, run_id):
+    """Bind campaign-owned immutable inputs before any postcommit file is written."""
+    if not isinstance(value, Mapping) or set(value) != EPISODE_LEDGER_CONTEXT_FIELDS:
+        raise ContractError("EPISODE_LEDGER_CONTEXT_FIELDS")
+    manifest = value["manifest"]
+    intent = value["intent"]
+    if not isinstance(manifest, Mapping) or not isinstance(intent, Mapping):
+        raise ContractError("EPISODE_LEDGER_CONTEXT_FIELDS")
+    manifest = copy.deepcopy(dict(manifest))
+    intent = copy.deepcopy(dict(intent))
+    manifest_digest = manifest.get("manifest_digest")
+    intent_digest = intent.get("intent_digest")
+    slot = intent.get("slot")
+    if (
+        not isinstance(manifest_digest, str)
+        or not DIGEST.fullmatch(manifest_digest)
+        or manifest_digest != canonical_digest({
+            key: item for key, item in manifest.items() if key != "manifest_digest"
+        })
+        or not isinstance(intent_digest, str)
+        or not DIGEST.fullmatch(intent_digest)
+        or intent_digest != canonical_digest({
+            key: item for key, item in intent.items() if key != "intent_digest"
+        })
+        or intent.get("run_id") != run_id
+        or intent.get("manifest_digest") != manifest_digest
+        or not isinstance(slot, Mapping)
+        or episode_binding.get("manifest_digest") != manifest_digest
+        or episode_binding.get("intent_digest") != intent_digest
+        or episode_binding.get("slot_digest") != canonical_digest(slot)
+    ):
+        raise ContractError("EPISODE_LEDGER_CONTEXT_BINDING")
+    return {"manifest": manifest, "intent": intent}
+
+
+def _json_artifact_ref(path, payload):
+    path = Path(path).resolve(strict=True)
+    return {"artifact_path": str(path), "artifact_digest": canonical_digest(payload)}
+
+
+def _jsonl_artifact_ref(path, *, selected=None):
+    path = Path(path).resolve(strict=True)
+    try:
+        rows = [load_json_strict(line) for line in path.read_text(encoding="utf-8").splitlines()]
+    except (OSError, ContractError) as exc:
+        raise ContractError("EPISODE_LEDGER_ARTIFACT_IO") from exc
+    if not rows:
+        raise ContractError("EPISODE_LEDGER_ARTIFACT_IO")
+    payload = rows if selected is None else selected
+    return {"artifact_path": str(path), "artifact_digest": canonical_digest(payload)}
+
+
+def _lerobot_v3_episode_locator(dataset_root, repo_id, episode_index):
+    """Read finalized LeRobot v3 metadata and return file-local shard ranges."""
+    try:
+        from lerobot.datasets.io_utils import load_episodes, load_info
+
+        root = Path(dataset_root).resolve(strict=True)
+        episodes = list(load_episodes(root))
+        info = load_info(root)
+        matches = [
+            row for row in episodes
+            if type(row.get("episode_index")) is int
+            and row["episode_index"] == episode_index
+        ]
+        if len(matches) != 1:
+            raise ContractError("EPISODE_LEDGER_LOCATOR_EPISODE")
+        episode = matches[0]
+        data_chunk = int(episode["data/chunk_index"])
+        data_file = int(episode["data/file_index"])
+        shard = [
+            row for row in episodes
+            if int(row["data/chunk_index"]) == data_chunk
+            and int(row["data/file_index"]) == data_file
+        ]
+        file_base = min(int(row["dataset_from_index"]) for row in shard)
+        dataset_from = int(episode["dataset_from_index"])
+        dataset_to = int(episode["dataset_to_index"])
+        rows = dataset_to - dataset_from
+        if rows <= 0 or int(episode["length"]) != rows:
+            raise ContractError("EPISODE_LEDGER_LOCATOR_RANGE")
+        videos = []
+        for camera_key in sorted(
+            key for key, feature in info.features.items()
+            if isinstance(feature, Mapping) and feature.get("dtype") == "video"
+        ):
+            prefix = f"videos/{camera_key}"
+            chunk_index = int(episode[f"{prefix}/chunk_index"])
+            file_index = int(episode[f"{prefix}/file_index"])
+            timestamp_start = float(episode[f"{prefix}/from_timestamp"])
+            timestamp_end = float(episode[f"{prefix}/to_timestamp"])
+            frame_start = round(timestamp_start * info.fps)
+            frame_end = round(timestamp_end * info.fps)
+            if frame_end - frame_start != rows:
+                raise ContractError("EPISODE_LEDGER_LOCATOR_RANGE")
+            videos.append({
+                "camera_key": camera_key,
+                "chunk_index": chunk_index,
+                "file_index": file_index,
+                "relative_path": info.video_path.format(
+                    video_key=camera_key,
+                    chunk_index=chunk_index,
+                    file_index=file_index,
+                ),
+                "file_frame_start": frame_start,
+                "file_frame_end_exclusive": frame_end,
+                "timestamp_start_s": timestamp_start,
+                "timestamp_end_s": timestamp_end,
+            })
+        return build_lerobot_v3_episode_locator(
+            repo_id=repo_id,
+            episode_index=episode_index,
+            data={
+                "chunk_index": data_chunk,
+                "file_index": data_file,
+                "relative_path": info.data_path.format(
+                    chunk_index=data_chunk, file_index=data_file,
+                ),
+                "file_row_start": dataset_from - file_base,
+                "file_row_end_exclusive": dataset_to - file_base,
+            },
+            videos=videos,
+        )
+    except ContractError:
+        raise
+    except (ImportError, KeyError, OSError, TypeError, ValueError) as exc:
+        raise ContractError("EPISODE_LEDGER_LOCATOR_IO") from exc
+
+
+def _write_episode_ledger(
+    payload, validated, profile, lifecycle, storage_reference,
+    episode_binding, ledger_context,
+):
+    """Compile the immutable postcommit join from the existing owner artifacts."""
+    context = _validate_episode_ledger_context(
+        ledger_context, episode_binding=episode_binding, run_id=payload["run_id"],
+    )
+    if not isinstance(storage_reference, Mapping):
+        raise ContractError("EPISODE_LEDGER_STORAGE_REQUIRED")
+    episode_ref = storage_reference.get("episode_ref")
+    episode_index = episode_ref.get("episode_index") if isinstance(episode_ref, Mapping) else None
+    execution = getattr(lifecycle, "execution_response", None)
+    if (
+        type(episode_index) is not int
+        or episode_index < 0
+        or not isinstance(execution, Mapping)
+        or execution.get("state") != "COMPLETED"
+        or execution.get("ok") is not True
+    ):
+        raise ContractError("EPISODE_LEDGER_RUNTIME_EVIDENCE")
+    run_dir = _run_dir(payload)
+    documents = {
+        "manifest": (run_dir / "campaign_manifest.json", context["manifest"]),
+        "intent": (run_dir / "episode_intent.json", context["intent"]),
+        "execution": (run_dir / "execution_response.json", copy.deepcopy(dict(execution))),
+        "runtime_binding": (run_dir / "runtime_episode_binding.json", copy.deepcopy(dict(episode_binding))),
+    }
+    for path, document in documents.values():
+        write_json_atomic(path, document)
+    dataset_root = Path(payload["dataset_root"]).resolve(strict=True)
+    quality_path = dataset_root / "meta/recording_quality.jsonl"
+    try:
+        quality_rows = [
+            load_json_strict(line)
+            for line in quality_path.read_text(encoding="utf-8").splitlines()
+        ]
+    except (OSError, ContractError) as exc:
+        raise ContractError("EPISODE_LEDGER_RECORDING_QUALITY_IO") from exc
+    matches = [row for row in quality_rows if row.get("episode_index") == episode_index]
+    if len(matches) != 1:
+        raise ContractError("EPISODE_LEDGER_RECORDING_QUALITY_EPISODE")
+    artifacts = {
+        "episode": _json_artifact_ref(run_dir / "storage_usage.json", storage_reference),
+        "run": _json_artifact_ref(run_dir / "result.json", load_json_strict(run_dir / "result.json")),
+        "staging_manifest": _json_artifact_ref(
+            run_dir / "staging_manifest.json", load_json_strict(run_dir / "staging_manifest.json"),
+        ),
+        "manifest": _json_artifact_ref(*documents["manifest"]),
+        "intent": _json_artifact_ref(*documents["intent"]),
+        "plan": _json_artifact_ref(
+            run_dir / "preapproval_evidence.json", load_json_strict(run_dir / "preapproval_evidence.json"),
+        ),
+        "technical": _json_artifact_ref(
+            run_dir / "technical_validator.json", load_json_strict(run_dir / "technical_validator.json"),
+        ),
+        "source_provenance": _jsonl_artifact_ref(
+            dataset_root / "meta/source_provenance" / f"episode-{episode_index:06d}.jsonl",
+        ),
+        "recording_quality": _jsonl_artifact_ref(quality_path, selected=matches[0]),
+        "execution": _json_artifact_ref(*documents["execution"]),
+        "runtime_binding": _json_artifact_ref(*documents["runtime_binding"]),
+    }
+    dataset_digest = canonical_digest({
+        "repo_id": profile["repo_id"],
+        "dataset_root": str(dataset_root),
+        "episode_ref": episode_ref,
+    })
+    ledger = compile_episode_ledger(
+        dataset={
+            "dataset_id": f"dataset-{dataset_digest[7:23]}",
+            "repo_id": profile["repo_id"],
+            "dataset_root": str(dataset_root),
+            "dataset_digest": dataset_digest,
+        },
+        artifacts=artifacts,
+        episode_locator=_lerobot_v3_episode_locator(
+            dataset_root, profile["repo_id"], episode_index,
+        ),
+    )
+    path = run_dir / "episode_ledger.json"
+    write_json_atomic(path, ledger)
+    state = project_episode_state(ledger=ledger)
+    state_path = run_dir / "episode_ledger_state.json"
+    write_json_atomic(state_path, state)
+    return {
+        "schema_version": "data_factory.episode_ledger_reference.v1",
+        "path": str(path.resolve(strict=True)),
+        "ledger_digest": ledger["ledger_digest"],
+        "episode_ref_digest": ledger["episode"]["episode_ref_digest"],
+        "technical_status": ledger["admission"]["technical_status"],
+        "state_path": str(state_path.resolve(strict=True)),
+        "state_digest": state["state_digest"],
+        "review_status": state["review"]["semantic_status"],
+        "retention_state": state["retention"]["retention_state"],
+        "reclaim_state": state["retention"]["reclaim_state"],
+        "training_status": "NOT_AUTHORIZED",
+    }
+
+
 def run_plan_only(payload, cancel, publish, *, resolver=resolve_inputs, executor_factory=_executor):
     """Resolve and plan once; recorder, dataset, camera, and robot execution stay absent."""
     try:
@@ -1052,14 +1321,19 @@ def run_live(payload, cancel, publish, *, resolver=resolve_inputs, executor_fact
              decision_timeout_s=None, checkpoint_provider=None,
              checkpoint_timeout_s=None, test_only_root_binding=None,
              test_only_episode_binding=None, test_only_start_binding=None,
+             episode_ledger_context=None,
              preapproval_checklist=None,
+             campaign_authorization=None,
              candidate_writer_enabled=True,
-             repository_root=ROOT):
+             repository_root=ROOT, clock=None):
     """Public single HIL run: plan and human approval precede recorder begin and motion."""
     executor = recorder = resource_monitor = None
     resource_finished = False
     profile = None
     try:
+        current_clock = clock or (lambda: datetime.now(timezone.utc))
+        if not callable(current_clock):
+            raise ContractError("RUNNER_CLOCK")
         if approval_scope not in {"HUMAN_GATED", "HIL_NUMERIC_PROXY"}:
             raise ContractError("APPROVAL_SCOPE")
         if checkpoint_provider is not None and not callable(checkpoint_provider):
@@ -1093,6 +1367,7 @@ def run_live(payload, cancel, publish, *, resolver=resolve_inputs, executor_fact
                 candidate_writer_enabled is not True
                 or test_only_episode_binding is not None
                 or test_only_start_binding is not None
+                or episode_ledger_context is not None
             ):
                 raise ContractError("CANDIDATE_WRITER_SCOPE")
             cell_root = ROOT / "outputs/data_factory/cells"
@@ -1124,8 +1399,34 @@ def run_live(payload, cancel, publish, *, resolver=resolve_inputs, executor_fact
                 )
             except (AttributeError, ValueError) as exc:
                 raise ContractError("TEST_ONLY_EPISODE_EXPIRY") from exc
-            if expires_at.astimezone(timezone.utc) <= datetime.now(timezone.utc):
+            if expires_at.astimezone(timezone.utc) <= current_clock().astimezone(timezone.utc):
                 raise ContractError("TEST_ONLY_EPISODE_EXPIRED")
+        if campaign_authorization is not None:
+            if (
+                episode_binding is None
+                or approval_scope != "HIL_NUMERIC_PROXY"
+            ):
+                raise ContractError("CAMPAIGN_AUTHORIZATION_BINDING")
+            validate_campaign_authorization(
+                campaign_authorization, now=current_clock(),
+                operator_label=validated["normalized_job"]["operator_or_agent_id"],
+                manifest_digest=episode_binding["manifest_digest"],
+                data_disposition="TEST_ONLY" if test_only else "PRODUCTION",
+            )
+            validate_runtime_campaign_scope(
+                campaign_authorization, resolved_inputs=validated,
+                episode_binding=episode_binding, now=current_clock(),
+            )
+            if episode_ledger_context is None:
+                raise ContractError("EPISODE_LEDGER_CONTEXT_REQUIRED")
+        ledger_context = (
+            _validate_episode_ledger_context(
+                episode_ledger_context,
+                episode_binding=episode_binding,
+                run_id=payload["run_id"],
+            )
+            if episode_ledger_context is not None else None
+        )
         profile = _collection_profile(validated, payload)
         if cancel.is_set():
             return _response(ok=False, code="CANCELLED", state="CANCELLED", run_id=payload["run_id"])
@@ -1239,6 +1540,10 @@ def run_live(payload, cancel, publish, *, resolver=resolve_inputs, executor_fact
                     "planned_start_evidence_digest": canonical_digest(planned_start),
                     "data_disposition": "TEST_ONLY",
                 },
+                expected_source=(
+                    "CAMPAIGN_AUTHORIZATION"
+                    if campaign_authorization is not None else "LOCAL_UI_BUTTON"
+                ),
             )
             if site_confirmation is None or site_confirmation["choice"] != "READY":
                 return _response(
@@ -1297,6 +1602,10 @@ def run_live(payload, cancel, publish, *, resolver=resolve_inputs, executor_fact
                     } if test_only else {}),
                 },
                 operator_id=operator_id, timeout_s=decision_timeout_s,
+                expected_source=(
+                    "CAMPAIGN_AUTHORIZATION"
+                    if campaign_authorization is not None else "LOCAL_UI_BUTTON"
+                ),
             )
             if decision is None:
                 return _response(ok=False, code="PAUSED_AWAITING_OPERATOR", state="PLANNED", run_id=payload["run_id"], plan_digest=planned["plan_digest"], data={
@@ -1326,7 +1635,11 @@ def run_live(payload, cancel, publish, *, resolver=resolve_inputs, executor_fact
             tty_decision(approval_prompt, f"APPROVE {planned['plan_digest']}")
         if cancel.is_set():
             return _response(ok=False, code="CANCELLED", state="CANCELLED", run_id=payload["run_id"], plan_digest=planned["plan_digest"])
-        approval_source = decision_source if test_only else "HUMAN"
+        approval_source = (
+            "CAMPAIGN_AUTHORIZATION"
+            if campaign_authorization is not None
+            else decision_source if test_only else "HUMAN"
+        )
         approved = job.approve(_approval(
             payload["run_id"], planned["plan_digest"], operator_id,
             approval_scope, source=approval_source,
@@ -1409,6 +1722,18 @@ def run_live(payload, cancel, publish, *, resolver=resolve_inputs, executor_fact
                 except (ContractError, OSError, ValueError):
                     resource_finished = True
                     postcommit_error = postcommit_error or "RESOURCE_EVIDENCE_ERROR"
+                ledger_reference = None
+                if ledger_context is not None and storage_reference is not None:
+                    try:
+                        ledger_reference = _write_episode_ledger(
+                            payload, validated, profile, job, storage_reference,
+                            episode_binding, ledger_context,
+                        )
+                    except (ContractError, OSError) as exc:
+                        postcommit_error = postcommit_error or (
+                            exc.code if isinstance(exc, ContractError)
+                            else "EPISODE_LEDGER_WRITE_ERROR"
+                        )
                 terminal_error = postcommit_error or (None if technical["ok"] else "TECHNICAL_VALIDATOR_FAILED")
                 if terminal_error is not None:
                     # A committed episode remains forensic evidence, but cannot unlock the cell.
@@ -1416,6 +1741,7 @@ def run_live(payload, cancel, publish, *, resolver=resolve_inputs, executor_fact
                     return _response(ok=False, code=terminal_error, state="BLOCKED", run_id=payload["run_id"], plan_digest=planned["plan_digest"], data={
                         "mode": "live", "operator_summary": summary, "technical_validator": validator_reference,
                         "storage_usage": storage_reference, "resource_usage": resource_reference,
+                        "episode_ledger": ledger_reference,
                         "camera_warmup_digest": canonical_digest(camera_warmup),
                         "postcommit_cell_state": cell,
                         "camera_semantic_authority": False, "training_authorized": False,
@@ -1426,7 +1752,7 @@ def run_live(payload, cancel, publish, *, resolver=resolve_inputs, executor_fact
                     transition = execution.get("scene_transition") if isinstance(execution, dict) else None
                     if (
                         not isinstance(release_evidence, dict)
-                        or release_evidence.get("human_verdict") != "LANDED"
+                        or not _release_outcome_landed(release_evidence)
                         or release_evidence.get("release_slot_id") != summary["recycle"]["release_slot_id"]
                         or not isinstance(transition, dict)
                         or not isinstance(transition.get("scene_state_digest"), str)
@@ -1446,6 +1772,7 @@ def run_live(payload, cancel, publish, *, resolver=resolve_inputs, executor_fact
                     return _response(ok=True, code="VALIDATED", state="COMPLETE", run_id=payload["run_id"], plan_digest=planned["plan_digest"], data={
                         "mode": "live", "operator_summary": summary, "technical_validator": validator_reference,
                         "storage_usage": storage_reference, "resource_usage": resource_reference,
+                        "episode_ledger": ledger_reference,
                         "camera_warmup_digest": canonical_digest(camera_warmup),
                         "postcommit_scene_state_digest": transition["scene_state_digest"], "postcommit_cell_state": cell,
                         "frozen_rows": result["frozen_rows"], "rows_after_recycle": result["rows_after_recycle"],
@@ -1501,6 +1828,7 @@ def run_live(payload, cancel, publish, *, resolver=resolve_inputs, executor_fact
                 return _response(ok=True, code="VALIDATED", state="COMPLETE", run_id=payload["run_id"], plan_digest=planned["plan_digest"], data={
                     "mode": "live", "operator_summary": summary, "technical_validator": validator_reference,
                     "storage_usage": storage_reference, "resource_usage": resource_reference,
+                    "episode_ledger": ledger_reference,
                     "camera_warmup_digest": canonical_digest(camera_warmup),
                     "postcommit_scene_state_digest": scene["scene_state_digest"], "postcommit_cell_state": cell,
                     **test_only_projection,
@@ -1612,6 +1940,7 @@ def run_live(payload, cancel, publish, *, resolver=resolve_inputs, executor_fact
                                     (f"LANDED {recycle['plan_digest']}", "OFF_SLOT", "UNCERTAIN"),
                                 )
                                 decision = "LANDED" if decision.startswith("LANDED ") else decision
+                                source = "HUMAN"
                             else:
                                 checkpoint = _operator_checkpoint(
                                     checkpoint_provider,
@@ -1620,33 +1949,46 @@ def run_live(payload, cancel, publish, *, resolver=resolve_inputs, executor_fact
                                     choices=("LANDED", "OFF_SLOT", "UNCERTAIN"),
                                     operator_id=operator_id, timeout_s=checkpoint_timeout_s,
                                     evidence=evidence,
+                                    expected_source=(
+                                        "CAMPAIGN_CONTROL_PROXY"
+                                        if campaign_authorization is not None
+                                        else "LOCAL_UI_BUTTON"
+                                    ),
                                 )
                                 if checkpoint is None:
                                     raise ContractError("OPERATOR_CHECKPOINT_TIMEOUT")
                                 decision = checkpoint["choice"]
-                            decisions.put(("RELEASE_VERDICT", decision))
+                                source = checkpoint["decision_source"]
+                            decisions.put(("RELEASE_VERDICT", (decision, source)))
                         except Exception as exc:
                             decisions.put(("RELEASE_VERDICT", exc))
 
                     threading.Thread(target=release_in_background, daemon=True).start()
                 try:
-                    state, decision = decisions.get_nowait()
+                    state, release_decision = decisions.get_nowait()
                 except queue.Empty:
                     time.sleep(0.05)
                     continue
                 pending = None
-                if state != result["state"] or isinstance(decision, Exception):
+                if state != result["state"] or isinstance(release_decision, Exception):
                     cancelled = job.cancel()
                     return _response(ok=False, code=cancelled["code"], state=cancelled["state"], run_id=payload["run_id"], plan_digest=planned["plan_digest"])
-                acted = (
-                    job.release_verdict(decision, operator_id, source="TEST_OPERATOR")
-                    if test_only and getattr(job, "allow_synthetic_test_operator", False)
-                    else job.release_verdict(decision, operator_id)
-                )
+                decision, source = release_decision
+                acted = job.release_verdict(decision, operator_id, source=source)
                 if not acted["ok"]:
                     return _response(ok=False, code=acted["code"], state=acted["state"], run_id=payload["run_id"], plan_digest=planned["plan_digest"])
                 continue
             if result["state"] == "PRECONTACT_HUMAN":
+                if campaign_authorization is not None:
+                    confirmed = job.confirm(
+                        operator_id, source="CAMPAIGN_AUTHORIZATION",
+                    )
+                    if not confirmed["ok"]:
+                        return _response(
+                            ok=False, code=confirmed["code"], state=confirmed["state"],
+                            run_id=payload["run_id"], plan_digest=planned["plan_digest"],
+                        )
+                    continue
                 if pending is None:
                     pending = result["state"]
                     def confirm_in_background():
@@ -1689,18 +2031,41 @@ def run_live(payload, cancel, publish, *, resolver=resolve_inputs, executor_fact
                         raise
 
 
+def resolve_campaign_episode_inputs(
+    payload, *, release_role, next_run_id=None, source_slot=None,
+    cell_root=ROOT / "outputs/data_factory/cells",
+):
+    """Resolve one serial episode and seal its exact source/destination scene edge."""
+    if release_role not in {"RELEASE_DESTINATION", "DESTINATION_THEN_NEXT_SOURCE"}:
+        raise ContractError("CAMPAIGN_RELEASE_SLOT")
+    if (release_role == "DESTINATION_THEN_NEXT_SOURCE") != (next_run_id is not None):
+        raise ContractError("SCENE_SLOT_NEXT_RUN")
+    root = Path(cell_root).resolve()
+    validated, program, binding = resolve_inputs(
+        payload,
+        scene_binding_call=lambda checked, release_pose, run_id: _scene_binding(
+            checked, release_pose, run_id, root=root,
+        ),
+    )
+    slot = binding.get("release_slot")
+    if not isinstance(slot, dict):
+        raise ContractError("CAMPAIGN_RELEASE_SLOT")
+    binding = {**binding, "release_slot": {**slot, "role": release_role}}
+    if next_run_id is not None:
+        binding["allowed_next_run_id"] = _identifier(
+            next_run_id, "SCENE_SLOT_NEXT_RUN",
+        )
+    if source_slot is not None and binding.get("source_slot") != source_slot:
+        raise ContractError("SCENE_SLOT_NEXT_RUN")
+    return validated, program, binding
+
+
 def _campaign_episode(payload, cancel, publish, release_role, next_run_id, source_slot=None, before_approval=None):
     def campaign_resolver(value):
-        validated, program, binding = resolve_inputs(value)
-        slot = binding.get("release_slot")
-        if not isinstance(slot, dict):
-            raise ContractError("CAMPAIGN_RELEASE_SLOT")
-        binding = {**binding, "release_slot": {**slot, "role": release_role}}
-        if next_run_id is not None:
-            binding["allowed_next_run_id"] = next_run_id
-        if source_slot is not None and binding.get("source_slot") != source_slot:
-            raise ContractError("SCENE_SLOT_NEXT_RUN")
-        return validated, program, binding
+        return resolve_campaign_episode_inputs(
+            value, release_role=release_role, next_run_id=next_run_id,
+            source_slot=source_slot,
+        )
 
     return run_live(payload, cancel, publish, resolver=campaign_resolver, before_approval=before_approval)
 
@@ -1772,7 +2137,7 @@ def run_campaign(payload, cancel, publish, *, episode_call=_campaign_episode,
                     item for item in snapshot["scene_state"]["objects"].values()
                     if item.get("object_profile_id") == next_job["object_profile_id"]
                     and item.get("state") == "ON_SURFACE"
-                    and item.get("source") == "ROBOT_RELEASE"
+                    and item.get("source") in {"ROBOT_RELEASE", "ROBOT_RELEASE_PROXY"}
                     and item.get("pose") == source_pose
                 ]
                 slots = [

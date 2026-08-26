@@ -7,208 +7,257 @@ from pathlib import Path
 ROOT = Path(__file__).parents[1]
 
 
-class GoalTwoOperatorUiTest(unittest.TestCase):
+class DataFactoryOperatorUiTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        cls.fixture = json.loads((ROOT / "fixtures/states.json").read_text())
+        cls.fixture = json.loads((ROOT / "fixtures/states.json").read_text(encoding="utf-8"))
         cls.view = cls.fixture["base_view"]
-        cls.html = (ROOT / "index.html").read_text()
-        cls.js = (ROOT / "app.js").read_text()
-        cls.messages = (ROOT / "messages.js").read_text()
-        cls.css = (ROOT / "styles.css").read_text()
-        cls.browser = (ROOT / "tests/browser-regression.html").read_text()
-        cls.docs = "\n".join(
-            (ROOT / name).read_text()
-            for name in ("README.md", "architecture.md", "backend-contract-proposal.md")
-        )
+        cls.html = (ROOT / "index.html").read_text(encoding="utf-8")
+        cls.js = (ROOT / "app.js").read_text(encoding="utf-8")
+        cls.messages = (ROOT / "messages.js").read_text(encoding="utf-8")
+        cls.css = (ROOT / "styles.css").read_text(encoding="utf-8")
+        cls.browser = (ROOT / "tests/browser-regression.html").read_text(encoding="utf-8")
 
-    def test_korean_default_unified_view_contract(self):
-        self.assertIn('<html lang="ko">', self.html)
-        self.assertEqual(self.view["schema_version"], "data_factory.operator_session_view.v1")
-        self.assertEqual(self.view["data_disposition"], "TEST_ONLY")
-        self.assertEqual(self.view["effect_scope"], "FAKE")
-        self.assertEqual(self.view["lifecycle_action"], "LIVE_COLLECT")
-        self.assertIn("통합 상태공간", self.html)
-
-    def test_same_origin_bridge_and_operator_token_contract(self):
-        self.assertEqual(self.html.count("<!-- OPERATOR_TOKEN -->"), 1)
-        self.assertIn('fetch("/api/view"', self.js)
-        self.assertIn('fetch("/api/intent"', self.js)
-        self.assertEqual(self.js.count('"X-Operator-Token"'), 1)
-        self.assertIn("function unwrapViewEnvelope(value)", self.js)
-        self.assertIn('"VIEW_ENVELOPE_INVALID"', self.js)
-        self.assertNotIn("Access-Control-Allow-Origin", self.html + self.js)
-        self.assertNotIn("WebSocket", self.html + self.js)
-
-    def test_intent_envelope_has_every_digest_bound_field(self):
-        match = re.search(r"const envelope = \{(?P<body>.*?)\n  \};", self.js, re.S)
-        self.assertIsNotNone(match)
-        body = match.group("body")
-        for field in ("schema_version", "intent_id", "session_id", "view_revision", "view_digest", "op", "payload"):
-            self.assertRegex(body, rf"\b{field}\b")
-        self.assertIn('const INTENT_SCHEMA = "data_factory.operator_intent.v1"', self.js)
-
-    def test_approval_is_native_digest_bound_button_without_typed_phrase(self):
-        approval = self.fixture["states"]["approval"]["approval"]
-        self.assertRegex(approval["plan_digest"], r"^sha256:[0-9a-f]{64}$")
-        self.assertIn('data-op="approve_exact_plan"', self.js)
-        self.assertIn('data-op="reject_plan"', self.js)
-        self.assertIn("view_digest: boundView.view_digest", self.js)
-        self.assertIn("plan_digest: currentView.approval.plan_digest", self.js)
-        self.assertNotIn("approval-input", self.html + self.js)
-        self.assertNotIn("typed_phrase", self.html + self.js + self.docs)
-        self.assertIn("신원 인증이 아닙니다", self.js)
-        self.assertIn("TEST_ONLY 기계적 그리퍼 판정", self.js)
-        self.assertIn('approval_scope === "HIL_NUMERIC_PROXY"', self.js)
-        self.assertIn('type="checkbox" ${mechanicalProxy ? "checked" : ""} disabled', self.js)
-        self.assertEqual(len(approval["operator_summary"]["path"]), 10)
-        self.assertEqual(approval["operator_summary"]["path"][-1], "SAFE_POSE_PTP")
+    def test_product_is_a_six_step_collection_flow(self):
+        self.assertIn("<h1>로봇 학습 데이터 수집</h1>", self.html)
         self.assertEqual(
-            (approval["preapproval_checklist"]["place_alias"],
-             approval["preapproval_checklist"]["place_id"],
-             approval["preapproval_checklist"]["full_return_step_count"]),
-            ("place1", "PLACE_A", 10),
+            re.findall(r'data-step="([a-z]+)"', self.html),
+            ["environment", "plan", "review", "execution", "results", "next"],
         )
-        self.assertRegex(approval["site_confirmation_digest"], r"^sha256:[0-9a-f]{64}$")
-        for marker in ("summary.path.length", "collision_report_digest", "현장 READY 확인 완료"):
-            self.assertIn(marker, self.js)
+        for label in ("환경 준비", "수집 계획", "계획 확인", "실행", "결과", "다음 수집"):
+            self.assertIn(label, self.html)
+        for retired in ("FIXED LANE", "통합 상태공간", "한 평면", "authenticated HUMAN", "한 번", "파일럿", "테스트 수집"):
+            self.assertNotIn(retired, self.html + self.messages)
 
-    def test_setup_projection_is_exact_and_exception_is_one_checkpoint(self):
-        self.assertEqual(set(self.view["setup"]), {"host_status", "operator_label", "subsystems"})
-        self.assertTrue(self.view["setup"]["subsystems"])
-        self.assertTrue(all(set(row) == {"label", "status", "detail"} for row in self.view["setup"]["subsystems"]))
-        exception = self.fixture["states"]["setup_exception"]
-        self.assertEqual(exception["setup"]["host_status"], "READY_WITH_EXCEPTION")
-        self.assertEqual(exception["operator_checkpoint"]["kind"], "GRIPPER_MAINTENANCE")
-        self.assertEqual(exception["available_ops"], ["resolve_checkpoint"])
-        for marker in ('id="setup-panel"', "setup-subsystems", "authenticated HUMAN 아님"):
+    def test_catalog_owns_every_required_control_and_unavailable_reason(self):
+        axes = self.view["catalog"]["axes"]
+        self.assertEqual(
+            set(axes),
+            {"workspace", "frame", "task", "object", "grasp", "start", "motion", "variant", "camera", "data_mode", "split"},
+        )
+        for axis in axes:
+            self.assertGreater(len(axes[axis]), 0)
+            self.assertIn(f'data-axis="{axis}"', self.html)
+        self.assertFalse(next(item for item in axes["task"] if item["id"] == "pick_place")["available"])
+        self.assertFalse(next(item for item in axes["variant"] if item["id"] == "TWO_STAGE_ALIGN")["available"])
+        self.assertIn('option.available ? "" : "disabled"', self.js)
+        self.assertIn("humanReason(option.reason)", self.js)
+        self.assertIn("호환되지 않는 다른 항목도 함께 조정될 수 있습니다", self.html)
+
+    def test_count_repeat_split_and_shared_authoring_are_editable(self):
+        self.assertEqual(self.view["draft"]["requested_count"], 3)
+        self.assertGreater(self.view["draft"]["requested_count"], 1)
+        self.assertIn('id="count-input" type="number" min="1" max="100"', self.html)
+        self.assertIn("조건별 최대 반복", self.html)
+        self.assertIn("현재 작성 범위", self.js)
+        self.assertIn('id="repeat-input" type="number" min="1" max="100"', self.html)
+        self.assertIn('id="prepare-environment"', self.html)
+        self.assertIn('value="ASSISTED"> 자동 선택', self.html)
+        self.assertIn('value="DIRECT_EDIT"> 직접 선택', self.html)
+        self.assertIn('submitIntent("update_draft"', self.js)
+        self.assertIn('event.target.closest("[data-cell-id]")', self.js)
+        self.assertIn('[pose ? "remove_pose" : "add_pose"]', self.js)
+
+    def test_direct_pose_editor_exposes_backend_owned_order_and_bounds(self):
+        for marker in (
+            'id="direct-pose-editor"',
+            'id="direct-x-input"',
+            'id="direct-y-input"',
+            'id="direct-yaw-input"',
+            'id="add-direct-pose"',
+            'aria-label="입력된 직접 자세 순서"',
+            "view.catalog.workspace_domain",
+            "view.draft.direct_poses ?? []",
+            "add_pose:",
+            "remove_pose: pose",
+        ):
             self.assertIn(marker, self.html + self.js)
+        self.assertIn("등록된 셀은 빠른 선택용입니다", self.html)
+        self.assertIn("!values.every(Number.isFinite)", self.js)
+        self.assertIn("form.checkValidity()", self.js)
+        self.assertIn("form.reportValidity()", self.js)
+        self.assertNotIn("% 360", self.js)
+        self.assertNotIn('name="domain_digest"', self.html)
 
-    def test_operator_checkpoints_are_exact_digest_bound_and_not_duplicated(self):
-        expected_keys = {"kind", "prompt", "binding_digest", "choices", "evidence"}
-        semantic = self.fixture["states"]["semantic"]["operator_checkpoint"]
-        release = self.fixture["states"]["release"]["operator_checkpoint"]
-        scene_ready = self.fixture["states"]["scene_ready"]["operator_checkpoint"]
-        for checkpoint in (semantic, release, scene_ready):
-            self.assertEqual(set(checkpoint), expected_keys)
-            self.assertRegex(checkpoint["binding_digest"], r"^sha256:[0-9a-f]{64}$")
-        self.assertEqual(semantic["kind"], "SEMANTIC_VERDICT")
-        self.assertEqual(semantic["choices"], ["PASS", "FAIL"])
-        self.assertEqual(release["kind"], "RELEASE_VERDICT")
-        self.assertEqual(release["choices"], ["LANDED", "OFF_SLOT", "UNCERTAIN"])
-        self.assertIn("착지", release["prompt"])
-        self.assertIn("그리퍼 비움", release["prompt"])
-        self.assertIn("후퇴", release["prompt"])
-        self.assertIn("안전 스테이징", release["prompt"])
-        self.assertEqual(scene_ready["kind"], "SCENE_READY")
-        self.assertEqual(scene_ready["choices"], ["SCENE_READY"])
-        self.assertIn('canIntent("resolve_checkpoint")', self.js)
-        self.assertIn("checkpoint_binding_digest: currentView.operator_checkpoint.binding_digest", self.js)
-        self.assertNotIn("checkpoint_binding_digest:", self.html)
-
-    def test_candidate_review_is_exact_and_separate_from_training_approval(self):
-        review = self.fixture["states"]["candidate_review"]["candidate_review"]
-        self.assertEqual(set(review), {"review_binding_digest", "run_id", "status", "choices", "reasons"})
-        self.assertEqual(review["choices"], ["PASS", "FAIL", "UNCERTAIN"])
-        self.assertEqual(review["status"], "PENDING")
-        self.assertRegex(review["review_binding_digest"], r"^sha256:[0-9a-f]{64}$")
-        self.assertIn('canIntent("review_candidate")', self.js)
-        self.assertIn("review_binding_digest: currentView.candidate_review.review_binding_digest", self.js)
-        self.assertIn('const reason = choice === "PASS" ? null', self.js)
-        self.assertIn("TRAINING APPROVAL 아님", self.js)
-        self.assertNotIn("training_approval", self.js)
-
-    def test_assisted_and_direct_edit_share_one_draft_and_no_extra_tools(self):
-        self.assertEqual(self.view["draft"]["authoring_mode"], "ASSISTED")
-        self.assertEqual(self.view["draft"]["selector"], "BALANCED_INITIAL")
-        self.assertIn('submitIntent("update_draft", {draft_id: currentView.draft.draft_id, authoring_mode:', self.js)
-        self.assertIn("ASSISTED and DIRECT_EDIT mutate the same draft through one op", self.browser)
-        for forbidden in ("lasso", "LatinHypercube", "scipy", "optimizer", "saved template", "localStorage"):
-            self.assertNotIn(forbidden, (self.html + self.js).lower())
-
-    def test_single_screen_contains_every_required_campaign_axis(self):
-        rendered_sources = self.html + self.js
+    def test_workspace_registration_is_native_ordered_and_hidden_without_projection(self):
+        registration = self.view["workspace_registration"]
+        self.assertEqual(list(registration["captures"]), ["CENTER", "X_REF", "Y_CHECK"])
+        self.assertTrue(all(value is False for value in registration["captures"].values()))
+        self.assertIsNone(self.fixture["states"]["workspace_absent"]["workspace_registration"])
+        self.assertEqual(
+            re.findall(r'\["(CENTER|X_REF|Y_CHECK)"', self.js)[:3],
+            ["CENTER", "X_REF", "Y_CHECK"],
+        )
         for marker in (
-            "workspace/place", "X / Y / yaw", "object", "grasp", "task", "motion", "start",
-            "split / repeat", "coverage / selector", "effect_scope", "lifecycle_action", "TEST_ONLY",
-            "capability-list", "reason_codes",
+            'id="workspace-entry"',
+            'id="workspace-dialog"',
+            'id="workspace-captures"',
+            'id="source-scale-bar"',
+            'id="final-scale-bar"',
+            'entry.hidden = !workspace',
+            'view.runtime.workflow_state === "AUTHORING"',
+            "티치 펜던트",
+            "이 화면은 로봇 동작 명령을 보내지 않습니다",
         ):
-            self.assertIn(marker, rendered_sources)
+            self.assertIn(marker, self.html + self.js)
+        self.assertNotIn("raw_joint_snapshot", json.dumps(self.fixture, ensure_ascii=False))
 
-    def test_pick_place_and_variants_are_not_available(self):
-        capabilities = {item["label"]: item for item in self.view["capabilities"]}
-        self.assertEqual(capabilities["Task · pick_place"]["status"], "NOT_AVAILABLE")
-        self.assertEqual(capabilities["Motion variant · TWO_STAGE_ALIGN"]["status"], "NOT_AVAILABLE")
-        self.assertIn("FUTURE_TASK_RECIPE", capabilities["Task · pick_place"]["reason_codes"])
-        self.assertIn("NO_PRODUCTION_CALLER", capabilities["Motion variant · TWO_STAGE_ALIGN"]["reason_codes"])
-
-    def test_workspace_wizard_is_qualified_plane_three_point_and_fake_only(self):
-        wizard = self.view["workspace_wizard"]
-        self.assertEqual(set(wizard["captures"]), {"CENTER", "X_REF", "Y_CHECK"})
-        self.assertRegex(wizard["plane_reference"]["digest"], r"^sha256:[0-9a-f]{64}$")
-        for text in ("출력 원본 100 mm", "최종 100 mm", "적격 평면", "CENTER → X_REF → Y_CHECK"):
-            self.assertIn(text, self.html)
-        self.assertIn('currentView.effect_scope !== "FAKE"', self.js)
-        self.assertIn('mode: "FAKE"', self.js)
-
-    def test_fail_close_matrix_does_not_queue_or_replay_intents(self):
-        self.assertEqual(set(self.fixture["states"]), {
-            "draft", "setup_exception", "gripper_normal_graph_required", "approval", "semantic", "release", "scene_ready",
-            "candidate_review", "running", "cancel_pending", "blocked", "stale",
-            "reconnecting", "physical_toggle", "terminal", "unknown_enum",
-        })
+    def test_workspace_intents_use_exact_payloads_and_native_measurement_validation(self):
+        captured = self.fixture["states"]["workspace_captured"]
+        previewed = self.fixture["states"]["workspace_previewed"]
+        self.assertEqual(captured["workspace_registration"]["captures"], {"CENTER": True, "X_REF": True, "Y_CHECK": True})
+        self.assertIn("preview_workspace", captured["available_ops"])
+        self.assertEqual(previewed["workspace_registration"]["preview"]["status"], "CANDIDATE_WITHIN_TOLERANCE")
         for marker in (
-            "BRIDGE_UNAVAILABLE", "VIEW_STALE", "INTENT_REPLAYED", "CANCEL_PENDING",
-            "VIEW_REVISION_ROLLBACK", 'window.addEventListener("online"', "reconnect refetches view without replaying an intent",
-            "explicit retry may refetch the same rejected view without replaying its intent",
+            'submitIntent("capture_workspace_point", {label: button.dataset.captureLabel})',
+            'submitIntent("preview_workspace", {source_scale_bar_mm: source, final_scale_bar_mm: final})',
+            'submitIntent("save_workspace_revision", {preview_digest: digest})',
+            'submitIntent("new_workspace_registration", {})',
+            "form.checkValidity()",
+            "form.reportValidity()",
+            'canIntent("save_workspace_revision")',
         ):
-            self.assertIn(marker, self.messages + self.js + self.browser)
-        self.assertNotIn("setInterval", self.js)
-        self.assertIn("setTimeout(loadView, 250)", self.js)
-        self.assertNotIn("indexedDB", self.js)
-
-    def test_terminal_result_keeps_technical_and_synthetic_provenance_visible(self):
-        terminal = self.fixture["states"]["terminal"]["episode_result"]
-        self.assertEqual(terminal["technical_evidence"]["status"], "PASS")
-        self.assertEqual(terminal["human_semantic"], "NOT_MEASURED")
-        self.assertEqual(terminal["synthetic_review"]["reviewed_by"], "TEST_OPERATOR")
-        self.assertEqual(terminal["synthetic_coverage_update"]["production_coverage_delta"], 0)
-        for marker in ("result-card", "human semantic", "synthetic review", "synthetic coverage"):
             self.assertIn(marker, self.js)
-        self.assertIn("candidate review</dt><dd>NOT_APPLICABLE (TEST_ONLY)", self.js)
+        self.assertIn('min="96" max="104"', self.html)
 
-    def test_fake_and_authority_side_effect_counts_are_zero(self):
-        counts = self.view["effect_counts"]
-        self.assertTrue(counts)
-        self.assertTrue(all(value == 0 for value in counts.values()))
-        self.assertEqual(set(counts), {
-            "robot_calls", "gripper_calls", "recorder_calls", "dataset_writes",
-            "run_state_writes", "production_approvals", "training_authority",
-        })
-        self.assertIn("PHYSICAL toggle alone sends no plan start or execution intent", self.browser)
+    def test_workspace_save_refreshes_catalog_without_minting_authority(self):
+        saved = self.fixture["states"]["workspace_saved"]
+        registration = saved["workspace_registration"]
+        self.assertEqual(saved["available_ops"], ["update_draft", "compile_draft", "new_workspace_registration"])
+        self.assertEqual(registration["promotion"]["status"], "PROMOTED")
+        self.assertEqual(len(registration["history"]), 1)
+        self.assertFalse(registration["execution_authorized"])
+        self.assertFalse(registration["training_approved"])
+        self.assertIn(registration["promotion"]["calibration_id"], {item["id"] for item in saved["catalog"]["axes"]["frame"]})
+        self.assertIn("카탈로그를 같은 프로세스에서 새로고침했습니다", self.js)
+        self.assertIn("이 저장은 로봇 실행 권한이나 학습 승인을 만들지 않습니다", self.js)
 
-    def test_accessibility_floor_uses_native_controls_and_live_status(self):
+    def test_saved_frame_is_authorable_while_motion_compile_stays_unavailable(self):
+        blocked = self.fixture["states"]["workspace_motion_required"]
+        self.assertFalse(blocked["draft"]["execution_ready"])
+        self.assertEqual(
+            blocked["draft"]["execution_reason"],
+            "MOTION_QUALIFICATION_REQUIRED",
+        )
+        self.assertIn("update_draft", blocked["available_ops"])
+        self.assertNotIn("compile_draft", blocked["available_ops"])
+        self.assertIn("view.draft.execution_ready === false", self.js)
+        self.assertIn("view.draft.execution_reason ?? view.catalog.selection_execution?.reason", self.js)
+        self.assertIn('document.querySelector("#compile-campaign").hidden = false', self.js)
+        self.assertIn('document.querySelector("#compile-campaign").disabled = !canIntent("compile_draft")', self.js)
+        self.assertIn("MOTION_QUALIFICATION_REQUIRED", self.messages)
+
+    def test_review_campaign_has_one_digest_bound_authorization(self):
+        review = self.fixture["states"]["review_campaign"]
+        self.assertEqual(review["runtime"]["workflow_state"], "REVIEW_CAMPAIGN")
+        self.assertEqual(
+            review["available_ops"],
+            ["edit_campaign_draft", "authorize_campaign"],
+        )
+        self.assertEqual(review["campaign_envelope"]["episode_count"], 3)
+        for field in ("manifest_digest", "envelope_digest"):
+            self.assertRegex(review["campaign_envelope"][field], r"^sha256:[0-9a-f]{64}$")
+            self.assertIn(f"{field}: currentView.campaign_envelope.{field}", self.js)
+        self.assertIn('canIntent("authorize_campaign")', self.js)
+        self.assertIn('submitIntent("edit_campaign_draft"', self.js)
+        self.assertIn("수집 시작", self.html + self.messages)
+        self.assertNotIn("approve_exact_plan", self.js)
+
+    def test_continuous_execution_projects_progress_and_reachable_cancel(self):
+        running = self.fixture["states"]["running"]
+        campaign = running["campaign_session"]["campaign"]
+        self.assertEqual(
+            (campaign["completed_intents"], campaign["remaining_intents"], running["runtime"]["current_episode"], running["runtime"]["next_episode"]),
+            (1, 2, 2, 3),
+        )
+        self.assertEqual(running["available_ops"], ["cancel_session"])
+        for fact in ("completed", "total", "current", "next", "recorder"):
+            self.assertIn(f'data-fact="{fact}"', self.js)
+        self.assertIn('id="cancel-campaign"', self.html)
+        self.assertIn("RUNNING_CANCEL_UNAVAILABLE", self.js)
+        self.assertIn("문제 있음 · 즉시 중단", self.html)
+
+    def test_results_keep_measurement_review_and_coverage_separate(self):
+        results = self.fixture["states"]["results"]
+        self.assertEqual(len(results["episode_history"]), 3)
+        self.assertTrue(all(item["technical_evidence"]["status"] == "PASS" for item in results["episode_history"]))
+        self.assertTrue(all(item["human_semantic"] == "NOT_MEASURED" for item in results["episode_history"]))
+        self.assertEqual(results["candidate_review"]["choices"], ["PASS", "FAIL", "UNCERTAIN"])
+        for marker in ("수집 커버리지", "작업 성공", "작업 실패", "판정 보류", "데이터 보존 상태와 학습 사용 승인"):
+            self.assertIn(marker, self.html + self.js)
+        self.assertIn("review_binding_digest: currentView.candidate_review.review_binding_digest", self.js)
+        self.assertNotIn("training_approval", self.js)
+        self.assertNotIn("item.admission_state ?? item.human_semantic", self.js)
+
+    def test_terminal_offers_one_clear_same_process_next_campaign_path(self):
+        complete = self.fixture["states"]["complete"]
+        self.assertEqual(complete["runtime"]["workflow_state"], "TERMINAL")
+        self.assertEqual(complete["available_ops"], ["new_campaign_same_settings"])
+        self.assertIn("다음 캠페인 계획", self.html)
+        self.assertIn("필요한 항목만 바꿀 수 있습니다", self.html)
+        self.assertIn('canIntent("new_campaign_same_settings")', self.js)
+        self.assertNotIn('id="edit-new-campaign-action"', self.html)
+        self.assertIn("프로세스 재시작 없음", self.html)
+
+    def test_fail_close_uses_available_ops_and_never_replays(self):
         for marker in (
-            '<a class="skip-link"', '<main id="campaign-desk" tabindex="-1">',
-            'role="status" aria-live="polite"', '<dialog id="workspace-dialog"',
-            'aria-pressed="${selected}"', 'type="radio"', 'type="number"',
-            'data-checkpoint-choice="${escapeHtml(choice)}"', 'data-review-choice="${escapeHtml(choice)}"',
-            '<select id="candidate-reason" required>',
+            'currentView.available_ops.includes(op)',
+            "VIEW_REVISION_ROLLBACK",
+            "VERSION_CONFLICT",
+            "최신 상태 다시 불러오기",
+            'window.addEventListener("online"',
+        ):
+            self.assertIn(marker, self.js + self.messages)
+        self.assertNotIn("setInterval", self.js)
+        self.assertNotIn("localStorage", self.js)
+        self.assertNotIn("indexedDB", self.js)
+        self.assertIn("요청은 실행되지 않았습니다", self.js)
+
+    def test_missing_measurement_is_never_rendered_as_fail(self):
+        blocked = self.fixture["states"]["blocked"]
+        self.assertEqual(blocked["runtime"]["measurement_outcome"], "NOT_AVAILABLE")
+        self.assertIn('return "측정 자료 없음"', self.js)
+        self.assertIn('NOT_MEASURED: "사후 검토를 수행하지 않음"', self.messages)
+        self.assertIn('NOT_AVAILABLE: "측정 자료 없음"', self.messages)
+        self.assertIn("사후 검토를 수행하지 않았습니다", self.js)
+        self.assertNotIn('?? "FAIL"', self.js)
+
+    def test_raw_contract_details_stay_in_collapsed_technical_details(self):
+        self.assertIn('<details id="technical-details"', self.html)
+        self.assertIn("manifest_digest: view.campaign_envelope?.manifest_digest", self.js)
+        self.assertIn("reason_codes: view.runtime.reason_codes", self.js)
+        self.assertIn("workspace_preview_digest: view.workspace_registration?.preview?.preview_digest", self.js)
+        self.assertNotIn("digest", self.html.lower())
+        self.assertNotIn("reason code", self.html.lower())
+        self.assertNotIn("lifecycle owner", self.html.lower())
+
+    def test_accessibility_and_zoom_floor_are_preserved(self):
+        for marker in (
+            '<html lang="ko">',
+            '<a class="skip-link"',
+            'role="status" aria-live="polite"',
+            'aria-label="데이터 수집 단계"',
+            'type="radio"',
+            'type="number"',
+            '<details id="technical-details"',
+            'aria-pressed="${selected}"',
         ):
             self.assertIn(marker, self.html + self.js)
         self.assertIn(":focus-visible", self.css)
         self.assertIn("min-height: 44px", self.css)
+        self.assertIn("@media (max-width: 700px)", self.css)
         self.assertIn("prefers-reduced-motion: reduce", self.css)
         self.assertNotIn("outline: none", self.css)
 
-    def test_dependency_free_fixture_and_docs_match_live_boundary(self):
+    def test_native_dependency_boundary_and_browser_fixture(self):
         self.assertFalse((ROOT / "package.json").exists())
         self.assertNotIn("https://", self.html)
-        self.assertIn("GET /api/view", self.docs)
-        self.assertIn("POST /api/intent", self.docs)
-        self.assertIn("X-Operator-Token", self.docs)
-        self.assertIn("TEST_ONLY", self.docs)
-        self.assertIn("NOT_AVAILABLE", self.docs)
+        self.assertNotIn("React", self.html + self.js)
+        self.assertIn('fetch("/api/view"', self.js)
+        self.assertIn('fetch("/api/intent"', self.js)
+        self.assertEqual(self.html.count("<!-- OPERATOR_TOKEN -->"), 1)
+        for marker in ("REVIEW_CAMPAIGN", "authorize_campaign", "three serial episodes", "same-process next campaign", "raw yaw reaches backend", "unavailable direct-pose domain disables input", "workspace hidden when absent", "three ordered workspace captures", "digest-bound workspace save", "workspace flow posts no motion intent"):
+            self.assertIn(marker, self.browser)
 
 
 if __name__ == "__main__":

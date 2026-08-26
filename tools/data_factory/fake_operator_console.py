@@ -25,6 +25,7 @@ from tools.data_factory.campaign_operator import (
     FORBIDDEN_FAKE_COUNTERS as OPERATOR_ZERO_SENTINELS,
     CampaignOperator,
 )
+from tools.data_factory.campaign_session import TERMINAL_CHILD_STATES
 from tools.data_factory.experiment_manifest import (
     SLOT_INPUT_FIELDS,
     compile_fr5_hypothesis,
@@ -71,12 +72,12 @@ ZERO_SENTINELS = (
 )
 EFFECT_COUNTERS = FAKE_RECORDER_COUNTERS + ZERO_SENTINELS
 QA_WORKFLOW = (
-    "Start this foreground command and open the printed loopback URL.",
-    "Confirm FAKE / LIVE_COLLECT / TEST_ONLY and every forbidden effect count is 0.",
-    "Press compile once; confirm AWAITING_APPROVAL and the displayed plan digest.",
-    "Press the exact-plan approval button once; confirm technical PASS and human semantic NOT_MEASURED.",
-    "Refresh and confirm the same terminal result; a repeated old button intent must fail stale/replay.",
-    "Restart, compile, then cancel before approval; confirm no execute, commit, candidate, inventory, or training effect.",
+    "환경 준비를 누르고 모든 가상 장치가 사용 가능인지 확인한다.",
+    "수집 조건과 횟수를 선택하고 캠페인 요약으로 이동한다.",
+    "캠페인을 한 번 시작한 뒤 요청한 에피소드가 직렬로 완료되는지 확인한다.",
+    "실행 중에는 문제 있음·즉시 중단이 항상 보이는지 확인한다.",
+    "결과와 커버리지를 확인하고 같은 프로세스에서 다음 캠페인을 만든다.",
+    "robot·camera·production dataset·training effect가 모두 0인지 기술 정보에서 확인한다.",
 )
 PREPARE_TIMEOUT_S = 2.0
 DECISION_TIMEOUT_S = 600.0
@@ -219,6 +220,13 @@ def make_fake_one_job(*, trace: list[str], counters: dict[str, int],
                 request, "FROZEN" if state["frozen"] else "RECORDING",
                 state["run_id"], state["transaction_id"], metrics(),
                 writer_error="synthetic writer fault" if fault == "readiness_fault" and not state["frozen"] else None,
+            )
+        if op == "trim_readiness_prefix":
+            trimmed = metrics()
+            trimmed["rows"] = 0
+            trimmed["quality_snapshot"]["frames"] = 0
+            return _recorder_response(
+                request, "RECORDING", state["run_id"], state["transaction_id"], trimmed,
             )
         if op == "freeze":
             state["frozen"] = True
@@ -396,14 +404,22 @@ class FakeOperatorConsole:
         fixture_root: str | Path, one_job_factory: Callable[[], OneJob],
         counters: dict[str, int], trace: list[str], expires_at: str,
         technical_status: str = "PASS", current_usage: Mapping[str, int] | None = None,
-        clock=None,
+        clock=None, adapter_only: bool = False,
+        campaign_episode_call: Callable[..., Mapping[str, Any]] | None = None,
+        operator_label: str = TEST_OPERATOR, run_index: int = 0,
     ):
         if not isinstance(session_id, str) or not SAFE_ID.fullmatch(session_id):
             raise ContractError("FAKE_CONSOLE_SESSION_ID")
         root = Path(fixture_root)
         if root.is_symlink() or not root.is_dir():
             raise ContractError("FAKE_CONSOLE_FIXTURE_ROOT")
-        if not callable(one_job_factory) or technical_status not in {"PASS", "FAIL"}:
+        if (
+            not callable(one_job_factory) or technical_status not in {"PASS", "FAIL"}
+            or type(adapter_only) is not bool
+            or campaign_episode_call is not None and not callable(campaign_episode_call)
+            or not isinstance(operator_label, str) or not SAFE_ID.fullmatch(operator_label)
+            or type(run_index) is not int or run_index < 0
+        ):
             raise ContractError("FAKE_CONSOLE_PORT")
         if set(counters) != set(EFFECT_COUNTERS) or any(type(value) is not int or value < 0 for value in counters.values()):
             raise ContractError("FAKE_CONSOLE_COUNTERS")
@@ -413,6 +429,8 @@ class FakeOperatorConsole:
             raise ContractError("FAKE_CONSOLE_SYNTHETIC_FIXTURE_REQUIRED")
         checked_draft = validate_campaign_draft(draft, hypothesis=self.hypothesis)
         self.fixture_root = root.resolve(strict=True)
+        self.adapter_only = adapter_only
+        self.operator_label = operator_label
         self._one_job_factory = one_job_factory
         self.counters, self.trace = counters, trace
         self.expires_at, self.technical_status = expires_at, technical_status
@@ -422,8 +440,10 @@ class FakeOperatorConsole:
         self.intent = self.plan_result = self.episode_plan = self.episode_result = None
         self.synthetic_review = self.synthetic_coverage_update = None
         self._scene_digest = self.hypothesis["fixed_contract"]["scene_digest"]
-        self._workflow, self._last_error, self._run_index = "AUTHORING", None, 0
+        self._workflow, self._last_error, self._run_index = "AUTHORING", None, run_index
         self._factory_calls, self._lifecycle_ids = 0, set()
+        self.children: list[OneJob] = []
+        self.max_active_owners = 0
         self.button_port = self._thread = self._prepare_event = None
         self._decision_choice = self._pending_one_job = self._pending_technical = None
         self._initial_handler_active = False
@@ -441,7 +461,8 @@ class FakeOperatorConsole:
             "saved_revision_digest": None,
         }
         self.campaign_operator = CampaignOperator(
-            session_id=f"{session_id}-campaign", lifecycle_owner=TEST_OPERATOR,
+            session_id=f"{session_id}-campaign", lifecycle_owner=operator_label,
+            operator_label=operator_label,
             workspace={
                 "workspace_id": "synthetic-workspace", "identity": "SYNTHETIC",
                 "fixture_root": str(self.fixture_root),
@@ -458,13 +479,13 @@ class FakeOperatorConsole:
             scene_evidence_call=self._scene_evidence,
             side_effect_counter_call=self._operator_counter_snapshot,
             fake_lifecycle_factory=self._fresh_one_job,
-            fake_live_call=self._live_episode,
+            fake_live_call=campaign_episode_call or self.run_episode,
             current_usage=self.current_usage,
             clock=self.clock,
         )
         self.draft = copy.deepcopy(self.campaign_operator.draft)
         self.manifest = self.receipt = None
-        self.core = OperatorIntentCore(
+        self.core = None if adapter_only else OperatorIntentCore(
             session_id=session_id, projection_call=self.projection,
             handlers={
                 "update_draft": self.update_draft,
@@ -502,6 +523,11 @@ class FakeOperatorConsole:
         return result
 
     def _fresh_one_job(self) -> OneJob:
+        active = sum(
+            child.state not in TERMINAL_CHILD_STATES for child in self.children
+        )
+        if active:
+            raise ContractError("FAKE_CONSOLE_ONE_JOB_OVERLAP")
         job = self._one_job_factory()
         self._factory_calls += 1
         if (
@@ -513,6 +539,8 @@ class FakeOperatorConsole:
         if id(job) in self._lifecycle_ids:
             raise ContractError("FAKE_CONSOLE_ONE_JOB_REUSED")
         self._lifecycle_ids.add(id(job))
+        self.children.append(job)
+        self.max_active_owners = max(self.max_active_owners, active + 1)
         self.trace.append(f"factory:OneJob:{self._factory_calls}")
         return job
 
@@ -600,8 +628,13 @@ class FakeOperatorConsole:
             or result["effect_scope"] != "FAKE"
             or result["lifecycle_action"] != "LIVE_COLLECT"
             or result["data_disposition"] != "TEST_ONLY"
-            or result["root_binding"] is not None
-            or result["start_binding"] is not None
+            or not self.adapter_only and (
+                result["root_binding"] is not None
+                or result["start_binding"] is not None
+            )
+            or self.adapter_only and not all(isinstance(result[field], Mapping) for field in (
+                "root_binding", "start_binding",
+            ))
             or result["context_digest"] != canonical_digest({
                 key: item for key, item in result.items() if key != "context_digest"
             })
@@ -609,25 +642,47 @@ class FakeOperatorConsole:
             raise ContractError("FAKE_CONSOLE_EPISODE_CONTEXT")
         return result
 
-    def _live_episode(
+    def run_episode(
         self, intent: dict[str, Any], lifecycle: OneJob,
         cancel_event: threading.Event, episode_context: dict[str, Any],
+        decision_provider: Callable[[Mapping[str, Any]], Mapping[str, Any] | None] | None = None,
+        _checkpoint_provider: Callable[[Mapping[str, Any]], Mapping[str, Any] | None] | None = None,
     ) -> dict[str, Any]:
         """Drive the CampaignOperator-owned child after one exact button choice."""
         episode_context = self._episode_context(intent, episode_context)
+        self.manifest = copy.deepcopy(self.campaign_operator.manifest)
+        self.receipt = copy.deepcopy(self.campaign_operator.compilation_receipt)
         self.trace.append(f"context:{episode_context['context_digest']}")
         program = _motion_program(intent, self.hypothesis)
         condition = intent["base_condition"]["coverage_condition"]
+        next_index = intent["order_index"] + 1
+        next_slot = (
+            self.manifest["slots"][next_index]
+            if next_index < len(self.manifest["slots"]) else None
+        )
+        release_condition = condition
+        if next_slot is not None:
+            release_condition = next(
+                item["coverage_condition"]
+                for item in self.hypothesis["base_conditions"]
+                if item["base_condition_digest"] == next_slot["base_condition_digest"]
+            )
         scene_binding = {
             "scene_state_digest": intent["required_scene_digest"],
             "revision": self._run_index, "object_instance_id": "synthetic-object",
             "release_slot": release_slot(
                 robot_system_id=intent["fixed_contract"]["robot_system_id"],
-                pose={key: condition[key] for key in ("place_id", "yaw_deg", "x_mm", "y_mm")},
+                pose={key: release_condition[key] for key in ("place_id", "yaw_deg", "x_mm", "y_mm")},
                 object_profile_id=intent["fixed_contract"]["object_profile_id"],
                 exclusion_geometry_digest=canonical_digest("synthetic-release-exclusion"),
             ),
         }
+        scene_binding["release_slot"]["role"] = (
+            "DESTINATION_THEN_NEXT_SOURCE"
+            if next_slot is not None else "RELEASE_DESTINATION"
+        )
+        if next_slot is not None:
+            scene_binding["allowed_next_run_id"] = f"synthetic-run-{self._run_index + 1}"
         plan_result = lifecycle.plan_only(intent["run_id"], program, scene_binding)
         if not plan_result["ok"]:
             self._pending_one_job = copy.deepcopy(plan_result)
@@ -635,22 +690,59 @@ class FakeOperatorConsole:
         plan = self._intent_projection(intent, plan_result)
         plan["episode_context"] = copy.deepcopy(episode_context)
         plan["episode_context_digest"] = episode_context["context_digest"]
-        port = ButtonDecisionPort(
-            session_id=f"{self.session_id}-button-{self._run_index}",
-            operator_label=TEST_OPERATOR, clock=self.clock,
-        )
-        offered = port.offer(
-            run_id=intent["run_id"], plan_digest=plan_result["plan_digest"],
-            decision_binding=plan, approval_scope="HIL_NUMERIC_PROXY",
-        )
-        plan["decision_binding_digest"] = offered["projection"]["pending_plan"]["decision_binding_digest"]
-        with self._lock:
-            self.intent, self.plan_result = copy.deepcopy(intent), copy.deepcopy(plan_result)
-            self.episode_plan, self.button_port = copy.deepcopy(plan), port
-            self._workflow, self._last_error = "AWAITING_APPROVAL", None
-            self.trace.append("console:AWAITING_APPROVAL")
-            self._prepare_event.set()
-        decision = port.wait(DECISION_TIMEOUT_S)
+        if decision_provider is None:
+            port = ButtonDecisionPort(
+                session_id=f"{self.session_id}-button-{self._run_index}",
+                operator_label=TEST_OPERATOR, clock=self.clock,
+            )
+            offered = port.offer(
+                run_id=intent["run_id"], plan_digest=plan_result["plan_digest"],
+                decision_binding=plan, approval_scope="HIL_NUMERIC_PROXY",
+            )
+            plan["decision_binding_digest"] = offered["projection"]["pending_plan"]["decision_binding_digest"]
+            with self._lock:
+                self.intent, self.plan_result = copy.deepcopy(intent), copy.deepcopy(plan_result)
+                self.episode_plan, self.button_port = copy.deepcopy(plan), port
+                self._workflow, self._last_error = "AWAITING_APPROVAL", None
+                self.trace.append("console:AWAITING_APPROVAL")
+                self._prepare_event.set()
+            decision = port.wait(DECISION_TIMEOUT_S)
+        else:
+            context = plan["episode_context"]
+            plan.update({
+                "data_disposition": "TEST_ONLY",
+                "episode_binding": {
+                    "manifest_digest": intent["manifest_digest"],
+                    "intent_digest": intent["intent_digest"],
+                    "run_id": intent["run_id"],
+                    "slot_digest": intent["slot_digest"],
+                    "root_binding_digest": canonical_digest(context["root_binding"]),
+                    "start_binding_digest": canonical_digest(context["start_binding"]),
+                },
+                "operator_summary": {
+                    "path": list(PHASES),
+                    "speed": {"mode": "SYNTHETIC"},
+                    "clearance": {"mode": "SYNTHETIC"},
+                    "flow": {"mode": "SERIAL_ONE_JOB"},
+                },
+            })
+            decision = decision_provider({
+                "schema_version": "data_factory.plan_decision_request.v1",
+                "run_id": intent["run_id"],
+                "plan_digest": plan_result["plan_digest"],
+                "approval_scope": "HIL_NUMERIC_PROXY",
+                "decision_binding": copy.deepcopy(plan),
+                "timeout_s": DECISION_TIMEOUT_S,
+            })
+            if isinstance(decision, Mapping):
+                plan["decision_binding_digest"] = decision.get(
+                    "decision_binding_digest"
+                )
+            with self._lock:
+                self.intent, self.plan_result = copy.deepcopy(intent), copy.deepcopy(plan_result)
+                self.episode_plan = copy.deepcopy(plan)
+            if isinstance(decision, Mapping) and decision.get("decision_source") == "CAMPAIGN_AUTHORIZATION":
+                self.trace.append(f"campaign-authorization:APPROVE:{intent['run_id']}")
         if decision is None:
             self._pending_one_job = lifecycle.cancel()
             raise ContractError("FAKE_CONSOLE_DECISION_TIMEOUT")
@@ -708,13 +800,43 @@ class FakeOperatorConsole:
         technical = self._technical(intent, result)
         self._pending_one_job = copy.deepcopy(result)
         self._pending_technical = copy.deepcopy(technical)
+        episode_result = {
+            "one_job": copy.deepcopy(result),
+            "technical_evidence": copy.deepcopy(technical),
+            "human_semantic": "NOT_MEASURED",
+        }
+        if decision_provider is not None:
+            episode_result["intent_binding"] = self._result_binding()
+            if technical["status"] == "PASS":
+                review, coverage = self._review_projection(technical)
+                episode_result.update(
+                    synthetic_review=review,
+                    synthetic_coverage_update=coverage,
+                )
+                self._scene_digest = technical["post_scene_digest"]
+                self._run_index += 1
+                self.trace.extend((
+                    "campaign:technical_PASS", "review:TEST_OPERATOR:SYNTHETIC",
+                    "coverage:SYNTHETIC_TEST_ONLY:+1",
+                ))
         return {
-            "result": {
-                "one_job": copy.deepcopy(result),
-                "technical_evidence": copy.deepcopy(technical),
-                "human_semantic": "NOT_MEASURED",
-            },
+            "result": episode_result,
             "technical_evidence": technical,
+        }
+
+    def terminal_response(self) -> dict[str, Any] | None:
+        technical = self._pending_technical
+        if not isinstance(technical, Mapping) or technical.get("status") == "PASS":
+            return None
+        return {
+            "ok": False, "code": "SEED_CAMPAIGN_TECHNICAL_NOT_PASS",
+            "state": "BLOCKED",
+            "data": {
+                "measurement_outcome": "FAIL",
+                "technical_validator": copy.deepcopy(technical),
+                "one_job": copy.deepcopy(self._pending_one_job),
+                "human_semantic_outcome": "NOT_MEASURED",
+            },
         }
 
     @staticmethod
@@ -748,6 +870,10 @@ class FakeOperatorConsole:
         if self.episode_plan is None:
             return None
         plan = self.episode_plan
+        condition = plan["base_condition"]["coverage_condition"]
+        condition_digest = plan["base_condition"]["coverage_condition_digest"]
+        if canonical_digest(condition) != condition_digest:
+            raise ContractError("FAKE_CONSOLE_COVERAGE_BINDING")
         return {
             "episode_plan_digest": canonical_digest(plan),
             "run_id": plan["run_id"], "intent_digest": plan["intent_digest"],
@@ -756,6 +882,8 @@ class FakeOperatorConsole:
             "hypothesis_digest": plan["hypothesis_digest"],
             "normalized_seed": plan["normalized_seed"],
             "base_condition_digest": plan["base_condition"]["base_condition_digest"],
+            "coverage_condition": copy.deepcopy(condition),
+            "coverage_condition_digest": condition_digest,
             "resolver_result_digest": plan["resolver_result"]["resolver_result_digest"],
             "robot_start_pose_id": plan["robot_start_pose"]["robot_start_pose_id"],
             "slot": copy.deepcopy(plan["slot"]),
@@ -1239,6 +1367,10 @@ def build_fake_operator_console(
     one_job_factory: Callable[[], OneJob] | None = None,
     fault: str | None = None, technical_status: str = "PASS",
     current_usage: Mapping[str, int] | None = None, clock=None,
+    adapter_only: bool = False,
+    campaign_episode_call: Callable[..., Mapping[str, Any]] | None = None,
+    operator_label: str = TEST_OPERATOR,
+    run_index: int = 0,
 ) -> FakeOperatorConsole:
     """Build the small public seam used by LoopbackBridge and browser integration."""
     clock = clock or (lambda: datetime.now(timezone.utc))
@@ -1252,6 +1384,8 @@ def build_fake_operator_console(
         fixture_root=fixture_root, one_job_factory=factory,
         counters=counters, trace=trace, expires_at=expiry,
         technical_status=technical_status, current_usage=current_usage, clock=clock,
+        adapter_only=adapter_only, campaign_episode_call=campaign_episode_call,
+        operator_label=operator_label, run_index=run_index,
     )
 
 
@@ -1462,20 +1596,33 @@ def main(argv=None) -> int:
         help="Synthetic directory containing hypothesis.json and draft.json; omitted uses the built-in fixture in a cleaned temporary root",
     )
     args = parser.parse_args(argv)
-    temporary = tempfile.TemporaryDirectory(prefix="fake-operator-console-") if args.fixture_root is None else None
-    root = Path(temporary.name if temporary is not None else args.fixture_root)
-    bridge = console = None
+    root = None
+    bridge = console = product = None
     try:
-        hypothesis, draft = synthetic_fixture() if temporary is not None else _load_fixture(root)
-        console = build_fake_operator_console(hypothesis=hypothesis, draft=draft, fixture_root=root)
+        if args.fixture_root is None:
+            # Local import avoids a module cycle: the reusable product composition
+            # deliberately reuses this module's existing pure-FAKE OneJob ports.
+            from tools.data_factory.product_fake_operator import build_product_fake_operator
+
+            product = build_product_fake_operator()
+            core = product.bridge_core
+            root = Path(product.fixture_root)
+        else:
+            root = Path(args.fixture_root)
+            hypothesis, draft = _load_fixture(root)
+            console = build_fake_operator_console(
+                hypothesis=hypothesis, draft=draft, fixture_root=root,
+            )
+            core = console.bridge_core
         bridge = LoopbackBridge(
-            core=console.bridge_core,
+            core=core,
             ui_root=Path(__file__).resolve().parents[2] / "operator-ui",
             host="127.0.0.1", port=args.port,
         )
         print(json.dumps({
             "status": "LISTENING", "url": bridge.origin, "effect_scope": "FAKE",
             "operator_identity": TEST_OPERATOR, "fixture_root": str(root),
+            "product_flow": product is not None,
             "qa_workflow": QA_WORKFLOW,
         }, sort_keys=True), flush=True)
         bridge.serve_forever()
@@ -1488,10 +1635,10 @@ def main(argv=None) -> int:
     finally:
         if console is not None:
             console.close()
+        if product is not None:
+            product.close()
         if bridge is not None:
             bridge.server.server_close()
-        if temporary is not None:
-            temporary.cleanup()
     return 0
 
 
