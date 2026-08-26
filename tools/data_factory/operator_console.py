@@ -91,6 +91,14 @@ DEFAULT_TCP_MANIFEST = Path(
 )
 
 
+def _measurement_for_code(code: str) -> str:
+    if code == "PHYSICAL_SECOND_MOTION_OWNER" or code.endswith("_MISMATCH"):
+        return "FAIL"
+    if code.startswith(("PHYSICAL_", "GRIPPER_SETUP_")) or code.endswith("NOT_AVAILABLE"):
+        return "NOT_AVAILABLE"
+    return "FAIL"
+
+
 def _redigest(value: dict[str, Any], field: str) -> dict[str, Any]:
     value[field] = canonical_digest({key: item for key, item in value.items() if key != field})
     return value
@@ -335,9 +343,8 @@ class OperatorConsole:
         self._workflow = "BLOCKED" if initial_block_code is not None else "AUTHORING"
         self._last_error = initial_block_code
         self._measurement_outcome = (
-            "FAIL" if initial_block_code == "GRIPPER_BINDING_MISMATCH"
-            else "NOT_AVAILABLE" if initial_block_code is not None
-            else "NOT_MEASURED"
+            _measurement_for_code(initial_block_code)
+            if initial_block_code is not None else "NOT_MEASURED"
         )
         self._episode_plan = self._episode_result = None
         self._cancel_requested = False
@@ -595,9 +602,7 @@ class OperatorConsole:
         else:
             name = "FAIL"
             code = outcome.get("code") if isinstance(outcome.get("code"), str) else "OPERATOR_CONSOLE_EPISODE"
-            self._measurement_outcome = (
-                "NOT_AVAILABLE" if code.startswith("PHYSICAL_") else "FAIL"
-            )
+            self._measurement_outcome = _measurement_for_code(code)
             workflow, self._last_error = "BLOCKED", code
         sealed = {
             "outcome": name, "code": code,
@@ -651,8 +656,8 @@ class OperatorConsole:
             self._thread.start()
         ready = self._prepared.wait(self.prepare_timeout_s)
         with self._lock:
-            if ready:
-                self._initial_handler_active = False
+            ready = ready or self._prepared.is_set()
+            self._initial_handler_active = False
             if ready and self._workflow == "AWAITING_APPROVAL":
                 return {
                     "outcome": "AWAITING_APPROVAL",
@@ -666,13 +671,7 @@ class OperatorConsole:
                         "operator_checkpoint": checkpoint,
                     }
                 return copy.deepcopy(self._episode_result)
-        self._cancel_owner()
-        self._thread.join(self.close_timeout_s)
-        with self._lock:
-            self._initial_handler_active = False
-        if self._thread.is_alive():
-            raise ContractError("OPERATOR_CONSOLE_THREAD_LEAK")
-        raise ContractError("OPERATOR_CONSOLE_PREPARE_TIMEOUT")
+            return {"outcome": "RUNNING", "active_child_id": self.run_id}
 
     def _button_intent(self, snapshot, op, digest, choice) -> dict[str, Any]:
         return {
@@ -915,13 +914,10 @@ def capture_gripper_setup_readback() -> dict[str, Any]:
         ).splitlines()
         if line.strip()
     )
-    try:
-        controllers = _controller_names(_readonly_command(
-            ["ros2", "control", "list_controllers"],
-            "GRIPPER_SETUP_CONTROLLER_GRAPH",
-        ))
-    except ContractError:
-        controllers = set()
+    controllers = _controller_names(_readonly_command(
+        ["ros2", "control", "list_controllers"],
+        "GRIPPER_SETUP_CONTROLLER_GRAPH",
+    ))
     normal = {
         "fairino5_controller", "gripper_controller", "joint_state_broadcaster",
     } <= controllers
@@ -1037,18 +1033,18 @@ def passive_physical_gate(
     )
     for name in ("fairino5_controller", "gripper_controller", "joint_state_broadcaster"):
         if not any(line.split()[:1] == [name] and "active" in line.split() for line in controllers.splitlines()):
-            raise ContractError("PHYSICAL_CONTROLLER_GRAPH")
+            raise ContractError("PHYSICAL_CONTROLLER_STATE_MISMATCH")
     nodes = _readonly_command(["ros2", "node", "list"], "PHYSICAL_NODE_GRAPH")
     if "/fr_command_server" in nodes.splitlines():
         raise ContractError("PHYSICAL_SECOND_MOTION_OWNER")
     if _readonly_command(
         ["ros2", "topic", "type", "/joint_states"], "PHYSICAL_JOINT_TOPIC",
     ).strip() != "sensor_msgs/msg/JointState":
-        raise ContractError("PHYSICAL_JOINT_TOPIC")
+        raise ContractError("PHYSICAL_JOINT_TOPIC_MISMATCH")
     if _readonly_command(
         ["ros2", "topic", "type", camera_topic], "PHYSICAL_CAMERA_TOPIC",
     ).strip() != "sensor_msgs/msg/Image":
-        raise ContractError("PHYSICAL_CAMERA_TOPIC")
+        raise ContractError("PHYSICAL_CAMERA_TOPIC_MISMATCH")
     configured_device = _readonly_command(
         ["ros2", "param", "get", camera_node, "video_device", "--hide-type"],
         "PHYSICAL_CAMERA_DEVICE_PARAMETER",
@@ -1056,7 +1052,7 @@ def passive_physical_gate(
     try:
         configured_target = Path(configured_device).resolve(strict=True)
     except OSError as exc:
-        raise ContractError("PHYSICAL_CAMERA_DEVICE_PARAMETER") from exc
+        raise ContractError("PHYSICAL_CAMERA_DEVICE_MISMATCH") from exc
     if configured_target != stable_target:
         raise ContractError("PHYSICAL_CAMERA_DEVICE_MISMATCH")
     evidence = {
@@ -1324,7 +1320,7 @@ def build_physical_operator_console(
                     if key != "binding_digest"
                 })
             ):
-                raise ContractError("PHYSICAL_CAMERA_BINDING")
+                raise ContractError("PHYSICAL_CAMERA_BINDING_MISMATCH")
         else:
             raise ContractError("CAMPAIGN_OPERATOR_PHYSICAL_ACTIVATION_FAILED")
         holder["camera_transport_evidence"] = evidence
@@ -1354,7 +1350,7 @@ def build_physical_operator_console(
         )
         transport = holder.get("camera_transport_evidence")
         if not isinstance(transport, Mapping):
-            raise ContractError("PHYSICAL_CAMERA_BINDING")
+            raise ContractError("PHYSICAL_CAMERA_BINDING_MISMATCH")
         checklist = {
             "schema_version": "data_factory.goal2_site_checklist.v1",
             "place_alias": "place1", "place_id": "PLACE_A",

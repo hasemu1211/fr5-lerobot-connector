@@ -286,7 +286,7 @@ class Harness:
             "effect_counts": copy.deepcopy(self.forbidden),
         }
 
-    def console(self) -> OperatorConsole:
+    def console(self, *, episode_call=None, prepare_timeout_s=1.0) -> OperatorConsole:
         def forbidden_review(*_args, **_kwargs):
             self.forbidden["candidate"] += 1
             raise AssertionError("TEST_ONLY must not review a production candidate")
@@ -294,7 +294,7 @@ class Harness:
         return OperatorConsole(
             session_id="physical-console-r001", operator_label="local-operator",
             campaign_operator_factory=self.operator_factory,
-            episode_call=self.episode, projection_call=self.projection,
+            episode_call=episode_call or self.episode, projection_call=self.projection,
             test_only_paths=self.root, clock=lambda: NOW,
             candidate_review_port=CandidateReviewPort(
                 operator_label="local-operator", review_call=forbidden_review,
@@ -302,7 +302,7 @@ class Harness:
             terminal_response_call=lambda: self.terminal_response,
             gripper_setup_request=self.setup_request,
             gripper_setup_resolution_call=self.setup_resolution_call,
-            prepare_timeout_s=1.0, close_timeout_s=1.0,
+            prepare_timeout_s=prepare_timeout_s, close_timeout_s=1.0,
         )
 
 
@@ -545,7 +545,7 @@ feedback:
                 side_effect=(
                     lambda args, _code: "/fr_command_server\n"
                     if args[:3] == ["ros2", "node", "list"]
-                    else (_ for _ in ()).throw(ContractError("NO_CONTROLLER_MANAGER"))
+                    else ""
                 ),
             ),
             mock.patch(
@@ -558,6 +558,27 @@ feedback:
             (maintenance_readback["source"], maintenance_readback["active"]),
             ("COMMAND_SERVER_MAINTENANCE", False),
         )
+
+        remote = mock.Mock()
+        with (
+            mock.patch(
+                "tools.data_factory.operator_console._readonly_command",
+                side_effect=(
+                    lambda args, _code: "/fr_command_server\n"
+                    if args[:3] == ["ros2", "node", "list"]
+                    else (_ for _ in ()).throw(
+                        ContractError("GRIPPER_SETUP_CONTROLLER_GRAPH")
+                    )
+                ),
+            ),
+            mock.patch(
+                "tools.data_factory.operator_console._remote_gripper_command",
+                remote,
+            ),
+            self.assertRaisesRegex(ContractError, "GRIPPER_SETUP_CONTROLLER_GRAPH"),
+        ):
+            capture_gripper_setup_readback()
+        remote.assert_not_called()
         commands = []
 
         def server_command(command, *, expected_fields):
@@ -775,6 +796,100 @@ feedback:
                 ))
             finally:
                 console.close()
+
+    def test_slow_physical_preparation_returns_running_without_cancelling_owner(self):
+        with tempfile.TemporaryDirectory() as root:
+            harness = Harness(root)
+            release = threading.Event()
+
+            def slow_episode(*args):
+                release.wait(1.0)
+                return harness.episode(*args)
+
+            console = harness.console(
+                episode_call=slow_episode, prepare_timeout_s=0.01,
+            )
+            try:
+                initial = console.bridge_core.snapshot()
+                result = console.bridge_core.consume(envelope(
+                    initial, "compile_draft", {
+                        "draft_id": harness.source_draft["draft_id"],
+                        "data_disposition": "TEST_ONLY",
+                    }, "compile-slow-r001",
+                ))["result"]
+                self.assertEqual(result, {
+                    "outcome": "RUNNING",
+                    "active_child_id": "physical-console-r001-run-0",
+                })
+                self.assertEqual(harness.operator_counters["physical_factory"], 1)
+                release.set()
+                approval_view = self.wait_for(console, "approval")
+                self.assertEqual(
+                    approval_view["projection"]["runtime"]["workflow_state"],
+                    "AWAITING_APPROVAL",
+                )
+                approval = approval_view["projection"]["approval"]
+                console.bridge_core.consume(envelope(
+                    approval_view, "reject_plan", {
+                        "plan_digest": approval["plan_digest"],
+                        "approval_scope": approval["approval_scope"],
+                        "data_disposition": "TEST_ONLY",
+                    }, "reject-slow-r001",
+                ))
+                self.assertEqual(console.wait_for_episode(1.0)["outcome"], "REJECT")
+            finally:
+                release.set()
+                console.close()
+
+    def test_measured_physical_activation_mismatch_projects_fail(self):
+        for code in (
+            "PHYSICAL_SECOND_MOTION_OWNER",
+            "PHYSICAL_CAMERA_DEVICE_MISMATCH",
+        ):
+            with self.subTest(code=code), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                self.portable_repository(root)
+                opened = {
+                    "active": True, "position_valid": True, "gripper_index": 1,
+                    "reference_position_m": 0.021, "feedback_position_m": 0.021,
+                    "sample_age_s": 0.0, "max_age_s": 0.1,
+                    "source": "CONTROLLER_STATE",
+                }
+
+                def fail_activation(code=code):
+                    raise ContractError(code)
+
+                console, context = build_physical_operator_console(
+                    repository_root=root,
+                    session_id=f"goal2-physical-fail-{code.lower()}",
+                    run_id=f"goal2-place1-fail-{code.lower()}",
+                    operator_label="local-operator",
+                    discovery_call=lambda: ["usb-Goal2_Camera-video-index0"],
+                    activation_call=fail_activation,
+                    gripper_readback_call=lambda: copy.deepcopy(opened),
+                    clock=lambda: NOW,
+                )
+                try:
+                    initial = console.bridge_core.snapshot()
+                    result = console.bridge_core.consume(envelope(
+                        initial, "compile_draft", {
+                            "draft_id": initial["projection"]["draft"]["draft_id"],
+                            "data_disposition": "TEST_ONLY",
+                        }, f"compile-{code.lower()}",
+                    ))["result"]
+                    projection = console.bridge_core.snapshot()["projection"]
+                    self.assertEqual(
+                        (result["outcome"], projection["runtime"]["workflow_state"],
+                         projection["runtime"]["measurement_outcome"],
+                         projection["available_ops"]),
+                        ("FAIL", "BLOCKED", "FAIL", []),
+                    )
+                    self.assertEqual(
+                        projection["runtime"]["reason_codes"], [code],
+                    )
+                    self.assertEqual(context["production_writers_enabled"], False)
+                finally:
+                    console.close()
 
     def test_gripper_setup_cancel_stale_and_ready_are_single_use_before_campaign(self):
         for choice in ("CANCEL", "READY"):
