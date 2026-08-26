@@ -491,6 +491,25 @@ class OperatorConsoleTests(unittest.TestCase):
                         discovery_call=lambda: [token],
                     )
 
+            for discovered, expected in (
+                ([token, token], "PHYSICAL_CAMERA_BINDING_MISMATCH"),
+                ([token], "PHYSICAL_CAMERA_BINDING_MISMATCH"),
+            ):
+                with self.subTest(discovered=discovered, expected=expected):
+                    if len(discovered) == 1:
+                        (device_root / token).unlink()
+                    try:
+                        with self.assertRaisesRegex(ContractError, expected):
+                            passive_physical_gate(
+                                camera_topic="/camera/up/color/image_raw",
+                                discovered_device_id=token,
+                                device_root=device_root,
+                                discovery_call=lambda discovered=discovered: discovered,
+                            )
+                    finally:
+                        if not (device_root / token).exists():
+                            (device_root / token).symlink_to("/dev/null")
+
     def test_gripper_ros_adapter_reads_one_owner_and_runs_only_sealed_normalization(self):
         controller_message = """
 joint_names: [finger_right_joint]
@@ -576,6 +595,25 @@ feedback:
                 remote,
             ),
             self.assertRaisesRegex(ContractError, "GRIPPER_SETUP_CONTROLLER_GRAPH"),
+        ):
+            capture_gripper_setup_readback()
+        remote.assert_not_called()
+
+        remote.reset_mock()
+        with (
+            mock.patch(
+                "tools.data_factory.operator_console._readonly_command",
+                side_effect=(
+                    lambda args, _code: "/fr_command_server\n"
+                    if args[:3] == ["ros2", "node", "list"]
+                    else "gripper_controller inactive\n"
+                ),
+            ),
+            mock.patch(
+                "tools.data_factory.operator_console._remote_gripper_command",
+                remote,
+            ),
+            self.assertRaisesRegex(ContractError, "GRIPPER_SETUP_NOT_AVAILABLE"),
         ):
             capture_gripper_setup_readback()
         remote.assert_not_called()
@@ -761,6 +799,17 @@ feedback:
         with tempfile.TemporaryDirectory() as root:
             harness = Harness(root, preplan_checkpoint=True)
             console = harness.console()
+            offered = threading.Event()
+            release_offer = threading.Event()
+            original_offer = console.button_port.offer
+
+            def delayed_offer(*args, **kwargs):
+                result = original_offer(*args, **kwargs)
+                offered.set()
+                release_offer.wait(1.0)
+                return result
+
+            console.button_port.offer = delayed_offer
             try:
                 initial = console.bridge_core.snapshot()
                 result = console.bridge_core.consume(envelope(
@@ -784,7 +833,25 @@ feedback:
                         "choice": "READY",
                     }, "site-ready-r001",
                 ))
-                approval_view = self.wait_for(console, "approval")
+                self.assertTrue(offered.wait(1.0))
+                snapshots = []
+                snapshot_started = threading.Event()
+                snapshot_done = threading.Event()
+
+                def take_snapshot():
+                    snapshot_started.set()
+                    snapshots.append(console.bridge_core.snapshot())
+                    snapshot_done.set()
+
+                snapshot_thread = threading.Thread(target=take_snapshot)
+                snapshot_thread.start()
+                self.assertTrue(snapshot_started.wait(1.0))
+                published_before_outer_transition = snapshot_done.wait(0.05)
+                release_offer.set()
+                snapshot_thread.join(1.0)
+                self.assertFalse(published_before_outer_transition)
+                self.assertFalse(snapshot_thread.is_alive())
+                approval_view = snapshots[0]
                 approval = approval_view["projection"]["approval"]
                 self.assertRegex(approval["plan_digest"], r"^sha256:[0-9a-f]{64}$")
                 console.bridge_core.consume(envelope(
@@ -795,6 +862,7 @@ feedback:
                     }, "site-reject-r001",
                 ))
             finally:
+                release_offer.set()
                 console.close()
 
     def test_slow_physical_preparation_returns_running_without_cancelling_owner(self):
@@ -844,6 +912,7 @@ feedback:
     def test_measured_physical_activation_mismatch_projects_fail(self):
         for code in (
             "PHYSICAL_SECOND_MOTION_OWNER",
+            "PHYSICAL_CAMERA_BINDING_MISMATCH",
             "PHYSICAL_CAMERA_DEVICE_MISMATCH",
         ):
             with self.subTest(code=code), tempfile.TemporaryDirectory() as directory:

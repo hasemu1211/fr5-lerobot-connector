@@ -510,28 +510,26 @@ class OperatorConsole:
         else:
             self.core.transition(change)
 
-    def _publish_plan(self, pending: Mapping[str, Any]) -> None:
-        def change():
-            plan = copy.deepcopy(dict(pending["decision_binding"]))
-            plan["decision_binding_digest"] = pending["decision_binding_digest"]
-            self._episode_plan = plan
-            self._workflow, self._last_error = "AWAITING_APPROVAL", None
-
-        self._owner_transition(change)
-
     def _decision_provider(self, request: Mapping[str, Any]) -> dict[str, Any] | None:
         if (
             not isinstance(request, Mapping) or set(request) != PLAN_REQUEST_FIELDS
             or request.get("schema_version") != "data_factory.plan_decision_request.v1"
         ):
             raise ContractError("OPERATOR_CONSOLE_PLAN_REQUEST")
-        offered = self.button_port.offer(
-            run_id=request["run_id"], plan_digest=request["plan_digest"],
-            decision_binding=request["decision_binding"],
-            approval_scope=request["approval_scope"],
-        )
-        pending = offered["projection"]["pending_plan"]
-        self._publish_plan(pending)
+
+        def change():
+            offered = self.button_port.offer(
+                run_id=request["run_id"], plan_digest=request["plan_digest"],
+                decision_binding=request["decision_binding"],
+                approval_scope=request["approval_scope"],
+            )
+            pending = offered["projection"]["pending_plan"]
+            plan = copy.deepcopy(dict(pending["decision_binding"]))
+            plan["decision_binding_digest"] = pending["decision_binding_digest"]
+            self._episode_plan = plan
+            self._workflow, self._last_error = "AWAITING_APPROVAL", None
+
+        self._owner_transition(change)
         return self.button_port.wait(request["timeout_s"])
 
     def _checkpoint_provider(self, request: Mapping[str, Any]) -> dict[str, Any] | None:
@@ -914,10 +912,11 @@ def capture_gripper_setup_readback() -> dict[str, Any]:
         ).splitlines()
         if line.strip()
     )
-    controllers = _controller_names(_readonly_command(
+    controller_listing = _readonly_command(
         ["ros2", "control", "list_controllers"],
         "GRIPPER_SETUP_CONTROLLER_GRAPH",
-    ))
+    )
+    controllers = _controller_names(controller_listing)
     normal = {
         "fairino5_controller", "gripper_controller", "joint_state_broadcaster",
     } <= controllers
@@ -950,7 +949,7 @@ def capture_gripper_setup_readback() -> dict[str, Any]:
             "sample_age_s": 0.0, "max_age_s": 0.1,
             "source": "CONTROLLER_STATE",
         }
-    if command_server and not controllers:
+    if command_server and not controller_listing.strip():
         activation = _remote_gripper_command(
             "GetGripperActivateStatus()", expected_fields=3,
         )
@@ -1019,15 +1018,19 @@ def passive_physical_gate(
     discovery_call: Callable[[], list[str]] = discover_uvc_device_ids,
 ) -> dict[str, Any]:
     """Attach only to an already-running graph; perform no lifecycle mutation."""
-    if discovery_call().count(discovered_device_id) != 1:
+    discovered = discovery_call()
+    discovered_count = discovered.count(discovered_device_id)
+    if discovered_count == 0:
         raise ContractError("PHYSICAL_CAMERA_BINDING")
+    if discovered_count != 1:
+        raise ContractError("PHYSICAL_CAMERA_BINDING_MISMATCH")
     stable_path = Path(device_root) / discovered_device_id
     try:
         stable_target = stable_path.resolve(strict=True)
     except OSError as exc:
-        raise ContractError("PHYSICAL_CAMERA_BINDING") from exc
+        raise ContractError("PHYSICAL_CAMERA_BINDING_MISMATCH") from exc
     if not stable_path.is_symlink() or not stat.S_ISCHR(stable_target.stat().st_mode):
-        raise ContractError("PHYSICAL_CAMERA_BINDING")
+        raise ContractError("PHYSICAL_CAMERA_BINDING_MISMATCH")
     controllers = _readonly_command(
         ["ros2", "control", "list_controllers"], "PHYSICAL_CONTROLLER_GRAPH",
     )
