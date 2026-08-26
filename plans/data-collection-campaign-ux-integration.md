@@ -1,6 +1,6 @@
 # FR5 통합 데이터 수집 캠페인 UX와 작업영역 등록 계획
 
-> 상태: `OFFLINE_COLLECTION_CAMPAIGN_UX_COMPLETE`. Goal 1 software와 비실물 검증을 완료했으며 이 문서는 Goal 2 handoff 정본이다. 현재 동작과 실물 권한의 정본은 `docs/`, `config/`와 executable validator이며, 이 문서만으로 robot motion, recorder, dataset, training 또는 production approval이 허용되지 않는다.
+> 상태: `OFFLINE_COLLECTION_CAMPAIGN_UX_COMPLETE`. Goal 1 software와 비실물 검증을 완료했으며, 2026-08-26 사용자 요청에 따라 Goal 2를 **HOME↔`place1` physical TEST_ONLY one-pilot + portable operator closeout**으로 확장한 handoff 정본이다. 현재 동작과 실물 권한의 정본은 `docs/`, `config/`와 executable validator이며, 이 문서만으로 robot motion, recorder, dataset, training 또는 production approval이 허용되지 않는다.
 
 - 작성일: 2026-08-25
 - Goal 1 software integration 기준: code `HEAD=c1d439d92bfa7809e7171f67168f02159c15f681`, tree `3944442c9a3fcbc18733c5463c8f27e7884d4c26`
@@ -8,6 +8,7 @@
 - 상위 software 상태: `OFFLINE_IMPLEMENTATION_COMPLETE_THROUGH_P6_5`
 - 동결 계획 원본 SHA256: `6501694bc23a1e34dd35b9638431582612fdf7918fa4b0cab3a75a60f00dc810`
 - Goal 1 UI 상태: foreground stdlib loopback bridge와 synthetic campaign console을 실제 UI 버튼으로 완주함
+- Goal 2 확장 목표: 개인용 수집 노트북의 setup/doctor부터 같은 browser UI의 계획·수집·현장 판정·candidate review까지 연결하고, 현재 장비에서는 사전 허용된 한 episode만 `TEST_ONLY`로 실측함
 - 관련 계획: [데이터 팩토리 다음 반복](data-factory-next-iteration.md), [수집 UX 후속](lightweight-collection-ux-follow-up.md)
 - 관련 계약: [데이터 팩토리](../docs/data-factory.md), [수집·피드백](../docs/data-collection-and-feedback.md), [UI backend proposal](../operator-ui/backend-contract-proposal.md)
 - 문서 수명주기: Goal 1 구현 이력과 Goal 2 handoff 계획. current 운영 계약은 `docs/`와 executable code가 소유하고 이 문서는 production authority가 아니다.
@@ -23,8 +24,9 @@
 5. `FAKE`와 `PHYSICAL`은 같은 UX와 lifecycle을 사용하되 effect adapter에서 구조적으로 분리한다.
 6. 버튼 승인을 제공하고 digest 입력, 장치 ID, ROS topic과 controller 세부정보를 일반 사용자에게 요구하지 않는다.
 7. fake에서 가능한 전체 흐름과 현재 `CONNECTED_UNPLACED` 환경에서 가능한 제한 진단을 명확히 구분한다.
+8. 개인용 수집 노트북 한 대에서 명시적인 foreground 명령 하나로 setup을 진단하고 UI를 열어, 장치 예외가 없다면 계획→수집→현장 판정→candidate 검토를 같은 화면에서 끝낸다.
 
-대상 독자는 다음 구현을 소유할 coordinator, frontend/backend writer, read-only reviewer와 실제 수집을 수행할 단일 local operator다.
+대상 독자는 다음 구현을 소유할 coordinator, frontend/backend writer, read-only reviewer, 개인용 수집 노트북을 준비할 maintainer와 실제 수집을 수행할 단일 local operator다.
 
 ## 2. 계획 갱신 계약
 
@@ -250,13 +252,15 @@ finite grid V1에는 LHS/space-filling sampler, SciPy dependency나 새 optimize
 
 ## 6. 현재 물리환경 snapshot과 허용 범위
 
-이 snapshot은 2026-08-25 사용자 설명과 checked-in config를 구분해 기록한다.
+이 snapshot은 2026-08-25 최초 설명, 2026-08-26 현장 재확인과 checked-in config를 구분해 기록한다.
 
 ### 6.1 알려진 상태
 
-- 사용자 설명상 FR5 robot 한 대와 camera 한 대가 연결돼 있다. 이 계획 작성 중 device query로 재확인하지 않았다.
+- 2026-08-26 사용자 설명상 FR5 robot은 HOME에 있고 camera 한 대가 연결돼 있다. 이 계획 보강 중 device query로 재확인하지 않았으므로 실제 controller/joint/device state는 Goal 2 passive discovery에서 별도로 측정한다.
 - camera는 PC 주변에 있고 robot을 보도록 최종 장착·배치되지 않았다. image framing, object visibility, occlusion, lighting과 wrist/up 역할을 정성 평가할 수 없다.
+- 같은 종류 camera 한 대를 더 연결할 수 있지만 Goal 2에는 요구하지 않는다. 현재 한 대를 stable local binding으로 사용하고, 두 번째 camera와 future RealSense/depth profile은 별도 profile revision/qualification으로 남긴다.
 - 사용자는 **나무 cube가 기존 작업영역 `place1`의 yaw 0°, local `(x=0 mm, y=0 mm)`에 있다**고 선언했다. 이는 operator scene declaration이지 외부 metrology나 camera가 자동 증명한 값이 아니다.
+- 사용자는 gripper가 비어 있고 finger/cell 주변이 clear하며, 실물 dispatch부터 terminal까지 E-stop 근처에서 감시할 수 있음을 2026-08-26 확인했다. 이 확인은 current session의 fresh preflight와 exact button binding을 대체하지 않는다.
 - 사용자는 새 local frame을 만들지 않고, 기존 HOME과 위 `place1` target 사이의 bounded physical test motion을 사전 허용했다. 이는 정확한 대상 binding과 계획을 모르는 미래 모션 digest 승인, 안전 감시, semantic `PASS|LANDED` 또는 다른 좌표·variant·task 허용으로 확장되지 않는다.
 - Goal 2가 만드는 모든 run/dataset은 `TEST_ONLY`이며 production candidate, data-validity, motion qualification 또는 training approval 근거가 아니다.
 - checked-in exact place ID는 literal `place1`이 아닌 `PLACE_A`이고, calibration은 `place-a-yaw0-r002`/`QUALIFIED`이다. Goal 2는 새 좌표계 등록 대신 UI에서 `place1` operator alias를 exact `PLACE_A` + calibration/sheet/scene target digest에 한 번 binding해 보여 준다. 일치하지 않으면 motion 전에 멈춘다.
@@ -303,7 +307,7 @@ checked-in hardware interface activation은 servo mode를 restart하고 current-
 
 정상 경로:
 
-- 새 narrow v2 device-role binding receipt의 stable UVC by-id/RealSense serial과 stored qualified profile이 exact match일 때만 camera를 자동 선택한다.
+- existing narrow v2 device-role binding receipt의 stable UVC by-id **basename token**/RealSense serial과 stored qualified profile이 exact match일 때만 camera를 자동 선택한다. UVC raw absolute path를 artifact에 저장하지 않고 `/dev/v4l/by-id` 아래 discovered symlink basename만 허용한다.
 - Goal 2에서 사람이 physical bring-up 범위를 승인한 뒤에만 configured robot endpoint와 gripper index를 적용한다. `CONNECTED_UNPLACED` 진단이나 Goal 1이 graph를 시작하지 않는다.
 - active/valid 상태는 재활성화하지 않고 current state와 reference를 동기화한다.
 - 이미 허용된 process 안에서 bounded technical preflight를 자동 실행하고 subsystem별 준비 상태와 aggregate supported action을 한 화면에 표시한다.
@@ -321,7 +325,7 @@ checked-in hardware interface activation은 servo mode를 restart하고 current-
 
 사용자의 사전 허용은 **새 좌표계 등록 없이**, operator alias `place1`이 exact checked-in `PLACE_A@place-a-yaw0-r002`와 일치한다는 한 번의 확인 후, yaw 0°/local `(0,0)`의 `wood-cube-25mm-r001` 하나에 대한 기존 v2 `DIRECT` 기준선 시험에만 적용한다. 첫 live는 정확히 한 episode다.
 
-이번 Goal 2에 한해 사용자는 최종 digest-locked `TEST_ONLY` 계획이 정확히 `HOME ↔ place1 (PLACE_A@place-a-yaw0-r002)`, yaw 0°, local `(0,0)`, wood cube, v2 `DIRECT` pickup + same-cell recycle, 한 episode일 때 coordinator가 exact-plan 승인 버튼을 누르는 것을 명시적으로 위임했다. 이는 개인용 local button 조작 위임이지 authenticated `HUMAN` provenance가 아니다. scope가 조금이라도 바뀌거나 fresh replan으로 plan digest가 바뀌면 위임은 즉시 무효이며 새 사용자 승인이 필요하다. 이 위임은 semantic `PASS`, release `LANDED`, final scene-ready 또는 gripper maintenance의 empty/clear 확인·승인으로 확장되지 않는다.
+이번 Goal 2에 한해 사용자는 최종 digest-locked `TEST_ONLY` 계획이 정확히 `HOME ↔ place1 (PLACE_A@place-a-yaw0-r002)`, yaw 0°, local `(0,0)`, wood cube, v2 `DIRECT` pickup + same-cell recycle, 한 episode일 때 coordinator가 exact-plan 승인 버튼을 누르는 것을 명시적으로 위임했다. 이는 개인용 local button 조작 위임이지 authenticated `HUMAN` provenance가 아니다. scope가 조금이라도 바뀌거나 fresh replan으로 plan digest가 바뀌면 위임은 즉시 무효이며 새 사용자 승인이 필요하다. 이 위임은 semantic `PASS`, combined release/final-scene verdict 또는 gripper maintenance의 empty/clear 확인·승인으로 확장되지 않는다.
 
 resolved program의 source와 recycle target이 모두 같은 `(0,0)` cell이고 모든 intermediate pose가 exact qualified planning scene에서 통과할 때만 다음 반환 cycle를 보여 준다.
 
@@ -348,7 +352,7 @@ Goal 2에서는 사용자 의도대로 기본 ON이다. 그 값은 exact plan �
 
 current v2는 기본 precontact/grasp hold 없이 close와 lift terminal에서 범위를 기술적으로 검증한다. post-lift `SEMANTIC_VERDICT` hold에서 proxy가 같은 범위를 사용해 계속 여부를 결정한다.
 
-UI/report는 그 결과를 `MECHANICAL_GRASP_PROXY_PASS|FAIL`, source `HIL_PROXY`로 표시하고 human semantic truth는 `NOT_MEASURED`로 남긴다. production HUMAN/semantic/candidate/training artifact는 0이다. toggle OFF일 때만 post-lift 사람 `PASS|FAIL`을 대기하며, release `LANDED|OFF_SLOT|UNCERTAIN`와 final scene-ready는 sensor가 없으므로 toggle와 무관하게 사람 checkpoint를 유지한다.
+UI/report는 그 결과를 `MECHANICAL_GRASP_PROXY_PASS|FAIL`, source `HIL_PROXY`로 표시하고 human semantic truth는 `NOT_MEASURED`로 남긴다. production HUMAN/semantic/candidate/training artifact는 0이다. toggle OFF일 때만 post-lift 사람 `PASS|FAIL`을 대기한다. current recycle의 release prompt는 landing, gripper-empty, retreat-complete와 safe-staging을 이미 한 checklist로 묶으므로 `LANDED|OFF_SLOT|UNCERTAIN` 한 번만 사람이 누른다. 별도 final-scene click을 중복 추가하지 않으며, non-recycle existing path의 `SCENE_READY`만 독립 checkpoint로 유지한다.
 
 | 조건 | source/측정법 | 자동 판정 가능 범위 | 증명하는 것 | 증명하지 못하는 것 | 미충족 처리 |
 |---|---|---|---|---|---|
@@ -375,6 +379,24 @@ UI/ledger에 resolved absolute path를 표시한다. repository root 밖, symlin
 
 실물 object가 예상과 다른 위치에 남았다면 test-only scene을 quarantine한다. 실제 위치를 사람이 확인하기 전까지 후속 motion은 0이다.
 
+### 6.5 portable collection host와 완료 경계
+
+Goal 2의 추가 목표는 현재 workstation에서 한 번 성공하는 것에 그치지 않고, 같은 repository revision을 **개인용 수집 노트북 한 대**에 준비해 **setup→UI→수집→판정·검토**를 다시 시작할 수 있게 하는 것이다. portable은 hardware qualification을 복사한다는 뜻이 아니라 software, local binding 절차와 operator workflow를 재현한다는 뜻이다. 지원 범위는 current `README.md`/`docs/setup.md`의 Ubuntu 24.04, ROS 2 Jazzy, Python 3.12와 LeRobot 0.6.1이며 cross-platform installer, fleet/계정 관리, remote service, auto-updater와 패키징 framework는 만들지 않는다.
+
+정상 사용자 흐름은 다음 하나다.
+
+1. fresh clone에서 documented prerequisite/setup을 실행한다. installer는 사용자가 명시적으로 실행하며 `.envrc` 변경을 자동 승인하지 않는다.
+2. non-mutating setup doctor가 Python/ROS/package/config/submodule와 local output 권한을 확인하고 `OFFLINE_READY`, `PHYSICAL_DEPENDENCY`, `BLOCKED`를 항목별로 보여 준다. doctor는 robot/camera process, recorder나 motion을 시작하지 않는다.
+3. `PHYSICAL`을 선택하면 passive discovery가 configured robot endpoint, gripper index와 camera identity를 읽는다. exact match는 자동 attach 후보가 되고 ambiguity만 한 번 선택하게 한다.
+4. stable UVC by-id basename token 또는 RealSense serial 선택은 existing `camera_binding.v1` candidate/validator를 거친 ignored machine-local receipt에 저장한다. tracked config/profile을 자동 rewrite하지 않고, later camera/profile 교체는 이 binding과 explicit profile revision만 바꾼다.
+5. 명시적인 foreground operator-console 명령 하나가 loopback backend와 같은 UI를 열거나 URL을 출력한다. hidden daemon, 두 번째 runner와 browser-owned lifecycle은 없다.
+6. browser는 exact plan 승인, 필요한 physical semantic verdict, recycle의 combined release/final-scene verdict(또는 non-recycle의 existing `SCENE_READY`)와 post-commit candidate review를 evidence가 생기는 시점에 버튼으로 제공한다. 사용자는 digest 문자열, ROS topic 또는 artifact path를 입력하지 않는다.
+7. candidate review `PASS|FAIL|UNCERTAIN`는 existing candidate-admission CAS에 결속한다. local button은 개인 operator checkpoint로 충분하지만 `reviewed_by=HUMAN`을 위조하지 않으며 training approval은 existing 별도 gate로 남긴다. Goal 2는 training 화면을 만들지 않는다.
+
+현재 Goal 2의 실제 episode는 `TEST_ONLY`라서 production candidate writer와 training approval writer는 계속 0이다. browser checkpoint handler와 production-default compatibility는 temporary fake/isolated fixture로 검증하되, 현재 episode 결과를 production candidate로 승격하지 않는다. 개인용 노트북에서 production collection을 시작하려면 그 노트북의 current robot/controller/start/cell, intended camera placement/profile와 production roots를 다시 적격화해야 한다.
+
+portable acceptance는 clean checkout 또는 disposable local clone에서 setup doctor/offline smoke와 foreground console start를 재현하는 것으로 증명한다. 실제 개인용 노트북이 제공되지 않은 상태에서는 OS/driver/device-specific hardware qualification을 PASS로 주장하지 않는다. 또한 push가 금지된 동안 그 노트북은 이 미전송 commit을 받을 수 없으므로, 최종 보고에 exact commit과 “push/transfer pending”을 명시한다.
+
 ## 7. 현재 코드와 목표 architecture의 대조
 
 ### 7.1 현재 재사용할 소유자
@@ -392,8 +414,13 @@ UI/ledger에 resolved absolute path를 표시한다. repository root 밖, symlin
 | recollection | `tools/data_factory/recollection.py:112-184,302-397` | evidence-gated offline failure selector/manifest |
 | scene/cell/slot | `tools/data_factory/scene_state.py:196-379`, `tools/data_factory/cell_state.py:38-151` | eligibility projection과 execution-time fresh CAS binding |
 | camera discovery/profile | `scripts/start_uvc_camera.sh:10-21`, `scripts/start_realsense_camera.sh:7-25`, `config/data_factory/collection_profiles/*.json` | two explicit discoverer와 새 narrow device-role binding receipt; auto-first는 production binding으로 재사용하지 않음 |
+| camera binding candidate | `tools/data_factory/operator_setup.py:722-770` | existing builder/validator와 digest를 재사용; raw path가 아닌 UVC by-id basename/RealSense serial field validation만 최소 보정 |
 | gripper/controller readiness | `scripts/preflight_collection.sh:46-79`, `tools/data_factory/motion/moveit_transport.py:468-610` | active controller는 자동 attach/read; activation/reset은 human-approved maintenance exception |
 | current UI | `operator-ui/app.js:120-197`, `operator-ui/architecture.md:3-11` | visual language와 DOM checks를 출발점으로 사용; current fixture는 authority 아님 |
+| Goal 1 operator owner | `tools/data_factory/campaign_operator.py:66-220`, `tools/data_factory/campaign_session.py` | `CampaignOperator → CampaignSession → fresh OneJob`을 유일한 browser campaign owner로 유지 |
+| current composition root | `tools/data_factory/fake_operator_console.py:391-480,1236-1479` | FAKE foreground caller와 fixture 조립은 재사용하되 PHYSICAL caller로 이름만 바꾸지 않음 |
+| human verdict/review core | `tools/data_factory/run_job.py:421-440,725-844,1290-1435` | TTY 결정과 candidate CAS의 domain core를 보존하고 browser-bound decision port만 주입 |
+| portable setup/preflight | `scripts/setup_notebook.sh`, `scripts/preflight_collection.sh` | fresh-clone installer는 보존하고 non-mutating doctor/한 foreground start 경로를 최소 추가 |
 
 여기서 current `run_job campaign`은 정확히 두 episode의 pickup/recycle scene chain일 뿐 일반 N-episode campaign이 아니다. 일반화하지 않고 보존한다. P5.8 `SeedCampaign`은 arbitrary finite slot을 serial intent로 만들지만 현재 production `run_job`/`OneJob` caller가 없고 `NO_EXECUTION_AUTHORITY`다. UI campaign은 이 기존 manifest/serial-intent owner를 재사용하되, 실행 adapter가 실제로 구현·검증된 effect scope만 진행한다.
 
@@ -423,6 +450,19 @@ UI/ledger에 resolved absolute path를 표시한다. repository root 밖, symlin
 - current `run_live` 일반 경로는 `outputs/data_factory/cells`를 hard-code하고 `HUMAN_GATED` approval을 생성하며 완료 후 `candidate_admission.json`을 쓴다. Goal 1은 이 함수를 복제하지 않고 session-sealed state/run/dataset roots, decision/approval-scope port와 candidate-admission writer enable flag를 주입하는 최소 seam으로 refactor한다. production default/TTY behavior는 byte-for-byte 의미를 보존하고, `TEST_ONLY`에서만 isolated roots + optional `HIL_NUMERIC_PROXY` + candidate/coverage/inventory/training writer 0을 강제한다. `TestPilotRunner`를 따로 만들지 않는다.
 
 현재 `operator-ui/backend-contract-proposal.md`의 passkey 수준 provenance와 `typed_phrase`는 이 개인용 제품 의도에 맞춰 수정 대상이다. 유지할 핵심은 current revision/digest binding, stale/replay rejection과 single consumption이지 문자열 입력이나 별도 identity ceremony가 아니다.
+
+#### Goal 2 시작 시 fresh source/caller mapping
+
+2026-08-26 mapping에서 Goal 1 authoring/bridge/runtime core는 구현됐지만 확장된 완료 목표까지 잇는 caller는 아직 없다.
+
+- 실제 product tool 중 `CampaignOperator(...)`를 조립하는 caller는 `tools/data_factory/fake_operator_console.py:443` 하나다. activation/lifecycle/plan/live port는 주입 가능하지만 PHYSICAL operator-console composition root가 없다.
+- `CampaignOperator.projection()`은 현재 `operator_identity=TEST_OPERATOR`와 모든 authority `NONE`을 고정한다. PHYSICAL console이 fake identity를 노출하지 않도록 caller-provided local `operator_label`/decision source를 최소 주입하되, authenticated HUMAN이나 training authority로 승격하지 않아야 한다.
+- UI mutation은 exact-plan approve/reject/cancel까지만 연결돼 있다. physical semantic verdict, recycle의 combined release/final-scene `LANDED|OFF_SLOT|UNCERTAIN`, non-recycle `SCENE_READY`와 persistent candidate review는 `run_job.py`의 TTY/domain core에만 있고 browser handler/projection이 없다.
+- fake console은 `TEST_OPERATOR`로 semantic/release와 process-local synthetic review를 스스로 진행한다. 이는 human UI checkpoint나 production candidate CAS 증거가 아니다.
+- `setup_notebook.sh`는 fresh clone 설치에 가깝지만 package/submodule/build를 실제로 변경하므로 현재 dirty workspace의 doctor가 아니다. `preflight_collection.sh --live`는 RealSense up topic을 가정하며 current single UVC stable binding과 operator-console startup을 해결하지 않는다.
+- existing `build_camera_binding_candidate`/validator는 `stable_device_id`에도 generic `SAFE_ID`를 적용한다. 실제 discovered UVC by-id basename 또는 RealSense serial을 round-trip하지 못하는 문자가 있으면 이 field만 separator/traversal/control을 거부하는 narrow validation으로 고치고, arbitrary path나 새 camera schema/registry를 만들지 않는다.
+
+따라서 Goal 2는 새 framework 대신 세 seam만 닫는다: (1) existing ports와 truthful operator projection을 조립하는 한 physical-capable foreground console, (2) `run_live`/candidate CAS에 주입되는 generic local-button checkpoint port, (3) installer와 분리된 non-mutating setup doctor + machine-local device binding. `OneJob`, recorder, scene/cell store, approval/review schema와 campaign scheduler를 복제하지 않는다.
 
 ### 7.3 제안 DAG
 
@@ -456,6 +496,7 @@ technical result + exact post-scene evidence
 - browser snapshot은 view이며 scene, cell, approval 또는 run authority store가 아니다.
 - Python stdlib HTTP를 확정한다. `127.0.0.1`/`::1`에만 bind하고 UI와 JSON을 same-origin으로 제공한다. `GET` view는 owning process lock 아래 existing owner snapshots를 합성한다. mutation `POST operator_intent.v1`은 session ID, view revision, operation과 backend가 발급한 binding digest만 받고 source/approved_by/reviewed_by/current scene/transition target은 browser 입력으로 받지 않는다.
 - local bridge는 existing core의 intent를 전달하며 lifecycle state machine을 복제하지 않는다.
+- Goal 2의 foreground console 하나가 effect scope에 따라 fake 또는 physical port bundle을 조립한다. UI server와 physical runner를 별도 process owner로 나누지 않고, `CampaignOperator`를 우회하는 direct `run_live` browser caller도 만들지 않는다.
 - current exact-two pickup/recycle campaign을 generic N scheduler로 확장하지 않는다. finite ordering/quota/next-intent는 existing manifest와 `SeedCampaign`이 소유한다.
 - process-local `CampaignSession` 하나가 `SeedCampaign`, exactly one active child와 campaign cancel/status를 소유한다. 각 child transaction은 주입된 fresh `OneJob` 하나만 소유한다. UI와 bridge는 lifecycle owner가 아니다.
 - `run_live`는 default behavior/TTY caller를 보존하면서 caller-provided fresh `OneJob`과 decision port를 받는 episode seam으로 refactor한다. `CampaignSession`은 intent를 그 same instance에 먼저 bind하고, terminal technical result와 exact post-scene evidence를 `SeedCampaign.record_technical_result`에 돌려준 뒤에만 next intent를 요청한다.
@@ -463,6 +504,8 @@ technical result + exact post-scene evidence
 - `FAKE` process에는 physical adapter factory/transport가 주입되지 않는다.
 - effect scope와 data disposition은 session creation 때 sealed한다. scope 전환은 active child 0을 확인하고 pending plan/decision을 폐기한 새 session ID와 anti-CSRF token을 만든다. UI toggle이 live transport를 hot-swap하거나 `TEST_ONLY`를 production path로 올리지 않는다.
 - `PHYSICAL` approval button은 current scene/start/expiry와 plan digest를 backend에서 다시 검증한다.
+- semantic/grasp와 combined recycle release/final-scene button은 backend가 발급한 current `OneJob` hold kind, run/plan/evidence digest와 view revision에 결속한다. non-recycle `SCENE_READY`는 `OneJob` hold가 아니라 commit/technical-validator 뒤 cell acknowledgement 전의 `run_live` checkpoint이며 run/plan/post-scene/technical digest에 결속한다. UI는 state를 추측해 다음 phase를 호출하지 않고 generic checkpoint port에 한 번의 choice만 전달한다.
+- candidate review button은 post-commit candidate file/context digest를 existing review CAS에 전달한다. episode checkpoint와 candidate review, training admission은 질문·시점·artifact가 다르므로 한 `approve` operation으로 합치지 않는다.
 - button response가 늦거나 중복되면 single-use CAS가 fail-close한다.
 - browser를 새로고침해도 backend state를 다시 투영하며 optimistic local authority를 복원하지 않는다.
 - bridge는 사용자가 명시적으로 시작한 foreground local process이며 hidden daemon이 아니다.
@@ -552,11 +595,13 @@ future `pick_place`는 destination workspace/slot·release/retreat phase·record
 | 후보 검토 | post-commit technical evidence projection | production candidate일 때만 `PASS|FAIL|UNCERTAIN` + reason | candidate review CAS; TEST_ONLY는 writer 0 |
 | training | inventory/split/checkpoint 검증 | training admission | separate training approval core |
 
-AI가 `PHYSICAL` plan approve, scene truth, human semantic PASS, landing 또는 training admission 버튼을 대신 누르지 않는다. 사용자가 exact plan에 결속해 켠 `TEST_ONLY` numeric proxy는 AI 판단이 아니라 checked-in 범위를 사용한 deterministic operational gate이며 human semantic을 `NOT_MEASURED`로 남긴다. AI browser automation은 `FAKE`에서 동일한 UI와 handler를 시험한다.
+AI가 일반적으로 `PHYSICAL` plan approve, scene truth, human semantic PASS, landing 또는 training admission 버튼을 대신 누르지 않는다. 유일한 예외는 6.4의 변경 없는 exact one-episode plan에 대해 사용자가 이번 한 번 coordinator에게 위임한 local plan button이며, scope/digest drift에서 즉시 무효이고 HUMAN identity를 만들지 않는다. 사용자가 exact plan에 결속해 켠 `TEST_ONLY` numeric proxy는 AI 판단이 아니라 checked-in 범위를 사용한 deterministic operational gate이며 human semantic을 `NOT_MEASURED`로 남긴다. AI browser automation은 `FAKE`에서 동일한 UI와 handler를 시험한다.
 
 현재 code의 실행-time `GRASP/SEMANTIC` 판단과 post-technical candidate admission은 evidence 시점과 질문이 다르다. 첫 판단은 commit/abort 전에 물리 결과를 확인하고, 둘째는 technical-validator digest까지 본 뒤 dataset 후보 사용 여부와 `UNCERTAIN`/reason을 정한다. 둘을 하나로 합치거나 earlier verdict를 자동 승격하지 않는다.
 
 문자열 입력을 없애고 정확한 문장·현재 evidence·한 번의 버튼을 각 필요한 시점에 바로 보여 준다. 여러 candidate는 한 review queue에서 처리하고 training admission은 계속 별도로 둔다.
+
+Goal 2 browser QA는 isolated candidate fixture로 `PASS|FAIL|UNCERTAIN` 세 review button과 stale/double-submit rejection을 실제 handler까지 검증한다. 실제 HOME↔`place1` episode는 `TEST_ONLY`이므로 candidate file 자체를 만들지 않고 terminal 카드에 `candidate review: NOT_APPLICABLE (TEST_ONLY)`를 표시한다. 이 차이는 UI가 덜 연결된 것이 아니라 test data를 production inventory로 조용히 올리지 않는 의도된 disposition 경계다.
 
 향후 두 판단을 합치려면 첫 시점에 technical/staged evidence까지 제공하는 transaction redesign, 하나의 exact checklist, `UNCERTAIN`/reason과 quarantine 규칙, run/plan/resolved-job/staging/preview/source/time을 결속한 decision receipt가 먼저 필요하다. V1 Goal 1/2에는 넣지 않는다.
 
@@ -570,11 +615,12 @@ AI가 `PHYSICAL` plan approve, scene truth, human semantic PASS, landing 또는 
 | L1 pure unit/property fixtures | deterministic compiler, calibration math, budget/split/selection invariant | bridge/browser wiring |
 | L2 real loopback integration | real HTTP parsing, same-origin/token, revision/CAS, decision port와 projection | hardware transport |
 | L3 full fake browser E2E | 실제 UI handler부터 fresh OneJob까지 serial success/failure/cancel/reconnect 흐름 | physical timing, visibility, collision truth |
+| L3P personal-laptop rehearsal | clean checkout setup doctor, local binding config와 한 foreground console start | 실제 노트북의 driver/device qualification |
 | L4 optional connected-unplaced diagnostic | device-local identity/profile/transport와 UI status | placement, data validity, motion safety |
 | L5 bounded `TEST_ONLY` HIL | 사전 허용된 HOME↔`place1` exact baseline의 plan/execution/gripper/return과 가능한 recorder mechanism | camera qualitative/data validity, production/training authority |
 | L6 placed-and-qualified production activation | intended camera/workspace/robot/start 적격화 후 production candidate flow | 현재 두 Goal 범위 밖 |
 
-L0–L3와 side-effect sentinel이 모두 통과해야 Goal 1의 `OFFLINE_COLLECTION_CAMPAIGN_UX_COMPLETE`를 선언한다. L4를 수행하지 않아도 offline 완료를 막지 않는다. L5는 Goal 2의 test-only 기계·흐름 증거이며, L6가 없으면 `PRODUCTION_READY`, physical data validity 또는 새 motion qualification을 선언하지 않는다.
+L0–L3와 side-effect sentinel이 모두 통과해야 Goal 1의 `OFFLINE_COLLECTION_CAMPAIGN_UX_COMPLETE`를 선언한다. Goal 2 portable closeout에는 L3P와 새 browser checkpoint E2E가 추가로 필요하다. L4를 수행하지 않아도 offline 완료를 막지 않는다. L5는 Goal 2의 test-only 기계·흐름 증거이며, L6가 없으면 `PRODUCTION_READY`, physical data validity 또는 새 motion qualification을 선언하지 않는다.
 
 ### 9.1 문서·contract 정적 검증
 
@@ -628,6 +674,7 @@ L0–L3와 side-effect sentinel이 모두 통과해야 Goal 1의 `OFFLINE_COLLEC
 - cancel/fault 후 later goal 0
 - fake UI action이 production human artifact를 만들지 않음
 - backend가 `operator_label`과 `decision_source=LOCAL_UI_BUTTON`을 채우고 authenticated human identity라고 주장하지 않으며 browser가 `source/reviewed_by/transition`을 mint하지 않음
+- PHYSICAL projection이 `TEST_OPERATOR`/synthetic authority를 노출하지 않고 configured local operator label과 unauthenticated-button boundary를 그대로 표시함
 - loopback-only binding과 remote request 거부
 - wrong/missing `Host`, `Origin` 또는 anti-CSRF token 거부와 process restart 뒤 token replay 거부
 - `TEST_ONLY`를 request body로 production에 올리거나 root를 바꾸는 intent 거부
@@ -640,12 +687,15 @@ L0–L3와 side-effect sentinel이 모두 통과해야 Goal 1의 `OFFLINE_COLLEC
 - 자동 결과를 직접 편집하고 다시 자동 채울 수 있음
 - 선택 cell마다 선택/제외 이유 표시
 - digest 입력 없이 버튼 승인
+- physical hold에서 current evidence와 질문에 맞는 semantic `PASS|FAIL`, recycle combined release/final-scene `LANDED|OFF_SLOT|UNCERTAIN`(또는 non-recycle `SCENE_READY`) 버튼이 정확히 한 번만 보임
+- post-commit candidate queue에서 `PASS|FAIL|UNCERTAIN`와 필요한 reason을 선택할 수 있고 training approval과 명확히 분리됨
 - normal device auto-attach와 exception-only prompt
 - Korean default, 기술 세부정보의 stable English code, keyboard focus와 reduced motion
 - loading, empty, blocked, stale, running, technical result와 recovery
 - hostile/unknown enum과 oversized progress fail-safe rendering
 - V1 desktop/local-console viewport와 좁은 창의 핵심 정보 보존. 별도 mobile layout은 후속으로 미룸
-- automated browser run과 별도로 사람이 따라 할 수 있는 10분 이내 fake QA script 제공: 자동 N회 계획, 직접 cell 수정, 좌표 wizard, plan 버튼 승인, cancel/retry, semantic 결과와 error recovery. 이 QA의 artifact는 `TEST_OPERATOR`이며 production HUMAN evidence가 아니다.
+- automated browser run과 별도로 사람이 따라 할 수 있는 15분 이내 fake QA script 제공: setup status, 자동 N회 계획, 직접 cell 수정, 좌표 wizard, plan 버튼 승인, semantic, combined release/final-scene, candidate `PASS|FAIL|UNCERTAIN`, cancel/retry와 error recovery. 이 QA의 artifact는 isolated local-test fixture이며 production HUMAN/training evidence가 아니다.
+- coordinator는 최종 foreground UI를 Orca embedded browser tab에 열고 사용자가 누를 기능, 예상 visible state와 금지 side effect를 순서대로 안내한다. 사용자가 테스트하는 동안 terminal/process는 visible foreground로 유지한다.
 
 ### 9.6 fake end-to-end
 
@@ -687,6 +737,8 @@ fake devices discovered
 - readiness prefix가 같은 TEST_ONLY episode/result에 남고 hidden trim/re-begin, production default 변경과 별도 recorder/lifecycle owner가 0임
 - begin-before-execute failure, cancel uncertainty, status uncertainty, release ambiguity, scene-write failure, post-scene commit/validator failure의 7.5 recovery ordering과 later intent 0
 - production-default `run_live` TTY/root/candidate behavior는 보존되고 TEST_ONLY seam에서만 isolated roots/proxy/no-candidate behavior가 적용
+- fake physical-port bundle에서 plan approval→semantic→combined recycle release/final-scene가 browser button으로 실제 `OneJob` hold를 해소하며, TTY read 0과 single active child/later-intent ordering을 증명. non-recycle fixture는 existing post-commit `SCENE_READY` port를 별도로 확인
+- isolated candidate fixture의 PASS/FAIL/UNCERTAIN/reason/stale/double-submit가 existing candidate CAS를 통과하고 training approval writer는 0
 
 ### 9.7 side-effect sentinel
 
@@ -736,18 +788,32 @@ Goal 1 뒤 별도 Goal 2에서 수행한다. Goal 2는 production activation이 
 3. current executable v2 `DIRECT` 하나를 source=recycle=`(0,0)`으로 resolve하고 plan/collision/constraint/endpoint/phase chain과 no-motion snapshot을 통과한다.
 4. exact plan digest, alias/scene checklist, 전체 반환 phase, clearance/speed, sealed TEST_ONLY paths와 numeric-proxy toggle을 한 화면에 보인 뒤 사람이 버튼으로 승인한다. 사람이 없으면 `PAUSED + NOT_MEASURED`이며 robot/recorder goal 0 상태에서 대기한다.
 5. 실물 dispatch 전 existing single-camera v2 test profile과 exact device binding으로 기존 5 s topic warmup을 통과한다. 이 값은 recorder readiness를 대신하지 않는다. passive 약 15 fps 관측은 보고일 뿐이지만, 이 live subtest의 topic bound를 못 만족하면 `BLOCKED + FAIL`이고 recorder begin/motion은 0이다.
-6. dispatch부터 terminal까지 사람은 E-stop/cell을 감시한다. numeric proxy ON이면 close/post-lift feedback로 `MECHANICAL_GRASP_PROXY_PASS|FAIL`을 자동 기록하고 human semantic은 `NOT_MEASURED`다. proxy OFF는 post-lift 사람 `PASS|FAIL`을 대기한다. release `LANDED|OFF_SLOT|UNCERTAIN`와 final scene-ready는 항상 사람이 누른다.
+6. dispatch부터 terminal까지 사람은 E-stop/cell을 감시한다. numeric proxy ON이면 close/post-lift feedback로 `MECHANICAL_GRASP_PROXY_PASS|FAIL`을 자동 기록하고 human semantic은 `NOT_MEASURED`다. proxy OFF는 post-lift 사람 `PASS|FAIL`을 대기한다. current recycle은 landing+gripper-empty+retreat+safe-staging checklist를 한 combined `LANDED|OFF_SLOT|UNCERTAIN` button으로 사람이 누르며 별도 final-scene click을 만들지 않는다.
 7. 하나의 `CampaignSession`/fresh `OneJob`이 isolated TEST_ONLY recorder를 begin한 뒤 5 s 안에 최소 60 durable rows의 bounded readiness를 확인한다. row `27–33 Hz`, bound camera source `≥28.5 Hz`, fresh status, writer error/drop/alignment 0과 resolved gap/repeat/timestamp-age bound가 모두 PASS한 뒤에만 executor를 dispatch한다. 실패하면 same transaction abort, executor 0이다.
 8. 같은 `OneJob`이 rows/freeze/commit/validator, physical phase와 source `(0,0)` 반환을 함께 완료한다. readiness prefix는 같은 TEST_ONLY episode에 남고 다른 runner, recorder, trim/re-begin mechanism을 만들지 않는다.
 9. 실물 motion은 first one episode에서 멈춘다. exact program, recorder readiness evidence, execution, gripper proxy/사람 판정, landing/return, TEST_ONLY transaction/validator가 통과하면 `PHYSICAL_TEST_ONLY_HOME_PLACE1_PILOT_COMPLETE`를 보고한다.
 10. one-camera는 위 test-only pilot의 충분한 입력이지만 dual-camera sync, production profile/30 Hz qualification, framing, visibility, lighting, semantic/data validity는 `NOT_AVAILABLE`이며 해당 pilot marker를 무효화하지 않는다.
 11. P6 variant, P6.5 recollection, `pick_place`, production candidate/inventory/coverage, training/inference와 두 번째 physical episode는 0이다.
 
-Goal 2 종합 표식도 `PHYSICAL_TEST_ONLY_HOME_PLACE1_PILOT_COMPLETE`다. mandatory live recorder/preflight가 `NOT_AVAILABLE`이거나 FAIL이면 plan-only 하위 결과는 보존하지만 종합 표식은 쓰지 않고 exact dependency를 남긴다.
+Goal 2의 physical subtest 표식은 `PHYSICAL_TEST_ONLY_HOME_PLACE1_PILOT_COMPLETE`다. mandatory live recorder/preflight가 `NOT_AVAILABLE`이거나 FAIL이면 plan-only 하위 결과는 보존하지만 이 physical 표식은 쓰지 않고 exact dependency를 남긴다. 전체 Goal 표식은 10.2의 portable marker와 conjunction을 요구한다.
 
 camera qualitative·dual-camera·production data-validity는 Goal 2 mandatory가 아니므로 `NOT_AVAILABLE`이어도 표식을 막지 않는다. 이 표식은 `PLACED_AND_QUALIFIED`, `PRODUCTION_READY`, data validity 또는 motion/training approval이 아니다.
 
 사람 checkpoint 대기는 `PAUSED_AWAITING_OPERATOR + NOT_MEASURED`, hardware/source 문제는 exact `BLOCKED + FAIL|NOT_AVAILABLE`로 끝낸다.
+
+### 9.10 portable setup과 operator closeout test
+
+Goal 2 implementation 뒤 다음을 한 번씩 직렬 검증한다.
+
+1. **Current dirty tree doctor:** submodule edit/stage/clean, package install, ROS launch, camera open와 output write 없이 prerequisites와 exact missing dependency를 읽는다.
+   realistic UVC by-id basename/RealSense serial의 existing camera-binding builder/validator round-trip, exact one-device auto-match, zero/multiple ambiguity, wrong profile와 raw path/traversal rejection을 포함하고 tracked profile backfill은 0이다.
+2. **Disposable clean-checkout rehearsal:** current committed tree의 local disposable clone에서 installer의 dry/check path 또는 documented staged setup을 검증하고 offline focused smoke를 실행한다. network/apt/ROS hardware가 필요한 단계는 source와 expected command를 검증하되 현재 host 성공을 실제 노트북 성공으로 과장하지 않는다.
+3. **Foreground startup:** 한 명령이 loopback console을 foreground에서 시작하고 readiness URL/session/effect/disposition을 출력한다. Ctrl-C/normal shutdown 뒤 child/server/temp fixture가 0인지 확인한다.
+4. **Full fake physical-button E2E:** physical-shaped pure fake port로 exact plan, semantic, combined recycle release/final-scene(plus non-recycle `SCENE_READY` compatibility)와 candidate review를 실제 browser handler까지 완주한다. robot/gripper/camera/production recorder/dataset/run-state/training effect는 0이다.
+5. **Orca human QA:** embedded browser에서 사용자가 automatic/direct authoring, setup exception, plan approve/reject, semantic, combined release/final-scene, candidate review와 cancel/reconnect를 누른다. 각 step의 expected visible state와 side effect를 별도 checklist로 제공한다.
+6. **Compatibility:** existing TTY `run_job`/campaign/review entrypoint와 `setup_notebook.sh` fresh-clone semantics를 회귀 검증하고 duplicate lifecycle/recorder/service가 없음을 source/caller map으로 다시 확인한다.
+
+portable marker는 위 항목과 stable integrated full suite가 통과할 때 `PORTABLE_COLLECTION_OPERATOR_PATH_COMPLETE`다. 이는 actual laptop driver/device test, placed-camera qualification, production data-validity 또는 training approval marker가 아니다.
 
 ## 10. 구현 slice와 파일 소유권 후보
 
@@ -773,17 +839,18 @@ Goal 1이 닫아야 Goal 2 간격이 사라지는 software edge:
 - UI의 버튼/상태/recovery handler가 Goal 2에서도 그대로 사용됨
 - remaining physical unknown이 code TODO가 아니라 handoff ledger의 explicit `UNRESOLVED_PHYSICAL`로만 남음
 
-### 10.2 Goal 2 — HOME↔`place1` 실물 `TEST_ONLY` one-pilot
+### 10.2 Goal 2 — portable operator closeout + HOME↔`place1` physical `TEST_ONLY` one-pilot
 
-Goal 2는 architecture 재설계나 production qualification Goal이 아니다. Goal 1 commit/ledger를 revalidate하고 같은 UI/handler/`CampaignSession`/fresh `OneJob`에 physical ports를 연결해 6.4와 9.9의 exact test-only evidence를 채운다. physical evidence가 contract를 반증할 때만 최소 correction 후 fresh review하며 두 번째 episode로 회피하지 않는다.
+Goal 2는 Goal 1 architecture를 재설계하거나 production qualification을 발급하는 Goal이 아니다. Goal 1 commit/ledger를 revalidate하고, 아직 fake composition에만 연결된 existing UI/handler/`CampaignOperator`/`CampaignSession`/fresh `OneJob`을 portable foreground console과 physical ports에 연결한다. 그 software path를 clean-checkout/fake browser로 닫은 뒤 6.4와 9.9의 exact one-pilot evidence를 채운다. physical evidence가 contract를 반증할 때만 최소 correction 후 fresh review하며 두 번째 episode나 duplicate runner로 회피하지 않는다.
 
-1. **G2-S0 handoff revalidation:** Goal 1 marker, plan/implementation/schema digest, TEST_ONLY paths, dirty submodule, focused smoke와 current config/device drift를 확인한다.
-2. **G2-S1 scoped setup:** passive discovery로 robot/gripper/camera state를 먼저 투영한다. 사전 허용된 Goal 2를 명시적으로 시작한 뒤에만 configured foreground graph/profile을 대상으로 attach/bring-up하며 hidden process를 만들지 않는다. active/valid subsystem은 재활성화하지 않고, gripper exception은 빈 finger/cell-clear 한 번 버튼 뒤만 maintenance한다.
-3. **G2-S2 exact binding:** 새 workspace capture 없이 `place1 → PLACE_A@place-a-yaw0-r002`, wood cube/yaw 0°/local `(0,0)`, source=recycle same cell, existing object/grasp/motion/profile digest를 한 화면에 표시한다. alias/scene 의미는 별도 ceremony가 아니라 exact-plan checklist에 포함한다.
-4. **G2-S3 current-start + physical plan-only:** qualified motion safe vector와 ≤0.1 s current snapshot의 delta ≤0.01 rad를 확인한다. 범위 밖이면 사용자가 HOME 영역 motion을 사전 허용했어도 standalone homing caller를 추측해 만들지 않고 exact dependency로 멈춘다. 범위 내에서 v2 `DIRECT` 반환 cycle plan/collision/constraint/endpoint/no-motion snapshot을 통과한다.
-5. **G2-S4 topic/approval gate:** stable one-camera binding과 existing v2 30 Hz test profile의 기존 5 s topic warmup을 측정한다. 필수 범위 위반은 recorder begin/motion 0 + `BLOCKED + FAIL`이다. 그 뒤 exact plan/TEST_ONLY paths/numeric-proxy ON을 6.4의 변경 없는 digest에 한해 coordinator가 이번 한 번 버튼 승인할 수 있고, 그 밖에는 사람이 승인한다. cell-clear와 현장 감시는 위임되지 않는다.
-6. **G2-S5 bounded live:** recorder begin 뒤 5 s/60 durable-row actual-recorder readiness가 same quality bound로 PASS해야 한 active child를 dispatch한다. 그 뒤 7.5 ordering대로 close/lift→freeze→numeric proxy→녹화 밖 recycle/release/return→human landing→scene/commit/validator/cell-ready를 수행한다. 어떤 readiness/후속 차단·FAIL에서도 later intent는 0이다.
-7. **G2-S6 evidence/report:** workflow/outcome을 분리하고 device/profile/topic warmup, recorder-readiness digest/FPS/drop/alignment/timestamp, plan/no-motion, phase/action, gripper reference/close/post-lift, frozen rows, release/scene, transaction/validator, 허용/금지 side-effect count를 보고한다. 모든 mandatory 항목이 통과했을 때만 `PHYSICAL_TEST_ONLY_HOME_PLACE1_PILOT_COMPLETE`를 쓴다.
+1. **G2-S0 handoff + mapping revalidation:** Goal 1 marker, plan/implementation/schema digest, TEST_ONLY paths, dirty submodule, focused smoke, current config/device drift와 `CampaignOperator`/TTY/setup source-caller mapping을 확인한다.
+2. **G2-S1 portable setup contract:** existing fresh-clone installer와 `build_camera_binding_candidate`/validator를 보존·재사용하고 non-mutating setup doctor, ignored machine-local stable camera binding과 한 foreground start command를 구현한다. UVC는 `/dev/v4l/by-id` basename token, RealSense는 serial을 결속하며 valid token을 막는 경우에만 device-ID field validation을 최소 보정한다. installer/doctor/start를 한 script의 숨은 mutation으로 합치지 않고, current dirty submodule에는 setup script를 실행하지 않는다.
+3. **G2-S2 physical composition root:** 한 physical-capable console이 existing `CampaignOperator`에 truthful local operator projection, activation, lifecycle factory, plan/live, TEST_ONLY roots와 start/device ports를 lazy injection한다. `run_job.py` default TTY와 current fake console을 보존하고 두 번째 lifecycle/recorder/service를 만들지 않는다.
+4. **G2-S3 complete browser checkpoints:** exact plan, semantic/grasp, recycle combined release/final-scene, non-recycle `SCENE_READY`와 post-commit candidate review를 generic digest-bound local-button port/projection으로 연결한다. TEST_ONLY actual run은 candidate writer 0/`NOT_APPLICABLE`; isolated fixture만 existing candidate CAS를 검증한다. training approval과 `reviewed_by=HUMAN` 자동 생성은 0이다.
+5. **G2-S4 fake/portable/browser verification:** physical-shaped pure fake bundle로 success, reject/cancel, stale/replay, semantic FAIL, landing uncertainty, non-recycle scene-ready timeout, candidate PASS/FAIL/UNCERTAIN와 reconnect를 실제 loopback browser에서 검증한다. clean checkout doctor/start rehearsal, side-effect sentinel과 user-facing Orca browser QA checklist를 통과한다.
+6. **G2-S5 scoped physical setup + exact binding:** passive discovery로 robot/gripper/camera state를 먼저 투영한다. 사전 허용된 Goal 2를 시작한 뒤에만 configured foreground graph/profile을 attach/bring-up한다. active/valid subsystem은 재활성화하지 않고, gripper exception은 confirmed empty/clear에 결속한 한 maintenance button 뒤만 수행한다. 새 workspace capture 없이 `place1 → PLACE_A@place-a-yaw0-r002`, wood cube/yaw 0°/local `(0,0)`, source=recycle same cell과 existing object/grasp/motion/profile digest를 한 화면에 표시한다.
+7. **G2-S6 current-start/plan/topic/approval:** qualified motion safe vector와 ≤0.1 s current snapshot의 delta ≤0.01 rad를 확인한다. 범위 밖이면 automatic homing caller를 추측하지 않는다. 범위 내에서 v2 `DIRECT` 반환 cycle plan-only/no-motion sentinel과 stable one-camera 5 s warmup을 통과한다. exact plan/TEST_ONLY paths/numeric-proxy ON이 6.4의 변경 없는 digest일 때 coordinator가 이번 한 번 버튼 승인할 수 있고 그 밖에는 멈춘다.
+8. **G2-S7 bounded live + closeout:** recorder begin 뒤 5 s/60 durable-row readiness가 same quality bound로 PASS해야 한 active child를 dispatch한다. 7.5 ordering대로 close/lift→freeze→numeric proxy→녹화 밖 recycle/release/return→human combined landing/final-scene checklist→scene transition/commit/validator/cell-ready를 수행하고 first episode에서 멈춘다. physical evidence/report와 portable evidence/report를 각각 닫고 fresh integrated verifier를 통과한다.
 
 사용자는 passive discovery, config/digest 검증, 계획 생성과 report 동안에는 자리를 비워도 된다. 다음은 대체할 수 없는 현장 checkpoint다.
 
@@ -791,11 +858,19 @@ Goal 2는 architecture 재설계나 production qualification Goal이 아니다. 
 - 실물 cube/alias/cell/E-stop 확인
 - exact plan/scope 승인. 단, 위 6.4의 변경 없는 최종 digest에 한해서만 coordinator가 이번 한 번 버튼을 대신 누를 수 있음
 - dispatch부터 terminal까지 안전 감시
-- release/landing과 final scene-ready
+- combined release/landing/final-scene checklist
 
 dispatch 전 부재는 `PAUSED + NOT_MEASURED`이지 FAIL이 아니다. dispatch 후 부재/timeout은 no continuation·scene/cell block이며 HOME 복귀를 가정하지 않는다.
 
-camera 최종 배치·정성 평가, 새 workspace capture, production candidate review와 training approval은 Goal 2에서 요구하지 않는다.
+camera 최종 배치·정성 평가, 새 workspace capture와 production training approval은 Goal 2에서 요구하지 않는다. production candidate **review UI/software path**는 구현·isolated fixture 검증하지만 현재 TEST_ONLY physical episode의 candidate artifact는 만들지 않는다.
+
+완료 표식은 서로 다른 사실을 합치지 않는다.
+
+- `PORTABLE_COLLECTION_OPERATOR_PATH_COMPLETE`: clean-checkout doctor/start, foreground physical-capable composition과 full browser checkpoint path가 fake/isolated evidence로 통과함.
+- `PHYSICAL_TEST_ONLY_HOME_PLACE1_PILOT_COMPLETE`: current one-camera/robot/gripper에서 exact 한 episode의 mandatory measured bound와 TEST_ONLY transaction이 통과함.
+- `DATA_COLLECTION_UX_PROJECT_COMPLETE`: 위 두 표식이 모두 있을 때만 사용함. actual laptop hardware, placed-camera data validity, production qualification과 training approval을 뜻하지 않음.
+
+mandatory camera/recorder bound가 current hardware에서 실패하면 portable/software 표식과 plan-only/mechanical 하위 결과는 보존하되 physical/overall 표식을 쓰지 않고 exact measured blocker를 남긴다. 30 Hz quality threshold를 Goal 완료를 위해 낮추거나 다른 camera가 있는 것으로 가정하지 않는다.
 
 ### 10.3 handoff ledger
 
@@ -810,7 +885,7 @@ Goal 1 구현자가 아래 표를 실제 값으로 채운다. 이 표는 product
 | capability matrix | `FAKE×AUTHOR/PLAN/LIVE`는 temp draft/synthetic plan/fake ports만; `PHYSICAL×AUTHOR`는 session-only, `PHYSICAL×PLAN/LIVE`는 Goal 1 construction/dispatch 0이고 Goal 2 gate 뒤에만 열림 |
 | TEST_ONLY roots / start binding / numeric scope | browser artifact `/tmp/fake-operator-console-*`는 종료 시 삭제; foreground FAKE context의 root/start는 `null`이고 별도 `CampaignSession→run_live` pure-port 통합 test가 temporary exact roots, `MOTION_Q_SAFE_START` ≤0.1 s/≤0.01 rad, episode binding, single-camera v2 profile와 `HIL_NUMERIC_PROXY`를 실제 `OneJob` API까지 전달함; actual plan initial state를 같은 target/tolerance에 비교한 no-authority planned-start evidence가 UI publish 전 만들어져 button decision에 결속되며 mismatch는 publish/approval/recorder/execute 0; default resolver는 bound cell root만 읽고 authority는 전부 `NONE` |
 | recorder/recovery ordering trace | `plan→button→approve→begin→60-row readiness→execute→post-lift freeze→HIL proxy→녹화 밖 recycle/release/return→scene transition→commit→validator/cell-ready`; frozen rows `60→60`; failure/cancel은 later intent 0 |
-| exact unresolved physical dependencies | fresh robot/controller/gripper state, stable one-camera ID/profile와 5 s warmup, HOME joint snapshot, exact alias/cube/cell/E-stop 현장 확인, optional gripper maintenance, real plan-only, actual recorder readiness, dispatch-terminal 감시, release/landing/final scene-ready |
+| exact unresolved physical dependencies | fresh robot/controller/gripper state, stable one-camera ID/profile와 5 s warmup, HOME joint snapshot, exact alias/cube/cell/E-stop 현장 확인, optional gripper maintenance, real plan-only, actual recorder readiness, dispatch-terminal 감시, combined release/landing/final-scene checklist |
 | dirty `src/frcobot_ros2` preservation | 시작과 동일한 `60755d44d521a5ad6bee8494cc19522f8801aa20-dirty`; read-only pointer verification만 수행, edit/stage/clean 0 |
 
 Goal 2는 ledger를 authority로 신뢰하지 않고 commit/config/hardware를 fresh recheck한다. 그 목적은 재설계·반복 리서치를 없애고 drift를 빠르게 찾는 것이다.
@@ -819,7 +894,7 @@ Goal 2는 ledger를 authority로 신뢰하지 않고 commit/config/hardware를 f
 
 예약 hotspot:
 
-- `tools/data_factory/run_job.py`, production bridge와 shared preflight는 Integration Owner만 수정한다.
+- `tools/data_factory/run_job.py`, physical console composition root와 shared preflight/setup doctor는 Integration Owner만 수정한다.
 - `tools/data_factory/one_job.py`는 새 UI state machine을 넣는 곳이 아니다.
 - existing calibration/coverage/manifest/variant/recollection validator는 각 domain owner가 최소 수정한다.
 - `operator-ui/**`는 frontend owner가 맡는다.
@@ -827,6 +902,8 @@ Goal 2는 ledger를 authority로 신뢰하지 않고 commit/config/hardware를 f
 - 같은 파일을 두 writer에게 배정하지 않는다.
 
 별도 worktree는 실제 disjoint writer가 생길 때만 만든다. focused test를 branch별로 실행하고, stable integrated tree에서 full suite를 한 번 실행한다.
+
+Goal 2 writer 분리는 source mapping 뒤 실제 파일이 disjoint일 때만 `operator-ui/**` frontend/checkpoint projection과 setup/portable scripts를 나눈다. `run_job.py`/composition/preflight hotspot은 coordinator가 직렬 통합하며 같은 파일을 두 writer에게 주지 않는다. coding·review에는 exposed Ponytail bundle을 사용해 existing ports/CAS/scripts를 얇게 연결하고 speculative registry, daemon, message broker나 deployment framework를 추가하지 않는다.
 
 ## 11. 외부 근거와 현재 engineering inference
 
@@ -867,6 +944,8 @@ Goal 2는 ledger를 authority로 신뢰하지 않고 commit/config/hardware를 f
 ### production activation 전 결정
 
 - intended camera 두 대의 최종 role, stable ID, placement와 30 Hz profile
+- 실제 개인용 collection 노트북의 OS/ROS/driver와 device binding 재검증. Goal 2 clean-checkout rehearsal은 software portability만 증명하고 그 노트북의 hardware qualification을 대신하지 않음
+- current commits의 전달 방법. 이 Goal은 push 0이므로 노트북 설치 전에 사용자가 push 또는 명시적 local bundle transfer를 별도 요청해야 함
 - production P5.8 campaign에 쓸 tracked `robot_start_pose_qualification.v1`과 condition×start catalog; Goal 2 session-local start binding을 승격하지 않음
 - gripper actual activation/position state와 exception maintenance 필요 여부
 - 새 workspace의 physical repeatability tolerance
@@ -875,7 +954,7 @@ Goal 2는 ledger를 authority로 신뢰하지 않고 commit/config/hardware를 f
 
 ## 13. 계획 acceptance
 
-아래 계획 acceptance를 충족했고 Goal 1 executable acceptance까지 통과해 이 문서를 `OFFLINE_COLLECTION_CAMPAIGN_UX_COMPLETE`로 닫았다. Goal 2의 실물 측정은 별도다.
+아래 원래 계획 acceptance와 Goal 1 executable acceptance를 통과해 `OFFLINE_COLLECTION_CAMPAIGN_UX_COMPLETE`를 유지한다. 2026-08-26 확장된 Goal 2는 portable/software와 bounded physical 표식을 각각 검증한 뒤에만 전체 프로젝트 표식을 쓴다.
 
 - 사용자 의도와 물리환경 snapshot이 누락 없이 기록됨
 - state-space axes와 UI single-screen projection이 합의됨
@@ -892,10 +971,15 @@ Goal 2는 ledger를 authority로 신뢰하지 않고 commit/config/hardware를 f
 - independent architecture/evidence critic의 blocking finding이 해결됨
 - docs governance audit, content QA와 `mex check`가 통과함
 - copy-ready Goal 1/Goal 2 prompt 전문이 이 문서에 포함되고 모호한 미결정을 숨기지 않음
+- Goal 2의 actual PHYSICAL `CampaignOperator` composition root가 fake console과 분리되되 같은 lifecycle owner/`run_live` seam을 재사용함
+- browser exact-plan/semantic/combined recycle release-final-scene/non-recycle scene-ready/candidate-review가 current view/evidence digest에 single-use 결속되고 TTY default와 training approval을 우회하지 않음
+- setup installer와 non-mutating doctor가 분리되고, stable device binding은 ignored local receipt이며 한 foreground start/stop 경로만 존재함
+- clean-checkout portable rehearsal, physical-shaped fake browser E2E, Orca human QA와 existing TTY/setup compatibility test가 구체적인 command/evidence로 남음
+- actual laptop qualification과 current one-camera TEST_ONLY pilot을 서로 증거로 대체하지 않으며, push 0에 따른 transfer dependency가 명시됨
 
 ## 14. copy-ready Goal prompts
 
-두 prompt는 순서대로 사용한다. Goal 1이 implementation commit, handoff ledger와 `OFFLINE_COLLECTION_CAMPAIGN_UX_COMPLETE`를 남기기 전에 Goal 2를 시작하지 않는다. Goal 2는 이 문서의 production activation이 아니라 exact one-pilot TEST_ONLY 경계를 사용한다.
+두 prompt는 순서대로 사용한다. Goal 1이 implementation commit, handoff ledger와 `OFFLINE_COLLECTION_CAMPAIGN_UX_COMPLETE`를 남기기 전에 Goal 2를 시작하지 않는다. Goal 2는 portable operator software path를 완료하고 exact one-pilot TEST_ONLY 경계를 실측하지만 production qualification을 발급하지 않는다.
 
 ### 14.1 Goal 1 — software + 비실물 검증
 
@@ -1072,11 +1156,11 @@ E. Workspace/setup/UI
 - 최종 표식 `OFFLINE_COLLECTION_CAMPAIGN_UX_COMPLETE`
 ```
 
-### 14.2 Goal 2 — HOME↔`place1` physical `TEST_ONLY` one-pilot
+### 14.2 Goal 2 — portable operator closeout + HOME↔`place1` physical `TEST_ONLY` one-pilot
 
 ```text
 너는 `/home/codelab/Desktop/Project/fr5_ws`의 Data Collection Campaign UX Goal 2
-Physical TEST_ONLY Integration Owner다.
+Portable Operator + Physical TEST_ONLY Integration Owner다.
 
 운영 설정:
 - Coordinator: Sol, effort max
@@ -1086,20 +1170,23 @@ Physical TEST_ONLY Integration Owner다.
 - 시작 즉시 HEAD/origin/main, plan sha256, Goal 1 schema/test digest와 current config/device drift를 fresh recheck한다.
 - dirty `src/frcobot_ros2`는 사용자 변경이므로 수정·stage·정리하지 않는다.
 - push는 하지 않는다.
+- 이 plan이 든 exact commit/tree와 plan SHA256을 Goal 시작 기록에 고정한다.
 - Goal 1 architecture를 재설계하거나 반복 research하지 않는다.
   physical evidence가 exact software contract를 반증할 때만 최소 correction + fresh review한다.
 
 이 Goal의 유일한 기능 목표:
-사전 허용된 HOME↔사용자 별칭 `place1` exact one-slot에서
-Goal 1의 같은 UI/handler/`CampaignSession`/fresh `OneJob`을 사용해
-한 번의 v2 `DIRECT` pickup + same-cell recycle 실물 TEST_ONLY 파일럿을 수행·측정하고
-`PHYSICAL_TEST_ONLY_HOME_PLACE1_PILOT_COMPLETE`를 증명한다.
-이 결과는 production/data-validity/motion qualification/training approval이 아니다.
+Goal 1의 same UI/handler/`CampaignOperator`/`CampaignSession`/fresh `OneJob`을 사용해
+(1) supported Ubuntu 24.04/ROS 2 Jazzy/Python 3.12/LeRobot 0.6.1의 개인용 수집 노트북 한 대에서 setup doctor→한 foreground console→계획→수집→현장 판정→candidate review가 이어지는 portable operator software path를 완성하고,
+(2) 사전 허용된 HOME↔사용자 별칭 `place1` exact one-slot에서 한 번의 v2 `DIRECT` pickup + same-cell recycle 실물 TEST_ONLY 파일럿을 수행·측정한다.
+`PORTABLE_COLLECTION_OPERATOR_PATH_COMPLETE`와 `PHYSICAL_TEST_ONLY_HOME_PLACE1_PILOT_COMPLETE`를 각각 증명하고 둘 다 있을 때만 `DATA_COLLECTION_UX_PROJECT_COMPLETE`를 기록한다.
+이 결과는 actual laptop hardware qualification, production/data-validity/motion qualification/training approval이 아니다. cross-platform/fleet/account/remote-deployment 제품을 만들지 않는다.
 
 현재 물리 snapshot과 사전 허용:
-- 사용자 설명상 robot 한 대와 camera 한 대가 연결돼 있다.
+- 2026-08-26 사용자 설명상 robot은 HOME이고 camera 한 대가 연결돼 있다.
 - camera는 PC 주변의 `CONNECTED_UNPLACED`로 robot 최종 장착/배치가 아니다.
+- 같은 종류 camera 한 대를 추가할 수 있지만 이번 Goal은 현재 한 대만 사용한다. future RealSense/depth와 second-camera role/profile은 별도 revision/qualification이며 현재 완료 조건이 아니다.
 - 나무 cube는 사용자 별칭 `place1`, yaw 0°, local `(x=0 mm,y=0 mm)`에 있다는 operator scene declaration이다.
+- 사용자는 gripper empty, finger/cell clear와 dispatch부터 terminal까지 E-stop 현장 감시 가능 상태를 확인했다. Goal 2는 current session의 fresh state/heartbeat를 다시 측정한다.
 - 새 coordinate frame/workspace를 만들지 않는다.
 - checked-in exact binding 후보는
   `PLACE_A@place-a-yaw0-r002`,
@@ -1119,7 +1206,25 @@ Goal 1의 같은 UI/handler/`CampaignSession`/fresh `OneJob`을 사용해
   v2 `DIRECT` pickup + same-cell recycle, 한 episode이면 coordinator가 exact-plan 승인 버튼을 누를 수 있다.
   이는 authenticated `HUMAN` provenance가 아닌 명시적 local button 위임이다.
   scope 변경 또는 fresh replan으로 digest가 바뀌는 즉시 위임은 무효다.
-  semantic `PASS`, `LANDED`, final scene-ready와 gripper maintenance 승인은 위임되지 않았다.
+  semantic `PASS`, combined release/final-scene verdict와 gripper maintenance 승인은 위임되지 않았다.
+
+필수 software/portable closeout:
+- fresh source/caller mapping을 한 번 수행하고 `CampaignOperator(...)`의 only caller가 fake console인 gap,
+  `run_job.py` TTY-only semantic/release/scene/candidate path와 setup/preflight gap을 exact file/line으로 확정한다.
+- existing `CampaignOperator → CampaignSession → run_live → fresh OneJob`에 activation/lifecycle/plan/live/root/start/device port를 lazy injection하는 physical-capable foreground console 하나를 만든다.
+  browser-owned runner, daemon, second lifecycle/recorder/service는 만들지 않는다.
+- current `CampaignOperator.projection()`의 hard-coded `TEST_OPERATOR`를 caller-provided local operator label로 좁게 일반화한다. FAKE default는 유지하고 PHYSICAL이 authenticated HUMAN/training authority를 주장하지 않게 한다.
+- current `OneJob` hold의 grasp/semantic `PASS|FAIL`와 recycle combined release/final-scene `LANDED|OFF_SLOT|UNCERTAIN`를 current view/run/plan/evidence digest에 결속한 generic local-button checkpoint port로 연결한다.
+  non-recycle `SCENE_READY`는 `OneJob` hold로 만들지 않고 existing `run_live`의 commit/technical-validator 뒤 cell acknowledgement 전 checkpoint로 유지하며 run/plan/post-scene/technical digest에 결속한다.
+  existing TTY default는 보존하고 browser는 source, HUMAN identity, scene truth나 transition target을 mint하지 않는다.
+- post-commit candidate admission의 `PASS|FAIL|UNCERTAIN` + reason을 existing digest/CAS review core에 연결한다.
+  current physical run은 TEST_ONLY라 candidate writer 0/`NOT_APPLICABLE`이고 isolated fixture로만 review handler를 검증한다. training admission은 별도 gate이며 자동 생성 0이다.
+- existing `scripts/setup_notebook.sh` fresh-clone installer와 `operator_setup.build_camera_binding_candidate`/validator를 보존·재사용하고 install/mutation 없는 setup doctor와 ignored machine-local `camera_binding.v1` receipt를 추가한다.
+  UVC는 `/dev/v4l/by-id` 아래 symlink의 basename token만, RealSense는 serial을 저장한다. valid real token을 generic `SAFE_ID`가 막으면 stable-device field만 narrow correction하고 raw absolute path/separator/traversal/control은 거부한다. exact match는 자동 attach 후보, zero/multiple ambiguity만 한 번 선택이며 current generic camera string을 tracked profile에 자동 backfill하지 않는다.
+- 한 foreground start command는 loopback URL/session/effect/data disposition을 출력하고 Ctrl-C/normal shutdown으로 child/server/temp state를 닫는다. hidden process는 0이다.
+- disposable clean checkout에서 doctor/offline smoke/foreground start를 rehearsal한다. 실제 개인용 노트북의 OS/ROS/driver/device와 placed-camera qualification은 PASS로 주장하지 않고, push 0이라 commit transfer가 별도 필요함을 보고한다.
+- physical-shaped pure fake로 plan approve/reject, semantic success/fail, combined recycle landing/final-scene, non-recycle scene-ready, candidate PASS/FAIL/UNCERTAIN, stale/replay, cancel/reconnect를 real loopback/browser handler까지 검증한다.
+- 최종 UI를 Orca embedded browser에 foreground로 열고 사람이 따라 할 15분 이내 QA 순서, 각 expected visible state와 forbidden side effect를 안내한다.
 
 허용된 exact physical effect:
 - configured known robot/controller/camera graph의 foreground bring-up/attach와 technical preflight
@@ -1139,7 +1244,16 @@ Goal 1의 같은 UI/handler/`CampaignSession`/fresh `OneJob`을 사용해
 - actual training/checkpoint/reload/inference/rollout, P6/P6.5, `pick_place`
 - 두 번째 physical episode와 실물 fault injection
 
-실행 순서:
+software/portable 실행 순서:
+1. Goal 1 focused smoke와 source/caller mapping을 revalidate하고 실제 변경 파일/DAG를 확정한다.
+2. setup doctor/local binding/foreground composition, generic checkpoint port/backend projection, frontend checkpoint/review를 disjoint writer에게만 병렬 배정한다. `run_job.py`, composition root와 shared preflight는 Integration Owner가 예약한다.
+3. writer는 exact objective/write scope/shared hotspot/fail-close-no-side-effect matrix/focused command 하나와 실제 exposed Ponytail coding bundle만 받는다. 같은 파일 두 writer, branch별 full suite와 작은 patch별 reviewer는 0이다.
+4. disjoint focused tests 뒤 coordinator가 직렬 통합하고 physical-shaped fake loopback/browser E2E와 setup clean-checkout rehearsal을 통과한다.
+5. material correction이 끝난 integrated tree에서 fresh read-only verifier가 correctness, caller/trust boundary, portability와 불필요한 complexity를 함께 검토한다. correction 뒤 이전 verdict는 무효다.
+6. stable integrated tree에서 full suite 한 번, browser regression, `git diff --check`, docs-governance, `mex check`, entropy/process/submodule 감사를 통과한다.
+7. Orca browser에 최종 foreground UI를 열어 사람 QA checklist와 기대 state를 제공한다. 이 fake/isolated QA가 끝나기 전 physical dispatch는 0이다.
+
+physical 실행 순서:
 1. Goal 1 handoff의 focused smoke만 재확인한다. code 변경이 없으면 full suite를 반복하지 않는다.
 2. passive discovery로 device/controller/gripper state를 먼저 보여 준다.
    Goal 2를 시작한 후에만 허용된 configured foreground graph를 attach/bring-up한다.
@@ -1180,12 +1294,12 @@ Goal 1의 같은 UI/handler/`CampaignSession`/fresh `OneJob`을 사용해
     human semantic은 `NOT_MEASURED`다. OFF면 post-lift human `PASS|FAIL`을 대기한다.
 12. post-lift recorder freeze 뒤에만 녹화 밖 same-cell recycle/release/retreat/SAFE_POSE를 수행한다.
     frozen row count는 recycle 중 불변이어야 한다.
-13. release `LANDED|OFF_SLOT|UNCERTAIN`와 final scene-ready는 사람이 누른다.
-    AI/camera/gripper-open command만으로 landing을 PASS로 만들지 않는다.
+13. current recycle의 release prompt는 object-in-slot, gripper-empty, retreat-complete와 safe-staging을 함께 보여 주고 사람이 `LANDED|OFF_SLOT|UNCERTAIN`를 한 번 누른다.
+    AI/camera/gripper-open command만으로 landing/final-scene을 PASS로 만들지 않으며 별도 중복 scene-ready click은 만들지 않는다.
 14. LANDED일 때 exact scene object+slot atomic transition→executor COMPLETED→recorder commit→
     technical validator→cell acknowledgement 순서를 지킨다.
     TEST_ONLY candidate/inventory/coverage/training writer는 0이다.
-15. first episode terminal에서 멈춘고 다음 intent는 0이다.
+15. first episode terminal에서 멈추고 다음 intent는 0이다.
 
 판정 계약:
 - workflow는 `READY|RUNNING|PAUSED_AWAITING_OPERATOR|BLOCKED|TERMINAL`,
@@ -1207,13 +1321,16 @@ Goal 1의 같은 UI/handler/`CampaignSession`/fresh `OneJob`을 사용해
 - 사용자는 passive discovery, digest/config 검증, plan generation/report 동안에는 자리를 비워도 된다.
 - 다음 순간에는 반드시 현장에 있다:
   gripper maintenance가 필요한 경우, cube/alias/cell/E-stop 확인,
-  dispatch부터 terminal까지 안전 감시, release/landing/final scene-ready.
+  dispatch부터 terminal까지 안전 감시, combined release/landing/final-scene verdict.
 - exact plan/scope 버튼만 위의 변경 없는 최종 digest에 대해 이번 한 번 coordinator에게 위임됐다.
   이 예외가 현장 확인·감시·결과 판정을 대체하지 않는다.
 - 사람 부재를 번거로운 hardware FAIL로 오판하지 않되,
   active motion 중 감시 부재를 안전하다고 가정해 계속하지 않는다.
 
 검증/보고:
+- portable slices별 changed files/commit, reused owner와 만들지 않은 duplicate framework를 보고한다.
+- setup doctor current-tree/clean-checkout 결과, one-command foreground start/stop, local camera binding, actual laptop `NOT_MEASURED`와 push/transfer dependency를 보고한다.
+- fake physical-button/candidate-review/browser QA의 case 수, exact handler/CAS evidence, TTY compatibility와 forbidden hardware/production/training count 0을 보고한다.
 - plan-only 전후 execute/gripper/recorder/dataset count 0을 증명한다.
 - live의 허용 effect를 phase/action/recorder/dataset/TEST_ONLY scene-cell 카운트로 보고한다.
 - 금지 production run/cell/candidate/coverage/inventory/training writer와 P6/policy/second episode count는 0이어야 한다.
@@ -1226,10 +1343,11 @@ Goal 1의 같은 UI/handler/`CampaignSession`/fresh `OneJob`을 사용해
   `git diff --check`, docs-governance, `mex check`, entropy와 fresh reviewer를 다시 통과한다.
 - hardware/process를 foreground에서 종료/인계하고 hidden process가 없음을 확인한다.
 - dirty `src/frcobot_ros2`가 시작 상태 그대로임을 확인한다.
-- mandatory 항목이 모두 PASS일 때만
-  `PHYSICAL_TEST_ONLY_HOME_PLACE1_PILOT_COMPLETE`를 기록한다.
+- software/portable mandatory 항목이 모두 PASS일 때만 `PORTABLE_COLLECTION_OPERATOR_PATH_COMPLETE`를 기록한다.
+- physical mandatory 항목이 모두 PASS일 때만 `PHYSICAL_TEST_ONLY_HOME_PLACE1_PILOT_COMPLETE`를 기록한다.
   아니면 `PAUSED_AWAITING_OPERATOR`, exact `BLOCKED_*`, `FAIL|NOT_AVAILABLE|NOT_MEASURED`와
   다음에 필요한 물리 의존성을 정확히 남긴다.
+- 두 표식이 모두 있을 때만 `DATA_COLLECTION_UX_PROJECT_COMPLETE`를 기록한다. physical blocker가 있어도 portable 표식을 숨기지 않고, 반대로 software/browser/portable gap을 실물 성공으로 덮지 않는다.
 - 이 표식이 production/data-validity/motion qualification/training approval이 아니고,
   actual production dataset/training/inference는 0임을 명시한다.
 ```
@@ -1264,7 +1382,7 @@ Goal 1의 같은 UI/handler/`CampaignSession`/fresh `OneJob`을 사용해
 - real loopback browser에서 automatic budget, direct cell edit, 100 mm three-point wizard, 세 episode button flow와 cancel-before-approval을 수행했다. browser QA 중 terminal evidence가 보이지 않는 결함을 수정해 technical, human semantic, synthetic review/coverage를 한 카드에서 분리 표시한다.
 - focused 61 tests, full 283 tests, browser regression 26 checks와 mobile Lighthouse accessibility 100을 통과했다. synthetic success의 fake recorder 네 단계는 각 3회, cancel은 0회였고 모든 physical/production/HUMAN/training effect는 0이었다.
 - `NO_HARDWARE_USE`를 유지해 robot/camera/gripper/ROS/MoveIt/real recorder/dataset/training/inference를 호출하지 않았고 두 temporary fixture와 foreground console을 종료·정리했다.
-- 사용자의 이번 한정 exact-plan button 위임을 Goal 2에 추가했다. scope 또는 digest 변경 시 무효이며 semantic `PASS`, `LANDED`, final scene-ready와 gripper maintenance에는 적용되지 않는다.
+- 사용자의 이번 한정 exact-plan button 위임을 Goal 2에 추가했다. scope 또는 digest 변경 시 무효이며 semantic `PASS`, combined release/final-scene verdict와 gripper maintenance에는 적용되지 않는다.
 
 ### 2026-08-25 completion-verifier correction
 
@@ -1291,3 +1409,13 @@ Goal 1의 같은 UI/handler/`CampaignSession`/fresh `OneJob`을 사용해
 
 - 네 번째 fresh verifier가 실제 foreground loopback/CAS/lifecycle 통합은 구현됐지만 `operator-ui/architecture.md`의 마지막 절만 backend Python을 future로 기술하는 문서 drift를 blocker로 판정해 이전 완료 판정을 무효화했다.
 - 해당 절만 현재 경계로 교체했다. Goal 1은 stdlib loopback, token/Host/Origin 검증, single-use CAS와 `CampaignOperator → CampaignSession → fresh OneJob` FAKE/TEST_ONLY 경로를 구현했고, PHYSICAL port construction/activation, hardware adapter와 production authority만 deferred다. standalone static preview의 `BRIDGE_UNAVAILABLE` fail-close는 그대로 유지한다.
+
+### 2026-08-26 Goal 2 portable operator amendment
+
+- 사용자가 Goal 2를 bounded physical one-pilot뿐 아니라 기존 UX 테스트와 프로젝트 마무리, 개인용 collection 노트북 setup 후 즉시 UI에서 수집·판정·검토할 수 있는 portable operator closeout으로 확장했다. enterprise/fleet/cross-platform 제품은 요구하지 않았다.
+- fresh source/caller mapping에서 `CampaignOperator`의 실제 composition caller가 fake console 하나뿐이고, semantic/combined recycle release-final-scene/non-recycle scene-ready/candidate review는 TTY/domain core에만 있으며, current setup/preflight가 non-mutating doctor와 stable single-UVC binding을 제공하지 않는 세 gap을 확인했다.
+- 새 framework 대신 physical-capable foreground composition root, generic digest-bound local-button checkpoint port와 setup doctor/machine-local binding 세 seam만 추가하도록 DAG를 보강했다. `CampaignOperator → CampaignSession → run_live → fresh OneJob`, existing candidate CAS, TTY default와 fresh-clone installer는 재사용한다.
+- current recycle의 TTY는 landing/gripper-empty/retreat/safe-staging을 한 release checklist로 이미 묶고 별도 final-scene hold가 없음을 source로 재확인했다. UI도 이를 한 버튼으로 유지하고 non-recycle post-commit `SCENE_READY`만 별도 checkpoint로 보존해 중복 click/state를 만들지 않는다.
+- existing camera-binding builder가 generic `SAFE_ID`를 쓰는 constraint를 기록했다. raw `/dev` path나 새 schema 대신 UVC by-id basename/RealSense serial을 existing candidate에 결속하고 valid real token에 필요한 field-specific validation만 최소 보정하도록 acceptance를 추가했다.
+- 2026-08-26 physical snapshot에 robot HOME, cube `place1` yaw0/(0,0), one connected-unplaced camera, optional unused second camera, gripper empty/cell clear와 E-stop monitoring 가능 확인을 기록했다. second camera/RealSense/depth는 current Goal dependency가 아니다.
+- portable clean-checkout rehearsal, full physical-shaped fake browser checkpoints, Orca human QA와 actual one-pilot을 분리하고 `PORTABLE_COLLECTION_OPERATOR_PATH_COMPLETE`, `PHYSICAL_TEST_ONLY_HOME_PLACE1_PILOT_COMPLETE`, 두 표식의 conjunction인 `DATA_COLLECTION_UX_PROJECT_COMPLETE`를 정의했다. 실제 노트북 hardware와 production/data/training authority는 여전히 별도다.
