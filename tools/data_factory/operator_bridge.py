@@ -48,7 +48,7 @@ CHECKPOINT_CHOICES = {
 CANDIDATE_REVIEW_CHOICES = ("PASS", "FAIL", "UNCERTAIN")
 CANDIDATE_REVIEW_REASONS = (
     "WRONG_OBJECT_OR_START", "GRASP_OR_LIFT", "TRAJECTORY_FLOW", "TASK_GOAL",
-    "UNMODELED_CONTACT", "RELEASE_SCENE", "UNKNOWN",
+    "UNMODELED_CONTACT", "RELEASE_SCENE", "IMAGE_QUALITY_OR_VISIBILITY", "UNKNOWN",
 )
 
 
@@ -448,6 +448,8 @@ class CandidateReviewPort:
         self.review_call = review_call
         self._pending = None
         self._public = None
+        self._resolved = None
+        self._resolved_payload = None
         self._lock = threading.RLock()
 
     def offer(
@@ -494,7 +496,8 @@ class CandidateReviewPort:
         with self._lock:
             return copy.deepcopy(self._public)
 
-    def resolve(self, payload: dict[str, Any], _view=None) -> dict[str, Any]:
+    def resolve_deferred(self, payload: dict[str, Any], _view=None) -> dict[str, Any]:
+        """Resolve the durable CAS but retain it until its ledger projection lands."""
         with self._lock:
             if self._pending is None or self._public is None:
                 raise ContractError("CANDIDATE_REVIEW_STATE")
@@ -509,6 +512,10 @@ class CandidateReviewPort:
                 or choice != "PASS" and reason not in CANDIDATE_REVIEW_REASONS
             ):
                 raise ContractError("CANDIDATE_REVIEW_CHOICE")
+            if self._resolved is not None:
+                if payload != self._resolved_payload:
+                    raise ContractError("CANDIDATE_REVIEW_ALREADY_RESOLVED")
+                return copy.deepcopy(self._resolved)
             updated = self.review_call(
                 self._pending["path"],
                 expected_file_digest=self._pending["file_digest"],
@@ -525,16 +532,36 @@ class CandidateReviewPort:
                 or updated.get("reviewed_by") != self.operator_label
             ):
                 raise ContractError("CANDIDATE_REVIEW_RESULT")
-            self._public["status"] = choice
             binding_digest = self._pending["review_binding_digest"]
             run_id = self._pending["run_id"]
-            self._pending = None
-            return {
+            self._resolved_payload = copy.deepcopy(payload)
+            self._resolved = {
                 "review_binding_digest": binding_digest,
                 "run_id": run_id,
                 "status": choice,
                 "training_authorized": False,
             }
+            return copy.deepcopy(self._resolved)
+
+    def acknowledge(self, review_binding_digest: str) -> None:
+        """Release a resolved CAS after its episode-ledger state is durable."""
+        with self._lock:
+            if (
+                self._pending is None
+                or self._resolved is None
+                or review_binding_digest != self._pending["review_binding_digest"]
+            ):
+                raise ContractError("CANDIDATE_REVIEW_ACK")
+            self._public["status"] = self._resolved["status"]
+            self._pending = None
+            self._resolved = None
+            self._resolved_payload = None
+
+    def resolve(self, payload: dict[str, Any], _view=None) -> dict[str, Any]:
+        """Resolve a standalone review whose caller has no secondary projection."""
+        result = self.resolve_deferred(payload, _view)
+        self.acknowledge(result["review_binding_digest"])
+        return result
 
 
 class _IPv6ThreadingHTTPServer(ThreadingHTTPServer):

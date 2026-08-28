@@ -196,6 +196,42 @@ class OperatorStackTests(unittest.TestCase):
         self.assertEqual(caught.exception.code, "OPERATOR_STACK_GRIPPER_SETUP_GATE")
         self.assertEqual(len(calls), 1)
 
+    def test_reconfigure_replaces_only_the_named_owned_child(self):
+        robot, old_camera, new_camera = FakeProcess(), FakeProcess(), FakeProcess()
+        factory = FakeFactory(robot, old_camera, new_camera)
+        stack = OperatorStack(COMMANDS, discover=facts, process_factory=factory)
+        stack.ensure()
+        replacement = {
+            "argv": ["scripts/start_camera_group.sh", "up", "UVC", "/dev/camera"],
+            "owner": "camera-group", "provides": ["camera"],
+        }
+
+        stack.reconfigure("camera_up", replacement)
+        stack.ensure()
+
+        self.assertEqual(robot.terminate_calls, 0)
+        self.assertEqual(old_camera.terminate_calls, 1)
+        self.assertEqual(new_camera.terminate_calls, 0)
+        self.assertEqual(stack.commands["camera_up"]["owner"], "camera-group")
+
+    def test_invalid_reconfigure_does_not_stop_the_current_child(self):
+        camera = FakeProcess()
+        stack = OperatorStack(
+            {"camera_up": COMMANDS["camera_up"]},
+            discover=lambda: facts("READY", "READY", "READY", "MISSING"),
+            process_factory=FakeFactory(camera),
+        )
+        stack.ensure()
+
+        with self.assertRaises(ContractError):
+            stack.reconfigure("camera_up", {
+                "argv": ["systemctl", "start", "camera"],
+                "owner": "camera-up", "provides": ["camera"],
+            })
+
+        self.assertEqual(camera.terminate_calls, 0)
+        self.assertIsNone(camera.poll())
+
 
 if __name__ == "__main__":
     unittest.main()

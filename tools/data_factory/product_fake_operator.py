@@ -16,7 +16,7 @@ from tools.data_factory.fake_operator_console import (
     synthetic_fixture,
 )
 from tools.data_factory.operator_application import CollectionOperatorApplication
-from tools.data_factory.operator_bridge import OperatorIntentCore
+from tools.data_factory.operator_bridge import CandidateReviewPort, OperatorIntentCore
 from tools.data_factory.operator_catalog import (
     SELECTION_SCHEMA,
     load_operator_catalog,
@@ -38,6 +38,7 @@ from tools.fr5_data_factory import (
     ContractError,
     canonical_digest,
     load_json_strict,
+    normalize_yaw_deg,
 )
 
 
@@ -79,7 +80,7 @@ def _product_fixture(
     poses = (
         ({"place_id": "PLACE_A", "yaw_deg": yaw, "x_mm": x_mm, "y_mm": y_mm}
          for yaw, x_mm, y_mm in (
-             (0, 0, 0), (90, 35, 0), (180, 0, 20), (270, -35, 0),
+             (0, 0, 0), (90, 35, 0), (-180, 0, 20), (-90, -35, 0),
          ))
         if pose_sequence is None else pose_sequence
     )
@@ -88,6 +89,9 @@ def _product_fixture(
         candidate = copy.deepcopy(dict(pose))
         if set(candidate) != {"place_id", "yaw_deg", "x_mm", "y_mm"}:
             raise ContractError("PRODUCT_FAKE_POSE_SEQUENCE")
+        candidate["yaw_deg"] = normalize_yaw_deg(candidate["yaw_deg"])
+        if candidate["yaw_deg"].is_integer():
+            candidate["yaw_deg"] = int(candidate["yaw_deg"])
         if candidate not in unique_poses:
             unique_poses.append(candidate)
     if not unique_poses:
@@ -248,6 +252,7 @@ def _catalog(
         if item["workspace_id"] == "PLACE_A"
         and item["frame_id"] == "place-a-yaw0-r002"
         and item["cell_id"] == "PLACE_A-yaw0-CENTER"
+        and item["camera_profile_id"] == "fr5-up-rgb-30hz-v1"
         and item["execution"]["TEST_COLLECTION"]["executable"] is True
     ]
     if len(candidates) != 1:
@@ -483,11 +488,12 @@ class ProductFakeOperator:
             ))
             snapshot_index = 0
 
-            def workspace_manager_factory():
+            def workspace_manager_factory(display_name):
                 return WorkspaceManager(
                     session_id=f"{session_id}-workspace",
                     candidate_root=self.workspace_candidate_root,
                     config_root=self.workspace_config_root,
+                    display_name=display_name,
                 )
 
             def workspace_snapshot():
@@ -562,15 +568,13 @@ class ProductFakeOperator:
                 pose_sequence = None
                 initial_pose = validate_operator_pose(
                     self.application.catalog, selected,
-                    {
-                        "place_id": selected["workspace_id"],
-                        "yaw_deg": 0, "x_mm": 0, "y_mm": 0,
-                    },
+                    draft.get("current_object_pose"),
                 )
                 if draft["authoring_mode"] == "ASSISTED":
                     pose_sequence = project_assisted_poses(
                         self.application.catalog, selected, initial_pose,
                         draft["requested_count"], repeat=draft["repeat"],
+                        normalized_seed=draft["normalized_seed"],
                     )
                     campaign_hypothesis, campaign_template = _product_fixture(
                         pose_sequence,
@@ -604,17 +608,133 @@ class ProductFakeOperator:
                 )
                 first_run = len(self._campaigns) * 100
                 holder = {}
+                synthetic_candidates: dict[str, dict[str, Any]] = {}
+
+                def review_candidate(
+                    path, *, expected_file_digest,
+                    expected_review_context_digest, checklist_id,
+                    semantic_status, reviewed_by, reason,
+                ):
+                    key = str(Path(path))
+                    candidate = synthetic_candidates.get(key)
+                    if (
+                        candidate is None
+                        or candidate["file_digest"] != expected_file_digest
+                        or candidate["review_context_digest"]
+                        != expected_review_context_digest
+                        or checklist_id != "pickup-v2"
+                        or candidate["semantic_status"] != "PENDING"
+                    ):
+                        raise ContractError("PRODUCT_FAKE_CANDIDATE_REVIEW")
+                    candidate.update(
+                        semantic_status=semantic_status,
+                        reviewed_by=reviewed_by, reason=reason,
+                    )
+                    return {
+                        "run_id": candidate["run_id"],
+                        "semantic_status": semantic_status,
+                        "reviewed_by": reviewed_by,
+                    }
+
+                def bind_candidate_state(reference, path):
+                    candidate = synthetic_candidates.get(str(Path(path)))
+                    if (
+                        not isinstance(reference, Mapping)
+                        or reference.get("schema_version")
+                        != "data_factory.synthetic_episode_review_reference.v1"
+                        or candidate is None
+                        or reference.get("run_id") != candidate["run_id"]
+                        or candidate["semantic_status"] == "PENDING"
+                    ):
+                        raise ContractError("PRODUCT_FAKE_CANDIDATE_STATE")
+                    return {
+                        **copy.deepcopy(dict(reference)),
+                        "review_status": candidate["semantic_status"],
+                        "retention_state": "PRESERVE",
+                        "training_status": "NOT_AUTHORIZED",
+                    }
 
                 def episode(
                     intent, lifecycle, cancel_event, episode_context,
                     decision_provider, checkpoint_provider,
                 ):
                     driver = holder["driver"]
-                    return driver.run_episode(
+                    outcome = driver.run_episode(
                         intent, lifecycle, cancel_event,
                         _bind_fake_episode_context(driver, intent, episode_context),
                         decision_provider, checkpoint_provider,
                     )
+                    result = outcome.get("result")
+                    technical = outcome.get("technical_evidence")
+                    if (
+                        not isinstance(result, Mapping)
+                        or not isinstance(technical, Mapping)
+                        or technical.get("status") != "PASS"
+                    ):
+                        return outcome
+                    slots = driver.campaign_operator.manifest["slots"]
+                    release_slot_value = (
+                        slots[intent["order_index"] + 1]
+                        if intent["order_index"] + 1 < len(slots)
+                        else intent["slot"]
+                    )
+                    release_base = next(
+                        item for item in campaign_hypothesis["base_conditions"]
+                        if item["base_condition_digest"]
+                        == release_slot_value["base_condition_digest"]
+                    )
+                    terminal_object_pose = {
+                        key: release_base["coverage_condition"][key]
+                        for key in ("place_id", "yaw_deg", "x_mm", "y_mm")
+                    }
+                    candidate_path = str(
+                        Path(self.fixture_root)
+                        / "synthetic_candidate_reviews" / intent["run_id"]
+                        / "candidate_admission.json"
+                    )
+                    review_context_digest = canonical_digest({
+                        "source": "SYNTHETIC_TEST_ONLY",
+                        "run_id": intent["run_id"],
+                        "technical_evidence_digest": canonical_digest(technical),
+                    })
+                    candidate = {
+                        "run_id": intent["run_id"],
+                        "review_context_digest": review_context_digest,
+                        "semantic_status": "PENDING",
+                        "reviewed_by": None,
+                        "reason": None,
+                    }
+                    candidate["file_digest"] = canonical_digest(candidate)
+                    synthetic_candidates[candidate_path] = candidate
+                    ledger_reference = {
+                        "schema_version": (
+                            "data_factory.synthetic_episode_review_reference.v1"
+                        ),
+                        "run_id": intent["run_id"],
+                        "path": str(Path(candidate_path).with_name(
+                            "synthetic_episode_ledger.json"
+                        )),
+                        "state_path": str(Path(candidate_path).with_name(
+                            "synthetic_episode_review_state.json"
+                        )),
+                        "review_status": "PENDING",
+                        "retention_state": "PRESERVE",
+                        "reclaim_state": "NOT_EVALUATED",
+                        "training_status": "NOT_AUTHORIZED",
+                    }
+                    sealed = copy.deepcopy(dict(result))
+                    sealed.update({
+                        "terminal_object_pose": terminal_object_pose,
+                        "episode_ledger": copy.deepcopy(ledger_reference),
+                        "candidate_review_offer": {
+                            "candidate_path": candidate_path,
+                            "run_id": intent["run_id"],
+                            "expected_file_digest": candidate["file_digest"],
+                            "expected_review_context_digest": review_context_digest,
+                            "ledger_reference": copy.deepcopy(ledger_reference),
+                        },
+                    })
+                    return {**copy.deepcopy(dict(outcome)), "result": sealed}
 
                 def operator_factory(episode_call):
                     driver = build_fake_operator_console(
@@ -672,6 +792,11 @@ class ProductFakeOperator:
                     projection_call=projection,
                     test_only_paths=self.fixture_root,
                     terminal_response_call=terminal_response,
+                    candidate_review_port=CandidateReviewPort(
+                        operator_label=operator_label,
+                        review_call=review_candidate,
+                    ),
+                    candidate_state_bind_call=bind_candidate_state,
                     campaign_approval_once=True,
                     run_id_factory=lambda index, start=first_run: (
                         f"synthetic-run-{start + index}"

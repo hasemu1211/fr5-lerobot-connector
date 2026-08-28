@@ -1,0 +1,33 @@
+{
+  "schema_version": "data_factory.collection_profile.v2",
+  "collection_profile_id": "fr5-up-wrist-rgb-30hz-v1",
+  "qualification_status": "QUALIFIED",
+  "camera_profile": "up-wrist",
+  "camera_roles": [
+    "up",
+    "wrist"
+  ],
+  "camera_serials": {
+    "up": "RUNTIME_BINDING_REQUIRED",
+    "wrist": "RUNTIME_BINDING_REQUIRED"
+  },
+  "camera_topics": {
+    "up": "/camera/up/color/image_raw",
+    "wrist": "/camera/wrist/color/image_raw"
+  },
+  "fps": 30,
+  "width": 640,
+  "height": 480,
+  "image_qos": "reliable",
+  "image_qos_depth": 10,
+  "writer_queue_size": 128,
+  "encoder_threads": 2,
+  "encoding_mode": "batch",
+  "repo_id": "local/fr5_smolvla_up_wrist_30hz",
+  "encoder_temp_policy": "DATASET_LOCAL",
+  "dataset_incremental_peak_bytes": 16777216,
+  "encoder_temp_peak_bytes": 1,
+  "disk_reserve_bytes": 1073741824,
+  "portability_status": "QUALIFICATION_REQUIRED",
+  "quality_contract_digest": "sha256:73e3c83d30867db024020302b3a28f4d039321fac72dc7f9a1535bfb5faf324f"
+}

@@ -9,6 +9,14 @@ const WORKSPACE_CAPTURE_ROLES = [
   ["X_REF", "X축 기준점", "CENTER에서 +X 방향"],
   ["Y_CHECK", "Y축 확인점", "계산된 +Y 방향 확인"],
 ];
+const CAMERA_ROLES = [
+  ["UP", "상단"],
+  ["SIDE", "측면"],
+  ["WRIST", "손목"],
+  ["UNUSED", "사용 안 함"],
+];
+const CAMERA_ROLE_IDS = new Set(CAMERA_ROLES.map(([role]) => role));
+const START_POSE_STATUSES = new Set(["CANDIDATE", "AVAILABLE", "QUALIFICATION_REQUIRED"]);
 const ENUMS = {
   connection_state: new Set(["READY", "STALE", "RECONNECTING", "BLOCKED"]),
   effect_scope: new Set(["FAKE", "PHYSICAL"]),
@@ -87,16 +95,35 @@ function validateView(value) {
     assertObject(item, "SETUP_INVALID");
     if (typeof item.label !== "string" || !item.label || typeof item.status !== "string" || !item.status || typeof item.detail !== "string") throw new TypeError("SETUP_INVALID");
   });
+  validateCameraSetup(view.camera_setup);
+  validateStartPoseSetup(view.start_pose_setup);
+  validateStateSpaceSummary(view.state_space_summary);
   assertObject(view.draft, "DRAFT_INVALID");
   assertEnum("authoring_mode", view.draft.authoring_mode);
   if (typeof view.draft.draft_id !== "string" || !view.draft.draft_id || !Number.isInteger(view.draft.requested_count)
       || view.draft.requested_count < 1 || view.draft.requested_count > 100 || !Number.isInteger(view.draft.repeat)
       || view.draft.repeat < 1 || !Array.isArray(view.draft.cells)) throw new TypeError("DRAFT_INVALID");
   validateCatalog(view.catalog, view.draft);
+  const currentObject = view.draft.current_object_pose;
+  if (!currentObject || typeof currentObject !== "object" || Array.isArray(currentObject)
+      || currentObject.place_id !== view.draft.selection.workspace
+      || ![currentObject.x_mm, currentObject.y_mm, currentObject.yaw_deg].every(Number.isFinite)) throw new TypeError("CURRENT_OBJECT_POSE_INVALID");
   if (view.draft.direct_poses !== undefined && (!Array.isArray(view.draft.direct_poses)
       || view.draft.direct_poses.some((pose) => !pose || typeof pose !== "object" || Array.isArray(pose)
         || pose.place_id !== view.draft.selection.workspace
         || ![pose.x_mm, pose.y_mm, pose.yaw_deg].every(Number.isFinite)))) throw new TypeError("DIRECT_POSES_INVALID");
+  if (view.draft.direct_pairs !== undefined && (!Array.isArray(view.draft.direct_pairs)
+      || view.draft.direct_pairs.some((pair) => !pair || typeof pair !== "object" || Array.isArray(pair)
+        || typeof pair.start_pose_id !== "string" || !pair.start_pose_id
+        || pair.place_id !== view.draft.selection.workspace
+        || ![pair.x_mm, pair.y_mm, pair.yaw_deg].every(Number.isFinite)))) throw new TypeError("DIRECT_PAIRS_INVALID");
+  if (view.draft.direct_pairs !== undefined && view.start_pose_setup) {
+    const selectedStartIds = new Set(view.start_pose_setup.selected_start_pose_ids);
+    if (view.draft.direct_pairs.some((pair) => !selectedStartIds.has(pair.start_pose_id))) throw new TypeError("DIRECT_PAIRS_INVALID");
+  }
+  if (view.state_space_summary && (view.state_space_summary.planned_count !== view.draft.requested_count
+      || view.start_pose_setup && view.state_space_summary.selected_start_pose_count !== view.start_pose_setup.selected_start_pose_ids.length
+      || view.state_space_summary.eligible_pair_count > view.state_space_summary.selected_start_pose_count * view.state_space_summary.selected_condition_count)) throw new TypeError("STATE_SPACE_SUMMARY_INVALID");
   if (view.draft.selection.data_mode !== view.data_disposition) throw new TypeError("DATA_MODE_MISMATCH");
   const cellIds = new Set();
   view.draft.cells.forEach((cell) => {
@@ -116,6 +143,18 @@ function validateView(value) {
     if (!DIGEST_PATTERN.test(view.campaign_envelope.manifest_digest) || !DIGEST_PATTERN.test(view.campaign_envelope.envelope_digest)
         || view.campaign_envelope.episode_count !== view.draft.requested_count) throw new TypeError("CAMPAIGN_ENVELOPE_INVALID");
   }
+  const gripperTuning = view.campaign_review?.gripper_tuning;
+  if (gripperTuning !== undefined) {
+    assertObject(gripperTuning, "GRIPPER_TUNING_INVALID");
+    if (!DIGEST_PATTERN.test(gripperTuning.retune_digest)
+        || gripperTuning.status !== "CANDIDATE_PENDING_HIL"
+        || gripperTuning.data_disposition !== "TEST_ONLY"
+        || gripperTuning.production_authority !== false
+        || gripperTuning.training_authority !== false
+        || !Number.isFinite(gripperTuning.command_percent)
+        || !Number.isFinite(gripperTuning.acceptable_feedback_percent?.min)
+        || !Number.isFinite(gripperTuning.acceptable_feedback_percent?.max)) throw new TypeError("GRIPPER_TUNING_INVALID");
+  }
   if (view.runtime.workflow_state === "RUNNING" && !view.available_ops.includes("cancel_session")) throw new TypeError("RUNNING_CANCEL_UNAVAILABLE");
   if (view.episode_history !== undefined && (!Array.isArray(view.episode_history)
       || view.episode_history.some((item) => !item || typeof item !== "object" || Array.isArray(item)
@@ -124,25 +163,91 @@ function validateView(value) {
   if (sequence !== undefined && (!Array.isArray(sequence) || sequence.some((item, index) => !item
       || typeof item !== "object" || Array.isArray(item) || item.order_index !== index + 1
       || item.place_id !== view.draft.selection.workspace
+      || item.start_pose_id !== undefined && (typeof item.start_pose_id !== "string" || !item.start_pose_id)
       || ![item.x_mm, item.y_mm, item.yaw_deg].every(Number.isFinite)
       || !DIGEST_PATTERN.test(item.coverage_condition_digest)))) throw new TypeError("COVERAGE_SEQUENCE_INVALID");
   if (view.candidate_review !== undefined && view.candidate_review !== null) {
     assertObject(view.candidate_review, "CANDIDATE_REVIEW_INVALID");
     if (!DIGEST_PATTERN.test(view.candidate_review.review_binding_digest)
         || !["PENDING", "PASS", "FAIL", "UNCERTAIN"].includes(view.candidate_review.status)
-        || !Array.isArray(view.candidate_review.choices) || !view.candidate_review.choices.every((choice) => ["PASS", "FAIL", "UNCERTAIN"].includes(choice))) throw new TypeError("CANDIDATE_REVIEW_INVALID");
+        || !Array.isArray(view.candidate_review.choices) || !view.candidate_review.choices.every((choice) => ["PASS", "FAIL", "UNCERTAIN"].includes(choice))
+        || view.candidate_review.episode_number !== undefined && (!Number.isInteger(view.candidate_review.episode_number) || view.candidate_review.episode_number < 1)
+        || view.candidate_review.queue_remaining !== undefined && (!Number.isInteger(view.candidate_review.queue_remaining) || view.candidate_review.queue_remaining < 1)) throw new TypeError("CANDIDATE_REVIEW_INVALID");
+  }
+  if (view.home_recovery !== undefined && view.home_recovery !== null) {
+    assertObject(view.home_recovery, "HOME_RECOVERY_INVALID");
+    if (view.home_recovery.schema_version !== "data_factory.home_recovery.v1"
+        || !["HOME", "ALREADY_HOME"].includes(view.home_recovery.status)
+        || view.home_recovery.gripper_open !== true
+        || ![0, 1].includes(view.home_recovery.arm_goal_count)) throw new TypeError("HOME_RECOVERY_INVALID");
   }
   validateWorkspaceRegistration(view.workspace_registration);
-  if (view.runtime.progress !== undefined && (!Number.isFinite(view.runtime.progress) || view.runtime.progress < 0 || view.runtime.progress > 100)) throw new TypeError("RUNTIME_PROGRESS_INVALID");
+  if (view.runtime.progress != null && (!Number.isFinite(view.runtime.progress) || view.runtime.progress < 0 || view.runtime.progress > 100)) throw new TypeError("RUNTIME_PROGRESS_INVALID");
   if (lastSession === view.session_id && (view.revision < lastRevision
       || view.revision === lastRevision && lastDigest && lastDigest !== view.view_digest)) throw new TypeError("VIEW_REVISION_ROLLBACK");
   return view;
+}
+
+function validateStartPoseSetup(setup) {
+  if (setup === undefined || setup === null) return;
+  assertObject(setup, "START_POSE_SETUP_INVALID");
+  if (!Array.isArray(setup.profiles) || !Array.isArray(setup.selected_start_pose_ids)
+      || new Set(setup.selected_start_pose_ids).size !== setup.selected_start_pose_ids.length) throw new TypeError("START_POSE_SETUP_INVALID");
+  const ids = new Set();
+  setup.profiles.forEach((profile) => {
+    assertObject(profile, "START_POSE_PROFILE_INVALID");
+    if (typeof profile.start_pose_id !== "string" || !profile.start_pose_id || ids.has(profile.start_pose_id)
+        || typeof profile.display_name !== "string" || !profile.display_name.trim()
+        || !START_POSE_STATUSES.has(profile.status)
+        || profile.reason !== undefined && typeof profile.reason !== "string") throw new TypeError("START_POSE_PROFILE_INVALID");
+    ids.add(profile.start_pose_id);
+  });
+  if (setup.selected_start_pose_ids.some((id) => !ids.has(id)
+      || setup.profiles.find((profile) => profile.start_pose_id === id)?.status !== "AVAILABLE")) throw new TypeError("START_POSE_SELECTION_INVALID");
+}
+
+function validateStateSpaceSummary(summary) {
+  if (summary === undefined || summary === null) return;
+  assertObject(summary, "STATE_SPACE_SUMMARY_INVALID");
+  const fields = ["selected_start_pose_count", "selected_condition_count", "eligible_pair_count", "planned_count"];
+  if (Object.keys(summary).length !== fields.length || fields.some((field) => !Number.isInteger(summary[field]) || summary[field] < 0)) throw new TypeError("STATE_SPACE_SUMMARY_INVALID");
+}
+
+function validateCameraSetup(cameraSetup) {
+  if (cameraSetup === undefined || cameraSetup === null) return;
+  assertObject(cameraSetup, "CAMERA_SETUP_INVALID");
+  const availableRoles = cameraSetup.available_roles ?? CAMERA_ROLES.map(([role]) => role);
+  if (!Array.isArray(cameraSetup.devices) || typeof cameraSetup.profile_label !== "string"
+      || !Array.isArray(cameraSetup.required_roles) || new Set(cameraSetup.required_roles).size !== cameraSetup.required_roles.length
+      || cameraSetup.required_roles.some((role) => role === "UNUSED" || !CAMERA_ROLE_IDS.has(role))
+      || !Array.isArray(availableRoles) || !availableRoles.includes("UNUSED")
+      || new Set(availableRoles).size !== availableRoles.length
+      || availableRoles.some((role) => !CAMERA_ROLE_IDS.has(role))
+      || cameraSetup.status !== undefined && !["READY", "BINDING_REQUIRED", "NO_CAMERA_CONNECTED"].includes(cameraSetup.status)
+      || cameraSetup.reason !== undefined && cameraSetup.reason !== null && typeof cameraSetup.reason !== "string") throw new TypeError("CAMERA_SETUP_INVALID");
+  assertObject(cameraSetup.bindings, "CAMERA_SETUP_INVALID");
+  const deviceIds = new Set();
+  cameraSetup.devices.forEach((device) => {
+    assertObject(device, "CAMERA_DEVICE_INVALID");
+    if (typeof device.logical_id !== "string" || !device.logical_id || deviceIds.has(device.logical_id)
+        || typeof device.label !== "string" || !device.label || typeof device.status !== "string" || !device.status
+        || !["CONNECTED", "CONNECTING", "DISCONNECTED"].includes(device.status)
+        || device.technical_identity !== undefined && typeof device.technical_identity !== "string") throw new TypeError("CAMERA_DEVICE_INVALID");
+    deviceIds.add(device.logical_id);
+  });
+  if (Object.keys(cameraSetup.bindings).length !== deviceIds.size
+      || Object.keys(cameraSetup.bindings).some((logicalId) => !deviceIds.has(logicalId))
+      || [...deviceIds].some((logicalId) => !availableRoles.includes(cameraSetup.bindings[logicalId]))) throw new TypeError("CAMERA_BINDINGS_INVALID");
+  const assigned = Object.values(cameraSetup.bindings).filter((role) => role !== "UNUSED");
+  if (new Set(assigned).size !== assigned.length
+      || cameraSetup.status === "READY" && cameraSetup.required_roles.some((role) => !assigned.includes(role))) throw new TypeError("CAMERA_BINDINGS_INVALID");
 }
 
 function validateWorkspaceRegistration(workspace) {
   if (workspace === undefined || workspace === null) return;
   assertObject(workspace, "WORKSPACE_REGISTRATION_INVALID");
   if (typeof workspace.calibration_id !== "string" || !workspace.calibration_id) throw new TypeError("WORKSPACE_REGISTRATION_INVALID");
+  if (workspace.display_name !== undefined && (typeof workspace.display_name !== "string" || !workspace.display_name.trim())) throw new TypeError("WORKSPACE_REGISTRATION_INVALID");
   assertObject(workspace.captures, "WORKSPACE_REGISTRATION_INVALID");
   const labels = WORKSPACE_CAPTURE_ROLES.map(([label]) => label);
   if (Object.keys(workspace.captures).length !== labels.length
@@ -178,7 +283,7 @@ function setBanner(text, tone = "info", announce = true) {
 }
 
 function humanReason(code) {
-  return message("reason", code, "현재 조합을 사용할 수 없습니다");
+  return message("reason", code, "현재 사용할 수 없습니다");
 }
 
 function renderTechnical(rows) {
@@ -199,27 +304,31 @@ function failClose(code, detail = "") {
   if (document.querySelector("#workspace-dialog").open) document.querySelector("#workspace-dialog").close();
   cancelButton.hidden = true;
   setBanner(`${humanReason(code)}. 요청을 보내지 않았습니다. 최신 상태를 다시 불러오세요.`, "bad");
-  document.querySelectorAll(".flow-step").forEach((section) => { section.hidden = section.dataset.step !== "execution"; });
-  document.querySelector("#runtime-content").innerHTML = `<div class="recovery-card"><strong>실행하지 않았습니다</strong><p>화면을 새로 읽은 뒤 현재 조건과 진행 상황을 다시 확인하세요.</p><button id="retry-view" type="button">최신 상태 다시 불러오기</button></div>`;
+  document.querySelectorAll(".flow-step").forEach((section) => { section.hidden = section.dataset.step !== "environment"; });
+  document.querySelectorAll("[data-step-target]").forEach((button) => button.classList.toggle("active", button.dataset.stepTarget === "environment"));
+  document.querySelector("#setup-summary").innerHTML = `<strong>${escapeHtml(humanReason(code))}</strong><span>장치 상태를 성공으로 표시하지 않습니다. 서비스를 연결한 뒤 다시 확인하세요.</span><button id="retry-view" type="button">최신 상태 다시 불러오기</button>`;
+  document.querySelector("#setup-subsystems").innerHTML = "";
+  document.querySelector("#camera-setup").hidden = true;
+  document.querySelector("#runtime-content").innerHTML = "";
   const retry = document.querySelector("#retry-view");
-  retry.disabled = false;
   retry.addEventListener("click", () => loadView(), {once: true});
   renderTechnical({error_code: code, detail});
 }
 
 function setupReady(view) {
-  return ["READY", "READY_WITH_EXCEPTION"].includes(view.setup.host_status);
+  return ["READY", "READY_WITH_EXCEPTION"].includes(view.setup.host_status)
+    && (!view.camera_setup?.status || view.camera_setup.status === "READY");
 }
 
 function workflowStep(view) {
   const state = view.runtime.workflow_state;
-  if (state === "PREPARING" || !setupReady(view)) return "environment";
+  if (state === "PREPARING" || !setupReady(view) || view.available_ops.includes("recover_camera_setup")) return "environment";
   if (state === "AUTHORING") return "plan";
   if (["REVIEW_CAMPAIGN", "AWAITING_APPROVAL"].includes(state)) return "review";
+  if (view.candidate_review?.status === "PENDING") return "results";
   if (["RUNNING", "CANCELLING", "PAUSED_AWAITING_OPERATOR", "BLOCKED"].includes(state)) return "execution";
   if (state === "REVIEW_RESULTS"
-      || (state === "TERMINAL" && view.episode_history?.length)
-      || view.candidate_review?.status === "PENDING") return "results";
+      || (state === "TERMINAL" && view.episode_history?.length)) return "results";
   return "next";
 }
 
@@ -267,14 +376,120 @@ function renderConnection(view) {
 }
 
 function renderSetup(view) {
-  document.querySelector("#setup-summary").innerHTML = `<strong>${escapeHtml(message("status", view.setup.host_status, view.setup.summary ?? "환경 상태 확인됨"))}</strong><span>${escapeHtml(view.setup.summary ?? "현재 장치 상태를 아래에서 확인하세요.")}</span>`;
+  if (canIntent("recover_camera_setup")) {
+    document.querySelector("#setup-summary").innerHTML = "<strong>카메라 재연결 필요</strong><span>이전 장치 상태는 다시 확인하기 전까지 사용하지 않습니다.</span>";
+    document.querySelector("#setup-subsystems").innerHTML = "";
+    renderCameraSetup(view);
+    document.querySelector("#environment-next").disabled = true;
+    document.querySelector("#prepare-environment").hidden = true;
+    document.querySelector("#recover-home").hidden = true;
+    return;
+  }
+  const observed = typeof view.setup.observed_at === "string"
+    ? ` · ${new Date(view.setup.observed_at).toLocaleTimeString("ko-KR")}` : "";
+  const recovery = view.home_recovery;
+  const recoverySummary = recovery
+    ? `<span>${escapeHtml(message("status", recovery.status))} · 그리퍼 열림 · ${recovery.arm_goal_count === 1 ? "로봇 이동 1회" : "로봇 이동 없음"}</span>`
+    : "";
+  document.querySelector("#setup-summary").innerHTML = `<strong>${escapeHtml(message("status", view.setup.host_status, view.setup.summary ?? "환경 상태 확인됨"))}</strong><span>${escapeHtml((view.setup.summary ?? "현재 장치 상태를 아래에서 확인하세요.") + observed)}</span>${recoverySummary}`;
   document.querySelector("#setup-subsystems").innerHTML = view.setup.subsystems.map((item) => {
     const label = message("status", item.status, message("reason", item.status, "확인 필요"));
     const tone = item.status === "READY" ? "ready" : item.status === "CONNECTING" ? "waiting" : "attention";
     return `<li><span class="device-state ${tone}" aria-hidden="true"></span><div><strong>${escapeHtml(item.label)}</strong><p>${escapeHtml(item.detail)}</p></div><b>${escapeHtml(label)}</b></li>`;
   }).join("");
+  renderCameraSetup(view);
   document.querySelector("#environment-next").disabled = !setupReady(view);
   document.querySelector("#prepare-environment").hidden = !canIntent("prepare_environment");
+  document.querySelector("#recover-home").hidden = !canIntent("recover_home");
+}
+
+function renderCameraSetup(view) {
+  const setup = view.camera_setup;
+  const section = document.querySelector("#camera-setup");
+  const recovering = canIntent("recover_camera_setup");
+  const recoveryCard = recovering
+    ? '<div class="recovery-card"><strong>카메라 연결을 다시 확인하세요.</strong><p>현재 연결과 역할을 새로 읽고 환경 준비로 돌아갑니다.</p><button type="button" data-recovery-op="recover_camera_setup">카메라 다시 연결</button></div>'
+    : "";
+  section.hidden = !setup && !recovering;
+  if (recovering) {
+    document.querySelector("#camera-role-list").innerHTML = recoveryCard;
+    document.querySelector("#camera-role-status").textContent = "현재 장치와 역할을 다시 확인해야 합니다.";
+    document.querySelector("#camera-profile-label").textContent = "재연결 필요";
+    return;
+  }
+  if (!setup) {
+    document.querySelector("#camera-role-list").innerHTML = "";
+    document.querySelector("#camera-role-status").textContent = "";
+    document.querySelector("#camera-profile-label").textContent = "";
+    return;
+  }
+  const editable = canIntent("update_camera_bindings");
+  const availableRoles = setup.available_roles ?? CAMERA_ROLES.map(([role]) => role);
+  document.querySelector("#camera-profile-label").textContent = setup.profile_label || "녹화 설정 결정 전";
+  const deviceRows = setup.devices.length ? setup.devices.map((device, index) => {
+    const selected = setup.bindings[device.logical_id];
+    const options = CAMERA_ROLES.filter(([role]) => availableRoles.includes(role)).map(([role, label]) => `<option value="${role}" ${role === selected ? "selected" : ""}>${label}</option>`).join("");
+    const status = {CONNECTED: "연결됨", CONNECTING: "연결 중", DISCONNECTED: "연결 안 됨"}[device.status] ?? "상태 확인 필요";
+    return `<div class="camera-role-row"><span class="camera-lens" aria-hidden="true"></span><div><strong>${escapeHtml(device.label || `카메라 ${index + 1}`)}</strong><small>${status}</small></div><label>사용 위치<select data-camera-logical-id="${escapeHtml(device.logical_id)}" aria-label="${escapeHtml(device.label)} 사용 위치" ${editable ? "" : "disabled"}>${options}</select></label></div>`;
+  }).join("") : '<p class="empty-camera">연결된 카메라가 없습니다.</p>';
+  document.querySelector("#camera-role-list").innerHTML = deviceRows + recoveryCard;
+  const assigned = new Set(Object.values(setup.bindings));
+  const missing = setup.required_roles.filter((role) => !assigned.has(role));
+  const used = [...assigned].filter((role) => role !== "UNUSED").map((role) => CAMERA_ROLES.find(([id]) => id === role)?.[1] ?? role);
+  document.querySelector("#camera-role-status").textContent = setup.reason
+    ? humanReason(setup.reason)
+    : missing.length
+    ? `${missing.map((role) => CAMERA_ROLES.find(([id]) => id === role)?.[1] ?? role).join(" · ")} 역할을 지정하세요.`
+    : setup.devices.length ? `${setup.devices.length}대 연결 · ${used.join(" · ")} 사용${assigned.has("UNUSED") ? " · 나머지 미사용" : ""}` : "카메라를 연결하면 역할을 지정할 수 있습니다.";
+}
+
+function startPoseLabel(view, startPoseId) {
+  return view.start_pose_setup?.profiles.find((profile) => profile.start_pose_id === startPoseId)?.display_name
+    ?? catalogOption(view, "start", startPoseId)?.label
+    ?? startPoseId;
+}
+
+function selectedStartPoseProfiles(view) {
+  if (!view.start_pose_setup) return [];
+  const selected = new Set(view.start_pose_setup.selected_start_pose_ids);
+  return view.start_pose_setup.profiles.filter((profile) => selected.has(profile.start_pose_id));
+}
+
+function renderStateSpaceSummary(view) {
+  const summary = view.state_space_summary;
+  const element = document.querySelector("#state-space-summary");
+  element.hidden = !summary;
+  element.innerHTML = summary ? [
+    ["시작 자세", `${summary.selected_start_pose_count}개`],
+    ["A4 기준점", `${summary.selected_condition_count}개`],
+    ["기준점 조합", `${summary.eligible_pair_count}개`],
+    ["계획된 에피소드", `${summary.planned_count}개`],
+  ].map(([term, value]) => `<div><dt>${term}</dt><dd>${escapeHtml(value)}</dd></div>`).join("") : "";
+}
+
+function renderStartPoseSetup(view) {
+  const setup = view.runtime.workflow_state === "AUTHORING" ? view.start_pose_setup : null;
+  const entry = document.querySelector("#start-pose-entry");
+  const dialog = document.querySelector("#start-pose-dialog");
+  entry.hidden = !setup;
+  if (!setup) {
+    if (dialog.open) dialog.close();
+    document.querySelector("#start-pose-profile-list").innerHTML = "";
+    document.querySelector("#start-pose-status").textContent = "";
+    return;
+  }
+  document.querySelector("#open-start-pose").disabled = intentBusy;
+  document.querySelector("#capture-start-pose").disabled = !canIntent("capture_start_pose");
+  const selected = new Set(setup.selected_start_pose_ids);
+  const canSelect = canIntent("update_start_pose_selection");
+  document.querySelector("#start-pose-profile-list").innerHTML = setup.profiles.length ? setup.profiles.map((profile) => {
+    const available = profile.status === "AVAILABLE";
+    const required = selected.size === 1 && selected.has(profile.start_pose_id);
+    const label = {CANDIDATE: "후보", AVAILABLE: "사용 가능", QUALIFICATION_REQUIRED: "검증 필요"}[profile.status];
+    const reason = profile.reason ? ` · ${humanReason(profile.reason)}` : "";
+    return `<label class="start-pose-profile"><input type="checkbox" data-start-pose-id="${escapeHtml(profile.start_pose_id)}" ${selected.has(profile.start_pose_id) ? "checked" : ""} ${canSelect && available && !required ? "" : "disabled"}><span><strong>${escapeHtml(profile.display_name)}</strong><small>${escapeHtml(label + reason)}</small></span></label>`;
+  }).join("") : '<p class="empty-camera">등록된 시작 자세가 없습니다.</p>';
+  document.querySelector("#start-pose-status").textContent = `${setup.selected_start_pose_ids.length}개 시작 자세가 수집 범위에 포함됩니다. 최소 1개는 필요합니다.`;
 }
 
 function catalogOption(view, axis, id) {
@@ -292,12 +507,42 @@ function directPoseDomain(view) {
   return domain;
 }
 
+function renderCurrentObjectPose(view, editable) {
+  const domain = directPoseDomain(view);
+  const pose = view.draft.current_object_pose;
+  const fields = [
+    ["#current-object-x", pose.x_mm, domain?.x_mm],
+    ["#current-object-y", pose.y_mm, domain?.y_mm],
+    ["#current-object-yaw", pose.yaw_deg, domain?.yaw_deg],
+  ];
+  fields.forEach(([selector, value, bounds]) => {
+    const input = document.querySelector(selector);
+    input.value = value;
+    if (bounds) {
+      input.min = bounds.minimum;
+      if (Number.isFinite(bounds.maximum)) input.max = bounds.maximum;
+      else input.removeAttribute("max");
+    } else {
+      input.removeAttribute("min");
+      input.removeAttribute("max");
+    }
+    input.disabled = !editable || !domain;
+  });
+  document.querySelector("#apply-current-object").disabled = !editable || !domain;
+  document.querySelector("#current-object-status").textContent = domain
+    ? `${selectedLabel(view, "workspace")} · 첫 에피소드와 작업영역 초기화가 이 위치에서 시작합니다.`
+    : "현재 작업영역의 입력 범위를 사용할 수 없습니다.";
+}
+
 function renderDirectPoseEditor(view, editable) {
   const editor = document.querySelector("#direct-pose-editor");
   const direct = view.draft.authoring_mode === "DIRECT_EDIT";
   const domain = directPoseDomain(view);
-  const enabled = direct && editable && Boolean(domain);
+  const pairMode = Array.isArray(view.draft.direct_pairs);
+  const startProfiles = selectedStartPoseProfiles(view);
+  const enabled = direct && editable && Boolean(domain) && (!pairMode || startProfiles.length > 0);
   editor.hidden = !direct;
+  editor.dataset.pairMode = String(pairMode);
   [["#direct-x-input", domain?.x_mm], ["#direct-y-input", domain?.y_mm]].forEach(([selector, bounds]) => {
     const input = document.querySelector(selector);
     if (bounds) {
@@ -309,28 +554,53 @@ function renderDirectPoseEditor(view, editable) {
     }
     input.disabled = !enabled;
   });
-  document.querySelector("#direct-yaw-input").disabled = !enabled;
+  const yawInput = document.querySelector("#direct-yaw-input");
+  if (domain?.yaw_deg) {
+    yawInput.min = domain.yaw_deg.minimum;
+    yawInput.removeAttribute("max");
+  } else {
+    yawInput.removeAttribute("min");
+    yawInput.removeAttribute("max");
+  }
+  yawInput.disabled = !enabled;
+  const pairs = pairMode ? view.draft.direct_pairs : null;
   const poses = view.draft.direct_poses ?? [];
-  const anchor = view.draft.cells.find((cell) => ["SELECTED", "PINNED"].includes(cell.selection_state)) ?? view.draft.cells[0];
-  const required = 1 + poses.length;
+  const anchor = view.draft.current_object_pose;
+  const required = pairMode ? pairs.length : 1 + poses.length;
+  const startLabel = document.querySelector("#direct-start-label");
+  const startSelect = document.querySelector("#direct-start-select");
+  startLabel.hidden = !pairMode;
+  startSelect.innerHTML = pairMode ? startProfiles.map((profile) => `<option value="${escapeHtml(profile.start_pose_id)}">${escapeHtml(profile.display_name)}</option>`).join("") : "";
+  startSelect.disabled = !enabled;
   document.querySelector("#add-direct-pose").disabled = !enabled || required >= view.draft.requested_count;
+  document.querySelector("#direct-selection-count").textContent = `${required}개 · 표시 순서대로 실행`;
   document.querySelector("#direct-domain-status").textContent = !domain
     ? "현재 작업영역의 직접 입력 범위를 사용할 수 없습니다."
+    : pairMode && !startProfiles.length
+      ? "수집에 사용할 시작 자세를 먼저 선택하세요."
     : required > view.draft.requested_count
-      ? `현재 ${required}개 자세가 필요합니다. 에피소드 수를 ${required}회 이상으로 늘리거나 자세를 삭제하세요.`
-      : `현재 시작 위치를 첫 조건으로 두고, 아래 전체 조건 목록을 표시 순서대로 ${view.draft.requested_count}회까지 반복합니다. 입력 범위: X ${domain.x_mm.minimum}~${domain.x_mm.maximum} mm, Y ${domain.y_mm.minimum}~${domain.y_mm.maximum} mm.`;
-  const anchorRow = `<li><span>1</span><strong>X ${escapeHtml(anchor?.x_mm ?? 0)} · Y ${escapeHtml(anchor?.y_mm ?? 0)} · ${escapeHtml(anchor?.yaw_deg ?? 0)}°</strong><em>현재 시작 위치</em></li>`;
-  document.querySelector("#direct-pose-list").innerHTML = anchorRow + poses.map((pose, index) => `<li><span>${index + 2}</span><strong>X ${escapeHtml(pose.x_mm)} · Y ${escapeHtml(pose.y_mm)} · ${escapeHtml(pose.yaw_deg)}°</strong><button type="button" class="secondary-button" data-pose-index="${index}" aria-label="${index + 2}번째 직접 자세 삭제" ${enabled ? "" : "disabled"}>삭제</button></li>`).join("");
+      ? `현재 ${required}개 조건이 선택되었습니다. 에피소드 수를 ${required}회 이상으로 늘리거나 조건을 삭제하세요.`
+      : pairMode
+        ? `시작 자세와 위치·각도를 한 조건으로 추가합니다. 입력 범위: X ${domain.x_mm.minimum}~${domain.x_mm.maximum} mm, Y ${domain.y_mm.minimum}~${domain.y_mm.maximum} mm.`
+        : `현재 물체 위치를 첫 조건으로 두고 표시 순서대로 실행합니다. 입력 범위: X ${domain.x_mm.minimum}~${domain.x_mm.maximum} mm, Y ${domain.y_mm.minimum}~${domain.y_mm.maximum} mm.`;
+  if (pairMode) {
+    document.querySelector("#direct-pose-list").innerHTML = pairs.length ? pairs.map((pair, index) => `<li><span>${index + 1}</span><strong>${escapeHtml(startPoseLabel(view, pair.start_pose_id))} · X ${escapeHtml(pair.x_mm)} · Y ${escapeHtml(pair.y_mm)} · ${escapeHtml(pair.yaw_deg)}°</strong><button type="button" class="secondary-button" data-pair-index="${index}" aria-label="${index + 1}번째 직접 조건 삭제" ${enabled ? "" : "disabled"}>삭제</button></li>`).join("") : '<li class="empty-pose">선택한 조건이 없습니다.</li>';
+    return;
+  }
+  const anchorRow = `<li><span>1</span><strong>${escapeHtml(selectedLabel(view, "start"))} · X ${escapeHtml(anchor?.x_mm ?? 0)} · Y ${escapeHtml(anchor?.y_mm ?? 0)} · ${escapeHtml(anchor?.yaw_deg ?? 0)}°</strong><em>현재 물체 위치</em></li>`;
+  document.querySelector("#direct-pose-list").innerHTML = anchorRow + poses.map((pose, index) => `<li><span>${index + 2}</span><strong>${escapeHtml(selectedLabel(view, "start"))} · X ${escapeHtml(pose.x_mm)} · Y ${escapeHtml(pose.y_mm)} · ${escapeHtml(pose.yaw_deg)}°</strong><button type="button" class="secondary-button" data-pose-index="${index}" aria-label="${index + 2}번째 직접 조건 삭제" ${enabled ? "" : "disabled"}>삭제</button></li>`).join("");
 }
 
 function renderCatalog(view) {
   const editable = view.runtime.workflow_state === "AUTHORING" && canIntent("update_draft");
   const direct = view.draft.authoring_mode === "DIRECT_EDIT";
   const domain = directPoseDomain(view);
-  const anchor = view.draft.cells.find((cell) => ["SELECTED", "PINNED"].includes(cell.selection_state)) ?? view.draft.cells[0];
+  const anchor = view.draft.current_object_pose;
+  const pairMode = Array.isArray(view.draft.direct_pairs);
+  const directPairs = pairMode ? view.draft.direct_pairs : [];
   const directPoses = view.draft.direct_poses ?? [];
   const samePose = (cell, pose) => Boolean(pose) && cell.x_mm === pose.x_mm && cell.y_mm === pose.y_mm && cell.yaw_deg === pose.yaw_deg;
-  const directFull = 1 + directPoses.length >= view.draft.requested_count;
+  const directFull = (pairMode ? directPairs.length : 1 + directPoses.length) >= view.draft.requested_count;
   CATALOG_AXES.forEach((axis) => {
     const select = document.querySelector(`[data-axis="${axis}"]`);
     const selected = view.draft.selection[axis];
@@ -338,10 +608,15 @@ function renderCatalog(view) {
       const unavailable = option.available ? "" : ` — ${humanReason(option.reason)}`;
       return `<option value="${escapeHtml(option.id)}" ${option.id === selected ? "selected" : ""} ${option.available ? "" : "disabled"}>${escapeHtml(option.label + unavailable)}</option>`;
     }).join("");
-    select.disabled = !editable;
+    select.disabled = !editable || axis === "camera";
     const hint = document.querySelector(`[data-axis-hint="${axis}"]`);
-    if (hint) hint.textContent = catalogOption(view, axis, selected)?.description ?? "";
+    const selectedOption = catalogOption(view, axis, selected);
+    if (hint) hint.textContent = [
+      selectedOption?.description,
+      selectedOption?.execution_reason ? humanReason(selectedOption.execution_reason) : "",
+    ].filter(Boolean).join(" · ");
   });
+  document.querySelector("#camera-selection-label").textContent = view.camera_setup?.profile_label || selectedLabel(view, "camera");
   document.querySelectorAll('[name="authoring_mode"]').forEach((control) => {
     control.checked = control.value === view.draft.authoring_mode;
     control.disabled = !editable;
@@ -363,43 +638,51 @@ function renderCatalog(view) {
   document.querySelector("#compile-campaign").hidden = false;
   document.querySelector("#compile-campaign").disabled = !canIntent("compile_draft");
 
+  renderCurrentObjectPose(view, editable);
+  renderStateSpaceSummary(view);
   renderDirectPoseEditor(view, editable);
-  document.querySelector("#cell-grid").innerHTML = view.draft.cells.map((cell) => {
+  const disclosure = document.querySelector("#cell-grid-disclosure");
+  disclosure.hidden = !direct;
+  if (!direct) disclosure.open = false;
+  document.querySelector("#cell-grid").innerHTML = direct ? view.draft.cells.map((cell) => {
     const selected = direct
-      ? samePose(cell, anchor) || directPoses.some((pose) => samePose(cell, pose))
+      ? pairMode ? directPairs.some((pair) => samePose(cell, pair)) : samePose(cell, anchor) || directPoses.some((pose) => samePose(cell, pose))
       : ["SELECTED", "PINNED"].includes(cell.selection_state);
-    const fixedAnchor = direct && samePose(cell, anchor);
+    const fixedAnchor = direct && !pairMode && samePose(cell, anchor);
     const available = cell.eligibility_status === "ELIGIBLE";
     const disabled = !editable || !direct || !available || fixedAnchor || !selected && directFull;
     const reason = available ? (selected ? "수집에 포함됨" : "선택 가능") : humanReason(cell.reason_codes?.[0]);
     const cellDetail = direct ? `${cell.split} · ${cell.repeat}회` : selected ? "현재 시작점" : "빠른 기준점";
     return `<button type="button" class="cell ${selected ? "selected" : ""} ${available ? "" : "blocked"}" data-cell-id="${escapeHtml(cell.cell_id)}" aria-pressed="${selected}" aria-label="X ${escapeHtml(cell.x_mm)} mm, Y ${escapeHtml(cell.y_mm)} mm, ${escapeHtml(cell.yaw_deg)}도, ${escapeHtml(reason)}" ${disabled ? "disabled" : ""}>
       <span>X ${escapeHtml(cell.x_mm)} · Y ${escapeHtml(cell.y_mm)}</span><strong>${escapeHtml(cell.yaw_deg)}°</strong><small>${escapeHtml(cellDetail)}</small><em>${escapeHtml(reason)}</em></button>`;
-  }).join("");
+  }).join("") : "";
 }
 
 function renderWorkspaceRegistration(view) {
   const workspace = view.runtime.workflow_state === "AUTHORING" ? view.workspace_registration : null;
   const entry = document.querySelector("#workspace-entry");
   const dialog = document.querySelector("#workspace-dialog");
-  entry.hidden = !workspace;
-  document.querySelector("#open-workspace").disabled = intentBusy;
-  if (!workspace) {
-    if (dialog.open) dialog.close();
+  const named = Boolean(workspace?.display_name?.trim());
+  const canBegin = canIntent("new_workspace_registration");
+  entry.hidden = !named && !canBegin;
+  document.querySelector("#open-workspace").disabled = intentBusy || !named && !canBegin;
+  document.querySelector("#open-workspace").textContent = named && !workspace.promotion ? "등록 계속" : workspace?.promotion && !canBegin ? "등록 결과 보기" : "새 작업영역 등록";
+  const nameForm = document.querySelector("#workspace-name-form");
+  nameForm.hidden = named && (!workspace.promotion || !canBegin);
+  nameForm.querySelector("button").disabled = !canBegin;
+  document.querySelector("#workspace-registration-content").hidden = !named;
+  if (!workspace || !named) {
     document.querySelector("#workspace-selection").innerHTML = "";
     document.querySelector("#workspace-captures").innerHTML = "";
     document.querySelector("#workspace-preview-form").hidden = true;
     document.querySelector("#workspace-preview-status").innerHTML = "";
     document.querySelector("#workspace-promotion").innerHTML = "";
     document.querySelector("#workspace-next-action").textContent = "";
+    if (!named && dialog.open && entry.hidden) dialog.close();
     return;
   }
 
-  document.querySelector("#workspace-selection").innerHTML = [
-    ["선택 작업영역", `${selectedLabel(view, "workspace")} · ${view.draft.selection.workspace}`],
-    ["선택 좌표계", `${selectedLabel(view, "frame")} · ${view.draft.selection.frame}`],
-    ["새 좌표계", workspace.calibration_id],
-  ].map(([term, value]) => `<div><dt>${escapeHtml(term)}</dt><dd>${escapeHtml(value)}</dd></div>`).join("");
+  document.querySelector("#workspace-selection").innerHTML = `<div><dt>작업영역 이름</dt><dd>${escapeHtml(workspace.display_name)}</dd></div>`;
 
   const canCapture = canIntent("capture_workspace_point");
   document.querySelector("#workspace-captures").innerHTML = WORKSPACE_CAPTURE_ROLES.map(([label, title, detail]) => {
@@ -418,21 +701,23 @@ function renderWorkspaceRegistration(view) {
   const previewStatus = document.querySelector("#workspace-preview-status");
   if (workspace.preview) {
     const withinTolerance = workspace.preview.status === "CANDIDATE_WITHIN_TOLERANCE";
-    previewStatus.innerHTML = `<div class="notice ${withinTolerance ? "workspace-pass" : "workspace-fail"}"><strong>${withinTolerance ? "미리보기 통과" : "미리보기 저장 불가"}</strong><span>${withinTolerance ? "세 점과 두 실측값으로 계산한 좌표계가 허용 범위 안입니다." : "계산한 좌표계가 허용 범위를 벗어나 저장할 수 없습니다."}</span></div>${canIntent("save_workspace_revision") ? `<button type="button" data-workspace-op="save_workspace_revision">${message("action", "save_workspace_revision")}</button>` : ""}`;
+    const saveOp = canIntent("save_workspace") ? "save_workspace" : canIntent("save_workspace_revision") ? "save_workspace_revision" : null;
+    const discardOp = canIntent("discard_workspace_preview") ? "discard_workspace_preview" : null;
+    previewStatus.innerHTML = `<div class="notice ${withinTolerance ? "workspace-pass" : "workspace-fail"}"><strong>${withinTolerance ? "계산 결과 사용 가능" : "계산 결과 저장 불가"}</strong><span>${withinTolerance ? "세 기준점과 두 실측값이 등록 허용 범위 안에 있습니다." : "측정값이 등록 허용 범위를 벗어났습니다."}</span></div>${saveOp ? `<button type="button" data-workspace-op="${saveOp}">${message("action", "save_workspace")}</button>` : discardOp ? `<button type="button" data-workspace-op="${discardOp}">${message("action", discardOp)}</button>` : ""}`;
   } else {
     previewStatus.innerHTML = "";
   }
 
   const promotion = document.querySelector("#workspace-promotion");
-  promotion.innerHTML = workspace.promotion ? `<div class="notice workspace-pass"><strong>변경 불가능한 좌표계 개정본이 저장되었습니다.</strong><span>좌표계 카탈로그를 같은 프로세스에서 새로고침했습니다. 이 저장은 로봇 실행 권한이나 학습 승인을 만들지 않습니다.</span></div>${canIntent("new_workspace_registration") ? `<button type="button" data-workspace-op="new_workspace_registration">${message("action", "new_workspace_registration")}</button>` : ""}` : "";
+  promotion.innerHTML = workspace.promotion ? `<div class="notice workspace-pass"><strong>${escapeHtml(workspace.display_name)} 작업영역이 저장되었습니다.</strong><span>저장된 작업영역은 수집 계획에서 선택할 수 있습니다. 실제 동작 검증이 필요한 상태는 별도로 표시됩니다.</span></div>` : "";
 
   let nextAction;
-  if (workspace.promotion) nextAction = canIntent("new_workspace_registration") ? "다음 작업: 수집 계획으로 돌아가거나 다른 좌표계를 등록합니다." : "다음 작업: 수집 계획으로 돌아갑니다.";
-  else if (workspace.preview) nextAction = canIntent("save_workspace_revision") ? "다음 작업: 현재 미리보기로 좌표계를 저장합니다." : "다음 작업 없음: 현재 미리보기는 저장할 수 없습니다.";
-  else if (allCaptured) nextAction = canPreview ? "다음 작업: 원본과 최종 100 mm 눈금을 실측해 미리보기를 만듭니다." : "다음 작업 없음: 현재 상태에서는 미리보기를 만들 수 없습니다.";
+  if (workspace.promotion) nextAction = "수집 계획으로 돌아가 저장된 작업영역을 선택하세요.";
+  else if (workspace.preview) nextAction = canIntent("save_workspace") || canIntent("save_workspace_revision") ? "계산 결과를 저장하세요." : canIntent("discard_workspace_preview") ? "이 계산 결과를 폐기한 뒤 기준점을 다시 캡처하세요." : "현재 계산 결과는 저장할 수 없습니다.";
+  else if (allCaptured) nextAction = canPreview ? "두 100 mm 눈금의 실측값을 입력해 계산 결과를 확인하세요." : "현재 상태에서는 계산 결과를 만들 수 없습니다.";
   else {
     const [label, title] = WORKSPACE_CAPTURE_ROLES.find(([role]) => !workspace.captures[role]);
-    nextAction = canCapture ? `다음 작업: ${label} ${title}을 캡처합니다.` : `다음 작업 없음: ${label} 캡처 요청을 사용할 수 없습니다.`;
+    nextAction = canCapture ? `${label} ${title}을 캡처하세요.` : `${label} 캡처를 현재 사용할 수 없습니다.`;
   }
   document.querySelector("#workspace-next-action").textContent = nextAction;
 }
@@ -445,24 +730,32 @@ function renderReview(view) {
   const direct = view.draft.authoring_mode === "DIRECT_EDIT";
   const plannedCells = view.coverage?.cells ?? [];
   const sequence = view.coverage?.sequence ?? [];
+  const directConditionCount = Array.isArray(view.draft.direct_pairs)
+    ? view.draft.direct_pairs.length : 1 + (view.draft.direct_poses?.length ?? 0);
   const range = direct
-    ? `${view.draft.requested_count}회 · ${plannedCells.length || 1 + (view.draft.direct_poses?.length ?? 0)}개 자세를 표시 순서로 실행 · ${selectedLabel(view, "split")}`
+    ? `${view.draft.requested_count}회 · ${plannedCells.length || directConditionCount}개 조건을 표시 순서로 실행 · ${selectedLabel(view, "split")}`
     : `${view.draft.requested_count}회 · 조건별 최대 ${view.draft.repeat}회 · ${selectedLabel(view, "split")}`;
   const rows = [
     ["작업영역", `${selectedLabel(view, "workspace")} · ${selectedLabel(view, "frame")}`],
+    ["현재 물체 위치", `X ${view.draft.current_object_pose.x_mm} · Y ${view.draft.current_object_pose.y_mm} · ${view.draft.current_object_pose.yaw_deg}°`],
     ["작업", selectedLabel(view, "task")],
     ["물체와 잡기", `${selectedLabel(view, "object")} · ${selectedLabel(view, "grasp")}`],
     ["로봇 동작", `${selectedLabel(view, "motion")} · ${selectedLabel(view, "variant")}`],
-    ["시작 자세", selectedLabel(view, "start")],
+    ["시작 자세", view.start_pose_setup ? `${view.start_pose_setup.selected_start_pose_ids.length}개 선택` : selectedLabel(view, "start")],
     ["카메라", selectedLabel(view, "camera")],
     ["수집 범위", range],
     ["데이터 모드", selectedLabel(view, "data_mode")],
   ];
+  const tuning = view.campaign_review?.gripper_tuning;
+  if (tuning) rows.splice(4, 0, [
+    "그리퍼 설정",
+    `${tuning.command_percent}% · 허용 피드백 ${tuning.acceptable_feedback_percent.min}–${tuning.acceptable_feedback_percent.max}% · TEST_ONLY 조정 후보`,
+  ]);
   if (view.campaign_review?.speed_limit) rows.push(["속도 상한", view.campaign_review.speed_limit]);
   document.querySelector("#review-summary").innerHTML = rows.map(([term, value]) => `<div><dt>${escapeHtml(term)}</dt><dd>${escapeHtml(value)}</dd></div>`).join("");
   const reviewPlan = document.querySelector("#review-plan");
   reviewPlan.hidden = sequence.length === 0;
-  document.querySelector("#review-plan-list").innerHTML = sequence.map((item) => `<li><span>${escapeHtml(item.order_index)}</span><strong>X ${escapeHtml(item.x_mm)} · Y ${escapeHtml(item.y_mm)} · ${escapeHtml(item.yaw_deg)}°</strong></li>`).join("");
+  document.querySelector("#review-plan-list").innerHTML = sequence.map((item) => `<li><span>${escapeHtml(item.order_index)}</span><strong>${item.start_pose_id ? `${escapeHtml(startPoseLabel(view, item.start_pose_id))} · ` : ""}X ${escapeHtml(item.x_mm)} · Y ${escapeHtml(item.y_mm)} · ${escapeHtml(item.yaw_deg)}°</strong></li>`).join("");
   document.querySelector("#review-actions").innerHTML = canIntent("authorize_campaign") ? `<button type="button" data-op="authorize_campaign">${message("action", "authorize_campaign")}</button>` : "";
   document.querySelector("#review-back").disabled = !canIntent("edit_campaign_draft");
 }
@@ -475,15 +768,17 @@ function renderFacts(view) {
   const state = campaignStatus(view);
   const total = view.campaign_envelope?.episode_count ?? view.draft.requested_count;
   const completed = state.completed_intents ?? view.episode_history?.length ?? 0;
+  const campaignProgress = Number.isFinite(view.runtime.campaign_progress)
+    ? Math.round(view.runtime.campaign_progress)
+    : (total > 0 ? Math.round(100 * completed / total) : 0);
   const current = view.runtime.current_episode ?? (view.runtime.workflow_state === "RUNNING" ? completed + 1 : null);
   const next = view.runtime.next_episode ?? (current && current < total ? current + 1 : null);
   const recorder = view.runtime.recorder?.label ?? view.runtime.recorder?.status ?? "상태 확인 전";
   const facts = document.querySelector("#campaign-facts");
   facts.hidden = !view.campaign_envelope && !view.episode_history?.length;
-  facts.innerHTML = `<div data-fact="completed"><span>완료</span><strong>${escapeHtml(completed)}/${escapeHtml(total)}</strong></div>
-    <div data-fact="total"><span>전체</span><strong>${escapeHtml(total)}회</strong></div>
-    <div data-fact="current"><span>현재</span><strong>${current ? `${escapeHtml(current)}/${escapeHtml(total)}` : "없음"}</strong></div>
-    <div data-fact="next"><span>다음</span><strong>${next ? `${escapeHtml(next)}/${escapeHtml(total)}` : "없음"}</strong></div>
+  facts.innerHTML = `<div data-fact="completed"><span>전체 진행</span><strong>${escapeHtml(completed)}/${escapeHtml(total)} · ${escapeHtml(campaignProgress)}%</strong></div>
+    <div data-fact="current"><span>현재 에피소드</span><strong>${current ? `${escapeHtml(current)}/${escapeHtml(total)}` : "없음"}</strong></div>
+    <div data-fact="next"><span>다음 에피소드</span><strong>${next ? `${escapeHtml(next)}/${escapeHtml(total)}` : "없음"}</strong></div>
     <div data-fact="recorder"><span>기록기</span><strong>${escapeHtml(recorder)}</strong></div>`;
 }
 
@@ -493,13 +788,16 @@ function renderRuntime(view) {
   const reason = runtime.reason_codes?.length ? humanReason(runtime.reason_codes[0]) : "";
   let html = `<div class="runtime-state"><span class="pulse" aria-hidden="true"></span><div><strong>${escapeHtml(stateText)}</strong>${reason ? `<p>${escapeHtml(reason)}</p>` : ""}</div></div>`;
   if (Number.isFinite(runtime.progress) && runtime.progress >= 0 && runtime.progress <= 100) {
-    html += `<div class="progress-block"><div><span>${escapeHtml(runtime.phase_label ?? "현재 에피소드")}</span><strong>${escapeHtml(runtime.progress)}%</strong></div><progress max="100" value="${escapeHtml(runtime.progress)}">${escapeHtml(runtime.progress)}%</progress><p>${escapeHtml(runtime.detail ?? "")}</p></div>`;
+    html += `<div class="progress-block"><div><span>현재 에피소드 · ${escapeHtml(runtime.phase_label ?? "진행 중")}</span><strong>${escapeHtml(runtime.progress)}%</strong></div><progress max="100" value="${escapeHtml(runtime.progress)}">${escapeHtml(runtime.progress)}%</progress><p>${escapeHtml(runtime.detail ?? "")}</p></div>`;
   }
   if (runtime.recorder) {
     const recorderRows = [["상태", runtime.recorder.label ?? message("status", runtime.recorder.status)]];
     if (Number.isInteger(runtime.recorder.frames)) recorderRows.push(["기록 프레임", `${runtime.recorder.frames}`]);
     if (Number.isFinite(runtime.recorder.fps)) recorderRows.push(["관측 속도", `${runtime.recorder.fps} fps`]);
     html += `<dl class="runtime-evidence">${recorderRows.map(([term, value]) => `<div><dt>${escapeHtml(term)}</dt><dd>${escapeHtml(value)}</dd></div>`).join("")}</dl>`;
+  }
+  if (runtime.workflow_state === "BLOCKED" && canIntent("new_campaign_same_settings")) {
+    html += `<div class="recovery-card"><strong>이번 실행은 종료되었습니다.</strong><p>필요하면 로봇을 HOME으로 복귀한 뒤 같은 설정의 새 계획을 만드세요.</p>${canIntent("recover_home") ? '<button type="button" data-recovery-op="recover_home">그리퍼 열고 HOME 복귀</button>' : ""}<button type="button" data-recovery-op="new_campaign_same_settings">종료된 실행 닫고 새 계획</button></div>`;
   }
   document.querySelector("#runtime-content").innerHTML = html;
   const showCancel = ["RUNNING", "CANCELLING", "PAUSED_AWAITING_OPERATOR"].includes(runtime.workflow_state);
@@ -514,19 +812,29 @@ function measurementLabel(value) {
 }
 
 function semanticReviewLabel(value) {
-  return {PASS: "작업 성공", FAIL: "작업 실패", UNCERTAIN: "판정 보류"}[value] ?? measurementLabel(value);
+  return {PASS: "사용 후보", FAIL: "제외", UNCERTAIN: "보류"}[value] ?? measurementLabel(value);
 }
 
 function episodeNoteLabel(item) {
-  const semantic = item.human_semantic ?? item.episode_ledger?.review_status;
+  const ledgerReview = item.episode_ledger?.review_status;
+  const semantic = ledgerReview && ledgerReview !== "NOT_MEASURED"
+    ? ledgerReview
+    : item.human_semantic ?? ledgerReview;
   return semantic === "NOT_MEASURED" ? message("status", semantic) : semanticReviewLabel(semantic);
+}
+
+function episodeRetentionLabel(item) {
+  const retention = {PRESERVE: "보존"}[item.episode_ledger?.retention_state];
+  const reclaim = {NOT_EVALUATED: "회수 미평가", REPACK_REQUIRED: "재패킹 필요"}[item.episode_ledger?.reclaim_state];
+  return [retention, reclaim].filter(Boolean).join(" · ");
 }
 
 function renderResults(view) {
   const history = view.episode_history ?? [];
   document.querySelector("#episode-results").innerHTML = history.length ? history.map((item, index) => {
     const technical = item.technical_evidence?.status ?? item.technical_status;
-    return `<li><span>${index + 1}</span><div><strong>에피소드 ${index + 1}</strong><p>기술 검사 ${escapeHtml(measurementLabel(technical))}</p></div><b>${escapeHtml(episodeNoteLabel(item))}</b></li>`;
+    const retention = episodeRetentionLabel(item);
+    return `<li><span>${index + 1}</span><div><strong>에피소드 ${index + 1}</strong><p>기술 검사 ${escapeHtml(measurementLabel(technical))}${retention ? ` · ${escapeHtml(retention)}` : ""}</p></div><b>${escapeHtml(episodeNoteLabel(item))}</b></li>`;
   }).join("") : "<li class=\"empty-result\">완료된 에피소드가 없습니다.</li>";
 
   const cells = view.coverage?.cells ?? view.draft.cells;
@@ -539,20 +847,28 @@ function renderResults(view) {
   const review = view.candidate_review;
   if (!review) {
     const passed = history.filter((item) => (item.technical_evidence?.status ?? item.technical_status) === "PASS").length;
-    document.querySelector("#review-queue").innerHTML = `<div class="notice"><strong>사후 검토를 수행하지 않았습니다.</strong><span>${escapeHtml(passed)}개 에피소드가 기술 검사를 통과했습니다. 보존 상태와 학습 사용 승인은 별도입니다.</span></div>`;
+    document.querySelector("#review-queue").innerHTML = `<div class="notice"><strong>분류 대기 0개</strong><span>${escapeHtml(passed)}개 에피소드가 기술 검사를 통과했습니다. 보존 상태와 학습 사용 승인은 별도입니다.</span></div>`;
     return;
   }
   const pending = review.status === "PENDING" && canIntent("review_candidate");
   const reasons = Array.isArray(review.reasons) ? review.reasons : [];
-  document.querySelector("#review-queue").innerHTML = `<section class="review-card" aria-labelledby="review-queue-title"><div><p class="step-number">작업 결과 검토</p><h3 id="review-queue-title">이 에피소드의 작업 결과를 판정하세요.</h3></div>
+  const pose = review.coverage_condition;
+  const context = [
+    Number.isInteger(review.episode_number) ? `에피소드 ${review.episode_number}` : null,
+    Number.isInteger(review.queue_remaining) ? `남은 분류 ${review.queue_remaining}개` : null,
+    pose && Number.isFinite(pose.x_mm) && Number.isFinite(pose.y_mm) && Number.isFinite(pose.yaw_deg)
+      ? `X ${pose.x_mm} · Y ${pose.y_mm} · ${pose.yaw_deg}°`
+      : null,
+  ].filter(Boolean).join(" · ");
+  document.querySelector("#review-queue").innerHTML = `<section class="review-card" aria-labelledby="review-queue-title"><div><p class="step-number">수집 데이터 분류</p><h3 id="review-queue-title">기술 검사를 통과한 에피소드를 분류하세요.</h3>${context ? `<p>${escapeHtml(context)}</p>` : ""}</div>
     ${pending ? `<label for="candidate-reason">실패 또는 보류 이유<select id="candidate-reason" required><option value="">이유 선택</option>${reasons.map((reason) => `<option value="${escapeHtml(reason)}">${escapeHtml(message("review_reason", reason))}</option>`).join("")}</select></label>
-    <div class="admission-actions"><button type="button" data-review-choice="PASS">작업 성공</button><button type="button" data-review-choice="FAIL">작업 실패</button><button type="button" data-review-choice="UNCERTAIN">판정 보류</button></div>` : `<p>${escapeHtml(semanticReviewLabel(review.status))}</p>`}
-    <p class="cell-help">이 판정은 작업 결과만 기록합니다. 데이터 보존 상태와 학습 사용 승인을 바꾸지 않습니다.</p></section>`;
+    <div class="admission-actions"><button type="button" data-review-choice="PASS">사용 후보</button><button type="button" data-review-choice="FAIL">제외</button><button type="button" data-review-choice="UNCERTAIN">보류</button></div>` : `<p>${escapeHtml(semanticReviewLabel(review.status))}</p>`}
+    <p class="cell-help">이 분류는 데이터의 사후 사용 후보 상태만 기록합니다. 파일 보존과 학습 사용 승인은 바꾸지 않습니다.</p></section>`;
 }
 
 function renderNext(view) {
   document.querySelector("#results-next").disabled = view.runtime.workflow_state !== "TERMINAL";
-  document.querySelector("#same-settings-action").innerHTML = canIntent("new_campaign_same_settings") ? `<button type="button" data-op="new_campaign_same_settings">${message("action", "new_campaign_same_settings")}</button>` : "<p>현재 상태에서는 새 캠페인을 만들 수 없습니다.</p>";
+  document.querySelector("#same-settings-action").innerHTML = canIntent("new_campaign_same_settings") ? `<button type="button" data-op="new_campaign_same_settings">${message("action", "new_campaign_same_settings")}</button>` : "<p>현재 상태에서는 새 수집 계획을 만들 수 없습니다.</p>";
 }
 
 function renderTechnicalDetails(view) {
@@ -562,6 +878,16 @@ function renderTechnicalDetails(view) {
     view_digest: view.view_digest,
     draft_id: view.draft.draft_id,
     draft_revision: view.draft.revision,
+    workspace_id: view.draft.selection.workspace,
+    frame_id: view.draft.selection.frame,
+    workspace_registration_session_id: view.workspace_registration?.session_id,
+    workspace_registration_calibration_id: view.workspace_registration?.calibration_id,
+    workspace_registration_display_name: view.workspace_registration?.display_name,
+    selected_start_pose_ids: view.start_pose_setup?.selected_start_pose_ids,
+    start_pose_profiles: view.start_pose_setup?.profiles.map(({start_pose_id, status}) => ({start_pose_id, status})),
+    state_space_summary: view.state_space_summary,
+    camera_devices: view.camera_setup?.devices.map(({logical_id, status, technical_identity}) => ({logical_id, status, technical_identity})),
+    camera_bindings: view.camera_setup?.bindings,
     compatibility_digest: view.catalog.compatibility_digest,
     manifest_digest: view.campaign_envelope?.manifest_digest,
     envelope_digest: view.campaign_envelope?.envelope_digest,
@@ -571,7 +897,8 @@ function renderTechnicalDetails(view) {
     reason_codes: view.runtime.reason_codes,
     result_digests: view.episode_history?.map((item) => item.result_digest).filter(Boolean),
     ledger_digests: view.episode_history?.map((item) => item.episode_ledger?.ledger_digest).filter(Boolean),
-    retention_states: view.episode_history?.map((item) => item.episode_ledger?.reclaim_state).filter(Boolean),
+    retention_states: view.episode_history?.map((item) => item.episode_ledger?.retention_state).filter(Boolean),
+    reclaim_states: view.episode_history?.map((item) => item.episode_ledger?.reclaim_state).filter(Boolean),
     effect_counts: view.effect_counts,
   });
 }
@@ -585,6 +912,7 @@ function render(view) {
   renderSetup(view);
   renderCatalog(view);
   renderWorkspaceRegistration(view);
+  renderStartPoseSetup(view);
   renderReview(view);
   renderFacts(view);
   renderRuntime(view);
@@ -677,10 +1005,37 @@ document.querySelector(".step-rail").addEventListener("click", (event) => {
 });
 document.querySelector("#environment-next").addEventListener("click", () => showStep("plan", true));
 document.querySelector("#prepare-environment").addEventListener("click", () => submitIntent("prepare_environment", {}));
+document.querySelector("#recover-home").addEventListener("click", () => submitIntent("recover_home", {}));
+document.querySelector("#camera-role-list").addEventListener("change", (event) => {
+  const select = event.target.closest("select[data-camera-logical-id]");
+  if (!select || !currentView?.camera_setup || !canIntent("update_camera_bindings")) return;
+  const logicalId = select.dataset.cameraLogicalId;
+  const role = select.value;
+  const bindings = {...currentView.camera_setup.bindings};
+  const previousRole = bindings[logicalId];
+  const availableRoles = currentView.camera_setup.available_roles ?? CAMERA_ROLES.map(([id]) => id);
+  if (!Object.hasOwn(bindings, logicalId) || !availableRoles.includes(role)) return renderCameraSetup(currentView);
+  if (role !== "UNUSED") {
+    const occupied = Object.entries(bindings).find(([deviceId, assignedRole]) => deviceId !== logicalId && assignedRole === role);
+    if (occupied) bindings[occupied[0]] = previousRole;
+  }
+  bindings[logicalId] = role;
+  const assigned = Object.values(bindings).filter((assignedRole) => assignedRole !== "UNUSED");
+  if (new Set(assigned).size !== assigned.length) return renderCameraSetup(currentView);
+  submitIntent("update_camera_bindings", {bindings});
+});
 document.querySelector("#open-workspace").addEventListener("click", () => {
-  if (currentView?.runtime.workflow_state === "AUTHORING" && currentView.workspace_registration) document.querySelector("#workspace-dialog").showModal();
+  if (currentView?.runtime.workflow_state === "AUTHORING" && !document.querySelector("#workspace-entry").hidden) document.querySelector("#workspace-dialog").showModal();
 });
 document.querySelector("#close-workspace").addEventListener("click", () => document.querySelector("#workspace-dialog").close());
+document.querySelector("#workspace-name-form").addEventListener("submit", (event) => {
+  event.preventDefault();
+  const form = event.currentTarget;
+  const displayName = document.querySelector("#workspace-display-name").value.trim();
+  if (!canIntent("new_workspace_registration") || !displayName || !form.checkValidity()) return form.reportValidity();
+  submitIntent("new_workspace_registration", {display_name: displayName});
+  form.reset();
+});
 document.querySelector("#workspace-captures").addEventListener("click", (event) => {
   const button = event.target.closest("[data-capture-label]");
   if (button && WORKSPACE_CAPTURE_ROLES.some(([label]) => label === button.dataset.captureLabel)) {
@@ -696,12 +1051,33 @@ document.querySelector("#workspace-preview-form").addEventListener("submit", (ev
   submitIntent("preview_workspace", {source_scale_bar_mm: source, final_scale_bar_mm: final});
 });
 document.querySelector("#workspace-preview-status").addEventListener("click", (event) => {
-  const button = event.target.closest('[data-workspace-op="save_workspace_revision"]');
+  const button = event.target.closest("[data-workspace-op]");
   const digest = currentView?.workspace_registration?.preview?.preview_digest;
-  if (button && DIGEST_PATTERN.test(digest)) submitIntent("save_workspace_revision", {preview_digest: digest});
+  if (button && ["save_workspace", "save_workspace_revision", "discard_workspace_preview"].includes(button.dataset.workspaceOp) && DIGEST_PATTERN.test(digest)) submitIntent(button.dataset.workspaceOp, {preview_digest: digest});
 });
-document.querySelector("#workspace-promotion").addEventListener("click", (event) => {
-  if (event.target.closest('[data-workspace-op="new_workspace_registration"]')) submitIntent("new_workspace_registration", {});
+document.querySelector("#open-start-pose").addEventListener("click", () => {
+  if (currentView?.runtime.workflow_state === "AUTHORING" && currentView.start_pose_setup) document.querySelector("#start-pose-dialog").showModal();
+});
+document.querySelector("#close-start-pose").addEventListener("click", () => document.querySelector("#start-pose-dialog").close());
+document.querySelector("#start-pose-capture-form").addEventListener("submit", (event) => {
+  event.preventDefault();
+  const form = event.currentTarget;
+  const displayName = document.querySelector("#start-pose-display-name").value.trim();
+  if (!canIntent("capture_start_pose") || !displayName || !form.checkValidity()) return form.reportValidity();
+  submitIntent("capture_start_pose", {display_name: displayName});
+  form.reset();
+});
+document.querySelector("#start-pose-profile-list").addEventListener("change", (event) => {
+  const input = event.target.closest("[data-start-pose-id]");
+  if (!input || !currentView?.start_pose_setup || !canIntent("update_start_pose_selection")) return;
+  const selected = new Set(currentView.start_pose_setup.selected_start_pose_ids);
+  if (input.checked) selected.add(input.dataset.startPoseId);
+  else if (selected.size > 1) selected.delete(input.dataset.startPoseId);
+  else {
+    input.checked = true;
+    return;
+  }
+  submitIntent("update_start_pose_selection", {selected_start_pose_ids: currentView.start_pose_setup.profiles.map((profile) => profile.start_pose_id).filter((id) => selected.has(id))});
 });
 document.querySelector("#plan-back").addEventListener("click", () => showStep("environment", true));
 document.querySelector("#review-back").addEventListener("click", () => submitIntent("edit_campaign_draft", {}));
@@ -717,13 +1093,36 @@ document.querySelector("#authoring-mode").addEventListener("change", (event) => 
   if (!Number.isInteger(value) || value < Number(event.target.min) || value > Number(event.target.max)) return event.target.reportValidity();
   submitIntent("update_draft", {draft_id: currentView.draft.draft_id, [field === "count" ? "requested_count" : "repeat"]: value});
 }));
+document.querySelector("#current-object-form").addEventListener("submit", (event) => {
+  event.preventDefault();
+  if (!currentView || !canIntent("update_draft") || !directPoseDomain(currentView)) return;
+  const form = event.currentTarget;
+  const values = ["#current-object-x", "#current-object-y", "#current-object-yaw"].map((selector) => document.querySelector(selector).valueAsNumber);
+  const yawInput = document.querySelector("#current-object-yaw");
+  const yawDomain = directPoseDomain(currentView).yaw_deg;
+  yawInput.setCustomValidity(values[2] >= yawDomain.minimum && values[2] < yawDomain.maximum_exclusive ? "" : `Yaw는 ${yawDomain.minimum}° 이상 ${yawDomain.maximum_exclusive}° 미만이어야 합니다.`);
+  if (!values.every(Number.isFinite) || !form.checkValidity()) return form.reportValidity();
+  submitIntent("update_draft", {
+    draft_id: currentView.draft.draft_id,
+    current_object_pose: {
+      place_id: currentView.draft.selection.workspace,
+      x_mm: values[0], y_mm: values[1], yaw_deg: values[2],
+    },
+  });
+});
 document.querySelector("#split-select").addEventListener("change", (event) => submitIntent("update_draft", {draft_id: currentView.draft.draft_id, split: event.target.value}));
 document.querySelector("#cell-grid").addEventListener("click", (event) => {
   const button = event.target.closest("[data-cell-id]");
   const cell = button && currentView?.draft.cells.find((item) => item.cell_id === button.dataset.cellId);
   if (!cell || currentView.draft.authoring_mode !== "DIRECT_EDIT") return;
-  const anchor = currentView.draft.cells.find((item) => ["SELECTED", "PINNED"].includes(item.selection_state)) ?? currentView.draft.cells[0];
+  const anchor = currentView.draft.current_object_pose;
   const samePose = (pose) => pose && ["x_mm", "y_mm", "yaw_deg"].every((field) => pose[field] === cell[field]);
+  if (Array.isArray(currentView.draft.direct_pairs)) {
+    const startPoseId = document.querySelector("#direct-start-select").value;
+    const pair = currentView.draft.direct_pairs.find((item) => item.start_pose_id === startPoseId && samePose(item));
+    const nextPair = pair ?? {start_pose_id: startPoseId, place_id: currentView.draft.selection.workspace, x_mm: cell.x_mm, y_mm: cell.y_mm, yaw_deg: cell.yaw_deg};
+    return submitIntent("update_draft", {draft_id: currentView.draft.draft_id, [pair ? "remove_pair" : "add_pair"]: nextPair});
+  }
   if (samePose(anchor)) return;
   const pose = currentView.draft.direct_poses?.find(samePose);
   submitIntent("update_draft", {
@@ -739,13 +1138,23 @@ document.querySelector("#direct-pose-form").addEventListener("submit", (event) =
   if (!currentView || !canIntent("update_draft") || !directPoseDomain(currentView)) return;
   const form = event.currentTarget;
   const values = ["#direct-x-input", "#direct-y-input", "#direct-yaw-input"].map((selector) => document.querySelector(selector).valueAsNumber);
+  const yawInput = document.querySelector("#direct-yaw-input");
+  const yawDomain = directPoseDomain(currentView).yaw_deg;
+  yawInput.setCustomValidity(values[2] >= yawDomain.minimum && values[2] < yawDomain.maximum_exclusive ? "" : `Yaw는 ${yawDomain.minimum}° 이상 ${yawDomain.maximum_exclusive}° 미만이어야 합니다.`);
   if (!values.every(Number.isFinite) || !form.checkValidity()) return form.reportValidity();
   submitIntent("update_draft", {
     draft_id: currentView.draft.draft_id,
-    add_pose: {place_id: currentView.draft.selection.workspace, x_mm: values[0], y_mm: values[1], yaw_deg: values[2]},
+    [Array.isArray(currentView.draft.direct_pairs) ? "add_pair" : "add_pose"]: Array.isArray(currentView.draft.direct_pairs) ? {
+      start_pose_id: document.querySelector("#direct-start-select").value,
+      place_id: currentView.draft.selection.workspace,
+      x_mm: values[0], y_mm: values[1], yaw_deg: values[2],
+    } : {place_id: currentView.draft.selection.workspace, x_mm: values[0], y_mm: values[1], yaw_deg: values[2]},
   });
 });
 document.querySelector("#direct-pose-list").addEventListener("click", (event) => {
+  const pairButton = event.target.closest("[data-pair-index]");
+  const pair = pairButton && currentView?.draft.direct_pairs?.[Number(pairButton.dataset.pairIndex)];
+  if (pair && canIntent("update_draft")) return submitIntent("update_draft", {draft_id: currentView.draft.draft_id, remove_pair: pair});
   const button = event.target.closest("[data-pose-index]");
   const pose = button && currentView?.draft.direct_poses?.[Number(button.dataset.poseIndex)];
   if (pose && canIntent("update_draft")) submitIntent("update_draft", {draft_id: currentView.draft.draft_id, remove_pose: pose});
@@ -756,6 +1165,10 @@ document.querySelector("#review-actions").addEventListener("click", (event) => {
   if (button) submitIntent(button.dataset.op);
 });
 cancelButton.addEventListener("click", () => submitIntent("cancel_session"));
+document.addEventListener("click", (event) => {
+  const button = event.target.closest("[data-recovery-op]");
+  if (button) submitIntent(button.dataset.recoveryOp, {});
+});
 document.querySelector("#review-queue").addEventListener("click", (event) => {
   const button = event.target.closest("[data-review-choice]");
   if (!button) return;

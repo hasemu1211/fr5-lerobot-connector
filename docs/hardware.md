@@ -50,7 +50,9 @@ action[6]              = finger_right_joint reference [m]
 
 - ROS 2에는 구동축 하나인 `finger_right_joint`만 노출한다. 왼쪽 finger는 URDF mimic joint다.
 - 현재 `FR5_GRIPPER_UPPER_POSITION=0.021`이 SDK의 0–100% 위치를 `0–0.021 m`로 환산한다. 양 finger가 대칭 이동하므로 URDF상의 총 변화량은 약 42 mm지만, 제조사 명목 stroke는 40 mm다.
-- 이 장착에서는 ROS `0 m`가 SDK `0%`인 **closed**, `0.021 m`가 SDK `100%`인 **open**이다. 25 mm 나무 큐브는 `0.01239 m`(59%)에서 헐거웠고, `0.01134 m`(54%) 명령에 `0.01197 m`(57%) 피드백으로 정착했을 때 저속 HIL 파지가 확인됐다. 이 값은 `wood-cube-25mm-top-center-r001`에만 속하며 다른 물체의 고정 파지값이 아니다.
+- 이 장착에서는 ROS `0 m`가 SDK `0%`인 **closed**, `0.021 m`가 SDK `100%`인 **open**이다. 25 mm 나무 큐브는 `0.01239 m`(59%)에서 헐거웠다. `0.01134 m`(54%) 명령에 `0.01197 m`(57%) 피드백으로 정착했을 때 저속 HIL 파지가 확인됐으며, 이 값과 evidence는 전역 `QUALIFIED` profile에 그대로 보존한다.
+- 2026-08-27 operator는 연속 수집 중 놓기 때 큐브가 fingertip을 따라 움직였다고 보고했다. 이 관찰로 제안된 `0.01176 m`(56%) 명령과 `0.01176–0.01197 m`(56–57%) feedback 창은 별도 `data_factory.test_only_gripper_retune.v1` artifact다.
+- retune은 PHYSICAL `TEST_ONLY` 조립에서만 `wood-cube-25mm-r001` + `wood-cube-25mm-top-center-r001`에 적용된다. production/training authority는 없고 상태는 `CANDIDATE_PENDING_HIL`이다. 성공하면 새 grasp profile revision 승격을 검토하고, 실패하면 이 조정 파일만 바꾼다. 다른 물체와 기본 resolver는 각자의 qualified profile을 계속 사용한다.
 - 이 21 mm 값은 현재 actuator와 feedback의 **소프트웨어 스케일**이다. 그리퍼 본체나 전달기구가 바뀔 때만 실측 후 바꾼다.
 - `FR5_GRIPPER_VELOCITY`와 `FR5_GRIPPER_FORCE`는 SI 단위가 아니라 FAIRINO `MoveGripper`의 1–100 설정값이다.
 - 명령은 전용 non-realtime worker가 `MoveGripper(..., block=1)`로 접수하며, `ros2_control` update loop에서 SDK RPC 반환이나 물리 동작 완료를 기다리지 않는다. `block=1`의 RPC 반환 시간은 realtime으로 보장되지 않는다.

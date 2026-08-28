@@ -104,6 +104,9 @@ class ProductFakeOperatorTests(unittest.TestCase):
             old_frame = initial["selection"]["frame_id"]
             self.assertEqual(initial["selection"]["workspace_id"], "PLACE_A")
             self.assertTrue(initial["draft"]["execution_ready"])
+            self.send(product, "new_workspace_registration", {
+                "display_name": "Place B",
+            }, "workspace-new")
 
             for label in ("CENTER", "X_REF", "Y_CHECK"):
                 captured = self.send(
@@ -130,7 +133,7 @@ class ProductFakeOperatorTests(unittest.TestCase):
             self.assertFalse(preview["training_approved"])
             self.assertEqual(list(fixture_root.rglob("*")), [])
 
-            self.send(product, "save_workspace_revision", {
+            self.send(product, "save_workspace", {
                 "preview_digest": preview["preview_digest"],
             }, "workspace-save")
             saved = product.bridge_core.snapshot()["projection"]
@@ -164,7 +167,9 @@ class ProductFakeOperatorTests(unittest.TestCase):
             }, "workspace-select")
             selected = product.bridge_core.snapshot()["projection"]
             self.assertEqual(selected["selection"]["frame_id"], new_frame)
-            self.assertEqual(selected["selection"]["workspace_id"], "PLACE_A")
+            self.assertEqual(
+                selected["selection"]["workspace_id"], promotion["place_id"],
+            )
             self.assertFalse(selected["draft"]["execution_ready"])
             self.assertEqual(
                 selected["draft"]["execution_reason"],
@@ -175,13 +180,13 @@ class ProductFakeOperatorTests(unittest.TestCase):
             self.send(product, "update_draft", {
                 "draft_id": draft_id,
                 "add_pose": {
-                    "place_id": "PLACE_A", "yaw_deg": 33,
+                    "place_id": promotion["place_id"], "yaw_deg": 33,
                     "x_mm": 10, "y_mm": 5,
                 },
             }, "workspace-author-pose")
             authored = product.bridge_core.snapshot()["projection"]
             self.assertEqual(authored["draft"]["direct_poses"], [{
-                "place_id": "PLACE_A", "yaw_deg": 33,
+                "place_id": promotion["place_id"], "yaw_deg": 33,
                 "x_mm": 10, "y_mm": 5,
             }])
             with self.assertRaisesRegex(
@@ -241,7 +246,7 @@ class ProductFakeOperatorTests(unittest.TestCase):
                 "PLACE_A", "CONTINUOUS_A4_PLANE",
                 {"minimum": -70.0, "maximum": 70.0},
                 {"minimum": -35.0, "maximum": 35.0},
-                {"minimum": 0.0, "maximum_exclusive": 360.0},
+                {"minimum": -180.0, "maximum_exclusive": 180.0},
             ),
         )
         self.assertEqual(
@@ -323,8 +328,14 @@ class ProductFakeOperatorTests(unittest.TestCase):
         self.assertEqual(len(terminal["episodes"]), 3)
         self.assertEqual(
             terminal["available_ops"],
-            ["new_campaign_same_settings"],
+            ["review_candidate", "new_campaign_same_settings"],
         )
+        self.assertEqual(
+            (terminal["candidate_review"]["episode_number"],
+             terminal["candidate_review"]["queue_remaining"]),
+            (1, 3),
+        )
+        self.assertNotIn(str(fixture_root), json.dumps(terminal))
         self.assertIsNone(campaign.session.active_lifecycle)
         self.assertEqual((len(children), active_before_factory), (3, [0, 0, 0]))
         self.assertEqual(len({id(child) for child in children}), 3)
@@ -369,12 +380,44 @@ class ProductFakeOperatorTests(unittest.TestCase):
         ))
         self.assertEqual(list(fixture_root.rglob("*")), [])
 
+        for index, (choice, reason) in enumerate((
+            ("PASS", None), ("FAIL", "TASK_GOAL"),
+            ("UNCERTAIN", "UNKNOWN"),
+        ), 1):
+            pending = product.bridge_core.snapshot()["projection"]["candidate_review"]
+            reviewed = self.send(product, "review_candidate", {
+                "review_binding_digest": pending["review_binding_digest"],
+                "choice": choice, "reason": reason,
+            }, f"review-{index}")
+            self.assertEqual(reviewed["status"], choice)
+            self.assertEqual(reviewed["remaining_reviews"], 3 - index)
+        reviewed_terminal = product.bridge_core.snapshot()["projection"]
+        self.assertEqual(
+            [item["human_semantic"] for item in reviewed_terminal["episodes"]],
+            ["PASS", "FAIL", "UNCERTAIN"],
+        )
+        self.assertTrue(all(
+            item["episode_ledger"]["retention_state"] == "PRESERVE"
+            and item["episode_ledger"]["training_status"] == "NOT_AUTHORIZED"
+            for item in reviewed_terminal["episodes"]
+        ))
+        self.assertEqual(
+            reviewed_terminal["available_ops"], ["new_campaign_same_settings"],
+        )
+        self.assertEqual(list(fixture_root.rglob("*")), [])
+
         first_draft = terminal["draft"]["draft_id"]
         first_manifest = compiled["manifest_digest"]
         self.send(product, "new_campaign_same_settings", {}, "new-same")
         same = product.bridge_core.snapshot()["projection"]
         self.assertEqual((same["workflow_state"], same["draft"]["requested_count"]),
                          ("AUTHORING", 3))
+        self.assertEqual(
+            same["draft"]["current_object_pose"], {
+                key: selected[-1][key]
+                for key in ("place_id", "yaw_deg", "x_mm", "y_mm")
+            },
+        )
         self.assertNotEqual(same["draft"]["draft_id"], first_draft)
         second_compiled = self.compile(product, "compile-second")
         self.authorize(product, second_compiled, "authorize-second")
@@ -465,6 +508,11 @@ class ProductFakeOperatorTests(unittest.TestCase):
                 "draft_id": draft_id, field: value,
             }, suffix)
 
+        current = {
+            "place_id": "PLACE_A", "yaw_deg": -37.5,
+            "x_mm": 12.5, "y_mm": -7.25,
+        }
+        update("current_object_pose", current, "direct-current-object")
         update("authoring_mode", "DIRECT_EDIT", "direct-mode")
         for index, generated in enumerate(
             copy.deepcopy(product.bridge_core.snapshot()["projection"]["draft"]["direct_poses"]),
@@ -472,9 +520,9 @@ class ProductFakeOperatorTests(unittest.TestCase):
         ):
             update("remove_pose", generated, f"remove-generated-{index}")
         poses = [
-            {"place_id": "PLACE_A", "yaw_deg": 0, "x_mm": 0, "y_mm": 0},
+            current,
             {"place_id": "PLACE_A", "yaw_deg": 45, "x_mm": 10, "y_mm": 5},
-            {"place_id": "PLACE_A", "yaw_deg": 180, "x_mm": -10, "y_mm": -5},
+            {"place_id": "PLACE_A", "yaw_deg": -180, "x_mm": -10, "y_mm": -5},
         ]
         for index, pose in enumerate(poses[1:], 1):
             update("add_pose", pose, f"direct-pose-{index}")

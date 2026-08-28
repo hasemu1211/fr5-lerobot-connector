@@ -3,8 +3,10 @@ from __future__ import annotations
 import copy
 import json
 import unittest
+from pathlib import Path
 
 from tools.data_factory.experiment_manifest import (
+    build_test_only_feature_contract,
     compile_base_condition,
     compile_fr5_hypothesis,
     compile_robot_start_pose,
@@ -226,8 +228,9 @@ def qualification_inputs() -> tuple[dict, dict, list[dict], list[dict], list[dic
 def single_qualification_inputs(
     source: str = "SYNTHETIC_TEST_ONLY",
     collection_profile: dict | None = None,
+    feature_contract: dict = FR5_TEST_ONLY_FEATURE_CONTRACT,
 ) -> tuple[dict, dict, list[dict], list[dict], list[dict], dict]:
-    feature = FR5_TEST_ONLY_FEATURE_CONTRACT
+    feature = feature_contract
     fixed = fixed_contract(feature, collection_profile)
     at = condition(
         yaw=0, x_mm=10, feature_contract=feature,
@@ -325,6 +328,106 @@ def seed_slots(value: dict) -> list[dict]:
 
 
 class ExperimentManifestTests(unittest.TestCase):
+    def test_v2_camera_profiles_derive_roles_without_device_identity(self) -> None:
+        root = Path("config/data_factory/collection_profiles")
+        expected = {
+            "fr5-up-side-rgb-30hz-v1.json": {
+                "up": "camera1", "side": "camera2",
+            },
+            "fr5-up-wrist-rgb-30hz-v1.json": {
+                "up": "camera1", "wrist": "camera2",
+            },
+        }
+        for filename, mapping in expected.items():
+            with self.subTest(filename=filename):
+                profile = json.loads((root / filename).read_text(encoding="utf-8"))
+                feature = build_test_only_feature_contract(profile)
+                self.assertEqual(feature["camera_mapping"], mapping)
+                self.assertEqual((profile["fps"], profile["width"], profile["height"]), (30, 640, 480))
+                self.assertEqual(set(profile["camera_serials"].values()), {"RUNTIME_BINDING_REQUIRED"})
+                rebound = copy.deepcopy(profile)
+                rebound["camera_serials"] = {
+                    role: f"machine-local-{index}"
+                    for index, role in enumerate(profile["camera_roles"], start=1)
+                }
+                self.assertEqual(build_test_only_feature_contract(rebound), feature)
+
+    def test_profile_derived_dual_contract_is_test_only_and_roundtrips(self) -> None:
+        profile = json.loads(Path(
+            "config/data_factory/collection_profiles/fr5-up-wrist-rgb-30hz-v1.json",
+        ).read_text(encoding="utf-8"))
+        feature = build_test_only_feature_contract(profile)
+        fixed, report, resolvers, _, _, qualification_catalog = single_qualification_inputs(
+            collection_profile=profile, feature_contract=feature,
+        )
+        value = compile_fr5_hypothesis(
+            fixed_contract=fixed, coverage_report=report, resolver_results=resolvers,
+            qualification_catalog=qualification_catalog,
+        )
+        self.assertEqual(value, validate_fr5_hypothesis(value))
+        self.assertEqual(value["fixed_contract"]["feature_contract"], feature)
+
+        qualification_catalog["source"] = "QUALIFICATION_ARTIFACT"
+        qualification_catalog["base_condition_qualifications"][0]["source"] = "QUALIFICATION_ARTIFACT"
+        redigest(qualification_catalog["base_condition_qualifications"][0], "qualification_digest")
+        qualification_catalog["robot_start_pose_qualifications"][0]["source"] = "QUALIFICATION_ARTIFACT"
+        redigest(qualification_catalog["robot_start_pose_qualifications"][0], "qualification_digest")
+        qualification_catalog["allowed_pairs"][0]["base_condition_qualification_digest"] = (
+            qualification_catalog["base_condition_qualifications"][0]["qualification_digest"]
+        )
+        qualification_catalog["allowed_pairs"][0]["robot_start_pose_qualification_digest"] = (
+            qualification_catalog["robot_start_pose_qualifications"][0]["qualification_digest"]
+        )
+        redigest(qualification_catalog, "catalog_digest")
+        with self.assertRaisesRegex(ContractError, "HYPOTHESIS_TEST_ONLY_PROFILE_SOURCE"):
+            compile_fr5_hypothesis(
+                fixed_contract=fixed, coverage_report=report, resolver_results=resolvers,
+                qualification_catalog=qualification_catalog,
+            )
+
+    def test_runtime_single_camera_contract_is_synthetic_only_and_bound(self) -> None:
+        profile = json.loads(Path(
+            "config/data_factory/collection_profiles/fr5-up-rgb-30hz-runtime-v1.json",
+        ).read_text(encoding="utf-8"))
+        feature = build_test_only_feature_contract(profile)
+        self.assertEqual(feature["collection_profile_id"], profile["collection_profile_id"])
+        self.assertEqual(feature["camera_mapping"], {"up": "camera1"})
+
+        fixed, report, resolvers, _, _, qualification_catalog = single_qualification_inputs(
+            collection_profile=profile, feature_contract=feature,
+        )
+        value = compile_fr5_hypothesis(
+            fixed_contract=fixed, coverage_report=report, resolver_results=resolvers,
+            qualification_catalog=qualification_catalog,
+        )
+        self.assertEqual(value["fixed_contract"]["feature_contract"], feature)
+
+        fixed, report, resolvers, _, _, qualification_catalog = single_qualification_inputs(
+            "QUALIFICATION_ARTIFACT", collection_profile=profile, feature_contract=feature,
+        )
+        with self.assertRaisesRegex(ContractError, "HYPOTHESIS_TEST_ONLY_PROFILE_SOURCE"):
+            compile_fr5_hypothesis(
+                fixed_contract=fixed, coverage_report=report, resolver_results=resolvers,
+                qualification_catalog=qualification_catalog,
+            )
+
+    def test_profile_derived_contract_rejects_unknown_or_misordered_topology(self) -> None:
+        profile = json.loads(Path(
+            "config/data_factory/collection_profiles/fr5-up-side-rgb-30hz-v1.json",
+        ).read_text(encoding="utf-8"))
+        for name, mutate in (
+            ("legacy", lambda value: value.update(schema_version="data_factory.collection_profile.v1")),
+            ("roles", lambda value: value.update(camera_roles=["side", "up"])),
+            ("topology", lambda value: value.update(camera_profile="side-wrist")),
+            ("fps", lambda value: value.update(fps=15)),
+        ):
+            candidate = copy.deepcopy(profile)
+            mutate(candidate)
+            with self.subTest(name=name), self.assertRaisesRegex(
+                ContractError, "HYPOTHESIS_TEST_ONLY_PROFILE",
+            ):
+                build_test_only_feature_contract(candidate)
+
     def test_hypothesis_is_exact_evidence_bound_and_not_a_cartesian_product(self) -> None:
         value = hypothesis()
         self.assertEqual(value["schema_version"], "data_factory.fr5_hypothesis.v2")
@@ -351,16 +454,24 @@ class ExperimentManifestTests(unittest.TestCase):
         )
 
     def test_single_camera_profile_is_exact_and_synthetic_only(self) -> None:
-        for name, mutate in (
-            ("profile_id", lambda feature: feature.update(collection_profile_id="wrong-profile")),
-            ("mapping", lambda feature: feature.update(camera_mapping={"up": "camera2"})),
-            ("extra_camera", lambda feature: feature.update(camera_mapping={"up": "camera1", "side": "camera2"})),
-            ("state_dimension", lambda feature: feature.update(state_dimension=6)),
-            ("action_dimension", lambda feature: feature.update(action_dimension=6)),
+        for name, mutate, code in (
+            (
+                "profile_id",
+                lambda feature: feature.update(collection_profile_id="wrong-profile"),
+                "HYPOTHESIS_RESOLVER_SOURCE_BINDING",
+            ),
+            ("mapping", lambda feature: feature.update(camera_mapping={"up": "camera2"}), "HYPOTHESIS_FIXED_CONTRACT"),
+            (
+                "extra_camera",
+                lambda feature: feature.update(camera_mapping={"up": "camera1", "side": "camera2"}),
+                "HYPOTHESIS_FIXED_CONTRACT",
+            ),
+            ("state_dimension", lambda feature: feature.update(state_dimension=6), "HYPOTHESIS_FIXED_CONTRACT"),
+            ("action_dimension", lambda feature: feature.update(action_dimension=6), "HYPOTHESIS_FIXED_CONTRACT"),
         ):
             fixed, report, resolvers, _, _, qualification_catalog = single_qualification_inputs()
             mutate(fixed["feature_contract"])
-            with self.subTest(name=name), self.assertRaisesRegex(ContractError, "HYPOTHESIS_FIXED_CONTRACT"):
+            with self.subTest(name=name), self.assertRaisesRegex(ContractError, code):
                 compile_fr5_hypothesis(
                     fixed_contract=fixed, coverage_report=report, resolver_results=resolvers,
                     qualification_catalog=qualification_catalog,
@@ -449,23 +560,40 @@ class ExperimentManifestTests(unittest.TestCase):
             ):
                 validate_fr5_hypothesis(value)
 
-    def test_single_camera_design_rejects_extra_pose_and_non_train_pair(self) -> None:
-        for mismatch in ("extra_pose", "non_train_pair"):
-            fixed, report, resolvers, _, _, qualification_catalog = single_qualification_inputs()
-            if mismatch == "extra_pose":
-                qualification_catalog["robot_start_pose_qualifications"].append(
-                    pose_qualification("start-2"),
-                )
-            else:
-                qualification_catalog["allowed_pairs"][0]["split_groups"] = ["TRAIN", "ID"]
-            redigest(qualification_catalog, "catalog_digest")
-            with self.subTest(mismatch=mismatch), self.assertRaisesRegex(
-                ContractError, "HYPOTHESIS_TEST_ONLY_PROFILE_DESIGN",
-            ):
-                compile_fr5_hypothesis(
-                    fixed_contract=fixed, coverage_report=report, resolver_results=resolvers,
-                    qualification_catalog=qualification_catalog,
-                )
+    def test_single_camera_design_accepts_sparse_multi_pose_train_pairs(self) -> None:
+        fixed, report, resolvers, _, _, qualification_catalog = single_qualification_inputs()
+        poses = [pose_qualification("start-2"), pose_qualification("start-3")]
+        qualification_catalog["robot_start_pose_qualifications"].extend(poses)
+        qualification_catalog["allowed_pairs"].append({
+            "base_condition_qualification_digest": qualification_catalog[
+                "base_condition_qualifications"
+            ][0]["qualification_digest"],
+            "robot_start_pose_qualification_digest": poses[1]["qualification_digest"],
+            "split_groups": ["TRAIN"],
+        })
+        qualification_catalog["allowed_pairs"].sort(key=lambda item: (
+            item["base_condition_qualification_digest"],
+            item["robot_start_pose_qualification_digest"],
+        ))
+        redigest(qualification_catalog, "catalog_digest")
+
+        value = compile_fr5_hypothesis(
+            fixed_contract=fixed, coverage_report=report, resolver_results=resolvers,
+            qualification_catalog=qualification_catalog,
+        )
+        self.assertEqual(len(value["robot_start_poses"]), 3)
+        self.assertEqual(len(value["allowed_pairs"]), 2)
+        self.assertTrue(all(item["split_groups"] == ["TRAIN"] for item in value["allowed_pairs"]))
+
+    def test_single_camera_design_rejects_non_train_pair(self) -> None:
+        fixed, report, resolvers, _, _, qualification_catalog = single_qualification_inputs()
+        qualification_catalog["allowed_pairs"][0]["split_groups"] = ["TRAIN", "ID"]
+        redigest(qualification_catalog, "catalog_digest")
+        with self.assertRaisesRegex(ContractError, "HYPOTHESIS_TEST_ONLY_PROFILE_DESIGN"):
+            compile_fr5_hypothesis(
+                fixed_contract=fixed, coverage_report=report, resolver_results=resolvers,
+                qualification_catalog=qualification_catalog,
+            )
 
     def test_base_condition_requires_exact_coverage_resolver_and_qualification(self) -> None:
         _, report, resolvers, qualifications, _, _ = qualification_inputs()

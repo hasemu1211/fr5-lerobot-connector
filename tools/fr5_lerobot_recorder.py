@@ -74,6 +74,7 @@ class FR5LeRobotRecorder(Node):
         self._transaction_lock: DatasetTransactionLock | None = None
         self._buffer_cleared = False
         self.next_target_stamp: float | None = None
+        self.sampler_epoch = 0
         self.frames = 0
         self.started = 0.0
         self.frame_stamps: list[float] = []
@@ -186,6 +187,10 @@ class FR5LeRobotRecorder(Node):
         )
 
     def _reset_episode(self) -> None:
+        # Invalidate targets that the sampler computed before this reset.  The
+        # source rings deliberately survive readiness-prefix trimming, but rows
+        # from the discarded prefix must never cross into the new buffer.
+        self.sampler_epoch = getattr(self, "sampler_epoch", 0) + 1
         self.frames = 0
         self.started = 0.0
         self.frame_stamps.clear()
@@ -210,6 +215,9 @@ class FR5LeRobotRecorder(Node):
         self.alignment_failure_sources.update({f"image.{name}": 0 for name in self.camera_names})
         self.writer_error = None
         self.next_target_stamp = None
+        self.alignment_tail_target_ros_s = None
+        self.alignment_tail_last_row_ros_s = None
+        self.alignment_tail_drained = False
         self._buffer_cleared = False
 
     def _result(self, ok: bool, reason_code: str = "OK", **extra) -> dict:
@@ -301,6 +309,16 @@ class FR5LeRobotRecorder(Node):
             }
         return samples
 
+    def _encoder_temp_bytes(self, dataset_root: Path, temp_root: Path) -> int:
+        """Measure configured temp plus LeRobot's dataset-local ``tmp*`` encodes."""
+        total = self._tree_bytes(temp_root)
+        if dataset_root == temp_root:
+            return total
+        for path in dataset_root.glob("tmp*"):
+            if path.is_dir() and not path.is_symlink():
+                total += self._tree_bytes(path)
+        return total
+
     def _storage_preflight(self) -> dict | None:
         reserve = getattr(self.args, "disk_reserve_bytes", 0)
         dataset_peak = getattr(self.args, "dataset_incremental_peak_bytes", 0)
@@ -324,7 +342,12 @@ class FR5LeRobotRecorder(Node):
             "required_free_bytes_by_device": required_by_device,
             "begin": sample,
             "dataset_bytes_before": self._tree_bytes(self.args.root),
-            "temp_bytes_before_by_device": {str(sample["encoder_temp"]["device"]): self._tree_bytes(Path(sample["encoder_temp"]["path"]))},
+            "temp_bytes_before_by_device": {
+                str(sample["encoder_temp"]["device"]): self._encoder_temp_bytes(
+                    Path(sample["dataset"]["path"]),
+                    Path(sample["encoder_temp"]["path"]),
+                )
+            },
             "temp_peak_bytes_by_device": {str(sample["encoder_temp"]["device"]): 0},
             "last_check_monotonic": 0.0,
         }
@@ -338,7 +361,10 @@ class FR5LeRobotRecorder(Node):
         try:
             sample = self._storage_sample()
             device = str(sample["encoder_temp"]["device"])
-            current_temp_bytes = self._tree_bytes(Path(sample["encoder_temp"]["path"]))
+            current_temp_bytes = self._encoder_temp_bytes(
+                Path(sample["dataset"]["path"]),
+                Path(sample["encoder_temp"]["path"]),
+            )
             monitor["temp_peak_bytes_by_device"][device] = max(
                 monitor["temp_peak_bytes_by_device"].get(device, 0),
                 max(0, current_temp_bytes - monitor["temp_bytes_before_by_device"].get(device, 0)),
@@ -358,6 +384,9 @@ class FR5LeRobotRecorder(Node):
         if not monitor:
             return None
         path = Path(monitor["begin"]["encoder_temp"]["path"])
+        dataset_path = Path(
+            monitor["begin"].get("dataset", {"path": self.args.root})["path"]
+        )
         device = str(monitor["begin"]["encoder_temp"]["device"])
         stop = threading.Event()
         sampled = threading.Event()
@@ -365,7 +394,11 @@ class FR5LeRobotRecorder(Node):
         def probe() -> None:
             while not stop.is_set():
                 try:
-                    used = max(0, self._tree_bytes(path) - monitor["temp_bytes_before_by_device"].get(device, 0))
+                    used = max(
+                        0,
+                        self._encoder_temp_bytes(dataset_path, path)
+                        - monitor["temp_bytes_before_by_device"].get(device, 0),
+                    )
                     monitor["temp_peak_bytes_by_device"][device] = max(
                         monitor["temp_peak_bytes_by_device"].get(device, 0), used
                     )
@@ -700,6 +733,15 @@ class FR5LeRobotRecorder(Node):
             "sync_slop_s": self.args.sync_slop,
             "action_sync_slop_s": self.args.action_sync_slop,
             "alignment_delay_s": self.args.alignment_delay,
+            "alignment_tail_target_ros_s": getattr(
+                self, "alignment_tail_target_ros_s", None,
+            ),
+            "alignment_tail_last_row_ros_s": getattr(
+                self, "alignment_tail_last_row_ros_s", None,
+            ),
+            "alignment_tail_drained": getattr(
+                self, "alignment_tail_drained", True,
+            ),
             "image_max_age_s": self.args.image_max_age,
             "state_max_age_s": self.args.state_max_age,
             "action_max_age_s": self.args.action_max_age,
@@ -753,6 +795,11 @@ class FR5LeRobotRecorder(Node):
             reasons.append(f"dataset writer queue dropped {self.writer_queue_drops} row(s)")
         if self.alignment_failures:
             reasons.append(f"timestamp alignment failed for {self.alignment_failures} target row(s)")
+        if (
+            self.episode_state in {self.FROZEN, self.COMMITTING, self.COMMITTED}
+            and not getattr(self, "alignment_tail_drained", True)
+        ):
+            reasons.append("recording stopped before the alignment tail was durably drained")
         if self.frames < self.args.min_frames:
             reasons.append(f"frames {self.frames} < minimum {self.args.min_frames}")
         if effective_fps and abs(effective_fps - self.args.fps) / self.args.fps > self.args.fps_tolerance:
@@ -824,20 +871,95 @@ class FR5LeRobotRecorder(Node):
         with self.lock:
             if self.episode_state != self.RECORDING:
                 return self._result(False, "STATE_FREEZE_NOT_RECORDING")
-            self.recording = False
             self.episode_state = self.FREEZING
+            drain_target = self.get_clock().now().nanoseconds * 1e-9
+            self.alignment_tail_target_ros_s = drain_target
+            sampler_thread = getattr(self, "sampler_thread", None)
+            sampler_expected = self.next_target_stamp is not None
+            sampler_active = bool(
+                sampler_expected and sampler_thread is not None
+                and sampler_thread.is_alive()
+            )
+            # A missing thread only exists in minimal unit-test recorders built
+            # without __init__.  A production sampler that exists but died is a
+            # real fail-closed condition.
+            sampler_stopped = (
+                sampler_expected and sampler_thread is not None
+                and not sampler_active
+            )
+            if sampler_stopped:
+                self.recording = False
+                self.episode_state = self.QUARANTINED_COMMIT
+
+        if sampler_stopped:
+            return self._persist_quarantine(
+                "ALIGNMENT_TAIL_SAMPLER_STOPPED",
+                "row sampler stopped before the freeze watermark",
+            )
+
+        # The sampler intentionally runs `alignment_delay` behind source time.
+        # Keep the robot in its terminal hold and let that watermark cross the
+        # freeze request before closing the episode.  Waiting on the sampler's
+        # target cursor avoids an arbitrary sleep and preserves the LIFT tail.
+        deadline = time.monotonic() + self.args.alignment_delay + max(
+            1.0, 2.0 / self.args.fps,
+        )
+        while True:
+            with self.lock:
+                interrupted = self.episode_state != self.FREEZING
+                last_row = self.frame_stamps[-1] if self.frame_stamps else None
+                drained = (
+                    not sampler_active
+                    or last_row is not None
+                    and last_row >= drain_target - 1.0 / self.args.fps
+                )
+                if interrupted or drained:
+                    self.recording = False
+                    break
+            if time.monotonic() >= deadline:
+                with self.lock:
+                    self.recording = False
+                    self.episode_state = self.QUARANTINED_COMMIT
+                return self._persist_quarantine(
+                    "ALIGNMENT_TAIL_TIMEOUT",
+                    "sampler watermark did not cross the freeze request",
+                )
+            self.stop_threads.wait(min(0.01, max(0.001, 1.0 / self.args.fps / 4)))
+
+        if interrupted:
+            return self._result(False, "STATE_FREEZE_INTERRUPTED")
         self.writer_queue.join()
+        quarantine = None
         with self.lock:
             if self.episode_state != self.FREEZING:
                 return self._result(False, "STATE_FREEZE_INTERRUPTED")
-            self.episode_state = self.FROZEN
-            try:
-                self._write_commit_guard(self.FROZEN, "FROZEN")
-                self._append_event("FROZEN")
-            except Exception as exc:
+            self.alignment_tail_last_row_ros_s = (
+                self.frame_stamps[-1] if self.frame_stamps else None
+            )
+            period = 1.0 / self.args.fps
+            self.alignment_tail_drained = bool(
+                not sampler_active
+                or self.alignment_tail_last_row_ros_s is not None
+                and self.alignment_tail_last_row_ros_s >= drain_target - period
+            )
+            if not self.alignment_tail_drained:
                 self.episode_state = self.QUARANTINED_COMMIT
-                return self._persist_quarantine("FREEZE_DURABILITY_FAILED", str(exc))
-            return self._result(True)
+                quarantine = (
+                    "ALIGNMENT_TAIL_INCOMPLETE",
+                    "no durable row reached the freeze request watermark",
+                )
+            else:
+                self.episode_state = self.FROZEN
+        if quarantine is not None:
+            return self._persist_quarantine(*quarantine)
+        try:
+            self._write_commit_guard(self.FROZEN, "FROZEN")
+            self._append_event("FROZEN")
+        except Exception as exc:
+            with self.lock:
+                self.episode_state = self.QUARANTINED_COMMIT
+            return self._persist_quarantine("FREEZE_DURABILITY_FAILED", str(exc))
+        return self._result(True)
 
     def trim_readiness_prefix(self) -> dict:
         """Discard readiness rows while keeping the sealed transaction recording.
@@ -1025,10 +1147,14 @@ class FR5LeRobotRecorder(Node):
     def episode_status(self) -> dict:
         self._storage_status_check()
         with self.lock:
+            sampler_thread = getattr(self, "sampler_thread", None)
             result = self._result(
                 True,
                 writer_error=str(self.writer_error) if self.writer_error else None,
                 writer_alive=self.writer_thread.is_alive(),
+                sampler_alive=(
+                    True if sampler_thread is None else sampler_thread.is_alive()
+                ),
             )
             result["metrics"]["quality_snapshot"] = self._quality_snapshot()
             return result
@@ -1118,14 +1244,28 @@ class FR5LeRobotRecorder(Node):
             and all(self.camera_frames[camera] for camera in self.camera_names)
         )
 
-    def _record_alignment_failure(self, sources) -> None:
+    def _record_alignment_failure(
+        self, sources, *, sampler_epoch: int | None = None,
+    ) -> None:
         with self.lock:
+            if (
+                sampler_epoch is not None
+                and sampler_epoch != getattr(self, "sampler_epoch", 0)
+            ):
+                return
             self.alignment_failures += 1
             for source in sources:
                 self.alignment_failure_sources[source] += 1
 
-    def _aligned_sample(self, target_stamp: float):
+    def _aligned_sample(
+        self, target_stamp: float, *, sampler_epoch: int | None = None,
+    ):
         with self.lock:
+            if (
+                sampler_epoch is not None
+                and sampler_epoch != getattr(self, "sampler_epoch", 0)
+            ):
+                return None
             state = interpolate_vector(self.joint_states, target_stamp, self.args.state_max_age)
             arm = interpolate_vector(self.arm_actions, target_stamp, self.args.action_sync_slop)
             gripper = latest_sample(self.gripper_actions, target_stamp, self.args.action_max_age)
@@ -1139,7 +1279,7 @@ class FR5LeRobotRecorder(Node):
         if gripper is None: missing.append("gripper_action")
         missing.extend(f"image.{camera}" for camera, sample in camera_samples.items() if sample is None)
         if missing:
-            self._record_alignment_failure(missing)
+            self._record_alignment_failure(missing, sampler_epoch=sampler_epoch)
             return None
         state_value, state_before, state_after = state
         arm_value, arm_before, arm_after = arm
@@ -1148,7 +1288,7 @@ class FR5LeRobotRecorder(Node):
             camera: sample[3] - sample[2] for camera, sample in camera_samples.items()
         }
         if any(age < 0 or age > self.args.image_max_age for age in transport_ages.values()):
-            self._record_alignment_failure(("transport",))
+            self._record_alignment_failure(("transport",), sampler_epoch=sampler_epoch)
             return None
         images = tuple(camera_samples[camera][1] for camera in self.camera_names)
         action = np.r_[arm_value, gripper_value].astype(np.float32)
@@ -1185,16 +1325,26 @@ class FR5LeRobotRecorder(Node):
             + " ".join(camera_status)
         )
 
-    def _enqueue_aligned_frame(self, target_stamp: float) -> None:
+    def _enqueue_aligned_frame(
+        self, target_stamp: float, *, sampler_epoch: int | None = None,
+    ) -> None:
         with self.lock:
-            if not self.recording:
+            if (
+                not self.recording
+                or sampler_epoch is not None
+                and sampler_epoch != getattr(self, "sampler_epoch", 0)
+            ):
                 return
-        sample = self._aligned_sample(target_stamp)
+        sample = self._aligned_sample(target_stamp, sampler_epoch=sampler_epoch)
         if sample is None:
             return
         state, action, images, provenance, sync_span, action_age, state_age = sample
         with self.lock:
-            if not self.recording:
+            if (
+                not self.recording
+                or sampler_epoch is not None
+                and sampler_epoch != getattr(self, "sampler_epoch", 0)
+            ):
                 return
             enqueue_attempt_index = self.enqueue_attempts
             self.enqueue_attempts += 1
@@ -1221,10 +1371,10 @@ class FR5LeRobotRecorder(Node):
                         self.started = time.perf_counter()
                     ready_until = now_ros - self.args.alignment_delay
                     while self.next_target_stamp <= ready_until and len(targets) < self.args.fps:
-                        targets.append(self.next_target_stamp)
+                        targets.append((self.next_target_stamp, self.sampler_epoch))
                         self.next_target_stamp += period
-            for target in targets:
-                self._enqueue_aligned_frame(target)
+            for target, sampler_epoch in targets:
+                self._enqueue_aligned_frame(target, sampler_epoch=sampler_epoch)
             self.stop_threads.wait(min(period / 4, 0.01))
 
     def _writer_loop(self) -> None:

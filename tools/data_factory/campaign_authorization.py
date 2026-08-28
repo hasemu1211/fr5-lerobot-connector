@@ -11,7 +11,14 @@ from tools.data_factory.campaign_authoring import (
     validate_collection_campaign_manifest,
 )
 from tools.data_factory.experiment_manifest import validate_fr5_hypothesis
-from tools.fr5_data_factory import ContractError, DIGEST, RFC3339, SAFE_ID, canonical_digest
+from tools.fr5_data_factory import (
+    ContractError,
+    DIGEST,
+    RFC3339,
+    SAFE_ID,
+    canonical_digest,
+    validate_motion_program,
+)
 
 
 ENVELOPE_SCHEMA = "data_factory.campaign_execution_envelope.v1"
@@ -196,13 +203,19 @@ def validate_campaign_envelope(value: object) -> dict[str, Any]:
 
 def validate_runtime_campaign_scope(
     authorization: Mapping[str, Any], *, resolved_inputs: Mapping[str, Any],
-    episode_binding: Mapping[str, Any], now: datetime,
+    motion_program: Mapping[str, Any], episode_binding: Mapping[str, Any],
+    now: datetime,
 ) -> dict[str, Any]:
     """Fail before effects when resolved runtime inputs escape the envelope."""
     checked = validate_campaign_authorization(authorization, now=now)
     envelope = checked["envelope"]
     job = resolved_inputs.get("normalized_job")
     digests = resolved_inputs.get("input_digests")
+    try:
+        program = validate_motion_program(motion_program)
+    except (ContractError, TypeError):
+        raise ContractError("CAMPAIGN_AUTHORIZATION_SCOPE_MISMATCH") from None
+    program_digests = program["binding_digests"]
     if (
         not isinstance(job, Mapping)
         or not isinstance(digests, Mapping)
@@ -213,7 +226,8 @@ def validate_runtime_campaign_scope(
         not in envelope["allowed_start_pose_ids"]
         or episode_binding.get("data_disposition") != envelope["data_disposition"]
         or digests.get("collection_profile") != envelope["collection_profile_digest"]
-        or digests.get("motion_qualification")
+        or program.get("resolved_job_digest") != resolved_inputs.get("resolved_job_digest")
+        or program_digests.get("motion_qualification")
         != envelope["motion_qualification_digest"]
         or any(
             job.get(field) != envelope[field]

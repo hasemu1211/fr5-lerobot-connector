@@ -9,7 +9,13 @@ set -u
 
 ROLE="${UVC_ROLE:-side}"
 FPS="${UVC_FPS:-${FR5_COLLECTION_FPS:-30}}"
+WIDTH="${UVC_WIDTH:-640}"
+HEIGHT="${UVC_HEIGHT:-480}"
 [[ "$FPS" =~ ^[1-9][0-9]*$ ]] || { echo "UVC_FPS must be a positive integer" >&2; exit 1; }
+[[ "$WIDTH" =~ ^[1-9][0-9]*$ && "$HEIGHT" =~ ^[1-9][0-9]*$ ]] || {
+  echo "UVC dimensions must be positive integers" >&2
+  exit 1
+}
 DEVICE="${UVC_DEVICE:-}"
 if [[ -z "$DEVICE" ]]; then
   DEVICE="$(find /dev/v4l/by-id -maxdepth 1 -type l -name '*-video-index0' ! -name '*RealSense*' -print -quit 2>/dev/null || true)"
@@ -26,7 +32,7 @@ exec ros2 run usb_cam usb_cam_node_exe --ros-args \
   -p framerate:="${FPS}.0" \
   -p io_method:=mmap \
   -p pixel_format:=yuyv2rgb \
-  -p image_width:=640 \
-  -p image_height:=480 \
+  -p image_width:="$WIDTH" \
+  -p image_height:="$HEIGHT" \
   -p camera_name:="${ROLE}_camera" \
   -p frame_id:="${ROLE}_camera_color_optical_frame"

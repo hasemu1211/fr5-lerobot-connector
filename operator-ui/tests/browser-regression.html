@@ -19,21 +19,22 @@
     <div class="work-area">
       <section id="campaign-facts" hidden></section><button id="cancel-campaign" type="button" hidden>cancel</button>
       <div id="step-content">
-        <section id="step-environment" class="flow-step" data-step="environment" tabindex="-1"><p id="setup-summary"></p><ul id="setup-subsystems"></ul><button id="prepare-environment" hidden>prepare</button><button id="environment-next">next</button></section>
+        <section id="step-environment" class="flow-step" data-step="environment" tabindex="-1"><p id="setup-summary"></p><ul id="setup-subsystems"></ul><section id="camera-setup" hidden><strong id="camera-profile-label"></strong><div id="camera-role-list"></div><p id="camera-role-status"></p></section><button id="prepare-environment" hidden>prepare</button><button id="recover-home" hidden>recover</button><button id="environment-next">next</button></section>
         <section id="step-plan" class="flow-step" data-step="plan" tabindex="-1" hidden>
-          <div id="workspace-entry" hidden><button id="open-workspace" type="button">workspace</button></div>
+          <div class="setup-tools"><div id="workspace-entry" hidden><strong>작업영역 관리</strong><button id="open-workspace" type="button">새 작업영역 등록</button></div><div id="start-pose-entry" hidden><strong>시작 자세 관리</strong><button id="open-start-pose" type="button">시작 자세 관리</button></div></div>
           <fieldset id="catalog-fields">
             <select data-axis="workspace"></select><small data-axis-hint="workspace"></small><select id="frame-select" data-axis="frame"></select><small data-axis-hint="frame"></small>
             <select data-axis="task"></select><small data-axis-hint="task"></small><select data-axis="object"></select><small data-axis-hint="object"></small>
-            <select data-axis="grasp"></select><small data-axis-hint="grasp"></small><select data-axis="start"></select><small data-axis-hint="start"></small>
+            <select data-axis="grasp"></select><small data-axis-hint="grasp"></small><select data-axis="start" hidden></select><small data-axis-hint="start" hidden></small>
             <select data-axis="motion"></select><small data-axis-hint="motion"></small><select data-axis="variant"></select><small data-axis-hint="variant"></small>
-            <select data-axis="camera"></select><small data-axis-hint="camera"></small><select data-axis="data_mode"></select><small data-axis-hint="data_mode"></small>
+            <div><strong id="camera-selection-label"></strong><select data-axis="camera" hidden></select><small data-axis-hint="camera" hidden></small></div><select data-axis="data_mode"></select><small data-axis-hint="data_mode"></small>
           </fieldset>
           <fieldset id="authoring-mode"><label><input type="radio" name="authoring_mode" value="ASSISTED">assisted</label><label><input type="radio" name="authoring_mode" value="DIRECT_EDIT">direct</label></fieldset>
           <label>count<input id="count-input" type="number" min="1" max="100"></label><label>repeat<input id="repeat-input" type="number" min="1" max="100"></label><select id="split-select" data-axis="split"></select>
-          <p id="workspace-domain-summary"></p>
-          <section id="direct-pose-editor" hidden><p id="direct-domain-status"></p><form id="direct-pose-form"><label>X<input id="direct-x-input" type="number" step="any" required></label><label>Y<input id="direct-y-input" type="number" step="any" required></label><label>yaw<input id="direct-yaw-input" type="number" step="any" required></label><button id="add-direct-pose" type="submit">add</button></form><ol id="direct-pose-list"></ol></section>
-          <p id="plan-lock-reason"></p><div id="cell-grid"></div><button id="plan-back">back</button><button id="compile-campaign">compile</button>
+          <p id="current-object-status"></p><form id="current-object-form"><label>X<input id="current-object-x" type="number" step="any" required></label><label>Y<input id="current-object-y" type="number" step="any" required></label><label>yaw<input id="current-object-yaw" type="number" step="any" required></label><button id="apply-current-object" type="submit">apply</button></form>
+          <dl id="state-space-summary" hidden></dl><p id="workspace-domain-summary"></p>
+          <section id="direct-pose-editor" hidden><p id="direct-domain-status"></p><form id="direct-pose-form"><label id="direct-start-label" hidden>start<select id="direct-start-select"></select></label><label>X<input id="direct-x-input" type="number" step="any" required></label><label>Y<input id="direct-y-input" type="number" step="any" required></label><label>yaw<input id="direct-yaw-input" type="number" step="any" required></label><button id="add-direct-pose" type="submit">add</button></form><span id="direct-selection-count"></span><ol id="direct-pose-list"></ol></section>
+          <p id="plan-lock-reason"></p><details id="cell-grid-disclosure" hidden><summary>grid</summary><div id="cell-grid"></div></details><button id="plan-back">back</button><button id="compile-campaign">compile</button>
         </section>
         <section id="step-review" class="flow-step" data-step="review" tabindex="-1" hidden><dl id="review-summary"></dl><section id="review-plan" hidden><h3 id="review-plan-title">plan</h3><ol id="review-plan-list"></ol></section><button id="review-back">back</button><div id="review-actions"></div></section>
         <section id="step-execution" class="flow-step" data-step="execution" tabindex="-1" hidden><div id="runtime-content"></div></section>
@@ -44,21 +45,25 @@
     </div>
   </main>
   <dialog id="workspace-dialog">
+    <h2 id="workspace-dialog-title">새 작업영역 등록</h2>
     <button id="close-workspace" type="button">close</button>
-    <dl id="workspace-selection"></dl><p id="workspace-next-action" role="status"></p><ol id="workspace-captures"></ol>
-    <form id="workspace-preview-form" hidden>
-      <input id="source-scale-bar" type="number" min="0.01" step="any" required>
-      <input id="final-scale-bar" type="number" min="96" max="104" step="any" required>
-      <button id="preview-workspace" type="submit">preview</button>
-    </form>
-    <div id="workspace-preview-status"></div><div id="workspace-promotion"></div>
+    <form id="workspace-name-form"><input id="workspace-display-name" type="text" required><button type="submit">begin</button></form>
+    <section id="workspace-registration-content" hidden><dl id="workspace-selection"></dl><p id="workspace-next-action" role="status"></p><ol id="workspace-captures"></ol>
+      <form id="workspace-preview-form" hidden>
+        <input id="source-scale-bar" type="number" min="0.01" step="any" required>
+        <input id="final-scale-bar" type="number" min="96" max="104" step="any" required>
+        <button id="preview-workspace" type="submit">preview</button>
+      </form>
+      <div id="workspace-preview-status"></div><div id="workspace-promotion"></div>
+    </section>
   </dialog>
+  <dialog id="start-pose-dialog"><h2 id="start-pose-dialog-title">시작 자세 관리</h2><button id="close-start-pose">close</button><form id="start-pose-capture-form"><input id="start-pose-display-name" type="text" required><button id="capture-start-pose">capture</button></form><div id="start-pose-profile-list"></div><p id="start-pose-status"></p></dialog>
   <div id="announcer" role="status"></div>
   <pre id="results">픽스처 대기 중…</pre>
 
   <script>
     const nativeFetch = window.fetch.bind(window);
-    const fixturePromise = nativeFetch("fixtures/states.json").then((response) => response.json());
+    const fixturePromise = nativeFetch("../fixtures/states.json").then((response) => response.json());
     const posted = [];
     let stateKey = "authoring";
     let postResult = "accepted";
@@ -68,15 +73,21 @@
     let draftRequestedCount;
     let draftRepeat;
     let directPoses = [];
+    let directPairs = [];
     let workspaceDomainAvailable = true;
     let workspaceRegistrationVisible = true;
     let workspaceOperationsEnabled = true;
     let workspaceRegistrationState;
     let workspaceCatalogRefreshed = false;
+    let rejectNextWorkspacePreview = false;
+    let cameraSetupState;
+    let startPoseSetupState;
+    let cameraRecovered = false;
+    let stateSpaceProjectionAvailable = true;
     const snapshotProbe = "RAW_SNAPSHOT_MUST_NOT_RENDER";
     const workspaceDomain = {
       workspace_id: "PLACE_A", frame_id: "place-a-frame-r002", coordinate_mode: "CONTINUOUS_A4_PLANE",
-      x_mm: {minimum: -70, maximum: 70}, y_mm: {minimum: -35, maximum: 35}, yaw_deg: {minimum: 0, maximum_exclusive: 360},
+      x_mm: {minimum: -70, maximum: 70}, y_mm: {minimum: -35, maximum: 35}, yaw_deg: {minimum: -180, maximum_exclusive: 180},
     };
     const clone = (value) => JSON.parse(JSON.stringify(value));
     const merge = (target, patch) => {
@@ -86,27 +97,56 @@
     const fixtureView = async () => {
       const fixture = await fixturePromise;
       const flat = merge(clone(fixture.base_view), fixture.states[stateKey]);
+      if (stateKey === "results") flat.episode_history.forEach((item, index) => {
+        item.episode_ledger = {
+          ledger_digest: `sha256:${String(index + 1).repeat(64)}`,
+          review_status: "NOT_MEASURED", retention_state: "PRESERVE",
+          reclaim_state: "REPACK_REQUIRED", training_status: "NOT_AUTHORIZED",
+        };
+      });
       if (stateKey === "authoring") {
         flat.draft.authoring_mode = draftAuthoringMode ?? flat.draft.authoring_mode;
         flat.draft.requested_count = draftRequestedCount ?? flat.draft.requested_count;
         flat.draft.repeat = draftRepeat ?? flat.draft.repeat;
         flat.draft.direct_poses = clone(directPoses);
+        flat.draft.direct_pairs = clone(directPairs);
         if (workspaceDomainAvailable) flat.catalog.workspace_domain = clone(workspaceDomain);
         else delete flat.catalog.workspace_domain;
         workspaceRegistrationState ??= clone(flat.workspace_registration);
-        flat.workspace_registration = workspaceRegistrationVisible ? {...clone(workspaceRegistrationState), raw_joint_snapshot: snapshotProbe} : null;
+        cameraSetupState ??= clone(flat.camera_setup);
+        startPoseSetupState ??= clone(flat.start_pose_setup);
+        flat.camera_setup = clone(cameraSetupState);
+        flat.start_pose_setup = clone(startPoseSetupState);
+        flat.state_space_summary.selected_start_pose_count = startPoseSetupState.selected_start_pose_ids.length;
+        flat.state_space_summary.eligible_pair_count = 15 * startPoseSetupState.selected_start_pose_ids.length;
+        flat.state_space_summary.planned_count = flat.draft.requested_count;
+        if (!stateSpaceProjectionAvailable) {
+          delete flat.start_pose_setup;
+          delete flat.state_space_summary;
+          delete flat.draft.direct_pairs;
+        }
+        flat.workspace_registration = workspaceRegistrationVisible && workspaceRegistrationState ? {...clone(workspaceRegistrationState), raw_joint_snapshot: snapshotProbe} : null;
         const workspaceOps = [];
         if (workspaceRegistrationVisible && workspaceOperationsEnabled) {
-          if (workspaceRegistrationState.promotion) workspaceOps.push("new_workspace_registration");
-          else if (workspaceRegistrationState.preview?.status === "CANDIDATE_WITHIN_TOLERANCE") workspaceOps.push("save_workspace_revision");
+          if (!workspaceRegistrationState || workspaceRegistrationState.promotion) workspaceOps.push("new_workspace_registration");
+          else if (workspaceRegistrationState.preview?.status === "CANDIDATE_WITHIN_TOLERANCE") workspaceOps.push("save_workspace");
+          else if (workspaceRegistrationState.preview) workspaceOps.push("discard_workspace_preview");
           else {
             workspaceOps.push("capture_workspace_point");
             if (Object.values(workspaceRegistrationState.captures).every(Boolean)) workspaceOps.push("preview_workspace");
           }
         }
-        flat.available_ops = ["update_draft", "compile_draft", ...workspaceOps];
-        if (workspaceCatalogRefreshed && !flat.catalog.axes.frame.some((item) => item.id === workspaceRegistrationState.calibration_id)) {
+        flat.available_ops = ["update_draft", "update_camera_bindings", ...(stateSpaceProjectionAvailable ? ["capture_start_pose", "update_start_pose_selection"] : []), "compile_draft", ...workspaceOps];
+        if (workspaceCatalogRefreshed && workspaceRegistrationState && !flat.catalog.axes.frame.some((item) => item.id === workspaceRegistrationState.calibration_id)) {
           flat.catalog.axes.frame.push({id: workspaceRegistrationState.calibration_id, label: "새 작업영역 좌표계 r1", available: true, reason: null, description: "같은 프로세스에서 새로고침됨"});
+        }
+        if (cameraRecovered) {
+          flat.revision = 15;
+          flat.view_digest = "sha256:2323232323232323232323232323232323232323232323232323232323232323";
+          flat.runtime.workflow_state = "PREPARING";
+          flat.setup.host_status = "ACTION_REQUIRED";
+          flat.setup.summary = "카메라 역할을 다시 확인한 뒤 환경 준비를 실행하세요.";
+          flat.available_ops = ["prepare_environment", "update_camera_bindings"];
         }
       }
       if (stateKey === "workspace_motion_required" && !flat.catalog.axes.frame.some((item) => item.id === flat.draft.selection.frame)) {
@@ -127,30 +167,50 @@
         if (postResult === "accepted") {
           if (request.body.op === "update_draft") {
             const payload = request.body.payload;
-            if (payload.authoring_mode === "DIRECT_EDIT" && draftAuthoringMode !== "DIRECT_EDIT") directPoses = [
-              {place_id: "PLACE_A", x_mm: 10, y_mm: 10, yaw_deg: 90},
-              {place_id: "PLACE_A", x_mm: -10, y_mm: -10, yaw_deg: 180},
+            if (payload.authoring_mode === "DIRECT_EDIT" && draftAuthoringMode !== "DIRECT_EDIT") directPairs = [
+              {start_pose_id: "fr5-home-r001", place_id: "PLACE_A", x_mm: 0, y_mm: 0, yaw_deg: 0},
+              {start_pose_id: "fr5-home-r001", place_id: "PLACE_A", x_mm: 10, y_mm: 10, yaw_deg: 90},
+              {start_pose_id: "fr5-home-r001", place_id: "PLACE_A", x_mm: -10, y_mm: -10, yaw_deg: -180},
             ];
-            if (payload.authoring_mode === "ASSISTED") directPoses = [];
+            if (payload.authoring_mode === "ASSISTED") directPairs = [];
             if (payload.authoring_mode) draftAuthoringMode = payload.authoring_mode;
             if (payload.requested_count) draftRequestedCount = payload.requested_count;
             if (payload.repeat) draftRepeat = payload.repeat;
-            if (payload.add_pose) directPoses.push({...payload.add_pose, yaw_deg: ((payload.add_pose.yaw_deg % 360) + 360) % 360});
+            if (payload.add_pose) directPoses.push({...payload.add_pose, yaw_deg: ((payload.add_pose.yaw_deg + 180) % 360 + 360) % 360 - 180});
             if (payload.remove_pose) directPoses = directPoses.filter((pose) => !["place_id", "x_mm", "y_mm", "yaw_deg"].every((field) => pose[field] === payload.remove_pose[field]));
+            if (payload.add_pair) directPairs.push({...payload.add_pair, yaw_deg: ((payload.add_pair.yaw_deg + 180) % 360 + 360) % 360 - 180});
+            if (payload.remove_pair) directPairs = directPairs.filter((pair) => !["start_pose_id", "place_id", "x_mm", "y_mm", "yaw_deg"].every((field) => pair[field] === payload.remove_pair[field]));
           }
           if (request.body.op === "capture_workspace_point") workspaceRegistrationState.captures[request.body.payload.label] = true;
-          if (request.body.op === "preview_workspace") workspaceRegistrationState.preview = clone(fixture.states.workspace_previewed.workspace_registration.preview);
-          if (request.body.op === "save_workspace_revision") {
+          if (request.body.op === "preview_workspace") {
+            workspaceRegistrationState.preview = clone(fixture.states.workspace_previewed.workspace_registration.preview);
+            if (rejectNextWorkspacePreview) workspaceRegistrationState.preview.status = "CANDIDATE_OUT_OF_TOLERANCE";
+          }
+          if (request.body.op === "discard_workspace_preview") workspaceRegistrationState.preview = null;
+          if (["save_workspace", "save_workspace_revision"].includes(request.body.op)) {
             workspaceRegistrationState = clone(fixture.states.workspace_saved.workspace_registration);
             workspaceCatalogRefreshed = true;
           }
           if (request.body.op === "new_workspace_registration") {
-            workspaceRegistrationState = clone(fixture.base_view.workspace_registration);
+            workspaceRegistrationState = clone(fixture.states.workspace_captured.workspace_registration);
+            workspaceRegistrationState.display_name = request.body.payload.display_name;
+            workspaceRegistrationState.captures = {CENTER: false, X_REF: false, Y_CHECK: false};
+            workspaceRegistrationState.preview = null;
+            workspaceRegistrationState.promotion = null;
+          }
+          if (request.body.op === "capture_start_pose") startPoseSetupState.profiles.push({start_pose_id: `captured-${startPoseSetupState.profiles.length + 1}`, display_name: request.body.payload.display_name, status: "CANDIDATE"});
+          if (request.body.op === "update_start_pose_selection") startPoseSetupState.selected_start_pose_ids = clone(request.body.payload.selected_start_pose_ids);
+          if (request.body.op === "update_camera_bindings") {
+            cameraSetupState.bindings = clone(request.body.payload.bindings);
+            cameraSetupState.required_roles = [...new Set(Object.values(cameraSetupState.bindings).filter((role) => role !== "UNUSED"))];
+            const labels = {UP: "상단", SIDE: "측면", WRIST: "손목"};
+            cameraSetupState.profile_label = `${cameraSetupState.required_roles.map((role) => labels[role]).join(" + ")} RGB · 30 fps`;
           }
           if (request.body.op === "compile_draft") stateKey = "review_campaign";
           if (request.body.op === "authorize_campaign") stateKey = "running";
           if (request.body.op === "cancel_session") stateKey = "cancelling";
           if (request.body.op === "review_candidate") stateKey = "complete";
+          if (request.body.op === "recover_camera_setup") { cameraRecovered = true; stateKey = "authoring"; }
         }
         const result = fixture.intent_results[postResult];
         return new Response(JSON.stringify(result), {status: result.ok ? 200 : 409, headers: {"Content-Type": "application/json"}});
@@ -174,7 +234,7 @@
     const show = async (key) => {
       stateKey = key;
       await loadView();
-      const expected = {authoring: 1, review_campaign: 2, running: 3, cancelling: 4, results: 5, complete: 6, blocked: 7, stale: 8, workspace_motion_required: 12}[key];
+      const expected = {authoring: 1, review_campaign: 2, running: 3, cancelling: 4, results: 5, complete: 6, blocked: 7, stale: 8, workspace_motion_required: 12, camera_blocked: 14}[key];
       await waitFor(() => currentView?.revision === expected || !currentView);
     };
 
@@ -185,10 +245,66 @@
         check(document.querySelectorAll("[data-step-target]").length === 6, "six-step product flow renders");
         check(document.querySelector("#step-environment").hidden && !document.querySelector("#step-plan").hidden, "AUTHORING enters collection plan directly");
         check(!document.querySelector('[data-step-target="plan"]').disabled, "ready environment unlocks collection planning");
-        check(document.querySelectorAll('#catalog-fields select:not([data-axis="split"])').length === 10, "catalog renders workspace frame task object grasp start motion variant camera and data mode");
+        check(!document.querySelector("#camera-setup").hidden && document.querySelectorAll("#camera-role-list select").length === 2, "environment lists two connected cameras by logical label");
+        check(["상단", "측면", "손목", "사용 안 함"].every((label) => document.querySelector("#camera-role-list").textContent.includes(label)), "each camera exposes plain-language role choices");
+        check(!document.querySelector("#camera-setup").textContent.includes("usb-") && document.querySelector("#technical-content").textContent.includes("usb-Generic"), "technical camera identity stays in collapsed technical details");
+        check(document.querySelector('[data-axis="camera"]').hidden && document.querySelector('[data-axis="camera"]').disabled && document.querySelector("#camera-selection-label").textContent.includes("상단 RGB"), "camera profile is derived instead of manually selected in the plan");
+        const camera2 = document.querySelector('[data-camera-logical-id="camera-2"]');
+        camera2.value = "WRIST";
+        camera2.dispatchEvent(new Event("change", {bubbles: true}));
+        await waitFor(() => currentView?.camera_setup?.bindings["camera-2"] === "WRIST" && !intentBusy);
+        const firstCameraPost = posted.find((item) => item.body.op === "update_camera_bindings");
+        check(JSON.stringify(firstCameraPost.body.payload.bindings) === JSON.stringify({"camera-1": "UP", "camera-2": "WRIST"}), "camera role change posts one complete binding map");
+        const camera1 = document.querySelector('[data-camera-logical-id="camera-1"]');
+        camera1.value = "WRIST";
+        camera1.dispatchEvent(new Event("change", {bubbles: true}));
+        await waitFor(() => currentView?.camera_setup?.bindings["camera-1"] === "WRIST" && !intentBusy);
+        check(currentView.camera_setup.bindings["camera-2"] === "UP" && new Set(Object.values(currentView.camera_setup.bindings)).size === 2, "occupied camera roles swap atomically without duplicates");
+        check(document.querySelector('[data-axis="start"]').hidden && !document.querySelector("#open-start-pose").hidden && document.querySelector("#catalog-fields").textContent.includes("시작 자세"), "legacy start dropdown is replaced by reusable start-pose management");
         check([...document.querySelector('[data-axis="task"]').options].some((option) => option.value === "pick_place" && option.disabled), "unavailable catalog combination is disabled with a reason");
+        const selectedTask = catalogOption(currentView, "task", currentView.draft.selection.task);
+        selectedTask.description = "현재 화면 상태에 포함된 레시피 정보";
+        for (const [code, copy] of [
+          ["GENERAL_QUALIFICATION_REQUIRED", "일반 수집 전에 이 조합의 실제 장치 동작을 먼저 확인해야 합니다"],
+          ["TASK_CALLER_NOT_CONFIGURED", "이 작업을 실행할 연결이 아직 설정되지 않았습니다"],
+          ["TASK_LIVE_CALLER_REQUIRED", "이 작업에는 실제 로봇 실행 연결이 필요합니다"],
+          ["GENERAL_CALLER_NOT_CONFIGURED", "일반 수집 실행 연결이 아직 설정되지 않았습니다"],
+          ["NO_LIVE_COLLECTION_CALLER", "선택한 조합의 실제 수집 연결이 아직 설정되지 않았습니다"],
+          ["SPLIT_NOT_CONFIGURED", "선택한 데이터 분할은 아직 설정되지 않았습니다"],
+          ["CAMERA_PROFILE_NOT_AVAILABLE", "선택한 카메라 역할 조합에 맞는 녹화 설정이 없습니다"],
+          ["CAMERA_REBIND_REQUIRED", "이 카메라를 사용하려면 해당 장치로 수집 서비스를 다시 시작해야 합니다"],
+          ["MOTION_QUALIFICATION_REQUIRED", "이 좌표계에서 실제 로봇 동작을 먼저 확인해야 합니다"],
+        ]) {
+          selectedTask.execution_reason = code;
+          renderCatalog(currentView);
+          const hint = document.querySelector('[data-axis-hint="task"]').textContent;
+          check(hint.includes(selectedTask.description) && hint.includes(copy), `${code} selected execution reason is shown in its hint`);
+        }
+        await loadView();
         check(document.querySelector("#count-input").valueAsNumber === 3 && document.querySelector("#count-input").min === "1", "editable episode count supports one through one hundred");
-        check(document.querySelectorAll("#cell-grid .cell").length === 6, "finite position and angle cells render");
+        check(document.querySelector("#cell-grid-disclosure").hidden && document.querySelectorAll("#cell-grid .cell").length === 0, "assisted mode omits the full state-space grid");
+        check(!document.querySelector("#state-space-summary").hidden && document.querySelector("#state-space-summary").textContent.includes("시작 자세") && document.querySelector("#state-space-summary").textContent.includes("기준점 조합"), "assisted mode labels finite anchors without claiming the continuous domain is fully executable");
+
+        check(!document.querySelector("#start-pose-entry").hidden, "start-pose management is separate from HOME recovery");
+        document.querySelector("#open-start-pose").click();
+        check(document.querySelector("#start-pose-dialog").open && ["후보", "사용 가능", "검증 필요"].every((label) => document.querySelector("#start-pose-profile-list").textContent.includes(label)), "start-pose registry reports each backend status truthfully");
+        check(document.querySelector('[data-start-pose-id="fr5-home-r001"]').disabled, "the last selected start pose cannot be unchecked into an invalid empty set");
+        document.querySelector("#start-pose-display-name").value = "높은 준비 자세";
+        document.querySelector("#start-pose-capture-form").requestSubmit();
+        await waitFor(() => currentView?.start_pose_setup?.profiles.some((profile) => profile.display_name === "높은 준비 자세") && !intentBusy);
+        const captureStartPost = posted.find((item) => item.body.op === "capture_start_pose");
+        check(JSON.stringify(captureStartPost.body.payload) === JSON.stringify({display_name: "높은 준비 자세"}), "capture_start_pose posts only the human display name");
+        const sideStart = document.querySelector('[data-start-pose-id="fr5-ready-side-r001"]');
+        sideStart.click();
+        await waitFor(() => currentView?.start_pose_setup?.selected_start_pose_ids.length === 2 && !intentBusy);
+        const startSelectionPost = posted.find((item) => item.body.op === "update_start_pose_selection");
+        check(JSON.stringify(startSelectionPost.body.payload.selected_start_pose_ids) === JSON.stringify(["fr5-home-r001", "fr5-ready-side-r001"]), "start-pose selection posts one complete ordered id list");
+        document.querySelector("#close-start-pose").click();
+        stateSpaceProjectionAvailable = false;
+        await loadView();
+        check(document.querySelector("#start-pose-entry").hidden && document.querySelector("#state-space-summary").hidden && currentView.start_pose_setup === undefined && currentView.draft.direct_pairs === undefined, "absent state-space projections stay hidden without invented values");
+        stateSpaceProjectionAvailable = true;
+        await loadView();
 
         workspaceRegistrationVisible = false;
         await loadView();
@@ -196,17 +312,25 @@
         workspaceRegistrationVisible = true;
         workspaceOperationsEnabled = false;
         await loadView();
-        check(!document.querySelector("#workspace-entry").hidden && !document.querySelector("#workspace-captures [data-capture-label]"), "unavailable workspace op exposes no capture button or intent");
+        check(document.querySelector("#workspace-entry").hidden && !document.querySelector("#workspace-captures [data-capture-label]"), "workspace entry stays hidden when no registration operation exists");
         workspaceOperationsEnabled = true;
         await loadView();
         document.querySelector("#open-workspace").click();
         check(document.querySelector("#workspace-dialog").open, "plan authoring opens native workspace management");
-        check(document.querySelector("#workspace-selection").textContent.includes("PLACE_A") && document.querySelector("#workspace-selection").textContent.includes("place-a-frame-r002"), "workspace flow shows exact selected workspace and frame");
+        check(document.querySelector("#workspace-dialog-title").textContent === "새 작업영역 등록" && !document.querySelector("#workspace-name-form").hidden && document.querySelector("#workspace-registration-content").hidden, "workspace flow asks for a new independent name before captures");
+        check(!document.querySelector("#workspace-dialog").textContent.includes("놓기 영역 A") && !document.querySelector("#workspace-dialog").textContent.includes("영역 A 좌표계 r2"), "selected workspace and frame are not reused as the new identity");
+        document.querySelector("#workspace-display-name").value = "놓기 영역 B";
+        const workspacePostStart = posted.length;
+        document.querySelector("#workspace-name-form").requestSubmit();
+        await waitFor(() => currentView?.workspace_registration?.display_name === "놓기 영역 B" && !intentBusy);
+        const newWorkspacePost = posted.slice(workspacePostStart).find((item) => item.body.op === "new_workspace_registration");
+        check(JSON.stringify(newWorkspacePost.body.payload) === JSON.stringify({display_name: "놓기 영역 B"}), "new_workspace_registration posts only the new display name");
+        check(document.querySelector("#workspace-name-form").hidden && !document.querySelector("#workspace-registration-content").hidden && document.querySelector("#workspace-selection").textContent.includes("놓기 영역 B"), "captures appear only after the named projection exists");
+        check(document.querySelector("#technical-content").textContent.includes("PLACE_A") && document.querySelector("#technical-content").textContent.includes("workspace-pending-r001"), "workspace provenance ids remain in technical details");
         check(!document.querySelector("#workspace-dialog").textContent.includes(snapshotProbe) && !document.querySelector("#technical-content").textContent.includes(snapshotProbe), "snapshot content never rendered");
         check([...document.querySelectorAll("#workspace-captures [data-capture-role]")].map((item) => item.dataset.captureRole).join(",") === "CENTER,X_REF,Y_CHECK", "three ordered workspace captures");
         check(document.querySelector("#workspace-next-action").textContent.includes("CENTER"), "workspace states the exact next capture");
 
-        const workspacePostStart = posted.length;
         for (const label of ["CENTER", "X_REF", "Y_CHECK"]) {
           document.querySelector(`[data-capture-label="${label}"]`).click();
           await waitFor(() => currentView?.workspace_registration?.captures[label] && !intentBusy);
@@ -220,27 +344,34 @@
         document.querySelector("#workspace-preview-form").requestSubmit();
         check(document.querySelector("#final-scale-bar").validity.rangeOverflow && posted.length === beforeInvalidWorkspace, "invalid workspace measurement is rejected by browser validation");
         document.querySelector("#final-scale-bar").value = "100";
+        rejectNextWorkspacePreview = true;
+        document.querySelector("#workspace-preview-form").requestSubmit();
+        await waitFor(() => currentView?.workspace_registration?.preview && !intentBusy);
+        check(document.querySelector("#workspace-preview-status").textContent.includes("계산 결과 저장 불가"), "out-of-tolerance workspace preview is factual");
+        const discardButton = document.querySelector('[data-workspace-op="discard_workspace_preview"]');
+        check(discardButton, "rejected workspace preview exposes one retry path");
+        const rejectedPreviewDigest = currentView.workspace_registration.preview.preview_digest;
+        discardButton.click();
+        await waitFor(() => currentView?.workspace_registration?.preview === null && !intentBusy);
+        const discardPost = posted.find((item) => item.body.op === "discard_workspace_preview");
+        check(discardPost.body.payload.preview_digest === rejectedPreviewDigest && !document.querySelector("#workspace-preview-form").hidden, "discard is digest-bound and returns to capture/preview");
+        rejectNextWorkspacePreview = false;
         document.querySelector("#workspace-preview-form").requestSubmit();
         await waitFor(() => currentView?.workspace_registration?.preview && !intentBusy);
         const previewPost = posted.find((item) => item.body.op === "preview_workspace");
         check(JSON.stringify(previewPost.body.payload) === JSON.stringify({source_scale_bar_mm: 100, final_scale_bar_mm: 100}), "preview_workspace posts exact measured scale bars");
-        check(document.querySelector("#workspace-preview-status").textContent.includes("미리보기 통과"), "workspace preview status is plain language");
-        const saveButton = document.querySelector('[data-workspace-op="save_workspace_revision"]');
+        check(document.querySelector("#workspace-preview-status").textContent.includes("계산 결과 사용 가능"), "workspace calculation status is plain language");
+        const saveButton = document.querySelector('[data-workspace-op="save_workspace"]');
         check(saveButton, "save is exposed only for the current saveable preview");
         const expectedPreviewDigest = currentView.workspace_registration.preview.preview_digest;
         saveButton.click();
         await waitFor(() => currentView?.workspace_registration?.promotion && !intentBusy);
-        const savePost = posted.find((item) => item.body.op === "save_workspace_revision");
+        const savePost = posted.find((item) => item.body.op === "save_workspace");
         check(savePost.body.payload.preview_digest === expectedPreviewDigest, "digest-bound workspace save");
-        check(document.querySelector("#workspace-promotion").textContent.includes("변경 불가능한 좌표계 개정본") && document.querySelector("#workspace-promotion").textContent.includes("같은 프로세스"), "saved workspace reports immutable revision and catalog refresh");
+        check(document.querySelector("#workspace-promotion").textContent.includes("놓기 영역 B 작업영역이 저장되었습니다") && document.querySelector("#workspace-promotion").textContent.includes("수집 계획에서 선택"), "saved workspace reports the independent workspace and next state");
         check([...document.querySelector("#frame-select").options].some((item) => item.value === workspaceRegistrationState.calibration_id), "saved workspace refreshes catalog in the same process");
-        check(document.querySelector('[data-workspace-op="new_workspace_registration"]'), "promotion offers another workspace registration");
-        document.querySelector('[data-workspace-op="new_workspace_registration"]').click();
-        await waitFor(() => currentView?.workspace_registration && Object.values(currentView.workspace_registration.captures).every((value) => value === false) && !intentBusy);
-        const newWorkspacePost = posted.find((item) => item.body.op === "new_workspace_registration");
-        check(Object.keys(newWorkspacePost.body.payload).length === 0, "new_workspace_registration posts an exact empty payload");
         const workspacePosts = posted.slice(workspacePostStart);
-        check(workspacePosts.every((item) => ["capture_workspace_point", "preview_workspace", "save_workspace_revision", "new_workspace_registration"].includes(item.body.op)), "workspace flow posts no motion intent");
+        check(workspacePosts.every((item) => ["capture_workspace_point", "preview_workspace", "discard_workspace_preview", "save_workspace", "new_workspace_registration"].includes(item.body.op)), "workspace flow posts no motion intent");
         document.querySelector("#close-workspace").click();
         check(!document.querySelector("#workspace-dialog").open && !document.querySelector("#step-plan").hidden && !document.querySelector("#compile-campaign").hidden, "catalog refresh returns to usable collection plan in the same process");
 
@@ -253,29 +384,41 @@
         await waitFor(() => currentView?.draft.repeat === 2 && !intentBusy);
         document.querySelector('[name="authoring_mode"][value="DIRECT_EDIT"]').click();
         await waitFor(() => currentView?.draft.authoring_mode === "DIRECT_EDIT" && !document.querySelector("#direct-pose-editor").hidden);
-        check(currentView.draft.requested_count === 5 && currentView.draft.repeat === 2 && document.querySelectorAll("#direct-pose-list [data-pose-index]").length === 2, "assisted A,B,C,A,B materializes ordered direct B,C without changing N or repeat");
-        check(document.querySelector("#direct-x-input").min === "-70" && document.querySelector("#direct-y-input").max === "35", "direct-pose bounds come from projected workspace domain");
+        check(currentView.draft.requested_count === 5 && currentView.draft.repeat === 2 && document.querySelectorAll("#direct-pose-list [data-pair-index]").length === 3, "assisted plan materializes ordered start-pose and position pairs without changing N or repeat");
+        check(!document.querySelector("#direct-start-label").hidden && [...document.querySelector("#direct-start-select").options].map((option) => option.textContent).join(",") === "HOME,측면 준비 자세", "direct mode selects among the projected usable start poses");
+        const gridDisclosure = document.querySelector("#cell-grid-disclosure");
+        check(!gridDisclosure.hidden && !gridDisclosure.open && document.querySelector("#direct-selection-count").textContent.includes("3개"), "direct mode shows a compact chosen-condition summary with the full grid closed");
+        gridDisclosure.open = true;
+        check(document.querySelectorAll("#cell-grid .cell").length === 6, "explicit disclosure reveals the full state-space grid");
+        check(document.querySelector("#direct-x-input").min === "-70" && document.querySelector("#direct-y-input").max === "35" && document.querySelector("#direct-yaw-input").min === "-180" && document.querySelector("#direct-yaw-input").max === "", "direct-pose bounds preserve the exclusive yaw ceiling");
         const preset = [...document.querySelectorAll("#cell-grid [data-cell-id]")].find((item) => !item.disabled && item.getAttribute("aria-pressed") === "false");
+        const presetPose = currentView.draft.cells.find((item) => item.cell_id === preset.dataset.cellId);
         preset.click();
-        await waitFor(() => document.querySelectorAll("#direct-pose-list [data-pose-index]").length === 3);
-        check(posted.some((item) => item.body.payload.add_pose && item.body.payload.add_pose.x_mm === 0 && item.body.payload.add_pose.y_mm === 50), "preset cell adds the same direct pose used by numeric input");
+        await waitFor(() => document.querySelectorAll("#direct-pose-list [data-pair-index]").length === 4);
+        check(posted.some((item) => item.body.payload.add_pair?.start_pose_id === "fr5-home-r001" && ["x_mm", "y_mm", "yaw_deg"].every((field) => item.body.payload.add_pair?.[field] === presetPose[field])), "preset cell adds its exact start-pose and position pair");
         document.querySelector(`#cell-grid [data-cell-id="${preset.dataset.cellId}"]`).click();
-        await waitFor(() => document.querySelectorAll("#direct-pose-list [data-pose-index]").length === 2);
-        check(posted.some((item) => item.body.payload.remove_pose && item.body.payload.remove_pose.x_mm === 0 && item.body.payload.remove_pose.y_mm === 50), "selected preset cell removes the exact direct pose");
+        await waitFor(() => document.querySelectorAll("#direct-pose-list [data-pair-index]").length === 3);
+        check(posted.some((item) => item.body.payload.remove_pair?.start_pose_id === "fr5-home-r001" && ["x_mm", "y_mm", "yaw_deg"].every((field) => item.body.payload.remove_pair?.[field] === presetPose[field])), "selected preset cell removes the exact pair");
+        document.querySelector("#direct-start-select").value = "fr5-ready-side-r001";
         document.querySelector("#direct-x-input").value = "12.5";
         document.querySelector("#direct-y-input").value = "-7.25";
-        document.querySelector("#direct-yaw-input").value = "483.5";
+        document.querySelector("#direct-yaw-input").value = "-162.5";
         document.querySelector("#direct-pose-form").requestSubmit();
-        await waitFor(() => document.querySelectorAll("#direct-pose-list [data-pose-index]").length === 3);
-        const addPost = posted.find((item) => item.body.payload.add_pose?.yaw_deg === 483.5);
-        check(addPost.body.payload.add_pose.yaw_deg === 483.5 && document.querySelector("#direct-pose-list").textContent.includes("123.5°"), "raw yaw reaches backend and returned normalization renders");
+        await waitFor(() => document.querySelectorAll("#direct-pose-list [data-pair-index]").length === 4);
+        const addPost = posted.find((item) => item.body.payload.add_pair?.yaw_deg === -162.5);
+        check(addPost.body.payload.add_pair.start_pose_id === "fr5-ready-side-r001" && addPost.body.payload.add_pair.yaw_deg === -162.5 && document.querySelector("#direct-pose-list").textContent.includes("측면 준비 자세 · X 12.5") && document.querySelector("#direct-pose-list").textContent.includes("-162.5°"), "direct pair preserves start pose and signed yaw");
+        const beforeYaw180 = posted.length;
+        document.querySelector("#direct-yaw-input").value = "180";
+        document.querySelector("#direct-pose-form").requestSubmit();
+        check(!document.querySelector("#direct-yaw-input").validity.valid && posted.length === beforeYaw180, "exclusive 180 degree ceiling blocks intent instead of silently wrapping to -180");
+        document.querySelector("#direct-yaw-input").value = "-162.5";
         const beforeInvalid = posted.length;
         document.querySelector("#direct-x-input").value = "70.001";
         document.querySelector("#direct-pose-form").requestSubmit();
         check(document.querySelector("#direct-x-input").validity.rangeOverflow && posted.length === beforeInvalid, "native validity blocks out-of-range pose without an intent");
-        document.querySelectorAll("#direct-pose-list [data-pose-index]")[2].click();
-        await waitFor(() => document.querySelectorAll("#direct-pose-list [data-pose-index]").length === 2);
-        check(posted.some((item) => item.body.payload.remove_pose?.yaw_deg === 123.5), "remove uses exact projected pose");
+        document.querySelectorAll("#direct-pose-list [data-pair-index]")[3].click();
+        await waitFor(() => document.querySelectorAll("#direct-pose-list [data-pair-index]").length === 3);
+        check(posted.some((item) => item.body.payload.remove_pair?.start_pose_id === "fr5-ready-side-r001" && item.body.payload.remove_pair?.yaw_deg === -162.5), "remove uses the exact projected pair");
         workspaceDomainAvailable = false;
         await loadView();
         check(document.querySelector("#direct-x-input").disabled && document.querySelector("#direct-domain-status").textContent.includes("사용할 수 없습니다"), "unavailable direct-pose domain disables input");
@@ -288,6 +431,7 @@
         await waitFor(() => currentView?.runtime.workflow_state === "REVIEW_CAMPAIGN");
         const authorize = document.querySelector('[data-op="authorize_campaign"]');
         check(authorize && document.querySelector("#review-summary").textContent.includes("3회"), "REVIEW_CAMPAIGN shows one authorization and readable count");
+        check(document.querySelector("#review-summary").textContent.includes("56%") && document.querySelector("#review-summary").textContent.includes("56–57%") && document.querySelector("#review-summary").textContent.includes("TEST_ONLY 조정 후보"), "review shows the object-scoped test-only gripper retune");
         check(!document.querySelector("#review-plan").hidden && document.querySelectorAll("#review-plan-list li").length === 3, "review shows the exact finite episode sequence");
         authorize.click();
         await waitFor(() => currentView?.runtime.workflow_state === "RUNNING");
@@ -304,8 +448,9 @@
 
         await show("results");
         check(document.querySelectorAll("#episode-results li").length === 3, "results preserve three completed episodes");
-        check(document.querySelector("#episode-results").textContent.includes("사후 검토를 수행하지 않음"), "NOT_MEASURED states that post-review was not performed");
-        check(document.querySelectorAll("[data-review-choice]").length === 3 && ["작업 성공", "작업 실패", "판정 보류"].every((label) => document.querySelector("#review-queue").textContent.includes(label)) && document.querySelector("#review-queue").textContent.includes("데이터 보존 상태와 학습 사용 승인"), "semantic review labels task outcome without changing retention or training authority");
+        check(document.querySelector("#episode-results").textContent.includes("분류 전"), "NOT_MEASURED is shown as unclassified data");
+        check(document.querySelector("#episode-results").textContent.includes("보존 · 재패킹 필요") && document.querySelector("#technical-content").textContent.includes("retention_states") && document.querySelector("#technical-content").textContent.includes("reclaim_states"), "results expose ledger retention and reclaim state without changing it");
+        check(document.querySelectorAll("[data-review-choice]").length === 3 && ["사용 후보", "제외", "보류"].every((label) => document.querySelector("#review-queue").textContent.includes(label)) && document.querySelector("#review-queue").textContent.includes("파일 보존과 학습 사용 승인"), "semantic review labels data use candidate state without changing retention or training authority");
         check(document.querySelectorAll("#coverage-summary progress").length === 3, "coverage renders without a chart dependency");
         check(!document.querySelector("#technical-details").open && document.querySelector("#technical-content").textContent.includes("manifest_digest"), "raw digests stay in collapsed technical details");
 
@@ -315,7 +460,15 @@
 
         await show("workspace_motion_required");
         check(!document.querySelector("#compile-campaign").hidden && document.querySelector("#compile-campaign").disabled, "non-executable draft keeps compile visible and disabled");
-        check(document.querySelector("#plan-lock-reason").textContent.includes("실물 동작 적격화"), "non-executable draft renders its projected reason");
+        check(document.querySelector("#plan-lock-reason").textContent.includes("이 좌표계에서 실제 로봇 동작을 먼저 확인해야 합니다"), "non-executable draft renders its projected reason");
+
+        await show("camera_blocked");
+        const cameraRecovery = document.querySelector('[data-recovery-op="recover_camera_setup"]');
+        check(cameraRecovery?.textContent === "카메라 다시 연결", "recoverable camera terminal offers one factual recovery action");
+        cameraRecovery.click();
+        await waitFor(() => currentView?.revision === 15 && currentView?.runtime.workflow_state === "PREPARING" && !intentBusy);
+        const cameraRecoveryPost = posted.find((item) => item.body.op === "recover_camera_setup");
+        check(Object.keys(cameraRecoveryPost.body.payload).length === 0 && !document.querySelector("#step-environment").hidden, "camera recovery posts an empty intent and returns to environment preparation");
 
         postResult = "stale";
         sessionIdOverride = "collection-operator-r002";
@@ -340,7 +493,7 @@
         throw error;
       }
     }
-    // REVIEW_CAMPAIGN / authorize_campaign / AUTHORING enters collection plan directly / non-executable draft keeps compile visible and disabled / semantic review labels task outcome / raw yaw reaches backend / unavailable direct-pose domain disables input / three serial episodes / same-process next campaign / workspace hidden when absent / three ordered workspace captures / digest-bound workspace save / workspace flow posts no motion intent
+    // REVIEW_CAMPAIGN / authorize_campaign / AUTHORING enters collection plan directly / non-executable draft keeps compile visible and disabled / direct pair preserves start pose and signed yaw / unavailable direct-pose domain disables input / three serial episodes / same-process next campaign / workspace hidden when absent / new independent name before captures / three ordered workspace captures / digest-bound workspace save / workspace flow posts no motion intent / camera recovery posts an empty intent
     run();
   </script>
 </body>

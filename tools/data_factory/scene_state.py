@@ -175,6 +175,9 @@ def validate_scene_binding(value: object) -> dict:
         frozenset(SCENE_BINDING_KEYS), frozenset(SCENE_BINDING_KEYS | {"release_slot"}),
         frozenset(SCENE_BINDING_KEYS | {"release_slot", "allowed_next_run_id"}),
         frozenset(SCENE_BINDING_KEYS | {"release_slot", "source_slot"}),
+        frozenset(SCENE_BINDING_KEYS | {
+            "release_slot", "allowed_next_run_id", "source_slot",
+        }),
     }:
         raise ContractError("SCENE_BINDING")
     if not isinstance(value["scene_state_digest"], str) or not DIGEST.fullmatch(value["scene_state_digest"]):
@@ -335,7 +338,13 @@ class SceneStateStore:
             slots = dict(current.get("slot_allocations", {}))
             prior_slot = slots.get(release_slot["slot_id"])
             if prior_slot is not None and prior_slot.get("state") != "AVAILABLE":
-                raise ContractError("SCENE_SLOT_UNAVAILABLE")
+                consumed_here_by_this_run = (
+                    prior_slot.get("state") == "CONSUMED_PENDING_REVIEW"
+                    and prior_slot.get("role") == "DESTINATION_THEN_NEXT_SOURCE"
+                    and prior_slot.get("allowed_run_id") == evidence["run_id"]
+                )
+                if not consumed_here_by_this_run:
+                    raise ContractError("SCENE_SLOT_UNAVAILABLE")
 
             now = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
             evidence_digest = canonical_digest(evidence)

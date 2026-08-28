@@ -146,16 +146,23 @@ class ReusableHarness(Harness):
 
     @staticmethod
     def _checkpoint_request(kind: str, run_id: str, plan_digest: str) -> dict:
-        evidence = {
-            "data_disposition": "TEST_ONLY",
-            "execution_evidence_digest": canonical_digest(["execution", run_id]),
-        }
-        if kind == "RELEASE_VERDICT":
-            evidence.update(
-                release_target={"place_id": "place-r1", "x_mm": 10, "y_mm": 0},
-                safe_staging_joint_positions_rad=[0.0] * 6,
-                landing_and_final_scene_combined=True,
-            )
+        if kind == "PHYSICAL_SCENE_CONFIRMATION":
+            evidence = {
+                "data_disposition": "TEST_ONLY",
+                "checklist": {"place_alias": "place1"},
+                "operator_summary": {"path": ["PREGRASP_PTP", "LIFT_LIN"]},
+                "planned_start_evidence_digest": canonical_digest(
+                    ["planned-start", run_id],
+                ),
+            }
+        else:
+            evidence = {
+                "data_disposition": "TEST_ONLY",
+                "execution_evidence_digest": canonical_digest(["execution", run_id]),
+                "release_target": {"place_id": "place-r1", "x_mm": 10, "y_mm": 0},
+                "safe_staging_joint_positions_rad": [0.0] * 6,
+                "landing_and_final_scene_combined": True,
+            }
         return {
             "schema_version": "data_factory.operator_checkpoint_request.v1",
             "kind": kind,
@@ -205,19 +212,7 @@ class ReusableHarness(Harness):
             },
             "timeout_s": 1.0,
         }
-        decision = decision_provider(copy.deepcopy(request))
-        self.plan_exchanges.append((request, copy.deepcopy(decision)))
-        if decision is None or decision["choice"] != "APPROVE":
-            raise ContractError("TEST_PLAN_NOT_APPROVED")
-
-        self.episode_entered.set()
-        if self.block_until_cancel:
-            if not cancel_event.wait(1.0):
-                raise ContractError("TEST_CANCEL_TIMEOUT")
-            lifecycle.state = "CANCELLED"
-            raise ContractError("TEST_CANCELLED")
-
-        for kind in ("PHYSICAL_SCENE_CONFIRMATION", "RELEASE_VERDICT"):
+        for kind in ("PHYSICAL_SCENE_CONFIRMATION",):
             checkpoint_request = self._checkpoint_request(
                 kind,
                 "forged-run" if self.wrong_checkpoint_scope else intent["run_id"],
@@ -230,6 +225,28 @@ class ReusableHarness(Harness):
             expected = "READY" if kind == "PHYSICAL_SCENE_CONFIRMATION" else "LANDED"
             if checkpoint is None or checkpoint["choice"] != expected:
                 raise ContractError("TEST_CHECKPOINT_NOT_APPROVED")
+
+        decision = decision_provider(copy.deepcopy(request))
+        self.plan_exchanges.append((request, copy.deepcopy(decision)))
+        if decision is None or decision["choice"] != "APPROVE":
+            raise ContractError("TEST_PLAN_NOT_APPROVED")
+
+        self.episode_entered.set()
+        if self.block_until_cancel:
+            if not cancel_event.wait(1.0):
+                raise ContractError("TEST_CANCEL_TIMEOUT")
+            lifecycle.state = "CANCELLED"
+            raise ContractError("TEST_CANCELLED")
+
+        checkpoint_request = self._checkpoint_request(
+            "RELEASE_VERDICT",
+            "forged-run" if self.wrong_checkpoint_scope else intent["run_id"],
+            plan_digest,
+        )
+        checkpoint = checkpoint_provider(copy.deepcopy(checkpoint_request))
+        self.checkpoint_exchanges.append((checkpoint_request, copy.deepcopy(checkpoint)))
+        if checkpoint is None or checkpoint["choice"] != "LANDED":
+            raise ContractError("TEST_CHECKPOINT_NOT_APPROVED")
 
         lifecycle.state = "COMPLETE"
         post_scene_digest = canonical_digest(["post-scene", intent["run_id"]])
@@ -320,7 +337,8 @@ class ReusableOperatorConsoleTests(unittest.TestCase):
         self.assertEqual(draft["manifest_budget"]["max_storage_bytes"], 3 * 2_147_483_648)
         self.assertEqual(draft["program_budget"]["max_total_physical_episodes"], 3)
         self.assertEqual(draft["program_budget"]["max_total_storage_bytes"], 3 * 2_147_483_648)
-        self.assertEqual(draft["manifest_budget"]["max_pending_reviews"], 1)
+        self.assertEqual(draft["manifest_budget"]["max_pending_reviews"], 3)
+        self.assertEqual(draft["program_budget"]["max_pending_reviews"], 3)
 
         for invalid in (True, 0, 101):
             with self.subTest(invalid=invalid), self.assertRaisesRegex(
@@ -343,6 +361,7 @@ class ReusableOperatorConsoleTests(unittest.TestCase):
             self.assertEqual((terminal["outcome"], terminal["code"]), ("PASS", "TECHNICAL_PASS"))
             self.assertEqual(view["campaign_session"]["campaign"]["state"], "COMPLETE")
             self.assertEqual(view["campaign_session"]["campaign"]["completed_intents"], 3)
+            self.assertEqual(set(view["campaign_operator"]), {"campaign"})
             self.assertEqual(len(view["episode_history"]), 3)
             self.assertEqual(len(harness.children), 3)
             self.assertEqual(len({id(child) for child in harness.children}), 3)

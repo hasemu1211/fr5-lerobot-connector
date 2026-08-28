@@ -39,6 +39,10 @@ def main() -> None:
     parser.add_argument("--repo-id", default="local/fr5_smolvla")
     parser.add_argument("--expected-fps", type=int)
     parser.add_argument("--require-hil-motion", action="store_true")
+    parser.add_argument(
+        "--require-alignment-tail", action="store_true",
+        help="require each episode to durably reach its recorder freeze watermark",
+    )
     parser.add_argument("--min-arm-range", type=float, default=0.01)
     parser.add_argument("--min-gripper-range", type=float, default=0.001)
     args = parser.parse_args()
@@ -205,6 +209,21 @@ def main() -> None:
                 failures.append(f"quality line {line_number} dropped writer rows")
             if quality.get("alignment_failures", 0):
                 failures.append(f"quality line {line_number} has failed target-time alignments")
+            if args.require_alignment_tail:
+                tail_target = quality.get("alignment_tail_target_ros_s")
+                tail_last = quality.get("alignment_tail_last_row_ros_s")
+                if (
+                    quality.get("alignment_tail_drained") is not True
+                    or isinstance(tail_target, bool)
+                    or not isinstance(tail_target, (int, float))
+                    or isinstance(tail_last, bool)
+                    or not isinstance(tail_last, (int, float))
+                    or not np.isfinite([tail_target, tail_last]).all()
+                    or tail_last < tail_target - 1.0 / fps
+                ):
+                    failures.append(
+                        f"quality line {line_number} did not durably drain the alignment tail"
+                    )
             failure_sources = quality.get("alignment_failure_sources")
             expected_sources = {"state", "arm_action", "gripper_action", "transport"} | {
                 f"image.{key.removeprefix('observation.images.')}" for key in camera_keys

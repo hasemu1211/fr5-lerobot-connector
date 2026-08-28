@@ -128,6 +128,10 @@ RUNTIME_AUTHORITY = {
     "execution": "NONE", "human_approval": "NONE", "semantic_pass": "NONE",
     "training_approval": "NONE", "persistent_start_qualification": "NONE",
 }
+RUNTIME_SCHEMAS = {
+    "TEST_ONLY": "data_factory.test_only_episode_binding.v1",
+    "PRODUCTION": "data_factory.production_episode_binding.v1",
+}
 
 
 def _exact(value: object, fields: frozenset[str], code: str) -> dict[str, Any]:
@@ -413,8 +417,10 @@ def _runtime_binding(
     runtime = _exact(
         value, RUNTIME_BINDING_FIELDS, "EPISODE_LEDGER_RUNTIME_BINDING_FIELDS",
     )
+    disposition = runtime["data_disposition"]
     if (
-        runtime["schema_version"] != "data_factory.test_only_episode_binding.v1"
+        disposition not in RUNTIME_SCHEMAS
+        or runtime["schema_version"] != RUNTIME_SCHEMAS[disposition]
         or runtime["run_id"] != run_id
         or runtime["resolved_job_digest"] != resolved_job_digest
         or runtime["manifest_digest"] != manifest_digest
@@ -424,7 +430,6 @@ def _runtime_binding(
         or runtime["scene_state_digest"] != required_scene_digest
         or runtime["split_group"] != slot.get("split_group")
         or runtime["repeat_index"] != slot.get("repeat_index")
-        or runtime["data_disposition"] != "TEST_ONLY"
         or runtime["authority"] != RUNTIME_AUTHORITY
         or runtime["binding_digest"] != canonical_digest({
             key: item for key, item in runtime.items() if key != "binding_digest"
@@ -440,7 +445,14 @@ def _runtime_binding(
     ):
         _digest(runtime[field], "EPISODE_LEDGER_RUNTIME_BINDING")
     sources = (runtime["state_initialization_digest"], runtime["scene_observation_digest"])
-    if sum(item is not None for item in sources) != 1:
+    if (
+        (disposition == "TEST_ONLY" and sum(item is not None for item in sources) != 1)
+        or (
+            disposition == "PRODUCTION"
+            and (runtime["state_initialization_digest"] is not None
+                 or runtime["scene_observation_digest"] is None)
+        )
+    ):
         raise ContractError("EPISODE_LEDGER_RUNTIME_SCENE_SOURCE")
     _digest(next(item for item in sources if item is not None), "EPISODE_LEDGER_RUNTIME_BINDING")
     if (

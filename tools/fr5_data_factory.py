@@ -197,10 +197,16 @@ def normalize_job_spec(job: object, *, now: datetime | None = None) -> dict:
     for key in ("yaw_deg", "x_mm", "y_mm"):
         number = _number(result[key], "JOB_NUMBER")
         if key == "yaw_deg":
-            number %= 360.0
+            number = normalize_yaw_deg(number)
         result[key] = int(number) if number.is_integer() else number
     result["approval_expiry"] = _timestamp(result["approval_expiry"], "JOB_EXPIRY", future=True, now=now)
     return result
+
+
+def normalize_yaw_deg(value: object) -> float:
+    """Return one signed representative for a circular yaw angle."""
+    normalized = (_number(value, "SHEET_YAW") + 180.0) % 360.0 - 180.0
+    return 0.0 if normalized == 0.0 else normalized
 
 
 def validate_home_candidate(candidate: object, *, urdf: str | Path, expected_robot_system_id: str) -> dict:

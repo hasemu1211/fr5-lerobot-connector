@@ -19,7 +19,9 @@ class ResourceMonitor:
         self.run_id = run_id
         self.collection_profile_digest = collection_profile_digest
         self.roles_to_pid_callable = roles_to_pid_callable or (lambda: self._pids.copy())
-        self._pids, self._samples, self._round_trips, self._errors = {"runner": os.getpid()}, [], [], []
+        self._pids = {"runner": os.getpid()}
+        self._samples, self._round_trips, self._finalization_round_trips = [], [], []
+        self._errors = []
         if not .5 <= interval_s <= 1.0:
             raise ValueError("interval_s must be between 0.5 and 1.0")
         self._clock, self._sleep, self.interval_s = clock, sleep, interval_s
@@ -60,6 +62,9 @@ class ResourceMonitor:
 
     def record_control_round_trip(self, seconds):
         self._round_trips.append(float(seconds))
+
+    def record_finalization_round_trip(self, seconds):
+        self._finalization_round_trips.append(float(seconds))
 
     def _text(self, path):
         return self._readers["read_text"](path)
@@ -255,6 +260,7 @@ class ResourceMonitor:
                            "swap_io_read_delta_bytes": final.get("swap_io_read_bytes", 0) - initial.get("swap_io_read_bytes", 0),
                            "swap_io_write_delta_bytes": final.get("swap_io_write_bytes", 0) - initial.get("swap_io_write_bytes", 0)},
                 "control_round_trip_seconds": {"count": len(self._round_trips), "p95": self._p95(self._round_trips), "max": max(self._round_trips, default=None)},
+                "finalization_round_trip_seconds": {"count": len(self._finalization_round_trips), "p95": self._p95(self._finalization_round_trips), "max": max(self._finalization_round_trips, default=None)},
                 "recorder": {"queue_high_water": recorder_metrics.get("writer_queue_high_water", recorder_metrics.get("writer_queue")),
                              "queue_drops": recorder_metrics.get("writer_queue_drops"), "alignment_failures": recorder_metrics.get("alignment_failures")},
                 "oom_observation": "NOT_AVAILABLE", "portability_status": "QUALIFICATION_REQUIRED"}

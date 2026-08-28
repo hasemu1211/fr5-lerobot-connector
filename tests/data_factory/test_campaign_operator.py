@@ -4,6 +4,7 @@ import tempfile
 import threading
 import unittest
 from datetime import datetime, timedelta, timezone
+from unittest import mock
 
 try:
     from .test_campaign_authoring import draft
@@ -20,7 +21,10 @@ from tools.data_factory.campaign_operator import (
 )
 from tools.data_factory.experiment_manifest import SLOT_INPUT_FIELDS
 from tools.data_factory.operator_bridge import INTENT_SCHEMA
-from tools.data_factory.operator_setup import build_test_only_root_binding
+from tools.data_factory.operator_setup import (
+    build_production_root_binding,
+    build_test_only_root_binding,
+)
 from tools.fr5_data_factory import ContractError, canonical_digest
 
 
@@ -153,7 +157,7 @@ def make_operator(
     directory: str, *, effect_scope: str = "FAKE",
     lifecycle_action: str = "LIVE_COLLECT", count: int = 1,
     technical_status: str = "PASS", current_usage=None, clock=None,
-    operator_label: str = "TEST_OPERATOR",
+    operator_label: str = "TEST_OPERATOR", data_disposition: str = "TEST_ONLY",
 ) -> tuple[CampaignOperator, PureFakePorts]:
     contract = hypothesis()
     ports = PureFakePorts(technical_status=technical_status)
@@ -169,7 +173,7 @@ def make_operator(
         draft=draft(contract, count=count),
         effect_scope=effect_scope,
         lifecycle_action=lifecycle_action,
-        data_disposition="TEST_ONLY",
+        data_disposition=data_disposition,
         subsystems={
             "workspace": {"readiness": "READY", "capability": "AUTHOR", "reason": "SYNTHETIC"},
             "planner": {"readiness": "READY", "capability": "PLAN", "reason": "SYNTHETIC"},
@@ -194,6 +198,150 @@ def make_operator(
 
 
 class CampaignOperatorTests(unittest.TestCase):
+    def test_production_live_uses_the_same_serial_session_and_one_job_dag(self):
+        with tempfile.TemporaryDirectory() as directory:
+            model, ports = make_operator(
+                directory, effect_scope="PHYSICAL", lifecycle_action="LIVE_COLLECT",
+                count=2, data_disposition="PRODUCTION",
+            )
+            model.physical_activation_gate = ports.activate
+            children, contexts = [], []
+
+            def physical_factory():
+                ports.counters["physical_factory"] += 1
+                child = FakeLifecycle(ports.counters)
+                children.append(child)
+                return child
+
+            model.physical_lifecycle_factory = physical_factory
+
+            def seal(value: dict) -> dict:
+                return {**value, "binding_digest": canonical_digest(value)}
+
+            model.physical_root_binding_call = lambda run_id: seal({
+                "session_id": model.session_id, "run_id": run_id,
+                "data_disposition": "PRODUCTION",
+            })
+            model.physical_start_binding_call = lambda _run_id, slot: seal({
+                "data_disposition": "PRODUCTION", "slot_id": slot["slot_id"],
+            })
+
+            def production_live(intent, lifecycle, _cancel, context):
+                contexts.append(context)
+                lifecycle.state = "COMPLETE"
+                technical = ports._technical(intent)
+                return {
+                    "result": {"path": "SYNTHETIC_PRODUCTION", "technical_evidence": technical},
+                    "technical_evidence": technical,
+                }
+
+            model.physical_live_call = production_live
+
+            def checked(value, **_kwargs):
+                return dict(value)
+
+            with (
+                mock.patch(
+                    "tools.data_factory.campaign_operator.validate_runtime_root_binding",
+                    side_effect=checked,
+                ),
+                mock.patch(
+                    "tools.data_factory.campaign_operator.validate_runtime_start_binding",
+                    side_effect=checked,
+                ),
+                mock.patch(
+                    "tools.data_factory.campaign_session.validate_runtime_root_binding",
+                    side_effect=checked,
+                ),
+                mock.patch(
+                    "tools.data_factory.campaign_session.validate_runtime_start_binding",
+                    side_effect=checked,
+                ),
+            ):
+                send(model, "compile_draft", {}, "compile-production-r001")
+                first = send(
+                    model, "run_next", {"run_id": "production-run-0"},
+                    "run-production-r001",
+                )["result"]
+                second = send(
+                    model, "run_next", {"run_id": "production-run-1"},
+                    "run-production-r002",
+                )["result"]
+
+            self.assertEqual(first["campaign"]["state"], "READY")
+            self.assertEqual(second["campaign"]["state"], "COMPLETE")
+            self.assertEqual((ports.activation_calls, ports.counters["physical_factory"]), (1, 2))
+            self.assertEqual(len({id(child) for child in children}), 2)
+            self.assertEqual(
+                [context["data_disposition"] for context in contexts],
+                ["PRODUCTION", "PRODUCTION"],
+            )
+            self.assertEqual(
+                [context["root_binding"]["run_id"] for context in contexts],
+                ["production-run-0", "production-run-1"],
+            )
+            self.assertTrue(all(ports.counters[name] == 0 for name in FAKE_RECORDER_COUNTERS))
+            self.assertTrue(all(
+                ports.counters[name] == 0
+                for name in ("robot", "gripper", "camera", "production_recorder", "dataset", "run_state")
+            ))
+
+    def test_production_rejects_cross_disposition_bindings_before_child_effects(self):
+        with tempfile.TemporaryDirectory() as directory:
+            model, ports = make_operator(
+                directory, effect_scope="PHYSICAL", lifecycle_action="LIVE_COLLECT",
+                data_disposition="PRODUCTION",
+            )
+            model.physical_activation_gate = ports.activate
+            model.physical_start_binding_call = lambda _run_id, _slot: {
+                "data_disposition": "PRODUCTION",
+            }
+            model.physical_root_binding_call = lambda run_id: build_test_only_root_binding(
+                directory, session_id=model.session_id, run_id=run_id,
+            )
+            send(model, "compile_draft", {}, "compile-cross-root-r001")
+            with self.assertRaisesRegex(ContractError, "CAMPAIGN_OPERATOR_PHYSICAL_ROOT_BINDING"):
+                send(
+                    model, "run_next", {"run_id": "production-run-root"},
+                    "run-cross-root-r001",
+                )
+            self.assertEqual((ports.activation_calls, ports.counters["physical_factory"]), (0, 0))
+            self.assertEqual(sum(ports.counters.values()), 0)
+
+            model, ports = make_operator(
+                directory, effect_scope="PHYSICAL", lifecycle_action="LIVE_COLLECT",
+                data_disposition="PRODUCTION",
+            )
+            model.physical_activation_gate = ports.activate
+            model.physical_root_binding_call = lambda run_id: build_production_root_binding(
+                directory, session_id=model.session_id, run_id=run_id,
+                dataset_root=f"{directory}/datasets/fr5_episodes/production-dataset",
+            )
+            model.physical_start_binding_call = lambda _run_id, _slot: {
+                "data_disposition": "TEST_ONLY", "binding_digest": canonical_digest("start"),
+            }
+            send(model, "compile_draft", {}, "compile-cross-start-r001")
+            with mock.patch(
+                "tools.data_factory.campaign_operator.validate_runtime_start_binding",
+                side_effect=lambda value, **_kwargs: dict(value),
+            ):
+                with self.assertRaisesRegex(ContractError, "CAMPAIGN_OPERATOR_PHYSICAL_START_BINDING"):
+                    send(
+                        model, "run_next", {"run_id": "production-run-start"},
+                        "run-cross-start-r001",
+                    )
+            self.assertEqual((ports.activation_calls, ports.counters["physical_factory"]), (1, 0))
+            self.assertTrue(all(ports.counters[name] == 0 for name in FAKE_RECORDER_COUNTERS))
+            self.assertTrue(all(
+                ports.counters[name] == 0
+                for name in ("robot", "gripper", "camera", "production_recorder", "dataset", "run_state")
+            ))
+
+    def test_fake_scope_rejects_production_disposition(self):
+        with tempfile.TemporaryDirectory() as directory:
+            with self.assertRaisesRegex(ContractError, "CAMPAIGN_OPERATOR_DISPOSITION"):
+                make_operator(directory, data_disposition="PRODUCTION")
+
     def test_operator_label_is_caller_provided_without_human_authority(self):
         with tempfile.TemporaryDirectory() as directory:
             model, _ = make_operator(
@@ -213,25 +361,30 @@ class CampaignOperatorTests(unittest.TestCase):
             ("root-port", "LIVE_COLLECT", "physical_root_binding_call", lambda _run_id: {}),
         )
         with tempfile.TemporaryDirectory() as directory:
-            for name, action, field, invalid in cases:
-                with self.subTest(port=name):
-                    model, ports = make_operator(
-                        directory, effect_scope="PHYSICAL", lifecycle_action=action,
-                    )
-                    model.physical_activation_gate = ports.activate
-                    model.physical_start_binding_call = lambda _run_id, _slot: {}
-                    setattr(model, field, invalid)
-                    send(model, "compile_draft", {}, f"compile-invalid-{name}")
+            for disposition in ("TEST_ONLY", "PRODUCTION"):
+                for name, action, field, invalid in cases:
+                    with self.subTest(disposition=disposition, port=name):
+                        model, ports = make_operator(
+                            directory, effect_scope="PHYSICAL", lifecycle_action=action,
+                            data_disposition=disposition,
+                        )
+                        model.physical_activation_gate = ports.activate
+                        model.physical_start_binding_call = lambda _run_id, _slot: {}
+                        setattr(model, field, invalid)
+                        send(
+                            model, "compile_draft", {},
+                            f"compile-invalid-{disposition.lower()}-{name}",
+                        )
 
-                    for attempt in range(2):
-                        with self.assertRaises(ContractError):
-                            send(
-                                model, "run_next", {"run_id": f"SYNTHETIC-run-{attempt}"},
-                                f"run-invalid-{name}-{attempt}",
-                            )
-                        self.assertEqual(ports.activation_calls, 0)
-                        self.assertEqual(ports.fake_factory_calls, 0)
-                        self.assertEqual(sum(ports.counters.values()), 0)
+                        for attempt in range(2):
+                            with self.assertRaises(ContractError):
+                                send(
+                                    model, "run_next", {"run_id": f"SYNTHETIC-run-{attempt}"},
+                                    f"run-invalid-{disposition.lower()}-{name}-{attempt}",
+                                )
+                            self.assertEqual(ports.activation_calls, 0)
+                            self.assertEqual(ports.fake_factory_calls, 0)
+                            self.assertEqual(sum(ports.counters.values()), 0)
 
     def test_physical_campaign_gates_run_before_activation(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -319,7 +472,7 @@ class CampaignOperatorTests(unittest.TestCase):
                             )
                         )
                     send(model, "compile_draft", {}, f"compile-start-{action}")
-                    with self.assertRaisesRegex(ContractError, "TEST_ONLY_START_FIELDS"):
+                    with self.assertRaisesRegex(ContractError, "RUNTIME_START_DISPOSITION"):
                         send(
                             model, "run_next", {"run_id": "SYNTHETIC-run-start"},
                             f"run-start-{action}",

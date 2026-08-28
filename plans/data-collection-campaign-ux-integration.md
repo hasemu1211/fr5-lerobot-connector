@@ -165,7 +165,7 @@ Goal 1과 Goal 2는 모두 `TEST_ONLY`로 고정한다. `PRODUCTION_CANDIDATE`�
 
 초기 seed 자동 설계는 learned policy가 아니라 deterministic finite compiler다.
 
-1. validated catalog와 등록 작업영역의 bounded continuous X/Y 및 normalized yaw `[0,360)`에서 정확히 요청한 수의 finite candidate를 만든다. checked-in grid/cell은 빠른 선택과 evidence anchor이지 좌표 gate가 아니다. exact job 파일이 있는 좌표만 catalog에 넣는 방식은 금지하며 JobSpec은 선택 slot마다 template에서 canonical하게 생성한다.
+1. validated catalog와 등록 작업영역의 bounded continuous X/Y 및 signed normalized yaw `[-180,180)`에서 정확히 요청한 수의 finite candidate를 만든다. checked-in grid/cell은 빠른 선택과 evidence anchor이지 좌표 gate가 아니다. exact job 파일이 있는 좌표만 catalog에 넣는 방식은 금지하며 JobSpec은 선택 slot마다 template에서 canonical하게 생성한다. 동치인 180도 초과 표기는 만들지 않으며 실제 관절 궤적은 기존 plan 검증으로 확인한다.
 2. qualification, bounds, split integrity, slot, quota, expiry와 pending-review ceiling을 hard filter로 적용한다.
 3. 첫 source anchor를 고정하고 나머지 condition은 bounded domain에 결정적으로 펼친다.
 4. `repeat` 상한에 맞춰 고유 condition 수를 정한 뒤 전체 condition 목록을 round-robin으로 반복한다.
@@ -174,6 +174,8 @@ Goal 1과 Goal 2는 모두 `TEST_ONLY`로 고정한다. `PRODUCTION_CANDIDATE`�
 7. immutable subset-capable collection manifest와 mandatory compilation receipt를 함께 만든다.
 
 PHYSICAL campaign은 fresh observed object pose와 같은 slot을 sequence anchor로 포함하고 첫 순서에 둔다. 나머지 `N-1`개는 위 coverage rule로 선택하며, episode마다 녹화 뒤 next selected slot으로 reset/recycle해 다음 source를 만든다. 이 continuity ordering은 coverage cell의 유효성이나 count를 조작하지 않고 compilation receipt에 별도 이유로 남긴다.
+
+각 episode의 lifecycle result는 실제 release job에서 얻은 full `(place_id,yaw_deg,x_mm,y_mm)`를 `terminal_object_pose`로 명시한다. 다음 캠페인의 current pose는 terminal campaign에서 이 값을 소비하며, 마지막 planned coverage cell로 실물 위치를 추정하거나 frontend가 재구성하지 않는다.
 
 첫 구현의 기본 selector는 `BALANCED_INITIAL` 하나다. 첫 source anchor를 slot 0으로 보존하고 나머지는 선택한 continuous domain에 결정적으로 펼친다. `repeat=1`의 condition은 unique하고, repeat를 늘리면 선언한 상한 안에서만 같은 condition을 재사용한다. 결과는 항상 exact N·byte-stable이며 모든 점을 동일 validator로 다시 검사한다. 유효한 prior coverage가 있는 후속 selector만 condition/start/repeat deficit을 우선할 수 있고, evidence가 없는데 최적 수집이라고 주장하지 않는다.
 
@@ -326,7 +328,7 @@ checked-in hardware interface activation은 servo mode를 restart하고 current-
 
 ### 6.4 Goal 2 사전 허용 실물 범위와 측정 계약
 
-사용자의 사전 허용은 **새 좌표계 등록 없이**, operator alias `place1`이 exact checked-in `PLACE_A@place-a-yaw0-r002`와 일치하는 등록 작업영역 전체에 적용한다. 이 calibration이 선언한 bounded continuous X/Y와 모든 finite normalized yaw `[0,360)`는 새 좌표계나 좌표별 재승인 없이 상태공간 조합 대상이다. checked-in yaw/grid manifests는 빠른 preset과 provenance anchor이며 실행 좌표 gate가 아니다. 각 compile 결과는 여전히 exact finite slots이고 family/bounds 밖 값은 만들지 않는다.
+사용자의 사전 허용은 **새 좌표계 등록 없이**, operator alias `place1`이 exact checked-in `PLACE_A@place-a-yaw0-r002`와 일치하는 등록 작업영역 전체에 적용한다. 이 calibration이 선언한 bounded continuous X/Y와 모든 finite signed normalized yaw `[-180,180)`는 새 좌표계나 좌표별 재승인 없이 상태공간 조합 대상이다. checked-in yaw/grid manifests는 빠른 preset과 provenance anchor이며 실행 좌표 gate가 아니다. 각 compile 결과는 여전히 exact finite slots이고 family/bounds 밖 값은 만들지 않는다.
 
 현재 cube가 yaw 0°/local `(0,0)`에 있다는 사용자 설명은 **첫 source scene declaration**이지 campaign domain 제한이 아니다. compiler는 첫 slot을 이 observed source에 맞추고, 이후 선택한 slot은 recorder freeze 뒤 reset/recycle 구간의 full `(place_id,yaw_deg,x_mm,y_mm)` release target으로 chain한다. 따라서 episode `k+1`은 episode `k`가 만든 exact durable next-source scene에서 시작하며 사람이 매번 cube를 옮기는 정상 병목을 만들지 않는다.
 
@@ -357,20 +359,20 @@ Goal 2에서는 사용자 의도대로 기본 ON이다. 그 값은 campaign auth
 
 current v2는 기본 precontact/grasp hold 없이 close와 lift terminal에서 범위를 기술적으로 검증한다. post-lift `SEMANTIC_VERDICT` hold에서 proxy가 같은 범위를 사용해 계속 여부를 결정한다.
 
-UI/report는 그 결과를 `MECHANICAL_GRASP_PROXY_PASS|FAIL`, source `HIL_PROXY`로 표시하고 human semantic truth는 `NOT_MEASURED`로 남긴다. production HUMAN/semantic/candidate/training artifact는 0이다. qualified numeric feedback, exact terminal phase와 post-reset snapshot이 기대 범위이면 `CAMPAIGN_CONTROL_PROXY`가 다음 episode 진행 여부를 결정한다. 정상 episode마다 `PASS`, `LANDED` 또는 `SCENE_READY` 입력을 요구하지 않는다. 사용자는 항상 보이는 negative stop으로 잘못 잡힘·놓임·장애물 진입 같은 예외만 보고한다. proxy가 불충분하거나 결과가 모호하면 자동 PASS를 만들지 않고 현재 campaign을 fail-close한다.
+UI/report는 그 결과를 `MECHANICAL_GRASP_PROXY_PASS|FAIL`, source `HIL_PROXY`로 표시하고 human semantic truth는 `NOT_MEASURED`로 남긴다. authenticated `HUMAN`, production candidate와 training approval artifact는 0이다. technical PASS 뒤에는 isolated TEST_ONLY run root에만 `operational_source=HIL_PROXY`인 pending candidate를 만들 수 있으며, 이는 캠페인 종료 후 로컬 `사용 후보|제외|보류` 검토와 ledger projection을 위한 것이지 production/training authority가 아니다. qualified numeric feedback, exact terminal phase와 post-reset snapshot이 기대 범위이면 `CAMPAIGN_CONTROL_PROXY`가 다음 episode 진행 여부를 결정한다. 정상 episode마다 `PASS`, `LANDED` 또는 `SCENE_READY` 입력을 요구하지 않는다. 사용자는 항상 보이는 negative stop으로 잘못 잡힘·놓임·장애물 진입 같은 예외만 보고한다. proxy가 불충분하거나 결과가 모호하면 자동 PASS를 만들지 않고 현재 campaign을 fail-close한다.
 
 | 조건 | source/측정법 | 자동 판정 가능 범위 | 증명하는 것 | 증명하지 못하는 것 | 미충족 처리 |
 |---|---|---|---|---|---|
 | `place1 → PLACE_A` | checked-in ID/calibration/sheet/scene digest + exact-plan 화면의 operator alias checklist | exact digest 일치는 자동, alias 의미는 사람 한 번 | 선택한 기존 frame/config identity | cube 실물 위치 | 미확인은 `PAUSED + NOT_MEASURED`; 불일치는 `BLOCKED + FAIL`; 새 frame 0 |
 | initial cube yaw 0°, `(0,0)` | 최초 operator scene declaration + fresh scene/cell binding | 최초 source만 자동 chain의 seed로 사용 | campaign 시작 시 어떤 scene claim으로 계획했는지 | campaign domain 한계, external metrology 정확도, 물체 정체 | 최초 mismatch는 blocked; 이후 source는 직전 durable robot release evidence로 검증 |
 | controller/current start/HOME | qualified motion digest/safe vector, ≤0.1 s joint/controller readback, HOME-start delta ≤0.01 rad, plan/readback | 자동 | 이 exact program의 current-start/safe-return binding | 미지 영역의 안전성, standalone home candidate 실행 자격 | 실측 위반은 `BLOCKED + FAIL`; source 부재는 `BLOCKED + NOT_AVAILABLE` |
-| plan-only | collision/constraint/endpoint, phase-chain, source=recycle=`(0,0)`, plan digest, no-motion snapshot | 자동 technical PASS/FAIL | exact model/scene의 계획 일관성과 side-effect 0 | 실물 collision이 없음, 실행 성공 | 어떤 technical failure도 later goal 0 |
+| plan-only | collision/constraint/endpoint, phase-chain, source→next selected source(terminal은 current slot), plan digest, no-motion snapshot | 자동 technical PASS/FAIL | exact model/scene의 계획 일관성과 side-effect 0 | 실물 collision이 없음, 실행 성공 | 어떤 technical failure도 later goal 0 |
 | campaign authorization·cell clear·fresh plan containment | UI의 finite campaign 요약과 digest-bound 한 번 button, episode별 fresh recheck | 위 exact scope/slot/envelope 안의 fresh plan만 자동 소비; coordinator campaign button 1 | 표시된 finite 범위에 대한 local operator intent와 plan containment | 인증된 정체, 범위 밖 미래 plan, scene/cell/semantic truth | cell-clear 부재·위임 무효는 `PAUSED + NOT_MEASURED`; stale plan은 같은 envelope에서 replan; scope mismatch는 campaign block |
 | arm/gripper execution | action terminal status, phase event, timestamps, endpoint readback | 자동 technical PASS/FAIL | dispatched action의 terminal/endpoint 결과 | cube semantic success | failure/stale/heartbeat loss는 cancel·block |
-| grasp mechanical signal | reference `0.01134 m`, close/post-lift feedback `[0.01134,0.01218] m`, existing requirement digest | toggle ON에서 `MECHANICAL_GRASP_PROXY_PASS|FAIL` | gripper signal이 checked-in grasp requirement과 일치함 | cube를 실제로 잡아 유지했는지; empty-close 분리 | 범위 밖은 `BLOCKED + FAIL`; 범위 내는 mechanical proxy만 PASS |
+| grasp mechanical signal | 전역 qualified base는 reference `0.01134 m`/feedback `[0.01134,0.01218] m`; 현재 cube TEST_ONLY retune은 object+grasp/base digest에 묶인 reference `0.01176 m`/feedback `[0.01176,0.01197] m` | toggle ON에서 exact effective requirement로 `MECHANICAL_GRASP_PROXY_PASS|FAIL` | 이 TEST_ONLY 실행의 gripper signal이 표시된 조정 후보와 일치함 | cube를 실제로 잡아 유지했는지, production qualification, 다른 물체의 파지값 | 범위 밖은 `BLOCKED + FAIL`; 범위 내는 mechanical proxy만 PASS; 성공 뒤에만 새 grasp revision 검토 |
 | semantic grasp / next-source release | qualified numeric gripper, terminal phase, exact next-slot scene transition, post-reset snapshot과 operator negative stop | expected control evidence만 `CAMPAIGN_CONTROL_PROXY`; human semantic은 `NOT_MEASURED`; AI semantic PASS/LANDED 0 | expected control flow와 다음 slot의 machine-generated source lineage | production data validity, 직접 관측 semantic truth, training value | mismatch·negative stop·ambiguity는 current/next intent fail-close |
 | camera passive transport | stable device ID, negotiated/observed resolution/FPS/drop/timestamp | 수치 보고와 transport error만 자동 | 해당 device-local stream behavior | framing, object visibility, lighting, role, final 30 Hz validity | unplaced/약 15 fps는 기술; qualitative·dual sync는 `NOT_AVAILABLE` |
-| live TEST_ONLY camera/recorder preflight | 승인 전 existing 5 s topic warmup + 승인·recorder begin 뒤 bounded readiness window | 자동 technical PASS/FAIL | 해당 test transaction의 실제 aligner/writer/source가 dispatch 전 30 Hz 품질 bound를 만족함 | production 30 Hz/profile/semantic validity | readiness 미달은 same transaction abort, executor 0, `BLOCKED + FAIL` |
+| live TEST_ONLY camera/recorder preflight | 캠페인의 exact device/profile binding에서 최초 1회 5 s topic warmup, 이후 episode는 provenance가 분리된 reuse receipt + 매 episode recorder begin 뒤 bounded readiness window | 자동 technical PASS/FAIL | 최초 transport 확인과 해당 test transaction의 실제 aligner/writer/source가 dispatch 전 30 Hz 품질 bound를 만족함 | production 30 Hz/profile/semantic validity | binding/profile 변경 또는 live 실패 시 reuse 무효화; readiness 미달은 same transaction abort, executor 0, `BLOCKED + FAIL` |
 | TEST_ONLY recorder/dataset | isolated root, begin/row/freeze/commit/validator, row count/rate/timestamp/digest/bytes | 자동 technical PASS/FAIL | test namespace의 transaction과 schema 무결성 | production 후보, semantic/data/training validity | transaction failure는 test FAIL·quarantine; production writer 0 |
 | data quality/generalization/training | 현재 qualified camera/policy/evaluation evidence 없음 | 자동 PASS 0 | `NOT_AVAILABLE`임을 명시 | 모델 성능과 생산 적합성 전부 | Goal 2 성공 조건으로 삼지 않음 |
 
@@ -380,7 +382,7 @@ Goal 2의 physical session은 `data_disposition=TEST_ONLY`를 sealed하고 다�
 - `outputs/data_factory/test_only_physical/<session_id>/cells`
 - `datasets/test_only_physical/<session_id>/<run_id>`
 
-UI/ledger에 resolved absolute path를 표시한다. repository root 밖, symlink, `..`, 이미 생성된 다른 session/run과 production `outputs/data_factory/{runs,cells,coverage}`/`datasets/fr5_episodes` 방향은 construction 전 거부한다. production inventory/coverage/candidate/training writer는 0이다.
+UI/ledger에 resolved absolute path를 표시한다. repository root 밖, symlink, `..`, 이미 생성된 다른 session/run과 production `outputs/data_factory/{runs,cells,coverage}`/`datasets/fr5_episodes` 방향은 construction 전 거부한다. production inventory/coverage/candidate/training writer는 0이다. post-technical HIL proxy candidate와 mutable ledger projection은 해당 TEST_ONLY run directory 안에서만 허용한다.
 
 실물 object가 예상과 다른 위치에 남았다면 test-only scene을 quarantine한다. 실제 위치를 사람이 확인하기 전까지 후속 motion은 0이다.
 
@@ -398,7 +400,7 @@ Goal 2의 추가 목표는 현재 workstation에서 한 번 성공하는 것에 
 6. browser는 exact plan 승인, 필요한 physical semantic verdict, recycle의 combined release/final-scene verdict(또는 non-recycle의 existing `SCENE_READY`)와 post-commit candidate review를 evidence가 생기는 시점에 버튼으로 제공한다. 사용자는 digest 문자열, ROS topic 또는 artifact path를 입력하지 않는다.
 7. candidate review `PASS|FAIL|UNCERTAIN`는 existing candidate-admission CAS에 결속한다. local button은 개인 operator checkpoint로 충분하지만 `reviewed_by=HUMAN`을 위조하지 않으며 training approval은 existing 별도 gate로 남긴다. Goal 2는 training 화면을 만들지 않는다.
 
-현재 Goal 2의 실제 episode는 `TEST_ONLY`라서 production candidate writer와 training approval writer는 계속 0이다. browser checkpoint handler와 production-default compatibility는 temporary fake/isolated fixture로 검증하되, 현재 episode 결과를 production candidate로 승격하지 않는다. 다른 수집 워크스테이션에서 production collection을 시작하려면 그 host의 current robot/controller/start/cell, intended camera placement/profile와 production roots를 다시 적격화해야 한다.
+현재 Goal 2의 실제 episode는 `TEST_ONLY`라서 production candidate writer와 training approval writer는 계속 0이다. technical PASS인 episode는 같은 isolated run root의 HIL proxy candidate를 post-campaign review queue에 넣고 existing candidate CAS와 ledger state를 갱신하지만, production inventory/coverage나 training admission으로 전파하지 않는다. 다른 수집 워크스테이션에서 production collection을 시작하려면 그 host의 current robot/controller/start/cell, intended camera placement/profile와 production roots를 다시 적격화해야 한다.
 
 portable acceptance는 clean checkout 또는 disposable local clone에서 setup doctor/offline smoke와 foreground console start를 재현하는 것으로 증명한다. 별도 배포 host가 제공되지 않은 상태에서는 그 host의 OS/driver/device-specific hardware qualification을 PASS로 주장하지 않는다. 또한 push가 금지된 동안 다른 host는 이 미전송 commit을 받을 수 없으므로, 최종 보고에 exact commit과 “push/transfer pending”을 명시한다.
 
@@ -452,7 +454,7 @@ portable acceptance는 clean checkout 또는 disposable local clone에서 setup 
 - PHYSICAL ordering은 static root/config 검증과 owner/run/expiry/scene freshness+digest/quota preflight를 activation 전에 수행하고, activation 뒤에만 current-start port를 읽는다. `CampaignSession`은 child factory 직전에 같은 campaign preflight를 다시 수행한다. invalid static/scene/budget은 activation/factory 0, invalid dynamic start는 activation만 1일 수 있고 factory/episode/robot/recorder/dataset/run-state/training은 0이다.
 - P6 v3 candidate를 current v2 `OneJob`가 실행하지 않으며 P6.5 recollection manifest에도 production caller가 없다. UI는 plan-only/unsupported를 명시하고 live capability로 이름 바꾸지 않는다.
 - current launcher의 “첫 camera 자동 선택”은 stable qualified binding이 아니다. v1 dual profile은 role/device binding이 없고 live v2 profile도 generic serial 문자열이므로, zero-touch physical attach에는 narrow v2 device-role binding receipt와 ambiguity handling이 필요하다.
-- current `run_live` 일반 경로는 `outputs/data_factory/cells`를 hard-code하고 `HUMAN_GATED` approval을 생성하며 완료 후 `candidate_admission.json`을 쓴다. Goal 1은 이 함수를 복제하지 않고 session-sealed state/run/dataset roots, decision/approval-scope port와 candidate-admission writer enable flag를 주입하는 최소 seam으로 refactor한다. production default/TTY behavior는 byte-for-byte 의미를 보존하고, `TEST_ONLY`에서만 isolated roots + optional `HIL_NUMERIC_PROXY` + candidate/coverage/inventory/training writer 0을 강제한다. `TestPilotRunner`를 따로 만들지 않는다.
+- current `run_live` 일반 경로는 `outputs/data_factory/cells`를 hard-code하고 `HUMAN_GATED` approval을 생성하며 완료 후 `candidate_admission.json`을 쓴다. Goal 1은 이 함수를 복제하지 않고 session-sealed state/run/dataset roots, decision/approval-scope port와 candidate-admission writer enable flag를 주입하는 최소 seam으로 refactor한다. production default/TTY behavior는 byte-for-byte 의미를 보존한다. Goal 2 physical composition은 `run_live`의 production candidate writer를 끈 뒤 technical PASS에서 runner-owned writer로 같은 TEST_ONLY run root에 `HIL_PROXY` candidate만 만들고, production coverage/inventory/training writer는 0을 유지한다. `TestPilotRunner`를 따로 만들지 않는다.
 
 현재 `operator-ui/backend-contract-proposal.md`의 passkey 수준 provenance와 `typed_phrase`는 이 단일 운영자 제품 의도에 맞춰 수정 대상이다. 유지할 핵심은 current revision/digest binding, stale/replay rejection과 single consumption이지 문자열 입력이나 별도 identity ceremony가 아니다.
 
@@ -550,7 +552,7 @@ current `pickup_e2e` exact success ordering은 다음과 같다.
 
 ```text
 fresh device/profile/scene/start binding
-→ existing 5 s camera-topic warmup + planning-scene readback + collision/endpoint + no-motion proof
+→ exact campaign binding의 최초 episode면 5 s camera-topic warmup, 아니면 source evidence digest를 가진 reuse receipt + planning-scene readback + collision/endpoint + no-motion proof
 → exact plan/scope approval
 → recorder begin → bounded actual-recorder readiness window PASS
 → executor dispatch → approach/close/lift
@@ -563,7 +565,7 @@ fresh device/profile/scene/start binding
 → TEST_ONLY result; production candidate/inventory/training writer 0
 ```
 
-topic warmup과 recorder readiness는 서로 대체하지 않는다. 전자는 recorder process가 생기기 전에 camera topic identity/FPS/age를 확인하는 기존 preflight고, 후자는 승인 후 동일 TEST_ONLY transaction의 실제 aligner와 dataset writer를 통과한 row로 motion 직전 상태를 확인한다.
+topic warmup과 recorder readiness는 서로 대체하지 않는다. 전자는 recorder process가 생기기 전에 exact camera transport/profile binding의 identity/FPS/age를 캠페인 최초 1회 확인한다. 이후 같은 foreground campaign의 동일 binding에서는 과거 evidence를 현재 run에서 다시 측정한 것처럼 복사하지 않고 별도 `data_factory.camera_warmup_reuse.v1` receipt로 source run/evidence digest를 기록한다. profile/device binding 변경, cancel 또는 live failure가 있으면 reuse를 폐기한다. 후자는 승인 후 동일 TEST_ONLY transaction의 실제 aligner와 dataset writer를 통과한 row로 매 episode motion 직전 상태를 새로 확인한다.
 
 readiness는 새 recorder나 lifecycle op가 아니다. existing transported recorder `status`의 `metrics`에 immutable prefix snapshot을 추가하고 `OneJob.start()`의 first-row wait를 같은 위치에서 확장한다. deadline은 기존 first-row timeout `5.0 s`, 최소 window는 recorder의 기존 `min_frames=60` durable rows다. status 왕복/`observed_monotonic_ns`는 `heartbeat_lease/2`보다 fresh해야 한다.
 
@@ -741,7 +743,7 @@ fake devices discovered
 - low row/source rate, writer fault, queue drop, alignment failure, non-finite/provenance mismatch, long gap/repeat, stale status/timestamp/age, timeout과 cancel 각각이 same recorder transaction abort + executor/robot/gripper 0으로 끝남
 - readiness evidence는 같은 `OneJob` result에 남고 stationary prefix row는 같은 transaction 안에서 제거되며 recorder re-begin, production default 변경과 별도 recorder/lifecycle owner가 0임
 - begin-before-execute failure, cancel uncertainty, status uncertainty, release ambiguity, scene-write failure, post-scene commit/validator failure의 7.5 recovery ordering과 later intent 0
-- production-default `run_live` TTY/root/candidate behavior는 보존되고 TEST_ONLY seam에서만 isolated roots/proxy/no-candidate behavior가 적용
+- production-default `run_live` TTY/root/candidate behavior는 보존되고 TEST_ONLY seam에서는 isolated roots/proxy와 post-technical HIL proxy candidate만 적용
 - fake physical-port bundle에서 plan approval→semantic→combined recycle release/final-scene가 browser button으로 실제 `OneJob` hold를 해소하며, TTY read 0과 single active child/later-intent ordering을 증명. non-recycle fixture는 existing post-commit `SCENE_READY` port를 별도로 확인
 - isolated candidate fixture의 PASS/FAIL/UNCERTAIN/reason/stale/double-submit가 existing candidate CAS를 통과하고 training approval writer는 0
 
@@ -840,7 +842,7 @@ Goal 1이 닫아야 Goal 2 간격이 사라지는 software edge:
 - production/fake가 같은 normalized intent, event, decision와 result schema를 사용함
 - physical factory는 session gate 뒤 lazy construction되며 Goal 1 호출 count 0
 - collection slot→baseline JobSpec/run payload, current-start exact verification, fresh OneJob injection과 result feedback이 fake로 완주함
-- one-slot TEST_ONLY path가 exact single-camera v2 profile/root, post-begin recorder readiness, numeric proxy, out-of-recording recycle와 no-candidate writer까지 fake로 완주함
+- one-slot TEST_ONLY path가 exact single-camera v2 profile/root, post-begin recorder readiness, numeric proxy, out-of-recording recycle, production candidate writer 0과 isolated HIL proxy candidate까지 fake로 완주함
 - UI의 버튼/상태/recovery handler가 Goal 2에서도 그대로 사용됨
 - remaining physical unknown이 code TODO가 아니라 handoff ledger의 explicit `UNRESOLVED_PHYSICAL`로만 남음
 
@@ -867,7 +869,7 @@ Goal 2는 Goal 1 architecture를 재설계하거나 production qualification을 
 
 dispatch 전 부재는 `PAUSED + NOT_MEASURED`이지 FAIL이 아니다. dispatch 후 부재/timeout은 no continuation·scene/cell block이며 HOME 복귀를 가정하지 않는다.
 
-camera 최종 배치·정성 평가, 새 workspace capture와 production training approval은 Goal 2에서 요구하지 않는다. production candidate **review UI/software path**는 구현·isolated fixture 검증하지만 현재 TEST_ONLY physical episode의 candidate artifact는 만들지 않는다.
+camera 최종 배치·정성 평가, 새 workspace capture와 production training approval은 Goal 2에서 요구하지 않는다. production candidate **review UI/software path**는 existing CAS를 재사용해 검증하고, 현재 TEST_ONLY physical episode에는 technical PASS 뒤 isolated `HIL_PROXY` candidate만 만든다. 이 artifact는 로컬 episode 분류와 ledger projection 전용이며 production candidate/training authority가 아니다.
 
 완료 표식은 서로 다른 사실을 합치지 않는다.
 
@@ -917,6 +919,7 @@ Goal 2 writer 분리는 source mapping 뒤 실제 파일이 disjoint일 때만 `
 | 근거 | source가 지지하는 사실 | 현재 FR5 inference | 넘겨받을 수 없는 부분 |
 |---|---|---|---|
 | [Data Quality in Imitation Learning, NeurIPS 2023](https://proceedings.neurips.cc/paper_files/paper/2023/hash/fe692980c5d9732cf153ce27947653a7-Abstract-Conference.html) | action consistency, distribution shift와 transition/state diversity의 효과가 서로 다르며 state diversity가 항상 이롭지는 않다 | 초기 seed에서 동작 방식을 섞어 raw diversity만 늘리지 않고 `DIRECT`를 고정한 controlled condition coverage부터 시작한다 | FR5 factor level, quota, safety threshold는 주지 않는다 |
+| [MimicGen, CoRL 2023](https://arxiv.org/abs/2310.17596), [MoveIt goal tolerance](https://moveit.picknik.ai/main/doc/examples/move_group_interface/move_group_interface_tutorial.html#A-Note-on-Setting-Tolerances) | MimicGen은 task-aware adaptation으로 넓은 initial-state distribution을 만들며, MoveIt goal tolerance는 planning target 도달 허용오차이고 controller tolerance와도 별개다 | start 다양성은 tolerance/jitter가 아니라 여러 exact qualified target의 finite ensemble로 모델링하고 seed-offset round-robin으로 배치한다 | 임의 joint box의 안전성, FR5 주변 분포 폭이나 support-point 수를 정해 주지 않는다 |
 | [DROID, RSS 2024](https://www.roboticsproceedings.org/rss20/p120.html) | 다양한 scene/view/workspace/object/task를 가진 대규모 실물 dataset이 해당 실험에서 robustness에 이득을 보였다 | place/object/start/split metadata를 보존하고 검증된 뒤 단계적으로 breadth를 넓힌다 | Franka·대규모 분산 수집 결과를 단일 FR5의 초기 횟수로 복사할 수 없다 |
 | [LeRobot real-world guide](https://huggingface.co/docs/lerobot/main/getting_started_real_world_robot) | 먼저 camera/grasp를 일관되게 유지하고 반복 수집한 뒤 variation을 늘리라고 안내한다 | fixed qualified camera binding과 `DIRECT`의 thin pilot부터 시작한다 | tutorial 횟수는 FR5 acceptance threshold가 아니다 |
 | [LeRobot HIL collection](https://huggingface.co/docs/lerobot/main/en/hil_data_collection), [Demo-SCORE, RSS 2025](https://www.roboticsproceedings.org/rss21/p071.html), [CUPID, CoRL 2025](https://proceedings.mlr.press/v305/agia25a.html) | HIL/score 기반 보강은 trained policy/checkpoint, evaluation rollout 또는 failure label에 의존한다 | `ROLLOUT_TARGETED`는 pinned checkpoint와 labeled fixed-evaluation evidence 뒤에만 연다 | initial seed 선택, FR5 safe intervention과 자동 training admission 근거가 아니다 |
@@ -1075,7 +1078,7 @@ C. TEST_ONLY integration seam
   `outputs/data_factory/test_only_physical/<session_id>/cells`,
   `datasets/test_only_physical/<session_id>/<run_id>`다.
   traversal, outside absolute path, symlink, collision과 production prefix를 construction 전 거부한다.
-- TEST_ONLY에서 production candidate/coverage/inventory/training writer는 0이다.
+- TEST_ONLY에서 production candidate/coverage/inventory/training writer는 0이다. technical PASS 뒤 isolated run root의 HIL proxy candidate/ledger state만 허용한다.
 - exact plan 버튼은 alias/scene, plan digest, TEST_ONLY paths와 sealed
   `HUMAN_GATED|HIL_NUMERIC_PROXY` scope를 함께 결속한다.
 - `HIL_NUMERIC_PROXY` result는 `MECHANICAL_GRASP_PROXY_PASS|FAIL`, source `HIL_PROXY`로 투영하고
@@ -1223,7 +1226,7 @@ Goal 1의 same UI/handler/`CampaignOperator`/`CampaignSession`/fresh `OneJob`을
   non-recycle `SCENE_READY`는 `OneJob` hold로 만들지 않고 existing `run_live`의 commit/technical-validator 뒤 cell acknowledgement 전 checkpoint로 유지하며 run/plan/post-scene/technical digest에 결속한다.
   existing TTY default는 보존하고 browser는 source, HUMAN identity, scene truth나 transition target을 mint하지 않는다.
 - post-commit candidate admission의 `PASS|FAIL|UNCERTAIN` + reason을 existing digest/CAS review core에 연결한다.
-  current physical run은 TEST_ONLY라 candidate writer 0/`NOT_APPLICABLE`이고 isolated fixture로만 review handler를 검증한다. training admission은 별도 gate이며 자동 생성 0이다.
+  current physical run은 TEST_ONLY technical PASS 뒤 같은 isolated run root에 `operational_source=HIL_PROXY` candidate를 만들고 캠페인 종료 후 bounded queue로 검토한다. production candidate/inventory/coverage와 training admission은 자동 생성 0이다.
 - existing `scripts/setup_notebook.sh` fresh-clone installer와 `operator_setup.build_camera_binding_candidate`/validator를 보존·재사용하고 install/mutation 없는 setup doctor와 ignored machine-local `camera_binding.v1` receipt를 추가한다.
   UVC는 `/dev/v4l/by-id` 아래 symlink의 basename token만, RealSense는 serial을 저장한다. valid real token을 generic `SAFE_ID`가 막으면 stable-device field만 narrow correction하고 raw absolute path/separator/traversal/control은 거부한다. exact match는 자동 attach 후보, zero/multiple ambiguity만 한 번 선택이며 current generic camera string을 tracked profile에 자동 backfill하지 않는다.
 - 한 foreground start command는 loopback URL/session/effect/data disposition을 출력하고 Ctrl-C/normal shutdown으로 child/server/temp state를 닫는다. hidden process는 0이다.
@@ -1270,7 +1273,7 @@ physical 실행 순서:
    - `outputs/data_factory/test_only_physical/<session_id>/cells`
    - `datasets/test_only_physical/<session_id>/<run_id>`
    traversal/symlink/collision/production prefix면 즉시 거부한다.
-5. `place1→PLACE_A`, cube/yaw0/(0,0), source=recycle same cell, object/grasp/motion/profile digest를 resolve한다.
+5. `place1→PLACE_A`, cube/yaw0/(0,0) initial source, source→next selected slot(terminal은 current slot), object/grasp/motion/profile digest를 resolve한다.
 6. exact qualified motion digest/safe vector와 activation 뒤 획득한 ≤0.1 s current snapshot의 joint delta ≤0.01 rad를 확인한다.
    current가 범위 밖이면 자동 homing을 새로 만들지 않고 `BLOCKED + FAIL`로 멈춘다.
 7. full v2 return cycle의 plan/collision/constraint/endpoint/phase-chain과 plan-only no-motion snapshot을 통과한다. actual executor plan의 initial joint state와 motion/home/start/episode digest를 다시 검증한 `test_only_planned_start_evidence.v1`가 exact button decision에 결속돼야 한다.
@@ -1338,7 +1341,7 @@ physical 실행 순서:
 - fake physical-button/candidate-review/browser QA의 case 수, exact handler/CAS evidence, TTY compatibility와 forbidden hardware/production/training count 0을 보고한다.
 - plan-only 전후 execute/gripper/recorder/dataset count 0을 증명한다.
 - live의 허용 effect를 phase/action/recorder/dataset/TEST_ONLY scene-cell 카운트로 보고한다.
-- 금지 production run/cell/candidate/coverage/inventory/training writer와 P6/policy/second episode count는 0이어야 한다.
+- 금지 production run/cell/candidate/coverage/inventory/training writer와 P6/policy caller count는 0이어야 한다. TEST_ONLY run-local HIL proxy candidate/ledger state는 별도 카운트로 보고한다.
 - topic warmup과 post-begin recorder-readiness evidence를 분리해 보고하고,
   readiness의 run/transaction/profile/quality digest, 60-row window, rate/drop/alignment/timestamp reason을 남긴다.
 - technical validator, full-episode rows/rate/drop/timestamp/bytes/digest, frozen rows, phase terminals,
@@ -1691,3 +1694,103 @@ admission과 retention은 독립 상태다.
 - 수정 뒤 재사용 연결→종료에서 command server, launch, MoveIt, ros2_control, UVC, recorder와 training process 잔여는 모두 0이었다. 기존 ROS CLI daemon을 종료한 뒤 `ros2 node list --no-daemon`은 daemon을 다시 만들지 않았다.
 
 따라서 `PORTABLE_COLLECTION_OPERATOR_PATH_COMPLETE`와 offline product QA는 유지한다. `PHYSICAL_TEST_ONLY_HOME_PLACE1_PILOT_COMPLETE`, `DATA_COLLECTION_UX_PROJECT_COMPLETE`, `REUSABLE_COLLECTION_OPERATOR_PATH_COMPLETE`는 기록하지 않는다. 다음 실물 campaign의 정확한 선행조건은 동일 profile에서 안정적인 bound source `>=28.5 fps`, 현장 E-stop 감시와 기존 HOME/place1/cube 배치의 fresh 확인이다.
+
+## 20. 2026-08-27 physical campaign과 녹화 경계 evidence
+
+이 절은 19절 뒤 사용자가 직접 시작·감시하고 예외를 보고한 PHYSICAL `TEST_ONLY` campaign의 current evidence다. 결과 dataset은 테스트용이며 production qualification, semantic image-quality 판정, training approval 또는 learned-policy authority가 아니다.
+
+### 20.1 성공 episode와 실제 저장 구간
+
+| run | rows / duration | `PREGRASP_PTP` | readiness prefix | 마지막 row와 `LIFT_LIN` terminal |
+|---|---:|---:|---:|---:|
+| campaign-0001 / run-1 | 536 / 17.833 s | 314 rows / 10.490 s | 2.354 s, 전부 제거 | -7.5 ms |
+| campaign-0002 / run-1 | 552 / 18.367 s | 329 rows / 10.974 s | 2.388 s, 전부 제거 | -15.9 ms |
+| campaign-0002 / run-1-e2 | 558 / 18.567 s | 329 rows / 10.989 s | 2.374 s, 전부 제거 | +15.1 ms |
+
+- 세 run은 모두 effective 30.00003 Hz, writer drop 0, alignment failure 0, tail drained와 technical validator `PASS`였다.
+- planning, collision validation, camera warmup과 campaign approval은 녹화 밖이다. recorder begin 뒤 만들어진 60-row stationary readiness prefix는 같은 transaction에서 제거하며 recorder를 다시 열지 않는다.
+- trim 뒤 첫 motion dispatch까지는 5–8 ms, 첫 유의미한 action/state 변화는 각각 약 0.133/0.167 s였다. 따라서 화면 evidence의 약 10–11 s `PREGRASP_PTP`는 정지 준비 시간이 아니라 qualified 3% 속도로 HOME에서 물체 위 집기 전 위치까지 이동하는 실제 policy input이다.
+- `PREGRASP_PTP → APPROACH_STOP_LIN → FINAL_APPROACH_LIN → GRIPPER_CLOSE → LIFT_LIN`은 연속 저장한다. lift terminal 뒤 약 0.36–0.39 s drain은 350 ms source-time alignment watermark의 마지막 sample을 보존하며 idle row를 추가하지 않는다.
+- recycle, release, retreat와 SAFE return은 freeze 뒤 실행되어 dataset row가 0이다. 사용자가 별도 start-state 계약을 선택하지 않는 한 HOME-start policy에서 `PREGRASP_PTP`를 임의로 잘라내지 않는다.
+
+### 20.2 측정된 대기와 최소 복구 수정
+
+- campaign 시작 뒤 첫 motion까지 약 10.7 s의 녹화 밖 대기는 camera topic warmup 5 s, warmup 완료 뒤 recorder 시작까지 3.34–3.52 s, recorder readiness 2.35–2.39 s로 나뉜다. camera warmup과 plan/collision work는 이미 겹치며, readiness trim 뒤 dispatch 병목은 없다. qualification을 바꾸지 않고 PREGRASP나 recycle 속도를 올리지 않는다.
+- 같은 campaign의 첫 episode가 exact device/profile/transport binding으로 topic warmup을 통과하면 이후 episode는 별도 `data_factory.camera_warmup_reuse.v1` receipt로 그 결과를 재사용한다. binding 변경, 측정 실패 또는 live 예외는 cache를 폐기한다. episode별 actual-recorder 60-row/350 ms readiness와 기존 `>=28.5 fps` 품질 계약은 그대로 유지한다. 이 변경의 반복 실물 시간 단축은 다음 campaign에서 측정하며 미리 PASS로 기록하지 않는다.
+- warmup 뒤 recorder 생성에 쓰인 3.34–3.52 s는 아직 줄였다고 주장하지 않는다. recorder를 미리 열면 plan 실패 전 dataset side effect 0 경계를 깨고, process 재사용은 transaction owner를 바꿀 수 있다. 다음 반복에서 세부 구간을 다시 계측한 뒤 품질·소유권을 보존하는 최소 수정만 검토한다.
+- campaign-0001의 두 번째 attempt는 SAFE goal accept 약 1.54 s 뒤 사용자가 중단했다. robot hang으로 해석하지 않으며 scene은 `UNKNOWN`, slot은 `QUARANTINED`, later intent는 0이 맞다. 다만 frozen recorder transaction이 다음 reset까지 약 554 s 남은 것은 lifecycle 정리 결함이었다.
+- cancel terminal을 확인하지 못해도 exact-owned recorder가 `RECORDING|FROZEN`이면 즉시 abort를 요청한다. abort가 확인되면 recorder는 `ABORTED`지만 motion/cell은 계속 `BLOCKED|UNKNOWN`이다. abort 확인에도 실패하면 quarantine 의미를 보존하되 foreground owner가 bounded release하여 숨은 recorder process를 남기지 않는다. 해당 session/`OneJob`을 재개하지 않고 fresh campaign으로만 복구한다.
+- 다른 attempt는 camera source 28.39 fps로 기존 `>=28.5 fps` 계약을 넘지 못해 technical reject되고 payload가 폐기됐다. recorder threshold를 낮추거나 범용 하한 계약을 추가하지 않았다.
+
+### 20.3 gripper retune 경계
+
+- 기존 54% command와 HIL evidence는 전역 `QUALIFIED` grasp/motion profile에 그대로 남는다.
+- 사용자가 요청한 56% command와 56–57% feedback window는 25 mm wood cube + top-center grasp + PHYSICAL `TEST_ONLY` 조립에만 적용되는 `CANDIDATE_PENDING_HIL` artifact다.
+- resolver의 다른 object/grasp 조합과 production path에는 영향을 주지 않는다. 다음 반복 HIL에서 성공하면 새 profile revision 승격을 검토하고, 실패하면 retune artifact만 수정한다.
+
+### 20.4 명시적 HOME 복구와 오늘의 정지 상태
+
+- 사용자가 cube를 제거하고 arm을 위로 이동한 뒤 gripper RPC는 연결된 상태였지만 SDK execution error 14와 gripper fault 3을 보고했다. 이는 485 timeout이나 UI 연결 끊김으로 분류하지 않았다. 허가된 foreground maintenance에서 resettable error를 한 번 지운 뒤 activation 1, fault 0, open position 100을 fresh readback했다.
+- Web UI의 `그리퍼 열고 HOME 복귀`는 자동 복구가 아니다. `PHYSICAL`, active child 0과 명시적 local operator intent일 때만 열린다. 이미 열린 gripper에는 goal을 보내지 않고, 현재 joint state에서 기존 qualified `SAFE_POSE_PTP` HOME까지 한 plan을 만든다. planning-scene readback, collision/no-motion precommit, execute 직전 start-state drift와 terminal HOME readback을 같은 foreground owner가 검증한다. recorder, dataset과 campaign/run-state는 열지 않는다.
+- 첫 버튼 요청은 dependency parameter가 application composition에 전달되지 않아 Python `NameError`에서 종료됐다. 이 요청은 plan/robot/gripper/recorder/dataset effect가 모두 0이었다. parameter를 실제 composition root로 옮기고 factory-wiring regression을 추가한 뒤 operator-console 27개 집중 테스트가 통과했다.
+- 수정 후 재시도는 arm trajectory 정확히 1회, gripper goal 0회로 성공했다. backend receipt의 최대 HOME joint 오차는 약 0.000163 rad였고, 별도 `/joint_states` readback도 HOME을 확인했다. technical recovery status는 `HOME`, gripper는 open이다. 이는 semantic episode 판정, dataset 품질 또는 production authority가 아니다.
+- 재시도 뒤 fresh verifier는 닫힌 gripper를 먼저 여는 경로의 선행 goal count, arm terminal 뒤 최종 gripper readback과 action 실패 원인 보존을 추가로 지적했다. precommit은 진입 뒤 goal-count delta만 0인지 검사하고, 최종 reference/feedback open을 함께 확인하며, terminal handle이 이미 끝난 오류는 불필요한 cancel 오류로 바꾸지 않도록 수정했다. active cancel 실패는 계속 `HOME_RECOVERY_CANCEL_UNCERTAIN`이다. 수정 후 home-recovery 6개와 motion 12개 집중 테스트가 통과했고 두 번째 fresh read-only verifier는 `PASS`였다. 이 correction은 추가 실물 동작 없이 검증했다.
+- UI는 검증된 backend projection만 사용해 `HOME 복귀 완료` 또는 `이미 HOME`, gripper open과 arm goal 횟수를 표시한다. 실패를 성공으로 추론하거나 자동 재시도하지 않는다.
+- 2026-08-27 작업 종료 시 operator console, MoveIt, ros2_control, UVC, recorder, `run_job` 잔여 프로세스는 0이었다. 로봇은 HOME, gripper는 open이다. 사용자의 요청에 따라 추가 실물 campaign은 2026-08-28 이후 다시 시작하며, 그 전에는 오늘 상태를 재사용한다고 가정하지 않고 environment와 현장을 fresh 확인한다.
+
+현재 반복 physical campaign closeout과 그 뒤 stable full suite·최종 통합 verifier가 남아 있으므로 `REUSABLE_COLLECTION_OPERATOR_PATH_COMPLETE`는 아직 기록하지 않는다.
+
+## 21. 2026-08-28 배포 설정 registry 정정
+
+이 절은 당일 browser QA에서 확인된 제품 의미 오류를 정정한다. 기존 단일 `PLACE_A`·`HOME`·`up` pilot 구성을 최종 제품 한계로 보지 않는다.
+
+### 21.1 카메라는 role만 선택한다
+
+- 앱은 연결된 물리 카메라를 0/1/2대 이상 자동 발견하고 한 peripheral의 여러 `/dev/video*` node를 한 logical device로 투영한다. UVC는 stable by-id capture endpoint, RealSense는 serial을 machine-local identity로 사용한다.
+- 사용자가 주 화면에서 정하는 값은 각 logical camera의 `상단(up) | 측면(side) | 손목(wrist) | 사용 안 함` 역할뿐이다. USB path, serial, topic과 collection-profile ID를 입력하게 하지 않는다.
+- tracked collection profile은 role topology·topic·30 Hz·resolution·QoS·writer/quality 계약을 소유하고, ignored machine-local binding은 exact role→device identity를 소유한다. 역할 조합으로 compatible profile을 backend가 결정한다.
+- 0대면 UI shell은 열리고 collection만 막힌다. 1대면 compatible single-camera 구성을 제안한다. 2대 이상이면 exact stored binding이 현재 discovery와 맞을 때만 복원하고, 최초 또는 변경 시 역할 선택을 받는다. canonical first device를 조용히 선택하거나 빠진 장치를 다른 카메라로 자동 대체하지 않는다.
+- role assignment는 placement·framing·image semantics·production qualification이 아니다. profile/binding 변경은 active campaign 중 거부하고 authoring에서 기존 compile/warmup evidence를 무효화한다.
+
+### 21.2 새 작업영역 등록은 기존 place 개정이 아니다
+
+- `CENTER → X_REF → Y_CHECK` wizard의 기본 동작은 선택된 `PLACE_A` 개정본 생성이 아니라 독립된 새 작업영역/place 등록이다.
+- 사용자는 사람에게 보이는 새 작업영역 이름을 정하고 touch pendant 또는 수동 방식으로 TCP를 세 기준점에 놓는다. UI는 capture intent만 보내며 robot motion command를 만들지 않는다.
+- backend는 세 snapshot과 print/scale·plane 검증으로 새 `place_id`, `cell_calibration_id`/coordinate-frame revision, A4 local plane과 bounded continuous X/Y/yaw domain을 함께 만든다. `PLACE_A`, `PLACE_B`, `PLACE_C`는 catalog에서 서로 독립된 동급 선택지다.
+- 기존 작업영역을 수정하는 기능이 필요하면 별도 명시적 `기존 작업영역 보정` 흐름으로 둔다. 새 등록 화면에 기존 place를 필수 부모나 암묵적 source로 표시하지 않는다.
+- candidate 저장은 production/motion qualification을 자동 생성하지 않지만, 등록 직후 authoring catalog에는 나타나고 현재 실행 조합에 부족한 exact motion qualification만 사실대로 표시한다.
+
+### 21.3 시작 자세도 독립 registry다
+
+- `HOME`은 첫 qualified start pose일 뿐 유일한 고정값이 아니다. 환경 설정의 `시작 자세 관리`에서 현재 6-joint snapshot을 읽어 사용자 이름으로 여러 후보를 등록한다.
+- start-pose artifact는 robot system, ordered joint target, tolerance, capture timestamp/source와 digest를 소유한다. workspace/place/object/camera profile에 암묵적으로 종속시키지 않는다.
+- 등록된 start pose는 계획 화면의 선택지로 즉시 나타난다. exact cell/motion 조합에 실물 경로 qualification이 없으면 authoring은 가능하되 실행 가능 상태만 분리해 표시한다.
+- snapshot capture 자체는 read-only이며 motion을 보내지 않는다. 선택된 start pose로의 이동과 task 실행은 기존 plan/scene/start/collision/campaign 경계를 재사용하고, 별도 반복 사람 gate나 새 motion framework를 만들지 않는다.
+- 반복 episode의 시작 다양성은 한 target의 `tolerance_rad`를 넓히거나 runtime joint jitter를 만드는 방식이 아니다. 서로 다른 exact target을 가진 `QUALIFIED + SAFE_FOR_MOTION` start-pose profile들의 유한 ensemble이다. 각 target은 독립 ID·qualification digest·작은 도착 tolerance를 유지하고 manifest slot과 episode provenance에 그대로 남는다.
+- assisted mode는 선택한 start ID를 정렬한 뒤 `normalized_seed % K`에서 시작하는 round-robin으로 exact N개에 배치한다. 같은 입력/seed는 byte-stable이고 start별 횟수 차이는 최대 1이며, 다음 campaign seed에서는 첫 object condition과 특정 start의 고정 상관을 순환시킨다. direct mode의 operator 지정 pair 순서는 재정렬하지 않는다.
+- 연속 joint bounding box나 covariance를 “안전한 근처”로 추론하지 않는다. 가까운 분포를 넓히려면 주변 support point를 여러 named start pose로 등록·qualification하고, campaign 시작 전 finite exact targets 전체를 plan/collision/endpoint 검증한다. 한 번의 campaign 승인은 그 resolved set 전체를 덮으며 episode별 반복 승인을 추가하지 않는다.
+- 수집 범위의 정본은 단일 start-pose dropdown이 아니라 `선택한 robot_start_pose × 선택 가능한 (place, X, Y, yaw)`의 qualified allowed-pair domain이다. 기존 P5.8a hypothesis/manifest의 `base_condition × robot_start_pose` 구조를 그대로 사용한다.
+- 자동 선택은 eligible allowed-pair domain에서 요청한 exact N을 canonical·balanced하게 선택하고, 직접 선택은 episode별 `start pose + X/Y/yaw` 쌍의 순서를 편집한다. 한 pair의 IK/plan/collision/endpoint 실패는 그 pair만 제외하며 unrelated pair를 막지 않는다.
+- UI는 전체 Cartesian product를 항상 펼쳐 피로하게 만들지 않고, 선택한 start pose 수·위치/각도 조건 수·eligible pair 수와 planned N을 먼저 요약한 뒤 상세 pair 편집을 필요할 때만 연다.
+
+### 21.4 배포 기동과 acceptance
+
+- 정상 운영자는 `scripts/start_collection_ui.sh` 한 명령으로 UI를 먼저 연다. camera device ID, profile, topic과 port는 정상 사용 입력이 아니다.
+- 0/1/2 camera, saved binding reuse, missing-device fail-close, up-side/up-wrist profile derivation, role별 foreground child와 topic binding을 fake로 검증한다.
+- 새 workspace 이름→3점 capture→새 independent catalog option과 새 start-pose 이름→joint snapshot→catalog option을 browser fixture와 backend focused test로 관통한다.
+- start pose 2개와 위치/각도 3개 fixture에서 6개 allowed pair가 byte-stable하게 투영되고, exact N 자동 선택·직접 pair 순서·한 invalid pair만 제외되는 흐름을 검증한다.
+- start pose 3개와 N=8 fixture에서 사용 횟수 차이가 1 이하이고, 동일 seed 결과가 같으며 seed 0..2가 첫 start를 순환하고 direct pair 순서는 그대로인지 검증한다.
+- 이 설정 기능은 recorder/dataset/run-state를 열지 않는다. robot motion은 0이며, 이후 campaign 실행만 기존 single-owner physical path를 사용한다.
+- camera unplug/replug 또는 `PHYSICAL_CAMERA_TOPIC`처럼 환경 계층에서 복구 가능한 terminal은 browser를 종료 상태에 가두지 않는다. 현재 campaign/child를 bounded close하고 같은 application process의 `ENVIRONMENT`로 돌아가 passive discovery를 다시 읽는다.
+- 같은 stable device들이 돌아오면 exact stored role map만 복원하고, 빠졌거나 바뀌었으면 role 재선택을 요청한다. backend server는 유지하며 정상 복구에 전체 test suite, 반복 campaign approval, recorder warmup 또는 robot motion을 넣지 않는다.
+- terminal `Ctrl-C`는 전체 foreground application의 명시적 종료다. 일상 복구는 UI의 환경 복귀 action이 owned ROS/camera children만 정리하도록 하며, 죽은 backend를 browser가 살릴 수 있다고 오해시키는 reload 버튼을 만들지 않는다.
+
+## 22. 배포 안정화 뒤 책임별 패키지 정리
+
+후속 리팩터링의 실행 정본은 [collection-operator-architecture-refactor.md](collection-operator-architecture-refactor.md)다. 이 절은 배경과 deferred intent만 보존하며, 파일 소유권·목표 package·Orca DAG·테스트 분류와 acceptance는 별도 계획을 따른다.
+
+이번 Goal은 실물 재시험 직전의 동작 기준선을 안정화하므로 대규모 파일 이동을 하지 않는다. 다만 `operator_console.py`와 `operator_application.py`에 장치 준비, catalog/selection, 상태 투영, workspace/camera/start-pose 작성, campaign composition이 함께 모인 현재 구조는 후속 아키텍처 Goal에서 정리한다. 대상은 operator에 한정하지 않고 recorder, runtime binding, dataset quality/ledger, training orchestration과 UI adapter까지 import/caller DAG로 감사한다.
+
+후속 Goal은 먼저 현재 public entrypoint와 stable full-suite 기준선을 동결하고, `상위 패키지 / 책임 모듈 / 기능`의 한 방향 의존성을 정한 뒤 한 책임씩 기존 facade 뒤로 옮긴다. 후보 경계는 `operator/{application, projection, setup, workspace, camera, runtime}`이지만 실제 source/caller mapping 결과가 우선이다. 새 framework, 동작 변경, 계약 복제와 단순 파일 수 증가를 목표로 하지 않으며, 기존 CLI·Web UI·campaign/recorder owner와 artifact schema는 동일하게 유지한다. 각 이동은 focused test 뒤 직렬 통합하고 마지막에 full suite, import/entrypoint, docs link와 tracked-entropy를 다시 검증한다.
+
+테스트도 개수 자체를 보존하지 않는다. 현재 full suite는 실물 재시험 전 회귀 기준선으로 유지하되 후속 Goal에서 `unit / schema-contract / component / product-flow / browser / HIL`로 소유권과 실행 계층을 분류한다. 같은 계약을 fake application, product fixture와 browser에서 반복하는 경우 각 층이 실제로 소유하는 assertion만 남기고 stale compatibility·중복 fixture를 삭제한다. HIL은 기본 offline discovery와 분리하며, 정리 뒤에도 public behavior, trust boundary, side-effect sentinel과 실패 복구를 잃지 않았음을 mutation/caller mapping과 stable full suite로 확인한다.

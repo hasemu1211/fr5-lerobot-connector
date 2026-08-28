@@ -3,10 +3,12 @@ from __future__ import annotations
 import copy
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from tools.data_factory.operator_application import CollectionOperatorApplication
 from tools.data_factory.operator_bridge import INTENT_SCHEMA, OperatorIntentCore
 from tools.data_factory.operator_catalog import (
+    project_balanced_start_pose_ids,
     load_operator_catalog,
     project_assisted_poses,
     validate_operator_selection,
@@ -38,6 +40,7 @@ class StubCampaign:
         self.completed = 0
         self.closed = False
         self.history = []
+        self.candidate_pending = False
         self.core = OperatorIntentCore(
             session_id=campaign_id,
             projection_call=self.projection,
@@ -45,6 +48,7 @@ class StubCampaign:
                 "compile_draft": self.compile_draft,
                 "authorize_campaign": self.authorize_campaign,
                 "cancel_session": self.cancel_session,
+                "review_candidate": self.review_candidate,
             },
         )
 
@@ -80,6 +84,14 @@ class StubCampaign:
         self.state = "TERMINAL"
         return {"outcome": "CANCELLED"}
 
+    def review_candidate(self, payload, _view):
+        if not self.candidate_pending or set(payload) != {
+            "review_binding_digest", "choice", "reason",
+        }:
+            raise ContractError("STUB_REVIEW")
+        self.candidate_pending = False
+        return {"outcome": "REVIEWED", "status": payload["choice"]}
+
     def complete(self):
         self.completed = self.draft["requested_count"]
         self.history = [
@@ -103,18 +115,22 @@ class StubCampaign:
                     f"{self.campaign_id}-run-{self.completed + 1}"
                     if self.state == "RUNNING" else None
                 ),
+                **({
+                    "phase": "EXECUTING", "phase_label": "수집 동작 실행",
+                    "progress": 50,
+                } if self.state == "RUNNING" else {}),
             },
-            "available_ops": {
+            "available_ops": (["review_candidate"] if self.candidate_pending else {
                 "AUTHORING": ["compile_draft"],
                 "REVIEW_CAMPAIGN": ["authorize_campaign"],
                 "RUNNING": ["cancel_session"],
-            }.get(self.state, []),
+            }.get(self.state, [])),
             "draft": {
                 "draft_id": self.draft["draft_id"],
                 "revision": self.draft["revision"],
                 "budget": total,
                 "selected_count": total,
-                "cells": copy.deepcopy(self.draft["cells"]),
+                "cells": [],
             },
             "campaign_envelope": (
                 None if self.state == "AUTHORING" else {
@@ -141,8 +157,9 @@ class StubCampaign:
 class StubWorkspaceManager:
     LABELS = ("CENTER", "X_REF", "Y_CHECK")
 
-    def __init__(self, sequence):
+    def __init__(self, sequence, display_name="작업영역"):
         self.sequence = sequence
+        self.display_name = display_name
         self.captures = {}
         self.preview = None
         self.promotion = None
@@ -150,6 +167,7 @@ class StubWorkspaceManager:
     def projection(self):
         return {
             "calibration_id": f"workspace-stub-{self.sequence}",
+            "display_name": self.display_name,
             "captures": {label: label in self.captures for label in self.LABELS},
             "preview": copy.deepcopy(self.preview),
             "promotion": copy.deepcopy(self.promotion),
@@ -171,6 +189,16 @@ class StubWorkspaceManager:
             "preview_digest": preview_digest,
         }
         return copy.deepcopy(self.promotion)
+
+    def discard_preview(self, preview_digest):
+        if (
+            self.preview is None
+            or self.preview["status"] != "CANDIDATE_OUT_OF_TOLERANCE"
+            or preview_digest != self.preview["preview_digest"]
+        ):
+            raise ContractError("STUB_WORKSPACE_DISCARD")
+        self.preview = None
+        return self.projection()
 
 
 class OperatorCatalogTests(unittest.TestCase):
@@ -360,7 +388,7 @@ class CollectionOperatorApplicationTests(unittest.TestCase):
             }, "general")
         self.assertEqual(self.campaigns, [])
 
-    def test_projection_refreshes_environment_after_a_later_disconnect(self):
+    def test_projection_is_nonblocking_and_keeps_last_measured_environment(self):
         self.consume("prepare_environment", {}, "prepare-before-disconnect")
         self.assertEqual(
             self.application.bridge_core.snapshot()["projection"]["environment"]["state"],
@@ -371,10 +399,16 @@ class CollectionOperatorApplicationTests(unittest.TestCase):
         self.environment["components"]["camera"] = {
             "state": "MISSING", "owner": None, "reason": "NOT_RUNNING",
         }
-        disconnected = self.application.bridge_core.snapshot()["projection"]
-        self.assertEqual(disconnected["environment"], self.environment)
-        self.assertEqual(disconnected["runtime"]["workflow_state"], "PREPARING")
-        self.assertEqual(disconnected["available_ops"], ["prepare_environment"])
+        blocked_query = mock.Mock(side_effect=AssertionError(
+            "browser projection queried the physical environment",
+        ))
+        self.application.environment_call = blocked_query
+        cached = self.application.bridge_core.snapshot()["projection"]
+        self.assertEqual(cached["environment"]["state"], "READY")
+        self.assertEqual(cached["runtime"]["workflow_state"], "AUTHORING")
+        self.assertIn("compile_draft", cached["available_ops"])
+        self.assertNotIn("campaign_projection", cached["technical_details"])
+        blocked_query.assert_not_called()
 
     def test_blocked_prepare_is_consumed_and_preserves_component_reasons(self):
         blocked = copy.deepcopy(self.environment)
@@ -398,13 +432,49 @@ class CollectionOperatorApplicationTests(unittest.TestCase):
         self.assertEqual(view["runtime"]["workflow_state"], "BLOCKED")
         self.assertEqual(view["available_ops"], [])
 
+    def test_physical_home_recovery_is_explicit_and_does_not_create_campaign(self):
+        ready = self.application.prepare_environment_call()
+        calls = []
+        recovery = {
+            "schema_version": "data_factory.home_recovery.v1",
+            "status": "HOME", "arm_goal_count": 1,
+            "gripper_open": True, "target_rad": [0.0] * 6,
+            "final_rad": [0.0] * 6,
+            "motion_qualification_digest": canonical_digest(["motion"]),
+        }
+        application = CollectionOperatorApplication(
+            session_id="physical-recovery-application-r001",
+            operator_label="local-operator",
+            catalog=self.catalog,
+            initial_selection=self.selection,
+            environment_call=lambda: copy.deepcopy(ready),
+            prepare_environment_call=lambda: copy.deepcopy(ready),
+            campaign_factory=lambda *_args: self.fail("recovery created a campaign"),
+            home_recovery_call=lambda: calls.append(True) or copy.deepcopy(recovery),
+            initial_environment=ready,
+            effect_scope="PHYSICAL",
+        )
+        self.addCleanup(application.close)
+        before = application.bridge_core.snapshot()
+        self.assertIn("recover_home", before["projection"]["available_ops"])
+        result = application.bridge_core.consume(intent(
+            before, "recover_home", {}, "explicit-home-recovery",
+        ))["result"]
+        after = application.bridge_core.snapshot()["projection"]
+        self.assertEqual((result["outcome"], calls), ("HOME", [True]))
+        self.assertEqual(after["home_recovery"], recovery)
+        self.assertEqual(self.campaigns, [])
+
     def test_only_projected_canonical_ops_dispatch_and_legacy_bulk_is_immutable(self):
         self.assertEqual(set(self.application.bridge_core.handlers), {
             "prepare_environment", "update_draft", "compile_draft",
             "edit_campaign_draft", "authorize_campaign", "cancel_session",
             "review_candidate", "new_campaign_same_settings",
+            "recover_home",
             "capture_workspace_point", "preview_workspace",
-            "save_workspace_revision", "new_workspace_registration",
+            "discard_workspace_preview",
+            "save_workspace", "save_workspace_revision",
+            "new_workspace_registration",
         })
         initial = self.application.bridge_core.snapshot()
         called = []
@@ -508,7 +578,7 @@ class CollectionOperatorApplicationTests(unittest.TestCase):
         materialized = copy.deepcopy(view["draft"]["direct_poses"])
         requested = {
             "place_id": self.selection["workspace_id"],
-            "yaw_deg": 483.5,
+            "yaw_deg": 197.5,
             "x_mm": 12.5,
             "y_mm": -7.25,
         }
@@ -518,7 +588,7 @@ class CollectionOperatorApplicationTests(unittest.TestCase):
         projected = self.application.bridge_core.snapshot()["projection"]
         self.assertEqual(projected["draft"]["authoring_mode"], "DIRECT_EDIT")
         self.assertEqual(projected["draft"]["direct_poses"], [*materialized, {
-            **requested, "yaw_deg": 123.5,
+            **requested, "yaw_deg": -162.5,
         }])
 
         before = copy.deepcopy(projected["draft"])
@@ -534,7 +604,7 @@ class CollectionOperatorApplicationTests(unittest.TestCase):
 
         self.consume("update_draft", {
             "draft_id": projected["draft"]["draft_id"],
-            "remove_pose": {**requested, "yaw_deg": 123.5},
+            "remove_pose": {**requested, "yaw_deg": -162.5},
         }, "remove-direct-pose")
         self.assertEqual(
             self.application.bridge_core.snapshot()["projection"]["draft"]["direct_poses"],
@@ -632,6 +702,10 @@ class CollectionOperatorApplicationTests(unittest.TestCase):
         for field, identifier in changed.items():
             source = copy.deepcopy(catalog["axes"][axis_for_field[field]][0])
             source.update(id=identifier, label=identifier)
+            if field == "cell_id":
+                source["metadata"] = {
+                    **source["metadata"], "place_id": changed["workspace_id"],
+                }
             catalog["axes"][axis_for_field[field]].append(source)
         catalog["combinations"].append(replacement)
         catalog["catalog_digest"] = canonical_digest({
@@ -665,6 +739,30 @@ class CollectionOperatorApplicationTests(unittest.TestCase):
         selected = application.bridge_core.snapshot()["projection"]["selection"]
         self.assertEqual(selected["combination_digest"], replacement["combination_digest"])
         self.assertTrue(all(selected[field] == value for field, value in changed.items()))
+        self.assertEqual(
+            application.bridge_core.snapshot()["projection"]["draft"]["current_object_pose"]["place_id"],
+            "PLACE_B",
+        )
+
+    def test_current_object_pose_is_the_single_nonpreset_campaign_anchor(self):
+        self.consume("prepare_environment", {}, "prepare-current-object")
+        view = self.application.bridge_core.snapshot()["projection"]
+        current = {
+            "place_id": self.selection["workspace_id"],
+            "yaw_deg": -37.5, "x_mm": 12.5, "y_mm": -7.25,
+        }
+        self.consume("update_draft", {
+            "draft_id": view["draft"]["draft_id"],
+            "current_object_pose": current,
+        }, "set-current-object")
+        authored = self.application.bridge_core.snapshot()["projection"]
+        self.assertEqual(authored["draft"]["current_object_pose"], current)
+        self.assertEqual(self.application._direct_anchor(), current)
+        self.consume("compile_draft", {
+            "draft_id": authored["draft"]["draft_id"],
+            "data_disposition": "TEST_ONLY",
+        }, "compile-current-object")
+        self.assertEqual(self.campaigns[-1].draft["current_object_pose"], current)
 
     def test_one_process_runs_terminal_campaign_then_creates_fresh_lineage(self):
         self.consume("prepare_environment", {}, "prepare")
@@ -686,6 +784,8 @@ class CollectionOperatorApplicationTests(unittest.TestCase):
         }, "authorize")
         running = self.application.bridge_core.snapshot()["projection"]
         self.assertEqual(running["available_ops"], ["cancel_session"])
+        self.assertEqual(running["runtime"]["progress"], 50)
+        self.assertEqual(running["runtime"]["campaign_progress"], 0)
 
         self.campaigns[0].complete()
         terminal = self.application.bridge_core.snapshot()["projection"]
@@ -694,6 +794,9 @@ class CollectionOperatorApplicationTests(unittest.TestCase):
             (3, 3),
         )
         self.assertEqual(len(terminal["episodes"]), 3)
+        self.assertNotIn("campaign_projection", terminal["technical_details"])
+        self.assertEqual(terminal["campaign_envelope"]["episode_count"], 3)
+        self.assertEqual(terminal["coverage"]["planned"], 3)
         self.assertEqual(
             terminal["available_ops"],
             ["new_campaign_same_settings"],
@@ -727,13 +830,131 @@ class CollectionOperatorApplicationTests(unittest.TestCase):
             "data_disposition": "TEST_ONLY",
         }, "authorize-runtime-states")
 
-        for state in ("PAUSED_AWAITING_OPERATOR", "BLOCKED", "CANCELLING"):
+        for state in ("PAUSED_AWAITING_OPERATOR", "CANCELLING"):
             with self.subTest(state=state):
                 self.campaigns[0].state = state
                 view = self.application.bridge_core.snapshot()["projection"]
                 self.assertEqual(view["workflow_state"], state)
                 self.assertEqual(view["runtime"]["workflow_state"], state)
+                self.assertIsNone(view["runtime"]["progress"])
+                self.assertEqual(view["runtime"]["campaign_progress"], 0)
                 self.assertEqual(view["available_ops"], [])
+
+        self.campaigns[0].state = "BLOCKED"
+        blocked = self.application.bridge_core.snapshot()["projection"]
+        self.assertEqual(blocked["available_ops"], ["new_campaign_same_settings"])
+
+    def test_settled_blocked_campaign_closes_and_returns_to_fresh_authoring(self):
+        self.consume("prepare_environment", {}, "prepare-blocked-recovery")
+        authoring = self.application.bridge_core.snapshot()["projection"]
+        compiled = self.consume("compile_draft", {
+            "draft_id": authoring["draft"]["draft_id"],
+            "data_disposition": "TEST_ONLY",
+        }, "compile-blocked-recovery")
+        self.consume("authorize_campaign", {
+            "draft_id": authoring["draft"]["draft_id"],
+            "manifest_digest": compiled["manifest_digest"],
+            "envelope_digest": compiled["envelope_digest"],
+            "data_disposition": "TEST_ONLY",
+        }, "authorize-blocked-recovery")
+        self.campaigns[0].state = "BLOCKED"
+
+        self.consume("new_campaign_same_settings", {}, "recover-blocked")
+
+        recovered = self.application.bridge_core.snapshot()["projection"]
+        self.assertEqual(recovered["workflow_state"], "AUTHORING")
+        self.assertEqual(recovered["draft"]["requested_count"], 3)
+        self.assertEqual(self.application.draft["normalized_seed"], 1)
+        self.assertTrue(self.campaigns[0].closed)
+
+    def test_blocked_recovery_refreshes_environment_before_fresh_authoring(self):
+        self.consume("prepare_environment", {}, "prepare-refresh-environment")
+        authoring = self.application.bridge_core.snapshot()["projection"]
+        compiled = self.consume("compile_draft", {
+            "draft_id": authoring["draft"]["draft_id"],
+            "data_disposition": "TEST_ONLY",
+        }, "compile-refresh-environment")
+        self.consume("authorize_campaign", {
+            "draft_id": authoring["draft"]["draft_id"],
+            "manifest_digest": compiled["manifest_digest"],
+            "envelope_digest": compiled["envelope_digest"],
+            "data_disposition": "TEST_ONLY",
+        }, "authorize-refresh-environment")
+        self.campaigns[0].state = "BLOCKED"
+        self.environment["state"] = "SETUP_REQUIRED"
+        self.environment["components"]["controller"] = {
+            "state": "MISSING", "owner": None, "reason": "NOT_RUNNING",
+        }
+
+        result = self.consume(
+            "new_campaign_same_settings", {}, "recover-refresh-environment",
+        )
+
+        self.assertEqual(result["outcome"], "ENVIRONMENT")
+        recovered = self.application.bridge_core.snapshot()["projection"]
+        self.assertEqual(recovered["workflow_state"], "ENVIRONMENT")
+        self.assertEqual(recovered["available_ops"], ["prepare_environment"])
+        self.assertEqual(recovered["environment"], self.environment)
+        self.assertTrue(self.campaigns[0].closed)
+
+    def test_blocked_recovery_query_failure_keeps_campaign_blocked(self):
+        self.consume("prepare_environment", {}, "prepare-refresh-failure")
+        authoring = self.application.bridge_core.snapshot()["projection"]
+        compiled = self.consume("compile_draft", {
+            "draft_id": authoring["draft"]["draft_id"],
+            "data_disposition": "TEST_ONLY",
+        }, "compile-refresh-failure")
+        self.consume("authorize_campaign", {
+            "draft_id": authoring["draft"]["draft_id"],
+            "manifest_digest": compiled["manifest_digest"],
+            "envelope_digest": compiled["envelope_digest"],
+            "data_disposition": "TEST_ONLY",
+        }, "authorize-refresh-failure")
+        campaign = self.campaigns[0]
+        campaign.state = "BLOCKED"
+        self.application.environment_call = mock.Mock(
+            side_effect=ContractError("OPERATOR_ENVIRONMENT_QUERY_FAILED"),
+        )
+
+        with self.assertRaisesRegex(
+            ContractError, "OPERATOR_ENVIRONMENT_QUERY_FAILED",
+        ):
+            self.consume(
+                "new_campaign_same_settings", {}, "recover-refresh-failure",
+            )
+
+        projection = self.application.bridge_core.snapshot()["projection"]
+        self.assertEqual(projection["workflow_state"], "BLOCKED")
+        self.assertEqual(projection["available_ops"], ["new_campaign_same_settings"])
+        self.assertIs(self.application._campaign, campaign)
+        self.assertFalse(campaign.closed)
+
+    def test_blocked_candidate_is_reviewed_before_fresh_campaign_is_offered(self):
+        self.consume("prepare_environment", {}, "prepare-blocked-review")
+        authored = self.application.bridge_core.snapshot()["projection"]
+        compiled = self.consume("compile_draft", {
+            "draft_id": authored["draft"]["draft_id"],
+            "data_disposition": "TEST_ONLY",
+        }, "compile-blocked-review")
+        self.consume("authorize_campaign", {
+            "draft_id": authored["draft"]["draft_id"],
+            "manifest_digest": compiled["manifest_digest"],
+            "envelope_digest": compiled["envelope_digest"],
+            "data_disposition": "TEST_ONLY",
+        }, "authorize-blocked-review")
+        campaign = self.campaigns[0]
+        campaign.state = "BLOCKED"
+        campaign.candidate_pending = True
+
+        blocked = self.application.bridge_core.snapshot()["projection"]
+        self.assertEqual(blocked["available_ops"], ["review_candidate"])
+        self.consume("review_candidate", {
+            "review_binding_digest": canonical_digest("review-binding"),
+            "choice": "FAIL", "reason": "TASK_GOAL",
+        }, "review-blocked")
+
+        recovered = self.application.bridge_core.snapshot()["projection"]
+        self.assertEqual(recovered["available_ops"], ["new_campaign_same_settings"])
 
     def test_compiled_campaign_can_be_discarded_before_authorization(self):
         self.consume("prepare_environment", {}, "prepare-edit")
@@ -755,13 +976,107 @@ class CollectionOperatorApplicationTests(unittest.TestCase):
         self.assertNotEqual(edited["draft"]["draft_id"], before["draft"]["draft_id"])
         self.assertTrue(self.campaigns[0].closed)
 
+    def test_named_start_pose_selection_projects_exact_direct_pairs(self):
+        setup = {
+            "profiles": [
+                {"start_pose_id": "start-a", "display_name": "시작 A", "status": "AVAILABLE"},
+                {"start_pose_id": "start-b", "display_name": "시작 B", "status": "AVAILABLE"},
+            ],
+            "selected_start_pose_ids": ["start-a", "start-b"],
+        }
+        captures = []
+
+        def capture(display_name):
+            captures.append(display_name)
+            return {
+                **setup,
+                "profiles": [*setup["profiles"], {
+                    "start_pose_id": "start-candidate",
+                    "display_name": display_name,
+                    "status": "CANDIDATE",
+                }],
+            }
+
+        application = CollectionOperatorApplication(
+            session_id="start-space-application-r001",
+            operator_label="local-operator", catalog=self.catalog,
+            initial_selection=self.selection,
+            environment_call=lambda: copy.deepcopy(self.environment),
+            prepare_environment_call=self.application.prepare_environment_call,
+            campaign_factory=lambda *_args: self.fail("campaign was not requested"),
+            start_pose_setup=setup, start_pose_capture_call=capture,
+        )
+        self.addCleanup(application.close)
+        current = application.bridge_core.snapshot()
+        application.bridge_core.consume(intent(
+            current, "prepare_environment", {}, "start-space-prepare",
+        ))
+        ready = application.bridge_core.snapshot()
+        projected = ready["projection"]
+        self.assertEqual(
+            projected["state_space_summary"]["eligible_pair_count"],
+            2 * projected["state_space_summary"]["selected_condition_count"],
+        )
+        application.bridge_core.consume(intent(ready, "update_draft", {
+            "draft_id": projected["draft"]["draft_id"],
+            "authoring_mode": "DIRECT_EDIT",
+        }, "start-space-direct"))
+        direct = application.bridge_core.snapshot()
+        pairs = direct["projection"]["draft"]["direct_pairs"]
+        self.assertEqual(len(pairs), 3)
+        self.assertEqual(
+            [pair["start_pose_id"] for pair in pairs],
+            ["start-a", "start-b", "start-a"],
+        )
+        application.bridge_core.consume(intent(direct, "capture_start_pose", {
+            "display_name": "새 준비 자세",
+        }, "start-space-capture"))
+        captured_view = application.bridge_core.snapshot()
+        captured = captured_view["projection"]
+        self.assertEqual(captures, ["새 준비 자세"])
+        self.assertEqual(captured["start_pose_setup"]["profiles"][-1]["status"], "CANDIDATE")
+        application.bridge_core.consume(intent(captured_view, "update_start_pose_selection", {
+            "selected_start_pose_ids": ["start-b"],
+        }, "start-space-select"))
+        selected = application.bridge_core.snapshot()
+        self.assertEqual(
+            {pair["start_pose_id"] for pair in selected["projection"]["draft"]["direct_pairs"]},
+            {"start-b"},
+        )
+
+    def test_assisted_start_pose_ensemble_is_seeded_balanced_and_stable(self):
+        starts = ["start-c", "start-a", "start-b"]
+        first = project_balanced_start_pose_ids(
+            starts, 8, normalized_seed=1,
+        )
+        self.assertEqual(
+            first,
+            [
+                "start-b", "start-c", "start-a", "start-b",
+                "start-c", "start-a", "start-b", "start-c",
+            ],
+        )
+        self.assertEqual(
+            first,
+            project_balanced_start_pose_ids(starts, 8, normalized_seed=1),
+        )
+        counts = [first.count(identifier) for identifier in sorted(starts)]
+        self.assertLessEqual(max(counts) - min(counts), 1)
+        self.assertEqual(
+            [
+                project_balanced_start_pose_ids(starts, 1, normalized_seed=seed)[0]
+                for seed in range(3)
+            ],
+            ["start-a", "start-b", "start-c"],
+        )
+
     def test_workspace_registration_is_a_separate_preview_first_product_axis(self):
         managers = []
         snapshots = []
         reloads = []
 
-        def manager_factory():
-            manager = StubWorkspaceManager(len(managers) + 1)
+        def manager_factory(display_name):
+            manager = StubWorkspaceManager(len(managers) + 1, display_name)
             managers.append(manager)
             return manager
 
@@ -778,7 +1093,11 @@ class CollectionOperatorApplicationTests(unittest.TestCase):
             if set(manager.captures) != set(manager.LABELS):
                 raise ContractError("STUB_WORKSPACE_INCOMPLETE")
             manager.preview = {
-                "status": "CANDIDATE_WITHIN_TOLERANCE",
+                "status": (
+                    "CANDIDATE_OUT_OF_TOLERANCE"
+                    if getattr(manager, "reject", False)
+                    else "CANDIDATE_WITHIN_TOLERANCE"
+                ),
                 "preview_digest": canonical_digest({
                     "workspace": manager.sequence,
                     "measurements": measurements,
@@ -812,6 +1131,12 @@ class CollectionOperatorApplicationTests(unittest.TestCase):
         application.bridge_core.consume(intent(
             initial, "prepare_environment", {}, "workspace-prepare",
         ))
+        ready = application.bridge_core.snapshot()
+        self.assertIn("new_workspace_registration", ready["projection"]["available_ops"])
+        application.bridge_core.consume(intent(
+            ready, "new_workspace_registration", {"display_name": "놓기 영역 B"},
+            "workspace-begin",
+        ))
 
         for label in StubWorkspaceManager.LABELS:
             current = application.bridge_core.snapshot()
@@ -839,9 +1164,9 @@ class CollectionOperatorApplicationTests(unittest.TestCase):
         ]["preview_digest"]
         self.assertEqual(
             previewed["projection"]["available_ops"],
-            ["update_draft", "compile_draft", "save_workspace_revision"],
+            ["update_draft", "compile_draft", "save_workspace"],
         )
-        application.bridge_core.consume(intent(previewed, "save_workspace_revision", {
+        application.bridge_core.consume(intent(previewed, "save_workspace", {
             "preview_digest": preview_digest,
         }, "workspace-save"))
 
@@ -851,7 +1176,8 @@ class CollectionOperatorApplicationTests(unittest.TestCase):
         self.assertEqual(len(saved["projection"]["workspace_registration"]["history"]), 1)
         self.assertIn("new_workspace_registration", saved["projection"]["available_ops"])
         application.bridge_core.consume(intent(
-            saved, "new_workspace_registration", {}, "workspace-new",
+            saved, "new_workspace_registration", {"display_name": "놓기 영역 C"},
+            "workspace-new",
         ))
         restarted = application.bridge_core.snapshot()["projection"]
         self.assertEqual(len(managers), 2)
@@ -860,6 +1186,34 @@ class CollectionOperatorApplicationTests(unittest.TestCase):
             for value in restarted["workspace_registration"]["captures"].values()
         ))
         self.assertEqual(len(restarted["workspace_registration"]["history"]), 1)
+
+        managers[-1].reject = True
+        for label in StubWorkspaceManager.LABELS:
+            current = application.bridge_core.snapshot()
+            application.bridge_core.consume(intent(
+                current, "capture_workspace_point", {"label": label},
+                f"workspace-retry-capture-{label.lower()}",
+            ))
+        captured = application.bridge_core.snapshot()
+        application.bridge_core.consume(intent(captured, "preview_workspace", {
+            "source_scale_bar_mm": 100.0,
+            "final_scale_bar_mm": 100.0,
+        }, "workspace-rejected-preview"))
+        rejected = application.bridge_core.snapshot()
+        rejected_preview = rejected["projection"]["workspace_registration"]["preview"]
+        self.assertEqual(
+            rejected["projection"]["available_ops"],
+            ["update_draft", "compile_draft", "discard_workspace_preview"],
+        )
+        application.bridge_core.consume(intent(
+            rejected, "discard_workspace_preview",
+            {"preview_digest": rejected_preview["preview_digest"]},
+            "workspace-discard-preview",
+        ))
+        retry = application.bridge_core.snapshot()["projection"]
+        self.assertIsNone(retry["workspace_registration"]["preview"])
+        self.assertIn("capture_workspace_point", retry["available_ops"])
+        self.assertIn("preview_workspace", retry["available_ops"])
 
 
 if __name__ == "__main__":

@@ -12,13 +12,13 @@ from typing import Any, Callable, Mapping
 from tools.data_factory.operator_bridge import INTENT_SCHEMA, OperatorIntentCore
 from tools.data_factory.operator_catalog import (
     project_assisted_poses,
+    project_balanced_start_pose_ids,
     validate_operator_pose,
     validate_operator_selection,
 )
 from tools.data_factory.operator_product_view import (
     AXIS_BINDINGS,
     DISPOSITION_TO_MODE,
-    MODE_TO_DISPOSITION,
     browser_selection,
     camera_choice,
     project_catalog,
@@ -37,10 +37,17 @@ class CollectionOperatorApplication:
         environment_call: Callable[[], Mapping[str, Any]],
         prepare_environment_call: Callable[[], Mapping[str, Any]],
         campaign_factory: Callable[[str, dict[str, Any], dict[str, Any]], Any],
-        workspace_manager_factory: Callable[[], Any] | None = None,
+        workspace_manager_factory: Callable[[str], Any] | None = None,
         workspace_snapshot_call: Callable[[], Mapping[str, Any]] | None = None,
         workspace_preview_call: Callable[[Any, Mapping[str, Any]], Mapping[str, Any]] | None = None,
         catalog_reload_call: Callable[[], Mapping[str, Any]] | None = None,
+        home_recovery_call: Callable[[], Mapping[str, Any]] | None = None,
+        camera_setup: Mapping[str, Any] | None = None,
+        camera_bindings_call: Callable[[Mapping[str, str]], Mapping[str, Any]] | None = None,
+        camera_refresh_call: Callable[[], Mapping[str, Any]] | None = None,
+        start_pose_setup: Mapping[str, Any] | None = None,
+        start_pose_capture_call: Callable[[str], Mapping[str, Any]] | None = None,
+        initial_environment: Mapping[str, Any] | None = None,
         effect_scope: str = "FAKE",
     ):
         if (
@@ -60,6 +67,14 @@ class CollectionOperatorApplication:
             callable(call) for call in workspace_calls
         ):
             raise ContractError("OPERATOR_APPLICATION_WORKSPACE")
+        if home_recovery_call is not None and not callable(home_recovery_call):
+            raise ContractError("OPERATOR_APPLICATION_RECOVERY")
+        if (camera_setup is None) != (camera_bindings_call is None):
+            raise ContractError("OPERATOR_APPLICATION_CAMERA_SETUP")
+        if camera_refresh_call is not None and camera_bindings_call is None:
+            raise ContractError("OPERATOR_APPLICATION_CAMERA_SETUP")
+        if (start_pose_setup is None) != (start_pose_capture_call is None):
+            raise ContractError("OPERATOR_APPLICATION_START_POSE")
         self.session_id = session_id
         self.operator_label = operator_label
         self.effect_scope = effect_scope
@@ -72,32 +87,60 @@ class CollectionOperatorApplication:
         self.workspace_snapshot_call = workspace_snapshot_call
         self.workspace_preview_call = workspace_preview_call
         self.catalog_reload_call = catalog_reload_call
-        self._workspace_manager = self._new_workspace_manager()
+        self.home_recovery_call = home_recovery_call
+        self.camera_setup = (
+            None if camera_setup is None else self._validated_camera_setup(camera_setup)
+        )
+        self.camera_bindings_call = camera_bindings_call
+        self.camera_refresh_call = camera_refresh_call
+        self.start_pose_setup = (
+            None if start_pose_setup is None
+            else self._validated_start_pose_setup(start_pose_setup)
+        )
+        self.start_pose_capture_call = start_pose_capture_call
+        self._camera_recovery_pending = False
+        self._last_home_recovery = None
+        self._workspace_manager = None
         self._workspace_history: list[dict[str, Any]] = []
         self._generation = 1
         self._inner_intent_sequence = 0
         self._campaign = None
         self._closed = False
-        self._environment_prepare_baseline = None
-        self._environment_view = self._read_environment()
+        self._environment_view = (
+            self._validated_environment(initial_environment)
+            if initial_environment is not None else self._read_environment()
+        )
         self.draft = self._new_draft(None)
+        handlers = {
+            "prepare_environment": self.prepare_environment,
+            "update_draft": self.update_draft,
+            "compile_draft": self.compile_draft,
+            "edit_campaign_draft": self.edit_campaign_draft,
+            "authorize_campaign": self.authorize_campaign,
+            "cancel_session": self.cancel_session,
+            "review_candidate": self.review_candidate,
+            "new_campaign_same_settings": self.new_campaign_same_settings,
+            "recover_home": self.recover_home,
+            "capture_workspace_point": self.capture_workspace_point,
+            "preview_workspace": self.preview_workspace,
+            "discard_workspace_preview": self.discard_workspace_preview,
+            "save_workspace": self.save_workspace,
+            "save_workspace_revision": self.save_workspace,
+            "new_workspace_registration": self.new_workspace_registration,
+        }
+        if self.camera_bindings_call is not None:
+            handlers["update_camera_bindings"] = self.update_camera_bindings
+        if self.camera_refresh_call is not None:
+            handlers["recover_camera_setup"] = self.recover_camera_setup
+        if self.start_pose_capture_call is not None:
+            handlers.update(
+                capture_start_pose=self.capture_start_pose,
+                update_start_pose_selection=self.update_start_pose_selection,
+            )
         self.core = OperatorIntentCore(
             session_id=session_id,
             projection_call=self.projection,
-            handlers={
-                "prepare_environment": self.prepare_environment,
-                "update_draft": self.update_draft,
-                "compile_draft": self.compile_draft,
-                "edit_campaign_draft": self.edit_campaign_draft,
-                "authorize_campaign": self.authorize_campaign,
-                "cancel_session": self.cancel_session,
-                "review_candidate": self.review_candidate,
-                "new_campaign_same_settings": self.new_campaign_same_settings,
-                "capture_workspace_point": self.capture_workspace_point,
-                "preview_workspace": self.preview_workspace,
-                "save_workspace_revision": self.save_workspace_revision,
-                "new_workspace_registration": self.new_workspace_registration,
-            },
+            handlers=handlers,
         )
 
     @property
@@ -110,6 +153,14 @@ class CollectionOperatorApplication:
     def _new_draft(self, previous: Mapping[str, Any] | None) -> dict[str, Any]:
         values = copy.deepcopy(dict(previous or {}))
         requested_count = values.get("requested_count", 3)
+        current_object_pose = values.get("current_object_pose")
+        if current_object_pose is None:
+            current_object_pose = self._selected_cell_pose()
+        if current_object_pose is None:
+            raise ContractError("OPERATOR_APPLICATION_DRAFT")
+        current_object_pose = validate_operator_pose(
+            self.catalog, self.selection, current_object_pose,
+        )
         direct_poses = values.get("direct_poses")
         if direct_poses is None:
             direct_poses = []
@@ -119,7 +170,27 @@ class CollectionOperatorApplication:
             validate_operator_pose(self.catalog, self.selection, value)
             for value in direct_poses
         ]
+        direct_poses = [pose for pose in direct_poses if pose != current_object_pose]
         if len({tuple(value.items()) for value in direct_poses}) != len(direct_poses):
+            raise ContractError("OPERATOR_APPLICATION_DRAFT")
+        selected_start_pose_ids = values.get("selected_start_pose_ids")
+        if selected_start_pose_ids is None:
+            selected_start_pose_ids = (
+                self.start_pose_setup["selected_start_pose_ids"]
+                if self.start_pose_setup is not None
+                else [self.selection["start_pose_id"]]
+            )
+        selected_start_pose_ids = self._validated_selected_start_poses(
+            selected_start_pose_ids,
+        )
+        direct_pairs = values.get("direct_pairs", [])
+        if not isinstance(direct_pairs, list):
+            raise ContractError("OPERATOR_APPLICATION_DRAFT")
+        direct_pairs = [
+            self._validated_direct_pair(value, selected_start_pose_ids)
+            for value in direct_pairs
+        ]
+        if len({canonical_digest(value) for value in direct_pairs}) != len(direct_pairs):
             raise ContractError("OPERATOR_APPLICATION_DRAFT")
         return {
             "draft_id": f"{self._id('campaign')}-draft",
@@ -131,15 +202,10 @@ class CollectionOperatorApplication:
             "normalized_seed": values.get("normalized_seed", 0),
             "pinned": copy.deepcopy(values.get("pinned", [])),
             "excluded": copy.deepcopy(values.get("excluded", [])),
+            "current_object_pose": copy.deepcopy(current_object_pose),
             "direct_poses": copy.deepcopy(direct_poses),
-            "included_cells": copy.deepcopy(
-                values.get("included_cells", [self.selection["cell_id"]])
-            ),
-            "cells": [{
-                "cell_id": self.selection["cell_id"],
-                "selected": True,
-                "sequence": 1,
-            }],
+            "selected_start_pose_ids": selected_start_pose_ids,
+            "direct_pairs": direct_pairs,
         }
 
     @staticmethod
@@ -150,17 +216,112 @@ class CollectionOperatorApplication:
             raise ContractError("OPERATOR_APPLICATION_ENVIRONMENT")
         return copy.deepcopy(dict(value))
 
+    @staticmethod
+    def _validated_camera_setup(value: object) -> dict[str, Any]:
+        if not isinstance(value, Mapping) or set(value) != {
+            "status", "reason", "profile_label", "devices", "bindings",
+            "required_roles", "available_roles",
+        }:
+            raise ContractError("OPERATOR_APPLICATION_CAMERA_SETUP")
+        result = copy.deepcopy(dict(value))
+        devices = result["devices"]
+        bindings = result["bindings"]
+        if (
+            result["status"] not in {
+                "READY", "BINDING_REQUIRED", "NO_CAMERA_CONNECTED",
+            }
+            or not isinstance(devices, list)
+            or not isinstance(bindings, Mapping)
+            or not isinstance(result["profile_label"], str)
+            or not result["profile_label"]
+            or any(
+                not isinstance(item, Mapping)
+                or set(item) != {"logical_id", "label", "status"}
+                or item["status"] != "CONNECTED"
+                for item in devices
+            )
+            or set(bindings) != {item["logical_id"] for item in devices}
+            or any(role not in {"UP", "SIDE", "WRIST", "UNUSED"} for role in bindings.values())
+            or not isinstance(result["required_roles"], list)
+            or not isinstance(result["available_roles"], list)
+        ):
+            raise ContractError("OPERATOR_APPLICATION_CAMERA_SETUP")
+        return result
+
+    @staticmethod
+    def _validated_start_pose_setup(value: object) -> dict[str, Any]:
+        if not isinstance(value, Mapping) or set(value) != {
+            "profiles", "selected_start_pose_ids",
+        }:
+            raise ContractError("OPERATOR_APPLICATION_START_POSE")
+        result = copy.deepcopy(dict(value))
+        profiles, selected = result["profiles"], result["selected_start_pose_ids"]
+        if (
+            not isinstance(profiles, list) or not profiles
+            or not isinstance(selected, list) or not selected
+            or len(selected) != len(set(selected))
+        ):
+            raise ContractError("OPERATOR_APPLICATION_START_POSE")
+        by_id = {}
+        for profile in profiles:
+            if (
+                not isinstance(profile, Mapping)
+                or set(profile) not in ({"start_pose_id", "display_name", "status"}, {
+                    "start_pose_id", "display_name", "status", "reason",
+                })
+                or not isinstance(profile.get("start_pose_id"), str)
+                or not SAFE_ID.fullmatch(profile["start_pose_id"])
+                or not isinstance(profile.get("display_name"), str)
+                or not profile["display_name"]
+                or profile.get("status") not in {
+                    "CANDIDATE", "AVAILABLE", "QUALIFICATION_REQUIRED",
+                }
+                or profile["start_pose_id"] in by_id
+            ):
+                raise ContractError("OPERATOR_APPLICATION_START_POSE")
+            by_id[profile["start_pose_id"]] = profile
+        if any(
+            identifier not in by_id or by_id[identifier]["status"] != "AVAILABLE"
+            for identifier in selected
+        ):
+            raise ContractError("OPERATOR_APPLICATION_START_POSE")
+        return result
+
+    def _validated_selected_start_poses(self, value: object) -> list[str]:
+        if self.start_pose_setup is None:
+            expected = [self.selection["start_pose_id"]]
+            if value != expected:
+                raise ContractError("OPERATOR_APPLICATION_START_POSE")
+            return expected
+        setup = self._validated_start_pose_setup({
+            **self.start_pose_setup, "selected_start_pose_ids": copy.deepcopy(value),
+        })
+        return setup["selected_start_pose_ids"]
+
+    def _validated_direct_pair(
+        self, value: object, selected_start_pose_ids: list[str] | None = None,
+    ) -> dict[str, Any]:
+        if not isinstance(value, Mapping) or set(value) != {
+            "start_pose_id", "place_id", "yaw_deg", "x_mm", "y_mm",
+        }:
+            raise ContractError("OPERATOR_APPLICATION_DRAFT")
+        start_pose_id = value["start_pose_id"]
+        selected = self._validated_selected_start_poses(
+            self.draft["selected_start_pose_ids"]
+            if selected_start_pose_ids is None else selected_start_pose_ids
+        )
+        if start_pose_id not in selected:
+            raise ContractError("OPERATOR_APPLICATION_DRAFT")
+        pose = validate_operator_pose(
+            self.catalog, self.selection,
+            {key: value[key] for key in ("place_id", "yaw_deg", "x_mm", "y_mm")},
+        )
+        return {"start_pose_id": start_pose_id, **pose}
+
     def _read_environment(self) -> dict[str, Any]:
         return self._validated_environment(self.environment_call())
 
-    @staticmethod
-    def _environment_facts(value: Mapping[str, Any]) -> dict[str, Any]:
-        return {
-            field: copy.deepcopy(item)
-            for field, item in value.items() if field != "observed_at"
-        }
-
-    def _direct_anchor(self) -> dict[str, Any] | None:
+    def _selected_cell_pose(self) -> dict[str, Any] | None:
         option = next((
             item for item in self.catalog["axes"]["cell"]
             if item["id"] == self.selection["cell_id"]
@@ -178,21 +339,45 @@ class CollectionOperatorApplication:
             )
         })
 
+    def _direct_anchor(self) -> dict[str, Any] | None:
+        pose = getattr(self, "draft", {}).get("current_object_pose")
+        return None if pose is None else copy.deepcopy(pose)
+
     def _direct_draft_ready(self) -> bool:
         if self.draft["authoring_mode"] != "DIRECT_EDIT":
             return True
+        if self.start_pose_setup is not None:
+            return len(self.draft["direct_pairs"]) == self.draft["requested_count"]
         anchor = self._direct_anchor()
         if anchor is None:
             return False
         required = 1 + sum(pose != anchor for pose in self.draft["direct_poses"])
         return required <= self.draft["requested_count"]
 
-    def _new_workspace_manager(self):
+    def _reset_direct_pairs(self) -> None:
+        if self.start_pose_setup is None:
+            return
+        poses = project_assisted_poses(
+            self.catalog, self.selection, self.draft["current_object_pose"],
+            self.draft["requested_count"], repeat=self.draft["repeat"],
+            normalized_seed=self.draft["normalized_seed"],
+        )
+        starts = project_balanced_start_pose_ids(
+            self.draft["selected_start_pose_ids"],
+            self.draft["requested_count"],
+            normalized_seed=self.draft["normalized_seed"],
+        )
+        self.draft["direct_pairs"] = [
+            {"start_pose_id": start_pose_id, **pose}
+            for start_pose_id, pose in zip(starts, poses)
+        ]
+
+    def _new_workspace_manager(self, display_name: str):
         if self.workspace_manager_factory is None:
             return None
-        manager = self.workspace_manager_factory()
+        manager = self.workspace_manager_factory(display_name)
         if not all(callable(getattr(manager, name, None)) for name in (
-            "projection", "capture", "save",
+            "projection", "capture", "discard_preview", "save",
         )):
             raise ContractError("OPERATOR_APPLICATION_WORKSPACE")
         return manager
@@ -210,16 +395,19 @@ class CollectionOperatorApplication:
 
     def _workspace_ops(self, workflow: str) -> list[str]:
         workspace = self._workspace_projection()
-        if workflow != "AUTHORING" or workspace is None:
+        if workflow != "AUTHORING" or self.workspace_manager_factory is None:
             return []
+        if workspace is None:
+            return ["new_workspace_registration"]
         preview, promotion = workspace.get("preview"), workspace.get("promotion")
         captures = workspace.get("captures")
         if promotion is not None:
             return ["new_workspace_registration"]
         if preview is not None:
             return (
-                ["save_workspace_revision"]
-                if preview.get("status") == "CANDIDATE_WITHIN_TOLERANCE" else []
+                ["save_workspace"]
+                if preview.get("status") == "CANDIDATE_WITHIN_TOLERANCE"
+                else ["discard_workspace_preview"]
             )
         result = ["capture_workspace_point"]
         if isinstance(captures, Mapping) and captures and all(
@@ -229,18 +417,7 @@ class CollectionOperatorApplication:
         return result
 
     def _environment(self) -> dict[str, Any]:
-        current = self._read_environment()
-        if (
-            self._environment_prepare_baseline is not None
-            and self._environment_facts(current)
-            == self._environment_facts(self._environment_prepare_baseline)
-        ):
-            return copy.deepcopy(self._environment_view)
-        self._environment_prepare_baseline = None
-        if self._environment_facts(current) != self._environment_facts(
-            self._environment_view
-        ):
-            self._environment_view = current
+        """Project the last measured environment without blocking browser reads."""
         return copy.deepcopy(self._environment_view)
 
     @staticmethod
@@ -274,6 +451,8 @@ class CollectionOperatorApplication:
 
     def _workflow(self, environment: Mapping[str, Any], inner: Mapping[str, Any] | None) -> str:
         if self._campaign is None:
+            if self._camera_recovery_pending:
+                return "ENVIRONMENT"
             return "AUTHORING" if environment["state"] == "READY" else "ENVIRONMENT"
         runtime = inner.get("runtime") if isinstance(inner, Mapping) else None
         state = runtime.get("workflow_state") if isinstance(runtime, Mapping) else None
@@ -313,6 +492,14 @@ class CollectionOperatorApplication:
         selection_execution = selected_combination["execution"][
             self.selection["data_mode"]
         ]
+        if self.camera_setup is not None and (
+            self.camera_setup["status"] != "READY"
+            or self.camera_setup["reason"] is not None
+        ):
+            selection_execution = {
+                "executable": False,
+                "reason": self.camera_setup["reason"] or "CAMERA_ROLE_BINDING_REQUIRED",
+            }
         campaign = None if self._campaign is None else {
             "campaign_id": self._id("campaign"),
             "state": workflow,
@@ -329,13 +516,26 @@ class CollectionOperatorApplication:
             "envelope_digest": envelope.get("envelope_digest"),
             "data_disposition": self._disposition(self.selection["data_mode"]),
         }
+        if campaign_review is not None and isinstance(
+            inner.get("gripper_tuning"), Mapping
+        ):
+            campaign_review["gripper_tuning"] = copy.deepcopy(
+                inner["gripper_tuning"]
+            )
         if workflow == "ENVIRONMENT":
             operations = (
                 ["prepare_environment"]
-                if environment["state"] == "SETUP_REQUIRED" else []
+                if environment["state"] == "SETUP_REQUIRED"
+                or self._camera_recovery_pending else []
             )
         elif workflow == "AUTHORING":
             operations = ["update_draft"]
+            if self.start_pose_capture_call is not None:
+                operations.extend([
+                    "capture_start_pose", "update_start_pose_selection",
+                ])
+            if self.home_recovery_call is not None:
+                operations.append("recover_home")
             if (
                 selection_execution["executable"] is True
                 and self._direct_draft_ready()
@@ -346,22 +546,65 @@ class CollectionOperatorApplication:
             operations = ["edit_campaign_draft", "authorize_campaign"]
         elif workflow == "RUNNING":
             operations = ["cancel_session"]
+        elif workflow == "BLOCKED":
+            operations = []
+            if isinstance(inner, Mapping) and "review_candidate" in inner.get("available_ops", []):
+                operations.append("review_candidate")
+            elif runtime.get("active_child_id") is None:
+                if self.home_recovery_call is not None:
+                    operations.append("recover_home")
+                operations.append("new_campaign_same_settings")
         elif workflow == "TERMINAL":
             operations = []
             if isinstance(inner, Mapping) and "review_candidate" in inner.get("available_ops", []):
                 operations.append("review_candidate")
+            if self.home_recovery_call is not None:
+                operations.append("recover_home")
             operations.append("new_campaign_same_settings")
         else:
             operations = []
+        if (
+            self.camera_bindings_call is not None
+            and self.camera_setup is not None
+            and bool(self.camera_setup["devices"])
+            and self._campaign is None
+            and workflow in {"ENVIRONMENT", "AUTHORING"}
+        ):
+            operations.insert(0, "update_camera_bindings")
+        camera_failure = any(
+            isinstance(code, str) and "CAMERA" in code
+            for code in runtime.get("reason_codes", [])
+        )
+        if (
+            self.camera_refresh_call is not None
+            and self._campaign is not None
+            and workflow in {"BLOCKED", "TERMINAL"}
+            and runtime.get("active_child_id") is None
+            and camera_failure
+        ):
+            operations.insert(0, "recover_camera_setup")
         cells = project_cells(
             self.catalog, self.selection, split=self.draft["split"],
             repeat=self.draft["repeat"],
         )
-        included = set(self.draft["included_cells"])
+        selected_poses = (
+            [
+                {key: pair[key] for key in ("place_id", "yaw_deg", "x_mm", "y_mm")}
+                for pair in self.draft["direct_pairs"]
+            ]
+            if self.start_pose_setup is not None
+            and self.draft["authoring_mode"] == "DIRECT_EDIT"
+            else [self.draft["current_object_pose"], *self.draft["direct_poses"]]
+        )
         for cell in cells:
             if cell["eligibility_status"] == "ELIGIBLE":
                 cell["selection_state"] = (
-                    "SELECTED" if cell["cell_id"] in included else "AVAILABLE"
+                    "SELECTED" if any(
+                        all(pose.get(field) == cell.get(field) for field in (
+                            "x_mm", "y_mm", "yaw_deg",
+                        ))
+                        for pose in selected_poses
+                    ) else "AVAILABLE"
                 )
         browser_draft = {
             "draft_id": self.draft["draft_id"],
@@ -369,6 +612,7 @@ class CollectionOperatorApplication:
             "authoring_mode": self.draft["authoring_mode"],
             "requested_count": self.draft["requested_count"],
             "repeat": self.draft["repeat"],
+            "current_object_pose": copy.deepcopy(self.draft["current_object_pose"]),
             "direct_poses": copy.deepcopy(self.draft["direct_poses"]),
             "execution_ready": selection_execution["executable"],
             "execution_reason": (
@@ -378,13 +622,21 @@ class CollectionOperatorApplication:
             "draft_ready": self._direct_draft_ready(),
             "draft_reason": (
                 None if self._direct_draft_ready()
-                else "DIRECT_POSE_COUNT_EXCEEDS_EPISODES"
+                else (
+                    "DIRECT_PAIR_COUNT_MISMATCH"
+                    if self.start_pose_setup is not None
+                    else "DIRECT_POSE_COUNT_EXCEEDS_EPISODES"
+                )
             ),
             "selection": browser_selection(
                 self.selection, split=self.draft["split"],
             ),
             "cells": cells,
         }
+        if self.start_pose_setup is not None:
+            browser_draft["direct_pairs"] = copy.deepcopy(
+                self.draft["direct_pairs"],
+            )
         ui_state = (
             (
                 "PREPARING"
@@ -395,12 +647,14 @@ class CollectionOperatorApplication:
         if workflow == "TERMINAL":
             ui_state = "TERMINAL"
         ui_runtime = copy.deepcopy(dict(runtime))
+        campaign_progress = 0 if total == 0 else min(100, 100 * completed / total)
         ui_runtime.update({
             "workflow_state": ui_state,
             "measurement_outcome": runtime.get("measurement_outcome", "NOT_MEASURED"),
             "reason_codes": copy.deepcopy(runtime.get("reason_codes", [])),
             "active_child_id": runtime.get("active_child_id"),
-            "progress": 0 if total == 0 else min(100, 100 * completed / total),
+            "progress": runtime.get("progress"),
+            "campaign_progress": campaign_progress,
             "current_episode": (
                 completed + 1 if ui_state == "RUNNING" and completed < total else None
             ),
@@ -430,6 +684,7 @@ class CollectionOperatorApplication:
                     raise ContractError("OPERATOR_APPLICATION_COVERAGE")
                 coverage_sequence.append({
                     "order_index": planned["order_index"] + 1,
+                    "start_pose_id": planned.get("robot_start_pose_id"),
                     "place_id": condition["place_id"],
                     "x_mm": condition["x_mm"],
                     "y_mm": condition["y_mm"],
@@ -486,6 +741,27 @@ class CollectionOperatorApplication:
                 option["reason"] = combination["execution"][
                     self.selection["data_mode"]
                 ]["reason"]
+        start_pose_setup = None
+        state_space_summary = None
+        if self.start_pose_setup is not None:
+            start_pose_setup = copy.deepcopy(self.start_pose_setup)
+            start_pose_setup["selected_start_pose_ids"] = copy.deepcopy(
+                self.draft["selected_start_pose_ids"],
+            )
+            eligible_conditions = sum(
+                cell["eligibility_status"] == "ELIGIBLE" for cell in cells
+            )
+            state_space_summary = {
+                "selected_start_pose_count": len(
+                    self.draft["selected_start_pose_ids"],
+                ),
+                "selected_condition_count": eligible_conditions,
+                "eligible_pair_count": (
+                    len(self.draft["selected_start_pose_ids"])
+                    * eligible_conditions
+                ),
+                "planned_count": self.draft["requested_count"],
+            }
         return {
             "connection_state": "READY",
             "effect_scope": self.effect_scope,
@@ -530,9 +806,20 @@ class CollectionOperatorApplication:
                 "application_generation": self._generation,
                 "catalog_digest": self.catalog.get("catalog_digest"),
                 "combination_digest": self.selection["combination_digest"],
-                "campaign_projection": copy.deepcopy(inner),
             },
             "workspace_registration": self._workspace_projection(),
+            "home_recovery": copy.deepcopy(self._last_home_recovery),
+            **(
+                {
+                    "start_pose_setup": start_pose_setup,
+                    "state_space_summary": state_space_summary,
+                }
+                if start_pose_setup is not None else {}
+            ),
+            **(
+                {"camera_setup": copy.deepcopy(self.camera_setup)}
+                if self.camera_setup is not None else {}
+            ),
         }
 
     def _require(self, expected: str, payload: Mapping[str, Any], fields: set[str]) -> None:
@@ -541,17 +828,78 @@ class CollectionOperatorApplication:
 
     def prepare_environment(self, payload: dict[str, Any], _view: dict[str, Any]) -> dict[str, Any]:
         self._require("ENVIRONMENT", payload, set())
-        baseline = copy.deepcopy(self._environment_view)
         self._environment_view = self._validated_environment(
             self.prepare_environment_call()
         )
-        self._environment_prepare_baseline = baseline
+        self._camera_recovery_pending = False
         return {
             "outcome": self._environment_view["state"],
             "environment": copy.deepcopy(self._environment_view),
         }
 
+    def update_camera_bindings(
+        self, payload: dict[str, Any], _view: dict[str, Any],
+    ) -> dict[str, Any]:
+        if (
+            self.camera_bindings_call is None
+            or self._campaign is not None
+            or self.projection()["workflow_state"] not in {"ENVIRONMENT", "AUTHORING"}
+            or set(payload) != {"bindings"}
+            or not isinstance(payload["bindings"], Mapping)
+        ):
+            raise ContractError("OPERATOR_APPLICATION_CAMERA_SETUP")
+        updated = self.camera_bindings_call(copy.deepcopy(dict(payload["bindings"])))
+        camera_setup = self._apply_camera_update(updated)
+        return {
+            "outcome": camera_setup["status"],
+            "camera_setup": copy.deepcopy(camera_setup),
+        }
+
+    def _apply_camera_update(self, updated: object) -> dict[str, Any]:
+        if not isinstance(updated, Mapping) or set(updated) != {
+            "camera_setup", "catalog", "selection", "environment",
+        }:
+            raise ContractError("OPERATOR_APPLICATION_CAMERA_SETUP")
+        camera_setup = self._validated_camera_setup(updated["camera_setup"])
+        catalog = copy.deepcopy(dict(updated["catalog"]))
+        selection = validate_operator_selection(catalog, updated["selection"])
+        environment = self._validated_environment(updated["environment"])
+        self.camera_setup = camera_setup
+        self.catalog = catalog
+        self.selection = selection
+        self._environment_view = environment
+        return camera_setup
+
+    def recover_camera_setup(
+        self, payload: dict[str, Any], _view: dict[str, Any],
+    ) -> dict[str, Any]:
+        projection = self.projection()
+        if (
+            payload
+            or self.camera_refresh_call is None
+            or "recover_camera_setup" not in projection["available_ops"]
+        ):
+            raise ContractError("OPERATOR_APPLICATION_CAMERA_RECOVERY")
+        previous = copy.deepcopy(self.draft)
+        close = getattr(self._campaign, "close", None)
+        if callable(close):
+            close()
+        self._campaign = None
+        self._generation += 1
+        previous["normalized_seed"] = previous.get("normalized_seed", 0) + 1
+        self.draft = self._new_draft(previous)
+        self._camera_recovery_pending = True
+        camera_setup = self._apply_camera_update(self.camera_refresh_call())
+        return {
+            "outcome": "ENVIRONMENT",
+            "camera_setup": copy.deepcopy(camera_setup),
+            "draft_id": self.draft["draft_id"],
+        }
+
     def _update_browser_selection(self, axis: str, value: object) -> None:
+        previous_workspace = (
+            self.selection["workspace_id"], self.selection["frame_id"],
+        )
         browser_catalog = project_catalog(
             self.catalog, self.selection, split=self.draft["split"],
         )
@@ -574,13 +922,15 @@ class CollectionOperatorApplication:
             _domain_axis, field = AXIS_BINDINGS[axis]
             expected = value
             profile_id = device_id = None
+        current_pose = self._selected_cell_pose()
+        cell_metadata = {
+            item["id"]: item.get("metadata", {})
+            for item in self.catalog["axes"]["cell"]
+        }
         candidates = []
         for combination in self.catalog["combinations"]:
             if axis == "camera":
-                changed = (
-                    combination.get("camera_profile_id") == profile_id
-                    and combination.get("camera_device_id") == device_id
-                )
+                changed = camera_choice(combination) == value
             else:
                 changed = combination.get(field) == expected
             if not changed:
@@ -613,10 +963,26 @@ class CollectionOperatorApplication:
                 preserved += int(
                     combination.get("cell_id") == self.selection["cell_id"]
                 )
+                candidate_pose = cell_metadata.get(combination.get("cell_id"), {})
+                preserved += int(
+                    current_pose is not None
+                    and all(
+                        candidate_pose.get(name) == current_pose[name]
+                        for name in ("yaw_deg", "x_mm", "y_mm")
+                    )
+                )
                 candidates.append((
                     execution.get("executable") is True,
                     preserved, combination["combination_digest"], combination,
                 ))
+        if axis != "camera" and self.selection.get("camera_binding_digest") is not None:
+            same_camera = [
+                item for item in candidates
+                if item[3].get("camera_binding_digest")
+                == self.selection["camera_binding_digest"]
+            ]
+            if same_camera:
+                candidates = same_camera
         if not candidates:
             raise ContractError("OPERATOR_APPLICATION_SELECTION")
         combination = sorted(
@@ -630,7 +996,22 @@ class CollectionOperatorApplication:
             camera_profile_id=combination["camera_profile_id"],
             camera_device_id=combination["camera_device_id"],
         )
-        self.draft["included_cells"] = [combination["cell_id"]]
+        if "camera_bindings" in self.selection:
+            self.selection.update(
+                camera_bindings=copy.deepcopy(combination["camera_bindings"]),
+                camera_binding_digest=combination["camera_binding_digest"],
+            )
+        if previous_workspace != (
+            self.selection["workspace_id"], self.selection["frame_id"],
+        ):
+            current = self._selected_cell_pose()
+            if current is None:
+                raise ContractError("OPERATOR_APPLICATION_DRAFT")
+            self.draft["current_object_pose"] = current
+            self.draft["direct_poses"] = []
+            self.draft["direct_pairs"] = []
+            if self.draft["authoring_mode"] == "DIRECT_EDIT":
+                self._reset_direct_pairs()
 
     def update_draft(self, payload: dict[str, Any], _view: dict[str, Any]) -> dict[str, Any]:
         if (
@@ -646,25 +1027,40 @@ class CollectionOperatorApplication:
             self._update_browser_selection(axis, selected)
         elif field == "authoring_mode" and value in {"ASSISTED", "DIRECT_EDIT"}:
             if value == "DIRECT_EDIT" and self.draft[field] == "ASSISTED":
-                anchor = self._direct_anchor()
-                if anchor is None:
-                    raise ContractError("OPERATOR_APPLICATION_DRAFT")
-                direct_poses = []
-                for pose in project_assisted_poses(
-                    self.catalog, self.selection, anchor,
-                    self.draft["requested_count"], repeat=self.draft["repeat"],
-                ):
-                    if pose != anchor and pose not in direct_poses:
-                        direct_poses.append(pose)
-                self.draft["direct_poses"] = direct_poses
+                if self.start_pose_setup is not None:
+                    self._reset_direct_pairs()
+                else:
+                    anchor = self._direct_anchor()
+                    if anchor is None:
+                        raise ContractError("OPERATOR_APPLICATION_DRAFT")
+                    direct_poses = []
+                    for pose in project_assisted_poses(
+                        self.catalog, self.selection, anchor,
+                        self.draft["requested_count"], repeat=self.draft["repeat"],
+                        normalized_seed=self.draft["normalized_seed"],
+                    ):
+                        if pose != anchor and pose not in direct_poses:
+                            direct_poses.append(pose)
+                    self.draft["direct_poses"] = direct_poses
             elif value == "ASSISTED":
                 self.draft["direct_poses"] = []
+                self.draft["direct_pairs"] = []
             self.draft[field] = value
             self.selection["policy_id"] = (
                 "DETERMINISTIC_SPREAD" if value == "ASSISTED" else "DIRECT_SELECTION"
             )
         elif field in {"requested_count", "repeat"} and type(value) is int and 1 <= value <= 100:
             self.draft[field] = value
+            if self.draft["authoring_mode"] == "DIRECT_EDIT":
+                self._reset_direct_pairs()
+        elif field == "current_object_pose" and isinstance(value, Mapping):
+            checked = validate_operator_pose(self.catalog, self.selection, value)
+            self.draft["current_object_pose"] = checked
+            self.draft["direct_poses"] = [
+                pose for pose in self.draft["direct_poses"] if pose != checked
+            ]
+            if self.draft["authoring_mode"] == "DIRECT_EDIT":
+                self._reset_direct_pairs()
         elif field == "split" and value in {"TRAIN", "ID", "OOD"}:
             self._update_browser_selection("split", value)
         elif field == "add_pose" and isinstance(value, Mapping):
@@ -683,6 +1079,21 @@ class CollectionOperatorApplication:
             if checked not in self.draft["direct_poses"]:
                 raise ContractError("OPERATOR_APPLICATION_DRAFT")
             self.draft["direct_poses"].remove(checked)
+        elif field == "add_pair" and self.start_pose_setup is not None:
+            checked = self._validated_direct_pair(value)
+            if (
+                checked in self.draft["direct_pairs"]
+                or len(self.draft["direct_pairs"]) >= self.draft["requested_count"]
+            ):
+                raise ContractError("OPERATOR_APPLICATION_DRAFT")
+            self.draft["direct_pairs"].append(checked)
+            self.draft["authoring_mode"] = "DIRECT_EDIT"
+            self.selection["policy_id"] = "DIRECT_SELECTION"
+        elif field == "remove_pair" and self.start_pose_setup is not None:
+            checked = self._validated_direct_pair(value)
+            if checked not in self.draft["direct_pairs"]:
+                raise ContractError("OPERATOR_APPLICATION_DRAFT")
+            self.draft["direct_pairs"].remove(checked)
         else:
             raise ContractError("OPERATOR_APPLICATION_DRAFT")
         self.draft["revision"] += 1
@@ -693,7 +1104,6 @@ class CollectionOperatorApplication:
         if (
             payload["draft_id"] != self.draft["draft_id"]
             or payload["data_disposition"] != self._disposition(self.selection["data_mode"])
-            or not self.draft["included_cells"]
             or not self._direct_draft_ready()
         ):
             raise ContractError("OPERATOR_APPLICATION_DRAFT")
@@ -741,12 +1151,12 @@ class CollectionOperatorApplication:
             raise ContractError("OPERATOR_APPLICATION_WORKSPACE_PREVIEW")
         return {"outcome": "WORKSPACE_PREVIEW_READY", "preview": copy.deepcopy(dict(value))}
 
-    def save_workspace_revision(
+    def save_workspace(
         self, payload: dict[str, Any], _view: dict[str, Any],
     ) -> dict[str, Any]:
         if (
             self.projection()["workflow_state"] != "AUTHORING"
-            or "save_workspace_revision" not in self.projection()["available_ops"]
+            or "save_workspace" not in self.projection()["available_ops"]
             or set(payload) != {"preview_digest"}
         ):
             raise ContractError("OPERATOR_APPLICATION_WORKSPACE_STATE")
@@ -762,7 +1172,25 @@ class CollectionOperatorApplication:
             self.catalog = previous
             raise
         self._workspace_history.append(copy.deepcopy(dict(promotion)))
-        return {"outcome": "WORKSPACE_REVISION_SAVED", "promotion": copy.deepcopy(dict(promotion))}
+        return {"outcome": "WORKSPACE_SAVED", "promotion": copy.deepcopy(dict(promotion))}
+
+    def discard_workspace_preview(
+        self, payload: dict[str, Any], _view: dict[str, Any],
+    ) -> dict[str, Any]:
+        if (
+            self._workspace_manager is None
+            or self.projection()["workflow_state"] != "AUTHORING"
+            or "discard_workspace_preview" not in self.projection()["available_ops"]
+            or set(payload) != {"preview_digest"}
+        ):
+            raise ContractError("OPERATOR_APPLICATION_WORKSPACE_STATE")
+        workspace = self._workspace_manager.discard_preview(
+            payload["preview_digest"],
+        )
+        return {
+            "outcome": "WORKSPACE_PREVIEW_DISCARDED",
+            "workspace": copy.deepcopy(dict(workspace)),
+        }
 
     def new_workspace_registration(
         self, payload: dict[str, Any], _view: dict[str, Any],
@@ -770,13 +1198,56 @@ class CollectionOperatorApplication:
         if (
             self.projection()["workflow_state"] != "AUTHORING"
             or "new_workspace_registration" not in self.projection()["available_ops"]
-            or payload
+            or set(payload) != {"display_name"}
         ):
             raise ContractError("OPERATOR_APPLICATION_WORKSPACE_STATE")
-        self._workspace_manager = self._new_workspace_manager()
+        self._workspace_manager = self._new_workspace_manager(payload["display_name"])
         return {
             "outcome": "WORKSPACE_REGISTRATION_READY",
             "workspace": self._workspace_manager.projection(),
+        }
+
+    def capture_start_pose(
+        self, payload: dict[str, Any], _view: dict[str, Any],
+    ) -> dict[str, Any]:
+        if (
+            self.start_pose_capture_call is None
+            or self.projection()["workflow_state"] != "AUTHORING"
+            or set(payload) != {"display_name"}
+            or not isinstance(payload["display_name"], str)
+        ):
+            raise ContractError("OPERATOR_APPLICATION_START_POSE")
+        setup = self._validated_start_pose_setup(
+            self.start_pose_capture_call(payload["display_name"]),
+        )
+        if setup["selected_start_pose_ids"] != self.draft["selected_start_pose_ids"]:
+            raise ContractError("OPERATOR_APPLICATION_START_POSE")
+        self.start_pose_setup = setup
+        return {
+            "outcome": "START_POSE_CAPTURED",
+            "start_pose_setup": copy.deepcopy(setup),
+        }
+
+    def update_start_pose_selection(
+        self, payload: dict[str, Any], _view: dict[str, Any],
+    ) -> dict[str, Any]:
+        if (
+            self.start_pose_setup is None
+            or self.projection()["workflow_state"] != "AUTHORING"
+            or set(payload) != {"selected_start_pose_ids"}
+        ):
+            raise ContractError("OPERATOR_APPLICATION_START_POSE")
+        selected = self._validated_selected_start_poses(
+            payload["selected_start_pose_ids"],
+        )
+        self.draft["selected_start_pose_ids"] = selected
+        self.start_pose_setup["selected_start_pose_ids"] = copy.deepcopy(selected)
+        if self.draft["authoring_mode"] == "DIRECT_EDIT":
+            self._reset_direct_pairs()
+        self.draft["revision"] += 1
+        return {
+            "outcome": "START_POSE_SELECTION_UPDATED",
+            "selected_start_pose_ids": copy.deepcopy(selected),
         }
 
     def authorize_campaign(self, payload: dict[str, Any], _view: dict[str, Any]) -> dict[str, Any]:
@@ -801,21 +1272,87 @@ class CollectionOperatorApplication:
         return self._forward("cancel_session", payload)
 
     def review_candidate(self, payload: dict[str, Any], _view: dict[str, Any]) -> dict[str, Any]:
-        if self.projection()["workflow_state"] != "TERMINAL":
+        projection = self.projection()
+        if (
+            projection["workflow_state"] not in {"BLOCKED", "TERMINAL"}
+            or "review_candidate" not in projection["available_ops"]
+        ):
             raise ContractError("OPERATOR_APPLICATION_STATE")
         return self._forward("review_candidate", payload)
 
+    def recover_home(self, payload: dict[str, Any], _view: dict[str, Any]) -> dict[str, Any]:
+        projection = self.projection()
+        if (
+            payload
+            or self.effect_scope != "PHYSICAL"
+            or self.home_recovery_call is None
+            or "recover_home" not in projection["available_ops"]
+            or projection["runtime"].get("active_child_id") is not None
+        ):
+            raise ContractError("OPERATOR_APPLICATION_RECOVERY_STATE")
+        value = self.home_recovery_call()
+        if (
+            not isinstance(value, Mapping)
+            or value.get("schema_version") != "data_factory.home_recovery.v1"
+            or value.get("status") not in {"HOME", "ALREADY_HOME"}
+            or value.get("gripper_open") is not True
+            or value.get("arm_goal_count") not in {0, 1}
+        ):
+            raise ContractError("OPERATOR_APPLICATION_RECOVERY")
+        self._last_home_recovery = copy.deepcopy(dict(value))
+        self._environment_view = self._read_environment()
+        return {
+            "outcome": value["status"],
+            "home_recovery": copy.deepcopy(self._last_home_recovery),
+        }
+
     def _replace_campaign(self) -> dict[str, Any]:
-        if self.projection()["workflow_state"] != "TERMINAL":
+        projection = self.projection()
+        workflow = projection["workflow_state"]
+        if (
+            workflow not in {"BLOCKED", "TERMINAL"}
+            or "new_campaign_same_settings" not in projection["available_ops"]
+        ):
             raise ContractError("OPERATOR_APPLICATION_STATE")
         previous = copy.deepcopy(self.draft)
+        _snapshot, inner = self._campaign_snapshot()
+        session = inner.get("campaign_session") if isinstance(inner, Mapping) else None
+        campaign = session.get("campaign") if isinstance(session, Mapping) else None
+        terminal_pose = (
+            inner.get("terminal_object_pose") if isinstance(inner, Mapping) else None
+        )
+        if (
+            isinstance(campaign, Mapping)
+            and campaign.get("state") == "COMPLETE"
+            and campaign.get("remaining_intents") == 0
+            and isinstance(campaign.get("completed_intents"), int)
+            and campaign["completed_intents"] > 0
+            and terminal_pose is not None
+        ):
+            previous["current_object_pose"] = validate_operator_pose(
+                self.catalog, self.selection, terminal_pose,
+            )
+            previous["direct_poses"] = [
+                pose for pose in previous["direct_poses"]
+                if pose != previous["current_object_pose"]
+            ]
+        fresh_environment = self._read_environment()
         close = getattr(self._campaign, "close", None)
         if callable(close):
             close()
         self._campaign = None
+        self._environment_view = fresh_environment
         self._generation += 1
+        previous["normalized_seed"] = previous.get("normalized_seed", 0) + 1
         self.draft = self._new_draft(previous)
-        return {"outcome": "AUTHORING", "draft_id": self.draft["draft_id"]}
+        return {
+            "outcome": (
+                "AUTHORING"
+                if self._environment_view["state"] == "READY"
+                else "ENVIRONMENT"
+            ),
+            "draft_id": self.draft["draft_id"],
+        }
 
     def new_campaign_same_settings(self, payload: dict[str, Any], _view: dict[str, Any]) -> dict[str, Any]:
         if payload:

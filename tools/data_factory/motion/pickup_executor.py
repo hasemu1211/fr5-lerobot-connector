@@ -49,6 +49,7 @@ COMMAND_FIELDS = {"schema_version", "op_id", "op", "payload"}
 COMMAND_OPS = {"preflight", "plan", "approve", "execute", "heartbeat", "confirm", "grasp_verdict", "semantic_verdict", "release_verdict", "cancel", "status"}
 ACTIVE_STATES = {"EXECUTING", "PRECONTACT_HUMAN", "GRASP_VERDICT", "SEMANTIC_VERDICT", "RELEASE_VERDICT"}
 RECYCLE_PHASES = ("RECYCLE_APPROACH_PTP", "LOWER_LIN", "GRIPPER_OPEN", "RETREAT_LIN", "SAFE_POSE_PTP")
+EXECUTION_RESULT_MARGIN_S = 2.0
 EXPECTED_GRAPH = {
     "move_action": ("/move_action", "moveit_msgs/action/MoveGroup"),
     "execute_trajectory": ("/execute_trajectory", "moveit_msgs/action/ExecuteTrajectory"),
@@ -349,6 +350,7 @@ class PickupExecutor:
         planned_steps = []
         for step in motion_program["steps"]:
             phase = step["phase"]
+            planned_duration_s = None
             if phase in ARM_PHASES:
                 result = _exact(
                     self.transport.plan_arm(
@@ -378,6 +380,18 @@ class PickupExecutor:
                 final_state = _joint_positions(result["final_joint_state"])
                 serialized = result["serialized_trajectory"]
                 step_type = "ARM"
+                duration_reader = getattr(self.transport, "arm_trajectory_duration_s", None)
+                if callable(duration_reader):
+                    planned_duration_s = duration_reader(serialized)
+                    if (
+                        not isinstance(planned_duration_s, (int, float))
+                        or isinstance(planned_duration_s, bool)
+                        or not math.isfinite(planned_duration_s)
+                        or planned_duration_s <= 0
+                    ):
+                        raise ContractError("PLAN_TRAJECTORY_DURATION")
+                    if planned_duration_s + EXECUTION_RESULT_MARGIN_S > step["limits"]["execution_timeout_s"]:
+                        raise ContractError("EXECUTION_TIMEOUT_INSUFFICIENT")
             else:
                 serialized = self.transport.build_gripper_goal(
                     phase, step["gripper_position_m"], step["limits"]
@@ -395,6 +409,8 @@ class PickupExecutor:
                 "start_joint_state": state,
                 "final_joint_state": final_state,
             }
+            if planned_duration_s is not None:
+                compiled["planned_duration_s"] = float(planned_duration_s)
             for key in (
                 "target",
                 "joint_positions_rad",
@@ -1082,9 +1098,6 @@ def run_jsonl(input_stream, output_stream, executor):
             kind, value = events.get(timeout=0.05)
         except queue.Empty:
             executor.tick()
-            for run in executor.runs.values():
-                if run["state"] == "BLOCKED":
-                    return terminal(run)
             continue
         if kind == "line":
             try:

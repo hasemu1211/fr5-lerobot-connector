@@ -11,6 +11,29 @@ from tools.fr5_data_factory import ContractError, canonical_digest
 
 
 class SceneStateTest(unittest.TestCase):
+    def test_intermediate_campaign_binding_has_previous_source_and_next_destination(self):
+        destination = scene_state.release_slot(
+            robot_system_id="fr5-lab-a",
+            pose={"place_id": "place-a", "yaw_deg": -90, "x_mm": 35, "y_mm": 0},
+            object_profile_id="wood-cube-25mm-r001",
+            exclusion_geometry_digest="sha256:" + "e" * 64,
+            role="DESTINATION_THEN_NEXT_SOURCE",
+        )
+        binding = {
+            "scene_state_digest": "sha256:" + "a" * 64,
+            "revision": 2,
+            "object_instance_id": "cube-1",
+            "release_slot": destination,
+            "allowed_next_run_id": "run-3",
+            "source_slot": {
+                "slot_id": "sha256:" + "b" * 64,
+                "slot_digest": "sha256:" + "c" * 64,
+                "allowed_run_id": "run-2",
+            },
+        }
+
+        self.assertEqual(scene_state.validate_scene_binding(binding), binding)
+
     def test_human_robot_and_external_updates_share_one_revisioned_contract(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory) / "outputs/data_factory/cells"
@@ -192,6 +215,38 @@ class SceneStateTest(unittest.TestCase):
                     expected_scene_digest=consumed["scene_state_digest"],
                     expected_slot_digest=canonical_digest(consumed["scene_state"]["slot_allocations"][slot["slot_id"]]),
                 )
+
+            terminal_slot = {**slot, "role": "RELEASE_DESTINATION"}
+            terminal_evidence = {
+                **evidence,
+                "run_id": "wrong-run",
+                "plan_digest": "sha256:" + "b" * 64,
+                "expected_scene_state_digest": consumed["scene_state_digest"],
+                "expected_scene_revision": consumed["scene_state"]["revision"],
+            }
+            with self.assertRaisesRegex(ContractError, "SCENE_SLOT_UNAVAILABLE"):
+                store.transition_release(
+                    instance_id="cube-1", release_slot=terminal_slot,
+                    evidence=terminal_evidence, updated_by="pickup-executor",
+                    expected_digest=consumed["scene_state_digest"],
+                    expected_revision=consumed["scene_state"]["revision"],
+                )
+            terminal_evidence["run_id"] = "run-2"
+            terminal = store.transition_release(
+                instance_id="cube-1", release_slot=terminal_slot,
+                evidence=terminal_evidence, updated_by="pickup-executor",
+                expected_digest=consumed["scene_state_digest"],
+                expected_revision=consumed["scene_state"]["revision"],
+            )["scene_state"]
+            terminal_allocation = terminal["slot_allocations"][slot["slot_id"]]
+            self.assertEqual(
+                (
+                    terminal["objects"]["cube-1"]["pose"],
+                    terminal_allocation["state"], terminal_allocation["role"],
+                    terminal_allocation["evidence_run_id"],
+                ),
+                (slot["pose"], "CONSUMED_PENDING_REVIEW", "RELEASE_DESTINATION", "run-2"),
+            )
 
 
 if __name__ == "__main__":

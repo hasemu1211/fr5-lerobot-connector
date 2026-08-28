@@ -74,7 +74,10 @@ def _rotation_quaternion(columns):
 class RosMoveItTransport:
     """Build plan-only MoveGroup requests and serialized gripper goals."""
 
-    def __init__(self, node, *, graph_timeout_s=1.0, clock=time.monotonic):
+    def __init__(
+        self, node, *, graph_timeout_s=1.0, preflight_timeout_s=5.0,
+        clock=time.monotonic,
+    ):
         try:
             import rclpy
             from action_msgs.msg import GoalStatus
@@ -110,6 +113,7 @@ class RosMoveItTransport:
 
         self.node = node
         self.graph_timeout_s = graph_timeout_s
+        self.preflight_timeout_s = preflight_timeout_s
         self._clock = clock
         self._rclpy = rclpy
         self._get_action_names_and_types = get_action_names_and_types
@@ -629,18 +633,29 @@ class RosMoveItTransport:
         return result
 
     def preflight(self):
-        deadline = time.monotonic() + self.graph_timeout_s
+        clients = {
+            "/move_action": self.move_group,
+            "/execute_trajectory": self.execute_trajectory,
+            "/gripper_controller/follow_joint_trajectory": self.gripper,
+        }
+        deadline = time.monotonic() + self.preflight_timeout_s
+        server_ready = {endpoint: False for endpoint in clients}
         while True:
             try:
                 actions = dict(self._get_action_names_and_types(self.node))
                 topics = dict(self.node.get_topic_names_and_types())
-                publisher_count = self.node.count_publishers("/joint_states")
+                server_ready = {
+                    endpoint: bool(client.server_is_ready())
+                    for endpoint, client in clients.items()
+                }
             except RuntimeError as exc:
                 raise ContractError("ROS_GRAPH_FAILED", str(exc)) from exc
+            joint_sample_ready = self._joint_state is not None
             graph_ready = (
                 all(actions.get(endpoint) == [kind] for endpoint, kind in ACTION_TYPES.items())
+                and all(server_ready.values())
                 and topics.get("/joint_states") == ["sensor_msgs/msg/JointState"]
-                and publisher_count > 0
+                and joint_sample_ready
             )
             if graph_ready or time.monotonic() >= deadline:
                 break
@@ -649,11 +664,6 @@ class RosMoveItTransport:
                 timeout_sec=max(0.0, min(0.05, deadline - time.monotonic())),
             )
 
-        clients = {
-            "/move_action": self.move_group,
-            "/execute_trajectory": self.execute_trajectory,
-            "/gripper_controller/follow_joint_trajectory": self.gripper,
-        }
         facts = {}
         fact_keys = {
             "/move_action": "move_action",
@@ -663,13 +673,10 @@ class RosMoveItTransport:
         for endpoint, expected_type in ACTION_TYPES.items():
             observed = actions.get(endpoint, [])
             exact_type = observed == [expected_type]
-            ready = exact_type and clients[endpoint].wait_for_server(
-                timeout_sec=self.graph_timeout_s
-            )
             facts[fact_keys[endpoint]] = {
                 "endpoint": endpoint,
                 "type": expected_type if exact_type else "|".join(sorted(observed)),
-                "ready": bool(ready),
+                "ready": exact_type and server_ready[endpoint],
             }
 
         joint_types = topics.get("/joint_states", [])
@@ -681,7 +688,7 @@ class RosMoveItTransport:
                 if exact_joint_type
                 else "|".join(sorted(joint_types))
             ),
-            "ready": exact_joint_type and publisher_count > 0,
+            "ready": exact_joint_type and joint_sample_ready,
         }
         facts["joint_order"] = list(JOINT_ORDER)
         return facts
@@ -845,6 +852,121 @@ class RosMoveItTransport:
             },
         }
 
+    def precommit_joint_transition(
+        self, *, serialized_trajectory, start_joint_state, final_joint_state,
+        planning_scene, planning_scene_digest, planning_group,
+        max_joint_state_age_s, joint_tolerance_rad, gripper_tolerance_m,
+        before_snapshot,
+    ):
+        """Check one exact joint-target trajectory without issuing a goal."""
+        numeric = (
+            [
+                *start_joint_state, *final_joint_state,
+                max_joint_state_age_s, joint_tolerance_rad, gripper_tolerance_m,
+            ]
+            if isinstance(start_joint_state, list)
+            and isinstance(final_joint_state, list)
+            else []
+        )
+        if (
+            not isinstance(serialized_trajectory, bytes)
+            or not serialized_trajectory
+            or not isinstance(start_joint_state, list)
+            or not isinstance(final_joint_state, list)
+            or len(start_joint_state) != len(JOINT_ORDER)
+            or len(final_joint_state) != len(JOINT_ORDER)
+            or not isinstance(planning_group, str)
+            or not planning_group
+            or not isinstance(before_snapshot, dict)
+            or any(
+                isinstance(value, bool)
+                or not isinstance(value, (int, float))
+                or not math.isfinite(value)
+                for value in numeric
+            )
+            or max_joint_state_age_s <= 0
+            or joint_tolerance_rad <= 0
+            or gripper_tolerance_m <= 0
+        ):
+            raise ContractError("JOINT_TRANSITION_PRECOMMIT")
+        execute_goals_before = self._execute_goal_count
+        gripper_goals_before = self._gripper_goal_count
+        readback = self._apply_and_readback_scene(
+            planning_scene, planning_scene_digest,
+        )
+        try:
+            initial_gripper = float(
+                before_snapshot["gripper_controller"]["feedback_position_m"]
+            )
+            plan = {
+                "frames": {"planning_group": planning_group},
+                "initial_joint_state": list(map(float, start_joint_state)),
+                "steps": [{
+                    "phase": "SAFE_POSE_PTP",
+                    "type": "ARM",
+                    "trajectory_b64": base64.b64encode(
+                        serialized_trajectory
+                    ).decode("ascii"),
+                    "start_joint_state": list(map(float, start_joint_state)),
+                    "final_joint_state": list(map(float, final_joint_state)),
+                }],
+            }
+            collision = self._check_plan_collision(plan, initial_gripper)
+            after_snapshot = self.snapshot(max_joint_state_age_s)
+            joint_delta = max(abs(a - b) for a, b in zip(
+                before_snapshot["joint_positions"],
+                after_snapshot["joint_positions"],
+            ))
+            gripper_delta = abs(
+                float(before_snapshot["gripper_controller"]["feedback_position_m"])
+                - float(after_snapshot["gripper_controller"]["feedback_position_m"])
+            )
+        except ContractError:
+            raise
+        except (KeyError, TypeError, ValueError) as exc:
+            raise ContractError("JOINT_TRANSITION_PRECOMMIT", str(exc)) from exc
+        if (
+            joint_delta > joint_tolerance_rad
+            or gripper_delta > gripper_tolerance_m
+            or self._execute_goal_count != execute_goals_before
+            or self._gripper_goal_count != gripper_goals_before
+        ):
+            raise ContractError("JOINT_TRANSITION_PLAN_ONLY_MOVED")
+        evidence = {
+            "schema_version": "data_factory.joint_transition_precommit.v1",
+            "planning_scene_digest": planning_scene_digest,
+            "planning_scene_readback": readback,
+            "collision_report": collision,
+            "before_snapshot": before_snapshot,
+            "after_snapshot": after_snapshot,
+            "max_joint_delta_rad": joint_delta,
+            "gripper_delta_m": gripper_delta,
+            "execute_goal_count": self._execute_goal_count,
+            "gripper_goal_count": self._gripper_goal_count,
+            "execute_goal_count_delta": self._execute_goal_count - execute_goals_before,
+            "gripper_goal_count_delta": self._gripper_goal_count - gripper_goals_before,
+        }
+        evidence["evidence_digest"] = canonical_digest(evidence)
+        return evidence
+
+    def precommit_home_recovery(self, **kwargs):
+        """Backward-compatible HOME evidence alias for the generic check."""
+        try:
+            evidence = self.precommit_joint_transition(**kwargs)
+        except ContractError as exc:
+            aliases = {
+                "JOINT_TRANSITION_PRECOMMIT": "HOME_RECOVERY_PRECOMMIT",
+                "JOINT_TRANSITION_PLAN_ONLY_MOVED":
+                    "HOME_RECOVERY_PLAN_ONLY_MOVED",
+            }
+            if exc.code in aliases:
+                raise ContractError(aliases[exc.code], str(exc)) from exc
+            raise
+        evidence["schema_version"] = "data_factory.home_recovery_precommit.v1"
+        evidence.pop("evidence_digest")
+        evidence["evidence_digest"] = canonical_digest(evidence)
+        return evidence
+
     def plan_arm(
         self,
         phase,
@@ -907,6 +1029,19 @@ class RosMoveItTransport:
             "serialized_trajectory": serialized,
             "final_joint_state": [by_name[name] for name in JOINT_ORDER],
         }
+
+    def arm_trajectory_duration_s(self, serialized):
+        """Return the approved trajectory's controller time horizon."""
+        try:
+            trajectory = self._deserialize_message(serialized, self._RobotTrajectory)
+            points = trajectory.joint_trajectory.points
+            end = points[-1].time_from_start
+            duration = float(end.sec) + float(end.nanosec) / 1_000_000_000
+        except (IndexError, RuntimeError, TypeError, ValueError) as exc:
+            raise ContractError("ROS_TRAJECTORY_DURATION", str(exc)) from exc
+        if not math.isfinite(duration) or duration <= 0:
+            raise ContractError("ROS_TRAJECTORY_DURATION")
+        return duration
 
     def _move_group_goal(
         self,

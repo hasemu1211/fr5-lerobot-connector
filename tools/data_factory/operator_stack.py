@@ -290,6 +290,22 @@ class OperatorStack:
             raise ContractError("OPERATOR_STACK_GRIPPER_SETUP_FAILED")
         return self._snapshot(after)
 
+    def reconfigure(self, name: str, spec: Mapping[str, object] | None) -> None:
+        """Replace one configured owner after boundedly stopping only its child."""
+        if not _valid_id(name):
+            raise ContractError("OPERATOR_STACK_COMMAND")
+        commands: dict[str, Mapping[str, object]] = dict(self.commands)
+        if spec is None:
+            commands.pop(name, None)
+        else:
+            commands[name] = spec
+        checked = self._commands(commands)
+        record = self._children.get(name)
+        if record is not None and not self._stop_record(record):
+            raise ContractError("OPERATOR_STACK_STOP_FAILED", name)
+        self._children.pop(name, None)
+        self.commands = checked
+
     def stop(self) -> dict[str, object]:
         """Boundedly terminate, then kill, only handles created by this instance."""
         failed = self._stop_names(list(self._children))

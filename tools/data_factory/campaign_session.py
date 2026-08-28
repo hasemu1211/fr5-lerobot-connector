@@ -15,8 +15,8 @@ from tools.data_factory.campaign_authoring import (
     validate_collection_campaign_manifest,
 )
 from tools.data_factory.operator_setup import (
-    validate_test_only_root_binding,
-    validate_test_only_start_binding,
+    validate_runtime_root_binding,
+    validate_runtime_start_binding,
 )
 from tools.data_factory.seed_campaign import SeedCampaign
 from tools.fr5_data_factory import ContractError, SAFE_ID, canonical_digest
@@ -24,7 +24,10 @@ from tools.fr5_data_factory import ContractError, SAFE_ID, canonical_digest
 
 EFFECT_SCOPES = frozenset({"FAKE", "PHYSICAL"})
 LIFECYCLE_ACTIONS = frozenset({"AUTHOR_ONLY", "PLAN_ONLY", "LIVE_COLLECT"})
-DISPOSITIONS = {"FAKE": "TEST_ONLY", "PHYSICAL": "TEST_ONLY"}
+DISPOSITIONS = {
+    "FAKE": frozenset({"TEST_ONLY"}),
+    "PHYSICAL": frozenset({"TEST_ONLY", "PRODUCTION"}),
+}
 EPISODE_CONTEXT_SCHEMA = "data_factory.campaign_episode_context.v1"
 TERMINAL_CHILD_STATES = frozenset({
     "ABORTED", "BLOCKED", "CANCELLED", "COMPLETE", "IDLE", "QUARANTINED_COMMIT",
@@ -48,7 +51,7 @@ class CampaignSession:
             raise ContractError("CAMPAIGN_SESSION_ID")
         if effect_scope not in EFFECT_SCOPES or lifecycle_action not in LIFECYCLE_ACTIONS:
             raise ContractError("CAMPAIGN_SESSION_SCOPE")
-        if data_disposition != DISPOSITIONS[effect_scope]:
+        if data_disposition not in DISPOSITIONS[effect_scope]:
             raise ContractError("CAMPAIGN_SESSION_DISPOSITION")
         if not callable(fake_lifecycle_factory) or physical_lifecycle_factory is not None and not callable(physical_lifecycle_factory):
             raise ContractError("CAMPAIGN_SESSION_FACTORY")
@@ -174,13 +177,21 @@ class CampaignSession:
         if start_binding is None:
             raise ContractError("CAMPAIGN_SESSION_PHYSICAL_BINDING_REQUIRED")
         if roots is not None:
-            roots = validate_test_only_root_binding(roots, repository_root=self.repository_root)
-            if roots["session_id"] != self.session_id or roots["run_id"] != run_id:
+            roots = validate_runtime_root_binding(
+                roots, repository_root=self.repository_root,
+            )
+            if (
+                roots["data_disposition"] != self.data_disposition
+                or roots["session_id"] != self.session_id
+                or roots["run_id"] != run_id
+            ):
                 raise ContractError("CAMPAIGN_SESSION_ROOT_BINDING")
-        start = validate_test_only_start_binding(
+        start = validate_runtime_start_binding(
             start_binding, manifest=self.manifest, hypothesis=self._campaign.hypothesis,
             slot=self._campaign.next_slot,
         )
+        if start["data_disposition"] != self.data_disposition:
+            raise ContractError("CAMPAIGN_SESSION_START_BINDING")
         return roots, start
 
     def _preflight_next(

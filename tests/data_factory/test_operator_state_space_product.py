@@ -170,24 +170,33 @@ class OperatorStateSpaceProductTests(unittest.TestCase):
                 if item["sources"]["job"] == template_path
                 and item["camera_device_id"] == DEVICE
             ]
-            self.assertEqual(len(combinations), 105)
-            self.assertEqual(
-                {item["cell_id"] for item in combinations},
-                {
-                    option["id"] for option in catalog["axes"]["cell"]
-                    if pose(option["metadata"]) in expected
-                },
-            )
+            by_profile = {
+                profile_id: [
+                    item for item in combinations
+                    if item["camera_profile_id"] == profile_id
+                ]
+                for profile_id in {item["camera_profile_id"] for item in combinations}
+            }
+            expected_cells = {
+                option["id"] for option in catalog["axes"]["cell"]
+                if pose(option["metadata"]) in expected
+            }
+            self.assertTrue(by_profile)
+            self.assertTrue(all(
+                len(items) == 105
+                and {item["cell_id"] for item in items} == expected_cells
+                for items in by_profile.values()
+            ))
             job = load_json_strict(repository / template_path)
             self.assertEqual(pose(job), ("PLACE_A", 0, 0, 0))
+            self.assertIn(job["collection_profile_id"], by_profile)
             self.assertTrue(all(
                 (
                     item["task_id"], item["object_id"], item["grasp_id"],
-                    item["camera_profile_id"], item["frame_id"],
+                    item["frame_id"],
                 ) == (
                     job["task"], job["object_profile_id"],
-                    job["grasp_profile_id"], job["collection_profile_id"],
-                    job["cell_calibration_id"],
+                    job["grasp_profile_id"], job["cell_calibration_id"],
                 )
                 for item in combinations
             ))
@@ -242,6 +251,46 @@ class OperatorStateSpaceProductTests(unittest.TestCase):
                 option["metadata"].get("yaw_deg") == 105.0 for option in place1
             ))
 
+    def test_catalog_routes_a_valid_v2_camera_profile_through_the_generic_caller(self):
+        with tempfile.TemporaryDirectory() as directory:
+            repository = Path(directory)
+            self.portable_repository(repository)
+            profile_path = (
+                repository / "config/data_factory/collection_profiles"
+                / "future-up-v2.json"
+            )
+            profile = load_json_strict(
+                repository / "config/data_factory/collection_profiles"
+                / "fr5-up-rgb-30hz-v1.json"
+            )
+            profile["collection_profile_id"] = "future-up-v2"
+            profile_path.write_text(json.dumps(profile), encoding="utf-8")
+            source_job = (
+                repository / "config/data_factory/test_only_physical"
+                / "goal2-place1/center-live-p45-20260821-r001.job.json"
+            )
+            job = load_json_strict(source_job)
+            job.update(
+                job_id="future-camera-job-r001",
+                collection_profile_id="future-up-v2",
+            )
+            future_job = source_job.with_name("future-camera-job-r001.job.json")
+            future_job.write_text(json.dumps(job), encoding="utf-8")
+
+            catalog = load_operator_catalog(repository, device_ids=[DEVICE])
+            relative = str(future_job.relative_to(repository))
+            future = [
+                item for item in catalog["combinations"]
+                if item["sources"]["job"] == relative
+                and item["camera_profile_id"] == "future-up-v2"
+            ]
+            self.assertTrue(future)
+            self.assertTrue(all(
+                item["execution"]["TEST_COLLECTION"] == {
+                    "executable": True, "reason": "REGISTERED_WORKSPACE_CALLER",
+                }
+                for item in future
+            ))
     def test_registered_workspace_projects_continuous_bounds_and_105_presets(self):
         catalog = load_operator_catalog(ROOT, device_ids=[DEVICE])
         domains = [
@@ -266,7 +315,7 @@ class OperatorStateSpaceProductTests(unittest.TestCase):
                 "place-a-yaw0-r002", "CONTINUOUS_A4_PLANE",
                 {"minimum": -70.0, "maximum": 70.0},
                 {"minimum": -35.0, "maximum": 35.0},
-                {"minimum": 0.0, "maximum_exclusive": 360.0},
+                {"minimum": -180.0, "maximum_exclusive": 180.0},
                 "FRESH_PLAN_IK_COLLISION_ENDPOINT_PER_SLOT",
             ),
         )
@@ -318,7 +367,7 @@ class OperatorStateSpaceProductTests(unittest.TestCase):
         )
         selection = self.selection(combination)
         requested = {
-            "place_id": "PLACE_A", "yaw_deg": 483.5,
+            "place_id": "PLACE_A", "yaw_deg": 197.5,
             "x_mm": 12.5, "y_mm": -7.25,
         }
         preset_poses = {
@@ -326,10 +375,10 @@ class OperatorStateSpaceProductTests(unittest.TestCase):
             for option in catalog["axes"]["cell"]
             if option["metadata"].get("place_id") == "PLACE_A"
         }
-        self.assertNotIn(("PLACE_A", 123.5, 12.5, -7.25), preset_poses)
+        self.assertNotIn(("PLACE_A", -162.5, 12.5, -7.25), preset_poses)
         before = canonical_digest(catalog)
         self.assertEqual(validator(catalog, selection, requested), {
-            **requested, "yaw_deg": 123.5,
+            **requested, "yaw_deg": -162.5,
         })
         for invalid in (
             {**requested, "x_mm": 70.001},
@@ -340,7 +389,7 @@ class OperatorStateSpaceProductTests(unittest.TestCase):
                 validator(catalog, selection, invalid)
         self.assertEqual(canonical_digest(catalog), before)
 
-    def test_assisted_projection_is_exact_stable_valid_and_not_preset_only(self):
+    def test_assisted_projection_is_exact_stable_and_a4_stratified_continuous(self):
         catalog = load_operator_catalog(ROOT, device_ids=[DEVICE])
         combination = next(
             item for item in catalog["combinations"]
@@ -361,11 +410,49 @@ class OperatorStateSpaceProductTests(unittest.TestCase):
         }
 
         self.assertEqual((len(projected), projected[0]), (100, source))
+        self.assertTrue(all(-180.0 <= item["yaw_deg"] < 180.0 for item in projected))
+        first_three = project_assisted_poses(catalog, selection, source, 3)
         self.assertEqual(len({pose(item) for item in projected}), 100)
         self.assertTrue(all(pose(item) not in presets for item in projected[1:]))
+        spatial_anchors = {
+            option["metadata"]["point_id"]: (
+                option["metadata"]["x_mm"], option["metadata"]["y_mm"],
+            )
+            for option in catalog["axes"]["cell"]
+            if option["metadata"].get("place_id") == "PLACE_A"
+        }
+        nearest_spatial = lambda item: min(
+            spatial_anchors,
+            key=lambda identifier: (
+                (item["x_mm"] - spatial_anchors[identifier][0]) ** 2
+                + (item["y_mm"] - spatial_anchors[identifier][1]) ** 2,
+                identifier,
+            ),
+        )
+        self.assertEqual(len({nearest_spatial(item) for item in projected[:15]}), 15)
+        yaw_anchors = {0, 15, 30, 45, 60, 75, 90}
+        nearest_yaw = lambda item: min(
+            yaw_anchors, key=lambda value: (abs(item["yaw_deg"] - value), value),
+        )
+        self.assertEqual(
+            [nearest_yaw(item) for item in projected[:7]],
+            [0, 15, 30, 45, 60, 75, 90],
+        )
+        first_cycle_anchors = [nearest_spatial(item) for item in projected[:15]]
+        self.assertTrue(all(
+            math.dist(spatial_anchors[left], spatial_anchors[right]) <= 50.0
+            for left, right in zip(first_cycle_anchors, first_cycle_anchors[1:])
+        ))
         self.assertEqual(
             canonical_digest(projected),
             canonical_digest(project_assisted_poses(catalog, selection, source, 100)),
+        )
+        self.assertEqual(projected[:3], first_three)
+        self.assertNotEqual(
+            projected,
+            project_assisted_poses(
+                catalog, selection, source, 100, normalized_seed=1,
+            ),
         )
         self.assertEqual(project_assisted_poses(catalog, selection, source, 1), [source])
         repeated = project_assisted_poses(
@@ -403,6 +490,11 @@ class OperatorStateSpaceProductTests(unittest.TestCase):
                 project_assisted_poses(
                     catalog, selection, source, 3, repeat=invalid,
                 )
+        for invalid in (True, -1, 1.5):
+            with self.subTest(seed=invalid), self.assertRaises(ContractError):
+                project_assisted_poses(
+                    catalog, selection, source, 3, normalized_seed=invalid,
+                )
 
     def test_assisted_three_anchors_observed_origin_then_uses_distinct_undercovered_cells(self):
         product = self.make_product()
@@ -431,7 +523,7 @@ class OperatorStateSpaceProductTests(unittest.TestCase):
             for option in product.application.catalog["axes"]["cell"]
             if option["metadata"].get("place_id") == "PLACE_A"
         }
-        with self.subTest(contract="continuous-domain-not-preset-only"):
+        with self.subTest(contract="assisted-domain-distributes-around-a4-grid"):
             self.assertTrue(all(pose(item) not in preset_poses for item in selected[1:]))
         minimum = min(item["human_semantic_pass"] for item in coverage.values())
         self.assertTrue(all(

@@ -156,6 +156,8 @@ class RecorderContractTest(unittest.TestCase):
             max_clipping=0.20, min_sharpness=20,
         )
         recorder.dataset = SimpleNamespace(meta=SimpleNamespace(total_episodes=0))
+        recorder.episode_state = recorder.FROZEN
+        recorder.alignment_tail_drained = True
         recorder.frames = 90
         recorder.frame_stamps = list(np.arange(90) / 30)
         recorder.sync_spans = [0.005] * 90

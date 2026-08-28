@@ -110,6 +110,7 @@ def _recorder_response(request: Mapping[str, Any], state: str, run_id: str | Non
         "episode_index": 0, "metrics": copy.deepcopy(dict(metrics)),
         "artifacts": {}, "detail": "SYNTHETIC_FIXTURE",
         "writer_alive": writer_error is None, "writer_error": writer_error,
+        "sampler_alive": True,
     }
 
 

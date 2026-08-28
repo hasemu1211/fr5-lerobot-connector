@@ -214,6 +214,7 @@ class OperatorIntentCoreTests(unittest.TestCase):
             self.assertEqual(set(projection), {
                 "review_binding_digest", "run_id", "status", "choices", "reasons",
             })
+            self.assertIn("IMAGE_QUALITY_OR_VISIBILITY", projection["reasons"])
             self.assertNotIn(str(path), json.dumps(projection))
             core = OperatorIntentCore(
                 session_id="review-session-r001",

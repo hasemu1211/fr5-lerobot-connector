@@ -18,6 +18,15 @@ from tools.fr5_data_factory import ContractError, DIGEST, SAFE_ID, canonical_dig
 
 
 JOINTS = ("j1", "j2", "j3", "j4", "j5", "j6")
+FEATURE_CONTRACT_FIELDS = frozenset({
+    "schema_version", "collection_profile_id", "camera_profile",
+    "camera_mapping", "state_dimension", "action_dimension",
+})
+TEST_ONLY_CAMERA_ROLES = {
+    "up": ("up",),
+    "up-side": ("up", "side"),
+    "up-wrist": ("up", "wrist"),
+}
 FR5_TEST_ONLY_FEATURE_CONTRACT = {
     "schema_version": "data_factory.fr5_feature_contract.v1",
     "collection_profile_id": "fr5-up-rgb-30hz-v1",
@@ -133,6 +142,65 @@ def _number(value: object, code: str, *, positive: bool = False) -> int | float:
     return value
 
 
+def build_test_only_feature_contract(collection_profile: Mapping[str, Any]) -> dict[str, Any]:
+    """Derive camera slots from a qualified v2 profile, never from device identity."""
+    if not isinstance(collection_profile, Mapping):
+        raise ContractError("HYPOTHESIS_TEST_ONLY_PROFILE")
+    profile_id = collection_profile.get("collection_profile_id")
+    camera_profile = collection_profile.get("camera_profile")
+    roles = TEST_ONLY_CAMERA_ROLES.get(camera_profile) if isinstance(camera_profile, str) else None
+    serials, topics = (
+        collection_profile.get("camera_serials"),
+        collection_profile.get("camera_topics"),
+    )
+    if (
+        collection_profile.get("schema_version") != "data_factory.collection_profile.v2"
+        or collection_profile.get("qualification_status") != "QUALIFIED"
+        or not isinstance(profile_id, str) or not SAFE_ID.fullmatch(profile_id)
+        or roles is None or collection_profile.get("camera_roles") != list(roles)
+        or not isinstance(serials, Mapping) or set(serials) != set(roles)
+        or not isinstance(topics, Mapping) or set(topics) != set(roles)
+        or collection_profile.get("fps") != 30
+        or collection_profile.get("width") != 640
+        or collection_profile.get("height") != 480
+    ):
+        raise ContractError("HYPOTHESIS_TEST_ONLY_PROFILE")
+    return {
+        "schema_version": "data_factory.fr5_feature_contract.v1",
+        "collection_profile_id": profile_id,
+        "camera_profile": camera_profile,
+        "camera_mapping": {
+            role: f"camera{index}" for index, role in enumerate(roles, start=1)
+        },
+        "state_dimension": 7,
+        "action_dimension": 7,
+    }
+
+
+def _is_test_only_feature_contract(value: object) -> bool:
+    if not isinstance(value, Mapping) or set(value) != FEATURE_CONTRACT_FIELDS:
+        return False
+    if value == FR5_FEATURE_CONTRACT:
+        return False
+    camera_profile = value.get("camera_profile")
+    roles = TEST_ONLY_CAMERA_ROLES.get(camera_profile) if isinstance(camera_profile, str) else None
+    profile_id = value.get("collection_profile_id")
+    return bool(
+        roles is not None
+        and isinstance(profile_id, str) and SAFE_ID.fullmatch(profile_id)
+        and value == {
+            "schema_version": "data_factory.fr5_feature_contract.v1",
+            "collection_profile_id": profile_id,
+            "camera_profile": value["camera_profile"],
+            "camera_mapping": {
+                role: f"camera{index}" for index, role in enumerate(roles, start=1)
+            },
+            "state_dimension": 7,
+            "action_dimension": 7,
+        }
+    )
+
+
 def _fixed_contract(value: object) -> dict[str, Any]:
     value = _exact(value, FIXED_FIELDS, "HYPOTHESIS_FIXED_FIELDS")
     result = copy.deepcopy(dict(value))
@@ -140,8 +208,9 @@ def _fixed_contract(value: object) -> dict[str, Any]:
         result["schema_version"] != "data_factory.fr5_fixed_contract.v1"
         or result["task"] != "pickup_e2e"
         or result["motion_recipe"] != "DIRECT"
-        or result["feature_contract"] not in (
-            FR5_FEATURE_CONTRACT, FR5_TEST_ONLY_FEATURE_CONTRACT,
+        or not (
+            result["feature_contract"] == FR5_FEATURE_CONTRACT
+            or _is_test_only_feature_contract(result["feature_contract"])
         )
     ):
         raise ContractError("HYPOTHESIS_FIXED_CONTRACT")
@@ -191,7 +260,7 @@ def _resolver_receipt(value: object) -> dict[str, Any]:
 
 def _resolver_result(
     value: object, *,
-    collection_profile_id: str = FR5_FEATURE_CONTRACT["collection_profile_id"],
+    feature_contract: Mapping[str, Any] = FR5_FEATURE_CONTRACT,
 ) -> dict[str, Any]:
     result = copy.deepcopy(dict(_exact(value, RESOLVER_RESULT_FIELDS, "HYPOTHESIS_RESOLVER_FIELDS")))
     receipt = _resolver_receipt({
@@ -228,8 +297,14 @@ def _resolver_result(
         or document.get("place_id") != job["place_id"]
         or inputs["cell_calibration"] != canonical_digest(document)
         or inputs["selected_sheet"] != job["sheet_manifest_digest"]
-        or job["collection_profile_id"] != collection_profile_id
+        or job["collection_profile_id"] != feature_contract["collection_profile_id"]
         or result["grasp_profile"].get("object_profile_id") != job["object_profile_id"]
+    ):
+        raise ContractError("HYPOTHESIS_RESOLVER_SOURCE_BINDING")
+    if (
+        feature_contract not in (FR5_FEATURE_CONTRACT, FR5_TEST_ONLY_FEATURE_CONTRACT)
+        and build_test_only_feature_contract(result["collection_profile"])
+        != feature_contract
     ):
         raise ContractError("HYPOTHESIS_RESOLVER_SOURCE_BINDING")
     return receipt
@@ -241,7 +316,7 @@ def _profile_contract(
 ) -> None:
     feature = fixed["feature_contract"]
     profile_id = feature["collection_profile_id"]
-    if feature == FR5_TEST_ONLY_FEATURE_CONTRACT and source != "SYNTHETIC_TEST_ONLY":
+    if _is_test_only_feature_contract(feature) and source != "SYNTHETIC_TEST_ONLY":
         raise ContractError("HYPOTHESIS_TEST_ONLY_PROFILE_SOURCE")
     if (
         report["collection_profile_id"] != profile_id
@@ -321,7 +396,10 @@ def compile_base_condition(
     qualification: Mapping[str, Any],
 ) -> dict[str, Any]:
     """Compile a compact condition binding from exact resolver and coverage evidence."""
-    return _base_from(validate_coverage_report(coverage_report), _resolver_result(resolver_result), qualification)
+    return _base_from(
+        validate_coverage_report(coverage_report), _resolver_result(resolver_result),
+        qualification,
+    )
 
 
 def _pose_qualification(value: object) -> dict[str, Any]:
@@ -502,12 +580,10 @@ def _validate_design(
         pair_keys.add(key)
         for group in item["split_groups"]:
             eligibility[group].add(key)
-    if fixed["feature_contract"] == FR5_TEST_ONLY_FEATURE_CONTRACT:
+    if _is_test_only_feature_contract(fixed["feature_contract"]):
         if (
-            len(poses) != 1 or len(pairs) != len(bases)
+            not poses or not pairs
             or any(item["split_groups"] != ["TRAIN"] for item in pairs)
-            or {item["base_condition_digest"] for item in pairs} != condition_ids
-            or {item["robot_start_pose_id"] for item in pairs} != pose_ids
         ):
             raise ContractError("HYPOTHESIS_TEST_ONLY_PROFILE_DESIGN")
         return
@@ -562,7 +638,7 @@ def compile_fr5_hypothesis(
         (
             _resolver_result(
                 item,
-                collection_profile_id=fixed["feature_contract"]["collection_profile_id"],
+                feature_contract=fixed["feature_contract"],
             )
             for item in resolver_results
         ),

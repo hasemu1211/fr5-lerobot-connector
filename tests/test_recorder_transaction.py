@@ -268,7 +268,8 @@ class RecorderTransactionTest(unittest.TestCase):
                 "dataset": {"path": str(recorder.args.root), "device": 1, "free_bytes": 200, "total_bytes": 1000},
                 "encoder_temp": {"path": str(temp_dir), "device": 1, "free_bytes": 200, "total_bytes": 1000},
             }
-            transient = temp_dir / "encode.tmp"
+            transient_dir = recorder.args.root / "tmp-lerobot-encode"
+            transient = transient_dir / "camera.mp4"
             initial_sample = threading.Event()
             observed = threading.Event()
             tree_bytes = recorder._tree_bytes
@@ -277,15 +278,17 @@ class RecorderTransactionTest(unittest.TestCase):
                 value = tree_bytes(path)
                 if Path(path) == temp_dir:
                     initial_sample.set()
-                    if transient.exists():
-                        observed.set()
+                if Path(path) == transient_dir and transient.exists():
+                    observed.set()
                 return value
 
             def save_with_transient(parallel_encoding=True):
                 self.assertTrue(initial_sample.is_set())
+                transient_dir.mkdir()
                 transient.write_bytes(b"x" * 4096)
                 self.assertTrue(observed.wait(1))
                 transient.unlink()
+                transient_dir.rmdir()
                 recorder.dataset.saves += 1
 
             recorder.dataset.save_episode = save_with_transient
@@ -443,6 +446,7 @@ class RecorderTransactionTest(unittest.TestCase):
             status = recorder.episode_status()
             self.assertEqual(status["state"], recorder.RECORDING)
             self.assertIn("writer_alive", status)
+            self.assertTrue(status["sampler_alive"])
             self.assertEqual(
                 set(status["metrics"]),
                 {"rows", "writer_queue", "writer_queue_high_water", "writer_queue_drops", "alignment_failures", "observed_monotonic_ns", "quality_snapshot"},
@@ -487,7 +491,7 @@ class RecorderTransactionTest(unittest.TestCase):
                 "op_id": "status-1",
                 "op": "status",
             }), {})
-            self.assertEqual(set(status), self.CONTROL_RESPONSE_FIELDS | {"writer_error", "writer_alive"})
+            self.assertEqual(set(status), self.CONTROL_RESPONSE_FIELDS | {"writer_error", "writer_alive", "sampler_alive"})
             self.assertIsInstance(status["ok"], bool)
             self.assertIsInstance(status["metrics"], dict)
             failure = process_recorder_control_line(recorder, "[]", {})
@@ -826,6 +830,45 @@ class RecorderTransactionTest(unittest.TestCase):
             recorder.stop_threads.set()
             recorder.writer_thread.join(1)
 
+    def test_freeze_waits_for_alignment_tail_row_before_sealing(self):
+        with tempfile.TemporaryDirectory() as directory:
+            recorder = self.make_recorder(directory)
+            self.assertTrue(recorder.begin_episode(self.transaction(directory))["ok"])
+            recorder.next_target_stamp = 0.65
+            recorder.frame_stamps = [0.60]
+
+            def complete_tail():
+                time.sleep(0.02)
+                with recorder.lock:
+                    recorder.frame_stamps.append(0.99)
+                    recorder.next_target_stamp = 1.02
+
+            worker = threading.Thread(target=complete_tail)
+            recorder.sampler_thread = worker
+            worker.start()
+            result = recorder.freeze_episode()
+            worker.join(1)
+
+            self.assertTrue(result["ok"])
+            self.assertEqual(result["state"], recorder.FROZEN)
+            self.assertTrue(recorder.alignment_tail_drained)
+            self.assertEqual(recorder.alignment_tail_target_ros_s, 1.0)
+            self.assertEqual(recorder.alignment_tail_last_row_ros_s, 0.99)
+            quality, reasons = recorder._quality_summary()
+            self.assertTrue(quality["alignment_tail_drained"])
+            self.assertFalse(any("alignment tail" in reason for reason in reasons))
+
+    def test_freeze_quarantines_when_the_production_sampler_has_stopped(self):
+        with tempfile.TemporaryDirectory() as directory:
+            recorder = self.make_recorder(directory)
+            self.assertTrue(recorder.begin_episode(self.transaction(directory))["ok"])
+            recorder.sampler_thread = SimpleNamespace(is_alive=lambda: False)
+            result = recorder.freeze_episode()
+            self.assertEqual(
+                (result["ok"], result["state"], result["reason_code"]),
+                (False, recorder.QUARANTINED_COMMIT, "ALIGNMENT_TAIL_SAMPLER_STOPPED"),
+            )
+
     def test_readiness_prefix_is_discarded_without_reopening_the_transaction(self):
         with tempfile.TemporaryDirectory() as directory:
             recorder = self.make_recorder(directory)
@@ -848,6 +891,25 @@ class RecorderTransactionTest(unittest.TestCase):
             blocked = recorder.trim_readiness_prefix()
             self.assertEqual((blocked["ok"], blocked["reason_code"]), (False, "READINESS_PREFIX_UNSAFE"))
             self.assertEqual(recorder.dataset.clears, 1)
+
+    def test_stale_sampler_target_cannot_cross_readiness_trim(self):
+        with tempfile.TemporaryDirectory() as directory:
+            recorder = self.make_recorder(directory)
+            self.assertTrue(recorder.begin_episode(self.transaction(directory))["ok"])
+            stale_epoch = recorder.sampler_epoch
+            self.assertTrue(recorder.trim_readiness_prefix()["ok"])
+            recorder._aligned_sample = lambda _target: (
+                None, None, (), {}, 0.0, 0.0, 0.0,
+            )
+
+            recorder._enqueue_aligned_frame(0.99, sampler_epoch=stale_epoch)
+            recorder._record_alignment_failure(
+                ("state",), sampler_epoch=stale_epoch,
+            )
+
+            self.assertEqual(recorder.enqueue_attempts, 0)
+            self.assertEqual(recorder.alignment_failures, 0)
+            self.assertTrue(recorder.writer_queue.empty())
 
     def test_abort_is_idempotent_and_recorder_is_reusable(self):
         with tempfile.TemporaryDirectory() as directory:

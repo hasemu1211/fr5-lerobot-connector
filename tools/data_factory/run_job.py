@@ -12,6 +12,7 @@ import subprocess
 import sys
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from collections.abc import Mapping
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -22,9 +23,11 @@ if __package__ in (None, ""):
 from tools.data_factory.one_job import (
     JsonlProcess,
     OneJob,
+    RECORDER_READINESS_CONTRACT,
     TEST_ONLY_READINESS_CONTRACT,
     hil_numeric_gripper_verdict,
 )
+from tools.data_factory.operator_bridge import CANDIDATE_REVIEW_REASONS
 from tools.data_factory.campaign_authorization import (
     validate_campaign_authorization,
     validate_runtime_campaign_scope,
@@ -34,8 +37,12 @@ from tools.data_factory.episode_ledger import (
     build_lerobot_v3_episode_locator,
     compile_episode_ledger,
     project_episode_state,
+    reproject_episode_state,
 )
 from tools.data_factory.operator_setup import (
+    validate_runtime_episode_binding,
+    validate_runtime_planned_start,
+    validate_runtime_root_binding,
     validate_test_only_episode_binding,
     validate_test_only_planned_start,
     validate_test_only_root_binding,
@@ -53,6 +60,7 @@ from tools.fr5_data_factory import (
     canonical_digest,
     load_json_strict,
     normalize_job_spec,
+    normalize_yaw_deg,
     resolve_motion_program,
     validate_job_spec,
 )
@@ -82,10 +90,6 @@ CANDIDATE_ADMISSION_KEYS = {
     "schema_version", "run_id", "operational_gate", "operational_source", "checklist_id",
     "review_context_digest", "semantic_status", "reviewed_by", "reviewed_at", "reason",
 }
-REVIEW_REASONS = (
-    "WRONG_OBJECT_OR_START", "GRASP_OR_LIFT", "TRAJECTORY_FLOW", "TASK_GOAL",
-    "UNMODELED_CONTACT", "RELEASE_SCENE", "UNKNOWN",
-)
 EPISODE_LEDGER_CONTEXT_FIELDS = frozenset({"manifest", "intent"})
 ROOT = Path(__file__).resolve().parents[2]
 DATA_PYTHON = str(ROOT / ".venv/bin/python")
@@ -281,7 +285,9 @@ def _scene_binding(validated, release_pose, run_id, root=ROOT / "outputs/data_fa
     return binding
 
 
-def resolve_inputs(payload, *, scene_binding_call=_scene_binding):
+def resolve_inputs(
+    payload, *, scene_binding_call=_scene_binding, input_transform=None,
+):
     validated = validate_job_spec(
         payload["job"],
         paths={"selected_sheet": payload["selected_sheet"], "yaw0_sheet": payload["yaw0_sheet"]},
@@ -293,7 +299,7 @@ def resolve_inputs(payload, *, scene_binding_call=_scene_binding):
     if RECYCLE_COORD_KEYS <= set(payload):
         sheet = _load(payload["selected_sheet"], "INPUT_SELECTED_SHEET")
         if RECYCLE_YAW_KEY in payload:
-            recycle_yaw = payload[RECYCLE_YAW_KEY] % 360
+            recycle_yaw = normalize_yaw_deg(payload[RECYCLE_YAW_KEY])
             x_mm, y_mm = bounded_place_coordinate(
                 sheet, payload["recycle_x_mm"], payload["recycle_y_mm"],
                 yaw_deg=recycle_yaw,
@@ -304,9 +310,25 @@ def resolve_inputs(payload, *, scene_binding_call=_scene_binding):
                 sheet, payload["recycle_x_mm"], payload["recycle_y_mm"],
             )
         release_pose.update(x_mm=x_mm, y_mm=y_mm)
+    motion_qualification = _load(
+        payload["motion_qualification"], "MOTION_QUALIFICATION_IO",
+    )
+    if input_transform is not None:
+        if not callable(input_transform):
+            raise ContractError("INPUT_TRANSFORM")
+        transformed = input_transform(validated, motion_qualification)
+        if (
+            not isinstance(transformed, (tuple, list))
+            or len(transformed) != 2
+            or any(not isinstance(item, Mapping) for item in transformed)
+        ):
+            raise ContractError("INPUT_TRANSFORM")
+        validated, motion_qualification = (
+            copy.deepcopy(dict(item)) for item in transformed
+        )
     program = resolve_motion_program(
         validated,
-        _load(payload["motion_qualification"], "MOTION_QUALIFICATION_IO"),
+        motion_qualification,
         _load(payload["home_candidate"], "HOME_CANDIDATE_IO"),
         urdf=payload["urdf"],
         expected_robot_system_id=payload["expected_robot_system_id"],
@@ -705,7 +727,11 @@ def _release_outcome_landed(evidence):
 
 
 def _technical_validator(dataset_root, _payload, profile):
-    command = [DATA_PYTHON, str(ROOT / "tools/validate_lerobot_dataset.py"), dataset_root, "--expected-fps", str(profile["fps"]), "--require-hil-motion"]
+    command = [
+        DATA_PYTHON, str(ROOT / "tools/validate_lerobot_dataset.py"), dataset_root,
+        "--expected-fps", str(profile["fps"]), "--require-hil-motion",
+        "--require-alignment-tail",
+    ]
     completed = subprocess.run(
         command,
         stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, timeout=180,
@@ -807,14 +833,18 @@ def _write_validator_reference(payload, validated, plan_digest, profile, technic
     return reference
 
 
-def _write_candidate_admission(payload, validated, technical_reference):
+def write_candidate_admission(
+    payload, validated, technical_reference, *, operational_source="HUMAN_GATED",
+):
     if technical_reference.get("status") != "PASS":
         raise ContractError("CANDIDATE_ADMISSION_TECHNICAL_PASS")
+    if operational_source not in {"HUMAN_GATED", "HIL_PROXY"}:
+        raise ContractError("CANDIDATE_ADMISSION_OPERATIONAL_SOURCE")
     admission = {
         "schema_version": "data_factory.candidate_admission.v1",
         "run_id": payload["run_id"],
         "operational_gate": "PASS",
-        "operational_source": "HUMAN_GATED",
+        "operational_source": operational_source,
         "checklist_id": "pickup-v2",
         "review_context_digest": canonical_digest({
             "run_id": payload["run_id"],
@@ -831,6 +861,49 @@ def _write_candidate_admission(payload, validated, technical_reference):
     return admission
 
 
+def bind_candidate_episode_state(ledger_reference, candidate_path):
+    """Bind one postcommit candidate to the rewritable ledger projection."""
+    if not isinstance(ledger_reference, Mapping):
+        raise ContractError("EPISODE_LEDGER_REFERENCE")
+    ledger_path = Path(ledger_reference.get("path", ""))
+    state_path = Path(ledger_reference.get("state_path", ""))
+    candidate_path = Path(candidate_path)
+    if (
+        ledger_path.name != "episode_ledger.json"
+        or state_path.name != "episode_ledger_state.json"
+        or candidate_path.name != "candidate_admission.json"
+    ):
+        raise ContractError("EPISODE_LEDGER_REFERENCE")
+    try:
+        ledger_path = ledger_path.resolve(strict=True)
+        state_path = state_path.resolve(strict=True)
+        candidate_path = candidate_path.resolve(strict=True)
+    except OSError as exc:
+        raise ContractError("EPISODE_LEDGER_REFERENCE") from exc
+    if not ledger_path.parent == state_path.parent == candidate_path.parent:
+        raise ContractError("EPISODE_LEDGER_REFERENCE")
+    ledger = load_json_strict(ledger_path)
+    current_state = load_json_strict(state_path)
+    candidate = load_json_strict(candidate_path)
+    candidate_ref = {
+        "artifact_path": str(candidate_path),
+        "artifact_digest": canonical_digest(candidate),
+    }
+    updated = reproject_episode_state(
+        ledger=ledger, current_state=current_state, candidate=candidate_ref,
+    )
+    write_json_atomic(state_path, updated)
+    reference = copy.deepcopy(dict(ledger_reference))
+    reference.update({
+        "state_digest": updated["state_digest"],
+        "review_status": updated["review"]["semantic_status"],
+        "retention_state": updated["retention"]["retention_state"],
+        "reclaim_state": updated["retention"]["reclaim_state"],
+        "training_status": updated["review"]["training_status"],
+    })
+    return reference
+
+
 def review_candidate_admission(
     path, *, expected_file_digest, expected_review_context_digest, checklist_id,
     semantic_status, reviewed_by, reason=None, clock=lambda: datetime.now(timezone.utc),
@@ -845,7 +918,7 @@ def review_candidate_admission(
         or semantic_status not in {"PASS", "FAIL", "UNCERTAIN"}
         or not isinstance(reviewed_by, str) or reviewed_by == "HUMAN" or not SAFE_ID.fullmatch(reviewed_by)
         or (semantic_status == "PASS" and reason is not None)
-        or (semantic_status != "PASS" and reason not in REVIEW_REASONS)
+        or (semantic_status != "PASS" and reason not in CANDIDATE_REVIEW_REASONS)
     ):
         raise ContractError("CANDIDATE_REVIEW_SCHEMA")
     flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
@@ -923,7 +996,7 @@ def _campaign_candidate_reviews(campaign, tty_decision=_tty_decision):
                 or not current["reviewed_at"]
             )
             or passed and current.get("reason") is not None
-            or not pending and not passed and current.get("reason") not in REVIEW_REASONS
+            or not pending and not passed and current.get("reason") not in CANDIDATE_REVIEW_REASONS
         ):
             raise ContractError("CANDIDATE_REVIEW_STATE")
         if pending and review_enabled:
@@ -933,7 +1006,7 @@ def _campaign_candidate_reviews(campaign, tty_decision=_tty_decision):
                     ("PASS", "FAIL", "UNCERTAIN", "SKIP"),
                 )
                 if decision != "SKIP":
-                    reason = None if decision == "PASS" else tty_decision("Choose the primary review reason", REVIEW_REASONS)
+                    reason = None if decision == "PASS" else tty_decision("Choose the primary review reason", CANDIDATE_REVIEW_REASONS)
                     current = review_candidate_admission(
                         path, expected_file_digest=current_digest,
                         expected_review_context_digest=expected_context, checklist_id="pickup-v2",
@@ -1314,6 +1387,20 @@ def run_plan_only(payload, cancel, publish, *, resolver=resolve_inputs, executor
         return _response(ok=False, code="RUNNER_FAILED", state="BLOCKED", run_id=payload.get("run_id"), data={"detail": str(exc)})
 
 
+def _close_runtime_child(child, cancel):
+    if child is None:
+        return
+    preserved = getattr(child, "preserved", False)
+    try:
+        if preserved:
+            child.release(timeout_s=1.0)
+        else:
+            child.close(timeout_s=1.0 if cancel.is_set() else None)
+    except ContractError:
+        if not cancel.is_set() and not preserved:
+            raise
+
+
 def run_live(payload, cancel, publish, *, resolver=resolve_inputs, executor_factory=_live_executor,
              recorder_factory=_recorder, validator_call=_technical_validator, tty_decision=_tty_decision,
              camera_warmup_call=_camera_warmup, before_approval=None, one_job=None,
@@ -1321,13 +1408,15 @@ def run_live(payload, cancel, publish, *, resolver=resolve_inputs, executor_fact
              decision_timeout_s=None, checkpoint_provider=None,
              checkpoint_timeout_s=None, test_only_root_binding=None,
              test_only_episode_binding=None, test_only_start_binding=None,
+             runtime_root_binding=None, runtime_episode_binding=None,
+             runtime_start_binding=None,
              episode_ledger_context=None,
              preapproval_checklist=None,
              campaign_authorization=None,
              candidate_writer_enabled=True,
              repository_root=ROOT, clock=None):
     """Public single HIL run: plan and human approval precede recorder begin and motion."""
-    executor = recorder = resource_monitor = None
+    executor = recorder = resource_monitor = warmup_pool = None
     resource_finished = False
     profile = None
     try:
@@ -1346,39 +1435,68 @@ def run_live(payload, cancel, publish, *, resolver=resolve_inputs, executor_fact
             raise ContractError("OPERATOR_CHECKPOINT_TIMEOUT")
         if before_approval is not None and decision_provider is not None:
             raise ContractError("PLAN_DECISION_AMBIGUOUS")
-        test_only = test_only_root_binding is not None
-        if test_only:
-            roots = validate_test_only_root_binding(
-                test_only_root_binding, repository_root=repository_root,
+        legacy_bindings = any(item is not None for item in (
+            test_only_root_binding, test_only_episode_binding,
+            test_only_start_binding,
+        ))
+        generic_bindings = any(item is not None for item in (
+            runtime_root_binding, runtime_episode_binding, runtime_start_binding,
+        ))
+        if legacy_bindings and generic_bindings:
+            raise ContractError("RUNTIME_BINDING_AMBIGUOUS")
+        if legacy_bindings:
+            runtime_root_binding = test_only_root_binding
+            runtime_episode_binding = test_only_episode_binding
+            runtime_start_binding = test_only_start_binding
+        bound_runtime = runtime_root_binding is not None
+        roots = None
+        data_disposition = "PRODUCTION"
+        if bound_runtime:
+            roots = (
+                validate_test_only_root_binding(
+                    runtime_root_binding, repository_root=repository_root,
+                )
+                if legacy_bindings
+                else validate_runtime_root_binding(
+                    runtime_root_binding, repository_root=repository_root,
+                )
             )
+            data_disposition = (
+                "TEST_ONLY" if legacy_bindings else roots["data_disposition"]
+            )
+            expected_writers = data_disposition == "PRODUCTION"
             if (
                 roots["run_id"] != payload.get("run_id")
                 or roots["run_root"] != str(Path(payload.get("run_root", "")).resolve())
                 or roots["dataset_root"] != str(Path(payload.get("dataset_root", "")).resolve())
-                or candidate_writer_enabled is not False
+                or candidate_writer_enabled is not expected_writers
                 or decision_provider is None
-                or test_only_episode_binding is None
-                or test_only_start_binding is None
+                or runtime_episode_binding is None
+                or runtime_start_binding is None
+                or data_disposition == "PRODUCTION"
+                and episode_ledger_context is None
+                or legacy_bindings and data_disposition != "TEST_ONLY"
             ):
-                raise ContractError("TEST_ONLY_RUN_BINDING")
+                raise ContractError(f"{data_disposition}_RUN_BINDING")
             cell_root = Path(roots["cell_root"])
         else:
             if (
                 candidate_writer_enabled is not True
-                or test_only_episode_binding is not None
-                or test_only_start_binding is not None
+                or runtime_episode_binding is not None
+                or runtime_start_binding is not None
                 or episode_ledger_context is not None
             ):
                 raise ContractError("CANDIDATE_WRITER_SCOPE")
             cell_root = ROOT / "outputs/data_factory/cells"
+        test_only = bound_runtime and data_disposition == "TEST_ONLY"
         if preapproval_checklist is not None and (
-            not test_only
+            not bound_runtime
             or checkpoint_provider is None
             or not isinstance(preapproval_checklist, Mapping)
             or not preapproval_checklist
         ):
             raise ContractError("PREAPPROVAL_CHECKLIST_SCOPE")
-        if test_only and resolver is resolve_inputs:
+        if bound_runtime and resolver is resolve_inputs:
             validated, program, scene_binding = resolve_inputs(
                 payload,
                 scene_binding_call=lambda validated, release_pose, run_id: _scene_binding(
@@ -1389,18 +1507,24 @@ def run_live(payload, cancel, publish, *, resolver=resolve_inputs, executor_fact
             validated, program, scene_binding = resolver(payload)
         episode_binding = None
         _validate_runtime_collection_binding(validated, program)
-        if test_only:
-            episode_binding = validate_test_only_episode_binding(
-                test_only_episode_binding, roots=roots, normalized_job=validated,
+        if bound_runtime:
+            episode_binding = (
+                validate_test_only_episode_binding(
+                    runtime_episode_binding, roots=roots, normalized_job=validated,
+                )
+                if legacy_bindings
+                else validate_runtime_episode_binding(
+                    runtime_episode_binding, roots=roots, normalized_job=validated,
+                )
             )
             try:
                 expires_at = datetime.fromisoformat(
                     episode_binding["expires_at"].replace("Z", "+00:00")
                 )
             except (AttributeError, ValueError) as exc:
-                raise ContractError("TEST_ONLY_EPISODE_EXPIRY") from exc
+                raise ContractError(f"{data_disposition}_EPISODE_EXPIRY") from exc
             if expires_at.astimezone(timezone.utc) <= current_clock().astimezone(timezone.utc):
-                raise ContractError("TEST_ONLY_EPISODE_EXPIRED")
+                raise ContractError(f"{data_disposition}_EPISODE_EXPIRED")
         if campaign_authorization is not None:
             if (
                 episode_binding is None
@@ -1411,11 +1535,12 @@ def run_live(payload, cancel, publish, *, resolver=resolve_inputs, executor_fact
                 campaign_authorization, now=current_clock(),
                 operator_label=validated["normalized_job"]["operator_or_agent_id"],
                 manifest_digest=episode_binding["manifest_digest"],
-                data_disposition="TEST_ONLY" if test_only else "PRODUCTION",
+                data_disposition=data_disposition,
             )
             validate_runtime_campaign_scope(
                 campaign_authorization, resolved_inputs=validated,
-                episode_binding=episode_binding, now=current_clock(),
+                motion_program=program, episode_binding=episode_binding,
+                now=current_clock(),
             )
             if episode_ledger_context is None:
                 raise ContractError("EPISODE_LEDGER_CONTEXT_REQUIRED")
@@ -1436,101 +1561,131 @@ def run_live(payload, cancel, publish, *, resolver=resolve_inputs, executor_fact
         if cell.get("robot_system_id") != payload["expected_robot_system_id"] or cell.get("cell_ready") is not True:
             return _response(ok=False, code="CELL_NOT_READY", state="BLOCKED", run_id=payload["run_id"])
         _prepare_run_dir(payload)
-        camera_warmup = None
-        if not test_only:
-            camera_warmup = camera_warmup_call(payload, profile, cancel)
-            if cancel.is_set():
-                return _response(ok=False, code="CANCELLED", state="CANCELLED", run_id=payload["run_id"])
+        publish(_response(
+            ok=True, code="CAMERA_WARMUP", state="PREPARING",
+            run_id=payload["run_id"],
+            data={"mode": "live", "progress": 25 if bound_runtime else 5},
+        ))
+        warmup_pool = ThreadPoolExecutor(
+            max_workers=1, thread_name_prefix="camera-warmup",
+        )
+        camera_warmup_future = warmup_pool.submit(
+            camera_warmup_call, payload, profile, cancel,
+        )
+        publish(_response(
+            ok=True, code="PLANNING", state="PLANNING",
+            run_id=payload["run_id"], data={"mode": "live", "progress": 10},
+        ))
         timeout_s = _timeout_s(program)
         executor = (
             executor_factory(payload, timeout_s, cell_root=cell_root)
             if executor_factory is _live_executor
             else executor_factory(payload, timeout_s)
         )
-        preflight = executor.request({
-            "schema_version": "fr5.pickup_executor.command.v4", "op_id": "00-preflight", "op": "preflight",
-            "payload": {"motion_program": program},
-        }, cancel)
-        if not isinstance(preflight, dict):
-            raise ContractError("PREFLIGHT_RESPONSE")
-        if preflight.get("ok") is not True:
-            code = preflight.get("code")
-            raise ContractError(code if isinstance(code, str) and SAFE_ID.fullmatch(code) else "PREFLIGHT_FAILED")
-        if preflight.get("code") != "PREFLIGHT_OK":
-            raise ContractError("PREFLIGHT_RESPONSE")
         forbidden = lambda _request: (_ for _ in ()).throw(ContractError("LIVE_RECORDER_NOT_STARTED"))
         if one_job is None:
             arguments = (forbidden, lambda request: executor.request(request, cancel))
             job = (
                 OneJob(*arguments, cell_state_call=cell_store.read,
-                       readiness_contract=TEST_ONLY_READINESS_CONTRACT)
-                if test_only else OneJob(*arguments, cell_state_call=cell_store.read)
+                       readiness_contract=RECORDER_READINESS_CONTRACT)
+                if bound_runtime else OneJob(*arguments, cell_state_call=cell_store.read)
             )
         else:
             if getattr(one_job, "state", None) != "IDLE":
                 raise ContractError("ONE_JOB_NOT_FRESH")
-            if (
-                test_only and getattr(one_job, "readiness_contract", None) != TEST_ONLY_READINESS_CONTRACT
-                or not test_only and getattr(one_job, "readiness_contract", None) is not None
-            ):
+            expected_readiness = RECORDER_READINESS_CONTRACT if bound_runtime else None
+            if getattr(one_job, "readiness_contract", None) != expected_readiness:
                 raise ContractError("ONE_JOB_READINESS_SCOPE")
             job = one_job
             job.recorder_call = forbidden
             job.executor_call = lambda request: executor.request(request, cancel)
             job.cell_state_call = cell_store.read
-        planned = job.plan_only(payload["run_id"], program, scene_binding)
+        planned = None
+        plan_error = None
+        try:
+            planned = job.plan_only(payload["run_id"], program, scene_binding)
+        except Exception as exc:
+            plan_error = exc
+        camera_warmup = None
+        warmup_error = None
+        try:
+            camera_warmup = camera_warmup_future.result()
+        except Exception as exc:
+            warmup_error = exc
+        finally:
+            warmup_pool.shutdown(wait=True)
+            warmup_pool = None
+        if plan_error is not None:
+            raise plan_error
         if not planned["ok"]:
             return _response(ok=False, code=planned["code"], state=planned["state"], run_id=payload["run_id"], plan_digest=planned["plan_digest"])
         planned_start = (
-            validate_test_only_planned_start(
-                start_binding=test_only_start_binding,
-                episode_binding=episode_binding,
-                motion_program=program,
-                plan=planned["plan_envelope"]["plan"],
+            (
+                validate_test_only_planned_start
+                if legacy_bindings else validate_runtime_planned_start
+            )(
+                start_binding=runtime_start_binding, episode_binding=episode_binding,
+                motion_program=program, plan=planned["plan_envelope"]["plan"],
             )
-            if test_only else None
+            if bound_runtime else None
         )
+        runtime_projection = {}
+        if bound_runtime:
+            runtime_projection = {
+                "runtime_episode_binding_digest": episode_binding["binding_digest"],
+                "runtime_planned_start": copy.deepcopy(planned_start),
+            }
+            if test_only:
+                runtime_projection.update({
+                    "test_only_episode_binding_digest": episode_binding["binding_digest"],
+                    "test_only_planned_start": copy.deepcopy(planned_start),
+                })
         summary = _operator_summary(planned)
         preapproval_evidence = _write_preapproval_evidence(payload, validated, planned)
+        if warmup_error is not None:
+            if not isinstance(warmup_error, ContractError):
+                raise warmup_error
+            data = {
+                "mode": "live", "measurement_outcome": "FAIL",
+                "recorder_goal_count": 0, "execute_goal_count": 0,
+                "camera_semantic_authority": False,
+                "training_authorized": False,
+            }
+            if bound_runtime:
+                data.update({
+                    "operator_summary": summary,
+                    "preapproval_evidence_digest": canonical_digest(preapproval_evidence),
+                    **runtime_projection,
+                })
+            return _response(
+                ok=False, code=warmup_error.code, state="BLOCKED",
+                run_id=payload["run_id"], plan_digest=planned["plan_digest"],
+                data=data,
+            )
+        if cancel.is_set():
+            return _response(
+                ok=False, code="CANCELLED", state="CANCELLED",
+                run_id=payload["run_id"], plan_digest=planned["plan_digest"],
+                data={
+                    "measurement_outcome": "NOT_MEASURED",
+                    "preapproval_evidence_digest": canonical_digest(preapproval_evidence),
+                    "recorder_goal_count": 0, "execute_goal_count": 0,
+                    "training_authorized": False,
+                } if bound_runtime else None,
+            )
         operator_id = validated["normalized_job"]["operator_or_agent_id"]
-        if test_only:
-            try:
-                camera_warmup = camera_warmup_call(payload, profile, cancel)
-            except ContractError as exc:
-                return _response(
-                    ok=False, code=exc.code, state="BLOCKED",
-                    run_id=payload["run_id"], plan_digest=planned["plan_digest"],
-                    data={
-                        "mode": "live", "measurement_outcome": "FAIL",
-                        "operator_summary": summary,
-                        "preapproval_evidence_digest": canonical_digest(preapproval_evidence),
-                        "test_only_episode_binding_digest": episode_binding["binding_digest"],
-                        "test_only_planned_start": copy.deepcopy(planned_start),
-                        "recorder_goal_count": 0, "execute_goal_count": 0,
-                        "camera_semantic_authority": False,
-                        "training_authorized": False,
-                    },
-                )
-            if cancel.is_set():
-                return _response(
-                    ok=False, code="CANCELLED", state="CANCELLED",
-                    run_id=payload["run_id"], plan_digest=planned["plan_digest"],
-                    data={
-                        "measurement_outcome": "NOT_MEASURED",
-                        "preapproval_evidence_digest": canonical_digest(preapproval_evidence),
-                        "recorder_goal_count": 0, "execute_goal_count": 0,
-                        "training_authorized": False,
-                    },
-                )
         site_confirmation = None
         if preapproval_checklist is not None:
+            displayed_place = preapproval_checklist.get("place_alias")
+            if not isinstance(displayed_place, str) or not displayed_place:
+                displayed_place = "workspace"
             site_confirmation = _operator_checkpoint(
                 checkpoint_provider,
                 kind="PHYSICAL_SCENE_CONFIRMATION", run_id=payload["run_id"],
                 plan_digest=planned["plan_digest"],
                 prompt=(
-                    "Confirm the displayed place1 binding, cube pose, empty gripper, "
-                    "clear cell, and E-stop monitoring before this one TEST_ONLY dispatch."
+                    f"Confirm the displayed {displayed_place} binding, object pose, empty "
+                    f"gripper, clear cell, and E-stop monitoring before this {data_disposition} dispatch."
                 ),
                 choices=("READY", "CANCEL"), operator_id=operator_id,
                 timeout_s=checkpoint_timeout_s,
@@ -1538,7 +1693,7 @@ def run_live(payload, cancel, publish, *, resolver=resolve_inputs, executor_fact
                     "checklist": copy.deepcopy(dict(preapproval_checklist)),
                     "operator_summary": copy.deepcopy(summary),
                     "planned_start_evidence_digest": canonical_digest(planned_start),
-                    "data_disposition": "TEST_ONLY",
+                    "data_disposition": data_disposition,
                 },
                 expected_source=(
                     "CAMPAIGN_AUTHORIZATION"
@@ -1553,8 +1708,7 @@ def run_live(payload, cancel, publish, *, resolver=resolve_inputs, executor_fact
                         "measurement_outcome": "NOT_MEASURED",
                         "operator_summary": summary,
                         "preapproval_evidence_digest": canonical_digest(preapproval_evidence),
-                        "test_only_episode_binding_digest": episode_binding["binding_digest"],
-                        "test_only_planned_start": copy.deepcopy(planned_start),
+                        **runtime_projection,
                         "recorder_goal_count": 0, "execute_goal_count": 0,
                         "training_authorized": False,
                     },
@@ -1562,11 +1716,8 @@ def run_live(payload, cancel, publish, *, resolver=resolve_inputs, executor_fact
         publish(_response(ok=True, code="AWAITING_HUMAN_APPROVAL", state="PLANNED", run_id=payload["run_id"], plan_digest=planned["plan_digest"], data={
             "mode": "live", "operator_summary": summary, "resolved_job_digest": validated["resolved_job_digest"],
             "scene_binding": scene_binding, "preapproval_evidence_digest": canonical_digest(preapproval_evidence),
-            "camera_warmup_digest": canonical_digest(camera_warmup),
-            **({
-                "test_only_episode_binding_digest": episode_binding["binding_digest"],
-                "test_only_planned_start": copy.deepcopy(planned_start),
-            } if test_only else {}),
+            "camera_warmup_digest": canonical_digest(camera_warmup), "progress": 35,
+            **(runtime_projection if bound_runtime else {}),
             "camera_semantic_authority": False, "training_authorized": False,
         }))
         recycle_text = f" recycle={summary['recycle']}" if "recycle" in summary else ""
@@ -1593,13 +1744,13 @@ def run_live(payload, cancel, publish, *, resolver=resolve_inputs, executor_fact
                         None if site_confirmation is None
                         else canonical_digest(site_confirmation)
                     ),
-                    "data_disposition": "TEST_ONLY" if test_only else "PRODUCTION",
-                    "root_binding_digest": roots["binding_digest"] if test_only else None,
+                    "data_disposition": data_disposition,
+                    "root_binding_digest": roots["binding_digest"] if bound_runtime else None,
                     "episode_binding": copy.deepcopy(episode_binding),
                     **({
                         "start_binding_digest": planned_start["start_binding_digest"],
                         "planned_start_evidence": copy.deepcopy(planned_start),
-                    } if test_only else {}),
+                    } if bound_runtime else {}),
                 },
                 operator_id=operator_id, timeout_s=decision_timeout_s,
                 expected_source=(
@@ -1611,10 +1762,7 @@ def run_live(payload, cancel, publish, *, resolver=resolve_inputs, executor_fact
                 return _response(ok=False, code="PAUSED_AWAITING_OPERATOR", state="PLANNED", run_id=payload["run_id"], plan_digest=planned["plan_digest"], data={
                     "measurement_outcome": "NOT_MEASURED", "recorder_goal_count": 0,
                     "execute_goal_count": 0,
-                    **({
-                        "test_only_episode_binding_digest": episode_binding["binding_digest"],
-                        "test_only_planned_start": copy.deepcopy(planned_start),
-                    } if test_only else {}),
+                    **(runtime_projection if bound_runtime else {}),
                     "training_authorized": False,
                 })
             if decision["choice"] != "APPROVE":
@@ -1622,10 +1770,7 @@ def run_live(payload, cancel, publish, *, resolver=resolve_inputs, executor_fact
                 return _response(ok=False, code=code, state="CANCELLED", run_id=payload["run_id"], plan_digest=planned["plan_digest"], data={
                     "measurement_outcome": "NOT_MEASURED", "recorder_goal_count": 0,
                     "execute_goal_count": 0,
-                    **({
-                        "test_only_episode_binding_digest": episode_binding["binding_digest"],
-                        "test_only_planned_start": copy.deepcopy(planned_start),
-                    } if test_only else {}),
+                    **(runtime_projection if bound_runtime else {}),
                     "training_authorized": False,
                 })
             decision_source = decision["decision_source"]
@@ -1638,7 +1783,7 @@ def run_live(payload, cancel, publish, *, resolver=resolve_inputs, executor_fact
         approval_source = (
             "CAMPAIGN_AUTHORIZATION"
             if campaign_authorization is not None
-            else decision_source if test_only else "HUMAN"
+            else decision_source if bound_runtime else "HUMAN"
         )
         approved = job.approve(_approval(
             payload["run_id"], planned["plan_digest"], operator_id,
@@ -1646,6 +1791,11 @@ def run_live(payload, cancel, publish, *, resolver=resolve_inputs, executor_fact
         ))
         if not approved["ok"]:
             return _response(ok=False, code=approved["code"], state=approved["state"], run_id=payload["run_id"], plan_digest=planned["plan_digest"])
+        publish(_response(
+            ok=True, code="RECORDER_STARTING", state="RUNNING",
+            run_id=payload["run_id"], plan_digest=planned["plan_digest"],
+            data={"mode": "live", "progress": 40},
+        ))
         resource_monitor = ResourceMonitor(
             payload["run_id"], validated["input_digests"]["collection_profile"]
         ).start()
@@ -1657,7 +1807,29 @@ def run_live(payload, cancel, publish, *, resolver=resolve_inputs, executor_fact
         job.recorder_call = recorder
         started = job.start()
         if not started["ok"]:
-            return _response(ok=False, code=started["code"], state=started["state"], run_id=payload["run_id"], plan_digest=planned["plan_digest"])
+            readiness_failure = started.get("readiness_failure_evidence")
+            if isinstance(readiness_failure, dict):
+                write_json_atomic(
+                    _run_dir(payload) / "readiness_failure.json",
+                    readiness_failure,
+                )
+            return _response(
+                ok=False, code=started["code"], state=started["state"],
+                run_id=payload["run_id"], plan_digest=planned["plan_digest"],
+                data={
+                    "mode": "live",
+                    "readiness_failure": copy.deepcopy(readiness_failure),
+                    "recorder_goal_count": 1,
+                    "execute_goal_count": 0,
+                    "camera_semantic_authority": False,
+                    "training_authorized": False,
+                },
+            )
+        publish(_response(
+            ok=True, code="EXECUTING", state="RUNNING",
+            run_id=payload["run_id"], plan_digest=planned["plan_digest"],
+            data={"mode": "live", "progress": 50},
+        ))
         decisions = queue.Queue(maxsize=1)
         pending = None
         mechanical_proxy = None
@@ -1668,7 +1840,17 @@ def run_live(payload, cancel, publish, *, resolver=resolve_inputs, executor_fact
                 return _response(ok=False, code=result["code"], state=result["state"], run_id=payload["run_id"], plan_digest=planned["plan_digest"])
             poll_started = time.monotonic()
             result = job.poll()
-            resource_monitor.record_control_round_trip(time.monotonic() - poll_started)
+            poll_elapsed = time.monotonic() - poll_started
+            finalization_recorder = getattr(
+                resource_monitor, "record_finalization_round_trip", None,
+            )
+            if (
+                result.get("state") in {"AWAITING_CELL_READY", "COMMITTED"}
+                and callable(finalization_recorder)
+            ):
+                finalization_recorder(poll_elapsed)
+            else:
+                resource_monitor.record_control_round_trip(poll_elapsed)
             if not result["ok"]:
                 if result["code"] == "QUALITY_REJECTED" and "recycle" in summary:
                     transition_digest, cell = _recover_quality_rejected_recycle(
@@ -1683,6 +1865,11 @@ def run_live(payload, cancel, publish, *, resolver=resolve_inputs, executor_fact
                     })
                 return _response(ok=False, code=result["code"], state=result["state"], run_id=payload["run_id"], plan_digest=planned["plan_digest"])
             if result["state"] in {"AWAITING_CELL_READY", "COMMITTED"}:
+                publish(_response(
+                    ok=True, code="VALIDATING", state="RUNNING",
+                    run_id=payload["run_id"], plan_digest=planned["plan_digest"],
+                    data={"mode": "live", "progress": 90},
+                ))
                 test_only_projection = (
                     _test_only_terminal_projection(
                         result.get("readiness_evidence"), run_id=payload["run_id"],
@@ -1768,7 +1955,14 @@ def run_live(payload, cancel, publish, *, resolver=resolve_inputs, executor_fact
                     if not finished["ok"] or finished["state"] != "COMPLETE":
                         raise ContractError("CELL_READY_REQUIRED")
                     if candidate_writer_enabled:
-                        _write_candidate_admission(payload, validated, validator_reference)
+                        admission = write_candidate_admission(
+                            payload, validated, validator_reference,
+                        )
+                        if ledger_reference is not None and isinstance(admission, Mapping):
+                            ledger_reference = bind_candidate_episode_state(
+                                ledger_reference,
+                                _run_dir(payload) / "candidate_admission.json",
+                            )
                     return _response(ok=True, code="VALIDATED", state="COMPLETE", run_id=payload["run_id"], plan_digest=planned["plan_digest"], data={
                         "mode": "live", "operator_summary": summary, "technical_validator": validator_reference,
                         "storage_usage": storage_reference, "resource_usage": resource_reference,
@@ -1777,10 +1971,7 @@ def run_live(payload, cancel, publish, *, resolver=resolve_inputs, executor_fact
                         "postcommit_scene_state_digest": transition["scene_state_digest"], "postcommit_cell_state": cell,
                         "frozen_rows": result["frozen_rows"], "rows_after_recycle": result["rows_after_recycle"],
                         **test_only_projection,
-                        **({
-                            "test_only_episode_binding_digest": episode_binding["binding_digest"],
-                            "test_only_planned_start": copy.deepcopy(planned_start),
-                        } if test_only else {}),
+                        **(runtime_projection if bound_runtime else {}),
                         "camera_semantic_authority": False, "training_authorized": False,
                     })
                 target = validated["normalized_job"]
@@ -1805,7 +1996,7 @@ def run_live(payload, cancel, publish, *, resolver=resolve_inputs, executor_fact
                             },
                             "technical_result_digest": technical["result_digest"],
                             "validator_reference_digest": canonical_digest(validator_reference),
-                            "data_disposition": "TEST_ONLY" if test_only else "PRODUCTION",
+                            "data_disposition": data_disposition,
                         },
                     )
                     if checkpoint is None:
@@ -1824,7 +2015,14 @@ def run_live(payload, cancel, publish, *, resolver=resolve_inputs, executor_fact
                 if not finished["ok"] or finished["state"] != "COMPLETE":
                     raise ContractError("CELL_READY_REQUIRED")
                 if candidate_writer_enabled:
-                    _write_candidate_admission(payload, validated, validator_reference)
+                    admission = write_candidate_admission(
+                        payload, validated, validator_reference,
+                    )
+                    if ledger_reference is not None and isinstance(admission, Mapping):
+                        ledger_reference = bind_candidate_episode_state(
+                            ledger_reference,
+                            _run_dir(payload) / "candidate_admission.json",
+                        )
                 return _response(ok=True, code="VALIDATED", state="COMPLETE", run_id=payload["run_id"], plan_digest=planned["plan_digest"], data={
                     "mode": "live", "operator_summary": summary, "technical_validator": validator_reference,
                     "storage_usage": storage_reference, "resource_usage": resource_reference,
@@ -1832,13 +2030,18 @@ def run_live(payload, cancel, publish, *, resolver=resolve_inputs, executor_fact
                     "camera_warmup_digest": canonical_digest(camera_warmup),
                     "postcommit_scene_state_digest": scene["scene_state_digest"], "postcommit_cell_state": cell,
                     **test_only_projection,
-                    **({
-                        "test_only_episode_binding_digest": episode_binding["binding_digest"],
-                        "test_only_planned_start": copy.deepcopy(planned_start),
-                    } if test_only else {}),
+                    **(runtime_projection if bound_runtime else {}),
                     "camera_semantic_authority": False, "training_authorized": False,
                 })
             if result["state"] in {"GRASP_VERDICT", "SEMANTIC_VERDICT"}:
+                if result["state"] == "SEMANTIC_VERDICT":
+                    publish(_response(
+                        ok=True,
+                        code="RECYCLING" if "recycle" in summary else "FINALIZING",
+                        state="RUNNING",
+                        run_id=payload["run_id"], plan_digest=planned["plan_digest"],
+                        data={"mode": "live", "progress": 70},
+                    ))
                 if approval_scope == "HIL_NUMERIC_PROXY":
                     decision = hil_numeric_gripper_verdict(
                         result["state"], result.get("execution_evidence"),
@@ -1865,7 +2068,7 @@ def run_live(payload, cancel, publish, *, resolver=resolve_inputs, executor_fact
                         "execution_evidence": copy.deepcopy(result.get("execution_evidence")),
                         "operator_summary_digest": canonical_digest(summary),
                         "approval_scope": approval_scope,
-                        "data_disposition": "TEST_ONLY" if test_only else "PRODUCTION",
+                        "data_disposition": data_disposition,
                     }
 
                     def verdict_in_background(
@@ -1929,7 +2132,7 @@ def run_live(payload, cancel, publish, *, resolver=resolve_inputs, executor_fact
                         "execution_evidence_digest": canonical_digest(
                             result.get("execution_evidence")
                         ),
-                        "data_disposition": "TEST_ONLY" if test_only else "PRODUCTION",
+                        "data_disposition": data_disposition,
                     }
 
                     def release_in_background(evidence=release_checkpoint_evidence):
@@ -1977,6 +2180,11 @@ def run_live(payload, cancel, publish, *, resolver=resolve_inputs, executor_fact
                 acted = job.release_verdict(decision, operator_id, source=source)
                 if not acted["ok"]:
                     return _response(ok=False, code=acted["code"], state=acted["state"], run_id=payload["run_id"], plan_digest=planned["plan_digest"])
+                publish(_response(
+                    ok=True, code="FINALIZING", state="RUNNING",
+                    run_id=payload["run_id"], plan_digest=planned["plan_digest"],
+                    data={"mode": "live", "progress": 80},
+                ))
                 continue
             if result["state"] == "PRECONTACT_HUMAN":
                 if campaign_authorization is not None:
@@ -2017,23 +2225,20 @@ def run_live(payload, cancel, publish, *, resolver=resolve_inputs, executor_fact
     except Exception as exc:
         return _response(ok=False, code="RUNNER_FAILED", state="BLOCKED", run_id=payload.get("run_id"), data={"detail": str(exc)})
     finally:
+        if warmup_pool is not None:
+            warmup_pool.shutdown(wait=True)
         if resource_monitor is not None and not resource_finished:
             try:
                 resource_monitor.finish({}, collection_settings=profile)
             except Exception:
                 pass
         for child in (recorder, executor):
-            if child is not None:
-                try:
-                    child.close(timeout_s=1.0 if cancel.is_set() else None)
-                except ContractError:
-                    if not cancel.is_set():
-                        raise
+            _close_runtime_child(child, cancel)
 
 
 def resolve_campaign_episode_inputs(
     payload, *, release_role, next_run_id=None, source_slot=None,
-    cell_root=ROOT / "outputs/data_factory/cells",
+    cell_root=ROOT / "outputs/data_factory/cells", resolver=None,
 ):
     """Resolve one serial episode and seal its exact source/destination scene edge."""
     if release_role not in {"RELEASE_DESTINATION", "DESTINATION_THEN_NEXT_SOURCE"}:
@@ -2041,7 +2246,10 @@ def resolve_campaign_episode_inputs(
     if (release_role == "DESTINATION_THEN_NEXT_SOURCE") != (next_run_id is not None):
         raise ContractError("SCENE_SLOT_NEXT_RUN")
     root = Path(cell_root).resolve()
-    validated, program, binding = resolve_inputs(
+    resolver = resolve_inputs if resolver is None else resolver
+    if not callable(resolver):
+        raise ContractError("CAMPAIGN_RESOLVER")
+    validated, program, binding = resolver(
         payload,
         scene_binding_call=lambda checked, release_pose, run_id: _scene_binding(
             checked, release_pose, run_id, root=root,

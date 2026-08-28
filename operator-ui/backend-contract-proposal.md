@@ -1,6 +1,6 @@
 # Operator UI loopback integration contract
 
-Status: implemented for the reusable FAKE product and the current PHYSICAL TEST_ONLY caller. GENERAL/PRODUCTION activation remains unavailable.
+Status: the loopback transport, catalog flow, independent workspace registration, multi-start-pose state space, Cartesian `direct_pairs`, camera role/recovery flow and current PHYSICAL TEST_ONLY caller are implemented. Each operation is usable only when the backend includes it in `available_ops`. GENERAL/PRODUCTION activation remains unavailable because the repository has no executable production combination and caller.
 
 This document is for backend and UI maintainers. It specifies the current same-origin transport, atomic view, public product operations and campaign boundary. Inner `OneJob` ports remain implementation details and are not browser APIs.
 
@@ -54,6 +54,9 @@ The process serves static UI and one `CollectionOperatorApplication`. FAKE injec
 | `lifecycle_action` | Current product uses `LIVE_COLLECT` |
 | `data_disposition` | Executable caller currently uses `TEST_ONLY`; `PRODUCTION` may be visible but unavailable |
 | `setup` | Factual host summary and robot/controller/gripper/camera subsystem states |
+| `camera_setup` | Optional connected-camera inventory, role bindings and backend-derived recording profile |
+| `start_pose_setup` | Optional registered start-pose profiles and selected usable IDs |
+| `state_space_summary` | Optional backend counts for selected starts, conditions, eligible pairs and planned episodes |
 | `catalog.axes` | Workspace, frame, task, object, grasp, start, motion, variant, camera, data mode and split options with availability reasons |
 | `draft` | Draft ID/revision, authoring mode, requested count, repeat, coherent selection and cells |
 | `runtime` | Workflow, measurement outcome, reason codes, progress and active child |
@@ -63,7 +66,7 @@ The process serves static UI and one `CollectionOperatorApplication`. FAKE injec
 | `coverage` | Planned/completed counts and per-cell projection |
 | `candidate_review` | Optional separately bound review offer; absent in current PHYSICAL TEST_ONLY caller |
 | `available_ops` | The only operations the browser may currently send |
-| `technical_details` | Catalog/combination identities and nested backend projection for diagnostics |
+| `technical_details` | Compact catalog/combination identities for diagnostics; owner-side campaign artifacts stay out of the browser view |
 
 `revision` is monotonic within the application session. `view_digest` covers session ID, revision and the complete projection. The backend increments revision when the owner-side projection changes. The browser rejects revision rollback, a different digest at the same revision, unknown enums, invalid catalog selection and malformed runtime state.
 
@@ -95,6 +98,11 @@ The application exposes operations by workflow:
 | Workflow | Public operations | Payload |
 | --- | --- | --- |
 | environment not ready | `prepare_environment` | `{}` |
+| environment/authoring with camera inventory | `update_camera_bindings` | complete logical-device-to-role map |
+| recoverable camera terminal | `recover_camera_setup` | `{}` |
+| `AUTHORING`, no active workspace registration | `new_workspace_registration` | `{"display_name":"…"}` |
+| `AUTHORING`, active workspace registration | `capture_workspace_point`, `preview_workspace`, `discard_workspace_preview`, `save_workspace` | exact capture label, scale measurements or preview digest |
+| `AUTHORING`, start-pose setup | `capture_start_pose`, `update_start_pose_selection` | display name or complete ordered selected-ID list |
 | `AUTHORING` | `update_draft` | `draft_id` plus exactly one selection/draft change |
 | `AUTHORING` | `compile_draft` | `draft_id`, exact `data_disposition` |
 | `REVIEW_CAMPAIGN` | `edit_campaign_draft` | `{}` |
@@ -105,15 +113,114 @@ The application exposes operations by workflow:
 
 Supported single-field `update_draft` changes are:
 
-- `selection: {axis: option_id}` for workspace, frame, task, object, grasp, start, motion, variant, camera or data mode;
+- `selection: {axis: option_id}` for workspace, frame, task, object, grasp, motion, variant, camera or data mode. The legacy single `start` axis remains backend compatibility state but is not a visible product control when `start_pose_setup` exists;
 - `authoring_mode: ASSISTED|DIRECT_EDIT`;
 - `requested_count` (total finite episodes) or `repeat` (ASSISTED per-condition maximum), each 1~100;
 - `split: TRAIN|ID|OOD`, subject to catalog availability;
-- `add_pose` with one bounded `{place_id, x_mm, y_mm, yaw_deg}` pose, or `remove_pose` with one exact projected pose, in direct-edit mode.
+- `add_pair` with one bounded `{start_pose_id, place_id, x_mm, y_mm, yaw_deg}` pair, or `remove_pair` with one exact projected pair, in direct-edit mode.
 
-`direct_poses` is the canonical ordered, non-anchor condition list. Switching from assisted to direct authoring materializes the assisted sequence's first-seen unique conditions into that list; the fixed source anchor remains first. Compile repeats the full `[anchor, ...direct_poses]` list to exact `requested_count`. No separate cell-toggle operation is public.
+`direct_pairs` is the canonical ordered list when the backend exposes the reusable state-space contract. Each row binds one registered start pose to one workspace X/Y/yaw condition. The browser never creates a Cartesian product or fills missing rows itself. During transition, a projection may omit `direct_pairs` and retain legacy `direct_poses`; the UI then preserves the old `add_pose`/`remove_pose` behavior without inventing a start ID.
 
 `available_ops` is authoritative. A handler existing inside the Python process does not make it a public operation in the current workflow.
+
+### Camera role binding
+
+When connected cameras can be configured in-process, the projection adds this optional shape:
+
+```json
+{
+  "camera_setup": {
+    "profile_label": "상단 + 손목 RGB · 30 fps",
+    "required_roles": ["UP", "WRIST"],
+    "devices": [
+      {"logical_id": "camera-1", "label": "카메라 1", "status": "CONNECTED", "technical_identity": "…"},
+      {"logical_id": "camera-2", "label": "카메라 2", "status": "CONNECTED", "technical_identity": "…"}
+    ],
+    "bindings": {"camera-1": "UP", "camera-2": "WRIST"}
+  }
+}
+```
+
+The main UI shows only the logical labels and `UP | SIDE | WRIST | UNUSED` choices. `technical_identity` is diagnostic provenance and appears only inside collapsed technical details. The catalog camera profile is backend-derived from the complete role map and is not a second user choice.
+
+`update_camera_bindings` sends exactly one complete map:
+
+```json
+{"bindings": {"camera-1": "UP", "camera-2": "WRIST"}}
+```
+
+Every discovered logical device appears exactly once. A non-`UNUSED` role may appear at most once. Selecting an occupied role swaps the two logical assignments in the browser before posting, and the backend validates the same invariant before changing any camera owner. Older/fake projections may omit `camera_setup`; the UI then preserves the existing catalog-only behavior without inventing devices.
+
+The UI implements the following optional projections without fabricating fallback values. Operational support exists only when the backend emits the matching projection and operation.
+
+### Camera recovery projection
+
+A terminal camera failure may expose `recover_camera_setup` only after the active child is gone. The browser sends `{}` and waits for a new atomic projection. A successful recovery returns to environment preparation, where passive discovery and the projected role map can be checked again. It does not rerun an old POST, restart a dead HTTP process, claim that a browser reload can revive the backend, move the robot or create a recording.
+
+### Independent workspace registration
+
+Before registration starts, `workspace_registration` is absent or `null` and `new_workspace_registration` is the only workspace-creation operation. The dialog first collects a human display name and sends exactly:
+
+```json
+{"display_name": "놓기 영역 B"}
+```
+
+Only the resulting projection exposes capture controls:
+
+```json
+{
+  "workspace_registration": {
+    "calibration_id": "workspace-pending-r001",
+    "display_name": "놓기 영역 B",
+    "captures": {"CENTER": false, "X_REF": false, "Y_CHECK": false},
+    "preview": null,
+    "promotion": null,
+    "execution_authorized": false,
+    "training_approved": false,
+    "history": []
+  }
+}
+```
+
+The selected old workspace and frame are not the new identity and are not rendered as registration inputs. `capture_workspace_point` reads current TCP state only. `preview_workspace` binds the three captures and two measured scale values. An out-of-tolerance preview exposes only digest-bound `discard_workspace_preview`; it removes that temporary candidate and returns the same wizard to capture/preview without touching config or granting authority.
+
+`save_workspace` binds the current `preview_digest`; during backend migration the UI accepts `save_workspace_revision` only when that exact legacy operation appears in `available_ops`, while still labeling the action `작업영역 저장`. Saving refreshes catalog facts but does not create motion, production or training authority.
+
+### Start poses and Cartesian collection state
+
+The optional start-pose projection is:
+
+```json
+{
+  "start_pose_setup": {
+    "profiles": [
+      {"start_pose_id": "fr5-home-r001", "display_name": "HOME", "status": "AVAILABLE"},
+      {"start_pose_id": "fr5-side-r001", "display_name": "측면 준비 자세", "status": "QUALIFICATION_REQUIRED", "reason": "QUALIFICATION_REQUIRED"}
+    ],
+    "selected_start_pose_ids": ["fr5-home-r001"]
+  },
+  "state_space_summary": {
+    "selected_start_pose_count": 1,
+    "selected_condition_count": 15,
+    "eligible_pair_count": 15,
+    "planned_count": 3
+  }
+}
+```
+
+Profile status is exactly `CANDIDATE | AVAILABLE | QUALIFICATION_REQUIRED`. Only `AVAILABLE` profiles may appear in `selected_start_pose_ids`. `capture_start_pose` sends `{"display_name":"…"}` and reads current joints without motion. `update_start_pose_selection` sends one complete ordered `selected_start_pose_ids` list. HOME 복귀는 시작 자세 registry와 별도이며 기존 safe recovery operation을 계속 사용한다.
+
+The collection domain is selected start poses × eligible workspace X/Y/yaw conditions. `state_space_summary` is backend-owned and optional; its finite counts describe registered A4 anchor points and anchor/start pairs, not every point in the continuous plane or a claim that every future path executes. When absent the UI hides it rather than calculating or guessing counts. Assisted mode shows the summary and keeps the full cell grid closed. Direct mode consumes projected rows such as:
+
+```json
+{
+  "direct_pairs": [
+    {"start_pose_id": "fr5-home-r001", "place_id": "PLACE_A", "x_mm": 0, "y_mm": 0, "yaw_deg": 0}
+  ]
+}
+```
+
+Each ordered row displays its start-pose name and exact X/Y/yaw. The backend remains responsible for pair eligibility, deterministic selection, finite exact N and per-pair exclusion.
 
 ## Compile and campaign authorization
 
@@ -187,14 +294,16 @@ The browser polls only while environment preparation or execution is active. Pol
 
 ## Current PHYSICAL TEST_ONLY boundary
 
-The current PHYSICAL application reads the repository catalog but marks a combination executable only when it matches the tracked place1 workspace/frame, motion qualification, start pose and one-camera profile supported by the injected caller. The coherent lane uses wood-cube top-center grasp, `pickup_e2e`, `DIRECT`, `fr5-lab-a-home-r001` and `fr5-up-rgb-30hz-v1`.
+The current PHYSICAL application reads the repository catalog but marks a combination executable only when its workspace/frame, motion qualification, start pose, object/grasp and backend-derived camera profile all match the injected caller. The checked-in executable lane uses place1, wood-cube top-center grasp, `pickup_e2e`, `DIRECT` and the currently qualified start pose; compatible one- or two-camera role maps select a validated v2 profile.
 
 Qualified `PLACE_A@place-a-yaw0-r002` contributes bounded continuous X/Y and normalized yaw. Checked-in cells and HOME/origin/yaw0 are convenient presets rather than the product limit. Count is editable from 1 to 100, and compile seals automatic deterministic spread or direct ordered poses as exact serial slots.
 
-Startup discovers stable UVC identities, chooses the explicit `--camera-device-id` or the canonical first compatible identity, and prepares the corresponding foreground environment by default. Only that process-start identity is executable. Other matching identities remain visible with `CAMERA_REBIND_REQUIRED`; no browser intent reconfigures the camera owner. Starting a new process with an explicit identity is the supported rebind path. With zero compatible cameras the server still opens a blocked factual shell and exposes no compile or campaign operation.
+Startup discovers stable camera identities and projects them as `카메라 1`, `카메라 2`, and so on. The operator assigns only recording roles that participate in a tracked profile feasible for the current device count; the backend keeps technical identities, derives the exact compatible profile and owns any safe foreground rebind.
+
+An old or forged role map without a compatible profile is reported as unavailable rather than relabeled as the preferred profile. With zero compatible cameras the server still opens a blocked factual shell and exposes no compile or campaign operation.
 
 The environment can attach to one existing robot/controller/gripper owner, bootstrap configured missing owners, perform required gripper open normalization and start the selected UVC node. Ambiguous owner, partial owner, unreadable query, incompatible device or setup timeout blocks the application. `Ctrl-C` closes the campaign, bridge and processes owned by the environment.
 
 Camera identity and transport are bound during environment preparation and compiled-campaign construction. Every selected cell gets a fresh HOME snapshot and scene/start/plan validation before its episode, followed by recorder readiness and technical validation. The camera may remain `CONNECTED_UNPLACED`; no image-quality, object-visibility, role-placement, dual-camera-sync, depth or production-data-validity judgment is issued.
 
-GENERAL/PRODUCTION mode, new physical workspace or unregistered-cell/task/object/grasp/start/motion/variant callers, `pick_place`, `TWO_STAGE_ALIGN`, ID/OOD collection, dual-camera/RealSense support, production candidate issuance and training approval require separate qualified combinations and runtime callers. Declared cells inside the qualified place1 registration do not require point-by-point workspace requalification. Catalog visibility alone is not execution authority.
+GENERAL/PRODUCTION mode, new physical workspace or unregistered-cell/task/object/grasp/start/motion/variant callers, `pick_place`, `TWO_STAGE_ALIGN`, ID/OOD collection, RealSense/depth and dual-camera sync/data-validity qualification, production candidate issuance and training approval require separate qualified combinations and runtime callers. Declared cells inside the qualified place1 registration do not require point-by-point workspace requalification. Catalog visibility alone is not execution authority.

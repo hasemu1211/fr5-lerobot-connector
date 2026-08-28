@@ -17,6 +17,13 @@ fi
 TOPIC_NAMESPACE="${REALSENSE_NAMESPACE:-camera}"
 ROLE="${REALSENSE_ROLE:-up}"
 FPS="${REALSENSE_FPS:-${FR5_COLLECTION_FPS:-30}}"
+WIDTH="${REALSENSE_WIDTH:-640}"
+HEIGHT="${REALSENSE_HEIGHT:-480}"
+[[ "$FPS" =~ ^[1-9][0-9]*$ ]] || { echo "REALSENSE_FPS must be a positive integer" >&2; exit 1; }
+[[ "$WIDTH" =~ ^[1-9][0-9]*$ && "$HEIGHT" =~ ^[1-9][0-9]*$ ]] || {
+  echo "RealSense dimensions must be positive integers" >&2
+  exit 1
+}
 ENABLE_SYNC="${REALSENSE_ENABLE_SYNC:-false}"
 FRAMES_QUEUE_SIZE="${REALSENSE_FRAMES_QUEUE_SIZE:-10}"
 COLOR_QOS="${REALSENSE_COLOR_QOS:-DEFAULT}"
@@ -26,7 +33,7 @@ ros2 launch realsense2_camera rs_launch.py \
   camera_namespace:="${TOPIC_NAMESPACE}" \
   camera_name:="${ROLE}" \
   enable_color:=false enable_depth:=false \
-  rgb_camera.color_profile:="640x480x${FPS}" \
+  rgb_camera.color_profile:="${WIDTH}x${HEIGHT}x${FPS}" \
   enable_sync:="${ENABLE_SYNC}" &
 LAUNCH_PID=$!
 trap 'kill "$LAUNCH_PID" 2>/dev/null || true' EXIT INT TERM

@@ -73,7 +73,7 @@ class ResourceUsageTest(unittest.TestCase):
             readers={"read_text": read_text, "listdir": listdir, "sysconf": lambda key: {"SC_PAGE_SIZE": 4096, "SC_CLK_TCK": 10}[key], "uname": lambda: Uname(),
                      "getcwd": lambda: "/work", "stat": lambda _: Status(), "statvfs": lambda _: Filesystem(), "realpath": lambda path: "/sys/module/uvcvideo" if path.endswith("1-2:1.0/driver") else path,
                      "environ": {"ROS_DISTRO": "jazzy"}, "python_version": lambda: "3.12.0", "distribution_version": lambda _: "0.6.1"}, sleep=lambda _: gate.wait())
-        monitor.start(); monitor.record_control_round_trip(.2); monitor.record_control_round_trip(.1); monitor._stop.set(); gate.set()
+        monitor.start(); monitor.record_control_round_trip(.2); monitor.record_control_round_trip(.1); monitor.record_finalization_round_trip(6.7); monitor._stop.set(); gate.set()
         report = monitor.finish({"writer_queue": 4, "writer_queue_drops": 0, "alignment_failures": 0}, {"fps": 30})
         self.assertEqual(report["schema_version"], "data_factory.resource_usage.v1")
         self.assertEqual(report["host"]["ram_total_bytes"], 16384 * 1024)
@@ -84,6 +84,9 @@ class ResourceUsageTest(unittest.TestCase):
         self.assertEqual(report["memory"]["swap_io_write_delta_bytes"], 4 * 4096)
         self.assertEqual(report["recorder"], {"queue_high_water": 4, "queue_drops": 0, "alignment_failures": 0})
         self.assertEqual(report["control_round_trip_seconds"]["p95"], .2)
+        self.assertEqual(report["finalization_round_trip_seconds"], {
+            "count": 1, "p95": 6.7, "max": 6.7,
+        })
         self.assertEqual(report["collection_settings"], {"fps": 30})
         self.assertEqual(report["host"]["runtime"], {"python_version": "3.12.0", "ros_distro": "jazzy", "lerobot_version": "0.6.1", "robot_driver_version": "NOT_AVAILABLE"})
         self.assertEqual(report["host"]["usb"], {"devices": [{"sysfs_path": "1-2", "vendor_id": "1908", "product_id": "2311", "serial": "cam-serial", "speed_mbps": "480", "driver": "uvcvideo"}], "camera_role_binding": "NOT_AVAILABLE"})

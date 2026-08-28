@@ -25,6 +25,12 @@ DISPOSITION_TO_MODE = {value: key for key, value in MODE_TO_DISPOSITION.items()}
 
 
 def camera_choice(combination: Mapping[str, Any]) -> str:
+    bindings = combination.get("camera_bindings")
+    if isinstance(bindings, Mapping) and len(bindings) != 1:
+        return (
+            f"{combination['camera_profile_id']}@"
+            f"{combination['camera_binding_digest']}"
+        )
     return f"{combination['camera_profile_id']}@{combination['camera_device_id']}"
 
 
@@ -33,8 +39,14 @@ def browser_selection(selection: Mapping[str, Any], *, split: str) -> dict[str, 
         ui: selection[field]
         for ui, (_axis, field) in AXIS_BINDINGS.items()
     }
+    binding = selection.get("camera_bindings")
+    camera = (
+        f"{selection['camera_profile_id']}@{selection['camera_binding_digest']}"
+        if isinstance(binding, Mapping) and len(binding) != 1
+        else f"{selection['camera_profile_id']}@{selection['camera_device_id']}"
+    )
     value.update(
-        camera=f"{selection['camera_profile_id']}@{selection['camera_device_id']}",
+        camera=camera,
         data_mode=MODE_TO_DISPOSITION[selection["data_mode"]],
         split=split,
     )
@@ -91,6 +103,13 @@ def project_catalog(
             matches = _matching_combinations(
                 catalog, selection, changed_field=field, changed_value=source["id"],
             )
+            current_camera = selection.get("camera_binding_digest")
+            same_camera = [
+                item for item in matches
+                if item.get("camera_binding_digest") == current_camera
+            ]
+            if same_camera:
+                matches = same_camera
             ready = any(
                 item.get("execution", {}).get(selection["data_mode"], {}).get("executable") is True
                 for item in matches
@@ -127,7 +146,11 @@ def project_catalog(
             "id": identifier,
             "label": (
                 f"{profile_labels.get(combination['camera_profile_id'], combination['camera_profile_id'])}"
-                f" · {device_labels.get(combination['camera_device_id'], combination['camera_device_id'])}"
+                f" · "
+                + ", ".join(
+                    f"{role}: {device_labels.get(device, device)}"
+                    for role, device in combination.get("camera_bindings", {}).items()
+                )
             ),
             "available": compatible or bool(previous and previous["available"]),
             "reason": (
@@ -271,8 +294,8 @@ def project_environment(environment: Mapping[str, Any]) -> dict[str, Any]:
     reason_text = {
         "SYNTHETIC_ATTACHED": "가상 테스트 장치가 연결되어 있습니다.",
         "SYNTHETIC_NOT_PREPARED": "가상 테스트 장치가 아직 준비되지 않았습니다.",
-        "ATTACHED": "현재 실행 환경에 연결되어 있습니다.",
-        "NOT_RUNNING": "현재 실행 중인 연결을 찾지 못했습니다.",
+        "ATTACHED": "마지막 확인에서 실행 환경에 연결되어 있었습니다.",
+        "NOT_RUNNING": "마지막 확인에서 실행 중인 연결을 찾지 못했습니다.",
         "SETUP_REQUIRED": "초기 설정이 필요합니다.",
         "OPERATOR_STACK_GRIPPER_SETUP_GATE": "그리퍼 초기 활성화와 열림이 필요합니다.",
         "OPERATOR_STACK_AMBIGUOUS": "동일 기능을 제공하는 실행 주체가 둘 이상 발견되었습니다.",
@@ -300,9 +323,10 @@ def project_environment(environment: Mapping[str, Any]) -> dict[str, Any]:
     return {
         "host_status": "READY" if state == "READY" else "BLOCKED" if state == "BLOCKED" else "ACTION_REQUIRED",
         "summary": (
-            "현재 선택한 수집 환경을 사용할 수 있습니다."
-            if state == "READY" else "환경 준비가 필요합니다."
+            "마지막 환경 확인을 통과했습니다. 실행 직전에 다시 확인합니다."
+            if state == "READY" else "마지막 확인 기준으로 환경 준비가 필요합니다."
         ),
+        "observed_at": environment.get("observed_at"),
         "subsystems": subsystems,
     }
 

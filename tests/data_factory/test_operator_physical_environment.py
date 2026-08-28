@@ -10,9 +10,45 @@ from tools.data_factory.operator_physical_environment import (
     _default_process,
     build_physical_operator_environment,
 )
+from tools.fr5_data_factory import ContractError
 
 
-DEVICE = "usb-Generic_USB2.0_PC_CAMERA-video-index0"
+UP_DEVICE = "usb-Generic_USB2.0_PC_CAMERA-video-index0"
+SIDE_DEVICE = "usb-Second_USB_Camera-video-index0"
+
+
+def profile(*roles: str, serials: dict[str, str] | None = None) -> dict:
+    camera_profile = "up" if roles == ("up",) else "-".join(roles)
+    return {
+        "schema_version": "data_factory.collection_profile.v2",
+        "collection_profile_id": f"test-{camera_profile}-30hz",
+        "qualification_status": "QUALIFIED",
+        "camera_profile": camera_profile,
+        "camera_roles": list(roles),
+        "camera_serials": serials or {
+            role: "Generic_USB2.0_PC_CAMERA" if role == "up" else "Second_USB_Camera"
+            for role in roles
+        },
+        "camera_topics": {
+            role: f"/camera/{role}/color/image_raw" for role in roles
+        },
+        "fps": 30, "width": 640, "height": 480,
+        "image_qos": "reliable", "image_qos_depth": 10,
+        "writer_queue_size": 128, "encoder_threads": 2,
+        "encoding_mode": "batch", "repo_id": "local/test",
+        "encoder_temp_policy": "DATASET_LOCAL",
+        "dataset_incremental_peak_bytes": 1,
+        "encoder_temp_peak_bytes": 1, "disk_reserve_bytes": 1,
+        "portability_status": "QUALIFICATION_REQUIRED",
+        "quality_contract_digest": "sha256:" + "0" * 64,
+    }
+
+
+def uvc(root: Path, stable_id: str) -> dict[str, str]:
+    return {
+        "kind": "UVC", "stable_id": stable_id,
+        "capture_endpoint": str(root / stable_id),
+    }
 
 
 class FakeProcess:
@@ -68,10 +104,24 @@ class PhysicalEnvironmentTests(unittest.TestCase):
         )
 
     def build(
-        self, root, state, *, external_ready=False,
-        external_command_server=False, maintenance_open=False,
+        self, root: Path, state: dict[str, bool], *,
+        collection_profile: dict | None = None,
+        camera_devices: dict | None = None,
+        external_ready: bool = False,
+        external_command_server: bool = False,
+        maintenance_open: bool = False,
+        partial_camera_roles: set[str] | None = None,
+        realsense_connected: bool = True,
+        realsense_depth: bool = False,
     ):
+        collection_profile = collection_profile or profile("up")
+        camera_devices = camera_devices or {"up": uvc(root, UP_DEVICE)}
         calls = {"process": [], "maintenance": []}
+
+        def active_roles() -> set[str]:
+            if external_ready or state["camera"]:
+                return set(collection_profile["camera_roles"])
+            return set(partial_camera_roles or ())
 
         def command(argv):
             if argv == ("ros2", "node", "list", "--no-daemon"):
@@ -80,17 +130,54 @@ class PhysicalEnvironmentTests(unittest.TestCase):
                     nodes.append("/fr_command_server")
                 if external_ready or state["robot"]:
                     nodes.append("/controller_manager")
-                if external_ready or state["camera"]:
-                    nodes.append("/camera/up/color/uvc_up_camera")
+                for role in active_roles():
+                    descriptor = camera_devices[role]
+                    nodes.append(
+                        f"/camera/{role}/color/uvc_{role}_camera"
+                        if descriptor["kind"] == "UVC" else f"/camera/{role}"
+                    )
                 return "\n".join(nodes)
+            if argv == ("ros2", "topic", "list", "--no-daemon"):
+                return "\n".join(
+                    collection_profile["camera_topics"][role]
+                    for role in active_roles()
+                )
             if argv == ("ros2", "control", "list_controllers"):
                 return (
                     "fairino5_controller active\n"
                     "gripper_controller active\n"
                     "joint_state_broadcaster active\n"
                 )
-            if argv[:4] == ("ros2", "param", "get", "/camera/up/color/uvc_up_camera"):
-                return str(root / DEVICE)
+            if argv[:3] == ("ros2", "node", "info"):
+                role = next(
+                    role for role in collection_profile["camera_roles"]
+                    if argv[3].startswith(f"/camera/{role}")
+                )
+                return (
+                    "Publishers:\n"
+                    f"  {collection_profile['camera_topics'][role]}: sensor_msgs/msg/Image\n"
+                )
+            if argv[:3] == ("ros2", "param", "get"):
+                node, name = argv[3], argv[4]
+                role = next(
+                    role for role in collection_profile["camera_roles"]
+                    if node.startswith(f"/camera/{role}")
+                )
+                descriptor = camera_devices[role]
+                if name == "video_device":
+                    return str(Path(descriptor["capture_endpoint"]).resolve(strict=True))
+                if name == "serial_no":
+                    return "_" + descriptor["stable_id"]
+                if name == "enable_color":
+                    return "true"
+                if name == "enable_depth":
+                    return "true" if realsense_depth else "false"
+            if argv == ("rs-enumerate-devices", "-s", "--no-dds"):
+                serials = [
+                    item["stable_id"] for item in camera_devices.values()
+                    if item["kind"] == "REALSENSE"
+                ]
+                return "\n".join(serials) if realsense_connected else ""
             raise AssertionError(argv)
 
         def process(argv):
@@ -127,7 +214,8 @@ class PhysicalEnvironmentTests(unittest.TestCase):
 
         environment = build_physical_operator_environment(
             repository_root=Path(__file__).resolve().parents[2],
-            camera_device_id=DEVICE,
+            collection_profile=collection_profile,
+            camera_devices=camera_devices,
             command_call=command,
             process_factory=process,
             gripper_readback_call=readback,
@@ -138,10 +226,15 @@ class PhysicalEnvironmentTests(unittest.TestCase):
         )
         return environment, calls
 
-    def test_missing_environment_bootstraps_gripper_then_starts_normal_children(self):
+    @staticmethod
+    def make_uvc_links(root: Path) -> None:
+        (root / UP_DEVICE).symlink_to("/dev/null")
+        (root / SIDE_DEVICE).symlink_to("/dev/zero")
+
+    def test_single_camera_missing_environment_starts_one_aggregate_camera_owner(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            (root / DEVICE).symlink_to("/dev/null")
+            self.make_uvc_links(root)
             state = {"maintenance": False, "robot": False, "camera": False}
             environment, calls = self.build(root, state)
 
@@ -156,28 +249,197 @@ class PhysicalEnvironmentTests(unittest.TestCase):
                     else "camera"
                     for argv in calls["process"]
                 ],
-                ["maintenance", "robot", "camera"],
+                ["maintenance", "camera", "robot"],
             )
-            stopped = environment.stop()
-            self.assertEqual(stopped["state"], "SETUP_REQUIRED")
+            camera = calls["process"][1]
+            self.assertIn("CAMERA_FPS=30", camera)
+            self.assertEqual(camera[-3:], ("up", "UVC", str(root / UP_DEVICE)))
+            self.assertEqual(environment.stop()["state"], "SETUP_REQUIRED")
             self.assertFalse(state["robot"] or state["camera"] or state["maintenance"])
 
     def test_existing_ready_owners_are_reused_without_setup_or_processes(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            (root / DEVICE).symlink_to("/dev/null")
+            self.make_uvc_links(root)
             state = {"maintenance": False, "robot": False, "camera": False}
             environment, calls = self.build(root, state, external_ready=True)
 
-            projected = environment.prepare_environment()
-
-            self.assertEqual(projected["state"], "READY")
+            self.assertEqual(environment.prepare_environment()["state"], "READY")
             self.assertEqual(calls, {"process": [], "maintenance": []})
+
+    def test_camera_rebind_and_stop_preserve_the_owned_motion_child(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.make_uvc_links(root)
+            state = {"maintenance": False, "robot": False, "camera": False}
+            environment, calls = self.build(root, state)
+            self.assertEqual(environment.prepare_environment()["state"], "READY")
+            process_count = len(calls["process"])
+            maintenance_count = len(calls["maintenance"])
+            (root / UP_DEVICE).unlink()
+            (root / UP_DEVICE).symlink_to("/dev/zero")
+            rebound = environment.rebind_cameras(
+                profile("up"), {"up": uvc(root, UP_DEVICE)},
+            )
+
+            self.assertEqual(rebound["state"], "SETUP_REQUIRED")
+            self.assertTrue(state["robot"])
+            self.assertFalse(state["camera"])
+            self.assertEqual(len(calls["process"]), process_count)
+            self.assertEqual(len(calls["maintenance"]), maintenance_count)
+
+            self.assertEqual(environment.prepare_environment()["state"], "READY")
+            self.assertTrue(state["robot"] and state["camera"])
+            self.assertEqual(len(calls["process"]), process_count + 1)
+            self.assertNotIn(
+                "real_robot.launch.py", calls["process"][-1],
+                "camera rebind restarted the motion owner",
+            )
+            stopped = environment.stop_cameras()
+            self.assertEqual(stopped["state"], "SETUP_REQUIRED")
+            self.assertTrue(state["robot"])
+            self.assertFalse(state["camera"])
+
+    def test_invalid_camera_rebind_preserves_existing_children(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.make_uvc_links(root)
+            state = {"maintenance": False, "robot": False, "camera": False}
+            environment, calls = self.build(root, state)
+            self.assertEqual(environment.prepare_environment()["state"], "READY")
+            process_count = len(calls["process"])
+            maintenance_count = len(calls["maintenance"])
+            invalid = profile("up")
+            invalid["camera_roles"] = ["side"]
+
+            with self.assertRaisesRegex(
+                ContractError, "OPERATOR_PHYSICAL_CAMERA_PROFILE",
+            ):
+                environment.rebind_cameras(
+                    invalid, {"up": uvc(root, UP_DEVICE)},
+                )
+
+            self.assertTrue(state["robot"] and state["camera"])
+            self.assertEqual(len(calls["process"]), process_count)
+            self.assertEqual(len(calls["maintenance"]), maintenance_count)
+
+    def test_dual_uvc_realsense_roles_share_one_owner_and_require_rgb_only(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.make_uvc_links(root)
+            dual = profile(
+                "up", "side",
+                serials={
+                    "up": "RUNTIME_BINDING_REQUIRED",
+                    "side": "RUNTIME_BINDING_REQUIRED",
+                },
+            )
+            devices = {
+                "up": uvc(root, UP_DEVICE),
+                "side": {
+                    "kind": "REALSENSE", "stable_id": "RS123",
+                    "capture_endpoint": "RS123",
+                },
+            }
+            state = {"maintenance": False, "robot": False, "camera": False}
+            environment, calls = self.build(
+                root, state, collection_profile=dual, camera_devices=devices,
+                external_ready=True,
+            )
+
+            ready = environment.prepare_environment()
+            self.assertEqual(ready["components"]["camera"], {
+                "state": "READY", "owner": "camera-group", "reason": "ATTACHED",
+            })
+            self.assertEqual(calls["process"], [])
+
+            blocked, blocked_calls = self.build(
+                root, state, collection_profile=dual, camera_devices=devices,
+                external_ready=True, realsense_depth=True,
+            )
+            self.assertEqual(blocked.prepare_environment()["state"], "BLOCKED")
+            self.assertEqual(blocked_calls["process"], [])
+
+    def test_partial_dual_graph_blocks_without_starting_any_process(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.make_uvc_links(root)
+            dual = profile("up", "side")
+            devices = {"up": uvc(root, UP_DEVICE), "side": uvc(root, SIDE_DEVICE)}
+            state = {"maintenance": False, "robot": True, "camera": False}
+            environment, calls = self.build(
+                root, state, collection_profile=dual, camera_devices=devices,
+                partial_camera_roles={"up"},
+            )
+
+            self.assertEqual(environment.prepare_environment()["state"], "BLOCKED")
+            self.assertEqual(calls, {"process": [], "maintenance": []})
+
+    def test_missing_realsense_serial_blocks_before_starting_any_process(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.make_uvc_links(root)
+            rs_profile = profile("up", serials={"up": "RS123"})
+            devices = {"up": {
+                "kind": "REALSENSE", "stable_id": "RS123",
+                "capture_endpoint": "RS123",
+            }}
+            state = {"maintenance": False, "robot": True, "camera": False}
+            environment, calls = self.build(
+                root, state, collection_profile=rs_profile,
+                camera_devices=devices, realsense_connected=False,
+            )
+
+            self.assertEqual(environment.prepare_environment()["state"], "BLOCKED")
+            self.assertEqual(calls, {"process": [], "maintenance": []})
+
+    def test_stale_duplicate_and_profile_mismatch_fail_before_process_creation(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.make_uvc_links(root)
+            spawn = Mock(side_effect=AssertionError("process side effect"))
+            common = dict(
+                repository_root=Path(__file__).resolve().parents[2],
+                command_call=Mock(side_effect=AssertionError("query side effect")),
+                process_factory=spawn,
+                gripper_readback_call=Mock(), gripper_maintenance_call=Mock(),
+                device_root=root,
+            )
+            stale = {"up": uvc(root, "usb-missing-video-index0")}
+            with self.assertRaisesRegex(ContractError, "OPERATOR_PHYSICAL_CAMERA_DEVICE_STALE"):
+                build_physical_operator_environment(
+                    collection_profile=profile(
+                        "up", serials={"up": "usb-missing"},
+                    ),
+                    camera_devices=stale, **common,
+                )
+            dual = profile(
+                "up", "side",
+                serials={
+                    "up": "Generic_USB2.0_PC_CAMERA",
+                    "side": "Generic_USB2.0_PC_CAMERA",
+                },
+            )
+            alias = "usb-Generic_USB2.0_PC_CAMERA-alias-video-index0"
+            (root / alias).symlink_to("/dev/null")
+            duplicate = {"up": uvc(root, UP_DEVICE), "side": uvc(root, alias)}
+            with self.assertRaisesRegex(ContractError, "OPERATOR_PHYSICAL_CAMERA_BINDING"):
+                build_physical_operator_environment(
+                    collection_profile=dual, camera_devices=duplicate, **common,
+                )
+            wrong_roles = profile("up")
+            wrong_roles["camera_roles"] = ["up", "side"]
+            with self.assertRaisesRegex(ContractError, "OPERATOR_PHYSICAL_CAMERA_PROFILE"):
+                build_physical_operator_environment(
+                    collection_profile=wrong_roles,
+                    camera_devices={"up": uvc(root, UP_DEVICE)}, **common,
+                )
+            spawn.assert_not_called()
 
     def test_missing_environment_does_not_reopen_an_already_open_gripper(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            (root / DEVICE).symlink_to("/dev/null")
+            self.make_uvc_links(root)
             state = {"maintenance": False, "robot": False, "camera": False}
             environment, calls = self.build(root, state, maintenance_open=True)
 
@@ -188,7 +450,7 @@ class PhysicalEnvironmentTests(unittest.TestCase):
     def test_external_command_server_is_ambiguous_and_never_mutated(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            (root / DEVICE).symlink_to("/dev/null")
+            self.make_uvc_links(root)
             state = {"maintenance": False, "robot": False, "camera": False}
             environment, calls = self.build(
                 root, state, external_command_server=True,

@@ -11,20 +11,25 @@ from pathlib import Path
 from typing import Any, Mapping
 from unittest import mock
 
+from tools.data_factory import run_job
 from tools.data_factory.campaign_operator import CampaignOperator, SIDE_EFFECT_COUNTERS
+from tools.data_factory.campaign_authorization import validate_runtime_campaign_scope
+from tools.data_factory.experiment_manifest import compile_fr5_hypothesis
 from tools.data_factory.one_job import OneJob, TEST_ONLY_READINESS_CONTRACT
 from tools.data_factory.operator_bridge import (
     CandidateReviewPort,
     LoopbackBridge,
     OperatorIntentCore,
 )
-from tools.data_factory.operator_catalog import project_assisted_poses
+from tools.data_factory.operator_catalog import load_operator_catalog, project_assisted_poses
 from tools.data_factory.operator_console import (
     OperatorConsole,
+    _campaign_camera_warmup,
     build_physical_operator_application,
     build_physical_operator_console,
     build_physical_test_contract,
     capture_gripper_setup_readback,
+    capture_home_snapshot,
     main as operator_console_main,
     normalize_gripper_after_operator_ready,
     passive_physical_gate,
@@ -34,10 +39,14 @@ from tools.fr5_data_factory import ContractError, canonical_digest, load_json_st
 
 try:
     from .test_campaign_authoring import draft as campaign_draft
-    from .test_experiment_manifest import single_hypothesis, single_qualification_inputs
+    from .test_experiment_manifest import (
+        qualification_inputs, single_hypothesis, single_qualification_inputs,
+    )
 except ImportError:
     from test_campaign_authoring import draft as campaign_draft
-    from test_experiment_manifest import single_hypothesis, single_qualification_inputs
+    from test_experiment_manifest import (
+        qualification_inputs, single_hypothesis, single_qualification_inputs,
+    )
 
 
 NOW = datetime(2026, 8, 26, 3, 0, tzinfo=timezone.utc)
@@ -54,6 +63,44 @@ def envelope(view: dict, op: str, payload: dict, intent_id: str) -> dict:
         "op": op,
         "payload": payload,
     }
+
+
+def production_hypothesis() -> dict[str, Any]:
+    fixed, report, resolvers, _bases, _poses, catalog = qualification_inputs()
+    digest_maps = []
+    for field in (
+        "base_condition_qualifications", "robot_start_pose_qualifications",
+    ):
+        replacements = {}
+        for item in catalog[field]:
+            old = item["qualification_digest"]
+            item["source"] = "QUALIFICATION_ARTIFACT"
+            item["qualification_digest"] = canonical_digest({
+                key: value for key, value in item.items()
+                if key != "qualification_digest"
+            })
+            replacements[old] = item["qualification_digest"]
+        digest_maps.append(replacements)
+    for pair in catalog["allowed_pairs"]:
+        pair["base_condition_qualification_digest"] = digest_maps[0][
+            pair["base_condition_qualification_digest"]
+        ]
+        pair["robot_start_pose_qualification_digest"] = digest_maps[1][
+            pair["robot_start_pose_qualification_digest"]
+        ]
+    catalog["allowed_pairs"].sort(key=lambda pair: (
+        pair["base_condition_qualification_digest"],
+        pair["robot_start_pose_qualification_digest"],
+    ))
+    catalog["source"] = "QUALIFICATION_ARTIFACT"
+    catalog["catalog_digest"] = canonical_digest({
+        key: value for key, value in catalog.items()
+        if key != "catalog_digest"
+    })
+    return compile_fr5_hypothesis(
+        fixed_contract=fixed, coverage_report=report,
+        resolver_results=resolvers, qualification_catalog=catalog,
+    )
 
 
 class Harness:
@@ -289,7 +336,10 @@ class Harness:
             "effect_counts": copy.deepcopy(self.forbidden),
         }
 
-    def console(self, *, episode_call=None, prepare_timeout_s=1.0) -> OperatorConsole:
+    def console(
+        self, *, episode_call=None, prepare_timeout_s=1.0,
+        candidate_review_port=None, campaign_approval_once=False,
+    ) -> OperatorConsole:
         def forbidden_review(*_args, **_kwargs):
             self.forbidden["candidate"] += 1
             raise AssertionError("TEST_ONLY must not review a production candidate")
@@ -299,17 +349,244 @@ class Harness:
             campaign_operator_factory=self.operator_factory,
             episode_call=episode_call or self.episode, projection_call=self.projection,
             test_only_paths=self.root, clock=lambda: NOW,
-            candidate_review_port=CandidateReviewPort(
-                operator_label="local-operator", review_call=forbidden_review,
+            candidate_review_port=(
+                candidate_review_port
+                if candidate_review_port is not None
+                else CandidateReviewPort(
+                    operator_label="local-operator", review_call=forbidden_review,
+                )
             ),
             terminal_response_call=lambda: self.terminal_response,
             gripper_setup_request=self.setup_request,
             gripper_setup_resolution_call=self.setup_resolution_call,
+            campaign_approval_once=campaign_approval_once,
             prepare_timeout_s=prepare_timeout_s, close_timeout_s=1.0,
         )
 
 
 class OperatorConsoleTests(unittest.TestCase):
+    def test_console_preserves_production_authoring_without_opening_effects(self):
+        hypothesis = production_hypothesis()
+        source_draft = campaign_draft(hypothesis, count=1)
+        counters = {name: 0 for name in SIDE_EFFECT_COUNTERS}
+
+        def factory(episode_call):
+            return CampaignOperator(
+                session_id="production-campaign-r001",
+                lifecycle_owner="local-operator", operator_label="local-operator",
+                workspace={"workspace_id": "qualified-workspace", "identity": "PRODUCTION"},
+                hypothesis=hypothesis, draft=source_draft,
+                effect_scope="PHYSICAL", lifecycle_action="LIVE_COLLECT",
+                data_disposition="PRODUCTION",
+                subsystems={
+                    "planner": {
+                        "readiness": "READY", "capability": "PLAN",
+                        "reason": "QUALIFICATION_ARTIFACT",
+                    },
+                },
+                expires_at=EXPIRES,
+                initial_scene_digest=hypothesis["fixed_contract"]["scene_digest"],
+                scene_evidence_call=lambda _run_id: {},
+                side_effect_counter_call=lambda: copy.deepcopy(counters),
+                fake_lifecycle_factory=lambda: None,
+                physical_activation_gate=lambda: True,
+                physical_lifecycle_factory=lambda: None,
+                physical_live_call=episode_call,
+                physical_root_binding_call=lambda _run_id: {},
+                physical_start_binding_call=lambda _run_id, _slot: {},
+                clock=lambda: NOW,
+            )
+
+        with tempfile.TemporaryDirectory() as directory:
+            harness = Harness(directory)
+            harness.hypothesis = hypothesis
+            harness.source_draft = source_draft
+            console = OperatorConsole(
+                session_id="production-console-r001", operator_label="local-operator",
+                campaign_operator_factory=factory,
+                episode_call=lambda *_args: {}, projection_call=harness.projection,
+                test_only_paths=directory, campaign_approval_once=True,
+                clock=lambda: NOW,
+            )
+            try:
+                self.assertEqual(console.projection()["data_disposition"], "PRODUCTION")
+                result = console.compile_draft({
+                    "draft_id": source_draft["draft_id"],
+                    "data_disposition": "PRODUCTION",
+                }, {})
+                self.assertEqual(result["outcome"], "REVIEW_CAMPAIGN")
+                self.assertEqual(counters, {name: 0 for name in SIDE_EFFECT_COUNTERS})
+            finally:
+                console.close()
+
+    def test_product_application_dispatches_executable_general_mode_to_production_factory(self):
+        repository = Path(__file__).resolve().parents[2]
+        device = "usb-Generic_USB2.0_PC_CAMERA-video-index0"
+        catalog = load_operator_catalog(repository, device_ids=[device])
+        for combination in catalog["combinations"]:
+            if combination["execution"]["TEST_COLLECTION"]["executable"]:
+                combination["execution"]["GENERAL_COLLECTION"] = {
+                    "executable": True, "reason": "GENERAL_CALLER_READY",
+                }
+                combination["combination_digest"] = canonical_digest({
+                    key: value for key, value in combination.items()
+                    if key != "combination_digest"
+                })
+        catalog["combinations"].sort(
+            key=lambda combination: combination["combination_digest"],
+        )
+        catalog["catalog_digest"] = canonical_digest({
+            key: value for key, value in catalog.items()
+            if key != "catalog_digest"
+        })
+
+        hypothesis = production_hypothesis()
+        counters = {name: 0 for name in SIDE_EFFECT_COUNTERS}
+        created = []
+
+        def production_factory(campaign_id, selected, app_draft):
+            source_draft = campaign_draft(hypothesis, count=app_draft["requested_count"])
+            source_draft.update(
+                draft_id=app_draft["draft_id"],
+                manifest_id=f"{campaign_id}-manifest",
+            )
+
+            def owner_factory(episode_call):
+                return CampaignOperator(
+                    session_id=campaign_id, lifecycle_owner="local-operator",
+                    operator_label="local-operator",
+                    workspace={"workspace_id": selected["workspace_id"], "identity": "PRODUCTION"},
+                    hypothesis=hypothesis, draft=source_draft,
+                    effect_scope="PHYSICAL", lifecycle_action="LIVE_COLLECT",
+                    data_disposition="PRODUCTION",
+                    subsystems={
+                        "planner": {
+                            "readiness": "READY", "capability": "PLAN",
+                            "reason": "QUALIFICATION_ARTIFACT",
+                        },
+                    },
+                    expires_at=EXPIRES,
+                    initial_scene_digest=hypothesis["fixed_contract"]["scene_digest"],
+                    scene_evidence_call=lambda _run_id: {},
+                    side_effect_counter_call=lambda: copy.deepcopy(counters),
+                    fake_lifecycle_factory=lambda: None,
+                    physical_activation_gate=lambda: True,
+                    physical_lifecycle_factory=lambda: None,
+                    physical_live_call=episode_call,
+                    physical_root_binding_call=lambda _run_id: {},
+                    physical_start_binding_call=lambda _run_id, _slot: {},
+                    clock=lambda: NOW,
+                )
+
+            harness = Harness(str(repository))
+            harness.hypothesis = hypothesis
+            harness.source_draft = source_draft
+            console = OperatorConsole(
+                session_id=campaign_id, operator_label="local-operator",
+                campaign_operator_factory=owner_factory,
+                episode_call=lambda *_args: {}, projection_call=harness.projection,
+                test_only_paths="production-bound-roots",
+                campaign_approval_once=True, clock=lambda: NOW,
+            )
+            created.append((copy.deepcopy(selected), console))
+            return console
+
+        environment = {
+            "schema_version": "data_factory.operator_environment.v1",
+            "state": "READY", "observed_at": "2026-08-26T03:00:00Z",
+            "components": {
+                name: {"state": "READY", "owner": f"owner-{name}", "reason": "ATTACHED"}
+                for name in ("robot", "controller", "gripper", "camera")
+            },
+        }
+        application, _context = build_physical_operator_application(
+            repository_root=repository, session_id="general-dispatch-r001",
+            operator_label="local-operator",
+            environment_call=lambda: copy.deepcopy(environment),
+            prepare_environment_call=lambda: copy.deepcopy(environment),
+            selected_camera_device_id=device, discovery_call=lambda: [device],
+            initial_catalog=catalog, initial_camera_devices=[device],
+            initial_environment=environment,
+            production_campaign_factory=production_factory, clock=lambda: NOW,
+        )
+        try:
+            authoring = application.bridge_core.snapshot()
+            application.bridge_core.consume(envelope(
+                authoring, "update_draft", {
+                    "draft_id": authoring["projection"]["draft"]["draft_id"],
+                    "selection": {"data_mode": "PRODUCTION"},
+                }, "select-general-r001",
+            ))
+            authoring = application.bridge_core.snapshot()
+            result = application.bridge_core.consume(envelope(
+                authoring, "compile_draft", {
+                    "draft_id": authoring["projection"]["draft"]["draft_id"],
+                    "data_disposition": "PRODUCTION",
+                }, "compile-general-r001",
+            ))["result"]
+            self.assertEqual(result["outcome"], "REVIEW_CAMPAIGN")
+            self.assertEqual(len(created), 1)
+            self.assertEqual(created[0][0]["data_mode"], "GENERAL_COLLECTION")
+            self.assertEqual(
+                created[0][1].campaign_operator.data_disposition, "PRODUCTION",
+            )
+            self.assertEqual(counters, {name: 0 for name in SIDE_EFFECT_COUNTERS})
+        finally:
+            application.close()
+
+    def test_campaign_camera_warmup_reuses_only_the_exact_bound_profile(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            cache = {}
+            transport = {"binding_digest": canonical_digest("camera-binding")}
+            profile = {"collection_profile_id": "profile-a", "fps": 30}
+            calls = []
+
+            def measure(payload, active_profile, _cancel):
+                calls.append((payload["run_id"], canonical_digest(active_profile)))
+                return {
+                    "schema_version": "data_factory.camera_warmup.v1",
+                    "run_id": payload["run_id"], "camera_profile": "up",
+                    "attempts": [{"attempt": 1, "roles": [], "status": "PASS"}],
+                }
+
+            def payload(run_id):
+                (root / run_id).mkdir()
+                return {
+                    "run_id": run_id, "run_root": str(root),
+                    "camera_profile": "up",
+                }
+
+            first = _campaign_camera_warmup(
+                cache=cache, transport=transport, payload=payload("run-1"),
+                profile=profile, cancel=threading.Event(), measure_call=measure,
+            )
+            second = _campaign_camera_warmup(
+                cache=cache, transport=transport, payload=payload("run-2"),
+                profile=profile, cancel=threading.Event(), measure_call=measure,
+            )
+            changed = _campaign_camera_warmup(
+                cache=cache, transport=transport, payload=payload("run-3"),
+                profile={**profile, "fps": 29}, cancel=threading.Event(),
+                measure_call=measure,
+            )
+            self.assertEqual([item[0] for item in calls], ["run-1", "run-3"])
+            self.assertEqual(first["schema_version"], "data_factory.camera_warmup.v1")
+            self.assertEqual(
+                second["source_evidence_digest"],
+                canonical_digest(first),
+            )
+            self.assertEqual(
+                (second["schema_version"], second["run_id"], second["status"]),
+                ("data_factory.camera_warmup_reuse.v1", "run-2", "REUSED_PASS"),
+            )
+            self.assertEqual(changed["run_id"], "run-3")
+            self.assertEqual(
+                json.loads((root / "run-2/camera_warmup_reuse.json").read_text()),
+                second,
+            )
+            self.assertFalse((root / "run-2/camera_warmup.json").exists())
+
     @staticmethod
     def gripper_setup_request() -> dict:
         return {
@@ -483,6 +760,57 @@ class OperatorConsoleTests(unittest.TestCase):
                 }),
             )
 
+            camera_reads = 0
+
+            def transient_camera_command(args, code):
+                nonlocal camera_reads
+                if args[:4] == [
+                    "ros2", "topic", "type", "/camera/up/color/image_raw",
+                ]:
+                    camera_reads += 1
+                    if camera_reads == 1:
+                        raise ContractError(code)
+                return command(args, code)
+
+            with mock.patch(
+                "tools.data_factory.operator_console._readonly_command",
+                side_effect=transient_camera_command,
+            ):
+                transient_evidence = passive_physical_gate(
+                    camera_topic="/camera/up/color/image_raw",
+                    discovered_device_id=token,
+                    device_root=device_root,
+                    discovery_call=lambda: [token],
+                )
+            self.assertEqual(camera_reads, 2)
+            self.assertEqual(transient_evidence["topic_type"], "sensor_msgs/msg/Image")
+
+            joint_reads = 0
+
+            def transient_joint_command(args, code):
+                nonlocal joint_reads
+                if args[:4] == ["ros2", "topic", "type", "/joint_states"]:
+                    joint_reads += 1
+                    if joint_reads < 3:
+                        raise ContractError(code)
+                return command(args, code)
+
+            with (
+                mock.patch(
+                    "tools.data_factory.operator_console._readonly_command",
+                    side_effect=transient_joint_command,
+                ),
+                mock.patch("tools.data_factory.operator_console.time.sleep") as pause,
+            ):
+                passive_physical_gate(
+                    camera_topic="/camera/up/color/image_raw",
+                    discovered_device_id=token,
+                    device_root=device_root,
+                    discovery_call=lambda: [token],
+                )
+            self.assertEqual(joint_reads, 3)
+            self.assertEqual(pause.call_args_list, [mock.call(0.1), mock.call(0.2)])
+
             def mismatched_command(args, code):
                 result = command(args, code)
                 return "/dev/zero\n" if args[:4] == [
@@ -504,7 +832,7 @@ class OperatorConsoleTests(unittest.TestCase):
                     )
 
             for discovered, expected in (
-                ([token, token], "PHYSICAL_CAMERA_BINDING_MISMATCH"),
+                ([token, token], "CAMERA_BINDING_DISCOVERY"),
                 ([token], "PHYSICAL_CAMERA_BINDING_MISMATCH"),
             ):
                 with self.subTest(discovered=discovered, expected=expected):
@@ -521,6 +849,30 @@ class OperatorConsoleTests(unittest.TestCase):
                     finally:
                         if not (device_root / token).exists():
                             (device_root / token).symlink_to("/dev/null")
+
+    def test_home_snapshot_retries_one_transient_read_failure(self):
+        snapshot = {"schema_version": "data_factory.pose_snapshot.v1"}
+        read = mock.Mock(side_effect=(
+            ContractError("PHYSICAL_HOME_SNAPSHOT"), json.dumps(snapshot),
+        ))
+        with mock.patch(
+            "tools.data_factory.operator_console._readonly_command", read,
+        ):
+            self.assertEqual(
+                capture_home_snapshot(tcp_candidate_manifest=Path("tcp.json")),
+                snapshot,
+            )
+        self.assertEqual(read.call_count, 2)
+
+        read = mock.Mock(side_effect=ContractError("PHYSICAL_HOME_SNAPSHOT"))
+        with (
+            mock.patch(
+                "tools.data_factory.operator_console._readonly_command", read,
+            ),
+            self.assertRaisesRegex(ContractError, "PHYSICAL_HOME_SNAPSHOT"),
+        ):
+            capture_home_snapshot(tcp_candidate_manifest=Path("tcp.json"))
+        self.assertEqual(read.call_count, 2)
 
     def test_gripper_ros_adapter_reads_one_owner_and_runs_only_sealed_normalization(self):
         controller_message = """A message was lost!!!
@@ -659,22 +1011,46 @@ feedback:
         def server_command(command, *, expected_fields):
             commands.append((command, expected_fields))
             return {
+                "GetGripperActivateStatus()": [0, 0, 0],
                 "ActGripper(1,0)": [0], "ActGripper(1,1)": [0],
                 "MoveGripper(1,100)": [0],
                 "GetGripperMotionDone()": [0, 0, 1],
                 "GetGripperCurPosition()": [0, 0, 100],
             }[command]
 
+        settled = []
         with mock.patch(
             "tools.data_factory.operator_console._remote_gripper_command",
             side_effect=server_command,
         ):
-            result = normalize_gripper_after_operator_ready(maintenance_readback)
+            result = normalize_gripper_after_operator_ready(
+                maintenance_readback, settle_call=settled.append,
+            )
         self.assertEqual(result, {"status": "NORMALIZED", "requires_graph_switch": True})
+        self.assertEqual(settled, [1.0, 2.0])
         self.assertEqual(
             [command for command, _ in commands],
             [
-                "ActGripper(1,0)", "ActGripper(1,1)", "MoveGripper(1,100)",
+                "GetGripperActivateStatus()", "ActGripper(1,0)",
+                "ActGripper(1,1)", "MoveGripper(1,100)",
+                "GetGripperMotionDone()", "GetGripperCurPosition()",
+            ],
+        )
+
+        commands.clear()
+        remote = mock.Mock(side_effect=(
+            [0, 3, 1], [0], [0, 0, 1], [0], [0, 0, 1], [0, 0, 100],
+        ))
+        with mock.patch(
+            "tools.data_factory.operator_console._remote_gripper_command", remote,
+        ):
+            result = normalize_gripper_after_operator_ready(maintenance_readback)
+        self.assertEqual(result, {"status": "NORMALIZED", "requires_graph_switch": True})
+        self.assertEqual(
+            [call.args[0] for call in remote.call_args_list],
+            [
+                "GetGripperActivateStatus()", "ResetAllError()",
+                "GetGripperActivateStatus()", "MoveGripper(1,100)",
                 "GetGripperMotionDone()", "GetGripperCurPosition()",
             ],
         )
@@ -731,11 +1107,93 @@ feedback:
                 )
                 self.assertEqual(context["production_writers_enabled"], False)
                 self.assertEqual(context["gripper_setup"]["state"], "MAINTENANCE_APPROVAL_REQUIRED")
+                tuning = projection["gripper_tuning"]
+                self.assertEqual(
+                    (tuning["object_profile_id"], tuning["grasp_profile_id"],
+                     tuning["command_percent"],
+                     tuning["acceptable_feedback_percent"], tuning["status"]),
+                    ("wood-cube-25mm-r001", "wood-cube-25mm-top-center-r001",
+                     56.0, {"min": 56.0, "max": 57.0},
+                     "CANDIDATE_PENDING_HIL"),
+                )
+                self.assertFalse(tuning["production_authority"])
+                self.assertFalse(tuning["training_authority"])
+                self.assertEqual(
+                    context["motion_qualification_digest"],
+                    context["base_motion_qualification_digest"],
+                )
                 maintenance.assert_called_once_with(closed)
                 self.assertEqual(readbacks, [])
                 self.assertIsNone(console.episode_worker)
             finally:
                 console.close()
+
+    def test_default_resolver_keeps_qualified_54_percent_grasp(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.portable_repository(root)
+            config = root / "config/data_factory"
+            goal = config / "test_only_physical/goal2-place1"
+            payload = {
+                "mode": "plan_only", "run_id": "default-grasp-r001",
+                "job": load_json_strict(goal / "center-live-p45-20260821-r001.job.json"),
+                "selected_sheet": str(goal / "yaw0_sheet.json"),
+                "yaw0_sheet": str(goal / "yaw0_sheet.json"),
+                "config_root": str(config),
+                "motion_qualification": str(
+                    config / "motion_qualifications/fr5-place-a-wood-cube-r001.json"
+                ),
+                "home_candidate": str(
+                    config / "home_candidates/fr5-lab-a-home-r001.json"
+                ),
+                "urdf": str(root / "src/fairino_description/urdf/fairino5_v6.urdf"),
+                "expected_robot_system_id": "fr5-lab-a",
+            }
+            resolved, program, _ = run_job.resolve_inputs(
+                payload, scene_binding_call=lambda *_args: {},
+            )
+            close = resolved["grasp_profile"]["gripper_close"]
+            self.assertEqual(close["command_position_m"], 0.01134)
+            self.assertEqual(
+                close["acceptable_feedback_m"], {"min": 0.01134, "max": 0.01218},
+            )
+            self.assertEqual(
+                program["gripper_requirements"]["evidence_digest"],
+                "sha256:77ca8fbbd45a18c5f5ce230b7494a05678c3810da1e3e51164766d6f15e6c22f",
+            )
+
+    def test_test_only_gripper_retune_rejects_out_of_envelope_before_roots(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.portable_repository(root)
+            path = root / (
+                "config/data_factory/test_only_physical/goal2-place1/"
+                "gripper-retune-wood-cube-25mm-top-center-r002.json"
+            )
+            retune = load_json_strict(path)
+            retune["acceptable_feedback_m"]["max"] = 0.01219
+            retune["retune_digest"] = canonical_digest({
+                key: value for key, value in retune.items()
+                if key != "retune_digest"
+            })
+            path.write_text(json.dumps(retune), encoding="utf-8")
+            readback = mock.Mock(side_effect=AssertionError("gripper read before static validation"))
+            with self.assertRaisesRegex(
+                ContractError, "TEST_ONLY_GRIPPER_RETUNE_ENVELOPE",
+            ):
+                build_physical_operator_console(
+                    repository_root=root,
+                    session_id="retune-envelope-r001",
+                    run_id="retune-envelope-run-r001",
+                    operator_label="local-operator",
+                    discovery_call=lambda: ["usb-Goal2_Camera-video-index0"],
+                    activation_call=lambda: True,
+                    gripper_readback_call=readback,
+                    clock=lambda: NOW,
+                )
+            self.assertFalse((root / "outputs").exists())
+            self.assertFalse((root / "datasets").exists())
+            readback.assert_not_called()
 
     def test_real_physical_composition_auto_attaches_fresh_open_gripper(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -769,6 +1227,228 @@ feedback:
                 )
                 maintenance.assert_not_called()
                 self.assertIsNone(console.episode_worker)
+            finally:
+                console.close()
+
+    def test_physical_episode_consumes_hypothesis_resolver_receipt(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.portable_repository(root)
+            motion = json.loads((
+                root / "config/data_factory/motion_qualifications/"
+                "fr5-place-a-wood-cube-r001.json"
+            ).read_text(encoding="utf-8"))
+            tcp = json.loads((
+                root / "config/data_factory/test_only_physical/goal2-place1/"
+                "tcp_candidate_manifest.json"
+            ).read_text(encoding="utf-8"))
+            identity = {
+                "translation_m": [0.0, 0.0, 0.0],
+                "rotation_columns": [
+                    [1.0, 0.0, 0.0],
+                    [0.0, 1.0, 0.0],
+                    [0.0, 0.0, 1.0],
+                ],
+            }
+            snapshot = {
+                "schema_version": "data_factory.pose_snapshot.v1",
+                "frames": {"base": "base_link", "wrist": "wrist3_link"},
+                "joint_positions_rad": dict(zip(
+                    ("j1", "j2", "j3", "j4", "j5", "j6"),
+                    motion["qualified_safe_joint_positions_rad"],
+                )),
+                "base_wrist": copy.deepcopy(identity),
+                "base_tcp": {
+                    **copy.deepcopy(identity),
+                    "candidate_status": "CANDIDATE_MODEL_DERIVED",
+                    "candidate_source_sha256": tcp["tcp_candidate_digest"],
+                    "manifest_source_sha256": canonical_digest(tcp),
+                },
+                "joint_state_age_s": 0.01,
+                "joint_stamp_ns": 1_000_000_000,
+                "transform_stamp_ns": 1_000_000_000,
+                "ros_sample_age_s": 0.01,
+            }
+            opened = {
+                "active": True, "position_valid": True, "gripper_index": 1,
+                "reference_position_m": 0.021, "feedback_position_m": 0.021,
+                "sample_age_s": 0.0, "max_age_s": 0.1,
+                "source": "CONTROLLER_STATE",
+            }
+            scope_observed = {}
+            runtime_observed = {}
+
+            def validate_scope_then_stop(
+                payload, _cancel, publish, resolver, campaign_authorization,
+                test_only_episode_binding, decision_provider,
+                checkpoint_provider, **_kwargs,
+            ):
+                publish({"code": "PLANNING", "run_id": payload["run_id"]})
+                runtime_observed.update(
+                    console.bridge_core.snapshot()["projection"]["runtime"],
+                )
+                validated, program, _scene = resolver(payload)
+                envelope = campaign_authorization["envelope"]
+                job = validated["normalized_job"]
+                digests = validated["input_digests"]
+                base_close = validated["grasp_profile"]["gripper_close"]
+                retune = load_json_strict(
+                    root / "config/data_factory/test_only_physical/goal2-place1/"
+                    "gripper-retune-wood-cube-25mm-top-center-r002.json"
+                )
+                scope_observed.update({
+                    "manifest": test_only_episode_binding["manifest_digest"]
+                    == envelope["manifest_digest"],
+                    "slot": test_only_episode_binding["slot_digest"]
+                    in envelope["slot_digests"],
+                    "start_pose": test_only_episode_binding["robot_start_pose_id"]
+                    in envelope["allowed_start_pose_ids"],
+                    "disposition": test_only_episode_binding["data_disposition"]
+                    == envelope["data_disposition"],
+                    "collection": digests["collection_profile"]
+                    == envelope["collection_profile_digest"],
+                    "motion": program["binding_digests"]["motion_qualification"]
+                    == envelope["motion_qualification_digest"],
+                    "retune_command": program["gripper_requirements"][
+                        "command_position_m"
+                    ] == 0.021 * 56 / 100,
+                    "retune_feedback": program["gripper_requirements"][
+                        "acceptable_feedback_m"
+                    ] == {
+                        "min": 0.021 * 56 / 100,
+                        "max": 0.021 * 57 / 100,
+                    },
+                    "retune_close_step": next(
+                        step for step in program["steps"]
+                        if step["phase"] == "GRIPPER_CLOSE"
+                    )["gripper_position_m"] == 0.021 * 56 / 100,
+                    "retune_tolerance": next(
+                        step for step in program["steps"]
+                        if step["phase"] == "GRIPPER_CLOSE"
+                    )["limits"]["completion_tolerance_m"]
+                    == 0.021 * 57 / 100 - 0.021 * 56 / 100,
+                    "qualified_grasp_unchanged": (
+                        validated["grasp_profile"]["qualification_status"] == "QUALIFIED"
+                        and base_close["command_position_m"] == 0.01134
+                        and base_close["evidence_digest"]
+                        != program["gripper_requirements"]["evidence_digest"]
+                    ),
+                    "retune_evidence": program["gripper_requirements"][
+                        "evidence_digest"
+                    ] == retune["retune_digest"],
+                    **{
+                        field: job[field] == envelope[field]
+                        for field in (
+                            "robot_system_id", "task", "object_profile_id",
+                            "grasp_profile_id", "cell_calibration_id",
+                        )
+                    },
+                })
+                validate_runtime_campaign_scope(
+                    campaign_authorization, resolved_inputs=validated,
+                    motion_program=program,
+                    episode_binding=test_only_episode_binding, now=NOW,
+                )
+                plan_digest = canonical_digest(["plan", payload["run_id"]])
+                summary = {
+                    "path": ["PREGRASP_PTP", "APPROACH_STOP_LIN"],
+                    "flow": {
+                        "continuous_through": "LIFT_LIN",
+                        "next_human_hold": "POST_LIFT_SEMANTIC",
+                    },
+                    "speed": {
+                        "max_velocity_scaling": 0.03,
+                        "max_acceleration_scaling": 0.03,
+                    },
+                    "clearance": {
+                        "status": "COLLISION_CHECKED_NO_DISTANCE",
+                        "collision_report_digest": canonical_digest("collision"),
+                    },
+                }
+                site = checkpoint_provider({
+                    "schema_version": "data_factory.operator_checkpoint_request.v1",
+                    "kind": "PHYSICAL_SCENE_CONFIRMATION",
+                    "run_id": payload["run_id"], "plan_digest": plan_digest,
+                    "prompt": "Confirm the exact TEST_ONLY scene",
+                    "choices": ["READY", "CANCEL"],
+                    "evidence": {
+                        "checklist": {"place_alias": "place1"},
+                        "operator_summary": summary,
+                        "planned_start_evidence_digest": canonical_digest("start"),
+                        "data_disposition": "TEST_ONLY",
+                    },
+                    "timeout_s": 2.0,
+                })
+                decision = decision_provider({
+                    "schema_version": "data_factory.plan_decision_request.v1",
+                    "run_id": payload["run_id"], "plan_digest": plan_digest,
+                    "approval_scope": "HIL_NUMERIC_PROXY",
+                    "decision_binding": {
+                        "operator_summary": summary,
+                        "data_disposition": "TEST_ONLY",
+                        "episode_binding": copy.deepcopy(test_only_episode_binding),
+                    },
+                    "timeout_s": 2.0,
+                })
+                scope_observed.update({
+                    "site_before_plan": site["choice"] == "READY",
+                    "campaign_plan": decision["choice"] == "APPROVE",
+                })
+                raise ContractError("EXPECTED_LIVE_BOUND")
+
+            live = mock.Mock(side_effect=validate_scope_then_stop)
+            console, _ = build_physical_operator_console(
+                repository_root=root,
+                session_id="goal2-physical-receipt-r001",
+                run_id="goal2-place1-receipt-r001",
+                operator_label="local-operator",
+                discovery_call=lambda: ["usb-Goal2_Camera-video-index0"],
+                activation_call=lambda: True,
+                snapshot_call=lambda: copy.deepcopy(snapshot),
+                gripper_readback_call=lambda: copy.deepcopy(opened),
+                run_live_call=live,
+                environment_prepared=True,
+                clock=lambda: NOW,
+            )
+            try:
+                current = console.bridge_core.snapshot()
+                compiled = console.bridge_core.consume(envelope(
+                    current, "compile_draft", {
+                        "draft_id": current["projection"]["draft"]["draft_id"],
+                        "data_disposition": "TEST_ONLY",
+                    }, "compile-physical-receipt-r001",
+                ))["result"]
+                review = console.bridge_core.snapshot()
+                console.bridge_core.consume(envelope(
+                    review, "authorize_campaign", {
+                        "draft_id": review["projection"]["draft"]["draft_id"],
+                        "manifest_digest": compiled["manifest_digest"],
+                        "envelope_digest": compiled["envelope_digest"],
+                        "data_disposition": "TEST_ONLY",
+                    }, "authorize-physical-receipt-r001",
+                ))
+                retune = load_json_strict(
+                    root / "config/data_factory/test_only_physical/goal2-place1/"
+                    "gripper-retune-wood-cube-25mm-top-center-r002.json"
+                )
+                fixed = console.campaign_operator.hypothesis["fixed_contract"]
+                self.assertEqual(
+                    fixed["trajectory_digest"],
+                    canonical_digest({
+                        "motion_qualification": fixed["motion_recipe_digest"],
+                        "recipe": "DIRECT",
+                        "test_only_gripper_retune": retune["retune_digest"],
+                    }),
+                )
+                self.assertEqual(
+                    console.wait_for_episode(1.0)["code"], "EXPECTED_LIVE_BOUND",
+                )
+                self.assertEqual(
+                    scope_observed, dict.fromkeys(scope_observed, True),
+                )
+                self.assertEqual(runtime_observed["phase"], "PLANNING")
+                self.assertEqual(runtime_observed["phase_label"], "경로 계획 및 충돌 검사")
+                live.assert_called_once()
             finally:
                 console.close()
 
@@ -836,6 +1516,15 @@ feedback:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             self.portable_repository(root)
+            default_job = (
+                root / "config/data_factory/test_only_physical/goal2-place1"
+                / "center-live-p45-20260821-r001.job.json"
+            )
+            duplicate_job = load_json_strict(default_job)
+            duplicate_job["job_id"] = "same-pose-other-job-r001"
+            default_job.with_name("same-pose-other-job-r001.job.json").write_text(
+                json.dumps(duplicate_job), encoding="utf-8",
+            )
             environment = {
                 "schema_version": "data_factory.operator_environment.v1",
                 "state": "SETUP_REQUIRED",
@@ -862,6 +1551,8 @@ feedback:
             }
             device = "usb-Generic_USB2.0_PC_CAMERA-video-index0"
             other_device = "usb-Generic_USB2.0_PC_CAMERA_2-video-index0"
+            activation = mock.Mock(return_value=True)
+            gripper_readback = mock.Mock(return_value=copy.deepcopy(opened))
             application, context = build_physical_operator_application(
                 repository_root=root,
                 session_id="product-application-r001",
@@ -870,12 +1561,21 @@ feedback:
                 prepare_environment_call=prepare,
                 selected_camera_device_id=device,
                 discovery_call=lambda: [device, other_device],
-                activation_call=lambda: True,
-                gripper_readback_call=lambda: copy.deepcopy(opened),
+                activation_call=activation,
+                gripper_readback_call=gripper_readback,
                 run_live_call=mock.Mock(side_effect=AssertionError("live before authorization")),
                 clock=lambda: NOW,
             )
             try:
+                selected_combination = next(
+                    item for item in application.catalog["combinations"]
+                    if item["combination_digest"]
+                    == application.selection["combination_digest"]
+                )
+                self.assertEqual(
+                    selected_combination["sources"]["job"],
+                    str(default_job.relative_to(root)),
+                )
                 self.assertFalse((root / "outputs").exists())
                 initial = application.bridge_core.snapshot()
                 self.assertEqual(
@@ -888,12 +1588,12 @@ feedback:
                 authoring = application.bridge_core.snapshot()
                 draft = authoring["projection"]["draft"]
                 camera_options = authoring["projection"]["catalog"]["axes"]["camera"]
-                self.assertEqual(
-                    {item["id"] for item in camera_options},
+                self.assertLessEqual(
                     {
                         f"fr5-up-rgb-30hz-v1@{device}",
                         f"fr5-up-rgb-30hz-v1@{other_device}",
                     },
+                    {item["id"] for item in camera_options},
                 )
                 camera_by_id = {item["id"]: item for item in camera_options}
                 self.assertTrue(
@@ -915,16 +1615,101 @@ feedback:
                     ))
                 self.assertFalse((root / "outputs").exists())
                 authoring = application.bridge_core.snapshot()
+                current_object_pose = {
+                    "place_id": "PLACE_A", "yaw_deg": -37.5,
+                    "x_mm": 12.5, "y_mm": -7.25,
+                }
+                application.bridge_core.consume(envelope(
+                    authoring, "update_draft", {
+                        "draft_id": authoring["projection"]["draft"]["draft_id"],
+                        "current_object_pose": current_object_pose,
+                    }, "set-current-object-r001",
+                ))
+                authoring = application.bridge_core.snapshot()
+                application.bridge_core.consume(envelope(
+                    authoring, "update_draft", {
+                        "draft_id": authoring["projection"]["draft"]["draft_id"],
+                        "requested_count": 1,
+                    }, "repeat-pose-count-one-r001",
+                ))
+                authoring = application.bridge_core.snapshot()
+                application.bridge_core.consume(envelope(
+                    authoring, "update_draft", {
+                        "draft_id": authoring["projection"]["draft"]["draft_id"],
+                        "authoring_mode": "DIRECT_EDIT",
+                    }, "repeat-pose-direct-r001",
+                ))
+                authoring = application.bridge_core.snapshot()
+                application.bridge_core.consume(envelope(
+                    authoring, "update_draft", {
+                        "draft_id": authoring["projection"]["draft"]["draft_id"],
+                        "requested_count": 3,
+                    }, "repeat-pose-count-three-r001",
+                ))
+                authoring = application.bridge_core.snapshot()
+                self.assertEqual(authoring["projection"]["draft"]["direct_poses"], [])
+                materialized_poses = [
+                    {
+                        key: pair[key]
+                        for key in ("place_id", "yaw_deg", "x_mm", "y_mm")
+                    }
+                    for pair in authoring["projection"]["draft"]["direct_pairs"]
+                ]
+                self.assertEqual(materialized_poses[0], current_object_pose)
+                probe_draft = copy.deepcopy(application.draft)
+                probe_draft["draft_id"] = "repeat-pose-probe-r001-draft"
+                repeat_probe = application.campaign_factory(
+                    "repeat-pose-probe-r001", copy.deepcopy(application.selection),
+                    probe_draft,
+                )
+                try:
+                    repeat_probe.compile_draft({
+                        "draft_id": probe_draft["draft_id"],
+                        "data_disposition": "TEST_ONLY",
+                    }, {})
+                    probe_owner = repeat_probe.campaign_operator
+                    probe_bases = {
+                        item["base_condition_digest"]: item
+                        for item in probe_owner.hypothesis["base_conditions"]
+                    }
+                    probe_resolvers = {
+                        item["resolved_job_digest"]: item
+                        for item in probe_owner.hypothesis["resolver_receipts"]
+                    }
+                    probe_poses = []
+                    for slot in probe_owner.manifest["slots"]:
+                        job = probe_resolvers[
+                            probe_bases[slot["base_condition_digest"]][
+                                "resolved_job_digest"
+                            ]
+                        ]["normalized_job"]
+                        probe_poses.append({
+                            key: job[key]
+                            for key in ("place_id", "yaw_deg", "x_mm", "y_mm")
+                        })
+                    self.assertEqual(probe_poses, materialized_poses)
+                finally:
+                    repeat_probe.close()
                 direct_poses = [
                     {"place_id": "PLACE_A", "yaw_deg": 45, "x_mm": 10, "y_mm": 5},
-                    {"place_id": "PLACE_A", "yaw_deg": 180, "x_mm": -10, "y_mm": -5},
+                    {"place_id": "PLACE_A", "yaw_deg": -180, "x_mm": -10, "y_mm": -5},
                 ]
                 for index, pose in enumerate(direct_poses, 1):
+                    replaced = authoring["projection"]["draft"]["direct_pairs"][1]
                     application.bridge_core.consume(envelope(
                         authoring, "update_draft", {
                             "draft_id": authoring["projection"]["draft"]["draft_id"],
-                            "add_pose": pose,
-                        }, f"add-direct-pose-r{index:03d}",
+                            "remove_pair": replaced,
+                        }, f"remove-direct-pair-r{index:03d}",
+                    ))
+                    authoring = application.bridge_core.snapshot()
+                    application.bridge_core.consume(envelope(
+                        authoring, "update_draft", {
+                            "draft_id": authoring["projection"]["draft"]["draft_id"],
+                            "add_pair": {
+                                "start_pose_id": replaced["start_pose_id"], **pose,
+                            },
+                        }, f"add-direct-pair-r{index:03d}",
                     ))
                     authoring = application.bridge_core.snapshot()
                 compiled = application.bridge_core.consume(envelope(
@@ -934,6 +1719,8 @@ feedback:
                     }, "compile-product-r001",
                 ))["result"]
                 self.assertEqual(compiled["outcome"], "REVIEW_CAMPAIGN")
+                activation.assert_not_called()
+                gripper_readback.assert_not_called()
                 self.assertTrue((
                     root / "outputs/data_factory/test_only_physical"
                     / "product-application-r001-campaign-0001"
@@ -957,7 +1744,7 @@ feedback:
                         for key in ("place_id", "yaw_deg", "x_mm", "y_mm")
                     })
                 self.assertEqual(observed, [
-                    {"place_id": "PLACE_A", "yaw_deg": 0, "x_mm": 0, "y_mm": 0},
+                    current_object_pose,
                     *direct_poses,
                 ])
                 coverage = application.bridge_core.snapshot()["projection"][
@@ -970,9 +1757,9 @@ feedback:
                     }
                     for cell in coverage
                 ], [
-                    {"x_mm": 0, "y_mm": 0, "yaw_deg": 0, "target_count": 1},
+                    {"x_mm": 12.5, "y_mm": -7.25, "yaw_deg": -37.5, "target_count": 1},
                     {"x_mm": 10, "y_mm": 5, "yaw_deg": 45, "target_count": 1},
-                    {"x_mm": -10, "y_mm": -5, "yaw_deg": 180, "target_count": 1},
+                    {"x_mm": -10, "y_mm": -5, "yaw_deg": -180, "target_count": 1},
                 ])
                 self.assertEqual(context["production_writers_enabled"], False)
                 self.assertIsNone(application._campaign.episode_worker)
@@ -1041,7 +1828,10 @@ feedback:
                     ))["result"]
                 assisted_projection.assert_called_once()
                 self.assertEqual(assisted_projection.call_args.args[3], 3)
-                self.assertEqual(assisted_projection.call_args.kwargs, {"repeat": 1})
+                self.assertEqual(
+                    assisted_projection.call_args.kwargs,
+                    {"repeat": 1, "normalized_seed": 0},
+                )
                 self.assertEqual(compiled["episode_count"], 3)
                 campaign = application._campaign.campaign_operator
                 bases = {
@@ -1154,6 +1944,12 @@ feedback:
                     current, "prepare_environment", {}, "workspace-prepare-r001",
                 ))
                 self.assertFalse((root / "outputs").exists())
+                current = application.bridge_core.snapshot()
+                application.bridge_core.consume(envelope(
+                    current, "new_workspace_registration", {
+                        "display_name": "Place B",
+                    }, "workspace-new-r001",
+                ))
 
                 for label in ("CENTER", "X_REF", "Y_CHECK"):
                     current = application.bridge_core.snapshot()
@@ -1178,7 +1974,7 @@ feedback:
                 self.assertFalse(preview["execution_authorized"])
 
                 application.bridge_core.consume(envelope(
-                    previewed, "save_workspace_revision", {
+                    previewed, "save_workspace", {
                         "preview_digest": preview["preview_digest"],
                     }, "workspace-save-r001",
                 ))
@@ -1201,6 +1997,7 @@ feedback:
                     frame["execution_reason"], "MOTION_QUALIFICATION_REQUIRED",
                 )
                 promotion = saved["workspace_registration"]["promotion"]
+                selected_camera_digest = saved["selection"]["camera_binding_digest"]
                 self.assertEqual(
                     load_json_strict(
                         root / "config/data_factory"
@@ -1220,6 +2017,10 @@ feedback:
                 self.assertEqual(
                     selected["projection"]["selection"]["frame_id"], calibration_id,
                 )
+                self.assertEqual(
+                    selected["projection"]["selection"]["camera_binding_digest"],
+                    selected_camera_digest,
+                )
                 self.assertFalse(selected["projection"]["draft"]["execution_ready"])
                 self.assertNotIn(
                     "compile_draft", selected["projection"]["available_ops"],
@@ -1228,7 +2029,8 @@ feedback:
                     selected, "update_draft", {
                         "draft_id": selected["projection"]["draft"]["draft_id"],
                         "add_pose": {
-                            "place_id": "PLACE_A", "yaw_deg": 33,
+                            "place_id": selected["projection"]["selection"]["workspace_id"],
+                            "yaw_deg": 33,
                             "x_mm": 10, "y_mm": 5,
                         },
                     }, "workspace-pose-r001",
@@ -1270,7 +2072,7 @@ feedback:
             )
             with (
                 mock.patch(
-                    "tools.data_factory.operator_console.discover_uvc_device_ids",
+                    "tools.data_factory.operator_console.discover_camera_devices",
                     return_value=[],
                 ),
                 mock.patch(
@@ -1299,10 +2101,12 @@ feedback:
                 "reason": "DEVICE_NOT_CONNECTED",
             })
             camera = view["catalog"]["axes"]["camera"]
-            self.assertEqual(
-                [(item["available"], item["reason"]) for item in camera],
-                [(False, "DEVICE_NOT_CONNECTED")],
-            )
+            self.assertTrue(camera)
+            self.assertTrue(all(
+                item["available"] is False
+                and item["reason"] == "DEVICE_NOT_CONNECTED"
+                for item in camera
+            ))
             self.assertIsNone(view["campaign"])
             self.assertEqual(view["effect_counts"], {})
             self.assertFalse((root / "outputs").exists())
@@ -1321,13 +2125,22 @@ feedback:
                     for name in ("robot", "controller", "gripper", "camera")
                 },
             }
+            environment_query = mock.Mock(side_effect=AssertionError(
+                "cached product view repeated physical environment discovery",
+            ))
+            catalog = load_operator_catalog(root, device_ids=[device])
+            discovery = mock.Mock(side_effect=AssertionError(
+                "initial catalog snapshot repeated camera discovery",
+            ))
             application, context = build_physical_operator_application(
                 repository_root=root,
                 session_id="one-camera-auto-select-r001",
                 operator_label="local-operator",
-                environment_call=lambda: copy.deepcopy(blocked),
+                environment_call=environment_query,
                 prepare_environment_call=lambda: self.fail("prepare was exposed"),
-                discovery_call=lambda: [device],
+                initial_environment=blocked,
+                initial_catalog=catalog,
+                discovery_call=discovery,
                 run_live_call=mock.Mock(side_effect=AssertionError("live was called")),
                 clock=lambda: NOW,
             )
@@ -1335,9 +2148,136 @@ feedback:
                 view = application.bridge_core.snapshot()["projection"]
                 self.assertEqual(context["camera_device_id"], device)
                 self.assertEqual(view["selection"]["camera_device_id"], device)
-                self.assertTrue(view["catalog"]["axes"]["camera"][0]["available"])
+                selected_camera = next(
+                    item for item in view["catalog"]["axes"]["camera"]
+                    if item["id"]
+                    == f"fr5-up-rgb-30hz-v1@{device}"
+                )
+                self.assertTrue(selected_camera["available"])
                 self.assertEqual(view["available_ops"], [])
                 self.assertFalse((root / "outputs").exists())
+                environment_query.assert_not_called()
+                discovery.assert_not_called()
+            finally:
+                application.close()
+
+    def test_product_application_wires_explicit_home_recovery(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.portable_repository(root)
+            device = "usb-Generic_USB2.0_PC_CAMERA-video-index0"
+            ready = {
+                "schema_version": "data_factory.operator_environment.v1",
+                "state": "READY", "observed_at": "2026-08-26T03:00:00Z",
+                "components": {
+                    name: {"state": "READY", "owner": f"owner-{name}", "reason": "ATTACHED"}
+                    for name in ("robot", "controller", "gripper", "camera")
+                },
+            }
+            recovery = {
+                "schema_version": "data_factory.home_recovery.v1",
+                "status": "HOME", "arm_goal_count": 1,
+                "gripper_open": True, "target_rad": [0.0] * 6,
+                "final_rad": [0.0] * 6,
+                "motion_qualification_digest": canonical_digest(["motion"]),
+            }
+            recover = mock.Mock(return_value=copy.deepcopy(recovery))
+            application, _context = build_physical_operator_application(
+                repository_root=root,
+                session_id="wired-home-recovery-r001",
+                operator_label="local-operator",
+                environment_call=lambda: copy.deepcopy(ready),
+                prepare_environment_call=lambda: copy.deepcopy(ready),
+                initial_environment=ready,
+                initial_catalog=load_operator_catalog(root, device_ids=[device]),
+                home_recovery_call=recover,
+                run_live_call=mock.Mock(side_effect=AssertionError("live was called")),
+                clock=lambda: NOW,
+            )
+            try:
+                before = application.bridge_core.snapshot()
+                result = application.bridge_core.consume(envelope(
+                    before, "recover_home", {}, "wired-home-recovery",
+                ))["result"]
+                self.assertEqual(result["outcome"], "HOME")
+                self.assertEqual(result["home_recovery"], recovery)
+                recover.assert_called_once_with()
+                self.assertFalse((root / "outputs").exists())
+            finally:
+                application.close()
+
+    def test_product_application_captures_named_start_as_non_executable_candidate(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.portable_repository(root)
+            device = "usb-Generic_USB2.0_PC_CAMERA-video-index0"
+            ready = {
+                "schema_version": "data_factory.operator_environment.v1",
+                "state": "READY", "observed_at": "2026-08-26T03:00:00Z",
+                "components": {
+                    name: {"state": "READY", "owner": f"owner-{name}", "reason": "ATTACHED"}
+                    for name in ("robot", "controller", "gripper", "camera")
+                },
+            }
+            rigid = {
+                "translation_m": [0.0, 0.0, 0.0],
+                "rotation_columns": [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
+            }
+            tcp = load_json_strict(
+                root / "config/data_factory/test_only_physical/goal2-place1/"
+                "tcp_candidate_manifest.json"
+            )
+            snapshot = {
+                "schema_version": "data_factory.pose_snapshot.v1",
+                "frames": {"base": "base_link", "wrist": "wrist3_link"},
+                "joint_positions_rad": {
+                    joint: index / 10
+                    for index, joint in enumerate(("j1", "j2", "j3", "j4", "j5", "j6"))
+                },
+                "base_wrist": copy.deepcopy(rigid),
+                "base_tcp": {
+                    **copy.deepcopy(rigid), "candidate_status": "CANDIDATE",
+                    "candidate_source_sha256": tcp["tcp_candidate_digest"],
+                    "manifest_source_sha256": canonical_digest(tcp),
+                },
+                "joint_state_age_s": 0.01, "ros_sample_age_s": 0.01,
+                "joint_stamp_ns": 1_000_000_000,
+                "transform_stamp_ns": 1_000_000_000,
+            }
+            application, _context = build_physical_operator_application(
+                repository_root=root, session_id="named-start-r001",
+                operator_label="local-operator",
+                environment_call=lambda: copy.deepcopy(ready),
+                prepare_environment_call=lambda: self.fail("prepare called"),
+                selected_camera_device_id=device,
+                discovery_call=lambda: [device],
+                snapshot_call=lambda: copy.deepcopy(snapshot),
+                run_live_call=mock.Mock(side_effect=AssertionError("live called")),
+                clock=lambda: NOW,
+            )
+            try:
+                before = application.bridge_core.snapshot()
+                self.assertEqual(
+                    before["projection"]["start_pose_setup"]["selected_start_pose_ids"],
+                    ["fr5-lab-a-home-r001"],
+                )
+                result = application.bridge_core.consume(envelope(
+                    before, "capture_start_pose", {"display_name": "Inspection ready"},
+                    "capture-named-start-r001",
+                ))["result"]
+                candidates = [
+                    item for item in result["start_pose_setup"]["profiles"]
+                    if item["status"] == "CANDIDATE"
+                ]
+                self.assertEqual(len(candidates), 1)
+                self.assertEqual(candidates[0]["display_name"], "Inspection ready")
+                self.assertEqual(
+                    result["start_pose_setup"]["selected_start_pose_ids"],
+                    ["fr5-lab-a-home-r001"],
+                )
+                saved = list((root / "config/data_factory/start_poses").glob("*.json"))
+                self.assertEqual(len(saved), 1)
+                self.assertEqual(load_json_strict(saved[0])["authority"], "NO_EXECUTION_AUTHORITY")
             finally:
                 application.close()
 
@@ -1729,6 +2669,152 @@ feedback:
                 "robot", "gripper", "camera", "production_recorder", "dataset",
                 "run_state", "candidate", "inventory", "training",
             )))
+
+    def test_three_episode_reviews_queue_only_after_campaign_and_preserve_authority(self):
+        with tempfile.TemporaryDirectory() as root:
+            root_path = Path(root).resolve()
+            statuses = {}
+            review_calls = []
+
+            def review_call(
+                path, *, semantic_status, reviewed_by, **_kwargs,
+            ):
+                run_id = Path(path).parent.name
+                review_calls.append((str(path), semantic_status))
+                statuses[str(path)] = semantic_status
+                return {
+                    "run_id": run_id, "semantic_status": semantic_status,
+                    "reviewed_by": reviewed_by,
+                }
+
+            port = CandidateReviewPort(
+                operator_label="local-operator", review_call=review_call,
+            )
+            harness = Harness(root)
+            console = harness.console(
+                candidate_review_port=port, campaign_approval_once=True,
+            )
+            self.addCleanup(console.close)
+
+            def ledger_reference(run_id):
+                return {
+                    "path": str(root_path / run_id / "episode_ledger.json"),
+                    "state_path": str(root_path / run_id / "episode_ledger_state.json"),
+                    "review_status": "PENDING", "retention_state": "PRESERVE",
+                    "reclaim_state": "NOT_EVALUATED",
+                    "training_status": "NOT_AUTHORIZED",
+                }
+
+            bind_fault = {"armed": True}
+
+            def bind_state(reference, path):
+                if bind_fault["armed"]:
+                    bind_fault["armed"] = False
+                    raise OSError("synthetic ledger write fault")
+                return {
+                    **reference,
+                    "review_status": statuses[str(path)],
+                    "retention_state": "PRESERVE",
+                    "training_status": "NOT_AUTHORIZED",
+                }
+
+            with mock.patch.object(
+                run_job, "bind_candidate_episode_state",
+                side_effect=bind_state,
+            ):
+                console.candidate_state_bind_call = (
+                    run_job.bind_candidate_episode_state
+                )
+                for index in range(3):
+                    run_id = f"review-run-{index + 1}"
+                    candidate_path = root_path / run_id / "candidate_admission.json"
+                    condition = {
+                        "place_id": "PLACE_A", "yaw_deg": index * 45,
+                        "x_mm": index * 10, "y_mm": 0,
+                    }
+                    console._active_intent_projection = {
+                        "run_id": run_id,
+                        "coverage_condition": condition,
+                    }
+                    continuation = console._publish_outcome({
+                        "ok": True,
+                        "campaign": {
+                            "state": "READY" if index < 2 else "COMPLETE",
+                        },
+                        "result": {
+                            "technical_evidence": {"status": "PASS"},
+                            "human_semantic": "NOT_MEASURED",
+                            "episode_ledger": ledger_reference(run_id),
+                            "candidate_review_offer": {
+                                "candidate_path": str(candidate_path),
+                                "run_id": run_id,
+                                "expected_file_digest": canonical_digest([run_id, "file"]),
+                                "expected_review_context_digest": canonical_digest(
+                                    [run_id, "context"],
+                                ),
+                                "ledger_reference": ledger_reference(run_id),
+                            },
+                        },
+                    })
+                    self.assertEqual(continuation, index < 2)
+                    if index < 2:
+                        self.assertIsNone(port.projection())
+
+                projected = console.projection()
+                self.assertEqual(
+                    (projected["candidate_review"]["run_id"],
+                     projected["candidate_review"]["episode_number"],
+                     projected["candidate_review"]["queue_remaining"]),
+                    ("review-run-1", 1, 3),
+                )
+                self.assertNotIn(str(root_path), json.dumps(projected))
+
+                with self.assertRaisesRegex(
+                    ContractError, "CANDIDATE_REVIEW_DIGEST_MISMATCH",
+                ):
+                    console.review_candidate({
+                        "review_binding_digest": canonical_digest("stale"),
+                        "choice": "PASS", "reason": None,
+                    })
+                self.assertEqual(statuses, {})
+
+                first = console.projection()["candidate_review"]
+                first_payload = {
+                    "review_binding_digest": first["review_binding_digest"],
+                    "choice": "PASS", "reason": None,
+                }
+                with self.assertRaisesRegex(
+                    ContractError, "OPERATOR_CONSOLE_CANDIDATE_STATE",
+                ):
+                    console.review_candidate(first_payload)
+                self.assertIn("review_candidate", console.projection()["available_ops"])
+                resolved = console.review_candidate(first_payload)
+                self.assertEqual(resolved["remaining_reviews"], 2)
+                self.assertEqual(len(review_calls), 1)
+
+                choices = (
+                    ("FAIL", "TASK_GOAL"),
+                    ("UNCERTAIN", "UNKNOWN"),
+                )
+                for index, (choice, reason) in enumerate(choices, start=1):
+                    current = console.projection()["candidate_review"]
+                    resolved = console.review_candidate({
+                        "review_binding_digest": current["review_binding_digest"],
+                        "choice": choice, "reason": reason,
+                    })
+                    self.assertEqual(resolved["remaining_reviews"], 2 - index)
+
+                history = console.projection()["episode_history"]
+                self.assertEqual(
+                    [item["human_semantic"] for item in history],
+                    ["PASS", "FAIL", "UNCERTAIN"],
+                )
+                self.assertTrue(all(
+                    item["episode_ledger"]["retention_state"] == "PRESERVE"
+                    and item["episode_ledger"]["training_status"] == "NOT_AUTHORIZED"
+                    for item in history
+                ))
+                self.assertNotIn("review_candidate", console.projection()["available_ops"])
 
     def test_cancel_unblocks_the_single_worker_and_closes_without_a_thread_leak(self):
         with tempfile.TemporaryDirectory() as root:

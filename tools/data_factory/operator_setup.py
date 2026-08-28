@@ -50,7 +50,8 @@ PLANE_FIELDS = frozenset({
     "source_artifact_digest", "status", "reference_digest",
 })
 CAMERA_FIELDS = frozenset({
-    "binding_id", "device_kind", "stable_device_id", "intended_role",
+    "binding_id", "device_kind", "stable_device_id", "capture_endpoint",
+    "intended_role",
     "collection_profile_id", "collection_profile_digest", "connection_state",
     "placement_status", "role_qualification", "production_qualified",
     "binding_digest",
@@ -87,6 +88,15 @@ EPISODE_BINDING_FIELDS = frozenset({
 })
 PLANNED_START_EVIDENCE_SCHEMA = "data_factory.test_only_planned_start_evidence.v1"
 CAMERA_BINDING_RECEIPT = Path("outputs/data_factory/operator_setup/camera_binding.json")
+CAMERA_ROLE_BINDINGS_RECEIPT = Path(
+    "outputs/data_factory/operator_setup/camera_role_bindings.json"
+)
+CAMERA_ROLE_BINDINGS_SCHEMA = "data_factory.camera_role_bindings.v1"
+CAMERA_ROLE_BINDINGS_FIELDS = frozenset({
+    "schema_version", "collection_profile_id", "collection_profile_digest",
+    "devices", "assignments", "bindings", "binding_digest",
+})
+CAMERA_SETUP_ROLES = frozenset({"UP", "SIDE", "WRIST", "UNUSED"})
 
 
 def _exact(value: object, fields: frozenset[str], code: str) -> Mapping[str, Any]:
@@ -114,6 +124,63 @@ def _stable_device_id(device_kind: str, value: object) -> str:
     ):
         raise ContractError("CAMERA_BINDING_DEVICE_ID")
     return value
+
+
+def normalize_camera_devices(
+    values: Sequence[object], *, default_kind: str = "UVC",
+) -> list[dict[str, str]]:
+    """Validate passive logical camera identities without opening a device."""
+    if (
+        default_kind not in {"UVC", "REALSENSE"}
+        or isinstance(values, (str, bytes))
+        or not isinstance(values, Sequence)
+    ):
+        raise ContractError("CAMERA_BINDING_DISCOVERY")
+    devices = []
+    for value in values:
+        if isinstance(value, str):
+            device = {
+                "logical_id": value, "label": value, "status": "CONNECTED",
+                "kind": default_kind,
+                "capture_endpoint": (
+                    str(Path("/dev/v4l/by-id") / value)
+                    if default_kind == "UVC" else value
+                ),
+            }
+        elif isinstance(value, Mapping):
+            device = copy.deepcopy(dict(value))
+            if set(device) == {"logical_id", "label", "status"}:
+                device.update(
+                    kind=default_kind,
+                    capture_endpoint=(
+                        str(Path("/dev/v4l/by-id") / device["logical_id"])
+                        if default_kind == "UVC" else device["logical_id"]
+                    ),
+                )
+        else:
+            raise ContractError("CAMERA_BINDING_DISCOVERY")
+        if (
+            set(device) != {
+                "logical_id", "label", "status", "kind", "capture_endpoint",
+            }
+            or device["kind"] not in {"UVC", "REALSENSE"}
+            or device["status"] != "CONNECTED"
+            or not isinstance(device["label"], str)
+            or not device["label"]
+        ):
+            raise ContractError("CAMERA_BINDING_DISCOVERY")
+        stable_id = _stable_device_id(device["kind"], device["logical_id"])
+        endpoint = device["capture_endpoint"]
+        expected = (
+            str(Path("/dev/v4l/by-id") / stable_id)
+            if device["kind"] == "UVC" else stable_id
+        )
+        if not isinstance(endpoint, str) or endpoint != expected:
+            raise ContractError("CAMERA_BINDING_DISCOVERY")
+        devices.append(device)
+    if len({device["logical_id"] for device in devices}) != len(devices):
+        raise ContractError("CAMERA_BINDING_DISCOVERY")
+    return sorted(devices, key=lambda item: (item["kind"], item["logical_id"]))
 
 
 def _finite(value: object, code: str) -> float:
@@ -305,6 +372,99 @@ def validate_test_only_root_binding(
     return result
 
 
+def build_production_root_binding(
+    repository_root: str | Path, *, session_id: str, run_id: str,
+    dataset_root: str | Path,
+) -> dict[str, Any]:
+    """Seal the standard production run/cell roots and one configured dataset."""
+    repository = Path(repository_root).resolve(strict=True)
+    value = {
+        "session_id": _identifier(session_id, "PRODUCTION_SESSION_ID"),
+        "run_id": _identifier(run_id, "PRODUCTION_RUN_ID"),
+        "data_disposition": "PRODUCTION",
+        "run_root": str(repository / "outputs/data_factory/runs"),
+        "cell_root": str(repository / "outputs/data_factory/cells"),
+        "dataset_root": str(Path(dataset_root).resolve(strict=False)),
+        "production_writers_enabled": True,
+    }
+    value["binding_digest"] = canonical_digest(value)
+    return validate_production_root_binding(value, repository_root=repository)
+
+
+def validate_production_root_binding(
+    value: object, *, repository_root: str | Path,
+) -> dict[str, Any]:
+    result = copy.deepcopy(dict(_exact(value, ROOT_FIELDS, "PRODUCTION_ROOT_FIELDS")))
+    if (
+        result["data_disposition"] != "PRODUCTION"
+        or result["production_writers_enabled"] is not True
+    ):
+        raise ContractError("PRODUCTION_ROOT_AUTHORITY")
+    _identifier(result["session_id"], "PRODUCTION_SESSION_ID")
+    _identifier(result["run_id"], "PRODUCTION_RUN_ID")
+    repository = Path(repository_root).resolve(strict=True)
+    expected = {
+        "run_root": repository / "outputs/data_factory/runs",
+        "cell_root": repository / "outputs/data_factory/cells",
+    }
+    for field, target in expected.items():
+        path = Path(result[field])
+        if not path.is_absolute() or path.resolve(strict=False) != target:
+            raise ContractError("PRODUCTION_ROOT_MISMATCH")
+        _no_symlink_components(repository, target)
+        if target.exists() and not target.is_dir():
+            raise ContractError("PRODUCTION_ROOT_COLLISION")
+    dataset = Path(result["dataset_root"])
+    dataset_parent = repository / "datasets/fr5_episodes"
+    if (
+        not dataset.is_absolute()
+        or dataset.resolve(strict=False).parent != dataset_parent
+        or not SAFE_ID.fullmatch(dataset.name)
+    ):
+        raise ContractError("PRODUCTION_ROOT_MISMATCH")
+    _no_symlink_components(repository, dataset)
+    if dataset.exists() and not dataset.is_dir():
+        raise ContractError("PRODUCTION_ROOT_COLLISION")
+    run_dir = expected["run_root"] / result["run_id"]
+    _no_symlink_components(repository, run_dir)
+    if run_dir.exists():
+        raise ContractError("PRODUCTION_ROOT_COLLISION")
+    if result["binding_digest"] != canonical_digest({
+        key: result[key] for key in result if key != "binding_digest"
+    }):
+        raise ContractError("PRODUCTION_ROOT_DIGEST_MISMATCH")
+    return result
+
+
+def build_runtime_root_binding(
+    repository_root: str | Path, *, session_id: str, run_id: str,
+    data_disposition: str, dataset_root: str | Path | None = None,
+) -> dict[str, Any]:
+    if data_disposition == "TEST_ONLY":
+        if dataset_root is not None:
+            raise ContractError("RUNTIME_ROOT_DISPOSITION")
+        return build_test_only_root_binding(
+            repository_root, session_id=session_id, run_id=run_id,
+        )
+    if data_disposition == "PRODUCTION" and dataset_root is not None:
+        return build_production_root_binding(
+            repository_root, session_id=session_id, run_id=run_id,
+            dataset_root=dataset_root,
+        )
+    raise ContractError("RUNTIME_ROOT_DISPOSITION")
+
+
+def validate_runtime_root_binding(
+    value: object, *, repository_root: str | Path,
+) -> dict[str, Any]:
+    disposition = value.get("data_disposition") if isinstance(value, Mapping) else None
+    if disposition == "TEST_ONLY":
+        return validate_test_only_root_binding(value, repository_root=repository_root)
+    if disposition == "PRODUCTION":
+        return validate_production_root_binding(value, repository_root=repository_root)
+    raise ContractError("RUNTIME_ROOT_DISPOSITION")
+
+
 def initialize_test_only_state_from_user_declaration(
     roots: Mapping[str, Any], *, repository_root: str | Path,
     robot_system_id: str, object_instance_id: str, object_profile_id: str,
@@ -390,15 +550,18 @@ def validate_test_only_state_initialization(
     return result
 
 
-def build_test_only_scene_observation_binding(
+def _build_scene_observation_binding(
     *, roots: Mapping[str, Any], repository_root: str | Path,
     manifest: Mapping[str, Any], hypothesis: Mapping[str, Any],
     slot: Mapping[str, Any], resolved_job: Mapping[str, Any],
     scene_binding: Mapping[str, Any], scene_evidence: Mapping[str, Any],
-    observed_by: str, max_evidence_age_s: float = 5.0, clock=None,
+    observed_by: str, data_disposition: str,
+    max_evidence_age_s: float = 5.0, clock=None,
 ) -> dict[str, Any]:
-    """Seal a fresh later-episode scene observation without changing scene state."""
-    roots = validate_test_only_root_binding(roots, repository_root=repository_root)
+    """Seal a fresh scene observation without changing scene state."""
+    roots = validate_runtime_root_binding(roots, repository_root=repository_root)
+    if roots["data_disposition"] != data_disposition:
+        raise ContractError("RUNTIME_SCENE_OBSERVATION_DISPOSITION")
     hypothesis = validate_fr5_hypothesis(hypothesis)
     manifest = validate_collection_campaign_manifest(manifest, hypothesis=hypothesis)
     slot = _manifest_slot(manifest, slot)
@@ -411,8 +574,9 @@ def build_test_only_scene_observation_binding(
         scene_evidence, expected_scene_digest=binding["scene_state_digest"],
         max_evidence_age_s=max_evidence_age_s, clock=clock,
     )
+    prefix = data_disposition.lower()
     value = {
-        "schema_version": "data_factory.test_only_scene_observation.v1",
+        "schema_version": f"data_factory.{prefix}_scene_observation.v1",
         "session_id": roots["session_id"],
         "run_id": roots["run_id"],
         "root_binding_digest": roots["binding_digest"],
@@ -429,27 +593,32 @@ def build_test_only_scene_observation_binding(
         "scene_evidence": evidence,
         "scene_state_digest": binding["scene_state_digest"],
         "scene_revision": binding["revision"],
-        "observed_by": _identifier(observed_by, "TEST_ONLY_SCENE_OBSERVATION_OBSERVER"),
-        "data_disposition": "TEST_ONLY",
-        "production_writers_enabled": False,
+        "observed_by": _identifier(
+            observed_by, f"{data_disposition}_SCENE_OBSERVATION_OBSERVER",
+        ),
+        "data_disposition": data_disposition,
+        "production_writers_enabled": data_disposition == "PRODUCTION",
         "authority": copy.deepcopy(NO_AUTHORITY),
     }
     value["binding_digest"] = canonical_digest(value)
-    return validate_test_only_scene_observation_binding(
+    return _validate_scene_observation_binding(
         value, roots=roots, manifest=manifest, hypothesis=hypothesis, slot=slot,
         normalized_job=resolved_job, max_evidence_age_s=max_evidence_age_s,
-        clock=clock,
+        clock=clock, data_disposition=data_disposition,
     )
 
 
-def validate_test_only_scene_observation_binding(
+def _validate_scene_observation_binding(
     value: object, *, roots: Mapping[str, Any], manifest: Mapping[str, Any],
     hypothesis: Mapping[str, Any], slot: Mapping[str, Any],
     normalized_job: Mapping[str, Any], max_evidence_age_s: float = 5.0,
-    clock=None,
+    clock=None, data_disposition: str,
 ) -> dict[str, Any]:
+    if data_disposition not in {"TEST_ONLY", "PRODUCTION"}:
+        raise ContractError("RUNTIME_SCENE_OBSERVATION_DISPOSITION")
+    code = f"{data_disposition}_SCENE_OBSERVATION_BINDING"
     result = copy.deepcopy(dict(_exact(
-        value, SCENE_OBSERVATION_FIELDS, "TEST_ONLY_SCENE_OBSERVATION_FIELDS",
+        value, SCENE_OBSERVATION_FIELDS, f"{data_disposition}_SCENE_OBSERVATION_FIELDS",
     )))
     hypothesis = validate_fr5_hypothesis(hypothesis)
     manifest = validate_collection_campaign_manifest(manifest, hypothesis=hypothesis)
@@ -465,7 +634,7 @@ def validate_test_only_scene_observation_binding(
     )
     pose = {key: job[key] for key in ("place_id", "yaw_deg", "x_mm", "y_mm")}
     if (
-        result["schema_version"] != "data_factory.test_only_scene_observation.v1"
+        result["schema_version"] != f"data_factory.{data_disposition.lower()}_scene_observation.v1"
         or result["session_id"] != roots.get("session_id")
         or result["run_id"] != roots.get("run_id")
         or result["root_binding_digest"] != roots.get("binding_digest")
@@ -481,66 +650,115 @@ def validate_test_only_scene_observation_binding(
         or result["scene_evidence"] != evidence
         or result["scene_state_digest"] != binding["scene_state_digest"]
         or result["scene_revision"] != binding["revision"]
-        or result["data_disposition"] != "TEST_ONLY"
-        or result["production_writers_enabled"] is not False
+        or roots.get("data_disposition") != data_disposition
+        or result["data_disposition"] != data_disposition
+        or result["production_writers_enabled"] is not (data_disposition == "PRODUCTION")
         or result["authority"] != NO_AUTHORITY
     ):
-        raise ContractError("TEST_ONLY_SCENE_OBSERVATION_BINDING")
+        raise ContractError(code)
     for field in (
         "session_id", "run_id", "robot_system_id", "object_instance_id",
         "object_profile_id", "observed_by",
     ):
-        _identifier(result[field], "TEST_ONLY_SCENE_OBSERVATION_BINDING")
+        _identifier(result[field], code)
     for field in (
         "root_binding_digest", "manifest_digest", "slot_digest",
         "resolver_result_digest", "resolved_job_digest", "scene_binding_digest",
         "scene_state_digest",
     ):
-        _digest(result[field], "TEST_ONLY_SCENE_OBSERVATION_BINDING")
+        _digest(result[field], code)
     if type(result["scene_revision"]) is not int or result["scene_revision"] < 1:
-        raise ContractError("TEST_ONLY_SCENE_OBSERVATION_BINDING")
+        raise ContractError(code)
     if result["binding_digest"] != canonical_digest({
         key: item for key, item in result.items() if key != "binding_digest"
     }):
-        raise ContractError("TEST_ONLY_SCENE_OBSERVATION_DIGEST_MISMATCH")
+        raise ContractError(f"{data_disposition}_SCENE_OBSERVATION_DIGEST_MISMATCH")
     return result
 
 
-def build_test_only_episode_binding(
+def build_test_only_scene_observation_binding(**kwargs) -> dict[str, Any]:
+    return _build_scene_observation_binding(
+        **kwargs, data_disposition="TEST_ONLY",
+    )
+
+
+def build_production_scene_observation_binding(**kwargs) -> dict[str, Any]:
+    return _build_scene_observation_binding(
+        **kwargs, data_disposition="PRODUCTION",
+    )
+
+
+def build_runtime_scene_observation_binding(**kwargs) -> dict[str, Any]:
+    roots = kwargs.get("roots")
+    disposition = roots.get("data_disposition") if isinstance(roots, Mapping) else None
+    if disposition not in {"TEST_ONLY", "PRODUCTION"}:
+        raise ContractError("RUNTIME_SCENE_OBSERVATION_DISPOSITION")
+    return _build_scene_observation_binding(
+        **kwargs, data_disposition=disposition,
+    )
+
+
+def validate_test_only_scene_observation_binding(value: object, **kwargs) -> dict[str, Any]:
+    return _validate_scene_observation_binding(
+        value, **kwargs, data_disposition="TEST_ONLY",
+    )
+
+
+def validate_production_scene_observation_binding(value: object, **kwargs) -> dict[str, Any]:
+    return _validate_scene_observation_binding(
+        value, **kwargs, data_disposition="PRODUCTION",
+    )
+
+
+def validate_runtime_scene_observation_binding(value: object, **kwargs) -> dict[str, Any]:
+    disposition = value.get("data_disposition") if isinstance(value, Mapping) else None
+    if disposition not in {"TEST_ONLY", "PRODUCTION"}:
+        raise ContractError("RUNTIME_SCENE_OBSERVATION_DISPOSITION")
+    return _validate_scene_observation_binding(
+        value, **kwargs, data_disposition=disposition,
+    )
+
+
+def _build_episode_binding(
     *, roots: Mapping[str, Any], repository_root: str | Path,
     manifest: Mapping[str, Any], hypothesis: Mapping[str, Any],
     intent: Mapping[str, Any], start_binding: Mapping[str, Any],
     resolved_job: Mapping[str, Any], place_alias: str,
     state_initialization: Mapping[str, Any] | None = None,
     scene_observation: Mapping[str, Any] | None = None,
-    max_scene_evidence_age_s: float = 5.0, clock=None,
+    data_disposition: str, max_scene_evidence_age_s: float = 5.0, clock=None,
 ) -> dict[str, Any]:
-    """Join one exact campaign intent to its TEST_ONLY run context."""
-    roots = validate_test_only_root_binding(roots, repository_root=repository_root)
+    """Join one exact campaign intent to its disposition-bound run context."""
+    roots = validate_runtime_root_binding(roots, repository_root=repository_root)
+    if roots["data_disposition"] != data_disposition:
+        raise ContractError("RUNTIME_EPISODE_DISPOSITION")
     manifest = validate_collection_campaign_manifest(manifest, hypothesis=hypothesis)
     intent = validate_seed_episode_intent(intent, manifest=manifest, hypothesis=hypothesis)
-    start = validate_test_only_start_binding(
+    start = validate_runtime_start_binding(
         start_binding, manifest=manifest, hypothesis=hypothesis, slot=intent["slot"],
     )
-    if (state_initialization is None) == (scene_observation is None):
-        raise ContractError("TEST_ONLY_EPISODE_SCENE_SOURCE")
-    if intent["order_index"] == 0:
-        if state_initialization is None:
-            raise ContractError("TEST_ONLY_EPISODE_SCENE_SOURCE")
+    if start["data_disposition"] != data_disposition:
+        raise ContractError("RUNTIME_EPISODE_DISPOSITION")
+    source_code = f"{data_disposition}_EPISODE_SCENE_SOURCE"
+    if data_disposition == "TEST_ONLY" and intent["order_index"] == 0:
+        if state_initialization is None or scene_observation is not None:
+            raise ContractError(source_code)
         source = validate_test_only_state_initialization(state_initialization, roots=roots)
         initialization_digest = source["initialization_digest"]
         observation_digest = None
     else:
-        if scene_observation is None:
-            raise ContractError("TEST_ONLY_EPISODE_SCENE_SOURCE")
-        source = validate_test_only_scene_observation_binding(
+        if state_initialization is not None or scene_observation is None:
+            raise ContractError(source_code)
+        source = validate_runtime_scene_observation_binding(
             scene_observation, roots=roots, manifest=manifest,
             hypothesis=hypothesis, slot=intent["slot"], normalized_job=resolved_job,
             max_evidence_age_s=max_scene_evidence_age_s, clock=clock,
         )
+        if source["data_disposition"] != data_disposition:
+            raise ContractError("RUNTIME_EPISODE_DISPOSITION")
         initialization_digest = None
         observation_digest = source["binding_digest"]
-    place_alias = _identifier(place_alias, "TEST_ONLY_EPISODE_ALIAS")
+    place_alias = _identifier(place_alias, f"{data_disposition}_EPISODE_ALIAS")
     receipt, job = _resolved_job_for_slot(
         manifest=manifest, hypothesis=hypothesis, slot=intent["slot"],
         resolved_job=resolved_job,
@@ -558,10 +776,10 @@ def build_test_only_episode_binding(
             key: job[key] for key in ("place_id", "yaw_deg", "x_mm", "y_mm")
         }
     ):
-        raise ContractError("TEST_ONLY_EPISODE_BINDING")
+        raise ContractError(f"{data_disposition}_EPISODE_BINDING")
     slot = intent["slot"]
     value = {
-        "schema_version": "data_factory.test_only_episode_binding.v1",
+        "schema_version": f"data_factory.{data_disposition.lower()}_episode_binding.v1",
         "session_id": roots["session_id"],
         "run_id": roots["run_id"],
         "intent_digest": intent["intent_digest"],
@@ -583,50 +801,64 @@ def build_test_only_episode_binding(
         "repeat_index": slot["repeat_index"],
         "budget_digests": copy.deepcopy(intent["budget_digests"]),
         "expires_at": intent["expires_at"],
-        "data_disposition": "TEST_ONLY",
+        "data_disposition": data_disposition,
         "authority": copy.deepcopy(NO_AUTHORITY),
     }
     value["binding_digest"] = canonical_digest(value)
-    return validate_test_only_episode_binding(value, roots=roots, normalized_job=resolved_job)
+    return _validate_episode_binding(
+        value, roots=roots, normalized_job=resolved_job,
+        data_disposition=data_disposition,
+    )
 
 
-def validate_test_only_episode_binding(
+def _validate_episode_binding(
     value: object, *, roots: Mapping[str, Any], normalized_job: Mapping[str, Any],
+    data_disposition: str,
 ) -> dict[str, Any]:
     """Validate the compact context consumed immediately before plan approval."""
+    if data_disposition not in {"TEST_ONLY", "PRODUCTION"}:
+        raise ContractError("RUNTIME_EPISODE_DISPOSITION")
+    code = f"{data_disposition}_EPISODE_BINDING"
     result = copy.deepcopy(dict(_exact(
-        value, EPISODE_BINDING_FIELDS, "TEST_ONLY_EPISODE_FIELDS",
+        value, EPISODE_BINDING_FIELDS, f"{data_disposition}_EPISODE_FIELDS",
     )))
     if (
-        result["schema_version"] != "data_factory.test_only_episode_binding.v1"
+        result["schema_version"] != f"data_factory.{data_disposition.lower()}_episode_binding.v1"
         or result["session_id"] != roots.get("session_id")
         or result["run_id"] != roots.get("run_id")
         or result["root_binding_digest"] != roots.get("binding_digest")
-        or result["data_disposition"] != "TEST_ONLY"
+        or roots.get("data_disposition") != data_disposition
+        or result["data_disposition"] != data_disposition
         or result["authority"] != NO_AUTHORITY
         or result["resolved_job_digest"] != normalized_job.get("resolved_job_digest")
     ):
-        raise ContractError("TEST_ONLY_EPISODE_BINDING")
+        raise ContractError(code)
     job = normalized_job.get("normalized_job")
     if not isinstance(job, Mapping) or any(
         result[field] != job[field] for field in ("place_id", "yaw_deg", "x_mm", "y_mm")
     ):
-        raise ContractError("TEST_ONLY_EPISODE_JOB")
+        raise ContractError(f"{data_disposition}_EPISODE_JOB")
     for field in ("session_id", "run_id", "place_alias", "place_id", "robot_start_pose_id"):
-        _identifier(result[field], "TEST_ONLY_EPISODE_BINDING")
+        _identifier(result[field], code)
     for field in (
         "intent_digest", "manifest_digest", "slot_digest", "resolved_job_digest",
         "root_binding_digest", "start_binding_digest", "scene_state_digest",
     ):
-        _digest(result[field], "TEST_ONLY_EPISODE_BINDING")
+        _digest(result[field], code)
     sources = (
         result["state_initialization_digest"], result["scene_observation_digest"],
     )
-    if sum(item is not None for item in sources) != 1:
-        raise ContractError("TEST_ONLY_EPISODE_SCENE_SOURCE")
-    _digest(next(item for item in sources if item is not None), "TEST_ONLY_EPISODE_BINDING")
+    if (
+        data_disposition == "TEST_ONLY"
+        and sum(item is not None for item in sources) != 1
+    ) or (
+        data_disposition == "PRODUCTION"
+        and (sources[0] is not None or sources[1] is None)
+    ):
+        raise ContractError(f"{data_disposition}_EPISODE_SCENE_SOURCE")
+    _digest(next(item for item in sources if item is not None), code)
     for field in ("yaw_deg", "x_mm", "y_mm"):
-        _finite(result[field], "TEST_ONLY_EPISODE_BINDING")
+        _finite(result[field], code)
     if (
         result["split_group"] not in {"TRAIN", "ID", "OOD"}
         or type(result["repeat_index"]) is not int
@@ -634,18 +866,43 @@ def validate_test_only_episode_binding(
         or not isinstance(result["budget_digests"], Mapping)
         or set(result["budget_digests"]) != SEED_BUDGET_DIGEST_FIELDS
     ):
-        raise ContractError("TEST_ONLY_EPISODE_BINDING")
+        raise ContractError(code)
     for digest in result["budget_digests"].values():
-        _digest(digest, "TEST_ONLY_EPISODE_BINDING")
-    _timestamp(result["expires_at"], "TEST_ONLY_EPISODE_EXPIRY")
+        _digest(digest, code)
+    _timestamp(result["expires_at"], f"{data_disposition}_EPISODE_EXPIRY")
     if result["binding_digest"] != canonical_digest({
         key: result[key] for key in result if key != "binding_digest"
     }):
-        raise ContractError("TEST_ONLY_EPISODE_DIGEST_MISMATCH")
+        raise ContractError(f"{data_disposition}_EPISODE_DIGEST_MISMATCH")
     return result
 
 
-def build_test_only_runtime_episode_binding(
+def build_test_only_episode_binding(**kwargs) -> dict[str, Any]:
+    return _build_episode_binding(**kwargs, data_disposition="TEST_ONLY")
+
+
+def build_production_episode_binding(**kwargs) -> dict[str, Any]:
+    return _build_episode_binding(**kwargs, data_disposition="PRODUCTION")
+
+
+def validate_test_only_episode_binding(value: object, **kwargs) -> dict[str, Any]:
+    return _validate_episode_binding(value, **kwargs, data_disposition="TEST_ONLY")
+
+
+def validate_production_episode_binding(value: object, **kwargs) -> dict[str, Any]:
+    return _validate_episode_binding(value, **kwargs, data_disposition="PRODUCTION")
+
+
+def validate_runtime_episode_binding(value: object, **kwargs) -> dict[str, Any]:
+    disposition = value.get("data_disposition") if isinstance(value, Mapping) else None
+    if disposition not in {"TEST_ONLY", "PRODUCTION"}:
+        raise ContractError("RUNTIME_EPISODE_DISPOSITION")
+    return _validate_episode_binding(
+        value, **kwargs, data_disposition=disposition,
+    )
+
+
+def build_runtime_episode_binding(
     *, roots: Mapping[str, Any], repository_root: str | Path,
     manifest: Mapping[str, Any], hypothesis: Mapping[str, Any],
     intent: Mapping[str, Any], start_binding: Mapping[str, Any],
@@ -656,9 +913,12 @@ def build_test_only_runtime_episode_binding(
     observed_by: str | None = None,
     max_scene_evidence_age_s: float = 5.0, clock=None,
 ) -> dict[str, Any]:
-    """Build the first declared or later freshly observed TEST_ONLY episode edge."""
+    """Build one fresh episode edge under the root binding disposition."""
+    disposition = roots.get("data_disposition") if isinstance(roots, Mapping) else None
+    if disposition not in {"TEST_ONLY", "PRODUCTION"}:
+        raise ContractError("RUNTIME_EPISODE_DISPOSITION")
     order_index = intent.get("order_index") if isinstance(intent, Mapping) else None
-    if order_index == 0:
+    if disposition == "TEST_ONLY" and order_index == 0:
         if (
             state_initialization is None
             or scene_binding is not None
@@ -667,16 +927,16 @@ def build_test_only_runtime_episode_binding(
         ):
             raise ContractError("TEST_ONLY_EPISODE_SCENE_SOURCE")
         source = {"state_initialization": state_initialization}
-    elif type(order_index) is int and order_index > 0:
+    elif type(order_index) is int and order_index >= 0:
         if (
             state_initialization is not None
             or scene_binding is None
             or scene_evidence is None
             or observed_by is None
         ):
-            raise ContractError("TEST_ONLY_EPISODE_SCENE_SOURCE")
+            raise ContractError(f"{disposition}_EPISODE_SCENE_SOURCE")
         source = {
-            "scene_observation": build_test_only_scene_observation_binding(
+            "scene_observation": build_runtime_scene_observation_binding(
                 roots=roots, repository_root=repository_root,
                 manifest=manifest, hypothesis=hypothesis, slot=intent["slot"],
                 resolved_job=resolved_job, scene_binding=scene_binding,
@@ -685,15 +945,30 @@ def build_test_only_runtime_episode_binding(
             ),
         }
     else:
-        raise ContractError("TEST_ONLY_EPISODE_SCENE_SOURCE")
-    return build_test_only_episode_binding(
+        raise ContractError(f"{disposition}_EPISODE_SCENE_SOURCE")
+    return _build_episode_binding(
         roots=roots, repository_root=repository_root,
         manifest=manifest, hypothesis=hypothesis, intent=intent,
         start_binding=start_binding, resolved_job=resolved_job,
         place_alias=place_alias,
         max_scene_evidence_age_s=max_scene_evidence_age_s, clock=clock,
+        data_disposition=disposition,
         **source,
     )
+
+
+def build_test_only_runtime_episode_binding(**kwargs) -> dict[str, Any]:
+    roots = kwargs.get("roots")
+    if not isinstance(roots, Mapping) or roots.get("data_disposition") != "TEST_ONLY":
+        raise ContractError("TEST_ONLY_EPISODE_SCENE_SOURCE")
+    return build_runtime_episode_binding(**kwargs)
+
+
+def build_production_runtime_episode_binding(**kwargs) -> dict[str, Any]:
+    roots = kwargs.get("roots")
+    if not isinstance(roots, Mapping) or roots.get("data_disposition") != "PRODUCTION":
+        raise ContractError("PRODUCTION_EPISODE_SCENE_SOURCE")
+    return build_runtime_episode_binding(**kwargs)
 
 
 def build_test_only_start_binding(
@@ -702,7 +977,7 @@ def build_test_only_start_binding(
     current_snapshot: Mapping[str, Any], slot: Mapping[str, Any] | None = None,
     max_snapshot_age_s: float = 0.1,
 ) -> dict[str, Any]:
-    """Bind one fresh HOME-range snapshot to one exact TEST_ONLY slot."""
+    """Bind one fresh qualified-start snapshot to one exact TEST_ONLY slot."""
     hypothesis = validate_fr5_hypothesis(hypothesis)
     manifest = validate_collection_campaign_manifest(manifest, hypothesis=hypothesis)
     slot = _manifest_slot(manifest, slot)
@@ -738,23 +1013,25 @@ def build_test_only_start_binding(
         raise ContractError("TEST_ONLY_START_AGE")
     if max(snapshot["joint_state_age_s"], snapshot["ros_sample_age_s"]) > min(max_age, qualified_age):
         raise ContractError("TEST_ONLY_START_STALE")
-    target = motion_qualification.get("qualified_safe_joint_positions_rad")
-    tolerance = motion_qualification.get("goal_tolerances", {}).get("joint_rad")
+    safe_target = motion_qualification.get("qualified_safe_joint_positions_rad")
+    motion_tolerance = motion_qualification.get("goal_tolerances", {}).get("joint_rad")
     if (
-        not isinstance(target, list) or len(target) != len(JOINTS)
-        or any(not math.isfinite(_finite(item, "TEST_ONLY_START_TARGET")) for item in target)
-        or _finite(tolerance, "TEST_ONLY_START_TOLERANCE") <= 0
-        or float(tolerance) > 0.01
+        not isinstance(safe_target, list) or len(safe_target) != len(JOINTS)
+        or any(not math.isfinite(_finite(item, "TEST_ONLY_START_TARGET")) for item in safe_target)
+        or _finite(motion_tolerance, "TEST_ONLY_START_TOLERANCE") <= 0
+        or float(motion_tolerance) > 0.01
     ):
         raise ContractError("TEST_ONLY_START_TARGET")
-    expected_target = [pose["target_rad"][joint] for joint in JOINTS]
-    if (
-        any(abs(actual - expected) > 1e-9 for actual, expected in zip(target, expected_target))
-        or any(float(pose["tolerance_rad"][joint]) < float(tolerance) for joint in JOINTS)
-    ):
+    target = [_finite(pose["target_rad"][joint], "TEST_ONLY_START_QUALIFICATION") for joint in JOINTS]
+    pose_tolerances = [
+        _finite(pose["tolerance_rad"][joint], "TEST_ONLY_START_QUALIFICATION")
+        for joint in JOINTS
+    ]
+    if any(item <= 0 for item in pose_tolerances):
         raise ContractError("TEST_ONLY_START_QUALIFICATION")
+    tolerance = min(float(motion_tolerance), *pose_tolerances)
     current = [snapshot["joint_positions_rad"][joint] for joint in JOINTS]
-    if any(abs(actual - expected) > float(tolerance) for actual, expected in zip(current, target)):
+    if any(abs(actual - expected) > tolerance for actual, expected in zip(current, target)):
         raise ContractError("TEST_ONLY_START_OUTSIDE_HOME")
     value = {
         "scope": "MOTION_Q_SAFE_START",
@@ -770,9 +1047,9 @@ def build_test_only_start_binding(
         "motion_qualification_digest": canonical_digest(motion_qualification),
         "home_candidate_digest": home_digest,
         "joint_order": list(JOINTS),
-        "target_rad": [float(item) for item in target],
+        "target_rad": target,
         "current_rad": current,
-        "tolerance_rad": float(tolerance),
+        "tolerance_rad": tolerance,
         "max_snapshot_age_s": min(max_age, qualified_age),
         "snapshot_digest": canonical_digest(snapshot),
         "status": "BOUND_TEST_ONLY",
@@ -796,36 +1073,147 @@ def validate_test_only_start_binding(
         item for item in hypothesis["robot_start_poses"]
         if item["robot_start_pose_id"] == result.get("robot_start_pose_id")
     ]
+    pose = poses[0] if len(poses) == 1 else None
     if (
         result["manifest_digest"] != manifest.get("manifest_digest")
         or result["slot_digest"] != canonical_digest(slot)
         or result["robot_start_pose_id"] != slot["robot_start_pose_id"]
-        or len(poses) != 1
-        or result["robot_start_pose_qualification_digest"] != poses[0]["qualification_digest"]
+        or pose is None
+        or result["robot_start_pose_qualification_digest"] != pose["qualification_digest"]
+        or any(
+            abs(actual - pose["target_rad"][joint]) > 1e-9
+            for actual, joint in zip(result["target_rad"], JOINTS)
+        )
+        or any(
+            result["tolerance_rad"] > pose["tolerance_rad"][joint]
+            for joint in JOINTS
+        )
     ):
         raise ContractError("TEST_ONLY_START_BINDING")
     return result
 
 
-def _validate_test_only_start_shape(value: object) -> dict[str, Any]:
-    """Validate the sealed target binding without claiming its old snapshot is current."""
-    result = copy.deepcopy(dict(_exact(value, START_FIELDS, "TEST_ONLY_START_FIELDS")))
+def build_production_start_binding(
+    *, manifest: Mapping[str, Any], hypothesis: Mapping[str, Any],
+    motion_qualification: Mapping[str, Any], home_candidate: Mapping[str, Any],
+    current_snapshot: Mapping[str, Any], slot: Mapping[str, Any] | None = None,
+    max_snapshot_age_s: float = 0.1,
+) -> dict[str, Any]:
+    """Bind a fresh exact qualified start without creating execution authority."""
+    result = build_test_only_start_binding(
+        manifest=manifest, hypothesis=hypothesis,
+        motion_qualification=motion_qualification,
+        home_candidate=home_candidate, current_snapshot=current_snapshot,
+        slot=slot, max_snapshot_age_s=max_snapshot_age_s,
+    )
+    result.update(data_disposition="PRODUCTION", status="BOUND_PRODUCTION")
+    result["binding_digest"] = canonical_digest({
+        key: value for key, value in result.items() if key != "binding_digest"
+    })
+    return validate_production_start_binding(
+        result, manifest=manifest, hypothesis=hypothesis, slot=slot,
+    )
+
+
+def validate_production_start_binding(
+    value: object, *, manifest: Mapping[str, Any], hypothesis: Mapping[str, Any],
+    slot: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    hypothesis = validate_fr5_hypothesis(hypothesis)
+    manifest = validate_collection_campaign_manifest(manifest, hypothesis=hypothesis)
+    slot = _manifest_slot(manifest, slot)
+    result = _validate_start_shape(value, "PRODUCTION")
+    poses = [
+        item for item in hypothesis["robot_start_poses"]
+        if item["robot_start_pose_id"] == result.get("robot_start_pose_id")
+    ]
+    pose = poses[0] if len(poses) == 1 else None
+    source_poses = [
+        item for item in hypothesis["qualification_catalog"][
+            "robot_start_pose_qualifications"
+        ]
+        if item["qualification_digest"]
+        == result.get("robot_start_pose_qualification_digest")
+    ]
+    if (
+        result["manifest_digest"] != manifest.get("manifest_digest")
+        or result["slot_digest"] != canonical_digest(slot)
+        or result["robot_start_pose_id"] != slot["robot_start_pose_id"]
+        or pose is None
+        or len(source_poses) != 1
+        or source_poses[0].get("source") != "QUALIFICATION_ARTIFACT"
+        or result["robot_start_pose_qualification_digest"] != pose["qualification_digest"]
+        or any(
+            abs(actual - pose["target_rad"][joint]) > 1e-9
+            for actual, joint in zip(result["target_rad"], JOINTS)
+        )
+        or any(
+            result["tolerance_rad"] > pose["tolerance_rad"][joint]
+            for joint in JOINTS
+        )
+    ):
+        raise ContractError("PRODUCTION_START_BINDING")
+    return result
+
+
+def build_runtime_start_binding(
+    *, data_disposition: str, manifest: Mapping[str, Any],
+    hypothesis: Mapping[str, Any], motion_qualification: Mapping[str, Any],
+    home_candidate: Mapping[str, Any], current_snapshot: Mapping[str, Any],
+    slot: Mapping[str, Any] | None = None, max_snapshot_age_s: float = 0.1,
+) -> dict[str, Any]:
+    builder = {
+        "TEST_ONLY": build_test_only_start_binding,
+        "PRODUCTION": build_production_start_binding,
+    }.get(data_disposition)
+    if builder is None:
+        raise ContractError("RUNTIME_START_DISPOSITION")
+    return builder(
+        manifest=manifest, hypothesis=hypothesis,
+        motion_qualification=motion_qualification,
+        home_candidate=home_candidate, current_snapshot=current_snapshot,
+        slot=slot, max_snapshot_age_s=max_snapshot_age_s,
+    )
+
+
+def validate_runtime_start_binding(
+    value: object, *, manifest: Mapping[str, Any], hypothesis: Mapping[str, Any],
+    slot: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    disposition = value.get("data_disposition") if isinstance(value, Mapping) else None
+    if disposition == "TEST_ONLY":
+        return validate_test_only_start_binding(
+            value, manifest=manifest, hypothesis=hypothesis, slot=slot,
+        )
+    if disposition == "PRODUCTION":
+        return validate_production_start_binding(
+            value, manifest=manifest, hypothesis=hypothesis, slot=slot,
+        )
+    raise ContractError("RUNTIME_START_DISPOSITION")
+
+
+def _validate_start_shape(value: object, data_disposition: str) -> dict[str, Any]:
+    """Validate a sealed exact target without claiming its old snapshot is current."""
+    if data_disposition not in {"TEST_ONLY", "PRODUCTION"}:
+        raise ContractError("RUNTIME_START_DISPOSITION")
+    code = f"{data_disposition}_START_BINDING"
+    result = copy.deepcopy(dict(_exact(value, START_FIELDS, f"{data_disposition}_START_FIELDS")))
     if (
         result["scope"] != "MOTION_Q_SAFE_START"
-        or result["data_disposition"] != "TEST_ONLY"
-        or result["status"] != "BOUND_TEST_ONLY"
+        or result["data_disposition"] != data_disposition
+        or result["status"] != f"BOUND_{data_disposition}"
         or result["authority"] != NO_AUTHORITY
     ):
-        raise ContractError("TEST_ONLY_START_BINDING")
+        raise ContractError(code)
     for field in ("robot_start_pose_id", "motion_qualification_id"):
-        _identifier(result[field], "TEST_ONLY_START_BINDING")
+        _identifier(result[field], code)
     for field in (
         "manifest_digest", "slot_digest", "robot_start_pose_qualification_digest",
         "motion_qualification_digest", "home_candidate_digest", "snapshot_digest",
     ):
-        _digest(result[field], "TEST_ONLY_START_BINDING")
-    tolerance = _finite(result["tolerance_rad"], "TEST_ONLY_START_BINDING")
-    max_age = _finite(result["max_snapshot_age_s"], "TEST_ONLY_START_BINDING")
+        _digest(result[field], code)
+    tolerance = _finite(result["tolerance_rad"], code)
+    max_age = _finite(result["max_snapshot_age_s"], code)
     if (
         result["joint_order"] != list(JOINTS)
         or not isinstance(result["target_rad"], list)
@@ -835,24 +1223,36 @@ def _validate_test_only_start_shape(value: object) -> dict[str, Any]:
         or not 0 < tolerance <= 0.01
         or not 0 < max_age <= 0.1
     ):
-        raise ContractError("TEST_ONLY_START_BINDING")
-    target = [_finite(item, "TEST_ONLY_START_BINDING") for item in result["target_rad"]]
-    current = [_finite(item, "TEST_ONLY_START_BINDING") for item in result["current_rad"]]
+        raise ContractError(code)
+    target = [_finite(item, code) for item in result["target_rad"]]
+    current = [_finite(item, code) for item in result["current_rad"]]
     if any(abs(actual - expected) > tolerance for actual, expected in zip(current, target)):
-        raise ContractError("TEST_ONLY_START_BINDING")
+        raise ContractError(code)
     if result["binding_digest"] != canonical_digest({key: result[key] for key in result if key != "binding_digest"}):
-        raise ContractError("TEST_ONLY_START_DIGEST_MISMATCH")
+        raise ContractError(f"{data_disposition}_START_DIGEST_MISMATCH")
     return result
 
 
-def validate_test_only_planned_start(
+def _validate_test_only_start_shape(value: object) -> dict[str, Any]:
+    return _validate_start_shape(value, "TEST_ONLY")
+
+
+def validate_runtime_planned_start(
     *, start_binding: Mapping[str, Any], episode_binding: Mapping[str, Any],
     motion_program: Mapping[str, Any], plan: Mapping[str, Any],
 ) -> dict[str, Any]:
-    """Prove the executor's fresh plan snapshot still matches the qualified HOME target."""
-    start = _validate_test_only_start_shape(start_binding)
+    """Prove the executor's fresh plan snapshot still matches its qualified target."""
+    disposition = (
+        start_binding.get("data_disposition")
+        if isinstance(start_binding, Mapping) else None
+    )
+    if disposition not in {"TEST_ONLY", "PRODUCTION"}:
+        raise ContractError("RUNTIME_PLANNED_START_DISPOSITION")
+    code = f"{disposition}_PLANNED_START"
+    start = _validate_start_shape(start_binding, disposition)
     if (
         not isinstance(episode_binding, Mapping)
+        or episode_binding.get("data_disposition") != disposition
         or episode_binding.get("start_binding_digest") != start["binding_digest"]
         or not isinstance(motion_program, Mapping)
         or not isinstance(motion_program.get("binding_digests"), Mapping)
@@ -862,24 +1262,28 @@ def validate_test_only_planned_start(
         or not isinstance(plan.get("initial_joint_state"), list)
         or len(plan["initial_joint_state"]) != len(JOINTS)
     ):
-        raise ContractError("TEST_ONLY_PLANNED_START")
+        raise ContractError(code)
     bindings = motion_program["binding_digests"]
     max_age = _finite(
         motion_program["planning"].get("max_joint_state_age_s"),
-        "TEST_ONLY_PLANNED_START",
+        code,
     )
     if (
         bindings.get("motion_qualification") != start["motion_qualification_digest"]
         or bindings.get("home_candidate") != start["home_candidate_digest"]
         or not 0 < max_age <= start["max_snapshot_age_s"]
     ):
-        raise ContractError("TEST_ONLY_PLANNED_START")
-    initial = [_finite(item, "TEST_ONLY_PLANNED_START") for item in plan["initial_joint_state"]]
+        raise ContractError(code)
+    initial = [_finite(item, code) for item in plan["initial_joint_state"]]
     maximum = max(abs(actual - target) for actual, target in zip(initial, start["target_rad"]))
     if maximum > start["tolerance_rad"]:
-        raise ContractError("TEST_ONLY_PLANNED_START_MISMATCH")
+        raise ContractError(f"{disposition}_PLANNED_START_MISMATCH")
     evidence = {
-        "schema_version": PLANNED_START_EVIDENCE_SCHEMA,
+        "schema_version": (
+            PLANNED_START_EVIDENCE_SCHEMA
+            if disposition == "TEST_ONLY"
+            else "data_factory.production_planned_start_evidence.v1"
+        ),
         "start_binding_digest": start["binding_digest"],
         "motion_qualification_digest": start["motion_qualification_digest"],
         "home_candidate_digest": start["home_candidate_digest"],
@@ -894,6 +1298,16 @@ def validate_test_only_planned_start(
     }
     evidence["evidence_digest"] = canonical_digest(evidence)
     return evidence
+
+
+def validate_test_only_planned_start(**kwargs) -> dict[str, Any]:
+    start = kwargs.get("start_binding")
+    if not isinstance(start, Mapping) or start.get("data_disposition") != "TEST_ONLY":
+        raise ContractError("TEST_ONLY_PLANNED_START")
+    episode = kwargs.get("episode_binding")
+    if isinstance(episode, Mapping) and "data_disposition" not in episode:
+        kwargs = {**kwargs, "episode_binding": {**episode, "data_disposition": "TEST_ONLY"}}
+    return validate_runtime_planned_start(**kwargs)
 
 
 def qualified_table_plane_reference(cell_calibration: Mapping[str, Any]) -> dict[str, Any]:
@@ -1054,11 +1468,20 @@ def compile_workspace_registration_candidate(
 def build_camera_binding_candidate(
     *, binding_id: str, device_kind: str, stable_device_id: str,
     intended_role: str, collection_profile: Mapping[str, Any], connected: bool,
+    capture_endpoint: str | None = None,
 ) -> dict[str, Any]:
     if device_kind not in {"UVC", "REALSENSE"}:
         raise ContractError("CAMERA_BINDING_DEVICE_KIND")
     _identifier(binding_id, "CAMERA_BINDING_ID")
     _stable_device_id(device_kind, stable_device_id)
+    expected_endpoint = (
+        str(Path("/dev/v4l/by-id") / stable_device_id)
+        if device_kind == "UVC" else stable_device_id
+    )
+    if capture_endpoint is None:
+        capture_endpoint = expected_endpoint
+    if capture_endpoint != expected_endpoint:
+        raise ContractError("CAMERA_BINDING_DEVICE_ID")
     _identifier(intended_role, "CAMERA_BINDING_ROLE")
     if (
         not isinstance(collection_profile, Mapping)
@@ -1072,6 +1495,7 @@ def build_camera_binding_candidate(
         "binding_id": binding_id,
         "device_kind": device_kind,
         "stable_device_id": stable_device_id,
+        "capture_endpoint": capture_endpoint,
         "intended_role": intended_role,
         "collection_profile_id": collection_profile["collection_profile_id"],
         "collection_profile_digest": canonical_digest(collection_profile),
@@ -1097,6 +1521,12 @@ def validate_camera_binding_candidate(value: object) -> dict[str, Any]:
     for field in ("binding_id", "intended_role", "collection_profile_id"):
         _identifier(result[field], "CAMERA_BINDING_ID")
     _stable_device_id(result["device_kind"], result["stable_device_id"])
+    expected_endpoint = (
+        str(Path("/dev/v4l/by-id") / result["stable_device_id"])
+        if result["device_kind"] == "UVC" else result["stable_device_id"]
+    )
+    if result["capture_endpoint"] != expected_endpoint:
+        raise ContractError("CAMERA_BINDING_DEVICE_ID")
     _digest(result["collection_profile_digest"], "CAMERA_BINDING_DIGEST")
     if result["binding_digest"] != canonical_digest({key: result[key] for key in result if key != "binding_digest"}):
         raise ContractError("CAMERA_BINDING_DIGEST_MISMATCH")
@@ -1104,16 +1534,26 @@ def validate_camera_binding_candidate(value: object) -> dict[str, Any]:
 
 
 def build_camera_binding_from_discovery(
-    *, binding_id: str, device_kind: str, discovered_device_ids: Sequence[str],
+    *, binding_id: str, device_kind: str, discovered_device_ids: Sequence[object],
     intended_role: str, collection_profile: Mapping[str, Any],
     selected_device_id: str | None = None,
 ) -> dict[str, Any]:
     """Bind one passive-discovery token; multiple devices require an explicit choice."""
     if device_kind not in {"UVC", "REALSENSE"}:
         raise ContractError("CAMERA_BINDING_DEVICE_KIND")
-    if isinstance(discovered_device_ids, (str, bytes)) or not isinstance(discovered_device_ids, Sequence):
+    if (
+        isinstance(discovered_device_ids, (str, bytes))
+        or not isinstance(discovered_device_ids, Sequence)
+    ):
         raise ContractError("CAMERA_BINDING_DISCOVERY")
-    discovered = [_stable_device_id(device_kind, item) for item in discovered_device_ids]
+    devices = [
+        device
+        for value in discovered_device_ids
+        for device in normalize_camera_devices([value], default_kind=device_kind)
+    ]
+    discovered = [
+        item["logical_id"] for item in devices if item["kind"] == device_kind
+    ]
     if selected_device_id is None:
         if not discovered:
             raise ContractError("CAMERA_BINDING_DISCOVERY_ZERO")
@@ -1133,6 +1573,11 @@ def build_camera_binding_from_discovery(
         intended_role=intended_role,
         collection_profile=collection_profile,
         connected=True,
+        capture_endpoint=next(
+            item["capture_endpoint"] for item in devices
+            if item["kind"] == device_kind
+            and item["logical_id"] == selected_device_id
+        ),
     )
 
 
@@ -1156,6 +1601,204 @@ def reuse_camera_binding_receipt(
         intended_role=binding["intended_role"],
         collection_profile=collection_profile,
     )
+
+
+def build_camera_role_bindings(
+    *, collection_profile: Mapping[str, Any],
+    discovered_device_ids: Sequence[object], assignments: Mapping[str, str],
+) -> dict[str, Any]:
+    """Bind an exact connected-device role map to one matching v2 profile."""
+    if (
+        not isinstance(collection_profile, Mapping)
+        or collection_profile.get("schema_version")
+        != "data_factory.collection_profile.v2"
+        or isinstance(discovered_device_ids, (str, bytes))
+        or not isinstance(discovered_device_ids, Sequence)
+        or not isinstance(assignments, Mapping)
+    ):
+        raise ContractError("CAMERA_ROLE_BINDINGS_INPUT")
+    devices = normalize_camera_devices(discovered_device_ids)
+    discovered = {item["logical_id"]: item for item in devices}
+    if set(assignments) != set(discovered):
+        raise ContractError("CAMERA_ROLE_BINDINGS_DISCOVERY")
+    checked_assignments = {}
+    for device, role in assignments.items():
+        if device not in discovered:
+            raise ContractError("CAMERA_ROLE_BINDINGS_DISCOVERY")
+        if role not in CAMERA_SETUP_ROLES:
+            raise ContractError("CAMERA_ROLE_BINDINGS_ROLE")
+        checked_assignments[device] = role
+    used_roles = [role.lower() for role in checked_assignments.values() if role != "UNUSED"]
+    profile_roles = collection_profile.get("camera_roles")
+    if (
+        not used_roles
+        or len(used_roles) != len(set(used_roles))
+        or not isinstance(profile_roles, list)
+        or sorted(used_roles) != sorted(profile_roles)
+    ):
+        raise ContractError("CAMERA_ROLE_BINDINGS_PROFILE")
+    serials = collection_profile.get("camera_serials")
+    if not isinstance(serials, Mapping) or set(serials) != set(profile_roles):
+        raise ContractError("CAMERA_ROLE_BINDINGS_PROFILE")
+    bindings = {}
+    for device, ui_role in sorted(checked_assignments.items()):
+        if ui_role == "UNUSED":
+            continue
+        role = ui_role.lower()
+        serial = serials.get(role)
+        if (
+            not isinstance(serial, str) or not serial
+            or serial != "RUNTIME_BINDING_REQUIRED" and serial not in device
+        ):
+            raise ContractError("CAMERA_ROLE_BINDINGS_DEVICE_PROFILE")
+        binding_id = (
+            "camera-"
+            + canonical_digest({
+                "profile": collection_profile["collection_profile_id"],
+                "role": role, "device": device,
+            }).removeprefix("sha256:")[:20]
+        )
+        descriptor = discovered[device]
+        bindings[role] = build_camera_binding_candidate(
+            binding_id=binding_id, device_kind=descriptor["kind"],
+            stable_device_id=device,
+            capture_endpoint=descriptor["capture_endpoint"],
+            intended_role=role, collection_profile=collection_profile,
+            connected=True,
+        )
+    result = {
+        "schema_version": CAMERA_ROLE_BINDINGS_SCHEMA,
+        "collection_profile_id": collection_profile["collection_profile_id"],
+        "collection_profile_digest": canonical_digest(collection_profile),
+        "devices": {
+            device: {
+                "kind": descriptor["kind"],
+                "capture_endpoint": descriptor["capture_endpoint"],
+            }
+            for device, descriptor in sorted(discovered.items())
+        },
+        "assignments": dict(sorted(checked_assignments.items())),
+        "bindings": bindings,
+    }
+    result["binding_digest"] = canonical_digest(result)
+    return validate_camera_role_bindings(result)
+
+
+def validate_camera_role_bindings(value: object) -> dict[str, Any]:
+    result = copy.deepcopy(dict(_exact(
+        value, CAMERA_ROLE_BINDINGS_FIELDS, "CAMERA_ROLE_BINDINGS_FIELDS",
+    )))
+    if result.get("schema_version") != CAMERA_ROLE_BINDINGS_SCHEMA:
+        raise ContractError("CAMERA_ROLE_BINDINGS_SCHEMA")
+    _identifier(result.get("collection_profile_id"), "CAMERA_ROLE_BINDINGS_PROFILE")
+    _digest(result.get("collection_profile_digest"), "CAMERA_ROLE_BINDINGS_PROFILE")
+    devices = result.get("devices")
+    assignments, bindings = result.get("assignments"), result.get("bindings")
+    if (
+        not isinstance(devices, Mapping)
+        or not isinstance(assignments, Mapping)
+        or not isinstance(bindings, Mapping)
+        or set(devices) != set(assignments)
+    ):
+        raise ContractError("CAMERA_ROLE_BINDINGS_FIELDS")
+    for stable_id, descriptor in devices.items():
+        if (
+            not isinstance(descriptor, Mapping)
+            or set(descriptor) != {"kind", "capture_endpoint"}
+            or descriptor["kind"] not in {"UVC", "REALSENSE"}
+        ):
+            raise ContractError("CAMERA_ROLE_BINDINGS_DISCOVERY")
+        _stable_device_id(descriptor["kind"], stable_id)
+        expected_endpoint = (
+            str(Path("/dev/v4l/by-id") / stable_id)
+            if descriptor["kind"] == "UVC" else stable_id
+        )
+        if descriptor["capture_endpoint"] != expected_endpoint:
+            raise ContractError("CAMERA_ROLE_BINDINGS_DISCOVERY")
+    used = {}
+    for device, role in assignments.items():
+        if device not in devices:
+            raise ContractError("CAMERA_ROLE_BINDINGS_DISCOVERY")
+        if role not in CAMERA_SETUP_ROLES:
+            raise ContractError("CAMERA_ROLE_BINDINGS_ROLE")
+        if role != "UNUSED":
+            if role in used:
+                raise ContractError("CAMERA_ROLE_BINDINGS_ROLE")
+            used[role] = device
+    if set(bindings) != {role.lower() for role in used} or not bindings:
+        raise ContractError("CAMERA_ROLE_BINDINGS_FIELDS")
+    for role, candidate in bindings.items():
+        checked = validate_camera_binding_candidate(candidate)
+        ui_role = role.upper()
+        if (
+            checked["intended_role"] != role
+            or checked["stable_device_id"] != used.get(ui_role)
+            or checked["device_kind"] != devices[checked["stable_device_id"]]["kind"]
+            or checked["capture_endpoint"]
+            != devices[checked["stable_device_id"]]["capture_endpoint"]
+            or checked["collection_profile_id"] != result["collection_profile_id"]
+            or checked["collection_profile_digest"] != result["collection_profile_digest"]
+        ):
+            raise ContractError("CAMERA_ROLE_BINDINGS_BINDING")
+        bindings[role] = checked
+    if result["binding_digest"] != canonical_digest({
+        key: result[key] for key in result if key != "binding_digest"
+    }):
+        raise ContractError("CAMERA_ROLE_BINDINGS_DIGEST_MISMATCH")
+    result["assignments"] = dict(sorted(assignments.items()))
+    result["devices"] = dict(sorted(devices.items()))
+    result["bindings"] = dict(sorted(bindings.items()))
+    return result
+
+
+def reuse_camera_role_bindings(
+    value: object, *, discovered_device_ids: Sequence[object],
+    collection_profile: Mapping[str, Any],
+) -> dict[str, Any]:
+    stored = validate_camera_role_bindings(value)
+    discovered = normalize_camera_devices(discovered_device_ids)
+    exact_devices = {
+        item["logical_id"]: {
+            "kind": item["kind"], "capture_endpoint": item["capture_endpoint"],
+        }
+        for item in discovered
+    }
+    if (
+        exact_devices != stored["devices"]
+        or stored["collection_profile_id"]
+        != collection_profile.get("collection_profile_id")
+        or stored["collection_profile_digest"] != canonical_digest(collection_profile)
+    ):
+        raise ContractError("CAMERA_ROLE_BINDINGS_STALE")
+    return build_camera_role_bindings(
+        collection_profile=collection_profile,
+        discovered_device_ids=discovered,
+        assignments=stored["assignments"],
+    )
+
+
+def write_camera_role_bindings(
+    value: object, *, repository_root: str | Path,
+) -> Path:
+    bindings = validate_camera_role_bindings(value)
+    repository = Path(repository_root).resolve(strict=True)
+    receipt = repository / CAMERA_ROLE_BINDINGS_RECEIPT
+    _no_symlink_components(repository, receipt)
+    receipt.parent.mkdir(parents=True, exist_ok=True)
+    _no_symlink_components(repository, receipt)
+    write_json_atomic(receipt, bindings)
+    return receipt
+
+
+def load_camera_role_bindings(
+    *, repository_root: str | Path,
+) -> dict[str, Any]:
+    repository = Path(repository_root).resolve(strict=True)
+    receipt = repository / CAMERA_ROLE_BINDINGS_RECEIPT
+    _no_symlink_components(repository, receipt)
+    if receipt.is_symlink() or not receipt.is_file():
+        raise ContractError("CAMERA_ROLE_BINDINGS_RECEIPT")
+    return validate_camera_role_bindings(load_json_strict(receipt))
 
 
 def write_camera_binding_receipt(

@@ -157,6 +157,7 @@ class DataFactoryTest(unittest.TestCase):
     def test_nominal_file_stdin_and_rotation(self):
         validated = self._validated(); pose = factory.resolve_pose(validated)
         self.assertEqual(factory.normalize_job_spec({**self.job,"yaw_deg":30.0}, now=NOW)["yaw_deg"], 30)
+        self.assertEqual(factory.normalize_job_spec({**self.job,"yaw_deg":197.5}, now=NOW)["yaw_deg"], -162.5)
         self.assertEqual(pose["resolved_job_digest"], validated["resolved_job_digest"])
         cols = pose["rotation_base_columns"]
         for column in cols:

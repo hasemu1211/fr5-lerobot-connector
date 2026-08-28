@@ -46,6 +46,19 @@ class Test(unittest.TestCase):
   t=T();t.snapshot=lambda *_:snapshot([.25]*6);n=e.PickupExecutor(t,clock=lambda:datetime(2026,1,1,tzinfo=timezone.utc));r=n.process(self.req("plan",{"run_id":"r","motion_program":motion()}));plan=r["data"]["plan"];self.assertEqual(set(r["data"]),{"plan","precommit_safety","precommit_evidence","operator_summary"});self.assertEqual(r["data"]["precommit_safety"]["status"],"PENDING");self.assertEqual(r["data"]["precommit_evidence"]["approved_plan_digest"],r["plan_digest"]);self.assertEqual(plan["scene_binding"],SCENE);self.assertEqual([x["phase"] for x in plan["steps"]],list(e.PHASES));self.assertEqual(plan["initial_joint_state"],[.25]*6);self.assertEqual(plan["steps"][0]["start_joint_state"],[.25]*6);self.assertEqual(plan["steps"][1]["final_joint_state"],plan["steps"][2]["start_joint_state"]);self.assertEqual(plan["steps"][2]["requires_confirmation"],"PRECONTACT_HUMAN");self.assertEqual(plan["steps"][3]["pause_after"],"GRASP_VERDICT");self.assertEqual(plan["steps"][4]["pause_after"],"SEMANTIC_VERDICT");self.assertEqual(plan["gripper_requirements"],motion()["gripper_requirements"]);self.assertEqual(len(t.calls),len(e.PHASES));injected={"schema_version":"fr5.pickup_executor.command.v4","op_id":"injected","op":"plan","payload":{"run_id":"i","motion_program":motion(),"initial_joint_state":[0]*6}};self.assertEqual(n.process(injected)["code"],"PLAN_SCHEMA")
   self.assertEqual(r["data"]["operator_summary"]["flow"],{"continuous_through":"APPROACH_STOP_LIN","next_human_hold":"PRECONTACT_HUMAN"})
   t=T();t.snapshot=lambda *_:snapshot([.25]*6);n=e.PickupExecutor(t,clock=lambda:datetime(2026,1,1,tzinfo=timezone.utc));continuous=n.process(self.req("plan",{"run_id":"continuous","motion_program":motion(True)}));self.assertTrue(continuous["ok"]);self.assertEqual(continuous["data"]["operator_summary"]["flow"],{"continuous_through":"LIFT_LIN","next_human_hold":"POST_LIFT_SEMANTIC"});self.assertNotIn("requires_confirmation",continuous["data"]["plan"]["steps"][2]);self.assertNotIn("pause_after",continuous["data"]["plan"]["steps"][3])
+ def test_plan_rejects_trajectory_that_cannot_finish_before_timeout(self):
+  class Timed(T):
+   def arm_trajectory_duration_s(self,_):return .5
+  timed=Timed();program=motion(True)
+  for step in program["steps"]:
+   if step["phase"] in e.ARM_PHASES:step["limits"]["execution_timeout_s"]=3.
+  planned=e.PickupExecutor(timed).process(self.req("plan",{"run_id":"timed","motion_program":program}));self.assertTrue(planned["ok"]);self.assertEqual(planned["data"]["plan"]["steps"][0]["planned_duration_s"],.5)
+  class TooSlow(Timed):
+   def arm_trajectory_duration_s(self,_):return .75
+  slow=TooSlow();program=motion(True)
+  for step in program["steps"]:
+   if step["phase"] in e.ARM_PHASES:step["limits"]["execution_timeout_s"]=2.5
+  blocked=e.PickupExecutor(slow).process(self.req("plan",{"run_id":"slow","motion_program":program}));self.assertEqual((blocked["ok"],blocked["code"]),(False,"EXECUTION_TIMEOUT_INSUFFICIENT"))
  def test_failures_reuse_approval_live_no_later(self):
   for failure,code in ((e.ContractError("ROS_JOINT_STATE_STALE"),"ROS_JOINT_STATE_STALE"),({"joint_positions":[0]*6,"arm_controller":{"ready":False},"gripper_controller":{"ready":True}},"CONTROLLER_NOT_READY")):
    t=T();t.snapshot=lambda *_: (_ for _ in ()).throw(failure) if isinstance(failure,Exception) else snapshot(ready=False);n=e.PickupExecutor(t);self.assertEqual((n.process(self.req("plan",{"run_id":"r","motion_program":motion()}))["code"],t.calls),(code,[]))
@@ -123,7 +136,7 @@ class Test(unittest.TestCase):
   t=Live();s=Store();n=e.PickupExecutor(t,clock=lambda:datetime(2026,1,1,tzinfo=timezone.utc),cell_state_store=s,scene_state_store=s,execution_enabled=True);p=n.process(self.req("plan",{"run_id":"r","motion_program":motion()}));n.process(self.req("approve",{"approval_id":"approval-1","approved_by":"operator-1","run_id":"r","resolved_job_digest":"sha256:"+"a"*64,"plan_digest":p["plan_digest"],"approval_expiry":"2026-01-02T00:00:00Z"},"a5"));n.process(self.req("execute",{"run_id":"r","plan_digest":p["plan_digest"],"lease_id":"lease-1"},"e5"));out=io.StringIO();self.assertFalse(e.run_jsonl(io.StringIO(),out,n));self.assertEqual((len(out.getvalue().splitlines()),__import__("json").loads(out.getvalue())["state"],__import__("json").loads(out.getvalue())["mode"],t.started),(1,"BLOCKED","LIVE",["PREGRASP_PTP"]))
   class Quiet:
    def __iter__(self):time.sleep(.2);return iter(())
-  clock=[0];t=Live();s=Store();n=e.PickupExecutor(t,clock=lambda:datetime(2026,1,1,tzinfo=timezone.utc),monotonic_clock=lambda:clock[0],cell_state_store=s,scene_state_store=s,execution_enabled=True);p=n.process(self.req("plan",{"run_id":"r","motion_program":motion()}));n.process(self.req("approve",{"approval_id":"approval-1","approved_by":"operator-1","run_id":"r","resolved_job_digest":"sha256:"+"a"*64,"plan_digest":p["plan_digest"],"approval_expiry":"2026-01-02T00:00:00Z"},"a6"));n.process(self.req("execute",{"run_id":"r","plan_digest":p["plan_digest"],"lease_id":"lease-1"},"e6"));clock[0]=2;out=io.StringIO();self.assertFalse(e.run_jsonl(Quiet(),out,n));self.assertEqual((len(out.getvalue().splitlines()),__import__("json").loads(out.getvalue())["code"],t.cancelled,t.started),(1,"HEARTBEAT_TIMEOUT",1,["PREGRASP_PTP"]))
+  clock=[0];t=Live();s=Store();n=e.PickupExecutor(t,clock=lambda:datetime(2026,1,1,tzinfo=timezone.utc),monotonic_clock=lambda:clock[0],cell_state_store=s,scene_state_store=s,execution_enabled=True);p=n.process(self.req("plan",{"run_id":"r","motion_program":motion()}));n.process(self.req("approve",{"approval_id":"approval-1","approved_by":"operator-1","run_id":"r","resolved_job_digest":"sha256:"+"a"*64,"plan_digest":p["plan_digest"],"approval_expiry":"2026-01-02T00:00:00Z"},"a6"));n.process(self.req("execute",{"run_id":"r","plan_digest":p["plan_digest"],"lease_id":"lease-1"},"e6"));clock[0]=2;out=io.StringIO();self.assertFalse(e.run_jsonl(Quiet(),out,n));self.assertEqual((len(out.getvalue().splitlines()),t.cancelled,t.started),(0,1,["PREGRASP_PTP"]))
   t=Live();s=Store();writes=[]
   def mark(*args):
    writes.append(args)
@@ -203,6 +216,18 @@ class Test(unittest.TestCase):
   class Output(io.StringIO):
    def flush(self):flushed.set();return super().flush()
   output=Output();worker=__import__("threading").Thread(target=lambda:result.append(e.run_jsonl(reader,output,Terminal())));worker.start();writer.write("{}\n");writer.flush();self.assertTrue(flushed.wait(1));self.assertTrue(worker.is_alive());writer.close();worker.join(1);reader.close();self.assertEqual((worker.is_alive(),result),(False,[True]))
+ def test_jsonl_async_block_waits_for_bound_parent_request(self):
+  class Terminal:
+   mode="LIVE";digest="sha256:"+"1"*64
+   def __init__(self):self.runs={"r":{"state":"EXECUTING","plan":{"run_id":"r"},"digest":self.digest}}
+   def process(self,request):return e._response(op_id=request["op_id"],op=request["op"],code="ROS_EXEC_RESULT_TIMEOUT",run_id="r",plan_digest=self.digest,state="BLOCKED",mode=self.mode)
+   def tick(self):self.runs["r"]["state"]="BLOCKED"
+   def close(self):return False
+   def _execution_data(self,_):return {"durable_blocked":True}
+  read_fd,write_fd=os.pipe();reader=os.fdopen(read_fd,"r");writer=os.fdopen(write_fd,"w");flushed=__import__("threading").Event();result=[]
+  class Output(io.StringIO):
+   def flush(self):flushed.set();return super().flush()
+  output=Output();worker=__import__("threading").Thread(target=lambda:result.append(e.run_jsonl(reader,output,Terminal())));worker.start();time.sleep(.1);self.assertEqual(output.getvalue(),"");writer.write(__import__("json").dumps({"op_id":"status-1","op":"status"})+"\n");writer.flush();self.assertTrue(flushed.wait(1));response=__import__("json").loads(output.getvalue());self.assertEqual((response["op_id"],response["code"]),("status-1","ROS_EXEC_RESULT_TIMEOUT"));writer.close();worker.join(1);reader.close();self.assertEqual((worker.is_alive(),result),(False,[False]))
  def test_cell_state_is_fail_closed_and_durable(self):
   from contextlib import redirect_stderr, redirect_stdout
   from unittest import mock
@@ -262,23 +287,36 @@ class Test(unittest.TestCase):
    def get_result_async(self):return self.result_future
    def cancel_goal_async(self):self.cancel_count+=1;return Future(SimpleNamespace(goals_canceling=[object()]))
   class Client:
-   def __init__(self,endpoint):self.endpoint,self.handle,self.goals=endpoint,None,[]
-   def wait_for_server(self,timeout_sec):return timeout_sec>0
+   def __init__(self,endpoint):self.endpoint,self.handle,self.goals,self.ready=endpoint,None,[],True
+   def wait_for_server(self,timeout_sec):return timeout_sec>0 and self.ready
+   def server_is_ready(self):return self.ready
    def send_goal_async(self,goal):self.goals.append(goal);return Future(self.handle)
   class Node:
-   def __init__(self):self.publisher_ready,self.spins=False,0
+   def __init__(self):self.spins=0
    def get_topic_names_and_types(self):return [("/joint_states",["sensor_msgs/msg/JointState"])]
-   def count_publishers(self,topic):return int(self.publisher_ready and topic=="/joint_states")
   clients={}
   def client_factory(node,action_type,endpoint):del node,action_type;clients[endpoint]=Client(endpoint);return clients[endpoint]
   actions=[(endpoint,[kind]) for endpoint,kind in ACTION_TYPES.items()]
   node=Node()
   with mock.patch("rclpy.action.ActionClient",side_effect=client_factory),mock.patch("rclpy.action.get_action_names_and_types",return_value=actions):transport=RosMoveItTransport(node)
-  def discover(*args,**kwargs):del args,kwargs;node.publisher_ready=True;node.spins+=1
+  clients["/execute_trajectory"].ready=False
+  action_polls=[0]
+  def discover_actions(_node):
+   action_polls[0]+=1
+   return [] if action_polls[0]<3 else actions
+  transport._get_action_names_and_types=discover_actions
+  def discover(*args,**kwargs):
+   del args,kwargs;transport._joint_state=object();node.spins+=1
+   if node.spins==2:clients["/execute_trajectory"].ready=True
   transport._rclpy.spin_once=discover
   self.assertTrue(all(not client.goals for client in clients.values()))
   self.assertTrue(all(item["ready"] for key,item in transport.preflight().items() if key!="joint_order"))
-  self.assertEqual(node.spins,1)
+  self.assertEqual(node.spins,2)
+  transport._joint_state=None
+  transport.preflight_timeout_s=0.
+  transport._get_action_names_and_types=lambda _node:actions
+  transport._rclpy.spin_once=lambda *args,**kwargs:None
+  self.assertFalse(transport.preflight()["joint_states"]["ready"])
   trajectory=RobotTrajectory();trajectory.joint_trajectory.joint_names=["j3","j1","j6","j2","j5","j4"];trajectory.joint_trajectory.points=[JointTrajectoryPoint(positions=[3.,1.,6.,2.,5.,4.])]
   move_result=transport._MoveGroup.Result();move_result.error_code.val=MoveItErrorCodes.SUCCESS;move_result.planned_trajectory=trajectory;handle=Handle(Future(SimpleNamespace(status=GoalStatus.STATUS_SUCCEEDED,result=move_result)));clients["/move_action"].handle=handle
   program=motion();step=program["steps"][2];target={"base_tcp":step["target"]["base_tcp"],"base_tool":{"translation_m":[.1,.2,.3],"rotation_columns":[[0,1,0],[-1,0,0],[0,0,1]]}}
@@ -297,4 +335,10 @@ class Test(unittest.TestCase):
   minimal={"run_id":"closed","binding_digests":{"planning_scene_digest":"sha256:"+"0"*64},"scene_binding":SCENE,"steps":[{"phase":"GRIPPER_OPEN","gripper_position_m":.021,"limits":{"completion_tolerance_m":.001}}]}
   with self.assertRaises(e.ContractError) as closed_error:isolated.precommit_safety(minimal,{},closed)
   self.assertEqual(closed_error.exception.code,"GRIPPER_INITIAL_NOT_OPEN")
+  before=snapshot([.2]*6,gripper_position=.021);isolated._gripper_goal_count=1;isolated._check_plan_collision=lambda plan,gripper:{"schema_version":"data_factory.collision_report.v1","plan_digest":canonical_digest(plan),"sample_count":1,"samples":[],"failure_count":0,"all_valid":True};isolated.snapshot=lambda *_:before
+  transition_args=dict(serialized_trajectory=b"trajectory",start_joint_state=[.2]*6,final_joint_state=[0.]*6,planning_scene={},planning_scene_digest="sha256:"+"0"*64,planning_group="fairino5_v6_group",max_joint_state_age_s=.1,joint_tolerance_rad=.01,gripper_tolerance_m=.000105,before_snapshot=before)
+  transition=isolated.precommit_joint_transition(**transition_args)
+  self.assertEqual(transition["schema_version"],"data_factory.joint_transition_precommit.v1")
+  recovery=isolated.precommit_home_recovery(**transition_args)
+  self.assertEqual((recovery["schema_version"],recovery["execute_goal_count"],recovery["gripper_goal_count"],recovery["gripper_goal_count_delta"]),("data_factory.home_recovery_precommit.v1",0,1,0))
 if __name__=="__main__":unittest.main()

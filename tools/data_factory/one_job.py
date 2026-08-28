@@ -15,7 +15,7 @@ from tools.fr5_data_factory import ContractError, DIGEST, RFC3339, SAFE_ID, cano
 from tools.data_factory.scene_state import validate_scene_binding
 
 
-TEST_ONLY_READINESS_CONTRACT = {
+RECORDER_READINESS_CONTRACT = {
     "schema_version": "data_factory.recorder_readiness_contract.v1",
     "deadline_s": 5.0,
     "min_durable_rows": 60,
@@ -29,6 +29,8 @@ TEST_ONLY_READINESS_CONTRACT = {
     "max_alignment_failures": 0,
     "require_quality_accepted": True,
 }
+# Compatibility name; the predicates are recorder quality, not a disposition.
+TEST_ONLY_READINESS_CONTRACT = RECORDER_READINESS_CONTRACT
 
 
 def hil_numeric_gripper_verdict(state, execution_evidence, gripper_requirements):
@@ -124,9 +126,13 @@ class JsonlProcess:
     def preserve(self):
         self._preserved = True
 
-    def release(self):
+    @property
+    def preserved(self):
+        return self._preserved
+
+    def release(self, timeout_s=None):
         self._preserved = False
-        return self.close()
+        return self.close(timeout_s=timeout_s)
 
     def __enter__(self):
         return self
@@ -172,6 +178,7 @@ class OneJob:
         self.execution_response = None
         self.recorder_evidence = None
         self.readiness_evidence = None
+        self.readiness_failure_evidence = None
         self.plan_envelope = None
         self.frozen_rows = self.rows_after_recycle = None
         self._sequence = 0
@@ -194,6 +201,7 @@ class OneJob:
                 "execution_evidence": copy.deepcopy(self.execution_evidence),
                 "recorder_evidence": copy.deepcopy(self.recorder_evidence),
                 "readiness_evidence": copy.deepcopy(self.readiness_evidence),
+                "readiness_failure_evidence": copy.deepcopy(self.readiness_failure_evidence),
                 "frozen_rows": self.frozen_rows,
                 "rows_after_recycle": self.rows_after_recycle,
                 **extra}
@@ -342,7 +350,7 @@ class OneJob:
                   if target == "recorder" else
                   {"schema_version", "mode", "op_id", "op", "ok", "code", "run_id", "plan_digest", "state", "data"})
         schema = "data_factory.recorder_response.v1" if target == "recorder" else "fr5.pickup_executor.response.v3"
-        allowed = fields | ({"writer_alive", "writer_error", "quality", "abort_reason_code"} if target == "recorder" else set())
+        allowed = fields | ({"writer_alive", "writer_error", "sampler_alive", "quality", "abort_reason_code"} if target == "recorder" else set())
         if (not isinstance(response, dict) or not fields <= set(response) <= allowed or response.get("schema_version") != schema
                 or response.get("op_id") != request["op_id"] or response.get("op") != op
                 or type(response.get("ok")) is not bool or not isinstance(response.get("state"), str)
@@ -412,14 +420,19 @@ class OneJob:
             except ContractError as exc:
                 self.cancel_error = exc.code
         if self.cancel_error:
-            if self.recorder_state == "RECORDING":
+            recorder_aborted = False
+            if self.recorder_state in {"RECORDING", "FROZEN"}:
                 try:
-                    self._request("recorder", "freeze", allowed_failure=True)
+                    response = self._request("recorder", "abort", allowed_failure=True)
+                    recorder_aborted = bool(
+                        response["ok"] and response["state"] == "ABORTED"
+                    )
                 except ContractError:
                     pass
-            preserve = getattr(self.recorder_call, "preserve", None)
-            if callable(preserve):
-                preserve()
+            if not recorder_aborted:
+                preserve = getattr(self.recorder_call, "preserve", None)
+                if callable(preserve):
+                    preserve()
             self.state = "BLOCKED"
             return self._result(False, code)
         if self.recorder_state == "STATUS_UNCERTAIN" and self.lease_id is not None:
@@ -539,26 +552,52 @@ class OneJob:
             status_received_ns = time.monotonic_ns()
             if self._cancel_requested(cancel):
                 raise ContractError("START_CANCELLED")
-            if status["state"] != "RECORDING":
-                raise ContractError("RECORDER_STATE")
-            if status.get("writer_alive") is not True or status.get("writer_error") is not None:
-                raise ContractError("RECORDER_WRITER_FAULT")
-            rows = status["metrics"].get("rows")
-            if type(rows) is not int or rows < 0:
-                raise ContractError("RECORDER_HEALTH_SCHEMA")
-            if self.readiness_contract is None and rows >= 1:
-                return status
-            if self.readiness_contract is not None:
-                evidence = self._test_only_readiness(status, status_started_ns, status_received_ns)
-                if evidence is not None:
-                    self.readiness_evidence = evidence
+            try:
+                if status["state"] != "RECORDING":
+                    raise ContractError("RECORDER_STATE")
+                if status.get("writer_alive") is not True or status.get("writer_error") is not None:
+                    raise ContractError("RECORDER_WRITER_FAULT")
+                if status.get("sampler_alive") is not True:
+                    raise ContractError("RECORDER_SAMPLER_FAULT")
+                rows = status["metrics"].get("rows")
+                if type(rows) is not int or rows < 0:
+                    raise ContractError("RECORDER_HEALTH_SCHEMA")
+                if self.readiness_contract is None and rows >= 1:
                     return status
+                if self.readiness_contract is not None:
+                    evidence = self._test_only_readiness(status, status_started_ns, status_received_ns)
+                    if evidence is not None:
+                        self.readiness_evidence = evidence
+                        return status
+            except ContractError as exc:
+                self._capture_readiness_failure(exc.code, status)
+                raise
             if self.monotonic_clock() >= deadline:
-                raise ContractError(
+                code = (
                     "RECORDER_READINESS_TIMEOUT" if self.readiness_contract is not None
                     else "RECORDER_FIRST_ROW_TIMEOUT"
                 )
+                self._capture_readiness_failure(code, status)
+                raise ContractError(code)
             time.sleep(0.01)
+
+    def _capture_readiness_failure(self, code, status):
+        if self.readiness_contract is None or not isinstance(status, dict):
+            return
+        self.readiness_failure_evidence = {
+            "schema_version": "data_factory.recorder_readiness_failure.v1",
+            "run_id": self.run_id,
+            "transaction_id": self.transaction_id,
+            "episode_index": self.episode_index,
+            "code": code,
+            "recorder_status": {
+                "state": status.get("state"),
+                "writer_alive": status.get("writer_alive"),
+                "writer_error": status.get("writer_error"),
+                "sampler_alive": status.get("sampler_alive"),
+                "metrics": copy.deepcopy(status.get("metrics")),
+            },
+        }
 
     def _test_only_readiness(self, status, started_ns, received_ns):
         contract = self.readiness_contract
@@ -597,6 +636,11 @@ class OneJob:
         rows = metrics["rows"]
         if rows < contract["min_durable_rows"]:
             return None
+        queue_depth = metrics.get("writer_queue")
+        if type(queue_depth) is not int or queue_depth < 0:
+            raise ContractError("RECORDER_READINESS_SCHEMA")
+        if queue_depth:
+            return None
         if (
             type(quality["frames"]) is not int
             or quality["frames"] != rows
@@ -630,6 +674,12 @@ class OneJob:
                 raise ContractError("RECORDER_READINESS_CAMERA_FPS")
             camera_fps[name] = float(source_fps)
         if contract["require_quality_accepted"] and (quality["accepted"] is not True or quality["reasons"]):
+            transient = (
+                quality["reasons"]
+                and all(reason.startswith(("source provenance rows ", "enqueue attempts ")) for reason in quality["reasons"])
+            )
+            if transient:
+                return None
             raise ContractError("RECORDER_READINESS_QUALITY")
         return {
             "schema_version": "data_factory.recorder_readiness_evidence.v1",
@@ -645,6 +695,7 @@ class OneJob:
                 "camera_source_fps": camera_fps,
                 "writer_alive": True,
                 "writer_error": None,
+                "sampler_alive": True,
                 "writer_queue_drops": drops,
                 "alignment_failures": failures,
                 "quality_accepted": True,
@@ -700,10 +751,15 @@ class OneJob:
             if status["state"] != ("FROZEN" if self.state == "SEMANTIC_VERDICT" or self.semantic is not None else "RECORDING"):
                 raise ContractError("RECORDER_STATE")
             health = {key: status.get(key) for key in ("writer_alive", "writer_error")}
+            sampler_alive = status.get("sampler_alive")
             if type(health["writer_alive"]) is not bool or health["writer_error"] is not None and not isinstance(health["writer_error"], str):
+                raise ContractError("RECORDER_HEALTH_SCHEMA")
+            if type(sampler_alive) is not bool:
                 raise ContractError("RECORDER_HEALTH_SCHEMA")
             if not health["writer_alive"] or health["writer_error"] is not None:
                 raise ContractError("RECORDER_WRITER_FAULT")
+            if not sampler_alive:
+                raise ContractError("RECORDER_SAMPLER_FAULT")
             if status["state"] == "FROZEN":
                 rows = status["metrics"].get("rows")
                 if type(rows) is not int or rows < 0:

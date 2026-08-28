@@ -347,10 +347,10 @@ class RunJobTest(unittest.TestCase):
                 result, observed, ops, recorder, events, _ = run(choice)
                 self.assertEqual((result["code"], result["state"]), (code, state))
                 self.assertEqual((result["data"]["recorder_goal_count"], result["data"]["execute_goal_count"]), (0, 0))
-                self.assertEqual(ops, ["preflight", "plan"])
-                self.assertEqual(
-                    events,
-                    ["executor:preflight", "executor:plan", "camera_warmup", "decision"],
+                self.assertEqual(ops, ["plan"])
+                self.assertEqual(events[-1], "decision")
+                self.assertCountEqual(
+                    events[:-1], ["executor:plan", "camera_warmup"],
                 )
                 recorder.assert_not_called()
                 self.assertEqual(observed[0]["decision_binding"]["data_disposition"], "TEST_ONLY")
@@ -373,7 +373,7 @@ class RunJobTest(unittest.TestCase):
 
         result, _, ops, recorder, _, _ = run("APPROVE", stale=True)
         self.assertEqual((result["code"], result["state"]), ("PLAN_DECISION_BINDING", "BLOCKED"))
-        self.assertEqual(ops, ["preflight", "plan"])
+        self.assertEqual(ops, ["plan"])
         recorder.assert_not_called()
 
         result, observed, ops, recorder, events, _ = run("APPROVE", expired=True)
@@ -387,8 +387,8 @@ class RunJobTest(unittest.TestCase):
             (result["code"], result["state"]),
             ("TEST_ONLY_PLANNED_START_MISMATCH", "BLOCKED"),
         )
-        self.assertEqual((observed, ops), ([], ["preflight", "plan"]))
-        self.assertEqual(events, ["executor:preflight", "executor:plan"])
+        self.assertEqual((observed, ops), ([], ["plan"]))
+        self.assertCountEqual(events, ["executor:plan", "camera_warmup"])
         recorder.assert_not_called()
 
         result, observed, ops, recorder, events, site_requests = run(
@@ -401,13 +401,10 @@ class RunJobTest(unittest.TestCase):
         )
         self.assertEqual(result["data"]["measurement_outcome"], "NOT_MEASURED")
         self.assertEqual(observed, [])
-        self.assertEqual(ops, ["preflight", "plan"])
-        self.assertEqual(
-            events,
-            [
-                "executor:preflight", "executor:plan", "camera_warmup",
-                "checkpoint:PHYSICAL_SCENE_CONFIRMATION",
-            ],
+        self.assertEqual(ops, ["plan"])
+        self.assertEqual(events[-1], "checkpoint:PHYSICAL_SCENE_CONFIRMATION")
+        self.assertCountEqual(
+            events[:-1], ["executor:plan", "camera_warmup"],
         )
         self.assertEqual(site_requests[0]["kind"], "PHYSICAL_SCENE_CONFIRMATION")
         self.assertEqual(site_requests[0]["evidence"]["checklist"]["place_alias"], "place1")
@@ -418,11 +415,11 @@ class RunJobTest(unittest.TestCase):
         )
         self.assertEqual((result["code"], result["state"]), ("PLAN_REJECTED", "CANCELLED"))
         self.assertEqual(
-            events,
-            [
-                "executor:preflight", "executor:plan", "camera_warmup",
-                "checkpoint:PHYSICAL_SCENE_CONFIRMATION", "decision",
-            ],
+            events[-2:],
+            ["checkpoint:PHYSICAL_SCENE_CONFIRMATION", "decision"],
+        )
+        self.assertCountEqual(
+            events[:-2], ["executor:plan", "camera_warmup"],
         )
         binding = observed[0]["decision_binding"]
         self.assertEqual(
@@ -455,16 +452,137 @@ class RunJobTest(unittest.TestCase):
             ("CAMERA_WARMUP_RATE", "BLOCKED", "FAIL"),
         )
         self.assertRegex(result["plan_digest"], r"^sha256:[0-9a-f]{64}$")
-        self.assertEqual(observed, [])
-        self.assertEqual(ops, ["preflight", "plan"])
-        self.assertEqual(
-            events, ["executor:preflight", "executor:plan", "camera_warmup"],
+        self.assertIn("operator_summary", result["data"])
+        self.assertRegex(
+            result["data"]["preapproval_evidence_digest"],
+            r"^sha256:[0-9a-f]{64}$",
         )
+        self.assertEqual(
+            result["data"]["test_only_episode_binding_digest"],
+            run_job.canonical_digest("episode-binding"),
+        )
+        self.assertEqual(result["data"]["test_only_planned_start"], {
+            "start_binding_digest": run_job.canonical_digest("start-binding"),
+            "evidence_digest": run_job.canonical_digest("planned-start"),
+            "status": "PASS",
+        })
+        self.assertEqual(observed, [])
+        self.assertEqual(ops, ["plan"])
+        self.assertCountEqual(events, ["executor:plan", "camera_warmup"])
         self.assertEqual(
             (result["data"]["recorder_goal_count"], result["data"]["execute_goal_count"]),
             (0, 0),
         )
         recorder.assert_not_called()
+
+    def test_bound_production_uses_the_same_plan_gate_and_rejects_mixed_bindings(self):
+        validated = runtime_validated(job={
+            **JOB, "operator_or_agent_id": "operator", "instruction": "pick up",
+        })
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            live_payload = payload("live")
+            live_payload.update(
+                run_root=str(root / "runs"), dataset_root=str(root / "dataset"),
+            )
+            roots = {
+                "session_id": "session-r001", "run_id": live_payload["run_id"],
+                "data_disposition": "PRODUCTION",
+                "run_root": str((root / "runs").resolve()),
+                "cell_root": str((root / "cells").resolve()),
+                "dataset_root": str((root / "dataset").resolve()),
+                "production_writers_enabled": True,
+            }
+            roots["binding_digest"] = run_job.canonical_digest(roots)
+            episode = {
+                "binding_digest": run_job.canonical_digest("production-episode"),
+                "start_binding_digest": run_job.canonical_digest("production-start"),
+                "data_disposition": "PRODUCTION",
+                "expires_at": "2099-01-01T00:00:00Z",
+            }
+            planned_start = {
+                "start_binding_digest": episode["start_binding_digest"],
+                "evidence_digest": run_job.canonical_digest("production-planned-start"),
+                "status": "PASS",
+            }
+            decisions = []
+
+            def reject(request):
+                decisions.append(request)
+                bound = {
+                    "run_id": request["run_id"], "plan_digest": request["plan_digest"],
+                    "approval_scope": request["approval_scope"],
+                    "decision_binding": request["decision_binding"],
+                }
+                return {
+                    "choice": "REJECT", "run_id": request["run_id"],
+                    "plan_digest": request["plan_digest"],
+                    "approval_scope": request["approval_scope"],
+                    "decision_binding_digest": run_job.canonical_digest(bound),
+                    "decision_source": "LOCAL_UI_BUTTON", "operator_label": "operator",
+                }
+
+            recorder = mock.Mock()
+            cell = mock.Mock()
+            cell.read.return_value = {
+                "robot_system_id": live_payload["expected_robot_system_id"],
+                "cell_ready": True,
+            }
+            with (
+                mock.patch.object(run_job, "validate_runtime_root_binding", return_value=roots),
+                mock.patch.object(run_job, "validate_runtime_episode_binding", return_value=episode),
+                mock.patch.object(run_job, "validate_runtime_planned_start", return_value=planned_start),
+                mock.patch.object(
+                    run_job, "_validate_episode_ledger_context",
+                    return_value={"manifest": {}, "intent": {}},
+                ),
+                mock.patch.object(run_job, "CellStateStore", return_value=cell),
+                mock.patch.object(run_job, "SceneStateStore"),
+            ):
+                no_ledger_resolver = mock.Mock()
+                blocked = run_job.run_live(
+                    live_payload, threading.Event(), lambda _: None,
+                    resolver=no_ledger_resolver, decision_provider=reject,
+                    runtime_root_binding={"fixture": "production-root"},
+                    runtime_episode_binding={"fixture": "production-episode"},
+                    runtime_start_binding={"fixture": "production-start"},
+                    repository_root=root,
+                )
+                self.assertEqual(
+                    (blocked["code"], blocked["state"]),
+                    ("PRODUCTION_RUN_BINDING", "BLOCKED"),
+                )
+                no_ledger_resolver.assert_not_called()
+                result = run_job.run_live(
+                    live_payload, threading.Event(), lambda _: None,
+                    resolver=lambda _: (validated, runtime_motion(validated), SCENE),
+                    executor_factory=lambda *_: Executor(), recorder_factory=recorder,
+                    camera_warmup_call=lambda *_: {
+                        "schema_version": "data_factory.camera_warmup.v1", "attempts": [],
+                    },
+                    decision_provider=reject,
+                    runtime_root_binding={"fixture": "production-root"},
+                    runtime_episode_binding={"fixture": "production-episode"},
+                    runtime_start_binding={"fixture": "production-start"},
+                    episode_ledger_context={"fixture": "production-ledger"},
+                    repository_root=root,
+                )
+            self.assertEqual((result["code"], result["state"]), ("PLAN_REJECTED", "CANCELLED"))
+            recorder.assert_not_called()
+            decision_binding = decisions[0]["decision_binding"]
+            self.assertEqual(decision_binding["data_disposition"], "PRODUCTION")
+            self.assertEqual(decision_binding["root_binding_digest"], roots["binding_digest"])
+            self.assertEqual(decision_binding["planned_start_evidence"], planned_start)
+
+            resolver = mock.Mock()
+            mixed = run_job.run_live(
+                live_payload, threading.Event(), lambda _: None,
+                resolver=resolver, decision_provider=reject,
+                test_only_root_binding={"fixture": True},
+                runtime_root_binding={"fixture": True},
+            )
+            self.assertEqual(mixed["code"], "RUNTIME_BINDING_AMBIGUOUS")
+            resolver.assert_not_called()
 
     def test_test_only_scope_rejects_before_resolver_or_filesystem_side_effect(self):
         resolver = mock.Mock()
@@ -522,7 +640,7 @@ class RunJobTest(unittest.TestCase):
                 candidate = mock.Mock()
                 with (
                     mock.patch.object(run_job, "CellStateStore", cell_store),
-                    mock.patch.object(run_job, "_write_candidate_admission", candidate),
+                    mock.patch.object(run_job, "write_candidate_admission", candidate),
                 ):
                     result = run_job.run_live(
                         live_payload, threading.Event(), lambda _: None,
@@ -838,7 +956,7 @@ class RunJobTest(unittest.TestCase):
                     mock.patch.object(run_job, "ResourceMonitor", return_value=Resource()),
                     mock.patch.object(run_job, "_write_storage_reference", return_value={"status": "SYNTHETIC"}),
                     mock.patch.object(run_job, "_write_resource_reference", return_value={"sampling": {"status": "AVAILABLE"}}),
-                    mock.patch.object(run_job, "_write_candidate_admission") as candidate_writer,
+                    mock.patch.object(run_job, "write_candidate_admission") as candidate_writer,
                 ):
                     live_result = run_job.run_live(
                         live_payload, cancel_event, lambda _event: None,
@@ -1150,6 +1268,7 @@ class RunJobTest(unittest.TestCase):
         self.assertEqual(validator_command[0], run_job.DATA_PYTHON)
         self.assertEqual(validator_command[validator_command.index("--expected-fps") + 1], "30")
         self.assertIn("--require-hil-motion", validator_command)
+        self.assertIn("--require-alignment-tail", validator_command)
 
     def test_camera_warmup_retries_only_the_camera_gate_and_preserves_compact_evidence(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -1173,14 +1292,18 @@ class RunJobTest(unittest.TestCase):
         self.assertIn("--reliable-image", command)
         self.assertEqual(invoked.call_args.kwargs["timeout"], run_job.CAMERA_WARMUP_TIMEOUT_S)
 
-    def test_camera_warmup_all_fail_or_timeout_blocks_before_executor_recorder_or_goal(self):
+    def test_camera_warmup_all_fail_or_timeout_allows_only_concurrent_plan_only(self):
         validated = runtime_validated()
         ready_cell = SimpleNamespace(read=lambda: {"robot_system_id": "fr5-lab-a", "cell_ready": True})
         with tempfile.TemporaryDirectory() as directory:
             live_payload = payload("live")
             live_payload["run_root"] = directory
+            dataset_root = Path(directory) / "dataset-must-not-exist"
+            live_payload["dataset_root"] = str(dataset_root)
             timeout = subprocess.TimeoutExpired(["probe"], run_job.CAMERA_WARMUP_TIMEOUT_S, output="probe timed out")
-            executor_factory = mock.Mock()
+            executor = Executor()
+            executor.request = mock.Mock(wraps=executor.request)
+            executor_factory = mock.Mock(return_value=executor)
             recorder_factory = mock.Mock()
             with mock.patch.object(run_job.subprocess, "run", side_effect=(timeout, timeout)), mock.patch.object(run_job, "CellStateStore", return_value=ready_cell):
                 result = run_job.run_live(
@@ -1189,17 +1312,24 @@ class RunJobTest(unittest.TestCase):
                     recorder_factory=recorder_factory,
                 )
             evidence = json.loads((Path(directory) / live_payload["run_id"] / "camera_warmup.json").read_text(encoding="utf-8"))
+            self.assertFalse(dataset_root.exists())
         self.assertEqual((result["ok"], result["code"], result["state"]), (False, "CAMERA_WARMUP_FAILED", "BLOCKED"))
         self.assertEqual([attempt["status"] for attempt in evidence["attempts"]], ["FAIL", "FAIL"])
         self.assertEqual([role["status"] for attempt in evidence["attempts"] for role in attempt["roles"]], ["TIMEOUT", "TIMEOUT"])
-        executor_factory.assert_not_called()
+        executor_factory.assert_called_once()
+        self.assertEqual(
+            [call.args[0]["op"] for call in executor.request.call_args_list],
+            ["plan"],
+        )
         recorder_factory.assert_not_called()
 
-    def test_camera_warmup_cancel_is_bounded_and_starts_nothing(self):
+    def test_camera_warmup_cancel_is_bounded_and_allows_only_concurrent_plan_only(self):
         validated = runtime_validated()
         ready_cell = SimpleNamespace(read=lambda: {"robot_system_id": "fr5-lab-a", "cell_ready": True})
         cancel = threading.Event()
-        executor_factory = mock.Mock()
+        executor = Executor()
+        executor.request = mock.Mock(wraps=executor.request)
+        executor_factory = mock.Mock(return_value=executor)
         recorder_factory = mock.Mock()
         with tempfile.TemporaryDirectory() as directory:
             live_payload = payload("live")
@@ -1212,15 +1342,76 @@ class RunJobTest(unittest.TestCase):
                     camera_warmup_call=lambda *_: (cancel.set(), {"schema_version": "data_factory.camera_warmup.v1", "attempts": []})[1],
                 )
         self.assertEqual((result["ok"], result["code"], result["state"]), (False, "CANCELLED", "CANCELLED"))
-        executor_factory.assert_not_called()
+        executor_factory.assert_called_once()
+        self.assertEqual(
+            [call.args[0]["op"] for call in executor.request.call_args_list],
+            ["plan"],
+        )
         recorder_factory.assert_not_called()
 
-    def test_live_preserves_executor_preflight_failure_code(self):
+    def test_camera_warmup_and_plan_overlap_then_join_before_operator_decision(self):
+        validated = runtime_validated(job={
+            **JOB, "operator_or_agent_id": "operator", "instruction": "pick up",
+        })
+        ready_cell = SimpleNamespace(
+            read=lambda: {"robot_system_id": "fr5-lab-a", "cell_ready": True},
+        )
+        camera_started = threading.Event()
+        plan_started = threading.Event()
+
+        class OverlapExecutor(Executor):
+            def request(self, request, cancel=None):
+                if request["op"] == "plan":
+                    plan_started.set()
+                    self.assert_overlap(camera_started.wait(1.0))
+                return super().request(request, cancel)
+
+            @staticmethod
+            def assert_overlap(overlapped):
+                if not overlapped:
+                    raise AssertionError("camera warm-up did not overlap plan-only")
+
+        def warmup(*_):
+            camera_started.set()
+            if not plan_started.wait(1.0):
+                raise AssertionError("plan-only did not overlap camera warm-up")
+            return {"schema_version": "data_factory.camera_warmup.v1", "attempts": []}
+
+        with tempfile.TemporaryDirectory() as directory:
+            live_payload = payload("live")
+            live_payload["run_root"] = directory
+            with mock.patch.object(run_job, "CellStateStore", return_value=ready_cell):
+                result = run_job.run_live(
+                    live_payload, threading.Event(), lambda _: None,
+                    resolver=lambda _: (validated, runtime_motion(validated), SCENE),
+                    executor_factory=lambda *_: OverlapExecutor(),
+                    recorder_factory=mock.Mock(),
+                    camera_warmup_call=warmup,
+                    decision_provider=lambda _: None,
+                    decision_timeout_s=0,
+                )
+        self.assertEqual(
+            (result["code"], result["state"]),
+            ("PAUSED_AWAITING_OPERATOR", "PLANNED"),
+        )
+        self.assertTrue(camera_started.is_set())
+        self.assertTrue(plan_started.is_set())
+        self.assertFalse(any(
+            thread.name.startswith("camera-warmup")
+            for thread in threading.enumerate()
+        ))
+
+    def test_live_preserves_plan_owned_preflight_failure_code(self):
         ready_cell = SimpleNamespace(read=lambda: {"robot_system_id": "fr5-lab-a", "cell_ready": True})
         validated = runtime_validated()
         class Process:
-            def request(self, *_):
-                return {"ok": False, "code": "CONTROLLER_ACTION_GRAPH"}
+            def request(self, request, *_):
+                return {
+                    "schema_version": "fr5.pickup_executor.response.v3",
+                    "mode": "LIVE", "op_id": request["op_id"], "op": request["op"],
+                    "ok": False, "code": "CONTROLLER_ACTION_GRAPH",
+                    "run_id": None, "plan_digest": None, "state": "BLOCKED", "data": None,
+                }
 
             def close(self, **_):
                 return None
@@ -1234,7 +1425,9 @@ class RunJobTest(unittest.TestCase):
                     live_payload, threading.Event(), lambda _: None,
                     resolver=lambda _: (validated, runtime_motion(validated), SCENE),
                     executor_factory=lambda *_: Process(), recorder_factory=recorder_factory,
-                    camera_warmup_call=lambda *_: {"schema_version": "data_factory.camera_warmup.v1", "attempts": []},
+                    camera_warmup_call=lambda *_: (_ for _ in ()).throw(
+                        run_job.ContractError("CAMERA_WARMUP_FAILED")
+                    ),
                 )
         self.assertEqual((result["ok"], result["code"], result["state"]), (False, "CONTROLLER_ACTION_GRAPH", "BLOCKED"))
         recorder_factory.assert_not_called()
@@ -1455,7 +1648,10 @@ class RunJobTest(unittest.TestCase):
                 "--domain-manifest", str(domain_path), "--stored-episodes", str(stored_path), "--output-root", str(bad_root),
             ], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
         self.assertEqual((result["ok"], result["code"], result["state"]), (True, "VALIDATED", "COMPLETE"))
-        self.assertEqual([item[:2] for item in calls[:4]], [("camera_warmup", "PASS"), ("executor", "preflight"), ("job", "approve"), ("recorder", "spawn")])
+        self.assertEqual(
+            [item[:2] for item in calls[:4]],
+            [("camera_warmup", "PASS"), ("job", "approve"), ("recorder", "spawn"), ("job", "start")],
+        )
         self.assertIn(("job", "approve", "HUMAN_GATED"), calls)
         self.assertLess(calls.index(("camera_warmup", "PASS")), calls.index(("recorder", "spawn")))
         self.assertEqual([expected for _, expected in prompts], [f"APPROVE {digest}", ("PASS", "FAIL"), f"SCENE_READY {digest}"])
@@ -1624,18 +1820,20 @@ class RunJobTest(unittest.TestCase):
                 self.assertEqual([expected_text for _, expected_text in prompts], [f"APPROVE {digest}"])
                 self.assertFalse((Path(directory) / live_payload["run_id"] / "candidate_admission.json").exists())
 
-    def test_live_composed_one_job_commits_before_validator_without_camera_semantics(self):
-        """The public runner drives the real coordinator; fakes replace only child processes."""
+    def test_bound_production_live_commits_and_binds_one_candidate_to_one_ledger(self):
+        """The public runner owns one production commit, ledger, and candidate chain."""
         helper = one_job_test.OneJobTest()
         self.addCleanup(helper.doCleanups)
         recorder_call, executor_call = None, None
         job, calls = helper.make(
             ["RECORDING", "RECORDING", "FROZEN", "FROZEN", "COMMITTED"],
             ["PLANNED", "APPROVED", "EXECUTING", "SEMANTIC_VERDICT", "EXECUTING", "COMPLETED"],
+            first_row_rows=60,
             continuous=True,
+            readiness_contract=run_job.RECORDER_READINESS_CONTRACT,
         )
         recorder_call, executor_call = job.recorder_call, job.executor_call
-        timeline, validator_calls, test_case = [], [], self
+        timeline, validator_calls, published, test_case = [], [], [], self
 
         storage = {
             "episode_index": 0, "transaction_id": "tx", "staging_manifest_digest": "sha256:" + "4" * 64,
@@ -1734,21 +1932,88 @@ class RunJobTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             live_payload = payload("live")
             live_payload.update(run_id="run", run_root=directory, dataset_root=str(Path(directory) / "dataset"))
-            with mock.patch.object(run_job, "ResourceMonitor", Resource), mock.patch.object(run_job, "CellStateStore", return_value=cell), mock.patch.object(run_job, "SceneStateStore", return_value=scene):
+            roots = {
+                "session_id": "session-r001", "run_id": "run",
+                "data_disposition": "PRODUCTION",
+                "run_root": str(Path(directory).resolve()),
+                "cell_root": str((Path(directory) / "cells").resolve()),
+                "dataset_root": str((Path(directory) / "dataset").resolve()),
+                "production_writers_enabled": True,
+            }
+            roots["binding_digest"] = run_job.canonical_digest(roots)
+            episode = {
+                "binding_digest": run_job.canonical_digest("production-episode"),
+                "start_binding_digest": run_job.canonical_digest("production-start"),
+                "data_disposition": "PRODUCTION",
+                "expires_at": "2099-01-01T00:00:00Z",
+            }
+            planned_start = {
+                "start_binding_digest": episode["start_binding_digest"],
+                "evidence_digest": run_job.canonical_digest("production-planned-start"),
+                "status": "PASS",
+            }
+            ledger_reference = {
+                "path": str(Path(directory) / "run" / "episode_ledger.json"),
+                "state_path": str(Path(directory) / "run" / "episode_ledger_state.json"),
+            }
+            bound_ledger_reference = {**ledger_reference, "review_status": "PENDING"}
+
+            def approve(request):
+                return {
+                    "choice": "APPROVE", "run_id": request["run_id"],
+                    "plan_digest": request["plan_digest"],
+                    "approval_scope": request["approval_scope"],
+                    "decision_binding_digest": run_job.canonical_digest({
+                        "run_id": request["run_id"],
+                        "plan_digest": request["plan_digest"],
+                        "approval_scope": request["approval_scope"],
+                        "decision_binding": request["decision_binding"],
+                    }),
+                    "decision_source": "LOCAL_UI_BUTTON", "operator_label": "operator",
+                }
+
+            with (
+                mock.patch.object(run_job, "ResourceMonitor", Resource),
+                mock.patch.object(run_job, "CellStateStore", return_value=cell),
+                mock.patch.object(run_job, "SceneStateStore", return_value=scene),
+                mock.patch.object(run_job, "validate_runtime_root_binding", return_value=roots),
+                mock.patch.object(run_job, "validate_runtime_episode_binding", return_value=episode),
+                mock.patch.object(run_job, "validate_runtime_planned_start", return_value=planned_start),
+                mock.patch.object(run_job, "_validate_episode_ledger_context", return_value={"manifest": {}, "intent": {}}),
+                mock.patch.object(run_job, "_write_episode_ledger", return_value=ledger_reference) as ledger_writer,
+                mock.patch.object(run_job, "write_candidate_admission", return_value={"semantic_status": "PENDING"}) as candidate_writer,
+                mock.patch.object(run_job, "bind_candidate_episode_state", return_value=bound_ledger_reference) as candidate_binder,
+            ):
                 result = run_job.run_live(
-                    live_payload, threading.Event(), lambda _: None,
+                    live_payload, threading.Event(), published.append,
                     resolver=lambda _: (validated, runtime_motion(validated, continuous=True), SCENE), executor_factory=lambda *_: Executor(), recorder_factory=lambda *_: Recorder(),
                     validator_call=lambda *_: (validator_calls.append("validator"), timeline.append(("validator", "PASS")), {"ok": True, "code": "PASS", "result_digest": "sha256:" + "6" * 64})[2],
                     tty_decision=lambda _prompt, expected: "PASS" if expected == ("PASS", "FAIL") else None,
                     camera_warmup_call=lambda *_: {"schema_version": "data_factory.camera_warmup.v1", "run_id": "run", "camera_profile": "up", "attempts": []},
+                    one_job=job,
+                    decision_provider=approve,
+                    runtime_root_binding={"fixture": "production-root"},
+                    runtime_episode_binding={"fixture": "production-episode"},
+                    runtime_start_binding={"fixture": "production-start"},
+                    episode_ledger_context={"fixture": "production-ledger"},
                 )
                 preapproval = json.loads((Path(directory) / "run" / "preapproval_evidence.json").read_text(encoding="utf-8"))
 
         self.assertEqual((result["ok"], result["code"], result["state"]), (True, "VALIDATED", "COMPLETE"))
+        self.assertEqual(
+            [item["code"] for item in published],
+            [
+                "CAMERA_WARMUP", "PLANNING", "AWAITING_HUMAN_APPROVAL",
+                "RECORDER_STARTING", "EXECUTING", "FINALIZING", "VALIDATING",
+            ],
+        )
         self.assertEqual(preapproval["plan_digest"], result["plan_digest"])
+        first_status = next(
+            index for index, item in enumerate(timeline) if item[:2] == ("recorder", "status")
+        )
         self.assertLess(timeline.index(("executor", "plan")), timeline.index(("executor", "approve")))
-        self.assertLess(timeline.index(("recorder", "begin")), timeline.index(("recorder", "status", 1)))
-        self.assertLess(timeline.index(("recorder", "status", 1)), timeline.index(("executor", "execute")))
+        self.assertLess(timeline.index(("recorder", "begin")), first_status)
+        self.assertLess(first_status, timeline.index(("executor", "execute")))
         self.assertLess(timeline.index(("recorder", "commit")), timeline.index(("validator", "PASS")))
         self.assertLess(timeline.index(("recorder", "commit")), timeline.index(("scene", "ON_SURFACE")))
         self.assertEqual(validator_calls, ["validator"])
@@ -1758,6 +2023,12 @@ class RunJobTest(unittest.TestCase):
         self.assertNotIn("rgb", result["data"])
         self.assertNotIn("frames", result["data"])
         self.assertIn(("cell", "ack"), timeline)
+        ledger_writer.assert_called_once()
+        candidate_writer.assert_called_once()
+        candidate_binder.assert_called_once_with(
+            ledger_reference, Path(directory) / "run" / "candidate_admission.json",
+        )
+        self.assertEqual(result["data"]["episode_ledger"], bound_ledger_reference)
 
     def test_human_and_ai_share_plan_only_contract_and_jsonl_live_uses_same_session(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -1939,6 +2210,24 @@ class RunJobTest(unittest.TestCase):
         broken = __import__("io").StringIO()
         self.assertFalse(run_job.run_jsonl(BrokenInput(), broken))
         self.assertEqual(json.loads(broken.getvalue())["code"], "CONTROL_INPUT_FAILED")
+
+    def test_runtime_cleanup_releases_preserved_child_without_leaving_a_process(self):
+        calls = []
+
+        class PreservedChild:
+            preserved = True
+
+            def release(self, timeout_s=None):
+                calls.append(("release", timeout_s))
+
+            def close(self, **_):
+                raise AssertionError("preserved child must use explicit release")
+
+        cancelled = threading.Event()
+        cancelled.set()
+        run_job._close_runtime_child(PreservedChild(), cancelled)
+        run_job._close_runtime_child(PreservedChild(), threading.Event())
+        self.assertEqual(calls, [("release", 1.0), ("release", 1.0)])
 
     def test_fake_commit_validator_and_async_boundaries_reuse_existing_core(self):
         helper = one_job_test.OneJobTest()

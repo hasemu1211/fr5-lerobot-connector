@@ -14,8 +14,8 @@ from tools.data_factory.campaign_session import CampaignSession, DISPOSITIONS
 from tools.data_factory.experiment_manifest import validate_fr5_hypothesis
 from tools.data_factory.operator_bridge import OperatorIntentCore
 from tools.data_factory.operator_setup import (
-    validate_test_only_root_binding,
-    validate_test_only_start_binding,
+    validate_runtime_root_binding,
+    validate_runtime_start_binding,
 )
 from tools.fr5_data_factory import ContractError, SAFE_ID
 
@@ -90,7 +90,7 @@ class CampaignOperator:
             "AUTHOR_ONLY", "PLAN_ONLY", "LIVE_COLLECT",
         }:
             raise ContractError("CAMPAIGN_OPERATOR_SCOPE")
-        if data_disposition != DISPOSITIONS[effect_scope]:
+        if data_disposition not in DISPOSITIONS[effect_scope]:
             raise ContractError("CAMPAIGN_OPERATOR_DISPOSITION")
         if not isinstance(workspace, Mapping):
             raise ContractError("CAMPAIGN_OPERATOR_WORKSPACE")
@@ -316,11 +316,15 @@ class CampaignOperator:
             if self.lifecycle_action == "LIVE_COLLECT":
                 if not callable(self.physical_root_binding_call):
                     raise ContractError("CAMPAIGN_OPERATOR_PHYSICAL_ROOT_BINDING_REQUIRED")
-                roots = validate_test_only_root_binding(
+                roots = validate_runtime_root_binding(
                     self.physical_root_binding_call(run_id),
                     repository_root=repository_root,
                 )
-                if roots["session_id"] != self.session_id or roots["run_id"] != run_id:
+                if (
+                    roots["data_disposition"] != self.data_disposition
+                    or roots["session_id"] != self.session_id
+                    or roots["run_id"] != run_id
+                ):
                     raise ContractError("CAMPAIGN_OPERATOR_PHYSICAL_ROOT_BINDING")
                 bindings["roots"] = roots
         if self._session is None:
@@ -380,11 +384,13 @@ class CampaignOperator:
                         raise ContractError("CAMPAIGN_OPERATOR_NEXT_SLOT")
                     start_binding = self.physical_start_binding_call(run_id, slot)
                     scene_evidence = self.scene_evidence_call(run_id)
-                    bindings["start_binding"] = validate_test_only_start_binding(
+                    bindings["start_binding"] = validate_runtime_start_binding(
                         start_binding,
                         manifest=self.manifest, hypothesis=self.hypothesis,
                         slot=slot,
                     )
+                    if bindings["start_binding"]["data_disposition"] != self.data_disposition:
+                        raise ContractError("CAMPAIGN_OPERATOR_PHYSICAL_START_BINDING")
             result = session.run_next(
                 run_id=run_id,
                 scene_evidence=scene_evidence,

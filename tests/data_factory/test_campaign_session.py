@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import unittest
+from tempfile import TemporaryDirectory
 from datetime import datetime, timedelta, timezone
+from unittest import mock
 
 try:
     from .test_campaign_authoring import draft
@@ -11,6 +13,7 @@ except ImportError:
     from test_experiment_manifest import hypothesis
 from tools.data_factory.campaign_authoring import compile_collection_campaign
 from tools.data_factory.campaign_session import CampaignSession
+from tools.data_factory.operator_setup import build_test_only_root_binding
 from tools.data_factory.seed_campaign import SeedCampaign, validate_seed_episode_intent
 from tools.fr5_data_factory import ContractError, canonical_digest
 
@@ -106,6 +109,119 @@ def make_session(
 
 
 class CampaignSessionTests(unittest.TestCase):
+    def test_physical_production_reuses_the_serial_session_and_fresh_children(self):
+        contract, source, manifest, receipt = compiled(2)
+        children = []
+
+        def factory():
+            child = FakeOneJob()
+            children.append(child)
+            return child
+
+        def checked(value, **_kwargs):
+            return dict(value)
+
+        with TemporaryDirectory() as directory:
+            session = CampaignSession(
+                session_id="production-session-r001", source_draft=source,
+                manifest=manifest, compilation_receipt=receipt,
+                hypothesis=contract, lifecycle_owner="campaign-owner-r001",
+                expires_at=EXPIRES,
+                initial_scene_digest=canonical_digest("scene-0"),
+                effect_scope="PHYSICAL", lifecycle_action="LIVE_COLLECT",
+                data_disposition="PRODUCTION",
+                fake_lifecycle_factory=lambda: 1 / 0,
+                physical_lifecycle_factory=factory,
+                repository_root=directory, clock=lambda: NOW,
+            )
+            expected_scene = canonical_digest("scene-0")
+            with (
+                mock.patch(
+                    "tools.data_factory.campaign_session.validate_runtime_root_binding",
+                    side_effect=checked,
+                ),
+                mock.patch(
+                    "tools.data_factory.campaign_session.validate_runtime_start_binding",
+                    side_effect=checked,
+                ),
+            ):
+                for index in range(2):
+                    run_id = f"production-run-{index}"
+                    roots = {
+                        "session_id": session.session_id, "run_id": run_id,
+                        "data_disposition": "PRODUCTION",
+                        "binding_digest": canonical_digest(["root", run_id]),
+                    }
+                    start = {
+                        "data_disposition": "PRODUCTION",
+                        "binding_digest": canonical_digest([
+                            "start", session.next_slot["slot_id"],
+                        ]),
+                    }
+                    next_scene = canonical_digest(["scene", index + 1])
+
+                    def episode(intent, lifecycle, _cancel, context, destination=next_scene):
+                        self.assertEqual(context["data_disposition"], "PRODUCTION")
+                        self.assertEqual(context["root_binding"]["run_id"], intent["run_id"])
+                        self.assertEqual(context["start_binding"]["data_disposition"], "PRODUCTION")
+                        lifecycle.state = "COMPLETE"
+                        return {
+                            "result": {"ok": True},
+                            "technical_evidence": technical(intent, destination),
+                        }
+
+                    result = session.run_next(
+                        run_id=run_id, scene_evidence=scene(expected_scene),
+                        episode_call=episode, roots=roots, start_binding=start,
+                    )
+                    expected_scene = next_scene
+                    self.assertTrue(result["result"]["ok"])
+
+        self.assertEqual(len(children), 2)
+        self.assertEqual(len({id(child) for child in children}), 2)
+        self.assertEqual(session.status()["campaign"]["state"], "COMPLETE")
+
+    def test_cross_disposition_root_fails_before_physical_child_factory(self):
+        contract, source, manifest, receipt = compiled(1)
+        factory_calls = []
+        with TemporaryDirectory() as directory:
+            session = CampaignSession(
+                session_id="production-session-r001", source_draft=source,
+                manifest=manifest, compilation_receipt=receipt,
+                hypothesis=contract, lifecycle_owner="campaign-owner-r001",
+                expires_at=EXPIRES,
+                initial_scene_digest=canonical_digest("scene-0"),
+                effect_scope="PHYSICAL", lifecycle_action="LIVE_COLLECT",
+                data_disposition="PRODUCTION", fake_lifecycle_factory=lambda: None,
+                physical_lifecycle_factory=lambda: factory_calls.append(True),
+                repository_root=directory, clock=lambda: NOW,
+            )
+            roots = build_test_only_root_binding(
+                directory, session_id=session.session_id, run_id="production-run-0",
+            )
+            with self.assertRaisesRegex(ContractError, "CAMPAIGN_SESSION_ROOT_BINDING"):
+                session.open_next(
+                    run_id="production-run-0",
+                    scene_evidence=scene(canonical_digest("scene-0")),
+                    roots=roots, start_binding={"data_disposition": "PRODUCTION"},
+                )
+        self.assertEqual(factory_calls, [])
+        self.assertFalse(session.status()["active_child"])
+
+    def test_fake_scope_rejects_production_disposition(self):
+        contract, source, manifest, receipt = compiled(1)
+        with self.assertRaisesRegex(ContractError, "CAMPAIGN_SESSION_DISPOSITION"):
+            CampaignSession(
+                session_id="fake-session-r001", source_draft=source,
+                manifest=manifest, compilation_receipt=receipt,
+                hypothesis=contract, lifecycle_owner="campaign-owner-r001",
+                expires_at=EXPIRES,
+                initial_scene_digest=canonical_digest("scene-0"),
+                effect_scope="FAKE", lifecycle_action="LIVE_COLLECT",
+                data_disposition="PRODUCTION", fake_lifecycle_factory=FakeOneJob,
+                clock=lambda: NOW,
+            )
+
     def test_collection_adapter_requires_matching_receipt(self):
         contract, source, manifest, receipt = compiled(1)
         with self.assertRaisesRegex(ContractError, "SEED_CAMPAIGN_COMPILATION_RECEIPT_REQUIRED"):

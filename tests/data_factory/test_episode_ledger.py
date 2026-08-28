@@ -349,6 +349,68 @@ class EpisodeLedgerTest(unittest.TestCase):
         )
         self.assertEqual(ledger, validate_episode_ledger(ledger))
 
+    def test_production_runtime_binding_is_scene_observed_and_fail_closed(self) -> None:
+        def runtime_artifacts(
+            suffix: str, *, schema: str = "data_factory.production_episode_binding.v1",
+            disposition: str = "PRODUCTION", initialization=None,
+            observation=digest("production-scene-observation"),
+        ):
+            artifacts = self._artifacts(suffix=suffix)
+            runtime = json.loads(
+                Path(artifacts["runtime_binding"]["artifact_path"]).read_text(encoding="utf-8")
+            )
+            runtime.update(
+                schema_version=schema,
+                data_disposition=disposition,
+                state_initialization_digest=initialization,
+                scene_observation_digest=observation,
+            )
+            runtime["binding_digest"] = digest({
+                key: value for key, value in runtime.items() if key != "binding_digest"
+            })
+            artifacts["runtime_binding"] = self._json(
+                f"runtime-binding-{suffix}.json", runtime,
+            )
+            return artifacts
+
+        ledger = self._compile(runtime_artifacts("production"))
+        self.assertEqual(ledger, validate_episode_ledger(ledger))
+        self.assertEqual("NOT_AUTHORIZED", ledger["admission"]["training_status"])
+        self.assertEqual(
+            "NOT_AUTHORIZED",
+            project_episode_state(ledger=ledger)["review"]["training_status"],
+        )
+
+        cases = (
+            {
+                "suffix": "production-test-schema",
+                "schema": "data_factory.test_only_episode_binding.v1",
+                "disposition": "PRODUCTION",
+                "code": "EPISODE_LEDGER_RUNTIME_BINDING",
+            },
+            {
+                "suffix": "test-production-schema",
+                "schema": "data_factory.production_episode_binding.v1",
+                "disposition": "TEST_ONLY",
+                "code": "EPISODE_LEDGER_RUNTIME_BINDING",
+            },
+            {
+                "suffix": "production-initialization",
+                "initialization": digest("synthetic-initialization"),
+                "code": "EPISODE_LEDGER_RUNTIME_SCENE_SOURCE",
+            },
+            {
+                "suffix": "production-no-observation",
+                "observation": None,
+                "code": "EPISODE_LEDGER_RUNTIME_SCENE_SOURCE",
+            },
+        )
+        for case in cases:
+            case = dict(case)
+            code = case.pop("code")
+            with self.subTest(case=case["suffix"]), self.assertRaisesRegex(ContractError, code):
+                self._compile(runtime_artifacts(**case))
+
     def test_lerobot_v3_locator_is_canonical_confined_and_episode_bound(self) -> None:
         up = copy.deepcopy(self.episode_locator["videos"][0])
         side = {
@@ -610,6 +672,57 @@ class EpisodeLedgerTest(unittest.TestCase):
         self.assertEqual(current["retention"], reviewed["retention"])
         self.assertEqual("PASS", reviewed["review"]["semantic_status"])
         self.assertEqual("NOT_AUTHORIZED", reviewed["review"]["training_status"])
+
+    def test_runner_candidate_binding_updates_only_the_mutable_ledger_state(self) -> None:
+        run_dir = self.base / "run"
+        run_dir.mkdir()
+        ledger = self._compile(self._artifacts(suffix="runner-binding"))
+        ledger_path = run_dir / "episode_ledger.json"
+        state_path = run_dir / "episode_ledger_state.json"
+        candidate_path = run_dir / "candidate_admission.json"
+        ledger_path.write_text(json.dumps(ledger), encoding="utf-8")
+        initial = project_episode_state(ledger=ledger, reclaim_state="REPACK_REQUIRED")
+        state_path.write_text(json.dumps(initial), encoding="utf-8")
+        source = self._candidate(
+            ledger, name="runner-binding-candidate-source.json",
+        )
+        candidate_path.write_bytes(Path(source["artifact_path"]).read_bytes())
+        reference = {
+            "path": str(ledger_path), "state_path": str(state_path),
+            "ledger_digest": ledger["ledger_digest"],
+            "review_status": "NOT_MEASURED", "retention_state": "PRESERVE",
+            "reclaim_state": "REPACK_REQUIRED", "training_status": "NOT_AUTHORIZED",
+        }
+
+        pending = run_job.bind_candidate_episode_state(reference, candidate_path)
+        self.assertEqual(
+            (pending["review_status"], pending["retention_state"],
+             pending["reclaim_state"], pending["training_status"]),
+            ("PENDING", "PRESERVE", "REPACK_REQUIRED", "NOT_AUTHORIZED"),
+        )
+        unchanged_ledger = json.loads(ledger_path.read_text())
+        self.assertEqual(ledger, unchanged_ledger)
+        self.assertEqual(ledger, validate_episode_ledger(unchanged_ledger))
+
+        run_job.review_candidate_admission(
+            candidate_path,
+            expected_file_digest=digest(json.loads(candidate_path.read_text())),
+            expected_review_context_digest=ledger["admission"]["review_context_digest"],
+            checklist_id="pickup-v2", semantic_status="PASS",
+            reviewed_by="local-operator", reason=None,
+        )
+        reviewed = run_job.bind_candidate_episode_state(pending, candidate_path)
+        state = json.loads(state_path.read_text())
+        self.assertEqual(
+            (reviewed["review_status"], state["review"]["semantic_status"],
+             state["retention"]["reclaim_state"], state["review"]["training_status"]),
+            ("PASS", "PASS", "REPACK_REQUIRED", "NOT_AUTHORIZED"),
+        )
+
+        sibling = self.base / "candidate_admission.json"
+        sibling.write_bytes(candidate_path.read_bytes())
+        with self.assertRaisesRegex(ContractError, "EPISODE_LEDGER_REFERENCE"):
+            run_job.bind_candidate_episode_state(reviewed, sibling)
 
 
 if __name__ == "__main__":

@@ -78,7 +78,7 @@ class OneJobTest(unittest.TestCase):
                     "writer_queue_drops":0, "alignment_failures":0, "image_quality_warnings":[],
                 },
             }
-            response = {"schema_version":"data_factory.recorder_response.v1", "op_id":request["op_id"], "op":request["op"], "ok":not rejected, "state":"FROZEN" if rejected else item, "reason_code":item, "run_id":"run", "transaction_id":"tx", "episode_index":0, "metrics":metrics, "artifacts":{}, "detail":"", "writer_alive":True, "writer_error":None}
+            response = {"schema_version":"data_factory.recorder_response.v1", "op_id":request["op_id"], "op":request["op"], "ok":not rejected, "state":"FROZEN" if rejected else item, "reason_code":item, "run_id":"run", "transaction_id":"tx", "episode_index":0, "metrics":metrics, "artifacts":{}, "detail":"", "writer_alive":True, "writer_error":None, "sampler_alive":True}
             if request["op"] == "status" and status_mutation is not None:
                 status_mutation(response)
             return response
@@ -261,6 +261,35 @@ class OneJobTest(unittest.TestCase):
         with self.assertRaisesRegex(ContractError, "RECORDER_READINESS_CONTRACT"):
             OneJob(lambda _: None, lambda _: None, readiness_contract={})
 
+    def test_test_only_readiness_waits_for_writer_drain_without_lowering_quality(self):
+        statuses = [0]
+
+        def transient_writer(status):
+            statuses[0] += 1
+            metrics = status["metrics"]
+            metrics["rows"] = 60
+            quality = metrics["quality_snapshot"]
+            quality["frames"] = 60
+            if statuses[0] == 1:
+                metrics["writer_queue"] = 1
+                quality.update(
+                    accepted=False,
+                    reasons=["enqueue attempts 61 != rows+drops 60"],
+                )
+            else:
+                metrics["writer_queue"] = 0
+                quality.update(accepted=True, reasons=[])
+
+        job, calls = self.make(
+            ["RECORDING", "RECORDING"], ["PLANNED", "APPROVED", "EXECUTING"],
+            first_row_rows=60, readiness_contract=TEST_ONLY_READINESS_CONTRACT,
+            status_mutation=transient_writer,
+        )
+        self.prepare_and_start(job)
+        self.assertEqual(job.state, "EXECUTING")
+        self.assertEqual(calls.count(("recorder", "status")), 2)
+        self.assertEqual(calls.count(("executor", "execute")), 1)
+
     def test_production_start_does_not_trim_readiness_prefix(self):
         job, calls = self.make(["RECORDING"], ["PLANNED", "APPROVED", "EXECUTING"])
         self.prepare_and_start(job)
@@ -319,6 +348,7 @@ class OneJobTest(unittest.TestCase):
                 job.prepare(PLAN); job.approve(MOTION_APPROVAL)
                 result = job.start()
                 self.assertEqual((result["state"], result["code"]), ("ABORTED", code))
+                self.assertEqual(result["readiness_failure_evidence"]["code"], code)
                 self.assertEqual(job.transaction_id, "tx")
                 self.assertEqual(calls.count(("recorder", "abort")), 1)
                 self.assertEqual(calls.count(("executor", "execute")), 0)
@@ -374,7 +404,7 @@ class OneJobTest(unittest.TestCase):
         rejected = {"schema_version":"fr5.pickup_executor.response.v3", "mode":"PRE_LIVE", "op_id":"01-plan", "op":"plan", "ok":False, "code":"PLAN_NOT_COMPLETE", "run_id":None, "plan_digest":None, "state":"IDLE", "data":None}
         job, calls = self.make([], [rejected])
         self.assertEqual(job.prepare(PLAN)["code"], "PLAN_NOT_COMPLETE")
-        drift = {"schema_version":"data_factory.recorder_response.v1", "op_id":"06-status", "op":"status", "ok":True, "state":"RECORDING", "reason_code":"OK", "run_id":"other", "transaction_id":"other", "episode_index":0, "metrics":{}, "artifacts":{}, "detail":"", "writer_alive":True, "writer_error":None}
+        drift = {"schema_version":"data_factory.recorder_response.v1", "op_id":"06-status", "op":"status", "ok":True, "state":"RECORDING", "reason_code":"OK", "run_id":"other", "transaction_id":"other", "episode_index":0, "metrics":{}, "artifacts":{}, "detail":"", "writer_alive":True, "writer_error":None, "sampler_alive":True}
         job, calls = self.make(["RECORDING", drift, "ABORTED"], ["PLANNED", "APPROVED", "EXECUTING", "BLOCKED"])
         self.prepare_and_start(job); result = job.poll(); self.assertEqual((result["state"], result["code"]), ("BLOCKED", "RECORDER_BINDING"))
         self.assertNotIn(("recorder", "commit"), calls)
@@ -386,10 +416,16 @@ class OneJobTest(unittest.TestCase):
         self.assertNotIn(("recorder", "commit"), calls)
 
         failed_cancel = {"schema_version":"fr5.pickup_executor.response.v3", "mode":"LIVE", "op_id":"05-cancel", "op":"cancel", "ok":False, "code":"CANCEL_UNCONFIRMED", "run_id":"run", "plan_digest":None, "state":"EXECUTING", "data":{"cancel_error":"ROS_EXEC_CANCEL_ACK_TIMEOUT"}}
+        job, calls = self.make(["RECORDING", "ABORTED"], ["PLANNED", "APPROVED", "EXECUTING", failed_cancel])
+        self.prepare_and_start(job); result = job.cancel()
+        self.assertEqual((result["state"], result["recorder_state"]), ("BLOCKED", "ABORTED"))
+        self.assertEqual(calls.count(("recorder", "abort")), 1)
+        self.assertNotIn(("recorder", "preserve"), calls)
+
         job, calls = self.make(["RECORDING", "FROZEN"], ["PLANNED", "APPROVED", "EXECUTING", failed_cancel])
         self.prepare_and_start(job); result = job.cancel()
         self.assertEqual((result["state"], result["recorder_state"]), ("BLOCKED", "FROZEN"))
-        self.assertNotIn(("recorder", "abort"), calls)
+        self.assertEqual(calls.count(("recorder", "abort")), 1)
         self.assertIn(("recorder", "preserve"), calls)
 
     def test_precommit_safety_must_stay_exact_and_pass_before_commit(self):
@@ -455,8 +491,10 @@ class OneJobTest(unittest.TestCase):
         process = JsonlProcess([sys.executable, "-u", "-c", child])
         with process:
             process.preserve()
+            self.assertTrue(process.preserved)
         self.assertIsNone(process.process.poll())
         self.assertEqual(process.release(), 0)
+        self.assertFalse(process.preserved)
         job, calls = self.make(["RECORDING", "RECORDING", "RECORDING", "RECORDING", "RECORDING", "FROZEN", "FROZEN", "COMMITTED"], ["PLANNED", "APPROVED", "EXECUTING", "PRECONTACT_HUMAN", "PRECONTACT_HUMAN", "EXECUTING", "GRASP_VERDICT", "EXECUTING", "SEMANTIC_VERDICT", "EXECUTING", "COMPLETED"])
         decision_gate = threading.Event()
         def decide(state, _):
@@ -500,7 +538,7 @@ class OneJobTest(unittest.TestCase):
                 state = "FROZEN"
             else:
                 state = "RECORDING"
-            return {"schema_version":"data_factory.recorder_response.v1", "op_id":request["op_id"], "op":request["op"], "ok":True, "state":state, "reason_code":state, "run_id":"run", "transaction_id":"tx", "episode_index":0, "metrics":{}, "artifacts":{}, "detail":"", "writer_alive":True, "writer_error":None}
+            return {"schema_version":"data_factory.recorder_response.v1", "op_id":request["op_id"], "op":request["op"], "ok":True, "state":state, "reason_code":state, "run_id":"run", "transaction_id":"tx", "episode_index":0, "metrics":{}, "artifacts":{}, "detail":"", "writer_alive":True, "writer_error":None, "sampler_alive":True}
         stuck_recorder.preserve = lambda: preserved.append(True)
         def blocking_executor(request):
             calls.append(("executor", request["op"]))

@@ -33,6 +33,9 @@ from tools.data_factory.operator_setup import (
     build_test_only_root_binding,
     build_test_only_scene_observation_binding,
     build_test_only_start_binding,
+    build_production_root_binding,
+    build_production_runtime_episode_binding,
+    build_production_start_binding,
     compile_workspace_registration_candidate,
     gripper_setup_projection,
     initialize_test_only_state_from_user_declaration,
@@ -47,6 +50,10 @@ from tools.data_factory.operator_setup import (
     validate_test_only_planned_start,
     validate_test_only_state_initialization,
     validate_test_only_start_binding,
+    validate_production_root_binding,
+    validate_production_start_binding,
+    validate_runtime_episode_binding,
+    validate_runtime_planned_start,
     write_camera_binding_receipt,
 )
 from tools.data_factory.seed_campaign import SeedCampaign
@@ -86,8 +93,14 @@ def pose_snapshot(target: list[float], *, age: float = 0.05) -> dict:
 
 def compatible_start_fixture(
     *, collection_profile: dict | None = None,
+    start_target: list[float] | None = None,
+    start_tolerance: float | None = None,
+    qualification_source: str | None = None,
 ) -> tuple[dict, dict, dict]:
-    if collection_profile is None:
+    if qualification_source is not None:
+        fixed, report, resolvers, base_qualifications, poses, _ = qualification_inputs()
+        qualification_catalog = None
+    elif collection_profile is None:
         fixed, report, resolvers, base_qualifications, poses, _ = qualification_inputs()
         qualification_catalog = None
     else:
@@ -106,8 +119,14 @@ def compatible_start_fixture(
         grasp_profile_id=fixed["grasp_profile_id"],
         home_candidate_digest=canonical_digest(home),
     )
-    target = motion["qualified_safe_joint_positions_rad"]
-    tolerance = motion["goal_tolerances"]["joint_rad"]
+    target = (
+        motion["qualified_safe_joint_positions_rad"]
+        if start_target is None else start_target
+    )
+    tolerance = (
+        motion["goal_tolerances"]["joint_rad"]
+        if start_tolerance is None else start_tolerance
+    )
     for pose in poses:
         pose.update(
             robot_system_id=fixed["robot_system_id"],
@@ -117,7 +136,18 @@ def compatible_start_fixture(
             home_candidate_digest=canonical_digest(home),
         )
         redigest(pose, "qualification_digest")
-    if qualification_catalog is None:
+    if qualification_source is not None:
+        for item in (*base_qualifications, *poses):
+            item["source"] = qualification_source
+            redigest(item, "qualification_digest")
+        qualification_catalog = catalog(
+            fixed, report, resolvers, base_qualifications, poses,
+        )
+        qualification_catalog["source"] = qualification_source
+        redigest(qualification_catalog, "catalog_digest")
+    if qualification_source is not None:
+        pass
+    elif qualification_catalog is None:
         qualification_catalog = catalog(
             fixed, report, resolvers, base_qualifications, poses,
         )
@@ -141,6 +171,142 @@ def compatible_start_fixture(
 
 
 class OperatorSetupTests(unittest.TestCase):
+    def test_production_runtime_reuses_exact_bindings_without_synthetic_initialization(self):
+        contract, motion, home = compatible_start_fixture(
+            qualification_source="QUALIFICATION_ARTIFACT",
+        )
+        source = draft(contract, count=1)
+        manifest, receipt = compile_collection_campaign(source, hypothesis=contract)
+        slot = manifest["slots"][0]
+        base = next(
+            item for item in contract["base_conditions"]
+            if item["base_condition_digest"] == slot["base_condition_digest"]
+        )
+        resolved = next(
+            item for item in contract["resolver_receipts"]
+            if item["resolver_result_digest"] == base["resolver_result_digest"]
+        )
+        job = resolved["normalized_job"]
+        now = datetime.now(timezone.utc)
+        scene_digest = canonical_digest("production-scene-r001")
+        scene_evidence = {
+            "schema_version": "data_factory.scene_freshness_evidence.v1",
+            "scene_digest": scene_digest,
+            "observed_at": now.isoformat().replace("+00:00", "Z"),
+        }
+        scene_evidence["evidence_digest"] = canonical_digest(scene_evidence)
+
+        with tempfile.TemporaryDirectory() as directory:
+            repository = Path(directory).resolve()
+            dataset = repository / "datasets/fr5_episodes/fr5-campaign-r001"
+            roots = build_production_root_binding(
+                repository, session_id="session-r001", run_id="run-r001",
+                dataset_root=dataset,
+            )
+            self.assertEqual(
+                roots,
+                validate_production_root_binding(roots, repository_root=repository),
+            )
+            self.assertTrue(roots["production_writers_enabled"])
+            self.assertEqual(list(repository.iterdir()), [])
+
+            dataset.mkdir(parents=True)
+            next_roots = build_production_root_binding(
+                repository, session_id="session-r001", run_id="run-r002",
+                dataset_root=dataset,
+            )
+            self.assertEqual(next_roots["dataset_root"], roots["dataset_root"])
+
+            start = build_production_start_binding(
+                manifest=manifest, hypothesis=contract,
+                motion_qualification=motion, home_candidate=home,
+                current_snapshot=pose_snapshot(
+                    motion["qualified_safe_joint_positions_rad"],
+                ),
+            )
+            self.assertEqual(
+                start,
+                validate_production_start_binding(
+                    start, manifest=manifest, hypothesis=contract,
+                ),
+            )
+            campaign = SeedCampaign(
+                manifest=manifest, hypothesis=contract,
+                lifecycle_owner="TEST_OPERATOR",
+                expires_at="2099-01-01T00:00:00Z",
+                initial_scene_digest=scene_digest,
+                source_draft=source, compilation_receipt=receipt,
+                clock=lambda: now,
+            )
+            intent = campaign.start_intent(
+                owner="TEST_OPERATOR", run_id=roots["run_id"],
+                lifecycle=SimpleNamespace(state="IDLE"),
+                scene_evidence=scene_evidence,
+            )
+            episode = build_production_runtime_episode_binding(
+                roots=roots, repository_root=repository, manifest=manifest,
+                hypothesis=contract, intent=intent, start_binding=start,
+                resolved_job=resolved, place_alias="place1",
+                scene_binding={
+                    "scene_state_digest": scene_digest,
+                    "revision": 1,
+                    "object_instance_id": "object-r001",
+                },
+                scene_evidence=scene_evidence, observed_by="test-operator",
+                clock=lambda: now,
+            )
+            self.assertEqual(episode["schema_version"], "data_factory.production_episode_binding.v1")
+            self.assertIsNone(episode["state_initialization_digest"])
+            self.assertIsNotNone(episode["scene_observation_digest"])
+            self.assertEqual(
+                episode,
+                validate_runtime_episode_binding(
+                    episode, roots=roots, normalized_job=resolved,
+                ),
+            )
+
+            bindings = {
+                "motion_qualification": start["motion_qualification_digest"],
+                "home_candidate": start["home_candidate_digest"],
+            }
+            planned = validate_runtime_planned_start(
+                start_binding=start, episode_binding=episode,
+                motion_program={
+                    "binding_digests": bindings,
+                    "planning": {"max_joint_state_age_s": start["max_snapshot_age_s"]},
+                },
+                plan={
+                    "binding_digests": bindings,
+                    "initial_joint_state": list(start["target_rad"]),
+                },
+            )
+            self.assertEqual(
+                planned["schema_version"],
+                "data_factory.production_planned_start_evidence.v1",
+            )
+
+            forged = {**episode, "data_disposition": "TEST_ONLY"}
+            forged["binding_digest"] = canonical_digest({
+                key: value for key, value in forged.items() if key != "binding_digest"
+            })
+            with self.assertRaises(ContractError):
+                validate_runtime_episode_binding(
+                    forged, roots=roots, normalized_job=resolved,
+                )
+
+        synthetic, synthetic_motion, synthetic_home = compatible_start_fixture()
+        synthetic_manifest, _ = compile_collection_campaign(
+            draft(synthetic, count=1), hypothesis=synthetic,
+        )
+        with self.assertRaisesRegex(ContractError, "PRODUCTION_START_BINDING"):
+            build_production_start_binding(
+                manifest=synthetic_manifest, hypothesis=synthetic,
+                motion_qualification=synthetic_motion, home_candidate=synthetic_home,
+                current_snapshot=pose_snapshot(
+                    synthetic_motion["qualified_safe_joint_positions_rad"],
+                ),
+            )
+
     def test_episode_binding_joins_intent_start_scene_job_and_budgets(self):
         contract, motion, home = compatible_start_fixture()
         source = draft(contract, count=1)
@@ -354,6 +520,51 @@ class OperatorSetupTests(unittest.TestCase):
                 manifest=manifest, hypothesis=contract,
                 motion_qualification=wrong_motion, home_candidate=home,
                 current_snapshot=pose_snapshot(target),
+            )
+
+    def test_named_start_uses_slot_qualification_instead_of_home_target(self):
+        home_target = load(
+            "config/data_factory/motion_qualifications/fr5-place-a-wood-cube-r001.json"
+        )["qualified_safe_joint_positions_rad"]
+        named_target = [item + 0.05 for item in home_target]
+        contract, motion, home = compatible_start_fixture(
+            start_target=named_target, start_tolerance=0.005,
+        )
+        manifest, _ = compile_collection_campaign(
+            draft(contract, count=1), hypothesis=contract,
+        )
+        binding = build_test_only_start_binding(
+            manifest=manifest, hypothesis=contract,
+            motion_qualification=motion, home_candidate=home,
+            current_snapshot=pose_snapshot(named_target),
+        )
+        self.assertEqual(binding["target_rad"], named_target)
+        self.assertEqual(binding["tolerance_rad"], 0.005)
+        self.assertNotEqual(binding["target_rad"], motion["qualified_safe_joint_positions_rad"])
+        self.assertEqual(
+            binding,
+            validate_test_only_start_binding(
+                binding, manifest=manifest, hypothesis=contract,
+            ),
+        )
+        for field, value in (
+            ("target_rad", [named_target[0] + 0.001, *named_target[1:]]),
+            ("tolerance_rad", 0.006),
+        ):
+            forged = copy.deepcopy(binding)
+            forged[field] = value
+            redigest(forged, "binding_digest")
+            with self.subTest(field=field), self.assertRaisesRegex(
+                ContractError, "TEST_ONLY_START_BINDING",
+            ):
+                validate_test_only_start_binding(
+                    forged, manifest=manifest, hypothesis=contract,
+                )
+        with self.assertRaisesRegex(ContractError, "TEST_ONLY_START_OUTSIDE_HOME"):
+            build_test_only_start_binding(
+                manifest=manifest, hypothesis=contract,
+                motion_qualification=motion, home_candidate=home,
+                current_snapshot=pose_snapshot(home_target),
             )
 
     def test_planned_start_rechecks_fresh_executor_state_and_binds_evidence(self):
