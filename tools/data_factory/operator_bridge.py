@@ -80,6 +80,17 @@ def _forbidden(value: object) -> bool:
     return False
 
 
+class UnlockedIntent:
+    """One intent reserved under the CAS lock and executed outside it."""
+
+    def __init__(self, *, run, complete, failed):
+        if not all(callable(call) for call in (run, complete, failed)):
+            raise ContractError("OPERATOR_CORE_CALLABLE")
+        self.run = run
+        self.complete = complete
+        self.failed = failed
+
+
 class OperatorIntentCore:
     """Atomic projection/CAS facade around existing owner callbacks."""
 
@@ -186,22 +197,73 @@ class OperatorIntentCore:
             if not isinstance(payload, dict) or _forbidden(payload):
                 raise ContractError("OPERATOR_INTENT_AUTHORITY")
             result = self.handlers[op](copy.deepcopy(payload), current)
-            if not isinstance(result, Mapping):
+            if not isinstance(result, (Mapping, UnlockedIntent)):
                 raise ContractError("OPERATOR_INTENT_RESULT")
             self._consumed.add(intent_id)
             self._revision += 1
-            latest = self._snapshot_locked(observe_external=False)
-            return {
-                "schema_version": RESULT_SCHEMA,
-                "ok": True,
-                "code": "INTENT_CONSUMED",
-                "consumed": True,
-                "intent_id": intent_id,
-                "op": op,
-                "result": copy.deepcopy(dict(result)),
-                "current_view_revision": latest["revision"],
-                "current_view_digest": latest["view_digest"],
-            }
+            if isinstance(result, UnlockedIntent):
+                self._snapshot_locked(observe_external=False)
+            else:
+                latest = self._snapshot_locked(observe_external=False)
+                return self._result(intent_id, op, result, latest)
+
+        produced = None
+        cleanup = None
+        try:
+            produced = result.run()
+            with self._lock:
+                completed = result.complete(produced)
+                if (
+                    not isinstance(completed, tuple)
+                    or len(completed) != 3
+                    or not isinstance(completed[0], Mapping)
+                    or type(completed[1]) is not bool
+                    or completed[2] is not None and not callable(completed[2])
+                ):
+                    raise ContractError("OPERATOR_INTENT_RESULT")
+                response, changed, cleanup = completed
+                if changed:
+                    self._revision += 1
+                latest = self._snapshot_locked(observe_external=False)
+        except BaseException as exc:
+            with self._lock:
+                failed = result.failed(exc, produced)
+                if (
+                    not isinstance(failed, tuple)
+                    or len(failed) != 2
+                    or type(failed[0]) is not bool
+                    or failed[1] is not None and not callable(failed[1])
+                ):
+                    raise ContractError("OPERATOR_INTENT_RESULT") from exc
+                changed, cleanup = failed
+                if changed:
+                    self._revision += 1
+                self._snapshot_locked(observe_external=False)
+            if cleanup is not None:
+                try:
+                    cleanup()
+                except Exception:
+                    pass
+            raise
+        if cleanup is not None:
+            cleanup()
+        return self._result(intent_id, op, response, latest)
+
+    @staticmethod
+    def _result(
+        intent_id: str, op: str, result: Mapping[str, Any], latest: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        return {
+            "schema_version": RESULT_SCHEMA,
+            "ok": True,
+            "code": "INTENT_CONSUMED",
+            "consumed": True,
+            "intent_id": intent_id,
+            "op": op,
+            "result": copy.deepcopy(dict(result)),
+            "current_view_revision": latest["revision"],
+            "current_view_digest": latest["view_digest"],
+        }
 
 
 class ButtonDecisionPort:

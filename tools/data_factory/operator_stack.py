@@ -1,13 +1,14 @@
 """Foreground-only owner reuse for operator laptop bringup.
 
-This module is called explicitly by setup code.  It has no thread, timer, recorder
-hook, control callback, robot motion, or readiness authority.
+This module is called explicitly by setup code.  It has no background thread,
+timer, recorder hook, control callback, robot motion, or readiness authority.
 """
 from __future__ import annotations
 
 import copy
 import os
 import subprocess
+from concurrent.futures import ThreadPoolExecutor
 from collections.abc import Callable, Mapping
 
 from tools.fr5_data_factory import ContractError, SAFE_ID
@@ -175,7 +176,7 @@ class OperatorStack:
         if "READY" in motion_states and "MISSING" in motion_states and not motion_active:
             raise ContractError("OPERATOR_STACK_PARTIAL_OWNER", "robot")
 
-    def _start(self, name: str) -> None:
+    def _start(self, name: str) -> dict[str, object]:
         spec = self.commands[name]
         try:
             process = self.process_factory(spec["argv"])
@@ -194,10 +195,46 @@ class OperatorStack:
             "stop_failed": False,
             "unexpected_exit": False,
         }
-        self._children[name] = record
-        code = self._measure(record)
-        if code is not None:
-            raise ContractError("OPERATOR_STACK_CHILD_EXITED", f"{name}:{code}")
+        return record
+
+    def _start_names(self, names: list[str]) -> list[str]:
+        """Start independent foreground owners together, preserving command order."""
+        if not names:
+            return []
+        records: dict[str, dict[str, object]] = {}
+        errors: dict[str, Exception] = {}
+        with ThreadPoolExecutor(max_workers=len(names)) as executor:
+            futures = {name: executor.submit(self._start, name) for name in names}
+            for name in names:
+                try:
+                    records[name] = futures[name].result()
+                except Exception as exc:
+                    errors[name] = exc
+        for name in names:
+            record = records.get(name)
+            if record is None:
+                continue
+            self._children[name] = record
+            code = self._measure(record)
+            if code is not None and name not in errors:
+                errors[name] = ContractError(
+                    "OPERATOR_STACK_CHILD_EXITED", f"{name}:{code}",
+                )
+        if errors:
+            raise errors[next(name for name in names if name in errors)]
+        return names
+
+    def _unexpected_exit(self) -> str | None:
+        for name, record in self._children.items():
+            self._measure(record)
+            if record["unexpected_exit"] and not record["stop_requested"]:
+                return name
+        return None
+
+    def _require_children_live(self) -> None:
+        failed = self._unexpected_exit()
+        if failed is not None:
+            raise ContractError("OPERATOR_STACK_CHILD_EXITED", failed)
 
     def _stop_record(self, record: dict[str, object]) -> bool:
         record["stop_requested"] = True
@@ -223,10 +260,12 @@ class OperatorStack:
 
     def ensure(self) -> dict[str, object]:
         """Reuse positive owners and start each wholly missing configured child once."""
+        self._require_children_live()
         facts = self._facts()
         self._validate_observation(facts)
         started: list[str] = []
         try:
+            missing: list[str] = []
             for name, spec in self.commands.items():
                 if self._active(name) is not None:
                     continue
@@ -238,8 +277,13 @@ class OperatorStack:
                     continue
                 if not all(state == "MISSING" for state in states):
                     raise ContractError("OPERATOR_STACK_PARTIAL_OWNER", name)
-                self._start(name)
-                started.append(name)
+                missing.append(name)
+
+            try:
+                started = self._start_names(missing)
+            except Exception:
+                started = [name for name in missing if name in self._children]
+                raise
 
             uncovered = [
                 component for component in COMPONENTS
@@ -262,6 +306,7 @@ class OperatorStack:
         """Run the injected setup-only callback after proving one motion owner."""
         if self.gripper_setup is None:
             raise ContractError("OPERATOR_STACK_GRIPPER_SETUP_UNAVAILABLE")
+        self._require_children_live()
         facts = self._facts()
         if any(facts[name]["state"] == "AMBIGUOUS" for name in COMPONENTS):
             raise ContractError("OPERATOR_STACK_AMBIGUOUS")
@@ -315,6 +360,8 @@ class OperatorStack:
 
     def status(self) -> dict[str, object]:
         """Measure child exits and discovery once; no background polling is used."""
+        if self._unexpected_exit() is not None:
+            return self._snapshot(self._last_facts)
         return self._snapshot(self._facts())
 
     def _snapshot(self, facts: dict[str, dict[str, object]] | None) -> dict[str, object]:

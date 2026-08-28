@@ -10,6 +10,21 @@ HEIGHT="${CAMERA_HEIGHT:-480}"
   exit 2
 }
 
+arguments=("$@")
+for ((index = 0; index < ${#arguments[@]}; index += 3)); do
+  role="${arguments[index]}"
+  kind="${arguments[index + 1]}"
+  endpoint="${arguments[index + 2]}"
+  [[ "$role" =~ ^[A-Za-z0-9_.-]+$ && -n "$endpoint" ]] || {
+    echo "invalid camera role or capture endpoint" >&2
+    exit 2
+  }
+  [[ "$kind" == UVC || "$kind" == REALSENSE ]] || {
+    echo "unsupported camera kind: $kind" >&2
+    exit 2
+  }
+done
+
 pids=()
 cleanup() {
   ((${#pids[@]})) && kill "${pids[@]}" 2>/dev/null || true
@@ -33,10 +48,6 @@ while (($#)); do
         REALSENSE_FPS="$FPS" REALSENSE_WIDTH="$WIDTH" \
         REALSENSE_HEIGHT="$HEIGHT" \
         "$ROOT/scripts/start_realsense_camera.sh" &
-      ;;
-    *)
-      echo "unsupported camera kind: $kind" >&2
-      exit 2
       ;;
   esac
   pids+=("$!")

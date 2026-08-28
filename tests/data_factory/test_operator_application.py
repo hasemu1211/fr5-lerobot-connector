@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+import threading
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -431,6 +432,157 @@ class CollectionOperatorApplicationTests(unittest.TestCase):
         self.assertEqual(view["environment"], blocked)
         self.assertEqual(view["runtime"]["workflow_state"], "BLOCKED")
         self.assertEqual(view["available_ops"], [])
+
+    def test_prepare_generation_keeps_get_live_and_discards_stale_owner_once(self):
+        owners = [
+            {
+                "started": threading.Event(), "release": threading.Event(),
+                "closed": 0,
+            }
+            for _ in range(2)
+        ]
+        for owner in owners:
+            self.addCleanup(owner["release"].set)
+        owner_sequence = iter(owners)
+
+        def owner_call():
+            owner = next(owner_sequence)
+
+            def run():
+                owner["started"].set()
+                owner["release"].wait()
+                ready = copy.deepcopy(self.environment)
+                ready["state"] = "READY"
+                ready["components"] = {
+                    name: {
+                        "state": "READY", "owner": f"owner-{name}",
+                        "reason": "ATTACHED",
+                    }
+                    for name in ready["components"]
+                }
+                return ready
+
+            def close():
+                owner["closed"] += 1
+
+            return run, close
+
+        self.application.prepare_environment_owner_call = owner_call
+        results = []
+        first_view = self.application.bridge_core.snapshot()
+        first = threading.Thread(target=lambda: results.append(
+            self.application.bridge_core.consume(
+                intent(first_view, "prepare_environment", {}, "generation-one"),
+            )["result"],
+        ))
+        first.start()
+        self.assertTrue(owners[0]["started"].wait(1))
+
+        snapshots = []
+        snapshot_done = threading.Event()
+
+        def snapshot():
+            snapshots.append(self.application.bridge_core.snapshot())
+            snapshot_done.set()
+
+        snapshot_thread = threading.Thread(target=snapshot)
+        snapshot_thread.start()
+        self.assertTrue(snapshot_done.wait(0.2))
+        snapshot_thread.join(1)
+        preparing = snapshots[0]
+        generation_one = preparing["projection"]["technical_details"][
+            "preparation_generation"
+        ]
+        self.assertEqual(preparing["projection"]["runtime"]["workflow_state"], "PREPARING")
+        self.assertEqual(preparing["projection"]["available_ops"], ["cancel_session"])
+
+        cancelled = self.application.bridge_core.consume(
+            intent(preparing, "cancel_session", {}, "cancel-generation-one"),
+        )["result"]
+        self.assertEqual(cancelled, {"outcome": "CANCELLED"})
+        self.assertEqual(owners[0]["closed"], 1)
+
+        second_view = self.application.bridge_core.snapshot()
+        second = threading.Thread(target=lambda: results.append(
+            self.application.bridge_core.consume(
+                intent(second_view, "prepare_environment", {}, "generation-two"),
+            )["result"],
+        ))
+        second.start()
+        self.assertTrue(owners[1]["started"].wait(1))
+        preparing_two = self.application.bridge_core.snapshot()
+        self.assertNotEqual(
+            preparing_two["projection"]["technical_details"]["preparation_generation"],
+            generation_one,
+        )
+
+        owners[0]["release"].set()
+        first.join(1)
+        self.assertFalse(first.is_alive())
+        self.assertEqual(results[0], {"outcome": "STALE", "generation": generation_one})
+        self.assertEqual(owners[0]["closed"], 1)
+        self.assertEqual(
+            self.application.bridge_core.snapshot()["projection"]["runtime"]["workflow_state"],
+            "PREPARING",
+        )
+
+        owners[1]["release"].set()
+        second.join(1)
+        self.assertFalse(second.is_alive())
+        self.assertEqual(results[1]["outcome"], "READY")
+        self.assertEqual(owners[1]["closed"], 0)
+        self.assertEqual(
+            self.application.bridge_core.snapshot()["projection"]["environment"]["state"],
+            "READY",
+        )
+
+    def test_prepare_exception_and_close_cleanup_each_owner_once(self):
+        closed = []
+
+        def failed_owner():
+            return (
+                lambda: (_ for _ in ()).throw(RuntimeError("prepare failed")),
+                lambda: closed.append("failed"),
+            )
+
+        self.application.prepare_environment_owner_call = failed_owner
+        with self.assertRaisesRegex(RuntimeError, "prepare failed"):
+            self.consume("prepare_environment", {}, "prepare-exception")
+        self.assertEqual(closed, ["failed"])
+        self.assertEqual(
+            self.application.bridge_core.snapshot()["projection"]["available_ops"],
+            ["prepare_environment"],
+        )
+
+        started = threading.Event()
+        release = threading.Event()
+        self.addCleanup(release.set)
+
+        def blocked_owner():
+            def run():
+                started.set()
+                release.wait()
+                return copy.deepcopy(self.environment)
+            return run, lambda: closed.append("closed")
+
+        self.application.prepare_environment_owner_call = blocked_owner
+        view = self.application.bridge_core.snapshot()
+        result = []
+        worker = threading.Thread(target=lambda: result.append(
+            self.application.bridge_core.consume(
+                intent(view, "prepare_environment", {}, "prepare-close"),
+            )["result"],
+        ))
+        worker.start()
+        self.assertTrue(started.wait(1))
+        self.application.close()
+        self.application.close()
+        self.assertEqual(closed, ["failed", "closed"])
+        release.set()
+        worker.join(1)
+        self.assertFalse(worker.is_alive())
+        self.assertEqual(result[0]["outcome"], "STALE")
+        self.assertEqual(closed, ["failed", "closed"])
 
     def test_physical_home_recovery_is_explicit_and_does_not_create_campaign(self):
         ready = self.application.prepare_environment_call()

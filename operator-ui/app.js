@@ -426,13 +426,30 @@ function renderCameraSetup(view) {
   const editable = canIntent("update_camera_bindings");
   const availableRoles = setup.available_roles ?? CAMERA_ROLES.map(([role]) => role);
   document.querySelector("#camera-profile-label").textContent = setup.profile_label || "녹화 설정 결정 전";
-  const deviceRows = setup.devices.length ? setup.devices.map((device, index) => {
+  const deviceRow = (device, index) => {
     const selected = setup.bindings[device.logical_id];
     const options = CAMERA_ROLES.filter(([role]) => availableRoles.includes(role)).map(([role, label]) => `<option value="${role}" ${role === selected ? "selected" : ""}>${label}</option>`).join("");
     const status = {CONNECTED: "연결됨", CONNECTING: "연결 중", DISCONNECTED: "연결 안 됨"}[device.status] ?? "상태 확인 필요";
     return `<div class="camera-role-row"><span class="camera-lens" aria-hidden="true"></span><div><strong>${escapeHtml(device.label || `카메라 ${index + 1}`)}</strong><small>${status}</small></div><label>사용 위치<select data-camera-logical-id="${escapeHtml(device.logical_id)}" aria-label="${escapeHtml(device.label)} 사용 위치" ${editable ? "" : "disabled"}>${options}</select></label></div>`;
-  }).join("") : '<p class="empty-camera">연결된 카메라가 없습니다.</p>';
-  document.querySelector("#camera-role-list").innerHTML = deviceRows + recoveryCard;
+  };
+  const roleList = document.querySelector("#camera-role-list");
+  const focusedSelect = document.activeElement?.matches?.("#camera-role-list select[data-camera-logical-id]") ? document.activeElement : null;
+  const focusedIndex = focusedSelect ? setup.devices.findIndex((device) => device.logical_id === focusedSelect.dataset.cameraLogicalId) : -1;
+  const preserveFocused = editable && focusedIndex >= 0 && availableRoles.includes(focusedSelect.value);
+  if (!preserveFocused) {
+    roleList.innerHTML = (setup.devices.length ? setup.devices.map(deviceRow).join("") : '<p class="empty-camera">연결된 카메라가 없습니다.</p>') + recoveryCard;
+  } else {
+    const focusedRow = focusedSelect.closest(".camera-role-row");
+    const device = setup.devices[focusedIndex];
+    focusedRow.querySelector("strong").textContent = device.label || `카메라 ${focusedIndex + 1}`;
+    focusedRow.querySelector("small").textContent = {CONNECTED: "연결됨", CONNECTING: "연결 중", DISCONNECTED: "연결 안 됨"}[device.status] ?? "상태 확인 필요";
+    focusedSelect.setAttribute("aria-label", `${device.label} 사용 위치`);
+    focusedSelect.innerHTML = CAMERA_ROLES.filter(([role]) => availableRoles.includes(role)).map(([role, label]) => `<option value="${role}">${label}</option>`).join("");
+    focusedSelect.value = setup.bindings[device.logical_id];
+    [...roleList.children].filter((row) => row !== focusedRow).forEach((row) => row.remove());
+    setup.devices.slice(0, focusedIndex).forEach((item, index) => focusedRow.insertAdjacentHTML("beforebegin", deviceRow(item, index)));
+    setup.devices.slice(focusedIndex + 1).forEach((item, index) => roleList.insertAdjacentHTML("beforeend", deviceRow(item, focusedIndex + index + 1)));
+  }
   const assigned = new Set(Object.values(setup.bindings));
   const missing = setup.required_roles.filter((role) => !assigned.has(role));
   const used = [...assigned].filter((role) => role !== "UNUSED").map((role) => CAMERA_ROLES.find(([id]) => id === role)?.[1] ?? role);

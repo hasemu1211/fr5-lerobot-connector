@@ -2355,8 +2355,10 @@ feedback:
         with tempfile.TemporaryDirectory() as root:
             harness = Harness(root)
             release = threading.Event()
+            episode_started = threading.Event()
 
             def slow_episode(*args):
+                episode_started.set()
                 release.wait()
                 return harness.episode(*args)
 
@@ -2375,25 +2377,20 @@ feedback:
                     "outcome": "RUNNING",
                     "active_child_id": "physical-console-r001-run-0",
                 })
-                qualification = json.loads((
-                    Path(__file__).resolve().parents[2]
-                    / "config/data_factory/motion_qualifications/fr5-place-a-wood-cube-r001.json"
-                ).read_text())
-                contract_bound_s = (
-                    10.0
-                    + sum(
-                        float(limit.get("planning_timeout_s", 0.0))
-                        for limit in qualification["phase_limits"].values()
-                    )
-                    + 2 * 8.0
-                )
-                observation_window_s = 8.05
-                self.assertLess(observation_window_s, contract_bound_s)
-                started = time.monotonic()
-                self.assertFalse(release.wait(observation_window_s))
-                self.assertGreaterEqual(time.monotonic() - started, 8.0)
+                self.assertTrue(episode_started.wait(1.0))
+                snapshots = []
+                snapshot_done = threading.Event()
 
-                projection = console.bridge_core.snapshot()["projection"]
+                def snapshot():
+                    snapshots.append(console.bridge_core.snapshot()["projection"])
+                    snapshot_done.set()
+
+                snapshot_thread = threading.Thread(target=snapshot)
+                snapshot_thread.start()
+                self.assertTrue(snapshot_done.wait(0.2))
+                snapshot_thread.join(1.0)
+                self.assertFalse(snapshot_thread.is_alive())
+                projection = snapshots[0]
                 self.assertEqual(projection["runtime"]["workflow_state"], "RUNNING")
                 self.assertEqual(harness.operator_counters["physical_factory"], 1)
                 self.assertEqual(len(harness.children), 1)

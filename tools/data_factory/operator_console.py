@@ -3458,6 +3458,9 @@ def build_physical_operator_application(
     camera_environment_call: Callable[
         [Mapping[str, Any] | None, Mapping[str, Mapping[str, str]]], Mapping[str, Any]
     ] | None = None,
+    prepare_environment_owner_call: Callable[
+        [], tuple[Callable[[], Mapping[str, Any]], Callable[[], None]]
+    ] | None = None,
     clock=None,
 ) -> tuple[CollectionOperatorApplication, dict[str, Any]]:
     """Compose the reusable app without creating campaign roots or run state."""
@@ -4128,6 +4131,7 @@ def build_physical_operator_application(
         initial_selection=selection,
         environment_call=environment_call,
         prepare_environment_call=prepare_environment_call,
+        prepare_environment_owner_call=prepare_environment_owner_call,
         campaign_factory=campaign_factory,
         workspace_manager_factory=workspace_manager_factory,
         workspace_snapshot_call=workspace_snapshot_call,
@@ -4297,6 +4301,21 @@ def main(argv=None) -> int:
             environment_holder["active"] = pending
             return pending.prepare_environment()
 
+        def prepare_environment_owner_call():
+            pending = environment_holder["pending"]
+            if pending is None:
+                return (lambda: copy.deepcopy(blocked), lambda: None)
+            environment_holder["active"] = pending
+
+            def close_owned_environment() -> None:
+                pending.stop()
+                if environment_holder["pending"] is pending:
+                    environment_holder["pending"] = None
+                if environment_holder["active"] is pending:
+                    environment_holder["active"] = None
+
+            return pending.prepare_environment, close_owned_environment
+
         if initial_resolution is None:
             prepared = copy.deepcopy(blocked)
         else:
@@ -4323,6 +4342,7 @@ def main(argv=None) -> int:
             discovery_call=discover_camera_devices,
             environment_call=environment_call,
             prepare_environment_call=prepare_environment_call,
+            prepare_environment_owner_call=prepare_environment_owner_call,
             initial_environment=prepared,
             initial_catalog=catalog,
             initial_camera_devices=camera_descriptors,

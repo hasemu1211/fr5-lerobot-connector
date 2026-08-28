@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import subprocess
+import threading
 import unittest
 
 from tools.data_factory.operator_stack import OperatorStack
@@ -132,6 +133,24 @@ class OperatorStackTests(unittest.TestCase):
         self.assertEqual(robot.terminate_calls, 1)
         self.assertEqual(robot.kill_calls, 0)
         self.assertEqual(stack.status()["children"]["robot_stack"]["returncode"], -15)
+
+    def test_parallel_start_failure_cleans_up_a_distinct_running_sibling(self):
+        robot = FakeProcess()
+        camera_started = threading.Event()
+
+        def factory(argv):
+            if "real_robot.launch.py" in argv:
+                self.assertTrue(camera_started.wait(1.0))
+                return robot
+            camera_started.set()
+            raise OSError("camera failed")
+
+        stack = OperatorStack(COMMANDS, discover=facts, process_factory=factory)
+        with self.assertRaises(ContractError) as caught:
+            stack.ensure()
+
+        self.assertEqual(caught.exception.code, "OPERATOR_STACK_START")
+        self.assertEqual((robot.terminate_calls, robot.kill_calls), (1, 0))
 
     def test_stop_timeout_escalates_to_kill_with_the_same_bound(self):
         camera = FakeProcess(terminate_timeouts=1)

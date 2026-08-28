@@ -293,7 +293,11 @@ def build_physical_operator_environment(
     spawn = process_factory or _default_process(repository)
     if not callable(spawn):
         raise ContractError("OPERATOR_PHYSICAL_ENVIRONMENT_INPUT")
-    owned_started = {"motion": False, "camera": False}
+    owned_children: dict[str, object] = {}
+
+    def owned_running(name: str) -> bool:
+        process = owned_children.get(name)
+        return process is not None and process.poll() is None
 
     def nodes() -> set[str]:
         return {
@@ -428,7 +432,7 @@ def build_physical_operator_environment(
                     },
                 }
             else:
-                state = "MISSING" if owned_started["motion"] else "AMBIGUOUS"
+                state = "MISSING" if owned_running("motion") else "AMBIGUOUS"
                 motion = {
                     name: {"state": state, "owner": None}
                     for name in ("robot", "controller", "gripper")
@@ -448,6 +452,10 @@ def build_physical_operator_environment(
             "MISSING" if not camera_states
             else "READY" if all(item == "READY" for item in camera_states)
             else "MISSING" if all(item == "MISSING" for item in camera_states)
+            else "MISSING" if (
+                owned_running("camera")
+                and set(camera_states) <= {"READY", "MISSING"}
+            )
             else "AMBIGUOUS"
         )
         motion["camera"] = {
@@ -459,9 +467,9 @@ def build_physical_operator_environment(
     def tracked_spawn(argv: tuple[str, ...]) -> object:
         process = spawn(argv)
         if "real_robot.launch.py" in argv:
-            owned_started["motion"] = True
+            owned_children["motion"] = process
         elif str(repository / "scripts/start_camera_group.sh") in argv:
-            owned_started["camera"] = True
+            owned_children["camera"] = process
         return process
 
     commands = {

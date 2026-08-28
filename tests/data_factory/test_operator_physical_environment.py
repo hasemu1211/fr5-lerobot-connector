@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import signal
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import Mock, patch
@@ -59,7 +60,7 @@ class FakeProcess:
         state[kind] = True
 
     def poll(self):
-        return self.returncode
+        return self.state.get(f"{self.kind}_returncode", self.returncode)
 
     def terminate(self):
         self.returncode = -15
@@ -124,6 +125,8 @@ class PhysicalEnvironmentTests(unittest.TestCase):
             return set(partial_camera_roles or ())
 
         def command(argv):
+            if state.get("query_forbidden"):
+                raise AssertionError("owned child liveness must precede ROS discovery")
             if argv == ("ros2", "node", "list", "--no-daemon"):
                 nodes = []
                 if external_command_server or state["maintenance"]:
@@ -374,6 +377,26 @@ class PhysicalEnvironmentTests(unittest.TestCase):
 
             self.assertEqual(environment.prepare_environment()["state"], "BLOCKED")
             self.assertEqual(calls, {"process": [], "maintenance": []})
+
+    def test_nested_camera_child_exit_projects_before_discovery_within_two_seconds(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.make_uvc_links(root)
+            state = {"maintenance": False, "robot": False, "camera": False}
+            environment, _calls = self.build(root, state)
+            self.assertEqual(environment.prepare_environment()["state"], "READY")
+            state["camera_returncode"] = 17
+            state["query_forbidden"] = True
+
+            started = time.monotonic()
+            projected = environment.projection()
+
+            self.assertLess(time.monotonic() - started, 2.0)
+            self.assertEqual(projected["state"], "BLOCKED")
+            self.assertEqual(
+                {item["reason"] for item in projected["components"].values()},
+                {"OPERATOR_STACK_CHILD_EXITED"},
+            )
 
     def test_missing_realsense_serial_blocks_before_starting_any_process(self):
         with tempfile.TemporaryDirectory() as directory:

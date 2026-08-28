@@ -7,9 +7,15 @@ existing single-owner chain.
 from __future__ import annotations
 
 import copy
+import threading
+from datetime import datetime, timezone
 from typing import Any, Callable, Mapping
 
-from tools.data_factory.operator_bridge import INTENT_SCHEMA, OperatorIntentCore
+from tools.data_factory.operator_bridge import (
+    INTENT_SCHEMA,
+    OperatorIntentCore,
+    UnlockedIntent,
+)
 from tools.data_factory.operator_catalog import (
     project_assisted_poses,
     project_balanced_start_pose_ids,
@@ -26,6 +32,27 @@ from tools.data_factory.operator_product_view import (
     project_environment,
 )
 from tools.fr5_data_factory import ContractError, SAFE_ID, canonical_digest
+
+
+class _Preparation:
+    def __init__(self, *, generation, application_revision, run, close):
+        self.generation = generation
+        self.application_revision = application_revision
+        self.run = run
+        self.close = close
+        self.started_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+        self.state = "PREPARING"
+        self._cleanup_lock = threading.Lock()
+        self._cleaned = False
+
+    def cleanup(self, result=None) -> None:
+        with self._cleanup_lock:
+            if self._cleaned:
+                return
+            self._cleaned = True
+            close = self.close or getattr(result, "close", None)
+            if callable(close):
+                close()
 
 
 class CollectionOperatorApplication:
@@ -47,6 +74,9 @@ class CollectionOperatorApplication:
         camera_refresh_call: Callable[[], Mapping[str, Any]] | None = None,
         start_pose_setup: Mapping[str, Any] | None = None,
         start_pose_capture_call: Callable[[str], Mapping[str, Any]] | None = None,
+        prepare_environment_owner_call: Callable[
+            [], tuple[Callable[[], Mapping[str, Any]], Callable[[], None]]
+        ] | None = None,
         initial_environment: Mapping[str, Any] | None = None,
         effect_scope: str = "FAKE",
     ):
@@ -75,6 +105,11 @@ class CollectionOperatorApplication:
             raise ContractError("OPERATOR_APPLICATION_CAMERA_SETUP")
         if (start_pose_setup is None) != (start_pose_capture_call is None):
             raise ContractError("OPERATOR_APPLICATION_START_POSE")
+        if (
+            prepare_environment_owner_call is not None
+            and not callable(prepare_environment_owner_call)
+        ):
+            raise ContractError("OPERATOR_APPLICATION_INPUT")
         self.session_id = session_id
         self.operator_label = operator_label
         self.effect_scope = effect_scope
@@ -82,6 +117,7 @@ class CollectionOperatorApplication:
         self.selection = validate_operator_selection(self.catalog, initial_selection)
         self.environment_call = environment_call
         self.prepare_environment_call = prepare_environment_call
+        self.prepare_environment_owner_call = prepare_environment_owner_call
         self.campaign_factory = campaign_factory
         self.workspace_manager_factory = workspace_manager_factory
         self.workspace_snapshot_call = workspace_snapshot_call
@@ -103,9 +139,12 @@ class CollectionOperatorApplication:
         self._workspace_manager = None
         self._workspace_history: list[dict[str, Any]] = []
         self._generation = 1
+        self._preparation_sequence = 0
+        self._preparation = None
         self._inner_intent_sequence = 0
         self._campaign = None
         self._closed = False
+        self._close_lock = threading.Lock()
         self._environment_view = (
             self._validated_environment(initial_environment)
             if initial_environment is not None else self._read_environment()
@@ -451,6 +490,8 @@ class CollectionOperatorApplication:
 
     def _workflow(self, environment: Mapping[str, Any], inner: Mapping[str, Any] | None) -> str:
         if self._campaign is None:
+            if self._preparation is not None:
+                return "ENVIRONMENT"
             if self._camera_recovery_pending:
                 return "ENVIRONMENT"
             return "AUTHORING" if environment["state"] == "READY" else "ENVIRONMENT"
@@ -523,11 +564,14 @@ class CollectionOperatorApplication:
                 inner["gripper_tuning"]
             )
         if workflow == "ENVIRONMENT":
-            operations = (
-                ["prepare_environment"]
-                if environment["state"] == "SETUP_REQUIRED"
-                or self._camera_recovery_pending else []
-            )
+            if self._preparation is not None:
+                operations = ["cancel_session"]
+            else:
+                operations = (
+                    ["prepare_environment"]
+                    if environment["state"] == "SETUP_REQUIRED"
+                    or self._camera_recovery_pending else []
+                )
         elif workflow == "AUTHORING":
             operations = ["update_draft"]
             if self.start_pose_capture_call is not None:
@@ -640,7 +684,8 @@ class CollectionOperatorApplication:
         ui_state = (
             (
                 "PREPARING"
-                if environment["state"] == "SETUP_REQUIRED" else "BLOCKED"
+                if self._preparation is not None
+                or environment["state"] == "SETUP_REQUIRED" else "BLOCKED"
             ) if workflow == "ENVIRONMENT"
             else runtime.get("workflow_state", workflow)
         )
@@ -806,6 +851,16 @@ class CollectionOperatorApplication:
                 "application_generation": self._generation,
                 "catalog_digest": self.catalog.get("catalog_digest"),
                 "combination_digest": self.selection["combination_digest"],
+                **(
+                    {
+                        "preparation_generation": self._preparation.generation,
+                        "preparation_application_revision": (
+                            self._preparation.application_revision
+                        ),
+                        "preparation_started_at": self._preparation.started_at,
+                    }
+                    if self._preparation is not None else {}
+                ),
             },
             "workspace_registration": self._workspace_projection(),
             "home_recovery": copy.deepcopy(self._last_home_recovery),
@@ -828,14 +883,60 @@ class CollectionOperatorApplication:
 
     def prepare_environment(self, payload: dict[str, Any], _view: dict[str, Any]) -> dict[str, Any]:
         self._require("ENVIRONMENT", payload, set())
-        self._environment_view = self._validated_environment(
-            self.prepare_environment_call()
+        if self._closed or self._preparation is not None:
+            raise ContractError("OPERATOR_APPLICATION_STATE")
+        run = self.prepare_environment_call
+        close = None
+        if self.prepare_environment_owner_call is not None:
+            owner = self.prepare_environment_owner_call()
+            if (
+                not isinstance(owner, tuple)
+                or len(owner) != 2
+                or not callable(owner[0])
+                or not callable(owner[1])
+            ):
+                raise ContractError("OPERATOR_APPLICATION_INPUT")
+            run, close = owner
+        self._preparation_sequence += 1
+        preparation = _Preparation(
+            generation=f"{self.session_id}-prepare-{self._preparation_sequence:04d}",
+            application_revision=self._generation,
+            run=run, close=close,
         )
-        self._camera_recovery_pending = False
-        return {
-            "outcome": self._environment_view["state"],
-            "environment": copy.deepcopy(self._environment_view),
-        }
+        self._preparation = preparation
+
+        def complete(value):
+            if (
+                self._preparation is not preparation
+                or preparation.state != "PREPARING"
+                or self._closed
+                or self._generation != preparation.application_revision
+            ):
+                if preparation.state == "PREPARING":
+                    preparation.state = "STALE"
+                return (
+                    {"outcome": "STALE", "generation": preparation.generation},
+                    False,
+                    lambda: preparation.cleanup(value),
+                )
+            self._environment_view = self._validated_environment(value)
+            self._camera_recovery_pending = False
+            preparation.state = "COMMITTED"
+            self._preparation = None
+            return ({
+                "outcome": self._environment_view["state"],
+                "environment": copy.deepcopy(self._environment_view),
+            }, True, None)
+
+        def failed(_exc, value):
+            changed = self._preparation is preparation
+            if changed:
+                self._preparation = None
+            if preparation.state == "PREPARING":
+                preparation.state = "FAILED" if changed else "STALE"
+            return changed, lambda: preparation.cleanup(value)
+
+        return UnlockedIntent(run=preparation.run, complete=complete, failed=failed)
 
     def update_camera_bindings(
         self, payload: dict[str, Any], _view: dict[str, Any],
@@ -1268,6 +1369,17 @@ class CollectionOperatorApplication:
         return {"outcome": "AUTHORING", "draft_id": self.draft["draft_id"]}
 
     def cancel_session(self, payload: dict[str, Any], _view: dict[str, Any]) -> dict[str, Any]:
+        if self._preparation is not None:
+            if payload:
+                raise ContractError("OPERATOR_APPLICATION_STATE")
+            preparation = self._preparation
+            self._preparation = None
+            preparation.state = "CANCELLED"
+            return UnlockedIntent(
+                run=preparation.cleanup,
+                complete=lambda _value: ({"outcome": "CANCELLED"}, False, None),
+                failed=lambda _exc, _value: (False, None),
+            )
         self._require("RUNNING", payload, {"active_child_id"})
         return self._forward("cancel_session", payload)
 
@@ -1360,12 +1472,28 @@ class CollectionOperatorApplication:
         return self._replace_campaign()
 
     def close(self) -> None:
-        if self._closed:
-            return
-        self._closed = True
-        close = getattr(self._campaign, "close", None)
-        if callable(close):
-            close()
+        with self._close_lock:
+            if self._closed:
+                return
+            preparation = None
+            campaign = None
+
+            def detach() -> None:
+                nonlocal preparation, campaign
+                self._closed = True
+                preparation = self._preparation
+                if preparation is not None:
+                    preparation.state = "CLOSED"
+                    self._preparation = None
+                campaign = self._campaign
+                self._campaign = None
+
+            self.core.transition(detach)
+            if preparation is not None:
+                preparation.cleanup()
+            close = getattr(campaign, "close", None)
+            if callable(close):
+                close()
 
 
 __all__ = ["CollectionOperatorApplication"]

@@ -83,6 +83,10 @@
     let cameraSetupState;
     let startPoseSetupState;
     let cameraRecovered = false;
+    let authoringRevision = 1;
+    let authoringDigest;
+    let authoringSetupSummary;
+    let cameraBindingOperationAvailable = true;
     let stateSpaceProjectionAvailable = true;
     const snapshotProbe = "RAW_SNAPSHOT_MUST_NOT_RENDER";
     const workspaceDomain = {
@@ -105,6 +109,9 @@
         };
       });
       if (stateKey === "authoring") {
+        flat.revision = authoringRevision;
+        if (authoringDigest) flat.view_digest = authoringDigest;
+        if (authoringSetupSummary) flat.setup.summary = authoringSetupSummary;
         flat.draft.authoring_mode = draftAuthoringMode ?? flat.draft.authoring_mode;
         flat.draft.requested_count = draftRequestedCount ?? flat.draft.requested_count;
         flat.draft.repeat = draftRepeat ?? flat.draft.repeat;
@@ -136,7 +143,7 @@
             if (Object.values(workspaceRegistrationState.captures).every(Boolean)) workspaceOps.push("preview_workspace");
           }
         }
-        flat.available_ops = ["update_draft", "update_camera_bindings", ...(stateSpaceProjectionAvailable ? ["capture_start_pose", "update_start_pose_selection"] : []), "compile_draft", ...workspaceOps];
+        flat.available_ops = ["update_draft", ...(cameraBindingOperationAvailable ? ["update_camera_bindings"] : []), ...(stateSpaceProjectionAvailable ? ["capture_start_pose", "update_start_pose_selection"] : []), "compile_draft", ...workspaceOps];
         if (workspaceCatalogRefreshed && workspaceRegistrationState && !flat.catalog.axes.frame.some((item) => item.id === workspaceRegistrationState.calibration_id)) {
           flat.catalog.axes.frame.push({id: workspaceRegistrationState.calibration_id, label: "새 작업영역 좌표계 r1", available: true, reason: null, description: "같은 프로세스에서 새로고침됨"});
         }
@@ -260,6 +267,41 @@
         camera1.dispatchEvent(new Event("change", {bubbles: true}));
         await waitFor(() => currentView?.camera_setup?.bindings["camera-1"] === "WRIST" && !intentBusy);
         check(currentView.camera_setup.bindings["camera-2"] === "UP" && new Set(Object.values(currentView.camera_setup.bindings)).size === 2, "occupied camera roles swap atomically without duplicates");
+
+        const focusedCamera = document.querySelector('[data-camera-logical-id="camera-2"]');
+        focusedCamera.focus();
+        cameraSetupState.bindings = {"camera-1": "SIDE", "camera-2": "UP"};
+        cameraSetupState.required_roles = ["SIDE", "UP"];
+        authoringRevision = 2;
+        authoringDigest = "sha256:2424242424242424242424242424242424242424242424242424242424242424";
+        authoringSetupSummary = "최신 비카메라 상태도 함께 반영됨";
+        const focusPostStart = posted.length;
+        await loadView();
+        const focusPreserved = document.activeElement === focusedCamera && document.querySelector('[data-camera-logical-id="camera-2"]') === focusedCamera;
+        focusedCamera.value = "WRIST";
+        focusedCamera.dispatchEvent(new Event("change", {bubbles: true}));
+        await waitFor(() => currentView?.camera_setup?.bindings["camera-2"] === "WRIST" && !intentBusy);
+        const latestCameraPost = posted.slice(focusPostStart).find((item) => item.body.op === "update_camera_bindings");
+        const latestStatusRendered = document.querySelector("#setup-summary").textContent.includes(authoringSetupSummary);
+        const operationLossCamera = document.querySelector('[data-camera-logical-id="camera-2"]');
+        operationLossCamera.focus();
+        cameraBindingOperationAvailable = false;
+        authoringRevision = 3;
+        authoringDigest = "sha256:2525252525252525252525252525252525252525252525252525252525252525";
+        await loadView();
+        const operationLossReprojected = document.querySelector('[data-camera-logical-id="camera-2"]') !== operationLossCamera
+          && document.querySelector('[data-camera-logical-id="camera-2"]').disabled;
+        check(focusPreserved && latestStatusRendered && latestCameraPost.body.view_revision === 2
+          && JSON.stringify(latestCameraPost.body.payload.bindings) === JSON.stringify({"camera-1": "SIDE", "camera-2": "WRIST"})
+          && posted.slice(focusPostStart).every((item) => item.body.op !== "prepare_environment") && operationLossReprojected,
+        "focused camera polling consumes non-camera status and posts latest revision/bindings without auto-prepare, then operation loss reprojects");
+        cameraBindingOperationAvailable = true;
+        authoringRevision = 1;
+        authoringDigest = undefined;
+        authoringSetupSummary = undefined;
+        sessionIdOverride = "collection-operator-r002";
+        await loadView();
+        await waitFor(() => currentView?.session_id === sessionIdOverride && currentView?.revision === 1);
         check(document.querySelector('[data-axis="start"]').hidden && !document.querySelector("#open-start-pose").hidden && document.querySelector("#catalog-fields").textContent.includes("시작 자세"), "legacy start dropdown is replaced by reusable start-pose management");
         check([...document.querySelector('[data-axis="task"]').options].some((option) => option.value === "pick_place" && option.disabled), "unavailable catalog combination is disabled with a reason");
         const selectedTask = catalogOption(currentView, "task", currentView.draft.selection.task);
@@ -471,7 +513,7 @@
         check(Object.keys(cameraRecoveryPost.body.payload).length === 0 && !document.querySelector("#step-environment").hidden, "camera recovery posts an empty intent and returns to environment preparation");
 
         postResult = "stale";
-        sessionIdOverride = "collection-operator-r002";
+        sessionIdOverride = "collection-operator-r003";
         stateKey = "review_campaign";
         await loadView();
         await waitFor(() => currentView?.revision === 2);
