@@ -11,86 +11,35 @@ from unittest import mock
 from pathlib import Path
 from types import SimpleNamespace
 
-from .test_motion import SCENE, T, motion
+from .test_motion import SCENE, T
 from . import test_one_job as one_job_test
 from tools.data_factory.motion.pickup_executor import PHASES, PickupExecutor
 from tools.data_factory.one_job import JsonlProcess, run_one_job
 from tools.data_factory import run_job
 from tools.data_factory.campaign_authoring import compile_collection_campaign
 from tools.data_factory.campaign_session import CampaignSession
-from tools.data_factory.fake_operator_console import (
+from tools.data_factory.operator.preview import (
     _motion_program,
     make_fake_one_job,
     new_effect_counters,
 )
-from tools.data_factory.operator_setup import (
+from tools.data_factory.operator.setup.contracts import (
     build_test_only_episode_binding,
     build_test_only_root_binding,
     build_test_only_start_binding,
     initialize_test_only_state_from_user_declaration,
 )
-from .test_campaign_authoring import draft as campaign_draft
-from .test_operator_setup import compatible_start_fixture, pose_snapshot
-
-
-JOB = {"task": "pickup_e2e", "robot_system_id": "fr5-lab-a"}
-PROFILE = {
-    "schema_version": "data_factory.collection_profile.v2", "collection_profile_id": "test",
-    "qualification_status": "QUALIFIED", "quality_contract_digest": "sha256:" + "7" * 64,
-    "camera_profile": "up", "camera_roles": ["up"], "camera_serials": {"up": "serial-up"},
-    "camera_topics": {"up": "/camera/up/color/image_raw"}, "fps": 30, "width": 640, "height": 480,
-    "image_qos": "reliable", "image_qos_depth": 10, "writer_queue_size": 128, "encoder_threads": 2,
-    "encoding_mode": "batch", "repo_id": "local/test", "encoder_temp_policy": "DATASET_LOCAL",
-    "dataset_incremental_peak_bytes": 100, "encoder_temp_peak_bytes": 200, "disk_reserve_bytes": 300,
-    "portability_status": "QUALIFICATION_REQUIRED",
-}
-
-
-def payload(mode="plan_only"):
-    value = {
-        "mode": mode,
-        "run_id": "runner-test",
-        "job": JOB,
-        "selected_sheet": "selected.json",
-        "yaw0_sheet": "yaw0.json",
-        "config_root": "config/data_factory",
-        "motion_qualification": "motion.json",
-        "home_candidate": "home.json",
-        "urdf": "robot.urdf",
-        "expected_robot_system_id": "fr5-lab-a",
-    }
-    if mode == "live":
-        value.update(camera_profile="up", dataset_root="datasets/test", run_root="outputs/data_factory/runs")
-    return value
-
-
-def runtime_validated(*, job=None, profile=None, input_digests=None, **extra):
-    """Build the minimum resolver-shaped value accepted at the live boundary."""
-    profile = copy.deepcopy(PROFILE if profile is None else profile)
-    normalized_job = copy.deepcopy(JOB if job is None else job)
-    normalized_job["collection_profile_id"] = profile["collection_profile_id"]
-    inputs = copy.deepcopy(input_digests or {})
-    inputs["collection_profile"] = run_job.canonical_digest(profile)
-    return {
-        "normalized_job": normalized_job,
-        "input_digests": inputs,
-        "resolved_job_digest": run_job.canonical_digest({
-            "job": normalized_job, "input_digests": inputs,
-        }),
-        "collection_profile": profile,
-        **copy.deepcopy(extra),
-    }
-
-
-def runtime_motion(validated, *, continuous=False):
-    """Bind the synthetic motion program to the resolver receipt under test."""
-    value = motion(continuous)
-    value["resolved_job_digest"] = validated["resolved_job_digest"]
-    value["binding_digests"]["collection_profile"] = validated["input_digests"][
-        "collection_profile"
-    ]
-    return value
-
+from .operator.fixtures import (
+    JOB,
+    PROFILE,
+    campaign_draft,
+    compatible_start_fixture,
+    motion,
+    payload,
+    pose_snapshot,
+    runtime_motion,
+    runtime_validated,
+)
 
 def command(op_id="run-1", op="run", value=None):
     return {"schema_version": run_job.COMMAND_SCHEMA, "op_id": op_id, "op": op, "payload": payload() if value is None else value}

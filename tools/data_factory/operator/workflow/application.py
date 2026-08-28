@@ -11,27 +11,34 @@ import threading
 from datetime import datetime, timezone
 from typing import Any, Callable, Mapping
 
-from tools.data_factory.operator_bridge import (
+from tools.data_factory.operator.workflow.intents import (
     INTENT_SCHEMA,
     OperatorIntentCore,
     UnlockedIntent,
 )
-from tools.data_factory.operator_catalog import (
+from tools.data_factory.operator.catalog import (
     project_assisted_poses,
     project_balanced_start_pose_ids,
     validate_operator_pose,
     validate_operator_selection,
 )
-from tools.data_factory.operator_product_view import (
-    AXIS_BINDINGS,
-    DISPOSITION_TO_MODE,
-    browser_selection,
-    camera_choice,
-    project_catalog,
-    project_cells,
-    project_environment,
-)
 from tools.fr5_data_factory import ContractError, SAFE_ID, canonical_digest
+
+_PROJECTOR_FUNCTIONS = (
+    "browser_selection", "camera_choice", "project_catalog", "project_cells",
+    "project_environment",
+)
+_PROJECTOR_CONSTANTS = (
+    "AXIS_BINDINGS", "DISPOSITION_TO_MODE", "MODE_TO_DISPOSITION",
+)
+
+
+def _validated_projector(projector: Any) -> Any:
+    if any(not callable(getattr(projector, name, None)) for name in _PROJECTOR_FUNCTIONS):
+        raise ContractError("OPERATOR_APPLICATION_PROJECTOR")
+    if any(not isinstance(getattr(projector, name, None), Mapping) for name in _PROJECTOR_CONSTANTS):
+        raise ContractError("OPERATOR_APPLICATION_PROJECTOR")
+    return projector
 
 
 class _Preparation:
@@ -61,6 +68,7 @@ class CollectionOperatorApplication:
     def __init__(
         self, *, session_id: str, operator_label: str,
         catalog: Mapping[str, Any], initial_selection: Mapping[str, Any],
+        projector: Any,
         environment_call: Callable[[], Mapping[str, Any]],
         prepare_environment_call: Callable[[], Mapping[str, Any]],
         campaign_factory: Callable[[str, dict[str, Any], dict[str, Any]], Any],
@@ -113,6 +121,7 @@ class CollectionOperatorApplication:
         self.session_id = session_id
         self.operator_label = operator_label
         self.effect_scope = effect_scope
+        self.projector = _validated_projector(projector)
         self.catalog = copy.deepcopy(dict(catalog))
         self.selection = validate_operator_selection(self.catalog, initial_selection)
         self.environment_call = environment_call
@@ -164,7 +173,6 @@ class CollectionOperatorApplication:
             "preview_workspace": self.preview_workspace,
             "discard_workspace_preview": self.discard_workspace_preview,
             "save_workspace": self.save_workspace,
-            "save_workspace_revision": self.save_workspace,
             "new_workspace_registration": self.new_workspace_registration,
         }
         if self.camera_bindings_call is not None:
@@ -627,7 +635,7 @@ class CollectionOperatorApplication:
             and camera_failure
         ):
             operations.insert(0, "recover_camera_setup")
-        cells = project_cells(
+        cells = self.projector.project_cells(
             self.catalog, self.selection, split=self.draft["split"],
             repeat=self.draft["repeat"],
         )
@@ -672,7 +680,7 @@ class CollectionOperatorApplication:
                     else "DIRECT_POSE_COUNT_EXCEEDS_EPISODES"
                 )
             ),
-            "selection": browser_selection(
+            "selection": self.projector.browser_selection(
                 self.selection, split=self.draft["split"],
             ),
             "cells": cells,
@@ -772,7 +780,7 @@ class CollectionOperatorApplication:
                     if cell["cell_id"] == self.selection["cell_id"]
                     else cell["repeat"]
                 )
-        browser_catalog = project_catalog(
+        browser_catalog = self.projector.project_catalog(
             self.catalog, self.selection, split=self.draft["split"],
         )
         for option in browser_catalog["axes"]["camera"]:
@@ -780,7 +788,7 @@ class CollectionOperatorApplication:
                 continue
             combination = next((
                 value for value in self.catalog["combinations"]
-                if camera_choice(value) == option["id"]
+                if self.projector.camera_choice(value) == option["id"]
             ), None)
             if isinstance(combination, Mapping):
                 option["reason"] = combination["execution"][
@@ -813,7 +821,7 @@ class CollectionOperatorApplication:
             "lifecycle_action": "LIVE_COLLECT",
             "data_disposition": self._disposition(self.selection["data_mode"]),
             "runtime": ui_runtime,
-            "setup": project_environment(environment),
+            "setup": self.projector.project_environment(environment),
             "catalog": browser_catalog,
             "draft": browser_draft,
             "campaign_envelope": copy.deepcopy(envelope),
@@ -1001,7 +1009,7 @@ class CollectionOperatorApplication:
         previous_workspace = (
             self.selection["workspace_id"], self.selection["frame_id"],
         )
-        browser_catalog = project_catalog(
+        browser_catalog = self.projector.project_catalog(
             self.catalog, self.selection, split=self.draft["split"],
         )
         options = browser_catalog["axes"].get(axis)
@@ -1014,13 +1022,13 @@ class CollectionOperatorApplication:
             self.draft["split"] = value
             return
         if axis == "data_mode":
-            self.selection["data_mode"] = DISPOSITION_TO_MODE[value]
+            self.selection["data_mode"] = self.projector.DISPOSITION_TO_MODE[value]
             return
         if axis == "camera":
             profile_id, device_id = value.split("@", 1)
             field, expected = None, None
         else:
-            _domain_axis, field = AXIS_BINDINGS[axis]
+            _domain_axis, field = self.projector.AXIS_BINDINGS[axis]
             expected = value
             profile_id = device_id = None
         current_pose = self._selected_cell_pose()
@@ -1031,7 +1039,7 @@ class CollectionOperatorApplication:
         candidates = []
         for combination in self.catalog["combinations"]:
             if axis == "camera":
-                changed = camera_choice(combination) == value
+                changed = self.projector.camera_choice(combination) == value
             else:
                 changed = combination.get(field) == expected
             if not changed:
@@ -1054,7 +1062,7 @@ class CollectionOperatorApplication:
                 preserved = sum(
                     ui_axis == axis
                     or combination.get(binding_field) == self.selection[binding_field]
-                    for ui_axis, (_domain, binding_field) in AXIS_BINDINGS.items()
+                    for ui_axis, (_domain, binding_field) in self.projector.AXIS_BINDINGS.items()
                 )
                 preserved += int(
                     axis == "camera"
@@ -1089,7 +1097,7 @@ class CollectionOperatorApplication:
         combination = sorted(
             candidates, key=lambda item: (-int(item[0]), -item[1], item[2]),
         )[0][3]
-        for _ui_axis, (_domain, binding_field) in AXIS_BINDINGS.items():
+        for _ui_axis, (_domain, binding_field) in self.projector.AXIS_BINDINGS.items():
             self.selection[binding_field] = combination[binding_field]
         self.selection.update(
             combination_digest=combination["combination_digest"],

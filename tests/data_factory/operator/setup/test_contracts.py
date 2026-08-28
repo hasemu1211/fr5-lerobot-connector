@@ -11,22 +11,20 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 
-try:
-    from .test_campaign_authoring import draft
-    from .test_experiment_manifest import (
-        catalog, hypothesis, qualification_inputs, redigest,
-        single_qualification_inputs,
-    )
-except ImportError:
-    from test_campaign_authoring import draft
-    from test_experiment_manifest import (
-        catalog, hypothesis, qualification_inputs, redigest,
-        single_qualification_inputs,
-    )
+from ..fixtures import (
+    catalog,
+    compatible_start_fixture,
+    draft,
+    hypothesis,
+    pose_snapshot,
+    qualification_inputs,
+    redigest,
+    single_qualification_inputs,
+)
 from tools.data_factory.campaign_authoring import compile_collection_campaign
 from tools.data_factory.campaign_session import CampaignSession
 from tools.data_factory.experiment_manifest import compile_fr5_hypothesis
-from tools.data_factory.operator_setup import (
+from tools.data_factory.operator.setup.contracts import (
     build_camera_binding_from_discovery,
     build_camera_binding_candidate,
     build_test_only_episode_binding,
@@ -61,113 +59,13 @@ from tools.a4_place_yaw.generate_place_yaw_a4 import build_places, make_manifest
 from tools.fr5_data_factory import ContractError, canonical_digest, load_json_strict
 
 
-ROOT = Path(__file__).parents[2]
+ROOT = Path(__file__).parents[4]
 
 
 def load(relative: str) -> dict:
     return json.loads((ROOT / relative).read_text())
 
 
-def pose_snapshot(target: list[float], *, age: float = 0.05) -> dict:
-    rigid = {
-        "translation_m": [0.0, 0.0, 0.0],
-        "rotation_columns": [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
-    }
-    return {
-        "schema_version": "data_factory.pose_snapshot.v1",
-        "frames": {"base": "base_link", "wrist": "wrist3_link"},
-        "joint_positions_rad": dict(zip(("j1", "j2", "j3", "j4", "j5", "j6"), target)),
-        "base_wrist": rigid,
-        "base_tcp": {
-            **rigid,
-            "candidate_status": "QUALIFIED",
-            "candidate_source_sha256": canonical_digest("tcp"),
-            "manifest_source_sha256": canonical_digest("tcp-manifest"),
-        },
-        "joint_state_age_s": age,
-        "joint_stamp_ns": 1_000_000_000,
-        "transform_stamp_ns": 1_000_000_000,
-        "ros_sample_age_s": age,
-    }
-
-
-def compatible_start_fixture(
-    *, collection_profile: dict | None = None,
-    start_target: list[float] | None = None,
-    start_tolerance: float | None = None,
-    qualification_source: str | None = None,
-) -> tuple[dict, dict, dict]:
-    if qualification_source is not None:
-        fixed, report, resolvers, base_qualifications, poses, _ = qualification_inputs()
-        qualification_catalog = None
-    elif collection_profile is None:
-        fixed, report, resolvers, base_qualifications, poses, _ = qualification_inputs()
-        qualification_catalog = None
-    else:
-        profile = copy.deepcopy(collection_profile)
-        (
-            fixed, report, resolvers, base_qualifications, poses,
-            qualification_catalog,
-        ) = single_qualification_inputs(collection_profile=profile)
-    home = load("config/data_factory/home_candidates/fr5-lab-a-home-r001.json")
-    home["robot_system_id"] = fixed["robot_system_id"]
-    motion = load("config/data_factory/motion_qualifications/fr5-place-a-wood-cube-r001.json")
-    motion.update(
-        robot_system_id=fixed["robot_system_id"],
-        cell_calibration_id=fixed["cell_calibration_id"],
-        object_profile_id=fixed["object_profile_id"],
-        grasp_profile_id=fixed["grasp_profile_id"],
-        home_candidate_digest=canonical_digest(home),
-    )
-    target = (
-        motion["qualified_safe_joint_positions_rad"]
-        if start_target is None else start_target
-    )
-    tolerance = (
-        motion["goal_tolerances"]["joint_rad"]
-        if start_tolerance is None else start_tolerance
-    )
-    for pose in poses:
-        pose.update(
-            robot_system_id=fixed["robot_system_id"],
-            joint_order=["j1", "j2", "j3", "j4", "j5", "j6"],
-            target_rad=dict(zip(pose["joint_order"], target)),
-            tolerance_rad={joint: tolerance for joint in pose["joint_order"]},
-            home_candidate_digest=canonical_digest(home),
-        )
-        redigest(pose, "qualification_digest")
-    if qualification_source is not None:
-        for item in (*base_qualifications, *poses):
-            item["source"] = qualification_source
-            redigest(item, "qualification_digest")
-        qualification_catalog = catalog(
-            fixed, report, resolvers, base_qualifications, poses,
-        )
-        qualification_catalog["source"] = qualification_source
-        redigest(qualification_catalog, "catalog_digest")
-    if qualification_source is not None:
-        pass
-    elif qualification_catalog is None:
-        qualification_catalog = catalog(
-            fixed, report, resolvers, base_qualifications, poses,
-        )
-    else:
-        qualification_catalog.update(
-            fixed_contract_digest=canonical_digest(fixed),
-            resolver_result_digests=[canonical_digest(resolvers[0])],
-            base_condition_qualifications=copy.deepcopy(base_qualifications),
-            robot_start_pose_qualifications=copy.deepcopy(poses),
-        )
-        qualification_catalog["allowed_pairs"][0].update(
-            base_condition_qualification_digest=base_qualifications[0]["qualification_digest"],
-            robot_start_pose_qualification_digest=poses[0]["qualification_digest"],
-        )
-        redigest(qualification_catalog, "catalog_digest")
-    contract = compile_fr5_hypothesis(
-        fixed_contract=fixed, coverage_report=report, resolver_results=resolvers,
-        qualification_catalog=qualification_catalog,
-    )
-    return contract, motion, home
 
 
 class OperatorSetupTests(unittest.TestCase):

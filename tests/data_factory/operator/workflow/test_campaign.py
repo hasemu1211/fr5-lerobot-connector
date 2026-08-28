@@ -11,31 +11,26 @@ from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import patch
 
-try:
-    from .test_campaign_authoring import draft
-    from .test_experiment_manifest import hypothesis
-except ImportError:
-    from test_campaign_authoring import draft
-    from test_experiment_manifest import hypothesis
+from ..fixtures import draft, hypothesis
 
 from tools.data_factory.campaign_operator import CampaignOperator
-from tools.data_factory.fake_operator_console import (
+from tools.data_factory.operator.preview import (
     FAKE_RECORDER_COUNTERS,
     QA_WORKFLOW,
     TEST_OPERATOR,
     ZERO_SENTINELS,
     FakeOperatorConsole,
     build_fake_operator_console,
-    main,
     make_fake_one_job,
     new_effect_counters,
     synthetic_fixture,
 )
 from tools.data_factory.one_job import TEST_ONLY_READINESS_CONTRACT, OneJob
-from tools.data_factory.operator_bridge import (
+from tools.data_factory.operator.cli import _fake_main as main
+from tools.data_factory.operator.web.bridge import LoopbackBridge
+from tools.data_factory.operator.workflow.intents import (
     INTENT_SCHEMA,
     ButtonDecisionPort,
-    LoopbackBridge,
 )
 from tools.fr5_data_factory import ContractError, canonical_digest
 
@@ -230,7 +225,7 @@ class FakeOperatorConsoleTests(unittest.TestCase):
             console = self.make(root)
             bridge = LoopbackBridge(
                 core=console.bridge_core,
-                ui_root=Path(__file__).resolve().parents[2] / "operator-ui",
+                ui_root=Path(__file__).resolve().parents[4] / "operator-ui",
                 host="127.0.0.1", port=0,
                 token="fixed-fake-console-token-long-enough",
             )

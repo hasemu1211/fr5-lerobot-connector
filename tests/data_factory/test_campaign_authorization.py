@@ -19,11 +19,7 @@ from tools.data_factory.campaign_authorization import (
 )
 from tools.data_factory.campaign_authoring import compile_collection_campaign
 from tools.fr5_data_factory import ContractError, canonical_digest
-
-try:
-    from .test_reusable_operator_console import physical_contract
-except ImportError:
-    from test_reusable_operator_console import physical_contract
+from .operator.fixtures import physical_contract
 
 
 NOW = datetime(2026, 8, 26, 12, 0, tzinfo=timezone.utc)

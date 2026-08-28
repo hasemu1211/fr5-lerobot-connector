@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Any, Mapping
 
 from tools.a4_place_yaw.generate_place_yaw_a4 import build_places, make_manifest
-from tools.data_factory.operator_setup import (
+from tools.data_factory.operator.setup.contracts import (
     compile_workspace_registration_candidate,
     qualified_table_plane_reference,
     validate_table_plane_reference,

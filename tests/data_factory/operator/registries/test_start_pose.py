@@ -7,7 +7,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from tools.data_factory.experiment_manifest import compile_robot_start_pose
-from tools.data_factory.start_pose_registry import (
+from tools.data_factory.operator.registries.start_pose import (
     compile_start_pose_profile,
     list_start_pose_profiles,
     project_robot_start_pose_qualification,

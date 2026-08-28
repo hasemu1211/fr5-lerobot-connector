@@ -1,0 +1,139 @@
+import unittest
+from pathlib import Path
+
+from tools.data_factory.operator.catalog import (
+    load_operator_catalog,
+    validate_operator_selection,
+)
+from tools.data_factory.operator.web.projection import project_catalog
+from tools.fr5_data_factory import ContractError, canonical_digest, load_json_strict
+
+
+ROOT = Path(__file__).resolve().parents[4]
+DEVICE = "usb-Generic_USB2.0_PC_CAMERA-video-index0"
+
+
+class OperatorProjectionTests(unittest.TestCase):
+    @staticmethod
+    def selection(combination: dict) -> dict:
+        return {
+            "schema_version": "data_factory.operator_selection.v1",
+            "combination_digest": combination["combination_digest"],
+            "data_mode": "TEST_COLLECTION",
+            **{
+                field: combination[field]
+                for field in (
+                    "workspace_id", "frame_id", "task_id", "object_id",
+                    "grasp_id", "cell_id", "start_pose_id", "motion_id",
+                    "variant_id", "camera_profile_id", "camera_device_id",
+                )
+            },
+            "policy_id": "DETERMINISTIC_SPREAD",
+        }
+
+    def test_registered_workspace_projects_continuous_bounds_and_105_presets(self):
+        catalog = load_operator_catalog(ROOT, device_ids=[DEVICE])
+        domains = [
+            item for item in catalog["workspace_domains"]
+            if item["workspace_id"] == "PLACE_A"
+            and item["frame_id"] == "place-a-yaw0-r002"
+        ]
+        self.assertEqual(len(domains), 1)
+        domain = domains[0]
+        self.assertEqual(set(domain), {
+            "domain_id", "workspace_id", "frame_id", "coordinate_mode",
+            "a4_family_digest", "yaw0_manifest_digest", "x_mm", "y_mm",
+            "yaw_deg", "preset_cell_ids", "execution_gate", "domain_digest",
+        })
+        self.assertEqual(
+            (
+                domain["domain_id"], domain["coordinate_mode"],
+                domain["x_mm"], domain["y_mm"], domain["yaw_deg"],
+                domain["execution_gate"],
+            ),
+            (
+                "place-a-yaw0-r002", "CONTINUOUS_A4_PLANE",
+                {"minimum": -70.0, "maximum": 70.0},
+                {"minimum": -35.0, "maximum": 35.0},
+                {"minimum": -180.0, "maximum_exclusive": 180.0},
+                "FRESH_PLAN_IK_COLLISION_ENDPOINT_PER_SLOT",
+            ),
+        )
+        calibration = load_json_strict(
+            ROOT / "config/data_factory/cells/place-a-yaw0-r002.json",
+        )
+        self.assertEqual(
+            (domain["a4_family_digest"], domain["yaw0_manifest_digest"]),
+            (calibration["a4_family_digest"], calibration["yaw0_manifest_digest"]),
+        )
+        preset_ids = {
+            option["id"] for option in catalog["axes"]["cell"]
+            if option["metadata"].get("place_id") == "PLACE_A"
+        }
+        self.assertEqual((len(preset_ids), set(domain["preset_cell_ids"])), (105, preset_ids))
+        self.assertEqual(
+            domain["domain_digest"],
+            canonical_digest({
+                key: value for key, value in domain.items()
+                if key != "domain_digest"
+            }),
+        )
+        combination = next(
+            item for item in catalog["combinations"]
+            if item["frame_id"] == domain["frame_id"]
+            and item["execution"]["TEST_COLLECTION"]["executable"]
+        )
+        projected = project_catalog(
+            catalog, self.selection(combination), split="TRAIN",
+        )
+        self.assertEqual(projected["workspace_domain"], domain)
+        general = next(
+            item for item in projected["axes"]["data_mode"]
+            if item["id"] == "PRODUCTION"
+        )
+        self.assertEqual(
+            general["description"],
+            "기술 검사와 사후 검토 대상인 일반 수집",
+        )
+
+    def test_pick_place_visibility_matches_current_caller_registration(self):
+        catalog = load_operator_catalog(ROOT, device_ids=[DEVICE])
+        option = next(
+            item for item in catalog["axes"]["task"] if item["id"] == "pick_place"
+        )
+        pick_place_combinations = [
+            item for item in catalog["combinations"]
+            if item["task_id"] == "pick_place"
+        ]
+        if pick_place_combinations:
+            self.assertTrue(option["registered"])
+            self.assertTrue(any(
+                item["execution"]["TEST_COLLECTION"]["executable"]
+                for item in pick_place_combinations
+            ))
+            return
+
+        self.assertEqual(
+            (option["registered"], option["status"], option["reason"]),
+            (False, "NOT_CONFIGURED", "TASK_CALLER_NOT_CONFIGURED"),
+        )
+        pickup = next(
+            item for item in catalog["combinations"]
+            if item["execution"]["TEST_COLLECTION"]["executable"]
+        )
+        selection = self.selection(pickup)
+        browser = project_catalog(catalog, selection, split="TRAIN")
+        projected = next(
+            item for item in browser["axes"]["task"] if item["id"] == "pick_place"
+        )
+        self.assertEqual(
+            (projected["available"], projected["reason"]),
+            (False, "TASK_CALLER_NOT_CONFIGURED"),
+        )
+        before = canonical_digest(catalog)
+        with self.assertRaisesRegex(ContractError, "OPERATOR_SELECTION_COMBINATION"):
+            validate_operator_selection(
+                catalog, {**selection, "task_id": "pick_place"},
+                require_executable=True,
+            )
+        self.assertEqual(canonical_digest(catalog), before)

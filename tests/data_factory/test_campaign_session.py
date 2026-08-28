@@ -5,15 +5,10 @@ from tempfile import TemporaryDirectory
 from datetime import datetime, timedelta, timezone
 from unittest import mock
 
-try:
-    from .test_campaign_authoring import draft
-    from .test_experiment_manifest import hypothesis
-except ImportError:
-    from test_campaign_authoring import draft
-    from test_experiment_manifest import hypothesis
+from .operator.fixtures import draft, hypothesis
 from tools.data_factory.campaign_authoring import compile_collection_campaign
 from tools.data_factory.campaign_session import CampaignSession
-from tools.data_factory.operator_setup import build_test_only_root_binding
+from tools.data_factory.operator.setup.contracts import build_test_only_root_binding
 from tools.data_factory.seed_campaign import SeedCampaign, validate_seed_episode_intent
 from tools.fr5_data_factory import ContractError, canonical_digest
 

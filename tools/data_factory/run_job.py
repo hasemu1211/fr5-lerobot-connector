@@ -27,7 +27,7 @@ from tools.data_factory.one_job import (
     TEST_ONLY_READINESS_CONTRACT,
     hil_numeric_gripper_verdict,
 )
-from tools.data_factory.operator_bridge import CANDIDATE_REVIEW_REASONS
+from tools.data_factory.operator.workflow.intents import CANDIDATE_REVIEW_REASONS
 from tools.data_factory.campaign_authorization import (
     validate_campaign_authorization,
     validate_runtime_campaign_scope,
@@ -39,7 +39,7 @@ from tools.data_factory.episode_ledger import (
     project_episode_state,
     reproject_episode_state,
 )
-from tools.data_factory.operator_setup import (
+from tools.data_factory.operator.setup.contracts import (
     validate_runtime_episode_binding,
     validate_runtime_planned_start,
     validate_runtime_root_binding,

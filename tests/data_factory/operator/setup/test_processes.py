@@ -4,7 +4,7 @@ import subprocess
 import threading
 import unittest
 
-from tools.data_factory.operator_stack import OperatorStack
+from tools.data_factory.operator.setup.processes import OperatorStack
 from tools.fr5_data_factory import ContractError
 
 

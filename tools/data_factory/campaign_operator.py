@@ -12,8 +12,8 @@ from tools.data_factory.campaign_authoring import (
 )
 from tools.data_factory.campaign_session import CampaignSession, DISPOSITIONS
 from tools.data_factory.experiment_manifest import validate_fr5_hypothesis
-from tools.data_factory.operator_bridge import OperatorIntentCore
-from tools.data_factory.operator_setup import (
+from tools.data_factory.operator.workflow.intents import OperatorIntentCore
+from tools.data_factory.operator.setup.contracts import (
     validate_runtime_root_binding,
     validate_runtime_start_binding,
 )

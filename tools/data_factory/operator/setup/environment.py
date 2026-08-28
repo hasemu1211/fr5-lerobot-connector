@@ -5,7 +5,11 @@ from collections.abc import Callable, Mapping
 from datetime import datetime, timezone
 from typing import Any
 
-from tools.data_factory.operator_stack import COMPONENTS, FACT_STATES, MOTION_COMPONENTS
+from tools.data_factory.operator.setup.processes import (
+    COMPONENTS,
+    FACT_STATES,
+    MOTION_COMPONENTS,
+)
 from tools.fr5_data_factory import ContractError
 
 

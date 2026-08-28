@@ -14,7 +14,7 @@ from tools.data_factory.campaign_authoring import (
     validate_campaign_draft,
     validate_collection_campaign_manifest,
 )
-from tools.data_factory.operator_setup import (
+from tools.data_factory.operator.setup.contracts import (
     validate_runtime_root_binding,
     validate_runtime_start_binding,
 )

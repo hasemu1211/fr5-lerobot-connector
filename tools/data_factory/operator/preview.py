@@ -2,9 +2,7 @@
 """Foreground, loopback-only FAKE console for one collection campaign."""
 from __future__ import annotations
 
-import argparse
 import copy
-import json
 import tempfile
 import threading
 import time
@@ -36,13 +34,12 @@ from tools.data_factory.one_job import (
     OneJob,
     hil_numeric_gripper_verdict,
 )
-from tools.data_factory.operator_bridge import (
+from tools.data_factory.operator.workflow.intents import (
     INTENT_SCHEMA,
     ButtonDecisionPort,
-    LoopbackBridge,
     OperatorIntentCore,
 )
-from tools.data_factory.operator_setup import validate_print_measurements
+from tools.data_factory.operator.setup.contracts import validate_print_measurements
 from tools.data_factory.quality.coverage_report import build_coverage_report
 from tools.data_factory.scene_state import release_slot
 from tools.data_factory.training_split import FR5_FEATURE_CONTRACT
@@ -1578,70 +1575,3 @@ def synthetic_fixture() -> tuple[dict[str, Any], dict[str, Any]]:
         "manifest_budget": budget, "program_budget": program_budget,
     }
     return hypothesis, draft
-
-
-def _load_fixture(root: Path) -> tuple[dict[str, Any], dict[str, Any]]:
-    if root.is_symlink() or not root.is_dir():
-        raise ContractError("FAKE_CONSOLE_FIXTURE_ROOT")
-    return load_json_strict(root / "hypothesis.json"), load_json_strict(root / "draft.json")
-
-
-def main(argv=None) -> int:
-    parser = argparse.ArgumentParser(
-        description="Serve the existing operator UI over a foreground FAKE LoopbackBridge",
-        epilog="Under-10-minute QA: " + " ".join(f"{index + 1}) {step}" for index, step in enumerate(QA_WORKFLOW)),
-    )
-    parser.add_argument("--port", type=int, default=4174)
-    parser.add_argument(
-        "--fixture-root",
-        help="Synthetic directory containing hypothesis.json and draft.json; omitted uses the built-in fixture in a cleaned temporary root",
-    )
-    args = parser.parse_args(argv)
-    root = None
-    bridge = console = product = None
-    try:
-        if args.fixture_root is None:
-            # Local import avoids a module cycle: the reusable product composition
-            # deliberately reuses this module's existing pure-FAKE OneJob ports.
-            from tools.data_factory.product_fake_operator import build_product_fake_operator
-
-            product = build_product_fake_operator()
-            core = product.bridge_core
-            root = Path(product.fixture_root)
-        else:
-            root = Path(args.fixture_root)
-            hypothesis, draft = _load_fixture(root)
-            console = build_fake_operator_console(
-                hypothesis=hypothesis, draft=draft, fixture_root=root,
-            )
-            core = console.bridge_core
-        bridge = LoopbackBridge(
-            core=core,
-            ui_root=Path(__file__).resolve().parents[2] / "operator-ui",
-            host="127.0.0.1", port=args.port,
-        )
-        print(json.dumps({
-            "status": "LISTENING", "url": bridge.origin, "effect_scope": "FAKE",
-            "operator_identity": TEST_OPERATOR, "fixture_root": str(root),
-            "product_flow": product is not None,
-            "qa_workflow": QA_WORKFLOW,
-        }, sort_keys=True), flush=True)
-        bridge.serve_forever()
-    except KeyboardInterrupt:
-        return 130
-    except (ContractError, OSError) as exc:
-        code = exc.code if isinstance(exc, ContractError) else "FAKE_CONSOLE_FAILED"
-        print(json.dumps({"error": {"code": code, "message": str(exc)}}, sort_keys=True), flush=True)
-        return 2
-    finally:
-        if console is not None:
-            console.close()
-        if product is not None:
-            product.close()
-        if bridge is not None:
-            bridge.server.server_close()
-    return 0
-
-
-if __name__ == "__main__":
-    raise SystemExit(main())

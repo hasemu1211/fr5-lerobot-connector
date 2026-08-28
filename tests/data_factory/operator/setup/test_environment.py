@@ -4,7 +4,7 @@ import copy
 import unittest
 from datetime import datetime, timezone
 
-from tools.data_factory.operator_environment import OperatorEnvironment
+from tools.data_factory.operator.setup.environment import OperatorEnvironment
 
 
 NOW = datetime(2026, 8, 26, 12, 0, tzinfo=timezone.utc)

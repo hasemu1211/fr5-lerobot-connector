@@ -7,25 +7,28 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from tools.data_factory.operator_application import CollectionOperatorApplication
-from tools.data_factory.operator_bridge import OperatorIntentCore
-from tools.data_factory.operator_catalog import (
+from tools.data_factory.operator.workflow.application import CollectionOperatorApplication
+from tools.data_factory.operator.web import projection
+from tools.data_factory.operator.workflow.intents import OperatorIntentCore
+from tools.data_factory.operator.catalog import (
     SELECTION_SCHEMA_V2,
     camera_binding_digest,
     load_operator_catalog,
 )
-from tools.data_factory.operator_console import (
+from tools.data_factory.operator.composition import (
     build_physical_operator_application,
     build_physical_operator_console,
+)
+from tools.data_factory.operator.setup.camera import (
     discover_camera_devices,
     discover_uvc_devices,
-    passive_physical_gate,
     query_realsense_serials,
     resolve_camera_setup,
 )
-from tools.data_factory.operator_setup import build_camera_role_bindings
+from tools.data_factory.operator.setup.contracts import build_camera_role_bindings
+from tools.data_factory.operator.setup.physical import passive_physical_gate
 from tools.fr5_data_factory import ContractError
-ROOT = Path(__file__).resolve().parents[2]
+ROOT = Path(__file__).resolve().parents[4]
 
 
 def profile(identifier: str, roles: list[str], serials: dict[str, str]) -> dict:
@@ -62,11 +65,11 @@ class CameraRoleSetupTests(unittest.TestCase):
         serial = "254622073507"
         with (
             mock.patch(
-                "tools.data_factory.operator_console.load_camera_role_bindings",
+                "tools.data_factory.operator.setup.camera.load_camera_role_bindings",
                 side_effect=ContractError("NO_RECEIPT"),
             ),
             mock.patch(
-                "tools.data_factory.operator_console.load_camera_binding_receipt",
+                "tools.data_factory.operator.setup.camera.load_camera_binding_receipt",
                 side_effect=ContractError("NO_RECEIPT"),
             ),
         ):
@@ -293,7 +296,7 @@ class CameraRoleSetupTests(unittest.TestCase):
             raise AssertionError(args)
 
         with mock.patch(
-            "tools.data_factory.operator_console._readonly_command",
+            "tools.data_factory.operator.setup.physical._readonly_command",
             side_effect=command,
         ):
             evidence = passive_physical_gate(
@@ -331,18 +334,18 @@ class CameraRoleSetupTests(unittest.TestCase):
         }
         with (
             mock.patch(
-                "tools.data_factory.operator_console.load_camera_role_bindings",
+                "tools.data_factory.operator.setup.camera.load_camera_role_bindings",
                 side_effect=ContractError("NO_RECEIPT"),
             ),
             mock.patch(
-                "tools.data_factory.operator_console.load_camera_binding_receipt",
+                "tools.data_factory.operator.setup.camera.load_camera_binding_receipt",
                 side_effect=ContractError("NO_RECEIPT"),
             ),
             mock.patch(
-                "tools.data_factory.operator_console.write_camera_role_bindings",
+                "tools.data_factory.operator.composition.write_camera_role_bindings",
             ),
             mock.patch(
-                "tools.data_factory.operator_console.WorkspaceManager",
+                "tools.data_factory.operator.composition.WorkspaceManager",
                 return_value=workspace,
             ),
         ):
@@ -557,6 +560,7 @@ class CameraRoleSetupTests(unittest.TestCase):
         application = CollectionOperatorApplication(
             session_id="camera-role-intent-r001", operator_label="operator",
             catalog=catalog, initial_selection=selection,
+            projector=projection,
             environment_call=lambda: ready,
             prepare_environment_call=lambda: ready,
             campaign_factory=campaign, camera_setup=setup,

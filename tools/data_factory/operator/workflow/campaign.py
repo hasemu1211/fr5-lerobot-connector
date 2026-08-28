@@ -1,0 +1,1750 @@
+"""Thin foreground UI adapter for one injected TEST_ONLY campaign.
+
+The injected episode callable remains the adapter to ``run_live``.  This module
+owns no robot, recorder, dataset, scheduler, or lifecycle state machine.
+"""
+from __future__ import annotations
+
+import copy
+import math
+import threading
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any, Callable, Mapping, Sequence
+
+from tools.data_factory.campaign_authoring import (
+    DRAFT_SCHEMA,
+    campaign_cell_id,
+    validate_campaign_draft,
+)
+from tools.data_factory.campaign_authorization import (
+    EPISODE_SCOPE_FIELDS,
+    build_campaign_authorization,
+    build_campaign_envelope,
+    validate_authorized_episode_scope,
+)
+from tools.data_factory.campaign_operator import CampaignOperator
+from tools.data_factory.experiment_manifest import (
+    FR5_TEST_ONLY_FEATURE_CONTRACT,
+    build_test_only_feature_contract,
+    compile_fr5_hypothesis,
+)
+from tools.data_factory.operator.workflow.intents import (
+    ButtonDecisionPort,
+    CandidateReviewPort,
+    INTENT_SCHEMA,
+    OperatorCheckpointPort,
+    OperatorIntentCore,
+)
+from tools.data_factory.quality.coverage_report import build_coverage_report
+from tools.data_factory import run_job
+from tools.data_factory_recovery import write_json_atomic
+from tools.fr5_data_factory import (
+    ContractError,
+    DIGEST,
+    SAFE_ID,
+    canonical_digest,
+    validate_motion_program,
+)
+
+
+PLAN_REQUEST_FIELDS = frozenset({
+    "schema_version", "run_id", "plan_digest", "approval_scope",
+    "decision_binding", "timeout_s",
+})
+BASE_PROJECTION_FIELDS = frozenset({
+    "setup", "fixed_lane", "draft", "capabilities", "workspace_wizard",
+    "effect_counts",
+})
+SETUP_FIELDS = frozenset({"host_status", "operator_label", "subsystems"})
+LIVE_RUNTIME_MILESTONES = {
+    "PLANNING": ("경로 계획 및 충돌 검사", 10, "현재 시작 상태에서 각 동작 구간을 연결해 검사합니다."),
+    "CAMERA_WARMUP": ("카메라 전송 확인", 25, "프레임 속도와 timestamp 전송 상태를 확인합니다."),
+    "AWAITING_HUMAN_APPROVAL": ("승인 범위 확인", 35, "캠페인 승인 범위와 이번 계획을 대조합니다."),
+    "RECORDER_STARTING": ("기록기 준비", 40, "30 Hz readiness와 writer 상태를 확인합니다."),
+    "EXECUTING": ("수집 동작 실행", 50, "로봇 상태·명령·RGB를 동기화해 기록합니다."),
+    "RECYCLING": ("수집 구간 완료 및 복구", 70, "녹화를 멈춘 뒤 물체를 다음 시작 상태로 복구합니다."),
+    "FINALIZING": ("데이터 저장", 80, "동결된 episode를 commit하고 영상 파일을 마무리합니다."),
+    "VALIDATING": ("데이터 품질 검사", 90, "timestamp·drop·provenance·프레임 일치를 검사합니다."),
+}
+ROOT = Path(__file__).resolve().parents[4]
+DEFAULT_JOB = Path(
+    "config/data_factory/test_only_physical/goal2-place1/"
+    "center-live-p45-20260821-r001.job.json"
+)
+DEFAULT_YAW0 = Path(
+    "config/data_factory/test_only_physical/goal2-place1/yaw0_sheet.json"
+)
+DEFAULT_MOTION = Path(
+    "config/data_factory/motion_qualifications/fr5-place-a-wood-cube-r001.json"
+)
+DEFAULT_HOME = Path(
+    "config/data_factory/home_candidates/fr5-lab-a-home-r001.json"
+)
+DEFAULT_START_POSES = Path("config/data_factory/start_poses")
+DEFAULT_PROFILE = Path(
+    "config/data_factory/collection_profiles/fr5-up-rgb-30hz-v1.json"
+)
+DEFAULT_URDF = Path("src/fairino_description/urdf/fairino5_v6.urdf")
+DEFAULT_TCP_MANIFEST = Path(
+    "config/data_factory/test_only_physical/goal2-place1/tcp_candidate_manifest.json"
+)
+DEFAULT_GRIPPER_RETUNE = Path(
+    "config/data_factory/test_only_physical/goal2-place1/"
+    "gripper-retune-wood-cube-25mm-top-center-r002.json"
+)
+GRIPPER_RETUNE_FIELDS = frozenset({
+    "schema_version", "retune_id", "status", "source",
+    "object_profile_id", "grasp_profile_id",
+    "base_grasp_profile_digest", "base_motion_qualification_digest",
+    "command_position_m", "acceptable_feedback_m", "data_disposition",
+    "production_authority", "training_authority", "retune_digest",
+})
+
+
+def _measurement_for_code(code: str) -> str:
+    if code == "PHYSICAL_SECOND_MOTION_OWNER" or code.endswith("_MISMATCH"):
+        return "FAIL"
+    if code.startswith(("PHYSICAL_", "GRIPPER_SETUP_")) or code.endswith("NOT_AVAILABLE"):
+        return "NOT_AVAILABLE"
+    return "FAIL"
+
+
+def _redigest(value: dict[str, Any], field: str) -> dict[str, Any]:
+    value[field] = canonical_digest({key: item for key, item in value.items() if key != field})
+    return value
+
+
+def _campaign_camera_warmup(
+    *, cache: dict[str, Any], transport: Mapping[str, Any],
+    payload: Mapping[str, Any], profile: Mapping[str, Any],
+    cancel: threading.Event, measure_call: Callable[..., Mapping[str, Any]],
+) -> dict[str, Any]:
+    """Measure once per exact binding; later runs get a distinct reuse receipt."""
+    if not isinstance(transport, Mapping) or not isinstance(
+        transport.get("binding_digest"), str,
+    ):
+        raise ContractError("PHYSICAL_CAMERA_BINDING_MISMATCH")
+    cache_key = canonical_digest({
+        "camera_transport_binding_digest": transport["binding_digest"],
+        "collection_profile_digest": canonical_digest(profile),
+    })
+    cached = cache.get("camera_warmup_cache")
+    if not isinstance(cached, Mapping) or cached.get("cache_key") != cache_key:
+        measured = measure_call(payload, profile, cancel)
+        attempts = measured.get("attempts") if isinstance(measured, Mapping) else None
+        exact_measurement = (
+            isinstance(measured, Mapping)
+            and set(measured) == {
+                "schema_version", "run_id", "camera_profile", "attempts",
+            }
+            and measured.get("schema_version") == "data_factory.camera_warmup.v1"
+            and measured.get("run_id") == payload.get("run_id")
+            and measured.get("camera_profile") == payload.get("camera_profile")
+        )
+        if (
+            not cancel.is_set() and exact_measurement
+            and isinstance(attempts, list) and attempts
+            and isinstance(attempts[-1], Mapping)
+            and attempts[-1].get("status") == "PASS"
+        ):
+            cache["camera_warmup_cache"] = {
+                "cache_key": cache_key,
+                "source_run_id": payload["run_id"],
+                "source_evidence": copy.deepcopy(dict(measured)),
+                "source_evidence_digest": canonical_digest(measured),
+            }
+        return copy.deepcopy(dict(measured))
+    evidence = {
+        "schema_version": "data_factory.camera_warmup_reuse.v1",
+        "run_id": payload["run_id"],
+        "status": "REUSED_PASS",
+        "source_run_id": cached["source_run_id"],
+        "source_evidence_digest": cached["source_evidence_digest"],
+        "camera_transport_binding_digest": transport["binding_digest"],
+        "collection_profile_digest": canonical_digest(profile),
+    }
+    write_json_atomic(
+        Path(payload["run_root"]) / payload["run_id"]
+        / "camera_warmup_reuse.json",
+        evidence,
+    )
+    return evidence
+
+
+def _derive_test_only_gripper_program(
+    validated: Mapping[str, Any], motion: Mapping[str, Any],
+    program: Mapping[str, Any], retune: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Apply an object-scoped TEST_ONLY override after qualified resolution."""
+    if (
+        not isinstance(retune, Mapping) or set(retune) != GRIPPER_RETUNE_FIELDS
+        or retune.get("schema_version")
+        != "data_factory.test_only_gripper_retune.v1"
+        or retune.get("status") != "CANDIDATE_PENDING_HIL"
+        or retune.get("source") != "OPERATOR_REPORTED_RETUNE"
+        or retune.get("data_disposition") != "TEST_ONLY"
+        or retune.get("production_authority") is not False
+        or retune.get("training_authority") is not False
+        or not isinstance(retune.get("retune_id"), str)
+        or SAFE_ID.fullmatch(retune["retune_id"]) is None
+        or not isinstance(retune.get("retune_digest"), str)
+        or DIGEST.fullmatch(retune["retune_digest"]) is None
+        or retune["retune_digest"] != canonical_digest({
+            key: item for key, item in retune.items() if key != "retune_digest"
+        })
+        or not isinstance(validated, Mapping) or not isinstance(motion, Mapping)
+        or not isinstance(program, Mapping)
+    ):
+        raise ContractError("TEST_ONLY_GRIPPER_RETUNE")
+    job = validated.get("normalized_job")
+    inputs = validated.get("input_digests")
+    grasp = validated.get("grasp_profile")
+    close = grasp.get("gripper_close") if isinstance(grasp, Mapping) else None
+    feedback = retune.get("acceptable_feedback_m")
+    base_feedback = close.get("acceptable_feedback_m") if isinstance(close, Mapping) else None
+    program_bindings = program.get("binding_digests")
+    program_requirements = program.get("gripper_requirements")
+    numbers = (
+        retune.get("command_position_m"),
+        feedback.get("min") if isinstance(feedback, Mapping) else None,
+        feedback.get("max") if isinstance(feedback, Mapping) else None,
+    )
+    if (
+        not isinstance(job, Mapping) or not isinstance(inputs, Mapping)
+        or not isinstance(grasp, Mapping) or not isinstance(close, Mapping)
+        or not isinstance(base_feedback, Mapping)
+        or not isinstance(feedback, Mapping) or set(feedback) != {"min", "max"}
+        or any(
+            isinstance(value, bool) or not isinstance(value, (int, float))
+            or not math.isfinite(value)
+            for value in numbers
+        )
+        or retune.get("object_profile_id") != job.get("object_profile_id")
+        or retune.get("grasp_profile_id") != job.get("grasp_profile_id")
+        or retune.get("object_profile_id") != grasp.get("object_profile_id")
+        or retune.get("grasp_profile_id") != grasp.get("grasp_profile_id")
+        or retune.get("base_grasp_profile_digest") != canonical_digest(grasp)
+        or inputs.get("grasp_profile") != canonical_digest(grasp)
+        or retune.get("base_motion_qualification_digest")
+        != canonical_digest(motion)
+        or not isinstance(program_bindings, Mapping)
+        or program_bindings.get("motion_qualification") != canonical_digest(motion)
+        or program_bindings.get("grasp_profile") != canonical_digest(grasp)
+        or program_requirements != close
+    ):
+        raise ContractError("TEST_ONLY_GRIPPER_RETUNE_BINDING")
+    command, minimum, maximum = (float(value) for value in numbers)
+    if not (
+        float(close["command_position_m"]) <= command <= minimum < maximum
+        and float(base_feedback["min"]) <= minimum
+        and maximum <= float(base_feedback["max"])
+    ):
+        raise ContractError("TEST_ONLY_GRIPPER_RETUNE_ENVELOPE")
+
+    tuned_requirements = copy.deepcopy(dict(close))
+    tuned_requirements.update(
+        command_position_m=command,
+        acceptable_feedback_m={"min": minimum, "max": maximum},
+        evidence_digest=retune["retune_digest"],
+    )
+    derived = copy.deepcopy(dict(program))
+    derived["gripper_requirements"] = tuned_requirements
+    close_steps = [
+        step for step in derived.get("steps", [])
+        if isinstance(step, Mapping) and step.get("phase") == "GRIPPER_CLOSE"
+    ]
+    if len(close_steps) != 1:
+        raise ContractError("TEST_ONLY_GRIPPER_RETUNE_BINDING")
+    close_steps[0]["gripper_position_m"] = command
+    close_steps[0]["limits"]["completion_tolerance_m"] = maximum - command
+    return copy.deepcopy(validate_motion_program(derived))
+
+
+def _test_only_home_start_pose(
+    motion_qualification: Mapping[str, Any], home_candidate: Mapping[str, Any],
+    robot_system_id: str,
+) -> dict[str, Any]:
+    target = motion_qualification.get("qualified_safe_joint_positions_rad")
+    tolerance = motion_qualification.get("goal_tolerances", {}).get("joint_rad")
+    source_id = home_candidate.get("home_candidate_id")
+    if (
+        not isinstance(target, list) or len(target) != 6
+        or isinstance(tolerance, bool)
+        or not isinstance(tolerance, (int, float))
+        or not math.isfinite(tolerance) or tolerance <= 0
+    ):
+        raise ContractError("PHYSICAL_CONSOLE_START_POSE")
+    if not isinstance(source_id, str) or not SAFE_ID.fullmatch(source_id):
+        source_id = "home-" + canonical_digest(home_candidate).removeprefix("sha256:")[:20]
+    joints = ("j1", "j2", "j3", "j4", "j5", "j6")
+    return _redigest({
+        "schema_version": "data_factory.robot_start_pose_qualification.v1",
+        "source": "SYNTHETIC_TEST_ONLY",
+        "robot_system_id": robot_system_id,
+        "robot_start_pose_id": source_id,
+        "joint_order": list(joints),
+        "target_rad": dict(zip(joints, target)),
+        "tolerance_rad": {joint: float(tolerance) for joint in joints},
+        "home_candidate_digest": canonical_digest(home_candidate),
+        "qualification_status": "QUALIFIED",
+        "safety_status": "SAFE_FOR_MOTION",
+    }, "qualification_digest")
+
+
+def _build_physical_campaign_contract(
+    *, resolver_results: Sequence[Mapping[str, Any]],
+    motion_qualification: Mapping[str, Any], home_candidate: Mapping[str, Any],
+    scene_digest: str, draft_id: str, manifest_id: str,
+    requested_count: int, normalized_seed: int = 0,
+    anchor_resolved_job_digest: str | None = None,
+    direct_resolved_job_digests: Sequence[str] | None = None,
+    direct_start_pose_ids: Sequence[str] | None = None,
+    start_pose_qualifications: Sequence[Mapping[str, Any]] | None = None,
+    test_only_gripper_retune_digest: str | None = None,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Compile a finite TEST_ONLY condition domain without execution authority."""
+    if (
+        type(requested_count) is not int or not 1 <= requested_count <= 100
+        or type(normalized_seed) is not int or normalized_seed < 0
+        or test_only_gripper_retune_digest is not None
+        and (
+            not isinstance(test_only_gripper_retune_digest, str)
+            or DIGEST.fullmatch(test_only_gripper_retune_digest) is None
+        )
+    ):
+        raise ContractError("PHYSICAL_CONSOLE_REQUESTED_COUNT")
+    if (
+        not isinstance(resolver_results, (list, tuple))
+        or not resolver_results
+        or any(not isinstance(item, Mapping) for item in resolver_results)
+    ):
+        raise ContractError("PHYSICAL_CONSOLE_RESOLVED_JOB")
+    resolved_jobs = [copy.deepcopy(dict(item)) for item in resolver_results]
+    resolved_by_job_digest = {
+        item.get("resolved_job_digest"): item for item in resolved_jobs
+    }
+    if (
+        len(resolved_by_job_digest) != len(resolved_jobs)
+        or any(not isinstance(key, str) or not DIGEST.fullmatch(key) for key in resolved_by_job_digest)
+    ):
+        raise ContractError("PHYSICAL_CONSOLE_RESOLVED_JOB")
+    first = resolved_jobs[0]
+    job = first.get("normalized_job")
+    inputs = first.get("input_digests")
+    profile = first.get("collection_profile")
+    try:
+        feature_contract = build_test_only_feature_contract(profile)
+    except ContractError as exc:
+        if (
+            isinstance(profile, Mapping)
+            and profile.get("collection_profile_id")
+            == FR5_TEST_ONLY_FEATURE_CONTRACT["collection_profile_id"]
+        ):
+            feature_contract = copy.deepcopy(FR5_TEST_ONLY_FEATURE_CONTRACT)
+        else:
+            raise ContractError("PHYSICAL_CONSOLE_FIXED_BINDING") from exc
+    if (
+        not isinstance(job, Mapping)
+        or not isinstance(inputs, Mapping)
+        or not isinstance(profile, Mapping)
+        or job.get("collection_profile_id") != profile.get("collection_profile_id")
+        or inputs.get("collection_profile") != canonical_digest(profile)
+        or not isinstance(scene_digest, str)
+        or not DIGEST.fullmatch(scene_digest)
+        or motion_qualification.get("schema_version")
+        != "data_factory.motion_qualification.v1"
+        or motion_qualification.get("qualification_status") != "QUALIFIED"
+        or home_candidate.get("schema_version") != "data_factory.home_candidate.v1"
+        or motion_qualification.get("home_candidate_digest")
+        != canonical_digest(home_candidate)
+        or any(
+            motion_qualification.get(field) != job.get(field)
+            for field in (
+                "robot_system_id", "cell_calibration_id", "object_profile_id",
+                "grasp_profile_id",
+            )
+        )
+    ):
+        raise ContractError("PHYSICAL_CONSOLE_FIXED_BINDING")
+
+    motion_digest = canonical_digest(motion_qualification)
+    fixed_job_fields = (
+        "task", "instruction", "robot_system_id", "collection_profile_id",
+        "cell_calibration_id", "object_profile_id", "grasp_profile_id",
+    )
+    fixed_input_fields = (
+        "cell_calibration", "robot_system", "collection_profile",
+        "object_profile", "grasp_profile",
+    )
+    for resolved in resolved_jobs:
+        other_job = resolved.get("normalized_job")
+        other_inputs = resolved.get("input_digests")
+        if (
+            not isinstance(other_job, Mapping)
+            or not isinstance(other_inputs, Mapping)
+            or resolved.get("collection_profile") != profile
+            or any(other_job.get(field) != job[field] for field in fixed_job_fields)
+            or any(other_inputs.get(field) != inputs[field] for field in fixed_input_fields)
+            or resolved.get("resolved_job_digest")
+            != canonical_digest({"job": other_job, "input_digests": other_inputs})
+        ):
+            raise ContractError("PHYSICAL_CONSOLE_FIXED_BINDING")
+    fixed = {
+        "schema_version": "data_factory.fr5_fixed_contract.v1",
+        "robot_system_id": job["robot_system_id"],
+        "task": job["task"],
+        "instruction": job["instruction"],
+        "collection_profile_digest": inputs["collection_profile"],
+        "feature_contract": feature_contract,
+        "object_profile_id": job["object_profile_id"],
+        "grasp_profile_id": job["grasp_profile_id"],
+        "scene_digest": scene_digest,
+        "cell_calibration_id": job["cell_calibration_id"],
+        "cell_calibration_digest": inputs["cell_calibration"],
+        "motion_recipe": "DIRECT",
+        "motion_recipe_digest": motion_digest,
+        "pregrasp_digest": canonical_digest({
+            "motion_qualification": motion_digest, "phase": "PREGRASP_PTP",
+        }),
+        "waypoint_digest": canonical_digest({
+            "motion_qualification": motion_digest,
+            "phases": ["APPROACH_STOP_LIN", "FINAL_APPROACH_LIN", "LIFT_LIN"],
+        }),
+        "trajectory_digest": canonical_digest({
+            "motion_qualification": motion_digest, "recipe": "DIRECT",
+            **(
+                {"test_only_gripper_retune": test_only_gripper_retune_digest}
+                if test_only_gripper_retune_digest is not None else {}
+            ),
+        }),
+    }
+    conditions = []
+    resolved_by_condition = {}
+    for resolved in resolved_jobs:
+        current_job = resolved["normalized_job"]
+        current_inputs = resolved["input_digests"]
+        condition = {
+            "task_schema_version": current_job["schema_version"],
+            "task": current_job["task"],
+            "robot_system_id": current_job["robot_system_id"],
+            "place_id": current_job["place_id"],
+            "cell_calibration_id": current_job["cell_calibration_id"],
+            "cell_calibration_digest": current_inputs["cell_calibration"],
+            "yaw_deg": current_job["yaw_deg"],
+            "x_mm": current_job["x_mm"],
+            "y_mm": current_job["y_mm"],
+            "object_profile_id": current_job["object_profile_id"],
+            "grasp_profile_id": current_job["grasp_profile_id"],
+            "motion_recipe_digest": motion_digest,
+            "collection_profile_digest": current_inputs["collection_profile"],
+        }
+        condition_digest = canonical_digest(condition)
+        if condition_digest in resolved_by_condition:
+            raise ContractError("PHYSICAL_CONSOLE_RESOLVED_JOB")
+        conditions.append(condition)
+        resolved_by_condition[condition_digest] = resolved
+    report = build_coverage_report(
+        collection_profile_id=profile["collection_profile_id"],
+        domain=conditions, episodes=[],
+    )
+    bases = []
+    for cell in report["cells"]:
+        condition = cell["condition"]
+        condition_digest = canonical_digest(condition)
+        resolved = resolved_by_condition[condition_digest]
+        bases.append(_redigest({
+            "schema_version": "data_factory.fr5_base_condition_qualification.v1",
+            "source": "SYNTHETIC_TEST_ONLY",
+            "qualification_status": "QUALIFIED",
+            "coverage_report_digest": canonical_digest(report),
+            "coverage_domain_digest": report["domain_digest"],
+            "coverage_condition_digest": condition_digest,
+            "resolver_result_digest": canonical_digest(resolved),
+            "resolved_job_digest": resolved["resolved_job_digest"],
+            "yaw_action_binding_digest": canonical_digest({
+                "scope": "TEST_ONLY", "yaw_deg": condition["yaw_deg"],
+                "motion_qualification_digest": motion_digest,
+            }),
+            "dual_view_observability_digest": canonical_digest({
+                "single_view": "CONNECTED_UNPLACED",
+                "dual_view": "NOT_AVAILABLE",
+                "semantic_authority": "NONE",
+                "yaw_deg": condition["yaw_deg"],
+            }),
+        }, "qualification_digest"))
+    home_pose = _test_only_home_start_pose(
+        motion_qualification, home_candidate, job["robot_system_id"],
+    )
+    poses = [home_pose] if start_pose_qualifications is None else [
+        copy.deepcopy(dict(item)) for item in start_pose_qualifications
+    ]
+    pose_ids = [item.get("robot_start_pose_id") for item in poses]
+    if (
+        not poses or pose_ids != sorted(pose_ids)
+        or len(pose_ids) != len(set(pose_ids))
+        or any(
+            item.get("schema_version")
+            != "data_factory.robot_start_pose_qualification.v1"
+            or item.get("source") != "SYNTHETIC_TEST_ONLY"
+            or item.get("robot_system_id") != job["robot_system_id"]
+            or item.get("home_candidate_digest") != canonical_digest(home_candidate)
+            or item.get("qualification_status") != "QUALIFIED"
+            or item.get("safety_status") != "SAFE_FOR_MOTION"
+            or item.get("qualification_digest")
+            != canonical_digest({
+                key: value for key, value in item.items()
+                if key != "qualification_digest"
+            })
+            for item in poses
+        )
+    ):
+        raise ContractError("PHYSICAL_CONSOLE_START_POSE")
+    catalog = _redigest({
+        "schema_version": "data_factory.fr5_qualification_catalog.v1",
+        "source": "SYNTHETIC_TEST_ONLY",
+        "qualification_status": "QUALIFIED",
+        "fixed_contract_digest": canonical_digest(fixed),
+        "coverage_report_digest": canonical_digest(report),
+        "coverage_domain_digest": report["domain_digest"],
+        "resolver_result_digests": sorted(
+            canonical_digest(resolved) for resolved in resolved_jobs
+        ),
+        "base_condition_qualifications": bases,
+        "robot_start_pose_qualifications": poses,
+        "allowed_pairs": sorted(({
+            "base_condition_qualification_digest": base["qualification_digest"],
+            "robot_start_pose_qualification_digest": pose["qualification_digest"],
+            "split_groups": ["TRAIN"],
+        } for base in bases for pose in poses), key=lambda item: (
+            item["base_condition_qualification_digest"],
+            item["robot_start_pose_qualification_digest"],
+        )),
+    }, "catalog_digest")
+    hypothesis = compile_fr5_hypothesis(
+        fixed_contract=fixed, coverage_report=report,
+        resolver_results=resolved_jobs, qualification_catalog=catalog,
+    )
+    manifest_budget = {
+        "max_physical_episodes": requested_count, "max_rollout_trials": requested_count,
+        "max_hil_prompts": requested_count, "max_reviews": requested_count,
+        "max_pending_reviews": requested_count,
+        "max_storage_bytes": 2_147_483_648 * requested_count,
+    }
+    program_budget = {
+        "max_rounds": 1, "used_rounds": 0,
+        "max_total_physical_episodes": requested_count, "used_total_physical_episodes": 0,
+        "max_total_rollout_trials": requested_count, "used_total_rollout_trials": 0,
+        "max_total_hil_prompts": requested_count, "used_total_hil_prompts": 0,
+        "max_total_reviews": requested_count, "used_total_reviews": 0,
+        "max_pending_reviews": requested_count, "used_pending_reviews": 0,
+        "max_total_storage_bytes": 2_147_483_648 * requested_count,
+        "used_total_storage_bytes": 0,
+    }
+    base_by_job_digest = {
+        item["resolved_job_digest"]: item for item in hypothesis["base_conditions"]
+    }
+    if set(base_by_job_digest) != set(resolved_by_job_digest):
+        raise ContractError("PHYSICAL_CONSOLE_RESOLVED_JOB")
+    start_pose_id = hypothesis["robot_start_poses"][0]["robot_start_pose_id"]
+    pinned = []
+    direct_slots = []
+    selector = "BALANCED_INITIAL"
+    if direct_resolved_job_digests is not None:
+        if direct_start_pose_ids is None:
+            direct_start_pose_ids = [start_pose_id] * requested_count
+        if (
+            not isinstance(direct_resolved_job_digests, (list, tuple))
+            or len(direct_resolved_job_digests) != requested_count
+            or any(item not in base_by_job_digest for item in direct_resolved_job_digests)
+            or not isinstance(direct_start_pose_ids, (list, tuple))
+            or len(direct_start_pose_ids) != requested_count
+            or any(item not in pose_ids for item in direct_start_pose_ids)
+        ):
+            raise ContractError("PHYSICAL_CONSOLE_DIRECT_SEQUENCE")
+        selector = "DIRECT_LIST"
+        repeats: dict[tuple[str, str], int] = {}
+        for resolved_digest, selected_start_pose_id in zip(
+            direct_resolved_job_digests, direct_start_pose_ids,
+        ):
+            base_digest = base_by_job_digest[resolved_digest]["base_condition_digest"]
+            repeat_key = (base_digest, selected_start_pose_id)
+            repeat_index = repeats.get(repeat_key, 0)
+            repeats[repeat_key] = repeat_index + 1
+            direct_slots.append({
+                "slot_id": campaign_cell_id(
+                    base_digest, selected_start_pose_id, "TRAIN", repeat_index,
+                ),
+                "base_condition_digest": base_digest,
+                "robot_start_pose_id": selected_start_pose_id,
+                "split_group": "TRAIN", "repeat_index": repeat_index,
+                "hil_prompts": 1, "reviews": 1, "pending_reviews": 0,
+                "storage_bytes": max(
+                    1, manifest_budget["max_storage_bytes"] // requested_count,
+                ),
+            })
+    elif anchor_resolved_job_digest is not None:
+        if anchor_resolved_job_digest not in base_by_job_digest:
+            raise ContractError("PHYSICAL_CONSOLE_SEQUENCE_ANCHOR")
+        base_digest = base_by_job_digest[
+            anchor_resolved_job_digest
+        ]["base_condition_digest"]
+        pinned = [campaign_cell_id(base_digest, start_pose_id, "TRAIN", 0)]
+    draft = validate_campaign_draft({
+        "schema_version": DRAFT_SCHEMA,
+        "draft_id": draft_id, "revision": 0,
+        "source": {
+            "hypothesis_digest": hypothesis["hypothesis_digest"],
+            "catalog_digest": hypothesis["qualification_catalog"]["catalog_digest"],
+            "coverage_digest": canonical_digest(hypothesis["coverage_report"]),
+        },
+        "branch": "INITIAL_SEED", "selector": selector,
+        "requested_count": requested_count, "normalized_seed": normalized_seed,
+        "pinned": pinned, "excluded": [], "direct_slots": direct_slots,
+        "manifest_id": manifest_id,
+        "manifest_budget": manifest_budget, "program_budget": program_budget,
+    }, hypothesis=hypothesis)
+    return hypothesis, draft
+
+
+def build_physical_test_contract(
+    *, resolved_job: Mapping[str, Any], motion_qualification: Mapping[str, Any],
+    home_candidate: Mapping[str, Any], scene_digest: str,
+    draft_id: str, manifest_id: str, requested_count: int = 1,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Backward-compatible single-condition TEST_ONLY contract."""
+    return _build_physical_campaign_contract(
+        resolver_results=[resolved_job],
+        motion_qualification=motion_qualification,
+        home_candidate=home_candidate, scene_digest=scene_digest,
+        draft_id=draft_id, manifest_id=manifest_id,
+        requested_count=requested_count,
+    )
+
+
+class OperatorConsole:
+    """Expose one finite campaign through one outer intent core and worker."""
+
+    def __init__(
+        self, *, session_id: str, operator_label: str,
+        campaign_operator_factory: Callable[[Callable[..., Mapping[str, Any]]], CampaignOperator],
+        episode_call: Callable[..., Mapping[str, Any]],
+        projection_call: Callable[[], Mapping[str, Any]],
+        test_only_paths: str, run_id: str | None = None,
+        candidate_review_port: CandidateReviewPort | None = None,
+        candidate_state_bind_call: Callable[
+            [Mapping[str, Any], str | Path], Mapping[str, Any]
+        ] | None = None,
+        terminal_response_call: Callable[[], Mapping[str, Any] | None] | None = None,
+        gripper_setup_request: Mapping[str, Any] | None = None,
+        gripper_setup_resolution_call: Callable[[Mapping[str, Any]], Mapping[str, Any]] | None = None,
+        initial_block_code: str | None = None,
+        campaign_approval_once: bool = False,
+        run_id_factory: Callable[[int], str] | None = None,
+        prepare_timeout_s: float = 5.0, close_timeout_s: float = 5.0,
+        clock=None,
+    ):
+        if (
+            not isinstance(session_id, str) or not SAFE_ID.fullmatch(session_id)
+            or not isinstance(operator_label, str) or not SAFE_ID.fullmatch(operator_label)
+        ):
+            raise ContractError("OPERATOR_CONSOLE_ID")
+        run_id = run_id or f"{session_id}-run-0"
+        if not isinstance(run_id, str) or not SAFE_ID.fullmatch(run_id):
+            raise ContractError("OPERATOR_CONSOLE_RUN_ID")
+        if type(campaign_approval_once) is not bool or run_id_factory is not None and not callable(run_id_factory):
+            raise ContractError("OPERATOR_CONSOLE_CAMPAIGN_MODE")
+        if not all(callable(call) for call in (
+            campaign_operator_factory, episode_call, projection_call,
+        )):
+            raise ContractError("OPERATOR_CONSOLE_CALLABLE")
+        if not isinstance(test_only_paths, str) or not test_only_paths or "\x00" in test_only_paths:
+            raise ContractError("OPERATOR_CONSOLE_TEST_ONLY_PATHS")
+        if candidate_review_port is not None and not isinstance(candidate_review_port, CandidateReviewPort):
+            raise ContractError("OPERATOR_CONSOLE_CANDIDATE_PORT")
+        if candidate_state_bind_call is not None and (
+            candidate_review_port is None or not callable(candidate_state_bind_call)
+        ):
+            raise ContractError("OPERATOR_CONSOLE_CANDIDATE_BIND_CALL")
+        if terminal_response_call is not None and not callable(terminal_response_call):
+            raise ContractError("OPERATOR_CONSOLE_CALLABLE")
+        if (
+            (gripper_setup_request is None) != (gripper_setup_resolution_call is None)
+            or gripper_setup_request is not None and not isinstance(gripper_setup_request, Mapping)
+            or gripper_setup_resolution_call is not None and not callable(gripper_setup_resolution_call)
+            or initial_block_code is not None and (
+                not isinstance(initial_block_code, str)
+                or not SAFE_ID.fullmatch(initial_block_code)
+            )
+            or gripper_setup_request is not None and initial_block_code is not None
+        ):
+            raise ContractError("OPERATOR_CONSOLE_SETUP")
+        for value in (prepare_timeout_s, close_timeout_s):
+            if isinstance(value, bool) or not isinstance(value, (int, float)) or value <= 0:
+                raise ContractError("OPERATOR_CONSOLE_TIMEOUT")
+
+        self.session_id, self.operator_label, self.run_id = session_id, operator_label, run_id
+        self._base_run_id = run_id
+        self._run_index = 0
+        self._run_id_factory = run_id_factory or (
+            lambda index: run_id if index == 0 else f"{run_id}-e{index + 1}"
+        )
+        self.campaign_approval_once = campaign_approval_once
+        self.episode_call, self.projection_call = episode_call, projection_call
+        self.test_only_paths = test_only_paths
+        self.prepare_timeout_s, self.close_timeout_s = float(prepare_timeout_s), float(close_timeout_s)
+        self.clock = clock or (lambda: datetime.now(timezone.utc))
+        self.terminal_response_call = terminal_response_call
+        self.gripper_setup_resolution_call = gripper_setup_resolution_call
+        self.button_port = ButtonDecisionPort(
+            session_id=f"{session_id}-plan-0", operator_label=operator_label, clock=self.clock,
+        )
+        self.checkpoint_port = OperatorCheckpointPort(operator_label=operator_label)
+        self.candidate_review_port = candidate_review_port
+        self.candidate_state_bind_call = (
+            candidate_state_bind_call or run_job.bind_candidate_episode_state
+        )
+        self._lock = threading.RLock()
+        self._prepared = threading.Event()
+        self._thread = None
+        self._initial_handler_active = False
+        self._workflow = "BLOCKED" if initial_block_code is not None else "AUTHORING"
+        self._last_error = initial_block_code
+        self._measurement_outcome = (
+            _measurement_for_code(initial_block_code)
+            if initial_block_code is not None else "NOT_MEASURED"
+        )
+        self._episode_plan = self._episode_result = None
+        self._runtime_milestone = None
+        self._terminal_object_pose = None
+        self._episode_history: list[dict[str, Any]] = []
+        self._candidate_review_queue: list[dict[str, Any]] = []
+        self._active_candidate_review: dict[str, Any] | None = None
+        self._campaign_envelope = self._campaign_authorization = None
+        self._active_episode_scope = None
+        self._active_intent_projection = None
+        self._cancel_requested = False
+        self._plan_choice = None
+        if gripper_setup_request is not None:
+            self.checkpoint_port.offer(gripper_setup_request)
+            self._last_error = "MAINTENANCE_APPROVAL_REQUIRED"
+
+        self.campaign_operator = campaign_operator_factory(self._run_episode)
+        if (
+            not isinstance(self.campaign_operator, CampaignOperator)
+            or self.campaign_operator.effect_scope not in {"FAKE", "PHYSICAL"}
+            or self.campaign_operator.lifecycle_action != "LIVE_COLLECT"
+            or self.campaign_operator.data_disposition not in {"TEST_ONLY", "PRODUCTION"}
+            or self.campaign_operator.effect_scope == "FAKE"
+            and self.campaign_operator.data_disposition != "TEST_ONLY"
+            or self.campaign_operator.operator_label != operator_label
+        ):
+            raise ContractError("OPERATOR_CONSOLE_CAMPAIGN_OPERATOR")
+        self._base_projection()
+        handlers = {
+            "compile_draft": self.compile_draft,
+            "authorize_campaign": self.authorize_campaign,
+            "approve_exact_plan": self.approve_exact_plan,
+            "reject_plan": self.reject_plan,
+            "resolve_checkpoint": self.resolve_checkpoint,
+            "cancel_session": self.cancel_session,
+        }
+        if candidate_review_port is not None:
+            handlers["review_candidate"] = self.review_candidate
+        self.core = OperatorIntentCore(
+            session_id=session_id, projection_call=self.projection,
+            handlers=handlers, clock=self.clock,
+        )
+
+    @property
+    def bridge_core(self) -> OperatorIntentCore:
+        """The sole outer core accepted by the existing LoopbackBridge."""
+        return self.core
+
+    @property
+    def episode_worker(self) -> threading.Thread | None:
+        return self._thread
+
+    @property
+    def session(self):
+        return self.campaign_operator._session
+
+    @property
+    def campaign_authorization(self) -> dict[str, Any] | None:
+        with self._lock:
+            return copy.deepcopy(self._campaign_authorization)
+
+    @property
+    def campaign_envelope(self) -> dict[str, Any] | None:
+        with self._lock:
+            return copy.deepcopy(self._campaign_envelope)
+
+    def _base_projection(self) -> dict[str, Any]:
+        value = self.projection_call()
+        if not isinstance(value, Mapping) or not BASE_PROJECTION_FIELDS <= set(value):
+            raise ContractError("OPERATOR_CONSOLE_PROJECTION")
+        result = copy.deepcopy(dict(value))
+        setup = result["setup"]
+        draft = result["draft"]
+        if (
+            not isinstance(setup, Mapping) or set(setup) != SETUP_FIELDS
+            or setup.get("operator_label") != self.operator_label
+            or not isinstance(setup.get("subsystems"), list) or not setup["subsystems"]
+            or not isinstance(result["fixed_lane"], Mapping)
+            or not isinstance(draft, Mapping)
+            or draft.get("draft_id") != self.campaign_operator.draft["draft_id"]
+            or not isinstance(draft.get("cells"), list)
+            or not isinstance(result["capabilities"], list)
+            or not isinstance(result["workspace_wizard"], Mapping)
+            or not isinstance(result["effect_counts"], Mapping)
+            or any(type(count) is not int or count < 0 for count in result["effect_counts"].values())
+        ):
+            raise ContractError("OPERATOR_CONSOLE_PROJECTION")
+        return result
+
+    @staticmethod
+    def _campaign(value: object) -> dict[str, Any] | None:
+        if not isinstance(value, Mapping):
+            return None
+        nested = value.get("campaign")
+        return copy.deepcopy(dict(nested if isinstance(nested, Mapping) else value))
+
+    @staticmethod
+    def _browser_result(value: object) -> dict[str, Any] | None:
+        if not isinstance(value, Mapping):
+            return None
+        result = copy.deepcopy(dict(value))
+        ledger = result.get("episode_ledger")
+        if isinstance(ledger, Mapping):
+            result["episode_ledger"] = {
+                key: copy.deepcopy(item)
+                for key, item in ledger.items()
+                if key not in {"path", "state_path"}
+            }
+        return result
+
+    def _pending_plan(self) -> dict[str, Any] | None:
+        pending = self.button_port.core.snapshot()["projection"]["pending_plan"]
+        return copy.deepcopy(pending)
+
+    def _checkpoint_projection(self) -> dict[str, Any] | None:
+        pending = self.checkpoint_port.projection()
+        if pending is None:
+            return None
+        return {
+            key: copy.deepcopy(pending[key])
+            for key in ("kind", "prompt", "binding_digest", "choices", "evidence")
+        }
+
+    def _reset_episode_ports(self) -> None:
+        self.button_port = ButtonDecisionPort(
+            session_id=f"{self.session_id}-plan-{self._run_index}",
+            operator_label=self.operator_label,
+            clock=self.clock,
+        )
+        self.checkpoint_port = OperatorCheckpointPort(operator_label=self.operator_label)
+        self._prepared = threading.Event()
+        self._plan_choice = None
+        self._episode_plan = None
+        self._episode_result = None
+        self._runtime_milestone = None
+        self._active_episode_scope = None
+        self._active_intent_projection = None
+
+    def _campaign_coverage(self) -> list[dict[str, Any]]:
+        manifest = self.campaign_operator.manifest
+        if not isinstance(manifest, Mapping):
+            return []
+        bases = {
+            item["base_condition_digest"]: item
+            for item in self.campaign_operator.hypothesis["base_conditions"]
+        }
+        result = []
+        for slot in manifest["slots"]:
+            base = bases.get(slot["base_condition_digest"])
+            condition = base.get("coverage_condition") if isinstance(base, Mapping) else None
+            condition_digest = (
+                base.get("coverage_condition_digest")
+                if isinstance(base, Mapping) else None
+            )
+            if (
+                not isinstance(condition, Mapping)
+                or canonical_digest(condition) != condition_digest
+            ):
+                raise ContractError("OPERATOR_CONSOLE_COVERAGE_BINDING")
+            result.append({
+                "order_index": slot["order_index"],
+                "slot_id": slot["slot_id"],
+                "slot_digest": canonical_digest(slot),
+                "base_condition_digest": slot["base_condition_digest"],
+                "coverage_condition": copy.deepcopy(dict(condition)),
+                "coverage_condition_digest": condition_digest,
+            })
+        return result
+
+    def _advance_run(self) -> None:
+        self._run_index += 1
+        run_id = self._run_id_factory(self._run_index)
+        if not isinstance(run_id, str) or not SAFE_ID.fullmatch(run_id) or run_id == self.run_id:
+            raise ContractError("OPERATOR_CONSOLE_RUN_ID")
+        self.run_id = run_id
+        self._reset_episode_ports()
+
+    def _queue_candidate_review(self, value: object, sealed: Mapping[str, Any]) -> None:
+        fields = {
+            "candidate_path", "run_id", "expected_file_digest",
+            "expected_review_context_digest", "ledger_reference",
+        }
+        binding = sealed.get("intent_binding")
+        if (
+            self.candidate_review_port is None
+            or not isinstance(value, Mapping) or set(value) != fields
+            or not isinstance(binding, Mapping)
+            or value.get("run_id") != binding.get("run_id")
+            or not isinstance(value.get("ledger_reference"), Mapping)
+        ):
+            raise ContractError("OPERATOR_CONSOLE_CANDIDATE_OFFER")
+        item = copy.deepcopy(dict(value))
+        item.update({
+            "episode_number": len(self._episode_history) + 1,
+            "coverage_condition": copy.deepcopy(binding.get("coverage_condition")),
+        })
+        self._candidate_review_queue.append(item)
+
+    def _offer_next_candidate_review(self) -> None:
+        if (
+            self.candidate_review_port is None
+            or self._active_candidate_review is not None
+            or not self._candidate_review_queue
+        ):
+            return
+        item = self._candidate_review_queue.pop(0)
+        self.candidate_review_port.offer(**{
+            key: item[key] for key in (
+                "candidate_path", "run_id", "expected_file_digest",
+                "expected_review_context_digest",
+            )
+        })
+        self._active_candidate_review = item
+
+    def _available_ops(self, checkpoint, candidate) -> list[str]:
+        if self._workflow == "AUTHORING":
+            return ["resolve_checkpoint"] if checkpoint is not None else ["compile_draft"]
+        if self._workflow == "REVIEW_CAMPAIGN":
+            return ["authorize_campaign"]
+        if self._workflow == "AWAITING_APPROVAL":
+            return ["approve_exact_plan", "reject_plan", "cancel_session"]
+        if self._workflow == "RUNNING":
+            result = ["cancel_session"]
+            if checkpoint is not None:
+                result.insert(0, "resolve_checkpoint")
+            return result
+        if candidate is not None and candidate.get("status") == "PENDING":
+            return ["review_candidate"]
+        return []
+
+    def projection(self) -> dict[str, Any]:
+        with self._lock:
+            base = self._base_projection()
+            pending = self._pending_plan()
+            checkpoint = self._checkpoint_projection()
+            candidate = None if self.candidate_review_port is None else self.candidate_review_port.projection()
+            if candidate is not None and self._active_candidate_review is not None:
+                candidate.update({
+                    "episode_number": self._active_candidate_review["episode_number"],
+                    "queue_remaining": 1 + len(self._candidate_review_queue),
+                    "coverage_condition": copy.deepcopy(
+                        self._active_candidate_review["coverage_condition"]
+                    ),
+                })
+            campaign_session = None if self.session is None else self.session.status()
+            active = (
+                campaign_session.get("active_run_id")
+                if isinstance(campaign_session, Mapping)
+                and campaign_session.get("active_child") is True
+                else self.run_id if self._workflow in {
+                    "AWAITING_APPROVAL", "RUNNING", "CANCELLING",
+                } else None
+            )
+            runtime = {
+                "workflow_state": self._workflow,
+                "measurement_outcome": self._measurement_outcome,
+                "reason_codes": [] if self._last_error is None else [self._last_error],
+                "active_child_id": active,
+            }
+            if self._workflow in {"RUNNING", "CANCELLING"}:
+                runtime.update(copy.deepcopy(
+                    self._runtime_milestone
+                    or {
+                        "phase": "STARTING" if self._workflow == "RUNNING" else "CANCEL",
+                        "phase_label": (
+                            "에피소드 준비" if self._workflow == "RUNNING"
+                            else "안전한 중단 확인"
+                        ),
+                        "progress": 0 if self._workflow == "RUNNING" else 90,
+                        "detail": (
+                            "실행 입력과 현재 상태를 연결합니다."
+                            if self._workflow == "RUNNING"
+                            else "다음 에피소드는 시작하지 않습니다."
+                        ),
+                    }
+                ))
+            approval = None
+            if pending is not None:
+                binding = pending.get("decision_binding")
+                binding = binding if isinstance(binding, Mapping) else {}
+                approval = {
+                    "plan_digest": pending["plan_digest"],
+                    "approval_scope": pending["approval_scope"],
+                    "test_only_paths": self.test_only_paths,
+                    "decision_binding_digest": pending["decision_binding_digest"],
+                    "operator_summary": copy.deepcopy(binding.get("operator_summary")),
+                    "preapproval_checklist": copy.deepcopy(
+                        binding.get("preapproval_checklist")
+                    ),
+                    "site_confirmation_digest": binding.get("site_confirmation_digest"),
+                }
+            base.update({
+                "connection_state": "READY",
+                "effect_scope": self.campaign_operator.effect_scope,
+                "lifecycle_action": self.campaign_operator.lifecycle_action,
+                "data_disposition": self.campaign_operator.data_disposition,
+                "available_ops": self._available_ops(checkpoint, candidate),
+                "operator_checkpoint": checkpoint,
+                "candidate_review": candidate,
+                "candidate_review_status": "NOT_APPLICABLE" if candidate is None else candidate["status"],
+                "runtime": runtime, "approval": approval,
+                "episode_plan": copy.deepcopy(self._episode_plan),
+                "episode_result": self._browser_result(self._episode_result),
+                "episode_history": [
+                    self._browser_result(item) for item in self._episode_history
+                ],
+                "campaign_envelope": copy.deepcopy(self._campaign_envelope),
+                "campaign_authorization": copy.deepcopy(self._campaign_authorization),
+                # The lifecycle owner retains the full manifest and receipt.  The
+                # browser only needs the compact campaign status; copying the full
+                # owner projection here made large campaign views superlinear.
+                "campaign_operator": (
+                    None if campaign_session is None else {
+                        "campaign": copy.deepcopy(campaign_session["campaign"]),
+                    }
+                ),
+                "campaign_session": campaign_session,
+                "campaign_coverage": self._campaign_coverage(),
+                "terminal_object_pose": copy.deepcopy(self._terminal_object_pose),
+                "operator_identity": self.operator_label,
+                "human_semantic": "NOT_MEASURED",
+            })
+            return base
+
+    def publish_runtime(self, event: Mapping[str, Any]) -> None:
+        """Project bounded run_job milestones without taking lifecycle ownership."""
+        if not isinstance(event, Mapping):
+            raise ContractError("OPERATOR_CONSOLE_RUNTIME_EVENT")
+        code = event.get("code")
+        milestone = LIVE_RUNTIME_MILESTONES.get(code)
+        if milestone is None:
+            return
+        if event.get("run_id") != self.run_id:
+            raise ContractError("OPERATOR_CONSOLE_RUNTIME_EVENT")
+        label, progress, detail = milestone
+
+        def change():
+            if self._workflow != "RUNNING":
+                return
+            self._runtime_milestone = {
+                "phase": code, "phase_label": label,
+                "progress": progress, "detail": detail,
+            }
+
+        self._owner_transition(change)
+
+    def _owner_transition(self, change: Callable[[], None]) -> None:
+        with self._lock:
+            initial = self._initial_handler_active
+        if initial:
+            with self._lock:
+                change()
+                self._prepared.set()
+        else:
+            self.core.transition(change)
+
+    def _authorization_payload(self) -> dict[str, str]:
+        manifest = self.campaign_operator.manifest
+        if not isinstance(manifest, Mapping) or not isinstance(self._campaign_envelope, Mapping):
+            raise ContractError("OPERATOR_CONSOLE_CAMPAIGN_NOT_COMPILED")
+        return {
+            "draft_id": self.campaign_operator.draft["draft_id"],
+            "manifest_digest": manifest["manifest_digest"],
+            "envelope_digest": self._campaign_envelope["envelope_digest"],
+            "data_disposition": self.campaign_operator.data_disposition,
+        }
+
+    def _build_campaign_authorization(self) -> dict[str, Any]:
+        if self._campaign_envelope is None:
+            raise ContractError("OPERATOR_CONSOLE_CAMPAIGN_NOT_COMPILED")
+        now = self.clock().astimezone(timezone.utc)
+        return build_campaign_authorization(
+            authorization_id=f"{self.session_id}-campaign-authorization",
+            operator_label=self.operator_label,
+            envelope=self._campaign_envelope,
+            approved_at=now.isoformat().replace("+00:00", "Z"),
+            expires_at=self.campaign_operator.expires_at,
+        )
+
+    def _active_campaign_episode_scope(self) -> dict[str, str]:
+        session = self.session.status() if self.session is not None else None
+        intent = self._active_intent_projection
+        if (
+            not isinstance(self._campaign_envelope, Mapping)
+            or not isinstance(session, Mapping)
+            or session.get("active_child") is not True
+            or not isinstance(intent, Mapping)
+        ):
+            raise ContractError("OPERATOR_CONSOLE_CAMPAIGN_SCOPE_MISMATCH")
+        scope = {
+            "manifest_digest": self._campaign_envelope["manifest_digest"],
+            "intent_digest": intent.get("intent_digest"),
+            "run_id": intent.get("run_id"),
+            "slot_digest": intent.get("slot_digest"),
+            "root_binding_digest": session.get("root_binding_digest"),
+            "start_binding_digest": session.get("start_binding_digest"),
+        }
+        if (
+            scope["run_id"] != session.get("active_run_id")
+            or scope["intent_digest"] != session.get("active_intent_digest")
+        ):
+            raise ContractError("OPERATOR_CONSOLE_CAMPAIGN_SCOPE_MISMATCH")
+        return scope
+
+    def _authorized_plan_decision(self, request: Mapping[str, Any]) -> dict[str, Any]:
+        authorization = self._campaign_authorization
+        binding = request.get("decision_binding") if isinstance(request, Mapping) else None
+        episode = binding.get("episode_binding") if isinstance(binding, Mapping) else None
+        summary = binding.get("operator_summary") if isinstance(binding, Mapping) else None
+        session = self.session.status() if self.session is not None else None
+        scope = (
+            {field: copy.deepcopy(episode[field]) for field in EPISODE_SCOPE_FIELDS}
+            if isinstance(episode, Mapping) and EPISODE_SCOPE_FIELDS <= set(episode)
+            else None
+        )
+        if (
+            not isinstance(authorization, Mapping)
+            or not isinstance(self._campaign_envelope, Mapping)
+            or not isinstance(binding, Mapping)
+            or not isinstance(scope, Mapping)
+            or not isinstance(summary, Mapping)
+            or binding.get("data_disposition")
+            != self._campaign_envelope["data_disposition"]
+            or request.get("approval_scope") != "HIL_NUMERIC_PROXY"
+            or not isinstance(summary.get("path"), list)
+            or not summary["path"]
+            or not all(isinstance(phase, str) and SAFE_ID.fullmatch(phase) for phase in summary["path"])
+            or not all(isinstance(summary.get(field), Mapping) for field in ("speed", "clearance"))
+            or not isinstance(summary.get("flow"), Mapping)
+            or self._active_episode_scope is not None
+            and self._active_episode_scope != scope
+        ):
+            raise ContractError("OPERATOR_CONSOLE_CAMPAIGN_SCOPE_MISMATCH")
+        validate_authorized_episode_scope(
+            authorization,
+            run_id=request.get("run_id"),
+            plan_digest=request.get("plan_digest"),
+            active_run_id=session.get("active_run_id") if isinstance(session, Mapping) else None,
+            active_intent_digest=(
+                session.get("active_intent_digest") if isinstance(session, Mapping) else None
+            ),
+            data_disposition=binding.get("data_disposition"),
+            episode_binding=scope,
+            expected_envelope=self._campaign_envelope,
+            now=self.clock(),
+        )
+        pending = {
+            "plan_digest": request["plan_digest"],
+            "approval_scope": request["approval_scope"],
+            "decision_binding_digest": canonical_digest({
+                "run_id": request["run_id"],
+                "plan_digest": request["plan_digest"],
+                "approval_scope": request["approval_scope"],
+                "decision_binding": binding,
+            }),
+            "operator_summary": copy.deepcopy(summary),
+            "campaign_authorization_digest": authorization["authorization_digest"],
+        }
+        self._episode_plan = pending
+        self._active_episode_scope = copy.deepcopy(scope)
+        return {
+            "choice": "APPROVE",
+            "run_id": request["run_id"],
+            "plan_digest": request["plan_digest"],
+            "approval_scope": request["approval_scope"],
+            "decision_binding_digest": pending["decision_binding_digest"],
+            "decision_source": "CAMPAIGN_AUTHORIZATION",
+            "operator_label": self.operator_label,
+        }
+
+    def _authorized_checkpoint(self, request: Mapping[str, Any]) -> dict[str, Any] | None:
+        if self._campaign_authorization is None:
+            return None
+        choices = {
+            "PHYSICAL_SCENE_CONFIRMATION": (
+                "READY", "CAMPAIGN_AUTHORIZATION",
+            ),
+            "RELEASE_VERDICT": (
+                "LANDED", "CAMPAIGN_CONTROL_PROXY",
+            ),
+        }
+        decision = choices.get(request.get("kind"))
+        evidence = request.get("evidence")
+        if decision is None or not isinstance(evidence, Mapping):
+            return None
+        choice, source = decision
+        session = self.session.status() if self.session is not None else None
+        if request["kind"] == "PHYSICAL_SCENE_CONFIRMATION":
+            if self._episode_plan is not None:
+                raise ContractError("OPERATOR_CONSOLE_CAMPAIGN_SCOPE_MISMATCH")
+            scope = self._active_campaign_episode_scope()
+            if (
+                not isinstance(evidence.get("checklist"), Mapping)
+                or not isinstance(evidence.get("operator_summary"), Mapping)
+                or not isinstance(evidence.get("planned_start_evidence_digest"), str)
+                or DIGEST.fullmatch(evidence["planned_start_evidence_digest"]) is None
+                or evidence.get("data_disposition")
+                != self.campaign_operator.data_disposition
+            ):
+                raise ContractError("OPERATOR_CONSOLE_CAMPAIGN_SCOPE_MISMATCH")
+            expected_plan_digest = None
+        else:
+            if (
+                not isinstance(self._active_episode_scope, Mapping)
+                or not isinstance(self._episode_plan, Mapping)
+            ):
+                raise ContractError("OPERATOR_CONSOLE_CAMPAIGN_SCOPE_MISMATCH")
+            scope = self._active_episode_scope
+            expected_plan_digest = self._episode_plan["plan_digest"]
+        validate_authorized_episode_scope(
+            self._campaign_authorization,
+            run_id=request.get("run_id"),
+            plan_digest=request.get("plan_digest"),
+            active_run_id=session.get("active_run_id") if isinstance(session, Mapping) else None,
+            active_intent_digest=(
+                session.get("active_intent_digest") if isinstance(session, Mapping) else None
+            ),
+            data_disposition=self._campaign_envelope["data_disposition"],
+            episode_binding=scope,
+            expected_plan_digest=expected_plan_digest,
+            expected_envelope=self._campaign_envelope,
+            now=self.clock(),
+        )
+        if request["kind"] == "RELEASE_VERDICT" and (
+            not isinstance(evidence.get("release_target"), Mapping)
+            or not isinstance(evidence.get("safe_staging_joint_positions_rad"), list)
+            or not isinstance(evidence.get("execution_evidence_digest"), str)
+            or not DIGEST.fullmatch(evidence["execution_evidence_digest"])
+        ):
+            raise ContractError("OPERATOR_CONSOLE_CAMPAIGN_SCOPE_MISMATCH")
+        bound = {
+            key: copy.deepcopy(request[key])
+            for key in ("kind", "run_id", "plan_digest", "prompt", "choices", "evidence")
+        }
+        if choice not in request.get("choices", []):
+            raise ContractError("OPERATOR_CONSOLE_CAMPAIGN_SCOPE_MISMATCH")
+        if request["kind"] == "PHYSICAL_SCENE_CONFIRMATION":
+            self._active_episode_scope = copy.deepcopy(scope)
+        return {
+            "kind": request["kind"], "choice": choice,
+            "run_id": request["run_id"], "plan_digest": request["plan_digest"],
+            "checkpoint_binding_digest": canonical_digest(bound),
+            "decision_source": source, "operator_label": self.operator_label,
+        }
+
+    def _decision_provider(self, request: Mapping[str, Any]) -> dict[str, Any] | None:
+        if (
+            not isinstance(request, Mapping) or set(request) != PLAN_REQUEST_FIELDS
+            or request.get("schema_version") != "data_factory.plan_decision_request.v1"
+        ):
+            raise ContractError("OPERATOR_CONSOLE_PLAN_REQUEST")
+
+        if self.campaign_approval_once:
+            with self._lock:
+                return self._authorized_plan_decision(request)
+
+        def change():
+            offered = self.button_port.offer(
+                run_id=request["run_id"], plan_digest=request["plan_digest"],
+                decision_binding=request["decision_binding"],
+                approval_scope=request["approval_scope"],
+            )
+            pending = offered["projection"]["pending_plan"]
+            plan = copy.deepcopy(dict(pending["decision_binding"]))
+            plan["decision_binding_digest"] = pending["decision_binding_digest"]
+            self._episode_plan = plan
+            self._workflow, self._last_error = "AWAITING_APPROVAL", None
+
+        self._owner_transition(change)
+        return self.button_port.wait(request["timeout_s"])
+
+    def _checkpoint_provider(self, request: Mapping[str, Any]) -> dict[str, Any] | None:
+        automatic = self._authorized_checkpoint(request)
+        if automatic is not None:
+            return automatic
+
+        def change():
+            self.checkpoint_port.offer(request)
+            self._workflow, self._last_error = "RUNNING", None
+
+        self._owner_transition(change)
+        return self.checkpoint_port.wait(request["timeout_s"])
+
+    def _run_episode(self, intent, lifecycle, cancel_event, episode_context):
+        slot = intent.get("slot") if isinstance(intent, Mapping) else None
+        base = intent.get("base_condition") if isinstance(intent, Mapping) else None
+        condition = base.get("coverage_condition") if isinstance(base, Mapping) else None
+        condition_digest = (
+            base.get("coverage_condition_digest") if isinstance(base, Mapping) else None
+        )
+        if (
+            not isinstance(slot, Mapping)
+            or not isinstance(condition, Mapping)
+            or canonical_digest(condition) != condition_digest
+        ):
+            raise ContractError("OPERATOR_CONSOLE_COVERAGE_BINDING")
+        binding = {
+            "run_id": intent["run_id"],
+            "intent_digest": intent["intent_digest"],
+            "order_index": intent["order_index"],
+            "slot_id": slot["slot_id"],
+            "slot_digest": intent["slot_digest"],
+            "base_condition_digest": slot["base_condition_digest"],
+            "coverage_condition": copy.deepcopy(dict(condition)),
+            "coverage_condition_digest": condition_digest,
+        }
+        binding["binding_digest"] = canonical_digest(binding)
+        with self._lock:
+            self._active_intent_projection = binding
+        return self.episode_call(
+            intent, lifecycle, cancel_event, episode_context,
+            self._decision_provider, self._checkpoint_provider,
+        )
+
+    def _clear_pending_plan(self) -> None:
+        pending = self._pending_plan()
+        if pending is not None:
+            try:
+                self._consume_button("CANCEL")
+            except ContractError:
+                pass
+
+    def _publish_outcome(self, outcome: Mapping[str, Any]) -> bool:
+        self._clear_pending_plan()
+        self.checkpoint_port.close()
+        campaign = self._campaign(outcome.get("campaign"))
+        result = outcome.get("result") if isinstance(outcome.get("result"), Mapping) else {}
+        technical = result.get("technical_evidence") if isinstance(result, Mapping) else None
+        terminal = (
+            self.terminal_response_call()
+            if self.terminal_response_call is not None else None
+        )
+        terminal = copy.deepcopy(dict(terminal)) if isinstance(terminal, Mapping) else None
+        terminal_data = (
+            terminal.get("data")
+            if isinstance(terminal, Mapping) and isinstance(terminal.get("data"), Mapping)
+            else {}
+        )
+        continue_campaign = bool(
+            outcome.get("ok") is True
+            and not self._cancel_requested
+            and self.campaign_approval_once
+            and campaign
+            and campaign.get("state") == "READY"
+        )
+        if self._cancel_requested or campaign and campaign.get("state") == "CANCELLED":
+            name, code, workflow = "CANCEL", "PLAN_CANCELLED", "TERMINAL"
+            self._measurement_outcome = "NOT_MEASURED"
+            self._last_error = code
+        elif outcome.get("ok") is True:
+            name, code = "PASS", "TECHNICAL_PASS"
+            workflow = "RUNNING" if continue_campaign else "TERMINAL"
+            self._measurement_outcome = "PASS"
+            self._last_error = None
+        elif terminal is not None and terminal.get("ok") is False:
+            code = terminal.get("code") if isinstance(terminal.get("code"), str) else "OPERATOR_CONSOLE_EPISODE"
+            measured = terminal_data.get("measurement_outcome")
+            if measured not in {"PASS", "FAIL", "NOT_AVAILABLE", "NOT_MEASURED"}:
+                measured = "NOT_MEASURED" if terminal.get("state") == "CANCELLED" else "FAIL"
+            self._measurement_outcome = measured
+            if code == "PAUSED_AWAITING_OPERATOR":
+                name, workflow = "PAUSED", "PAUSED_AWAITING_OPERATOR"
+            elif terminal.get("state") == "CANCELLED":
+                name, workflow = "CANCEL", "TERMINAL"
+            elif measured == "NOT_AVAILABLE":
+                name, workflow = "NOT_AVAILABLE", "BLOCKED"
+            else:
+                name, workflow = "FAIL", "BLOCKED"
+            self._last_error = code
+        elif self._plan_choice == "REJECT":
+            name, code, workflow = "REJECT", "PLAN_REJECTED", "BLOCKED"
+            self._measurement_outcome = "NOT_MEASURED"
+            self._last_error = code
+        else:
+            name = "FAIL"
+            code = outcome.get("code") if isinstance(outcome.get("code"), str) else "OPERATOR_CONSOLE_EPISODE"
+            self._measurement_outcome = _measurement_for_code(code)
+            workflow, self._last_error = "BLOCKED", code
+        sealed = {
+            "outcome": name, "code": code,
+            "technical_evidence": copy.deepcopy(
+                technical if technical is not None else terminal_data.get("technical_validator")
+            ),
+            "campaign": campaign,
+            "human_semantic": result.get(
+                "human_semantic", terminal_data.get("human_semantic_outcome", "NOT_MEASURED"),
+            ),
+            "episode_ledger": copy.deepcopy(
+                result.get("episode_ledger", terminal_data.get("episode_ledger"))
+            ),
+            "intent_binding": copy.deepcopy(
+                result.get("intent_binding", self._active_intent_projection)
+            ),
+        }
+        for field in (
+            "one_job", "synthetic_review", "synthetic_coverage_update",
+        ):
+            value = result.get(field, terminal_data.get(field))
+            if value is not None:
+                sealed[field] = copy.deepcopy(value)
+        review_offer = result.get("candidate_review_offer")
+        if review_offer is not None:
+            if name != "PASS":
+                raise ContractError("OPERATOR_CONSOLE_CANDIDATE_OFFER")
+            self._queue_candidate_review(review_offer, sealed)
+        terminal_pose = result.get("terminal_object_pose")
+        if terminal_pose is not None:
+            if (
+                not isinstance(terminal_pose, Mapping)
+                or set(terminal_pose) != {"place_id", "yaw_deg", "x_mm", "y_mm"}
+                or not isinstance(terminal_pose.get("place_id"), str)
+                or not SAFE_ID.fullmatch(terminal_pose["place_id"])
+                or any(
+                    isinstance(terminal_pose.get(field), bool)
+                    or not isinstance(terminal_pose.get(field), (int, float))
+                    or not math.isfinite(terminal_pose[field])
+                    for field in ("yaw_deg", "x_mm", "y_mm")
+                )
+            ):
+                raise ContractError("OPERATOR_CONSOLE_TERMINAL_OBJECT_POSE")
+            self._terminal_object_pose = copy.deepcopy(dict(terminal_pose))
+            sealed["terminal_object_pose"] = copy.deepcopy(self._terminal_object_pose)
+        sealed["result_digest"] = canonical_digest(sealed)
+        self._episode_result, self._workflow = sealed, workflow
+        self._episode_history.append(copy.deepcopy(sealed))
+        if workflow in {"BLOCKED", "TERMINAL"}:
+            self._offer_next_candidate_review()
+        self._prepared.set()
+        return continue_campaign
+
+    def _worker_target(self) -> None:
+        while True:
+            try:
+                outcome = self.campaign_operator.run_next({"run_id": self.run_id}, {})
+            except ContractError as exc:
+                outcome = {
+                    "ok": False, "code": exc.code,
+                    "campaign": None if self.session is None else self.session.status(),
+                }
+            with self._lock:
+                initial = self._initial_handler_active
+            if initial:
+                with self._lock:
+                    continuation = self._publish_outcome(outcome)
+            else:
+                continuation_holder = []
+
+                def publish():
+                    continuation_holder.append(self._publish_outcome(outcome))
+
+                self.core.transition(publish)
+                continuation = continuation_holder[0]
+            if not continuation:
+                return
+            if self._cancel_requested:
+                return
+            if initial:
+                with self._lock:
+                    self._advance_run()
+            else:
+                self.core.transition(self._advance_run)
+
+    def compile_draft(self, payload: dict[str, Any], _view: dict[str, Any]) -> dict[str, Any]:
+        expected = {
+            "draft_id": self.campaign_operator.draft["draft_id"],
+            "data_disposition": self.campaign_operator.data_disposition,
+        }
+        with self._lock:
+            if (
+                payload != expected or self._workflow != "AUTHORING"
+                or self._thread is not None or self._checkpoint_projection() is not None
+            ):
+                raise ContractError("OPERATOR_CONSOLE_COMPILE_FIELDS")
+            if self.campaign_operator.manifest is None:
+                self.campaign_operator.compile_draft({}, {})
+            if self.campaign_approval_once:
+                self._campaign_envelope = build_campaign_envelope(
+                    source_draft=self.campaign_operator.draft,
+                    manifest=self.campaign_operator.manifest,
+                    compilation_receipt=self.campaign_operator.compilation_receipt,
+                    hypothesis=self.campaign_operator.hypothesis,
+                    effect_scope=self.campaign_operator.effect_scope,
+                    lifecycle_action=self.campaign_operator.lifecycle_action,
+                    data_disposition=self.campaign_operator.data_disposition,
+                )
+                self._workflow, self._last_error = "REVIEW_CAMPAIGN", None
+                return {
+                    "outcome": "REVIEW_CAMPAIGN",
+                    "manifest_digest": self.campaign_operator.manifest["manifest_digest"],
+                    "envelope_digest": self._campaign_envelope["envelope_digest"],
+                    "episode_count": len(self.campaign_operator.manifest["slots"]),
+                }
+            self._workflow, self._last_error = "RUNNING", None
+            self._initial_handler_active = True
+            self._thread = threading.Thread(
+                target=self._worker_target, name=f"operator-console-{self.run_id}",
+                daemon=False,
+            )
+            self._thread.start()
+        ready = self._prepared.wait(self.prepare_timeout_s)
+        with self._lock:
+            ready = ready or self._prepared.is_set()
+            self._initial_handler_active = False
+            if ready and self._workflow == "AWAITING_APPROVAL":
+                return {
+                    "outcome": "AWAITING_APPROVAL",
+                    "episode_plan": copy.deepcopy(self._episode_plan),
+                }
+            if ready:
+                checkpoint = self._checkpoint_projection()
+                if checkpoint is not None:
+                    return {
+                        "outcome": "AWAITING_CHECKPOINT",
+                        "operator_checkpoint": checkpoint,
+                    }
+                return copy.deepcopy(self._episode_result)
+            return {"outcome": "RUNNING", "active_child_id": self.run_id}
+
+    def authorize_campaign(self, payload: dict[str, Any], _view: dict[str, Any]) -> dict[str, Any]:
+        with self._lock:
+            if (
+                not self.campaign_approval_once
+                or self._workflow != "REVIEW_CAMPAIGN"
+                or payload != self._authorization_payload()
+                or self._thread is not None
+                or self._campaign_authorization is not None
+            ):
+                raise ContractError("OPERATOR_CONSOLE_CAMPAIGN_AUTHORIZATION")
+            self._campaign_authorization = self._build_campaign_authorization()
+            self._workflow, self._last_error = "RUNNING", None
+            self._thread = threading.Thread(
+                target=self._worker_target,
+                name=f"operator-console-{self.session_id}",
+                daemon=False,
+            )
+            self._thread.start()
+            return {
+                "outcome": "RUNNING",
+                "active_child_id": self.run_id,
+                "campaign_authorization_digest": self._campaign_authorization["authorization_digest"],
+            }
+
+    def _button_intent(self, snapshot, op, digest, choice) -> dict[str, Any]:
+        return {
+            "schema_version": INTENT_SCHEMA,
+            "intent_id": f"{self.session_id}-button-{choice.lower()}",
+            "session_id": snapshot["session_id"],
+            "view_revision": snapshot["revision"],
+            "view_digest": snapshot["view_digest"], "op": op,
+            "payload": {"decision_binding_digest": digest},
+        }
+
+    def _consume_button(self, choice: str) -> dict[str, Any]:
+        snapshot = self.button_port.core.snapshot()
+        pending = snapshot["projection"]["pending_plan"]
+        if pending is None:
+            raise ContractError("OPERATOR_CONSOLE_PLAN_STATE")
+        op = {
+            "APPROVE": "approve_exact_plan", "REJECT": "reject_plan", "CANCEL": "cancel_plan",
+        }[choice]
+        return self.button_port.core.consume(self._button_intent(
+            snapshot, op, pending["decision_binding_digest"], choice,
+        ))["result"]
+
+    def _plan_payload(self) -> dict[str, Any]:
+        pending = self._pending_plan()
+        if pending is None:
+            raise ContractError("OPERATOR_CONSOLE_PLAN_STATE")
+        return {
+            "plan_digest": pending["plan_digest"],
+            "approval_scope": pending["approval_scope"],
+            "data_disposition": self.campaign_operator.data_disposition,
+        }
+
+    def approve_exact_plan(self, payload: dict[str, Any], _view: dict[str, Any]) -> dict[str, Any]:
+        with self._lock:
+            if self._workflow != "AWAITING_APPROVAL" or payload != self._plan_payload():
+                raise ContractError("OPERATOR_CONSOLE_PLAN_DIGEST_MISMATCH")
+            decision = self._consume_button("APPROVE")
+            self._plan_choice = "APPROVE"
+            self._workflow = "RUNNING"
+            return {"outcome": "RUNNING", "active_child_id": self.run_id, "decision": decision}
+
+    def reject_plan(self, payload: dict[str, Any], _view: dict[str, Any]) -> dict[str, Any]:
+        with self._lock:
+            if self._workflow != "AWAITING_APPROVAL" or payload != self._plan_payload():
+                raise ContractError("OPERATOR_CONSOLE_PLAN_DIGEST_MISMATCH")
+            decision = self._consume_button("REJECT")
+            self._plan_choice = "REJECT"
+            self._workflow = "CANCELLING"
+            return {"outcome": "REJECT", "decision": decision}
+
+    def resolve_checkpoint(self, payload: dict[str, Any], _view: dict[str, Any]) -> dict[str, Any]:
+        with self._lock:
+            pending = self._checkpoint_projection()
+            if (
+                self._workflow == "AUTHORING"
+                and pending is not None
+                and pending.get("kind") == "GRIPPER_MAINTENANCE"
+                and self.gripper_setup_resolution_call is not None
+            ):
+                decision = self.checkpoint_port.resolve(payload)
+                consumed = self.checkpoint_port.wait(0)
+                if consumed != decision:
+                    raise ContractError("OPERATOR_CONSOLE_SETUP")
+                if decision["choice"] == "CANCEL":
+                    self._workflow = "PAUSED_AWAITING_OPERATOR"
+                    self._measurement_outcome = "NOT_MEASURED"
+                    self._last_error = "GRIPPER_MAINTENANCE_CANCELLED"
+                    return {"outcome": "PAUSED", "measurement_outcome": "NOT_MEASURED"}
+                try:
+                    result = self.gripper_setup_resolution_call(copy.deepcopy(decision))
+                except ContractError as exc:
+                    self._last_error = exc.code
+                    if exc.code == "GRIPPER_NORMAL_GRAPH_REQUIRED":
+                        self._workflow = "PAUSED_AWAITING_OPERATOR"
+                        self._measurement_outcome = "NOT_MEASURED"
+                        return {
+                            "outcome": "PAUSED",
+                            "measurement_outcome": "NOT_MEASURED",
+                            "code": exc.code,
+                        }
+                    self._workflow = "BLOCKED"
+                    self._measurement_outcome = (
+                        "NOT_AVAILABLE" if exc.code.endswith("NOT_AVAILABLE") else "FAIL"
+                    )
+                    return {
+                        "outcome": "BLOCKED",
+                        "measurement_outcome": self._measurement_outcome,
+                        "code": exc.code,
+                    }
+                if not isinstance(result, Mapping) or result.get("state") != "ATTACHED":
+                    self._workflow = "BLOCKED"
+                    self._measurement_outcome = "FAIL"
+                    self._last_error = "GRIPPER_MAINTENANCE_RECHECK"
+                    return {
+                        "outcome": "BLOCKED", "measurement_outcome": "FAIL",
+                        "code": self._last_error,
+                    }
+                self._last_error = None
+                return {"outcome": "READY", "gripper_setup": copy.deepcopy(dict(result))}
+            if self._workflow != "RUNNING":
+                raise ContractError("OPERATOR_CONSOLE_CHECKPOINT_STATE")
+            return self.checkpoint_port.resolve(payload)
+
+    def _cancel_owner(self) -> dict[str, Any] | None:
+        self._cancel_requested = True
+        self._plan_choice = "CANCEL"
+        self._clear_pending_plan()
+        self.checkpoint_port.close()
+        try:
+            return self.campaign_operator.cancel_campaign({}, {})
+        except ContractError:
+            return None
+
+    def cancel_session(self, payload: dict[str, Any], _view: dict[str, Any]) -> dict[str, Any]:
+        with self._lock:
+            if (
+                self._workflow not in {"AWAITING_APPROVAL", "RUNNING"}
+                or payload != {"active_child_id": self.run_id}
+            ):
+                raise ContractError("OPERATOR_CONSOLE_CANCEL_BINDING")
+            cancelled = self._cancel_owner()
+            self._workflow = "CANCELLING"
+            return {"outcome": "CANCELLING", "campaign": copy.deepcopy(cancelled)}
+
+    def review_candidate(self, payload: dict[str, Any], _view=None) -> dict[str, Any]:
+        """Resolve one terminal candidate and reproject its existing ledger state."""
+        with self._lock:
+            if (
+                self._workflow not in {"BLOCKED", "TERMINAL"}
+                or self.candidate_review_port is None
+                or self._active_candidate_review is None
+            ):
+                raise ContractError("OPERATOR_CONSOLE_CANDIDATE_STATE")
+            item = self._active_candidate_review
+            resolved = self.candidate_review_port.resolve_deferred(payload)
+            try:
+                ledger_reference = self.candidate_state_bind_call(
+                    item["ledger_reference"], item["candidate_path"],
+                )
+            except Exception as exc:
+                # The candidate CAS may already be durable.  Keep the exact
+                # review pending so the same intent can retry only the ledger
+                # projection instead of losing or changing the decision.
+                raise ContractError("OPERATOR_CONSOLE_CANDIDATE_STATE") from exc
+            if (
+                ledger_reference.get("review_status") != resolved["status"]
+                or ledger_reference.get("training_status") != "NOT_AUTHORIZED"
+                or ledger_reference.get("retention_state") != "PRESERVE"
+            ):
+                raise ContractError("OPERATOR_CONSOLE_CANDIDATE_STATE")
+            matches = [
+                history for history in self._episode_history
+                if history.get("intent_binding", {}).get("run_id") == resolved["run_id"]
+            ]
+            if len(matches) != 1:
+                raise ContractError("OPERATOR_CONSOLE_CANDIDATE_STATE")
+            history = matches[0]
+            history["episode_ledger"] = copy.deepcopy(ledger_reference)
+            history["human_semantic"] = resolved["status"]
+            history["result_digest"] = canonical_digest({
+                key: value for key, value in history.items()
+                if key != "result_digest"
+            })
+            self.candidate_review_port.acknowledge(
+                resolved["review_binding_digest"],
+            )
+            self._active_candidate_review = None
+            self._offer_next_candidate_review()
+            return {
+                **resolved,
+                "remaining_reviews": (
+                    len(self._candidate_review_queue)
+                    + (1 if self._active_candidate_review is not None else 0)
+                ),
+            }
+
+    def wait_for_episode(self, timeout_s: float | None = None) -> dict[str, Any] | None:
+        thread = self._thread
+        if thread is not None:
+            thread.join(self.close_timeout_s if timeout_s is None else timeout_s)
+        with self._lock:
+            return copy.deepcopy(self._episode_result)
+
+    def close(self) -> None:
+        thread = self._thread
+        if thread is None or not thread.is_alive():
+            self.checkpoint_port.close()
+            return
+        with self._lock:
+            self._cancel_owner()
+        thread.join(self.close_timeout_s)
+        if thread.is_alive():
+            raise ContractError("OPERATOR_CONSOLE_THREAD_LEAK")

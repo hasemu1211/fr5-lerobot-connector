@@ -268,6 +268,7 @@
         await waitFor(() => currentView?.camera_setup?.bindings["camera-1"] === "WRIST" && !intentBusy);
         check(currentView.camera_setup.bindings["camera-2"] === "UP" && new Set(Object.values(currentView.camera_setup.bindings)).size === 2, "occupied camera roles swap atomically without duplicates");
 
+        document.querySelector('[data-step-target="environment"]').click();
         const focusedCamera = document.querySelector('[data-camera-logical-id="camera-2"]');
         focusedCamera.focus();
         cameraSetupState.bindings = {"camera-1": "SIDE", "camera-2": "UP"};
@@ -302,6 +303,7 @@
         sessionIdOverride = "collection-operator-r002";
         await loadView();
         await waitFor(() => currentView?.session_id === sessionIdOverride && currentView?.revision === 1);
+        document.querySelector('[data-step-target="plan"]').click();
         check(document.querySelector('[data-axis="start"]').hidden && !document.querySelector("#open-start-pose").hidden && document.querySelector("#catalog-fields").textContent.includes("시작 자세"), "legacy start dropdown is replaced by reusable start-pose management");
         check([...document.querySelector('[data-axis="task"]').options].some((option) => option.value === "pick_place" && option.disabled), "unavailable catalog combination is disabled with a reason");
         const selectedTask = catalogOption(currentView, "task", currentView.draft.selection.task);

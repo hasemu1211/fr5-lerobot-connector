@@ -5,22 +5,9 @@ from pathlib import Path
 sys.path.insert(0,str(Path(__file__).resolve().parents[2])); from tools.data_factory.motion import pickup_executor as e
 from tools.data_factory.scene_state import release_slot
 from tools.fr5_data_factory import canonical_digest
-SCENE={"scene_state_digest":"sha256:"+"8"*64,"revision":1,"object_instance_id":"cube-1"}
-SCENE_SPEC={"frame_id":"base_link","floor":{"id":"floor","dimensions_m":[2.,2.,.05],"surface_z_m":-.02,"source":"test"},"wall":{"id":"wall","dimensions_m":[2.,.05,2.],"near_face_y_m":-.3,"wall_side":"opposite_home_arm_protrusion","home_arm_protrusion_base_xy":[0.,1.],"j1_home_deg":-90.}}
+from .operator.fixtures import SCENE_SPEC, motion
 
-def motion(continuous=False):
-    phases=[]
-    for p in e.PHASES:
-        s={"phase":p,"limits":{"command_duration_s":1,"execution_timeout_s":2,"completion_tolerance_m":.002 if p=="GRIPPER_CLOSE" else .001} if p.startswith("GRIPPER") else {"velocity_scaling":.1,"acceleration_scaling":.1,"planning_timeout_s":1,"execution_timeout_s":1}}
-        if p == "SAFE_POSE_PTP":s["joint_positions_rad"]=[0]*6
-        elif p in e.ARM_PHASES:s["target"]={"base_tcp":{"translation_m":[0,0,0],"rotation_columns":[[1,0,0],[0,1,0],[0,0,1]]},"base_tool":{"translation_m":[0,0,0],"rotation_columns":[[1,0,0],[0,1,0],[0,0,1]]}}
-        else:s["gripper_position_m"]=0.01
-        if not continuous and p=="FINAL_APPROACH_LIN":s["requires_confirmation"]="PRECONTACT_HUMAN"
-        if not continuous and p=="GRIPPER_CLOSE":s["pause_after"]="GRASP_VERDICT"
-        if p=="LIFT_LIN":s["pause_after"]="SEMANTIC_VERDICT"
-        phases.append(s)
-    digests={key:"sha256:"+char*64 for key,char in zip(("selected_sheet","yaw0_sheet","cell_calibration","robot_system","collection_profile","object_profile","grasp_profile","robot_description_digest","moveit_config_digest","planning_scene_digest","motion_qualification","home_candidate"),"bcdef0123456")};digests["planning_scene_digest"]=canonical_digest(SCENE_SPEC)
-    return {"schema_version":"fr5.motion_program.v2","robot_system_id":"fr5-lab-a","resolved_job_digest":"sha256:"+"a"*64,"binding_digests":digests,"planning_scene":SCENE_SPEC,"frames":{"planning_frame":"base_link","planning_group":"fairino5_v6_group","tool_link":"wrist3_link"},"planning":{"pipeline_id":"pilz_industrial_motion_planner","ptp_planner_id":"PTP","lin_planner_id":"LIN","goal_tolerances":{"position_m":.001,"orientation_rad":.01,"joint_rad":.01},"max_joint_state_age_s":1},"execution_timeouts_s":{"heartbeat_lease":1,"cancel":1,"precontact_confirmation":30,"grasp_verdict":30,"semantic_verdict":30},"gripper_requirements":{"command_position_m":.01,"acceptable_feedback_m":{"min":.01,"max":.012},"velocity_percent":20,"force_percent":50,"evidence_digest":"sha256:"+"7"*64},"steps":phases}
+SCENE={"scene_state_digest":"sha256:"+"8"*64,"revision":1,"object_instance_id":"cube-1"}
 def snapshot(positions=None,ready=True,gripper_position=.01,velocity=20,force=50,plugin="fairino_hardware/FairinoHardwareInterface"):
  def controller(endpoint):
   value={"endpoint":endpoint,"type":"control_msgs/msg/JointTrajectoryControllerState","publisher_count":1,"ready":ready,"age_s":0.,"speed_scaling":1.}

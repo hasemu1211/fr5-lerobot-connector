@@ -8,18 +8,18 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-import tools.data_factory.workspace_manager as workspace_manager
-from tools.data_factory.operator_catalog import load_operator_catalog
-from tools.data_factory.operator_setup import (
+import tools.data_factory.operator.registries.workspace as workspace_manager
+from tools.data_factory.operator.catalog import load_operator_catalog
+from tools.data_factory.operator.setup.contracts import (
     qualified_table_plane_reference,
     select_yaw0_print_profile,
     validate_print_measurements,
 )
-from tools.data_factory.workspace_manager import WorkspaceManager
+from tools.data_factory.operator.registries.workspace import WorkspaceManager
 from tools.fr5_data_factory import ContractError, SAFE_ID, canonical_digest, load_json_strict
 
 
-ROOT = Path(__file__).resolve().parents[2]
+ROOT = Path(__file__).resolve().parents[4]
 
 
 class WorkspaceManagerTest(unittest.TestCase):

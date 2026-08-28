@@ -1,0 +1,1 @@
+"""Operator registry tests."""

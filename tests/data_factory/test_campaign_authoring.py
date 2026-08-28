@@ -4,16 +4,9 @@ import copy
 import json
 import unittest
 
-try:
-    from .test_experiment_manifest import (
-        base_qualification, budget, catalog, hypothesis, program_budget,
-        qualification_inputs,
-    )
-except ImportError:
-    from test_experiment_manifest import (
-        base_qualification, budget, catalog, hypothesis, program_budget,
-        qualification_inputs,
-    )
+from .operator.fixtures import (
+    base_qualification, catalog, draft, hypothesis, qualification_inputs,
+)
 from tools.data_factory.campaign_authoring import (
     DRAFT_SCHEMA,
     campaign_cell_id,
@@ -28,27 +21,6 @@ from tools.data_factory.quality.coverage_report import build_coverage_report
 from tools.fr5_data_factory import ContractError, canonical_digest
 
 
-def draft(contract: dict, *, count: int = 2, selector: str = "BALANCED_INITIAL") -> dict:
-    return {
-        "schema_version": DRAFT_SCHEMA,
-        "draft_id": "campaign-draft-r001",
-        "revision": 0,
-        "source": {
-            "hypothesis_digest": contract["hypothesis_digest"],
-            "catalog_digest": contract["qualification_catalog"]["catalog_digest"],
-            "coverage_digest": canonical_digest(contract["coverage_report"]),
-        },
-        "branch": "INITIAL_SEED",
-        "selector": selector,
-        "requested_count": count,
-        "normalized_seed": 17,
-        "pinned": [],
-        "excluded": [],
-        "direct_slots": [],
-        "manifest_id": "collection-campaign-r001",
-        "manifest_budget": budget(),
-        "program_budget": program_budget(),
-    }
 
 
 class CampaignAuthoringTests(unittest.TestCase):

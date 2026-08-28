@@ -12,41 +12,51 @@ from typing import Any, Mapping
 from unittest import mock
 
 from tools.data_factory import run_job
+from tools.data_factory.campaign_authoring import compile_collection_campaign
 from tools.data_factory.campaign_operator import CampaignOperator, SIDE_EFFECT_COUNTERS
-from tools.data_factory.campaign_authorization import validate_runtime_campaign_scope
+from tools.data_factory.campaign_authorization import (
+    build_campaign_authorization,
+    build_campaign_envelope,
+    validate_runtime_campaign_scope,
+)
 from tools.data_factory.experiment_manifest import compile_fr5_hypothesis
 from tools.data_factory.one_job import OneJob, TEST_ONLY_READINESS_CONTRACT
-from tools.data_factory.operator_bridge import (
+from tools.data_factory.operator.workflow.intents import (
     CandidateReviewPort,
-    LoopbackBridge,
     OperatorIntentCore,
 )
-from tools.data_factory.operator_catalog import load_operator_catalog, project_assisted_poses
-from tools.data_factory.operator_console import (
-    OperatorConsole,
-    _campaign_camera_warmup,
+from tools.data_factory.operator.web.bridge import LoopbackBridge
+from tools.data_factory.operator.catalog import load_operator_catalog, project_assisted_poses
+from tools.data_factory.operator.cli import main as operator_console_main
+from tools.data_factory.operator.composition import (
     build_physical_operator_application,
     build_physical_operator_console,
-    build_physical_test_contract,
+)
+from tools.data_factory.operator.setup.physical import (
     capture_gripper_setup_readback,
     capture_home_snapshot,
-    main as operator_console_main,
     normalize_gripper_after_operator_ready,
     passive_physical_gate,
 )
-from tools.data_factory.operator_setup import NO_AUTHORITY, build_test_only_root_binding
+from tools.data_factory.operator.workflow.campaign import (
+    OperatorConsole,
+    _campaign_camera_warmup,
+    build_physical_test_contract,
+)
+from tools.data_factory.operator.setup.contracts import NO_AUTHORITY, build_test_only_root_binding
 from tools.fr5_data_factory import ContractError, canonical_digest, load_json_strict
 
-try:
-    from .test_campaign_authoring import draft as campaign_draft
-    from .test_experiment_manifest import (
-        qualification_inputs, single_hypothesis, single_qualification_inputs,
-    )
-except ImportError:
-    from test_campaign_authoring import draft as campaign_draft
-    from test_experiment_manifest import (
-        qualification_inputs, single_hypothesis, single_qualification_inputs,
-    )
+from .fixtures import (
+    SCENE,
+    campaign_draft,
+    payload,
+    physical_contract,
+    qualification_inputs,
+    runtime_motion,
+    runtime_validated,
+    single_hypothesis,
+    single_qualification_inputs,
+)
 
 
 NOW = datetime(2026, 8, 26, 3, 0, tzinfo=timezone.utc)
@@ -420,7 +430,7 @@ class OperatorConsoleTests(unittest.TestCase):
                 console.close()
 
     def test_product_application_dispatches_executable_general_mode_to_production_factory(self):
-        repository = Path(__file__).resolve().parents[2]
+        repository = Path(__file__).resolve().parents[3]
         device = "usb-Generic_USB2.0_PC_CAMERA-video-index0"
         catalog = load_operator_catalog(repository, device_ids=[device])
         for combination in catalog["combinations"]:
@@ -604,7 +614,7 @@ class OperatorConsoleTests(unittest.TestCase):
 
     @staticmethod
     def portable_repository(target: Path) -> None:
-        source = Path(__file__).resolve().parents[2]
+        source = Path(__file__).resolve().parents[3]
         shutil.copytree(source / "config/data_factory", target / "config/data_factory")
         urdf = target / "src/fairino_description/urdf/fairino5_v6.urdf"
         urdf.parent.mkdir(parents=True)
@@ -614,7 +624,7 @@ class OperatorConsoleTests(unittest.TestCase):
     def start_bridge(console: OperatorConsole):
         bridge = LoopbackBridge(
             core=console.bridge_core,
-            ui_root=Path(__file__).resolve().parents[2] / "operator-ui",
+            ui_root=Path(__file__).resolve().parents[3] / "operator-ui",
             host="127.0.0.1", port=0,
             token="operator-console-loopback-test-token",
         )
@@ -734,7 +744,7 @@ class OperatorConsoleTests(unittest.TestCase):
                 raise AssertionError(args)
 
             with mock.patch(
-                "tools.data_factory.operator_console._readonly_command",
+                "tools.data_factory.operator.setup.physical._readonly_command",
                 side_effect=command,
             ):
                 evidence = passive_physical_gate(
@@ -773,7 +783,7 @@ class OperatorConsoleTests(unittest.TestCase):
                 return command(args, code)
 
             with mock.patch(
-                "tools.data_factory.operator_console._readonly_command",
+                "tools.data_factory.operator.setup.physical._readonly_command",
                 side_effect=transient_camera_command,
             ):
                 transient_evidence = passive_physical_gate(
@@ -797,10 +807,10 @@ class OperatorConsoleTests(unittest.TestCase):
 
             with (
                 mock.patch(
-                    "tools.data_factory.operator_console._readonly_command",
+                    "tools.data_factory.operator.setup.physical._readonly_command",
                     side_effect=transient_joint_command,
                 ),
-                mock.patch("tools.data_factory.operator_console.time.sleep") as pause,
+                mock.patch("tools.data_factory.operator.setup.physical.time.sleep") as pause,
             ):
                 passive_physical_gate(
                     camera_topic="/camera/up/color/image_raw",
@@ -818,7 +828,7 @@ class OperatorConsoleTests(unittest.TestCase):
                 ] else result
 
             with mock.patch(
-                "tools.data_factory.operator_console._readonly_command",
+                "tools.data_factory.operator.setup.physical._readonly_command",
                 side_effect=mismatched_command,
             ):
                 with self.assertRaisesRegex(
@@ -856,7 +866,7 @@ class OperatorConsoleTests(unittest.TestCase):
             ContractError("PHYSICAL_HOME_SNAPSHOT"), json.dumps(snapshot),
         ))
         with mock.patch(
-            "tools.data_factory.operator_console._readonly_command", read,
+            "tools.data_factory.operator.setup.physical._readonly_command", read,
         ):
             self.assertEqual(
                 capture_home_snapshot(tcp_candidate_manifest=Path("tcp.json")),
@@ -867,7 +877,7 @@ class OperatorConsoleTests(unittest.TestCase):
         read = mock.Mock(side_effect=ContractError("PHYSICAL_HOME_SNAPSHOT"))
         with (
             mock.patch(
-                "tools.data_factory.operator_console._readonly_command", read,
+                "tools.data_factory.operator.setup.physical._readonly_command", read,
             ),
             self.assertRaisesRegex(ContractError, "PHYSICAL_HOME_SNAPSHOT"),
         ):
@@ -902,7 +912,7 @@ feedback:
             raise AssertionError(args)
 
         with mock.patch(
-            "tools.data_factory.operator_console._readonly_command",
+            "tools.data_factory.operator.setup.physical._readonly_command",
             side_effect=controller_read,
         ):
             readback = capture_gripper_setup_readback()
@@ -914,7 +924,7 @@ feedback:
         malformed_read_remote = mock.Mock()
         with (
             mock.patch(
-                "tools.data_factory.operator_console._readonly_command",
+                "tools.data_factory.operator.setup.physical._readonly_command",
                 side_effect=lambda args, _code: (
                     "/controller_manager\n"
                     if args[:3] == ["ros2", "node", "list"] else
@@ -925,7 +935,7 @@ feedback:
                 ),
             ),
             mock.patch(
-                "tools.data_factory.operator_console._remote_gripper_command",
+                "tools.data_factory.operator.setup.physical._remote_gripper_command",
                 malformed_read_remote,
             ),
             self.assertRaisesRegex(ContractError, "GRIPPER_SETUP_READBACK"),
@@ -933,7 +943,7 @@ feedback:
             capture_gripper_setup_readback()
         malformed_read_remote.assert_not_called()
         with mock.patch(
-            "tools.data_factory.operator_console._bounded_command",
+            "tools.data_factory.operator.setup.physical._bounded_command",
             return_value="Result:\n  error_code: 0\nGoal finished with status: SUCCEEDED\n",
         ) as action:
             result = normalize_gripper_after_operator_ready(readback)
@@ -949,7 +959,7 @@ feedback:
         ))
         with (
             mock.patch(
-                "tools.data_factory.operator_console._readonly_command",
+                "tools.data_factory.operator.setup.physical._readonly_command",
                 side_effect=(
                     lambda args, _code: "/fr_command_server\n"
                     if args[:3] == ["ros2", "node", "list"]
@@ -957,7 +967,7 @@ feedback:
                 ),
             ),
             mock.patch(
-                "tools.data_factory.operator_console._remote_gripper_command",
+                "tools.data_factory.operator.setup.physical._remote_gripper_command",
                 server_read,
             ),
         ):
@@ -970,7 +980,7 @@ feedback:
         remote = mock.Mock()
         with (
             mock.patch(
-                "tools.data_factory.operator_console._readonly_command",
+                "tools.data_factory.operator.setup.physical._readonly_command",
                 side_effect=(
                     lambda args, _code: "/controller_manager\n/fr_command_server\n"
                     if args[:3] == ["ros2", "node", "list"]
@@ -980,7 +990,7 @@ feedback:
                 ),
             ),
             mock.patch(
-                "tools.data_factory.operator_console._remote_gripper_command",
+                "tools.data_factory.operator.setup.physical._remote_gripper_command",
                 remote,
             ),
             self.assertRaisesRegex(ContractError, "GRIPPER_SETUP_CONTROLLER_GRAPH"),
@@ -991,7 +1001,7 @@ feedback:
         remote.reset_mock()
         with (
             mock.patch(
-                "tools.data_factory.operator_console._readonly_command",
+                "tools.data_factory.operator.setup.physical._readonly_command",
                 side_effect=(
                     lambda args, _code: "/controller_manager\n/fr_command_server\n"
                     if args[:3] == ["ros2", "node", "list"]
@@ -999,7 +1009,7 @@ feedback:
                 ),
             ),
             mock.patch(
-                "tools.data_factory.operator_console._remote_gripper_command",
+                "tools.data_factory.operator.setup.physical._remote_gripper_command",
                 remote,
             ),
             self.assertRaisesRegex(ContractError, "GRIPPER_SETUP_NOT_AVAILABLE"),
@@ -1020,7 +1030,7 @@ feedback:
 
         settled = []
         with mock.patch(
-            "tools.data_factory.operator_console._remote_gripper_command",
+            "tools.data_factory.operator.setup.physical._remote_gripper_command",
             side_effect=server_command,
         ):
             result = normalize_gripper_after_operator_ready(
@@ -1042,7 +1052,7 @@ feedback:
             [0, 3, 1], [0], [0, 0, 1], [0], [0, 0, 1], [0, 0, 100],
         ))
         with mock.patch(
-            "tools.data_factory.operator_console._remote_gripper_command", remote,
+            "tools.data_factory.operator.setup.physical._remote_gripper_command", remote,
         ):
             result = normalize_gripper_after_operator_ready(maintenance_readback)
         self.assertEqual(result, {"status": "NORMALIZED", "requires_graph_switch": True})
@@ -1817,7 +1827,7 @@ feedback:
                 authoring = application.bridge_core.snapshot()
                 draft = authoring["projection"]["draft"]
                 with mock.patch(
-                    "tools.data_factory.operator_console.project_assisted_poses",
+                    "tools.data_factory.operator.composition.project_assisted_poses",
                     wraps=project_assisted_poses,
                 ) as assisted_projection:
                     compiled = application.bridge_core.consume(envelope(
@@ -2064,7 +2074,9 @@ feedback:
                     self.origin = "http://127.0.0.1:4174"
                     self.server = mock.Mock()
 
-                def serve_forever(self):
+                def serve_forever(self, startup_call=None):
+                    self.startup_call = startup_call
+                    captured["startup_call"] = startup_call
                     captured["served"] = True
 
             physical_environment = mock.Mock(
@@ -2072,14 +2084,14 @@ feedback:
             )
             with (
                 mock.patch(
-                    "tools.data_factory.operator_console.discover_camera_devices",
+                    "tools.data_factory.operator.composition.discover_camera_devices",
                     return_value=[],
                 ),
                 mock.patch(
-                    "tools.data_factory.operator_console.LoopbackBridge", ShellBridge,
+                    "tools.data_factory.operator.composition.LoopbackBridge", ShellBridge,
                 ),
                 mock.patch(
-                    "tools.data_factory.operator_physical_environment."
+                    "tools.data_factory.operator.setup.physical."
                     "build_physical_operator_environment",
                     physical_environment,
                 ),
@@ -2093,6 +2105,7 @@ feedback:
 
             self.assertEqual(result, 0)
             self.assertTrue(captured["served"])
+            self.assertIsNone(captured["startup_call"])
             view = captured["view"]
             self.assertEqual(view["runtime"]["workflow_state"], "BLOCKED")
             self.assertEqual(view["available_ops"], [])
@@ -3003,6 +3016,571 @@ feedback:
                         self.assertIsNone(result["technical_evidence"])
                     finally:
                         console.close()
+
+
+class ReusableHarness(Harness):
+    TERMINAL = {"ABORTED", "BLOCKED", "CANCELLED", "COMPLETE", "QUARANTINED_COMMIT"}
+
+    def __init__(
+        self, root: str, *, count: int = 3, wrong_plan_scope: bool = False,
+        wrong_checkpoint_scope: bool = False, block_until_cancel: bool = False,
+    ):
+        super().__init__(root)
+        self.hypothesis, self.source_draft = physical_contract(count)
+        self.scene_digest = self.hypothesis["fixed_contract"]["scene_digest"]
+        self.count = count
+        self.wrong_plan_scope = wrong_plan_scope
+        self.wrong_checkpoint_scope = wrong_checkpoint_scope
+        self.block_until_cancel = block_until_cancel
+        self.max_active = 0
+        self.overlap = False
+        self.intents = []
+        self.contexts = []
+        self.plan_exchanges = []
+        self.checkpoint_exchanges = []
+        self.episode_entered = threading.Event()
+
+    def fresh_one_job(self) -> OneJob:
+        active = sum(child.state not in self.TERMINAL for child in self.children)
+        self.overlap = self.overlap or active > 0
+        self.max_active = max(self.max_active, active + 1)
+        return super().fresh_one_job()
+
+    def start_binding(self, _run_id: str, slot: Mapping[str, Any]) -> dict:
+        pose = next(
+            item for item in self.hypothesis["robot_start_poses"]
+            if item["robot_start_pose_id"] == slot["robot_start_pose_id"]
+        )
+        target = [pose["target_rad"][joint] for joint in pose["joint_order"]]
+        value = {
+            "scope": "MOTION_Q_SAFE_START",
+            "data_disposition": "TEST_ONLY",
+            "manifest_digest": self.operator.manifest["manifest_digest"],
+            "slot_digest": canonical_digest(slot),
+            "robot_start_pose_id": pose["robot_start_pose_id"],
+            "robot_start_pose_qualification_digest": pose["qualification_digest"],
+            "motion_qualification_id": "motion-q-safe-reusable-test",
+            "motion_qualification_digest": canonical_digest("motion-q-safe-reusable-test"),
+            "home_candidate_digest": pose["home_candidate_digest"],
+            "joint_order": copy.deepcopy(pose["joint_order"]),
+            "target_rad": target,
+            "current_rad": copy.deepcopy(target),
+            "tolerance_rad": 0.01,
+            "max_snapshot_age_s": 0.1,
+            "snapshot_digest": canonical_digest(["fresh-start", slot["slot_id"]]),
+            "status": "BOUND_TEST_ONLY",
+            "authority": copy.deepcopy(NO_AUTHORITY),
+        }
+        value["binding_digest"] = canonical_digest(value)
+        return value
+
+    def projection(self) -> dict:
+        value = super().projection()
+        value["draft"].update(
+            budget=self.count,
+            selected_count=self.count,
+            split_summary=f"TRAIN {self.count}",
+            repeat_summary=f"x{self.count}",
+            coverage_summary=f"{self.count}/{self.count} selected",
+        )
+        value["draft"]["cells"][0]["repeat"] = self.count
+        return value
+
+    @staticmethod
+    def _checkpoint_request(kind: str, run_id: str, plan_digest: str) -> dict:
+        if kind == "PHYSICAL_SCENE_CONFIRMATION":
+            evidence = {
+                "data_disposition": "TEST_ONLY",
+                "checklist": {"place_alias": "place1"},
+                "operator_summary": {"path": ["PREGRASP_PTP", "LIFT_LIN"]},
+                "planned_start_evidence_digest": canonical_digest(
+                    ["planned-start", run_id],
+                ),
+            }
+        else:
+            evidence = {
+                "data_disposition": "TEST_ONLY",
+                "execution_evidence_digest": canonical_digest(["execution", run_id]),
+                "release_target": {"place_id": "place-r1", "x_mm": 10, "y_mm": 0},
+                "safe_staging_joint_positions_rad": [0.0] * 6,
+                "landing_and_final_scene_combined": True,
+            }
+        return {
+            "schema_version": "data_factory.operator_checkpoint_request.v1",
+            "kind": kind,
+            "run_id": run_id,
+            "plan_digest": plan_digest,
+            "prompt": f"Confirm {kind}",
+            "choices": (
+                ["READY", "CANCEL"]
+                if kind == "PHYSICAL_SCENE_CONFIRMATION"
+                else ["LANDED", "OFF_SLOT", "UNCERTAIN"]
+            ),
+            "evidence": evidence,
+            "timeout_s": 1.0,
+        }
+
+    def episode(
+        self, intent, lifecycle, cancel_event, episode_context,
+        decision_provider, checkpoint_provider,
+    ):
+        self.intents.append(copy.deepcopy(intent))
+        self.contexts.append(copy.deepcopy(episode_context))
+        plan_digest = canonical_digest(["fresh-plan", intent["intent_digest"]])
+        episode_binding = {
+            "manifest_digest": intent["manifest_digest"],
+            "intent_digest": intent["intent_digest"],
+            "run_id": (
+                "forged-run" if self.wrong_plan_scope else intent["run_id"]
+            ),
+            "slot_digest": intent["slot_digest"],
+            "root_binding_digest": episode_context["root_binding"]["binding_digest"],
+            "start_binding_digest": episode_context["start_binding"]["binding_digest"],
+        }
+        request = {
+            "schema_version": "data_factory.plan_decision_request.v1",
+            "run_id": intent["run_id"],
+            "plan_digest": plan_digest,
+            "approval_scope": "HIL_NUMERIC_PROXY",
+            "decision_binding": {
+                "data_disposition": "TEST_ONLY",
+                "episode_binding": episode_binding,
+                "operator_summary": {
+                    "path": ["PREGRASP_PTP", "LIFT_LIN"],
+                    "speed": {"joint_scale": 0.2},
+                    "clearance": {"minimum_m": 0.05},
+                    "flow": {"pickup": True, "same_cell_recycle": True},
+                },
+            },
+            "timeout_s": 1.0,
+        }
+        for kind in ("PHYSICAL_SCENE_CONFIRMATION",):
+            checkpoint_request = self._checkpoint_request(
+                kind,
+                "forged-run" if self.wrong_checkpoint_scope else intent["run_id"],
+                plan_digest,
+            )
+            checkpoint = checkpoint_provider(copy.deepcopy(checkpoint_request))
+            self.checkpoint_exchanges.append(
+                (checkpoint_request, copy.deepcopy(checkpoint)),
+            )
+            expected = "READY" if kind == "PHYSICAL_SCENE_CONFIRMATION" else "LANDED"
+            if checkpoint is None or checkpoint["choice"] != expected:
+                raise ContractError("TEST_CHECKPOINT_NOT_APPROVED")
+
+        decision = decision_provider(copy.deepcopy(request))
+        self.plan_exchanges.append((request, copy.deepcopy(decision)))
+        if decision is None or decision["choice"] != "APPROVE":
+            raise ContractError("TEST_PLAN_NOT_APPROVED")
+
+        self.episode_entered.set()
+        if self.block_until_cancel:
+            if not cancel_event.wait(1.0):
+                raise ContractError("TEST_CANCEL_TIMEOUT")
+            lifecycle.state = "CANCELLED"
+            raise ContractError("TEST_CANCELLED")
+
+        checkpoint_request = self._checkpoint_request(
+            "RELEASE_VERDICT",
+            "forged-run" if self.wrong_checkpoint_scope else intent["run_id"],
+            plan_digest,
+        )
+        checkpoint = checkpoint_provider(copy.deepcopy(checkpoint_request))
+        self.checkpoint_exchanges.append((checkpoint_request, copy.deepcopy(checkpoint)))
+        if checkpoint is None or checkpoint["choice"] != "LANDED":
+            raise ContractError("TEST_CHECKPOINT_NOT_APPROVED")
+
+        lifecycle.state = "COMPLETE"
+        post_scene_digest = canonical_digest(["post-scene", intent["run_id"]])
+        technical = {
+            "schema_version": "data_factory.seed_technical_result.v1",
+            "intent_digest": intent["intent_digest"],
+            "run_id": intent["run_id"],
+            "manifest_digest": intent["manifest_digest"],
+            "slot_id": intent["slot"]["slot_id"],
+            "status": "PASS",
+            "technical_result_digest": canonical_digest(["technical", intent["run_id"]]),
+            "post_scene_digest": post_scene_digest,
+            "observed_at": NOW.isoformat().replace("+00:00", "Z"),
+        }
+        technical["evidence_digest"] = canonical_digest(technical)
+        self.scene_digest = post_scene_digest
+        return {
+            "result": {
+                "technical_evidence": technical,
+                "human_semantic": "NOT_MEASURED",
+            },
+            "technical_evidence": technical,
+        }
+
+    def console(self) -> OperatorConsole:
+        value = OperatorConsole(
+            session_id="reusable-console-r001",
+            run_id="reusable-run-1",
+            operator_label="local-operator",
+            campaign_operator_factory=self.operator_factory,
+            episode_call=self.episode,
+            projection_call=self.projection,
+            test_only_paths=self.root,
+            campaign_approval_once=True,
+            run_id_factory=lambda index: f"reusable-run-{index + 1}",
+            prepare_timeout_s=1.0,
+            close_timeout_s=1.0,
+            clock=lambda: NOW,
+        )
+        self.console_instance = value
+        return value
+
+
+def start_campaign(console: OperatorConsole, harness: ReusableHarness, suffix: str):
+    initial = console.bridge_core.snapshot()
+    compiled = console.bridge_core.consume(envelope(
+        initial,
+        "compile_draft",
+        {
+            "draft_id": harness.source_draft["draft_id"],
+            "data_disposition": "TEST_ONLY",
+        },
+        f"compile-{suffix}",
+    ))["result"]
+    review = console.bridge_core.snapshot()
+    authorization = console.bridge_core.consume(envelope(
+        review,
+        "authorize_campaign",
+        {
+            "draft_id": harness.source_draft["draft_id"],
+            "manifest_digest": compiled["manifest_digest"],
+            "envelope_digest": compiled["envelope_digest"],
+            "data_disposition": "TEST_ONLY",
+        },
+        f"authorize-{suffix}",
+    ))["result"]
+    return compiled, authorization
+
+
+class ReusableOperatorConsoleTests(unittest.TestCase):
+    def test_requested_count_scales_budgets_and_compiles_multiple_slots(self):
+        hypothesis, draft = physical_contract(3)
+        manifest, _ = compile_collection_campaign(draft, hypothesis=hypothesis)
+        self.assertEqual((draft["requested_count"], len(manifest["slots"])), (3, 3))
+        self.assertEqual(
+            {
+                key: draft["manifest_budget"][key]
+                for key in (
+                    "max_physical_episodes", "max_rollout_trials",
+                    "max_hil_prompts", "max_reviews",
+                )
+            },
+            {key: 3 for key in (
+                "max_physical_episodes", "max_rollout_trials",
+                "max_hil_prompts", "max_reviews",
+            )},
+        )
+        self.assertEqual(draft["manifest_budget"]["max_storage_bytes"], 3 * 2_147_483_648)
+        self.assertEqual(draft["program_budget"]["max_total_physical_episodes"], 3)
+        self.assertEqual(draft["program_budget"]["max_total_storage_bytes"], 3 * 2_147_483_648)
+        self.assertEqual(draft["manifest_budget"]["max_pending_reviews"], 3)
+        self.assertEqual(draft["program_budget"]["max_pending_reviews"], 3)
+
+        for invalid in (True, 0, 101):
+            with self.subTest(invalid=invalid), self.assertRaisesRegex(
+                ContractError, "PHYSICAL_CONSOLE_REQUESTED_COUNT",
+            ):
+                physical_contract(invalid)
+
+    def test_one_authorization_runs_three_fresh_digest_bound_serial_episodes(self):
+        with tempfile.TemporaryDirectory() as root:
+            harness = ReusableHarness(root)
+            console = harness.console()
+            self.addCleanup(console.close)
+            compiled, started = start_campaign(console, harness, "success")
+            self.assertEqual(compiled["outcome"], "REVIEW_CAMPAIGN")
+            self.assertEqual(compiled["episode_count"], 3)
+            self.assertEqual(started["outcome"], "RUNNING")
+            terminal = console.wait_for_episode(2.0)
+            view = console.bridge_core.snapshot()["projection"]
+
+            self.assertEqual((terminal["outcome"], terminal["code"]), ("PASS", "TECHNICAL_PASS"))
+            self.assertEqual(view["campaign_session"]["campaign"]["state"], "COMPLETE")
+            self.assertEqual(view["campaign_session"]["campaign"]["completed_intents"], 3)
+            self.assertEqual(set(view["campaign_operator"]), {"campaign"})
+            self.assertEqual(len(view["episode_history"]), 3)
+            self.assertEqual(len(harness.children), 3)
+            self.assertEqual(len({id(child) for child in harness.children}), 3)
+            self.assertEqual(harness.max_active, 1)
+            self.assertFalse(harness.overlap)
+            self.assertEqual([child.state for child in harness.children], ["COMPLETE"] * 3)
+            self.assertEqual(len({item["run_id"] for item in harness.intents}), 3)
+            self.assertEqual(len({item["plan_digest"] for item, _ in harness.plan_exchanges}), 3)
+            self.assertEqual(len({item["root_binding"]["binding_digest"] for item in harness.contexts}), 3)
+            self.assertEqual(len({item["start_binding"]["binding_digest"] for item in harness.contexts}), 3)
+            self.assertTrue(all(value == 0 for value in harness.forbidden.values()))
+
+            authorization = console.campaign_authorization
+            self.assertEqual(
+                authorization["envelope"]["manifest_digest"],
+                compiled["manifest_digest"],
+            )
+            self.assertEqual(authorization["envelope"]["episode_count"], 3)
+            self.assertEqual(
+                started["campaign_authorization_digest"],
+                authorization["authorization_digest"],
+            )
+            for request, decision in harness.plan_exchanges:
+                self.assertEqual(
+                    (decision["run_id"], decision["plan_digest"], decision["choice"]),
+                    (request["run_id"], request["plan_digest"], "APPROVE"),
+                )
+                self.assertEqual(
+                    decision["decision_binding_digest"],
+                    canonical_digest({
+                        "run_id": request["run_id"],
+                        "plan_digest": request["plan_digest"],
+                        "approval_scope": request["approval_scope"],
+                        "decision_binding": request["decision_binding"],
+                    }),
+                )
+                self.assertEqual(
+                    request["decision_binding"]["episode_binding"]["manifest_digest"],
+                    authorization["envelope"]["manifest_digest"],
+                )
+                self.assertEqual(decision["decision_source"], "CAMPAIGN_AUTHORIZATION")
+            for request, decision in harness.checkpoint_exchanges:
+                bound = {
+                    key: request[key]
+                    for key in (
+                        "kind", "run_id", "plan_digest", "prompt", "choices", "evidence",
+                    )
+                }
+                self.assertEqual(decision["checkpoint_binding_digest"], canonical_digest(bound))
+                self.assertEqual((decision["run_id"], decision["plan_digest"]),
+                                 (request["run_id"], request["plan_digest"]))
+                self.assertEqual(
+                    decision["decision_source"],
+                    "CAMPAIGN_AUTHORIZATION"
+                    if request["kind"] == "PHYSICAL_SCENE_CONFIRMATION"
+                    else "CAMPAIGN_CONTROL_PROXY",
+                )
+
+            with self.assertRaisesRegex(
+                ContractError, "OPERATOR_CONSOLE_CAMPAIGN_AUTHORIZATION",
+            ):
+                console.authorize_campaign({
+                    "draft_id": harness.source_draft["draft_id"],
+                    "manifest_digest": compiled["manifest_digest"],
+                    "envelope_digest": compiled["envelope_digest"],
+                    "data_disposition": "TEST_ONLY",
+                }, {})
+
+    def test_automatic_plan_and_checkpoint_reject_wrong_episode_scope(self):
+        for field in ("wrong_plan_scope", "wrong_checkpoint_scope"):
+            with self.subTest(field=field), tempfile.TemporaryDirectory() as root:
+                harness = ReusableHarness(root, **{field: True})
+                console = harness.console()
+                try:
+                    start_campaign(console, harness, field)
+                    result = console.wait_for_episode(2.0)
+                    view = console.bridge_core.snapshot()["projection"]
+                    self.assertEqual(
+                        (result["outcome"], result["code"]),
+                        ("FAIL", "OPERATOR_CONSOLE_CAMPAIGN_SCOPE_MISMATCH"),
+                    )
+                    self.assertEqual(view["campaign_session"]["campaign"]["state"], "BLOCKED")
+                    self.assertEqual(len(harness.children), 1)
+                    self.assertEqual(len(harness.intents), 1)
+                finally:
+                    console.close()
+
+    def test_negative_cancel_stops_before_a_second_episode(self):
+        with tempfile.TemporaryDirectory() as root:
+            harness = ReusableHarness(root, block_until_cancel=True)
+            console = harness.console()
+            try:
+                start_campaign(console, harness, "cancel")
+                self.assertTrue(harness.episode_entered.wait(1.0))
+                view = console.bridge_core.snapshot()
+                cancelled = console.bridge_core.consume(envelope(
+                    view,
+                    "cancel_session",
+                    {"active_child_id": view["projection"]["runtime"]["active_child_id"]},
+                    "cancel-reusable",
+                ))["result"]
+                self.assertEqual(cancelled["outcome"], "CANCELLING")
+                result = console.wait_for_episode(2.0)
+                projection = console.bridge_core.snapshot()["projection"]
+                self.assertEqual(result["outcome"], "CANCEL")
+                self.assertEqual(projection["campaign_session"]["campaign"]["state"], "CANCELLED")
+                self.assertEqual(len(harness.children), 1)
+                self.assertEqual(len(harness.intents), 1)
+                self.assertEqual(harness.operator_counters["physical_factory"], 1)
+            finally:
+                console.close()
+
+    def test_bad_campaign_authorization_fails_before_executor_recorder_or_files(self):
+        validated = runtime_validated(job={
+            "task": "pickup_e2e",
+            "robot_system_id": "fr5-lab-a",
+            "operator_or_agent_id": "operator",
+            "instruction": "pick up",
+        })
+        authorization_hypothesis, authorization_draft = physical_contract(3)
+        authorization_manifest, authorization_receipt = compile_collection_campaign(
+            authorization_draft, hypothesis=authorization_hypothesis,
+        )
+        campaign_envelope = build_campaign_envelope(
+            source_draft=authorization_draft, manifest=authorization_manifest,
+            compilation_receipt=authorization_receipt,
+            hypothesis=authorization_hypothesis, effect_scope="PHYSICAL",
+            lifecycle_action="LIVE_COLLECT", data_disposition="TEST_ONLY",
+        )
+        base = build_campaign_authorization(
+            authorization_id="authorization-r001", operator_label="operator",
+            envelope=campaign_envelope, approved_at="2026-08-26T00:00:00Z",
+            expires_at="2099-01-01T00:00:00Z",
+        )
+        cases = {"forged": copy.deepcopy(base)}
+        cases["forged"]["envelope"]["episode_count"] = 4
+        cases["forged"]["authorization_digest"] = canonical_digest({
+            key: value for key, value in cases["forged"].items()
+            if key != "authorization_digest"
+        })
+        cases["expired"] = build_campaign_authorization(
+            authorization_id="authorization-r001", operator_label="operator",
+            envelope=campaign_envelope, approved_at="2026-08-25T00:00:00Z",
+            expires_at="2026-08-25T01:00:00Z",
+        )
+        cases["wrong_scope"] = copy.deepcopy(base)
+
+        expected = {
+            "forged": "CAMPAIGN_ENVELOPE_BINDING",
+            "expired": "CAMPAIGN_AUTHORIZATION_EXPIRED",
+            "wrong_scope": "CAMPAIGN_AUTHORIZATION_BINDING",
+        }
+        for name, authorization in cases.items():
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                live_payload = payload("live")
+                live_payload.update(
+                    run_root=str(root / "runs"),
+                    dataset_root=str(root / "dataset"),
+                )
+                roots = {
+                    "session_id": "authorization-session",
+                    "run_id": live_payload["run_id"],
+                    "data_disposition": "TEST_ONLY",
+                    "run_root": str((root / "runs").resolve()),
+                    "cell_root": str((root / "cells").resolve()),
+                    "dataset_root": str((root / "dataset").resolve()),
+                    "production_writers_enabled": False,
+                    "binding_digest": canonical_digest("roots"),
+                }
+                episode = {
+                    "expires_at": "2099-01-01T00:00:00Z",
+                    "manifest_digest": (
+                        canonical_digest("other-manifest")
+                        if name == "wrong_scope"
+                        else campaign_envelope["manifest_digest"]
+                    ),
+                    "slot_digest": campaign_envelope["slot_digests"][0],
+                    "robot_start_pose_id": campaign_envelope["allowed_start_pose_ids"][0],
+                    "data_disposition": "TEST_ONLY",
+                }
+                executor = mock.Mock()
+                recorder = mock.Mock()
+                warmup = mock.Mock()
+                with (
+                    mock.patch.object(
+                        run_job, "validate_test_only_root_binding", return_value=roots,
+                    ),
+                    mock.patch.object(
+                        run_job, "validate_test_only_episode_binding", return_value=episode,
+                    ),
+                ):
+                    result = run_job.run_live(
+                        live_payload,
+                        threading.Event(),
+                        lambda _event: None,
+                        resolver=lambda _payload: (
+                            validated, runtime_motion(validated), SCENE,
+                        ),
+                        executor_factory=executor,
+                        recorder_factory=recorder,
+                        camera_warmup_call=warmup,
+                        decision_provider=lambda _request: None,
+                        approval_scope="HIL_NUMERIC_PROXY",
+                        test_only_root_binding={"fixture": True},
+                        test_only_episode_binding={"fixture": True},
+                        test_only_start_binding={"fixture": True},
+                        campaign_authorization=authorization,
+                        candidate_writer_enabled=False,
+                        repository_root=root,
+                    )
+                self.assertEqual((result["code"], result["state"]),
+                                 (expected[name], "BLOCKED"))
+                executor.assert_not_called()
+                recorder.assert_not_called()
+                warmup.assert_not_called()
+                self.assertEqual(list(root.iterdir()), [])
+
+    def test_legacy_mode_keeps_per_episode_plan_and_checkpoint_buttons(self):
+        with tempfile.TemporaryDirectory() as root:
+            harness = Harness(root)
+            console = harness.console()
+            try:
+                initial = console.bridge_core.snapshot()
+                compiled = console.bridge_core.consume(envelope(
+                    initial,
+                    "compile_draft",
+                    {
+                        "draft_id": harness.source_draft["draft_id"],
+                        "data_disposition": "TEST_ONLY",
+                    },
+                    "compile-legacy-reusable",
+                ))["result"]
+                self.assertFalse(console.campaign_approval_once)
+                self.assertEqual(compiled["outcome"], "AWAITING_APPROVAL")
+                approval_view = console.bridge_core.snapshot()
+                approval = approval_view["projection"]["approval"]
+                self.assertEqual(
+                    approval_view["projection"]["available_ops"],
+                    ["approve_exact_plan", "reject_plan", "cancel_session"],
+                )
+                console.bridge_core.consume(envelope(
+                    approval_view,
+                    "approve_exact_plan",
+                    {
+                        "plan_digest": approval["plan_digest"],
+                        "approval_scope": approval["approval_scope"],
+                        "data_disposition": "TEST_ONLY",
+                    },
+                    "approve-legacy-reusable",
+                ))
+                deadline = time.monotonic() + 1.0
+                while time.monotonic() < deadline:
+                    checkpoint_view = console.bridge_core.snapshot()
+                    checkpoint = checkpoint_view["projection"]["operator_checkpoint"]
+                    if checkpoint is not None:
+                        break
+                    time.sleep(0.005)
+                else:
+                    self.fail("legacy checkpoint was not projected")
+                self.assertEqual(checkpoint["kind"], "SEMANTIC_VERDICT")
+                self.assertEqual(
+                    checkpoint_view["projection"]["available_ops"],
+                    ["resolve_checkpoint", "cancel_session"],
+                )
+                console.bridge_core.consume(envelope(
+                    checkpoint_view,
+                    "resolve_checkpoint",
+                    {
+                        "checkpoint_binding_digest": checkpoint["binding_digest"],
+                        "choice": "PASS",
+                    },
+                    "checkpoint-legacy-reusable",
+                ))
+                self.assertEqual(console.wait_for_episode(1.0)["outcome"], "PASS")
+            finally:
+                console.close()
 
 
 if __name__ == "__main__":

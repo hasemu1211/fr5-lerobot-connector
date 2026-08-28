@@ -6,12 +6,7 @@ import unittest
 from datetime import datetime, timedelta, timezone
 from unittest import mock
 
-try:
-    from .test_campaign_authoring import draft
-    from .test_experiment_manifest import hypothesis
-except ImportError:
-    from test_campaign_authoring import draft
-    from test_experiment_manifest import hypothesis
+from .operator.fixtures import draft, hypothesis
 
 from tools.data_factory.campaign_operator import (
     FAKE_RECORDER_COUNTERS,
@@ -20,8 +15,8 @@ from tools.data_factory.campaign_operator import (
     CampaignOperator,
 )
 from tools.data_factory.experiment_manifest import SLOT_INPUT_FIELDS
-from tools.data_factory.operator_bridge import INTENT_SCHEMA
-from tools.data_factory.operator_setup import (
+from tools.data_factory.operator.workflow.intents import INTENT_SCHEMA
+from tools.data_factory.operator.setup.contracts import (
     build_production_root_binding,
     build_test_only_root_binding,
 )

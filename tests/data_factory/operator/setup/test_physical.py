@@ -7,7 +7,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import Mock, patch
 
-from tools.data_factory.operator_physical_environment import (
+from tools.data_factory.operator.setup.physical import (
     _default_process,
     build_physical_operator_environment,
 )
@@ -75,8 +75,8 @@ class FakeProcess:
 
 
 class PhysicalEnvironmentTests(unittest.TestCase):
-    @patch("tools.data_factory.operator_physical_environment.os.killpg")
-    @patch("tools.data_factory.operator_physical_environment.subprocess.Popen")
+    @patch("tools.data_factory.operator.setup.physical.os.killpg")
+    @patch("tools.data_factory.operator.setup.physical.subprocess.Popen")
     def test_default_process_stops_the_ros_wrapper_and_children_as_one_group(
         self, popen, killpg,
     ):
@@ -216,7 +216,7 @@ class PhysicalEnvironmentTests(unittest.TestCase):
             }
 
         environment = build_physical_operator_environment(
-            repository_root=Path(__file__).resolve().parents[2],
+            repository_root=Path(__file__).resolve().parents[4],
             collection_profile=collection_profile,
             camera_devices=camera_devices,
             command_call=command,
@@ -422,7 +422,7 @@ class PhysicalEnvironmentTests(unittest.TestCase):
             self.make_uvc_links(root)
             spawn = Mock(side_effect=AssertionError("process side effect"))
             common = dict(
-                repository_root=Path(__file__).resolve().parents[2],
+                repository_root=Path(__file__).resolve().parents[4],
                 command_call=Mock(side_effect=AssertionError("query side effect")),
                 process_factory=spawn,
                 gripper_readback_call=Mock(), gripper_maintenance_call=Mock(),

@@ -29,15 +29,15 @@ The campaign does not turn broad catalog flexibility into unbounded runtime inpu
 
 | Module | Owns | Must not own |
 | --- | --- | --- |
-| `operator_catalog.py` | Read-only repository qualification and machine-device catalog; coherent executable combinations | Qualification promotion, motion or dataset writes |
-| `operator_product_view.py` | Pure projection of domain contracts into browser labels, axes, cells and setup facts | Lifecycle state or hardware access |
-| `operator_stack.py` | Attach to one discovered foreground owner or start configured missing children; bounded shutdown | Planning, recorder or readiness authority |
-| `operator_environment.py` | Fresh environment facts and the explicit prepare operation | Robot motion, campaign compilation or dataset creation |
-| `operator_physical_environment.py` | ROS/UVC discovery and foreground bring-up adapters, including gripper setup | Planning, collection and semantic judgment |
-| `operator_application.py` | Application session, selection, editable draft, campaign replacement and public operations | Robot, recorder, dataset or motion lifecycles |
+| `operator/catalog.py` | Read-only repository qualification and machine-device catalog; coherent executable combinations | Qualification promotion, motion or dataset writes |
+| `operator/web/projection.py` | Pure projection of domain contracts into browser labels, axes, cells and setup facts | Lifecycle state or hardware access |
+| `operator/setup/processes.py` | Attach to one discovered foreground owner or start configured missing children; bounded shutdown | Planning, recorder or readiness authority |
+| `operator/setup/environment.py` | Fresh environment facts and the explicit prepare operation | Robot motion, campaign compilation or dataset creation |
+| `operator/setup/physical.py` | ROS/UVC discovery and foreground bring-up adapters, including gripper setup | Planning, collection and semantic judgment |
+| `operator/workflow/application.py` | Application session, selection, editable draft, campaign replacement and public operations | Robot, recorder, dataset or motion lifecycles |
 | `campaign_authorization.py` | Digest- and expiry-bound finite campaign envelope/authorization validation | Semantic PASS, production admission or training approval |
-| `operator_console.py` | Current PHYSICAL TEST_ONLY composition and exact per-episode adapter to `run_live` | A second lifecycle owner or general production caller |
-| `operator_bridge.py` | Loopback HTTP, token injection, view compare-and-swap and intent replay rejection | Domain decisions or hardware state |
+| `operator/composition.py` | Current PHYSICAL TEST_ONLY composition and exact per-episode adapter to `run_live` | A second lifecycle owner or general production caller |
+| `operator/web/bridge.py` and `operator/workflow/intents.py` | Loopback HTTP/token transport plus view compare-and-swap and intent replay rejection | Domain decisions or hardware state |
 | `episode_ledger.py` | Immutable episode provenance/admission ledger and separately rewritable review/retention projection | Dataset row deletion or training authority |
 | `operator-ui/*` | Render one atomic view and send operations that `available_ops` currently permits | Client-side approval receipts, retries or hidden execution |
 

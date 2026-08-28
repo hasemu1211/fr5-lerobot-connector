@@ -5,19 +5,33 @@ robot joints, starts a recorder, or writes a dataset.
 """
 from __future__ import annotations
 
+import copy
+import json
+import math
 import os
 import re
 import signal
 import stat
 import subprocess
+import sys
 import time
 from pathlib import Path
-from typing import Any, Callable, Mapping
+from typing import Any, Callable, Mapping, Sequence
 
-from tools.data_factory.operator_environment import OperatorEnvironment
-from tools.data_factory.operator_setup import gripper_setup_projection
-from tools.data_factory.operator_stack import OperatorStack
-from tools.fr5_data_factory import COLLECTION_PROFILE_V2_KEYS, ContractError, SAFE_ID
+from tools.data_factory.operator.setup.camera import discover_uvc_device_ids
+from tools.data_factory.operator.setup.contracts import (
+    gripper_setup_projection,
+    normalize_camera_devices,
+)
+from tools.data_factory.operator.setup.environment import OperatorEnvironment
+from tools.data_factory.operator.setup.processes import OperatorStack
+from tools.fr5_data_factory import (
+    COLLECTION_PROFILE_V2_KEYS,
+    ContractError,
+    SAFE_ID,
+    canonical_digest,
+    load_json_strict,
+)
 
 
 MOTION_OWNER = "fr5-ros2-control"
@@ -552,3 +566,316 @@ __all__ = [
     "PhysicalOperatorEnvironment", "bounded_settle",
     "build_physical_operator_environment",
 ]
+def _bounded_command(command: list[str], code: str, *, timeout_s: float = 5) -> str:
+    try:
+        completed = subprocess.run(
+            command, text=True, capture_output=True, timeout=timeout_s, check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise ContractError(code) from exc
+    if completed.returncode != 0:
+        raise ContractError(code)
+    return completed.stdout
+
+
+def _readonly_command(command: list[str], code: str) -> str:
+    return _bounded_command(command, code)
+
+
+def _controller_names(value: str) -> set[str]:
+    return {
+        fields[0]
+        for line in value.splitlines()
+        if (fields := line.split()) and "active" in fields
+    }
+
+
+def _remote_gripper_command(command: str, *, expected_fields: int) -> list[int]:
+    output = _bounded_command([
+        "ros2", "service", "call", "/fairino_remote_command_service",
+        "fairino_msgs/srv/RemoteCmdInterface",
+        json.dumps({"cmd_str": command}, separators=(",", ":")),
+    ], "GRIPPER_MAINTENANCE_SERVICE", timeout_s=35)
+    match = re.search(r"cmd_res(?:=|:)\s*['\"]?(-?\d+(?:,-?\d+)*)", output)
+    if match is None:
+        raise ContractError("GRIPPER_MAINTENANCE_RESPONSE")
+    result = [int(value) for value in match.group(1).split(",")]
+    if len(result) != expected_fields:
+        raise ContractError("GRIPPER_MAINTENANCE_RESPONSE")
+    return result
+
+
+def capture_gripper_setup_readback() -> dict[str, Any]:
+    """Read one fresh gripper source without opening a second SDK owner."""
+    nodes = set(
+        line.strip()
+        for line in _readonly_command(
+            ["ros2", "node", "list", "--no-daemon"], "GRIPPER_SETUP_NODE_GRAPH",
+        ).splitlines()
+        if line.strip()
+    )
+    command_server = "/fr_command_server" in nodes
+    controller_listing = (
+        ""
+        if command_server and "/controller_manager" not in nodes
+        else _readonly_command(
+            ["ros2", "control", "list_controllers"],
+            "GRIPPER_SETUP_CONTROLLER_GRAPH",
+        )
+    )
+    controllers = _controller_names(controller_listing)
+    normal = {
+        "fairino5_controller", "gripper_controller", "joint_state_broadcaster",
+    } <= controllers
+    if normal and command_server:
+        raise ContractError("PHYSICAL_SECOND_MOTION_OWNER")
+    if normal:
+        output = _readonly_command([
+            "ros2", "topic", "echo", "/gripper_controller/controller_state",
+            "control_msgs/msg/JointTrajectoryControllerState", "--once",
+            "--timeout", "2", "--flow-style", "--no-daemon",
+        ], "GRIPPER_SETUP_READBACK")
+        try:
+            import yaml
+        except ImportError as exc:
+            raise ContractError("GRIPPER_SETUP_READBACK") from exc
+        message_start = re.search(r"(?m)^joint_names:\s*", output)
+        if message_start is None:
+            raise ContractError("GRIPPER_SETUP_READBACK")
+        try:
+            message = next(yaml.safe_load_all(output[message_start.start():]))
+            names = message["joint_names"]
+            reference = message["reference"]["positions"]
+            feedback = message["feedback"]["positions"]
+            if names != ["finger_right_joint"] or len(reference) != 1 or len(feedback) != 1:
+                raise ValueError
+            reference_m, feedback_m = float(reference[0]), float(feedback[0])
+        except (KeyError, StopIteration, TypeError, ValueError, yaml.YAMLError) as exc:
+            raise ContractError("GRIPPER_SETUP_READBACK") from exc
+        if not all(math.isfinite(value) for value in (reference_m, feedback_m)):
+            raise ContractError("GRIPPER_SETUP_READBACK")
+        return {
+            "active": True, "position_valid": True, "gripper_index": 1,
+            "reference_position_m": reference_m,
+            "feedback_position_m": feedback_m,
+            "sample_age_s": 0.0, "max_age_s": 0.1,
+            "source": "CONTROLLER_STATE",
+        }
+    if command_server and not controller_listing.strip():
+        activation = _remote_gripper_command(
+            "GetGripperActivateStatus()", expected_fields=3,
+        )
+        position = _remote_gripper_command(
+            "GetGripperCurPosition()", expected_fields=3,
+        )
+        active = activation[0] == 0 and activation[1] == 0 and activation[2] & 1 == 1
+        valid = position[0] == 0 and position[1] == 0 and 0 <= position[2] <= 100
+        position_m = 0.021 * position[2] / 100 if valid else None
+        return {
+            "active": active, "position_valid": valid, "gripper_index": 1,
+            "reference_position_m": position_m,
+            "feedback_position_m": position_m,
+            "sample_age_s": 0.0, "max_age_s": 0.1,
+            "source": "COMMAND_SERVER_MAINTENANCE",
+        }
+    raise ContractError("GRIPPER_SETUP_NOT_AVAILABLE")
+
+
+def normalize_gripper_after_operator_ready(
+    readback: Mapping[str, Any], *, settle_call: Callable[[float], Any] = time.sleep,
+) -> dict[str, Any]:
+    """Perform the one approved open-normalization branch; never manage processes."""
+    source = readback.get("source") if isinstance(readback, Mapping) else None
+    if source == "CONTROLLER_STATE":
+        goal = {
+            "trajectory": {
+                "joint_names": ["finger_right_joint"],
+                "points": [{
+                    "positions": [0.021],
+                    "time_from_start": {"sec": 2, "nanosec": 0},
+                }],
+            },
+            "goal_tolerance": [{"name": "finger_right_joint", "position": 0.000105}],
+            "goal_time_tolerance": {"sec": 5, "nanosec": 0},
+        }
+        output = _bounded_command([
+            "ros2", "action", "send_goal",
+            "/gripper_controller/follow_joint_trajectory",
+            "control_msgs/action/FollowJointTrajectory",
+            json.dumps(goal, separators=(",", ":")),
+        ], "GRIPPER_MAINTENANCE_ACTION", timeout_s=15)
+        if (
+            "Goal finished with status: SUCCEEDED" not in output
+            or re.search(r"error_code(?:=|:)\s*0\b", output) is None
+        ):
+            raise ContractError("GRIPPER_MAINTENANCE_ACTION")
+        return {"status": "NORMALIZED", "requires_graph_switch": False}
+    if source == "COMMAND_SERVER_MAINTENANCE":
+        activation = _remote_gripper_command(
+            "GetGripperActivateStatus()", expected_fields=3,
+        )
+        if activation[0] != 0:
+            raise ContractError("GRIPPER_MAINTENANCE_ACTION")
+        if activation[1] != 0:
+            if _remote_gripper_command(
+                "ResetAllError()", expected_fields=1,
+            ) != [0]:
+                raise ContractError("GRIPPER_MAINTENANCE_ACTION")
+            activation = _remote_gripper_command(
+                "GetGripperActivateStatus()", expected_fields=3,
+            )
+            if activation[0] != 0 or activation[1] != 0:
+                raise ContractError("GRIPPER_MAINTENANCE_ACTION")
+        if activation[2] & 1 != 1:
+            if _remote_gripper_command(
+                "ActGripper(1,0)", expected_fields=1,
+            ) != [0]:
+                raise ContractError("GRIPPER_MAINTENANCE_ACTION")
+            settle_call(1.0)
+            if _remote_gripper_command(
+                "ActGripper(1,1)", expected_fields=1,
+            ) != [0]:
+                raise ContractError("GRIPPER_MAINTENANCE_ACTION")
+            settle_call(2.0)
+        if _remote_gripper_command("MoveGripper(1,100)", expected_fields=1) != [0]:
+            raise ContractError("GRIPPER_MAINTENANCE_ACTION")
+        done = _remote_gripper_command("GetGripperMotionDone()", expected_fields=3)
+        position = _remote_gripper_command("GetGripperCurPosition()", expected_fields=3)
+        if done != [0, 0, 1] or position != [0, 0, 100]:
+            raise ContractError("GRIPPER_MAINTENANCE_ACTION")
+        return {"status": "NORMALIZED", "requires_graph_switch": True}
+    raise ContractError("GRIPPER_MAINTENANCE_NOT_AVAILABLE")
+
+
+def passive_physical_gate(
+    *, camera_topic: str, discovered_device_id: str,
+    camera_node: str = "/camera/up/color/uvc_up_camera",
+    device_kind: str = "UVC", capture_endpoint: str | None = None,
+    device_root: str | Path = "/dev/v4l/by-id",
+    discovery_call: Callable[[], Sequence[object]] = discover_uvc_device_ids,
+) -> dict[str, Any]:
+    """Attach only to an already-running graph; perform no lifecycle mutation."""
+    def read_graph(args: list[str], code: str) -> str:
+        for attempt in range(3):
+            try:
+                return _readonly_command(args, code)
+            except ContractError:
+                if attempt == 2:
+                    raise
+                time.sleep(0.1 * (attempt + 1))
+        raise AssertionError("unreachable")
+
+    discovered = normalize_camera_devices(
+        discovery_call(), default_kind=device_kind,
+    )
+    matches = [
+        item for item in discovered
+        if item["logical_id"] == discovered_device_id
+        and item["kind"] == device_kind
+    ]
+    if not matches:
+        raise ContractError("PHYSICAL_CAMERA_BINDING")
+    if len(matches) != 1:
+        raise ContractError("PHYSICAL_CAMERA_BINDING_MISMATCH")
+    endpoint = capture_endpoint or matches[0]["capture_endpoint"]
+    if endpoint != matches[0]["capture_endpoint"]:
+        raise ContractError("PHYSICAL_CAMERA_BINDING_MISMATCH")
+    stable_target = None
+    if device_kind == "UVC":
+        stable_path = Path(device_root) / discovered_device_id
+        try:
+            stable_target = stable_path.resolve(strict=True)
+        except OSError as exc:
+            raise ContractError("PHYSICAL_CAMERA_BINDING_MISMATCH") from exc
+        if not stable_path.is_symlink() or not stat.S_ISCHR(stable_target.stat().st_mode):
+            raise ContractError("PHYSICAL_CAMERA_BINDING_MISMATCH")
+    controllers = read_graph(
+        ["ros2", "control", "list_controllers"], "PHYSICAL_CONTROLLER_GRAPH",
+    )
+    for name in ("fairino5_controller", "gripper_controller", "joint_state_broadcaster"):
+        if not any(line.split()[:1] == [name] and "active" in line.split() for line in controllers.splitlines()):
+            raise ContractError("PHYSICAL_CONTROLLER_STATE_MISMATCH")
+    nodes = read_graph(
+        ["ros2", "node", "list", "--no-daemon"], "PHYSICAL_NODE_GRAPH",
+    )
+    if "/fr_command_server" in nodes.splitlines():
+        raise ContractError("PHYSICAL_SECOND_MOTION_OWNER")
+    if read_graph(
+        ["ros2", "topic", "type", "/joint_states", "--no-daemon"],
+        "PHYSICAL_JOINT_TOPIC",
+    ).strip() != "sensor_msgs/msg/JointState":
+        raise ContractError("PHYSICAL_JOINT_TOPIC_MISMATCH")
+    if read_graph(
+        ["ros2", "topic", "type", camera_topic, "--no-daemon"],
+        "PHYSICAL_CAMERA_TOPIC",
+    ).strip() != "sensor_msgs/msg/Image":
+        raise ContractError("PHYSICAL_CAMERA_TOPIC_MISMATCH")
+    if device_kind == "UVC":
+        reported = read_graph(
+            [
+                "ros2", "param", "get", camera_node, "video_device",
+                "--hide-type", "--no-daemon",
+            ],
+            "PHYSICAL_CAMERA_DEVICE_PARAMETER",
+        ).strip()
+        try:
+            configured_target = Path(reported).resolve(strict=True)
+        except OSError as exc:
+            raise ContractError("PHYSICAL_CAMERA_DEVICE_MISMATCH") from exc
+        if configured_target != stable_target:
+            raise ContractError("PHYSICAL_CAMERA_DEVICE_MISMATCH")
+        resolved_device = str(stable_target)
+    elif device_kind == "REALSENSE":
+        parameters = {
+            name: read_graph(
+                [
+                    "ros2", "param", "get", camera_node, name,
+                    "--hide-type", "--no-daemon",
+                ],
+                "PHYSICAL_CAMERA_DEVICE_PARAMETER",
+            ).strip().strip('"')
+            for name in ("serial_no", "enable_color", "enable_depth")
+        }
+        if (
+            parameters["serial_no"].lstrip("_") != discovered_device_id
+            or parameters["enable_color"].lower() != "true"
+            or parameters["enable_depth"].lower() != "false"
+        ):
+            raise ContractError("PHYSICAL_CAMERA_DEVICE_MISMATCH")
+        reported = parameters["serial_no"]
+        resolved_device = endpoint
+    else:
+        raise ContractError("PHYSICAL_CAMERA_BINDING_MISMATCH")
+    evidence = {
+        "schema_version": "data_factory.test_only_camera_transport_binding.v1",
+        "device_kind": device_kind,
+        "stable_device_id": discovered_device_id,
+        "resolved_device": resolved_device,
+        "camera_node": camera_node,
+        "camera_topic": camera_topic,
+        "reported_video_device": reported,
+        "topic_type": "sensor_msgs/msg/Image",
+        "authority": "TEST_ONLY_TRANSPORT",
+    }
+    evidence["binding_digest"] = canonical_digest(evidence)
+    return evidence
+
+
+def capture_home_snapshot(
+    *, tcp_candidate_manifest: Path, max_age_s: float = 0.1,
+) -> dict[str, Any]:
+    """Capture a fresh ROS snapshot with one bounded transient retry."""
+    command = [
+        sys.executable, "-m", "tools.data_factory.motion.pose_snapshot", "capture",
+        "--timeout-s", "2", "--max-age-s", str(max_age_s),
+        "--tcp-candidate-manifest", str(tcp_candidate_manifest),
+    ]
+    for attempt in range(2):
+        try:
+            output = _readonly_command(command, "PHYSICAL_HOME_SNAPSHOT")
+        except ContractError:
+            if attempt:
+                raise
+        else:
+            return load_json_strict(output.strip())
+    raise AssertionError("unreachable")
