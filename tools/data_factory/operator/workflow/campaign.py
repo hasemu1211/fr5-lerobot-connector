@@ -95,7 +95,7 @@ DEFAULT_TCP_MANIFEST = Path(
 )
 DEFAULT_GRIPPER_RETUNE = Path(
     "config/data_factory/test_only_physical/goal2-place1/"
-    "gripper-retune-wood-cube-25mm-top-center-r006.json"
+    "gripper-retune-wood-cube-25mm-top-center-r007.json"
 )
 GRIPPER_RETUNE_FIELDS = frozenset({
     "schema_version", "retune_id", "status", "source",
@@ -105,6 +105,9 @@ GRIPPER_RETUNE_FIELDS = frozenset({
     "production_authority", "training_authority", "retune_digest",
 })
 GRIPPER_RETUNE_V2_FIELDS = GRIPPER_RETUNE_FIELDS | {"force_percent"}
+GRIPPER_RETUNE_V3_FIELDS = GRIPPER_RETUNE_V2_FIELDS | {
+    "open_velocity_percent",
+}
 
 
 def _measurement_for_code(code: str) -> str:
@@ -180,7 +183,7 @@ def _campaign_camera_warmup(
 def _validate_test_only_gripper_retune(
     retune: Mapping[str, Any], *, grasp: Mapping[str, Any],
     motion: Mapping[str, Any],
-) -> tuple[dict[str, Any], int]:
+) -> tuple[dict[str, Any], int, int]:
     """Validate the passive TEST_ONLY gripper settings before ROS bring-up."""
     schema = (
         retune.get("schema_version")
@@ -189,6 +192,7 @@ def _validate_test_only_gripper_retune(
     expected_fields = {
         "data_factory.test_only_gripper_retune.v1": GRIPPER_RETUNE_FIELDS,
         "data_factory.test_only_gripper_retune.v2": GRIPPER_RETUNE_V2_FIELDS,
+        "data_factory.test_only_gripper_retune.v3": GRIPPER_RETUNE_V3_FIELDS,
     }.get(schema)
     if (
         not isinstance(retune, Mapping) or set(retune) != expected_fields
@@ -235,16 +239,23 @@ def _validate_test_only_gripper_retune(
     force_percent = retune.get(
         "force_percent", close.get("force_percent"),
     )
+    open_velocity_percent = retune.get(
+        "open_velocity_percent", close.get("velocity_percent"),
+    )
     if not (
         float(close["command_position_m"]) <= command <= minimum < maximum
         and float(base_feedback["min"]) <= minimum
         and maximum <= float(base_feedback["max"])
         and type(force_percent) is int
         and 1 <= force_percent <= close["force_percent"]
+        and type(open_velocity_percent) is int
+        and 1 <= open_velocity_percent <= close["velocity_percent"]
     ):
         raise ContractError("TEST_ONLY_GRIPPER_RETUNE_ENVELOPE")
 
-    return copy.deepcopy(dict(retune)), force_percent
+    return (
+        copy.deepcopy(dict(retune)), force_percent, open_velocity_percent,
+    )
 
 
 def _derive_test_only_gripper_program(
@@ -255,8 +266,10 @@ def _derive_test_only_gripper_program(
     if not isinstance(validated, Mapping) or not isinstance(program, Mapping):
         raise ContractError("TEST_ONLY_GRIPPER_RETUNE")
     grasp = validated.get("grasp_profile")
-    checked_retune, force_percent = _validate_test_only_gripper_retune(
-        retune, grasp=grasp, motion=motion,
+    checked_retune, force_percent, open_velocity_percent = (
+        _validate_test_only_gripper_retune(
+            retune, grasp=grasp, motion=motion,
+        )
     )
     job = validated.get("normalized_job")
     inputs = validated.get("input_digests")
@@ -284,8 +297,13 @@ def _derive_test_only_gripper_program(
         acceptable_feedback_m={"min": minimum, "max": maximum},
         evidence_digest=checked_retune["retune_digest"],
     )
-    if checked_retune["schema_version"] == "data_factory.test_only_gripper_retune.v2":
+    if checked_retune["schema_version"] in {
+        "data_factory.test_only_gripper_retune.v2",
+        "data_factory.test_only_gripper_retune.v3",
+    }:
         tuned_requirements["force_percent"] = force_percent
+    if checked_retune["schema_version"] == "data_factory.test_only_gripper_retune.v3":
+        tuned_requirements["open_velocity_percent"] = open_velocity_percent
     derived = copy.deepcopy(dict(program))
     derived["gripper_requirements"] = tuned_requirements
     close_steps = [

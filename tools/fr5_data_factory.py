@@ -923,7 +923,20 @@ def validate_motion_program(value):
     for item in bindings.values(): _digest(item, "MOTION_PROGRAM_BINDING")
     planning_scene = _planning_scene(value["planning_scene"])
     if canonical_digest(planning_scene) != bindings["planning_scene_digest"]: raise ContractError("MOTION_PROGRAM_PLANNING_SCENE")
-    requirements = _gripper_close(value["gripper_requirements"], "MOTION_PROGRAM_GRIPPER")
+    raw_requirements = value["gripper_requirements"]
+    open_velocity_percent = None
+    if isinstance(raw_requirements, dict) and "open_velocity_percent" in raw_requirements:
+        raw_requirements = dict(raw_requirements)
+        open_velocity_percent = raw_requirements.pop("open_velocity_percent")
+    requirements = _gripper_close(raw_requirements, "MOTION_PROGRAM_GRIPPER")
+    if open_velocity_percent is not None:
+        if (
+            isinstance(open_velocity_percent, bool)
+            or not isinstance(open_velocity_percent, int)
+            or not 1 <= open_velocity_percent <= requirements["velocity_percent"]
+        ):
+            raise ContractError("MOTION_PROGRAM_GRIPPER")
+        requirements["open_velocity_percent"] = open_velocity_percent
     if requirements["acceptable_feedback_m"]["max"] <= requirements["command_position_m"]: raise ContractError("MOTION_PROGRAM_GRIPPER")
     frames = _exact(value["frames"], MOTION_FRAMES, "MOTION_PROGRAM_FRAMES")
     if frames != {"planning_frame": "base_link", "planning_group": "fairino5_v6_group", "tool_link": "wrist3_link"}: raise ContractError("MOTION_PROGRAM_FRAMES")

@@ -8,12 +8,14 @@ from tools.fr5_data_factory import canonical_digest
 from .operator.fixtures import SCENE_SPEC, motion
 
 SCENE={"scene_state_digest":"sha256:"+"8"*64,"revision":1,"object_instance_id":"cube-1"}
-def snapshot(positions=None,ready=True,gripper_position=.01,velocity=20,force=50,plugin="fairino_hardware/FairinoHardwareInterface"):
+def snapshot(positions=None,ready=True,gripper_position=.01,velocity=20,force=50,plugin="fairino_hardware/FairinoHardwareInterface",open_velocity=None):
  def controller(endpoint):
   value={"endpoint":endpoint,"type":"control_msgs/msg/JointTrajectoryControllerState","publisher_count":1,"ready":ready,"age_s":0.,"speed_scaling":1.}
   if endpoint.startswith("/gripper_controller"):value.update(reference_position_m=.01,feedback_position_m=gripper_position)
   return value
- return {"joint_positions":[0.]*6 if positions is None else positions,"joint_state_age_s":0.,"gripper_settings":{"hardware_plugin":plugin,"velocity_percent":velocity,"force_percent":force,"settle_time_ms":500},"arm_controller":controller("/fairino5_controller/controller_state"),"gripper_controller":controller("/gripper_controller/controller_state")}
+ settings={"hardware_plugin":plugin,"velocity_percent":velocity,"force_percent":force,"settle_time_ms":500}
+ if open_velocity is not None:settings["open_velocity_percent"]=open_velocity
+ return {"joint_positions":[0.]*6 if positions is None else positions,"joint_state_age_s":0.,"gripper_settings":settings,"arm_controller":controller("/fairino5_controller/controller_state"),"gripper_controller":controller("/gripper_controller/controller_state")}
 class T:
  def __init__(self,fail=None):self.calls=[];self.fail=fail
  def preflight(self):return {"move_action":{"endpoint":"/move_action","type":"moveit_msgs/action/MoveGroup","ready":True},"execute_trajectory":{"endpoint":"/execute_trajectory","type":"moveit_msgs/action/ExecuteTrajectory","ready":True},"gripper":{"endpoint":"/gripper_controller/follow_joint_trajectory","type":"control_msgs/action/FollowJointTrajectory","ready":True},"joint_states":{"endpoint":"/joint_states","type":"sensor_msgs/msg/JointState","ready":True},"joint_order":["j1","j2","j3","j4","j5","j6"]}
@@ -34,6 +36,13 @@ class Test(unittest.TestCase):
   self.assertEqual(r["data"]["operator_summary"]["flow"],{"continuous_through":"APPROACH_STOP_LIN","next_human_hold":"PRECONTACT_HUMAN"})
   t=T();t.snapshot=lambda *_:snapshot([.25]*6);n=e.PickupExecutor(t,clock=lambda:datetime(2026,1,1,tzinfo=timezone.utc));continuous=n.process(self.req("plan",{"run_id":"continuous","motion_program":motion(True)}));self.assertTrue(continuous["ok"]);self.assertEqual(continuous["data"]["operator_summary"]["flow"],{"continuous_through":"LIFT_LIN","next_human_hold":"POST_LIFT_SEMANTIC"});self.assertNotIn("requires_confirmation",continuous["data"]["plan"]["steps"][2]);self.assertNotIn("pause_after",continuous["data"]["plan"]["steps"][3])
   pick_place=motion(True);del pick_place["steps"][4]["pause_after"];pick_place["steps"][8]["pause_after"]="SEMANTIC_VERDICT";slot=release_slot(robot_system_id="fr5-lab-a",pose={"place_id":"place-a","yaw_deg":0,"x_mm":60,"y_mm":0},object_profile_id="wood-cube-25mm-r001",exclusion_geometry_digest="sha256:"+"e"*64);binding={**SCENE,"release_slot":slot};t=T();t.snapshot=lambda *_:snapshot([.25]*6);n=e.PickupExecutor(t,clock=lambda:datetime(2026,1,1,tzinfo=timezone.utc));placed=n.process(self.req("plan",{"run_id":"pick-place","motion_program":pick_place,"scene_binding":binding}));self.assertTrue(placed["ok"]);self.assertEqual(placed["data"]["operator_summary"]["flow"],{"continuous_through":"RETREAT_LIN","next_human_hold":"POST_RETREAT_SEMANTIC"});self.assertEqual(placed["data"]["operator_summary"]["recycle"]["recording_boundary_after"],"RETREAT_LIN")
+ def test_plan_binds_direction_specific_open_velocity(self):
+  program=motion();program["gripper_requirements"]["open_velocity_percent"]=10
+  matching=T();matching.snapshot=lambda *_:snapshot(open_velocity=10)
+  self.assertTrue(e.PickupExecutor(matching).process(self.req("plan",{"run_id":"matching","motion_program":program}))["ok"])
+  mismatched=T();mismatched.snapshot=lambda *_:snapshot(open_velocity=20)
+  rejected=e.PickupExecutor(mismatched).process(self.req("plan",{"run_id":"mismatched","motion_program":program}))
+  self.assertEqual((rejected["ok"],rejected["code"]),(False,"GRIPPER_SETTINGS_MISMATCH"))
  def test_plan_rejects_trajectory_that_cannot_finish_before_timeout(self):
   class Timed(T):
    def arm_trajectory_duration_s(self,_):return .5

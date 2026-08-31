@@ -1140,9 +1140,10 @@ feedback:
                 self.assertEqual(
                     (tuning["object_profile_id"], tuning["grasp_profile_id"],
                      tuning["command_percent"],
-                     tuning["acceptable_feedback_percent"], tuning["status"]),
+                     tuning["acceptable_feedback_percent"],
+                     tuning["open_velocity_percent"], tuning["status"]),
                     ("wood-cube-25mm-r001", "wood-cube-25mm-top-center-r001",
-                     56.0, {"min": 56.0, "max": 58.0},
+                     56.0, {"min": 56.0, "max": 58.0}, 10,
                      "CANDIDATE_PENDING_HIL"),
                 )
                 self.assertFalse(tuning["production_authority"])
@@ -1290,6 +1291,30 @@ feedback:
             ):
                 _derive_test_only_gripper_program(
                     resolved, motion, program, stronger,
+                )
+            release_retune = load_json_strict(
+                goal / "gripper-retune-wood-cube-25mm-top-center-r007.json"
+            )
+            release_tuned = _derive_test_only_gripper_program(
+                resolved, motion, program, release_retune,
+            )
+            self.assertEqual(
+                release_tuned["gripper_requirements"][
+                    "open_velocity_percent"
+                ],
+                10,
+            )
+            too_fast = copy.deepcopy(release_retune)
+            too_fast["open_velocity_percent"] = 21
+            too_fast["retune_digest"] = canonical_digest({
+                key: value for key, value in too_fast.items()
+                if key != "retune_digest"
+            })
+            with self.assertRaisesRegex(
+                ContractError, "TEST_ONLY_GRIPPER_RETUNE_ENVELOPE",
+            ):
+                _derive_test_only_gripper_program(
+                    resolved, motion, program, too_fast,
                 )
 
     def test_real_physical_composition_auto_attaches_fresh_open_gripper(self):
@@ -1467,7 +1492,7 @@ feedback:
                 base_close = validated["grasp_profile"]["gripper_close"]
                 retune = load_json_strict(
                     root / "config/data_factory/test_only_physical/goal2-place1/"
-                    "gripper-retune-wood-cube-25mm-top-center-r006.json"
+                    "gripper-retune-wood-cube-25mm-top-center-r007.json"
                 )
                 scope_observed.update({
                     "manifest": test_only_episode_binding["manifest_digest"]
@@ -1491,6 +1516,9 @@ feedback:
                         "min": 0.021 * 56 / 100,
                         "max": 0.021 * 58 / 100,
                     },
+                    "retune_open_velocity": program["gripper_requirements"][
+                        "open_velocity_percent"
+                    ] == 10,
                     "retune_close_step": next(
                         step for step in program["steps"]
                         if step["phase"] == "GRIPPER_CLOSE"
@@ -1612,7 +1640,7 @@ feedback:
                 ))
                 retune = load_json_strict(
                     root / "config/data_factory/test_only_physical/goal2-place1/"
-                    "gripper-retune-wood-cube-25mm-top-center-r006.json"
+                    "gripper-retune-wood-cube-25mm-top-center-r007.json"
                 )
                 fixed = console.campaign_operator.hypothesis["fixed_contract"]
                 self.assertEqual(
@@ -2352,7 +2380,7 @@ feedback:
                     camera_device_id=device,
                     gripper_retune=(
                         "config/data_factory/test_only_physical/goal2-place1/"
-                        "gripper-retune-wood-cube-25mm-top-center-r004.json"
+                        "gripper-retune-wood-cube-25mm-top-center-r007.json"
                     ),
                     auto_prepare=False,
                 )
@@ -2361,7 +2389,13 @@ feedback:
                 environment.projection.assert_called_once_with()
                 self.assertEqual(
                     environment_builder.call_args.kwargs["gripper_force_percent"],
-                    25,
+                    20,
+                )
+                self.assertEqual(
+                    environment_builder.call_args.kwargs[
+                        "gripper_open_velocity_percent"
+                    ],
+                    10,
                 )
             finally:
                 runtime.close()

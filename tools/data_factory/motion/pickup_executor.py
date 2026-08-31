@@ -119,18 +119,22 @@ def _precommit_evidence(value, safety, *, run_id, plan_digest, scene_binding, pl
 
 
 def _gripper_settings(value):
-    if not isinstance(value, dict) or set(value) not in ({
-        "hardware_plugin", "velocity_percent", "force_percent", "settle_time_ms",
-    }, {
+    required = {
         "hardware_plugin", "velocity_percent", "force_percent",
-        "open_force_percent", "settle_time_ms",
-    }):
+        "settle_time_ms",
+    }
+    optional = {"open_velocity_percent", "open_force_percent"}
+    if (
+        not isinstance(value, dict)
+        or not required <= set(value) <= required | optional
+    ):
         raise ContractError("GRIPPER_SETTINGS_UNVERIFIED")
     value = dict(value)
+    value.setdefault("open_velocity_percent", value["velocity_percent"])
     value.setdefault("open_force_percent", value["force_percent"])
     if (
         value["hardware_plugin"] not in {"fairino_hardware/FairinoHardwareInterface", "mock_components/GenericSystem"}
-        or any(type(value[key]) is not int or not 1 <= value[key] <= 100 for key in ("velocity_percent", "force_percent", "open_force_percent"))
+        or any(type(value[key]) is not int or not 1 <= value[key] <= 100 for key in ("velocity_percent", "open_velocity_percent", "force_percent", "open_force_percent"))
         or type(value["settle_time_ms"]) is not int
         or not 50 <= value["settle_time_ms"] <= 10000
     ):
@@ -340,7 +344,12 @@ class PickupExecutor:
         )
         settings = _gripper_settings(observed["gripper_settings"])
         required = motion_program["gripper_requirements"]
-        if settings["velocity_percent"] != required["velocity_percent"] or settings["force_percent"] != required["force_percent"]:
+        if (
+            settings["velocity_percent"] != required["velocity_percent"]
+            or settings["open_velocity_percent"]
+            != required.get("open_velocity_percent", required["velocity_percent"])
+            or settings["force_percent"] != required["force_percent"]
+        ):
             raise ContractError("GRIPPER_SETTINGS_MISMATCH")
         for controller in ("arm_controller", "gripper_controller"):
             fields = {"endpoint", "type", "publisher_count", "ready", "age_s", "speed_scaling"}

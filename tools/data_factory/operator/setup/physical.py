@@ -314,6 +314,7 @@ def build_physical_operator_environment(
     controller_ip: str | None = None,
     gripper_force_percent: int = 50,
     gripper_open_force_percent: int = 50,
+    gripper_open_velocity_percent: int = 20,
     device_root: str | Path = "/dev/v4l/by-id",
 ) -> OperatorEnvironment:
     """Build one owner-aware environment for an exact one/two-camera role map."""
@@ -331,6 +332,8 @@ def build_physical_operator_environment(
         or not 1 <= gripper_force_percent <= 100
         or type(gripper_open_force_percent) is not int
         or not 1 <= gripper_open_force_percent <= 100
+        or type(gripper_open_velocity_percent) is not int
+        or not 1 <= gripper_open_velocity_percent <= 100
     ):
         raise ContractError("OPERATOR_PHYSICAL_ENVIRONMENT_INPUT")
     spawn = process_factory or _default_process(repository)
@@ -608,6 +611,7 @@ def build_physical_operator_environment(
             "argv": (
                 "env", f"FR5_GRIPPER_FORCE={gripper_force_percent}",
                 f"FR5_GRIPPER_OPEN_FORCE={gripper_open_force_percent}",
+                f"FR5_GRIPPER_OPEN_VELOCITY={gripper_open_velocity_percent}",
                 "ros2", "launch", "fairino5_v6_moveit2_config",
                 "real_robot.launch.py", "use_fake_hardware:=false", "use_rviz:=false",
             ),

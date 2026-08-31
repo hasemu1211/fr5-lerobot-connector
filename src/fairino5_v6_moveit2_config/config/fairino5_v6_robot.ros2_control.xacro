@@ -16,6 +16,7 @@
                     <param name="gripper_upper_position">$(optenv FR5_GRIPPER_UPPER_POSITION 0.021)</param>
                 </xacro:unless>
                 <param name="gripper_velocity">$(optenv FR5_GRIPPER_VELOCITY 20)</param>
+                <param name="gripper_open_velocity">$(optenv FR5_GRIPPER_OPEN_VELOCITY 20)</param>
                 <param name="gripper_force">$(optenv FR5_GRIPPER_FORCE 50)</param>
                 <param name="gripper_open_force">$(optenv FR5_GRIPPER_OPEN_FORCE 50)</param>
                 <param name="gripper_settle_time_ms">$(optenv FR5_GRIPPER_SETTLE_TIME_MS 500)</param>
