@@ -250,6 +250,12 @@ class PhysicalEnvironmentTests(unittest.TestCase):
 
         def readback(_node_names=None, _controller_listing=None):
             maintenance = external_command_server or state["maintenance"]
+            if (
+                not maintenance
+                and state.get("gripper_readback_failures", 0) > 0
+            ):
+                state["gripper_readback_failures"] -= 1
+                raise ContractError("GRIPPER_SETUP_READBACK")
             return {
                 "active": maintenance_open or not maintenance,
                 "position_valid": True,
@@ -334,6 +340,24 @@ class PhysicalEnvironmentTests(unittest.TestCase):
             projected = environment.prepare_environment()
 
             self.assertEqual(projected["state"], "READY")
+
+    def test_owned_motion_retries_a_transient_first_gripper_readback(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.make_uvc_links(root)
+            state = {
+                "maintenance": False, "robot": False, "camera": False,
+                "gripper_readback_failures": 1,
+            }
+            environment, calls = self.build(root, state)
+
+            self.assertEqual(environment.prepare_environment()["state"], "READY")
+            self.assertEqual(state["gripper_readback_failures"], 0)
+            self.assertEqual(
+                sum("real_robot.launch.py" in argv for argv in calls["process"]),
+                1,
+            )
+            environment.stop()
 
     def test_realsense_presence_retries_one_failed_query(self):
         with tempfile.TemporaryDirectory() as directory:

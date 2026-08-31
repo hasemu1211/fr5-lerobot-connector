@@ -515,9 +515,20 @@ def build_physical_operator_environment(
             listing = controller_listing()
             active = _controller_names(listing)
             if EXPECTED_CONTROLLERS <= active:
-                projection = gripper_setup_projection(
-                    gripper_readback_call(graph, listing),
-                )
+                try:
+                    projection = gripper_setup_projection(
+                        gripper_readback_call(graph, listing),
+                    )
+                except ContractError as exc:
+                    if (
+                        exc.code == "GRIPPER_SETUP_READBACK"
+                        and owned_running("motion")
+                    ):
+                        return {
+                            name: {"state": "MISSING", "owner": None}
+                            for name in ("robot", "controller", "gripper")
+                        }
+                    raise
                 gripper_state = {
                     "ATTACHED": "READY",
                     "MAINTENANCE_APPROVAL_REQUIRED": "SETUP_REQUIRED",
