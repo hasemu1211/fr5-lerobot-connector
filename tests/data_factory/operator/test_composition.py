@@ -1502,6 +1502,7 @@ feedback:
             }
             scope_observed = {}
             runtime_observed = {}
+            recorder_runtime_observed = {}
 
             def validate_scope_then_stop(
                 payload, _cancel, publish, resolver, campaign_authorization,
@@ -1512,6 +1513,16 @@ feedback:
                 runtime_observed.update(
                     console.bridge_core.snapshot()["projection"]["runtime"],
                 )
+                for code in (
+                    "RECORDER_STARTING", "EXECUTING", "RECYCLING",
+                    "FINALIZING", "VALIDATING",
+                ):
+                    publish({"code": code, "run_id": payload["run_id"]})
+                    recorder_runtime_observed[code] = copy.deepcopy(
+                        console.bridge_core.snapshot()["projection"]["runtime"].get(
+                            "recorder"
+                        )
+                    )
                 validated, program, _scene = resolver(payload)
                 envelope = campaign_authorization["envelope"]
                 job = validated["normalized_job"]
@@ -1686,6 +1697,16 @@ feedback:
                 )
                 self.assertEqual(runtime_observed["phase"], "PLANNING")
                 self.assertEqual(runtime_observed["phase_label"], "경로 계획 및 충돌 검사")
+                self.assertNotIn("recorder", runtime_observed)
+                self.assertEqual(recorder_runtime_observed, {
+                    "RECORDER_STARTING": {
+                        "status": "CONNECTING", "label": "기록 준비 중",
+                    },
+                    "EXECUTING": {"status": "RECORDING", "label": "기록 중"},
+                    "RECYCLING": {"status": "FROZEN", "label": "녹화 완료"},
+                    "FINALIZING": {"status": "FROZEN", "label": "녹화 완료"},
+                    "VALIDATING": {"status": "COMMITTED", "label": "저장 완료"},
+                })
                 live.assert_called_once()
             finally:
                 console.close()

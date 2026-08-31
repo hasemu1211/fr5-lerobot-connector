@@ -126,6 +126,9 @@ class DataFactoryOperatorUiStaticTest(unittest.TestCase):
         ):
             self.assertIn(marker, self.js + self.messages + self.browser)
 
+    def test_recorder_fact_never_invents_an_unknown_status(self):
+        self.assertNotIn('"상태 확인 전"', self.js)
+
 
 if __name__ == "__main__":
     unittest.main()

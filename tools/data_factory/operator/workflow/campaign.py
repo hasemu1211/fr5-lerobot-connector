@@ -71,6 +71,13 @@ LIVE_RUNTIME_MILESTONES = {
     "FINALIZING": ("데이터 저장", 80, "동결된 episode를 commit하고 영상 파일을 마무리합니다."),
     "VALIDATING": ("데이터 품질 검사", 90, "timestamp·drop·provenance·프레임 일치를 검사합니다."),
 }
+RECORDER_RUNTIME_MILESTONES = {
+    "RECORDER_STARTING": {"status": "CONNECTING", "label": "기록 준비 중"},
+    "EXECUTING": {"status": "RECORDING", "label": "기록 중"},
+    "RECYCLING": {"status": "FROZEN", "label": "녹화 완료"},
+    "FINALIZING": {"status": "FROZEN", "label": "녹화 완료"},
+    "VALIDATING": {"status": "COMMITTED", "label": "저장 완료"},
+}
 ROOT = Path(__file__).resolve().parents[4]
 DEFAULT_JOB = Path(
     "config/data_factory/test_only_physical/goal2-place1/"
@@ -1174,6 +1181,9 @@ class OperatorConsole:
                 "phase": code, "phase_label": label,
                 "progress": progress, "detail": detail,
             }
+            recorder = RECORDER_RUNTIME_MILESTONES.get(code)
+            if recorder is not None:
+                self._runtime_milestone["recorder"] = dict(recorder)
 
         self._owner_transition(change)
 

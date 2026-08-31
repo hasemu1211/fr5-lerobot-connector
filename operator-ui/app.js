@@ -857,13 +857,13 @@ function renderFacts(view) {
     : (total > 0 ? Math.round(100 * completed / total) : 0);
   const current = view.runtime.current_episode ?? (view.runtime.workflow_state === "RUNNING" ? completed + 1 : null);
   const next = view.runtime.next_episode ?? (current && current < total ? current + 1 : null);
-  const recorder = view.runtime.recorder?.label ?? view.runtime.recorder?.status ?? "상태 확인 전";
+  const recorder = view.runtime.recorder?.label ?? view.runtime.recorder?.status;
   const facts = document.querySelector("#campaign-facts");
   facts.hidden = !view.campaign_envelope && !view.episode_history?.length;
   facts.innerHTML = `<div data-fact="completed"><span>전체 진행</span><strong>${escapeHtml(completed)}/${escapeHtml(total)} · ${escapeHtml(campaignProgress)}%</strong></div>
     <div data-fact="current"><span>현재 에피소드</span><strong>${current ? `${escapeHtml(current)}/${escapeHtml(total)}` : "없음"}</strong></div>
     <div data-fact="next"><span>다음 에피소드</span><strong>${next ? `${escapeHtml(next)}/${escapeHtml(total)}` : "없음"}</strong></div>
-    <div data-fact="recorder"><span>기록기</span><strong>${escapeHtml(recorder)}</strong></div>`;
+    ${recorder ? `<div data-fact="recorder"><span>기록기</span><strong>${escapeHtml(recorder)}</strong></div>` : ""}`;
 }
 
 function renderRuntime(view) {
