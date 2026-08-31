@@ -119,10 +119,18 @@ def _precommit_evidence(value, safety, *, run_id, plan_digest, scene_binding, pl
 
 
 def _gripper_settings(value):
-    value = _exact(value, {"hardware_plugin", "velocity_percent", "force_percent", "settle_time_ms"}, "GRIPPER_SETTINGS_UNVERIFIED")
+    if not isinstance(value, dict) or set(value) not in ({
+        "hardware_plugin", "velocity_percent", "force_percent", "settle_time_ms",
+    }, {
+        "hardware_plugin", "velocity_percent", "force_percent",
+        "open_force_percent", "settle_time_ms",
+    }):
+        raise ContractError("GRIPPER_SETTINGS_UNVERIFIED")
+    value = dict(value)
+    value.setdefault("open_force_percent", value["force_percent"])
     if (
         value["hardware_plugin"] not in {"fairino_hardware/FairinoHardwareInterface", "mock_components/GenericSystem"}
-        or any(type(value[key]) is not int or not 1 <= value[key] <= 100 for key in ("velocity_percent", "force_percent"))
+        or any(type(value[key]) is not int or not 1 <= value[key] <= 100 for key in ("velocity_percent", "force_percent", "open_force_percent"))
         or type(value["settle_time_ms"]) is not int
         or not 50 <= value["settle_time_ms"] <= 10000
     ):
@@ -884,7 +892,12 @@ class PickupExecutor:
                 try:
                     active = self.transport.poll_active()
                 except Exception as exc:
-                    self._fault(run, exc.code if isinstance(exc, ContractError) else "ROS_EXEC_POLL_FAILED")
+                    code = exc.code if isinstance(exc, ContractError) else "ROS_EXEC_POLL_FAILED"
+                    if code == "ROS_EXEC_RESULT_TIMEOUT":
+                        step = run["plan"]["steps"][execution["step_index"]]
+                        if step["phase"] == "GRIPPER_OPEN":
+                            code = "GRIPPER_OPEN_TIMEOUT"
+                    self._fault(run, code)
                     continue
                 if active is not None:
                     execution["active"] = False

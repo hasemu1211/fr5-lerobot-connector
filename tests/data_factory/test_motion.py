@@ -47,6 +47,13 @@ class Test(unittest.TestCase):
   for step in program["steps"]:
    if step["phase"] in e.ARM_PHASES:step["limits"]["execution_timeout_s"]=2.5
   blocked=e.PickupExecutor(slow).process(self.req("plan",{"run_id":"slow","motion_program":program}));self.assertEqual((blocked["ok"],blocked["code"]),(False,"EXECUTION_TIMEOUT_INSUFFICIENT"))
+ def test_open_result_timeout_reports_the_exact_phase(self):
+  class Timeout:
+   def poll_active(self):raise e.ContractError("ROS_EXEC_RESULT_TIMEOUT")
+   def cancel_active(self,*_):return None
+   def snapshot(self,*_):return snapshot()
+  for phase,expected in (("GRIPPER_OPEN","GRIPPER_OPEN_TIMEOUT"),("LIFT_LIN","ROS_EXEC_RESULT_TIMEOUT")):
+   node=e.PickupExecutor(Timeout(),monotonic_clock=lambda:0.);node.runs["r"]={"state":"EXECUTING","digest":"sha256:"+"1"*64,"plan":{"run_id":"r","steps":[{"phase":phase}],"execution_timeouts_s":{"cancel":1.},"planning":{"max_joint_state_age_s":.1},"scene_binding":{}},"execution":{"lease_deadline":1.,"step_index":0,"active":True}};node.tick();self.assertEqual((node.runs["r"]["state"],node.runs["r"]["failure_code"]),("BLOCKED",expected))
  def test_failures_reuse_approval_live_no_later(self):
   for failure,code in ((e.ContractError("ROS_JOINT_STATE_STALE"),"ROS_JOINT_STATE_STALE"),({"joint_positions":[0]*6,"arm_controller":{"ready":False},"gripper_controller":{"ready":True}},"CONTROLLER_NOT_READY")):
    t=T();t.snapshot=lambda *_: (_ for _ in ()).throw(failure) if isinstance(failure,Exception) else snapshot(ready=False);n=e.PickupExecutor(t);self.assertEqual((n.process(self.req("plan",{"run_id":"r","motion_program":motion()}))["code"],t.calls),(code,[]))

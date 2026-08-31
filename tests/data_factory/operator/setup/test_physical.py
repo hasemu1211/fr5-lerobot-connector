@@ -323,7 +323,10 @@ class PhysicalEnvironmentTests(unittest.TestCase):
             self.assertIn("CAMERA_FPS=30", camera)
             self.assertEqual(camera[-3:], ("up", "UVC", str(root / UP_DEVICE)))
             robot = calls["process"][2]
-            self.assertEqual(robot[:2], ("env", "FR5_GRIPPER_FORCE=25"))
+            self.assertEqual(
+                robot[:3],
+                ("env", "FR5_GRIPPER_FORCE=25", "FR5_GRIPPER_OPEN_FORCE=50"),
+            )
             self.assertEqual(environment.stop()["state"], "SETUP_REQUIRED")
             self.assertFalse(state["robot"] or state["camera"] or state["maintenance"])
 

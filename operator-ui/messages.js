@@ -55,6 +55,7 @@ const MESSAGE_CATALOG = {
     CELL_NOT_READY: "이전 실행 오류를 복구하고 로봇 상태를 다시 확인해야 합니다",
     EXECUTION_TIMEOUT_INSUFFICIENT: "계획된 동작 시간이 현재 실행 제한을 넘었습니다",
     ROS_EXEC_RESULT_TIMEOUT: "로봇 제어 결과가 제한 시간 안에 완료되지 않았습니다",
+    GRIPPER_OPEN_TIMEOUT: "물체를 내려놓은 뒤 그리퍼가 열리지 않아 후퇴 동작을 시작하지 않았습니다",
     GRIPPER_FEEDBACK_OUT_OF_RANGE: "그리퍼 피드백이 이 물체에 등록된 허용 범위를 벗어났습니다",
     CAMERA_WARMUP_FAILED: "카메라 전송 속도 또는 timestamp 확인에 실패했습니다",
     CANDIDATE_REVIEW_STATE: "분류 대상과 작업별 검토 계약이 일치하지 않습니다",

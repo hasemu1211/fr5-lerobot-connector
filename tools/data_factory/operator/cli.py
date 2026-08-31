@@ -15,7 +15,7 @@ DEFAULT_JOB = (
 )
 DEFAULT_GRIPPER_RETUNE = (
     "config/data_factory/test_only_physical/goal2-place1/"
-    "gripper-retune-wood-cube-25mm-top-center-r002.json"
+    "gripper-retune-wood-cube-25mm-top-center-r005.json"
 )
 
 

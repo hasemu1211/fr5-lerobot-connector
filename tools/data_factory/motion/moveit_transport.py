@@ -629,6 +629,9 @@ class RosMoveItTransport:
                 "hardware_plugin": plugin,
                 "velocity_percent": int(params["gripper_velocity"]),
                 "force_percent": int(params["gripper_force"]),
+                "open_force_percent": int(params.get(
+                    "gripper_open_force", params["gripper_force"],
+                )),
                 "settle_time_ms": int(params["gripper_settle_time_ms"]),
             }
         except (KeyError, ValueError) as exc:
@@ -640,6 +643,7 @@ class RosMoveItTransport:
             }
             or not 1 <= settings["velocity_percent"] <= 100
             or not 1 <= settings["force_percent"] <= 100
+            or not 1 <= settings["open_force_percent"] <= 100
             or not 50 <= settings["settle_time_ms"] <= 10000
         ):
             raise ContractError("ROS_GRIPPER_SETTINGS_UNVERIFIED")

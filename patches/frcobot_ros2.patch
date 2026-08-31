@@ -41,7 +41,7 @@ index cd06d65..be0671f 100644
    
    FAIRINO_HARDWARE_PUBLIC
    std::vector<hardware_interface::StateInterface> export_state_interfaces() override;
-@@ -53,18 +71,41 @@ public:
+@@ -53,18 +71,42 @@ public:
    hardware_interface::return_type write(const rclcpp::Time & time, const rclcpp::Duration & period) override;
    
  private:
@@ -65,6 +65,7 @@ index cd06d65..be0671f 100644
 +  int _gripper_index{1};
 +  int _gripper_velocity{80};
 +  int _gripper_force{50};
++  int _gripper_open_force{50};
 +  int _gripper_max_time{30000};
 +  int _gripper_settle_time_ms{500};
 +  double _gripper_upper_position{0.021};
@@ -183,7 +184,7 @@ diff --git a/fairino_hardware_v3_9_7/src/fairino_hardware_interface.cpp b/fairin
 index ca2d84f..23e8879 100644
 --- a/fairino_hardware_v3_9_7/src/fairino_hardware_interface.cpp
 +++ b/fairino_hardware_v3_9_7/src/fairino_hardware_interface.cpp
-@@ -2,11 +2,72 @@
+@@ -2,11 +2,74 @@
  
  namespace fairino_hardware{
  
@@ -235,6 +236,7 @@ index ca2d84f..23e8879 100644
 +            if (auto it = params.find("gripper_index"); it != params.end()) _gripper_index = std::stoi(it->second);
 +            if (auto it = params.find("gripper_velocity"); it != params.end()) _gripper_velocity = std::stoi(it->second);
 +            if (auto it = params.find("gripper_force"); it != params.end()) _gripper_force = std::stoi(it->second);
++            if (auto it = params.find("gripper_open_force"); it != params.end()) _gripper_open_force = std::stoi(it->second);
 +            if (auto it = params.find("gripper_max_time"); it != params.end()) _gripper_max_time = std::stoi(it->second);
 +            if (auto it = params.find("gripper_settle_time_ms"); it != params.end()) _gripper_settle_time_ms = std::stoi(it->second);
 +            if (auto it = params.find("gripper_upper_position"); it != params.end()) _gripper_upper_position = std::stod(it->second);
@@ -246,6 +248,7 @@ index ca2d84f..23e8879 100644
 +        if (_gripper_index < 1 || _gripper_index > 16 ||
 +            _gripper_velocity < 1 || _gripper_velocity > 100 ||
 +            _gripper_force < 1 || _gripper_force > 100 ||
++            _gripper_open_force < 1 || _gripper_open_force > 100 ||
 +            _gripper_max_time <= 0 || _gripper_max_time > 30000 ||
 +            _gripper_settle_time_ms < 50 || _gripper_settle_time_ms > 10000 ||
 +            !std::isfinite(_gripper_upper_position) || _gripper_upper_position <= 0.0) {
@@ -500,7 +503,7 @@ index ca2d84f..23e8879 100644
              [](double c) { return not std::isfinite(c); })) {
              return hardware_interface::return_type::ERROR;
          }
-@@ -211,6 +392,151 @@ hardware_interface::return_type FairinoHardwareInterface::write(const rclcpp::Ti
+@@ -211,6 +392,156 @@ hardware_interface::return_type FairinoHardwareInterface::write(const rclcpp::Ti
      return hardware_interface::return_type::OK;
  }
  
@@ -549,9 +552,14 @@ index ca2d84f..23e8879 100644
 +                    initial_position_result, initial_fault);
 +                return;
 +            }
++            const bool opening = *position > static_cast<int>(last_feedback);
++            const int force = opening ? _gripper_open_force : _gripper_force;
++            RCLCPP_INFO(rclcpp::get_logger("FairinoHardwareInterface"),
++                "Gripper command direction=%s target=%d feedback=%u force=%d",
++                opening ? "OPEN" : "CLOSE", *position, last_feedback, force);
 +            _gripper_rpc_active = true;
 +            const int result = _ptr_robot->MoveGripper(
-+                _gripper_index, *position, _gripper_velocity, _gripper_force,
++                _gripper_index, *position, _gripper_velocity, force,
 +                _gripper_max_time, 1, 0, 0, 0, 0);
 +            _gripper_rpc_active = false;
 +            if (result != 0) {
