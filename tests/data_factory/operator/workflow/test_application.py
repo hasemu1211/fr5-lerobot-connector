@@ -652,7 +652,7 @@ class CollectionOperatorApplicationTests(unittest.TestCase):
         with self.assertRaises(ContractError) as rejected:
             self.consume("update_draft", {
                 "draft_id": projected["draft"]["draft_id"],
-                "add_pose": {**requested, "x_mm": 70.001},
+                "add_pose": {**requested, "x_mm": 159.0},
             }, "reject-outside-pose")
         self.assertEqual(rejected.exception.code, "JOB_COORDINATE_BOUNDS")
         self.assertEqual(
@@ -744,6 +744,7 @@ class CollectionOperatorApplicationTests(unittest.TestCase):
             domain_id=changed["frame_id"],
             workspace_id=changed["workspace_id"],
             frame_id=changed["frame_id"],
+            object_id=changed["object_id"],
             preset_cell_ids=[changed["cell_id"]],
         )
         domain["domain_digest"] = canonical_digest({

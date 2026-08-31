@@ -117,6 +117,7 @@ class PhysicalEnvironmentTests(unittest.TestCase):
         partial_camera_roles: set[str] | None = None,
         realsense_connected: bool = True,
         realsense_depth: bool = False,
+        gripper_force_percent: int = 50,
     ):
         collection_profile = collection_profile or profile("up")
         camera_devices = camera_devices or {"up": uvc(root, UP_DEVICE)}
@@ -280,6 +281,7 @@ class PhysicalEnvironmentTests(unittest.TestCase):
             gripper_maintenance_call=maintain,
             settle_policy=lambda check: check(),
             controller_ip="192.0.2.1",
+            gripper_force_percent=gripper_force_percent,
             device_root=root,
         )
         return environment, calls
@@ -294,7 +296,9 @@ class PhysicalEnvironmentTests(unittest.TestCase):
             root = Path(directory)
             self.make_uvc_links(root)
             state = {"maintenance": False, "robot": False, "camera": False}
-            environment, calls = self.build(root, state)
+            environment, calls = self.build(
+                root, state, gripper_force_percent=25,
+            )
 
             projected = environment.prepare_environment()
 
@@ -312,6 +316,8 @@ class PhysicalEnvironmentTests(unittest.TestCase):
             camera = calls["process"][1]
             self.assertIn("CAMERA_FPS=30", camera)
             self.assertEqual(camera[-3:], ("up", "UVC", str(root / UP_DEVICE)))
+            robot = calls["process"][2]
+            self.assertEqual(robot[:2], ("env", "FR5_GRIPPER_FORCE=25"))
             self.assertEqual(environment.stop()["state"], "SETUP_REQUIRED")
             self.assertFalse(state["robot"] or state["camera"] or state["maintenance"])
 

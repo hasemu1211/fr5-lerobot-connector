@@ -43,6 +43,7 @@ from tools.data_factory.operator.setup.contracts import (
 )
 from tools.data_factory.operator.composition import build_product_fake_operator
 from tools.data_factory.task_recipe import TASK_IDS
+from tools.data_factory.workspace_geometry import rotate_xy, safe_rectangle_bounds
 from tools.fr5_data_factory import ContractError, canonical_digest, load_json_strict
 
 
@@ -332,8 +333,8 @@ class OperatorStateSpaceProductTests(unittest.TestCase):
             **requested, "yaw_deg": -162.5,
         })
         for invalid in (
-            {**requested, "x_mm": 70.001},
-            {**requested, "y_mm": -35.001},
+            {**requested, "x_mm": 159.0},
+            {**requested, "y_mm": -159.0},
             {**requested, "place_id": "PLACE_B"},
         ):
             with self.subTest(invalid=invalid), self.assertRaises(ContractError):
@@ -365,48 +366,60 @@ class OperatorStateSpaceProductTests(unittest.TestCase):
         first_three = project_assisted_poses(catalog, selection, source, 3)
         self.assertEqual(len({pose(item) for item in projected}), 100)
         self.assertTrue(all(pose(item) not in presets for item in projected[1:]))
-        spatial_anchors = {
-            option["metadata"]["point_id"]: (
-                option["metadata"]["x_mm"], option["metadata"]["y_mm"],
-            )
-            for option in catalog["axes"]["cell"]
-            if option["metadata"].get("place_id") == "PLACE_A"
-        }
-        nearest_spatial = lambda item: min(
-            spatial_anchors,
-            key=lambda identifier: (
-                (item["x_mm"] - spatial_anchors[identifier][0]) ** 2
-                + (item["y_mm"] - spatial_anchors[identifier][1]) ** 2,
-                identifier,
-            ),
+        domain = next(
+            item for item in catalog["workspace_domains"]
+            if item["frame_id"] == selection["frame_id"]
+            and item["object_id"] == selection["object_id"]
         )
-        self.assertEqual(len({nearest_spatial(item) for item in projected[:15]}), 15)
+        region = domain["coverage_region"]
+        x_bounds, y_bounds = safe_rectangle_bounds(
+            page_size_mm=region["page_size_mm"],
+            origin_xy_mm=region["origin_xy_mm"],
+            base_margin_xy_mm=region["base_margin_xy_mm"],
+            object_size_xy_mm=region["object_size_xy_mm"],
+            uncertainty_mm=region["uncertainty_mm"], yaw_deg=0,
+        )
+        columns, rows = region["strata"]["columns"], region["strata"]["rows"]
+
+        def physical_xy(item):
+            return rotate_xy((item["x_mm"], item["y_mm"]), item["yaw_deg"])
+
+        def stratum(item):
+            x_mm, y_mm = physical_xy(item)
+            column = min(
+                int((x_mm - x_bounds[0]) / ((x_bounds[1] - x_bounds[0]) / columns)),
+                columns - 1,
+            )
+            row = min(
+                int((y_mm - y_bounds[0]) / ((y_bounds[1] - y_bounds[0]) / rows)),
+                rows - 1,
+            )
+            return row, column
+
+        self.assertEqual(len({stratum(item) for item in projected[:15]}), 15)
         self.assertTrue(all(
             item["yaw_deg"] == source["yaw_deg"] for item in projected[:15]
         ))
-        self.assertTrue(all(
-            min(value[0] for value in spatial_anchors.values()) + 3.5
-            <= item["x_mm"]
-            <= max(value[0] for value in spatial_anchors.values()) - 3.5
-            and min(value[1] for value in spatial_anchors.values()) + 3.5
-            <= item["y_mm"]
-            <= max(value[1] for value in spatial_anchors.values()) - 3.5
-            for item in projected[1:]
-        ))
-        self.assertTrue(any(
-            math.dist(
-                (item["x_mm"], item["y_mm"]),
-                spatial_anchors[nearest_spatial(item)],
-            ) > 7.0
-            for item in projected[1:15]
-        ))
+        prefix_x = [physical_xy(item)[0] for item in projected[1:5]]
+        prefix_y = [physical_xy(item)[1] for item in projected[1:5]]
+        self.assertLess(min(prefix_x), x_bounds[0] / 2)
+        self.assertGreater(max(prefix_x), x_bounds[1] / 2)
+        self.assertLess(min(prefix_y), y_bounds[0] / 2)
+        self.assertGreater(max(prefix_y), y_bounds[1] / 2)
+        for item in projected:
+            safe_x, safe_y = safe_rectangle_bounds(
+                page_size_mm=region["page_size_mm"],
+                origin_xy_mm=region["origin_xy_mm"],
+                base_margin_xy_mm=region["base_margin_xy_mm"],
+                object_size_xy_mm=region["object_size_xy_mm"],
+                uncertainty_mm=region["uncertainty_mm"],
+                yaw_deg=item["yaw_deg"],
+            )
+            x_mm, y_mm = physical_xy(item)
+            self.assertTrue(safe_x[0] <= x_mm <= safe_x[1])
+            self.assertTrue(safe_y[0] <= y_mm <= safe_y[1])
         self.assertTrue(any(
             item["yaw_deg"] != source["yaw_deg"] for item in projected[15:]
-        ))
-        first_cycle_anchors = [nearest_spatial(item) for item in projected[:15]]
-        self.assertTrue(all(
-            math.dist(spatial_anchors[left], spatial_anchors[right]) <= 50.0
-            for left, right in zip(first_cycle_anchors, first_cycle_anchors[1:])
         ))
         self.assertEqual(
             canonical_digest(projected),
@@ -959,8 +972,8 @@ class ProductFakeOperatorTests(unittest.TestCase):
             ),
             (
                 "PLACE_A", "CONTINUOUS_A4_PLANE",
-                {"minimum": -70.0, "maximum": 70.0},
-                {"minimum": -35.0, "maximum": 35.0},
+                domain["x_mm"],
+                domain["y_mm"],
                 {"minimum": -180.0, "maximum_exclusive": 180.0},
             ),
         )
@@ -970,6 +983,14 @@ class ProductFakeOperatorTests(unittest.TestCase):
                 key: value for key, value in domain.items()
                 if key != "domain_digest"
             }),
+        )
+        self.assertEqual(domain["object_id"], "wood-cube-25mm-r001")
+        self.assertGreater(domain["x_mm"]["maximum"], 150)
+        self.assertEqual(
+            domain["x_mm"]["minimum"], -domain["x_mm"]["maximum"],
+        )
+        self.assertEqual(
+            domain["coverage_region"]["strata"], {"columns": 5, "rows": 3},
         )
 
         with self.assertRaisesRegex(ContractError, "OPERATOR_INTENT_OP"):
@@ -1231,7 +1252,7 @@ class ProductFakeOperatorTests(unittest.TestCase):
 
         with self.assertRaises(ContractError) as raised:
             self.compile(product, "forged-domain")
-        self.assertEqual(raised.exception.code, "JOB_COORDINATE_BOUNDS")
+        self.assertEqual(raised.exception.code, "OPERATOR_POSE_DOMAIN")
         self.assertEqual(product.campaigns, ())
         self.assertEqual(list(Path(product.fixture_root).rglob("*")), [])
 

@@ -531,6 +531,7 @@ function directPoseDomain(view) {
   const validBounds = (bounds) => bounds && Number.isFinite(bounds.minimum) && Number.isFinite(bounds.maximum) && bounds.minimum <= bounds.maximum;
   if (!domain || typeof domain !== "object" || Array.isArray(domain)
       || domain.workspace_id !== view.draft.selection.workspace || domain.frame_id !== view.draft.selection.frame
+      || domain.object_id !== view.draft.selection.object
       || domain.coordinate_mode !== "CONTINUOUS_A4_PLANE" || !validBounds(domain.x_mm) || !validBounds(domain.y_mm)
       || !domain.yaw_deg || !Number.isFinite(domain.yaw_deg.minimum) || !Number.isFinite(domain.yaw_deg.maximum_exclusive)
       || domain.yaw_deg.minimum >= domain.yaw_deg.maximum_exclusive) return null;

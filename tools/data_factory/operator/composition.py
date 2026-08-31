@@ -89,6 +89,7 @@ from tools.data_factory.operator.workflow.campaign import (
     _campaign_camera_warmup,
     _derive_test_only_gripper_program,
     _test_only_home_start_pose,
+    _validate_test_only_gripper_retune,
 )
 from tools.data_factory.quality.coverage_report import build_coverage_report
 from tools.data_factory.operator.registries.workspace import WorkspaceManager
@@ -120,6 +121,40 @@ def _repository_path(repository: Path, value: str | Path) -> Path:
     except ValueError as exc:
         raise ContractError("PHYSICAL_CONSOLE_PATH") from exc
     return path
+
+
+def _runtime_gripper_force_percent(
+    repository: Path, initial_job: Mapping[str, Any],
+    gripper_retune: str | Path,
+) -> int:
+    """Resolve one object-scoped force setting before the owned ROS graph starts."""
+    retune = load_json_strict(_repository_path(repository, gripper_retune))
+    grasp_matches = []
+    for path in sorted(
+        (repository / "config/data_factory/grasps").glob("*.json"),
+        key=lambda value: str(value),
+    ):
+        grasp = load_json_strict(path)
+        if grasp.get("grasp_profile_id") == initial_job.get("grasp_profile_id"):
+            grasp_matches.append(grasp)
+    motion_matches = []
+    for path in sorted(
+        (repository / "config/data_factory/motion_qualifications").glob("*.json"),
+        key=lambda value: str(value),
+    ):
+        motion = load_json_strict(path)
+        if canonical_digest(motion) == retune.get("base_motion_qualification_digest"):
+            motion_matches.append(motion)
+    if (
+        len(grasp_matches) != 1 or len(motion_matches) != 1
+        or retune.get("object_profile_id") != initial_job.get("object_profile_id")
+        or retune.get("grasp_profile_id") != initial_job.get("grasp_profile_id")
+    ):
+        raise ContractError("TEST_ONLY_GRIPPER_RETUNE_BINDING")
+    _checked, force_percent = _validate_test_only_gripper_retune(
+        retune, grasp=grasp_matches[0], motion=motion_matches[0],
+    )
+    return force_percent
 
 
 def _resolve_physical_pose_domain(
@@ -1116,6 +1151,9 @@ def build_physical_runtime(
         devices = [item["logical_id"] for item in camera_descriptors]
         catalog = load_operator_catalog(repository, device_ids=devices)
         initial_job = load_json_strict(_repository_path(repository, job))
+        gripper_force_percent = _runtime_gripper_force_percent(
+            repository, initial_job, gripper_retune,
+        )
         requested_bindings = None
         if camera_device_id is not None:
             if camera_device_id not in devices:
@@ -1180,6 +1218,7 @@ def build_physical_runtime(
                 camera_devices=camera_devices,
                 gripper_readback_call=capture_gripper_setup_readback,
                 gripper_maintenance_call=normalize_gripper_after_operator_ready,
+                gripper_force_percent=gripper_force_percent,
             )
             environment_holder["pending"] = pending
             return pending.projection()

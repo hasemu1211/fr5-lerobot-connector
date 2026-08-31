@@ -7,9 +7,19 @@ import math
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
+from tools.a4_place_yaw.generate_place_yaw_a4 import (
+    PRINT_X_MARGIN_MM,
+    PRINT_Y_MARGIN_MM,
+)
 from tools.data_factory.experiment_manifest import build_test_only_feature_contract
 from tools.data_factory.motion.trajectory_variants import phase_variant_catalog
 from tools.data_factory.task_recipe import TASK_IDS, get_task_recipe
+from tools.data_factory.workspace_geometry import (
+    rotate_xy,
+    rotation_envelope,
+    safe_rectangle_bounds,
+    stratified_rectangle_samples,
+)
 from tools.fr5_data_factory import (
     ContractError, SAFE_ID,
     bounded_a4_coordinate,
@@ -42,8 +52,14 @@ POSE_ORDER = ("place_id", "yaw_deg", "x_mm", "y_mm")
 POSE_FIELDS = frozenset(POSE_ORDER)
 WORKSPACE_DOMAIN_FIELDS = frozenset({
     "domain_id", "workspace_id", "frame_id", "coordinate_mode",
+    "object_id", "coverage_region",
     "a4_family_digest", "yaw0_manifest_digest", "x_mm", "y_mm",
     "yaw_deg", "preset_cell_ids", "execution_gate", "domain_digest",
+})
+COVERAGE_REGION_FIELDS = frozenset({
+    "shape", "page_size_mm", "origin_xy_mm", "base_margin_xy_mm",
+    "object_size_xy_mm", "uncertainty_mm", "strata",
+    "coordinate_contract",
 })
 
 
@@ -285,6 +301,7 @@ def load_operator_catalog(
                 identifier, value.get("description", identifier),
                 status="QUALIFIED" if qualified else "QUALIFICATION_REQUIRED",
                 reason="OBJECT_PROFILE_QUALIFIED" if qualified else "OBJECT_PROFILE_REQUIRED",
+                metadata={"dimensions_mm": copy.deepcopy(value.get("dimensions_mm"))},
             ))
     for _path, value in grasps:
         identifier = value.get("grasp_profile_id")
@@ -376,33 +393,68 @@ def load_operator_catalog(
         ]
         if cell.get("qualification_status") != "QUALIFIED" or len(yaw0) != 1:
             continue
-        u_values = [
-            float(point["local_uv_mm"][0])
-            for point in yaw0[0]["grid_points"]
-        ]
-        v_values = [
-            float(point["local_uv_mm"][1])
-            for point in yaw0[0]["grid_points"]
-        ]
         preset_ids = sorted({
             f"{cell['place_id']}-yaw{int(float(sheet['yaw_deg']))}-{point['point_id']}"
             for sheet in family_sheets for point in sheet["grid_points"]
         })
-        domain = {
-            "domain_id": cell["calibration_id"],
-            "workspace_id": cell["place_id"],
-            "frame_id": cell["calibration_id"],
-            "coordinate_mode": "CONTINUOUS_A4_PLANE",
-            "a4_family_digest": cell["a4_family_digest"],
-            "yaw0_manifest_digest": cell["yaw0_manifest_digest"],
-            "x_mm": {"minimum": min(u_values), "maximum": max(u_values)},
-            "y_mm": {"minimum": min(v_values), "maximum": max(v_values)},
-            "yaw_deg": {"minimum": -180.0, "maximum_exclusive": 180.0},
-            "preset_cell_ids": preset_ids,
-            "execution_gate": "FRESH_PLAN_IK_COLLISION_ENDPOINT_PER_SLOT",
-        }
-        domain["domain_digest"] = canonical_digest(domain)
-        workspace_domains.append(domain)
+        sheet = yaw0[0]
+        page_size = [sheet["page_mm"]["width"], sheet["page_mm"]["height"]]
+        origin = sheet["registration"]["origin"]["sheet_xy_mm"]
+        base_margin = [PRINT_X_MARGIN_MM, PRINT_Y_MARGIN_MM]
+        try:
+            printable = safe_rectangle_bounds(
+                page_size_mm=page_size, origin_xy_mm=origin,
+                base_margin_xy_mm=base_margin,
+                object_size_xy_mm=(0.0, 0.0), uncertainty_mm=0.0,
+                yaw_deg=0.0,
+            )
+            envelope_x, envelope_y = rotation_envelope(*printable)
+        except ValueError as exc:
+            raise ContractError("OPERATOR_CATALOG_CONFIG") from exc
+        for _object_path, object_profile in objects:
+            dimensions = object_profile.get("dimensions_mm")
+            if object_profile.get("qualification_status") != "QUALIFIED":
+                continue
+            try:
+                object_size = [float(dimensions[0]), float(dimensions[1])]
+                safe_rectangle_bounds(
+                    page_size_mm=page_size, origin_xy_mm=origin,
+                    base_margin_xy_mm=base_margin,
+                    object_size_xy_mm=object_size,
+                    uncertainty_mm=cell["limits"]["combined_error_bound_mm"],
+                    yaw_deg=0.0,
+                )
+            except (KeyError, TypeError, ValueError, IndexError) as exc:
+                raise ContractError("OPERATOR_CATALOG_CONFIG") from exc
+            region = {
+                "shape": "RECTANGLE",
+                "page_size_mm": page_size,
+                "origin_xy_mm": copy.deepcopy(origin),
+                "base_margin_xy_mm": base_margin,
+                "object_size_xy_mm": object_size,
+                "uncertainty_mm": float(
+                    cell["limits"]["combined_error_bound_mm"]
+                ),
+                "strata": {"columns": 5, "rows": 3},
+                "coordinate_contract": "SHEET_XY_EQUALS_RZ_YAW_TIMES_LOCAL_XY",
+            }
+            domain = {
+                "domain_id": f"{cell['calibration_id']}@{object_profile['object_profile_id']}",
+                "workspace_id": cell["place_id"],
+                "frame_id": cell["calibration_id"],
+                "object_id": object_profile["object_profile_id"],
+                "coordinate_mode": "CONTINUOUS_A4_PLANE",
+                "coverage_region": region,
+                "a4_family_digest": cell["a4_family_digest"],
+                "yaw0_manifest_digest": cell["yaw0_manifest_digest"],
+                "x_mm": {"minimum": envelope_x[0], "maximum": envelope_x[1]},
+                "y_mm": {"minimum": envelope_y[0], "maximum": envelope_y[1]},
+                "yaw_deg": {"minimum": -180.0, "maximum_exclusive": 180.0},
+                "preset_cell_ids": preset_ids,
+                "execution_gate": "FRESH_PLAN_IK_COLLISION_ENDPOINT_PER_SLOT",
+            }
+            domain["domain_digest"] = canonical_digest(domain)
+            workspace_domains.append(domain)
 
     combinations = []
     camera_jobs = [
@@ -780,15 +832,54 @@ def _operator_pose_domain(
         if isinstance(item, Mapping)
         and item.get("workspace_id") == selected["workspace_id"]
         and item.get("frame_id") == selected["frame_id"]
+        and item.get("object_id") == selected["object_id"]
     ]
     if len(domains) != 1:
         raise ContractError("OPERATOR_POSE_DOMAIN")
     domain = domains[0]
+    region = domain.get("coverage_region")
     if (
-        domain.get("coordinate_mode") != "CONTINUOUS_A4_PLANE"
+        set(domain) != WORKSPACE_DOMAIN_FIELDS
+        or domain.get("coordinate_mode") != "CONTINUOUS_A4_PLANE"
+        or domain.get("execution_gate")
+        != "FRESH_PLAN_IK_COLLISION_ENDPOINT_PER_SLOT"
+        or not isinstance(region, Mapping)
+        or set(region) != COVERAGE_REGION_FIELDS
+        or region.get("shape") != "RECTANGLE"
+        or region.get("coordinate_contract")
+        != "SHEET_XY_EQUALS_RZ_YAW_TIMES_LOCAL_XY"
+        or not isinstance(region.get("strata"), Mapping)
+        or region["strata"] != {"columns": 5, "rows": 3}
         or domain.get("domain_digest") != canonical_digest({
             key: value for key, value in domain.items() if key != "domain_digest"
         })
+    ):
+        raise ContractError("OPERATOR_POSE_DOMAIN")
+    try:
+        printable = safe_rectangle_bounds(
+            page_size_mm=region["page_size_mm"],
+            origin_xy_mm=region["origin_xy_mm"],
+            base_margin_xy_mm=region["base_margin_xy_mm"],
+            object_size_xy_mm=(0.0, 0.0), uncertainty_mm=0.0,
+            yaw_deg=0.0,
+        )
+        envelope_x, envelope_y = rotation_envelope(*printable)
+        safe_rectangle_bounds(
+            page_size_mm=region["page_size_mm"],
+            origin_xy_mm=region["origin_xy_mm"],
+            base_margin_xy_mm=region["base_margin_xy_mm"],
+            object_size_xy_mm=region["object_size_xy_mm"],
+            uncertainty_mm=region["uncertainty_mm"], yaw_deg=0.0,
+        )
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ContractError("OPERATOR_POSE_DOMAIN") from exc
+    if (
+        domain.get("x_mm")
+        != {"minimum": envelope_x[0], "maximum": envelope_x[1]}
+        or domain.get("y_mm")
+        != {"minimum": envelope_y[0], "maximum": envelope_y[1]}
+        or domain.get("yaw_deg")
+        != {"minimum": -180.0, "maximum_exclusive": 180.0}
     ):
         raise ContractError("OPERATOR_POSE_DOMAIN")
     return domain
@@ -809,9 +900,15 @@ def _canonical_operator_pose(
         numbers.append(float(value))
     yaw, x_mm, y_mm = numbers
     yaw = normalize_yaw_deg(yaw)
+    region = domain["coverage_region"]
     bounded_a4_coordinate(
         x_bounds=domain["x_mm"], y_bounds=domain["y_mm"],
         yaw_deg=yaw, x_mm=x_mm, y_mm=y_mm,
+        page_size_mm=region["page_size_mm"],
+        origin_xy_mm=region["origin_xy_mm"],
+        base_margin_xy_mm=region["base_margin_xy_mm"],
+        object_size_xy_mm=region["object_size_xy_mm"],
+        uncertainty_mm=region["uncertainty_mm"],
     )
     return {
         "place_id": selected["workspace_id"],
@@ -870,38 +967,7 @@ def project_assisted_poses(
         domain = _operator_pose_domain(catalog, selected)
     except ContractError as exc:
         raise ContractError("OPERATOR_ASSISTED_DOMAIN") from exc
-    if (
-        set(domain) != WORKSPACE_DOMAIN_FIELDS
-        or domain.get("coordinate_mode") != "CONTINUOUS_A4_PLANE"
-        or domain.get("domain_digest") != canonical_digest({
-            key: value for key, value in domain.items() if key != "domain_digest"
-        })
-    ):
-        raise ContractError("OPERATOR_ASSISTED_DOMAIN")
-
-    bounds = []
-    for axis in ("x_mm", "y_mm"):
-        value = domain.get(axis)
-        if not isinstance(value, Mapping) or set(value) != {"minimum", "maximum"}:
-            raise ContractError("OPERATOR_ASSISTED_DOMAIN")
-        minimum, maximum = value["minimum"], value["maximum"]
-        if (
-            isinstance(minimum, bool) or not isinstance(minimum, (int, float))
-            or isinstance(maximum, bool) or not isinstance(maximum, (int, float))
-            or not math.isfinite(minimum) or not math.isfinite(maximum)
-            or minimum > maximum
-        ):
-            raise ContractError("OPERATOR_ASSISTED_DOMAIN")
-        bounds.append((float(minimum), float(maximum)))
-    yaw_bounds = domain.get("yaw_deg")
-    if (
-        not isinstance(yaw_bounds, Mapping)
-        or set(yaw_bounds) != {"minimum", "maximum_exclusive"}
-        or yaw_bounds.get("minimum") != -180.0
-        or yaw_bounds.get("maximum_exclusive") != 180.0
-    ):
-        raise ContractError("OPERATOR_ASSISTED_DOMAIN")
-
+    region = domain["coverage_region"]
     preset_ids = domain.get("preset_cell_ids")
     if (
         not isinstance(preset_ids, list)
@@ -919,17 +985,29 @@ def project_assisted_poses(
         option = cell_options.get(identifier)
         metadata = option.get("metadata") if isinstance(option, Mapping) else None
         point_id = metadata.get("point_id") if isinstance(metadata, Mapping) else None
-        if not isinstance(point_id, str) or not point_id:
+        if (
+            not isinstance(point_id, str) or not point_id
+            or metadata.get("place_id") != selected["workspace_id"]
+        ):
             raise ContractError("OPERATOR_ASSISTED_DOMAIN")
-        preset = _canonical_operator_pose(selected, domain, {
-            field: metadata.get(field) for field in POSE_ORDER
-        })
-        xy = (float(preset["x_mm"]), float(preset["y_mm"]))
+        try:
+            yaw = normalize_yaw_deg(metadata["yaw_deg"])
+            x_mm, y_mm = bounded_a4_coordinate(
+                x_bounds=domain["x_mm"], y_bounds=domain["y_mm"],
+                yaw_deg=yaw, x_mm=metadata["x_mm"], y_mm=metadata["y_mm"],
+                page_size_mm=region["page_size_mm"],
+                origin_xy_mm=region["origin_xy_mm"],
+                base_margin_xy_mm=region["base_margin_xy_mm"],
+            )
+        except (KeyError, TypeError, ContractError) as exc:
+            raise ContractError("OPERATOR_ASSISTED_DOMAIN") from exc
+        xy = (float(x_mm), float(y_mm))
         if point_id in spatial_anchors and spatial_anchors[point_id] != xy:
             raise ContractError("OPERATOR_ASSISTED_DOMAIN")
         spatial_anchors[point_id] = xy
-        yaw_anchors.add(float(preset["yaw_deg"]))
-    if not spatial_anchors or not yaw_anchors:
+        yaw_anchors.add(float(yaw))
+    columns, rows = region["strata"]["columns"], region["strata"]["rows"]
+    if len(spatial_anchors) != columns * rows or not yaw_anchors:
         raise ContractError("OPERATOR_ASSISTED_DOMAIN")
 
     source = _canonical_operator_pose(selected, domain, source_pose)
@@ -939,96 +1017,12 @@ def project_assisted_poses(
     if unique_count == 1:
         return [copy.deepcopy(source) for _ in range(requested_count)]
 
-    anchor_items = sorted(spatial_anchors.items())
     yaw_values = sorted(yaw_anchors)
-    x_centers = sorted({value[0] for value in spatial_anchors.values()})
-    y_centers = sorted({value[1] for value in spatial_anchors.values()})
-
-    def fraction(sample_index: int, anchor_id: str, yaw_anchor: float, axis: str, attempt: int) -> float:
-        digest = canonical_digest({
-            "strategy": "A4_SPATIAL_FIRST_SAFE_STRATA_V3",
-            "seed": normalized_seed,
-            "sample_index": sample_index,
-            "anchor_id": anchor_id,
-            "yaw_anchor": yaw_anchor,
-            "axis": axis,
-            "attempt": attempt,
-        })
-        return int(digest.removeprefix("sha256:")[:16], 16) / 2**64
-
-    def xy_distance(left: tuple[float, float], right: tuple[float, float]) -> float:
-        return math.dist(left, right)
 
     def yaw_distance(left: float, right: float) -> float:
         delta = abs(left - right) % 360.0
         return min(delta, 360.0 - delta) / 180.0
 
-    source_xy = (float(source["x_mm"]), float(source["y_mm"]))
-    nearest_anchor = min(
-        anchor_items, key=lambda item: (xy_distance(item[1], source_xy), item[0]),
-    )
-    spatial_route = [nearest_anchor]
-    spatial_unrouted = [item for item in anchor_items if item != nearest_anchor]
-    while spatial_unrouted:
-        item = min(
-            spatial_unrouted,
-            key=lambda value: (
-                xy_distance(spatial_route[-1][1], value[1]), value[0],
-            ),
-        )
-        spatial_route.append(item)
-        spatial_unrouted.remove(item)
-
-    def route_score(route: list[tuple[str, tuple[float, float]]]) -> tuple[Any, ...]:
-        edges = [
-            xy_distance(left[1], right[1])
-            for left, right in zip(route, route[1:])
-        ]
-        return max(edges, default=0.0), sum(edges), tuple(item[0] for item in route)
-
-    while len(spatial_route) > 2:
-        candidates = [
-            spatial_route[:start]
-            + list(reversed(spatial_route[start:stop + 1]))
-            + spatial_route[stop + 1:]
-            for start in range(1, len(spatial_route) - 1)
-            for stop in range(start + 1, len(spatial_route))
-        ]
-        improved = min(candidates, key=route_score)
-        if route_score(improved)[:2] >= route_score(spatial_route)[:2]:
-            break
-        spatial_route = improved
-    nearest_yaw = min(
-        yaw_values,
-        key=lambda value: (yaw_distance(value, float(source["yaw_deg"])), value),
-    )
-    positive_anchor_distances = [
-        xy_distance(left[1], right[1])
-        for index, left in enumerate(anchor_items)
-        for right in anchor_items[index + 1:]
-        if xy_distance(left[1], right[1]) > 0.0
-    ]
-    if not positive_anchor_distances:
-        raise ContractError("OPERATOR_ASSISTED_DOMAIN")
-    boundary_margin = min(positive_anchor_distances) * 0.1
-
-    def spatial_interval(
-        centers: list[float], center: float, limits: tuple[float, float],
-    ) -> tuple[float, float]:
-        index = centers.index(center)
-        low = (
-            (centers[index - 1] + center) / 2.0
-            if index else limits[0] + boundary_margin
-        )
-        high = (
-            (center + centers[index + 1]) / 2.0
-            if index + 1 < len(centers) else limits[1] - boundary_margin
-        )
-        if low > high:
-            raise ContractError("OPERATOR_ASSISTED_DOMAIN")
-        return low, high
-
-    first_spatial_pass = spatial_route[1:]
     yaw_variants = sorted(
         (
             value for value in yaw_values
@@ -1037,49 +1031,55 @@ def project_assisted_poses(
         key=lambda value: (
             yaw_distance(value, float(source["yaw_deg"])), value,
         ),
-    ) or [nearest_yaw]
+    ) or [float(source["yaw_deg"])]
 
+    current_sheet_xy = rotate_xy(
+        (float(source["x_mm"]), float(source["y_mm"])),
+        float(source["yaw_deg"]),
+    )
+    pass_index = 0
     while len(result) < unique_count:
-        sample_offset = len(result) - 1
-        if sample_offset < len(first_spatial_pass):
-            anchor_id, anchor = first_spatial_pass[sample_offset]
-            yaw_anchor = float(source["yaw_deg"])
-        else:
-            repeated_offset = sample_offset - len(first_spatial_pass)
-            pass_index, route_index = divmod(repeated_offset, len(spatial_route))
-            route = (
-                list(reversed(spatial_route))
-                if pass_index % 2 == 0 else spatial_route
+        yaw_anchor = (
+            float(source["yaw_deg"])
+            if pass_index == 0
+            else yaw_variants[(pass_index - 1) % len(yaw_variants)]
+        )
+        try:
+            x_bounds, y_bounds = safe_rectangle_bounds(
+                page_size_mm=region["page_size_mm"],
+                origin_xy_mm=region["origin_xy_mm"],
+                base_margin_xy_mm=region["base_margin_xy_mm"],
+                object_size_xy_mm=region["object_size_xy_mm"],
+                uncertainty_mm=region["uncertainty_mm"],
+                yaw_deg=yaw_anchor,
             )
-            anchor_id, anchor = route[route_index]
-            yaw_anchor = yaw_variants[pass_index % len(yaw_variants)]
-        x_low, x_high = spatial_interval(x_centers, anchor[0], bounds[0])
-        y_low, y_high = spatial_interval(y_centers, anchor[1], bounds[1])
-        candidate = None
-        for attempt in range(64):
+            count = min(
+                unique_count - len(result),
+                columns * rows - int(pass_index == 0),
+            )
+            samples = stratified_rectangle_samples(
+                x_bounds=x_bounds, y_bounds=y_bounds,
+                columns=columns, rows=rows, start_xy=current_sheet_xy,
+                count=count, seed=normalized_seed, pass_index=pass_index,
+                skip_start_cell=pass_index == 0,
+            )
+        except ValueError as exc:
+            raise ContractError("OPERATOR_ASSISTED_DOMAIN") from exc
+        for sheet_x, sheet_y, _row, _column in samples:
+            local_x, local_y = rotate_xy((sheet_x, sheet_y), -yaw_anchor)
             proposed = {
                 "place_id": selected["workspace_id"],
-                "x_mm": x_low + (x_high - x_low) * fraction(len(result), anchor_id, yaw_anchor, "x", attempt),
-                "y_mm": y_low + (y_high - y_low) * fraction(len(result), anchor_id, yaw_anchor, "y", attempt),
+                "x_mm": local_x, "y_mm": local_y,
                 "yaw_deg": yaw_anchor,
             }
-            try:
-                checked = _canonical_operator_pose(selected, domain, proposed)
-            except ContractError as exc:
-                if exc.code == "JOB_COORDINATE_BOUNDS":
-                    continue
-                raise
+            checked = _canonical_operator_pose(selected, domain, proposed)
             checked_key = tuple(checked[field] for field in POSE_ORDER)
-            if (
-                checked_key not in seen
-                and (float(checked["x_mm"]), float(checked["y_mm"])) != anchor
-            ):
-                candidate = checked
-                break
-        if candidate is None:
-            raise ContractError("OPERATOR_ASSISTED_STRATUM_EXHAUSTION")
-        seen.add(tuple(candidate[field] for field in POSE_ORDER))
-        result.append(candidate)
+            if checked_key in seen:
+                raise ContractError("OPERATOR_ASSISTED_STRATUM_EXHAUSTION")
+            seen.add(checked_key)
+            result.append(checked)
+            current_sheet_xy = (sheet_x, sheet_y)
+        pass_index += 1
     return [
         copy.deepcopy(result[index % unique_count])
         for index in range(requested_count)

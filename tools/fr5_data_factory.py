@@ -17,6 +17,19 @@ try:
 except ImportError:
     from tools.a4_place_yaw.generate_place_yaw_a4 import (PAGE_H_MM, PAGE_W_MM, PLACE0_XY_MM, PRINT_X_MARGIN_MM, PRINT_Y_MARGIN_MM, REGISTRATION_FIRST_INSTALL, REGISTRATION_FIXED_SHEET_SWAP, TRANSFORM_CONTRACT, X_REF_XY_MM, Y_CHECK_XY_MM, family_digest_from_manifest)
 
+try:
+    from tools.data_factory.workspace_geometry import (
+        rotate_xy,
+        rotation_envelope,
+        safe_rectangle_bounds,
+    )
+except ImportError:
+    from data_factory.workspace_geometry import (
+        rotate_xy,
+        rotation_envelope,
+        safe_rectangle_bounds,
+    )
+
 SAFE_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
 RFC3339 = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$")
 JOB_KEYS = {"schema_version", "job_id", "task", "robot_system_id", "collection_profile_id", "place_id", "cell_calibration_id", "sheet_manifest_digest", "yaw_deg", "x_mm", "y_mm", "object_profile_id", "grasp_profile_id", "instruction", "episode_intent", "operator_or_agent_id", "approval_expiry", "dry_run_required"}
@@ -493,7 +506,7 @@ def _validate_sheet(sheet):
         raise ContractError("SHEET_GRID")
 
 
-def _sheet_contract(selected, yaw0, job):
+def _sheet_contract(selected, yaw0, job, object_profile, calibration):
     for sheet in (selected, yaw0):
         validate_sheet_manifest(sheet)
     if canonical_digest(selected) != job["sheet_manifest_digest"]: raise ContractError("SHEET_DIGEST")
@@ -502,10 +515,17 @@ def _sheet_contract(selected, yaw0, job):
     if _number(yaw0.get("yaw_deg"), "SHEET_YAW") != 0: raise ContractError("SHEET_YAW0")
     bounded_place_coordinate(
         selected, job["x_mm"], job["y_mm"], yaw_deg=job["yaw_deg"],
+        object_dimensions_mm=object_profile["dimensions_mm"],
+        uncertainty_mm=calibration["limits"]["combined_error_bound_mm"],
     )
 
 
-def bounded_a4_coordinate(*, x_bounds, y_bounds, yaw_deg, x_mm, y_mm):
+def bounded_a4_coordinate(
+    *, x_bounds, y_bounds, yaw_deg, x_mm, y_mm,
+    object_size_xy_mm=(0.0, 0.0), uncertainty_mm=0.0,
+    page_size_mm=(PAGE_W_MM, PAGE_H_MM), origin_xy_mm=PLACE0_XY_MM,
+    base_margin_xy_mm=(PRINT_X_MARGIN_MM, PRINT_Y_MARGIN_MM),
+):
     """Validate one continuous pose against the shared A4 printable domain."""
     x, y = _input_number(x_mm, "JOB_BUILDER_INPUT"), _input_number(y_mm, "JOB_BUILDER_INPUT")
     try:
@@ -517,23 +537,54 @@ def bounded_a4_coordinate(*, x_bounds, y_bounds, yaw_deg, x_mm, y_mm):
         raise ContractError("JOB_BUILDER_INPUT") from exc
     if x_min > x_max or y_min > y_max or not (x_min <= x <= x_max and y_min <= y <= y_max):
         raise ContractError("JOB_COORDINATE_BOUNDS", str((x_mm, y_mm)))
-    angle = math.radians(_input_number(yaw_deg, "SHEET_YAW"))
-    sheet_x = PLACE0_XY_MM[0] + math.cos(angle) * x - math.sin(angle) * y
-    sheet_y = PLACE0_XY_MM[1] + math.sin(angle) * x + math.cos(angle) * y
-    if not (PRINT_X_MARGIN_MM <= sheet_x <= PAGE_W_MM - PRINT_X_MARGIN_MM and PRINT_Y_MARGIN_MM <= sheet_y <= PAGE_H_MM - PRINT_Y_MARGIN_MM):
+    yaw = _input_number(yaw_deg, "SHEET_YAW")
+    try:
+        safe_x, safe_y = safe_rectangle_bounds(
+            page_size_mm=page_size_mm, origin_xy_mm=origin_xy_mm,
+            base_margin_xy_mm=base_margin_xy_mm,
+            object_size_xy_mm=object_size_xy_mm,
+            uncertainty_mm=uncertainty_mm, yaw_deg=yaw,
+        )
+        sheet_x, sheet_y = rotate_xy((x, y), yaw)
+    except ValueError as exc:
+        raise ContractError("JOB_BUILDER_INPUT") from exc
+    if not (safe_x[0] <= sheet_x <= safe_x[1] and safe_y[0] <= sheet_y <= safe_y[1]):
         raise ContractError("JOB_COORDINATE_BOUNDS", str((x_mm, y_mm)))
     return x, y
 
 
-def bounded_place_coordinate(sheet, x_mm, y_mm, *, yaw_deg=None):
+def bounded_place_coordinate(
+    sheet, x_mm, y_mm, *, yaw_deg=None,
+    object_dimensions_mm=None, uncertainty_mm=0.0,
+):
     """Validate one continuous local coordinate inside a registered A4 domain."""
-    u_values = [_number(point["local_uv_mm"][0], "SHEET_GRID") for point in sheet["grid_points"]]
-    v_values = [_number(point["local_uv_mm"][1], "SHEET_GRID") for point in sheet["grid_points"]]
+    if object_dimensions_mm is None:
+        u_values = [_number(point["local_uv_mm"][0], "SHEET_GRID") for point in sheet["grid_points"]]
+        v_values = [_number(point["local_uv_mm"][1], "SHEET_GRID") for point in sheet["grid_points"]]
+        x_bounds, y_bounds = (
+            (min(u_values), max(u_values)), (min(v_values), max(v_values)),
+        )
+        object_size_xy_mm = (0.0, 0.0)
+    else:
+        try:
+            object_size_xy_mm = tuple(object_dimensions_mm[:2])
+            printable = safe_rectangle_bounds(
+                page_size_mm=(PAGE_W_MM, PAGE_H_MM),
+                origin_xy_mm=PLACE0_XY_MM,
+                base_margin_xy_mm=(PRINT_X_MARGIN_MM, PRINT_Y_MARGIN_MM),
+                object_size_xy_mm=(0.0, 0.0), uncertainty_mm=0.0,
+                yaw_deg=0.0,
+            )
+            x_bounds, y_bounds = rotation_envelope(*printable)
+        except (TypeError, ValueError) as exc:
+            raise ContractError("JOB_BUILDER_INPUT") from exc
     return bounded_a4_coordinate(
-        x_bounds={"minimum": min(u_values), "maximum": max(u_values)},
-        y_bounds={"minimum": min(v_values), "maximum": max(v_values)},
+        x_bounds={"minimum": x_bounds[0], "maximum": x_bounds[1]},
+        y_bounds={"minimum": y_bounds[0], "maximum": y_bounds[1]},
         yaw_deg=sheet["yaw_deg"] if yaw_deg is None else yaw_deg,
         x_mm=x_mm, y_mm=y_mm,
+        object_size_xy_mm=object_size_xy_mm,
+        uncertainty_mm=uncertainty_mm,
     )
 
 
@@ -661,8 +712,8 @@ def validate_job_spec(job, *, paths=None, data=None, config_root, now=None):
         raise ContractError("JOB_TEXT")
     cell_path = _safe_profile_path(root, "cells", normalized["cell_calibration_id"])
     calibration = load_json_strict(cell_path)
-    _sheet_contract(selected, yaw0, normalized)
     resolved_calibration = _calibration(calibration, normalized, yaw0, robot, now)
+    _sheet_contract(selected, yaw0, normalized, object_profile, calibration)
     input_digests = {"selected_sheet": canonical_digest(selected), "yaw0_sheet": canonical_digest(yaw0), "cell_calibration": canonical_digest(calibration), "robot_system": canonical_digest(robot), "collection_profile": canonical_digest(collection), "object_profile": canonical_digest(object_profile), "grasp_profile": canonical_digest(grasp)}
     resolved_job_digest = canonical_digest({"job": normalized, "input_digests": input_digests})
     return {"normalized_job": normalized, "input_digests": input_digests, "resolved_job_digest": resolved_job_digest, "robot": robot, "collection_profile": collection, "calibration": resolved_calibration, "object_profile": object_profile, "grasp_profile": grasp}

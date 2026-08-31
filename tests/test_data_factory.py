@@ -307,9 +307,15 @@ class DataFactoryTest(unittest.TestCase):
             ),
             (12.5, -7.25),
         )
+        self.assertEqual(
+            self._validated(
+                job={**base, "x_mm": 120}, selected=self.yaw0,
+            )["normalized_job"]["x_mm"],
+            120,
+        )
         self._error(
             "JOB_COORDINATE_BOUNDS",
-            job={**base, "x_mm": 71}, selected=self.yaw0,
+            job={**base, "x_mm": 140}, selected=self.yaw0,
         )
 
     def test_cli_missing_job_is_stable(self):
@@ -555,6 +561,6 @@ class DataFactoryTest(unittest.TestCase):
                 self.assertEqual(result.returncode, 2)
                 self.assertEqual(result.stdout, "")
                 self.assertEqual(json.loads(result.stderr)["error"]["code"], code)
-        self._error("JOB_COORDINATE_BOUNDS", job={**self.job, "x_mm": 36, "y_mm": 0})
+        self._error("JOB_COORDINATE_BOUNDS", job={**self.job, "x_mm": 140, "y_mm": 0})
 
 if __name__ == "__main__": unittest.main()

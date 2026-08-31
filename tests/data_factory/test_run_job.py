@@ -1052,9 +1052,20 @@ class RunJobTest(unittest.TestCase):
             with self.assertRaisesRegex(run_job.ContractError, "RUN_PAYLOAD"):
                 run_job._run_payload(bad)
 
-        validated = {"normalized_job": {
-            **JOB, "place_id": "PLACE_A", "yaw_deg": 0, "x_mm": -60, "y_mm": 20,
-        }}
+        validated = {
+            "normalized_job": {
+                **JOB, "place_id": "PLACE_A", "yaw_deg": 0,
+                "x_mm": -60, "y_mm": 20,
+            },
+            "object_profile": {"dimensions_mm": [25, 25, 25]},
+            "calibration": {"document": {
+                "limits": {"combined_error_bound_mm": 16},
+            }},
+        }
+        coordinate_safety = {
+            "object_dimensions_mm": [25, 25, 25],
+            "uncertainty_mm": 16,
+        }
         with (
             mock.patch.object(run_job, "validate_job_spec", return_value=validated),
             mock.patch.object(run_job, "_load", side_effect=lambda path, _: {"selected.json": {}, "motion.json": {}, "home.json": {}}[path]),
@@ -1062,14 +1073,16 @@ class RunJobTest(unittest.TestCase):
             mock.patch.object(run_job, "resolve_motion_program", return_value={}) as resolve,
         ):
             _, _, binding = run_job.resolve_inputs(value, scene_binding_call=lambda _, pose, _run_id: pose)
-        bounded.assert_called_once_with({}, 60, -20)
+        bounded.assert_called_once_with({}, 60, -20, **coordinate_safety)
         self.assertEqual(binding, {"place_id": "PLACE_A", "yaw_deg": 0, "x_mm": 60, "y_mm": -20})
         self.assertEqual(resolve.call_args.kwargs["release_pose"], binding)
 
         pick_place_job = {
             **validated["normalized_job"], "task": "pick_place",
         }
-        pick_place_validated = {"normalized_job": pick_place_job}
+        pick_place_validated = {
+            **validated, "normalized_job": pick_place_job,
+        }
         without_destination = payload()
         with (
             mock.patch.object(
@@ -1122,7 +1135,9 @@ class RunJobTest(unittest.TestCase):
             _, _, binding = run_job.resolve_inputs(
                 rotated, scene_binding_call=lambda _, pose, _run_id: pose,
             )
-        bounded.assert_called_once_with({}, 60, -20, yaw_deg=90)
+        bounded.assert_called_once_with(
+            {}, 60, -20, yaw_deg=90, **coordinate_safety,
+        )
         self.assertEqual(
             binding,
             {"place_id": "PLACE_A", "yaw_deg": 90, "x_mm": 60, "y_mm": -20},

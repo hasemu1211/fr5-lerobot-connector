@@ -305,16 +305,23 @@ def resolve_inputs(
     release_pose = {key: validated["normalized_job"][key] for key in ("place_id", "yaw_deg", "x_mm", "y_mm")}
     if RECYCLE_COORD_KEYS <= set(payload):
         sheet = _load(payload["selected_sheet"], "INPUT_SELECTED_SHEET")
+        coordinate_safety = {
+            "object_dimensions_mm": validated["object_profile"]["dimensions_mm"],
+            "uncertainty_mm": validated["calibration"]["document"]["limits"][
+                "combined_error_bound_mm"
+            ],
+        }
         if RECYCLE_YAW_KEY in payload:
             recycle_yaw = normalize_yaw_deg(payload[RECYCLE_YAW_KEY])
             x_mm, y_mm = bounded_place_coordinate(
                 sheet, payload["recycle_x_mm"], payload["recycle_y_mm"],
-                yaw_deg=recycle_yaw,
+                yaw_deg=recycle_yaw, **coordinate_safety,
             )
             release_pose["yaw_deg"] = recycle_yaw
         else:
             x_mm, y_mm = bounded_place_coordinate(
                 sheet, payload["recycle_x_mm"], payload["recycle_y_mm"],
+                **coordinate_safety,
             )
         release_pose.update(x_mm=x_mm, y_mm=y_mm)
     motion_qualification = _load(

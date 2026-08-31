@@ -221,6 +221,7 @@ def project_catalog(
         copy.deepcopy(item) for item in catalog.get("workspace_domains", [])
         if item.get("workspace_id") == selection["workspace_id"]
         and item.get("frame_id") == selection["frame_id"]
+        and item.get("object_id") == selection["object_id"]
     ]
     if len(domains) != 1:
         raise ContractError("OPERATOR_PRODUCT_WORKSPACE_DOMAIN")

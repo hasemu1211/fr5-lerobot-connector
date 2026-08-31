@@ -90,8 +90,8 @@
     let stateSpaceProjectionAvailable = true;
     const snapshotProbe = "RAW_SNAPSHOT_MUST_NOT_RENDER";
     const workspaceDomain = {
-      workspace_id: "PLACE_A", frame_id: "place-a-frame-r002", coordinate_mode: "CONTINUOUS_A4_PLANE",
-      x_mm: {minimum: -70, maximum: 70}, y_mm: {minimum: -35, maximum: 35}, yaw_deg: {minimum: -180, maximum_exclusive: 180},
+      workspace_id: "PLACE_A", frame_id: "place-a-frame-r002", object_id: "wood-cube-25mm-r001", coordinate_mode: "CONTINUOUS_A4_PLANE",
+      x_mm: {minimum: -158.26323009467487, maximum: 158.26323009467487}, y_mm: {minimum: -158.26323009467487, maximum: 158.26323009467487}, yaw_deg: {minimum: -180, maximum_exclusive: 180},
     };
     const clone = (value) => JSON.parse(JSON.stringify(value));
     const merge = (target, patch) => {
@@ -457,7 +457,7 @@
         check(!document.querySelector("#direct-yaw-input").validity.valid && posted.length === beforeYaw180, "exclusive 180 degree ceiling blocks intent instead of silently wrapping to -180");
         document.querySelector("#direct-yaw-input").value = "-162.5";
         const beforeInvalid = posted.length;
-        document.querySelector("#direct-x-input").value = "70.001";
+        document.querySelector("#direct-x-input").value = "159";
         document.querySelector("#direct-pose-form").requestSubmit();
         check(document.querySelector("#direct-x-input").validity.rangeOverflow && posted.length === beforeInvalid, "native validity blocks out-of-range pose without an intent");
         document.querySelectorAll("#direct-pose-list [data-pair-index]")[3].click();

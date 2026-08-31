@@ -177,11 +177,11 @@ def _campaign_camera_warmup(
     return evidence
 
 
-def _derive_test_only_gripper_program(
-    validated: Mapping[str, Any], motion: Mapping[str, Any],
-    program: Mapping[str, Any], retune: Mapping[str, Any],
-) -> dict[str, Any]:
-    """Apply an object-scoped TEST_ONLY override after qualified resolution."""
+def _validate_test_only_gripper_retune(
+    retune: Mapping[str, Any], *, grasp: Mapping[str, Any],
+    motion: Mapping[str, Any],
+) -> tuple[dict[str, Any], int]:
+    """Validate the passive TEST_ONLY gripper settings before ROS bring-up."""
     schema = (
         retune.get("schema_version")
         if isinstance(retune, Mapping) else None
@@ -204,26 +204,19 @@ def _derive_test_only_gripper_program(
         or retune["retune_digest"] != canonical_digest({
             key: item for key, item in retune.items() if key != "retune_digest"
         })
-        or not isinstance(validated, Mapping) or not isinstance(motion, Mapping)
-        or not isinstance(program, Mapping)
+        or not isinstance(grasp, Mapping) or not isinstance(motion, Mapping)
     ):
         raise ContractError("TEST_ONLY_GRIPPER_RETUNE")
-    job = validated.get("normalized_job")
-    inputs = validated.get("input_digests")
-    grasp = validated.get("grasp_profile")
     close = grasp.get("gripper_close") if isinstance(grasp, Mapping) else None
     feedback = retune.get("acceptable_feedback_m")
     base_feedback = close.get("acceptable_feedback_m") if isinstance(close, Mapping) else None
-    program_bindings = program.get("binding_digests")
-    program_requirements = program.get("gripper_requirements")
     numbers = (
         retune.get("command_position_m"),
         feedback.get("min") if isinstance(feedback, Mapping) else None,
         feedback.get("max") if isinstance(feedback, Mapping) else None,
     )
     if (
-        not isinstance(job, Mapping) or not isinstance(inputs, Mapping)
-        or not isinstance(grasp, Mapping) or not isinstance(close, Mapping)
+        not isinstance(close, Mapping)
         or not isinstance(base_feedback, Mapping)
         or not isinstance(feedback, Mapping) or set(feedback) != {"min", "max"}
         or any(
@@ -231,18 +224,11 @@ def _derive_test_only_gripper_program(
             or not math.isfinite(value)
             for value in numbers
         )
-        or retune.get("object_profile_id") != job.get("object_profile_id")
-        or retune.get("grasp_profile_id") != job.get("grasp_profile_id")
         or retune.get("object_profile_id") != grasp.get("object_profile_id")
         or retune.get("grasp_profile_id") != grasp.get("grasp_profile_id")
         or retune.get("base_grasp_profile_digest") != canonical_digest(grasp)
-        or inputs.get("grasp_profile") != canonical_digest(grasp)
         or retune.get("base_motion_qualification_digest")
         != canonical_digest(motion)
-        or not isinstance(program_bindings, Mapping)
-        or program_bindings.get("motion_qualification") != canonical_digest(motion)
-        or program_bindings.get("grasp_profile") != canonical_digest(grasp)
-        or program_requirements != close
     ):
         raise ContractError("TEST_ONLY_GRIPPER_RETUNE_BINDING")
     command, minimum, maximum = (float(value) for value in numbers)
@@ -258,13 +244,47 @@ def _derive_test_only_gripper_program(
     ):
         raise ContractError("TEST_ONLY_GRIPPER_RETUNE_ENVELOPE")
 
+    return copy.deepcopy(dict(retune)), force_percent
+
+
+def _derive_test_only_gripper_program(
+    validated: Mapping[str, Any], motion: Mapping[str, Any],
+    program: Mapping[str, Any], retune: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Apply an object-scoped TEST_ONLY override after qualified resolution."""
+    if not isinstance(validated, Mapping) or not isinstance(program, Mapping):
+        raise ContractError("TEST_ONLY_GRIPPER_RETUNE")
+    grasp = validated.get("grasp_profile")
+    checked_retune, force_percent = _validate_test_only_gripper_retune(
+        retune, grasp=grasp, motion=motion,
+    )
+    job = validated.get("normalized_job")
+    inputs = validated.get("input_digests")
+    close = grasp.get("gripper_close") if isinstance(grasp, Mapping) else None
+    program_bindings = program.get("binding_digests")
+    if (
+        not isinstance(job, Mapping) or not isinstance(inputs, Mapping)
+        or checked_retune.get("object_profile_id") != job.get("object_profile_id")
+        or checked_retune.get("grasp_profile_id") != job.get("grasp_profile_id")
+        or inputs.get("grasp_profile") != canonical_digest(grasp)
+        or not isinstance(program_bindings, Mapping)
+        or program_bindings.get("motion_qualification") != canonical_digest(motion)
+        or program_bindings.get("grasp_profile") != canonical_digest(grasp)
+        or program.get("gripper_requirements") != close
+    ):
+        raise ContractError("TEST_ONLY_GRIPPER_RETUNE_BINDING")
+
+    command = float(checked_retune["command_position_m"])
+    feedback = checked_retune["acceptable_feedback_m"]
+    minimum, maximum = float(feedback["min"]), float(feedback["max"])
+
     tuned_requirements = copy.deepcopy(dict(close))
     tuned_requirements.update(
         command_position_m=command,
         acceptable_feedback_m={"min": minimum, "max": maximum},
-        evidence_digest=retune["retune_digest"],
+        evidence_digest=checked_retune["retune_digest"],
     )
-    if schema == "data_factory.test_only_gripper_retune.v2":
+    if checked_retune["schema_version"] == "data_factory.test_only_gripper_retune.v2":
         tuned_requirements["force_percent"] = force_percent
     derived = copy.deepcopy(dict(program))
     derived["gripper_requirements"] = tuned_requirements

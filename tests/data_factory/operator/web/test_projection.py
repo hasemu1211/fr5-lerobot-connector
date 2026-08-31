@@ -42,6 +42,7 @@ class OperatorProjectionTests(unittest.TestCase):
         domain = domains[0]
         self.assertEqual(set(domain), {
             "domain_id", "workspace_id", "frame_id", "coordinate_mode",
+            "object_id", "coverage_region",
             "a4_family_digest", "yaw0_manifest_digest", "x_mm", "y_mm",
             "yaw_deg", "preset_cell_ids", "execution_gate", "domain_digest",
         })
@@ -52,12 +53,27 @@ class OperatorProjectionTests(unittest.TestCase):
                 domain["execution_gate"],
             ),
             (
-                "place-a-yaw0-r002", "CONTINUOUS_A4_PLANE",
-                {"minimum": -70.0, "maximum": 70.0},
-                {"minimum": -35.0, "maximum": 35.0},
+                "place-a-yaw0-r002@wood-cube-25mm-r001",
+                "CONTINUOUS_A4_PLANE",
+                domain["x_mm"], domain["y_mm"],
                 {"minimum": -180.0, "maximum_exclusive": 180.0},
                 "FRESH_PLAN_IK_COLLISION_ENDPOINT_PER_SLOT",
             ),
+        )
+        self.assertEqual(domain["object_id"], "wood-cube-25mm-r001")
+        self.assertGreater(domain["x_mm"]["maximum"], 150)
+        self.assertEqual(
+            domain["coverage_region"],
+            {
+                "shape": "RECTANGLE",
+                "page_size_mm": [297.0, 210.0],
+                "origin_xy_mm": [148.5, 105.0],
+                "base_margin_xy_mm": [15.0, 20.0],
+                "object_size_xy_mm": [25.0, 25.0],
+                "uncertainty_mm": 16.0,
+                "strata": {"columns": 5, "rows": 3},
+                "coordinate_contract": "SHEET_XY_EQUALS_RZ_YAW_TIMES_LOCAL_XY",
+            },
         )
         calibration = load_json_strict(
             ROOT / "config/data_factory/cells/place-a-yaw0-r002.json",

@@ -2336,7 +2336,7 @@ feedback:
                     "tools.data_factory.operator.composition."
                     "build_physical_operator_environment",
                     return_value=environment,
-                ),
+                ) as environment_builder,
                 mock.patch(
                     "tools.data_factory.operator.composition.LoopbackBridge",
                     ShellBridge,
@@ -2346,11 +2346,19 @@ feedback:
                     repository_root=root,
                     session_id="single-observation-r001",
                     camera_device_id=device,
+                    gripper_retune=(
+                        "config/data_factory/test_only_physical/goal2-place1/"
+                        "gripper-retune-wood-cube-25mm-top-center-r004.json"
+                    ),
                     auto_prepare=False,
                 )
             try:
                 self.assertEqual(runtime.announcement["environment_state"], "SETUP_REQUIRED")
                 environment.projection.assert_called_once_with()
+                self.assertEqual(
+                    environment_builder.call_args.kwargs["gripper_force_percent"],
+                    25,
+                )
             finally:
                 runtime.close()
 
