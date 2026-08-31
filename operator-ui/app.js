@@ -307,6 +307,7 @@ function renderTechnical(rows) {
 }
 
 function failClose(code, detail = "") {
+  const bridgeSessionExpired = code === "BRIDGE_SESSION_EXPIRED";
   clearTimeout(refreshTimer);
   refreshTimer = undefined;
   currentView = undefined;
@@ -320,12 +321,12 @@ function failClose(code, detail = "") {
   setBanner(`${humanReason(code)}. 요청을 보내지 않았습니다. 최신 상태를 다시 불러오세요.`, "bad");
   document.querySelectorAll(".flow-step").forEach((section) => { section.hidden = section.dataset.step !== "environment"; });
   document.querySelectorAll("[data-step-target]").forEach((button) => button.classList.toggle("active", button.dataset.stepTarget === "environment"));
-  document.querySelector("#setup-summary").innerHTML = `<strong>${escapeHtml(humanReason(code))}</strong><span>장치 상태를 성공으로 표시하지 않습니다. 서비스를 연결한 뒤 다시 확인하세요.</span><button id="retry-view" type="button">최신 상태 다시 불러오기</button>`;
+  document.querySelector("#setup-summary").innerHTML = `<strong>${escapeHtml(humanReason(code))}</strong><span>장치 상태를 성공으로 표시하지 않습니다. 서비스를 연결한 뒤 다시 확인하세요.</span><button id="retry-view" type="button">${bridgeSessionExpired ? "새 서버에 다시 연결" : "최신 상태 다시 불러오기"}</button>`;
   document.querySelector("#setup-subsystems").innerHTML = "";
   document.querySelector("#camera-setup").hidden = true;
   document.querySelector("#runtime-content").innerHTML = "";
   const retry = document.querySelector("#retry-view");
-  retry.addEventListener("click", () => loadView(), {once: true});
+  retry.addEventListener("click", () => bridgeSessionExpired ? window.location.reload() : loadView(), {once: true});
   renderTechnical({error_code: code, detail});
 }
 
@@ -1089,7 +1090,7 @@ async function loadView({releaseIntent = false, rejectionCode} = {}) {
   } catch (error) {
     if (releaseIntent) intentBusy = false;
     const stale = error.message === "VIEW_REVISION_ROLLBACK";
-    const code = error.message.startsWith("UNKNOWN_VIEW_ENUM") ? "VIEW_STALE" : stale ? error.message : error.message === "RUNNING_CANCEL_UNAVAILABLE" ? "VIEW_STALE" : "BRIDGE_UNAVAILABLE";
+    const code = error.message === "HTTP_403" ? "BRIDGE_SESSION_EXPIRED" : error.message.startsWith("UNKNOWN_VIEW_ENUM") ? "VIEW_STALE" : stale ? error.message : error.message === "RUNNING_CANCEL_UNAVAILABLE" ? "VIEW_STALE" : "BRIDGE_UNAVAILABLE";
     failClose(code, error.message);
   }
 }

@@ -68,6 +68,7 @@
     let stateKey = "authoring";
     let postResult = "accepted";
     let networkFailure = false;
+    let bridgeTokenRejected = false;
     let sessionIdOverride;
     let draftAuthoringMode;
     let draftRequestedCount;
@@ -166,6 +167,7 @@
     window.fetch = async (input, init = {}) => {
       const path = new URL(typeof input === "string" ? input : input.url, location.href).pathname;
       if (networkFailure && path.startsWith("/api/")) throw new TypeError("fixture network down");
+      if (bridgeTokenRejected && path === "/api/view") return new Response(JSON.stringify({schema_version: "data_factory.operator_intent_result.v1", ok: false, code: "BRIDGE_TOKEN", consumed: false}), {status: 403, headers: {"Content-Type": "application/json"}});
       if (path === "/api/view") return new Response(JSON.stringify(await fixtureView()), {status: 200, headers: {"Content-Type": "application/json"}});
       if (path === "/api/intent") {
         const fixture = await fixturePromise;
@@ -434,7 +436,7 @@
         check(!gridDisclosure.hidden && !gridDisclosure.open && document.querySelector("#direct-selection-count").textContent.includes("3개"), "direct mode shows a compact chosen-condition summary with the full grid closed");
         gridDisclosure.open = true;
         check(document.querySelectorAll("#cell-grid .cell").length === 6, "explicit disclosure reveals the full state-space grid");
-        check(document.querySelector("#direct-x-input").min === "-70" && document.querySelector("#direct-y-input").max === "35" && document.querySelector("#direct-yaw-input").min === "-180" && document.querySelector("#direct-yaw-input").max === "", "direct-pose bounds preserve the exclusive yaw ceiling");
+        check(document.querySelector("#direct-x-input").min === String(workspaceDomain.x_mm.minimum) && document.querySelector("#direct-y-input").max === String(workspaceDomain.y_mm.maximum) && document.querySelector("#direct-yaw-input").min === "-180" && document.querySelector("#direct-yaw-input").max === "", "direct-pose bounds use the workspace domain and preserve the exclusive yaw ceiling");
         const preset = [...document.querySelectorAll("#cell-grid [data-cell-id]")].find((item) => !item.disabled && item.getAttribute("aria-pressed") === "false");
         const presetPose = currentView.draft.cells.find((item) => item.cell_id === preset.dataset.cellId);
         preset.click();
@@ -475,7 +477,7 @@
         await waitFor(() => currentView?.runtime.workflow_state === "REVIEW_CAMPAIGN");
         const authorize = document.querySelector('[data-op="authorize_campaign"]');
         check(authorize && document.querySelector("#review-summary").textContent.includes("3회"), "REVIEW_CAMPAIGN shows one authorization and readable count");
-        check(document.querySelector("#review-summary").textContent.includes("56%") && document.querySelector("#review-summary").textContent.includes("56–57%") && document.querySelector("#review-summary").textContent.includes("TEST_ONLY 조정 후보"), "review shows the object-scoped test-only gripper retune");
+        check(document.querySelector("#review-summary").textContent.includes("56%") && document.querySelector("#review-summary").textContent.includes("56–58%") && document.querySelector("#review-summary").textContent.includes("닫기 속도 20% / 힘 20%") && document.querySelector("#review-summary").textContent.includes("열기 속도 10% / 힘 50%") && document.querySelector("#review-summary").textContent.includes("TEST_ONLY 조정 후보"), "review shows the object-scoped test-only gripper retune");
         check(!document.querySelector("#review-plan").hidden && document.querySelectorAll("#review-plan-list li").length === 3, "review shows the exact finite episode sequence");
         authorize.click();
         await waitFor(() => currentView?.runtime.workflow_state === "RUNNING");
@@ -528,6 +530,12 @@
         await waitFor(() => currentView?.revision === 2 && !intentBusy);
         check(document.body.dataset.bridge === "ready" && document.querySelector("#connection-banner").textContent.includes("요청은 실행되지 않았습니다"), "stale conflict keeps the current view usable and does not execute");
         check(posted.filter((item) => item.body.op === "authorize_campaign").length === 2, "stale authorization is never replayed");
+
+        bridgeTokenRejected = true;
+        await loadView();
+        await waitFor(() => !currentView && document.body.dataset.bridge === "blocked");
+        check(document.querySelector("#retry-view").textContent === "새 서버에 다시 연결", "expired bridge token fails closed and offers one fresh-page reconnect");
+        bridgeTokenRejected = false;
 
         networkFailure = true;
         await loadView();

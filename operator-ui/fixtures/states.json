@@ -138,10 +138,14 @@
     "campaign_review": {
       "speed_limit": "속도 3% · 가속도 3%",
       "gripper_tuning": {
-        "retune_digest": "sha256:9c1a5f233ada9d95e131fa297c0f07c1ba4ddcb62a5b57c66af8ddc2a6dde838",
+        "retune_digest": "sha256:347224135cdbfae7cb6d3261c310e12f073e6abb4219434bcb0ab0464eef9086",
         "status": "CANDIDATE_PENDING_HIL",
         "command_percent": 56,
-        "acceptable_feedback_percent": {"min": 56, "max": 57},
+        "acceptable_feedback_percent": {"min": 56, "max": 58},
+        "velocity_percent": 20,
+        "force_percent": 20,
+        "open_velocity_percent": 10,
+        "open_force_percent": 50,
         "data_disposition": "TEST_ONLY",
         "production_authority": false,
         "training_authority": false

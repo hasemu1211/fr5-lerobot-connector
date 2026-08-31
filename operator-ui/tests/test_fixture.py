@@ -117,6 +117,15 @@ class DataFactoryOperatorUiStaticTest(unittest.TestCase):
         ):
             self.assertIn(marker, self.js + self.browser)
 
+    def test_expired_bridge_token_requires_a_fresh_page(self):
+        for marker in (
+            "BRIDGE_SESSION_EXPIRED",
+            "새 서버에 다시 연결",
+            "window.location.reload()",
+            "expired bridge token fails closed and offers one fresh-page reconnect",
+        ):
+            self.assertIn(marker, self.js + self.messages + self.browser)
+
 
 if __name__ == "__main__":
     unittest.main()

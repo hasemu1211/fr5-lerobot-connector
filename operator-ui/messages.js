@@ -19,6 +19,7 @@ const MESSAGE_CATALOG = {
   },
   reason: {
     BRIDGE_UNAVAILABLE: "로컬 수집 서비스에 연결할 수 없습니다",
+    BRIDGE_SESSION_EXPIRED: "로컬 수집 서비스가 재시작되었습니다",
     VIEW_STALE: "화면 정보가 최신 상태와 다릅니다",
     VIEW_REVISION_ROLLBACK: "이전 상태가 도착해 작업을 차단했습니다",
     VERSION_CONFLICT: "다른 변경이 먼저 반영되었습니다",
