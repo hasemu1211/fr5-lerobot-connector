@@ -95,7 +95,7 @@ DEFAULT_TCP_MANIFEST = Path(
 )
 DEFAULT_GRIPPER_RETUNE = Path(
     "config/data_factory/test_only_physical/goal2-place1/"
-    "gripper-retune-wood-cube-25mm-top-center-r005.json"
+    "gripper-retune-wood-cube-25mm-top-center-r006.json"
 )
 GRIPPER_RETUNE_FIELDS = frozenset({
     "schema_version", "retune_id", "status", "source",

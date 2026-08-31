@@ -1142,7 +1142,7 @@ feedback:
                      tuning["command_percent"],
                      tuning["acceptable_feedback_percent"], tuning["status"]),
                     ("wood-cube-25mm-r001", "wood-cube-25mm-top-center-r001",
-                     56.0, {"min": 57.0, "max": 58.0},
+                     56.0, {"min": 56.0, "max": 58.0},
                      "CANDIDATE_PENDING_HIL"),
                 )
                 self.assertFalse(tuning["production_authority"])
@@ -1467,7 +1467,7 @@ feedback:
                 base_close = validated["grasp_profile"]["gripper_close"]
                 retune = load_json_strict(
                     root / "config/data_factory/test_only_physical/goal2-place1/"
-                    "gripper-retune-wood-cube-25mm-top-center-r005.json"
+                    "gripper-retune-wood-cube-25mm-top-center-r006.json"
                 )
                 scope_observed.update({
                     "manifest": test_only_episode_binding["manifest_digest"]
@@ -1488,7 +1488,7 @@ feedback:
                     "retune_feedback": program["gripper_requirements"][
                         "acceptable_feedback_m"
                     ] == {
-                        "min": 0.021 * 57 / 100,
+                        "min": 0.021 * 56 / 100,
                         "max": 0.021 * 58 / 100,
                     },
                     "retune_close_step": next(
@@ -1612,7 +1612,7 @@ feedback:
                 ))
                 retune = load_json_strict(
                     root / "config/data_factory/test_only_physical/goal2-place1/"
-                    "gripper-retune-wood-cube-25mm-top-center-r005.json"
+                    "gripper-retune-wood-cube-25mm-top-center-r006.json"
                 )
                 fixed = console.campaign_operator.hypothesis["fixed_contract"]
                 self.assertEqual(
