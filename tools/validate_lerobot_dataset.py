@@ -7,12 +7,21 @@ import argparse
 import json
 from pathlib import Path
 import subprocess
+import sys
 
 import cv2
 import numpy as np
 import pyarrow.parquet as pq
 
-from fr5_dataset_schema import FEATURE_NAMES, QUALITY_LIMITS
+if __package__ in (None, ""):
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from tools.fr5_dataset_schema import FEATURE_NAMES, QUALITY_LIMITS
+from tools.data_factory.episode_ledger import build_lerobot_v3_episode_locator
+from tools.fr5_data_factory import ContractError
+
+
+EPISODE_LOCATOR_PREFIX = "EPISODE_LOCATOR_JSON:"
 
 
 def has_nonfinite_number(value) -> bool:
@@ -33,6 +42,70 @@ def image_metrics(image: np.ndarray) -> tuple[float, float, float, float]:
     return color, float(gray.mean()), float(((gray <= 5) | (gray >= 250)).mean()), float(cv2.Laplacian(gray, cv2.CV_64F).var())
 
 
+def episode_locator(info: dict, episode_rows: list[dict], episode_index: int, repo_id: str) -> dict:
+    """Build the canonical ledger locator from metadata already read by this validator."""
+    matches = [row for row in episode_rows if int(row["episode_index"]) == episode_index]
+    if len(matches) != 1:
+        raise ContractError("EPISODE_LEDGER_LOCATOR_EPISODE")
+    episode = matches[0]
+    data_chunk = int(episode["data/chunk_index"])
+    data_file = int(episode["data/file_index"])
+    shard = [
+        row for row in episode_rows
+        if int(row["data/chunk_index"]) == data_chunk
+        and int(row["data/file_index"]) == data_file
+    ]
+    file_base = min(int(row["dataset_from_index"]) for row in shard)
+    dataset_from = int(episode["dataset_from_index"])
+    dataset_to = int(episode["dataset_to_index"])
+    rows = dataset_to - dataset_from
+    if rows <= 0 or int(episode["length"]) != rows:
+        raise ContractError("EPISODE_LEDGER_LOCATOR_RANGE")
+    fps = int(info["fps"])
+    videos = []
+    for camera_key in sorted(
+        key for key, feature in info["features"].items()
+        if isinstance(feature, dict) and feature.get("dtype") == "video"
+    ):
+        prefix = f"videos/{camera_key}"
+        chunk_index = int(episode[f"{prefix}/chunk_index"])
+        file_index = int(episode[f"{prefix}/file_index"])
+        timestamp_start = float(episode[f"{prefix}/from_timestamp"])
+        timestamp_end = float(episode[f"{prefix}/to_timestamp"])
+        frame_start = round(timestamp_start * fps)
+        frame_end = round(timestamp_end * fps)
+        if frame_end - frame_start != rows:
+            raise ContractError("EPISODE_LEDGER_LOCATOR_RANGE")
+        videos.append({
+            "camera_key": camera_key,
+            "chunk_index": chunk_index,
+            "file_index": file_index,
+            "relative_path": info["video_path"].format(
+                video_key=camera_key,
+                chunk_index=chunk_index,
+                file_index=file_index,
+            ),
+            "file_frame_start": frame_start,
+            "file_frame_end_exclusive": frame_end,
+            "timestamp_start_s": timestamp_start,
+            "timestamp_end_s": timestamp_end,
+        })
+    return build_lerobot_v3_episode_locator(
+        repo_id=repo_id,
+        episode_index=episode_index,
+        data={
+            "chunk_index": data_chunk,
+            "file_index": data_file,
+            "relative_path": info["data_path"].format(
+                chunk_index=data_chunk, file_index=data_file,
+            ),
+            "file_row_start": dataset_from - file_base,
+            "file_row_end_exclusive": dataset_to - file_base,
+        },
+        videos=videos,
+    )
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("root", type=Path)
@@ -45,6 +118,14 @@ def main() -> None:
     )
     parser.add_argument("--min-arm-range", type=float, default=0.01)
     parser.add_argument("--min-gripper-range", type=float, default=0.001)
+    parser.add_argument(
+        "--skip-decoded-image-diagnostics", action="store_true",
+        help="skip duplicate warning-only image sampling; structural video decoding remains mandatory",
+    )
+    parser.add_argument(
+        "--episode-locator-index", type=int,
+        help="emit the canonical locator for one validated episode",
+    )
     args = parser.parse_args()
     quarantine = args.root / "meta" / "quarantine.json"
     if quarantine.exists() or quarantine.is_symlink():
@@ -88,12 +169,22 @@ def main() -> None:
 
     episode_metadata_files = sorted((args.root / "meta" / "episodes").rglob("*.parquet"))
     expected_episodes: dict[int, int] = {}
+    episode_rows: list[dict] = []
     if not episode_metadata_files:
         failures.append("episode metadata parquet missing")
     else:
-        episode_rows = []
+        episode_columns = [
+            "episode_index", "tasks", "length", "data/chunk_index", "data/file_index",
+            "dataset_from_index", "dataset_to_index",
+        ]
+        for key in camera_keys:
+            if info["features"][key].get("dtype") == "video":
+                episode_columns.extend([
+                    f"videos/{key}/chunk_index", f"videos/{key}/file_index",
+                    f"videos/{key}/from_timestamp", f"videos/{key}/to_timestamp",
+                ])
         for path in episode_metadata_files:
-            episode_rows.extend(pq.read_table(path, columns=["episode_index", "tasks", "length", "dataset_from_index", "dataset_to_index"]).to_pylist())
+            episode_rows.extend(pq.read_table(path, columns=episode_columns).to_pylist())
         for row in episode_rows:
             episode_index = int(row["episode_index"])
             length = int(row["length"])
@@ -371,7 +462,10 @@ def main() -> None:
         if decoded_frames != info.get("total_frames", 0):
             failures.append(f"{key} decoded video frames {decoded_frames} do not match total_frames")
 
-    if camera_keys and info.get("total_frames", 0):
+    if (
+        camera_keys and info.get("total_frames", 0)
+        and not args.skip_decoded_image_diagnostics
+    ):
         from lerobot.datasets.lerobot_dataset import LeRobotDataset
         dataset = LeRobotDataset(args.repo_id, root=args.root, return_uint8=True)
         indices = np.linspace(0, len(dataset) - 1, min(100, len(dataset)), dtype=int)
@@ -384,13 +478,27 @@ def main() -> None:
             if clipping > 0.20: warnings.append(f"{key} clipping exceeds diagnostic threshold 20%")
             if sharpness < 20: warnings.append(f"{key} sharpness is below diagnostic threshold")
 
+    locator = None
+    if args.episode_locator_index is not None:
+        try:
+            if args.episode_locator_index < 0:
+                raise ContractError("EPISODE_LEDGER_LOCATOR_EPISODE")
+            locator = episode_locator(
+                info, episode_rows, args.episode_locator_index, args.repo_id,
+            )
+        except (ContractError, KeyError, TypeError, ValueError) as exc:
+            failures.append(f"cannot build episode locator: {exc}")
+
     for warning in warnings:
         print(f"WARN: {warning}")
     if failures:
         print("FAIL")
         for failure in failures: print(f"- {failure}")
         raise SystemExit(2)
-    print(f"PASS: FR5 dataset structure, source evidence, and RGB decoding ({len(warnings)} warning(s))")
+    if locator is not None:
+        print(EPISODE_LOCATOR_PREFIX + json.dumps(locator, sort_keys=True, separators=(",", ":")))
+    checked_images = "video frame counts" if args.skip_decoded_image_diagnostics else "RGB decoding"
+    print(f"PASS: FR5 dataset structure, source evidence, and {checked_images} ({len(warnings)} warning(s))")
 
 
 if __name__ == "__main__":

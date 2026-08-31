@@ -1,0 +1,19 @@
+{
+  "acceptable_feedback_m": {
+    "max": 0.01218,
+    "min": 0.011760000000000001
+  },
+  "base_grasp_profile_digest": "sha256:262af862eb62c54312ec084a11ee6616852f332b0d07e2fe076f41cc84f4f4e2",
+  "base_motion_qualification_digest": "sha256:c8def7838ae6c84bb5f0ac3e1cf3e3943f0e1fec29a1a6d44747f6f14679da44",
+  "command_position_m": 0.011760000000000001,
+  "data_disposition": "TEST_ONLY",
+  "grasp_profile_id": "wood-cube-25mm-top-center-r001",
+  "object_profile_id": "wood-cube-25mm-r001",
+  "production_authority": false,
+  "retune_digest": "sha256:e5411ad9bb135e51e85702f3f261bf059e8f0ce274b741564493e24f00e08f72",
+  "retune_id": "wood-cube-25mm-top-center-test-only-r003",
+  "schema_version": "data_factory.test_only_gripper_retune.v1",
+  "source": "OPERATOR_REPORTED_RETUNE",
+  "status": "CANDIDATE_PENDING_HIL",
+  "training_authority": false
+}

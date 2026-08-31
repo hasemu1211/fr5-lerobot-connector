@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import json
 import signal
 import tempfile
+import threading
 import time
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from unittest.mock import Mock, patch
 
@@ -124,23 +127,31 @@ class PhysicalEnvironmentTests(unittest.TestCase):
                 return set(collection_profile["camera_roles"])
             return set(partial_camera_roles or ())
 
-        def command(argv):
+        def command_result(argv):
             if state.get("query_forbidden"):
                 raise AssertionError("owned child liveness must precede ROS discovery")
-            if argv == ("ros2", "node", "list", "--no-daemon"):
+            if argv == (
+                "ros2", "node", "list", "--no-daemon", "--spin-time", "2",
+            ):
                 nodes = []
                 if external_command_server or state["maintenance"]:
                     nodes.append("/fr_command_server")
                 if external_ready or state["robot"]:
                     nodes.append("/controller_manager")
-                for role in active_roles():
+                roles = active_roles()
+                if state.get("camera_node_lag") and state["camera"]:
+                    state["camera_node_lag"] -= 1
+                    roles = set()
+                for role in roles:
                     descriptor = camera_devices[role]
                     nodes.append(
                         f"/camera/{role}/color/uvc_{role}_camera"
                         if descriptor["kind"] == "UVC" else f"/camera/{role}"
                     )
                 return "\n".join(nodes)
-            if argv == ("ros2", "topic", "list", "--no-daemon"):
+            if argv == (
+                "ros2", "topic", "list", "--no-daemon", "--spin-time", "2",
+            ):
                 return "\n".join(
                     collection_profile["camera_topics"][role]
                     for role in active_roles()
@@ -175,13 +186,57 @@ class PhysicalEnvironmentTests(unittest.TestCase):
                     return "true"
                 if name == "enable_depth":
                     return "true" if realsense_depth else "false"
+            if argv[:3] == ("ros2", "param", "dump"):
+                if state.get("parameter_query_failures"):
+                    state["parameter_query_failures"] -= 1
+                    raise ContractError("OPERATOR_ENVIRONMENT_QUERY_FAILED")
+                node = argv[3]
+                role = next(
+                    role for role in collection_profile["camera_roles"]
+                    if node.startswith(f"/camera/{role}")
+                )
+                descriptor = camera_devices[role]
+                parameters = (
+                    {
+                        "video_device": str(
+                            Path(descriptor["capture_endpoint"]).resolve(strict=True)
+                        ),
+                    }
+                    if descriptor["kind"] == "UVC"
+                    else {
+                        "serial_no": "_" + descriptor["stable_id"],
+                        "enable_color": True,
+                        "enable_depth": realsense_depth,
+                    }
+                )
+                return json.dumps({node: {"ros__parameters": parameters}})
             if argv == ("rs-enumerate-devices", "-s", "--no-dds"):
+                if state.get("realsense_query_failures"):
+                    state["realsense_query_failures"] -= 1
+                    raise ContractError("OPERATOR_ENVIRONMENT_QUERY_FAILED")
                 serials = [
                     item["stable_id"] for item in camera_devices.values()
                     if item["kind"] == "REALSENSE"
                 ]
                 return "\n".join(serials) if realsense_connected else ""
             raise AssertionError(argv)
+
+        def command(argv):
+            state.setdefault("command_calls", []).append(argv)
+            activity_lock = state.get("activity_lock")
+            if activity_lock is None:
+                return command_result(argv)
+            with activity_lock:
+                state["active_queries"] = state.get("active_queries", 0) + 1
+                state["max_active_queries"] = max(
+                    state.get("max_active_queries", 0), state["active_queries"],
+                )
+            try:
+                time.sleep(0.005)
+                return command_result(argv)
+            finally:
+                with activity_lock:
+                    state["active_queries"] -= 1
 
         def process(argv):
             calls["process"].append(argv)
@@ -192,7 +247,7 @@ class PhysicalEnvironmentTests(unittest.TestCase):
             )
             return FakeProcess(kind, state)
 
-        def readback():
+        def readback(_node_names=None, _controller_listing=None):
             maintenance = external_command_server or state["maintenance"]
             return {
                 "active": maintenance_open or not maintenance,
@@ -260,6 +315,89 @@ class PhysicalEnvironmentTests(unittest.TestCase):
             self.assertEqual(environment.stop()["state"], "SETUP_REQUIRED")
             self.assertFalse(state["robot"] or state["camera"] or state["maintenance"])
 
+    def test_owned_camera_topic_can_arrive_before_its_node(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.make_uvc_links(root)
+            state = {
+                "maintenance": False, "robot": False, "camera": False,
+                "camera_node_lag": 1,
+            }
+            environment, _calls = self.build(root, state)
+
+            projected = environment.prepare_environment()
+
+            self.assertEqual(projected["state"], "READY")
+
+    def test_realsense_presence_retries_one_failed_query(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            serial = "254622073507"
+            state = {
+                "maintenance": False, "robot": False, "camera": False,
+                "realsense_query_failures": 1,
+            }
+            environment, _calls = self.build(
+                root, state,
+                collection_profile=profile(
+                    "up", serials={"up": "RUNTIME_BINDING_REQUIRED"},
+                ),
+                camera_devices={
+                    "up": {
+                        "kind": "REALSENSE", "stable_id": serial,
+                        "capture_endpoint": serial,
+                    },
+                },
+            )
+
+            with patch(
+                "tools.data_factory.operator.setup.physical.time.sleep",
+            ) as retry_wait:
+                projected = environment.projection()
+
+            self.assertEqual(projected["state"], "SETUP_REQUIRED")
+            self.assertEqual(state["realsense_query_failures"], 0)
+            self.assertEqual(
+                state["command_calls"].count(
+                    ("rs-enumerate-devices", "-s", "--no-dds"),
+                ),
+                2,
+            )
+            retry_wait.assert_called_once_with(0.5)
+
+    def test_camera_parameter_discovery_retries_one_failed_query(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            serial = "254622073507"
+            state = {
+                "maintenance": False, "robot": False, "camera": False,
+                "parameter_query_failures": 1,
+            }
+            environment, _calls = self.build(
+                root, state, external_ready=True,
+                collection_profile=profile(
+                    "up", serials={"up": "RUNTIME_BINDING_REQUIRED"},
+                ),
+                camera_devices={
+                    "up": {
+                        "kind": "REALSENSE", "stable_id": serial,
+                        "capture_endpoint": serial,
+                    },
+                },
+            )
+
+            projected = environment.projection()
+
+            self.assertEqual(projected["state"], "READY")
+            self.assertEqual(state["parameter_query_failures"], 0)
+            self.assertEqual(
+                len([
+                    call for call in state["command_calls"]
+                    if call[:3] == ("ros2", "param", "dump")
+                ]),
+                2,
+            )
+
     def test_existing_ready_owners_are_reused_without_setup_or_processes(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -269,6 +407,84 @@ class PhysicalEnvironmentTests(unittest.TestCase):
 
             self.assertEqual(environment.prepare_environment()["state"], "READY")
             self.assertEqual(calls, {"process": [], "maintenance": []})
+
+    def test_prepared_owned_environment_liveness_avoids_graph_rediscovery(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.make_uvc_links(root)
+            state = {"maintenance": False, "robot": False, "camera": False}
+            environment, _calls = self.build(root, state)
+            self.assertEqual(environment.prepare_environment()["state"], "READY")
+            state["query_forbidden"] = True
+
+            self.assertEqual(environment.liveness()["state"], "READY")
+
+            state["camera_returncode"] = 7
+            blocked = environment.liveness()
+            self.assertEqual(blocked["state"], "BLOCKED")
+            self.assertEqual(
+                blocked["components"]["camera"]["reason"],
+                "OPERATOR_STACK_CHILD_EXITED",
+            )
+
+    def test_external_environment_liveness_keeps_fresh_discovery(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.make_uvc_links(root)
+            state = {"maintenance": False, "robot": False, "camera": False}
+            environment, _calls = self.build(root, state, external_ready=True)
+            self.assertEqual(environment.projection()["state"], "READY")
+            before = len(state["command_calls"])
+
+            self.assertEqual(environment.liveness()["state"], "READY")
+
+            self.assertGreater(len(state["command_calls"]), before)
+
+    def test_concurrent_projections_serialize_transactions_and_parallelize_reads(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.make_uvc_links(root)
+            state = {
+                "maintenance": False, "robot": False, "camera": False,
+                "activity_lock": threading.Lock(),
+            }
+            environment, _calls = self.build(root, state, external_ready=True)
+            start = threading.Barrier(2)
+
+            def project():
+                start.wait(timeout=1)
+                return environment.projection()
+
+            with ThreadPoolExecutor(max_workers=2) as executor:
+                projections = [future.result() for future in (
+                    executor.submit(project), executor.submit(project),
+                )]
+
+            self.assertEqual([item["state"] for item in projections], ["READY", "READY"])
+            self.assertEqual(state["max_active_queries"], 2)
+            self.assertEqual(
+                state["command_calls"].count((
+                    "ros2", "node", "list", "--no-daemon", "--spin-time", "2",
+                )),
+                2,
+            )
+
+    def test_graph_discovery_uses_the_measured_stable_spin_window(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.make_uvc_links(root)
+            state = {"maintenance": False, "robot": False, "camera": False}
+            environment, _calls = self.build(root, state, external_ready=True)
+
+            self.assertEqual(environment.projection()["state"], "READY")
+            self.assertIn(
+                ("ros2", "node", "list", "--no-daemon", "--spin-time", "2"),
+                state["command_calls"],
+            )
+            self.assertIn(
+                ("ros2", "topic", "list", "--no-daemon", "--spin-time", "2"),
+                state["command_calls"],
+            )
 
     def test_camera_rebind_and_stop_preserve_the_owned_motion_child(self):
         with tempfile.TemporaryDirectory() as directory:

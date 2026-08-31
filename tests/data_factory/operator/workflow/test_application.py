@@ -597,7 +597,7 @@ class CollectionOperatorApplicationTests(unittest.TestCase):
             item for item in view["catalog"]["axes"]["data_mode"]
             if item["id"] == "TEST_ONLY"
         )["available"])
-        self.assertFalse(next(
+        self.assertTrue(next(
             item for item in view["catalog"]["axes"]["task"]
             if item["id"] == "pick_place"
         )["available"])
@@ -1102,6 +1102,57 @@ class CollectionOperatorApplicationTests(unittest.TestCase):
             {pair["start_pose_id"] for pair in selected["projection"]["draft"]["direct_pairs"]},
             {"start-b"},
         )
+
+    def test_pick_place_keeps_robot_starts_separate_from_n_plus_one_object_nodes(self):
+        setup = {
+            "profiles": [
+                {"start_pose_id": "start-a", "display_name": "시작 A", "status": "AVAILABLE"},
+                {"start_pose_id": "start-b", "display_name": "시작 B", "status": "AVAILABLE"},
+            ],
+            "selected_start_pose_ids": ["start-a", "start-b"],
+        }
+        application = CollectionOperatorApplication(
+            session_id="pick-place-space-application-r001",
+            operator_label="local-operator", catalog=self.catalog,
+            initial_selection=self.selection,
+            projector=projection,
+            environment_call=lambda: copy.deepcopy(self.environment),
+            prepare_environment_call=self.application.prepare_environment_call,
+            campaign_factory=lambda *_args: self.fail("campaign was not requested"),
+            start_pose_setup=setup,
+            start_pose_capture_call=lambda _name: copy.deepcopy(setup),
+        )
+        self.addCleanup(application.close)
+        current = application.bridge_core.snapshot()
+        application.bridge_core.consume(intent(
+            current, "prepare_environment", {}, "pick-place-space-prepare",
+        ))
+        ready = application.bridge_core.snapshot()
+        application.bridge_core.consume(intent(ready, "update_draft", {
+            "draft_id": ready["projection"]["draft"]["draft_id"],
+            "selection": {"task": "pick_place"},
+        }, "pick-place-space-task"))
+        selected = application.bridge_core.snapshot()
+        application.bridge_core.consume(intent(selected, "update_draft", {
+            "draft_id": selected["projection"]["draft"]["draft_id"],
+            "authoring_mode": "DIRECT_EDIT",
+        }, "pick-place-space-direct"))
+        draft = application.bridge_core.snapshot()["projection"]["draft"]
+        pairs = draft["direct_pairs"]
+        self.assertEqual((draft["requested_count"], len(pairs)), (3, 4))
+        self.assertEqual(
+            [pair["start_pose_id"] for pair in pairs],
+            ["start-a", "start-b", "start-a", None],
+        )
+        self.assertEqual(
+            {key: pairs[0][key] for key in ("place_id", "yaw_deg", "x_mm", "y_mm")},
+            draft["current_object_pose"],
+        )
+        self.assertTrue(all(
+            any(left[key] != right[key] for key in ("place_id", "yaw_deg", "x_mm", "y_mm"))
+            for left, right in zip(pairs, pairs[1:])
+        ))
+        self.assertTrue(draft["draft_ready"])
 
     def test_assisted_start_pose_ensemble_is_seeded_balanced_and_stable(self):
         starts = ["start-c", "start-a", "start-b"]

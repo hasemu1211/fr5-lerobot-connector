@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any, Mapping, Sequence
 
 from tools.data_factory_recovery import write_json_atomic
-from tools.fr5_data_factory import ContractArgumentParser, ContractError, DIGEST, SAFE_ID, canonical_digest, load_json_strict, normalize_job_spec
+from tools.fr5_data_factory import ContractArgumentParser, ContractError, DIGEST, SAFE_ID, canonical_digest, load_json_strict, normalize_job_spec, task_review_checklist_id
 
 
 REPORT_SCHEMA = "data_factory.coverage_report.v1"
@@ -319,7 +319,8 @@ def build_and_publish_coverage_report(
             or admission.get("run_id") != episode_id
             or admission.get("operational_gate") not in {"PASS", "FAIL"}
             or admission.get("operational_source") not in {"HIL_PROXY", "HUMAN_GATED"}
-            or admission.get("checklist_id") != "pickup-v2"
+            or admission.get("checklist_id")
+            != task_review_checklist_id(job["task"])
             or not isinstance(admission.get("review_context_digest"), str)
             or not DIGEST.fullmatch(admission["review_context_digest"])
             or admission.get("semantic_status") not in {"PENDING", "PASS", "FAIL", "UNCERTAIN"}

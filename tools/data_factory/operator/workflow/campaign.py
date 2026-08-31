@@ -38,6 +38,7 @@ from tools.data_factory.operator.workflow.intents import (
 )
 from tools.data_factory.quality.coverage_report import build_coverage_report
 from tools.data_factory import run_job
+from tools.data_factory.task_recipe import validate_task_binding
 from tools.data_factory_recovery import write_json_atomic
 from tools.fr5_data_factory import (
     ContractError,
@@ -59,7 +60,10 @@ BASE_PROJECTION_FIELDS = frozenset({
 SETUP_FIELDS = frozenset({"host_status", "operator_label", "subsystems"})
 LIVE_RUNTIME_MILESTONES = {
     "PLANNING": ("경로 계획 및 충돌 검사", 10, "현재 시작 상태에서 각 동작 구간을 연결해 검사합니다."),
-    "CAMERA_WARMUP": ("카메라 전송 확인", 25, "프레임 속도와 timestamp 전송 상태를 확인합니다."),
+    "CAMERA_WARMUP": (
+        "카메라 준비 증거 확인", 25,
+        "동일 결속의 통과 증거를 재사용하거나 두 카메라를 병렬 측정합니다.",
+    ),
     "AWAITING_HUMAN_APPROVAL": ("승인 범위 확인", 35, "캠페인 승인 범위와 이번 계획을 대조합니다."),
     "RECORDER_STARTING": ("기록기 준비", 40, "30 Hz readiness와 writer 상태를 확인합니다."),
     "EXECUTING": ("수집 동작 실행", 50, "로봇 상태·명령·RGB를 동기화해 기록합니다."),
@@ -100,6 +104,7 @@ GRIPPER_RETUNE_FIELDS = frozenset({
     "command_position_m", "acceptable_feedback_m", "data_disposition",
     "production_authority", "training_authority", "retune_digest",
 })
+GRIPPER_RETUNE_V2_FIELDS = GRIPPER_RETUNE_FIELDS | {"force_percent"}
 
 
 def _measurement_for_code(code: str) -> str:
@@ -177,10 +182,16 @@ def _derive_test_only_gripper_program(
     program: Mapping[str, Any], retune: Mapping[str, Any],
 ) -> dict[str, Any]:
     """Apply an object-scoped TEST_ONLY override after qualified resolution."""
+    schema = (
+        retune.get("schema_version")
+        if isinstance(retune, Mapping) else None
+    )
+    expected_fields = {
+        "data_factory.test_only_gripper_retune.v1": GRIPPER_RETUNE_FIELDS,
+        "data_factory.test_only_gripper_retune.v2": GRIPPER_RETUNE_V2_FIELDS,
+    }.get(schema)
     if (
-        not isinstance(retune, Mapping) or set(retune) != GRIPPER_RETUNE_FIELDS
-        or retune.get("schema_version")
-        != "data_factory.test_only_gripper_retune.v1"
+        not isinstance(retune, Mapping) or set(retune) != expected_fields
         or retune.get("status") != "CANDIDATE_PENDING_HIL"
         or retune.get("source") != "OPERATOR_REPORTED_RETUNE"
         or retune.get("data_disposition") != "TEST_ONLY"
@@ -235,10 +246,15 @@ def _derive_test_only_gripper_program(
     ):
         raise ContractError("TEST_ONLY_GRIPPER_RETUNE_BINDING")
     command, minimum, maximum = (float(value) for value in numbers)
+    force_percent = retune.get(
+        "force_percent", close.get("force_percent"),
+    )
     if not (
         float(close["command_position_m"]) <= command <= minimum < maximum
         and float(base_feedback["min"]) <= minimum
         and maximum <= float(base_feedback["max"])
+        and type(force_percent) is int
+        and 1 <= force_percent <= close["force_percent"]
     ):
         raise ContractError("TEST_ONLY_GRIPPER_RETUNE_ENVELOPE")
 
@@ -248,6 +264,8 @@ def _derive_test_only_gripper_program(
         acceptable_feedback_m={"min": minimum, "max": maximum},
         evidence_digest=retune["retune_digest"],
     )
+    if schema == "data_factory.test_only_gripper_retune.v2":
+        tuned_requirements["force_percent"] = force_percent
     derived = copy.deepcopy(dict(program))
     derived["gripper_requirements"] = tuned_requirements
     close_steps = [
@@ -638,6 +656,7 @@ class OperatorConsole:
         terminal_response_call: Callable[[], Mapping[str, Any] | None] | None = None,
         gripper_setup_request: Mapping[str, Any] | None = None,
         gripper_setup_resolution_call: Callable[[Mapping[str, Any]], Mapping[str, Any]] | None = None,
+        task_bindings: Sequence[Mapping[str, Any]] | None = None,
         initial_block_code: str | None = None,
         campaign_approval_once: bool = False,
         run_id_factory: Callable[[int], str] | None = None,
@@ -740,6 +759,22 @@ class OperatorConsole:
             or self.campaign_operator.operator_label != operator_label
         ):
             raise ContractError("OPERATOR_CONSOLE_CAMPAIGN_OPERATOR")
+        if task_bindings is None:
+            self._task_bindings = None
+        else:
+            self._task_bindings = [
+                validate_task_binding(item) for item in task_bindings
+            ]
+            if (
+                len(self._task_bindings)
+                != self.campaign_operator.draft["requested_count"]
+                or any(
+                    item["task_id"]
+                    != self.campaign_operator.hypothesis["fixed_contract"]["task"]
+                    for item in self._task_bindings
+                )
+            ):
+                raise ContractError("OPERATOR_CONSOLE_TASK_BINDING")
         self._base_projection()
         handlers = {
             "compile_draft": self.compile_draft,
@@ -860,7 +895,7 @@ class OperatorConsole:
             for item in self.campaign_operator.hypothesis["base_conditions"]
         }
         result = []
-        for slot in manifest["slots"]:
+        for index, slot in enumerate(manifest["slots"]):
             base = bases.get(slot["base_condition_digest"])
             condition = base.get("coverage_condition") if isinstance(base, Mapping) else None
             condition_digest = (
@@ -872,14 +907,36 @@ class OperatorConsole:
                 or canonical_digest(condition) != condition_digest
             ):
                 raise ContractError("OPERATOR_CONSOLE_COVERAGE_BINDING")
-            result.append({
+            projected = {
                 "order_index": slot["order_index"],
                 "slot_id": slot["slot_id"],
                 "slot_digest": canonical_digest(slot),
                 "base_condition_digest": slot["base_condition_digest"],
+                "robot_start_pose_id": slot["robot_start_pose_id"],
                 "coverage_condition": copy.deepcopy(dict(condition)),
                 "coverage_condition_digest": condition_digest,
-            })
+            }
+            if self._task_bindings is not None:
+                binding = self._task_bindings[index]
+                source = binding["spatial_bindings"][0]
+                if (
+                    source["role"] != "SOURCE"
+                    or any(
+                        source["pose"][field] != condition[field]
+                        for field in ("place_id", "yaw_deg", "x_mm", "y_mm")
+                    )
+                ):
+                    raise ContractError("OPERATOR_CONSOLE_TASK_BINDING")
+                projected["task_binding"] = copy.deepcopy(binding)
+                destination = next((
+                    item for item in binding["spatial_bindings"]
+                    if item["role"] == "DESTINATION"
+                ), None)
+                if destination is not None:
+                    projected["destination_pose"] = copy.deepcopy(
+                        destination["pose"],
+                    )
+            result.append(projected)
         return result
 
     def _advance_run(self) -> None:
@@ -893,7 +950,8 @@ class OperatorConsole:
     def _queue_candidate_review(self, value: object, sealed: Mapping[str, Any]) -> None:
         fields = {
             "candidate_path", "run_id", "expected_file_digest",
-            "expected_review_context_digest", "ledger_reference",
+            "expected_review_context_digest", "checklist_id",
+            "ledger_reference",
         }
         binding = sealed.get("intent_binding")
         if (
@@ -922,7 +980,7 @@ class OperatorConsole:
         self.candidate_review_port.offer(**{
             key: item[key] for key in (
                 "candidate_path", "run_id", "expected_file_digest",
-                "expected_review_context_digest",
+                "expected_review_context_digest", "checklist_id",
             )
         })
         self._active_candidate_review = item
@@ -938,6 +996,8 @@ class OperatorConsole:
             result = ["cancel_session"]
             if checkpoint is not None:
                 result.insert(0, "resolve_checkpoint")
+            if candidate is not None and candidate.get("status") == "PENDING":
+                result.insert(0, "review_candidate")
             return result
         if candidate is not None and candidate.get("status") == "PENDING":
             return ["review_candidate"]
@@ -1438,8 +1498,7 @@ class OperatorConsole:
         sealed["result_digest"] = canonical_digest(sealed)
         self._episode_result, self._workflow = sealed, workflow
         self._episode_history.append(copy.deepcopy(sealed))
-        if workflow in {"BLOCKED", "TERMINAL"}:
-            self._offer_next_candidate_review()
+        self._offer_next_candidate_review()
         self._prepared.set()
         return continue_campaign
 
@@ -1683,7 +1742,7 @@ class OperatorConsole:
         """Resolve one terminal candidate and reproject its existing ledger state."""
         with self._lock:
             if (
-                self._workflow not in {"BLOCKED", "TERMINAL"}
+                self._workflow not in {"RUNNING", "BLOCKED", "TERMINAL"}
                 or self.candidate_review_port is None
                 or self._active_candidate_review is None
             ):

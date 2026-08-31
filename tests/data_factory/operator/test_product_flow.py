@@ -42,6 +42,7 @@ from tools.data_factory.operator.setup.contracts import (
     validate_print_measurements,
 )
 from tools.data_factory.operator.composition import build_product_fake_operator
+from tools.data_factory.task_recipe import TASK_IDS
 from tools.fr5_data_factory import ContractError, canonical_digest, load_json_strict
 
 
@@ -192,8 +193,14 @@ class OperatorStateSpaceProductTests(unittest.TestCase):
             }
             self.assertTrue(by_profile)
             self.assertTrue(all(
-                len(items) == 105
-                and {item["cell_id"] for item in items} == expected_cells
+                len(items) == 105 * len(TASK_IDS)
+                and all(
+                    {
+                        item["cell_id"] for item in items
+                        if item["task_id"] == task_id
+                    } == expected_cells
+                    for task_id in TASK_IDS
+                )
                 for items in by_profile.values()
             ))
             job = load_json_strict(repository / template_path)
@@ -201,12 +208,12 @@ class OperatorStateSpaceProductTests(unittest.TestCase):
             self.assertIn(job["collection_profile_id"], by_profile)
             self.assertTrue(all(
                 (
-                    item["task_id"], item["object_id"], item["grasp_id"],
-                    item["frame_id"],
+                    item["object_id"], item["grasp_id"], item["frame_id"],
                 ) == (
-                    job["task"], job["object_profile_id"],
-                    job["grasp_profile_id"], job["cell_calibration_id"],
+                    job["object_profile_id"], job["grasp_profile_id"],
+                    job["cell_calibration_id"],
                 )
+                and item["task_id"] in TASK_IDS
                 for item in combinations
             ))
 
@@ -374,14 +381,28 @@ class OperatorStateSpaceProductTests(unittest.TestCase):
             ),
         )
         self.assertEqual(len({nearest_spatial(item) for item in projected[:15]}), 15)
-        yaw_anchors = {0, 15, 30, 45, 60, 75, 90}
-        nearest_yaw = lambda item: min(
-            yaw_anchors, key=lambda value: (abs(item["yaw_deg"] - value), value),
-        )
-        self.assertEqual(
-            [nearest_yaw(item) for item in projected[:7]],
-            [0, 15, 30, 45, 60, 75, 90],
-        )
+        self.assertTrue(all(
+            item["yaw_deg"] == source["yaw_deg"] for item in projected[:15]
+        ))
+        self.assertTrue(all(
+            min(value[0] for value in spatial_anchors.values()) + 3.5
+            <= item["x_mm"]
+            <= max(value[0] for value in spatial_anchors.values()) - 3.5
+            and min(value[1] for value in spatial_anchors.values()) + 3.5
+            <= item["y_mm"]
+            <= max(value[1] for value in spatial_anchors.values()) - 3.5
+            for item in projected[1:]
+        ))
+        self.assertTrue(any(
+            math.dist(
+                (item["x_mm"], item["y_mm"]),
+                spatial_anchors[nearest_spatial(item)],
+            ) > 7.0
+            for item in projected[1:15]
+        ))
+        self.assertTrue(any(
+            item["yaw_deg"] != source["yaw_deg"] for item in projected[15:]
+        ))
         first_cycle_anchors = [nearest_spatial(item) for item in projected[:15]]
         self.assertTrue(all(
             math.dist(spatial_anchors[left], spatial_anchors[right]) <= 50.0
@@ -973,6 +994,13 @@ class ProductFakeOperatorTests(unittest.TestCase):
             [item["order_index"] for item in review["coverage"]["sequence"]],
             [1, 2, 3],
         )
+        self.assertEqual(
+            [item["start_pose_id"] for item in review["coverage"]["sequence"]],
+            [
+                slot["robot_start_pose_id"]
+                for slot in campaign.campaign_operator.manifest["slots"]
+            ],
+        )
         self.assertIsNone(campaign.session)
         self.assertTrue(all(value == 0 for value in campaign.projection()["effect_counts"].values()))
         self.assertIsNone(campaign.campaign_authorization)
@@ -1140,6 +1168,53 @@ class ProductFakeOperatorTests(unittest.TestCase):
 
         product.close()
         self.assertFalse(fixture_root.exists())
+
+    def test_candidate_review_is_optional_while_the_next_episode_keeps_running(self):
+        product = self.make()
+        self.addCleanup(product.close)
+        self.prepare(product)
+        self.update_count(product, 2, "async-review-count")
+        compiled = self.compile(product, "async-review-compile")
+        campaign = product.current_campaign
+        original_episode = campaign.episode_call
+        second_started = threading.Event()
+        release_second = threading.Event()
+        calls = 0
+
+        def delayed_second(*args, **kwargs):
+            nonlocal calls
+            calls += 1
+            if calls == 2:
+                second_started.set()
+                release_second.wait(2.0)
+            return original_episode(*args, **kwargs)
+
+        campaign.episode_call = delayed_second
+        self.authorize(product, compiled, "async-review-authorize")
+        self.assertTrue(second_started.wait(2.0))
+        running = product.bridge_core.snapshot()["projection"]
+        self.assertEqual(running["workflow_state"], "RUNNING")
+        self.assertEqual(
+            running["available_ops"], ["review_candidate", "cancel_session"],
+        )
+        self.assertEqual(
+            (running["candidate_review"]["episode_number"],
+             running["candidate_review"]["queue_remaining"]),
+            (1, 1),
+        )
+        reviewed = self.send(product, "review_candidate", {
+            "review_binding_digest": running["candidate_review"]["review_binding_digest"],
+            "choice": "PASS", "reason": None,
+        }, "async-review-first")
+        self.assertEqual(
+            (reviewed["status"], reviewed["remaining_reviews"]), ("PASS", 0),
+        )
+        self.assertEqual(
+            product.bridge_core.snapshot()["projection"]["workflow_state"],
+            "RUNNING",
+        )
+        release_second.set()
+        self.assertEqual(product.wait_for_campaign(4.0)["outcome"], "PASS")
 
     def test_forged_workspace_domain_blocks_campaign_creation(self):
         product = self.make()

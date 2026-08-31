@@ -89,6 +89,7 @@ class RecorderTransactionTest(unittest.TestCase):
             api = SimpleNamespace(resume=mock.Mock(return_value=dataset))
             recorder = FR5LeRobotRecorder.__new__(FR5LeRobotRecorder)
             recorder.LeRobotDataset = api
+            recorder.camera_names = ("up", "wrist")
             recorder.args = SimpleNamespace(
                 root=root, repo_id="local/test", fps=30, no_videos=False,
                 streaming_encoding=False, encoder_threads=2,
@@ -96,6 +97,7 @@ class RecorderTransactionTest(unittest.TestCase):
             )
             recorder._features = lambda: features
             self.assertIs(recorder._open_dataset(), dataset)
+            self.assertEqual(api.resume.call_args.kwargs["image_writer_threads"], 2)
             encoder = api.resume.call_args.kwargs["rgb_encoder"]
             self.assertEqual((encoder.vcodec, encoder.preset, encoder.crf), ("h264", "ultrafast", 23))
 
@@ -138,6 +140,7 @@ class RecorderTransactionTest(unittest.TestCase):
         recorder.sync_spans = []
         recorder.action_ages = []
         recorder.state_ages = []
+        recorder.camera_source_stamps = {name: [] for name in recorder.camera_names}
         recorder.camera_stamps = {name: [] for name in recorder.camera_names}
         recorder.image_ages = {name: [] for name in recorder.camera_names}
         recorder.image_transport_ages = {name: [] for name in recorder.camera_names}
@@ -443,19 +446,21 @@ class RecorderTransactionTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             recorder = self.make_recorder(directory)
             recorder.begin_episode()
-            status = recorder.episode_status()
+            with mock.patch.object(
+                recorder, "_quality_snapshot",
+                side_effect=AssertionError("status must not scan cumulative quality"),
+            ) as quality_snapshot:
+                status = recorder.episode_status()
             self.assertEqual(status["state"], recorder.RECORDING)
             self.assertIn("writer_alive", status)
             self.assertTrue(status["sampler_alive"])
             self.assertEqual(
                 set(status["metrics"]),
-                {"rows", "writer_queue", "writer_queue_high_water", "writer_queue_drops", "alignment_failures", "observed_monotonic_ns", "quality_snapshot"},
+                {"rows", "writer_queue", "writer_queue_high_water", "writer_queue_drops", "alignment_failures", "observed_monotonic_ns"},
             )
-            snapshot = status["metrics"]["quality_snapshot"]
-            self.assertFalse(snapshot["accepted"])
-            self.assertTrue(any("minimum 60" in reason for reason in snapshot["reasons"]))
+            quality_snapshot.assert_not_called()
             recorder.frames = 1
-            self.assertEqual(snapshot["frames"], 0)
+            self.assertEqual(recorder.episode_status()["metrics"]["rows"], 1)
             self.assertEqual(recorder.dataset.clears, 0)
             self.assertEqual(recorder.dataset.saves, 0)
             self.assertEqual(recorder.episode_state, recorder.RECORDING)
@@ -687,7 +692,10 @@ class RecorderTransactionTest(unittest.TestCase):
                 "op": "status",
             }) + "\n"
             output = io.StringIO()
-            args = SimpleNamespace(factory_jsonl=True, interactive=False)
+            args = SimpleNamespace(
+                factory_jsonl=True, interactive=False,
+                no_videos=False, camera_profile="up",
+            )
             with (
                 mock.patch.object(recorder_module, "parse_args", return_value=args),
                 mock.patch.object(recorder_module, "FR5LeRobotRecorder", return_value=recorder),
@@ -703,6 +711,38 @@ class RecorderTransactionTest(unittest.TestCase):
             lines = output.getvalue().splitlines()
             self.assertEqual(len(lines), 1)
             self.assertEqual(json.loads(lines[0])["op_id"], "status-1")
+
+    def test_factory_multicamera_main_selects_spawn_before_ros_threads(self):
+        args = SimpleNamespace(
+            factory_jsonl=True, interactive=False,
+            no_videos=False, camera_profile="up-wrist",
+        )
+        with (
+            mock.patch.object(recorder_module, "parse_args", return_value=args),
+            mock.patch.object(
+                recorder_module.multiprocessing, "get_start_method", return_value=None,
+            ),
+            mock.patch.object(
+                recorder_module.multiprocessing, "set_start_method",
+            ) as set_start_method,
+            mock.patch.object(recorder_module.rclpy, "init"),
+            mock.patch.object(
+                recorder_module, "FR5LeRobotRecorder",
+                side_effect=AssertionError("spawn must be selected before recorder construction"),
+            ),
+        ):
+            with self.assertRaisesRegex(AssertionError, "before recorder construction"):
+                recorder_module.main()
+        set_start_method.assert_called_once_with("spawn")
+
+        with (
+            mock.patch.object(recorder_module, "parse_args", return_value=args),
+            mock.patch.object(
+                recorder_module.multiprocessing, "get_start_method", return_value="fork",
+            ),
+            self.assertRaisesRegex(SystemExit, "requires spawn isolation"),
+        ):
+            recorder_module.main()
 
     def test_constructor_preserves_legacy_autostart_and_defers_factory_begin(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -801,6 +841,41 @@ class RecorderTransactionTest(unittest.TestCase):
             self.assertEqual(response["reason_code"], "RUN_EVIDENCE_DIRECTORY_CONFLICT")
             self.assertEqual(conflict.episode_state, conflict.IDLE)
 
+    def test_transaction_accepts_one_warmup_receipt_and_rejects_ambiguous_evidence(self):
+        for warmup_name, warmup_schema in (
+            ("camera_warmup.json", "data_factory.camera_warmup.v1"),
+            ("camera_warmup_reuse.json", "data_factory.camera_warmup_reuse.v1"),
+        ):
+            with self.subTest(warmup_name=warmup_name), tempfile.TemporaryDirectory() as directory:
+                run_dir = Path(directory) / "runs" / "run-001"
+                run_dir.mkdir(parents=True)
+                (run_dir / warmup_name).write_text(json.dumps({
+                    "schema_version": warmup_schema,
+                    "run_id": "run-001",
+                }))
+                (run_dir / "preapproval_evidence.json").write_text(json.dumps({
+                    "schema_version": "data_factory.preapproval_evidence.v1",
+                    "run_id": "run-001",
+                }))
+                recorder = self.make_recorder(directory)
+                self.assertTrue(recorder.begin_episode(self.transaction(directory))["ok"])
+                self.assertTrue(recorder.abort_episode()["ok"])
+
+        with tempfile.TemporaryDirectory() as directory:
+            run_dir = Path(directory) / "runs" / "run-001"
+            run_dir.mkdir(parents=True)
+            evidence = {
+                "camera_warmup.json": "data_factory.camera_warmup.v1",
+                "camera_warmup_reuse.json": "data_factory.camera_warmup_reuse.v1",
+                "preapproval_evidence.json": "data_factory.preapproval_evidence.v1",
+            }
+            for name, schema in evidence.items():
+                (run_dir / name).write_text(json.dumps({"schema_version": schema, "run_id": "run-001"}))
+            recorder = self.make_recorder(directory)
+            with self.assertRaises(RecoveryError) as conflict:
+                recorder.begin_episode(self.transaction(directory))
+            self.assertEqual(conflict.exception.code, "RUN_EVIDENCE_DIRECTORY_CONFLICT")
+
     def test_begin_journal_failure_is_fail_closed(self):
         with tempfile.TemporaryDirectory() as directory:
             recorder = self.make_recorder(directory)
@@ -819,8 +894,11 @@ class RecorderTransactionTest(unittest.TestCase):
             recorder._write_frame = lambda value: written.append(value) if recorder.episode_state in (recorder.RECORDING, recorder.FREEZING) else None
             recorder.writer_thread = threading.Thread(target=recorder._writer_loop, daemon=True)
             recorder.writer_thread.start()
+            image_writer = mock.Mock()
+            recorder.dataset.writer = SimpleNamespace(image_writer=image_writer)
             recorder.writer_queue.put(("queued",))
             self.assertTrue(recorder.freeze_episode()["ok"])
+            image_writer.wait_until_done.assert_called_once_with()
             recorder._write_frame("late")
             self.assertEqual(written, ["queued"])
             frames_before = recorder.frames
@@ -837,19 +915,20 @@ class RecorderTransactionTest(unittest.TestCase):
             recorder.next_target_stamp = 0.65
             recorder.frame_stamps = [0.60]
 
-            def complete_tail():
-                time.sleep(0.02)
+            def deliver_source_callbacks(*_args, **_kwargs):
                 with recorder.lock:
-                    recorder.frame_stamps.append(0.99)
-                    recorder.next_target_stamp = 1.02
+                    if recorder.frame_stamps[-1] < 0.99:
+                        recorder.frame_stamps.append(0.99)
+                        recorder.next_target_stamp = 1.02
 
-            worker = threading.Thread(target=complete_tail)
-            recorder.sampler_thread = worker
-            worker.start()
-            result = recorder.freeze_episode()
-            worker.join(1)
+            recorder.sampler_thread = SimpleNamespace(is_alive=lambda: True)
+            with mock.patch.object(
+                recorder_module.rclpy, "spin_once", side_effect=deliver_source_callbacks,
+            ) as spin_once:
+                result = recorder.freeze_episode()
 
             self.assertTrue(result["ok"])
+            spin_once.assert_called()
             self.assertEqual(result["state"], recorder.FROZEN)
             self.assertTrue(recorder.alignment_tail_drained)
             self.assertEqual(recorder.alignment_tail_target_ros_s, 1.0)
@@ -877,19 +956,60 @@ class RecorderTransactionTest(unittest.TestCase):
             recorder.frames = 60
             recorder.frame_stamps = [index / 30 for index in range(60)]
             recorder.source_provenance = [{} for _ in range(60)]
+            recorder.camera_source_stamps = {
+                name: [index / 30 for index in range(60)]
+                for name in recorder.camera_names
+            }
+            recorder.enqueue_attempts = 60
+            image_writer = mock.Mock()
+            recorder.dataset.writer = SimpleNamespace(image_writer=image_writer)
+            drained = []
+            recorder.writer_queue.put("readiness-row")
+
+            def drain_one():
+                recorder.writer_queue.get()
+                time.sleep(0.01)
+                drained.append("row")
+                recorder.writer_queue.task_done()
+
+            writer = threading.Thread(target=drain_one)
+            writer.start()
+            quality = {"accepted": True, "reasons": [], "frames": 60}
+
+            def sealed_quality():
+                self.assertFalse(recorder.recording)
+                self.assertEqual(recorder.writer_queue.unfinished_tasks, 0)
+                self.assertEqual(drained, ["row"])
+                image_writer.wait_until_done.assert_called_once_with()
+                return quality
+
+            recorder._quality_snapshot = sealed_quality
             result = recorder.trim_readiness_prefix()
+            writer.join(1)
             self.assertEqual(
                 (result["ok"], result["state"], result["reason_code"], result["metrics"]["rows"]),
                 (True, recorder.RECORDING, "READINESS_PREFIX_TRIMMED", 0),
             )
+            self.assertEqual(result["quality"], quality)
             self.assertEqual(recorder.dataset.clears, 1)
             self.assertEqual(recorder._transaction["transaction_id"], transaction_id)
             self.assertTrue(recorder.recording)
             self.assertEqual(recorder.next_target_stamp, 1.0)
+            self.assertTrue(all(
+                not stamps for stamps in recorder.camera_source_stamps.values()
+            ))
 
-            recorder.writer_error = RuntimeError("writer failed")
+            recorder.frames = 60
+            rejected = {
+                "accepted": False, "reasons": ["dataset writer failed: disk fault"],
+                "frames": 60,
+            }
+            recorder._quality_snapshot = lambda: rejected
             blocked = recorder.trim_readiness_prefix()
             self.assertEqual((blocked["ok"], blocked["reason_code"]), (False, "READINESS_PREFIX_UNSAFE"))
+            self.assertEqual(blocked["quality"], rejected)
+            self.assertEqual(blocked["metrics"]["rows"], 60)
+            self.assertTrue(recorder.recording)
             self.assertEqual(recorder.dataset.clears, 1)
 
     def test_stale_sampler_target_cannot_cross_readiness_trim(self):
@@ -897,6 +1017,9 @@ class RecorderTransactionTest(unittest.TestCase):
             recorder = self.make_recorder(directory)
             self.assertTrue(recorder.begin_episode(self.transaction(directory))["ok"])
             stale_epoch = recorder.sampler_epoch
+            recorder._quality_snapshot = lambda: {
+                "accepted": True, "reasons": [], "frames": 60,
+            }
             self.assertTrue(recorder.trim_readiness_prefix()["ok"])
             recorder._aligned_sample = lambda _target: (
                 None, None, (), {}, 0.0, 0.0, 0.0,
@@ -931,7 +1054,7 @@ class RecorderTransactionTest(unittest.TestCase):
             recorder.freeze_episode()
             self.assertTrue(recorder.commit_episode()["ok"])
             self.assertEqual(recorder.dataset.saves, 1)
-            self.assertFalse(recorder.dataset.parallel_encoding)
+            self.assertTrue(recorder.dataset.parallel_encoding)
             self.assertFalse((recorder.args.root / "meta" / "quarantine.json").exists())
             self.assertFalse(recorder.commit_episode()["ok"])
             self.assertEqual(recorder.dataset.saves, 1)

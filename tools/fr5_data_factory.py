@@ -20,6 +20,25 @@ except ImportError:
 SAFE_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
 RFC3339 = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$")
 JOB_KEYS = {"schema_version", "job_id", "task", "robot_system_id", "collection_profile_id", "place_id", "cell_calibration_id", "sheet_manifest_digest", "yaw_deg", "x_mm", "y_mm", "object_profile_id", "grasp_profile_id", "instruction", "episode_intent", "operator_or_agent_id", "approval_expiry", "dry_run_required"}
+TASK_CONTRACTS = {
+    "pickup_e2e": {
+        "episode_intent": "nominal pickup",
+        "instruction_template": "pick up the {object_description}",
+        "recording_boundary": "LIFT_LIN",
+        "review_checklist_id": "pickup-v2",
+    },
+    "pick_place": {
+        "episode_intent": "nominal pick and place",
+        "instruction_template": (
+            "pick up the {object_description} and place it at the destination"
+        ),
+        "recording_boundary": "RETREAT_LIN",
+        "review_checklist_id": "pick-place-v1",
+    },
+}
+TASK_REVIEW_CHECKLIST_IDS = frozenset(
+    contract["review_checklist_id"] for contract in TASK_CONTRACTS.values()
+)
 CALIBRATION_KEYS = {"schema_version", "calibration_id", "qualification_status", "robot_system_id", "place_id", "yaw0_manifest_digest", "a4_family_digest", "tcp_digest", "measurement_report_digest", "table_plane_measurement_digest", "center_base_m", "x_ref_base_m", "y_check_base_m", "table_normal_base", "print_source_scale_bar_measured_mm", "scale_bar_measured_mm", "limits", "measured_at"}
 LIMIT_KEYS = {"max_scale_error_mm", "min_x_ref_separation_mm", "max_x_ref_distance_error_mm", "max_x_ref_out_of_plane_mm", "max_y_check_residual_mm", "combined_error_bound_mm"}
 DIGEST = re.compile(r"^sha256:[0-9a-f]{64}$")
@@ -84,6 +103,30 @@ def canonical_digest(value: object) -> str:
     except (TypeError, ValueError) as exc:
         raise ContractError("JSON_NONFINITE", str(exc)) from exc
     return "sha256:" + hashlib.sha256(text.encode()).hexdigest()
+
+
+def task_instruction(task_id: str, object_description: str) -> str:
+    """Return the one collection-time language label for a supported task."""
+    contract = TASK_CONTRACTS.get(task_id)
+    if contract is None:
+        raise ContractError("JOB_TASK")
+    if (
+        not isinstance(object_description, str)
+        or not object_description
+        or object_description.strip() != object_description
+        or not object_description.isprintable()
+    ):
+        raise ContractError("OBJECT_DESCRIPTION")
+    return contract["instruction_template"].format(
+        object_description=object_description,
+    )
+
+
+def task_review_checklist_id(task_id: str) -> str:
+    contract = TASK_CONTRACTS.get(task_id)
+    if contract is None:
+        raise ContractError("JOB_TASK")
+    return contract["review_checklist_id"]
 
 
 def load_json_strict(source: str | Path) -> dict:
@@ -183,8 +226,9 @@ def normalize_job_spec(job: object, *, now: datetime | None = None) -> dict:
     if result["schema_version"] != "data_factory.job.v1": raise ContractError("JOB_SCHEMA")
     for key in ("job_id", "robot_system_id", "collection_profile_id", "place_id", "cell_calibration_id", "object_profile_id", "grasp_profile_id", "operator_or_agent_id"):
         result[key] = _id(result[key], "JOB_ID")
-    if result["task"] != "pickup_e2e": raise ContractError("JOB_TASK")
-    if result["episode_intent"] != "nominal pickup": raise ContractError("JOB_INTENT")
+    task_contract = TASK_CONTRACTS.get(result["task"])
+    if task_contract is None: raise ContractError("JOB_TASK")
+    if result["episode_intent"] != task_contract["episode_intent"]: raise ContractError("JOB_INTENT")
     if result["dry_run_required"] is not True: raise ContractError("JOB_DRY_RUN")
     if (
         not isinstance(result["instruction"], str)
@@ -611,7 +655,9 @@ def validate_job_spec(job, *, paths=None, data=None, config_root, now=None):
     _digest(robot.get("tcp_digest"), "ROBOT_CONTRACT")
     if grasp.get("object_profile_id") != normalized["object_profile_id"]:
         raise ContractError("GRASP_OBJECT")
-    if normalized["instruction"] != f"pick up the {object_profile['description']}":
+    if normalized["instruction"] != task_instruction(
+        normalized["task"], object_profile["description"],
+    ):
         raise ContractError("JOB_TEXT")
     cell_path = _safe_profile_path(root, "cells", normalized["cell_calibration_id"])
     calibration = load_json_strict(cell_path)
@@ -774,6 +820,11 @@ def resolve_motion_program(validated, motion_qualification, home_candidate, *, u
     release_pose = _exact(release_pose, {"place_id", "yaw_deg", "x_mm", "y_mm"}, "MOTION_RELEASE_POSE")
     if release_pose["place_id"] != job["place_id"]:
         raise ContractError("MOTION_RELEASE_POSE")
+    if job["task"] == "pick_place" and all(
+        release_pose[key] == job[key]
+        for key in ("place_id", "yaw_deg", "x_mm", "y_mm")
+    ):
+        raise ContractError("TASK_BINDING_DISTINCT")
     release_resolved = resolve_place_pose(
         validated["calibration"]["center"], validated["calibration"]["x"], validated["calibration"]["y"], validated["calibration"]["z"],
         _number(release_pose["yaw_deg"], "MOTION_RELEASE_POSE"),
@@ -796,13 +847,14 @@ def resolve_motion_program(validated, motion_qualification, home_candidate, *, u
         "LOWER_LIN": (release_datum, 0),
         "RETREAT_LIN": (release_datum, q["offsets"]["retreat"]),
     }
+    recording_boundary = TASK_CONTRACTS[job["task"]]["recording_boundary"]
     steps = []
     for phase in MOTION_PHASES:
         step = {"phase": phase, "limits": q["limits"][phase]}
         if phase in offsets: step["target"] = target(*offsets[phase])
         elif phase.startswith("GRIPPER"): step["gripper_position_m"] = q["gripper"]["closed" if phase == "GRIPPER_CLOSE" else "open"]
         else: step["joint_positions_rad"] = q["safe"]
-        if phase == "LIFT_LIN": step["pause_after"] = "SEMANTIC_VERDICT"
+        if phase == recording_boundary: step["pause_after"] = "SEMANTIC_VERDICT"
         steps.append(step)
     binding_digests = {**validated["input_digests"], **q["pins"], "motion_qualification": q["digest"], "home_candidate": home["candidate_digest"]}
     return {"schema_version": "fr5.motion_program.v2", "robot_system_id": validated["normalized_job"]["robot_system_id"], "resolved_job_digest": validated["resolved_job_digest"], "binding_digests": binding_digests, "frames": q["frames"], "planning_scene": q["planning_scene"], "planning": {"pipeline_id": "pilz_industrial_motion_planner", "ptp_planner_id": "PTP", "lin_planner_id": "LIN", "goal_tolerances": q["tolerances"], "max_joint_state_age_s": q["max_joint_state_age_s"]}, "gripper_requirements": q["gripper_requirements"], "execution_timeouts_s": q["execution_timeouts_s"], "steps": steps}
@@ -842,12 +894,25 @@ def validate_motion_program(value):
         raise ContractError("MOTION_PROGRAM_MARKER")
     if legacy_grasp_verdict and close_step["pause_after"] != "GRASP_VERDICT":
         raise ContractError("MOTION_PROGRAM_GRIPPER")
+    recording_boundaries = {
+        contract["recording_boundary"] for contract in TASK_CONTRACTS.values()
+    }
+    semantic_steps = [
+        step for step in value["steps"]
+        if step.get("pause_after") == "SEMANTIC_VERDICT"
+    ]
+    if (
+        len(semantic_steps) != 1
+        or semantic_steps[0]["phase"] not in recording_boundaries
+    ):
+        raise ContractError("MOTION_PROGRAM_MARKER")
+    semantic_phase = semantic_steps[0]["phase"]
     for step in value["steps"]:
         phase = step["phase"]
         extras = {"phase", "limits", "target"} if phase in {"PREGRASP_PTP", "APPROACH_STOP_LIN", "FINAL_APPROACH_LIN", "LIFT_LIN", "RECYCLE_APPROACH_PTP", "LOWER_LIN", "RETREAT_LIN"} else {"phase", "limits", "joint_positions_rad"} if phase == "SAFE_POSE_PTP" else {"phase", "limits", "gripper_position_m"}
         if legacy_precontact and phase == "FINAL_APPROACH_LIN": extras.add("requires_confirmation")
         if legacy_grasp_verdict and phase == "GRIPPER_CLOSE": extras.add("pause_after")
-        if phase == "LIFT_LIN": extras.add("pause_after")
+        if phase == semantic_phase: extras.add("pause_after")
         _exact(step, extras, "MOTION_PROGRAM_STEP")
         limit = step["limits"]
         if phase.startswith("GRIPPER"):
@@ -871,12 +936,12 @@ def validate_motion_program(value):
             position = _number(step["gripper_position_m"], "MOTION_PROGRAM_GRIPPER")
             if phase == "GRIPPER_CLOSE" and position != requirements["command_position_m"]: raise ContractError("MOTION_PROGRAM_GRIPPER")
         if phase == "GRIPPER_CLOSE" and _number(step["limits"]["completion_tolerance_m"], "MOTION_PROGRAM_LIMITS") != requirements["acceptable_feedback_m"]["max"] - requirements["command_position_m"]: raise ContractError("MOTION_PROGRAM_GRIPPER")
-        if phase == "LIFT_LIN" and step["pause_after"] != "SEMANTIC_VERDICT": raise ContractError("MOTION_PROGRAM_MARKER")
+        if phase == semantic_phase and step["pause_after"] != "SEMANTIC_VERDICT": raise ContractError("MOTION_PROGRAM_MARKER")
     return value
 
 
-def build_job_spec(selected_sheet, *, point_id=None, x_mm=None, y_mm=None, job_id, robot_system_id, collection_profile_id, cell_calibration_id, object_profile_id, object_description, grasp_profile_id, operator_or_agent_id, approval_expiry, now=None):
-    """Build the fixed pickup JobSpec from an A4 point or bounded coordinate."""
+def build_job_spec(selected_sheet, *, point_id=None, x_mm=None, y_mm=None, job_id, robot_system_id, collection_profile_id, cell_calibration_id, object_profile_id, object_description, grasp_profile_id, operator_or_agent_id, approval_expiry, task="pickup_e2e", now=None):
+    """Build one supported JobSpec from an A4 point or bounded coordinate."""
     if not isinstance(object_description, str) or not 1 <= len(object_description) <= 80 or object_description.strip() != object_description or not object_description.isprintable():
         raise ContractError("OBJECT_DESCRIPTION")
     sheet = _document(selected_sheet, "INPUT_SELECTED_SHEET")
@@ -897,7 +962,7 @@ def build_job_spec(selected_sheet, *, point_id=None, x_mm=None, y_mm=None, job_i
     return normalize_job_spec({
         "schema_version": "data_factory.job.v1",
         "job_id": job_id,
-        "task": "pickup_e2e",
+        "task": task,
         "robot_system_id": robot_system_id,
         "collection_profile_id": collection_profile_id,
         "place_id": pose["place_id"],
@@ -908,8 +973,8 @@ def build_job_spec(selected_sheet, *, point_id=None, x_mm=None, y_mm=None, job_i
         "y_mm": pose["y_mm"],
         "object_profile_id": object_profile_id,
         "grasp_profile_id": grasp_profile_id,
-        "instruction": f"pick up the {object_description}",
-        "episode_intent": "nominal pickup",
+        "instruction": task_instruction(task, object_description),
+        "episode_intent": TASK_CONTRACTS.get(task, {}).get("episode_intent"),
         "operator_or_agent_id": operator_or_agent_id,
         "approval_expiry": approval_expiry,
         "dry_run_required": True,
@@ -1002,6 +1067,7 @@ def _cli():
     builder.add_argument("--yaw0-sheet", required=True)
     builder.add_argument("--config-root", required=True)
     builder.add_argument("--interactive", action="store_true")
+    builder.add_argument("--task", choices=tuple(TASK_CONTRACTS), default="pickup_e2e")
     builder.add_argument("--point-id")
     builder.add_argument("--x-mm")
     builder.add_argument("--y-mm")
@@ -1037,6 +1103,7 @@ def _cli():
                 grasp_profile_id=_profile_choice(args.grasp_profile_id, label="grasp_profile_id", root=root, folder="grasps", interactive=args.interactive),
                 operator_or_agent_id=_required(args.operator_or_agent_id, "operator_or_agent_id", args.interactive),
                 approval_expiry=_required(args.approval_expiry, "approval_expiry", args.interactive),
+                task=args.task,
             )
             yaw0 = _document(args.yaw0_sheet, "INPUT_YAW0_SHEET")
             validated = validate_job_spec(job, data={"selected_sheet": selected, "yaw0_sheet": yaw0}, config_root=args.config_root)

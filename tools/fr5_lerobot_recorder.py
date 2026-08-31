@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 from collections import deque
 import json
+import multiprocessing
 import os
 import queue
 import re
@@ -81,6 +82,9 @@ class FR5LeRobotRecorder(Node):
         self.sync_spans: list[float] = []
         self.action_ages: list[float] = []
         self.state_ages: list[float] = []
+        self.camera_source_stamps: dict[str, list[float]] = {
+            name: [] for name in self.camera_names
+        }
         self.camera_stamps: dict[str, list[float]] = {name: [] for name in self.camera_names}
         self.image_ages: dict[str, list[float]] = {name: [] for name in self.camera_names}
         self.image_transport_ages: dict[str, list[float]] = {name: [] for name in self.camera_names}
@@ -155,9 +159,11 @@ class FR5LeRobotRecorder(Node):
             "encoder_threads": self.args.encoder_threads,
             "image_writer_processes": 0,
         }
+        image_writer_threads = len(self.camera_names)
         if info.exists():
             dataset = self.LeRobotDataset.resume(
-                self.args.repo_id, root=root, image_writer_threads=0,
+                self.args.repo_id, root=root,
+                image_writer_threads=image_writer_threads,
                 rgb_encoder=rgb_encoder,
                 **encoder_options,
             )
@@ -181,10 +187,17 @@ class FR5LeRobotRecorder(Node):
             robot_type="fr5_ros2",
             features=expected,
             use_videos=not self.args.no_videos,
-            image_writer_threads=0,
+            image_writer_threads=image_writer_threads,
             rgb_encoder=rgb_encoder,
             **encoder_options,
         )
+
+    def _drain_image_writer(self) -> None:
+        """Wait for LeRobot's bounded image workers at lifecycle barriers."""
+        writer = getattr(self.dataset, "writer", None)
+        image_writer = getattr(writer, "image_writer", None)
+        if image_writer is not None:
+            image_writer.wait_until_done()
 
     def _reset_episode(self) -> None:
         # Invalidate targets that the sampler computed before this reset.  The
@@ -197,6 +210,7 @@ class FR5LeRobotRecorder(Node):
         self.sync_spans.clear()
         self.action_ages.clear()
         self.state_ages.clear()
+        self.camera_source_stamps = {name: [] for name in self.camera_names}
         self.camera_stamps = {name: [] for name in self.camera_names}
         self.image_ages = {name: [] for name in self.camera_names}
         self.image_transport_ages = {name: [] for name in self.camera_names}
@@ -485,12 +499,20 @@ class FR5LeRobotRecorder(Node):
         except ValueError as exc:
             raise ValueError("transaction run_dir must be under configured run_root") from exc
         if directory.exists():
-            expected = {
+            warmup_receipts = {
                 "camera_warmup.json": "data_factory.camera_warmup.v1",
+                "camera_warmup_reuse.json": "data_factory.camera_warmup_reuse.v1",
+            }
+            expected = {
                 "preapproval_evidence.json": "data_factory.preapproval_evidence.v1",
             }
             try:
                 entries = {entry.name: entry for entry in directory.iterdir()}
+                selected_warmup = set(entries) & set(warmup_receipts)
+                if len(selected_warmup) != 1:
+                    raise ValueError("expected exactly one camera warmup receipt")
+                warmup_name = selected_warmup.pop()
+                expected[warmup_name] = warmup_receipts[warmup_name]
                 if set(entries) != set(expected):
                     raise ValueError("unexpected files")
                 for name, schema in expected.items():
@@ -814,11 +836,19 @@ class FR5LeRobotRecorder(Node):
             reasons.append(f"action alignment distance {max(self.action_ages)*1000:.1f}ms exceeds limit")
         for camera, metrics in self.image_metrics.items():
             samples = np.asarray(metrics, dtype=float)
-            stamps = np.asarray(self.camera_stamps[camera], dtype=float)
-            repeats = np.diff(stamps) == 0 if stamps.size > 1 else np.array([], dtype=bool)
-            unique_frames = int(stamps.size - repeats.sum()) if stamps.size else 0
-            unique_stamps = np.unique(stamps)
-            source_gaps = np.diff(unique_stamps)
+            selected_stamps = np.asarray(self.camera_stamps[camera], dtype=float)
+            repeats = (
+                np.diff(selected_stamps) == 0
+                if selected_stamps.size > 1 else np.array([], dtype=bool)
+            )
+            source_stamps = np.unique(np.asarray(
+                self.camera_source_stamps[camera], dtype=float,
+            ))
+            source_gaps = np.diff(source_stamps)
+            source_duration = (
+                source_stamps[-1] - source_stamps[0]
+                if source_stamps.size > 1 else 0.0
+            )
             ages = np.asarray(self.image_ages[camera], dtype=float)
             transport_ages = np.asarray(self.image_transport_ages[camera], dtype=float)
             camera_summary = {
@@ -826,10 +856,11 @@ class FR5LeRobotRecorder(Node):
                 "brightness_mean": float(samples[:, 1].mean()) if samples.size else None,
                 "clipping_mean": float(samples[:, 2].mean()) if samples.size else None,
                 "sharpness_median": float(np.median(samples[:, 3])) if samples.size else None,
-                "unique_source_frames": unique_frames,
+                "unique_source_frames": int(source_stamps.size),
                 "repeat_count": int(repeats.sum()),
                 "repeat_ratio": float(repeats.mean()) if repeats.size else 0.0,
-                "source_fps": float((unique_frames - 1) / duration) if duration > 0 and unique_frames > 1 else 0.0,
+                "source_fps": float((source_stamps.size - 1) / source_duration)
+                if source_duration > 0 else 0.0,
                 "source_gap_max_ms": float(source_gaps.max() * 1000) if source_gaps.size else None,
                 "age_p95_ms": float(np.percentile(ages, 95) * 1000) if ages.size else None,
                 "age_max_ms": float(ages.max() * 1000) if ages.size else None,
@@ -924,11 +955,23 @@ class FR5LeRobotRecorder(Node):
                     "ALIGNMENT_TAIL_TIMEOUT",
                     "sampler watermark did not cross the freeze request",
                 )
-            self.stop_threads.wait(min(0.01, max(0.001, 1.0 / self.args.fps / 4)))
+            # Factory control and ROS callbacks share this thread.  Keep source
+            # buffers advancing while the sampler seals the alignment tail.
+            rclpy.spin_once(
+                self, timeout_sec=min(0.01, max(0.001, 1.0 / self.args.fps / 4)),
+            )
 
         if interrupted:
             return self._result(False, "STATE_FREEZE_INTERRUPTED")
         self.writer_queue.join()
+        try:
+            self._drain_image_writer()
+        except Exception as exc:
+            with self.lock:
+                self.episode_state = self.QUARANTINED_COMMIT
+            return self._persist_quarantine(
+                "IMAGE_WRITER_DRAIN_FAILED", str(exc),
+            )
         quarantine = None
         with self.lock:
             if self.episode_state != self.FREEZING:
@@ -962,7 +1005,7 @@ class FR5LeRobotRecorder(Node):
         return self._result(True)
 
     def trim_readiness_prefix(self) -> dict:
-        """Discard readiness rows while keeping the sealed transaction recording.
+        """Seal, validate, and discard readiness rows in the active transaction.
 
         The source rings keep running, so the alignment delay still preserves the
         action onset.  Only rows accumulated to prove transport/writer readiness
@@ -973,12 +1016,29 @@ class FR5LeRobotRecorder(Node):
                 return self._result(False, "STATE_TRIM_NOT_RECORDING")
             self.recording = False
         self.writer_queue.join()
+        try:
+            self._drain_image_writer()
+        except Exception as exc:
+            with self.lock:
+                self.episode_state = self.QUARANTINED_COMMIT
+            return self._persist_quarantine(
+                "READINESS_PREFIX_IMAGE_DRAIN_FAILED", str(exc),
+            )
         with self.lock:
             if self.episode_state != self.RECORDING:
                 return self._result(False, "STATE_TRIM_INTERRUPTED")
-            if self.writer_error is not None or self.writer_queue_drops or self.alignment_failures:
+            try:
+                attempt = self._quality_snapshot()
+            except Exception as exc:
                 self.recording = True
-                return self._result(False, "READINESS_PREFIX_UNSAFE")
+                return self._result(
+                    False, "READINESS_PREFIX_QUALITY_FAILED", detail=str(exc),
+                )
+            if not attempt["accepted"]:
+                self.recording = True
+                return self._result(
+                    False, "READINESS_PREFIX_UNSAFE", quality=attempt,
+                )
             try:
                 self.dataset.clear_episode_buffer()
             except Exception as exc:
@@ -994,7 +1054,9 @@ class FR5LeRobotRecorder(Node):
                 self.recording = False
                 self.episode_state = self.QUARANTINED_COMMIT
                 return self._persist_quarantine("READINESS_PREFIX_JOURNAL_FAILED", str(exc))
-            return self._result(True, "READINESS_PREFIX_TRIMMED")
+            return self._result(
+                True, "READINESS_PREFIX_TRIMMED", quality=attempt,
+            )
 
     def _clear_episode_buffer_once(self) -> None:
         if not self._buffer_cleared:
@@ -1110,7 +1172,9 @@ class FR5LeRobotRecorder(Node):
         try:
             probe = self._start_encoder_temp_probe()
             try:
-                self.dataset.save_episode(parallel_encoding=False)
+                self.dataset.save_episode(
+                    parallel_encoding=len(self.camera_names) > 1,
+                )
                 temporary_path.replace(provenance_path)
                 quality_path = self.args.root / "meta" / "recording_quality.jsonl"
                 with quality_path.open("a", encoding="utf-8") as file:
@@ -1148,7 +1212,7 @@ class FR5LeRobotRecorder(Node):
         self._storage_status_check()
         with self.lock:
             sampler_thread = getattr(self, "sampler_thread", None)
-            result = self._result(
+            return self._result(
                 True,
                 writer_error=str(self.writer_error) if self.writer_error else None,
                 writer_alive=self.writer_thread.is_alive(),
@@ -1156,8 +1220,6 @@ class FR5LeRobotRecorder(Node):
                     True if sampler_thread is None else sampler_thread.is_alive()
                 ),
             )
-            result["metrics"]["quality_snapshot"] = self._quality_snapshot()
-            return result
 
     def stop_episode(self, discard: bool = False) -> bool:
         if self.episode_state in (self.IDLE, self.COMMITTED, self.ABORTED):
@@ -1235,6 +1297,10 @@ class FR5LeRobotRecorder(Node):
             frames = self.camera_frames[camera]
             if not frames or corrected_stamp > frames[-1][0]:
                 frames.append((corrected_stamp, message, raw_stamp, received_stamp))
+                if self.recording and self.episode_state == self.RECORDING:
+                    source_stamps = self.camera_source_stamps[camera]
+                    if not source_stamps or raw_stamp > source_stamps[-1]:
+                        source_stamps.append(raw_stamp)
 
     def _sources_ready(self) -> bool:
         return bool(
@@ -1709,6 +1775,16 @@ def main() -> None:
     args = parse_args()
     if args.factory_jsonl:
         os.environ["RCUTILS_LOGGING_USE_STDOUT"] = "0"
+    if (
+        args.factory_jsonl
+        and not args.no_videos
+        and len(CAMERA_PROFILES[args.camera_profile]) > 1
+    ):
+        start_method = multiprocessing.get_start_method(allow_none=True)
+        if start_method is None:
+            multiprocessing.set_start_method("spawn")
+        elif start_method != "spawn":
+            raise SystemExit("factory multi-camera encoding requires spawn isolation")
     encoder_temp_dir = getattr(args, "encoder_temp_dir", None)
     if encoder_temp_dir is not None:
         resolved_temp = str(encoder_temp_dir.resolve())

@@ -48,6 +48,14 @@ class OperatorCatalogTests(unittest.TestCase):
         self.assertIn("DIRECT", ids["variant"])
         self.assertIn("TWO_STAGE_ALIGN", ids["variant"])
         self.assertIn(self.device_id, ids["camera_device"])
+        self.assertEqual(
+            {option["label"] for option in self.catalog["axes"]["motion"]},
+            {"검증된 접근·집기·이송 경로"},
+        )
+        self.assertEqual(
+            {option["id"]: option["label"] for option in self.catalog["axes"]["variant"]},
+            {"DIRECT": "직선 1단계", "TWO_STAGE_ALIGN": "직선 2단계 정렬"},
+        )
         self.assertTrue(all(
             set(item["source_digests"]) == set(item["sources"])
             and all(

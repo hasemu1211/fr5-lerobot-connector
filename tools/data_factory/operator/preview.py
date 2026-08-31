@@ -42,6 +42,7 @@ from tools.data_factory.operator.workflow.intents import (
 from tools.data_factory.operator.setup.contracts import validate_print_measurements
 from tools.data_factory.quality.coverage_report import build_coverage_report
 from tools.data_factory.scene_state import release_slot
+from tools.data_factory.task_recipe import get_task_recipe
 from tools.data_factory.training_split import FR5_FEATURE_CONTRACT
 from tools.fr5_data_factory import ContractError, SAFE_ID, canonical_digest, load_json_strict
 
@@ -189,17 +190,20 @@ def make_fake_one_job(*, trace: list[str], counters: dict[str, int],
 
     def metrics() -> dict[str, Any]:
         drops = int(fault == "readiness_drop")
-        row_fps = 26.0 if fault == "readiness_rate" else 30.0
         return {
             "rows": 60, "writer_queue": 0, "writer_queue_drops": drops,
             "alignment_failures": 0, "observed_monotonic_ns": time.monotonic_ns(),
-            "quality_snapshot": {
-                "accepted": True, "reasons": [], "frames": 60,
-                "target_fps": 30, "effective_fps": row_fps,
-                "cameras": {"synthetic-up": {"source_fps": 30.0}},
-                "writer_queue_drops": drops, "alignment_failures": 0,
-                "image_quality_warnings": [],
-            },
+        }
+
+    def quality() -> dict[str, Any]:
+        row_fps = 26.0 if fault == "readiness_rate" else 30.0
+        reasons = ["row fps 26.00 is too low"] if fault == "readiness_rate" else []
+        return {
+            "accepted": not reasons, "reasons": reasons, "frames": 60,
+            "target_fps": 30, "effective_fps": row_fps,
+            "cameras": {"synthetic-up": {"source_fps": 30.0}},
+            "writer_queue_drops": int(fault == "readiness_drop"),
+            "alignment_failures": 0, "image_quality_warnings": [],
         }
 
     def recorder(request: Mapping[str, Any]) -> dict[str, Any]:
@@ -220,12 +224,19 @@ def make_fake_one_job(*, trace: list[str], counters: dict[str, int],
                 writer_error="synthetic writer fault" if fault == "readiness_fault" and not state["frozen"] else None,
             )
         if op == "trim_readiness_prefix":
+            attempt = quality()
             trimmed = metrics()
-            trimmed["rows"] = 0
-            trimmed["quality_snapshot"]["frames"] = 0
-            return _recorder_response(
-                request, "RECORDING", state["run_id"], state["transaction_id"], trimmed,
+            trimmed["rows"] = 0 if attempt["accepted"] else attempt["frames"]
+            response = _recorder_response(
+                request, "RECORDING", state["run_id"], state["transaction_id"],
+                trimmed, ok=attempt["accepted"],
             )
+            response["reason_code"] = (
+                "READINESS_PREFIX_TRIMMED"
+                if attempt["accepted"] else "READINESS_PREFIX_UNSAFE"
+            )
+            response["quality"] = attempt
+            return response
         if op == "freeze":
             state["frozen"] = True
             counters["fake_recorder_freeze"] += 1
@@ -351,6 +362,9 @@ def _motion_program(
         "command_duration_s": 0.1, "execution_timeout_s": 1.0,
         "completion_tolerance_m": 0.002,
     }
+    recording_boundary = get_task_recipe(
+        intent["fixed_contract"]["task"],
+    )["recording_boundary"]
     steps = []
     for phase in PHASES:
         step: dict[str, Any] = {
@@ -364,7 +378,7 @@ def _motion_program(
             step["gripper_position_m"] = 0.01 if phase == "GRIPPER_CLOSE" else 0.02
         else:
             step["target"] = {"base_tcp": copy.deepcopy(target), "base_tool": copy.deepcopy(target)}
-        if phase == "LIFT_LIN":
+        if phase == recording_boundary:
             step["pause_after"] = "SEMANTIC_VERDICT"
         steps.append(step)
     return {

@@ -565,9 +565,9 @@ class OneJob:
                 if self.readiness_contract is None and rows >= 1:
                     return status
                 if self.readiness_contract is not None:
-                    evidence = self._test_only_readiness(status, status_started_ns, status_received_ns)
-                    if evidence is not None:
-                        self.readiness_evidence = evidence
+                    if self._readiness_status_ready(
+                        status, status_started_ns, status_received_ns,
+                    ):
                         return status
             except ContractError as exc:
                 self._capture_readiness_failure(exc.code, status)
@@ -581,7 +581,7 @@ class OneJob:
                 raise ContractError(code)
             time.sleep(0.01)
 
-    def _capture_readiness_failure(self, code, status):
+    def _capture_readiness_failure(self, code, status, sealed_quality=None):
         if self.readiness_contract is None or not isinstance(status, dict):
             return
         self.readiness_failure_evidence = {
@@ -598,11 +598,48 @@ class OneJob:
                 "metrics": copy.deepcopy(status.get("metrics")),
             },
         }
+        if isinstance(sealed_quality, dict):
+            self.readiness_failure_evidence["sealed_quality"] = copy.deepcopy(
+                sealed_quality,
+            )
 
-    def _test_only_readiness(self, status, started_ns, received_ns):
+    def _readiness_status_ready(self, status, started_ns, received_ns):
         contract = self.readiness_contract
         metrics = status["metrics"]
-        quality = metrics.get("quality_snapshot")
+        observed_ns = metrics.get("observed_monotonic_ns")
+        if type(observed_ns) is not int:
+            raise ContractError("RECORDER_READINESS_SCHEMA")
+        max_age_ns = int(
+            self._program["execution_timeouts_s"]["heartbeat_lease"]
+            * contract["status_max_age_heartbeat_fraction"] * 1_000_000_000
+        )
+        age_ns = received_ns - observed_ns
+        if age_ns < 0 or age_ns >= max_age_ns or received_ns - started_ns >= max_age_ns:
+            raise ContractError("RECORDER_READINESS_STALE")
+        drops, failures = metrics.get("writer_queue_drops"), metrics.get("alignment_failures")
+        if type(drops) is not int or type(failures) is not int:
+            raise ContractError("RECORDER_READINESS_SCHEMA")
+        if drops != contract["max_writer_queue_drops"]:
+            raise ContractError("RECORDER_READINESS_DROPS")
+        if failures != contract["max_alignment_failures"]:
+            raise ContractError("RECORDER_READINESS_ALIGNMENT")
+        rows, queue_depth = metrics.get("rows"), metrics.get("writer_queue")
+        if (
+            type(rows) is not int or rows < 0
+            or type(queue_depth) is not int or queue_depth < 0
+        ):
+            raise ContractError("RECORDER_READINESS_SCHEMA")
+        # The producer is still active here, so queue depth may never reach
+        # zero when encoding is slightly slower than sampling.  The recorder's
+        # trim barrier owns the safe pause-and-drain transition; this status
+        # gate only proves that enough rows are durable and the live pipeline
+        # remains healthy before entering that barrier.
+        return rows >= contract["min_durable_rows"]
+
+    def _test_only_readiness(self, barrier, started_ns, received_ns):
+        contract = self.readiness_contract
+        metrics = barrier["metrics"]
+        quality = barrier.get("quality")
         observed_ns = metrics.get("observed_monotonic_ns")
         required_quality = {
             "accepted", "reasons", "frames", "target_fps", "effective_fps", "cameras",
@@ -626,28 +663,21 @@ class OneJob:
         age_ns = received_ns - observed_ns
         if age_ns < 0 or age_ns >= max_age_ns or received_ns - started_ns >= max_age_ns:
             raise ContractError("RECORDER_READINESS_STALE")
-        drops, failures = metrics.get("writer_queue_drops"), metrics.get("alignment_failures")
+        drops = quality["writer_queue_drops"]
+        failures = quality["alignment_failures"]
         if type(drops) is not int or type(failures) is not int:
             raise ContractError("RECORDER_READINESS_SCHEMA")
         if drops != contract["max_writer_queue_drops"]:
             raise ContractError("RECORDER_READINESS_DROPS")
         if failures != contract["max_alignment_failures"]:
             raise ContractError("RECORDER_READINESS_ALIGNMENT")
-        rows = metrics["rows"]
-        if rows < contract["min_durable_rows"]:
-            return None
-        queue_depth = metrics.get("writer_queue")
-        if type(queue_depth) is not int or queue_depth < 0:
-            raise ContractError("RECORDER_READINESS_SCHEMA")
-        if queue_depth:
-            return None
+        rows = quality["frames"]
+        barrier_rows = metrics.get("rows")
         if (
-            type(quality["frames"]) is not int
-            or quality["frames"] != rows
-            or type(quality["writer_queue_drops"]) is not int
-            or type(quality["alignment_failures"]) is not int
-            or quality["writer_queue_drops"] != drops
-            or quality["alignment_failures"] != failures
+            type(rows) is not int or rows < contract["min_durable_rows"]
+            or type(barrier_rows) is not int or barrier_rows < 0
+            or barrier["ok"] and barrier_rows != 0
+            or not barrier["ok"] and barrier_rows != rows
             or quality["target_fps"] != contract["target_fps"]
         ):
             raise ContractError("RECORDER_READINESS_MISMATCH")
@@ -674,13 +704,13 @@ class OneJob:
                 raise ContractError("RECORDER_READINESS_CAMERA_FPS")
             camera_fps[name] = float(source_fps)
         if contract["require_quality_accepted"] and (quality["accepted"] is not True or quality["reasons"]):
-            transient = (
-                quality["reasons"]
-                and all(reason.startswith(("source provenance rows ", "enqueue attempts ")) for reason in quality["reasons"])
-            )
-            if transient:
-                return None
             raise ContractError("RECORDER_READINESS_QUALITY")
+        if (
+            barrier["ok"] is not True
+            or barrier["state"] != "RECORDING"
+            or barrier["reason_code"] != "READINESS_PREFIX_TRIMMED"
+        ):
+            raise ContractError("RECORDER_READINESS_TRIM")
         return {
             "schema_version": "data_factory.recorder_readiness_evidence.v1",
             "run_id": self.run_id,
@@ -724,13 +754,26 @@ class OneJob:
             response = self._request("recorder", "begin", transaction=transaction)  # Recording precedes motion.
             if response["state"] != "RECORDING":
                 raise ContractError("RECORDER_BEGIN")
-            self._wait_for_first_recorder_row(cancel_event)
+            readiness_status = self._wait_for_first_recorder_row(cancel_event)
             if self._cancel_requested(cancel_event):
                 raise ContractError("START_CANCELLED")
             if self.readiness_contract == TEST_ONLY_READINESS_CONTRACT:
-                response = self._request("recorder", "trim_readiness_prefix")
-                if response["state"] != "RECORDING" or response["metrics"].get("rows") != 0:
-                    raise ContractError("RECORDER_READINESS_TRIM")
+                barrier_started_ns = time.monotonic_ns()
+                response = self._request(
+                    "recorder", "trim_readiness_prefix", allowed_failure=True,
+                )
+                barrier_received_ns = time.monotonic_ns()
+                try:
+                    self.readiness_evidence = self._test_only_readiness(
+                        response, barrier_started_ns, barrier_received_ns,
+                    )
+                except ContractError as exc:
+                    self._capture_readiness_failure(
+                        exc.code, readiness_status, response.get("quality"),
+                    )
+                    raise
+                if self._cancel_requested(cancel_event):
+                    raise ContractError("START_CANCELLED")
             self.lease_id = lease_id  # Arm only when the execute request is about to leave this process.
             response = self._request("executor", "execute", {"run_id": self.run_id, "plan_digest": self.plan_digest, "lease_id": lease_id})
             if response["state"] != "EXECUTING":

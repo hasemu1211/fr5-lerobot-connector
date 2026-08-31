@@ -8,7 +8,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Mapping
 
-from tools.fr5_data_factory import ContractError, DIGEST, SAFE_ID, canonical_digest
+from tools.fr5_data_factory import ContractError, DIGEST, SAFE_ID, TASK_REVIEW_CHECKLIST_IDS, canonical_digest
 
 
 VIEW_SCHEMA = "data_factory.operator_session_view.v1"
@@ -496,7 +496,7 @@ class CandidateReviewPort:
             or not DIGEST.fullmatch(expected_file_digest)
             or not isinstance(expected_review_context_digest, str)
             or not DIGEST.fullmatch(expected_review_context_digest)
-            or checklist_id != "pickup-v2"
+            or checklist_id not in TASK_REVIEW_CHECKLIST_IDS
         ):
             raise ContractError("CANDIDATE_REVIEW_OFFER")
         bound = {

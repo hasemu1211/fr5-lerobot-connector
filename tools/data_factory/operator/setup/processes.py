@@ -364,6 +364,28 @@ class OperatorStack:
             return self._snapshot(self._last_facts)
         return self._snapshot(self._facts())
 
+    def liveness_status(self) -> dict[str, object]:
+        """Reuse prepared facts only while this stack still owns every component."""
+        self._require_children_live()
+        facts = self._last_facts
+        if facts is None or any(
+            fact["state"] != "READY" for fact in facts.values()
+        ):
+            return self.status()
+        covered: set[str] = set()
+        for name, spec in self.commands.items():
+            if self._active(name) is None:
+                continue
+            for component in spec["provides"]:
+                if facts[component] != {
+                    "state": "READY", "owner": spec["owner"],
+                }:
+                    return self.status()
+                covered.add(component)
+        if covered != set(COMPONENTS):
+            return self.status()
+        return self._snapshot(facts)
+
     def _snapshot(self, facts: dict[str, dict[str, object]] | None) -> dict[str, object]:
         children = {}
         for name, record in self._children.items():

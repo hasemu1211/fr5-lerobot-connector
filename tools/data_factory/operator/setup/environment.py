@@ -169,6 +169,16 @@ class OperatorEnvironment:
         except Exception as exc:
             return self._blocked(self._exception_reason(exc, QUERY_FAILED))
 
+    def liveness(self) -> dict[str, Any]:
+        """Reuse prepared facts only when owned foreground children remain live."""
+        status = getattr(self.stack, "liveness_status", None)
+        if not callable(status):
+            return self.projection()
+        try:
+            return self._project(status())
+        except Exception as exc:
+            return self._blocked(self._exception_reason(exc, QUERY_FAILED))
+
     @staticmethod
     def _needs_gripper_setup(view: Mapping[str, Any]) -> bool:
         return view["components"]["gripper"]["state"] == "SETUP_REQUIRED"

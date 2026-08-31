@@ -1066,6 +1066,52 @@ class RunJobTest(unittest.TestCase):
         self.assertEqual(binding, {"place_id": "PLACE_A", "yaw_deg": 0, "x_mm": 60, "y_mm": -20})
         self.assertEqual(resolve.call_args.kwargs["release_pose"], binding)
 
+        pick_place_job = {
+            **validated["normalized_job"], "task": "pick_place",
+        }
+        pick_place_validated = {"normalized_job": pick_place_job}
+        without_destination = payload()
+        with (
+            mock.patch.object(
+                run_job, "validate_job_spec", return_value=pick_place_validated,
+            ),
+            mock.patch.object(
+                run_job, "_load",
+                side_effect=lambda path, _: {
+                    "motion.json": {}, "home.json": {},
+                }[path],
+            ),
+        ):
+            with self.assertRaisesRegex(
+                run_job.ContractError, "TASK_DESTINATION_REQUIRED",
+            ):
+                run_job.resolve_inputs(without_destination)
+
+        with (
+            mock.patch.object(
+                run_job, "validate_job_spec", return_value=pick_place_validated,
+            ),
+            mock.patch.object(
+                run_job, "_load",
+                side_effect=lambda path, _: {
+                    "selected.json": {}, "motion.json": {}, "home.json": {},
+                }[path],
+            ),
+            mock.patch.object(
+                run_job, "bounded_place_coordinate", return_value=(60, -20),
+            ),
+            mock.patch.object(
+                run_job, "resolve_motion_program", return_value={},
+            ) as pick_place_resolve,
+        ):
+            run_job.resolve_inputs(
+                value, scene_binding_call=lambda _, pose, _run_id: pose,
+            )
+        self.assertEqual(
+            pick_place_resolve.call_args.kwargs["release_pose"],
+            {"place_id": "PLACE_A", "yaw_deg": 0, "x_mm": 60, "y_mm": -20},
+        )
+
         rotated = {**value, "recycle_yaw_deg": 450}
         with (
             mock.patch.object(run_job, "validate_job_spec", return_value=validated),
@@ -1215,9 +1261,12 @@ class RunJobTest(unittest.TestCase):
             self.assertEqual(run_job._technical_validator("dataset", {}, profile)["code"], "PASS")
         validator_command = invoked.call_args.args[0]
         self.assertEqual(validator_command[0], run_job.DATA_PYTHON)
+        self.assertEqual(validator_command[validator_command.index("--repo-id") + 1], profile["repo_id"])
         self.assertEqual(validator_command[validator_command.index("--expected-fps") + 1], "30")
         self.assertIn("--require-hil-motion", validator_command)
         self.assertIn("--require-alignment-tail", validator_command)
+        self.assertIn("--skip-decoded-image-diagnostics", validator_command)
+        self.assertNotIn("--episode-locator-index", validator_command)
 
     def test_camera_warmup_retries_only_the_camera_gate_and_preserves_compact_evidence(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -1240,6 +1289,96 @@ class RunJobTest(unittest.TestCase):
         self.assertEqual(command[command.index("--image-qos-depth") + 1], "10")
         self.assertIn("--reliable-image", command)
         self.assertEqual(invoked.call_args.kwargs["timeout"], run_job.CAMERA_WARMUP_TIMEOUT_S)
+
+    def test_technical_validator_reuses_a_canonical_locator_and_fails_closed_without_it(self):
+        locator = run_job.build_lerobot_v3_episode_locator(
+            repo_id=PROFILE["repo_id"], episode_index=0,
+            data={
+                "chunk_index": 0, "file_index": 0,
+                "relative_path": "data/chunk-000/file-000.parquet",
+                "file_row_start": 0, "file_row_end_exclusive": 30,
+            },
+            videos=[{
+                "camera_key": "observation.images.up",
+                "chunk_index": 0, "file_index": 0,
+                "relative_path": "videos/observation.images.up/chunk-000/file-000.mp4",
+                "file_frame_start": 0, "file_frame_end_exclusive": 30,
+                "timestamp_start_s": 0.0, "timestamp_end_s": 1.0,
+            }],
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            live_payload = payload("live")
+            live_payload["run_root"] = directory
+            run_dir = run_job._prepare_run_dir(live_payload)
+            (run_dir / "result.json").write_text(json.dumps({
+                "schema_version": "data_factory.recorder_result.v1",
+                "run_id": live_payload["run_id"],
+                "transaction_id": "tx-1", "episode_index": 0,
+                "state": "COMMITTED", "reason_code": "COMMITTED",
+                "rows": 30, "detail": "",
+            }), encoding="utf-8")
+            passed = SimpleNamespace(
+                returncode=0,
+                stdout=(
+                    run_job.EPISODE_LOCATOR_PREFIX
+                    + json.dumps(locator, sort_keys=True, separators=(",", ":"))
+                    + "\nPASS\n"
+                ),
+            )
+            with mock.patch.object(run_job.subprocess, "run", return_value=passed) as invoked:
+                result = run_job._technical_validator("dataset", live_payload, PROFILE)
+            self.assertEqual(result["episode_locator"], locator)
+            self.assertEqual((result["ok"], result["code"]), (True, "PASS"))
+            command_line = invoked.call_args.args[0]
+            self.assertEqual(
+                command_line[command_line.index("--episode-locator-index") + 1], "0",
+            )
+
+            missing = SimpleNamespace(returncode=0, stdout="PASS\n")
+            with mock.patch.object(run_job.subprocess, "run", return_value=missing):
+                result = run_job._technical_validator("dataset", live_payload, PROFILE)
+            self.assertEqual((result["ok"], result["code"]), (False, "FAIL"))
+            self.assertIsNone(result["episode_locator"])
+
+    def test_camera_warmup_measures_configured_roles_concurrently(self):
+        dual = copy.deepcopy(PROFILE)
+        dual.update(
+            camera_profile="up-wrist",
+            camera_roles=["up", "wrist"],
+            camera_topics={
+                "up": "/camera/up/color/image_raw",
+                "wrist": "/camera/wrist/color/image_raw",
+            },
+        )
+        both_started = threading.Event()
+        started = set()
+        lock = threading.Lock()
+
+        def measure(command, **_kwargs):
+            topic = command[command.index("--image") + 1]
+            with lock:
+                started.add(topic)
+                if len(started) == 2:
+                    both_started.set()
+            if not both_started.wait(1.0):
+                raise AssertionError("camera probes ran serially")
+            return SimpleNamespace(returncode=0, stdout=f"{topic}: 30Hz")
+
+        with tempfile.TemporaryDirectory() as directory:
+            live_payload = payload("live")
+            live_payload["run_root"] = directory
+            run_job._prepare_run_dir(live_payload)
+            with mock.patch.object(run_job.subprocess, "run", side_effect=measure):
+                evidence = run_job._camera_warmup(
+                    live_payload, dual, threading.Event(),
+                )
+
+        self.assertEqual(started, set(dual["camera_topics"].values()))
+        self.assertEqual(
+            [role["role"] for role in evidence["attempts"][0]["roles"]],
+            ["up", "wrist"],
+        )
+        self.assertEqual(evidence["attempts"][0]["status"], "PASS")
 
     def test_camera_warmup_all_fail_or_timeout_allows_only_concurrent_plan_only(self):
         validated = runtime_validated()
@@ -1952,7 +2091,7 @@ class RunJobTest(unittest.TestCase):
         self.assertEqual(
             [item["code"] for item in published],
             [
-                "CAMERA_WARMUP", "PLANNING", "AWAITING_HUMAN_APPROVAL",
+                "PLANNING", "CAMERA_WARMUP", "AWAITING_HUMAN_APPROVAL",
                 "RECORDER_STARTING", "EXECUTING", "FINALIZING", "VALIDATING",
             ],
         )
@@ -2499,8 +2638,12 @@ class RunJobTest(unittest.TestCase):
             self.assertEqual(json.loads(second_path.read_text(encoding="utf-8")), second)
 
             campaign = {"campaign_id": "campaign-1", "episodes": [
-                {"run": {"run_id": "run-a", "run_root": str(root), "job": {"operator_or_agent_id": "operator"}}},
-                {"run": {"run_id": "run-b", "run_root": str(root), "job": {"operator_or_agent_id": "operator"}}},
+                {"run": {"run_id": "run-a", "run_root": str(root), "job": {
+                    "task": "pickup_e2e", "operator_or_agent_id": "operator",
+                }}},
+                {"run": {"run_id": "run-b", "run_root": str(root), "job": {
+                    "task": "pickup_e2e", "operator_or_agent_id": "operator",
+                }}},
             ]}
             choices = iter(("SKIP",))
             skipped = run_job._campaign_candidate_reviews(campaign, tty_decision=lambda *_: next(choices))

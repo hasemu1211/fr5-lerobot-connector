@@ -6,7 +6,13 @@ import math
 from collections.abc import Mapping
 from typing import Any
 
-from tools.fr5_data_factory import ContractError, DIGEST, SAFE_ID, canonical_digest
+from tools.fr5_data_factory import (
+    TASK_CONTRACTS,
+    ContractError,
+    DIGEST,
+    SAFE_ID,
+    canonical_digest,
+)
 
 
 RECIPE_SCHEMA = "data_factory.task_recipe.v1"
@@ -17,7 +23,8 @@ TASK_IDS = ("pickup_e2e", "pick_place")
 _RECIPE_FIELDS = {
     "schema_version", "task_id", "spatial_roles", "recorded_phases",
     "recording_boundary", "post_recording_phases", "task_terminal",
-    "review_checklist_id", "recipe_digest",
+    "review_checklist_id", "episode_intent", "instruction_template",
+    "recipe_digest",
 }
 _CATALOG_FIELDS = {"schema_version", "recipes", "catalog_digest"}
 _BINDING_FIELDS = {
@@ -40,6 +47,12 @@ def _recipe(
     recorded_phases: list[dict[str, str]], recording_boundary: str,
     post_recording_phases: list[dict[str, str]], review_checklist_id: str,
 ) -> dict[str, Any]:
+    contract = TASK_CONTRACTS[task_id]
+    if (
+        recording_boundary != contract["recording_boundary"]
+        or review_checklist_id != contract["review_checklist_id"]
+    ):
+        raise RuntimeError("task recipe and task contract disagree")
     value = {
         "schema_version": RECIPE_SCHEMA,
         "task_id": task_id,
@@ -49,6 +62,8 @@ def _recipe(
         "post_recording_phases": post_recording_phases,
         "task_terminal": recording_boundary,
         "review_checklist_id": review_checklist_id,
+        "episode_intent": contract["episode_intent"],
+        "instruction_template": contract["instruction_template"],
     }
     value["recipe_digest"] = canonical_digest(value)
     return value

@@ -262,6 +262,8 @@ def load_operator_catalog(
     configured_tasks = {
         job.get("task") for _path, job in jobs if isinstance(job.get("task"), str)
     }
+    if configured_tasks & set(TASK_IDS):
+        configured_tasks.update(TASK_IDS)
     for task_id in sorted(configured_tasks | set(TASK_IDS)):
         registered = task_id in configured_tasks
         recipe = get_task_recipe(task_id) if task_id in TASK_IDS else {}
@@ -329,7 +331,7 @@ def load_operator_catalog(
         if isinstance(identifier, str):
             qualified = value.get("qualification_status") == "QUALIFIED"
             axes["motion"].append(_option(
-                identifier, "직접 접근·집기·원위치 반환",
+                identifier, "검증된 접근·집기·이송 경로",
                 status="QUALIFIED" if qualified else "QUALIFICATION_REQUIRED",
                 reason="MOTION_QUALIFIED" if qualified else "MOTION_QUALIFICATION_REQUIRED",
             ))
@@ -337,7 +339,7 @@ def load_operator_catalog(
         identifier = value["trajectory_variant_id"]
         live = identifier == "DIRECT"
         axes["variant"].append(_option(
-            identifier, "바로 접근" if live else "2단계 정렬",
+            identifier, "직선 1단계" if live else "직선 2단계 정렬",
             status="LIVE_AVAILABLE" if live else "PLAN_ONLY",
             reason="DIRECT_LIVE_CALLER" if live else "NO_LIVE_COLLECTION_CALLER",
         ))
@@ -406,11 +408,19 @@ def load_operator_catalog(
     camera_jobs = [
         (
             job_path, source_job,
-            {**source_job, "collection_profile_id": profile["collection_profile_id"]},
+            {
+                **source_job, "task": task_id,
+                "collection_profile_id": profile["collection_profile_id"],
+            },
         )
         for job_path, source_job in jobs
+        for task_id in (
+            sorted(TASK_IDS, key=lambda value: value != source_job.get("task"))
+            if source_job.get("task") in TASK_IDS else (source_job.get("task"),)
+        )
         for _profile_path, profile in profiles
-        if isinstance(profile.get("collection_profile_id"), str)
+        if isinstance(task_id, str)
+        and isinstance(profile.get("collection_profile_id"), str)
     ]
     for job_path, source_job, job in camera_jobs:
         object_entry = by_object.get(job.get("object_profile_id"))
@@ -460,7 +470,7 @@ def load_operator_catalog(
         except ContractError:
             test_profile_ready = False
         test_ready = (
-            job.get("task") == "pickup_e2e" and all(
+            job.get("task") in TASK_IDS and all(
                 value.get("qualification_status") == "QUALIFIED" for value in (
                     cell, object_entry[1], grasp_entry[1], motion, profile,
                     robot_entry[1],
@@ -471,6 +481,7 @@ def load_operator_catalog(
         )
         general_ready = (
             test_ready
+            and job.get("task") == source_job.get("task")
             and profile.get("collection_profile_id")
             == source_job.get("collection_profile_id")
             and "test_only_physical" not in job_path.parts
@@ -509,7 +520,7 @@ def load_operator_catalog(
                         "reason": (
                             "REGISTERED_WORKSPACE_CALLER" if test_ready
                             else "TASK_LIVE_CALLER_REQUIRED"
-                            if job.get("task") != "pickup_e2e"
+                            if job.get("task") not in TASK_IDS
                             else "QUALIFICATION_REQUIRED"
                         ),
                     },
@@ -933,25 +944,9 @@ def project_assisted_poses(
     x_centers = sorted({value[0] for value in spatial_anchors.values()})
     y_centers = sorted({value[1] for value in spatial_anchors.values()})
 
-    def interval(values: list[float], center: float, limits: tuple[float, float], *, extend: bool = False) -> tuple[float, float]:
-        index = values.index(center)
-        if index:
-            low = (values[index - 1] + center) / 2.0
-        elif extend and len(values) > 1:
-            low = center - (values[1] - center) / 2.0
-        else:
-            low = limits[0]
-        if index + 1 < len(values):
-            high = (center + values[index + 1]) / 2.0
-        elif extend and len(values) > 1:
-            high = center + (center - values[-2]) / 2.0
-        else:
-            high = limits[1]
-        return max(limits[0], low), min(limits[1], high)
-
     def fraction(sample_index: int, anchor_id: str, yaw_anchor: float, axis: str, attempt: int) -> float:
         digest = canonical_digest({
-            "strategy": "A4_STRATIFIED_CONTINUOUS_V1",
+            "strategy": "A4_SPATIAL_FIRST_SAFE_STRATA_V3",
             "seed": normalized_seed,
             "sample_index": sample_index,
             "anchor_id": anchor_id,
@@ -1007,38 +1002,66 @@ def project_assisted_poses(
         yaw_values,
         key=lambda value: (yaw_distance(value, float(source["yaw_deg"])), value),
     )
-    spatial_remaining = spatial_route[1:]
-    yaw_remaining = [value for value in yaw_values if value != nearest_yaw]
+    positive_anchor_distances = [
+        xy_distance(left[1], right[1])
+        for index, left in enumerate(anchor_items)
+        for right in anchor_items[index + 1:]
+        if xy_distance(left[1], right[1]) > 0.0
+    ]
+    if not positive_anchor_distances:
+        raise ContractError("OPERATOR_ASSISTED_DOMAIN")
+    boundary_margin = min(positive_anchor_distances) * 0.1
+
+    def spatial_interval(
+        centers: list[float], center: float, limits: tuple[float, float],
+    ) -> tuple[float, float]:
+        index = centers.index(center)
+        low = (
+            (centers[index - 1] + center) / 2.0
+            if index else limits[0] + boundary_margin
+        )
+        high = (
+            (center + centers[index + 1]) / 2.0
+            if index + 1 < len(centers) else limits[1] - boundary_margin
+        )
+        if low > high:
+            raise ContractError("OPERATOR_ASSISTED_DOMAIN")
+        return low, high
+
+    first_spatial_pass = spatial_route[1:]
+    yaw_variants = sorted(
+        (
+            value for value in yaw_values
+            if value != float(source["yaw_deg"])
+        ),
+        key=lambda value: (
+            yaw_distance(value, float(source["yaw_deg"])), value,
+        ),
+    ) or [nearest_yaw]
 
     while len(result) < unique_count:
-        if not spatial_remaining:
-            spatial_remaining = list(spatial_route)
-        if not yaw_remaining:
-            yaw_remaining = list(yaw_values)
-        anchor_id, anchor = spatial_remaining[0]
-        yaw_anchor = min(
-            yaw_remaining,
-            key=lambda value: (
-                yaw_distance(value, float(result[-1]["yaw_deg"])),
-                value,
-            ),
-        )
-        spatial_remaining.pop(0)
-        yaw_remaining.remove(yaw_anchor)
-        x_low, x_high = interval(x_centers, anchor[0], bounds[0])
-        y_low, y_high = interval(y_centers, anchor[1], bounds[1])
-        yaw_low, yaw_high = interval(
-            yaw_values, yaw_anchor,
-            (float(yaw_bounds["minimum"]), float(yaw_bounds["maximum_exclusive"])),
-            extend=True,
-        )
+        sample_offset = len(result) - 1
+        if sample_offset < len(first_spatial_pass):
+            anchor_id, anchor = first_spatial_pass[sample_offset]
+            yaw_anchor = float(source["yaw_deg"])
+        else:
+            repeated_offset = sample_offset - len(first_spatial_pass)
+            pass_index, route_index = divmod(repeated_offset, len(spatial_route))
+            route = (
+                list(reversed(spatial_route))
+                if pass_index % 2 == 0 else spatial_route
+            )
+            anchor_id, anchor = route[route_index]
+            yaw_anchor = yaw_variants[pass_index % len(yaw_variants)]
+        x_low, x_high = spatial_interval(x_centers, anchor[0], bounds[0])
+        y_low, y_high = spatial_interval(y_centers, anchor[1], bounds[1])
         candidate = None
         for attempt in range(64):
             proposed = {
                 "place_id": selected["workspace_id"],
                 "x_mm": x_low + (x_high - x_low) * fraction(len(result), anchor_id, yaw_anchor, "x", attempt),
                 "y_mm": y_low + (y_high - y_low) * fraction(len(result), anchor_id, yaw_anchor, "y", attempt),
-                "yaw_deg": yaw_low + (yaw_high - yaw_low) * fraction(len(result), anchor_id, yaw_anchor, "yaw", attempt),
+                "yaw_deg": yaw_anchor,
             }
             try:
                 checked = _canonical_operator_pose(selected, domain, proposed)
@@ -1046,7 +1069,11 @@ def project_assisted_poses(
                 if exc.code == "JOB_COORDINATE_BOUNDS":
                     continue
                 raise
-            if tuple(checked[field] for field in POSE_ORDER) not in seen:
+            checked_key = tuple(checked[field] for field in POSE_ORDER)
+            if (
+                checked_key not in seen
+                and (float(checked["x_mm"]), float(checked["y_mm"])) != anchor
+            ):
                 candidate = checked
                 break
         if candidate is None:

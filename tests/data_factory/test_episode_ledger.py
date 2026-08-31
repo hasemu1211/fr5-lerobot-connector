@@ -499,7 +499,7 @@ class EpisodeLedgerTest(unittest.TestCase):
         with mock.patch.object(
             run_job, "_lerobot_v3_episode_locator", return_value=self.episode_locator,
             create=True,
-        ):
+        ) as fallback:
             reference = run_job._write_episode_ledger(
                 {
                     "run_id": self.run_id, "run_root": str(run_root),
@@ -510,7 +510,9 @@ class EpisodeLedgerTest(unittest.TestCase):
                 SimpleNamespace(execution_response=document("execution")),
                 document("episode"), document("runtime_binding"),
                 {"manifest": document("manifest"), "intent": document("intent")},
+                episode_locator=self.episode_locator,
             )
+        fallback.assert_not_called()
         ledger = json.loads(Path(reference["path"]).read_text(encoding="utf-8"))
         self.assertEqual(ledger, validate_episode_ledger(ledger))
         self.assertEqual(reference["ledger_digest"], ledger["ledger_digest"])

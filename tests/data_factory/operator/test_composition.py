@@ -31,6 +31,7 @@ from tools.data_factory.operator.cli import main as operator_console_main
 from tools.data_factory.operator.composition import (
     build_physical_operator_application,
     build_physical_operator_console,
+    build_physical_runtime,
 )
 from tools.data_factory.operator.setup.physical import (
     capture_gripper_setup_readback,
@@ -40,6 +41,7 @@ from tools.data_factory.operator.setup.physical import (
 )
 from tools.data_factory.operator.workflow.campaign import (
     OperatorConsole,
+    _derive_test_only_gripper_program,
     _campaign_camera_warmup,
     build_physical_test_contract,
 )
@@ -762,6 +764,11 @@ class OperatorConsoleTests(unittest.TestCase):
                 for args in commands
                 if args[1] in {"node", "topic", "param"}
             ))
+            self.assertTrue(all(
+                args[-2:] == ["--spin-time", "2"]
+                for args in commands
+                if args[1] in {"node", "topic"}
+            ))
             self.assertEqual(
                 evidence["binding_digest"],
                 canonical_digest({
@@ -921,6 +928,18 @@ feedback:
              readback["reference_position_m"], readback["feedback_position_m"]),
             ("CONTROLLER_STATE", True, 0.012, 0.012),
         )
+        snapshot_read = mock.Mock(side_effect=controller_read)
+        with mock.patch(
+            "tools.data_factory.operator.setup.physical._readonly_command",
+            snapshot_read,
+        ):
+            capture_gripper_setup_readback(
+                {"/controller_manager"},
+                "fairino5_controller active\ngripper_controller active\n"
+                "joint_state_broadcaster active\n",
+            )
+        self.assertEqual(snapshot_read.call_count, 1)
+        self.assertEqual(snapshot_read.call_args.args[0][:3], ["ros2", "topic", "echo"])
         malformed_read_remote = mock.Mock()
         with (
             mock.patch(
@@ -1205,6 +1224,70 @@ feedback:
             self.assertFalse((root / "datasets").exists())
             readback.assert_not_called()
 
+    def test_test_only_gripper_retune_v2_reduces_force_without_an_extra_phase(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.portable_repository(root)
+            config = root / "config/data_factory"
+            goal = config / "test_only_physical/goal2-place1"
+            request = {
+                "mode": "plan_only", "run_id": "force-retune-r004",
+                "job": load_json_strict(
+                    goal / "center-live-p45-20260821-r001.job.json"
+                ),
+                "selected_sheet": str(goal / "yaw0_sheet.json"),
+                "yaw0_sheet": str(goal / "yaw0_sheet.json"),
+                "config_root": str(config),
+                "motion_qualification": str(
+                    config / "motion_qualifications/fr5-place-a-wood-cube-r001.json"
+                ),
+                "home_candidate": str(
+                    config / "home_candidates/fr5-lab-a-home-r001.json"
+                ),
+                "urdf": str(
+                    root / "src/fairino_description/urdf/fairino5_v6.urdf"
+                ),
+                "expected_robot_system_id": "fr5-lab-a",
+            }
+            resolved, program, _ = run_job.resolve_inputs(
+                request, scene_binding_call=lambda *_args: {},
+            )
+            motion = load_json_strict(request["motion_qualification"])
+            retune = load_json_strict(
+                goal / "gripper-retune-wood-cube-25mm-top-center-r004.json"
+            )
+            tuned = _derive_test_only_gripper_program(
+                resolved, motion, program, retune,
+            )
+            self.assertEqual(
+                (
+                    program["gripper_requirements"]["force_percent"],
+                    tuned["gripper_requirements"]["force_percent"],
+                    tuned["gripper_requirements"]["command_position_m"],
+                    tuned["gripper_requirements"]["acceptable_feedback_m"],
+                ),
+                (
+                    50, 25, 0.021 * 56 / 100,
+                    {"min": 0.021 * 57 / 100, "max": 0.021 * 58 / 100},
+                ),
+            )
+            self.assertEqual(
+                [step["phase"] for step in tuned["steps"]],
+                [step["phase"] for step in program["steps"]],
+            )
+            stronger = copy.deepcopy(retune)
+            stronger["force_percent"] = 51
+            stronger["retune_digest"] = canonical_digest({
+                key: value for key, value in stronger.items()
+                if key != "retune_digest"
+            })
+            with self.assertRaisesRegex(
+                ContractError, "TEST_ONLY_GRIPPER_RETUNE_ENVELOPE",
+            ):
+                _derive_test_only_gripper_program(
+                    resolved, motion, program, stronger,
+                )
+
     def test_real_physical_composition_auto_attaches_fresh_open_gripper(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -1236,6 +1319,82 @@ feedback:
                     ("READY", ["compile_draft"], None, 0),
                 )
                 maintenance.assert_not_called()
+                self.assertIsNone(console.episode_worker)
+            finally:
+                console.close()
+
+    def test_one_pick_place_episode_compiles_start_source_and_distinct_destination(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.portable_repository(root)
+            job = load_json_strict(
+                root / "config/data_factory/test_only_physical/goal2-place1/"
+                "center-live-p45-20260821-r001.job.json",
+            )
+            source = {
+                key: job[key]
+                for key in ("place_id", "yaw_deg", "x_mm", "y_mm")
+            }
+            destination = {
+                "place_id": "PLACE_A", "yaw_deg": 0,
+                "x_mm": 0, "y_mm": -35,
+            }
+            opened = {
+                "active": True, "position_valid": True, "gripper_index": 1,
+                "reference_position_m": 0.021, "feedback_position_m": 0.021,
+                "sample_age_s": 0.0, "max_age_s": 0.1,
+                "source": "CONTROLLER_STATE",
+            }
+            console, context = build_physical_operator_console(
+                repository_root=root,
+                session_id="pick-place-one-episode-r001",
+                run_id="pick-place-one-run-r001",
+                operator_label="local-operator",
+                discovery_call=lambda: ["usb-Goal2_Camera-video-index0"],
+                activation_call=lambda: True,
+                gripper_readback_call=lambda: copy.deepcopy(opened),
+                task_id="pick_place", requested_count=1,
+                direct_pose_sequence=[source, destination],
+                clock=lambda: NOW,
+            )
+            try:
+                current = console.bridge_core.snapshot()
+                compiled = console.bridge_core.consume(envelope(
+                    current, "compile_draft", {
+                        "draft_id": current["projection"]["draft"]["draft_id"],
+                        "data_disposition": "TEST_ONLY",
+                    }, "compile-pick-place-one-r001",
+                ))["result"]
+                review = console.bridge_core.snapshot()["projection"]
+                coverage = review["campaign_coverage"]
+                self.assertEqual((compiled["episode_count"], len(coverage)), (1, 1))
+                self.assertEqual(
+                    console.campaign_operator.hypothesis["fixed_contract"]["task"],
+                    "pick_place",
+                )
+                self.assertEqual(
+                    len(console.campaign_operator.hypothesis["base_conditions"]),
+                    2,
+                )
+                self.assertEqual(
+                    {
+                        key: coverage[0]["coverage_condition"][key]
+                        for key in ("place_id", "yaw_deg", "x_mm", "y_mm")
+                    },
+                    source,
+                )
+                self.assertEqual(coverage[0]["destination_pose"], {
+                    **destination,
+                    "yaw_deg": 0.0, "x_mm": 0.0, "y_mm": -35.0,
+                })
+                self.assertEqual(
+                    [
+                        item["role"]
+                        for item in coverage[0]["task_binding"]["spatial_bindings"]
+                    ],
+                    ["SOURCE", "DESTINATION"],
+                )
+                self.assertEqual(context["requested_count"], 1)
                 self.assertIsNone(console.episode_worker)
             finally:
                 console.close()
@@ -1407,15 +1566,25 @@ feedback:
                 raise ContractError("EXPECTED_LIVE_BOUND")
 
             live = mock.Mock(side_effect=validate_scope_then_stop)
+            runtime_gate = threading.Barrier(2)
+
+            def activate_runtime_gate():
+                runtime_gate.wait(timeout=1)
+                return True
+
+            def read_runtime_gripper():
+                runtime_gate.wait(timeout=1)
+                return copy.deepcopy(opened)
+
             console, _ = build_physical_operator_console(
                 repository_root=root,
                 session_id="goal2-physical-receipt-r001",
                 run_id="goal2-place1-receipt-r001",
                 operator_label="local-operator",
                 discovery_call=lambda: ["usb-Goal2_Camera-video-index0"],
-                activation_call=lambda: True,
+                activation_call=activate_runtime_gate,
                 snapshot_call=lambda: copy.deepcopy(snapshot),
-                gripper_readback_call=lambda: copy.deepcopy(opened),
+                gripper_readback_call=read_runtime_gripper,
                 run_live_call=live,
                 environment_prepared=True,
                 clock=lambda: NOW,
@@ -2125,6 +2294,66 @@ feedback:
             self.assertFalse((root / "outputs").exists())
             physical_environment.assert_not_called()
 
+    def test_physical_runtime_reuses_the_initial_environment_observation(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.portable_repository(root)
+            device = "usb-Generic_USB2.0_PC_CAMERA-video-index0"
+            descriptor = {
+                "logical_id": device,
+                "label": "USB camera 1",
+                "status": "CONNECTED",
+                "kind": "UVC",
+                "capture_endpoint": f"/dev/v4l/by-id/{device}",
+            }
+            observed = {
+                "schema_version": "data_factory.operator_environment.v1",
+                "state": "SETUP_REQUIRED",
+                "observed_at": "2026-08-31T03:00:00Z",
+                "components": {
+                    name: {
+                        "state": "MISSING", "owner": None,
+                        "reason": "NOT_RUNNING",
+                    }
+                    for name in ("robot", "controller", "gripper", "camera")
+                },
+            }
+            environment = mock.Mock()
+            environment.projection.return_value = copy.deepcopy(observed)
+
+            class ShellBridge:
+                def __init__(self, *, core, **_kwargs):
+                    self.core = core
+                    self.origin = "http://127.0.0.1:4174"
+                    self.server = mock.Mock()
+
+            with (
+                mock.patch(
+                    "tools.data_factory.operator.composition.discover_camera_devices",
+                    return_value=[descriptor],
+                ),
+                mock.patch(
+                    "tools.data_factory.operator.composition."
+                    "build_physical_operator_environment",
+                    return_value=environment,
+                ),
+                mock.patch(
+                    "tools.data_factory.operator.composition.LoopbackBridge",
+                    ShellBridge,
+                ),
+            ):
+                runtime = build_physical_runtime(
+                    repository_root=root,
+                    session_id="single-observation-r001",
+                    camera_device_id=device,
+                    auto_prepare=False,
+                )
+            try:
+                self.assertEqual(runtime.announcement["environment_state"], "SETUP_REQUIRED")
+                environment.projection.assert_called_once_with()
+            finally:
+                runtime.close()
+
     def test_product_application_auto_selects_one_stable_camera_without_effects(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -2680,17 +2909,17 @@ feedback:
                 "run_state", "candidate", "inventory", "training",
             )))
 
-    def test_three_episode_reviews_queue_only_after_campaign_and_preserve_authority(self):
+    def test_three_episode_reviews_queue_without_blocking_campaign_and_preserve_authority(self):
         with tempfile.TemporaryDirectory() as root:
             root_path = Path(root).resolve()
             statuses = {}
             review_calls = []
 
             def review_call(
-                path, *, semantic_status, reviewed_by, **_kwargs,
+                path, *, semantic_status, reviewed_by, checklist_id, **_kwargs,
             ):
                 run_id = Path(path).parent.name
-                review_calls.append((str(path), semantic_status))
+                review_calls.append((str(path), semantic_status, checklist_id))
                 statuses[str(path)] = semantic_status
                 return {
                     "run_id": run_id, "semantic_status": semantic_status,
@@ -2758,6 +2987,7 @@ feedback:
                             "candidate_review_offer": {
                                 "candidate_path": str(candidate_path),
                                 "run_id": run_id,
+                                "checklist_id": "pick-place-v1",
                                 "expected_file_digest": canonical_digest([run_id, "file"]),
                                 "expected_review_context_digest": canonical_digest(
                                     [run_id, "context"],
@@ -2768,7 +2998,13 @@ feedback:
                     })
                     self.assertEqual(continuation, index < 2)
                     if index < 2:
-                        self.assertIsNone(port.projection())
+                        self.assertEqual(
+                            port.projection()["run_id"], "review-run-1",
+                        )
+                        self.assertEqual(
+                            console.projection()["available_ops"],
+                            ["review_candidate", "cancel_session"],
+                        )
 
                 projected = console.projection()
                 self.assertEqual(
@@ -2800,7 +3036,11 @@ feedback:
                 self.assertIn("review_candidate", console.projection()["available_ops"])
                 resolved = console.review_candidate(first_payload)
                 self.assertEqual(resolved["remaining_reviews"], 2)
-                self.assertEqual(len(review_calls), 1)
+                self.assertEqual(
+                    review_calls,
+                    [(str(root_path / "review-run-1" / "candidate_admission.json"),
+                      "PASS", "pick-place-v1")],
+                )
 
                 choices = (
                     ("FAIL", "TASK_GOAL"),

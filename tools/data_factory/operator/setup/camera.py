@@ -5,6 +5,7 @@ import copy
 import re
 import stat
 import subprocess
+import time
 from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
 
@@ -25,6 +26,9 @@ from tools.fr5_data_factory import (
     canonical_digest,
     load_json_strict,
 )
+
+
+REALSENSE_QUERY_RETRY_DELAYS = (0.5, 1.0)
 
 
 def discover_uvc_devices(device_root: str | Path = "/dev/v4l/by-id") -> list[dict[str, str]]:
@@ -66,14 +70,25 @@ def discover_uvc_device_ids(device_root: str | Path = "/dev/v4l/by-id") -> list[
 def query_realsense_serials(command_call=None) -> list[str]:
     """Passively enumerate librealsense serials; absence is not a fabricated device."""
     command_call = command_call or subprocess.run
-    try:
-        completed = command_call(
-            ["rs-enumerate-devices", "-s", "--no-dds"],
-            capture_output=True, text=True, timeout=3, check=False,
-        )
-    except (OSError, subprocess.TimeoutExpired):
-        return []
-    if completed.returncode != 0 or not isinstance(completed.stdout, str):
+    completed = None
+    for attempt in range(len(REALSENSE_QUERY_RETRY_DELAYS) + 1):
+        try:
+            candidate = command_call(
+                ["rs-enumerate-devices", "-s", "--no-dds"],
+                capture_output=True, text=True, timeout=3, check=False,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            candidate = None
+        if (
+            candidate is not None
+            and candidate.returncode == 0
+            and isinstance(candidate.stdout, str)
+        ):
+            completed = candidate
+            break
+        if attempt < len(REALSENSE_QUERY_RETRY_DELAYS):
+            time.sleep(REALSENSE_QUERY_RETRY_DELAYS[attempt])
+    if completed is None:
         return []
     output = completed.stdout
     serials = re.findall(

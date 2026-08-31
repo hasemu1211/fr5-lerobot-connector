@@ -6,6 +6,7 @@ import math
 import re
 import shutil
 import tempfile
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
@@ -92,7 +93,7 @@ from tools.data_factory.operator.workflow.campaign import (
 from tools.data_factory.quality.coverage_report import build_coverage_report
 from tools.data_factory.operator.registries.workspace import WorkspaceManager
 from tools.data_factory.scene_state import SceneStateStore
-from tools.data_factory.task_recipe import get_task_recipe
+from tools.data_factory.task_recipe import compile_task_binding, get_task_recipe
 from tools.fr5_data_factory import (
     ContractError,
     DIGEST,
@@ -100,6 +101,7 @@ from tools.fr5_data_factory import (
     canonical_digest,
     load_json_strict,
     normalize_yaw_deg,
+    task_instruction,
 )
 
 
@@ -123,10 +125,20 @@ def _repository_path(repository: Path, value: str | Path) -> Path:
 def _resolve_physical_pose_domain(
     *, template_job: Mapping[str, Any], poses: Sequence[Mapping[str, Any]],
     operator_label: str, payload_template: Mapping[str, Any],
-    sheet_manifest: Path, resolver=None,
+    sheet_manifest: Path,
+    release_poses: Sequence[Mapping[str, Any]] | None = None,
+    resolver=None,
 ) -> list[dict[str, Any]]:
     """Resolve each exact pose with the ordinary JobSpec/motion input path."""
     if not isinstance(poses, (list, tuple)) or not poses:
+        raise ContractError("PHYSICAL_CONSOLE_POSE_DOMAIN")
+    if (
+        release_poses is not None
+        and (
+            not isinstance(release_poses, (list, tuple))
+            or len(release_poses) != len(poses)
+        )
+    ):
         raise ContractError("PHYSICAL_CONSOLE_POSE_DOMAIN")
     sheet_digest = canonical_digest(load_json_strict(sheet_manifest))
     result = []
@@ -134,7 +146,7 @@ def _resolve_physical_pose_domain(
     resolver = run_job.resolve_inputs if resolver is None else resolver
     if not callable(resolver):
         raise ContractError("PHYSICAL_CONSOLE_RESOLVER")
-    for pose in poses:
+    for index, pose in enumerate(poses):
         if not isinstance(pose, Mapping) or set(pose) != {
             "place_id", "yaw_deg", "x_mm", "y_mm",
         }:
@@ -149,6 +161,19 @@ def _resolve_physical_pose_domain(
         )
         candidate_payload = copy.deepcopy(dict(payload_template))
         candidate_payload["job"] = job
+        if release_poses is not None:
+            release_pose = release_poses[index]
+            if not isinstance(release_pose, Mapping) or set(release_pose) != {
+                "place_id", "yaw_deg", "x_mm", "y_mm",
+            }:
+                raise ContractError("PHYSICAL_CONSOLE_POSE_DOMAIN")
+            if release_pose["place_id"] != pose["place_id"]:
+                raise ContractError("PHYSICAL_CONSOLE_EXACT_SCOPE")
+            candidate_payload.update(
+                recycle_yaw_deg=release_pose["yaw_deg"],
+                recycle_x_mm=release_pose["x_mm"],
+                recycle_y_mm=release_pose["y_mm"],
+            )
         resolved, program, _binding = resolver(
             candidate_payload, scene_binding_call=lambda *_args: {},
         )
@@ -374,6 +399,7 @@ def _catalog(
         item for item in catalog["combinations"]
         if item["workspace_id"] == "PLACE_A"
         and item["frame_id"] == "place-a-yaw0-r002"
+        and item["task_id"] == "pickup_e2e"
         and item["cell_id"] == "PLACE_A-yaw0-CENTER"
         and item["camera_profile_id"] == "fr5-up-rgb-30hz-v1"
         and item["execution"]["TEST_COLLECTION"]["executable"] is True
@@ -745,7 +771,7 @@ class ProductFakeOperator:
                         or candidate["file_digest"] != expected_file_digest
                         or candidate["review_context_digest"]
                         != expected_review_context_digest
-                        or checklist_id != "pickup-v2"
+                        or candidate["checklist_id"] != checklist_id
                         or candidate["semantic_status"] != "PENDING"
                     ):
                         raise ContractError("PRODUCT_FAKE_CANDIDATE_REVIEW")
@@ -823,6 +849,9 @@ class ProductFakeOperator:
                     candidate = {
                         "run_id": intent["run_id"],
                         "review_context_digest": review_context_digest,
+                        "checklist_id": get_task_recipe(
+                            selected["task_id"],
+                        )["review_checklist_id"],
                         "semantic_status": "PENDING",
                         "reviewed_by": None,
                         "reason": None,
@@ -854,6 +883,7 @@ class ProductFakeOperator:
                             "run_id": intent["run_id"],
                             "expected_file_digest": candidate["file_digest"],
                             "expected_review_context_digest": review_context_digest,
+                            "checklist_id": candidate["checklist_id"],
                             "ledger_reference": copy.deepcopy(ledger_reference),
                         },
                     })
@@ -1156,7 +1186,7 @@ def build_physical_runtime(
 
         def environment_call() -> Mapping[str, Any]:
             current = environment_holder["pending"] or environment_holder["active"]
-            return copy.deepcopy(blocked) if current is None else current.projection()
+            return copy.deepcopy(blocked) if current is None else current.liveness()
 
         def prepare_environment_call() -> Mapping[str, Any]:
             pending = environment_holder["pending"]
@@ -1191,10 +1221,9 @@ def build_physical_runtime(
                 }
                 for role, binding in initial_resolution["role_bindings"]["bindings"].items()
             }
-            select_camera_environment(
+            initial_environment = select_camera_environment(
                 initial_resolution["collection_profile"], camera_devices,
             )
-            initial_environment = environment_call()
         application, context = build_physical_operator_application(
             repository_root=repository, session_id=session_id,
             operator_label=operator_label,
@@ -1292,6 +1321,7 @@ def build_physical_operator_console(
     gripper_readback_call: Callable[[], Mapping[str, Any]] | None = None,
     gripper_maintenance_call: Callable[[Mapping[str, Any]], Mapping[str, Any]] | None = None,
     run_live_call: Callable[..., Mapping[str, Any]] = run_job.run_live,
+    task_id: str | None = None,
     requested_count: int = 1, normalized_seed: int = 0,
     candidate_poses: Sequence[Mapping[str, Any]] | None = None,
     direct_pose_sequence: Sequence[Mapping[str, Any]] | None = None,
@@ -1317,6 +1347,26 @@ def build_physical_operator_console(
     }
     template_job = load_json_strict(paths["job"])
     template_job["operator_or_agent_id"] = operator_label
+    selected_task = template_job.get("task") if task_id is None else task_id
+    recipe = get_task_recipe(selected_task)
+    if selected_task != template_job.get("task"):
+        object_profiles = []
+        for path in sorted(
+            (repository / "config/data_factory/objects").glob("*.json"),
+            key=lambda value: str(value),
+        ):
+            profile = load_json_strict(path)
+            if profile.get("object_profile_id") == template_job.get("object_profile_id"):
+                object_profiles.append(profile)
+        if len(object_profiles) != 1:
+            raise ContractError("PHYSICAL_CONSOLE_TASK_PROFILE")
+        template_job.update(
+            task=selected_task,
+            episode_intent=recipe["episode_intent"],
+            instruction=task_instruction(
+                selected_task, object_profiles[0]["description"],
+            ),
+        )
     configured_profile = load_json_strict(paths["profile"])
     if (
         configured_profile.get("schema_version")
@@ -1336,10 +1386,11 @@ def build_physical_operator_console(
     initial_pose = copy.deepcopy(dict(initial_object_pose or default_pose))
     if set(initial_pose) != set(default_pose):
         raise ContractError("PHYSICAL_CONSOLE_SEQUENCE_ANCHOR")
+    spatial_node_count = requested_count + int(template_job["task"] == "pick_place")
     if direct_pose_sequence is not None:
         if (
             not isinstance(direct_pose_sequence, (list, tuple))
-            or len(direct_pose_sequence) != requested_count
+            or len(direct_pose_sequence) != spatial_node_count
             or not direct_pose_sequence
             or dict(direct_pose_sequence[0]) != initial_pose
             or direct_start_pose_ids is not None
@@ -1351,7 +1402,7 @@ def build_physical_operator_console(
             raise ContractError("PHYSICAL_CONSOLE_SEQUENCE_ANCHOR")
         pose_domain = [copy.deepcopy(dict(item)) for item in direct_pose_sequence]
     else:
-        if direct_start_pose_ids is not None:
+        if direct_start_pose_ids is not None or template_job["task"] == "pick_place":
             raise ContractError("PHYSICAL_CONSOLE_DIRECT_SEQUENCE")
         pose_domain = [
             copy.deepcopy(dict(item))
@@ -1384,6 +1435,10 @@ def build_physical_operator_console(
         template_job=template_job, poses=pose_domain,
         operator_label=operator_label, payload_template=payload,
         sheet_manifest=paths["yaw0_sheet"],
+        release_poses=(
+            [*pose_domain[1:], pose_domain[-2]]
+            if template_job["task"] == "pick_place" else None
+        ),
         resolver=test_only_resolver,
     )
     resolved_by_pose = {
@@ -1398,8 +1453,9 @@ def build_physical_operator_console(
     if resolved is None:
         raise ContractError("PHYSICAL_CONSOLE_SEQUENCE_ANCHOR")
     direct_digests = None
+    ordered_direct_resolved = None
     if direct_pose_sequence is not None:
-        direct_digests = []
+        ordered_direct_resolved = []
         for pose in direct_pose_sequence:
             normalized_key = (
                 pose["place_id"], normalize_yaw_deg(pose["yaw_deg"]),
@@ -1412,7 +1468,55 @@ def build_physical_operator_console(
             ), None)
             if matched is None:
                 raise ContractError("PHYSICAL_CONSOLE_DIRECT_SEQUENCE")
-            direct_digests.append(matched["resolved_job_digest"])
+            ordered_direct_resolved.append(matched)
+        direct_digests = [
+            item["resolved_job_digest"]
+            for item in ordered_direct_resolved[:requested_count]
+        ]
+    task_bindings = None
+    if ordered_direct_resolved is not None:
+        def spatial_binding(item: Mapping[str, Any], role: str) -> dict[str, Any]:
+            job = item["normalized_job"]
+            return {
+                "role": role,
+                "workspace_id": job["place_id"],
+                "frame_id": job["cell_calibration_id"],
+                "pose": {
+                    key: job[key]
+                    for key in ("place_id", "yaw_deg", "x_mm", "y_mm")
+                },
+                "sheet_digest": job["sheet_manifest_digest"],
+                "family_digest": item["calibration"]["document"][
+                    "a4_family_digest"
+                ],
+            }
+
+        task_bindings = []
+        for index, source in enumerate(
+            ordered_direct_resolved[:requested_count],
+        ):
+            release = (
+                ordered_direct_resolved[index + 1]
+                if index + 1 < len(ordered_direct_resolved) else source
+            )
+            task_bindings.append(
+                compile_task_binding(
+                    template_job["task"],
+                    source=spatial_binding(source, "SOURCE"),
+                    **(
+                        {
+                            "destination": spatial_binding(
+                                release, "DESTINATION",
+                            ),
+                        }
+                        if template_job["task"] == "pick_place" else {
+                            "next_source_reset": spatial_binding(
+                                release, "NEXT_SOURCE_RESET",
+                            ),
+                        }
+                    ),
+                )
+            )
     profile = resolved["collection_profile"]
     if canonical_digest(profile) != canonical_digest(configured_profile):
         raise ContractError("PHYSICAL_CONSOLE_COLLECTION_PROFILE")
@@ -1779,10 +1883,16 @@ def build_physical_operator_console(
         return refreshed
 
     def activate() -> bool:
-        gripper = refresh_gripper()
+        with ThreadPoolExecutor(
+            max_workers=2, thread_name_prefix="physical-runtime-gate",
+        ) as executor:
+            gripper_future = executor.submit(refresh_gripper)
+            camera_future = executor.submit(physical_gate_evidence)
+            gripper = gripper_future.result()
+            camera_transport_evidence = camera_future.result()
         if gripper["state"] != "ATTACHED":
             raise ContractError("GRIPPER_SETUP_NOT_AVAILABLE")
-        holder["camera_transport_evidence"] = physical_gate_evidence()
+        holder["camera_transport_evidence"] = camera_transport_evidence
         return True
 
     def start_binding(_run_id: str, slot: Mapping[str, Any]) -> dict[str, Any]:
@@ -1848,11 +1958,16 @@ def build_physical_operator_console(
             else None
         )
         release_resolved = active_resolved
-        if next_slot is not None:
+        destination_slot = next_slot
+        if active_job["task"] == "pick_place":
+            if ordered_direct_resolved is None:
+                raise ContractError("TASK_DESTINATION_REQUIRED")
+            release_resolved = ordered_direct_resolved[order_index + 1]
+        elif destination_slot is not None:
             next_base = next(
                 item for item in hypothesis["base_conditions"]
                 if item["base_condition_digest"]
-                == next_slot["base_condition_digest"]
+                == destination_slot["base_condition_digest"]
             )
             release_resolved = resolved_by_digest.get(
                 next_base["resolved_job_digest"],
@@ -1860,6 +1975,11 @@ def build_physical_operator_console(
             if release_resolved is None:
                 raise ContractError("PHYSICAL_CONSOLE_RESOLVED_JOB")
         release_job = release_resolved["normalized_job"]
+        if active_job["task"] == "pick_place" and all(
+            active_job[key] == release_job[key]
+            for key in ("place_id", "yaw_deg", "x_mm", "y_mm")
+        ):
+            raise ContractError("TASK_BINDING_DISTINCT")
         active_payload.update(
             recycle_yaw_deg=release_job["yaw_deg"],
             recycle_x_mm=release_job["x_mm"],
@@ -1925,6 +2045,10 @@ def build_physical_operator_console(
             "camera_transport_binding_digest": transport["binding_digest"],
             "episode_number": order_index + 1,
             "episode_limit": requested_count, "data_disposition": "TEST_ONLY",
+            **(
+                {"task_binding": copy.deepcopy(task_bindings[order_index])}
+                if task_bindings is not None else {}
+            ),
         }
         holder["last_live_response"] = None
         try:
@@ -2002,6 +2126,7 @@ def build_physical_operator_console(
                     "run_id": intent["run_id"],
                     "expected_file_digest": canonical_digest(admission),
                     "expected_review_context_digest": admission["review_context_digest"],
+                    "checklist_id": admission["checklist_id"],
                     "ledger_reference": copy.deepcopy(ledger_reference),
                 },
             },
@@ -2085,6 +2210,9 @@ def build_physical_operator_console(
     }
     full_open_m = float(motion_qualification["gripper_positions_m"]["open"])
     retune_feedback = retune["acceptable_feedback_m"]
+    base_force_percent = int(
+        resolved["grasp_profile"]["gripper_close"]["force_percent"]
+    )
     gripper_tuning = {
         "retune_id": retune["retune_id"],
         "retune_digest": retune["retune_digest"],
@@ -2100,6 +2228,8 @@ def build_physical_operator_console(
             key: round(100 * float(value) / full_open_m, 2)
             for key, value in retune_feedback.items()
         },
+        "force_percent": int(retune.get("force_percent", base_force_percent)),
+        "base_force_percent": base_force_percent,
         "data_disposition": "TEST_ONLY",
         "production_authority": False,
         "training_authority": False,
@@ -2205,6 +2335,7 @@ def build_physical_operator_console(
             resolve_gripper_setup if setup_request is not None else None
         ),
         initial_block_code=initial_block_code,
+        task_bindings=task_bindings,
         campaign_approval_once=True,
         run_id_factory=run_id_for,
         prepare_timeout_s=8.0, close_timeout_s=5.0, clock=clock,
@@ -2412,6 +2543,7 @@ def build_physical_operator_application(
         item for item in compatible
         if item["cell_id"] in initial_cells
         and item["sources"]["job"] == initial_job_source
+        and item["task_id"] == initial_job.get("task")
         and (
             internal_binding_digest is not None
             or item["camera_profile_id"] == initial_job.get("collection_profile_id")
@@ -2789,9 +2921,10 @@ def build_physical_operator_application(
             current_catalog, selected, draft.get("current_object_pose"),
         )
         count = draft["requested_count"]
+        spatial_node_count = count + int(selected["task_id"] == "pick_place")
         if draft.get("authoring_mode") == "ASSISTED":
             poses = project_assisted_poses(
-                current_catalog, selected, anchor, count,
+                current_catalog, selected, anchor, spatial_node_count,
                 repeat=draft["repeat"], normalized_seed=draft["normalized_seed"],
             )
             start_ids = project_balanced_start_pose_ids(
@@ -2800,7 +2933,7 @@ def build_physical_operator_application(
             )
         else:
             pairs = copy.deepcopy(draft.get("direct_pairs") or [])
-            if len(pairs) != count:
+            if len(pairs) != spatial_node_count:
                 raise ContractError("PHYSICAL_CONSOLE_DIRECT_SEQUENCE")
             poses = [
                 validate_operator_pose(current_catalog, selected, {
@@ -2809,7 +2942,7 @@ def build_physical_operator_application(
                 })
                 for pair in pairs
             ]
-            start_ids = [pair["start_pose_id"] for pair in pairs]
+            start_ids = [pair["start_pose_id"] for pair in pairs[:count]]
         _setup, qualifications = start_pose_domain(
             draft["selected_start_pose_ids"],
         )
@@ -2841,11 +2974,11 @@ def build_physical_operator_application(
                     "device_kind": binding["device_kind"],
                     "stable_device_id": binding["stable_device_id"],
                     "capture_endpoint": binding["capture_endpoint"],
-                    "status": "ENVIRONMENT_GRAPH_VERIFIED",
+                    "status": "ENVIRONMENT_LIFECYCLE_VERIFIED",
                 }
                 for role, binding in checked["bindings"].items()
             },
-            "status": "ENVIRONMENT_GRAPH_VERIFIED",
+            "status": "ENVIRONMENT_LIFECYCLE_VERIFIED",
         }
         evidence["binding_digest"] = canonical_digest(evidence)
         return evidence
@@ -2914,6 +3047,7 @@ def build_physical_operator_application(
             gripper_maintenance_call=gripper_maintenance_call,
             gripper_retune_path=gripper_retune_path,
             run_live_call=run_live_call,
+            task_id=selected["task_id"],
             start_transition_call=start_transition_call,
             requested_count=draft["requested_count"],
             normalized_seed=draft["normalized_seed"],

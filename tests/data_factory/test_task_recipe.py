@@ -9,7 +9,9 @@ from tools.data_factory.task_recipe import (
     validate_task_catalog,
     validate_task_recipe,
 )
+from tools.data_factory.motion.pickup_executor import PHASES
 from tools.fr5_data_factory import ContractError, canonical_digest
+from tools.fr5_data_factory import task_instruction
 
 
 DIGEST = "sha256:" + "1" * 64
@@ -34,6 +36,19 @@ class TaskRecipeTest(unittest.TestCase):
             ["pickup_e2e", "pick_place"],
         )
         pickup, pick_place = catalog["recipes"]
+        for recipe in (pickup, pick_place):
+            recorded = recipe["recorded_phases"]
+            self.assertEqual(
+                [
+                    item["internal_phase"]
+                    for item in recorded + recipe["post_recording_phases"]
+                ],
+                list(PHASES),
+            )
+            self.assertEqual(
+                recipe["recording_boundary"],
+                recorded[-1]["internal_phase"],
+            )
         self.assertEqual(
             [(item["role"], item["required"]) for item in pickup["spatial_roles"]],
             [("SOURCE", True), ("NEXT_SOURCE_RESET", False)],
@@ -80,6 +95,21 @@ class TaskRecipeTest(unittest.TestCase):
         self.assertEqual(
             [item["internal_phase"] for item in pick_place["post_recording_phases"]],
             ["SAFE_POSE_PTP"],
+        )
+        self.assertEqual(
+            (pickup["episode_intent"], pickup["instruction_template"]),
+            ("nominal pickup", "pick up the {object_description}"),
+        )
+        self.assertEqual(
+            (pick_place["episode_intent"], pick_place["instruction_template"]),
+            (
+                "nominal pick and place",
+                "pick up the {object_description} and place it at the destination",
+            ),
+        )
+        self.assertEqual(
+            task_instruction("pick_place", "wooden cube"),
+            "pick up the wooden cube and place it at the destination",
         )
         self.assertNotIn("authority", json.dumps(catalog).lower())
         self.assertEqual(validate_task_catalog(catalog), catalog)

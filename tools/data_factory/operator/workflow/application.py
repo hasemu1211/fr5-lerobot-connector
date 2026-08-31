@@ -357,7 +357,12 @@ class CollectionOperatorApplication:
             self.draft["selected_start_pose_ids"]
             if selected_start_pose_ids is None else selected_start_pose_ids
         )
-        if start_pose_id not in selected:
+        if (
+            start_pose_id is None
+            and self.selection["task_id"] != "pick_place"
+            or start_pose_id is not None
+            and start_pose_id not in selected
+        ):
             raise ContractError("OPERATOR_APPLICATION_DRAFT")
         pose = validate_operator_pose(
             self.catalog, self.selection,
@@ -390,23 +395,49 @@ class CollectionOperatorApplication:
         pose = getattr(self, "draft", {}).get("current_object_pose")
         return None if pose is None else copy.deepcopy(pose)
 
+    def _spatial_node_count(self) -> int:
+        return self.draft["requested_count"] + int(
+            self.selection["task_id"] == "pick_place"
+        )
+
     def _direct_draft_ready(self) -> bool:
         if self.draft["authoring_mode"] != "DIRECT_EDIT":
             return True
         if self.start_pose_setup is not None:
-            return len(self.draft["direct_pairs"]) == self.draft["requested_count"]
+            pairs = self.draft["direct_pairs"]
+            return (
+                len(pairs) == self._spatial_node_count()
+                and all(
+                    pair["start_pose_id"] is not None
+                    for pair in pairs[:self.draft["requested_count"]]
+                )
+                and (
+                    self.selection["task_id"] != "pick_place"
+                    or pairs[-1]["start_pose_id"] is None
+                )
+                and all(
+                    any(left[field] != right[field] for field in (
+                        "place_id", "yaw_deg", "x_mm", "y_mm",
+                    ))
+                    for left, right in zip(pairs, pairs[1:])
+                )
+                and all(
+                    pairs[0][field] == self.draft["current_object_pose"][field]
+                    for field in ("place_id", "yaw_deg", "x_mm", "y_mm")
+                )
+            )
         anchor = self._direct_anchor()
         if anchor is None:
             return False
         required = 1 + sum(pose != anchor for pose in self.draft["direct_poses"])
-        return required <= self.draft["requested_count"]
+        return required <= self._spatial_node_count()
 
     def _reset_direct_pairs(self) -> None:
         if self.start_pose_setup is None:
             return
         poses = project_assisted_poses(
             self.catalog, self.selection, self.draft["current_object_pose"],
-            self.draft["requested_count"], repeat=self.draft["repeat"],
+            self._spatial_node_count(), repeat=self.draft["repeat"],
             normalized_seed=self.draft["normalized_seed"],
         )
         starts = project_balanced_start_pose_ids(
@@ -415,8 +446,13 @@ class CollectionOperatorApplication:
             normalized_seed=self.draft["normalized_seed"],
         )
         self.draft["direct_pairs"] = [
-            {"start_pose_id": start_pose_id, **pose}
-            for start_pose_id, pose in zip(starts, poses)
+            {
+                "start_pose_id": (
+                    starts[index] if index < len(starts) else None
+                ),
+                **pose,
+            }
+            for index, pose in enumerate(poses)
         ]
 
     def _new_workspace_manager(self, display_name: str):
@@ -597,7 +633,10 @@ class CollectionOperatorApplication:
         elif workflow == "REVIEW_CAMPAIGN":
             operations = ["edit_campaign_draft", "authorize_campaign"]
         elif workflow == "RUNNING":
-            operations = ["cancel_session"]
+            operations = []
+            if isinstance(inner, Mapping) and "review_candidate" in inner.get("available_ops", []):
+                operations.append("review_candidate")
+            operations.append("cancel_session")
         elif workflow == "BLOCKED":
             operations = []
             if isinstance(inner, Mapping) and "review_candidate" in inner.get("available_ops", []):
@@ -735,7 +774,7 @@ class CollectionOperatorApplication:
                     or planned.get("order_index") != len(coverage_sequence)
                 ):
                     raise ContractError("OPERATOR_APPLICATION_COVERAGE")
-                coverage_sequence.append({
+                projected_condition = {
                     "order_index": planned["order_index"] + 1,
                     "start_pose_id": planned.get("robot_start_pose_id"),
                     "place_id": condition["place_id"],
@@ -743,7 +782,28 @@ class CollectionOperatorApplication:
                     "y_mm": condition["y_mm"],
                     "yaw_deg": condition["yaw_deg"],
                     "coverage_condition_digest": digest,
-                })
+                }
+                destination = planned.get("destination_pose")
+                task_binding = planned.get("task_binding")
+                if destination is not None:
+                    if (
+                        not isinstance(destination, Mapping)
+                        or set(destination) != {
+                            "place_id", "yaw_deg", "x_mm", "y_mm",
+                        }
+                        or not isinstance(task_binding, Mapping)
+                        or task_binding.get("binding_digest")
+                        != canonical_digest({
+                            key: value for key, value in task_binding.items()
+                            if key != "binding_digest"
+                        })
+                    ):
+                        raise ContractError("OPERATOR_APPLICATION_COVERAGE")
+                    projected_condition.update(
+                        destination_pose=copy.deepcopy(dict(destination)),
+                        task_binding_digest=task_binding["binding_digest"],
+                    )
+                coverage_sequence.append(projected_condition)
                 cell = grouped.setdefault(digest, {
                     "cell_id": f"campaign-{digest.removeprefix('sha256:')[:20]}",
                     "x_mm": condition["x_mm"],
@@ -1009,6 +1069,7 @@ class CollectionOperatorApplication:
         previous_workspace = (
             self.selection["workspace_id"], self.selection["frame_id"],
         )
+        previous_task = self.selection["task_id"]
         browser_catalog = self.projector.project_catalog(
             self.catalog, self.selection, split=self.draft["split"],
         )
@@ -1121,6 +1182,14 @@ class CollectionOperatorApplication:
             self.draft["direct_pairs"] = []
             if self.draft["authoring_mode"] == "DIRECT_EDIT":
                 self._reset_direct_pairs()
+        elif (
+            previous_task != self.selection["task_id"]
+            and self.draft["authoring_mode"] == "DIRECT_EDIT"
+        ):
+            if self.start_pose_setup is not None:
+                self._reset_direct_pairs()
+            else:
+                self.draft["direct_poses"] = []
 
     def update_draft(self, payload: dict[str, Any], _view: dict[str, Any]) -> dict[str, Any]:
         if (
@@ -1145,7 +1214,7 @@ class CollectionOperatorApplication:
                     direct_poses = []
                     for pose in project_assisted_poses(
                         self.catalog, self.selection, anchor,
-                        self.draft["requested_count"], repeat=self.draft["repeat"],
+                        self._spatial_node_count(), repeat=self.draft["repeat"],
                         normalized_seed=self.draft["normalized_seed"],
                     ):
                         if pose != anchor and pose not in direct_poses:
@@ -1177,7 +1246,7 @@ class CollectionOperatorApplication:
             if (
                 checked == self._direct_anchor()
                 or checked in self.draft["direct_poses"]
-                or 1 + len(self.draft["direct_poses"]) >= self.draft["requested_count"]
+                or 1 + len(self.draft["direct_poses"]) >= self._spatial_node_count()
             ):
                 raise ContractError("OPERATOR_APPLICATION_DRAFT")
             self.draft["direct_poses"].append(checked)
@@ -1192,15 +1261,31 @@ class CollectionOperatorApplication:
             checked = self._validated_direct_pair(value)
             if (
                 checked in self.draft["direct_pairs"]
-                or len(self.draft["direct_pairs"]) >= self.draft["requested_count"]
+                or len(self.draft["direct_pairs"]) >= self._spatial_node_count()
             ):
                 raise ContractError("OPERATOR_APPLICATION_DRAFT")
-            self.draft["direct_pairs"].append(checked)
+            terminal_index = next((
+                index for index, pair in enumerate(self.draft["direct_pairs"])
+                if pair["start_pose_id"] is None
+            ), None)
+            if terminal_index is not None:
+                self.draft["direct_pairs"].insert(terminal_index, checked)
+            elif (
+                self.selection["task_id"] == "pick_place"
+                and len(self.draft["direct_pairs"]) == self.draft["requested_count"]
+            ):
+                checked["start_pose_id"] = None
+                self.draft["direct_pairs"].append(checked)
+            else:
+                self.draft["direct_pairs"].append(checked)
             self.draft["authoring_mode"] = "DIRECT_EDIT"
             self.selection["policy_id"] = "DIRECT_SELECTION"
         elif field == "remove_pair" and self.start_pose_setup is not None:
             checked = self._validated_direct_pair(value)
-            if checked not in self.draft["direct_pairs"]:
+            if (
+                checked not in self.draft["direct_pairs"]
+                or self.draft["direct_pairs"].index(checked) == 0
+            ):
                 raise ContractError("OPERATOR_APPLICATION_DRAFT")
             self.draft["direct_pairs"].remove(checked)
         else:
@@ -1394,7 +1479,7 @@ class CollectionOperatorApplication:
     def review_candidate(self, payload: dict[str, Any], _view: dict[str, Any]) -> dict[str, Any]:
         projection = self.projection()
         if (
-            projection["workflow_state"] not in {"BLOCKED", "TERMINAL"}
+            projection["workflow_state"] not in {"RUNNING", "BLOCKED", "TERMINAL"}
             or "review_candidate" not in projection["available_ops"]
         ):
             raise ContractError("OPERATOR_APPLICATION_STATE")

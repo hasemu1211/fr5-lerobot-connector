@@ -161,6 +161,27 @@ class TestExecutionTransport(unittest.TestCase):
         )
         transport._rclpy.spin_once = lambda *args, **kwargs: None
         self.assertEqual(transport.snapshot(1.0)["gripper_settings"]["force_percent"], 50)
+
+        transport._robot_description = None
+        transport._robot_description_client = SimpleNamespace(
+            wait_for_services=lambda **_: True,
+            get_parameters=lambda _: Future(None, done=False),
+        )
+        transport._rclpy.spin_once = lambda *args, **kwargs: node.callbacks[
+            "/robot_description"
+        ](SimpleNamespace(data=(
+            "<robot><ros2_control><hardware>"
+            "<plugin>fairino_hardware/FairinoHardwareInterface</plugin>"
+            "<param name='gripper_velocity'>20</param>"
+            "<param name='gripper_force'>50</param>"
+            "<param name='gripper_settle_time_ms'>500</param>"
+            "</hardware><joint name='finger_right_joint'/>"
+            "</ros2_control></robot>"
+        )))
+        self.assertEqual(
+            transport.snapshot(1.0)["gripper_settings"]["settle_time_ms"], 500,
+        )
+
         clock[0] = 12.0
         transport.graph_timeout_s = 0.0
         transport._rclpy.spin_once = lambda *args, **kwargs: None

@@ -105,35 +105,19 @@ class OperatorProjectionTests(unittest.TestCase):
             item for item in catalog["combinations"]
             if item["task_id"] == "pick_place"
         ]
-        if pick_place_combinations:
-            self.assertTrue(option["registered"])
-            self.assertTrue(any(
-                item["execution"]["TEST_COLLECTION"]["executable"]
+        self.assertTrue(option["registered"])
+        self.assertTrue(pick_place_combinations)
+        self.assertTrue(any(
+            item["execution"]["TEST_COLLECTION"]["executable"]
+            for item in pick_place_combinations
+        ))
+        self.assertEqual(
+            {
+                item["sources"]["job"]
                 for item in pick_place_combinations
-            ))
-            return
-
-        self.assertEqual(
-            (option["registered"], option["status"], option["reason"]),
-            (False, "NOT_CONFIGURED", "TASK_CALLER_NOT_CONFIGURED"),
+            },
+            {
+                "config/data_factory/test_only_physical/goal2-place1/"
+                "center-live-p45-20260821-r001.job.json"
+            },
         )
-        pickup = next(
-            item for item in catalog["combinations"]
-            if item["execution"]["TEST_COLLECTION"]["executable"]
-        )
-        selection = self.selection(pickup)
-        browser = project_catalog(catalog, selection, split="TRAIN")
-        projected = next(
-            item for item in browser["axes"]["task"] if item["id"] == "pick_place"
-        )
-        self.assertEqual(
-            (projected["available"], projected["reason"]),
-            (False, "TASK_CALLER_NOT_CONFIGURED"),
-        )
-        before = canonical_digest(catalog)
-        with self.assertRaisesRegex(ContractError, "OPERATOR_SELECTION_COMBINATION"):
-            validate_operator_selection(
-                catalog, {**selection, "task_id": "pick_place"},
-                require_executable=True,
-            )
-        self.assertEqual(canonical_digest(catalog), before)

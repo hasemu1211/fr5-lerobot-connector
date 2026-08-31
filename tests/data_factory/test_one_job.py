@@ -31,7 +31,8 @@ MOTION_APPROVAL = {"source":"HUMAN", "approval_id":"a", "approved_by":"operator"
 
 class OneJobTest(unittest.TestCase):
     def make(self, recorder_states, executor_states, *, first_row_rows=1, continuous=False, release=False,
-             readiness_contract=None, status_mutation=None, allow_synthetic_test_operator=False):
+             readiness_contract=None, status_mutation=None, quality_mutation=None,
+             allow_synthetic_test_operator=False):
         calls = []
         scene = RELEASE_SCENE if release else SCENE
         steps = [{"phase":phase} for phase in PHASES]
@@ -49,8 +50,9 @@ class OneJobTest(unittest.TestCase):
         evidence = {"schema_version":"data_factory.precommit_evidence.v1", "run_id":"run", "approved_plan_digest":plan_digest, "scene_binding_digest":canonical_digest(scene), "expected_planning_scene_digest":BINDINGS["planning_scene_digest"], "planning_scene_readback":readback, "collision_report":collision, "plan_only_no_motion":no_motion}
         envelope = {"plan":planned, "precommit_safety":safety, "precommit_evidence":evidence, "operator_summary":{}}
         first_status_after_begin = False
+        last_readiness_rows = first_row_rows
         def recorder(request):
-            nonlocal first_status_after_begin
+            nonlocal first_status_after_begin, last_readiness_rows
             calls.append(("recorder", request["op"]))
             if request["op"] == "begin":
                 first_status_after_begin = True
@@ -68,19 +70,33 @@ class OneJobTest(unittest.TestCase):
                 rows = 1
             if isinstance(item, dict): return item
             rejected = item == "QUALITY_REJECTED"
-            quality_reasons = [] if rows >= 60 else [f"frames {rows} < minimum 60"]
             metrics = {
                 "rows":rows, "writer_queue":0, "writer_queue_drops":0, "alignment_failures":0,
                 "observed_monotonic_ns":time.monotonic_ns(),
-                "quality_snapshot":{
-                    "accepted":not quality_reasons, "reasons":quality_reasons, "frames":rows,
-                    "target_fps":30, "effective_fps":30.0, "cameras":{"up":{"source_fps":30.0}},
-                    "writer_queue_drops":0, "alignment_failures":0, "image_quality_warnings":[],
-                },
             }
             response = {"schema_version":"data_factory.recorder_response.v1", "op_id":request["op_id"], "op":request["op"], "ok":not rejected, "state":"FROZEN" if rejected else item, "reason_code":item, "run_id":"run", "transaction_id":"tx", "episode_index":0, "metrics":metrics, "artifacts":{}, "detail":"", "writer_alive":True, "writer_error":None, "sampler_alive":True}
             if request["op"] == "status" and status_mutation is not None:
                 status_mutation(response)
+            if request["op"] == "status":
+                last_readiness_rows = response["metrics"]["rows"]
+            if request["op"] == "trim_readiness_prefix":
+                quality_reasons = [] if last_readiness_rows >= 60 else [
+                    f"frames {last_readiness_rows} < minimum 60"
+                ]
+                quality = {
+                    "accepted":not quality_reasons, "reasons":quality_reasons,
+                    "frames":last_readiness_rows, "target_fps":30, "effective_fps":30.0,
+                    "cameras":{"up":{"source_fps":30.0}}, "writer_queue_drops":0,
+                    "alignment_failures":0, "image_quality_warnings":[],
+                }
+                if quality_mutation is not None:
+                    quality_mutation(quality)
+                response["quality"] = quality
+                if quality["accepted"]:
+                    response["reason_code"] = "READINESS_PREFIX_TRIMMED"
+                else:
+                    response.update(ok=False, reason_code="READINESS_PREFIX_UNSAFE")
+                    response["metrics"]["rows"] = last_readiness_rows
             return response
         recorder.preserve = lambda: calls.append(("recorder", "preserve"))
         def executor(request):
@@ -237,12 +253,12 @@ class OneJobTest(unittest.TestCase):
         self.assertNotIn(("recorder", "preserve"), calls)
 
     def test_test_only_readiness_records_evidence_then_executes_once(self):
-        def warnings_are_diagnostic(status):
-            status["metrics"]["quality_snapshot"]["image_quality_warnings"] = ["up brightness warning"]
+        def warnings_are_diagnostic(quality):
+            quality["image_quality_warnings"] = ["up brightness warning"]
 
         job, calls = self.make(
             ["RECORDING"], ["PLANNED", "APPROVED", "EXECUTING"], first_row_rows=60,
-            readiness_contract=TEST_ONLY_READINESS_CONTRACT, status_mutation=warnings_are_diagnostic,
+            readiness_contract=TEST_ONLY_READINESS_CONTRACT, quality_mutation=warnings_are_diagnostic,
         )
         self.prepare_and_start(job)
         evidence = job._result()["readiness_evidence"]
@@ -261,33 +277,19 @@ class OneJobTest(unittest.TestCase):
         with self.assertRaisesRegex(ContractError, "RECORDER_READINESS_CONTRACT"):
             OneJob(lambda _: None, lambda _: None, readiness_contract={})
 
-    def test_test_only_readiness_waits_for_writer_drain_without_lowering_quality(self):
-        statuses = [0]
-
-        def transient_writer(status):
-            statuses[0] += 1
-            metrics = status["metrics"]
-            metrics["rows"] = 60
-            quality = metrics["quality_snapshot"]
-            quality["frames"] = 60
-            if statuses[0] == 1:
-                metrics["writer_queue"] = 1
-                quality.update(
-                    accepted=False,
-                    reasons=["enqueue attempts 61 != rows+drops 60"],
-                )
-            else:
-                metrics["writer_queue"] = 0
-                quality.update(accepted=True, reasons=[])
+    def test_test_only_readiness_enters_barrier_with_live_writer_backlog(self):
+        def active_writer(status):
+            status["metrics"].update(rows=60, writer_queue=14)
 
         job, calls = self.make(
-            ["RECORDING", "RECORDING"], ["PLANNED", "APPROVED", "EXECUTING"],
+            ["RECORDING"], ["PLANNED", "APPROVED", "EXECUTING"],
             first_row_rows=60, readiness_contract=TEST_ONLY_READINESS_CONTRACT,
-            status_mutation=transient_writer,
+            status_mutation=active_writer,
         )
         self.prepare_and_start(job)
         self.assertEqual(job.state, "EXECUTING")
-        self.assertEqual(calls.count(("recorder", "status")), 2)
+        self.assertEqual(calls.count(("recorder", "status")), 1)
+        self.assertEqual(calls.count(("recorder", "trim_readiness_prefix")), 1)
         self.assertEqual(calls.count(("executor", "execute")), 1)
 
     def test_production_start_does_not_trim_readiness_prefix(self):
@@ -320,30 +322,33 @@ class OneJobTest(unittest.TestCase):
 
     def test_test_only_readiness_failures_abort_without_execute(self):
         cases = {
-            "stale": (lambda status: status["metrics"].update(
+            "stale": ("status", lambda status: status["metrics"].update(
                 observed_monotonic_ns=time.monotonic_ns() - 600_000_000
             ), "RECORDER_READINESS_STALE"),
-            "row_fps": (lambda status: status["metrics"]["quality_snapshot"].update(
-                effective_fps=26.9
+            "row_fps": ("quality", lambda quality: quality.update(
+                effective_fps=26.9, accepted=False, reasons=["row fps is too low"],
             ), "RECORDER_READINESS_ROW_FPS"),
-            "camera_fps": (lambda status: status["metrics"]["quality_snapshot"]["cameras"]["up"].update(
-                source_fps=28.4
+            "camera_fps": ("quality", lambda quality: (
+                quality["cameras"]["up"].update(source_fps=28.4),
+                quality.update(accepted=False, reasons=["camera source fps is too low"]),
             ), "RECORDER_READINESS_CAMERA_FPS"),
-            "drops": (lambda status: status["metrics"].update(writer_queue_drops=1), "RECORDER_READINESS_DROPS"),
-            "alignment": (lambda status: status["metrics"].update(alignment_failures=1), "RECORDER_READINESS_ALIGNMENT"),
-            "writer_fault": (lambda status: status.update(writer_error="disk fault"), "RECORDER_WRITER_FAULT"),
-            "quality_reason": (lambda status: status["metrics"]["quality_snapshot"].update(
+            "drops": ("status", lambda status: status["metrics"].update(writer_queue_drops=1), "RECORDER_READINESS_DROPS"),
+            "alignment": ("status", lambda status: status["metrics"].update(alignment_failures=1), "RECORDER_READINESS_ALIGNMENT"),
+            "writer_fault": ("status", lambda status: status.update(writer_error="disk fault"), "RECORDER_WRITER_FAULT"),
+            "quality_reason": ("quality", lambda quality: quality.update(
                 accepted=False, reasons=["up image repeat ratio is too high"]
             ), "RECORDER_READINESS_QUALITY"),
-            "prefix_mismatch": (lambda status: status["metrics"]["quality_snapshot"].update(
-                frames=59
+            "prefix_mismatch": ("quality", lambda quality: quality.update(
+                frames=59, accepted=False, reasons=["source provenance rows do not match"],
             ), "RECORDER_READINESS_MISMATCH"),
         }
-        for name, (mutation, code) in cases.items():
+        for name, (target, mutation, code) in cases.items():
             with self.subTest(name=name):
                 job, calls = self.make(
                     ["RECORDING", "ABORTED"], ["PLANNED", "APPROVED"], first_row_rows=60,
-                    readiness_contract=TEST_ONLY_READINESS_CONTRACT, status_mutation=mutation,
+                    readiness_contract=TEST_ONLY_READINESS_CONTRACT,
+                    status_mutation=mutation if target == "status" else None,
+                    quality_mutation=mutation if target == "quality" else None,
                 )
                 job.prepare(PLAN); job.approve(MOTION_APPROVAL)
                 result = job.start()

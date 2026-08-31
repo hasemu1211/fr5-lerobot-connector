@@ -50,18 +50,21 @@ from tools.data_factory.operator.setup.contracts import (
 from tools.data_factory.resource_usage import ResourceMonitor
 from tools.data_factory_recovery import write_json_atomic
 from tools.data_factory.scene_state import SceneStateStore, release_slot
+from tools.data_factory.task_recipe import TASK_IDS, get_task_recipe
 from tools.fr5_data_factory import (
     COLLECTION_PROFILE_V2_KEYS,
     ContractArgumentParser,
     ContractError,
     DIGEST,
     SAFE_ID,
+    TASK_REVIEW_CHECKLIST_IDS,
     bounded_place_coordinate,
     canonical_digest,
     load_json_strict,
     normalize_job_spec,
     normalize_yaw_deg,
     resolve_motion_program,
+    task_review_checklist_id,
     validate_job_spec,
 )
 
@@ -93,6 +96,7 @@ CANDIDATE_ADMISSION_KEYS = {
 EPISODE_LEDGER_CONTEXT_FIELDS = frozenset({"manifest", "intent"})
 ROOT = Path(__file__).resolve().parents[2]
 DATA_PYTHON = str(ROOT / ".venv/bin/python")
+EPISODE_LOCATOR_PREFIX = "EPISODE_LOCATOR_JSON:"
 
 
 def _exact(value, keys, code):
@@ -293,8 +297,11 @@ def resolve_inputs(
         paths={"selected_sheet": payload["selected_sheet"], "yaw0_sheet": payload["yaw0_sheet"]},
         config_root=payload["config_root"],
     )
-    if validated["normalized_job"]["task"] != "pickup_e2e":
+    task_id = validated["normalized_job"]["task"]
+    if task_id not in TASK_IDS:
         raise ContractError("TASK_NOT_SUPPORTED")
+    if task_id == "pick_place" and not RECYCLE_COORD_KEYS <= set(payload):
+        raise ContractError("TASK_DESTINATION_REQUIRED")
     release_pose = {key: validated["normalized_job"][key] for key in ("place_id", "yaw_deg", "x_mm", "y_mm")}
     if RECYCLE_COORD_KEYS <= set(payload):
         sheet = _load(payload["selected_sheet"], "INPUT_SELECTED_SHEET")
@@ -429,53 +436,64 @@ def _compact_process_output(value, limit=2000):
 
 def _camera_warmup(payload, profile, cancel):
     """Prove each configured camera is fresh before the recorder transaction exists."""
-    attempts = []
-    for attempt in range(1, CAMERA_WARMUP_ATTEMPTS + 1):
-        if cancel.is_set():
-            break
-        roles = []
-        all_passed = True
-        for role in profile["camera_roles"]:
-            if cancel.is_set():
-                all_passed = False
-                break
-            command = [
-                sys.executable, str(ROOT / "tools/measure_ros_topic_age.py"),
-                "--image", profile["camera_topics"][role],
-                "--duration", str(CAMERA_WARMUP_DURATION_S),
-                "--expected-image-hz", str(profile["fps"]),
-                "--min-image-fps-ratio", str(LIVE_CAMERA_MIN_FPS_RATIO),
-                "--max-image-age-ms", str(CAMERA_WARMUP_MAX_AGE_MS),
-                "--image-qos-depth", str(profile["image_qos_depth"]),
-            ]
-            if profile["image_qos"] == "reliable":
-                command.append("--reliable-image")
-            try:
-                completed = subprocess.run(
-                    command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
-                    timeout=CAMERA_WARMUP_TIMEOUT_S,
-                )
-                result = {
-                    "role": role, "topic": profile["camera_topics"][role],
-                    "command_digest": canonical_digest(command[1:]), "status": "PASS" if completed.returncode == 0 else "FAIL",
-                    "returncode": completed.returncode, "output": _compact_process_output(completed.stdout),
-                }
-            except subprocess.TimeoutExpired as exc:
-                result = {
-                    "role": role, "topic": profile["camera_topics"][role],
-                    "command_digest": canonical_digest(command[1:]), "status": "TIMEOUT", "returncode": None,
-                    "output": _compact_process_output(exc.stdout),
-                }
-            roles.append(result)
-            all_passed = all_passed and result["status"] == "PASS"
-        attempts.append({"attempt": attempt, "roles": roles, "status": "PASS" if all_passed else "FAIL"})
-        if all_passed:
-            evidence = {
-                "schema_version": "data_factory.camera_warmup.v1", "run_id": payload["run_id"],
-                "camera_profile": payload["camera_profile"], "attempts": attempts,
+    def measure(role):
+        command = [
+            sys.executable, str(ROOT / "tools/measure_ros_topic_age.py"),
+            "--image", profile["camera_topics"][role],
+            "--duration", str(CAMERA_WARMUP_DURATION_S),
+            "--expected-image-hz", str(profile["fps"]),
+            "--min-image-fps-ratio", str(LIVE_CAMERA_MIN_FPS_RATIO),
+            "--max-image-age-ms", str(CAMERA_WARMUP_MAX_AGE_MS),
+            "--image-qos-depth", str(profile["image_qos_depth"]),
+        ]
+        if profile["image_qos"] == "reliable":
+            command.append("--reliable-image")
+        try:
+            completed = subprocess.run(
+                command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                text=True, timeout=CAMERA_WARMUP_TIMEOUT_S,
+            )
+            return {
+                "role": role, "topic": profile["camera_topics"][role],
+                "command_digest": canonical_digest(command[1:]),
+                "status": "PASS" if completed.returncode == 0 else "FAIL",
+                "returncode": completed.returncode,
+                "output": _compact_process_output(completed.stdout),
             }
-            write_json_atomic(_run_dir(payload) / "camera_warmup.json", evidence)
-            return evidence
+        except subprocess.TimeoutExpired as exc:
+            return {
+                "role": role, "topic": profile["camera_topics"][role],
+                "command_digest": canonical_digest(command[1:]),
+                "status": "TIMEOUT", "returncode": None,
+                "output": _compact_process_output(exc.stdout),
+            }
+
+    attempts = []
+    camera_roles = profile["camera_roles"]
+    with ThreadPoolExecutor(
+        max_workers=len(camera_roles), thread_name_prefix="camera-probe",
+    ) as pool:
+        for attempt in range(1, CAMERA_WARMUP_ATTEMPTS + 1):
+            if cancel.is_set():
+                break
+            futures = [pool.submit(measure, role) for role in camera_roles]
+            roles = [future.result() for future in futures]
+            all_passed = all(result["status"] == "PASS" for result in roles)
+            attempts.append({
+                "attempt": attempt, "roles": roles,
+                "status": "PASS" if all_passed else "FAIL",
+            })
+            if all_passed:
+                evidence = {
+                    "schema_version": "data_factory.camera_warmup.v1",
+                    "run_id": payload["run_id"],
+                    "camera_profile": payload["camera_profile"],
+                    "attempts": attempts,
+                }
+                write_json_atomic(
+                    _run_dir(payload) / "camera_warmup.json", evidence,
+                )
+                return evidence
     evidence = {
         "schema_version": "data_factory.camera_warmup.v1", "run_id": payload["run_id"],
         "camera_profile": payload["camera_profile"], "attempts": attempts,
@@ -664,9 +682,33 @@ def _operator_summary(result):
         raise ContractError("OPERATOR_SUMMARY_SCHEMA")
     if not isinstance(summary["speed"], dict) or not summary["speed"]:
         raise ContractError("OPERATOR_SUMMARY_SCHEMA")
-    if summary["flow"] not in (
+    plan = envelope.get("plan")
+    steps = plan.get("steps") if isinstance(plan, Mapping) else None
+    markers = [
+        step.get("phase") for step in steps or []
+        if isinstance(step, Mapping)
+        and step.get("pause_after") == "SEMANTIC_VERDICT"
+    ]
+    boundary = markers[0] if len(markers) == 1 else None
+    if boundary is None and isinstance(summary.get("recycle"), Mapping):
+        boundary = summary["recycle"].get("recording_boundary_after")
+    if boundary is None and isinstance(summary.get("flow"), Mapping):
+        continuous = summary["flow"].get("continuous_through")
+        if continuous in {"LIFT_LIN", "RETREAT_LIN"}:
+            boundary = continuous
+    allowed_boundaries = {
+        get_task_recipe(task_id)["recording_boundary"] for task_id in TASK_IDS
+    }
+    expected_flow = {
+        "continuous_through": boundary,
+        "next_human_hold": (
+            "POST_LIFT_SEMANTIC" if boundary == "LIFT_LIN"
+            else "POST_RETREAT_SEMANTIC"
+        ),
+    }
+    if boundary not in allowed_boundaries or summary["flow"] not in (
         {"continuous_through": "APPROACH_STOP_LIN", "next_human_hold": "PRECONTACT_HUMAN"},
-        {"continuous_through": "LIFT_LIN", "next_human_hold": "POST_LIFT_SEMANTIC"},
+        expected_flow,
     ):
         raise ContractError("OPERATOR_SUMMARY_SCHEMA")
     if not isinstance(summary["clearance"], dict) or summary["clearance"].get("status") != "COLLISION_CHECKED_NO_DISTANCE":
@@ -676,7 +718,7 @@ def _operator_summary(result):
         if (
             not isinstance(recycle, dict)
             or set(recycle) != {"recording_boundary_after", "path", "release_slot_id", "release_target", "safe_staging_joint_positions_rad", "plan_digest"}
-            or recycle["recording_boundary_after"] != "LIFT_LIN"
+            or recycle["recording_boundary_after"] != boundary
             or recycle["path"] != ["RECYCLE_APPROACH_PTP", "LOWER_LIN", "GRIPPER_OPEN", "RETREAT_LIN", "SAFE_POSE_PTP"]
             or not all(isinstance(recycle[key], str) and DIGEST.fullmatch(recycle[key]) for key in ("release_slot_id", "plan_digest"))
         ):
@@ -729,16 +771,55 @@ def _release_outcome_landed(evidence):
 def _technical_validator(dataset_root, _payload, profile):
     command = [
         DATA_PYTHON, str(ROOT / "tools/validate_lerobot_dataset.py"), dataset_root,
+        "--repo-id", profile["repo_id"],
         "--expected-fps", str(profile["fps"]), "--require-hil-motion",
-        "--require-alignment-tail",
+        "--require-alignment-tail", "--skip-decoded-image-diagnostics",
     ]
+    episode_index = None
+    if isinstance(_payload, Mapping) and isinstance(_payload.get("run_root"), str) and isinstance(_payload.get("run_id"), str):
+        try:
+            recorder_result = load_json_strict(_run_dir(_payload) / "result.json")
+        except (ContractError, OSError):
+            recorder_result = None
+        if (
+            isinstance(recorder_result, Mapping)
+            and recorder_result.get("schema_version") == "data_factory.recorder_result.v1"
+            and recorder_result.get("state") == "COMMITTED"
+            and type(recorder_result.get("episode_index")) is int
+            and recorder_result["episode_index"] >= 0
+        ):
+            episode_index = recorder_result["episode_index"]
+            command.extend(["--episode-locator-index", str(episode_index)])
     completed = subprocess.run(
         command,
         stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, timeout=180,
     )
+    locator = None
+    locator_ok = episode_index is None
+    if episode_index is not None and completed.returncode == 0:
+        lines = [
+            line.removeprefix(EPISODE_LOCATOR_PREFIX)
+            for line in completed.stdout.splitlines()
+            if line.startswith(EPISODE_LOCATOR_PREFIX)
+        ]
+        if len(lines) == 1:
+            try:
+                candidate = json.loads(lines[0])
+                canonical = build_lerobot_v3_episode_locator(
+                    repo_id=profile["repo_id"],
+                    episode_index=episode_index,
+                    data=candidate.get("data") if isinstance(candidate, Mapping) else None,
+                    videos=candidate.get("videos") if isinstance(candidate, Mapping) else None,
+                )
+                if candidate == canonical:
+                    locator, locator_ok = canonical, True
+            except (ContractError, json.JSONDecodeError, TypeError):
+                pass
+    ok = completed.returncode == 0 and locator_ok
     return {
-        "ok": completed.returncode == 0, "code": "PASS" if completed.returncode == 0 else "FAIL",
+        "ok": ok, "code": "PASS" if ok else "FAIL",
         "result_digest": canonical_digest({"command": command[1:], "returncode": completed.returncode, "output": completed.stdout}),
+        "episode_locator": locator,
     }
 
 
@@ -845,7 +926,9 @@ def write_candidate_admission(
         "run_id": payload["run_id"],
         "operational_gate": "PASS",
         "operational_source": operational_source,
-        "checklist_id": "pickup-v2",
+        "checklist_id": task_review_checklist_id(
+            validated["normalized_job"]["task"],
+        ),
         "review_context_digest": canonical_digest({
             "run_id": payload["run_id"],
             "resolved_job_digest": validated["resolved_job_digest"],
@@ -914,7 +997,7 @@ def review_candidate_admission(
         path.name != "candidate_admission.json"
         or not isinstance(expected_file_digest, str) or not DIGEST.fullmatch(expected_file_digest)
         or not isinstance(expected_review_context_digest, str) or not DIGEST.fullmatch(expected_review_context_digest)
-        or checklist_id != "pickup-v2"
+        or checklist_id not in TASK_REVIEW_CHECKLIST_IDS
         or semantic_status not in {"PASS", "FAIL", "UNCERTAIN"}
         or not isinstance(reviewed_by, str) or reviewed_by == "HUMAN" or not SAFE_ID.fullmatch(reviewed_by)
         or (semantic_status == "PASS" and reason is not None)
@@ -965,6 +1048,7 @@ def _campaign_candidate_reviews(campaign, tty_decision=_tty_decision):
     review_enabled = True
     for index, episode in enumerate(campaign["episodes"], 1):
         run = episode["run"]
+        checklist_id = task_review_checklist_id(run["job"]["task"])
         run_dir = _run_dir(run)
         path = run_dir / "candidate_admission.json"
         technical = _load(run_dir / "technical_validator.json", "CANDIDATE_REVIEW_IO")
@@ -984,7 +1068,7 @@ def _campaign_candidate_reviews(campaign, tty_decision=_tty_decision):
             or current.get("run_id") != run["run_id"]
             or current.get("operational_gate") != "PASS"
             or current.get("operational_source") not in {"HUMAN_GATED", "HIL_PROXY"}
-            or current.get("checklist_id") != "pickup-v2"
+            or current.get("checklist_id") != checklist_id
             or current.get("review_context_digest") != expected_context
             or current.get("semantic_status") not in {"PENDING", "PASS", "FAIL", "UNCERTAIN"}
             or pending and any(current.get(key) is not None for key in ("reviewed_by", "reviewed_at", "reason"))
@@ -1009,7 +1093,8 @@ def _campaign_candidate_reviews(campaign, tty_decision=_tty_decision):
                     reason = None if decision == "PASS" else tty_decision("Choose the primary review reason", CANDIDATE_REVIEW_REASONS)
                     current = review_candidate_admission(
                         path, expected_file_digest=current_digest,
-                        expected_review_context_digest=expected_context, checklist_id="pickup-v2",
+                        expected_review_context_digest=expected_context,
+                        checklist_id=checklist_id,
                         semantic_status=decision, reviewed_by=run["job"]["operator_or_agent_id"], reason=reason,
                     )
                     current_digest = canonical_digest(current)
@@ -1222,7 +1307,7 @@ def _lerobot_v3_episode_locator(dataset_root, repo_id, episode_index):
 
 def _write_episode_ledger(
     payload, validated, profile, lifecycle, storage_reference,
-    episode_binding, ledger_context,
+    episode_binding, ledger_context, *, episode_locator=None,
 ):
     """Compile the immutable postcommit join from the existing owner artifacts."""
     context = _validate_episode_ledger_context(
@@ -1296,8 +1381,9 @@ def _write_episode_ledger(
             "dataset_digest": dataset_digest,
         },
         artifacts=artifacts,
-        episode_locator=_lerobot_v3_episode_locator(
-            dataset_root, profile["repo_id"], episode_index,
+        episode_locator=(
+            _lerobot_v3_episode_locator(dataset_root, profile["repo_id"], episode_index)
+            if episode_locator is None else episode_locator
         ),
     )
     path = run_dir / "episode_ledger.json"
@@ -1562,9 +1648,8 @@ def run_live(payload, cancel, publish, *, resolver=resolve_inputs, executor_fact
             return _response(ok=False, code="CELL_NOT_READY", state="BLOCKED", run_id=payload["run_id"])
         _prepare_run_dir(payload)
         publish(_response(
-            ok=True, code="CAMERA_WARMUP", state="PREPARING",
-            run_id=payload["run_id"],
-            data={"mode": "live", "progress": 25 if bound_runtime else 5},
+            ok=True, code="PLANNING", state="PLANNING",
+            run_id=payload["run_id"], data={"mode": "live", "progress": 10},
         ))
         warmup_pool = ThreadPoolExecutor(
             max_workers=1, thread_name_prefix="camera-warmup",
@@ -1573,8 +1658,9 @@ def run_live(payload, cancel, publish, *, resolver=resolve_inputs, executor_fact
             camera_warmup_call, payload, profile, cancel,
         )
         publish(_response(
-            ok=True, code="PLANNING", state="PLANNING",
-            run_id=payload["run_id"], data={"mode": "live", "progress": 10},
+            ok=True, code="CAMERA_WARMUP", state="PREPARING",
+            run_id=payload["run_id"],
+            data={"mode": "live", "progress": 25 if bound_runtime else 5},
         ))
         timeout_s = _timeout_s(program)
         executor = (
@@ -1915,6 +2001,7 @@ def run_live(payload, cancel, publish, *, resolver=resolve_inputs, executor_fact
                         ledger_reference = _write_episode_ledger(
                             payload, validated, profile, job, storage_reference,
                             episode_binding, ledger_context,
+                            episode_locator=technical.get("episode_locator"),
                         )
                     except (ContractError, OSError) as exc:
                         postcommit_error = postcommit_error or (
@@ -2037,7 +2124,13 @@ def run_live(payload, cancel, publish, *, resolver=resolve_inputs, executor_fact
                 if result["state"] == "SEMANTIC_VERDICT":
                     publish(_response(
                         ok=True,
-                        code="RECYCLING" if "recycle" in summary else "FINALIZING",
+                        code=(
+                            "RECYCLING"
+                            if summary.get("recycle", {}).get(
+                                "recording_boundary_after"
+                            ) == "LIFT_LIN"
+                            else "FINALIZING"
+                        ),
                         state="RUNNING",
                         run_id=payload["run_id"], plan_digest=planned["plan_digest"],
                         data={"mode": "live", "progress": 70},

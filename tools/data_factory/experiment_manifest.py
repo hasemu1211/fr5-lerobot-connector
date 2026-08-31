@@ -14,7 +14,14 @@ from tools.data_factory.quality.coverage_report import (
     validate_coverage_report,
 )
 from tools.data_factory.training_split import FR5_FEATURE_CONTRACT, GROUPS, validate_program_budget
-from tools.fr5_data_factory import ContractError, DIGEST, SAFE_ID, canonical_digest, normalize_job_spec
+from tools.fr5_data_factory import (
+    TASK_CONTRACTS,
+    ContractError,
+    DIGEST,
+    SAFE_ID,
+    canonical_digest,
+    normalize_job_spec,
+)
 
 
 JOINTS = ("j1", "j2", "j3", "j4", "j5", "j6")
@@ -206,7 +213,7 @@ def _fixed_contract(value: object) -> dict[str, Any]:
     result = copy.deepcopy(dict(value))
     if (
         result["schema_version"] != "data_factory.fr5_fixed_contract.v1"
-        or result["task"] != "pickup_e2e"
+        or result["task"] not in TASK_CONTRACTS
         or result["motion_recipe"] != "DIRECT"
         or not (
             result["feature_contract"] == FR5_FEATURE_CONTRACT

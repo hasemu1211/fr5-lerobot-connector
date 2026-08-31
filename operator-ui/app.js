@@ -42,6 +42,9 @@ const escapeHtml = (value) => String(value).replace(/[&<>"']/g, (character) => (
   "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
 })[character]);
 const message = (group, key, fallback = "확인 필요") => MESSAGE_CATALOG[group]?.[key] ?? fallback;
+const isPickPlace = (view) => view?.draft?.selection?.task === "pick_place";
+const spatialNodeCount = (view) => view.draft.requested_count + Number(isPickPlace(view));
+const poseText = (pose) => `X ${pose.x_mm} · Y ${pose.y_mm} · ${pose.yaw_deg}°`;
 const operatorToken = () => document.querySelector('meta[name="operator-token"]')?.content.trim() ?? "";
 const tokenHeaders = () => {
   const token = operatorToken();
@@ -113,13 +116,15 @@ function validateView(value) {
         || pose.place_id !== view.draft.selection.workspace
         || ![pose.x_mm, pose.y_mm, pose.yaw_deg].every(Number.isFinite)))) throw new TypeError("DIRECT_POSES_INVALID");
   if (view.draft.direct_pairs !== undefined && (!Array.isArray(view.draft.direct_pairs)
-      || view.draft.direct_pairs.some((pair) => !pair || typeof pair !== "object" || Array.isArray(pair)
-        || typeof pair.start_pose_id !== "string" || !pair.start_pose_id
+      || view.draft.direct_pairs.length > spatialNodeCount(view)
+      || view.draft.direct_pairs.some((pair, index, pairs) => !pair || typeof pair !== "object" || Array.isArray(pair)
+        || !(typeof pair.start_pose_id === "string" && pair.start_pose_id
+          || isPickPlace(view) && pair.start_pose_id === null && index === pairs.length - 1)
         || pair.place_id !== view.draft.selection.workspace
         || ![pair.x_mm, pair.y_mm, pair.yaw_deg].every(Number.isFinite)))) throw new TypeError("DIRECT_PAIRS_INVALID");
   if (view.draft.direct_pairs !== undefined && view.start_pose_setup) {
     const selectedStartIds = new Set(view.start_pose_setup.selected_start_pose_ids);
-    if (view.draft.direct_pairs.some((pair) => !selectedStartIds.has(pair.start_pose_id))) throw new TypeError("DIRECT_PAIRS_INVALID");
+    if (view.draft.direct_pairs.some((pair) => pair.start_pose_id !== null && !selectedStartIds.has(pair.start_pose_id))) throw new TypeError("DIRECT_PAIRS_INVALID");
   }
   if (view.state_space_summary && (view.state_space_summary.planned_count !== view.draft.requested_count
       || view.start_pose_setup && view.state_space_summary.selected_start_pose_count !== view.start_pose_setup.selected_start_pose_ids.length
@@ -160,12 +165,21 @@ function validateView(value) {
       || view.episode_history.some((item) => !item || typeof item !== "object" || Array.isArray(item)
         || item.result_digest !== undefined && !DIGEST_PATTERN.test(item.result_digest)))) throw new TypeError("EPISODE_HISTORY_INVALID");
   const sequence = view.coverage?.sequence;
-  if (sequence !== undefined && (!Array.isArray(sequence) || sequence.some((item, index) => !item
-      || typeof item !== "object" || Array.isArray(item) || item.order_index !== index + 1
-      || item.place_id !== view.draft.selection.workspace
-      || item.start_pose_id !== undefined && (typeof item.start_pose_id !== "string" || !item.start_pose_id)
-      || ![item.x_mm, item.y_mm, item.yaw_deg].every(Number.isFinite)
-      || !DIGEST_PATTERN.test(item.coverage_condition_digest)))) throw new TypeError("COVERAGE_SEQUENCE_INVALID");
+  if (sequence !== undefined) {
+    if (!Array.isArray(sequence)) throw new TypeError("COVERAGE_SEQUENCE_INVALID");
+    sequence.forEach((item, index) => {
+      const destination = item?.destination_pose;
+      if (!item || typeof item !== "object" || Array.isArray(item) || item.order_index !== index + 1
+          || item.place_id !== view.draft.selection.workspace
+          || item.start_pose_id !== undefined && (typeof item.start_pose_id !== "string" || !item.start_pose_id)
+          || ![item.x_mm, item.y_mm, item.yaw_deg].every(Number.isFinite)
+          || !DIGEST_PATTERN.test(item.coverage_condition_digest)
+          || destination !== undefined && (!destination || typeof destination !== "object" || Array.isArray(destination)
+            || destination.place_id !== view.draft.selection.workspace
+            || ![destination.x_mm, destination.y_mm, destination.yaw_deg].every(Number.isFinite)
+            || !DIGEST_PATTERN.test(item.task_binding_digest))) throw new TypeError("COVERAGE_SEQUENCE_INVALID");
+    });
+  }
   if (view.candidate_review !== undefined && view.candidate_review !== null) {
     assertObject(view.candidate_review, "CANDIDATE_REVIEW_INVALID");
     if (!DIGEST_PATTERN.test(view.candidate_review.review_binding_digest)
@@ -283,7 +297,7 @@ function setBanner(text, tone = "info", announce = true) {
 }
 
 function humanReason(code) {
-  return message("reason", code, "현재 사용할 수 없습니다");
+  return message("reason", code, typeof code === "string" && code ? code : "확인 필요");
 }
 
 function renderTechnical(rows) {
@@ -325,7 +339,6 @@ function workflowStep(view) {
   if (state === "PREPARING" || !setupReady(view) || view.available_ops.includes("recover_camera_setup")) return "environment";
   if (state === "AUTHORING") return "plan";
   if (["REVIEW_CAMPAIGN", "AWAITING_APPROVAL"].includes(state)) return "review";
-  if (view.candidate_review?.status === "PENDING") return "results";
   if (["RUNNING", "CANCELLING", "PAUSED_AWAITING_OPERATOR", "BLOCKED"].includes(state)) return "execution";
   if (state === "REVIEW_RESULTS"
       || (state === "TERMINAL" && view.episode_history?.length)) return "results";
@@ -527,6 +540,7 @@ function directPoseDomain(view) {
 function renderCurrentObjectPose(view, editable) {
   const domain = directPoseDomain(view);
   const pose = view.draft.current_object_pose;
+  const pickPlace = isPickPlace(view);
   const fields = [
     ["#current-object-x", pose.x_mm, domain?.x_mm],
     ["#current-object-y", pose.y_mm, domain?.y_mm],
@@ -545,9 +559,13 @@ function renderCurrentObjectPose(view, editable) {
     }
     input.disabled = !editable || !domain;
   });
+  document.querySelector("#current-object-title").textContent = pickPlace
+    ? "물체 출발점 (SOURCE)" : "지금 놓인 물체";
+  document.querySelector("#apply-current-object").textContent = pickPlace
+    ? "출발점 적용" : "현재 위치 적용";
   document.querySelector("#apply-current-object").disabled = !editable || !domain;
   document.querySelector("#current-object-status").textContent = domain
-    ? `${selectedLabel(view, "workspace")} · 첫 에피소드와 작업영역 초기화가 이 위치에서 시작합니다.`
+    ? `작성안 r${view.draft.revision} · ${selectedLabel(view, "workspace")} · ${pickPlace ? "첫 에피소드의 물체 출발점입니다. 로봇 시작 자세와는 별도입니다." : "첫 에피소드와 작업영역 초기화가 이 위치에서 시작합니다."}`
     : "현재 작업영역의 입력 범위를 사용할 수 없습니다.";
 }
 
@@ -556,6 +574,7 @@ function renderDirectPoseEditor(view, editable) {
   const direct = view.draft.authoring_mode === "DIRECT_EDIT";
   const domain = directPoseDomain(view);
   const pairMode = Array.isArray(view.draft.direct_pairs);
+  const pickPlace = isPickPlace(view);
   const startProfiles = selectedStartPoseProfiles(view);
   const enabled = direct && editable && Boolean(domain) && (!pairMode || startProfiles.length > 0);
   editor.hidden = !direct;
@@ -584,24 +603,49 @@ function renderDirectPoseEditor(view, editable) {
   const poses = view.draft.direct_poses ?? [];
   const anchor = view.draft.current_object_pose;
   const required = pairMode ? pairs.length : 1 + poses.length;
+  const requiredNodes = spatialNodeCount(view);
+  const terminalExists = pairMode && pairs.some((pair) => pair.start_pose_id === null);
+  const addingTerminal = pickPlace && pairMode
+    && required === view.draft.requested_count && !terminalExists;
   const startLabel = document.querySelector("#direct-start-label");
   const startSelect = document.querySelector("#direct-start-select");
-  startLabel.hidden = !pairMode;
+  document.querySelector("#direct-pose-title").textContent = pickPlace
+    ? "출발·도착 위치 직접 입력" : "직접 조건 입력";
+  startLabel.hidden = !pairMode || addingTerminal;
   startSelect.innerHTML = pairMode ? startProfiles.map((profile) => `<option value="${escapeHtml(profile.start_pose_id)}">${escapeHtml(profile.display_name)}</option>`).join("") : "";
-  startSelect.disabled = !enabled;
-  document.querySelector("#add-direct-pose").disabled = !enabled || required >= view.draft.requested_count;
-  document.querySelector("#direct-selection-count").textContent = `${required}개 · 표시 순서대로 실행`;
+  startSelect.disabled = !enabled || addingTerminal;
+  document.querySelector("#add-direct-pose").textContent = addingTerminal
+    ? "마지막 도착점 추가" : pickPlace ? "다음 물체 위치 추가" : "자세 추가";
+  document.querySelector("#add-direct-pose").disabled = !enabled || required >= requiredNodes;
+  document.querySelector("#direct-selection-count").textContent = pickPlace
+    ? `${view.draft.requested_count}개 에피소드 · 물체 위치 ${required}/${requiredNodes}개`
+    : `${required}개 · 표시 순서대로 실행`;
   document.querySelector("#direct-domain-status").textContent = !domain
     ? "현재 작업영역의 직접 입력 범위를 사용할 수 없습니다."
     : pairMode && !startProfiles.length
       ? "수집에 사용할 시작 자세를 먼저 선택하세요."
-    : required > view.draft.requested_count
-      ? `현재 ${required}개 조건이 선택되었습니다. 에피소드 수를 ${required}회 이상으로 늘리거나 조건을 삭제하세요.`
+    : required > requiredNodes
+      ? `현재 ${required}개 위치가 선택되었습니다. 필요한 ${requiredNodes}개에 맞게 삭제하세요.`
+      : pickPlace
+        ? `각 에피소드는 로봇 시작 자세에서 출발점으로 접근해 도착점에 놓습니다. 직전 도착점은 다음 출발점이 됩니다.`
       : pairMode
         ? `시작 자세와 위치·각도를 한 조건으로 추가합니다. 입력 범위: X ${domain.x_mm.minimum}~${domain.x_mm.maximum} mm, Y ${domain.y_mm.minimum}~${domain.y_mm.maximum} mm.`
         : `현재 물체 위치를 첫 조건으로 두고 표시 순서대로 실행합니다. 입력 범위: X ${domain.x_mm.minimum}~${domain.x_mm.maximum} mm, Y ${domain.y_mm.minimum}~${domain.y_mm.maximum} mm.`;
   if (pairMode) {
-    document.querySelector("#direct-pose-list").innerHTML = pairs.length ? pairs.map((pair, index) => `<li><span>${index + 1}</span><strong>${escapeHtml(startPoseLabel(view, pair.start_pose_id))} · X ${escapeHtml(pair.x_mm)} · Y ${escapeHtml(pair.y_mm)} · ${escapeHtml(pair.yaw_deg)}°</strong><button type="button" class="secondary-button" data-pair-index="${index}" aria-label="${index + 1}번째 직접 조건 삭제" ${enabled ? "" : "disabled"}>삭제</button></li>`).join("") : '<li class="empty-pose">선택한 조건이 없습니다.</li>';
+    document.querySelector("#direct-pose-list").innerHTML = pairs.length ? pairs.map((pair, index) => {
+      if (!pickPlace) return `<li><span>${index + 1}</span><strong>${escapeHtml(startPoseLabel(view, pair.start_pose_id))} · ${escapeHtml(poseText(pair))}</strong><button type="button" class="secondary-button" data-pair-index="${index}" aria-label="${index + 1}번째 직접 조건 삭제" ${enabled ? "" : "disabled"}>삭제</button></li>`;
+      const role = index === 0
+        ? "출발점 1"
+        : pair.start_pose_id === null
+          ? `도착점 ${view.draft.requested_count}`
+          : `도착점 ${index} · 다음 출발점 ${index + 1}`;
+      const robotStart = pair.start_pose_id === null
+        ? "" : `로봇 시작: ${startPoseLabel(view, pair.start_pose_id)} · `;
+      const action = index === 0
+        ? "<em>현재 출발점</em>"
+        : `<button type="button" class="secondary-button" data-pair-index="${index}" aria-label="${escapeHtml(role)} 삭제" ${enabled ? "" : "disabled"}>삭제</button>`;
+      return `<li><span>${index + 1}</span><strong>${escapeHtml(`${role} · ${robotStart}${poseText(pair)}`)}</strong>${action}</li>`;
+    }).join("") : '<li class="empty-pose">선택한 위치가 없습니다.</li>';
     return;
   }
   const anchorRow = `<li><span>1</span><strong>${escapeHtml(selectedLabel(view, "start"))} · X ${escapeHtml(anchor?.x_mm ?? 0)} · Y ${escapeHtml(anchor?.y_mm ?? 0)} · ${escapeHtml(anchor?.yaw_deg ?? 0)}°</strong><em>현재 물체 위치</em></li>`;
@@ -617,7 +661,7 @@ function renderCatalog(view) {
   const directPairs = pairMode ? view.draft.direct_pairs : [];
   const directPoses = view.draft.direct_poses ?? [];
   const samePose = (cell, pose) => Boolean(pose) && cell.x_mm === pose.x_mm && cell.y_mm === pose.y_mm && cell.yaw_deg === pose.yaw_deg;
-  const directFull = (pairMode ? directPairs.length : 1 + directPoses.length) >= view.draft.requested_count;
+  const directFull = (pairMode ? directPairs.length : 1 + directPoses.length) >= spatialNodeCount(view);
   CATALOG_AXES.forEach((axis) => {
     const select = document.querySelector(`[data-axis="${axis}"]`);
     const selected = view.draft.selection[axis];
@@ -665,7 +709,8 @@ function renderCatalog(view) {
     const selected = direct
       ? pairMode ? directPairs.some((pair) => samePose(cell, pair)) : samePose(cell, anchor) || directPoses.some((pose) => samePose(cell, pose))
       : ["SELECTED", "PINNED"].includes(cell.selection_state);
-    const fixedAnchor = direct && !pairMode && samePose(cell, anchor);
+    const fixedAnchor = direct && samePose(cell, anchor)
+      && (!pairMode || isPickPlace(view));
     const available = cell.eligibility_status === "ELIGIBLE";
     const disabled = !editable || !direct || !available || fixedAnchor || !selected && directFull;
     const reason = available ? (selected ? "수집에 포함됨" : "선택 가능") : humanReason(cell.reason_codes?.[0]);
@@ -745,16 +790,19 @@ function selectedLabel(view, axis) {
 
 function renderReview(view) {
   const direct = view.draft.authoring_mode === "DIRECT_EDIT";
+  const pickPlace = isPickPlace(view);
   const plannedCells = view.coverage?.cells ?? [];
   const sequence = view.coverage?.sequence ?? [];
   const directConditionCount = Array.isArray(view.draft.direct_pairs)
     ? view.draft.direct_pairs.length : 1 + (view.draft.direct_poses?.length ?? 0);
-  const range = direct
-    ? `${view.draft.requested_count}회 · ${plannedCells.length || directConditionCount}개 조건을 표시 순서로 실행 · ${selectedLabel(view, "split")}`
-    : `${view.draft.requested_count}회 · 조건별 최대 ${view.draft.repeat}회 · ${selectedLabel(view, "split")}`;
+  const range = pickPlace
+    ? `${view.draft.requested_count}회 · ${spatialNodeCount(view)}개 물체 위치를 ${direct ? "직접" : "자동 공간 우선"} 출발→도착 순서로 실행 · ${selectedLabel(view, "split")}`
+    : direct
+      ? `${view.draft.requested_count}회 · ${plannedCells.length || directConditionCount}개 조건을 표시 순서로 실행 · ${selectedLabel(view, "split")}`
+      : `${view.draft.requested_count}회 · 조건별 최대 ${view.draft.repeat}회 · ${selectedLabel(view, "split")}`;
   const rows = [
     ["작업영역", `${selectedLabel(view, "workspace")} · ${selectedLabel(view, "frame")}`],
-    ["현재 물체 위치", `X ${view.draft.current_object_pose.x_mm} · Y ${view.draft.current_object_pose.y_mm} · ${view.draft.current_object_pose.yaw_deg}°`],
+    [pickPlace ? "첫 물체 출발점" : "현재 물체 위치", poseText(view.draft.current_object_pose)],
     ["작업", selectedLabel(view, "task")],
     ["물체와 잡기", `${selectedLabel(view, "object")} · ${selectedLabel(view, "grasp")}`],
     ["로봇 동작", `${selectedLabel(view, "motion")} · ${selectedLabel(view, "variant")}`],
@@ -763,16 +811,31 @@ function renderReview(view) {
     ["수집 범위", range],
     ["데이터 모드", selectedLabel(view, "data_mode")],
   ];
+  const manifestDigest = view.campaign_review?.manifest_digest
+    ?? view.campaign_envelope?.manifest_digest;
+  rows.splice(1, 0, [
+    "실행 계획",
+    manifestDigest
+      ? `작성안 r${view.draft.revision}에서 고정 · ${manifestDigest.slice(0, 19)}…`
+      : `현재 작성안 r${view.draft.revision} · 아직 고정되지 않음`,
+  ]);
   const tuning = view.campaign_review?.gripper_tuning;
   if (tuning) rows.splice(4, 0, [
     "그리퍼 설정",
-    `${tuning.command_percent}% · 허용 피드백 ${tuning.acceptable_feedback_percent.min}–${tuning.acceptable_feedback_percent.max}% · TEST_ONLY 조정 후보`,
+    `${tuning.command_percent}% · 허용 피드백 ${tuning.acceptable_feedback_percent.min}–${tuning.acceptable_feedback_percent.max}%${Number.isInteger(tuning.force_percent) ? ` · 최대 힘 ${tuning.force_percent}%${Number.isInteger(tuning.base_force_percent) && tuning.force_percent !== tuning.base_force_percent ? ` (기준 ${tuning.base_force_percent}%)` : ""}` : ""} · TEST_ONLY 조정 후보`,
   ]);
   if (view.campaign_review?.speed_limit) rows.push(["속도 상한", view.campaign_review.speed_limit]);
   document.querySelector("#review-summary").innerHTML = rows.map(([term, value]) => `<div><dt>${escapeHtml(term)}</dt><dd>${escapeHtml(value)}</dd></div>`).join("");
   const reviewPlan = document.querySelector("#review-plan");
   reviewPlan.hidden = sequence.length === 0;
-  document.querySelector("#review-plan-list").innerHTML = sequence.map((item) => `<li><span>${escapeHtml(item.order_index)}</span><strong>${item.start_pose_id ? `${escapeHtml(startPoseLabel(view, item.start_pose_id))} · ` : ""}X ${escapeHtml(item.x_mm)} · Y ${escapeHtml(item.y_mm)} · ${escapeHtml(item.yaw_deg)}°</strong></li>`).join("");
+  document.querySelector("#review-plan-list").innerHTML = sequence.map((item) => {
+    const start = item.start_pose_id
+      ? `로봇 시작: ${startPoseLabel(view, item.start_pose_id)} · ` : "";
+    const route = item.destination_pose
+      ? `출발 ${poseText(item)} → 도착 ${poseText(item.destination_pose)}`
+      : poseText(item);
+    return `<li><span>${escapeHtml(item.order_index)}</span><strong>${escapeHtml(start + route)}</strong></li>`;
+  }).join("");
   document.querySelector("#review-actions").innerHTML = canIntent("authorize_campaign") ? `<button type="button" data-op="authorize_campaign">${message("action", "authorize_campaign")}</button>` : "";
   document.querySelector("#review-back").disabled = !canIntent("edit_campaign_draft");
 }
@@ -862,9 +925,12 @@ function renderResults(view) {
   }).join("");
 
   const review = view.candidate_review;
+  const reviewQueue = document.querySelector("#review-queue");
   if (!review) {
     const passed = history.filter((item) => (item.technical_evidence?.status ?? item.technical_status) === "PASS").length;
-    document.querySelector("#review-queue").innerHTML = `<div class="notice"><strong>분류 대기 0개</strong><span>${escapeHtml(passed)}개 에피소드가 기술 검사를 통과했습니다. 보존 상태와 학습 사용 승인은 별도입니다.</span></div>`;
+    delete reviewQueue.dataset.reviewBindingDigest;
+    delete reviewQueue.dataset.reviewRenderKey;
+    reviewQueue.innerHTML = `<div class="notice"><strong>분류 대기 0개</strong><span>${escapeHtml(passed)}개 에피소드가 기술 검사를 통과했습니다. 보존 상태와 학습 사용 승인은 별도입니다.</span></div>`;
     return;
   }
   const pending = review.status === "PENDING" && canIntent("review_candidate");
@@ -877,7 +943,16 @@ function renderResults(view) {
       ? `X ${pose.x_mm} · Y ${pose.y_mm} · ${pose.yaw_deg}°`
       : null,
   ].filter(Boolean).join(" · ");
-  document.querySelector("#review-queue").innerHTML = `<section class="review-card" aria-labelledby="review-queue-title"><div><p class="step-number">수집 데이터 분류</p><h3 id="review-queue-title">기술 검사를 통과한 에피소드를 분류하세요.</h3>${context ? `<p>${escapeHtml(context)}</p>` : ""}</div>
+  const reviewRenderKey = JSON.stringify([
+    review.review_binding_digest, review.status, review.queue_remaining,
+    pending, reasons, pose,
+  ]);
+  if (reviewQueue.dataset.reviewRenderKey === reviewRenderKey) return;
+  if (document.activeElement === document.querySelector("#candidate-reason")
+      && reviewQueue.dataset.reviewBindingDigest === review.review_binding_digest) return;
+  reviewQueue.dataset.reviewBindingDigest = review.review_binding_digest;
+  reviewQueue.dataset.reviewRenderKey = reviewRenderKey;
+  reviewQueue.innerHTML = `<section class="review-card" aria-labelledby="review-queue-title"><div><p class="step-number">수집 데이터 분류</p><h3 id="review-queue-title">기술 검사를 통과한 에피소드를 분류하세요.</h3>${context ? `<p>${escapeHtml(context)}</p>` : ""}</div>
     ${pending ? `<label for="candidate-reason">실패 또는 보류 이유<select id="candidate-reason" required><option value="">이유 선택</option>${reasons.map((reason) => `<option value="${escapeHtml(reason)}">${escapeHtml(message("review_reason", reason))}</option>`).join("")}</select></label>
     <div class="admission-actions"><button type="button" data-review-choice="PASS">사용 후보</button><button type="button" data-review-choice="FAIL">제외</button><button type="button" data-review-choice="UNCERTAIN">보류</button></div>` : `<p>${escapeHtml(semanticReviewLabel(review.status))}</p>`}
     <p class="cell-help">이 분류는 데이터의 사후 사용 후보 상태만 기록합니다. 파일 보존과 학습 사용 승인은 바꾸지 않습니다.</p></section>`;
@@ -1136,7 +1211,8 @@ document.querySelector("#cell-grid").addEventListener("click", (event) => {
   const samePose = (pose) => pose && ["x_mm", "y_mm", "yaw_deg"].every((field) => pose[field] === cell[field]);
   if (Array.isArray(currentView.draft.direct_pairs)) {
     const startPoseId = document.querySelector("#direct-start-select").value;
-    const pair = currentView.draft.direct_pairs.find((item) => item.start_pose_id === startPoseId && samePose(item));
+    const pair = currentView.draft.direct_pairs.find((item) => samePose(item)
+      && (isPickPlace(currentView) || item.start_pose_id === startPoseId));
     const nextPair = pair ?? {start_pose_id: startPoseId, place_id: currentView.draft.selection.workspace, x_mm: cell.x_mm, y_mm: cell.y_mm, yaw_deg: cell.yaw_deg};
     return submitIntent("update_draft", {draft_id: currentView.draft.draft_id, [pair ? "remove_pair" : "add_pair"]: nextPair});
   }

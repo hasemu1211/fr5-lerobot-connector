@@ -8,7 +8,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
-from tools.fr5_data_factory import ContractError, DIGEST, SAFE_ID, _cross, _dot, _mul, _sub, _timestamp, _unit, _vec, canonical_digest, load_json_strict, normalize_job_spec, resolve_pose, validate_rigid_transform
+from tools.fr5_data_factory import ContractError, DIGEST, SAFE_ID, _cross, _dot, _mul, _sub, _timestamp, _unit, _vec, canonical_digest, load_json_strict, normalize_job_spec, resolve_pose, task_review_checklist_id, validate_rigid_transform
 from tools.data_factory.quality.coverage_report import CANDIDATE_FIELDS, PLAN_BINDING_DIGEST_FIELDS, RESOLVED_INPUT_DIGEST_FIELDS, STORED_EPISODE_FIELDS, TECHNICAL_FIELDS
 from tools.data_factory.quality.phase_metrics import ATTRIBUTE_SCHEMA, STATUS, quality_attribute
 
@@ -122,7 +122,8 @@ def _object_frame_binding(accepted_episode: Mapping[str, Any], resolved_job: Map
         or admission.get("run_id") != episode_id
         or admission.get("operational_gate") != "PASS"
         or admission.get("operational_source") not in {"HIL_PROXY", "HUMAN_GATED"}
-        or admission.get("checklist_id") != "pickup-v2"
+        or admission.get("checklist_id")
+        != task_review_checklist_id(job["task"])
         or admission.get("semantic_status") != "PASS"
         or not isinstance(admission.get("reviewed_by"), str)
         or admission["reviewed_by"] == "HUMAN"

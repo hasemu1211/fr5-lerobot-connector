@@ -109,6 +109,38 @@ class DataFactoryTest(unittest.TestCase):
         self.assertNotIn("requires_confirmation", program["steps"][2])
         self.assertNotIn("pause_after", program["steps"][3])
         self.assertEqual(program["steps"][4]["pause_after"], "SEMANTIC_VERDICT")
+        pick_place_job = {
+            **self.job,
+            "task": "pick_place",
+            "instruction": "pick up the test object and place it at the destination",
+            "episode_intent": "nominal pick and place",
+        }
+        pick_place_validated = self._validated(job=pick_place_job)
+        pick_place_program = factory.resolve_motion_program(
+            pick_place_validated, qualification, candidate,
+            urdf=urdf, expected_robot_system_id="fr5-lab-a",
+            release_pose={
+                "place_id": "PLACE_A", "yaw_deg": 30,
+                "x_mm": 0, "y_mm": 0,
+            },
+            now=NOW,
+        )
+        self.assertNotIn("pause_after", pick_place_program["steps"][4])
+        self.assertEqual(
+            pick_place_program["steps"][8]["pause_after"],
+            "SEMANTIC_VERDICT",
+        )
+        self.assertEqual(
+            factory.validate_motion_program(pick_place_program),
+            pick_place_program,
+        )
+        with self.assertRaisesRegex(
+            factory.ContractError, "TASK_BINDING_DISTINCT",
+        ):
+            factory.resolve_motion_program(
+                pick_place_validated, qualification, candidate,
+                urdf=urdf, expected_robot_system_id="fr5-lab-a", now=NOW,
+            )
         legacy_program = copy.deepcopy(program)
         legacy_program["steps"][2]["requires_confirmation"] = "PRECONTACT_HUMAN"
         legacy_program["steps"][3]["pause_after"] = "GRASP_VERDICT"
@@ -181,11 +213,24 @@ class DataFactoryTest(unittest.TestCase):
                 with self.assertRaises(factory.ContractError) as caught:
                     factory.load_json_strict(json.dumps(value, allow_nan=True) if isinstance(value,dict) else value)
                 self.assertEqual(caught.exception.code, code)
-        for job, code in (({**self.job,"extra":1},"JOB_KEYS"), ({key:value for key,value in self.job.items() if key!="x_mm"},"JOB_KEYS"), ({**self.job,"task":"pick_place"},"JOB_TASK"), ({**self.job,"grasp_profile_id":"bad/id"},"JOB_ID"), ({**self.job,"instruction":"bad\ninstruction"},"JOB_TEXT"), ({**self.job,"x_mm":float("nan")},"JOB_NUMBER"), ({**self.job,"approval_expiry":"2026-08-15 00:00:00Z"},"JOB_EXPIRY"), ({**self.job,"approval_expiry":"2026-08-13T00:00:00Z"},"JOB_EXPIRED")):
+        for job, code in (({**self.job,"extra":1},"JOB_KEYS"), ({key:value for key,value in self.job.items() if key!="x_mm"},"JOB_KEYS"), ({**self.job,"task":"unsupported"},"JOB_TASK"), ({**self.job,"grasp_profile_id":"bad/id"},"JOB_ID"), ({**self.job,"instruction":"bad\ninstruction"},"JOB_TEXT"), ({**self.job,"x_mm":float("nan")},"JOB_NUMBER"), ({**self.job,"approval_expiry":"2026-08-15 00:00:00Z"},"JOB_EXPIRY"), ({**self.job,"approval_expiry":"2026-08-13T00:00:00Z"},"JOB_EXPIRED")):
             with self.subTest(code=code):
                 with self.assertRaises(factory.ContractError) as caught: factory.normalize_job_spec(job,now=NOW)
                 self.assertEqual(caught.exception.code,code)
         self._error("JOB_TEXT", job={**self.job, "instruction": "pick up another object"})
+        pick_place = {
+            **self.job,
+            "task": "pick_place",
+            "instruction": "pick up the test object and place it at the destination",
+            "episode_intent": "nominal pick and place",
+        }
+        self.assertEqual(
+            self._validated(job=pick_place)["normalized_job"], pick_place,
+        )
+        self._error(
+            "JOB_TEXT",
+            job={**pick_place, "instruction": self.job["instruction"]},
+        )
         offset_job = {**self.job, "approval_expiry": "2099-01-01T09:00:00+09:00"}
         self.assertEqual(factory.normalize_job_spec(offset_job, now=NOW)["approval_expiry"], self.job["approval_expiry"])
         self.assertEqual(factory.normalize_job_spec({**self.job, "grasp_profile_id": "another-safe-profile"}, now=NOW)["grasp_profile_id"], "another-safe-profile")
@@ -463,6 +508,19 @@ class DataFactoryTest(unittest.TestCase):
         piped = subprocess.run(validate, input=by_xy.stdout, text=True, capture_output=True)
         self.assertEqual(piped.returncode, 0, piped.stderr)
         self.assertEqual(json.loads(piped.stdout)["normalized_job"], continuous_job)
+
+        pick_place = subprocess.run(
+            base + ["--task", "pick_place", "--point-id", "GRID_1"],
+            text=True, capture_output=True,
+        )
+        self.assertEqual(pick_place.returncode, 0, pick_place.stderr)
+        expected_pick_place = {
+            **self.job,
+            "task": "pick_place",
+            "instruction": "pick up the test object and place it at the destination",
+            "episode_intent": "nominal pick and place",
+        }
+        self.assertEqual(json.loads(pick_place.stdout), expected_pick_place)
 
     def test_build_job_rejects_missing_conflicting_and_unknown_points(self):
         selected = self._write("selected.json", self.selected)

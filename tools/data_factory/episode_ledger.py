@@ -15,7 +15,8 @@ from typing import Any, Mapping
 
 from tools.data_factory.quality.coverage_report import CANDIDATE_FIELDS, TECHNICAL_FIELDS
 from tools.fr5_data_factory import (
-    ContractError, DIGEST, RFC3339, SAFE_ID, canonical_digest, load_json_strict,
+    ContractError, DIGEST, RFC3339, SAFE_ID, TASK_REVIEW_CHECKLIST_IDS,
+    canonical_digest, load_json_strict,
 )
 
 
@@ -783,7 +784,7 @@ def _candidate_review(
         or candidate["run_id"] != run_id
         or candidate["operational_gate"] != "PASS"
         or candidate["operational_source"] not in {"HIL_PROXY", "HUMAN_GATED"}
-        or candidate["checklist_id"] != "pickup-v2"
+        or candidate["checklist_id"] not in TASK_REVIEW_CHECKLIST_IDS
         or candidate["review_context_digest"] != review_context_digest
         or semantic not in {"PENDING", "PASS", "FAIL", "UNCERTAIN"}
     ):

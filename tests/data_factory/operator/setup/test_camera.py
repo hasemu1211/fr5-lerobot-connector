@@ -196,6 +196,16 @@ class CameraRoleSetupTests(unittest.TestCase):
             ),
             [],
         )
+        transient = mock.Mock(side_effect=[FileNotFoundError(), completed])
+        with mock.patch(
+            "tools.data_factory.operator.setup.camera.time.sleep",
+        ) as retry_wait:
+            self.assertEqual(
+                query_realsense_serials(command_call=transient),
+                ["254622073507"],
+            )
+        self.assertEqual(transient.call_count, 2)
+        retry_wait.assert_called_once_with(0.5)
         with tempfile.TemporaryDirectory() as directory:
             repository = Path(directory)
             profiles = repository / "config/data_factory/collection_profiles"

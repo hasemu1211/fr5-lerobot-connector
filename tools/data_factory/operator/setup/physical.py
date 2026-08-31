@@ -14,11 +14,16 @@ import signal
 import stat
 import subprocess
 import sys
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
 
-from tools.data_factory.operator.setup.camera import discover_uvc_device_ids
+from tools.data_factory.operator.setup.camera import (
+    REALSENSE_QUERY_RETRY_DELAYS,
+    discover_uvc_device_ids,
+)
 from tools.data_factory.operator.setup.contracts import (
     gripper_setup_projection,
     normalize_camera_devices,
@@ -47,6 +52,8 @@ CAMERA_PROFILES = {
     "up-side": ("up", "side"),
     "up-wrist": ("up", "wrist"),
 }
+ROS_DISCOVERY_SPIN_SECONDS = "2"
+ROS_PARAMETER_DISCOVERY_SPIN_SECONDS = "0.2"
 
 
 class PhysicalOperatorEnvironment(OperatorEnvironment):
@@ -109,8 +116,22 @@ def _default_command(argv: tuple[str, ...]) -> str:
             argv, text=True, capture_output=True, timeout=4.0, check=False,
         )
     except (OSError, subprocess.TimeoutExpired) as exc:
+        print(json.dumps({
+            "event": "operator_environment_query_failed",
+            "argv": list(argv),
+            "failure": (
+                "TIMEOUT" if isinstance(exc, subprocess.TimeoutExpired)
+                else type(exc).__name__
+            ),
+        }, sort_keys=True), file=sys.stderr, flush=True)
         raise ContractError("OPERATOR_ENVIRONMENT_QUERY_FAILED") from exc
     if completed.returncode != 0:
+        print(json.dumps({
+            "event": "operator_environment_query_failed",
+            "argv": list(argv),
+            "failure": "NONZERO_EXIT",
+            "returncode": completed.returncode,
+        }, sort_keys=True), file=sys.stderr, flush=True)
         raise ContractError("OPERATOR_ENVIRONMENT_QUERY_FAILED")
     return completed.stdout
 
@@ -285,7 +306,9 @@ def build_physical_operator_environment(
     camera_devices: Mapping[str, Mapping[str, str]],
     command_call: Callable[[tuple[str, ...]], str] = _default_command,
     process_factory: Callable[[tuple[str, ...]], object] | None = None,
-    gripper_readback_call: Callable[[], Mapping[str, object]],
+    gripper_readback_call: Callable[
+        [set[str] | None, str | None], Mapping[str, object]
+    ],
     gripper_maintenance_call: Callable[[Mapping[str, object]], Mapping[str, object]],
     settle_policy: Callable[[Callable[[], bool]], bool] = bounded_settle,
     controller_ip: str | None = None,
@@ -308,6 +331,7 @@ def build_physical_operator_environment(
     if not callable(spawn):
         raise ContractError("OPERATOR_PHYSICAL_ENVIRONMENT_INPUT")
     owned_children: dict[str, object] = {}
+    discovery_lock = threading.Lock()
 
     def owned_running(name: str) -> bool:
         process = owned_children.get(name)
@@ -316,28 +340,55 @@ def build_physical_operator_environment(
     def nodes() -> set[str]:
         return {
             line.strip()
-            for line in command_call(("ros2", "node", "list", "--no-daemon")).splitlines()
+            for line in command_call((
+                "ros2", "node", "list", "--no-daemon",
+                "--spin-time", ROS_DISCOVERY_SPIN_SECONDS,
+            )).splitlines()
             if line.strip().startswith("/")
         }
 
     def topics() -> set[str]:
         return {
             line.strip()
-            for line in command_call(("ros2", "topic", "list", "--no-daemon")).splitlines()
+            for line in command_call((
+                "ros2", "topic", "list", "--no-daemon",
+                "--spin-time", ROS_DISCOVERY_SPIN_SECONDS,
+            )).splitlines()
             if line.strip().startswith("/")
         }
 
-    def controllers() -> set[str]:
-        return {
-            fields[0]
-            for line in command_call(("ros2", "control", "list_controllers")).splitlines()
-            if (fields := line.split()) and "active" in fields
-        }
+    def controller_listing() -> str:
+        return command_call(("ros2", "control", "list_controllers"))
 
     def parameter(node: str, name: str) -> str:
         return command_call((
             "ros2", "param", "get", node, name, "--hide-type", "--no-daemon",
         )).strip().strip('"')
+
+    def parameters(node: str) -> Mapping[str, Any]:
+        try:
+            import yaml
+        except ImportError as exc:
+            raise ContractError("OPERATOR_ENVIRONMENT_CAMERA_BINDING") from exc
+        argv = (
+            "ros2", "param", "dump", node, "--no-daemon",
+            "--spin-time", ROS_PARAMETER_DISCOVERY_SPIN_SECONDS,
+            "--timeout", "2",
+        )
+        try:
+            try:
+                output = command_call(argv)
+            except ContractError as exc:
+                if exc.code != "OPERATOR_ENVIRONMENT_QUERY_FAILED":
+                    raise
+                output = command_call(argv)
+            document = yaml.safe_load(output)
+            values = document[node]["ros__parameters"]
+        except (KeyError, TypeError, yaml.YAMLError) as exc:
+            raise ContractError("OPERATOR_ENVIRONMENT_CAMERA_BINDING") from exc
+        if not isinstance(values, Mapping):
+            raise ContractError("OPERATOR_ENVIRONMENT_CAMERA_BINDING")
+        return values
 
     def camera_target(node: str) -> Path:
         value = parameter(node, "video_device")
@@ -347,14 +398,27 @@ def build_physical_operator_environment(
             raise ContractError("OPERATOR_ENVIRONMENT_CAMERA_BINDING") from exc
 
     def realsense_present(serial: str) -> bool:
-        output = command_call(("rs-enumerate-devices", "-s", "--no-dds"))
+        for attempt in range(len(REALSENSE_QUERY_RETRY_DELAYS) + 1):
+            try:
+                output = command_call(("rs-enumerate-devices", "-s", "--no-dds"))
+                break
+            except ContractError as exc:
+                if (
+                    exc.code != "OPERATOR_ENVIRONMENT_QUERY_FAILED"
+                    or attempt == len(REALSENSE_QUERY_RETRY_DELAYS)
+                ):
+                    raise
+                time.sleep(REALSENSE_QUERY_RETRY_DELAYS[attempt])
         return re.search(
             rf"(?<![A-Za-z0-9_.-]){re.escape(serial)}(?![A-Za-z0-9_.-])",
             output,
         ) is not None
 
     def node_publishes(node: str, topic: str) -> bool:
-        output = command_call(("ros2", "node", "info", node, "--no-daemon"))
+        output = command_call((
+            "ros2", "node", "info", node, "--no-daemon",
+            "--spin-time", ROS_DISCOVERY_SPIN_SECONDS,
+        ))
         return any(
             line.strip() == f"{topic}: sensor_msgs/msg/Image"
             for line in output.splitlines()
@@ -397,47 +461,65 @@ def build_physical_operator_environment(
                     for item in graph
                     if item.startswith("/camera/") and item.count("/") == 2
                 )
+            if (
+                owned_running("camera") and not role_nodes
+                and topic in graph_topics and not occupied and present
+            ):
+                return "MISSING"
             return (
                 "AMBIGUOUS"
                 if role_nodes or topic in graph_topics or occupied or not present
                 else "MISSING"
             )
-        if topic not in graph_topics or not node_publishes(node, topic):
-            return "AMBIGUOUS"
+        if topic not in graph_topics:
+            return "MISSING" if owned_running("camera") else "AMBIGUOUS"
+        publishes = node_publishes(node, topic)
+        if not publishes:
+            return "MISSING" if owned_running("camera") else "AMBIGUOUS"
+        node_parameters = parameters(node)
         if spec["kind"] == "UVC":
+            value = node_parameters.get("video_device")
+            try:
+                target = Path(value).resolve(strict=True) if isinstance(value, str) else None
+            except OSError as exc:
+                raise ContractError("OPERATOR_ENVIRONMENT_CAMERA_BINDING") from exc
             return (
                 "READY"
-                if uvc_present(spec) and camera_target(node) == spec["target"]
+                if uvc_present(spec) and target == spec["target"]
                 else "AMBIGUOUS"
             )
-        serial = parameter(node, "serial_no").lstrip("_")
-        color = parameter(node, "enable_color").lower()
-        depth = parameter(node, "enable_depth").lower()
+        serial = node_parameters.get("serial_no")
         return (
             "READY"
-            if serial == spec["stable_id"] and color == "true" and depth == "false"
+            if (
+                isinstance(serial, str)
+                and serial.lstrip("_") == spec["stable_id"]
+                and node_parameters.get("enable_color") is True
+                and node_parameters.get("enable_depth") is False
+            )
             else "AMBIGUOUS"
         )
 
-    def discover() -> dict[str, dict[str, object]]:
-        graph = nodes()
+    def motion_state(graph: set[str]) -> dict[str, dict[str, object]]:
         has_manager = "/controller_manager" in graph
         has_command_server = "/fr_command_server" in graph
-        motion: dict[str, dict[str, object]]
         if has_command_server:
-            motion = {
+            return {
                 name: {"state": "AMBIGUOUS", "owner": None}
                 for name in ("robot", "controller", "gripper")
             }
-        elif has_manager:
-            active = controllers()
+        if has_manager:
+            listing = controller_listing()
+            active = _controller_names(listing)
             if EXPECTED_CONTROLLERS <= active:
-                projection = gripper_setup_projection(gripper_readback_call())
+                projection = gripper_setup_projection(
+                    gripper_readback_call(graph, listing),
+                )
                 gripper_state = {
                     "ATTACHED": "READY",
                     "MAINTENANCE_APPROVAL_REQUIRED": "SETUP_REQUIRED",
                 }.get(projection["state"], "AMBIGUOUS")
-                motion = {
+                return {
                     "robot": {"state": "READY", "owner": MOTION_OWNER},
                     "controller": {"state": "READY", "owner": MOTION_OWNER},
                     "gripper": {
@@ -447,21 +529,16 @@ def build_physical_operator_environment(
                 }
             else:
                 state = "MISSING" if owned_running("motion") else "AMBIGUOUS"
-                motion = {
+                return {
                     name: {"state": state, "owner": None}
                     for name in ("robot", "controller", "gripper")
                 }
-        else:
-            motion = {
-                name: {"state": "MISSING", "owner": None}
-                for name in ("robot", "controller", "gripper")
-            }
+        return {
+            name: {"state": "MISSING", "owner": None}
+            for name in ("robot", "controller", "gripper")
+        }
 
-        graph_topics = topics()
-        camera_states = [
-            role_camera_state(spec, graph, graph_topics)
-            for spec in camera_config["specs"]
-        ]
+    def camera_state(camera_states: Sequence[str]) -> dict[str, object]:
         state = (
             "MISSING" if not camera_states
             else "READY" if all(item == "READY" for item in camera_states)
@@ -472,11 +549,33 @@ def build_physical_operator_environment(
             )
             else "AMBIGUOUS"
         )
-        motion["camera"] = {
+        return {
             "state": state,
             "owner": CAMERA_OWNER if state == "READY" else None,
         }
-        return motion
+
+    def discover() -> dict[str, dict[str, object]]:
+        with discovery_lock:
+            with ThreadPoolExecutor(
+                max_workers=2, thread_name_prefix="operator-graph",
+            ) as executor:
+                graph_future = executor.submit(nodes)
+                topics_future = executor.submit(topics)
+                graph = graph_future.result()
+                graph_topics = topics_future.result()
+            specs = tuple(camera_config["specs"])
+            with ThreadPoolExecutor(
+                max_workers=1 + len(specs), thread_name_prefix="operator-gate",
+            ) as executor:
+                motion_future = executor.submit(motion_state, graph)
+                camera_futures = [
+                    executor.submit(role_camera_state, spec, graph, graph_topics)
+                    for spec in specs
+                ]
+                motion = motion_future.result()
+                camera_states = [future.result() for future in camera_futures]
+            motion["camera"] = camera_state(camera_states)
+            return motion
 
     def tracked_spawn(argv: tuple[str, ...]) -> object:
         process = spawn(argv)
@@ -499,7 +598,7 @@ def build_physical_operator_environment(
     }
 
     def setup_attached_gripper(_facts: dict[str, dict[str, object]]) -> None:
-        readback = gripper_readback_call()
+        readback = gripper_readback_call(None, None)
         if readback.get("source") != "CONTROLLER_STATE":
             raise ContractError("OPERATOR_ENVIRONMENT_GRIPPER_OWNER")
         result = gripper_maintenance_call(readback)
@@ -522,7 +621,7 @@ def build_physical_operator_environment(
         try:
             if not settle_policy(lambda: process.poll() is None and "/fr_command_server" in nodes()):
                 raise ContractError("OPERATOR_ENVIRONMENT_GRIPPER_BOOTSTRAP")
-            readback = gripper_readback_call()
+            readback = gripper_readback_call(None, None)
             if readback.get("source") != "COMMAND_SERVER_MAINTENANCE":
                 raise ContractError("OPERATOR_ENVIRONMENT_GRIPPER_OWNER")
             projection = gripper_setup_projection(readback)
@@ -605,25 +704,40 @@ def _remote_gripper_command(command: str, *, expected_fields: int) -> list[int]:
     return result
 
 
-def capture_gripper_setup_readback() -> dict[str, Any]:
+def capture_gripper_setup_readback(
+    node_names: set[str] | None = None,
+    controller_listing: str | None = None,
+) -> dict[str, Any]:
     """Read one fresh gripper source without opening a second SDK owner."""
-    nodes = set(
-        line.strip()
-        for line in _readonly_command(
-            ["ros2", "node", "list", "--no-daemon"], "GRIPPER_SETUP_NODE_GRAPH",
-        ).splitlines()
-        if line.strip()
+    if (node_names is None) != (controller_listing is None):
+        raise ContractError("GRIPPER_SETUP_NODE_GRAPH")
+    nodes = (
+        set(
+            line.strip()
+            for line in _readonly_command(
+                [
+                    "ros2", "node", "list", "--no-daemon",
+                    "--spin-time", ROS_DISCOVERY_SPIN_SECONDS,
+                ],
+                "GRIPPER_SETUP_NODE_GRAPH",
+            ).splitlines()
+            if line.strip()
+        )
+        if node_names is None else set(node_names)
     )
     command_server = "/fr_command_server" in nodes
-    controller_listing = (
-        ""
-        if command_server and "/controller_manager" not in nodes
-        else _readonly_command(
-            ["ros2", "control", "list_controllers"],
-            "GRIPPER_SETUP_CONTROLLER_GRAPH",
+    listing = (
+        (
+            ""
+            if command_server and "/controller_manager" not in nodes
+            else _readonly_command(
+                ["ros2", "control", "list_controllers"],
+                "GRIPPER_SETUP_CONTROLLER_GRAPH",
+            )
         )
+        if controller_listing is None else controller_listing
     )
-    controllers = _controller_names(controller_listing)
+    controllers = _controller_names(listing)
     normal = {
         "fairino5_controller", "gripper_controller", "joint_state_broadcaster",
     } <= controllers
@@ -661,7 +775,7 @@ def capture_gripper_setup_readback() -> dict[str, Any]:
             "sample_age_s": 0.0, "max_age_s": 0.1,
             "source": "CONTROLLER_STATE",
         }
-    if command_server and not controller_listing.strip():
+    if command_server and not listing.strip():
         activation = _remote_gripper_command(
             "GetGripperActivateStatus()", expected_fields=3,
         )
@@ -796,17 +910,27 @@ def passive_physical_gate(
         if not any(line.split()[:1] == [name] and "active" in line.split() for line in controllers.splitlines()):
             raise ContractError("PHYSICAL_CONTROLLER_STATE_MISMATCH")
     nodes = read_graph(
-        ["ros2", "node", "list", "--no-daemon"], "PHYSICAL_NODE_GRAPH",
+        [
+            "ros2", "node", "list", "--no-daemon",
+            "--spin-time", ROS_DISCOVERY_SPIN_SECONDS,
+        ],
+        "PHYSICAL_NODE_GRAPH",
     )
     if "/fr_command_server" in nodes.splitlines():
         raise ContractError("PHYSICAL_SECOND_MOTION_OWNER")
     if read_graph(
-        ["ros2", "topic", "type", "/joint_states", "--no-daemon"],
+        [
+            "ros2", "topic", "type", "/joint_states", "--no-daemon",
+            "--spin-time", ROS_DISCOVERY_SPIN_SECONDS,
+        ],
         "PHYSICAL_JOINT_TOPIC",
     ).strip() != "sensor_msgs/msg/JointState":
         raise ContractError("PHYSICAL_JOINT_TOPIC_MISMATCH")
     if read_graph(
-        ["ros2", "topic", "type", camera_topic, "--no-daemon"],
+        [
+            "ros2", "topic", "type", camera_topic, "--no-daemon",
+            "--spin-time", ROS_DISCOVERY_SPIN_SECONDS,
+        ],
         "PHYSICAL_CAMERA_TOPIC",
     ).strip() != "sensor_msgs/msg/Image":
         raise ContractError("PHYSICAL_CAMERA_TOPIC_MISMATCH")

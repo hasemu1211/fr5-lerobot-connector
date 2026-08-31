@@ -476,18 +476,32 @@ class PickupExecutor:
             run_id=run_id, plan_digest=plan_digest, scene_binding=scene_binding,
             planning_scene_digest=motion_program["binding_digests"]["planning_scene_digest"],
         )
+        semantic_steps = [
+            step for step in planned_steps
+            if step.get("pause_after") == "SEMANTIC_VERDICT"
+        ]
+        if len(semantic_steps) != 1:
+            raise ContractError("MOTION_PROGRAM_MARKER")
+        recording_boundary = semantic_steps[0]["phase"]
+        has_precontact_hold = any(
+            step.get("requires_confirmation") == "PRECONTACT_HUMAN"
+            for step in planned_steps
+        )
         operator_summary = {
             "path": [step["phase"] for step in planned_steps],
             "flow": {
                 "continuous_through": (
                     "APPROACH_STOP_LIN"
-                    if any(step.get("requires_confirmation") == "PRECONTACT_HUMAN" for step in planned_steps)
-                    else "LIFT_LIN"
+                    if has_precontact_hold else recording_boundary
                 ),
                 "next_human_hold": (
                     "PRECONTACT_HUMAN"
-                    if any(step.get("requires_confirmation") == "PRECONTACT_HUMAN" for step in planned_steps)
-                    else "POST_LIFT_SEMANTIC"
+                    if has_precontact_hold
+                    else (
+                        "POST_LIFT_SEMANTIC"
+                        if recording_boundary == "LIFT_LIN"
+                        else "POST_RETREAT_SEMANTIC"
+                    )
                 ),
             },
             "speed": {
@@ -511,11 +525,11 @@ class PickupExecutor:
             recycle_plan_digest = canonical_digest({
                 "schema_version": "fr5.recycle_plan.v1",
                 "scene_binding": scene_binding,
-                "recording_boundary_after": "LIFT_LIN",
+                "recording_boundary_after": recording_boundary,
                 "steps": recycle_steps,
             })
             operator_summary["recycle"] = {
-                "recording_boundary_after": "LIFT_LIN",
+                "recording_boundary_after": recording_boundary,
                 "path": list(RECYCLE_PHASES),
                 "release_slot_id": scene_binding["release_slot"]["slot_id"],
                 "release_target": copy.deepcopy(scene_binding["release_slot"]["pose"]),

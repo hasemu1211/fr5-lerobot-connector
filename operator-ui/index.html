@@ -92,7 +92,7 @@
             <label for="grasp-select">등록 잡기 프로필<select id="grasp-select" data-axis="grasp"></select><small data-axis-hint="grasp"></small></label>
             <select id="start-select" data-axis="start" aria-hidden="true" tabindex="-1" hidden></select><small data-axis-hint="start" hidden></small>
             <label for="motion-select">로봇 동작<select id="motion-select" data-axis="motion"></select><small data-axis-hint="motion"></small></label>
-            <label for="variant-select">동작 변형<select id="variant-select" data-axis="variant"></select><small data-axis-hint="variant"></small></label>
+            <label for="variant-select">최종 집기 접근<select id="variant-select" data-axis="variant"></select><small data-axis-hint="variant"></small></label>
             <div class="catalog-derived"><span>녹화 카메라</span><strong id="camera-selection-label"></strong><small>환경 준비에서 지정한 역할로 자동 설정됩니다.</small><select id="camera-select" data-axis="camera" aria-hidden="true" tabindex="-1" hidden></select><small data-axis-hint="camera" hidden></small></div>
             <label for="data-mode-select">데이터 모드<select id="data-mode-select" data-axis="data_mode"></select><small data-axis-hint="data_mode"></small></label>
           </fieldset>
@@ -123,7 +123,7 @@
             <section id="direct-pose-editor" class="direct-pose-editor" aria-labelledby="direct-pose-title" hidden>
               <div><h4 id="direct-pose-title">직접 조건 입력</h4><p id="direct-domain-status" role="status"></p></div>
               <form id="direct-pose-form">
-                <label id="direct-start-label" for="direct-start-select" hidden>시작 자세<select id="direct-start-select"></select></label>
+                <label id="direct-start-label" for="direct-start-select" hidden>로봇 시작 자세<select id="direct-start-select"></select></label>
                 <label for="direct-x-input">X (mm)<input id="direct-x-input" name="x_mm" type="number" step="any" inputmode="decimal" required aria-describedby="direct-domain-status"></label>
                 <label for="direct-y-input">Y (mm)<input id="direct-y-input" name="y_mm" type="number" step="any" inputmode="decimal" required aria-describedby="direct-domain-status"></label>
                 <label for="direct-yaw-input">Yaw (°)<input id="direct-yaw-input" name="yaw_deg" type="number" step="any" inputmode="decimal" required aria-describedby="direct-domain-status"></label>

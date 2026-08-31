@@ -74,6 +74,49 @@ class DataFactoryOperatorUiStaticTest(unittest.TestCase):
         self.assertIn("수집 완료는 학습 사용 승인이 아닙니다", self.html)
         self.assertNotIn("usb-Generic", self.html)
 
+    def test_runtime_failures_have_specific_operator_copy(self):
+        for code in (
+            "RECORDER_READINESS_TIMEOUT",
+            "RECORDER_READINESS_ROW_FPS",
+            "RECORDER_READINESS_CAMERA_FPS",
+            "RECORDER_READINESS_DROPS",
+            "RECORDER_READINESS_ALIGNMENT",
+            "RECORDER_READINESS_QUALITY",
+            "RECORDER_READINESS_SCHEMA",
+            "RECORDER_READINESS_STALE",
+            "RECORDER_READINESS_MISMATCH",
+            "RECORDER_READINESS_TRIM",
+            "RECORDER_WRITER_FAULT",
+            "RECORDER_SAMPLER_FAULT",
+            "RECORDER_FREEZE_TIMEOUT",
+            "CANDIDATE_REVIEW_STATE",
+        ):
+            self.assertIn(f"{code}:", self.messages)
+        self.assertIn(
+            'typeof code === "string" && code ? code : "확인 필요"',
+            self.js,
+        )
+
+    def test_pick_place_ui_separates_robot_start_source_destination_and_plan_revision(self):
+        for marker in (
+            "로봇 시작 자세",
+            "물체 출발점 (SOURCE)",
+            "직전 도착점은 다음 출발점",
+            "최종 집기 접근",
+            "destination_pose",
+            "작성안 r",
+        ):
+            self.assertIn(marker, self.html + self.js)
+
+    def test_status_refresh_preserves_candidate_reason_control(self):
+        for marker in (
+            "reviewRenderKey",
+            "reviewBindingDigest",
+            'document.activeElement === document.querySelector("#candidate-reason")',
+            "status refresh preserves the focused candidate reason control",
+        ):
+            self.assertIn(marker, self.js + self.browser)
+
 
 if __name__ == "__main__":
     unittest.main()

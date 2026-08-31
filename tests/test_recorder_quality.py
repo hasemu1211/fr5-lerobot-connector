@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 
 import unittest
+from collections import deque
 from io import BytesIO
 from pathlib import Path
 from types import SimpleNamespace
@@ -9,6 +10,7 @@ import subprocess
 import sys
 import tarfile
 import tempfile
+import threading
 from unittest.mock import patch
 
 import numpy as np
@@ -163,6 +165,7 @@ class RecorderContractTest(unittest.TestCase):
         recorder.sync_spans = [0.005] * 90
         recorder.action_ages = [0.010] * 90
         recorder.state_ages = [0.010] * 90
+        recorder.camera_source_stamps = {"up": list(np.arange(90) / 30)}
         recorder.camera_stamps = {"up": [((i - 1) if i % 6 == 5 else i) / 30 for i in range(90)]}
         recorder.image_ages = {"up": [0.010] * 90}
         recorder.image_transport_ages = {"up": [0.010] * 90}
@@ -183,7 +186,13 @@ class RecorderContractTest(unittest.TestCase):
         recorder.enqueue_attempts = 90
         summary, reasons = recorder._quality_summary()
         self.assertEqual(reasons, [])
+        self.assertAlmostEqual(summary["cameras"]["up"]["source_fps"], 30.0)
         self.assertGreater(summary["cameras"]["up"]["repeat_ratio"], 0.10)
+
+        recorder.camera_source_stamps = {"up": list(np.arange(60) / 20)}
+        _, reasons = recorder._quality_summary()
+        self.assertTrue(any("source fps 20.00 is too low" in reason for reason in reasons))
+        recorder.camera_source_stamps = {"up": list(np.arange(90) / 30)}
         snapshot = recorder._quality_snapshot()
         recorder.frame_stamps.append(99.0)
         self.assertTrue(snapshot["accepted"])
@@ -216,6 +225,29 @@ class RecorderContractTest(unittest.TestCase):
         recorder.state_samples = [np.zeros(7) for _ in recorder.action_samples]
         _, reasons = recorder._quality_summary()
         self.assertFalse(any("range" in reason for reason in reasons))
+
+    def test_camera_source_cadence_tracks_callbacks_only_during_task_window(self):
+        recorder = FR5LeRobotRecorder.__new__(FR5LeRobotRecorder)
+        recorder.args = SimpleNamespace(height=2, width=3)
+        recorder.lock = threading.Lock()
+        recorder.camera_offsets = {"up": 0.0}
+        recorder.camera_frames = {"up": deque(maxlen=3)}
+        recorder.camera_source_stamps = {"up": []}
+        recorder.recording = True
+        recorder.episode_state = recorder.RECORDING
+        recorder._stamp = lambda message: message.stamp
+        recorder.get_clock = lambda: SimpleNamespace(
+            now=lambda: SimpleNamespace(nanoseconds=2_000_000_000),
+        )
+        recorder.get_logger = lambda: SimpleNamespace(warning=lambda _message: None)
+        message = SimpleNamespace(stamp=1.0, height=2, width=3)
+
+        recorder._on_image("up", message)
+        recorder.episode_state = recorder.FREEZING
+        recorder._on_image("up", SimpleNamespace(stamp=1.1, height=2, width=3))
+
+        self.assertEqual(recorder.camera_source_stamps["up"], [1.0])
+        self.assertEqual(len(recorder.camera_frames["up"]), 2)
 
     def test_nonfinite_quality_option_is_rejected(self):
         with patch.object(sys, "argv", ["recorder", "--task", "test", "--fps-tolerance", "nan"]):

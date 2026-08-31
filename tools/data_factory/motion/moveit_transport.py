@@ -555,28 +555,59 @@ class RosMoveItTransport:
         client = self._robot_description_client
         if self._robot_description is not None or client is None:
             return
-        remaining = max(0.0, deadline - time.monotonic())
-        if remaining == 0 or not client.wait_for_services(timeout_sec=min(0.2, remaining)):
-            return
-        response = self._wait(
-            client.get_parameters(["robot_description"]),
-            max(0.0, deadline - time.monotonic()),
-            "ROS_GRIPPER_SETTINGS_UNVERIFIED",
-        )
-        values = getattr(response, "values", None)
-        if (
-            not isinstance(values, (list, tuple))
-            or len(values) != 1
-            or values[0].type != self._parameter_string
-            or not isinstance(values[0].string_value, str)
-            or not values[0].string_value
-        ):
-            raise ContractError("ROS_GRIPPER_SETTINGS_UNVERIFIED")
-        self._robot_description = values[0].string_value
+        parameter_future = None
+        parameter_finished = False
+        while self._robot_description is None and time.monotonic() < deadline:
+            if not parameter_finished and parameter_future is None:
+                try:
+                    if client.wait_for_services(timeout_sec=0.0):
+                        parameter_future = client.get_parameters(["robot_description"])
+                except RuntimeError:
+                    parameter_finished = True
+            if parameter_future is not None and parameter_future.done():
+                parameter_finished = True
+                try:
+                    response = parameter_future.result()
+                except (RuntimeError, TimeoutError):
+                    response = None
+                parameter_future = None
+                values = getattr(response, "values", None)
+                candidate = (
+                    values[0].string_value
+                    if isinstance(values, (list, tuple))
+                    and len(values) == 1
+                    and values[0].type == self._parameter_string
+                    and isinstance(values[0].string_value, str)
+                    and values[0].string_value
+                    else None
+                )
+                if candidate is not None:
+                    try:
+                        self._parse_gripper_settings(candidate)
+                    except ContractError:
+                        pass
+                    else:
+                        self._robot_description = candidate
+                        return
+            self._rclpy.spin_once(
+                self.node,
+                timeout_sec=max(0.0, min(0.05, deadline - time.monotonic())),
+            )
+            if self._robot_description is not None:
+                try:
+                    self._parse_gripper_settings(self._robot_description)
+                except ContractError:
+                    self._robot_description = None
+                else:
+                    return
 
     def _gripper_settings(self):
+        return self._parse_gripper_settings(self._robot_description)
+
+    @staticmethod
+    def _parse_gripper_settings(robot_description):
         try:
-            root = ET.fromstring(self._robot_description)
+            root = ET.fromstring(robot_description)
         except (TypeError, ET.ParseError) as exc:
             raise ContractError("ROS_GRIPPER_SETTINGS_UNVERIFIED", str(exc)) from exc
         blocks = []
