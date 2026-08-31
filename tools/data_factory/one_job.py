@@ -62,33 +62,52 @@ class JsonlProcess:
         self.timeout_s = float(timeout_s)
         self.process = subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True, bufsize=1)
         self._preserved = False
+        self._response_pending = False
         self.selector = selectors.DefaultSelector()
         self.selector.register(self.process.stdout, selectors.EVENT_READ)
 
-    def request(self, request, cancel_event=None, timeout_s=None):
+    def _request(self, request, cancel_event=None, timeout_s=None, *, wait_for_response=False):
         if self.process.poll() is not None:
             raise ContractError("JSONL_PROCESS_EXIT", str(self.process.returncode))
+        if self._response_pending:
+            raise ContractError("JSONL_RESPONSE_PENDING")
         try:
             self.process.stdin.write(json.dumps(request, sort_keys=True, separators=(",", ":"), allow_nan=False) + "\n")
             self.process.stdin.flush()
         except (BrokenPipeError, OSError, TypeError, ValueError) as exc:
             raise ContractError("JSONL_WRITE", str(exc)) from exc
-        wait_s = self.timeout_s if timeout_s is None else timeout_s
-        if not isinstance(wait_s, (int, float)) or isinstance(wait_s, bool) or wait_s <= 0:
-            raise ContractError("JSONL_TIMEOUT")
-        deadline = time.monotonic() + min(self.timeout_s, float(wait_s))
+        self._response_pending = True
+        if wait_for_response:
+            deadline = None
+        else:
+            wait_s = self.timeout_s if timeout_s is None else timeout_s
+            if not isinstance(wait_s, (int, float)) or isinstance(wait_s, bool) or wait_s <= 0:
+                raise ContractError("JSONL_TIMEOUT")
+            deadline = time.monotonic() + min(self.timeout_s, float(wait_s))
         while True:
             if cancel_event is not None and cancel_event.is_set():
                 raise ContractError("JSONL_REQUEST_CANCELLED")
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                raise ContractError("JSONL_RESPONSE_TIMEOUT")
-            if self.selector.select(min(remaining, 0.05) if cancel_event is not None else remaining):
+            if deadline is None:
+                remaining = None
+            else:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise ContractError("JSONL_RESPONSE_TIMEOUT")
+            wait = None if remaining is None else min(remaining, 0.05) if cancel_event is not None else remaining
+            if self.selector.select(wait):
                 break
         line = self.process.stdout.readline()
+        self._response_pending = False
         if not line:
             raise ContractError("JSONL_PROCESS_EXIT", str(self.process.poll()))
         return load_json_strict(line)
+
+    def request(self, request, cancel_event=None, timeout_s=None):
+        return self._request(request, cancel_event, timeout_s)
+
+    def request_terminal(self, request):
+        """Wait for an irreversible transaction response or child EOF."""
+        return self._request(request, wait_for_response=True)
 
     def __call__(self, request):
         return self.request(request)
@@ -331,8 +350,11 @@ class OneJob:
             request["transaction"] = transaction
         caller = self.executor_call if target == "executor" else self.recorder_call
         transported_status = target == "recorder" and op == "status" and callable(getattr(caller, "request", None))
+        transported_commit = target == "recorder" and op == "commit" and callable(getattr(caller, "request_terminal", None))
         try:
-            if transported_status:
+            if transported_commit:
+                response = caller.request_terminal(request)
+            elif transported_status:
                 response = caller.request(request, timeout_s=self._program["execution_timeouts_s"]["heartbeat_lease"] / 2)
             else:
                 response = caller(request)

@@ -100,6 +100,14 @@ class RecorderContractTest(unittest.TestCase):
     def test_camera_preflight_rejects_bad_clock_domain_or_rate(self):
         stamps = list(np.arange(150) / 30)
         self.assertEqual(image_gate_failures(stamps, [0.05] * 150, 5, 30, 0.75, 300), [])
+        discovery_delayed = list(np.arange(72) / 30)
+        self.assertEqual(
+            image_gate_failures(
+                discovery_delayed, [0.05] * len(discovery_delayed),
+                5, 30, 0.95, 300,
+            ),
+            [],
+        )
         self.assertTrue(image_gate_failures(stamps, [-0.01] * 150, 5, 30, 0.75, 300))
         self.assertTrue(image_gate_failures(stamps[:50], [0.05] * 50, 5, 30, 0.75, 300))
         self.assertTrue(image_gate_failures(stamps, [0.4] * 150, 5, 30, 0.75, 300))

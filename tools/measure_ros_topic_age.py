@@ -17,16 +17,27 @@ def stamp_seconds(message) -> float:
     return message.header.stamp.sec + message.header.stamp.nanosec * 1e-9
 
 
+def source_cadence(stamps: list[float], duration: float) -> tuple[int, float, float]:
+    if not stamps:
+        return 0, 0.0, 0.0
+    intervals = np.diff(stamps)
+    unique = 1 + int(np.count_nonzero(intervals))
+    span = float(stamps[-1] - stamps[0]) if len(stamps) > 1 else 0.0
+    hz = (unique - 1) / span if span > 0 else unique / duration
+    return unique, span, hz
+
+
 def report(name: str, stamps: list[float], ages: list[float], duration: float) -> None:
     if not stamps:
         print(f"{name}: no messages")
         return
     intervals = np.diff(stamps)
     age_ms = np.asarray(ages) * 1000
-    unique = 1 + int(np.count_nonzero(intervals)) if stamps else 0
+    _unique, source_span, source_hz = source_cadence(stamps, duration)
     print(
         f"{name}: received={len(stamps)} ({len(stamps)/duration:.2f}Hz), "
-        f"source={unique/duration:.2f}Hz, age_ms p50={np.percentile(age_ms, 50):.2f} "
+        f"source={source_hz:.2f}Hz over {source_span:.2f}s, "
+        f"age_ms p50={np.percentile(age_ms, 50):.2f} "
         f"p95={np.percentile(age_ms, 95):.2f} max={age_ms.max():.2f}, "
         f"source_gap_ms p95={np.percentile(intervals, 95)*1000:.2f} "
         f"max={intervals.max()*1000:.2f}" if intervals.size else f"{name}: one message"
@@ -40,12 +51,18 @@ def image_gate_failures(
     expected_hz: float,
     min_fps_ratio: float,
     max_age_ms: float,
+    min_observation_s: float = 2.0,
 ) -> list[str]:
     if not stamps:
         return ["no image messages"]
-    source_hz = (1 + int(np.count_nonzero(np.diff(stamps)))) / duration
+    _unique, source_span, source_hz = source_cadence(stamps, duration)
     age_ms = np.asarray(ages) * 1000
     failures = []
+    required_observation_s = min(duration, min_observation_s)
+    if source_span < required_observation_s:
+        failures.append(
+            f"source observation {source_span:.2f}s below {required_observation_s:.2f}s"
+        )
     if source_hz < expected_hz * min_fps_ratio:
         failures.append(f"source rate {source_hz:.2f}Hz below {expected_hz * min_fps_ratio:.2f}Hz")
     if age_ms.min() < 0:
@@ -66,11 +83,13 @@ def main() -> None:
     parser.add_argument("--expected-image-hz", type=float)
     parser.add_argument("--min-image-fps-ratio", type=float, default=0.75)
     parser.add_argument("--max-image-age-ms", type=float, default=300.0)
+    parser.add_argument("--min-image-observation-s", type=float, default=2.0)
     args = parser.parse_args()
     if args.duration <= 0 or args.image_qos_depth <= 0:
         parser.error("duration and image-qos-depth must be positive")
     if args.expected_image_hz is not None and (
-        args.expected_image_hz <= 0 or not 0 < args.min_image_fps_ratio <= 1 or args.max_image_age_ms <= 0
+        args.expected_image_hz <= 0 or not 0 < args.min_image_fps_ratio <= 1
+        or args.max_image_age_ms <= 0 or args.min_image_observation_s <= 0
     ):
         parser.error("image gate values must be positive and min-image-fps-ratio must be <= 1")
     rclpy.init()
@@ -120,6 +139,7 @@ def main() -> None:
         failures = image_gate_failures(
             *samples["image"], actual_duration, args.expected_image_hz,
             args.min_image_fps_ratio, args.max_image_age_ms,
+            args.min_image_observation_s,
         )
     node.destroy_node()
     rclpy.shutdown()

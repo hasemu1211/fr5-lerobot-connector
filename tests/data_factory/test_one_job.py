@@ -563,6 +563,73 @@ class OneJobTest(unittest.TestCase):
         time.sleep(.2)
         self.assertEqual(job.recorder_state, "FREEZE_UNCERTAIN")
 
+    def test_jsonl_terminal_response_has_no_motion_deadline_and_timeout_taints_stream(self):
+        delayed_echo = (
+            "import json,sys,time; "
+            "line=sys.stdin.readline(); time.sleep(.08); "
+            "print(json.dumps(json.loads(line)),flush=True)"
+        )
+        with JsonlProcess(
+            [sys.executable, "-u", "-c", delayed_echo], timeout_s=.02,
+        ) as process:
+            started = time.monotonic()
+            self.assertEqual(
+                process.request_terminal({"op":"commit"}), {"op":"commit"},
+            )
+            self.assertGreaterEqual(time.monotonic() - started, .06)
+
+        pending = JsonlProcess(
+            [sys.executable, "-u", "-c", delayed_echo], timeout_s=.02,
+        )
+        with self.assertRaisesRegex(ContractError, "JSONL_RESPONSE_TIMEOUT"):
+            pending.request({"op":"status"})
+        with self.assertRaisesRegex(ContractError, "JSONL_RESPONSE_PENDING"):
+            pending.request({"op":"abort"})
+        with self.assertRaises(ContractError):
+            pending.close(timeout_s=.02)
+
+        exited = JsonlProcess([
+            sys.executable, "-u", "-c",
+            "import sys; sys.stdin.readline(); raise SystemExit(3)",
+        ], timeout_s=1)
+        with self.assertRaises(ContractError) as raised:
+            exited.request_terminal({"op":"commit"})
+        self.assertEqual(raised.exception.code, "JSONL_PROCESS_EXIT")
+        self.assertEqual(exited.close(), 3)
+
+    def test_one_job_routes_only_commit_through_terminal_transport(self):
+        job, _ = self.make(
+            ["RECORDING", "RECORDING", "RECORDING", "RECORDING", "FROZEN", "FROZEN", "COMMITTED"],
+            ["PLANNED", "APPROVED", "EXECUTING", "PRECONTACT_HUMAN", "EXECUTING", "GRASP_VERDICT", "EXECUTING", "SEMANTIC_VERDICT", "EXECUTING", "COMPLETED"],
+        )
+        recorder = job.recorder_call
+        terminal_ops = []
+
+        class RecorderPort:
+            def __call__(self, request):
+                if request["op"] == "commit":
+                    raise AssertionError("commit must use terminal transport")
+                return recorder(request)
+
+            def request_terminal(self, request):
+                terminal_ops.append(request["op"])
+                return recorder(request)
+
+            def preserve(self):
+                return recorder.preserve()
+
+        job.recorder_call = RecorderPort()
+        result = run_one_job(
+            job, PLAN, MOTION_APPROVAL,
+            lambda state, _: {
+                "PRECONTACT_HUMAN":"CONFIRM", "GRASP_VERDICT":"PASS",
+                "SEMANTIC_VERDICT":"PASS", "AWAITING_CELL_READY":"READY",
+            }[state],
+            operator_id="operator", poll_interval_s=.001, sleep=lambda _: None,
+        )
+        self.assertEqual(result["state"], "COMPLETE")
+        self.assertEqual(terminal_ops, ["commit"])
+
     def test_hil_numeric_gripper_verdict_is_a_pure_mechanical_proxy(self):
         required = {"command_position_m":.01, "acceptable_feedback_m":{"min":.01, "max":.012}}
         evidence = {"gripper_reference_m":.01, "gripper_feedback_m":.011, "post_lift_gripper_feedback_m":.012}

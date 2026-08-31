@@ -1301,6 +1301,9 @@ class RunJobTest(unittest.TestCase):
         self.assertEqual(command[command.index("--expected-image-hz") + 1], "30")
         self.assertEqual(command[command.index("--min-image-fps-ratio") + 1], "0.95")
         self.assertEqual(command[command.index("--max-image-age-ms") + 1], "300.0")
+        self.assertEqual(
+            command[command.index("--min-image-observation-s") + 1], "2.0",
+        )
         self.assertEqual(command[command.index("--image-qos-depth") + 1], "10")
         self.assertIn("--reliable-image", command)
         self.assertEqual(invoked.call_args.kwargs["timeout"], run_job.CAMERA_WARMUP_TIMEOUT_S)

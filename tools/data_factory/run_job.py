@@ -79,6 +79,7 @@ CAMERA_WARMUP_DURATION_S = 5.0
 CAMERA_WARMUP_TIMEOUT_S = 8.0
 LIVE_CAMERA_MIN_FPS_RATIO = 0.95
 CAMERA_WARMUP_MAX_AGE_MS = 300.0
+CAMERA_WARMUP_MIN_OBSERVATION_S = 2.0
 COMMAND_KEYS = {"schema_version", "op_id", "op", "payload"}
 COMMON_RUN_KEYS = {
     "mode", "run_id", "job", "selected_sheet", "yaw0_sheet", "config_root",
@@ -451,6 +452,7 @@ def _camera_warmup(payload, profile, cancel):
             "--expected-image-hz", str(profile["fps"]),
             "--min-image-fps-ratio", str(LIVE_CAMERA_MIN_FPS_RATIO),
             "--max-image-age-ms", str(CAMERA_WARMUP_MAX_AGE_MS),
+            "--min-image-observation-s", str(CAMERA_WARMUP_MIN_OBSERVATION_S),
             "--image-qos-depth", str(profile["image_qos_depth"]),
         ]
         if profile["image_qos"] == "reliable":

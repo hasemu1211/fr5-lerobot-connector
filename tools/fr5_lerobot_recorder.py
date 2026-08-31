@@ -233,6 +233,7 @@ class FR5LeRobotRecorder(Node):
         self.alignment_tail_last_row_ros_s = None
         self.alignment_tail_drained = False
         self._buffer_cleared = False
+        self.commit_stage_seconds = {}
 
     def _result(self, ok: bool, reason_code: str = "OK", **extra) -> dict:
         storage_usage = self._storage_usage()
@@ -250,6 +251,8 @@ class FR5LeRobotRecorder(Node):
                 "writer_queue_drops": self.writer_queue_drops,
                 "alignment_failures": self.alignment_failures,
                 "observed_monotonic_ns": time.monotonic_ns(),
+                **({"commit_stage_seconds": dict(getattr(self, "commit_stage_seconds", {}))}
+                   if getattr(self, "commit_stage_seconds", {}) else {}),
                 **({"storage_usage": storage_usage} if storage_usage is not None else {}),
             },
             "artifacts": self._transaction["artifacts"] if self._transaction else {},
@@ -1121,6 +1124,7 @@ class FR5LeRobotRecorder(Node):
         return self._finish_abort(False, reason_code, detail)
 
     def commit_episode(self) -> dict:
+        commit_started = time.monotonic()
         with self.lock:
             if self.episode_state != self.FROZEN:
                 return self._result(False, "STATE_COMMIT_NOT_FROZEN")
@@ -1172,9 +1176,13 @@ class FR5LeRobotRecorder(Node):
         try:
             probe = self._start_encoder_temp_probe()
             try:
+                save_started = time.monotonic()
+                self.commit_stage_seconds["pre_save"] = save_started - commit_started
                 self.dataset.save_episode(
                     parallel_encoding=len(self.camera_names) > 1,
                 )
+                dataset_saved = time.monotonic()
+                self.commit_stage_seconds["dataset_save"] = dataset_saved - save_started
                 temporary_path.replace(provenance_path)
                 quality_path = self.args.root / "meta" / "recording_quality.jsonl"
                 with quality_path.open("a", encoding="utf-8") as file:
@@ -1203,8 +1211,14 @@ class FR5LeRobotRecorder(Node):
             self.get_logger().error(f"episode save quarantined: {exc}")
             reason_code = "DISK_RESERVE_LOW" if str(exc) == "DISK_RESERVE_LOW" else "QUARANTINED_COMMIT"
             return self._persist_quarantine(reason_code, str(exc))
+        commit_finished = time.monotonic()
+        self.commit_stage_seconds["post_save"] = commit_finished - dataset_saved
+        self.commit_stage_seconds["total"] = commit_finished - commit_started
         self.get_logger().info(
-            f"episode saved: index={summary['episode_index']}, frames={self.frames}, row_fps={summary['effective_fps']:.2f}"
+            f"episode saved: index={summary['episode_index']}, frames={self.frames}, row_fps={summary['effective_fps']:.2f}, "
+            f"commit_s pre={self.commit_stage_seconds['pre_save']:.3f} "
+            f"dataset={self.commit_stage_seconds['dataset_save']:.3f} "
+            f"post={self.commit_stage_seconds['post_save']:.3f} total={self.commit_stage_seconds['total']:.3f}"
         )
         return self._result(True, quality=attempt)
 

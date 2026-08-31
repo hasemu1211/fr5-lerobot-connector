@@ -1052,7 +1052,12 @@ class RecorderTransactionTest(unittest.TestCase):
             recorder._quality_summary = lambda: ({"episode_index": 7, "effective_fps": 30.0, "image_quality_warnings": []}, [])
             self.assertFalse(recorder.commit_episode()["ok"])
             recorder.freeze_episode()
-            self.assertTrue(recorder.commit_episode()["ok"])
+            committed = recorder.commit_episode()
+            self.assertTrue(committed["ok"])
+            self.assertEqual(
+                set(committed["metrics"]["commit_stage_seconds"]),
+                {"pre_save", "dataset_save", "post_save", "total"},
+            )
             self.assertEqual(recorder.dataset.saves, 1)
             self.assertTrue(recorder.dataset.parallel_encoding)
             self.assertFalse((recorder.args.root / "meta" / "quarantine.json").exists())
