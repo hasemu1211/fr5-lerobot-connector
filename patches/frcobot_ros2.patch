@@ -506,7 +506,7 @@ index ca2d84f..23e8879 100644
              [](double c) { return not std::isfinite(c); })) {
              return hardware_interface::return_type::ERROR;
          }
-@@ -211,6 +394,157 @@ hardware_interface::return_type FairinoHardwareInterface::write(const rclcpp::Ti
+@@ -211,6 +394,166 @@ hardware_interface::return_type FairinoHardwareInterface::write(const rclcpp::Ti
      return hardware_interface::return_type::OK;
  }
  
@@ -632,15 +632,24 @@ index ca2d84f..23e8879 100644
 +                } else {
 +                    non_target_stable_since.reset();
 +                }
-+                if (now >= deadline) {
++                std::unique_lock<std::mutex> lock(_gripper_mutex);
++                _gripper_cv.wait_for(lock, 50ms, [this] {
++                    return _stop_gripper_thread ||
++                        _pending_gripper_position.has_value();
++                });
++                if (_stop_gripper_thread) return;
++                if (_pending_gripper_position.has_value()) {
++                    RCLCPP_WARN(rclcpp::get_logger("FairinoHardwareInterface"),
++                        "Superseding unsettled gripper command target=%d with latest target=%d",
++                        *position, *_pending_gripper_position);
++                    break;
++                }
++                if (std::chrono::steady_clock::now() >= deadline) {
 +                    _gripper_error = -1;
 +                    RCLCPP_ERROR(rclcpp::get_logger("FairinoHardwareInterface"),
 +                        "Gripper motion timed out after %d ms", _gripper_max_time);
 +                    return;
 +                }
-+                std::unique_lock<std::mutex> lock(_gripper_mutex);
-+                _gripper_cv.wait_for(lock, 50ms, [this] { return _stop_gripper_thread; });
-+                if (_stop_gripper_thread) return;
 +            }
 +            continue;
 +        }

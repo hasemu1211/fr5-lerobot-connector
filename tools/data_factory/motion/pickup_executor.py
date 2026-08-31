@@ -349,6 +349,8 @@ class PickupExecutor:
             or settings["open_velocity_percent"]
             != required.get("open_velocity_percent", required["velocity_percent"])
             or settings["force_percent"] != required["force_percent"]
+            or settings["open_force_percent"]
+            != required.get("open_force_percent", required["force_percent"])
         ):
             raise ContractError("GRIPPER_SETTINGS_MISMATCH")
         for controller in ("arm_controller", "gripper_controller"):

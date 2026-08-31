@@ -312,6 +312,7 @@ def build_physical_operator_environment(
     gripper_maintenance_call: Callable[[Mapping[str, object]], Mapping[str, object]],
     settle_policy: Callable[[Callable[[], bool]], bool] = bounded_settle,
     controller_ip: str | None = None,
+    gripper_velocity_percent: int = 20,
     gripper_force_percent: int = 50,
     gripper_open_force_percent: int = 50,
     gripper_open_velocity_percent: int = 20,
@@ -328,6 +329,8 @@ def build_physical_operator_environment(
         or not callable(gripper_readback_call)
         or not callable(gripper_maintenance_call)
         or not callable(settle_policy)
+        or type(gripper_velocity_percent) is not int
+        or not 1 <= gripper_velocity_percent <= 100
         or type(gripper_force_percent) is not int
         or not 1 <= gripper_force_percent <= 100
         or type(gripper_open_force_percent) is not int
@@ -609,7 +612,8 @@ def build_physical_operator_environment(
         "camera_group": _camera_command(repository, collection_profile, camera_specs),
         "robot_stack": {
             "argv": (
-                "env", f"FR5_GRIPPER_FORCE={gripper_force_percent}",
+                "env", f"FR5_GRIPPER_VELOCITY={gripper_velocity_percent}",
+                f"FR5_GRIPPER_FORCE={gripper_force_percent}",
                 f"FR5_GRIPPER_OPEN_FORCE={gripper_open_force_percent}",
                 f"FR5_GRIPPER_OPEN_VELOCITY={gripper_open_velocity_percent}",
                 "ros2", "launch", "fairino5_v6_moveit2_config",

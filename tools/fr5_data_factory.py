@@ -924,19 +924,22 @@ def validate_motion_program(value):
     planning_scene = _planning_scene(value["planning_scene"])
     if canonical_digest(planning_scene) != bindings["planning_scene_digest"]: raise ContractError("MOTION_PROGRAM_PLANNING_SCENE")
     raw_requirements = value["gripper_requirements"]
-    open_velocity_percent = None
-    if isinstance(raw_requirements, dict) and "open_velocity_percent" in raw_requirements:
+    open_settings = {}
+    if isinstance(raw_requirements, dict):
         raw_requirements = dict(raw_requirements)
-        open_velocity_percent = raw_requirements.pop("open_velocity_percent")
+        for key in ("open_velocity_percent", "open_force_percent"):
+            if key in raw_requirements:
+                open_settings[key] = raw_requirements.pop(key)
     requirements = _gripper_close(raw_requirements, "MOTION_PROGRAM_GRIPPER")
-    if open_velocity_percent is not None:
+    for key, setting in open_settings.items():
         if (
-            isinstance(open_velocity_percent, bool)
-            or not isinstance(open_velocity_percent, int)
-            or not 1 <= open_velocity_percent <= requirements["velocity_percent"]
+            isinstance(setting, bool) or not isinstance(setting, int)
+            or not 1 <= setting <= 100
+            or key == "open_velocity_percent"
+            and setting > requirements["velocity_percent"]
         ):
             raise ContractError("MOTION_PROGRAM_GRIPPER")
-        requirements["open_velocity_percent"] = open_velocity_percent
+        requirements[key] = setting
     if requirements["acceptable_feedback_m"]["max"] <= requirements["command_position_m"]: raise ContractError("MOTION_PROGRAM_GRIPPER")
     frames = _exact(value["frames"], MOTION_FRAMES, "MOTION_PROGRAM_FRAMES")
     if frames != {"planning_frame": "base_link", "planning_group": "fairino5_v6_group", "tool_link": "wrist3_link"}: raise ContractError("MOTION_PROGRAM_FRAMES")

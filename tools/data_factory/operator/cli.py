@@ -6,16 +6,13 @@ import json
 from pathlib import Path
 
 from tools.data_factory.operator.composition import build_operator_runtime
+from tools.data_factory.operator.workflow.campaign import DEFAULT_GRIPPER_RETUNE
 from tools.fr5_data_factory import ContractError
 
 
 DEFAULT_JOB = (
     "config/data_factory/test_only_physical/goal2-place1/"
     "center-live-p45-20260821-r001.job.json"
-)
-DEFAULT_GRIPPER_RETUNE = (
-    "config/data_factory/test_only_physical/goal2-place1/"
-    "gripper-retune-wood-cube-25mm-top-center-r007.json"
 )
 
 

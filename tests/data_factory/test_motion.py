@@ -8,13 +8,14 @@ from tools.fr5_data_factory import canonical_digest
 from .operator.fixtures import SCENE_SPEC, motion
 
 SCENE={"scene_state_digest":"sha256:"+"8"*64,"revision":1,"object_instance_id":"cube-1"}
-def snapshot(positions=None,ready=True,gripper_position=.01,velocity=20,force=50,plugin="fairino_hardware/FairinoHardwareInterface",open_velocity=None):
+def snapshot(positions=None,ready=True,gripper_position=.01,velocity=20,force=50,plugin="fairino_hardware/FairinoHardwareInterface",open_velocity=None,open_force=None):
  def controller(endpoint):
   value={"endpoint":endpoint,"type":"control_msgs/msg/JointTrajectoryControllerState","publisher_count":1,"ready":ready,"age_s":0.,"speed_scaling":1.}
   if endpoint.startswith("/gripper_controller"):value.update(reference_position_m=.01,feedback_position_m=gripper_position)
   return value
  settings={"hardware_plugin":plugin,"velocity_percent":velocity,"force_percent":force,"settle_time_ms":500}
  if open_velocity is not None:settings["open_velocity_percent"]=open_velocity
+ if open_force is not None:settings["open_force_percent"]=open_force
  return {"joint_positions":[0.]*6 if positions is None else positions,"joint_state_age_s":0.,"gripper_settings":settings,"arm_controller":controller("/fairino5_controller/controller_state"),"gripper_controller":controller("/gripper_controller/controller_state")}
 class T:
  def __init__(self,fail=None):self.calls=[];self.fail=fail
@@ -36,13 +37,14 @@ class Test(unittest.TestCase):
   self.assertEqual(r["data"]["operator_summary"]["flow"],{"continuous_through":"APPROACH_STOP_LIN","next_human_hold":"PRECONTACT_HUMAN"})
   t=T();t.snapshot=lambda *_:snapshot([.25]*6);n=e.PickupExecutor(t,clock=lambda:datetime(2026,1,1,tzinfo=timezone.utc));continuous=n.process(self.req("plan",{"run_id":"continuous","motion_program":motion(True)}));self.assertTrue(continuous["ok"]);self.assertEqual(continuous["data"]["operator_summary"]["flow"],{"continuous_through":"LIFT_LIN","next_human_hold":"POST_LIFT_SEMANTIC"});self.assertNotIn("requires_confirmation",continuous["data"]["plan"]["steps"][2]);self.assertNotIn("pause_after",continuous["data"]["plan"]["steps"][3])
   pick_place=motion(True);del pick_place["steps"][4]["pause_after"];pick_place["steps"][8]["pause_after"]="SEMANTIC_VERDICT";slot=release_slot(robot_system_id="fr5-lab-a",pose={"place_id":"place-a","yaw_deg":0,"x_mm":60,"y_mm":0},object_profile_id="wood-cube-25mm-r001",exclusion_geometry_digest="sha256:"+"e"*64);binding={**SCENE,"release_slot":slot};t=T();t.snapshot=lambda *_:snapshot([.25]*6);n=e.PickupExecutor(t,clock=lambda:datetime(2026,1,1,tzinfo=timezone.utc));placed=n.process(self.req("plan",{"run_id":"pick-place","motion_program":pick_place,"scene_binding":binding}));self.assertTrue(placed["ok"]);self.assertEqual(placed["data"]["operator_summary"]["flow"],{"continuous_through":"RETREAT_LIN","next_human_hold":"POST_RETREAT_SEMANTIC"});self.assertEqual(placed["data"]["operator_summary"]["recycle"]["recording_boundary_after"],"RETREAT_LIN")
- def test_plan_binds_direction_specific_open_velocity(self):
-  program=motion();program["gripper_requirements"]["open_velocity_percent"]=10
-  matching=T();matching.snapshot=lambda *_:snapshot(open_velocity=10)
+ def test_plan_binds_direction_specific_open_settings(self):
+  program=motion();program["gripper_requirements"].update(open_velocity_percent=10,open_force_percent=50)
+  matching=T();matching.snapshot=lambda *_:snapshot(open_velocity=10,open_force=50)
   self.assertTrue(e.PickupExecutor(matching).process(self.req("plan",{"run_id":"matching","motion_program":program}))["ok"])
-  mismatched=T();mismatched.snapshot=lambda *_:snapshot(open_velocity=20)
-  rejected=e.PickupExecutor(mismatched).process(self.req("plan",{"run_id":"mismatched","motion_program":program}))
-  self.assertEqual((rejected["ok"],rejected["code"]),(False,"GRIPPER_SETTINGS_MISMATCH"))
+  for run_id,kwargs in (("velocity",{"open_velocity":20,"open_force":50}),("force",{"open_velocity":10,"open_force":45})):
+   mismatched=T();mismatched.snapshot=lambda *_,kwargs=kwargs:snapshot(**kwargs)
+   rejected=e.PickupExecutor(mismatched).process(self.req("plan",{"run_id":run_id,"motion_program":program}))
+   self.assertEqual((rejected["ok"],rejected["code"]),(False,"GRIPPER_SETTINGS_MISMATCH"))
  def test_plan_rejects_trajectory_that_cannot_finish_before_timeout(self):
   class Timed(T):
    def arm_trajectory_duration_s(self,_):return .5

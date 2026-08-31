@@ -821,10 +821,12 @@ function renderReview(view) {
       : `현재 작성안 r${view.draft.revision} · 아직 고정되지 않음`,
   ]);
   const tuning = view.campaign_review?.gripper_tuning;
-  if (tuning) rows.splice(4, 0, [
-    "그리퍼 설정",
-    `${tuning.command_percent}% · 허용 피드백 ${tuning.acceptable_feedback_percent.min}–${tuning.acceptable_feedback_percent.max}%${Number.isInteger(tuning.force_percent) ? ` · 최대 힘 ${tuning.force_percent}%${Number.isInteger(tuning.base_force_percent) && tuning.force_percent !== tuning.base_force_percent ? ` (기준 ${tuning.base_force_percent}%)` : ""}` : ""} · TEST_ONLY 조정 후보`,
-  ]);
+  if (tuning) {
+    rows.splice(4, 0, [
+      "그리퍼 설정",
+      `${tuning.command_percent}% · 허용 피드백 ${tuning.acceptable_feedback_percent.min}–${tuning.acceptable_feedback_percent.max}% · 닫기 속도 ${tuning.velocity_percent}% / 힘 ${tuning.force_percent}% · 열기 속도 ${tuning.open_velocity_percent}% / 힘 ${tuning.open_force_percent}% · TEST_ONLY 조정 후보`,
+    ]);
+  }
   if (view.campaign_review?.speed_limit) rows.push(["속도 상한", view.campaign_review.speed_limit]);
   document.querySelector("#review-summary").innerHTML = rows.map(([term, value]) => `<div><dt>${escapeHtml(term)}</dt><dd>${escapeHtml(value)}</dd></div>`).join("");
   const reviewPlan = document.querySelector("#review-plan");

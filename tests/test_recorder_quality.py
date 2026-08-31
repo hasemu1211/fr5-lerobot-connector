@@ -55,10 +55,21 @@ class RecorderContractTest(unittest.TestCase):
         )
         settle_branch = worker_body.split(
             "if (observed_movement && feedback != static_cast<uint8_t>(*position))", 1
-        )[1].split("if (now >= deadline)", 1)[0]
+        )[1].split("if (std::chrono::steady_clock::now() >= deadline)", 1)[0]
         self.assertIn("Gripper motion settled away from target", settle_branch)
         self.assertIn("_restart_servo_after_gripper = true", settle_branch)
         self.assertNotIn("_gripper_error =", settle_branch)
+        pending_supersession = worker_body.split(
+            "_gripper_cv.wait_for(lock, 50ms", 2
+        )[2].split("continue;", 1)[0]
+        self.assertIn("_pending_gripper_position.has_value()", pending_supersession)
+        self.assertIn("Superseding unsettled gripper command", pending_supersession)
+        self.assertLess(
+            pending_supersession.index("_pending_gripper_position.has_value()"),
+            pending_supersession.index(
+                "std::chrono::steady_clock::now() >= deadline"
+            ),
+        )
         self.assertRegex(write_body, r"ServoJ\([^;]+,\s*0,\s*1\)")
         self.assertRegex(
             source,

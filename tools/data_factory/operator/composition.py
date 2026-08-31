@@ -126,8 +126,8 @@ def _repository_path(repository: Path, value: str | Path) -> Path:
 def _runtime_gripper_settings(
     repository: Path, initial_job: Mapping[str, Any],
     gripper_retune: str | Path,
-) -> tuple[int, int]:
-    """Resolve object-scoped close force and open speed before ROS starts."""
+) -> dict[str, int]:
+    """Resolve the object-scoped gripper settings before ROS starts."""
     retune = load_json_strict(_repository_path(repository, gripper_retune))
     grasp_matches = []
     for path in sorted(
@@ -151,12 +151,12 @@ def _runtime_gripper_settings(
         or retune.get("grasp_profile_id") != initial_job.get("grasp_profile_id")
     ):
         raise ContractError("TEST_ONLY_GRIPPER_RETUNE_BINDING")
-    _checked, force_percent, open_velocity_percent = (
+    _checked, settings = (
         _validate_test_only_gripper_retune(
             retune, grasp=grasp_matches[0], motion=motion_matches[0],
         )
     )
-    return force_percent, open_velocity_percent
+    return settings
 
 
 def _resolve_physical_pose_domain(
@@ -1153,10 +1153,8 @@ def build_physical_runtime(
         devices = [item["logical_id"] for item in camera_descriptors]
         catalog = load_operator_catalog(repository, device_ids=devices)
         initial_job = load_json_strict(_repository_path(repository, job))
-        gripper_force_percent, gripper_open_velocity_percent = (
-            _runtime_gripper_settings(
-                repository, initial_job, gripper_retune,
-            )
+        gripper_settings = _runtime_gripper_settings(
+            repository, initial_job, gripper_retune,
         )
         requested_bindings = None
         if camera_device_id is not None:
@@ -1222,8 +1220,14 @@ def build_physical_runtime(
                 camera_devices=camera_devices,
                 gripper_readback_call=capture_gripper_setup_readback,
                 gripper_maintenance_call=normalize_gripper_after_operator_ready,
-                gripper_force_percent=gripper_force_percent,
-                gripper_open_velocity_percent=gripper_open_velocity_percent,
+                gripper_velocity_percent=gripper_settings["velocity_percent"],
+                gripper_force_percent=gripper_settings["force_percent"],
+                gripper_open_velocity_percent=gripper_settings[
+                    "open_velocity_percent"
+                ],
+                gripper_open_force_percent=gripper_settings[
+                    "open_force_percent"
+                ],
             )
             environment_holder["pending"] = pending
             return pending.projection()
@@ -2253,7 +2257,13 @@ def build_physical_operator_console(
         "profile_id": profile["collection_profile_id"],
     }
     full_open_m = float(motion_qualification["gripper_positions_m"]["open"])
+    retune, gripper_settings = _validate_test_only_gripper_retune(
+        retune, grasp=resolved["grasp_profile"], motion=motion_qualification,
+    )
     retune_feedback = retune["acceptable_feedback_m"]
+    base_velocity_percent = int(
+        resolved["grasp_profile"]["gripper_close"]["velocity_percent"]
+    )
     base_force_percent = int(
         resolved["grasp_profile"]["gripper_close"]["force_percent"]
     )
@@ -2272,11 +2282,8 @@ def build_physical_operator_console(
             key: round(100 * float(value) / full_open_m, 2)
             for key, value in retune_feedback.items()
         },
-        "force_percent": int(retune.get("force_percent", base_force_percent)),
-        "open_velocity_percent": int(retune.get(
-            "open_velocity_percent",
-            resolved["grasp_profile"]["gripper_close"]["velocity_percent"],
-        )),
+        **gripper_settings,
+        "base_velocity_percent": base_velocity_percent,
         "base_force_percent": base_force_percent,
         "data_disposition": "TEST_ONLY",
         "production_authority": False,

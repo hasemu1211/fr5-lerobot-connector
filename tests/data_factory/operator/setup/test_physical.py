@@ -117,6 +117,7 @@ class PhysicalEnvironmentTests(unittest.TestCase):
         partial_camera_roles: set[str] | None = None,
         realsense_connected: bool = True,
         realsense_depth: bool = False,
+        gripper_velocity_percent: int = 20,
         gripper_force_percent: int = 50,
         gripper_open_velocity_percent: int = 20,
     ):
@@ -288,6 +289,7 @@ class PhysicalEnvironmentTests(unittest.TestCase):
             gripper_maintenance_call=maintain,
             settle_policy=lambda check: check(),
             controller_ip="192.0.2.1",
+            gripper_velocity_percent=gripper_velocity_percent,
             gripper_force_percent=gripper_force_percent,
             gripper_open_velocity_percent=gripper_open_velocity_percent,
             device_root=root,
@@ -305,7 +307,8 @@ class PhysicalEnvironmentTests(unittest.TestCase):
             self.make_uvc_links(root)
             state = {"maintenance": False, "robot": False, "camera": False}
             environment, calls = self.build(
-                root, state, gripper_force_percent=25,
+                root, state, gripper_velocity_percent=19,
+                gripper_force_percent=25,
                 gripper_open_velocity_percent=10,
             )
 
@@ -327,9 +330,10 @@ class PhysicalEnvironmentTests(unittest.TestCase):
             self.assertEqual(camera[-3:], ("up", "UVC", str(root / UP_DEVICE)))
             robot = calls["process"][2]
             self.assertEqual(
-                robot[:4],
+                robot[:5],
                 (
-                    "env", "FR5_GRIPPER_FORCE=25",
+                    "env", "FR5_GRIPPER_VELOCITY=19",
+                    "FR5_GRIPPER_FORCE=25",
                     "FR5_GRIPPER_OPEN_FORCE=50",
                     "FR5_GRIPPER_OPEN_VELOCITY=10",
                 ),
