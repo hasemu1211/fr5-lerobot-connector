@@ -50,7 +50,7 @@ class ExperimentManifestTests(unittest.TestCase):
                 }
                 self.assertEqual(build_test_only_feature_contract(rebound), feature)
 
-    def test_profile_derived_dual_contract_is_test_only_and_roundtrips(self) -> None:
+    def test_profile_derived_dual_contract_roundtrips_for_both_sources(self) -> None:
         profile = json.loads(Path(
             "config/data_factory/collection_profiles/fr5-up-wrist-rgb-30hz-v1.json",
         ).read_text(encoding="utf-8"))
@@ -77,13 +77,17 @@ class ExperimentManifestTests(unittest.TestCase):
             qualification_catalog["robot_start_pose_qualifications"][0]["qualification_digest"]
         )
         redigest(qualification_catalog, "catalog_digest")
-        with self.assertRaisesRegex(ContractError, "HYPOTHESIS_TEST_ONLY_PROFILE_SOURCE"):
-            compile_fr5_hypothesis(
-                fixed_contract=fixed, coverage_report=report, resolver_results=resolvers,
-                qualification_catalog=qualification_catalog,
-            )
+        qualified = compile_fr5_hypothesis(
+            fixed_contract=fixed, coverage_report=report, resolver_results=resolvers,
+            qualification_catalog=qualification_catalog,
+        )
+        self.assertEqual(
+            qualified["qualification_catalog"]["source"],
+            "QUALIFICATION_ARTIFACT",
+        )
+        self.assertEqual(qualified["fixed_contract"]["feature_contract"], feature)
 
-    def test_runtime_single_camera_contract_is_synthetic_only_and_bound(self) -> None:
+    def test_runtime_single_camera_contract_is_source_independent_and_bound(self) -> None:
         profile = json.loads(Path(
             "config/data_factory/collection_profiles/fr5-up-rgb-30hz-runtime-v1.json",
         ).read_text(encoding="utf-8"))
@@ -103,11 +107,14 @@ class ExperimentManifestTests(unittest.TestCase):
         fixed, report, resolvers, _, _, qualification_catalog = single_qualification_inputs(
             "QUALIFICATION_ARTIFACT", collection_profile=profile, feature_contract=feature,
         )
-        with self.assertRaisesRegex(ContractError, "HYPOTHESIS_TEST_ONLY_PROFILE_SOURCE"):
-            compile_fr5_hypothesis(
-                fixed_contract=fixed, coverage_report=report, resolver_results=resolvers,
-                qualification_catalog=qualification_catalog,
-            )
+        qualified = compile_fr5_hypothesis(
+            fixed_contract=fixed, coverage_report=report, resolver_results=resolvers,
+            qualification_catalog=qualification_catalog,
+        )
+        self.assertEqual(
+            qualified["qualification_catalog"]["source"],
+            "QUALIFICATION_ARTIFACT",
+        )
 
     def test_profile_derived_contract_rejects_unknown_or_misordered_topology(self) -> None:
         profile = json.loads(Path(
@@ -151,7 +158,7 @@ class ExperimentManifestTests(unittest.TestCase):
             encoded,
         )
 
-    def test_single_camera_profile_is_exact_and_synthetic_only(self) -> None:
+    def test_single_camera_profile_is_exact_and_source_independent(self) -> None:
         for name, mutate, code in (
             (
                 "profile_id",
@@ -178,11 +185,14 @@ class ExperimentManifestTests(unittest.TestCase):
         fixed, report, resolvers, _, _, qualification_catalog = single_qualification_inputs(
             "QUALIFICATION_ARTIFACT",
         )
-        with self.assertRaisesRegex(ContractError, "HYPOTHESIS_TEST_ONLY_PROFILE_SOURCE"):
-            compile_fr5_hypothesis(
-                fixed_contract=fixed, coverage_report=report, resolver_results=resolvers,
-                qualification_catalog=qualification_catalog,
-            )
+        value = compile_fr5_hypothesis(
+            fixed_contract=fixed, coverage_report=report, resolver_results=resolvers,
+            qualification_catalog=qualification_catalog,
+        )
+        self.assertEqual(
+            value["qualification_catalog"]["source"],
+            "QUALIFICATION_ARTIFACT",
+        )
 
     def test_single_camera_compile_rejects_cross_profile_evidence(self) -> None:
         for mismatch, code in (

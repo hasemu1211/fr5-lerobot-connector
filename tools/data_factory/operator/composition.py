@@ -44,6 +44,9 @@ from tools.data_factory.operator.registries.start_pose import (
 )
 from tools.data_factory.operator.setup.contracts import (
     build_camera_role_bindings,
+    build_runtime_episode_binding,
+    build_runtime_root_binding,
+    build_runtime_start_binding,
     build_test_only_root_binding,
     build_test_only_runtime_episode_binding,
     build_test_only_start_binding,
@@ -88,7 +91,7 @@ from tools.data_factory.operator.workflow.campaign import (
     _build_physical_campaign_contract,
     _campaign_camera_warmup,
     _derive_test_only_gripper_program,
-    _test_only_home_start_pose,
+    _home_start_pose,
     _validate_test_only_gripper_retune,
 )
 from tools.data_factory.quality.coverage_report import build_coverage_report
@@ -125,10 +128,9 @@ def _repository_path(repository: Path, value: str | Path) -> Path:
 
 def _runtime_gripper_settings(
     repository: Path, initial_job: Mapping[str, Any],
-    gripper_retune: str | Path,
+    gripper_retune: str | Path | None,
 ) -> dict[str, int]:
     """Resolve the object-scoped gripper settings before ROS starts."""
-    retune = load_json_strict(_repository_path(repository, gripper_retune))
     grasp_matches = []
     for path in sorted(
         (repository / "config/data_factory/grasps").glob("*.json"),
@@ -137,6 +139,23 @@ def _runtime_gripper_settings(
         grasp = load_json_strict(path)
         if grasp.get("grasp_profile_id") == initial_job.get("grasp_profile_id"):
             grasp_matches.append(grasp)
+    if len(grasp_matches) != 1:
+        raise ContractError("GRIPPER_PROFILE_BINDING")
+    if gripper_retune is None:
+        close = grasp_matches[0].get("gripper_close")
+        opened = grasp_matches[0].get("gripper_open")
+        if not isinstance(close, Mapping) or not isinstance(opened, Mapping):
+            raise ContractError("GRIPPER_PROFILE_BINDING")
+        settings = {
+            "velocity_percent": close.get("velocity_percent"),
+            "force_percent": close.get("force_percent"),
+            "open_velocity_percent": opened.get("velocity_percent"),
+            "open_force_percent": opened.get("force_percent"),
+        }
+        if any(type(value) is not int or not 1 <= value <= 100 for value in settings.values()):
+            raise ContractError("GRIPPER_PROFILE_BINDING")
+        return settings
+    retune = load_json_strict(_repository_path(repository, gripper_retune))
     motion_matches = []
     for path in sorted(
         (repository / "config/data_factory/motion_qualifications").glob("*.json"),
@@ -146,14 +165,15 @@ def _runtime_gripper_settings(
         if canonical_digest(motion) == retune.get("base_motion_qualification_digest"):
             motion_matches.append(motion)
     if (
-        len(grasp_matches) != 1 or len(motion_matches) != 1
+        len(motion_matches) != 1
         or retune.get("object_profile_id") != initial_job.get("object_profile_id")
         or retune.get("grasp_profile_id") != initial_job.get("grasp_profile_id")
     ):
         raise ContractError("TEST_ONLY_GRIPPER_RETUNE_BINDING")
     _checked, settings = (
         _validate_test_only_gripper_retune(
-            retune, grasp=grasp_matches[0], motion=motion_matches[0],
+            retune, grasp=grasp_matches[0],
+            motion=motion_matches[0],
         )
     )
     return settings
@@ -1140,11 +1160,20 @@ def build_physical_runtime(
     *, port: int = 4174, repository_root: str | Path = ROOT,
     session_id: str | None = None, operator_label: str = "local-operator",
     camera_device_id: str | None = None, job: str | Path = DEFAULT_JOB,
-    gripper_retune: str | Path = DEFAULT_GRIPPER_RETUNE,
+    gripper_retune: str | Path | None = None,
+    data_mode: str = "GENERAL_COLLECTION",
+    dataset_name: str = "fr5_smolvla_up_wrist_30hz",
     auto_prepare: bool = True,
 ) -> OperatorRuntime:
     now = datetime.now(timezone.utc)
-    session_id = session_id or f"collection-test-only-{now.strftime('%Y%m%dT%H%M%SZ')}"
+    if (
+        data_mode not in {"TEST_COLLECTION", "GENERAL_COLLECTION"}
+        or not isinstance(dataset_name, str)
+        or SAFE_ID.fullmatch(dataset_name) is None
+    ):
+        raise ContractError("OPERATOR_RUNTIME_DATA_MODE")
+    scope = "production" if data_mode == "GENERAL_COLLECTION" else "test-only"
+    session_id = session_id or f"collection-{scope}-{now.strftime('%Y%m%dT%H%M%SZ')}"
     application = bridge = None
     environment_holder: dict[str, Any] = {"active": None, "pending": None}
     try:
@@ -1290,6 +1319,10 @@ def build_physical_runtime(
             initial_environment=initial_environment, initial_catalog=catalog,
             initial_camera_devices=camera_descriptors, job_path=job,
             gripper_retune_path=gripper_retune,
+            production_dataset_root=(
+                repository / "datasets/fr5_episodes" / dataset_name
+            ),
+            initial_data_mode=data_mode,
             camera_environment_call=select_camera_environment,
         )
         bridge = LoopbackBridge(
@@ -1365,7 +1398,8 @@ def build_physical_operator_console(
     collection_profile_path: str | Path = DEFAULT_PROFILE,
     urdf_path: str | Path = DEFAULT_URDF,
     tcp_candidate_manifest: str | Path = DEFAULT_TCP_MANIFEST,
-    gripper_retune_path: str | Path = DEFAULT_GRIPPER_RETUNE,
+    gripper_retune_path: str | Path | None = DEFAULT_GRIPPER_RETUNE,
+    job_binding: Mapping[str, str] | None = None,
     selected_camera_device_id: str | None = None,
     selected_camera_bindings: Mapping[str, str] | None = None,
     selected_camera_binding_digest: str | None = None,
@@ -1384,12 +1418,21 @@ def build_physical_operator_console(
     selected_start_pose_qualifications: Sequence[Mapping[str, Any]] | None = None,
     start_transition_call: Callable[[Mapping[str, Any], Mapping[str, Any]], Mapping[str, Any]] | None = None,
     initial_object_pose: Mapping[str, Any] | None = None,
+    data_disposition: str = "TEST_ONLY",
+    dataset_root: str | Path | None = None,
     environment_prepared: bool = False,
     clock=None,
 ) -> tuple[OperatorConsole, dict[str, Any]]:
-    """Compose a finite registered-workspace TEST_ONLY campaign without activation."""
+    """Compose one finite registered-workspace physical campaign without activation."""
     repository = Path(repository_root).resolve(strict=True)
     clock = clock or (lambda: datetime.now(timezone.utc))
+    if (
+        data_disposition not in {"TEST_ONLY", "PRODUCTION"}
+        or data_disposition == "TEST_ONLY" and dataset_root is not None
+        or data_disposition == "PRODUCTION" and dataset_root is None
+        or data_disposition == "PRODUCTION" and gripper_retune_path is not None
+    ):
+        raise ContractError("PHYSICAL_CONSOLE_DATA_DISPOSITION")
     paths = {
         "job": _repository_path(repository, job_path),
         "yaw0_sheet": _repository_path(repository, yaw0_sheet),
@@ -1398,13 +1441,32 @@ def build_physical_operator_console(
         "profile": _repository_path(repository, collection_profile_path),
         "urdf": _repository_path(repository, urdf_path),
         "tcp": _repository_path(repository, tcp_candidate_manifest),
-        "gripper_retune": _repository_path(repository, gripper_retune_path),
     }
+    if gripper_retune_path is not None:
+        paths["gripper_retune"] = _repository_path(
+            repository, gripper_retune_path,
+        )
     template_job = load_json_strict(paths["job"])
     template_job["operator_or_agent_id"] = operator_label
+    if job_binding is not None:
+        expected_binding = {
+            "place_id", "cell_calibration_id", "object_profile_id",
+            "grasp_profile_id",
+        }
+        if (
+            not isinstance(job_binding, Mapping)
+            or set(job_binding) != expected_binding
+            or any(
+                not isinstance(value, str)
+                or SAFE_ID.fullmatch(value) is None
+                for value in job_binding.values()
+            )
+        ):
+            raise ContractError("PHYSICAL_CONSOLE_JOB_BINDING")
+        template_job.update(copy.deepcopy(dict(job_binding)))
     selected_task = template_job.get("task") if task_id is None else task_id
     recipe = get_task_recipe(selected_task)
-    if selected_task != template_job.get("task"):
+    if selected_task != template_job.get("task") or job_binding is not None:
         object_profiles = []
         for path in sorted(
             (repository / "config/data_factory/objects").glob("*.json"),
@@ -1475,16 +1537,21 @@ def build_physical_operator_console(
         "expected_robot_system_id": template_job["robot_system_id"],
         "camera_profile": configured_profile["camera_profile"],
     }
-    retune = load_json_strict(paths["gripper_retune"])
+    retune = (
+        None if gripper_retune_path is None
+        else load_json_strict(paths["gripper_retune"])
+    )
     motion_qualification = load_json_strict(paths["motion"])
 
-    def test_only_resolver(value, *, scene_binding_call):
+    def physical_resolver(value, *, scene_binding_call):
         resolved, program, binding = run_job.resolve_inputs(
             value, scene_binding_call=scene_binding_call,
         )
-        return resolved, _derive_test_only_gripper_program(
-            resolved, motion_qualification, program, retune,
-        ), binding
+        if retune is not None:
+            program = _derive_test_only_gripper_program(
+                resolved, motion_qualification, program, retune,
+            )
+        return resolved, program, binding
 
     resolved_jobs = _resolve_physical_pose_domain(
         template_job=template_job, poses=pose_domain,
@@ -1494,7 +1561,7 @@ def build_physical_operator_console(
             [*pose_domain[1:], pose_domain[-2]]
             if template_job["task"] == "pick_place" else None
         ),
-        resolver=test_only_resolver,
+        resolver=physical_resolver,
     )
     resolved_by_pose = {
         tuple(item["normalized_job"][key] for key in (
@@ -1641,27 +1708,61 @@ def build_physical_operator_console(
     maintain_gripper = gripper_maintenance_call or normalize_gripper_after_operator_ready
     if type(environment_prepared) is not bool:
         raise ContractError("PHYSICAL_CONSOLE_ENVIRONMENT")
-    first_roots = build_test_only_root_binding(
+    first_roots = build_runtime_root_binding(
         repository, session_id=session_id, run_id=run_id,
+        data_disposition=data_disposition, dataset_root=dataset_root,
     )
-    state_initialization = initialize_test_only_state_from_user_declaration(
-        first_roots, repository_root=repository,
-        robot_system_id=resolved["normalized_job"]["robot_system_id"],
-        object_instance_id=(
-            "test-object-"
-            + canonical_digest({
-                "session_id": session_id,
-                "object_profile_id": resolved["normalized_job"]["object_profile_id"],
+    job = resolved["normalized_job"]
+    state_initialization = None
+    if data_disposition == "TEST_ONLY":
+        state_initialization = initialize_test_only_state_from_user_declaration(
+            first_roots, repository_root=repository,
+            robot_system_id=job["robot_system_id"],
+            object_instance_id=(
+                "test-object-"
+                + canonical_digest({
+                    "session_id": session_id,
+                    "object_profile_id": job["object_profile_id"],
+                }).removeprefix("sha256:")[:20]
+            ),
+            object_profile_id=job["object_profile_id"],
+            place_id=job["place_id"], yaw_deg=job["yaw_deg"],
+            x_mm=job["x_mm"], y_mm=job["y_mm"],
+            declared_by=operator_label,
+        )
+        initial_scene_digest = state_initialization["scene_state_digest"]
+    else:
+        scene_store = SceneStateStore(first_roots["cell_root"], job["robot_system_id"])
+        before = scene_store.snapshot()
+        matching = [
+            item for item in before["scene_state"]["objects"].values()
+            if item.get("object_profile_id") == job["object_profile_id"]
+        ]
+        if len(matching) > 1:
+            raise ContractError("SCENE_OBJECT_AMBIGUOUS")
+        instance_id = (
+            matching[0]["instance_id"] if matching else
+            "production-object-" + canonical_digest({
+                "robot_system_id": job["robot_system_id"],
+                "object_profile_id": job["object_profile_id"],
             }).removeprefix("sha256:")[:20]
-        ),
-        object_profile_id=resolved["normalized_job"]["object_profile_id"],
-        place_id=resolved["normalized_job"]["place_id"],
-        yaw_deg=resolved["normalized_job"]["yaw_deg"],
-        x_mm=resolved["normalized_job"]["x_mm"],
-        y_mm=resolved["normalized_job"]["y_mm"],
-        declared_by=operator_label,
-    )
+        )
+        observed = scene_store.update_object(
+            instance_id=instance_id,
+            object_profile_id=job["object_profile_id"], state="ON_SURFACE",
+            pose={
+                key: job[key]
+                for key in ("place_id", "yaw_deg", "x_mm", "y_mm")
+            },
+            source="HUMAN", updated_by=operator_label,
+            expected_revision=before["scene_state"]["revision"],
+        )
+        initial_scene_digest = observed["scene_state_digest"]
     home_candidate = load_json_strict(paths["home"])
+    qualification_source = (
+        "SYNTHETIC_TEST_ONLY"
+        if data_disposition == "TEST_ONLY" else "QUALIFICATION_ARTIFACT"
+    )
     live_start_qualifications: dict[str, dict[str, Any]] = {}
     campaign_start_qualifications = None
     if selected_start_pose_qualifications is not None:
@@ -1680,7 +1781,7 @@ def build_physical_operator_console(
                 raise ContractError("PHYSICAL_CONSOLE_START_POSE")
             if qualification.get("source") == "QUALIFICATION_ARTIFACT":
                 live_start_qualifications[identifier] = copy.deepcopy(qualification)
-            qualification["source"] = "SYNTHETIC_TEST_ONLY"
+            qualification["source"] = qualification_source
             qualification["qualification_digest"] = canonical_digest({
                 key: value for key, value in qualification.items()
                 if key != "qualification_digest"
@@ -1692,7 +1793,7 @@ def build_physical_operator_console(
     hypothesis, draft = _build_physical_campaign_contract(
         resolver_results=resolved_jobs, motion_qualification=motion_qualification,
         home_candidate=home_candidate,
-        scene_digest=state_initialization["scene_state_digest"],
+        scene_digest=initial_scene_digest,
         draft_id=f"{session_id}-draft", manifest_id=f"{session_id}-manifest",
         requested_count=requested_count,
         normalized_seed=normalized_seed,
@@ -1702,7 +1803,10 @@ def build_physical_operator_console(
         direct_resolved_job_digests=direct_digests,
         direct_start_pose_ids=direct_start_pose_ids,
         start_pose_qualifications=campaign_start_qualifications,
-        test_only_gripper_retune_digest=retune["retune_digest"],
+        test_only_gripper_retune_digest=(
+            None if retune is None else retune["retune_digest"]
+        ),
+        qualification_source=qualification_source,
     )
     resolved_by_digest = {
         item["resolved_job_digest"]: item
@@ -1726,8 +1830,9 @@ def build_physical_operator_console(
     def roots_for(active_run_id: str) -> dict[str, Any]:
         if active_run_id not in campaign_run_ids:
             raise ContractError("PHYSICAL_CONSOLE_RUN_ID")
-        return build_test_only_root_binding(
+        return build_runtime_root_binding(
             repository, session_id=session_id, run_id=active_run_id,
+            data_disposition=data_disposition, dataset_root=dataset_root,
         )
 
     counters = {name: 0 for name in SIDE_EFFECT_COUNTERS}
@@ -1764,7 +1869,9 @@ def build_physical_operator_console(
                         discovery_call=lambda: discovered_cameras,
                     )
                 value = {
-                    "schema_version": "data_factory.test_only_camera_transport_set.v1",
+                    "schema_version": (
+                        f"data_factory.{data_disposition.lower()}_camera_transport_set.v1"
+                    ),
                     "camera_binding_digest": role_map_digest,
                     "roles": transports,
                     "status": "PASSIVE_GRAPH_VERIFIED",
@@ -1776,7 +1883,9 @@ def build_physical_operator_console(
             raise ContractError("CAMPAIGN_OPERATOR_PHYSICAL_ACTIVATION_FAILED") from exc
         if value is True:
             evidence = {
-                "schema_version": "data_factory.test_only_camera_transport_set.v1",
+                "schema_version": (
+                    f"data_factory.{data_disposition.lower()}_camera_transport_set.v1"
+                ),
                 "camera_binding_digest": role_map_digest,
                 "roles": {
                     role: {
@@ -1845,7 +1954,7 @@ def build_physical_operator_console(
             "plan_digest": setup_binding_digest,
             "prompt": (
                 "Confirm the gripper is empty and physically clear before one "
-                "TEST_ONLY open-normalization action."
+                f"{data_disposition} open-normalization action."
             ),
             "choices": ["READY", "CANCEL"],
             "evidence": {
@@ -1895,7 +2004,7 @@ def build_physical_operator_console(
         return OneJob(
             unused_port, unused_port,
             readiness_contract=TEST_ONLY_READINESS_CONTRACT,
-            allow_synthetic_test_operator=True,
+            allow_synthetic_test_operator=data_disposition == "TEST_ONLY",
         )
 
     def resolve_gripper_setup(_decision: Mapping[str, Any]) -> dict[str, Any]:
@@ -1978,7 +2087,8 @@ def build_physical_operator_console(
             snapshot_call() if snapshot_call is not None
             else capture_home_snapshot(tcp_candidate_manifest=paths["tcp"])
         )
-        return build_test_only_start_binding(
+        return build_runtime_start_binding(
+            data_disposition=data_disposition,
             manifest=holder["operator"].manifest, hypothesis=hypothesis,
             motion_qualification=motion_qualification,
             home_candidate=home_candidate, current_snapshot=snapshot, slot=slot,
@@ -2050,11 +2160,11 @@ def build_physical_operator_console(
                 ),
                 next_run_id=next_run_id,
                 cell_root=active_roots["cell_root"],
-                resolver=test_only_resolver,
+                resolver=physical_resolver,
             )
 
         scene_source: dict[str, Any]
-        if order_index == 0:
+        if data_disposition == "TEST_ONLY" and order_index == 0:
             scene_source = {"state_initialization": state_initialization}
         else:
             live_resolved, _program, active_scene_binding = episode_resolver(active_payload)
@@ -2066,7 +2176,7 @@ def build_physical_operator_console(
                 "observed_by": operator_label,
             }
         place_alias = "place1" if active_job["place_id"] == "PLACE_A" else active_job["place_id"]
-        episode_binding = build_test_only_runtime_episode_binding(
+        episode_binding = build_runtime_episode_binding(
             roots=active_roots, repository_root=repository,
             manifest=holder["operator"].manifest, hypothesis=hypothesis,
             intent=intent, start_binding=episode_context["start_binding"],
@@ -2099,7 +2209,8 @@ def build_physical_operator_console(
             "camera_profile_id": profile["collection_profile_id"],
             "camera_transport_binding_digest": transport["binding_digest"],
             "episode_number": order_index + 1,
-            "episode_limit": requested_count, "data_disposition": "TEST_ONLY",
+            "episode_limit": requested_count,
+            "data_disposition": data_disposition,
             **(
                 {"task_binding": copy.deepcopy(task_bindings[order_index])}
                 if task_bindings is not None else {}
@@ -2113,9 +2224,9 @@ def build_physical_operator_console(
                 one_job=lifecycle, decision_provider=decision_provider,
                 checkpoint_provider=checkpoint_provider,
                 approval_scope="HIL_NUMERIC_PROXY",
-                test_only_root_binding=episode_context["root_binding"],
-                test_only_episode_binding=episode_binding,
-                test_only_start_binding=episode_context["start_binding"],
+                runtime_root_binding=episode_context["root_binding"],
+                runtime_episode_binding=episode_binding,
+                runtime_start_binding=episode_context["start_binding"],
                 episode_ledger_context={
                     "manifest": holder["operator"].manifest,
                     "intent": intent,
@@ -2123,7 +2234,8 @@ def build_physical_operator_console(
                 preapproval_checklist=checklist,
                 campaign_authorization=holder["console"].campaign_authorization,
                 camera_warmup_call=campaign_camera_warmup,
-                candidate_writer_enabled=False, repository_root=repository,
+                candidate_writer_enabled=data_disposition == "PRODUCTION",
+                repository_root=repository,
             )
         except Exception:
             holder.pop("camera_warmup_cache", None)
@@ -2199,7 +2311,7 @@ def build_physical_operator_console(
             session_id=session_id, lifecycle_owner=operator_label,
             operator_label=operator_label,
             workspace={
-                "workspace_id": f"{workspace_alias}-test-only",
+                "workspace_id": f"{workspace_alias}-{data_disposition.lower()}",
                 "identity": (
                     f"{resolved['normalized_job']['place_id']}@"
                     f"{resolved['normalized_job']['cell_calibration_id']}"
@@ -2207,7 +2319,7 @@ def build_physical_operator_console(
             },
             hypothesis=hypothesis, draft=draft,
             effect_scope="PHYSICAL", lifecycle_action="LIVE_COLLECT",
-            data_disposition="TEST_ONLY",
+            data_disposition=data_disposition,
             subsystems={
                 "robot": {"readiness": "READY", "capability": "ATTACH", "reason": "PASSIVE_GATE_AT_RUN"},
                 "gripper": {
@@ -2218,10 +2330,10 @@ def build_physical_operator_console(
                     "capability": "ATTACH",
                     "reason": initial_gripper["state"],
                 },
-                "camera": {"readiness": "READY", "capability": "CONNECTED_UNPLACED", "reason": "STABLE_LOCAL_BINDING"},
+                "camera": {"readiness": "READY", "capability": "CONNECTED_ASSIGNED", "reason": "STABLE_LOCAL_BINDING"},
             },
             expires_at=(clock() + timedelta(hours=1)).astimezone(timezone.utc).isoformat().replace("+00:00", "Z"),
-            initial_scene_digest=state_initialization["scene_state_digest"],
+            initial_scene_digest=initial_scene_digest,
             scene_evidence_call=scene_evidence,
             side_effect_counter_call=lambda: copy.deepcopy(counters),
             fake_lifecycle_factory=lambda: (_ for _ in ()).throw(
@@ -2239,7 +2351,10 @@ def build_physical_operator_console(
 
     fixed_lane = {
         "workspace": {
-            "display_name": f"{workspace_alias} · {resolved['normalized_job']['place_id']} · TEST_ONLY",
+            "display_name": (
+                f"{workspace_alias} · {resolved['normalized_job']['place_id']} · "
+                f"{data_disposition}"
+            ),
             "place_id": resolved["normalized_job"]["place_id"],
             "revision": resolved["normalized_job"]["cell_calibration_id"],
             "bounds": (
@@ -2259,41 +2374,62 @@ def build_physical_operator_console(
         },
         "start_pose_id": hypothesis["robot_start_poses"][0]["robot_start_pose_id"],
         "camera_role": (
-            f"{'+'.join(profile['camera_roles'])} · CONNECTED_UNPLACED · TEST_ONLY"
+            f"{'+'.join(profile['camera_roles'])} · CONNECTED_ASSIGNED · "
+            f"{data_disposition}"
         ),
         "profile_id": profile["collection_profile_id"],
     }
     full_open_m = float(motion_qualification["gripper_positions_m"]["open"])
-    retune, gripper_settings = _validate_test_only_gripper_retune(
-        retune, grasp=resolved["grasp_profile"], motion=motion_qualification,
-    )
-    retune_feedback = retune["acceptable_feedback_m"]
+    grasp_profile = resolved["grasp_profile"]
+    close_profile = grasp_profile["gripper_close"]
+    if retune is None:
+        open_profile = grasp_profile["gripper_open"]
+        tuning_id = grasp_profile["grasp_profile_id"]
+        tuning_digest = canonical_digest(grasp_profile)
+        tuning_status = "QUALIFIED_PROFILE"
+        command_position_m = close_profile["command_position_m"]
+        tuning_feedback = close_profile["acceptable_feedback_m"]
+        gripper_settings = {
+            "velocity_percent": close_profile["velocity_percent"],
+            "force_percent": close_profile["force_percent"],
+            "open_velocity_percent": open_profile["velocity_percent"],
+            "open_force_percent": open_profile["force_percent"],
+        }
+    else:
+        retune, gripper_settings = _validate_test_only_gripper_retune(
+            retune, grasp=grasp_profile, motion=motion_qualification,
+        )
+        tuning_id = retune["retune_id"]
+        tuning_digest = retune["retune_digest"]
+        tuning_status = retune["status"]
+        command_position_m = retune["command_position_m"]
+        tuning_feedback = retune["acceptable_feedback_m"]
     base_velocity_percent = int(
-        resolved["grasp_profile"]["gripper_close"]["velocity_percent"]
+        close_profile["velocity_percent"]
     )
     base_force_percent = int(
-        resolved["grasp_profile"]["gripper_close"]["force_percent"]
+        close_profile["force_percent"]
     )
     gripper_tuning = {
-        "retune_id": retune["retune_id"],
-        "retune_digest": retune["retune_digest"],
-        "status": retune["status"],
-        "object_profile_id": retune["object_profile_id"],
-        "grasp_profile_id": retune["grasp_profile_id"],
-        "command_position_m": retune["command_position_m"],
+        "retune_id": tuning_id,
+        "retune_digest": tuning_digest,
+        "status": tuning_status,
+        "object_profile_id": grasp_profile["object_profile_id"],
+        "grasp_profile_id": grasp_profile["grasp_profile_id"],
+        "command_position_m": command_position_m,
         "command_percent": round(
-            100 * float(retune["command_position_m"]) / full_open_m, 2,
+            100 * float(command_position_m) / full_open_m, 2,
         ),
-        "acceptable_feedback_m": copy.deepcopy(retune_feedback),
+        "acceptable_feedback_m": copy.deepcopy(tuning_feedback),
         "acceptable_feedback_percent": {
             key: round(100 * float(value) / full_open_m, 2)
-            for key, value in retune_feedback.items()
+            for key, value in tuning_feedback.items()
         },
         **gripper_settings,
         "base_velocity_percent": base_velocity_percent,
         "base_force_percent": base_force_percent,
-        "data_disposition": "TEST_ONLY",
-        "production_authority": False,
+        "data_disposition": data_disposition,
+        "production_authority": data_disposition == "PRODUCTION",
         "training_authority": False,
     }
 
@@ -2321,13 +2457,20 @@ def build_physical_operator_console(
                         ),
                     },
                     {
-                        "label": "camera", "status": "CONNECTED_UNPLACED",
+                        "label": "camera", "status": "CONNECTED_ASSIGNED",
                         "detail": ", ".join(
                             f"{role}: {device}"
                             for role, device in role_device_ids.items()
                         ),
                     },
-                    {"label": "data", "status": "TEST_ONLY", "detail": "production writers disabled"},
+                    {
+                        "label": "data", "status": data_disposition,
+                        "detail": (
+                            str(first_roots["dataset_root"])
+                            if data_disposition == "PRODUCTION"
+                            else "isolated test root"
+                        ),
+                    },
                 ],
             },
             "fixed_lane": copy.deepcopy(fixed_lane),
@@ -2359,7 +2502,7 @@ def build_physical_operator_console(
                 "label": (
                     f"{resolved['normalized_job']['task']} · "
                     f"{hypothesis['fixed_contract']['motion_recipe']} · "
-                    f"{len(profile['camera_roles'])}-camera TEST_ONLY"
+                    f"{len(profile['camera_roles'])}-camera {data_disposition}"
                 ),
                 "status": "PHYSICAL_EXECUTABLE",
                 "reason_codes": ["REGISTERED_WORKSPACE_FINITE_CAMPAIGN"],
@@ -2405,7 +2548,7 @@ def build_physical_operator_console(
     holder["console"] = console
     context = {
         "session_id": session_id, "run_id": run_id,
-        "effect_scope": "PHYSICAL", "data_disposition": "TEST_ONLY",
+        "effect_scope": "PHYSICAL", "data_disposition": data_disposition,
         "camera_binding_set": camera_binding_set,
         "camera_binding_digest": role_map_digest,
         "camera_bindings": copy.deepcopy(role_device_ids),
@@ -2417,12 +2560,12 @@ def build_physical_operator_console(
             hypothesis["fixed_contract"]["feature_contract"]
         ),
         "motion_qualification_digest": canonical_digest(motion_qualification),
-        "base_motion_qualification_digest": (
-            retune["base_motion_qualification_digest"]
+        "base_motion_qualification_digest": canonical_digest(
+            motion_qualification,
         ),
         "gripper_tuning": copy.deepcopy(gripper_tuning),
         "gripper_setup": copy.deepcopy(holder["gripper_projection"]),
-        "production_writers_enabled": False,
+        "production_writers_enabled": data_disposition == "PRODUCTION",
     }
     return console, context
 
@@ -2444,11 +2587,13 @@ def build_physical_operator_application(
     production_campaign_factory: Callable[
         [str, dict[str, Any], dict[str, Any]], OperatorConsole
     ] | None = None,
+    production_dataset_root: str | Path | None = None,
+    initial_data_mode: str = "TEST_COLLECTION",
     initial_environment: Mapping[str, Any] | None = None,
     initial_catalog: Mapping[str, Any] | None = None,
     initial_camera_devices: Sequence[object] | None = None,
     job_path: str | Path = DEFAULT_JOB,
-    gripper_retune_path: str | Path = DEFAULT_GRIPPER_RETUNE,
+    gripper_retune_path: str | Path | None = DEFAULT_GRIPPER_RETUNE,
     camera_environment_call: Callable[
         [Mapping[str, Any] | None, Mapping[str, Mapping[str, str]]], Mapping[str, Any]
     ] | None = None,
@@ -2460,6 +2605,15 @@ def build_physical_operator_application(
     """Compose the reusable app without creating campaign roots or run state."""
     if production_campaign_factory is not None and not callable(
         production_campaign_factory
+    ):
+        raise ContractError("OPERATOR_APPLICATION_PRODUCTION_FACTORY")
+    if (
+        initial_data_mode not in {"TEST_COLLECTION", "GENERAL_COLLECTION"}
+        or production_campaign_factory is not None
+        and production_dataset_root is not None
+        or initial_data_mode == "GENERAL_COLLECTION"
+        and production_campaign_factory is None
+        and production_dataset_root is None
     ):
         raise ContractError("OPERATOR_APPLICATION_PRODUCTION_FACTORY")
     if (
@@ -2572,7 +2726,10 @@ def build_physical_operator_application(
                     candidate["execution"][mode] = {
                         "executable": False, "reason": reason,
                     }
-            if production_campaign_factory is None:
+            if (
+                production_campaign_factory is None
+                and production_dataset_root is None
+            ):
                 candidate["execution"]["GENERAL_COLLECTION"] = {
                     "executable": False,
                     "reason": "GENERAL_CALLER_NOT_CONFIGURED",
@@ -2618,7 +2775,7 @@ def build_physical_operator_application(
         )
         and (
             not mapping_ready
-            or item["execution"]["TEST_COLLECTION"]["executable"] is True
+            or item["execution"][initial_data_mode]["executable"] is True
         )
     ]
     if len(initial) != 1:
@@ -2627,7 +2784,7 @@ def build_physical_operator_application(
     selection = {
         "schema_version": SELECTION_SCHEMA_V2,
         "combination_digest": combination["combination_digest"],
-        "data_mode": "TEST_COLLECTION",
+        "data_mode": initial_data_mode,
         **{
             field: combination[field]
             for field in (
@@ -2667,7 +2824,7 @@ def build_physical_operator_application(
         motion = load_json_strict(_repository_path(repository, source["motion"]))
         home = load_json_strict(_repository_path(repository, source["start_pose"]))
         home_digest = canonical_digest(home)
-        home_pose = _test_only_home_start_pose(
+        home_pose = _home_start_pose(
             motion, home, motion["robot_system_id"],
         )
         qualifications = {home_pose["robot_start_pose_id"]: home_pose}
@@ -3074,9 +3231,7 @@ def build_physical_operator_application(
             or type(draft.get("requested_count")) is not int
         ):
             raise ContractError("OPERATOR_APPLICATION_CAMPAIGN_FACTORY")
-        if mode == "GENERAL_COLLECTION":
-            if production_campaign_factory is None:
-                raise ContractError("OPERATOR_APPLICATION_PRODUCTION_FACTORY")
+        if mode == "GENERAL_COLLECTION" and production_campaign_factory is not None:
             console = production_campaign_factory(
                 campaign_id, copy.deepcopy(selected), copy.deepcopy(draft),
             )
@@ -3090,8 +3245,13 @@ def build_physical_operator_application(
                     close()
                 raise ContractError("OPERATOR_APPLICATION_PRODUCTION_FACTORY")
             return console
+        if mode == "GENERAL_COLLECTION" and production_dataset_root is None:
+            raise ContractError("OPERATOR_APPLICATION_PRODUCTION_FACTORY")
         source = chosen["sources"]
         pose_plan, campaign_initial_pose = physical_pose_plan(selected, draft)
+        disposition = (
+            "PRODUCTION" if mode == "GENERAL_COLLECTION" else "TEST_ONLY"
+        )
         console, _context = build_physical_operator_console(
             repository_root=repository,
             session_id=campaign_id,
@@ -3115,7 +3275,15 @@ def build_physical_operator_application(
             snapshot_call=snapshot_call,
             gripper_readback_call=gripper_readback_call,
             gripper_maintenance_call=gripper_maintenance_call,
-            gripper_retune_path=gripper_retune_path,
+            gripper_retune_path=(
+                None if disposition == "PRODUCTION" else gripper_retune_path
+            ),
+            job_binding={
+                "place_id": chosen["workspace_id"],
+                "cell_calibration_id": chosen["frame_id"],
+                "object_profile_id": chosen["object_id"],
+                "grasp_profile_id": chosen["grasp_id"],
+            },
             run_live_call=run_live_call,
             task_id=selected["task_id"],
             start_transition_call=start_transition_call,
@@ -3123,6 +3291,10 @@ def build_physical_operator_application(
             normalized_seed=draft["normalized_seed"],
             initial_object_pose=campaign_initial_pose,
             **pose_plan,
+            data_disposition=disposition,
+            dataset_root=(
+                production_dataset_root if disposition == "PRODUCTION" else None
+            ),
             environment_prepared=True,
             clock=clock,
         )
@@ -3159,7 +3331,10 @@ def build_physical_operator_application(
     return application, {
         "session_id": session_id,
         "effect_scope": "PHYSICAL",
-        "data_disposition": "TEST_ONLY",
+        "data_disposition": (
+            "PRODUCTION"
+            if initial_data_mode == "GENERAL_COLLECTION" else "TEST_ONLY"
+        ),
         "catalog_digest": catalog["catalog_digest"],
         "combination_digest": combination["combination_digest"],
         "camera_device_id": (
@@ -3171,5 +3346,7 @@ def build_physical_operator_application(
         "camera_binding_digest": (
             camera_state["binding_digest"] if camera_state["ready"] else None
         ),
-        "production_writers_enabled": False,
+        "production_writers_enabled": (
+            initial_data_mode == "GENERAL_COLLECTION"
+        ),
     }

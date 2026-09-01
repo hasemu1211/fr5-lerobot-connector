@@ -24,6 +24,7 @@ from tools.data_factory_recovery import write_json_atomic
 from tools.fr5_data_factory import (
     ContractError,
     DIGEST,
+    MOTION_QUALIFICATION_SCHEMAS,
     RFC3339,
     SAFE_ID,
     canonical_digest,
@@ -981,7 +982,12 @@ def build_test_only_start_binding(
     hypothesis = validate_fr5_hypothesis(hypothesis)
     manifest = validate_collection_campaign_manifest(manifest, hypothesis=hypothesis)
     slot = _manifest_slot(manifest, slot)
-    if not isinstance(motion_qualification, Mapping) or motion_qualification.get("schema_version") != "data_factory.motion_qualification.v1" or motion_qualification.get("qualification_status") != "QUALIFIED":
+    if (
+        not isinstance(motion_qualification, Mapping)
+        or motion_qualification.get("schema_version")
+        not in MOTION_QUALIFICATION_SCHEMAS
+        or motion_qualification.get("qualification_status") != "QUALIFIED"
+    ):
         raise ContractError("TEST_ONLY_START_MOTION_QUALIFICATION")
     if not isinstance(home_candidate, Mapping) or home_candidate.get("schema_version") != "data_factory.home_candidate.v1":
         raise ContractError("TEST_ONLY_START_HOME_CANDIDATE")

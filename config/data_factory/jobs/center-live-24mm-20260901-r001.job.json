@@ -1,0 +1,20 @@
+{
+  "schema_version": "data_factory.job.v1",
+  "job_id": "center-live-24mm-20260901-r001",
+  "task": "pickup_e2e",
+  "robot_system_id": "fr5-lab-a",
+  "collection_profile_id": "fr5-up-wrist-rgb-30hz-v1",
+  "place_id": "PLACE_A",
+  "cell_calibration_id": "place-a-yaw0-r003",
+  "sheet_manifest_digest": "sha256:60de245b7578a22b20892fe3757837adc9ca3bd39c5610a3c3943b7d862ad025",
+  "yaw_deg": 0.0,
+  "x_mm": 0.0,
+  "y_mm": 0.0,
+  "object_profile_id": "wood-cube-24mm-r001",
+  "grasp_profile_id": "wood-cube-24mm-top-3p5mm-r001",
+  "instruction": "pick up the 24 mm wooden cube",
+  "episode_intent": "nominal pickup",
+  "operator_or_agent_id": "local-operator",
+  "approval_expiry": "2099-01-01T00:00:00Z",
+  "dry_run_required": true
+}

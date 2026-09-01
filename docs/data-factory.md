@@ -18,7 +18,7 @@ r007의 체감 정지는 runner queue 적체와 구분한다. terminal 뒤 다�
 
 2026-08-21에는 같은 ROS `FollowJointTrajectory` 경로와 feedback/timeout gate를 유지하고 gripper duration만 1.0 s로 재적격화했다. 독립 HIL에서 close는 1.0509 s, open은 1.7011 s에 성공했고 두 goal 사이 coordinator gap은 0.179 ms, arm 최대 drift는 7.59 µrad였다. 근거는 `outputs/data_factory/qualifications/p45-gripper-latency-r001/evidence.json`이며 SHA-256은 `8ebef58209dcbdb7ef60e46cb8d483f319deba313888033df16bdbee7e51f0f9`다.
 
-같은 날 공개 `run_job --mode live`의 pickup+recycle HIL은 CENTER source에서 GRID_1=`(-70 mm,+35 mm,0°)` release까지 10개 phase를 모두 실행했다. 2,023개 collision sample은 전부 valid였고 close/open accepted→terminal은 1.051/1.096 s, gripper terminal→다음 arm dispatch는 1.374/1.418 ms였다. recorder는 lift 직후 537 rows에서 freeze되어 recycle 뒤에도 537 rows였고, scene v2 revision 14의 `ROBOT_RELEASE` object+slot 전이가 commit보다 먼저 durable해진 뒤 technical validator가 `PASS`했다. plan은 `sha256:c2e5668c…a9ce1`, recycle은 `sha256:434fca4c…4b10d`이며 원본은 `outputs/data_factory/runs/p45-public-live-20260821-r003/`와 `datasets/fr5_episodes/p45_public_recycle_20260821_r003/`다. 이 single-camera HIL의 `camera_semantic_authority`와 `training_authorized`는 모두 false다.
+같은 날 공개 `run_job --mode live`의 pickup+recycle HIL은 CENTER source에서 GRID_1=`(-70 mm,+35 mm,0°)` release까지 10개 phase를 모두 실행했다. 2,023개 collision sample은 전부 valid였고 close/open accepted→terminal은 1.051/1.096 s, gripper terminal→다음 arm dispatch는 1.374/1.418 ms였다. recorder는 lift 직후 537 rows에서 freeze되어 recycle 뒤에도 537 rows였고, scene v2 revision 14의 `ROBOT_RELEASE` object+slot 전이가 commit보다 먼저 durable해진 뒤 technical validator가 `PASS`했다. plan은 `sha256:c2e5668c…a9ce1`, recycle은 `sha256:434fca4c…4b10d`이며 원본은 `outputs/data_factory/runs/p45-public-live-20260821-r003/`와 `datasets/legacy_physical/p45_public_recycle_20260821_r003/`다. 이 single-camera HIL의 `camera_semantic_authority`와 `training_authorized`는 모두 false다.
 
 - 첫 live task: `pickup_e2e`
 - 첫 grasp profile: `top_center` 하나
@@ -407,6 +407,7 @@ outputs/
 └── legacy/                              # migration inventory로만 이동한 과거 산출물
 
 datasets/fr5_episodes/<dataset_name>/    # LeRobot dataset; accepted episode의 유일한 heavy copy
+datasets/legacy_physical/                # checksum inventory로 격리한 과거 HIL·불완전 dataset
 .agent-local/work/research/              # 외부 원문·임시 분석; 검증 사실을 승격한 뒤 세션 삭제
 build/ install/ log/                     # colcon/ROS 산출물; factory evidence가 아님
 ```
@@ -415,4 +416,4 @@ run 디렉터리는 control-plane metadata만 소유한다. RGB/video/Parquet를
 
 Phase-event sidecar와 behavior quality report는 digest, row count와 phase scalar만 저장하며 recorder row, RGB, MP4와 Parquet를 복제하지 않는다.
 
-기존 `datasets/fr5_episodes/hil_usb_cam_30hz_20260812/`는 과거 HIL dataset으로 그대로 보존한다. 현재 평평한 `outputs/diagnostics/`와 `outputs/previews/`도 삭제하지 않는다. 새 factory run은 그 경로에 쓰지 않으며, 별도 inventory·checksum·참조 검사를 통과한 뒤에만 `outputs/legacy/`로 이동한다. 기존 dataset은 새 layout으로 복사하거나 이름을 바꾸지 않는다.
+2026-09-01 현재 수집 호스트의 과거 HIL·qualification dataset 16개는 active writer가 없음을 확인하고 파일별 tree checksum과 repository reference를 `datasets/legacy_physical/inventory.json`에 기록한 뒤 그 root로 이동했다. 이 중 8개는 data-bearing legacy이고 8개는 zero-episode 불완전 dataset이며 모두 `training_authority=false`다. 새 factory run은 `datasets/fr5_episodes/<dataset_name>/`에만 쓰고 legacy payload를 복사하거나 자동 승격하지 않는다. 비어 있던 encoder 임시 디렉터리만 제거했으며 현재 평평한 `outputs/diagnostics/`와 `outputs/previews/`는 삭제하지 않는다.

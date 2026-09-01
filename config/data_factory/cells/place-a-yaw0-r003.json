@@ -1,0 +1,43 @@
+{
+  "schema_version": "data_factory.cell_calibration.v1",
+  "calibration_id": "place-a-yaw0-r003",
+  "qualification_status": "QUALIFIED",
+  "robot_system_id": "fr5-lab-a",
+  "place_id": "PLACE_A",
+  "yaw0_manifest_digest": "sha256:60de245b7578a22b20892fe3757837adc9ca3bd39c5610a3c3943b7d862ad025",
+  "a4_family_digest": "sha256:f4b34c3d2c57f588003ce7627290ca735b6ff7a512a25f9a6bd5fa0148dd4fa0",
+  "tcp_digest": "sha256:5ecc779a26905471c0d7ea792361fe5c81756fd072138851d95ab9f2cab31eb3",
+  "measurement_report_digest": "sha256:ea871c12f48ef538ada2dc7b6020cdcfe1bef0f3cfa0600b7e50e1b36710b98c",
+  "table_plane_measurement_digest": "sha256:7585d877fc404839d263dcf27315f2c89fbee0e97ecc8e7a2767db17a87997ad",
+  "center_base_m": [
+    0.223765,
+    0.557577,
+    -0.004457
+  ],
+  "x_ref_base_m": [
+    0.351406,
+    0.557569,
+    -0.004455
+  ],
+  "y_check_base_m": [
+    0.094393,
+    0.638576,
+    -0.004456
+  ],
+  "table_normal_base": [
+    0.0,
+    0.0,
+    1.0
+  ],
+  "print_source_scale_bar_measured_mm": 100.0,
+  "scale_bar_measured_mm": 99.33151770482735,
+  "limits": {
+    "max_scale_error_mm": 1.0,
+    "min_x_ref_separation_mm": 124.5,
+    "max_x_ref_distance_error_mm": 2.0,
+    "max_x_ref_out_of_plane_mm": 0.1,
+    "max_y_check_residual_mm": 2.0,
+    "combined_error_bound_mm": 4.0
+  },
+  "measured_at": "2026-09-01T07:47:45Z"
+}

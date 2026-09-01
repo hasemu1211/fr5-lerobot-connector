@@ -65,6 +65,16 @@ PROFILE_KEYS = {
     "object_profile": {"schema_version", "object_profile_id", "qualification_status", "description", "dimensions_mm", "datum"},
     "grasp_profile": {"schema_version", "grasp_profile_id", "qualification_status", "object_profile_id", "grasp_kind", "gripper_close"},
 }
+GRASP_PROFILE_V3_KEYS = PROFILE_KEYS["grasp_profile"] | {
+    "object_profile_digest", "grasp_geometry", "gripper_open",
+}
+GRASP_GEOMETRY_KEYS = {
+    "contact_surface", "depth_from_top_mm", "datum_to_tcp_grasp",
+}
+GRIPPER_OPEN_KEYS = {
+    "command_position_m", "velocity_percent", "force_percent",
+    "completion_tolerance_m", "evidence_digest",
+}
 COLLECTION_PROFILE_V2_KEYS = PROFILE_KEYS["collection_profile"] | {
     "camera_profile", "camera_roles", "camera_serials", "camera_topics",
     "fps", "width", "height", "image_qos", "image_qos_depth",
@@ -76,6 +86,16 @@ HOME_CANDIDATE_KEYS = {"schema_version", "home_candidate_id", "robot_system_id",
 HOME_JOINT_ORDER = ["j1", "j2", "j3", "j4", "j5", "j6"]
 MOTION_PHASES = ("PREGRASP_PTP", "APPROACH_STOP_LIN", "FINAL_APPROACH_LIN", "GRIPPER_CLOSE", "LIFT_LIN", "RECYCLE_APPROACH_PTP", "LOWER_LIN", "GRIPPER_OPEN", "RETREAT_LIN", "SAFE_POSE_PTP")
 MOTION_QUALIFICATION_KEYS = {"schema_version", "motion_qualification_id", "qualification_status", "robot_system_id", "cell_calibration_id", "object_profile_id", "grasp_profile_id", "profile_digests", "home_candidate_digest", "robot_description_digest", "moveit_config_digest", "planning_scene_digest", "planning_scene", "frames", "tool_to_tcp", "datum_to_tcp_grasp", "offsets_m", "gripper_positions_m", "qualified_safe_joint_positions_rad", "goal_tolerances", "max_joint_state_age_s", "execution_timeouts_s", "phase_limits", "qualified_at"}
+MOTION_QUALIFICATION_V2_KEYS = MOTION_QUALIFICATION_KEYS | {
+    "planning_scene_profile_id", "planning_scene_profile_digest",
+}
+MOTION_QUALIFICATION_KEYS_BY_SCHEMA = {
+    "data_factory.motion_qualification.v1": MOTION_QUALIFICATION_KEYS,
+    "data_factory.motion_qualification.v2": MOTION_QUALIFICATION_V2_KEYS,
+}
+MOTION_QUALIFICATION_SCHEMAS = frozenset(
+    MOTION_QUALIFICATION_KEYS_BY_SCHEMA
+)
 MOTION_PROFILE_DIGESTS = {"robot_system", "cell_calibration", "object_profile", "grasp_profile"}
 MOTION_FRAMES = {"planning_frame", "planning_group", "tool_link"}
 MOTION_OFFSETS = {"pregrasp", "approach_stop", "lift", "retreat"}
@@ -84,6 +104,14 @@ MOTION_EXECUTION_TIMEOUTS = {"heartbeat_lease", "cancel", "precontact_confirmati
 PLANNING_SCENE_KEYS = {"frame_id", "floor", "wall"}
 PLANNING_SCENE_FLOOR_KEYS = {"id", "dimensions_m", "surface_z_m", "source"}
 PLANNING_SCENE_WALL_KEYS = {"id", "dimensions_m", "near_face_y_m", "wall_side", "home_arm_protrusion_base_xy", "j1_home_deg"}
+PLANNING_SCENE_PROFILE_KEYS = {
+    "schema_version", "planning_scene_profile_id", "qualification_status",
+    "robot_system_id", "frame_id", "floor", "wall",
+}
+PLANNING_SCENE_PROFILE_FLOOR_KEYS = {
+    "id", "dimensions_m", "measured_surface_z_m", "collision_margin_m",
+    "workspace_datum_tolerance_m", "source_measurement_digest", "source",
+}
 
 
 class ContractError(ValueError):
@@ -333,6 +361,8 @@ def _profile(root, folder, ident, id_key, schema):
     kind = schema.removeprefix("data_factory.").rsplit(".v", 1)[0]
     if kind == "collection_profile" and value.get("schema_version") == "data_factory.collection_profile.v2":
         _exact(value, COLLECTION_PROFILE_V2_KEYS, "PROFILE_SCHEMA")
+    elif kind == "grasp_profile" and value.get("schema_version") == "data_factory.grasp_profile.v3":
+        _exact(value, GRASP_PROFILE_V3_KEYS, "PROFILE_SCHEMA")
     else:
         _exact(value, PROFILE_KEYS[kind], "PROFILE_SCHEMA")
         if value.get("schema_version") != schema: raise ContractError("PROFILE_SCHEMA")
@@ -378,6 +408,45 @@ def _profile(root, folder, ident, id_key, schema):
     elif kind == "grasp_profile":
         if value["grasp_kind"] != "top_center": raise ContractError("GRASP_KIND")
         value = {**value, "gripper_close": _gripper_close(value["gripper_close"], "GRASP_CLOSE")}
+        if value["schema_version"] == "data_factory.grasp_profile.v3":
+            geometry = _exact(
+                value["grasp_geometry"], GRASP_GEOMETRY_KEYS,
+                "GRASP_GEOMETRY",
+            )
+            if geometry["contact_surface"] != "TOP":
+                raise ContractError("GRASP_GEOMETRY")
+            depth = _number(
+                geometry["depth_from_top_mm"], "GRASP_GEOMETRY",
+            )
+            if depth <= 0:
+                raise ContractError("GRASP_GEOMETRY")
+            transform = validate_rigid_transform(
+                geometry["datum_to_tcp_grasp"], "GRASP_GEOMETRY",
+            )
+            expected_rotation = [
+                [1.0, 0.0, 0.0],
+                [0.0, -1.0, 0.0],
+                [0.0, 0.0, -1.0],
+            ]
+            if any(
+                abs(transform["rotation_columns"][column][row] - expected_rotation[column][row]) > 1e-9
+                for column in range(3) for row in range(3)
+            ):
+                raise ContractError("GRASP_GEOMETRY")
+            value = {
+                **value,
+                "object_profile_digest": _digest(
+                    value["object_profile_digest"], "GRASP_OBJECT",
+                ),
+                "grasp_geometry": {
+                    "contact_surface": "TOP",
+                    "depth_from_top_mm": depth,
+                    "datum_to_tcp_grasp": transform,
+                },
+                "gripper_open": _gripper_open(
+                    value["gripper_open"], "GRASP_OPEN",
+                ),
+            }
     else:
         for key, item in value.items():
             if key.endswith("_digest"):
@@ -397,6 +466,28 @@ def _gripper_close(value, code):
             raise ContractError(code)
     _digest(value["evidence_digest"], code)
     return {"command_position_m": command, "acceptable_feedback_m": {"min": minimum, "max": maximum}, "velocity_percent": value["velocity_percent"], "force_percent": value["force_percent"], "evidence_digest": value["evidence_digest"]}
+
+
+def _gripper_open(value, code):
+    value = _exact(value, GRIPPER_OPEN_KEYS, code)
+    command = _number(value["command_position_m"], code)
+    tolerance = _number(value["completion_tolerance_m"], code)
+    if command <= 0 or tolerance <= 0:
+        raise ContractError(code)
+    for key in ("velocity_percent", "force_percent"):
+        if (
+            isinstance(value[key], bool) or not isinstance(value[key], int)
+            or not 1 <= value[key] <= 100
+        ):
+            raise ContractError(code)
+    _digest(value["evidence_digest"], code)
+    return {
+        "command_position_m": command,
+        "velocity_percent": value["velocity_percent"],
+        "force_percent": value["force_percent"],
+        "completion_tolerance_m": tolerance,
+        "evidence_digest": value["evidence_digest"],
+    }
 
 
 def _document(source, code):
@@ -706,6 +797,22 @@ def validate_job_spec(job, *, paths=None, data=None, config_root, now=None):
     _digest(robot.get("tcp_digest"), "ROBOT_CONTRACT")
     if grasp.get("object_profile_id") != normalized["object_profile_id"]:
         raise ContractError("GRASP_OBJECT")
+    if grasp["schema_version"] == "data_factory.grasp_profile.v3":
+        geometry = grasp["grasp_geometry"]
+        dimensions = object_profile["dimensions_mm"]
+        depth = geometry["depth_from_top_mm"]
+        translation = geometry["datum_to_tcp_grasp"]["translation_m"]
+        if (
+            grasp["object_profile_digest"] != canonical_digest(object_profile)
+            or depth >= dimensions[2]
+            or abs(translation[0]) > 1e-9
+            or abs(translation[1]) > 1e-9
+            or abs(
+                translation[2]
+                - (dimensions[2] / 2.0 - depth) / 1000.0
+            ) > 1e-9
+        ):
+            raise ContractError("GRASP_OBJECT")
     if normalized["instruction"] != task_instruction(
         normalized["task"], object_profile["description"],
     ):
@@ -797,9 +904,85 @@ def _planning_scene(value):
     return {"frame_id": value["frame_id"], "floor": floor, "wall": wall}
 
 
-def _validate_motion_qualification(qualification, validated, home, *, urdf, now=None):
-    qualification = _exact(qualification, MOTION_QUALIFICATION_KEYS, "MOTION_KEYS")
-    if qualification["schema_version"] != "data_factory.motion_qualification.v1": raise ContractError("MOTION_SCHEMA")
+def validate_planning_scene_profile(value, *, expected_robot_system_id):
+    """Validate one reusable floor/wall authority and resolve its collision scene."""
+    profile = _exact(
+        value, PLANNING_SCENE_PROFILE_KEYS, "PLANNING_SCENE_PROFILE",
+    )
+    if (
+        profile["schema_version"] != "data_factory.planning_scene_profile.v1"
+        or profile["qualification_status"] != "QUALIFIED"
+        or profile["robot_system_id"] != expected_robot_system_id
+        or profile["frame_id"] != "base_link"
+    ):
+        raise ContractError("PLANNING_SCENE_PROFILE")
+    _id(profile["planning_scene_profile_id"], "PLANNING_SCENE_PROFILE")
+    _id(profile["robot_system_id"], "PLANNING_SCENE_PROFILE")
+    floor = _exact(
+        profile["floor"], PLANNING_SCENE_PROFILE_FLOOR_KEYS,
+        "PLANNING_SCENE_PROFILE",
+    )
+    _id(floor["id"], "PLANNING_SCENE_PROFILE")
+    dimensions = floor["dimensions_m"]
+    if not isinstance(dimensions, list) or len(dimensions) != 3:
+        raise ContractError("PLANNING_SCENE_PROFILE")
+    dimensions = [
+        _number(number, "PLANNING_SCENE_PROFILE") for number in dimensions
+    ]
+    measured = _number(
+        floor["measured_surface_z_m"], "PLANNING_SCENE_PROFILE",
+    )
+    margin = _number(
+        floor["collision_margin_m"], "PLANNING_SCENE_PROFILE",
+    )
+    tolerance = _number(
+        floor["workspace_datum_tolerance_m"],
+        "PLANNING_SCENE_PROFILE",
+    )
+    if (
+        any(number <= 0 for number in dimensions)
+        or margin < 0 or tolerance <= 0
+        or not isinstance(floor["source"], str) or not floor["source"]
+        or not floor["source"].isprintable()
+    ):
+        raise ContractError("PLANNING_SCENE_PROFILE")
+    _digest(
+        floor["source_measurement_digest"], "PLANNING_SCENE_PROFILE",
+    )
+    wall = _exact(
+        profile["wall"], PLANNING_SCENE_WALL_KEYS,
+        "PLANNING_SCENE_PROFILE",
+    )
+    scene = _planning_scene({
+        "frame_id": profile["frame_id"],
+        "floor": {
+            "id": floor["id"],
+            "dimensions_m": dimensions,
+            "surface_z_m": measured + margin,
+            "source": floor["source"],
+        },
+        "wall": wall,
+    })
+    return {
+        "document": profile,
+        "digest": canonical_digest(profile),
+        "planning_scene": scene,
+        "planning_scene_digest": canonical_digest(scene),
+        "measured_surface_z_m": measured,
+        "collision_margin_m": margin,
+        "workspace_datum_tolerance_m": tolerance,
+    }
+
+
+def _validate_motion_qualification(
+    qualification, validated, home, *, urdf,
+    planning_scene_profile=None, now=None,
+):
+    schema = qualification.get("schema_version") if isinstance(qualification, dict) else None
+    keys = MOTION_QUALIFICATION_KEYS_BY_SCHEMA.get(schema)
+    if keys is None:
+        raise ContractError("MOTION_SCHEMA")
+    qualification = _exact(qualification, keys, "MOTION_KEYS")
     _id(qualification["motion_qualification_id"], "MOTION_ID")
     if qualification["qualification_status"] != "QUALIFIED": raise ContractError("MOTION_STATUS")
     job, digests = validated["normalized_job"], validated["input_digests"]
@@ -814,12 +997,48 @@ def _validate_motion_qualification(qualification, validated, home, *, urdf, now=
     planning_scene = _planning_scene(qualification["planning_scene"])
     if canonical_digest(planning_scene) != qualification["planning_scene_digest"]:
         raise ContractError("MOTION_PLANNING_SCENE_BINDING")
+    if schema == "data_factory.motion_qualification.v2":
+        if planning_scene_profile is None:
+            raise ContractError("MOTION_PLANNING_SCENE_BINDING")
+        scene_profile = validate_planning_scene_profile(
+            planning_scene_profile,
+            expected_robot_system_id=job["robot_system_id"],
+        )
+        if (
+            qualification["planning_scene_profile_id"]
+            != planning_scene_profile.get("planning_scene_profile_id")
+            or _digest(
+                qualification["planning_scene_profile_digest"],
+                "MOTION_DIGESTS",
+            ) != scene_profile["digest"]
+            or planning_scene != scene_profile["planning_scene"]
+            or qualification["planning_scene_digest"]
+            != scene_profile["planning_scene_digest"]
+        ):
+            raise ContractError("MOTION_PLANNING_SCENE_BINDING")
+        object_height_m = validated["object_profile"]["dimensions_mm"][2] / 1000.0
+        object_center_z_m = validated["calibration"]["center"][2]
+        expected_center_z_m = (
+            scene_profile["measured_surface_z_m"] + object_height_m / 2.0
+        )
+        if abs(object_center_z_m - expected_center_z_m) > scene_profile[
+            "workspace_datum_tolerance_m"
+        ]:
+            raise ContractError("MOTION_WORKSPACE_FLOOR_BINDING")
     if qualification["robot_description_digest"] != home["robot_description_digest"]: raise ContractError("MOTION_HOME_BINDING")
     frames = _exact(qualification["frames"], MOTION_FRAMES, "MOTION_FRAMES")
     if (frames["planning_frame"] != "base_link" or frames["planning_frame"] != validated["robot"]["base_frame"] or frames["planning_group"] != "fairino5_v6_group" or
             frames["tool_link"] != "wrist3_link" or any(not isinstance(value, str) or not value for value in frames.values())):
         raise ContractError("MOTION_FRAMES")
     transforms = {key: validate_rigid_transform(qualification[key], "MOTION_TRANSFORM") for key in ("tool_to_tcp", "datum_to_tcp_grasp")}
+    if schema == "data_factory.motion_qualification.v2":
+        grasp = validated["grasp_profile"]
+        if (
+            grasp.get("schema_version") != "data_factory.grasp_profile.v3"
+            or transforms["datum_to_tcp_grasp"]
+            != grasp["grasp_geometry"]["datum_to_tcp_grasp"]
+        ):
+            raise ContractError("MOTION_GRASP_BINDING")
     offsets = _exact(qualification["offsets_m"], MOTION_OFFSETS, "MOTION_OFFSETS")
     offsets = {key: _number(value, "MOTION_OFFSETS") for key, value in offsets.items()}
     if not (offsets["pregrasp"] > offsets["approach_stop"] > 0 and offsets["lift"] > 0 and offsets["retreat"] > 0): raise ContractError("MOTION_OFFSETS")
@@ -829,6 +1048,12 @@ def _validate_motion_qualification(qualification, validated, home, *, urdf, now=
     if any(not lower <= value <= upper for value in gripper.values()) or gripper["open"] <= gripper["closed"]: raise ContractError("MOTION_GRIPPER")
     close = validated["grasp_profile"]["gripper_close"]
     if gripper["closed"] != close["command_position_m"]: raise ContractError("MOTION_GRIPPER")
+    if (
+        schema == "data_factory.motion_qualification.v2"
+        and gripper["open"]
+        != validated["grasp_profile"]["gripper_open"]["command_position_m"]
+    ):
+        raise ContractError("MOTION_GRIPPER")
     safe = qualification["qualified_safe_joint_positions_rad"]
     if not isinstance(safe, list) or len(safe) != len(HOME_JOINT_ORDER) or any(abs(_number(value, "MOTION_SAFE_JOINTS") - expected) > 1e-12 for value, expected in zip(safe, home["nominal_target_rad"])): raise ContractError("MOTION_SAFE_JOINTS")
     tolerance = _exact(qualification["goal_tolerances"], MOTION_GOAL_TOLERANCES, "MOTION_TOLERANCES")
@@ -848,6 +1073,15 @@ def _validate_motion_qualification(qualification, validated, home, *, urdf, now=
             values = {key: _number(value, "MOTION_PHASE_LIMITS") for key, value in limit.items()}
             if values["execution_timeout_s"] <= values["command_duration_s"]: raise ContractError("MOTION_PHASE_LIMITS")
             if phase == "GRIPPER_CLOSE" and (close["acceptable_feedback_m"]["max"] <= close["command_position_m"] or values["completion_tolerance_m"] != close["acceptable_feedback_m"]["max"] - close["command_position_m"]): raise ContractError("MOTION_PHASE_LIMITS")
+            if (
+                schema == "data_factory.motion_qualification.v2"
+                and phase == "GRIPPER_OPEN"
+                and values["completion_tolerance_m"]
+                != validated["grasp_profile"]["gripper_open"][
+                    "completion_tolerance_m"
+                ]
+            ):
+                raise ContractError("MOTION_PHASE_LIMITS")
         else:
             limit = _exact(limit, {"velocity_scaling", "acceleration_scaling", "planning_timeout_s", "execution_timeout_s"}, "MOTION_PHASE_LIMITS")
             values = {key: _number(value, "MOTION_PHASE_LIMITS") for key, value in limit.items()}
@@ -858,12 +1092,20 @@ def _validate_motion_qualification(qualification, validated, home, *, urdf, now=
     return {"digest": canonical_digest(qualification), "frames": frames, "planning_scene": planning_scene, "transforms": transforms, "offsets": offsets, "gripper": gripper, "gripper_requirements": close, "safe": [_number(v, "MOTION_SAFE_JOINTS") for v in safe], "limits": normalized_limits, "tolerances": tolerance, "max_joint_state_age_s": max_joint_state_age_s, "execution_timeouts_s": execution_timeouts, "pins": {key: qualification[key] for key in ("robot_description_digest", "moveit_config_digest", "planning_scene_digest")}}
 
 
-def resolve_motion_program(validated, motion_qualification, home_candidate, *, urdf, expected_robot_system_id, release_pose=None, now=None):
+def resolve_motion_program(
+    validated, motion_qualification, home_candidate, *, urdf,
+    expected_robot_system_id, release_pose=None,
+    planning_scene_profile=None, now=None,
+):
     """Resolve a qualification-bound, offline-only motion program; it authorizes no execution."""
     home_raw = load_json_strict(json.dumps(home_candidate, allow_nan=False)) if isinstance(home_candidate, dict) else load_json_strict(home_candidate)
     home = validate_home_candidate(home_raw, urdf=urdf, expected_robot_system_id=expected_robot_system_id)
     qualification_raw = load_json_strict(json.dumps(motion_qualification, allow_nan=False)) if isinstance(motion_qualification, dict) else load_json_strict(motion_qualification)
-    q = _validate_motion_qualification(qualification_raw, validated, {**home, "robot_description_digest": home_raw["robot_description_digest"]}, urdf=urdf, now=now)
+    q = _validate_motion_qualification(
+        qualification_raw, validated,
+        {**home, "robot_description_digest": home_raw["robot_description_digest"]},
+        urdf=urdf, planning_scene_profile=planning_scene_profile, now=now,
+    )
     pose = resolve_pose(validated)
     job = validated["normalized_job"]
     if release_pose is None:
@@ -1186,7 +1428,13 @@ def _cli():
         if args.command == "resolve-motion":
             qualification = load_json_strict(sys.stdin.read() if args.motion_qualification == "-" else Path(args.motion_qualification).read_text())
             candidate = load_json_strict(sys.stdin.read() if args.home_candidate == "-" else Path(args.home_candidate).read_text())
-            print(json.dumps(resolve_motion_program(validated, qualification, candidate, urdf=args.urdf, expected_robot_system_id=args.expected_robot_system_id), sort_keys=True, separators=(",", ":"), allow_nan=False)); return 0
+            scene_profile = None
+            if qualification.get("schema_version") == "data_factory.motion_qualification.v2":
+                scene_profile = load_json_strict(_safe_profile_path(
+                    Path(args.config_root), "planning_scenes",
+                    qualification.get("planning_scene_profile_id"),
+                ))
+            print(json.dumps(resolve_motion_program(validated, qualification, candidate, urdf=args.urdf, expected_robot_system_id=args.expected_robot_system_id, planning_scene_profile=scene_profile), sort_keys=True, separators=(",", ":"), allow_nan=False)); return 0
         output = resolve_pose(validated) if args.command == "resolve-pose" else {"normalized_job": validated["normalized_job"], "input_digests": validated["input_digests"], "resolved_job_digest": validated["resolved_job_digest"]}
         print(json.dumps(output, sort_keys=True, separators=(",", ":"), allow_nan=False)); return 0
     except (ContractError, OSError, UnicodeError) as exc:

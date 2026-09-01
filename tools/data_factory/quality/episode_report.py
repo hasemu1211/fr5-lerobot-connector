@@ -8,7 +8,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
-from tools.fr5_data_factory import ContractError, DIGEST, SAFE_ID, _cross, _dot, _mul, _sub, _timestamp, _unit, _vec, canonical_digest, load_json_strict, normalize_job_spec, resolve_pose, task_review_checklist_id, validate_rigid_transform
+from tools.fr5_data_factory import ContractError, DIGEST, MOTION_QUALIFICATION_KEYS_BY_SCHEMA, SAFE_ID, _cross, _dot, _mul, _sub, _timestamp, _unit, _vec, canonical_digest, load_json_strict, normalize_job_spec, resolve_pose, task_review_checklist_id, validate_rigid_transform
 from tools.data_factory.quality.coverage_report import CANDIDATE_FIELDS, PLAN_BINDING_DIGEST_FIELDS, RESOLVED_INPUT_DIGEST_FIELDS, STORED_EPISODE_FIELDS, TECHNICAL_FIELDS
 from tools.data_factory.quality.phase_metrics import ATTRIBUTE_SCHEMA, STATUS, quality_attribute
 
@@ -78,6 +78,11 @@ def _object_frame_binding(accepted_episode: Mapping[str, Any], resolved_job: Map
     bindings = plan.get("binding_digests") if isinstance(plan, Mapping) else None
     safety = envelope.get("precommit_safety") if isinstance(envelope, Mapping) else None
     precommit = envelope.get("precommit_evidence") if isinstance(envelope, Mapping) else None
+    motion_schema = (
+        motion_qualification.get("schema_version")
+        if isinstance(motion_qualification, Mapping) else None
+    )
+    motion_keys = MOTION_QUALIFICATION_KEYS_BY_SCHEMA.get(motion_schema)
     if (
         set(preapproval) != {"schema_version", "run_id", "resolved_job_digest", "plan_digest", "plan_envelope", "plan_envelope_digest"}
         or preapproval.get("schema_version") != "data_factory.preapproval_evidence.v1"
@@ -181,7 +186,7 @@ def _object_frame_binding(accepted_episode: Mapping[str, Any], resolved_job: Map
         raise ContractError("OBJECT_FRAME_BINDING") from exc
     if (
         not isinstance(motion_qualification, Mapping)
-        or motion_qualification.get("schema_version") != "data_factory.motion_qualification.v1"
+        or motion_keys is None
         or motion_qualification.get("qualification_status") != "QUALIFIED"
         or canonical_digest(motion_qualification) != bindings["motion_qualification"]
         or any(motion_qualification.get(key) != job.get(key) for key in ("robot_system_id", "cell_calibration_id", "object_profile_id", "grasp_profile_id"))
@@ -189,6 +194,18 @@ def _object_frame_binding(accepted_episode: Mapping[str, Any], resolved_job: Map
         or motion_qualification.get("robot_description_digest") != bindings["robot_description_digest"]
         or not isinstance(motion_qualification.get("frames"), Mapping)
         or motion_qualification["frames"] != {"planning_frame": "base_link", "planning_group": "fairino5_v6_group", "tool_link": "wrist3_link"}
+        or motion_schema == "data_factory.motion_qualification.v2"
+        and (
+            not isinstance(motion_qualification.get("planning_scene_profile_id"), str)
+            or SAFE_ID.fullmatch(motion_qualification["planning_scene_profile_id"])
+            is None
+            or not isinstance(
+                motion_qualification.get("planning_scene_profile_digest"), str,
+            )
+            or DIGEST.fullmatch(
+                motion_qualification["planning_scene_profile_digest"]
+            ) is None
+        )
     ):
         raise ContractError("OBJECT_FRAME_BINDING")
     validate_rigid_transform(motion_qualification.get("tool_to_tcp"), "OBJECT_FRAME_BINDING")

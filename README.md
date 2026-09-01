@@ -10,11 +10,11 @@ FAIRINO FR5의 학습용 demonstration을 계획·실행·시간 정합·검증�
 - 키 기반 episode 시작·저장·폐기 및 자동 디렉터리 구성
 - LeRobot v3 구조·시간·RGB 검사, 명시적 HIL 동작 검사와 사람 승인 절차
 - catalog 기반 상태공간 작성, finite campaign 한 번 승인과 fresh `OneJob` 직렬 실행
-- A4 `(place,yaw,x,y)` Job, scene/cell state, episode ledger와 TEST_ONLY 격리
+- A4 `(place,yaw,x,y)` Job, scene/cell state, episode ledger와 production/TEST_ONLY 분리
 - SmolVLA·ACT·VQ-BeT용 공식 `lerobot-train` 학습 profile
 - SmolVLA 검증 episode의 오프라인 loss 평가
 
-학습된 정책의 실물 실행(rollout)은 아직 제공하지 않는다. `scripts/evaluate_smolvla.sh`는 로봇을 움직이지 않는 오프라인 검사다. 현재 browser operator의 실물 경로는 격리된 `TEST_ONLY` 수집이며, 일반 수집과 training admission은 별도 qualification을 유지한다. live 성공도 자동 학습 승인을 만들지 않는다.
+학습된 정책의 실물 실행(rollout)은 아직 제공하지 않는다. `scripts/evaluate_smolvla.sh`는 로봇을 움직이지 않는 오프라인 검사다. Browser operator는 일반 수집과 격리된 TEST_ONLY 수집을 같은 lifecycle로 제공하지만 저장 위치와 admission authority는 섞지 않는다. live 성공도 자동 학습 승인을 만들지 않는다.
 
 ## 빠른 시작
 
@@ -26,15 +26,15 @@ cd fr5-lerobot-connector
 scripts/setup_notebook.sh
 ```
 
-`config/fr5.env`를 장비에 맞게 확인한 뒤 tmux에서 로봇과 카메라를 실행한다.
+`config/fr5.env`와 빈 작업 셀을 확인한 뒤, 보이는 터미널 하나에서 Web UI를 실행한다.
 
 ```bash
-scripts/preflight_collection.sh --live
-scripts/collect.sh pick_red "pick the red block and place it in the tray" --camera-profile up
-scripts/validate_dataset.sh --preview pick_red
+scripts/start_collection_ui.sh
 ```
 
-기본 저장 위치는 `datasets/fr5_episodes/<dataset-name>`이다. 하나의 디렉터리에 같은 작업의 여러 episode를 저장한다.
+출력된 loopback URL을 브라우저에서 연다. 기본값은 24 mm 큐브, `PLACE_A`, RealSense `UP` + UVC `WRIST`, `GENERAL_COLLECTION`이며 환경 준비가 로봇·카메라 foreground owner를 한 번만 관리한다. 기본 저장 위치는 `datasets/fr5_episodes/fr5_smolvla_up_wrist_30hz`다. 연결 시험만 할 때는 `scripts/start_collection_ui.sh --data-mode TEST_COLLECTION`을 사용하며 결과는 production dataset에 쓰지 않는다.
+
+이 수집 호스트의 기존 HIL·qualification 데이터는 checksum inventory와 함께 `datasets/legacy_physical/`에 격리되어 새 수집과 섞이지 않는다. 수동 recorder와 개별 ROS launcher가 필요한 진단 절차는 [데이터 수집 따라 하기](docs/data-collection.md)에 남겨 둔다.
 
 ## 명령
 
@@ -45,7 +45,7 @@ scripts/validate_dataset.sh --preview pick_red
 | `scripts/train_policy.sh` | 검사된 데이터셋을 정책별 공식 `lerobot-train` profile에 전달 |
 | `scripts/evaluate_smolvla.sh` | 검증용으로 분리한 episode의 오프라인 SmolVLA loss 계산 |
 | `python3 -m tools.data_factory.run_job` | 사람/AI 공통 one-job plan-only/live pickup runner ([사용법](docs/data-factory.md#one-job-runner)) |
-| `python3 -m tools.data_factory.operator_console` | 환경 준비→상태공간 계획→연속 TEST_ONLY campaign을 제공하는 foreground browser operator |
+| `scripts/start_collection_ui.sh` | 환경 준비→상태공간 계획→직렬 production/TEST_ONLY campaign을 제공하는 foreground browser operator |
 
 표의 `scripts/` wrapper는 `--help`, 경로 지정 옵션, `--dry-run`을 제공한다. factory runner의 live는 qualified profile·scene·cell과 exact plan 승인을 요구하는 별도 경로다.
 

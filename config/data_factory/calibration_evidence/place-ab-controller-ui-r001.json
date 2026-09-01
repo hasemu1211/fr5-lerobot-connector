@@ -1,0 +1,80 @@
+{
+  "schema_version": "data_factory.workspace_measurement_evidence.v1",
+  "evidence_id": "place-ab-controller-ui-r001",
+  "captured_at": "2026-09-01T08:09:04Z",
+  "measurement_authority": "CONTROLLER_WEB_UI_OPERATOR",
+  "robot_system_id": "fr5-lab-a",
+  "tcp_digest": "sha256:5ecc779a26905471c0d7ea792361fe5c81756fd072138851d95ab9f2cab31eb3",
+  "controller": {
+    "model": "FR5 V6.0",
+    "firmware": "V3.9.7",
+    "coordinate_frame": "BASE",
+    "display_quantity": "TCP"
+  },
+  "object_reference": {
+    "object_profile_id": "wood-cube-24mm-r001",
+    "dimensions_mm": [
+      24.0,
+      24.0,
+      24.0
+    ],
+    "datum": "center"
+  },
+  "grasp_reference": {
+    "contact_surface": "TOP",
+    "depth_from_top_mm": 3.5,
+    "object_center_to_tcp_z_mm": 8.5,
+    "same_reference_for_all_points": true
+  },
+  "observations": {
+    "PLACE_A": {
+      "CENTER": [
+        0.223765,
+        0.557577,
+        0.004043
+      ],
+      "X_REF": [
+        0.351406,
+        0.557569,
+        0.004045
+      ],
+      "Y_CHECK": [
+        0.094393,
+        0.638576,
+        0.004044
+      ],
+      "y_check_residual_mm": 1.323302579007753
+    },
+    "PLACE_B": {
+      "CENTER": [
+        -0.279947,
+        0.554328,
+        0.004048
+      ],
+      "X_REF": [
+        -0.151093,
+        0.554329,
+        0.004047
+      ],
+      "Y_CHECK": [
+        -0.408094,
+        0.634327,
+        0.004044
+      ],
+      "y_check_residual_mm": 0.3536434762323696
+    }
+  },
+  "derivation": {
+    "workspace_datum": "OBJECT_CENTER_ON_MEASURED_FLOOR",
+    "workspace_z_formula": "observed_tcp_z_m - object_center_to_tcp_z_m",
+    "floor_z_formula": "observed_tcp_z_m - object_center_to_tcp_z_m - object_height_m / 2",
+    "conservative_observed_tcp_z_m": 0.004048,
+    "measured_floor_surface_z_m": -0.016452,
+    "collision_margin_m": 0.001,
+    "collision_floor_surface_z_m": -0.015452,
+    "workspace_datum_tolerance_m": 0.001
+  },
+  "qualification_scope": "CELL_REGISTRATION_AND_FLOOR_DERIVATION",
+  "execution_authorized": false,
+  "training_approved": false
+}

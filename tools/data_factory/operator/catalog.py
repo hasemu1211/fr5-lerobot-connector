@@ -26,6 +26,7 @@ from tools.fr5_data_factory import (
     canonical_digest,
     load_json_strict,
     normalize_yaw_deg,
+    validate_planning_scene_profile,
     validate_sheet_manifest,
 )
 
@@ -155,7 +156,9 @@ def _motion_matches_profiles(
     motion: Mapping[str, Any], *, robot: Mapping[str, Any],
     cell: Mapping[str, Any], object_profile: Mapping[str, Any],
     grasp_profile: Mapping[str, Any],
+    planning_scenes: Mapping[str, Mapping[str, Any]] | None = None,
 ) -> bool:
+    planning_scenes = {} if planning_scenes is None else planning_scenes
     profiles = {
         "robot_system": robot,
         "cell_calibration": cell,
@@ -168,13 +171,38 @@ def _motion_matches_profiles(
         "object_profile_id": object_profile.get("object_profile_id"),
         "grasp_profile_id": grasp_profile.get("grasp_profile_id"),
     }
-    return (
-        motion.get("schema_version") == "data_factory.motion_qualification.v1"
+    common = (
+        motion.get("schema_version") in {
+            "data_factory.motion_qualification.v1",
+            "data_factory.motion_qualification.v2",
+        }
         and motion.get("qualification_status") == "QUALIFIED"
         and all(motion.get(field) == value for field, value in bindings.items())
         and motion.get("profile_digests") == {
             name: canonical_digest(value) for name, value in profiles.items()
         }
+    )
+    if not common:
+        return False
+    if motion.get("schema_version") == "data_factory.motion_qualification.v1":
+        return True
+    scene = planning_scenes.get(motion.get("planning_scene_profile_id"))
+    try:
+        checked_scene = validate_planning_scene_profile(
+            scene, expected_robot_system_id=robot.get("robot_system_id"),
+        )
+    except (ContractError, TypeError):
+        return False
+    return (
+        motion.get("planning_scene_profile_digest")
+        == checked_scene["digest"]
+        and motion.get("planning_scene_digest")
+        == checked_scene["planning_scene_digest"]
+        and motion.get("planning_scene") == checked_scene["planning_scene"]
+        and grasp_profile.get("schema_version")
+        == "data_factory.grasp_profile.v3"
+        and motion.get("datum_to_tcp_grasp")
+        == grasp_profile.get("grasp_geometry", {}).get("datum_to_tcp_grasp")
     )
 
 
@@ -194,6 +222,12 @@ def load_operator_catalog(
     grasps = _files(root, "config/data_factory/grasps")
     homes = _files(root, "config/data_factory/home_candidates")
     motions = _files(root, "config/data_factory/motion_qualifications")
+    planning_scene_files = _files(root, "config/data_factory/planning_scenes")
+    planning_scenes = {
+        value.get("planning_scene_profile_id"): value
+        for _path, value in planning_scene_files
+        if isinstance(value.get("planning_scene_profile_id"), str)
+    }
     profiles = _files(root, "config/data_factory/collection_profiles")
     robots = _files(root, "config/data_factory/robot_systems")
     workspaces = _files(root, "config/data_factory/workspaces")
@@ -226,6 +260,7 @@ def load_operator_catalog(
     by_profile = {value.get("collection_profile_id"): (path, value) for path, value in profiles}
     by_robot = {value.get("robot_system_id"): (path, value) for path, value in robots}
     workspace_labels = {}
+    workspace_place_labels = {}
     for path, workspace in workspaces:
         key = (workspace.get("place_id"), workspace.get("frame_id"))
         label = workspace.get("display_name")
@@ -236,6 +271,10 @@ def load_operator_catalog(
         ):
             raise ContractError("OPERATOR_CATALOG_CONFIG", str(path))
         workspace_labels[key] = label
+        previous = workspace_place_labels.get(key[0])
+        if previous is not None and previous != label:
+            raise ContractError("OPERATOR_CATALOG_CONFIG", str(path))
+        workspace_place_labels[key[0]] = label
     workspace_cells = [
         value for _path, value in cells
         if value.get("qualification_status") == "QUALIFIED"
@@ -266,7 +305,10 @@ def load_operator_catalog(
             axes["workspace"].append(_option(
                 place_id, workspace_labels.get(
                     (place_id, frame_id),
-                    "place1 · PLACE_A" if place_id == "PLACE_A" else place_id,
+                    workspace_place_labels.get(
+                        place_id,
+                        "place1 · PLACE_A" if place_id == "PLACE_A" else place_id,
+                    ),
                 ),
                 status="QUALIFIED" if qualified else "QUALIFICATION_REQUIRED",
                 reason="CELL_CALIBRATION_QUALIFIED" if qualified else "CELL_CALIBRATION_REQUIRED",
@@ -332,15 +374,19 @@ def load_operator_catalog(
     for _path, value in homes:
         identifier = value.get("home_candidate_id")
         if isinstance(identifier, str):
-            qualified = (
-                value.get("qualification_status") == "QUALIFIED"
-                and value.get("safety_status") == "SAFE_FOR_MOTION"
+            motion_bound = any(
+                motion.get("qualification_status") == "QUALIFIED"
+                and motion.get("home_candidate_digest") == canonical_digest(value)
+                for _motion_path, motion in motions
             )
             axes["start_pose"].append(_option(
-                identifier, "HOME", status="QUALIFIED" if qualified else "TEST_ONLY_BOUND",
+                identifier, "HOME",
+                status=(
+                    "MOTION_QUALIFIED" if motion_bound else "QUALIFICATION_REQUIRED"
+                ),
                 reason=(
-                    "START_POSE_QUALIFIED" if qualified
-                    else "MOTION_QUALIFICATION_SAFE_VECTOR_ONLY"
+                    "EXACT_MOTION_SAFE_VECTOR" if motion_bound
+                    else "MOTION_QUALIFICATION_REQUIRED"
                 ),
             ))
     for _path, value in motions:
@@ -463,9 +509,12 @@ def load_operator_catalog(
             {
                 **source_job, "task": task_id,
                 "collection_profile_id": profile["collection_profile_id"],
+                "place_id": cell["place_id"],
+                "cell_calibration_id": cell["calibration_id"],
             },
         )
         for job_path, source_job in jobs
+        for _cell_path, cell in cells
         for task_id in (
             sorted(TASK_IDS, key=lambda value: value != source_job.get("task"))
             if source_job.get("task") in TASK_IDS else (source_job.get("task"),)
@@ -473,6 +522,7 @@ def load_operator_catalog(
         for _profile_path, profile in profiles
         if isinstance(task_id, str)
         and isinstance(profile.get("collection_profile_id"), str)
+        and cell.get("robot_system_id") == source_job.get("robot_system_id")
     ]
     for job_path, source_job, job in camera_jobs:
         object_entry = by_object.get(job.get("object_profile_id"))
@@ -492,6 +542,7 @@ def load_operator_catalog(
             if _motion_matches_profiles(
                 value, robot=robot_entry[1], cell=cell,
                 object_profile=object_entry[1], grasp_profile=grasp_entry[1],
+                planning_scenes=planning_scenes,
             )
         ]
         if len(motion_matches) != 1:
@@ -533,13 +584,9 @@ def load_operator_catalog(
         )
         general_ready = (
             test_ready
-            and job.get("task") == source_job.get("task")
+            and "test_only_physical" not in job_path.parts
             and profile.get("collection_profile_id")
             == source_job.get("collection_profile_id")
-            and "test_only_physical" not in job_path.parts
-            and home.get("qualification_status") == "QUALIFIED"
-            and home.get("safety_status") == "SAFE_FOR_MOTION"
-            and profile.get("portability_status") == "QUALIFIED"
         )
         compatible_points = [
             (sheet_path, sheet, point)
@@ -658,6 +705,7 @@ def load_operator_catalog(
                 and _motion_matches_profiles(
                     value, robot=robot_entry[1], cell=cell,
                     object_profile=object_entry[1], grasp_profile=grasp_entry[1],
+                    planning_scenes=planning_scenes,
                 )
             ]
             exact_motion = exact_motions[0] if len(exact_motions) == 1 else None

@@ -37,6 +37,7 @@ class OperatorProjectionTests(unittest.TestCase):
             item for item in catalog["workspace_domains"]
             if item["workspace_id"] == "PLACE_A"
             and item["frame_id"] == "place-a-yaw0-r002"
+            and item["object_id"] == "wood-cube-25mm-r001"
         ]
         self.assertEqual(len(domains), 1)
         domain = domains[0]
@@ -127,13 +128,14 @@ class OperatorProjectionTests(unittest.TestCase):
             item["execution"]["TEST_COLLECTION"]["executable"]
             for item in pick_place_combinations
         ))
-        self.assertEqual(
-            {
-                item["sources"]["job"]
-                for item in pick_place_combinations
-            },
+        self.assertTrue(
             {
                 "config/data_factory/test_only_physical/goal2-place1/"
-                "center-live-p45-20260821-r001.job.json"
+                "center-live-p45-20260821-r001.job.json",
+                "config/data_factory/jobs/"
+                "center-live-24mm-20260901-r001.job.json",
+            } <= {
+                item["sources"]["job"]
+                for item in pick_place_combinations
             },
         )

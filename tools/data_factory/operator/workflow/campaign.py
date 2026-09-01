@@ -43,6 +43,7 @@ from tools.data_factory_recovery import write_json_atomic
 from tools.fr5_data_factory import (
     ContractError,
     DIGEST,
+    MOTION_QUALIFICATION_SCHEMAS,
     SAFE_ID,
     canonical_digest,
     validate_motion_program,
@@ -344,9 +345,9 @@ def _derive_test_only_gripper_program(
     return copy.deepcopy(validate_motion_program(derived))
 
 
-def _test_only_home_start_pose(
+def _home_start_pose(
     motion_qualification: Mapping[str, Any], home_candidate: Mapping[str, Any],
-    robot_system_id: str,
+    robot_system_id: str, *, source: str = "SYNTHETIC_TEST_ONLY",
 ) -> dict[str, Any]:
     target = motion_qualification.get("qualified_safe_joint_positions_rad")
     tolerance = motion_qualification.get("goal_tolerances", {}).get("joint_rad")
@@ -363,7 +364,7 @@ def _test_only_home_start_pose(
     joints = ("j1", "j2", "j3", "j4", "j5", "j6")
     return _redigest({
         "schema_version": "data_factory.robot_start_pose_qualification.v1",
-        "source": "SYNTHETIC_TEST_ONLY",
+        "source": source,
         "robot_system_id": robot_system_id,
         "robot_start_pose_id": source_id,
         "joint_order": list(joints),
@@ -385,14 +386,19 @@ def _build_physical_campaign_contract(
     direct_start_pose_ids: Sequence[str] | None = None,
     start_pose_qualifications: Sequence[Mapping[str, Any]] | None = None,
     test_only_gripper_retune_digest: str | None = None,
+    qualification_source: str = "SYNTHETIC_TEST_ONLY",
 ) -> tuple[dict[str, Any], dict[str, Any]]:
-    """Compile a finite TEST_ONLY condition domain without execution authority."""
+    """Compile a finite physical condition domain without execution authority."""
     if (
         type(requested_count) is not int or not 1 <= requested_count <= 100
         or type(normalized_seed) is not int or normalized_seed < 0
+        or qualification_source not in {
+            "SYNTHETIC_TEST_ONLY", "QUALIFICATION_ARTIFACT",
+        }
         or test_only_gripper_retune_digest is not None
         and (
-            not isinstance(test_only_gripper_retune_digest, str)
+            qualification_source != "SYNTHETIC_TEST_ONLY"
+            or not isinstance(test_only_gripper_retune_digest, str)
             or DIGEST.fullmatch(test_only_gripper_retune_digest) is None
         )
     ):
@@ -436,7 +442,7 @@ def _build_physical_campaign_contract(
         or not isinstance(scene_digest, str)
         or not DIGEST.fullmatch(scene_digest)
         or motion_qualification.get("schema_version")
-        != "data_factory.motion_qualification.v1"
+        not in MOTION_QUALIFICATION_SCHEMAS
         or motion_qualification.get("qualification_status") != "QUALIFIED"
         or home_candidate.get("schema_version") != "data_factory.home_candidate.v1"
         or motion_qualification.get("home_candidate_digest")
@@ -538,7 +544,7 @@ def _build_physical_campaign_contract(
         resolved = resolved_by_condition[condition_digest]
         bases.append(_redigest({
             "schema_version": "data_factory.fr5_base_condition_qualification.v1",
-            "source": "SYNTHETIC_TEST_ONLY",
+            "source": qualification_source,
             "qualification_status": "QUALIFIED",
             "coverage_report_digest": canonical_digest(report),
             "coverage_domain_digest": report["domain_digest"],
@@ -546,7 +552,11 @@ def _build_physical_campaign_contract(
             "resolver_result_digest": canonical_digest(resolved),
             "resolved_job_digest": resolved["resolved_job_digest"],
             "yaw_action_binding_digest": canonical_digest({
-                "scope": "TEST_ONLY", "yaw_deg": condition["yaw_deg"],
+                "scope": (
+                    "TEST_ONLY" if qualification_source == "SYNTHETIC_TEST_ONLY"
+                    else "QUALIFIED_MOTION"
+                ),
+                "yaw_deg": condition["yaw_deg"],
                 "motion_qualification_digest": motion_digest,
             }),
             "dual_view_observability_digest": canonical_digest({
@@ -556,8 +566,9 @@ def _build_physical_campaign_contract(
                 "yaw_deg": condition["yaw_deg"],
             }),
         }, "qualification_digest"))
-    home_pose = _test_only_home_start_pose(
+    home_pose = _home_start_pose(
         motion_qualification, home_candidate, job["robot_system_id"],
+        source=qualification_source,
     )
     poses = [home_pose] if start_pose_qualifications is None else [
         copy.deepcopy(dict(item)) for item in start_pose_qualifications
@@ -569,7 +580,7 @@ def _build_physical_campaign_contract(
         or any(
             item.get("schema_version")
             != "data_factory.robot_start_pose_qualification.v1"
-            or item.get("source") != "SYNTHETIC_TEST_ONLY"
+            or item.get("source") != qualification_source
             or item.get("robot_system_id") != job["robot_system_id"]
             or item.get("home_candidate_digest") != canonical_digest(home_candidate)
             or item.get("qualification_status") != "QUALIFIED"
@@ -585,7 +596,7 @@ def _build_physical_campaign_contract(
         raise ContractError("PHYSICAL_CONSOLE_START_POSE")
     catalog = _redigest({
         "schema_version": "data_factory.fr5_qualification_catalog.v1",
-        "source": "SYNTHETIC_TEST_ONLY",
+        "source": qualification_source,
         "qualification_status": "QUALIFIED",
         "fixed_contract_digest": canonical_digest(fixed),
         "coverage_report_digest": canonical_digest(report),

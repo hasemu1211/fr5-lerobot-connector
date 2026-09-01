@@ -10,7 +10,7 @@ from typing import Any, Mapping
 from tools.fr5_data_factory import (
     ContractError,
     DIGEST,
-    MOTION_QUALIFICATION_KEYS,
+    MOTION_QUALIFICATION_KEYS_BY_SCHEMA,
     SAFE_ID,
     canonical_digest,
 )
@@ -92,7 +92,10 @@ def _wait_phase(
 
 
 def _validated_motion(value: object, prefix: str) -> dict[str, Any]:
-    if not isinstance(value, Mapping) or set(value) != MOTION_QUALIFICATION_KEYS:
+    if not isinstance(value, Mapping):
+        raise ContractError(f"{prefix}_QUALIFICATION")
+    keys = MOTION_QUALIFICATION_KEYS_BY_SCHEMA.get(value.get("schema_version"))
+    if keys is None or set(value) != keys:
         raise ContractError(f"{prefix}_QUALIFICATION")
     motion = copy.deepcopy(dict(value))
     try:
@@ -116,12 +119,23 @@ def _validated_motion(value: object, prefix: str) -> dict[str, Any]:
     except (KeyError, TypeError, ValueError) as exc:
         raise ContractError(f"{prefix}_QUALIFICATION", str(exc)) from exc
     if (
-        motion.get("schema_version") != "data_factory.motion_qualification.v1"
-        or motion.get("qualification_status") != "QUALIFIED"
+        motion.get("qualification_status") != "QUALIFIED"
         or not isinstance(motion.get("robot_system_id"), str)
         or not SAFE_ID.fullmatch(motion["robot_system_id"])
         or not isinstance(motion.get("home_candidate_digest"), str)
         or not DIGEST.fullmatch(motion["home_candidate_digest"])
+        or motion.get("schema_version")
+        == "data_factory.motion_qualification.v2"
+        and (
+            not isinstance(motion.get("planning_scene_profile_id"), str)
+            or SAFE_ID.fullmatch(motion["planning_scene_profile_id"]) is None
+            or not isinstance(
+                motion.get("planning_scene_profile_digest"), str,
+            )
+            or DIGEST.fullmatch(
+                motion["planning_scene_profile_digest"]
+            ) is None
+        )
         or not isinstance(safe, list)
         or len(safe) != len(JOINT_ORDER)
         or any(

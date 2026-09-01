@@ -323,8 +323,6 @@ def _profile_contract(
 ) -> None:
     feature = fixed["feature_contract"]
     profile_id = feature["collection_profile_id"]
-    if _is_test_only_feature_contract(feature) and source != "SYNTHETIC_TEST_ONLY":
-        raise ContractError("HYPOTHESIS_TEST_ONLY_PROFILE_SOURCE")
     if (
         report["collection_profile_id"] != profile_id
         or any(

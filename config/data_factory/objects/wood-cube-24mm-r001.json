@@ -1,0 +1,12 @@
+{
+  "schema_version": "data_factory.object_profile.v2",
+  "object_profile_id": "wood-cube-24mm-r001",
+  "qualification_status": "QUALIFIED",
+  "description": "24 mm wooden cube",
+  "dimensions_mm": [
+    24.0,
+    24.0,
+    24.0
+  ],
+  "datum": "center"
+}

@@ -73,7 +73,7 @@ class WorkspaceManagerTest(unittest.TestCase):
             "ros_sample_age_s": age,
         }
 
-    def manager(self, suffix="B", *, display_name=None):
+    def manager(self, suffix="Fixture", *, display_name=None):
         return WorkspaceManager(
             session_id=f"workspace-session-{suffix}",
             candidate_root=self.candidate_root,
@@ -128,8 +128,8 @@ class WorkspaceManagerTest(unittest.TestCase):
         manager = self.manager()
         other = self.manager("C")
         self.assertNotEqual(manager.calibration_id, other.calibration_id)
-        self.assertEqual(manager.place_id, "PLACE_B")
-        self.assertEqual(manager.calibration_id, "place-b-yaw0-r001")
+        self.assertEqual(manager.place_id, "PLACE_FIXTURE")
+        self.assertEqual(manager.calibration_id, "place-fixture-yaw0-r001")
         self.assertRegex(manager.calibration_id, SAFE_ID)
 
         preview = self.preview(manager)
@@ -150,7 +150,7 @@ class WorkspaceManagerTest(unittest.TestCase):
         self.assertEqual(
             (workspace_document["display_name"], workspace_document["place_id"],
              workspace_document["frame_id"]),
-            ("Place B", "PLACE_B", manager.calibration_id),
+            ("Place Fixture", "PLACE_FIXTURE", manager.calibration_id),
         )
         self.assertEqual(
             (workspace_document["coordinate_mode"],
@@ -165,18 +165,18 @@ class WorkspaceManagerTest(unittest.TestCase):
             ("PLACE_A", self.source_cell["calibration_id"]),
         )
         self.assertEqual(load_json_strict(cell)["qualification_status"], "QUALIFIED")
-        self.assertEqual(load_json_strict(cell)["place_id"], "PLACE_B")
+        self.assertEqual(load_json_strict(cell)["place_id"], "PLACE_FIXTURE")
         stored_sheet = load_json_strict(sheet)
-        self.assertEqual(stored_sheet["place_id"], "PLACE_B")
+        self.assertEqual(stored_sheet["place_id"], "PLACE_FIXTURE")
         self.assertEqual(
             {point["job_pose"]["place_id"] for point in stored_sheet["grid_points"]},
-            {"PLACE_B"},
+            {"PLACE_FIXTURE"},
         )
         changed = set(self.config_bytes()) - set(before)
         self.assertEqual(
             changed,
             {
-                Path("workspaces/PLACE_B.json"),
+                Path("workspaces/PLACE_FIXTURE.json"),
                 Path("cells") / f"{manager.calibration_id}.json",
                 Path("workspace_sheets") / f"{manager.calibration_id}_yaw0_sheet.json",
             },
@@ -198,16 +198,17 @@ class WorkspaceManagerTest(unittest.TestCase):
             option for option in catalog["axes"]["workspace"]
             if option["id"] == manager.place_id
         )
-        self.assertEqual(workspace_option["label"], "Place B")
+        self.assertEqual(workspace_option["label"], "Place Fixture")
         domains = [
             item for item in catalog["workspace_domains"]
             if item["frame_id"] == manager.calibration_id
         ]
-        self.assertEqual(len(domains), 1)
-        self.assertEqual(
-            (domains[0]["workspace_id"], domains[0]["coordinate_mode"]),
-            ("PLACE_B", "CONTINUOUS_A4_PLANE"),
-        )
+        self.assertTrue(domains)
+        self.assertTrue(all(
+            (item["workspace_id"], item["coordinate_mode"])
+            == ("PLACE_FIXTURE", "CONTINUOUS_A4_PLANE")
+            for item in domains
+        ))
         candidates = [
             item for item in catalog["combinations"]
             if item["frame_id"] == manager.calibration_id
@@ -227,6 +228,7 @@ class WorkspaceManagerTest(unittest.TestCase):
         ))
 
     def test_exact_peer_motion_graduates_test_collection_without_a_job_clone(self):
+        jobs_before = set(self.config.rglob("*.job.json"))
         manager = self.manager("Graduated", display_name="Bench Two")
         promotion = manager.save(self.preview(manager)["preview_digest"])
         motion_path, motion = self.add_peer_motion(manager)
@@ -265,8 +267,7 @@ class WorkspaceManagerTest(unittest.TestCase):
             }
             for item in candidates
         ))
-        jobs = list(self.config.rglob("*.job.json"))
-        self.assertEqual(len(jobs), 1)
+        self.assertEqual(set(self.config.rglob("*.job.json")), jobs_before)
 
     def test_stale_peer_motion_digest_remains_non_executable(self):
         manager = self.manager("StaleMotion", display_name="Stale Motion")

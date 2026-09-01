@@ -341,6 +341,25 @@ def resolve_inputs(
         validated, motion_qualification = (
             copy.deepcopy(dict(item)) for item in transformed
         )
+    planning_scene_profile = None
+    if (
+        motion_qualification.get("schema_version")
+        == "data_factory.motion_qualification.v2"
+    ):
+        profile_id = motion_qualification.get("planning_scene_profile_id")
+        if not isinstance(profile_id, str) or SAFE_ID.fullmatch(profile_id) is None:
+            raise ContractError("MOTION_PLANNING_SCENE_BINDING")
+        config_root = Path(payload["config_root"]).resolve(strict=True)
+        profile_path = (
+            config_root / "planning_scenes" / f"{profile_id}.json"
+        ).resolve(strict=True)
+        try:
+            profile_path.relative_to(config_root)
+        except ValueError as exc:
+            raise ContractError("MOTION_PLANNING_SCENE_BINDING") from exc
+        planning_scene_profile = _load(
+            profile_path, "MOTION_PLANNING_SCENE_BINDING",
+        )
     program = resolve_motion_program(
         validated,
         motion_qualification,
@@ -348,6 +367,7 @@ def resolve_inputs(
         urdf=payload["urdf"],
         expected_robot_system_id=payload["expected_robot_system_id"],
         release_pose=release_pose,
+        planning_scene_profile=planning_scene_profile,
     )
     return validated, program, scene_binding_call(validated, release_pose, payload["run_id"])
 

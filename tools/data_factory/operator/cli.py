@@ -6,13 +6,11 @@ import json
 from pathlib import Path
 
 from tools.data_factory.operator.composition import build_operator_runtime
-from tools.data_factory.operator.workflow.campaign import DEFAULT_GRIPPER_RETUNE
 from tools.fr5_data_factory import ContractError
 
 
 DEFAULT_JOB = (
-    "config/data_factory/test_only_physical/goal2-place1/"
-    "center-live-p45-20260821-r001.job.json"
+    "config/data_factory/jobs/center-live-24mm-20260901-r001.job.json"
 )
 
 
@@ -77,8 +75,18 @@ def main(argv=None) -> int:
         help="Repository-relative qualified job used only for the initial selection",
     )
     parser.add_argument(
-        "--gripper-retune", default=DEFAULT_GRIPPER_RETUNE,
-        help="Repository-relative object/grasp TEST_ONLY gripper retune",
+        "--gripper-retune",
+        help="Optional repository-relative TEST_COLLECTION-only gripper retune",
+    )
+    parser.add_argument(
+        "--data-mode",
+        choices=("GENERAL_COLLECTION", "TEST_COLLECTION"),
+        default="GENERAL_COLLECTION",
+        help="GENERAL_COLLECTION writes the dedicated production dataset",
+    )
+    parser.add_argument(
+        "--dataset-name", default="fr5_smolvla_up_wrist_30hz",
+        help="Direct child name under datasets/fr5_episodes for production episodes",
     )
     parser.add_argument(
         "--no-auto-prepare", action="store_true",

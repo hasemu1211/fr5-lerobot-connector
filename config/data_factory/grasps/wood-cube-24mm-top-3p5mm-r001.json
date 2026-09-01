@@ -1,0 +1,53 @@
+{
+  "schema_version": "data_factory.grasp_profile.v3",
+  "grasp_profile_id": "wood-cube-24mm-top-3p5mm-r001",
+  "qualification_status": "QUALIFIED",
+  "object_profile_id": "wood-cube-24mm-r001",
+  "object_profile_digest": "sha256:fd93d2fb05d9ddd05a040e823b2d2b31428a79a7ae7ce07a1ad8cf519c66489a",
+  "grasp_kind": "top_center",
+  "grasp_geometry": {
+    "contact_surface": "TOP",
+    "depth_from_top_mm": 3.5,
+    "datum_to_tcp_grasp": {
+      "translation_m": [
+        0.0,
+        0.0,
+        0.0085
+      ],
+      "rotation_columns": [
+        [
+          1.0,
+          0.0,
+          0.0
+        ],
+        [
+          0.0,
+          -1.0,
+          0.0
+        ],
+        [
+          0.0,
+          0.0,
+          -1.0
+        ]
+      ]
+    }
+  },
+  "gripper_close": {
+    "command_position_m": 0.01176,
+    "acceptable_feedback_m": {
+      "min": 0.01176,
+      "max": 0.01218
+    },
+    "velocity_percent": 20,
+    "force_percent": 20,
+    "evidence_digest": "sha256:24369d1fbbbdda1af18578521dad72f37a8073c8fe080c7cc6ef1418a6e65ce2"
+  },
+  "gripper_open": {
+    "command_position_m": 0.021,
+    "velocity_percent": 10,
+    "force_percent": 50,
+    "completion_tolerance_m": 0.000105,
+    "evidence_digest": "sha256:24369d1fbbbdda1af18578521dad72f37a8073c8fe080c7cc6ef1418a6e65ce2"
+  }
+}

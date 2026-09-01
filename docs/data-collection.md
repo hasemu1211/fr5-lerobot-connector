@@ -2,14 +2,39 @@
 
 ## 목적
 
-FR5·그리퍼·RGB 카메라를 실행하고 여러 episode를 한 LeRobot v3 데이터셋에 저장한다. 실제 수집은 항상 다음 순서로 진행한다.
+FR5·그리퍼·RGB 카메라를 실행하고 여러 episode를 한 LeRobot v3 데이터셋에 저장한다. 기본 Web UI 수집은 항상 다음 순서로 진행한다.
 
-1. tmux에서 로봇과 카메라를 실행한다.
-2. live 사전점검을 통과한다.
-3. 작업 하나를 끝까지 수행해 episode로 저장한다.
-4. 자동 검사와 RGB 미리보기를 모두 통과한 데이터만 학습한다.
+1. 보이는 터미널 하나에서 Web UI foreground process를 실행한다.
+2. 카메라 역할을 확인하고 환경 준비를 통과한다.
+3. 작업영역·task·episode 수를 고정하고 캠페인을 승인한다.
+4. 각 episode의 durable commit과 기술 검사가 끝난 뒤 다음 episode로 진행한다.
+5. 사후 semantic review와 별도 training approval을 통과한 데이터만 학습한다.
 
 처음 설치하는 컴퓨터라면 먼저 [설치와 노트북 이식](setup.md)을 따른다.
+
+## 권장 경로: Web UI production 수집
+
+현재 장비의 기본 profile은 RealSense serial `254622073507`을 `UP`, `/dev/v4l/by-id/usb-Generic_USB2.0_PC_CAMERA-video-index0`을 `WRIST`로 사용한다. 24 mm 큐브의 상단 아래 3.5 mm 파지, `PLACE_A`·`PLACE_B`, `pickup_e2e`·`pick_place`의 exact-qualified 조합만 실행 가능하다. 역할 영수증은 machine-local output이므로 장치가 바뀌면 UI에서 다시 확정한다.
+
+```bash
+scripts/start_collection_ui.sh
+```
+
+이 명령은 `GENERAL_COLLECTION`과 `datasets/fr5_episodes/fr5_smolvla_up_wrist_30hz`를 기본으로 사용한다. 출력된 `http://127.0.0.1:4174` URL을 열고 다음 순서로 진행한다.
+
+1. `환경 준비`에서 단일 lifecycle owner가 로봇·controller·gripper·두 카메라를 준비하도록 한다.
+2. 작업영역, task, 시작 자세, 카메라 profile과 episode 수를 확인한다.
+3. `계획 확인`으로 finite manifest를 고정하고 캠페인을 한 번 승인한다.
+4. 실행 중 이상이 보이면 즉시 중단한다. 성공 episode는 recorder commit과 기술 검사를 직렬로 통과해야 다음 episode가 열린다.
+5. 캠페인 중이나 종료 뒤 candidate review를 처리한다. review와 training approval은 로봇 실행 경로를 멈추게 하지 않으며 서로 다른 authority다.
+
+연결·회귀 시험은 아래처럼 production 데이터와 분리한다.
+
+```bash
+scripts/start_collection_ui.sh --data-mode TEST_COLLECTION
+```
+
+Web UI가 foreground 환경을 소유하는 동안 같은 ROS·카메라 graph를 별도 터미널에서 중복 기동하지 않는다. 아래 1~5절의 tmux·개별 launcher·대화형 recorder 절차는 Web UI를 우회해야 하는 진단 또는 수동 수집 경로다.
 
 ## 1. tmux와 로봇 실행
 
@@ -67,6 +92,8 @@ activation은 active이고 position도 실제 non-open을 나타내면 `ActGripp
 | `up` | 작업대 위에서 비스듬히 내려다본다. 시작 영역, 목표 영역, 그리퍼가 작업 내내 보여야 한다. | 카메라 한 대로 배선과 녹화를 먼저 검증할 때 |
 | `up-side` | up은 유지하고 side를 로봇 팔 반대편의 낮은 사선에 둔다. 두 영상이 같은 가림을 만들지 않게 한다. | **FR5 최종 수집의 첫 권장안** |
 | `up-wrist` | wrist를 최종 그리퍼에 단단히 고정하고 광축을 finger 사이 작업점으로 향하게 한다. | 작은 물체, 삽입, 정밀 파지 |
+
+현재 FR5 production 기본값은 위 표의 `up-wrist`이며, 다른 설치로 바꾸면 새 dataset 이름과 새 역할 결속을 사용한다.
 
 공개 로봇의 거리와 각도를 그대로 복사하지 않는다. FR5 작업공간과 렌즈 FOV가 다르므로 preview에서 물체·목표·finger 접촉이 실제로 보이게 조정한다.
 

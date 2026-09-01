@@ -46,21 +46,21 @@ direnv exec . python3 -m tools.data_factory.operator_console --effect-scope FAKE
 
 종료는 실행한 터미널에서 `Ctrl-C`로 수행한다. episode worker와 HTTP handler가 join된 뒤 프로세스가 끝난다. UI는 revision 기반 long-poll 하나로 상태 변화를 읽고 5초 heartbeat에서 외부 상태를 다시 관찰하며, intent를 queue하거나 자동 재전송하지 않는다.
 
-## PHYSICAL TEST_ONLY
+## PHYSICAL 수집
 
 현재 PHYSICAL caller는 배포 가능한 카탈로그 UI를 사용하되, 실제 실행은 다음 tracked·validated 조합으로 제한한다.
 
-- qualified `place1 / PLACE_A@place-a-yaw0-r002`와 그 registration의 bounded continuous X/Y·normalized yaw domain
-- `pickup_e2e`, `DIRECT`와 exact cell/motion에 결속된 사용 가능한 시작 자세
-- qualified wood-cube object/grasp와 역할 조합에서 backend가 선택한 v2 camera profile
-- 각 역할에 결속된 stable `/dev/v4l/by-id/*-video-index0` UVC identity
-- isolated `TEST_ONLY` roots와 production writer disabled
+- qualified `PLACE_A@place-a-yaw0-r003`, `PLACE_B@place-b-yaw0-r001`와 각 registration의 bounded continuous X/Y·normalized yaw domain
+- `pickup_e2e`·`pick_place`, `DIRECT`와 exact cell/motion에 결속된 사용 가능한 시작 자세
+- qualified 24 mm wood-cube와 상단 아래 3.5 mm grasp profile
+- RealSense `UP` + stable `/dev/v4l/by-id/*-video-index0` UVC `WRIST`의 machine-local role binding
+- 기본 `GENERAL_COLLECTION` production root와 선택 가능한 격리 `TEST_COLLECTION` root
 
 현재 catalog에는 workspace/frame/task/object/grasp/start/motion/variant/camera/data mode 축이 모두 나타난다. Qualified place1 registration의 bounded continuous X/Y와 normalized yaw를 자동 설계 또는 직접 입력으로 선택할 수 있다. checked-in cells와 HOME·원점·yaw 0은 빠른 preset과 현재 physical test의 시작점이며 product/catalog 한계가 아니다. Compile만 exact finite slots를 만들고, 각 slot은 fresh scene/start/plan 검증을 거친다.
 
 좌표계 wizard는 인쇄 source와 최종 100 mm 막대 실측을 분리한다. 현재 실물 sheet의 `96 → 100 mm` 보정 이력은 exact checked-in print profile로 기록되며 별도 좌표계나 기존 `place1` 재등록 조건이 아니다.
 
-Tracked qualification과 current physical caller가 함께 존재하는 coherent combination만 실행 가능하다. `pick_place`, `TWO_STAGE_ALIGN`, ID/OOD split, GENERAL/PRODUCTION, 새 workspace 또는 등록되지 않은 cell은 qualification과 caller가 갖춰질 때까지 이유와 함께 비활성이다.
+Tracked qualification과 current physical caller가 함께 존재하는 coherent combination만 실행 가능하다. `TWO_STAGE_ALIGN`, ID/OOD split, 새 workspace 또는 등록되지 않은 cell은 qualification과 caller가 갖춰질 때까지 이유와 함께 비활성이다.
 
 연결된 camera는 환경 준비 화면에 `카메라 1`, `카메라 2`처럼 나타난다. 운영자는 각 장치를 상단·측면·손목·사용 안 함으로만 지정하고, backend가 완전한 역할 map에서 녹화 profile을 결정한다. USB 경로, serial, profile ID와 topic은 주 화면에서 입력하지 않으며 접힌 기술 정보에만 남는다. 호환 camera가 0대여도 앱은 종료하지 않고 camera 미연결을 표시하는 blocked shell을 연다.
 
@@ -76,15 +76,15 @@ scripts/start_collection_ui.sh
 
 이 한 명령으로 앱을 먼저 연다. 환경 화면에서 연결된 카메라의 역할을 정하면 앱이 필요한 foreground 실행 환경을 준비하므로 USB 경로, serial, profile ID나 topic을 명령행에 입력하지 않는다. 새 host는 robot/controller/start, workspace/frame binding과 camera 조건을 다시 확인해야 하며 tracked test input이 그 host의 production qualification을 대신하지 않는다. 같은 qualified place1의 registered bounds 안에서는 좌표마다 workspace를 다시 등록하지 않는다.
 
-한 캠페인 안에서는 campaign authorization이 예상되는 positive path를 결속한다. Camera identity/transport는 environment 준비와 compile 시 결속하고, 각 episode의 HOME snapshot, scene freshness, plan digest, recorder readiness와 technical validator는 runtime에서 새로 측정한다. 실행 중 cancel은 항상 다음 intent를 막는다. 현재 PHYSICAL TEST_ONLY 결과는 candidate admission을 만들지 않고 `human semantic=NOT_MEASURED`, `training=NOT_AUTHORIZED`를 유지한다.
+한 캠페인 안에서는 campaign authorization이 예상되는 positive path를 결속한다. Camera identity/transport는 environment 준비와 compile 시 결속하고, 각 episode의 HOME snapshot, scene freshness, plan digest, recorder readiness와 technical validator는 runtime에서 새로 측정한다. 실행 중 cancel은 항상 다음 intent를 막는다. Production 결과는 기술 통과 뒤 candidate review를 만들지만 training approval은 만들지 않는다. TEST_COLLECTION은 candidate admission 없이 `human semantic=NOT_MEASURED`, `training=NOT_AUTHORIZED`를 유지한다.
 
 ## 데이터와 authority 경계
 
 - `FAKE`는 robot, gripper, production recorder, dataset과 run-state effect가 0이다.
-- PHYSICAL authoring은 run root, dataset episode와 motion을 만들지 않는다. Compile은 current caller와 machine-local camera binding을 확인하고 isolated TEST_ONLY cell/scene setup state를 만들 수 있지만, motion·recorder·dataset episode는 campaign authorization 뒤에만 시작한다.
+- PHYSICAL authoring은 dataset episode나 motion을 만들지 않는다. Compile은 current caller, machine-local camera binding과 scene anchor를 고정할 수 있지만 motion·recorder·dataset episode는 campaign authorization 뒤에만 시작한다.
 - immutable episode ledger와 rewritable ledger-state sidecar는 provenance, technical admission과 retention을 분리한다. 초기 retention은 `PRESERVE`; shared chunk의 물리 삭제는 UI가 허가하지 않는다.
 - browser button은 local page channel의 operator intent다. OS 인증이나 신원 증명을 주장하지 않는다.
-- candidate `PASS | FAIL | UNCERTAIN`는 별도 compare-and-swap review가 제공된 경우에만 보인다. 현재 PHYSICAL TEST_ONLY caller는 candidate review를 만들지 않는다.
+- candidate `PASS | FAIL | UNCERTAIN`는 production episode가 기술 검사를 통과해 별도 compare-and-swap review가 제공된 경우에만 보인다. TEST_COLLECTION은 candidate review를 만들지 않는다.
 - technical PASS, human semantic evidence, production admission과 training approval은 서로 다른 상태다. UI intent는 production 또는 training authority를 생성하지 않는다.
 
 ## 정적·계약 검사

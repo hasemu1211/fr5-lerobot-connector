@@ -833,7 +833,7 @@ class ProductFakeOperatorTests(unittest.TestCase):
             self.assertEqual(initial["selection"]["workspace_id"], "PLACE_A")
             self.assertTrue(initial["draft"]["execution_ready"])
             self.send(product, "new_workspace_registration", {
-                "display_name": "Place B",
+                "display_name": "Fixture Workspace",
             }, "workspace-new")
 
             for label in ("CENTER", "X_REF", "Y_CHECK"):
@@ -1241,7 +1241,13 @@ class ProductFakeOperatorTests(unittest.TestCase):
         product = self.make()
         self.prepare(product)
         catalog = product.application.catalog
-        domain = catalog["workspace_domains"][0]
+        selection = product.bridge_core.snapshot()["projection"]["selection"]
+        domain = next(
+            item for item in catalog["workspace_domains"]
+            if item["workspace_id"] == selection["workspace_id"]
+            and item["frame_id"] == selection["frame_id"]
+            and item["object_id"] == selection["object_id"]
+        )
         domain["x_mm"] = {"minimum": 1.0, "maximum": 70.0}
         domain["domain_digest"] = canonical_digest({
             key: value for key, value in domain.items() if key != "domain_digest"

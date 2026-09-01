@@ -1,0 +1,31 @@
+{
+  "schema_version": "data_factory.workspace.v1",
+  "place_id": "PLACE_B",
+  "display_name": "작업영역 B",
+  "frame_id": "place-b-yaw0-r001",
+  "coordinate_mode": "CONTINUOUS_A4_PLANE",
+  "a4_family_digest": "sha256:822d54f10d2cc946b5b2eee0a391a8df41e506e0dd8b068d33b9546fee2a0f23",
+  "yaw0_manifest_digest": "sha256:43b544cf9c074086ee93834a2443217bec69f467907d53f3be66579ea87a29fd",
+  "x_mm": {
+    "minimum": -70.0,
+    "maximum": 70.0
+  },
+  "y_mm": {
+    "minimum": -35.0,
+    "maximum": 35.0
+  },
+  "yaw_deg": {
+    "minimum": -180.0,
+    "maximum_exclusive": 180.0
+  },
+  "table_plane_provenance": {
+    "source_place_id": "PLACE_B",
+    "source_calibration_id": "place-b-yaw0-r001",
+    "source_artifact_digest": "sha256:ea871c12f48ef538ada2dc7b6020cdcfe1bef0f3cfa0600b7e50e1b36710b98c",
+    "reference_digest": "sha256:7585d877fc404839d263dcf27315f2c89fbee0e97ecc8e7a2767db17a87997ad"
+  },
+  "registration_status": "REGISTERED",
+  "motion_qualification_status": "QUALIFIED",
+  "execution_authorized": false,
+  "training_approved": false
+}

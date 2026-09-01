@@ -1506,7 +1506,7 @@ feedback:
 
             def validate_scope_then_stop(
                 payload, _cancel, publish, resolver, campaign_authorization,
-                test_only_episode_binding, decision_provider,
+                runtime_episode_binding, decision_provider,
                 checkpoint_provider, **_kwargs,
             ):
                 publish({"code": "PLANNING", "run_id": payload["run_id"]})
@@ -1533,13 +1533,13 @@ feedback:
                     "gripper-retune-wood-cube-25mm-top-center-r008.json"
                 )
                 scope_observed.update({
-                    "manifest": test_only_episode_binding["manifest_digest"]
+                    "manifest": runtime_episode_binding["manifest_digest"]
                     == envelope["manifest_digest"],
-                    "slot": test_only_episode_binding["slot_digest"]
+                    "slot": runtime_episode_binding["slot_digest"]
                     in envelope["slot_digests"],
-                    "start_pose": test_only_episode_binding["robot_start_pose_id"]
+                    "start_pose": runtime_episode_binding["robot_start_pose_id"]
                     in envelope["allowed_start_pose_ids"],
-                    "disposition": test_only_episode_binding["data_disposition"]
+                    "disposition": runtime_episode_binding["data_disposition"]
                     == envelope["data_disposition"],
                     "collection": digests["collection_profile"]
                     == envelope["collection_profile_digest"],
@@ -1586,7 +1586,7 @@ feedback:
                 validate_runtime_campaign_scope(
                     campaign_authorization, resolved_inputs=validated,
                     motion_program=program,
-                    episode_binding=test_only_episode_binding, now=NOW,
+                    episode_binding=runtime_episode_binding, now=NOW,
                 )
                 plan_digest = canonical_digest(["plan", payload["run_id"]])
                 summary = {
@@ -1625,7 +1625,7 @@ feedback:
                     "decision_binding": {
                         "operator_summary": summary,
                         "data_disposition": "TEST_ONLY",
-                        "episode_binding": copy.deepcopy(test_only_episode_binding),
+                        "episode_binding": copy.deepcopy(runtime_episode_binding),
                     },
                     "timeout_s": 2.0,
                 })
@@ -2206,7 +2206,7 @@ feedback:
                 current = application.bridge_core.snapshot()
                 application.bridge_core.consume(envelope(
                     current, "new_workspace_registration", {
-                        "display_name": "Place B",
+                        "display_name": "Fixture Workspace",
                     }, "workspace-new-r001",
                 ))
 
@@ -2426,6 +2426,7 @@ feedback:
                     repository_root=root,
                     session_id="single-observation-r001",
                     camera_device_id=device,
+                    data_mode="TEST_COLLECTION",
                     gripper_retune=(
                         "config/data_factory/test_only_physical/goal2-place1/"
                         "gripper-retune-wood-cube-25mm-top-center-r008.json"
