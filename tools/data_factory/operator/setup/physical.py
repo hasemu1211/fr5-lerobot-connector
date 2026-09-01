@@ -682,7 +682,7 @@ def build_physical_operator_environment(
     environment: PhysicalOperatorEnvironment
 
     def prepare_home_recovery() -> dict[str, Any]:
-        current = environment.projection()
+        current = environment.liveness()
         motion = [current["components"][name] for name in MOTION_COMPONENTS]
         if any(item["state"] == "AMBIGUOUS" for item in motion) or (
             any(item["state"] == "READY" for item in motion)
@@ -697,16 +697,12 @@ def build_physical_operator_environment(
         # Only this environment may retire its known motion child.  An external
         # graph remains visible below and therefore blocks the maintenance node.
         stack.reconfigure("robot_stack", commands["robot_stack"])
-        try:
-            if not settle_policy(lambda: not ({
-                "/controller_manager", "/fr_command_server",
-            } & nodes())):
-                raise ContractError("HOME_RECOVERY_MOTION_OWNER")
-            recovery = command_server_maintenance(home_recovery=True)
-        finally:
-            # A rejected maintenance request must not strand the normal motion
-            # graph while the camera owner stays alive.
-            stack.ensure()
+
+        def motion_absent() -> bool:
+            try:
+                return not ({"/controller_manager", "/fr_command_server"} & nodes())
+            except ContractError:
+                return False
 
         def motion_ready() -> bool:
             try:
@@ -717,8 +713,22 @@ def build_physical_operator_environment(
             except ContractError:
                 return False
 
-        if not settle_policy(motion_ready):
-            raise ContractError("HOME_RECOVERY_GRAPH")
+        try:
+            if not settle_policy(motion_absent):
+                raise ContractError("HOME_RECOVERY_MOTION_OWNER")
+            recovery = command_server_maintenance(home_recovery=True)
+        finally:
+            # A rejected maintenance request must not strand the normal motion
+            # graph.  Restore that known child without querying the independent
+            # camera owner, then wait until its controllers are active.
+            if not settle_policy(motion_absent):
+                raise ContractError("HOME_RECOVERY_MOTION_OWNER")
+            try:
+                stack.start_configured("robot_stack")
+            except ContractError as exc:
+                raise ContractError("HOME_RECOVERY_GRAPH") from exc
+            if not settle_policy(motion_ready):
+                raise ContractError("HOME_RECOVERY_GRAPH")
         return {
             **(recovery or {}), "status": "READY", "graph_restarted": True,
         }

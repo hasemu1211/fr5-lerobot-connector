@@ -351,6 +351,14 @@ class OperatorStack:
         self._children.pop(name, None)
         self.commands = checked
 
+    def start_configured(self, name: str) -> None:
+        """Start one stopped child after its owner-specific absence was proven."""
+        if not _valid_id(name) or name not in self.commands:
+            raise ContractError("OPERATOR_STACK_COMMAND")
+        if name in self._children:
+            raise ContractError("OPERATOR_STACK_START_GATE", name)
+        self._start_names([name])
+
     def stop(self) -> dict[str, object]:
         """Boundedly terminate, then kill, only handles created by this instance."""
         failed = self._stop_names(list(self._children))

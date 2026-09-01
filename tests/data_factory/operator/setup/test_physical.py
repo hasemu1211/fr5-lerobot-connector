@@ -611,6 +611,47 @@ class PhysicalEnvironmentTests(unittest.TestCase):
             )
             environment.stop()
 
+    def test_home_recovery_restart_does_not_depend_on_camera_rediscovery(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.make_uvc_links(root)
+            state = {"maintenance": False, "robot": False, "camera": False}
+            environment, calls = self.build(root, state, maintenance_open=True)
+            self.assertEqual(environment.prepare_environment()["state"], "READY")
+            prepared = {
+                "collision_cleared": False, "mode_switched": False,
+                "robot_enabled": True, "robot_mode": "AUTO",
+            }
+
+            def prepare_robot():
+                state["parameter_query_failures"] = 2
+                return prepared
+
+            with patch(
+                "tools.data_factory.operator.setup.physical."
+                "_prepare_robot_for_home_recovery",
+                side_effect=prepare_robot,
+            ):
+                recovered = environment.prepare_home_recovery()
+
+            self.assertEqual(recovered, {
+                **prepared, "status": "READY", "graph_restarted": True,
+            })
+            self.assertEqual(state["parameter_query_failures"], 2)
+            self.assertTrue(state["robot"] and state["camera"])
+            self.assertEqual(
+                sum("real_robot.launch.py" in argv for argv in calls["process"]),
+                2,
+            )
+            self.assertEqual(
+                sum(
+                    "start_camera_group.sh" in " ".join(argv)
+                    for argv in calls["process"]
+                ),
+                1,
+            )
+            environment.stop()
+
     def test_home_recovery_restores_motion_graph_after_maintenance_failure(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
