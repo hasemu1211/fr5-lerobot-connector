@@ -3,6 +3,9 @@ from pathlib import Path
 
 from tools.data_factory.operator.catalog import (
     load_operator_catalog,
+    project_workspace_cycle_poses,
+    resolve_workspace_cycle_selections,
+    validate_operator_pose,
     validate_operator_selection,
 )
 from tools.fr5_data_factory import ContractError, canonical_digest
@@ -115,3 +118,72 @@ class OperatorCatalogTests(unittest.TestCase):
         forged = {**selection, "grasp_id": "not-this-object"}
         with self.assertRaisesRegex(ContractError, "OPERATOR_SELECTION_COMBINATION"):
             validate_operator_selection(self.catalog, forged)
+
+    def test_pick_place_workspace_cycle_uses_each_endpoint_domain(self):
+        catalog = load_operator_catalog(
+            ROOT, device_ids=["camera-up", "camera-wrist"],
+        )
+        source = next(
+            item for item in catalog["combinations"]
+            if item["workspace_id"] == "PLACE_A"
+            and item["frame_id"] == "place-a-yaw0-r003"
+            and item["task_id"] == "pick_place"
+            and item["object_id"] == "wood-cube-24mm-r001"
+            and item["cell_id"] == "PLACE_A-yaw0-CENTER"
+            and item["camera_profile_id"] == "fr5-up-wrist-rgb-30hz-v1"
+            and item["execution"]["TEST_COLLECTION"]["executable"]
+        )
+        selection = {
+            "schema_version": "data_factory.operator_selection.v2",
+            "combination_digest": source["combination_digest"],
+            "data_mode": "TEST_COLLECTION",
+            **{
+                field: source[field]
+                for field in (
+                    "workspace_id", "frame_id", "task_id", "object_id",
+                    "grasp_id", "cell_id", "start_pose_id", "motion_id",
+                    "variant_id", "camera_profile_id", "camera_device_id",
+                    "camera_bindings", "camera_binding_digest",
+                )
+            },
+            "policy_id": "DETERMINISTIC_SPREAD",
+        }
+        start = {
+            "place_id": "PLACE_A", "yaw_deg": 0,
+            "x_mm": 0, "y_mm": 0,
+        }
+
+        a_cycle = resolve_workspace_cycle_selections(catalog, selection, 2)
+        self.assertEqual(
+            [(item["workspace_id"], item["frame_id"]) for item in a_cycle],
+            [
+                ("PLACE_A", "place-a-yaw0-r003"),
+                ("PLACE_B", "place-b-yaw0-r001"),
+                ("PLACE_A", "place-a-yaw0-r003"),
+            ],
+        )
+        poses = project_workspace_cycle_poses(catalog, selection, start, 2)
+        self.assertEqual([item["place_id"] for item in poses], [
+            "PLACE_A", "PLACE_B", "PLACE_A",
+        ])
+        self.assertTrue(all(
+            validate_operator_pose(catalog, endpoint, pose) == pose
+            for endpoint, pose in zip(a_cycle, poses)
+        ))
+
+        b_selection = a_cycle[1]
+        b_start = {
+            "place_id": "PLACE_B", "yaw_deg": 0,
+            "x_mm": 0, "y_mm": 0,
+        }
+        b_cycle = resolve_workspace_cycle_selections(catalog, b_selection, 3)
+        self.assertEqual(
+            [item["workspace_id"] for item in b_cycle],
+            ["PLACE_B", "PLACE_A", "PLACE_B", "PLACE_A"],
+        )
+        self.assertEqual(
+            [item["place_id"] for item in project_workspace_cycle_poses(
+                catalog, b_selection, b_start, 3,
+            )],
+            ["PLACE_B", "PLACE_A", "PLACE_B", "PLACE_A"],
+        )

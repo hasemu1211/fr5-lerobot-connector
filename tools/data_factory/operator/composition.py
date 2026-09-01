@@ -33,6 +33,8 @@ from tools.data_factory.operator.catalog import (
     project_assisted_poses,
     project_balanced_start_pose_ids,
     project_direct_poses,
+    project_workspace_cycle_poses,
+    resolve_workspace_cycle_selections,
     validate_operator_pose,
     validate_operator_selection,
 )
@@ -184,6 +186,7 @@ def _resolve_physical_pose_domain(
     operator_label: str, payload_template: Mapping[str, Any],
     sheet_manifest: Path,
     release_poses: Sequence[Mapping[str, Any]] | None = None,
+    workspace_bindings: Mapping[str, Mapping[str, Any]] | None = None,
     resolver=None,
 ) -> list[dict[str, Any]]:
     """Resolve each exact pose with the ordinary JobSpec/motion input path."""
@@ -198,6 +201,56 @@ def _resolve_physical_pose_domain(
     ):
         raise ContractError("PHYSICAL_CONSOLE_POSE_DOMAIN")
     sheet_digest = canonical_digest(load_json_strict(sheet_manifest))
+    if workspace_bindings is not None and (
+        not isinstance(workspace_bindings, Mapping)
+        or not workspace_bindings
+        or any(
+            not isinstance(place_id, str)
+            or not SAFE_ID.fullmatch(place_id)
+            or not isinstance(binding, Mapping)
+            or set(binding) != {
+                "frame_id", "selected_sheet", "yaw0_sheet",
+                "motion_qualification",
+            }
+            or not isinstance(binding["frame_id"], str)
+            or not SAFE_ID.fullmatch(binding["frame_id"])
+            for place_id, binding in workspace_bindings.items()
+        )
+    ):
+        raise ContractError("PHYSICAL_CONSOLE_WORKSPACE_BINDING")
+
+    def endpoint(place_id: str) -> dict[str, Any]:
+        if workspace_bindings is None:
+            if place_id != template_job.get("place_id"):
+                raise ContractError("PHYSICAL_CONSOLE_EXACT_SCOPE")
+            return {
+                "frame_id": template_job["cell_calibration_id"],
+                "selected_sheet": sheet_manifest,
+                "yaw0_sheet": payload_template["yaw0_sheet"],
+                "motion_qualification": payload_template[
+                    "motion_qualification"
+                ],
+            }
+        binding = workspace_bindings.get(place_id)
+        if not isinstance(binding, Mapping):
+            raise ContractError("PHYSICAL_CONSOLE_WORKSPACE_BINDING")
+        return copy.deepcopy(dict(binding))
+
+    def endpoint_job(
+        pose: Mapping[str, Any], binding: Mapping[str, Any], token: str,
+    ) -> dict[str, Any]:
+        job = copy.deepcopy(dict(template_job))
+        job.update(
+            job_id=f"physical-pose-{token}",
+            operator_or_agent_id=operator_label,
+            cell_calibration_id=binding["frame_id"],
+            sheet_manifest_digest=canonical_digest(
+                load_json_strict(binding["selected_sheet"]),
+            ),
+            **copy.deepcopy(dict(pose)),
+        )
+        return job
+
     result = []
     seen = set()
     resolver = run_job.resolve_inputs if resolver is None else resolver
@@ -209,28 +262,44 @@ def _resolve_physical_pose_domain(
         }:
             raise ContractError("PHYSICAL_CONSOLE_POSE_DOMAIN")
         token = canonical_digest(dict(pose)).removeprefix("sha256:")[:20]
-        job = copy.deepcopy(dict(template_job))
-        job.update(
-            job_id=f"physical-pose-{token}",
-            operator_or_agent_id=operator_label,
-            sheet_manifest_digest=sheet_digest,
-            **copy.deepcopy(dict(pose)),
-        )
+        source_endpoint = endpoint(pose["place_id"])
+        job = endpoint_job(pose, source_endpoint, token)
+        if workspace_bindings is None:
+            job["sheet_manifest_digest"] = sheet_digest
         candidate_payload = copy.deepcopy(dict(payload_template))
-        candidate_payload["job"] = job
+        candidate_payload.update(
+            job=job,
+            selected_sheet=str(source_endpoint["selected_sheet"]),
+            yaw0_sheet=str(source_endpoint["yaw0_sheet"]),
+            motion_qualification=str(source_endpoint["motion_qualification"]),
+        )
         if release_poses is not None:
             release_pose = release_poses[index]
             if not isinstance(release_pose, Mapping) or set(release_pose) != {
                 "place_id", "yaw_deg", "x_mm", "y_mm",
             }:
                 raise ContractError("PHYSICAL_CONSOLE_POSE_DOMAIN")
-            if release_pose["place_id"] != pose["place_id"]:
-                raise ContractError("PHYSICAL_CONSOLE_EXACT_SCOPE")
-            candidate_payload.update(
-                recycle_yaw_deg=release_pose["yaw_deg"],
-                recycle_x_mm=release_pose["x_mm"],
-                recycle_y_mm=release_pose["y_mm"],
-            )
+            release_endpoint = endpoint(release_pose["place_id"])
+            if release_pose["place_id"] == pose["place_id"]:
+                candidate_payload.update(
+                    recycle_yaw_deg=release_pose["yaw_deg"],
+                    recycle_x_mm=release_pose["x_mm"],
+                    recycle_y_mm=release_pose["y_mm"],
+                )
+            else:
+                release_token = canonical_digest(
+                    dict(release_pose),
+                ).removeprefix("sha256:")[:20]
+                candidate_payload["destination"] = {
+                    "job": endpoint_job(
+                        release_pose, release_endpoint, release_token,
+                    ),
+                    "selected_sheet": str(release_endpoint["selected_sheet"]),
+                    "yaw0_sheet": str(release_endpoint["yaw0_sheet"]),
+                    "motion_qualification": str(
+                        release_endpoint["motion_qualification"]
+                    ),
+                }
         resolved, program, _binding = resolver(
             candidate_payload, scene_binding_call=lambda *_args: {},
         )
@@ -238,7 +307,9 @@ def _resolve_physical_pose_domain(
         if key in seen:
             continue
         if (
-            program.get("schema_version") != "fr5.motion_program.v2"
+            program.get("schema_version") not in {
+                "fr5.motion_program.v2", "fr5.motion_program.v4",
+            }
             or len(program.get("steps", [])) != 10
         ):
             raise ContractError("PHYSICAL_CONSOLE_EXACT_SCOPE")
@@ -1400,6 +1471,7 @@ def build_physical_operator_console(
     tcp_candidate_manifest: str | Path = DEFAULT_TCP_MANIFEST,
     gripper_retune_path: str | Path | None = DEFAULT_GRIPPER_RETUNE,
     job_binding: Mapping[str, str] | None = None,
+    workspace_bindings: Mapping[str, Mapping[str, str]] | None = None,
     selected_camera_device_id: str | None = None,
     selected_camera_bindings: Mapping[str, str] | None = None,
     selected_camera_binding_digest: str | None = None,
@@ -1527,6 +1599,49 @@ def build_physical_operator_console(
         ]
         if initial_pose not in pose_domain:
             pose_domain.insert(0, initial_pose)
+    if workspace_bindings is None:
+        resolved_workspace_bindings = {
+            template_job["place_id"]: {
+                "frame_id": template_job["cell_calibration_id"],
+                "selected_sheet": paths["yaw0_sheet"],
+                "yaw0_sheet": paths["yaw0_sheet"],
+                "motion_qualification": paths["motion"],
+            },
+        }
+    else:
+        if not isinstance(workspace_bindings, Mapping) or not workspace_bindings:
+            raise ContractError("PHYSICAL_CONSOLE_WORKSPACE_BINDING")
+        resolved_workspace_bindings = {}
+        for place_id, binding in workspace_bindings.items():
+            if (
+                not isinstance(place_id, str) or not SAFE_ID.fullmatch(place_id)
+                or not isinstance(binding, Mapping)
+                or set(binding) != {
+                    "frame_id", "selected_sheet", "yaw0_sheet",
+                    "motion_qualification",
+                }
+                or not isinstance(binding["frame_id"], str)
+                or not SAFE_ID.fullmatch(binding["frame_id"])
+            ):
+                raise ContractError("PHYSICAL_CONSOLE_WORKSPACE_BINDING")
+            resolved_workspace_bindings[place_id] = {
+                "frame_id": binding["frame_id"],
+                **{
+                    field: _repository_path(repository, binding[field])
+                    for field in (
+                        "selected_sheet", "yaw0_sheet",
+                        "motion_qualification",
+                    )
+                },
+            }
+    if (
+        set(resolved_workspace_bindings)
+        != {pose["place_id"] for pose in pose_domain}
+        or resolved_workspace_bindings.get(
+            template_job["place_id"], {},
+        ).get("frame_id") != template_job["cell_calibration_id"]
+    ):
+        raise ContractError("PHYSICAL_CONSOLE_WORKSPACE_BINDING")
     payload = {
         "mode": "live", "run_id": run_id, "job": template_job,
         "selected_sheet": str(paths["yaw0_sheet"]),
@@ -1542,6 +1657,14 @@ def build_physical_operator_console(
         else load_json_strict(paths["gripper_retune"])
     )
     motion_qualification = load_json_strict(paths["motion"])
+    endpoint_motion_qualifications = [
+        load_json_strict(binding["motion_qualification"])
+        for _place_id, binding in sorted(resolved_workspace_bindings.items())
+    ]
+    motion_qualification_by_cell = {
+        item["cell_calibration_id"]: item
+        for item in endpoint_motion_qualifications
+    }
 
     def physical_resolver(value, *, scene_binding_call):
         resolved, program, binding = run_job.resolve_inputs(
@@ -1561,6 +1684,7 @@ def build_physical_operator_console(
             [*pose_domain[1:], pose_domain[-2]]
             if template_job["task"] == "pick_place" else None
         ),
+        workspace_bindings=resolved_workspace_bindings,
         resolver=physical_resolver,
     )
     resolved_by_pose = {
@@ -1792,6 +1916,7 @@ def build_physical_operator_console(
         )
     hypothesis, draft = _build_physical_campaign_contract(
         resolver_results=resolved_jobs, motion_qualification=motion_qualification,
+        motion_qualifications=endpoint_motion_qualifications,
         home_candidate=home_candidate,
         scene_digest=initial_scene_digest,
         draft_id=f"{session_id}-draft", manifest_id=f"{session_id}-manifest",
@@ -2060,6 +2185,23 @@ def build_physical_operator_console(
         return True
 
     def start_binding(_run_id: str, slot: Mapping[str, Any]) -> dict[str, Any]:
+        base = next((
+            item for item in hypothesis["base_conditions"]
+            if item["base_condition_digest"] == slot.get("base_condition_digest")
+        ), None)
+        receipt = next((
+            item for item in hypothesis["resolver_receipts"]
+            if isinstance(base, Mapping)
+            and item["resolver_result_digest"] == base["resolver_result_digest"]
+        ), None)
+        endpoint_motion = (
+            motion_qualification_by_cell.get(
+                receipt["normalized_job"]["cell_calibration_id"]
+            )
+            if isinstance(receipt, Mapping) else None
+        )
+        if not isinstance(endpoint_motion, Mapping):
+            raise ContractError("PHYSICAL_CONSOLE_WORKSPACE_BINDING")
         start_pose_id = slot.get("robot_start_pose_id")
         qualification = live_start_qualifications.get(start_pose_id)
         if qualification is not None:
@@ -2068,12 +2210,12 @@ def build_physical_operator_console(
                     transition_to_start_live,
                 )
                 transition = transition_to_start_live(
-                    motion_qualification=motion_qualification,
+                    motion_qualification=endpoint_motion,
                     robot_start_pose_qualification=qualification,
                 )
             else:
                 transition = start_transition_call(
-                    motion_qualification, qualification,
+                    endpoint_motion, qualification,
                 )
             if (
                 not isinstance(transition, Mapping)
@@ -2090,7 +2232,7 @@ def build_physical_operator_console(
         return build_runtime_start_binding(
             data_disposition=data_disposition,
             manifest=holder["operator"].manifest, hypothesis=hypothesis,
-            motion_qualification=motion_qualification,
+            motion_qualification=endpoint_motion,
             home_candidate=home_candidate, current_snapshot=snapshot, slot=slot,
         )
 
@@ -2106,7 +2248,20 @@ def build_physical_operator_console(
         if active_resolved is None:
             raise ContractError("PHYSICAL_CONSOLE_RESOLVED_JOB")
         active_job = active_resolved["normalized_job"]
-        active_payload["job"] = copy.deepcopy(active_job)
+        source_endpoint = resolved_workspace_bindings.get(
+            active_job["place_id"],
+        )
+        if (
+            not isinstance(source_endpoint, Mapping)
+            or source_endpoint["frame_id"] != active_job["cell_calibration_id"]
+        ):
+            raise ContractError("PHYSICAL_CONSOLE_WORKSPACE_BINDING")
+        active_payload.update(
+            job=copy.deepcopy(active_job),
+            selected_sheet=str(source_endpoint["selected_sheet"]),
+            yaw0_sheet=str(source_endpoint["yaw0_sheet"]),
+            motion_qualification=str(source_endpoint["motion_qualification"]),
+        )
         active_payload.update(
             run_id=intent["run_id"], run_root=active_roots["run_root"],
             dataset_root=active_roots["dataset_root"],
@@ -2145,11 +2300,33 @@ def build_physical_operator_console(
             for key in ("place_id", "yaw_deg", "x_mm", "y_mm")
         ):
             raise ContractError("TASK_BINDING_DISTINCT")
-        active_payload.update(
-            recycle_yaw_deg=release_job["yaw_deg"],
-            recycle_x_mm=release_job["x_mm"],
-            recycle_y_mm=release_job["y_mm"],
+        release_endpoint = resolved_workspace_bindings.get(
+            release_job["place_id"],
         )
+        if (
+            not isinstance(release_endpoint, Mapping)
+            or release_endpoint["frame_id"]
+            != release_job["cell_calibration_id"]
+        ):
+            raise ContractError("PHYSICAL_CONSOLE_WORKSPACE_BINDING")
+        if release_job["place_id"] == active_job["place_id"]:
+            active_payload.update(
+                recycle_yaw_deg=release_job["yaw_deg"],
+                recycle_x_mm=release_job["x_mm"],
+                recycle_y_mm=release_job["y_mm"],
+            )
+            active_payload.pop("destination", None)
+        else:
+            for key in (*run_job.RECYCLE_COORD_KEYS, run_job.RECYCLE_YAW_KEY):
+                active_payload.pop(key, None)
+            active_payload["destination"] = {
+                "job": copy.deepcopy(release_job),
+                "selected_sheet": str(release_endpoint["selected_sheet"]),
+                "yaw0_sheet": str(release_endpoint["yaw0_sheet"]),
+                "motion_qualification": str(
+                    release_endpoint["motion_qualification"]
+                ),
+            }
 
         def episode_resolver(value):
             return run_job.resolve_campaign_episode_inputs(
@@ -2649,6 +2826,52 @@ def build_physical_operator_application(
     initial_job_path = _repository_path(repository, job_path)
     initial_job = load_json_strict(initial_job_path)
     initial_job_source = str(initial_job_path.relative_to(repository))
+
+    def scope_catalog_to_active_job(value: Mapping[str, Any]) -> dict[str, Any]:
+        """Keep historical profiles readable without exposing them as this job."""
+        scoped = copy.deepcopy(dict(value))
+        combinations = [
+            item for item in scoped["combinations"]
+            if item.get("sources", {}).get("job") == initial_job_source
+            and item.get("object_id") == initial_job.get("object_profile_id")
+            and item.get("grasp_id") == initial_job.get("grasp_profile_id")
+        ]
+        if not combinations:
+            raise ContractError("OPERATOR_APPLICATION_COMPATIBLE_COMBINATION")
+        axis_fields = {
+            "workspace": "workspace_id", "frame": "frame_id",
+            "task": "task_id", "object": "object_id", "grasp": "grasp_id",
+            "cell": "cell_id", "start_pose": "start_pose_id",
+            "motion": "motion_id", "variant": "variant_id",
+            "camera_profile": "camera_profile_id",
+        }
+        for axis, field in axis_fields.items():
+            identifiers = {item[field] for item in combinations}
+            scoped["axes"][axis] = [
+                option for option in scoped["axes"][axis]
+                if option["id"] in identifiers
+            ]
+        endpoints = {
+            (item["workspace_id"], item["frame_id"], item["object_id"])
+            for item in combinations
+        }
+        scoped["workspace_domains"] = [
+            domain for domain in scoped["workspace_domains"]
+            if (
+                domain["workspace_id"], domain["frame_id"],
+                domain["object_id"],
+            ) in endpoints
+        ]
+        scoped["combinations"] = sorted(
+            combinations, key=lambda item: item["combination_digest"],
+        )
+        scoped["catalog_digest"] = canonical_digest({
+            key: item for key, item in scoped.items()
+            if key != "catalog_digest"
+        })
+        return scoped
+
+    catalog = scope_catalog_to_active_job(catalog)
     requested = None
     if selected_camera_device_id is not None:
         if devices.count(selected_camera_device_id) != 1:
@@ -2920,7 +3143,9 @@ def build_physical_operator_application(
             for role, binding in resolution["role_bindings"]["bindings"].items()
         }
         binding_digest = camera_binding_digest(profile, role_map)
-        raw_catalog = load_operator_catalog(repository, device_ids=devices)
+        raw_catalog = scope_catalog_to_active_job(
+            load_operator_catalog(repository, device_ids=devices),
+        )
         bound_catalog = bind_selected_camera(
             raw_catalog, binding_digest=binding_digest,
         )
@@ -3121,7 +3346,9 @@ def build_physical_operator_application(
 
     def catalog_reload_call() -> Mapping[str, Any]:
         return bind_selected_camera(
-            load_operator_catalog(repository, device_ids=devices),
+            scope_catalog_to_active_job(
+                load_operator_catalog(repository, device_ids=devices),
+            ),
             binding_digest=(
                 camera_state["binding_digest"] if camera_state["ready"] else None
             ),
@@ -3149,10 +3376,26 @@ def build_physical_operator_application(
         )
         count = draft["requested_count"]
         spatial_node_count = count + int(selected["task_id"] == "pick_place")
+        route = (
+            resolve_workspace_cycle_selections(
+                current_catalog, selected, count,
+            )
+            if selected["task_id"] == "pick_place"
+            else [copy.deepcopy(selected) for _index in range(spatial_node_count)]
+        )
         if draft.get("authoring_mode") == "ASSISTED":
-            poses = project_assisted_poses(
-                current_catalog, selected, anchor, spatial_node_count,
-                repeat=draft["repeat"], normalized_seed=draft["normalized_seed"],
+            poses = (
+                project_workspace_cycle_poses(
+                    current_catalog, selected, anchor, count,
+                    repeat=draft["repeat"],
+                    normalized_seed=draft["normalized_seed"],
+                )
+                if selected["task_id"] == "pick_place"
+                else project_assisted_poses(
+                    current_catalog, selected, anchor, spatial_node_count,
+                    repeat=draft["repeat"],
+                    normalized_seed=draft["normalized_seed"],
+                )
             )
             start_ids = project_balanced_start_pose_ids(
                 draft["selected_start_pose_ids"], count,
@@ -3163,11 +3406,11 @@ def build_physical_operator_application(
             if len(pairs) != spatial_node_count:
                 raise ContractError("PHYSICAL_CONSOLE_DIRECT_SEQUENCE")
             poses = [
-                validate_operator_pose(current_catalog, selected, {
+                validate_operator_pose(current_catalog, endpoint, {
                     key: pair[key]
                     for key in ("place_id", "yaw_deg", "x_mm", "y_mm")
                 })
-                for pair in pairs
+                for pair, endpoint in zip(pairs, route)
             ]
             start_ids = [pair["start_pose_id"] for pair in pairs[:count]]
         _setup, qualifications = start_pose_domain(
@@ -3249,6 +3492,36 @@ def build_physical_operator_application(
             raise ContractError("OPERATOR_APPLICATION_PRODUCTION_FACTORY")
         source = chosen["sources"]
         pose_plan, campaign_initial_pose = physical_pose_plan(selected, draft)
+        endpoint_selections = (
+            resolve_workspace_cycle_selections(
+                active_catalog(), selected, draft["requested_count"],
+            )
+            if selected["task_id"] == "pick_place" else [selected]
+        )
+        endpoint_combinations = []
+        for endpoint in endpoint_selections:
+            if any(
+                item["workspace_id"] == endpoint["workspace_id"]
+                for item in endpoint_combinations
+            ):
+                continue
+            match = next((
+                item for item in active_catalog()["combinations"]
+                if item["combination_digest"]
+                == endpoint["combination_digest"]
+            ), None)
+            if not isinstance(match, Mapping):
+                raise ContractError("OPERATOR_APPLICATION_CAMPAIGN_FACTORY")
+            endpoint_combinations.append(match)
+        runtime_workspace_bindings = {
+            endpoint["workspace_id"]: {
+                "frame_id": endpoint["frame_id"],
+                "selected_sheet": endpoint["sources"]["selected_sheet"],
+                "yaw0_sheet": endpoint["sources"]["yaw0_sheet"],
+                "motion_qualification": endpoint["sources"]["motion"],
+            }
+            for endpoint in endpoint_combinations
+        }
         disposition = (
             "PRODUCTION" if mode == "GENERAL_COLLECTION" else "TEST_ONLY"
         )
@@ -3284,6 +3557,7 @@ def build_physical_operator_application(
                 "object_profile_id": chosen["object_id"],
                 "grasp_profile_id": chosen["grasp_id"],
             },
+            workspace_bindings=runtime_workspace_bindings,
             run_live_call=run_live_call,
             task_id=selected["task_id"],
             start_transition_call=start_transition_call,

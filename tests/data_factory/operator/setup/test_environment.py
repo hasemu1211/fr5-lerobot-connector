@@ -96,6 +96,21 @@ class OperatorEnvironmentTests(unittest.TestCase):
         self.assertEqual((stack.ensure_calls, stack.setup_calls, stack.status_calls), (1, 0, 2))
         self.assertEqual(settle.calls, 0)
 
+    def test_transient_graph_query_failures_settle_through_owned_startup(self):
+        stack = FakeStack(
+            RuntimeError("graph starting"),
+            report(),
+            RuntimeError("graph propagating"),
+            report("READY", "READY", "READY", "READY", state="FOREGROUND_RUNNING"),
+        )
+        environment, settle = self.environment(stack, checks=3)
+
+        projected = environment.prepare_environment()
+
+        self.assertEqual(projected["state"], "READY")
+        self.assertEqual((stack.ensure_calls, stack.setup_calls, stack.status_calls), (1, 0, 4))
+        self.assertEqual(settle.calls, 1)
+
     def test_missing_motion_bootstraps_once_before_normal_stack_start(self):
         stack = FakeStack(
             report(), report(),

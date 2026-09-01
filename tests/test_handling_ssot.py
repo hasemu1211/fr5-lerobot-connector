@@ -136,6 +136,12 @@ class HandlingSsotTest(unittest.TestCase):
                     program["gripper_requirements"]["force_percent"], 20,
                 )
                 self.assertEqual(
+                    program["gripper_requirements"]["open_force_percent"], 50,
+                )
+                self.assertEqual(
+                    program["gripper_requirements"]["open_velocity_percent"], 10,
+                )
+                self.assertEqual(
                     grasp["gripper_open"]["force_percent"], 50,
                 )
                 self.assertEqual(

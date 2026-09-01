@@ -36,7 +36,7 @@ The campaign does not turn broad catalog flexibility into unbounded runtime inpu
 | `operator/setup/physical.py` | ROS/UVC discovery and foreground bring-up adapters, including gripper setup | Planning, collection and semantic judgment |
 | `operator/workflow/application.py` | Application session, selection, editable draft, campaign replacement and public operations | Robot, recorder, dataset or motion lifecycles |
 | `campaign_authorization.py` | Digest- and expiry-bound finite campaign envelope/authorization validation | Semantic PASS, production admission or training approval |
-| `operator/composition.py` | Current PHYSICAL TEST_ONLY composition and exact per-episode adapter to `run_live` | A second lifecycle owner or general production caller |
+| `operator/composition.py` | Current job-scoped PHYSICAL composition, exact A/B endpoint binding and per-episode adapter to `run_live` | A second lifecycle owner, planner or recorder writer |
 | `operator/web/bridge.py` and `operator/workflow/intents.py` | Loopback HTTP/token transport plus view compare-and-swap and intent replay rejection | Domain decisions or hardware state |
 | `episode_ledger.py` | Immutable episode provenance/admission ledger and separately rewritable review/retention projection | Dataset row deletion or training authority |
 | `operator-ui/*` | Render one atomic view and send operations that `available_ops` currently permits | Client-side approval receipts, retries or hidden execution |
@@ -45,7 +45,7 @@ This separation keeps environment setup independent of collection logic and keep
 
 ## Authoring and campaign lifecycle
 
-The authoring view exposes workspace, frame, task, object, grasp, start, motion, variant, camera and data mode. Episode count, assisted per-condition maximum repeat, split and eligible poses are editable.
+The authoring view exposes workspace, task, object, grasp, start, motion, variant, camera and data mode. The catalog keeps frame as an internal exact-binding axis, and a workspace choice atomically resolves its compatible frame revision instead of exposing a second operator control. Episode count, assisted per-condition maximum repeat, split and eligible poses are editable.
 
 `ASSISTED` and `DIRECT_EDIT` mutate the same draft; they are not parallel schedulers. Switching to direct mode materializes the assisted sequence's first-seen unique non-anchor conditions. Preset clicks and numeric X/Y/yaw entry feed that same list, and compile cycles the full anchor-plus-list order to the exact episode count.
 
@@ -85,10 +85,14 @@ All normal interaction uses native buttons, radios, number inputs and selects. C
 
 FAKE is the full reusable product flow with synthetic, temporary fixtures and zero robot, gripper, production recorder, dataset, run-state, production-approval and training effects.
 
-PHYSICAL uses the same application flow and catalog. Its current caller is limited to the tracked TEST_ONLY place1 combination, qualified wood cube and top-center grasp, `pickup_e2e`, `DIRECT`, `fr5-lab-a-home-r001` and `fr5-up-rgb-30hz-v1`. The qualified `PLACE_A@place-a-yaw0-r002` registration opens bounded continuous X/Y and normalized yaw as the authoring domain; checked-in cells and HOME/origin/yaw0 are presets, not coordinate gates. Episode count is editable from 1 to 100; compile turns the authored domain subset into exact slots with fresh scene, start and plan validation.
+PHYSICAL uses the same application flow and internally broad catalog, then scopes the operator surface to the active `--job` handling family. The default family is the qualified 24 mm wooden cube with the top-below-3.5 mm grasp, `pickup_e2e` and `pick_place`, `DIRECT`, `fr5-lab-a-home-r001`, `PLACE_A@place-a-yaw0-r003`, `PLACE_B@place-b-yaw0-r001` and RealSense `UP` + UVC `WRIST`. Historical 25 mm profiles remain readable for reproduction but are not choices in this product run.
+
+`pickup_e2e` plans inside the selected workspace. `pick_place` derives the opposite A/B endpoint and projects N+1 object poses for N episodes. Each endpoint keeps its own frame, sheet, cell calibration and motion qualification; the browser selects only the starting workspace and displays the derived route. Every episode starts from a freshly validated HOME/start binding, uses one active `OneJob`, commits the destination scene state and returns through retreat to HOME before the next episode.
+
+Both `GENERAL_COLLECTION` and isolated `TEST_COLLECTION` use this lifecycle. General collection writes the dedicated production dataset and offers technical-pass candidates for later semantic review; test collection uses separate roots and grants no production or training authority. Compile remains plan-only with zero motion, recorder or dataset episode effects.
 
 Matching stable UVC identities can be catalogued independently, but only the process-start identity is executable. Other identities remain visible with `CAMERA_REBIND_REQUIRED`; the application performs no in-process camera rebinding. With zero compatible cameras it serves a truthful blocked shell instead of constructing a campaign.
 
 The PHYSICAL environment may attach to one existing owner or start configured missing foreground children. It performs gripper activation/open normalization only when fresh controller readback requires it, then re-reads all components. Owner ambiguity, partial ownership, unreadable controller state, incompatible camera binding or setup timeout blocks collection. The process stops children it started when the application exits.
 
-The current caller keeps production writers disabled and writes only isolated TEST_ONLY roots. It does not qualify GENERAL/PRODUCTION collection, `pick_place`, `TWO_STAGE_ALIGN`, ID/OOD split, new workspaces or unregistered cells, dual-camera sync, RealSense/depth, camera image semantics, production candidate admission or training. A new host must re-establish its local controller, start, workspace/frame and camera facts; declared cells within the same qualified place1 registration do not require point-by-point workspace requalification.
+The current caller does not qualify `TWO_STAGE_ALIGN`, ID/OOD split, region-aware red/blue motion, new or unqualified workspaces, depth recording, camera image semantics, automatic semantic PASS, training approval or policy rollout. A new host must re-establish its local controller, start, workspace/frame and camera facts; bounded poses inside an already qualified A/B registration do not require point-by-point workspace requalification.

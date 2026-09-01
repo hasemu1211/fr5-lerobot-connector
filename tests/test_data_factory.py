@@ -134,6 +134,132 @@ class DataFactoryTest(unittest.TestCase):
             factory.validate_motion_program(pick_place_program),
             pick_place_program,
         )
+        b_yaw0 = generator.make_manifest(
+            "PLACE_B", "PLACE_B_0", 0,
+            generator.build_places(3, 3, 35, 0), 35, 100,
+        )
+        b_selected = generator.make_manifest(
+            "PLACE_B", "PLACE_B_30", 30,
+            generator.build_places(3, 3, 35, 30), 35, 100,
+        )
+        b_calibration = {
+            **self.calibration,
+            "calibration_id": "cal-b", "place_id": "PLACE_B",
+            "yaw0_manifest_digest": factory.canonical_digest(b_yaw0),
+            "a4_family_digest": b_yaw0["a4_family_digest"],
+            "center_base_m": [4, 5, 3], "x_ref_base_m": [4.1285, 5, 3],
+            "y_check_base_m": [3.8715, 5.08, 3],
+        }
+        self._write("cells/cal-b.json", b_calibration)
+        b_job = {
+            **pick_place_job,
+            "job_id": "job-b", "place_id": "PLACE_B",
+            "cell_calibration_id": "cal-b",
+            "sheet_manifest_digest": factory.canonical_digest(b_selected),
+            "x_mm": 0, "y_mm": 0,
+        }
+        b_validated = factory.validate_job_spec(
+            b_job, data={
+                "selected_sheet": b_selected, "yaw0_sheet": b_yaw0,
+            }, config_root=self.root, now=NOW,
+        )
+        b_qualification = {
+            **copy.deepcopy(qualification),
+            "motion_qualification_id": "motion-q-b",
+            "cell_calibration_id": "cal-b",
+            "profile_digests": {
+                **qualification["profile_digests"],
+                "cell_calibration": b_validated["input_digests"][
+                    "cell_calibration"
+                ],
+            },
+        }
+        cross_program = factory.resolve_motion_program(
+            pick_place_validated, qualification, candidate,
+            urdf=urdf, expected_robot_system_id="fr5-lab-a",
+            release_validated=b_validated,
+            release_motion_qualification=b_qualification,
+            now=NOW,
+        )
+        self.assertEqual(cross_program["schema_version"], "fr5.motion_program.v4")
+        self.assertEqual(
+            cross_program["destination_resolved_job_digest"],
+            b_validated["resolved_job_digest"],
+        )
+        expected_endpoints = sorted([
+            {
+                "workspace_id": "PLACE_A",
+                "cell_calibration_id": "cal-a",
+                "cell_calibration_digest": pick_place_validated[
+                    "input_digests"
+                ]["cell_calibration"],
+                "motion_recipe_digest": factory.canonical_digest(
+                    qualification
+                ),
+            },
+            {
+                "workspace_id": "PLACE_B",
+                "cell_calibration_id": "cal-b",
+                "cell_calibration_digest": b_validated["input_digests"][
+                    "cell_calibration"
+                ],
+                "motion_recipe_digest": factory.canonical_digest(
+                    b_qualification
+                ),
+            },
+        ], key=lambda item: (item["workspace_id"], item["cell_calibration_id"]))
+        self.assertEqual(cross_program["endpoint_bindings"], expected_endpoints)
+        self.assertEqual(
+            cross_program["endpoint_bindings_digest"],
+            factory.canonical_digest(expected_endpoints),
+        )
+        self.assertEqual(
+            factory.validate_motion_program(cross_program), cross_program,
+        )
+        forged_endpoint_scope = copy.deepcopy(cross_program)
+        forged_endpoint_scope["endpoint_bindings"][1][
+            "motion_recipe_digest"
+        ] = forged_endpoint_scope["binding_digests"]["motion_qualification"]
+        forged_endpoint_scope["endpoint_bindings_digest"] = (
+            factory.canonical_digest(
+                forged_endpoint_scope["endpoint_bindings"]
+            )
+        )
+        with self.assertRaisesRegex(
+            factory.ContractError, "MOTION_ENDPOINT_BINDING",
+        ):
+            factory.validate_motion_program(forged_endpoint_scope)
+        same_endpoint = copy.deepcopy(cross_program)
+        same_endpoint["destination_binding_digests"]["cell_calibration"] = (
+            same_endpoint["binding_digests"]["cell_calibration"]
+        )
+        same_endpoint["endpoint_bindings"][1]["cell_calibration_digest"] = (
+            same_endpoint["binding_digests"]["cell_calibration"]
+        )
+        same_endpoint["endpoint_bindings_digest"] = factory.canonical_digest(
+            same_endpoint["endpoint_bindings"]
+        )
+        with self.assertRaisesRegex(
+            factory.ContractError, "MOTION_ENDPOINT_COMPATIBILITY",
+        ):
+            factory.validate_motion_program(same_endpoint)
+        destination = next(
+            step for step in cross_program["steps"]
+            if step["phase"] == "LOWER_LIN"
+        )["target"]["base_tcp"]["translation_m"]
+        self.assertGreater(destination[0], 3.5)
+        incompatible = copy.deepcopy(b_qualification)
+        incompatible["phase_limits"]["LOWER_LIN"]["velocity_scaling"] = .05
+        with self.assertRaisesRegex(
+            factory.ContractError, "MOTION_ENDPOINT_COMPATIBILITY",
+        ):
+            factory.resolve_motion_program(
+                pick_place_validated, qualification, candidate,
+                urdf=urdf, expected_robot_system_id="fr5-lab-a",
+                release_validated=b_validated,
+                release_motion_qualification=incompatible,
+                now=NOW,
+            )
         with self.assertRaisesRegex(
             factory.ContractError, "TASK_BINDING_DISTINCT",
         ):
@@ -362,6 +488,35 @@ class DataFactoryTest(unittest.TestCase):
         self.assertEqual(center["job_pose"], {"place_id": "PLACE_A", "yaw_deg": 30, "x_mm": 0, "y_mm": 0})
         manifest["transform_contract"]["position"] = "tampered"
         self.assertEqual(self._sheet(30, 96)["transform_contract"], generator.TRANSFORM_CONTRACT)
+
+    def test_red_blue_region_layout_reuses_printcal_without_motion_authority(self):
+        layout = generator.make_red_blue_region_layout()
+        self.assertEqual(
+            [region["region_id"] for region in layout["regions"]],
+            ["RED", "BLUE"],
+        )
+        self.assertEqual(
+            layout["layout_digest"],
+            generator.canonical_digest({
+                key: value for key, value in layout.items()
+                if key != "layout_digest"
+            }),
+        )
+        svg = generator.make_region_svg(layout, 96)
+        self.assertIn('data-content-scale-percent="104.167"', svg)
+        self.assertIn(">RED<", svg)
+        self.assertIn(">BLUE<", svg)
+        self.assertNotIn("GRID_", svg)
+        self.assertNotIn("REGISTER", svg)
+
+        tampered = copy.deepcopy(layout)
+        tampered["regions"][0]["polygon_local_xy_mm"].reverse()
+        tampered["layout_digest"] = generator.canonical_digest({
+            key: value for key, value in tampered.items()
+            if key != "layout_digest"
+        })
+        with self.assertRaisesRegex(ValueError, "REGION_LAYOUT_WINDING"):
+            generator.validate_region_layout(tampered)
 
     def test_bound_input_changes_resolved_digest(self):
         validated = self._validated()

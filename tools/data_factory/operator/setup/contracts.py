@@ -995,6 +995,30 @@ def build_test_only_start_binding(
     if motion_qualification.get("home_candidate_digest") != home_digest:
         raise ContractError("TEST_ONLY_START_HOME_DIGEST")
     fixed = hypothesis["fixed_contract"]
+    bases = [
+        item for item in hypothesis["base_conditions"]
+        if item["base_condition_digest"] == slot["base_condition_digest"]
+    ]
+    receipts = [
+        item for item in hypothesis["resolver_receipts"]
+        if len(bases) == 1
+        and item["resolver_result_digest"] == bases[0]["resolver_result_digest"]
+    ]
+    if len(receipts) != 1:
+        raise ContractError("TEST_ONLY_START_QUALIFICATION")
+    slot_job = receipts[0]["normalized_job"]
+    endpoint = (
+        next((
+            item for item in fixed["endpoint_bindings"]
+            if item["workspace_id"] == slot_job["place_id"]
+            and item["cell_calibration_id"] == slot_job["cell_calibration_id"]
+        ), None)
+        if fixed["schema_version"] == "data_factory.fr5_fixed_contract.v2"
+        else {
+            "cell_calibration_id": fixed["cell_calibration_id"],
+            "motion_recipe_digest": fixed["motion_recipe_digest"],
+        }
+    )
     poses = [
         item for item in hypothesis["robot_start_poses"]
         if item["robot_start_pose_id"] == slot["robot_start_pose_id"]
@@ -1006,7 +1030,12 @@ def build_test_only_start_binding(
         home_candidate.get("robot_system_id") != fixed["robot_system_id"]
         or home_candidate.get("joint_order") != list(JOINTS)
         or motion_qualification.get("robot_system_id") != fixed["robot_system_id"]
-        or motion_qualification.get("cell_calibration_id") != fixed["cell_calibration_id"]
+        or not isinstance(endpoint, Mapping)
+        or motion_qualification.get("cell_calibration_id")
+        != endpoint["cell_calibration_id"]
+        or fixed["schema_version"] == "data_factory.fr5_fixed_contract.v2"
+        and canonical_digest(motion_qualification)
+        != endpoint["motion_recipe_digest"]
         or motion_qualification.get("object_profile_id") != fixed["object_profile_id"]
         or motion_qualification.get("grasp_profile_id") != fixed["grasp_profile_id"]
         or pose["home_candidate_digest"] != home_digest

@@ -188,6 +188,13 @@ class OperatorEnvironment:
         return any(item["state"] == "MISSING" for item in view["components"].values())
 
     @staticmethod
+    def _query_failed(view: Mapping[str, Any]) -> bool:
+        return view["state"] == "BLOCKED" and all(
+            item["reason"] == QUERY_FAILED
+            for item in view["components"].values()
+        )
+
+    @staticmethod
     def _motion_missing(view: Mapping[str, Any]) -> bool:
         return all(
             view["components"][name]["state"] == "MISSING"
@@ -249,16 +256,28 @@ class OperatorEnvironment:
                 break
             return view
 
-        if current["state"] != "SETUP_REQUIRED":
+        if current["state"] not in {"SETUP_REQUIRED", "BLOCKED"}:
             return current
-        current = advance(current)
-        if current["state"] != "SETUP_REQUIRED":
+        if current["state"] == "BLOCKED" and not self._query_failed(current):
             return current
+        if current["state"] == "SETUP_REQUIRED":
+            current = advance(current)
+            if current["state"] not in {"SETUP_REQUIRED", "BLOCKED"}:
+                return current
+            if current["state"] == "BLOCKED" and not self._query_failed(current):
+                return current
 
         def settled() -> bool:
             nonlocal current
-            current = advance(self.projection())
-            return current["state"] != "SETUP_REQUIRED"
+            projected = self.projection()
+            if self._query_failed(projected):
+                current = projected
+                return False
+            current = advance(projected)
+            return (
+                current["state"] != "SETUP_REQUIRED"
+                and not self._query_failed(current)
+            )
 
         try:
             result = self.settle_policy(settled)
@@ -269,6 +288,8 @@ class OperatorEnvironment:
         if type(result) is not bool:
             return self._blocked("OPERATOR_ENVIRONMENT_SETTLE_POLICY", current)
         if result and current["state"] in {"READY", "BLOCKED"}:
+            return current
+        if self._query_failed(current):
             return current
         return self._blocked(SETTLE_TIMEOUT, current)
 

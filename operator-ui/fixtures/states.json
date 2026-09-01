@@ -109,6 +109,11 @@
       "requested_count": 3,
       "repeat": 1,
       "current_object_pose": {"place_id": "PLACE_A", "x_mm": 0, "y_mm": 0, "yaw_deg": 0},
+      "workspace_route": [
+        {"workspace_id": "PLACE_A", "frame_id": "place-a-frame-r002"},
+        {"workspace_id": "PLACE_A", "frame_id": "place-a-frame-r002"},
+        {"workspace_id": "PLACE_A", "frame_id": "place-a-frame-r002"}
+      ],
       "direct_pairs": [],
       "direct_poses": [],
       "execution_ready": true,

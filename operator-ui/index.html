@@ -85,8 +85,7 @@
 
           <fieldset id="catalog-fields" class="catalog-fields">
             <legend>수집 조건</legend>
-            <label for="workspace-select">작업영역<select id="workspace-select" data-axis="workspace"></select><small data-axis-hint="workspace"></small></label>
-            <label for="frame-select">좌표계<select id="frame-select" data-axis="frame"></select><small data-axis-hint="frame"></small></label>
+            <label for="frame-select" hidden>좌표계<select id="frame-select" data-axis="frame"></select><small data-axis-hint="frame"></small></label>
             <label for="task-select">작업 레시피<select id="task-select" data-axis="task"></select><small data-axis-hint="task"></small></label>
             <label for="object-select">등록 물체 프로필<select id="object-select" data-axis="object"></select><small data-axis-hint="object"></small></label>
             <label for="grasp-select">등록 잡기 프로필<select id="grasp-select" data-axis="grasp"></select><small data-axis-hint="grasp"></small></label>
@@ -100,6 +99,10 @@
 
           <section class="range-panel" aria-labelledby="range-title">
             <div class="section-title"><div><p class="step-number">수집 범위</p><h3 id="range-title">수집 위치와 각도</h3></div><p id="plan-lock-reason"></p></div>
+            <div class="range-workspace">
+              <label for="workspace-select"><span id="workspace-select-label">작업영역</span><select id="workspace-select" data-axis="workspace"></select><small data-axis-hint="workspace"></small></label>
+              <p id="workspace-route-summary" class="cell-help"></p>
+            </div>
             <section id="current-object-editor" class="direct-pose-editor" aria-labelledby="current-object-title">
               <div><h4 id="current-object-title">지금 놓인 물체</h4><p id="current-object-status" role="status">첫 에피소드가 시작되는 실제 위치입니다.</p></div>
               <form id="current-object-form">

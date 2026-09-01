@@ -23,10 +23,12 @@ scripts/start_collection_ui.sh
 이 명령은 `GENERAL_COLLECTION`과 `datasets/fr5_episodes/fr5_smolvla_up_wrist_30hz`를 기본으로 사용한다. 출력된 `http://127.0.0.1:4174` URL을 열고 다음 순서로 진행한다.
 
 1. `환경 준비`에서 단일 lifecycle owner가 로봇·controller·gripper·두 카메라를 준비하도록 한다.
-2. 작업영역, task, 시작 자세, 카메라 profile과 episode 수를 확인한다.
+2. task와 시작 자세를 고른 뒤 `수집 위치와 각도`에서 물체의 시작 작업영역과 episode 수를 확인한다. frame revision은 작업영역에 맞춰 자동 결속된다.
 3. `계획 확인`으로 finite manifest를 고정하고 캠페인을 한 번 승인한다.
 4. 실행 중 이상이 보이면 즉시 중단한다. 성공 episode는 recorder commit과 기술 검사를 직렬로 통과해야 다음 episode가 열린다.
 5. 캠페인 중이나 종료 뒤 candidate review를 처리한다. review와 training approval은 로봇 실행 경로를 멈추게 하지 않으며 서로 다른 authority다.
+
+기본 active job family에는 24 mm 큐브와 상단 아래 3.5 mm 파지만 표시된다. 과거 25 mm profile은 재현용 설정으로 남지만 이 실행의 선택지가 아니다. `pickup_e2e`는 고른 작업영역 안에서 수집하고, `pick_place`는 반대 작업영역을 목적지로 자동 결속해 `A → B → A …` 또는 `B → A → B …`로 왕복한다. 좌표계 revision을 사용자가 별도로 고르지 않는다.
 
 연결·회귀 시험은 아래처럼 production 데이터와 분리한다.
 
@@ -141,7 +143,7 @@ qualified JobSpec과 scene/cell을 쓸 때는 [one-job runner](data-factory.md#o
 
 `PASS` 뒤에는 recorder row를 늘리지 않고 release slot approach→lower→open→retreat→safe staging을 실행한다. 물체가 표시 slot 안에 있고 gripper가 비었으며 retreat/safe staging이 끝났으면 exact recycle digest가 붙은 `LANDED`를 입력한다. executor가 object+slot을 scene v2 한 revision으로 먼저 기록한 뒤에만 recorder commit과 validator가 진행된다. `OFF_SLOT`/`UNCERTAIN`, terminal evidence 불일치 또는 scene write 실패에서는 commit과 다음 motion을 막고 object=`UNKNOWN`, slot=`QUARANTINED`로 격리한다.
 
-현재 사람용 표면은 같은 interactive Job builder와 이 one-job CLI다. bounded two-episode campaign은 manifest 기반 CLI로 운용하며 여러 episode를 한 화면에서 다루는 별도 GUI나 무인 연속 수집은 검증되지 않았다.
+이 절의 interactive Job builder와 one-job CLI는 수동 진단 표면이다. 여러 episode의 기본 운영 표면은 위의 Web UI이며, 두 경로는 같은 JobSpec·plan·scene validator를 사용한다.
 
 임시 camera profile은 정량 기록만 하며 화면으로 성공을 자동 판정하지 않는다. validator `PASS`도 `training_approved.json`을 만들지 않는다.
 

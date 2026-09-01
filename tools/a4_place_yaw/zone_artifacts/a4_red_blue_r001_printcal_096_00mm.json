@@ -1,0 +1,61 @@
+{
+  "schema_version": "a4_region_layout.v1",
+  "layout_id": "a4-red-blue-r001",
+  "page_mm": {
+    "width": 297.0,
+    "height": 210.0
+  },
+  "origin_xy_mm": [
+    148.5,
+    105.0
+  ],
+  "regions": [
+    {
+      "region_id": "RED",
+      "display_name": "RED",
+      "color": "#C62828",
+      "polygon_local_xy_mm": [
+        [
+          -133.5,
+          -85.0
+        ],
+        [
+          0.0,
+          -85.0
+        ],
+        [
+          0.0,
+          85.0
+        ],
+        [
+          -133.5,
+          85.0
+        ]
+      ]
+    },
+    {
+      "region_id": "BLUE",
+      "display_name": "BLUE",
+      "color": "#1565C0",
+      "polygon_local_xy_mm": [
+        [
+          0.0,
+          -85.0
+        ],
+        [
+          133.5,
+          -85.0
+        ],
+        [
+          133.5,
+          85.0
+        ],
+        [
+          0.0,
+          85.0
+        ]
+      ]
+    }
+  ],
+  "layout_digest": "sha256:301b71229eeada1efce57dde29d1c4417c14cd7444164afda803c42663a157e2"
+}

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import copy
 import hashlib
 import json
 import math
@@ -146,7 +147,12 @@ def canonical_digest(value: object) -> str:
     return "sha256:" + hashlib.sha256(text.encode()).hexdigest()
 
 
-def task_instruction(task_id: str, object_description: str) -> str:
+def task_instruction(
+    task_id: str, object_description: str, *,
+    source_region_id: str | None = None,
+    destination_region_id: str | None = None,
+    region_binding_verified: bool = False,
+) -> str:
     """Return the one collection-time language label for a supported task."""
     contract = TASK_CONTRACTS.get(task_id)
     if contract is None:
@@ -158,6 +164,24 @@ def task_instruction(task_id: str, object_description: str) -> str:
         or not object_description.isprintable()
     ):
         raise ContractError("OBJECT_DESCRIPTION")
+    if (
+        type(region_binding_verified) is not bool
+        or (source_region_id is None) != (destination_region_id is None)
+        or region_binding_verified and source_region_id is None
+    ):
+        raise ContractError("TASK_REGION_BINDING")
+    if source_region_id is not None and (
+        task_id != "pick_place"
+        or {source_region_id, destination_region_id} != {"RED", "BLUE"}
+        or source_region_id == destination_region_id
+    ):
+        raise ContractError("TASK_REGION_BINDING")
+    if source_region_id is not None and region_binding_verified:
+        return (
+            f"pick up the {object_description} from the "
+            f"{source_region_id.lower()} zone and place it in the "
+            f"{destination_region_id.lower()} zone"
+        )
     return contract["instruction_template"].format(
         object_description=object_description,
     )
@@ -1046,7 +1070,14 @@ def _validate_motion_qualification(
     gripper = {key: _number(value, "MOTION_GRIPPER") for key, value in gripper.items()}
     lower, upper = _urdf_motion_limits(urdf)
     if any(not lower <= value <= upper for value in gripper.values()) or gripper["open"] <= gripper["closed"]: raise ContractError("MOTION_GRIPPER")
-    close = validated["grasp_profile"]["gripper_close"]
+    grasp_profile = validated["grasp_profile"]
+    close = copy.deepcopy(grasp_profile["gripper_close"])
+    if grasp_profile.get("schema_version") == "data_factory.grasp_profile.v3":
+        opened = grasp_profile["gripper_open"]
+        close.update(
+            open_velocity_percent=opened["velocity_percent"],
+            open_force_percent=opened["force_percent"],
+        )
     if gripper["closed"] != close["command_position_m"]: raise ContractError("MOTION_GRIPPER")
     if (
         schema == "data_factory.motion_qualification.v2"
@@ -1095,6 +1126,7 @@ def _validate_motion_qualification(
 def resolve_motion_program(
     validated, motion_qualification, home_candidate, *, urdf,
     expected_robot_system_id, release_pose=None,
+    release_validated=None, release_motion_qualification=None,
     planning_scene_profile=None, now=None,
 ):
     """Resolve a qualification-bound, offline-only motion program; it authorizes no execution."""
@@ -1108,22 +1140,81 @@ def resolve_motion_program(
     )
     pose = resolve_pose(validated)
     job = validated["normalized_job"]
-    if release_pose is None:
+    cross_workspace = (
+        release_validated is not None
+        or release_motion_qualification is not None
+    )
+    if cross_workspace and (
+        not isinstance(release_validated, dict)
+        or release_motion_qualification is None
+        or release_pose is not None
+    ):
+        raise ContractError("MOTION_ENDPOINT_BINDING")
+    destination_q = None
+    if cross_workspace:
+        destination_job = release_validated.get("normalized_job")
+        destination_inputs = release_validated.get("input_digests")
+        if (
+            not isinstance(destination_job, dict)
+            or not isinstance(destination_inputs, dict)
+            or job.get("task") != "pick_place"
+            or destination_job.get("task") != job["task"]
+            or destination_job.get("place_id") == job.get("place_id")
+            or any(
+                destination_job.get(field) != job.get(field)
+                for field in (
+                    "robot_system_id", "collection_profile_id",
+                    "object_profile_id", "grasp_profile_id", "instruction",
+                    "episode_intent",
+                )
+            )
+            or any(
+                destination_inputs.get(field)
+                != validated.get("input_digests", {}).get(field)
+                for field in (
+                    "robot_system", "collection_profile", "object_profile",
+                    "grasp_profile",
+                )
+            )
+        ):
+            raise ContractError("MOTION_ENDPOINT_BINDING")
+        destination_q = _validate_motion_qualification(
+            release_motion_qualification, release_validated,
+            {**home, "robot_description_digest": home_raw["robot_description_digest"]},
+            urdf=urdf, planning_scene_profile=planning_scene_profile, now=now,
+        )
+        compatible_fields = (
+            "frames", "planning_scene", "transforms", "offsets", "gripper",
+            "gripper_requirements", "safe", "limits", "tolerances",
+            "max_joint_state_age_s", "execution_timeouts_s", "pins",
+        )
+        if any(destination_q[field] != q[field] for field in compatible_fields):
+            raise ContractError("MOTION_ENDPOINT_COMPATIBILITY")
+        release_pose = {
+            key: destination_job[key]
+            for key in ("place_id", "yaw_deg", "x_mm", "y_mm")
+        }
+        release_resolved = resolve_pose(release_validated)
+    elif release_pose is None:
         release_pose = {key: job[key] for key in ("place_id", "yaw_deg", "x_mm", "y_mm")}
-    release_pose = _exact(release_pose, {"place_id", "yaw_deg", "x_mm", "y_mm"}, "MOTION_RELEASE_POSE")
-    if release_pose["place_id"] != job["place_id"]:
+    release_pose = _exact(
+        release_pose, {"place_id", "yaw_deg", "x_mm", "y_mm"},
+        "MOTION_RELEASE_POSE",
+    )
+    if not cross_workspace and release_pose["place_id"] != job["place_id"]:
         raise ContractError("MOTION_RELEASE_POSE")
     if job["task"] == "pick_place" and all(
         release_pose[key] == job[key]
         for key in ("place_id", "yaw_deg", "x_mm", "y_mm")
     ):
         raise ContractError("TASK_BINDING_DISTINCT")
-    release_resolved = resolve_place_pose(
-        validated["calibration"]["center"], validated["calibration"]["x"], validated["calibration"]["y"], validated["calibration"]["z"],
-        _number(release_pose["yaw_deg"], "MOTION_RELEASE_POSE"),
-        _number(release_pose["x_mm"], "MOTION_RELEASE_POSE"),
-        _number(release_pose["y_mm"], "MOTION_RELEASE_POSE"),
-    )
+    if not cross_workspace:
+        release_resolved = resolve_place_pose(
+            validated["calibration"]["center"], validated["calibration"]["x"], validated["calibration"]["y"], validated["calibration"]["z"],
+            _number(release_pose["yaw_deg"], "MOTION_RELEASE_POSE"),
+            _number(release_pose["x_mm"], "MOTION_RELEASE_POSE"),
+            _number(release_pose["y_mm"], "MOTION_RELEASE_POSE"),
+        )
     datum = {"translation_m": pose["position_base_m"], "rotation_columns": pose["rotation_base_columns"]}
     release_datum = {"translation_m": release_resolved["position_base_m"], "rotation_columns": release_resolved["rotation_base_columns"]}
     tool_inverse = inverse_rigid_transform(q["transforms"]["tool_to_tcp"])
@@ -1150,19 +1241,165 @@ def resolve_motion_program(
         if phase == recording_boundary: step["pause_after"] = "SEMANTIC_VERDICT"
         steps.append(step)
     binding_digests = {**validated["input_digests"], **q["pins"], "motion_qualification": q["digest"], "home_candidate": home["candidate_digest"]}
-    return {"schema_version": "fr5.motion_program.v2", "robot_system_id": validated["normalized_job"]["robot_system_id"], "resolved_job_digest": validated["resolved_job_digest"], "binding_digests": binding_digests, "frames": q["frames"], "planning_scene": q["planning_scene"], "planning": {"pipeline_id": "pilz_industrial_motion_planner", "ptp_planner_id": "PTP", "lin_planner_id": "LIN", "goal_tolerances": q["tolerances"], "max_joint_state_age_s": q["max_joint_state_age_s"]}, "gripper_requirements": q["gripper_requirements"], "execution_timeouts_s": q["execution_timeouts_s"], "steps": steps}
+    result = {
+        "schema_version": (
+            "fr5.motion_program.v4" if cross_workspace
+            else "fr5.motion_program.v2"
+        ),
+        "robot_system_id": validated["normalized_job"]["robot_system_id"],
+        "resolved_job_digest": validated["resolved_job_digest"],
+        "binding_digests": binding_digests,
+        "frames": q["frames"], "planning_scene": q["planning_scene"],
+        "planning": {
+            "pipeline_id": "pilz_industrial_motion_planner",
+            "ptp_planner_id": "PTP", "lin_planner_id": "LIN",
+            "goal_tolerances": q["tolerances"],
+            "max_joint_state_age_s": q["max_joint_state_age_s"],
+        },
+        "gripper_requirements": q["gripper_requirements"],
+        "execution_timeouts_s": q["execution_timeouts_s"],
+        "steps": steps,
+    }
+    if cross_workspace:
+        endpoint_bindings = sorted(
+            [
+                {
+                    "workspace_id": job["place_id"],
+                    "cell_calibration_id": job["cell_calibration_id"],
+                    "cell_calibration_digest": validated["input_digests"][
+                        "cell_calibration"
+                    ],
+                    "motion_recipe_digest": q["digest"],
+                },
+                {
+                    "workspace_id": destination_job["place_id"],
+                    "cell_calibration_id": destination_job[
+                        "cell_calibration_id"
+                    ],
+                    "cell_calibration_digest": release_validated[
+                        "input_digests"
+                    ]["cell_calibration"],
+                    "motion_recipe_digest": destination_q["digest"],
+                },
+            ],
+            key=lambda item: (
+                item["workspace_id"], item["cell_calibration_id"]
+            ),
+        )
+        result.update(
+            destination_resolved_job_digest=(
+                release_validated["resolved_job_digest"]
+            ),
+            destination_binding_digests={
+                **release_validated["input_digests"], **destination_q["pins"],
+                "motion_qualification": destination_q["digest"],
+                "home_candidate": home["candidate_digest"],
+            },
+            endpoint_bindings=endpoint_bindings,
+            endpoint_bindings_digest=canonical_digest(endpoint_bindings),
+        )
+    return result
 
 
 def validate_motion_program(value):
     """Validate the exact offline motion-program contract emitted above."""
     keys = {"schema_version", "robot_system_id", "resolved_job_digest", "binding_digests", "frames", "planning_scene", "planning", "gripper_requirements", "execution_timeouts_s", "steps"}
+    schema = value.get("schema_version") if isinstance(value, dict) else None
+    if schema == "fr5.motion_program.v4":
+        keys |= {
+            "destination_resolved_job_digest",
+            "destination_binding_digests",
+            "endpoint_bindings", "endpoint_bindings_digest",
+        }
     value = _exact(value, keys, "MOTION_PROGRAM_SCHEMA")
-    if value["schema_version"] != "fr5.motion_program.v2": raise ContractError("MOTION_PROGRAM_SCHEMA")
+    if schema not in {"fr5.motion_program.v2", "fr5.motion_program.v4"}: raise ContractError("MOTION_PROGRAM_SCHEMA")
     _id(value["robot_system_id"], "MOTION_PROGRAM_ROBOT_ID")
     _digest(value["resolved_job_digest"], "MOTION_PROGRAM_DIGEST")
     binding_keys = {"selected_sheet", "yaw0_sheet", "cell_calibration", "robot_system", "collection_profile", "object_profile", "grasp_profile", "robot_description_digest", "moveit_config_digest", "planning_scene_digest", "motion_qualification", "home_candidate"}
     bindings = _exact(value["binding_digests"], binding_keys, "MOTION_PROGRAM_BINDING")
     for item in bindings.values(): _digest(item, "MOTION_PROGRAM_BINDING")
+    if schema == "fr5.motion_program.v4":
+        _digest(
+            value["destination_resolved_job_digest"],
+            "MOTION_PROGRAM_DIGEST",
+        )
+        destination_bindings = _exact(
+            value["destination_binding_digests"], binding_keys,
+            "MOTION_PROGRAM_BINDING",
+        )
+        for item in destination_bindings.values():
+            _digest(item, "MOTION_PROGRAM_BINDING")
+        endpoint_keys = {
+            "workspace_id", "cell_calibration_id",
+            "cell_calibration_digest", "motion_recipe_digest",
+        }
+        endpoint_bindings = value["endpoint_bindings"]
+        if not isinstance(endpoint_bindings, list) or len(endpoint_bindings) != 2:
+            raise ContractError("MOTION_ENDPOINT_BINDING")
+        for endpoint in endpoint_bindings:
+            endpoint = _exact(
+                endpoint, endpoint_keys, "MOTION_ENDPOINT_BINDING",
+            )
+            _id(endpoint["workspace_id"], "MOTION_ENDPOINT_BINDING")
+            _id(endpoint["cell_calibration_id"], "MOTION_ENDPOINT_BINDING")
+            _digest(
+                endpoint["cell_calibration_digest"],
+                "MOTION_ENDPOINT_BINDING",
+            )
+            _digest(
+                endpoint["motion_recipe_digest"],
+                "MOTION_ENDPOINT_BINDING",
+            )
+        if (
+            endpoint_bindings != sorted(
+                endpoint_bindings,
+                key=lambda item: (
+                    item["workspace_id"], item["cell_calibration_id"]
+                ),
+            )
+            or len({item["workspace_id"] for item in endpoint_bindings}) != 2
+            or len({item["cell_calibration_id"] for item in endpoint_bindings}) != 2
+            or {
+                (
+                    item["cell_calibration_digest"],
+                    item["motion_recipe_digest"],
+                )
+                for item in endpoint_bindings
+            } != {
+                (
+                    bindings["cell_calibration"],
+                    bindings["motion_qualification"],
+                ),
+                (
+                    destination_bindings["cell_calibration"],
+                    destination_bindings["motion_qualification"],
+                ),
+            }
+            or value["endpoint_bindings_digest"]
+            != canonical_digest(endpoint_bindings)
+        ):
+            raise ContractError("MOTION_ENDPOINT_BINDING")
+        _digest(
+            value["endpoint_bindings_digest"], "MOTION_ENDPOINT_BINDING",
+        )
+        if (
+            value["destination_resolved_job_digest"]
+            == value["resolved_job_digest"]
+            or destination_bindings["cell_calibration"]
+            == bindings["cell_calibration"]
+            or destination_bindings["motion_qualification"]
+            == bindings["motion_qualification"]
+            or any(
+                destination_bindings[key] != bindings[key]
+                for key in (
+                    "robot_system", "collection_profile", "object_profile",
+                    "grasp_profile", "robot_description_digest",
+                    "moveit_config_digest", "planning_scene_digest",
+                    "home_candidate",
+                )
+            )
+        ):
+            raise ContractError("MOTION_ENDPOINT_COMPATIBILITY")
     planning_scene = _planning_scene(value["planning_scene"])
     if canonical_digest(planning_scene) != bindings["planning_scene_digest"]: raise ContractError("MOTION_PROGRAM_PLANNING_SCENE")
     raw_requirements = value["gripper_requirements"]

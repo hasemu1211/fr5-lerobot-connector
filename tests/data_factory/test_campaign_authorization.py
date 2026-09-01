@@ -16,6 +16,7 @@ from tools.data_factory.campaign_authorization import (
     build_campaign_envelope,
     validate_authorized_episode_scope,
     validate_campaign_authorization,
+    validate_runtime_campaign_scope,
 )
 from tools.data_factory.campaign_authoring import compile_collection_campaign
 from tools.fr5_data_factory import ContractError, canonical_digest
@@ -227,6 +228,103 @@ class CampaignAuthorizationTests(unittest.TestCase):
             ))
             self.assertEqual((value, binding), before)
             self.assertEqual(set(binding), EPISODE_FIELDS)
+
+    def test_cross_workspace_runtime_uses_exact_combined_endpoint_scope(self):
+        value = authorization()
+        endpoint_bindings = [
+            {
+                "workspace_id": "PLACE_A",
+                "cell_calibration_id": "cell-a",
+                "cell_calibration_digest": digest("cell-a"),
+                "motion_recipe_digest": digest("motion-a"),
+            },
+            {
+                "workspace_id": "PLACE_B",
+                "cell_calibration_id": "cell-b",
+                "cell_calibration_digest": digest("cell-b"),
+                "motion_recipe_digest": digest("motion-b"),
+            },
+        ]
+        endpoint_digest = canonical_digest(endpoint_bindings)
+        scope = value["envelope"]
+        scope.update(
+            task="pick_place",
+            cell_calibration_id="cell-a",
+            motion_qualification_digest=endpoint_digest,
+        )
+        scope["envelope_digest"] = canonical_digest({
+            key: item for key, item in scope.items()
+            if key != "envelope_digest"
+        })
+        value["envelope_digest"] = scope["envelope_digest"]
+        redigest(value)
+        runtime_binding = {
+            "manifest_digest": scope["manifest_digest"],
+            "slot_digest": scope["slot_digests"][0],
+            "robot_start_pose_id": scope["allowed_start_pose_ids"][0],
+            "data_disposition": scope["data_disposition"],
+        }
+
+        for endpoint in endpoint_bindings:
+            program = {
+                "schema_version": "fr5.motion_program.v4",
+                "resolved_job_digest": digest(
+                    f"resolved-{endpoint['workspace_id']}"
+                ),
+                "binding_digests": {
+                    "motion_qualification": endpoint[
+                        "motion_recipe_digest"
+                    ],
+                },
+                "endpoint_bindings": copy.deepcopy(endpoint_bindings),
+                "endpoint_bindings_digest": endpoint_digest,
+            }
+            resolved = {
+                "normalized_job": {
+                    "robot_system_id": scope["robot_system_id"],
+                    "task": scope["task"],
+                    "object_profile_id": scope["object_profile_id"],
+                    "grasp_profile_id": scope["grasp_profile_id"],
+                    "place_id": endpoint["workspace_id"],
+                    "cell_calibration_id": endpoint[
+                        "cell_calibration_id"
+                    ],
+                },
+                "input_digests": {
+                    "collection_profile": scope[
+                        "collection_profile_digest"
+                    ],
+                    "cell_calibration": endpoint[
+                        "cell_calibration_digest"
+                    ],
+                },
+                "resolved_job_digest": program["resolved_job_digest"],
+            }
+            with self.subTest(source=endpoint["workspace_id"]), mock.patch(
+                "tools.data_factory.campaign_authorization.validate_motion_program",
+                return_value=program,
+            ):
+                self.assertEqual(
+                    validate_runtime_campaign_scope(
+                        value, resolved_inputs=resolved,
+                        motion_program=program,
+                        episode_binding=runtime_binding, now=NOW,
+                    ),
+                    value,
+                )
+
+        forged = copy.deepcopy(program)
+        forged["endpoint_bindings_digest"] = digest("forged-endpoints")
+        with mock.patch(
+            "tools.data_factory.campaign_authorization.validate_motion_program",
+            return_value=forged,
+        ), self.assertRaisesRegex(
+            ContractError, "CAMPAIGN_AUTHORIZATION_SCOPE_MISMATCH",
+        ):
+            validate_runtime_campaign_scope(
+                value, resolved_inputs=resolved, motion_program=forged,
+                episode_binding=runtime_binding, now=NOW,
+            )
 
     def test_forged_run_intent_plan_manifest_and_episode_binding_fail_closed(self):
         value = authorization()

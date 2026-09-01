@@ -7,7 +7,7 @@
 ## 현재 운영 흐름
 
 1. 앱이 로봇, controller, gripper와 camera의 현재 연결 상태를 읽는다. PHYSICAL 실행은 기본적으로 필요한 foreground owner를 준비하고, 준비되지 않은 항목이나 충돌한 owner는 화면에 그대로 표시한다.
-2. 등록된 조합에서 작업영역, 좌표계, task, object, grasp, motion, variant, camera와 데이터 모드를 고른다. 서로 결속되지 않은 조합은 선택할 수 없고 이유가 표시된다. 시작 자세는 별도 관리 화면에서 여러 개를 선택한다.
+2. 등록된 조합에서 task, object, grasp, motion, variant, camera와 데이터 모드를 고른다. 작업영역은 `수집 위치와 각도`에서 고르고 좌표계 revision은 backend가 자동 적용한다. 서로 결속되지 않은 조합은 선택할 수 없고 이유가 표시된다. 시작 자세는 별도 관리 화면에서 여러 개를 선택한다.
 3. 수집 범위는 선택한 시작 자세 × 선택한 작업영역 X/Y/yaw 조건이다. backend가 시작 자세 수, 위치·각도 조건 수, 실행 가능한 pair 수와 계획된 N을 요약한다. 자동 선택은 exact N을 만들고 전체 grid를 기본적으로 숨긴다. 직접 선택은 각 ordered row에서 시작 자세와 X/Y/yaw를 함께 정한다. 새 projection이 없는 이전 backend에서는 기존 단일 start와 `direct_poses`를 그대로 표시하고 값을 추측하지 않는다.
 4. `계획 확인으로 이동`이 선택과 예산을 finite manifest와 campaign envelope로 고정한다. 이때 만들어진 내부 lane은 한 manifest 안에서 exact하다. 조건을 바꾸면 기존 compile 결과를 버리고 새 draft를 만든다.
 5. `이 캠페인 시작`을 한 번 누르면 draft, manifest digest, envelope digest와 데이터 모드에 결속된 finite campaign authorization이 생성된다. SHA-256 문자열을 사용자가 입력하지 않는다.
@@ -36,7 +36,7 @@ direnv exec . python3 -m tools.data_factory.operator_console --effect-scope FAKE
 명령이 출력한 loopback URL을 열고 다음을 확인한다.
 
 1. 환경 준비 후 plan 단계가 열리는지 확인한다.
-2. 작업영역부터 데이터 모드까지 각 카탈로그 축이 보이고, 사용할 수 없는 항목은 disabled reason과 함께 남는지 확인한다.
+2. 작업영역부터 데이터 모드까지 운영자가 선택하는 항목이 보이고, 사용할 수 없는 항목은 disabled reason과 함께 남는지 확인한다. 좌표계 revision은 작업영역 선택에 따라 자동으로 바뀌는지 확인한다.
 3. 총 에피소드 수와 자동 모드의 조건별 최대 반복을 바꾸고, 자동 선택과 직접 선택이 같은 draft를 수정하는지 확인한다. 직접 모드에서는 preset click과 numeric X/Y/yaw가 같은 ordered pose list에 나타나는지도 확인한다.
 4. 계획을 compile한 뒤 다시 편집하면 새 draft ID가 생기고 이전 envelope를 재사용하지 않는지 확인한다.
 5. 캠페인을 한 번 시작해 에피소드가 한 개씩 직렬로 실행되고 목표 횟수만큼 끝나는지 확인한다.
@@ -56,7 +56,9 @@ direnv exec . python3 -m tools.data_factory.operator_console --effect-scope FAKE
 - RealSense `UP` + stable `/dev/v4l/by-id/*-video-index0` UVC `WRIST`의 machine-local role binding
 - 기본 `GENERAL_COLLECTION` production root와 선택 가능한 격리 `TEST_COLLECTION` root
 
-현재 catalog에는 workspace/frame/task/object/grasp/start/motion/variant/camera/data mode 축이 모두 나타난다. Qualified place1 registration의 bounded continuous X/Y와 normalized yaw를 자동 설계 또는 직접 입력으로 선택할 수 있다. checked-in cells와 HOME·원점·yaw 0은 빠른 preset과 현재 physical test의 시작점이며 product/catalog 한계가 아니다. Compile만 exact finite slots를 만들고, 각 slot은 fresh scene/start/plan 검증을 거친다.
+현재 catalog는 workspace/frame/task/object/grasp/start/motion/variant/camera/data mode 축을 내부 계약으로 유지하되, 제품 화면에는 실행 시 지정한 active job family만 투영한다. 기본 화면에는 24 mm 큐브와 상단 아래 3.5 mm 파지만 남고 과거 25 mm 재현 profile은 선택지로 나오지 않는다. 작업영역을 선택하면 그 조합의 frame revision을 자동 적용하며 별도 좌표계 선택란을 노출하지 않는다. A/B의 bounded continuous X/Y와 normalized yaw를 자동 설계 또는 직접 입력으로 선택할 수 있고, checked-in cells와 HOME·원점·yaw 0은 빠른 preset이다. Compile만 exact finite slots를 만들고 각 slot은 fresh scene/start/plan 검증을 거친다.
+
+`pickup_e2e`는 고른 작업영역 안에서 계획한다. `pick_place`는 고른 곳을 SOURCE로 두고 반대 작업영역을 자동 DESTINATION으로 정해 `A → B → A …` 또는 `B → A → B …` 경로를 표시한다. N회 실행에는 N+1개 물체 pose가 결속되며, 매 episode는 놓기·후퇴 뒤 HOME에서 다음 SOURCE로 새로 계획한다.
 
 좌표계 wizard는 인쇄 source와 최종 100 mm 막대 실측을 분리한다. 현재 실물 sheet의 `96 → 100 mm` 보정 이력은 exact checked-in print profile로 기록되며 별도 좌표계나 기존 `place1` 재등록 조건이 아니다.
 
@@ -68,15 +70,15 @@ Tracked qualification과 current physical caller가 함께 존재하는 coherent
 
 카메라는 `CONNECTED_UNPLACED`로 사용할 수 있다. 이 UI는 framing, object visibility, occlusion, lighting, image semantics, dual-camera sync 또는 data validity를 판정하지 않는다. 한 대의 transport 결과는 dual-camera qualification이나 30 Hz production PASS를 만들지 않는다.
 
-시작 전에는 foreground ROS graph, 로봇 HOME, 빈 gripper, clear cell, `place1` 원점의 물체와 E-stop 감시 조건을 사람이 확인한다. 앱은 기본적으로 missing foreground owner를 준비하고 gripper readback이 요구할 때 초기 활성화·open normalization을 수행한 뒤 상태를 다시 읽는다. controller IP와 장치 binding을 확인할 수 없거나 owner가 중복되면 fail-close한다.
+시작 전에는 foreground ROS graph, 로봇 HOME, 빈 gripper, clear cell, 선택한 SOURCE의 물체와 E-stop 감시 조건을 사람이 확인한다. 앱은 기본적으로 missing foreground owner를 준비하고 gripper readback이 요구할 때 초기 활성화·open normalization을 수행한 뒤 상태를 다시 읽는다. controller IP와 장치 binding을 확인할 수 없거나 owner가 중복되면 fail-close한다.
 
 ```sh
 scripts/start_collection_ui.sh
 ```
 
-이 한 명령으로 앱을 먼저 연다. 환경 화면에서 연결된 카메라의 역할을 정하면 앱이 필요한 foreground 실행 환경을 준비하므로 USB 경로, serial, profile ID나 topic을 명령행에 입력하지 않는다. 새 host는 robot/controller/start, workspace/frame binding과 camera 조건을 다시 확인해야 하며 tracked test input이 그 host의 production qualification을 대신하지 않는다. 같은 qualified place1의 registered bounds 안에서는 좌표마다 workspace를 다시 등록하지 않는다.
+이 한 명령으로 앱을 먼저 연다. 환경 화면에서 연결된 카메라의 역할을 정하면 앱이 필요한 foreground 실행 환경을 준비하므로 USB 경로, serial, profile ID나 topic을 명령행에 입력하지 않는다. 새 host는 robot/controller/start, workspace/frame binding과 camera 조건을 다시 확인해야 하며 tracked test input이 그 host의 production qualification을 대신하지 않는다. 같은 qualified A/B registered bounds 안에서는 좌표마다 workspace를 다시 등록하지 않는다.
 
-한 캠페인 안에서는 campaign authorization이 예상되는 positive path를 결속한다. Camera identity/transport는 environment 준비와 compile 시 결속하고, 각 episode의 HOME snapshot, scene freshness, plan digest, recorder readiness와 technical validator는 runtime에서 새로 측정한다. 실행 중 cancel은 항상 다음 intent를 막는다. Production 결과는 기술 통과 뒤 candidate review를 만들지만 training approval은 만들지 않는다. TEST_COLLECTION은 candidate admission 없이 `human semantic=NOT_MEASURED`, `training=NOT_AUTHORIZED`를 유지한다.
+한 캠페인 안에서는 campaign authorization이 예상되는 positive path를 결속한다. Camera identity/transport는 environment 준비와 compile 시 결속하고, 각 episode의 HOME snapshot, scene freshness, plan digest, recorder readiness와 technical validator는 runtime에서 새로 측정한다. 실행 중 cancel은 항상 다음 intent를 막는다. 기술 통과 결과는 candidate review를 만들지만 training approval은 만들지 않는다. `TEST_COLLECTION`의 review는 `HIL_PROXY` 품질 분류일 뿐 production admission이나 training authority가 아니다.
 
 ## 데이터와 authority 경계
 
@@ -84,7 +86,7 @@ scripts/start_collection_ui.sh
 - PHYSICAL authoring은 dataset episode나 motion을 만들지 않는다. Compile은 current caller, machine-local camera binding과 scene anchor를 고정할 수 있지만 motion·recorder·dataset episode는 campaign authorization 뒤에만 시작한다.
 - immutable episode ledger와 rewritable ledger-state sidecar는 provenance, technical admission과 retention을 분리한다. 초기 retention은 `PRESERVE`; shared chunk의 물리 삭제는 UI가 허가하지 않는다.
 - browser button은 local page channel의 operator intent다. OS 인증이나 신원 증명을 주장하지 않는다.
-- candidate `PASS | FAIL | UNCERTAIN`는 production episode가 기술 검사를 통과해 별도 compare-and-swap review가 제공된 경우에만 보인다. TEST_COLLECTION은 candidate review를 만들지 않는다.
+- candidate `PASS | FAIL | UNCERTAIN`는 PHYSICAL episode가 기술 검사를 통과해 exact compare-and-swap review가 제공된 경우에만 보인다. `TEST_COLLECTION`의 PASS도 격리 데이터의 품질 분류이며 production/training 승인이 아니다.
 - technical PASS, human semantic evidence, production admission과 training approval은 서로 다른 상태다. UI intent는 production 또는 training authority를 생성하지 않는다.
 
 ## 정적·계약 검사

@@ -978,6 +978,148 @@ def validate_operator_pose(
     )
 
 
+def project_operator_pose_domain(
+    catalog: Mapping[str, Any], selection: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Project the validated local pose domain for one exact endpoint."""
+    selected = validate_operator_selection(catalog, selection)
+    return copy.deepcopy(dict(_operator_pose_domain(catalog, selected)))
+
+
+def resolve_workspace_cycle_selections(
+    catalog: Mapping[str, Any], selection: Mapping[str, Any], requested_count: int,
+    *, require_executable: bool = True,
+) -> list[dict[str, Any]]:
+    """Resolve the exact two-endpoint selection sequence for pick-place."""
+    if (
+        type(requested_count) is not int or not 1 <= requested_count <= 100
+        or type(require_executable) is not bool
+    ):
+        raise ContractError("OPERATOR_WORKSPACE_CYCLE_COUNT")
+    selected = validate_operator_selection(
+        catalog, selection, require_executable=require_executable,
+    )
+    if selected["task_id"] != "pick_place":
+        raise ContractError("OPERATOR_WORKSPACE_CYCLE_TASK")
+    source = next((
+        item for item in catalog["combinations"]
+        if item.get("combination_digest") == selected["combination_digest"]
+    ), None)
+    if not isinstance(source, Mapping):
+        raise ContractError("OPERATOR_WORKSPACE_CYCLE_ENDPOINT")
+    shared_fields = (
+        "task_id", "object_id", "grasp_id", "start_pose_id", "variant_id",
+        "camera_profile_id", "camera_device_id", "camera_bindings",
+        "camera_binding_digest",
+    )
+    shared_sources = (
+        "job", "object", "grasp", "start_pose", "camera_profile",
+    )
+    source_tail = source["cell_id"].removeprefix(
+        f"{source['workspace_id']}-",
+    )
+    candidates = [
+        item for item in catalog["combinations"]
+        if item.get("workspace_id") != source["workspace_id"]
+        and all(item.get(field) == source.get(field) for field in shared_fields)
+        and all(
+            item.get("source_digests", {}).get(name)
+            == source.get("source_digests", {}).get(name)
+            for name in shared_sources
+        )
+        and (
+            item.get("execution", {}).get(selected["data_mode"], {}).get(
+                "executable"
+            ) is True
+            if require_executable
+            else item.get("authoring", {}).get("selectable") is True
+        )
+        and item.get("cell_id", "").removeprefix(
+            f"{item.get('workspace_id')}-",
+        ) == source_tail
+    ]
+    if len(candidates) != 1:
+        raise ContractError("OPERATOR_WORKSPACE_CYCLE_ENDPOINT")
+    alternate = candidates[0]
+
+    def endpoint(candidate: Mapping[str, Any]) -> dict[str, Any]:
+        result = copy.deepcopy(selected)
+        for field in (
+            "combination_digest", "workspace_id", "frame_id", "task_id",
+            "object_id", "grasp_id", "cell_id", "start_pose_id",
+            "motion_id", "variant_id", "camera_profile_id",
+            "camera_device_id",
+        ):
+            result[field] = candidate[field]
+        if result["schema_version"] == SELECTION_SCHEMA_V2:
+            result.update(
+                camera_bindings=copy.deepcopy(candidate["camera_bindings"]),
+                camera_binding_digest=candidate["camera_binding_digest"],
+            )
+        return validate_operator_selection(
+            catalog, result, require_executable=require_executable,
+        )
+
+    endpoints = (endpoint(source), endpoint(alternate))
+    return [
+        copy.deepcopy(endpoints[index % 2])
+        for index in range(requested_count + 1)
+    ]
+
+
+def _selected_cell_pose(
+    catalog: Mapping[str, Any], selection: Mapping[str, Any],
+) -> dict[str, Any]:
+    option = next((
+        item for item in catalog.get("axes", {}).get("cell", [])
+        if item.get("id") == selection["cell_id"]
+    ), None)
+    metadata = option.get("metadata") if isinstance(option, Mapping) else None
+    if not isinstance(metadata, Mapping):
+        raise ContractError("OPERATOR_WORKSPACE_CYCLE_ENDPOINT")
+    try:
+        pose = {
+            field: metadata[field] for field in POSE_ORDER
+        }
+    except KeyError as exc:
+        raise ContractError("OPERATOR_WORKSPACE_CYCLE_ENDPOINT") from exc
+    return validate_operator_pose(catalog, selection, pose)
+
+
+def project_workspace_cycle_poses(
+    catalog: Mapping[str, Any], selection: Mapping[str, Any],
+    source_pose: Mapping[str, Any], requested_count: int, *, repeat: int = 1,
+    normalized_seed: int = 0,
+) -> list[dict[str, Any]]:
+    """Project N+1 A/B poses, validating every pose in its own endpoint."""
+    cycle = resolve_workspace_cycle_selections(
+        catalog, selection, requested_count, require_executable=False,
+    )
+    source = validate_operator_pose(catalog, cycle[0], source_pose)
+    series: dict[str, list[dict[str, Any]]] = {}
+    offsets: dict[str, int] = {}
+    for endpoint_index, endpoint in enumerate(cycle[:2]):
+        digest = endpoint["combination_digest"]
+        count = sum(
+            item["combination_digest"] == digest for item in cycle
+        )
+        anchor = source if endpoint_index == 0 else _selected_cell_pose(
+            catalog, endpoint,
+        )
+        series[digest] = project_assisted_poses(
+            catalog, endpoint, anchor, count, repeat=repeat,
+            normalized_seed=normalized_seed + endpoint_index,
+        )
+        offsets[digest] = 0
+    result = []
+    for endpoint in cycle:
+        digest = endpoint["combination_digest"]
+        pose = series[digest][offsets[digest]]
+        offsets[digest] += 1
+        result.append(validate_operator_pose(catalog, endpoint, pose))
+    return result
+
+
 def project_balanced_start_pose_ids(
     start_pose_ids: Sequence[str], requested_count: int, *, normalized_seed: int = 0,
 ) -> list[str]:
@@ -1161,6 +1303,8 @@ def project_direct_poses(
 __all__ = [
     "AXES", "CATALOG_SCHEMA", "SELECTION_SCHEMA", "load_operator_catalog",
     "project_assisted_poses", "project_balanced_start_pose_ids",
-    "project_direct_poses", "UNBOUND_CAMERA_DEVICE_ID", "validate_operator_pose",
-    "validate_operator_selection",
+    "project_direct_poses", "project_operator_pose_domain",
+    "project_workspace_cycle_poses",
+    "resolve_workspace_cycle_selections", "UNBOUND_CAMERA_DEVICE_ID",
+    "validate_operator_pose", "validate_operator_selection",
 ]

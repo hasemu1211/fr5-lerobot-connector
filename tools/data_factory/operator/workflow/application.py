@@ -19,6 +19,9 @@ from tools.data_factory.operator.workflow.intents import (
 from tools.data_factory.operator.catalog import (
     project_assisted_poses,
     project_balanced_start_pose_ids,
+    project_operator_pose_domain,
+    project_workspace_cycle_poses,
+    resolve_workspace_cycle_selections,
     validate_operator_pose,
     validate_operator_selection,
 )
@@ -364,10 +367,17 @@ class CollectionOperatorApplication:
             and start_pose_id not in selected
         ):
             raise ContractError("OPERATOR_APPLICATION_DRAFT")
-        pose = validate_operator_pose(
-            self.catalog, self.selection,
-            {key: value[key] for key in ("place_id", "yaw_deg", "x_mm", "y_mm")},
-        )
+        pose_value = {
+            key: value[key]
+            for key in ("place_id", "yaw_deg", "x_mm", "y_mm")
+        }
+        endpoints = {
+            item["workspace_id"]: item for item in self._workspace_cycle()
+        }
+        endpoint = endpoints.get(value["place_id"])
+        if endpoint is None:
+            raise ContractError("OPERATOR_APPLICATION_DRAFT")
+        pose = validate_operator_pose(self.catalog, endpoint, pose_value)
         return {"start_pose_id": start_pose_id, **pose}
 
     def _read_environment(self) -> dict[str, Any]:
@@ -400,13 +410,34 @@ class CollectionOperatorApplication:
             self.selection["task_id"] == "pick_place"
         )
 
+    def _workspace_cycle(self) -> list[dict[str, Any]]:
+        if self.selection["task_id"] == "pick_place":
+            try:
+                return resolve_workspace_cycle_selections(
+                    self.catalog, self.selection,
+                    self.draft["requested_count"],
+                    require_executable=False,
+                )
+            except ContractError:
+                if self.effect_scope != "FAKE":
+                    raise
+        return [
+            copy.deepcopy(self.selection)
+            for _index in range(self._spatial_node_count())
+        ]
+
     def _direct_draft_ready(self) -> bool:
         if self.draft["authoring_mode"] != "DIRECT_EDIT":
             return True
         if self.start_pose_setup is not None:
             pairs = self.draft["direct_pairs"]
+            route = self._workspace_cycle()
             return (
                 len(pairs) == self._spatial_node_count()
+                and all(
+                    pair["place_id"] == endpoint["workspace_id"]
+                    for pair, endpoint in zip(pairs, route)
+                )
                 and all(
                     pair["start_pose_id"] is not None
                     for pair in pairs[:self.draft["requested_count"]]
@@ -435,10 +466,23 @@ class CollectionOperatorApplication:
     def _reset_direct_pairs(self) -> None:
         if self.start_pose_setup is None:
             return
-        poses = project_assisted_poses(
-            self.catalog, self.selection, self.draft["current_object_pose"],
-            self._spatial_node_count(), repeat=self.draft["repeat"],
-            normalized_seed=self.draft["normalized_seed"],
+        poses = (
+            project_workspace_cycle_poses(
+                self.catalog, self.selection,
+                self.draft["current_object_pose"],
+                self.draft["requested_count"], repeat=self.draft["repeat"],
+                normalized_seed=self.draft["normalized_seed"],
+            )
+            if (
+                self.selection["task_id"] == "pick_place"
+                and self.effect_scope == "PHYSICAL"
+            )
+            else project_assisted_poses(
+                self.catalog, self.selection,
+                self.draft["current_object_pose"],
+                self._spatial_node_count(), repeat=self.draft["repeat"],
+                normalized_seed=self.draft["normalized_seed"],
+            )
         )
         starts = project_balanced_start_pose_ids(
             self.draft["selected_start_pose_ids"],
@@ -722,6 +766,13 @@ class CollectionOperatorApplication:
             "repeat": self.draft["repeat"],
             "current_object_pose": copy.deepcopy(self.draft["current_object_pose"]),
             "direct_poses": copy.deepcopy(self.draft["direct_poses"]),
+            "workspace_route": [
+                {
+                    "workspace_id": endpoint["workspace_id"],
+                    "frame_id": endpoint["frame_id"],
+                }
+                for endpoint in self._workspace_cycle()
+            ],
             "execution_ready": selection_execution["executable"],
             "execution_reason": (
                 None if selection_execution["executable"]
@@ -860,6 +911,16 @@ class CollectionOperatorApplication:
         browser_catalog = self.projector.project_catalog(
             self.catalog, self.selection, split=self.draft["split"],
         )
+        browser_catalog["workspace_domains"] = []
+        projected_endpoints = set()
+        for endpoint in self._workspace_cycle():
+            key = (endpoint["workspace_id"], endpoint["frame_id"])
+            if key in projected_endpoints:
+                continue
+            projected_endpoints.add(key)
+            browser_catalog["workspace_domains"].append(
+                project_operator_pose_domain(self.catalog, endpoint)
+            )
         for option in browser_catalog["axes"]["camera"]:
             if option["available"]:
                 continue
@@ -1281,20 +1342,24 @@ class CollectionOperatorApplication:
                 or len(self.draft["direct_pairs"]) >= self._spatial_node_count()
             ):
                 raise ContractError("OPERATOR_APPLICATION_DRAFT")
-            terminal_index = next((
+            route = self._workspace_cycle()
+            insert_at = next((
                 index for index, pair in enumerate(self.draft["direct_pairs"])
-                if pair["start_pose_id"] is None
-            ), None)
-            if terminal_index is not None:
-                self.draft["direct_pairs"].insert(terminal_index, checked)
-            elif (
+                if pair["place_id"] != route[index]["workspace_id"]
+            ), len(self.draft["direct_pairs"]))
+            if (
+                insert_at >= len(route)
+                or checked["place_id"] != route[insert_at]["workspace_id"]
+            ):
+                raise ContractError("OPERATOR_APPLICATION_DRAFT")
+            if (
                 self.selection["task_id"] == "pick_place"
-                and len(self.draft["direct_pairs"]) == self.draft["requested_count"]
+                and insert_at == self.draft["requested_count"]
             ):
                 checked["start_pose_id"] = None
-                self.draft["direct_pairs"].append(checked)
-            else:
-                self.draft["direct_pairs"].append(checked)
+            elif checked["start_pose_id"] is None:
+                raise ContractError("OPERATOR_APPLICATION_DRAFT")
+            self.draft["direct_pairs"].insert(insert_at, checked)
             self.draft["authoring_mode"] = "DIRECT_EDIT"
             self.selection["policy_id"] = "DIRECT_SELECTION"
         elif field == "remove_pair" and self.start_pose_setup is not None:
@@ -1558,8 +1623,15 @@ class CollectionOperatorApplication:
             and campaign.get("remaining_intents") == 0
             and isinstance(campaign.get("completed_intents"), int)
             and campaign["completed_intents"] > 0
-            and terminal_pose is not None
+            and isinstance(terminal_pose, Mapping)
         ):
+            endpoint = next((
+                item for item in self._workspace_cycle()
+                if item["workspace_id"] == terminal_pose.get("place_id")
+            ), None)
+            if not isinstance(endpoint, Mapping):
+                raise ContractError("OPERATOR_APPLICATION_DRAFT")
+            self.selection = copy.deepcopy(endpoint)
             previous["current_object_pose"] = validate_operator_pose(
                 self.catalog, self.selection, terminal_pose,
             )
@@ -1567,6 +1639,7 @@ class CollectionOperatorApplication:
                 pose for pose in previous["direct_poses"]
                 if pose != previous["current_object_pose"]
             ]
+            previous["direct_pairs"] = []
         fresh_environment = self._read_environment()
         close = getattr(self._campaign, "close", None)
         if callable(close):
@@ -1576,6 +1649,11 @@ class CollectionOperatorApplication:
         self._generation += 1
         previous["normalized_seed"] = previous.get("normalized_seed", 0) + 1
         self.draft = self._new_draft(previous)
+        if (
+            self.draft["authoring_mode"] == "DIRECT_EDIT"
+            and self.start_pose_setup is not None
+        ):
+            self._reset_direct_pairs()
         return {
             "outcome": (
                 "AUTHORING"
@@ -1607,7 +1685,11 @@ class CollectionOperatorApplication:
                 campaign = self._campaign
                 self._campaign = None
 
-            self.core.transition(detach)
+            try:
+                self.core.transition(detach)
+            except ContractError:
+                if not self._closed:
+                    raise
             if preparation is not None:
                 preparation.cleanup()
             close = getattr(campaign, "close", None)

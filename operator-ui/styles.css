@@ -117,7 +117,7 @@ code { font-family: "SFMono-Regular", Consolas, monospace; overflow-wrap: anywhe
 .setup-tool span { margin-top: .2rem; color: var(--muted); font-size: .76rem; }
 .catalog-fields { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: .8rem; margin: 0; padding: 1.1rem; border: 1px solid var(--line); background: #f5f8f9; }
 .catalog-fields legend { padding: 0 .45rem; font-weight: 800; }
-.catalog-fields label, .range-controls > label, .review-card > label { display: grid; min-width: 0; gap: .3rem; color: var(--muted); font-size: .75rem; font-weight: 750; }
+.catalog-fields label, .range-workspace label, .range-controls > label, .review-card > label { display: grid; min-width: 0; gap: .3rem; color: var(--muted); font-size: .75rem; font-weight: 750; }
 .catalog-fields small { min-height: 1.15em; color: var(--muted); font-weight: 500; }
 .catalog-derived { display: grid; min-width: 0; gap: .3rem; }
 .catalog-derived > span { color: var(--muted); font-size: .75rem; font-weight: 750; }
@@ -126,6 +126,8 @@ code { font-family: "SFMono-Regular", Consolas, monospace; overflow-wrap: anywhe
 select, input[type="number"], input[type="text"] { width: 100%; min-width: 0; min-height: 44px; border: 1px solid #758995; border-radius: .25rem; padding: .55rem .65rem; color: var(--ink); background: #fff; }
 select:disabled, input:disabled { background: #e9eef0; color: #596872; }
 .range-panel { margin-top: 1.2rem; padding: 1rem; border: 1px solid var(--line); }
+.range-workspace { display: grid; grid-template-columns: minmax(14rem, .5fr) minmax(18rem, 1fr); gap: 1rem; align-items: end; margin: 1rem 0; }
+.range-workspace p { margin: 0 0 .65rem; }
 .section-title { display: flex; justify-content: space-between; gap: 1rem; align-items: end; }
 .section-title h3, .section-title > p { margin-bottom: 0; }
 .section-title > p { max-width: 34rem; color: var(--muted); font-size: .75rem; text-align: right; }
@@ -298,7 +300,7 @@ footer { display: flex; justify-content: space-between; gap: 1rem; padding: 1rem
   .app-header { display: flex; }
   .header-status { width: 100%; min-width: 0; border-top: 1px solid #587181; border-left: 0; }
   .step-heading { display: grid; grid-template-columns: 1fr; }
-  .catalog-fields, .setup-tools, .state-space-summary, .review-summary, .result-layout, .review-card, .next-options, .technical-details dl, .workspace-selection, .workspace-preview-form > div { grid-template-columns: 1fr; }
+  .catalog-fields, .range-workspace, .setup-tools, .state-space-summary, .review-summary, .result-layout, .review-card, .next-options, .technical-details dl, .workspace-selection, .workspace-preview-form > div { grid-template-columns: 1fr; }
   .state-space-summary div { border-right: 0; border-bottom: 1px solid var(--line); }
   .state-space-summary div:last-child { border-bottom: 0; }
   .workspace-selection div { border-right: 0; border-bottom: 1px solid var(--line); }

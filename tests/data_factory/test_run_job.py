@@ -1125,6 +1125,67 @@ class RunJobTest(unittest.TestCase):
             {"place_id": "PLACE_A", "yaw_deg": 0, "x_mm": 60, "y_mm": -20},
         )
 
+        destination_job = {
+            **pick_place_job,
+            "job_id": "destination-job",
+            "place_id": "PLACE_B",
+            "cell_calibration_id": "cal-b",
+            "sheet_manifest_digest": "sha256:" + "b" * 64,
+            "x_mm": 10,
+            "y_mm": -10,
+        }
+        destination_validated = {
+            **pick_place_validated,
+            "normalized_job": destination_job,
+            "resolved_job_digest": "sha256:" + "c" * 64,
+        }
+        cross = {
+            **without_destination,
+            "job": pick_place_job,
+            "destination": {
+                "job": destination_job,
+                "selected_sheet": "destination-selected.json",
+                "yaw0_sheet": "destination-yaw0.json",
+                "motion_qualification": "destination-motion.json",
+            },
+        }
+        self.assertEqual(
+            run_job._run_payload(cross)["destination"]["job"]["place_id"],
+            "PLACE_B",
+        )
+        with self.assertRaisesRegex(run_job.ContractError, "RUN_PAYLOAD"):
+            run_job._run_payload({**cross, "recycle_x_mm": 1, "recycle_y_mm": 2})
+        with (
+            mock.patch.object(
+                run_job, "validate_job_spec",
+                side_effect=[pick_place_validated, destination_validated],
+            ),
+            mock.patch.object(
+                run_job, "_load",
+                side_effect=lambda path, _: {
+                    "motion.json": {"source": True},
+                    "destination-motion.json": {"destination": True},
+                    "home.json": {},
+                }[path],
+            ),
+            mock.patch.object(
+                run_job, "resolve_motion_program", return_value={},
+            ) as cross_resolve,
+        ):
+            _, _, binding = run_job.resolve_inputs(
+                cross, scene_binding_call=lambda _, pose, _run_id: pose,
+            )
+        self.assertEqual(binding["place_id"], "PLACE_B")
+        self.assertIsNone(cross_resolve.call_args.kwargs["release_pose"])
+        self.assertEqual(
+            cross_resolve.call_args.kwargs["release_validated"],
+            destination_validated,
+        )
+        self.assertEqual(
+            cross_resolve.call_args.kwargs["release_motion_qualification"],
+            {"destination": True},
+        )
+
         rotated = {**value, "recycle_yaw_deg": 450}
         with (
             mock.patch.object(run_job, "validate_job_spec", return_value=validated),

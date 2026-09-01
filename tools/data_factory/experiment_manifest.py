@@ -49,6 +49,13 @@ FIXED_FIELDS = frozenset({
     "cell_calibration_digest", "motion_recipe", "motion_recipe_digest",
     "pregrasp_digest", "waypoint_digest", "trajectory_digest",
 })
+FIXED_V2_FIELDS = FIXED_FIELDS | frozenset({
+    "endpoint_bindings", "endpoint_bindings_digest",
+})
+ENDPOINT_BINDING_FIELDS = frozenset({
+    "workspace_id", "cell_calibration_id", "cell_calibration_digest",
+    "motion_recipe_digest",
+})
 BASE_FIELDS = frozenset({
     "coverage_condition", "coverage_condition_digest", "yaw_action_binding_digest",
     "dual_view_observability_digest", "resolver_result_digest", "resolved_job_digest",
@@ -209,10 +216,19 @@ def _is_test_only_feature_contract(value: object) -> bool:
 
 
 def _fixed_contract(value: object) -> dict[str, Any]:
-    value = _exact(value, FIXED_FIELDS, "HYPOTHESIS_FIXED_FIELDS")
+    fields = (
+        FIXED_V2_FIELDS
+        if isinstance(value, Mapping)
+        and value.get("schema_version") == "data_factory.fr5_fixed_contract.v2"
+        else FIXED_FIELDS
+    )
+    value = _exact(value, fields, "HYPOTHESIS_FIXED_FIELDS")
     result = copy.deepcopy(dict(value))
     if (
-        result["schema_version"] != "data_factory.fr5_fixed_contract.v1"
+        result["schema_version"] not in {
+            "data_factory.fr5_fixed_contract.v1",
+            "data_factory.fr5_fixed_contract.v2",
+        }
         or result["task"] not in TASK_CONTRACTS
         or result["motion_recipe"] != "DIRECT"
         or not (
@@ -238,6 +254,43 @@ def _fixed_contract(value: object) -> dict[str, Any]:
         "trajectory_digest",
     ):
         _digest(result[field], "HYPOTHESIS_FIXED_DIGEST")
+    if result["schema_version"] == "data_factory.fr5_fixed_contract.v2":
+        endpoints = result["endpoint_bindings"]
+        if (
+            result["task"] != "pick_place"
+            or not isinstance(endpoints, list)
+            or len(endpoints) != 2
+        ):
+            raise ContractError("HYPOTHESIS_ENDPOINT_BINDINGS")
+        checked = []
+        for endpoint in endpoints:
+            endpoint = _exact(
+                endpoint, ENDPOINT_BINDING_FIELDS,
+                "HYPOTHESIS_ENDPOINT_BINDINGS",
+            )
+            checked.append(copy.deepcopy(dict(endpoint)))
+            for field in ("workspace_id", "cell_calibration_id"):
+                _id(endpoint[field], "HYPOTHESIS_ENDPOINT_BINDINGS")
+            for field in ("cell_calibration_digest", "motion_recipe_digest"):
+                _digest(endpoint[field], "HYPOTHESIS_ENDPOINT_BINDINGS")
+        if (
+            checked != sorted(
+                checked,
+                key=lambda item: (
+                    item["workspace_id"], item["cell_calibration_id"],
+                ),
+            )
+            or len({item["workspace_id"] for item in checked}) != 2
+            or len({item["cell_calibration_id"] for item in checked}) != 2
+            or result["cell_calibration_id"]
+            != checked[0]["cell_calibration_id"]
+            or result["cell_calibration_digest"]
+            != checked[0]["cell_calibration_digest"]
+            or result["endpoint_bindings_digest"] != canonical_digest(checked)
+            or result["motion_recipe_digest"]
+            != result["endpoint_bindings_digest"]
+        ):
+            raise ContractError("HYPOTHESIS_ENDPOINT_BINDINGS")
     return result
 
 
@@ -453,15 +506,32 @@ def _fixed_base(fixed: Mapping[str, Any], base: Mapping[str, Any], receipt: Mapp
     condition = base["coverage_condition"]
     expected = {
         "task": fixed["task"], "robot_system_id": fixed["robot_system_id"],
-        "cell_calibration_id": fixed["cell_calibration_id"],
-        "cell_calibration_digest": fixed["cell_calibration_digest"],
         "object_profile_id": fixed["object_profile_id"],
         "grasp_profile_id": fixed["grasp_profile_id"],
-        "motion_recipe_digest": fixed["motion_recipe_digest"],
         "collection_profile_digest": fixed["collection_profile_digest"],
     }
+    if fixed["schema_version"] == "data_factory.fr5_fixed_contract.v1":
+        expected.update(
+            cell_calibration_id=fixed["cell_calibration_id"],
+            cell_calibration_digest=fixed["cell_calibration_digest"],
+            motion_recipe_digest=fixed["motion_recipe_digest"],
+        )
+        endpoint_matches = True
+    else:
+        endpoint_matches = any(
+            endpoint == {
+                "workspace_id": condition["place_id"],
+                "cell_calibration_id": condition["cell_calibration_id"],
+                "cell_calibration_digest": condition[
+                    "cell_calibration_digest"
+                ],
+                "motion_recipe_digest": condition["motion_recipe_digest"],
+            }
+            for endpoint in fixed["endpoint_bindings"]
+        )
     if (
         any(condition[field] != item for field, item in expected.items())
+        or not endpoint_matches
         or receipt["normalized_job"]["instruction"] != fixed["instruction"]
     ):
         raise ContractError("HYPOTHESIS_MIXED_FIXED_AXIS")
@@ -553,7 +623,7 @@ def _validate_design(
     fixed: Mapping[str, Any], bases: Sequence[Mapping[str, Any]],
     poses: Sequence[Mapping[str, Any]], pairs: Sequence[Mapping[str, Any]],
 ) -> None:
-    yaw_bindings: dict[int | float, tuple[str, str]] = {}
+    yaw_bindings: dict[object, tuple[str, str]] = {}
     action_yaws: dict[str, int | float] = {}
     observations: dict[str, tuple[str, str, str, str, str]] = {}
     policy = (
@@ -561,11 +631,17 @@ def _validate_design(
         fixed["waypoint_digest"], fixed["trajectory_digest"],
     )
     for item in bases:
-        yaw = item["coverage_condition"]["yaw_deg"]
+        condition = item["coverage_condition"]
+        yaw = condition["yaw_deg"]
+        yaw_domain = (
+            (condition["place_id"], condition["cell_calibration_id"], yaw)
+            if fixed["schema_version"] == "data_factory.fr5_fixed_contract.v2"
+            else yaw
+        )
         binding = (item["yaw_action_binding_digest"], item["dual_view_observability_digest"])
-        if yaw in yaw_bindings and yaw_bindings[yaw] != binding:
+        if yaw_domain in yaw_bindings and yaw_bindings[yaw_domain] != binding:
             raise ContractError("HYPOTHESIS_YAW_BINDING_MIXED")
-        yaw_bindings[yaw] = binding
+        yaw_bindings[yaw_domain] = binding
         prior_yaw = action_yaws.setdefault(item["yaw_action_binding_digest"], yaw)
         if prior_yaw != yaw:
             raise ContractError("HYPOTHESIS_YAW_ACTION_BINDING_ALIASED")

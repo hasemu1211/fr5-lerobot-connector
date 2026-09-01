@@ -908,6 +908,34 @@ class RecorderTransactionTest(unittest.TestCase):
             recorder.stop_threads.set()
             recorder.writer_thread.join(1)
 
+    def test_image_quality_sampling_does_not_hold_alignment_lock(self):
+        with tempfile.TemporaryDirectory() as directory:
+            recorder = self.make_recorder(directory)
+            recorder.episode_state = recorder.RECORDING
+            recorder.recording = True
+            recorder.frames = 29
+            recorder.args.task = "pick up the test object"
+            recorder.dataset.add_frame = mock.Mock()
+            observed = []
+            recorder._sample_image_quality = lambda camera, _image: (
+                observed.append((camera, recorder.lock.locked()))
+            )
+            provenance = {
+                "target_ros_s": 1.0,
+                "image_raw_ros_s": {"up": 0.99, "side": 0.99},
+                "image_corrected_ros_s": {"up": 0.99, "side": 0.99},
+                "image_received_ros_s": {"up": 1.0, "side": 1.0},
+            }
+
+            with mock.patch.object(recorder_module, "image_message_to_rgb", side_effect=lambda image: image):
+                recorder._write_frame(
+                    [0.0] * 7, [0.0] * 7, (object(), object()), provenance,
+                    0.01, 0.01, 0.01, 29,
+                )
+
+            self.assertEqual(observed, [("up", False), ("side", False)])
+            self.assertEqual(recorder.frames, 30)
+
     def test_freeze_waits_for_alignment_tail_row_before_sealing(self):
         with tempfile.TemporaryDirectory() as directory:
             recorder = self.make_recorder(directory)

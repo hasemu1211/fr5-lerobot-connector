@@ -1272,8 +1272,6 @@ class FR5LeRobotRecorder(Node):
                     self.gripper_actions.append((stamp, position))
 
     def _sample_image_quality(self, camera: str, image: np.ndarray) -> None:
-        if self.frames % max(self.args.fps, 1):
-            return
         image_f = image.astype(np.float32)
         color_delta = float(
             (np.abs(image_f[..., 0] - image_f[..., 1]).mean() + np.abs(image_f[..., 1] - image_f[..., 2]).mean()) / 2
@@ -1484,6 +1482,7 @@ class FR5LeRobotRecorder(Node):
         for camera, image in zip(self.camera_names, images):
             frame[f"observation.images.{camera}"] = image
         self.dataset.add_frame(frame)
+        quality_images = ()
         with self.lock:
             self.frames += 1
             self.frame_stamps.append(row_stamp)
@@ -1504,7 +1503,8 @@ class FR5LeRobotRecorder(Node):
                 self.camera_stamps[camera].append(raw_stamp)
                 self.image_ages[camera].append(abs(corrected_stamp - row_stamp))
                 self.image_transport_ages[camera].append(received_stamp - raw_stamp)
-                self._sample_image_quality(camera, image)
+            if self.frames % max(self.args.fps, 1) == 0:
+                quality_images = tuple(zip(self.camera_names, images))
             if self.frames % self.args.fps == 0:
                 elapsed = self.frame_stamps[-1] - self.frame_stamps[0] if self.frames > 1 else 0.0
                 row_fps = (self.frames - 1) / elapsed if elapsed > 0 else 0.0
@@ -1514,6 +1514,12 @@ class FR5LeRobotRecorder(Node):
                     f"gripper={action[6]:.4f}, "
                     f"alignment_failures={self.alignment_failures}"
                 )
+        # Full-frame brightness and Laplacian work must not hold the alignment
+        # lock: ROS state callbacks need that lock to preserve their 100 Hz
+        # timestamp brackets.  The writer queue drain remains the lifecycle
+        # barrier before quality is sealed.
+        for camera, image in quality_images:
+            self._sample_image_quality(camera, image)
 
     def finished(self) -> bool:
         return not self.args.interactive and self.started > 0 and time.perf_counter() - self.started >= self.args.duration

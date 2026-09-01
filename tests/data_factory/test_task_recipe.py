@@ -111,6 +111,32 @@ class TaskRecipeTest(unittest.TestCase):
             task_instruction("pick_place", "wooden cube"),
             "pick up the wooden cube and place it at the destination",
         )
+        self.assertEqual(
+            task_instruction(
+                "pick_place", "24 mm wooden cube",
+                source_region_id="RED", destination_region_id="BLUE",
+                region_binding_verified=True,
+            ),
+            "pick up the 24 mm wooden cube from the red zone and place it in the blue zone",
+        )
+        self.assertEqual(
+            task_instruction(
+                "pick_place", "24 mm wooden cube",
+                source_region_id="RED", destination_region_id="BLUE",
+            ),
+            "pick up the 24 mm wooden cube and place it at the destination",
+        )
+        with self.assertRaisesRegex(ContractError, "TASK_REGION_BINDING"):
+            task_instruction(
+                "pick_place", "wooden cube",
+                source_region_id="RED", destination_region_id="RED",
+                region_binding_verified=True,
+            )
+        with self.assertRaisesRegex(ContractError, "TASK_REGION_BINDING"):
+            task_instruction(
+                "pick_place", "wooden cube",
+                region_binding_verified=True,
+            )
         self.assertNotIn("authority", json.dumps(catalog).lower())
         self.assertEqual(validate_task_catalog(catalog), catalog)
         reordered_catalog = {

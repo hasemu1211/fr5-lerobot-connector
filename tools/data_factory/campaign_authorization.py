@@ -216,6 +216,33 @@ def validate_runtime_campaign_scope(
     except (ContractError, TypeError):
         raise ContractError("CAMPAIGN_AUTHORIZATION_SCOPE_MISMATCH") from None
     program_digests = program["binding_digests"]
+    cross_workspace = program["schema_version"] == "fr5.motion_program.v4"
+    source_scope_mismatch = False
+    if cross_workspace and isinstance(job, Mapping) and isinstance(digests, Mapping):
+        source_endpoints = [
+            endpoint for endpoint in program["endpoint_bindings"]
+            if endpoint["cell_calibration_id"]
+            == job.get("cell_calibration_id")
+        ]
+        source_scope_mismatch = (
+            len(source_endpoints) != 1
+            or source_endpoints[0]["workspace_id"] != job.get("place_id")
+            or source_endpoints[0]["cell_calibration_digest"]
+            != digests.get("cell_calibration")
+            or source_endpoints[0]["motion_recipe_digest"]
+            != program_digests.get("motion_qualification")
+            or envelope["cell_calibration_id"]
+            != program["endpoint_bindings"][0]["cell_calibration_id"]
+        )
+    elif cross_workspace:
+        source_scope_mismatch = True
+    motion_scope_digest = (
+        program["endpoint_bindings_digest"] if cross_workspace
+        else program_digests.get("motion_qualification")
+    )
+    job_scope_fields = (
+        "robot_system_id", "task", "object_profile_id", "grasp_profile_id",
+    ) + (() if cross_workspace else ("cell_calibration_id",))
     if (
         not isinstance(job, Mapping)
         or not isinstance(digests, Mapping)
@@ -227,14 +254,11 @@ def validate_runtime_campaign_scope(
         or episode_binding.get("data_disposition") != envelope["data_disposition"]
         or digests.get("collection_profile") != envelope["collection_profile_digest"]
         or program.get("resolved_job_digest") != resolved_inputs.get("resolved_job_digest")
-        or program_digests.get("motion_qualification")
-        != envelope["motion_qualification_digest"]
+        or motion_scope_digest != envelope["motion_qualification_digest"]
+        or source_scope_mismatch
         or any(
             job.get(field) != envelope[field]
-            for field in (
-                "robot_system_id", "task", "object_profile_id", "grasp_profile_id",
-                "cell_calibration_id",
-            )
+            for field in job_scope_fields
         )
     ):
         raise ContractError("CAMPAIGN_AUTHORIZATION_SCOPE_MISMATCH")

@@ -293,7 +293,14 @@ def _derive_test_only_gripper_program(
     job = validated.get("normalized_job")
     inputs = validated.get("input_digests")
     close = grasp.get("gripper_close") if isinstance(grasp, Mapping) else None
+    opened = grasp.get("gripper_open") if isinstance(grasp, Mapping) else None
     program_bindings = program.get("binding_digests")
+    base_requirements = copy.deepcopy(dict(close)) if isinstance(close, Mapping) else None
+    if isinstance(base_requirements, dict) and isinstance(opened, Mapping):
+        base_requirements.update(
+            open_velocity_percent=opened.get("velocity_percent"),
+            open_force_percent=opened.get("force_percent"),
+        )
     if (
         not isinstance(job, Mapping) or not isinstance(inputs, Mapping)
         or checked_retune.get("object_profile_id") != job.get("object_profile_id")
@@ -302,7 +309,7 @@ def _derive_test_only_gripper_program(
         or not isinstance(program_bindings, Mapping)
         or program_bindings.get("motion_qualification") != canonical_digest(motion)
         or program_bindings.get("grasp_profile") != canonical_digest(grasp)
-        or program.get("gripper_requirements") != close
+        or program.get("gripper_requirements") != base_requirements
     ):
         raise ContractError("TEST_ONLY_GRIPPER_RETUNE_BINDING")
 
@@ -310,7 +317,7 @@ def _derive_test_only_gripper_program(
     feedback = checked_retune["acceptable_feedback_m"]
     minimum, maximum = float(feedback["min"]), float(feedback["max"])
 
-    tuned_requirements = copy.deepcopy(dict(close))
+    tuned_requirements = copy.deepcopy(base_requirements)
     tuned_requirements.update(
         command_position_m=command,
         acceptable_feedback_m={"min": minimum, "max": maximum},
@@ -379,6 +386,7 @@ def _home_start_pose(
 def _build_physical_campaign_contract(
     *, resolver_results: Sequence[Mapping[str, Any]],
     motion_qualification: Mapping[str, Any], home_candidate: Mapping[str, Any],
+    motion_qualifications: Sequence[Mapping[str, Any]] | None = None,
     scene_digest: str, draft_id: str, manifest_id: str,
     requested_count: int, normalized_seed: int = 0,
     anchor_resolved_job_digest: str | None = None,
@@ -457,30 +465,103 @@ def _build_physical_campaign_contract(
     ):
         raise ContractError("PHYSICAL_CONSOLE_FIXED_BINDING")
 
-    motion_digest = canonical_digest(motion_qualification)
+    qualifications = (
+        [copy.deepcopy(dict(motion_qualification))]
+        if motion_qualifications is None else [
+            copy.deepcopy(dict(item)) for item in motion_qualifications
+            if isinstance(item, Mapping)
+        ]
+    )
+    qualification_by_cell = {
+        item.get("cell_calibration_id"): item for item in qualifications
+    }
+    resolved_cells = {
+        item.get("normalized_job", {}).get("cell_calibration_id")
+        for item in resolved_jobs
+    }
+    if (
+        len(qualifications) != len(qualification_by_cell)
+        or set(qualification_by_cell) != resolved_cells
+        or any(
+            item.get("schema_version") not in MOTION_QUALIFICATION_SCHEMAS
+            or item.get("qualification_status") != "QUALIFIED"
+            or item.get("home_candidate_digest")
+            != canonical_digest(home_candidate)
+            for item in qualifications
+        )
+    ):
+        raise ContractError("PHYSICAL_CONSOLE_FIXED_BINDING")
+    motion_digests = {
+        cell_id: canonical_digest(item)
+        for cell_id, item in qualification_by_cell.items()
+    }
     fixed_job_fields = (
         "task", "instruction", "robot_system_id", "collection_profile_id",
-        "cell_calibration_id", "object_profile_id", "grasp_profile_id",
+        "object_profile_id", "grasp_profile_id",
     )
     fixed_input_fields = (
-        "cell_calibration", "robot_system", "collection_profile",
-        "object_profile", "grasp_profile",
+        "robot_system", "collection_profile", "object_profile",
+        "grasp_profile",
     )
     for resolved in resolved_jobs:
         other_job = resolved.get("normalized_job")
         other_inputs = resolved.get("input_digests")
+        endpoint_motion = (
+            qualification_by_cell.get(other_job.get("cell_calibration_id"))
+            if isinstance(other_job, Mapping) else None
+        )
         if (
             not isinstance(other_job, Mapping)
             or not isinstance(other_inputs, Mapping)
             or resolved.get("collection_profile") != profile
             or any(other_job.get(field) != job[field] for field in fixed_job_fields)
             or any(other_inputs.get(field) != inputs[field] for field in fixed_input_fields)
+            or not isinstance(endpoint_motion, Mapping)
+            or any(
+                endpoint_motion.get(field) != other_job.get(field)
+                for field in (
+                    "robot_system_id", "cell_calibration_id",
+                    "object_profile_id", "grasp_profile_id",
+                )
+            )
             or resolved.get("resolved_job_digest")
             != canonical_digest({"job": other_job, "input_digests": other_inputs})
         ):
             raise ContractError("PHYSICAL_CONSOLE_FIXED_BINDING")
+    endpoint_by_cell: dict[str, dict[str, Any]] = {}
+    for resolved in resolved_jobs:
+        current_job = resolved["normalized_job"]
+        current_inputs = resolved["input_digests"]
+        cell_id = current_job["cell_calibration_id"]
+        endpoint = {
+            "workspace_id": current_job["place_id"],
+            "cell_calibration_id": cell_id,
+            "cell_calibration_digest": current_inputs["cell_calibration"],
+            "motion_recipe_digest": motion_digests[cell_id],
+        }
+        previous = endpoint_by_cell.get(cell_id)
+        if previous is not None and previous != endpoint:
+            raise ContractError("PHYSICAL_CONSOLE_FIXED_BINDING")
+        endpoint_by_cell[cell_id] = endpoint
+    endpoint_bindings = sorted(
+        endpoint_by_cell.values(),
+        key=lambda item: (item["workspace_id"], item["cell_calibration_id"]),
+    )
+    multi_endpoint = len(endpoint_bindings) > 1
+    if multi_endpoint and (
+        job["task"] != "pick_place" or len(endpoint_bindings) != 2
+    ):
+        raise ContractError("PHYSICAL_CONSOLE_FIXED_BINDING")
+    endpoint_digest = canonical_digest(endpoint_bindings)
+    motion_digest = (
+        endpoint_digest if multi_endpoint
+        else endpoint_bindings[0]["motion_recipe_digest"]
+    )
     fixed = {
-        "schema_version": "data_factory.fr5_fixed_contract.v1",
+        "schema_version": (
+            "data_factory.fr5_fixed_contract.v2" if multi_endpoint
+            else "data_factory.fr5_fixed_contract.v1"
+        ),
         "robot_system_id": job["robot_system_id"],
         "task": job["task"],
         "instruction": job["instruction"],
@@ -489,8 +570,10 @@ def _build_physical_campaign_contract(
         "object_profile_id": job["object_profile_id"],
         "grasp_profile_id": job["grasp_profile_id"],
         "scene_digest": scene_digest,
-        "cell_calibration_id": job["cell_calibration_id"],
-        "cell_calibration_digest": inputs["cell_calibration"],
+        "cell_calibration_id": endpoint_bindings[0]["cell_calibration_id"],
+        "cell_calibration_digest": endpoint_bindings[0][
+            "cell_calibration_digest"
+        ],
         "motion_recipe": "DIRECT",
         "motion_recipe_digest": motion_digest,
         "pregrasp_digest": canonical_digest({
@@ -508,6 +591,11 @@ def _build_physical_campaign_contract(
             ),
         }),
     }
+    if multi_endpoint:
+        fixed.update(
+            endpoint_bindings=copy.deepcopy(endpoint_bindings),
+            endpoint_bindings_digest=endpoint_digest,
+        )
     conditions = []
     resolved_by_condition = {}
     for resolved in resolved_jobs:
@@ -525,7 +613,9 @@ def _build_physical_campaign_contract(
             "y_mm": current_job["y_mm"],
             "object_profile_id": current_job["object_profile_id"],
             "grasp_profile_id": current_job["grasp_profile_id"],
-            "motion_recipe_digest": motion_digest,
+            "motion_recipe_digest": motion_digests[
+                current_job["cell_calibration_id"]
+            ],
             "collection_profile_digest": current_inputs["collection_profile"],
         }
         condition_digest = canonical_digest(condition)
@@ -557,13 +647,24 @@ def _build_physical_campaign_contract(
                     else "QUALIFIED_MOTION"
                 ),
                 "yaw_deg": condition["yaw_deg"],
-                "motion_qualification_digest": motion_digest,
+                "motion_qualification_digest": condition[
+                    "motion_recipe_digest"
+                ],
             }),
             "dual_view_observability_digest": canonical_digest({
                 "single_view": "CONNECTED_UNPLACED",
                 "dual_view": "NOT_AVAILABLE",
                 "semantic_authority": "NONE",
                 "yaw_deg": condition["yaw_deg"],
+                **(
+                    {
+                        "workspace_id": condition["place_id"],
+                        "cell_calibration_id": condition[
+                            "cell_calibration_id"
+                        ],
+                    }
+                    if multi_endpoint else {}
+                ),
             }),
         }, "qualification_digest"))
     home_pose = _home_start_pose(

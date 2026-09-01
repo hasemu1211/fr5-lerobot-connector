@@ -8,6 +8,9 @@ import hashlib
 import json
 import math
 import re
+import shutil
+import subprocess
+import tempfile
 from html import escape
 from pathlib import Path
 
@@ -29,6 +32,8 @@ TRANSFORM_CONTRACT = {
 }
 SCHEMA_VERSION = "a4_place_yaw.v2"
 NOMINAL_SCALE_BAR_MM = 100.0
+REGION_LAYOUT_SCHEMA = "a4_region_layout.v1"
+REGION_LAYOUT_ID = "a4-red-blue-r001"
 
 
 def rotate(u: float, v: float, yaw_deg: float) -> tuple[float, float]:
@@ -286,6 +291,202 @@ def make_manifest(
     return manifest
 
 
+def make_red_blue_region_layout() -> dict:
+    """Return the workspace-independent A4-local red/blue overlay geometry."""
+    x_min = PRINT_X_MARGIN_MM - PLACE0_XY_MM[0]
+    x_max = PAGE_W_MM - PRINT_X_MARGIN_MM - PLACE0_XY_MM[0]
+    y_min = PRINT_Y_MARGIN_MM - PLACE0_XY_MM[1]
+    y_max = PAGE_H_MM - PRINT_Y_MARGIN_MM - PLACE0_XY_MM[1]
+    layout = {
+        "schema_version": REGION_LAYOUT_SCHEMA,
+        "layout_id": REGION_LAYOUT_ID,
+        "page_mm": {"width": PAGE_W_MM, "height": PAGE_H_MM},
+        "origin_xy_mm": list(PLACE0_XY_MM),
+        "regions": [
+            {
+                "region_id": "RED", "display_name": "RED", "color": "#C62828",
+                "polygon_local_xy_mm": [
+                    [x_min, y_min], [0.0, y_min], [0.0, y_max], [x_min, y_max],
+                ],
+            },
+            {
+                "region_id": "BLUE", "display_name": "BLUE", "color": "#1565C0",
+                "polygon_local_xy_mm": [
+                    [0.0, y_min], [x_max, y_min], [x_max, y_max], [0.0, y_max],
+                ],
+            },
+        ],
+    }
+    layout["layout_digest"] = canonical_digest(layout)
+    return validate_region_layout(layout)
+
+
+def _signed_area(polygon: list[list[float]]) -> float:
+    return 0.5 * sum(
+        left[0] * right[1] - right[0] * left[1]
+        for left, right in zip(polygon, polygon[1:] + polygon[:1])
+    )
+
+
+def _segments_intersect(
+    left_a: list[float], left_b: list[float], right_a: list[float], right_b: list[float],
+) -> bool:
+    def cross(a, b, c):
+        return (b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0])
+
+    values = (
+        cross(left_a, left_b, right_a), cross(left_a, left_b, right_b),
+        cross(right_a, right_b, left_a), cross(right_a, right_b, left_b),
+    )
+    if values[0] * values[1] < 0 and values[2] * values[3] < 0:
+        return True
+    for value, point, start, end in (
+        (values[0], right_a, left_a, left_b),
+        (values[1], right_b, left_a, left_b),
+        (values[2], left_a, right_a, right_b),
+        (values[3], left_b, right_a, right_b),
+    ):
+        if abs(value) < 1e-9 and all(
+            min(start[axis], end[axis]) <= point[axis] <= max(start[axis], end[axis])
+            for axis in (0, 1)
+        ):
+            return True
+    return False
+
+
+def validate_region_layout(value: object) -> dict:
+    """Validate the one bounded visual layout; this grants no motion eligibility."""
+    fields = {
+        "schema_version", "layout_id", "page_mm", "origin_xy_mm", "regions",
+        "layout_digest",
+    }
+    if not isinstance(value, dict) or set(value) != fields:
+        raise ValueError("REGION_LAYOUT_FIELDS")
+    layout = json.loads(json.dumps(value, allow_nan=False))
+    if (
+        layout["schema_version"] != REGION_LAYOUT_SCHEMA
+        or layout["layout_id"] != REGION_LAYOUT_ID
+        or layout["page_mm"] != {"width": PAGE_W_MM, "height": PAGE_H_MM}
+        or layout["origin_xy_mm"] != list(PLACE0_XY_MM)
+        or not isinstance(layout["regions"], list)
+        or [item.get("region_id") for item in layout["regions"]] != ["RED", "BLUE"]
+        or layout["layout_digest"] != canonical_digest({
+            key: item for key, item in layout.items() if key != "layout_digest"
+        })
+    ):
+        raise ValueError("REGION_LAYOUT_CONTRACT")
+    boxes = []
+    for region in layout["regions"]:
+        if (
+            not isinstance(region, dict)
+            or set(region) != {
+                "region_id", "display_name", "color", "polygon_local_xy_mm",
+            }
+            or region["display_name"] != region["region_id"]
+            or re.fullmatch(r"#[0-9A-F]{6}", region["color"]) is None
+            or not isinstance(region["polygon_local_xy_mm"], list)
+            or len(region["polygon_local_xy_mm"]) < 3
+        ):
+            raise ValueError("REGION_LAYOUT_REGION")
+        polygon = region["polygon_local_xy_mm"]
+        if any(
+            not isinstance(point, list) or len(point) != 2
+            or any(isinstance(item, bool) or not isinstance(item, (int, float)) or not math.isfinite(item) for item in point)
+            for point in polygon
+        ) or len({tuple(point) for point in polygon}) != len(polygon):
+            raise ValueError("REGION_LAYOUT_POLYGON")
+        if _signed_area(polygon) <= 0:
+            raise ValueError("REGION_LAYOUT_WINDING")
+        if any(
+            not 0 <= PLACE0_XY_MM[0] + point[0] <= PAGE_W_MM
+            or not 0 <= PLACE0_XY_MM[1] + point[1] <= PAGE_H_MM
+            for point in polygon
+        ):
+            raise ValueError("REGION_LAYOUT_PAGE_BOUNDS")
+        edges = list(zip(polygon, polygon[1:] + polygon[:1]))
+        for left_index, left in enumerate(edges):
+            for right_index, right in enumerate(edges):
+                if right_index <= left_index + 1 or {left_index, right_index} == {0, len(edges) - 1}:
+                    continue
+                if _segments_intersect(*left, *right):
+                    raise ValueError("REGION_LAYOUT_SELF_INTERSECTION")
+        boxes.append((
+            min(point[0] for point in polygon), max(point[0] for point in polygon),
+            min(point[1] for point in polygon), max(point[1] for point in polygon),
+        ))
+    if (
+        boxes != [
+            (PRINT_X_MARGIN_MM - PLACE0_XY_MM[0], 0.0,
+             PRINT_Y_MARGIN_MM - PLACE0_XY_MM[1], PAGE_H_MM - PRINT_Y_MARGIN_MM - PLACE0_XY_MM[1]),
+            (0.0, PAGE_W_MM - PRINT_X_MARGIN_MM - PLACE0_XY_MM[0],
+             PRINT_Y_MARGIN_MM - PLACE0_XY_MM[1], PAGE_H_MM - PRINT_Y_MARGIN_MM - PLACE0_XY_MM[1]),
+        ]
+        or min(boxes[0][1], boxes[1][1]) > max(boxes[0][0], boxes[1][0])
+        and min(boxes[0][3], boxes[1][3]) > max(boxes[0][2], boxes[1][2])
+    ):
+        raise ValueError("REGION_LAYOUT_OVERLAP")
+    return layout
+
+
+def make_region_svg(
+    layout: dict, measured_scale_mm: float = NOMINAL_SCALE_BAR_MM,
+) -> str:
+    layout = validate_region_layout(layout)
+    calibration = print_calibration(measured_scale_mm)
+    content_scale = calibration["content_scale_percent"] / 100.0
+    lines = [
+        '<?xml version="1.0" encoding="UTF-8"?>',
+        f'<svg xmlns="http://www.w3.org/2000/svg" width="{PAGE_W_MM}mm" height="{PAGE_H_MM}mm" viewBox="0 0 {PAGE_W_MM} {PAGE_H_MM}" data-measured-scale-mm="{fmt(measured_scale_mm)}" data-content-scale-percent="{fmt(calibration["content_scale_percent"])}">',
+        '<rect width="297" height="210" fill="white"/>',
+        f'<g transform="translate({fmt(PAGE_W_MM / 2)} {fmt(PAGE_H_MM / 2)}) scale({content_scale:.9f}) translate(-{fmt(PAGE_W_MM / 2)} -{fmt(PAGE_H_MM / 2)})">',
+    ]
+    for region in layout["regions"]:
+        sheet = [
+            (PLACE0_XY_MM[0] + point[0], PLACE0_XY_MM[1] + point[1])
+            for point in region["polygon_local_xy_mm"]
+        ]
+        svg_points = " ".join(
+            f"{fmt(x)},{fmt(PAGE_H_MM - y)}" for x, y in sheet
+        )
+        center_x = sum(point[0] for point in sheet) / len(sheet)
+        center_y = PAGE_H_MM - sum(point[1] for point in sheet) / len(sheet)
+        lines.extend([
+            f'<polygon points="{svg_points}" fill="{region["color"]}" fill-opacity="0.13" stroke="{region["color"]}" stroke-width="1.2"/>',
+            svg_text(
+                center_x, center_y + 4, region["display_name"], 12,
+                fill=region["color"], font_weight="700", text_anchor="middle",
+            ),
+        ])
+    lines.extend(["</g>", "</svg>"])
+    return "\n".join(lines)
+
+
+def render_pdf(svg_path: Path, pdf_path: Path) -> None:
+    """Render one SVG with an already-installed converter."""
+    try:
+        from reportlab.graphics import renderPDF
+        from svglib.svglib import svg2rlg
+    except ImportError:
+        converter = shutil.which("libreoffice")
+        if converter is None:
+            raise SystemExit("--pdf requires svglib/reportlab or libreoffice")
+        with tempfile.TemporaryDirectory(prefix="a4-place-yaw-pdf-") as directory:
+            subprocess.run(
+                [
+                    converter, "--headless", "--convert-to", "pdf",
+                    "--outdir", directory, str(svg_path),
+                ],
+                check=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                text=True, timeout=30,
+            )
+            generated = Path(directory) / f"{svg_path.stem}.pdf"
+            if not generated.is_file():
+                raise SystemExit("PDF converter did not produce an output")
+            shutil.copy2(generated, pdf_path)
+        return
+    renderPDF.drawToFile(svg2rlg(str(svg_path)), str(pdf_path))
+
+
 def self_check() -> None:
     assert rotate(10, 0, 0) == (10.0, 0.0)
     x, y = rotate(10, 0, 90)
@@ -311,6 +512,11 @@ def self_check() -> None:
     assert compensated["print_calibration"]["content_scale_percent"] == 104.166667
     assert compensated["a4_family_digest"] != manifest_0["a4_family_digest"]
     assert print_calibration(100)["content_scale_percent"] == 100.0
+    region_layout = make_red_blue_region_layout()
+    assert validate_region_layout(region_layout) == region_layout
+    assert 'data-content-scale-percent="104.167"' in make_region_svg(
+        region_layout, 96,
+    )
     for invalid_measurement in (96.001, 1e-10):
         try:
             print_calibration(invalid_measurement)
@@ -322,7 +528,11 @@ def self_check() -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--yaw-deg", nargs="+", type=float, required=True)
+    parser.add_argument("--yaw-deg", nargs="+", type=float)
+    parser.add_argument(
+        "--red-blue-zone", action="store_true",
+        help="also write the bounded A4-local RED/BLUE layout artifacts",
+    )
     parser.add_argument("--place-id", default="PLACE_A")
     parser.add_argument("--cols", type=int, default=5)
     parser.add_argument("--rows", type=int, default=3)
@@ -336,6 +546,8 @@ def main() -> None:
     parser.add_argument("--pdf", action="store_true", help="also render A4 PDF (requires svglib and reportlab)")
     parser.add_argument("--output-dir", type=Path, default=Path(__file__).resolve().parent)
     args = parser.parse_args()
+    if not args.yaw_deg and not args.red_blue_zone:
+        parser.error("provide --yaw-deg or --red-blue-zone")
 
     self_check()
     measured_scale_mm = print_calibration(args.measured_scale_mm)["measured_scale_bar_mm"]
@@ -355,7 +567,7 @@ def main() -> None:
     pdf_dir.mkdir(exist_ok=True)
     place_id = safe_id(args.place_id)
 
-    for yaw_deg in args.yaw_deg:
+    for yaw_deg in args.yaw_deg or []:
         tag = yaw_tag(yaw_deg)
         suffix = f"_PRINTCAL_{measurement_tag}MM" if is_compensated else ""
         sheet_id = f"{place_id}_YAW_{tag}{suffix}"
@@ -379,14 +591,31 @@ def main() -> None:
         print(svg_path)
         print(json_path)
         if args.pdf:
-            try:
-                from reportlab.graphics import renderPDF
-                from svglib.svglib import svg2rlg
-            except ImportError as error:
-                raise SystemExit("--pdf requires installed svglib and reportlab") from error
             pdf_path = pdf_dir / f"{stem}.pdf"
-            renderPDF.drawToFile(svg2rlg(str(svg_path)), str(pdf_path))
+            render_pdf(svg_path, pdf_path)
             print(pdf_path)
+
+    if args.red_blue_zone:
+        zone_dir = args.output_dir / "zone_artifacts"
+        zone_dir.mkdir(parents=True, exist_ok=True)
+        suffix = f"_printcal_{measurement_tag}mm" if is_compensated else ""
+        stem = f"a4_red_blue_r001{suffix}"
+        layout = make_red_blue_region_layout()
+        zone_json = zone_dir / f"{stem}.json"
+        zone_svg = zone_dir / f"{stem}.svg"
+        zone_json.write_text(
+            json.dumps(layout, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+        zone_svg.write_text(
+            make_region_svg(layout, measured_scale_mm), encoding="utf-8",
+        )
+        print(zone_json)
+        print(zone_svg)
+        if args.pdf:
+            zone_pdf = zone_dir / f"{stem}.pdf"
+            render_pdf(zone_svg, zone_pdf)
+            print(zone_pdf)
 
 
 if __name__ == "__main__":

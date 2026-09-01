@@ -871,7 +871,7 @@ class OperatorSetupTests(unittest.TestCase):
                 ),
             )
             duplicate = repository / "config/data_factory/workspace_sheets/copy.json"
-            duplicate.parent.mkdir(parents=True)
+            duplicate.parent.mkdir(parents=True, exist_ok=True)
             duplicate.write_bytes(selected.read_bytes())
             self.assertEqual(
                 load_json_strict(select_yaw0_print_profile(

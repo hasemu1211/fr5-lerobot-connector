@@ -83,6 +83,39 @@ def _key(condition: Mapping[str, Any]) -> tuple[Any, ...]:
     return tuple(condition[field] for field in CONDITION_FIELDS)
 
 
+def _validate_domain_axes(
+    conditions: Sequence[Mapping[str, Any]], code: str,
+) -> None:
+    common_fields = (
+        "task_schema_version", "task", "robot_system_id",
+        "collection_profile_digest",
+    )
+    expected = tuple(conditions[0][field] for field in common_fields)
+    if any(
+        tuple(item[field] for field in common_fields) != expected
+        for item in conditions[1:]
+    ):
+        raise ContractError(code)
+    endpoints = {
+        (
+            item["place_id"], item["cell_calibration_id"],
+            item["cell_calibration_digest"],
+        )
+        for item in conditions
+    }
+    if len(endpoints) == 1:
+        return
+    if conditions[0]["task"] != "pick_place" or len(endpoints) != 2:
+        raise ContractError(code)
+    if (
+        len({item[0] for item in endpoints}) != 2
+        or len({item[1] for item in endpoints}) != 2
+        or len({item["object_profile_id"] for item in conditions}) != 1
+        or len({item["grasp_profile_id"] for item in conditions}) != 1
+    ):
+        raise ContractError(code)
+
+
 def _continuity(value: object) -> dict[str, dict[str, Any]]:
     if value is None:
         value = {}
@@ -122,15 +155,7 @@ def build_coverage_report(
     keys = [_key(item) for item in conditions]
     if len(keys) != len(set(keys)):
         raise ContractError("COVERAGE_DOMAIN_DUPLICATE")
-    fixed = tuple(conditions[0][field] for field in (
-        "task_schema_version", "task", "robot_system_id", "cell_calibration_id",
-        "cell_calibration_digest", "collection_profile_digest",
-    ))
-    if any(tuple(item[field] for field in (
-        "task_schema_version", "task", "robot_system_id", "cell_calibration_id",
-        "cell_calibration_digest", "collection_profile_digest",
-    )) != fixed for item in conditions[1:]):
-        raise ContractError("COVERAGE_MIXED_DOMAIN")
+    _validate_domain_axes(conditions, "COVERAGE_MIXED_DOMAIN")
 
     cells = {_key(item): {"condition": item, "counts": {name: 0 for name in COUNTS}, "trajectory_continuity": []} for item in conditions}
     episode_ids: set[str] = set()
@@ -209,9 +234,7 @@ def validate_coverage_report(report: Mapping[str, Any]) -> dict[str, Any]:
         conditions.append(condition)
     if conditions != sorted(conditions, key=_key) or len({_key(item) for item in conditions}) != len(conditions):
         raise ContractError("COVERAGE_REPORT_DOMAIN")
-    fixed_fields = ("task_schema_version", "task", "robot_system_id", "cell_calibration_id", "cell_calibration_digest", "collection_profile_digest")
-    if any(tuple(item[field] for field in fixed_fields) != tuple(conditions[0][field] for field in fixed_fields) for item in conditions[1:]):
-        raise ContractError("COVERAGE_REPORT_DOMAIN")
+    _validate_domain_axes(conditions, "COVERAGE_REPORT_DOMAIN")
     if report.get("domain_digest") != canonical_digest(conditions):
         raise ContractError("COVERAGE_REPORT_DOMAIN")
     suggestion = report.get("suggest_next")

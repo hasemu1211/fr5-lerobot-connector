@@ -48,6 +48,35 @@ class CoverageReportTest(unittest.TestCase):
             report = build_coverage_report(collection_profile_id="profile-r1", domain=[a], episodes=[], slots=[{"condition": a, "state": state}])
             self.assertIsNone(report["suggest_next"])
 
+    def test_pick_place_accepts_exactly_two_endpoint_domains(self):
+        source = {**condition(0), "task": "pick_place"}
+        destination = {
+            **condition(0), "task": "pick_place", "place_id": "place-b",
+            "cell_calibration_id": "cell-r2",
+            "cell_calibration_digest": "sha256:" + "2" * 64,
+            "motion_recipe_digest": "sha256:" + "3" * 64,
+        }
+        report = build_coverage_report(
+            collection_profile_id="profile-r1",
+            domain=[destination, source], episodes=[],
+        )
+        self.assertEqual(
+            [cell["condition"]["place_id"] for cell in report["cells"]],
+            ["place-a", "place-b"],
+        )
+        with self.assertRaisesRegex(ContractError, "COVERAGE_MIXED_DOMAIN"):
+            build_coverage_report(
+                collection_profile_id="profile-r1",
+                domain=[condition(0), {**destination, "task": "pickup_e2e"}],
+                episodes=[],
+            )
+        with self.assertRaisesRegex(ContractError, "COVERAGE_MIXED_DOMAIN"):
+            build_coverage_report(
+                collection_profile_id="profile-r1",
+                domain=[source, {**destination, "object_profile_id": "cube-r2"}],
+                episodes=[],
+            )
+
     def test_admission_branches_and_exact_source_digest_boundary(self):
         at = condition(0)
         states = ["COLLECTED", "TECHNICAL_PASS_CANDIDATE", "PENDING_REVIEW", "HUMAN_SEMANTIC_PASS", "HUMAN_TRAINING_APPROVED", "REJECTED", "QUARANTINED"]

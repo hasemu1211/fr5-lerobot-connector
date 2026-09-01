@@ -23,12 +23,13 @@
         <section id="step-plan" class="flow-step" data-step="plan" tabindex="-1" hidden>
           <div class="setup-tools"><div id="workspace-entry" hidden><strong>작업영역 관리</strong><button id="open-workspace" type="button">새 작업영역 등록</button></div><div id="start-pose-entry" hidden><strong>시작 자세 관리</strong><button id="open-start-pose" type="button">시작 자세 관리</button></div></div>
           <fieldset id="catalog-fields">
-            <select data-axis="workspace"></select><small data-axis-hint="workspace"></small><select id="frame-select" data-axis="frame"></select><small data-axis-hint="frame"></small>
+            <select id="frame-select" data-axis="frame"></select><small data-axis-hint="frame"></small>
             <select data-axis="task"></select><small data-axis-hint="task"></small><select data-axis="object"></select><small data-axis-hint="object"></small>
             <select data-axis="grasp"></select><small data-axis-hint="grasp"></small><select data-axis="start" hidden></select><small data-axis-hint="start" hidden></small>
             <select data-axis="motion"></select><small data-axis-hint="motion"></small><select data-axis="variant"></select><small data-axis-hint="variant"></small>
             <div><strong id="camera-selection-label"></strong><select data-axis="camera" hidden></select><small data-axis-hint="camera" hidden></small></div><select data-axis="data_mode"></select><small data-axis-hint="data_mode"></small>
           </fieldset>
+          <label><span id="workspace-select-label">작업영역</span><select id="workspace-select" data-axis="workspace"></select><small data-axis-hint="workspace"></small></label><p id="workspace-route-summary"></p>
           <fieldset id="authoring-mode"><label><input type="radio" name="authoring_mode" value="ASSISTED">assisted</label><label><input type="radio" name="authoring_mode" value="DIRECT_EDIT">direct</label></fieldset>
           <label>count<input id="count-input" type="number" min="1" max="100"></label><label>repeat<input id="repeat-input" type="number" min="1" max="100"></label><select id="split-select" data-axis="split"></select>
           <h4 id="current-object-title">current object</h4><p id="current-object-status"></p><form id="current-object-form"><label>X<input id="current-object-x" type="number" step="any" required></label><label>Y<input id="current-object-y" type="number" step="any" required></label><label>yaw<input id="current-object-yaw" type="number" step="any" required></label><button id="apply-current-object" type="submit">apply</button></form>
@@ -110,6 +111,7 @@
         };
       });
       if (stateKey === "authoring") {
+        flat.coverage = {sequence: []};
         flat.revision = authoringRevision;
         if (authoringDigest) flat.view_digest = authoringDigest;
         if (authoringSetupSummary) flat.setup.summary = authoringSetupSummary;
@@ -483,6 +485,9 @@
         const authorize = document.querySelector('[data-op="authorize_campaign"]');
         check(authorize && document.querySelector("#review-summary").textContent.includes("3회"), "REVIEW_CAMPAIGN shows one authorization and readable count");
         check(document.querySelector("#review-summary").textContent.includes("56%") && document.querySelector("#review-summary").textContent.includes("56–58%") && document.querySelector("#review-summary").textContent.includes("닫기 속도 20% / 힘 20%") && document.querySelector("#review-summary").textContent.includes("열기 속도 10% / 힘 50%") && document.querySelector("#review-summary").textContent.includes("TEST_ONLY 조정 후보"), "review shows the object-scoped test-only gripper retune");
+        (await fixturePromise).base_view.campaign_review.gripper_tuning.status = "QUALIFIED_PROFILE";
+        await loadView();
+        check(document.querySelector("#review-summary").textContent.includes("검증된 등록 프로필"), "review accepts the qualified object-scoped gripper profile without calling it a retune candidate");
         check(!document.querySelector("#review-plan").hidden && document.querySelectorAll("#review-plan-list li").length === 3, "review shows the exact finite episode sequence");
         authorize.click();
         await waitFor(() => currentView?.runtime.workflow_state === "RUNNING");

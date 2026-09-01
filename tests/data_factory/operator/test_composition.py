@@ -45,7 +45,11 @@ from tools.data_factory.operator.workflow.campaign import (
     _campaign_camera_warmup,
     build_physical_test_contract,
 )
-from tools.data_factory.operator.setup.contracts import NO_AUTHORITY, build_test_only_root_binding
+from tools.data_factory.operator.setup.contracts import (
+    NO_AUTHORITY,
+    build_test_only_root_binding,
+    build_test_only_start_binding,
+)
 from tools.fr5_data_factory import ContractError, canonical_digest, load_json_strict
 
 from .fixtures import (
@@ -54,6 +58,7 @@ from .fixtures import (
     payload,
     physical_contract,
     qualification_inputs,
+    pose_snapshot,
     runtime_motion,
     runtime_validated,
     single_hypothesis,
@@ -1455,6 +1460,110 @@ feedback:
             finally:
                 console.close()
 
+    def test_cross_workspace_pick_place_binds_each_endpoint_through_home_start(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.portable_repository(root)
+            devices = [
+                "usb-Cross_UP-video-index0",
+                "usb-Cross_WRIST-video-index0",
+            ]
+            poses = [
+                {"place_id": "PLACE_A", "yaw_deg": 0, "x_mm": 0, "y_mm": 0},
+                {"place_id": "PLACE_B", "yaw_deg": 0, "x_mm": 0, "y_mm": 0},
+                {"place_id": "PLACE_A", "yaw_deg": 0, "x_mm": 0, "y_mm": -35},
+            ]
+            workspace_bindings = {
+                "PLACE_A": {
+                    "frame_id": "place-a-yaw0-r003",
+                    "selected_sheet": "config/data_factory/test_only_physical/goal2-place1/yaw0_sheet.json",
+                    "yaw0_sheet": "config/data_factory/test_only_physical/goal2-place1/yaw0_sheet.json",
+                    "motion_qualification": "config/data_factory/motion_qualifications/fr5-place-a-wood-cube-24mm-r001.json",
+                },
+                "PLACE_B": {
+                    "frame_id": "place-b-yaw0-r001",
+                    "selected_sheet": "config/data_factory/workspace_sheets/place-b-yaw0-r001_yaw0_sheet.json",
+                    "yaw0_sheet": "config/data_factory/workspace_sheets/place-b-yaw0-r001_yaw0_sheet.json",
+                    "motion_qualification": "config/data_factory/motion_qualifications/fr5-place-b-wood-cube-24mm-r001.json",
+                },
+            }
+            opened = {
+                "active": True, "position_valid": True, "gripper_index": 1,
+                "reference_position_m": 0.021, "feedback_position_m": 0.021,
+                "sample_age_s": 0.0, "max_age_s": 0.1,
+                "source": "CONTROLLER_STATE",
+            }
+            console, _context = build_physical_operator_console(
+                repository_root=root,
+                session_id="cross-workspace-r001",
+                run_id="cross-workspace-run-r001",
+                operator_label="local-operator",
+                job_path="config/data_factory/jobs/center-live-24mm-20260901-r001.job.json",
+                yaw0_sheet=workspace_bindings["PLACE_A"]["yaw0_sheet"],
+                motion_qualification_path=workspace_bindings["PLACE_A"]["motion_qualification"],
+                collection_profile_path="config/data_factory/collection_profiles/fr5-up-wrist-rgb-30hz-v1.json",
+                gripper_retune_path=None,
+                workspace_bindings=workspace_bindings,
+                discovery_call=lambda: devices,
+                selected_camera_bindings={"up": devices[0], "wrist": devices[1]},
+                gripper_readback_call=lambda: copy.deepcopy(opened),
+                activation_call=lambda: True,
+                task_id="pick_place", requested_count=2,
+                direct_pose_sequence=poses,
+                clock=lambda: NOW,
+            )
+            try:
+                view = console.bridge_core.snapshot()
+                console.bridge_core.consume(envelope(
+                    view, "compile_draft", {
+                        "draft_id": view["projection"]["draft"]["draft_id"],
+                        "data_disposition": "TEST_ONLY",
+                    }, "compile-cross-workspace-r001",
+                ))
+                hypothesis = console.campaign_operator.hypothesis
+                manifest = console.campaign_operator.manifest
+                self.assertEqual(
+                    hypothesis["fixed_contract"]["schema_version"],
+                    "data_factory.fr5_fixed_contract.v2",
+                )
+                self.assertEqual(
+                    [item["workspace_id"] for item in hypothesis["fixed_contract"]["endpoint_bindings"]],
+                    ["PLACE_A", "PLACE_B"],
+                )
+                home = load_json_strict(
+                    root / "config/data_factory/home_candidates/fr5-lab-a-home-r001.json",
+                )
+                motions = {
+                    place: load_json_strict(root / binding["motion_qualification"])
+                    for place, binding in workspace_bindings.items()
+                }
+                bound = []
+                for slot in manifest["slots"]:
+                    base = next(
+                        item for item in hypothesis["base_conditions"]
+                        if item["base_condition_digest"] == slot["base_condition_digest"]
+                    )
+                    receipt = next(
+                        item for item in hypothesis["resolver_receipts"]
+                        if item["resolver_result_digest"] == base["resolver_result_digest"]
+                    )
+                    place = receipt["normalized_job"]["place_id"]
+                    motion = motions[place]
+                    start = build_test_only_start_binding(
+                        manifest=manifest, hypothesis=hypothesis, slot=slot,
+                        motion_qualification=motion, home_candidate=home,
+                        current_snapshot=pose_snapshot(
+                            motion["qualified_safe_joint_positions_rad"], age=0.01,
+                        ),
+                    )
+                    bound.append((place, start["motion_qualification_id"]))
+                self.assertEqual(bound, [
+                    ("PLACE_A", "fr5-place-a-wood-cube-24mm-r001"),
+                    ("PLACE_B", "fr5-place-b-wood-cube-24mm-r001"),
+                ])
+            finally:
+                console.close()
+
     def test_physical_episode_consumes_hypothesis_resolver_receipt(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -2507,6 +2616,63 @@ feedback:
                 self.assertFalse((root / "outputs").exists())
                 environment_query.assert_not_called()
                 discovery.assert_not_called()
+            finally:
+                application.close()
+
+    def test_product_application_exposes_only_the_active_job_handling_family(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.portable_repository(root)
+            device = "usb-Generic_USB2.0_PC_CAMERA-video-index0"
+            blocked = {
+                "schema_version": "data_factory.operator_environment.v1",
+                "state": "BLOCKED", "observed_at": "2026-08-26T03:00:00Z",
+                "components": {
+                    name: {
+                        "state": "BLOCKED", "owner": None,
+                        "reason": "TEST_BLOCK",
+                    }
+                    for name in ("robot", "controller", "gripper", "camera")
+                },
+            }
+            application, _context = build_physical_operator_application(
+                repository_root=root,
+                session_id="active-handling-family-r001",
+                operator_label="local-operator",
+                environment_call=lambda: copy.deepcopy(blocked),
+                prepare_environment_call=lambda: copy.deepcopy(blocked),
+                initial_environment=blocked,
+                initial_catalog=load_operator_catalog(root, device_ids=[device]),
+                job_path=(
+                    "config/data_factory/jobs/"
+                    "center-live-24mm-20260901-r001.job.json"
+                ),
+                run_live_call=mock.Mock(
+                    side_effect=AssertionError("live was called"),
+                ),
+                clock=lambda: NOW,
+            )
+            try:
+                view = application.bridge_core.snapshot()["projection"]
+                self.assertEqual(
+                    [item["id"] for item in view["catalog"]["axes"]["object"]],
+                    ["wood-cube-24mm-r001"],
+                )
+                self.assertEqual(
+                    [item["id"] for item in view["catalog"]["axes"]["grasp"]],
+                    ["wood-cube-24mm-top-3p5mm-r001"],
+                )
+                self.assertEqual(
+                    {
+                        item["sources"]["job"]
+                        for item in application.catalog["combinations"]
+                    },
+                    {
+                        "config/data_factory/jobs/"
+                        "center-live-24mm-20260901-r001.job.json"
+                    },
+                )
+                self.assertFalse((root / "outputs").exists())
             finally:
                 application.close()
 

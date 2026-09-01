@@ -87,6 +87,10 @@ COMMON_RUN_KEYS = {
 }
 RECYCLE_COORD_KEYS = {"recycle_x_mm", "recycle_y_mm"}
 RECYCLE_YAW_KEY = "recycle_yaw_deg"
+DESTINATION_KEY = "destination"
+DESTINATION_KEYS = {
+    "job", "selected_sheet", "yaw0_sheet", "motion_qualification",
+}
 LIVE_RUN_KEYS = COMMON_RUN_KEYS | {"camera_profile", "dataset_root", "run_root"}
 RESPONSE_KEYS = {"schema_version", "op_id", "op", "ok", "code", "state", "run_id", "plan_digest", "data"}
 EVENT_KEYS = {"schema_version", "event", "sequence", "origin_op_id", "ok", "code", "state", "run_id", "plan_digest", "data"}
@@ -150,6 +154,7 @@ def _run_payload(value):
     keys = set(COMMON_RUN_KEYS if value["mode"] == "plan_only" else LIVE_RUN_KEYS)
     supplied_recycle = set(value) & RECYCLE_COORD_KEYS
     supplied_recycle_yaw = RECYCLE_YAW_KEY in value
+    supplied_destination = DESTINATION_KEY in value
     if supplied_recycle:
         if supplied_recycle != RECYCLE_COORD_KEYS:
             raise ContractError("RUN_PAYLOAD")
@@ -158,11 +163,21 @@ def _run_payload(value):
         if not supplied_recycle:
             raise ContractError("RUN_PAYLOAD")
         keys.add(RECYCLE_YAW_KEY)
+    if supplied_destination:
+        if supplied_recycle or supplied_recycle_yaw:
+            raise ContractError("RUN_PAYLOAD")
+        destination = value[DESTINATION_KEY]
+        _exact(destination, DESTINATION_KEYS, "RUN_DESTINATION")
+        if not isinstance(destination["job"], dict):
+            raise ContractError("RUN_DESTINATION")
+        for key in DESTINATION_KEYS - {"job"}:
+            _text(destination[key], "RUN_DESTINATION")
+        keys.add(DESTINATION_KEY)
     _exact(value, keys, "RUN_PAYLOAD")
     _identifier(value["run_id"], "RUN_ID")
     if not isinstance(value["job"], dict):
         raise ContractError("RUN_JOB")
-    for key in keys - {"job"} - RECYCLE_COORD_KEYS - {RECYCLE_YAW_KEY}:
+    for key in keys - {"job", DESTINATION_KEY} - RECYCLE_COORD_KEYS - {RECYCLE_YAW_KEY}:
         _text(value[key], "RUN_PAYLOAD")
     for key in supplied_recycle | ({RECYCLE_YAW_KEY} if supplied_recycle_yaw else set()):
         if isinstance(value[key], bool) or not isinstance(value[key], (int, float)) or not math.isfinite(value[key]):
@@ -301,10 +316,36 @@ def resolve_inputs(
     task_id = validated["normalized_job"]["task"]
     if task_id not in TASK_IDS:
         raise ContractError("TASK_NOT_SUPPORTED")
-    if task_id == "pick_place" and not RECYCLE_COORD_KEYS <= set(payload):
+    destination_payload = payload.get(DESTINATION_KEY)
+    if task_id == "pick_place" and (
+        not RECYCLE_COORD_KEYS <= set(payload)
+        and destination_payload is None
+    ):
         raise ContractError("TASK_DESTINATION_REQUIRED")
+    if task_id != "pick_place" and destination_payload is not None:
+        raise ContractError("RUN_DESTINATION")
     release_pose = {key: validated["normalized_job"][key] for key in ("place_id", "yaw_deg", "x_mm", "y_mm")}
-    if RECYCLE_COORD_KEYS <= set(payload):
+    destination_validated = None
+    destination_motion_qualification = None
+    if destination_payload is not None:
+        _exact(destination_payload, DESTINATION_KEYS, "RUN_DESTINATION")
+        destination_validated = validate_job_spec(
+            destination_payload["job"],
+            paths={
+                "selected_sheet": destination_payload["selected_sheet"],
+                "yaw0_sheet": destination_payload["yaw0_sheet"],
+            },
+            config_root=payload["config_root"],
+        )
+        release_pose = {
+            key: destination_validated["normalized_job"][key]
+            for key in ("place_id", "yaw_deg", "x_mm", "y_mm")
+        }
+        destination_motion_qualification = _load(
+            destination_payload["motion_qualification"],
+            "MOTION_QUALIFICATION_IO",
+        )
+    elif RECYCLE_COORD_KEYS <= set(payload):
         sheet = _load(payload["selected_sheet"], "INPUT_SELECTED_SHEET")
         coordinate_safety = {
             "object_dimensions_mm": validated["object_profile"]["dimensions_mm"],
@@ -366,7 +407,9 @@ def resolve_inputs(
         _load(payload["home_candidate"], "HOME_CANDIDATE_IO"),
         urdf=payload["urdf"],
         expected_robot_system_id=payload["expected_robot_system_id"],
-        release_pose=release_pose,
+        release_pose=(None if destination_validated is not None else release_pose),
+        release_validated=destination_validated,
+        release_motion_qualification=destination_motion_qualification,
         planning_scene_profile=planning_scene_profile,
     )
     return validated, program, scene_binding_call(validated, release_pose, payload["run_id"])
