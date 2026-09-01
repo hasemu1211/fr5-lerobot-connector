@@ -29,7 +29,7 @@ from tools.data_factory.operator.setup.contracts import (
     normalize_camera_devices,
 )
 from tools.data_factory.operator.setup.environment import OperatorEnvironment
-from tools.data_factory.operator.setup.processes import OperatorStack
+from tools.data_factory.operator.setup.processes import MOTION_COMPONENTS, OperatorStack
 from tools.fr5_data_factory import (
     COLLECTION_PROFILE_V2_KEYS,
     ContractError,
@@ -57,12 +57,16 @@ ROS_PARAMETER_DISCOVERY_SPIN_SECONDS = "0.2"
 
 
 class PhysicalOperatorEnvironment(OperatorEnvironment):
-    """Operator environment with a camera-only foreground rebind seam."""
+    """Operator environment with camera rebind and explicit recovery seams."""
 
-    def __init__(self, *args, rebind_call, stop_cameras_call, **kwargs) -> None:
+    def __init__(
+        self, *args, rebind_call, stop_cameras_call,
+        prepare_home_recovery_call, **kwargs,
+    ) -> None:
         super().__init__(*args, **kwargs)
         self._rebind_call = rebind_call
         self._stop_cameras_call = stop_cameras_call
+        self._prepare_home_recovery_call = prepare_home_recovery_call
 
     def rebind_cameras(
         self, collection_profile: Mapping[str, Any],
@@ -72,6 +76,10 @@ class PhysicalOperatorEnvironment(OperatorEnvironment):
 
     def stop_cameras(self) -> dict[str, Any]:
         return self._stop_cameras_call()
+
+    def prepare_home_recovery(self) -> dict[str, Any]:
+        """Prepare the existing motion owner for one explicit HOME recovery."""
+        return self._prepare_home_recovery_call()
 
 
 class _ForegroundProcessGroup:
@@ -637,7 +645,7 @@ def build_physical_operator_environment(
         gripper_setup=setup_attached_gripper,
     )
 
-    def bootstrap_missing_motion() -> None:
+    def command_server_maintenance(*, home_recovery: bool) -> dict[str, Any] | None:
         ip = controller_ip or os.environ.get("FR5_CONTROLLER_IP")
         if not isinstance(ip, str) or not ip.strip():
             raise ContractError("OPERATOR_ENVIRONMENT_CONTROLLER_IP")
@@ -648,6 +656,10 @@ def build_physical_operator_environment(
         try:
             if not settle_policy(lambda: process.poll() is None and "/fr_command_server" in nodes()):
                 raise ContractError("OPERATOR_ENVIRONMENT_GRIPPER_BOOTSTRAP")
+            recovery = (
+                _prepare_robot_for_home_recovery()
+                if home_recovery else None
+            )
             readback = gripper_readback_call(None, None)
             if readback.get("source") != "COMMAND_SERVER_MAINTENANCE":
                 raise ContractError("OPERATOR_ENVIRONMENT_GRIPPER_OWNER")
@@ -662,8 +674,54 @@ def build_physical_operator_environment(
             _stop_owned_process(process)
         if not settle_policy(lambda: "/fr_command_server" not in nodes()):
             raise ContractError("OPERATOR_ENVIRONMENT_GRIPPER_OWNER")
+        return recovery
+
+    def bootstrap_missing_motion() -> None:
+        command_server_maintenance(home_recovery=False)
 
     environment: PhysicalOperatorEnvironment
+
+    def prepare_home_recovery() -> dict[str, Any]:
+        current = environment.projection()
+        motion = [current["components"][name] for name in MOTION_COMPONENTS]
+        if any(item["state"] == "AMBIGUOUS" for item in motion) or (
+            any(item["state"] == "READY" for item in motion)
+            and not owned_running("motion")
+            and not all(
+                item["reason"] == "OPERATOR_STACK_CHILD_EXITED"
+                for item in motion
+            )
+        ):
+            raise ContractError("HOME_RECOVERY_MOTION_OWNER")
+
+        # Only this environment may retire its known motion child.  An external
+        # graph remains visible below and therefore blocks the maintenance node.
+        stack.reconfigure("robot_stack", commands["robot_stack"])
+        try:
+            if not settle_policy(lambda: not ({
+                "/controller_manager", "/fr_command_server",
+            } & nodes())):
+                raise ContractError("HOME_RECOVERY_MOTION_OWNER")
+            recovery = command_server_maintenance(home_recovery=True)
+        finally:
+            # A rejected maintenance request must not strand the normal motion
+            # graph while the camera owner stays alive.
+            stack.ensure()
+
+        def motion_ready() -> bool:
+            try:
+                return (
+                    "/controller_manager" in nodes()
+                    and EXPECTED_CONTROLLERS <= _controller_names(controller_listing())
+                )
+            except ContractError:
+                return False
+
+        if not settle_policy(motion_ready):
+            raise ContractError("HOME_RECOVERY_GRAPH")
+        return {
+            **(recovery or {}), "status": "READY", "graph_restarted": True,
+        }
 
     def rebind_cameras(
         profile: Mapping[str, Any], devices: Mapping[str, Mapping[str, str]],
@@ -684,6 +742,7 @@ def build_physical_operator_environment(
         bootstrap_missing_motion=bootstrap_missing_motion,
         rebind_call=rebind_cameras,
         stop_cameras_call=stop_cameras,
+        prepare_home_recovery_call=prepare_home_recovery,
     )
     return environment
 
@@ -704,8 +763,10 @@ def _bounded_command(command: list[str], code: str, *, timeout_s: float = 5) -> 
     return completed.stdout
 
 
-def _readonly_command(command: list[str], code: str) -> str:
-    return _bounded_command(command, code)
+def _readonly_command(
+    command: list[str], code: str, *, timeout_s: float = 5,
+) -> str:
+    return _bounded_command(command, code, timeout_s=timeout_s)
 
 
 def _controller_names(value: str) -> set[str]:
@@ -716,12 +777,14 @@ def _controller_names(value: str) -> set[str]:
     }
 
 
-def _remote_gripper_command(command: str, *, expected_fields: int) -> list[int]:
+def _remote_robot_command(
+    command: str, *, expected_fields: int, timeout_s: float = 35,
+) -> list[int]:
     output = _bounded_command([
         "ros2", "service", "call", "/fairino_remote_command_service",
         "fairino_msgs/srv/RemoteCmdInterface",
         json.dumps({"cmd_str": command}, separators=(",", ":")),
-    ], "GRIPPER_MAINTENANCE_SERVICE", timeout_s=35)
+    ], "GRIPPER_MAINTENANCE_SERVICE", timeout_s=timeout_s)
     match = re.search(r"cmd_res(?:=|:)\s*['\"]?(-?\d+(?:,-?\d+)*)", output)
     if match is None:
         raise ContractError("GRIPPER_MAINTENANCE_RESPONSE")
@@ -729,6 +792,106 @@ def _remote_gripper_command(command: str, *, expected_fields: int) -> list[int]:
     if len(result) != expected_fields:
         raise ContractError("GRIPPER_MAINTENANCE_RESPONSE")
     return result
+
+
+def _robot_recovery_state() -> dict[str, Any]:
+    output = _readonly_command([
+        "ros2", "topic", "echo", "/nonrt_state_data",
+        "fairino_msgs/msg/RobotNonrtState", "--once", "--timeout", "5",
+        "--no-daemon",
+    ], "HOME_RECOVERY_STATE", timeout_s=6)
+    try:
+        import yaml
+    except ImportError as exc:
+        raise ContractError("HOME_RECOVERY_STATE") from exc
+    message_start = re.search(r"(?m)^robot_mode:\s*", output)
+    if message_start is None:
+        raise ContractError("HOME_RECOVERY_STATE")
+    try:
+        state = next(yaml.safe_load_all(output[message_start.start():]))
+        robot_mode = state["robot_mode"]
+        collision_err = float(state["collision_err"])
+    except (KeyError, StopIteration, TypeError, ValueError, yaml.YAMLError) as exc:
+        raise ContractError("HOME_RECOVERY_STATE") from exc
+    if (
+        type(robot_mode) is not int
+        or robot_mode not in {0, 1}
+        or not math.isfinite(collision_err)
+        or collision_err < 0
+    ):
+        raise ContractError("HOME_RECOVERY_STATE")
+    return {"robot_mode": robot_mode, "collision_err": collision_err}
+
+
+def _prepare_robot_for_home_recovery(
+    *, remote_call: Callable[..., list[int]] | None = None,
+    state_call: Callable[[], Mapping[str, Any]] | None = None,
+    settle_call: Callable[[float], Any] = time.sleep,
+) -> dict[str, Any]:
+    """Prepare AUTO+enabled state for one explicit, verified HOME request."""
+    remote = remote_call or _remote_robot_command
+    read_state = state_call or _robot_recovery_state
+    state = read_state()
+    if state.get("robot_mode") not in {0, 1}:
+        raise ContractError("HOME_RECOVERY_STATE")
+    emergency = remote("GetRobotEmergencyStopState()", expected_fields=2)
+    safety = remote("GetSafetyStopState()", expected_fields=3)
+    if (
+        emergency != [0, 0]
+        or safety[0] != 0
+        or safety[1:] != [0, 0]
+    ):
+        raise ContractError("HOME_RECOVERY_SAFETY_STOP_ACTIVE")
+    errors = remote("GetRobotErrorCode()", expected_fields=3)
+    if errors[0] != 0:
+        raise ContractError("HOME_RECOVERY_STATE")
+    has_error = errors[1:] != [0, 0]
+    collision = float(state.get("collision_err", -1)) > 0
+    if has_error and not collision:
+        raise ContractError("HOME_RECOVERY_NON_COLLISION_FAULT")
+    if collision:
+        if remote("ResetAllError()", expected_fields=1) != [0]:
+            raise ContractError("HOME_RECOVERY_FAULT_CLEAR")
+        errors = remote("GetRobotErrorCode()", expected_fields=3)
+        if errors != [0, 0, 0]:
+            raise ContractError("HOME_RECOVERY_FAULT_CLEAR")
+    mode_switched = state["robot_mode"] == 1
+    if mode_switched:
+        try:
+            mode_result = remote("Mode(0)", expected_fields=1, timeout_s=5)
+        except ContractError as exc:
+            print(json.dumps({
+                "event": "home_recovery_mode_switch_failed",
+                "failure": exc.code,
+            }, sort_keys=True), file=sys.stderr, flush=True)
+            raise ContractError("HOME_RECOVERY_MODE_SWITCH") from exc
+        if mode_result != [0]:
+            print(json.dumps({
+                "event": "home_recovery_mode_switch_rejected",
+                "sdk_result": mode_result,
+            }, sort_keys=True), file=sys.stderr, flush=True)
+            raise ContractError("HOME_RECOVERY_MODE_SWITCH")
+        for delay_s in (0.1, 0.25, 0.5):
+            settle_call(delay_s)
+            state = read_state()
+            if state.get("robot_mode") == 0:
+                break
+        else:
+            print(json.dumps({
+                "event": "home_recovery_auto_feedback_missing",
+                "robot_mode": state.get("robot_mode"),
+            }, sort_keys=True), file=sys.stderr, flush=True)
+            raise ContractError("HOME_RECOVERY_AUTO_MODE_REQUIRED")
+    if remote("RobotEnable(1)", expected_fields=1) != [0]:
+        raise ContractError("HOME_RECOVERY_ENABLE")
+    if remote("GetRobotErrorCode()", expected_fields=3) != [0, 0, 0]:
+        raise ContractError("HOME_RECOVERY_ENABLE")
+    return {
+        "collision_cleared": collision,
+        "mode_switched": mode_switched,
+        "robot_enabled": True,
+        "robot_mode": "AUTO",
+    }
 
 
 def capture_gripper_setup_readback(
@@ -803,10 +966,10 @@ def capture_gripper_setup_readback(
             "source": "CONTROLLER_STATE",
         }
     if command_server and not listing.strip():
-        activation = _remote_gripper_command(
+        activation = _remote_robot_command(
             "GetGripperActivateStatus()", expected_fields=3,
         )
-        position = _remote_gripper_command(
+        position = _remote_robot_command(
             "GetGripperCurPosition()", expected_fields=3,
         )
         active = activation[0] == 0 and activation[1] == 0 and activation[2] & 1 == 1
@@ -852,36 +1015,36 @@ def normalize_gripper_after_operator_ready(
             raise ContractError("GRIPPER_MAINTENANCE_ACTION")
         return {"status": "NORMALIZED", "requires_graph_switch": False}
     if source == "COMMAND_SERVER_MAINTENANCE":
-        activation = _remote_gripper_command(
+        activation = _remote_robot_command(
             "GetGripperActivateStatus()", expected_fields=3,
         )
         if activation[0] != 0:
             raise ContractError("GRIPPER_MAINTENANCE_ACTION")
         if activation[1] != 0:
-            if _remote_gripper_command(
+            if _remote_robot_command(
                 "ResetAllError()", expected_fields=1,
             ) != [0]:
                 raise ContractError("GRIPPER_MAINTENANCE_ACTION")
-            activation = _remote_gripper_command(
+            activation = _remote_robot_command(
                 "GetGripperActivateStatus()", expected_fields=3,
             )
             if activation[0] != 0 or activation[1] != 0:
                 raise ContractError("GRIPPER_MAINTENANCE_ACTION")
         if activation[2] & 1 != 1:
-            if _remote_gripper_command(
+            if _remote_robot_command(
                 "ActGripper(1,0)", expected_fields=1,
             ) != [0]:
                 raise ContractError("GRIPPER_MAINTENANCE_ACTION")
             settle_call(1.0)
-            if _remote_gripper_command(
+            if _remote_robot_command(
                 "ActGripper(1,1)", expected_fields=1,
             ) != [0]:
                 raise ContractError("GRIPPER_MAINTENANCE_ACTION")
             settle_call(2.0)
-        if _remote_gripper_command("MoveGripper(1,100)", expected_fields=1) != [0]:
+        if _remote_robot_command("MoveGripper(1,100)", expected_fields=1) != [0]:
             raise ContractError("GRIPPER_MAINTENANCE_ACTION")
-        done = _remote_gripper_command("GetGripperMotionDone()", expected_fields=3)
-        position = _remote_gripper_command("GetGripperCurPosition()", expected_fields=3)
+        done = _remote_robot_command("GetGripperMotionDone()", expected_fields=3)
+        position = _remote_robot_command("GetGripperCurPosition()", expected_fields=3)
         if done != [0, 0, 1] or position != [0, 0, 100]:
             raise ContractError("GRIPPER_MAINTENANCE_ACTION")
         return {"status": "NORMALIZED", "requires_graph_switch": True}

@@ -169,6 +169,11 @@
       if (networkFailure && path.startsWith("/api/")) throw new TypeError("fixture network down");
       if (bridgeTokenRejected && path === "/api/view") return new Response(JSON.stringify({schema_version: "data_factory.operator_intent_result.v1", ok: false, code: "BRIDGE_TOKEN", consumed: false}), {status: 403, headers: {"Content-Type": "application/json"}});
       if (path === "/api/view") return new Response(JSON.stringify(await fixtureView()), {status: 200, headers: {"Content-Type": "application/json"}});
+      if (path === "/api/view/watch") return new Promise((_resolve, reject) => {
+        const abort = () => reject(new DOMException("Aborted", "AbortError"));
+        if (init.signal?.aborted) abort();
+        else init.signal?.addEventListener("abort", abort, {once: true});
+      });
       if (path === "/api/intent") {
         const fixture = await fixturePromise;
         const request = {headers: new Headers(init.headers), body: JSON.parse(init.body)};

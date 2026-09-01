@@ -10,7 +10,7 @@ from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, Mapping
-from urllib.parse import unquote, urlsplit
+from urllib.parse import parse_qs, unquote, urlsplit
 
 from tools.data_factory.operator.workflow.intents import (
     OperatorIntentCore,
@@ -20,6 +20,28 @@ from tools.fr5_data_factory import ContractError
 
 
 MAX_BODY_BYTES = 65_536
+MAX_WATCH_REVISION = 2**63 - 1
+
+
+def _watch_after_revision(query: str) -> int:
+    try:
+        values = parse_qs(
+            query, keep_blank_values=True, strict_parsing=True, max_num_fields=2,
+        )
+    except ValueError as exc:
+        raise ContractError("BRIDGE_WATCH_QUERY") from exc
+    if set(values) != {"after_revision"} or len(values["after_revision"]) != 1:
+        raise ContractError("BRIDGE_WATCH_QUERY")
+    raw = values["after_revision"][0]
+    if (
+        not raw or len(raw) > 19 or any(character < "0" or character > "9" for character in raw)
+        or len(raw) > 1 and raw.startswith("0")
+    ):
+        raise ContractError("BRIDGE_WATCH_QUERY")
+    revision = int(raw)
+    if revision > MAX_WATCH_REVISION:
+        raise ContractError("BRIDGE_WATCH_QUERY")
+    return revision
 
 
 def _json_loads(payload: bytes) -> Any:
@@ -65,6 +87,7 @@ class LoopbackBridge:
     def __init__(
         self, *, core: OperatorIntentCore, ui_root: str | Path,
         host: str = "127.0.0.1", port: int = 0, token: str | None = None,
+        watch_timeout_s: float = 5.0,
     ):
         if host not in {"127.0.0.1", "::1"}:
             raise ContractError("BRIDGE_LOOPBACK_REQUIRED")
@@ -75,6 +98,14 @@ class LoopbackBridge:
         self.token = token or secrets.token_urlsafe(32)
         if not isinstance(self.token, str) or len(self.token) < 24:
             raise ContractError("BRIDGE_TOKEN")
+        if (
+            isinstance(watch_timeout_s, bool)
+            or not isinstance(watch_timeout_s, (int, float))
+            or not 0 < watch_timeout_s <= 60
+        ):
+            raise ContractError("BRIDGE_WATCH_TIMEOUT")
+        self.watch_timeout_s = float(watch_timeout_s)
+        self._closing = threading.Event()
         server_type = _IPv6ThreadingHTTPServer if host == "::1" else _ThreadingHTTPServer
         self.server = server_type((host, port), self._handler())
         self.server.daemon_threads = False
@@ -129,7 +160,8 @@ class LoopbackBridge:
             def do_GET(self):
                 if not self._host_ok():
                     return self._error(HTTPStatus.BAD_REQUEST, "BRIDGE_HOST")
-                path = urlsplit(self.path).path
+                request = urlsplit(self.path)
+                path = request.path
                 if path == "/api/view":
                     if self.headers.get("X-Operator-Token") != bridge.token:
                         return self._error(HTTPStatus.FORBIDDEN, "BRIDGE_TOKEN")
@@ -137,6 +169,23 @@ class LoopbackBridge:
                         return self._json(HTTPStatus.OK, bridge.core.snapshot())
                     except ContractError as exc:
                         return self._error(HTTPStatus.CONFLICT, exc.code)
+                if path == "/api/view/watch":
+                    if self.headers.get("X-Operator-Token") != bridge.token:
+                        return self._error(HTTPStatus.FORBIDDEN, "BRIDGE_TOKEN")
+                    try:
+                        revision = _watch_after_revision(request.query)
+                    except ContractError as exc:
+                        return self._error(HTTPStatus.BAD_REQUEST, exc.code)
+                    try:
+                        snapshot = bridge.core.wait_for_snapshot(
+                            revision, bridge.watch_timeout_s,
+                            stopped=bridge._closing.is_set,
+                        )
+                    except ContractError as exc:
+                        return self._error(HTTPStatus.CONFLICT, exc.code)
+                    if snapshot is None:
+                        return self._error(HTTPStatus.SERVICE_UNAVAILABLE, "BRIDGE_CLOSED")
+                    return self._json(HTTPStatus.OK, snapshot)
                 relative = "index.html" if path == "/" else unquote(path.lstrip("/"))
                 if not relative or ".." in Path(relative).parts:
                     return self._error(HTTPStatus.NOT_FOUND, "BRIDGE_STATIC_PATH")
@@ -197,5 +246,7 @@ class LoopbackBridge:
         self.server.serve_forever(poll_interval=0.1)
 
     def close(self) -> None:
+        self._closing.set()
+        self.core.wake_waiters()
         self.server.shutdown()
         self.server.server_close()

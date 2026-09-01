@@ -44,6 +44,7 @@ class LoopbackBridgeTests(unittest.TestCase):
         self.bridge = LoopbackBridge(
             core=self.core, ui_root=root, host="127.0.0.1", port=0,
             token="fixed-test-token-that-is-long-enough",
+            watch_timeout_s=0.02,
         )
         self.thread = threading.Thread(target=self.bridge.serve_forever)
         self.thread.start()
@@ -129,6 +130,103 @@ class LoopbackBridgeTests(unittest.TestCase):
         status, _, body = self.request("GET", "/api/view", headers=view_headers)
         reconnected = json.loads(body)
         self.assertEqual((reconnected["revision"], reconnected["projection"]["value"]), (1, 2))
+
+    def test_watch_reuses_snapshot_envelope_and_observes_external_heartbeat(self):
+        headers = {"X-Operator-Token": self.bridge.token}
+        initial = self.core.snapshot()
+        observed = []
+        started = threading.Event()
+
+        def watch():
+            started.set()
+            observed.append(self.request(
+                "GET", f"/api/view/watch?after_revision={initial['revision']}",
+                headers=headers,
+            ))
+
+        thread = threading.Thread(target=watch)
+        thread.start()
+        self.assertTrue(started.wait(timeout=1))
+        self.core.transition(lambda: self.state.update(value=2))
+        thread.join(timeout=1)
+        self.assertFalse(thread.is_alive())
+        status, _, body = observed[0]
+        transitioned = json.loads(body)
+        self.assertEqual((status, transitioned["revision"], transitioned["projection"]["value"]), (200, 1, 2))
+        self.assertEqual(set(transitioned), set(initial))
+
+        self.state["value"] = 3
+        status, _, body = self.request(
+            "GET", f"/api/view/watch?after_revision={transitioned['revision']}",
+            headers=headers,
+        )
+        heartbeat = json.loads(body)
+        self.assertEqual((status, heartbeat["revision"], heartbeat["projection"]["value"]), (200, 2, 3))
+
+    def test_watch_query_and_future_revision_fail_closed(self):
+        headers = {"X-Operator-Token": self.bridge.token}
+        for path in (
+            "/api/view/watch",
+            "/api/view/watch?revision=0",
+            "/api/view/watch?after_revision=-1",
+            "/api/view/watch?after_revision=00",
+            "/api/view/watch?after_revision=0&after_revision=0",
+            "/api/view/watch?after_revision=0&extra=1",
+        ):
+            with self.subTest(path=path):
+                status, _, body = self.request("GET", path, headers=headers)
+                self.assertEqual((status, json.loads(body)["code"]), (400, "BRIDGE_WATCH_QUERY"))
+        status, _, body = self.request(
+            "GET", "/api/view/watch?after_revision=1", headers=headers,
+        )
+        self.assertEqual(
+            (status, json.loads(body)["code"]),
+            (409, "OPERATOR_VIEW_REVISION_FUTURE"),
+        )
+        status, _, body = self.request("GET", "/api/view/watch?after_revision=0")
+        self.assertEqual((status, json.loads(body)["code"]), (403, "BRIDGE_TOKEN"))
+
+    def test_close_wakes_a_pending_watch_before_its_timeout(self):
+        core = OperatorIntentCore(
+            session_id="closing-watch-r001", projection_call=lambda: {"value": 1},
+            handlers={"noop": lambda _payload, _view: {}}, clock=lambda: NOW,
+        )
+        initial = core.snapshot()
+        entered = threading.Event()
+        original_wait = core.wait_for_snapshot
+
+        def observed_wait(*args, **kwargs):
+            entered.set()
+            return original_wait(*args, **kwargs)
+
+        core.wait_for_snapshot = observed_wait
+        bridge = LoopbackBridge(
+            core=core, ui_root=self.bridge.ui_root, host="127.0.0.1", port=0,
+            token="closing-watch-token-that-is-long-enough", watch_timeout_s=5,
+        )
+        server_thread = threading.Thread(target=bridge.serve_forever)
+        server_thread.start()
+        result = []
+
+        def watch():
+            connection = http.client.HTTPConnection("127.0.0.1", bridge.port, timeout=2)
+            connection.request(
+                "GET", f"/api/view/watch?after_revision={initial['revision']}",
+                headers={"X-Operator-Token": bridge.token},
+            )
+            response = connection.getresponse()
+            result.append((response.status, json.loads(response.read())["code"]))
+            connection.close()
+
+        client_thread = threading.Thread(target=watch)
+        client_thread.start()
+        self.assertTrue(entered.wait(timeout=1))
+        bridge.close()
+        client_thread.join(timeout=1)
+        server_thread.join(timeout=1)
+        self.assertFalse(client_thread.is_alive())
+        self.assertFalse(server_thread.is_alive())
+        self.assertEqual(result, [(503, "BRIDGE_CLOSED")])
 
     def test_origin_token_host_stale_replay_and_malformed_json_are_rejected(self):
         for token in (None, "wrong-token-that-is-still-long-enough"):

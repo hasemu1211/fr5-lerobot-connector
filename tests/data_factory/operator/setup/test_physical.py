@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import contextlib
+import io
 import json
 import signal
 import tempfile
@@ -12,6 +14,8 @@ from unittest.mock import Mock, patch
 
 from tools.data_factory.operator.setup.physical import (
     _default_process,
+    _prepare_robot_for_home_recovery,
+    _robot_recovery_state,
     build_physical_operator_environment,
 )
 from tools.fr5_data_factory import ContractError
@@ -107,6 +111,233 @@ class PhysicalEnvironmentTests(unittest.TestCase):
             ],
         )
 
+    def test_home_recovery_clears_only_confirmed_collision_then_enables(self):
+        commands = []
+        results = {
+            "GetRobotEmergencyStopState()": [[0, 0]],
+            "GetSafetyStopState()": [[0, 0, 0]],
+            "GetRobotErrorCode()": [[0, 4, 2], [0, 0, 0], [0, 0, 0]],
+            "ResetAllError()": [[0]],
+            "RobotEnable(1)": [[0]],
+        }
+
+        def remote(command, *, expected_fields):
+            commands.append((command, expected_fields))
+            return results[command].pop(0)
+
+        states = iter(({"robot_mode": 0, "collision_err": 1.0},))
+        result = _prepare_robot_for_home_recovery(
+            remote_call=remote, state_call=lambda: next(states),
+        )
+
+        self.assertEqual(result, {
+            "collision_cleared": True,
+            "mode_switched": False,
+            "robot_enabled": True,
+            "robot_mode": "AUTO",
+        })
+        self.assertEqual([item[0] for item in commands], [
+            "GetRobotEmergencyStopState()", "GetSafetyStopState()",
+            "GetRobotErrorCode()", "ResetAllError()",
+            "GetRobotErrorCode()", "RobotEnable(1)",
+            "GetRobotErrorCode()",
+        ])
+        self.assertNotIn("Mode(0)", [item[0] for item in commands])
+
+    def test_home_recovery_reads_auto_mode_and_collision_from_one_state_sample(self):
+        with patch(
+            "tools.data_factory.operator.setup.physical._readonly_command",
+            return_value=(
+                "j1_cur_pos: -115.0\n"
+                "robot_mode: 0\n"
+                "abnormal_stop: 1\n"
+                "collision_err: 1.0\n---\n"
+            ),
+        ) as read:
+            state = _robot_recovery_state()
+
+        self.assertEqual(state, {"robot_mode": 0, "collision_err": 1.0})
+        self.assertEqual(read.call_count, 1)
+        self.assertIn("/nonrt_state_data", read.call_args.args[0])
+        self.assertIn("5", read.call_args.args[0])
+        self.assertEqual(read.call_args.kwargs, {"timeout_s": 6})
+
+    def test_home_recovery_switches_manual_mode_once_and_verifies_feedback(self):
+        commands = []
+        results = {
+            "GetRobotEmergencyStopState()": [0, 0],
+            "GetSafetyStopState()": [0, 0, 0],
+            "GetRobotErrorCode()": [0, 0, 0],
+            "Mode(0)": [0],
+            "RobotEnable(1)": [0],
+        }
+
+        def remote(command, **kwargs):
+            commands.append((command, kwargs))
+            return results[command]
+
+        states = iter((
+            {"robot_mode": 1, "collision_err": 0.0},
+            {"robot_mode": 1, "collision_err": 0.0},
+            {"robot_mode": 0, "collision_err": 0.0},
+        ))
+        settled = []
+        result = _prepare_robot_for_home_recovery(
+            remote_call=remote, state_call=lambda: next(states),
+            settle_call=settled.append,
+        )
+
+        self.assertTrue(result["mode_switched"])
+        self.assertEqual(settled, [0.1, 0.25])
+        self.assertEqual([item[0] for item in commands], [
+            "GetRobotEmergencyStopState()", "GetSafetyStopState()",
+            "GetRobotErrorCode()", "Mode(0)", "RobotEnable(1)",
+            "GetRobotErrorCode()",
+        ])
+        self.assertEqual(commands[3][1], {"expected_fields": 1, "timeout_s": 5})
+
+    def test_home_recovery_bounds_a_stuck_mode_switch_without_enabling(self):
+        commands = []
+
+        def remote(command, **kwargs):
+            commands.append((command, kwargs))
+            return {
+                "GetRobotEmergencyStopState()": [0, 0],
+                "GetSafetyStopState()": [0, 0, 0],
+                "GetRobotErrorCode()": [0, 0, 0],
+                "Mode(0)": [7],
+            }[command]
+
+        stderr = io.StringIO()
+        with contextlib.redirect_stderr(stderr):
+            with self.assertRaisesRegex(ContractError, "HOME_RECOVERY_MODE_SWITCH"):
+                _prepare_robot_for_home_recovery(
+                    remote_call=remote,
+                    state_call=lambda: {"robot_mode": 1, "collision_err": 0.0},
+                )
+
+        self.assertIn("Mode(0)", [item[0] for item in commands])
+        self.assertNotIn("RobotEnable(1)", [item[0] for item in commands])
+        self.assertIn('"sdk_result": [7]', stderr.getvalue())
+
+    def test_home_recovery_requires_auto_feedback_after_sdk_success(self):
+        commands = []
+
+        def remote(command, **_kwargs):
+            commands.append(command)
+            return {
+                "GetRobotEmergencyStopState()": [0, 0],
+                "GetSafetyStopState()": [0, 0, 0],
+                "GetRobotErrorCode()": [0, 0, 0],
+                "Mode(0)": [0],
+            }[command]
+
+        settled = []
+        stderr = io.StringIO()
+        with contextlib.redirect_stderr(stderr):
+            with self.assertRaisesRegex(
+                ContractError, "HOME_RECOVERY_AUTO_MODE_REQUIRED",
+            ):
+                _prepare_robot_for_home_recovery(
+                    remote_call=remote,
+                    state_call=lambda: {"robot_mode": 1, "collision_err": 0.0},
+                    settle_call=settled.append,
+                )
+
+        self.assertEqual(settled, [0.1, 0.25, 0.5])
+        self.assertEqual(commands.count("Mode(0)"), 1)
+        self.assertNotIn("RobotEnable(1)", commands)
+        self.assertIn('"robot_mode": 1', stderr.getvalue())
+
+    def test_home_recovery_reports_a_bounded_sdk_mode_failure(self):
+        commands = []
+
+        def remote(command, **_kwargs):
+            commands.append(command)
+            if command == "Mode(0)":
+                raise ContractError("GRIPPER_MAINTENANCE_SERVICE")
+            return {
+                "GetRobotEmergencyStopState()": [0, 0],
+                "GetSafetyStopState()": [0, 0, 0],
+                "GetRobotErrorCode()": [0, 0, 0],
+            }[command]
+
+        stderr = io.StringIO()
+        with contextlib.redirect_stderr(stderr):
+            with self.assertRaisesRegex(
+                ContractError, "HOME_RECOVERY_MODE_SWITCH",
+            ):
+                _prepare_robot_for_home_recovery(
+                    remote_call=remote,
+                    state_call=lambda: {
+                        "robot_mode": 1, "collision_err": 0.0,
+                    },
+                )
+
+        self.assertNotIn("RobotEnable(1)", commands)
+        self.assertIn(
+            '"failure": "GRIPPER_MAINTENANCE_SERVICE"', stderr.getvalue(),
+        )
+
+    def test_home_recovery_never_mutates_safety_or_other_faults(self):
+        cases = (
+            (
+                {"robot_mode": 0, "collision_err": 1.0},
+                {
+                    "GetRobotEmergencyStopState()": [0, 1],
+                    "GetSafetyStopState()": [0, 0, 0],
+                },
+                "HOME_RECOVERY_SAFETY_STOP_ACTIVE",
+            ),
+            (
+                {"robot_mode": 0, "collision_err": 0.0},
+                {
+                    "GetRobotEmergencyStopState()": [0, 0],
+                    "GetSafetyStopState()": [0, 0, 0],
+                    "GetRobotErrorCode()": [0, 9, 1],
+                },
+                "HOME_RECOVERY_NON_COLLISION_FAULT",
+            ),
+        )
+        for state, responses, code in cases:
+            with self.subTest(code=code):
+                commands = []
+
+                def remote(command, *, expected_fields):
+                    commands.append(command)
+                    return responses[command]
+
+                with self.assertRaisesRegex(ContractError, code):
+                    _prepare_robot_for_home_recovery(
+                        remote_call=remote,
+                        state_call=lambda state=state: state,
+                    )
+                self.assertNotIn("ResetAllError()", commands)
+                self.assertNotIn("Mode(0)", commands)
+                self.assertNotIn("RobotEnable(1)", commands)
+
+    def test_clean_home_recovery_enables_without_clearing_errors(self):
+        commands = []
+        results = {
+            "GetRobotEmergencyStopState()": [0, 0],
+            "GetSafetyStopState()": [0, 0, 0],
+            "GetRobotErrorCode()": [0, 0, 0],
+            "RobotEnable(1)": [0],
+        }
+
+        def remote(command, *, expected_fields):
+            commands.append(command)
+            return results[command]
+
+        result = _prepare_robot_for_home_recovery(
+            remote_call=remote,
+            state_call=lambda: {"robot_mode": 0, "collision_err": 0.0},
+        )
+
+        self.assertFalse(result["collision_cleared"])
+        self.assertEqual(commands.count("GetRobotErrorCode()"), 2)
+        self.assertNotIn("ResetAllError()", commands)
+
     def build(
         self, root: Path, state: dict[str, bool], *,
         collection_profile: dict | None = None,
@@ -138,6 +369,12 @@ class PhysicalEnvironmentTests(unittest.TestCase):
             ):
                 nodes = []
                 if external_command_server or state["maintenance"]:
+                    nodes.append("/fr_command_server")
+                elif (
+                    not state["robot"]
+                    and state.get("stale_command_server_queries", 0) > 0
+                ):
+                    state["stale_command_server_queries"] -= 1
                     nodes.append("/fr_command_server")
                 if external_ready or state["robot"]:
                     nodes.append("/controller_manager")
@@ -341,6 +578,95 @@ class PhysicalEnvironmentTests(unittest.TestCase):
             self.assertEqual(environment.stop()["state"], "SETUP_REQUIRED")
             self.assertFalse(state["robot"] or state["camera"] or state["maintenance"])
 
+    def test_home_recovery_restarts_only_motion_and_preserves_camera_owner(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.make_uvc_links(root)
+            state = {"maintenance": False, "robot": False, "camera": False}
+            environment, calls = self.build(root, state, maintenance_open=True)
+            self.assertEqual(environment.prepare_environment()["state"], "READY")
+            prepared = {
+                "collision_cleared": True, "robot_enabled": True,
+                "robot_mode": "AUTO",
+            }
+            with patch(
+                "tools.data_factory.operator.setup.physical."
+                "_prepare_robot_for_home_recovery",
+                return_value=prepared,
+            ) as prepare_robot:
+                recovered = environment.prepare_home_recovery()
+
+            self.assertEqual(recovered, {
+                **prepared, "status": "READY", "graph_restarted": True,
+            })
+            prepare_robot.assert_called_once_with()
+            self.assertTrue(state["robot"] and state["camera"])
+            self.assertEqual(
+                sum("real_robot.launch.py" in argv for argv in calls["process"]),
+                2,
+            )
+            self.assertEqual(
+                sum("start_camera_group.sh" in " ".join(argv) for argv in calls["process"]),
+                1,
+            )
+            environment.stop()
+
+    def test_home_recovery_restores_motion_graph_after_maintenance_failure(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.make_uvc_links(root)
+            state = {"maintenance": False, "robot": False, "camera": False}
+            environment, calls = self.build(root, state, maintenance_open=True)
+            self.assertEqual(environment.prepare_environment()["state"], "READY")
+
+            with patch(
+                "tools.data_factory.operator.setup.physical."
+                "_prepare_robot_for_home_recovery",
+                side_effect=ContractError("HOME_RECOVERY_MODE_SWITCH"),
+            ):
+                with self.assertRaisesRegex(
+                    ContractError, "HOME_RECOVERY_MODE_SWITCH",
+                ):
+                    environment.prepare_home_recovery()
+
+            self.assertTrue(state["robot"] and state["camera"])
+            self.assertFalse(state["maintenance"])
+            self.assertEqual(
+                sum("real_robot.launch.py" in argv for argv in calls["process"]),
+                2,
+            )
+            self.assertEqual(
+                sum("start_camera_group.sh" in " ".join(argv) for argv in calls["process"]),
+                1,
+            )
+            environment.stop()
+
+    def test_home_recovery_restores_motion_graph_after_stop_settle_timeout(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.make_uvc_links(root)
+            state = {"maintenance": False, "robot": False, "camera": False}
+            environment, calls = self.build(root, state, maintenance_open=True)
+            self.assertEqual(environment.prepare_environment()["state"], "READY")
+            state["stale_command_server_queries"] = 1
+
+            with self.assertRaisesRegex(
+                ContractError, "HOME_RECOVERY_MOTION_OWNER",
+            ):
+                environment.prepare_home_recovery()
+
+            self.assertTrue(state["robot"] and state["camera"])
+            self.assertFalse(state["maintenance"])
+            self.assertEqual(
+                sum("real_robot.launch.py" in argv for argv in calls["process"]),
+                2,
+            )
+            self.assertEqual(
+                sum("start_camera_group.sh" in " ".join(argv) for argv in calls["process"]),
+                1,
+            )
+            environment.stop()
+
     def test_owned_camera_topic_can_arrive_before_its_node(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -450,6 +776,10 @@ class PhysicalEnvironmentTests(unittest.TestCase):
             environment, calls = self.build(root, state, external_ready=True)
 
             self.assertEqual(environment.prepare_environment()["state"], "READY")
+            self.assertEqual(calls, {"process": [], "maintenance": []})
+
+            with self.assertRaisesRegex(ContractError, "HOME_RECOVERY_MOTION_OWNER"):
+                environment.prepare_home_recovery()
             self.assertEqual(calls, {"process": [], "maintenance": []})
 
     def test_prepared_owned_environment_liveness_avoids_graph_rediscovery(self):

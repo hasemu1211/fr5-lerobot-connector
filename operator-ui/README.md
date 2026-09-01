@@ -44,7 +44,7 @@ direnv exec . python3 -m tools.data_factory.operator_console --effect-scope FAKE
 7. `다음 캠페인 계획`을 열어 설정을 그대로 쓰거나 편집했을 때 모두 새 campaign/run lineage가 생기는지 확인한다.
 8. 별도 실행에서 진행 중 cancel을 한 번 보내고, 뒤 episode와 production/training effect가 모두 0인지 확인한다.
 
-종료는 실행한 터미널에서 `Ctrl-C`로 수행한다. episode worker와 HTTP handler가 join된 뒤 프로세스가 끝난다. UI polling은 현재 상태를 읽기만 하며 intent를 queue하거나 자동 재전송하지 않는다.
+종료는 실행한 터미널에서 `Ctrl-C`로 수행한다. episode worker와 HTTP handler가 join된 뒤 프로세스가 끝난다. UI는 revision 기반 long-poll 하나로 상태 변화를 읽고 5초 heartbeat에서 외부 상태를 다시 관찰하며, intent를 queue하거나 자동 재전송하지 않는다.
 
 ## PHYSICAL TEST_ONLY
 

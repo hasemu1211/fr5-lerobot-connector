@@ -25,6 +25,22 @@ fairino5_controller:
       - position
     state_interfaces:
       - position
+    constraints:
+      # Do not report success when the command reference reaches the goal but
+      # physical joint feedback is still outside the qualified HOME tolerance.
+      goal_time: 5.0
+      j1:
+        goal: 0.01
+      j2:
+        goal: 0.01
+      j3:
+        goal: 0.01
+      j4:
+        goal: 0.01
+      j5:
+        goal: 0.01
+      j6:
+        goal: 0.01
 
 gripper_controller:
   ros__parameters:

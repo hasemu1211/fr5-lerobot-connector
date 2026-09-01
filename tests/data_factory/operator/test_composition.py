@@ -954,7 +954,7 @@ feedback:
                 ),
             ),
             mock.patch(
-                "tools.data_factory.operator.setup.physical._remote_gripper_command",
+                "tools.data_factory.operator.setup.physical._remote_robot_command",
                 malformed_read_remote,
             ),
             self.assertRaisesRegex(ContractError, "GRIPPER_SETUP_READBACK"),
@@ -986,7 +986,7 @@ feedback:
                 ),
             ),
             mock.patch(
-                "tools.data_factory.operator.setup.physical._remote_gripper_command",
+                "tools.data_factory.operator.setup.physical._remote_robot_command",
                 server_read,
             ),
         ):
@@ -1009,7 +1009,7 @@ feedback:
                 ),
             ),
             mock.patch(
-                "tools.data_factory.operator.setup.physical._remote_gripper_command",
+                "tools.data_factory.operator.setup.physical._remote_robot_command",
                 remote,
             ),
             self.assertRaisesRegex(ContractError, "GRIPPER_SETUP_CONTROLLER_GRAPH"),
@@ -1028,7 +1028,7 @@ feedback:
                 ),
             ),
             mock.patch(
-                "tools.data_factory.operator.setup.physical._remote_gripper_command",
+                "tools.data_factory.operator.setup.physical._remote_robot_command",
                 remote,
             ),
             self.assertRaisesRegex(ContractError, "GRIPPER_SETUP_NOT_AVAILABLE"),
@@ -1049,7 +1049,7 @@ feedback:
 
         settled = []
         with mock.patch(
-            "tools.data_factory.operator.setup.physical._remote_gripper_command",
+            "tools.data_factory.operator.setup.physical._remote_robot_command",
             side_effect=server_command,
         ):
             result = normalize_gripper_after_operator_ready(
@@ -1071,7 +1071,7 @@ feedback:
             [0, 3, 1], [0], [0, 0, 1], [0], [0, 0, 1], [0, 0, 100],
         ))
         with mock.patch(
-            "tools.data_factory.operator.setup.physical._remote_gripper_command", remote,
+            "tools.data_factory.operator.setup.physical._remote_robot_command", remote,
         ):
             result = normalize_gripper_after_operator_ready(maintenance_readback)
         self.assertEqual(result, {"status": "NORMALIZED", "requires_graph_switch": True})
@@ -2551,6 +2551,59 @@ feedback:
                 self.assertEqual(result["home_recovery"], recovery)
                 recover.assert_called_once_with()
                 self.assertFalse((root / "outputs").exists())
+            finally:
+                application.close()
+
+    def test_default_home_recovery_prepares_motion_before_reusing_live_transition(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.portable_repository(root)
+            device = "usb-Generic_USB2.0_PC_CAMERA-video-index0"
+            ready = {
+                "schema_version": "data_factory.operator_environment.v1",
+                "state": "READY", "observed_at": "2026-08-26T03:00:00Z",
+                "components": {
+                    name: {
+                        "state": "READY", "owner": f"owner-{name}",
+                        "reason": "ATTACHED",
+                    }
+                    for name in ("robot", "controller", "gripper", "camera")
+                },
+            }
+            recovery = {
+                "schema_version": "data_factory.home_recovery.v1",
+                "status": "HOME", "arm_goal_count": 1,
+                "gripper_open": True, "target_rad": [0.0] * 6,
+                "final_rad": [0.0] * 6,
+                "motion_qualification_digest": canonical_digest(["motion"]),
+            }
+            events = []
+            application, _context = build_physical_operator_application(
+                repository_root=root,
+                session_id="prepared-home-recovery-r001",
+                operator_label="local-operator",
+                environment_call=lambda: copy.deepcopy(ready),
+                prepare_environment_call=lambda: copy.deepcopy(ready),
+                initial_environment=ready,
+                initial_catalog=load_operator_catalog(root, device_ids=[device]),
+                home_recovery_prepare_call=lambda: events.append("prepare") or {
+                    "status": "READY",
+                },
+                run_live_call=mock.Mock(side_effect=AssertionError("live was called")),
+                clock=lambda: NOW,
+            )
+            try:
+                with mock.patch(
+                    "tools.data_factory.motion.home_recovery.recover_home_live",
+                    side_effect=lambda **_kwargs: events.append("recover")
+                    or copy.deepcopy(recovery),
+                ):
+                    before = application.bridge_core.snapshot()
+                    result = application.bridge_core.consume(envelope(
+                        before, "recover_home", {}, "prepared-home-recovery",
+                    ))["result"]
+                self.assertEqual(result["outcome"], "HOME")
+                self.assertEqual(events, ["prepare", "recover"])
             finally:
                 application.close()
 

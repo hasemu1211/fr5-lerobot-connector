@@ -548,6 +548,21 @@ class CollectionOperatorApplication:
             raise ContractError("OPERATOR_APPLICATION_CAMPAIGN_STATE")
         return state
 
+    def _environment_home_recovery_available(
+        self, environment: Mapping[str, Any],
+    ) -> bool:
+        components = environment.get("components")
+        return (
+            self.effect_scope == "PHYSICAL"
+            and self.home_recovery_call is not None
+            and isinstance(components, Mapping)
+            and all(
+                isinstance(components.get(name), Mapping)
+                and components[name].get("state") in {"READY", "MISSING"}
+                for name in ("robot", "controller", "gripper")
+            )
+        )
+
     def projection(self) -> dict[str, Any]:
         environment = self._environment()
         _snapshot, inner = self._campaign_snapshot()
@@ -616,6 +631,8 @@ class CollectionOperatorApplication:
                     if environment["state"] == "SETUP_REQUIRED"
                     or self._camera_recovery_pending else []
                 )
+                if self._environment_home_recovery_available(environment):
+                    operations.append("recover_home")
         elif workflow == "AUTHORING":
             operations = ["update_draft"]
             if self.start_pose_capture_call is not None:
@@ -1495,15 +1512,24 @@ class CollectionOperatorApplication:
             or projection["runtime"].get("active_child_id") is not None
         ):
             raise ContractError("OPERATOR_APPLICATION_RECOVERY_STATE")
-        value = self.home_recovery_call()
-        if (
-            not isinstance(value, Mapping)
-            or value.get("schema_version") != "data_factory.home_recovery.v1"
-            or value.get("status") not in {"HOME", "ALREADY_HOME"}
-            or value.get("gripper_open") is not True
-            or value.get("arm_goal_count") not in {0, 1}
-        ):
-            raise ContractError("OPERATOR_APPLICATION_RECOVERY")
+        try:
+            value = self.home_recovery_call()
+            if (
+                not isinstance(value, Mapping)
+                or value.get("schema_version") != "data_factory.home_recovery.v1"
+                or value.get("status") not in {"HOME", "ALREADY_HOME"}
+                or value.get("gripper_open") is not True
+                or value.get("arm_goal_count") not in {0, 1}
+            ):
+                raise ContractError("OPERATOR_APPLICATION_RECOVERY")
+        except Exception:
+            # The physical helper restores the normal graph in its finally block.
+            # Reflect that state without replacing the original recovery error.
+            try:
+                self._environment_view = self._read_environment()
+            except Exception:
+                pass
+            raise
         self._last_home_recovery = copy.deepcopy(dict(value))
         self._environment_view = self._read_environment()
         return {

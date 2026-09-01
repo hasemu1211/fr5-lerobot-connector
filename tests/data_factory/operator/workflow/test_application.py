@@ -522,6 +522,81 @@ class CollectionOperatorApplicationTests(unittest.TestCase):
         self.assertEqual(after["home_recovery"], recovery)
         self.assertEqual(self.campaigns, [])
 
+    def test_physical_home_recovery_is_available_before_environment_prepare(self):
+        calls = []
+        recovery = {
+            "schema_version": "data_factory.home_recovery.v1",
+            "status": "ALREADY_HOME", "arm_goal_count": 0,
+            "gripper_open": True, "target_rad": [0.0] * 6,
+            "final_rad": [0.0] * 6,
+            "motion_qualification_digest": canonical_digest(["motion"]),
+        }
+        application = CollectionOperatorApplication(
+            session_id="physical-early-recovery-r001",
+            operator_label="local-operator",
+            catalog=self.catalog,
+            initial_selection=self.selection,
+            projector=projection,
+            environment_call=lambda: copy.deepcopy(self.environment),
+            prepare_environment_call=lambda: self.fail("environment was prepared"),
+            campaign_factory=lambda *_args: self.fail("recovery created a campaign"),
+            home_recovery_call=lambda: calls.append(True) or copy.deepcopy(recovery),
+            initial_environment=self.environment,
+            effect_scope="PHYSICAL",
+        )
+        self.addCleanup(application.close)
+
+        before = application.bridge_core.snapshot()
+        self.assertEqual(before["projection"]["workflow_state"], "ENVIRONMENT")
+        self.assertIn("prepare_environment", before["projection"]["available_ops"])
+        self.assertIn("recover_home", before["projection"]["available_ops"])
+        result = application.bridge_core.consume(intent(
+            before, "recover_home", {}, "early-home-recovery",
+        ))["result"]
+
+        self.assertEqual((result["outcome"], calls), ("ALREADY_HOME", [True]))
+        self.assertEqual(self.campaigns, [])
+
+    def test_failed_home_recovery_refreshes_restored_environment(self):
+        ready = copy.deepcopy(self.environment)
+        ready["state"] = "READY"
+        ready["components"] = {
+            name: {
+                "state": "READY", "owner": f"owner-{name}", "reason": "ATTACHED",
+            }
+            for name in ready["components"]
+        }
+
+        def fail_after_graph_restore():
+            self.environment = copy.deepcopy(ready)
+            raise ContractError("HOME_RECOVERY_MODE_SWITCH")
+
+        application = CollectionOperatorApplication(
+            session_id="physical-failed-recovery-r001",
+            operator_label="local-operator",
+            catalog=self.catalog,
+            initial_selection=self.selection,
+            projector=projection,
+            environment_call=lambda: copy.deepcopy(self.environment),
+            prepare_environment_call=lambda: self.fail("environment was prepared"),
+            campaign_factory=lambda *_args: self.fail("recovery created a campaign"),
+            home_recovery_call=fail_after_graph_restore,
+            initial_environment=self.environment,
+            effect_scope="PHYSICAL",
+        )
+        self.addCleanup(application.close)
+
+        before = application.bridge_core.snapshot()
+        with self.assertRaisesRegex(ContractError, "HOME_RECOVERY_MODE_SWITCH"):
+            application.bridge_core.consume(intent(
+                before, "recover_home", {}, "failed-home-recovery",
+            ))
+
+        after = application.bridge_core.snapshot()["projection"]
+        self.assertEqual(after["environment"], ready)
+        self.assertEqual(after["workflow_state"], "AUTHORING")
+        self.assertEqual(self.campaigns, [])
+
     def test_only_projected_canonical_ops_dispatch_and_legacy_bulk_is_immutable(self):
         self.assertEqual(set(self.application.bridge_core.handlers), {
             "prepare_environment", "update_draft", "compile_draft",

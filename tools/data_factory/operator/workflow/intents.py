@@ -79,6 +79,11 @@ class OperatorIntentCore:
         self._projection_digest = None
         self._consumed: set[str] = set()
         self._lock = threading.RLock()
+        self._condition = threading.Condition(self._lock)
+
+    def _publish_locked(self) -> None:
+        self._revision += 1
+        self._condition.notify_all()
 
     def _projection(self) -> dict[str, Any]:
         value = self.projection_call()
@@ -97,7 +102,7 @@ class OperatorIntentCore:
             and self._projection_digest is not None
             and projection_digest != self._projection_digest
         ):
-            self._revision += 1
+            self._publish_locked()
         self._projection_digest = projection_digest
         bound = {
             "session_id": self.session_id,
@@ -121,13 +126,43 @@ class OperatorIntentCore:
         with self._lock:
             return self._snapshot_locked()
 
+    def wait_for_snapshot(
+        self, after_revision: int, timeout_s: float, *,
+        stopped: Callable[[], bool] | None = None,
+    ) -> dict[str, Any] | None:
+        """Wait for a revision hint, then rebuild the authoritative snapshot."""
+        if type(after_revision) is not int or after_revision < 0:
+            raise ContractError("OPERATOR_VIEW_REVISION")
+        if (
+            isinstance(timeout_s, bool)
+            or not isinstance(timeout_s, (int, float))
+            or not 0 < timeout_s <= 60
+        ):
+            raise ContractError("OPERATOR_VIEW_WAIT_TIMEOUT")
+        if stopped is not None and not callable(stopped):
+            raise ContractError("OPERATOR_CORE_CALLABLE")
+        with self._condition:
+            if after_revision > self._revision:
+                raise ContractError("OPERATOR_VIEW_REVISION_FUTURE")
+            self._condition.wait_for(
+                lambda: self._revision > after_revision or stopped is not None and stopped(),
+                float(timeout_s),
+            )
+            if stopped is not None and stopped():
+                return None
+            return self._snapshot_locked()
+
+    def wake_waiters(self) -> None:
+        with self._condition:
+            self._condition.notify_all()
+
     def transition(self, change: Callable[[], None]) -> dict[str, Any]:
         """Publish an owner-side transition without letting the browser name it."""
         if not callable(change):
             raise ContractError("OPERATOR_CORE_CALLABLE")
         with self._lock:
             change()
-            self._revision += 1
+            self._publish_locked()
             return self._snapshot_locked(observe_external=False)
 
     def consume(self, value: object) -> dict[str, Any]:
@@ -166,7 +201,7 @@ class OperatorIntentCore:
             if not isinstance(result, (Mapping, UnlockedIntent)):
                 raise ContractError("OPERATOR_INTENT_RESULT")
             self._consumed.add(intent_id)
-            self._revision += 1
+            self._publish_locked()
             if isinstance(result, UnlockedIntent):
                 self._snapshot_locked(observe_external=False)
             else:
@@ -189,7 +224,7 @@ class OperatorIntentCore:
                     raise ContractError("OPERATOR_INTENT_RESULT")
                 response, changed, cleanup = completed
                 if changed:
-                    self._revision += 1
+                    self._publish_locked()
                 latest = self._snapshot_locked(observe_external=False)
         except BaseException as exc:
             with self._lock:
@@ -203,7 +238,7 @@ class OperatorIntentCore:
                     raise ContractError("OPERATOR_INTENT_RESULT") from exc
                 changed, cleanup = failed
                 if changed:
-                    self._revision += 1
+                    self._publish_locked()
                 self._snapshot_locked(observe_external=False)
             if cleanup is not None:
                 try:

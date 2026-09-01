@@ -1258,6 +1258,12 @@ def build_physical_runtime(
 
             return pending.prepare_environment, close_owned_environment
 
+        def home_recovery_prepare_call() -> Mapping[str, Any]:
+            current = environment_holder["pending"] or environment_holder["active"]
+            if current is None:
+                raise ContractError("HOME_RECOVERY_ENVIRONMENT")
+            return current.prepare_home_recovery()
+
         if initial_resolution is None:
             initial_environment = copy.deepcopy(blocked)
         else:
@@ -1280,6 +1286,7 @@ def build_physical_runtime(
             environment_call=environment_call,
             prepare_environment_call=prepare_environment_call,
             prepare_environment_owner_call=prepare_environment_owner_call,
+            home_recovery_prepare_call=home_recovery_prepare_call,
             initial_environment=initial_environment, initial_catalog=catalog,
             initial_camera_devices=camera_descriptors, job_path=job,
             gripper_retune_path=gripper_retune,
@@ -2431,6 +2438,7 @@ def build_physical_operator_application(
     gripper_readback_call: Callable[[], Mapping[str, Any]] | None = None,
     gripper_maintenance_call: Callable[[Mapping[str, Any]], Mapping[str, Any]] | None = None,
     home_recovery_call: Callable[[], Mapping[str, Any]] | None = None,
+    home_recovery_prepare_call: Callable[[], Mapping[str, Any]] | None = None,
     start_transition_call: Callable[[Mapping[str, Any], Mapping[str, Any]], Mapping[str, Any]] | None = None,
     run_live_call: Callable[..., Mapping[str, Any]] = run_job.run_live,
     production_campaign_factory: Callable[
@@ -2454,6 +2462,11 @@ def build_physical_operator_application(
         production_campaign_factory
     ):
         raise ContractError("OPERATOR_APPLICATION_PRODUCTION_FACTORY")
+    if (
+        home_recovery_prepare_call is not None
+        and not callable(home_recovery_prepare_call)
+    ):
+        raise ContractError("OPERATOR_APPLICATION_RECOVERY")
     repository = Path(repository_root).resolve(strict=True)
     if initial_catalog is None:
         camera_devices = normalize_camera_devices(discovery_call())
@@ -2961,6 +2974,8 @@ def build_physical_operator_application(
         if home_recovery_call is not None:
             return home_recovery_call()
         from tools.data_factory.motion.home_recovery import recover_home_live
+        if home_recovery_prepare_call is not None:
+            home_recovery_prepare_call()
         source = active_combination()["sources"]
         return recover_home_live(
             motion_qualification=load_json_strict(

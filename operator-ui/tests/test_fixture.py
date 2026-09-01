@@ -58,6 +58,16 @@ class DataFactoryOperatorUiStaticTest(unittest.TestCase):
         self.assertIn('nativeFetch("../fixtures/states.json")', self.browser)
         self.assertIn('<script src="app.js"></script>', self.browser)
 
+    def test_revision_watch_replaces_500ms_status_polling(self):
+        self.assertNotIn("refreshTimer", self.js)
+        self.assertNotIn("setTimeout(loadView, 500)", self.js)
+        self.assertIn("/api/view/watch?after_revision=${afterRevision}", self.js)
+        self.assertIn("new AbortController()", self.js)
+        self.assertIn("stopWatch();", self.js)
+        submit = self.js.split("async function submitIntent", 1)[1].split("async function loadView", 1)[0]
+        self.assertNotIn("stopWatch();", submit)
+        self.assertEqual(submit.count("loadView("), 1)
+
     def test_forbidden_copy_and_browser_authority(self):
         product_copy = self.html + self.messages
         for retired in (

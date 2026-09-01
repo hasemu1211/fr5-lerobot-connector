@@ -14,6 +14,7 @@ from tools.data_factory.operator.workflow.intents import (
     INTENT_SCHEMA,
     OperatorCheckpointPort,
     OperatorIntentCore,
+    UnlockedIntent,
 )
 from ..fixtures import (
     NOW,
@@ -52,6 +53,103 @@ class OperatorIntentCoreTests(unittest.TestCase):
                 current, "edit_draft", {"source": "HUMAN", "count": 4}, "intent-r003",
             ))
         self.assertEqual(core.snapshot()["revision"], 1)
+
+    def test_revision_wait_wakes_on_transition_and_reobserves_external_state(self):
+        state = {"value": 1}
+        core = OperatorIntentCore(
+            session_id="watch-session-r001", projection_call=lambda: state,
+            handlers={"noop": lambda _payload, _view: {}}, clock=lambda: NOW,
+        )
+        initial = core.snapshot()
+        observed = []
+        started = threading.Event()
+
+        def wait():
+            started.set()
+            observed.append(core.wait_for_snapshot(initial["revision"], 1))
+
+        thread = threading.Thread(target=wait)
+        thread.start()
+        self.assertTrue(started.wait(timeout=1))
+        core.transition(lambda: state.update(value=2))
+        thread.join(timeout=1)
+        self.assertFalse(thread.is_alive())
+        self.assertEqual(
+            (observed[0]["revision"], observed[0]["projection"]["value"]),
+            (1, 2),
+        )
+
+        state["value"] = 3
+        heartbeat = core.wait_for_snapshot(observed[0]["revision"], 0.01)
+        self.assertEqual(
+            (heartbeat["revision"], heartbeat["projection"]["value"]),
+            (2, 3),
+        )
+        with self.assertRaisesRegex(ContractError, "OPERATOR_VIEW_REVISION_FUTURE"):
+            core.wait_for_snapshot(heartbeat["revision"] + 1, 0.01)
+
+    def test_existing_waiter_observes_unlocked_intent_while_post_is_running(self):
+        state = {"phase": "IDLE", "available_ops": ["run"]}
+        run_entered = threading.Event()
+        release_run = threading.Event()
+        self.addCleanup(release_run.set)
+
+        def run():
+            run_entered.set()
+            if not release_run.wait(timeout=1):
+                raise AssertionError("test did not release intent")
+            return None
+
+        def complete(_produced):
+            state["phase"] = "DONE"
+            return {"phase": "DONE"}, True, None
+
+        def start(_payload, _view):
+            state["phase"] = "RUNNING"
+            return UnlockedIntent(
+                run=run, complete=complete,
+                failed=lambda _exc, _produced: (False, None),
+            )
+
+        core = OperatorIntentCore(
+            session_id="watch-intent-r001", projection_call=lambda: state,
+            handlers={"run": start}, clock=lambda: NOW,
+        )
+        initial = core.snapshot()
+        observed = []
+        waiter = threading.Thread(target=lambda: observed.append(
+            core.wait_for_snapshot(initial["revision"], 1),
+        ))
+        waiter.start()
+        results = []
+        post = threading.Thread(target=lambda: results.append(core.consume(intent(
+            initial, "run", {}, "watch-intent-r001",
+        ))))
+        post.start()
+        self.assertTrue(run_entered.wait(timeout=1))
+        waiter.join(timeout=1)
+        self.assertFalse(waiter.is_alive())
+        self.assertTrue(post.is_alive())
+        self.assertEqual(
+            (observed[0]["revision"], observed[0]["projection"]["phase"]),
+            (1, "RUNNING"),
+        )
+
+        milestone = []
+        milestone_waiter = threading.Thread(target=lambda: milestone.append(
+            core.wait_for_snapshot(observed[0]["revision"], 1),
+        ))
+        milestone_waiter.start()
+        core.transition(lambda: state.update(phase="MILESTONE"))
+        milestone_waiter.join(timeout=1)
+        self.assertEqual(
+            (milestone[0]["revision"], milestone[0]["projection"]["phase"]),
+            (2, "MILESTONE"),
+        )
+        release_run.set()
+        post.join(timeout=1)
+        self.assertFalse(post.is_alive())
+        self.assertEqual(results[0]["current_view_revision"], 3)
 
     def test_button_port_binds_exact_plan_without_minting_human_identity(self):
         port = ButtonDecisionPort(

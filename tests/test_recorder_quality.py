@@ -38,6 +38,14 @@ class RecorderContractTest(unittest.TestCase):
         self.assertIn("ServoMoveStart(1)", source)
         self.assertIn("ServoMoveEnd(1)", source)
         self.assertNotIn("ActGripper", source)
+        activation_body = source.split("FairinoHardwareInterface::on_activate", 1)[1].split(
+            "FairinoHardwareInterface::on_deactivate", 1
+        )[0]
+        self.assertLess(
+            activation_body.index("GetRobotErrorCode"),
+            activation_body.index("ServoMoveStart(1)"),
+        )
+        self.assertNotIn("ResetAllError", activation_body)
         read_body = source.split("FairinoHardwareInterface::read", 1)[1].split(
             "FairinoHardwareInterface::write", 1
         )[0]
@@ -106,6 +114,12 @@ class RecorderContractTest(unittest.TestCase):
         self.assertIn('up-side) CAMERA_TOPICS=("$UP_TOPIC" "/camera/side/color/image_raw")', preflight)
         self.assertIn("--expected-image-hz", preflight)
         self.assertIn("--max-image-age-ms 300", preflight)
+        arm_controller = controllers.split("\nfairino5_controller:\n", 1)[1].split(
+            "\ngripper_controller:\n", 1
+        )[0]
+        self.assertIn("goal_time: 5.0", arm_controller)
+        for joint in ("j1", "j2", "j3", "j4", "j5", "j6"):
+            self.assertRegex(arm_controller, rf"{joint}:\n\s+goal: 0\.01")
         self.assertIn("goal: 0.000105", controllers)
 
     def test_camera_preflight_rejects_bad_clock_domain_or_rate(self):

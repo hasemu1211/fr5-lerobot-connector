@@ -34,7 +34,7 @@ let lastSession;
 let lastRevision = -1;
 let lastDigest;
 let intentBusy = false;
-let refreshTimer;
+let watchController;
 let manualStep;
 let renderedWorkflow;
 
@@ -308,8 +308,7 @@ function renderTechnical(rows) {
 
 function failClose(code, detail = "") {
   const bridgeSessionExpired = code === "BRIDGE_SESSION_EXPIRED";
-  clearTimeout(refreshTimer);
-  refreshTimer = undefined;
+  stopWatch();
   currentView = undefined;
   document.body.dataset.bridge = "blocked";
   document.querySelector("#connection-dot").className = "connection-dot blocked";
@@ -328,6 +327,21 @@ function failClose(code, detail = "") {
   const retry = document.querySelector("#retry-view");
   retry.addEventListener("click", () => bridgeSessionExpired ? window.location.reload() : loadView(), {once: true});
   renderTechnical({error_code: code, detail});
+}
+
+function stopWatch() {
+  const controller = watchController;
+  watchController = undefined;
+  controller?.abort();
+}
+
+function failViewRequest(error) {
+  const detail = error instanceof Error ? error.message : String(error);
+  const stale = ["OPERATOR_VIEW_REVISION_FUTURE", "RUNNING_CANCEL_UNAVAILABLE"].includes(detail);
+  const code = detail === "HTTP_403" ? "BRIDGE_SESSION_EXPIRED"
+    : detail.startsWith("UNKNOWN_VIEW_ENUM") || stale ? "VIEW_STALE"
+      : detail === "VIEW_REVISION_ROLLBACK" ? detail : "BRIDGE_UNAVAILABLE";
+  failClose(code, detail);
 }
 
 function setupReady(view) {
@@ -1016,13 +1030,33 @@ function render(view) {
   renderNext(view);
   renderTechnicalDetails(view);
   renderSteps(view);
-  scheduleStatusRefresh(view);
 }
 
-function scheduleStatusRefresh(view) {
-  clearTimeout(refreshTimer);
-  refreshTimer = undefined;
-  if (view.connection_state === "READY" && ["PREPARING", "RUNNING", "CANCELLING"].includes(view.runtime.workflow_state)) refreshTimer = setTimeout(loadView, 500);
+async function watchView() {
+  if (!currentView || currentView.connection_state !== "READY" || watchController) return;
+  const boundSession = currentView.session_id;
+  const afterRevision = currentView.revision;
+  const controller = new AbortController();
+  watchController = controller;
+  try {
+    const response = await fetch(`/api/view/watch?after_revision=${afterRevision}`, {
+      method: "GET", credentials: "same-origin", cache: "no-store",
+      headers: tokenHeaders(), signal: controller.signal,
+    });
+    const payload = await response.json();
+    if (!response.ok) throw new Error(response.status === 403 ? "HTTP_403" : typeof payload.code === "string" ? payload.code : `HTTP_${response.status}`);
+    if (controller.signal.aborted) return;
+    const view = validateView(payload);
+    if (controller.signal.aborted || !currentView || currentView.session_id !== boundSession) return;
+    if (view.revision !== currentView.revision || view.view_digest !== currentView.view_digest) render(view);
+  } catch (error) {
+    if (error.name !== "AbortError") failViewRequest(error);
+  } finally {
+    if (watchController === controller) {
+      watchController = undefined;
+      watchView();
+    }
+  }
 }
 
 function intentPayload(op) {
@@ -1075,6 +1109,7 @@ async function submitIntent(op, payload = intentPayload(op)) {
 }
 
 async function loadView({releaseIntent = false, rejectionCode} = {}) {
+  stopWatch();
   setBanner("최신 상태를 다시 읽고 있습니다. 이 동안 요청을 보내지 않습니다.", "info", false);
   try {
     const response = await fetch("/api/view", {method: "GET", credentials: "same-origin", cache: "no-store", headers: tokenHeaders()});
@@ -1087,11 +1122,10 @@ async function loadView({releaseIntent = false, rejectionCode} = {}) {
     }
     render(view);
     if (rejectionCode) setBanner(`${humanReason(rejectionCode)}. 요청은 실행되지 않았습니다.`, "bad");
+    watchView();
   } catch (error) {
     if (releaseIntent) intentBusy = false;
-    const stale = error.message === "VIEW_REVISION_ROLLBACK";
-    const code = error.message === "HTTP_403" ? "BRIDGE_SESSION_EXPIRED" : error.message.startsWith("UNKNOWN_VIEW_ENUM") ? "VIEW_STALE" : stale ? error.message : error.message === "RUNNING_CANCEL_UNAVAILABLE" ? "VIEW_STALE" : "BRIDGE_UNAVAILABLE";
-    failClose(code, error.message);
+    failViewRequest(error);
   }
 }
 
