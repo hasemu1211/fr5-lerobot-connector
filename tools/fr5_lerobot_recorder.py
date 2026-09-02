@@ -904,6 +904,30 @@ class FR5LeRobotRecorder(Node):
         summary, reasons = self._quality_summary()
         return {**summary, "accepted": not reasons, "reasons": reasons}
 
+    @staticmethod
+    def _readiness_prefix_quality(attempt: dict) -> dict:
+        """Do not gate a discarded prefix on target/source phase reuse."""
+        repeat_reasons = {
+            f"{camera} image repeat ratio {metrics['repeat_ratio']:.1%} is too high"
+            for camera, metrics in attempt.get("cameras", {}).items()
+            if isinstance(metrics, dict)
+            and isinstance(metrics.get("repeat_ratio"), (int, float))
+            and not isinstance(metrics.get("repeat_ratio"), bool)
+        }
+        diagnostics = [
+            reason for reason in attempt.get("reasons", [])
+            if reason in repeat_reasons
+        ]
+        if not diagnostics:
+            return attempt
+        reasons = [reason for reason in attempt["reasons"] if reason not in repeat_reasons]
+        return {
+            **attempt,
+            "accepted": not reasons,
+            "reasons": reasons,
+            "discarded_prefix_diagnostics": diagnostics,
+        }
+
     def freeze_episode(self) -> dict:
         with self.lock:
             if self.episode_state != self.RECORDING:
@@ -1034,7 +1058,7 @@ class FR5LeRobotRecorder(Node):
             if self.episode_state != self.RECORDING:
                 return self._result(False, "STATE_TRIM_INTERRUPTED")
             try:
-                attempt = self._quality_snapshot()
+                attempt = self._readiness_prefix_quality(self._quality_snapshot())
             except Exception as exc:
                 self.recording = True
                 return self._result(

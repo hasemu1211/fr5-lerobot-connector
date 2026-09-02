@@ -71,6 +71,144 @@ class Executor:
 
 
 class RunJobTest(unittest.TestCase):
+    def test_only_fresh_authorized_production_cell_is_initialized(self):
+        missing = {
+            "cell_ready": False, "reason_code": "STATE_MISSING",
+        }
+        ready = {
+            "cell_ready": True, "reason_code": "HUMAN_ACKNOWLEDGED",
+        }
+        store = SimpleNamespace(
+            read=lambda: missing,
+            acknowledge_ready=mock.Mock(return_value=ready),
+        )
+        self.assertEqual(
+            run_job._read_live_cell_state(
+                store, data_disposition="PRODUCTION",
+                campaign_authorization={"validated": True},
+                operator_id="local-operator",
+                run_id="new-run", scene_binding=None, scene_store=None,
+            ),
+            ready,
+        )
+        store.acknowledge_ready.assert_called_once_with("local-operator")
+
+        for disposition, authorization, reason in (
+            ("PRODUCTION", None, "STATE_MISSING"),
+            ("TEST_ONLY", {"validated": True}, "STATE_MISSING"),
+            ("PRODUCTION", {"validated": True}, "EXECUTION_IN_PROGRESS"),
+        ):
+            with self.subTest(
+                disposition=disposition, authorization=authorization,
+                reason=reason,
+            ):
+                blocked = {"cell_ready": False, "reason_code": reason}
+                unchanged = SimpleNamespace(
+                    read=lambda: blocked,
+                    acknowledge_ready=mock.Mock(),
+                )
+                untouched_scene = SimpleNamespace(snapshot=mock.Mock())
+                self.assertEqual(
+                    run_job._read_live_cell_state(
+                        unchanged, data_disposition=disposition,
+                        campaign_authorization=authorization,
+                        operator_id="local-operator",
+                        run_id="new-run", scene_binding=None,
+                        scene_store=untouched_scene,
+                    ),
+                    blocked,
+                )
+                unchanged.acknowledge_ready.assert_not_called()
+                untouched_scene.snapshot.assert_not_called()
+
+    def test_fresh_human_scene_supersedes_only_an_older_scene_slot_fault(self):
+        scene = {
+            "revision": 11,
+            "updated_at": "2026-09-02T06:12:14.026093Z",
+            "objects": {
+                "cube-1": {
+                    "state": "ON_SURFACE", "source": "HUMAN",
+                    "updated_at": "2026-09-02T06:12:14.026093Z",
+                },
+            },
+            "slot_allocations": {},
+        }
+        scene_digest = run_job.canonical_digest(scene)
+        scene_snapshot = {
+            "scene_state": scene, "scene_state_digest": scene_digest,
+        }
+        scene_binding = {
+            "scene_state_digest": scene_digest,
+            "revision": 11,
+            "object_instance_id": "cube-1",
+        }
+        blocked = {
+            "cell_ready": False, "reason_code": "SCENE_SLOT_UNAVAILABLE",
+            "run_id": "old-run", "plan_digest": "sha256:" + "a" * 64,
+            "updated_at": "2026-09-02T05:58:29.854942Z",
+        }
+        ready = {**blocked, "cell_ready": True, "reason_code": "HUMAN_ACKNOWLEDGED"}
+        store = SimpleNamespace(
+            read=lambda: blocked,
+            acknowledge_ready=mock.Mock(return_value=ready),
+        )
+
+        self.assertEqual(
+            run_job._read_live_cell_state(
+                store, data_disposition="PRODUCTION",
+                campaign_authorization={"validated": True},
+                operator_id="local-operator", run_id="new-run",
+                scene_binding=scene_binding,
+                scene_store=SimpleNamespace(snapshot=lambda: scene_snapshot),
+            ),
+            ready,
+        )
+        store.acknowledge_ready.assert_called_once_with(
+            "local-operator", expected_run_id="old-run",
+            expected_plan_digest="sha256:" + "a" * 64,
+        )
+
+        for label, changes in (
+            ("physical fault", {"cell": {**blocked, "reason_code": "PRECONTACT_TIMEOUT"}}),
+            ("same run", {"run_id": "old-run"}),
+            ("robot scene", {"instance": {"source": "ROBOT_RELEASE"}}),
+            ("occupied slot", {"scene": {"slot_allocations": {"slot": {}}}}),
+            ("stale scene", {"scene": {"updated_at": "2026-09-02T05:00:00Z"}, "instance": {"updated_at": "2026-09-02T05:00:00Z"}}),
+            ("digest mismatch", {"binding": {"scene_state_digest": "sha256:" + "b" * 64}}),
+        ):
+            with self.subTest(label=label):
+                candidate_cell = changes.get("cell", blocked)
+                candidate_scene = copy.deepcopy(scene)
+                candidate_scene.update(changes.get("scene", {}))
+                candidate_scene["objects"]["cube-1"].update(
+                    changes.get("instance", {}),
+                )
+                candidate_snapshot = {
+                    "scene_state": candidate_scene,
+                    "scene_state_digest": scene_digest,
+                }
+                candidate_binding = {
+                    **scene_binding, **changes.get("binding", {}),
+                }
+                unchanged = SimpleNamespace(
+                    read=lambda value=candidate_cell: value,
+                    acknowledge_ready=mock.Mock(),
+                )
+                self.assertEqual(
+                    run_job._read_live_cell_state(
+                        unchanged, data_disposition="PRODUCTION",
+                        campaign_authorization={"validated": True},
+                        operator_id="local-operator",
+                        run_id=changes.get("run_id", "new-run"),
+                        scene_binding=candidate_binding,
+                        scene_store=SimpleNamespace(
+                            snapshot=lambda value=candidate_snapshot: value,
+                        ),
+                    ),
+                    candidate_cell,
+                )
+                unchanged.acknowledge_ready.assert_not_called()
+
     def test_episode_instruction_scope_binds_source_destination_and_object(self):
         family_digest = run_job.canonical_digest("a4-family")
         object_profile = {
@@ -1381,6 +1519,24 @@ class RunJobTest(unittest.TestCase):
             source="HUMAN", updated_by="operator", expected_revision=0,
         )
         self.assertNotIn("source_slot", run_job._scene_binding(validated, release_pose, "run-2", root=human_root))
+
+        stale_root, stale_store, _, stale_state = landed()
+        stale_scene = copy.deepcopy(stale_state["scene_state"])
+        stale_scene["revision"] += 1
+        stale_scene["objects"]["cube-1"].update({
+            "pose": {"place_id": "place-a", "yaw_deg": 0, "x_mm": -60, "y_mm": 0},
+            "source": "HUMAN",
+        })
+        stale_store._path().write_text(json.dumps(stale_scene), encoding="utf-8")
+        stale_validated = copy.deepcopy(validated)
+        stale_validated["normalized_job"].update(x_mm=-60, y_mm=0)
+        with self.assertRaisesRegex(run_job.ContractError, "SCENE_SLOT_NOT_READY"):
+            run_job._scene_binding(
+                stale_validated,
+                {"place_id": "place-a", "yaw_deg": 0, "x_mm": 0, "y_mm": 0},
+                "new-run",
+                root=stale_root,
+            )
 
         side_effects = []
         live_payload = payload("live")
