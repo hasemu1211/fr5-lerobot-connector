@@ -1,5 +1,5 @@
 diff --git a/fairino_hardware_v3_9_7/include/fairino_hardware/fairino_hardware_interface.hpp b/fairino_hardware_v3_9_7/include/fairino_hardware/fairino_hardware_interface.hpp
-index cd06d65..6eca8f6 100644
+index cd06d65..ef88774 100644
 --- a/fairino_hardware_v3_9_7/include/fairino_hardware/fairino_hardware_interface.hpp
 +++ b/fairino_hardware_v3_9_7/include/fairino_hardware/fairino_hardware_interface.hpp
 @@ -9,6 +9,16 @@
@@ -41,7 +41,7 @@ index cd06d65..6eca8f6 100644
    
    FAIRINO_HARDWARE_PUBLIC
    std::vector<hardware_interface::StateInterface> export_state_interfaces() override;
-@@ -53,18 +71,43 @@ public:
+@@ -53,18 +71,44 @@ public:
    hardware_interface::return_type write(const rclcpp::Time & time, const rclcpp::Duration & period) override;
    
  private:
@@ -78,7 +78,8 @@ index cd06d65..6eca8f6 100644
 +  std::condition_variable _gripper_cv;
 +  std::optional<int> _pending_gripper_position;
 +  bool _stop_gripper_thread{false};
-+  std::atomic<bool> _restart_servo_after_gripper{false};
++  std::atomic<uint64_t> _gripper_command_generation{0};
++  std::atomic<bool> _arm_stream_paused{true};
 +  std::atomic<double> _gripper_position_state{0.0};
 +  std::atomic<int> _gripper_error{0};
 +  std::atomic<bool> _gripper_rpc_active{false};
@@ -182,11 +183,74 @@ index c793c2a..fe3ad76 100644
          _state_publisher->publish(msg);
          
 diff --git a/fairino_hardware_v3_9_7/src/fairino_hardware_interface.cpp b/fairino_hardware_v3_9_7/src/fairino_hardware_interface.cpp
-index ca2d84f..ecf90fe 100644
+index ca2d84f..d49fd0d 100644
 --- a/fairino_hardware_v3_9_7/src/fairino_hardware_interface.cpp
 +++ b/fairino_hardware_v3_9_7/src/fairino_hardware_interface.cpp
-@@ -2,11 +2,76 @@
+@@ -1,12 +1,139 @@
+ #include "fairino_hardware/fairino_hardware_interface.hpp"
  
++#include <charconv>
++#include <string_view>
++
++namespace {
++
++std::atomic<int> udp_command_error{0};
++std::atomic<uint64_t> udp_reply_count{0};
++
++void capture_udp_command_reply(
++    int com_type, int, int, int, std::string content)
++{
++    if (com_type != 1) return;
++    udp_reply_count.fetch_add(1, std::memory_order_relaxed);
++    constexpr std::string_view marker{"robot errcode:"};
++    const auto marker_position = content.rfind(marker);
++    if (marker_position == std::string::npos) return;
++    const char *first = content.data() + marker_position + marker.size();
++    const char *last = content.data() + content.size();
++    int error = 0;
++    const auto parsed = std::from_chars(first, last, error);
++    if (parsed.ec == std::errc{} && error != 0) {
++        int expected = 0;
++        udp_command_error.compare_exchange_strong(expected, error);
++    }
++}
++
++struct UdpCommandResult {
++    int send_error;
++    bool reply_received;
++    int controller_error;
++
++    bool ok() const
++    {
++        // FAIRINO's UDP callback reports controller rejections, but it does not
++        // acknowledge every successful command. Absence of a reply is therefore
++        // not a failure; delayed non-zero replies remain sticky in write().
++        return send_error == 0 && controller_error == 0;
++    }
++};
++
++template<typename Send>
++UdpCommandResult send_udp_command_and_observe(Send send)
++{
++    const auto replies_before = udp_reply_count.load(std::memory_order_relaxed);
++    const int send_error = send();
++    if (send_error != 0) {
++        return {send_error, false, udp_command_error.load()};
++    }
++    const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(50);
++    while (udp_reply_count.load(std::memory_order_relaxed) == replies_before &&
++           std::chrono::steady_clock::now() < deadline) {
++        std::this_thread::sleep_for(std::chrono::milliseconds(1));
++    }
++    return {
++        send_error,
++        udp_reply_count.load(std::memory_order_relaxed) != replies_before,
++        udp_command_error.load(),
++    };
++}
++
++}  // namespace
++
  namespace fairino_hardware{
  
 +FairinoHardwareInterface::~FairinoHardwareInterface()
@@ -262,7 +326,7 @@ index ca2d84f..ecf90fe 100644
      
      for (const hardware_interface::ComponentInfo& joint : info_.joints) {
  
-@@ -108,7 +173,7 @@ hardware_interface::CallbackReturn FairinoHardwareInterface::on_activate(const r
+@@ -108,7 +235,7 @@ hardware_interface::CallbackReturn FairinoHardwareInterface::on_activate(const r
      RCLCPP_INFO(rclcpp::get_logger("FairinoHardwareInterface"), "Starting ...please wait...");
      //做变量的初始化工作
      _ptr_robot = std::make_unique<FRRobot>();//创建机器人实例
@@ -271,8 +335,21 @@ index ca2d84f..ecf90fe 100644
          _jnt_position_command[i] = 0;
          _jnt_velocity_command[i] = 0;
          _jnt_torque_command[i] = 0;
-@@ -121,20 +186,93 @@ hardware_interface::CallbackReturn FairinoHardwareInterface::on_activate(const r
-     rclcpp::sleep_for(200ms);//等待一段时间让控制器的rpc连接建立完毕
+@@ -117,24 +244,220 @@ hardware_interface::CallbackReturn FairinoHardwareInterface::on_activate(const r
+         _jnt_torque_state[i] = 0;
+     }
+     _control_mode = 0;//默认是位置控制,0-位置控制，1-扭矩控制 2-速度控制
++    udp_command_error = 0;
++    udp_reply_count = 0;
++    const int callback_result = _ptr_robot->SetCmdRpyCallback(capture_udp_command_reply);
++    if (callback_result != 0) {
++        RCLCPP_ERROR(rclcpp::get_logger("FairinoHardwareInterface"),
++            "Failed to register FAIRINO UDP reply callback, error code: %d", callback_result);
++        (void)_ptr_robot.release();
++        return hardware_interface::CallbackReturn::ERROR;
++    }
+     errno_t returncode = _ptr_robot->RPC(_controller_ip.c_str());//建立xmlrpc连接
+-    rclcpp::sleep_for(200ms);//等待一段时间让控制器的rpc连接建立完毕
      if(returncode != 0){
          RCLCPP_INFO(rclcpp::get_logger("FairinoHardwareInterface"), "机械臂SDK连接失败！请检查端口时候被占用");
 +        _ptr_robot->CloseRPC();
@@ -296,6 +373,17 @@ index ca2d84f..ecf90fe 100644
 +        (void)_ptr_robot.release();
 +        return hardware_interface::CallbackReturn::ERROR;
 +    }
++    ROBOT_STATE_PKG activation_state{};
++    const int realtime_state_result =
++        _ptr_robot->GetRobotRealTimeState(&activation_state);
++    if (realtime_state_result != 0) {
++        RCLCPP_ERROR(rclcpp::get_logger("FairinoHardwareInterface"),
++            "Failed to read realtime robot state during activation, error=%d",
++            realtime_state_result);
++        _ptr_robot->CloseRPC();
++        (void)_ptr_robot.release();
++        return hardware_interface::CallbackReturn::ERROR;
++    }
 +    if (_is_gripper) {
 +        uint16_t activation_fault = 0;
 +        uint16_t activation_status = 0;
@@ -315,23 +403,22 @@ index ca2d84f..ecf90fe 100644
 +            (void)_ptr_robot.release();
 +            return hardware_interface::CallbackReturn::ERROR;
 +        }
-+        ROBOT_STATE_PKG state{};
-+        const int state_result = _ptr_robot->GetRobotRealTimeState(&state);
-+        if (state_result != 0 || state.gripper_fault != 0 ||
-+            state.gripper_position > 100) {
++        if (activation_state.gripper_fault != 0 ||
++            activation_state.gripper_position > 100) {
 +            RCLCPP_ERROR(rclcpp::get_logger("FairinoHardwareInterface"),
-+                "Failed to read valid realtime gripper state, error=%d fault=%u position=%u",
-+                state_result, state.gripper_fault, state.gripper_position);
++                "Invalid realtime gripper state, fault=%u position=%u",
++                activation_state.gripper_fault,
++                activation_state.gripper_position);
 +            _ptr_robot->CloseRPC();
 +            (void)_ptr_robot.release();
 +            return hardware_interface::CallbackReturn::ERROR;
 +        }
-+        const uint8_t position = state.gripper_position;
++        const uint8_t position = activation_state.gripper_position;
 +        _jnt_position_state[_gripper_joint_index] = _jnt_position_command[_gripper_joint_index] =
 +            _gripper_upper_position * static_cast<double>(position) / 100.0;
 +        _gripper_position_state = _jnt_position_state[_gripper_joint_index];
 +        _gripper_error = 0;
-+        _restart_servo_after_gripper = false;
++        _arm_stream_paused = true;
 +        _last_gripper_command = _jnt_position_command[_gripper_joint_index];
 +        RCLCPP_INFO(rclcpp::get_logger("FairinoHardwareInterface"),
 +            "Real gripper hardware ready (index=%d, position=%u)", _gripper_index, position);
@@ -350,18 +437,123 @@ index ca2d84f..ecf90fe 100644
 +            const size_t joint = _arm_joint_indices[arm];
 +            _jnt_position_state[joint] = _jnt_position_command[joint] = jntpos.jPos[arm] / 180.0 * M_PI;
 +        }
-+        // Clear a stale servo session left by an interrupted controller before restarting.
-+        errno_t servoret = 0;
-+        if (_has_arm) {
-+            _ptr_robot->ServoMoveEnd(1);
-+            rclcpp::sleep_for(100ms);
-+            servoret = _ptr_robot->ServoMoveStart(1);
++        if (_has_arm && activation_state.robot_state == 3) {
++            bool stationary_hold = true;
++            for (size_t joint = 0; joint < 6; ++joint) {
++                stationary_hold = stationary_hold &&
++                    std::abs(activation_state.actual_qd[joint]) <= 0.1 &&
++                    std::abs(activation_state.targetJointVel[joint]) <= 0.001 &&
++                    std::abs(activation_state.lastServoTarget[joint] -
++                        activation_state.jt_cur_pos[joint]) <= 0.1;
++            }
++            const bool stale_pause_is_safe_to_clear =
++                (activation_state.program_state == 1 ||
++                    activation_state.program_state == 3) &&
++                activation_state.mc_queue_len == 0 &&
++                activation_state.servoJCmdNum == 0 &&
++                activation_state.trajectory_pnum == 0 &&
++                activation_state.luaLineNum == 0 &&
++                activation_state.programTotalLine == 0 &&
++                activation_state.currentLuaFileName[0] == '\0' &&
++                stationary_hold &&
++                activation_state.robot_mode == 0 &&
++                activation_state.rbtEnableState == 1 &&
++                activation_state.EmergencyStop == 0 &&
++                activation_state.collisionState == 0 &&
++                activation_state.safety_stop0_state == 0 &&
++                activation_state.safety_stop1_state == 0 &&
++                activation_state.abnomalStop == 0;
++            if (!stale_pause_is_safe_to_clear) {
++                RCLCPP_ERROR(rclcpp::get_logger("FairinoHardwareInterface"),
++                    "Paused robot is not eligible for automatic stale-pause recovery "
++                    "(program=%u, queue=%d, servo_count=%d, trajectory=%d, stationary_hold=%s, "
++                    "mode=%u, enabled=%d, estop=%u, collision=%u, safety=%u/%u, abnormal=%u)",
++                    activation_state.program_state, activation_state.mc_queue_len,
++                    activation_state.servoJCmdNum,
++                    activation_state.trajectory_pnum,
++                    stationary_hold ? "yes" : "no",
++                    activation_state.robot_mode, activation_state.rbtEnableState,
++                    activation_state.EmergencyStop, activation_state.collisionState,
++                    activation_state.safety_stop0_state,
++                    activation_state.safety_stop1_state,
++                    activation_state.abnomalStop);
++                _ptr_robot->CloseRPC();
++                (void)_ptr_robot.release();
++                return hardware_interface::CallbackReturn::ERROR;
++            }
++            const int resume_result = _ptr_robot->ResumeMotion();
++            const auto resume_deadline =
++                std::chrono::steady_clock::now() + std::chrono::milliseconds(1000);
++            int resume_state_result = 0;
++            while (resume_result == 0 && activation_state.robot_state != 1 &&
++                   std::chrono::steady_clock::now() < resume_deadline) {
++                std::this_thread::sleep_for(std::chrono::milliseconds(10));
++                resume_state_result = _ptr_robot->GetRobotRealTimeState(&activation_state);
++                if (resume_state_result != 0) break;
++            }
++            if (resume_result != 0 || resume_state_result != 0 ||
++                activation_state.robot_state != 1) {
++                RCLCPP_ERROR(rclcpp::get_logger("FairinoHardwareInterface"),
++                    "Failed to clear stale paused state "
++                    "(resume=%d, state_read=%d, robot_state=%u)",
++                    resume_result, resume_state_result, activation_state.robot_state);
++                _ptr_robot->CloseRPC();
++                (void)_ptr_robot.release();
++                return hardware_interface::CallbackReturn::ERROR;
++            }
++            RCLCPP_INFO(rclcpp::get_logger("FairinoHardwareInterface"),
++                "Cleared stale paused state with no queued motion");
 +        }
-+        if(servoret != 0){
-+            RCLCPP_INFO(rclcpp::get_logger("FairinoHardwareInterface"), "ServoMoveStart failed, error code: %d", servoret);
++        int stop_result = 0;
++        int end_result = 0;
++        int start_result = 0;
++        if (_has_arm) {
++            // Retire any previous servo session before opening the UDP stream.
++            // FAIRINO's controller can otherwise retain a full UDP command queue
++            // even while the public motion-queue counters are zero.
++            stop_result = _ptr_robot->StopMotion();
++            if (stop_result == 0) {
++                std::this_thread::sleep_for(250ms);
++                end_result = _ptr_robot->ServoMoveEnd();
++            }
++            if (stop_result == 0 && end_result == 0) {
++                start_result = _ptr_robot->ServoMoveStart();
++            }
++        }
++        if (stop_result != 0 || end_result != 0 || start_result != 0) {
++            RCLCPP_ERROR(rclcpp::get_logger("FairinoHardwareInterface"),
++                "Servo lifecycle preparation failed (stop=%d, end=%d, start=%d, queue=%d, servo_count=%d, robot_state=%u)",
++                stop_result, end_result, start_result,
++                activation_state.mc_queue_len,
++                activation_state.servoJCmdNum,
++                activation_state.robot_state);
++            if (_has_arm && start_result == 0) {
++                (void)_ptr_robot->ServoMoveEnd(1);
++            }
 +            _ptr_robot->CloseRPC();
 +            (void)_ptr_robot.release();
 +            return hardware_interface::CallbackReturn::ERROR;
++        }
++        if (_has_arm) {
++            std::this_thread::sleep_for(100ms);
++            JointPos hold = jntpos;
++            ExaxisPos extcmd{0,0,0,0};
++            const auto hold_result = send_udp_command_and_observe([this, &hold, &extcmd] {
++                return _ptr_robot->ServoJ(
++                    &hold, &extcmd, 0, 0, 0.008, 0, 0, 0, 1);
++            });
++            if (!hold_result.ok()) {
++                RCLCPP_ERROR(rclcpp::get_logger("FairinoHardwareInterface"),
++                    "Servo transport qualification failed (send=%d, reply=%s, controller=%d)",
++                    hold_result.send_error,
++                    hold_result.reply_received ? "received" : "missing",
++                    hold_result.controller_error);
++                _ptr_robot->ServoMoveEnd(1);
++                _ptr_robot->CloseRPC();
++                (void)_ptr_robot.release();
++                return hardware_interface::CallbackReturn::ERROR;
++            }
++            _arm_stream_paused = false;
 +        }
 +        if (_is_gripper) {
 +            _stop_gripper_thread = false;
@@ -370,7 +562,7 @@ index ca2d84f..ecf90fe 100644
          }
          RCLCPP_INFO(rclcpp::get_logger("FairinoHardwareInterface"),"初始指令位置: %f,%f,%f,%f,%f,%f",_jnt_position_command[0],\
          _jnt_position_command[1],_jnt_position_command[2],_jnt_position_command[3],_jnt_position_command[4],_jnt_position_command[5]);    
-@@ -142,6 +280,8 @@ hardware_interface::CallbackReturn FairinoHardwareInterface::on_activate(const r
+@@ -142,6 +465,8 @@ hardware_interface::CallbackReturn FairinoHardwareInterface::on_activate(const r
          return hardware_interface::CallbackReturn::SUCCESS;
      }else{
          RCLCPP_INFO(rclcpp::get_logger("FairinoHardwareInterface"), "读取初始关节角度错误，硬件无法启动！请检查通讯内容");
@@ -379,21 +571,22 @@ index ca2d84f..ecf90fe 100644
          return hardware_interface::CallbackReturn::ERROR;
      }
  }
-@@ -151,54 +291,114 @@ hardware_interface::CallbackReturn FairinoHardwareInterface::on_activate(const r
+@@ -151,54 +476,122 @@ hardware_interface::CallbackReturn FairinoHardwareInterface::on_activate(const r
  hardware_interface::CallbackReturn FairinoHardwareInterface::on_deactivate(const rclcpp_lifecycle::State& previous_state)
  {
      RCLCPP_INFO(rclcpp::get_logger("FairinoHardwareInterface"), "Stopping ...please wait...");
 -    _ptr_robot->StopMotion();//停止机器人
 -    _ptr_robot->CloseRPC();//销毁实例，连接断开
 -    _ptr_robot.release();
-+    errno_t servo_result = 0;
 +    if (_ptr_robot && _has_arm) {
-+        // Stop arm streaming over UDP before a potentially delayed gripper RPC join.
-+        servo_result = _ptr_robot->ServoMoveEnd(1);
++        _arm_stream_paused = true;
 +    }
 +    stop_gripper_worker();
 +    if (!_ptr_robot) return hardware_interface::CallbackReturn::SUCCESS;
++    errno_t servo_result = 0;
 +    if (_has_arm) {
++        _arm_stream_paused = true;
++        servo_result = _ptr_robot->ServoMoveEnd(1);
 +        const auto stop_result = _ptr_robot->StopMotion();//停止机器人
 +        if (servo_result != 0 || stop_result != 0) {
 +            RCLCPP_WARN(rclcpp::get_logger("FairinoHardwareInterface"),
@@ -466,6 +659,13 @@ index ca2d84f..ecf90fe 100644
  {
 -    if(_control_mode == 0){//位置控制模式
 -        if (std::any_of(&_jnt_position_command[0], &_jnt_position_command[5],\
++    const int controller_error = udp_command_error.load();
++    if (controller_error != 0) {
++        RCLCPP_ERROR(rclcpp::get_logger("FairinoHardwareInterface"),
++            "FAIRINO controller rejected the UDP servo stream, error code: %d",
++            controller_error);
++        return hardware_interface::return_type::ERROR;
++    }
 +    if (_is_gripper) {
 +        if (_gripper_error.load() != 0) {
 +            return hardware_interface::return_type::ERROR;
@@ -479,20 +679,19 @@ index ca2d84f..ecf90fe 100644
 +        const int position = static_cast<int>(std::lround(100.0 * target / _gripper_upper_position));
 +        const double last_command = _last_gripper_command.load();
 +        if (last_command < 0.0 || std::abs(target - last_command) > 0.0001) {
++            // Gripper motion interrupts servo mode. Stop producing hold packets until it completes.
 +            {
 +                std::lock_guard<std::mutex> lock(_gripper_mutex);
 +                _pending_gripper_position = position;
++                _gripper_command_generation.fetch_add(1);
++                _arm_stream_paused = true;
 +            }
 +            _last_gripper_command = target;
 +            _gripper_cv.notify_one();
 +        }
 +    }
 +    if (_has_arm && _control_mode == 0){//位置控制模式
-+        if (_restart_servo_after_gripper.exchange(false) && _ptr_robot->ServoMoveStart(1) != 0) {
-+            RCLCPP_ERROR(rclcpp::get_logger("FairinoHardwareInterface"),
-+                "ServoMoveStart failed after gripper motion");
-+            return hardware_interface::return_type::ERROR;
-+        }
++        if (_arm_stream_paused.load()) return hardware_interface::return_type::OK;
 +        if (std::any_of(_jnt_position_command.begin(), _jnt_position_command.end(),\
              [](double c) { return not std::isfinite(c); })) {
              return hardware_interface::return_type::ERROR;
@@ -508,7 +707,8 @@ index ca2d84f..ecf90fe 100644
 -        //RCLCPP_INFO(rclcpp::get_logger("FairinoHardwareInterface"), "ServoJ下发位置:%f,%f,%f,%f,%f,%f",\
 -            cmd.jPos[0],cmd.jPos[1],cmd.jPos[2],cmd.jPos[3],cmd.jPos[4],cmd.jPos[5]);
 -        int returncode = _ptr_robot->ServoJ(&cmd,&extcmd,0,0,0.008,0,0);
-+        int returncode = _ptr_robot->ServoJ(&cmd, &extcmd, 0, 0, 0.008, 0, 0, 0, 1);
++        int returncode = _ptr_robot->ServoJ(
++            &cmd, &extcmd, 0, 0, 0.008, 0, 0, 0, 1);
          if(returncode != 0){
 -            RCLCPP_INFO(rclcpp::get_logger("FairinoHardwareInterface"), "ServoJ指令下发错误,错误码:%d",returncode);
 +            RCLCPP_ERROR(rclcpp::get_logger("FairinoHardwareInterface"), "ServoJ指令下发错误,错误码:%d",returncode);
@@ -521,7 +721,7 @@ index ca2d84f..ecf90fe 100644
              [](double c) { return not std::isfinite(c); })) {
              return hardware_interface::return_type::ERROR;
          }
-@@ -211,6 +411,207 @@ hardware_interface::return_type FairinoHardwareInterface::write(const rclcpp::Ti
+@@ -211,6 +604,228 @@ hardware_interface::return_type FairinoHardwareInterface::write(const rclcpp::Ti
      return hardware_interface::return_type::OK;
  }
  
@@ -547,6 +747,7 @@ index ca2d84f..ecf90fe 100644
 +    size_t idle_invalid_feedback_samples = 0;
 +    while (true) {
 +        std::optional<int> position;
++        uint64_t command_generation = 0;
 +        {
 +            std::unique_lock<std::mutex> lock(_gripper_mutex);
 +            _gripper_cv.wait_for(lock, 50ms, [this] {
@@ -555,8 +756,10 @@ index ca2d84f..ecf90fe 100644
 +            if (_stop_gripper_thread) return;
 +            position = _pending_gripper_position;
 +            _pending_gripper_position.reset();
++            command_generation = _gripper_command_generation.load();
 +        }
 +        if (position.has_value()) {
++            bool resume_arm = false;
 +            ROBOT_STATE_PKG initial_state{};
 +            _gripper_rpc_active = true;
 +            const int initial_state_result =
@@ -645,7 +848,7 @@ index ca2d84f..ecf90fe 100644
 +                            *position, last_feedback, feedback);
 +                        return;
 +                    }
-+                    _restart_servo_after_gripper = true;
++                    resume_arm = true;
 +                    break;
 +                }
 +                const auto now = std::chrono::steady_clock::now();
@@ -661,7 +864,7 @@ index ca2d84f..ecf90fe 100644
 +                        RCLCPP_WARN(rclcpp::get_logger("FairinoHardwareInterface"),
 +                            "Gripper motion settled away from target (target=%d, feedback=%u, dwell=%d ms)",
 +                            *position, feedback, _gripper_settle_time_ms);
-+                        _restart_servo_after_gripper = true;
++                        resume_arm = true;
 +                        break;
 +                    }
 +                } else if (feedback_is_plausible) {
@@ -684,6 +887,24 @@ index ca2d84f..ecf90fe 100644
 +                    RCLCPP_ERROR(rclcpp::get_logger("FairinoHardwareInterface"),
 +                        "Gripper motion timed out after %d ms", _gripper_max_time);
 +                    return;
++                }
++            }
++            if (resume_arm) {
++                const auto servo_result = send_udp_command_and_observe(
++                    [this] { return _ptr_robot->ServoMoveStart(1); });
++                if (!servo_result.ok()) {
++                    _gripper_error = servo_result.controller_error != 0 ?
++                        servo_result.controller_error :
++                        (servo_result.send_error != 0 ? servo_result.send_error : -4);
++                    RCLCPP_ERROR(rclcpp::get_logger("FairinoHardwareInterface"),
++                        "ServoMoveStart failed after gripper motion (send=%d, reply=%s, controller=%d)",
++                        servo_result.send_error,
++                        servo_result.reply_received ? "received" : "missing",
++                        servo_result.controller_error);
++                    return;
++                }
++                if (_gripper_command_generation.load() == command_generation) {
++                    _arm_stream_paused = false;
 +                }
 +            }
 +            continue;

@@ -39,16 +39,42 @@ class RecorderContractTest(unittest.TestCase):
         )[0]
         self.assertNotIn("MoveGripper", write_body)
         self.assertNotIn("SetRobotRealtimeStateConfig", source)
-        self.assertIn("ServoMoveStart(1)", source)
-        self.assertIn("ServoMoveEnd(1)", source)
+        self.assertIn("SetCmdRpyCallback(capture_udp_command_reply)", source)
         self.assertNotIn("ActGripper", source)
         activation_body = source.split("FairinoHardwareInterface::on_activate", 1)[1].split(
             "FairinoHardwareInterface::on_deactivate", 1
         )[0]
         self.assertLess(
             activation_body.index("GetRobotErrorCode"),
-            activation_body.index("ServoMoveStart(1)"),
+            activation_body.index("ServoMoveStart()"),
         )
+        self.assertLess(
+            activation_body.index("StopMotion()"),
+            activation_body.index("ServoMoveEnd()"),
+        )
+        self.assertLess(
+            activation_body.index("ServoMoveEnd()"),
+            activation_body.index("ServoMoveStart()"),
+        )
+        self.assertNotIn("MotionQueueClear()", activation_body)
+        self.assertNotIn("sleep_for(200ms)", activation_body)
+        self.assertIn("sleep_for(250ms)", activation_body)
+        self.assertIn("sleep_for(100ms)", activation_body)
+        self.assertIn("send_udp_command_and_observe", activation_body)
+        self.assertIn("std::chrono::milliseconds(50)", source)
+        self.assertIn("return send_error == 0 && controller_error == 0;", source)
+        self.assertIn("stale_pause_is_safe_to_clear", activation_body)
+        self.assertIn("program_state == 1", activation_body)
+        self.assertIn("mc_queue_len == 0", activation_body)
+        self.assertIn("currentLuaFileName[0] == '\\0'", activation_body)
+        self.assertIn("lastServoTarget[joint]", activation_body)
+        self.assertIn("ResumeMotion()", activation_body)
+        self.assertIn("activation_state.robot_state != 1", activation_body)
+        self.assertIn("Servo transport qualification failed", activation_body)
+        start_failure = activation_body.split("if (stop_result != 0", 1)[1].split(
+            "if (_has_arm) {", 2
+        )[0]
+        self.assertIn("ServoMoveEnd(1)", start_failure)
         self.assertNotIn("ResetAllError", activation_body)
         read_body = source.split("FairinoHardwareInterface::read", 1)[1].split(
             "FairinoHardwareInterface::write", 1
@@ -57,14 +83,22 @@ class RecorderContractTest(unittest.TestCase):
             "FairinoHardwareInterface::read", 1
         )[0]
         self.assertNotIn("GetGripperCurPosition", read_body)
-        self.assertLess(deactivate_body.index("ServoMoveEnd(1)"), deactivate_body.index("stop_gripper_worker()"))
-        self.assertIn("_restart_servo_after_gripper.exchange(false)", write_body)
+        self.assertLess(deactivate_body.index("stop_gripper_worker()"), deactivate_body.index("ServoMoveEnd(1)"))
+        self.assertIn("_arm_stream_paused = true", write_body)
+        self.assertIn("if (_arm_stream_paused.load()) return", write_body)
+        self.assertNotIn("_restart_servo_after_gripper", source)
+        self.assertLess(
+            write_body.index("udp_command_error.load()"),
+            write_body.index("_arm_stream_paused.load()"),
+        )
         worker_body = source.split("void FairinoHardwareInterface::gripper_worker", 1)[1]
         self.assertIn("GetRobotRealTimeState", worker_body)
         self.assertNotIn("GetGripperCurPosition", worker_body)
         self.assertIn("feedback <= 100", worker_body)
         self.assertIn("feedback > 100", worker_body)
-        self.assertLess(worker_body.index("if (result != 0)"), worker_body.index("_restart_servo_after_gripper = true"))
+        self.assertLess(worker_body.index("MoveGripper("), worker_body.index("ServoMoveStart(1)"))
+        self.assertLess(worker_body.index("ServoMoveStart(1)"), worker_body.index("_arm_stream_paused = false"))
+        self.assertIn("_gripper_command_generation.load() == command_generation", worker_body)
         self.assertIn(
             "if (feedback_is_plausible &&",
             worker_body,
@@ -75,7 +109,7 @@ class RecorderContractTest(unittest.TestCase):
             "if (feedback_is_plausible && observed_movement &&", 1
         )[1].split("if (std::chrono::steady_clock::now() >= deadline)", 1)[0]
         self.assertIn("Gripper motion settled away from target", settle_branch)
-        self.assertIn("_restart_servo_after_gripper = true", settle_branch)
+        self.assertIn("resume_arm = true", settle_branch)
         self.assertNotIn("_gripper_error =", settle_branch)
         pending_supersession = worker_body.split(
             "_gripper_cv.wait_for(lock, 50ms", 2
