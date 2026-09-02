@@ -32,6 +32,45 @@ def has_nonfinite_number(value) -> bool:
     return isinstance(value, (int, float)) and not isinstance(value, bool) and not np.isfinite(value)
 
 
+def transient_gripper_zero_dropouts(
+    states: np.ndarray,
+    actions: np.ndarray,
+    episode_indices: np.ndarray,
+    frame_indices: np.ndarray,
+    *,
+    epsilon: float = 1e-8,
+) -> list[dict[str, int]]:
+    """Find zero feedback runs bracketed by valid nonzero feedback and commands."""
+    dropouts: list[dict[str, int]] = []
+    for episode_index in np.unique(episode_indices):
+        selected = np.flatnonzero(episode_indices == episode_index)
+        selected = selected[np.argsort(frame_indices[selected])]
+        feedback = states[selected, 6]
+        commanded = actions[selected, 6]
+        suspect = (np.abs(feedback) <= epsilon) & (commanded > epsilon)
+        start = 0
+        while start < len(selected):
+            if not suspect[start]:
+                start += 1
+                continue
+            end = start
+            while end + 1 < len(selected) and suspect[end + 1]:
+                end += 1
+            if (
+                start > 0
+                and end + 1 < len(selected)
+                and feedback[start - 1] > epsilon
+                and feedback[end + 1] > epsilon
+            ):
+                dropouts.append({
+                    "episode_index": int(episode_index),
+                    "frame_start": int(frame_indices[selected[start]]),
+                    "frame_end": int(frame_indices[selected[end]]),
+                })
+            start = end + 1
+    return dropouts
+
+
 def image_metrics(image: np.ndarray) -> tuple[float, float, float, float]:
     if image.shape[0] == 3:
         image = np.moveaxis(image, 0, -1)
@@ -220,6 +259,16 @@ def main() -> None:
             failures.append("data rows reference missing/empty tasks")
         if not np.isfinite(actions).all(): failures.append("action contains NaN/Inf")
         if not np.isfinite(states).all(): failures.append("observation.state contains NaN/Inf")
+        if np.isfinite(actions).all() and np.isfinite(states).all():
+            for dropout in transient_gripper_zero_dropouts(
+                states, actions, episode_indices, frame_indices,
+            ):
+                failures.append(
+                    "episode {episode_index} gripper feedback has a transient "
+                    "zero dropout at frames {frame_start}-{frame_end}".format(
+                        **dropout,
+                    )
+                )
         arm_range = float(np.ptp(actions[:, :6], axis=0).max())
         gripper_range = float(np.ptp(actions[:, 6]))
         state_arm_range = float(np.ptp(states[:, :6], axis=0).max())

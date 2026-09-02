@@ -22,7 +22,10 @@ from fr5_lerobot_recorder import FR5LeRobotRecorder, parse_args
 from time_alignment import interpolate_vector, latest_sample, nearest_sample
 from ros_image import image_message_to_rgb
 from measure_ros_topic_age import image_gate_failures
-from validate_lerobot_dataset import has_nonfinite_number
+from validate_lerobot_dataset import (
+    has_nonfinite_number,
+    transient_gripper_zero_dropouts,
+)
 
 
 class RecorderContractTest(unittest.TestCase):
@@ -56,13 +59,19 @@ class RecorderContractTest(unittest.TestCase):
         self.assertLess(deactivate_body.index("ServoMoveEnd(1)"), deactivate_body.index("stop_gripper_worker()"))
         self.assertIn("_restart_servo_after_gripper.exchange(false)", write_body)
         worker_body = source.split("void FairinoHardwareInterface::gripper_worker", 1)[1]
+        self.assertIn("GetRobotRealTimeState", worker_body)
+        self.assertNotIn("GetGripperCurPosition", worker_body)
+        self.assertIn("feedback <= 100", worker_body)
+        self.assertIn("feedback > 100", worker_body)
         self.assertLess(worker_body.index("if (result != 0)"), worker_body.index("_restart_servo_after_gripper = true"))
         self.assertIn(
-            "if (motion_done == 1 || feedback != static_cast<uint8_t>(*position))",
+            "if (feedback_is_plausible &&",
             worker_body,
         )
+        self.assertIn("Holding last valid gripper feedback", worker_body)
+        self.assertIn("Realtime gripper feedback recovered", worker_body)
         settle_branch = worker_body.split(
-            "if (observed_movement && feedback != static_cast<uint8_t>(*position))", 1
+            "if (feedback_is_plausible && observed_movement &&", 1
         )[1].split("if (std::chrono::steady_clock::now() >= deadline)", 1)[0]
         self.assertIn("Gripper motion settled away from target", settle_branch)
         self.assertIn("_restart_servo_after_gripper = true", settle_branch)
@@ -288,6 +297,23 @@ class RecorderContractTest(unittest.TestCase):
                 parse_args()
         self.assertTrue(has_nonfinite_number({"nested": [1, float("nan")]}))
         self.assertFalse(has_nonfinite_number({"nested": [1, 2.0], "accepted": True}))
+
+    def test_transient_gripper_zero_feedback_is_rejected_without_deleting_rows(self):
+        states = np.zeros((9, 7), dtype=np.float32)
+        actions = np.zeros((9, 7), dtype=np.float32)
+        states[:, 6] = [0.021, 0.021, 0.0, 0.0, 0.0119, 0.0118, 0.0, 0.0, 0.0]
+        actions[:, 6] = [0.021, 0.01176, 0.01176, 0.01176, 0.01176, 0.0, 0.0, 0.0, 0.0]
+        dropouts = transient_gripper_zero_dropouts(
+            states,
+            actions,
+            np.zeros(9, dtype=np.int64),
+            np.arange(9, dtype=np.int64),
+        )
+        self.assertEqual(dropouts, [{
+            "episode_index": 0,
+            "frame_start": 2,
+            "frame_end": 3,
+        }])
 
     def test_collection_defaults_and_supported_camera_path(self):
         root = Path(__file__).resolve().parents[1]

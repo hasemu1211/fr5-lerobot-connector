@@ -1011,7 +1011,10 @@ def _validate_motion_qualification(
     keys = MOTION_QUALIFICATION_KEYS_BY_SCHEMA.get(schema)
     if keys is None:
         raise ContractError("MOTION_SCHEMA")
-    qualification = _exact(qualification, keys, "MOTION_KEYS")
+    qualification = copy.deepcopy(
+        _exact(qualification, keys, "MOTION_KEYS")
+    )
+    qualification_digest = canonical_digest(qualification)
     _id(qualification["motion_qualification_id"], "MOTION_ID")
     if qualification["qualification_status"] != "QUALIFIED": raise ContractError("MOTION_STATUS")
     job, digests = validated["normalized_job"], validated["input_digests"]
@@ -1125,7 +1128,7 @@ def _validate_motion_qualification(
         if any(value <= 0 for value in values.values()): raise ContractError("MOTION_PHASE_LIMITS")
         normalized_limits[phase] = values
     _timestamp(qualification["qualified_at"], "MOTION_QUALIFIED_AT", now=now)
-    return {"digest": canonical_digest(qualification), "frames": frames, "planning_scene": planning_scene, "transforms": transforms, "offsets": offsets, "gripper": gripper, "gripper_requirements": close, "safe": [_number(v, "MOTION_SAFE_JOINTS") for v in safe], "limits": normalized_limits, "tolerances": tolerance, "max_joint_state_age_s": max_joint_state_age_s, "execution_timeouts_s": execution_timeouts, "pins": {key: qualification[key] for key in ("robot_description_digest", "moveit_config_digest", "planning_scene_digest")}}
+    return {"digest": qualification_digest, "frames": frames, "planning_scene": planning_scene, "transforms": transforms, "offsets": offsets, "gripper": gripper, "gripper_requirements": close, "safe": [_number(v, "MOTION_SAFE_JOINTS") for v in safe], "limits": normalized_limits, "tolerances": tolerance, "max_joint_state_age_s": max_joint_state_age_s, "execution_timeouts_s": execution_timeouts, "pins": {key: qualification[key] for key in ("robot_description_digest", "moveit_config_digest", "planning_scene_digest")}}
 
 
 def resolve_motion_program(

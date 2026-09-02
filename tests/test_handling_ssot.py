@@ -59,8 +59,13 @@ class HandlingSsotTest(unittest.TestCase):
         for place in expected_tcp_z:
             with self.subTest(place=place):
                 payload, motion_path = self._payload(place)
+                motion = load_json_strict(motion_path)
                 validated, program, _binding = run_job.resolve_inputs(
                     payload, scene_binding_call=lambda *_args: {},
+                )
+                self.assertEqual(
+                    program["binding_digests"]["motion_qualification"],
+                    canonical_digest(motion),
                 )
                 grasp = validated["grasp_profile"]
                 self.assertEqual(
@@ -106,7 +111,6 @@ class HandlingSsotTest(unittest.TestCase):
                     final_z - measured_floor, 0.0205, delta=0.00001,
                 )
 
-                motion = load_json_strict(motion_path)
                 self.assertAlmostEqual(
                     motion["tool_to_tcp"]["translation_m"][2],
                     0.249852939145247,
