@@ -12,6 +12,9 @@ import numpy as np
 from tools.curator.contracts import CuratorError
 
 
+MAX_BACKGROUND_PLATE_FRAMES = 31
+
+
 def uint8_hwc(value: Any, *, width: int, height: int, code: str = "IMAGE") -> np.ndarray:
     if hasattr(value, "detach"):
         value = value.detach().cpu().numpy()
@@ -65,12 +68,24 @@ def array_digest(value: np.ndarray) -> str:
 
 
 def make_background_plate(frames: Sequence[np.ndarray]) -> np.ndarray:
-    if not frames:
+    count = len(frames)
+    if not 1 <= count <= MAX_BACKGROUND_PLATE_FRAMES:
         raise CuratorError("PLATE_FRAMES")
     shape = frames[0].shape
     if any(frame.dtype != np.uint8 or frame.shape != shape for frame in frames):
         raise CuratorError("PLATE_FRAME_CONTRACT")
-    return np.median(np.stack(frames, axis=0), axis=0).astype(np.uint8)
+    if count == 1:
+        return frames[0].copy()
+    stacked = np.stack(frames, axis=0)
+    upper = count // 2
+    if count % 2:
+        stacked.partition(upper, axis=0)
+        return stacked[upper].copy()
+    lower = upper - 1
+    stacked.partition((lower, upper), axis=0)
+    return (
+        (stacked[lower].astype(np.uint16) + stacked[upper].astype(np.uint16)) // 2
+    ).astype(np.uint8)
 
 
 def apply_up_view(raw_up: np.ndarray, keep_mask: np.ndarray, background_plate: np.ndarray) -> np.ndarray:
@@ -142,6 +157,7 @@ def polygon_crop(image: np.ndarray, polygons: Sequence[Sequence[Sequence[float]]
 
 
 __all__ = [
+    "MAX_BACKGROUND_PLATE_FRAMES",
     "apply_up_view",
     "array_digest",
     "make_background_plate",

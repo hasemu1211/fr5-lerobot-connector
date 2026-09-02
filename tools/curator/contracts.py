@@ -262,15 +262,35 @@ def tree_snapshot(root: str | Path) -> dict[str, list[int]]:
     return result
 
 
-def tree_identity(root: str | Path) -> tuple[str, dict[str, str]]:
-    base = Path(root)
-    snapshot = tree_snapshot(base)
+def _tree_identity_from_snapshot(
+    base: Path,
+    snapshot: dict[str, list[int]],
+) -> tuple[str, dict[str, str]]:
     files = {
         relative: file_sha256(base / relative)
         for relative in snapshot
         if not relative.endswith("/")
     }
     return canonical_digest({"files": files}), files
+
+
+def tree_identity(root: str | Path) -> tuple[str, dict[str, str]]:
+    base = Path(root)
+    return _tree_identity_from_snapshot(base, tree_snapshot(base))
+
+
+def stable_tree_identity(
+    root: str | Path,
+    *,
+    code: str,
+) -> tuple[dict[str, list[int]], str]:
+    """Capture one payload identity with one pre-hash and one post-hash walk."""
+    base = Path(root)
+    before = tree_snapshot(base)
+    digest, _files = _tree_identity_from_snapshot(base, before)
+    if tree_snapshot(base) != before:
+        raise CuratorError(code, "metadata changed")
+    return before, digest
 
 
 def assert_tree_identity(
@@ -284,7 +304,7 @@ def assert_tree_identity(
     before = tree_snapshot(root)
     if before != expected_snapshot:
         raise CuratorError(code, "metadata changed")
-    current_digest, _files = tree_identity(root)
+    current_digest, _files = _tree_identity_from_snapshot(Path(root), before)
     if current_digest != expected_digest or tree_snapshot(root) != before:
         raise CuratorError(code, "payload changed")
 
@@ -303,6 +323,7 @@ __all__ = [
     "read_regular_bytes",
     "reject_symlink_components",
     "rename_noreplace",
+    "stable_tree_identity",
     "tree_identity",
     "tree_snapshot",
     "write_json_atomic",

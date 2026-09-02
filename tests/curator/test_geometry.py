@@ -10,6 +10,7 @@ import numpy as np
 
 from tools.curator.contracts import CuratorError, canonical_digest, file_sha256
 from tools.curator.geometry import build_keep_mask, load_profile_request, resolve_geometry
+from tools.curator.up_view import MAX_BACKGROUND_PLATE_FRAMES
 
 
 def _write(path: Path, value: object) -> None:
@@ -185,6 +186,14 @@ class GeometryTest(unittest.TestCase):
         self.request["physical_region_binding_digest"] = self.binding["binding_digest"]
         _write(self.request_path, self.request)
         with self.assertRaisesRegex(CuratorError, "VERIFIED_BINDING_NOT_CANONICAL"):
+            load_profile_request(self.request_path)
+
+    def test_background_plate_frame_count_is_bounded_before_decode(self):
+        self.request["background_plate_frame_indices"] = list(
+            range(MAX_BACKGROUND_PLATE_FRAMES + 1)
+        )
+        _write(self.request_path, self.request)
+        with self.assertRaisesRegex(CuratorError, "PROFILE_PLATE_INDICES"):
             load_profile_request(self.request_path)
 
     def test_semantic_subregion_outside_table_is_rejected(self):

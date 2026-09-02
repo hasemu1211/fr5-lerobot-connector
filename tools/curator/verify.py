@@ -29,6 +29,7 @@ from tools.curator.contracts import (
     read_regular_bytes,
     reject_symlink_components,
     rename_noreplace,
+    stable_tree_identity,
     tree_identity,
     tree_snapshot,
     write_json_atomic,
@@ -259,10 +260,10 @@ def export_reference(
     if source == target or source in target.parents or target in source.parents:
         raise CuratorError("SOURCE_ARTIFACT_OVERLAP", str(target))
 
-    before = tree_snapshot(source)
-    source_digest, _source_files = tree_identity(source)
-    if tree_snapshot(source) != before:
-        raise CuratorError("SOURCE_CHANGED_DURING_IDENTITY")
+    before, source_digest = stable_tree_identity(
+        source,
+        code="SOURCE_CHANGED_DURING_IDENTITY",
+    )
     dataset = open_source_dataset(source, source_repo_id)
     try:
         feature = dataset.meta.features[CAMERA_KEY]
@@ -431,8 +432,10 @@ def create_review_bundle(
     for artifact in (request.review_bundle_path, request.approval_path):
         if source == artifact or source in artifact.parents or artifact in source.parents:
             raise CuratorError("SOURCE_ARTIFACT_OVERLAP", str(artifact))
-    before = tree_snapshot(source)
-    source_digest, _source_files = tree_identity(source)
+    before, source_digest = stable_tree_identity(
+        source,
+        code="SOURCE_CHANGED_DURING_IDENTITY",
+    )
     if request.review_bundle_path.exists() or request.review_bundle_path.is_symlink():
         raise CuratorError("BUNDLE_EXISTS", str(request.review_bundle_path))
     geometry, _layout, binding = resolve_geometry(request)
@@ -692,13 +695,6 @@ def _scalar(value: Any, code: str) -> Any:
     return array.reshape(-1)[0].item()
 
 
-def _frame_mae(left: np.ndarray, right: np.ndarray, pixels: np.ndarray | None = None) -> float:
-    delta = np.abs(left.astype(np.int16) - right.astype(np.int16))
-    if pixels is not None:
-        delta = delta[pixels]
-    return float(delta.mean()) if delta.size else 0.0
-
-
 def _image_metrics(image: np.ndarray) -> tuple[float, float, float, float]:
     value = image.astype(np.float32)
     color = float(
@@ -715,6 +711,37 @@ def _image_metrics(image: np.ndarray) -> tuple[float, float, float, float]:
         float(((gray <= 5) | (gray >= 250)).mean()),
         float(cv2.Laplacian(gray, cv2.CV_64F).var()),
     )
+
+
+def _metric_accumulator() -> dict[str, Any]:
+    return {
+        "count": 0,
+        "color_delta_total": 0.0,
+        "brightness_total": 0.0,
+        "clipping_total": 0.0,
+        "sharpness": [],
+    }
+
+
+def _accumulate_metrics(accumulator: dict[str, Any], image: np.ndarray) -> None:
+    color, brightness, clipping, sharpness = _image_metrics(image)
+    accumulator["count"] += 1
+    accumulator["color_delta_total"] += color
+    accumulator["brightness_total"] += brightness
+    accumulator["clipping_total"] += clipping
+    accumulator["sharpness"].append(sharpness)
+
+
+def _summarize_metrics(accumulator: dict[str, Any]) -> dict[str, float]:
+    count = accumulator["count"]
+    if not count:
+        raise CuratorError("DERIVED_IMAGE_METRICS")
+    return {
+        "color_delta_mean": accumulator["color_delta_total"] / count,
+        "brightness_mean": accumulator["brightness_total"] / count,
+        "clipping_mean": accumulator["clipping_total"] / count,
+        "sharpness_median": float(np.median(accumulator["sharpness"])),
+    }
 
 
 def _verify_h264(root: Path) -> list[str]:
@@ -768,7 +795,8 @@ def verify_derived_dataset(
         raise CuratorError("DERIVED_EMPTY")
     mapping: dict[int, dict[str, int]] = {}
     maxima = {"up_keep_mae": 0.0, "up_replace_mae": 0.0, "wrist_mae": 0.0}
-    image_metrics: dict[int, dict[str, list[tuple[float, float, float, float]]]] = {}
+    image_metrics: dict[int, dict[str, dict[str, Any]]] = {}
+    replace_mask = ~keep_mask
     for index in range(len(source_dataset)):
         try:
             source = source_dataset[index]
@@ -810,10 +838,14 @@ def verify_derived_dataset(
             code="DERIVED_WRIST_FRAME",
         )
         expected_up = apply_up_view(raw_up, keep_mask, background_plate)
+        up_delta = np.abs(output_up.astype(np.int16) - expected_up.astype(np.int16))
+        wrist_delta = np.abs(output_wrist.astype(np.int16) - raw_wrist.astype(np.int16))
+        keep_delta = up_delta[keep_mask]
+        replace_delta = up_delta[replace_mask]
         frame_metrics = {
-            "up_keep_mae": _frame_mae(output_up, expected_up, keep_mask),
-            "up_replace_mae": _frame_mae(output_up, expected_up, ~keep_mask),
-            "wrist_mae": _frame_mae(output_wrist, raw_wrist),
+            "up_keep_mae": float(keep_delta.mean()) if keep_delta.size else 0.0,
+            "up_replace_mae": float(replace_delta.mean()) if replace_delta.size else 0.0,
+            "wrist_mae": float(wrist_delta.mean()) if wrist_delta.size else 0.0,
         }
         for key, value in frame_metrics.items():
             maxima[key] = max(maxima[key], value)
@@ -827,10 +859,13 @@ def verify_derived_dataset(
                 "derived_from_index": index,
                 "frames": 0,
             }
+            image_metrics[episode] = {
+                "up": _metric_accumulator(),
+                "wrist": _metric_accumulator(),
+            }
         mapping[episode]["frames"] += 1
-        episode_metrics = image_metrics.setdefault(episode, {"up": [], "wrist": []})
-        episode_metrics["up"].append(_image_metrics(output_up))
-        episode_metrics["wrist"].append(_image_metrics(output_wrist))
+        _accumulate_metrics(image_metrics[episode]["up"], output_up)
+        _accumulate_metrics(image_metrics[episode]["wrist"], output_wrist)
     expected_episodes = list(range(source_dataset.meta.total_episodes))
     if list(mapping) != expected_episodes:
         raise CuratorError("DERIVED_EPISODE_ORDER")
@@ -843,15 +878,10 @@ def verify_derived_dataset(
         raise CuratorError("DERIVED_AUTHORITY_INHERITANCE", str(forbidden))
     derived_image_metrics = []
     for episode in expected_episodes:
-        cameras: dict[str, dict[str, float]] = {}
-        for camera, samples in image_metrics[episode].items():
-            values = np.asarray(samples, dtype=np.float64)
-            cameras[camera] = {
-                "color_delta_mean": float(values[:, 0].mean()),
-                "brightness_mean": float(values[:, 1].mean()),
-                "clipping_mean": float(values[:, 2].mean()),
-                "sharpness_median": float(np.median(values[:, 3])),
-            }
+        cameras = {
+            camera: _summarize_metrics(accumulator)
+            for camera, accumulator in image_metrics[episode].items()
+        }
         derived_image_metrics.append({"episode_index": episode, "cameras": cameras})
     h264_files = _verify_h264(Path(derived_root))
     return {

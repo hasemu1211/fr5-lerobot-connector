@@ -21,6 +21,7 @@ from tools.curator.contracts import (
     load_json,
     reject_symlink_components,
 )
+from tools.curator.up_view import MAX_BACKGROUND_PLATE_FRAMES
 
 
 PROFILE_REQUEST_SCHEMA = "curator.up_view_profile_request.v1"
@@ -126,6 +127,7 @@ def load_profile_request(path: str | Path) -> ProfileRequest:
     if (
         not isinstance(indices, list)
         or not indices
+        or len(indices) > MAX_BACKGROUND_PLATE_FRAMES
         or any(type(index) is not int or index < 0 for index in indices)
         or indices != sorted(set(indices))
     ):

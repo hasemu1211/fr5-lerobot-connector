@@ -22,7 +22,11 @@ from tools.curator.contracts import (
 )
 from tools.curator.derive import _run_existing_validator, _validate_source_contract, derive_dataset
 from tools.curator.verify import (
+    _accumulate_metrics,
+    _image_metrics,
+    _metric_accumulator,
     _require_local_file,
+    _summarize_metrics,
     create_review_bundle,
     export_reference,
     open_source_dataset,
@@ -321,7 +325,30 @@ class DeriveIntegrationTest(unittest.TestCase):
         self.assertEqual(receipt["verification"]["video_codec"]["expected"], "h264")
         self.assertEqual(receipt["existing_validator"]["status"], "PASS")
         self.assertEqual(receipt["recording_quality_lineage"]["derived_pixel_metrics"], "RECOMPUTED")
-        self.assertEqual(receipt["encoder"], {"vcodec": "h264", "preset": "ultrafast", "crf": 23})
+        self.assertEqual(
+            {key: receipt["encoder"][key] for key in ("vcodec", "preset", "crf")},
+            {"vcodec": "h264", "preset": "ultrafast", "crf": 23},
+        )
+        self.assertIs(receipt["encoder"]["parallel_cameras"], True)
+        self.assertGreater(receipt["encoder"]["image_writer_threads"], 0)
+        self.assertGreater(receipt["encoder"]["encoder_threads_per_camera"], 0)
+        performance = receipt["performance_observation"]
+        self.assertEqual(
+            set(performance["stage_seconds"]),
+            {
+                "preflight",
+                "materialization",
+                "post_write_verification",
+                "quality_and_existing_validator",
+                "source_and_authority_revalidation",
+                "durable_publication",
+                "output_identity",
+            },
+        )
+        self.assertTrue(all(value >= 0 for value in performance["stage_seconds"].values()))
+        self.assertGreater(performance["materialization_frames_per_second"], 0)
+        self.assertGreater(performance["end_to_end_frames_per_second"], 0)
+        self.assertIs(performance["authoritative_threshold"], False)
         self.assertEqual(
             receipt["publication"],
             {
@@ -755,6 +782,23 @@ class DeriveIntegrationTest(unittest.TestCase):
 
 
 class DeriveContractTest(unittest.TestCase):
+    def test_compact_image_metric_accumulator_preserves_results(self):
+        generator = np.random.default_rng(11)
+        images = [
+            generator.integers(0, 256, size=(8, 10, 3), dtype=np.uint8)
+            for _ in range(5)
+        ]
+        expected = np.asarray([_image_metrics(image) for image in images])
+        accumulator = _metric_accumulator()
+        for image in images:
+            _accumulate_metrics(accumulator, image)
+        actual = _summarize_metrics(accumulator)
+        self.assertAlmostEqual(actual["color_delta_mean"], float(expected[:, 0].mean()))
+        self.assertAlmostEqual(actual["brightness_mean"], float(expected[:, 1].mean()))
+        self.assertAlmostEqual(actual["clipping_mean"], float(expected[:, 2].mean()))
+        self.assertAlmostEqual(actual["sharpness_median"], float(np.median(expected[:, 3])))
+        self.assertEqual(len(accumulator["sharpness"]), len(images))
+
     def test_local_dataset_paths_cannot_escape_the_source_root(self):
         with tempfile.TemporaryDirectory() as directory:
             parent = Path(directory)

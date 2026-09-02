@@ -13,6 +13,7 @@ from tools.curator.contracts import (
     assert_tree_identity,
     file_sha256,
     rename_noreplace,
+    stable_tree_identity,
     tree_identity,
     tree_snapshot,
 )
@@ -51,6 +52,20 @@ class ContractsTest(unittest.TestCase):
                     digest,
                     code="SOURCE_CHANGED",
                 )
+
+    def test_stable_identity_reuses_the_pre_hash_snapshot(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "payload.bin").write_bytes(b"payload")
+            expected, _files = tree_identity(root)
+            with mock.patch(
+                "tools.curator.contracts.tree_snapshot",
+                wraps=tree_snapshot,
+            ) as snapshot_call:
+                snapshot, digest = stable_tree_identity(root, code="SOURCE_CHANGED")
+            self.assertEqual(snapshot_call.call_count, 2)
+            self.assertEqual(digest, expected)
+            self.assertEqual(snapshot, tree_snapshot(root))
 
     def test_rename_reports_non_exists_errno_as_publish_failure(self):
         class FailingRename:

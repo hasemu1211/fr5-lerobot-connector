@@ -15,6 +15,7 @@ import shutil
 import stat
 import subprocess
 import sys
+import time
 from typing import Any
 
 import numpy as np
@@ -29,6 +30,7 @@ from tools.curator.contracts import (
     load_json,
     reject_symlink_components,
     rename_noreplace,
+    stable_tree_identity,
     tree_identity,
     tree_snapshot,
     write_json_atomic,
@@ -51,6 +53,9 @@ _CUSTOM_FEATURES = {
     "observation.images.up",
     "observation.images.wrist",
 }
+_CPU_COUNT = os.cpu_count() or 2
+_IMAGE_WRITER_THREADS = min(8, max(2, _CPU_COUNT // 2))
+_ENCODER_THREADS = min(4, max(1, _CPU_COUNT // 4))
 
 
 def _repo_id(value: str, code: str) -> str:
@@ -490,6 +495,16 @@ def derive_dataset(
     output_repo_id: str = "local/curator-derived",
 ) -> dict[str, Any]:
     """Materialize, verify, and atomically publish one isolated v3 dataset."""
+    started_ns = time.perf_counter_ns()
+    stage_started_ns = started_ns
+    stage_seconds: dict[str, float] = {}
+
+    def finish_stage(name: str) -> None:
+        nonlocal stage_started_ns
+        now_ns = time.perf_counter_ns()
+        stage_seconds[name] = (now_ns - stage_started_ns) / 1_000_000_000
+        stage_started_ns = now_ns
+
     if not isinstance(run_id, str) or SAFE_ID.fullmatch(run_id) is None:
         raise CuratorError("RUN_ID")
     source_repo_id = _repo_id(source_repo_id, "SOURCE_REPO_ID")
@@ -510,10 +525,10 @@ def derive_dataset(
     run_parent = run.parent.resolve(strict=False)
     run = run_parent / run.name
     _no_overlap(source, output, run, request.review_bundle_path)
-    source_before = tree_snapshot(source)
-    source_digest, _source_files = tree_identity(source)
-    if tree_snapshot(source) != source_before:
-        raise CuratorError("SOURCE_CHANGED_DURING_IDENTITY")
+    source_before, source_digest = stable_tree_identity(
+        source,
+        code="SOURCE_CHANGED_DURING_IDENTITY",
+    )
     if source_digest != review["reference_source_dataset_digest"]:
         raise CuratorError("SOURCE_REVIEW_MISMATCH")
     keep_mask, background_plate = load_profile_assets(request, profile, review)
@@ -521,6 +536,7 @@ def derive_dataset(
     features = _validate_source_contract(source_dataset, profile)
     if tree_snapshot(source) != source_before:
         raise CuratorError("SOURCE_READER_MUTATION")
+    finish_stage("preflight")
     run_parent.mkdir(parents=True, exist_ok=True)
     run.mkdir(mode=0o700)
     write_json_atomic(
@@ -553,7 +569,8 @@ def derive_dataset(
                 robot_type=source_dataset.meta.robot_type,
                 features=features,
                 use_videos=True,
-                image_writer_threads=2,
+                image_writer_threads=_IMAGE_WRITER_THREADS,
+                encoder_threads=_ENCODER_THREADS,
                 rgb_encoder=RGBEncoderConfig(vcodec="h264", preset="ultrafast", crf=23),
             )
             temporary_identity = _identity(temporary, stat.S_IFDIR, "TEMP_DIRECTORY_IDENTITY")
@@ -568,7 +585,7 @@ def derive_dataset(
             frame_index = _scalar_int(row["frame_index"], "SOURCE_FRAME_INDEX")
             if episode != current_episode:
                 if current_episode >= 0:
-                    writer.save_episode(parallel_encoding=False)
+                    writer.save_episode(parallel_encoding=True)
                 if episode != current_episode + 1:
                     raise CuratorError("SOURCE_EPISODE_ORDER", str(episode))
                 current_episode = episode
@@ -605,10 +622,11 @@ def derive_dataset(
                 "task": task,
             })
             frame_in_episode += 1
-        writer.save_episode(parallel_encoding=False)
+        writer.save_episode(parallel_encoding=True)
         writer.finalize()
         writer_closed = True
         writer = None
+        finish_stage("materialization")
         _copy_source_provenance(source, temporary, source_dataset.meta.total_episodes)
         verification = verify_derived_dataset(
             source_dataset,
@@ -618,10 +636,12 @@ def derive_dataset(
             keep_mask=keep_mask,
             background_plate=background_plate,
         )
+        finish_stage("post_write_verification")
         quality_lineage = _write_derived_quality(
             source, temporary, verification, profile["profile_digest"],
         )
         validator = _run_existing_validator(temporary, output_repo_id)
+        finish_stage("quality_and_existing_validator")
         assert_tree_identity(
             source,
             source_before,
@@ -638,6 +658,7 @@ def derive_dataset(
             or file_sha256(request.approval_path) != approval_artifact_sha256
         ):
             raise CuratorError("APPROVAL_BUNDLE_CHANGED_BEFORE_PUBLISH")
+        finish_stage("source_and_authority_revalidation")
         _fsync_tree(temporary)
         _publish(temporary, output)
         published = True
@@ -654,7 +675,11 @@ def derive_dataset(
             publication_state = "COMMITTED_OWNER_MARKER_AMBIGUOUS"
             raise CuratorError("OUTPUT_COMMITTED_OWNER_MARKER_AMBIGUOUS", str(output))
         marker.unlink()
+        finish_stage("durable_publication")
         output_digest, _output_files = tree_identity(output)
+        finish_stage("output_identity")
+        total_before_receipt_seconds = (time.perf_counter_ns() - started_ns) / 1_000_000_000
+        frames = len(source_dataset)
         receipt = {
             "schema_version": RECEIPT_SCHEMA,
             "run_id": run_id,
@@ -662,7 +687,24 @@ def derive_dataset(
             "source": {"root": str(source), "repo_id": source_repo_id, "dataset_digest": source_digest},
             "output": {"root": str(output), "repo_id": output_repo_id, "dataset_digest": output_digest},
             "runtime": {"python": platform.python_version(), "lerobot": lerobot_version},
-            "encoder": {"vcodec": "h264", "preset": "ultrafast", "crf": 23},
+            "encoder": {
+                "vcodec": "h264",
+                "preset": "ultrafast",
+                "crf": 23,
+                "parallel_cameras": True,
+                "image_writer_threads": _IMAGE_WRITER_THREADS,
+                "encoder_threads_per_camera": _ENCODER_THREADS,
+            },
+            "performance_observation": {
+                "scope": "WALL_TIME_BEFORE_RECEIPT_WRITE",
+                "stage_seconds": stage_seconds,
+                "total_seconds": total_before_receipt_seconds,
+                "materialization_frames_per_second": (
+                    frames / max(stage_seconds["materialization"], 1e-9)
+                ),
+                "end_to_end_frames_per_second": frames / max(total_before_receipt_seconds, 1e-9),
+                "authoritative_threshold": False,
+            },
             "publication": {
                 "state": "COMMITTED_DURABLE",
                 "rename_noreplace": True,
@@ -751,6 +793,13 @@ def derive_dataset(
                     "cleanup_state": cleanup_state,
                     "temporary_artifact": str(temporary),
                     "owner_marker_artifact": str(marker),
+                    "performance_observation": {
+                        "completed_stage_seconds": stage_seconds,
+                        "elapsed_seconds": (
+                            time.perf_counter_ns() - started_ns
+                        ) / 1_000_000_000,
+                        "authoritative_threshold": False,
+                    },
                     "training_authority": False,
                 },
             )
