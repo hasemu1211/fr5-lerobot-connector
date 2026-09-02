@@ -23,6 +23,7 @@ from time_alignment import interpolate_vector, latest_sample, nearest_sample
 from ros_image import image_message_to_rgb
 from measure_ros_topic_age import image_gate_failures
 from validate_lerobot_dataset import (
+    _video_frame_counts,
     has_nonfinite_number,
     transient_gripper_zero_dropouts,
 )
@@ -314,6 +315,28 @@ class RecorderContractTest(unittest.TestCase):
             "frame_start": 2,
             "frame_end": 3,
         }])
+
+    def test_video_frame_counts_are_bounded_parallel_and_ordered(self):
+        barrier = threading.Barrier(4)
+        lock = threading.Lock()
+        started = 0
+        worker_names = set()
+
+        def probe(path):
+            nonlocal started
+            with lock:
+                started += 1
+                should_wait = started <= 4
+                worker_names.add(threading.current_thread().name)
+            if should_wait:
+                barrier.wait(timeout=2.0)
+            return int(path.name), None
+
+        paths = [Path(str(index)) for index in range(6)]
+        with patch("validate_lerobot_dataset._video_frame_count", side_effect=probe):
+            counts = _video_frame_counts(paths)
+        self.assertEqual(counts, [(index, None) for index in range(6)])
+        self.assertEqual(len(worker_names), 4)
 
     def test_collection_defaults_and_supported_camera_path(self):
         root = Path(__file__).resolve().parents[1]

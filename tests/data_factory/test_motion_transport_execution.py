@@ -1,5 +1,6 @@
 import base64
 import math
+import time
 import unittest
 from types import SimpleNamespace
 from unittest import mock
@@ -15,6 +16,53 @@ from tools.data_factory.motion.moveit_transport import RosMoveItTransport
 
 
 class TestExecutionTransport(unittest.TestCase):
+    def test_robot_description_parameter_retries_transient_future_failure(self):
+        description = (
+            "<robot><ros2_control><hardware>"
+            "<plugin>fairino_hardware/FairinoHardwareInterface</plugin>"
+            "<param name='gripper_velocity'>20</param>"
+            "<param name='gripper_force'>50</param>"
+            "<param name='gripper_settle_time_ms'>500</param>"
+            "</hardware><joint name='finger_right_joint'/>"
+            "</ros2_control></robot>"
+        )
+
+        class Future:
+            def __init__(self, result): self.result_value = result
+            def done(self): return True
+            def result(self):
+                if isinstance(self.result_value, Exception):
+                    raise self.result_value
+                return self.result_value
+
+        response = SimpleNamespace(values=[SimpleNamespace(
+            type=4, string_value=description,
+        )])
+        for transient_error in (RuntimeError("graph changed"), TimeoutError()):
+            with self.subTest(error=type(transient_error).__name__):
+                results = iter((transient_error, response))
+                client = SimpleNamespace(
+                    wait_for_services=lambda **_: True,
+                    get_parameters=mock.Mock(
+                        side_effect=lambda _: Future(next(results))
+                    ),
+                )
+                transport = object.__new__(RosMoveItTransport)
+                transport.node = object()
+                transport._robot_description = None
+                transport._robot_description_client = client
+                transport._parameter_string = 4
+                transport._rclpy = SimpleNamespace(
+                    spin_once=lambda *args, **kwargs: None,
+                )
+
+                transport._load_robot_description_parameter(
+                    time.monotonic() + 1.0,
+                )
+
+                self.assertEqual(transport._robot_description, description)
+                self.assertEqual(client.get_parameters.call_count, 2)
+
     def test_execute_cancel_and_snapshot_contract(self):
         class Future:
             def __init__(self, value, done=True): self.value, self.complete = value, done

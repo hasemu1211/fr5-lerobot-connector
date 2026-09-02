@@ -15,7 +15,7 @@ class ResourceMonitor:
     """Sample the runner and declared child PIDs without touching their pipes."""
 
     def __init__(self, run_id, collection_profile_digest, roles_to_pid_callable=None, *,
-                 readers=None, clock=time.monotonic, sleep=time.sleep, interval_s=.5):
+                 readers=None, clock=time.monotonic, sleep=None, interval_s=.5):
         self.run_id = run_id
         self.collection_profile_digest = collection_profile_digest
         self.roles_to_pid_callable = roles_to_pid_callable or (lambda: self._pids.copy())
@@ -24,7 +24,10 @@ class ResourceMonitor:
         self._errors = []
         if not .5 <= interval_s <= 1.0:
             raise ValueError("interval_s must be between 0.5 and 1.0")
-        self._clock, self._sleep, self.interval_s = clock, sleep, interval_s
+        self._stop, self._thread = threading.Event(), None
+        self._clock = clock
+        self._sleep = self._stop.wait if sleep is None else sleep
+        self.interval_s = interval_s
         defaults = {
             "read_text": self._read_text, "listdir": os.listdir, "sysconf": os.sysconf,
             "uname": platform.uname, "getcwd": os.getcwd, "stat": os.stat,
@@ -32,7 +35,6 @@ class ResourceMonitor:
             "python_version": platform.python_version, "distribution_version": importlib.metadata.version,
         }
         self._readers = {**defaults, **(readers or {})}
-        self._stop, self._thread = threading.Event(), None
         self._host = None
 
     @staticmethod

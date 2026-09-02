@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+from concurrent.futures import ThreadPoolExecutor
 import json
 from pathlib import Path
 import subprocess
@@ -143,6 +144,25 @@ def episode_locator(info: dict, episode_rows: list[dict], episode_index: int, re
         },
         videos=videos,
     )
+
+
+def _video_frame_count(path: Path) -> tuple[int, str | None]:
+    try:
+        result = subprocess.run(
+            ["ffprobe", "-v", "error", "-count_frames", "-select_streams", "v:0", "-show_entries", "stream=nb_read_frames", "-of", "json", str(path)],
+            check=True, capture_output=True, text=True,
+        )
+        streams = json.loads(result.stdout).get("streams", [])
+        return (int(streams[0]["nb_read_frames"]) if streams else 0), None
+    except (FileNotFoundError, subprocess.CalledProcessError, ValueError, KeyError) as exc:
+        return 0, str(exc)
+
+
+def _video_frame_counts(paths: list[Path]) -> list[tuple[int, str | None]]:
+    if not paths:
+        return []
+    with ThreadPoolExecutor(max_workers=min(4, len(paths))) as pool:
+        return list(pool.map(_video_frame_count, paths))
 
 
 def main() -> None:
@@ -498,16 +518,12 @@ def main() -> None:
             continue
         video_files = sorted((args.root / "videos" / key).rglob("*.mp4"))
         decoded_frames = 0
-        for path in video_files:
-            try:
-                result = subprocess.run(
-                    ["ffprobe", "-v", "error", "-count_frames", "-select_streams", "v:0", "-show_entries", "stream=nb_read_frames", "-of", "json", str(path)],
-                    check=True, capture_output=True, text=True,
-                )
-                streams = json.loads(result.stdout).get("streams", [])
-                decoded_frames += int(streams[0]["nb_read_frames"]) if streams else 0
-            except (FileNotFoundError, subprocess.CalledProcessError, ValueError, KeyError) as exc:
-                failures.append(f"cannot fully decode {path}: {exc}")
+        for path, (frame_count, error) in zip(
+            video_files, _video_frame_counts(video_files),
+        ):
+            decoded_frames += frame_count
+            if error is not None:
+                failures.append(f"cannot fully decode {path}: {error}")
         if decoded_frames != info.get("total_frames", 0):
             failures.append(f"{key} decoded video frames {decoded_frames} do not match total_frames")
 
