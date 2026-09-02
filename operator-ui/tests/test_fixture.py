@@ -33,6 +33,7 @@ class DataFactoryOperatorUiStaticTest(unittest.TestCase):
             self.assertIn(f'id="{element_id}"', self.html)
         self.assertEqual(self.html.count("<!-- OPERATOR_TOKEN -->"), 1)
         self.assertIn('<label for="frame-select" hidden>', self.html)
+        self.assertIn('<label for="motion-select" hidden>', self.html)
         catalog = self.html.split('<fieldset id="catalog-fields"', 1)[1].split("</fieldset>", 1)[0]
         collection_range = self.html.split('<section class="range-panel"', 1)[1].split("</section>", 1)[0]
         self.assertNotIn('id="workspace-select"', catalog)

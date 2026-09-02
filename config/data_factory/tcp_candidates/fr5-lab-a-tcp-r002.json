@@ -1,0 +1,36 @@
+{
+  "schema_version": "data_factory.tcp_candidate_manifest.v1",
+  "robot_system_id": "fr5-lab-a-tcp-r002",
+  "captured_at": "2026-09-02T01:10:46Z",
+  "source_evidence_id": "place-ab-controller-ui-r002",
+  "execution_authorized": false,
+  "training_approved": false,
+  "tcp_candidate": {
+    "schema_version": "data_factory.tcp_candidate.v1",
+    "logical_frame": "grasp_tcp",
+    "parent_frame": "wrist3_link",
+    "definition": "operator_aligned_grasp_plane_crosschecked_between_controller_tcp_and_ros_wrist",
+    "status": "CONTROLLER_CROSSCHECKED_DOWNWARD",
+    "translation_m": [0.0, 0.0, 0.249852939145247],
+    "rotation_columns": [
+      [1.0, 0.0, 0.0],
+      [0.0, 1.0, 0.0],
+      [0.0, 0.0, 1.0]
+    ],
+    "controller_crosscheck": {
+      "captured_at": "2026-09-02T01:10:46Z",
+      "controller_tcp_z_m": 0.003848,
+      "model_tcp_z_before_m": -0.0022990608545399027,
+      "offset_correction_m": -0.006147060854753,
+      "orientation_scope": "DOWNWARD_TOOL_Z",
+      "ros_wrist_z_m": 0.2537009391365941
+    },
+    "urdf_offset_sum_m": {
+      "adapter_to_gripper": 0.01,
+      "finger_joint_to_collision_center": 0.009,
+      "gripper_to_finger_joint": 0.138,
+      "wrist_to_adapter": 0.099
+    }
+  },
+  "tcp_candidate_digest": "sha256:4557a3d1831d9767bf445e4f76c061173b27e5d13ff0dd97d2494ed4e4c674be"
+}

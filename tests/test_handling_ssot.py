@@ -3,6 +3,7 @@ import unittest
 from pathlib import Path
 
 from tools.data_factory import run_job
+from tools.data_factory.operator.composition import _tcp_manifest_for_robot
 from tools.data_factory.operator.catalog import load_operator_catalog
 from tools.fr5_data_factory import (
     ContractError,
@@ -21,8 +22,12 @@ SHEET_A = ROOT / "tools/a4_place_yaw/json/place_a_yaw_p000_00.json"
 SHEET_B = CONFIG / "workspace_sheets/place-b-yaw0-r001_yaw0_sheet.json"
 MOTION_A = CONFIG / "motion_qualifications/fr5-place-a-wood-cube-24mm-r001.json"
 MOTION_B = CONFIG / "motion_qualifications/fr5-place-b-wood-cube-24mm-r001.json"
-HOME = CONFIG / "home_candidates/fr5-lab-a-home-r001.json"
+HOME = CONFIG / "home_candidates/fr5-lab-a-tcp-r002-home-r001.json"
 URDF = ROOT / "src/fairino_description/urdf/fairino5_v6.urdf"
+TCP_MANIFEST = CONFIG / "tcp_candidates/fr5-lab-a-tcp-r002.json"
+MEASUREMENT_EVIDENCE = (
+    CONFIG / "calibration_evidence/place-ab-controller-ui-r002.json"
+)
 
 
 class HandlingSsotTest(unittest.TestCase):
@@ -46,11 +51,11 @@ class HandlingSsotTest(unittest.TestCase):
             "motion_qualification": str(motion),
             "home_candidate": str(HOME),
             "urdf": str(URDF),
-            "expected_robot_system_id": "fr5-lab-a",
+            "expected_robot_system_id": "fr5-lab-a-tcp-r002",
         }, motion
 
     def test_object_grasp_workspace_and_floor_share_one_geometry(self):
-        expected_tcp_z = {"PLACE_A": 0.004043, "PLACE_B": 0.004048}
+        expected_tcp_z = {"PLACE_A": 0.003848, "PLACE_B": 0.003853}
         for place in expected_tcp_z:
             with self.subTest(place=place):
                 payload, motion_path = self._payload(place)
@@ -66,6 +71,9 @@ class HandlingSsotTest(unittest.TestCase):
                     grasp["grasp_geometry"]["depth_from_top_mm"], 3.5,
                 )
                 self.assertEqual(
+                    grasp["grasp_geometry"]["release_clearance_mm"], 1.0,
+                )
+                self.assertEqual(
                     grasp["grasp_geometry"]["datum_to_tcp_grasp"][
                         "translation_m"
                     ][2],
@@ -79,7 +87,9 @@ class HandlingSsotTest(unittest.TestCase):
                     "translation_m"
                 ][2]
                 self.assertAlmostEqual(final_z, expected_tcp_z[place], places=12)
-                self.assertAlmostEqual(lower_z, expected_tcp_z[place], places=12)
+                self.assertAlmostEqual(
+                    lower_z, expected_tcp_z[place] + 0.001, places=12,
+                )
                 self.assertGreater(
                     steps["APPROACH_STOP_LIN"]["target"]["base_tcp"][
                         "translation_m"
@@ -87,7 +97,7 @@ class HandlingSsotTest(unittest.TestCase):
                     final_z,
                 )
                 scene_profile = load_json_strict(
-                    CONFIG / "planning_scenes/fr5-table-floor-wall-r002.json"
+                    CONFIG / "planning_scenes/fr5-table-floor-wall-r003.json"
                 )
                 measured_floor = scene_profile["floor"][
                     "measured_surface_z_m"
@@ -97,12 +107,24 @@ class HandlingSsotTest(unittest.TestCase):
                 )
 
                 motion = load_json_strict(motion_path)
+                self.assertAlmostEqual(
+                    motion["tool_to_tcp"]["translation_m"][2],
+                    0.249852939145247,
+                    places=15,
+                )
+                self.assertAlmostEqual(
+                    steps["FINAL_APPROACH_LIN"]["target"]["base_tool"]
+                    ["translation_m"][2],
+                    expected_tcp_z[place] + 0.249852939145247,
+                    places=15,
+                )
                 bad_motion = copy.deepcopy(motion)
                 bad_motion["datum_to_tcp_grasp"]["translation_m"][2] = 0.0075
                 with self.assertRaises(ContractError) as caught:
                     resolve_motion_program(
                         validated, bad_motion, load_json_strict(HOME),
-                        urdf=URDF, expected_robot_system_id="fr5-lab-a",
+                        urdf=URDF,
+                        expected_robot_system_id="fr5-lab-a-tcp-r002",
                         planning_scene_profile=scene_profile,
                     )
                 self.assertEqual(caught.exception.code, "MOTION_GRASP_BINDING")
@@ -112,11 +134,64 @@ class HandlingSsotTest(unittest.TestCase):
                 with self.assertRaises(ContractError) as caught:
                     resolve_motion_program(
                         bad_validated, motion, load_json_strict(HOME),
-                        urdf=URDF, expected_robot_system_id="fr5-lab-a",
+                        urdf=URDF,
+                        expected_robot_system_id="fr5-lab-a-tcp-r002",
                         planning_scene_profile=scene_profile,
                     )
                 self.assertEqual(
                     caught.exception.code, "MOTION_WORKSPACE_FLOOR_BINDING",
+                )
+
+    def test_measured_tcp_is_the_single_source_for_cells_and_motion(self):
+        manifest = load_json_strict(TCP_MANIFEST)
+        candidate = manifest["tcp_candidate"]
+        evidence = load_json_strict(MEASUREMENT_EVIDENCE)
+        tcp_digest = canonical_digest(candidate)
+        self.assertEqual(manifest["tcp_candidate_digest"], tcp_digest)
+        self.assertEqual(evidence["tcp_digest"], tcp_digest)
+        self.assertAlmostEqual(
+            candidate["translation_m"][2],
+            evidence["tcp_crosscheck"]["tool_to_tcp_after_m"],
+            places=15,
+        )
+        self.assertAlmostEqual(
+            evidence["tcp_crosscheck"]["ros_wrist_base_m"][2]
+            - candidate["translation_m"][2],
+            evidence["tcp_crosscheck"]["controller_tcp_base_m"][2],
+            places=9,
+        )
+        robot = load_json_strict(
+            CONFIG / "robot_systems/fr5-lab-a-tcp-r002.json",
+        )
+        self.assertEqual(robot["tcp_digest"], tcp_digest)
+        self.assertEqual(
+            _tcp_manifest_for_robot(ROOT, robot["robot_system_id"]),
+            TCP_MANIFEST,
+        )
+        self.assertEqual(
+            _tcp_manifest_for_robot(ROOT, "fr5-lab-a"),
+            CONFIG
+            / "test_only_physical/goal2-place1/tcp_candidate_manifest.json",
+        )
+        for cell_path, motion_path in (
+            (CONFIG / "cells/place-a-yaw0-r003.json", MOTION_A),
+            (CONFIG / "cells/place-b-yaw0-r001.json", MOTION_B),
+        ):
+            with self.subTest(cell=cell_path.name):
+                cell = load_json_strict(cell_path)
+                motion = load_json_strict(motion_path)
+                self.assertEqual(cell["tcp_digest"], tcp_digest)
+                self.assertEqual(
+                    cell["measurement_report_digest"],
+                    canonical_digest(evidence),
+                )
+                self.assertEqual(
+                    cell["table_plane_measurement_digest"],
+                    canonical_digest(evidence["derivation"]),
+                )
+                self.assertEqual(
+                    motion["tool_to_tcp"]["translation_m"],
+                    candidate["translation_m"],
                 )
 
     def test_gripper_profile_reuses_across_workspaces(self):

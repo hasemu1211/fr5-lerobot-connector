@@ -868,7 +868,7 @@ function renderReview(view) {
     [pickPlace ? "첫 물체 출발점" : "현재 물체 위치", poseText(view.draft.current_object_pose)],
     ["작업", selectedLabel(view, "task")],
     ["물체와 잡기", `${selectedLabel(view, "object")} · ${selectedLabel(view, "grasp")}`],
-    ["로봇 동작", `${selectedLabel(view, "motion")} · ${selectedLabel(view, "variant")}`],
+    ["최종 집기 접근", selectedLabel(view, "variant")],
     ["시작 자세", view.start_pose_setup ? `${view.start_pose_setup.selected_start_pose_ids.length}개 선택` : selectedLabel(view, "start")],
     ["카메라", selectedLabel(view, "camera")],
     ["수집 범위", range],

@@ -8,6 +8,7 @@
   "grasp_geometry": {
     "contact_surface": "TOP",
     "depth_from_top_mm": 3.5,
+    "release_clearance_mm": 1.0,
     "datum_to_tcp_grasp": {
       "translation_m": [
         0.0,

@@ -2,7 +2,7 @@
   "schema_version": "data_factory.job.v1",
   "job_id": "center-live-24mm-20260901-r001",
   "task": "pickup_e2e",
-  "robot_system_id": "fr5-lab-a",
+  "robot_system_id": "fr5-lab-a-tcp-r002",
   "collection_profile_id": "fr5-up-wrist-rgb-30hz-v1",
   "place_id": "PLACE_A",
   "cell_calibration_id": "place-a-yaw0-r003",

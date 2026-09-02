@@ -1,0 +1,24 @@
+{
+  "schema_version": "data_factory.planning_scene_profile.v1",
+  "planning_scene_profile_id": "fr5-table-floor-wall-r003",
+  "qualification_status": "QUALIFIED",
+  "robot_system_id": "fr5-lab-a-tcp-r002",
+  "frame_id": "base_link",
+  "floor": {
+    "id": "table_floor_conservative_r003",
+    "dimensions_m": [2.0, 2.0, 0.05],
+    "measured_surface_z_m": -0.016647,
+    "collision_margin_m": 0.001,
+    "workspace_datum_tolerance_m": 0.001,
+    "source_measurement_digest": "sha256:24c215597b5230302d3923d2ff3e12aba761bf9be90bfa196b4aa287affae14c",
+    "source": "controller_ui_tcp_crosscheck_minus_bound_24mm_top_3p5mm_grasp_plus_1mm_collision_margin"
+  },
+  "wall": {
+    "id": "home_back_wall_candidate",
+    "dimensions_m": [2.0, 0.05, 2.0],
+    "near_face_y_m": -0.3,
+    "wall_side": "opposite_home_arm_protrusion",
+    "home_arm_protrusion_base_xy": [0.0, 1.0],
+    "j1_home_deg": -90.0
+  }
+}

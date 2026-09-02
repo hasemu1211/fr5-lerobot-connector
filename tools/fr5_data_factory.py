@@ -70,7 +70,8 @@ GRASP_PROFILE_V3_KEYS = PROFILE_KEYS["grasp_profile"] | {
     "object_profile_digest", "grasp_geometry", "gripper_open",
 }
 GRASP_GEOMETRY_KEYS = {
-    "contact_surface", "depth_from_top_mm", "datum_to_tcp_grasp",
+    "contact_surface", "depth_from_top_mm", "release_clearance_mm",
+    "datum_to_tcp_grasp",
 }
 GRIPPER_OPEN_KEYS = {
     "command_position_m", "velocity_percent", "force_percent",
@@ -442,7 +443,10 @@ def _profile(root, folder, ident, id_key, schema):
             depth = _number(
                 geometry["depth_from_top_mm"], "GRASP_GEOMETRY",
             )
-            if depth <= 0:
+            release_clearance = _number(
+                geometry["release_clearance_mm"], "GRASP_GEOMETRY",
+            )
+            if depth <= 0 or release_clearance < 0:
                 raise ContractError("GRASP_GEOMETRY")
             transform = validate_rigid_transform(
                 geometry["datum_to_tcp_grasp"], "GRASP_GEOMETRY",
@@ -465,6 +469,7 @@ def _profile(root, folder, ident, id_key, schema):
                 "grasp_geometry": {
                     "contact_surface": "TOP",
                     "depth_from_top_mm": depth,
+                    "release_clearance_mm": release_clearance,
                     "datum_to_tcp_grasp": transform,
                 },
                 "gripper_open": _gripper_open(
@@ -1218,6 +1223,14 @@ def resolve_motion_program(
     datum = {"translation_m": pose["position_base_m"], "rotation_columns": pose["rotation_base_columns"]}
     release_datum = {"translation_m": release_resolved["position_base_m"], "rotation_columns": release_resolved["rotation_base_columns"]}
     tool_inverse = inverse_rigid_transform(q["transforms"]["tool_to_tcp"])
+    release_clearance_m = (
+        validated["grasp_profile"]["grasp_geometry"][
+            "release_clearance_mm"
+        ] / 1000.0
+        if validated["grasp_profile"].get("schema_version")
+        == "data_factory.grasp_profile.v3"
+        else 0.0
+    )
     def target(frame, offset):
         tcp = compose_rigid_transform(frame, q["transforms"]["datum_to_tcp_grasp"])
         shifted = {"translation_m": _add(tcp["translation_m"], _mul(frame["rotation_columns"][2], offset)), "rotation_columns": tcp["rotation_columns"]}
@@ -1228,7 +1241,7 @@ def resolve_motion_program(
         "FINAL_APPROACH_LIN": (datum, 0),
         "LIFT_LIN": (datum, q["offsets"]["lift"]),
         "RECYCLE_APPROACH_PTP": (release_datum, q["offsets"]["pregrasp"]),
-        "LOWER_LIN": (release_datum, 0),
+        "LOWER_LIN": (release_datum, release_clearance_m),
         "RETREAT_LIN": (release_datum, q["offsets"]["retreat"]),
     }
     recording_boundary = TASK_CONTRACTS[job["task"]]["recording_boundary"]

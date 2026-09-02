@@ -1,0 +1,108 @@
+{
+  "schema_version": "data_factory.workspace_measurement_evidence.v1",
+  "evidence_id": "place-ab-controller-ui-r002",
+  "captured_at": "2026-09-02T01:10:46Z",
+  "measurement_authority": "CONTROLLER_WEB_UI_OPERATOR_AND_ROS_TF_CROSSCHECK",
+  "robot_system_id": "fr5-lab-a-tcp-r002",
+  "tcp_digest": "sha256:4557a3d1831d9767bf445e4f76c061173b27e5d13ff0dd97d2494ed4e4c674be",
+  "supersedes_evidence_digest": "sha256:ea871c12f48ef538ada2dc7b6020cdcfe1bef0f3cfa0600b7e50e1b36710b98c",
+  "controller": {
+    "model": "FR5 V6.0",
+    "firmware": "V3.9.7",
+    "coordinate_frame": "BASE",
+    "display_quantity": "TCP"
+  },
+  "object_reference": {
+    "object_profile_id": "wood-cube-24mm-r001",
+    "dimensions_mm": [
+      24.0,
+      24.0,
+      24.0
+    ],
+    "datum": "center"
+  },
+  "grasp_reference": {
+    "contact_surface": "TOP",
+    "depth_from_top_mm": 3.5,
+    "object_center_to_tcp_z_mm": 8.5,
+    "same_reference_for_all_points": true
+  },
+  "tcp_crosscheck": {
+    "controller_tcp_base_m": [
+      0.223658,
+      0.565409,
+      0.003848
+    ],
+    "ros_wrist_base_m": [
+      0.22369281053464696,
+      0.5657934834977154,
+      0.2537009391365941
+    ],
+    "ros_model_tcp_before_base_m": [
+      0.2236926232573457,
+      0.5657913611461803,
+      -0.0022990608545399027
+    ],
+    "tool_to_tcp_before_m": 0.256,
+    "tool_to_tcp_after_m": 0.249852939145247,
+    "z_error_before_m": -0.006147060854539903,
+    "orientation_scope": "DOWNWARD_TOOL_Z",
+    "xy_measurement_role": "DIAGNOSTIC_ONLY"
+  },
+  "observations": {
+    "PLACE_A": {
+      "CENTER": [
+        0.223765,
+        0.557577,
+        0.003848
+      ],
+      "X_REF": [
+        0.351406,
+        0.557569,
+        0.00385
+      ],
+      "Y_CHECK": [
+        0.094393,
+        0.638576,
+        0.003849
+      ],
+      "y_check_residual_mm": 1.323302579007753
+    },
+    "PLACE_B": {
+      "CENTER": [
+        -0.279947,
+        0.554328,
+        0.003853
+      ],
+      "X_REF": [
+        -0.151093,
+        0.554329,
+        0.003852
+      ],
+      "Y_CHECK": [
+        -0.408094,
+        0.634327,
+        0.003849
+      ],
+      "y_check_residual_mm": 0.3536434762323696
+    }
+  },
+  "derivation": {
+    "workspace_datum": "OBJECT_CENTER_ON_MEASURED_FLOOR",
+    "workspace_z_formula": "observed_tcp_z_m - object_center_to_tcp_z_m",
+    "floor_z_formula": "observed_tcp_z_m - object_center_to_tcp_z_m - object_height_m / 2",
+    "shared_table_z_shift_m": -0.000195,
+    "shared_table_z_shift_applied_to": [
+      "PLACE_A",
+      "PLACE_B"
+    ],
+    "conservative_observed_tcp_z_m": 0.003853,
+    "measured_floor_surface_z_m": -0.016647,
+    "collision_margin_m": 0.001,
+    "collision_floor_surface_z_m": -0.015647,
+    "workspace_datum_tolerance_m": 0.001
+  },
+  "qualification_scope": "TCP_Z_CROSSCHECK_CELL_REGISTRATION_AND_FLOOR_DERIVATION",
+  "execution_authorized": false,
+  "training_approved": false
+}

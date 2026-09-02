@@ -1501,6 +1501,7 @@ feedback:
                 job_path="config/data_factory/jobs/center-live-24mm-20260901-r001.job.json",
                 yaw0_sheet=workspace_bindings["PLACE_A"]["yaw0_sheet"],
                 motion_qualification_path=workspace_bindings["PLACE_A"]["motion_qualification"],
+                home_candidate_path="config/data_factory/home_candidates/fr5-lab-a-tcp-r002-home-r001.json",
                 collection_profile_path="config/data_factory/collection_profiles/fr5-up-wrist-rgb-30hz-v1.json",
                 gripper_retune_path=None,
                 workspace_bindings=workspace_bindings,
@@ -1531,7 +1532,7 @@ feedback:
                     ["PLACE_A", "PLACE_B"],
                 )
                 home = load_json_strict(
-                    root / "config/data_factory/home_candidates/fr5-lab-a-home-r001.json",
+                    root / "config/data_factory/home_candidates/fr5-lab-a-tcp-r002-home-r001.json",
                 )
                 motions = {
                     place: load_json_strict(root / binding["motion_qualification"])

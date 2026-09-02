@@ -128,6 +128,35 @@ def _repository_path(repository: Path, value: str | Path) -> Path:
     return path
 
 
+def _tcp_manifest_for_robot(repository: Path, robot_system_id: object) -> Path:
+    if (
+        not isinstance(robot_system_id, str)
+        or SAFE_ID.fullmatch(robot_system_id) is None
+    ):
+        raise ContractError("TCP_MANIFEST_BINDING")
+    robot = load_json_strict(
+        repository / "config/data_factory/robot_systems" / f"{robot_system_id}.json"
+    )
+    candidates = [
+        _repository_path(repository, DEFAULT_TCP_MANIFEST),
+        *sorted((repository / "config/data_factory/tcp_candidates").glob("*.json")),
+    ]
+    matches = []
+    for path in candidates:
+        manifest = load_json_strict(path)
+        candidate = manifest.get("tcp_candidate")
+        digest = manifest.get("tcp_candidate_digest")
+        if (
+            manifest.get("robot_system_id") == robot_system_id
+            and isinstance(candidate, Mapping)
+            and canonical_digest(candidate) == digest == robot.get("tcp_digest")
+        ):
+            matches.append(path)
+    if len(matches) != 1:
+        raise ContractError("TCP_MANIFEST_BINDING")
+    return matches[0]
+
+
 def _runtime_gripper_settings(
     repository: Path, initial_job: Mapping[str, Any],
     gripper_retune: str | Path | None,
@@ -2826,6 +2855,9 @@ def build_physical_operator_application(
     initial_job_path = _repository_path(repository, job_path)
     initial_job = load_json_strict(initial_job_path)
     initial_job_source = str(initial_job_path.relative_to(repository))
+    tcp_manifest_path = _tcp_manifest_for_robot(
+        repository, initial_job.get("robot_system_id"),
+    )
 
     def scope_catalog_to_active_job(value: Mapping[str, Any]) -> dict[str, Any]:
         """Keep historical profiles readable without exposing them as this job."""
@@ -3251,7 +3283,7 @@ def build_physical_operator_application(
         if snapshot_call is not None:
             return snapshot_call()
         return capture_home_snapshot(
-            tcp_candidate_manifest=_repository_path(repository, DEFAULT_TCP_MANIFEST),
+            tcp_candidate_manifest=tcp_manifest_path,
         )
 
     def start_pose_capture_call(display_name: str) -> Mapping[str, Any]:
@@ -3340,7 +3372,7 @@ def build_physical_operator_application(
             print_measurements=measured,
             operator_or_agent_id=operator_label,
             yaw0_sheet=yaw0_sheet,
-            tcp_candidate_manifest=_repository_path(repository, DEFAULT_TCP_MANIFEST),
+            tcp_candidate_manifest=tcp_manifest_path,
             tolerance_mm=1.0,
         )
 
@@ -3535,6 +3567,7 @@ def build_physical_operator_application(
             motion_qualification_path=source["motion"],
             home_candidate_path=source["start_pose"],
             collection_profile_path=source["camera_profile"],
+            tcp_candidate_manifest=tcp_manifest_path,
             selected_camera_device_id=selected["camera_device_id"],
             selected_camera_bindings=selected["camera_bindings"],
             selected_camera_binding_digest=selected["camera_binding_digest"],

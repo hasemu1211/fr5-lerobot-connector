@@ -661,7 +661,9 @@ def load_operator_catalog(
     # A newly promoted frame is immediately authorable through the existing
     # pickup recipe, but it stays non-executable until motion qualification is
     # explicitly bound to that exact cell revision.
-    configured_frames = {item["frame_id"] for item in combinations}
+    configured_frames = {
+        value.get("cell_calibration_id") for _path, value in jobs
+    } | {item["frame_id"] for item in combinations}
     templates: dict[tuple[str, str], dict[str, Any]] = {}
     for combination in combinations:
         key = (combination["sources"]["job"], combination["camera_binding_digest"])

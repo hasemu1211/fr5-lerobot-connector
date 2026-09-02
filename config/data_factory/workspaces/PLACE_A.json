@@ -21,8 +21,8 @@
   "table_plane_provenance": {
     "source_place_id": "PLACE_A",
     "source_calibration_id": "place-a-yaw0-r003",
-    "source_artifact_digest": "sha256:ea871c12f48ef538ada2dc7b6020cdcfe1bef0f3cfa0600b7e50e1b36710b98c",
-    "reference_digest": "sha256:7585d877fc404839d263dcf27315f2c89fbee0e97ecc8e7a2767db17a87997ad"
+    "source_artifact_digest": "sha256:24c215597b5230302d3923d2ff3e12aba761bf9be90bfa196b4aa287affae14c",
+    "reference_digest": "sha256:ed0b91625fec70dc2a1bbeb75b163873502a215a15f34bd0994380ee9007481f"
   },
   "registration_status": "REGISTERED",
   "motion_qualification_status": "QUALIFIED",
