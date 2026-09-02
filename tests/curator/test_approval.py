@@ -114,7 +114,12 @@ class ApprovalTest(unittest.TestCase):
         (source / "owned").write_text("source", encoding="utf-8")
         (target / "racer").write_text("target", encoding="utf-8")
         with self.assertRaisesRegex(CuratorError, "OUTPUT_EXISTS"):
-            rename_noreplace(source, target, code="OUTPUT_EXISTS")
+            rename_noreplace(
+                source,
+                target,
+                exists_code="OUTPUT_EXISTS",
+                failure_code="OUTPUT_PUBLISH",
+            )
         self.assertEqual((source / "owned").read_text(), "source")
         self.assertEqual((target / "racer").read_text(), "target")
 

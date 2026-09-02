@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from contextlib import ExitStack
 import json
+import os
 from pathlib import Path
 import tempfile
 from types import SimpleNamespace
@@ -21,6 +22,7 @@ from tools.curator.contracts import (
 )
 from tools.curator.derive import _run_existing_validator, _validate_source_contract, derive_dataset
 from tools.curator.verify import (
+    _require_local_file,
     create_review_bundle,
     export_reference,
     open_source_dataset,
@@ -320,6 +322,15 @@ class DeriveIntegrationTest(unittest.TestCase):
         self.assertEqual(receipt["existing_validator"]["status"], "PASS")
         self.assertEqual(receipt["recording_quality_lineage"]["derived_pixel_metrics"], "RECOMPUTED")
         self.assertEqual(receipt["encoder"], {"vcodec": "h264", "preset": "ultrafast", "crf": 23})
+        self.assertEqual(
+            receipt["publication"],
+            {
+                "state": "COMMITTED_DURABLE",
+                "rename_noreplace": True,
+                "tree_fsync": True,
+                "parent_fsync": True,
+            },
+        )
         self.assertIs(receipt["training_authority"], False)
         self.assertIs(receipt["approval_inherited"], False)
         self.assertIs(receipt["quarantine_inherited"], False)
@@ -378,6 +389,9 @@ class DeriveIntegrationTest(unittest.TestCase):
                 )
         self.assertFalse(output.exists())
         self.assertEqual(list(self.root.glob(".fault-derived*.curator-*")), [])
+        failure = json.loads((self.root / "runs" / "run-fault" / "failure.json").read_text())
+        self.assertEqual(failure["cleanup_state"], "REMOVED")
+        self.assertEqual(failure["writer_shutdown_state"], "FINALIZED_BEFORE_FAILURE")
 
         write_json_atomic(self.source / "meta" / "quarantine.json", {"reason": "synthetic"})
         with mock.patch(
@@ -455,7 +469,83 @@ class DeriveIntegrationTest(unittest.TestCase):
         self.assertEqual(tree_snapshot(self.source), before_snapshot)
         self.assertEqual(tree_identity(self.source), before_identity)
 
+    def test_same_size_preserved_mtime_source_change_never_publishes(self):
+        import tools.curator.derive as derive_module
+
+        original_validator = derive_module._run_existing_validator
+        target = self.source / "meta" / "recording_quality.jsonl"
+
+        def mutate_after_validation(root, repo_id):
+            result = original_validator(root, repo_id)
+            details = target.stat()
+            payload = target.read_bytes()
+            changed = payload.replace(b'"target_fps": 30', b'"target_fps": 31', 1)
+            self.assertEqual(len(changed), len(payload))
+            self.assertNotEqual(changed, payload)
+            target.write_bytes(changed)
+            os.utime(target, ns=(details.st_atime_ns, details.st_mtime_ns))
+            return result
+
+        output = self.root / "source-mutated-derived"
+        run = self.root / "runs" / "run-source-mutated"
+        with (
+            mock.patch(
+                "tools.curator.derive.verify_approval",
+                return_value=(self.mocked_approval, self.resolved_profile, self.review_manifest),
+            ),
+            mock.patch(
+                "tools.curator.derive._run_existing_validator",
+                side_effect=mutate_after_validation,
+            ),
+        ):
+            with self.assertRaisesRegex(CuratorError, "SOURCE_CHANGED_DURING_DERIVE"):
+                derive_dataset(
+                    self.source,
+                    output,
+                    self.request_path,
+                    self.approval_path,
+                    run_dir=run,
+                    run_id="run-source-mutated",
+                    source_repo_id="local/source",
+                    output_repo_id="local/source-mutated-derived",
+                )
+        self.assertFalse(output.exists())
+        failure = json.loads((run / "failure.json").read_text())
+        self.assertEqual(failure["cleanup_state"], "REMOVED")
+
+    def test_tree_fsync_fault_never_commits_output(self):
+        output = self.root / "tree-fsync-derived"
+        run = self.root / "runs" / "run-tree-fsync"
+        with (
+            mock.patch(
+                "tools.curator.derive.verify_approval",
+                return_value=(self.mocked_approval, self.resolved_profile, self.review_manifest),
+            ),
+            mock.patch(
+                "tools.curator.derive._fsync_tree",
+                side_effect=CuratorError("DERIVED_TREE_FSYNC", "injected"),
+            ),
+        ):
+            with self.assertRaisesRegex(CuratorError, "DERIVED_TREE_FSYNC"):
+                derive_dataset(
+                    self.source,
+                    output,
+                    self.request_path,
+                    self.approval_path,
+                    run_dir=run,
+                    run_id="run-tree-fsync",
+                    source_repo_id="local/source",
+                    output_repo_id="local/tree-fsync-derived",
+                )
+        self.assertFalse(output.exists())
+        failure = json.loads((run / "failure.json").read_text())
+        self.assertEqual(failure["publication_state"], "UNPUBLISHED")
+        self.assertEqual(failure["cleanup_state"], "REMOVED")
+
     def test_committed_output_survives_parent_fsync_and_receipt_faults(self):
+        import tools.curator.derive as derive_module
+
+        original_fsync_directory = derive_module._fsync_directory
         cases = ("parent-fsync", "receipt")
         for case in cases:
             with self.subTest(case=case):
@@ -470,9 +560,14 @@ class DeriveIntegrationTest(unittest.TestCase):
                 expected_code = "OUTPUT_COMMITTED_PARENT_FSYNC_FAILED"
                 expected_state = "COMMITTED_PARENT_FSYNC_FAILED"
                 if case == "parent-fsync":
+                    def fail_output_parent(path):
+                        if Path(path) == output.parent:
+                            raise OSError("injected parent fsync fault")
+                        return original_fsync_directory(path)
+
                     patches.append(mock.patch(
                         "tools.curator.derive._fsync_directory",
-                        side_effect=OSError("injected parent fsync fault"),
+                        side_effect=fail_output_parent,
                     ))
                 else:
                     expected_code = "COMMITTED_RECEIPT_FAILED"
@@ -506,6 +601,8 @@ class DeriveIntegrationTest(unittest.TestCase):
                 self.assertIs(failure["output_committed"], True)
                 self.assertEqual(failure["output"], str(output))
                 self.assertEqual(failure["publication_state"], expected_state)
+                self.assertEqual(failure["cleanup_state"], "NOT_APPLICABLE_OUTPUT_COMMITTED")
+                self.assertEqual(failure["writer_shutdown_state"], "FINALIZED_BEFORE_FAILURE")
 
     def test_writer_add_save_and_finalize_faults_shutdown_before_cleanup(self):
         original_finalize = self.LeRobotDataset.finalize
@@ -568,6 +665,11 @@ class DeriveIntegrationTest(unittest.TestCase):
                 self.assertFalse(
                     (self.root / f".{case}-derived.run-{case}.curator-owner.json").exists()
                 )
+                failure = json.loads(
+                    (self.root / "runs" / f"run-{case}" / "failure.json").read_text()
+                )
+                self.assertEqual(failure["cleanup_state"], "REMOVED")
+                self.assertEqual(failure["writer_shutdown_state"], "FINALIZED_DURING_FAILURE")
 
     def test_cleanup_leaks_on_temporary_path_substitution(self):
         output = self.root / "substituted-derived"
@@ -609,6 +711,8 @@ class DeriveIntegrationTest(unittest.TestCase):
         self.assertTrue((temporary / "replacement-sentinel").is_file())
         self.assertTrue(moved.is_dir())
         self.assertTrue((self.root / ".substituted-derived.run-sub.curator-owner.json").is_file())
+        failure = json.loads((self.root / "runs" / "run-sub" / "failure.json").read_text())
+        self.assertEqual(failure["cleanup_state"], "RETAINED_IDENTITY_AMBIGUOUS")
 
     def test_cleanup_leaks_on_owner_marker_path_substitution(self):
         output = self.root / "marker-substituted-derived"
@@ -644,9 +748,27 @@ class DeriveIntegrationTest(unittest.TestCase):
         self.assertTrue(temporary.is_dir())
         self.assertTrue(moved_marker.is_file())
         self.assertEqual(marker.read_text(encoding="utf-8"), '{"replacement":"do not delete"}')
+        failure = json.loads(
+            (self.root / "runs" / "run-marker-sub" / "failure.json").read_text()
+        )
+        self.assertEqual(failure["cleanup_state"], "RETAINED_IDENTITY_AMBIGUOUS")
 
 
 class DeriveContractTest(unittest.TestCase):
+    def test_local_dataset_paths_cannot_escape_the_source_root(self):
+        with tempfile.TemporaryDirectory() as directory:
+            parent = Path(directory)
+            root = parent / "source"
+            root.mkdir()
+            (root / "inside.mp4").write_bytes(b"inside")
+            outside = parent / "outside.mp4"
+            outside.write_bytes(b"outside")
+            _require_local_file(root, Path("inside.mp4"))
+            for candidate in (Path("../outside.mp4"), outside):
+                with self.subTest(candidate=candidate):
+                    with self.assertRaisesRegex(CuratorError, "SOURCE_LOCAL_PATH_ESCAPE"):
+                        _require_local_file(root, candidate)
+
     def test_source_and_existing_validator_are_pinned_to_30_hz(self):
         class Dataset:
             meta = SimpleNamespace(

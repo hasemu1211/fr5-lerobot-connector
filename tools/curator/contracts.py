@@ -101,12 +101,20 @@ def reject_symlink_components(path: str | Path, code: str) -> Path:
     return absolute
 
 
-def rename_noreplace(source: str | Path, target: str | Path, *, code: str) -> None:
+def rename_noreplace(
+    source: str | Path,
+    target: str | Path,
+    *,
+    exists_code: str,
+    failure_code: str,
+) -> None:
     """Linux atomic directory publication with RENAME_NOREPLACE."""
     try:
         renameat2 = ctypes.CDLL(None, use_errno=True).renameat2
     except AttributeError as exc:
-        raise CuratorError(code, "renameat2(RENAME_NOREPLACE) is unavailable") from exc
+        raise CuratorError(
+            failure_code, "renameat2(RENAME_NOREPLACE) is unavailable",
+        ) from exc
     renameat2.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p, ctypes.c_uint]
     renameat2.restype = ctypes.c_int
     result = renameat2(
@@ -120,8 +128,8 @@ def rename_noreplace(source: str | Path, target: str | Path, *, code: str) -> No
         return
     error = ctypes.get_errno()
     if error == errno.EEXIST:
-        raise CuratorError(code, f"target already exists: {target}")
-    raise CuratorError(code, os.strerror(error))
+        raise CuratorError(exists_code, f"target already exists: {target}")
+    raise CuratorError(failure_code, f"{os.strerror(error)}: {target}")
 
 
 def read_regular_bytes(path: str | Path, *, code: str = "FILE_READ") -> bytes:
@@ -265,11 +273,28 @@ def tree_identity(root: str | Path) -> tuple[str, dict[str, str]]:
     return canonical_digest({"files": files}), files
 
 
+def assert_tree_identity(
+    root: str | Path,
+    expected_snapshot: dict[str, list[int]],
+    expected_digest: str,
+    *,
+    code: str,
+) -> None:
+    """Rehash a tree and reject metadata or payload changes during the check."""
+    before = tree_snapshot(root)
+    if before != expected_snapshot:
+        raise CuratorError(code, "metadata changed")
+    current_digest, _files = tree_identity(root)
+    if current_digest != expected_digest or tree_snapshot(root) != before:
+        raise CuratorError(code, "payload changed")
+
+
 __all__ = [
     "DIGEST",
     "RFC3339_UTC",
     "SAFE_ID",
     "CuratorError",
+    "assert_tree_identity",
     "canonical_digest",
     "exact_fields",
     "file_sha256",

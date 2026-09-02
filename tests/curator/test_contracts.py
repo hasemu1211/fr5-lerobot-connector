@@ -1,12 +1,21 @@
 from __future__ import annotations
 
+import errno
 import hashlib
+import os
 from pathlib import Path
 import tempfile
 import unittest
 from unittest import mock
 
-from tools.curator.contracts import file_sha256
+from tools.curator.contracts import (
+    CuratorError,
+    assert_tree_identity,
+    file_sha256,
+    rename_noreplace,
+    tree_identity,
+    tree_snapshot,
+)
 
 
 class ContractsTest(unittest.TestCase):
@@ -23,6 +32,47 @@ class ContractsTest(unittest.TestCase):
                     file_sha256(path),
                     "sha256:" + hashlib.sha256(payload).hexdigest(),
                 )
+
+    def test_tree_identity_detects_same_size_preserved_mtime_mutation(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            path = root / "payload.bin"
+            path.write_bytes(b"before")
+            snapshot = tree_snapshot(root)
+            digest, _files = tree_identity(root)
+            details = path.stat()
+            path.write_bytes(b"change")
+            os.utime(path, ns=(details.st_atime_ns, details.st_mtime_ns))
+            self.assertEqual(tree_snapshot(root), snapshot)
+            with self.assertRaisesRegex(CuratorError, "SOURCE_CHANGED"):
+                assert_tree_identity(
+                    root,
+                    snapshot,
+                    digest,
+                    code="SOURCE_CHANGED",
+                )
+
+    def test_rename_reports_non_exists_errno_as_publish_failure(self):
+        class FailingRename:
+            argtypes = None
+            restype = None
+
+            def __call__(self, *_args):
+                return -1
+
+        library = type("Library", (), {"renameat2": FailingRename()})()
+        with (
+            mock.patch("tools.curator.contracts.ctypes.CDLL", return_value=library),
+            mock.patch("tools.curator.contracts.ctypes.get_errno", return_value=errno.EROFS),
+        ):
+            with self.assertRaises(CuratorError) as raised:
+                rename_noreplace(
+                    "/tmp/source",
+                    "/tmp/target",
+                    exists_code="OUTPUT_EXISTS",
+                    failure_code="OUTPUT_PUBLISH",
+                )
+        self.assertEqual(raised.exception.code, "OUTPUT_PUBLISH")
 
 
 if __name__ == "__main__":

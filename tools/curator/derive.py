@@ -23,6 +23,7 @@ from tools.curator.approval import verify_approval
 from tools.curator.contracts import (
     SAFE_ID,
     CuratorError,
+    assert_tree_identity,
     canonical_digest,
     file_sha256,
     load_json,
@@ -346,6 +347,22 @@ def _same_identity(path: Path, expected: _Identity, mode: int) -> bool:
     )
 
 
+def _same_identity_at(
+    directory_fd: int,
+    name: str,
+    expected: _Identity,
+    mode: int,
+) -> bool:
+    try:
+        details = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+    except OSError:
+        return False
+    return (
+        stat.S_IFMT(details.st_mode) == mode
+        and (details.st_dev, details.st_ino) == (expected.device, expected.inode)
+    )
+
+
 def _cleanup_owned(
     temporary: Path,
     marker: Path,
@@ -353,41 +370,112 @@ def _cleanup_owned(
     temporary_identity: _Identity | None,
     marker_identity: _Identity,
 ) -> bool:
-    """Delete only the exact captured marker and temporary directory identities."""
-    if temporary_identity is None or temporary.parent != marker.parent:
+    """Best-effort cleanup anchored to the captured sibling parent directory."""
+    if (
+        temporary_identity is None
+        or temporary.parent != marker.parent
+        or not getattr(shutil.rmtree, "avoids_symlink_attacks", False)
+    ):
         return False
-    if not _same_identity(marker, marker_identity, stat.S_IFREG):
-        return False
-    if not _same_identity(temporary, temporary_identity, stat.S_IFDIR):
-        return False
+    parent_fd = -1
+    marker_fd = -1
     try:
-        current = load_json(marker, code="TEMP_OWNER")
-    except CuratorError:
+        parent_fd = os.open(
+            temporary.parent,
+            os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0),
+        )
+        if (
+            not _same_identity_at(parent_fd, marker.name, marker_identity, stat.S_IFREG)
+            or not _same_identity_at(parent_fd, temporary.name, temporary_identity, stat.S_IFDIR)
+        ):
+            return False
+        marker_fd = os.open(
+            marker.name,
+            os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0),
+            dir_fd=parent_fd,
+        )
+        marker_details = os.fstat(marker_fd)
+        if (
+            not stat.S_ISREG(marker_details.st_mode)
+            or (marker_details.st_dev, marker_details.st_ino)
+            != (marker_identity.device, marker_identity.inode)
+        ):
+            return False
+        with os.fdopen(marker_fd, "r", encoding="utf-8") as stream:
+            marker_fd = -1
+            current = _strict_json_object(stream.read(), "TEMP_OWNER")
+        if (
+            current != owner
+            or not _same_identity_at(parent_fd, marker.name, marker_identity, stat.S_IFREG)
+            or not _same_identity_at(parent_fd, temporary.name, temporary_identity, stat.S_IFDIR)
+        ):
+            return False
+        shutil.rmtree(temporary.name, dir_fd=parent_fd)
+        if not _same_identity_at(parent_fd, marker.name, marker_identity, stat.S_IFREG):
+            return False
+        os.unlink(marker.name, dir_fd=parent_fd)
+        return True
+    except (CuratorError, OSError, UnicodeError):
         return False
-    if current != owner or not _same_identity(marker, marker_identity, stat.S_IFREG):
-        return False
-    if not _same_identity(temporary, temporary_identity, stat.S_IFDIR):
-        return False
-    shutil.rmtree(temporary)
-    if not _same_identity(marker, marker_identity, stat.S_IFREG):
-        return False
-    marker.unlink()
-    return True
+    finally:
+        if marker_fd >= 0:
+            os.close(marker_fd)
+        if parent_fd >= 0:
+            os.close(parent_fd)
 
 
 def _publish(temporary: Path, output: Path) -> None:
     """Commit the no-clobber rename; durability is recorded separately."""
     if output.exists() or output.is_symlink():
         raise CuratorError("OUTPUT_EXISTS", str(output))
-    rename_noreplace(temporary, output, code="OUTPUT_EXISTS")
+    rename_noreplace(
+        temporary,
+        output,
+        exists_code="OUTPUT_EXISTS",
+        failure_code="OUTPUT_PUBLISH",
+    )
 
 
 def _fsync_directory(path: Path) -> None:
-    directory_fd = os.open(path, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+    directory_fd = os.open(
+        path,
+        os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0),
+    )
     try:
         os.fsync(directory_fd)
     finally:
         os.close(directory_fd)
+
+
+def _fsync_tree(root: Path) -> None:
+    """Make every finalized file and nested directory durable before rename."""
+    snapshot = tree_snapshot(root)
+    directories = [root]
+    try:
+        for relative in sorted(snapshot):
+            path = root / relative.rstrip("/")
+            if relative.endswith("/"):
+                directories.append(path)
+                continue
+            fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+            try:
+                if not stat.S_ISREG(os.fstat(fd).st_mode):
+                    raise CuratorError("DERIVED_TREE_FSYNC", str(path))
+                os.fsync(fd)
+            finally:
+                os.close(fd)
+        for directory in sorted(
+            directories,
+            key=lambda item: len(item.relative_to(root).parts),
+            reverse=True,
+        ):
+            _fsync_directory(directory)
+    except CuratorError:
+        raise
+    except OSError as exc:
+        raise CuratorError("DERIVED_TREE_FSYNC", str(exc)) from exc
+    if tree_snapshot(root) != snapshot:
+        raise CuratorError("DERIVED_TREE_FSYNC", "tree changed during fsync")
 
 
 def derive_dataset(
@@ -534,8 +622,12 @@ def derive_dataset(
             source, temporary, verification, profile["profile_digest"],
         )
         validator = _run_existing_validator(temporary, output_repo_id)
-        if tree_snapshot(source) != source_before:
-            raise CuratorError("SOURCE_CHANGED_DURING_DERIVE")
+        assert_tree_identity(
+            source,
+            source_before,
+            source_digest,
+            code="SOURCE_CHANGED_DURING_DERIVE",
+        )
         current_approval, current_profile, current_review = verify_approval(
             profile_request, approval_path,
         )
@@ -546,6 +638,7 @@ def derive_dataset(
             or file_sha256(request.approval_path) != approval_artifact_sha256
         ):
             raise CuratorError("APPROVAL_BUNDLE_CHANGED_BEFORE_PUBLISH")
+        _fsync_tree(temporary)
         _publish(temporary, output)
         published = True
         publication_state = "COMMITTED_PARENT_FSYNC_PENDING"
@@ -573,6 +666,7 @@ def derive_dataset(
             "publication": {
                 "state": "COMMITTED_DURABLE",
                 "rename_noreplace": True,
+                "tree_fsync": True,
                 "parent_fsync": True,
             },
             "profile_digest": profile["profile_digest"],
@@ -615,31 +709,48 @@ def derive_dataset(
         return receipt
     except Exception as exc:
         cleanup_safe = writer_closed
+        writer_shutdown_state = (
+            "FINALIZED_BEFORE_FAILURE"
+            if writer_closed
+            else "WRITER_CREATE_NOT_CONFIRMED"
+        )
         if writer is not None:
             try:
                 writer.finalize()
                 cleanup_safe = True
+                writer_closed = True
+                writer_shutdown_state = "FINALIZED_DURING_FAILURE"
             except Exception:
                 cleanup_safe = False
+                writer_shutdown_state = "FINALIZE_FAILED"
             writer = None
-        if not published and cleanup_safe:
-            _cleanup_owned(
+        if published:
+            cleanup_state = "NOT_APPLICABLE_OUTPUT_COMMITTED"
+        elif not cleanup_safe:
+            cleanup_state = "RETAINED_WRITER_SHUTDOWN_UNCONFIRMED"
+        else:
+            cleaned = _cleanup_owned(
                 temporary,
                 marker,
                 owner,
                 temporary_identity,
                 marker_identity,
             )
+            cleanup_state = "REMOVED" if cleaned else "RETAINED_IDENTITY_AMBIGUOUS"
         with suppress(Exception):
             write_json_atomic(
                 run / "failure.json",
                 {
-                    "schema_version": "curator.derive_failure.v1",
+                    "schema_version": "curator.derive_failure.v2",
                     "run_id": run_id,
                     "reason_code": exc.code if isinstance(exc, CuratorError) else "DERIVE_FAILURE",
                     "publication_state": publication_state,
                     "output_committed": published,
                     "output": str(output) if published else None,
+                    "writer_shutdown_state": writer_shutdown_state,
+                    "cleanup_state": cleanup_state,
+                    "temporary_artifact": str(temporary),
+                    "owner_marker_artifact": str(marker),
                     "training_authority": False,
                 },
             )

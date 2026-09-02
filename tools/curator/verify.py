@@ -21,6 +21,7 @@ import numpy as np
 from tools.curator.contracts import (
     DIGEST,
     CuratorError,
+    assert_tree_identity,
     canonical_digest,
     exact_fields,
     file_sha256,
@@ -147,17 +148,30 @@ def _deny_lerobot_hub_fallback():
 
 
 def _require_local_file(root: Path, relative: Path) -> None:
+    relative = Path(relative)
+    if relative.is_absolute() or ".." in relative.parts:
+        raise CuratorError("SOURCE_LOCAL_PATH_ESCAPE", str(relative))
     path = root / relative
     reject_symlink_components(path, "SOURCE_LOCAL_INCOMPLETE")
     try:
+        resolved = path.resolve(strict=True)
         details = path.stat(follow_symlinks=False)
     except OSError as exc:
         raise CuratorError("SOURCE_LOCAL_INCOMPLETE", str(relative)) from exc
-    if not stat.S_ISREG(details.st_mode) or details.st_size <= 0:
+    try:
+        resolved.relative_to(root)
+    except ValueError as exc:
+        raise CuratorError("SOURCE_LOCAL_PATH_ESCAPE", str(relative)) from exc
+    if resolved != path or not stat.S_ISREG(details.st_mode) or details.st_size <= 0:
         raise CuratorError("SOURCE_LOCAL_INCOMPLETE", str(relative))
 
 
 def open_source_dataset(root: Path, repo_id: str):
+    reject_symlink_components(root, "SOURCE_DATASET")
+    try:
+        root = root.resolve(strict=True)
+    except OSError as exc:
+        raise CuratorError("SOURCE_DATASET", str(exc)) from exc
     required = (
         root / "meta" / "info.json",
         root / "meta" / "stats.json",
@@ -294,8 +308,12 @@ def export_reference(
             os.fsync(directory_fd)
         finally:
             os.close(directory_fd)
-        if tree_snapshot(source) != before:
-            raise CuratorError("SOURCE_CHANGED_DURING_REFERENCE_EXPORT")
+        assert_tree_identity(
+            source,
+            before,
+            source_digest,
+            code="SOURCE_CHANGED_DURING_REFERENCE_EXPORT",
+        )
         return {
             "schema_version": "curator.reference_export.v1",
             "reference_image": str(target),
@@ -384,7 +402,12 @@ def _profile_document(
 def _publish_directory(temporary: Path, target: Path) -> None:
     if target.exists() or target.is_symlink():
         raise CuratorError("BUNDLE_EXISTS", str(target))
-    rename_noreplace(temporary, target, code="BUNDLE_EXISTS")
+    rename_noreplace(
+        temporary,
+        target,
+        exists_code="BUNDLE_EXISTS",
+        failure_code="BUNDLE_PUBLISH",
+    )
     directory_fd = os.open(target.parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
     try:
         os.fsync(directory_fd)
@@ -476,8 +499,12 @@ def create_review_bundle(
         }
         manifest["review_bundle_digest"] = canonical_digest(manifest)
         write_json_atomic(temporary / "manifest.json", manifest)
-        if tree_snapshot(source) != before:
-            raise CuratorError("SOURCE_CHANGED_DURING_PREVIEW")
+        assert_tree_identity(
+            source,
+            before,
+            source_digest,
+            code="SOURCE_CHANGED_DURING_PREVIEW",
+        )
         _publish_directory(temporary, request.review_bundle_path)
         return {
             "profile_path": str(request.review_bundle_path / "profile.json"),
