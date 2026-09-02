@@ -111,38 +111,49 @@ class PhysicalEnvironmentTests(unittest.TestCase):
             ],
         )
 
-    def test_home_recovery_clears_only_confirmed_collision_then_enables(self):
+    def test_home_recovery_enters_manual_before_clearing_collision(self):
         commands = []
         results = {
             "GetRobotEmergencyStopState()": [[0, 0]],
             "GetSafetyStopState()": [[0, 0, 0]],
             "GetRobotErrorCode()": [[0, 4, 2], [0, 0, 0], [0, 0, 0]],
+            "Mode(1)": [[0]],
             "ResetAllError()": [[0]],
+            "Mode(0)": [[0]],
             "RobotEnable(1)": [[0]],
         }
 
-        def remote(command, *, expected_fields):
+        def remote(command, **kwargs):
+            expected_fields = kwargs["expected_fields"]
             commands.append((command, expected_fields))
             return results[command].pop(0)
 
-        states = iter(({"robot_mode": 0, "collision_err": 1.0},))
+        states = iter((
+            {"robot_mode": 0, "collision_err": 1.0},
+            {"robot_mode": 1, "collision_err": 1.0},
+            {"robot_mode": 0, "collision_err": 0.0},
+        ))
         result = _prepare_robot_for_home_recovery(
             remote_call=remote, state_call=lambda: next(states),
+            settle_call=lambda _seconds: None,
         )
 
         self.assertEqual(result, {
             "collision_cleared": True,
-            "mode_switched": False,
+            "mode_switched": True,
             "robot_enabled": True,
             "robot_mode": "AUTO",
         })
         self.assertEqual([item[0] for item in commands], [
             "GetRobotEmergencyStopState()", "GetSafetyStopState()",
-            "GetRobotErrorCode()", "ResetAllError()",
-            "GetRobotErrorCode()", "RobotEnable(1)",
+            "GetRobotErrorCode()", "Mode(1)", "ResetAllError()",
+            "GetRobotErrorCode()", "Mode(0)", "RobotEnable(1)",
             "GetRobotErrorCode()",
         ])
-        self.assertNotIn("Mode(0)", [item[0] for item in commands])
+        self.assertLess(
+            [item[0] for item in commands].index("Mode(1)"),
+            [item[0] for item in commands].index("ResetAllError()"),
+        )
 
     def test_home_recovery_reads_auto_mode_and_collision_from_one_state_sample(self):
         with patch(
@@ -161,6 +172,34 @@ class PhysicalEnvironmentTests(unittest.TestCase):
         self.assertIn("/nonrt_state_data", read.call_args.args[0])
         self.assertIn("5", read.call_args.args[0])
         self.assertEqual(read.call_args.kwargs, {"timeout_s": 6})
+
+    def test_home_recovery_never_clears_collision_without_manual_feedback(self):
+        commands = []
+
+        def remote(command, **_kwargs):
+            commands.append(command)
+            return {
+                "GetRobotEmergencyStopState()": [0, 0],
+                "GetSafetyStopState()": [0, 0, 0],
+                "GetRobotErrorCode()": [0, 4, 2],
+                "Mode(1)": [0],
+            }[command]
+
+        with contextlib.redirect_stderr(io.StringIO()):
+            with self.assertRaisesRegex(
+                ContractError, "HOME_RECOVERY_MODE_SWITCH",
+            ):
+                _prepare_robot_for_home_recovery(
+                    remote_call=remote,
+                    state_call=lambda: {
+                        "robot_mode": 0, "collision_err": 1.0,
+                    },
+                    settle_call=lambda _seconds: None,
+                )
+
+        self.assertEqual(commands.count("Mode(1)"), 1)
+        self.assertNotIn("ResetAllError()", commands)
+        self.assertNotIn("RobotEnable(1)", commands)
 
     def test_home_recovery_switches_manual_mode_once_and_verifies_feedback(self):
         commands = []

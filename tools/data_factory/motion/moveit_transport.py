@@ -1171,16 +1171,41 @@ class RosMoveItTransport:
         constraints.orientation_constraints = [orientation]
         return constraints
 
-    def build_gripper_goal(self, phase, position, limits):
-        del phase
+    def build_gripper_goal(
+        self, phase, position, limits,
+        release_position=None, release_hold_s=None,
+    ):
         goal = self._FollowJointTrajectory.Goal()
         goal.trajectory.joint_names = ["finger_right_joint"]
-        endpoint = self._JointTrajectoryPoint()
-        endpoint.positions = [float(position)]
+        staged = release_position is not None or release_hold_s is not None
+        if staged:
+            values = (release_position, release_hold_s, position)
+            if (
+                phase != "GRIPPER_OPEN"
+                or any(
+                    isinstance(value, bool)
+                    or not isinstance(value, (int, float))
+                    or not math.isfinite(value)
+                    for value in values
+                )
+                or not 0 < release_position < position
+                or not 0 < release_hold_s < limits["command_duration_s"]
+            ):
+                raise ContractError("ROS_GRIPPER_STAGE")
+            endpoint = self._JointTrajectoryPoint()
+            endpoint.positions = [float(release_position)]
+            full_open = self._JointTrajectoryPoint()
+            full_open.positions = [float(position)]
+            full_open.time_from_start = self._duration(release_hold_s)
+            points = [endpoint, full_open]
+        else:
+            endpoint = self._JointTrajectoryPoint()
+            endpoint.positions = [float(position)]
+            points = [endpoint]
         completion_check = self._JointTrajectoryPoint()
         completion_check.positions = [float(position)]
         completion_check.time_from_start = self._duration(limits["command_duration_s"])
-        goal.trajectory.points = [endpoint, completion_check]
+        goal.trajectory.points = [*points, completion_check]
         goal.goal_tolerance = [
             self._JointTolerance(
                 name="finger_right_joint",

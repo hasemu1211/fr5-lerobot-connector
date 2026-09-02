@@ -412,8 +412,12 @@ class PickupExecutor:
                     if planned_duration_s + EXECUTION_RESULT_MARGIN_S > step["limits"]["execution_timeout_s"]:
                         raise ContractError("EXECUTION_TIMEOUT_INSUFFICIENT")
             else:
+                staged_open = (
+                    step["release_position_m"], step["release_hold_s"]
+                ) if phase == "GRIPPER_OPEN" and "release_position_m" in step else ()
                 serialized = self.transport.build_gripper_goal(
-                    phase, step["gripper_position_m"], step["limits"]
+                    phase, step["gripper_position_m"], step["limits"],
+                    *staged_open,
                 )
                 if not isinstance(serialized, bytes) or not serialized:
                     raise ContractError("GRIPPER_GOAL")
@@ -434,6 +438,8 @@ class PickupExecutor:
                 "target",
                 "joint_positions_rad",
                 "gripper_position_m",
+                "release_position_m",
+                "release_hold_s",
                 "requires_confirmation",
                 "pause_after",
             ):

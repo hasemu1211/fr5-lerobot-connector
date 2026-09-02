@@ -77,6 +77,7 @@ GRIPPER_OPEN_KEYS = {
     "command_position_m", "velocity_percent", "force_percent",
     "completion_tolerance_m", "evidence_digest",
 }
+GRIPPER_OPEN_STAGE_KEYS = {"release_position_m", "release_hold_s"}
 COLLECTION_PROFILE_V2_KEYS = PROFILE_KEYS["collection_profile"] | {
     "camera_profile", "camera_roles", "camera_serials", "camera_topics",
     "fps", "width", "height", "image_qos", "image_qos_depth",
@@ -461,6 +462,12 @@ def _profile(root, folder, ident, id_key, schema):
                 for column in range(3) for row in range(3)
             ):
                 raise ContractError("GRASP_GEOMETRY")
+            opened = _gripper_open(value["gripper_open"], "GRASP_OPEN")
+            if "release_position_m" in opened and not (
+                value["gripper_close"]["acceptable_feedback_m"]["max"]
+                < opened["release_position_m"] < opened["command_position_m"]
+            ):
+                raise ContractError("GRASP_OPEN")
             value = {
                 **value,
                 "object_profile_digest": _digest(
@@ -472,9 +479,7 @@ def _profile(root, folder, ident, id_key, schema):
                     "release_clearance_mm": release_clearance,
                     "datum_to_tcp_grasp": transform,
                 },
-                "gripper_open": _gripper_open(
-                    value["gripper_open"], "GRASP_OPEN",
-                ),
+                "gripper_open": opened,
             }
     else:
         for key, item in value.items():
@@ -498,7 +503,12 @@ def _gripper_close(value, code):
 
 
 def _gripper_open(value, code):
-    value = _exact(value, GRIPPER_OPEN_KEYS, code)
+    if not isinstance(value, dict):
+        raise ContractError(code)
+    staged_keys = GRIPPER_OPEN_STAGE_KEYS & set(value)
+    if staged_keys and staged_keys != GRIPPER_OPEN_STAGE_KEYS:
+        raise ContractError(code)
+    value = _exact(value, GRIPPER_OPEN_KEYS | staged_keys, code)
     command = _number(value["command_position_m"], code)
     tolerance = _number(value["completion_tolerance_m"], code)
     if command <= 0 or tolerance <= 0:
@@ -510,13 +520,20 @@ def _gripper_open(value, code):
         ):
             raise ContractError(code)
     _digest(value["evidence_digest"], code)
-    return {
+    result = {
         "command_position_m": command,
         "velocity_percent": value["velocity_percent"],
         "force_percent": value["force_percent"],
         "completion_tolerance_m": tolerance,
         "evidence_digest": value["evidence_digest"],
     }
+    if staged_keys:
+        release = _number(value["release_position_m"], code)
+        hold = _number(value["release_hold_s"], code)
+        if release <= 0 or release >= command or hold <= 0:
+            raise ContractError(code)
+        result.update(release_position_m=release, release_hold_s=hold)
+    return result
 
 
 def _document(source, code):
@@ -1093,6 +1110,15 @@ def _validate_motion_qualification(
         != validated["grasp_profile"]["gripper_open"]["command_position_m"]
     ):
         raise ContractError("MOTION_GRIPPER")
+    if (
+        schema == "data_factory.motion_qualification.v2"
+        and "release_position_m"
+        in validated["grasp_profile"]["gripper_open"]
+        and not lower <= validated["grasp_profile"]["gripper_open"][
+            "release_position_m"
+        ] <= upper
+    ):
+        raise ContractError("MOTION_GRIPPER")
     safe = qualification["qualified_safe_joint_positions_rad"]
     if not isinstance(safe, list) or len(safe) != len(HOME_JOINT_ORDER) or any(abs(_number(value, "MOTION_SAFE_JOINTS") - expected) > 1e-12 for value, expected in zip(safe, home["nominal_target_rad"])): raise ContractError("MOTION_SAFE_JOINTS")
     tolerance = _exact(qualification["goal_tolerances"], MOTION_GOAL_TOLERANCES, "MOTION_TOLERANCES")
@@ -1115,10 +1141,19 @@ def _validate_motion_qualification(
             if (
                 schema == "data_factory.motion_qualification.v2"
                 and phase == "GRIPPER_OPEN"
-                and values["completion_tolerance_m"]
-                != validated["grasp_profile"]["gripper_open"][
-                    "completion_tolerance_m"
-                ]
+                and (
+                    values["completion_tolerance_m"]
+                    != validated["grasp_profile"]["gripper_open"][
+                        "completion_tolerance_m"
+                    ]
+                    or (
+                        "release_hold_s"
+                        in validated["grasp_profile"]["gripper_open"]
+                        and validated["grasp_profile"]["gripper_open"][
+                            "release_hold_s"
+                        ] >= values["command_duration_s"]
+                    )
+                )
             ):
                 raise ContractError("MOTION_PHASE_LIMITS")
         else:
@@ -1252,7 +1287,19 @@ def resolve_motion_program(
     for phase in MOTION_PHASES:
         step = {"phase": phase, "limits": q["limits"][phase]}
         if phase in offsets: step["target"] = target(*offsets[phase])
-        elif phase.startswith("GRIPPER"): step["gripper_position_m"] = q["gripper"]["closed" if phase == "GRIPPER_CLOSE" else "open"]
+        elif phase.startswith("GRIPPER"):
+            step["gripper_position_m"] = q["gripper"][
+                "closed" if phase == "GRIPPER_CLOSE" else "open"
+            ]
+            if phase == "GRIPPER_OPEN" and validated["grasp_profile"].get(
+                "schema_version"
+            ) == "data_factory.grasp_profile.v3":
+                opened = validated["grasp_profile"]["gripper_open"]
+                if "release_position_m" in opened:
+                    step.update(
+                        release_position_m=opened["release_position_m"],
+                        release_hold_s=opened["release_hold_s"],
+                    )
         else: step["joint_positions_rad"] = q["safe"]
         if phase == recording_boundary: step["pause_after"] = "SEMANTIC_VERDICT"
         steps.append(step)
@@ -1472,6 +1519,11 @@ def validate_motion_program(value):
     for step in value["steps"]:
         phase = step["phase"]
         extras = {"phase", "limits", "target"} if phase in {"PREGRASP_PTP", "APPROACH_STOP_LIN", "FINAL_APPROACH_LIN", "LIFT_LIN", "RECYCLE_APPROACH_PTP", "LOWER_LIN", "RETREAT_LIN"} else {"phase", "limits", "joint_positions_rad"} if phase == "SAFE_POSE_PTP" else {"phase", "limits", "gripper_position_m"}
+        staged_open_keys = {"release_position_m", "release_hold_s"}
+        if phase == "GRIPPER_OPEN" and staged_open_keys & set(step):
+            if not staged_open_keys <= set(step):
+                raise ContractError("MOTION_PROGRAM_GRIPPER")
+            extras |= staged_open_keys
         if legacy_precontact and phase == "FINAL_APPROACH_LIN": extras.add("requires_confirmation")
         if legacy_grasp_verdict and phase == "GRIPPER_CLOSE": extras.add("pause_after")
         if phase == semantic_phase: extras.add("pause_after")
@@ -1497,6 +1549,19 @@ def validate_motion_program(value):
         if "gripper_position_m" in step:
             position = _number(step["gripper_position_m"], "MOTION_PROGRAM_GRIPPER")
             if phase == "GRIPPER_CLOSE" and position != requirements["command_position_m"]: raise ContractError("MOTION_PROGRAM_GRIPPER")
+            if phase == "GRIPPER_OPEN" and staged_open_keys <= set(step):
+                release_position = _number(
+                    step["release_position_m"], "MOTION_PROGRAM_GRIPPER",
+                )
+                release_hold = _number(
+                    step["release_hold_s"], "MOTION_PROGRAM_GRIPPER",
+                )
+                if not (
+                    requirements["acceptable_feedback_m"]["max"]
+                    < release_position < position
+                    and 0 < release_hold < limit["command_duration_s"]
+                ):
+                    raise ContractError("MOTION_PROGRAM_GRIPPER")
         if phase == "GRIPPER_CLOSE" and _number(step["limits"]["completion_tolerance_m"], "MOTION_PROGRAM_LIMITS") != requirements["acceptable_feedback_m"]["max"] - requirements["command_position_m"]: raise ContractError("MOTION_PROGRAM_GRIPPER")
         if phase == semantic_phase and step["pause_after"] != "SEMANTIC_VERDICT": raise ContractError("MOTION_PROGRAM_MARKER")
     return value

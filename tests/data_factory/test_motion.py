@@ -45,6 +45,15 @@ class Test(unittest.TestCase):
    mismatched=T();mismatched.snapshot=lambda *_,kwargs=kwargs:snapshot(**kwargs)
    rejected=e.PickupExecutor(mismatched).process(self.req("plan",{"run_id":run_id,"motion_program":program}))
    self.assertEqual((rejected["ok"],rejected["code"]),(False,"GRIPPER_SETTINGS_MISMATCH"))
+ def test_plan_preserves_staged_open_as_one_phase_goal(self):
+  class Staged(T):
+   def __init__(self):super().__init__();self.gripper_calls=[]
+   def build_gripper_goal(self,*args):self.calls.append(args[0]);self.gripper_calls.append(args);return args[0].encode()
+  program=motion(True);opened=next(step for step in program["steps"] if step["phase"]=="GRIPPER_OPEN");opened.update(gripper_position_m=.021,release_position_m=.0126,release_hold_s=.5)
+  transport=Staged();result=e.PickupExecutor(transport).process(self.req("plan",{"run_id":"staged-open","motion_program":program}))
+  self.assertTrue(result["ok"]);self.assertEqual([step["phase"] for step in result["data"]["plan"]["steps"]].count("GRIPPER_OPEN"),1)
+  self.assertEqual(next(call for call in transport.gripper_calls if call[0]=="GRIPPER_OPEN")[3:],(.0126,.5))
+  planned=next(step for step in result["data"]["plan"]["steps"] if step["phase"]=="GRIPPER_OPEN");self.assertEqual((planned["release_position_m"],planned["release_hold_s"]),(.0126,.5))
  def test_plan_rejects_trajectory_that_cannot_finish_before_timeout(self):
   class Timed(T):
    def arm_trajectory_duration_s(self,_):return .5
@@ -329,6 +338,9 @@ class Test(unittest.TestCase):
   with mock.patch.object(transport._rclpy,"spin_until_future_complete",return_value=None):result=transport.plan_arm(step["phase"],target,None,step["limits"],program["frames"],program["planning"],[0.]*6)
   goal=clients["/move_action"].goals[-1];request=goal.request;constraint=request.goal_constraints[0];position=constraint.position_constraints[0];orientation=constraint.orientation_constraints[0];self.assertTrue(goal.planning_options.plan_only);self.assertEqual((request.pipeline_id,request.planner_id,request.group_name),("pilz_industrial_motion_planner","LIN","fairino5_v6_group"));self.assertEqual((request.allowed_planning_time,request.max_velocity_scaling_factor,request.max_acceleration_scaling_factor),(1.,.1,.1));self.assertEqual((request.start_state.joint_state.name,list(request.start_state.joint_state.position)),(["j1","j2","j3","j4","j5","j6"],[0.]*6));self.assertEqual([position.constraint_region.primitive_poses[0].position.x,position.constraint_region.primitive_poses[0].position.y,position.constraint_region.primitive_poses[0].position.z],[.1,.2,.3]);self.assertEqual(list(position.constraint_region.primitives[0].dimensions),[.001]);self.assertAlmostEqual(orientation.orientation.z,2**-.5);self.assertAlmostEqual(orientation.orientation.w,2**-.5);self.assertEqual((orientation.absolute_x_axis_tolerance,orientation.absolute_y_axis_tolerance,orientation.absolute_z_axis_tolerance),(.01,.01,.01));self.assertEqual(result["final_joint_state"],[1.,2.,3.,4.,5.,6.]);safe=program["steps"][-1];safe_goal=transport._move_group_goal(safe["phase"],None,safe["joint_positions_rad"],safe["limits"],program["frames"],program["planning"],[1.]*6);self.assertEqual((safe_goal.request.planner_id,[item.position for item in safe_goal.request.goal_constraints[0].joint_constraints]),("PTP",[0.]*6));self.assertTrue(serialize_message(goal));self.assertTrue(serialize_message(safe_goal))
   close=program["steps"][3];gripper=deserialize_message(transport.build_gripper_goal(close["phase"],close["gripper_position_m"],close["limits"]),FollowJointTrajectory.Goal);self.assertEqual([list(point.positions) for point in gripper.trajectory.points],[[.01],[.01]]);self.assertEqual(gripper.trajectory.points[0].time_from_start.sec,0);self.assertEqual(gripper.trajectory.points[1].time_from_start.sec,1);self.assertEqual(gripper.goal_tolerance[0].position,.002);self.assertEqual(gripper.goal_tolerance[0].position,program["gripper_requirements"]["acceptable_feedback_m"]["max"]-program["gripper_requirements"]["command_position_m"]);self.assertEqual(gripper.goal_time_tolerance.sec,1)
+  opened=deserialize_message(transport.build_gripper_goal("GRIPPER_OPEN",.021,{"command_duration_s":1.,"execution_timeout_s":2.,"completion_tolerance_m":.000105},.0126,.5),FollowJointTrajectory.Goal)
+  self.assertEqual([list(point.positions) for point in opened.trajectory.points],[[.0126],[.021],[.021]])
+  self.assertEqual([(point.time_from_start.sec,point.time_from_start.nanosec) for point in opened.trajectory.points],[(0,0),(0,500000000),(1,0)])
   for status,error in ((GoalStatus.STATUS_ABORTED,MoveItErrorCodes.SUCCESS),(GoalStatus.STATUS_SUCCEEDED,MoveItErrorCodes.PLANNING_FAILED)):
    failed=transport._MoveGroup.Result();failed.error_code.val=error;failed.planned_trajectory=trajectory;clients["/move_action"].handle=Handle(Future(SimpleNamespace(status=status,result=failed)))
    with mock.patch.object(transport._rclpy,"spin_until_future_complete",return_value=None),self.assertRaises(e.ContractError) as failed_call:transport.plan_arm(step["phase"],target,None,step["limits"],program["frames"],program["planning"],[0.]*6)
