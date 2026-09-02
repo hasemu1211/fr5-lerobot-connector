@@ -7,22 +7,27 @@ import math
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
-from tools.a4_place_yaw.generate_place_yaw_a4 import (
-    PRINT_X_MARGIN_MM,
-    PRINT_Y_MARGIN_MM,
+from tools.a4_place_yaw.region_layout import (
+    a4_printable_polygon,
+    make_red_blue_region_layout,
+    workspace_region,
 )
 from tools.data_factory.experiment_manifest import build_test_only_feature_contract
 from tools.data_factory.motion.trajectory_variants import phase_variant_catalog
+from tools.data_factory.operator.registries.region import (
+    load_workspace_region_binding,
+)
 from tools.data_factory.task_recipe import TASK_IDS, get_task_recipe
 from tools.data_factory.workspace_geometry import (
+    point_in_convex_polygon,
+    polygon_bounds,
     rotate_xy,
     rotation_envelope,
-    safe_rectangle_bounds,
-    stratified_rectangle_samples,
+    safe_convex_polygon,
+    stratified_convex_polygon_samples,
 )
 from tools.fr5_data_factory import (
     ContractError, SAFE_ID,
-    bounded_a4_coordinate,
     canonical_digest,
     load_json_strict,
     normalize_yaw_deg,
@@ -58,9 +63,9 @@ WORKSPACE_DOMAIN_FIELDS = frozenset({
     "yaw_deg", "preset_cell_ids", "execution_gate", "domain_digest",
 })
 COVERAGE_REGION_FIELDS = frozenset({
-    "shape", "page_size_mm", "origin_xy_mm", "base_margin_xy_mm",
-    "object_size_xy_mm", "uncertainty_mm", "strata",
-    "coordinate_contract",
+    "shape", "layout_id", "layout_digest", "region_id",
+    "polygon_local_xy_mm", "physical_binding_status", "object_size_xy_mm",
+    "uncertainty_mm", "strata", "coordinate_contract",
 })
 
 
@@ -427,6 +432,17 @@ def load_operator_catalog(
         status="NOT_CONNECTED", reason="DEVICE_NOT_CONNECTED",
     )]
 
+    region_layout = make_red_blue_region_layout()
+    persisted_region_binding = load_workspace_region_binding(
+        root, region_layout,
+    )
+    persisted_regions = {
+        item["place_id"]: item
+        for item in (
+            [] if persisted_region_binding is None
+            else persisted_region_binding["bindings"]
+        )
+    }
     workspace_domains = []
     for cell in workspace_cells:
         family_sheets = [
@@ -444,28 +460,43 @@ def load_operator_catalog(
             for sheet in family_sheets for point in sheet["grid_points"]
         })
         sheet = yaw0[0]
-        page_size = [sheet["page_mm"]["width"], sheet["page_mm"]["height"]]
-        origin = sheet["registration"]["origin"]["sheet_xy_mm"]
-        base_margin = [PRINT_X_MARGIN_MM, PRINT_Y_MARGIN_MM]
         try:
-            printable = safe_rectangle_bounds(
-                page_size_mm=page_size, origin_xy_mm=origin,
-                base_margin_xy_mm=base_margin,
-                object_size_xy_mm=(0.0, 0.0), uncertainty_mm=0.0,
-                yaw_deg=0.0,
-            )
-            envelope_x, envelope_y = rotation_envelope(*printable)
+            if (
+                sheet["page_mm"] != region_layout["page_mm"]
+                or sheet["registration"]["origin"]["sheet_xy_mm"]
+                != region_layout["origin_xy_mm"]
+            ):
+                raise ValueError("region sheet")
         except ValueError as exc:
             raise ContractError("OPERATOR_CATALOG_CONFIG") from exc
+        try:
+            zone = workspace_region(region_layout, cell["place_id"])
+        except ValueError:
+            zone = None
+        persisted_region = persisted_regions.get(cell["place_id"])
+        region_status = (
+            persisted_region_binding["physical_binding_status"]
+            if zone is not None
+            and persisted_region_binding is not None
+            and isinstance(persisted_region, Mapping)
+            and persisted_region["frame_id"] == cell["calibration_id"]
+            and persisted_region["region_id"] == zone["region_id"]
+            else "PREPARED_NOT_VERIFIED" if zone is not None
+            else "NOT_CONFIGURED"
+        )
+        polygon = (
+            zone["polygon_local_xy_mm"]
+            if zone is not None else a4_printable_polygon()
+        )
+        envelope_x, envelope_y = rotation_envelope(*polygon_bounds(polygon))
         for _object_path, object_profile in objects:
             dimensions = object_profile.get("dimensions_mm")
             if object_profile.get("qualification_status") != "QUALIFIED":
                 continue
             try:
                 object_size = [float(dimensions[0]), float(dimensions[1])]
-                safe_rectangle_bounds(
-                    page_size_mm=page_size, origin_xy_mm=origin,
-                    base_margin_xy_mm=base_margin,
+                safe_convex_polygon(
+                    polygon=polygon,
                     object_size_xy_mm=object_size,
                     uncertainty_mm=cell["limits"]["combined_error_bound_mm"],
                     yaw_deg=0.0,
@@ -473,10 +504,18 @@ def load_operator_catalog(
             except (KeyError, TypeError, ValueError, IndexError) as exc:
                 raise ContractError("OPERATOR_CATALOG_CONFIG") from exc
             region = {
-                "shape": "RECTANGLE",
-                "page_size_mm": page_size,
-                "origin_xy_mm": copy.deepcopy(origin),
-                "base_margin_xy_mm": base_margin,
+                "shape": "CONVEX_POLYGON",
+                "layout_id": (
+                    region_layout["layout_id"] if zone is not None else None
+                ),
+                "layout_digest": (
+                    region_layout["layout_digest"] if zone is not None else None
+                ),
+                "region_id": zone["region_id"] if zone is not None else None,
+                "polygon_local_xy_mm": copy.deepcopy(polygon),
+                "physical_binding_status": (
+                    region_status
+                ),
                 "object_size_xy_mm": object_size,
                 "uncertainty_mm": float(
                     cell["limits"]["combined_error_bound_mm"]
@@ -895,7 +934,10 @@ def _operator_pose_domain(
         != "FRESH_PLAN_IK_COLLISION_ENDPOINT_PER_SLOT"
         or not isinstance(region, Mapping)
         or set(region) != COVERAGE_REGION_FIELDS
-        or region.get("shape") != "RECTANGLE"
+        or region.get("shape") != "CONVEX_POLYGON"
+        or region.get("physical_binding_status") not in {
+            "NOT_CONFIGURED", "PREPARED_NOT_VERIFIED", "VERIFIED",
+        }
         or region.get("coordinate_contract")
         != "SHEET_XY_EQUALS_RZ_YAW_TIMES_LOCAL_XY"
         or not isinstance(region.get("strata"), Mapping)
@@ -906,18 +948,30 @@ def _operator_pose_domain(
     ):
         raise ContractError("OPERATOR_POSE_DOMAIN")
     try:
-        printable = safe_rectangle_bounds(
-            page_size_mm=region["page_size_mm"],
-            origin_xy_mm=region["origin_xy_mm"],
-            base_margin_xy_mm=region["base_margin_xy_mm"],
-            object_size_xy_mm=(0.0, 0.0), uncertainty_mm=0.0,
-            yaw_deg=0.0,
+        layout = make_red_blue_region_layout()
+        if region["physical_binding_status"] == "NOT_CONFIGURED":
+            if (
+                any(region[field] is not None for field in (
+                    "layout_id", "layout_digest", "region_id",
+                ))
+                or region["polygon_local_xy_mm"] != a4_printable_polygon()
+            ):
+                raise ValueError("region binding")
+        else:
+            expected = workspace_region(layout, domain["workspace_id"])
+            if (
+                region["layout_id"] != layout["layout_id"]
+                or region["layout_digest"] != layout["layout_digest"]
+                or region["region_id"] != expected["region_id"]
+                or region["polygon_local_xy_mm"]
+                != expected["polygon_local_xy_mm"]
+            ):
+                raise ValueError("region binding")
+        envelope_x, envelope_y = rotation_envelope(
+            *polygon_bounds(region["polygon_local_xy_mm"]),
         )
-        envelope_x, envelope_y = rotation_envelope(*printable)
-        safe_rectangle_bounds(
-            page_size_mm=region["page_size_mm"],
-            origin_xy_mm=region["origin_xy_mm"],
-            base_margin_xy_mm=region["base_margin_xy_mm"],
+        safe_convex_polygon(
+            polygon=region["polygon_local_xy_mm"],
             object_size_xy_mm=region["object_size_xy_mm"],
             uncertainty_mm=region["uncertainty_mm"], yaw_deg=0.0,
         )
@@ -951,15 +1005,17 @@ def _canonical_operator_pose(
     yaw, x_mm, y_mm = numbers
     yaw = normalize_yaw_deg(yaw)
     region = domain["coverage_region"]
-    bounded_a4_coordinate(
-        x_bounds=domain["x_mm"], y_bounds=domain["y_mm"],
-        yaw_deg=yaw, x_mm=x_mm, y_mm=y_mm,
-        page_size_mm=region["page_size_mm"],
-        origin_xy_mm=region["origin_xy_mm"],
-        base_margin_xy_mm=region["base_margin_xy_mm"],
-        object_size_xy_mm=region["object_size_xy_mm"],
-        uncertainty_mm=region["uncertainty_mm"],
-    )
+    try:
+        safe_polygon = safe_convex_polygon(
+            polygon=region["polygon_local_xy_mm"],
+            object_size_xy_mm=region["object_size_xy_mm"],
+            uncertainty_mm=region["uncertainty_mm"], yaw_deg=yaw,
+        )
+        sheet_xy = rotate_xy((x_mm, y_mm), yaw)
+    except ValueError as exc:
+        raise ContractError("OPERATOR_POSE_DOMAIN") from exc
+    if not point_in_convex_polygon(sheet_xy, safe_polygon):
+        raise ContractError("JOB_COORDINATE_BOUNDS", str((x_mm, y_mm)))
     return {
         "place_id": selected["workspace_id"],
         "yaw_deg": int(yaw) if yaw.is_integer() else yaw,
@@ -1184,14 +1240,13 @@ def project_assisted_poses(
             raise ContractError("OPERATOR_ASSISTED_DOMAIN")
         try:
             yaw = normalize_yaw_deg(metadata["yaw_deg"])
-            x_mm, y_mm = bounded_a4_coordinate(
-                x_bounds=domain["x_mm"], y_bounds=domain["y_mm"],
-                yaw_deg=yaw, x_mm=metadata["x_mm"], y_mm=metadata["y_mm"],
-                page_size_mm=region["page_size_mm"],
-                origin_xy_mm=region["origin_xy_mm"],
-                base_margin_xy_mm=region["base_margin_xy_mm"],
-            )
-        except (KeyError, TypeError, ContractError) as exc:
+            x_mm, y_mm = float(metadata["x_mm"]), float(metadata["y_mm"])
+            if not point_in_convex_polygon(
+                rotate_xy((x_mm, y_mm), yaw),
+                region["polygon_local_xy_mm"],
+            ):
+                raise ValueError("anchor")
+        except (KeyError, TypeError, ValueError, ContractError) as exc:
             raise ContractError("OPERATOR_ASSISTED_DOMAIN") from exc
         xy = (float(x_mm), float(y_mm))
         if point_id in spatial_anchors and spatial_anchors[point_id] != xy:
@@ -1237,10 +1292,8 @@ def project_assisted_poses(
             else yaw_variants[(pass_index - 1) % len(yaw_variants)]
         )
         try:
-            x_bounds, y_bounds = safe_rectangle_bounds(
-                page_size_mm=region["page_size_mm"],
-                origin_xy_mm=region["origin_xy_mm"],
-                base_margin_xy_mm=region["base_margin_xy_mm"],
+            safe_polygon = safe_convex_polygon(
+                polygon=region["polygon_local_xy_mm"],
                 object_size_xy_mm=region["object_size_xy_mm"],
                 uncertainty_mm=region["uncertainty_mm"],
                 yaw_deg=yaw_anchor,
@@ -1249,8 +1302,8 @@ def project_assisted_poses(
                 unique_count - len(result),
                 columns * rows - int(pass_index == 0),
             )
-            samples = stratified_rectangle_samples(
-                x_bounds=x_bounds, y_bounds=y_bounds,
+            samples = stratified_convex_polygon_samples(
+                polygon=safe_polygon,
                 columns=columns, rows=rows, start_xy=current_sheet_xy,
                 count=count, seed=normalized_seed, pass_index=pass_index,
                 skip_start_cell=pass_index == 0,

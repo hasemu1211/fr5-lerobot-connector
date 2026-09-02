@@ -492,8 +492,9 @@ class DataFactoryTest(unittest.TestCase):
     def test_red_blue_region_layout_reuses_printcal_without_motion_authority(self):
         layout = generator.make_red_blue_region_layout()
         self.assertEqual(
-            [region["region_id"] for region in layout["regions"]],
-            ["RED", "BLUE"],
+            [(region["place_id"], region["region_id"])
+             for region in layout["workspace_regions"]],
+            [("PLACE_A", "RED"), ("PLACE_B", "BLUE")],
         )
         self.assertEqual(
             layout["layout_digest"],
@@ -502,15 +503,18 @@ class DataFactoryTest(unittest.TestCase):
                 if key != "layout_digest"
             }),
         )
-        svg = generator.make_region_svg(layout, 96)
-        self.assertIn('data-content-scale-percent="104.167"', svg)
-        self.assertIn(">RED<", svg)
-        self.assertIn(">BLUE<", svg)
-        self.assertNotIn("GRID_", svg)
-        self.assertNotIn("REGISTER", svg)
+        red_svg = generator.make_region_svg(layout, "PLACE_A", 96)
+        blue_svg = generator.make_region_svg(layout, "PLACE_B", 96)
+        self.assertIn('data-content-scale-percent="104.167"', red_svg)
+        self.assertIn('data-region-id="RED"', red_svg)
+        self.assertIn('data-region-id="BLUE"', blue_svg)
+        self.assertNotIn("BLUE", red_svg)
+        self.assertNotIn("RED", blue_svg)
+        self.assertNotIn("GRID_", red_svg + blue_svg)
+        self.assertNotIn("REGISTER", red_svg + blue_svg)
 
         tampered = copy.deepcopy(layout)
-        tampered["regions"][0]["polygon_local_xy_mm"].reverse()
+        tampered["workspace_regions"][0]["polygon_local_xy_mm"].reverse()
         tampered["layout_digest"] = generator.canonical_digest({
             key: value for key, value in tampered.items()
             if key != "layout_digest"

@@ -44,6 +44,9 @@ from tools.data_factory.operator.registries.start_pose import (
     project_robot_start_pose_qualification,
     save_start_pose_profile,
 )
+from tools.data_factory.operator.registries.region import (
+    validate_region_endpoint_authority,
+)
 from tools.data_factory.operator.setup.contracts import (
     build_camera_role_bindings,
     build_runtime_episode_binding,
@@ -99,7 +102,12 @@ from tools.data_factory.operator.workflow.campaign import (
 from tools.data_factory.quality.coverage_report import build_coverage_report
 from tools.data_factory.operator.registries.workspace import WorkspaceManager
 from tools.data_factory.scene_state import SceneStateStore
-from tools.data_factory.task_recipe import compile_task_binding, get_task_recipe
+from tools.data_factory.task_recipe import (
+    compile_episode_instruction_binding,
+    compile_task_binding,
+    get_task_recipe,
+    validate_region_binding,
+)
 from tools.fr5_data_factory import (
     ContractError,
     DIGEST,
@@ -239,8 +247,9 @@ def _resolve_physical_pose_domain(
             or not isinstance(binding, Mapping)
             or set(binding) != {
                 "frame_id", "selected_sheet", "yaw0_sheet",
-                "motion_qualification",
+                "motion_qualification", "region_binding",
             }
+            or not isinstance(binding["region_binding"], Mapping)
             or not isinstance(binding["frame_id"], str)
             or not SAFE_ID.fullmatch(binding["frame_id"])
             for place_id, binding in workspace_bindings.items()
@@ -1635,6 +1644,11 @@ def build_physical_operator_console(
                 "selected_sheet": paths["yaw0_sheet"],
                 "yaw0_sheet": paths["yaw0_sheet"],
                 "motion_qualification": paths["motion"],
+                "region_binding": validate_region_binding({
+                    "layout_id": None, "layout_digest": None,
+                    "region_id": None,
+                    "physical_binding_status": "NOT_CONFIGURED",
+                }),
             },
         }
     else:
@@ -1642,12 +1656,16 @@ def build_physical_operator_console(
             raise ContractError("PHYSICAL_CONSOLE_WORKSPACE_BINDING")
         resolved_workspace_bindings = {}
         for place_id, binding in workspace_bindings.items():
+            binding_fields = {
+                "frame_id", "selected_sheet", "yaw0_sheet",
+                "motion_qualification",
+            }
             if (
                 not isinstance(place_id, str) or not SAFE_ID.fullmatch(place_id)
                 or not isinstance(binding, Mapping)
-                or set(binding) != {
-                    "frame_id", "selected_sheet", "yaw0_sheet",
-                    "motion_qualification",
+                or frozenset(binding) not in {
+                    frozenset(binding_fields),
+                    frozenset(binding_fields | {"region_binding"}),
                 }
                 or not isinstance(binding["frame_id"], str)
                 or not SAFE_ID.fullmatch(binding["frame_id"])
@@ -1655,6 +1673,13 @@ def build_physical_operator_console(
                 raise ContractError("PHYSICAL_CONSOLE_WORKSPACE_BINDING")
             resolved_workspace_bindings[place_id] = {
                 "frame_id": binding["frame_id"],
+                "region_binding": validate_region_binding(
+                    binding.get("region_binding", {
+                        "layout_id": None, "layout_digest": None,
+                        "region_id": None,
+                        "physical_binding_status": "NOT_CONFIGURED",
+                    }),
+                ),
                 **{
                     field: _repository_path(repository, binding[field])
                     for field in (
@@ -1663,6 +1688,13 @@ def build_physical_operator_console(
                     )
                 },
             }
+            validate_region_endpoint_authority(
+                repository, place_id=place_id,
+                frame_id=resolved_workspace_bindings[place_id]["frame_id"],
+                region_binding=resolved_workspace_bindings[place_id][
+                    "region_binding"
+                ],
+            )
     if (
         set(resolved_workspace_bindings)
         != {pose["place_id"] for pose in pose_domain}
@@ -1749,9 +1781,11 @@ def build_physical_operator_console(
             for item in ordered_direct_resolved[:requested_count]
         ]
     task_bindings = None
+    episode_instruction_bindings = None
     if ordered_direct_resolved is not None:
         def spatial_binding(item: Mapping[str, Any], role: str) -> dict[str, Any]:
             job = item["normalized_job"]
+            endpoint = resolved_workspace_bindings[job["place_id"]]
             return {
                 "role": role,
                 "workspace_id": job["place_id"],
@@ -1764,6 +1798,7 @@ def build_physical_operator_console(
                 "family_digest": item["calibration"]["document"][
                     "a4_family_digest"
                 ],
+                "region_binding": copy.deepcopy(endpoint["region_binding"]),
             }
 
         task_bindings = []
@@ -1792,6 +1827,10 @@ def build_physical_operator_console(
                     ),
                 )
             )
+        episode_instruction_bindings = [
+            compile_episode_instruction_binding(item, resolved["object_profile"])
+            for item in task_bindings
+        ]
     profile = resolved["collection_profile"]
     if canonical_digest(profile) != canonical_digest(configured_profile):
         raise ContractError("PHYSICAL_CONSOLE_COLLECTION_PROFILE")
@@ -2418,7 +2457,12 @@ def build_physical_operator_console(
             "episode_limit": requested_count,
             "data_disposition": data_disposition,
             **(
-                {"task_binding": copy.deepcopy(task_bindings[order_index])}
+                {
+                    "task_binding": copy.deepcopy(task_bindings[order_index]),
+                    "episode_instruction_binding": copy.deepcopy(
+                        episode_instruction_bindings[order_index]
+                    ),
+                }
                 if task_bindings is not None else {}
             ),
         }
@@ -2438,6 +2482,10 @@ def build_physical_operator_console(
                     "intent": intent,
                 },
                 preapproval_checklist=checklist,
+                episode_instruction_binding=(
+                    None if episode_instruction_bindings is None
+                    else episode_instruction_bindings[order_index]
+                ),
                 campaign_authorization=holder["console"].campaign_authorization,
                 camera_warmup_call=campaign_camera_warmup,
                 candidate_writer_enabled=data_disposition == "PRODUCTION",
@@ -2747,6 +2795,7 @@ def build_physical_operator_console(
         ),
         initial_block_code=initial_block_code,
         task_bindings=task_bindings,
+        episode_instruction_bindings=episode_instruction_bindings,
         campaign_approval_once=True,
         run_id_factory=run_id_for,
         prepare_timeout_s=8.0, close_timeout_s=5.0, clock=clock,
@@ -3545,15 +3594,29 @@ def build_physical_operator_application(
             if not isinstance(match, Mapping):
                 raise ContractError("OPERATOR_APPLICATION_CAMPAIGN_FACTORY")
             endpoint_combinations.append(match)
-        runtime_workspace_bindings = {
-            endpoint["workspace_id"]: {
+        runtime_workspace_bindings = {}
+        for endpoint in endpoint_combinations:
+            domains = [
+                domain for domain in active_catalog()["workspace_domains"]
+                if domain["workspace_id"] == endpoint["workspace_id"]
+                and domain["frame_id"] == endpoint["frame_id"]
+                and domain["object_id"] == endpoint["object_id"]
+            ]
+            if len(domains) != 1:
+                raise ContractError("OPERATOR_APPLICATION_CAMPAIGN_FACTORY")
+            region = domains[0]["coverage_region"]
+            runtime_workspace_bindings[endpoint["workspace_id"]] = {
                 "frame_id": endpoint["frame_id"],
                 "selected_sheet": endpoint["sources"]["selected_sheet"],
                 "yaw0_sheet": endpoint["sources"]["yaw0_sheet"],
                 "motion_qualification": endpoint["sources"]["motion"],
+                "region_binding": {
+                    key: copy.deepcopy(region[key]) for key in (
+                        "layout_id", "layout_digest", "region_id",
+                        "physical_binding_status",
+                    )
+                },
             }
-            for endpoint in endpoint_combinations
-        }
         disposition = (
             "PRODUCTION" if mode == "GENERAL_COLLECTION" else "TEST_ONLY"
         )

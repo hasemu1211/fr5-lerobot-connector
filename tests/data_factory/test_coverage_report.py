@@ -4,6 +4,10 @@ import unittest
 from pathlib import Path
 
 from tools.data_factory.quality.coverage_report import build_and_publish_coverage_report, build_coverage_report, validate_coverage_report, write_coverage_report
+from tools.data_factory.task_recipe import (
+    compile_episode_instruction_binding,
+    compile_task_binding,
+)
 from tools.fr5_data_factory import ContractError, canonical_digest, load_json_strict
 
 
@@ -165,10 +169,31 @@ class CoverageReportTest(unittest.TestCase):
             "operator_summary": {},
         }
         preapproval = {
-            "schema_version": "data_factory.preapproval_evidence.v1", "run_id": "run-1",
+            "schema_version": "data_factory.preapproval_evidence.v2", "run_id": "run-1",
             "resolved_job_digest": resolved_job_digest, "plan_digest": plan_digest,
             "plan_envelope": plan_envelope, "plan_envelope_digest": canonical_digest(plan_envelope),
         }
+        task_binding = compile_task_binding("pickup_e2e", source={
+            "role": "SOURCE", "workspace_id": job["place_id"],
+            "frame_id": job["cell_calibration_id"],
+            "pose": {
+                key: job[key] for key in ("place_id", "yaw_deg", "x_mm", "y_mm")
+            },
+            "sheet_digest": job["sheet_manifest_digest"],
+            "family_digest": canonical_digest("family"),
+            "region_binding": {
+                "layout_id": None, "layout_digest": None, "region_id": None,
+                "physical_binding_status": "NOT_CONFIGURED",
+            },
+        })
+        instruction = compile_episode_instruction_binding(
+            task_binding,
+            {"object_profile_id": job["object_profile_id"], "description": "cube"},
+        )
+        preapproval.update(
+            episode_instruction_binding=instruction,
+            episode_instruction_binding_digest=instruction["binding_digest"],
+        )
         technical = {
             "schema_version": "data_factory.technical_validator_result.v1", "run_id": "run-1",
             "resolved_job_digest": resolved_job_digest, "plan_digest": preapproval["plan_digest"], "dataset_root": "/stored/dataset",

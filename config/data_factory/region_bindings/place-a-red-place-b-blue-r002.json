@@ -1,0 +1,22 @@
+{
+  "schema_version": "data_factory.workspace_region_binding.v1",
+  "layout_id": "a4-place-a-red-place-b-blue-r002",
+  "layout_digest": "sha256:84861f71c045293102f3c743c4d6b058d2c6a910b684c7318ce661b38069a3b3",
+  "physical_binding_status": "PREPARED_NOT_VERIFIED",
+  "bindings": [
+    {
+      "place_id": "PLACE_A",
+      "frame_id": "place-a-yaw0-r003",
+      "region_id": "RED"
+    },
+    {
+      "place_id": "PLACE_B",
+      "frame_id": "place-b-yaw0-r001",
+      "region_id": "BLUE"
+    }
+  ],
+  "verified_at": null,
+  "verified_by": null,
+  "evidence_digest": null,
+  "binding_digest": "sha256:3a3daaa9a3eb49db44fb53dddac899307539d7b37df15fed9c5798d6f230f7b3"
+}

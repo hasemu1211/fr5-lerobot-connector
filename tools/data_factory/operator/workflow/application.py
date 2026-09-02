@@ -25,6 +25,7 @@ from tools.data_factory.operator.catalog import (
     validate_operator_pose,
     validate_operator_selection,
 )
+from tools.data_factory.task_recipe import validate_episode_instruction_binding
 from tools.fr5_data_factory import ContractError, SAFE_ID, canonical_digest
 
 _PROJECTOR_FUNCTIONS = (
@@ -853,6 +854,29 @@ class CollectionOperatorApplication:
                 }
                 destination = planned.get("destination_pose")
                 task_binding = planned.get("task_binding")
+                instruction_binding = planned.get(
+                    "episode_instruction_binding"
+                )
+                if instruction_binding is not None:
+                    try:
+                        checked_instruction = validate_episode_instruction_binding(
+                            instruction_binding,
+                        )
+                    except ContractError as exc:
+                        raise ContractError(
+                            "OPERATOR_APPLICATION_COVERAGE"
+                        ) from exc
+                    if (
+                        not isinstance(task_binding, Mapping)
+                        or checked_instruction["task_binding"] != task_binding
+                    ):
+                        raise ContractError("OPERATOR_APPLICATION_COVERAGE")
+                    projected_condition.update(
+                        task_binding_digest=task_binding["binding_digest"],
+                        instruction=checked_instruction["instruction"],
+                        episode_instruction_binding_digest=
+                        checked_instruction["binding_digest"],
+                    )
                 if destination is not None:
                     if (
                         not isinstance(destination, Mapping)

@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any, Mapping, Sequence
 
 from tools.fr5_data_factory import ContractError, DIGEST, MOTION_QUALIFICATION_KEYS_BY_SCHEMA, SAFE_ID, _cross, _dot, _mul, _sub, _timestamp, _unit, _vec, canonical_digest, load_json_strict, normalize_job_spec, resolve_pose, task_review_checklist_id, validate_rigid_transform
-from tools.data_factory.quality.coverage_report import CANDIDATE_FIELDS, PLAN_BINDING_DIGEST_FIELDS, RESOLVED_INPUT_DIGEST_FIELDS, STORED_EPISODE_FIELDS, TECHNICAL_FIELDS
+from tools.data_factory.quality.coverage_report import CANDIDATE_FIELDS, PLAN_BINDING_DIGEST_FIELDS, RESOLVED_INPUT_DIGEST_FIELDS, STORED_EPISODE_FIELDS, TECHNICAL_FIELDS, validate_preapproval_evidence
 from tools.data_factory.quality.phase_metrics import ATTRIBUTE_SCHEMA, STATUS, quality_attribute
 
 
@@ -71,6 +71,10 @@ def _object_frame_binding(accepted_episode: Mapping[str, Any], resolved_job: Map
     episode_id = accepted_episode["episode_id"]
     job, preapproval, technical, admission = (values[name] for name in ("job_spec", "preapproval_evidence", "technical_validator", "candidate_admission"))
     job = normalize_job_spec(job, now=datetime.min.replace(tzinfo=timezone.utc))
+    try:
+        preapproval = validate_preapproval_evidence(preapproval)
+    except ContractError as exc:
+        raise ContractError("OBJECT_FRAME_ACCEPTED_EPISODE") from exc
     if job["job_id"] != episode_id:
         raise ContractError("OBJECT_FRAME_ACCEPTED_EPISODE")
     envelope = preapproval.get("plan_envelope") if isinstance(preapproval, Mapping) else None
@@ -84,9 +88,7 @@ def _object_frame_binding(accepted_episode: Mapping[str, Any], resolved_job: Map
     )
     motion_keys = MOTION_QUALIFICATION_KEYS_BY_SCHEMA.get(motion_schema)
     if (
-        set(preapproval) != {"schema_version", "run_id", "resolved_job_digest", "plan_digest", "plan_envelope", "plan_envelope_digest"}
-        or preapproval.get("schema_version") != "data_factory.preapproval_evidence.v1"
-        or preapproval.get("run_id") != episode_id
+        preapproval.get("run_id") != episode_id
         or not isinstance(envelope, Mapping)
         or set(envelope) != {"plan", "precommit_safety", "precommit_evidence", "operator_summary"}
         or canonical_digest(envelope) != preapproval.get("plan_envelope_digest")

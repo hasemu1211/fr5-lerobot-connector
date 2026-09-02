@@ -43,7 +43,12 @@ from tools.data_factory.operator.setup.contracts import (
 )
 from tools.data_factory.operator.composition import build_product_fake_operator
 from tools.data_factory.task_recipe import TASK_IDS
-from tools.data_factory.workspace_geometry import rotate_xy, safe_rectangle_bounds
+from tools.data_factory.workspace_geometry import (
+    point_in_convex_polygon,
+    polygon_bounds,
+    rotate_xy,
+    safe_convex_polygon,
+)
 from tools.fr5_data_factory import ContractError, canonical_digest, load_json_strict
 
 
@@ -372,12 +377,15 @@ class OperatorStateSpaceProductTests(unittest.TestCase):
             and item["object_id"] == selection["object_id"]
         )
         region = domain["coverage_region"]
-        x_bounds, y_bounds = safe_rectangle_bounds(
-            page_size_mm=region["page_size_mm"],
-            origin_xy_mm=region["origin_xy_mm"],
-            base_margin_xy_mm=region["base_margin_xy_mm"],
+        safe_polygon = safe_convex_polygon(
+            polygon=region["polygon_local_xy_mm"],
             object_size_xy_mm=region["object_size_xy_mm"],
             uncertainty_mm=region["uncertainty_mm"], yaw_deg=0,
+        )
+        x_bounds, y_bounds = polygon_bounds(safe_polygon)
+        self.assertEqual(
+            (region["region_id"], region["physical_binding_status"]),
+            ("RED", "PREPARED_NOT_VERIFIED"),
         )
         columns, rows = region["strata"]["columns"], region["strata"]["rows"]
 
@@ -407,17 +415,15 @@ class OperatorStateSpaceProductTests(unittest.TestCase):
         self.assertLess(min(prefix_y), y_bounds[0] / 2)
         self.assertGreater(max(prefix_y), y_bounds[1] / 2)
         for item in projected:
-            safe_x, safe_y = safe_rectangle_bounds(
-                page_size_mm=region["page_size_mm"],
-                origin_xy_mm=region["origin_xy_mm"],
-                base_margin_xy_mm=region["base_margin_xy_mm"],
+            safe_polygon = safe_convex_polygon(
+                polygon=region["polygon_local_xy_mm"],
                 object_size_xy_mm=region["object_size_xy_mm"],
                 uncertainty_mm=region["uncertainty_mm"],
                 yaw_deg=item["yaw_deg"],
             )
-            x_mm, y_mm = physical_xy(item)
-            self.assertTrue(safe_x[0] <= x_mm <= safe_x[1])
-            self.assertTrue(safe_y[0] <= y_mm <= safe_y[1])
+            self.assertTrue(point_in_convex_polygon(
+                physical_xy(item), safe_polygon,
+            ))
         self.assertTrue(any(
             item["yaw_deg"] != source["yaw_deg"] for item in projected[15:]
         ))

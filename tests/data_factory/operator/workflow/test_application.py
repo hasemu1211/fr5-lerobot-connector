@@ -15,6 +15,10 @@ from tools.data_factory.operator.catalog import (
     project_assisted_poses,
     validate_operator_selection,
 )
+from tools.data_factory.task_recipe import (
+    compile_episode_instruction_binding,
+    compile_task_binding,
+)
 from tools.fr5_data_factory import ContractError, canonical_digest
 
 
@@ -43,6 +47,7 @@ class StubCampaign:
         self.closed = False
         self.history = []
         self.candidate_pending = False
+        self.campaign_coverage = None
         self.core = OperatorIntentCore(
             session_id=campaign_id,
             projection_call=self.projection,
@@ -108,7 +113,7 @@ class StubCampaign:
 
     def projection(self):
         total = self.draft["requested_count"]
-        return {
+        result = {
             "runtime": {
                 "workflow_state": self.state,
                 "measurement_outcome": "PASS" if self.state == "TERMINAL" else "NOT_MEASURED",
@@ -151,6 +156,9 @@ class StubCampaign:
             "episode_history": copy.deepcopy(self.history),
             "effect_counts": {"robot": 0, "dataset": 0, "training": 0},
         }
+        if self.campaign_coverage is not None:
+            result["campaign_coverage"] = copy.deepcopy(self.campaign_coverage)
+        return result
 
     def close(self):
         self.closed = True
@@ -822,6 +830,12 @@ class CollectionOperatorApplicationTests(unittest.TestCase):
             object_id=changed["object_id"],
             preset_cell_ids=[changed["cell_id"]],
         )
+        domain["coverage_region"].update(
+            layout_id=None,
+            layout_digest=None,
+            region_id=None,
+            physical_binding_status="NOT_CONFIGURED",
+        )
         domain["domain_digest"] = canonical_digest({
             key: value for key, value in domain.items()
             if key != "domain_digest"
@@ -897,6 +911,64 @@ class CollectionOperatorApplicationTests(unittest.TestCase):
             "data_disposition": "TEST_ONLY",
         }, "compile-current-object")
         self.assertEqual(self.campaigns[-1].draft["current_object_pose"], current)
+
+    def test_episode_instruction_binding_reaches_the_web_coverage_projection(self):
+        self.consume("prepare_environment", {}, "prepare-instruction")
+        authoring = self.application.bridge_core.snapshot()["projection"]
+        self.consume("compile_draft", {
+            "draft_id": authoring["draft"]["draft_id"],
+            "data_disposition": "TEST_ONLY",
+        }, "compile-instruction")
+        campaign = self.campaigns[-1]
+        object_profile = {
+            "object_profile_id": self.selection["object_id"],
+            "description": "24 mm wooden cube",
+        }
+        coverage = []
+        for index in range(campaign.draft["requested_count"]):
+            condition = {
+                "place_id": self.selection["workspace_id"],
+                "yaw_deg": 0.0, "x_mm": float(index), "y_mm": 0.0,
+            }
+            task_binding = compile_task_binding(
+                "pickup_e2e",
+                source={
+                    "role": "SOURCE",
+                    "workspace_id": self.selection["workspace_id"],
+                    "frame_id": self.selection["frame_id"],
+                    "pose": copy.deepcopy(condition),
+                    "sheet_digest": canonical_digest("sheet"),
+                    "family_digest": canonical_digest("family"),
+                    "region_binding": {
+                        "layout_id": None, "layout_digest": None,
+                        "region_id": None,
+                        "physical_binding_status": "NOT_CONFIGURED",
+                    },
+                },
+            )
+            coverage.append({
+                "order_index": index,
+                "robot_start_pose_id": self.selection["start_pose_id"],
+                "coverage_condition": condition,
+                "coverage_condition_digest": canonical_digest(condition),
+                "task_binding": task_binding,
+                "episode_instruction_binding":
+                compile_episode_instruction_binding(
+                    task_binding, object_profile,
+                ),
+            })
+        campaign.campaign_coverage = coverage
+
+        sequence = self.application.bridge_core.snapshot()["projection"][
+            "coverage"
+        ]["sequence"]
+        self.assertEqual(len(sequence), campaign.draft["requested_count"])
+        self.assertTrue(all(
+            item["instruction"] == "pick up the 24 mm wooden cube"
+            and item["episode_instruction_binding_digest"].startswith("sha256:")
+            and item["task_binding_digest"].startswith("sha256:")
+            for item in sequence
+        ))
 
     def test_one_process_runs_terminal_campaign_then_creates_fresh_lineage(self):
         self.consume("prepare_environment", {}, "prepare")

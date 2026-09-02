@@ -31,9 +31,9 @@ direnv exec . python3 tools/a4_place_yaw/generate_place_yaw_a4.py \
 각 JSON `grid_points[].job_pose`가 데이터팩토리에 넣는 `(place_id, yaw_deg, x_mm, y_mm)`이며, `x_mm/y_mm`는 종이에 표시된 `(u,v)`와 같다.
 같은 `place_id`·페이지·격자·기준점·인쇄 보정 계열의 yaw 시트는 동일한 `a4_family_digest`를 가진다.
 
-## RED/BLUE zone 준비물
+## PLACE_A RED / PLACE_B BLUE zone 준비물
 
-다음 명령은 기존 96→100 mm printcal 계산을 그대로 적용해 `zone_artifacts/`에 논리 polygon JSON과 A4 가로 SVG/PDF를 함께 만든다.
+다음 명령은 기존 96→100 mm printcal 계산을 그대로 적용해 `zone_artifacts/`에 workspace-region JSON과 A4 가로 SVG/PDF 두 장을 만든다.
 
 ```bash
 direnv exec . python3 tools/a4_place_yaw/generate_place_yaw_a4.py \
@@ -42,4 +42,12 @@ direnv exec . python3 tools/a4_place_yaw/generate_place_yaw_a4.py \
   --pdf
 ```
 
-이 파일은 인쇄·배치 준비물일 뿐 motion 자격이 아니다. 실제 A4에 포개 고정한 뒤 별도 scene binding이 검증되기 전에는 UI나 학습 문장에 RED/BLUE를 노출하지 않는다. PDF는 설치된 `svglib`/`reportlab`을 우선 사용하고, 없으면 시스템 `libreoffice` 변환기를 사용한다.
+생성물은 다음과 같다.
+
+- `a4_place_a_red_r002_printcal_096_00mm.pdf`: 작업영역 A에 놓는 전체 RED A4
+- `a4_place_b_blue_r002_printcal_096_00mm.pdf`: 작업영역 B에 놓는 전체 BLUE A4
+- `a4_place_a_red_place_b_blue_r002_printcal_096_00mm.json`: 각 `place_id`와 A4-local convex polygon을 묶는 좌표 계약
+
+Web UI 자동 표본기는 이 polygon을 물체 footprint와 해당 frame의 보정 불확실성만큼 안쪽으로 침식한 뒤 5×3 층화 표본을 만든다. polygon 검증·안전 침식·표본 생성은 분리되어 있어 convex polygon 모양을 바꿔도 UI나 motion owner를 바꾸지 않는다.
+
+이 파일들은 인쇄·배치 준비물일 뿐 motion 자격이 아니다. 각 A4를 해당 작업영역에 포개 고정하고 영속 region binding이 검증되기 전에는 학습 문장에 RED/BLUE를 넣지 않는다. PDF는 설치된 `svglib`/`reportlab`을 우선 사용하고, 없으면 시스템 `libreoffice` 변환기를 사용한다.

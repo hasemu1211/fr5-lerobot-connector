@@ -9,6 +9,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
+from tools.data_factory.task_recipe import validate_episode_instruction_binding
 from tools.data_factory_recovery import write_json_atomic
 from tools.fr5_data_factory import ContractArgumentParser, ContractError, DIGEST, SAFE_ID, canonical_digest, load_json_strict, normalize_job_spec, task_review_checklist_id
 
@@ -52,10 +53,49 @@ PLAN_BINDING_DIGEST_FIELDS = frozenset({
     *RESOLVED_INPUT_DIGEST_FIELDS, "robot_description_digest", "moveit_config_digest",
     "planning_scene_digest", "motion_qualification", "home_candidate",
 })
+PREAPPROVAL_V1_FIELDS = frozenset({
+    "schema_version", "run_id", "resolved_job_digest", "plan_digest",
+    "plan_envelope", "plan_envelope_digest",
+})
+PREAPPROVAL_V2_FIELDS = PREAPPROVAL_V1_FIELDS | frozenset({
+    "episode_instruction_binding", "episode_instruction_binding_digest",
+})
 TECHNICAL_FIELDS = frozenset({
     "schema_version", "run_id", "resolved_job_digest", "plan_digest", "dataset_root",
     "expected_fps", "status", "result_digest",
 })
+
+
+def validate_preapproval_evidence(value: object) -> dict[str, Any]:
+    """Accept legacy evidence and validate the optional episode language binding."""
+    if not isinstance(value, Mapping):
+        raise ContractError("PREAPPROVAL_EVIDENCE_SCHEMA")
+    schema = value.get("schema_version")
+    fields = (
+        PREAPPROVAL_V1_FIELDS
+        if schema == "data_factory.preapproval_evidence.v1"
+        else PREAPPROVAL_V2_FIELDS
+        if schema == "data_factory.preapproval_evidence.v2"
+        else frozenset()
+    )
+    if set(value) != fields:
+        raise ContractError("PREAPPROVAL_EVIDENCE_SCHEMA")
+    result = copy.deepcopy(dict(value))
+    if schema == "data_factory.preapproval_evidence.v2":
+        try:
+            instruction = validate_episode_instruction_binding(
+                result["episode_instruction_binding"],
+            )
+        except ContractError as exc:
+            raise ContractError("PREAPPROVAL_EVIDENCE_SCHEMA") from exc
+        if (
+            result["episode_instruction_binding_digest"]
+            != instruction["binding_digest"]
+        ):
+            raise ContractError("PREAPPROVAL_EVIDENCE_SCHEMA")
+    return result
+
+
 CANDIDATE_FIELDS = frozenset({
     "schema_version", "run_id", "operational_gate", "operational_source", "checklist_id",
     "review_context_digest", "semantic_status", "reviewed_by", "reviewed_at", "reason",
@@ -278,7 +318,12 @@ def build_and_publish_coverage_report(
             values[name] = value
 
         job = normalize_job_spec(values["job_spec"], now=datetime.min.replace(tzinfo=timezone.utc))
-        preapproval = values["preapproval_evidence"]
+        try:
+            preapproval = validate_preapproval_evidence(
+                values["preapproval_evidence"],
+            )
+        except ContractError as exc:
+            raise ContractError("COVERAGE_PLAN_EVIDENCE") from exc
         technical = values["technical_validator"]
         admission = values["candidate_admission"]
         envelope = preapproval.get("plan_envelope") if isinstance(preapproval, Mapping) else None
@@ -287,10 +332,7 @@ def build_and_publish_coverage_report(
         precommit = envelope.get("precommit_evidence") if isinstance(envelope, Mapping) else None
         bindings = plan.get("binding_digests") if isinstance(plan, Mapping) else None
         if (
-            not isinstance(preapproval, Mapping)
-            or set(preapproval) != {"schema_version", "run_id", "resolved_job_digest", "plan_digest", "plan_envelope", "plan_envelope_digest"}
-            or preapproval.get("schema_version") != "data_factory.preapproval_evidence.v1"
-            or preapproval.get("run_id") != episode_id
+            preapproval.get("run_id") != episode_id
             or not isinstance(envelope, Mapping)
             or set(envelope) != {"plan", "precommit_safety", "precommit_evidence", "operator_summary"}
             or canonical_digest(envelope) != preapproval.get("plan_envelope_digest")

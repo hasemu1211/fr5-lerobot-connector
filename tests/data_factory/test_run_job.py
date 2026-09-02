@@ -16,6 +16,10 @@ from . import test_one_job as one_job_test
 from tools.data_factory.motion.pickup_executor import PHASES, PickupExecutor
 from tools.data_factory.one_job import JsonlProcess, run_one_job
 from tools.data_factory import run_job
+from tools.data_factory.task_recipe import (
+    compile_episode_instruction_binding,
+    compile_task_binding,
+)
 from tools.data_factory.campaign_authoring import compile_collection_campaign
 from tools.data_factory.campaign_session import CampaignSession
 from tools.data_factory.operator.preview import (
@@ -67,6 +71,118 @@ class Executor:
 
 
 class RunJobTest(unittest.TestCase):
+    def test_episode_instruction_scope_binds_source_destination_and_object(self):
+        family_digest = run_job.canonical_digest("a4-family")
+        object_profile = {
+            "schema_version": "data_factory.object_profile.v2",
+            "object_profile_id": "wood-cube-24mm-r001",
+            "qualification_status": "QUALIFIED",
+            "description": "24 mm wooden cube",
+            "dimensions_mm": [24, 24, 24],
+            "datum": "CENTER",
+        }
+        job = {
+            "task": "pick_place", "robot_system_id": "fr5-lab-a",
+            "operator_or_agent_id": "operator",
+            "instruction": "pick up the 24 mm wooden cube and place it at the destination",
+            "place_id": "PLACE_A", "cell_calibration_id": "place-a-yaw0-r003",
+            "sheet_manifest_digest": run_job.canonical_digest("sheet-a"),
+            "yaw_deg": 0.0, "x_mm": 10.0, "y_mm": -5.0,
+            "object_profile_id": object_profile["object_profile_id"],
+        }
+        validated = runtime_validated(
+            job=job, object_profile=object_profile,
+            calibration={"document": {"a4_family_digest": family_digest}},
+            input_digests={"object_profile": run_job.canonical_digest(object_profile)},
+        )
+
+        def endpoint(role, place_id, frame_id, x_mm, y_mm, region_id):
+            return {
+                "role": role, "workspace_id": place_id, "frame_id": frame_id,
+                "pose": {
+                    "place_id": place_id, "yaw_deg": 0.0,
+                    "x_mm": x_mm, "y_mm": y_mm,
+                },
+                "sheet_digest": (
+                    job["sheet_manifest_digest"]
+                    if role == "SOURCE" else run_job.canonical_digest("sheet-b")
+                ),
+                "family_digest": family_digest,
+                "region_binding": {
+                    "layout_id": "layout-r1",
+                    "layout_digest": run_job.canonical_digest("layout-r1"),
+                    "region_id": region_id,
+                    "physical_binding_status": "PREPARED_NOT_VERIFIED",
+                },
+            }
+
+        task_binding = compile_task_binding(
+            "pick_place",
+            source=endpoint(
+                "SOURCE", "PLACE_A", "place-a-yaw0-r003", 10.0, -5.0, "RED",
+            ),
+            destination=endpoint(
+                "DESTINATION", "PLACE_B", "place-b-yaw0-r001", -20.0, 15.0,
+                "BLUE",
+            ),
+        )
+        instruction_binding = compile_episode_instruction_binding(
+            task_binding, object_profile,
+        )
+        checklist = {
+            "task_binding": task_binding,
+            "episode_instruction_binding": instruction_binding,
+        }
+        scene = {
+            **SCENE,
+            "release_slot": {
+                "pose": {
+                    "place_id": "PLACE_B", "yaw_deg": 0.0,
+                    "x_mm": -20.0, "y_mm": 15.0,
+                },
+            },
+        }
+        self.assertEqual(
+            run_job._validate_episode_instruction_scope(
+                instruction_binding, validated=validated,
+                scene_binding=scene, preapproval_checklist=checklist,
+                repository_root=Path(__file__).resolve().parents[2],
+            ),
+            instruction_binding,
+        )
+
+        for label, mutate in (
+            (
+                "source",
+                lambda value: value["task_binding"]["spatial_bindings"][0]["pose"].update(x_mm=11.0),
+            ),
+            (
+                "destination",
+                lambda value: value["task_binding"]["spatial_bindings"][1]["pose"].update(y_mm=16.0),
+            ),
+            (
+                "instruction",
+                lambda value: value.update(instruction="move it somewhere"),
+            ),
+        ):
+            with self.subTest(label=label):
+                tampered = copy.deepcopy(instruction_binding)
+                mutate(tampered)
+                tampered["binding_digest"] = run_job.canonical_digest({
+                    key: value for key, value in tampered.items()
+                    if key != "binding_digest"
+                })
+                with self.assertRaises(run_job.ContractError):
+                    run_job._validate_episode_instruction_scope(
+                        tampered, validated=validated,
+                        scene_binding=scene,
+                        preapproval_checklist={
+                            "task_binding": tampered["task_binding"],
+                            "episode_instruction_binding": tampered,
+                        },
+                        repository_root=Path(__file__).resolve().parents[2],
+                    )
+
     def test_test_only_terminal_projection_binds_readiness_and_keeps_semantics_separate(self):
         profile_digest = "sha256:" + "7" * 64
         readiness = {

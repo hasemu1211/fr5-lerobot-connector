@@ -126,6 +126,8 @@ class DataFactoryOperatorUiStaticTest(unittest.TestCase):
             "위로 후퇴하고 HOME",
             "QUALIFIED_PROFILE",
             "검증된 등록 프로필",
+            "VLA 지시문",
+            "episode_instruction_binding_digest",
         ):
             self.assertIn(marker, self.html + self.js)
 

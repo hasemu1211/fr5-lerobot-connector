@@ -17,6 +17,10 @@ from tools.data_factory.episode_ledger import (
     validate_episode_ledger,
     validate_episode_state,
 )
+from tools.data_factory.task_recipe import (
+    compile_episode_instruction_binding,
+    compile_task_binding,
+)
 from tools.fr5_data_factory import ContractError, canonical_digest
 
 
@@ -348,6 +352,57 @@ class EpisodeLedgerTest(unittest.TestCase):
             b"shared shard may append without a whole-file locator hash",
         )
         self.assertEqual(ledger, validate_episode_ledger(ledger))
+
+    def test_plan_artifact_preserves_the_episode_instruction_binding(self) -> None:
+        artifacts = self._artifacts(suffix="instruction-v2")
+        plan = json.loads(
+            Path(artifacts["plan"]["artifact_path"]).read_text(encoding="utf-8")
+        )
+        object_profile = {
+            "object_profile_id": "wood-cube-24mm-r001",
+            "description": "24 mm wooden cube",
+        }
+        source = {
+            "role": "SOURCE", "workspace_id": "PLACE_A",
+            "frame_id": "place-a-yaw0-r003",
+            "pose": {
+                "place_id": "PLACE_A", "yaw_deg": 0.0,
+                "x_mm": 0.0, "y_mm": 0.0,
+            },
+            "sheet_digest": digest("sheet-a"),
+            "family_digest": digest("family-a"),
+            "region_binding": {
+                "layout_id": None, "layout_digest": None, "region_id": None,
+                "physical_binding_status": "NOT_CONFIGURED",
+            },
+        }
+        instruction = compile_episode_instruction_binding(
+            compile_task_binding("pickup_e2e", source=source), object_profile,
+        )
+        plan.update(
+            schema_version="data_factory.preapproval_evidence.v2",
+            episode_instruction_binding=instruction,
+            episode_instruction_binding_digest=instruction["binding_digest"],
+        )
+        artifacts["plan"] = self._json("plan-instruction-v2.json", plan)
+        ledger = self._compile(artifacts)
+        self.assertEqual(ledger, validate_episode_ledger(ledger))
+
+        forged = copy.deepcopy(plan)
+        forged["episode_instruction_binding"]["instruction"] = "unbound label"
+        forged["episode_instruction_binding"]["binding_digest"] = digest({
+            key: value
+            for key, value in forged["episode_instruction_binding"].items()
+            if key != "binding_digest"
+        })
+        forged["episode_instruction_binding_digest"] = forged[
+            "episode_instruction_binding"
+        ]["binding_digest"]
+        artifacts["plan"] = self._json("plan-instruction-forged.json", forged)
+        with self.assertRaisesRegex(
+            ContractError, "EPISODE_LEDGER_PLAN_INSTRUCTION",
+        ):
+            self._compile(artifacts)
 
     def test_production_runtime_binding_is_scene_observed_and_fail_closed(self) -> None:
         def runtime_artifacts(

@@ -21,7 +21,7 @@
 5. N회 pick-place는 N+1개의 ordered object pose를 만든다. 직전 DESTINATION은 다음 episode의 SOURCE다.
 6. 각 SOURCE와 DESTINATION은 자기 작업영역의 frame revision, A4 sheet, motion qualification과 안전 경계를 사용한다.
 7. 자동·직접 계획, scene/cell CAS, plan digest, recorder transaction, technical admission과 HOME 복구를 기존 단일 lifecycle owner 안에서 유지한다.
-8. 동일 A4 좌표에 포개 쓰는 red/blue zone layout을 시각 파일과 polygon JSON으로 미리 만든다. 첫 A↔B 실물 시험에서는 zone을 실행 조건으로 사용하지 않는다.
+8. PLACE_A에는 전체 RED A4, PLACE_B에는 전체 BLUE A4를 놓는 workspace-region layout을 시각 파일과 polygon JSON으로 만든다. 각 polygon은 자기 workspace/frame의 local pose와 함께 추적하며, 물리 배치 검증 전에는 zone을 실행·언어 조건으로 사용하지 않는다.
 9. task recipe와 endpoint 의미로부터 VLA instruction을 생성하되, 실제로 결속·배치된 zone만 문장에 넣는다.
 10. 자동 검증 뒤 `TEST_COLLECTION`에서 accepted pickup 10 episode와 accepted pick-place 10 episode를 확보한다.
 11. 각 task의 실패·보류 episode는 성공 수에서 제외하고, 정해진 실패 예산 안에서만 fresh plan으로 대체한다.
@@ -152,22 +152,22 @@ release/reset → vertical retreat → SAFE_POSE_PTP(HOME) terminal
 
 ### 3.3 red/blue zone 준비와 실행 경계
 
-red/blue zone은 이번 범위에서 artifact와 순수 검증까지 준비하되, 최초 A↔B 실물 시험의 motion domain으로는 켜지 않는다. 작업영역 내부 region identity는 다음처럼 표현한다.
+red/blue zone은 이번 범위에서 artifact와 순수 검증까지 준비하되, 물리 배치가 검증되기 전에는 A↔B 실물 시험의 의미 조건으로 켜지 않는다. region identity는 다음처럼 표현한다.
 
 ```text
 workspace_id + frame_id + region_id + local pose
 ```
 
-region은 동일한 A4 frame을 공유하며 bounds/coverage 정책만 좁힌다. zone마다 새 workspace나 calibration revision을 만들지 않는다. 이번 구현은 A/B 문자열을 motion core에 하드코딩하지 않고 ordered workspace cycle을 사용해 이 확장을 막지 않는다.
+PLACE_A의 RED와 PLACE_B의 BLUE는 서로 다른 workspace/frame을 사용한다. zone마다 새 workspace나 calibration revision을 만들지 않고 기존 A/B frame에 layout digest와 region ID를 결속한다. 이번 구현은 색 문자열을 motion core에 하드코딩하지 않고 ordered workspace cycle과 task binding을 사용한다.
 
 최소 artifact는 다음 두 표현이 같은 polygon을 공유한다.
 
-- 사람이 인쇄·배치할 A4 가로 SVG/PDF: 흰 여백 위에 `RED`와 `BLUE` 영역, 경계선과 이름만 명료하게 표시한다. 격자·좌표 숫자·작업 안내는 넣지 않는다.
-- 소프트웨어 JSON: `schema_version`, `layout_id`, A4 `page_mm`, 중심 `origin_xy_mm`, ordered `regions[{region_id, display_name, color, polygon_local_xy_mm}]`, `layout_digest`만 둔다.
+- 사람이 인쇄·배치할 A4 가로 SVG/PDF 두 장: PLACE_A 전체 `RED`, PLACE_B 전체 `BLUE`의 경계선과 이름만 표시한다. 격자·좌표 숫자·작업 안내는 넣지 않는다.
+- 소프트웨어 JSON: `schema_version`, `layout_id`, A4 `page_mm`, 중심 `origin_xy_mm`, ordered `workspace_regions[{place_id, region_id, display_name, color, polygon_local_xy_mm}]`, `layout_digest`를 둔다.
 
-초기 layout은 A4의 현행 printable rectangle을 중심 X=0에서 좌우로 나누고 `RED=x<0`, `BLUE=x>0`을 기본값으로 고정한다. polygon은 서로 겹치지 않고 경계만 공유한다. 24 mm cube의 실제 center sampling domain은 polygon 자체를 다시 쓰지 않고 기존 object footprint와 calibration uncertainty로 안쪽 침식해 계산한다. 따라서 시각 polygon과 collision/sampling 안전 여백을 혼동하지 않는다. polygon winding, self-intersection, page bounds, overlap과 digest tamper를 순수 validator로 검사한다.
+초기 layout은 각 A4의 현행 printable rectangle 전체를 사용한다. PLACE_A polygon은 RED, PLACE_B polygon은 BLUE이며 서로 다른 frame에 있으므로 한 종이를 양분하지 않는다. 24 mm cube의 실제 center sampling domain은 각 polygon을 object footprint와 calibration uncertainty만큼 안쪽으로 침식해 계산한다. polygon 계약은 convex·CCW·page bounds·digest를 검증하고, 안전 침식과 층화 표본은 별도 geometry 책임이 처리한다.
 
-layout 파일은 workspace-independent geometry다. PLACE_A/B는 각자 `workspace_id + frame_id + layout_digest`로 같은 layout을 결속한다. physical overlay가 실제 A4와 정렬됐다는 사람 scene 확인 전에는 region-aware live execution과 region 이름을 포함한 instruction을 허용하지 않는다.
+layout 파일은 A/B workspace-region mapping과 각 A4-local polygon을 함께 담는다. 영속 binding은 `workspace_id + frame_id + region_id + layout_digest`를 결속한다. physical overlay가 실제 A4와 정렬됐다는 설치 evidence 전에는 상태를 `PREPARED_NOT_VERIFIED`로 유지하고 region 이름을 포함한 instruction을 허용하지 않는다.
 
 ### 3.4 VLA 텍스트 계약
 
@@ -176,7 +176,8 @@ layout 파일은 workspace-independent geometry다. PLACE_A/B는 각자 `workspa
 - 현재 무색 A/B 왕복: 기존 canonical 문장 `pick up the 24 mm wooden cube and place it at the destination`을 유지한다. A/B exact route는 task binding이 보존한다.
 - 실제 red/blue overlay가 scene에 결속된 이후: `pick up the 24 mm wooden cube from the red zone and place it in the blue zone` 또는 역방향 문장을 생성한다.
 - `region_id`가 없거나 physical layout 확인이 없으면 zone 문장을 생성하지 않는다.
-- 한 episode의 manifest, LeRobot task field, task binding과 review projection이 같은 instruction과 digest를 가져야 한다.
+- campaign manifest의 fixed instruction은 작업 전체의 일반 가설로 유지한다. A→B/B→A처럼 episode마다 달라지는 문장은 exact task binding과 object profile을 묶은 `episode_instruction_binding`이 소유한다.
+- 한 episode의 plan-review projection, preapproval evidence와 LeRobot task field는 같은 `episode_instruction_binding`의 문장과 digest를 사용해야 한다.
 
 이 준비는 임의 paraphrase 생성이나 별도 language service를 추가하지 않는다. 한 canonical English template만 사용하고 한국어는 operator UI 설명에만 쓴다.
 
@@ -255,9 +256,9 @@ motion program은 SOURCE와 DESTINATION binding digest를 구분해 담는다. d
 
 ### Phase 3.5 — zone artifact와 task text 준비
 
-- 기존 A4 generator의 page/origin/printcal 계산을 그대로 호출하는 최소 red/blue layout 생성을 추가하고 JSON/SVG/PDF를 함께 만든다.
-- 생성물의 polygon JSON과 SVG geometry가 동일 입력에서 파생되게 한다.
-- region layout validator를 순수 테스트한다. object-safe center domain은 실제 overlay가 scene에 결속될 때 기존 `workspace_geometry.safe_rectangle_bounds`의 object footprint·calibration uncertainty 계산으로 region rectangle을 안쪽 침식한다. 이번 비활성 artifact 단계에는 사용되지 않는 두 번째 geometry 구현을 만들지 않는다.
+- 기존 A4 generator의 page/origin/printcal 계산을 그대로 호출해 A용 RED와 B용 BLUE JSON/SVG/PDF를 만든다.
+- 두 시각물의 polygon geometry와 workspace-region JSON이 하나의 순수 layout contract에서 파생되게 한다.
+- region layout validator는 convex·CCW·page bounds·digest를 검사한다. object-safe center domain은 `workspace_geometry.safe_convex_polygon`이 물체 footprint와 calibration uncertainty만큼 polygon을 안쪽 침식하고, 별도 sampler가 그 결과만 사용한다.
 - task instruction resolver가 no-region legacy 문장과 exact red↔blue 문장을 결정론적으로 생성하게 한다.
 - UI에는 live-eligible region binding이 생기기 전까지 zone selector를 노출하지 않는다.
 
@@ -275,7 +276,7 @@ motion program은 SOURCE와 DESTINATION binding digest를 구분해 담는다. d
 8. UI에서 frame selector가 보이지 않고 작업영역 selector가 수집 범위 안에 있다.
 9. focused unit/UI tests와 전체 `unittest discover -s tests`가 통과한다.
 10. `git diff --check`, docs governance와 `mex check`가 통과한다.
-11. zone JSON/SVG가 같은 A4-local polygon을 사용하고, 기존 96→100 mm printcal 계산을 변경 없이 재사용한다.
+11. A RED/B BLUE SVG가 workspace-region JSON의 각 A4-local polygon을 사용하고, 기존 96→100 mm printcal 계산을 변경 없이 재사용한다.
 12. region binding이 없는 run은 zone 문구를 만들지 않고, exact red/blue binding만 정해진 VLA 문구를 만든다.
 13. pickup과 pick-place 모두 episode마다 terminal HOME 뒤에만 다음 episode dispatch가 일어난다.
 14. status refresh가 workspace/task selection과 review reason 입력을 초기화하지 않는다.
@@ -305,10 +306,26 @@ motion program은 SOURCE와 DESTINATION binding digest를 구분해 담는다. d
 - 결정: 품질 기준·표본 주기·writer queue·lifecycle barrier는 유지하고, lock 안에서는 표본 여부와 frame 참조만 정한 뒤 실제 image-quality 계산을 lock 밖에서 수행한다. 새 queue, worker나 readiness 예외를 만들지 않는다.
 - 변경: `_write_frame`의 image-quality 계산을 alignment lock 밖으로 옮기고 lock 비점유 회귀 테스트를 추가했다. 이후 긴 pick-place 7회에서 같은 recorder 경로를 연속 사용했다.
 - 검증: 전체 `python3 -m unittest discover -s tests` 660개가 통과했다. accepted inventory 19개의 실제 dataset을 `scripts/validate_dataset.sh --expected-fps 30 --require-hil-motion`으로 각각 다시 열어 Parquet, episode/task/frame index, 7D action/state, provenance, 양쪽 MP4 전체 frame 수와 RGB decode를 검증했다. 합계 16,233 frame, episode당 510–1,326 frame, effective 30.00003 Hz, long gap 0, writer queue drop 0, alignment failure 0, queue high-water 최대 3, sync p95 최대 17.79 ms였다.
-- 산출물·지식 QA: red/blue zone을 임시 경로에 다시 생성했을 때 JSON·SVG는 byte 단위로 일치했고, LibreOffice PDF의 생성 시각 metadata만 달랐으며 150 dpi render는 byte 단위로 일치했다. docs-governance 구조 검사는 진단 0건이었고, 계획서의 목록 비중은 실행·합격·중단 체크리스트 책임 때문에 유지했다. `mex check`는 drift 100/100, 0 error·warning·info였고 `git diff --check`와 JavaScript syntax 검사도 통과했다.
+- 산출물 정정: 당시 생성한 r001은 한 A4를 RED/BLUE로 양분해 사용자 의도와 달랐으므로 폐기 대상이다. r002는 PLACE_A 전체 RED와 PLACE_B 전체 BLUE를 독립 파일로 만들고 workspace/frame/region/digest 계약으로 교체한다.
 - 정성검토: pickup A/B 각 5개와 pick-place A→B 5개·B→A 4개를 양쪽 camera의 대표 시퀀스와 phase/terminal evidence로 확인해 기존 candidate CAS를 `PASS`로 확정했다. wrist clipping 최대 21.58%인 pickup 한 회차는 경고가 있었지만 접촉·물체·동작이 식별되고 전체 decode와 기술 기준을 통과했다. 놓기 직후의 미세한 마찰·정착은 허용하며 지속 부착이나 다음 SOURCE를 훼손하는 이동은 관찰되지 않았다.
 - 중단 evidence: 다음 B→A 회차는 첫 시도에서 recorder readiness alignment가 motion 전에 fail-close했고, fresh plan의 재시도는 camera warm-up에서 motion 전에 멈췄다. clean process-group restart 뒤에도 UP은 약 29.98 Hz였지만 어두운 WRIST는 auto-exposure로 약 8.33 Hz까지 낮아졌다. 직접 frame 평균 밝기는 UP 7.76/255, WRIST 1.12/255로 실내 조명 소등과 일치했다. 이를 transport/frame-drop으로 오진하거나 FPS gate를 낮추지 않았다.
 - 남은 위험: 로봇은 HOME, gripper open이고 물체는 PLACE_B `(x=109.0783614056 mm, y=-71.3425260027 mm, yaw=0°)`에 있다. 조명이 돌아오고 기존 camera warm-up이 통과하면 이 exact SOURCE에서 PLACE_A CENTER로 B→A 한 회차만 fresh plan으로 수행·검토하면 물리 목표가 20/20이 된다.
+
+#### Checkpoint 4 — A/B 독립 region과 polygon 책임 분리
+
+- 관찰: 폐기 대상 r001은 한 A4를 RED/BLUE로 반분할했고, 기존 assisted sampler는 직사각형 bounds에 직접 결속되어 future polygon 변경과 시각 region 의미를 분리하지 못했다.
+- 결정: PLACE_A 전체 RED와 PLACE_B 전체 BLUE를 서로 다른 workspace/frame의 독립 A4로 정의한다. 시각 polygon, 물체·calibration 안전 침식, 층화 표본, 물리 설치 binding과 VLA 문장을 각각 기존 책임 owner에 둔다.
+- 변경: r002 layout JSON과 A/B별 SVG/PDF를 한 순수 layout contract에서 생성하고, 잘못된 r001 산출물 세 개를 제거했다. catalog는 convex polygon을 24 mm object footprint와 현행 calibration uncertainty로 침식한 뒤 5×3 progressive spread를 생성한다. task binding은 layout/region/status를 보존하고 exact `VERIFIED` 양쪽 endpoint에서만 red→blue 또는 blue→red 문장을 해석한다.
+- 검증: 새 JSON/SVG는 반복 생성 시 byte-for-byte 동일했고 두 PDF는 A4 landscape 한 페이지로 렌더링됐다. geometry/catalog/task binding/registry/UI projection 회귀와 전체 `python3 -m unittest discover -s tests` 665개가 통과했다.
+- 남은 위험: r002 두 장의 실제 A/B 고정·정렬 evidence가 아직 없으므로 binding은 `PREPARED_NOT_VERIFIED`다. 이 상태에서는 zone 문장을 레코더에 활성화하지 않는다. 물리 배치 확인 뒤 exact binding을 승격하고 episode instruction·preapproval·LeRobot task·review projection의 동일성을 검증해야 한다.
+
+#### Checkpoint 5 — episode instruction과 recorder 결속
+
+- 관찰: `task_binding_instruction()`은 VERIFIED A→B/B→A 문장을 계산했지만 production caller가 없었고, recorder는 campaign-level generic JobSpec instruction만 받았다. fixed manifest 하나로 교대 방향 두 문장을 표현하려 하면 campaign 가설과 episode label 책임이 섞인다.
+- 결정: generic JobSpec/manifest는 고정 motion hypothesis로 유지한다. episode별 SOURCE/DESTINATION task binding과 exact object profile을 `episode_instruction_binding.v1`로 묶고, 이를 plan review·승인 evidence·recorder task에 한 번만 전달한다. PREPARED endpoint는 계속 generic 문장을 사용한다.
+- 변경: composition이 episode instruction binding을 만들고 Web UI coverage와 site checklist에 투영한다. `run_live`는 source job, release slot, object profile, persisted VERIFIED region binding과 checklist를 실행 side effect 전에 대조하고, 통과한 문장만 recorder `--task`로 넘긴다. preapproval evidence v2가 exact binding을 보존하며 recorder·coverage report·episode report·ledger는 v1을 유지하면서 v2를 추가 수용한다.
+- 검증: PREPARED generic, VERIFIED red→blue/blue→red, object/source/destination/instruction 변조, persisted binding 위장, Web UI projection, legacy/v2 evidence와 recorder transaction을 focused regression으로 검사했다. 전체 repository unittest 670개, operator UI fixture 10개, JavaScript 구문, 두 PDF의 one-page A4 landscape 규격, `mex check` 100/100이 통과했다.
+- 남은 위험: 현행 r002 binding은 계속 `PREPARED_NOT_VERIFIED`이므로 현재 실물 수집은 generic destination 문장을 기록한다. 실제 두 출력물을 A/B에 고정·정렬하고 evidence를 등록하기 전에는 color-direction 문장이 활성화되지 않는다.
 
 ## 6. 실물 검증
 
@@ -379,7 +396,7 @@ pickup accepted 10개와 pick-place accepted 10개가 각각 다음을 모두 �
 - phase event가 task recipe 순서·시각과 일치하고 중간의 비자연스러운 장시간 공백이 없음
 - 두 camera의 row/frame/timestamp, action/state alignment와 queue drop이 기존 technical validator를 통과함
 - episode가 격리 TEST_COLLECTION root에 durable하게 commit되고, 실행에 사용한 LeRobot version으로 다시 열어 episode/task/frame index와 두 camera video를 decode할 수 있음
-- canonical VLA instruction, task binding, manifest와 review projection이 동일함
+- canonical VLA instruction, episode task binding, preapproval evidence, recorder task와 review projection이 동일함; campaign manifest의 generic fixed hypothesis와 역할이 충돌하지 않음
 - 제가 양쪽 camera의 시작, pregrasp, close, lift, destination release/reset, retreat와 terminal 구간 및 전체 영상 연속성을 직접 확인함
 - AI-assisted 또는 그에 준하는 영상 검토가 잘못된 집기·놓기, 지속적인 물체 부착/유의미한 끌림, 과도한 가림·흐림, 비정상 정지와 instruction 불일치를 발견하지 않음
 - 기존 disposition의 학습 후보에 해당하고 보류/제외 사유가 없음

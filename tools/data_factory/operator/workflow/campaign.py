@@ -38,7 +38,10 @@ from tools.data_factory.operator.workflow.intents import (
 )
 from tools.data_factory.quality.coverage_report import build_coverage_report
 from tools.data_factory import run_job
-from tools.data_factory.task_recipe import validate_task_binding
+from tools.data_factory.task_recipe import (
+    validate_episode_instruction_binding,
+    validate_task_binding,
+)
 from tools.data_factory_recovery import write_json_atomic
 from tools.fr5_data_factory import (
     ContractError,
@@ -834,6 +837,7 @@ class OperatorConsole:
         gripper_setup_request: Mapping[str, Any] | None = None,
         gripper_setup_resolution_call: Callable[[Mapping[str, Any]], Mapping[str, Any]] | None = None,
         task_bindings: Sequence[Mapping[str, Any]] | None = None,
+        episode_instruction_bindings: Sequence[Mapping[str, Any]] | None = None,
         initial_block_code: str | None = None,
         campaign_approval_once: bool = False,
         run_id_factory: Callable[[int], str] | None = None,
@@ -938,6 +942,8 @@ class OperatorConsole:
             raise ContractError("OPERATOR_CONSOLE_CAMPAIGN_OPERATOR")
         if task_bindings is None:
             self._task_bindings = None
+            if episode_instruction_bindings is not None:
+                raise ContractError("OPERATOR_CONSOLE_TASK_BINDING")
         else:
             self._task_bindings = [
                 validate_task_binding(item) for item in task_bindings
@@ -949,6 +955,26 @@ class OperatorConsole:
                     item["task_id"]
                     != self.campaign_operator.hypothesis["fixed_contract"]["task"]
                     for item in self._task_bindings
+                )
+            ):
+                raise ContractError("OPERATOR_CONSOLE_TASK_BINDING")
+        if episode_instruction_bindings is None:
+            self._episode_instruction_bindings = None
+        else:
+            self._episode_instruction_bindings = [
+                validate_episode_instruction_binding(item)
+                for item in episode_instruction_bindings
+            ]
+            if (
+                self._task_bindings is None
+                or len(self._episode_instruction_bindings)
+                != len(self._task_bindings)
+                or any(
+                    instruction["task_binding"] != task_binding
+                    for instruction, task_binding in zip(
+                        self._episode_instruction_bindings,
+                        self._task_bindings,
+                    )
                 )
             ):
                 raise ContractError("OPERATOR_CONSOLE_TASK_BINDING")
@@ -1105,6 +1131,11 @@ class OperatorConsole:
                 ):
                     raise ContractError("OPERATOR_CONSOLE_TASK_BINDING")
                 projected["task_binding"] = copy.deepcopy(binding)
+                if self._episode_instruction_bindings is None:
+                    raise ContractError("OPERATOR_CONSOLE_TASK_BINDING")
+                projected["episode_instruction_binding"] = copy.deepcopy(
+                    self._episode_instruction_bindings[index]
+                )
                 destination = next((
                     item for item in binding["spatial_bindings"]
                     if item["role"] == "DESTINATION"

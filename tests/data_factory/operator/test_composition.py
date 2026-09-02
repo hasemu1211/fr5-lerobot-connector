@@ -1521,6 +1521,24 @@ feedback:
                         "data_disposition": "TEST_ONLY",
                     }, "compile-cross-workspace-r001",
                 ))
+                coverage = console.bridge_core.snapshot()["projection"][
+                    "campaign_coverage"
+                ]
+                self.assertEqual(
+                    [
+                        item["episode_instruction_binding"]["instruction"]
+                        for item in coverage
+                    ],
+                    [
+                        "pick up the 24 mm wooden cube and place it at the destination",
+                        "pick up the 24 mm wooden cube and place it at the destination",
+                    ],
+                )
+                self.assertTrue(all(
+                    item["episode_instruction_binding"]["task_binding"]
+                    == item["task_binding"]
+                    for item in coverage
+                ))
                 hypothesis = console.campaign_operator.hypothesis
                 manifest = console.campaign_operator.manifest
                 self.assertEqual(

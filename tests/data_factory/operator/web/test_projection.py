@@ -63,19 +63,30 @@ class OperatorProjectionTests(unittest.TestCase):
         )
         self.assertEqual(domain["object_id"], "wood-cube-25mm-r001")
         self.assertGreater(domain["x_mm"]["maximum"], 150)
+        region = domain["coverage_region"]
         self.assertEqual(
-            domain["coverage_region"],
             {
-                "shape": "RECTANGLE",
-                "page_size_mm": [297.0, 210.0],
-                "origin_xy_mm": [148.5, 105.0],
-                "base_margin_xy_mm": [15.0, 20.0],
+                key: region[key] for key in (
+                    "shape", "layout_id", "region_id",
+                    "physical_binding_status", "object_size_xy_mm",
+                    "uncertainty_mm", "strata", "coordinate_contract",
+                )
+            },
+            {
+                "shape": "CONVEX_POLYGON",
+                "layout_id": "a4-place-a-red-place-b-blue-r002",
+                "region_id": "RED",
+                "physical_binding_status": "PREPARED_NOT_VERIFIED",
                 "object_size_xy_mm": [25.0, 25.0],
                 "uncertainty_mm": 16.0,
                 "strata": {"columns": 5, "rows": 3},
                 "coordinate_contract": "SHEET_XY_EQUALS_RZ_YAW_TIMES_LOCAL_XY",
             },
         )
+        self.assertEqual(region["polygon_local_xy_mm"], [
+            [-133.5, -85.0], [133.5, -85.0],
+            [133.5, 85.0], [-133.5, 85.0],
+        ])
         calibration = load_json_strict(
             ROOT / "config/data_factory/cells/place-a-yaw0-r002.json",
         )

@@ -47,10 +47,17 @@ from tools.data_factory.operator.setup.contracts import (
     validate_test_only_planned_start,
     validate_test_only_root_binding,
 )
+from tools.data_factory.operator.registries.region import (
+    validate_region_endpoint_authority,
+)
 from tools.data_factory.resource_usage import ResourceMonitor
 from tools.data_factory_recovery import write_json_atomic
 from tools.data_factory.scene_state import SceneStateStore, release_slot
-from tools.data_factory.task_recipe import TASK_IDS, get_task_recipe
+from tools.data_factory.task_recipe import (
+    TASK_IDS,
+    get_task_recipe,
+    validate_episode_instruction_binding,
+)
 from tools.fr5_data_factory import (
     COLLECTION_PROFILE_V2_KEYS,
     ContractArgumentParser,
@@ -926,7 +933,9 @@ def _prepare_run_dir(payload):
     return run_dir
 
 
-def _write_preapproval_evidence(payload, validated, planned):
+def _write_preapproval_evidence(
+    payload, validated, planned, episode_instruction_binding=None,
+):
     """Persist exactly the executor envelope that the human is about to approve."""
     envelope = planned.get("plan_envelope") if isinstance(planned, dict) else None
     if not isinstance(envelope, dict) or set(envelope) != {"plan", "precommit_safety", "precommit_evidence", "operator_summary"}:
@@ -970,8 +979,91 @@ def _write_preapproval_evidence(payload, validated, planned):
         "plan_envelope": copy.deepcopy(envelope),
         "plan_envelope_digest": canonical_digest(envelope),
     }
+    if episode_instruction_binding is not None:
+        checked_instruction = validate_episode_instruction_binding(
+            episode_instruction_binding,
+            object_profile=validated.get("object_profile"),
+        )
+        evidence.update(
+            schema_version="data_factory.preapproval_evidence.v2",
+            episode_instruction_binding=checked_instruction,
+            episode_instruction_binding_digest=checked_instruction[
+                "binding_digest"
+            ],
+        )
     write_json_atomic(_run_dir(payload) / "preapproval_evidence.json", evidence)
     return evidence
+
+
+def _validate_episode_instruction_scope(
+    value, *, validated, scene_binding, preapproval_checklist,
+    repository_root,
+):
+    """Close one language label over its resolved source, release, and profile."""
+    try:
+        checked = validate_episode_instruction_binding(
+            value, object_profile=validated["object_profile"],
+        )
+        job = validated["normalized_job"]
+        calibration = validated["calibration"]["document"]
+        task_binding = checked["task_binding"]
+        spatial = task_binding["spatial_bindings"]
+        source = spatial[0]
+        source_pose = source["pose"]
+        source_matches = (
+            task_binding["task_id"] == job["task"]
+            and checked["object_profile_id"] == job["object_profile_id"]
+            and validated["input_digests"]["object_profile"]
+            == checked["object_profile_digest"]
+            and source["role"] == "SOURCE"
+            and source["workspace_id"] == job["place_id"]
+            and source["frame_id"] == job["cell_calibration_id"]
+            and source["sheet_digest"] == job["sheet_manifest_digest"]
+            and source["family_digest"] == calibration["a4_family_digest"]
+            and source_pose == {
+                "place_id": job["place_id"],
+                "yaw_deg": float(job["yaw_deg"]),
+                "x_mm": float(job["x_mm"]),
+                "y_mm": float(job["y_mm"]),
+            }
+        )
+        if not source_matches:
+            raise ContractError("EPISODE_INSTRUCTION_SCOPE")
+        for endpoint in spatial:
+            validate_region_endpoint_authority(
+                repository_root,
+                place_id=endpoint["workspace_id"],
+                frame_id=endpoint["frame_id"],
+                region_binding=endpoint["region_binding"],
+            )
+        release_bindings = spatial[1:]
+        if release_bindings:
+            release_slot_value = scene_binding.get("release_slot")
+            release_pose = (
+                release_slot_value.get("pose")
+                if isinstance(release_slot_value, Mapping) else None
+            )
+            if (
+                len(release_bindings) != 1
+                or not isinstance(release_pose, Mapping)
+                or release_bindings[0]["pose"] != {
+                    "place_id": release_pose.get("place_id"),
+                    "yaw_deg": float(release_pose.get("yaw_deg")),
+                    "x_mm": float(release_pose.get("x_mm")),
+                    "y_mm": float(release_pose.get("y_mm")),
+                }
+            ):
+                raise ContractError("EPISODE_INSTRUCTION_SCOPE")
+        if (
+            not isinstance(preapproval_checklist, Mapping)
+            or preapproval_checklist.get("task_binding") != task_binding
+            or preapproval_checklist.get("episode_instruction_binding")
+            != checked
+        ):
+            raise ContractError("EPISODE_INSTRUCTION_SCOPE")
+        return checked
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ContractError("EPISODE_INSTRUCTION_SCOPE") from exc
 
 
 def _write_validator_reference(payload, validated, plan_digest, profile, technical):
@@ -1570,6 +1662,7 @@ def run_live(payload, cancel, publish, *, resolver=resolve_inputs, executor_fact
              runtime_start_binding=None,
              episode_ledger_context=None,
              preapproval_checklist=None,
+             episode_instruction_binding=None,
              campaign_authorization=None,
              candidate_writer_enabled=True,
              repository_root=ROOT, clock=None):
@@ -1654,6 +1747,15 @@ def run_live(payload, cancel, publish, *, resolver=resolve_inputs, executor_fact
             or not preapproval_checklist
         ):
             raise ContractError("PREAPPROVAL_CHECKLIST_SCOPE")
+        if (
+            (episode_instruction_binding is not None)
+            != (
+                isinstance(preapproval_checklist, Mapping)
+                and "episode_instruction_binding" in preapproval_checklist
+            )
+            or episode_instruction_binding is not None and not bound_runtime
+        ):
+            raise ContractError("EPISODE_INSTRUCTION_SCOPE")
         if bound_runtime and resolver is resolve_inputs:
             validated, program, scene_binding = resolve_inputs(
                 payload,
@@ -1663,6 +1765,16 @@ def run_live(payload, cancel, publish, *, resolver=resolve_inputs, executor_fact
             )
         else:
             validated, program, scene_binding = resolver(payload)
+        checked_episode_instruction = (
+            _validate_episode_instruction_scope(
+                episode_instruction_binding,
+                validated=validated,
+                scene_binding=scene_binding,
+                preapproval_checklist=preapproval_checklist,
+                repository_root=repository_root,
+            )
+            if episode_instruction_binding is not None else None
+        )
         episode_binding = None
         _validate_runtime_collection_binding(validated, program)
         if bound_runtime:
@@ -1793,13 +1905,23 @@ def run_live(payload, cancel, publish, *, resolver=resolve_inputs, executor_fact
                 "runtime_episode_binding_digest": episode_binding["binding_digest"],
                 "runtime_planned_start": copy.deepcopy(planned_start),
             }
+            if checked_episode_instruction is not None:
+                runtime_projection.update({
+                    "episode_instruction": checked_episode_instruction[
+                        "instruction"
+                    ],
+                    "episode_instruction_binding_digest":
+                    checked_episode_instruction["binding_digest"],
+                })
             if test_only:
                 runtime_projection.update({
                     "test_only_episode_binding_digest": episode_binding["binding_digest"],
                     "test_only_planned_start": copy.deepcopy(planned_start),
                 })
         summary = _operator_summary(planned)
-        preapproval_evidence = _write_preapproval_evidence(payload, validated, planned)
+        preapproval_evidence = _write_preapproval_evidence(
+            payload, validated, planned, checked_episode_instruction,
+        )
         if warmup_error is not None:
             if not isinstance(warmup_error, ContractError):
                 raise warmup_error
@@ -1905,6 +2027,10 @@ def run_live(payload, cancel, publish, *, resolver=resolve_inputs, executor_fact
                     "data_disposition": data_disposition,
                     "root_binding_digest": roots["binding_digest"] if bound_runtime else None,
                     "episode_binding": copy.deepcopy(episode_binding),
+                    "episode_instruction_binding_digest": (
+                        None if checked_episode_instruction is None
+                        else checked_episode_instruction["binding_digest"]
+                    ),
                     **({
                         "start_binding_digest": planned_start["start_binding_digest"],
                         "planned_start_evidence": copy.deepcopy(planned_start),
@@ -1959,7 +2085,15 @@ def run_live(payload, cancel, publish, *, resolver=resolve_inputs, executor_fact
         ).start()
         if isinstance(getattr(getattr(executor, "process", None), "pid", None), int):
             resource_monitor.set_pid("executor", executor.process.pid)
-        recorder = recorder_factory(payload, validated["normalized_job"]["instruction"], profile, timeout_s)
+        recorder = recorder_factory(
+            payload,
+            (
+                validated["normalized_job"]["instruction"]
+                if checked_episode_instruction is None
+                else checked_episode_instruction["instruction"]
+            ),
+            profile, timeout_s,
+        )
         if isinstance(getattr(getattr(recorder, "process", None), "pid", None), int):
             resource_monitor.set_pid("recorder", recorder.process.pid)
         job.recorder_call = recorder

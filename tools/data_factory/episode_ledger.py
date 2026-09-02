@@ -14,6 +14,7 @@ from pathlib import PurePosixPath
 from typing import Any, Mapping
 
 from tools.data_factory.quality.coverage_report import CANDIDATE_FIELDS, TECHNICAL_FIELDS
+from tools.data_factory.task_recipe import validate_episode_instruction_binding
 from tools.fr5_data_factory import (
     ContractError, DIGEST, RFC3339, SAFE_ID, TASK_REVIEW_CHECKLIST_IDS,
     canonical_digest, load_json_strict,
@@ -97,6 +98,9 @@ EPISODE_VIDEO_LOCATOR_FIELDS = frozenset({
 PREAPPROVAL_FIELDS = frozenset({
     "schema_version", "run_id", "resolved_job_digest", "plan_digest",
     "plan_envelope", "plan_envelope_digest",
+})
+PREAPPROVAL_V2_FIELDS = PREAPPROVAL_FIELDS | frozenset({
+    "episode_instruction_binding", "episode_instruction_binding_digest",
 })
 PRECOMMIT_SAFETY_FIELDS = frozenset({
     "schema_version", "run_id", "approved_plan_digest", "scene_binding_digest",
@@ -483,13 +487,34 @@ def _runtime_binding(
 def _plan_binding(
     value: object, run_id: str, resolved_job_digest: str,
 ) -> tuple[str, dict[str, Any]]:
-    plan_artifact = _exact(value, PREAPPROVAL_FIELDS, "EPISODE_LEDGER_PLAN_FIELDS")
+    if not isinstance(value, Mapping):
+        raise ContractError("EPISODE_LEDGER_PLAN_FIELDS")
+    schema = value.get("schema_version")
+    fields = (
+        PREAPPROVAL_FIELDS
+        if schema == "data_factory.preapproval_evidence.v1"
+        else PREAPPROVAL_V2_FIELDS
+        if schema == "data_factory.preapproval_evidence.v2"
+        else frozenset()
+    )
+    plan_artifact = _exact(value, fields, "EPISODE_LEDGER_PLAN_FIELDS")
     if (
-        plan_artifact["schema_version"] != "data_factory.preapproval_evidence.v1"
-        or plan_artifact["run_id"] != run_id
+        plan_artifact["run_id"] != run_id
         or plan_artifact["resolved_job_digest"] != resolved_job_digest
     ):
         raise ContractError("EPISODE_LEDGER_PLAN_RUN")
+    if schema == "data_factory.preapproval_evidence.v2":
+        try:
+            instruction = validate_episode_instruction_binding(
+                plan_artifact["episode_instruction_binding"],
+            )
+            if (
+                plan_artifact["episode_instruction_binding_digest"]
+                != instruction["binding_digest"]
+            ):
+                raise ContractError("EPISODE_LEDGER_PLAN_INSTRUCTION")
+        except ContractError as exc:
+            raise ContractError("EPISODE_LEDGER_PLAN_INSTRUCTION") from exc
     envelope = plan_artifact["plan_envelope"]
     if (
         not isinstance(envelope, Mapping)

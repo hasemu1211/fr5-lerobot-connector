@@ -194,11 +194,20 @@ function validateView(value) {
       const destination = item?.destination_pose;
       const sourceEndpoint = route[index];
       const destinationEndpoint = route[index + 1];
+      const instructionFields = [
+        item?.instruction,
+        item?.episode_instruction_binding_digest,
+        item?.task_binding_digest,
+      ];
+      const hasInstruction = instructionFields.some((value) => value !== undefined);
       if (!item || typeof item !== "object" || Array.isArray(item) || item.order_index !== index + 1
           || item.place_id !== sourceEndpoint?.workspace_id
           || item.start_pose_id !== undefined && (typeof item.start_pose_id !== "string" || !item.start_pose_id)
           || ![item.x_mm, item.y_mm, item.yaw_deg].every(Number.isFinite)
           || !DIGEST_PATTERN.test(item.coverage_condition_digest)
+          || hasInstruction && (typeof item.instruction !== "string" || !item.instruction.trim()
+            || !DIGEST_PATTERN.test(item.episode_instruction_binding_digest)
+            || !DIGEST_PATTERN.test(item.task_binding_digest))
           || isPickPlace(view) !== (destination !== undefined)
           || destination !== undefined && (!destination || typeof destination !== "object" || Array.isArray(destination)
             || destination.place_id !== destinationEndpoint?.workspace_id
@@ -901,7 +910,9 @@ function renderReview(view) {
     const route = item.destination_pose
       ? `출발 ${workspaceName(view, item.place_id)} · ${poseText(item)} → 도착 ${workspaceName(view, item.destination_pose.place_id)} · ${poseText(item.destination_pose)}`
       : poseText(item);
-    return `<li><span>${escapeHtml(item.order_index)}</span><strong>${escapeHtml(start + route)}</strong></li>`;
+    const instruction = item.instruction
+      ? `<small>VLA 지시문 · ${escapeHtml(item.instruction)}</small>` : "";
+    return `<li><span>${escapeHtml(item.order_index)}</span><strong>${escapeHtml(start + route)}</strong>${instruction}</li>`;
   }).join("");
   document.querySelector("#review-actions").innerHTML = canIntent("authorize_campaign") ? `<button type="button" data-op="authorize_campaign">${message("action", "authorize_campaign")}</button>` : "";
   document.querySelector("#review-back").disabled = !canIntent("edit_campaign_draft");

@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="297.0mm" height="210.0mm" viewBox="0 0 297.0 210.0" data-place-id="PLACE_A" data-region-id="RED" data-layout-digest="sha256:84861f71c045293102f3c743c4d6b058d2c6a910b684c7318ce661b38069a3b3" data-measured-scale-mm="96" data-content-scale-percent="104.167">
+<rect width="297" height="210" fill="white"/>
+<g transform="translate(148.5 105) scale(1.041666670) translate(-148.5 -105)">
+<polygon points="15,190 282,190 282,20 15,20" fill="#C62828" fill-opacity="0.13" stroke="#C62828" stroke-width="1.2"/>
+<text x="148.5" y="109" font-size="18" fill="#C62828" font-weight="700" text-anchor="middle">RED</text>
+<text x="148.5" y="119" font-size="5" fill="#C62828" font-weight="700" text-anchor="middle">PLACE_A</text>
+</g>
+</svg>

@@ -183,6 +183,7 @@ select:disabled, input:disabled { background: #e9eef0; color: #596872; }
 .review-plan li:last-child { border-bottom: 0; }
 .review-plan li span { color: var(--blue); font: 800 .75rem "SFMono-Regular", Consolas, monospace; }
 .review-plan li strong { font: 750 .8rem "SFMono-Regular", Consolas, monospace; }
+.review-plan li small { grid-column: 2; color: var(--muted); font-size: .72rem; }
 .notice { display: grid; gap: .2rem; margin-top: 1rem; padding: .9rem 1rem; border-left: 5px solid var(--amber); background: var(--amber-soft); }
 .notice span { color: var(--muted); font-size: .8rem; line-height: 1.45; }
 .runtime-content { display: grid; gap: 1rem; }

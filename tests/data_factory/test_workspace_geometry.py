@@ -1,11 +1,19 @@
 import math
 import unittest
 
+from tools.a4_place_yaw.region_layout import (
+    make_red_blue_region_layout,
+    workspace_region,
+)
 from tools.data_factory.workspace_geometry import (
+    point_in_convex_polygon,
+    polygon_bounds,
     progressive_farthest_order,
     rotate_xy,
     rotation_envelope,
+    safe_convex_polygon,
     safe_rectangle_bounds,
+    stratified_convex_polygon_samples,
     stratified_rectangle_samples,
 )
 
@@ -57,6 +65,45 @@ class WorkspaceGeometryTests(unittest.TestCase):
                 seed=0, skip_start_cell=True,
             ),
         )
+
+    def test_workspace_regions_are_independent_and_eroded_before_sampling(self):
+        layout = make_red_blue_region_layout()
+        red = workspace_region(layout, "PLACE_A")
+        blue = workspace_region(layout, "PLACE_B")
+        self.assertEqual((red["region_id"], blue["region_id"]), ("RED", "BLUE"))
+        self.assertEqual(
+            red["polygon_local_xy_mm"], blue["polygon_local_xy_mm"],
+        )
+        safe = safe_convex_polygon(
+            polygon=red["polygon_local_xy_mm"],
+            object_size_xy_mm=(24, 24), uncertainty_mm=16, yaw_deg=0,
+        )
+        self.assertEqual(polygon_bounds(safe), ((-105.5, 105.5), (-57.0, 57.0)))
+        samples = stratified_convex_polygon_samples(
+            polygon=safe, columns=5, rows=3, start_xy=(0, 0),
+            count=14, seed=0, skip_start_cell=True,
+        )
+        self.assertEqual(len({(row, column) for _x, _y, row, column in samples}), 14)
+        self.assertTrue(all(
+            point_in_convex_polygon((x, y), safe)
+            for x, y, _row, _column in samples
+        ))
+
+    def test_convex_polygon_shape_can_change_without_changing_sampler(self):
+        polygon = [(-100, -60), (100, -40), (80, 60), (-90, 70)]
+        safe = safe_convex_polygon(
+            polygon=polygon, object_size_xy_mm=(24, 24),
+            uncertainty_mm=4, yaw_deg=30,
+        )
+        samples = stratified_convex_polygon_samples(
+            polygon=safe, columns=5, rows=3, start_xy=(0, 0),
+            count=15, seed=3,
+        )
+        self.assertGreaterEqual(len(samples), 10)
+        self.assertTrue(all(
+            point_in_convex_polygon((x, y), safe)
+            for x, y, _row, _column in samples
+        ))
 
     def test_invalid_geometry_fails_without_partial_samples(self):
         for call in (

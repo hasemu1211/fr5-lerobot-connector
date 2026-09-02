@@ -1,6 +1,6 @@
 {
-  "schema_version": "a4_region_layout.v1",
-  "layout_id": "a4-red-blue-r001",
+  "schema_version": "a4_workspace_region_layout.v1",
+  "layout_id": "a4-place-a-red-place-b-blue-r002",
   "page_mm": {
     "width": 297.0,
     "height": 210.0
@@ -9,8 +9,9 @@
     148.5,
     105.0
   ],
-  "regions": [
+  "workspace_regions": [
     {
+      "place_id": "PLACE_A",
       "region_id": "RED",
       "display_name": "RED",
       "color": "#C62828",
@@ -20,11 +21,11 @@
           -85.0
         ],
         [
-          0.0,
+          133.5,
           -85.0
         ],
         [
-          0.0,
+          133.5,
           85.0
         ],
         [
@@ -34,12 +35,13 @@
       ]
     },
     {
+      "place_id": "PLACE_B",
       "region_id": "BLUE",
       "display_name": "BLUE",
       "color": "#1565C0",
       "polygon_local_xy_mm": [
         [
-          0.0,
+          -133.5,
           -85.0
         ],
         [
@@ -51,11 +53,11 @@
           85.0
         ],
         [
-          0.0,
+          -133.5,
           85.0
         ]
       ]
     }
   ],
-  "layout_digest": "sha256:301b71229eeada1efce57dde29d1c4417c14cd7444164afda803c42663a157e2"
+  "layout_digest": "sha256:84861f71c045293102f3c743c4d6b058d2c6a910b684c7318ce661b38069a3b3"
 }

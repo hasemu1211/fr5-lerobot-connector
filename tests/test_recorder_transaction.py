@@ -817,7 +817,7 @@ class RecorderTransactionTest(unittest.TestCase):
             run_dir.mkdir(parents=True)
             evidence = {
                 "camera_warmup.json": "data_factory.camera_warmup.v1",
-                "preapproval_evidence.json": "data_factory.preapproval_evidence.v1",
+                "preapproval_evidence.json": "data_factory.preapproval_evidence.v2",
             }
             for name, schema in evidence.items():
                 (run_dir / name).write_text(json.dumps({"schema_version": schema, "run_id": "run-001"}))
