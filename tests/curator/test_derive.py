@@ -4,6 +4,7 @@ from contextlib import ExitStack
 import json
 from pathlib import Path
 import tempfile
+from types import SimpleNamespace
 import unittest
 from unittest import mock
 
@@ -18,7 +19,7 @@ from tools.curator.contracts import (
     tree_snapshot,
     write_json_atomic,
 )
-from tools.curator.derive import derive_dataset
+from tools.curator.derive import _run_existing_validator, _validate_source_contract, derive_dataset
 from tools.curator.verify import (
     create_review_bundle,
     export_reference,
@@ -68,6 +69,8 @@ class DeriveIntegrationTest(unittest.TestCase):
         )
         yy, xx = np.mgrid[:480, :640]
         for index in range(4):
+            if index == 2:
+                writer.save_episode(parallel_encoding=False)
             up = np.stack(
                 ((xx // 4 + index * 2) % 256, (yy // 3 + index) % 256, ((xx + yy) // 6 + index) % 256),
                 axis=-1,
@@ -83,7 +86,11 @@ class DeriveIntegrationTest(unittest.TestCase):
                 "action": action,
                 "observation.images.up": up,
                 "observation.images.wrist": wrist,
-                "task": "move the cube from red to blue",
+                "task": (
+                    "move the cube from red to blue"
+                    if index < 2
+                    else "move the cube from blue to red"
+                ),
             })
         writer.save_episode(parallel_encoding=False)
         writer.finalize()
@@ -124,53 +131,61 @@ class DeriveIntegrationTest(unittest.TestCase):
         self.temporary.cleanup()
 
     def _write_source_evidence(self):
-        quality = {
-            "episode_index": 0,
-            "frames": 4,
-            "target_fps": 30,
-            "effective_fps": 30.0,
-            "interval_max_ms": 1000 / 30,
-            "writer_queue_drops": 0,
-            "alignment_failures": 0,
-            "alignment_failure_sources": {
-                "state": 0, "arm_action": 0, "gripper_action": 0, "transport": 0,
-                "image.up": 0, "image.wrist": 0,
-            },
-            "action_age_max_ms": 1.0,
-            "state_age_max_ms": 1.0,
-            "camera_time_offsets_ms": {"up": 0.0, "wrist": 0.0},
-            "cameras": {
-                camera: {
-                    "age_max_ms": 0.0, "transport_age_max_ms": 1.0, "source_fps": 30.0,
-                    "repeat_ratio": 0.0, "source_gap_max_ms": 1000 / 30,
-                    "color_delta_mean": 20.0, "brightness_mean": 100.0,
-                    "clipping_mean": 0.0, "sharpness_median": 100.0,
-                }
-                for camera in ("up", "wrist")
-            },
-        }
+        qualities = []
+        for episode in range(2):
+            qualities.append({
+                "episode_index": episode,
+                "frames": 2,
+                "target_fps": 30,
+                "effective_fps": 30.0,
+                "interval_max_ms": 1000 / 30,
+                "writer_queue_drops": 0,
+                "alignment_failures": 0,
+                "alignment_failure_sources": {
+                    "state": 0, "arm_action": 0, "gripper_action": 0, "transport": 0,
+                    "image.up": 0, "image.wrist": 0,
+                },
+                "action_age_max_ms": 1.0,
+                "state_age_max_ms": 1.0,
+                "camera_time_offsets_ms": {"up": 0.0, "wrist": 0.0},
+                "cameras": {
+                    camera: {
+                        "age_max_ms": 0.0, "transport_age_max_ms": 1.0, "source_fps": 30.0,
+                        "repeat_ratio": 0.0, "source_gap_max_ms": 1000 / 30,
+                        "color_delta_mean": 0.0, "brightness_mean": 0.0,
+                        "clipping_mean": 1.0, "sharpness_median": 0.0,
+                    }
+                    for camera in ("up", "wrist")
+                },
+                "image_quality_warnings": [
+                    "source pixel warning intentionally stale for curator test"
+                ],
+            })
         (self.source / "meta" / "recording_quality.jsonl").write_text(
-            json.dumps(quality, sort_keys=True) + "\n", encoding="utf-8",
+            "".join(json.dumps(quality, sort_keys=True) + "\n" for quality in qualities),
+            encoding="utf-8",
         )
         provenance = self.source / "meta" / "source_provenance"
         provenance.mkdir()
-        rows = []
-        for index in range(4):
-            target = 100.0 + index / 30
-            rows.append({
-                "frame_index": index,
-                "enqueue_attempt_index": index,
-                "target_ros_s": target,
-                "joint_bracket_ros_s": [target - 0.001, target + 0.001],
-                "arm_action_bracket_ros_s": [target - 0.001, target + 0.001],
-                "gripper_action_ros_s": target - 0.001,
-                "image_raw_ros_s": {"up": target, "wrist": target},
-                "image_corrected_ros_s": {"up": target, "wrist": target},
-                "image_received_ros_s": {"up": target + 0.001, "wrist": target + 0.001},
-            })
-        (provenance / "episode-000000.jsonl").write_text(
-            "".join(json.dumps(row, sort_keys=True) + "\n" for row in rows), encoding="utf-8",
-        )
+        for episode in range(2):
+            rows = []
+            for index in range(2):
+                target = 100.0 + episode * 10 + index / 30
+                rows.append({
+                    "frame_index": index,
+                    "enqueue_attempt_index": index,
+                    "target_ros_s": target,
+                    "joint_bracket_ros_s": [target - 0.001, target + 0.001],
+                    "arm_action_bracket_ros_s": [target - 0.001, target + 0.001],
+                    "gripper_action_ros_s": target - 0.001,
+                    "image_raw_ros_s": {"up": target, "wrist": target},
+                    "image_corrected_ros_s": {"up": target, "wrist": target},
+                    "image_received_ros_s": {"up": target + 0.001, "wrist": target + 0.001},
+                })
+            (provenance / f"episode-{episode:06d}.jsonl").write_text(
+                "".join(json.dumps(row, sort_keys=True) + "\n" for row in rows),
+                encoding="utf-8",
+            )
 
     def _write_profile_files(self):
         layout = {
@@ -253,6 +268,8 @@ class DeriveIntegrationTest(unittest.TestCase):
     def test_official_roundtrip_atomic_publish_and_no_authority_inheritance(self):
         before = tree_snapshot(self.source)
         output = self.root / "derived"
+        stale_lock = self.root / ".derived.curator-publish.lock"
+        stale_lock.write_text("obsolete lock must not block renameat2", encoding="utf-8")
         with mock.patch(
             "tools.curator.derive.verify_approval",
             return_value=(self.mocked_approval, self.resolved_profile, self.review_manifest),
@@ -271,12 +288,34 @@ class DeriveIntegrationTest(unittest.TestCase):
         self.assertEqual(self.reference_export["reference_image_sha256"], file_sha256(self.reference))
         self.assertIs(self.reference_export["training_authority"], False)
         self.assertTrue(output.is_dir())
+        self.assertTrue(stale_lock.is_file())
         self.assertFalse((output / "meta" / "training_approved.json").exists())
         self.assertFalse((output / "meta" / "quarantine.json").exists())
-        quality = json.loads((output / "meta" / "recording_quality.jsonl").read_text().strip())
-        self.assertEqual(quality["curator_lineage"]["derived_pixel_metrics"], "RECOMPUTED")
-        self.assertEqual(quality["curator_lineage"]["source_timing_evidence"], "PRESERVED")
+        quality_rows = [
+            json.loads(line)
+            for line in (output / "meta" / "recording_quality.jsonl").read_text().splitlines()
+        ]
+        self.assertEqual(len(quality_rows), 2)
+        for quality in quality_rows:
+            self.assertEqual(quality["curator_lineage"]["derived_pixel_metrics"], "RECOMPUTED")
+            self.assertEqual(quality["curator_lineage"]["source_timing_evidence"], "PRESERVED")
+            self.assertNotIn(
+                "source pixel warning intentionally stale for curator test",
+                quality["image_quality_warnings"],
+            )
+        derived = open_source_dataset(output, "local/derived")
+        self.assertEqual(derived.meta.total_episodes, 2)
+        self.assertEqual(
+            [derived[index]["task"] for index in range(len(derived))],
+            [
+                "move the cube from red to blue",
+                "move the cube from red to blue",
+                "move the cube from blue to red",
+                "move the cube from blue to red",
+            ],
+        )
         self.assertEqual(receipt["verification"]["status"], "PASS")
+        self.assertEqual(len(receipt["verification"]["episode_mapping"]), 2)
         self.assertEqual(receipt["verification"]["video_codec"]["expected"], "h264")
         self.assertEqual(receipt["existing_validator"]["status"], "PASS")
         self.assertEqual(receipt["recording_quality_lineage"]["derived_pixel_metrics"], "RECOMPUTED")
@@ -416,6 +455,58 @@ class DeriveIntegrationTest(unittest.TestCase):
         self.assertEqual(tree_snapshot(self.source), before_snapshot)
         self.assertEqual(tree_identity(self.source), before_identity)
 
+    def test_committed_output_survives_parent_fsync_and_receipt_faults(self):
+        cases = ("parent-fsync", "receipt")
+        for case in cases:
+            with self.subTest(case=case):
+                output = self.root / f"{case}-derived"
+                run = self.root / "runs" / f"run-{case}"
+                patches = [
+                    mock.patch(
+                        "tools.curator.derive.verify_approval",
+                        return_value=(self.mocked_approval, self.resolved_profile, self.review_manifest),
+                    ),
+                ]
+                expected_code = "OUTPUT_COMMITTED_PARENT_FSYNC_FAILED"
+                expected_state = "COMMITTED_PARENT_FSYNC_FAILED"
+                if case == "parent-fsync":
+                    patches.append(mock.patch(
+                        "tools.curator.derive._fsync_directory",
+                        side_effect=OSError("injected parent fsync fault"),
+                    ))
+                else:
+                    expected_code = "COMMITTED_RECEIPT_FAILED"
+                    expected_state = "COMMITTED_RECEIPT_FAILED"
+
+                    def receipt_fault(path, value):
+                        if Path(path).name == "receipt.json":
+                            raise OSError("injected receipt fault")
+                        return write_json_atomic(path, value)
+
+                    patches.append(mock.patch(
+                        "tools.curator.derive.write_json_atomic",
+                        side_effect=receipt_fault,
+                    ))
+                with ExitStack() as stack:
+                    for patcher in patches:
+                        stack.enter_context(patcher)
+                    with self.assertRaisesRegex(CuratorError, expected_code):
+                        derive_dataset(
+                            self.source,
+                            output,
+                            self.request_path,
+                            self.approval_path,
+                            run_dir=run,
+                            run_id=f"run-{case}",
+                            source_repo_id="local/source",
+                            output_repo_id=f"local/{case}-derived",
+                        )
+                self.assertTrue(output.is_dir())
+                failure = json.loads((run / "failure.json").read_text())
+                self.assertIs(failure["output_committed"], True)
+                self.assertEqual(failure["output"], str(output))
+                self.assertEqual(failure["publication_state"], expected_state)
+
     def test_writer_add_save_and_finalize_faults_shutdown_before_cleanup(self):
         original_finalize = self.LeRobotDataset.finalize
         cases = ("add", "save", "finalize")
@@ -518,6 +609,70 @@ class DeriveIntegrationTest(unittest.TestCase):
         self.assertTrue((temporary / "replacement-sentinel").is_file())
         self.assertTrue(moved.is_dir())
         self.assertTrue((self.root / ".substituted-derived.run-sub.curator-owner.json").is_file())
+
+    def test_cleanup_leaks_on_owner_marker_path_substitution(self):
+        output = self.root / "marker-substituted-derived"
+        temporary = self.root / ".marker-substituted-derived.run-marker-sub.curator-tmp"
+        marker = self.root / ".marker-substituted-derived.run-marker-sub.curator-owner.json"
+        moved_marker = self.root / "captured-owner-marker-moved.json"
+        original_finalize = self.LeRobotDataset.finalize
+
+        def substitute(_writer, _frame):
+            marker.rename(moved_marker)
+            marker.write_text('{"replacement":"do not delete"}', encoding="utf-8")
+            raise RuntimeError("injected marker path substitution")
+
+        with (
+            mock.patch(
+                "tools.curator.derive.verify_approval",
+                return_value=(self.mocked_approval, self.resolved_profile, self.review_manifest),
+            ),
+            mock.patch.object(self.LeRobotDataset, "add_frame", new=substitute),
+            mock.patch.object(self.LeRobotDataset, "finalize", new=original_finalize),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "marker path substitution"):
+                derive_dataset(
+                    self.source,
+                    output,
+                    self.request_path,
+                    self.approval_path,
+                    run_dir=self.root / "runs" / "run-marker-sub",
+                    run_id="run-marker-sub",
+                    source_repo_id="local/source",
+                    output_repo_id="local/marker-substituted-derived",
+                )
+        self.assertTrue(temporary.is_dir())
+        self.assertTrue(moved_marker.is_file())
+        self.assertEqual(marker.read_text(encoding="utf-8"), '{"replacement":"do not delete"}')
+
+
+class DeriveContractTest(unittest.TestCase):
+    def test_source_and_existing_validator_are_pinned_to_30_hz(self):
+        class Dataset:
+            meta = SimpleNamespace(
+                features=dataset_features(
+                    fps=29,
+                    height=480,
+                    width=640,
+                    cameras=("up", "wrist"),
+                    use_videos=True,
+                ),
+                fps=29,
+                robot_type="fr5_ros2",
+                total_episodes=1,
+            )
+
+            def __len__(self):
+                return 1
+
+        with self.assertRaisesRegex(CuratorError, "SOURCE_DATASET_CONTRACT"):
+            _validate_source_contract(Dataset(), {"width": 640, "height": 480})
+
+        completed = SimpleNamespace(returncode=0, stdout="PASS\n", stderr="")
+        with mock.patch("tools.curator.derive.subprocess.run", return_value=completed) as run:
+            _run_existing_validator(Path("/tmp/derived"), "local/derived")
+        command = run.call_args.args[0]
+        self.assertEqual(command[command.index("--expected-fps") + 1], "30")
 
 
 if __name__ == "__main__":

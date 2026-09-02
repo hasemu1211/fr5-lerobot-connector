@@ -15,8 +15,13 @@ from tools.curator.derive import derive_dataset
 from tools.curator.verify import create_review_bundle, export_reference
 
 
+class _JsonArgumentParser(argparse.ArgumentParser):
+    def error(self, message: str) -> None:
+        raise CuratorError("CLI_ARGUMENTS", message)
+
+
 def _parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description=__doc__)
+    parser = _JsonArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest="command", required=True)
 
     export = commands.add_parser("export-reference", help="export one exact official-reader up frame")
@@ -52,8 +57,8 @@ def _run_id() -> str:
 
 
 def main(argv: list[str] | None = None) -> None:
-    args = _parser().parse_args(argv)
     try:
+        args = _parser().parse_args(argv)
         if args.command == "export-reference":
             result = export_reference(
                 args.source,
@@ -93,7 +98,22 @@ def main(argv: list[str] | None = None) -> None:
             ),
             file=sys.stderr,
         )
-        raise SystemExit(2) from exc
+        raise SystemExit(2) from None
+    except Exception as exc:
+        print(
+            json.dumps(
+                {
+                    "ok": False,
+                    "reason_code": "UNEXPECTED_RUNTIME_FAILURE",
+                    "detail": type(exc).__name__,
+                },
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ),
+            file=sys.stderr,
+        )
+        raise SystemExit(2) from None
 
 
 __all__ = ["main"]

@@ -187,6 +187,15 @@ class GeometryTest(unittest.TestCase):
         with self.assertRaisesRegex(CuratorError, "VERIFIED_BINDING_NOT_CANONICAL"):
             load_profile_request(self.request_path)
 
+    def test_semantic_subregion_outside_table_is_rejected(self):
+        request = load_profile_request(self.request_path)
+        geometry, _layout, _binding = resolve_geometry(request)
+        geometry["table_work_surface"] = [
+            [50, 40], [190, 40], [190, 110], [50, 110],
+        ]
+        with self.assertRaisesRegex(CuratorError, "SEMANTIC_OUTSIDE_TABLE"):
+            build_keep_mask(geometry, 200, 120, 0)
+
 
 if __name__ == "__main__":
     unittest.main()

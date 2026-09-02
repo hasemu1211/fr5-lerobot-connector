@@ -124,7 +124,7 @@ def _validate_source_contract(dataset: Any, profile: dict[str, Any]) -> dict[str
     if (
         (profile["width"], profile["height"]) != (640, 480)
         or type(dataset.meta.fps) is not int
-        or dataset.meta.fps <= 0
+        or dataset.meta.fps != 30
         or dataset.meta.robot_type != "fr5_ros2"
         or dataset.meta.total_episodes <= 0
         or len(dataset) <= 0
@@ -224,17 +224,21 @@ def _write_derived_quality(
             or not isinstance(cameras, dict)
             or set(cameras) != {"up", "wrist"}
             or "curator_lineage" in quality
+            or not isinstance(quality.get("image_quality_warnings"), list)
+            or any(not isinstance(item, str) for item in quality["image_quality_warnings"])
         ):
             raise CuratorError("SOURCE_QUALITY_EVIDENCE", str(episode))
         for camera in ("up", "wrist"):
             if not isinstance(cameras[camera], dict):
                 raise CuratorError("SOURCE_QUALITY_EVIDENCE", camera)
             cameras[camera].update(metrics[episode][camera])
+        quality["image_quality_warnings"] = _derived_image_quality_warnings(metrics[episode])
         quality["curator_lineage"] = {
             "schema_version": "curator.derived_recording_quality_lineage.v1",
             "source_recording_quality_sha256": source_sha256,
             "source_timing_evidence": "PRESERVED",
             "derived_pixel_metrics": "RECOMPUTED",
+            "source_image_quality_warnings": "REPLACED_FROM_DERIVED_METRICS",
             "profile_digest": profile_digest,
             "training_authority": False,
         }
@@ -258,6 +262,29 @@ def _write_derived_quality(
     }
 
 
+def _derived_image_quality_warnings(cameras: dict[str, dict[str, float]]) -> list[str]:
+    warnings: list[str] = []
+    for camera in ("up", "wrist"):
+        metrics = cameras[camera]
+        if metrics["color_delta_mean"] < 1.0:
+            warnings.append(
+                f"{camera} image appears monochrome (color delta {metrics['color_delta_mean']:.2f})"
+            )
+        if not 20 <= metrics["brightness_mean"] <= 235:
+            warnings.append(
+                f"{camera} brightness {metrics['brightness_mean']:.1f} outside diagnostic range"
+            )
+        if metrics["clipping_mean"] > 0.20:
+            warnings.append(
+                f"{camera} clipping {metrics['clipping_mean']:.1%} exceeds diagnostic threshold"
+            )
+        if metrics["sharpness_median"] < 20:
+            warnings.append(
+                f"{camera} sharpness {metrics['sharpness_median']:.1f} below diagnostic threshold"
+            )
+    return warnings
+
+
 def _run_existing_validator(root: Path, repo_id: str) -> dict[str, Any]:
     repository = Path(__file__).resolve().parents[2]
     command = [
@@ -266,6 +293,8 @@ def _run_existing_validator(root: Path, repo_id: str) -> dict[str, Any]:
         str(root),
         "--repo-id",
         repo_id,
+        "--expected-fps",
+        "30",
         "--skip-decoded-image-diagnostics",
     ]
     result = subprocess.run(command, capture_output=True, text=True, check=False)
@@ -347,24 +376,18 @@ def _cleanup_owned(
 
 
 def _publish(temporary: Path, output: Path) -> None:
-    lock = output.parent / f".{output.name}.curator-publish.lock"
-    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+    """Commit the no-clobber rename; durability is recorded separately."""
+    if output.exists() or output.is_symlink():
+        raise CuratorError("OUTPUT_EXISTS", str(output))
+    rename_noreplace(temporary, output, code="OUTPUT_EXISTS")
+
+
+def _fsync_directory(path: Path) -> None:
+    directory_fd = os.open(path, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
     try:
-        fd = os.open(lock, flags, 0o600)
-    except FileExistsError as exc:
-        raise CuratorError("OUTPUT_PUBLISH_BUSY", str(lock)) from exc
-    try:
-        os.close(fd)
-        if output.exists() or output.is_symlink():
-            raise CuratorError("OUTPUT_EXISTS", str(output))
-        rename_noreplace(temporary, output, code="OUTPUT_EXISTS")
-        directory_fd = os.open(output.parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
-        try:
-            os.fsync(directory_fd)
-        finally:
-            os.close(directory_fd)
+        os.fsync(directory_fd)
     finally:
-        lock.unlink(missing_ok=True)
+        os.close(directory_fd)
 
 
 def derive_dataset(
@@ -428,6 +451,7 @@ def derive_dataset(
     temporary_identity: _Identity | None = None
     writer_closed = False
     published = False
+    publication_state = "UNPUBLISHED"
     try:
         try:
             from lerobot import __version__ as lerobot_version
@@ -524,6 +548,18 @@ def derive_dataset(
             raise CuratorError("APPROVAL_BUNDLE_CHANGED_BEFORE_PUBLISH")
         _publish(temporary, output)
         published = True
+        publication_state = "COMMITTED_PARENT_FSYNC_PENDING"
+        try:
+            _fsync_directory(output.parent)
+        except Exception as fsync_error:
+            publication_state = "COMMITTED_PARENT_FSYNC_FAILED"
+            raise CuratorError(
+                "OUTPUT_COMMITTED_PARENT_FSYNC_FAILED", str(output),
+            ) from fsync_error
+        publication_state = "COMMITTED_DURABLE_RECEIPT_PENDING"
+        if not _same_identity(marker, marker_identity, stat.S_IFREG):
+            publication_state = "COMMITTED_OWNER_MARKER_AMBIGUOUS"
+            raise CuratorError("OUTPUT_COMMITTED_OWNER_MARKER_AMBIGUOUS", str(output))
         marker.unlink()
         output_digest, _output_files = tree_identity(output)
         receipt = {
@@ -534,6 +570,11 @@ def derive_dataset(
             "output": {"root": str(output), "repo_id": output_repo_id, "dataset_digest": output_digest},
             "runtime": {"python": platform.python_version(), "lerobot": lerobot_version},
             "encoder": {"vcodec": "h264", "preset": "ultrafast", "crf": 23},
+            "publication": {
+                "state": "COMMITTED_DURABLE",
+                "rename_noreplace": True,
+                "parent_fsync": True,
+            },
             "profile_digest": profile["profile_digest"],
             "mask_sha256": profile["mask_sha256"],
             "background_plate_sha256": profile["background_plate_sha256"],
@@ -556,7 +597,21 @@ def derive_dataset(
             "receipt_authority": "NON_AUTHORITATIVE",
         }
         receipt["receipt_digest"] = canonical_digest(receipt)
-        write_json_atomic(run / "receipt.json", receipt)
+        try:
+            write_json_atomic(run / "receipt.json", receipt)
+        except Exception as receipt_error:
+            receipt_path = run / "receipt.json"
+            try:
+                recorded = load_json(receipt_path, code="RECEIPT_READ") == receipt
+            except CuratorError:
+                recorded = False
+            publication_state = (
+                "COMMITTED_RECEIPT_DURABILITY_UNCONFIRMED"
+                if recorded
+                else "COMMITTED_RECEIPT_FAILED"
+            )
+            raise CuratorError(publication_state, str(output)) from receipt_error
+        publication_state = "COMMITTED_RECEIPT_RECORDED"
         return receipt
     except Exception as exc:
         cleanup_safe = writer_closed
@@ -582,6 +637,9 @@ def derive_dataset(
                     "schema_version": "curator.derive_failure.v1",
                     "run_id": run_id,
                     "reason_code": exc.code if isinstance(exc, CuratorError) else "DERIVE_FAILURE",
+                    "publication_state": publication_state,
+                    "output_committed": published,
+                    "output": str(output) if published else None,
                     "training_authority": False,
                 },
             )

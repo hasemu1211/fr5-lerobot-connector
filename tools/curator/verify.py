@@ -165,7 +165,8 @@ def open_source_dataset(root: Path, repo_id: str):
     )
     if root.is_symlink() or not root.is_dir() or any(path.is_symlink() or not path.is_file() for path in required):
         raise CuratorError("SOURCE_DATASET", "complete local finalized metadata required")
-    if not (root / "meta" / "episodes").is_dir():
+    episodes_metadata = root / "meta" / "episodes"
+    if episodes_metadata.is_symlink() or not episodes_metadata.is_dir():
         raise CuratorError("SOURCE_DATASET", "episode metadata required")
     try:
         with _deny_lerobot_hub_fallback() as (LeRobotDataset, LeRobotDatasetMetadata):
@@ -381,27 +382,16 @@ def _profile_document(
 
 
 def _publish_directory(temporary: Path, target: Path) -> None:
-    lock = target.parent / f".{target.name}.curator-publish.lock"
-    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+    if target.exists() or target.is_symlink():
+        raise CuratorError("BUNDLE_EXISTS", str(target))
+    rename_noreplace(temporary, target, code="BUNDLE_EXISTS")
+    directory_fd = os.open(target.parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
     try:
-        fd = os.open(lock, flags, 0o600)
-    except FileExistsError as exc:
-        raise CuratorError("BUNDLE_PUBLISH_BUSY", str(lock)) from exc
-    try:
-        os.close(fd)
-        if target.exists() or target.is_symlink():
-            raise CuratorError("BUNDLE_EXISTS", str(target))
-        rename_noreplace(temporary, target, code="BUNDLE_EXISTS")
-        directory_fd = os.open(target.parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
-        try:
-            os.fsync(directory_fd)
-        finally:
-            os.close(directory_fd)
+        os.fsync(directory_fd)
+    except OSError as exc:
+        raise CuratorError("BUNDLE_COMMITTED_PARENT_FSYNC_FAILED", str(target)) from exc
     finally:
-        try:
-            lock.unlink()
-        except FileNotFoundError:
-            pass
+        os.close(directory_fd)
 
 
 def create_review_bundle(
@@ -736,10 +726,8 @@ def verify_derived_dataset(
 ) -> dict[str, Any]:
     """Full official-loader comparison before atomic publication."""
     try:
-        from lerobot.datasets.lerobot_dataset import LeRobotDataset
-
-        derived = LeRobotDataset(derived_repo_id, root=Path(derived_root), return_uint8=True)
-    except Exception as exc:
+        derived = open_source_dataset(Path(derived_root), derived_repo_id)
+    except CuratorError as exc:
         raise CuratorError("DERIVED_READER", str(exc)) from exc
     if (
         len(source_dataset) != len(derived)
