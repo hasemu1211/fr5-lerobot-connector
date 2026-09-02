@@ -1,0 +1,1 @@
+"""Synthetic curator contract tests."""
