@@ -3438,14 +3438,18 @@ def build_physical_operator_application(
     def selected_home_recovery_call() -> Mapping[str, Any]:
         if home_recovery_call is not None:
             return home_recovery_call()
-        from tools.data_factory.motion.home_recovery import recover_home_live
+        from tools.data_factory.motion.home_recovery import (
+            recover_home_live,
+            validate_home_recovery_qualification,
+        )
+        source = active_combination()["sources"]
+        motion = validate_home_recovery_qualification(load_json_strict(
+            _repository_path(repository, source["motion"]),
+        ))
         if home_recovery_prepare_call is not None:
             home_recovery_prepare_call()
-        source = active_combination()["sources"]
         return recover_home_live(
-            motion_qualification=load_json_strict(
-                _repository_path(repository, source["motion"]),
-            ),
+            motion_qualification=motion,
         )
 
     def physical_pose_plan(

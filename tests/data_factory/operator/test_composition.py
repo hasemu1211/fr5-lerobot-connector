@@ -2757,7 +2757,7 @@ feedback:
             finally:
                 application.close()
 
-    def test_default_home_recovery_prepares_motion_before_reusing_live_transition(self):
+    def test_default_home_recovery_validates_before_preparing_motion(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             self.portable_repository(root)
@@ -2796,17 +2796,26 @@ feedback:
                 clock=lambda: NOW,
             )
             try:
-                with mock.patch(
-                    "tools.data_factory.motion.home_recovery.recover_home_live",
-                    side_effect=lambda **_kwargs: events.append("recover")
-                    or copy.deepcopy(recovery),
+                with (
+                    mock.patch(
+                        "tools.data_factory.motion.home_recovery."
+                        "validate_home_recovery_qualification",
+                        side_effect=lambda value: events.append("validate")
+                        or value,
+                    ),
+                    mock.patch(
+                        "tools.data_factory.motion.home_recovery."
+                        "recover_home_live",
+                        side_effect=lambda **_kwargs: events.append("recover")
+                        or copy.deepcopy(recovery),
+                    ),
                 ):
                     before = application.bridge_core.snapshot()
                     result = application.bridge_core.consume(envelope(
                         before, "recover_home", {}, "prepared-home-recovery",
                     ))["result"]
                 self.assertEqual(result["outcome"], "HOME")
-                self.assertEqual(events, ["prepare", "recover"])
+                self.assertEqual(events, ["validate", "prepare", "recover"])
             finally:
                 application.close()
 

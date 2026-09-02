@@ -922,7 +922,7 @@ def _urdf_motion_limits(urdf):
     return max(lower for lower, _ in gripper), min(upper for _, upper in gripper)
 
 
-def _planning_scene(value):
+def normalize_planning_scene(value):
     value = _exact(value, PLANNING_SCENE_KEYS, "MOTION_PLANNING_SCENE")
     if value["frame_id"] != "base_link":
         raise ContractError("MOTION_PLANNING_SCENE")
@@ -999,7 +999,7 @@ def validate_planning_scene_profile(value, *, expected_robot_system_id):
         profile["wall"], PLANNING_SCENE_WALL_KEYS,
         "PLANNING_SCENE_PROFILE",
     )
-    scene = _planning_scene({
+    scene = normalize_planning_scene({
         "frame_id": profile["frame_id"],
         "floor": {
             "id": floor["id"],
@@ -1043,7 +1043,7 @@ def _validate_motion_qualification(
     if _digest(qualification["home_candidate_digest"], "MOTION_DIGESTS") != home["candidate_digest"]: raise ContractError("MOTION_HOME_BINDING")
     for key in ("robot_description_digest", "moveit_config_digest", "planning_scene_digest"):
         _digest(qualification[key], "MOTION_DIGESTS")
-    planning_scene = _planning_scene(qualification["planning_scene"])
+    planning_scene = normalize_planning_scene(qualification["planning_scene"])
     if canonical_digest(planning_scene) != qualification["planning_scene_digest"]:
         raise ContractError("MOTION_PLANNING_SCENE_BINDING")
     if schema == "data_factory.motion_qualification.v2":
@@ -1463,7 +1463,7 @@ def validate_motion_program(value):
             )
         ):
             raise ContractError("MOTION_ENDPOINT_COMPATIBILITY")
-    planning_scene = _planning_scene(value["planning_scene"])
+    planning_scene = normalize_planning_scene(value["planning_scene"])
     if canonical_digest(planning_scene) != bindings["planning_scene_digest"]: raise ContractError("MOTION_PROGRAM_PLANNING_SCENE")
     raw_requirements = value["gripper_requirements"]
     open_settings = {}
