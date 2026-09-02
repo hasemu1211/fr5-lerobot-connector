@@ -2,12 +2,17 @@
 
 from __future__ import annotations
 
+from contextlib import contextmanager
+import hashlib
+import inspect
 import json
 import os
 from pathlib import Path
 import shutil
+import stat
 import subprocess
 import tempfile
+import threading
 from typing import Any
 
 import cv2
@@ -20,6 +25,7 @@ from tools.curator.contracts import (
     exact_fields,
     file_sha256,
     load_json,
+    read_regular_bytes,
     reject_symlink_components,
     rename_noreplace,
     tree_identity,
@@ -92,6 +98,63 @@ _PROFILE_FIELDS = {
     "profile_digest",
 }
 CODEC_MAX_FRAME_MAE = 18.0
+_LEROBOT_VERSION = "0.6.1"
+_LEROBOT_GUARD_LOCK = threading.Lock()
+
+
+@contextmanager
+def _deny_lerobot_hub_fallback():
+    """Fence the two private 0.6.1 fallback hooks while opening local data."""
+    import lerobot
+    import lerobot.datasets.dataset_metadata as metadata_module
+    import lerobot.datasets.lerobot_dataset as dataset_module
+    from lerobot.datasets.lerobot_dataset import LeRobotDataset, LeRobotDatasetMetadata
+
+    contracts = (
+        (LeRobotDataset._download, ("self", "download_videos", "token")),
+        (
+            LeRobotDatasetMetadata._pull_from_repo,
+            ("self", "allow_patterns", "ignore_patterns", "token"),
+        ),
+    )
+    if lerobot.__version__ != _LEROBOT_VERSION or any(
+        tuple(inspect.signature(function).parameters) != parameters
+        for function, parameters in contracts
+    ):
+        raise CuratorError("LEROBOT_LOCAL_CONTRACT", "expected LeRobot 0.6.1 fallback hooks")
+
+    def denied(*_args, **_kwargs):
+        raise CuratorError("SOURCE_LOCAL_INCOMPLETE", "Hub fallback is disabled")
+
+    with _LEROBOT_GUARD_LOCK:
+        original = (
+            LeRobotDataset._download,
+            LeRobotDatasetMetadata._pull_from_repo,
+            dataset_module.get_safe_version,
+            metadata_module.get_safe_version,
+        )
+        LeRobotDataset._download = denied
+        LeRobotDatasetMetadata._pull_from_repo = denied
+        dataset_module.get_safe_version = denied
+        metadata_module.get_safe_version = denied
+        try:
+            yield LeRobotDataset, LeRobotDatasetMetadata
+        finally:
+            LeRobotDataset._download = original[0]
+            LeRobotDatasetMetadata._pull_from_repo = original[1]
+            dataset_module.get_safe_version = original[2]
+            metadata_module.get_safe_version = original[3]
+
+
+def _require_local_file(root: Path, relative: Path) -> None:
+    path = root / relative
+    reject_symlink_components(path, "SOURCE_LOCAL_INCOMPLETE")
+    try:
+        details = path.stat(follow_symlinks=False)
+    except OSError as exc:
+        raise CuratorError("SOURCE_LOCAL_INCOMPLETE", str(relative)) from exc
+    if not stat.S_ISREG(details.st_mode) or details.st_size <= 0:
+        raise CuratorError("SOURCE_LOCAL_INCOMPLETE", str(relative))
 
 
 def open_source_dataset(root: Path, repo_id: str):
@@ -105,9 +168,45 @@ def open_source_dataset(root: Path, repo_id: str):
     if not (root / "meta" / "episodes").is_dir():
         raise CuratorError("SOURCE_DATASET", "episode metadata required")
     try:
-        from lerobot.datasets.lerobot_dataset import LeRobotDataset
-
-        return LeRobotDataset(repo_id, root=root, return_uint8=True)
+        with _deny_lerobot_hub_fallback() as (LeRobotDataset, LeRobotDatasetMetadata):
+            metadata = LeRobotDatasetMetadata(
+                repo_id,
+                root=root,
+                force_cache_sync=False,
+                token=False,
+            )
+            try:
+                episode_metadata_count = len(metadata.episodes)
+            except (TypeError, AttributeError) as exc:
+                raise CuratorError("SOURCE_LOCAL_INCOMPLETE", "episode metadata") from exc
+            if (
+                Path(metadata.root).resolve(strict=True) != root.resolve(strict=True)
+                or type(metadata.total_episodes) is not int
+                or metadata.total_episodes <= 0
+                or episode_metadata_count != metadata.total_episodes
+            ):
+                raise CuratorError("SOURCE_LOCAL_INCOMPLETE", "episode metadata")
+            files = {
+                metadata.get_data_file_path(episode)
+                for episode in range(metadata.total_episodes)
+            }
+            files.update(
+                metadata.get_video_file_path(episode, key)
+                for episode in range(metadata.total_episodes)
+                for key in metadata.video_keys
+            )
+            for relative in files:
+                _require_local_file(root, relative)
+            return LeRobotDataset(
+                repo_id,
+                root=root,
+                force_cache_sync=False,
+                download_videos=False,
+                return_uint8=True,
+                token=False,
+            )
+    except CuratorError:
+        raise
     except Exception as exc:
         raise CuratorError("SOURCE_READER", str(exc)) from exc
 
@@ -511,10 +610,55 @@ def verify_review_bundle(profile_request: str | Path) -> tuple[ProfileRequest, d
     return request, profile, manifest
 
 
-def load_profile_assets(request: ProfileRequest, profile: dict[str, Any]) -> tuple[np.ndarray, np.ndarray]:
-    root = request.review_bundle_path
-    mask = _mask(root / "keep_mask.png", profile["width"], profile["height"])
-    plate = _bundle_image(root / "background_plate.png", profile["width"], profile["height"])
+def _approved_bundle_bytes(
+    request: ProfileRequest,
+    profile: dict[str, Any],
+    manifest: dict[str, Any],
+    name: str,
+    profile_field: str,
+) -> bytes:
+    payload = read_regular_bytes(request.review_bundle_path / name, code="BUNDLE_ASSET_READ")
+    digest = "sha256:" + hashlib.sha256(payload).hexdigest()
+    expected = manifest["files"].get(name)
+    if (
+        not isinstance(expected, dict)
+        or expected.get("sha256") != digest
+        or expected.get("size") != len(payload)
+        or profile[profile_field] != digest
+    ):
+        raise CuratorError("BUNDLE_ASSET_DIGEST", name)
+    return payload
+
+
+def load_profile_assets(
+    request: ProfileRequest,
+    profile: dict[str, Any],
+    manifest: dict[str, Any],
+) -> tuple[np.ndarray, np.ndarray]:
+    """Decode the exact approved no-follow bytes once for the whole derivation."""
+    mask_payload = _approved_bundle_bytes(
+        request, profile, manifest, "keep_mask.png", "mask_sha256",
+    )
+    plate_payload = _approved_bundle_bytes(
+        request, profile, manifest, "background_plate.png", "background_plate_sha256",
+    )
+    mask_image = cv2.imdecode(np.frombuffer(mask_payload, dtype=np.uint8), cv2.IMREAD_GRAYSCALE)
+    if (
+        mask_image is None
+        or mask_image.shape != (profile["height"], profile["width"])
+        or not set(np.unique(mask_image)).issubset({0, 255})
+    ):
+        raise CuratorError("BUNDLE_MASK")
+    plate_image = cv2.imdecode(np.frombuffer(plate_payload, dtype=np.uint8), cv2.IMREAD_COLOR)
+    if plate_image is None:
+        raise CuratorError("BUNDLE_ASSET_READ", "background_plate.png")
+    mask = mask_image == 255
+    plate = uint8_hwc(
+        cv2.cvtColor(plate_image, cv2.COLOR_BGR2RGB),
+        width=profile["width"],
+        height=profile["height"],
+        code="PNG_SIZE",
+    )
     return mask, plate
 
 

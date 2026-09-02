@@ -52,6 +52,11 @@ class ApprovalTest(unittest.TestCase):
             )
         exclusive.assert_called_once_with(self.request.approval_path, issued)
         self.assertEqual(issued["provenance"], "HUMAN_TASK_VIEW_APPROVED")
+        self.assertEqual(issued["issuance_path"], "FOREGROUND_CONTROLLING_/dev/tty")
+        self.assertEqual(
+            issued["identity_assurance"],
+            "LOCAL_TTY_PRESENCE_NOT_CRYPTOGRAPHIC_IDENTITY",
+        )
         self.assertIs(issued["training_authorized"], False)
         self.assertFalse(self.request.approval_path.exists())
 
@@ -83,7 +88,7 @@ class ApprovalTest(unittest.TestCase):
 
     def test_test_fixture_provenance_is_never_accepted(self):
         artifact = {
-            "schema_version": "curator.human_task_view_approval.v1",
+            "schema_version": "curator.human_task_view_approval.v2",
             "scope": "HUMAN_TASK_VIEW",
             "profile_id": self.profile["profile_id"],
             "profile_digest": self.profile["profile_digest"],
@@ -91,6 +96,8 @@ class ApprovalTest(unittest.TestCase):
             "approved_by": "operator-1",
             "approved_at": "2026-09-02T00:00:00Z",
             "provenance": "TEST_ONLY",
+            "issuance_path": "TEST_ONLY",
+            "identity_assurance": "TEST_ONLY_MOCKED_AUTHORITY",
             "training_authorized": False,
             "approval_digest": "sha256:" + "3" * 64,
         }

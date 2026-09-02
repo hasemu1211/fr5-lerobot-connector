@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from contextlib import suppress
 import copy
+from dataclasses import dataclass
 import hashlib
 import json
 import os
@@ -11,6 +12,7 @@ from pathlib import Path
 import platform
 import re
 import shutil
+import stat
 import subprocess
 import sys
 from typing import Any
@@ -288,16 +290,60 @@ def _owner_value(run_id: str, output: Path, profile_digest: str) -> dict[str, An
     }
 
 
-def _cleanup_owned(temporary: Path, marker: Path, owner: dict[str, Any]) -> None:
+@dataclass(frozen=True)
+class _Identity:
+    device: int
+    inode: int
+
+
+def _identity(path: Path, mode: int, code: str) -> _Identity:
+    try:
+        details = path.stat(follow_symlinks=False)
+    except OSError as exc:
+        raise CuratorError(code, str(path)) from exc
+    if stat.S_IFMT(details.st_mode) != mode:
+        raise CuratorError(code, str(path))
+    return _Identity(details.st_dev, details.st_ino)
+
+
+def _same_identity(path: Path, expected: _Identity, mode: int) -> bool:
+    try:
+        details = path.stat(follow_symlinks=False)
+    except OSError:
+        return False
+    return (
+        stat.S_IFMT(details.st_mode) == mode
+        and (details.st_dev, details.st_ino) == (expected.device, expected.inode)
+    )
+
+
+def _cleanup_owned(
+    temporary: Path,
+    marker: Path,
+    owner: dict[str, Any],
+    temporary_identity: _Identity | None,
+    marker_identity: _Identity,
+) -> bool:
+    """Delete only the exact captured marker and temporary directory identities."""
+    if temporary_identity is None or temporary.parent != marker.parent:
+        return False
+    if not _same_identity(marker, marker_identity, stat.S_IFREG):
+        return False
+    if not _same_identity(temporary, temporary_identity, stat.S_IFDIR):
+        return False
     try:
         current = load_json(marker, code="TEMP_OWNER")
     except CuratorError:
-        return
-    if current != owner:
-        return
-    if temporary.exists() and not temporary.is_symlink() and temporary.parent == marker.parent:
-        shutil.rmtree(temporary)
-    marker.unlink(missing_ok=True)
+        return False
+    if current != owner or not _same_identity(marker, marker_identity, stat.S_IFREG):
+        return False
+    if not _same_identity(temporary, temporary_identity, stat.S_IFDIR):
+        return False
+    shutil.rmtree(temporary)
+    if not _same_identity(marker, marker_identity, stat.S_IFREG):
+        return False
+    marker.unlink()
+    return True
 
 
 def _publish(temporary: Path, output: Path) -> None:
@@ -341,6 +387,7 @@ def derive_dataset(
     request, current_profile, current_review = verify_review_bundle(profile_request)
     if current_profile != profile or current_review != review:
         raise CuratorError("PROFILE_REVIEW_CHANGED")
+    approval_artifact_sha256 = file_sha256(request.approval_path)
     source = _resolved_directory(source_root, "SOURCE_ROOT")
     if (source / "meta" / "quarantine.json").exists() or (source / "meta" / "quarantine.json").is_symlink():
         raise CuratorError("SOURCE_QUARANTINED")
@@ -358,7 +405,7 @@ def derive_dataset(
         raise CuratorError("SOURCE_CHANGED_DURING_IDENTITY")
     if source_digest != review["reference_source_dataset_digest"]:
         raise CuratorError("SOURCE_REVIEW_MISMATCH")
-    keep_mask, background_plate = load_profile_assets(request, profile)
+    keep_mask, background_plate = load_profile_assets(request, profile, review)
     source_dataset = open_source_dataset(source, source_repo_id)
     features = _validate_source_contract(source_dataset, profile)
     if tree_snapshot(source) != source_before:
@@ -376,7 +423,10 @@ def derive_dataset(
         raise CuratorError("TEMP_EXISTS")
     owner = _owner_value(run_id, output, profile["profile_digest"])
     write_json_exclusive(marker, owner)
+    marker_identity = _identity(marker, stat.S_IFREG, "TEMP_OWNER_IDENTITY")
     writer = None
+    temporary_identity: _Identity | None = None
+    writer_closed = False
     published = False
     try:
         try:
@@ -394,6 +444,7 @@ def derive_dataset(
                 image_writer_threads=2,
                 rgb_encoder=RGBEncoderConfig(vcodec="h264", preset="ultrafast", crf=23),
             )
+            temporary_identity = _identity(temporary, stat.S_IFDIR, "TEMP_DIRECTORY_IDENTITY")
         except Exception as exc:
             raise CuratorError("DERIVED_WRITER_CREATE", str(exc)) from exc
         current_episode = -1
@@ -444,6 +495,7 @@ def derive_dataset(
             frame_in_episode += 1
         writer.save_episode(parallel_encoding=False)
         writer.finalize()
+        writer_closed = True
         writer = None
         _copy_source_provenance(source, temporary, source_dataset.meta.total_episodes)
         verification = verify_derived_dataset(
@@ -460,6 +512,16 @@ def derive_dataset(
         validator = _run_existing_validator(temporary, output_repo_id)
         if tree_snapshot(source) != source_before:
             raise CuratorError("SOURCE_CHANGED_DURING_DERIVE")
+        current_approval, current_profile, current_review = verify_approval(
+            profile_request, approval_path,
+        )
+        if (
+            current_approval != approval
+            or current_profile != profile
+            or current_review != review
+            or file_sha256(request.approval_path) != approval_artifact_sha256
+        ):
+            raise CuratorError("APPROVAL_BUNDLE_CHANGED_BEFORE_PUBLISH")
         _publish(temporary, output)
         published = True
         marker.unlink()
@@ -478,7 +540,7 @@ def derive_dataset(
             "review_bundle_digest": review["review_bundle_digest"],
             "task_view_approval": {
                 "artifact": str(request.approval_path),
-                "artifact_sha256": file_sha256(request.approval_path),
+                "artifact_sha256": approval_artifact_sha256,
                 "approved_by": approval["approved_by"],
                 "approved_at": approval["approved_at"],
                 "provenance": approval["provenance"],
@@ -497,8 +559,22 @@ def derive_dataset(
         write_json_atomic(run / "receipt.json", receipt)
         return receipt
     except Exception as exc:
-        if not published:
-            _cleanup_owned(temporary, marker, owner)
+        cleanup_safe = writer_closed
+        if writer is not None:
+            try:
+                writer.finalize()
+                cleanup_safe = True
+            except Exception:
+                cleanup_safe = False
+            writer = None
+        if not published and cleanup_safe:
+            _cleanup_owned(
+                temporary,
+                marker,
+                owner,
+                temporary_identity,
+                marker_identity,
+            )
         with suppress(Exception):
             write_json_atomic(
                 run / "failure.json",
@@ -510,10 +586,6 @@ def derive_dataset(
                 },
             )
         raise
-    finally:
-        if writer is not None:
-            with suppress(Exception):
-                writer.finalize()
 
 
 __all__ = ["RECEIPT_SCHEMA", "derive_dataset"]

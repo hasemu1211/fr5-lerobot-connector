@@ -37,6 +37,9 @@ _RFC3339 = re.compile(
     r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})\Z"
 )
 _HEX_COLOR = re.compile(r"#[0-9A-Fa-f]{6}\Z")
+_CANONICAL_BINDING_ROOT = (
+    Path(__file__).resolve().parents[2] / "config" / "data_factory" / "region_bindings"
+).resolve()
 
 _REQUEST_FIELDS = {
     "schema_version",
@@ -93,7 +96,10 @@ def _path(base: Path, value: object, code: str, *, must_exist: bool) -> Path:
 
 def load_profile_request(path: str | Path) -> ProfileRequest:
     reject_symlink_components(path, "PROFILE_PATH")
-    source = Path(path).resolve(strict=True)
+    try:
+        source = Path(path).resolve(strict=True)
+    except OSError as exc:
+        raise CuratorError("PROFILE_PATH", str(exc)) from exc
     value = exact_fields(load_json(source, code="PROFILE_JSON"), _REQUEST_FIELDS, "PROFILE_FIELDS")
     if value["schema_version"] != PROFILE_REQUEST_SCHEMA:
         raise CuratorError("PROFILE_SCHEMA")
@@ -144,6 +150,14 @@ def load_profile_request(path: str | Path) -> ProfileRequest:
     binding_value = parse_binding(binding, layout_value)
     if binding_value["binding_digest"] != value["physical_region_binding_digest"]:
         raise CuratorError("PROFILE_BINDING_DIGEST")
+    if binding_value["physical_binding_status"] == "VERIFIED":
+        try:
+            binding.relative_to(_CANONICAL_BINDING_ROOT)
+        except ValueError as exc:
+            raise CuratorError(
+                "VERIFIED_BINDING_NOT_CANONICAL",
+                f"VERIFIED bindings must come from {_CANONICAL_BINDING_ROOT}",
+            ) from exc
     return ProfileRequest(
         source,
         value,

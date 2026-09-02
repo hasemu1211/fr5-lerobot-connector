@@ -57,14 +57,14 @@ class GeometryTest(unittest.TestCase):
             "schema_version": "data_factory.workspace_region_binding.v1",
             "layout_id": self.layout["layout_id"],
             "layout_digest": self.layout["layout_digest"],
-            "physical_binding_status": "VERIFIED",
+            "physical_binding_status": "PREPARED_NOT_VERIFIED",
             "bindings": [
                 {"place_id": "PLACE_A", "frame_id": "place-a-r003", "region_id": "RED"},
                 {"place_id": "PLACE_B", "frame_id": "place-b-r003", "region_id": "BLUE"},
             ],
-            "verified_at": "2026-09-02T00:00:00Z",
-            "verified_by": "operator-1",
-            "evidence_digest": "sha256:" + "e" * 64,
+            "verified_at": None,
+            "verified_by": None,
+            "evidence_digest": None,
         }
         self.binding["binding_digest"] = canonical_digest(self.binding)
         self.binding_path = self.root / "binding.json"
@@ -170,6 +170,22 @@ class GeometryTest(unittest.TestCase):
         self.annotation_path.write_text(text, encoding="utf-8")
         with self.assertRaisesRegex(CuratorError, "JSON_NONFINITE"):
             resolve_geometry(load_profile_request(self.request_path))
+
+    def test_verified_binding_must_come_from_producer_registry(self):
+        self.binding.update({
+            "physical_binding_status": "VERIFIED",
+            "verified_at": "2026-09-02T00:00:00Z",
+            "verified_by": "operator-1",
+            "evidence_digest": "sha256:" + "e" * 64,
+        })
+        self.binding["binding_digest"] = canonical_digest({
+            key: value for key, value in self.binding.items() if key != "binding_digest"
+        })
+        _write(self.binding_path, self.binding)
+        self.request["physical_region_binding_digest"] = self.binding["binding_digest"]
+        _write(self.request_path, self.request)
+        with self.assertRaisesRegex(CuratorError, "VERIFIED_BINDING_NOT_CANONICAL"):
+            load_profile_request(self.request_path)
 
 
 if __name__ == "__main__":

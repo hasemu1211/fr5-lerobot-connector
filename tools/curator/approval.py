@@ -17,13 +17,16 @@ from tools.curator.contracts import (
     canonical_digest,
     exact_fields,
     load_json,
+    reject_symlink_components,
     write_json_exclusive,
 )
 from tools.curator.verify import verify_review_bundle
 
 
-APPROVAL_SCHEMA = "curator.human_task_view_approval.v1"
+APPROVAL_SCHEMA = "curator.human_task_view_approval.v2"
 PROVENANCE = "HUMAN_TASK_VIEW_APPROVED"
+ISSUANCE_PATH = "FOREGROUND_CONTROLLING_/dev/tty"
+IDENTITY_ASSURANCE = "LOCAL_TTY_PRESENCE_NOT_CRYPTOGRAPHIC_IDENTITY"
 _APPROVAL_FIELDS = {
     "schema_version",
     "scope",
@@ -33,6 +36,8 @@ _APPROVAL_FIELDS = {
     "approved_by",
     "approved_at",
     "provenance",
+    "issuance_path",
+    "identity_assurance",
     "training_authorized",
     "approval_digest",
 }
@@ -133,6 +138,8 @@ def issue_approval(
         "approved_by": human,
         "approved_at": now.astimezone(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z"),
         "provenance": PROVENANCE,
+        "issuance_path": ISSUANCE_PATH,
+        "identity_assurance": IDENTITY_ASSURANCE,
         "training_authorized": False,
     }
     approval["approval_digest"] = canonical_digest(approval)
@@ -145,7 +152,14 @@ def verify_approval(
     approval_path: str | Path | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
     request, profile, manifest = verify_review_bundle(profile_request)
-    path = request.approval_path if approval_path is None else Path(approval_path).resolve(strict=True)
+    if approval_path is None:
+        path = request.approval_path
+    else:
+        reject_symlink_components(approval_path, "APPROVAL_PATH")
+        try:
+            path = Path(approval_path).resolve(strict=True)
+        except OSError as exc:
+            raise CuratorError("APPROVAL_PATH", str(exc)) from exc
     if path != request.approval_path:
         raise CuratorError("APPROVAL_PATH_MISMATCH")
     approval = exact_fields(load_json(path, code="APPROVAL_JSON"), _APPROVAL_FIELDS, "APPROVAL_FIELDS")
@@ -159,6 +173,8 @@ def verify_approval(
         or not isinstance(approval["approved_at"], str)
         or RFC3339_UTC.fullmatch(approval["approved_at"]) is None
         or approval["provenance"] != PROVENANCE
+        or approval["issuance_path"] != ISSUANCE_PATH
+        or approval["identity_assurance"] != IDENTITY_ASSURANCE
         or approval["training_authorized"] is not False
         or not isinstance(approval["approval_digest"], str)
         or DIGEST.fullmatch(approval["approval_digest"]) is None
@@ -174,6 +190,8 @@ def verify_approval(
 __all__ = [
     "APPROVAL_SCHEMA",
     "PROVENANCE",
+    "IDENTITY_ASSURANCE",
+    "ISSUANCE_PATH",
     "approval_phrase",
     "issue_approval",
     "verify_approval",

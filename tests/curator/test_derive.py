@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from contextlib import ExitStack
 import json
 from pathlib import Path
 import tempfile
@@ -9,9 +10,21 @@ from unittest import mock
 import cv2
 import numpy as np
 
-from tools.curator.contracts import CuratorError, canonical_digest, file_sha256, tree_snapshot, write_json_atomic
+from tools.curator.contracts import (
+    CuratorError,
+    canonical_digest,
+    file_sha256,
+    tree_identity,
+    tree_snapshot,
+    write_json_atomic,
+)
 from tools.curator.derive import derive_dataset
-from tools.curator.verify import create_review_bundle, export_reference
+from tools.curator.verify import (
+    create_review_bundle,
+    export_reference,
+    open_source_dataset,
+    verify_review_bundle,
+)
 from tools.fr5_dataset_schema import dataset_features
 
 
@@ -93,19 +106,19 @@ class DeriveIntegrationTest(unittest.TestCase):
         result = create_review_bundle(self.source, self.request_path, source_repo_id="local/source")
         self.profile_digest = result["profile_digest"]
         self.review_digest = result["review_bundle_digest"]
-        approval = {
-            "schema_version": "curator.human_task_view_approval.v1",
-            "scope": "HUMAN_TASK_VIEW",
-            "profile_id": "synthetic-up-view-r001",
-            "profile_digest": self.profile_digest,
-            "review_bundle_digest": self.review_digest,
-            "approved_by": "operator-1",
+        _request, self.resolved_profile, self.review_manifest = verify_review_bundle(
+            self.request_path,
+        )
+        self.mocked_approval = {
+            "approved_by": "TEST_ONLY_MOCKED_AUTHORITY",
             "approved_at": "2026-09-02T00:00:00Z",
-            "provenance": "HUMAN_TASK_VIEW_APPROVED",
-            "training_authorized": False,
+            "provenance": "TEST_ONLY_MOCKED_AUTHORITY",
+            "approval_digest": "sha256:" + "a" * 64,
         }
-        approval["approval_digest"] = canonical_digest(approval)
-        write_json_atomic(self.approval_path, approval)
+        write_json_atomic(
+            self.approval_path,
+            {"scope": "TEST_ONLY_MOCKED_AUTHORITY", "training_authorized": False},
+        )
 
     def tearDown(self):
         self.temporary.cleanup()
@@ -183,14 +196,14 @@ class DeriveIntegrationTest(unittest.TestCase):
             "schema_version": "data_factory.workspace_region_binding.v1",
             "layout_id": layout["layout_id"],
             "layout_digest": layout["layout_digest"],
-            "physical_binding_status": "VERIFIED",
+            "physical_binding_status": "PREPARED_NOT_VERIFIED",
             "bindings": [
                 {"place_id": "PLACE_A", "frame_id": "place-a-r001", "region_id": "RED"},
                 {"place_id": "PLACE_B", "frame_id": "place-b-r001", "region_id": "BLUE"},
             ],
-            "verified_at": "2026-09-02T00:00:00Z",
-            "verified_by": "operator-1",
-            "evidence_digest": "sha256:" + "e" * 64,
+            "verified_at": None,
+            "verified_by": None,
+            "evidence_digest": None,
         }
         binding["binding_digest"] = canonical_digest(binding)
         binding_path = self.assets / "binding.json"
@@ -240,16 +253,20 @@ class DeriveIntegrationTest(unittest.TestCase):
     def test_official_roundtrip_atomic_publish_and_no_authority_inheritance(self):
         before = tree_snapshot(self.source)
         output = self.root / "derived"
-        receipt = derive_dataset(
-            self.source,
-            output,
-            self.request_path,
-            self.approval_path,
-            run_dir=self.root / "runs" / "run-1",
-            run_id="run-1",
-            source_repo_id="local/source",
-            output_repo_id="local/derived",
-        )
+        with mock.patch(
+            "tools.curator.derive.verify_approval",
+            return_value=(self.mocked_approval, self.resolved_profile, self.review_manifest),
+        ):
+            receipt = derive_dataset(
+                self.source,
+                output,
+                self.request_path,
+                self.approval_path,
+                run_dir=self.root / "runs" / "run-1",
+                run_id="run-1",
+                source_repo_id="local/source",
+                output_repo_id="local/derived",
+            )
         self.assertEqual(tree_snapshot(self.source), before)
         self.assertEqual(self.reference_export["reference_image_sha256"], file_sha256(self.reference))
         self.assertIs(self.reference_export["training_authority"], False)
@@ -276,17 +293,21 @@ class DeriveIntegrationTest(unittest.TestCase):
             {"schema_version": "synthetic.training_approval.v1", "training_approved": False},
         )
         mismatch_output = self.root / "mismatch-derived"
-        with self.assertRaisesRegex(CuratorError, "SOURCE_REVIEW_MISMATCH"):
-            derive_dataset(
-                self.source,
-                mismatch_output,
-                self.request_path,
-                self.approval_path,
-                run_dir=self.root / "runs" / "run-mismatch",
-                run_id="run-mismatch",
-                source_repo_id="local/source",
-                output_repo_id="local/mismatch-derived",
-            )
+        with mock.patch(
+            "tools.curator.derive.verify_approval",
+            return_value=(self.mocked_approval, self.resolved_profile, self.review_manifest),
+        ):
+            with self.assertRaisesRegex(CuratorError, "SOURCE_REVIEW_MISMATCH"):
+                derive_dataset(
+                    self.source,
+                    mismatch_output,
+                    self.request_path,
+                    self.approval_path,
+                    run_dir=self.root / "runs" / "run-mismatch",
+                    run_id="run-mismatch",
+                    source_repo_id="local/source",
+                    output_repo_id="local/mismatch-derived",
+                )
         self.assertFalse(mismatch_output.exists())
         self.assertFalse((self.root / "runs" / "run-mismatch").exists())
         write_json_atomic(
@@ -295,9 +316,15 @@ class DeriveIntegrationTest(unittest.TestCase):
         )
 
         output = self.root / "fault-derived"
-        with mock.patch(
-            "tools.curator.derive.verify_derived_dataset",
-            side_effect=CuratorError("INJECTED_POST_WRITE_FAULT"),
+        with (
+            mock.patch(
+                "tools.curator.derive.verify_approval",
+                return_value=(self.mocked_approval, self.resolved_profile, self.review_manifest),
+            ),
+            mock.patch(
+                "tools.curator.derive.verify_derived_dataset",
+                side_effect=CuratorError("INJECTED_POST_WRITE_FAULT"),
+            ),
         ):
             with self.assertRaisesRegex(CuratorError, "INJECTED_POST_WRITE_FAULT"):
                 derive_dataset(
@@ -314,18 +341,183 @@ class DeriveIntegrationTest(unittest.TestCase):
         self.assertEqual(list(self.root.glob(".fault-derived*.curator-*")), [])
 
         write_json_atomic(self.source / "meta" / "quarantine.json", {"reason": "synthetic"})
-        with self.assertRaisesRegex(CuratorError, "SOURCE_QUARANTINED"):
-            derive_dataset(
-                self.source,
-                self.root / "quarantine-derived",
-                self.request_path,
-                self.approval_path,
-                run_dir=self.root / "runs" / "run-quarantine",
-                run_id="run-quarantine",
-                source_repo_id="local/source",
-                output_repo_id="local/quarantine-derived",
-            )
+        with mock.patch(
+            "tools.curator.derive.verify_approval",
+            return_value=(self.mocked_approval, self.resolved_profile, self.review_manifest),
+        ):
+            with self.assertRaisesRegex(CuratorError, "SOURCE_QUARANTINED"):
+                derive_dataset(
+                    self.source,
+                    self.root / "quarantine-derived",
+                    self.request_path,
+                    self.approval_path,
+                    run_dir=self.root / "runs" / "run-quarantine",
+                    run_id="run-quarantine",
+                    source_repo_id="local/source",
+                    output_repo_id="local/quarantine-derived",
+                )
         self.assertFalse((self.root / "quarantine-derived").exists())
+
+    def test_asset_tamper_during_source_identity_never_publishes(self):
+        import tools.curator.derive as derive_module
+
+        original = derive_module.tree_identity
+        tampered = False
+
+        def tree_identity_with_tamper(root):
+            nonlocal tampered
+            result = original(root)
+            if Path(root) == self.source and not tampered:
+                mask_path = self.assets / "review" / "keep_mask.png"
+                payload = bytearray(mask_path.read_bytes())
+                payload[-1] ^= 1
+                mask_path.write_bytes(payload)
+                tampered = True
+            return result
+
+        output = self.root / "tampered-derived"
+        with (
+            mock.patch(
+                "tools.curator.derive.verify_approval",
+                return_value=(self.mocked_approval, self.resolved_profile, self.review_manifest),
+            ),
+            mock.patch("tools.curator.derive.tree_identity", side_effect=tree_identity_with_tamper),
+        ):
+            with self.assertRaisesRegex(CuratorError, "BUNDLE_ASSET_DIGEST"):
+                derive_dataset(
+                    self.source,
+                    output,
+                    self.request_path,
+                    self.approval_path,
+                    run_dir=self.root / "runs" / "run-tamper",
+                    run_id="run-tamper",
+                    source_repo_id="local/source",
+                    output_repo_id="local/tampered-derived",
+                )
+        self.assertTrue(tampered)
+        self.assertFalse(output.exists())
+
+    def test_missing_video_fails_locally_without_source_mutation_or_network_probe(self):
+        import lerobot.datasets.dataset_metadata as metadata_module
+        import lerobot.datasets.lerobot_dataset as dataset_module
+
+        video = sorted((self.source / "videos").rglob("*.mp4"))[0]
+        video.unlink()
+        before_snapshot = tree_snapshot(self.source)
+        before_identity = tree_identity(self.source)
+        with (
+            mock.patch.object(dataset_module, "snapshot_download") as data_download,
+            mock.patch.object(metadata_module, "snapshot_download") as metadata_download,
+        ):
+            with self.assertRaisesRegex(CuratorError, "SOURCE_LOCAL_INCOMPLETE"):
+                open_source_dataset(self.source, "local/source")
+        data_download.assert_not_called()
+        metadata_download.assert_not_called()
+        self.assertEqual(tree_snapshot(self.source), before_snapshot)
+        self.assertEqual(tree_identity(self.source), before_identity)
+
+    def test_writer_add_save_and_finalize_faults_shutdown_before_cleanup(self):
+        original_finalize = self.LeRobotDataset.finalize
+        cases = ("add", "save", "finalize")
+        for case in cases:
+            with self.subTest(case=case):
+                output = self.root / f"{case}-derived"
+                temporary = self.root / f".{case}-derived.run-{case}.curator-tmp"
+                observed: list[bool] = []
+                finalize_calls = 0
+
+                def finalize(writer):
+                    nonlocal finalize_calls
+                    finalize_calls += 1
+                    observed.append(temporary.is_dir())
+                    if case == "finalize" and finalize_calls == 1:
+                        raise RuntimeError("injected finalize fault")
+                    return original_finalize(writer)
+
+                patches = [
+                    mock.patch(
+                        "tools.curator.derive.verify_approval",
+                        return_value=(self.mocked_approval, self.resolved_profile, self.review_manifest),
+                    ),
+                    mock.patch.object(self.LeRobotDataset, "finalize", new=finalize),
+                ]
+                if case == "add":
+                    patches.append(mock.patch.object(
+                        self.LeRobotDataset,
+                        "add_frame",
+                        new=lambda _writer, _frame: (_ for _ in ()).throw(
+                            RuntimeError("injected add fault")
+                        ),
+                    ))
+                if case == "save":
+                    patches.append(mock.patch.object(
+                        self.LeRobotDataset,
+                        "save_episode",
+                        new=lambda _writer, parallel_encoding=False: (_ for _ in ()).throw(
+                            RuntimeError("injected save fault")
+                        ),
+                    ))
+                with ExitStack() as stack:
+                    for patcher in patches:
+                        stack.enter_context(patcher)
+                    with self.assertRaises(RuntimeError):
+                        derive_dataset(
+                            self.source,
+                            output,
+                            self.request_path,
+                            self.approval_path,
+                            run_dir=self.root / "runs" / f"run-{case}",
+                            run_id=f"run-{case}",
+                            source_repo_id="local/source",
+                            output_repo_id=f"local/{case}-derived",
+                        )
+                self.assertTrue(observed)
+                self.assertTrue(all(observed))
+                self.assertFalse(temporary.exists())
+                self.assertFalse(
+                    (self.root / f".{case}-derived.run-{case}.curator-owner.json").exists()
+                )
+
+    def test_cleanup_leaks_on_temporary_path_substitution(self):
+        output = self.root / "substituted-derived"
+        temporary = self.root / ".substituted-derived.run-sub.curator-tmp"
+        moved = self.root / "captured-temp-moved"
+        original_finalize = self.LeRobotDataset.finalize
+        observed: list[bool] = []
+
+        def substitute(_writer, _frame):
+            temporary.rename(moved)
+            temporary.mkdir()
+            (temporary / "replacement-sentinel").write_text("do not delete", encoding="utf-8")
+            raise RuntimeError("injected path substitution")
+
+        def finalize(writer):
+            observed.append(temporary.is_dir())
+            return original_finalize(writer)
+
+        with (
+            mock.patch(
+                "tools.curator.derive.verify_approval",
+                return_value=(self.mocked_approval, self.resolved_profile, self.review_manifest),
+            ),
+            mock.patch.object(self.LeRobotDataset, "add_frame", new=substitute),
+            mock.patch.object(self.LeRobotDataset, "finalize", new=finalize),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "path substitution"):
+                derive_dataset(
+                    self.source,
+                    output,
+                    self.request_path,
+                    self.approval_path,
+                    run_dir=self.root / "runs" / "run-sub",
+                    run_id="run-sub",
+                    source_repo_id="local/source",
+                    output_repo_id="local/substituted-derived",
+                )
+        self.assertEqual(observed, [True])
+        self.assertTrue((temporary / "replacement-sentinel").is_file())
+        self.assertTrue(moved.is_dir())
+        self.assertTrue((self.root / ".substituted-derived.run-sub.curator-owner.json").is_file())
 
 
 if __name__ == "__main__":
