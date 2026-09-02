@@ -152,7 +152,7 @@ def task_instruction(
     task_id: str, object_description: str, *,
     source_region_id: str | None = None,
     destination_region_id: str | None = None,
-    region_binding_verified: bool = False,
+    region_binding_active: bool = False,
 ) -> str:
     """Return the one collection-time language label for a supported task."""
     contract = TASK_CONTRACTS.get(task_id)
@@ -166,9 +166,9 @@ def task_instruction(
     ):
         raise ContractError("OBJECT_DESCRIPTION")
     if (
-        type(region_binding_verified) is not bool
+        type(region_binding_active) is not bool
         or (source_region_id is None) != (destination_region_id is None)
-        or region_binding_verified and source_region_id is None
+        or region_binding_active and source_region_id is None
     ):
         raise ContractError("TASK_REGION_BINDING")
     if source_region_id is not None and (
@@ -177,7 +177,7 @@ def task_instruction(
         or source_region_id == destination_region_id
     ):
         raise ContractError("TASK_REGION_BINDING")
-    if source_region_id is not None and region_binding_verified:
+    if source_region_id is not None and region_binding_active:
         return (
             f"pick up the {object_description} from the "
             f"{source_region_id.lower()} zone and place it in the "

@@ -11,6 +11,10 @@ from pathlib import Path
 from typing import Any, Mapping
 from unittest import mock
 
+from tools.a4_place_yaw.region_layout import (
+    make_red_blue_region_layout,
+    workspace_region,
+)
 from tools.data_factory import run_job
 from tools.data_factory.campaign_authoring import compile_collection_campaign
 from tools.data_factory.campaign_operator import CampaignOperator, SIDE_EFFECT_COUNTERS
@@ -1473,15 +1477,28 @@ feedback:
                 {"place_id": "PLACE_B", "yaw_deg": 0, "x_mm": 0, "y_mm": 0},
                 {"place_id": "PLACE_A", "yaw_deg": 0, "x_mm": 0, "y_mm": -35},
             ]
+            region_layout = make_red_blue_region_layout()
+
+            def prepared_region(place_id):
+                region = workspace_region(region_layout, place_id)
+                return {
+                    "layout_id": region_layout["layout_id"],
+                    "layout_digest": region_layout["layout_digest"],
+                    "region_id": region["region_id"],
+                    "physical_binding_status": "PREPARED_NOT_VERIFIED",
+                }
+
             workspace_bindings = {
                 "PLACE_A": {
                     "frame_id": "place-a-yaw0-r003",
+                    "region_binding": prepared_region("PLACE_A"),
                     "selected_sheet": "config/data_factory/test_only_physical/goal2-place1/yaw0_sheet.json",
                     "yaw0_sheet": "config/data_factory/test_only_physical/goal2-place1/yaw0_sheet.json",
                     "motion_qualification": "config/data_factory/motion_qualifications/fr5-place-a-wood-cube-24mm-r001.json",
                 },
                 "PLACE_B": {
                     "frame_id": "place-b-yaw0-r001",
+                    "region_binding": prepared_region("PLACE_B"),
                     "selected_sheet": "config/data_factory/workspace_sheets/place-b-yaw0-r001_yaw0_sheet.json",
                     "yaw0_sheet": "config/data_factory/workspace_sheets/place-b-yaw0-r001_yaw0_sheet.json",
                     "motion_qualification": "config/data_factory/motion_qualifications/fr5-place-b-wood-cube-24mm-r001.json",
@@ -1530,8 +1547,8 @@ feedback:
                         for item in coverage
                     ],
                     [
-                        "pick up the 24 mm wooden cube and place it at the destination",
-                        "pick up the 24 mm wooden cube and place it at the destination",
+                        "pick up the 24 mm wooden cube from the red zone and place it in the blue zone",
+                        "pick up the 24 mm wooden cube from the blue zone and place it in the red zone",
                     ],
                 )
                 self.assertTrue(all(

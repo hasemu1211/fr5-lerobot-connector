@@ -152,7 +152,7 @@ release/reset → vertical retreat → SAFE_POSE_PTP(HOME) terminal
 
 ### 3.3 red/blue zone 준비와 실행 경계
 
-red/blue zone은 이번 범위에서 artifact와 순수 검증까지 준비하되, 물리 배치가 검증되기 전에는 A↔B 실물 시험의 의미 조건으로 켜지 않는다. region identity는 다음처럼 표현한다.
+red/blue zone은 exact layout과 A/B endpoint가 준비되면 A↔B episode 의미로 바로 사용한다. 물리 고정·정렬 상태는 별도 evidence로 보존하되 문구 활성화를 막지 않는다. region identity는 다음처럼 표현한다.
 
 ```text
 workspace_id + frame_id + region_id + local pose
@@ -167,15 +167,14 @@ PLACE_A의 RED와 PLACE_B의 BLUE는 서로 다른 workspace/frame을 사용한�
 
 초기 layout은 각 A4의 현행 printable rectangle 전체를 사용한다. PLACE_A polygon은 RED, PLACE_B polygon은 BLUE이며 서로 다른 frame에 있으므로 한 종이를 양분하지 않는다. 24 mm cube의 실제 center sampling domain은 각 polygon을 object footprint와 calibration uncertainty만큼 안쪽으로 침식해 계산한다. polygon 계약은 convex·CCW·page bounds·digest를 검증하고, 안전 침식과 층화 표본은 별도 geometry 책임이 처리한다.
 
-layout 파일은 A/B workspace-region mapping과 각 A4-local polygon을 함께 담는다. 영속 binding은 `workspace_id + frame_id + region_id + layout_digest`를 결속한다. physical overlay가 실제 A4와 정렬됐다는 설치 evidence 전에는 상태를 `PREPARED_NOT_VERIFIED`로 유지하고 region 이름을 포함한 instruction을 허용하지 않는다.
+layout 파일은 A/B workspace-region mapping과 각 A4-local polygon을 함께 담는다. 영속 binding은 `workspace_id + frame_id + region_id + layout_digest`를 결속한다. physical overlay가 실제 A4와 정렬됐다는 설치 evidence 전에는 상태를 `PREPARED_NOT_VERIFIED`로 유지하지만, 동일한 exact layout에 결속된 A/B endpoint는 region 이름을 포함한 instruction을 사용한다. 별도 사람 확인이나 상태 승격을 수집 흐름에 추가하지 않는다.
 
 ### 3.4 VLA 텍스트 계약
 
 학습용 `instruction`은 task recipe, object description과 사람이 영상에서 구별할 수 있는 endpoint 의미로 결정론적으로 생성한다. workspace/frame ID, revision, digest와 수치 좌표는 분석 metadata에만 두고 자연어에 넣지 않는다.
 
-- 현재 무색 A/B 왕복: 기존 canonical 문장 `pick up the 24 mm wooden cube and place it at the destination`을 유지한다. A/B exact route는 task binding이 보존한다.
-- 실제 red/blue overlay가 scene에 결속된 이후: `pick up the 24 mm wooden cube from the red zone and place it in the blue zone` 또는 역방향 문장을 생성한다.
-- `region_id`가 없거나 physical layout 확인이 없으면 zone 문장을 생성하지 않는다.
+- 동일한 exact layout에 A=RED/B=BLUE가 `PREPARED_NOT_VERIFIED` 또는 `VERIFIED`로 결속되면 `pick up the 24 mm wooden cube from the red zone and place it in the blue zone` 또는 역방향 문장을 생성한다.
+- `region_id`가 없거나 양 endpoint의 layout digest가 다르면 기존 generic destination 문장을 유지한다.
 - campaign manifest의 fixed instruction은 작업 전체의 일반 가설로 유지한다. A→B/B→A처럼 episode마다 달라지는 문장은 exact task binding과 object profile을 묶은 `episode_instruction_binding`이 소유한다.
 - 한 episode의 plan-review projection, preapproval evidence와 LeRobot task field는 같은 `episode_instruction_binding`의 문장과 digest를 사용해야 한다.
 
@@ -315,17 +314,17 @@ motion program은 SOURCE와 DESTINATION binding digest를 구분해 담는다. d
 
 - 관찰: 폐기 대상 r001은 한 A4를 RED/BLUE로 반분할했고, 기존 assisted sampler는 직사각형 bounds에 직접 결속되어 future polygon 변경과 시각 region 의미를 분리하지 못했다.
 - 결정: PLACE_A 전체 RED와 PLACE_B 전체 BLUE를 서로 다른 workspace/frame의 독립 A4로 정의한다. 시각 polygon, 물체·calibration 안전 침식, 층화 표본, 물리 설치 binding과 VLA 문장을 각각 기존 책임 owner에 둔다.
-- 변경: r002 layout JSON과 A/B별 SVG/PDF를 한 순수 layout contract에서 생성하고, 잘못된 r001 산출물 세 개를 제거했다. catalog는 convex polygon을 24 mm object footprint와 현행 calibration uncertainty로 침식한 뒤 5×3 progressive spread를 생성한다. task binding은 layout/region/status를 보존하고 exact `VERIFIED` 양쪽 endpoint에서만 red→blue 또는 blue→red 문장을 해석한다.
+- 변경: r002 layout JSON과 A/B별 SVG/PDF를 한 순수 layout contract에서 생성하고, 잘못된 r001 산출물 세 개를 제거했다. catalog는 convex polygon을 24 mm object footprint와 현행 calibration uncertainty로 침식한 뒤 5×3 progressive spread를 생성한다. task binding은 layout/region/status를 보존하며, 후속 v2 정책은 동일 exact layout의 `PREPARED_NOT_VERIFIED` 또는 `VERIFIED` 양쪽 endpoint에서 red→blue 또는 blue→red 문장을 해석한다.
 - 검증: 새 JSON/SVG는 반복 생성 시 byte-for-byte 동일했고 두 PDF는 A4 landscape 한 페이지로 렌더링됐다. geometry/catalog/task binding/registry/UI projection 회귀와 전체 `python3 -m unittest discover -s tests` 665개가 통과했다.
-- 남은 위험: r002 두 장의 실제 A/B 고정·정렬 evidence가 아직 없으므로 binding은 `PREPARED_NOT_VERIFIED`다. 이 상태에서는 zone 문장을 레코더에 활성화하지 않는다. 물리 배치 확인 뒤 exact binding을 승격하고 episode instruction·preapproval·LeRobot task·review projection의 동일성을 검증해야 한다.
+- 남은 위험: r002 두 장의 실제 A/B 고정·정렬 evidence가 아직 없으므로 binding은 `PREPARED_NOT_VERIFIED`다. 이후 정책 변경으로 이 exact prepared binding도 zone 문장을 활성화하며, 실제 수집 전에 출력물을 A/B A4 위에 정렬하는 책임은 현장 설정에 남는다.
 
 #### Checkpoint 5 — episode instruction과 recorder 결속
 
 - 관찰: `task_binding_instruction()`은 VERIFIED A→B/B→A 문장을 계산했지만 production caller가 없었고, recorder는 campaign-level generic JobSpec instruction만 받았다. fixed manifest 하나로 교대 방향 두 문장을 표현하려 하면 campaign 가설과 episode label 책임이 섞인다.
-- 결정: generic JobSpec/manifest는 고정 motion hypothesis로 유지한다. episode별 SOURCE/DESTINATION task binding과 exact object profile을 `episode_instruction_binding.v1`로 묶고, 이를 plan review·승인 evidence·recorder task에 한 번만 전달한다. PREPARED endpoint는 계속 generic 문장을 사용한다.
-- 변경: composition이 episode instruction binding을 만들고 Web UI coverage와 site checklist에 투영한다. `run_live`는 source job, release slot, object profile, persisted VERIFIED region binding과 checklist를 실행 side effect 전에 대조하고, 통과한 문장만 recorder `--task`로 넘긴다. preapproval evidence v2가 exact binding을 보존하며 recorder·coverage report·episode report·ledger는 v1을 유지하면서 v2를 추가 수용한다.
-- 검증: PREPARED generic, VERIFIED red→blue/blue→red, object/source/destination/instruction 변조, persisted binding 위장, Web UI projection, legacy/v2 evidence와 recorder transaction을 focused regression으로 검사했다. 전체 repository unittest 670개, operator UI fixture 10개, JavaScript 구문, 두 PDF의 one-page A4 landscape 규격, `mex check` 100/100이 통과했다.
-- 남은 위험: 현행 r002 binding은 계속 `PREPARED_NOT_VERIFIED`이므로 현재 실물 수집은 generic destination 문장을 기록한다. 실제 두 출력물을 A/B에 고정·정렬하고 evidence를 등록하기 전에는 color-direction 문장이 활성화되지 않는다.
+- 결정: generic JobSpec/manifest는 고정 motion hypothesis로 유지한다. episode별 SOURCE/DESTINATION task binding과 exact object profile을 episode instruction binding으로 묶고, 이를 plan review·승인 evidence·recorder task에 한 번만 전달한다. 새 v2 binding은 동일 exact layout의 PREPARED endpoint도 zone 문장으로 해석하고, v1은 기존 VERIFIED-only 해석으로 계속 읽는다.
+- 변경: composition이 episode instruction binding을 만들고 Web UI coverage와 site checklist에 투영한다. `run_live`는 source job, release slot, object profile, persisted exact region binding과 checklist를 실행 side effect 전에 대조하고, 통과한 문장만 recorder `--task`로 넘긴다. preapproval evidence v2가 exact binding을 보존하며 recorder·coverage report·episode report·ledger는 legacy v1과 새 v2를 모두 읽는다.
+- 검증: PREPARED/VERIFIED red→blue/blue→red, legacy v1 generic 해석, layout 불일치 generic fallback, object/source/destination/instruction 변조, persisted binding 위장, Web UI projection과 recorder transaction을 검사했다. 집중 77개와 전체 repository unittest 670개, `mex check` 100/100이 통과했다.
+- 남은 위험: 현행 r002 binding은 계속 `PREPARED_NOT_VERIFIED`이지만 새 episode는 color-direction 문장을 기록한다. 출력물을 실제 A/B A4에 포개기 전에 수집하면 영상 의미와 문장이 어긋날 수 있으므로 출력 정렬은 현장 설정 책임이다.
 
 ## 6. 실물 검증
 

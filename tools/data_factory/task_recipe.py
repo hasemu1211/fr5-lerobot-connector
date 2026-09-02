@@ -19,7 +19,8 @@ from tools.fr5_data_factory import (
 RECIPE_SCHEMA = "data_factory.task_recipe.v1"
 CATALOG_SCHEMA = "data_factory.task_recipe_catalog.v1"
 BINDING_SCHEMA = "data_factory.task_binding.v2"
-EPISODE_INSTRUCTION_SCHEMA = "data_factory.episode_instruction_binding.v1"
+LEGACY_EPISODE_INSTRUCTION_SCHEMA = "data_factory.episode_instruction_binding.v1"
+EPISODE_INSTRUCTION_SCHEMA = "data_factory.episode_instruction_binding.v2"
 TASK_IDS = ("pickup_e2e", "pick_place")
 
 _RECIPE_FIELDS = {
@@ -284,28 +285,35 @@ def validate_task_binding(value: Mapping[str, Any]) -> dict[str, Any]:
 
 
 def task_binding_instruction(
-    value: Mapping[str, Any], object_description: str,
+    value: Mapping[str, Any], object_description: str, *,
+    prepared_regions_active: bool = True,
 ) -> str:
-    """Derive one episode label; zone words require verified endpoint bindings."""
+    """Derive one episode label from an exact shared region layout."""
+    if type(prepared_regions_active) is not bool:
+        raise ContractError("TASK_REGION_BINDING")
     binding = validate_task_binding(value)
     if binding["task_id"] != "pick_place":
         return task_instruction(binding["task_id"], object_description)
     source, destination = binding["spatial_bindings"]
     source_region = source["region_binding"]
     destination_region = destination["region_binding"]
-    verified = (
-        source_region["physical_binding_status"] == "VERIFIED"
-        and destination_region["physical_binding_status"] == "VERIFIED"
+    active_statuses = (
+        {"PREPARED_NOT_VERIFIED", "VERIFIED"}
+        if prepared_regions_active else {"VERIFIED"}
+    )
+    active = (
+        source_region["physical_binding_status"] in active_statuses
+        and destination_region["physical_binding_status"] in active_statuses
         and source_region["layout_digest"]
         == destination_region["layout_digest"]
     )
     return task_instruction(
         "pick_place", object_description,
-        source_region_id=(source_region["region_id"] if verified else None),
+        source_region_id=(source_region["region_id"] if active else None),
         destination_region_id=(
-            destination_region["region_id"] if verified else None
+            destination_region["region_id"] if active else None
         ),
-        region_binding_verified=verified,
+        region_binding_active=active,
     )
 
 
@@ -353,8 +361,11 @@ def validate_episode_instruction_binding(
     if not isinstance(value, Mapping) or set(value) != _EPISODE_INSTRUCTION_FIELDS:
         raise ContractError("EPISODE_INSTRUCTION_SCHEMA")
     checked_task = validate_task_binding(value.get("task_binding"))
+    schema_version = value.get("schema_version")
     if (
-        value.get("schema_version") != EPISODE_INSTRUCTION_SCHEMA
+        schema_version not in {
+            LEGACY_EPISODE_INSTRUCTION_SCHEMA, EPISODE_INSTRUCTION_SCHEMA,
+        }
         or not _identifier(value.get("object_profile_id"))
         or not isinstance(value.get("object_profile_digest"), str)
         or DIGEST.fullmatch(value["object_profile_digest"]) is None
@@ -364,11 +375,14 @@ def validate_episode_instruction_binding(
         or "\x00" in value["object_description"]
         or value.get("instruction") != task_binding_instruction(
             checked_task, value["object_description"],
+            prepared_regions_active=(
+                schema_version == EPISODE_INSTRUCTION_SCHEMA
+            ),
         )
     ):
         raise ContractError("EPISODE_INSTRUCTION_CONTRACT")
     result = {
-        "schema_version": EPISODE_INSTRUCTION_SCHEMA,
+        "schema_version": schema_version,
         "task_binding": checked_task,
         "object_profile_id": value["object_profile_id"],
         "object_profile_digest": value["object_profile_digest"],

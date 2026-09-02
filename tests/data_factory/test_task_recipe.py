@@ -127,7 +127,7 @@ class TaskRecipeTest(unittest.TestCase):
             task_instruction(
                 "pick_place", "24 mm wooden cube",
                 source_region_id="RED", destination_region_id="BLUE",
-                region_binding_verified=True,
+                region_binding_active=True,
             ),
             "pick up the 24 mm wooden cube from the red zone and place it in the blue zone",
         )
@@ -142,12 +142,12 @@ class TaskRecipeTest(unittest.TestCase):
             task_instruction(
                 "pick_place", "wooden cube",
                 source_region_id="RED", destination_region_id="RED",
-                region_binding_verified=True,
+                region_binding_active=True,
             )
         with self.assertRaisesRegex(ContractError, "TASK_REGION_BINDING"):
             task_instruction(
                 "pick_place", "wooden cube",
-                region_binding_verified=True,
+                region_binding_active=True,
             )
         self.assertNotIn("authority", json.dumps(catalog).lower())
         self.assertEqual(validate_task_catalog(catalog), catalog)
@@ -204,6 +204,18 @@ class TaskRecipeTest(unittest.TestCase):
         self.assertEqual(validate_task_binding(placed), placed)
         self.assertEqual(
             task_binding_instruction(placed, "24 mm wooden cube"),
+            "pick up the 24 mm wooden cube from the red zone and place it in the blue zone",
+        )
+        mismatched_layout = copy.deepcopy(placed)
+        mismatched_layout["spatial_bindings"][1]["region_binding"][
+            "layout_digest"
+        ] = "sha256:" + "4" * 64
+        mismatched_layout["binding_digest"] = canonical_digest({
+            key: value for key, value in mismatched_layout.items()
+            if key != "binding_digest"
+        })
+        self.assertEqual(
+            task_binding_instruction(mismatched_layout, "24 mm wooden cube"),
             "pick up the 24 mm wooden cube and place it at the destination",
         )
         verified = compile_task_binding(
@@ -252,7 +264,7 @@ class TaskRecipeTest(unittest.TestCase):
         with self.assertRaisesRegex(ContractError, "TASK_BINDING_DISTINCT"):
             compile_task_binding("pick_place", source=source, destination=destination)
 
-    def test_episode_instruction_binding_is_generic_until_both_regions_are_verified(self):
+    def test_episode_instruction_binding_uses_prepared_exact_regions(self):
         object_profile = {
             "schema_version": "data_factory.object_profile.v2",
             "object_profile_id": "wood-cube-24mm-r001",
@@ -270,7 +282,7 @@ class TaskRecipeTest(unittest.TestCase):
         )
         self.assertEqual(
             prepared_instruction["instruction"],
-            "pick up the 24 mm wooden cube and place it at the destination",
+            "pick up the 24 mm wooden cube from the red zone and place it in the blue zone",
         )
         self.assertEqual(
             validate_episode_instruction_binding(
@@ -278,6 +290,18 @@ class TaskRecipeTest(unittest.TestCase):
             ),
             prepared_instruction,
         )
+        legacy = copy.deepcopy(prepared_instruction)
+        legacy["schema_version"] = (
+            "data_factory.episode_instruction_binding.v1"
+        )
+        legacy["instruction"] = (
+            "pick up the 24 mm wooden cube and place it at the destination"
+        )
+        legacy["binding_digest"] = canonical_digest({
+            key: value for key, value in legacy.items()
+            if key != "binding_digest"
+        })
+        self.assertEqual(validate_episode_instruction_binding(legacy), legacy)
 
         for source_place, destination_place, expected in (
             (
