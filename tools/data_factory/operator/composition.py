@@ -14,6 +14,7 @@ from typing import Any, Callable, Mapping, Sequence
 from tools.data_factory import run_job
 from tools.data_factory.campaign_authoring import campaign_cell_id
 from tools.data_factory.campaign_operator import CampaignOperator, SIDE_EFFECT_COUNTERS
+from tools.data_factory.cell_state import CellStateStore
 from tools.data_factory.experiment_manifest import compile_fr5_hypothesis
 from tools.data_factory.one_job import OneJob, TEST_ONLY_READINESS_CONTRACT
 from tools.data_factory.operator.preview import (
@@ -3448,9 +3449,33 @@ def build_physical_operator_application(
         ))
         if home_recovery_prepare_call is not None:
             home_recovery_prepare_call()
-        return recover_home_live(
+        recovery = recover_home_live(
             motion_qualification=motion,
         )
+        application = application_holder.get("application")
+        if (
+            application is not None
+            and application.selection.get("data_mode") == "GENERAL_COLLECTION"
+            and recovery.get("schema_version") == "data_factory.home_recovery.v1"
+            and recovery.get("status") in {"HOME", "ALREADY_HOME"}
+            and recovery.get("gripper_open") is True
+            and recovery.get("arm_goal_count") in {0, 1}
+        ):
+            cell_store = CellStateStore(
+                repository / "outputs/data_factory/cells",
+                motion["robot_system_id"],
+            )
+            cell = cell_store.read()
+            if (
+                cell["cell_ready"] is False
+                and cell["reason_code"] == "ROS_EXEC_FAILED"
+            ):
+                cell_store.acknowledge_ready(
+                    operator_label,
+                    expected_run_id=cell["run_id"],
+                    expected_plan_digest=cell["plan_digest"],
+                )
+        return recovery
 
     def physical_pose_plan(
         selected: Mapping[str, Any], draft: Mapping[str, Any],

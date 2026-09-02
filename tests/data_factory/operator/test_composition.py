@@ -18,6 +18,7 @@ from tools.a4_place_yaw.region_layout import (
 from tools.data_factory import run_job
 from tools.data_factory.campaign_authoring import compile_collection_campaign
 from tools.data_factory.campaign_operator import CampaignOperator, SIDE_EFFECT_COUNTERS
+from tools.data_factory.cell_state import CellStateStore
 from tools.data_factory.campaign_authorization import (
     build_campaign_authorization,
     build_campaign_envelope,
@@ -2780,6 +2781,29 @@ feedback:
                 "final_rad": [0.0] * 6,
                 "motion_qualification_digest": canonical_digest(["motion"]),
             }
+            cell_store = CellStateStore(
+                root / "outputs/data_factory/cells", "fr5-lab-a-tcp-r002",
+            )
+            blocked = cell_store.mark_blocked(
+                "ROS_EXEC_FAILED", "old-run", canonical_digest("old-plan"),
+            )
+            catalog = load_operator_catalog(root, device_ids=[device])
+            for combination in catalog["combinations"]:
+                if combination["execution"]["TEST_COLLECTION"]["executable"]:
+                    combination["execution"]["GENERAL_COLLECTION"] = {
+                        "executable": True, "reason": "GENERAL_CALLER_READY",
+                    }
+                    combination["combination_digest"] = canonical_digest({
+                        key: value for key, value in combination.items()
+                        if key != "combination_digest"
+                    })
+            catalog["combinations"].sort(
+                key=lambda value: value["combination_digest"],
+            )
+            catalog["catalog_digest"] = canonical_digest({
+                key: value for key, value in catalog.items()
+                if key != "catalog_digest"
+            })
             events = []
             application, _context = build_physical_operator_application(
                 repository_root=root,
@@ -2788,15 +2812,30 @@ feedback:
                 environment_call=lambda: copy.deepcopy(ready),
                 prepare_environment_call=lambda: copy.deepcopy(ready),
                 initial_environment=ready,
-                initial_catalog=load_operator_catalog(root, device_ids=[device]),
                 home_recovery_prepare_call=lambda: events.append("prepare") or {
                     "status": "READY",
                 },
                 run_live_call=mock.Mock(side_effect=AssertionError("live was called")),
+                job_path=(
+                    "config/data_factory/jobs/"
+                    "center-live-24mm-20260901-r001.job.json"
+                ),
+                initial_data_mode="GENERAL_COLLECTION",
+                production_dataset_root=(
+                    root / "datasets/fr5_episodes/recovery-test"
+                ),
+                initial_catalog=catalog,
                 clock=lambda: NOW,
             )
             try:
+                self.assertEqual(
+                    application.selection["data_mode"], "GENERAL_COLLECTION",
+                )
                 with (
+                    mock.patch(
+                        "tools.data_factory.operator.composition.CellStateStore",
+                        wraps=CellStateStore,
+                    ) as recovery_cell_store,
                     mock.patch(
                         "tools.data_factory.motion.home_recovery."
                         "validate_home_recovery_qualification",
@@ -2816,6 +2855,23 @@ feedback:
                     ))["result"]
                 self.assertEqual(result["outcome"], "HOME")
                 self.assertEqual(events, ["validate", "prepare", "recover"])
+                self.assertEqual(
+                    recovery_cell_store.call_args.args,
+                    (
+                        root / "outputs/data_factory/cells",
+                        "fr5-lab-a-tcp-r002",
+                    ),
+                )
+                self.assertEqual(
+                    cell_store.read(),
+                    {
+                        **blocked,
+                        "cell_ready": True,
+                        "reason_code": "HUMAN_ACKNOWLEDGED",
+                        "acknowledged_by": "local-operator",
+                        "updated_at": cell_store.read()["updated_at"],
+                    },
+                )
             finally:
                 application.close()
 
