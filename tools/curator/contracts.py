@@ -144,7 +144,21 @@ def read_regular_bytes(path: str | Path, *, code: str = "FILE_READ") -> bytes:
 
 
 def file_sha256(path: str | Path) -> str:
-    return "sha256:" + hashlib.sha256(read_regular_bytes(path)).hexdigest()
+    source = Path(path)
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        fd = os.open(source, flags)
+    except OSError as exc:
+        raise CuratorError("FILE_READ", f"{source}: {exc}") from exc
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            raise CuratorError("FILE_READ", f"regular file required: {source}")
+        with os.fdopen(fd, "rb") as stream:
+            fd = -1
+            return "sha256:" + hashlib.file_digest(stream, "sha256").hexdigest()
+    finally:
+        if fd >= 0:
+            os.close(fd)
 
 
 def write_json_atomic(path: str | Path, value: dict[str, Any]) -> None:
