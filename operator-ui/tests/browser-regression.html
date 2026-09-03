@@ -287,6 +287,14 @@
           && document.querySelector("#review-summary").textContent.includes("wood-cube-24mm-top-wrist-approach-r001")
           && document.querySelector("#review-summary").textContent.includes("설계 정격(endpoint당, repeat=1)")
           && document.querySelector("#review-summary").textContent.includes("실제 campaign prefix는 아래 slot binding 기준"), "selected 24 mm yaw/design/approach provenance renders with scoped nominal counts");
+        const blockedSelectedMode = clone(currentView);
+        const selectedMode = blockedSelectedMode.catalog.axes.data_mode.find(
+          (option) => option.id === blockedSelectedMode.draft.selection.data_mode,
+        );
+        selectedMode.available = false;
+        selectedMode.reason = "CAMERA_ROLE_BINDING_REQUIRED";
+        validateView(blockedSelectedMode);
+        check(true, "temporarily unavailable selected mode remains a renderable blocked draft");
         const missingProvenance = clone(currentView);
         delete missingProvenance.sampling_provenance;
         try {

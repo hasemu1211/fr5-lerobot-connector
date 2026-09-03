@@ -100,7 +100,7 @@ function validateCatalog(catalog, draft) {
       ids.add(option.id);
     });
     const selected = options.find((option) => option.id === draft.selection[axis]);
-    if (!selected || !selected.available) throw new TypeError(`DRAFT_SELECTION_INVALID:${axis}`);
+    if (!selected) throw new TypeError(`DRAFT_SELECTION_INVALID:${axis}`);
   });
 }
 
