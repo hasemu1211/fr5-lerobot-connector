@@ -502,7 +502,7 @@ direnv exec . python3 -m tools.data_factory.curator decide \
   --run <run-id>
 ```
 
-v1.1의 `preview-profile`, `approve-profile`, `derive` public flow와 flat module은 production 사용 전이므로 migration layer 없이 제거한다. 기존 함수는 다음처럼 이동하고 모든 repository caller/test를 같은 변경에서 갱신한다.
+**2026-09-03 사용자 확정:** v1.1의 `preview-profile`, `approve-profile`, `derive` public flow와 flat module은 production 사용 전이므로 migration layer 없이 제거한다. 기존 함수는 다음처럼 이동하고 모든 repository caller/test를 같은 변경에서 갱신한다.
 
 | 기존 | 새 소유자 |
 |---|---|
@@ -868,7 +868,7 @@ PDF에는 colored border와 text가 있지만 machine-readable fiducial은 없�
 ### v1.2 architecture replacement
 
 - 사람에게 request JSON·path·digest·frame index·encoder 설정을 반복 입력시키는 v1.1 CLI와 flat internal architecture를 production 구조로 채택하지 않기로 했다.
-- 내부를 `core/profile/dataset/review/workflow` package로 나누고 단방향 import와 application 단일 lifecycle owner를 강제한다. old flat module과 old command는 forwarding wrapper 없이 제거한다.
+- 사용자 확인에 따라 내부를 `core/profile/dataset/review/workflow` package로 나누고 단방향 import와 application 단일 lifecycle owner를 강제한다. old flat module과 old command는 forwarding wrapper·deprecation period 없이 제거한다.
 - profile preview를 먼저 승인하는 순서를 폐기하고, full hidden candidate를 finalize·기계 검증한 뒤 실제 candidate H.264에서 raw·overlay·policy 시간 제한 review를 만든다.
 - producer registry, curator view profile, review policy와 immutable generated run event를 책임별 SSOT로 두며, routine prepare는 source만 받는다. 필요가 입증되기 전 workspace defaults나 registry index는 만들지 않는다.
 - 표본은 task·episode·relative time·action/state transition·visual/mask-boundary motion·화질 극값을 결정론적으로 층화하고 coverage와 선택 이유를 manifest에 남긴다.
