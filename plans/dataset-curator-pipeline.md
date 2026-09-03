@@ -486,7 +486,7 @@ mask·plate·LabelMe JSON 같은 현장 자산은 external asset root가 소유�
 5. deterministic sampler가 실제 episode/task/action/state/image signal에서 bounded clip key를 고르고, renderer가 source raw, geometry overlay와 **candidate의 실제 decoded up**을 한 H.264 `review.mp4`로 만든다. manifest와 모든 digest를 `review_ready.json`에 결속한 뒤 process는 종료한다.
 6. 사람은 영상 하나만 확인한다. `decide --run`은 `/dev/tty`에서 `APPROVE` 또는 `REJECT`를 받고 exact decision을 exclusive-create한다. 긴 digest, path나 encoder option을 요구하지 않는다.
 7. approve이면 application이 source/profile/candidate/review/decision identity를 모두 다시 확인하고 full tree fsync 뒤 `RENAME_NOREPLACE`로 publish한다. output parent fsync 뒤에만 `COMMITTED_DURABLE` receipt를 쓴다. reject이면 writer가 이미 닫힌 run-owned candidate만 fd/identity-safe cleanup하고 final output은 만들지 않는다.
-8. 정상 예외와 `KeyboardInterrupt`는 writer 종료 뒤 ownership이 입증된 부산물만 정리하고 failure event를 남긴다. abrupt crash의 incomplete run은 `status --run`이 읽기만 하며, 명시적 `prepare --run <run-id>`만 exact event/digest에서 재개하거나 안전 cleanup 후 새 run을 안내한다. daemon·lock server·background worker는 만들지 않는다.
+8. 정상 예외와 `KeyboardInterrupt`는 writer 종료 뒤 ownership이 입증된 부산물만 정리하고 failure event를 남긴다. abrupt crash의 incomplete run은 `status --run`이 진단용으로 읽기만 하며 재개하지 않는다. 모든 retry는 `prepare --source`로 새 run ID를 만들고, process 분리는 완성된 `REVIEW_READY` run을 나중의 `decide --run`이 여는 경계에서만 허용한다. daemon·lock server·background worker는 만들지 않는다.
 9. source timing provenance와 derived quality는 비권한 lineage로 receipt에 보존한다. receipt는 결과를 설명하며 training 권한을 만들지 않는다.
 
 공개 command는 같은 module entrypoint의 subcommand다.

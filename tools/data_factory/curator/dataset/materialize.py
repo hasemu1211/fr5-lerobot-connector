@@ -20,8 +20,7 @@ from typing import Any
 
 import numpy as np
 
-from tools.data_factory.curator.approval import verify_approval
-from tools.data_factory.curator.contracts import (
+from tools.data_factory.curator.core.jsonio import (
     SAFE_ID,
     CuratorError,
     assert_tree_identity,
@@ -36,8 +35,8 @@ from tools.data_factory.curator.contracts import (
     write_json_atomic,
     write_json_exclusive,
 )
-from tools.data_factory.curator.up_view import apply_up_view, uint8_hwc
-from tools.data_factory.curator.verify import (
+from tools.data_factory.curator.profile.transform import apply_up_view, uint8_hwc
+from tools.data_factory.curator.dataset.verify import (
     load_profile_assets,
     open_source_dataset,
     validate_source_contract as _validate_source_contract,
@@ -266,7 +265,7 @@ def _derived_image_quality_warnings(cameras: dict[str, dict[str, float]]) -> lis
 
 
 def _run_existing_validator(root: Path, repo_id: str) -> dict[str, Any]:
-    repository = Path(__file__).resolve().parents[3]
+    repository = Path(__file__).resolve().parents[4]
     command = [
         sys.executable,
         str(repository / "tools" / "validate_lerobot_dataset.py"),
@@ -457,18 +456,20 @@ def _fsync_tree(root: Path) -> None:
         raise CuratorError("DERIVED_TREE_FSYNC", "tree changed during fsync")
 
 
-def derive_dataset(
+def materialize_candidate(
     source_root: str | Path,
-    output_root: str | Path,
+    candidate_root: str | Path,
     profile_request: str | Path,
-    approval_path: str | Path,
     *,
     run_dir: str | Path,
     run_id: str,
     source_repo_id: str = "local/curator-source",
     output_repo_id: str = "local/curator-derived",
 ) -> dict[str, Any]:
-    """Materialize, verify, and atomically publish one isolated v3 dataset."""
+    """Materialize and verify one isolated hidden v3 candidate.
+
+    Publication of this path is deliberately owned by workflow/application.
+    """
     started_ns = time.perf_counter_ns()
     stage_started_ns = started_ns
     stage_seconds: dict[str, float] = {}
@@ -486,15 +487,14 @@ def derive_dataset(
     if source_repo_id == output_repo_id:
         raise CuratorError("REPO_ID_COLLISION")
     _require_spawn_parallel_encoding()
-    approval, profile, review = verify_approval(profile_request, approval_path)
     request, current_profile, current_review = verify_review_bundle(profile_request)
-    if current_profile != profile or current_review != review:
-        raise CuratorError("PROFILE_REVIEW_CHANGED")
-    approval_artifact_sha256 = file_sha256(request.approval_path)
+    profile, review = current_profile, current_review
+    if profile["physical_binding_status"] != "VERIFIED":
+        raise CuratorError("PHYSICAL_BINDING_NOT_VERIFIED")
     source = _resolved_directory(source_root, "SOURCE_ROOT")
     if (source / "meta" / "quarantine.json").exists() or (source / "meta" / "quarantine.json").is_symlink():
         raise CuratorError("SOURCE_QUARANTINED")
-    output = _output_path(output_root)
+    output = _output_path(candidate_root)
     run = Path(run_dir)
     reject_symlink_components(run, "RUN_SYMLINK")
     if run.is_symlink() or run.exists():
@@ -625,16 +625,12 @@ def derive_dataset(
             source_digest,
             code="SOURCE_CHANGED_DURING_DERIVE",
         )
-        current_approval, current_profile, current_review = verify_approval(
-            profile_request, approval_path,
-        )
+        _current_request, current_profile, current_review = verify_review_bundle(profile_request)
         if (
-            current_approval != approval
-            or current_profile != profile
+            current_profile != profile
             or current_review != review
-            or file_sha256(request.approval_path) != approval_artifact_sha256
         ):
-            raise CuratorError("APPROVAL_BUNDLE_CHANGED_BEFORE_PUBLISH")
+            raise CuratorError("PROFILE_BUNDLE_CHANGED_BEFORE_CANDIDATE")
         finish_stage("source_and_authority_revalidation")
         _fsync_tree(temporary)
         _publish(temporary, output)
@@ -697,15 +693,7 @@ def derive_dataset(
             "mask_sha256": profile["mask_sha256"],
             "background_plate_sha256": profile["background_plate_sha256"],
             "review_bundle_digest": review["review_bundle_digest"],
-            "task_view_approval": {
-                "artifact": str(request.approval_path),
-                "artifact_sha256": approval_artifact_sha256,
-                "approved_by": approval["approved_by"],
-                "approved_at": approval["approved_at"],
-                "provenance": approval["provenance"],
-                "approval_digest": approval["approval_digest"],
-                "training_authorized": False,
-            },
+            "candidate_authority": "MACHINE_VERIFIED_NOT_HUMAN_APPROVED",
             "verification": verification,
             "recording_quality_lineage": quality_lineage,
             "existing_validator": validator,
@@ -716,9 +704,9 @@ def derive_dataset(
         }
         receipt["receipt_digest"] = canonical_digest(receipt)
         try:
-            write_json_atomic(run / "receipt.json", receipt)
+            write_json_exclusive(run / "candidate_materialization.json", receipt)
         except Exception as receipt_error:
-            receipt_path = run / "receipt.json"
+            receipt_path = run / "candidate_materialization.json"
             try:
                 recorded = load_json(receipt_path, code="RECEIPT_READ") == receipt
             except CuratorError:
@@ -794,4 +782,4 @@ def derive_dataset(
         raise
 
 
-__all__ = ["RECEIPT_SCHEMA", "derive_dataset"]
+__all__ = ["RECEIPT_SCHEMA", "materialize_candidate"]

@@ -8,9 +8,9 @@ import unittest
 import cv2
 import numpy as np
 
-from tools.data_factory.curator.contracts import CuratorError, canonical_digest, file_sha256
-from tools.data_factory.curator.geometry import build_keep_mask, load_profile_request, resolve_geometry
-from tools.data_factory.curator.up_view import MAX_BACKGROUND_PLATE_FRAMES
+from tools.data_factory.curator.core.jsonio import CuratorError, canonical_digest, file_sha256
+from tools.data_factory.curator.profile.geometry import build_keep_mask, load_profile_request, resolve_geometry
+from tools.data_factory.curator.profile.transform import MAX_BACKGROUND_PLATE_FRAMES
 
 
 def _write(path: Path, value: object) -> None:
@@ -89,7 +89,7 @@ class GeometryTest(unittest.TestCase):
         }
         self.annotation_path = self.root / "reference.json"
         _write(self.annotation_path, self.annotation)
-        repository = Path(__file__).resolve().parents[3]
+        repository = Path(__file__).resolve().parents[4]
         self.collection_profile = json.loads(
             (
                 repository

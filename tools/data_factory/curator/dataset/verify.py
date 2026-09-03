@@ -19,7 +19,7 @@ from typing import Any
 import cv2
 import numpy as np
 
-from tools.data_factory.curator.contracts import (
+from tools.data_factory.curator.core.jsonio import (
     DIGEST,
     CuratorError,
     assert_tree_identity,
@@ -35,7 +35,7 @@ from tools.data_factory.curator.contracts import (
     tree_snapshot,
     write_json_atomic,
 )
-from tools.data_factory.curator.geometry import (
+from tools.data_factory.curator.profile.geometry import (
     CAMERA_KEY,
     ProfileRequest,
     build_keep_mask,
@@ -43,7 +43,7 @@ from tools.data_factory.curator.geometry import (
     load_profile_request,
     resolve_geometry,
 )
-from tools.data_factory.curator.up_view import (
+from tools.data_factory.curator.profile.transform import (
     apply_up_view,
     array_digest,
     make_background_plate,

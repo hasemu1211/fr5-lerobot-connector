@@ -9,7 +9,7 @@ from typing import Any, Sequence
 import cv2
 import numpy as np
 
-from tools.data_factory.curator.contracts import CuratorError
+from tools.data_factory.curator.core.jsonio import CuratorError
 
 
 MAX_BACKGROUND_PLATE_FRAMES = 31

@@ -12,7 +12,7 @@ from unittest import mock
 import cv2
 import numpy as np
 
-from tools.data_factory.curator.contracts import (
+from tools.data_factory.curator.core.jsonio import (
     CuratorError,
     canonical_digest,
     file_sha256,
@@ -20,13 +20,13 @@ from tools.data_factory.curator.contracts import (
     tree_snapshot,
     write_json_atomic,
 )
-from tools.data_factory.curator.derive import (
+from tools.data_factory.curator.dataset.materialize import (
     _require_spawn_parallel_encoding,
     _run_existing_validator,
     _validate_source_contract,
-    derive_dataset,
+    materialize_candidate as _materialize_candidate,
 )
-from tools.data_factory.curator.verify import (
+from tools.data_factory.curator.dataset.verify import (
     _accumulate_metrics,
     _image_metrics,
     _metric_accumulator,
@@ -38,6 +38,11 @@ from tools.data_factory.curator.verify import (
     verify_review_bundle,
 )
 from tools.fr5_dataset_schema import dataset_features
+
+
+def derive_dataset(source, output, profile, _obsolete_approval, **kwargs):
+    """Exercise the proven writer path through its v1.2 candidate-only API."""
+    return _materialize_candidate(source, output, profile, **kwargs)
 
 
 def _write(path: Path, value: object) -> None:
@@ -55,11 +60,11 @@ class ParallelEncodingContextTest(unittest.TestCase):
     def test_selects_spawn_before_writer_threads_and_rejects_fork(self):
         with (
             mock.patch(
-                "tools.data_factory.curator.derive.multiprocessing.get_start_method",
+                "tools.data_factory.curator.dataset.materialize.multiprocessing.get_start_method",
                 return_value=None,
             ),
             mock.patch(
-                "tools.data_factory.curator.derive.multiprocessing.set_start_method",
+                "tools.data_factory.curator.dataset.materialize.multiprocessing.set_start_method",
             ) as set_start_method,
         ):
             _require_spawn_parallel_encoding()
@@ -67,7 +72,7 @@ class ParallelEncodingContextTest(unittest.TestCase):
 
         with (
             mock.patch(
-                "tools.data_factory.curator.derive.multiprocessing.get_start_method",
+                "tools.data_factory.curator.dataset.materialize.multiprocessing.get_start_method",
                 return_value="fork",
             ),
             self.assertRaisesRegex(CuratorError, "PARALLEL_ENCODING_REQUIRES_SPAWN"),
@@ -76,11 +81,11 @@ class ParallelEncodingContextTest(unittest.TestCase):
 
         with (
             mock.patch(
-                "tools.data_factory.curator.derive.multiprocessing.get_start_method",
+                "tools.data_factory.curator.dataset.materialize.multiprocessing.get_start_method",
                 side_effect=[None, "fork"],
             ),
             mock.patch(
-                "tools.data_factory.curator.derive.multiprocessing.set_start_method",
+                "tools.data_factory.curator.dataset.materialize.multiprocessing.set_start_method",
                 side_effect=RuntimeError("context already selected"),
             ),
             self.assertRaisesRegex(CuratorError, "PARALLEL_ENCODING_REQUIRES_SPAWN"),
@@ -164,9 +169,10 @@ class DeriveIntegrationTest(unittest.TestCase):
         result = create_review_bundle(self.source, self.request_path, source_repo_id="local/source")
         self.profile_digest = result["profile_digest"]
         self.review_digest = result["review_bundle_digest"]
-        _request, self.resolved_profile, self.review_manifest = verify_review_bundle(
+        self.request, self.resolved_profile, self.review_manifest = verify_review_bundle(
             self.request_path,
         )
+        self.resolved_profile = {**self.resolved_profile, "physical_binding_status": "VERIFIED"}
         self.mocked_approval = {
             "approved_by": "TEST_ONLY_MOCKED_AUTHORITY",
             "approved_at": "2026-09-02T00:00:00Z",
@@ -239,7 +245,7 @@ class DeriveIntegrationTest(unittest.TestCase):
             )
 
     def _write_profile_files(self):
-        repository = Path(__file__).resolve().parents[3]
+        repository = Path(__file__).resolve().parents[4]
         collection_profile = json.loads(
             (
                 repository
@@ -336,8 +342,8 @@ class DeriveIntegrationTest(unittest.TestCase):
         stale_lock = self.root / ".derived.curator-publish.lock"
         stale_lock.write_text("obsolete lock must not block renameat2", encoding="utf-8")
         with mock.patch(
-            "tools.data_factory.curator.derive.verify_approval",
-            return_value=(self.mocked_approval, self.resolved_profile, self.review_manifest),
+            "tools.data_factory.curator.dataset.materialize.verify_review_bundle",
+            return_value=(self.request, self.resolved_profile, self.review_manifest),
         ):
             receipt = derive_dataset(
                 self.source,
@@ -429,7 +435,7 @@ class DeriveIntegrationTest(unittest.TestCase):
         self.assertIs(receipt["training_authority"], False)
         self.assertIs(receipt["approval_inherited"], False)
         self.assertIs(receipt["quarantine_inherited"], False)
-        self.assertTrue((self.root / "runs" / "run-1" / "receipt.json").is_file())
+        self.assertTrue((self.root / "runs" / "run-1" / "candidate_materialization.json").is_file())
 
     def test_post_write_fault_and_quarantined_source_never_publish(self):
         source_approval = self.source / "meta" / "training_approved.json"
@@ -439,8 +445,8 @@ class DeriveIntegrationTest(unittest.TestCase):
         )
         mismatch_output = self.root / "mismatch-derived"
         with mock.patch(
-            "tools.data_factory.curator.derive.verify_approval",
-            return_value=(self.mocked_approval, self.resolved_profile, self.review_manifest),
+            "tools.data_factory.curator.dataset.materialize.verify_review_bundle",
+            return_value=(self.request, self.resolved_profile, self.review_manifest),
         ):
             with self.assertRaisesRegex(CuratorError, "SOURCE_REVIEW_MISMATCH"):
                 derive_dataset(
@@ -463,11 +469,11 @@ class DeriveIntegrationTest(unittest.TestCase):
         output = self.root / "fault-derived"
         with (
             mock.patch(
-                "tools.data_factory.curator.derive.verify_approval",
-                return_value=(self.mocked_approval, self.resolved_profile, self.review_manifest),
+                "tools.data_factory.curator.dataset.materialize.verify_review_bundle",
+                return_value=(self.request, self.resolved_profile, self.review_manifest),
             ),
             mock.patch(
-                "tools.data_factory.curator.derive.verify_derived_dataset",
+                "tools.data_factory.curator.dataset.materialize.verify_derived_dataset",
                 side_effect=CuratorError("INJECTED_POST_WRITE_FAULT"),
             ),
         ):
@@ -490,8 +496,8 @@ class DeriveIntegrationTest(unittest.TestCase):
 
         write_json_atomic(self.source / "meta" / "quarantine.json", {"reason": "synthetic"})
         with mock.patch(
-            "tools.data_factory.curator.derive.verify_approval",
-            return_value=(self.mocked_approval, self.resolved_profile, self.review_manifest),
+            "tools.data_factory.curator.dataset.materialize.verify_review_bundle",
+            return_value=(self.request, self.resolved_profile, self.review_manifest),
         ):
             with self.assertRaisesRegex(CuratorError, "SOURCE_QUARANTINED"):
                 derive_dataset(
@@ -530,7 +536,7 @@ class DeriveIntegrationTest(unittest.TestCase):
         _write(self.request_path, request)
         with (
             mock.patch(
-                "tools.data_factory.curator.verify.write_rgb_png",
+                "tools.data_factory.curator.dataset.verify.write_rgb_png",
                 side_effect=KeyboardInterrupt,
             ),
             self.assertRaises(KeyboardInterrupt),
@@ -542,7 +548,7 @@ class DeriveIntegrationTest(unittest.TestCase):
         reference = self.assets / "interrupt-reference.png"
         with (
             mock.patch(
-                "tools.data_factory.curator.verify.assert_tree_identity",
+                "tools.data_factory.curator.dataset.verify.assert_tree_identity",
                 side_effect=KeyboardInterrupt,
             ),
             self.assertRaises(KeyboardInterrupt),
@@ -551,7 +557,7 @@ class DeriveIntegrationTest(unittest.TestCase):
         self.assertFalse(reference.exists())
 
     def test_asset_tamper_during_source_identity_never_publishes(self):
-        import tools.data_factory.curator.derive as derive_module
+        import tools.data_factory.curator.dataset.materialize as derive_module
 
         original = derive_module.stable_tree_identity
         tampered = False
@@ -570,11 +576,11 @@ class DeriveIntegrationTest(unittest.TestCase):
         output = self.root / "tampered-derived"
         with (
             mock.patch(
-                "tools.data_factory.curator.derive.verify_approval",
-                return_value=(self.mocked_approval, self.resolved_profile, self.review_manifest),
+                "tools.data_factory.curator.dataset.materialize.verify_review_bundle",
+                return_value=(self.request, self.resolved_profile, self.review_manifest),
             ),
             mock.patch(
-                "tools.data_factory.curator.derive.stable_tree_identity",
+                "tools.data_factory.curator.dataset.materialize.stable_tree_identity",
                 side_effect=stable_tree_identity_with_tamper,
             ),
         ):
@@ -612,7 +618,7 @@ class DeriveIntegrationTest(unittest.TestCase):
         self.assertEqual(tree_identity(self.source), before_identity)
 
     def test_same_size_preserved_mtime_source_change_never_publishes(self):
-        import tools.data_factory.curator.derive as derive_module
+        import tools.data_factory.curator.dataset.materialize as derive_module
 
         original_validator = derive_module._run_existing_validator
         target = self.source / "meta" / "recording_quality.jsonl"
@@ -632,11 +638,11 @@ class DeriveIntegrationTest(unittest.TestCase):
         run = self.root / "runs" / "run-source-mutated"
         with (
             mock.patch(
-                "tools.data_factory.curator.derive.verify_approval",
-                return_value=(self.mocked_approval, self.resolved_profile, self.review_manifest),
+                "tools.data_factory.curator.dataset.materialize.verify_review_bundle",
+                return_value=(self.request, self.resolved_profile, self.review_manifest),
             ),
             mock.patch(
-                "tools.data_factory.curator.derive._run_existing_validator",
+                "tools.data_factory.curator.dataset.materialize._run_existing_validator",
                 side_effect=mutate_after_validation,
             ),
         ):
@@ -660,11 +666,11 @@ class DeriveIntegrationTest(unittest.TestCase):
         run = self.root / "runs" / "run-tree-fsync"
         with (
             mock.patch(
-                "tools.data_factory.curator.derive.verify_approval",
-                return_value=(self.mocked_approval, self.resolved_profile, self.review_manifest),
+                "tools.data_factory.curator.dataset.materialize.verify_review_bundle",
+                return_value=(self.request, self.resolved_profile, self.review_manifest),
             ),
             mock.patch(
-                "tools.data_factory.curator.derive._fsync_tree",
+                "tools.data_factory.curator.dataset.materialize._fsync_tree",
                 side_effect=CuratorError("DERIVED_TREE_FSYNC", "injected"),
             ),
         ):
@@ -685,7 +691,7 @@ class DeriveIntegrationTest(unittest.TestCase):
         self.assertEqual(failure["cleanup_state"], "REMOVED")
 
     def test_committed_output_survives_parent_fsync_and_receipt_faults(self):
-        import tools.data_factory.curator.derive as derive_module
+        import tools.data_factory.curator.dataset.materialize as derive_module
 
         original_fsync_directory = derive_module._fsync_directory
         cases = ("parent-fsync", "receipt")
@@ -695,8 +701,8 @@ class DeriveIntegrationTest(unittest.TestCase):
                 run = self.root / "runs" / f"run-{case}"
                 patches = [
                     mock.patch(
-                        "tools.data_factory.curator.derive.verify_approval",
-                        return_value=(self.mocked_approval, self.resolved_profile, self.review_manifest),
+                        "tools.data_factory.curator.dataset.materialize.verify_review_bundle",
+                        return_value=(self.request, self.resolved_profile, self.review_manifest),
                     ),
                 ]
                 expected_code = "OUTPUT_COMMITTED_PARENT_FSYNC_FAILED"
@@ -708,7 +714,7 @@ class DeriveIntegrationTest(unittest.TestCase):
                         return original_fsync_directory(path)
 
                     patches.append(mock.patch(
-                        "tools.data_factory.curator.derive._fsync_directory",
+                        "tools.data_factory.curator.dataset.materialize._fsync_directory",
                         side_effect=fail_output_parent,
                     ))
                 else:
@@ -716,12 +722,12 @@ class DeriveIntegrationTest(unittest.TestCase):
                     expected_state = "COMMITTED_RECEIPT_FAILED"
 
                     def receipt_fault(path, value):
-                        if Path(path).name == "receipt.json":
+                        if Path(path).name == "candidate_materialization.json":
                             raise OSError("injected receipt fault")
                         return write_json_atomic(path, value)
 
                     patches.append(mock.patch(
-                        "tools.data_factory.curator.derive.write_json_atomic",
+                        "tools.data_factory.curator.dataset.materialize.write_json_exclusive",
                         side_effect=receipt_fault,
                     ))
                 with ExitStack() as stack:
@@ -766,8 +772,8 @@ class DeriveIntegrationTest(unittest.TestCase):
 
                 patches = [
                     mock.patch(
-                        "tools.data_factory.curator.derive.verify_approval",
-                        return_value=(self.mocked_approval, self.resolved_profile, self.review_manifest),
+                        "tools.data_factory.curator.dataset.materialize.verify_review_bundle",
+                        return_value=(self.request, self.resolved_profile, self.review_manifest),
                     ),
                     mock.patch.object(self.LeRobotDataset, "finalize", new=finalize),
                 ]
@@ -819,8 +825,8 @@ class DeriveIntegrationTest(unittest.TestCase):
         temporary = self.root / ".interrupt-derived.run-interrupt.curator-tmp"
         with (
             mock.patch(
-                "tools.data_factory.curator.derive.verify_approval",
-                return_value=(self.mocked_approval, self.resolved_profile, self.review_manifest),
+                "tools.data_factory.curator.dataset.materialize.verify_review_bundle",
+                return_value=(self.request, self.resolved_profile, self.review_manifest),
             ),
             mock.patch.object(
                 self.LeRobotDataset,
@@ -868,8 +874,8 @@ class DeriveIntegrationTest(unittest.TestCase):
 
         with (
             mock.patch(
-                "tools.data_factory.curator.derive.verify_approval",
-                return_value=(self.mocked_approval, self.resolved_profile, self.review_manifest),
+                "tools.data_factory.curator.dataset.materialize.verify_review_bundle",
+                return_value=(self.request, self.resolved_profile, self.review_manifest),
             ),
             mock.patch.object(self.LeRobotDataset, "add_frame", new=substitute),
             mock.patch.object(self.LeRobotDataset, "finalize", new=finalize),
@@ -906,8 +912,8 @@ class DeriveIntegrationTest(unittest.TestCase):
 
         with (
             mock.patch(
-                "tools.data_factory.curator.derive.verify_approval",
-                return_value=(self.mocked_approval, self.resolved_profile, self.review_manifest),
+                "tools.data_factory.curator.dataset.materialize.verify_review_bundle",
+                return_value=(self.request, self.resolved_profile, self.review_manifest),
             ),
             mock.patch.object(self.LeRobotDataset, "add_frame", new=substitute),
             mock.patch.object(self.LeRobotDataset, "finalize", new=original_finalize),
@@ -986,7 +992,7 @@ class DeriveContractTest(unittest.TestCase):
             _validate_source_contract(Dataset(), {"width": 640, "height": 480})
 
         completed = SimpleNamespace(returncode=0, stdout="PASS\n", stderr="")
-        with mock.patch("tools.data_factory.curator.derive.subprocess.run", return_value=completed) as run:
+        with mock.patch("tools.data_factory.curator.dataset.materialize.subprocess.run", return_value=completed) as run:
             _run_existing_validator(Path("/tmp/derived"), "local/derived")
         command = run.call_args.args[0]
         self.assertEqual(command[command.index("--expected-fps") + 1], "30")
