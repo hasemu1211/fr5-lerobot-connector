@@ -144,7 +144,7 @@ class OperatorProjectionTests(unittest.TestCase):
                 "config/data_factory/test_only_physical/goal2-place1/"
                 "center-live-p45-20260821-r001.job.json",
                 "config/data_factory/jobs/"
-                "center-live-24mm-20260901-r001.job.json",
+                "center-live-24mm-20260903-r002.job.json",
             } <= {
                 item["sources"]["job"]
                 for item in pick_place_combinations

@@ -239,21 +239,34 @@ def project_cells(
     catalog: Mapping[str, Any], selection: Mapping[str, Any], *,
     split: str, repeat: int,
 ) -> list[dict[str, Any]]:
+    compatible_cells: set[str] = set()
+    executable_cells: set[str] = set()
+    for combination in catalog["combinations"]:
+        if (
+            all(
+                combination.get(field) == selection[field]
+                for _ui, (_axis, field) in AXIS_BINDINGS.items()
+            )
+            and combination.get("camera_profile_id")
+            == selection["camera_profile_id"]
+            and combination.get("camera_device_id")
+            == selection["camera_device_id"]
+            and combination.get("authoring", {}).get("selectable") is True
+        ):
+            cell_id = combination.get("cell_id")
+            if isinstance(cell_id, str):
+                compatible_cells.add(cell_id)
+                if (
+                    combination.get("execution", {})
+                    .get(selection["data_mode"], {})
+                    .get("executable") is True
+                ):
+                    executable_cells.add(cell_id)
     result = []
     for option in catalog["axes"]["cell"]:
         metadata = option.get("metadata", {})
         selected = option["id"] == selection["cell_id"]
-        compatible = any(
-            combination.get("cell_id") == option["id"]
-            and all(
-                combination.get(field) == selection[field]
-                for _ui, (_axis, field) in AXIS_BINDINGS.items()
-            )
-            and combination.get("camera_profile_id") == selection["camera_profile_id"]
-            and combination.get("camera_device_id") == selection["camera_device_id"]
-            and combination.get("authoring", {}).get("selectable") is True
-            for combination in catalog["combinations"]
-        )
+        compatible = option["id"] in compatible_cells
         result.append({
             "cell_id": option["id"],
             "x_mm": metadata.get("x_mm", 0),
@@ -266,19 +279,7 @@ def project_cells(
             "eligibility_status": "ELIGIBLE" if selected or compatible else "BLOCKED",
             "reason_codes": [(
                 "EXACT_QUALIFIED_COMBINATION"
-                if any(
-                    combination.get("cell_id") == option["id"]
-                    and all(
-                        combination.get(field) == selection[field]
-                        for _ui, (_axis, field) in AXIS_BINDINGS.items()
-                    )
-                    and combination.get("camera_profile_id") == selection["camera_profile_id"]
-                    and combination.get("camera_device_id") == selection["camera_device_id"]
-                    and combination.get("execution", {})
-                    .get(selection["data_mode"], {})
-                    .get("executable") is True
-                    for combination in catalog["combinations"]
-                )
+                if option["id"] in executable_cells
                 else "MOTION_QUALIFICATION_REQUIRED" if selected or compatible
                 else "QUALIFICATION_REQUIRED"
             )],

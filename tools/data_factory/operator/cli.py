@@ -10,7 +10,7 @@ from tools.fr5_data_factory import ContractError
 
 
 DEFAULT_JOB = (
-    "config/data_factory/jobs/center-live-24mm-20260901-r001.job.json"
+    "config/data_factory/jobs/center-live-24mm-20260903-r002.job.json"
 )
 
 

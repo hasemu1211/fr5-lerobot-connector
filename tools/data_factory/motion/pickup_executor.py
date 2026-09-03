@@ -19,6 +19,7 @@ if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 
 from tools.fr5_data_factory import (
+    DIGEST,
     RFC3339,
     SAFE_ID,
     ContractError,
@@ -217,16 +218,84 @@ class UnavailableTransport:
 class PickupExecutor:
     """Compile and approve plans; real execution stays opt-in for tests only."""
 
-    def __init__(self, transport=None, clock=None, monotonic_clock=None, cell_state_store=None, scene_state_store=None, execution_enabled=False, phase_events_root=None, event_clock=None):
+    def __init__(
+        self, transport=None, clock=None, monotonic_clock=None,
+        cell_state_store=None, scene_state_store=None, execution_enabled=False,
+        phase_events_root=None, event_clock=None,
+        motion_only_binding_digest=None,
+        motion_only_parent_run_id=None,
+        motion_only_parent_plan_digest=None,
+        motion_only_preapproval_scope_digest=None,
+        motion_only_expected_run_id=None,
+        motion_only_expected_resolved_job_digest=None,
+        motion_only_expected_program_digest=None,
+        motion_only_expected_scene_digest=None,
+        motion_only_expectation_digest=None,
+    ):
+        motion_only_values = (
+            motion_only_binding_digest, motion_only_parent_run_id,
+            motion_only_parent_plan_digest,
+            motion_only_preapproval_scope_digest,
+            motion_only_expected_run_id,
+            motion_only_expected_resolved_job_digest,
+            motion_only_expected_program_digest,
+            motion_only_expected_scene_digest,
+            motion_only_expectation_digest,
+        )
+        if any(value is not None for value in motion_only_values) != all(
+            value is not None for value in motion_only_values
+        ) or motion_only_binding_digest is not None and (
+            not execution_enabled
+            or not isinstance(motion_only_binding_digest, str)
+            or DIGEST.fullmatch(motion_only_binding_digest) is None
+            or not isinstance(motion_only_parent_run_id, str)
+            or SAFE_ID.fullmatch(motion_only_parent_run_id) is None
+            or not isinstance(motion_only_parent_plan_digest, str)
+            or DIGEST.fullmatch(motion_only_parent_plan_digest) is None
+            or not isinstance(motion_only_preapproval_scope_digest, str)
+            or DIGEST.fullmatch(motion_only_preapproval_scope_digest) is None
+            or not isinstance(motion_only_expected_run_id, str)
+            or SAFE_ID.fullmatch(motion_only_expected_run_id) is None
+            or any(
+                not isinstance(value, str) or DIGEST.fullmatch(value) is None
+                for value in (
+                    motion_only_expected_resolved_job_digest,
+                    motion_only_expected_program_digest,
+                    motion_only_expected_scene_digest,
+                    motion_only_expectation_digest,
+                )
+            )
+        ):
+            raise ContractError("MOTION_ONLY_BINDING")
         self.transport = transport or UnavailableTransport()
         self.clock = clock or (lambda: datetime.now(timezone.utc))
         self.monotonic_clock = monotonic_clock or time.monotonic
         self.cell_state_store = cell_state_store
         self.scene_state_store = scene_state_store
         self.execution_enabled = execution_enabled
+        self.motion_only_binding_digest = motion_only_binding_digest
+        self.motion_only_parent_run_id = motion_only_parent_run_id
+        self.motion_only_parent_plan_digest = motion_only_parent_plan_digest
+        self.motion_only_preapproval_scope_digest = (
+            motion_only_preapproval_scope_digest
+        )
+        self.motion_only_expected_run_id = motion_only_expected_run_id
+        self.motion_only_expected_resolved_job_digest = (
+            motion_only_expected_resolved_job_digest
+        )
+        self.motion_only_expected_program_digest = (
+            motion_only_expected_program_digest
+        )
+        self.motion_only_expected_scene_digest = (
+            motion_only_expected_scene_digest
+        )
+        self.motion_only_expectation_digest = motion_only_expectation_digest
         self.phase_events_root = Path(phase_events_root) if phase_events_root is not None else None
         self.event_clock = event_clock or (lambda: (time.time_ns(), "SYSTEM_TIME"))
-        self.mode = "LIVE" if execution_enabled else MODE
+        self.mode = (
+            "LIVE_MOTION_ONLY" if motion_only_binding_digest is not None
+            else "LIVE" if execution_enabled else MODE
+        )
         self.cache = {}
         self.runs = {}
         self._phase_event_writer = None
@@ -262,7 +331,11 @@ class PickupExecutor:
                 "event_ros_time_ns": event_ros_time_ns,
                 "monotonic_time_ns": int(round(self.monotonic_clock() * 1_000_000_000)),
                 "ros_clock_type": ros_clock_type,
-                "event_source": "pickup_executor",
+                "event_source": (
+                    "object_reposition_executor"
+                    if self.motion_only_binding_digest is not None
+                    else "pickup_executor"
+                ),
                 "action_status": action_status,
                 "evidence_digest": canonical_digest(evidence),
             }
@@ -320,8 +393,40 @@ class PickupExecutor:
 
     def _preflight(self, payload):
         _exact(payload, {"motion_program"}, "PREFLIGHT_SCHEMA")
+        if self.motion_only_binding_digest is not None:
+            raise ContractError("MOTION_ONLY_CONTINUATION_BINDING")
         facts = self._validated_preflight(payload["motion_program"])
         return _response(code="PREFLIGHT_OK", ok=True, state="PREFLIGHT", data=facts)
+
+    def _validate_motion_only_continuation(
+        self, run_id, motion_program, scene_binding,
+    ):
+        if self.motion_only_binding_digest is None:
+            return
+        expectation = {
+            "schema_version": "data_factory.motion_only_continuation.v1",
+            "preapproval_scope_digest":
+                self.motion_only_preapproval_scope_digest,
+            "object_reposition_binding_digest":
+                self.motion_only_binding_digest,
+            "run_id": run_id,
+            "resolved_job_digest": motion_program["resolved_job_digest"],
+            "motion_program_digest": canonical_digest(motion_program),
+            "scene_binding_digest": canonical_digest(scene_binding),
+        }
+        expectation["expectation_digest"] = canonical_digest(expectation)
+        if (
+            run_id != self.motion_only_expected_run_id
+            or motion_program["resolved_job_digest"]
+            != self.motion_only_expected_resolved_job_digest
+            or expectation["motion_program_digest"]
+            != self.motion_only_expected_program_digest
+            or expectation["scene_binding_digest"]
+            != self.motion_only_expected_scene_digest
+            or expectation["expectation_digest"]
+            != self.motion_only_expectation_digest
+        ):
+            raise ContractError("MOTION_ONLY_CONTINUATION_BINDING")
 
     def _plan(self, payload):
         _exact(payload, {"run_id", "motion_program", "scene_binding"}, "PLAN_SCHEMA")
@@ -335,6 +440,9 @@ class PickupExecutor:
 
         motion_program = validate_motion_program(copy.deepcopy(payload["motion_program"]))
         scene_binding = validate_scene_binding(payload["scene_binding"])
+        self._validate_motion_only_continuation(
+            run_id, motion_program, scene_binding,
+        )
         action_graph = self._validated_preflight(motion_program)
         observed = self.transport.snapshot(motion_program["planning"]["max_joint_state_age_s"])
         observed = _exact(
@@ -669,8 +777,18 @@ class PickupExecutor:
             raise ContractError("SCENE_STATE_REQUIRED")
         try:
             cell = self.cell_state_store.read()
-            if cell["robot_system_id"] != run["plan"]["robot_system_id"] or not cell["cell_ready"]:
+            if cell["robot_system_id"] != run["plan"]["robot_system_id"]:
                 raise ContractError("CELL_NOT_READY")
+            if self.motion_only_binding_digest is None:
+                if not cell["cell_ready"]:
+                    raise ContractError("CELL_NOT_READY")
+            elif (
+                cell.get("cell_ready") is not False
+                or cell.get("run_id") != self.motion_only_parent_run_id
+                or cell.get("plan_digest")
+                != self.motion_only_parent_plan_digest
+            ):
+                raise ContractError("MOTION_ONLY_PARENT_CELL")
             binding = run["plan"]["scene_binding"]
             execution_scene_digest = binding["scene_state_digest"]
             execution_scene_revision = binding["revision"]
@@ -691,10 +809,11 @@ class PickupExecutor:
                     raise ContractError("SCENE_STATE_CHANGED")
                 if not isinstance(item, dict) or item.get("state") != "ON_SURFACE":
                     raise ContractError("SCENE_OBJECT_NOT_READY")
-                try:
-                    self.cell_state_store.mark_blocked("EXECUTION_IN_PROGRESS", run["plan"]["run_id"], run["digest"])
-                except Exception as exc:
-                    raise ContractError("CELL_STATE_ARMING_FAILED") from exc
+                if self.motion_only_binding_digest is None:
+                    try:
+                        self.cell_state_store.mark_blocked("EXECUTION_IN_PROGRESS", run["plan"]["run_id"], run["digest"])
+                    except Exception as exc:
+                        raise ContractError("CELL_STATE_ARMING_FAILED") from exc
                 run["execution"] = {"lease_id": payload["lease_id"], "lease_deadline": self.monotonic_clock() + run["plan"]["execution_timeouts_s"]["heartbeat_lease"], "step_index": 0, "grasp_verdict": None, "semantic_verdict": None, "release_verdict": None, "snapshot": None, "active": False, "scene_object": copy.deepcopy(item), "scene_state_digest": execution_scene_digest, "scene_revision": execution_scene_revision, "terminal_phases": [], "phase_event_sequence": 0}
                 if self.phase_events_root is not None:
                     path = self.phase_events_root / run["plan"]["run_id"] / "phase_events.jsonl"
@@ -975,18 +1094,54 @@ class PickupExecutor:
                         self._start_current_step(run)
 
     def _heartbeat(self, payload):
-        run = self._execution_payload(payload, {"run_id", "plan_digest", "lease_id", "recorder_health"}, "HEARTBEAT_SCHEMA")
-        health = _exact(payload["recorder_health"], {"writer_alive", "writer_error"}, "HEARTBEAT_SCHEMA")
+        if self.motion_only_binding_digest is None:
+            run = self._execution_payload(
+                payload,
+                {"run_id", "plan_digest", "lease_id", "recorder_health"},
+                "HEARTBEAT_SCHEMA",
+            )
+            health = _exact(
+                payload["recorder_health"],
+                {"writer_alive", "writer_error"}, "HEARTBEAT_SCHEMA",
+            )
+            alive, error, failure_code = (
+                health["writer_alive"], health["writer_error"],
+                "RECORDER_WRITER_FAULT",
+            )
+        else:
+            run = self._execution_payload(
+                payload,
+                {"run_id", "plan_digest", "lease_id", "motion_owner_health"},
+                "HEARTBEAT_SCHEMA",
+            )
+            health = _exact(
+                payload["motion_owner_health"],
+                {
+                    "owner_alive", "owner_error", "recording_scope",
+                    "object_reposition_binding_digest",
+                },
+                "HEARTBEAT_SCHEMA",
+            )
+            if (
+                health.get("recording_scope") != "OUT_OF_DATASET"
+                or health.get("object_reposition_binding_digest")
+                != self.motion_only_binding_digest
+            ):
+                raise ContractError("MOTION_ONLY_BINDING")
+            alive, error, failure_code = (
+                health["owner_alive"], health["owner_error"],
+                "MOTION_OWNER_FAULT",
+            )
         if not isinstance(payload["lease_id"], str) or not SAFE_ID.fullmatch(payload["lease_id"]) or payload["lease_id"] != run.get("execution", {}).get("lease_id"):
             raise ContractError("LEASE_BINDING")
-        if type(health["writer_alive"]) is not bool or health["writer_error"] is not None and not isinstance(health["writer_error"], str):
+        if type(alive) is not bool or error is not None and not isinstance(error, str):
             raise ContractError("HEARTBEAT_SCHEMA")
         if run["state"] in {"BLOCKED", "COMPLETED"}:
             return self._execution_response(run, payload["run_id"], payload["plan_digest"], "HEARTBEAT_OK")
         if run["state"] not in ACTIVE_STATES:
             raise ContractError("EXECUTION_STATE")
-        if not health["writer_alive"] or health["writer_error"] is not None:
-            self._fault(run, "RECORDER_WRITER_FAULT")
+        if not alive or error is not None:
+            self._fault(run, failure_code)
             return self._execution_response(run, payload["run_id"], payload["plan_digest"], "HEARTBEAT_OK")
         run["execution"]["lease_deadline"] = self.monotonic_clock() + run["plan"]["execution_timeouts_s"]["heartbeat_lease"]
         return self._execution_response(run, payload["run_id"], payload["plan_digest"], "HEARTBEAT_OK")
@@ -1211,6 +1366,15 @@ def main(argv=None):
     parser.add_argument("--robot-system-id")
     parser.add_argument("--cell-state-root")
     parser.add_argument("--phase-events-root")
+    parser.add_argument("--motion-only-binding-digest")
+    parser.add_argument("--motion-only-parent-run-id")
+    parser.add_argument("--motion-only-parent-plan-digest")
+    parser.add_argument("--motion-only-preapproval-scope-digest")
+    parser.add_argument("--motion-only-expected-run-id")
+    parser.add_argument("--motion-only-expected-resolved-job-digest")
+    parser.add_argument("--motion-only-expected-program-digest")
+    parser.add_argument("--motion-only-expected-scene-digest")
+    parser.add_argument("--motion-only-expectation-digest")
     args = parser.parse_args(argv)
     if not args.factory_jsonl:
         parser.error("--factory-jsonl required")
@@ -1228,7 +1392,18 @@ def main(argv=None):
             scene_state_store = SceneStateStore(args.cell_state_root, args.robot_system_id)
         except ContractError as exc:
             parser.error(exc.code)
-    elif args.robot_system_id or args.cell_state_root or args.phase_events_root:
+    elif (
+        args.robot_system_id or args.cell_state_root or args.phase_events_root
+        or args.motion_only_binding_digest
+        or args.motion_only_parent_run_id
+        or args.motion_only_parent_plan_digest
+        or args.motion_only_preapproval_scope_digest
+        or args.motion_only_expected_run_id
+        or args.motion_only_expected_resolved_job_digest
+        or args.motion_only_expected_program_digest
+        or args.motion_only_expected_scene_digest
+        or args.motion_only_expectation_digest
+    ):
         parser.error("--robot-system-id, --cell-state-root, and --phase-events-root require --ros-live")
     else:
         cell_state_store = None
@@ -1245,7 +1420,12 @@ def main(argv=None):
             else:
                 from .moveit_transport import RosMoveItTransport
             rclpy.init()
-            node = rclpy.create_node("fr5_pickup_live" if args.ros_live else "fr5_pickup_plan_only")
+            node = rclpy.create_node(
+                "fr5_object_reposition_live"
+                if args.motion_only_binding_digest
+                else "fr5_pickup_live" if args.ros_live
+                else "fr5_pickup_plan_only"
+            )
             transport = RosMoveItTransport(node)
         except (ContractError, ImportError, RuntimeError) as exc:
             print(
@@ -1270,6 +1450,23 @@ def main(argv=None):
         execution_enabled=args.ros_live,
         phase_events_root=args.phase_events_root,
         event_clock=(lambda: (node.get_clock().now().nanoseconds, "ROS_TIME")) if node is not None else None,
+        motion_only_binding_digest=args.motion_only_binding_digest,
+        motion_only_parent_run_id=args.motion_only_parent_run_id,
+        motion_only_parent_plan_digest=args.motion_only_parent_plan_digest,
+        motion_only_preapproval_scope_digest=(
+            args.motion_only_preapproval_scope_digest
+        ),
+        motion_only_expected_run_id=args.motion_only_expected_run_id,
+        motion_only_expected_resolved_job_digest=(
+            args.motion_only_expected_resolved_job_digest
+        ),
+        motion_only_expected_program_digest=(
+            args.motion_only_expected_program_digest
+        ),
+        motion_only_expected_scene_digest=(
+            args.motion_only_expected_scene_digest
+        ),
+        motion_only_expectation_digest=args.motion_only_expectation_digest,
     )
     try:
         return 0 if run_jsonl(sys.stdin, sys.stdout, executor) else 2

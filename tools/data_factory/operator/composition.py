@@ -11,12 +11,33 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
 
+from tools.a4_place_yaw.region_layout import (
+    a4_printable_polygon,
+    make_red_blue_region_layout,
+    workspace_region,
+)
 from tools.data_factory import run_job
 from tools.data_factory.campaign_authoring import campaign_cell_id
 from tools.data_factory.campaign_operator import CampaignOperator, SIDE_EFFECT_COUNTERS
 from tools.data_factory.cell_state import CellStateStore
+from tools.data_factory.collection_seed import (
+    derive_domain_seed as _domain_seed,
+    trajectory_sampling_binding,
+    validate_campaign_seed,
+)
 from tools.data_factory.experiment_manifest import compile_fr5_hypothesis
 from tools.data_factory.one_job import OneJob, TEST_ONLY_READINESS_CONTRACT
+from tools.data_factory.motion.trajectory_variants import VARIANT_IDS
+from tools.data_factory.motion.object_reposition import (
+    build_object_reposition_binding,
+    yaw_preserving_destination,
+)
+from tools.data_factory.state_space import (
+    YAW_BINDING_SCHEMA,
+    validate_state_space_design_profile,
+    validate_yaw_sample_binding,
+    validate_yaw_sampling_profile,
+)
 from tools.data_factory.operator.preview import (
     QA_WORKFLOW as FAKE_QA_WORKFLOW,
     TEST_OPERATOR,
@@ -35,9 +56,11 @@ from tools.data_factory.operator.catalog import (
     project_balanced_start_pose_ids,
     project_direct_poses,
     project_workspace_cycle_poses,
+    project_yaw_sample_bindings,
     resolve_workspace_cycle_selections,
     validate_operator_pose,
     validate_operator_selection,
+    validate_yaw_preserving_transitions,
 )
 from tools.data_factory.operator.registries.start_pose import (
     compile_start_pose_profile,
@@ -98,6 +121,7 @@ from tools.data_factory.operator.workflow.campaign import (
     _campaign_camera_warmup,
     _derive_test_only_gripper_program,
     _home_start_pose,
+    _validate_successful_object_reposition_result,
     _validate_test_only_gripper_retune,
 )
 from tools.data_factory.quality.coverage_report import build_coverage_report
@@ -108,6 +132,11 @@ from tools.data_factory.task_recipe import (
     compile_task_binding,
     get_task_recipe,
     validate_region_binding,
+)
+from tools.data_factory.workspace_geometry import (
+    point_in_convex_polygon,
+    rotate_xy,
+    safe_convex_polygon_for_yaws,
 )
 from tools.fr5_data_factory import (
     ContractError,
@@ -121,6 +150,18 @@ from tools.fr5_data_factory import (
 
 
 ROOT = Path(__file__).resolve().parents[3]
+MIN_CAMPAIGN_AUTHORIZATION_TTL = timedelta(hours=1)
+CAMPAIGN_STARTUP_MARGIN = timedelta(minutes=15)
+QUALIFIED_EPISODE_RUNTIME = timedelta(minutes=2)
+
+
+def _campaign_authorization_ttl(requested_count: int) -> timedelta:
+    if type(requested_count) is not int or not 1 <= requested_count <= 100:
+        raise ContractError("PHYSICAL_CONSOLE_REQUESTED_COUNT")
+    return max(
+        MIN_CAMPAIGN_AUTHORIZATION_TTL,
+        CAMPAIGN_STARTUP_MARGIN + QUALIFIED_EPISODE_RUNTIME * requested_count,
+    )
 
 
 def _repository_path(repository: Path, value: str | Path) -> Path:
@@ -357,6 +398,49 @@ def _resolve_physical_pose_domain(
     return result
 
 
+def _validate_recorded_release_region(
+    *, recorded_pose: Mapping[str, Any], target_yaw_deg: float,
+    endpoint: Mapping[str, Any], resolved_destination: Mapping[str, Any],
+) -> None:
+    """Keep one physical release point safe before and after post-recording yaw."""
+    try:
+        binding = endpoint["region_binding"]
+        if binding["physical_binding_status"] == "NOT_CONFIGURED":
+            polygon = a4_printable_polygon()
+        else:
+            layout = make_red_blue_region_layout()
+            region = workspace_region(layout, recorded_pose["place_id"])
+            if binding != {
+                "layout_id": layout["layout_id"],
+                "layout_digest": layout["layout_digest"],
+                "region_id": region["region_id"],
+                "physical_binding_status": binding["physical_binding_status"],
+            }:
+                raise ValueError("region binding")
+            polygon = region["polygon_local_xy_mm"]
+        safe_polygon = safe_convex_polygon_for_yaws(
+            polygon=polygon,
+            object_size_xy_mm=resolved_destination["object_profile"][
+                "dimensions_mm"
+            ][:2],
+            uncertainty_mm=resolved_destination["calibration"]["document"][
+                "limits"
+            ]["combined_error_bound_mm"],
+            yaw_degs=(recorded_pose["yaw_deg"], target_yaw_deg),
+        )
+        sheet_xy = rotate_xy(
+            (recorded_pose["x_mm"], recorded_pose["y_mm"]),
+            recorded_pose["yaw_deg"],
+        )
+    except (KeyError, TypeError, ValueError, IndexError) as exc:
+        raise ContractError("PHYSICAL_CONSOLE_WORKSPACE_BINDING") from exc
+    if not point_in_convex_polygon(sheet_xy, safe_polygon):
+        raise ContractError(
+            "JOB_COORDINATE_BOUNDS",
+            str((recorded_pose["x_mm"], recorded_pose["y_mm"])),
+        )
+
+
 def _product_fixture(
     pose_sequence: Sequence[Mapping[str, Any]] | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
@@ -568,6 +652,7 @@ def _catalog(
         and item["frame_id"] == "place-a-yaw0-r002"
         and item["task_id"] == "pickup_e2e"
         and item["cell_id"] == "PLACE_A-yaw0-CENTER"
+        and item["variant_id"] == "DIRECT"
         and item["camera_profile_id"] == "fr5-up-rgb-30hz-v1"
         and item["execution"]["TEST_COLLECTION"]["executable"] is True
     ]
@@ -890,7 +975,12 @@ class ProductFakeOperator:
                     pose_sequence = project_assisted_poses(
                         self.application.catalog, selected, initial_pose,
                         draft["requested_count"], repeat=draft["repeat"],
-                        normalized_seed=draft["normalized_seed"],
+                        normalized_seed=_domain_seed(
+                            draft["normalized_seed"], "spatial",
+                        ),
+                        yaw_sampling_seed=_domain_seed(
+                            draft["normalized_seed"], "yaw",
+                        ),
                     )
                     campaign_hypothesis, campaign_template = _product_fixture(
                         pose_sequence,
@@ -975,10 +1065,18 @@ class ProductFakeOperator:
                     decision_provider, checkpoint_provider,
                 ):
                     driver = holder["driver"]
+
+                    def bind_reposition_preapproval(request):
+                        bound = copy.deepcopy(dict(request))
+                        bound["decision_binding"][
+                            "object_reposition_preapproval"
+                        ] = None
+                        return decision_provider(bound)
+
                     outcome = driver.run_episode(
                         intent, lifecycle, cancel_event,
                         _bind_fake_episode_context(driver, intent, episode_context),
-                        decision_provider, checkpoint_provider,
+                        bind_reposition_preapproval, checkpoint_provider,
                     )
                     result = outcome.get("result")
                     technical = outcome.get("technical_evidence")
@@ -1522,9 +1620,13 @@ def build_physical_operator_console(
     gripper_maintenance_call: Callable[[Mapping[str, Any]], Mapping[str, Any]] | None = None,
     run_live_call: Callable[..., Mapping[str, Any]] = run_job.run_live,
     task_id: str | None = None,
+    trajectory_variant_id: str = "DIRECT",
     requested_count: int = 1, normalized_seed: int = 0,
     candidate_poses: Sequence[Mapping[str, Any]] | None = None,
     direct_pose_sequence: Sequence[Mapping[str, Any]] | None = None,
+    direct_yaw_sample_bindings: Sequence[Mapping[str, Any] | None] | None = None,
+    yaw_sampling_profile: Mapping[str, Any] | None = None,
+    state_space_design_profile: Mapping[str, Any] | None = None,
     direct_start_pose_ids: Sequence[str] | None = None,
     selected_start_pose_qualifications: Sequence[Mapping[str, Any]] | None = None,
     start_transition_call: Callable[[Mapping[str, Any], Mapping[str, Any]], Mapping[str, Any]] | None = None,
@@ -1535,10 +1637,12 @@ def build_physical_operator_console(
     clock=None,
 ) -> tuple[OperatorConsole, dict[str, Any]]:
     """Compose one finite registered-workspace physical campaign without activation."""
+    normalized_seed = validate_campaign_seed(normalized_seed)
     repository = Path(repository_root).resolve(strict=True)
     clock = clock or (lambda: datetime.now(timezone.utc))
     if (
         data_disposition not in {"TEST_ONLY", "PRODUCTION"}
+        or trajectory_variant_id not in VARIANT_IDS
         or data_disposition == "TEST_ONLY" and dataset_root is not None
         or data_disposition == "PRODUCTION" and dataset_root is None
         or data_disposition == "PRODUCTION" and gripper_retune_path is not None
@@ -1629,8 +1733,24 @@ def build_physical_operator_console(
         ):
             raise ContractError("PHYSICAL_CONSOLE_SEQUENCE_ANCHOR")
         pose_domain = [copy.deepcopy(dict(item)) for item in direct_pose_sequence]
+        if (
+            direct_yaw_sample_bindings is not None
+            and (
+                not isinstance(direct_yaw_sample_bindings, (list, tuple))
+                or len(direct_yaw_sample_bindings) != len(pose_domain)
+                or any(
+                    item is not None and not isinstance(item, Mapping)
+                    for item in direct_yaw_sample_bindings
+                )
+            )
+        ):
+            raise ContractError("PHYSICAL_CONSOLE_YAW_BINDING")
     else:
-        if direct_start_pose_ids is not None or template_job["task"] == "pick_place":
+        if (
+            direct_start_pose_ids is not None
+            or direct_yaw_sample_bindings is not None
+            or template_job["task"] == "pick_place"
+        ):
             raise ContractError("PHYSICAL_CONSOLE_DIRECT_SEQUENCE")
         pose_domain = [
             copy.deepcopy(dict(item))
@@ -1713,6 +1833,8 @@ def build_physical_operator_console(
         "home_candidate": str(paths["home"]), "urdf": str(paths["urdf"]),
         "expected_robot_system_id": template_job["robot_system_id"],
         "camera_profile": configured_profile["camera_profile"],
+        run_job.TRAJECTORY_VARIANT_KEY: trajectory_variant_id,
+        run_job.TRAJECTORY_SAMPLING_SEED_KEY: normalized_seed,
     }
     retune = (
         None if gripper_retune_path is None
@@ -1743,7 +1865,14 @@ def build_physical_operator_console(
         operator_label=operator_label, payload_template=payload,
         sheet_manifest=paths["yaw0_sheet"],
         release_poses=(
-            [*pose_domain[1:], pose_domain[-2]]
+            [
+                yaw_preserving_destination(
+                    source,
+                    pose_domain[index + 1]
+                    if index + 1 < len(pose_domain) else pose_domain[-2],
+                )
+                for index, source in enumerate(pose_domain)
+            ]
             if template_job["task"] == "pick_place" else None
         ),
         workspace_bindings=resolved_workspace_bindings,
@@ -1783,15 +1912,65 @@ def build_physical_operator_console(
         ]
     task_bindings = None
     episode_instruction_bindings = None
+    yaw_sample_bindings: list[dict[str, Any] | None] | None = None
+    checked_yaw_profile = None
+    checked_state_space_design_profile = None
+    recorded_release_poses: list[dict[str, Any]] | None = None
+    reposition_bindings: list[dict[str, Any] | None] | None = None
     if ordered_direct_resolved is not None:
-        def spatial_binding(item: Mapping[str, Any], role: str) -> dict[str, Any]:
+        yaw_sample_bindings = (
+            list(direct_yaw_sample_bindings)
+            if direct_yaw_sample_bindings is not None
+            else [None for _item in ordered_direct_resolved]
+        )
+        checked_yaw_profile = (
+            None if yaw_sampling_profile is None
+            else validate_yaw_sampling_profile(
+                yaw_sampling_profile,
+                object_profile=resolved["object_profile"],
+                grasp_profile=resolved["grasp_profile"],
+            )
+        )
+        if checked_yaw_profile is None and any(
+            item is not None for item in yaw_sample_bindings
+        ):
+            raise ContractError("PHYSICAL_CONSOLE_YAW_PROFILE")
+        if state_space_design_profile is not None:
+            if checked_yaw_profile is None:
+                raise ContractError("PHYSICAL_CONSOLE_STATE_SPACE_DESIGN")
+            checked_state_space_design_profile = (
+                validate_state_space_design_profile(
+                    state_space_design_profile,
+                    object_profile=resolved["object_profile"],
+                    grasp_profile=resolved["grasp_profile"],
+                    yaw_sampling_profile=checked_yaw_profile,
+                )
+            )
+        for index, yaw_binding in enumerate(yaw_sample_bindings):
+            if yaw_binding is None:
+                continue
+            slotted = yaw_binding.get("schema_version") == YAW_BINDING_SCHEMA
+            if slotted and checked_state_space_design_profile is None:
+                raise ContractError("PHYSICAL_CONSOLE_STATE_SPACE_DESIGN")
+            yaw_sample_bindings[index] = validate_yaw_sample_binding(
+                yaw_binding,
+                profile=checked_yaw_profile,
+                state_space_design_profile=(
+                    checked_state_space_design_profile if slotted else None
+                ),
+            )
+
+        def spatial_binding(
+            item: Mapping[str, Any], role: str,
+            pose_override: Mapping[str, Any] | None = None,
+        ) -> dict[str, Any]:
             job = item["normalized_job"]
             endpoint = resolved_workspace_bindings[job["place_id"]]
             return {
                 "role": role,
                 "workspace_id": job["place_id"],
                 "frame_id": job["cell_calibration_id"],
-                "pose": {
+                "pose": copy.deepcopy(dict(pose_override)) if pose_override is not None else {
                     key: job[key]
                     for key in ("place_id", "yaw_deg", "x_mm", "y_mm")
                 },
@@ -1803,13 +1982,87 @@ def build_physical_operator_console(
             }
 
         task_bindings = []
+        recorded_release_poses = []
+        reposition_bindings = []
         for index, source in enumerate(
             ordered_direct_resolved[:requested_count],
         ):
-            release = (
+            parent_run_id = (
+                run_id if index == 0 else f"{run_id}-e{index + 1}"
+            )
+            next_run_id = (
+                f"{run_id}-e{index + 2}"
+                if index + 1 < requested_count else None
+            )
+            desired_release = (
                 ordered_direct_resolved[index + 1]
                 if index + 1 < len(ordered_direct_resolved) else source
             )
+            source_pose = {
+                key: source["normalized_job"][key]
+                for key in ("place_id", "yaw_deg", "x_mm", "y_mm")
+            }
+            desired_release_pose = {
+                key: desired_release["normalized_job"][key]
+                for key in ("place_id", "yaw_deg", "x_mm", "y_mm")
+            }
+            recorded_release = (
+                yaw_preserving_destination(source_pose, desired_release_pose)
+                if template_job["task"] == "pick_place"
+                else desired_release_pose
+            )
+            if template_job["task"] == "pick_place":
+                _validate_recorded_release_region(
+                    recorded_pose=recorded_release,
+                    target_yaw_deg=desired_release_pose["yaw_deg"],
+                    endpoint=resolved_workspace_bindings[
+                        recorded_release["place_id"]
+                    ],
+                    resolved_destination=desired_release,
+                )
+            recorded_release_poses.append(recorded_release)
+            reposition = None
+            if template_job["task"] == "pickup_e2e":
+                yaw_binding = yaw_sample_bindings[
+                    index + 1 if index + 1 < len(yaw_sample_bindings) else index
+                ]
+                reposition = build_object_reposition_binding(
+                    parent_run_id=parent_run_id,
+                    continuation_run_id=parent_run_id,
+                    next_run_id=next_run_id,
+                    start_state="HELD_OBJECT",
+                    source_pose=source_pose, target_pose=desired_release_pose,
+                    object_profile=resolved["object_profile"],
+                    grasp_profile=resolved["grasp_profile"],
+                    yaw_sampling_profile=(
+                        checked_yaw_profile if yaw_binding is not None else None
+                    ),
+                    yaw_sample_binding=yaw_binding,
+                )
+            elif (
+                index + 1 < requested_count
+                and not math.isclose(
+                    float(recorded_release["yaw_deg"]),
+                    float(desired_release_pose["yaw_deg"]),
+                    rel_tol=0.0, abs_tol=1e-9,
+                )
+            ):
+                yaw_binding = yaw_sample_bindings[index + 1]
+                reposition = build_object_reposition_binding(
+                    parent_run_id=parent_run_id,
+                    continuation_run_id=f"{parent_run_id}-reposition",
+                    next_run_id=next_run_id,
+                    start_state="ON_SURFACE",
+                    source_pose=recorded_release,
+                    target_pose=desired_release_pose,
+                    object_profile=resolved["object_profile"],
+                    grasp_profile=resolved["grasp_profile"],
+                    yaw_sampling_profile=(
+                        checked_yaw_profile if yaw_binding is not None else None
+                    ),
+                    yaw_sample_binding=yaw_binding,
+                )
+            reposition_bindings.append(reposition)
             task_bindings.append(
                 compile_task_binding(
                     template_job["task"],
@@ -1817,12 +2070,13 @@ def build_physical_operator_console(
                     **(
                         {
                             "destination": spatial_binding(
-                                release, "DESTINATION",
+                                desired_release, "DESTINATION",
+                                recorded_release,
                             ),
                         }
                         if template_job["task"] == "pick_place" else {
                             "next_source_reset": spatial_binding(
-                                release, "NEXT_SOURCE_RESET",
+                                desired_release, "NEXT_SOURCE_RESET",
                             ),
                         }
                     ),
@@ -2001,6 +2255,7 @@ def build_physical_operator_console(
             None if retune is None else retune["retune_digest"]
         ),
         qualification_source=qualification_source,
+        motion_recipe=trajectory_variant_id,
     )
     resolved_by_digest = {
         item["resolved_job_digest"]: item
@@ -2331,9 +2586,15 @@ def build_physical_operator_console(
             yaw0_sheet=str(source_endpoint["yaw0_sheet"]),
             motion_qualification=str(source_endpoint["motion_qualification"]),
         )
+        trajectory_design = trajectory_sampling_binding(
+            normalized_seed, intent["slot"],
+            holder["operator"].manifest["slots"],
+        )
         active_payload.update(
             run_id=intent["run_id"], run_root=active_roots["run_root"],
             dataset_root=active_roots["dataset_root"],
+            trajectory_sampling_seed=trajectory_design.pop("sampling_seed"),
+            trajectory_sampling_design=trajectory_design,
         )
         order_index = intent["order_index"]
         next_slot = (
@@ -2348,8 +2609,15 @@ def build_physical_operator_console(
         )
         release_resolved = active_resolved
         destination_slot = next_slot
+        reposition_binding = (
+            reposition_bindings[order_index]
+            if reposition_bindings is not None else None
+        )
         if active_job["task"] == "pick_place":
-            if ordered_direct_resolved is None:
+            if (
+                ordered_direct_resolved is None
+                or recorded_release_poses is None
+            ):
                 raise ContractError("TASK_DESTINATION_REQUIRED")
             release_resolved = ordered_direct_resolved[order_index + 1]
         elif destination_slot is not None:
@@ -2363,7 +2631,12 @@ def build_physical_operator_console(
             )
             if release_resolved is None:
                 raise ContractError("PHYSICAL_CONSOLE_RESOLVED_JOB")
-        release_job = release_resolved["normalized_job"]
+        release_job = copy.deepcopy(release_resolved["normalized_job"])
+        if active_job["task"] == "pick_place":
+            release_job.update(recorded_release_poses[order_index])
+            release_job["job_id"] = (
+                f"{intent['run_id']}-recorded-destination"
+            )
         if active_job["task"] == "pick_place" and all(
             active_job[key] == release_job[key]
             for key in ("place_id", "yaw_deg", "x_mm", "y_mm")
@@ -2396,6 +2669,24 @@ def build_physical_operator_console(
                     release_endpoint["motion_qualification"]
                 ),
             }
+        reposition_source_payload = None
+        if (
+            reposition_binding is not None
+            and reposition_binding["start_state"] == "ON_SURFACE"
+        ):
+            reposition_source_payload = copy.deepcopy(active_payload)
+            reposition_source_payload.update(
+                job=copy.deepcopy(release_resolved["normalized_job"]),
+                selected_sheet=str(release_endpoint["selected_sheet"]),
+                yaw0_sheet=str(release_endpoint["yaw0_sheet"]),
+                motion_qualification=str(
+                    release_endpoint["motion_qualification"]
+                ),
+            )
+            reposition_source_payload["job"].update(
+                reposition_binding["source_pose"],
+                job_id=reposition_binding["continuation_run_id"],
+            )
 
         def episode_resolver(value):
             return run_job.resolve_campaign_episode_inputs(
@@ -2404,7 +2695,12 @@ def build_physical_operator_console(
                     "DESTINATION_THEN_NEXT_SOURCE"
                     if next_run_id is not None else "RELEASE_DESTINATION"
                 ),
-                next_run_id=next_run_id,
+                next_run_id=(
+                    reposition_binding["continuation_run_id"]
+                    if reposition_binding is not None
+                    and reposition_binding["start_state"] == "ON_SURFACE"
+                    else next_run_id
+                ),
                 cell_root=active_roots["cell_root"],
                 resolver=physical_resolver,
             )
@@ -2433,6 +2729,10 @@ def build_physical_operator_console(
         if not isinstance(transport, Mapping):
             raise ContractError("PHYSICAL_CAMERA_BINDING_MISMATCH")
         task_recipe = get_task_recipe(active_job["task"])
+        current_yaw_sample = (
+            None if yaw_sample_bindings is None
+            else yaw_sample_bindings[order_index]
+        )
         checklist = {
             "schema_version": "data_factory.site_checklist.v1",
             "place_alias": place_alias, "place_id": active_job["place_id"],
@@ -2457,6 +2757,11 @@ def build_physical_operator_console(
             "episode_number": order_index + 1,
             "episode_limit": requested_count,
             "data_disposition": data_disposition,
+            "object_reposition_binding": copy.deepcopy(reposition_binding),
+            **(
+                {"yaw_sample_binding": copy.deepcopy(current_yaw_sample)}
+                if current_yaw_sample is not None else {}
+            ),
             **(
                 {
                     "task_binding": copy.deepcopy(task_bindings[order_index]),
@@ -2487,7 +2792,22 @@ def build_physical_operator_console(
                     None if episode_instruction_bindings is None
                     else episode_instruction_bindings[order_index]
                 ),
+                yaw_sample_binding=current_yaw_sample,
+                yaw_sampling_profile=(
+                    checked_yaw_profile
+                    if current_yaw_sample is not None else None
+                ),
+                state_space_design_profile=(
+                    checked_state_space_design_profile
+                    if current_yaw_sample is not None
+                    and current_yaw_sample.get("schema_version")
+                    == YAW_BINDING_SCHEMA else None
+                ),
+                object_reposition_binding=reposition_binding,
+                object_reposition_resolver=physical_resolver,
+                object_reposition_source_payload=reposition_source_payload,
                 campaign_authorization=holder["console"].campaign_authorization,
+                dataset_validation_scope="INCREMENTAL",
                 camera_warmup_call=campaign_camera_warmup,
                 candidate_writer_enabled=data_disposition == "PRODUCTION",
                 repository_root=repository,
@@ -2505,6 +2825,26 @@ def build_physical_operator_console(
         data = live.get("data")
         if not isinstance(data, Mapping):
             raise ContractError("PHYSICAL_CONSOLE_LIVE_RESULT")
+        reposition_result = data.get("object_reposition")
+        if (
+            reposition_binding is not None
+            and reposition_binding["start_state"] == "ON_SURFACE"
+        ):
+            reposition_result = _validate_successful_object_reposition_result(
+                reposition_result, reposition_binding,
+                post_scene_digest=data.get("postcommit_scene_state_digest"),
+                code="PHYSICAL_CONSOLE_REPOSITION_RESULT",
+            )
+            terminal_object_pose = copy.deepcopy(
+                reposition_binding["target_pose"],
+            )
+        else:
+            if reposition_result is not None:
+                raise ContractError("PHYSICAL_CONSOLE_REPOSITION_RESULT")
+            terminal_object_pose = {
+                key: release_job[key]
+                for key in ("place_id", "yaw_deg", "x_mm", "y_mm")
+            }
         validator = data.get("technical_validator")
         technical_digest = (
             validator.get("result_digest")
@@ -2538,10 +2878,11 @@ def build_physical_operator_console(
             "result": {
                 "technical_evidence": technical,
                 "human_semantic": data.get("human_semantic_outcome", "NOT_MEASURED"),
-                "terminal_object_pose": {
-                    key: release_job[key]
-                    for key in ("place_id", "yaw_deg", "x_mm", "y_mm")
-                },
+                "terminal_object_pose": terminal_object_pose,
+                **(
+                    {"object_reposition": reposition_result}
+                    if reposition_result is not None else {}
+                ),
                 "episode_ledger": copy.deepcopy(ledger_reference),
                 "candidate_review_offer": {
                     "candidate_path": str(candidate_path),
@@ -2587,7 +2928,8 @@ def build_physical_operator_console(
                 },
                 "camera": {"readiness": "READY", "capability": "CONNECTED_ASSIGNED", "reason": "STABLE_LOCAL_BINDING"},
             },
-            expires_at=(clock() + timedelta(hours=1)).astimezone(timezone.utc).isoformat().replace("+00:00", "Z"),
+            expires_at=(clock() + _campaign_authorization_ttl(requested_count))
+            .astimezone(timezone.utc).isoformat().replace("+00:00", "Z"),
             initial_scene_digest=initial_scene_digest,
             scene_evidence_call=scene_evidence,
             side_effect_counter_call=lambda: copy.deepcopy(counters),
@@ -2797,6 +3139,11 @@ def build_physical_operator_console(
         initial_block_code=initial_block_code,
         task_bindings=task_bindings,
         episode_instruction_bindings=episode_instruction_bindings,
+        object_reposition_bindings=reposition_bindings,
+        yaw_sample_bindings=(
+            None if yaw_sample_bindings is None
+            else yaw_sample_bindings[:requested_count]
+        ),
         campaign_approval_once=True,
         run_id_factory=run_id_for,
         prepare_timeout_s=8.0, close_timeout_s=5.0, clock=clock,
@@ -3074,6 +3421,7 @@ def build_physical_operator_application(
         if item["cell_id"] in initial_cells
         and item["sources"]["job"] == initial_job_source
         and item["task_id"] == initial_job.get("task")
+        and item["variant_id"] == "DIRECT"
         and (
             internal_binding_digest is not None
             or item["camera_profile_id"] == initial_job.get("collection_profile_id")
@@ -3494,22 +3842,31 @@ def build_physical_operator_application(
             else [copy.deepcopy(selected) for _index in range(spatial_node_count)]
         )
         if draft.get("authoring_mode") == "ASSISTED":
+            spatial_seed = _domain_seed(draft["normalized_seed"], "spatial")
             poses = (
                 project_workspace_cycle_poses(
                     current_catalog, selected, anchor, count,
                     repeat=draft["repeat"],
-                    normalized_seed=draft["normalized_seed"],
+                    normalized_seed=spatial_seed,
+                    yaw_sampling_seed=_domain_seed(
+                        draft["normalized_seed"], "yaw",
+                    ),
                 )
                 if selected["task_id"] == "pick_place"
                 else project_assisted_poses(
                     current_catalog, selected, anchor, spatial_node_count,
                     repeat=draft["repeat"],
-                    normalized_seed=draft["normalized_seed"],
+                    normalized_seed=spatial_seed,
+                    yaw_sampling_seed=_domain_seed(
+                        draft["normalized_seed"], "yaw",
+                    ),
                 )
             )
             start_ids = project_balanced_start_pose_ids(
                 draft["selected_start_pose_ids"], count,
-                normalized_seed=draft["normalized_seed"],
+                normalized_seed=_domain_seed(
+                    draft["normalized_seed"], "start_pose",
+                ),
             )
         else:
             pairs = copy.deepcopy(draft.get("direct_pairs") or [])
@@ -3522,12 +3879,26 @@ def build_physical_operator_application(
                 })
                 for pair, endpoint in zip(pairs, route)
             ]
+            if selected["task_id"] == "pick_place":
+                validate_yaw_preserving_transitions(
+                    current_catalog, route, poses,
+                )
             start_ids = [pair["start_pose_id"] for pair in pairs[:count]]
         _setup, qualifications = start_pose_domain(
             draft["selected_start_pose_ids"],
         )
+        yaw_bindings = (
+            project_yaw_sample_bindings(
+                current_catalog, route, poses,
+                _domain_seed(draft["normalized_seed"], "yaw"),
+                repeat=draft["repeat"],
+            )
+            if draft.get("authoring_mode") == "ASSISTED" else
+            [None for _pose in poses]
+        )
         return {
             "direct_pose_sequence": poses,
+            "direct_yaw_sample_bindings": yaw_bindings,
             "direct_start_pose_ids": start_ids,
             "selected_start_pose_qualifications": [
                 qualifications[identifier]
@@ -3685,9 +4056,14 @@ def build_physical_operator_application(
             workspace_bindings=runtime_workspace_bindings,
             run_live_call=run_live_call,
             task_id=selected["task_id"],
+            trajectory_variant_id=selected["variant_id"],
             start_transition_call=start_transition_call,
             requested_count=draft["requested_count"],
             normalized_seed=draft["normalized_seed"],
+            yaw_sampling_profile=chosen.get("yaw_sampling_profile"),
+            state_space_design_profile=chosen.get(
+                "state_space_design_profile",
+            ),
             initial_object_pose=campaign_initial_pose,
             **pose_plan,
             data_disposition=disposition,

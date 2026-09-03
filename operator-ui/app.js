@@ -1,4 +1,4 @@
-const VIEW_SCHEMA = "data_factory.operator_session_view.v1";
+const VIEW_SCHEMA = "data_factory.operator_session_view.v2";
 const INTENT_SCHEMA = "data_factory.operator_intent.v1";
 const RESULT_SCHEMA = "data_factory.operator_intent_result.v1";
 const DIGEST_PATTERN = /^sha256:[0-9a-f]{64}$/;
@@ -17,6 +17,17 @@ const CAMERA_ROLES = [
 ];
 const CAMERA_ROLE_IDS = new Set(CAMERA_ROLES.map(([role]) => role));
 const START_POSE_STATUSES = new Set(["CANDIDATE", "AVAILABLE", "QUALIFICATION_REQUIRED"]);
+const YAW_SAMPLE_BINDING_FIELDS = [
+  "schema_version", "yaw_sampling_profile_id", "yaw_sampling_profile_digest", "sampling_seed",
+  "sample_identity_digest", "sample_rank", "design_size", "yaw_sample_quantile", "raw_yaw_deg",
+  "source_object_yaw_deg", "canonical_object_yaw_deg", "grasp_yaw_deg",
+  "yaw_equivalence_period_deg", "sample_origin", "binding_digest",
+];
+const STATE_SPACE_SLOT_FIELDS = [
+  ...YAW_SAMPLE_BINDING_FIELDS,
+  "state_space_design_profile_id", "state_space_design_profile_digest",
+  "spatial_cell_index", "spatial_row", "spatial_column",
+];
 const ENUMS = {
   connection_state: new Set(["READY", "STALE", "RECONNECTING", "BLOCKED"]),
   effect_scope: new Set(["FAKE", "PHYSICAL"]),
@@ -43,6 +54,8 @@ const escapeHtml = (value) => String(value).replace(/[&<>"']/g, (character) => (
 })[character]);
 const message = (group, key, fallback = "확인 필요") => MESSAGE_CATALOG[group]?.[key] ?? fallback;
 const isPickPlace = (view) => view?.draft?.selection?.task === "pick_place";
+const yawNear = (left, right) => Number.isFinite(left) && Number.isFinite(right)
+  && Math.abs(left - right) <= 1e-9;
 const spatialNodeCount = (view) => view.draft.requested_count + Number(isPickPlace(view));
 const poseText = (pose) => `X ${pose.x_mm} · Y ${pose.y_mm} · ${pose.yaw_deg}°`;
 const workspaceRoute = (view) => view?.draft?.workspace_route ?? [];
@@ -111,11 +124,14 @@ function validateView(value) {
   validateCameraSetup(view.camera_setup);
   validateStartPoseSetup(view.start_pose_setup);
   validateStateSpaceSummary(view.state_space_summary);
+  validateSamplingProvenance(view.sampling_provenance);
+  validateActiveEpisodePlan(view.active_episode_plan);
   assertObject(view.draft, "DRAFT_INVALID");
   assertEnum("authoring_mode", view.draft.authoring_mode);
   if (typeof view.draft.draft_id !== "string" || !view.draft.draft_id || !Number.isInteger(view.draft.requested_count)
       || view.draft.requested_count < 1 || view.draft.requested_count > 100 || !Number.isInteger(view.draft.repeat)
-      || view.draft.repeat < 1 || !Array.isArray(view.draft.cells)) throw new TypeError("DRAFT_INVALID");
+      || view.draft.repeat < 1 || !Number.isSafeInteger(view.draft.normalized_seed) || view.draft.normalized_seed < 0
+      || !Array.isArray(view.draft.cells)) throw new TypeError("DRAFT_INVALID");
   validateCatalog(view.catalog, view.draft);
   const route = workspaceRoute(view);
   if (!Array.isArray(route) || route.length !== spatialNodeCount(view)
@@ -191,6 +207,8 @@ function validateView(value) {
         || sequence.length === 0 && view.campaign_envelope
         || sequence.length > 0 && sequence.length !== view.draft.requested_count) throw new TypeError("COVERAGE_SEQUENCE_INVALID");
     sequence.forEach((item, index) => {
+      validateObjectReposition(item?.object_reposition);
+      validateStateSpaceSlot(item?.state_space_slot, view.sampling_provenance?.state_space_design_profile);
       const destination = item?.destination_pose;
       const sourceEndpoint = route[index];
       const destinationEndpoint = route[index + 1];
@@ -205,6 +223,11 @@ function validateView(value) {
           || item.start_pose_id !== undefined && (typeof item.start_pose_id !== "string" || !item.start_pose_id)
           || ![item.x_mm, item.y_mm, item.yaw_deg].every(Number.isFinite)
           || !DIGEST_PATTERN.test(item.coverage_condition_digest)
+          || item.state_space_slot !== null && item.state_space_slot !== undefined
+            && !yawNear(item.state_space_slot.source_object_yaw_deg, item.yaw_deg)
+          || view.draft.authoring_mode === "ASSISTED"
+            && view.sampling_provenance?.state_space_design_profile
+            && !item.state_space_slot
           || hasInstruction && (typeof item.instruction !== "string" || !item.instruction.trim()
             || !DIGEST_PATTERN.test(item.episode_instruction_binding_digest)
             || !DIGEST_PATTERN.test(item.task_binding_digest))
@@ -215,6 +238,8 @@ function validateView(value) {
             || !DIGEST_PATTERN.test(item.task_binding_digest))) throw new TypeError("COVERAGE_SEQUENCE_INVALID");
     });
   }
+  validateActiveEpisodePlanCoherence(view);
+  validateRuntimeRepositionEvidence(view);
   if (view.candidate_review !== undefined && view.candidate_review !== null) {
     assertObject(view.candidate_review, "CANDIDATE_REVIEW_INVALID");
     if (!DIGEST_PATTERN.test(view.candidate_review.review_binding_digest)
@@ -260,6 +285,328 @@ function validateStateSpaceSummary(summary) {
   assertObject(summary, "STATE_SPACE_SUMMARY_INVALID");
   const fields = ["selected_start_pose_count", "selected_condition_count", "eligible_pair_count", "planned_count"];
   if (Object.keys(summary).length !== fields.length || fields.some((field) => !Number.isInteger(summary[field]) || summary[field] < 0)) throw new TypeError("STATE_SPACE_SUMMARY_INVALID");
+}
+
+function validateSamplingProvenance(provenance) {
+  assertObject(provenance, "SAMPLING_PROVENANCE_INVALID");
+  const fields = ["object_dimensions_mm", "yaw_sampling_profile", "state_space_design_profile", "approach_sampling_profile"];
+  if (Object.keys(provenance).length !== fields.length
+      || fields.some((field) => !(field in provenance))) throw new TypeError("SAMPLING_PROVENANCE_INVALID");
+  const dimensions = provenance.object_dimensions_mm;
+  if (dimensions !== null && (!Array.isArray(dimensions) || dimensions.length !== 3
+      || dimensions.some((value) => !Number.isFinite(value) || value <= 0))) throw new TypeError("SAMPLING_PROVENANCE_INVALID");
+  validateSamplingProfile(provenance.yaw_sampling_profile, false);
+  validateStateSpaceDesignProfile(provenance.state_space_design_profile, provenance.yaw_sampling_profile);
+  validateSamplingProfile(provenance.approach_sampling_profile, true);
+}
+
+function validateSamplingProfile(profile, approach) {
+  if (profile === null) return;
+  assertObject(profile, "SAMPLING_PROFILE_INVALID");
+  const fields = approach
+    ? ["approach_sampling_profile_id", "profile_digest", "parameter_distribution", "required_camera_roles"]
+    : ["yaw_sampling_profile_id", "profile_digest", "distribution", "canonical_interval_deg", "required_camera_roles"];
+  const identifier = profile[fields[0]];
+  const distribution = profile[fields[2]];
+  const roles = profile.required_camera_roles;
+  if (Object.keys(profile).length !== fields.length || fields.some((field) => !(field in profile))
+      || typeof identifier !== "string" || !identifier || !DIGEST_PATTERN.test(profile.profile_digest)
+      || !distribution || typeof distribution !== "object" || Array.isArray(distribution)
+      || !Array.isArray(roles) || new Set(roles).size !== roles.length
+      || roles.some((role) => typeof role !== "string" || !role)) throw new TypeError("SAMPLING_PROFILE_INVALID");
+  if (!approach) {
+    const interval = profile.canonical_interval_deg;
+    if (Object.keys(distribution).length !== 1 || distribution.kind !== "STRATIFIED_UNIFORM"
+        || !interval || typeof interval !== "object" || Array.isArray(interval)
+        || Object.keys(interval).length !== 2
+        || !("minimum" in interval) || !("maximum_exclusive" in interval)
+        || !Number.isFinite(interval.minimum) || !Number.isFinite(interval.maximum_exclusive)
+        || interval.minimum >= interval.maximum_exclusive) throw new TypeError("SAMPLING_PROFILE_INVALID");
+    return;
+  }
+  const clearance = distribution.align_clearance_m;
+  const offset = distribution.view_offset_xy_m;
+  const distributionFields = ["kind", "align_clearance_m", "view_offset_xy_m"];
+  const clearanceFields = ["kind", "mean", "standard_deviation", "minimum", "maximum"];
+  const offsetFields = ["kind", "object_axes", "maximum_radius_fraction", "absolute_maximum_radius_m", "mahalanobis_radius"];
+  if (Object.keys(distribution).length !== distributionFields.length
+      || distributionFields.some((field) => !(field in distribution))
+      || distribution.kind !== "STRATIFIED_BOUNDED"
+      || !clearance || typeof clearance !== "object" || Array.isArray(clearance)
+      || Object.keys(clearance).length !== clearanceFields.length
+      || clearanceFields.some((field) => !(field in clearance))
+      || clearance.kind !== "TRUNCATED_NORMAL"
+      || ![clearance.mean, clearance.standard_deviation, clearance.minimum, clearance.maximum].every(Number.isFinite)
+      || clearance.standard_deviation <= 0 || clearance.minimum >= clearance.maximum
+      || clearance.mean < clearance.minimum || clearance.mean > clearance.maximum
+      || !offset || typeof offset !== "object" || Array.isArray(offset)
+      || Object.keys(offset).length !== offsetFields.length
+      || offsetFields.some((field) => !(field in offset))
+      || offset.kind !== "OBJECT_RELATIVE_TRUNCATED_BIVARIATE_NORMAL"
+      || !Array.isArray(offset.object_axes) || offset.object_axes.length !== 2
+      || offset.object_axes[0] !== "X" || offset.object_axes[1] !== "Y"
+      || !Number.isFinite(offset.maximum_radius_fraction) || offset.maximum_radius_fraction <= 0
+      || !Number.isFinite(offset.absolute_maximum_radius_m) || offset.absolute_maximum_radius_m <= 0
+      || !Number.isFinite(offset.mahalanobis_radius) || offset.mahalanobis_radius <= 0) throw new TypeError("SAMPLING_PROFILE_INVALID");
+}
+
+function validateStateSpaceDesignProfile(profile, yawProfile) {
+  if (profile === null) return;
+  assertObject(profile, "STATE_SPACE_DESIGN_PROFILE_INVALID");
+  const fields = [
+    "state_space_design_profile_id", "profile_digest", "object_profile_id", "object_profile_digest",
+    "grasp_profile_id", "grasp_profile_digest", "yaw_sampling_profile_id", "yaw_sampling_profile_digest",
+    "spatial_strata", "yaw_cdf_strata", "derived_yaw_cdf_tiers", "assignment", "execution_order",
+    "initial_source_policy", "per_workspace_repeat_one_sweep_episode_count",
+    "full_cell_yaw_coverage_sweeps",
+    "per_workspace_repeat_one_full_cell_yaw_coverage_episode_count",
+  ];
+  const identifiers = [profile.state_space_design_profile_id, profile.object_profile_id, profile.grasp_profile_id, profile.yaw_sampling_profile_id];
+  const digests = [profile.profile_digest, profile.object_profile_digest, profile.grasp_profile_digest, profile.yaw_sampling_profile_digest];
+  const spatial = profile.spatial_strata;
+  if (Object.keys(profile).length !== fields.length || fields.some((field) => !(field in profile))
+      || identifiers.some((value) => typeof value !== "string" || !value)
+      || digests.some((value) => !DIGEST_PATTERN.test(value))
+      || !yawProfile || profile.yaw_sampling_profile_id !== yawProfile.yaw_sampling_profile_id
+      || profile.yaw_sampling_profile_digest !== yawProfile.profile_digest
+      || !spatial || typeof spatial !== "object" || Array.isArray(spatial)
+      || Object.keys(spatial).length !== 2 || !("columns" in spatial) || !("rows" in spatial)
+      || !Number.isInteger(spatial.columns) || !Number.isInteger(spatial.rows)
+      || spatial.columns < 1 || spatial.rows < 1 || spatial.columns * spatial.rows > 100
+      || !Number.isInteger(profile.yaw_cdf_strata) || profile.yaw_cdf_strata < 1
+      || profile.yaw_cdf_strata > spatial.columns * spatial.rows
+      || profile.assignment !== "ROTATING_BALANCED_FRACTIONAL_FACTORIAL"
+      || profile.execution_order !== "CONTIGUOUS_YAW_BLOCKS"
+      || profile.initial_source_policy !== "CONDITION_ON_OBSERVED_SOURCE"
+      || profile.per_workspace_repeat_one_sweep_episode_count !== spatial.columns * spatial.rows
+      || profile.full_cell_yaw_coverage_sweeps !== profile.yaw_cdf_strata
+      || profile.per_workspace_repeat_one_full_cell_yaw_coverage_episode_count
+        !== profile.per_workspace_repeat_one_sweep_episode_count * profile.yaw_cdf_strata
+      || !Array.isArray(profile.derived_yaw_cdf_tiers)
+      || profile.derived_yaw_cdf_tiers.length !== profile.yaw_cdf_strata) throw new TypeError("STATE_SPACE_DESIGN_PROFILE_INVALID");
+  const interval = yawProfile.canonical_interval_deg;
+  profile.derived_yaw_cdf_tiers.forEach((tier, rank, tiers) => {
+    assertObject(tier, "STATE_SPACE_DESIGN_PROFILE_INVALID");
+    const quantile = tier.quantile;
+    const yaw = tier.yaw_deg;
+    if (Object.keys(tier).length !== 3 || !("sample_rank" in tier) || !("quantile" in tier) || !("yaw_deg" in tier)
+        || tier.sample_rank !== rank || !quantile || typeof quantile !== "object" || Array.isArray(quantile)
+        || Object.keys(quantile).length !== 2 || quantile.minimum !== rank / tiers.length
+        || quantile.maximum_exclusive !== (rank + 1) / tiers.length
+        || !yaw || typeof yaw !== "object" || Array.isArray(yaw) || Object.keys(yaw).length !== 2
+        || !Number.isFinite(yaw.minimum) || !Number.isFinite(yaw.maximum_exclusive)
+        || yaw.minimum >= yaw.maximum_exclusive
+        || yaw.minimum !== (rank === 0 ? interval.minimum : tiers[rank - 1].yaw_deg.maximum_exclusive)
+        || rank === tiers.length - 1 && yaw.maximum_exclusive !== interval.maximum_exclusive) throw new TypeError("STATE_SPACE_DESIGN_PROFILE_INVALID");
+  });
+}
+
+function validateObjectReposition(reposition) {
+  if (reposition === undefined || reposition === null) return;
+  assertObject(reposition, "OBJECT_REPOSITION_INVALID");
+  const fields = ["parent_run_id", "continuation_run_id", "next_run_id", "execution_stage", "recording_scope", "start_state", "source_pose", "target_pose", "yaw_sample", "object_profile_id", "object_profile_digest", "grasp_profile_id", "grasp_profile_digest", "yaw_sampling_profile_id", "yaw_sampling_profile_digest", "motion_recipe", "recorder_authorized", "dataset_write_authorized", "binding_digest"];
+  const poseValid = (pose) => pose && typeof pose === "object" && !Array.isArray(pose)
+    && typeof pose.place_id === "string" && pose.place_id
+    && [pose.x_mm, pose.y_mm, pose.yaw_deg].every(Number.isFinite);
+  if (Object.keys(reposition).length !== fields.length || fields.some((field) => !(field in reposition))
+      || typeof reposition.parent_run_id !== "string" || !reposition.parent_run_id
+      || typeof reposition.continuation_run_id !== "string" || !reposition.continuation_run_id
+      || reposition.next_run_id !== null && (typeof reposition.next_run_id !== "string" || !reposition.next_run_id)
+      || reposition.execution_stage !== (reposition.start_state === "HELD_OBJECT" ? "PRECOMMIT_POST_RECORDING" : reposition.start_state === "ON_SURFACE" ? "POSTCOMMIT" : null)
+      || reposition.recording_scope !== "OUT_OF_DATASET"
+      || !["HELD_OBJECT", "ON_SURFACE"].includes(reposition.start_state)
+      || !poseValid(reposition.source_pose) || !poseValid(reposition.target_pose)
+      || typeof reposition.object_profile_id !== "string" || !reposition.object_profile_id
+      || !DIGEST_PATTERN.test(reposition.object_profile_digest)
+      || typeof reposition.grasp_profile_id !== "string" || !reposition.grasp_profile_id
+      || !DIGEST_PATTERN.test(reposition.grasp_profile_digest)
+      || (reposition.yaw_sampling_profile_id === null) !== (reposition.yaw_sampling_profile_digest === null)
+      || reposition.yaw_sampling_profile_id !== null && (typeof reposition.yaw_sampling_profile_id !== "string" || !reposition.yaw_sampling_profile_id || !DIGEST_PATTERN.test(reposition.yaw_sampling_profile_digest))
+      || reposition.motion_recipe !== "DIRECT" || reposition.recorder_authorized !== false
+      || reposition.dataset_write_authorized !== false || !DIGEST_PATTERN.test(reposition.binding_digest)) throw new TypeError("OBJECT_REPOSITION_INVALID");
+  if (reposition.yaw_sample !== null) {
+    const yaw = reposition.yaw_sample;
+    const yawFields = ["yaw_sampling_profile_id", "yaw_sampling_profile_digest", "sampling_seed", "sample_rank", "design_size", "source_object_yaw_deg", "binding_digest"];
+    if (!yaw || typeof yaw !== "object" || Array.isArray(yaw)
+        || Object.keys(yaw).length !== yawFields.length || yawFields.some((field) => !(field in yaw))
+        || typeof yaw.yaw_sampling_profile_id !== "string" || !yaw.yaw_sampling_profile_id
+        || !DIGEST_PATTERN.test(yaw.yaw_sampling_profile_digest) || !DIGEST_PATTERN.test(yaw.binding_digest)
+        || typeof yaw.sampling_seed !== "string" || !/^(0|[1-9]\d{0,19})$/.test(yaw.sampling_seed)
+        || BigInt(yaw.sampling_seed) > 18446744073709551615n
+        || !Number.isInteger(yaw.sample_rank) || !Number.isInteger(yaw.design_size)
+        || yaw.design_size < 1 || yaw.sample_rank < 0 || yaw.sample_rank >= yaw.design_size
+        || yaw.yaw_sampling_profile_id !== reposition.yaw_sampling_profile_id
+        || yaw.yaw_sampling_profile_digest !== reposition.yaw_sampling_profile_digest
+        || !Number.isFinite(yaw.source_object_yaw_deg)) throw new TypeError("OBJECT_REPOSITION_INVALID");
+  } else if (reposition.yaw_sampling_profile_id !== null) {
+    throw new TypeError("OBJECT_REPOSITION_INVALID");
+  }
+}
+
+function validateYawSampleBinding(yaw, requireStateSpaceSlot = false) {
+  assertObject(yaw, "YAW_SAMPLE_BINDING_INVALID");
+  const stateSpaceSlot = yaw.schema_version === "data_factory.yaw_sample_binding.v4";
+  const fields = stateSpaceSlot ? STATE_SPACE_SLOT_FIELDS : YAW_SAMPLE_BINDING_FIELDS;
+  if (Object.keys(yaw).length !== fields.length || fields.some((field) => !(field in yaw))
+      || !["data_factory.yaw_sample_binding.v3", "data_factory.yaw_sample_binding.v4"].includes(yaw.schema_version)
+      || requireStateSpaceSlot && !stateSpaceSlot
+      || typeof yaw.yaw_sampling_profile_id !== "string" || !yaw.yaw_sampling_profile_id
+      || !DIGEST_PATTERN.test(yaw.yaw_sampling_profile_digest)
+      || !DIGEST_PATTERN.test(yaw.sample_identity_digest) || !DIGEST_PATTERN.test(yaw.binding_digest)
+      || typeof yaw.sampling_seed !== "string" || !/^(0|[1-9]\d{0,19})$/.test(yaw.sampling_seed)
+      || BigInt(yaw.sampling_seed) > 18446744073709551615n
+      || !Number.isInteger(yaw.sample_rank) || !Number.isInteger(yaw.design_size)
+      || yaw.design_size < 1 || yaw.sample_rank < 0 || yaw.sample_rank >= yaw.design_size
+      || !Number.isFinite(yaw.yaw_sample_quantile) || yaw.yaw_sample_quantile < yaw.sample_rank / yaw.design_size
+      || yaw.yaw_sample_quantile >= (yaw.sample_rank + 1) / yaw.design_size
+      || ![yaw.raw_yaw_deg, yaw.source_object_yaw_deg, yaw.grasp_yaw_deg, yaw.yaw_equivalence_period_deg].every(Number.isFinite)
+      || !Number.isFinite(yaw.canonical_object_yaw_deg)
+      || !yawNear(yaw.source_object_yaw_deg, yaw.grasp_yaw_deg)
+      || yaw.yaw_equivalence_period_deg <= 0
+      || (!yawNear(yaw.raw_yaw_deg, yaw.source_object_yaw_deg)
+        || Math.abs((yaw.source_object_yaw_deg - yaw.canonical_object_yaw_deg) / yaw.yaw_equivalence_period_deg
+          - Math.round((yaw.source_object_yaw_deg - yaw.canonical_object_yaw_deg) / yaw.yaw_equivalence_period_deg)) > 1e-9)
+      || !["SEEDED_CDF_STRATUM", "CONDITIONED_SOURCE_ANCHOR"].includes(yaw.sample_origin)) throw new TypeError("YAW_SAMPLE_BINDING_INVALID");
+  if (stateSpaceSlot && (typeof yaw.state_space_design_profile_id !== "string" || !yaw.state_space_design_profile_id
+      || !DIGEST_PATTERN.test(yaw.state_space_design_profile_digest)
+      || !Number.isInteger(yaw.spatial_cell_index) || yaw.spatial_cell_index < 0
+      || !Number.isInteger(yaw.spatial_row) || yaw.spatial_row < 0
+      || !Number.isInteger(yaw.spatial_column) || yaw.spatial_column < 0)) throw new TypeError("YAW_SAMPLE_BINDING_INVALID");
+}
+
+function validateStateSpaceSlot(slot, design) {
+  if (slot === undefined || slot === null) return;
+  assertObject(slot, "STATE_SPACE_SLOT_INVALID");
+  validateYawSampleBinding(slot, true);
+  if (!design || slot.state_space_design_profile_id !== design.state_space_design_profile_id
+      || slot.state_space_design_profile_digest !== design.profile_digest
+      || slot.spatial_row < 0 || slot.spatial_row >= design.spatial_strata.rows
+      || slot.spatial_column < 0 || slot.spatial_column >= design.spatial_strata.columns
+      || slot.spatial_cell_index !== slot.spatial_row * design.spatial_strata.columns + slot.spatial_column) throw new TypeError("STATE_SPACE_SLOT_INVALID");
+  const tier = design.derived_yaw_cdf_tiers[slot.sample_rank];
+  if (slot.yaw_sampling_profile_id !== design.yaw_sampling_profile_id
+      || slot.yaw_sampling_profile_digest !== design.yaw_sampling_profile_digest
+      || slot.design_size !== design.yaw_cdf_strata
+      || slot.canonical_object_yaw_deg < tier.yaw_deg.minimum
+      || slot.canonical_object_yaw_deg >= tier.yaw_deg.maximum_exclusive) throw new TypeError("STATE_SPACE_SLOT_INVALID");
+}
+
+function validateActiveEpisodePlan(plan) {
+  if (plan === undefined || plan === null) return;
+  assertObject(plan, "ACTIVE_EPISODE_PLAN_INVALID");
+  const fields = [
+    "schema_version", "plan_digest", "approval_scope",
+    "decision_binding_digest", "operator_summary",
+    "trajectory_variant_binding", "yaw_sample_binding",
+    "precommit_safety", "plan_envelope_digest",
+    "preapproval_evidence_digest",
+  ];
+  const trajectoryFields = [
+    "schema_version", "trajectory_variant_id", "variation_profile_digest",
+    "sampling_seed", "sample_rank", "design_size", "design_digest",
+    "target_yaw_deg", "phase_parameters", "phase_parameters_digest",
+    "motion_program_digest", "binding_digest",
+  ];
+  const safetyFields = [
+    "schema_version", "run_id", "approved_plan_digest",
+    "scene_binding_digest", "expected_planning_scene_digest",
+    "planning_scene_readback_digest", "collision_report_digest",
+    "plan_only_no_motion_digest", "post_reset_safe_snapshot_digest",
+    "status",
+  ];
+  const trajectory = plan.trajectory_variant_binding;
+  const safety = plan.precommit_safety;
+  if (Object.keys(plan).length !== fields.length || fields.some((field) => !(field in plan))
+      || plan.schema_version !== "data_factory.active_episode_plan.v1"
+      || ![plan.plan_digest, plan.decision_binding_digest, plan.plan_envelope_digest,
+        plan.preapproval_evidence_digest].every((value) => typeof value === "string" && DIGEST_PATTERN.test(value))
+      || !["HUMAN_GATED", "HIL_NUMERIC_PROXY"].includes(plan.approval_scope)
+      || !plan.operator_summary || typeof plan.operator_summary !== "object" || Array.isArray(plan.operator_summary)
+      || !Array.isArray(plan.operator_summary.path) || !plan.operator_summary.path.length
+      || !trajectory || typeof trajectory !== "object" || Array.isArray(trajectory)
+      || Object.keys(trajectory).length !== trajectoryFields.length
+      || trajectoryFields.some((field) => !(field in trajectory))
+      || trajectory.schema_version !== "data_factory.trajectory_variant_binding.v2"
+      || !["DIRECT", "TWO_STAGE_ALIGN_V2"].includes(trajectory.trajectory_variant_id)
+      || typeof trajectory.sampling_seed !== "string" || !/^(0|[1-9]\d{0,19})$/.test(trajectory.sampling_seed)
+      || BigInt(trajectory.sampling_seed) > 18446744073709551615n
+      || !Number.isInteger(trajectory.sample_rank) || !Number.isInteger(trajectory.design_size)
+      || trajectory.design_size < 1 || trajectory.sample_rank < 0 || trajectory.sample_rank >= trajectory.design_size
+      || !Number.isFinite(trajectory.target_yaw_deg)
+      || !trajectory.phase_parameters || typeof trajectory.phase_parameters !== "object" || Array.isArray(trajectory.phase_parameters)
+      || ![trajectory.variation_profile_digest, trajectory.design_digest,
+        trajectory.phase_parameters_digest, trajectory.motion_program_digest,
+        trajectory.binding_digest].every((value) => typeof value === "string" && DIGEST_PATTERN.test(value))
+      || !safety || typeof safety !== "object" || Array.isArray(safety)
+      || Object.keys(safety).length !== safetyFields.length
+      || safetyFields.some((field) => !(field in safety))
+      || safety.schema_version !== "data_factory.precommit_safety.v1"
+      || safety.approved_plan_digest !== plan.plan_digest || safety.status !== "PENDING"
+      || safety.post_reset_safe_snapshot_digest !== null
+      || ![safety.scene_binding_digest, safety.expected_planning_scene_digest,
+        safety.planning_scene_readback_digest, safety.collision_report_digest,
+        safety.plan_only_no_motion_digest].every((value) => typeof value === "string" && DIGEST_PATTERN.test(value))) throw new TypeError("ACTIVE_EPISODE_PLAN_INVALID");
+  if (plan.yaw_sample_binding !== null) validateYawSampleBinding(plan.yaw_sample_binding);
+}
+
+function validateActiveEpisodePlanCoherence(view) {
+  const plan = view.active_episode_plan;
+  if (plan === undefined || plan === null) return;
+  const trajectory = plan.trajectory_variant_binding;
+  const yaw = plan.yaw_sample_binding;
+  const profile = view.sampling_provenance.yaw_sampling_profile;
+  const runtime = view.runtime;
+  if (trajectory.trajectory_variant_id !== view.draft.selection.variant
+      || typeof runtime.active_child_id !== "string" || !runtime.active_child_id
+      || plan.precommit_safety.run_id !== runtime.active_child_id
+      || trajectory.trajectory_variant_id === "TWO_STAGE_ALIGN_V2"
+        && view.sampling_provenance.approach_sampling_profile === null
+      || yaw !== null && (!profile
+        || yaw.yaw_sampling_profile_id !== profile.yaw_sampling_profile_id
+        || yaw.yaw_sampling_profile_digest !== profile.profile_digest)) throw new TypeError("ACTIVE_EPISODE_PLAN_INVALID");
+  if (runtime.current_episode === undefined || runtime.current_episode === null) return;
+  const sequence = view.coverage?.sequence;
+  const current = Number.isInteger(runtime.current_episode)
+    ? sequence?.[runtime.current_episode - 1] : undefined;
+  if (!current || !yawNear(trajectory.target_yaw_deg, current.yaw_deg)
+      || yaw !== null && (!yawNear(yaw.source_object_yaw_deg, current.yaw_deg)
+        || !yawNear(yaw.grasp_yaw_deg, trajectory.target_yaw_deg))) throw new TypeError("ACTIVE_EPISODE_PLAN_INVALID");
+  const slot = current.state_space_slot;
+  if (slot === undefined || slot === null) return;
+  if (yaw === null) throw new TypeError("ACTIVE_EPISODE_PLAN_INVALID");
+  const commonFields = STATE_SPACE_SLOT_FIELDS.filter(
+    (field) => field in yaw && field in slot && !["schema_version", "binding_digest"].includes(field),
+  );
+  if (commonFields.some((field) => yaw[field] !== slot[field])
+      || yaw.schema_version === slot.schema_version && yaw.binding_digest !== slot.binding_digest
+      || yaw.schema_version === "data_factory.yaw_sample_binding.v4"
+        && STATE_SPACE_SLOT_FIELDS.some((field) => yaw[field] !== slot[field])) throw new TypeError("ACTIVE_EPISODE_PLAN_INVALID");
+}
+
+function validateRuntimeRepositionEvidence(view) {
+  const runtime = view.runtime;
+  const evidence = runtime.evidence;
+  if (evidence === undefined || evidence === null) {
+    if (runtime.phase === "OBJECT_REPOSITION_PLANNED") throw new TypeError("RUNTIME_REPOSITION_EVIDENCE_INVALID");
+    return;
+  }
+  assertObject(evidence, "RUNTIME_REPOSITION_EVIDENCE_INVALID");
+  const fields = [
+    "object_reposition_binding_digest", "object_reposition_run_id",
+    "object_reposition_plan_digest", "object_reposition_plan_artifact_digest",
+    "object_reposition_collision_report_digest", "object_reposition_plan_only_no_motion_digest",
+  ];
+  const current = Number.isInteger(runtime.current_episode)
+    ? view.coverage?.sequence?.[runtime.current_episode - 1]?.object_reposition : undefined;
+  if (runtime.phase !== "OBJECT_REPOSITION_PLANNED"
+      || Object.keys(evidence).length !== fields.length || fields.some((field) => !(field in evidence))
+      || typeof evidence.object_reposition_run_id !== "string" || !evidence.object_reposition_run_id
+      || fields.filter((field) => field !== "object_reposition_run_id")
+        .some((field) => !DIGEST_PATTERN.test(evidence[field]))
+      || !current
+      || current.start_state !== "ON_SURFACE" || current.execution_stage !== "POSTCOMMIT"
+      || evidence.object_reposition_binding_digest !== current.binding_digest
+      || evidence.object_reposition_run_id !== current.continuation_run_id) throw new TypeError("RUNTIME_REPOSITION_EVIDENCE_INVALID");
 }
 
 function validateCameraSetup(cameraSetup) {
@@ -754,8 +1101,10 @@ function renderCatalog(view) {
   });
   document.querySelector("#count-input").value = view.draft.requested_count;
   document.querySelector("#repeat-input").value = view.draft.repeat;
+  document.querySelector("#seed-input").value = view.draft.normalized_seed;
   document.querySelector("#count-input").disabled = !editable;
   document.querySelector("#repeat-input").disabled = !editable || direct;
+  document.querySelector("#seed-input").disabled = !editable;
   document.querySelector("#repeat-input").closest("label").hidden = direct;
   document.querySelector("#workspace-domain-summary").textContent = domain
     ? `현재 작성 범위: X ${domain.x_mm.minimum}~${domain.x_mm.maximum} mm, Y ${domain.y_mm.minimum}~${domain.y_mm.maximum} mm, yaw ${domain.yaw_deg.minimum}° 이상 ${domain.yaw_deg.maximum_exclusive}° 미만. 등록된 셀은 빠른 기준점입니다.`
@@ -858,6 +1207,49 @@ function selectedLabel(view, axis) {
   return catalogOption(view, axis, view.draft.selection[axis])?.label ?? "확인 필요";
 }
 
+function samplingProfileText(profile, approach) {
+  if (!profile) return "선택 조합에 프로필 없음";
+  const distribution = approach ? profile.parameter_distribution : profile.distribution;
+  const parts = [profile[approach ? "approach_sampling_profile_id" : "yaw_sampling_profile_id"], distribution.kind ?? "분포 종류 미지정"];
+  if (!approach) {
+    const interval = profile.canonical_interval_deg;
+    parts.push(`${interval.minimum}° ≤ yaw < ${interval.maximum_exclusive}°`);
+    if (Number.isFinite(distribution.mean_deg) && Number.isFinite(distribution.standard_deviation_deg)) parts.push(`μ ${distribution.mean_deg}° · σ ${distribution.standard_deviation_deg}°`);
+  } else {
+    const clearance = distribution.align_clearance_m;
+    if (clearance && Number.isFinite(clearance.minimum) && Number.isFinite(clearance.maximum)) parts.push(`정렬 높이 ${(clearance.minimum * 1000).toFixed(1)}–${(clearance.maximum * 1000).toFixed(1)} mm`);
+    const offset = distribution.view_offset_xy_m;
+    if (offset && Number.isFinite(offset.maximum_radius_fraction) && Number.isFinite(offset.absolute_maximum_radius_m)) parts.push(`XY 반경 ≤ 물체축 ${offset.maximum_radius_fraction}× · ${(offset.absolute_maximum_radius_m * 1000).toFixed(1)} mm`);
+  }
+  parts.push(profile.required_camera_roles ? `필요 카메라 ${profile.required_camera_roles.join("+")}` : "필요 카메라 미지정");
+  return parts.join(" · ");
+}
+
+function stateSpaceDesignText(profile) {
+  if (!profile) return "선택 조합에 실험 설계 없음";
+  const spatial = profile.spatial_strata;
+  const tiers = profile.derived_yaw_cdf_tiers.map((tier) => (
+    `[${tier.yaw_deg.minimum}°, ${tier.yaw_deg.maximum_exclusive}°)`
+  )).join(" / ");
+  return `${profile.state_space_design_profile_id} · ${profile.profile_digest.slice(0, 19)}… · Nₓ×Nᵧ×N_yaw 설정값 ${spatial.columns}×${spatial.rows}×${profile.yaw_cdf_strata} · 설계 정격(endpoint당, repeat=1): 1 sweep ${profile.per_workspace_repeat_one_sweep_episode_count}회 · 전체 cell×yaw ${profile.full_cell_yaw_coverage_sweeps} sweeps/${profile.per_workspace_repeat_one_full_cell_yaw_coverage_episode_count}회 · 실제 campaign prefix는 아래 slot binding 기준 · 물체 yaw profile 파생 ${tiers} · 동일 yaw 최소 전환 실행`;
+}
+
+function objectRepositionText(view, reposition) {
+  if (!reposition) return "다음 물체 재배치 없음";
+  const source = `${workspaceName(view, reposition.source_pose.place_id)} ${poseText(reposition.source_pose)}`;
+  const target = `${workspaceName(view, reposition.target_pose.place_id)} ${poseText(reposition.target_pose)}`;
+  const yaw = reposition.yaw_sample
+    ? ` · yaw 표본 ${reposition.yaw_sample.sample_rank + 1}/${reposition.yaw_sample.design_size} · seed ${reposition.yaw_sample.sampling_seed}` : "";
+  return `녹화 밖 재배치 · ${reposition.execution_stage} · ${reposition.start_state} · ${source} → ${target}${yaw} · binding ${reposition.binding_digest.slice(0, 19)}… · recorder/dataset 쓰기 없음`;
+}
+
+function stateSpaceSlotText(slot) {
+  if (!slot) return "";
+  const canonical = slot.canonical_object_yaw_deg === slot.source_object_yaw_deg
+    ? "" : ` (canonical ${slot.canonical_object_yaw_deg.toFixed(3)}°)`;
+  return `설계 cell r${slot.spatial_row + 1}c${slot.spatial_column + 1} (#${slot.spatial_cell_index}) · yaw CDF층 ${slot.sample_rank + 1}/${slot.design_size} · q=${slot.yaw_sample_quantile.toFixed(6)} · 실제 yaw ${slot.source_object_yaw_deg.toFixed(3)}°${canonical} · seed ${slot.sampling_seed} · binding ${slot.binding_digest.slice(0, 19)}…`;
+}
+
 function renderReview(view) {
   const direct = view.draft.authoring_mode === "DIRECT_EDIT";
   const pickPlace = isPickPlace(view);
@@ -881,8 +1273,18 @@ function renderReview(view) {
     ["시작 자세", view.start_pose_setup ? `${view.start_pose_setup.selected_start_pose_ids.length}개 선택` : selectedLabel(view, "start")],
     ["카메라", selectedLabel(view, "camera")],
     ["수집 범위", range],
+    ["Campaign seed", String(view.draft.normalized_seed)],
     ["데이터 모드", selectedLabel(view, "data_mode")],
   ];
+  const provenance = view.sampling_provenance;
+  if (provenance) {
+    rows.splice(5, 0,
+      ["물체 크기", provenance.object_dimensions_mm ? `${provenance.object_dimensions_mm.join(" × ")} mm` : "선택 조합에 크기 없음"],
+      ["Yaw 표본", samplingProfileText(provenance.yaw_sampling_profile, false)],
+      ["상태공간 실험 설계", stateSpaceDesignText(provenance.state_space_design_profile)],
+      ["접근 표본", samplingProfileText(provenance.approach_sampling_profile, true)],
+    );
+  }
   const manifestDigest = view.campaign_review?.manifest_digest
     ?? view.campaign_envelope?.manifest_digest;
   rows.splice(1, 0, [
@@ -912,7 +1314,10 @@ function renderReview(view) {
       : poseText(item);
     const instruction = item.instruction
       ? `<small>VLA 지시문 · ${escapeHtml(item.instruction)}</small>` : "";
-    return `<li><span>${escapeHtml(item.order_index)}</span><strong>${escapeHtml(start + route)}</strong>${instruction}</li>`;
+    const stateSpace = item.state_space_slot
+      ? `<small>${escapeHtml(stateSpaceSlotText(item.state_space_slot))}</small>` : "";
+    const reposition = `<small>${escapeHtml(objectRepositionText(view, item.object_reposition))}</small>`;
+    return `<li><span>${escapeHtml(item.order_index)}</span><strong>${escapeHtml(start + route)}</strong>${instruction}${stateSpace}${reposition}</li>`;
   }).join("");
   document.querySelector("#review-actions").innerHTML = canIntent("authorize_campaign") ? `<button type="button" data-op="authorize_campaign">${message("action", "authorize_campaign")}</button>` : "";
   document.querySelector("#review-back").disabled = !canIntent("edit_campaign_draft");
@@ -953,6 +1358,35 @@ function renderRuntime(view) {
     if (Number.isInteger(runtime.recorder.frames)) recorderRows.push(["기록 프레임", `${runtime.recorder.frames}`]);
     if (Number.isFinite(runtime.recorder.fps)) recorderRows.push(["관측 속도", `${runtime.recorder.fps} fps`]);
     html += `<dl class="runtime-evidence">${recorderRows.map(([term, value]) => `<div><dt>${escapeHtml(term)}</dt><dd>${escapeHtml(value)}</dd></div>`).join("")}</dl>`;
+  }
+  const activePlan = view.active_episode_plan;
+  if (activePlan) {
+    const trajectory = activePlan.trajectory_variant_binding;
+    const yaw = activePlan.yaw_sample_binding;
+    const yawText = yaw
+      ? ` · yaw ${yaw.source_object_yaw_deg.toFixed(3)}° (CDF ${yaw.sample_rank + 1}/${yaw.design_size}, seed ${yaw.sampling_seed})`
+      : "";
+    html += `<details class="runtime-evidence" open><summary>현재 실행할 정확한 궤적</summary><dl>
+      <div><dt>경로</dt><dd>${escapeHtml(activePlan.operator_summary.path.join(" → "))}</dd></div>
+      <div><dt>변형</dt><dd>${escapeHtml(trajectory.trajectory_variant_id)} · ${escapeHtml(trajectory.sample_rank + 1)}/${escapeHtml(trajectory.design_size)} · seed ${escapeHtml(trajectory.sampling_seed)}${escapeHtml(yawText)}</dd></div>
+      <div><dt>목표 yaw</dt><dd>${escapeHtml(trajectory.target_yaw_deg)}°</dd></div>
+      <div><dt>해석된 매개변수</dt><dd><code>${escapeHtml(JSON.stringify(trajectory.phase_parameters))}</code></dd></div>
+      <div><dt>충돌 증거</dt><dd>${escapeHtml(activePlan.precommit_safety.collision_report_digest)}</dd></div>
+      <div><dt>Plan-only 무동작 증거</dt><dd>${escapeHtml(activePlan.precommit_safety.plan_only_no_motion_digest)}</dd></div>
+      <div><dt>계획 digest</dt><dd>${escapeHtml(activePlan.plan_digest)}</dd></div>
+    </dl></details>`;
+  }
+  if (runtime.evidence) {
+    const evidence = runtime.evidence;
+    const rows = [
+      ["재배치 binding", evidence.object_reposition_binding_digest],
+      ["재배치 run", evidence.object_reposition_run_id],
+      ["재배치 계획", evidence.object_reposition_plan_digest],
+      ["계획 artifact", evidence.object_reposition_plan_artifact_digest],
+      ["충돌 증거", evidence.object_reposition_collision_report_digest],
+      ["Plan-only 무동작 증거", evidence.object_reposition_plan_only_no_motion_digest],
+    ];
+    html += `<details class="runtime-evidence" open><summary>녹화 밖 물체 재배치 계획 증거</summary><dl>${rows.map(([term, value]) => `<div><dt>${escapeHtml(term)}</dt><dd>${escapeHtml(value)}</dd></div>`).join("")}</dl></details>`;
   }
   if (runtime.workflow_state === "BLOCKED" && canIntent("new_campaign_same_settings")) {
     html += `<div class="recovery-card"><strong>이번 실행은 종료되었습니다.</strong><p>필요하면 로봇을 HOME으로 복귀한 뒤 같은 설정의 새 계획을 만드세요.</p>${canIntent("recover_home") ? '<button type="button" data-recovery-op="recover_home">그리퍼 열고 HOME 복귀</button>' : ""}<button type="button" data-recovery-op="new_campaign_same_settings">종료된 실행 닫고 새 계획</button></div>`;
@@ -1048,6 +1482,11 @@ function renderTechnicalDetails(view) {
     view_digest: view.view_digest,
     draft_id: view.draft.draft_id,
     draft_revision: view.draft.revision,
+    normalized_seed: view.draft.normalized_seed,
+    sampling_provenance: view.sampling_provenance,
+    active_episode_plan: view.active_episode_plan,
+    object_reposition_bindings: view.coverage?.sequence?.map((item) => item.object_reposition),
+    object_reposition_runtime_evidence: view.runtime.evidence,
     workspace_id: view.draft.selection.workspace,
     frame_id: view.draft.selection.frame,
     workspace_registration_session_id: view.workspace_registration?.session_id,
@@ -1285,6 +1724,11 @@ document.querySelector("#authoring-mode").addEventListener("change", (event) => 
   if (!Number.isInteger(value) || value < Number(event.target.min) || value > Number(event.target.max)) return event.target.reportValidity();
   submitIntent("update_draft", {draft_id: currentView.draft.draft_id, [field === "count" ? "requested_count" : "repeat"]: value});
 }));
+document.querySelector("#seed-input").addEventListener("change", (event) => {
+  const normalizedSeed = event.target.valueAsNumber;
+  if (!Number.isSafeInteger(normalizedSeed) || normalizedSeed < 0 || normalizedSeed > Number(event.target.max)) return event.target.reportValidity();
+  submitIntent("update_draft", {draft_id: currentView.draft.draft_id, normalized_seed: normalizedSeed});
+});
 document.querySelector("#current-object-form").addEventListener("submit", (event) => {
   event.preventDefault();
   if (!currentView || !canIntent("update_draft") || !directPoseDomain(currentView)) return;

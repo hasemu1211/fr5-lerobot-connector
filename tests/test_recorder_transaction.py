@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Deterministic lifecycle tests; no ROS node or hardware is started."""
 
+import copy
 import io
 import json
 import os
@@ -27,7 +28,14 @@ from fr5_lerobot_recorder import (
 )
 import fr5_lerobot_recorder as recorder_module
 import data_factory_recovery as recovery
-from data_factory_recovery import DatasetTransactionLock, RecoveryError, canonical_json_digest, dataset_snapshot, recover_orphaned_transaction
+from data_factory_recovery import (
+    DatasetTransactionLock,
+    RecoveryError,
+    canonical_json_digest,
+    dataset_snapshot,
+    recover_orphaned_transaction,
+    validate_append_only_snapshot,
+)
 
 
 class _Logger:
@@ -78,6 +86,100 @@ class RecorderTransactionTest(unittest.TestCase):
         "schema_version", "op_id", "op", "ok", "state", "reason_code", "run_id",
         "transaction_id", "episode_index", "metrics", "artifacts", "detail",
     }
+
+    def test_append_only_snapshot_accepts_one_episode_and_rejects_old_mutation(self):
+        before = {
+            "total_episodes": 7,
+            "total_frames": 123,
+            "data_parquet": {"data/chunk-000/file-006.parquet": [10, 100]},
+            "committed_videos": {
+                "videos/observation.images.up/chunk-000/file-006.mp4": [20, 100],
+                "videos/observation.images.wrist/chunk-000/file-006.mp4": [20, 100],
+            },
+            "episode_metadata": {"meta/episodes/chunk-000/file-006.parquet": [5, 100]},
+            "dataset_metadata": {"meta/info.json": [4, 100]},
+        }
+        after = copy.deepcopy(before)
+        after.update(total_episodes=8, total_frames=183)
+        after["data_parquet"]["data/chunk-000/file-007.parquet"] = [10, 200]
+        after["committed_videos"].update({
+            "videos/observation.images.up/chunk-000/file-007.mp4": [20, 200],
+            "videos/observation.images.wrist/chunk-000/file-007.mp4": [20, 200],
+        })
+        after["episode_metadata"]["meta/episodes/chunk-000/file-007.parquet"] = [5, 200]
+        after["dataset_metadata"]["meta/info.json"] = [4, 200]
+
+        result = validate_append_only_snapshot(
+            before, after, episode_index=7, camera_count=2,
+        )
+        self.assertEqual(result["episode_frames"], 60)
+        self.assertEqual(
+            result["new_artifacts"]["data_parquet"],
+            ["data/chunk-000/file-007.parquet"],
+        )
+
+        mutated = copy.deepcopy(after)
+        mutated["data_parquet"]["data/chunk-000/file-006.parquet"] = [10, 101]
+        with self.assertRaisesRegex(RecoveryError, "RECOVERY_APPEND_MUTATED"):
+            validate_append_only_snapshot(
+                before, mutated, episode_index=7, camera_count=2,
+            )
+
+    def test_extended_append_snapshot_binds_provenance_and_quality_prefix(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "meta/episodes/chunk-000").mkdir(parents=True)
+            (root / "meta/source_provenance").mkdir(parents=True)
+            (root / "data/chunk-000").mkdir(parents=True)
+            (root / "videos/observation.images.up/chunk-000").mkdir(
+                parents=True,
+            )
+            info = {"total_episodes": 1, "total_frames": 10}
+            (root / "meta/info.json").write_text(json.dumps(info))
+            (root / "meta/recording_quality.jsonl").write_text(
+                '{"episode_index":0}\n', encoding="utf-8",
+            )
+            for relative in (
+                "data/chunk-000/file-000.parquet",
+                "videos/observation.images.up/chunk-000/file-000.mp4",
+                "meta/episodes/chunk-000/file-000.parquet",
+                "meta/source_provenance/episode-000000.jsonl",
+            ):
+                (root / relative).write_bytes(b"old")
+            before = dataset_snapshot(root)
+
+            info.update(total_episodes=2, total_frames=20)
+            (root / "meta/info.json").write_text(json.dumps(info))
+            for relative in (
+                "data/chunk-000/file-001.parquet",
+                "videos/observation.images.up/chunk-000/file-001.mp4",
+                "meta/episodes/chunk-000/file-001.parquet",
+                "meta/source_provenance/episode-000001.jsonl",
+            ):
+                (root / relative).write_bytes(b"new")
+            quality_path = root / "meta/recording_quality.jsonl"
+            with quality_path.open("a", encoding="utf-8") as file:
+                file.write('{"episode_index":1}\n')
+            after = dataset_snapshot(root)
+            result = validate_append_only_snapshot(
+                before, after, episode_index=1, camera_count=1,
+                dataset_root=root, require_extended=True,
+            )
+            self.assertEqual(
+                result["new_artifacts"]["source_provenance"],
+                ["meta/source_provenance/episode-000001.jsonl"],
+            )
+
+            quality = quality_path.read_bytes()
+            quality_path.write_bytes(b"[" + quality[1:])
+            with self.assertRaisesRegex(
+                RecoveryError, "RECOVERY_APPEND_MUTATED",
+            ):
+                validate_append_only_snapshot(
+                    before, dataset_snapshot(root), episode_index=1,
+                    camera_count=1, dataset_root=root,
+                    require_extended=True,
+                )
 
     def test_resume_preserves_the_configured_video_encoder(self):
         with tempfile.TemporaryDirectory() as directory:

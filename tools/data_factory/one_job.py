@@ -71,6 +71,8 @@ class JsonlProcess:
             raise ContractError("JSONL_PROCESS_EXIT", str(self.process.returncode))
         if self._response_pending:
             raise ContractError("JSONL_RESPONSE_PENDING")
+        if cancel_event is not None and cancel_event.is_set():
+            raise ContractError("JSONL_REQUEST_CANCELLED")
         try:
             self.process.stdin.write(json.dumps(request, sort_keys=True, separators=(",", ":"), allow_nan=False) + "\n")
             self.process.stdin.flush()

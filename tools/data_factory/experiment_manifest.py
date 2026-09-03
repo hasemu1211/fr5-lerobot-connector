@@ -14,6 +14,7 @@ from tools.data_factory.quality.coverage_report import (
     validate_coverage_report,
 )
 from tools.data_factory.training_split import FR5_FEATURE_CONTRACT, GROUPS, validate_program_budget
+from tools.data_factory.motion.trajectory_variants import VARIANT_IDS
 from tools.fr5_data_factory import (
     TASK_CONTRACTS,
     ContractError,
@@ -52,6 +53,17 @@ FIXED_FIELDS = frozenset({
 FIXED_V2_FIELDS = FIXED_FIELDS | frozenset({
     "endpoint_bindings", "endpoint_bindings_digest",
 })
+FIXED_CONTRACT_SINGLE_SCHEMAS = frozenset({
+    "data_factory.fr5_fixed_contract.v1",
+    "data_factory.fr5_fixed_contract.v3",
+})
+FIXED_CONTRACT_ENDPOINT_SCHEMAS = frozenset({
+    "data_factory.fr5_fixed_contract.v2",
+    "data_factory.fr5_fixed_contract.v4",
+})
+FIXED_CONTRACT_SCHEMAS = (
+    FIXED_CONTRACT_SINGLE_SCHEMAS | FIXED_CONTRACT_ENDPOINT_SCHEMAS
+)
 ENDPOINT_BINDING_FIELDS = frozenset({
     "workspace_id", "cell_calibration_id", "cell_calibration_digest",
     "motion_recipe_digest",
@@ -216,21 +228,28 @@ def _is_test_only_feature_contract(value: object) -> bool:
 
 
 def _fixed_contract(value: object) -> dict[str, Any]:
+    schema = value.get("schema_version") if isinstance(value, Mapping) else None
     fields = (
         FIXED_V2_FIELDS
-        if isinstance(value, Mapping)
-        and value.get("schema_version") == "data_factory.fr5_fixed_contract.v2"
+        if schema in FIXED_CONTRACT_ENDPOINT_SCHEMAS
         else FIXED_FIELDS
     )
     value = _exact(value, fields, "HYPOTHESIS_FIXED_FIELDS")
     result = copy.deepcopy(dict(value))
     if (
-        result["schema_version"] not in {
+        result["schema_version"] not in FIXED_CONTRACT_SCHEMAS
+        or result["task"] not in TASK_CONTRACTS
+        or result["motion_recipe"] not in VARIANT_IDS
+        or result["schema_version"] in {
             "data_factory.fr5_fixed_contract.v1",
             "data_factory.fr5_fixed_contract.v2",
         }
-        or result["task"] not in TASK_CONTRACTS
-        or result["motion_recipe"] != "DIRECT"
+        and result["motion_recipe"] != "DIRECT"
+        or result["schema_version"] in {
+            "data_factory.fr5_fixed_contract.v3",
+            "data_factory.fr5_fixed_contract.v4",
+        }
+        and result["motion_recipe"] != "TWO_STAGE_ALIGN_V2"
         or not (
             result["feature_contract"] == FR5_FEATURE_CONTRACT
             or _is_test_only_feature_contract(result["feature_contract"])
@@ -254,7 +273,7 @@ def _fixed_contract(value: object) -> dict[str, Any]:
         "trajectory_digest",
     ):
         _digest(result[field], "HYPOTHESIS_FIXED_DIGEST")
-    if result["schema_version"] == "data_factory.fr5_fixed_contract.v2":
+    if result["schema_version"] in FIXED_CONTRACT_ENDPOINT_SCHEMAS:
         endpoints = result["endpoint_bindings"]
         if (
             result["task"] != "pick_place"
@@ -510,7 +529,7 @@ def _fixed_base(fixed: Mapping[str, Any], base: Mapping[str, Any], receipt: Mapp
         "grasp_profile_id": fixed["grasp_profile_id"],
         "collection_profile_digest": fixed["collection_profile_digest"],
     }
-    if fixed["schema_version"] == "data_factory.fr5_fixed_contract.v1":
+    if fixed["schema_version"] in FIXED_CONTRACT_SINGLE_SCHEMAS:
         expected.update(
             cell_calibration_id=fixed["cell_calibration_id"],
             cell_calibration_digest=fixed["cell_calibration_digest"],
@@ -635,7 +654,7 @@ def _validate_design(
         yaw = condition["yaw_deg"]
         yaw_domain = (
             (condition["place_id"], condition["cell_calibration_id"], yaw)
-            if fixed["schema_version"] == "data_factory.fr5_fixed_contract.v2"
+            if fixed["schema_version"] in FIXED_CONTRACT_ENDPOINT_SCHEMAS
             else yaw
         )
         binding = (item["yaw_action_binding_digest"], item["dual_view_observability_digest"])

@@ -19,12 +19,14 @@ from tools.a4_place_yaw.generate_place_yaw_a4 import (
     make_manifest,
 )
 from tools.data_factory.campaign_authorization import validate_authorized_episode_scope
+from tools.data_factory.collection_seed import derive_domain_seed
 from tools.data_factory.operator.preview import (
     FAKE_RECORDER_COUNTERS,
     ZERO_SENTINELS,
     make_fake_one_job,
 )
 from tools.data_factory.campaign_session import TERMINAL_CHILD_STATES
+from tools.data_factory.motion.trajectory_variants import VARIANT_IDS
 from tools.data_factory.motion.pose_snapshot import qualify_place
 from tools.data_factory.operator.workflow.intents import INTENT_SCHEMA
 from tools.data_factory.operator.catalog import (
@@ -199,13 +201,15 @@ class OperatorStateSpaceProductTests(unittest.TestCase):
             }
             self.assertTrue(by_profile)
             self.assertTrue(all(
-                len(items) == 105 * len(TASK_IDS)
+                len(items) == 105 * len(TASK_IDS) * len(VARIANT_IDS)
                 and all(
                     {
                         item["cell_id"] for item in items
                         if item["task_id"] == task_id
+                        and item["variant_id"] == variant_id
                     } == expected_cells
                     for task_id in TASK_IDS
+                    for variant_id in VARIANT_IDS
                 )
                 for items in by_profile.values()
             ))
@@ -312,7 +316,81 @@ class OperatorStateSpaceProductTests(unittest.TestCase):
                     "executable": True, "reason": "REGISTERED_WORKSPACE_CALLER",
                 }
                 for item in future
+                if item["variant_id"] == "DIRECT"
             ))
+            self.assertTrue(all(
+                item["execution"]["TEST_COLLECTION"] == {
+                    "executable": False,
+                    "reason": "APPROACH_SAMPLING_PROFILE_REQUIRED",
+                }
+                for item in future
+                if item["variant_id"] == "TWO_STAGE_ALIGN_V2"
+            ))
+
+    def test_catalog_activates_latest_profile_revisions_as_one_dependency_chain(self):
+        with tempfile.TemporaryDirectory() as directory:
+            repository = Path(directory)
+            self.portable_repository(repository)
+            config = repository / "config/data_factory"
+
+            yaw = load_json_strict(
+                config / "yaw_sampling_profiles/wood-cube-24mm-top-r001.json"
+            )
+            yaw["yaw_sampling_profile_id"] = "wood-cube-24mm-top-yaw-r002"
+            (config / "yaw_sampling_profiles/wood-cube-24mm-top-r002.json").write_text(
+                json.dumps(yaw), encoding="utf-8",
+            )
+
+            design = load_json_strict(
+                config
+                / "state_space_design_profiles/wood-cube-24mm-a4-cdf3-r001.json"
+            )
+            design.update(
+                state_space_design_profile_id="wood-cube-24mm-a4-cdf3-r002",
+                yaw_sampling_profile_id=yaw["yaw_sampling_profile_id"],
+                yaw_sampling_profile_digest=canonical_digest(yaw),
+            )
+            (
+                config
+                / "state_space_design_profiles/wood-cube-24mm-a4-cdf3-r002.json"
+            ).write_text(json.dumps(design), encoding="utf-8")
+
+            approach = load_json_strict(
+                config
+                / "approach_sampling_profiles/wood-cube-24mm-top-wrist-r001.json"
+            )
+            approach["approach_sampling_profile_id"] = (
+                "wood-cube-24mm-top-wrist-approach-r002"
+            )
+            (
+                config
+                / "approach_sampling_profiles/wood-cube-24mm-top-wrist-r002.json"
+            ).write_text(json.dumps(approach), encoding="utf-8")
+
+            catalog = load_operator_catalog(repository, device_ids=[DEVICE])
+            profiled = [
+                item for item in catalog["combinations"]
+                if item["object_id"] == "wood-cube-24mm-r001"
+                and item["camera_profile_id"] == "fr5-up-wrist-rgb-30hz-v2"
+            ]
+            self.assertTrue(profiled)
+            self.assertEqual(
+                {item["yaw_sampling_profile"]["yaw_sampling_profile_id"]
+                 for item in profiled},
+                {"wood-cube-24mm-top-yaw-r002"},
+            )
+            self.assertEqual(
+                {item["state_space_design_profile"]
+                 ["state_space_design_profile_id"] for item in profiled},
+                {"wood-cube-24mm-a4-cdf3-r002"},
+            )
+            self.assertEqual(
+                {item["approach_sampling_profile"]
+                 ["approach_sampling_profile_id"] for item in profiled
+                 if item["variant_id"] == "TWO_STAGE_ALIGN_V2"},
+                {"wood-cube-24mm-top-wrist-approach-r002"},
+            )
+
     def test_direct_nonpreset_pose_is_normalized_and_admitted_by_the_domain(self):
         validator = getattr(operator_catalog, "validate_operator_pose", None)
         self.assertTrue(callable(validator), "validate_operator_pose API is required")
@@ -1284,6 +1362,9 @@ class ProductFakeOperatorTests(unittest.TestCase):
         anchor = product.application._direct_anchor()
         expected = project_assisted_poses(
             product.application.catalog, view["selection"], anchor, 5, repeat=2,
+            normalized_seed=derive_domain_seed(
+                view["draft"]["normalized_seed"], "spatial",
+            ),
         )
         update("authoring_mode", "DIRECT_EDIT", "round-trip-direct")
 

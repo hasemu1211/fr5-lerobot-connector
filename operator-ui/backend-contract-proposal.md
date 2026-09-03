@@ -8,7 +8,7 @@ This document is for backend and UI maintainers. It specifies the current same-o
 
 The foreground local server exposes two same-origin routes:
 
-- `GET /api/view` returns one atomic `data_factory.operator_session_view.v1` envelope.
+- `GET /api/view` returns one atomic `data_factory.operator_session_view.v2` envelope.
 - `POST /api/intent` accepts one `data_factory.operator_intent.v1` envelope.
 
 The server binds only `127.0.0.1` or `::1`, rejects unexpected `Host` and POST `Origin`, and replaces the exact HTML marker `<!-- OPERATOR_TOKEN -->` with an in-memory `<meta name="operator-token" content="…">`. The client sends that value as `X-Operator-Token` on both routes. Responses use `no-store`; the UI persists no token.
@@ -30,7 +30,7 @@ The process serves static UI and one `CollectionOperatorApplication`. FAKE injec
 
 ```json
 {
-  "schema_version": "data_factory.operator_session_view.v1",
+  "schema_version": "data_factory.operator_session_view.v2",
   "session_id": "collection-application-r001",
   "revision": 12,
   "projection": {},
@@ -294,9 +294,9 @@ The browser polls only while environment preparation or execution is active. Pol
 
 ## Current PHYSICAL TEST_ONLY boundary
 
-The current PHYSICAL application reads the repository catalog but marks a combination executable only when its workspace/frame, motion qualification, start pose, object/grasp and backend-derived camera profile all match the injected caller. The checked-in executable lane uses place1, wood-cube top-center grasp, `pickup_e2e`, `DIRECT` and the currently qualified start pose; compatible one- or two-camera role maps select a validated v2 profile.
+The current PHYSICAL application reads the repository catalog but marks a combination executable only when its workspace/frame, motion qualification, start pose, object/grasp and backend-derived camera profile all match the injected caller. The checked-in executable lane uses registered PLACE_A/PLACE_B, the 24 mm wood-cube top-below-3.5 mm grasp, `pickup_e2e`/`pick_place`, `DIRECT`/`TWO_STAGE_ALIGN_V2` and the currently qualified start poses. The active two-camera collection family is `fr5-up-wrist-rgb-30hz-v2`; older profile revisions remain replayable but are not duplicated as current UI choices.
 
-Qualified `PLACE_A@place-a-yaw0-r002` contributes bounded continuous X/Y and normalized yaw. Checked-in cells and HOME/origin/yaw0 are convenient presets rather than the product limit. Count is editable from 1 to 100, and compile seals automatic deterministic spread or direct ordered poses as exact serial slots.
+Qualified `PLACE_A@place-a-yaw0-r003` and `PLACE_B@place-b-yaw0-r001` contribute bounded continuous X/Y and object/grasp-profile yaw. Checked-in cells and HOME/origin/yaw0 are convenient presets rather than the product limit. Count is editable from 1 to 100, and compile seals automatic deterministic state-space coverage or direct ordered poses as exact serial slots. The browser supplies one master seed; all spatial/start/yaw/trajectory derivations and yaw-transition safe-region checks are backend-owned.
 
 Startup discovers stable camera identities and projects them as `카메라 1`, `카메라 2`, and so on. The operator assigns only recording roles that participate in a tracked profile feasible for the current device count; the backend keeps technical identities, derives the exact compatible profile and owns any safe foreground rebind.
 
@@ -306,4 +306,4 @@ The environment can attach to one existing robot/controller/gripper owner, boots
 
 Camera identity and transport are bound during environment preparation and compiled-campaign construction. Every selected cell gets a fresh HOME snapshot and scene/start/plan validation before its episode, followed by recorder readiness and technical validation. The camera may remain `CONNECTED_UNPLACED`; no image-quality, object-visibility, role-placement, dual-camera-sync, depth or production-data-validity judgment is issued.
 
-GENERAL/PRODUCTION mode, new physical workspace or unregistered-cell/task/object/grasp/start/motion/variant callers, `pick_place`, `TWO_STAGE_ALIGN`, ID/OOD collection, RealSense/depth and dual-camera sync/data-validity qualification, production candidate issuance and training approval require separate qualified combinations and runtime callers. Declared cells inside the qualified place1 registration do not require point-by-point workspace requalification. Catalog visibility alone is not execution authority.
+GENERAL/PRODUCTION mode and the registered `pick_place`/`TWO_STAGE_ALIGN_V2` caller now use the current physical application and existing exact-plan checks. New physical workspaces or unregistered cell/task/object/grasp/start/motion/variant callers, ID/OOD collection, depth and camera data-validity qualification, production candidate issuance and training approval still require their own current contracts. Declared cells inside the qualified place1 registration do not require point-by-point workspace requalification. Catalog visibility alone is not execution authority.

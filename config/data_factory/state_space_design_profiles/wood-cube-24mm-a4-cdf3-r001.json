@@ -1,0 +1,18 @@
+{
+  "schema_version": "data_factory.state_space_design_profile.v1",
+  "state_space_design_profile_id": "wood-cube-24mm-a4-cdf3-r001",
+  "object_profile_id": "wood-cube-24mm-r001",
+  "object_profile_digest": "sha256:fd93d2fb05d9ddd05a040e823b2d2b31428a79a7ae7ce07a1ad8cf519c66489a",
+  "grasp_profile_id": "wood-cube-24mm-top-3p5mm-r001",
+  "grasp_profile_digest": "sha256:d260ca29a2f70258f43d53e2127e0a5d307fef0fc7cbbadb093278391a509173",
+  "yaw_sampling_profile_id": "wood-cube-24mm-top-yaw-r001",
+  "yaw_sampling_profile_digest": "sha256:88e62729699e5c12daafd394800e8be83890dce9356fd40abb5a1583922606c6",
+  "spatial_strata": {
+    "columns": 5,
+    "rows": 3
+  },
+  "yaw_cdf_strata": 3,
+  "assignment": "ROTATING_BALANCED_FRACTIONAL_FACTORIAL",
+  "execution_order": "CONTIGUOUS_YAW_BLOCKS",
+  "initial_source_policy": "CONDITION_ON_OBSERVED_SOURCE"
+}

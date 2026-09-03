@@ -8,6 +8,8 @@ from tools.fr5_data_factory import canonical_digest
 from .operator.fixtures import SCENE_SPEC, motion
 
 SCENE={"scene_state_digest":"sha256:"+"8"*64,"revision":1,"object_instance_id":"cube-1"}
+def motion_only(binding_digest,parent_digest,run_id,program,scene):
+ scope="sha256:"+"3"*64;expectation={"schema_version":"data_factory.motion_only_continuation.v1","preapproval_scope_digest":scope,"object_reposition_binding_digest":binding_digest,"run_id":run_id,"resolved_job_digest":program["resolved_job_digest"],"motion_program_digest":canonical_digest(program),"scene_binding_digest":canonical_digest(scene)};expectation["expectation_digest"]=canonical_digest(expectation);return {"motion_only_binding_digest":binding_digest,"motion_only_parent_run_id":"parent-run","motion_only_parent_plan_digest":parent_digest,"motion_only_preapproval_scope_digest":scope,"motion_only_expected_run_id":run_id,"motion_only_expected_resolved_job_digest":program["resolved_job_digest"],"motion_only_expected_program_digest":expectation["motion_program_digest"],"motion_only_expected_scene_digest":expectation["scene_binding_digest"],"motion_only_expectation_digest":expectation["expectation_digest"]}
 def snapshot(positions=None,ready=True,gripper_position=.01,velocity=20,force=50,plugin="fairino_hardware/FairinoHardwareInterface",open_velocity=None,open_force=None):
  def controller(endpoint):
   value={"endpoint":endpoint,"type":"control_msgs/msg/JointTrajectoryControllerState","publisher_count":1,"ready":ready,"age_s":0.,"speed_scaling":1.}
@@ -119,6 +121,37 @@ class Test(unittest.TestCase):
    @contextmanager
    def locked_snapshot(self,digest):yield {"scene_state_digest":digest,"scene_state":{"revision":2,"objects":{"cube-1":{"object_profile_id":"wood-cube-25mm-r001","state":"ON_SURFACE"}}}}
   store=Store();node=e.PickupExecutor(T(),clock=lambda:datetime(2026,1,1,tzinfo=timezone.utc),cell_state_store=store,scene_state_store=store,execution_enabled=True);planned=node.process(self.req("plan",{"run_id":"r","motion_program":motion(True),"scene_binding":binding}));approval={"approval_id":"approval-1","approved_by":"operator-1","run_id":"r","resolved_job_digest":"sha256:"+"a"*64,"plan_digest":planned["plan_digest"],"approval_expiry":"2026-01-02T00:00:00Z"};self.assertTrue(node.process(self.req("approve",approval,"slot-a"))["ok"]);result=node.process(self.req("execute",{"run_id":"r","plan_digest":planned["plan_digest"],"lease_id":"lease-1"},"slot-e"));self.assertEqual((result["code"],store.consumed),("CELL_NOT_READY",[]))
+ def test_motion_only_consumes_reposition_slot_while_parent_owns_blocked_cell(self):
+  source={"slot_id":"sha256:"+"1"*64,"slot_digest":"sha256:"+"2"*64,"allowed_run_id":"reposition-run"};target=release_slot(robot_system_id="fr5-lab-a",pose={"place_id":"place-a","yaw_deg":20,"x_mm":60,"y_mm":0},object_profile_id="wood-cube-25mm-r001",exclusion_geometry_digest="sha256:"+"e"*64,role="DESTINATION_THEN_NEXT_SOURCE");binding={**SCENE,"release_slot":target,"allowed_next_run_id":"next-run","source_slot":source};parent_digest="sha256:"+"7"*64;binding_digest="sha256:"+"4"*64
+  class Live(T):
+   def __init__(self):super().__init__();self.started=[]
+   def start_phase(self,step):self.started.append(step["phase"])
+  class Store:
+   def __init__(self,parent="parent-run"):self.parent=parent;self.consumed=[];self.blocked=[]
+   def read(self):return {"robot_system_id":"fr5-lab-a","cell_ready":False,"run_id":self.parent,"plan_digest":parent_digest}
+   def consume_next_source(self,**value):self.consumed.append(value);return {"scene_state_digest":"sha256:"+"9"*64,"scene_state":{"revision":2}}
+   @contextmanager
+   def locked_snapshot(self,digest):yield {"scene_state_digest":digest,"scene_state":{"revision":2,"objects":{"cube-1":{"object_profile_id":"wood-cube-25mm-r001","state":"ON_SURFACE"}}}}
+   def mark_blocked(self,*value):self.blocked.append(value)
+  def prepare(store,phase_events_root=None):
+   transport=Live();program=motion(True);node=e.PickupExecutor(transport,clock=lambda:datetime(2026,1,1,tzinfo=timezone.utc),cell_state_store=store,scene_state_store=store,execution_enabled=True,phase_events_root=phase_events_root,**motion_only(binding_digest,parent_digest,"reposition-run",program,binding));planned=node.process(self.req("plan",{"run_id":"reposition-run","motion_program":program,"scene_binding":binding}));approval={"approval_id":"approval-1","approved_by":"operator-1","run_id":"reposition-run","resolved_job_digest":"sha256:"+"a"*64,"plan_digest":planned["plan_digest"],"approval_expiry":"2026-01-02T00:00:00Z","approval_scope":"HIL_NUMERIC_PROXY"};self.assertTrue(node.process(self.req("approve",approval,"motion-only-a"))["ok"]);return node,transport,planned
+  store=Store();node,transport,planned=prepare(store);result=node.process(self.req("execute",{"run_id":"reposition-run","plan_digest":planned["plan_digest"],"lease_id":"lease-1"},"motion-only-e"));self.assertEqual((result["state"],transport.started,store.blocked),("EXECUTING",["PREGRASP_PTP"],[]));self.assertEqual(store.consumed[0]["run_id"],"reposition-run")
+  wrong=Store("other-parent");node,_transport,planned=prepare(wrong);result=node.process(self.req("execute",{"run_id":"reposition-run","plan_digest":planned["plan_digest"],"lease_id":"lease-1"},"wrong-parent"));self.assertEqual((result["code"],wrong.consumed),("MOTION_ONLY_PARENT_CELL",[]))
+  with tempfile.TemporaryDirectory() as directory:
+   root=Path(directory);(root/"reposition-run").mkdir();node,_transport,planned=prepare(Store(),root);node.process(self.req("execute",{"run_id":"reposition-run","plan_digest":planned["plan_digest"],"lease_id":"lease-1"},"event-source"));self.assertTrue(node.close());event=__import__("json").loads((root/"reposition-run/phase_events.jsonl").read_text().splitlines()[0]);self.assertEqual(event["event_source"],"object_reposition_executor")
+ def test_motion_only_rejects_forged_continuation_before_preflight(self):
+  class Counted(T):
+   def __init__(self):super().__init__();self.preflights=0
+   def preflight(self):self.preflights+=1;return super().preflight()
+  binding_digest="sha256:"+"4"*64;parent_digest="sha256:"+"7"*64;base_program=motion(True);base_scene=SCENE
+  forged=[]
+  forged.append(("other-run",base_program,base_scene))
+  changed=motion(True);changed["resolved_job_digest"]="sha256:"+"9"*64;forged.append(("reposition-run",changed,base_scene))
+  changed=motion(True);changed["steps"][0]["target"]["base_tcp"]["translation_m"][0]=.01;forged.append(("reposition-run",changed,base_scene))
+  forged.append(("reposition-run",base_program,{**base_scene,"revision":2}))
+  for index,(run_id,program,scene) in enumerate(forged):
+   transport=Counted();node=e.PickupExecutor(transport,execution_enabled=True,**motion_only(binding_digest,parent_digest,"reposition-run",base_program,base_scene));result=node.process(self.req("plan",{"run_id":run_id,"motion_program":program,"scene_binding":scene},f"forged-{index}"));self.assertEqual((result["code"],transport.preflights,transport.calls),("MOTION_ONLY_CONTINUATION_BINDING",0,[]))
+  transport=Counted();node=e.PickupExecutor(transport,execution_enabled=True,**motion_only(binding_digest,parent_digest,"reposition-run",base_program,base_scene));result=node.process(self.req("preflight",{"motion_program":base_program},"bare-preflight"));self.assertEqual((result["code"],transport.preflights),("MOTION_ONLY_CONTINUATION_BINDING",0))
  def test_fake_execution_holds_reset_and_faults(self):
   class Live(T):
    def __init__(self):super().__init__();self.position=[0.]*6;self.gripper_position=.01;self.velocity=20;self.force=50;self.plugin="fairino_hardware/FairinoHardwareInterface";self.started=[];self.cancelled=0;self.bad_cancel=False
@@ -201,6 +234,21 @@ class Test(unittest.TestCase):
   n,t,s,p=ready();[n.tick() for _ in range(5)];self.assertEqual(n.process(self.req("release_verdict",{"run_id":"r","plan_digest":p["plan_digest"],"verdict":"LANDED","decided_by":"local-operator","source":"CAMPAIGN_CONTROL_PROXY"},"proxy-forged"))["code"],"RELEASE_VERDICT_SCHEMA");self.assertEqual(s.transitions,[])
   n,t,s,p=ready();[n.tick() for _ in range(5)];s.transition_release=lambda **_:(_ for _ in ()).throw(e.ContractError("SCENE_STATE_CHANGED"));result=n.process(self.req("release_verdict",{"run_id":"r","plan_digest":p["plan_digest"],"verdict":"LANDED","decided_by":"operator-1","source":"HUMAN"},"stale-scene"));self.assertEqual((result["state"],result["code"],result["data"]["durable_blocked"],s.blocked[-1][0]),("BLOCKED","SCENE_STATE_CHANGED",True,"SCENE_STATE_CHANGED"))
   n,t,s,p=ready();n.tick();t.fail_poll=True;n.tick();self.assertEqual((n.runs["r"]["state"],n.runs["r"]["failure_code"],t.started,s.transitions[0]["evidence"]["terminal_phases"],s.transitions[0]["evidence"]["release_outcome"],s.transitions[0]["evidence"]["outcome_source"]),("BLOCKED","ROS_EXEC_RESULT_FAILED",list(e.PHASES[:7]),["RECYCLE_APPROACH_PTP"],"UNCERTAIN","EXECUTOR_FAILURE"))
+ def test_motion_only_heartbeat_is_explicitly_separate_from_recorder_health(self):
+  binding_digest="sha256:"+"4"*64;plan_digest="sha256:"+"5"*64
+  with self.assertRaisesRegex(e.ContractError,"MOTION_ONLY_BINDING"):
+   e.PickupExecutor(T(),motion_only_binding_digest=binding_digest)
+  node=e.PickupExecutor(T(),execution_enabled=True,monotonic_clock=lambda:0.,**motion_only(binding_digest,"sha256:"+"7"*64,"r",motion(True),SCENE))
+  node.runs["r"]={"state":"SEMANTIC_VERDICT","digest":plan_digest,"plan":{"run_id":"r","execution_timeouts_s":{"heartbeat_lease":1}},"execution":{"lease_id":"lease-1","lease_deadline":1.,"wait_deadline":1.,"step_index":0}}
+  owner={"run_id":"r","plan_digest":plan_digest,"lease_id":"lease-1","motion_owner_health":{"owner_alive":True,"owner_error":None,"recording_scope":"OUT_OF_DATASET","object_reposition_binding_digest":binding_digest}}
+  result=node.process(self.req("heartbeat",owner,"motion-owner"));self.assertTrue(result["ok"]);self.assertEqual(result["mode"],"LIVE_MOTION_ONLY")
+  forged={**owner,"motion_owner_health":{**owner["motion_owner_health"],"object_reposition_binding_digest":"sha256:"+"6"*64}}
+  self.assertEqual(node.process(self.req("heartbeat",forged,"forged-owner"))["code"],"MOTION_ONLY_BINDING")
+  recorder={"run_id":"r","plan_digest":plan_digest,"lease_id":"lease-1","recorder_health":{"writer_alive":True,"writer_error":None}}
+  self.assertEqual(node.process(self.req("heartbeat",recorder,"forged-recorder"))["code"],"HEARTBEAT_SCHEMA")
+  normal=e.PickupExecutor(T(),execution_enabled=True,monotonic_clock=lambda:0.);normal.runs["r"]=node.runs["r"]
+  self.assertEqual(normal.process(self.req("heartbeat",owner,"forged-motion-only"))["code"],"HEARTBEAT_SCHEMA")
+
  def test_jsonl_schema_idempotency_preflight(self):
   from types import SimpleNamespace
   from unittest import mock

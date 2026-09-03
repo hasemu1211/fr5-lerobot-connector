@@ -9,6 +9,10 @@ from types import SimpleNamespace
 from unittest import mock
 
 from tools.data_factory import run_job
+from tools.data_factory.collection_seed import (
+    derive_domain_seed,
+    trajectory_sampling_binding,
+)
 from tools.data_factory.episode_ledger import (
     build_lerobot_v3_episode_locator,
     compile_episode_ledger,
@@ -26,6 +30,50 @@ from tools.fr5_data_factory import ContractError, canonical_digest
 
 def digest(value: object) -> str:
     return canonical_digest(value)
+
+
+def trajectory_binding() -> dict:
+    value = {
+        "schema_version": "data_factory.trajectory_variant_binding.v2",
+        "trajectory_variant_id": "DIRECT",
+        "variation_profile_digest": digest("direct-profile"),
+        "sampling_seed": 0,
+        "sample_rank": 0,
+        "design_size": 1,
+        "design_digest": digest("trajectory-design"),
+        "target_yaw_deg": 0.0,
+        "phase_parameters": {},
+        "phase_parameters_digest": digest({}),
+        "motion_program_digest": digest("motion-program"),
+    }
+    value["binding_digest"] = digest(value)
+    return value
+
+
+def yaw_binding() -> dict:
+    value = {
+        "schema_version": "data_factory.yaw_sample_binding.v4",
+        "yaw_sampling_profile_id": "cube-yaw-profile-r1",
+        "yaw_sampling_profile_digest": digest("yaw-profile"),
+        "sampling_seed": (1 << 64) - 1,
+        "sample_identity_digest": digest("yaw-identity"),
+        "sample_rank": 0,
+        "design_size": 3,
+        "yaw_sample_quantile": 0.2,
+        "raw_yaw_deg": 0.0,
+        "canonical_object_yaw_deg": 0.0,
+        "source_object_yaw_deg": 0.0,
+        "grasp_yaw_deg": 0.0,
+        "yaw_equivalence_period_deg": 90.0,
+        "sample_origin": "SEEDED_CDF_STRATUM",
+        "state_space_design_profile_id": "cube-state-space-r1",
+        "state_space_design_profile_digest": digest("state-space"),
+        "spatial_cell_index": 7,
+        "spatial_row": 1,
+        "spatial_column": 2,
+    }
+    value["binding_digest"] = digest(value)
+    return value
 
 
 class EpisodeLedgerTest(unittest.TestCase):
@@ -104,6 +152,7 @@ class EpisodeLedgerTest(unittest.TestCase):
         manifest = {
             "schema_version": "data_factory.collection_campaign_manifest.v1",
             "manifest_id": "campaign-1",
+            "normalized_seed": 4_242_424,
             "slots": [slot],
         }
         manifest["manifest_digest"] = digest(manifest)
@@ -117,7 +166,10 @@ class EpisodeLedgerTest(unittest.TestCase):
             "slot_digest": digest(slot),
             "base_condition": base_condition,
             "robot_start_pose": {"robot_start_pose_id": "start-0"},
-            "fixed_contract": {"collection_profile_digest": digest("collection-profile")},
+            "fixed_contract": {
+                "collection_profile_digest": digest("collection-profile"),
+                "motion_recipe": "DIRECT",
+            },
             "required_scene_digest": digest("fresh-scene"),
         }
         intent["intent_digest"] = digest(intent)
@@ -125,6 +177,7 @@ class EpisodeLedgerTest(unittest.TestCase):
             "schema_version": "fr5.pickup_plan.v3",
             "run_id": self.run_id,
             "resolved_job_digest": self.episode_ref["resolved_job_digest"],
+            "motion_program_digest": digest("motion-program"),
             "steps": ["approach", "grasp", "recycle"],
         }
         plan_digest = digest(plan)
@@ -404,6 +457,204 @@ class EpisodeLedgerTest(unittest.TestCase):
         ):
             self._compile(artifacts)
 
+    def test_modern_plan_artifact_fully_validates_durable_bindings(self) -> None:
+        artifacts = self._artifacts(suffix="modern-bindings")
+        plan = json.loads(
+            Path(artifacts["plan"]["artifact_path"]).read_text(encoding="utf-8")
+        )
+        manifest = json.loads(
+            Path(artifacts["manifest"]["artifact_path"]).read_text(
+                encoding="utf-8",
+            )
+        )
+        intent = json.loads(
+            Path(artifacts["intent"]["artifact_path"]).read_text(
+                encoding="utf-8",
+            )
+        )
+        runtime = json.loads(
+            Path(artifacts["runtime_binding"]["artifact_path"]).read_text(
+                encoding="utf-8",
+            )
+        )
+        trajectory = trajectory_binding()
+        trajectory.update(trajectory_sampling_binding(
+            manifest["normalized_seed"], intent["slot"], manifest["slots"],
+        ))
+        trajectory["binding_digest"] = digest({
+            key: value for key, value in trajectory.items()
+            if key != "binding_digest"
+        })
+        yaw = yaw_binding()
+        yaw["sampling_seed"] = derive_domain_seed(
+            manifest["normalized_seed"], "yaw",
+        )
+        yaw["binding_digest"] = digest({
+            key: value for key, value in yaw.items() if key != "binding_digest"
+        })
+        plan.update(
+            schema_version="data_factory.preapproval_evidence.v4",
+            trajectory_variant_binding=trajectory,
+            trajectory_variant_binding_digest=trajectory["binding_digest"],
+            campaign_binding={
+                "manifest_digest": manifest["manifest_digest"],
+                "intent_digest": intent["intent_digest"],
+                "slot_id": intent["slot"]["slot_id"],
+                "slot_digest": intent["slot_digest"],
+                "runtime_episode_binding_digest": runtime["binding_digest"],
+            },
+            object_reposition_binding=None,
+            object_reposition_binding_digest=None,
+            yaw_sample_binding=yaw,
+            yaw_sample_binding_digest=yaw["binding_digest"],
+        )
+        artifacts["plan"] = self._json("plan-modern-v4.json", plan)
+        ledger = self._compile(artifacts)
+        self.assertEqual(ledger, validate_episode_ledger(ledger))
+
+        legacy_trajectory = copy.deepcopy(plan)
+        legacy_binding = legacy_trajectory["trajectory_variant_binding"]
+        legacy_binding["schema_version"] = (
+            "data_factory.trajectory_variant_binding.v1"
+        )
+        for field in ("sample_rank", "design_size", "design_digest"):
+            legacy_binding.pop(field)
+        legacy_binding["binding_digest"] = digest({
+            key: value for key, value in legacy_binding.items()
+            if key != "binding_digest"
+        })
+        legacy_trajectory["trajectory_variant_binding_digest"] = (
+            legacy_binding["binding_digest"]
+        )
+        artifacts["plan"] = self._json(
+            "plan-modern-legacy-trajectory.json", legacy_trajectory,
+        )
+        with self.assertRaisesRegex(
+            ContractError, "EPISODE_LEDGER_PLAN_BINDING",
+        ):
+            self._compile(artifacts)
+
+        for label, mutate in (
+            (
+                "trajectory",
+                lambda value: value["trajectory_variant_binding"].update(
+                    phase_parameters={"unbound": True},
+                ),
+            ),
+            (
+                "campaign",
+                lambda value: value["campaign_binding"].update(
+                    slot_id="invalid slot",
+                ),
+            ),
+            (
+                "yaw",
+                lambda value: value["yaw_sample_binding"].update(
+                    spatial_row=2,
+                ),
+            ),
+        ):
+            with self.subTest(label=label):
+                forged = copy.deepcopy(plan)
+                mutate(forged)
+                artifacts["plan"] = self._json(
+                    f"plan-modern-forged-{label}.json", forged,
+                )
+                with self.assertRaisesRegex(
+                    ContractError, "EPISODE_LEDGER_PLAN_BINDING",
+                ):
+                    self._compile(artifacts)
+
+        def redigest(value: dict, field: str, outer_digest: str) -> None:
+            binding = value[field]
+            binding["binding_digest"] = digest({
+                key: item for key, item in binding.items()
+                if key != "binding_digest"
+            })
+            value[outer_digest] = binding["binding_digest"]
+
+        for label, mutate in (
+            (
+                "campaign-manifest",
+                lambda value: value["campaign_binding"].update(
+                    manifest_digest=digest("other-manifest"),
+                ),
+            ),
+            (
+                "trajectory-seed",
+                lambda value: (
+                    value["trajectory_variant_binding"].update(
+                        sampling_seed=(
+                            value["trajectory_variant_binding"]["sampling_seed"] + 1
+                        ) % (1 << 64),
+                    ),
+                    redigest(
+                        value, "trajectory_variant_binding",
+                        "trajectory_variant_binding_digest",
+                    ),
+                ),
+            ),
+            (
+                "trajectory-target",
+                lambda value: (
+                    value["trajectory_variant_binding"].update(target_yaw_deg=1.0),
+                    redigest(
+                        value, "trajectory_variant_binding",
+                        "trajectory_variant_binding_digest",
+                    ),
+                ),
+            ),
+            (
+                "trajectory-motion",
+                lambda value: (
+                    value["trajectory_variant_binding"].update(
+                        motion_program_digest=digest("other-motion-program"),
+                    ),
+                    redigest(
+                        value, "trajectory_variant_binding",
+                        "trajectory_variant_binding_digest",
+                    ),
+                ),
+            ),
+            (
+                "yaw-seed",
+                lambda value: (
+                    value["yaw_sample_binding"].update(
+                        sampling_seed=(
+                            value["yaw_sample_binding"]["sampling_seed"] + 1
+                        ) % (1 << 64),
+                    ),
+                    redigest(
+                        value, "yaw_sample_binding", "yaw_sample_binding_digest",
+                    ),
+                ),
+            ),
+            (
+                "yaw-source",
+                lambda value: (
+                    value["yaw_sample_binding"].update(
+                        raw_yaw_deg=1.0,
+                        canonical_object_yaw_deg=1.0,
+                        source_object_yaw_deg=1.0,
+                        grasp_yaw_deg=1.0,
+                    ),
+                    redigest(
+                        value, "yaw_sample_binding", "yaw_sample_binding_digest",
+                    ),
+                ),
+            ),
+        ):
+            with self.subTest(redigested=label):
+                forged = copy.deepcopy(plan)
+                mutate(forged)
+                artifacts["plan"] = self._json(
+                    f"plan-modern-redigested-{label}.json", forged,
+                )
+                with self.assertRaisesRegex(
+                    ContractError, "EPISODE_LEDGER_PLAN_BINDING",
+                ):
+                    self._compile(artifacts)
+
     def test_production_runtime_binding_is_scene_observed_and_fail_closed(self) -> None:
         def runtime_artifacts(
             suffix: str, *, schema: str = "data_factory.production_episode_binding.v1",
@@ -555,16 +806,41 @@ class EpisodeLedgerTest(unittest.TestCase):
             run_job, "_lerobot_v3_episode_locator", return_value=self.episode_locator,
             create=True,
         ) as fallback:
+            trajectory_binding = {
+                "schema_version": "data_factory.trajectory_variant_binding.v2",
+                "trajectory_variant_id": "DIRECT",
+                "variation_profile_digest": digest("direct-trajectory-profile"),
+                "sampling_seed": 0,
+                "sample_rank": 0,
+                "design_size": 1,
+                "design_digest": digest({
+                    "schema_version": "data_factory.trajectory_sampling_design.default.v1",
+                    "design_size": 1,
+                }),
+                "target_yaw_deg": 0.0,
+                "phase_parameters": {},
+                "phase_parameters_digest": digest({}),
+                "motion_program_digest": digest("motion-program"),
+            }
+            trajectory_binding["binding_digest"] = digest(trajectory_binding)
+            preapproval = document("plan")
             reference = run_job._write_episode_ledger(
                 {
                     "run_id": self.run_id, "run_root": str(run_root),
                     "dataset_root": str(self.dataset),
                 },
-                {"resolved_job_digest": self.episode_ref["resolved_job_digest"]},
+                {
+                    "resolved_job_digest": self.episode_ref["resolved_job_digest"],
+                    "normalized_job": {"yaw_deg": 0.0},
+                },
                 {"repo_id": self.dataset_identity["repo_id"]},
-                SimpleNamespace(execution_response=document("execution")),
+                SimpleNamespace(
+                    execution_response=document("execution"),
+                    plan_envelope=preapproval["plan_envelope"],
+                ),
                 document("episode"), document("runtime_binding"),
                 {"manifest": document("manifest"), "intent": document("intent")},
+                trajectory_binding=trajectory_binding,
                 episode_locator=self.episode_locator,
             )
         fallback.assert_not_called()
@@ -573,6 +849,12 @@ class EpisodeLedgerTest(unittest.TestCase):
         self.assertEqual(reference["ledger_digest"], ledger["ledger_digest"])
         self.assertEqual(reference["technical_status"], "PASS")
         self.assertEqual(reference["review_status"], "NOT_MEASURED")
+        self.assertEqual(
+            json.loads((run_dir / "execution_response.json").read_text(
+                encoding="utf-8",
+            ))["data"]["trajectory_variant_binding"],
+            trajectory_binding,
+        )
         self.assertEqual(reference["retention_state"], "PRESERVE")
         self.assertEqual(reference["reclaim_state"], "NOT_EVALUATED")
         self.assertEqual(reference["training_status"], "NOT_AUTHORIZED")

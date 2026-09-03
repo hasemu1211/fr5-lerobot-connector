@@ -13,8 +13,23 @@ from pathlib import Path
 from pathlib import PurePosixPath
 from typing import Any, Mapping
 
-from tools.data_factory.quality.coverage_report import CANDIDATE_FIELDS, TECHNICAL_FIELDS
+from tools.data_factory.collection_seed import (
+    derive_domain_seed,
+    trajectory_sampling_binding,
+)
+from tools.data_factory.motion.object_reposition import (
+    validate_object_reposition_binding,
+)
+from tools.data_factory.motion.trajectory_variants import (
+    validate_trajectory_variant_binding,
+)
+from tools.data_factory.quality.coverage_report import (
+    CANDIDATE_FIELDS,
+    TECHNICAL_FIELDS,
+    validate_preapproval_campaign_binding,
+)
 from tools.data_factory.task_recipe import validate_episode_instruction_binding
+from tools.data_factory.state_space import validate_yaw_sample_binding
 from tools.fr5_data_factory import (
     ContractError, DIGEST, RFC3339, SAFE_ID, TASK_REVIEW_CHECKLIST_IDS,
     canonical_digest, load_json_strict,
@@ -101,6 +116,12 @@ PREAPPROVAL_FIELDS = frozenset({
 })
 PREAPPROVAL_V2_FIELDS = PREAPPROVAL_FIELDS | frozenset({
     "episode_instruction_binding", "episode_instruction_binding_digest",
+})
+PREAPPROVAL_V4_FIELDS = PREAPPROVAL_FIELDS | frozenset({
+    "trajectory_variant_binding", "trajectory_variant_binding_digest",
+    "campaign_binding", "object_reposition_binding",
+    "object_reposition_binding_digest",
+    "yaw_sample_binding", "yaw_sample_binding_digest",
 })
 PRECOMMIT_SAFETY_FIELDS = frozenset({
     "schema_version", "run_id", "approved_plan_digest", "scene_binding_digest",
@@ -486,6 +507,9 @@ def _runtime_binding(
 
 def _plan_binding(
     value: object, run_id: str, resolved_job_digest: str,
+    *, manifest: Mapping[str, Any], manifest_digest: str,
+    intent: Mapping[str, Any], intent_digest: str,
+    slot: Mapping[str, Any], runtime: Mapping[str, Any],
 ) -> tuple[str, dict[str, Any]]:
     if not isinstance(value, Mapping):
         raise ContractError("EPISODE_LEDGER_PLAN_FIELDS")
@@ -495,6 +519,12 @@ def _plan_binding(
         if schema == "data_factory.preapproval_evidence.v1"
         else PREAPPROVAL_V2_FIELDS
         if schema == "data_factory.preapproval_evidence.v2"
+        else (
+            PREAPPROVAL_V4_FIELDS
+            | ({"episode_instruction_binding", "episode_instruction_binding_digest"}
+               if "episode_instruction_binding" in value else set())
+        )
+        if schema == "data_factory.preapproval_evidence.v4"
         else frozenset()
     )
     plan_artifact = _exact(value, fields, "EPISODE_LEDGER_PLAN_FIELDS")
@@ -503,7 +533,13 @@ def _plan_binding(
         or plan_artifact["resolved_job_digest"] != resolved_job_digest
     ):
         raise ContractError("EPISODE_LEDGER_PLAN_RUN")
-    if schema == "data_factory.preapproval_evidence.v2":
+    checked_trajectory = None
+    checked_campaign = None
+    checked_yaw = None
+    if schema in {
+        "data_factory.preapproval_evidence.v2",
+        "data_factory.preapproval_evidence.v4",
+    } and "episode_instruction_binding" in plan_artifact:
         try:
             instruction = validate_episode_instruction_binding(
                 plan_artifact["episode_instruction_binding"],
@@ -515,6 +551,49 @@ def _plan_binding(
                 raise ContractError("EPISODE_LEDGER_PLAN_INSTRUCTION")
         except ContractError as exc:
             raise ContractError("EPISODE_LEDGER_PLAN_INSTRUCTION") from exc
+    if schema == "data_factory.preapproval_evidence.v4":
+        trajectory = plan_artifact["trajectory_variant_binding"]
+        reposition = plan_artifact["object_reposition_binding"]
+        campaign = plan_artifact["campaign_binding"]
+        try:
+            checked_trajectory = validate_trajectory_variant_binding(trajectory)
+            checked_reposition = (
+                None if reposition is None
+                else validate_object_reposition_binding(reposition)
+            )
+            checked_campaign = validate_preapproval_campaign_binding(campaign)
+        except ContractError as exc:
+            raise ContractError("EPISODE_LEDGER_PLAN_BINDING") from exc
+        if (
+            plan_artifact["trajectory_variant_binding_digest"]
+            != checked_trajectory["binding_digest"]
+            or reposition is None
+            and plan_artifact["object_reposition_binding_digest"] is not None
+            or checked_reposition is not None
+            and plan_artifact["object_reposition_binding_digest"]
+            != checked_reposition["binding_digest"]
+            or checked_reposition is not None
+            and checked_reposition["parent_run_id"] != run_id
+            or campaign != checked_campaign
+        ):
+            raise ContractError("EPISODE_LEDGER_PLAN_BINDING")
+    if schema == "data_factory.preapproval_evidence.v4":
+        yaw_sample = plan_artifact["yaw_sample_binding"]
+        try:
+            checked_yaw = (
+                None if yaw_sample is None
+                else validate_yaw_sample_binding(yaw_sample)
+            )
+        except ContractError as exc:
+            raise ContractError("EPISODE_LEDGER_PLAN_BINDING") from exc
+        if (
+            checked_yaw is None
+            and plan_artifact["yaw_sample_binding_digest"] is not None
+            or checked_yaw is not None
+            and plan_artifact["yaw_sample_binding_digest"]
+            != checked_yaw["binding_digest"]
+        ):
+            raise ContractError("EPISODE_LEDGER_PLAN_BINDING")
     envelope = plan_artifact["plan_envelope"]
     if (
         not isinstance(envelope, Mapping)
@@ -545,6 +624,61 @@ def _plan_binding(
         or precommit.get("approved_plan_digest") != plan_digest
     ):
         raise ContractError("EPISODE_LEDGER_PLAN_DIGEST")
+    if schema == "data_factory.preapproval_evidence.v4":
+        try:
+            expected_trajectory = trajectory_sampling_binding(
+                manifest["normalized_seed"], slot, manifest["slots"],
+            )
+            expected_yaw_seed = derive_domain_seed(
+                manifest["normalized_seed"], "yaw",
+            )
+        except (ContractError, KeyError, TypeError) as exc:
+            raise ContractError("EPISODE_LEDGER_PLAN_BINDING") from exc
+        fixed_contract = intent.get("fixed_contract")
+        expected_campaign = {
+            "manifest_digest": manifest_digest,
+            "intent_digest": intent_digest,
+            "slot_id": slot.get("slot_id"),
+            "slot_digest": canonical_digest(slot),
+            "runtime_episode_binding_digest": runtime.get("binding_digest"),
+        }
+        if (
+            checked_campaign != expected_campaign
+            or not isinstance(fixed_contract, Mapping)
+            or checked_trajectory is None
+            or checked_trajectory["schema_version"]
+            != "data_factory.trajectory_variant_binding.v2"
+            or any(
+                checked_trajectory[field] != expected_trajectory[field]
+                for field in (
+                    "sampling_seed", "sample_rank", "design_size",
+                    "design_digest",
+                )
+            )
+            or checked_trajectory["trajectory_variant_id"]
+            != fixed_contract.get("motion_recipe")
+            or not math.isclose(
+                checked_trajectory["target_yaw_deg"], runtime["yaw_deg"],
+                rel_tol=0.0, abs_tol=1e-9,
+            )
+            or checked_trajectory["motion_program_digest"]
+            != plan.get("motion_program_digest")
+            or checked_yaw is not None and (
+                checked_yaw["schema_version"]
+                != "data_factory.yaw_sample_binding.v4"
+                or checked_yaw["sampling_seed"] != expected_yaw_seed
+                or not math.isclose(
+                    checked_yaw["source_object_yaw_deg"], runtime["yaw_deg"],
+                    rel_tol=0.0, abs_tol=1e-9,
+                )
+                or not math.isclose(
+                    checked_yaw["grasp_yaw_deg"],
+                    checked_trajectory["target_yaw_deg"],
+                    rel_tol=0.0, abs_tol=1e-9,
+                )
+            )
+        ):
+            raise ContractError("EPISODE_LEDGER_PLAN_BINDING")
     for field in COMMON_SAFETY_FIELDS[1:]:
         _digest(safety[field], "EPISODE_LEDGER_PLAN_SAFETY_DIGEST")
     return plan_digest, safety
@@ -661,6 +795,8 @@ def _source_bindings(
     if (
         not isinstance(base_condition, Mapping)
         or base_condition.get("base_condition_digest") != slot.get("base_condition_digest")
+        or base_condition.get("resolved_job_digest")
+        != episode_ref["resolved_job_digest"]
         or base_condition.get("base_condition_digest") != canonical_digest({
             key: item for key, item in base_condition.items() if key != "base_condition_digest"
         })
@@ -690,6 +826,9 @@ def _source_bindings(
 
     plan_digest, planned_safety = _plan_binding(
         loaded["plan"], run_id, episode_ref["resolved_job_digest"],
+        manifest=manifest, manifest_digest=manifest_digest,
+        intent=intent, intent_digest=intent_digest,
+        slot=slot, runtime=runtime,
     )
     technical = _exact(loaded["technical"], TECHNICAL_FIELDS, "EPISODE_LEDGER_TECHNICAL_FIELDS")
     expected_fps = technical["expected_fps"]

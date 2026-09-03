@@ -1325,7 +1325,7 @@ class FakeOperatorConsole:
                 {"label": "Task · pickup_e2e", "status": "OFFLINE_ONLY", "reason_codes": ["SYNTHETIC_FIXTURE"]},
                 {"label": "Task · pick_place", "status": "NOT_AVAILABLE", "reason_codes": ["FUTURE_TASK_RECIPE"]},
                 {"label": "Motion · DIRECT", "status": "OFFLINE_ONLY", "reason_codes": ["SYNTHETIC_FIXTURE"]},
-                {"label": "Motion variant · TWO_STAGE_ALIGN", "status": "NOT_AVAILABLE", "reason_codes": ["NO_PRODUCTION_CALLER"]},
+                {"label": "Motion variant · TWO_STAGE_ALIGN_V2", "status": "OFFLINE_ONLY", "reason_codes": ["SYNTHETIC_FIXTURE"]},
             ],
             "runtime": runtime,
             "approval": None if self._workflow != "AWAITING_APPROVAL" else {

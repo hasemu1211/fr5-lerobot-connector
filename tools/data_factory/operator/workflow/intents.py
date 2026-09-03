@@ -11,7 +11,7 @@ from typing import Any, Callable, Mapping
 from tools.fr5_data_factory import ContractError, DIGEST, SAFE_ID, TASK_REVIEW_CHECKLIST_IDS, canonical_digest
 
 
-VIEW_SCHEMA = "data_factory.operator_session_view.v1"
+VIEW_SCHEMA = "data_factory.operator_session_view.v2"
 INTENT_SCHEMA = "data_factory.operator_intent.v1"
 RESULT_SCHEMA = "data_factory.operator_intent_result.v1"
 INTENT_FIELDS = frozenset({

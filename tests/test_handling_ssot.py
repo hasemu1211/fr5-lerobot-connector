@@ -16,7 +16,7 @@ from tools.fr5_data_factory import (
 ROOT = Path(__file__).resolve().parents[1]
 CONFIG = ROOT / "config/data_factory"
 JOB_PATH = (
-    CONFIG / "jobs/center-live-24mm-20260901-r001.job.json"
+    CONFIG / "jobs/center-live-24mm-20260903-r002.job.json"
 )
 SHEET_A = ROOT / "tools/a4_place_yaw/json/place_a_yaw_p000_00.json"
 SHEET_B = CONFIG / "workspace_sheets/place-b-yaw0-r001_yaw0_sheet.json"
@@ -316,7 +316,7 @@ class HandlingSsotTest(unittest.TestCase):
             "wrist": "usb-Generic_USB2.0_PC_CAMERA-video-index0",
         }
         profile = load_json_strict(
-            CONFIG / "collection_profiles/fr5-up-wrist-rgb-30hz-v1.json",
+            CONFIG / "collection_profiles/fr5-up-wrist-rgb-30hz-v2.json",
         )
         self.assertEqual(
             profile["portability_status"], "QUALIFICATION_REQUIRED",

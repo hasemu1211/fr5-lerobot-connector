@@ -5,7 +5,7 @@ import json
 import unittest
 from datetime import datetime, timezone
 
-from tools.data_factory.motion.trajectory_variants import phase_variant_catalog
+from tools.data_factory.motion.trajectory_variants import legacy_phase_variant_catalog
 from tools.data_factory.quality.coverage_report import build_coverage_report
 from tools.data_factory.recollection import (
     compile_recollection_manifest,
@@ -16,7 +16,7 @@ from tools.fr5_data_factory import ContractError, canonical_digest
 
 
 NOW = datetime(2026, 8, 24, tzinfo=timezone.utc)
-CATALOG = phase_variant_catalog()
+CATALOG = legacy_phase_variant_catalog()
 VARIANTS = {item["trajectory_variant_id"]: item for item in CATALOG["variants"]}
 
 

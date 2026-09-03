@@ -31,7 +31,7 @@
           </fieldset>
           <label><span id="workspace-select-label">작업영역</span><select id="workspace-select" data-axis="workspace"></select><small data-axis-hint="workspace"></small></label><p id="workspace-route-summary"></p>
           <fieldset id="authoring-mode"><label><input type="radio" name="authoring_mode" value="ASSISTED">assisted</label><label><input type="radio" name="authoring_mode" value="DIRECT_EDIT">direct</label></fieldset>
-          <label>count<input id="count-input" type="number" min="1" max="100"></label><label>repeat<input id="repeat-input" type="number" min="1" max="100"></label><select id="split-select" data-axis="split"></select>
+          <label>count<input id="count-input" type="number" min="1" max="100"></label><label>repeat<input id="repeat-input" type="number" min="1" max="100"></label><label>Campaign seed<input id="seed-input" type="number" min="0" max="9007199254740991" step="1"></label><select id="split-select" data-axis="split"></select>
           <h4 id="current-object-title">current object</h4><p id="current-object-status"></p><form id="current-object-form"><label>X<input id="current-object-x" type="number" step="any" required></label><label>Y<input id="current-object-y" type="number" step="any" required></label><label>yaw<input id="current-object-yaw" type="number" step="any" required></label><button id="apply-current-object" type="submit">apply</button></form>
           <dl id="state-space-summary" hidden></dl><p id="workspace-domain-summary"></p>
           <section id="direct-pose-editor" hidden><h4 id="direct-pose-title">direct</h4><p id="direct-domain-status"></p><form id="direct-pose-form"><label id="direct-start-label" hidden>start<select id="direct-start-select"></select></label><label>X<input id="direct-x-input" type="number" step="any" required></label><label>Y<input id="direct-y-input" type="number" step="any" required></label><label>yaw<input id="direct-yaw-input" type="number" step="any" required></label><button id="add-direct-pose" type="submit">add</button></form><span id="direct-selection-count"></span><ol id="direct-pose-list"></ol></section>
@@ -76,6 +76,7 @@
     let draftAuthoringMode;
     let draftRequestedCount;
     let draftRepeat;
+    let draftNormalizedSeed;
     let directPoses = [];
     let directPairs = [];
     let workspaceDomainAvailable = true;
@@ -94,7 +95,7 @@
     let stateSpaceProjectionAvailable = true;
     const snapshotProbe = "RAW_SNAPSHOT_MUST_NOT_RENDER";
     const workspaceDomain = {
-      workspace_id: "PLACE_A", frame_id: "place-a-frame-r002", object_id: "wood-cube-25mm-r001", coordinate_mode: "CONTINUOUS_A4_PLANE",
+      workspace_id: "PLACE_A", frame_id: "place-a-frame-r002", object_id: "wood-cube-24mm-r001", coordinate_mode: "CONTINUOUS_A4_PLANE",
       x_mm: {minimum: -158.26323009467487, maximum: 158.26323009467487}, y_mm: {minimum: -158.26323009467487, maximum: 158.26323009467487}, yaw_deg: {minimum: -180, maximum_exclusive: 180},
     };
     const clone = (value) => JSON.parse(JSON.stringify(value));
@@ -105,6 +106,8 @@
     const fixtureView = async () => {
       const fixture = await fixturePromise;
       const flat = merge(clone(fixture.base_view), fixture.states[stateKey]);
+      if (stateKey === "running") flat.coverage = clone(fixture.states.review_campaign.coverage);
+      flat.draft.normalized_seed = draftNormalizedSeed ?? flat.draft.normalized_seed;
       if (stateKey === "results") flat.episode_history.forEach((item, index) => {
         item.episode_ledger = {
           ledger_digest: `sha256:${String(index + 1).repeat(64)}`,
@@ -120,6 +123,12 @@
         flat.draft.authoring_mode = draftAuthoringMode ?? flat.draft.authoring_mode;
         flat.draft.requested_count = draftRequestedCount ?? flat.draft.requested_count;
         flat.draft.repeat = draftRepeat ?? flat.draft.repeat;
+        if (flat.draft.selection.task === "pickup_e2e") {
+          flat.draft.workspace_route = Array.from(
+            {length: flat.draft.requested_count},
+            () => clone(flat.draft.workspace_route[0]),
+          );
+        }
         flat.draft.direct_poses = clone(directPoses);
         flat.draft.direct_pairs = clone(directPairs);
         if (workspaceDomainAvailable) flat.catalog.workspace_domain = clone(workspaceDomain);
@@ -199,6 +208,7 @@
             if (payload.authoring_mode) draftAuthoringMode = payload.authoring_mode;
             if (payload.requested_count) draftRequestedCount = payload.requested_count;
             if (payload.repeat) draftRepeat = payload.repeat;
+            if (Number.isInteger(payload.normalized_seed)) draftNormalizedSeed = payload.normalized_seed;
             if (payload.add_pose) directPoses.push({...payload.add_pose, yaw_deg: ((payload.add_pose.yaw_deg + 180) % 360 + 360) % 360 - 180});
             if (payload.remove_pose) directPoses = directPoses.filter((pose) => !["place_id", "x_mm", "y_mm", "yaw_deg"].every((field) => pose[field] === payload.remove_pose[field]));
             if (payload.add_pair) directPairs.push({...payload.add_pair, yaw_deg: ((payload.add_pair.yaw_deg + 180) % 360 + 360) % 360 - 180});
@@ -271,7 +281,28 @@
         check(!document.querySelector("#camera-setup").hidden && document.querySelectorAll("#camera-role-list select").length === 2, "environment lists two connected cameras by logical label");
         check(["상단", "측면", "손목", "사용 안 함"].every((label) => document.querySelector("#camera-role-list").textContent.includes(label)), "each camera exposes plain-language role choices");
         check(!document.querySelector("#camera-setup").textContent.includes("usb-") && document.querySelector("#technical-content").textContent.includes("usb-Generic"), "technical camera identity stays in collapsed technical details");
-        check(document.querySelector('[data-axis="camera"]').hidden && document.querySelector('[data-axis="camera"]').disabled && document.querySelector("#camera-selection-label").textContent.includes("상단 RGB"), "camera profile is derived instead of manually selected in the plan");
+        check(document.querySelector('[data-axis="camera"]').hidden && document.querySelector('[data-axis="camera"]').disabled && document.querySelector("#camera-selection-label").textContent.includes("상단 + 손목 RGB"), "camera profile is derived instead of manually selected in the plan");
+        check(document.querySelector("#review-summary").textContent.includes("24 × 24 × 24 mm")
+          && document.querySelector("#review-summary").textContent.includes("wood-cube-24mm-top-yaw-r001")
+          && document.querySelector("#review-summary").textContent.includes("wood-cube-24mm-top-wrist-approach-r001")
+          && document.querySelector("#review-summary").textContent.includes("설계 정격(endpoint당, repeat=1)")
+          && document.querySelector("#review-summary").textContent.includes("실제 campaign prefix는 아래 slot binding 기준"), "selected 24 mm yaw/design/approach provenance renders with scoped nominal counts");
+        const missingProvenance = clone(currentView);
+        delete missingProvenance.sampling_provenance;
+        try {
+          validateView(missingProvenance);
+          check(false, "missing sampling provenance must fail closed");
+        } catch (error) {
+          check(error.message === "SAMPLING_PROVENANCE_INVALID", "missing sampling provenance fails closed");
+        }
+        const malformedProvenance = clone(currentView);
+        malformedProvenance.sampling_provenance.yaw_sampling_profile.distribution.browser_sampler = true;
+        try {
+          validateView(malformedProvenance);
+          check(false, "malformed sampling provenance must fail closed");
+        } catch (error) {
+          check(error.message === "SAMPLING_PROFILE_INVALID", "sampling profile schema rejects browser-side sampling fields");
+        }
         const attemptsBeforeLostResponse = intentAttempts;
         postTransportFailure = true;
         submitIntent("update_draft", {draft_id: currentView.draft.draft_id, repeat: currentView.draft.repeat});
@@ -283,15 +314,15 @@
           return;
         }
         const camera2 = document.querySelector('[data-camera-logical-id="camera-2"]');
-        camera2.value = "WRIST";
+        camera2.value = "SIDE";
         camera2.dispatchEvent(new Event("change", {bubbles: true}));
-        await waitFor(() => currentView?.camera_setup?.bindings["camera-2"] === "WRIST" && !intentBusy);
+        await waitFor(() => currentView?.camera_setup?.bindings["camera-2"] === "SIDE" && !intentBusy);
         const firstCameraPost = posted.find((item) => item.body.op === "update_camera_bindings");
-        check(JSON.stringify(firstCameraPost.body.payload.bindings) === JSON.stringify({"camera-1": "UP", "camera-2": "WRIST"}), "camera role change posts one complete binding map");
+        check(JSON.stringify(firstCameraPost.body.payload.bindings) === JSON.stringify({"camera-1": "UP", "camera-2": "SIDE"}), "camera role change posts one complete binding map");
         const camera1 = document.querySelector('[data-camera-logical-id="camera-1"]');
-        camera1.value = "WRIST";
+        camera1.value = "SIDE";
         camera1.dispatchEvent(new Event("change", {bubbles: true}));
-        await waitFor(() => currentView?.camera_setup?.bindings["camera-1"] === "WRIST" && !intentBusy);
+        await waitFor(() => currentView?.camera_setup?.bindings["camera-1"] === "SIDE" && !intentBusy);
         check(currentView.camera_setup.bindings["camera-2"] === "UP" && new Set(Object.values(currentView.camera_setup.bindings)).size === 2, "occupied camera roles swap atomically without duplicates");
 
         document.querySelector('[data-step-target="environment"]').click();
@@ -352,6 +383,16 @@
         }
         await loadView();
         check(document.querySelector("#count-input").valueAsNumber === 3 && document.querySelector("#count-input").min === "1", "editable episode count supports one through one hundred");
+        check(document.querySelector("#seed-input").valueAsNumber === 0 && document.querySelector("#seed-input").min === "0" && document.querySelector("#seed-input").max === "9007199254740991" && document.querySelector("#seed-input").step === "1", "campaign seed is a native JS-safe integer control");
+        document.querySelector("#seed-input").value = "37";
+        document.querySelector("#seed-input").dispatchEvent(new Event("change", {bubbles: true}));
+        await waitFor(() => currentView?.draft.normalized_seed === 37 && !intentBusy);
+        const seedPost = posted.find((item) => item.body.payload.normalized_seed === 37);
+        check(JSON.stringify(seedPost.body.payload) === JSON.stringify({draft_id: currentView.draft.draft_id, normalized_seed: 37}) && document.querySelector("#technical-content").textContent.includes("normalized_seed"), "campaign seed posts one exact draft update and remains visible in technical details");
+        const beforeInvalidSeed = posted.length;
+        document.querySelector("#seed-input").value = "-1";
+        document.querySelector("#seed-input").dispatchEvent(new Event("change", {bubbles: true}));
+        check(document.querySelector("#seed-input").validity.rangeUnderflow && posted.length === beforeInvalidSeed, "negative campaign seed is blocked without an intent");
         check(document.querySelector("#cell-grid-disclosure").hidden && document.querySelectorAll("#cell-grid .cell").length === 0, "assisted mode omits the full state-space grid");
         check(!document.querySelector("#state-space-summary").hidden && document.querySelector("#state-space-summary").textContent.includes("시작 자세") && document.querySelector("#state-space-summary").textContent.includes("기준점 조합"), "assisted mode labels finite anchors without claiming the continuous domain is fully executable");
 
@@ -375,6 +416,14 @@
         check(document.querySelector("#start-pose-entry").hidden && document.querySelector("#state-space-summary").hidden && currentView.start_pose_setup === undefined && currentView.draft.direct_pairs === undefined, "absent state-space projections stay hidden without invented values");
         stateSpaceProjectionAvailable = true;
         await loadView();
+
+        const variantSelect = document.querySelector('[data-axis="variant"]');
+        const alignVariant = [...variantSelect.options].find((option) => option.value === "TWO_STAGE_ALIGN_V2");
+        check(alignVariant && !alignVariant.disabled && alignVariant.textContent.includes("XY·yaw 정렬"), "visible-align recipe is an enabled catalog option");
+        variantSelect.value = "TWO_STAGE_ALIGN_V2";
+        variantSelect.dispatchEvent(new Event("change", {bubbles: true}));
+        await waitFor(() => posted.some((item) => item.body.payload.selection?.variant === "TWO_STAGE_ALIGN_V2") && !intentBusy);
+        check(posted.some((item) => JSON.stringify(item.body.payload.selection) === JSON.stringify({variant: "TWO_STAGE_ALIGN_V2"})), "visible-align selection posts the exact recipe id");
 
         workspaceRegistrationVisible = false;
         await loadView();
@@ -411,8 +460,8 @@
         document.querySelector("#source-scale-bar").value = "100";
         document.querySelector("#final-scale-bar").value = "104.01";
         const beforeInvalidWorkspace = posted.length;
-        document.querySelector("#workspace-preview-form").requestSubmit();
-        check(document.querySelector("#final-scale-bar").validity.rangeOverflow && posted.length === beforeInvalidWorkspace, "invalid workspace measurement is rejected by browser validation");
+        const invalidWorkspace = !document.querySelector("#workspace-preview-form").checkValidity();
+        check(invalidWorkspace && document.querySelector("#final-scale-bar").validity.rangeOverflow && posted.length === beforeInvalidWorkspace, "invalid workspace measurement is rejected by browser validation");
         document.querySelector("#final-scale-bar").value = "100";
         rejectNextWorkspacePreview = true;
         document.querySelector("#workspace-preview-form").requestSubmit();
@@ -491,7 +540,7 @@
         check(posted.some((item) => item.body.payload.remove_pair?.start_pose_id === "fr5-ready-side-r001" && item.body.payload.remove_pair?.yaw_deg === -162.5), "remove uses the exact projected pair");
         workspaceDomainAvailable = false;
         await loadView();
-        check(document.querySelector("#direct-x-input").disabled && document.querySelector("#direct-domain-status").textContent.includes("사용할 수 없습니다"), "unavailable direct-pose domain disables input");
+        check(document.body.dataset.bridge === "blocked" && !currentView, "missing direct-pose domain fails closed");
         workspaceDomainAvailable = true;
         await loadView();
         document.querySelector("#count-input").value = "3";
@@ -500,14 +549,79 @@
         document.querySelector("#compile-campaign").click();
         await waitFor(() => currentView?.runtime.workflow_state === "REVIEW_CAMPAIGN");
         const authorize = document.querySelector('[data-op="authorize_campaign"]');
-        check(authorize && document.querySelector("#review-summary").textContent.includes("3회"), "REVIEW_CAMPAIGN shows one authorization and readable count");
+        check(authorize && document.querySelector("#review-summary").textContent.includes("3회") && document.querySelector("#review-summary").textContent.includes("Campaign seed37"), "REVIEW_CAMPAIGN shows one authorization, readable count, and the frozen campaign seed");
         check(document.querySelector("#review-summary").textContent.includes("56%") && document.querySelector("#review-summary").textContent.includes("56–58%") && document.querySelector("#review-summary").textContent.includes("닫기 속도 20% / 힘 20%") && document.querySelector("#review-summary").textContent.includes("열기 속도 10% / 힘 50%") && document.querySelector("#review-summary").textContent.includes("TEST_ONLY 조정 후보"), "review shows the object-scoped test-only gripper retune");
         (await fixturePromise).base_view.campaign_review.gripper_tuning.status = "QUALIFIED_PROFILE";
         await loadView();
         check(document.querySelector("#review-summary").textContent.includes("검증된 등록 프로필"), "review accepts the qualified object-scoped gripper profile without calling it a retune candidate");
         check(!document.querySelector("#review-plan").hidden && document.querySelectorAll("#review-plan-list li").length === 3, "review shows the exact finite episode sequence");
-        authorize.click();
+        check(document.querySelector("#review-plan-list").textContent.includes("설계 cell")
+          && document.querySelector("#review-plan-list").textContent.includes("binding sha256:efefefefefef")
+          && currentView.coverage.sequence.every((item) => item.state_space_slot?.schema_version === "data_factory.yaw_sample_binding.v4"), "assisted review shows backend-bound v4 state-space slots and reposition binding digest");
+        const derivedYawSeed = "5128904136610758680";
+        check(document.querySelector("#review-plan-list").textContent.includes(derivedYawSeed)
+          && document.querySelector("#technical-content").textContent.includes(derivedYawSeed), "64-bit derived yaw seed survives JSON and renders exactly without Number coercion");
+        const invalidYawSeeds = [-1, "-1", "01", "18446744073709551616"];
+        check(invalidYawSeeds.every((samplingSeed) => {
+          const invalid = clone(currentView);
+          invalid.coverage.sequence[0].object_reposition.yaw_sample.sampling_seed = samplingSeed;
+          try { validateView(invalid); return false; } catch (error) { return error.message === "OBJECT_REPOSITION_INVALID"; }
+        }), "yaw sampling seed rejects numbers and non-canonical or out-of-range decimal strings");
+        check(invalidYawSeeds.every((samplingSeed) => {
+          const invalid = clone(currentView);
+          invalid.coverage.sequence[0].state_space_slot.sampling_seed = samplingSeed;
+          try { validateView(invalid); return false; } catch (error) { return error.message === "YAW_SAMPLE_BINDING_INVALID"; }
+        }), "state-space slot seed rejects numbers and non-canonical or out-of-range decimal strings");
+        document.querySelector('[data-op="authorize_campaign"]').click();
         await waitFor(() => currentView?.runtime.workflow_state === "RUNNING");
+        check(document.querySelector("#runtime-content").textContent.includes("9223372036854775849")
+          && document.querySelector("#runtime-content").textContent.includes("align_clearance_m")
+          && document.querySelector("#runtime-content").textContent.includes("848484848484"), "active plan renders exact u64 trajectory seed, phase parameters, and collision evidence");
+        check(document.querySelector("#runtime-content").textContent.includes("녹화 밖 물체 재배치 계획 증거")
+          && document.querySelector("#runtime-content").textContent.includes("collection-run-2")
+          && document.querySelector("#runtime-content").textContent.includes("c4c4c4c4c4c4")
+          && document.querySelector("#technical-content").textContent.includes("object_reposition_runtime_evidence"), "runtime renders the exact reposition binding, plan, collision, and no-motion evidence without another request");
+        const nearYaw = clone(currentView);
+        nearYaw.coverage.sequence[nearYaw.runtime.current_episode - 1].yaw_deg += 5e-10;
+        try {
+          validateView(nearYaw);
+          check(true, "cross-artifact yaw tolerates sub-nanodegree serialization drift");
+        } catch (_error) {
+          check(false, "cross-artifact yaw tolerates sub-nanodegree serialization drift");
+        }
+        const invalidTrajectorySeeds = [-1, "-1", "01", "18446744073709551616"];
+        check(invalidTrajectorySeeds.every((samplingSeed) => {
+          const invalid = clone(currentView);
+          invalid.active_episode_plan.trajectory_variant_binding.sampling_seed = samplingSeed;
+          try { validateView(invalid); return false; } catch (error) { return error.message === "ACTIVE_EPISODE_PLAN_INVALID"; }
+        }), "active trajectory seed rejects numbers and non-canonical or out-of-range decimal strings");
+        const incoherentActivePlans = [
+          (view) => { view.active_episode_plan.trajectory_variant_binding.trajectory_variant_id = "DIRECT"; },
+          (view) => { view.active_episode_plan.trajectory_variant_binding.target_yaw_deg = 0; },
+          (view) => { view.active_episode_plan.precommit_safety.run_id = "different-run"; },
+          (view) => { view.active_episode_plan.yaw_sample_binding.sampling_seed = "17"; },
+        ];
+        check(incoherentActivePlans.every((mutate) => {
+          const invalid = clone(currentView);
+          mutate(invalid);
+          try { validateView(invalid); return false; } catch (error) { return error.message === "ACTIVE_EPISODE_PLAN_INVALID"; }
+        }), "active plan must match selected recipe, current coverage yaw binding, trajectory target, and runtime child");
+        const invalidRepositionEvidence = clone(currentView);
+        invalidRepositionEvidence.runtime.evidence.object_reposition_collision_report_digest = "sha256:not-a-digest";
+        try {
+          validateView(invalidRepositionEvidence);
+          check(false, "invalid reposition runtime evidence must fail closed");
+        } catch (error) {
+          check(error.message === "RUNTIME_REPOSITION_EVIDENCE_INVALID", "runtime reposition evidence rejects a malformed exact digest");
+        }
+        const mismatchedRepositionEvidence = clone(currentView);
+        mismatchedRepositionEvidence.runtime.evidence.object_reposition_binding_digest = `sha256:${"d5".repeat(32)}`;
+        try {
+          validateView(mismatchedRepositionEvidence);
+          check(false, "mismatched reposition runtime evidence must fail closed");
+        } catch (error) {
+          check(error.message === "RUNTIME_REPOSITION_EVIDENCE_INVALID", "runtime reposition evidence must match the current coverage binding");
+        }
         const authorizationPost = posted.find((item) => item.body.op === "authorize_campaign");
         check(authorizationPost.body.payload.manifest_digest && authorizationPost.body.payload.envelope_digest, "authorize_campaign binds manifest and envelope digests");
         check(document.querySelector('[data-fact="completed"]').textContent.includes("1/3") && document.querySelector('[data-fact="current"]').textContent.includes("2/3"), "three serial episodes project completed total and current facts");

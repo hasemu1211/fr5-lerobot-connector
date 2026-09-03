@@ -23,6 +23,7 @@ from time_alignment import interpolate_vector, latest_sample, nearest_sample
 from ros_image import image_message_to_rgb
 from measure_ros_topic_age import image_gate_failures
 from validate_lerobot_dataset import (
+    _video_frame_count,
     _video_frame_counts,
     has_nonfinite_number,
     transient_gripper_zero_dropouts,
@@ -388,6 +389,15 @@ class RecorderContractTest(unittest.TestCase):
             counts = _video_frame_counts(paths)
         self.assertEqual(counts, [(index, None) for index in range(6)])
         self.assertEqual(len(worker_names), 4)
+
+    def test_video_frame_count_timeout_is_a_bounded_validation_failure(self):
+        with patch(
+            "validate_lerobot_dataset.subprocess.run",
+            side_effect=subprocess.TimeoutExpired("ffprobe", 30),
+        ):
+            frames, error = _video_frame_count(Path("stalled.mp4"))
+        self.assertEqual(frames, 0)
+        self.assertIn("timed out", error)
 
     def test_collection_defaults_and_supported_camera_path(self):
         root = Path(__file__).resolve().parents[1]

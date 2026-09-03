@@ -6,7 +6,18 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from tools.data_factory.operator.workflow.application import CollectionOperatorApplication
+from tools.data_factory.collection_seed import derive_domain_seed
+from tools.data_factory.motion.object_reposition import (
+    build_object_reposition_binding,
+)
+from tools.data_factory.state_space import (
+    sample_yaw_cdf_strata,
+    validate_yaw_sampling_profile,
+)
+from tools.data_factory.operator.workflow.application import (
+    CollectionOperatorApplication,
+    _project_active_episode_plan,
+)
 from tools.data_factory.operator.web import projection
 from tools.data_factory.operator.workflow.intents import INTENT_SCHEMA, OperatorIntentCore
 from tools.data_factory.operator.catalog import (
@@ -19,7 +30,7 @@ from tools.data_factory.task_recipe import (
     compile_episode_instruction_binding,
     compile_task_binding,
 )
-from tools.fr5_data_factory import ContractError, canonical_digest
+from tools.fr5_data_factory import ContractError, canonical_digest, load_json_strict
 
 
 ROOT = Path(__file__).resolve().parents[4]
@@ -48,6 +59,7 @@ class StubCampaign:
         self.history = []
         self.candidate_pending = False
         self.campaign_coverage = None
+        self.reason_codes = []
         self.core = OperatorIntentCore(
             session_id=campaign_id,
             projection_call=self.projection,
@@ -117,7 +129,7 @@ class StubCampaign:
             "runtime": {
                 "workflow_state": self.state,
                 "measurement_outcome": "PASS" if self.state == "TERMINAL" else "NOT_MEASURED",
-                "reason_codes": [],
+                "reason_codes": copy.deepcopy(self.reason_codes),
                 "active_child_id": (
                     f"{self.campaign_id}-run-{self.completed + 1}"
                     if self.state == "RUNNING" else None
@@ -212,12 +224,19 @@ class StubWorkspaceManager:
 
 
 class CollectionOperatorApplicationTests(unittest.TestCase):
-    def setUp(self):
+    @classmethod
+    def setUpClass(cls):
         device = "usb-Generic_USB2.0_PC_CAMERA-video-index0"
-        self.catalog = load_operator_catalog(ROOT, device_ids=[device])
+        cls.catalog_fixture = load_operator_catalog(ROOT, device_ids=[device])
+
+    def setUp(self):
+        # CollectionOperatorApplication owns a deep copy, so this immutable
+        # repository fixture can be shared without leaking state across tests.
+        self.catalog = self.catalog_fixture
         combination = next(
             item for item in self.catalog["combinations"]
             if item["execution"]["TEST_COLLECTION"]["executable"]
+            and item["task_id"] == "pickup_e2e"
         )
         self.selection = {
             "schema_version": "data_factory.operator_selection.v1",
@@ -280,6 +299,90 @@ class CollectionOperatorApplicationTests(unittest.TestCase):
         return self.application.bridge_core.consume(
             intent(view, op, payload, suffix),
         )["result"]
+
+    def test_active_plan_projects_exact_u64_seeds_and_phase_parameters(self):
+        object_profile = load_json_strict(
+            ROOT / "config/data_factory/objects/wood-cube-24mm-r001.json",
+        )
+        grasp_profile = load_json_strict(
+            ROOT / "config/data_factory/grasps/"
+            "wood-cube-24mm-top-3p5mm-r001.json",
+        )
+        yaw_profile = validate_yaw_sampling_profile(
+            load_json_strict(
+                ROOT / "config/data_factory/yaw_sampling_profiles/"
+                "wood-cube-24mm-top-r001.json",
+            ),
+            object_profile=object_profile, grasp_profile=grasp_profile,
+        )
+        seed = (1 << 63) + 41
+        yaw_sample = next(
+            item for item in sample_yaw_cdf_strata(
+                yaw_profile, sampling_seed=seed,
+                sweep_identity={"sweep": "active-plan-r001"},
+                strata_count=3, conditioned_yaw_deg=0.0,
+            )
+            if item["sample_origin"] == "CONDITIONED_SOURCE_ANCHOR"
+        )
+        phase_parameters = {
+            "align_clearance_m": 0.057,
+            "view_offset_x_m": 0.004,
+            "view_offset_y_m": -0.006,
+        }
+        trajectory = {
+            "schema_version": "data_factory.trajectory_variant_binding.v2",
+            "trajectory_variant_id": "TWO_STAGE_ALIGN_V2",
+            "variation_profile_digest": canonical_digest("variation"),
+            "sampling_seed": seed,
+            "sample_rank": 1, "design_size": 3,
+            "design_digest": canonical_digest("design"),
+            "target_yaw_deg": 0.0,
+            "phase_parameters": phase_parameters,
+            "phase_parameters_digest": canonical_digest(phase_parameters),
+            "motion_program_digest": canonical_digest("motion"),
+        }
+        trajectory["binding_digest"] = canonical_digest(trajectory)
+        plan_digest = canonical_digest("active-plan")
+        safety = {
+            "schema_version": "data_factory.precommit_safety.v1",
+            "run_id": "active-plan-run-r001",
+            "approved_plan_digest": plan_digest,
+            "scene_binding_digest": canonical_digest("scene"),
+            "expected_planning_scene_digest": canonical_digest("expected"),
+            "planning_scene_readback_digest": canonical_digest("readback"),
+            "collision_report_digest": canonical_digest("collision"),
+            "plan_only_no_motion_digest": canonical_digest("no-motion"),
+            "post_reset_safe_snapshot_digest": None,
+            "status": "PENDING",
+        }
+        projected = _project_active_episode_plan({
+            "plan_digest": plan_digest,
+            "approval_scope": "HIL_NUMERIC_PROXY",
+            "decision_binding_digest": canonical_digest("decision"),
+            "operator_summary": {"path": ["PREGRASP_VIEW_PTP"]},
+            "trajectory_variant_binding": trajectory,
+            "trajectory_variant_binding_digest": trajectory[
+                "binding_digest"
+            ],
+            "yaw_sample_binding": yaw_sample,
+            "yaw_sample_binding_digest": yaw_sample["binding_digest"],
+            "precommit_safety": safety,
+            "plan_envelope_digest": canonical_digest("envelope"),
+            "preapproval_evidence_digest": canonical_digest("preapproval"),
+        })
+        self.assertEqual(projected["schema_version"],
+                         "data_factory.active_episode_plan.v1")
+        self.assertEqual(
+            projected["trajectory_variant_binding"]["sampling_seed"],
+            str(seed),
+        )
+        self.assertEqual(
+            projected["yaw_sample_binding"]["sampling_seed"], str(seed),
+        )
+        self.assertEqual(
+            projected["trajectory_variant_binding"]["phase_parameters"],
+            phase_parameters,
+        )
 
     def test_environment_precedes_factory_and_invalid_mode_has_zero_effects(self):
         view = self.application.bridge_core.snapshot()["projection"]
@@ -668,6 +771,10 @@ class CollectionOperatorApplicationTests(unittest.TestCase):
         view = self.application.bridge_core.snapshot()["projection"]
         self.assertEqual(view["runtime"]["workflow_state"], "AUTHORING")
         self.assertEqual(view["draft"]["repeat"], 1)
+        self.assertEqual(
+            view["draft"]["normalized_seed"],
+            self.application.draft["normalized_seed"],
+        )
         self.assertEqual(view["data_disposition"], "TEST_ONLY")
         self.assertEqual(
             set(view["catalog"]["axes"]),
@@ -701,6 +808,171 @@ class CollectionOperatorApplicationTests(unittest.TestCase):
             (6, 2),
         )
         self.assertIn("compile_draft", updated["available_ops"])
+
+    def test_seed_is_session_stable_projected_and_js_safe(self):
+        def create(session_id):
+            application = CollectionOperatorApplication(
+                session_id=session_id,
+                operator_label="local-operator",
+                catalog=self.catalog,
+                initial_selection=self.selection,
+                projector=projection,
+                environment_call=lambda: copy.deepcopy(self.environment),
+                prepare_environment_call=self.application.prepare_environment_call,
+                campaign_factory=lambda *_args: self.fail("campaign was requested"),
+                initial_environment=self.environment,
+            )
+            self.addCleanup(application.close)
+            return application
+
+        first = create("collection-seed-stable-r001")
+        repeated = create("collection-seed-stable-r001")
+        different = create("collection-seed-stable-r002")
+        seeds = [
+            application.bridge_core.snapshot()["projection"]["draft"][
+                "normalized_seed"
+            ]
+            for application in (first, repeated, different)
+        ]
+        self.assertEqual(seeds[0], seeds[1])
+        self.assertNotEqual(seeds[0], seeds[2])
+        self.assertTrue(all(0 <= seed <= (1 << 53) - 1 for seed in seeds))
+
+    def test_sampling_provenance_projects_selected_profiles_without_sampling(self):
+        catalog = load_operator_catalog(
+            ROOT, device_ids=["sampling-camera-a", "sampling-camera-b"],
+        )
+        combination = next(
+            item for item in catalog["combinations"]
+            if item["task_id"] == "pickup_e2e"
+            and item["object_id"] == "wood-cube-24mm-r001"
+            and item["variant_id"] == "TWO_STAGE_ALIGN_V2"
+            and item["execution"]["TEST_COLLECTION"]["executable"]
+        )
+        selection = {
+            "schema_version": "data_factory.operator_selection.v1",
+            "combination_digest": combination["combination_digest"],
+            "data_mode": "TEST_COLLECTION",
+            **{
+                field: combination[field]
+                for field in (
+                    "workspace_id", "frame_id", "task_id", "object_id",
+                    "grasp_id", "cell_id", "start_pose_id", "motion_id",
+                    "variant_id", "camera_profile_id", "camera_device_id",
+                )
+            },
+            "policy_id": "DETERMINISTIC_SPREAD",
+        }
+        application = CollectionOperatorApplication(
+            session_id="sampling-provenance-r001",
+            operator_label="local-operator",
+            catalog=catalog,
+            initial_selection=selection,
+            projector=projection,
+            environment_call=lambda: copy.deepcopy(self.environment),
+            prepare_environment_call=lambda: copy.deepcopy(self.environment),
+            campaign_factory=lambda *_args: self.fail("campaign was requested"),
+        )
+        self.addCleanup(application.close)
+
+        view = application.bridge_core.snapshot()["projection"]
+        provenance = view["sampling_provenance"]
+        self.assertEqual(provenance["object_dimensions_mm"], [24, 24, 24])
+        self.assertEqual(
+            set(provenance["yaw_sampling_profile"]),
+            {
+                "yaw_sampling_profile_id", "profile_digest", "distribution",
+                "canonical_interval_deg", "required_camera_roles",
+            },
+        )
+        self.assertEqual(
+            provenance["yaw_sampling_profile"]["canonical_interval_deg"],
+            {"minimum": -45.0, "maximum_exclusive": 45.0},
+        )
+        design = provenance["state_space_design_profile"]
+        self.assertEqual(
+            set(design),
+            {
+                "state_space_design_profile_id", "profile_digest",
+                "object_profile_id", "object_profile_digest",
+                "grasp_profile_id", "grasp_profile_digest",
+                "yaw_sampling_profile_id", "yaw_sampling_profile_digest",
+                "spatial_strata", "yaw_cdf_strata",
+                "derived_yaw_cdf_tiers", "assignment", "execution_order",
+                "initial_source_policy",
+                "per_workspace_repeat_one_sweep_episode_count",
+                "full_cell_yaw_coverage_sweeps",
+                "per_workspace_repeat_one_full_cell_yaw_coverage_episode_count",
+            },
+        )
+        self.assertEqual(design["spatial_strata"], {"columns": 5, "rows": 3})
+        self.assertEqual(design["yaw_cdf_strata"], 3)
+        self.assertEqual(
+            [tier["yaw_deg"] for tier in design["derived_yaw_cdf_tiers"]],
+            [
+                {"minimum": -45.0, "maximum_exclusive": -15.0},
+                {"minimum": -15.0, "maximum_exclusive": 15.0},
+                {"minimum": 15.0, "maximum_exclusive": 45.0},
+            ],
+        )
+        self.assertEqual(
+            design["per_workspace_repeat_one_sweep_episode_count"], 15,
+        )
+        self.assertEqual(design["full_cell_yaw_coverage_sweeps"], 3)
+        self.assertEqual(
+            design[
+                "per_workspace_repeat_one_full_cell_yaw_coverage_episode_count"
+            ],
+            45,
+        )
+        self.assertEqual(
+            design["yaw_sampling_profile_digest"],
+            provenance["yaw_sampling_profile"]["profile_digest"],
+        )
+        self.assertEqual(
+            set(provenance["approach_sampling_profile"]),
+            {
+                "approach_sampling_profile_id", "profile_digest",
+                "parameter_distribution", "required_camera_roles",
+            },
+        )
+        self.assertEqual(
+            provenance["approach_sampling_profile"]["required_camera_roles"],
+            ["wrist"],
+        )
+        self.assertNotIn("sampling_seed", str(provenance))
+
+    def test_draft_seed_accepts_only_js_safe_nonnegative_integers(self):
+        self.consume("prepare_environment", {}, "prepare-seed-validation")
+        maximum = (1 << 53) - 1
+        for index, value in enumerate((0, maximum), 1):
+            view = self.application.bridge_core.snapshot()["projection"]
+            self.consume("update_draft", {
+                "draft_id": view["draft"]["draft_id"],
+                "normalized_seed": value,
+            }, f"valid-seed-{index}")
+            self.assertEqual(
+                self.application.bridge_core.snapshot()["projection"]["draft"][
+                    "normalized_seed"
+                ],
+                value,
+            )
+
+        for index, value in enumerate((-1, maximum + 1, True, 1.0, "1"), 1):
+            before = self.application.bridge_core.snapshot()
+            with self.assertRaisesRegex(
+                ContractError, "OPERATOR_APPLICATION_DRAFT",
+            ):
+                self.application.bridge_core.consume(intent(before, "update_draft", {
+                    "draft_id": before["projection"]["draft"]["draft_id"],
+                    "normalized_seed": value,
+                }, f"invalid-seed-{index}"))
+            self.assertEqual(
+                self.application.bridge_core.snapshot()["projection"]["draft"][
+                    "normalized_seed"
+                ],
+                maximum,
+            )
 
     def test_direct_authoring_accepts_any_bounded_nonpreset_pose(self):
         self.consume("prepare_environment", {}, "prepare-direct-pose")
@@ -765,6 +1037,12 @@ class CollectionOperatorApplicationTests(unittest.TestCase):
         anchor = self.application._direct_anchor()
         assisted = project_assisted_poses(
             self.catalog, self.selection, anchor, 5, repeat=2,
+            normalized_seed=derive_domain_seed(
+                before["projection"]["draft"]["normalized_seed"], "spatial",
+            ),
+            yaw_sampling_seed=derive_domain_seed(
+                before["projection"]["draft"]["normalized_seed"], "yaw",
+            ),
         )
 
         self.consume("update_draft", {
@@ -807,7 +1085,7 @@ class CollectionOperatorApplicationTests(unittest.TestCase):
         catalog = copy.deepcopy(self.catalog)
         original = next(
             item for item in catalog["combinations"]
-            if item["execution"]["TEST_COLLECTION"]["executable"]
+            if item["combination_digest"] == self.selection["combination_digest"]
         )
         replacement = copy.deepcopy(original)
         changed = {
@@ -957,6 +1235,51 @@ class CollectionOperatorApplicationTests(unittest.TestCase):
                     task_binding, object_profile,
                 ),
             })
+        grasp_profile = {
+            "grasp_profile_id": self.selection["grasp_id"],
+            "object_profile_id": self.selection["object_id"],
+            "object_profile_digest": canonical_digest(object_profile),
+        }
+        yaw_profile = {
+            "schema_version": "data_factory.yaw_sampling_profile.v2",
+            "yaw_sampling_profile_id": "application-yaw-r001",
+            "qualification_status": "QUALIFIED",
+            "object_profile_id": self.selection["object_id"],
+            "object_profile_digest": canonical_digest(object_profile),
+            "grasp_profile_id": self.selection["grasp_id"],
+            "grasp_profile_digest": canonical_digest(grasp_profile),
+            "yaw_target_semantics": "OBJECT_FRAME_MODULO_SYMMETRY",
+            "observation_cue": "TEST_FIXTURE",
+            "required_camera_roles": ["wrist"],
+            "planar_symmetry_order": 4,
+            "yaw_equivalence_period_deg": 90.0,
+            "canonical_interval_deg": {
+                "minimum": -45.0, "maximum_exclusive": 45.0,
+            },
+            "distribution": {"kind": "STRATIFIED_UNIFORM"},
+        }
+        yaw_sampling_seed = derive_domain_seed(4_242_424, "yaw")
+        yaw_sample = sample_yaw_cdf_strata(
+            yaw_profile, sampling_seed=yaw_sampling_seed,
+            sweep_identity={"physical_slot": "application-slot-r001"},
+            strata_count=1,
+        )[0]
+        coverage[0]["object_reposition"] = build_object_reposition_binding(
+            parent_run_id="instruction-run-r001",
+            continuation_run_id="instruction-run-r001",
+            next_run_id="instruction-run-r002",
+            start_state="HELD_OBJECT",
+            source_pose=coverage[0]["coverage_condition"],
+            target_pose={
+                "place_id": self.selection["workspace_id"],
+                "yaw_deg": yaw_sample["source_object_yaw_deg"],
+                "x_mm": 4.0, "y_mm": -3.0,
+            },
+            object_profile=object_profile,
+            grasp_profile=grasp_profile,
+            yaw_sampling_profile=yaw_profile,
+            yaw_sample_binding=yaw_sample,
+        )
         campaign.campaign_coverage = coverage
 
         sequence = self.application.bridge_core.snapshot()["projection"][
@@ -969,9 +1292,37 @@ class CollectionOperatorApplicationTests(unittest.TestCase):
             and item["task_binding_digest"].startswith("sha256:")
             for item in sequence
         ))
+        reposition = sequence[0]["object_reposition"]
+        self.assertEqual(reposition["recording_scope"], "OUT_OF_DATASET")
+        self.assertFalse(reposition["recorder_authorized"])
+        self.assertFalse(reposition["dataset_write_authorized"])
+        self.assertAlmostEqual(
+            reposition["target_pose"]["yaw_deg"],
+            yaw_sample["source_object_yaw_deg"],
+        )
+        self.assertGreater(yaw_sampling_seed, (1 << 53) - 1)
+        self.assertIsInstance(
+            coverage[0]["object_reposition"]["yaw_sample_binding"][
+                "sampling_seed"
+            ],
+            int,
+        )
+        self.assertEqual(
+            reposition["yaw_sample"]["sampling_seed"],
+            str(yaw_sampling_seed),
+        )
+        self.assertNotIn("yaw_sample_binding", reposition)
+        self.assertTrue(all(
+            item["object_reposition"] is None for item in sequence[1:]
+        ))
 
     def test_one_process_runs_terminal_campaign_then_creates_fresh_lineage(self):
         self.consume("prepare_environment", {}, "prepare")
+        authoring = self.application.bridge_core.snapshot()["projection"]
+        self.consume("update_draft", {
+            "draft_id": authoring["draft"]["draft_id"],
+            "normalized_seed": 100,
+        }, "set-terminal-seed")
         authoring = self.application.bridge_core.snapshot()["projection"]
         first_draft_id = authoring["draft"]["draft_id"]
         compiled = self.consume("compile_draft", {
@@ -1012,6 +1363,7 @@ class CollectionOperatorApplicationTests(unittest.TestCase):
         second = self.application.bridge_core.snapshot()["projection"]
         self.assertEqual(second["workflow_state"], "AUTHORING")
         self.assertEqual(second["draft"]["requested_count"], 3)
+        self.assertEqual(second["draft"]["normalized_seed"], 101)
         self.assertNotEqual(second["draft"]["draft_id"], first_draft_id)
         self.assertTrue(self.campaigns[0].closed)
 
@@ -1053,6 +1405,11 @@ class CollectionOperatorApplicationTests(unittest.TestCase):
     def test_settled_blocked_campaign_closes_and_returns_to_fresh_authoring(self):
         self.consume("prepare_environment", {}, "prepare-blocked-recovery")
         authoring = self.application.bridge_core.snapshot()["projection"]
+        self.consume("update_draft", {
+            "draft_id": authoring["draft"]["draft_id"],
+            "normalized_seed": 73,
+        }, "set-blocked-seed")
+        authoring = self.application.bridge_core.snapshot()["projection"]
         compiled = self.consume("compile_draft", {
             "draft_id": authoring["draft"]["draft_id"],
             "data_disposition": "TEST_ONLY",
@@ -1070,8 +1427,78 @@ class CollectionOperatorApplicationTests(unittest.TestCase):
         recovered = self.application.bridge_core.snapshot()["projection"]
         self.assertEqual(recovered["workflow_state"], "AUTHORING")
         self.assertEqual(recovered["draft"]["requested_count"], 3)
-        self.assertEqual(self.application.draft["normalized_seed"], 1)
+        self.assertEqual(recovered["draft"]["normalized_seed"], 73)
         self.assertTrue(self.campaigns[0].closed)
+
+    def test_camera_recovery_preserves_seed(self):
+        ready = self.application.prepare_environment_call()
+        device_id = self.selection["camera_device_id"]
+        camera_setup = {
+            "status": "READY", "reason": None, "profile_label": "wrist-camera",
+            "devices": [{
+                "logical_id": device_id, "label": "wrist", "status": "CONNECTED",
+            }],
+            "bindings": {device_id: "WRIST"},
+            "required_roles": ["WRIST"], "available_roles": ["WRIST"],
+        }
+        campaigns = []
+
+        def factory(campaign_id, _selection, draft):
+            campaign = StubCampaign(campaign_id, draft, "TEST_ONLY")
+            campaigns.append(campaign)
+            return campaign
+
+        application = CollectionOperatorApplication(
+            session_id="camera-seed-recovery-r001",
+            operator_label="local-operator",
+            catalog=self.catalog,
+            initial_selection=self.selection,
+            projector=projection,
+            environment_call=lambda: copy.deepcopy(ready),
+            prepare_environment_call=lambda: copy.deepcopy(ready),
+            campaign_factory=factory,
+            camera_setup=camera_setup,
+            camera_bindings_call=lambda _bindings: self.fail("bindings changed"),
+            camera_refresh_call=lambda: {
+                "camera_setup": copy.deepcopy(camera_setup),
+                "catalog": copy.deepcopy(self.catalog),
+                "selection": copy.deepcopy(self.selection),
+                "environment": copy.deepcopy(ready),
+            },
+            initial_environment=ready,
+        )
+        self.addCleanup(application.close)
+
+        def consume(op, payload, suffix):
+            before = application.bridge_core.snapshot()
+            return application.bridge_core.consume(
+                intent(before, op, payload, suffix),
+            )["result"]
+
+        authored = application.bridge_core.snapshot()["projection"]
+        consume("update_draft", {
+            "draft_id": authored["draft"]["draft_id"], "normalized_seed": 211,
+        }, "camera-seed")
+        authored = application.bridge_core.snapshot()["projection"]
+        compiled = consume("compile_draft", {
+            "draft_id": authored["draft"]["draft_id"],
+            "data_disposition": "TEST_ONLY",
+        }, "camera-seed-compile")
+        consume("authorize_campaign", {
+            "draft_id": authored["draft"]["draft_id"],
+            "manifest_digest": compiled["manifest_digest"],
+            "envelope_digest": compiled["envelope_digest"],
+            "data_disposition": "TEST_ONLY",
+        }, "camera-seed-authorize")
+        campaigns[0].state = "BLOCKED"
+        campaigns[0].reason_codes = ["CAMERA_STREAM_FAILED"]
+
+        blocked = application.bridge_core.snapshot()["projection"]
+        self.assertIn("recover_camera_setup", blocked["available_ops"])
+        consume("recover_camera_setup", {}, "camera-seed-recover")
+        recovered = application.bridge_core.snapshot()["projection"]
+        self.assertEqual(recovered["draft"]["normalized_seed"], 211)
+        self.assertTrue(campaigns[0].closed)
 
     def test_blocked_recovery_refreshes_environment_before_fresh_authoring(self):
         self.consume("prepare_environment", {}, "prepare-refresh-environment")
@@ -1233,7 +1660,13 @@ class CollectionOperatorApplicationTests(unittest.TestCase):
         self.assertEqual(len(pairs), 3)
         self.assertEqual(
             [pair["start_pose_id"] for pair in pairs],
-            ["start-a", "start-b", "start-a"],
+            project_balanced_start_pose_ids(
+                ["start-a", "start-b"], 3,
+                normalized_seed=derive_domain_seed(
+                    direct["projection"]["draft"]["normalized_seed"],
+                    "start_pose",
+                ),
+            ),
         )
         application.bridge_core.consume(intent(direct, "capture_start_pose", {
             "display_name": "새 준비 자세",
@@ -1250,6 +1683,86 @@ class CollectionOperatorApplicationTests(unittest.TestCase):
             {pair["start_pose_id"] for pair in selected["projection"]["draft"]["direct_pairs"]},
             {"start-b"},
         )
+
+    def test_profiled_repeat_round_trip_allows_only_configured_run_length(self):
+        catalog = load_operator_catalog(
+            ROOT, device_ids=["repeat-camera-a", "repeat-camera-b"],
+        )
+        combination = next(
+            item for item in catalog["combinations"]
+            if item["task_id"] == "pickup_e2e"
+            and item["object_id"] == "wood-cube-24mm-r001"
+            and item["variant_id"] == "TWO_STAGE_ALIGN_V2"
+            and item["execution"]["TEST_COLLECTION"]["executable"]
+        )
+        selection = {
+            "schema_version": "data_factory.operator_selection.v1",
+            "combination_digest": combination["combination_digest"],
+            "data_mode": "TEST_COLLECTION",
+            **{
+                field: combination[field]
+                for field in (
+                    "workspace_id", "frame_id", "task_id", "object_id",
+                    "grasp_id", "cell_id", "start_pose_id", "motion_id",
+                    "variant_id", "camera_profile_id", "camera_device_id",
+                )
+            },
+            "policy_id": "DETERMINISTIC_SPREAD",
+        }
+        setup = {
+            "profiles": [{
+                "start_pose_id": selection["start_pose_id"],
+                "display_name": "시작 A",
+                "status": "AVAILABLE",
+            }],
+            "selected_start_pose_ids": [selection["start_pose_id"]],
+        }
+        application = CollectionOperatorApplication(
+            session_id="profiled-repeat-r001", operator_label="local-operator",
+            catalog=catalog, initial_selection=selection, projector=projection,
+            environment_call=lambda: copy.deepcopy(self.environment),
+            prepare_environment_call=self.application.prepare_environment_call,
+            campaign_factory=lambda *_args: self.fail(
+                "campaign was not requested",
+            ),
+            start_pose_setup=setup,
+            start_pose_capture_call=lambda _name: copy.deepcopy(setup),
+        )
+        self.addCleanup(application.close)
+        current = application.bridge_core.snapshot()
+        application.bridge_core.consume(intent(
+            current, "prepare_environment", {}, "profiled-repeat-prepare",
+        ))
+        ready = application.bridge_core.snapshot()
+        application.bridge_core.consume(intent(ready, "update_draft", {
+            "draft_id": ready["projection"]["draft"]["draft_id"],
+            "requested_count": 6,
+        }, "profiled-repeat-count"))
+        counted = application.bridge_core.snapshot()
+        application.bridge_core.consume(intent(counted, "update_draft", {
+            "draft_id": counted["projection"]["draft"]["draft_id"],
+            "repeat": 2,
+        }, "profiled-repeat-limit"))
+        repeated = application.bridge_core.snapshot()
+        application.bridge_core.consume(intent(repeated, "update_draft", {
+            "draft_id": repeated["projection"]["draft"]["draft_id"],
+            "authoring_mode": "DIRECT_EDIT",
+        }, "profiled-repeat-direct"))
+        projected = application.bridge_core.snapshot()["projection"]["draft"]
+        pairs = projected["direct_pairs"]
+        self.assertEqual((len(pairs), projected["repeat"]), (6, 2))
+        self.assertTrue(any(
+            all(left[field] == right[field] for field in (
+                "place_id", "yaw_deg", "x_mm", "y_mm",
+            ))
+            for left, right in zip(pairs, pairs[1:])
+        ))
+        self.assertTrue(projected["draft_ready"])
+        application.draft["direct_pairs"][2].update({
+            field: application.draft["direct_pairs"][0][field]
+            for field in ("place_id", "yaw_deg", "x_mm", "y_mm")
+        })
+        self.assertFalse(application._direct_draft_ready())
 
     def test_pick_place_keeps_robot_starts_separate_from_n_plus_one_object_nodes(self):
         setup = {
@@ -1290,7 +1803,13 @@ class CollectionOperatorApplicationTests(unittest.TestCase):
         self.assertEqual((draft["requested_count"], len(pairs)), (3, 4))
         self.assertEqual(
             [pair["start_pose_id"] for pair in pairs],
-            ["start-a", "start-b", "start-a", None],
+            [
+                *project_balanced_start_pose_ids(
+                    ["start-a", "start-b"], 3,
+                    normalized_seed=draft["normalized_seed"],
+                ),
+                None,
+            ],
         )
         self.assertEqual(
             {key: pairs[0][key] for key in ("place_id", "yaw_deg", "x_mm", "y_mm")},
@@ -1301,6 +1820,79 @@ class CollectionOperatorApplicationTests(unittest.TestCase):
             for left, right in zip(pairs, pairs[1:])
         ))
         self.assertTrue(draft["draft_ready"])
+
+    def test_direct_pick_place_blocks_a_release_unsafe_at_the_recorded_yaw(self):
+        combination = next(
+            item for item in self.catalog["combinations"]
+            if item["execution"]["TEST_COLLECTION"]["executable"]
+            and item["task_id"] == "pick_place"
+            and item["workspace_id"] == "PLACE_B"
+            and item["object_id"] == "wood-cube-24mm-r001"
+        )
+        selection = {
+            "schema_version": "data_factory.operator_selection.v1",
+            "combination_digest": combination["combination_digest"],
+            "data_mode": "TEST_COLLECTION",
+            **{
+                field: combination[field]
+                for field in (
+                    "workspace_id", "frame_id", "task_id", "object_id",
+                    "grasp_id", "cell_id", "start_pose_id", "motion_id",
+                    "variant_id", "camera_profile_id", "camera_device_id",
+                )
+            },
+            "policy_id": "DETERMINISTIC_SPREAD",
+        }
+        setup = {
+            "profiles": [{
+                "start_pose_id": selection["start_pose_id"],
+                "display_name": "시작 A", "status": "AVAILABLE",
+            }],
+            "selected_start_pose_ids": [selection["start_pose_id"]],
+        }
+        application = CollectionOperatorApplication(
+            session_id="unsafe-direct-transition-r001",
+            operator_label="local-operator", catalog=self.catalog,
+            initial_selection=selection, projector=projection,
+            effect_scope="PHYSICAL",
+            environment_call=lambda: copy.deepcopy(self.environment),
+            prepare_environment_call=self.application.prepare_environment_call,
+            campaign_factory=lambda *_args: self.fail(
+                "unsafe draft must not reach campaign construction",
+            ),
+            start_pose_setup=setup,
+            start_pose_capture_call=lambda _name: copy.deepcopy(setup),
+        )
+        self.addCleanup(application.close)
+        current = application.bridge_core.snapshot()
+        application.bridge_core.consume(intent(
+            current, "prepare_environment", {}, "unsafe-direct-prepare",
+        ))
+        ready = application.bridge_core.snapshot()
+        application.bridge_core.consume(intent(ready, "update_draft", {
+            "draft_id": ready["projection"]["draft"]["draft_id"],
+            "current_object_pose": {
+                "place_id": "PLACE_B", "yaw_deg": 44,
+                "x_mm": 0, "y_mm": 0,
+            },
+        }, "unsafe-direct-source"))
+        sourced = application.bridge_core.snapshot()
+        application.bridge_core.consume(intent(sourced, "update_draft", {
+            "draft_id": sourced["projection"]["draft"]["draft_id"],
+            "authoring_mode": "DIRECT_EDIT",
+        }, "unsafe-direct-mode"))
+        application.draft["direct_pairs"][1].update({
+            "place_id": "PLACE_A", "yaw_deg": 0,
+            "x_mm": 0, "y_mm": 68,
+        })
+
+        projected = application.bridge_core.snapshot()["projection"]
+        self.assertFalse(projected["draft"]["draft_ready"])
+        self.assertEqual(
+            projected["draft"]["draft_reason"],
+            "DIRECT_YAW_TRANSITION_UNSAFE",
+        )
+        self.assertNotIn("compile_draft", projected["available_ops"])
 
     def test_assisted_start_pose_ensemble_is_seeded_balanced_and_stable(self):
         starts = ["start-c", "start-a", "start-b"]

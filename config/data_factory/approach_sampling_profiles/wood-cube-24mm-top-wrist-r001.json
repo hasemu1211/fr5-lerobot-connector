@@ -1,0 +1,36 @@
+{
+  "schema_version": "data_factory.approach_sampling_profile.v1",
+  "approach_sampling_profile_id": "wood-cube-24mm-top-wrist-approach-r001",
+  "qualification_status": "QUALIFIED",
+  "trajectory_variant_id": "TWO_STAGE_ALIGN_V2",
+  "object_profile_id": "wood-cube-24mm-r001",
+  "object_profile_digest": "sha256:fd93d2fb05d9ddd05a040e823b2d2b31428a79a7ae7ce07a1ad8cf519c66489a",
+  "grasp_profile_id": "wood-cube-24mm-top-3p5mm-r001",
+  "grasp_profile_digest": "sha256:d260ca29a2f70258f43d53e2127e0a5d307fef0fc7cbbadb093278391a509173",
+  "collection_profile_id": "fr5-up-wrist-rgb-30hz-v2",
+  "collection_profile_digest": "sha256:d8288e4b3cbd34dc646949985658c786d8b9945ed368d67b412a1dec93a4931d",
+  "required_camera_roles": [
+    "wrist"
+  ],
+  "observation_cue": "WRIST_OBJECT_VISIBLE_BEFORE_XY_YAW_ALIGNMENT",
+  "parameter_distribution": {
+    "kind": "STRATIFIED_BOUNDED",
+    "align_clearance_m": {
+      "kind": "TRUNCATED_NORMAL",
+      "mean": 0.0575,
+      "standard_deviation": 0.00125,
+      "minimum": 0.055,
+      "maximum": 0.06
+    },
+    "view_offset_xy_m": {
+      "kind": "OBJECT_RELATIVE_TRUNCATED_BIVARIATE_NORMAL",
+      "object_axes": [
+        "X",
+        "Y"
+      ],
+      "maximum_radius_fraction": 0.5,
+      "absolute_maximum_radius_m": 0.02,
+      "mahalanobis_radius": 2.5
+    }
+  }
+}

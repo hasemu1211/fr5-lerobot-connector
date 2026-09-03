@@ -1,6 +1,6 @@
 {
   "base_view": {
-    "schema_version": "data_factory.operator_session_view.v1",
+    "schema_version": "data_factory.operator_session_view.v2",
     "session_id": "collection-operator-r001",
     "revision": 1,
     "view_digest": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
@@ -16,17 +16,17 @@
       "subsystems": [
         {"label": "로봇 제어", "status": "READY", "detail": "기존 정상 제어 환경을 사용하고 있습니다."},
         {"label": "그리퍼", "status": "READY", "detail": "활성화와 열림 상태가 확인되었습니다."},
-        {"label": "상단 카메라", "status": "READY", "detail": "상단 역할 · 640×480 · 30 fps 설정이 연결되었습니다."}
+        {"label": "상단·손목 카메라", "status": "READY", "detail": "상단·손목 역할 · 640×480 · 30 fps 설정이 연결되었습니다."}
       ]
     },
     "camera_setup": {
-      "profile_label": "상단 RGB · 30 fps",
-      "required_roles": ["UP"],
+      "profile_label": "상단 + 손목 RGB · 30 fps",
+      "required_roles": ["UP", "WRIST"],
       "devices": [
         {"logical_id": "camera-1", "label": "카메라 1", "status": "CONNECTED", "technical_identity": "usb-Generic_USB2.0_PC_CAMERA_A-video-index0"},
         {"logical_id": "camera-2", "label": "카메라 2", "status": "CONNECTED", "technical_identity": "usb-Generic_USB2.0_PC_CAMERA_B-video-index0"}
       ],
-      "bindings": {"camera-1": "UP", "camera-2": "UNUSED"}
+      "bindings": {"camera-1": "UP", "camera-2": "WRIST"}
     },
     "start_pose_setup": {
       "profiles": [
@@ -43,12 +43,56 @@
       "eligible_pair_count": 15,
       "planned_count": 3
     },
+    "sampling_provenance": {
+      "object_dimensions_mm": [24, 24, 24],
+      "yaw_sampling_profile": {
+        "yaw_sampling_profile_id": "wood-cube-24mm-top-yaw-r001",
+        "profile_digest": "sha256:88e62729699e5c12daafd394800e8be83890dce9356fd40abb5a1583922606c6",
+        "distribution": {"kind": "STRATIFIED_UNIFORM"},
+        "canonical_interval_deg": {"minimum": -45.0, "maximum_exclusive": 45.0},
+        "required_camera_roles": ["wrist"]
+      },
+      "state_space_design_profile": {
+        "state_space_design_profile_id": "wood-cube-24mm-a4-cdf3-r001",
+        "profile_digest": "sha256:261feff6f031763e54a41ee058a0fa92769228e9aced702997adf682e82db433",
+        "object_profile_id": "wood-cube-24mm-r001",
+        "object_profile_digest": "sha256:fd93d2fb05d9ddd05a040e823b2d2b31428a79a7ae7ce07a1ad8cf519c66489a",
+        "grasp_profile_id": "wood-cube-24mm-top-3p5mm-r001",
+        "grasp_profile_digest": "sha256:d260ca29a2f70258f43d53e2127e0a5d307fef0fc7cbbadb093278391a509173",
+        "yaw_sampling_profile_id": "wood-cube-24mm-top-yaw-r001",
+        "yaw_sampling_profile_digest": "sha256:88e62729699e5c12daafd394800e8be83890dce9356fd40abb5a1583922606c6",
+        "spatial_strata": {"columns": 5, "rows": 3},
+        "yaw_cdf_strata": 3,
+        "derived_yaw_cdf_tiers": [
+          {"sample_rank": 0, "quantile": {"minimum": 0.0, "maximum_exclusive": 0.3333333333333333}, "yaw_deg": {"minimum": -45.0, "maximum_exclusive": -15.0}},
+          {"sample_rank": 1, "quantile": {"minimum": 0.3333333333333333, "maximum_exclusive": 0.6666666666666666}, "yaw_deg": {"minimum": -15.0, "maximum_exclusive": 15.0}},
+          {"sample_rank": 2, "quantile": {"minimum": 0.6666666666666666, "maximum_exclusive": 1.0}, "yaw_deg": {"minimum": 15.0, "maximum_exclusive": 45.0}}
+        ],
+        "assignment": "ROTATING_BALANCED_FRACTIONAL_FACTORIAL",
+        "execution_order": "CONTIGUOUS_YAW_BLOCKS",
+        "initial_source_policy": "CONDITION_ON_OBSERVED_SOURCE",
+        "per_workspace_repeat_one_sweep_episode_count": 15,
+        "full_cell_yaw_coverage_sweeps": 3,
+        "per_workspace_repeat_one_full_cell_yaw_coverage_episode_count": 45
+      },
+      "approach_sampling_profile": {
+        "approach_sampling_profile_id": "wood-cube-24mm-top-wrist-approach-r001",
+        "profile_digest": "sha256:08dcb818bdd1ec9618bd9c42a873293489a87c0fd199d7f38de8d70b671cb9de",
+        "parameter_distribution": {
+          "kind": "STRATIFIED_BOUNDED",
+          "align_clearance_m": {"kind": "TRUNCATED_NORMAL", "mean": 0.0575, "standard_deviation": 0.00125, "minimum": 0.055, "maximum": 0.06},
+          "view_offset_xy_m": {"kind": "OBJECT_RELATIVE_TRUNCATED_BIVARIATE_NORMAL", "object_axes": ["X", "Y"], "maximum_radius_fraction": 0.5, "absolute_maximum_radius_m": 0.02, "mahalanobis_radius": 2.5}
+        },
+        "required_camera_roles": ["wrist"]
+      }
+    },
     "catalog": {
       "compatibility_digest": "sha256:2222222222222222222222222222222222222222222222222222222222222222",
       "selection_execution": {"executable": true, "reason": "REGISTERED_WORKSPACE_CALLER"},
       "workspace_domain": {
         "workspace_id": "PLACE_A",
         "frame_id": "place-a-frame-r002",
+        "object_id": "wood-cube-24mm-r001",
         "coordinate_mode": "CONTINUOUS_A4_PLANE",
         "x_mm": {"minimum": -70, "maximum": 70},
         "y_mm": {"minimum": -35, "maximum": 35},
@@ -68,11 +112,11 @@
           {"id": "pick_place", "label": "물체 옮겨 놓기", "available": false, "reason": "FUTURE_TASK_RECIPE"}
         ],
         "object": [
-          {"id": "wood-cube-25mm-r001", "label": "나무 큐브 25 mm", "available": true, "reason": null},
+          {"id": "wood-cube-24mm-r001", "label": "나무 큐브 24 mm", "available": true, "reason": null},
           {"id": "bottle-small-r001", "label": "작은 병", "available": false, "reason": "QUALIFICATION_REQUIRED"}
         ],
         "grasp": [
-          {"id": "wood-cube-top-r001", "label": "위에서 중앙 잡기", "available": true, "reason": null},
+          {"id": "wood-cube-24mm-top-3p5mm-r001", "label": "상단 아래 3.5 mm 잡기", "available": true, "reason": null},
           {"id": "wood-cube-side-r001", "label": "옆면 잡기", "available": false, "reason": "QUALIFICATION_REQUIRED"}
         ],
         "start": [
@@ -84,11 +128,11 @@
           {"id": "PICK_PLACE", "label": "옮겨 놓기 동작", "available": false, "reason": "FUTURE_TASK_RECIPE"}
         ],
         "variant": [
-          {"id": "BASELINE", "label": "기본", "available": true, "reason": null},
-          {"id": "TWO_STAGE_ALIGN", "label": "2단계 정렬", "available": false, "reason": "NO_PRODUCTION_CALLER"}
+          {"id": "DIRECT", "label": "직접 접근", "available": true, "reason": null},
+          {"id": "TWO_STAGE_ALIGN_V2", "label": "관측 높이 → XY·yaw 정렬 → 수직 하강", "available": true, "reason": null}
         ],
         "camera": [
-          {"id": "fr5-up-rgb-30hz-v1", "label": "상단 RGB · 30 fps", "available": true, "reason": null},
+          {"id": "fr5-up-wrist-rgb-30hz-v2", "label": "상단 + 손목 RGB · 30 fps", "available": true, "reason": null},
           {"id": "fr5-side-rgb-30hz-v1", "label": "측면 RGB · 30 fps", "available": false, "reason": "UNPLACED_CAMERA"}
         ],
         "data_mode": [
@@ -108,6 +152,7 @@
       "authoring_mode": "ASSISTED",
       "requested_count": 3,
       "repeat": 1,
+      "normalized_seed": 0,
       "current_object_pose": {"place_id": "PLACE_A", "x_mm": 0, "y_mm": 0, "yaw_deg": 0},
       "workspace_route": [
         {"workspace_id": "PLACE_A", "frame_id": "place-a-frame-r002"},
@@ -122,19 +167,19 @@
         "workspace": "PLACE_A",
         "frame": "place-a-frame-r002",
         "task": "pickup_e2e",
-        "object": "wood-cube-25mm-r001",
-        "grasp": "wood-cube-top-r001",
+        "object": "wood-cube-24mm-r001",
+        "grasp": "wood-cube-24mm-top-3p5mm-r001",
         "start": "fr5-home-r001",
         "motion": "DIRECT",
-        "variant": "BASELINE",
-        "camera": "fr5-up-rgb-30hz-v1",
+        "variant": "TWO_STAGE_ALIGN_V2",
+        "camera": "fr5-up-wrist-rgb-30hz-v2",
         "data_mode": "TEST_ONLY",
         "split": "TRAIN"
       },
       "cells": [
         {"cell_id": "x-70-y35-yaw0", "x_mm": -70, "y_mm": 35, "yaw_deg": 0, "split": "TRAIN", "repeat": 1, "coverage_count": 0, "selection_state": "SELECTED", "eligibility_status": "ELIGIBLE", "reason_codes": ["COVERAGE_DEFICIT"]},
-        {"cell_id": "x-35-y35-yaw45", "x_mm": -35, "y_mm": 35, "yaw_deg": 45, "split": "TRAIN", "repeat": 1, "coverage_count": 1, "selection_state": "SELECTED", "eligibility_status": "ELIGIBLE", "reason_codes": ["BALANCED_TIE_BREAK"]},
-        {"cell_id": "x0-y35-yaw90", "x_mm": 0, "y_mm": 35, "yaw_deg": 90, "split": "TRAIN", "repeat": 1, "coverage_count": 0, "selection_state": "SELECTED", "eligibility_status": "ELIGIBLE", "reason_codes": ["COVERAGE_DEFICIT"]},
+        {"cell_id": "x-35-y35-yaw-30", "x_mm": -35, "y_mm": 35, "yaw_deg": -30, "split": "TRAIN", "repeat": 1, "coverage_count": 1, "selection_state": "SELECTED", "eligibility_status": "ELIGIBLE", "reason_codes": ["BALANCED_TIE_BREAK"]},
+        {"cell_id": "x0-y35-yaw30", "x_mm": 0, "y_mm": 35, "yaw_deg": 30, "split": "TRAIN", "repeat": 1, "coverage_count": 0, "selection_state": "SELECTED", "eligibility_status": "ELIGIBLE", "reason_codes": ["COVERAGE_DEFICIT"]},
         {"cell_id": "x35-y0-yaw45", "x_mm": 35, "y_mm": 0, "yaw_deg": 45, "split": "ID", "repeat": 1, "coverage_count": 2, "selection_state": "AVAILABLE", "eligibility_status": "ELIGIBLE", "reason_codes": ["QUALIFIED_BASELINE"]},
         {"cell_id": "x0-y-35-yaw90", "x_mm": 0, "y_mm": -35, "yaw_deg": 90, "split": "OOD", "repeat": 1, "coverage_count": 0, "selection_state": "AVAILABLE", "eligibility_status": "ELIGIBLE", "reason_codes": ["COVERAGE_DEFICIT"]},
         {"cell_id": "x70-y-35-yaw0", "x_mm": 70, "y_mm": -35, "yaw_deg": 0, "split": "TRAIN", "repeat": 1, "coverage_count": 0, "selection_state": "BLOCKED", "eligibility_status": "BLOCKED", "reason_codes": ["SLOT_BLOCKED"]}
@@ -195,9 +240,154 @@
       },
       "coverage": {
         "sequence": [
-          {"order_index": 1, "place_id": "PLACE_A", "x_mm": -70, "y_mm": 35, "yaw_deg": 0, "coverage_condition_digest": "sha256:1010101010101010101010101010101010101010101010101010101010101010"},
-          {"order_index": 2, "place_id": "PLACE_A", "x_mm": -35, "y_mm": 35, "yaw_deg": 45, "coverage_condition_digest": "sha256:2020202020202020202020202020202020202020202020202020202020202020"},
-          {"order_index": 3, "place_id": "PLACE_A", "x_mm": 0, "y_mm": 35, "yaw_deg": 90, "coverage_condition_digest": "sha256:3030303030303030303030303030303030303030303030303030303030303030"}
+          {
+            "order_index": 1,
+            "place_id": "PLACE_A",
+            "x_mm": -70,
+            "y_mm": 35,
+            "yaw_deg": 0,
+            "coverage_condition_digest": "sha256:1010101010101010101010101010101010101010101010101010101010101010",
+            "state_space_slot": {
+              "schema_version": "data_factory.yaw_sample_binding.v4",
+              "yaw_sampling_profile_id": "wood-cube-24mm-top-yaw-r001",
+              "yaw_sampling_profile_digest": "sha256:88e62729699e5c12daafd394800e8be83890dce9356fd40abb5a1583922606c6",
+              "sampling_seed": "9223372036854775809",
+              "sample_identity_digest": "sha256:a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+              "sample_rank": 1,
+              "design_size": 3,
+              "yaw_sample_quantile": 0.5,
+              "raw_yaw_deg": 0.0,
+              "canonical_object_yaw_deg": 0.0,
+              "source_object_yaw_deg": 0.0,
+              "grasp_yaw_deg": 0.0,
+              "yaw_equivalence_period_deg": 90.0,
+              "sample_origin": "CONDITIONED_SOURCE_ANCHOR",
+              "binding_digest": "sha256:6ec75035fcff67fa44f35802fd8f8331dae06bc9abbcec0d347b00dc69dc768a",
+              "state_space_design_profile_id": "wood-cube-24mm-a4-cdf3-r001",
+              "state_space_design_profile_digest": "sha256:261feff6f031763e54a41ee058a0fa92769228e9aced702997adf682e82db433",
+              "spatial_cell_index": 0,
+              "spatial_row": 0,
+              "spatial_column": 0
+            },
+            "object_reposition": {
+              "parent_run_id": "collection-run-1",
+              "continuation_run_id": "collection-run-1",
+              "next_run_id": "collection-run-2",
+              "execution_stage": "PRECOMMIT_POST_RECORDING",
+              "recording_scope": "OUT_OF_DATASET",
+              "start_state": "HELD_OBJECT",
+              "source_pose": {"place_id": "PLACE_A", "x_mm": -70, "y_mm": 35, "yaw_deg": 0},
+              "target_pose": {"place_id": "PLACE_A", "x_mm": -35, "y_mm": 35, "yaw_deg": -30},
+              "yaw_sample": {
+                "yaw_sampling_profile_id": "wood-cube-24mm-top-yaw-r001",
+                "yaw_sampling_profile_digest": "sha256:88e62729699e5c12daafd394800e8be83890dce9356fd40abb5a1583922606c6",
+                "sampling_seed": "5128904136610758680",
+                "sample_rank": 0,
+                "design_size": 3,
+                "source_object_yaw_deg": -30,
+                "binding_digest": "sha256:d9edd99c4c0bba0700b0d167927f1768d909075fd9b63da294a9ca076652abcb"
+              },
+              "object_profile_id": "wood-cube-24mm-r001",
+              "object_profile_digest": "sha256:fd93d2fb05d9ddd05a040e823b2d2b31428a79a7ae7ce07a1ad8cf519c66489a",
+              "grasp_profile_id": "wood-cube-24mm-top-3p5mm-r001",
+              "grasp_profile_digest": "sha256:d260ca29a2f70258f43d53e2127e0a5d307fef0fc7cbbadb093278391a509173",
+              "yaw_sampling_profile_id": "wood-cube-24mm-top-yaw-r001",
+              "yaw_sampling_profile_digest": "sha256:88e62729699e5c12daafd394800e8be83890dce9356fd40abb5a1583922606c6",
+              "motion_recipe": "DIRECT",
+              "recorder_authorized": false,
+              "dataset_write_authorized": false,
+              "binding_digest": "sha256:efefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefef"
+            }
+          },
+          {
+            "order_index": 2,
+            "place_id": "PLACE_A",
+            "x_mm": -35,
+            "y_mm": 35,
+            "yaw_deg": -30,
+            "coverage_condition_digest": "sha256:2020202020202020202020202020202020202020202020202020202020202020",
+            "state_space_slot": {
+              "schema_version": "data_factory.yaw_sample_binding.v4",
+              "yaw_sampling_profile_id": "wood-cube-24mm-top-yaw-r001",
+              "yaw_sampling_profile_digest": "sha256:88e62729699e5c12daafd394800e8be83890dce9356fd40abb5a1583922606c6",
+              "sampling_seed": "5128904136610758680",
+              "sample_identity_digest": "sha256:a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2",
+              "sample_rank": 0,
+              "design_size": 3,
+              "yaw_sample_quantile": 0.16666666666666666,
+              "raw_yaw_deg": -30.0,
+              "canonical_object_yaw_deg": -30.0,
+              "source_object_yaw_deg": -30.0,
+              "grasp_yaw_deg": -30.0,
+              "yaw_equivalence_period_deg": 90.0,
+              "sample_origin": "SEEDED_CDF_STRATUM",
+              "binding_digest": "sha256:d9edd99c4c0bba0700b0d167927f1768d909075fd9b63da294a9ca076652abcb",
+              "state_space_design_profile_id": "wood-cube-24mm-a4-cdf3-r001",
+              "state_space_design_profile_digest": "sha256:261feff6f031763e54a41ee058a0fa92769228e9aced702997adf682e82db433",
+              "spatial_cell_index": 1,
+              "spatial_row": 0,
+              "spatial_column": 1
+            },
+            "object_reposition": {
+              "parent_run_id": "collection-run-2",
+              "continuation_run_id": "collection-run-2-reposition",
+              "next_run_id": "collection-run-3",
+              "execution_stage": "POSTCOMMIT",
+              "recording_scope": "OUT_OF_DATASET",
+              "start_state": "ON_SURFACE",
+              "source_pose": {"place_id": "PLACE_A", "x_mm": -35, "y_mm": 35, "yaw_deg": -30},
+              "target_pose": {"place_id": "PLACE_A", "x_mm": 0, "y_mm": 35, "yaw_deg": 30},
+              "yaw_sample": {
+                "yaw_sampling_profile_id": "wood-cube-24mm-top-yaw-r001",
+                "yaw_sampling_profile_digest": "sha256:88e62729699e5c12daafd394800e8be83890dce9356fd40abb5a1583922606c6",
+                "sampling_seed": "18446744073709551615",
+                "sample_rank": 2,
+                "design_size": 3,
+                "source_object_yaw_deg": 30,
+                "binding_digest": "sha256:a7dcaa19bc1e0eaa52c31f052985f358a1a8ad402b85dfdcc5f8d3c47d72736d"
+              },
+              "object_profile_id": "wood-cube-24mm-r001",
+              "object_profile_digest": "sha256:fd93d2fb05d9ddd05a040e823b2d2b31428a79a7ae7ce07a1ad8cf519c66489a",
+              "grasp_profile_id": "wood-cube-24mm-top-3p5mm-r001",
+              "grasp_profile_digest": "sha256:d260ca29a2f70258f43d53e2127e0a5d307fef0fc7cbbadb093278391a509173",
+              "yaw_sampling_profile_id": "wood-cube-24mm-top-yaw-r001",
+              "yaw_sampling_profile_digest": "sha256:88e62729699e5c12daafd394800e8be83890dce9356fd40abb5a1583922606c6",
+              "motion_recipe": "DIRECT",
+              "recorder_authorized": false,
+              "dataset_write_authorized": false,
+              "binding_digest": "sha256:e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2"
+            }
+          },
+          {
+            "order_index": 3,
+            "place_id": "PLACE_A",
+            "x_mm": 0,
+            "y_mm": 35,
+            "yaw_deg": 30,
+            "coverage_condition_digest": "sha256:3030303030303030303030303030303030303030303030303030303030303030",
+            "state_space_slot": {
+              "schema_version": "data_factory.yaw_sample_binding.v4",
+              "yaw_sampling_profile_id": "wood-cube-24mm-top-yaw-r001",
+              "yaw_sampling_profile_digest": "sha256:88e62729699e5c12daafd394800e8be83890dce9356fd40abb5a1583922606c6",
+              "sampling_seed": "18446744073709551615",
+              "sample_identity_digest": "sha256:a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3",
+              "sample_rank": 2,
+              "design_size": 3,
+              "yaw_sample_quantile": 0.8333333333333334,
+              "raw_yaw_deg": 30.0,
+              "canonical_object_yaw_deg": 30.0,
+              "source_object_yaw_deg": 30.0,
+              "grasp_yaw_deg": 30.0,
+              "yaw_equivalence_period_deg": 90.0,
+              "sample_origin": "SEEDED_CDF_STRATUM",
+              "binding_digest": "sha256:a7dcaa19bc1e0eaa52c31f052985f358a1a8ad402b85dfdcc5f8d3c47d72736d",
+              "state_space_design_profile_id": "wood-cube-24mm-a4-cdf3-r001",
+              "state_space_design_profile_digest": "sha256:261feff6f031763e54a41ee058a0fa92769228e9aced702997adf682e82db433",
+              "spatial_cell_index": 2,
+              "spatial_row": 0,
+              "spatial_column": 2
+            }
+          }
         ]
       }
     },
@@ -213,6 +403,75 @@
         "data_disposition": "TEST_ONLY"
       },
       "campaign_authorization": {"authorization_digest": "sha256:7777777777777777777777777777777777777777777777777777777777777777"},
+      "active_episode_plan": {
+        "schema_version": "data_factory.active_episode_plan.v1",
+        "plan_digest": "sha256:9191919191919191919191919191919191919191919191919191919191919191",
+        "approval_scope": "HIL_NUMERIC_PROXY",
+        "decision_binding_digest": "sha256:9292929292929292929292929292929292929292929292929292929292929292",
+        "operator_summary": {
+          "path": ["PREGRASP_VIEW_PTP", "ALIGN_AT_CLEARANCE_LIN", "DESCEND_LOCKED_LIN", "GRIPPER_CLOSE", "LIFT_LIN"]
+        },
+        "trajectory_variant_binding": {
+          "schema_version": "data_factory.trajectory_variant_binding.v2",
+          "trajectory_variant_id": "TWO_STAGE_ALIGN_V2",
+          "variation_profile_digest": "sha256:08dcb818bdd1ec9618bd9c42a873293489a87c0fd199d7f38de8d70b671cb9de",
+          "sampling_seed": "9223372036854775849",
+          "sample_rank": 1,
+          "design_size": 3,
+          "design_digest": "sha256:9494949494949494949494949494949494949494949494949494949494949494",
+          "target_yaw_deg": -30.0,
+          "phase_parameters": {
+            "align_clearance_m": 0.056767855,
+            "align_clearance_quantile": 0.26849986664529757,
+            "object_size_xy_m": [0.024, 0.024],
+            "view_offset_angle_quantile": 0.7797544174092522,
+            "view_offset_radial_quantile": 0.15825182623743206,
+            "view_offset_radius_xy_m": [0.012, 0.012],
+            "view_offset_standard_deviation_xy_m": [0.0048, 0.0048],
+            "view_offset_x_m": 0.000511023,
+            "view_offset_y_m": -0.002701516
+          },
+          "phase_parameters_digest": "sha256:e8c59bcd95d2c1f035d8e4904d349be21e661cca78f27e273a56167a9f0639c2",
+          "motion_program_digest": "sha256:9696969696969696969696969696969696969696969696969696969696969696",
+          "binding_digest": "sha256:df4e8533951a4a180d35791d6639ff93363565f21f41205c37638c82b899ab26"
+        },
+        "yaw_sample_binding": {
+          "schema_version": "data_factory.yaw_sample_binding.v4",
+          "yaw_sampling_profile_id": "wood-cube-24mm-top-yaw-r001",
+          "yaw_sampling_profile_digest": "sha256:88e62729699e5c12daafd394800e8be83890dce9356fd40abb5a1583922606c6",
+          "sampling_seed": "5128904136610758680",
+          "sample_identity_digest": "sha256:a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2",
+          "sample_rank": 0,
+          "design_size": 3,
+          "yaw_sample_quantile": 0.16666666666666666,
+          "raw_yaw_deg": -30.0,
+          "canonical_object_yaw_deg": -30.0,
+          "source_object_yaw_deg": -30.0,
+          "grasp_yaw_deg": -30.0,
+          "yaw_equivalence_period_deg": 90.0,
+          "sample_origin": "SEEDED_CDF_STRATUM",
+          "binding_digest": "sha256:d9edd99c4c0bba0700b0d167927f1768d909075fd9b63da294a9ca076652abcb",
+          "state_space_design_profile_id": "wood-cube-24mm-a4-cdf3-r001",
+          "state_space_design_profile_digest": "sha256:261feff6f031763e54a41ee058a0fa92769228e9aced702997adf682e82db433",
+          "spatial_cell_index": 1,
+          "spatial_row": 0,
+          "spatial_column": 1
+        },
+        "precommit_safety": {
+          "schema_version": "data_factory.precommit_safety.v1",
+          "run_id": "collection-run-2",
+          "approved_plan_digest": "sha256:9191919191919191919191919191919191919191919191919191919191919191",
+          "scene_binding_digest": "sha256:8181818181818181818181818181818181818181818181818181818181818181",
+          "expected_planning_scene_digest": "sha256:8282828282828282828282828282828282828282828282828282828282828282",
+          "planning_scene_readback_digest": "sha256:8383838383838383838383838383838383838383838383838383838383838383",
+          "collision_report_digest": "sha256:8484848484848484848484848484848484848484848484848484848484848484",
+          "plan_only_no_motion_digest": "sha256:8585858585858585858585858585858585858585858585858585858585858585",
+          "post_reset_safe_snapshot_digest": null,
+          "status": "PENDING"
+        },
+        "plan_envelope_digest": "sha256:8686868686868686868686868686868686868686868686868686868686868686",
+        "preapproval_evidence_digest": "sha256:8787878787878787878787878787878787878787878787878787878787878787"
+      },
       "campaign_session": {"campaign": {"state": "ACTIVE", "completed_intents": 1, "remaining_intents": 2}},
       "runtime": {
         "workflow_state": "RUNNING",
@@ -221,10 +480,18 @@
         "active_child_id": "collection-run-2",
         "current_episode": 2,
         "next_episode": 3,
-        "progress": 54,
-        "phase_label": "에피소드 2/3 · 물체 들어 올리기",
-        "detail": "현재 동작이 끝나면 기술 결과를 확인하고 다음 에피소드를 준비합니다.",
-        "recorder": {"status": "READY", "label": "기록 중", "frames": 328, "fps": 30.0}
+        "phase": "OBJECT_REPOSITION_PLANNED",
+        "progress": 92,
+        "phase_label": "에피소드 2/3 · 녹화 밖 물체 재배치 계획 확인",
+        "detail": "녹화와 dataset commit이 끝난 뒤 다음 조건을 위한 별도 재배치 계획을 확인했습니다.",
+        "evidence": {
+          "object_reposition_binding_digest": "sha256:e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2",
+          "object_reposition_run_id": "collection-run-2-reposition",
+          "object_reposition_plan_digest": "sha256:c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1",
+          "object_reposition_plan_artifact_digest": "sha256:c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2",
+          "object_reposition_collision_report_digest": "sha256:c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3",
+          "object_reposition_plan_only_no_motion_digest": "sha256:c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4"
+        }
       },
       "episode_history": [
         {"outcome": "PASS", "technical_evidence": {"status": "PASS"}, "human_semantic": "NOT_MEASURED", "admission_state": "PENDING", "result_digest": "sha256:8888888888888888888888888888888888888888888888888888888888888888"}
@@ -266,15 +533,15 @@
         "status": "PENDING",
         "episode_number": 2,
         "queue_remaining": 2,
-        "coverage_condition": {"place_id": "PLACE_A", "x_mm": -35, "y_mm": 35, "yaw_deg": 45},
+        "coverage_condition": {"place_id": "PLACE_A", "x_mm": -35, "y_mm": 35, "yaw_deg": -30},
         "choices": ["PASS", "FAIL", "UNCERTAIN"],
         "reasons": ["WRONG_OBJECT_OR_START", "GRASP_OR_LIFT", "TRAJECTORY_FLOW", "TASK_GOAL", "UNMODELED_CONTACT", "RELEASE_SCENE", "UNKNOWN"]
       },
       "coverage": {
         "cells": [
           {"x_mm": -70, "y_mm": 35, "yaw_deg": 0, "collected_count": 1, "target_count": 1},
-          {"x_mm": -35, "y_mm": 35, "yaw_deg": 45, "collected_count": 1, "target_count": 1},
-          {"x_mm": 0, "y_mm": 35, "yaw_deg": 90, "collected_count": 1, "target_count": 1}
+          {"x_mm": -35, "y_mm": 35, "yaw_deg": -30, "collected_count": 1, "target_count": 1},
+          {"x_mm": 0, "y_mm": 35, "yaw_deg": 30, "collected_count": 1, "target_count": 1}
         ]
       }
     },
@@ -392,7 +659,12 @@
       "draft": {
         "execution_ready": false,
         "execution_reason": "MOTION_QUALIFICATION_REQUIRED",
-        "selection": {"frame": "workspace-pending-r001"}
+        "selection": {"frame": "workspace-pending-r001"},
+        "workspace_route": [
+          {"workspace_id": "PLACE_A", "frame_id": "workspace-pending-r001"},
+          {"workspace_id": "PLACE_A", "frame_id": "workspace-pending-r001"},
+          {"workspace_id": "PLACE_A", "frame_id": "workspace-pending-r001"}
+        ]
       },
       "catalog": {
         "selection_execution": {"executable": false, "reason": "MOTION_QUALIFICATION_REQUIRED"},

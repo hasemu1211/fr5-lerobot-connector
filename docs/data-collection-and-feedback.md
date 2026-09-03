@@ -3,7 +3,7 @@
 - 상태: `CURRENT_CANONICAL_WITH_PROPOSED_STAGES`
 - 확인일: 2026-08-24
 - 목적: 수집할 증거, 피드백 소비자, 보존 규칙과 사람 개입 지점을 한 곳에 고정한다.
-- 비목적: 기존 recorder/validator schema 변경, 새 대시보드·broker·database·per-frame JSON 복제.
+- 비목적: 기존 recorder/per-frame dataset schema 변경, 새 대시보드·broker·database·per-frame JSON 복제. Technical validator는 단일 owner를 유지하되 live incremental과 명시적 full 범위를 지원한다.
 
 ## 1. 계약 정본과 우선순위
 
@@ -41,7 +41,7 @@ failure condition → targeted recollection recommendation
 
 원칙은 다음과 같다.
 
-1. 기술 품질은 기존 validator가 계속 단독 소유한다.
+1. 기술 품질은 기존 validator가 계속 단독 소유한다. Factory live는 새 episode+append-only 범위, dataset 승인·training/evaluation/curation은 full 범위를 사용하며 별도 quality owner를 만들지 않는다.
 2. 행동·Object–EE·coverage는 validator 결과를 read-only로 소비하며 PASS를 덮어쓰거나 FAIL을 상쇄하지 않는다.
 3. 기술 FAIL은 audit-only behavior report와 attempted 진단에는 들어갈 수 있지만 학습·coverage 적격 수량·critic·quality-bound calibration에서는 제외한다. 정상 finalize된 감사 증거는 자동 삭제하지 않고, 미완료 episode는 기존 transaction/recovery 규칙만 처리한다. 행동 flag는 별도 review evidence이며 기술 FAIL과 혼용하지 않는다.
 4. heavy RGB/video/Parquet은 dataset 또는 평가 evidence root 한 곳만 소유한다. report는 scalar, ID, digest와 row/video 범위 reference만 저장한다.
@@ -62,7 +62,7 @@ failure condition → targeted recollection recommendation
 | `OBJ-02` | `T_base_tcp(t)`, `T_object_tcp(t)`와 grasp-close relative error | recorder joints에서 offline FK; `OBJ-01` | per-row 저장 없이 필요 시 계산, close row reference+transform/scalar만 보존 | grasp consistency와 향후 trajectory-variant source 적격성 | `NOT_AVAILABLE`; `FK_TF_QUALIFICATION_MISSING` |
 | `LIFT-01` | `+table_normal_base` TCP progress/drift, gripper continuity | FK/TCP + lift row window | phase scalar만 | lift 안정성 후보 | FK/TF 뒤 미구현 |
 | `COVER-01` | condition별 attempted/technical-pass/human-training-approved/semantic-pass/human-rejected | JobSpec/profile/calibration/recipe digests + result references | `coverage_report.json` | under-covered qualified condition 제안 | coverage v1은 `REPORT_ONLY`; episode inventory compiler/validator와 human-only issuer는 offline-only API로 제공되며 coverage report는 production approval을 발급하지 않음 |
-| `VARIANT-01` | trajectory variant, finite parameter tuple, plan/observed evidence lineage | trajectory-variant catalog + plan/report digests | catalog에는 tuple 1회, episode에는 ID/digest만 | 동일 조건 안의 품질 경계 다양성 | `DIRECT`/`TWO_STAGE_ALIGN` offline plan-only compiler 구현됨; production HIL·observed eligibility는 미발급 |
+| `VARIANT-01` | trajectory variant, finite parameter tuple, plan/observed evidence lineage | trajectory-variant catalog + plan/report digests | catalog에는 분포 계약, episode에는 ID/seed/digest | 동일 조건 안의 품질 경계 다양성 | `DIRECT`/`TWO_STAGE_ALIGN_V2`가 Web UI와 live caller에 연결됨; V2 물리 성능·학습 효과는 미측정 |
 
 ### 기술 품질의 정확한 피드백
 
@@ -132,10 +132,10 @@ motion_recipe_digest, collection_profile_digest
 `tools.data_factory.training_orchestration`은 이 입력과 normalized command/config/runtime/training seed를 injected trainer→checkpoint validator→independent reloader→offline evaluator 순서에 결속한다. production wrapper를 직접 호출하거나 receipt·checkpoint를 발급하지 않는다.
 
 - `tools.data_factory.seed_campaign`은 finite seed manifest slot을 fresh idle `OneJob` lifecycle의 non-authoritative intent에 한 번씩 결속하며 technical PASS 전 다음 intent를 만들지 않는다.
-- `tools.data_factory.motion.trajectory_variants`는 validated `fr5.motion_program.v2`에서 exact `DIRECT` 또는 `TWO_STAGE_ALIGN` v3 plan-only candidate만 만들고 execute/gripper authority를 갖지 않는다.
+- `tools.data_factory.motion.trajectory_variants`는 validated motion program에서 exact `DIRECT` 또는 `TWO_STAGE_ALIGN_V2` sampling binding과 기존 10-phase executable projection을 만든다. V2는 pickup 첫 세 arm target만 바꾸고 execute/gripper authority는 기존 runner에 남긴다. 기존 `DIRECT`/`TWO_STAGE_ALIGN` v1/v3 plan-only compiler는 frozen legacy artifact 재현용으로만 유지한다.
 - `tools.data_factory.recollection`은 synthetic rollout failure와 coverage가 함께 지목한 qualified weak cell에 대해서만 nominal/variant-targeted finite manifest를 반환하며 production campaign artifact나 live caller를 만들지 않는다.
 
-새 service는 없고 `run_job.py`와 production training wrapper는 이 offline 구현에서 바꾸지 않았다.
+새 service는 없다. `run_job.py`는 선택한 recipe와 episode seed를 기존 resolver에 결속하며 production training wrapper는 변경하지 않는다.
 
 새 digest-bound baseline은 v2만 사용한다. 기존 schema v1은 기존 checkpoint 검증·resume을 위한 read-only compatibility로 유지하고 자동 재작성하지 않는다. v1에 없는 digest를 추정해 채우지 않으며, 새 provenance가 필요하면 현재 source에서 별도 v2를 생성한다. offline compiler/validator는 production inventory, seed manifest, checkpoint 또는 reload receipt를 스스로 발급하지 않는다.
 
@@ -186,9 +186,9 @@ failure 직전 영상은 새 MP4를 복사하는 대신 가능한 한 기존 평
 | 첫 live motion | exact plan summary를 보고 해당 plan digest를 한 번 승인 | planning scene/readback/collision/no-motion/start-state gate와 cached-plan 실행 |
 | exact live plan | path/flow/clearance/speed와 plan digest를 한 번 승인 | scene/readback/collision/no-motion과 cached-plan binding |
 | post-lift semantic | 현재 camera가 semantic authority가 아니므로 실제 pickup 성공/실패를 한 번 판정 | close/lift controller·gripper evidence, recorder freeze와 timeout/cancel/block |
-| run 종료 | released object pose/scene 상태를 입력하고 cell ready를 acknowledge | commit→validator, report와 coverage 갱신; scene 갱신 전 다음 job 차단 |
+| run 종료 | 요구된 경우 release/scene 이상을 확인 | robot release evidence로 scene을 갱신하고 commit→validator를 수행한다. pick-place의 다음 seeded yaw가 다르면 별도 비녹화 reposition을 병렬 validator lane과 합류시킨 뒤에만 다음 job을 연다. |
 | training admission | 사용할 episode와 split/ID-OOD 정의 승인 | v2 split/provenance 생성과 checkpoint reload 검증 |
-| variant HIL | trajectory-variant plan-only pair 검토 뒤 제한된 실물 비교 승인 | DIRECT/TWO_STAGE_ALIGN plan·metric·lineage 비교 |
+| trajectory recipe | Web UI에서 DIRECT 또는 TWO_STAGE_ALIGN_V2와 Campaign seed 하나를 고르고 exact preview/plan을 검토 | object/grasp/camera profile에서 yaw·XY·clearance finite design을 파생하고 기존 safety/human gate 적용; browser sampling 없음 |
 | policy rollout | trial 시작 승인, terminal/partial/failure label | checkpoint/condition/telemetry와 metric 결속 |
 
 현재 연결 카메라는 임시 1대이고 object semantic authority가 없으므로 agent는 영상으로 성공·파지·실패를 자율 판정하지 않는다. 첫 학습 seed는 과거 적격 dual-camera acquisition/mapping을 재사용하되 intended 두 장치의 exact binding과 최종 구도를 고정한 뒤 별도 수집한다. 현재 single-camera episode나 numeric gripper evidence는 training semantic label을 대체하지 않는다.
@@ -198,7 +198,7 @@ failure 직전 영상은 새 MP4를 복사하는 대신 가능한 한 기존 평
 1. technical FAIL이 있으면 같은 조건 episode 수를 늘리기 전에 acquisition 원인을 고친다.
 2. technical PASS + behavior flag면 raw episode를 보존하고 사람이 flag를 검토한다.
 3. technical/semantic PASS가 부족한 qualified condition을 coverage가 우선 제안한다.
-4. 같은 condition의 새 phase variant는 trajectory-variant plan-only·소수 HIL qualification 전 제안하지 않는다.
+4. 같은 condition의 새 phase variant는 observation→action 의미와 object-relative 범위를 versioned recipe로 명시한다. 별도 승격 gate를 만들지 않고 기존 plan/collision/사람 확인에서 실제 경로를 검토한다.
 5. baseline rollout 뒤에는 low coverage와 low policy success를 별도 표시한다. safety/failure 원인이 미해결이면 수집 추천보다 block/recovery가 우선이다.
 6. 같은 condition의 수량이 충분하고 rollout 성공이 안정적이면 우선순위를 내리되 자동 종료 threshold는 rollout 근거로 별도 qualification한다.
 

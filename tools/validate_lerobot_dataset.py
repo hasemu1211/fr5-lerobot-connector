@@ -18,11 +18,20 @@ if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from tools.fr5_dataset_schema import FEATURE_NAMES, QUALITY_LIMITS
+from tools.data_factory_recovery import (
+    RecoveryError,
+    canonical_json_digest,
+    dataset_snapshot,
+    decode_json_strict,
+    validate_append_only_snapshot,
+    validate_staging_manifest_contract,
+)
 from tools.data_factory.episode_ledger import build_lerobot_v3_episode_locator
 from tools.fr5_data_factory import ContractError
 
 
 EPISODE_LOCATOR_PREFIX = "EPISODE_LOCATOR_JSON:"
+VIDEO_PROBE_TIMEOUT_S = 30
 
 
 def has_nonfinite_number(value) -> bool:
@@ -151,10 +160,14 @@ def _video_frame_count(path: Path) -> tuple[int, str | None]:
         result = subprocess.run(
             ["ffprobe", "-v", "error", "-count_frames", "-select_streams", "v:0", "-show_entries", "stream=nb_read_frames", "-of", "json", str(path)],
             check=True, capture_output=True, text=True,
+            timeout=VIDEO_PROBE_TIMEOUT_S,
         )
         streams = json.loads(result.stdout).get("streams", [])
         return (int(streams[0]["nb_read_frames"]) if streams else 0), None
-    except (FileNotFoundError, subprocess.CalledProcessError, ValueError, KeyError) as exc:
+    except (
+        FileNotFoundError, subprocess.CalledProcessError,
+        subprocess.TimeoutExpired, ValueError, KeyError,
+    ) as exc:
         return 0, str(exc)
 
 
@@ -185,7 +198,43 @@ def main() -> None:
         "--episode-locator-index", type=int,
         help="emit the canonical locator for one validated episode",
     )
+    parser.add_argument(
+        "--incremental-episode-index", type=int,
+        help=(
+            "validate global metadata and only the data/video shard touched "
+            "by this newly appended episode"
+        ),
+    )
+    parser.add_argument(
+        "--append-manifest", type=Path,
+        help="staging manifest whose pre-commit snapshot proves append-only commit",
+    )
+    parser.add_argument(
+        "--append-manifest-digest",
+        help="recorder-returned digest that binds the append manifest",
+    )
     args = parser.parse_args()
+    if (
+        (
+            args.incremental_episode_index is not None
+            and args.incremental_episode_index < 0
+        )
+        or (
+            args.incremental_episode_index is not None
+            and args.episode_locator_index != args.incremental_episode_index
+        )
+        or (
+            (args.incremental_episode_index is None)
+            != (args.append_manifest is None)
+        )
+        or (
+            (args.incremental_episode_index is None)
+            != (args.append_manifest_digest is None)
+        )
+    ):
+        raise SystemExit(
+            "FAIL: incremental validation requires matching locator index and bound append manifest"
+        )
     quarantine = args.root / "meta" / "quarantine.json"
     if quarantine.exists() or quarantine.is_symlink():
         raise SystemExit(f"FAIL: dataset is quarantined: {quarantine}")
@@ -196,7 +245,15 @@ def main() -> None:
     info_path = args.root / "meta" / "info.json"
     if not info_path.exists():
         raise SystemExit(f"FAIL: {args.root} is not a LeRobot dataset root")
-    info = json.loads(info_path.read_text())
+    try:
+        info = decode_json_strict(
+            info_path.read_text(encoding="utf-8"),
+            "DATASET_INFO", info_path,
+        )
+    except (OSError, RecoveryError) as exc:
+        raise SystemExit(f"FAIL: cannot read dataset info: {exc}") from exc
+    if not isinstance(info, dict):
+        raise SystemExit(f"FAIL: dataset info is not an object: {info_path}")
     if info.get("codebase_version") != "v3.0": failures.append("dataset is not LeRobot v3.0")
     fps = info.get("fps")
     if not isinstance(fps, int) or fps <= 0: failures.append(f"invalid dataset fps: {fps}")
@@ -216,6 +273,43 @@ def main() -> None:
     camera_names = [key.removeprefix("observation.images.") for key in camera_keys]
     if info.get("total_episodes", 0) < 1: failures.append("no saved episodes")
 
+    append_contract = None
+    quality_append_offset = None
+    if args.incremental_episode_index is not None:
+        try:
+            if args.append_manifest.is_symlink() or not args.append_manifest.is_file():
+                raise RecoveryError(
+                    "RECOVERY_MANIFEST", "append manifest is not a regular file",
+                )
+            manifest = decode_json_strict(
+                args.append_manifest.read_text(encoding="utf-8"),
+                "RECOVERY_MANIFEST", args.append_manifest,
+            )
+            if canonical_json_digest(manifest) != args.append_manifest_digest:
+                raise RecoveryError(
+                    "RECOVERY_MANIFEST_DIGEST",
+                    "append manifest does not match recorder evidence",
+                )
+            manifest = validate_staging_manifest_contract(
+                manifest, args.root,
+                episode_index=args.incremental_episode_index,
+                camera_names=camera_names,
+            )
+            append_contract = validate_append_only_snapshot(
+                manifest["begin_snapshot"], dataset_snapshot(args.root),
+                episode_index=args.incremental_episode_index,
+                camera_count=sum(
+                    info["features"][key].get("dtype") == "video"
+                    for key in camera_keys
+                ),
+                dataset_root=args.root, require_extended=True,
+            )
+            quality_append_offset = manifest["begin_snapshot"][
+                "recording_quality"
+            ]["size"]
+        except (OSError, RecoveryError, TypeError, ValueError) as exc:
+            failures.append(f"append-only commit proof failed: {exc}")
+
     tasks_path = args.root / "meta" / "tasks.parquet"
     valid_task_indices: set[int] = set()
     if not tasks_path.exists():
@@ -226,7 +320,17 @@ def main() -> None:
         if len(valid_task_indices) != info.get("total_tasks", 0):
             failures.append("task metadata count or text is invalid")
 
-    episode_metadata_files = sorted((args.root / "meta" / "episodes").rglob("*.parquet"))
+    episode_metadata_files = (
+        sorted((args.root / "meta" / "episodes").rglob("*.parquet"))
+        if args.incremental_episode_index is None
+        else [
+            args.root / relative
+            for relative in (
+                append_contract["new_artifacts"]["episode_metadata"]
+                if append_contract is not None else []
+            )
+        ]
+    )
     expected_episodes: dict[int, int] = {}
     episode_rows: list[dict] = []
     if not episode_metadata_files:
@@ -254,12 +358,115 @@ def main() -> None:
                 failures.append(f"episode {episode_index} metadata range does not match length {length}")
             if not row.get("tasks") or not all(str(task).strip() for task in row["tasks"]):
                 failures.append(f"episode {episode_index} has no non-empty task")
-        if set(expected_episodes) != set(range(info.get("total_episodes", 0))):
-            failures.append("episode metadata indices do not match info.json total_episodes")
-        if sum(expected_episodes.values()) != info.get("total_frames", 0):
-            failures.append("episode metadata lengths do not match info.json total_frames")
+            for key in camera_keys:
+                if info["features"][key].get("dtype") != "video":
+                    continue
+                start = float(row[f"videos/{key}/from_timestamp"])
+                end = float(row[f"videos/{key}/to_timestamp"])
+                if (
+                    isinstance(fps, int) and fps > 0
+                    and round((end - start) * fps) != length
+                ):
+                    failures.append(
+                        f"episode {episode_index} {key} metadata range "
+                        f"does not match length {length}"
+                    )
+        if args.incremental_episode_index is None:
+            if set(expected_episodes) != set(range(info.get("total_episodes", 0))):
+                failures.append("episode metadata indices do not match info.json total_episodes")
+            if sum(expected_episodes.values()) != info.get("total_frames", 0):
+                failures.append("episode metadata lengths do not match info.json total_frames")
 
-    parquet_files = sorted((args.root / "data").rglob("*.parquet"))
+            cursor = 0
+            for row in sorted(episode_rows, key=lambda item: int(item["episode_index"])):
+                start = int(row["dataset_from_index"])
+                end = int(row["dataset_to_index"])
+                if start != cursor:
+                    failures.append("episode metadata dataset ranges are not contiguous")
+                    break
+                cursor = end
+            if cursor != info.get("total_frames", 0):
+                failures.append("episode metadata terminal range does not match total_frames")
+        elif append_contract is not None:
+            target = args.incremental_episode_index
+            expected_frames = append_contract["episode_frames"]
+            if len(episode_rows) != 1 or set(expected_episodes) != {target}:
+                failures.append("appended episode metadata is not exactly one target row")
+            elif (
+                expected_episodes[target] != expected_frames
+                or int(episode_rows[0]["dataset_from_index"])
+                != info.get("total_frames", 0) - expected_frames
+                or int(episode_rows[0]["dataset_to_index"])
+                != info.get("total_frames", 0)
+            ):
+                failures.append("appended episode metadata does not extend dataset totals")
+
+    incremental_row = None
+    data_scope_rows = episode_rows
+    expected_data_rows = (
+        info.get("total_frames", 0)
+        if args.incremental_episode_index is None else 0
+    )
+    expected_global_indices = (
+        np.arange(expected_data_rows)
+        if args.incremental_episode_index is None
+        else np.asarray([], dtype=np.int64)
+    )
+    parquet_files = (
+        sorted((args.root / "data").rglob("*.parquet"))
+        if args.incremental_episode_index is None else []
+    )
+    if args.incremental_episode_index is not None:
+        matches = [
+            row for row in episode_rows
+            if int(row["episode_index"]) == args.incremental_episode_index
+        ]
+        if len(matches) != 1:
+            failures.append(
+                "incremental episode index does not identify one metadata row"
+            )
+            parquet_files = []
+            data_scope_rows = []
+            expected_data_rows = 0
+            expected_global_indices = np.asarray([], dtype=np.int64)
+        else:
+            incremental_row = matches[0]
+            data_chunk = int(incremental_row["data/chunk_index"])
+            data_file = int(incremental_row["data/file_index"])
+            data_scope_rows = [
+                row for row in episode_rows
+                if int(row["data/chunk_index"]) == data_chunk
+                and int(row["data/file_index"]) == data_file
+            ]
+            expected_data_rows = sum(int(row["length"]) for row in data_scope_rows)
+            expected_global_indices = np.concatenate([
+                np.arange(
+                    int(row["dataset_from_index"]),
+                    int(row["dataset_to_index"]),
+                )
+                for row in data_scope_rows
+            ])
+            try:
+                parquet_files = [args.root / info["data_path"].format(
+                    chunk_index=data_chunk, file_index=data_file,
+                )]
+            except (KeyError, TypeError, ValueError):
+                failures.append("incremental data path metadata is invalid")
+                parquet_files = []
+            if append_contract is not None:
+                relative_paths = {
+                    str(path.relative_to(args.root)) for path in parquet_files
+                }
+                if relative_paths != set(
+                    append_contract["new_artifacts"]["data_parquet"]
+                ):
+                    failures.append(
+                        "incremental data locator does not match appended parquet"
+                    )
+                if int(incremental_row["length"]) != append_contract["episode_frames"]:
+                    failures.append(
+                        "incremental episode length does not match append frame delta"
+                    )
     if not parquet_files:
         failures.append("no frame parquet")
     else:
@@ -271,10 +478,20 @@ def main() -> None:
         task_indices = np.concatenate([np.asarray(table["task_index"]) for table in tables])
         actions = np.concatenate([np.asarray(table["action"].to_pylist()) for table in tables])
         states = np.concatenate([np.asarray(table["observation.state"].to_pylist()) for table in tables])
-        if len(episode_indices) != info.get("total_frames", 0):
-            failures.append(f"data rows {len(episode_indices)} do not match info.json total_frames {info.get('total_frames', 0)}")
-        if not np.array_equal(np.sort(global_indices), np.arange(len(global_indices))):
-            failures.append("global frame indices are missing or duplicated")
+        if len(episode_indices) != expected_data_rows:
+            failures.append(
+                f"data rows {len(episode_indices)} do not match expected "
+                f"validation-scope rows {expected_data_rows}"
+            )
+        if not np.array_equal(
+            np.sort(global_indices), np.sort(expected_global_indices),
+        ):
+            failures.append("validation-scope global frame indices are missing or duplicated")
+        expected_scope_episodes = {
+            int(row["episode_index"]) for row in data_scope_rows
+        }
+        if set(map(int, np.unique(episode_indices))) != expected_scope_episodes:
+            failures.append("data shard episode indices do not match episode metadata")
         if not set(map(int, np.unique(task_indices))).issubset(valid_task_indices):
             failures.append("data rows reference missing/empty tasks")
         if not np.isfinite(actions).all(): failures.append("action contains NaN/Inf")
@@ -335,10 +552,27 @@ def main() -> None:
     if not quality_path.exists():
         failures.append("recording_quality.jsonl missing; source timing is unverified")
     else:
-        quality_lines = quality_path.read_text().splitlines()
-        if len(quality_lines) != info.get("total_episodes", 0):
+        try:
+            if args.incremental_episode_index is None:
+                quality_lines = quality_path.read_text(
+                    encoding="utf-8",
+                ).splitlines()
+            elif quality_append_offset is None:
+                quality_lines = []
+            else:
+                with quality_path.open("rb") as file:
+                    file.seek(quality_append_offset)
+                    quality_lines = file.read().decode("utf-8").splitlines()
+        except (OSError, UnicodeError) as exc:
+            failures.append(f"recording quality log is unreadable: {exc}")
+            quality_lines = []
+        expected_quality_lines = (
+            info.get("total_episodes", 0)
+            if args.incremental_episode_index is None else 1
+        )
+        if len(quality_lines) != expected_quality_lines:
             failures.append(
-                f"recording quality entries {len(quality_lines)} do not match episodes {info.get('total_episodes', 0)}"
+                f"recording quality entries {len(quality_lines)} do not match validation scope {expected_quality_lines}"
             )
         for line_number, line in enumerate(quality_lines, 1):
             try:
@@ -349,10 +583,20 @@ def main() -> None:
             if not isinstance(quality, dict) or has_nonfinite_number(quality):
                 failures.append(f"quality line {line_number} is not an object or contains NaN/Inf")
                 continue
-            episode_index = int(quality.get("episode_index", -1))
+            episode_index = quality.get("episode_index")
+            if type(episode_index) is not int or episode_index < 0:
+                failures.append(
+                    f"quality line {line_number} has an invalid episode index"
+                )
+                continue
             if episode_index in quality_by_episode:
                 failures.append(f"duplicate recording quality for episode {episode_index}")
             quality_by_episode[episode_index] = quality
+            if (
+                args.incremental_episode_index is not None
+                and episode_index != args.incremental_episode_index
+            ):
+                continue
             if quality.get("frames") != expected_episodes.get(episode_index):
                 failures.append(f"quality line {line_number} frame count does not match episode metadata")
             if quality.get("target_fps", fps) != fps:
@@ -425,10 +669,28 @@ def main() -> None:
                     warnings.append(f"quality line {line_number} has high {camera} clipping")
                 if metrics.get("sharpness_median", 0) < 20:
                     warnings.append(f"quality line {line_number} has low-sharpness {camera} samples")
-        if set(quality_by_episode) != set(expected_episodes):
-            failures.append("recording quality episode indices do not match episode metadata")
+        expected_quality_indices = (
+            set(expected_episodes)
+            if args.incremental_episode_index is None
+            else {args.incremental_episode_index}
+        )
+        if set(quality_by_episode) != expected_quality_indices:
+            failures.append("recording quality episode indices do not match dataset metadata")
 
-    for episode_index, expected_length in expected_episodes.items():
+    provenance_scope = (
+        expected_episodes.items()
+        if args.incremental_episode_index is None
+        else [(
+            args.incremental_episode_index,
+            expected_episodes.get(args.incremental_episode_index, 0),
+        )]
+    )
+    for episode_index, expected_length in provenance_scope:
+        if expected_length <= 0:
+            failures.append(
+                f"incremental episode {episode_index} has no positive metadata length"
+            )
+            continue
         provenance_path = args.root / "meta" / "source_provenance" / f"episode-{episode_index:06d}.jsonl"
         if not provenance_path.exists():
             failures.append(f"episode {episode_index} source provenance missing; timing cannot be independently verified")
@@ -460,6 +722,17 @@ def main() -> None:
             raw_images = row.get("image_raw_ros_s", {})
             corrected_images = row.get("image_corrected_ros_s", {})
             received_images = row.get("image_received_ros_s", {})
+            if (
+                not isinstance(joint_bracket, list)
+                or not isinstance(arm_bracket, list)
+                or any(not isinstance(item, dict) for item in (
+                    raw_images, corrected_images, received_images,
+                ))
+            ):
+                failures.append(
+                    f"episode {episode_index} provenance row {row_number} is incomplete/non-finite"
+                )
+                continue
             values = [target, gripper_stamp, *joint_bracket, *arm_bracket, *raw_images.values(), *corrected_images.values(), *received_images.values()]
             if (
                 len(joint_bracket) != 2 or len(arm_bracket) != 2
@@ -513,10 +786,38 @@ def main() -> None:
             if unique.size > 1 and np.diff(unique).max() > QUALITY_LIMITS["max_pause_s"]:
                 failures.append(f"episode {episode_index} {camera} source timestamps contain a pause")
 
+    incremental_video_paths = set()
     for key in camera_keys:
         if info["features"][key].get("dtype") != "video":
             continue
-        video_files = sorted((args.root / "videos" / key).rglob("*.mp4"))
+        expected_decoded_frames = info.get("total_frames", 0)
+        video_files = (
+            sorted((args.root / "videos" / key).rglob("*.mp4"))
+            if args.incremental_episode_index is None else []
+        )
+        if incremental_row is not None:
+            prefix = f"videos/{key}"
+            chunk_index = int(incremental_row[f"{prefix}/chunk_index"])
+            file_index = int(incremental_row[f"{prefix}/file_index"])
+            video_scope_rows = [
+                row for row in episode_rows
+                if int(row[f"{prefix}/chunk_index"]) == chunk_index
+                and int(row[f"{prefix}/file_index"]) == file_index
+            ]
+            expected_decoded_frames = sum(
+                int(row["length"]) for row in video_scope_rows
+            )
+            try:
+                video_files = [args.root / info["video_path"].format(
+                    video_key=key, chunk_index=chunk_index,
+                    file_index=file_index,
+                )]
+                incremental_video_paths.update(
+                    str(path.relative_to(args.root)) for path in video_files
+                )
+            except (KeyError, TypeError, ValueError):
+                failures.append(f"incremental {key} video path metadata is invalid")
+                video_files = []
         decoded_frames = 0
         for path, (frame_count, error) in zip(
             video_files, _video_frame_counts(video_files),
@@ -524,16 +825,37 @@ def main() -> None:
             decoded_frames += frame_count
             if error is not None:
                 failures.append(f"cannot fully decode {path}: {error}")
-        if decoded_frames != info.get("total_frames", 0):
-            failures.append(f"{key} decoded video frames {decoded_frames} do not match total_frames")
+        if decoded_frames != expected_decoded_frames:
+            failures.append(
+                f"{key} decoded video frames {decoded_frames} do not match "
+                f"validation-scope frames {expected_decoded_frames}"
+            )
+    if (
+        append_contract is not None
+        and incremental_video_paths
+        != set(append_contract["new_artifacts"]["committed_videos"])
+    ):
+        failures.append("incremental video locators do not match appended videos")
 
     if (
         camera_keys and info.get("total_frames", 0)
         and not args.skip_decoded_image_diagnostics
+        and (
+            args.incremental_episode_index is None
+            or incremental_row is not None
+        )
     ):
         from lerobot.datasets.lerobot_dataset import LeRobotDataset
         dataset = LeRobotDataset(args.repo_id, root=args.root, return_uint8=True)
-        indices = np.linspace(0, len(dataset) - 1, min(100, len(dataset)), dtype=int)
+        if incremental_row is None:
+            first_index, last_index = 0, len(dataset) - 1
+        else:
+            first_index = int(incremental_row["dataset_from_index"])
+            last_index = int(incremental_row["dataset_to_index"]) - 1
+        indices = np.linspace(
+            first_index, last_index,
+            min(100, last_index - first_index + 1), dtype=int,
+        )
         for key in camera_keys:
             metrics = np.asarray([image_metrics(np.asarray(dataset[int(index)][key])) for index in indices])
             color, brightness, clipping, sharpness = metrics.mean(axis=0)
@@ -563,7 +885,15 @@ def main() -> None:
     if locator is not None:
         print(EPISODE_LOCATOR_PREFIX + json.dumps(locator, sort_keys=True, separators=(",", ":")))
     checked_images = "video frame counts" if args.skip_decoded_image_diagnostics else "RGB decoding"
-    print(f"PASS: FR5 dataset structure, source evidence, and {checked_images} ({len(warnings)} warning(s))")
+    scope = (
+        "full dataset"
+        if args.incremental_episode_index is None
+        else f"appended episode {args.incremental_episode_index} and touched shards"
+    )
+    print(
+        f"PASS: FR5 {scope} structure, source evidence, and "
+        f"{checked_images} ({len(warnings)} warning(s))"
+    )
 
 
 if __name__ == "__main__":

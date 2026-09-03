@@ -39,6 +39,9 @@ from tools.data_factory.episode_ledger import (
     project_episode_state,
     reproject_episode_state,
 )
+from tools.data_factory.experiment_manifest import (
+    FIXED_CONTRACT_ENDPOINT_SCHEMAS,
+)
 from tools.data_factory.operator.setup.contracts import (
     validate_runtime_episode_binding,
     validate_runtime_planned_start,
@@ -49,6 +52,26 @@ from tools.data_factory.operator.setup.contracts import (
 )
 from tools.data_factory.operator.registries.region import (
     validate_region_endpoint_authority,
+)
+from tools.data_factory.motion.trajectory_variants import (
+    TRAJECTORY_VARIANT_BINDING_FIELDS,
+    VARIANT_IDS,
+    compile_execution_motion_program,
+    trajectory_variant_binding,
+    validate_trajectory_variant_binding,
+)
+from tools.data_factory.motion.object_reposition import (
+    validate_object_reposition_binding,
+)
+from tools.data_factory.state_space import (
+    YAW_BINDING_SCHEMA,
+    validate_approach_sampling_profile,
+    validate_state_space_design_profile,
+    validate_yaw_sample_binding,
+    validate_yaw_sampling_profile,
+)
+from tools.data_factory.quality.coverage_report import (
+    validate_preapproval_campaign_binding,
 )
 from tools.data_factory.resource_usage import ResourceMonitor
 from tools.data_factory_recovery import write_json_atomic
@@ -73,6 +96,7 @@ from tools.fr5_data_factory import (
     resolve_motion_program,
     task_review_checklist_id,
     validate_job_spec,
+    validate_motion_program,
 )
 
 
@@ -94,6 +118,12 @@ COMMON_RUN_KEYS = {
 }
 RECYCLE_COORD_KEYS = {"recycle_x_mm", "recycle_y_mm"}
 RECYCLE_YAW_KEY = "recycle_yaw_deg"
+TRAJECTORY_VARIANT_KEY = "trajectory_variant_id"
+TRAJECTORY_SAMPLING_SEED_KEY = "trajectory_sampling_seed"
+TRAJECTORY_DESIGN_KEY = "trajectory_sampling_design"
+TRAJECTORY_DESIGN_FIELDS = frozenset({
+    "sample_rank", "design_size", "design_digest",
+})
 DESTINATION_KEY = "destination"
 DESTINATION_KEYS = {
     "job", "selected_sheet", "yaw0_sheet", "motion_qualification",
@@ -106,6 +136,41 @@ CANDIDATE_ADMISSION_KEYS = {
     "review_context_digest", "semantic_status", "reviewed_by", "reviewed_at", "reason",
 }
 EPISODE_LEDGER_CONTEXT_FIELDS = frozenset({"manifest", "intent"})
+OBJECT_REPOSITION_PREAPPROVAL_FIELDS = frozenset({
+    "schema_version", "parent_run_id", "parent_plan_digest",
+    "parent_preapproval_evidence_digest", "campaign_authorization_digest",
+    "campaign_envelope_digest", "manifest_digest", "intent_digest",
+    "runtime_episode_binding_digest", "current_slot_digest", "next_slot",
+    "next_slot_digest", "next_slot_endpoint", "next_slot_endpoint_digest",
+    "continuation_run_id", "next_run_id",
+    "object_reposition_binding_digest", "motion_payload_digest",
+    "resolved_job_digest", "motion_program_digest", "scope_digest",
+})
+OBJECT_REPOSITION_ENDPOINT_FIELDS = frozenset({
+    "run_id", "workspace_id", "frame_id", "source_pose", "target_pose",
+    "sheet_digest", "family_digest", "region_binding",
+    "cell_calibration_digest", "motion_qualification_digest",
+})
+OBJECT_REPOSITION_EXPECTATION_FIELDS = frozenset({
+    "schema_version", "preapproval_scope_digest",
+    "object_reposition_binding_digest", "run_id", "resolved_job_digest",
+    "motion_program_digest", "scene_binding_digest", "expectation_digest",
+})
+OBJECT_REPOSITION_PLAN_FIELDS = frozenset({
+    "schema_version", "parent_run_id", "continuation_run_id",
+    "object_reposition_binding_digest", "preapproval_scope_digest",
+    "continuation_expectation", "continuation_expectation_digest",
+    "resolved_job_digest", "motion_program_digest", "scene_binding_digest",
+    "plan_digest", "plan_envelope", "artifact_digest",
+})
+OBJECT_REPOSITION_RESULT_FIELDS = frozenset({
+    "schema_version", "status", "code", "parent_run_id",
+    "continuation_run_id", "next_run_id",
+    "object_reposition_binding_digest", "plan_digest",
+    "resolved_job_digest", "scene_state_digest",
+    "preapproval_scope_digest", "plan_artifact_digest",
+    "execution_response", "result_digest",
+})
 ROOT = Path(__file__).resolve().parents[2]
 DATA_PYTHON = str(ROOT / ".venv/bin/python")
 EPISODE_LOCATOR_PREFIX = "EPISODE_LOCATOR_JSON:"
@@ -162,6 +227,15 @@ def _run_payload(value):
     supplied_recycle = set(value) & RECYCLE_COORD_KEYS
     supplied_recycle_yaw = RECYCLE_YAW_KEY in value
     supplied_destination = DESTINATION_KEY in value
+    supplied_variant = TRAJECTORY_VARIANT_KEY in value
+    supplied_seed = TRAJECTORY_SAMPLING_SEED_KEY in value
+    supplied_design = TRAJECTORY_DESIGN_KEY in value
+    if supplied_variant != supplied_seed:
+        raise ContractError("RUN_PAYLOAD")
+    if supplied_variant:
+        keys |= {TRAJECTORY_VARIANT_KEY, TRAJECTORY_SAMPLING_SEED_KEY}
+        if supplied_design:
+            keys.add(TRAJECTORY_DESIGN_KEY)
     if supplied_recycle:
         if supplied_recycle != RECYCLE_COORD_KEYS:
             raise ContractError("RUN_PAYLOAD")
@@ -184,12 +258,41 @@ def _run_payload(value):
     _identifier(value["run_id"], "RUN_ID")
     if not isinstance(value["job"], dict):
         raise ContractError("RUN_JOB")
-    for key in keys - {"job", DESTINATION_KEY} - RECYCLE_COORD_KEYS - {RECYCLE_YAW_KEY}:
+    for key in keys - {"job", DESTINATION_KEY} - RECYCLE_COORD_KEYS - {
+        RECYCLE_YAW_KEY, TRAJECTORY_SAMPLING_SEED_KEY,
+        TRAJECTORY_DESIGN_KEY,
+    }:
         _text(value[key], "RUN_PAYLOAD")
+    if supplied_variant and (
+        value[TRAJECTORY_VARIANT_KEY] not in VARIANT_IDS
+        or type(value[TRAJECTORY_SAMPLING_SEED_KEY]) is not int
+        or value[TRAJECTORY_SAMPLING_SEED_KEY] < 0
+    ):
+        raise ContractError("RUN_PAYLOAD")
+    if supplied_design:
+        design = value[TRAJECTORY_DESIGN_KEY]
+        if (
+            not isinstance(design, Mapping)
+            or set(design) != TRAJECTORY_DESIGN_FIELDS
+            or type(design.get("sample_rank")) is not int
+            or type(design.get("design_size")) is not int
+            or design["design_size"] < 1
+            or not 0 <= design["sample_rank"] < design["design_size"]
+            or not isinstance(design.get("design_digest"), str)
+            or DIGEST.fullmatch(design["design_digest"]) is None
+        ):
+            raise ContractError("RUN_PAYLOAD")
     for key in supplied_recycle | ({RECYCLE_YAW_KEY} if supplied_recycle_yaw else set()):
         if isinstance(value[key], bool) or not isinstance(value[key], (int, float)) or not math.isfinite(value[key]):
             raise ContractError("RUN_PAYLOAD")
     return copy.deepcopy(value)
+
+
+def _trajectory_design(payload: Mapping[str, Any]) -> dict[str, Any]:
+    value = payload.get(TRAJECTORY_DESIGN_KEY)
+    if value is None:
+        return {"sample_rank": 0, "design_size": 1, "design_digest": None}
+    return copy.deepcopy(dict(value))
 
 
 def _campaign_manifest(value):
@@ -211,7 +314,11 @@ def _campaign_manifest(value):
             raise ContractError("CAMPAIGN_EPISODE")
         episodes.append({"run": run, "release_role": expected_role})
     first, second = (item["run"] for item in episodes)
-    if first["run_id"] == second["run_id"] or any(first[key] != second[key] for key in LIVE_RUN_KEYS - {"run_id", "job"}):
+    if (
+        first["run_id"] == second["run_id"]
+        or any(first[key] != second[key] for key in LIVE_RUN_KEYS - {"run_id", "job"})
+        or first.get(TRAJECTORY_VARIANT_KEY) != second.get(TRAJECTORY_VARIANT_KEY)
+    ):
         raise ContractError("CAMPAIGN_CHAIN")
     fixed_job = ("robot_system_id", "collection_profile_id", "place_id", "cell_calibration_id", "object_profile_id", "grasp_profile_id")
     if any(first["job"][key] != second["job"][key] for key in fixed_job) or any(
@@ -258,6 +365,123 @@ def _load(path, code):
         raise ContractError(code, str(exc)) from exc
 
 
+def _load_approach_sampling_profile(payload, validated):
+    """Resolve one exact object/grasp/camera-bound V2 sampling profile."""
+    if payload.get(TRAJECTORY_VARIANT_KEY, "DIRECT") == "DIRECT":
+        return None
+    object_profile = validated.get("object_profile")
+    grasp_profile = validated.get("grasp_profile")
+    collection_profile = validated.get("collection_profile")
+    if not all(isinstance(item, Mapping) for item in (
+        object_profile, grasp_profile, collection_profile,
+    )):
+        raise ContractError("VARIANT_APPROACH_PROFILE_REQUIRED")
+    try:
+        config_root = Path(payload["config_root"]).resolve(strict=True)
+    except OSError as exc:
+        raise ContractError("VARIANT_APPROACH_PROFILE_REQUIRED") from exc
+    directory = config_root / "approach_sampling_profiles"
+    matches = []
+    if directory.is_dir():
+        for path in sorted(directory.glob("*.json"), key=lambda item: item.name):
+            value = _load(path, "VARIANT_APPROACH_PROFILE_IO")
+            if (
+                value.get("trajectory_variant_id")
+                == payload.get(TRAJECTORY_VARIANT_KEY)
+                and value.get("object_profile_id")
+                == object_profile.get("object_profile_id")
+                and value.get("grasp_profile_id")
+                == grasp_profile.get("grasp_profile_id")
+                and value.get("collection_profile_id")
+                == collection_profile.get("collection_profile_id")
+            ):
+                matches.append(validate_approach_sampling_profile(
+                    value,
+                    object_profile=object_profile,
+                    grasp_profile=grasp_profile,
+                    collection_profile=collection_profile,
+                ))
+    if len(matches) != 1:
+        raise ContractError("VARIANT_APPROACH_PROFILE_REQUIRED")
+    return matches[0]
+
+
+def _load_reposition_yaw_profile(payload, validated, reposition):
+    """Resolve the exact yaw profile named by one reposition binding."""
+    profile_id = reposition.get("yaw_sampling_profile_id")
+    if profile_id is None:
+        return None
+    object_profile = validated.get("object_profile")
+    grasp_profile = validated.get("grasp_profile")
+    if not isinstance(object_profile, Mapping) or not isinstance(
+        grasp_profile, Mapping,
+    ):
+        raise ContractError("OBJECT_REPOSITION_PROFILE")
+    directory = Path(payload["config_root"]).resolve(strict=True) / (
+        "yaw_sampling_profiles"
+    )
+    matches = []
+    if directory.is_dir():
+        for path in sorted(directory.glob("*.json"), key=lambda item: item.name):
+            value = _load(path, "OBJECT_REPOSITION_PROFILE")
+            if value.get("yaw_sampling_profile_id") != profile_id:
+                continue
+            checked = validate_yaw_sampling_profile(
+                value, object_profile=object_profile,
+                grasp_profile=grasp_profile,
+            )
+            if checked["profile_digest"] == reposition.get(
+                "yaw_sampling_profile_digest"
+            ):
+                matches.append(checked)
+    if len(matches) != 1:
+        raise ContractError("OBJECT_REPOSITION_PROFILE")
+    return matches[0]
+
+
+def _validate_parent_reposition_edge(
+    binding, *, validated, scene_binding, operator_summary,
+):
+    """Tie a predeclared reposition to the exact release edge in this plan."""
+    checked = validate_object_reposition_binding(binding)
+    job = validated.get("normalized_job")
+    release = scene_binding.get("release_slot") if isinstance(
+        scene_binding, Mapping,
+    ) else None
+    recycle = operator_summary.get("recycle") if isinstance(
+        operator_summary, Mapping,
+    ) else None
+    if not all(isinstance(item, Mapping) for item in (job, release, recycle)):
+        raise ContractError("OBJECT_REPOSITION_PARENT_EDGE")
+    job_pose = {
+        key: job.get(key) for key in ("place_id", "yaw_deg", "x_mm", "y_mm")
+    }
+    if recycle.get("release_target") != release.get("pose"):
+        raise ContractError("OBJECT_REPOSITION_PARENT_EDGE")
+    if checked["start_state"] == "HELD_OBJECT":
+        expected_role = (
+            "DESTINATION_THEN_NEXT_SOURCE"
+            if checked["next_run_id"] is not None else "RELEASE_DESTINATION"
+        )
+        valid = (
+            checked["source_pose"] == job_pose
+            and checked["target_pose"] == release.get("pose")
+            and release.get("role") == expected_role
+            and scene_binding.get("allowed_next_run_id")
+            == checked["next_run_id"]
+        )
+    else:
+        valid = (
+            checked["source_pose"] == release.get("pose")
+            and release.get("role") == "DESTINATION_THEN_NEXT_SOURCE"
+            and scene_binding.get("allowed_next_run_id")
+            == checked["continuation_run_id"]
+        )
+    if not valid:
+        raise ContractError("OBJECT_REPOSITION_PARENT_EDGE")
+    return checked
+
+
 def _scene_binding(validated, release_pose, run_id, root=ROOT / "outputs/data_factory/cells"):
     job = validated["normalized_job"]
     run_id = _identifier(run_id, "SCENE_SLOT_NEXT_RUN")
@@ -281,34 +505,53 @@ def _scene_binding(validated, release_pose, run_id, root=ROOT / "outputs/data_fa
         object_profile_id=job["object_profile_id"],
         exclusion_geometry_digest=exclusion_geometry_digest,
     )
-    allocation = snapshot["scene_state"].get("slot_allocations", {}).get(slot["slot_id"])
-    if allocation is not None and allocation.get("state") != "AVAILABLE":
-        raise ContractError("SCENE_SLOT_NOT_READY")
     binding = {
         "scene_state_digest": snapshot["scene_state_digest"],
         "revision": snapshot["scene_state"]["revision"],
         "object_instance_id": matches[0]["instance_id"],
         "release_slot": slot,
     }
+    source_slot_id = None
+    source_allocation = None
     if matches[0].get("source") in {"ROBOT_RELEASE", "ROBOT_RELEASE_PROXY"}:
         source_slot = release_slot(
             robot_system_id=job["robot_system_id"], pose=pose,
             object_profile_id=job["object_profile_id"],
             exclusion_geometry_digest=exclusion_geometry_digest,
         )
-        source_allocation = snapshot["scene_state"].get("slot_allocations", {}).get(source_slot["slot_id"])
+        source_slot_id = source_slot["slot_id"]
+        source_allocation = snapshot["scene_state"].get(
+            "slot_allocations", {},
+        ).get(source_slot_id)
         if (
             not isinstance(source_allocation, dict)
-            or source_allocation.get("state") != "LANDED_FOR_NEXT_SOURCE"
-            or source_allocation.get("role") != "DESTINATION_THEN_NEXT_SOURCE"
+            or (
+                source_allocation.get("state"), source_allocation.get("role")
+            ) != ("LANDED_FOR_NEXT_SOURCE", "DESTINATION_THEN_NEXT_SOURCE")
             or source_allocation.get("allowed_run_id") != run_id
         ):
             raise ContractError("SCENE_SLOT_NEXT_RUN")
         binding["source_slot"] = {
-            "slot_id": source_slot["slot_id"],
+            "slot_id": source_slot_id,
             "slot_digest": canonical_digest(source_allocation),
             "allowed_run_id": run_id,
         }
+    allocation = snapshot["scene_state"].get(
+        "slot_allocations", {},
+    ).get(slot["slot_id"])
+    reusable_consumed_source = (
+        slot["slot_id"] == source_slot_id
+        and isinstance(source_allocation, dict)
+        and source_allocation.get("state") == "LANDED_FOR_NEXT_SOURCE"
+        and source_allocation.get("role") == "DESTINATION_THEN_NEXT_SOURCE"
+        and source_allocation.get("allowed_run_id") == run_id
+    )
+    if (
+        allocation is not None
+        and allocation.get("state") != "AVAILABLE"
+        and not reusable_consumed_source
+    ):
+        raise ContractError("SCENE_SLOT_NOT_READY")
     return binding
 
 
@@ -419,7 +662,161 @@ def resolve_inputs(
         release_motion_qualification=destination_motion_qualification,
         planning_scene_profile=planning_scene_profile,
     )
+    trajectory_variant_id = payload.get(TRAJECTORY_VARIANT_KEY, "DIRECT")
+    approach_sampling_profile = _load_approach_sampling_profile(
+        payload, validated,
+    )
+    if trajectory_variant_id != "DIRECT":
+        design = _trajectory_design(payload)
+        program = compile_execution_motion_program(
+            program,
+            trajectory_variant_id=trajectory_variant_id,
+            sampling_seed=payload.get(TRAJECTORY_SAMPLING_SEED_KEY, 0),
+            target_yaw_deg=validated["normalized_job"]["yaw_deg"],
+            object_dimensions_mm=validated["object_profile"]["dimensions_mm"],
+            approach_sampling_profile=approach_sampling_profile,
+            **design,
+        )
     return validated, program, scene_binding_call(validated, release_pose, payload["run_id"])
+
+
+def _trajectory_binding(payload, validated, program):
+    job = validated.get("normalized_job")
+    object_profile = validated.get("object_profile")
+    if not isinstance(job, Mapping) or not isinstance(object_profile, Mapping):
+        if payload.get(TRAJECTORY_VARIANT_KEY, "DIRECT") != "DIRECT":
+            raise ContractError("VARIANT_OBJECT_DIMENSIONS")
+        job = job if isinstance(job, Mapping) else {}
+        object_profile = {}
+    approach_sampling_profile = _load_approach_sampling_profile(
+        payload, validated,
+    )
+    return trajectory_variant_binding(
+        program,
+        trajectory_variant_id=payload.get(TRAJECTORY_VARIANT_KEY, "DIRECT"),
+        sampling_seed=payload.get(TRAJECTORY_SAMPLING_SEED_KEY, 0),
+        target_yaw_deg=job.get("yaw_deg", 0.0),
+        object_dimensions_mm=object_profile.get("dimensions_mm"),
+        approach_sampling_profile=approach_sampling_profile,
+        **_trajectory_design(payload),
+    )
+
+
+def _validated_trajectory_binding(
+    value, *, payload, validated, motion_program_digest,
+):
+    result = validate_trajectory_variant_binding(value)
+    job = validated.get("normalized_job")
+    if (
+        not isinstance(job, Mapping)
+        or result["schema_version"]
+        != "data_factory.trajectory_variant_binding.v2"
+        or result["trajectory_variant_id"]
+        != payload.get(TRAJECTORY_VARIANT_KEY, "DIRECT")
+        or result["sampling_seed"]
+        != payload.get(TRAJECTORY_SAMPLING_SEED_KEY, 0)
+        or result["sample_rank"] != _trajectory_design(payload)["sample_rank"]
+        or result["design_size"] != _trajectory_design(payload)["design_size"]
+        or (
+            _trajectory_design(payload)["design_digest"] is not None
+            and result["design_digest"]
+            != _trajectory_design(payload)["design_digest"]
+        )
+        or result["target_yaw_deg"]
+        != normalize_yaw_deg(job.get("yaw_deg", 0.0))
+        or result["motion_program_digest"] != motion_program_digest
+    ):
+        raise ContractError("TRAJECTORY_BINDING")
+    return result
+
+
+def _validated_yaw_sample_scope(
+    yaw_sample_binding, yaw_sampling_profile, state_space_design_profile, *,
+    validated, bound_runtime, preapproval_checklist, require_slotted=False,
+):
+    if (
+        (yaw_sample_binding is None) != (yaw_sampling_profile is None)
+        or yaw_sample_binding is None and state_space_design_profile is not None
+    ):
+        raise ContractError("YAW_SAMPLE_BINDING_SCOPE")
+    if yaw_sample_binding is None:
+        return None
+    try:
+        checked_yaw_profile = validate_yaw_sampling_profile(
+            yaw_sampling_profile,
+            object_profile=validated.get("object_profile"),
+            grasp_profile=validated.get("grasp_profile"),
+        )
+        is_slotted = (
+            isinstance(yaw_sample_binding, Mapping)
+            and yaw_sample_binding.get("schema_version") == YAW_BINDING_SCHEMA
+        )
+        if require_slotted and not is_slotted:
+            raise ContractError("YAW_SAMPLE_BINDING_SCOPE")
+        if is_slotted:
+            checked_design = validate_state_space_design_profile(
+                state_space_design_profile,
+                object_profile=validated.get("object_profile"),
+                grasp_profile=validated.get("grasp_profile"),
+                yaw_sampling_profile=checked_yaw_profile,
+            )
+        elif state_space_design_profile is not None:
+            raise ContractError("YAW_SAMPLE_BINDING_SCOPE")
+        else:
+            checked_design = None
+        checked_yaw_sample = validate_yaw_sample_binding(
+            yaw_sample_binding,
+            profile=checked_yaw_profile,
+            state_space_design_profile=checked_design,
+        )
+    except ContractError as exc:
+        raise ContractError("YAW_SAMPLE_BINDING_SCOPE") from exc
+    job_yaw = validated.get("normalized_job", {}).get("yaw_deg")
+    if (
+        not bound_runtime
+        or not isinstance(preapproval_checklist, Mapping)
+        or preapproval_checklist.get("yaw_sample_binding")
+        != checked_yaw_sample
+        or isinstance(job_yaw, bool)
+        or not isinstance(job_yaw, (int, float))
+        or abs(
+            normalize_yaw_deg(job_yaw)
+            - normalize_yaw_deg(
+                checked_yaw_sample["source_object_yaw_deg"],
+            )
+        ) > 1e-9
+    ):
+        raise ContractError("YAW_SAMPLE_BINDING_SCOPE")
+    return checked_yaw_sample
+
+
+def _bind_trajectory_to_planned_program(
+    value, *, payload, validated, planned,
+):
+    """Bind sampled parameters to the exact planner-normalized program."""
+    if not isinstance(value, Mapping):
+        raise ContractError("TRAJECTORY_BINDING")
+    checked = _validated_trajectory_binding(
+        value, payload=payload, validated=validated,
+        motion_program_digest=value.get("motion_program_digest"),
+    )
+    envelope = planned.get("plan_envelope") if isinstance(planned, Mapping) else None
+    plan = envelope.get("plan") if isinstance(envelope, Mapping) else None
+    exact_digest = (
+        plan.get("motion_program_digest") if isinstance(plan, Mapping) else None
+    )
+    if not isinstance(exact_digest, str) or DIGEST.fullmatch(exact_digest) is None:
+        raise ContractError("TRAJECTORY_BINDING")
+    if checked["motion_program_digest"] != exact_digest:
+        checked["motion_program_digest"] = exact_digest
+        checked["binding_digest"] = canonical_digest({
+            key: item for key, item in checked.items()
+            if key != "binding_digest"
+        })
+    return _validated_trajectory_binding(
+        checked, payload=payload, validated=validated,
+        motion_program_digest=exact_digest,
+    )
 
 
 def _executor(timeout_s):
@@ -437,6 +834,41 @@ def _live_executor(payload, timeout_s, *, cell_root=None):
             "--factory-jsonl", "--ros-live", "--robot-system-id", payload["expected_robot_system_id"],
             "--cell-state-root", str(cell_root),
             "--phase-events-root", payload["run_root"],
+        ],
+        timeout_s=timeout_s,
+    )
+
+
+def _live_motion_executor(
+    payload, timeout_s, *, cell_root, reposition_binding,
+    parent_plan_digest, continuation_expectation,
+):
+    """Start the existing executor with recorder-free parent-cell ownership."""
+    return JsonlProcess(
+        [
+            sys.executable, "-u",
+            str(ROOT / "tools/data_factory/motion/pickup_executor.py"),
+            "--factory-jsonl", "--ros-live",
+            "--robot-system-id", payload["expected_robot_system_id"],
+            "--cell-state-root", str(Path(cell_root)),
+            "--phase-events-root", payload["run_root"],
+            "--motion-only-binding-digest",
+            reposition_binding["binding_digest"],
+            "--motion-only-parent-run-id",
+            reposition_binding["parent_run_id"],
+            "--motion-only-parent-plan-digest", parent_plan_digest,
+            "--motion-only-preapproval-scope-digest",
+            continuation_expectation["preapproval_scope_digest"],
+            "--motion-only-expected-run-id",
+            continuation_expectation["run_id"],
+            "--motion-only-expected-resolved-job-digest",
+            continuation_expectation["resolved_job_digest"],
+            "--motion-only-expected-program-digest",
+            continuation_expectation["motion_program_digest"],
+            "--motion-only-expected-scene-digest",
+            continuation_expectation["scene_binding_digest"],
+            "--motion-only-expectation-digest",
+            continuation_expectation["expectation_digest"],
         ],
         timeout_s=timeout_s,
     )
@@ -911,7 +1343,12 @@ def _read_live_cell_state(
     return cell
 
 
-def _technical_validator(dataset_root, _payload, profile):
+def _technical_validator(
+    dataset_root, _payload, profile, *, validation_scope="FULL",
+    expected_append_manifest_digest=None,
+):
+    if validation_scope not in {"FULL", "INCREMENTAL"}:
+        raise ContractError("DATASET_VALIDATION_SCOPE")
     command = [
         DATA_PYTHON, str(ROOT / "tools/validate_lerobot_dataset.py"), dataset_root,
         "--repo-id", profile["repo_id"],
@@ -933,6 +1370,25 @@ def _technical_validator(dataset_root, _payload, profile):
         ):
             episode_index = recorder_result["episode_index"]
             command.extend(["--episode-locator-index", str(episode_index)])
+    if validation_scope == "INCREMENTAL":
+        if (
+            episode_index is None
+            or not isinstance(expected_append_manifest_digest, str)
+            or DIGEST.fullmatch(expected_append_manifest_digest) is None
+        ):
+            return {
+                "ok": False, "code": "FAIL",
+                "result_digest": canonical_digest({
+                    "validation_scope": validation_scope,
+                    "reason": "COMMITTED_EPISODE_INDEX_REQUIRED",
+                }),
+                "episode_locator": None,
+            }
+        command.extend([
+            "--incremental-episode-index", str(episode_index),
+            "--append-manifest", str(_run_dir(_payload) / "staging_manifest.json"),
+            "--append-manifest-digest", expected_append_manifest_digest,
+        ])
     completed = subprocess.run(
         command,
         stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, timeout=180,
@@ -998,7 +1454,9 @@ def _prepare_run_dir(payload):
 
 
 def _write_preapproval_evidence(
-    payload, validated, planned, episode_instruction_binding=None,
+    payload, validated, planned, trajectory_binding,
+    episode_instruction_binding=None, campaign_binding=None,
+    object_reposition_binding=None, yaw_sample_binding=None,
 ):
     """Persist exactly the executor envelope that the human is about to approve."""
     envelope = planned.get("plan_envelope") if isinstance(planned, dict) else None
@@ -1035,13 +1493,51 @@ def _write_preapproval_evidence(
         ))
     ):
         raise ContractError("PREAPPROVAL_EVIDENCE")
+    checked_trajectory = _validated_trajectory_binding(
+        trajectory_binding, payload=payload, validated=validated,
+        motion_program_digest=plan.get(
+            "motion_program_digest",
+            trajectory_binding.get("motion_program_digest")
+            if isinstance(trajectory_binding, Mapping) else None,
+        ),
+    )
+    checked_campaign = validate_preapproval_campaign_binding(campaign_binding)
+    checked_reposition = (
+        None if object_reposition_binding is None
+        else validate_object_reposition_binding(object_reposition_binding)
+    )
+    if (
+        checked_reposition is not None
+        and checked_reposition["parent_run_id"] != payload["run_id"]
+    ):
+        raise ContractError("PREAPPROVAL_REPOSITION_BINDING")
+    checked_yaw_sample = (
+        None if yaw_sample_binding is None
+        else validate_yaw_sample_binding(yaw_sample_binding)
+    )
     evidence = {
-        "schema_version": "data_factory.preapproval_evidence.v1",
+        "schema_version": "data_factory.preapproval_evidence.v4",
         "run_id": payload["run_id"],
         "resolved_job_digest": validated["resolved_job_digest"],
         "plan_digest": digest,
         "plan_envelope": copy.deepcopy(envelope),
         "plan_envelope_digest": canonical_digest(envelope),
+        "trajectory_variant_binding": checked_trajectory,
+        "trajectory_variant_binding_digest": checked_trajectory["binding_digest"],
+        "campaign_binding": (
+            None if checked_campaign is None
+            else copy.deepcopy(checked_campaign)
+        ),
+        "object_reposition_binding": checked_reposition,
+        "object_reposition_binding_digest": (
+            None if checked_reposition is None
+            else checked_reposition["binding_digest"]
+        ),
+        "yaw_sample_binding": checked_yaw_sample,
+        "yaw_sample_binding_digest": (
+            None if checked_yaw_sample is None
+            else checked_yaw_sample["binding_digest"]
+        ),
     }
     if episode_instruction_binding is not None:
         checked_instruction = validate_episode_instruction_binding(
@@ -1049,7 +1545,6 @@ def _write_preapproval_evidence(
             object_profile=validated.get("object_profile"),
         )
         evidence.update(
-            schema_version="data_factory.preapproval_evidence.v2",
             episode_instruction_binding=checked_instruction,
             episode_instruction_binding_digest=checked_instruction[
                 "binding_digest"
@@ -1535,7 +2030,8 @@ def _lerobot_v3_episode_locator(dataset_root, repo_id, episode_index):
 
 def _write_episode_ledger(
     payload, validated, profile, lifecycle, storage_reference,
-    episode_binding, ledger_context, *, episode_locator=None,
+    episode_binding, ledger_context, *, trajectory_binding,
+    episode_locator=None,
 ):
     """Compile the immutable postcommit join from the existing owner artifacts."""
     context = _validate_episode_ledger_context(
@@ -1555,10 +2051,29 @@ def _write_episode_ledger(
     ):
         raise ContractError("EPISODE_LEDGER_RUNTIME_EVIDENCE")
     run_dir = _run_dir(payload)
+    plan_envelope = getattr(lifecycle, "plan_envelope", None)
+    plan = (
+        plan_envelope.get("plan")
+        if isinstance(plan_envelope, Mapping) else None
+    )
+    if not isinstance(plan, Mapping):
+        raise ContractError("EPISODE_LEDGER_RUNTIME_EVIDENCE")
+    trajectory_binding = _validated_trajectory_binding(
+        trajectory_binding, payload=payload, validated=validated,
+        motion_program_digest=plan.get("motion_program_digest"),
+    )
+    execution_document = copy.deepcopy(dict(execution))
+    execution_data = execution_document.get("data")
+    if not isinstance(execution_data, Mapping):
+        raise ContractError("EPISODE_LEDGER_RUNTIME_EVIDENCE")
+    execution_document["data"] = {
+        **copy.deepcopy(dict(execution_data)),
+        "trajectory_variant_binding": trajectory_binding,
+    }
     documents = {
         "manifest": (run_dir / "campaign_manifest.json", context["manifest"]),
         "intent": (run_dir / "episode_intent.json", context["intent"]),
-        "execution": (run_dir / "execution_response.json", copy.deepcopy(dict(execution))),
+        "execution": (run_dir / "execution_response.json", execution_document),
         "runtime_binding": (run_dir / "runtime_episode_binding.json", copy.deepcopy(dict(episode_binding))),
     }
     for path, document in documents.values():
@@ -1638,6 +2153,7 @@ def run_plan_only(payload, cancel, publish, *, resolver=resolve_inputs, executor
     """Resolve and plan once; recorder, dataset, camera, and robot execution stay absent."""
     try:
         validated, program, scene_binding = resolver(payload)
+        trajectory_binding = _trajectory_binding(payload, validated, program)
         if cancel.is_set():
             return _response(ok=False, code="CANCELLED", state="CANCELLED", run_id=payload["run_id"])
         publish(_response(ok=True, code="PLANNING", state="PLANNING", run_id=payload["run_id"], data={
@@ -1650,7 +2166,12 @@ def run_plan_only(payload, cancel, publish, *, resolver=resolve_inputs, executor
             def recorder_forbidden(_):
                 raise ContractError("PLAN_ONLY_RECORDER_FORBIDDEN")
 
-            result = OneJob(recorder_forbidden, lambda request: executor.request(request, cancel)).plan_only(payload["run_id"], program, scene_binding)
+            result = OneJob(
+                recorder_forbidden,
+                lambda request: _runtime_child_request(
+                    executor, request, cancel,
+                ),
+            ).plan_only(payload["run_id"], program, scene_binding)
         except KeyboardInterrupt:
             cancel.set()
             raise
@@ -1664,6 +2185,10 @@ def run_plan_only(payload, cancel, publish, *, resolver=resolve_inputs, executor
             return _response(ok=False, code="CANCELLED", state="CANCELLED", run_id=payload["run_id"])
         if not result["ok"]:
             return _response(ok=False, code=result["code"], state=result["state"], run_id=payload["run_id"], plan_digest=result["plan_digest"])
+        trajectory_binding = _bind_trajectory_to_planned_program(
+            trajectory_binding, payload=payload, validated=validated,
+            planned=result,
+        )
         envelope = result["plan_envelope"]
         safety = envelope["precommit_safety"]
         collision = envelope["precommit_evidence"]["collision_report"]
@@ -1679,6 +2204,7 @@ def run_plan_only(payload, cancel, publish, *, resolver=resolve_inputs, executor
                 "normalized_job": validated["normalized_job"],
                 "resolved_job_digest": validated["resolved_job_digest"],
                 "motion_program_digest": canonical_digest(program),
+                "trajectory_variant_binding": trajectory_binding,
                 "scene_binding": scene_binding,
                 "operator_summary": _operator_summary(result),
                 "recycle_plan_digest": result["plan_envelope"]["operator_summary"].get("recycle", {}).get("plan_digest"),
@@ -1715,6 +2241,900 @@ def _close_runtime_child(child, cancel):
             raise
 
 
+def _runtime_child_request(child, request, cancel):
+    """Keep normal requests cancel-aware; a cancel command must still be sent."""
+    return child.request(
+        request, None if request.get("op") == "cancel" else cancel,
+    )
+
+
+def _object_reposition_payload(payload, binding, source_payload=None):
+    """Project a recorded pick-place run into one recorder-free DIRECT move."""
+    if binding["start_state"] != "ON_SURFACE":
+        raise ContractError("OBJECT_REPOSITION_START_STATE")
+    value = copy.deepcopy(payload if source_payload is None else source_payload)
+    if any(
+        value.get(key) != payload.get(key)
+        for key in (
+            "mode", "config_root", "home_candidate", "urdf",
+            "expected_robot_system_id", "camera_profile", "dataset_root",
+            "run_root",
+        )
+    ):
+        raise ContractError("OBJECT_REPOSITION_PAYLOAD")
+    value["run_id"] = binding["continuation_run_id"]
+    value["job"]["job_id"] = binding["continuation_run_id"]
+    value["job"].update(binding["source_pose"])
+    value.update({
+        "recycle_x_mm": binding["target_pose"]["x_mm"],
+        "recycle_y_mm": binding["target_pose"]["y_mm"],
+        "recycle_yaw_deg": binding["target_pose"]["yaw_deg"],
+    })
+    value.pop(DESTINATION_KEY, None)
+    for key in (
+        TRAJECTORY_VARIANT_KEY, TRAJECTORY_SAMPLING_SEED_KEY,
+        TRAJECTORY_DESIGN_KEY,
+    ):
+        value.pop(key, None)
+    return value
+
+
+def _validated_object_reposition_inputs(
+    motion_payload, binding, validated, program, scene_binding=None,
+):
+    """Validate the recorder-free child against its exact resolved inputs."""
+    checked = validate_object_reposition_binding(binding)
+    if not isinstance(validated, dict):
+        raise ContractError("OBJECT_REPOSITION_EXECUTION_BINDING")
+    program = validate_motion_program(copy.deepcopy(program))
+    _validate_runtime_collection_binding(validated, program)
+    checked = validate_object_reposition_binding(
+        checked,
+        object_profile=validated.get("object_profile"),
+        grasp_profile=validated.get("grasp_profile"),
+        yaw_sampling_profile=_load_reposition_yaw_profile(
+            motion_payload, validated, checked,
+        ),
+    )
+    job = validated.get("normalized_job")
+    inputs = validated.get("input_digests")
+    program_inputs = program.get("binding_digests")
+    source_pose = (
+        {key: job.get(key) for key in ("place_id", "yaw_deg", "x_mm", "y_mm")}
+        if isinstance(job, Mapping) else None
+    )
+    shared_inputs = (
+        "selected_sheet", "yaw0_sheet", "cell_calibration", "robot_system",
+        "collection_profile", "object_profile", "grasp_profile",
+    )
+    if (
+        not isinstance(job, Mapping)
+        or not isinstance(inputs, Mapping)
+        or not isinstance(program_inputs, Mapping)
+        or motion_payload.get("run_id") != checked["continuation_run_id"]
+        or job.get("job_id") != checked["continuation_run_id"]
+        or job.get("task") != "pick_place"
+        or source_pose != checked["source_pose"]
+        or job.get("object_profile_id") != checked["object_profile_id"]
+        or job.get("grasp_profile_id") != checked["grasp_profile_id"]
+        or program.get("schema_version") != "fr5.motion_program.v2"
+        or program.get("robot_system_id")
+        != motion_payload.get("expected_robot_system_id")
+        or any(program_inputs.get(key) != inputs.get(key) for key in shared_inputs)
+    ):
+        raise ContractError("OBJECT_REPOSITION_EXECUTION_BINDING")
+    if scene_binding is not None:
+        source_slot = scene_binding.get("source_slot") if isinstance(
+            scene_binding, Mapping,
+        ) else None
+        release = scene_binding.get("release_slot") if isinstance(
+            scene_binding, Mapping,
+        ) else None
+        if (
+            not isinstance(source_slot, Mapping)
+            or source_slot.get("allowed_run_id")
+            != checked["continuation_run_id"]
+            or not isinstance(release, Mapping)
+            or release.get("pose") != checked["target_pose"]
+            or release.get("role") != "DESTINATION_THEN_NEXT_SOURCE"
+            or scene_binding.get("allowed_next_run_id")
+            != checked["next_run_id"]
+        ):
+            raise ContractError("OBJECT_REPOSITION_EXECUTION_BINDING")
+    return validated, program, checked
+
+
+def _validate_object_reposition_preapproval(value):
+    """Validate one self-digested, pre-human continuation scope."""
+    if (
+        not isinstance(value, Mapping)
+        or set(value) != OBJECT_REPOSITION_PREAPPROVAL_FIELDS
+    ):
+        raise ContractError("OBJECT_REPOSITION_PREAPPROVAL")
+    result = copy.deepcopy(dict(value))
+    digest_fields = OBJECT_REPOSITION_PREAPPROVAL_FIELDS - {
+        "schema_version", "parent_run_id", "continuation_run_id",
+        "next_run_id", "next_slot", "next_slot_endpoint", "scope_digest",
+    }
+    next_slot = result.get("next_slot")
+    endpoint = result.get("next_slot_endpoint")
+    if (
+        result.get("schema_version")
+        != "data_factory.object_reposition_preapproval.v1"
+        or any(
+            not isinstance(result.get(field), str)
+            or SAFE_ID.fullmatch(result[field]) is None
+            for field in (
+                "parent_run_id", "continuation_run_id", "next_run_id",
+            )
+        )
+        or any(
+            not isinstance(result.get(field), str)
+            or DIGEST.fullmatch(result[field]) is None
+            for field in digest_fields | {"scope_digest"}
+        )
+        or not isinstance(next_slot, Mapping)
+        or canonical_digest(next_slot) != result.get("next_slot_digest")
+        or not isinstance(next_slot.get("slot_id"), str)
+        or SAFE_ID.fullmatch(next_slot["slot_id"]) is None
+        or not isinstance(next_slot.get("base_condition_digest"), str)
+        or DIGEST.fullmatch(next_slot["base_condition_digest"]) is None
+        or not isinstance(endpoint, Mapping)
+        or set(endpoint) != OBJECT_REPOSITION_ENDPOINT_FIELDS
+        or endpoint.get("run_id") != result.get("next_run_id")
+        or canonical_digest(endpoint)
+        != result.get("next_slot_endpoint_digest")
+        or result.get("scope_digest") != canonical_digest({
+            key: item for key, item in result.items() if key != "scope_digest"
+        })
+    ):
+        raise ContractError("OBJECT_REPOSITION_PREAPPROVAL")
+    return result
+
+
+def _write_object_reposition_preapproval(
+    payload, binding, *, parent_plan_digest, parent_preapproval_evidence,
+    campaign_authorization, ledger_context, episode_binding,
+    episode_instruction_binding, source_payload, resolver,
+):
+    """Seal the exact authorized next-slot endpoint before human approval."""
+    checked = validate_object_reposition_binding(binding)
+    authorization = validate_campaign_authorization(campaign_authorization)
+    envelope = authorization["envelope"]
+    if (
+        checked["start_state"] != "ON_SURFACE"
+        or checked["parent_run_id"] != payload.get("run_id")
+        or not isinstance(parent_preapproval_evidence, Mapping)
+        or parent_preapproval_evidence.get("plan_digest") != parent_plan_digest
+        or parent_preapproval_evidence.get(
+            "object_reposition_binding_digest"
+        ) != checked["binding_digest"]
+        or not isinstance(ledger_context, Mapping)
+        or not isinstance(episode_binding, Mapping)
+    ):
+        raise ContractError("OBJECT_REPOSITION_PREAPPROVAL")
+    manifest = ledger_context.get("manifest")
+    intent = ledger_context.get("intent")
+    slots = manifest.get("slots") if isinstance(manifest, Mapping) else None
+    order_index = intent.get("order_index") if isinstance(intent, Mapping) else None
+    if (
+        not isinstance(slots, list)
+        or type(order_index) is not int
+        or order_index < 0
+        or order_index + 1 >= len(slots)
+        or intent.get("slot") != slots[order_index]
+        or intent.get("slot_digest") != canonical_digest(slots[order_index])
+    ):
+        raise ContractError("OBJECT_REPOSITION_PREAPPROVAL")
+    slot_digests = [canonical_digest(slot) for slot in slots]
+    next_slot = copy.deepcopy(slots[order_index + 1])
+    if (
+        envelope.get("manifest_digest") != manifest.get("manifest_digest")
+        or envelope.get("manifest_digest") != intent.get("manifest_digest")
+        or envelope.get("episode_count") != len(slots)
+        or envelope.get("slot_digests") != slot_digests
+        or envelope.get("fixed_contract_digest")
+        != canonical_digest(intent.get("fixed_contract"))
+        or episode_binding.get("manifest_digest")
+        != envelope.get("manifest_digest")
+        or episode_binding.get("intent_digest") != intent.get("intent_digest")
+        or episode_binding.get("slot_digest") != slot_digests[order_index]
+        or episode_binding.get("run_id") != payload.get("run_id")
+    ):
+        raise ContractError("OBJECT_REPOSITION_PREAPPROVAL")
+
+    motion_payload = _object_reposition_payload(
+        payload, checked, source_payload=source_payload,
+    )
+    validated, program, _unused_scene = resolver(
+        motion_payload, scene_binding_call=lambda *_args: {},
+    )
+    validated, program, checked = _validated_object_reposition_inputs(
+        motion_payload, checked, validated, program,
+    )
+    instruction = validate_episode_instruction_binding(
+        episode_instruction_binding,
+        object_profile=validated.get("object_profile"),
+    )
+    spatial = instruction["task_binding"]["spatial_bindings"]
+    endpoint = spatial[1] if len(spatial) == 2 else None
+    job = validated["normalized_job"]
+    inputs = validated["input_digests"]
+    calibration = validated.get("calibration")
+    calibration_document = (
+        calibration.get("document") if isinstance(calibration, Mapping) else None
+    )
+    program_inputs = program["binding_digests"]
+    fixed = intent.get("fixed_contract")
+    expected_fixed_endpoint = {
+        "workspace_id": job.get("place_id"),
+        "cell_calibration_id": job.get("cell_calibration_id"),
+        "cell_calibration_digest": inputs.get("cell_calibration"),
+        "motion_recipe_digest": program_inputs.get("motion_qualification"),
+    }
+    if isinstance(fixed, Mapping) and fixed.get(
+        "schema_version",
+    ) in FIXED_CONTRACT_ENDPOINT_SCHEMAS:
+        fixed_endpoints = fixed.get("endpoint_bindings")
+        fixed_endpoint_ok = (
+            isinstance(fixed_endpoints, list)
+            and fixed.get("endpoint_bindings_digest")
+            == canonical_digest(fixed_endpoints)
+            and expected_fixed_endpoint in fixed_endpoints
+        )
+    else:
+        fixed_endpoint_ok = isinstance(fixed, Mapping) and all(
+            fixed.get(field) == item
+            for field, item in expected_fixed_endpoint.items()
+            if field != "workspace_id"
+        )
+    if (
+        instruction["task_binding"].get("task_id") != "pick_place"
+        or not isinstance(endpoint, Mapping)
+        or endpoint.get("role") != "DESTINATION"
+        or endpoint.get("pose") != checked["source_pose"]
+        or endpoint.get("workspace_id") != job.get("place_id")
+        or endpoint.get("frame_id") != job.get("cell_calibration_id")
+        or endpoint.get("sheet_digest") != job.get("sheet_manifest_digest")
+        or not isinstance(calibration_document, Mapping)
+        or endpoint.get("family_digest")
+        != calibration_document.get("a4_family_digest")
+        or checked["target_pose"].get("place_id")
+        != endpoint.get("workspace_id")
+        or not fixed_endpoint_ok
+        or envelope.get("effect_scope") != "PHYSICAL"
+        or envelope.get("lifecycle_action") != "LIVE_COLLECT"
+        or envelope.get("task") != "pick_place"
+        or envelope.get("robot_system_id") != job.get("robot_system_id")
+        or envelope.get("object_profile_id")
+        != checked["object_profile_id"]
+        or envelope.get("grasp_profile_id") != checked["grasp_profile_id"]
+        or envelope.get("collection_profile_digest")
+        != inputs.get("collection_profile")
+        or envelope.get("motion_qualification_digest")
+        != fixed.get("motion_recipe_digest")
+    ):
+        raise ContractError("OBJECT_REPOSITION_PREAPPROVAL")
+    next_endpoint = {
+        "run_id": checked["next_run_id"],
+        "workspace_id": endpoint["workspace_id"],
+        "frame_id": endpoint["frame_id"],
+        "source_pose": copy.deepcopy(checked["source_pose"]),
+        "target_pose": copy.deepcopy(checked["target_pose"]),
+        "sheet_digest": endpoint["sheet_digest"],
+        "family_digest": endpoint["family_digest"],
+        "region_binding": copy.deepcopy(endpoint["region_binding"]),
+        "cell_calibration_digest": inputs["cell_calibration"],
+        "motion_qualification_digest": program_inputs[
+            "motion_qualification"
+        ],
+    }
+    value = {
+        "schema_version": "data_factory.object_reposition_preapproval.v1",
+        "parent_run_id": checked["parent_run_id"],
+        "parent_plan_digest": parent_plan_digest,
+        "parent_preapproval_evidence_digest": canonical_digest(
+            parent_preapproval_evidence,
+        ),
+        "campaign_authorization_digest": authorization[
+            "authorization_digest"
+        ],
+        "campaign_envelope_digest": envelope["envelope_digest"],
+        "manifest_digest": envelope["manifest_digest"],
+        "intent_digest": intent["intent_digest"],
+        "runtime_episode_binding_digest": episode_binding["binding_digest"],
+        "current_slot_digest": slot_digests[order_index],
+        "next_slot": next_slot,
+        "next_slot_digest": slot_digests[order_index + 1],
+        "next_slot_endpoint": next_endpoint,
+        "next_slot_endpoint_digest": canonical_digest(next_endpoint),
+        "continuation_run_id": checked["continuation_run_id"],
+        "next_run_id": checked["next_run_id"],
+        "object_reposition_binding_digest": checked["binding_digest"],
+        "motion_payload_digest": canonical_digest(motion_payload),
+        "resolved_job_digest": validated["resolved_job_digest"],
+        "motion_program_digest": canonical_digest(program),
+    }
+    value["scope_digest"] = canonical_digest(value)
+    value = _validate_object_reposition_preapproval(value)
+    write_json_atomic(
+        _run_dir(payload) / "object_reposition_preapproval.json", value,
+    )
+    return value
+
+
+def resolve_object_reposition_inputs(
+    payload, binding, *, cell_root, resolver=resolve_inputs,
+    source_payload=None,
+):
+    """Compile one profile-bound surface reposition against the fresh scene."""
+    checked = validate_object_reposition_binding(binding)
+    motion_payload = _object_reposition_payload(
+        payload, checked, source_payload=source_payload,
+    )
+    validated, program, scene_binding = resolve_campaign_episode_inputs(
+        motion_payload,
+        release_role="DESTINATION_THEN_NEXT_SOURCE",
+        next_run_id=checked["next_run_id"],
+        cell_root=cell_root,
+        resolver=resolver,
+    )
+    validated, program, checked = _validated_object_reposition_inputs(
+        motion_payload, checked, validated, program, scene_binding,
+    )
+    return motion_payload, validated, program, scene_binding, checked
+
+
+def _object_reposition_continuation_expectation(
+    preapproval_scope, *, authorization, parent_plan_digest, binding,
+    motion_payload, validated, program, scene_binding,
+):
+    """Join fresh child inputs to the exact durable preapproval scope."""
+    scope = _validate_object_reposition_preapproval(preapproval_scope)
+    checked = validate_object_reposition_binding(binding)
+    endpoint = scope["next_slot_endpoint"]
+    job = validated.get("normalized_job") if isinstance(validated, Mapping) else None
+    inputs = validated.get("input_digests") if isinstance(validated, Mapping) else None
+    calibration = validated.get("calibration") if isinstance(validated, Mapping) else None
+    calibration_document = (
+        calibration.get("document") if isinstance(calibration, Mapping) else None
+    )
+    program_inputs = program.get("binding_digests") if isinstance(
+        program, Mapping,
+    ) else None
+    if (
+        scope["parent_run_id"] != checked["parent_run_id"]
+        or scope["parent_plan_digest"] != parent_plan_digest
+        or scope["continuation_run_id"] != checked["continuation_run_id"]
+        or scope["next_run_id"] != checked["next_run_id"]
+        or scope["object_reposition_binding_digest"]
+        != checked["binding_digest"]
+        or scope["campaign_authorization_digest"]
+        != authorization.get("authorization_digest")
+        or scope["campaign_envelope_digest"]
+        != authorization.get("envelope_digest")
+        or scope["manifest_digest"]
+        != authorization.get("envelope", {}).get("manifest_digest")
+        or scope["motion_payload_digest"] != canonical_digest(motion_payload)
+        or scope["resolved_job_digest"] != validated.get("resolved_job_digest")
+        or scope["motion_program_digest"] != canonical_digest(program)
+        or not isinstance(job, Mapping)
+        or not isinstance(inputs, Mapping)
+        or not isinstance(program_inputs, Mapping)
+        or not isinstance(calibration_document, Mapping)
+        or endpoint["workspace_id"] != job.get("place_id")
+        or endpoint["frame_id"] != job.get("cell_calibration_id")
+        or endpoint["source_pose"] != checked["source_pose"]
+        or endpoint["target_pose"] != checked["target_pose"]
+        or endpoint["sheet_digest"] != job.get("sheet_manifest_digest")
+        or endpoint["family_digest"]
+        != calibration_document.get("a4_family_digest")
+        or endpoint["cell_calibration_digest"]
+        != inputs.get("cell_calibration")
+        or endpoint["motion_qualification_digest"]
+        != program_inputs.get("motion_qualification")
+    ):
+        raise ContractError("OBJECT_REPOSITION_CONTINUATION_BINDING")
+    value = {
+        "schema_version": "data_factory.motion_only_continuation.v1",
+        "preapproval_scope_digest": scope["scope_digest"],
+        "object_reposition_binding_digest": checked["binding_digest"],
+        "run_id": checked["continuation_run_id"],
+        "resolved_job_digest": validated["resolved_job_digest"],
+        "motion_program_digest": canonical_digest(program),
+        "scene_binding_digest": canonical_digest(scene_binding),
+    }
+    value["expectation_digest"] = canonical_digest(value)
+    return value
+
+
+def _validate_object_reposition_result(
+    parent_payload, binding, preapproval_scope, result,
+):
+    """Join returned, stored, planned, and executed child evidence exactly."""
+    checked = validate_object_reposition_binding(binding)
+    scope = _validate_object_reposition_preapproval(preapproval_scope)
+    if not isinstance(result, Mapping) or set(result) != OBJECT_REPOSITION_RESULT_FIELDS:
+        raise ContractError("OBJECT_REPOSITION_RESULT")
+    result = copy.deepcopy(dict(result))
+    response = result.get("execution_response")
+    if (
+        result.get("schema_version") != "data_factory.object_reposition_result.v2"
+        or result.get("parent_run_id") != parent_payload.get("run_id")
+        or result.get("parent_run_id") != checked["parent_run_id"]
+        or result.get("continuation_run_id")
+        != checked["continuation_run_id"]
+        or result.get("next_run_id") != checked["next_run_id"]
+        or result.get("object_reposition_binding_digest")
+        != checked["binding_digest"]
+        or result.get("preapproval_scope_digest") != scope["scope_digest"]
+        or result.get("status") not in {"PASS", "FAIL"}
+        or not isinstance(result.get("code"), str)
+        or not result["code"]
+        or not isinstance(response, Mapping)
+        or (
+            result["status"] == "FAIL"
+            and response.get("code") != result["code"]
+        )
+        or result.get("result_digest") != canonical_digest({
+            key: item for key, item in result.items() if key != "result_digest"
+        })
+        or _load(
+            _run_dir(parent_payload) / "object_reposition_result.json",
+            "OBJECT_REPOSITION_RESULT",
+        ) != result
+    ):
+        raise ContractError("OBJECT_REPOSITION_RESULT")
+
+    has_plan = result.get("plan_artifact_digest") is not None
+    if has_plan != (result.get("plan_digest") is not None):
+        raise ContractError("OBJECT_REPOSITION_RESULT")
+    plan_artifact = None
+    if has_plan:
+        plan_artifact = _load(
+            _run_dir(parent_payload) / "object_reposition_plan.json",
+            "OBJECT_REPOSITION_RESULT",
+        )
+        if (
+            not isinstance(plan_artifact, Mapping)
+            or set(plan_artifact) != OBJECT_REPOSITION_PLAN_FIELDS
+        ):
+            raise ContractError("OBJECT_REPOSITION_RESULT")
+        expectation = plan_artifact.get("continuation_expectation")
+        envelope = plan_artifact.get("plan_envelope")
+        plan = envelope.get("plan") if isinstance(envelope, Mapping) else None
+        if (
+            plan_artifact.get("schema_version")
+            != "data_factory.object_reposition_plan.v2"
+            or plan_artifact.get("parent_run_id") != checked["parent_run_id"]
+            or plan_artifact.get("continuation_run_id")
+            != checked["continuation_run_id"]
+            or plan_artifact.get("object_reposition_binding_digest")
+            != checked["binding_digest"]
+            or plan_artifact.get("preapproval_scope_digest")
+            != scope["scope_digest"]
+            or plan_artifact.get("resolved_job_digest")
+            != scope["resolved_job_digest"]
+            or plan_artifact.get("motion_program_digest")
+            != scope["motion_program_digest"]
+            or plan_artifact.get("plan_digest") != result["plan_digest"]
+            or plan_artifact.get("artifact_digest")
+            != result["plan_artifact_digest"]
+            or plan_artifact.get("artifact_digest") != canonical_digest({
+                key: item for key, item in plan_artifact.items()
+                if key != "artifact_digest"
+            })
+            or not isinstance(expectation, Mapping)
+            or set(expectation) != OBJECT_REPOSITION_EXPECTATION_FIELDS
+            or expectation.get("schema_version")
+            != "data_factory.motion_only_continuation.v1"
+            or expectation.get("preapproval_scope_digest")
+            != scope["scope_digest"]
+            or expectation.get("object_reposition_binding_digest")
+            != checked["binding_digest"]
+            or expectation.get("run_id") != checked["continuation_run_id"]
+            or expectation.get("resolved_job_digest")
+            != scope["resolved_job_digest"]
+            or expectation.get("motion_program_digest")
+            != scope["motion_program_digest"]
+            or expectation.get("scene_binding_digest")
+            != plan_artifact.get("scene_binding_digest")
+            or expectation.get("expectation_digest") != canonical_digest({
+                key: item for key, item in expectation.items()
+                if key != "expectation_digest"
+            })
+            or plan_artifact.get("continuation_expectation_digest")
+            != expectation.get("expectation_digest")
+            or not isinstance(plan, Mapping)
+            or canonical_digest(plan) != result["plan_digest"]
+            or plan.get("run_id") != checked["continuation_run_id"]
+            or plan.get("resolved_job_digest") != scope["resolved_job_digest"]
+            or plan.get("motion_program_digest")
+            != scope["motion_program_digest"]
+            or canonical_digest(plan.get("scene_binding"))
+            != plan_artifact.get("scene_binding_digest")
+        ):
+            raise ContractError("OBJECT_REPOSITION_RESULT")
+
+    if result["status"] == "PASS":
+        data = response.get("data")
+        transition = data.get("scene_transition") if isinstance(data, Mapping) else None
+        release = data.get("release_evidence") if isinstance(data, Mapping) else None
+        if (
+            not has_plan
+            or result["code"] != "PASS"
+            or result.get("resolved_job_digest") != scope["resolved_job_digest"]
+            or response.get("ok") is not True
+            or response.get("code") != "COMPLETE"
+            or response.get("state") != "COMPLETED"
+            or response.get("run_id") != checked["continuation_run_id"]
+            or response.get("plan_digest") != result["plan_digest"]
+            or not isinstance(transition, Mapping)
+            or transition.get("scene_state_digest")
+            != result.get("scene_state_digest")
+            or not isinstance(result.get("scene_state_digest"), str)
+            or DIGEST.fullmatch(result["scene_state_digest"]) is None
+            or not isinstance(release, Mapping)
+            or not _release_outcome_landed(release)
+            or transition.get("release_evidence_digest")
+            != canonical_digest(release)
+        ):
+            raise ContractError("OBJECT_REPOSITION_RESULT")
+    elif (
+        response.get("ok") is not False
+        or response.get("run_id") not in {
+            None, checked["continuation_run_id"],
+        }
+        or response.get("plan_digest") not in {
+            None, result.get("plan_digest"),
+        }
+        or result.get("resolved_job_digest") not in {
+            None, scope["resolved_job_digest"],
+        }
+        or result.get("scene_state_digest") != (
+            response.get("data", {}).get("scene_transition", {}).get(
+                "scene_state_digest",
+            )
+            if isinstance(response.get("data"), Mapping)
+            and isinstance(
+                response["data"].get("scene_transition"), Mapping,
+            )
+            else None
+        )
+        or result.get("scene_state_digest") is not None
+        and (
+            not isinstance(result["scene_state_digest"], str)
+            or DIGEST.fullmatch(result["scene_state_digest"]) is None
+        )
+    ):
+        raise ContractError("OBJECT_REPOSITION_RESULT")
+    return result
+
+
+def _object_reposition_result(
+    parent_payload, binding, *, status, code, plan_digest,
+    resolved_job_digest, execution_response, preapproval_scope_digest,
+    plan_artifact_digest,
+):
+    transition = (
+        execution_response.get("data", {}).get("scene_transition")
+        if isinstance(execution_response, Mapping)
+        and isinstance(execution_response.get("data"), Mapping)
+        else None
+    )
+    value = {
+        "schema_version": "data_factory.object_reposition_result.v2",
+        "status": status,
+        "code": code,
+        "parent_run_id": binding["parent_run_id"],
+        "continuation_run_id": binding["continuation_run_id"],
+        "next_run_id": binding["next_run_id"],
+        "object_reposition_binding_digest": binding["binding_digest"],
+        "plan_digest": plan_digest,
+        "resolved_job_digest": resolved_job_digest,
+        "scene_state_digest": (
+            transition.get("scene_state_digest")
+            if isinstance(transition, Mapping) else None
+        ),
+        "preapproval_scope_digest": preapproval_scope_digest,
+        "plan_artifact_digest": plan_artifact_digest,
+        "execution_response": copy.deepcopy(execution_response),
+    }
+    value["result_digest"] = canonical_digest(value)
+    write_json_atomic(
+        _run_dir(parent_payload) / "object_reposition_result.json", value,
+    )
+    return value
+
+
+def _postcommit_validate_and_reposition(
+    validator_call, dataset_root, payload, profile, reposition_call=None,
+):
+    """Overlap only dataset validation with an optional recorder-free move."""
+    if reposition_call is None:
+        return validator_call(dataset_root, payload, profile), None
+    with ThreadPoolExecutor(
+        max_workers=1, thread_name_prefix="postcommit-validator",
+    ) as pool:
+        technical_future = pool.submit(
+            validator_call, dataset_root, payload, profile,
+        )
+        reposition_result = reposition_call()
+        technical = technical_future.result()
+    return technical, reposition_result
+
+
+def run_object_reposition(
+    payload, binding, cancel, publish, *, parent_plan_digest, operator_id,
+    cell_root, resolver=resolve_inputs, executor_factory=_live_motion_executor,
+    campaign_authorization, data_disposition, preapproval_scope,
+    source_payload=None, clock=None,
+):
+    """Plan and execute one post-commit reposition without recorder/data writes."""
+    checked = validate_object_reposition_binding(binding)
+    scope = _validate_object_reposition_preapproval(preapproval_scope)
+    stored_scope = _load(
+        _run_dir(payload) / "object_reposition_preapproval.json",
+        "OBJECT_REPOSITION_PREAPPROVAL",
+    )
+    if stored_scope != scope:
+        raise ContractError("OBJECT_REPOSITION_PREAPPROVAL")
+    now_call = clock or (lambda: datetime.now(timezone.utc))
+    now = now_call()
+    authorization = validate_campaign_authorization(
+        campaign_authorization, now=now, operator_label=operator_id,
+        data_disposition=data_disposition,
+    )
+    envelope = authorization["envelope"]
+    if (
+        checked["execution_stage"] != "POSTCOMMIT"
+        or checked["parent_run_id"] != payload["run_id"]
+        or envelope["effect_scope"] != "PHYSICAL"
+        or envelope["lifecycle_action"] != "LIVE_COLLECT"
+        or envelope["task"] != "pick_place"
+        or envelope["robot_system_id"] != payload["expected_robot_system_id"]
+        or envelope["object_profile_id"] != checked["object_profile_id"]
+        or envelope["grasp_profile_id"] != checked["grasp_profile_id"]
+    ):
+        raise ContractError("OBJECT_REPOSITION_AUTHORIZATION")
+    (
+        motion_payload, validated, program, scene_binding, checked,
+    ) = resolve_object_reposition_inputs(
+        payload, checked, cell_root=cell_root, resolver=resolver,
+        source_payload=source_payload,
+    )
+    continuation = _object_reposition_continuation_expectation(
+        scope, authorization=authorization,
+        parent_plan_digest=parent_plan_digest, binding=checked,
+        motion_payload=motion_payload, validated=validated, program=program,
+        scene_binding=scene_binding,
+    )
+    timeout_s = _timeout_s(program)
+    executor = None
+    job = None
+    plan_digest = None
+    plan_artifact_digest = None
+    try:
+        if cancel.is_set():
+            raise ContractError("CANCELLED")
+        _prepare_run_dir(motion_payload)
+        executor = executor_factory(
+            motion_payload, timeout_s, cell_root=cell_root,
+            reposition_binding=checked,
+            parent_plan_digest=parent_plan_digest,
+            continuation_expectation=continuation,
+        )
+        forbidden = lambda _request: (_ for _ in ()).throw(
+            ContractError("MOTION_ONLY_RECORDER_FORBIDDEN")
+        )
+        job = OneJob(
+            forbidden,
+            lambda request: _runtime_child_request(
+                executor, request, cancel,
+            ),
+            cell_state_call=CellStateStore(
+                cell_root, payload["expected_robot_system_id"],
+            ).read,
+            clock=now_call,
+        )
+        planned = job.plan_only(
+            checked["continuation_run_id"], program, scene_binding,
+        )
+        if not planned["ok"]:
+            return _object_reposition_result(
+                payload, checked, status="FAIL", code=planned["code"],
+                plan_digest=planned.get("plan_digest"),
+                resolved_job_digest=validated["resolved_job_digest"],
+                execution_response=planned,
+                preapproval_scope_digest=scope["scope_digest"],
+                plan_artifact_digest=None,
+            )
+        plan_digest = planned["plan_digest"]
+        plan_artifact = {
+            "schema_version": "data_factory.object_reposition_plan.v2",
+            "parent_run_id": checked["parent_run_id"],
+            "continuation_run_id": checked["continuation_run_id"],
+            "object_reposition_binding_digest": checked["binding_digest"],
+            "preapproval_scope_digest": scope["scope_digest"],
+            "continuation_expectation": continuation,
+            "continuation_expectation_digest": continuation[
+                "expectation_digest"
+            ],
+            "resolved_job_digest": validated["resolved_job_digest"],
+            "motion_program_digest": canonical_digest(program),
+            "scene_binding_digest": canonical_digest(scene_binding),
+            "plan_digest": plan_digest,
+            "plan_envelope": planned["plan_envelope"],
+        }
+        plan_artifact["artifact_digest"] = canonical_digest(plan_artifact)
+        plan_artifact_digest = plan_artifact["artifact_digest"]
+        write_json_atomic(
+            _run_dir(payload) / "object_reposition_plan.json", plan_artifact,
+        )
+        publish(_response(
+            ok=True, code="OBJECT_REPOSITION_PLANNED", state="RUNNING",
+            run_id=payload["run_id"], plan_digest=parent_plan_digest,
+            data={
+                "mode": "live", "progress": 92,
+                "object_reposition_binding_digest": checked["binding_digest"],
+                "object_reposition_run_id": checked["continuation_run_id"],
+                "object_reposition_plan_digest": plan_digest,
+                "object_reposition_plan_artifact_digest": (
+                    plan_artifact_digest
+                ),
+                "object_reposition_collision_report_digest": (
+                    planned["plan_envelope"]["precommit_safety"][
+                        "collision_report_digest"
+                    ]
+                ),
+                "object_reposition_plan_only_no_motion_digest": (
+                    planned["plan_envelope"]["precommit_safety"][
+                        "plan_only_no_motion_digest"
+                    ]
+                ),
+            },
+        ))
+        if cancel.is_set():
+            raise ContractError("CANCELLED")
+        authorization_expiry = datetime.fromisoformat(
+            authorization["expires_at"].replace("Z", "+00:00"),
+        )
+        approval_expiry = min(now + timedelta(minutes=5), authorization_expiry)
+        if approval_expiry <= now:
+            raise ContractError("CAMPAIGN_AUTHORIZATION_EXPIRED")
+        approved = job.approve({
+            "source": "CAMPAIGN_AUTHORIZATION",
+            "approval_id": f"{checked['continuation_run_id']}-approval",
+            "approved_by": operator_id,
+            "approval_expiry": approval_expiry.isoformat().replace(
+                "+00:00", "Z",
+            ),
+            "approval_scope": "HIL_NUMERIC_PROXY",
+        })
+        if not approved["ok"]:
+            return _object_reposition_result(
+                payload, checked, status="FAIL", code=approved["code"],
+                plan_digest=plan_digest,
+                resolved_job_digest=validated["resolved_job_digest"],
+                execution_response=approved,
+                preapproval_scope_digest=scope["scope_digest"],
+                plan_artifact_digest=plan_artifact_digest,
+            )
+        if cancel.is_set():
+            raise ContractError("CANCELLED")
+        lease_id = f"{checked['continuation_run_id']}-lease"
+        job.lease_id = lease_id
+        response = job._request(
+            "executor", "execute", {
+                "run_id": checked["continuation_run_id"],
+                "plan_digest": plan_digest, "lease_id": lease_id,
+            }, allowed_failure=True,
+        )
+        while response.get("ok") is True and response.get("state") != "COMPLETED":
+            if cancel.is_set():
+                response = job._request(
+                    "executor", "cancel", {
+                        "run_id": checked["continuation_run_id"],
+                        "plan_digest": plan_digest, "lease_id": lease_id,
+                    }, allowed_failure=True,
+                )
+                break
+            state = response.get("state")
+            action = None
+            if state == "PRECONTACT_HUMAN":
+                action = ("confirm", {
+                    "run_id": checked["continuation_run_id"],
+                    "plan_digest": plan_digest,
+                    "confirmed_by": operator_id,
+                    "source": "CAMPAIGN_AUTHORIZATION",
+                })
+            elif state in {"GRASP_VERDICT", "SEMANTIC_VERDICT"}:
+                action = (
+                    "grasp_verdict" if state == "GRASP_VERDICT"
+                    else "semantic_verdict",
+                    {
+                        "run_id": checked["continuation_run_id"],
+                        "plan_digest": plan_digest,
+                        "verdict": hil_numeric_gripper_verdict(
+                            state, response.get("data"),
+                            program["gripper_requirements"],
+                        ),
+                        "decided_by": operator_id, "source": "HIL_PROXY",
+                    },
+                )
+            elif state == "RELEASE_VERDICT":
+                action = ("release_verdict", {
+                    "run_id": checked["continuation_run_id"],
+                    "plan_digest": plan_digest, "verdict": "LANDED",
+                    "decided_by": operator_id,
+                    "source": "CAMPAIGN_CONTROL_PROXY",
+                })
+            elif state not in {"EXECUTING"}:
+                raise ContractError("OBJECT_REPOSITION_EXECUTION_STATE")
+            if action is not None:
+                response = job._request(
+                    "executor", action[0], action[1], allowed_failure=True,
+                )
+                continue
+            cancel.wait(0.05)
+            response = job._request(
+                "executor", "heartbeat", {
+                    "run_id": checked["continuation_run_id"],
+                    "plan_digest": plan_digest, "lease_id": lease_id,
+                    "motion_owner_health": {
+                        "owner_alive": True, "owner_error": None,
+                        "recording_scope": "OUT_OF_DATASET",
+                        "object_reposition_binding_digest": checked[
+                            "binding_digest"
+                        ],
+                    },
+                }, allowed_failure=True,
+            )
+        data = response.get("data") if isinstance(response, Mapping) else None
+        transition = data.get("scene_transition") if isinstance(data, Mapping) else None
+        release_evidence = data.get("release_evidence") if isinstance(data, Mapping) else None
+        passed = (
+            response.get("ok") is True
+            and response.get("state") == "COMPLETED"
+            and isinstance(transition, Mapping)
+            and isinstance(transition.get("scene_state_digest"), str)
+            and DIGEST.fullmatch(transition["scene_state_digest"]) is not None
+            and isinstance(release_evidence, Mapping)
+            and _release_outcome_landed(release_evidence)
+            and transition.get("release_evidence_digest")
+            == canonical_digest(release_evidence)
+        )
+        return _object_reposition_result(
+            payload, checked, status="PASS" if passed else "FAIL",
+            code="PASS" if passed else response.get(
+                "code", "OBJECT_REPOSITION_FAILED",
+            ),
+            plan_digest=plan_digest,
+            resolved_job_digest=validated["resolved_job_digest"],
+            execution_response=response,
+            preapproval_scope_digest=scope["scope_digest"],
+            plan_artifact_digest=plan_artifact_digest,
+        )
+    except ContractError as exc:
+        failure = {
+            "ok": False, "code": exc.code, "state": "BLOCKED",
+            "data": copy.deepcopy(getattr(job, "execution_evidence", None)),
+        }
+        return _object_reposition_result(
+            payload, checked, status="FAIL", code=exc.code,
+            plan_digest=plan_digest,
+            resolved_job_digest=(
+                validated["resolved_job_digest"]
+                if "validated" in locals() else None
+            ),
+            execution_response=failure,
+            preapproval_scope_digest=scope["scope_digest"],
+            plan_artifact_digest=plan_artifact_digest,
+        )
+    finally:
+        _close_runtime_child(executor, cancel)
+
+
 def run_live(payload, cancel, publish, *, resolver=resolve_inputs, executor_factory=_live_executor,
              recorder_factory=_recorder, validator_call=_technical_validator, tty_decision=_tty_decision,
              camera_warmup_call=_camera_warmup, before_approval=None, one_job=None,
@@ -1727,7 +3147,15 @@ def run_live(payload, cancel, publish, *, resolver=resolve_inputs, executor_fact
              episode_ledger_context=None,
              preapproval_checklist=None,
              episode_instruction_binding=None,
+             yaw_sample_binding=None, yaw_sampling_profile=None,
+             state_space_design_profile=None,
+             object_reposition_binding=None,
+             object_reposition_call=run_object_reposition,
+             object_reposition_resolver=resolve_inputs,
+             object_reposition_executor_factory=_live_motion_executor,
+             object_reposition_source_payload=None,
              campaign_authorization=None,
+             dataset_validation_scope="INCREMENTAL",
              candidate_writer_enabled=True,
              repository_root=ROOT, clock=None):
     """Public single HIL run: plan and human approval precede recorder begin and motion."""
@@ -1740,8 +3168,16 @@ def run_live(payload, cancel, publish, *, resolver=resolve_inputs, executor_fact
             raise ContractError("RUNNER_CLOCK")
         if approval_scope not in {"HUMAN_GATED", "HIL_NUMERIC_PROXY"}:
             raise ContractError("APPROVAL_SCOPE")
+        if dataset_validation_scope not in {"FULL", "INCREMENTAL"}:
+            raise ContractError("DATASET_VALIDATION_SCOPE")
         if checkpoint_provider is not None and not callable(checkpoint_provider):
             raise ContractError("OPERATOR_CHECKPOINT_PROVIDER")
+        if (
+            not callable(object_reposition_call)
+            or not callable(object_reposition_resolver)
+            or not callable(object_reposition_executor_factory)
+        ):
+            raise ContractError("OBJECT_REPOSITION_CALL")
         if checkpoint_timeout_s is not None and (
             isinstance(checkpoint_timeout_s, bool)
             or not isinstance(checkpoint_timeout_s, (int, float))
@@ -1839,8 +3275,16 @@ def run_live(payload, cancel, publish, *, resolver=resolve_inputs, executor_fact
             )
             if episode_instruction_binding is not None else None
         )
+        checked_yaw_sample = _validated_yaw_sample_scope(
+            yaw_sample_binding, yaw_sampling_profile,
+            state_space_design_profile,
+            validated=validated, bound_runtime=bound_runtime,
+            preapproval_checklist=preapproval_checklist,
+            require_slotted=episode_ledger_context is not None,
+        )
         episode_binding = None
         _validate_runtime_collection_binding(validated, program)
+        trajectory_binding = _trajectory_binding(payload, validated, program)
         if bound_runtime:
             episode_binding = (
                 validate_test_only_episode_binding(
@@ -1886,6 +3330,39 @@ def run_live(payload, cancel, publish, *, resolver=resolve_inputs, executor_fact
             )
             if episode_ledger_context is not None else None
         )
+        checked_reposition = (
+            None if object_reposition_binding is None
+            else validate_object_reposition_binding(object_reposition_binding)
+        )
+        if checked_reposition is not None:
+            checked_reposition = validate_object_reposition_binding(
+                checked_reposition,
+                object_profile=validated.get("object_profile"),
+                grasp_profile=validated.get("grasp_profile"),
+                yaw_sampling_profile=_load_reposition_yaw_profile(
+                    payload, validated, checked_reposition,
+                ),
+            )
+        if (
+            checked_reposition is not None
+            and (
+                not bound_runtime
+                or checked_reposition["parent_run_id"] != payload["run_id"]
+                or not isinstance(preapproval_checklist, Mapping)
+                or preapproval_checklist.get("object_reposition_binding")
+                != checked_reposition
+                or checked_reposition["start_state"] == "ON_SURFACE"
+                and campaign_authorization is None
+                or checked_reposition["start_state"] == "ON_SURFACE"
+                and not isinstance(object_reposition_source_payload, Mapping)
+            )
+        ):
+            raise ContractError("OBJECT_REPOSITION_BINDING")
+        if checked_reposition is None or checked_reposition[
+            "start_state"
+        ] != "ON_SURFACE":
+            if object_reposition_source_payload is not None:
+                raise ContractError("OBJECT_REPOSITION_PAYLOAD")
         profile = _collection_profile(validated, payload)
         if cancel.is_set():
             return _response(ok=False, code="CANCELLED", state="CANCELLED", run_id=payload["run_id"])
@@ -1924,7 +3401,12 @@ def run_live(payload, cancel, publish, *, resolver=resolve_inputs, executor_fact
         )
         forbidden = lambda _request: (_ for _ in ()).throw(ContractError("LIVE_RECORDER_NOT_STARTED"))
         if one_job is None:
-            arguments = (forbidden, lambda request: executor.request(request, cancel))
+            arguments = (
+                forbidden,
+                lambda request: _runtime_child_request(
+                    executor, request, cancel,
+                ),
+            )
             job = (
                 OneJob(*arguments, cell_state_call=cell_store.read,
                        readiness_contract=RECORDER_READINESS_CONTRACT)
@@ -1938,7 +3420,9 @@ def run_live(payload, cancel, publish, *, resolver=resolve_inputs, executor_fact
                 raise ContractError("ONE_JOB_READINESS_SCOPE")
             job = one_job
             job.recorder_call = forbidden
-            job.executor_call = lambda request: executor.request(request, cancel)
+            job.executor_call = lambda request: _runtime_child_request(
+                executor, request, cancel,
+            )
             job.cell_state_call = cell_store.read
         planned = None
         plan_error = None
@@ -1959,6 +3443,10 @@ def run_live(payload, cancel, publish, *, resolver=resolve_inputs, executor_fact
             raise plan_error
         if not planned["ok"]:
             return _response(ok=False, code=planned["code"], state=planned["state"], run_id=payload["run_id"], plan_digest=planned["plan_digest"])
+        trajectory_binding = _bind_trajectory_to_planned_program(
+            trajectory_binding, payload=payload, validated=validated,
+            planned=planned,
+        )
         planned_start = (
             (
                 validate_test_only_planned_start
@@ -1989,9 +3477,44 @@ def run_live(payload, cancel, publish, *, resolver=resolve_inputs, executor_fact
                     "test_only_planned_start": copy.deepcopy(planned_start),
                 })
         summary = _operator_summary(planned)
+        if checked_reposition is not None:
+            checked_reposition = _validate_parent_reposition_edge(
+                checked_reposition, validated=validated,
+                scene_binding=scene_binding, operator_summary=summary,
+            )
         preapproval_evidence = _write_preapproval_evidence(
-            payload, validated, planned, checked_episode_instruction,
+            payload, validated, planned, trajectory_binding,
+            checked_episode_instruction,
+            (
+                {
+                    "manifest_digest": ledger_context["manifest"]["manifest_digest"],
+                    "intent_digest": ledger_context["intent"]["intent_digest"],
+                    "slot_id": ledger_context["intent"]["slot"]["slot_id"],
+                    "slot_digest": episode_binding["slot_digest"],
+                    "runtime_episode_binding_digest": episode_binding["binding_digest"],
+                }
+                if ledger_context is not None and episode_binding is not None
+                else None
+            ),
+            checked_reposition,
+            checked_yaw_sample,
         )
+        reposition_preapproval = None
+        if (
+            checked_reposition is not None
+            and checked_reposition["start_state"] == "ON_SURFACE"
+        ):
+            reposition_preapproval = _write_object_reposition_preapproval(
+                payload, checked_reposition,
+                parent_plan_digest=planned["plan_digest"],
+                parent_preapproval_evidence=preapproval_evidence,
+                campaign_authorization=campaign_authorization,
+                ledger_context=ledger_context,
+                episode_binding=episode_binding,
+                episode_instruction_binding=checked_episode_instruction,
+                source_payload=object_reposition_source_payload,
+                resolver=object_reposition_resolver,
+            )
         if warmup_error is not None:
             if not isinstance(warmup_error, ContractError):
                 raise warmup_error
@@ -2042,6 +3565,9 @@ def run_live(payload, cancel, publish, *, resolver=resolve_inputs, executor_fact
                 evidence={
                     "checklist": copy.deepcopy(dict(preapproval_checklist)),
                     "operator_summary": copy.deepcopy(summary),
+                    "object_reposition_preapproval": copy.deepcopy(
+                        reposition_preapproval,
+                    ),
                     "planned_start_evidence_digest": canonical_digest(planned_start),
                     "data_disposition": data_disposition,
                 },
@@ -2066,6 +3592,9 @@ def run_live(payload, cancel, publish, *, resolver=resolve_inputs, executor_fact
         publish(_response(ok=True, code="AWAITING_HUMAN_APPROVAL", state="PLANNED", run_id=payload["run_id"], plan_digest=planned["plan_digest"], data={
             "mode": "live", "operator_summary": summary, "resolved_job_digest": validated["resolved_job_digest"],
             "scene_binding": scene_binding, "preapproval_evidence_digest": canonical_digest(preapproval_evidence),
+            "object_reposition_preapproval": copy.deepcopy(
+                reposition_preapproval,
+            ),
             "camera_warmup_digest": canonical_digest(camera_warmup), "progress": 35,
             **(runtime_projection if bound_runtime else {}),
             "camera_semantic_authority": False, "training_authorized": False,
@@ -2086,6 +3615,26 @@ def run_live(payload, cancel, publish, *, resolver=resolve_inputs, executor_fact
                     "scene_binding_digest": canonical_digest(scene_binding),
                     "operator_summary_digest": canonical_digest(summary),
                     "operator_summary": copy.deepcopy(summary),
+                    "trajectory_variant_binding": copy.deepcopy(
+                        trajectory_binding,
+                    ),
+                    "trajectory_variant_binding_digest": trajectory_binding[
+                        "binding_digest"
+                    ],
+                    "yaw_sample_binding": copy.deepcopy(checked_yaw_sample),
+                    "yaw_sample_binding_digest": (
+                        None if checked_yaw_sample is None
+                        else checked_yaw_sample["binding_digest"]
+                    ),
+                    "precommit_safety": copy.deepcopy(
+                        planned["plan_envelope"]["precommit_safety"],
+                    ),
+                    "plan_envelope_digest": preapproval_evidence[
+                        "plan_envelope_digest"
+                    ],
+                    "preapproval_evidence_digest": canonical_digest(
+                        preapproval_evidence,
+                    ),
                     "preapproval_checklist": (
                         None if preapproval_checklist is None
                         else copy.deepcopy(dict(preapproval_checklist))
@@ -2100,6 +3649,9 @@ def run_live(payload, cancel, publish, *, resolver=resolve_inputs, executor_fact
                     "episode_instruction_binding_digest": (
                         None if checked_episode_instruction is None
                         else checked_episode_instruction["binding_digest"]
+                    ),
+                    "object_reposition_preapproval": copy.deepcopy(
+                        reposition_preapproval,
                     ),
                     **({
                         "start_binding_digest": planned_start["start_binding_digest"],
@@ -2242,7 +3794,79 @@ def run_live(payload, cancel, publish, *, resolver=resolve_inputs, executor_fact
                     )
                     if test_only else {}
                 )
-                technical = validator_call(payload["dataset_root"], payload, profile)
+                reposition_result = None
+                surface_reposition = (
+                    checked_reposition is not None
+                    and checked_reposition["start_state"] == "ON_SURFACE"
+                )
+                effective_validator_call = validator_call
+                if validator_call is _technical_validator:
+                    recorder_evidence = result.get("recorder_evidence")
+                    recorder_metrics = (
+                        recorder_evidence.get("metrics")
+                        if isinstance(recorder_evidence, Mapping) else None
+                    )
+                    storage_usage = (
+                        recorder_metrics.get("storage_usage")
+                        if isinstance(recorder_metrics, Mapping) else None
+                    )
+                    def effective_validator_call(root, value, selected):
+                        return _technical_validator(
+                            root, value, selected,
+                            validation_scope=dataset_validation_scope,
+                            expected_append_manifest_digest=(
+                                storage_usage.get("staging_manifest_digest")
+                                if isinstance(storage_usage, Mapping) else None
+                            ),
+                        )
+                if surface_reposition:
+                    def reposition_call():
+                        try:
+                            return object_reposition_call(
+                                payload, checked_reposition, cancel, publish,
+                                parent_plan_digest=planned["plan_digest"],
+                                operator_id=operator_id, cell_root=cell_root,
+                                resolver=object_reposition_resolver,
+                                executor_factory=object_reposition_executor_factory,
+                                campaign_authorization=campaign_authorization,
+                                data_disposition=data_disposition,
+                                preapproval_scope=reposition_preapproval,
+                                source_payload=object_reposition_source_payload,
+                                clock=current_clock,
+                            )
+                        except Exception as exc:
+                            code = (
+                                exc.code if isinstance(exc, ContractError)
+                                else "OBJECT_REPOSITION_FAILED"
+                            )
+                            return _object_reposition_result(
+                                payload, checked_reposition, status="FAIL",
+                                code=code, plan_digest=None,
+                                resolved_job_digest=None,
+                                execution_response={
+                                    "ok": False, "code": code,
+                                    "state": "BLOCKED", "data": None,
+                                },
+                                preapproval_scope_digest=(
+                                    reposition_preapproval["scope_digest"]
+                                ),
+                                plan_artifact_digest=None,
+                            )
+                    technical, reposition_result = (
+                        _postcommit_validate_and_reposition(
+                            effective_validator_call,
+                            payload["dataset_root"], payload,
+                            profile, reposition_call,
+                        )
+                    )
+                else:
+                    technical, reposition_result = (
+                        _postcommit_validate_and_reposition(
+                            effective_validator_call,
+                            payload["dataset_root"], payload,
+                            profile,
+                        )
+                    )
                 if (
                     not isinstance(technical, dict)
                     or type(technical.get("ok")) is not bool
@@ -2252,9 +3876,32 @@ def run_live(payload, cancel, publish, *, resolver=resolve_inputs, executor_fact
                     or not DIGEST.fullmatch(technical["result_digest"])
                 ):
                     raise ContractError("TECHNICAL_VALIDATOR_SCHEMA")
+                if surface_reposition:
+                    reposition_result = _validate_object_reposition_result(
+                        payload, checked_reposition, reposition_preapproval,
+                        reposition_result,
+                    )
                 validator_reference = _write_validator_reference(payload, validated, planned["plan_digest"], profile, technical)
                 cell = cell_store.read()
-                if cell.get("cell_ready") is not False or cell.get("run_id") != payload["run_id"] or cell.get("plan_digest") != planned["plan_digest"]:
+                parent_owns_cell = (
+                    cell.get("cell_ready") is False
+                    and cell.get("run_id") == payload["run_id"]
+                    and cell.get("plan_digest") == planned["plan_digest"]
+                )
+                continuation_owns_failed_cell = (
+                    surface_reposition
+                    and reposition_result["status"] == "FAIL"
+                    and cell.get("cell_ready") is False
+                    and cell.get("run_id")
+                    == checked_reposition["continuation_run_id"]
+                    and isinstance(reposition_result.get("plan_digest"), str)
+                    and DIGEST.fullmatch(
+                        reposition_result["plan_digest"],
+                    ) is not None
+                    and cell.get("plan_digest")
+                    == reposition_result["plan_digest"]
+                )
+                if not parent_owns_cell and not continuation_owns_failed_cell:
                     raise ContractError("POSTCOMMIT_CELL_STATE")
                 postcommit_error = None
                 storage_reference = None
@@ -2277,6 +3924,7 @@ def run_live(payload, cancel, publish, *, resolver=resolve_inputs, executor_fact
                         ledger_reference = _write_episode_ledger(
                             payload, validated, profile, job, storage_reference,
                             episode_binding, ledger_context,
+                            trajectory_binding=trajectory_binding,
                             episode_locator=technical.get("episode_locator"),
                         )
                     except (ContractError, OSError) as exc:
@@ -2284,14 +3932,39 @@ def run_live(payload, cancel, publish, *, resolver=resolve_inputs, executor_fact
                             exc.code if isinstance(exc, ContractError)
                             else "EPISODE_LEDGER_WRITE_ERROR"
                         )
-                terminal_error = postcommit_error or (None if technical["ok"] else "TECHNICAL_VALIDATOR_FAILED")
+                reposition_error = (
+                    None
+                    if not surface_reposition
+                    or reposition_result["status"] == "PASS"
+                    else reposition_result["code"]
+                    or "OBJECT_REPOSITION_FAILED"
+                )
+                terminal_error = (
+                    postcommit_error or reposition_error
+                    or (None if technical["ok"] else "TECHNICAL_VALIDATOR_FAILED")
+                )
                 if terminal_error is not None:
                     # A committed episode remains forensic evidence, but cannot unlock the cell.
-                    cell = cell_store.mark_blocked(terminal_error, payload["run_id"], planned["plan_digest"])
+                    current_cell = cell_store.read()
+                    cell = (
+                        current_cell
+                        if reposition_error is not None
+                        and current_cell.get("cell_ready") is False
+                        and current_cell.get("run_id")
+                        == checked_reposition["continuation_run_id"]
+                        and current_cell.get("plan_digest")
+                        == reposition_result.get("plan_digest")
+                        else cell_store.mark_blocked(
+                            terminal_error, payload["run_id"],
+                            planned["plan_digest"],
+                        )
+                    )
                     return _response(ok=False, code=terminal_error, state="BLOCKED", run_id=payload["run_id"], plan_digest=planned["plan_digest"], data={
                         "mode": "live", "operator_summary": summary, "technical_validator": validator_reference,
                         "storage_usage": storage_reference, "resource_usage": resource_reference,
                         "episode_ledger": ledger_reference,
+                        "trajectory_variant_binding": trajectory_binding,
+                        "object_reposition": reposition_result,
                         "camera_warmup_digest": canonical_digest(camera_warmup),
                         "postcommit_cell_state": cell,
                         "camera_semantic_authority": False, "training_authorized": False,
@@ -2330,8 +4003,13 @@ def run_live(payload, cancel, publish, *, resolver=resolve_inputs, executor_fact
                         "mode": "live", "operator_summary": summary, "technical_validator": validator_reference,
                         "storage_usage": storage_reference, "resource_usage": resource_reference,
                         "episode_ledger": ledger_reference,
+                        "trajectory_variant_binding": trajectory_binding,
                         "camera_warmup_digest": canonical_digest(camera_warmup),
-                        "postcommit_scene_state_digest": transition["scene_state_digest"], "postcommit_cell_state": cell,
+                        "postcommit_scene_state_digest": (
+                            reposition_result["scene_state_digest"]
+                            if surface_reposition else transition["scene_state_digest"]
+                        ), "postcommit_cell_state": cell,
+                        "object_reposition": reposition_result,
                         "frozen_rows": result["frozen_rows"], "rows_after_recycle": result["rows_after_recycle"],
                         **test_only_projection,
                         **(runtime_projection if bound_runtime else {}),
@@ -2390,6 +4068,7 @@ def run_live(payload, cancel, publish, *, resolver=resolve_inputs, executor_fact
                     "mode": "live", "operator_summary": summary, "technical_validator": validator_reference,
                     "storage_usage": storage_reference, "resource_usage": resource_reference,
                     "episode_ledger": ledger_reference,
+                    "trajectory_variant_binding": trajectory_binding,
                     "camera_warmup_digest": canonical_digest(camera_warmup),
                     "postcommit_scene_state_digest": scene["scene_state_digest"], "postcommit_cell_state": cell,
                     **test_only_projection,
@@ -2610,9 +4289,10 @@ def resolve_campaign_episode_inputs(
     cell_root=ROOT / "outputs/data_factory/cells", resolver=None,
 ):
     """Resolve one serial episode and seal its exact source/destination scene edge."""
-    if release_role not in {"RELEASE_DESTINATION", "DESTINATION_THEN_NEXT_SOURCE"}:
+    chained_roles = {"DESTINATION_THEN_NEXT_SOURCE"}
+    if release_role not in {"RELEASE_DESTINATION", *chained_roles}:
         raise ContractError("CAMPAIGN_RELEASE_SLOT")
-    if (release_role == "DESTINATION_THEN_NEXT_SOURCE") != (next_run_id is not None):
+    if (release_role in chained_roles) != (next_run_id is not None):
         raise ContractError("SCENE_SLOT_NEXT_RUN")
     root = Path(cell_root).resolve()
     resolver = resolve_inputs if resolver is None else resolver

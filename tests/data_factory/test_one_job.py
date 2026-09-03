@@ -493,6 +493,14 @@ class OneJobTest(unittest.TestCase):
         child = "import json,sys; [print(json.dumps(json.loads(line)),flush=True) for line in sys.stdin]"
         with JsonlProcess([sys.executable, "-u", "-c", child]) as process:
             self.assertEqual(process({"hello":"world"}), {"hello":"world"})
+        cancelled = threading.Event()
+        cancelled.set()
+        with JsonlProcess([sys.executable, "-u", "-c", child]) as process:
+            with self.assertRaisesRegex(
+                ContractError, "JSONL_REQUEST_CANCELLED",
+            ):
+                process.request({"must_not_be_sent": True}, cancelled)
+            self.assertEqual(process({"sent": "after-test"}), {"sent": "after-test"})
         process = JsonlProcess([sys.executable, "-u", "-c", child])
         with process:
             process.preserve()

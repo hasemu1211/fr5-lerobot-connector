@@ -246,6 +246,13 @@ class WorkspaceManagerTest(unittest.TestCase):
             and item["camera_bindings"]
         ]
         self.assertTrue(candidates)
+        direct = [item for item in candidates if item["variant_id"] == "DIRECT"]
+        align = [
+            item for item in candidates
+            if item["variant_id"] == "TWO_STAGE_ALIGN_V2"
+        ]
+        self.assertTrue(direct)
+        self.assertTrue(align)
         self.assertTrue(all(
             item["motion_id"] == motion["motion_qualification_id"]
             and item["sources"]["motion"]
@@ -265,7 +272,16 @@ class WorkspaceManagerTest(unittest.TestCase):
                 "executable": False,
                 "reason": "GENERAL_QUALIFICATION_REQUIRED",
             }
-            for item in candidates
+            for item in direct
+        ))
+        self.assertTrue(all(
+            item["execution"]["TEST_COLLECTION"] == {
+                "executable": False,
+                "reason": "APPROACH_SAMPLING_PROFILE_REQUIRED",
+            }
+            and "approach_sampling_profile" not in item
+            and "approach_sampling_profile" not in item["sources"]
+            for item in align
         ))
         self.assertEqual(set(self.config.rglob("*.job.json")), jobs_before)
 

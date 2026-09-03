@@ -129,7 +129,7 @@
       "rule_id": "evidence-ledger",
       "document_type": "evidence",
       "subject": "training research and experiment evidence",
-      "path_globs": ["docs/training-evidence.md"],
+      "path_globs": ["docs/training-evidence.md", "docs/evidence/*.md"],
       "allowed_index_names": ["README.md"],
       "requires_index": false,
       "required_markdown_metadata": ["h1"],

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import copy
+import functools
 import itertools
 import math
 from pathlib import Path
@@ -12,18 +13,32 @@ from tools.a4_place_yaw.region_layout import (
     make_red_blue_region_layout,
     workspace_region,
 )
+from tools.data_factory.collection_seed import MAX_DERIVED_SEED
 from tools.data_factory.experiment_manifest import build_test_only_feature_contract
+from tools.data_factory.motion.object_reposition import yaw_preserving_destination
 from tools.data_factory.motion.trajectory_variants import phase_variant_catalog
 from tools.data_factory.operator.registries.region import (
     load_workspace_region_binding,
 )
 from tools.data_factory.task_recipe import TASK_IDS, get_task_recipe
+from tools.data_factory.state_space import (
+    bind_yaw_sample_to_state_space,
+    canonical_yaw_for_profile,
+    rotating_balanced_yaw_ranks,
+    sample_yaw_cdf_strata,
+    validate_approach_sampling_profile,
+    validate_state_space_design_profile,
+    validate_yaw_sample_binding,
+    validate_yaw_sampling_profile,
+    yaw_cdf_quantile,
+)
 from tools.data_factory.workspace_geometry import (
     point_in_convex_polygon,
     polygon_bounds,
     rotate_xy,
     rotation_envelope,
     safe_convex_polygon,
+    safe_convex_polygon_for_yaws,
     stratified_convex_polygon_samples,
 )
 from tools.fr5_data_factory import (
@@ -96,6 +111,32 @@ def _files(root: Path, relative: str) -> list[tuple[Path, dict[str, Any]]]:
     return result
 
 
+def _latest_profile_revisions(
+    profiles: Sequence[tuple[Path, dict[str, Any]]],
+    *, identifier_field: str, revision_marker: str,
+) -> list[tuple[Path, dict[str, Any]]]:
+    """Keep only the newest numeric revision of each named profile family."""
+    latest: dict[str, tuple[int, Path, dict[str, Any]]] = {}
+    unversioned = []
+    for path, profile in profiles:
+        identifier = profile.get(identifier_field)
+        try:
+            family, revision = identifier.rsplit(revision_marker, 1)
+            revision_number = int(revision)
+        except (AttributeError, ValueError):
+            unversioned.append((path, profile))
+            continue
+        current = latest.get(family)
+        if current is not None and revision_number == current[0]:
+            raise ContractError("OPERATOR_CATALOG_CONFIG", str(path))
+        if current is None or revision_number > current[0]:
+            latest[family] = (revision_number, path, profile)
+    return sorted(
+        [*unversioned, *((path, profile) for _, path, profile in latest.values())],
+        key=lambda item: item[0].name,
+    )
+
+
 def _bindings_for_profile(
     profile: Mapping[str, Any], device_ids: Sequence[str],
 ) -> list[dict[str, str]]:
@@ -155,6 +196,24 @@ def _sheet_matches_cell(sheet: Mapping[str, Any], cell: Mapping[str, Any]) -> bo
             or canonical_digest(sheet) == cell.get("yaw0_manifest_digest")
         )
     )
+
+
+def _sheet_spatial_strata(sheet: Mapping[str, Any]) -> dict[str, int]:
+    points = sheet.get("grid_points")
+    if not isinstance(points, list) or not points:
+        raise ContractError("OPERATOR_CATALOG_CONFIG")
+    try:
+        coordinates = [
+            (float(point["sheet_xy_mm"][0]), float(point["sheet_xy_mm"][1]))
+            for point in points
+        ]
+    except (KeyError, TypeError, ValueError, IndexError) as exc:
+        raise ContractError("OPERATOR_CATALOG_CONFIG") from exc
+    columns = len({point[0] for point in coordinates})
+    rows = len({point[1] for point in coordinates})
+    if columns * rows != len(coordinates) or len(set(coordinates)) != len(coordinates):
+        raise ContractError("OPERATOR_CATALOG_CONFIG")
+    return {"columns": columns, "rows": rows}
 
 
 def _motion_matches_profiles(
@@ -222,9 +281,23 @@ def load_operator_catalog(
     ):
         raise ContractError("OPERATOR_CATALOG_INPUT")
     devices = sorted(set(device_ids))
+    trajectory_variants = phase_variant_catalog()["variants"]
     cells = _files(root, "config/data_factory/cells")
     objects = _files(root, "config/data_factory/objects")
     grasps = _files(root, "config/data_factory/grasps")
+    yaw_profiles = _latest_profile_revisions(
+        _files(root, "config/data_factory/yaw_sampling_profiles"),
+        identifier_field="yaw_sampling_profile_id", revision_marker="-r",
+    )
+    state_space_design_profiles = _latest_profile_revisions(
+        _files(root, "config/data_factory/state_space_design_profiles"),
+        identifier_field="state_space_design_profile_id",
+        revision_marker="-r",
+    )
+    approach_profiles = _latest_profile_revisions(
+        _files(root, "config/data_factory/approach_sampling_profiles"),
+        identifier_field="approach_sampling_profile_id", revision_marker="-r",
+    )
     homes = _files(root, "config/data_factory/home_candidates")
     motions = _files(root, "config/data_factory/motion_qualifications")
     planning_scene_files = _files(root, "config/data_factory/planning_scenes")
@@ -233,7 +306,9 @@ def load_operator_catalog(
         for _path, value in planning_scene_files
         if isinstance(value.get("planning_scene_profile_id"), str)
     }
-    profiles = _files(root, "config/data_factory/collection_profiles")
+    profiles = _latest_profile_revisions(_files(
+        root, "config/data_factory/collection_profiles",
+    ), identifier_field="collection_profile_id", revision_marker="-v")
     robots = _files(root, "config/data_factory/robot_systems")
     workspaces = _files(root, "config/data_factory/workspaces")
     jobs = [
@@ -264,6 +339,67 @@ def load_operator_catalog(
     by_grasp = {value.get("grasp_profile_id"): (path, value) for path, value in grasps}
     by_profile = {value.get("collection_profile_id"): (path, value) for path, value in profiles}
     by_robot = {value.get("robot_system_id"): (path, value) for path, value in robots}
+    yaw_profile_by_pair = {}
+    for path, value in yaw_profiles:
+        object_entry = by_object.get(value.get("object_profile_id"))
+        grasp_entry = by_grasp.get(value.get("grasp_profile_id"))
+        if object_entry is None or grasp_entry is None:
+            raise ContractError("OPERATOR_CATALOG_CONFIG", str(path))
+        try:
+            checked = validate_yaw_sampling_profile(
+                value, object_profile=object_entry[1], grasp_profile=grasp_entry[1],
+            )
+        except ContractError as exc:
+            raise ContractError("OPERATOR_CATALOG_CONFIG", str(path)) from exc
+        key = (checked["object_profile_id"], checked["grasp_profile_id"])
+        if key in yaw_profile_by_pair:
+            raise ContractError("OPERATOR_CATALOG_CONFIG", str(path))
+        yaw_profile_by_pair[key] = (path, checked)
+    state_space_design_by_pair = {}
+    for path, value in state_space_design_profiles:
+        key = (value.get("object_profile_id"), value.get("grasp_profile_id"))
+        object_entry = by_object.get(key[0])
+        grasp_entry = by_grasp.get(key[1])
+        yaw_entry = yaw_profile_by_pair.get(key)
+        if object_entry is None or grasp_entry is None or yaw_entry is None:
+            raise ContractError("OPERATOR_CATALOG_CONFIG", str(path))
+        try:
+            checked = validate_state_space_design_profile(
+                value, object_profile=object_entry[1],
+                grasp_profile=grasp_entry[1],
+                yaw_sampling_profile=yaw_entry[1],
+            )
+        except ContractError as exc:
+            raise ContractError("OPERATOR_CATALOG_CONFIG", str(path)) from exc
+        if key in state_space_design_by_pair:
+            raise ContractError("OPERATOR_CATALOG_CONFIG", str(path))
+        state_space_design_by_pair[key] = (path, checked)
+    approach_profile_by_tuple = {}
+    for path, value in approach_profiles:
+        object_entry = by_object.get(value.get("object_profile_id"))
+        grasp_entry = by_grasp.get(value.get("grasp_profile_id"))
+        collection_entry = by_profile.get(value.get("collection_profile_id"))
+        if any(item is None for item in (
+            object_entry, grasp_entry, collection_entry,
+        )):
+            raise ContractError("OPERATOR_CATALOG_CONFIG", str(path))
+        try:
+            checked = validate_approach_sampling_profile(
+                value,
+                object_profile=object_entry[1],
+                grasp_profile=grasp_entry[1],
+                collection_profile=collection_entry[1],
+            )
+        except ContractError as exc:
+            raise ContractError("OPERATOR_CATALOG_CONFIG", str(path)) from exc
+        key = (
+            checked["object_profile_id"], checked["grasp_profile_id"],
+            checked["collection_profile_id"],
+            checked["trajectory_variant_id"],
+        )
+        if key in approach_profile_by_tuple:
+            raise ContractError("OPERATOR_CATALOG_CONFIG", str(path))
+        approach_profile_by_tuple[key] = (path, checked)
     workspace_labels = {}
     workspace_place_labels = {}
     for path, workspace in workspaces:
@@ -403,13 +539,22 @@ def load_operator_catalog(
                 status="QUALIFIED" if qualified else "QUALIFICATION_REQUIRED",
                 reason="MOTION_QUALIFIED" if qualified else "MOTION_QUALIFICATION_REQUIRED",
             ))
-    for value in phase_variant_catalog()["variants"]:
+    for value in trajectory_variants:
         identifier = value["trajectory_variant_id"]
-        live = identifier == "DIRECT"
         axes["variant"].append(_option(
-            identifier, "직선 1단계" if live else "직선 2단계 정렬",
-            status="LIVE_AVAILABLE" if live else "PLAN_ONLY",
-            reason="DIRECT_LIVE_CALLER" if live else "NO_LIVE_COLLECTION_CALLER",
+            identifier,
+            (
+                "직접 접근"
+                if identifier == "DIRECT"
+                else "관측 높이 → XY·yaw 정렬 → 수직 하강"
+            ),
+            status="LIVE_AVAILABLE",
+            reason="REGISTERED_LIVE_CALLER",
+            metadata={
+                "segment_roles": value["segment_roles"],
+                "parameter_distribution": value["parameter_distribution"],
+                "place_recipe": "DIRECT",
+            },
         ))
     axes["policy"] = [
         _option("DETERMINISTIC_SPREAD", "자동 선택", status="AVAILABLE", reason="DETERMINISTIC_DOMAIN_SPREAD"),
@@ -460,6 +605,7 @@ def load_operator_catalog(
             for sheet in family_sheets for point in sheet["grid_points"]
         })
         sheet = yaw0[0]
+        legacy_spatial_strata = _sheet_spatial_strata(sheet)
         try:
             if (
                 sheet["page_mm"] != region_layout["page_mm"]
@@ -520,7 +666,7 @@ def load_operator_catalog(
                 "uncertainty_mm": float(
                     cell["limits"]["combined_error_bound_mm"]
                 ),
-                "strata": {"columns": 5, "rows": 3},
+                "strata": copy.deepcopy(legacy_spatial_strata),
                 "coordinate_contract": "SHEET_XY_EQUALS_RZ_YAW_TIMES_LOCAL_XY",
             }
             domain = {
@@ -560,6 +706,7 @@ def load_operator_catalog(
         )
         for _profile_path, profile in profiles
         if isinstance(task_id, str)
+        and source_job.get("collection_profile_id") in by_profile
         and isinstance(profile.get("collection_profile_id"), str)
         and cell.get("robot_system_id") == source_job.get("robot_system_id")
     ]
@@ -587,6 +734,17 @@ def load_operator_catalog(
         if len(motion_matches) != 1:
             continue
         motion_path, motion = motion_matches[0]
+        yaw_profile_entry = yaw_profile_by_pair.get((
+            job["object_profile_id"], job["grasp_profile_id"],
+        ))
+        state_space_design_entry = state_space_design_by_pair.get((
+            job["object_profile_id"], job["grasp_profile_id"],
+        ))
+        if yaw_profile_entry is not None and not set(
+            yaw_profile_entry[1]["required_camera_roles"]
+        ) <= set(profile_entry[1].get("camera_roles", [])):
+            yaw_profile_entry = None
+            state_space_design_entry = None
         yaw0_matches = [
             path for path, sheet in sheets
             if _sheet_matches_cell(sheet, cell)
@@ -679,23 +837,58 @@ def load_operator_catalog(
                     "camera_profile": str(profile_path.relative_to(root)),
                 },
             }
-            for camera_bindings in matched_bindings or [{}]:
-                bound = copy.deepcopy(combination)
-                bound["camera_bindings"] = dict(sorted(camera_bindings.items()))
-                bound["camera_binding_digest"] = camera_binding_digest(
-                    profile, camera_bindings,
+            if yaw_profile_entry is not None:
+                yaw_profile_path, yaw_profile = yaw_profile_entry
+                combination["yaw_sampling_profile"] = copy.deepcopy(yaw_profile)
+                combination["sources"]["yaw_sampling_profile"] = str(
+                    yaw_profile_path.relative_to(root)
                 )
-                bound["camera_device_id"] = (
-                    next(iter(camera_bindings.values()))
-                    if len(camera_bindings) == 1 else UNBOUND_CAMERA_DEVICE_ID
+            if state_space_design_entry is not None:
+                design_path, design_profile = state_space_design_entry
+                combination["state_space_design_profile"] = copy.deepcopy(
+                    design_profile,
                 )
-                if not camera_bindings:
-                    for mode in ("TEST_COLLECTION", "GENERAL_COLLECTION"):
-                        bound["execution"][mode] = {
-                            "executable": False, "reason": "DEVICE_NOT_CONNECTED",
-                        }
-                bound["combination_digest"] = canonical_digest(bound)
-                combinations.append(bound)
+                combination["sources"]["state_space_design_profile"] = str(
+                    design_path.relative_to(root)
+                )
+            for variant in trajectory_variants:
+                variant_id = variant["trajectory_variant_id"]
+                approach_profile_entry = approach_profile_by_tuple.get((
+                    job["object_profile_id"], job["grasp_profile_id"],
+                    profile["collection_profile_id"], variant_id,
+                ))
+                for camera_bindings in matched_bindings or [{}]:
+                    bound = copy.deepcopy(combination)
+                    bound["variant_id"] = variant_id
+                    if approach_profile_entry is not None:
+                        approach_path, approach_profile = approach_profile_entry
+                        bound["approach_sampling_profile"] = copy.deepcopy(
+                            approach_profile
+                        )
+                        bound["sources"]["approach_sampling_profile"] = str(
+                            approach_path.relative_to(root)
+                        )
+                    elif variant_id == "TWO_STAGE_ALIGN_V2":
+                        for mode in ("TEST_COLLECTION", "GENERAL_COLLECTION"):
+                            bound["execution"][mode] = {
+                                "executable": False,
+                                "reason": "APPROACH_SAMPLING_PROFILE_REQUIRED",
+                            }
+                    bound["camera_bindings"] = dict(sorted(camera_bindings.items()))
+                    bound["camera_binding_digest"] = camera_binding_digest(
+                        profile, camera_bindings,
+                    )
+                    bound["camera_device_id"] = (
+                        next(iter(camera_bindings.values()))
+                        if len(camera_bindings) == 1 else UNBOUND_CAMERA_DEVICE_ID
+                    )
+                    if not camera_bindings:
+                        for mode in ("TEST_COLLECTION", "GENERAL_COLLECTION"):
+                            bound["execution"][mode] = {
+                                "executable": False, "reason": "DEVICE_NOT_CONNECTED",
+                            }
+                    bound["combination_digest"] = canonical_digest(bound)
+                    combinations.append(bound)
 
     # A newly promoted frame is immediately authorable through the existing
     # pickup recipe, but it stays non-executable until motion qualification is
@@ -855,14 +1048,14 @@ def load_operator_catalog(
     return result
 
 
-def validate_operator_selection(
+def _validate_operator_selection(
     catalog: Mapping[str, Any], selection: Mapping[str, Any], *,
-    require_executable: bool = False,
+    require_executable: bool = False, catalog_digest_checked: bool = False,
 ) -> dict[str, Any]:
     if (
         not isinstance(catalog, Mapping)
         or catalog.get("schema_version") != CATALOG_SCHEMA
-        or catalog.get("catalog_digest") != canonical_digest({
+        or not catalog_digest_checked and catalog.get("catalog_digest") != canonical_digest({
             key: value for key, value in catalog.items() if key != "catalog_digest"
         })
         or not isinstance(selection, Mapping)
@@ -913,6 +1106,545 @@ def validate_operator_selection(
     return result
 
 
+def validate_operator_selection(
+    catalog: Mapping[str, Any], selection: Mapping[str, Any], *,
+    require_executable: bool = False,
+) -> dict[str, Any]:
+    return _validate_operator_selection(
+        catalog, selection, require_executable=require_executable,
+    )
+
+
+def selected_state_space_design_profile(
+    catalog: Mapping[str, Any], selection: Mapping[str, Any],
+) -> dict[str, Any] | None:
+    """Return the optional finite spatial×yaw design for one selection."""
+    selected = validate_operator_selection(catalog, selection)
+    combination = next(
+        item for item in catalog["combinations"]
+        if item.get("combination_digest") == selected["combination_digest"]
+    )
+    profile = combination.get("state_space_design_profile")
+    return (
+        None if profile is None
+        else validate_state_space_design_profile(profile)
+    )
+
+
+def _yaw_selection_contexts(
+    catalog: Mapping[str, Any], selections: Sequence[Mapping[str, Any]],
+) -> list[dict[str, Any]]:
+    if (
+        not isinstance(selections, Sequence)
+        or isinstance(selections, (str, bytes))
+        or not selections
+    ):
+        raise ContractError("OPERATOR_YAW_PROFILE_CHAIN")
+    cache: dict[str, dict[str, Any]] = {}
+    result = []
+    catalog_digest_checked = False
+    for selection in selections:
+        if not isinstance(selection, Mapping):
+            raise ContractError("OPERATOR_YAW_PROFILE_CHAIN")
+        key = canonical_digest(dict(selection))
+        context = cache.get(key)
+        if context is None:
+            selected = _validate_operator_selection(
+                catalog, selection,
+                catalog_digest_checked=catalog_digest_checked,
+            )
+            catalog_digest_checked = True
+            combination = next(
+                item for item in catalog["combinations"]
+                if item.get("combination_digest")
+                == selected["combination_digest"]
+            )
+            raw_profile = combination.get("yaw_sampling_profile")
+            raw_design = combination.get("state_space_design_profile")
+            context = {
+                "selection": selected,
+                "domain": _operator_pose_domain(catalog, selected),
+                "profile": (
+                    None if raw_profile is None
+                    else validate_yaw_sampling_profile(raw_profile)
+                ),
+                "design": (
+                    None if raw_design is None
+                    else validate_state_space_design_profile(raw_design)
+                ),
+            }
+            cache[key] = context
+        result.append(context)
+    return result
+
+
+def validate_yaw_preserving_transitions(
+    catalog: Mapping[str, Any], selections: Sequence[Mapping[str, Any]],
+    poses: Sequence[Mapping[str, Any]],
+) -> list[dict[str, Any]]:
+    """Validate an ordered cycle with one catalog check and cached endpoints."""
+    if (
+        not isinstance(poses, Sequence) or isinstance(poses, (str, bytes))
+        or not poses or len(selections) != len(poses)
+    ):
+        raise ContractError("OPERATOR_WORKSPACE_CYCLE_ENDPOINT")
+    contexts = _yaw_selection_contexts(catalog, selections)
+    result = [
+        _canonical_operator_pose(
+            contexts[0]["selection"], contexts[0]["domain"], poses[0],
+        )
+    ]
+    for target, context in zip(poses[1:], contexts[1:]):
+        result.append(_validate_yaw_preserving_transition(
+            context["selection"], context["domain"], result[-1], target,
+        ))
+    return result
+
+
+def _spatial_cell_index(
+    polygon: Sequence[Sequence[float]], point: Sequence[float], *,
+    columns: int, rows: int,
+) -> int:
+    if not point_in_convex_polygon(point, polygon):
+        raise ContractError("OPERATOR_ASSISTED_DOMAIN")
+    (x_low, x_high), (y_low, y_high) = polygon_bounds(polygon)
+    x, y = float(point[0]), float(point[1])
+    column = min(int((x - x_low) / ((x_high - x_low) / columns)), columns - 1)
+    row = min(int((y - y_low) / ((y_high - y_low) / rows)), rows - 1)
+    return row * columns + column
+
+
+def _balanced_yaw_endpoint_allocation(
+    rank_order: Sequence[int], endpoint_capacities: Mapping[object, Mapping[int, int]],
+    episode_keys: Sequence[object], *, start: int, count: int,
+    require_first: bool,
+) -> dict[int, dict[object, int]]:
+    """Balance yaw counts while respecting each endpoint's cell capacity."""
+    ranks = tuple(rank_order)
+    route_keys = tuple(endpoint_capacities)
+    if (
+        not ranks or not 1 <= len(route_keys) <= 2 or count < 1 or start < 0
+        or start + count > len(episode_keys)
+    ):
+        raise ContractError("OPERATOR_YAW_PROFILE_CHAIN")
+    segment = episode_keys[start:start + count]
+    if any(key not in route_keys for key in segment):
+        raise ContractError("OPERATOR_YAW_PROFILE_CHAIN")
+    required = {
+        key: segment.count(key)
+        for key in route_keys
+    }
+    first_endpoint_index = route_keys.index(segment[0])
+    suffix_capacity = [
+        {
+            key: sum(
+                endpoint_capacities[key][rank] for rank in ranks[index:]
+            )
+            for key in route_keys
+        }
+        for index in range(len(ranks) + 1)
+    ]
+
+    @functools.lru_cache(maxsize=None)
+    def solve(
+        rank_index: int, used: tuple[int, ...],
+    ) -> tuple[int, tuple[tuple[int, ...], ...]] | None:
+        if rank_index == len(ranks):
+            return (
+                (0, ())
+                if all(
+                    used[index] == required[key]
+                    for index, key in enumerate(route_keys)
+                ) else None
+            )
+        rank = ranks[rank_index]
+        best = None
+        choices = itertools.product(*(
+            range(min(endpoint_capacities[key][rank], required[key]) + 1)
+            for key in route_keys
+        ))
+        for allocation in choices:
+            if (
+                require_first and rank_index == 0
+                and not allocation[first_endpoint_index]
+            ):
+                continue
+            updated = tuple(
+                used[index] + allocation[index]
+                for index in range(len(route_keys))
+            )
+            if any(
+                updated[index] > required[key]
+                or updated[index] + suffix_capacity[rank_index + 1][key]
+                < required[key]
+                for index, key in enumerate(route_keys)
+            ):
+                continue
+            suffix = solve(rank_index + 1, updated)
+            if suffix is None:
+                continue
+            quota = sum(allocation)
+            score = (quota * len(ranks) - count) ** 2 + suffix[0]
+            candidate = (score, (allocation, *suffix[1]))
+            if best is None or candidate < best:
+                best = candidate
+        return best
+
+    solution = solve(0, (0,) * len(route_keys))
+    if solution is None:
+        raise ContractError("OPERATOR_YAW_PROFILE_CHAIN")
+    return {
+        rank: dict(zip(route_keys, allocation))
+        for rank, allocation in zip(ranks, solution[1])
+    }
+
+
+def _single_run_yaw_schedule(
+    rank_order: Sequence[int], endpoint_capacities: Mapping[object, Mapping[int, int]],
+    episode_keys: Sequence[object], samples: Sequence[Mapping[str, Any]], *,
+    start: int, count: int, current_yaw: float, require_first: bool,
+) -> tuple[tuple[int, int], ...] | None:
+    """Find a minimum-travel one-run-per-yaw schedule for small yaw designs."""
+    ranks = tuple(rank_order)
+    if len(ranks) > 6:
+        return None
+    route_keys = tuple(endpoint_capacities)
+    segment = tuple(episode_keys[start:start + count])
+    prefix = {key: [0] for key in route_keys}
+    for key in segment:
+        for route_key in route_keys:
+            prefix[route_key].append(
+                prefix[route_key][-1] + int(key == route_key)
+            )
+    yaw_by_rank = {
+        rank: float(samples[rank]["source_object_yaw_deg"])
+        for rank in ranks
+    }
+
+    def consumed(key: object, offset: int, length: int) -> int:
+        return prefix[key][offset + length] - prefix[key][offset]
+
+    @functools.lru_cache(maxsize=None)
+    def solve(
+        offset: int, pending: frozenset[int], previous_rank: int,
+    ) -> tuple[int, int, float, tuple[tuple[int, int], ...]] | None:
+        if offset == count:
+            return len(pending) * count * count, 0, 0.0, ()
+        candidates = (
+            (ranks[0],)
+            if require_first and offset == 0 else
+            tuple(rank for rank in ranks if rank in pending)
+        )
+        best = None
+        for rank in candidates:
+            if rank not in pending:
+                continue
+            available = pending - {rank}
+            maximum = 0
+            for length in range(1, count - offset + 1):
+                if any(
+                    consumed(key, offset, length)
+                    > endpoint_capacities[key][rank]
+                    for key in route_keys
+                ):
+                    break
+                maximum = length
+            for length in range(1, maximum + 1):
+                stop = offset + length
+                if any(
+                    prefix[key][count] - prefix[key][stop]
+                    > sum(
+                        endpoint_capacities[key][candidate]
+                        for candidate in available
+                    )
+                    for key in route_keys
+                ):
+                    continue
+                suffix = solve(stop, available, rank)
+                if suffix is None:
+                    continue
+                prior_yaw = (
+                    current_yaw if previous_rank < 0
+                    else yaw_by_rank[previous_rank]
+                )
+                candidate = (
+                    (length * len(ranks) - count) ** 2 + suffix[0],
+                    1 + suffix[1],
+                    abs(yaw_by_rank[rank] - prior_yaw) + suffix[2],
+                    ((rank, length), *suffix[3]),
+                )
+                if best is None or candidate < best:
+                    best = candidate
+        return best
+
+    solution = solve(0, frozenset(ranks), -1)
+    return None if solution is None else solution[3]
+
+
+def _yaw_block_bindings(
+    catalog: Mapping[str, Any], contexts: Sequence[Mapping[str, Any]],
+    yaw_sampling_seed: int | None, *, repeat: int,
+    anchor_pose: Mapping[str, Any],
+) -> list[dict[str, Any] | None]:
+    if type(repeat) is not int or not 1 <= repeat <= 100:
+        raise ContractError("OPERATOR_ASSISTED_REPEAT")
+    if yaw_sampling_seed is None:
+        return [None for _context in contexts]
+    if (
+        isinstance(yaw_sampling_seed, bool)
+        or not isinstance(yaw_sampling_seed, int)
+        or not 0 <= yaw_sampling_seed <= MAX_DERIVED_SEED
+    ):
+        raise ContractError("OPERATOR_YAW_SAMPLING_SEED")
+    profiles = [context["profile"] for context in contexts]
+    designs = [context["design"] for context in contexts]
+    available = [profile for profile in profiles if profile is not None]
+    if not available:
+        return [None for _context in contexts]
+    profile_digest = available[0]["profile_digest"]
+    available_designs = [design for design in designs if design is not None]
+    design_digest = (
+        available_designs[0]["profile_digest"] if available_designs else None
+    )
+    tasks = {context["selection"]["task_id"] for context in contexts}
+    if (
+        len(available) != len(profiles)
+        or len(available_designs) != len(designs)
+        or any(
+            profile["profile_digest"] != profile_digest
+            for profile in available
+        )
+        or any(
+            design["profile_digest"] != design_digest
+            for design in available_designs
+        )
+        or len(tasks) != 1
+    ):
+        raise ContractError("OPERATOR_YAW_PROFILE_CHAIN")
+    design = available_designs[0]
+    if design["yaw_sampling_profile_digest"] != profile_digest:
+        raise ContractError("OPERATOR_YAW_PROFILE_CHAIN")
+    task_id = next(iter(tasks))
+    route = []
+    route_contexts = []
+    for context in contexts:
+        endpoint = {
+            "workspace_id": context["selection"]["workspace_id"],
+            "frame_id": context["selection"]["frame_id"],
+            "domain_digest": context["domain"]["domain_digest"],
+        }
+        if endpoint not in route:
+            route.append(endpoint)
+            route_contexts.append(context)
+    columns = design["spatial_strata"]["columns"]
+    rows = design["spatial_strata"]["rows"]
+    spatial_count = columns * rows
+    episode_count = len(contexts) - int(task_id == "pick_place")
+    if episode_count < 1:
+        raise ContractError("OPERATOR_YAW_PROFILE_CHAIN")
+    first_context = route_contexts[0]
+    source = _canonical_operator_pose(
+        first_context["selection"], first_context["domain"], anchor_pose,
+    )
+    anchor_yaw = float(source["yaw_deg"])
+    yaw_count = design["yaw_cdf_strata"]
+    anchor_canonical_yaw = canonical_yaw_for_profile(
+        available[0], anchor_yaw,
+    )
+    anchor_rank = min(
+        int(yaw_cdf_quantile(available[0], anchor_canonical_yaw) * yaw_count),
+        yaw_count - 1,
+    )
+    route_keys = [
+        (
+            endpoint["workspace_id"], endpoint["frame_id"],
+            endpoint["domain_digest"],
+        )
+        for endpoint in route
+    ]
+    route_anchor_cells = {}
+    for index, (key, context) in enumerate(zip(route_keys, route_contexts)):
+        endpoint_anchor = (
+            source if index == 0
+            else _selected_cell_pose(catalog, context["selection"])
+        )
+        endpoint_sheet_xy = rotate_xy(
+            (float(endpoint_anchor["x_mm"]), float(endpoint_anchor["y_mm"])),
+            float(endpoint_anchor["yaw_deg"]),
+        )
+        route_anchor_cells[key] = _spatial_cell_index(
+            context["domain"]["coverage_region"][
+                "polygon_local_xy_mm"
+            ],
+            endpoint_sheet_xy, columns=columns, rows=rows,
+        )
+    episode_keys = [
+        (
+            context["selection"]["workspace_id"],
+            context["selection"]["frame_id"],
+            context["domain"]["domain_digest"],
+        )
+        for context in contexts[:episode_count]
+    ]
+    # Balance each S-episode prefix across yaw strata.  A complete design sweep
+    # still gives every endpoint S source states, so alternating pick-place
+    # reuses the same K samples for one prefix per endpoint.
+    prefix_capacity = spatial_count * repeat
+    sweep_capacity = prefix_capacity * len(route)
+    sweep_count = math.ceil(episode_count / sweep_capacity)
+    result: list[dict[str, Any] | None] = []
+    current_yaw = anchor_yaw
+    for sweep_index in range(sweep_count):
+        samples = sample_yaw_cdf_strata(
+            available[0], sampling_seed=yaw_sampling_seed,
+            sweep_identity={
+                "state_space_design_profile_digest": design_digest,
+                "task_id": task_id,
+                "workspace_route": route,
+                "spatial_sweep_index": sweep_index,
+                "anchor_pose": source,
+            },
+            strata_count=yaw_count,
+            conditioned_yaw_deg=anchor_yaw if sweep_index == 0 else None,
+        )
+        remaining = {item["sample_rank"] for item in samples}
+        rank_order = []
+        ordering_yaw = current_yaw
+        if sweep_index == 0:
+            rank_order.append(anchor_rank)
+            remaining.remove(anchor_rank)
+        while remaining:
+            rank = min(remaining, key=lambda candidate: (
+                abs(
+                    samples[candidate]["source_object_yaw_deg"] - ordering_yaw
+                ),
+                candidate,
+            ))
+            rank_order.append(rank)
+            remaining.remove(rank)
+            ordering_yaw = samples[rank]["source_object_yaw_deg"]
+        endpoint_capacities = {
+            key: {
+                rank: rotating_balanced_yaw_ranks(
+                    spatial_count, yaw_count, sweep_index=sweep_index,
+                    anchor_cell_index=anchor_cell,
+                    anchor_yaw_rank=anchor_rank,
+                ).count(rank) * repeat
+                for rank in rank_order
+            }
+            for key, anchor_cell in route_anchor_cells.items()
+        }
+        remaining_count = min(
+            sweep_capacity, episode_count - len(result),
+        )
+        schedule = _single_run_yaw_schedule(
+            rank_order, endpoint_capacities, episode_keys, samples,
+            start=len(result), count=remaining_count,
+            current_yaw=current_yaw,
+            require_first=sweep_index == 0 and not result,
+        )
+        if schedule is not None:
+            for rank, quota in schedule:
+                result.extend(
+                    copy.deepcopy(samples[rank]) for _index in range(quota)
+                )
+                current_yaw = samples[rank]["source_object_yaw_deg"]
+            continue
+        # Balance even a short campaign across CDF strata, then keep each yaw
+        # for the longest endpoint-safe run.  A mathematically incompatible
+        # initial anchor may require one later return to that same yaw.
+        allocation = _balanced_yaw_endpoint_allocation(
+            rank_order, endpoint_capacities, episode_keys,
+            start=len(result), count=remaining_count,
+            require_first=sweep_index == 0 and not result,
+        )
+        remaining = copy.deepcopy(allocation)
+        current_rank = rank_order[0] if sweep_index == 0 and not result else None
+        segment = episode_keys[len(result):len(result) + remaining_count]
+        for offset, key in enumerate(segment):
+            if current_rank is None or remaining[current_rank][key] == 0:
+                candidates = [
+                    rank for rank in rank_order if remaining[rank][key] > 0
+                ]
+                if not candidates:
+                    raise ContractError("OPERATOR_YAW_PROFILE_CHAIN")
+
+                def run_length(rank: int) -> int:
+                    budget = copy.deepcopy(remaining[rank])
+                    length = 0
+                    for future_key in segment[offset:]:
+                        if budget[future_key] == 0:
+                            break
+                        budget[future_key] -= 1
+                        length += 1
+                    return length
+
+                current_rank = min(candidates, key=lambda rank: (
+                    -run_length(rank),
+                    abs(
+                        samples[rank]["source_object_yaw_deg"] - current_yaw
+                    ),
+                    rank_order.index(rank),
+                ))
+            result.append(copy.deepcopy(samples[current_rank]))
+            remaining[current_rank][key] -= 1
+            current_yaw = samples[current_rank]["source_object_yaw_deg"]
+        if any(
+            count_left
+            for endpoint_counts in remaining.values()
+            for count_left in endpoint_counts.values()
+        ):
+            raise ContractError("OPERATOR_YAW_PROFILE_CHAIN")
+    result = result[:episode_count]
+    if task_id == "pick_place":
+        result.append(copy.deepcopy(result[-1]))
+    return result
+
+
+def project_yaw_sample_bindings(
+    catalog: Mapping[str, Any], selections: Sequence[Mapping[str, Any]],
+    poses: Sequence[Mapping[str, Any]], yaw_sampling_seed: int | None, *,
+    repeat: int = 1,
+) -> list[dict[str, Any] | None]:
+    """Project one seeded yaw per complete object-safe spatial block."""
+    if (
+        not isinstance(poses, Sequence) or isinstance(poses, (str, bytes))
+        or not poses or len(selections) != len(poses)
+    ):
+        raise ContractError("OPERATOR_YAW_PROFILE_CHAIN")
+    contexts = _yaw_selection_contexts(catalog, selections)
+    bindings = _yaw_block_bindings(
+        catalog, contexts, yaw_sampling_seed, repeat=repeat,
+        anchor_pose=poses[0],
+    )
+    if any(
+        binding is not None and abs(
+            normalize_yaw_deg(pose["yaw_deg"])
+            - normalize_yaw_deg(binding["source_object_yaw_deg"])
+        ) > 1e-9
+        for pose, binding in zip(poses, bindings)
+    ):
+        raise ContractError("OPERATOR_YAW_POSE_BINDING")
+    result = []
+    for pose, binding, context in zip(poses, bindings, contexts):
+        cell = _project_state_space_cell(
+            context["selection"], context["domain"], context["design"], pose,
+        )
+        if binding is None:
+            result.append(None)
+            continue
+        if cell is None:
+            raise ContractError("OPERATOR_YAW_PROFILE_CHAIN")
+        result.append(bind_yaw_sample_to_state_space(
+            binding,
+            state_space_design_profile=context["design"],
+            spatial_cell_index=cell["spatial_cell_index"],
+            spatial_row=cell["spatial_row"],
+            spatial_column=cell["spatial_column"],
+        ))
+    return result
+
+
 def _operator_pose_domain(
     catalog: Mapping[str, Any], selected: Mapping[str, Any],
 ) -> Mapping[str, Any]:
@@ -941,7 +1673,12 @@ def _operator_pose_domain(
         or region.get("coordinate_contract")
         != "SHEET_XY_EQUALS_RZ_YAW_TIMES_LOCAL_XY"
         or not isinstance(region.get("strata"), Mapping)
-        or region["strata"] != {"columns": 5, "rows": 3}
+        or set(region["strata"]) != {"columns", "rows"}
+        or type(region["strata"].get("columns")) is not int
+        or type(region["strata"].get("rows")) is not int
+        or not 1 <= region["strata"]["columns"] <= 100
+        or not 1 <= region["strata"]["rows"] <= 100
+        or region["strata"]["columns"] * region["strata"]["rows"] > 100
         or domain.get("domain_digest") != canonical_digest({
             key: value for key, value in domain.items() if key != "domain_digest"
         })
@@ -1003,7 +1740,10 @@ def _canonical_operator_pose(
             raise ContractError("OPERATOR_POSE_NUMBER")
         numbers.append(float(value))
     yaw, x_mm, y_mm = numbers
-    yaw = normalize_yaw_deg(yaw)
+    yaw = (
+        0.0 if yaw == 0.0 else yaw
+        if -180.0 <= yaw < 180.0 else normalize_yaw_deg(yaw)
+    )
     region = domain["coverage_region"]
     try:
         safe_polygon = safe_convex_polygon(
@@ -1036,12 +1776,93 @@ def validate_operator_pose(
     )
 
 
+def _validate_yaw_preserving_transition(
+    destination_selection: Mapping[str, Any], domain: Mapping[str, Any],
+    source_pose: Mapping[str, Any], destination_pose: Mapping[str, Any],
+) -> dict[str, Any]:
+    target = _canonical_operator_pose(
+        destination_selection, domain, destination_pose,
+    )
+    recorded = yaw_preserving_destination(source_pose, target)
+    region = domain["coverage_region"]
+    try:
+        feasible = safe_convex_polygon_for_yaws(
+            polygon=region["polygon_local_xy_mm"],
+            object_size_xy_mm=region["object_size_xy_mm"],
+            uncertainty_mm=region["uncertainty_mm"],
+            yaw_degs=(recorded["yaw_deg"], target["yaw_deg"]),
+        )
+        sheet_xy = rotate_xy(
+            (recorded["x_mm"], recorded["y_mm"]), recorded["yaw_deg"],
+        )
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ContractError("OPERATOR_POSE_DOMAIN") from exc
+    if not point_in_convex_polygon(sheet_xy, feasible):
+        raise ContractError(
+            "JOB_COORDINATE_BOUNDS",
+            str((recorded["x_mm"], recorded["y_mm"])),
+        )
+    return target
+
+
+def validate_yaw_preserving_transition(
+    catalog: Mapping[str, Any], destination_selection: Mapping[str, Any],
+    source_pose: Mapping[str, Any], destination_pose: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Validate one recorded release at both current and next object yaws."""
+    selected = validate_operator_selection(catalog, destination_selection)
+    return _validate_yaw_preserving_transition(
+        selected, _operator_pose_domain(catalog, selected),
+        source_pose, destination_pose,
+    )
+
+
 def project_operator_pose_domain(
     catalog: Mapping[str, Any], selection: Mapping[str, Any],
 ) -> dict[str, Any]:
     """Project the validated local pose domain for one exact endpoint."""
     selected = validate_operator_selection(catalog, selection)
     return copy.deepcopy(dict(_operator_pose_domain(catalog, selected)))
+
+
+def _project_state_space_cell(
+    selected: Mapping[str, Any], domain: Mapping[str, Any],
+    design: Mapping[str, Any] | None, pose: Mapping[str, Any],
+) -> dict[str, Any] | None:
+    checked_pose = _canonical_operator_pose(selected, domain, pose)
+    if design is None:
+        return None
+    sheet_xy = rotate_xy(
+        (float(checked_pose["x_mm"]), float(checked_pose["y_mm"])),
+        float(checked_pose["yaw_deg"]),
+    )
+    columns = design["spatial_strata"]["columns"]
+    rows = design["spatial_strata"]["rows"]
+    index = _spatial_cell_index(
+        domain["coverage_region"]["polygon_local_xy_mm"], sheet_xy,
+        columns=columns, rows=rows,
+    )
+    row, column = divmod(index, columns)
+    return {
+        "state_space_design_profile_id": design[
+            "state_space_design_profile_id"
+        ],
+        "state_space_design_profile_digest": design["profile_digest"],
+        "spatial_cell_index": index,
+        "spatial_row": row,
+        "spatial_column": column,
+    }
+
+
+def project_state_space_cell(
+    catalog: Mapping[str, Any], selection: Mapping[str, Any],
+    pose: Mapping[str, Any],
+) -> dict[str, Any] | None:
+    """Project one pose into the selected design's fixed workspace cell."""
+    context = _yaw_selection_contexts(catalog, [selection])[0]
+    return _project_state_space_cell(
+        context["selection"], context["domain"], context["design"], pose,
+    )
 
 
 def resolve_workspace_cycle_selections(
@@ -1144,16 +1965,367 @@ def _selected_cell_pose(
     return validate_operator_pose(catalog, selection, pose)
 
 
+def _project_endpoint_yaw_sequence(
+    selection: Mapping[str, Any], domain: Mapping[str, Any],
+    anchor: Mapping[str, Any], yaw_bindings: Sequence[Mapping[str, Any]], *,
+    yaw_profile: Mapping[str, Any], design_profile: Mapping[str, Any],
+    normalized_seed: int, repeat: int,
+) -> list[dict[str, Any]]:
+    """Assign fixed workspace cells first, then sample each yaw-safe intersection."""
+    if not yaw_bindings:
+        return []
+    region = domain["coverage_region"]
+    columns = design_profile["spatial_strata"]["columns"]
+    rows = design_profile["spatial_strata"]["rows"]
+    strata_count = columns * rows
+    yaw_count = design_profile["yaw_cdf_strata"]
+    source = _canonical_operator_pose(selection, domain, anchor)
+    source_sheet_xy = rotate_xy(
+        (float(source["x_mm"]), float(source["y_mm"])),
+        float(source["yaw_deg"]),
+    )
+    partition_polygon = region["polygon_local_xy_mm"]
+    anchor_cell = _spatial_cell_index(
+        partition_polygon, source_sheet_xy, columns=columns, rows=rows,
+    )
+    checked_bindings = [
+        validate_yaw_sample_binding(binding, profile=yaw_profile)
+        for binding in yaw_bindings
+    ]
+    if any(binding["design_size"] != yaw_count for binding in checked_bindings):
+        raise ContractError("OPERATOR_YAW_PROFILE_CHAIN")
+    anchor_rank = checked_bindings[0]["sample_rank"]
+    result = []
+    offset = 0
+    sweep_index = 0
+    sweep_samples: dict[int, str] = {}
+    sweep_poses: dict[int, list[dict[str, Any]]] = {}
+    sweep_offsets: dict[int, int] = {}
+    current_sheet_xy = source_sheet_xy
+    while offset < len(checked_bindings):
+        binding = checked_bindings[offset]
+        yaw = float(binding["source_object_yaw_deg"])
+        end = offset + 1
+        while (
+            end < len(checked_bindings)
+            and checked_bindings[end]["binding_digest"]
+            == binding["binding_digest"]
+        ):
+            end += 1
+        block_length = end - offset
+        rank = binding["sample_rank"]
+        sample_identity = binding["sample_identity_digest"]
+        if (
+            rank in sweep_samples
+            and sweep_samples[rank] != sample_identity
+        ):
+            if (
+                len(sweep_samples) != yaw_count
+                or any(
+                    sweep_offsets.get(candidate) != len(
+                        sweep_poses.get(candidate, []),
+                    )
+                    for candidate in range(yaw_count)
+                )
+            ):
+                raise ContractError("OPERATOR_ASSISTED_STRATUM_EXHAUSTION")
+            sweep_index += 1
+            sweep_samples.clear()
+            sweep_poses.clear()
+            sweep_offsets.clear()
+        sweep_samples[rank] = sample_identity
+        if rank not in sweep_poses:
+            assigned_cells = {
+                index for index, assigned_rank in enumerate(
+                    rotating_balanced_yaw_ranks(
+                        strata_count, yaw_count, sweep_index=sweep_index,
+                        anchor_cell_index=anchor_cell,
+                        anchor_yaw_rank=anchor_rank,
+                    )
+                )
+                if assigned_rank == rank
+            }
+            first_block = not result
+            try:
+                safe_polygon = safe_convex_polygon(
+                    polygon=partition_polygon,
+                    object_size_xy_mm=region["object_size_xy_mm"],
+                    uncertainty_mm=region["uncertainty_mm"], yaw_deg=yaw,
+                )
+                samples = stratified_convex_polygon_samples(
+                    polygon=safe_polygon, columns=columns, rows=rows,
+                    partition_polygon=partition_polygon,
+                    start_xy=current_sheet_xy, count=strata_count,
+                    seed=normalized_seed,
+                    pass_index=sweep_index * yaw_count + rank,
+                )
+            except ValueError as exc:
+                raise ContractError("OPERATOR_ASSISTED_DOMAIN") from exc
+            by_cell = {
+                row * columns + column: (sheet_x, sheet_y)
+                for sheet_x, sheet_y, row, column in samples
+            }
+            if not assigned_cells <= set(by_cell):
+                raise ContractError("OPERATOR_ASSISTED_STRATUM_EXHAUSTION")
+            block = []
+            if first_block:
+                if (
+                    rank != anchor_rank or anchor_cell not in assigned_cells
+                    or not point_in_convex_polygon(
+                        source_sheet_xy, safe_polygon,
+                    )
+                ):
+                    raise ContractError("OPERATOR_ASSISTED_DOMAIN")
+                local_x, local_y = rotate_xy(source_sheet_xy, -yaw)
+                block.append(_canonical_operator_pose(selection, domain, {
+                    "place_id": selection["workspace_id"], "yaw_deg": yaw,
+                    "x_mm": local_x, "y_mm": local_y,
+                }))
+            for sheet_x, sheet_y, row, column in samples:
+                cell = row * columns + column
+                if (
+                    cell not in assigned_cells
+                    or first_block and cell == anchor_cell
+                ):
+                    continue
+                local_x, local_y = rotate_xy((sheet_x, sheet_y), -yaw)
+                block.append(_canonical_operator_pose(
+                    selection, domain,
+                    {
+                        "place_id": selection["workspace_id"],
+                        "yaw_deg": yaw, "x_mm": local_x, "y_mm": local_y,
+                    },
+                ))
+            if len(block) != len(assigned_cells) or not block:
+                raise ContractError("OPERATOR_ASSISTED_STRATUM_EXHAUSTION")
+            sweep_poses[rank] = [
+                copy.deepcopy(pose)
+                for pose in block for _repeat_index in range(repeat)
+            ]
+            sweep_offsets[rank] = 0
+        start = sweep_offsets[rank]
+        stop = start + block_length
+        expanded = sweep_poses[rank]
+        if stop > len(expanded):
+            raise ContractError("OPERATOR_ASSISTED_STRATUM_EXHAUSTION")
+        result.extend(copy.deepcopy(expanded[start:stop]))
+        sweep_offsets[rank] = stop
+        last = expanded[stop - 1]
+        current_sheet_xy = rotate_xy(
+            (float(last["x_mm"]), float(last["y_mm"])),
+            float(last["yaw_deg"]),
+        )
+        offset = end
+    if len(result) != len(checked_bindings):
+        raise ContractError("OPERATOR_ASSISTED_STRATUM_EXHAUSTION")
+    return result
+
+
+def _project_terminal_endpoint_pose(
+    selection: Mapping[str, Any], domain: Mapping[str, Any],
+    anchor: Mapping[str, Any], binding: Mapping[str, Any], *,
+    yaw_profile: Mapping[str, Any], design_profile: Mapping[str, Any],
+    normalized_seed: int,
+) -> dict[str, Any]:
+    """Place the explicit N+1 destination without counting it as a source cell."""
+    checked = validate_yaw_sample_binding(binding, profile=yaw_profile)
+    source = _canonical_operator_pose(selection, domain, anchor)
+    source_sheet_xy = rotate_xy(
+        (float(source["x_mm"]), float(source["y_mm"])),
+        float(source["yaw_deg"]),
+    )
+    yaw = float(checked["source_object_yaw_deg"])
+    local_x, local_y = rotate_xy(source_sheet_xy, -yaw)
+    candidate = {
+        "place_id": selection["workspace_id"], "yaw_deg": yaw,
+        "x_mm": local_x, "y_mm": local_y,
+    }
+    try:
+        return _canonical_operator_pose(selection, domain, candidate)
+    except ContractError as exc:
+        if exc.code not in {"JOB_COORDINATE_BOUNDS", "OPERATOR_POSE_DOMAIN"}:
+            raise
+    region = domain["coverage_region"]
+    try:
+        safe_polygon = safe_convex_polygon(
+            polygon=region["polygon_local_xy_mm"],
+            object_size_xy_mm=region["object_size_xy_mm"],
+            uncertainty_mm=region["uncertainty_mm"], yaw_deg=yaw,
+        )
+        sample = stratified_convex_polygon_samples(
+            polygon=safe_polygon,
+            partition_polygon=region["polygon_local_xy_mm"],
+            columns=design_profile["spatial_strata"]["columns"],
+            rows=design_profile["spatial_strata"]["rows"],
+            start_xy=source_sheet_xy, count=1, seed=normalized_seed,
+            pass_index=int(checked["sample_identity_digest"][-8:], 16),
+        )[0]
+    except (ValueError, IndexError) as exc:
+        raise ContractError("OPERATOR_ASSISTED_DOMAIN") from exc
+    local_x, local_y = rotate_xy(sample[:2], -yaw)
+    return _canonical_operator_pose(selection, domain, {
+        "place_id": selection["workspace_id"], "yaw_deg": yaw,
+        "x_mm": local_x, "y_mm": local_y,
+    })
+
+
+def _project_transition_safe_cycle(
+    catalog: Mapping[str, Any], cycle: Sequence[Mapping[str, Any]],
+    poses: Sequence[Mapping[str, Any]], *, normalized_seed: int,
+    contexts: Sequence[Mapping[str, Any]] | None = None,
+) -> list[dict[str, Any]]:
+    """Keep each destination cell feasible at both recorded and next yaws."""
+    if len(cycle) != len(poses) or not poses:
+        raise ContractError("OPERATOR_WORKSPACE_CYCLE_ENDPOINT")
+    contexts = (
+        _yaw_selection_contexts(catalog, cycle)
+        if contexts is None else contexts
+    )
+    if len(contexts) != len(cycle):
+        raise ContractError("OPERATOR_WORKSPACE_CYCLE_ENDPOINT")
+    result = [copy.deepcopy(dict(poses[0]))]
+    for index, (pose, context) in enumerate(
+        zip(poses[1:], contexts[1:]), start=1,
+    ):
+        selected, domain = context["selection"], context["domain"]
+        target = _canonical_operator_pose(selected, domain, pose)
+        target_sheet_xy = rotate_xy(
+            (float(target["x_mm"]), float(target["y_mm"])),
+            float(target["yaw_deg"]),
+        )
+        try:
+            _validate_yaw_preserving_transition(
+                selected, domain, result[index - 1], target,
+            )
+        except ContractError as exc:
+            if exc.code != "JOB_COORDINATE_BOUNDS":
+                raise
+        else:
+            result.append(target)
+            continue
+        region = domain["coverage_region"]
+        try:
+            feasible = safe_convex_polygon_for_yaws(
+                polygon=region["polygon_local_xy_mm"],
+                object_size_xy_mm=region["object_size_xy_mm"],
+                uncertainty_mm=region["uncertainty_mm"],
+                yaw_degs=(result[index - 1]["yaw_deg"], target["yaw_deg"]),
+            )
+        except ValueError as exc:
+            raise ContractError("OPERATOR_ASSISTED_DOMAIN") from exc
+        strata = (
+            context["design"]["spatial_strata"]
+            if context["design"] is not None else region["strata"]
+        )
+        columns, rows = strata["columns"], strata["rows"]
+        cell = _spatial_cell_index(
+            region["polygon_local_xy_mm"], target_sheet_xy,
+            columns=columns, rows=rows,
+        )
+        try:
+            samples = stratified_convex_polygon_samples(
+                polygon=feasible,
+                partition_polygon=region["polygon_local_xy_mm"],
+                columns=columns, rows=rows, start_xy=target_sheet_xy,
+                count=columns * rows, seed=normalized_seed,
+                pass_index=index,
+            )
+            sheet_x, sheet_y = next(
+                (x, y) for x, y, row, column in samples
+                if row * columns + column == cell
+            )
+        except (StopIteration, ValueError) as exc:
+            raise ContractError(
+                "OPERATOR_ASSISTED_STRATUM_EXHAUSTION",
+            ) from exc
+        local_x, local_y = rotate_xy(
+            (sheet_x, sheet_y), -float(target["yaw_deg"]),
+        )
+        result.append(_canonical_operator_pose(selected, domain, {
+            "place_id": selected["workspace_id"],
+            "yaw_deg": target["yaw_deg"],
+            "x_mm": local_x, "y_mm": local_y,
+        }))
+    return result
+
+
 def project_workspace_cycle_poses(
     catalog: Mapping[str, Any], selection: Mapping[str, Any],
     source_pose: Mapping[str, Any], requested_count: int, *, repeat: int = 1,
-    normalized_seed: int = 0,
+    normalized_seed: int = 0, yaw_sampling_seed: int | None = None,
 ) -> list[dict[str, Any]]:
     """Project N+1 A/B poses, validating every pose in its own endpoint."""
+    if (
+        type(normalized_seed) is not int
+        or not 0 <= normalized_seed <= MAX_DERIVED_SEED
+    ):
+        raise ContractError("OPERATOR_ASSISTED_SEED")
     cycle = resolve_workspace_cycle_selections(
         catalog, selection, requested_count, require_executable=False,
     )
     source = validate_operator_pose(catalog, cycle[0], source_pose)
+    if yaw_sampling_seed is not None:
+        contexts = _yaw_selection_contexts(catalog, cycle)
+        if any(context["profile"] is not None for context in contexts):
+            bindings = _yaw_block_bindings(
+                catalog, contexts, yaw_sampling_seed, repeat=repeat,
+                anchor_pose=source,
+            )
+            if any(binding is None for binding in bindings):
+                raise ContractError("OPERATOR_YAW_PROFILE_CHAIN")
+            by_digest: dict[str, list[int]] = {}
+            for index, endpoint in enumerate(cycle):
+                by_digest.setdefault(
+                    endpoint["combination_digest"], [],
+                ).append(index)
+            projected: dict[str, list[dict[str, Any]]] = {}
+            for endpoint_index, endpoint in enumerate(cycle[:2]):
+                digest = endpoint["combination_digest"]
+                indices = by_digest[digest]
+                anchor = source if endpoint_index == 0 else _selected_cell_pose(
+                    catalog, endpoint,
+                )
+                context = contexts[indices[0]]
+                has_terminal_destination = indices[-1] == len(cycle) - 1
+                source_indices = (
+                    indices[:-1] if has_terminal_destination else indices
+                )
+                series = (
+                    _project_endpoint_yaw_sequence(
+                        context["selection"], context["domain"], anchor,
+                        [bindings[index] for index in source_indices],
+                        yaw_profile=context["profile"],
+                        design_profile=context["design"],
+                        normalized_seed=(
+                            normalized_seed + endpoint_index
+                        ) % (MAX_DERIVED_SEED + 1),
+                        repeat=repeat,
+                    )
+                    if source_indices else []
+                )
+                if has_terminal_destination:
+                    series.append(_project_terminal_endpoint_pose(
+                        context["selection"], context["domain"],
+                        series[-1] if series else anchor,
+                        bindings[indices[-1]],
+                        yaw_profile=context["profile"],
+                        design_profile=context["design"],
+                        normalized_seed=(
+                            normalized_seed + endpoint_index
+                        ) % (MAX_DERIVED_SEED + 1),
+                    ))
+                projected[digest] = series
+            offsets = {digest: 0 for digest in projected}
+            result = []
+            for endpoint in cycle:
+                digest = endpoint["combination_digest"]
+                pose = projected[digest][offsets[digest]]
+                offsets[digest] += 1
+                result.append(pose)
+            return _project_transition_safe_cycle(
+                catalog, cycle, result, normalized_seed=normalized_seed,
+                contexts=contexts,
+            )
     series: dict[str, list[dict[str, Any]]] = {}
     offsets: dict[str, int] = {}
     for endpoint_index, endpoint in enumerate(cycle[:2]):
@@ -1166,7 +2338,9 @@ def project_workspace_cycle_poses(
         )
         series[digest] = project_assisted_poses(
             catalog, endpoint, anchor, count, repeat=repeat,
-            normalized_seed=normalized_seed + endpoint_index,
+            normalized_seed=(
+                normalized_seed + endpoint_index
+            ) % (MAX_DERIVED_SEED + 1),
         )
         offsets[digest] = 0
     result = []
@@ -1175,7 +2349,9 @@ def project_workspace_cycle_poses(
         pose = series[digest][offsets[digest]]
         offsets[digest] += 1
         result.append(validate_operator_pose(catalog, endpoint, pose))
-    return result
+    return _project_transition_safe_cycle(
+        catalog, cycle, result, normalized_seed=normalized_seed,
+    )
 
 
 def project_balanced_start_pose_ids(
@@ -1187,7 +2363,8 @@ def project_balanced_start_pose_ids(
         or any(not isinstance(item, str) or not SAFE_ID.fullmatch(item) for item in start_pose_ids)
         or len(set(start_pose_ids)) != len(start_pose_ids)
         or type(requested_count) is not int or not 1 <= requested_count <= 100
-        or type(normalized_seed) is not int or normalized_seed < 0
+        or type(normalized_seed) is not int
+        or not 0 <= normalized_seed <= MAX_DERIVED_SEED
     ):
         raise ContractError("OPERATOR_START_POSE_SEQUENCE")
     ordered = sorted(start_pose_ids)
@@ -1201,15 +2378,24 @@ def project_balanced_start_pose_ids(
 def project_assisted_poses(
     catalog: Mapping[str, Any], selection: Mapping[str, Any],
     source_pose: Mapping[str, Any], requested_count: int, *, repeat: int = 1,
-    normalized_seed: int = 0,
+    normalized_seed: int = 0, yaw_sampling_seed: int | None = None,
 ) -> list[dict[str, Any]]:
     """Stratify continuous poses around the registered A4 grid."""
     if type(requested_count) is not int or not 1 <= requested_count <= 100:
         raise ContractError("OPERATOR_ASSISTED_COUNT")
     if type(repeat) is not int or not 1 <= repeat <= 100:
         raise ContractError("OPERATOR_ASSISTED_REPEAT")
-    if type(normalized_seed) is not int or normalized_seed < 0:
+    if (
+        type(normalized_seed) is not int
+        or not 0 <= normalized_seed <= MAX_DERIVED_SEED
+    ):
         raise ContractError("OPERATOR_ASSISTED_SEED")
+    if yaw_sampling_seed is not None and (
+        isinstance(yaw_sampling_seed, bool)
+        or not isinstance(yaw_sampling_seed, int)
+        or not 0 <= yaw_sampling_seed <= MAX_DERIVED_SEED
+    ):
+        raise ContractError("OPERATOR_YAW_SAMPLING_SEED")
     selected = validate_operator_selection(catalog, selection)
     try:
         domain = _operator_pose_domain(catalog, selected)
@@ -1254,10 +2440,30 @@ def project_assisted_poses(
         spatial_anchors[point_id] = xy
         yaw_anchors.add(float(yaw))
     columns, rows = region["strata"]["columns"], region["strata"]["rows"]
-    if len(spatial_anchors) != columns * rows or not yaw_anchors:
+    design_profile = selected_state_space_design_profile(catalog, selected)
+    if (
+        not yaw_anchors
+        or design_profile is None and len(spatial_anchors) != columns * rows
+    ):
         raise ContractError("OPERATOR_ASSISTED_DOMAIN")
 
     source = _canonical_operator_pose(selected, domain, source_pose)
+    if yaw_sampling_seed is not None:
+        selections = [selected] * requested_count
+        contexts = _yaw_selection_contexts(catalog, selections)
+        if contexts[0]["profile"] is not None:
+            bindings = _yaw_block_bindings(
+                catalog, contexts, yaw_sampling_seed, repeat=repeat,
+                anchor_pose=source,
+            )
+            if any(binding is None for binding in bindings):
+                raise ContractError("OPERATOR_YAW_PROFILE_CHAIN")
+            return _project_endpoint_yaw_sequence(
+                selected, domain, source,
+                bindings, yaw_profile=contexts[0]["profile"],
+                design_profile=contexts[0]["design"],
+                normalized_seed=normalized_seed, repeat=repeat,
+            )
     result = [source]
     seen = {tuple(source[field] for field in POSE_ORDER)}
     unique_count = math.ceil(requested_count / repeat)
@@ -1359,7 +2565,12 @@ __all__ = [
     "AXES", "CATALOG_SCHEMA", "SELECTION_SCHEMA", "load_operator_catalog",
     "project_assisted_poses", "project_balanced_start_pose_ids",
     "project_direct_poses", "project_operator_pose_domain",
+    "project_state_space_cell",
     "project_workspace_cycle_poses",
+    "project_yaw_sample_bindings",
     "resolve_workspace_cycle_selections", "UNBOUND_CAMERA_DEVICE_ID",
+    "selected_state_space_design_profile",
     "validate_operator_pose", "validate_operator_selection",
+    "validate_yaw_preserving_transition",
+    "validate_yaw_preserving_transitions",
 ]

@@ -13,7 +13,10 @@ from typing import Any, Mapping, Sequence
 
 from tools.data_factory.campaign_authoring import validate_collection_campaign_manifest
 from tools.data_factory.cell_state import CellStateStore
-from tools.data_factory.experiment_manifest import validate_fr5_hypothesis
+from tools.data_factory.experiment_manifest import (
+    FIXED_CONTRACT_ENDPOINT_SCHEMAS,
+    validate_fr5_hypothesis,
+)
 from tools.data_factory.motion.pose_snapshot import JOINTS, _validate_snapshot, calibrate_place
 from tools.data_factory.scene_state import SceneStateStore, validate_scene_binding
 from tools.data_factory.seed_campaign import (
@@ -1013,7 +1016,7 @@ def build_test_only_start_binding(
             if item["workspace_id"] == slot_job["place_id"]
             and item["cell_calibration_id"] == slot_job["cell_calibration_id"]
         ), None)
-        if fixed["schema_version"] == "data_factory.fr5_fixed_contract.v2"
+        if fixed["schema_version"] in FIXED_CONTRACT_ENDPOINT_SCHEMAS
         else {
             "cell_calibration_id": fixed["cell_calibration_id"],
             "motion_recipe_digest": fixed["motion_recipe_digest"],
@@ -1033,7 +1036,7 @@ def build_test_only_start_binding(
         or not isinstance(endpoint, Mapping)
         or motion_qualification.get("cell_calibration_id")
         != endpoint["cell_calibration_id"]
-        or fixed["schema_version"] == "data_factory.fr5_fixed_contract.v2"
+        or fixed["schema_version"] in FIXED_CONTRACT_ENDPOINT_SCHEMAS
         and canonical_digest(motion_qualification)
         != endpoint["motion_recipe_digest"]
         or motion_qualification.get("object_profile_id") != fixed["object_profile_id"]

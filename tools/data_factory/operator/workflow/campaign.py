@@ -25,6 +25,7 @@ from tools.data_factory.campaign_authorization import (
 )
 from tools.data_factory.campaign_operator import CampaignOperator
 from tools.data_factory.experiment_manifest import (
+    FIXED_CONTRACT_ENDPOINT_SCHEMAS,
     FR5_TEST_ONLY_FEATURE_CONTRACT,
     build_test_only_feature_contract,
     compile_fr5_hypothesis,
@@ -36,6 +37,14 @@ from tools.data_factory.operator.workflow.intents import (
     OperatorCheckpointPort,
     OperatorIntentCore,
 )
+from tools.data_factory.motion.trajectory_variants import (
+    VARIANT_IDS,
+    validate_trajectory_variant_binding,
+)
+from tools.data_factory.motion.object_reposition import (
+    validate_object_reposition_binding,
+)
+from tools.data_factory.state_space import validate_yaw_sample_binding
 from tools.data_factory.quality.coverage_report import build_coverage_report
 from tools.data_factory import run_job
 from tools.data_factory.task_recipe import (
@@ -72,6 +81,10 @@ LIVE_RUNTIME_MILESTONES = {
     "RECORDER_STARTING": ("기록기 준비", 40, "30 Hz readiness와 writer 상태를 확인합니다."),
     "EXECUTING": ("수집 동작 실행", 50, "로봇 상태·명령·RGB를 동기화해 기록합니다."),
     "RECYCLING": ("수집 구간 완료 및 복구", 70, "녹화를 멈춘 뒤 물체를 다음 시작 상태로 복구합니다."),
+    "OBJECT_REPOSITION_PLANNED": (
+        "다음 물체 자세 계획 확인", 92,
+        "녹화 밖 재배치 계획을 기존 캠페인 결속과 대조했습니다.",
+    ),
     "FINALIZING": ("데이터 저장", 80, "동결된 episode를 commit하고 영상 파일을 마무리합니다."),
     "VALIDATING": ("데이터 품질 검사", 90, "timestamp·drop·provenance·프레임 일치를 검사합니다."),
 }
@@ -135,6 +148,61 @@ def _measurement_for_code(code: str) -> str:
 def _redigest(value: dict[str, Any], field: str) -> dict[str, Any]:
     value[field] = canonical_digest({key: item for key, item in value.items() if key != field})
     return value
+
+
+def _validate_successful_object_reposition_result(
+    value: object, binding: Mapping[str, Any], *,
+    post_scene_digest: object, code: str,
+) -> dict[str, Any]:
+    """Validate the compact successful continuation result at an outer boundary."""
+    try:
+        expected = validate_object_reposition_binding(binding)
+    except ContractError as exc:
+        raise ContractError(code) from exc
+    if not isinstance(value, Mapping) or set(value) != run_job.OBJECT_REPOSITION_RESULT_FIELDS:
+        raise ContractError(code)
+    result = copy.deepcopy(dict(value))
+    response = result.get("execution_response")
+    response_data = response.get("data") if isinstance(response, Mapping) else None
+    transition = (
+        response_data.get("scene_transition")
+        if isinstance(response_data, Mapping) else None
+    )
+    digest_fields = (
+        "plan_digest", "resolved_job_digest", "scene_state_digest",
+        "preapproval_scope_digest", "plan_artifact_digest", "result_digest",
+    )
+    if (
+        expected["start_state"] != "ON_SURFACE"
+        or result.get("schema_version")
+        != "data_factory.object_reposition_result.v2"
+        or result.get("status") != "PASS"
+        or result.get("code") != "PASS"
+        or result.get("parent_run_id") != expected["parent_run_id"]
+        or result.get("continuation_run_id") != expected["continuation_run_id"]
+        or result.get("next_run_id") != expected["next_run_id"]
+        or result.get("object_reposition_binding_digest")
+        != expected["binding_digest"]
+        or any(
+            not isinstance(result.get(field), str)
+            or DIGEST.fullmatch(result[field]) is None
+            for field in digest_fields
+        )
+        or result.get("result_digest") != canonical_digest({
+            key: item for key, item in result.items() if key != "result_digest"
+        })
+        or result.get("scene_state_digest") != post_scene_digest
+        or not isinstance(response, Mapping)
+        or response.get("ok") is not True
+        or response.get("code") != "COMPLETE"
+        or response.get("state") != "COMPLETED"
+        or response.get("run_id") != expected["continuation_run_id"]
+        or response.get("plan_digest") != result.get("plan_digest")
+        or not isinstance(transition, Mapping)
+        or transition.get("scene_state_digest") != result.get("scene_state_digest")
+    ):
+        raise ContractError(code)
+    return result
 
 
 def _campaign_camera_warmup(
@@ -398,6 +466,7 @@ def _build_physical_campaign_contract(
     start_pose_qualifications: Sequence[Mapping[str, Any]] | None = None,
     test_only_gripper_retune_digest: str | None = None,
     qualification_source: str = "SYNTHETIC_TEST_ONLY",
+    motion_recipe: str = "DIRECT",
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     """Compile a finite physical condition domain without execution authority."""
     if (
@@ -406,6 +475,7 @@ def _build_physical_campaign_contract(
         or qualification_source not in {
             "SYNTHETIC_TEST_ONLY", "QUALIFICATION_ARTIFACT",
         }
+        or motion_recipe not in VARIANT_IDS
         or test_only_gripper_retune_digest is not None
         and (
             qualification_source != "SYNTHETIC_TEST_ONLY"
@@ -562,7 +632,11 @@ def _build_physical_campaign_contract(
     )
     fixed = {
         "schema_version": (
-            "data_factory.fr5_fixed_contract.v2" if multi_endpoint
+            "data_factory.fr5_fixed_contract.v4"
+            if multi_endpoint and motion_recipe != "DIRECT"
+            else "data_factory.fr5_fixed_contract.v2" if multi_endpoint
+            else "data_factory.fr5_fixed_contract.v3"
+            if motion_recipe != "DIRECT"
             else "data_factory.fr5_fixed_contract.v1"
         ),
         "robot_system_id": job["robot_system_id"],
@@ -577,17 +651,19 @@ def _build_physical_campaign_contract(
         "cell_calibration_digest": endpoint_bindings[0][
             "cell_calibration_digest"
         ],
-        "motion_recipe": "DIRECT",
+        "motion_recipe": motion_recipe,
         "motion_recipe_digest": motion_digest,
         "pregrasp_digest": canonical_digest({
             "motion_qualification": motion_digest, "phase": "PREGRASP_PTP",
+            "recipe": motion_recipe,
         }),
         "waypoint_digest": canonical_digest({
             "motion_qualification": motion_digest,
             "phases": ["APPROACH_STOP_LIN", "FINAL_APPROACH_LIN", "LIFT_LIN"],
+            "recipe": motion_recipe,
         }),
         "trajectory_digest": canonical_digest({
-            "motion_qualification": motion_digest, "recipe": "DIRECT",
+            "motion_qualification": motion_digest, "recipe": motion_recipe,
             **(
                 {"test_only_gripper_retune": test_only_gripper_retune_digest}
                 if test_only_gripper_retune_digest is not None else {}
@@ -838,6 +914,8 @@ class OperatorConsole:
         gripper_setup_resolution_call: Callable[[Mapping[str, Any]], Mapping[str, Any]] | None = None,
         task_bindings: Sequence[Mapping[str, Any]] | None = None,
         episode_instruction_bindings: Sequence[Mapping[str, Any]] | None = None,
+        yaw_sample_bindings: Sequence[Mapping[str, Any] | None] | None = None,
+        object_reposition_bindings: Sequence[Mapping[str, Any] | None] | None = None,
         initial_block_code: str | None = None,
         campaign_approval_once: bool = False,
         run_id_factory: Callable[[int], str] | None = None,
@@ -978,6 +1056,49 @@ class OperatorConsole:
                 )
             ):
                 raise ContractError("OPERATOR_CONSOLE_TASK_BINDING")
+        if object_reposition_bindings is None:
+            self._object_reposition_bindings = None
+        else:
+            if (
+                not isinstance(object_reposition_bindings, (list, tuple))
+                or len(object_reposition_bindings)
+                != self.campaign_operator.draft["requested_count"]
+            ):
+                raise ContractError("OPERATOR_CONSOLE_REPOSITION_BINDING")
+            self._object_reposition_bindings = [
+                None if item is None
+                else validate_object_reposition_binding(item)
+                for item in object_reposition_bindings
+            ]
+        if yaw_sample_bindings is None:
+            self._yaw_sample_bindings = None
+        else:
+            if (
+                not isinstance(yaw_sample_bindings, (list, tuple))
+                or len(yaw_sample_bindings)
+                != self.campaign_operator.draft["requested_count"]
+            ):
+                raise ContractError("OPERATOR_CONSOLE_YAW_BINDING")
+            self._yaw_sample_bindings = [
+                None if item is None else validate_yaw_sample_binding(item)
+                for item in yaw_sample_bindings
+            ]
+            if self._task_bindings is not None and any(
+                binding is not None
+                and not math.isclose(
+                    float(binding["source_object_yaw_deg"]),
+                    float(next(
+                        spatial["pose"]["yaw_deg"]
+                        for spatial in task["spatial_bindings"]
+                        if spatial["role"] == "SOURCE"
+                    )),
+                    rel_tol=0.0, abs_tol=1e-9,
+                )
+                for binding, task in zip(
+                    self._yaw_sample_bindings, self._task_bindings,
+                )
+            ):
+                raise ContractError("OPERATOR_CONSOLE_YAW_BINDING")
         self._base_projection()
         handlers = {
             "compile_draft": self.compile_draft,
@@ -1144,6 +1265,14 @@ class OperatorConsole:
                     projected["destination_pose"] = copy.deepcopy(
                         destination["pose"],
                     )
+            if self._object_reposition_bindings is not None:
+                reposition = self._object_reposition_bindings[index]
+                if reposition is not None:
+                    projected["object_reposition"] = copy.deepcopy(reposition)
+            if self._yaw_sample_bindings is not None:
+                yaw_sample = self._yaw_sample_bindings[index]
+                if yaw_sample is not None:
+                    projected["yaw_sample_binding"] = copy.deepcopy(yaw_sample)
             result.append(projected)
         return result
 
@@ -1316,6 +1445,48 @@ class OperatorConsole:
         if event.get("run_id") != self.run_id:
             raise ContractError("OPERATOR_CONSOLE_RUNTIME_EVENT")
         label, progress, detail = milestone
+        event_data = event.get("data")
+        reposition_evidence = None
+        if code == "OBJECT_REPOSITION_PLANNED":
+            digest_fields = (
+                "object_reposition_binding_digest",
+                "object_reposition_plan_digest",
+                "object_reposition_plan_artifact_digest",
+                "object_reposition_collision_report_digest",
+                "object_reposition_plan_only_no_motion_digest",
+            )
+            try:
+                expected_reposition = self._expected_object_reposition_binding()
+            except ContractError as exc:
+                raise ContractError("OPERATOR_CONSOLE_RUNTIME_EVENT") from exc
+            if (
+                not isinstance(event_data, Mapping)
+                or not isinstance(expected_reposition, Mapping)
+                or expected_reposition.get("start_state") != "ON_SURFACE"
+                or event_data.get("object_reposition_binding_digest")
+                != expected_reposition.get("binding_digest")
+                or event_data.get("object_reposition_run_id")
+                != expected_reposition.get("continuation_run_id")
+                or not isinstance(event_data.get("object_reposition_run_id"), str)
+                or SAFE_ID.fullmatch(event_data["object_reposition_run_id"]) is None
+                or any(
+                    not isinstance(event_data.get(field), str)
+                    or DIGEST.fullmatch(event_data[field]) is None
+                    for field in digest_fields
+                )
+            ):
+                raise ContractError("OPERATOR_CONSOLE_RUNTIME_EVENT")
+            evidence_fields = (
+                "object_reposition_binding_digest",
+                "object_reposition_run_id",
+                "object_reposition_plan_digest",
+                "object_reposition_plan_artifact_digest",
+                "object_reposition_collision_report_digest",
+                "object_reposition_plan_only_no_motion_digest",
+            )
+            reposition_evidence = {
+                field: event_data[field] for field in evidence_fields
+            }
 
         def change():
             if self._workflow != "RUNNING":
@@ -1324,6 +1495,10 @@ class OperatorConsole:
                 "phase": code, "phase_label": label,
                 "progress": progress, "detail": detail,
             }
+            if reposition_evidence is not None:
+                self._runtime_milestone["evidence"] = copy.deepcopy(
+                    reposition_evidence,
+                )
             recorder = RECORDER_RUNTIME_MILESTONES.get(code)
             if recorder is not None:
                 self._runtime_milestone["recorder"] = dict(recorder)
@@ -1388,16 +1563,212 @@ class OperatorConsole:
             raise ContractError("OPERATOR_CONSOLE_CAMPAIGN_SCOPE_MISMATCH")
         return scope
 
+    def _expected_object_reposition_binding(self) -> dict[str, Any] | None:
+        if self._object_reposition_bindings is None:
+            return None
+        intent = self._active_intent_projection
+        manifest = self.campaign_operator.manifest
+        slots = manifest.get("slots") if isinstance(manifest, Mapping) else None
+        order_index = intent.get("order_index") if isinstance(intent, Mapping) else None
+        if (
+            not isinstance(slots, list)
+            or type(order_index) is not int
+            or order_index != self._run_index
+            or not 0 <= order_index < len(slots)
+            or slots[order_index].get("order_index") != order_index
+            or intent.get("run_id") != self.run_id
+            or intent.get("slot_id") != slots[order_index].get("slot_id")
+            or intent.get("slot_digest") != canonical_digest(slots[order_index])
+        ):
+            raise ContractError("OPERATOR_CONSOLE_CAMPAIGN_SCOPE_MISMATCH")
+        return self._object_reposition_bindings[order_index]
+
+    def _validated_object_reposition_preapproval(
+        self, value: object, *, request: Mapping[str, Any],
+        decision_binding: Mapping[str, Any], episode_binding: Mapping[str, Any],
+        authorization: Mapping[str, Any],
+    ) -> dict[str, Any] | None:
+        expected = self._expected_object_reposition_binding()
+        if expected is None or expected["start_state"] == "HELD_OBJECT":
+            if value is not None:
+                raise ContractError("OPERATOR_CONSOLE_CAMPAIGN_SCOPE_MISMATCH")
+            return None
+        try:
+            scope = run_job._validate_object_reposition_preapproval(value)
+        except ContractError as exc:
+            raise ContractError(
+                "OPERATOR_CONSOLE_CAMPAIGN_SCOPE_MISMATCH",
+            ) from exc
+        manifest = self.campaign_operator.manifest
+        envelope = (
+            self._campaign_envelope
+            if isinstance(self._campaign_envelope, Mapping) else {}
+        )
+        slots = manifest.get("slots") if isinstance(manifest, Mapping) else None
+        intent = self._active_intent_projection
+        order_index = intent.get("order_index") if isinstance(intent, Mapping) else None
+        task = (
+            self._task_bindings[order_index]
+            if self._task_bindings is not None
+            and type(order_index) is int
+            and 0 <= order_index < len(self._task_bindings)
+            else None
+        )
+        destinations = (
+            [
+                item for item in task.get("spatial_bindings", [])
+                if isinstance(item, Mapping) and item.get("role") == "DESTINATION"
+            ]
+            if isinstance(task, Mapping) else []
+        )
+        destination = destinations[0] if len(destinations) == 1 else None
+        fixed = self.campaign_operator.hypothesis.get("fixed_contract")
+        fixed_endpoints = (
+            fixed.get("endpoint_bindings")
+            if isinstance(fixed, Mapping)
+            and fixed.get("schema_version") in FIXED_CONTRACT_ENDPOINT_SCHEMAS
+            else None
+        )
+        if isinstance(fixed_endpoints, list) and isinstance(destination, Mapping):
+            endpoint_matches = [
+                item for item in fixed_endpoints
+                if item.get("workspace_id") == destination.get("workspace_id")
+                and item.get("cell_calibration_id") == destination.get("frame_id")
+            ]
+        elif isinstance(fixed, Mapping) and isinstance(destination, Mapping):
+            endpoint_matches = [{
+                "workspace_id": destination.get("workspace_id"),
+                "cell_calibration_id": fixed.get("cell_calibration_id"),
+                "cell_calibration_digest": fixed.get("cell_calibration_digest"),
+                "motion_recipe_digest": fixed.get("motion_recipe_digest"),
+            }]
+        else:
+            endpoint_matches = []
+        fixed_endpoint = endpoint_matches[0] if len(endpoint_matches) == 1 else None
+        next_slot = (
+            slots[order_index + 1]
+            if isinstance(slots, list)
+            and type(order_index) is int
+            and order_index + 1 < len(slots)
+            else None
+        )
+        expected_endpoint = (
+            {
+                "run_id": expected["next_run_id"],
+                "workspace_id": destination["workspace_id"],
+                "frame_id": destination["frame_id"],
+                "source_pose": copy.deepcopy(expected["source_pose"]),
+                "target_pose": copy.deepcopy(expected["target_pose"]),
+                "sheet_digest": destination["sheet_digest"],
+                "family_digest": destination["family_digest"],
+                "region_binding": copy.deepcopy(destination["region_binding"]),
+                "cell_calibration_digest": fixed_endpoint[
+                    "cell_calibration_digest"
+                ],
+                "motion_qualification_digest": fixed_endpoint[
+                    "motion_recipe_digest"
+                ],
+            }
+            if isinstance(destination, Mapping)
+            and isinstance(fixed_endpoint, Mapping)
+            else None
+        )
+        episode_digest = episode_binding.get("binding_digest")
+        if (
+            expected["start_state"] != "ON_SURFACE"
+            or not isinstance(next_slot, Mapping)
+            or not isinstance(expected_endpoint, Mapping)
+            or destination.get("pose") != expected.get("source_pose")
+            or expected.get("parent_run_id") != request.get("run_id")
+            or expected.get("parent_run_id") != self.run_id
+            or expected.get("next_run_id")
+            != self._run_id_factory(order_index + 1)
+            or not isinstance(episode_digest, str)
+            or DIGEST.fullmatch(episode_digest) is None
+            or episode_digest != canonical_digest({
+                key: item for key, item in episode_binding.items()
+                if key != "binding_digest"
+            })
+            or scope["parent_run_id"] != request.get("run_id")
+            or scope["parent_plan_digest"] != request.get("plan_digest")
+            or scope["parent_preapproval_evidence_digest"]
+            != decision_binding.get("preapproval_evidence_digest")
+            or scope["campaign_authorization_digest"]
+            != authorization.get("authorization_digest")
+            or scope["campaign_envelope_digest"]
+            != envelope.get("envelope_digest")
+            or scope["manifest_digest"] != (
+                manifest.get("manifest_digest")
+                if isinstance(manifest, Mapping) else None
+            )
+            or scope["intent_digest"] != intent.get("intent_digest")
+            or scope["runtime_episode_binding_digest"] != episode_digest
+            or scope["current_slot_digest"] != intent.get("slot_digest")
+            or scope["next_slot"] != next_slot
+            or scope["next_slot_digest"] != canonical_digest(next_slot)
+            or scope["next_slot_endpoint"] != expected_endpoint
+            or scope["next_slot_endpoint_digest"]
+            != canonical_digest(expected_endpoint)
+            or scope["continuation_run_id"]
+            != expected.get("continuation_run_id")
+            or scope["next_run_id"] != expected.get("next_run_id")
+            or scope["object_reposition_binding_digest"]
+            != expected.get("binding_digest")
+        ):
+            raise ContractError("OPERATOR_CONSOLE_CAMPAIGN_SCOPE_MISMATCH")
+        return scope
+
     def _authorized_plan_decision(self, request: Mapping[str, Any]) -> dict[str, Any]:
         authorization = self._campaign_authorization
         binding = request.get("decision_binding") if isinstance(request, Mapping) else None
         episode = binding.get("episode_binding") if isinstance(binding, Mapping) else None
         summary = binding.get("operator_summary") if isinstance(binding, Mapping) else None
+        trajectory = (
+            binding.get("trajectory_variant_binding")
+            if isinstance(binding, Mapping) else None
+        )
+        yaw_sample = (
+            binding.get("yaw_sample_binding")
+            if isinstance(binding, Mapping) else None
+        )
+        precommit_safety = (
+            binding.get("precommit_safety")
+            if isinstance(binding, Mapping) else None
+        )
+        exact_plan_fields = {
+            "trajectory_variant_binding",
+            "trajectory_variant_binding_digest", "yaw_sample_binding",
+            "yaw_sample_binding_digest", "precommit_safety",
+            "plan_envelope_digest", "preapproval_evidence_digest",
+        }
+        exact_plan_present = (
+            isinstance(binding, Mapping)
+            and bool(exact_plan_fields & set(binding))
+        )
+        if exact_plan_present:
+            try:
+                trajectory = validate_trajectory_variant_binding(trajectory)
+            except ContractError as exc:
+                raise ContractError(
+                    "OPERATOR_CONSOLE_CAMPAIGN_SCOPE_MISMATCH",
+                ) from exc
         session = self.session.status() if self.session is not None else None
         scope = (
             {field: copy.deepcopy(episode[field]) for field in EPISODE_SCOPE_FIELDS}
             if isinstance(episode, Mapping) and EPISODE_SCOPE_FIELDS <= set(episode)
             else None
+        )
+        reposition_preapproval = self._validated_object_reposition_preapproval(
+            (
+                binding.get("object_reposition_preapproval")
+                if isinstance(binding, Mapping) else None
+            ),
+            request=request,
+            decision_binding=binding if isinstance(binding, Mapping) else {},
+            episode_binding=episode if isinstance(episode, Mapping) else {},
+            authorization=(
+                authorization if isinstance(authorization, Mapping) else {}
+            ),
         )
         if (
             not isinstance(authorization, Mapping)
@@ -1413,10 +1784,43 @@ class OperatorConsole:
             or not all(isinstance(phase, str) and SAFE_ID.fullmatch(phase) for phase in summary["path"])
             or not all(isinstance(summary.get(field), Mapping) for field in ("speed", "clearance"))
             or not isinstance(summary.get("flow"), Mapping)
+            or exact_plan_present and (
+                not exact_plan_fields <= set(binding)
+                or trajectory.get("binding_digest")
+                != binding.get("trajectory_variant_binding_digest")
+                or trajectory.get("trajectory_variant_id")
+                != self._campaign_envelope.get("motion_recipe")
+                or not isinstance(precommit_safety, Mapping)
+                or precommit_safety.get("approved_plan_digest")
+                != request.get("plan_digest")
+                or not isinstance(binding.get("plan_envelope_digest"), str)
+                or DIGEST.fullmatch(binding["plan_envelope_digest"]) is None
+                or not isinstance(
+                    binding.get("preapproval_evidence_digest"), str,
+                )
+                or DIGEST.fullmatch(
+                    binding["preapproval_evidence_digest"]
+                ) is None
+                or yaw_sample is None
+                and binding.get("yaw_sample_binding_digest") is not None
+                or yaw_sample is not None
+                and (
+                    not isinstance(yaw_sample, Mapping)
+                    or binding.get("yaw_sample_binding_digest")
+                    != yaw_sample.get("binding_digest")
+                )
+            )
             or self._active_episode_scope is not None
             and self._active_episode_scope != scope
         ):
             raise ContractError("OPERATOR_CONSOLE_CAMPAIGN_SCOPE_MISMATCH")
+        if exact_plan_present and yaw_sample is not None:
+            try:
+                yaw_sample = validate_yaw_sample_binding(yaw_sample)
+            except ContractError as exc:
+                raise ContractError(
+                    "OPERATOR_CONSOLE_CAMPAIGN_SCOPE_MISMATCH"
+                ) from exc
         validate_authorized_episode_scope(
             authorization,
             run_id=request.get("run_id"),
@@ -1441,6 +1845,25 @@ class OperatorConsole:
             }),
             "operator_summary": copy.deepcopy(summary),
             "campaign_authorization_digest": authorization["authorization_digest"],
+            "object_reposition_preapproval": copy.deepcopy(
+                reposition_preapproval,
+            ),
+            **({
+                "trajectory_variant_binding": copy.deepcopy(trajectory),
+                "trajectory_variant_binding_digest": trajectory[
+                    "binding_digest"
+                ],
+                "yaw_sample_binding": copy.deepcopy(yaw_sample),
+                "yaw_sample_binding_digest": (
+                    None if yaw_sample is None
+                    else yaw_sample["binding_digest"]
+                ),
+                "precommit_safety": copy.deepcopy(precommit_safety),
+                "plan_envelope_digest": binding["plan_envelope_digest"],
+                "preapproval_evidence_digest": binding[
+                    "preapproval_evidence_digest"
+                ],
+            } if exact_plan_present else {}),
         }
         self._episode_plan = pending
         self._active_episode_scope = copy.deepcopy(scope)
@@ -1548,7 +1971,11 @@ class OperatorConsole:
             )
             pending = offered["projection"]["pending_plan"]
             plan = copy.deepcopy(dict(pending["decision_binding"]))
-            plan["decision_binding_digest"] = pending["decision_binding_digest"]
+            plan.update(
+                plan_digest=pending["plan_digest"],
+                approval_scope=pending["approval_scope"],
+                decision_binding_digest=pending["decision_binding_digest"],
+            )
             self._episode_plan = plan
             self._workflow, self._last_error = "AWAITING_APPROVAL", None
 
@@ -1678,18 +2105,35 @@ class OperatorConsole:
                 result.get("intent_binding", self._active_intent_projection)
             ),
         }
+        expected_reposition = self._expected_object_reposition_binding()
+        reposition_result = result.get("object_reposition")
+        if (
+            name == "PASS"
+            and isinstance(expected_reposition, Mapping)
+            and expected_reposition.get("start_state") == "ON_SURFACE"
+        ):
+            reposition_result = _validate_successful_object_reposition_result(
+                reposition_result, expected_reposition,
+                post_scene_digest=(
+                    technical.get("post_scene_digest")
+                    if isinstance(technical, Mapping) else None
+                ),
+                code="OPERATOR_CONSOLE_REPOSITION_RESULT",
+            )
+            sealed["object_reposition"] = reposition_result
+        elif reposition_result is not None:
+            raise ContractError("OPERATOR_CONSOLE_REPOSITION_RESULT")
         for field in (
             "one_job", "synthetic_review", "synthetic_coverage_update",
         ):
             value = result.get(field, terminal_data.get(field))
             if value is not None:
                 sealed[field] = copy.deepcopy(value)
-        review_offer = result.get("candidate_review_offer")
-        if review_offer is not None:
-            if name != "PASS":
-                raise ContractError("OPERATOR_CONSOLE_CANDIDATE_OFFER")
-            self._queue_candidate_review(review_offer, sealed)
         terminal_pose = result.get("terminal_object_pose")
+        if reposition_result is not None:
+            if terminal_pose != expected_reposition["target_pose"]:
+                raise ContractError("OPERATOR_CONSOLE_TERMINAL_OBJECT_POSE")
+            terminal_pose = copy.deepcopy(expected_reposition["target_pose"])
         if terminal_pose is not None:
             if (
                 not isinstance(terminal_pose, Mapping)
@@ -1706,6 +2150,11 @@ class OperatorConsole:
                 raise ContractError("OPERATOR_CONSOLE_TERMINAL_OBJECT_POSE")
             self._terminal_object_pose = copy.deepcopy(dict(terminal_pose))
             sealed["terminal_object_pose"] = copy.deepcopy(self._terminal_object_pose)
+        review_offer = result.get("candidate_review_offer")
+        if review_offer is not None:
+            if name != "PASS":
+                raise ContractError("OPERATOR_CONSOLE_CANDIDATE_OFFER")
+            self._queue_candidate_review(review_offer, sealed)
         sealed["result_digest"] = canonical_digest(sealed)
         self._episode_result, self._workflow = sealed, workflow
         self._episode_history.append(copy.deepcopy(sealed))

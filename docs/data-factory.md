@@ -56,7 +56,7 @@ brightness, clipping, sharpness와 색 변화량은 정성 검토를 돕는 warn
 
 ## Behavior quality sidecar와 offline report
 
-기존 technical validator는 변경하지 않고 versioned result digest를 read-only prerequisite로 참조한다. executor-owned `phase_events.jsonl`은 phase, sequence, ROS control-event time, monotonic time과 action terminal evidence를 bounded queue로 기록한다. recorder row join은 qualified same-clock의 accepted-to-terminal interval에 row index만 배정하며 clock mismatch, sequence gap, overlap과 missing terminal을 추정하지 않고 `NOT_AVAILABLE` 또는 flag로 남긴다.
+technical quality의 단일 owner와 result 의미는 유지한다. 다만 정상 factory live admission은 같은 validator의 episode-incremental 범위를 사용하고, 전체 dataset 검증은 수동 승인·학습·평가·curator 경계에 둔다. behavior quality는 어느 범위의 validator 결과도 read-only prerequisite로만 참조한다. executor-owned `phase_events.jsonl`은 phase, sequence, ROS control-event time, monotonic time과 action terminal evidence를 bounded queue로 기록한다. recorder row join은 qualified same-clock의 accepted-to-terminal interval에 row index만 배정하며 clock mismatch, sequence gap, overlap과 missing terminal을 추정하지 않고 `NOT_AVAILABLE` 또는 flag로 남긴다.
 
 `quality/`의 post-run 순수 함수는 compiled plan의 chain·endpoint scalar, joint tracking/progress/stall, gripper close window와 lift continuity를 attribute로 만든다. serialized trajectory shape와 TCP/FK/TF metric은 적격화 전 `NOT_AVAILABLE`이며 현재 `camera_semantic_authority=false`이므로 visual/object semantic 판정은 만들지 않는다. `episode_quality.json`은 이 attribute와 기존 technical-validator reference를 묶을 뿐 weighted score, 자동 삭제 또는 training approval을 만들지 않는다.
 
@@ -198,7 +198,7 @@ python3 -m tools.data_factory.run_job campaign --manifest <campaign.json>
 - 두 technical validator와 두 human semantic review는 `PASS`다.
 - 첫 run의 chain slot은 exact next dispatch에서 한 번 소비됐고 final scene revision 23과 cell acknowledgement가 남았다.
 
-이 결과는 정확히 실행한 두 release role의 mechanism 근거다. 다른 slot, non-yaw0, camera semantic authority 또는 training approval로 일반화하지 않으며 별도 GUI는 구현·검증하지 않았다.
+이 결과는 정확히 실행한 두 release role의 mechanism 근거다. 다른 slot, non-yaw0, camera semantic authority 또는 training approval로 일반화하지 않으며 당시 HIL은 현재 Web UI caller의 검증 근거가 아니다.
 
 campaign이 완료되고 episode별 motion/recorder child가 모두 닫힌 뒤에만 TTY batch review가 시작한다. `PASS|FAIL|UNCERTAIN`은 `pickup-v2` checklist, immutable review-context digest, expected current file digest를 한번 CAS해 atomic 저장하고 `SKIP`/Ctrl-C는 `PENDING`을 보존한다. 후속 review는 `python3 -m tools.data_factory.run_job review --campaign <campaign.json>`을 사용하며 JSONL은 HUMAN review를 발급할 수 없다. semantic PASS는 training approval이 아니며 모든 결과의 `training_authorized=false`는 그대로다.
 
@@ -207,6 +207,36 @@ campaign이 완료되고 episode별 motion/recorder child가 모두 닫힌 뒤�
 `live`는 30 Hz camera warm-up, planning-scene apply/readback, dense collision sampling, plan-only no-motion evidence와 exact cached pickup/recycle summary를 먼저 만든다. exact digest 승인 전에는 recorder나 motion을 시작하지 않는다. 승인 뒤 recorder의 첫 aligned row를 확인하고 pickup을 실행하며, post-lift freeze와 사람 semantic 판정 뒤 녹화 밖 recycle을 수행한다. `LANDED` evidence가 맞으면 executor가 scene v2 object+slot을 원자 갱신하고 `COMPLETED`를 낸 뒤에만 coordinator가 commit→validator→cell-ready를 수행한다. scene 전이 뒤 commit/validator가 실패해도 물리 scene을 과거로 rollback하지 않고 cell을 block한다. 어느 gate든 실패하면 다음 job을 허용하지 않는다.
 
 `config/data_factory/`의 robot, collection, cell과 motion qualification은 resolver 입력을 canonical digest로 고정하는 정적 계약이다. 현재 `fr5-place-a-wood-cube-r001`은 tracked URDF·MoveIt 설정과 기존 HIL binding에서 재구성한 qualification이며, live에서도 설치된 TCP·활성 robot description·planning-scene readback과 exact plan 승인을 다시 요구한다. coordinate/profile `QUALIFIED`, physical execution approval, `cell_ready`, motion approval과 training approval은 서로 다른 gate다.
+
+### Pickup trajectory recipe
+
+Web UI의 `Trajectory recipe`는 `DIRECT`와 `TWO_STAGE_ALIGN_V2`를 제공한다. V2는 새 executor phase를 쌓지 않고 기존 첫 세 arm phase를 `관측 자세 PTP → 같은 clearance의 XY·목표 yaw 정렬 LIN → XY·orientation 고정 수직 하강 LIN`으로 투영한다. 긴 PTP에서는 목표 yaw를 제거한 canonical wrist 자세를 사용하며, `pick_place`의 place/reset 5개 phase는 `DIRECT` 그대로다.
+
+관측 clearance는 55–60 mm 절삭 정규분포다. 접근 `dXY`는 object profile의 평면 치수에 결속된 절삭 이변량 정규분포이며 타원 반축은 각 물체 반폭과 20 mm 중 작은 값, 표준편차는 반축/2.5다. 이와 별개로 수집 위치는 versioned `Nₓ×Nᵧ×N_yaw` state-space design을 따른다. 각 `(i,j)` cell은 yaw별 object-safe strict-convex polygon과의 교집합에서 면적 균등하게 seed 표본화되고, yaw 계층은 object+grasp profile의 CDF를 균등 분할한다. 회전 사각형·사다리꼴 같은 convex 영역은 지원하지만 concave 영역과 hole은 거부한다. 현재 24 mm cube/A4 profile의 설정값만 `Nₓ=5`, `Nᵧ=3`, `N_yaw=3`, yaw `[-45°, +45°)`다.
+
+Yaw, state-space design, approach profile은 같은 family의 `-rNNN` 중 최신 numeric revision만 operator catalog에 활성화한다. Collection profile은 `-vN`에 같은 규칙을 쓴다. 과거 파일과 digest는 replay를 위해 남기되, 최신 design이 최신 yaw ID/digest와 정확히 결속되지 않거나 서로 다른 family가 같은 semantic key를 동시에 주장하면 catalog는 설정 오류로 닫힌다.
+
+Web UI에는 JS-safe 비음수 campaign master seed 하나만 노출한다. Backend는 `spatial`, `start_pose`, `yaw`, `trajectory` domain seed를 분리한다. Master seed는 2^53−1 이하이고 파생 seed는 u64이며 browser에는 10진 문자열로 투영한다. Yaw와 trajectory parameter는 stable finite slot의 rank/design size에 결속되며 browser는 이를 다시 표본화하지 않는다.
+
+Sampling은 plan compile 때 한 번만 수행된다. 이 recipe는 새 polling·sleep·service를 추가하지 않으며 기존 ROS action result가 terminal 상태가 된 뒤에만 다음 phase를 연다.
+
+녹화되는 `pick_place` destination은 source yaw를 유지하는 DIRECT place다. 다음 source가 다른 sampled yaw를 요구하면 recorder commit 뒤 별도 `OUT_OF_DATASET` continuation이 같은 surface XY에서 물체를 재파지해 yaw를 바꾼다. 이 continuation은 recorder/dataset write 권한이 없고 parent/next run, object/grasp/yaw profile, source/target scene slot과 fresh exact plan에 결속된다. Technical validator만 이 motion과 bounded overlap하며 둘이 끝나기 전에 다음 episode는 시작하지 않는다.
+
+Yaw를 보존해 놓는 위치는 현재 yaw와 다음 yaw 양쪽의 object-safe workspace polygon 안에 있어야 한다. Backend 자동 생성은 두 안전영역과 원래 `(i,j)` spatial cell의 교집합에서 deterministic하게 다시 표본화한다. 직접 입력한 sequence는 좌표를 암묵적으로 옮기지 않으며, UI authoring에서 `DIRECT_YAW_TRANSITION_UNSAFE`로 실행 준비를 막고 physical compile 경계에서도 같은 transition validator로 재검증한다. 따라서 녹화 place와 비녹화 yaw reposition이 같은 물리 XY를 사용해도 A4 작업영역 밖으로 확장되지 않는다.
+
+물체 위치는 revisioned scene snapshot이 정본이다. `PERCEPTION`은 사람·robot release와 같은 scene update 계약을 쓰는 선택적 evidence source이며 compiler가 detector stream을 직접 구독하지 않는다. 추적 pose가 계획에 쓰이는 경우에도 먼저 scene revision과 digest로 고정해야 하므로 현재 구조는 특정 tracker에 강결합되지 않는다.
+
+이 recipe 선택은 별도 승격 gate가 아니다. 모든 live motion은 기존 scene/cell/readback/collision/exact plan digest/사람 승인 경계를 그대로 통과한다. 수치 산출, 현재 24 mm 큐브의 12 mm 최대 offset, 영상 시점과 제한은 [2026-09-02 궤적 생성 근거](evidence/trajectory-generation-2026-09-02.md)에 기록한다.
+
+### Dataset validation scope
+
+검증은 검사마다 별도 daemon이나 service를 두지 않고 `validate_lerobot_dataset.py`와 recovery snapshot 함수의 재사용 가능한 책임으로 구성한다.
+
+- 정상 factory live: 방금 commit한 episode의 metadata·Parquet·MP4·provenance를 검증하고 staging manifest digest를 대조한다. transaction 전후 snapshot으로 기존 heavy artifact의 `(size, mtime_ns)`, provenance stat, quality JSONL prefix와 예상 신규 파일 수를 비교한다.
+- campaign 종료: 누적 dataset full scan을 자동 반복하지 않는다. 마지막 episode도 같은 incremental admission으로 끝난다.
+- 명시적 전체 검사: `scripts/validate_dataset.sh`, training/evaluation 진입, curator source 검증에서 사용한다.
+
+Incremental append evidence는 기존 MP4·Parquet 본문을 매번 읽지 않는 live 비파괴 경계다. 과거 payload 전체의 재해시·decode까지 요구하는 검사는 full 경계의 책임이다. 두 범위는 같은 validator 계약과 `PASS` 의미를 사용하며, incremental이 실패하면 다음 episode를 열지 않는다.
 
 ## A4 pose와 로봇 좌표
 

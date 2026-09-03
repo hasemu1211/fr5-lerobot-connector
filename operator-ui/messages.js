@@ -47,6 +47,8 @@ const MESSAGE_CATALOG = {
     PHYSICAL_CAMERA_TOPIC_MISMATCH: "연결된 카메라 영상이 선택한 역할과 다릅니다",
     MOTION_QUALIFICATION_REQUIRED: "이 좌표계에서 실제 로봇 동작을 먼저 확인해야 합니다",
     DIRECT_POSE_COUNT_EXCEEDS_EPISODES: "직접 지정한 자세보다 에피소드 수가 적습니다",
+    DIRECT_PAIR_COUNT_MISMATCH: "직접 지정한 시작 자세와 물체 위치 순서를 완성해야 합니다",
+    DIRECT_YAW_TRANSITION_UNSAFE: "놓는 위치가 현재 각도와 다음 각도 모두에서 안전한 범위 안이어야 합니다",
     DEVICE_NOT_CONNECTED: "현재 장치가 연결되지 않았습니다",
     DATA_MODE_UNAVAILABLE: "현재 설치에서는 이 데이터 모드를 사용할 수 없습니다",
     CANCEL_PENDING: "중단 완료를 확인하고 있습니다",

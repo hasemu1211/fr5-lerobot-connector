@@ -18,7 +18,7 @@ from tools.data_factory.experiment_manifest import (
 )
 from tools.data_factory.quality.coverage_report import build_coverage_report
 from tools.data_factory.training_split import FR5_FEATURE_CONTRACT
-from tools.fr5_data_factory import ContractError, canonical_digest
+from tools.fr5_data_factory import ContractError
 from .operator.fixtures import (
     JOINTS, base_qualification, budget, catalog, digest, group_pairs,
     hypothesis, pose_qualification, program_budget, qualification_inputs,
@@ -26,6 +26,47 @@ from .operator.fixtures import (
 )
 
 class ExperimentManifestTests(unittest.TestCase):
+    def test_fixed_contract_schema_recipe_matrix(self) -> None:
+        fixed, report, resolvers, _, _, qualifications = (
+            single_qualification_inputs()
+        )
+        wrong_new = copy.deepcopy(fixed)
+        wrong_new.update(
+            schema_version="data_factory.fr5_fixed_contract.v3",
+            motion_recipe="DIRECT",
+        )
+        with self.assertRaisesRegex(ContractError, "HYPOTHESIS_FIXED_CONTRACT"):
+            compile_fr5_hypothesis(
+                fixed_contract=wrong_new, coverage_report=report,
+                resolver_results=resolvers,
+                qualification_catalog=qualifications,
+            )
+
+        wrong_old = copy.deepcopy(fixed)
+        wrong_old["motion_recipe"] = "TWO_STAGE_ALIGN_V2"
+        with self.assertRaisesRegex(ContractError, "HYPOTHESIS_FIXED_CONTRACT"):
+            compile_fr5_hypothesis(
+                fixed_contract=wrong_old, coverage_report=report,
+                resolver_results=resolvers,
+                qualification_catalog=qualifications,
+            )
+
+        current = copy.deepcopy(fixed)
+        current.update(
+            schema_version="data_factory.fr5_fixed_contract.v3",
+            motion_recipe="TWO_STAGE_ALIGN_V2",
+        )
+        qualifications["fixed_contract_digest"] = digest(current)
+        redigest(qualifications, "catalog_digest")
+        self.assertEqual(
+            compile_fr5_hypothesis(
+                fixed_contract=current, coverage_report=report,
+                resolver_results=resolvers,
+                qualification_catalog=qualifications,
+            )["fixed_contract"],
+            current,
+        )
+
     def test_v2_camera_profiles_derive_roles_without_device_identity(self) -> None:
         root = Path("config/data_factory/collection_profiles")
         expected = {

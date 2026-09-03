@@ -5,7 +5,7 @@ import copy
 from datetime import datetime, timezone
 from typing import Any, Mapping, Sequence
 
-from tools.data_factory.motion.trajectory_variants import phase_variant_catalog
+from tools.data_factory.motion.trajectory_variants import legacy_phase_variant_catalog
 from tools.data_factory.quality.coverage_report import validate_coverage_report
 from tools.fr5_data_factory import ContractError, DIGEST, RFC3339, SAFE_ID, canonical_digest
 
@@ -16,7 +16,7 @@ SELECTION_SCHEMA = "data_factory.recollection_selection.v1"
 MANIFEST_SCHEMA = "data_factory.recollection_manifest.v1"
 MODES = frozenset({"NOMINAL", "VARIANT_TARGETED"})
 _MODE_VARIANTS = {"NOMINAL": "DIRECT", "VARIANT_TARGETED": "TWO_STAGE_ALIGN"}
-_VARIANT_CATALOG = phase_variant_catalog()
+_VARIANT_CATALOG = legacy_phase_variant_catalog()
 _VARIANT_DIGESTS = {
     item["trajectory_variant_id"]: item["variation_profile_digest"]
     for item in _VARIANT_CATALOG["variants"]

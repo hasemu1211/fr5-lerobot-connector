@@ -28,6 +28,7 @@ class DataFactoryOperatorUiStaticTest(unittest.TestCase):
             "prepare-environment",
             "compile-campaign",
             "cancel-campaign",
+            "seed-input",
             "technical-details",
         ):
             self.assertIn(f'id="{element_id}"', self.html)
@@ -39,6 +40,83 @@ class DataFactoryOperatorUiStaticTest(unittest.TestCase):
         self.assertNotIn('id="workspace-select"', catalog)
         self.assertIn('id="workspace-select"', collection_range)
         self.assertIn('id="workspace-select-label"', collection_range)
+        self.assertIn('<label for="seed-input">Campaign seed<input id="seed-input" type="number" min="0" max="9007199254740991" step="1" inputmode="numeric"></label>', self.html)
+
+    def test_campaign_seed_is_projected_reviewed_and_updated_exactly(self):
+        self.assertIn('!Number.isSafeInteger(view.draft.normalized_seed) || view.draft.normalized_seed < 0', self.js)
+        self.assertIn('["Campaign seed", String(view.draft.normalized_seed)]', self.js)
+        self.assertIn('normalized_seed: view.draft.normalized_seed', self.js)
+        self.assertIn('normalized_seed: normalizedSeed', self.js)
+        self.assertIn('"normalized_seed": 0', (ROOT / "fixtures/states.json").read_text(encoding="utf-8"))
+        self.assertIn("campaign seed posts one exact draft update", self.browser)
+
+    def test_sampling_and_reposition_provenance_are_read_only(self):
+        fixture = (ROOT / "fixtures/states.json").read_text(encoding="utf-8")
+        for marker in (
+            "validateSamplingProvenance(view.sampling_provenance)",
+            "validateStateSpaceDesignProfile(provenance.state_space_design_profile, provenance.yaw_sampling_profile)",
+            'sampling_provenance: view.sampling_provenance',
+            "object_reposition_bindings: view.coverage?.sequence?.map",
+            '"yaw_sampling_profile_id"',
+            '"approach_sampling_profile_id"',
+            "item?.object_reposition",
+            'reposition.recording_scope !== "OUT_OF_DATASET"',
+            "recorder/dataset 쓰기 없음",
+            'typeof yaw.sampling_seed !== "string"',
+            "BigInt(yaw.sampling_seed) > 18446744073709551615n",
+            'profile.assignment !== "ROTATING_BALANCED_FRACTIONAL_FACTORIAL"',
+            'profile.execution_order !== "CONTIGUOUS_YAW_BLOCKS"',
+            'profile.initial_source_policy !== "CONDITION_ON_OBSERVED_SOURCE"',
+            'stateSpaceDesignText(provenance.state_space_design_profile)',
+            "validateStateSpaceSlot(item?.state_space_slot, view.sampling_provenance?.state_space_design_profile)",
+            'typeof yaw.sampling_seed !== "string"',
+            "stateSpaceSlotText(item.state_space_slot)",
+            "validateActiveEpisodePlan(view.active_episode_plan)",
+            "validateActiveEpisodePlanCoherence(view)",
+            "validateRuntimeRepositionEvidence(view)",
+            'typeof trajectory.sampling_seed !== "string"',
+            "현재 실행할 정확한 궤적",
+            '"data_factory.yaw_sample_binding.v4"',
+            '"object_reposition_plan_artifact_digest"',
+            '"object_reposition_collision_report_digest"',
+            '"object_reposition_plan_only_no_motion_digest"',
+            "object_reposition_runtime_evidence: view.runtime.evidence",
+            "설계 정격(endpoint당, repeat=1)",
+            "실제 campaign prefix는 아래 slot binding 기준",
+        ):
+            self.assertIn(marker, self.js)
+        self.assertNotIn('if (provenance === undefined || provenance === null) return;', self.js)
+        for marker in (
+            '"object_dimensions_mm": [24, 24, 24]',
+            '"state_space_design_profile_id": "wood-cube-24mm-a4-cdf3-r001"',
+            '"approach_sampling_profile_id": "wood-cube-24mm-top-wrist-approach-r001"',
+            '"schema_version": "data_factory.yaw_sample_binding.v4"',
+        ):
+            self.assertIn(marker, fixture)
+        self.assertIn('"sampling_seed": "5128904136610758680"', fixture)
+        self.assertIn(
+            "64-bit derived yaw seed survives JSON and renders exactly without Number coercion",
+            self.browser,
+        )
+        self.assertIn(
+            "yaw sampling seed rejects numbers and non-canonical or out-of-range decimal strings",
+            self.browser,
+        )
+        self.assertIn(
+            "active plan renders exact u64 trajectory seed, phase parameters, and collision evidence",
+            self.browser,
+        )
+        for marker in (
+            "missing sampling provenance fails closed",
+            "active plan must match selected recipe, current coverage yaw binding, trajectory target, and runtime child",
+            "runtime reposition evidence rejects a malformed exact digest",
+            "runtime reposition evidence must match the current coverage binding",
+            "runtime renders the exact reposition binding, plan, collision, and no-motion evidence without another request",
+            "cross-artifact yaw tolerates sub-nanodegree serialization drift",
+        ):
+            self.assertIn(marker, self.browser)
+        self.assertNotIn("Number.isSafeInteger(yaw.sampling_seed)", self.js)
+        self.assertNotIn("Math.random", self.js)
 
     def test_accessibility_floor(self):
         for marker in (
@@ -107,6 +185,7 @@ class DataFactoryOperatorUiStaticTest(unittest.TestCase):
             "RECORDER_SAMPLER_FAULT",
             "RECORDER_FREEZE_TIMEOUT",
             "CANDIDATE_REVIEW_STATE",
+            "DIRECT_YAW_TRANSITION_UNSAFE",
         ):
             self.assertIn(f"{code}:", self.messages)
         self.assertIn(

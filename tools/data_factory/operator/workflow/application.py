@@ -7,6 +7,7 @@ existing single-owner chain.
 from __future__ import annotations
 
 import copy
+import math
 import threading
 from datetime import datetime, timezone
 from typing import Any, Callable, Mapping
@@ -16,17 +17,40 @@ from tools.data_factory.operator.workflow.intents import (
     OperatorIntentCore,
     UnlockedIntent,
 )
+from tools.data_factory.collection_seed import (
+    MAX_CAMPAIGN_SEED,
+    MAX_DERIVED_SEED,
+    derive_domain_seed,
+    session_campaign_seed,
+    validate_campaign_seed,
+)
 from tools.data_factory.operator.catalog import (
     project_assisted_poses,
     project_balanced_start_pose_ids,
     project_operator_pose_domain,
+    project_state_space_cell,
     project_workspace_cycle_poses,
     resolve_workspace_cycle_selections,
     validate_operator_pose,
     validate_operator_selection,
+    validate_yaw_preserving_transitions,
+)
+from tools.data_factory.motion.object_reposition import (
+    validate_object_reposition_binding,
+)
+from tools.data_factory.motion.trajectory_variants import (
+    validate_trajectory_variant_binding,
+)
+from tools.data_factory.state_space import (
+    YAW_BINDING_SCHEMA,
+    validate_approach_sampling_profile,
+    validate_state_space_design_profile,
+    validate_yaw_sample_binding,
+    validate_yaw_sampling_profile,
+    yaw_cdf_strata_bounds,
 )
 from tools.data_factory.task_recipe import validate_episode_instruction_binding
-from tools.fr5_data_factory import ContractError, SAFE_ID, canonical_digest
+from tools.fr5_data_factory import ContractError, DIGEST, SAFE_ID, canonical_digest
 
 _PROJECTOR_FUNCTIONS = (
     "browser_selection", "camera_choice", "project_catalog", "project_cells",
@@ -35,6 +59,287 @@ _PROJECTOR_FUNCTIONS = (
 _PROJECTOR_CONSTANTS = (
     "AXIS_BINDINGS", "DISPOSITION_TO_MODE", "MODE_TO_DISPOSITION",
 )
+
+
+def _validated_normalized_seed(value: object) -> int:
+    try:
+        return validate_campaign_seed(value)
+    except ContractError:
+        raise ContractError("OPERATOR_APPLICATION_DRAFT")
+
+
+def _session_normalized_seed(session_id: str) -> int:
+    return session_campaign_seed(session_id)
+
+
+def _object_dimensions(
+    catalog: Mapping[str, Any], combination: Mapping[str, Any],
+) -> list[int | float] | None:
+    dimensions = combination.get("object_dimensions_mm")
+    if dimensions is None:
+        option = next((
+            item for item in catalog.get("axes", {}).get("object", [])
+            if isinstance(item, Mapping)
+            and item.get("id") == combination.get("object_id")
+        ), None)
+        dimensions = (
+            option.get("metadata", {}).get("dimensions_mm")
+            if isinstance(option, Mapping) else None
+        )
+    if dimensions is None:
+        return None
+    if (
+        not isinstance(dimensions, (list, tuple))
+        or len(dimensions) != 3
+        or any(
+            isinstance(value, bool)
+            or not isinstance(value, (int, float))
+            or not math.isfinite(value)
+            or value <= 0
+            for value in dimensions
+        )
+    ):
+        raise ContractError("OPERATOR_APPLICATION_SAMPLING_PROVENANCE")
+    return copy.deepcopy(list(dimensions))
+
+
+def _sampling_profile(
+    value: object, *, approach: bool,
+) -> dict[str, Any] | None:
+    if value is None:
+        return None
+    checked = (
+        validate_approach_sampling_profile(value)
+        if approach else validate_yaw_sampling_profile(value)
+    )
+    fields = (
+        (
+            "approach_sampling_profile_id", "profile_digest",
+            "parameter_distribution", "required_camera_roles",
+        )
+        if approach else (
+            "yaw_sampling_profile_id", "profile_digest", "distribution",
+            "canonical_interval_deg", "required_camera_roles",
+        )
+    )
+    return {
+        field: copy.deepcopy(checked[field])
+        for field in fields
+    }
+
+
+def _sampling_provenance(
+    catalog: Mapping[str, Any], combination: Mapping[str, Any],
+) -> dict[str, Any]:
+    raw_yaw = combination.get("yaw_sampling_profile")
+    yaw = _sampling_profile(raw_yaw, approach=False)
+    raw_design = combination.get("state_space_design_profile")
+    design = None
+    if raw_design is not None:
+        checked_design = validate_state_space_design_profile(raw_design)
+        checked_yaw = (
+            None if raw_yaw is None else validate_yaw_sampling_profile(raw_yaw)
+        )
+        source_digests = combination.get("source_digests")
+        if (
+            checked_yaw is None
+            or not isinstance(source_digests, Mapping)
+            or checked_design["object_profile_id"] != combination.get("object_id")
+            or checked_design["object_profile_digest"]
+            != source_digests.get("object")
+            or checked_design["grasp_profile_id"] != combination.get("grasp_id")
+            or checked_design["grasp_profile_digest"]
+            != source_digests.get("grasp")
+            or checked_design["yaw_sampling_profile_id"]
+            != checked_yaw["yaw_sampling_profile_id"]
+            or checked_design["yaw_sampling_profile_digest"]
+            != checked_yaw["profile_digest"]
+        ):
+            raise ContractError("OPERATOR_APPLICATION_SAMPLING_PROVENANCE")
+        spatial = checked_design["spatial_strata"]
+        per_workspace_repeat_one_sweep_episode_count = (
+            spatial["columns"] * spatial["rows"]
+        )
+        yaw_count = checked_design["yaw_cdf_strata"]
+        design = {
+            field: copy.deepcopy(checked_design[field])
+            for field in (
+                "state_space_design_profile_id", "profile_digest",
+                "object_profile_id", "object_profile_digest",
+                "grasp_profile_id", "grasp_profile_digest",
+                "yaw_sampling_profile_id", "yaw_sampling_profile_digest",
+                "spatial_strata", "yaw_cdf_strata", "assignment",
+                "execution_order", "initial_source_policy",
+            )
+        }
+        design.update(
+            derived_yaw_cdf_tiers=yaw_cdf_strata_bounds(
+                checked_yaw, yaw_count,
+            ),
+            per_workspace_repeat_one_sweep_episode_count=(
+                per_workspace_repeat_one_sweep_episode_count
+            ),
+            full_cell_yaw_coverage_sweeps=yaw_count,
+            per_workspace_repeat_one_full_cell_yaw_coverage_episode_count=(
+                per_workspace_repeat_one_sweep_episode_count * yaw_count
+            ),
+        )
+    return {
+        "object_dimensions_mm": _object_dimensions(catalog, combination),
+        "yaw_sampling_profile": yaw,
+        "state_space_design_profile": design,
+        "approach_sampling_profile": _sampling_profile(
+            combination.get("approach_sampling_profile"), approach=True,
+        ),
+    }
+
+
+def _project_object_reposition(value: object) -> dict[str, Any] | None:
+    if value is None:
+        return None
+    checked = validate_object_reposition_binding(value)
+    yaw = checked["yaw_sample_binding"]
+    return {
+        "parent_run_id": checked["parent_run_id"],
+        "continuation_run_id": checked["continuation_run_id"],
+        "next_run_id": checked["next_run_id"],
+        "execution_stage": checked["execution_stage"],
+        "recording_scope": checked["recording_scope"],
+        "start_state": checked["start_state"],
+        "source_pose": copy.deepcopy(checked["source_pose"]),
+        "target_pose": copy.deepcopy(checked["target_pose"]),
+        "yaw_sample": (
+            None if yaw is None else {
+                field: (
+                    str(yaw[field]) if field == "sampling_seed"
+                    else copy.deepcopy(yaw[field])
+                )
+                for field in (
+                    "yaw_sampling_profile_id", "yaw_sampling_profile_digest",
+                    "sampling_seed", "sample_rank", "design_size",
+                    "source_object_yaw_deg", "binding_digest",
+                )
+            }
+        ),
+        "object_profile_id": checked["object_profile_id"],
+        "object_profile_digest": checked["object_profile_digest"],
+        "grasp_profile_id": checked["grasp_profile_id"],
+        "grasp_profile_digest": checked["grasp_profile_digest"],
+        "yaw_sampling_profile_id": checked["yaw_sampling_profile_id"],
+        "yaw_sampling_profile_digest": checked[
+            "yaw_sampling_profile_digest"
+        ],
+        "motion_recipe": checked["motion_recipe"],
+        "recorder_authorized": checked["recorder_authorized"],
+        "dataset_write_authorized": checked["dataset_write_authorized"],
+        "binding_digest": checked["binding_digest"],
+    }
+
+
+def _project_yaw_sample_binding(value: object) -> dict[str, Any] | None:
+    if value is None:
+        return None
+    checked = validate_yaw_sample_binding(value)
+    result = copy.deepcopy(checked)
+    result["sampling_seed"] = str(checked["sampling_seed"])
+    return result
+
+
+def _project_trajectory_variant_binding(value: object) -> dict[str, Any]:
+    try:
+        checked = validate_trajectory_variant_binding(value)
+    except ContractError as exc:
+        raise ContractError("OPERATOR_APPLICATION_ACTIVE_PLAN") from exc
+    if checked["sampling_seed"] > MAX_DERIVED_SEED:
+        raise ContractError("OPERATOR_APPLICATION_ACTIVE_PLAN")
+    return {
+        field: (
+            str(checked[field]) if field == "sampling_seed"
+            else copy.deepcopy(checked[field])
+        )
+        for field in checked
+    }
+
+
+def _project_active_episode_plan(value: object) -> dict[str, Any] | None:
+    if value is None:
+        return None
+    if not isinstance(value, Mapping):
+        raise ContractError("OPERATOR_APPLICATION_ACTIVE_PLAN")
+    if "trajectory_variant_binding" not in value:
+        return None
+    trajectory = _project_trajectory_variant_binding(
+        value.get("trajectory_variant_binding"),
+    )
+    yaw_sample = _project_yaw_sample_binding(value.get("yaw_sample_binding"))
+    safety = value.get("precommit_safety")
+    summary = value.get("operator_summary")
+    safety_fields = {
+        "schema_version", "run_id", "approved_plan_digest",
+        "scene_binding_digest", "expected_planning_scene_digest",
+        "planning_scene_readback_digest", "collision_report_digest",
+        "plan_only_no_motion_digest", "post_reset_safe_snapshot_digest",
+        "status",
+    }
+    digest_fields = (
+        "plan_digest", "decision_binding_digest", "plan_envelope_digest",
+        "preapproval_evidence_digest",
+    )
+    if (
+        any(
+            not isinstance(value.get(field), str)
+            or DIGEST.fullmatch(value[field]) is None
+            for field in digest_fields
+        )
+        or value.get("approval_scope") not in {
+            "HUMAN_GATED", "HIL_NUMERIC_PROXY",
+        }
+        or value.get("trajectory_variant_binding_digest")
+        != trajectory["binding_digest"]
+        or (
+            yaw_sample is None
+            and value.get("yaw_sample_binding_digest") is not None
+        )
+        or (
+            yaw_sample is not None
+            and value.get("yaw_sample_binding_digest")
+            != yaw_sample["binding_digest"]
+        )
+        or not isinstance(safety, Mapping)
+        or set(safety) != safety_fields
+        or safety.get("schema_version")
+        != "data_factory.precommit_safety.v1"
+        or safety.get("approved_plan_digest") != value.get("plan_digest")
+        or safety.get("status") != "PENDING"
+        or any(
+            not isinstance(safety.get(field), str)
+            or DIGEST.fullmatch(safety[field]) is None
+            for field in (
+                "scene_binding_digest", "expected_planning_scene_digest",
+                "planning_scene_readback_digest", "collision_report_digest",
+                "plan_only_no_motion_digest",
+            )
+        )
+        or safety.get("post_reset_safe_snapshot_digest") is not None
+        or not isinstance(summary, Mapping)
+        or not isinstance(summary.get("path"), list)
+        or not summary["path"]
+    ):
+        raise ContractError("OPERATOR_APPLICATION_ACTIVE_PLAN")
+    return {
+        "schema_version": "data_factory.active_episode_plan.v1",
+        "plan_digest": value["plan_digest"],
+        "approval_scope": value["approval_scope"],
+        "decision_binding_digest": value["decision_binding_digest"],
+        "operator_summary": copy.deepcopy(dict(summary)),
+        "trajectory_variant_binding": trajectory,
+        "yaw_sample_binding": yaw_sample,
+        "precommit_safety": copy.deepcopy(dict(safety)),
+        "plan_envelope_digest": value["plan_envelope_digest"],
+        "preapproval_evidence_digest": value[
+            "preapproval_evidence_digest"
+        ],
+    }
 
 
 def _validated_projector(projector: Any) -> Any:
@@ -204,6 +509,9 @@ class CollectionOperatorApplication:
     def _new_draft(self, previous: Mapping[str, Any] | None) -> dict[str, Any]:
         values = copy.deepcopy(dict(previous or {}))
         requested_count = values.get("requested_count", 3)
+        normalized_seed = _validated_normalized_seed(values.get(
+            "normalized_seed", _session_normalized_seed(self.session_id),
+        ))
         current_object_pose = values.get("current_object_pose")
         if current_object_pose is None:
             current_object_pose = self._selected_cell_pose()
@@ -250,7 +558,7 @@ class CollectionOperatorApplication:
             "requested_count": requested_count,
             "repeat": values.get("repeat", 1),
             "split": values.get("split", "TRAIN"),
-            "normalized_seed": values.get("normalized_seed", 0),
+            "normalized_seed": normalized_seed,
             "pinned": copy.deepcopy(values.get("pinned", [])),
             "excluded": copy.deepcopy(values.get("excluded", [])),
             "current_object_pose": copy.deepcopy(current_object_pose),
@@ -427,13 +735,24 @@ class CollectionOperatorApplication:
             for _index in range(self._spatial_node_count())
         ]
 
-    def _direct_draft_ready(self) -> bool:
+    def _direct_draft_reason(self) -> str | None:
         if self.draft["authoring_mode"] != "DIRECT_EDIT":
-            return True
+            return None
         if self.start_pose_setup is not None:
             pairs = self.draft["direct_pairs"]
             route = self._workspace_cycle()
-            return (
+            repeated = 1
+            repeats_valid = True
+            for left, right in zip(pairs, pairs[1:]):
+                same_pose = all(
+                    left[field] == right[field]
+                    for field in ("place_id", "yaw_deg", "x_mm", "y_mm")
+                )
+                repeated = repeated + 1 if same_pose else 1
+                if repeated > self.draft["repeat"]:
+                    repeats_valid = False
+                    break
+            if not (
                 len(pairs) == self._spatial_node_count()
                 and all(
                     pair["place_id"] == endpoint["workspace_id"]
@@ -447,32 +766,58 @@ class CollectionOperatorApplication:
                     self.selection["task_id"] != "pick_place"
                     or pairs[-1]["start_pose_id"] is None
                 )
-                and all(
-                    any(left[field] != right[field] for field in (
-                        "place_id", "yaw_deg", "x_mm", "y_mm",
-                    ))
-                    for left, right in zip(pairs, pairs[1:])
-                )
+                and repeats_valid
                 and all(
                     pairs[0][field] == self.draft["current_object_pose"][field]
                     for field in ("place_id", "yaw_deg", "x_mm", "y_mm")
                 )
-            )
+            ):
+                return "DIRECT_PAIR_COUNT_MISMATCH"
+            if self.selection["task_id"] == "pick_place":
+                try:
+                    validate_yaw_preserving_transitions(
+                        self.catalog, route,
+                        [
+                            {
+                                field: pair[field] for field in (
+                                    "place_id", "yaw_deg", "x_mm", "y_mm",
+                                )
+                            }
+                            for pair in pairs
+                        ],
+                    )
+                except ContractError as exc:
+                    if exc.code == "JOB_COORDINATE_BOUNDS":
+                        return "DIRECT_YAW_TRANSITION_UNSAFE"
+                    raise
+            return None
         anchor = self._direct_anchor()
         if anchor is None:
-            return False
+            return "DIRECT_POSE_COUNT_EXCEEDS_EPISODES"
         required = 1 + sum(pose != anchor for pose in self.draft["direct_poses"])
-        return required <= self._spatial_node_count()
+        return (
+            None if required <= self._spatial_node_count()
+            else "DIRECT_POSE_COUNT_EXCEEDS_EPISODES"
+        )
+
+    def _direct_draft_ready(self) -> bool:
+        return self._direct_draft_reason() is None
 
     def _reset_direct_pairs(self) -> None:
         if self.start_pose_setup is None:
             return
+        spatial_seed = derive_domain_seed(
+            self.draft["normalized_seed"], "spatial",
+        )
         poses = (
             project_workspace_cycle_poses(
                 self.catalog, self.selection,
                 self.draft["current_object_pose"],
                 self.draft["requested_count"], repeat=self.draft["repeat"],
-                normalized_seed=self.draft["normalized_seed"],
+                normalized_seed=spatial_seed,
+                yaw_sampling_seed=derive_domain_seed(
+                    self.draft["normalized_seed"], "yaw",
+                ),
             )
             if (
                 self.selection["task_id"] == "pick_place"
@@ -482,13 +827,18 @@ class CollectionOperatorApplication:
                 self.catalog, self.selection,
                 self.draft["current_object_pose"],
                 self._spatial_node_count(), repeat=self.draft["repeat"],
-                normalized_seed=self.draft["normalized_seed"],
+                normalized_seed=spatial_seed,
+                yaw_sampling_seed=derive_domain_seed(
+                    self.draft["normalized_seed"], "yaw",
+                ),
             )
         )
         starts = project_balanced_start_pose_ids(
             self.draft["selected_start_pose_ids"],
             self.draft["requested_count"],
-            normalized_seed=self.draft["normalized_seed"],
+            normalized_seed=derive_domain_seed(
+                self.draft["normalized_seed"], "start_pose",
+            ),
         )
         self.draft["direct_pairs"] = [
             {
@@ -634,6 +984,9 @@ class CollectionOperatorApplication:
         ), None)
         if not isinstance(selected_combination, Mapping):
             raise ContractError("OPERATOR_APPLICATION_SELECTION")
+        sampling_provenance = _sampling_provenance(
+            self.catalog, selected_combination,
+        )
         selection_execution = selected_combination["execution"][
             self.selection["data_mode"]
         ]
@@ -667,6 +1020,7 @@ class CollectionOperatorApplication:
             campaign_review["gripper_tuning"] = copy.deepcopy(
                 inner["gripper_tuning"]
             )
+        direct_draft_reason = self._direct_draft_reason()
         if workflow == "ENVIRONMENT":
             if self._preparation is not None:
                 operations = ["cancel_session"]
@@ -688,7 +1042,7 @@ class CollectionOperatorApplication:
                 operations.append("recover_home")
             if (
                 selection_execution["executable"] is True
-                and self._direct_draft_ready()
+                and direct_draft_reason is None
             ):
                 operations.append("compile_draft")
             operations.extend(self._workspace_ops(workflow))
@@ -765,6 +1119,7 @@ class CollectionOperatorApplication:
             "authoring_mode": self.draft["authoring_mode"],
             "requested_count": self.draft["requested_count"],
             "repeat": self.draft["repeat"],
+            "normalized_seed": self.draft["normalized_seed"],
             "current_object_pose": copy.deepcopy(self.draft["current_object_pose"]),
             "direct_poses": copy.deepcopy(self.draft["direct_poses"]),
             "workspace_route": [
@@ -779,15 +1134,8 @@ class CollectionOperatorApplication:
                 None if selection_execution["executable"]
                 else selection_execution["reason"]
             ),
-            "draft_ready": self._direct_draft_ready(),
-            "draft_reason": (
-                None if self._direct_draft_ready()
-                else (
-                    "DIRECT_PAIR_COUNT_MISMATCH"
-                    if self.start_pose_setup is not None
-                    else "DIRECT_POSE_COUNT_EXCEEDS_EPISODES"
-                )
-            ),
+            "draft_ready": direct_draft_reason is None,
+            "draft_reason": direct_draft_reason,
             "selection": self.projector.browser_selection(
                 self.selection, split=self.draft["split"],
             ),
@@ -828,6 +1176,7 @@ class CollectionOperatorApplication:
         )
         coverage_sequence: list[dict[str, Any]] = []
         if isinstance(campaign_coverage, list) and campaign_coverage:
+            coverage_route = self._workspace_cycle()
             grouped: dict[str, dict[str, Any]] = {}
             for planned in campaign_coverage:
                 if not isinstance(planned, Mapping):
@@ -851,7 +1200,59 @@ class CollectionOperatorApplication:
                     "y_mm": condition["y_mm"],
                     "yaw_deg": condition["yaw_deg"],
                     "coverage_condition_digest": digest,
+                    "object_reposition": _project_object_reposition(
+                        planned.get("object_reposition"),
+                    ),
+                    "state_space_slot": None,
                 }
+                yaw_sample = _project_yaw_sample_binding(
+                    planned.get("yaw_sample_binding"),
+                )
+                if yaw_sample is not None:
+                    design = sampling_provenance["state_space_design_profile"]
+                    endpoint = coverage_route[planned["order_index"]]
+                    cell = project_state_space_cell(
+                        self.catalog,
+                        endpoint,
+                        {
+                            field: condition[field]
+                            for field in (
+                                "place_id", "yaw_deg", "x_mm", "y_mm",
+                            )
+                        },
+                    )
+                    if (
+                        not isinstance(design, Mapping)
+                        or not isinstance(cell, Mapping)
+                        or yaw_sample["schema_version"] != YAW_BINDING_SCHEMA
+                        or cell["state_space_design_profile_id"]
+                        != design["state_space_design_profile_id"]
+                        or cell["state_space_design_profile_digest"]
+                        != design["profile_digest"]
+                        or yaw_sample["state_space_design_profile_id"]
+                        != design["state_space_design_profile_id"]
+                        or yaw_sample["state_space_design_profile_digest"]
+                        != design["profile_digest"]
+                        or any(
+                            yaw_sample[field] != cell[field]
+                            for field in (
+                                "spatial_cell_index", "spatial_row",
+                                "spatial_column",
+                            )
+                        )
+                        or yaw_sample["yaw_sampling_profile_id"]
+                        != design["yaw_sampling_profile_id"]
+                        or yaw_sample["yaw_sampling_profile_digest"]
+                        != design["yaw_sampling_profile_digest"]
+                        or yaw_sample["design_size"] != design["yaw_cdf_strata"]
+                        or not math.isclose(
+                            float(yaw_sample["source_object_yaw_deg"]),
+                            float(condition["yaw_deg"]),
+                            rel_tol=0.0, abs_tol=1e-9,
+                        )
+                    ):
+                        raise ContractError("OPERATOR_APPLICATION_COVERAGE")
+                    projected_condition["state_space_slot"] = yaw_sample
                 destination = planned.get("destination_pose")
                 task_binding = planned.get("task_binding")
                 instruction_binding = planned.get(
@@ -991,6 +1392,10 @@ class CollectionOperatorApplication:
                 copy.deepcopy(inner.get("campaign_authorization"))
                 if isinstance(inner, Mapping) else None
             ),
+            "active_episode_plan": _project_active_episode_plan(
+                inner.get("episode_plan")
+                if isinstance(inner, Mapping) else None
+            ),
             "campaign_session": copy.deepcopy(session),
             "campaign_operator": (
                 copy.deepcopy(inner.get("campaign_operator"))
@@ -1009,6 +1414,7 @@ class CollectionOperatorApplication:
             "workflow_state": workflow,
             "environment": environment,
             "selection": copy.deepcopy(self.selection),
+            "sampling_provenance": sampling_provenance,
             "campaign_review": campaign_review,
             "campaign": campaign,
             "episodes": copy.deepcopy(history if isinstance(history, list) else []),
@@ -1157,7 +1563,6 @@ class CollectionOperatorApplication:
             close()
         self._campaign = None
         self._generation += 1
-        previous["normalized_seed"] = previous.get("normalized_seed", 0) + 1
         self.draft = self._new_draft(previous)
         self._camera_recovery_pending = True
         camera_setup = self._apply_camera_update(self.camera_refresh_call())
@@ -1317,7 +1722,12 @@ class CollectionOperatorApplication:
                     for pose in project_assisted_poses(
                         self.catalog, self.selection, anchor,
                         self._spatial_node_count(), repeat=self.draft["repeat"],
-                        normalized_seed=self.draft["normalized_seed"],
+                        normalized_seed=derive_domain_seed(
+                            self.draft["normalized_seed"], "spatial",
+                        ),
+                        yaw_sampling_seed=derive_domain_seed(
+                            self.draft["normalized_seed"], "yaw",
+                        ),
                     ):
                         if pose != anchor and pose not in direct_poses:
                             direct_poses.append(pose)
@@ -1333,6 +1743,8 @@ class CollectionOperatorApplication:
             self.draft[field] = value
             if self.draft["authoring_mode"] == "DIRECT_EDIT":
                 self._reset_direct_pairs()
+        elif field == "normalized_seed":
+            self.draft[field] = _validated_normalized_seed(value)
         elif field == "current_object_pose" and isinstance(value, Mapping):
             checked = validate_operator_pose(self.catalog, self.selection, value)
             self.draft["current_object_pose"] = checked
@@ -1641,12 +2053,15 @@ class CollectionOperatorApplication:
         terminal_pose = (
             inner.get("terminal_object_pose") if isinstance(inner, Mapping) else None
         )
-        if (
+        campaign_complete = (
             isinstance(campaign, Mapping)
             and campaign.get("state") == "COMPLETE"
             and campaign.get("remaining_intents") == 0
-            and isinstance(campaign.get("completed_intents"), int)
+            and type(campaign.get("completed_intents")) is int
             and campaign["completed_intents"] > 0
+        )
+        if (
+            campaign_complete
             and isinstance(terminal_pose, Mapping)
         ):
             endpoint = next((
@@ -1671,7 +2086,10 @@ class CollectionOperatorApplication:
         self._campaign = None
         self._environment_view = fresh_environment
         self._generation += 1
-        previous["normalized_seed"] = previous.get("normalized_seed", 0) + 1
+        if campaign_complete:
+            previous["normalized_seed"] = (
+                _validated_normalized_seed(previous["normalized_seed"]) + 1
+            ) % (MAX_CAMPAIGN_SEED + 1)
         self.draft = self._new_draft(previous)
         if (
             self.draft["authoring_mode"] == "DIRECT_EDIT"

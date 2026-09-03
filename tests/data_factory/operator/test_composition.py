@@ -6,7 +6,7 @@ import time
 import tempfile
 import threading
 import unittest
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Mapping
 from unittest import mock
@@ -26,14 +26,23 @@ from tools.data_factory.campaign_authorization import (
 )
 from tools.data_factory.experiment_manifest import compile_fr5_hypothesis
 from tools.data_factory.one_job import OneJob, TEST_ONLY_READINESS_CONTRACT
+from tools.data_factory.motion.object_reposition import (
+    build_object_reposition_binding,
+)
 from tools.data_factory.operator.workflow.intents import (
     CandidateReviewPort,
     OperatorIntentCore,
 )
 from tools.data_factory.operator.web.bridge import LoopbackBridge
-from tools.data_factory.operator.catalog import load_operator_catalog, project_assisted_poses
+from tools.data_factory.operator.catalog import (
+    load_operator_catalog,
+    project_assisted_poses,
+    project_balanced_start_pose_ids,
+)
 from tools.data_factory.operator.cli import main as operator_console_main
 from tools.data_factory.operator.composition import (
+    _campaign_authorization_ttl,
+    _domain_seed,
     build_physical_operator_application,
     build_physical_operator_console,
     build_physical_runtime,
@@ -48,6 +57,7 @@ from tools.data_factory.operator.workflow.campaign import (
     OperatorConsole,
     _derive_test_only_gripper_program,
     _campaign_camera_warmup,
+    _validate_successful_object_reposition_result,
     build_physical_test_contract,
 )
 from tools.data_factory.operator.setup.contracts import (
@@ -85,6 +95,35 @@ def envelope(view: dict, op: str, payload: dict, intent_id: str) -> dict:
         "op": op,
         "payload": payload,
     }
+
+
+def successful_reposition_result(
+    binding: Mapping[str, Any], scene_digest: str,
+) -> dict[str, Any]:
+    plan_digest = canonical_digest([binding["continuation_run_id"], "plan"])
+    value = {
+        "schema_version": "data_factory.object_reposition_result.v2",
+        "status": "PASS", "code": "PASS",
+        "parent_run_id": binding["parent_run_id"],
+        "continuation_run_id": binding["continuation_run_id"],
+        "next_run_id": binding["next_run_id"],
+        "object_reposition_binding_digest": binding["binding_digest"],
+        "plan_digest": plan_digest,
+        "resolved_job_digest": canonical_digest("reposition-resolved-job"),
+        "scene_state_digest": scene_digest,
+        "preapproval_scope_digest": canonical_digest("reposition-preapproval"),
+        "plan_artifact_digest": canonical_digest("reposition-plan-artifact"),
+        "execution_response": {
+            "ok": True, "code": "COMPLETE", "state": "COMPLETED",
+            "run_id": binding["continuation_run_id"],
+            "plan_digest": plan_digest,
+            "data": {
+                "scene_transition": {"scene_state_digest": scene_digest},
+            },
+        },
+    }
+    value["result_digest"] = canonical_digest(value)
+    return value
 
 
 def production_hypothesis() -> dict[str, Any]:
@@ -361,6 +400,7 @@ class Harness:
     def console(
         self, *, episode_call=None, prepare_timeout_s=1.0,
         candidate_review_port=None, campaign_approval_once=False,
+        object_reposition_bindings=None,
     ) -> OperatorConsole:
         def forbidden_review(*_args, **_kwargs):
             self.forbidden["candidate"] += 1
@@ -381,12 +421,413 @@ class Harness:
             terminal_response_call=lambda: self.terminal_response,
             gripper_setup_request=self.setup_request,
             gripper_setup_resolution_call=self.setup_resolution_call,
+            object_reposition_bindings=object_reposition_bindings,
             campaign_approval_once=campaign_approval_once,
             prepare_timeout_s=prepare_timeout_s, close_timeout_s=1.0,
         )
 
 
 class OperatorConsoleTests(unittest.TestCase):
+    def test_domain_seeds_are_deterministic_and_slot_order_independent(self):
+        slot = {
+            "slot_id": "stable-slot-r001",
+            "base_condition_digest": canonical_digest("condition"),
+            "robot_start_pose_id": "start-r001",
+            "split_group": "TRAIN",
+            "repeat_index": 0,
+        }
+        slot_digest = canonical_digest(slot)
+        first = _domain_seed(7, "trajectory", slot_digest)
+        reordered = [
+            _domain_seed(7, "trajectory", canonical_digest({
+                key: value for key, value in {**slot, "order_index": order}.items()
+                if key != "order_index"
+            }))
+            for order in (0, 9)
+        ]
+
+        self.assertEqual(first, _domain_seed(7, "trajectory", slot_digest))
+        self.assertEqual(reordered, [first, first])
+        self.assertEqual(len({
+            _domain_seed(7, "spatial"),
+            _domain_seed(7, "start_pose"),
+            first,
+        }), 3)
+        self.assertNotIn(first, {7, 8})
+        self.assertNotEqual(first, _domain_seed(8, "trajectory", slot_digest))
+        next_slot_digest = canonical_digest({
+            **slot, "slot_id": "stable-slot-r002", "repeat_index": 1,
+        })
+        self.assertTrue(
+            {
+                _domain_seed(7, "trajectory", slot_digest),
+                _domain_seed(7, "trajectory", next_slot_digest),
+            }.isdisjoint({
+                _domain_seed(8, "trajectory", slot_digest),
+                _domain_seed(8, "trajectory", next_slot_digest),
+            })
+        )
+
+    def test_surface_reposition_evidence_is_fail_closed_and_sealed_in_history(self):
+        object_profile = {"object_profile_id": "object-r1"}
+        grasp_profile = {
+            "grasp_profile_id": "grasp-r1", "object_profile_id": "object-r1",
+        }
+        binding = build_object_reposition_binding(
+            parent_run_id="physical-console-r001",
+            continuation_run_id="physical-console-r001-reposition",
+            next_run_id="physical-console-r001-next",
+            start_state="ON_SURFACE",
+            source_pose={
+                "place_id": "PLACE_A", "yaw_deg": 0,
+                "x_mm": 0, "y_mm": 0,
+            },
+            target_pose={
+                "place_id": "PLACE_A", "yaw_deg": 30,
+                "x_mm": 0, "y_mm": 0,
+            },
+            object_profile=object_profile, grasp_profile=grasp_profile,
+        )
+        scene_digest = canonical_digest("repositioned-scene")
+        result = successful_reposition_result(binding, scene_digest)
+        for field, value, redigest in (
+            ("status", "FAIL", True),
+            ("object_reposition_binding_digest", canonical_digest("wrong"), True),
+            ("result_digest", canonical_digest("wrong-result"), False),
+        ):
+            with self.subTest(field=field), self.assertRaisesRegex(
+                ContractError, "OPERATOR_CONSOLE_REPOSITION_RESULT",
+            ):
+                tampered = copy.deepcopy(result)
+                tampered[field] = value
+                if redigest:
+                    tampered["result_digest"] = canonical_digest({
+                        key: item for key, item in tampered.items()
+                        if key != "result_digest"
+                    })
+                _validate_successful_object_reposition_result(
+                    tampered, binding, post_scene_digest=scene_digest,
+                    code="OPERATOR_CONSOLE_REPOSITION_RESULT",
+                )
+
+        with tempfile.TemporaryDirectory() as root:
+            harness = Harness(root)
+            console = harness.console(object_reposition_bindings=[binding])
+            self.addCleanup(console.close)
+            console.campaign_operator.compile_draft({}, {})
+            slot = console.campaign_operator.manifest["slots"][0]
+            console._active_intent_projection = {
+                "run_id": console.run_id, "order_index": 0,
+                "slot_id": slot["slot_id"], "slot_digest": canonical_digest(slot),
+            }
+            console._workflow = "RUNNING"
+            evidence = {
+                "object_reposition_binding_digest": binding["binding_digest"],
+                "object_reposition_run_id": binding["continuation_run_id"],
+                "object_reposition_plan_digest": result["plan_digest"],
+                "object_reposition_plan_artifact_digest": result[
+                    "plan_artifact_digest"
+                ],
+                "object_reposition_collision_report_digest": canonical_digest(
+                    "collision-report",
+                ),
+                "object_reposition_plan_only_no_motion_digest": canonical_digest(
+                    "plan-only-no-motion",
+                ),
+            }
+            for field in (
+                "object_reposition_plan_artifact_digest",
+                "object_reposition_collision_report_digest",
+                "object_reposition_plan_only_no_motion_digest",
+            ):
+                with self.subTest(runtime_field=field), self.assertRaisesRegex(
+                    ContractError, "OPERATOR_CONSOLE_RUNTIME_EVENT",
+                ):
+                    malformed = copy.deepcopy(evidence)
+                    malformed[field] = "not-a-digest"
+                    console.publish_runtime({
+                        "code": "OBJECT_REPOSITION_PLANNED",
+                        "run_id": console.run_id, "data": malformed,
+                    })
+            console.publish_runtime({
+                "code": "VALIDATING", "run_id": console.run_id,
+            })
+            self.assertEqual(console.projection()["runtime"]["progress"], 90)
+            console.publish_runtime({
+                "code": "OBJECT_REPOSITION_PLANNED",
+                "run_id": console.run_id, "data": evidence,
+            })
+            runtime = console.projection()["runtime"]
+            self.assertEqual(runtime["progress"], 92)
+            self.assertEqual(runtime["evidence"], evidence)
+
+            sealed = console._publish_outcome({
+                "ok": True, "campaign": {"state": "COMPLETE"},
+                "result": {
+                    "technical_evidence": {
+                        "status": "PASS", "post_scene_digest": scene_digest,
+                    },
+                    "human_semantic": "NOT_MEASURED",
+                    "terminal_object_pose": copy.deepcopy(binding["target_pose"]),
+                    "object_reposition": result,
+                },
+            })
+            self.assertFalse(sealed)
+            projection = console.projection()
+            self.assertEqual(
+                projection["terminal_object_pose"], binding["target_pose"],
+            )
+            self.assertEqual(
+                projection["episode_result"]["object_reposition"], result,
+            )
+            self.assertEqual(
+                projection["episode_history"][0]["object_reposition"], result,
+            )
+
+    def test_held_reposition_keeps_release_terminal_pose_without_a_result(self):
+        release_pose = {
+            "place_id": "PLACE_A", "yaw_deg": 15,
+            "x_mm": 8, "y_mm": -4,
+        }
+        binding = build_object_reposition_binding(
+            parent_run_id="physical-console-r001",
+            continuation_run_id="physical-console-r001",
+            next_run_id=None, start_state="HELD_OBJECT",
+            source_pose={
+                "place_id": "PLACE_A", "yaw_deg": 0,
+                "x_mm": 0, "y_mm": 0,
+            },
+            target_pose=release_pose,
+            object_profile={"object_profile_id": "object-r1"},
+            grasp_profile={
+                "grasp_profile_id": "grasp-r1", "object_profile_id": "object-r1",
+            },
+        )
+        with tempfile.TemporaryDirectory() as root:
+            harness = Harness(root)
+            console = harness.console(object_reposition_bindings=[binding])
+            self.addCleanup(console.close)
+            console.campaign_operator.compile_draft({}, {})
+            slot = console.campaign_operator.manifest["slots"][0]
+            console._active_intent_projection = {
+                "run_id": console.run_id, "order_index": 0,
+                "slot_id": slot["slot_id"], "slot_digest": canonical_digest(slot),
+            }
+            console._publish_outcome({
+                "ok": True, "campaign": {"state": "COMPLETE"},
+                "result": {
+                    "technical_evidence": {"status": "PASS"},
+                    "terminal_object_pose": release_pose,
+                },
+            })
+            projected = console.projection()["episode_result"]
+            self.assertEqual(projected["terminal_object_pose"], release_pose)
+            self.assertNotIn("object_reposition", projected)
+
+    def test_surface_preapproval_exactly_binds_campaign_and_next_endpoint(self):
+        parent_run_id = "campaign-run-1"
+        next_run_id = "campaign-run-2"
+        binding = build_object_reposition_binding(
+            parent_run_id=parent_run_id,
+            continuation_run_id="campaign-run-1-reposition",
+            next_run_id=next_run_id, start_state="ON_SURFACE",
+            source_pose={
+                "place_id": "PLACE_B", "yaw_deg": 0,
+                "x_mm": 0, "y_mm": 0,
+            },
+            target_pose={
+                "place_id": "PLACE_B", "yaw_deg": 30,
+                "x_mm": 0, "y_mm": 0,
+            },
+            object_profile={"object_profile_id": "object-r1"},
+            grasp_profile={
+                "grasp_profile_id": "grasp-r1", "object_profile_id": "object-r1",
+            },
+        )
+        current_slot = {
+            "slot_id": "campaign-slot-1", "order_index": 0,
+            "base_condition_digest": canonical_digest("current-base"),
+        }
+        next_base_digest = canonical_digest("next-base")
+        next_resolved_digest = canonical_digest("next-resolved")
+        next_slot = {
+            "slot_id": "campaign-slot-2", "order_index": 1,
+            "base_condition_digest": next_base_digest,
+        }
+        manifest_digest = canonical_digest("campaign-manifest")
+        envelope_digest = canonical_digest("campaign-envelope")
+        authorization_digest = canonical_digest("campaign-authorization")
+        intent_digest = canonical_digest("current-intent")
+        fixed_endpoint = {
+            "workspace_id": "PLACE_B",
+            "cell_calibration_id": "place-b-frame",
+            "cell_calibration_digest": canonical_digest("place-b-calibration"),
+            "motion_recipe_digest": canonical_digest("place-b-motion"),
+        }
+        destination = {
+            "role": "DESTINATION", "workspace_id": "PLACE_B",
+            "frame_id": "place-b-frame",
+            "pose": copy.deepcopy(binding["source_pose"]),
+            "sheet_digest": canonical_digest("place-b-sheet"),
+            "family_digest": canonical_digest("a4-family"),
+            "region_binding": {
+                "layout_id": "layout-r1",
+                "layout_digest": canonical_digest("layout"),
+                "region_id": "BLUE",
+                "physical_binding_status": "PREPARED_NOT_VERIFIED",
+            },
+        }
+        operator = mock.Mock()
+        operator.manifest = {
+            "manifest_digest": manifest_digest,
+            "slots": [current_slot, next_slot],
+        }
+        operator.hypothesis = {
+            "fixed_contract": {
+                "schema_version": "data_factory.fr5_fixed_contract.v2",
+                "endpoint_bindings": [fixed_endpoint],
+            },
+            "base_conditions": [{
+                "base_condition_digest": next_base_digest,
+                "resolved_job_digest": next_resolved_digest,
+            }],
+        }
+        console = object.__new__(OperatorConsole)
+        console._object_reposition_bindings = [binding, None]
+        console._active_intent_projection = {
+            "run_id": parent_run_id, "intent_digest": intent_digest,
+            "order_index": 0, "slot_id": current_slot["slot_id"],
+            "slot_digest": canonical_digest(current_slot),
+        }
+        console._run_index = 0
+        console.run_id = parent_run_id
+        console._run_id_factory = lambda index: f"campaign-run-{index + 1}"
+        console._task_bindings = [{"spatial_bindings": [destination]}, None]
+        console._campaign_envelope = {
+            "envelope_digest": envelope_digest,
+            "manifest_digest": manifest_digest,
+        }
+        console.campaign_operator = operator
+        episode_binding = {
+            "manifest_digest": manifest_digest,
+            "intent_digest": intent_digest,
+            "run_id": parent_run_id,
+            "slot_digest": canonical_digest(current_slot),
+            "root_binding_digest": canonical_digest("root-binding"),
+            "start_binding_digest": canonical_digest("start-binding"),
+        }
+        episode_binding["binding_digest"] = canonical_digest(episode_binding)
+        request = {
+            "run_id": parent_run_id,
+            "plan_digest": canonical_digest("parent-plan"),
+        }
+        decision_binding = {
+            "preapproval_evidence_digest": canonical_digest(
+                "parent-preapproval-evidence",
+            ),
+        }
+        endpoint = {
+            "run_id": next_run_id,
+            "workspace_id": destination["workspace_id"],
+            "frame_id": destination["frame_id"],
+            "source_pose": copy.deepcopy(binding["source_pose"]),
+            "target_pose": copy.deepcopy(binding["target_pose"]),
+            "sheet_digest": destination["sheet_digest"],
+            "family_digest": destination["family_digest"],
+            "region_binding": copy.deepcopy(destination["region_binding"]),
+            "cell_calibration_digest": fixed_endpoint[
+                "cell_calibration_digest"
+            ],
+            "motion_qualification_digest": fixed_endpoint[
+                "motion_recipe_digest"
+            ],
+        }
+        scope = {
+            "schema_version": "data_factory.object_reposition_preapproval.v1",
+            "parent_run_id": parent_run_id,
+            "parent_plan_digest": request["plan_digest"],
+            "parent_preapproval_evidence_digest": decision_binding[
+                "preapproval_evidence_digest"
+            ],
+            "campaign_authorization_digest": authorization_digest,
+            "campaign_envelope_digest": envelope_digest,
+            "manifest_digest": manifest_digest,
+            "intent_digest": intent_digest,
+            "runtime_episode_binding_digest": episode_binding["binding_digest"],
+            "current_slot_digest": canonical_digest(current_slot),
+            "next_slot": copy.deepcopy(next_slot),
+            "next_slot_digest": canonical_digest(next_slot),
+            "next_slot_endpoint": endpoint,
+            "next_slot_endpoint_digest": canonical_digest(endpoint),
+            "continuation_run_id": binding["continuation_run_id"],
+            "next_run_id": next_run_id,
+            "object_reposition_binding_digest": binding["binding_digest"],
+            "motion_payload_digest": canonical_digest("motion-payload"),
+            "resolved_job_digest": next_resolved_digest,
+            "motion_program_digest": canonical_digest("motion-program"),
+        }
+        scope["scope_digest"] = canonical_digest(scope)
+        authorization = {"authorization_digest": authorization_digest}
+        self.assertEqual(
+            console._validated_object_reposition_preapproval(
+                scope, request=request, decision_binding=decision_binding,
+                episode_binding=episode_binding, authorization=authorization,
+            ),
+            scope,
+        )
+
+        def tampered(field, value):
+            changed = copy.deepcopy(scope)
+            changed[field] = value
+            changed["scope_digest"] = canonical_digest({
+                key: item for key, item in changed.items()
+                if key != "scope_digest"
+            })
+            return changed
+
+        wrong_endpoint = copy.deepcopy(endpoint)
+        wrong_endpoint["sheet_digest"] = canonical_digest("wrong-sheet")
+        endpoint_scope = copy.deepcopy(scope)
+        endpoint_scope["next_slot_endpoint"] = wrong_endpoint
+        endpoint_scope["next_slot_endpoint_digest"] = canonical_digest(
+            wrong_endpoint,
+        )
+        endpoint_scope["scope_digest"] = canonical_digest({
+            key: item for key, item in endpoint_scope.items()
+            if key != "scope_digest"
+        })
+        cases = (
+            tampered("parent_plan_digest", canonical_digest("wrong-plan")),
+            tampered(
+                "campaign_authorization_digest", canonical_digest("wrong-auth"),
+            ),
+            tampered(
+                "object_reposition_binding_digest", canonical_digest("wrong-binding"),
+            ),
+            endpoint_scope,
+        )
+        for changed in cases:
+            with self.assertRaisesRegex(
+                ContractError, "OPERATOR_CONSOLE_CAMPAIGN_SCOPE_MISMATCH",
+            ):
+                console._validated_object_reposition_preapproval(
+                    changed, request=request, decision_binding=decision_binding,
+                    episode_binding=episode_binding, authorization=authorization,
+                )
+
+        console._object_reposition_bindings[0] = None
+        self.assertIsNone(console._validated_object_reposition_preapproval(
+            None, request=request, decision_binding=decision_binding,
+            episode_binding=episode_binding, authorization=authorization,
+        ))
+        with self.assertRaisesRegex(
+            ContractError, "OPERATOR_CONSOLE_CAMPAIGN_SCOPE_MISMATCH",
+        ):
+            console._validated_object_reposition_preapproval(
+                scope, request=request, decision_binding=decision_binding,
+                episode_binding=episode_binding, authorization=authorization,
+            )
+
     def test_console_preserves_production_authoring_without_opening_effects(self):
         hypothesis = production_hypothesis()
         source_draft = campaign_draft(hypothesis, count=1)
@@ -1394,8 +1835,8 @@ feedback:
             root = Path(directory)
             self.portable_repository(root)
             job = load_json_strict(
-                root / "config/data_factory/test_only_physical/goal2-place1/"
-                "center-live-p45-20260821-r001.job.json",
+                root / "config/data_factory/jobs/"
+                "center-live-24mm-20260903-r002.job.json",
             )
             source = {
                 key: job[key]
@@ -1411,15 +1852,42 @@ feedback:
                 "sample_age_s": 0.0, "max_age_s": 0.1,
                 "source": "CONTROLLER_STATE",
             }
+            camera_up = "usb-Goal2_Camera-video-index0"
+            camera_wrist = "usb-Goal2_Wrist_Camera-video-index0"
             console, context = build_physical_operator_console(
                 repository_root=root,
                 session_id="pick-place-one-episode-r001",
                 run_id="pick-place-one-run-r001",
                 operator_label="local-operator",
-                discovery_call=lambda: ["usb-Goal2_Camera-video-index0"],
+                job_path=(
+                    "config/data_factory/jobs/"
+                    "center-live-24mm-20260903-r002.job.json"
+                ),
+                motion_qualification_path=(
+                    "config/data_factory/motion_qualifications/"
+                    "fr5-place-a-wood-cube-24mm-r001.json"
+                ),
+                home_candidate_path=(
+                    "config/data_factory/home_candidates/"
+                    "fr5-lab-a-tcp-r002-home-r001.json"
+                ),
+                tcp_candidate_manifest=(
+                    "config/data_factory/tcp_candidates/"
+                    "fr5-lab-a-tcp-r002.json"
+                ),
+                gripper_retune_path=None,
+                collection_profile_path=(
+                    "config/data_factory/collection_profiles/"
+                    "fr5-up-wrist-rgb-30hz-v2.json"
+                ),
+                discovery_call=lambda: [camera_up, camera_wrist],
+                selected_camera_bindings={
+                    "up": camera_up, "wrist": camera_wrist,
+                },
                 activation_call=lambda: True,
                 gripper_readback_call=lambda: copy.deepcopy(opened),
                 task_id="pick_place", requested_count=1,
+                trajectory_variant_id="TWO_STAGE_ALIGN_V2",
                 direct_pose_sequence=[source, destination],
                 clock=lambda: NOW,
             )
@@ -1437,6 +1905,14 @@ feedback:
                 self.assertEqual(
                     console.campaign_operator.hypothesis["fixed_contract"]["task"],
                     "pick_place",
+                )
+                self.assertEqual(
+                    console.campaign_operator.hypothesis["fixed_contract"]["motion_recipe"],
+                    "TWO_STAGE_ALIGN_V2",
+                )
+                self.assertEqual(
+                    console.campaign_operator.hypothesis["fixed_contract"]["schema_version"],
+                    "data_factory.fr5_fixed_contract.v3",
                 )
                 self.assertEqual(
                     len(console.campaign_operator.hypothesis["base_conditions"]),
@@ -1465,7 +1941,7 @@ feedback:
             finally:
                 console.close()
 
-    def test_cross_workspace_pick_place_binds_each_endpoint_through_home_start(self):
+    def test_cross_workspace_pick_place_binds_endpoints_and_rejects_unsafe_yaw_release(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             self.portable_repository(root)
@@ -1516,11 +1992,11 @@ feedback:
                 session_id="cross-workspace-r001",
                 run_id="cross-workspace-run-r001",
                 operator_label="local-operator",
-                job_path="config/data_factory/jobs/center-live-24mm-20260901-r001.job.json",
+                job_path="config/data_factory/jobs/center-live-24mm-20260903-r002.job.json",
                 yaw0_sheet=workspace_bindings["PLACE_A"]["yaw0_sheet"],
                 motion_qualification_path=workspace_bindings["PLACE_A"]["motion_qualification"],
                 home_candidate_path="config/data_factory/home_candidates/fr5-lab-a-tcp-r002-home-r001.json",
-                collection_profile_path="config/data_factory/collection_profiles/fr5-up-wrist-rgb-30hz-v1.json",
+                collection_profile_path="config/data_factory/collection_profiles/fr5-up-wrist-rgb-30hz-v2.json",
                 gripper_retune_path=None,
                 workspace_bindings=workspace_bindings,
                 discovery_call=lambda: devices,
@@ -1601,6 +2077,61 @@ feedback:
             finally:
                 console.close()
 
+            unsafe_transition = [
+                {
+                    "place_id": "PLACE_B", "yaw_deg": 44.0,
+                    "x_mm": 0.0, "y_mm": 0.0,
+                },
+                {
+                    "place_id": "PLACE_A", "yaw_deg": 0.0,
+                    "x_mm": 0.0, "y_mm": 68.0,
+                },
+            ]
+            with self.assertRaises(ContractError) as raised:
+                build_physical_operator_console(
+                    repository_root=root,
+                    session_id="cross-workspace-unsafe-r001",
+                    run_id="cross-workspace-unsafe-run-r001",
+                    operator_label="local-operator",
+                    job_path=(
+                        "config/data_factory/jobs/"
+                        "center-live-24mm-20260903-r002.job.json"
+                    ),
+                    yaw0_sheet=workspace_bindings["PLACE_B"]["yaw0_sheet"],
+                    motion_qualification_path=workspace_bindings["PLACE_B"][
+                        "motion_qualification"
+                    ],
+                    home_candidate_path=(
+                        "config/data_factory/home_candidates/"
+                        "fr5-lab-a-tcp-r002-home-r001.json"
+                    ),
+                    collection_profile_path=(
+                        "config/data_factory/collection_profiles/"
+                        "fr5-up-wrist-rgb-30hz-v2.json"
+                    ),
+                    gripper_retune_path=None,
+                    workspace_bindings=workspace_bindings,
+                    discovery_call=lambda: devices,
+                    selected_camera_bindings={
+                        "up": devices[0], "wrist": devices[1],
+                    },
+                    gripper_readback_call=lambda: copy.deepcopy(opened),
+                    activation_call=lambda: True,
+                    task_id="pick_place", requested_count=1,
+                    job_binding={
+                        "place_id": "PLACE_B",
+                        "cell_calibration_id": "place-b-yaw0-r001",
+                        "object_profile_id": "wood-cube-24mm-r001",
+                        "grasp_profile_id": (
+                            "wood-cube-24mm-top-3p5mm-r001"
+                        ),
+                    },
+                    initial_object_pose=unsafe_transition[0],
+                    direct_pose_sequence=unsafe_transition,
+                    clock=lambda: NOW,
+                )
+            self.assertEqual(raised.exception.code, "JOB_COORDINATE_BOUNDS")
+
     def test_physical_episode_consumes_hypothesis_resolver_receipt(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -1653,7 +2184,7 @@ feedback:
             def validate_scope_then_stop(
                 payload, _cancel, publish, resolver, campaign_authorization,
                 runtime_episode_binding, decision_provider,
-                checkpoint_provider, **_kwargs,
+                checkpoint_provider, dataset_validation_scope, **_kwargs,
             ):
                 publish({"code": "PLANNING", "run_id": payload["run_id"]})
                 runtime_observed.update(
@@ -1679,6 +2210,24 @@ feedback:
                     "gripper-retune-wood-cube-25mm-top-center-r008.json"
                 )
                 scope_observed.update({
+                    "incremental_validation": dataset_validation_scope
+                    == "INCREMENTAL",
+                    "trajectory_seed": payload[
+                        run_job.TRAJECTORY_SAMPLING_SEED_KEY
+                    ] == _domain_seed(
+                        7,
+                        "trajectory",
+                        canonical_digest({
+                            key: console.campaign_operator.manifest["slots"][0][key]
+                            for key in (
+                                "slot_id", "base_condition_digest",
+                                "robot_start_pose_id", "split_group",
+                                "repeat_index",
+                            )
+                        }),
+                    ) and payload[
+                        run_job.TRAJECTORY_SAMPLING_SEED_KEY
+                    ] != 7,
                     "manifest": runtime_episode_binding["manifest_digest"]
                     == envelope["manifest_digest"],
                     "slot": runtime_episode_binding["slot_digest"]
@@ -1772,6 +2321,7 @@ feedback:
                         "operator_summary": summary,
                         "data_disposition": "TEST_ONLY",
                         "episode_binding": copy.deepcopy(runtime_episode_binding),
+                        "object_reposition_preapproval": None,
                     },
                     "timeout_s": 2.0,
                 })
@@ -1803,6 +2353,7 @@ feedback:
                 gripper_readback_call=read_runtime_gripper,
                 run_live_call=live,
                 environment_prepared=True,
+                normalized_seed=7,
                 clock=lambda: NOW,
             )
             try:
@@ -2221,10 +2772,18 @@ feedback:
                 ))
                 authoring = application.bridge_core.snapshot()
                 draft = authoring["projection"]["draft"]
-                with mock.patch(
-                    "tools.data_factory.operator.composition.project_assisted_poses",
-                    wraps=project_assisted_poses,
-                ) as assisted_projection:
+                master_seed = application.draft["normalized_seed"]
+                with (
+                    mock.patch(
+                        "tools.data_factory.operator.composition.project_assisted_poses",
+                        wraps=project_assisted_poses,
+                    ) as assisted_projection,
+                    mock.patch(
+                        "tools.data_factory.operator.composition."
+                        "project_balanced_start_pose_ids",
+                        wraps=project_balanced_start_pose_ids,
+                    ) as start_projection,
+                ):
                     compiled = application.bridge_core.consume(envelope(
                         authoring, "compile_draft", {
                             "draft_id": draft["draft_id"],
@@ -2235,7 +2794,15 @@ feedback:
                 self.assertEqual(assisted_projection.call_args.args[3], 3)
                 self.assertEqual(
                     assisted_projection.call_args.kwargs,
-                    {"repeat": 1, "normalized_seed": 0},
+                    {
+                        "repeat": 1,
+                        "normalized_seed": _domain_seed(master_seed, "spatial"),
+                        "yaw_sampling_seed": _domain_seed(master_seed, "yaw"),
+                    },
+                )
+                start_projection.assert_called_once_with(
+                    application.draft["selected_start_pose_ids"], 3,
+                    normalized_seed=_domain_seed(master_seed, "start_pose"),
                 )
                 self.assertEqual(compiled["episode_count"], 3)
                 campaign = application._campaign.campaign_operator
@@ -2682,7 +3249,7 @@ feedback:
                 initial_catalog=load_operator_catalog(root, device_ids=[device]),
                 job_path=(
                     "config/data_factory/jobs/"
-                    "center-live-24mm-20260901-r001.job.json"
+                    "center-live-24mm-20260903-r002.job.json"
                 ),
                 run_live_call=mock.Mock(
                     side_effect=AssertionError("live was called"),
@@ -2706,7 +3273,7 @@ feedback:
                     },
                     {
                         "config/data_factory/jobs/"
-                        "center-live-24mm-20260901-r001.job.json"
+                        "center-live-24mm-20260903-r002.job.json"
                     },
                 )
                 self.assertFalse((root / "outputs").exists())
@@ -2818,7 +3385,7 @@ feedback:
                 run_live_call=mock.Mock(side_effect=AssertionError("live was called")),
                 job_path=(
                     "config/data_factory/jobs/"
-                    "center-live-24mm-20260901-r001.job.json"
+                    "center-live-24mm-20260903-r002.job.json"
                 ),
                 initial_data_mode="GENERAL_COLLECTION",
                 production_dataset_root=(
@@ -3693,7 +4260,9 @@ class ReusableHarness(Harness):
 
     def __init__(
         self, root: str, *, count: int = 3, wrong_plan_scope: bool = False,
-        wrong_checkpoint_scope: bool = False, block_until_cancel: bool = False,
+        wrong_checkpoint_scope: bool = False,
+        wrong_trajectory_binding: bool = False,
+        block_until_cancel: bool = False,
     ):
         super().__init__(root)
         self.hypothesis, self.source_draft = physical_contract(count)
@@ -3701,6 +4270,7 @@ class ReusableHarness(Harness):
         self.count = count
         self.wrong_plan_scope = wrong_plan_scope
         self.wrong_checkpoint_scope = wrong_checkpoint_scope
+        self.wrong_trajectory_binding = wrong_trajectory_binding
         self.block_until_cancel = block_until_cancel
         self.max_active = 0
         self.overlap = False
@@ -3807,6 +4377,23 @@ class ReusableHarness(Harness):
             "root_binding_digest": episode_context["root_binding"]["binding_digest"],
             "start_binding_digest": episode_context["start_binding"]["binding_digest"],
         }
+        phase_parameters = {}
+        trajectory = {
+            "schema_version": "data_factory.trajectory_variant_binding.v2",
+            "trajectory_variant_id": "DIRECT",
+            "variation_profile_digest": canonical_digest("direct-profile"),
+            "sampling_seed": 0,
+            "sample_rank": 0,
+            "design_size": 1,
+            "design_digest": canonical_digest("direct-design"),
+            "target_yaw_deg": 0.0,
+            "phase_parameters": phase_parameters,
+            "phase_parameters_digest": canonical_digest(phase_parameters),
+            "motion_program_digest": canonical_digest(["program", intent["run_id"]]),
+        }
+        trajectory["binding_digest"] = canonical_digest(trajectory)
+        if self.wrong_trajectory_binding:
+            trajectory["phase_parameters"]["forged"] = True
         request = {
             "schema_version": "data_factory.plan_decision_request.v1",
             "run_id": intent["run_id"],
@@ -3821,6 +4408,18 @@ class ReusableHarness(Harness):
                     "clearance": {"minimum_m": 0.05},
                     "flow": {"pickup": True, "same_cell_recycle": True},
                 },
+                "trajectory_variant_binding": trajectory,
+                "trajectory_variant_binding_digest": trajectory["binding_digest"],
+                "yaw_sample_binding": None,
+                "yaw_sample_binding_digest": None,
+                "precommit_safety": {"approved_plan_digest": plan_digest},
+                "plan_envelope_digest": canonical_digest(
+                    ["envelope", intent["run_id"]],
+                ),
+                "preapproval_evidence_digest": canonical_digest(
+                    ["preapproval", intent["run_id"]],
+                ),
+                "object_reposition_preapproval": None,
             },
             "timeout_s": 1.0,
         }
@@ -3929,6 +4528,17 @@ def start_campaign(console: OperatorConsole, harness: ReusableHarness, suffix: s
 
 
 class ReusableOperatorConsoleTests(unittest.TestCase):
+    def test_campaign_authorization_ttl_scales_with_episode_count(self):
+        self.assertEqual(_campaign_authorization_ttl(1), timedelta(hours=1))
+        self.assertEqual(_campaign_authorization_ttl(22), timedelta(hours=1))
+        self.assertEqual(_campaign_authorization_ttl(45), timedelta(minutes=105))
+        self.assertEqual(_campaign_authorization_ttl(100), timedelta(minutes=215))
+        for invalid in (True, 0, 101):
+            with self.subTest(invalid=invalid), self.assertRaisesRegex(
+                ContractError, "PHYSICAL_CONSOLE_REQUESTED_COUNT",
+            ):
+                _campaign_authorization_ttl(invalid)
+
     def test_requested_count_scales_budgets_and_compiles_multiple_slots(self):
         hypothesis, draft = physical_contract(3)
         manifest, _ = compile_collection_campaign(draft, hypothesis=hypothesis)
@@ -4043,7 +4653,10 @@ class ReusableOperatorConsoleTests(unittest.TestCase):
                 }, {})
 
     def test_automatic_plan_and_checkpoint_reject_wrong_episode_scope(self):
-        for field in ("wrong_plan_scope", "wrong_checkpoint_scope"):
+        for field in (
+            "wrong_plan_scope", "wrong_checkpoint_scope",
+            "wrong_trajectory_binding",
+        ):
             with self.subTest(field=field), tempfile.TemporaryDirectory() as root:
                 harness = ReusableHarness(root, **{field: True})
                 console = harness.console()

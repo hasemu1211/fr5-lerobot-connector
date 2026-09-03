@@ -3,7 +3,13 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from tools.data_factory.quality.coverage_report import build_and_publish_coverage_report, build_coverage_report, validate_coverage_report, write_coverage_report
+from tools.data_factory.quality.coverage_report import (
+    build_and_publish_coverage_report,
+    build_coverage_report,
+    validate_coverage_report,
+    validate_preapproval_evidence,
+    write_coverage_report,
+)
 from tools.data_factory.task_recipe import (
     compile_episode_instruction_binding,
     compile_task_binding,
@@ -22,7 +28,104 @@ def episode(name, at, state, continuity=None):
     return {"episode_id": name, "condition": at, "admission_state": state, "evidence_digests": {"job_spec": D, "technical_validator_result": D, "candidate_admission": D}, "trajectory_continuity": continuity or {}}
 
 
+def trajectory_binding():
+    value = {
+        "schema_version": "data_factory.trajectory_variant_binding.v2",
+        "trajectory_variant_id": "DIRECT",
+        "variation_profile_digest": canonical_digest("direct-profile"),
+        "sampling_seed": 0,
+        "sample_rank": 0,
+        "design_size": 1,
+        "design_digest": canonical_digest("trajectory-design"),
+        "target_yaw_deg": 0.0,
+        "phase_parameters": {},
+        "phase_parameters_digest": canonical_digest({}),
+        "motion_program_digest": canonical_digest("motion-program"),
+    }
+    value["binding_digest"] = canonical_digest(value)
+    return value
+
+
+def yaw_binding():
+    value = {
+        "schema_version": "data_factory.yaw_sample_binding.v4",
+        "yaw_sampling_profile_id": "cube-yaw-profile-r1",
+        "yaw_sampling_profile_digest": canonical_digest("yaw-profile"),
+        "sampling_seed": (1 << 64) - 1,
+        "sample_identity_digest": canonical_digest("yaw-identity"),
+        "sample_rank": 0,
+        "design_size": 3,
+        "yaw_sample_quantile": 0.2,
+        "raw_yaw_deg": 0.0,
+        "canonical_object_yaw_deg": 0.0,
+        "source_object_yaw_deg": 0.0,
+        "grasp_yaw_deg": 0.0,
+        "yaw_equivalence_period_deg": 90.0,
+        "sample_origin": "SEEDED_CDF_STRATUM",
+        "state_space_design_profile_id": "cube-state-space-r1",
+        "state_space_design_profile_digest": canonical_digest("state-space"),
+        "spatial_cell_index": 7,
+        "spatial_row": 1,
+        "spatial_column": 2,
+    }
+    value["binding_digest"] = canonical_digest(value)
+    return value
+
+
+def modern_preapproval():
+    trajectory = trajectory_binding()
+    yaw = yaw_binding()
+    return {
+        "schema_version": "data_factory.preapproval_evidence.v4",
+        "run_id": "run-1",
+        "resolved_job_digest": canonical_digest("resolved-job"),
+        "plan_digest": canonical_digest("plan"),
+        "plan_envelope": {},
+        "plan_envelope_digest": canonical_digest({}),
+        "trajectory_variant_binding": trajectory,
+        "trajectory_variant_binding_digest": trajectory["binding_digest"],
+        "campaign_binding": {
+            "manifest_digest": canonical_digest("manifest"),
+            "intent_digest": canonical_digest("intent"),
+            "slot_id": "slot-1",
+            "slot_digest": canonical_digest("slot"),
+            "runtime_episode_binding_digest": canonical_digest("runtime"),
+        },
+        "object_reposition_binding": None,
+        "object_reposition_binding_digest": None,
+        "yaw_sample_binding": yaw,
+        "yaw_sample_binding_digest": yaw["binding_digest"],
+    }
+
+
 class CoverageReportTest(unittest.TestCase):
+    def test_modern_preapproval_fully_validates_nested_bindings(self):
+        evidence = modern_preapproval()
+        self.assertEqual(validate_preapproval_evidence(evidence), evidence)
+
+        forged_trajectory = copy.deepcopy(evidence)
+        forged_trajectory["trajectory_variant_binding"][
+            "phase_parameters"
+        ] = {"unbound": True}
+        with self.assertRaisesRegex(
+            ContractError, "PREAPPROVAL_EVIDENCE_SCHEMA",
+        ):
+            validate_preapproval_evidence(forged_trajectory)
+
+        forged_campaign = copy.deepcopy(evidence)
+        forged_campaign["campaign_binding"]["slot_id"] = "invalid slot"
+        with self.assertRaisesRegex(
+            ContractError, "PREAPPROVAL_EVIDENCE_SCHEMA",
+        ):
+            validate_preapproval_evidence(forged_campaign)
+
+        forged_yaw = copy.deepcopy(evidence)
+        forged_yaw["yaw_sample_binding"]["spatial_row"] = 2
+        with self.assertRaisesRegex(
+            ContractError, "PREAPPROVAL_EVIDENCE_SCHEMA",
+        ):
+            validate_preapproval_evidence(forged_yaw)
+
     def test_separate_counts_continuity_and_deterministic_suggestion(self):
         a, b, c = condition(0), condition(10), condition(20)
         continuity = {"close_feedback_in_window": {"status": "FLAGGED", "value": False, "flags": ["GRIPPER_FEEDBACK_OUT_OF_WINDOW"]}}

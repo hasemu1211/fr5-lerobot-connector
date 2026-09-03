@@ -11,9 +11,21 @@ from unittest import mock
 from pathlib import Path
 from types import SimpleNamespace
 
-from .test_motion import SCENE, T
+from .test_motion import SCENE, T, snapshot
 from . import test_one_job as one_job_test
 from tools.data_factory.motion.pickup_executor import PHASES, PickupExecutor
+from tools.data_factory.motion.object_reposition import (
+    build_object_reposition_binding,
+    yaw_preserving_destination,
+)
+from tools.data_factory.scene_state import release_slot
+from tools.data_factory.state_space import (
+    YAW_BINDING_SCHEMA,
+    bind_yaw_sample_to_state_space,
+    sample_yaw_cdf_strata,
+    validate_state_space_design_profile,
+    validate_yaw_sampling_profile,
+)
 from tools.data_factory.one_job import JsonlProcess, run_one_job
 from tools.data_factory import run_job
 from tools.data_factory.task_recipe import (
@@ -71,6 +83,1098 @@ class Executor:
 
 
 class RunJobTest(unittest.TestCase):
+    def test_runtime_yaw_scope_rejects_redigested_out_of_design_cell(self):
+        repository = Path(__file__).resolve().parents[2]
+        object_profile = run_job.load_json_strict(
+            repository / "config/data_factory/objects/wood-cube-24mm-r001.json",
+        )
+        grasp_profile = run_job.load_json_strict(
+            repository / "config/data_factory/grasps/"
+            "wood-cube-24mm-top-3p5mm-r001.json",
+        )
+        yaw_profile = validate_yaw_sampling_profile(
+            run_job.load_json_strict(
+                repository / "config/data_factory/yaw_sampling_profiles/"
+                "wood-cube-24mm-top-r001.json",
+            ),
+            object_profile=object_profile, grasp_profile=grasp_profile,
+        )
+        design_profile = validate_state_space_design_profile(
+            run_job.load_json_strict(
+                repository / "config/data_factory/state_space_design_profiles/"
+                "wood-cube-24mm-a4-cdf3-r001.json",
+            ),
+            object_profile=object_profile, grasp_profile=grasp_profile,
+            yaw_sampling_profile=yaw_profile,
+        )
+        yaw_sample = next(
+            item for item in sample_yaw_cdf_strata(
+                yaw_profile, sampling_seed=17,
+                sweep_identity={"sweep": "runtime-scope-r001"},
+                strata_count=3, conditioned_yaw_deg=0.0,
+            )
+            if item["sample_origin"] == "CONDITIONED_SOURCE_ANCHOR"
+        )
+        binding = bind_yaw_sample_to_state_space(
+            yaw_sample, state_space_design_profile=design_profile,
+            spatial_cell_index=7, spatial_row=1, spatial_column=2,
+        )
+        validated = runtime_validated(
+            job={
+                **JOB, "yaw_deg": 0.0,
+                "object_profile_id": object_profile["object_profile_id"],
+                "grasp_profile_id": grasp_profile["grasp_profile_id"],
+            },
+            object_profile=object_profile, grasp_profile=grasp_profile,
+        )
+        self.assertEqual(
+            run_job._validated_yaw_sample_scope(
+                binding, yaw_profile, design_profile,
+                validated=validated, bound_runtime=True,
+                preapproval_checklist={"yaw_sample_binding": binding},
+            ),
+            binding,
+        )
+        self.assertEqual(
+            run_job._validated_yaw_sample_scope(
+                yaw_sample, yaw_profile, None,
+                validated=validated, bound_runtime=True,
+                preapproval_checklist={"yaw_sample_binding": yaw_sample},
+            ),
+            yaw_sample,
+        )
+        with self.assertRaisesRegex(
+            run_job.ContractError, "YAW_SAMPLE_BINDING_SCOPE",
+        ):
+            run_job._validated_yaw_sample_scope(
+                yaw_sample, yaw_profile, None,
+                validated=validated, bound_runtime=True,
+                preapproval_checklist={"yaw_sample_binding": yaw_sample},
+                require_slotted=True,
+            )
+
+        forged = copy.deepcopy(binding)
+        forged["spatial_cell_index"] = 999
+        forged["binding_digest"] = run_job.canonical_digest({
+            key: value for key, value in forged.items()
+            if key != "binding_digest"
+        })
+        with self.assertRaisesRegex(
+            run_job.ContractError, "YAW_SAMPLE_BINDING_SCOPE",
+        ):
+            run_job._validated_yaw_sample_scope(
+                forged, yaw_profile, design_profile,
+                validated=validated, bound_runtime=True,
+                preapproval_checklist={"yaw_sample_binding": forged},
+            )
+        with self.assertRaisesRegex(
+            run_job.ContractError, "YAW_SAMPLE_BINDING_SCOPE",
+        ):
+            run_job._validated_yaw_sample_scope(
+                binding, yaw_profile, None,
+                validated=validated, bound_runtime=True,
+                preapproval_checklist={"yaw_sample_binding": binding},
+            )
+
+    def test_preapproval_evidence_durably_binds_current_yaw_sample(self):
+        repository = Path(__file__).resolve().parents[2]
+        object_profile = run_job.load_json_strict(
+            repository / "config/data_factory/objects/wood-cube-24mm-r001.json",
+        )
+        grasp_profile = run_job.load_json_strict(
+            repository / "config/data_factory/grasps/"
+            "wood-cube-24mm-top-3p5mm-r001.json",
+        )
+        yaw_profile = validate_yaw_sampling_profile(
+            run_job.load_json_strict(
+                repository / "config/data_factory/yaw_sampling_profiles/"
+                "wood-cube-24mm-top-r001.json",
+            ),
+            object_profile=object_profile, grasp_profile=grasp_profile,
+        )
+        design_profile = validate_state_space_design_profile(
+            run_job.load_json_strict(
+                repository / "config/data_factory/state_space_design_profiles/"
+                "wood-cube-24mm-a4-cdf3-r001.json",
+            ),
+            object_profile=object_profile, grasp_profile=grasp_profile,
+            yaw_sampling_profile=yaw_profile,
+        )
+        yaw_sample = next(
+            item for item in sample_yaw_cdf_strata(
+                yaw_profile, sampling_seed=(1 << 63) + 17,
+                sweep_identity={"sweep": "preapproval-r001"},
+                strata_count=3, conditioned_yaw_deg=0.0,
+            )
+            if item["sample_origin"] == "CONDITIONED_SOURCE_ANCHOR"
+        )
+        yaw_binding = bind_yaw_sample_to_state_space(
+            yaw_sample, state_space_design_profile=design_profile,
+            spatial_cell_index=7, spatial_row=1, spatial_column=2,
+        )
+        validated = runtime_validated(
+            job={
+                **JOB, "yaw_deg": 0.0,
+                "object_profile_id": object_profile["object_profile_id"],
+                "grasp_profile_id": grasp_profile["grasp_profile_id"],
+            },
+            object_profile=object_profile, grasp_profile=grasp_profile,
+        )
+        program = runtime_motion(validated)
+        with tempfile.TemporaryDirectory() as directory:
+            value = payload("live")
+            value["run_root"] = directory
+            (Path(directory) / value["run_id"]).mkdir()
+            trajectory = run_job._trajectory_binding(value, validated, program)
+            plan = {"motion_program_digest": run_job.canonical_digest(program)}
+            plan_digest = run_job.canonical_digest(plan)
+            readback = {"kind": "planning-scene"}
+            collision = {"kind": "collision"}
+            no_motion = {"kind": "no-motion"}
+            safety = {
+                "schema_version": "data_factory.precommit_safety.v1",
+                "run_id": value["run_id"],
+                "approved_plan_digest": plan_digest,
+                "scene_binding_digest": run_job.canonical_digest(SCENE),
+                "expected_planning_scene_digest": run_job.canonical_digest(
+                    "expected-scene",
+                ),
+                "planning_scene_readback_digest": run_job.canonical_digest(
+                    readback,
+                ),
+                "collision_report_digest": run_job.canonical_digest(collision),
+                "plan_only_no_motion_digest": run_job.canonical_digest(no_motion),
+                "post_reset_safe_snapshot_digest": None,
+                "status": "PENDING",
+            }
+            evidence = run_job._write_preapproval_evidence(
+                value, validated, {
+                    "plan_digest": plan_digest,
+                    "plan_envelope": {
+                        "plan": plan,
+                        "precommit_safety": safety,
+                        "precommit_evidence": {
+                            "schema_version":
+                            "data_factory.precommit_evidence.v1",
+                            "run_id": value["run_id"],
+                            "approved_plan_digest": plan_digest,
+                            "scene_binding_digest": safety[
+                                "scene_binding_digest"
+                            ],
+                            "expected_planning_scene_digest": safety[
+                                "expected_planning_scene_digest"
+                            ],
+                            "planning_scene_readback": readback,
+                            "collision_report": collision,
+                            "plan_only_no_motion": no_motion,
+                        },
+                        "operator_summary": {},
+                    },
+                }, trajectory, yaw_sample_binding=yaw_binding,
+            )
+            stored = run_job.load_json_strict(
+                Path(directory) / value["run_id"]
+                / "preapproval_evidence.json",
+            )
+        self.assertEqual(stored, evidence)
+        self.assertEqual(
+            stored["yaw_sample_binding"]["schema_version"],
+            YAW_BINDING_SCHEMA,
+        )
+        self.assertEqual(
+            (
+                stored["schema_version"], stored["yaw_sample_binding"],
+                stored["yaw_sample_binding_digest"],
+            ),
+            (
+                "data_factory.preapproval_evidence.v4", yaw_binding,
+                yaw_binding["binding_digest"],
+            ),
+        )
+
+    def test_runtime_child_keeps_requests_cancel_aware(self):
+        cancel = threading.Event()
+        calls = []
+
+        class Child:
+            def request(self, request, token):
+                if request["op"] == "cancel":
+                    self_outer.assertIsNone(token)
+                else:
+                    self_outer.assertIs(token, cancel)
+                    if token.is_set():
+                        raise run_job.ContractError("JSONL_REQUEST_CANCELLED")
+                calls.append(request["op"])
+                if request["op"] == "execute":
+                    cancel.set()
+                return {"op": request["op"], "ack": True}
+
+        self_outer = self
+        child = Child()
+        self.assertEqual(
+            run_job._runtime_child_request(
+                child, {"op": "execute"}, cancel,
+            ),
+            {"op": "execute", "ack": True},
+        )
+        with self.assertRaisesRegex(
+            run_job.ContractError, "JSONL_REQUEST_CANCELLED",
+        ):
+            run_job._runtime_child_request(
+                child, {"op": "heartbeat"}, cancel,
+            )
+        self.assertEqual(
+            run_job._runtime_child_request(
+                child, {"op": "cancel"}, cancel,
+            ),
+            {"op": "cancel", "ack": True},
+        )
+        self.assertEqual(calls, ["execute", "cancel"])
+
+    def test_postcommit_overlap_is_validator_only_and_joins_both_results(self):
+        validator_started = threading.Event()
+        reposition_started = threading.Event()
+        validator_finished = threading.Event()
+        reposition_finished = threading.Event()
+
+        def validate(dataset_root, payload_value, profile):
+            self.assertEqual(dataset_root, "/dataset")
+            self.assertEqual(payload_value, {"run_id": "episode-run"})
+            self.assertEqual(profile, {"profile": "bound"})
+            validator_started.set()
+            self.assertTrue(reposition_started.wait(1))
+            validator_finished.set()
+            return {"lane": "validator"}
+
+        def reposition():
+            reposition_started.set()
+            self.assertTrue(validator_started.wait(1))
+            reposition_finished.set()
+            return {"lane": "reposition"}
+
+        technical, moved = run_job._postcommit_validate_and_reposition(
+            validate, "/dataset", {"run_id": "episode-run"},
+            {"profile": "bound"}, reposition,
+        )
+        self.assertEqual(
+            (technical, moved),
+            ({"lane": "validator"}, {"lane": "reposition"}),
+        )
+        self.assertTrue(validator_finished.is_set())
+        self.assertTrue(reposition_finished.is_set())
+
+        serial_calls = []
+        technical, moved = run_job._postcommit_validate_and_reposition(
+            lambda *_: serial_calls.append("validator") or {"lane": "validator"},
+            "/dataset", {"run_id": "episode-run"}, {"profile": "bound"},
+        )
+        self.assertEqual((serial_calls, moved), (["validator"], None))
+
+    def test_reposition_cancel_after_planning_never_dispatches_motion(self):
+        object_profile = {"object_profile_id": "object-r1"}
+        grasp_profile = {
+            "grasp_profile_id": "grasp-r1",
+            "object_profile_id": "object-r1",
+        }
+        target = {
+            "place_id": "place-a", "yaw_deg": 0.0,
+            "x_mm": 1.0, "y_mm": 2.0,
+        }
+        target["yaw_deg"] = 15.0
+        source = yaw_preserving_destination(
+            {**target, "yaw_deg": 0.0}, target,
+        )
+        binding = build_object_reposition_binding(
+            parent_run_id="episode-run",
+            continuation_run_id="episode-run-reposition",
+            next_run_id="episode-next", start_state="ON_SURFACE",
+            source_pose=source, target_pose=target,
+            object_profile=object_profile, grasp_profile=grasp_profile,
+        )
+        scope = {"scope_digest": "sha256:" + "1" * 64}
+        authorization = {
+            "envelope": {
+                "effect_scope": "PHYSICAL",
+                "lifecycle_action": "LIVE_COLLECT",
+                "task": "pick_place", "robot_system_id": "fr5-lab-a",
+                "object_profile_id": "object-r1",
+                "grasp_profile_id": "grasp-r1",
+            },
+        }
+        program = {"schema_version": "fixture.motion"}
+        plan = {"run_id": binding["continuation_run_id"]}
+        plan_digest = run_job.canonical_digest(plan)
+        planned = {
+            "ok": True, "plan_digest": plan_digest,
+            "plan_envelope": {
+                "plan": plan,
+                "precommit_safety": {
+                    "collision_report_digest": "sha256:" + "2" * 64,
+                    "plan_only_no_motion_digest": "sha256:" + "3" * 64,
+                },
+            },
+        }
+        continuation = {
+            "expectation_digest": "sha256:" + "4" * 64,
+        }
+        cancel = threading.Event()
+        calls = []
+
+        class Process:
+            def close(self, **_kwargs):
+                calls.append("close")
+
+        class MotionOnlyJob:
+            def __init__(self, *_args, **_kwargs):
+                self.execution_evidence = None
+
+            def plan_only(self, *_args):
+                calls.append("plan")
+                return copy.deepcopy(planned)
+
+            def approve(self, *_args):
+                calls.append("approve")
+                raise AssertionError("cancelled reposition must not be approved")
+
+        with tempfile.TemporaryDirectory() as directory:
+            parent_payload = {
+                "run_id": binding["parent_run_id"],
+                "run_root": directory,
+                "expected_robot_system_id": "fr5-lab-a",
+            }
+            Path(directory, binding["parent_run_id"]).mkdir()
+            motion_payload = {
+                **parent_payload, "run_id": binding["continuation_run_id"],
+            }
+
+            def publish(_event):
+                calls.append("publish")
+                cancel.set()
+
+            with (
+                mock.patch.object(
+                    run_job, "_validate_object_reposition_preapproval",
+                    return_value=scope,
+                ),
+                mock.patch.object(run_job, "_load", return_value=scope),
+                mock.patch.object(
+                    run_job, "validate_campaign_authorization",
+                    return_value=authorization,
+                ),
+                mock.patch.object(
+                    run_job, "resolve_object_reposition_inputs",
+                    return_value=(
+                        motion_payload,
+                        {"resolved_job_digest": "sha256:" + "5" * 64},
+                        program, {}, binding,
+                    ),
+                ),
+                mock.patch.object(
+                    run_job, "_object_reposition_continuation_expectation",
+                    return_value=continuation,
+                ),
+                mock.patch.object(run_job, "_timeout_s", return_value=1.0),
+                mock.patch.object(run_job, "OneJob", MotionOnlyJob),
+            ):
+                result = run_job.run_object_reposition(
+                    parent_payload, binding, cancel, publish,
+                    parent_plan_digest="sha256:" + "6" * 64,
+                    operator_id="operator", cell_root=Path(directory) / "cells",
+                    executor_factory=lambda *_args, **_kwargs: Process(),
+                    campaign_authorization={"fixture": True},
+                    data_disposition="TEST_ONLY", preapproval_scope=scope,
+                )
+
+        self.assertEqual((result["status"], result["code"]), ("FAIL", "CANCELLED"))
+        self.assertEqual(calls, ["plan", "publish", "close"])
+
+    def test_parent_plan_release_edge_exactly_binds_both_reposition_modes(self):
+        object_profile = {"object_profile_id": "object-r1"}
+        grasp_profile = {
+            "grasp_profile_id": "grasp-r1", "object_profile_id": "object-r1",
+        }
+        source = {
+            "place_id": "place-a", "yaw_deg": 0.0,
+            "x_mm": 1.0, "y_mm": 2.0,
+        }
+        target = {
+            "place_id": "place-b", "yaw_deg": 15.0,
+            "x_mm": 3.0, "y_mm": 4.0,
+        }
+        held = build_object_reposition_binding(
+            parent_run_id="episode-run", continuation_run_id="episode-run",
+            next_run_id="episode-next", start_state="HELD_OBJECT",
+            source_pose=source, target_pose=target,
+            object_profile=object_profile, grasp_profile=grasp_profile,
+        )
+        validated = {"normalized_job": {**source, "task": "pickup_e2e"}}
+        held_scene = {
+            "release_slot": {
+                "pose": target, "role": "DESTINATION_THEN_NEXT_SOURCE",
+            },
+            "allowed_next_run_id": "episode-next",
+        }
+        summary = {"recycle": {"release_target": target}}
+        self.assertEqual(
+            run_job._validate_parent_reposition_edge(
+                held, validated=validated, scene_binding=held_scene,
+                operator_summary=summary,
+            ),
+            held,
+        )
+
+        rotated = {**target, "yaw_deg": 15.0}
+        landed = yaw_preserving_destination(
+            {**target, "yaw_deg": 0.0}, rotated,
+        )
+        surface = build_object_reposition_binding(
+            parent_run_id="episode-run",
+            continuation_run_id="episode-run-reposition",
+            next_run_id="episode-next", start_state="ON_SURFACE",
+            source_pose=landed, target_pose=rotated,
+            object_profile=object_profile, grasp_profile=grasp_profile,
+        )
+        surface_scene = {
+            "release_slot": {
+                "pose": landed, "role": "DESTINATION_THEN_NEXT_SOURCE",
+            },
+            "allowed_next_run_id": "episode-run-reposition",
+        }
+        self.assertEqual(
+            run_job._validate_parent_reposition_edge(
+                surface, validated=validated, scene_binding=surface_scene,
+                operator_summary={"recycle": {"release_target": landed}},
+            ),
+            surface,
+        )
+        for forged_scene in (
+            {**surface_scene, "allowed_next_run_id": "episode-next"},
+            {
+                **surface_scene,
+                "release_slot": {
+                    **surface_scene["release_slot"], "pose": rotated,
+                },
+            },
+        ):
+            with self.assertRaisesRegex(
+                run_job.ContractError, "OBJECT_REPOSITION_PARENT_EDGE",
+            ):
+                run_job._validate_parent_reposition_edge(
+                    surface, validated=validated, scene_binding=forged_scene,
+                    operator_summary={"recycle": {"release_target": landed}},
+                )
+
+    def test_trajectory_variant_binds_object_dimensions_seed_and_target_yaw(self):
+        approach_profile = run_job.load_json_strict(
+            Path(__file__).resolve().parents[2]
+            / "config/data_factory/approach_sampling_profiles/"
+            "wood-cube-24mm-top-wrist-r001.json"
+        )
+        value = payload()
+        value.update(
+            trajectory_variant_id="TWO_STAGE_ALIGN_V2",
+            trajectory_sampling_seed=23,
+            trajectory_sampling_design={
+                "sample_rank": 2, "design_size": 7,
+                "design_digest": run_job.canonical_digest("design"),
+            },
+        )
+        self.assertEqual(
+            run_job._run_payload(value)["trajectory_sampling_seed"], 23,
+        )
+        for invalid in (
+            {**payload(), "trajectory_variant_id": "TWO_STAGE_ALIGN_V2"},
+            {**value, "trajectory_sampling_seed": -1},
+            {**value, "trajectory_variant_id": "UNKNOWN"},
+            {**value, "trajectory_sampling_design": {"sample_rank": 7, "design_size": 7, "design_digest": run_job.canonical_digest("design")}},
+        ):
+            with self.assertRaisesRegex(run_job.ContractError, "RUN_PAYLOAD"):
+                run_job._run_payload(invalid)
+
+        validated = {
+            "normalized_job": {
+                **JOB, "task": "pickup_e2e", "place_id": "PLACE_A",
+                "yaw_deg": 45.0, "x_mm": 0.0, "y_mm": 0.0,
+            },
+            "object_profile": {"dimensions_mm": [24.0, 24.0, 24.0]},
+        }
+        source_program = motion()
+        for frame in ("base_tcp", "base_tool"):
+            source_program["steps"][0]["target"][frame]["translation_m"] = [
+                0.0, 0.0, 0.1,
+            ]
+            source_program["steps"][1]["target"][frame]["translation_m"] = [
+                0.0, 0.0, 0.02,
+            ]
+        with (
+            mock.patch.object(
+                run_job, "validate_job_spec", return_value=validated,
+            ),
+            mock.patch.object(run_job, "_load", return_value={}),
+            mock.patch.object(
+                run_job, "resolve_motion_program", return_value=source_program,
+            ),
+            mock.patch.object(
+                run_job, "compile_execution_motion_program",
+                wraps=run_job.compile_execution_motion_program,
+            ) as compile_variant,
+            mock.patch.object(
+                run_job, "_load_approach_sampling_profile",
+                return_value=approach_profile,
+            ),
+        ):
+            resolved, compiled_program, _scene = run_job.resolve_inputs(
+                value, scene_binding_call=lambda *_args: {},
+            )
+            binding = run_job._trajectory_binding(
+                value, resolved, compiled_program,
+            )
+        compile_variant.assert_called_once_with(
+            source_program,
+            trajectory_variant_id="TWO_STAGE_ALIGN_V2",
+            sampling_seed=23,
+            target_yaw_deg=45.0,
+            object_dimensions_mm=[24.0, 24.0, 24.0],
+            approach_sampling_profile=approach_profile,
+            sample_rank=2, design_size=7,
+            design_digest=run_job.canonical_digest("design"),
+        )
+        self.assertEqual(
+            (binding["trajectory_variant_id"], binding["sampling_seed"]),
+            ("TWO_STAGE_ALIGN_V2", 23),
+        )
+        self.assertEqual(
+            (binding["sample_rank"], binding["design_size"]), (2, 7),
+        )
+        self.assertEqual(
+            run_job._validated_trajectory_binding(
+                binding, payload=value, validated=validated,
+                motion_program_digest=run_job.canonical_digest(compiled_program),
+            ),
+            binding,
+        )
+        forged = copy.deepcopy(binding)
+        forged["sampling_seed"] += 1
+        with self.assertRaisesRegex(
+            run_job.ContractError, "TRAJECTORY_BINDING",
+        ):
+            run_job._validated_trajectory_binding(
+                forged, payload=value, validated=validated,
+                motion_program_digest=run_job.canonical_digest(compiled_program),
+            )
+
+    def test_postcommit_reposition_reuses_executor_without_recorder(self):
+        repository = Path(__file__).resolve().parents[2]
+        object_profile = run_job.load_json_strict(
+            repository / "config/data_factory/objects/wood-cube-24mm-r001.json",
+        )
+        grasp_profile = run_job.load_json_strict(
+            repository / "config/data_factory/grasps/"
+            "wood-cube-24mm-top-3p5mm-r001.json",
+        )
+        yaw_profile = validate_yaw_sampling_profile(
+            run_job.load_json_strict(
+                repository / "config/data_factory/yaw_sampling_profiles/"
+                "wood-cube-24mm-top-r001.json",
+            ),
+            object_profile=object_profile, grasp_profile=grasp_profile,
+        )
+        yaw_binding = sample_yaw_cdf_strata(
+            yaw_profile, sampling_seed=9,
+            sweep_identity={"slot": "next"}, strata_count=1,
+        )[0]
+        target_pose = {
+            "place_id": "PLACE_A", "yaw_deg": 0.0,
+            "x_mm": 4.0, "y_mm": -6.0,
+        }
+        target_pose = {
+            **target_pose,
+            "yaw_deg": yaw_binding["source_object_yaw_deg"],
+        }
+        source_pose = yaw_preserving_destination(
+            {**target_pose, "yaw_deg": 0.0}, target_pose,
+        )
+        binding = build_object_reposition_binding(
+            parent_run_id="episode-run",
+            continuation_run_id="episode-run-reposition",
+            next_run_id="episode-run-2", start_state="ON_SURFACE",
+            source_pose=source_pose, target_pose=target_pose,
+            object_profile=object_profile, grasp_profile=grasp_profile,
+            yaw_sampling_profile=yaw_profile,
+            yaw_sample_binding=yaw_binding,
+        )
+        parent_plan_digest = "sha256:" + "7" * 64
+        source_slot = {
+            "slot_id": "sha256:" + "1" * 64,
+            "slot_digest": "sha256:" + "2" * 64,
+            "allowed_run_id": binding["continuation_run_id"],
+        }
+        target_slot = release_slot(
+            robot_system_id="fr5-lab-a", pose=target_pose,
+            object_profile_id=object_profile["object_profile_id"],
+            exclusion_geometry_digest="sha256:" + "e" * 64,
+            role="DESTINATION_THEN_NEXT_SOURCE",
+        )
+        scene_binding = {
+            **SCENE, "source_slot": source_slot,
+            "release_slot": target_slot,
+            "allowed_next_run_id": binding["next_run_id"],
+        }
+        program_template = motion(True)
+        input_digests = {
+            key: program_template["binding_digests"][key]
+            for key in (
+                "selected_sheet", "yaw0_sheet", "cell_calibration",
+                "robot_system", "object_profile", "grasp_profile",
+            )
+        }
+        family_digest = "sha256:" + "d" * 64
+        validated = runtime_validated(job={
+            **JOB, "job_id": binding["continuation_run_id"],
+            "task": "pick_place", "place_id": source_pose["place_id"],
+            "cell_calibration_id": "cell-a",
+            "sheet_manifest_digest": input_digests["selected_sheet"],
+            "yaw_deg": source_pose["yaw_deg"],
+            "x_mm": source_pose["x_mm"], "y_mm": source_pose["y_mm"],
+            "object_profile_id": object_profile["object_profile_id"],
+            "grasp_profile_id": grasp_profile["grasp_profile_id"],
+        }, input_digests=input_digests,
+            object_profile=object_profile, grasp_profile=grasp_profile,
+            calibration={"document": {"a4_family_digest": family_digest}},
+        )
+        program = runtime_motion(validated, continuous=True)
+
+        class Transport(T):
+            def __init__(self):
+                super().__init__()
+                self.position = [0.0] * 6
+                self.gripper_position = 0.01
+                self.started = []
+
+            def snapshot(self, *_):
+                return snapshot(
+                    self.position, gripper_position=self.gripper_position,
+                )
+
+            def start_phase(self, step):
+                self.started.append(step["phase"])
+                self.position = list(step["final_joint_state"])
+                if step["type"] == "GRIPPER":
+                    self.gripper_position = step["gripper_position_m"]
+
+            def poll_active(self):
+                return object()
+
+            def cancel_active(self, *_):
+                return None
+
+        class Store:
+            def __init__(self):
+                self.consumed = []
+                self.transitions = []
+                self.blocked = []
+
+            def read(self):
+                return {
+                    "robot_system_id": "fr5-lab-a", "cell_ready": False,
+                    "run_id": binding["parent_run_id"],
+                    "plan_digest": parent_plan_digest,
+                }
+
+            def consume_next_source(self, **value):
+                self.consumed.append(value)
+                return {
+                    "scene_state_digest": "sha256:" + "9" * 64,
+                    "scene_state": {"revision": 2},
+                }
+
+            def locked_snapshot(self, digest):
+                class Locked:
+                    def __enter__(_self):
+                        return {
+                            "scene_state_digest": digest,
+                            "scene_state": {
+                                "revision": 2,
+                                "objects": {"cube-1": {
+                                    "object_profile_id": object_profile[
+                                        "object_profile_id"
+                                    ],
+                                    "state": "ON_SURFACE",
+                                }},
+                            },
+                        }
+
+                    def __exit__(_self, *_):
+                        return None
+
+                return Locked()
+
+            def transition_release(self, **value):
+                self.transitions.append(value)
+                return {
+                    "scene_state_digest": "sha256:" + "8" * 64,
+                    "release_evidence_digest": run_job.canonical_digest(
+                        value["evidence"],
+                    ),
+                }
+
+            def mark_blocked(self, *value):
+                self.blocked.append(value)
+
+        published = []
+        with tempfile.TemporaryDirectory() as directory:
+            parent_payload = payload("live")
+            parent_payload["job"] = {
+                **copy.deepcopy(parent_payload["job"]),
+                "task": "pick_place", "cell_calibration_id": "cell-a",
+                "object_profile_id": object_profile["object_profile_id"],
+                "grasp_profile_id": grasp_profile["grasp_profile_id"],
+                "operator_or_agent_id": "operator",
+            }
+            parent_payload.update(
+                run_id=binding["parent_run_id"], run_root=directory,
+                config_root=str(repository / "config/data_factory"),
+            )
+            run_job._prepare_run_dir(parent_payload)
+            motion_payload = run_job._object_reposition_payload(
+                parent_payload, binding,
+                source_payload=copy.deepcopy(parent_payload),
+            )
+            current_slot = {
+                "slot_id": "current-slot",
+                "base_condition_digest": "sha256:" + "d" * 64,
+                "robot_start_pose_id": "start-a", "order_index": 0,
+            }
+            next_slot = {
+                "slot_id": "next-slot",
+                "base_condition_digest": "sha256:" + "e" * 64,
+                "robot_start_pose_id": "start-a", "order_index": 1,
+            }
+            manifest = {"slots": [current_slot, next_slot]}
+            manifest["manifest_digest"] = run_job.canonical_digest(manifest)
+            endpoint_bindings = [
+                {
+                    "workspace_id": binding["source_pose"]["place_id"],
+                    "cell_calibration_id": "cell-a",
+                    "cell_calibration_digest": input_digests[
+                        "cell_calibration"
+                    ],
+                    "motion_recipe_digest": program["binding_digests"][
+                        "motion_qualification"
+                    ],
+                },
+                {
+                    "workspace_id": "PLACE_B",
+                    "cell_calibration_id": "cell-b",
+                    "cell_calibration_digest": "sha256:" + "5" * 64,
+                    "motion_recipe_digest": "sha256:" + "6" * 64,
+                },
+            ]
+            endpoint_bindings.sort(
+                key=lambda item: (
+                    item["workspace_id"], item["cell_calibration_id"],
+                ),
+            )
+            fixed_contract = {
+                "schema_version": "data_factory.fr5_fixed_contract.v2",
+                "endpoint_bindings": endpoint_bindings,
+                "endpoint_bindings_digest": run_job.canonical_digest(
+                    endpoint_bindings,
+                ),
+            }
+            fixed_contract["motion_recipe_digest"] = fixed_contract[
+                "endpoint_bindings_digest"
+            ]
+            intent = {
+                "run_id": binding["parent_run_id"], "order_index": 0,
+                "slot": current_slot,
+                "slot_digest": run_job.canonical_digest(current_slot),
+                "manifest_digest": manifest["manifest_digest"],
+                "fixed_contract": fixed_contract,
+            }
+            intent["intent_digest"] = run_job.canonical_digest(intent)
+            ledger_context = {"manifest": manifest, "intent": intent}
+            episode_binding = {
+                "run_id": binding["parent_run_id"],
+                "manifest_digest": manifest["manifest_digest"],
+                "intent_digest": intent["intent_digest"],
+                "slot_digest": run_job.canonical_digest(current_slot),
+                "binding_digest": run_job.canonical_digest(
+                    "runtime-episode-binding",
+                ),
+            }
+            region = {
+                "layout_id": None, "layout_digest": None,
+                "region_id": None,
+                "physical_binding_status": "NOT_CONFIGURED",
+            }
+            destination = {
+                "role": "DESTINATION",
+                "workspace_id": binding["source_pose"]["place_id"],
+                "frame_id": "cell-a",
+                "pose": copy.deepcopy(binding["source_pose"]),
+                "sheet_digest": input_digests["selected_sheet"],
+                "family_digest": family_digest,
+                "region_binding": region,
+            }
+            source = {
+                **copy.deepcopy(destination), "role": "SOURCE",
+                "pose": {
+                    **copy.deepcopy(destination["pose"]),
+                    "x_mm": destination["pose"]["x_mm"] + 20.0,
+                },
+            }
+            episode_instruction = compile_episode_instruction_binding(
+                compile_task_binding(
+                    "pick_place", source=source, destination=destination,
+                ),
+                object_profile,
+            )
+            envelope = {
+                "manifest_digest": manifest["manifest_digest"],
+                "fixed_contract_digest": run_job.canonical_digest(
+                    fixed_contract,
+                ),
+                "episode_count": 2,
+                "slot_digests": [
+                    run_job.canonical_digest(current_slot),
+                    run_job.canonical_digest(next_slot),
+                ],
+                "effect_scope": "PHYSICAL",
+                "lifecycle_action": "LIVE_COLLECT",
+                "task": "pick_place", "robot_system_id": "fr5-lab-a",
+                "object_profile_id": object_profile["object_profile_id"],
+                "grasp_profile_id": grasp_profile["grasp_profile_id"],
+                "collection_profile_digest": validated["input_digests"][
+                    "collection_profile"
+                ],
+                "motion_qualification_digest": fixed_contract[
+                    "motion_recipe_digest"
+                ],
+            }
+            envelope["envelope_digest"] = run_job.canonical_digest(envelope)
+            authorization = {
+                "expires_at": "2099-01-01T00:00:00Z",
+                "envelope_digest": envelope["envelope_digest"],
+                "envelope": envelope,
+            }
+            authorization["authorization_digest"] = run_job.canonical_digest(
+                authorization,
+            )
+            preapproval_evidence = {
+                "plan_digest": parent_plan_digest,
+                "object_reposition_binding_digest": binding["binding_digest"],
+            }
+            with mock.patch.object(
+                run_job, "validate_campaign_authorization",
+                return_value=authorization,
+            ):
+                preapproval_scope = (
+                    run_job._write_object_reposition_preapproval(
+                        parent_payload, binding,
+                        parent_plan_digest=parent_plan_digest,
+                        parent_preapproval_evidence=preapproval_evidence,
+                        campaign_authorization={"fixture": True},
+                        ledger_context=ledger_context,
+                        episode_binding=episode_binding,
+                        episode_instruction_binding=episode_instruction,
+                        source_payload=copy.deepcopy(parent_payload),
+                        resolver=lambda _value, **_: (
+                            validated, program, {}
+                        ),
+                    )
+                )
+            self.assertEqual(
+                (
+                    preapproval_scope["campaign_authorization_digest"],
+                    preapproval_scope["manifest_digest"],
+                    preapproval_scope["intent_digest"],
+                    preapproval_scope["next_slot_digest"],
+                    preapproval_scope["next_slot_endpoint"]["target_pose"],
+                ),
+                (
+                    authorization["authorization_digest"],
+                    manifest["manifest_digest"], intent["intent_digest"],
+                    run_job.canonical_digest(next_slot),
+                    binding["target_pose"],
+                ),
+            )
+            expectation = run_job._object_reposition_continuation_expectation(
+                preapproval_scope, authorization=authorization,
+                parent_plan_digest=parent_plan_digest, binding=binding,
+                motion_payload=motion_payload, validated=validated,
+                program=program, scene_binding=scene_binding,
+            )
+            forged_scope = copy.deepcopy(preapproval_scope)
+            forged_scope["next_slot_endpoint"][
+                "cell_calibration_digest"
+            ] = "sha256:" + "f" * 64
+            forged_scope["next_slot_endpoint_digest"] = (
+                run_job.canonical_digest(forged_scope["next_slot_endpoint"])
+            )
+            forged_scope["scope_digest"] = run_job.canonical_digest({
+                key: value for key, value in forged_scope.items()
+                if key != "scope_digest"
+            })
+            with self.assertRaisesRegex(
+                run_job.ContractError,
+                "OBJECT_REPOSITION_CONTINUATION_BINDING",
+            ):
+                run_job._object_reposition_continuation_expectation(
+                    forged_scope, authorization=authorization,
+                    parent_plan_digest=parent_plan_digest, binding=binding,
+                    motion_payload=motion_payload, validated=validated,
+                    program=program, scene_binding=scene_binding,
+                )
+            store = Store()
+            transport = Transport()
+            node = PickupExecutor(
+                transport, execution_enabled=True,
+                cell_state_store=store, scene_state_store=store,
+                clock=lambda: datetime(2026, 9, 3, tzinfo=timezone.utc),
+                motion_only_binding_digest=binding["binding_digest"],
+                motion_only_parent_run_id=binding["parent_run_id"],
+                motion_only_parent_plan_digest=parent_plan_digest,
+                motion_only_preapproval_scope_digest=preapproval_scope[
+                    "scope_digest"
+                ],
+                motion_only_expected_run_id=expectation["run_id"],
+                motion_only_expected_resolved_job_digest=expectation[
+                    "resolved_job_digest"
+                ],
+                motion_only_expected_program_digest=expectation[
+                    "motion_program_digest"
+                ],
+                motion_only_expected_scene_digest=expectation[
+                    "scene_binding_digest"
+                ],
+                motion_only_expectation_digest=expectation[
+                    "expectation_digest"
+                ],
+            )
+
+            class Process:
+                def request(self, request, *_):
+                    return node.process(request)
+
+                def close(self, **_):
+                    return None
+
+            with (
+                mock.patch.object(
+                    run_job, "validate_campaign_authorization",
+                    return_value=authorization,
+                ),
+                mock.patch.object(
+                    run_job, "resolve_object_reposition_inputs",
+                    return_value=(
+                        motion_payload, validated, program,
+                        scene_binding, binding,
+                    ),
+                ),
+                mock.patch.object(run_job, "CellStateStore", return_value=store),
+            ):
+                result = run_job.run_object_reposition(
+                    parent_payload, binding, threading.Event(), published.append,
+                    parent_plan_digest=parent_plan_digest,
+                    operator_id="operator", cell_root=Path(directory) / "cells",
+                    executor_factory=lambda *_, **__: Process(),
+                    campaign_authorization={"fixture": True},
+                    data_disposition="TEST_ONLY",
+                    preapproval_scope=preapproval_scope,
+                    source_payload=copy.deepcopy(parent_payload),
+                    clock=lambda: datetime(2026, 9, 3, tzinfo=timezone.utc),
+                )
+            plan_file = Path(directory) / "episode-run/object_reposition_plan.json"
+            result_file = Path(directory) / "episode-run/object_reposition_result.json"
+            self.assertTrue(plan_file.is_file())
+            self.assertTrue(
+                (Path(directory) / binding["continuation_run_id"]).is_dir()
+            )
+            self.assertEqual(
+                json.loads(result_file.read_text())["status"], "PASS", result,
+            )
+            self.assertEqual(
+                run_job._validate_object_reposition_result(
+                    parent_payload, binding, preapproval_scope, result,
+                ),
+                result,
+            )
+            plan_artifact = json.loads(plan_file.read_text())
+            self.assertEqual(
+                (
+                    plan_artifact["preapproval_scope_digest"],
+                    plan_artifact["continuation_expectation_digest"],
+                    plan_artifact["resolved_job_digest"],
+                    plan_artifact["motion_program_digest"],
+                    plan_artifact["scene_binding_digest"],
+                    plan_artifact["plan_digest"],
+                ),
+                (
+                    preapproval_scope["scope_digest"],
+                    expectation["expectation_digest"],
+                    validated["resolved_job_digest"],
+                    run_job.canonical_digest(program),
+                    run_job.canonical_digest(scene_binding),
+                    result["plan_digest"],
+                ),
+            )
+            forged_result = copy.deepcopy(result)
+            forged_result.update(
+                status="FAIL", code="EXECUTION_FAILED",
+                scene_state_digest=None,
+                execution_response={
+                    "ok": False, "code": "EXECUTION_FAILED",
+                    "state": "BLOCKED", "run_id": "other-run",
+                    "plan_digest": result["plan_digest"], "data": None,
+                },
+            )
+            forged_result["result_digest"] = run_job.canonical_digest({
+                key: value for key, value in forged_result.items()
+                if key != "result_digest"
+            })
+            run_job.write_json_atomic(result_file, forged_result)
+            with self.assertRaisesRegex(
+                run_job.ContractError, "OBJECT_REPOSITION_RESULT",
+            ):
+                run_job._validate_object_reposition_result(
+                    parent_payload, binding, preapproval_scope, forged_result,
+                )
+
+        self.assertEqual((result["status"], result["code"]), ("PASS", "PASS"))
+        self.assertEqual(
+            (store.consumed[0]["run_id"], len(store.transitions), store.blocked),
+            (binding["continuation_run_id"], 1, []),
+        )
+        self.assertEqual(transport.started, list(PHASES))
+        self.assertEqual(published[0]["code"], "OBJECT_REPOSITION_PLANNED")
+        self.assertEqual(
+            published[0]["data"]["object_reposition_plan_digest"],
+            result["plan_digest"],
+        )
+        self.assertEqual(
+            (
+                published[0]["data"][
+                    "object_reposition_plan_artifact_digest"
+                ],
+                published[0]["data"][
+                    "object_reposition_collision_report_digest"
+                ],
+                published[0]["data"][
+                    "object_reposition_plan_only_no_motion_digest"
+                ],
+            ),
+            (
+                plan_artifact["artifact_digest"],
+                plan_artifact["plan_envelope"]["precommit_safety"][
+                    "collision_report_digest"
+                ],
+                plan_artifact["plan_envelope"]["precommit_safety"][
+                    "plan_only_no_motion_digest"
+                ],
+            ),
+        )
+
     def test_only_fresh_authorized_production_cell_is_initialized(self):
         missing = {
             "cell_ready": False, "reason_code": "STATE_MISSING",
@@ -632,6 +1736,21 @@ class RunJobTest(unittest.TestCase):
         self.assertGreaterEqual(len(binding["operator_summary"]["path"]), 1)
         self.assertEqual(binding["preapproval_checklist"]["place_id"], "PLACE_A")
         self.assertEqual(
+            binding["trajectory_variant_binding_digest"],
+            binding["trajectory_variant_binding"]["binding_digest"],
+        )
+        self.assertEqual(
+            binding["precommit_safety"]["approved_plan_digest"],
+            observed[0]["plan_digest"],
+        )
+        self.assertIsNone(binding["yaw_sample_binding"])
+        self.assertIsNone(binding["yaw_sample_binding_digest"])
+        self.assertRegex(binding["plan_envelope_digest"], r"^sha256:[0-9a-f]{64}$")
+        self.assertRegex(
+            binding["preapproval_evidence_digest"],
+            r"^sha256:[0-9a-f]{64}$",
+        )
+        self.assertEqual(
             binding["site_confirmation_digest"], run_job.canonical_digest({
                 "kind": site_requests[0]["kind"], "choice": "READY",
                 "run_id": site_requests[0]["run_id"],
@@ -700,8 +1819,18 @@ class RunJobTest(unittest.TestCase):
             episode = {
                 "binding_digest": run_job.canonical_digest("production-episode"),
                 "start_binding_digest": run_job.canonical_digest("production-start"),
+                "manifest_digest": run_job.canonical_digest("manifest"),
+                "intent_digest": run_job.canonical_digest("intent"),
+                "slot_digest": run_job.canonical_digest("slot"),
                 "data_disposition": "PRODUCTION",
                 "expires_at": "2099-01-01T00:00:00Z",
+            }
+            ledger_context = {
+                "manifest": {"manifest_digest": episode["manifest_digest"]},
+                "intent": {
+                    "intent_digest": episode["intent_digest"],
+                    "slot": {"slot_id": "slot-1"},
+                },
             }
             planned_start = {
                 "start_binding_digest": episode["start_binding_digest"],
@@ -737,7 +1866,7 @@ class RunJobTest(unittest.TestCase):
                 mock.patch.object(run_job, "validate_runtime_planned_start", return_value=planned_start),
                 mock.patch.object(
                     run_job, "_validate_episode_ledger_context",
-                    return_value={"manifest": {}, "intent": {}},
+                    return_value=ledger_context,
                 ),
                 mock.patch.object(run_job, "CellStateStore", return_value=cell),
                 mock.patch.object(run_job, "SceneStateStore"),
@@ -1510,6 +2639,17 @@ class RunJobTest(unittest.TestCase):
         self.assertEqual(binding["source_slot"], expected_source)
         self.assertEqual(binding["scene_state_digest"], landed_state["scene_state_digest"])
 
+        same_slot_binding = run_job._scene_binding(
+            validated, source_slot["pose"], "run-2", root=root,
+        )
+        self.assertEqual(
+            (
+                same_slot_binding["source_slot"],
+                same_slot_binding["release_slot"]["slot_id"],
+            ),
+            (expected_source, source_slot["slot_id"]),
+        )
+
         human_directory = tempfile.TemporaryDirectory()
         self.addCleanup(human_directory.cleanup)
         human_root = Path(human_directory.name) / "cells"
@@ -1615,6 +2755,8 @@ class RunJobTest(unittest.TestCase):
         self.assertIn("--require-alignment-tail", validator_command)
         self.assertIn("--skip-decoded-image-diagnostics", validator_command)
         self.assertNotIn("--episode-locator-index", validator_command)
+        self.assertNotIn("--incremental-episode-index", validator_command)
+        self.assertNotIn("--append-manifest", validator_command)
 
     def test_camera_warmup_retries_only_the_camera_gate_and_preserves_compact_evidence(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -1677,19 +2819,48 @@ class RunJobTest(unittest.TestCase):
                 ),
             )
             with mock.patch.object(run_job.subprocess, "run", return_value=passed) as invoked:
-                result = run_job._technical_validator("dataset", live_payload, PROFILE)
+                result = run_job._technical_validator(
+                    "dataset", live_payload, PROFILE,
+                    validation_scope="INCREMENTAL",
+                    expected_append_manifest_digest="sha256:" + "4" * 64,
+                )
             self.assertEqual(result["episode_locator"], locator)
             self.assertEqual((result["ok"], result["code"]), (True, "PASS"))
             command_line = invoked.call_args.args[0]
             self.assertEqual(
                 command_line[command_line.index("--episode-locator-index") + 1], "0",
             )
+            self.assertEqual(
+                command_line[command_line.index("--incremental-episode-index") + 1],
+                "0",
+            )
+            self.assertEqual(
+                Path(command_line[command_line.index("--append-manifest") + 1]),
+                run_dir / "staging_manifest.json",
+            )
+            self.assertEqual(
+                command_line[
+                    command_line.index("--append-manifest-digest") + 1
+                ],
+                "sha256:" + "4" * 64,
+            )
 
             missing = SimpleNamespace(returncode=0, stdout="PASS\n")
             with mock.patch.object(run_job.subprocess, "run", return_value=missing):
-                result = run_job._technical_validator("dataset", live_payload, PROFILE)
+                result = run_job._technical_validator(
+                    "dataset", live_payload, PROFILE,
+                    validation_scope="INCREMENTAL",
+                    expected_append_manifest_digest="sha256:" + "4" * 64,
+                )
             self.assertEqual((result["ok"], result["code"]), (False, "FAIL"))
             self.assertIsNone(result["episode_locator"])
+
+        with mock.patch.object(run_job.subprocess, "run") as invoked:
+            result = run_job._technical_validator(
+                "dataset", {}, PROFILE, validation_scope="INCREMENTAL",
+            )
+        self.assertEqual((result["ok"], result["code"]), (False, "FAIL"))
+        invoked.assert_not_called()
 
     def test_camera_warmup_measures_configured_roles_concurrently(self):
         dual = copy.deepcopy(PROFILE)
@@ -1892,10 +3063,12 @@ class RunJobTest(unittest.TestCase):
         resolved_job_digest = validated["resolved_job_digest"]
         bindings = dict(motion()["binding_digests"])
         bindings["collection_profile"] = validated["input_digests"]["collection_profile"]
+        executable_program = runtime_motion(validated, continuous=True)
         plan = {
             "schema_version": "fr5.pickup_plan.v3", "run_id": "runner-test",
             "resolved_job_digest": resolved_job_digest, "binding_digests": bindings,
             "robot_system_id": "fr5-lab-a",
+            "motion_program_digest": run_job.canonical_digest(executable_program),
         }
         digest = run_job.canonical_digest(plan)
         summary = {
@@ -2026,7 +3199,7 @@ class RunJobTest(unittest.TestCase):
             with mock.patch.object(run_job, "OneJob", FakeJob), mock.patch.object(run_job, "ResourceMonitor", Resource), mock.patch.object(run_job, "CellStateStore", return_value=cell), mock.patch.object(run_job, "SceneStateStore", return_value=scene):
                 result = run_job.run_live(
                     live_payload, threading.Event(), lambda _: None,
-                    resolver=lambda _: (validated, runtime_motion(validated, continuous=True), SCENE), executor_factory=lambda *_: Process(), recorder_factory=lambda *_: Recorder(),
+                    resolver=lambda _: (validated, executable_program, SCENE), executor_factory=lambda *_: Process(), recorder_factory=lambda *_: Recorder(),
                     validator_call=lambda *_: {"ok": True, "code": "PASS", "result_digest": "sha256:" + "6" * 64}, tty_decision=decide,
                     camera_warmup_call=lambda *_: (calls.append(("camera_warmup", "PASS")), {"schema_version": "data_factory.camera_warmup.v1", "attempts": []})[1],
                 )
@@ -2134,7 +3307,7 @@ class RunJobTest(unittest.TestCase):
             with mock.patch.object(run_job, "OneJob", FakeJob), mock.patch.object(run_job, "ResourceMonitor", Resource), mock.patch.object(run_job, "CellStateStore", return_value=Cell()), mock.patch.object(run_job, "SceneStateStore", return_value=Scene()):
                 rejected = run_job.run_live(
                     live_payload, threading.Event(), lambda _: None,
-                    resolver=lambda _: (validated, runtime_motion(validated, continuous=True), SCENE), executor_factory=lambda *_: Process(), recorder_factory=lambda *_: Recorder(),
+                    resolver=lambda _: (validated, executable_program, SCENE), executor_factory=lambda *_: Process(), recorder_factory=lambda *_: Recorder(),
                     validator_call=lambda *_: {"ok": True, "code": "PASS", "result_digest": "sha256:" + "6" * 64}, tty_decision=decide,
                     camera_warmup_call=lambda *_: ({"schema_version": "data_factory.camera_warmup.v1", "attempts": []}),
                 )
@@ -2143,7 +3316,17 @@ class RunJobTest(unittest.TestCase):
         self.assertNotIn(("job", "finish"), calls)
 
     def test_postcommit_validation_or_evidence_failure_keeps_cell_blocked_without_scene_ack(self):
-        plan = {"schema_version": "fr5.pickup_plan.v3", "run_id": "runner-test", "evidence": "fake"}
+        validated = runtime_validated(job={
+            **JOB, "operator_or_agent_id": "operator", "instruction": "pick up",
+            "place_id": "PLACE_A", "yaw_deg": 0, "x_mm": -70, "y_mm": 35,
+            "object_profile_id": "wood-cube",
+        })
+        executable_program = runtime_motion(validated, continuous=True)
+        plan = {
+            "schema_version": "fr5.pickup_plan.v3", "run_id": "runner-test",
+            "evidence": "fake",
+            "motion_program_digest": run_job.canonical_digest(executable_program),
+        }
         digest = run_job.canonical_digest(plan)
         evidence = {
             "schema_version": "data_factory.precommit_evidence.v1", "run_id": "runner-test",
@@ -2161,12 +3344,6 @@ class RunJobTest(unittest.TestCase):
             "plan_only_no_motion_digest": run_job.canonical_digest(evidence["plan_only_no_motion"]),
             "post_reset_safe_snapshot_digest": None, "status": "PENDING",
         }
-        validated = runtime_validated(job={
-            **JOB, "operator_or_agent_id": "operator", "instruction": "pick up",
-            "place_id": "PLACE_A", "yaw_deg": 0, "x_mm": -70, "y_mm": 35,
-            "object_profile_id": "wood-cube",
-        })
-
         class Process:
             def request(self, request, *_):
                 return {"ok": True, "code": "PREFLIGHT_OK"} if request["op"] == "preflight" else {"ok": True}
@@ -2383,8 +3560,18 @@ class RunJobTest(unittest.TestCase):
             episode = {
                 "binding_digest": run_job.canonical_digest("production-episode"),
                 "start_binding_digest": run_job.canonical_digest("production-start"),
+                "manifest_digest": run_job.canonical_digest("manifest-commit"),
+                "intent_digest": run_job.canonical_digest("intent-commit"),
+                "slot_digest": run_job.canonical_digest("slot-commit"),
                 "data_disposition": "PRODUCTION",
                 "expires_at": "2099-01-01T00:00:00Z",
+            }
+            ledger_context = {
+                "manifest": {"manifest_digest": episode["manifest_digest"]},
+                "intent": {
+                    "intent_digest": episode["intent_digest"],
+                    "slot": {"slot_id": "slot-commit"},
+                },
             }
             planned_start = {
                 "start_binding_digest": episode["start_binding_digest"],
@@ -2418,7 +3605,7 @@ class RunJobTest(unittest.TestCase):
                 mock.patch.object(run_job, "validate_runtime_root_binding", return_value=roots),
                 mock.patch.object(run_job, "validate_runtime_episode_binding", return_value=episode),
                 mock.patch.object(run_job, "validate_runtime_planned_start", return_value=planned_start),
-                mock.patch.object(run_job, "_validate_episode_ledger_context", return_value={"manifest": {}, "intent": {}}),
+                mock.patch.object(run_job, "_validate_episode_ledger_context", return_value=ledger_context),
                 mock.patch.object(run_job, "_write_episode_ledger", return_value=ledger_reference) as ledger_writer,
                 mock.patch.object(run_job, "write_candidate_admission", return_value={"semantic_status": "PENDING"}) as candidate_writer,
                 mock.patch.object(run_job, "bind_candidate_episode_state", return_value=bound_ledger_reference) as candidate_binder,
@@ -2436,6 +3623,7 @@ class RunJobTest(unittest.TestCase):
                     runtime_start_binding={"fixture": "production-start"},
                     episode_ledger_context={"fixture": "production-ledger"},
                 )
+                self.assertTrue(result["ok"], result)
                 preapproval = json.loads((Path(directory) / "run" / "preapproval_evidence.json").read_text(encoding="utf-8"))
 
         self.assertEqual((result["ok"], result["code"], result["state"]), (True, "VALIDATED", "COMPLETE"))

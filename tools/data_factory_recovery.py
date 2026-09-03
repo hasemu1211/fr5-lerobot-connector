@@ -32,9 +32,12 @@ _MANIFEST_FIELDS = {
     "schema_version", "run_id", "dataset_root", "episode_index", "staging_mode",
     "binding_digests", "camera_staging_dirs", "begin_snapshot",
 }
-_SNAPSHOT_FIELDS = {
+_SNAPSHOT_V1_FIELDS = {
     "total_episodes", "total_frames", "data_parquet", "committed_videos",
     "episode_metadata", "dataset_metadata",
+}
+_SNAPSHOT_V2_FIELDS = _SNAPSHOT_V1_FIELDS | {
+    "schema_version", "source_provenance", "recording_quality",
 }
 _EVENT_FIELDS = {"run_id", "state", "reason_code", "episode_index", "rows", "monotonic_ns"}
 _STAGING_OWNER_FILE = ".data_factory_staging_owner.json"
@@ -155,23 +158,53 @@ def dataset_snapshot(dataset_root: Path | str) -> dict:
                 raise RecoveryError("RECOVERY_SYMLINK", f"unsafe dataset metadata: {path}")
             details = path.stat()
             metadata[relative] = [details.st_size, details.st_mtime_ns]
+    quality_path = root / "meta" / "recording_quality.jsonl"
+    if quality_path.exists() or quality_path.is_symlink():
+        if quality_path.is_symlink() or not quality_path.is_file():
+            raise RecoveryError(
+                "RECOVERY_SYMLINK", f"unsafe dataset metadata: {quality_path}",
+            )
+        quality_bytes = quality_path.read_bytes()
+    else:
+        quality_bytes = b""
     return {
+        "schema_version": "data_factory.dataset_snapshot.v2",
         "total_episodes": episodes,
         "total_frames": frames,
         "data_parquet": _regular_files(root, "data", "*.parquet"),
         "committed_videos": _regular_files(root, "videos", "*"),
         "episode_metadata": _regular_files(root, "meta/episodes", "*.parquet"),
         "dataset_metadata": metadata,
+        "source_provenance": _regular_files(
+            root, "meta/source_provenance", "*.jsonl",
+        ),
+        "recording_quality": {
+            "size": len(quality_bytes),
+            "sha256": "sha256:" + hashlib.sha256(quality_bytes).hexdigest(),
+        },
     }
 
 
-def _validate_snapshot(snapshot: object) -> None:
-    if not isinstance(snapshot, dict) or set(snapshot) != _SNAPSHOT_FIELDS:
+def _validate_snapshot(snapshot: object) -> int:
+    if not isinstance(snapshot, dict):
+        raise RecoveryError("RECOVERY_MANIFEST", "staging manifest snapshot schema is invalid")
+    fields = set(snapshot)
+    if fields == _SNAPSHOT_V1_FIELDS:
+        version = 1
+    elif (
+        fields == _SNAPSHOT_V2_FIELDS
+        and snapshot.get("schema_version") == "data_factory.dataset_snapshot.v2"
+    ):
+        version = 2
+    else:
         raise RecoveryError("RECOVERY_MANIFEST", "staging manifest snapshot schema is invalid")
     for key in ("total_episodes", "total_frames"):
         if type(snapshot[key]) is not int or snapshot[key] < 0:
             raise RecoveryError("RECOVERY_MANIFEST", f"invalid snapshot total: {key}")
-    for key in _SNAPSHOT_FIELDS - {"total_episodes", "total_frames"}:
+    maps = _SNAPSHOT_V1_FIELDS - {"total_episodes", "total_frames"}
+    if version == 2:
+        maps = maps | {"source_provenance"}
+    for key in maps:
         values = snapshot[key]
         if not isinstance(values, dict):
             raise RecoveryError("RECOVERY_MANIFEST", f"invalid snapshot map: {key}")
@@ -183,6 +216,189 @@ def _validate_snapshot(snapshot: object) -> None:
                 or any(type(value) is not int or value < 0 for value in details)
             ):
                 raise RecoveryError("RECOVERY_MANIFEST", f"invalid snapshot entry: {key}")
+    if version == 2:
+        quality = snapshot["recording_quality"]
+        if (
+            not isinstance(quality, dict)
+            or set(quality) != {"size", "sha256"}
+            or type(quality.get("size")) is not int
+            or quality["size"] < 0
+            or not isinstance(quality.get("sha256"), str)
+            or not _DIGEST.fullmatch(quality["sha256"])
+        ):
+            raise RecoveryError(
+                "RECOVERY_MANIFEST", "invalid recording quality snapshot",
+            )
+    return version
+
+
+def dataset_snapshot_unchanged(before: object, after: object) -> bool:
+    """Compare current snapshots while retaining interrupted v1 compatibility."""
+    version = _validate_snapshot(before)
+    _validate_snapshot(after)
+    fields = _SNAPSHOT_V1_FIELDS if version == 1 else _SNAPSHOT_V2_FIELDS
+    return all(before[field] == after.get(field) for field in fields)
+
+
+def validate_staging_manifest_contract(
+    value: object, dataset_root: Path | str, *, episode_index: int,
+    run_id: str | None = None, camera_names: tuple[str, ...] | list[str] | None = None,
+) -> dict:
+    """Validate the immutable part of a recorder staging manifest.
+
+    This intentionally does not require staging directories to still exist, so
+    the same contract can be checked after a successful commit removed them.
+    """
+    root = Path(dataset_root).resolve()
+    if not isinstance(value, dict) or set(value) != _MANIFEST_FIELDS:
+        raise RecoveryError("RECOVERY_MANIFEST", "staging manifest schema is not exact")
+    manifest = dict(value)
+    manifest_run_id = manifest.get("run_id")
+    if (
+        manifest.get("schema_version") != "data_factory.staging_manifest.v1"
+        or not isinstance(manifest_run_id, str)
+        or not _ID.fullmatch(manifest_run_id)
+        or run_id is not None and manifest_run_id != run_id
+        or type(episode_index) is not int
+        or episode_index < 0
+        or manifest.get("episode_index") != episode_index
+        or manifest.get("dataset_root") != str(root)
+        or manifest.get("staging_mode") != "batch"
+    ):
+        raise RecoveryError("RECOVERY_MANIFEST", "staging manifest identity is invalid")
+    bindings = manifest.get("binding_digests")
+    if (
+        not isinstance(bindings, dict)
+        or set(bindings) != _BINDINGS
+        or any(
+            not isinstance(item, str) or not _DIGEST.fullmatch(item)
+            for item in bindings.values()
+        )
+    ):
+        raise RecoveryError("RECOVERY_MANIFEST", "staging manifest bindings are invalid")
+    _validate_snapshot(manifest.get("begin_snapshot"))
+
+    cameras = manifest.get("camera_staging_dirs")
+    expected_names = None if camera_names is None else set(camera_names)
+    if (
+        not isinstance(cameras, dict)
+        or not cameras
+        or expected_names is not None and set(cameras) != expected_names
+    ):
+        raise RecoveryError("RECOVERY_MANIFEST", "camera staging dirs are invalid")
+    episode_dir = f"episode-{episode_index:06d}"
+    paths = []
+    for camera, path in cameras.items():
+        expected = root / "images" / f"observation.images.{camera}" / episode_dir
+        if (
+            not isinstance(camera, str)
+            or not _CAMERA.fullmatch(camera)
+            or not isinstance(path, str)
+            or path != str(expected)
+        ):
+            raise RecoveryError("RECOVERY_MANIFEST", "camera staging path is not exact")
+        paths.append(path)
+    if len(paths) != len(set(paths)):
+        raise RecoveryError("RECOVERY_MANIFEST", "duplicate staging paths")
+    return manifest
+
+
+def validate_append_only_snapshot(
+    before: object, after: object, *, episode_index: int, camera_count: int,
+    dataset_root: Path | str | None = None, require_extended: bool = False,
+) -> dict:
+    """Prove that one commit appended fresh immutable artifact files only."""
+    before_version = _validate_snapshot(before)
+    after_version = _validate_snapshot(after)
+    if (
+        type(episode_index) is not int
+        or episode_index < 0
+        or type(camera_count) is not int
+        or camera_count < 0
+        or type(require_extended) is not bool
+        or require_extended and before_version != 2
+    ):
+        raise RecoveryError("RECOVERY_APPEND_IDENTITY", "append identity is invalid")
+    if (
+        before["total_episodes"] != episode_index
+        or after["total_episodes"] != episode_index + 1
+        or after["total_frames"] <= before["total_frames"]
+    ):
+        raise RecoveryError("RECOVERY_APPEND_IDENTITY", "dataset totals are not one append")
+
+    expected_additions = {
+        "data_parquet": 1,
+        "committed_videos": camera_count,
+        "episode_metadata": 1,
+    }
+    additions = {}
+    for category, expected_count in expected_additions.items():
+        old_files, new_files = before[category], after[category]
+        changed = [
+            relative for relative, details in old_files.items()
+            if new_files.get(relative) != details
+        ]
+        if changed:
+            raise RecoveryError(
+                "RECOVERY_APPEND_MUTATED",
+                f"previous {category} artifacts changed: {', '.join(sorted(changed))}",
+            )
+        added = sorted(set(new_files) - set(old_files))
+        if (
+            len(added) != expected_count
+            or any(new_files[relative][0] <= 0 for relative in added)
+        ):
+            raise RecoveryError(
+                "RECOVERY_APPEND_ARTIFACTS",
+                f"unexpected new {category} artifact count or size",
+            )
+        additions[category] = added
+    if before_version == 2:
+        if after_version != 2 or dataset_root is None:
+            raise RecoveryError(
+                "RECOVERY_APPEND_EVIDENCE", "extended append evidence is unavailable",
+            )
+        old_files, new_files = (
+            before["source_provenance"], after["source_provenance"],
+        )
+        changed = [
+            relative for relative, details in old_files.items()
+            if new_files.get(relative) != details
+        ]
+        expected_path = f"meta/source_provenance/episode-{episode_index:06d}.jsonl"
+        added = sorted(set(new_files) - set(old_files))
+        if (
+            changed or added != [expected_path]
+            or new_files[expected_path][0] <= 0
+        ):
+            raise RecoveryError(
+                "RECOVERY_APPEND_MUTATED",
+                "source provenance is not one immutable append",
+            )
+        additions["source_provenance"] = added
+        quality = before["recording_quality"]
+        quality_path = Path(dataset_root).resolve() / "meta" / "recording_quality.jsonl"
+        if quality_path.is_symlink() or not quality_path.is_file():
+            raise RecoveryError(
+                "RECOVERY_APPEND_EVIDENCE", "recording quality log is unavailable",
+            )
+        with quality_path.open("rb") as file:
+            prefix = file.read(quality["size"])
+            appended = file.read(1)
+        if (
+            len(prefix) != quality["size"] or not appended
+            or "sha256:" + hashlib.sha256(prefix).hexdigest() != quality["sha256"]
+            or after["recording_quality"]["size"] <= quality["size"]
+        ):
+            raise RecoveryError(
+                "RECOVERY_APPEND_MUTATED",
+                "recording quality prefix changed or was not appended",
+            )
+    return {
+        "episode_index": episode_index,
+        "episode_frames": after["total_frames"] - before["total_frames"],
+        "new_artifacts": additions,
+    }
 
 
 def _write_json_at(directory_fd: int, name: str, value: dict) -> None:
@@ -391,25 +607,17 @@ def _validate_guard(root: Path, run_root: Path, meta_fd: int) -> tuple[Path, dic
 
 
 def _validate_manifest(root: Path, run_root: Path, guard: dict, manifest_path: Path, manifest: dict) -> list[Path]:
-    if set(manifest) != _MANIFEST_FIELDS or manifest.get("schema_version") != "data_factory.staging_manifest.v1":
-        raise RecoveryError("RECOVERY_MANIFEST", "staging manifest schema is not exact v1")
-    if manifest.get("run_id") != guard["run_id"] or manifest.get("dataset_root") != str(root) or manifest.get("episode_index") != guard["episode_index"] or manifest.get("staging_mode") != "batch":
-        raise RecoveryError("RECOVERY_MANIFEST", "staging manifest identity is invalid")
-    bindings = manifest.get("binding_digests")
-    if not isinstance(bindings, dict) or set(bindings) != _BINDINGS or any(not isinstance(value, str) or not _DIGEST.fullmatch(value) for value in bindings.values()):
-        raise RecoveryError("RECOVERY_MANIFEST", "staging manifest bindings are invalid")
-    _validate_snapshot(manifest.get("begin_snapshot"))
+    manifest = validate_staging_manifest_contract(
+        manifest, root, episode_index=guard["episode_index"],
+        run_id=guard["run_id"],
+    )
     if manifest_path != run_root / guard["run_id"] / "staging_manifest.json":
         raise RecoveryError("RECOVERY_MANIFEST", "staging manifest path is not exact")
     cameras = manifest.get("camera_staging_dirs")
-    if not isinstance(cameras, dict) or not cameras:
-        raise RecoveryError("RECOVERY_MANIFEST", "camera staging dirs are invalid")
     episode_dir = f"episode-{guard['episode_index']:06d}"
     paths: list[Path] = []
     for camera, value in cameras.items():
         expected = root / "images" / f"observation.images.{camera}" / episode_dir
-        if not isinstance(camera, str) or not _CAMERA.fullmatch(camera) or not isinstance(value, str) or value != str(expected):
-            raise RecoveryError("RECOVERY_MANIFEST", "camera staging path is not exact")
         cursor = root
         for part in expected.relative_to(root).parts:
             cursor /= part
@@ -420,8 +628,6 @@ def _validate_manifest(root: Path, run_root: Path, guard: dict, manifest_path: P
         if expected.exists() and not expected.is_dir():
             raise RecoveryError("RECOVERY_MANIFEST", f"staging target is not a directory: {expected}")
         paths.append(expected)
-    if len(set(paths)) != len(paths):
-        raise RecoveryError("RECOVERY_MANIFEST", "duplicate staging paths")
     return paths
 
 
@@ -554,14 +760,18 @@ def recover_orphaned_transaction(dataset_root: Path | str, run_root: Path | str)
             ):
                 return _quarantine(guard_path, guard, "RECOVERY_DIRECTORY_CHANGED", meta_fd)
             _recovery_events(events_path, guard, run_fd)
-            if dataset_snapshot(root) != manifest["begin_snapshot"]:
+            if not dataset_snapshot_unchanged(
+                manifest["begin_snapshot"], dataset_snapshot(root),
+            ):
                 return _quarantine(guard_path, guard, "RECOVERY_SNAPSHOT_CHANGED", meta_fd)
             if not _same_directory(root, root_fd):
                 return _quarantine(guard_path, guard, "RECOVERY_DIRECTORY_CHANGED", meta_fd)
             _remove_owned_staging(root_fd, manifest["camera_staging_dirs"], guard)
             if any(path.exists() or path.is_symlink() for path in staging_dirs):
                 return _quarantine(guard_path, guard, "RECOVERY_STAGING_REMAINS", meta_fd)
-            if dataset_snapshot(root) != manifest["begin_snapshot"]:
+            if not dataset_snapshot_unchanged(
+                manifest["begin_snapshot"], dataset_snapshot(root),
+            ):
                 return _quarantine(guard_path, guard, "RECOVERY_SNAPSHOT_CHANGED", meta_fd)
             if (
                 not _same_directory(root, root_fd) or not _same_directory(meta, meta_fd)

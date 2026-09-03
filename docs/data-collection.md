@@ -23,12 +23,18 @@ scripts/start_collection_ui.sh
 이 명령은 `GENERAL_COLLECTION`과 `datasets/fr5_episodes/fr5_smolvla_up_wrist_30hz`를 기본으로 사용한다. 출력된 `http://127.0.0.1:4174` URL을 열고 다음 순서로 진행한다.
 
 1. `환경 준비`에서 단일 lifecycle owner가 로봇·controller·gripper·두 카메라를 준비하도록 한다.
-2. task와 시작 자세를 고른 뒤 `수집 위치와 각도`에서 물체의 시작 작업영역과 episode 수를 확인한다. frame revision은 작업영역에 맞춰 자동 결속된다.
+2. task·시작 자세·`Trajectory recipe`를 고른 뒤 `수집 위치와 각도`에서 물체의 시작 작업영역과 episode 수를 확인한다. `DIRECT`는 기존 경로이고 `TWO_STAGE_ALIGN_V2`는 관측 높이에서 XY·목표 yaw를 맞춘 뒤 자세를 고정해 수직 하강한다. frame revision은 작업영역에 맞춰 자동 결속된다.
 3. `계획 확인`으로 finite manifest를 고정하고 캠페인을 한 번 승인한다.
-4. 실행 중 이상이 보이면 즉시 중단한다. 성공 episode는 recorder commit과 기술 검사를 직렬로 통과해야 다음 episode가 열린다.
+4. 실행 중 이상이 보이면 즉시 중단한다. 성공 episode는 recorder commit 뒤 기술 검사와 필요한 비녹화 surface 재배치를 모두 마쳐야 다음 episode가 열린다.
 5. 캠페인 중이나 종료 뒤 candidate review를 처리한다. review와 training approval은 로봇 실행 경로를 멈추게 하지 않으며 서로 다른 authority다.
 
 기본 active job family에는 24 mm 큐브와 상단 아래 3.5 mm 파지만 표시된다. 과거 25 mm profile은 재현용 설정으로 남지만 이 실행의 선택지가 아니다. `pickup_e2e`는 고른 작업영역 안에서 수집하고, `pick_place`는 반대 작업영역을 목적지로 자동 결속해 `A → B → A …` 또는 `B → A → B …`로 왕복한다. 좌표계 revision을 사용자가 별도로 고르지 않는다.
+
+`TWO_STAGE_ALIGN_V2`의 55–60 mm clearance와 접근 `dXY` 분포는 UI 숫자 slider가 아니라 object/grasp/camera-bound versioned profile에서 결정된다. 현재 24 mm 큐브의 `dXY` 절삭 반경은 최대 12 mm이고 seed마다 중심 집중형으로 달라진다. 수집 위치는 별도의 설정 기반 `Nₓ×Nᵧ×N_yaw` 설계다. 각 XY cell은 물체 footprint와 yaw로 침식한 안전영역과의 교집합에서 면적 균등하게 표본화되며, yaw는 object/grasp profile이 선언한 `[-45°, +45°)` 균등 CDF를 계층화한다. 현재 A4 profile의 값은 `Nₓ=5`, `Nᵧ=3`, `N_yaw=3`이고, 짧은 campaign도 yaw 계층별 수를 최대 1회 차이로 맞춘다. 이 값은 고정 아키텍처가 아니다. 관측된 실제 yaw는 그대로 유지하며 symmetry canonical yaw는 계층 계산에만 쓴다. `pick_place`에서도 접근 변화는 pickup prefix에만 적용되며 녹화되는 destination place는 source yaw를 보존하는 `DIRECT`다. 선택한 recipe도 기존 plan digest·collision·사람 승인 절차를 생략하지 않는다.
+
+`Campaign seed`는 수집 재현을 위한 단일 browser-safe master seed다. 같은 값은 campaign manifest에 그대로 남고, 위치·시작 자세·yaw·episode 궤적에는 서로 다른 u64 domain seed가 파생되어 한 축의 표본 수나 순서 변경이 다른 축의 난수열을 밀지 않는다. 실제 episode가 사용한 yaw/trajectory seed, finite rank/design과 해석된 clearance/XY parameter는 승인 전 `data_factory.preapproval_evidence.v4`와 plan-only/live binding에 digest와 함께 저장된다. UI는 파생 seed를 10진 문자열로 표시하고 자체 계산하지 않는다.
+
+다음 episode의 yaw가 다르면 `pick_place` commit 뒤 같은 위치의 물체를 다시 집어 회전·배치하는 `OUT_OF_DATASET` continuation이 실행된다. 이 동작에는 recorder와 dataset writer 권한이 없으며 UI review에는 source/target, profile, seed/rank와 binding digest가 표시된다. 물체 위치추적은 이 경로에 필수 결합되지 않는다. 현재 정본은 revisioned scene snapshot이고, perception pose를 사용할 때도 먼저 별도 scene revision으로 게시된 값만 다음 fresh plan의 입력이 된다.
 
 연결·회귀 시험은 아래처럼 production 데이터와 분리한다.
 
@@ -217,6 +223,8 @@ scripts/validate_dataset.sh --require-hil-motion <HIL_DATASET_NAME>
 ## 5. 전체 데이터셋 확인과 승인
 
 `f` 또는 `q`로 종료하면 전체 validator와 RGB contact sheet 실행 여부를 묻는다. 기본값 `Y`를 선택한다.
+
+이 절차는 사람이 종료하는 대화형 수집의 dataset 승인 단계다. Data Factory 자동 campaign의 episode critical path는 새 episode incremental 검증과 append-only 확인만 수행하며, campaign 종료만을 이유로 누적 full scan을 한 번 더 실행하지 않는다. 이후 이 절차로 전체 dataset을 검토하거나 학습·평가에 넘길 때 full validator를 실행한다.
 
 직접 다시 실행할 수도 있다.
 

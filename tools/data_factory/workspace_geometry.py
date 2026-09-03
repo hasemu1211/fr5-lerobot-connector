@@ -113,31 +113,44 @@ def point_in_convex_polygon(
     )
 
 
-def safe_convex_polygon(
+def safe_convex_polygon_for_yaws(
     *, polygon: Sequence[Sequence[float]],
-    object_size_xy_mm: Sequence[float], uncertainty_mm: float, yaw_deg: float,
+    object_size_xy_mm: Sequence[float], uncertainty_mm: float,
+    yaw_degs: Sequence[float],
 ) -> list[tuple[float, float]]:
-    """Erode a convex zone by the rotated object footprint and uncertainty."""
+    """Erode a convex zone by the largest support over several object yaws."""
     checked = _convex_polygon(polygon)
     object_x, object_y = _pair(
         object_size_xy_mm, "object_size_xy_mm",
     )
     uncertainty = _number(uncertainty_mm, "uncertainty_mm")
-    if min(object_x, object_y, uncertainty) < 0:
+    if (
+        min(object_x, object_y, uncertainty) < 0
+        or isinstance(yaw_degs, (str, bytes)) or not yaw_degs
+    ):
         raise ValueError("safe_polygon")
-    angle = math.radians(_number(yaw_deg, "yaw_deg"))
-    axis_x = (math.cos(angle), math.sin(angle))
-    axis_y = (-math.sin(angle), math.cos(angle))
+    axes = []
+    for yaw_deg in yaw_degs:
+        angle = math.radians(_number(yaw_deg, "yaw_deg"))
+        axes.append((
+            (math.cos(angle), math.sin(angle)),
+            (-math.sin(angle), math.cos(angle)),
+        ))
     shifted = []
     for left, right in zip(checked, checked[1:] + checked[:1]):
         dx, dy = right[0] - left[0], right[1] - left[1]
         length = math.hypot(dx, dy)
         inward = (-dy / length, dx / length)
-        support = (
-            object_x / 2.0 * abs(inward[0] * axis_x[0] + inward[1] * axis_x[1])
-            + object_y / 2.0 * abs(inward[0] * axis_y[0] + inward[1] * axis_y[1])
-            + uncertainty
+        support = max(
+            object_x / 2.0 * abs(
+                inward[0] * axis_x[0] + inward[1] * axis_x[1]
+            )
+            + object_y / 2.0 * abs(
+                inward[0] * axis_y[0] + inward[1] * axis_y[1]
+            )
+            for axis_x, axis_y in axes
         )
+        support += uncertainty
         shifted.append((
             (left[0] + inward[0] * support, left[1] + inward[1] * support),
             (dx / length, dy / length),
@@ -161,6 +174,17 @@ def safe_convex_polygon(
             previous_point[1] + distance * previous_direction[1],
         ))
     return _convex_polygon(result, "safe_polygon")
+
+
+def safe_convex_polygon(
+    *, polygon: Sequence[Sequence[float]],
+    object_size_xy_mm: Sequence[float], uncertainty_mm: float, yaw_deg: float,
+) -> list[tuple[float, float]]:
+    """Erode a convex zone by one rotated object footprint and uncertainty."""
+    return safe_convex_polygon_for_yaws(
+        polygon=polygon, object_size_xy_mm=object_size_xy_mm,
+        uncertainty_mm=uncertainty_mm, yaw_degs=(yaw_deg,),
+    )
 
 
 def rotation_envelope(
@@ -319,13 +343,81 @@ def _clip_box(
     return result if area > 1e-9 else []
 
 
+def _polygon_triangles(
+    polygon: Sequence[tuple[float, float]],
+) -> list[tuple[tuple[float, float], tuple[float, float], tuple[float, float], float]]:
+    """Triangulate one convex polygon and retain each triangle's area."""
+    origin = polygon[0]
+    result = []
+    for left, right in zip(polygon[1:-1], polygon[2:]):
+        area = abs(
+            (left[0] - origin[0]) * (right[1] - origin[1])
+            - (left[1] - origin[1]) * (right[0] - origin[0])
+        ) / 2.0
+        if area > 1e-12:
+            result.append((origin, left, right, area))
+    if not result:
+        raise ValueError("polygon")
+    return result
+
+
+def _area_centroid(
+    triangles: Sequence[
+        tuple[tuple[float, float], tuple[float, float], tuple[float, float], float]
+    ],
+) -> tuple[float, float]:
+    total = sum(triangle[3] for triangle in triangles)
+    return tuple(
+        sum(
+            (triangle[0][axis] + triangle[1][axis] + triangle[2][axis])
+            / 3.0 * triangle[3]
+            for triangle in triangles
+        ) / total
+        for axis in range(2)
+    )
+
+
+def _uniform_polygon_point(
+    triangles: Sequence[
+        tuple[tuple[float, float], tuple[float, float], tuple[float, float], float]
+    ],
+    *, seed: int, pass_index: int, row: int, column: int,
+) -> tuple[float, float]:
+    """Draw one deterministic area-uniform point from a triangulated polygon."""
+    total = sum(triangle[3] for triangle in triangles)
+    threshold = _fraction(
+        seed, pass_index, row, column, "triangle",
+    ) * total
+    cumulative = 0.0
+    selected = triangles[-1]
+    for triangle in triangles:
+        cumulative += triangle[3]
+        if threshold < cumulative:
+            selected = triangle
+            break
+    origin, left, right, _area = selected
+    radial = math.sqrt(_fraction(seed, pass_index, row, column, "radial"))
+    tangent = _fraction(seed, pass_index, row, column, "tangent")
+    return tuple(
+        (1.0 - radial) * origin[axis]
+        + radial * (1.0 - tangent) * left[axis]
+        + radial * tangent * right[axis]
+        for axis in range(2)
+    )
+
+
 def stratified_convex_polygon_samples(
     *, polygon: Sequence[Sequence[float]], columns: int, rows: int,
     start_xy: Sequence[float], count: int, seed: int,
     pass_index: int = 0, skip_start_cell: bool = False,
+    partition_polygon: Sequence[Sequence[float]] | None = None,
 ) -> list[tuple[float, float, int, int]]:
-    """Sample up to count deterministic, spread points from polygon strata."""
+    """Sample fixed partition cells only inside the feasible polygon."""
     checked = _convex_polygon(polygon)
+    partition = (
+        checked if partition_polygon is None
+        else _convex_polygon(partition_polygon, "partition_polygon")
+    )
     start = _pair(start_xy, "start_xy")
     if (
         isinstance(columns, bool) or not isinstance(columns, int) or columns < 1
@@ -336,7 +428,9 @@ def stratified_convex_polygon_samples(
         or type(skip_start_cell) is not bool
     ):
         raise ValueError("stratified_polygon")
-    (x_low, x_high), (y_low, y_high) = polygon_bounds(checked)
+    if any(not point_in_convex_polygon(point, partition) for point in checked):
+        raise ValueError("partition_polygon")
+    (x_low, x_high), (y_low, y_high) = polygon_bounds(partition)
     x_step, y_step = (x_high - x_low) / columns, (y_high - y_low) / rows
     cells = []
     for row in range(rows):
@@ -345,11 +439,11 @@ def stratified_convex_polygon_samples(
             bottom, top = y_low + row * y_step, y_low + (row + 1) * y_step
             clipped = _clip_box(checked, left, right, bottom, top)
             if clipped:
-                center = (
-                    sum(point[0] for point in clipped) / len(clipped),
-                    sum(point[1] for point in clipped) / len(clipped),
-                )
-                cells.append((left, right, bottom, top, row, column, clipped, center))
+                triangles = _polygon_triangles(clipped)
+                cells.append((
+                    left, right, bottom, top, row, column, clipped,
+                    _area_centroid(triangles), triangles,
+                ))
     available = set(range(len(cells)))
     if skip_start_cell:
         if not point_in_convex_polygon(start, checked):
@@ -375,13 +469,12 @@ def stratified_convex_polygon_samples(
     ][:count]
     result = []
     for index in order:
-        _left, _right, _bottom, _top, row, column, clipped, center = cells[index]
-        selector = _fraction(seed, pass_index, row, column, "vertex")
-        vertex = clipped[min(int(selector * len(clipped)), len(clipped) - 1)]
-        blend = 0.15 + 0.5 * _fraction(seed, pass_index, row, column, "blend")
+        _left, _right, _bottom, _top, row, column, _clipped, _center, triangles = cells[index]
+        x, y = _uniform_polygon_point(
+            triangles, seed=seed, pass_index=pass_index,
+            row=row, column=column,
+        )
         result.append((
-            center[0] * (1.0 - blend) + vertex[0] * blend,
-            center[1] * (1.0 - blend) + vertex[1] * blend,
-            row, column,
+            x, y, row, column,
         ))
     return result

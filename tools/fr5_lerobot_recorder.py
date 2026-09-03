@@ -30,6 +30,7 @@ from data_factory_recovery import (
     canonical_json_digest,
     claim_staging_directories,
     dataset_snapshot,
+    dataset_snapshot_unchanged,
     decode_json_strict,
     write_json_atomic,
 )
@@ -519,6 +520,7 @@ class FR5LeRobotRecorder(Node):
                 "preapproval_evidence.json": {
                     "data_factory.preapproval_evidence.v1",
                     "data_factory.preapproval_evidence.v2",
+                    "data_factory.preapproval_evidence.v4",
                 },
             }
             try:
@@ -624,7 +626,9 @@ class FR5LeRobotRecorder(Node):
         problems = []
         if remaining:
             problems.append("staging remains: " + ", ".join(remaining))
-        if current != self._transaction["begin_snapshot"]:
+        if not dataset_snapshot_unchanged(
+            self._transaction["begin_snapshot"], current,
+        ):
             problems.append("committed dataset snapshot changed")
         return "; ".join(problems)
 

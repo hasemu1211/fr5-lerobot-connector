@@ -12,6 +12,7 @@ from tools.data_factory.workspace_geometry import (
     rotate_xy,
     rotation_envelope,
     safe_convex_polygon,
+    safe_convex_polygon_for_yaws,
     safe_rectangle_bounds,
     stratified_convex_polygon_samples,
     stratified_rectangle_samples,
@@ -43,7 +44,7 @@ class WorkspaceGeometryTests(unittest.TestCase):
         self.assertLess(yaw45[0][1], yaw0[0][1])
         self.assertLess(yaw45[1][1], yaw0[1][1])
 
-    def test_five_by_three_samples_cover_every_stratum_and_spread_prefix(self):
+    def test_configured_grid_samples_cover_every_stratum_and_spread_prefix(self):
         samples = stratified_rectangle_samples(
             x_bounds=(-120, 120), y_bounds=(-76.5, 76.5),
             columns=5, rows=3, start_xy=(0, 0), count=14,
@@ -104,6 +105,62 @@ class WorkspaceGeometryTests(unittest.TestCase):
             point_in_convex_polygon((x, y), safe)
             for x, y, _row, _column in samples
         ))
+
+    def test_fixed_workspace_cells_only_sample_the_yaw_safe_intersection(self):
+        workspace = [(-120, -76.5), (120, -76.5), (120, 76.5), (-120, 76.5)]
+        cell_sets = []
+        for yaw in (0, 45):
+            safe = safe_convex_polygon(
+                polygon=workspace, object_size_xy_mm=(24, 24),
+                uncertainty_mm=4, yaw_deg=yaw,
+            )
+            samples = stratified_convex_polygon_samples(
+                polygon=safe, partition_polygon=workspace,
+                columns=3, rows=3, start_xy=(0, 0), count=9,
+                seed=7, pass_index=yaw,
+            )
+            cell_sets.append({(row, column) for _x, _y, row, column in samples})
+            self.assertTrue(all(
+                point_in_convex_polygon((x, y), safe)
+                for x, y, _row, _column in samples
+            ))
+        self.assertEqual(cell_sets, [
+            {(row, column) for row in range(3) for column in range(3)},
+        ] * 2)
+
+    def test_multi_yaw_erosion_is_inside_each_single_yaw_region(self):
+        workspace = [(-120, -76.5), (120, -76.5), (120, 76.5), (-120, 76.5)]
+        singles = [
+            safe_convex_polygon(
+                polygon=workspace, object_size_xy_mm=(30, 18),
+                uncertainty_mm=4, yaw_deg=yaw,
+            )
+            for yaw in (-35, 20)
+        ]
+        shared = safe_convex_polygon_for_yaws(
+            polygon=workspace, object_size_xy_mm=(30, 18),
+            uncertainty_mm=4, yaw_degs=(-35, 20),
+        )
+        self.assertTrue(all(
+            point_in_convex_polygon(point, single)
+            for point in shared for single in singles
+        ))
+
+    def test_each_safe_cell_is_sampled_area_uniformly_across_seeds(self):
+        polygon = [(-1, -1), (1, -1), (1, 1), (-1, 1)]
+        points = [
+            stratified_convex_polygon_samples(
+                polygon=polygon, columns=1, rows=1, start_xy=(0, 0),
+                count=1, seed=seed,
+            )[0][:2]
+            for seed in range(1000)
+        ]
+        for axis in range(2):
+            values = [point[axis] for point in points]
+            mean = sum(values) / len(values)
+            variance = sum((value - mean) ** 2 for value in values) / len(values)
+            self.assertAlmostEqual(mean, 0.0, delta=0.05)
+            self.assertAlmostEqual(variance, 1.0 / 3.0, delta=0.04)
 
     def test_invalid_geometry_fails_without_partial_samples(self):
         for call in (

@@ -9,7 +9,14 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
+from tools.data_factory.motion.object_reposition import (
+    validate_object_reposition_binding,
+)
+from tools.data_factory.motion.trajectory_variants import (
+    validate_trajectory_variant_binding,
+)
 from tools.data_factory.task_recipe import validate_episode_instruction_binding
+from tools.data_factory.state_space import validate_yaw_sample_binding
 from tools.data_factory_recovery import write_json_atomic
 from tools.fr5_data_factory import ContractArgumentParser, ContractError, DIGEST, SAFE_ID, canonical_digest, load_json_strict, normalize_job_spec, task_review_checklist_id
 
@@ -60,10 +67,43 @@ PREAPPROVAL_V1_FIELDS = frozenset({
 PREAPPROVAL_V2_FIELDS = PREAPPROVAL_V1_FIELDS | frozenset({
     "episode_instruction_binding", "episode_instruction_binding_digest",
 })
+PREAPPROVAL_V4_FIELDS = PREAPPROVAL_V1_FIELDS | frozenset({
+    "trajectory_variant_binding", "trajectory_variant_binding_digest",
+    "campaign_binding", "object_reposition_binding",
+    "object_reposition_binding_digest",
+    "yaw_sample_binding", "yaw_sample_binding_digest",
+})
+PREAPPROVAL_CAMPAIGN_BINDING_FIELDS = frozenset({
+    "manifest_digest", "intent_digest", "slot_id", "slot_digest",
+    "runtime_episode_binding_digest",
+})
 TECHNICAL_FIELDS = frozenset({
     "schema_version", "run_id", "resolved_job_digest", "plan_digest", "dataset_root",
     "expected_fps", "status", "result_digest",
 })
+
+
+def validate_preapproval_campaign_binding(
+    value: object,
+) -> dict[str, Any] | None:
+    """Validate the exact optional campaign slot bound before approval."""
+    if value is None:
+        return None
+    if not isinstance(value, Mapping) or set(value) != (
+        PREAPPROVAL_CAMPAIGN_BINDING_FIELDS
+    ):
+        raise ContractError("PREAPPROVAL_CAMPAIGN_BINDING")
+    result = copy.deepcopy(dict(value))
+    if any(
+        not isinstance(item, str)
+        or (
+            SAFE_ID.fullmatch(item) is None
+            if field == "slot_id" else DIGEST.fullmatch(item) is None
+        )
+        for field, item in result.items()
+    ):
+        raise ContractError("PREAPPROVAL_CAMPAIGN_BINDING")
+    return result
 
 
 def validate_preapproval_evidence(value: object) -> dict[str, Any]:
@@ -76,12 +116,21 @@ def validate_preapproval_evidence(value: object) -> dict[str, Any]:
         if schema == "data_factory.preapproval_evidence.v1"
         else PREAPPROVAL_V2_FIELDS
         if schema == "data_factory.preapproval_evidence.v2"
+        else (
+            PREAPPROVAL_V4_FIELDS
+            | ({"episode_instruction_binding", "episode_instruction_binding_digest"}
+               if "episode_instruction_binding" in value else set())
+        )
+        if schema == "data_factory.preapproval_evidence.v4"
         else frozenset()
     )
     if set(value) != fields:
         raise ContractError("PREAPPROVAL_EVIDENCE_SCHEMA")
     result = copy.deepcopy(dict(value))
-    if schema == "data_factory.preapproval_evidence.v2":
+    if schema in {
+        "data_factory.preapproval_evidence.v2",
+        "data_factory.preapproval_evidence.v4",
+    } and "episode_instruction_binding" in result:
         try:
             instruction = validate_episode_instruction_binding(
                 result["episode_instruction_binding"],
@@ -91,6 +140,47 @@ def validate_preapproval_evidence(value: object) -> dict[str, Any]:
         if (
             result["episode_instruction_binding_digest"]
             != instruction["binding_digest"]
+        ):
+            raise ContractError("PREAPPROVAL_EVIDENCE_SCHEMA")
+    if schema == "data_factory.preapproval_evidence.v4":
+        trajectory = result["trajectory_variant_binding"]
+        reposition = result["object_reposition_binding"]
+        campaign = result["campaign_binding"]
+        try:
+            checked_trajectory = validate_trajectory_variant_binding(trajectory)
+            checked_reposition = (
+                None if reposition is None
+                else validate_object_reposition_binding(reposition)
+            )
+            checked_campaign = validate_preapproval_campaign_binding(campaign)
+        except ContractError as exc:
+            raise ContractError("PREAPPROVAL_EVIDENCE_SCHEMA") from exc
+        if (
+            result["trajectory_variant_binding_digest"]
+            != checked_trajectory["binding_digest"]
+            or reposition is None
+            and result["object_reposition_binding_digest"] is not None
+            or checked_reposition is not None
+            and result["object_reposition_binding_digest"]
+            != checked_reposition["binding_digest"]
+            or campaign != checked_campaign
+        ):
+            raise ContractError("PREAPPROVAL_EVIDENCE_SCHEMA")
+    if schema == "data_factory.preapproval_evidence.v4":
+        yaw_sample = result["yaw_sample_binding"]
+        try:
+            checked_yaw = (
+                None if yaw_sample is None
+                else validate_yaw_sample_binding(yaw_sample)
+            )
+        except ContractError as exc:
+            raise ContractError("PREAPPROVAL_EVIDENCE_SCHEMA") from exc
+        if (
+            checked_yaw is None
+            and result["yaw_sample_binding_digest"] is not None
+            or checked_yaw is not None
+            and result["yaw_sample_binding_digest"]
+            != checked_yaw["binding_digest"]
         ):
             raise ContractError("PREAPPROVAL_EVIDENCE_SCHEMA")
     return result

@@ -1,0 +1,23 @@
+{
+  "schema_version": "data_factory.yaw_sampling_profile.v2",
+  "yaw_sampling_profile_id": "wood-cube-24mm-top-yaw-r001",
+  "qualification_status": "QUALIFIED",
+  "object_profile_id": "wood-cube-24mm-r001",
+  "object_profile_digest": "sha256:fd93d2fb05d9ddd05a040e823b2d2b31428a79a7ae7ce07a1ad8cf519c66489a",
+  "grasp_profile_id": "wood-cube-24mm-top-3p5mm-r001",
+  "grasp_profile_digest": "sha256:d260ca29a2f70258f43d53e2127e0a5d307fef0fc7cbbadb093278391a509173",
+  "yaw_target_semantics": "OBJECT_FRAME_MODULO_SYMMETRY",
+  "observation_cue": "SQUARE_FACE_EDGES_AND_NATURAL_WOOD_GRAIN",
+  "required_camera_roles": [
+    "wrist"
+  ],
+  "planar_symmetry_order": 4,
+  "yaw_equivalence_period_deg": 90.0,
+  "canonical_interval_deg": {
+    "minimum": -45.0,
+    "maximum_exclusive": 45.0
+  },
+  "distribution": {
+    "kind": "STRATIFIED_UNIFORM"
+  }
+}

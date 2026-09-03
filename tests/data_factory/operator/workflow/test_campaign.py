@@ -531,11 +531,11 @@ class FakeOperatorConsoleTests(unittest.TestCase):
                 item["label"]: item for item in self.make(root).projection()["capabilities"]
             }
             self.assertEqual(
-                capabilities["Motion variant · TWO_STAGE_ALIGN"],
+                capabilities["Motion variant · TWO_STAGE_ALIGN_V2"],
                 {
-                    "label": "Motion variant · TWO_STAGE_ALIGN",
-                    "status": "NOT_AVAILABLE",
-                    "reason_codes": ["NO_PRODUCTION_CALLER"],
+                    "label": "Motion variant · TWO_STAGE_ALIGN_V2",
+                    "status": "OFFLINE_ONLY",
+                    "reason_codes": ["SYNTHETIC_FIXTURE"],
                 },
             )
         output = io.StringIO()
