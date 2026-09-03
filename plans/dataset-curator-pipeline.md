@@ -1,6 +1,7 @@
 # 선택형 LeRobot Dataset Curator 구축 계획
 
 - 상태: Software-only implementation v1.1 후보 — core·review hardening·사전 최적화·`data_factory/curator` 책임 경계 정리를 main worktree에 구현했다. H.264 round-trip을 포함한 현재 focused test 38/38, vendor patch와 비추적 운영 자산을 갖춘 clean isolated worktree 전체 test 617/617, `fr5260902` read-only loader/reference-export를 통과했다. 실물 profile 승인·실제 파생 dataset 발행은 아직 하지 않았다.
+- 다음 구현: v1.2 routine UX — 반복 path·digest·geometry 입력을 SSOT에서 자동 해석하고, 사람은 시간 상한이 있는 최종형 표본 영상 하나를 본 뒤 승인/반려만 한다. 아래 4.4는 목표 계약이며 현재 v1.1 CLI 동작이라고 주장하지 않는다.
 - 갱신일: 2026-09-03
 - 대상: FR5 고정 up + raw wrist LeRobot v3 데이터와 향후 A↔B pick-place 데이터
 - 독자: 데이터 생산, 큐레이션, SmolVLA 학습, rollout·안전 담당자
@@ -127,6 +128,36 @@ task-view 승인은 mask가 실제 작업영역을 보존하는지에만 답한�
 
 curator는 recorder나 `run_job`에서 호출되지 않고 source를 in-place 수정하지 않는다.
 `VERIFIED` physical binding은 producer가 소유한 canonical `config/data_factory/region_bindings/` registry에서만 읽는다. curator profile이 임의의 외부 JSON을 `VERIFIED`라고 자가 선언할 수 없고, curator는 registry 파일을 만들거나 수정하거나 승격하지 않는다. LabelMe·reference·review 자산은 계속 외부 asset root가 소유한다.
+
+### 4.4 v1.2 routine UX와 SSOT 목표
+
+현재 v1.1은 안전한 primitive를 제공하지만 routine operator가 request JSON의 path·digest·크기·repo ID를 직접 관리하고, exact digest 문구를 옮겨 적으며, 정지 preview 여러 장을 찾아보게 한다. 또한 source payload마다 approval을 다시 요구한다. 이는 반복 수집 운영의 최종 UX로 채택하지 않는다.
+
+반복 실행의 사람 접점은 다음 하나로 줄인다.
+
+```text
+finalized source + 자동 해석한 approved view-profile SSOT
+  -> exact transform·H.264 설정으로 bounded sampled review.mp4 생성
+  -> 사람은 raw | overlay | policy 결과를 한 영상에서 보고 승인 또는 반려
+  -> 승인 시 full derive·기계 검증·atomic publish
+```
+
+사람은 polygon, frame index, path, digest, repo ID 또는 encoder option을 입력하지 않는다. 화면에 실제로 제시된 review artifact의 digest는 프로그램이 승인 artifact에 직접 결속하고, 사람은 한 번의 명시적 승인/반려 의사만 입력한다. 이는 사람 gate를 없애는 것이 아니라 우발적인 다른 artifact 승인을 막는 결속 책임과 반복 타이핑을 프로그램으로 옮기는 것이다. full derive 뒤에는 구조·codec·frame 수·source 불변성을 기계가 검사하며 같은 판단을 사람에게 다시 요구하지 않는다.
+
+SSOT는 중복 JSON 하나가 아니라 다음 소유 경계를 조합한다.
+
+| SSOT | 한 번 저장하는 값 | 자동 파생해 사람이 쓰지 않는 값 |
+|---|---|---|
+| producer registry, read-only | collection profile, layout, `VERIFIED` physical binding ID | 각 canonical digest, fps·camera feature 계약 |
+| curator view-profile registry | table/motion/context geometry, margin, plate policy, review policy, 적용 가능한 binding ID | mask·plate·projected A/B·profile digest와 asset path |
+| workspace-local curator defaults | source root, derived root, active profile ID | output name·repo ID·run ID·receipt path |
+| generated run manifest | exact source identity와 resolved profile identity | sample indices·review digest·publish evidence |
+
+현재 dataset metadata가 physical placement lineage를 증명하지 못하므로 단순히 dataset 이름이 다르다는 이유로 geometry 설정을 다시 받지도, 같은 camera라고 무조건 가정하지도 않는다. exact approved profile은 같은 producer binding과 collection profile에만 재사용하고, source의 reference registration이 허용 범위를 벗어나거나 판정 불능이면 자동 publish하지 않고 새 sampled review 하나만 요구한다. 이 compatibility check는 profile을 승인하거나 producer binding을 승격하지 않는다.
+
+review는 정지 프레임을 무작정 늘어놓지 않고 짧은 clip을 결정론적으로 중복 제거해 한 H.264 영상으로 만든다. 최소 strata는 episode/task·A→B/B→A 균형, 시작/접촉/운반/놓기/종료 구간, action 또는 영상 motion peak, keep-mask 경계 변화, 밝기·초점 극값, 균등 seeded 표본이다. up-only person audit가 검증되어 설치된 경우에는 keep 안 사람 score가 높은 clip을 **표본 우선순위에만** 추가하며 자동 삭제·승인에는 사용하지 않는다. review policy는 최대 clip 수와 총 재생시간을 SSOT로 제한하고, manifest에 전체 모집단 대비 task·episode·risk-stratum coverage를 기록한다. 첫 실제 데이터에서 사람이 충분히 판단 가능한 최소 시간으로 기본 budget을 측정해 고정하며 문서에서 임의 숫자를 발명하지 않는다.
+
+routine entrypoint의 목표는 `curate --source <dataset>` 한 명령이다. profile을 유일하게 해석할 수 없거나 compatibility가 불명확할 때만 명확한 reason으로 멈추며, 사람에게 내부 path나 digest를 해결하라고 떠넘기지 않는다. 최초 geometry 후보 생성·수정은 curator setup 책임이고 routine operator의 반복 업무가 아니다. 카메라·layout·binding·motion support가 바뀌면 새 profile version과 한 번의 새 final-form review가 필요하다.
 
 ## 5. up task-view profile
 
@@ -719,3 +750,12 @@ PDF에는 colored border와 text가 있지만 machine-readable fiducial은 없�
 - LeRobot 두-camera 병렬 encoder 전에 multiprocessing `spawn`을 강제해 Python 3.12 multithreaded-fork 경고와 교착 위험을 제거하고 concurrency cap을 회귀검사했다.
 - `KeyboardInterrupt`에도 writer 종료·owned temporary cleanup·failure evidence를 수행한 뒤 원래 중단을 다시 올리며, source/output repo ID 충돌을 사전 거부한다.
 - current focused 38/38과 commit `adb9770` clean isolated 전체 617/617은 PASS했다. 동시에 진행 중인 dirty main 실행은 별도 중간 상태였으므로 이 clean 판정에 섞지 않았다.
+
+### v1.2 UX 목표
+
+- 사람에게 request JSON·path·digest·frame index·encoder 설정을 반복 입력시키는 v1.1 CLI를 최종 routine UX로 채택하지 않기로 했다.
+- producer registry, curator view profile, workspace defaults와 generated run manifest를 책임별 SSOT로 두고 routine 명령은 source만 받도록 설계했다.
+- 정지 PNG 탐색 대신 raw·overlay·policy clip을 exact transform·H.264 조건으로 합친 시간 제한 review 영상 하나를 제공한다.
+- 표본은 단순 랜덤이 아니라 task·episode·phase·motion·mask boundary·화질 극값을 결정론적으로 층화하고 coverage를 manifest에 남긴다.
+- 사람은 제시된 최종형 표본에 승인/반려 한 번만 수행하고, 프로그램이 그 exact review digest를 결속한다. full derive 뒤 같은 판단을 다시 요구하지 않는다.
+- 같은 verified binding·collection profile과 compatible view에는 승인된 profile을 재사용하되, camera/view drift가 불명확하면 자동 publish하지 않고 새 review 하나만 요구한다.
