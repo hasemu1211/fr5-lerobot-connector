@@ -3461,7 +3461,10 @@ feedback:
                 ):
                     console.review_candidate(first_payload)
                 self.assertIn("review_candidate", console.projection()["available_ops"])
+                unrelated = {"intent_binding": None, "human_semantic": "NOT_MEASURED"}
+                console._episode_history.append(unrelated)
                 resolved = console.review_candidate(first_payload)
+                console._episode_history.remove(unrelated)
                 self.assertEqual(resolved["remaining_reviews"], 2)
                 self.assertEqual(
                     review_calls,

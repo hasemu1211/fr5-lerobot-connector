@@ -352,7 +352,7 @@ function failClose(code, detail = "") {
   document.querySelectorAll("button, input, select").forEach((control) => { control.disabled = true; });
   if (document.querySelector("#workspace-dialog").open) document.querySelector("#workspace-dialog").close();
   cancelButton.hidden = true;
-  setBanner(`${humanReason(code)}. 요청을 보내지 않았습니다. 최신 상태를 다시 불러오세요.`, "bad");
+  setBanner(`${humanReason(code)}. 새 요청을 보내지 않습니다. 최신 상태를 다시 불러오세요.`, "bad");
   document.querySelectorAll(".flow-step").forEach((section) => { section.hidden = section.dataset.step !== "environment"; });
   document.querySelectorAll("[data-step-target]").forEach((button) => button.classList.toggle("active", button.dataset.stepTarget === "environment"));
   document.querySelector("#setup-summary").innerHTML = `<strong>${escapeHtml(humanReason(code))}</strong><span>장치 상태를 성공으로 표시하지 않습니다. 서비스를 연결한 뒤 다시 확인하세요.</span><button id="retry-view" type="button">${bridgeSessionExpired ? "새 서버에 다시 연결" : "최신 상태 다시 불러오기"}</button>`;
@@ -1110,7 +1110,7 @@ async function watchView() {
     if (controller.signal.aborted || !currentView || currentView.session_id !== boundSession) return;
     if (view.revision !== currentView.revision || view.view_digest !== currentView.view_digest) render(view);
   } catch (error) {
-    if (error.name !== "AbortError") failViewRequest(error);
+    if (!controller.signal.aborted && watchController === controller && error.name !== "AbortError") failViewRequest(error);
   } finally {
     if (watchController === controller) {
       watchController = undefined;
@@ -1145,7 +1145,7 @@ async function submitIntent(op, payload = intentPayload(op)) {
     op,
     payload,
   };
-  let rejectionCode;
+  let rejectionCode, recoveryNotice;
   try {
     const response = await fetch("/api/intent", {
       method: "POST",
@@ -1161,14 +1161,12 @@ async function submitIntent(op, payload = intentPayload(op)) {
       rejectionCode = code;
     }
   } catch (error) {
-    intentBusy = false;
-    failClose("BRIDGE_UNAVAILABLE", error.message);
-    return;
+    recoveryNotice = "요청 응답을 받지 못해 최신 상태로 다시 맞췄습니다. 요청을 재전송하지 않았습니다.";
   }
-  await loadView({releaseIntent: true, rejectionCode});
+  await loadView({releaseIntent: true, rejectionCode, recoveryNotice});
 }
 
-async function loadView({releaseIntent = false, rejectionCode} = {}) {
+async function loadView({releaseIntent = false, rejectionCode, recoveryNotice} = {}) {
   stopWatch();
   setBanner("최신 상태를 다시 읽고 있습니다. 이 동안 요청을 보내지 않습니다.", "info", false);
   try {
@@ -1181,7 +1179,8 @@ async function loadView({releaseIntent = false, rejectionCode} = {}) {
       return;
     }
     render(view);
-    if (rejectionCode) setBanner(`${humanReason(rejectionCode)}. 요청은 실행되지 않았습니다.`, "bad");
+    if (recoveryNotice) setBanner(recoveryNotice, "bad");
+    else if (rejectionCode) setBanner(`${humanReason(rejectionCode)}. 요청은 실행되지 않았습니다.`, "bad");
     watchView();
   } catch (error) {
     if (releaseIntent) intentBusy = false;
