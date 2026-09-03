@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 from pathlib import Path
 import re
 from typing import Any, Sequence
@@ -13,23 +12,21 @@ import numpy as np
 from tools.data_factory.curator.core.jsonio import (
     DIGEST,
     SAFE_ID,
-    CuratorError,
     canonical_digest,
     exact_fields,
-    file_sha256,
     finite_number,
     load_json,
-    reject_symlink_components,
 )
-from tools.data_factory.curator.profile.transform import MAX_BACKGROUND_PLATE_FRAMES
-from tools.fr5_data_factory import COLLECTION_PROFILE_V2_KEYS
+from tools.data_factory.curator.core.errors import CuratorError
+from tools.data_factory.curator.profile.schema import (
+    CAMERA_KEY,
+    LABELME_VERSION,
+    ViewProfileSpec,
+)
 
 
-PROFILE_REQUEST_SCHEMA = "curator.up_view_profile_request.v2"
-LABELME_VERSION = "7.0.4"
 LAYOUT_SCHEMA = "a4_workspace_region_layout.v1"
 BINDING_SCHEMA = "data_factory.workspace_region_binding.v1"
-CAMERA_KEY = "observation.images.up"
 PLACES = ("PLACE_A", "PLACE_B")
 CORNER_NAMES = ("TL", "TR", "BR", "BL")
 TABLE_LABEL = "TABLE_WORK_SURFACE"
@@ -39,222 +36,14 @@ _RFC3339 = re.compile(
     r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})\Z"
 )
 _HEX_COLOR = re.compile(r"#[0-9A-Fa-f]{6}\Z")
-_CANONICAL_BINDING_ROOT = (
-    Path(__file__).resolve().parents[4] / "config" / "data_factory" / "region_bindings"
-).resolve()
-
-_REQUEST_FIELDS = {
-    "schema_version",
-    "profile_id",
-    "camera_key",
-    "width",
-    "height",
-    "collection_camera_profile",
-    "collection_camera_profile_digest",
-    "layout_manifest",
-    "layout_manifest_digest",
-    "physical_region_binding",
-    "physical_region_binding_digest",
-    "labelme_annotation",
-    "labelme_version",
-    "reference_image",
-    "reference_image_sha256",
-    "reference_frame_index",
-    "background_plate_frame_indices",
-    "dilation_margin_px",
-    "review_bundle",
-    "approval_artifact",
-}
-
-
-@dataclass(frozen=True)
-class ProfileRequest:
-    path: Path
-    value: dict[str, Any]
-    collection_profile_path: Path
-    layout_path: Path
-    binding_path: Path
-    annotation_path: Path
-    reference_image_path: Path
-    review_bundle_path: Path
-    approval_path: Path
-
-
-def _path(base: Path, value: object, code: str, *, must_exist: bool) -> Path:
-    if not isinstance(value, str) or not value or "\x00" in value:
-        raise CuratorError(code, "path string required")
-    candidate = Path(value)
-    if not candidate.is_absolute():
-        candidate = base / candidate
-    reject_symlink_components(candidate, code)
-    try:
-        resolved = candidate.resolve(strict=must_exist)
-    except OSError as exc:
-        raise CuratorError(code, f"{candidate}: {exc}") from exc
-    if must_exist and not resolved.is_file():
-        raise CuratorError(code, f"regular file required: {resolved}")
-    if not must_exist and (resolved.parent.is_symlink() or not resolved.parent.is_dir()):
-        raise CuratorError(code, f"existing regular parent required: {resolved.parent}")
-    return resolved
-
-
-def _validate_collection_profile(path: Path, digest: str, width: int, height: int) -> None:
-    profile = exact_fields(
-        load_json(path, code="COLLECTION_PROFILE_JSON"),
-        COLLECTION_PROFILE_V2_KEYS,
-        "COLLECTION_PROFILE_FIELDS",
-    )
-    if canonical_digest(profile) != digest:
-        raise CuratorError("COLLECTION_PROFILE_DIGEST")
-    if (
-        profile["schema_version"] != "data_factory.collection_profile.v2"
-        or not isinstance(profile["collection_profile_id"], str)
-        or SAFE_ID.fullmatch(profile["collection_profile_id"]) is None
-        or profile["qualification_status"] != "QUALIFIED"
-        or not isinstance(profile["quality_contract_digest"], str)
-        or DIGEST.fullmatch(profile["quality_contract_digest"]) is None
-        or profile["camera_profile"] != "up-wrist"
-        or profile["camera_roles"] != ["up", "wrist"]
-        or profile["fps"] != 30
-        or profile["width"] != width
-        or profile["height"] != height
-        or profile["image_qos"] not in ("reliable", "best-effort")
-        or profile["encoding_mode"] != "batch"
-        or profile["encoder_temp_policy"] != "DATASET_LOCAL"
-        or profile["portability_status"]
-        not in ("QUALIFICATION_REQUIRED", "SUPPORTED_8GB")
-        or not isinstance(profile["repo_id"], str)
-        or not profile["repo_id"]
-        or "\x00" in profile["repo_id"]
-    ):
-        raise CuratorError("COLLECTION_PROFILE_CONTRACT")
-    serials = profile["camera_serials"]
-    topics = profile["camera_topics"]
-    if (
-        not isinstance(serials, dict)
-        or set(serials) != {"up", "wrist"}
-        or any(
-            not isinstance(item, str) or not item or "\x00" in item
-            for item in serials.values()
-        )
-        or not isinstance(topics, dict)
-        or set(topics) != {"up", "wrist"}
-        or any(
-            not isinstance(item, str)
-            or not item.startswith("/")
-            or any(character.isspace() for character in item)
-            for item in topics.values()
-        )
-        or any(
-            type(profile[key]) is not int or profile[key] <= 0
-            for key in ("fps", "width", "height", "image_qos_depth", "writer_queue_size")
-        )
-        or type(profile["encoder_threads"]) is not int
-        or profile["encoder_threads"] < 0
-        or any(
-            type(profile[key]) is not int or profile[key] < 0
-            for key in (
-                "dataset_incremental_peak_bytes",
-                "encoder_temp_peak_bytes",
-                "disk_reserve_bytes",
-            )
-        )
-    ):
-        raise CuratorError("COLLECTION_PROFILE_CONTRACT")
-
-
-def load_profile_request(path: str | Path) -> ProfileRequest:
-    reject_symlink_components(path, "PROFILE_PATH")
-    try:
-        source = Path(path).resolve(strict=True)
-    except OSError as exc:
-        raise CuratorError("PROFILE_PATH", str(exc)) from exc
-    value = exact_fields(load_json(source, code="PROFILE_JSON"), _REQUEST_FIELDS, "PROFILE_FIELDS")
-    if value["schema_version"] != PROFILE_REQUEST_SCHEMA:
-        raise CuratorError("PROFILE_SCHEMA")
-    if not isinstance(value["profile_id"], str) or SAFE_ID.fullmatch(value["profile_id"]) is None:
-        raise CuratorError("PROFILE_ID")
-    if value["camera_key"] != CAMERA_KEY:
-        raise CuratorError("PROFILE_CAMERA_KEY")
-    for name in ("width", "height"):
-        if type(value[name]) is not int or not 1 <= value[name] <= 16_384:
-            raise CuratorError("PROFILE_IMAGE_SIZE", name)
-    for name in (
-        "collection_camera_profile_digest",
-        "layout_manifest_digest",
-        "physical_region_binding_digest",
-        "reference_image_sha256",
-    ):
-        if not isinstance(value[name], str) or DIGEST.fullmatch(value[name]) is None:
-            raise CuratorError("PROFILE_DIGEST", name)
-    if value["labelme_version"] != LABELME_VERSION:
-        raise CuratorError("PROFILE_LABELME_VERSION")
-    if type(value["reference_frame_index"]) is not int or value["reference_frame_index"] < 0:
-        raise CuratorError("PROFILE_REFERENCE_INDEX")
-    indices = value["background_plate_frame_indices"]
-    if (
-        not isinstance(indices, list)
-        or not indices
-        or len(indices) > MAX_BACKGROUND_PLATE_FRAMES
-        or any(type(index) is not int or index < 0 for index in indices)
-        or indices != sorted(set(indices))
-    ):
-        raise CuratorError("PROFILE_PLATE_INDICES")
-    if type(value["dilation_margin_px"]) is not int or not 0 <= value["dilation_margin_px"] <= 256:
-        raise CuratorError("PROFILE_MARGIN")
-
-    base = source.parent
-    collection_profile = _path(
-        base,
-        value["collection_camera_profile"],
-        "PROFILE_COLLECTION_PATH",
-        must_exist=True,
-    )
-    _validate_collection_profile(
-        collection_profile,
-        value["collection_camera_profile_digest"],
-        value["width"],
-        value["height"],
-    )
-    layout = _path(base, value["layout_manifest"], "PROFILE_LAYOUT_PATH", must_exist=True)
-    binding = _path(base, value["physical_region_binding"], "PROFILE_BINDING_PATH", must_exist=True)
-    annotation = _path(base, value["labelme_annotation"], "PROFILE_LABELME_PATH", must_exist=True)
-    reference = _path(base, value["reference_image"], "PROFILE_REFERENCE_PATH", must_exist=True)
-    bundle = _path(base, value["review_bundle"], "PROFILE_BUNDLE_PATH", must_exist=False)
-    approval = _path(base, value["approval_artifact"], "PROFILE_APPROVAL_PATH", must_exist=False)
-    if bundle == approval or bundle in approval.parents or approval.parent != bundle.parent:
-        raise CuratorError("PROFILE_ARTIFACT_OVERLAP", "approval must be outside immutable review bundle")
-    if file_sha256(reference) != value["reference_image_sha256"]:
-        raise CuratorError("PROFILE_REFERENCE_DIGEST")
-    layout_value = parse_layout(layout)
-    if layout_value["layout_digest"] != value["layout_manifest_digest"]:
-        raise CuratorError("PROFILE_LAYOUT_DIGEST")
-    binding_value = parse_binding(binding, layout_value)
-    if binding_value["binding_digest"] != value["physical_region_binding_digest"]:
-        raise CuratorError("PROFILE_BINDING_DIGEST")
-    if binding_value["physical_binding_status"] == "VERIFIED":
-        try:
-            binding.relative_to(_CANONICAL_BINDING_ROOT)
-        except ValueError as exc:
-            raise CuratorError(
-                "VERIFIED_BINDING_NOT_CANONICAL",
-                f"VERIFIED bindings must come from {_CANONICAL_BINDING_ROOT}",
-            ) from exc
-    return ProfileRequest(
-        source,
-        value,
-        collection_profile,
-        layout,
-        binding,
-        annotation,
-        reference,
-        bundle,
-        approval,
-    )
 
 
 def _point(value: object, code: str) -> list[float]:
-    if not isinstance(value, Sequence) or isinstance(value, (str, bytes)) or len(value) != 2:
+    if (
+        not isinstance(value, Sequence)
+        or isinstance(value, (str, bytes))
+        or len(value) != 2
+    ):
         raise CuratorError(code, "two coordinates required")
     return [finite_number(value[0], code), finite_number(value[1], code)]
 
@@ -271,14 +60,19 @@ def _orientation(a: Sequence[float], b: Sequence[float], c: Sequence[float]) -> 
 
 
 def _segments_intersect(
-    a: Sequence[float], b: Sequence[float], c: Sequence[float], d: Sequence[float],
+    a: Sequence[float],
+    b: Sequence[float],
+    c: Sequence[float],
+    d: Sequence[float],
 ) -> bool:
     first = (_orientation(a, b, c), _orientation(a, b, d))
     second = (_orientation(c, d, a), _orientation(c, d, b))
     return first[0] * first[1] <= 0 and second[0] * second[1] <= 0
 
 
-def _simple_polygon(value: object, code: str, *, positive_winding: bool = False) -> list[list[float]]:
+def _simple_polygon(
+    value: object, code: str, *, positive_winding: bool = False
+) -> list[list[float]]:
     if not isinstance(value, list) or len(value) < 3:
         raise CuratorError(code, "polygon requires at least three points")
     polygon = [_point(point, code) for point in value]
@@ -302,7 +96,9 @@ def _simple_polygon(value: object, code: str, *, positive_winding: bool = False)
 def _convex_polygon(value: object, code: str) -> list[list[float]]:
     polygon = _simple_polygon(value, code, positive_winding=True)
     crosses = [
-        _orientation(polygon[index - 1], polygon[index], polygon[(index + 1) % len(polygon)])
+        _orientation(
+            polygon[index - 1], polygon[index], polygon[(index + 1) % len(polygon)]
+        )
         for index in range(len(polygon))
     ]
     if any(cross <= 1e-9 for cross in crosses):
@@ -312,8 +108,12 @@ def _convex_polygon(value: object, code: str) -> list[list[float]]:
 
 def parse_layout(path: str | Path) -> dict[str, Any]:
     fields = {
-        "schema_version", "layout_id", "page_mm", "origin_xy_mm",
-        "workspace_regions", "layout_digest",
+        "schema_version",
+        "layout_id",
+        "page_mm",
+        "origin_xy_mm",
+        "workspace_regions",
+        "layout_digest",
     }
     value = exact_fields(load_json(path, code="LAYOUT_JSON"), fields, "LAYOUT_FIELDS")
     page = exact_fields(value["page_mm"], {"width", "height"}, "LAYOUT_PAGE_FIELDS")
@@ -330,7 +130,10 @@ def parse_layout(path: str | Path) -> dict[str, Any]:
         or not 0 <= origin[1] <= height
         or not isinstance(value["layout_digest"], str)
         or DIGEST.fullmatch(value["layout_digest"]) is None
-        or value["layout_digest"] != canonical_digest({key: item for key, item in value.items() if key != "layout_digest"})
+        or value["layout_digest"]
+        != canonical_digest(
+            {key: item for key, item in value.items() if key != "layout_digest"}
+        )
     ):
         raise CuratorError("LAYOUT_CONTRACT")
     regions = value["workspace_regions"]
@@ -370,8 +173,15 @@ def parse_layout(path: str | Path) -> dict[str, Any]:
 
 def parse_binding(path: str | Path, layout: dict[str, Any]) -> dict[str, Any]:
     fields = {
-        "schema_version", "layout_id", "layout_digest", "physical_binding_status",
-        "bindings", "verified_at", "verified_by", "evidence_digest", "binding_digest",
+        "schema_version",
+        "layout_id",
+        "layout_digest",
+        "physical_binding_status",
+        "bindings",
+        "verified_at",
+        "verified_by",
+        "evidence_digest",
+        "binding_digest",
     }
     value = exact_fields(load_json(path, code="BINDING_JSON"), fields, "BINDING_FIELDS")
     status = value["physical_binding_status"]
@@ -382,16 +192,24 @@ def parse_binding(path: str | Path, layout: dict[str, Any]) -> dict[str, Any]:
         or status not in {"PREPARED_NOT_VERIFIED", "VERIFIED"}
         or not isinstance(value["binding_digest"], str)
         or DIGEST.fullmatch(value["binding_digest"]) is None
-        or value["binding_digest"] != canonical_digest({key: item for key, item in value.items() if key != "binding_digest"})
+        or value["binding_digest"]
+        != canonical_digest(
+            {key: item for key, item in value.items() if key != "binding_digest"}
+        )
     ):
         raise CuratorError("BINDING_CONTRACT")
-    regions = {region["place_id"]: region["region_id"] for region in layout["workspace_regions"]}
+    regions = {
+        region["place_id"]: region["region_id"]
+        for region in layout["workspace_regions"]
+    }
     bindings = value["bindings"]
     if not isinstance(bindings, list) or len(bindings) != len(PLACES):
         raise CuratorError("BINDING_ENDPOINTS")
     seen: set[str] = set()
     for endpoint in bindings:
-        exact_fields(endpoint, {"place_id", "frame_id", "region_id"}, "BINDING_ENDPOINT_FIELDS")
+        exact_fields(
+            endpoint, {"place_id", "frame_id", "region_id"}, "BINDING_ENDPOINT_FIELDS"
+        )
         place = endpoint["place_id"]
         if (
             place not in PLACES
@@ -418,9 +236,13 @@ def parse_binding(path: str | Path, layout: dict[str, Any]) -> dict[str, Any]:
     return value
 
 
-def _image_polygon(value: object, width: int, height: int, code: str) -> list[list[float]]:
+def _image_polygon(
+    value: object, width: int, height: int, code: str
+) -> list[list[float]]:
     polygon = _simple_polygon(value, code)
-    if any(not 0 <= point[0] < width or not 0 <= point[1] < height for point in polygon):
+    if any(
+        not 0 <= point[0] < width or not 0 <= point[1] < height for point in polygon
+    ):
         raise CuratorError(code, "image coordinate out of bounds")
     return polygon
 
@@ -432,9 +254,21 @@ def _corner_quad(corners: dict[str, list[float]], place: str) -> None:
     _convex_polygon(polygon, "LABELME_CORNER_ORDER")
 
 
-def parse_labelme(request: ProfileRequest) -> dict[str, Any]:
-    fields = {"version", "flags", "shapes", "imagePath", "imageData", "imageHeight", "imageWidth"}
-    value = exact_fields(load_json(request.annotation_path, code="LABELME_JSON"), fields, "LABELME_FIELDS")
+def parse_labelme(request: ViewProfileSpec) -> dict[str, Any]:
+    fields = {
+        "version",
+        "flags",
+        "shapes",
+        "imagePath",
+        "imageData",
+        "imageHeight",
+        "imageWidth",
+    }
+    value = exact_fields(
+        load_json(request.annotation_path, code="LABELME_JSON"),
+        fields,
+        "LABELME_FIELDS",
+    )
     if (
         value["version"] != request.value["labelme_version"]
         or value["flags"] != {}
@@ -449,13 +283,19 @@ def parse_labelme(request: ProfileRequest) -> dict[str, Any]:
     allowed = {TABLE_LABEL, MOTION_LABEL, GROUNDING_LABEL}
     allowed.update(f"{place}_{corner}" for place in PLACES for corner in CORNER_NAMES)
     polygons: dict[str, list[list[list[float]]]] = {
-        TABLE_LABEL: [], MOTION_LABEL: [], GROUNDING_LABEL: [],
+        TABLE_LABEL: [],
+        MOTION_LABEL: [],
+        GROUNDING_LABEL: [],
     }
     corners: dict[str, dict[str, list[float]]] = {place: {} for place in PLACES}
     base_fields = {"label", "points", "group_id", "shape_type", "flags"}
     optional_fields = {"description", "mask"}
     for shape in value["shapes"]:
-        if not isinstance(shape, dict) or not base_fields <= set(shape) or set(shape) - base_fields - optional_fields:
+        if (
+            not isinstance(shape, dict)
+            or not base_fields <= set(shape)
+            or set(shape) - base_fields - optional_fields
+        ):
             raise CuratorError("LABELME_SHAPE_FIELDS")
         label = shape["label"]
         if (
@@ -474,7 +314,10 @@ def parse_labelme(request: ProfileRequest) -> dict[str, Any]:
             if not isinstance(shape["points"], list) or len(shape["points"]) != 1:
                 raise CuratorError("LABELME_POINT", label)
             point = _point(shape["points"][0], "LABELME_POINT")
-            if not 0 <= point[0] < request.value["width"] or not 0 <= point[1] < request.value["height"]:
+            if (
+                not 0 <= point[0] < request.value["width"]
+                or not 0 <= point[1] < request.value["height"]
+            ):
                 raise CuratorError("LABELME_POINT_BOUNDS", label)
             place, corner = label.rsplit("_", 1)
             if corner in corners[place]:
@@ -482,7 +325,12 @@ def parse_labelme(request: ProfileRequest) -> dict[str, Any]:
             corners[place][corner] = point
         else:
             polygons[label].append(
-                _image_polygon(shape["points"], request.value["width"], request.value["height"], "LABELME_POLYGON")
+                _image_polygon(
+                    shape["points"],
+                    request.value["width"],
+                    request.value["height"],
+                    "LABELME_POLYGON",
+                )
             )
     if len(polygons[TABLE_LABEL]) != 1 or not polygons[MOTION_LABEL]:
         raise CuratorError("LABELME_REQUIRED_POLYGONS")
@@ -499,18 +347,26 @@ def parse_labelme(request: ProfileRequest) -> dict[str, Any]:
 
 
 def project_semantic_subregions(
-    layout: dict[str, Any], correspondence: dict[str, dict[str, list[float]]],
+    layout: dict[str, Any],
+    correspondence: dict[str, dict[str, list[float]]],
 ) -> dict[str, list[list[float]]]:
     width = float(layout["page_mm"]["width"])
     height = float(layout["page_mm"]["height"])
     origin = np.asarray(layout["origin_xy_mm"], dtype=np.float64)
-    page = np.asarray([[0, 0], [width, 0], [width, height], [0, height]], dtype=np.float32)
+    page = np.asarray(
+        [[0, 0], [width, 0], [width, height], [0, height]], dtype=np.float32
+    )
     regions = {region["place_id"]: region for region in layout["workspace_regions"]}
     projected: dict[str, list[list[float]]] = {}
     for place in PLACES:
-        image = np.asarray([correspondence[place][name] for name in CORNER_NAMES], dtype=np.float32)
+        image = np.asarray(
+            [correspondence[place][name] for name in CORNER_NAMES], dtype=np.float32
+        )
         homography = cv2.getPerspectiveTransform(page, image)
-        if not np.isfinite(homography).all() or abs(float(np.linalg.det(homography))) <= 1e-12:
+        if (
+            not np.isfinite(homography).all()
+            or abs(float(np.linalg.det(homography))) <= 1e-12
+        ):
             raise CuratorError("HOMOGRAPHY_DEGENERATE", place)
         local = np.asarray(regions[place]["polygon_local_xy_mm"], dtype=np.float64)
         page_polygon = (local + origin).astype(np.float32).reshape(1, -1, 2)
@@ -521,11 +377,15 @@ def project_semantic_subregions(
     return projected
 
 
-def resolve_geometry(request: ProfileRequest) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
+def resolve_geometry(
+    request: ViewProfileSpec,
+) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
     layout = parse_layout(request.layout_path)
     binding = parse_binding(request.binding_path, layout)
     annotation = parse_labelme(request)
-    semantic = project_semantic_subregions(layout, annotation["place_plane_correspondence"])
+    semantic = project_semantic_subregions(
+        layout, annotation["place_plane_correspondence"]
+    )
     width, height = request.value["width"], request.value["height"]
     for place, polygon in semantic.items():
         _image_polygon(polygon, width, height, "SEMANTIC_SUBREGION_BOUNDS")
@@ -542,7 +402,9 @@ def _fill(mask: np.ndarray, polygons: Sequence[Sequence[Sequence[float]]]) -> No
         cv2.fillPoly(mask, [points], 1)
 
 
-def build_keep_mask(geometry: dict[str, Any], width: int, height: int, margin_px: int) -> np.ndarray:
+def build_keep_mask(
+    geometry: dict[str, Any], width: int, height: int, margin_px: int
+) -> np.ndarray:
     """Rasterize table-wide support first; A/B remain semantic subregions."""
     table = np.zeros((height, width), dtype=np.uint8)
     _fill(table, [geometry["table_work_surface"]])
@@ -559,16 +421,24 @@ def build_keep_mask(geometry: dict[str, Any], width: int, height: int, margin_px
         kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (size, size))
         keep = cv2.dilate(keep, kernel)
     if not keep.any() or keep.all():
-        raise CuratorError("KEEP_MASK_COVERAGE", "mask must contain keep and replace pixels")
+        raise CuratorError(
+            "KEEP_MASK_COVERAGE", "mask must contain keep and replace pixels"
+        )
     return keep.astype(bool)
 
 
 def geometry_digests(geometry: dict[str, Any]) -> dict[str, str]:
     return {
-        "place_plane_correspondence_digest": canonical_digest(geometry["place_plane_correspondence"]),
+        "place_plane_correspondence_digest": canonical_digest(
+            geometry["place_plane_correspondence"]
+        ),
         "table_work_surface_digest": canonical_digest(geometry["table_work_surface"]),
-        "visual_motion_support_digest": canonical_digest(geometry["visual_motion_support"]),
-        "grounding_context_support_digest": canonical_digest(geometry["grounding_context_support"]),
+        "visual_motion_support_digest": canonical_digest(
+            geometry["visual_motion_support"]
+        ),
+        "grounding_context_support_digest": canonical_digest(
+            geometry["grounding_context_support"]
+        ),
         "semantic_subregions_digest": canonical_digest(geometry["semantic_subregions"]),
     }
 
@@ -582,12 +452,9 @@ __all__ = [
     "LAYOUT_SCHEMA",
     "MOTION_LABEL",
     "PLACES",
-    "PROFILE_REQUEST_SCHEMA",
-    "ProfileRequest",
     "TABLE_LABEL",
     "build_keep_mask",
     "geometry_digests",
-    "load_profile_request",
     "parse_binding",
     "parse_labelme",
     "parse_layout",

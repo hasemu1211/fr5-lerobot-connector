@@ -1,1 +1,1 @@
-{"clip_frames":30,"max_clips":12,"policy_id":"bounded-default","render_fps":10,"schema_version":"curator.review_policy.v1","seed":5260903}
+{"clip_frames":30,"max_clips":12,"max_duration_seconds":36,"policy_id":"bounded-default","relative_time_quantiles":[0.1,0.5,0.9],"render_fps":10,"schema_version":"curator.review_policy.v1","seed":5260903}

@@ -1,736 +1,27 @@
-"""Immutable review-bundle and post-write curator verification."""
+"""Full derived-dataset verification and existing-validator integration."""
 
 from __future__ import annotations
 
-from contextlib import contextmanager
-import copy
 import hashlib
-import inspect
 import json
-import os
 from pathlib import Path
-import shutil
-import stat
 import subprocess
-import tempfile
-import threading
-from typing import Any
+import sys
+from typing import Any, Callable
 
-import cv2
 import numpy as np
 
-from tools.data_factory.curator.core.jsonio import (
-    DIGEST,
-    CuratorError,
-    assert_tree_identity,
-    canonical_digest,
-    exact_fields,
-    file_sha256,
-    load_json,
-    read_regular_bytes,
-    reject_symlink_components,
-    rename_noreplace,
-    stable_tree_identity,
-    tree_identity,
-    tree_snapshot,
-    write_json_atomic,
-)
-from tools.data_factory.curator.profile.geometry import (
-    CAMERA_KEY,
-    ProfileRequest,
-    build_keep_mask,
-    geometry_digests,
-    load_profile_request,
-    resolve_geometry,
-)
-from tools.data_factory.curator.profile.transform import (
-    apply_up_view,
-    array_digest,
-    make_background_plate,
-    polygon_crop,
-    read_rgb_png,
-    render_geometry_overview,
-    render_keep_overlay,
-    uint8_hwc,
-    write_mask_png,
-    write_rgb_png,
-)
+from ..core.errors import CuratorError
+from ..profile.schema import CAMERA_KEY
+from ..profile.transform import apply_up_view, uint8_hwc
+from .quality import accumulate_metrics, metric_accumulator, summarize_metrics
+from .source import open_source_dataset
 
 
-PROFILE_SCHEMA = "curator.up_view_profile.v2"
-BUNDLE_SCHEMA = "curator.task_view_review_bundle.v1"
-GEOMETRY_SCHEMA = "curator.task_view_geometry.v1"
-_BUNDLE_FILES = {
-    "background_plate.png",
-    "boundary_motion.png",
-    "boundary_place_a.png",
-    "boundary_place_b.png",
-    "geometry.json",
-    "keep_mask.png",
-    "overlay.png",
-    "policy_up.png",
-    "profile.json",
-    "reference_up.png",
-    "overview.png",
-}
-_PROFILE_FIELDS = {
-    "schema_version",
-    "profile_id",
-    "camera_key",
-    "width",
-    "height",
-    "collection_camera_profile_digest",
-    "collection_camera_profile_binding_status",
-    "layout_manifest_digest",
-    "physical_region_binding_digest",
-    "physical_binding_status",
-    "labelme_annotation_sha256",
-    "reference_image_sha256",
-    "reference_source_pixel_digest",
-    "reference_frame_index",
-    "background_plate_frame_indices",
-    "dilation_margin_px",
-    "place_plane_correspondence_digest",
-    "table_work_surface_digest",
-    "visual_motion_support_digest",
-    "grounding_context_support_digest",
-    "semantic_subregions_digest",
-    "geometry_sha256",
-    "mask_sha256",
-    "background_plate_sha256",
-    "reference_preview_sha256",
-    "profile_digest",
-}
 CODEC_MAX_FRAME_MAE = 18.0
-_LEROBOT_VERSION = "0.6.1"
-_LEROBOT_GUARD_LOCK = threading.Lock()
-_CUSTOM_FEATURES = {
-    "observation.state",
-    "action",
-    "observation.images.up",
-    "observation.images.wrist",
-}
-
-
-def validate_source_contract(dataset: Any, profile: dict[str, Any]) -> dict[str, Any]:
-    """Validate observable source fields against the declared collection contract."""
-    try:
-        from lerobot.utils.constants import DEFAULT_FEATURES
-        from tools.fr5_dataset_schema import FEATURE_NAMES
-    except ImportError as exc:
-        raise CuratorError("LEROBOT_IMPORT", str(exc)) from exc
-    features = dataset.meta.features
-    custom = set(features) - set(DEFAULT_FEATURES)
-    if custom != _CUSTOM_FEATURES:
-        raise CuratorError("SOURCE_FEATURE_SET", str(sorted(custom)))
-    for key in ("observation.state", "action"):
-        feature = features[key]
-        if (
-            feature.get("dtype") != "float32"
-            or list(feature.get("shape", [])) != [7]
-            or feature.get("names") != FEATURE_NAMES
-        ):
-            raise CuratorError("SOURCE_NUMERIC_FEATURE", key)
-    expected_shape = [profile["height"], profile["width"], 3]
-    for key in ("observation.images.up", "observation.images.wrist"):
-        feature = features[key]
-        if (
-            feature.get("dtype") != "video"
-            or list(feature.get("shape", [])) != expected_shape
-            or feature.get("names") != ["height", "width", "channels"]
-        ):
-            raise CuratorError("SOURCE_VIDEO_FEATURE", key)
-    if (
-        (profile["width"], profile["height"]) != (640, 480)
-        or type(dataset.meta.fps) is not int
-        or dataset.meta.fps != 30
-        or dataset.meta.robot_type != "fr5_ros2"
-        or dataset.meta.total_episodes <= 0
-        or len(dataset) <= 0
-    ):
-        raise CuratorError("SOURCE_DATASET_CONTRACT")
-    return copy.deepcopy({key: features[key] for key in _CUSTOM_FEATURES})
-
-
-@contextmanager
-def _deny_lerobot_hub_fallback():
-    """Fence the two private 0.6.1 fallback hooks while opening local data."""
-    import lerobot
-    import lerobot.datasets.dataset_metadata as metadata_module
-    import lerobot.datasets.lerobot_dataset as dataset_module
-    from lerobot.datasets.lerobot_dataset import LeRobotDataset, LeRobotDatasetMetadata
-
-    contracts = (
-        (LeRobotDataset._download, ("self", "download_videos", "token")),
-        (
-            LeRobotDatasetMetadata._pull_from_repo,
-            ("self", "allow_patterns", "ignore_patterns", "token"),
-        ),
-    )
-    if lerobot.__version__ != _LEROBOT_VERSION or any(
-        tuple(inspect.signature(function).parameters) != parameters
-        for function, parameters in contracts
-    ):
-        raise CuratorError("LEROBOT_LOCAL_CONTRACT", "expected LeRobot 0.6.1 fallback hooks")
-
-    def denied(*_args, **_kwargs):
-        raise CuratorError("SOURCE_LOCAL_INCOMPLETE", "Hub fallback is disabled")
-
-    with _LEROBOT_GUARD_LOCK:
-        original = (
-            LeRobotDataset._download,
-            LeRobotDatasetMetadata._pull_from_repo,
-            dataset_module.get_safe_version,
-            metadata_module.get_safe_version,
-        )
-        LeRobotDataset._download = denied
-        LeRobotDatasetMetadata._pull_from_repo = denied
-        dataset_module.get_safe_version = denied
-        metadata_module.get_safe_version = denied
-        try:
-            yield LeRobotDataset, LeRobotDatasetMetadata
-        finally:
-            LeRobotDataset._download = original[0]
-            LeRobotDatasetMetadata._pull_from_repo = original[1]
-            dataset_module.get_safe_version = original[2]
-            metadata_module.get_safe_version = original[3]
-
-
-def _require_local_file(root: Path, relative: Path) -> None:
-    relative = Path(relative)
-    if relative.is_absolute() or ".." in relative.parts:
-        raise CuratorError("SOURCE_LOCAL_PATH_ESCAPE", str(relative))
-    path = root / relative
-    reject_symlink_components(path, "SOURCE_LOCAL_INCOMPLETE")
-    try:
-        resolved = path.resolve(strict=True)
-        details = path.stat(follow_symlinks=False)
-    except OSError as exc:
-        raise CuratorError("SOURCE_LOCAL_INCOMPLETE", str(relative)) from exc
-    try:
-        resolved.relative_to(root)
-    except ValueError as exc:
-        raise CuratorError("SOURCE_LOCAL_PATH_ESCAPE", str(relative)) from exc
-    if resolved != path or not stat.S_ISREG(details.st_mode) or details.st_size <= 0:
-        raise CuratorError("SOURCE_LOCAL_INCOMPLETE", str(relative))
-
-
-def open_source_dataset(root: Path, repo_id: str):
-    reject_symlink_components(root, "SOURCE_DATASET")
-    try:
-        root = root.resolve(strict=True)
-    except OSError as exc:
-        raise CuratorError("SOURCE_DATASET", str(exc)) from exc
-    required = (
-        root / "meta" / "info.json",
-        root / "meta" / "stats.json",
-        root / "meta" / "tasks.parquet",
-    )
-    if root.is_symlink() or not root.is_dir() or any(path.is_symlink() or not path.is_file() for path in required):
-        raise CuratorError("SOURCE_DATASET", "complete local finalized metadata required")
-    episodes_metadata = root / "meta" / "episodes"
-    if episodes_metadata.is_symlink() or not episodes_metadata.is_dir():
-        raise CuratorError("SOURCE_DATASET", "episode metadata required")
-    try:
-        with _deny_lerobot_hub_fallback() as (LeRobotDataset, LeRobotDatasetMetadata):
-            metadata = LeRobotDatasetMetadata(
-                repo_id,
-                root=root,
-                force_cache_sync=False,
-                token=False,
-            )
-            try:
-                episode_metadata_count = len(metadata.episodes)
-            except (TypeError, AttributeError) as exc:
-                raise CuratorError("SOURCE_LOCAL_INCOMPLETE", "episode metadata") from exc
-            if (
-                Path(metadata.root).resolve(strict=True) != root.resolve(strict=True)
-                or type(metadata.total_episodes) is not int
-                or metadata.total_episodes <= 0
-                or episode_metadata_count != metadata.total_episodes
-            ):
-                raise CuratorError("SOURCE_LOCAL_INCOMPLETE", "episode metadata")
-            files = {
-                metadata.get_data_file_path(episode)
-                for episode in range(metadata.total_episodes)
-            }
-            files.update(
-                metadata.get_video_file_path(episode, key)
-                for episode in range(metadata.total_episodes)
-                for key in metadata.video_keys
-            )
-            for relative in files:
-                _require_local_file(root, relative)
-            return LeRobotDataset(
-                repo_id,
-                root=root,
-                force_cache_sync=False,
-                download_videos=False,
-                return_uint8=True,
-                token=False,
-            )
-    except CuratorError:
-        raise
-    except Exception as exc:
-        raise CuratorError("SOURCE_READER", str(exc)) from exc
-
-
-def export_reference(
-    source_root: str | Path,
-    output_path: str | Path,
-    frame_index: int,
-    *,
-    source_repo_id: str = "local/curator-source",
-) -> dict[str, Any]:
-    """Exclusive-export one exact 640x480 up frame through the official reader."""
-    if type(frame_index) is not int or frame_index < 0:
-        raise CuratorError("REFERENCE_FRAME_INDEX")
-    source = Path(source_root)
-    reject_symlink_components(source, "SOURCE_SYMLINK")
-    try:
-        source = source.resolve(strict=True)
-    except OSError as exc:
-        raise CuratorError("SOURCE_DATASET", str(exc)) from exc
-    if not source.is_dir():
-        raise CuratorError("SOURCE_DATASET", "directory required")
-
-    target = Path(output_path)
-    reject_symlink_components(target, "REFERENCE_OUTPUT_SYMLINK")
-    if target.suffix != ".png" or target.exists() or target.is_symlink():
-        raise CuratorError("REFERENCE_OUTPUT", "new .png path required")
-    try:
-        parent = target.parent.resolve(strict=True)
-    except OSError as exc:
-        raise CuratorError("REFERENCE_OUTPUT", str(exc)) from exc
-    if parent.is_symlink() or not parent.is_dir():
-        raise CuratorError("REFERENCE_OUTPUT", "regular parent required")
-    target = parent / target.name
-    if source == target or source in target.parents or target in source.parents:
-        raise CuratorError("SOURCE_ARTIFACT_OVERLAP", str(target))
-
-    before, source_digest = stable_tree_identity(
-        source,
-        code="SOURCE_CHANGED_DURING_IDENTITY",
-    )
-    dataset = open_source_dataset(source, source_repo_id)
-    try:
-        feature = dataset.meta.features[CAMERA_KEY]
-    except (AttributeError, KeyError, TypeError) as exc:
-        raise CuratorError("SOURCE_UP_FEATURE", str(exc)) from exc
-    if (
-        feature.get("dtype") != "video"
-        or list(feature.get("shape", [])) != [480, 640, 3]
-        or feature.get("names") != ["height", "width", "channels"]
-        or not 0 <= frame_index < len(dataset)
-    ):
-        raise CuratorError("SOURCE_UP_FEATURE")
-    try:
-        reference = uint8_hwc(
-            dataset[frame_index][CAMERA_KEY],
-            width=640,
-            height=480,
-            code="SOURCE_UP_FRAME",
-        )
-    except CuratorError:
-        raise
-    except (KeyError, IndexError, RuntimeError, TypeError, ValueError) as exc:
-        raise CuratorError("SOURCE_UP_FRAME", f"{frame_index}: {exc}") from exc
-    if tree_snapshot(source) != before:
-        raise CuratorError("SOURCE_READER_MUTATION")
-    ok, encoded = cv2.imencode(".png", cv2.cvtColor(reference, cv2.COLOR_RGB2BGR))
-    if not ok:
-        raise CuratorError("REFERENCE_ENCODE")
-
-    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
-    fd = -1
-    created = False
-    try:
-        fd = os.open(target, flags, 0o400)
-        created = True
-        with os.fdopen(fd, "wb") as stream:
-            fd = -1
-            stream.write(encoded.tobytes())
-            stream.flush()
-            os.fsync(stream.fileno())
-        directory_fd = os.open(parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
-        try:
-            os.fsync(directory_fd)
-        finally:
-            os.close(directory_fd)
-        assert_tree_identity(
-            source,
-            before,
-            source_digest,
-            code="SOURCE_CHANGED_DURING_REFERENCE_EXPORT",
-        )
-        return {
-            "schema_version": "curator.reference_export.v1",
-            "reference_image": str(target),
-            "reference_image_sha256": file_sha256(target),
-            "reference_source_pixel_digest": array_digest(reference),
-            "reference_source_dataset_digest": source_digest,
-            "reference_frame_index": frame_index,
-            "camera_key": CAMERA_KEY,
-            "width": 640,
-            "height": 480,
-            "training_authority": False,
-        }
-    except FileExistsError as exc:
-        raise CuratorError("REFERENCE_OUTPUT_EXISTS", str(target)) from exc
-    except OSError as exc:
-        if created:
-            target.unlink(missing_ok=True)
-        raise CuratorError("REFERENCE_WRITE", f"{target}: {exc}") from exc
-    except BaseException:
-        if created:
-            target.unlink(missing_ok=True)
-        raise
-    finally:
-        if fd >= 0:
-            os.close(fd)
-
-
-def _frame(dataset: Any, index: int, request: ProfileRequest) -> np.ndarray:
-    if not 0 <= index < len(dataset):
-        raise CuratorError("PROFILE_FRAME_INDEX", str(index))
-    try:
-        value = dataset[index][CAMERA_KEY]
-    except (KeyError, IndexError, RuntimeError, TypeError, ValueError) as exc:
-        raise CuratorError("SOURCE_UP_FRAME", f"{index}: {exc}") from exc
-    return uint8_hwc(
-        value,
-        width=request.value["width"],
-        height=request.value["height"],
-        code="SOURCE_UP_FRAME",
-    )
-
-
-def _geometry_document(request: ProfileRequest, geometry: dict[str, Any]) -> dict[str, Any]:
-    return {
-        "schema_version": GEOMETRY_SCHEMA,
-        "width": request.value["width"],
-        "height": request.value["height"],
-        **geometry,
-    }
-
-
-def _profile_document(
-    request: ProfileRequest,
-    geometry: dict[str, Any],
-    binding: dict[str, Any],
-    bundle: Path,
-    reference_pixel_digest: str,
-) -> dict[str, Any]:
-    value = request.value
-    profile = {
-        "schema_version": PROFILE_SCHEMA,
-        "profile_id": value["profile_id"],
-        "camera_key": value["camera_key"],
-        "width": value["width"],
-        "height": value["height"],
-        "collection_camera_profile_digest": value["collection_camera_profile_digest"],
-        "collection_camera_profile_binding_status": "DECLARED_CONFIG_OBSERVABLE_MATCH",
-        "layout_manifest_digest": value["layout_manifest_digest"],
-        "physical_region_binding_digest": value["physical_region_binding_digest"],
-        "physical_binding_status": binding["physical_binding_status"],
-        "labelme_annotation_sha256": file_sha256(request.annotation_path),
-        "reference_image_sha256": value["reference_image_sha256"],
-        "reference_source_pixel_digest": reference_pixel_digest,
-        "reference_frame_index": value["reference_frame_index"],
-        "background_plate_frame_indices": value["background_plate_frame_indices"],
-        "dilation_margin_px": value["dilation_margin_px"],
-        **geometry_digests(geometry),
-        "geometry_sha256": file_sha256(bundle / "geometry.json"),
-        "mask_sha256": file_sha256(bundle / "keep_mask.png"),
-        "background_plate_sha256": file_sha256(bundle / "background_plate.png"),
-        "reference_preview_sha256": file_sha256(bundle / "reference_up.png"),
-    }
-    profile["profile_digest"] = canonical_digest(profile)
-    return profile
-
-
-def _publish_directory(temporary: Path, target: Path) -> None:
-    if target.exists() or target.is_symlink():
-        raise CuratorError("BUNDLE_EXISTS", str(target))
-    rename_noreplace(
-        temporary,
-        target,
-        exists_code="BUNDLE_EXISTS",
-        failure_code="BUNDLE_PUBLISH",
-    )
-    directory_fd = os.open(target.parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
-    try:
-        os.fsync(directory_fd)
-    except OSError as exc:
-        raise CuratorError("BUNDLE_COMMITTED_PARENT_FSYNC_FAILED", str(target)) from exc
-    finally:
-        os.close(directory_fd)
-
-
-def create_review_bundle(
-    source_root: str | Path,
-    profile_request: str | Path,
-    *,
-    source_repo_id: str = "local/curator-source",
-) -> dict[str, Any]:
-    """Create one digest-closed preview bundle without creating authority."""
-    request = load_profile_request(profile_request)
-    source = Path(source_root)
-    reject_symlink_components(source, "SOURCE_SYMLINK")
-    source = source.resolve(strict=True)
-    for artifact in (request.review_bundle_path, request.approval_path):
-        if source == artifact or source in artifact.parents or artifact in source.parents:
-            raise CuratorError("SOURCE_ARTIFACT_OVERLAP", str(artifact))
-    before, source_digest = stable_tree_identity(
-        source,
-        code="SOURCE_CHANGED_DURING_IDENTITY",
-    )
-    if request.review_bundle_path.exists() or request.review_bundle_path.is_symlink():
-        raise CuratorError("BUNDLE_EXISTS", str(request.review_bundle_path))
-    geometry, _layout, binding = resolve_geometry(request)
-    keep_mask = build_keep_mask(
-        geometry,
-        request.value["width"],
-        request.value["height"],
-        request.value["dilation_margin_px"],
-    )
-    dataset = open_source_dataset(source, source_repo_id)
-    validate_source_contract(dataset, request.value)
-    reference = _frame(dataset, request.value["reference_frame_index"], request)
-    annotated_reference = read_rgb_png(
-        request.reference_image_path,
-        width=request.value["width"],
-        height=request.value["height"],
-    )
-    if not np.array_equal(reference, annotated_reference):
-        raise CuratorError("REFERENCE_FRAME_MISMATCH")
-    plate = make_background_plate(
-        [_frame(dataset, index, request) for index in request.value["background_plate_frame_indices"]]
-    )
-    policy = apply_up_view(reference, keep_mask, plate)
-    overlay = render_keep_overlay(reference, keep_mask)
-    overview = render_geometry_overview(reference, geometry)
-
-    temporary = Path(tempfile.mkdtemp(
-        prefix=f".{request.review_bundle_path.name}.curator-",
-        dir=request.review_bundle_path.parent,
-    ))
-    try:
-        shutil.copyfile(request.reference_image_path, temporary / "reference_up.png")
-        write_rgb_png(temporary / "background_plate.png", plate)
-        write_mask_png(temporary / "keep_mask.png", keep_mask)
-        write_rgb_png(temporary / "overlay.png", overlay)
-        write_rgb_png(temporary / "policy_up.png", policy)
-        write_rgb_png(temporary / "overview.png", overview)
-        write_rgb_png(
-            temporary / "boundary_place_a.png",
-            polygon_crop(overview, [geometry["semantic_subregions"]["PLACE_A"]]),
-        )
-        write_rgb_png(
-            temporary / "boundary_place_b.png",
-            polygon_crop(overview, [geometry["semantic_subregions"]["PLACE_B"]]),
-        )
-        write_rgb_png(
-            temporary / "boundary_motion.png",
-            polygon_crop(overview, geometry["visual_motion_support"]),
-        )
-        write_json_atomic(temporary / "geometry.json", _geometry_document(request, geometry))
-        profile = _profile_document(request, geometry, binding, temporary, array_digest(reference))
-        write_json_atomic(temporary / "profile.json", profile)
-        files = {
-            path.name: {"sha256": file_sha256(path), "size": path.stat().st_size}
-            for path in sorted(temporary.iterdir())
-            if path.is_file()
-        }
-        if set(files) != _BUNDLE_FILES:
-            raise CuratorError("BUNDLE_FILE_SET")
-        manifest = {
-            "schema_version": BUNDLE_SCHEMA,
-            "profile_digest": profile["profile_digest"],
-            "reference_source_dataset_digest": source_digest,
-            "files": files,
-        }
-        manifest["review_bundle_digest"] = canonical_digest(manifest)
-        write_json_atomic(temporary / "manifest.json", manifest)
-        assert_tree_identity(
-            source,
-            before,
-            source_digest,
-            code="SOURCE_CHANGED_DURING_PREVIEW",
-        )
-        _publish_directory(temporary, request.review_bundle_path)
-        return {
-            "profile_path": str(request.review_bundle_path / "profile.json"),
-            "profile_digest": profile["profile_digest"],
-            "review_bundle_digest": manifest["review_bundle_digest"],
-            "physical_binding_status": binding["physical_binding_status"],
-            "training_authorized": False,
-        }
-    except BaseException:
-        if temporary.exists():
-            shutil.rmtree(temporary)
-        raise
-
-
-def _bundle_image(path: Path, width: int, height: int) -> np.ndarray:
-    return read_rgb_png(path, width=width, height=height)
-
-
-def _mask(path: Path, width: int, height: int) -> np.ndarray:
-    if path.is_symlink() or not path.is_file():
-        raise CuratorError("BUNDLE_MASK")
-    image = cv2.imread(str(path), cv2.IMREAD_GRAYSCALE)
-    if image is None or image.shape != (height, width) or not set(np.unique(image)).issubset({0, 255}):
-        raise CuratorError("BUNDLE_MASK")
-    return image == 255
-
-
-def verify_review_bundle(profile_request: str | Path) -> tuple[ProfileRequest, dict[str, Any], dict[str, Any]]:
-    request = load_profile_request(profile_request)
-    root = request.review_bundle_path
-    if root.is_symlink() or not root.is_dir():
-        raise CuratorError("BUNDLE_ROOT")
-    manifest = exact_fields(
-        load_json(root / "manifest.json", code="BUNDLE_MANIFEST"),
-        {"schema_version", "profile_digest", "reference_source_dataset_digest", "files", "review_bundle_digest"},
-        "BUNDLE_MANIFEST_FIELDS",
-    )
-    if (
-        manifest["schema_version"] != BUNDLE_SCHEMA
-        or not isinstance(manifest["profile_digest"], str)
-        or DIGEST.fullmatch(manifest["profile_digest"]) is None
-        or not isinstance(manifest["reference_source_dataset_digest"], str)
-        or DIGEST.fullmatch(manifest["reference_source_dataset_digest"]) is None
-        or not isinstance(manifest["review_bundle_digest"], str)
-        or DIGEST.fullmatch(manifest["review_bundle_digest"]) is None
-        or manifest["review_bundle_digest"] != canonical_digest({key: item for key, item in manifest.items() if key != "review_bundle_digest"})
-    ):
-        raise CuratorError("BUNDLE_MANIFEST_CONTRACT")
-    files = manifest["files"]
-    if not isinstance(files, dict) or set(files) != _BUNDLE_FILES:
-        raise CuratorError("BUNDLE_FILE_SET")
-    actual = {
-        path.name for path in root.iterdir()
-        if path.name != "manifest.json"
-    }
-    if actual != _BUNDLE_FILES:
-        raise CuratorError("BUNDLE_UNEXPECTED_FILE")
-    for name, expected in files.items():
-        exact_fields(expected, {"sha256", "size"}, "BUNDLE_FILE_ENTRY")
-        path = root / name
-        if (
-            path.is_symlink()
-            or not path.is_file()
-            or type(expected["size"]) is not int
-            or expected["size"] < 0
-            or path.stat().st_size != expected["size"]
-            or file_sha256(path) != expected["sha256"]
-        ):
-            raise CuratorError("BUNDLE_FILE_DIGEST", name)
-
-    profile = exact_fields(load_json(root / "profile.json", code="PROFILE_RESOLVED"), _PROFILE_FIELDS, "PROFILE_RESOLVED_FIELDS")
-    if (
-        profile["schema_version"] != PROFILE_SCHEMA
-        or profile["profile_digest"] != canonical_digest({key: item for key, item in profile.items() if key != "profile_digest"})
-        or manifest["profile_digest"] != profile["profile_digest"]
-    ):
-        raise CuratorError("PROFILE_RESOLVED_DIGEST")
-    geometry, _layout, binding = resolve_geometry(request)
-    current_geometry = _geometry_document(request, geometry)
-    if load_json(root / "geometry.json", code="BUNDLE_GEOMETRY") != current_geometry:
-        raise CuratorError("BUNDLE_GEOMETRY_MISMATCH")
-    expected_profile = {
-        "profile_id": request.value["profile_id"],
-        "camera_key": request.value["camera_key"],
-        "width": request.value["width"],
-        "height": request.value["height"],
-        "collection_camera_profile_digest": request.value["collection_camera_profile_digest"],
-        "collection_camera_profile_binding_status": "DECLARED_CONFIG_OBSERVABLE_MATCH",
-        "layout_manifest_digest": request.value["layout_manifest_digest"],
-        "physical_region_binding_digest": request.value["physical_region_binding_digest"],
-        "physical_binding_status": binding["physical_binding_status"],
-        "labelme_annotation_sha256": file_sha256(request.annotation_path),
-        "reference_image_sha256": request.value["reference_image_sha256"],
-        "reference_frame_index": request.value["reference_frame_index"],
-        "background_plate_frame_indices": request.value["background_plate_frame_indices"],
-        "dilation_margin_px": request.value["dilation_margin_px"],
-        **geometry_digests(geometry),
-        "geometry_sha256": file_sha256(root / "geometry.json"),
-        "mask_sha256": file_sha256(root / "keep_mask.png"),
-        "background_plate_sha256": file_sha256(root / "background_plate.png"),
-        "reference_preview_sha256": file_sha256(root / "reference_up.png"),
-    }
-    if any(profile.get(key) != value for key, value in expected_profile.items()):
-        raise CuratorError("PROFILE_REQUEST_MISMATCH")
-    width, height = profile["width"], profile["height"]
-    mask = _mask(root / "keep_mask.png", width, height)
-    expected_mask = build_keep_mask(geometry, width, height, profile["dilation_margin_px"])
-    if not np.array_equal(mask, expected_mask):
-        raise CuratorError("BUNDLE_MASK_MISMATCH")
-    reference = _bundle_image(root / "reference_up.png", width, height)
-    plate = _bundle_image(root / "background_plate.png", width, height)
-    if array_digest(reference) != profile["reference_source_pixel_digest"]:
-        raise CuratorError("BUNDLE_REFERENCE_PIXEL_DIGEST")
-    policy = _bundle_image(root / "policy_up.png", width, height)
-    if not np.array_equal(policy, apply_up_view(reference, mask, plate)):
-        raise CuratorError("BUNDLE_POLICY_PREVIEW")
-    if not np.array_equal(_bundle_image(root / "overlay.png", width, height), render_keep_overlay(reference, mask)):
-        raise CuratorError("BUNDLE_OVERLAY")
-    if not np.array_equal(_bundle_image(root / "overview.png", width, height), render_geometry_overview(reference, geometry)):
-        raise CuratorError("BUNDLE_OVERVIEW")
-    return request, profile, manifest
-
-
-def _approved_bundle_bytes(
-    request: ProfileRequest,
-    profile: dict[str, Any],
-    manifest: dict[str, Any],
-    name: str,
-    profile_field: str,
-) -> bytes:
-    payload = read_regular_bytes(request.review_bundle_path / name, code="BUNDLE_ASSET_READ")
-    digest = "sha256:" + hashlib.sha256(payload).hexdigest()
-    expected = manifest["files"].get(name)
-    if (
-        not isinstance(expected, dict)
-        or expected.get("sha256") != digest
-        or expected.get("size") != len(payload)
-        or profile[profile_field] != digest
-    ):
-        raise CuratorError("BUNDLE_ASSET_DIGEST", name)
-    return payload
-
-
-def load_profile_assets(
-    request: ProfileRequest,
-    profile: dict[str, Any],
-    manifest: dict[str, Any],
-) -> tuple[np.ndarray, np.ndarray]:
-    """Decode the exact approved no-follow bytes once for the whole derivation."""
-    mask_payload = _approved_bundle_bytes(
-        request, profile, manifest, "keep_mask.png", "mask_sha256",
-    )
-    plate_payload = _approved_bundle_bytes(
-        request, profile, manifest, "background_plate.png", "background_plate_sha256",
-    )
-    mask_image = cv2.imdecode(np.frombuffer(mask_payload, dtype=np.uint8), cv2.IMREAD_GRAYSCALE)
-    if (
-        mask_image is None
-        or mask_image.shape != (profile["height"], profile["width"])
-        or not set(np.unique(mask_image)).issubset({0, 255})
-    ):
-        raise CuratorError("BUNDLE_MASK")
-    plate_image = cv2.imdecode(np.frombuffer(plate_payload, dtype=np.uint8), cv2.IMREAD_COLOR)
-    if plate_image is None:
-        raise CuratorError("BUNDLE_ASSET_READ", "background_plate.png")
-    mask = mask_image == 255
-    plate = uint8_hwc(
-        cv2.cvtColor(plate_image, cv2.COLOR_BGR2RGB),
-        width=profile["width"],
-        height=profile["height"],
-        code="PNG_SIZE",
-    )
-    return mask, plate
+FFPROBE_TIMEOUT_SECONDS = 30
+VALIDATOR_TIMEOUT_SECONDS = 300
+FrameObserver = Callable[..., None]
 
 
 def _numpy(value: Any) -> np.ndarray:
@@ -746,78 +37,97 @@ def _scalar(value: Any, code: str) -> Any:
     return array.reshape(-1)[0].item()
 
 
-def _image_metrics(image: np.ndarray) -> tuple[float, float, float, float]:
-    value = image.astype(np.float32)
-    color = float(
-        (
-            np.abs(value[..., 0] - value[..., 1]).mean()
-            + np.abs(value[..., 1] - value[..., 2]).mean()
+def _expected_video_paths(dataset: Any) -> set[str]:
+    expected: set[str] = set()
+    try:
+        for episode in range(dataset.meta.total_episodes):
+            for key in dataset.meta.video_keys:
+                expected.add(
+                    Path(dataset.meta.get_video_file_path(episode, key)).as_posix()
+                )
+    except (AttributeError, KeyError, TypeError, ValueError) as exc:
+        raise CuratorError("DERIVED_VIDEO_METADATA", str(exc)) from exc
+    return expected
+
+
+def verify_h264(root: str | Path, expected_paths: set[str]) -> list[str]:
+    base = Path(root)
+    actual = {
+        path.relative_to(base).as_posix()
+        for path in (base / "videos").rglob("*.mp4")
+        if path.is_file() and not path.is_symlink()
+    }
+    if not actual or actual != expected_paths:
+        raise CuratorError(
+            "DERIVED_H264_FILE_SET",
+            f"expected={sorted(expected_paths)} actual={sorted(actual)}",
         )
-        / 2
-    )
-    gray = cv2.cvtColor(image, cv2.COLOR_RGB2GRAY)
-    return (
-        color,
-        float(gray.mean()),
-        float(((gray <= 5) | (gray >= 250)).mean()),
-        float(cv2.Laplacian(gray, cv2.CV_64F).var()),
-    )
-
-
-def _metric_accumulator() -> dict[str, Any]:
-    return {
-        "count": 0,
-        "color_delta_total": 0.0,
-        "brightness_total": 0.0,
-        "clipping_total": 0.0,
-        "sharpness": [],
-    }
-
-
-def _accumulate_metrics(accumulator: dict[str, Any], image: np.ndarray) -> None:
-    color, brightness, clipping, sharpness = _image_metrics(image)
-    accumulator["count"] += 1
-    accumulator["color_delta_total"] += color
-    accumulator["brightness_total"] += brightness
-    accumulator["clipping_total"] += clipping
-    accumulator["sharpness"].append(sharpness)
-
-
-def _summarize_metrics(accumulator: dict[str, Any]) -> dict[str, float]:
-    count = accumulator["count"]
-    if not count:
-        raise CuratorError("DERIVED_IMAGE_METRICS")
-    return {
-        "color_delta_mean": accumulator["color_delta_total"] / count,
-        "brightness_mean": accumulator["brightness_total"] / count,
-        "clipping_mean": accumulator["clipping_total"] / count,
-        "sharpness_median": float(np.median(accumulator["sharpness"])),
-    }
-
-
-def _verify_h264(root: Path) -> list[str]:
-    files = sorted((root / "videos").rglob("*.mp4"))
-    if not files:
-        raise CuratorError("DERIVED_H264", "no MP4 files")
-    relative: list[str] = []
-    for path in files:
+    for relative in sorted(actual):
+        path = base / relative
         try:
             result = subprocess.run(
                 [
-                    "ffprobe", "-v", "error", "-select_streams", "v:0",
-                    "-show_entries", "stream=codec_name", "-of", "json", str(path),
+                    "ffprobe",
+                    "-v",
+                    "error",
+                    "-select_streams",
+                    "v:0",
+                    "-show_entries",
+                    "stream=codec_name",
+                    "-of",
+                    "json",
+                    str(path),
                 ],
                 check=True,
                 capture_output=True,
                 text=True,
+                timeout=FFPROBE_TIMEOUT_SECONDS,
             )
             streams = json.loads(result.stdout).get("streams", [])
-        except (FileNotFoundError, subprocess.CalledProcessError, json.JSONDecodeError) as exc:
+        except (
+            FileNotFoundError,
+            subprocess.CalledProcessError,
+            subprocess.TimeoutExpired,
+            json.JSONDecodeError,
+        ) as exc:
             raise CuratorError("DERIVED_H264", f"{path}: {exc}") from exc
         if len(streams) != 1 or streams[0].get("codec_name") != "h264":
             raise CuratorError("DERIVED_H264", f"{path}: {streams}")
-        relative.append(path.relative_to(root).as_posix())
-    return relative
+    return sorted(actual)
+
+
+def run_existing_validator(root: str | Path, repo_id: str) -> dict[str, Any]:
+    repository = Path(__file__).resolve().parents[4]
+    command = [
+        sys.executable,
+        str(repository / "tools/validate_lerobot_dataset.py"),
+        str(root),
+        "--repo-id",
+        repo_id,
+        "--expected-fps",
+        "30",
+        "--skip-decoded-image-diagnostics",
+    ]
+    try:
+        result = subprocess.run(
+            command,
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=VALIDATOR_TIMEOUT_SECONDS,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise CuratorError("EXISTING_VALIDATOR_TIMEOUT", str(exc)) from exc
+    if result.returncode != 0:
+        detail = "\n".join((result.stdout + "\n" + result.stderr).splitlines()[-20:])
+        raise CuratorError("EXISTING_VALIDATOR_FAILED", detail)
+    lines = [line for line in result.stdout.splitlines() if line]
+    return {
+        "status": "PASS",
+        "returncode": result.returncode,
+        "stdout_sha256": "sha256:" + hashlib.sha256(result.stdout.encode()).hexdigest(),
+        "summary": lines[-1] if lines else "PASS",
+    }
 
 
 def verify_derived_dataset(
@@ -828,8 +138,9 @@ def verify_derived_dataset(
     profile: dict[str, Any],
     keep_mask: np.ndarray,
     background_plate: np.ndarray,
+    frame_observer: FrameObserver | None = None,
 ) -> dict[str, Any]:
-    """Full official-loader comparison before atomic publication."""
+    """Decode every frame and compare all preserved and transformed features."""
     try:
         derived = open_source_dataset(Path(derived_root), derived_repo_id)
     except CuratorError as exc:
@@ -844,6 +155,7 @@ def verify_derived_dataset(
         raise CuratorError("DERIVED_METADATA_PRESERVATION")
     if not len(derived):
         raise CuratorError("DERIVED_EMPTY")
+
     mapping: dict[int, dict[str, int]] = {}
     maxima = {"up_keep_mae": 0.0, "up_replace_mae": 0.0, "wrist_mae": 0.0}
     image_metrics: dict[int, dict[str, dict[str, Any]]] = {}
@@ -855,17 +167,23 @@ def verify_derived_dataset(
         except Exception as exc:
             raise CuratorError("DERIVED_FULL_DECODE", f"frame {index}: {exc}") from exc
         for key in ("index", "episode_index", "frame_index", "task_index"):
-            if int(_scalar(source[key], "SOURCE_INDEX")) != int(_scalar(output[key], "DERIVED_INDEX")):
+            if int(_scalar(source[key], "SOURCE_INDEX")) != int(
+                _scalar(output[key], "DERIVED_INDEX")
+            ):
                 raise CuratorError("DERIVED_INDEX_PRESERVATION", f"{key}:{index}")
         source_timestamp = float(_scalar(source["timestamp"], "SOURCE_TIMESTAMP"))
         output_timestamp = float(_scalar(output["timestamp"], "DERIVED_TIMESTAMP"))
-        if abs(source_timestamp - output_timestamp) > 1e-7 or source["task"] != output["task"]:
+        if (
+            abs(source_timestamp - output_timestamp) > 1e-7
+            or source["task"] != output["task"]
+        ):
             raise CuratorError("DERIVED_TASK_TIMESTAMP_PRESERVATION", str(index))
         for key in ("observation.state", "action"):
             if not np.array_equal(_numpy(source[key]), _numpy(output[key])):
                 raise CuratorError("DERIVED_NUMERIC_PRESERVATION", f"{key}:{index}")
+
         raw_up = uint8_hwc(
-            source["observation.images.up"],
+            source[CAMERA_KEY],
             width=profile["width"],
             height=profile["height"],
             code="SOURCE_UP_FRAME",
@@ -877,7 +195,7 @@ def verify_derived_dataset(
             code="SOURCE_WRIST_FRAME",
         )
         output_up = uint8_hwc(
-            output["observation.images.up"],
+            output[CAMERA_KEY],
             width=profile["width"],
             height=profile["height"],
             code="DERIVED_UP_FRAME",
@@ -895,13 +213,18 @@ def verify_derived_dataset(
         replace_delta = up_delta[replace_mask]
         frame_metrics = {
             "up_keep_mae": float(keep_delta.mean()) if keep_delta.size else 0.0,
-            "up_replace_mae": float(replace_delta.mean()) if replace_delta.size else 0.0,
+            "up_replace_mae": float(replace_delta.mean())
+            if replace_delta.size
+            else 0.0,
             "wrist_mae": float(wrist_delta.mean()) if wrist_delta.size else 0.0,
         }
         for key, value in frame_metrics.items():
             maxima[key] = max(maxima[key], value)
             if value > CODEC_MAX_FRAME_MAE:
-                raise CuratorError("DERIVED_CODEC_BASELINE", f"{key}={value:.3f} frame={index}")
+                raise CuratorError(
+                    "DERIVED_CODEC_BASELINE", f"{key}={value:.3f} frame={index}"
+                )
+
         episode = int(_scalar(source["episode_index"], "SOURCE_EPISODE"))
         if episode not in mapping:
             mapping[episode] = {
@@ -911,12 +234,28 @@ def verify_derived_dataset(
                 "frames": 0,
             }
             image_metrics[episode] = {
-                "up": _metric_accumulator(),
-                "wrist": _metric_accumulator(),
+                "up": metric_accumulator(),
+                "wrist": metric_accumulator(),
             }
         mapping[episode]["frames"] += 1
-        _accumulate_metrics(image_metrics[episode]["up"], output_up)
-        _accumulate_metrics(image_metrics[episode]["wrist"], output_wrist)
+        accumulate_metrics(image_metrics[episode]["up"], output_up)
+        accumulate_metrics(image_metrics[episode]["wrist"], output_wrist)
+        if frame_observer is not None:
+            try:
+                frame_observer(
+                    dataset_index=index,
+                    source_row=source,
+                    candidate_row=output,
+                    raw_up=raw_up,
+                    candidate_up=output_up,
+                )
+            except CuratorError:
+                raise
+            except Exception as exc:
+                raise CuratorError(
+                    "REVIEW_SIGNAL_OBSERVER", f"frame {index}: {exc}"
+                ) from exc
+
     expected_episodes = list(range(source_dataset.meta.total_episodes))
     if list(mapping) != expected_episodes:
         raise CuratorError("DERIVED_EPISODE_ORDER")
@@ -930,11 +269,11 @@ def verify_derived_dataset(
     derived_image_metrics = []
     for episode in expected_episodes:
         cameras = {
-            camera: _summarize_metrics(accumulator)
+            camera: summarize_metrics(accumulator)
             for camera, accumulator in image_metrics[episode].items()
         }
         derived_image_metrics.append({"episode_index": episode, "cameras": cameras})
-    h264_files = _verify_h264(Path(derived_root))
+    h264_files = verify_h264(Path(derived_root), _expected_video_paths(derived))
     return {
         "schema_version": "curator.post_write_verification.v1",
         "status": "PASS",
@@ -964,15 +303,8 @@ def verify_derived_dataset(
 
 
 __all__ = [
-    "BUNDLE_SCHEMA",
     "CODEC_MAX_FRAME_MAE",
-    "GEOMETRY_SCHEMA",
-    "PROFILE_SCHEMA",
-    "create_review_bundle",
-    "export_reference",
-    "load_profile_assets",
-    "open_source_dataset",
-    "validate_source_contract",
+    "run_existing_validator",
     "verify_derived_dataset",
-    "verify_review_bundle",
+    "verify_h264",
 ]

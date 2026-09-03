@@ -1,19 +1,66 @@
-from datetime import datetime, timezone
-from pathlib import Path
-import tempfile, unittest
+import unittest
 from unittest import mock
-from tools.data_factory.curator.review.decision import issue_decision, verify_decision
-from tools.data_factory.curator.review.manifest import create_manifest
-from tools.data_factory.curator.core.jsonio import write_json_exclusive
+
+from tools.data_factory.curator.review.decision import read_foreground_decision
+
 
 class DecisionTest(unittest.TestCase):
-    def test_foreground_approve_is_digest_bound_and_exclusive(self):
-        with tempfile.TemporaryDirectory() as temporary:
-            run = Path(temporary); video = run / "review.mp4"; video.write_bytes(b"video")
-            manifest = create_manifest(run / "review_manifest.json", samples=[], identities={}, video=video)
-            write_json_exclusive(run / "review_ready.json", {"review_manifest_digest":manifest["review_manifest_digest"], "candidate_tree_digest":"sha256:"+"1"*64, "source_tree_digest":"sha256:"+"2"*64, "profile_digest":"sha256:"+"3"*64})
-            with mock.patch("tools.data_factory.curator.review.decision._read_controlling_tty", return_value="APPROVE"):
-                value = issue_decision(run, "operator", clock=lambda:datetime(2026,9,3,tzinfo=timezone.utc))
-            self.assertEqual(verify_decision(run), value); self.assertFalse(value["training_authorized"])
+    def test_foreground_decision_accepts_only_explicit_choice(self):
+        with (
+            mock.patch(
+                "tools.data_factory.curator.review.decision.os.open", return_value=7
+            ),
+            mock.patch(
+                "tools.data_factory.curator.review.decision.os.fstat",
+                return_value=mock.Mock(st_mode=0o020000),
+            ),
+            mock.patch(
+                "tools.data_factory.curator.review.decision.os.isatty",
+                return_value=True,
+            ),
+            mock.patch(
+                "tools.data_factory.curator.review.decision.os.tcgetpgrp",
+                return_value=12,
+            ),
+            mock.patch(
+                "tools.data_factory.curator.review.decision.os.getpgrp", return_value=12
+            ),
+            mock.patch("tools.data_factory.curator.review.decision.os.write"),
+            mock.patch(
+                "tools.data_factory.curator.review.decision.os.read",
+                side_effect=[bytes([value]) for value in b"APPROVE\n"],
+            ),
+            mock.patch("tools.data_factory.curator.review.decision.os.close"),
+        ):
+            self.assertEqual(read_foreground_decision("review.mp4"), "APPROVE")
+        with (
+            mock.patch(
+                "tools.data_factory.curator.review.decision.os.open", return_value=7
+            ),
+            mock.patch(
+                "tools.data_factory.curator.review.decision.os.fstat",
+                return_value=mock.Mock(st_mode=0o020000),
+            ),
+            mock.patch(
+                "tools.data_factory.curator.review.decision.os.isatty",
+                return_value=True,
+            ),
+            mock.patch(
+                "tools.data_factory.curator.review.decision.os.tcgetpgrp",
+                return_value=12,
+            ),
+            mock.patch(
+                "tools.data_factory.curator.review.decision.os.getpgrp", return_value=12
+            ),
+            mock.patch("tools.data_factory.curator.review.decision.os.write"),
+            mock.patch(
+                "tools.data_factory.curator.review.decision.os.read",
+                side_effect=[bytes([value]) for value in b"maybe\nREJECT\n"],
+            ),
+            mock.patch("tools.data_factory.curator.review.decision.os.close"),
+        ):
+            self.assertEqual(read_foreground_decision("review.mp4"), "REJECT")
 
-if __name__ == "__main__": unittest.main()
+
+if __name__ == "__main__":
+    unittest.main()

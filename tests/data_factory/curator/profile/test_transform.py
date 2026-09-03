@@ -4,7 +4,7 @@ import unittest
 
 import numpy as np
 
-from tools.data_factory.curator.core.jsonio import CuratorError
+from tools.data_factory.curator.core.errors import CuratorError
 from tools.data_factory.curator.profile.transform import (
     MAX_BACKGROUND_PLATE_FRAMES,
     apply_up_view,
@@ -29,9 +29,13 @@ class UpViewTest(unittest.TestCase):
     def test_temporal_median_and_contract_fail_closed(self):
         low = np.zeros((2, 3, 3), dtype=np.uint8)
         high = np.full_like(low, 100)
-        self.assertTrue(np.array_equal(make_background_plate([low, high]), np.full_like(low, 50)))
+        self.assertTrue(
+            np.array_equal(make_background_plate([low, high]), np.full_like(low, 50))
+        )
         middle = np.full_like(low, 37)
-        self.assertTrue(np.array_equal(make_background_plate([high, low, middle]), middle))
+        self.assertTrue(
+            np.array_equal(make_background_plate([high, low, middle]), middle)
+        )
         with self.assertRaisesRegex(CuratorError, "PLATE_FRAMES"):
             make_background_plate([low] * (MAX_BACKGROUND_PLATE_FRAMES + 1))
         with self.assertRaisesRegex(CuratorError, "UP_VIEW_INPUT"):
@@ -47,7 +51,9 @@ class UpViewTest(unittest.TestCase):
         ]
         for count in range(1, MAX_BACKGROUND_PLATE_FRAMES + 1):
             expected = np.median(np.stack(frames[:count]), axis=0).astype(np.uint8)
-            self.assertTrue(np.array_equal(make_background_plate(frames[:count]), expected))
+            self.assertTrue(
+                np.array_equal(make_background_plate(frames[:count]), expected)
+            )
 
 
 if __name__ == "__main__":
