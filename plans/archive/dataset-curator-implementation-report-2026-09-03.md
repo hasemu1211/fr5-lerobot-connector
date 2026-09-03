@@ -3,17 +3,17 @@
 - 작성일: 2026-09-03
 - 대상: FR5 30 Hz, up+wrist, 7D state/action LeRobot v3 dataset
 - 구현 위치: `tools/data_factory/curator/`
-- 판정 범위: software component와 synthetic end-to-end 검증
+- 판정 범위: software component, synthetic end-to-end와 repository 전체 회귀 검증. 현장 profile·학습 성능·rollout은 제외
 
 ## 1. 결론
 
-선택형 curator v1.2의 구현 본체는 완료됐다. 원본 dataset을 바꾸지 않고 별도 LeRobot v3/H.264 파생 후보를 만들며, 원본부터 후보·검토 영상·사람 결정·최종 결과까지 digest chain으로 추적한다. curator를 사용하지 않는 기존 원본 학습 경로도 그대로 남아 있다.
+선택형 curator v1.2 software component는 **GO**로 확정했다. 원본 dataset을 바꾸지 않고 별도 LeRobot v3/H.264 파생 후보를 만들며, 원본부터 후보·검토 영상·사람 결정·최종 결과까지 digest chain으로 추적한다. curator를 사용하지 않는 기존 원본 학습 경로도 그대로 남아 있다.
 
 다만 현재 repository에는 현장용 `VERIFIED` view profile과 그 외부 자산이 없다. 따라서 판정은 다음처럼 분리한다.
 
 | 항목 | 현재 판정 | 의미 |
 |---|---|---|
-| v1.2 코드 구조·계약 | GO 후보 | focused 71/71과 독립 P0/P1 재감사 통과; 최종 main 통합·전체 회귀 뒤 확정 |
+| v1.2 코드 구조·계약 | GO | main 통합, focused 71/71, repository 전체 808/808, knowledge QA 100/100과 독립 P0/P1 재감사 통과 |
 | synthetic LeRobot/H.264 흐름 | GO | 실제 writer/reader/FFmpeg encode·decode로 prepare, publish, reject와 복구 확인 |
 | 원본 추적성 | GO | full source-tree digest, episode/frame mapping, transform asset, copied provenance와 candidate digest 결속 |
 | 실제 현장 candidate 생성 | NO-GO | physical binding·LabelMe geometry·mask·plate가 아직 `VERIFIED` profile로 결속되지 않음 |
@@ -127,12 +127,11 @@ Linux에는 inode를 조건으로 한 `unlink`/`rmdir` API가 없다. 따라서 
 
 ```bash
 PYTHONWARNINGS='error::DeprecationWarning,error::ResourceWarning' \
-  direnv exec /home/codelab/Desktop/Project/fr5_ws \
-  env PYTHONPATH=$PWD \
+  direnv exec . \
   python3 -m unittest discover -s tests/data_factory/curator -t .
 ```
 
-결과는 **71/71 PASS, 81.008초**다. 실제 tiny LeRobot v3/H.264 encode/decode를 포함하며 주요 장애 주입은 다음과 같다.
+main 통합본 결과는 **71/71 PASS, 81.774초**다. 같은 code snapshot의 격리 worktree 실행도 **71/71 PASS, 81.008초**였다. 실제 tiny LeRobot v3/H.264 encode/decode를 포함하며 주요 장애 주입은 다음과 같다.
 
 - writer `add_frame`, `save_episode`, `finalize`, `KeyboardInterrupt`
 - existing validator가 후보 provenance를 변경하는 경우
@@ -146,7 +145,9 @@ PYTHONWARNINGS='error::DeprecationWarning,error::ResourceWarning' \
 - symlinked run ancestor, source-root escape, Hub fallback
 - review codec·크기·frame 수·digest와 candidate pixel 대응
 
-추가 정적 검사는 Ruff 0.12.11 `format`·`check`, Python `compileall`, `git diff --check`를 통과했다. 세 독립 read-only 감사에서 현재 frozen snapshot의 P0/P1 code·dataset-semantics·test gap이 없다는 GO를 받았다. repository 전체 test와 `mex check` 결과는 main 통합 시 최종 갱신한다.
+추가 정적 검사는 Ruff 0.12.11 `format`·`check`, Python `compileall`, `git diff --check`를 통과했다. 세 독립 read-only 감사에서 frozen snapshot의 P0/P1 code·dataset-semantics·test gap이 없다는 GO를 받았다. main에서 표준 repository 전체 명령을 낮은 scheduling priority로 실행한 결과는 **808/808 PASS, 383.110초**다. 전체 실행에는 Python 3.12의 기존 multiprocessing `fork` deprecation warning 한 건이 출력됐지만 Curator focused suite는 그 경고와 `ResourceWarning`을 오류로 승격한 조건에서도 통과했다. `mex check`는 **100/100, 오류·경고·정보 0**, documentation governance `audit`와 `check`는 진단 0건이었다.
+
+구현은 main의 `53ca2f4`와 `c0d497c`에 통합했다. 통합 전후 status를 비교해 Curator 변경과 경로가 겹치지 않던 동시 개발 파일의 dirty 상태가 그대로 보존됐음을 확인했다.
 
 모든 integration fixture는 `tempfile` 아래에서만 생성됐다. 실제 dataset, robot, camera, recorder, ROS, training, rollout은 실행하거나 수정하지 않았다.
 

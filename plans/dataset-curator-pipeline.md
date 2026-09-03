@@ -1,7 +1,7 @@
 # 선택형 LeRobot Dataset Curator 구축 계획
 
-- 상태: **v1.2 software implementation 완료 후보**. 내부를 `core/profile/dataset/review/workflow` package로 교체했고 공개 surface는 `prepare/status/decide`와 pure `apply_up_view()`만 남겼다. 실제 LeRobot v3/H.264, 원본 계보, 동시 결정과 crash/fsync/action-stage 장애를 포함한 focused test **71/71**이 strict warning 조건에서 통과했다. 최종 repository 통합·전체 회귀·문서 QA 전까지 이를 최종 GO로 승격하지 않는다.
-- 운영 판정: software component는 검증 중이지만 **production profile은 아직 없다**. producer-owned physical binding, 현장 LabelMe geometry, keep-mask와 background plate가 같은 profile로 `VERIFIED`되기 전에는 production candidate 생성이 의도적으로 실패한다. 원본 학습 경로는 curator와 무관하게 유지된다.
+- 상태: **v1.2 software implementation 완료 — GO**. 내부를 `core/profile/dataset/review/workflow` package로 교체했고 공개 surface는 `prepare/status/decide`와 pure `apply_up_view()`만 남겼다. 실제 LeRobot v3/H.264, 원본 계보, 동시 결정과 crash/fsync/action-stage 장애를 포함한 strict-warning focused test **71/71**, main repository 전체 test **808/808**, knowledge QA **100/100**과 세 독립 P0/P1 감사를 통과했다.
+- 운영 판정: software component는 검증됐지만 **production profile은 아직 없다**. producer-owned physical binding, 현장 LabelMe geometry, keep-mask와 background plate가 같은 profile로 `VERIFIED`되기 전에는 production candidate 생성이 의도적으로 실패한다. 원본 학습 경로는 curator와 무관하게 유지된다.
 - 역사 기준: v1.1 H.264 round-trip 38/38과 clean isolated 전체 617/617은 구조 교체의 회귀 기준이며 production 구조로 채택하지 않는다.
 - 갱신일: 2026-09-03
 - 대상: FR5 고정 up + raw wrist LeRobot v3 데이터와 향후 A↔B pick-place 데이터
@@ -548,7 +548,7 @@ active recorder가 source를 쓰는 동안에는 해당 source에 full decode·c
 
 2026-09-03 v1.2 snapshot은 별도 Orca recovery worktree에서 `curator/**`, mirrored tests, review policy와 이 문서만 수정해 구현했다. producer·recorder·robot·safety·training·rollout 및 실제 dataset에는 쓰기 작업을 하지 않았다.
 
-`PYTHONWARNINGS='error::DeprecationWarning,error::ResourceWarning' direnv exec ... python3 -m unittest discover -s tests/data_factory/curator -t .` 결과 **71/71 PASS, 81.008초**다. tiny synthetic LeRobot v3/H.264를 실제 encode/decode하는 통합 검사는 다음을 함께 확인한다.
+`PYTHONWARNINGS='error::DeprecationWarning,error::ResourceWarning' direnv exec . python3 -m unittest discover -s tests/data_factory/curator -t .`의 main 통합본 결과는 **71/71 PASS, 81.774초**다. 같은 code snapshot의 격리 worktree 실행은 **71/71 PASS, 81.008초**였다. tiny synthetic LeRobot v3/H.264를 실제 encode/decode하는 통합 검사는 다음을 함께 확인한다.
 
 - source full-tree SHA-256와 candidate의 `meta/curator_lineage.json`, episode/frame 동일 매핑, byte-identical `meta/source_provenance` copy
 - up fixed task-view와 wrist no-preencode-transform H.264 결과, state/action/task/timestamp 보존, actual-candidate review panel 대응
@@ -560,7 +560,7 @@ active recorder가 source를 쓰는 동안에는 해당 source에 full decode·c
 - action이 이미 끝난 뒤 source가 이동하고 profile/policy가 없어져도 immutable recorded decision으로 receipt 복구
 - source/profile/candidate/review가 decision 전 바뀌면 fail closed하고 어떠한 curator artifact도 training authority를 만들지 않음
 
-정적 품질 검사는 pinned transient Ruff 0.12.11의 `format`·`check`, Python `compileall`과 `git diff --check`를 통과했다. repository 전체 test, knowledge QA와 main 동시작업 충돌 검사는 통합 직전에 다시 실행하며 최종 수치는 별도 [구현 보고서](archive/dataset-curator-implementation-report-2026-09-03.md)에 고정한다.
+정적 품질 검사는 pinned transient Ruff 0.12.11의 `format`·`check`, Python `compileall`과 `git diff --check`를 통과했다. main 표준 repository 전체 test는 **808/808 PASS, 383.110초**, `mex check`는 **100/100, 오류·경고·정보 0**이며 documentation governance `audit`와 `check`도 진단 0건이다. Curator 두 commit과 경로가 겹치지 않던 main의 동시 개발 파일은 통합 전후 동일한 dirty 상태로 보존했다. 최종 판정과 명령별 증거는 [구현 보고서](archive/dataset-curator-implementation-report-2026-09-03.md)에 고정한다.
 
 이 증거는 software component와 synthetic end-to-end 경로만 승인한다. 실제 A/B geometry, physical binding, background plate, 사람 residual gold audit, SmolVLA smoke/성능 및 rollout은 아직 증명하지 않는다. `fr5260902`의 기존 read-only 감사 결과도 v1.2 production candidate 승인이 아니다.
 
