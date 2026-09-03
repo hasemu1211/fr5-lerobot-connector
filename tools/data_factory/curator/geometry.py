@@ -10,7 +10,7 @@ from typing import Any, Sequence
 import cv2
 import numpy as np
 
-from tools.curator.contracts import (
+from tools.data_factory.curator.contracts import (
     DIGEST,
     SAFE_ID,
     CuratorError,
@@ -21,7 +21,7 @@ from tools.curator.contracts import (
     load_json,
     reject_symlink_components,
 )
-from tools.curator.up_view import MAX_BACKGROUND_PLATE_FRAMES
+from tools.data_factory.curator.up_view import MAX_BACKGROUND_PLATE_FRAMES
 
 
 PROFILE_REQUEST_SCHEMA = "curator.up_view_profile_request.v1"
@@ -39,7 +39,7 @@ _RFC3339 = re.compile(
 )
 _HEX_COLOR = re.compile(r"#[0-9A-Fa-f]{6}\Z")
 _CANONICAL_BINDING_ROOT = (
-    Path(__file__).resolve().parents[2] / "config" / "data_factory" / "region_bindings"
+    Path(__file__).resolve().parents[3] / "config" / "data_factory" / "region_bindings"
 ).resolve()
 
 _REQUEST_FIELDS = {

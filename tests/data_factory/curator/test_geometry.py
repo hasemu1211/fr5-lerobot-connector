@@ -8,9 +8,9 @@ import unittest
 import cv2
 import numpy as np
 
-from tools.curator.contracts import CuratorError, canonical_digest, file_sha256
-from tools.curator.geometry import build_keep_mask, load_profile_request, resolve_geometry
-from tools.curator.up_view import MAX_BACKGROUND_PLATE_FRAMES
+from tools.data_factory.curator.contracts import CuratorError, canonical_digest, file_sha256
+from tools.data_factory.curator.geometry import build_keep_mask, load_profile_request, resolve_geometry
+from tools.data_factory.curator.up_view import MAX_BACKGROUND_PLATE_FRAMES
 
 
 def _write(path: Path, value: object) -> None:

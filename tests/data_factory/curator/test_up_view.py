@@ -4,8 +4,8 @@ import unittest
 
 import numpy as np
 
-from tools.curator.contracts import CuratorError
-from tools.curator.up_view import (
+from tools.data_factory.curator.contracts import CuratorError
+from tools.data_factory.curator.up_view import (
     MAX_BACKGROUND_PLATE_FRAMES,
     apply_up_view,
     make_background_plate,

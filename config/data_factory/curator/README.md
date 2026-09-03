@@ -14,9 +14,9 @@ This curator creates a separate LeRobot v3 dataset with a deterministic fixed up
   "width": 640,
   "height": 480,
   "collection_camera_profile_digest": "sha256:<64 lowercase hex>",
-  "layout_manifest": "../../tools/a4_place_yaw/zone_artifacts/<layout>.json",
+  "layout_manifest": "../../../tools/a4_place_yaw/zone_artifacts/<layout>.json",
   "layout_manifest_digest": "sha256:<layout semantic digest>",
-  "physical_region_binding": "../data_factory/region_bindings/<binding>.json",
+  "physical_region_binding": "../region_bindings/<binding>.json",
   "physical_region_binding_digest": "sha256:<binding semantic digest>",
   "labelme_annotation": "/external-assets/up-view/profile-r001/reference.json",
   "labelme_version": "7.0.4",
@@ -50,20 +50,20 @@ PLACE_A and PLACE_B are independently projected from each page’s named corners
 Run repository Python through the already-approved environment; never auto-approve `.envrc`.
 
 ```bash
-direnv exec . python3 -m tools.curator export-reference \
+direnv exec . python3 -m tools.data_factory.curator export-reference \
   --source /data/fr5/source \
   --output /external-assets/up-view/profile-r001/reference.png \
   --frame-index 0
 
-direnv exec . python3 -m tools.curator preview-profile \
+direnv exec . python3 -m tools.data_factory.curator preview-profile \
   --source /data/fr5/source \
   --profile /external-assets/up-view/profile-r001/request.json
 
-direnv exec . python3 -m tools.curator approve-profile \
+direnv exec . python3 -m tools.data_factory.curator approve-profile \
   --profile /external-assets/up-view/profile-r001/request.json \
   --approved-by operator-id
 
-direnv exec . python3 -m tools.curator derive \
+direnv exec . python3 -m tools.data_factory.curator derive \
   --source /data/fr5/source \
   --output /data/fr5-curated/derived-r001 \
   --profile /external-assets/up-view/profile-r001/request.json \

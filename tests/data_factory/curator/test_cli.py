@@ -8,7 +8,7 @@ import tempfile
 import unittest
 from unittest import mock
 
-from tools.curator.cli import main
+from tools.data_factory.curator.cli import main
 
 
 class CliTest(unittest.TestCase):
@@ -34,7 +34,7 @@ class CliTest(unittest.TestCase):
 
     def test_unexpected_runtime_failure_is_stable_json(self):
         with mock.patch(
-            "tools.curator.cli.create_review_bundle",
+            "tools.data_factory.curator.cli.create_review_bundle",
             side_effect=RuntimeError("unstable internal detail"),
         ):
             failure, _text = self._failure([

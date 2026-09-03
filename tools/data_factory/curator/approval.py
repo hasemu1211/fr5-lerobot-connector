@@ -9,7 +9,7 @@ import re
 import stat
 from typing import Any
 
-from tools.curator.contracts import (
+from tools.data_factory.curator.contracts import (
     DIGEST,
     RFC3339_UTC,
     SAFE_ID,
@@ -20,7 +20,7 @@ from tools.curator.contracts import (
     reject_symlink_components,
     write_json_exclusive,
 )
-from tools.curator.verify import verify_review_bundle
+from tools.data_factory.curator.verify import verify_review_bundle
 
 
 APPROVAL_SCHEMA = "curator.human_task_view_approval.v2"

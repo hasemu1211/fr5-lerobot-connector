@@ -9,10 +9,10 @@ from pathlib import Path
 import secrets
 import sys
 
-from tools.curator.approval import issue_approval
-from tools.curator.contracts import CuratorError
-from tools.curator.derive import derive_dataset
-from tools.curator.verify import create_review_bundle, export_reference
+from tools.data_factory.curator.approval import issue_approval
+from tools.data_factory.curator.contracts import CuratorError
+from tools.data_factory.curator.derive import derive_dataset
+from tools.data_factory.curator.verify import create_review_bundle, export_reference
 
 
 class _JsonArgumentParser(argparse.ArgumentParser):

@@ -7,8 +7,8 @@ from types import SimpleNamespace
 import unittest
 from unittest import mock
 
-from tools.curator import approval
-from tools.curator.contracts import CuratorError, reject_symlink_components, rename_noreplace, write_json_atomic
+from tools.data_factory.curator import approval
+from tools.data_factory.curator.contracts import CuratorError, reject_symlink_components, rename_noreplace, write_json_atomic
 
 
 class ApprovalTest(unittest.TestCase):

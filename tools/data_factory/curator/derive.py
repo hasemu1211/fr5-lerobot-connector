@@ -20,8 +20,8 @@ from typing import Any
 
 import numpy as np
 
-from tools.curator.approval import verify_approval
-from tools.curator.contracts import (
+from tools.data_factory.curator.approval import verify_approval
+from tools.data_factory.curator.contracts import (
     SAFE_ID,
     CuratorError,
     assert_tree_identity,
@@ -36,8 +36,8 @@ from tools.curator.contracts import (
     write_json_atomic,
     write_json_exclusive,
 )
-from tools.curator.up_view import apply_up_view, uint8_hwc
-from tools.curator.verify import (
+from tools.data_factory.curator.up_view import apply_up_view, uint8_hwc
+from tools.data_factory.curator.verify import (
     load_profile_assets,
     open_source_dataset,
     verify_derived_dataset,
@@ -292,7 +292,7 @@ def _derived_image_quality_warnings(cameras: dict[str, dict[str, float]]) -> lis
 
 
 def _run_existing_validator(root: Path, repo_id: str) -> dict[str, Any]:
-    repository = Path(__file__).resolve().parents[2]
+    repository = Path(__file__).resolve().parents[3]
     command = [
         sys.executable,
         str(repository / "tools" / "validate_lerobot_dataset.py"),

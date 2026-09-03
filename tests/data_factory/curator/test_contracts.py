@@ -8,7 +8,7 @@ import tempfile
 import unittest
 from unittest import mock
 
-from tools.curator.contracts import (
+from tools.data_factory.curator.contracts import (
     CuratorError,
     assert_tree_identity,
     file_sha256,
@@ -26,7 +26,7 @@ class ContractsTest(unittest.TestCase):
             path = Path(directory) / "payload.bin"
             path.write_bytes(payload)
             with mock.patch(
-                "tools.curator.contracts.read_regular_bytes",
+                "tools.data_factory.curator.contracts.read_regular_bytes",
                 side_effect=AssertionError("large files must not be materialized"),
             ):
                 self.assertEqual(
@@ -59,7 +59,7 @@ class ContractsTest(unittest.TestCase):
             (root / "payload.bin").write_bytes(b"payload")
             expected, _files = tree_identity(root)
             with mock.patch(
-                "tools.curator.contracts.tree_snapshot",
+                "tools.data_factory.curator.contracts.tree_snapshot",
                 wraps=tree_snapshot,
             ) as snapshot_call:
                 snapshot, digest = stable_tree_identity(root, code="SOURCE_CHANGED")
@@ -77,8 +77,8 @@ class ContractsTest(unittest.TestCase):
 
         library = type("Library", (), {"renameat2": FailingRename()})()
         with (
-            mock.patch("tools.curator.contracts.ctypes.CDLL", return_value=library),
-            mock.patch("tools.curator.contracts.ctypes.get_errno", return_value=errno.EROFS),
+            mock.patch("tools.data_factory.curator.contracts.ctypes.CDLL", return_value=library),
+            mock.patch("tools.data_factory.curator.contracts.ctypes.get_errno", return_value=errno.EROFS),
         ):
             with self.assertRaises(CuratorError) as raised:
                 rename_noreplace(
