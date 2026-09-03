@@ -1,6 +1,6 @@
 # 선택형 LeRobot Dataset Curator 구축 계획
 
-- 상태: Software-only implementation v1.1 후보 — core·review hardening·사전 최적화·`data_factory/curator` 책임 경계 정리를 main worktree에 구현했다. H.264 round-trip을 포함한 현재 focused test 38/38과 `fr5260902` read-only loader/reference-export를 통과했다. 실물 profile 승인·실제 파생 dataset 발행은 아직 하지 않았다.
+- 상태: Software-only implementation v1.1 후보 — core·review hardening·사전 최적화·`data_factory/curator` 책임 경계 정리를 main worktree에 구현했다. H.264 round-trip을 포함한 현재 focused test 38/38, vendor patch와 비추적 운영 자산을 갖춘 clean isolated worktree 전체 test 617/617, `fr5260902` read-only loader/reference-export를 통과했다. 실물 profile 승인·실제 파생 dataset 발행은 아직 하지 않았다.
 - 갱신일: 2026-09-03
 - 대상: FR5 고정 up + raw wrist LeRobot v3 데이터와 향후 A↔B pick-place 데이터
 - 독자: 데이터 생산, 큐레이션, SmolVLA 학습, rollout·안전 담당자
@@ -440,7 +440,7 @@ active recorder가 source를 쓰는 동안에는 해당 source에 full decode·`
 
 main 통합 당시 같은 focused 32개를 다시 통과했고, 당시 `direnv exec . python3 -m unittest discover -s tests` 전체 **724/724**도 PASS했다. 당시 `mex check`는 drift `100/100`, error/warning/info 0이었다. 이는 아래 v1.1 변경 전의 역사 증거다.
 
-v1.1 작업본은 collection-profile v2 전체 의미 검증, observable source 계약의 preview 조기검사, spawn 격리, `KeyboardInterrupt` 정리, distinct repo ID를 추가했고 `PYTHONWARNINGS=error::DeprecationWarning` 조건의 focused **38/38**을 67.712초에 통과했다. 실제 `fr5260902`도 현재 v1.1 local-only reader/source-contract 검사에서 8 episode·10,328 frame·30 Hz·FR5 7D+up+wrist로 통과했고 검사 전후 tree snapshot은 동일했다. 앞선 dirty-main 전체 회귀는 **741/742**였고 유일한 실패는 curator 밖 `operator/registries/test_workspace.py`였으며, 같은 10개 workspace test는 clean `curator-v06` worktree에서 **10/10 PASS**했다. 이후 전체 회귀를 다시 실행한 동안 다른 작업이 `test_motion.py`와 `test_run_job.py`를 수정해 실행은 **687개 중 1 failure·3 import error**로 끝났고, `Store`가 정의되기 전에 참조되는 중간 파일 상태였으므로 유효한 통합 판정으로 사용하지 않는다. 따라서 v1.1은 focused PASS로 판정하되 최신 dirty main 전체 PASS라고 주장하지 않는다.
+v1.1 작업본은 collection-profile v2 전체 의미 검증, observable source 계약의 preview 조기검사, spawn 격리, `KeyboardInterrupt` 정리, distinct repo ID를 추가했고 `PYTHONWARNINGS=error::DeprecationWarning` 조건의 focused **38/38**을 67.712초에 통과했다. 실제 `fr5260902`도 현재 v1.1 local-only reader/source-contract 검사에서 8 episode·10,328 frame·30 Hz·FR5 7D+up+wrist로 통과했고 검사 전후 tree snapshot은 동일했다. 앞선 dirty-main 전체 회귀는 **741/742**였고 유일한 실패는 curator 밖 `operator/registries/test_workspace.py`였으며, 이후 다른 작업이 파일을 수정하던 중의 전체 실행도 중간 상태 때문에 유효한 판정으로 쓰지 않았다. 대신 commit `adb9770`을 별도 Orca worktree에 격리하고 repository의 선언된 FR5 vendor patch, 운영 `.venv`, 비추적 A4 JSON 자산을 갖춘 뒤 전체 **617/617**을 208.582초에 통과했다. 이 clean 결과는 해당 commit의 tracked test 집합에 대한 software integration 증거이며, 동시에 진행 중인 main의 비추적·미커밋 기능까지 검증했다는 뜻은 아니다.
 
 v0.9 최적화는 `11a9956`에 보존했고, profile frame bound, 기존 median의 1~31 frame byte-level 동등성, identity directory-walk 횟수, compact metric 동등성과 두 camera 병렬 H.264 encode/stage timing receipt까지 focused 전체 32개로 재검증했다. 경로 이동 과정에서 옛 `tree_identity`를 patch하던 asset-tamper test가 최적화된 `stable_tree_identity`를 더 이상 가로채지 못한 문제를 발견했으며, product fail-closed 경계는 그대로 두고 test hook을 실제 호출 경계로 고쳤다.
 
@@ -718,4 +718,4 @@ PDF에는 colored border와 text가 있지만 machine-readable fiducial은 없�
 - profile request를 v2로 올려 exact collection profile JSON과 digest, 30 Hz·640×480·up+wrist·batch observable 계약을 검사하되 machine status를 `DECLARED_CONFIG_OBSERVABLE_MATCH`로 제한했다.
 - LeRobot 두-camera 병렬 encoder 전에 multiprocessing `spawn`을 강제해 Python 3.12 multithreaded-fork 경고와 교착 위험을 제거하고 concurrency cap을 회귀검사했다.
 - `KeyboardInterrupt`에도 writer 종료·owned temporary cleanup·failure evidence를 수행한 뒤 원래 중단을 다시 올리며, source/output repo ID 충돌을 사전 거부한다.
-- current focused 38/38은 PASS했지만 동시에 진행 중인 operator/catalog 변경 때문에 직전 dirty main 전체는 741/742였음을 분리 기록했다.
+- current focused 38/38과 commit `adb9770` clean isolated 전체 617/617은 PASS했다. 동시에 진행 중인 dirty main 실행은 별도 중간 상태였으므로 이 clean 판정에 섞지 않았다.
