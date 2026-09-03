@@ -1,12 +1,12 @@
 # 선택형 LeRobot Dataset Curator 구축 계획
 
-- 상태: Software-only implementation v1.1 후보 — core·review hardening·사전 최적화·`data_factory/curator` 책임 경계 정리를 main worktree에 구현했다. H.264 round-trip을 포함한 현재 focused test 38/38, vendor patch와 비추적 운영 자산을 갖춘 clean isolated worktree 전체 test 617/617, `fr5260902` read-only loader/reference-export를 통과했다. 실물 profile 승인·실제 파생 dataset 발행은 아직 하지 않았다.
-- 다음 구현: v1.2 routine UX — 반복 path·digest·geometry 입력을 SSOT에서 자동 해석하고, 사람은 시간 상한이 있는 최종형 표본 영상 하나를 본 뒤 승인/반려만 한다. 아래 4.4는 목표 계약이며 현재 v1.1 CLI 동작이라고 주장하지 않는다.
+- 상태: Software-only implementation v1.1은 검증 가능한 기반 코드로 남아 있지만 **production 구조로 채택하지 않는다**. 현재 `derive.py` 797줄, `verify.py` 978줄, `geometry.py` 596줄에 서로 다른 책임이 섞였고 approval이 review 검증을 역참조한다. H.264 round-trip focused 38/38, clean isolated 전체 test 617/617 증거는 리팩터링의 회귀 기준일 뿐 현 구조를 유지할 근거가 아니다.
+- 다음 구현: v1.2 architecture replacement — 공개 module entrypoint와 pure runtime transform 계약만 보존하고, 내부를 `core/profile/dataset/review/workflow` 하위 package로 재구성한다. 반복 path·digest·geometry 입력은 SSOT에서 자동 해석하며, 사람은 **검증 완료된 미게시 후보의 시간 제한 표본 영상 하나**를 본 뒤 후보 승인/반려만 한다. 아래 4.4와 9절은 목표 계약이며 현재 v1.1 CLI 동작이라고 주장하지 않는다.
 - 갱신일: 2026-09-03
 - 대상: FR5 고정 up + raw wrist LeRobot v3 데이터와 향후 A↔B pick-place 데이터
 - 독자: 데이터 생산, 큐레이션, SmolVLA 학습, rollout·안전 담당자
 - 목표: up keep 영역 밖의 사람·환경 변화를 고정 입력으로 만들어 background action shortcut을 줄이는 선택형 파생 데이터셋과 동일한 runtime transform을 제공한다. keep 영역 안 사람은 별도 측정 대상이며 제거 완료를 주장하지 않는다.
-- 현재 범위: optional curator의 software-only vertical slice를 구현하고 frozen source를 read-only로 검증한다. source data·모델·로봇·recorder는 변경하거나 실행하지 않는다. 실제 파생 발행은 source가 고정되고 producer-owned binding이 `VERIFIED`이며 exact preview를 본 사람이 profile을 승인한 뒤에만 수행한다. 수집은 curator와 독립적으로 계속할 수 있고, 변화 중인 source를 `derive`에 넣으면 publish 없이 fail closed해야 한다.
+- 현재 범위: optional curator의 software-only vertical slice를 구현하고 frozen source를 read-only로 검증한다. source data·모델·로봇·recorder는 변경하거나 실행하지 않는다. 파생 후보는 source가 고정되고 producer-owned binding이 `VERIFIED`일 때 별도 미게시 경로에 만들 수 있지만, 최종 dataset 이름으로의 publish는 그 **exact candidate에서 만든 review**를 사람이 승인한 뒤에만 수행한다. 수집은 curator와 독립적으로 계속할 수 있고, 변화 중인 source를 넣으면 publish 없이 fail closed해야 한다.
 
 ## 1. 확정한 기본안
 
@@ -33,7 +33,7 @@ up의 작업 관련 픽셀은 그대로 보존한다. 사람이 지나다니는 
 
 wrist에는 사람 판정 AI, mask, segmentation, inpainting 또는 별도 background augmentation을 적용하지 않는다.
 
-새 task-view profile을 실제 파생 dataset에 사용하는 curator 내부 gate는 `HUMAN_TASK_VIEW_APPROVED` 하나뿐이다. 자동 검사는 잘못된 입력과 구현 결함을 찾는 일반 검사이며 승인 상태를 만들지 않는다. AI나 기술 검토자의 의견도 자문일 뿐 gate가 아니다.
+curator 내부 gate는 exact 미게시 후보에 대한 `HUMAN_CURATED_CANDIDATE_APPROVED` 하나뿐이다. profile 작성·자동 compatibility·기계 검증은 잘못된 입력과 구현 결함을 찾는 준비 단계이며 승인 상태를 만들지 않는다. AI나 기술 검토자의 의견도 자문일 뿐 gate가 아니다.
 
 ## 2. 성능과 속도 판단
 
@@ -63,7 +63,7 @@ runtime transform은 frame당 단순 합성이지만, offline materialization은
 - A4 두 장만 꼭 맞게 자르지 않고 테이블 상판 전체와 robot/object swept region을 넓게 남긴다.
 - black fill 대신 같은 up camera에서 만든 정적인 실제 background plate를 사용한다.
 - layout, A/B page-corner correspondence, visual motion support, plate, 해상도와 camera placement를 하나의 profile digest로 묶는다.
-- 새 camera placement마다 한 번 raw/derived overlay를 확인한다.
+- 각 candidate review에서 raw/overlay/actual-derived를 확인하고, camera placement가 바뀌면 새 profile을 resolve한다.
 - mask 안의 사람 출현 위치와 task phase 분포를 offline audit하고, 성능 비교 전에는 “사람 제거 완료”라고 주장하지 않는다.
 - raw/raw 기준선보다 clean task 성능이 사전 정의한 허용폭 이상 낮으면 채택하지 않는다.
 
@@ -100,18 +100,20 @@ curator 실행이나 metadata는 이 경로의 prerequisite가 아니다. curato
 ### 4.2 curator 파생 경로
 
 ```text
-producer dataset (read-only) + draft up-view profile
-  -> raw/overlay/policy preview bundle
-  -> exact digest HUMAN task-view profile approval
-  -> optional curator derive
-  -> 별도 standard LeRobot v3 root + receipt
+producer dataset (read-only) + resolved up-view profile
+  -> run-owned hidden candidate에 full LeRobot v3 materialization
+  -> full decode·codec·보존성·source 불변성 기계 검증
+  -> actual candidate H.264에서 raw | overlay | policy sampled review.mp4
+  -> exact candidate에 대한 단 한 번의 HUMAN approve/reject
+  -> approve: atomic no-replace publish + non-authoritative receipt
+  -> reject: final dataset 없음 + heavy candidate 안전 폐기
   -> 기존 validator + 기존 사람 training approval + 기존 split
   -> train_policy.sh --root <derived-parent>
 ```
 
 파생본은 pixel과 dataset digest가 달라진 새 dataset이므로 source의 `meta/training_approved.json`을 복사하거나 상속하지 않는다. 기존 training owner가 기존 절차로 파생본을 승인한다. curator는 `TRAINING_APPROVED`나 별도의 “학습 가능” 상태를 발급하지 않는다.
 
-task-view 승인은 mask가 실제 작업영역을 보존하는지에만 답한다. 이후의 기존 training approval은 파생 dataset 전체가 학습에 적합한지에 답한다. 두 사람 판단은 책임이 다르며 어느 쪽도 다른 쪽을 대신하지 않는다.
+candidate 승인은 표본으로 제시된 exact 파생 결과가 작업 단서를 보존하고 눈에 띄는 artifact를 만들지 않았는지에만 답한다. 이후의 기존 training approval은 파생 dataset 전체가 해당 학습 실행에 적합한지에 답한다. 두 사람 판단은 책임이 다르며 어느 쪽도 다른 쪽을 대신하지 않는다.
 
 ### 4.3 책임 표
 
@@ -119,9 +121,9 @@ task-view 승인은 mask가 실제 작업영역을 보존하는지에만 답한�
 |---|---|---|
 | data factory·recorder | 수집 gate, 30 Hz 동기화, task/action/RGB, source finalize | curator transform·파생 root |
 | A4/scene producer | A/B geometry, physical binding, instruction과 demonstration 의미 | up pixel mask·학습 승인 |
-| curator | source snapshot, table-work-surface polygon, A4-to-image correspondence, visual motion support, draft up profile, preview, 파생 dataset, lineage·기술 검사 | A4 physical binding 승격, 사람 profile 승인, recorder, task 성공, split, 학습 자격, trainer, rollout |
-| 사람 profile owner | 동일 preview bundle을 보고 exact profile digest 승인 | 자동 검사 구현, dataset training approval, robot·recorder 승인 |
-| 검사 도구·AI 자문 | 재현 가능한 검사 결과와 시각 검토 의견 | 승인 artifact, profile 상태 전이, training authority |
+| curator | source snapshot, table-work-surface polygon, A4-to-image correspondence, visual motion support, resolved up profile, 미게시 candidate, sampled review, 파생 dataset, lineage·기술 검사 | A4 physical binding 승격, 사람 candidate 승인, recorder, task 성공, split, 학습 자격, trainer, rollout |
+| 사람 candidate owner | 실제 candidate에서 뽑은 하나의 review를 보고 exact candidate 승인 또는 반려 | profile path·digest 입력, 자동 검사 구현, dataset training approval, robot·recorder 승인 |
+| 검사 도구·AI 자문 | 재현 가능한 검사 결과, 표본 우선순위와 시각 검토 의견 | 승인 artifact, candidate 상태 전이, training authority |
 | training owner | 원본/파생본 선택, 기존 승인, split, trainer와 checkpoint | curator 내부 lifecycle |
 | rollout owner | checkpoint 평가와 동일 task-view runtime consumer | demonstration 생산·curator writer |
 | safety owner | raw camera 기반 human·scene·cell gate | policy 영상 미화 |
@@ -131,33 +133,44 @@ curator는 recorder나 `run_job`에서 호출되지 않고 source를 in-place �
 
 ### 4.4 v1.2 routine UX와 SSOT 목표
 
-현재 v1.1은 안전한 primitive를 제공하지만 routine operator가 request JSON의 path·digest·크기·repo ID를 직접 관리하고, exact digest 문구를 옮겨 적으며, 정지 preview 여러 장을 찾아보게 한다. 또한 source payload마다 approval을 다시 요구한다. 이는 반복 수집 운영의 최종 UX로 채택하지 않는다.
+현재 v1.1은 안전한 primitive를 제공하지만 routine operator가 request JSON의 path·digest·크기·repo ID를 직접 관리하고, exact digest 문구를 옮겨 적으며, 정지 preview 여러 장을 찾아보게 한다. 더 중요한 결함은 profile preview를 먼저 승인하고 실제 full H.264 결과를 나중에 만든다는 점이다. 실제 encoder·episode 전체·경계 motion을 보지 않은 승인을 production gate로 삼지 않는다.
 
-반복 실행의 사람 접점은 다음 하나로 줄인다.
+반복 실행의 사람 접점은 exact candidate에 대한 마지막 결정 하나다.
 
 ```text
-finalized source + 자동 해석한 approved view-profile SSOT
-  -> exact transform·H.264 설정으로 bounded sampled review.mp4 생성
-  -> 사람은 raw | overlay | policy 결과를 한 영상에서 보고 승인 또는 반려
-  -> 승인 시 full derive·기계 검증·atomic publish
+prepare --source <dataset>
+  -> SSOT resolve -> hidden full candidate -> full machine verification
+  -> verified candidate H.264를 decode해 bounded review.mp4 생성
+  -> REVIEW_READY에서 종료
+
+decide --run <run-id>
+  -> 사람은 raw | overlay | actual candidate를 한 영상에서 확인
+  -> APPROVE: digest chain 재검증 -> atomic publish
+  -> REJECT: final output 없음 -> heavy candidate 안전 폐기
 ```
 
-사람은 polygon, frame index, path, digest, repo ID 또는 encoder option을 입력하지 않는다. 화면에 실제로 제시된 review artifact의 digest는 프로그램이 승인 artifact에 직접 결속하고, 사람은 한 번의 명시적 승인/반려 의사만 입력한다. 이는 사람 gate를 없애는 것이 아니라 우발적인 다른 artifact 승인을 막는 결속 책임과 반복 타이핑을 프로그램으로 옮기는 것이다. full derive 뒤에는 구조·codec·frame 수·source 불변성을 기계가 검사하며 같은 판단을 사람에게 다시 요구하지 않는다.
+미리보기 전용 변환·encoder 경로를 따로 만들지 않는다. `policy` panel은 publish될 candidate의 실제 H.264 decode 결과이고, `raw`와 `overlay`는 같은 frame key의 source와 exact mask를 사용한다. 따라서 표본과 발행 결과의 차이는 sampling coverage 문제로만 좁혀지고 “preview에서는 괜찮았지만 full encoder 결과는 달랐다”는 구현 경로 불일치를 없앤다. 반려 시 full encode 비용이 낭비되지만 승인 정확성과 코드 단순성을 우선하며, 실측상 반려율·처리시간이 병목일 때만 proxy preview를 재검토한다.
 
-SSOT는 중복 JSON 하나가 아니라 다음 소유 경계를 조합한다.
+사람은 polygon, frame index, path, digest, repo ID 또는 encoder option을 입력하지 않는다. 프로그램이 화면에 제시한 review digest, candidate tree digest, source/profile identity를 decision artifact에 직접 결속하고 사람은 controlling TTY에서 명시적인 승인/반려만 선택한다. profile setup이나 자동 검사는 별도 사람 gate가 아니다. 장시간 encode와 제한 없는 검토시간 동안 한 process를 붙잡아 두지 않고 `REVIEW_READY`에서 안전하게 종료한 뒤 같은 application owner가 다음 명령에서 재개한다.
+
+SSOT는 중복된 거대 JSON 하나가 아니라 다음 소유 경계를 조합한다.
 
 | SSOT | 한 번 저장하는 값 | 자동 파생해 사람이 쓰지 않는 값 |
 |---|---|---|
 | producer registry, read-only | collection profile, layout, `VERIFIED` physical binding ID | 각 canonical digest, fps·camera feature 계약 |
-| curator view-profile registry | table/motion/context geometry, margin, plate policy, review policy, 적용 가능한 binding ID | mask·plate·projected A/B·profile digest와 asset path |
-| workspace-local curator defaults | source root, derived root, active profile ID | output name·repo ID·run ID·receipt path |
-| generated run manifest | exact source identity와 resolved profile identity | sample indices·review digest·publish evidence |
+| `view_profiles/<profile-id>.json` | table/motion/context geometry, margin, plate policy, 적용 가능한 binding ID | mask·plate·projected A/B·profile digest와 asset path |
+| `review_policies/<policy-id>.json` | sampling strata, clip/window 상한, render layout | exact sample indices·coverage·FFmpeg arguments |
+| generated immutable run events | exact source, resolved profile, candidate, review와 decision identity | output name·repo ID·receipt·recovery 상태 |
 
-현재 dataset metadata가 physical placement lineage를 증명하지 못하므로 단순히 dataset 이름이 다르다는 이유로 geometry 설정을 다시 받지도, 같은 camera라고 무조건 가정하지도 않는다. exact approved profile은 같은 producer binding과 collection profile에만 재사용하고, source의 reference registration이 허용 범위를 벗어나거나 판정 불능이면 자동 publish하지 않고 새 sampled review 하나만 요구한다. 이 compatibility check는 profile을 승인하거나 producer binding을 승격하지 않는다.
+별도의 registry index와 workspace defaults 파일은 처음부터 만들지 않는다. profile/policy ID는 canonical directory의 exact filename으로 해석하고, source에서 안전하게 파생 가능한 output name·repo ID·run ID는 생성한다. 실제로 둘 이상의 반복 기본값이 생긴 뒤에만 작은 workspace-local defaults를 추가한다. geometry image·mask·plate 같은 대형/현장 자산은 repository 밖 asset root가 소유하고 canonical config는 ID와 digest만 가진다.
 
-review는 정지 프레임을 무작정 늘어놓지 않고 짧은 clip을 결정론적으로 중복 제거해 한 H.264 영상으로 만든다. 최소 strata는 episode/task·A→B/B→A 균형, 시작/접촉/운반/놓기/종료 구간, action 또는 영상 motion peak, keep-mask 경계 변화, 밝기·초점 극값, 균등 seeded 표본이다. up-only person audit가 검증되어 설치된 경우에는 keep 안 사람 score가 높은 clip을 **표본 우선순위에만** 추가하며 자동 삭제·승인에는 사용하지 않는다. review policy는 최대 clip 수와 총 재생시간을 SSOT로 제한하고, manifest에 전체 모집단 대비 task·episode·risk-stratum coverage를 기록한다. 첫 실제 데이터에서 사람이 충분히 판단 가능한 최소 시간으로 기본 budget을 측정해 고정하며 문서에서 임의 숫자를 발명하지 않는다.
+현재 dataset metadata가 physical placement lineage를 증명하지 못하므로 이름이나 해상도만으로 geometry를 자동 재사용하지 않는다. curator는 producer episode ledger와 binding을 read-only로 대조하되, 증거가 불완전하면 그 사실을 run manifest에 남기고 실제 candidate review를 생략하지 않는다. future producer가 immutable placement ID를 제공하면 resolver가 읽을 수 있지만 producer format을 curator가 수정하거나 사후 lineage를 발명하지 않는다.
 
-routine entrypoint의 목표는 `curate --source <dataset>` 한 명령이다. profile을 유일하게 해석할 수 없거나 compatibility가 불명확할 때만 명확한 reason으로 멈추며, 사람에게 내부 path나 digest를 해결하라고 떠넘기지 않는다. 최초 geometry 후보 생성·수정은 curator setup 책임이고 routine operator의 반복 업무가 아니다. 카메라·layout·binding·motion support가 바뀌면 새 profile version과 한 번의 새 final-form review가 필요하다.
+review는 정지 프레임을 무작정 늘어놓지 않고 짧은 clip을 결정론적으로 중복 제거해 한 H.264 영상으로 만든다. 실제 데이터에 존재하는 신호만 사용한다: task·episode·A→B/B→A 균형, relative-time quantile, gripper action transition, arm action/state velocity, up visual-motion peak, mask-boundary motion, 밝기·초점 극값과 seeded uniform sample이다. 기록되지 않은 “접촉/운반/놓기 phase”를 정답처럼 추론하지 않는다. 검증된 up-only person detector가 나중에 설치되면 keep 안 residual-person score를 **표본 우선순위에만** 추가하며 자동 변환·삭제·승인에는 사용하지 않는다. policy는 최대 clip 수와 총 재생시간을 제한하고 manifest에 전체 모집단 대비 coverage와 각 clip 선택 이유를 기록한다.
+
+run state는 DB나 덮어쓰는 `state.json` 없이 `outputs/curator/runs/<run-id>/`의 exclusive-create immutable event로 투영한다: `request.json`, `candidate_ready.json`, `review_ready.json`, `decision.json`, `receipt.json` 또는 `failure.json`. candidate는 최종 output과 같은 filesystem의 run-owned hidden sibling에 두어 승인 후 no-replace atomic rename한다. reject는 finalized writer를 먼저 닫고 소유 identity가 같은 heavy candidate만 폐기하며, 작은 review·decision evidence는 retention policy 동안 남긴다. terminal run 재시도는 기존 상태를 고치지 않고 새 run을 만든다.
+
+routine entrypoint는 `prepare --source <dataset>`, `decide --run <run-id>`, `status --run <run-id>` 세 동작만 공개한다. `argparse`의 표준 subcommand로 충분하며 shell wrapper, daemon, web UI, plugin interface 또는 state database를 추가하지 않는다. 최초 geometry 작성·수정은 setup 책임이고 routine operator의 반복 업무가 아니다. camera·layout·binding·motion support가 바뀌면 새 profile version이 필요하지만 formal 사람 gate는 여전히 각 candidate의 최종 review 하나다.
 
 ## 5. up task-view profile
 
@@ -197,15 +210,15 @@ policy_wrist[t] = raw_wrist[t]
 - 전체 robot·gripper의 visual swept region
 - homography로 투영한 red/blue A/B semantic subregion, object와 instruction grounding cue
 
-사람이 정상적으로 지나다니는 통로처럼 task와 무관한 up 배경만 `M=0`으로 둔다. `visual_motion_support`가 바뀌는 새 task family는 새 profile과 사람 승인을 받는다.
+사람이 정상적으로 지나다니는 통로처럼 task와 무관한 up 배경만 `M=0`으로 둔다. `visual_motion_support`가 바뀌는 새 task family는 새 profile을 만들며 사람은 그 profile을 사용한 actual candidate review에서 최종 결정한다.
 
 ### 5.2 실제 background plate
 
 생성형 이미지나 검은 fill을 쓰지 않는다.
 
-1. finalized up 영상에서 사람이 없는 clean reference frame 한 장을 고른다.
-2. clean frame이 없으면 여러 시점의 temporal median으로 움직이는 사람을 제거한다.
-3. mask 밖에 human ghost·robot 잔상이 없는지 preview 한 장으로 확인한다.
+1. finalized reference source의 episode/time 전역에서 bounded frame을 결정론적으로 고른다.
+2. 선택 frame의 temporal median으로 움직이는 사람을 제거해 plate asset을 만든다.
+3. mask 밖 human ghost·robot 잔상·seam 여부는 별도 setup 승인 없이 actual candidate review에서 확인한다.
 
 plate는 매 frame 동일하므로 flicker가 없고 사람의 출현 시점과 상관되지 않는다. background 자체의 spatial cue는 같은 camera의 실영상 형태로 유지된다.
 
@@ -227,28 +240,28 @@ visual_motion_support_digest
 grounding_context_support_digest
 mask_sha256
 background_plate_sha256
-reference_preview_sha256
+reference_image_sha256
 ```
 
 `collection_camera_profile_digest`는 현재 producer provenance를 뜻하지 않는다. request가 가리키는 exact `data_factory.collection_profile.v2` JSON의 canonical digest와 source에서 관측 가능한 30 Hz·640×480·up+wrist feature 계약만 대조하며, resolved profile과 receipt에는 `DECLARED_CONFIG_OBSERVABLE_MATCH`로 기록한다. 현재 source metadata에는 collection profile·device serial·placement lineage가 없고 profile도 runtime binding을 사용하므로 모든 episode가 같은 물리 배치에서 수집됐다는 증거는 아니다. 그 승격은 producer-owned immutable lineage가 생긴 뒤에만 가능하며 curator가 사후 생성하지 않는다.
 
-현재 codebase에는 exact camera pose/extrinsic 권위가 없다. 이 profile의 homography는 A4 평면 좌표를 image pixel로 옮길 뿐 3D robot pose나 safety geometry를 만들지 않는다. draft preview는 `PREPARED_NOT_VERIFIED` binding으로 만들 수 있지만 production profile approval은 exact physical binding이 `VERIFIED`일 때만 발급한다. camera placement, crop, 해상도, A/B physical binding, layout polygon, page correspondence, motion support, mask 또는 plate가 바뀌면 profile digest가 바뀌고 기존 승인은 효력을 잃는다.
+현재 codebase에는 exact camera pose/extrinsic 권위가 없다. 이 profile의 homography는 A4 평면 좌표를 image pixel로 옮길 뿐 3D robot pose나 safety geometry를 만들지 않는다. setup 진단은 `PREPARED_NOT_VERIFIED` binding으로 할 수 있지만 publish 후보는 exact physical binding이 producer registry에서 `VERIFIED`일 때만 만든다. camera placement, crop, 해상도, A/B physical binding, layout polygon, page correspondence, motion support, mask 또는 plate가 바뀌면 profile digest가 바뀌며 기존 candidate decision과 결속되지 않는다.
 
-### 5.4 단일 사람 profile 승인
+### 5.4 단일 사람 candidate 결정
 
-승인 전에 curator는 한 source reference frame만 읽어 다음 immutable review bundle을 만든다.
+curator는 full candidate를 finalize하고 기계 검증한 뒤 실제 source/candidate의 결정론적 clip으로 다음 immutable review bundle을 만든다.
 
-- 원본 up frame
-- keep/replace 영역을 서로 다른 색으로 표시한 full-resolution overlay
-- transform을 적용한 policy up preview
-- table-work-surface, A/B page corner와 투영 subregion, object transport corridor, `visual_motion_support`와 grounding cue를 서로 다른 색으로 표시한 overview·경계 확대본
-- source frame, profile, mask, plate, task geometry와 review bundle의 digest manifest
+- 원본 up clip
+- keep/replace 영역과 table/A/B/motion/context 경계를 표시한 overlay clip
+- 실제 candidate H.264를 다시 decode한 policy up clip
+- episode/frame/time, 선택 이유와 raw↔candidate 대응 key
+- source, candidate tree, profile, mask, plate, geometry, sample coverage와 review 영상의 digest manifest
 
-제가 같은 bundle을 보고 누락·과도한 제거·경계 artifact를 설명할 수 있지만 그 의견은 저장 여부와 무관한 자문이다. 사람 profile owner가 실제 화면으로 같은 bundle을 확인하고 `/dev/tty`에 exact profile/review digest 문구를 입력해야 승인 artifact를 exclusive-create한다. stdin, JSONL, AI identity, timeout, 기본값, `--yes` 또는 `--force`로 승인할 수 없다.
+제가 같은 bundle을 보고 누락·과도한 제거·경계 artifact를 설명할 수 있지만 그 의견은 저장 여부와 무관한 자문이다. 사람 candidate owner가 실제 화면으로 review 영상 하나를 확인하고 controlling `/dev/tty`에서 명시적으로 `APPROVE` 또는 `REJECT`를 선택해야 decision artifact를 exclusive-create한다. 긴 digest를 사람이 옮겨 적지 않으며 프로그램이 현재 표시한 artifact identity를 결속한다. stdin, JSONL, AI identity, timeout, 기본값, `--yes` 또는 `--force`로 승인할 수 없다.
 
-승인 artifact는 최소한 `profile_digest`, `review_bundle_digest`, `approved_by`, `approved_at`, `provenance=HUMAN_TASK_VIEW_APPROVED`, `training_authorized=false`를 결속한다. 승인 부재나 digest mismatch는 해당 profile을 사용한 파생 dataset 생성을 거부한다. 이것은 원본 dataset의 validator·학습·training approval 경로에는 영향을 주지 않는다.
+decision artifact는 최소한 `source_tree_digest`, `candidate_tree_digest`, `profile_digest`, `review_manifest_digest`, `review_video_digest`, `decision`, `decided_by`, `decided_at`, `provenance=HUMAN_CURATED_CANDIDATE_APPROVED|REJECTED`, `training_authorized=false`를 결속한다. `APPROVE` 부재나 digest mismatch는 publish를 거부하고 `REJECT`는 final dataset을 만들지 않는다. 이것은 원본 dataset의 validator·학습·training approval 경로에는 영향을 주지 않는다.
 
-이 게이트의 보장은 **지원하는 curator CLI에서 비대화형 우회가 없고 승인된 byte/digest가 바뀌면 거부된다**는 로컬 운영 계약이다. `/dev/tty`와 unkeyed digest만으로 같은 Unix UID의 악성 프로세스가 쓴 JSON을 암호학적으로 사람 발급이라고 증명할 수는 없다. 같은 UID까지 적대자로 보는 배포가 필요하면 별도 승인 계정 또는 hardware-backed 서명키 같은 독립 trust root를 추가해야 한다. 현재 구현은 그 보장을 가장하지 않으며, production 경로는 `SYNTHETIC_TEST_ONLY` authority를 거부하고 test는 production 승인 artifact를 직접 만들지 않는다.
+이 게이트의 보장은 **지원하는 curator CLI에서 비대화형 승인 우회가 없고 결정에 결속된 source/candidate/profile/review byte가 바뀌면 publish가 거부된다**는 로컬 운영 계약이다. `/dev/tty`와 unkeyed digest만으로 같은 Unix UID의 악성 프로세스가 쓴 JSON을 암호학적으로 사람 발급이라고 증명할 수는 없다. 같은 UID까지 적대자로 보는 배포가 필요하면 별도 승인 계정 또는 hardware-backed 서명키 같은 독립 trust root를 추가해야 한다. 현재 구현은 그 보장을 가장하지 않으며, production 경로는 `SYNTHETIC_TEST_ONLY` authority를 거부하고 test는 production 승인 artifact를 직접 만들지 않는다.
 
 ### 5.5 사람 episode 처리
 
@@ -278,7 +291,8 @@ LeRobot writer가 wrist를 재인코딩하면 “bitwise raw”라고 주장하�
 ```text
 datasets/fr5_episodes/<source>/          # producer 소유, read-only
 datasets/fr5_curated/<derived>/          # 선택형 standard LeRobot v3 dataset
-outputs/curator/runs/<run-id>/           # receipt·preview·temporary, ignored
+datasets/fr5_curated/.<derived>.<run-id>.candidate/ # run-owned hidden candidate, ignored
+outputs/curator/runs/<run-id>/           # immutable run events·review·receipt, ignored
 <external-asset-root>/up-view/<profile>/ # mask·plate, digest로 결속
 ```
 
@@ -305,7 +319,7 @@ loose `images/`를 만들지 않는다. LeRobot v3 video dataset은 `videos/obse
 - source/output identity와 digest
 - LeRobot/runtime version
 - up profile·mask·plate digest
-- exact 사람 task-view approval artifact와 digest
+- exact 사람 candidate decision artifact와 digest
 - episode/frame mapping
 - state/action/task/timestamp 보존 결과
 - up 안/밖 pixel 검사와 wrist no-op encode 비교
@@ -354,9 +368,11 @@ runtime transform이 없는 checkpoint를 raw up으로 실행하면 train/infere
 | local LeRobot 0.6.1 | source decode, derived create/add/save/finalize, loader smoke | 현재 dataset/trainer의 정본 API |
 | NumPy·OpenCV | planar homography, polygon rasterize, binary mask, temporal median, preview | 이미 설치됐고 640×480 처리에 충분 |
 | external LabelMe 7.0.4 | reference PNG에서 A/B page corner point와 `visual_motion_support` polygon을 한 번 작성 | 유지되는 desktop annotation UI를 재사용하고 자체 임시 GUI를 만들지 않음 |
+| installed FFmpeg | actual candidate decode 결과의 `raw | overlay | policy` H.264 review 합성 | 공식 [`hstack`/`xstack`/`drawtext`](https://ffmpeg.org/ffmpeg-filters.html)와 concat demuxer를 재사용해 별도 video UI·composer를 만들지 않음 |
+| official `lerobot-dataset-viz`/Rerun | 사람이 특정 episode의 image·state·action을 더 깊게 볼 때 쓰는 선택형 진단 | [공식 dataset tool](https://github.com/huggingface/lerobot/blob/main/docs/source/using_dataset_tools.mdx)을 그대로 쓰며 routine approval gate에는 넣지 않음 |
 | existing validator·train wrapper | 구조 검사, 기존 승인 gate, smoke | 새 wrapper가 필요 없음 |
 
-LeRobot dataset tools는 episode delete/split/merge/re-encode에는 재사용할 수 있지만 up 한 camera의 semantic pixel을 바꾸지는 않는다. LeRobot image transform은 train-time augmentation이므로 동일 runtime task-view를 대신하지 못한다.
+LeRobot v3의 camera 정본은 [chunked MP4와 metadata/Parquet](https://github.com/huggingface/lerobot/blob/main/docs/source/lerobot-dataset-v3.mdx)이며 dataset tools는 episode delete/split/merge/re-encode에는 재사용할 수 있지만 up 한 camera의 semantic pixel을 바꾸지는 않는다. LeRobot image transform은 train-time augmentation이므로 동일 runtime task-view를 대신하지 못한다.
 
 LabelMe는 별도 설치한 authoring 도구일 뿐 repository runtime dependency가 아니다. v7은 Python import API를 지원하지 않으므로 curator는 LabelMe 내부 코드를 import하지 않는다. 저장된 JSON의 image digest·크기, 허용 label과 `shape_type=point|polygon`만 strict parser로 읽는다. homography와 rasterize는 OpenCV가 담당한다. AI assist는 이 고정 geometry 작성에 쓰지 않는다.
 
@@ -373,7 +389,7 @@ LabelMe는 별도 설치한 authoring 도구일 뿐 repository runtime dependenc
 | runtime RF-DETR·torchvision person model | zero-runtime fixed view와 train-only 경로가 실제 평가에서 실패하기 전에는 제외 |
 | Grounding DINO·SAM 2 | moving object segmentation 문제가 아니므로 제외 |
 | MediaPipe Hands | wrist를 처리하지 않고 physical intrusion은 safety/review 책임이므로 제외 |
-| CVAT·FiftyOne | 한 profile mask 검토에 annotation service를 먼저 운영하지 않음 |
+| CVAT·FiftyOne | [FiftyOne video clip view](https://docs.voxel51.com/user_guide/using_views.html)는 가능하지만 DB·UI 운영을 추가하므로 시간 제한 MP4와 공식 viewer로 부족하다는 실측 전에는 제외 |
 | 생성형 inpainting·Stable Diffusion | hallucination·flicker·dependency 비용 때문에 제외 |
 | ARRO code | FR5에 바로 넣을 production package를 확인하지 못해 protocol만 참고 |
 | GenAug code | RGBD·Stable Diffusion 중심이며 real-world code 정리가 TODO라 직접 채택하지 않음 |
@@ -384,58 +400,122 @@ core fixed transform은 neural model 없이 실행한다. per-frame runtime AI�
 
 ## 9. 구현 계획
 
-이 절은 product code와 책임 경계만 정의한다. 구현 완료는 테스트 통과, profile 승인 또는 성능 채택을 뜻하지 않는다. 새 workflow engine이나 plugin framework 없이 한 vertical slice로 만든다.
+이 절은 product code와 책임 경계만 정의한다. 구현 완료는 테스트 통과, candidate 승인 또는 성능 채택을 뜻하지 않는다. 새 workflow engine이나 plugin framework 없이 한 vertical slice로 만든다.
 
 ### 9.1 변경할 표면
 
+현재 평면 구조는 v1.2의 기반으로 적합하지 않다.
+
+- `verify.py`는 local-only source reader, source contract, reference export, profile/review bundle, asset load, image metric, full derived 검증과 H.264 probe를 함께 소유한다.
+- `derive.py`는 입력 경로, LeRobot writer loop, quality JSON, validator, temporary ownership·cleanup, fsync·publish, receipt/failure lifecycle을 함께 소유한다.
+- `geometry.py`는 사용자가 작성하는 request path/digest, producer profile 검증, layout/binding/LabelMe parser, homography와 mask build를 함께 소유한다.
+- `approval.py -> verify.py` 역참조 때문에 사람 결정 코드가 거대한 review/source/dataset 구현에 결합된다.
+
+따라서 파일명만 바꾸지 않고 다음 package 경계로 교체한다.
+
 ```text
 tools/data_factory/curator/
-  __init__.py
-  cli.py       # preview-profile, approve-profile, derive 명령 routing만 담당
-  geometry.py  # table polygon/layout/corner strict parsing, A/B homography와 support mask 합집합
-  up_view.py   # plate 생성과 pure pixel transform
-  approval.py  # exact TTY 사람 승인 발급·검증만 담당
-  derive.py    # LeRobot reader -> writer와 atomic publish
-  verify.py    # post-write 불변성 검사와 non-authoritative receipt
-  audit.py     # 10.2 bakeoff를 통과할 때만 후속 추가할 up-only report; v0.8에는 없음
+  __init__.py              # CuratorError·apply_up_view의 의도된 public API만 re-export
+  __main__.py              # cli.main 호출만
+  cli.py                   # argparse, stdout JSON envelope, exit code만
+
+  core/
+    __init__.py
+    errors.py              # CuratorError와 reason contract
+    jsonio.py              # strict JSON schema primitive·canonical digest
+    identity.py            # file/tree streaming identity와 재검증
+    filesystem.py          # symlink 방어, exclusive/atomic write, no-replace rename
+
+  profile/
+    __init__.py
+    schema.py              # view-profile·review-policy exact schema
+    registry.py            # canonical ID resolve와 producer registry read-only 대조
+    geometry.py            # layout/binding/LabelMe parse, homography와 keep-mask
+    transform.py           # plate 생성과 pure apply_up_view; runtime 공유 경계
+
+  dataset/
+    __init__.py
+    source.py              # local-only LeRobot reader, observable contract, frozen identity
+    materialize.py         # source -> hidden candidate writer/finalize; publish는 모름
+    quality.py             # derived pixel metric·warning·recording-quality lineage
+    verify.py              # full decode, feature/frame/task 보존, H.264·validator 검사
+    publish.py             # candidate ownership·cleanup·fsync·atomic no-replace publish
+
+  review/
+    __init__.py
+    sampling.py            # bounded deterministic clip 선택과 coverage
+    render.py              # installed FFmpeg로 raw|overlay|actual-candidate MP4 합성
+    manifest.py            # review bundle 생성·strict digest 검증
+    decision.py            # exact bundle의 foreground TTY approve/reject만
+
+  workflow/
+    __init__.py
+    state.py               # immutable run event에서 상태 투영·전이 검증
+    application.py         # prepare/decide/status의 유일한 lifecycle owner
 
 config/data_factory/curator/
-  README.md    # external LabelMe/profile/asset 계약과 운영 예시
+  README.md
+  view_profiles/
+    <profile-id>.json
+  review_policies/
+    <policy-id>.json
 ```
 
-mask·plate·LabelMe JSON·review bundle·사람 승인 artifact는 external asset root가 소유한다. 파생 영상은 `datasets/fr5_curated/`, 임시 decode와 run evidence는 ignored `outputs/curator/`에만 쓴다.
+이 깊이는 책임에서 나온다. `core`는 domain을 모르고, `profile`은 source 변환 규칙만, `dataset`은 표준 LeRobot candidate만, `review`는 사람이 볼 evidence와 결정만, `workflow`는 순서와 lifecycle만 소유한다. 각 package 안에서 다시 `interfaces/`, `adapters/`, `services/`, `factories/`를 만들지 않는다. 구현체가 하나인 protocol, dependency injection container, plugin system도 만들지 않는다.
+
+의존 방향은 다음 한 방향만 허용한다.
+
+```text
+core <- profile <- dataset <- review <- workflow <- cli
+```
+
+- lower package는 오른쪽 package나 CLI를 import하지 않는다.
+- `dataset.publish`는 사람 승인 의미를 모른다. workflow가 decision을 재검증한 뒤 publish를 호출한다.
+- `review.decision`은 dataset 전체 verifier를 import하지 않고 exact review manifest와 candidate identity만 확인한다.
+- `profile.transform`은 file·CLI·LeRobot·approval을 모르는 NumPy pure function으로 유지해 향후 rollout이 curator workflow 없이 가져다 쓸 수 있게 한다.
+- `workflow.application`만 run directory와 상태 전이를 쓰며, CLI command마다 lifecycle owner를 새로 만들지 않는다.
+
+mask·plate·LabelMe JSON 같은 현장 자산은 external asset root가 소유한다. canonical config는 ID와 digest만 추적한다. review bundle·decision·run evidence는 ignored `outputs/curator/`, hidden candidate와 파생 영상은 `datasets/fr5_curated/`에만 쓴다.
 
 ### 9.2 구현할 동작
 
-1. finalized source의 up reference frame을 PNG로 내보내고 source frame digest를 기록한다.
-2. external LabelMe에서 사람이 `TABLE_WORK_SURFACE`, A/B page corner 여덟 점, `visual_motion_support`와 필요한 grounding context polygon을 작성한다.
-3. curator는 exact reference, tracked layout JSON과 annotation을 strict하게 읽는다. table polygon을 주 작업영역으로 사용하고 A/B별 homography로 현재 또는 향후 mm polygon을 semantic subregion으로 투영한 뒤 support 합집합, margin과 실제 background plate를 만든다.
-4. `preview-profile`이 raw, table polygon, 평면별 A/B projected subregion, motion support, color overlay, policy preview, 경계 확대본과 하나의 digest manifest를 만든다. 이 명령은 dataset을 만들거나 승인하지 않는다.
-5. `approve-profile`은 같은 bundle과 digest를 화면에 표시하고 controlling `/dev/tty`의 exact 사람 입력 뒤 approval을 exclusive-create한다.
-6. `derive`는 canonical producer registry의 `VERIFIED` binding, approval과 현재 profile/review digest 일치를 확인한다. mask·plate는 `O_NOFOLLOW`로 한 번 읽은 exact byte의 승인 hash를 검사해 memory에 고정하고 publish 직전 현재 approval/bundle을 다시 확인한다.
-7. source는 30 Hz finalized local dataset이어야 한다. LeRobot metadata와 frame/video reader의 Hub fallback을 모두 차단하고 metadata가 지정한 data/video path가 상대경로이며 source root 안에만 머무는지 확인해, 누락·탈출 경로가 있으면 download/materialize하거나 외부 로컬 파일을 읽지 않고 fail closed한다. 그 뒤 up만 `apply_up_view()`로 바꾸고 wrist·state·action·task·episode 순서를 전달한다. reader가 만든 timestamp/index 필드는 writer 입력에서 제외해 LeRobot이 다시 만들게 하며 episode마다 하나의 exact task 문자열만 허용한다. publish 전에는 source payload 전체를 다시 해시해 size·mtime을 보존한 내용 변경도 거부한다.
-8. writer는 H.264 encoder를 명시적으로 고정하고, run-owned temporary root에서 finalize와 post-write 검사를 끝낸 뒤 모든 finalized file과 nested directory를 fsync한 후에만 `RENAME_NOREPLACE`로 no-clobber publish한다. 그 다음 output parent도 fsync해야 `COMMITTED_DURABLE`을 기록한다. 실패 시 writer 종료가 cleanup보다 먼저다. rename이 일어난 뒤 parent fsync나 receipt 기록이 실패하면 완성 output을 미발행처럼 삭제하지 않고 `COMMITTED_PARENT_FSYNC_FAILED`, `COMMITTED_RECEIPT_FAILED` 또는 `COMMITTED_RECEIPT_DURABILITY_UNCONFIRMED` recovery evidence로 정확히 남긴다. rename 자체가 publish race를 해결하므로 crash-stale 별도 lock은 두지 않는다.
-9. source의 per-frame timing provenance는 frame 순서와 함께 비권한 lineage로 보존한다. derived up/wrist의 pixel metric과 `image_quality_warnings`는 함께 재계산해 raw 경고와 모순되지 않게 한다. 기존 validator에도 `--expected-fps 30`을 전달하고, 계약을 충족하지 못하면 publish 전에 fail closed한다. receipt는 결과를 설명하며 training 권한을 만들지 않는다.
+1. setup owner가 external LabelMe에서 `TABLE_WORK_SURFACE`, A/B page corner 여덟 점, `visual_motion_support`와 필요한 grounding context polygon을 작성한다. registry는 이 현장 asset과 producer-owned `VERIFIED` binding을 ID/digest로 결속한다. 이는 routine 사람 gate가 아니다.
+2. `prepare --source`가 source를 local-only로 열고 exact identity를 `request.json`에 exclusive-create한다. profile/policy는 canonical ID에서 자동 resolve한다. matching profile이 없거나 둘 이상이거나 그 profile의 producer binding 자체가 `VERIFIED`가 아니면 fail closed한다. profile은 유일하지만 source-to-placement lineage만 불완전한 현재 과도기에는 이를 `PLACEMENT_LINEAGE_UNPROVEN`으로 명시하고 actual candidate review를 생략하지 않는다.
+3. source metadata의 data/video path containment와 30 Hz·up+wrist·7D 계약을 확인하고, up에만 `apply_up_view()`를 적용해 final output과 같은 filesystem의 hidden candidate에 full LeRobot v3를 materialize/finalize한다. wrist·state·action·task·episode 순서를 보존하고 Hub fallback을 차단한다.
+4. candidate 전체를 decode해 feature/frame/task mapping, up inside/outside pixel, wrist no-op codec baseline, H.264, derived quality와 기존 validator를 확인한다. initial source identity도 다시 streaming hash해 수집 중 변경을 거부한다. 통과한 exact evidence만 `candidate_ready.json`에 쓴다.
+5. deterministic sampler가 실제 episode/task/action/state/image signal에서 bounded clip key를 고르고, renderer가 source raw, geometry overlay와 **candidate의 실제 decoded up**을 한 H.264 `review.mp4`로 만든다. manifest와 모든 digest를 `review_ready.json`에 결속한 뒤 process는 종료한다.
+6. 사람은 영상 하나만 확인한다. `decide --run`은 `/dev/tty`에서 `APPROVE` 또는 `REJECT`를 받고 exact decision을 exclusive-create한다. 긴 digest, path나 encoder option을 요구하지 않는다.
+7. approve이면 application이 source/profile/candidate/review/decision identity를 모두 다시 확인하고 full tree fsync 뒤 `RENAME_NOREPLACE`로 publish한다. output parent fsync 뒤에만 `COMMITTED_DURABLE` receipt를 쓴다. reject이면 writer가 이미 닫힌 run-owned candidate만 fd/identity-safe cleanup하고 final output은 만들지 않는다.
+8. 정상 예외와 `KeyboardInterrupt`는 writer 종료 뒤 ownership이 입증된 부산물만 정리하고 failure event를 남긴다. abrupt crash의 incomplete run은 `status --run`이 읽기만 하며, 명시적 `prepare --run <run-id>`만 exact event/digest에서 재개하거나 안전 cleanup 후 새 run을 안내한다. daemon·lock server·background worker는 만들지 않는다.
+9. source timing provenance와 derived quality는 비권한 lineage로 receipt에 보존한다. receipt는 결과를 설명하며 training 권한을 만들지 않는다.
 
-세 core 동작은 같은 module entrypoint의 subcommand다.
+공개 command는 같은 module entrypoint의 subcommand다.
 
 ```bash
-direnv exec . python3 -m tools.data_factory.curator preview-profile \
-  --source datasets/fr5_episodes/<source> \
-  --profile <external-profile.json>
+direnv exec . python3 -m tools.data_factory.curator prepare \
+  --source datasets/fr5_episodes/<source>
 
-direnv exec . python3 -m tools.data_factory.curator approve-profile \
-  --profile <external-profile.json> \
-  --approved-by <human-id>
+direnv exec . python3 -m tools.data_factory.curator status \
+  --run <run-id>
 
-direnv exec . python3 -m tools.data_factory.curator derive \
-  --source datasets/fr5_episodes/<source> \
-  --output datasets/fr5_curated/<derived> \
-  --profile <external-profile.json> \
-  --approval <external-approval.json>
+direnv exec . python3 -m tools.data_factory.curator decide \
+  --run <run-id>
 ```
 
-RF-DETR-Seg-N이 10.2의 local bakeoff를 통과했을 때만 같은 entrypoint에 optional `audit-people`를 연다. 이 명령은 person mask 면적·위치의 frame timeline과 균등 표본만 `outputs/curator/`에 쓰며 dataset, profile, approval 또는 keep-mask를 변경하지 않는다.
+v1.1의 `preview-profile`, `approve-profile`, `derive` public flow와 flat module은 production 사용 전이므로 migration layer 없이 제거한다. 기존 함수는 다음처럼 이동하고 모든 repository caller/test를 같은 변경에서 갱신한다.
+
+| 기존 | 새 소유자 |
+|---|---|
+| `contracts.py` | `core/errors.py`, `jsonio.py`, `identity.py`, `filesystem.py` |
+| `geometry.py` | `profile/schema.py`, `registry.py`, `geometry.py` |
+| `up_view.py` | pure 기능은 `profile/transform.py`, review drawing은 `review/render.py` |
+| `verify.py` | `dataset/source.py`, `quality.py`, `verify.py`, `review/manifest.py` |
+| `derive.py` | `dataset/materialize.py`, `publish.py`, `workflow/application.py` |
+| `approval.py` | `review/decision.py` |
+
+old import forwarding file은 남기지 않는다. 단, rollout과 training/runtime parity가 사용할 의도된 API인 `from tools.data_factory.curator import apply_up_view`는 root `__init__.py`의 명시적 re-export 하나로 안정화한다. `python -m tools.data_factory.curator` entrypoint도 보존한다. 아직 production approval·derived output이 없으므로 old approval schema와 run artifact migration은 만들지 않고, 남은 개발 artifact는 non-authoritative history로만 취급한다.
+
+RF-DETR-Seg-N이 10.2의 local bakeoff를 통과했을 때만 별도 `audit/` package 추가를 검토한다. 통과 전에는 빈 package나 optional dependency hook을 만들지 않는다. 도입하더라도 person score는 review sampling 입력일 뿐 dataset, profile, decision 또는 keep-mask를 변경하지 않는다.
 
 ### 9.3 건드리지 않을 표면
 
@@ -449,9 +529,9 @@ RF-DETR-Seg-N이 10.2의 local bakeoff를 통과했을 때만 같은 entrypoint�
 | rollout | learned-policy runtime이나 safety stream 구현; `apply_up_view()`의 pure 함수 계약만 향후 consumer에 제공 |
 | dependency | local LeRobot/venv patch, LabelMe 내부 Python API import, runtime detector·SAM·생성형 model 추가 |
 
-기존 script는 옮기지 않는다. direct raw training path도 그대로 둔다. curator가 발급할 수 있는 유일한 사람 artifact는 task-view profile approval이며 training·motion·scene authority는 항상 `false`다.
+기존 script는 옮기지 않는다. direct raw training path도 그대로 둔다. curator가 발급할 수 있는 유일한 사람 artifact는 exact candidate decision이며 training·motion·scene authority는 항상 `false`다.
 
-active recorder가 source를 쓰는 동안에는 해당 source에 full decode·`derive`를 실행하지 않는다. 사용자가 특정 시점 snapshot 감사를 지시하면 non-mutating metadata/stat/validator/official reader 검사만 할 수 있으며, publish 작업은 하지 않는다. 구현·synthetic test는 별도 child worktree와 `tempfile` root에서 수행한다. 실제 `derive`는 source가 고정된 뒤 initial/final identity가 같을 때만 publish한다. 현재 producer가 curator용 immutable finalize/lease artifact를 발급하지 않으므로 “검사 직후 recorder가 다시 append하는 경우”까지 curator 단독으로 봉쇄하지는 못한다. recorder 종료·다른 dataset으로 전환을 운영 전제로 두며, 이를 보완하려고 curator가 producer lifecycle owner가 되지는 않는다.
+active recorder가 source를 쓰는 동안에는 해당 source에 full decode·candidate materialization을 실행하지 않는다. 사용자가 특정 시점 snapshot 감사를 지시하면 non-mutating metadata/stat/validator/official reader 검사만 할 수 있으며, publish 작업은 하지 않는다. 구현·synthetic test는 별도 child worktree와 `tempfile` root에서 수행한다. 실제 prepare는 source가 고정된 뒤 initial/final identity가 같을 때만 `REVIEW_READY`가 되고, decide 시 다시 일치를 확인한 뒤 publish한다. 현재 producer가 curator용 immutable finalize/lease artifact를 발급하지 않으므로 “검사 직후 recorder가 다시 append하는 경우”까지 curator 단독으로 봉쇄하지는 못한다. recorder 종료·다른 dataset으로 전환을 운영 전제로 두며, 이를 보완하려고 curator가 producer lifecycle owner가 되지는 않는다.
 
 ### 9.4 현재 구현 증거
 
@@ -485,43 +565,71 @@ v0.9 최적화는 `11a9956`에 보존했고, profile frame bound, 기존 median�
 
 ## 10. 테스트·평가 계획
 
-이 절은 구현과 독립된 증거 계획이다. 자동 테스트 PASS와 AI 검토는 profile 또는 dataset을 승인하지 않는다. production semantic 결정은 10.4의 사람 profile 승인과 기존 training approval만 담당한다.
+이 절은 구현과 독립된 증거 계획이다. 자동 테스트 PASS와 AI 검토는 candidate 또는 dataset을 승인하지 않는다. production semantic 결정은 10.4의 사람 candidate 결정과 기존 training approval만 담당한다.
 
 ### 10.1 자동 component test
 
 ```text
 tests/data_factory/curator/
-  test_geometry.py  # table polygon, layout/corner homography와 support 합집합
-  test_up_view.py   # mask/plate와 pixel transform
-  test_approval.py  # single human gate의 fail-closed 계약
-  test_derive.py    # LeRobot 보존·atomic publish·source read-only
-  test_audit.py     # 10.2 통과 뒤 audit.py와 함께 추가할 조건부 계약; v0.8에는 없음
+  test_architecture.py       # package import 방향·old flat module 부재
+  test_cli.py                # JSON envelope와 세 public command
+  core/
+    test_jsonio.py
+    test_identity.py
+    test_filesystem.py
+  profile/
+    test_schema.py
+    test_registry.py
+    test_geometry.py
+    test_transform.py
+  dataset/
+    test_source.py
+    test_materialize.py
+    test_quality.py
+    test_verify.py
+    test_publish.py
+  review/
+    test_sampling.py
+    test_render.py
+    test_manifest.py
+    test_decision.py
+  workflow/
+    test_state.py
+    test_application.py
+  integration/
+    test_candidate_flow.py   # tiny real H.264 prepare -> decide -> publish/reject
 ```
 
 | ID | 확인할 것 | 실패 기대값 |
 |---|---|---|
+| `ARCH-01` | `core <- profile <- dataset <- review <- workflow <- cli` import 방향과 application 단일 owner | forbidden import·old flat module 0 |
 | `GEO-01` | synthetic perspective에서 table polygon은 전체 상판 keep 영역이고 A/B별 page-mm 직사각형은 기대 image semantic subregion으로 투영됨 | profile 생성 0 |
 | `GEO-02` | 같은 page correspondence에서 future convex polygon·크기 변경을 코드 수정 없이 투영함 | hard-coded RED/BLUE geometry 0 |
-| `GEO-03` | 잘못되거나 퇴화한 table polygon, 뒤집힌 corner order, 퇴화 사각형, page 밖 A/B polygon과 `PREPARED_NOT_VERIFIED` production 승인 | approval 생성 0 |
+| `GEO-03` | 잘못되거나 퇴화한 table polygon, 뒤집힌 corner order, 퇴화 사각형, page 밖 A/B polygon과 `PREPARED_NOT_VERIFIED` binding | candidate 생성 0 |
 | `UP-01` | mask 안은 raw, 밖은 plate이고 wrist 입력은 transform API에 들어가지 않음 | pixel mismatch 거부 |
-| `UP-02` | wrong camera key·크기, 잘못된 point/polygon label, NaN, 범위 밖 좌표, reference digest mismatch | preview/derive write 0 |
-| `APP-01` | production approval은 exact `/dev/tty` 사람 입력과 exclusive create만 허용 | stdin·JSONL·AI·기본 yes·overwrite 거부 |
-| `APP-02` | camera/layout/A4 binding/page corner/motion support/mask/plate/review 중 한 digest라도 바뀜 | 기존 approval 재사용 거부 |
-| `DER-01` | episode/frame/task/state/action/timestamp 순서 보존 | partial publish 0 |
-| `DER-02` | up만 semantic transform하고 wrist는 no-op encode control 범위 | receipt PASS 발급 0 |
+| `UP-02` | wrong camera key·크기, 잘못된 point/polygon label, NaN, 범위 밖 좌표, reference digest mismatch | candidate write 0 |
+| `DATA-01` | episode/frame/task/state/action/timestamp 순서 보존 | `CANDIDATE_READY` 0, publish 0 |
+| `DATA-02` | up만 semantic transform하고 wrist는 no-op encode control 범위 | `CANDIDATE_READY` 발급 0 |
+| `REV-01` | task/episode/quantile/action/state/image risk strata, seed와 budget이 같은 sample을 재현 | 초과 clip·누락 coverage 거부 |
+| `REV-02` | policy panel이 preview-only encode가 아니라 exact candidate MP4 decode frame임 | `REVIEW_READY` 0 |
+| `REV-03` | raw·overlay·policy frame key, label, manifest와 review video digest 결속 | decision 생성 0 |
+| `DEC-01` | production approve/reject는 foreground `/dev/tty` 선택과 exclusive create만 허용 | stdin·JSONL·AI·기본 yes·overwrite 거부 |
+| `DEC-02` | source/candidate/profile/review 중 한 byte나 digest라도 바뀜 | publish 0, 기존 decision 재사용 거부 |
+| `FLOW-01` | machine PASS만으로는 final output이 없고 `REVIEW_READY`에서 process 종료·재개 가능 | 사람 decision 전 publish 0 |
+| `FLOW-02` | APPROVE는 exact candidate만 atomic publish하고 REJECT는 final output 없이 owned heavy candidate 정리 | overwrite·타 candidate publish 0 |
+| `FLOW-03` | immutable event의 누락·중복·불법 순서와 interrupted preparation | 상태 승격 0, 모호한 자동 cleanup 0 |
 | `IO-01` | source/output 중첩, symlink, existing target·publish race와 decode/write fault | source 변화 0, 완성 path 0, overwrite 0 |
 | `IO-02` | local metadata/data/video 누락·absolute path·`..` traversal 시 LeRobot Hub fallback과 source-root escape 차단 | source byte·mtime 변화 0, network·외부 local file read 0 |
 | `IO-03` | add/save/finalize fault와 temporary/marker path substitution | writer 종료 후 fd-anchored cleanup, shutdown·cleanup outcome 기록 |
 | `IO-04` | pre-publish tree fsync, rename 뒤 parent fsync 또는 receipt write fault | fsync 전 publish 0; committed output 보존과 recovery reason 명시 |
 | `IO-05` | source file을 같은 size로 바꾸고 mtime을 복원 | final payload digest 불일치로 publish 0 |
 | `AUTH-01` | source training approval·quarantine와 test fixture authority | derived로 상속 0 |
-| `AUTH-02` | 임의 외부 `VERIFIED` binding과 synthetic approval | production derive·approval 0 |
+| `AUTH-02` | 임의 외부 `VERIFIED` binding과 synthetic decision | production candidate·publish 0 |
 | `CLI-01` | missing path와 예상 밖 runtime error | traceback 없는 JSON reason과 고정 nonzero exit |
 | `QUAL-01` | 30 Hz 고정, derived pixel metric·warning 일관성 | 다른 fps·stale raw warning publish 0 |
 | `PERF-01` | plate frame bound·기존 median 동등성, bounded writer/encoder concurrency와 stage timing receipt | 무제한 plate stack 0; 검증 생략 0 |
-| `AUD-01` | optional audit가 up만 읽고 report·sample 외에는 쓰지 않음 | dataset/profile/approval 변화 0 |
 
-unit fixture는 `tempfile` 아래 synthetic LeRobot dataset만 사용한다. TTY 확인은 test double로 호출 여부와 exact phrase를 검사하되 production approval을 만들지 않는다.
+unit fixture는 `tempfile` 아래 synthetic LeRobot dataset만 사용한다. TTY 확인은 test double로 호출 여부와 선택 parsing을 검사하되 production decision을 만들지 않는다. integration fixture는 최소 두 episode의 실제 H.264를 encode/decode해 review policy panel이 candidate payload와 같은지 확인한다. architecture test는 Python stdlib `ast`로 import를 검사하며 별도 linter dependency를 추가하지 않는다.
 
 ```bash
 direnv exec . python3 -m unittest discover -s tests/data_factory/curator
@@ -542,11 +650,11 @@ RF-DETR weight는 repository 밖 격리된 환경에만 내려받는다. 먼저 
 - RF-DETR-Seg-N이 부족할 때만 S/M을 같은 sample·threshold에서 비교한다.
 - 결과가 유용하지 않으면 model adapter를 core에 넣지 않고 균등 frame sampling report만 유지한다.
 
-이 결과는 audit 도구 선택 근거일 뿐 profile 승인, episode 삭제 또는 runtime 채택 근거가 아니다.
+이 결과는 audit 도구 선택 근거일 뿐 candidate 승인, episode 삭제 또는 runtime 채택 근거가 아니다.
 
 ### 10.3 dataset integration test
 
-사람이 승인한 profile과 exact camera/layout binding으로 수집된 source를 read-only 입력 삼아 별도 temporary derived root를 만든다. 성공/실패 의미는 writer 연결 검사에 사용하지 않는다. `fr5260902`는 official reader와 reference export까지만 통과했으며, 현재 r002 binding이 `PREPARED_NOT_VERIFIED`이므로 승인·full derive integration PASS 근거로 승격하지 않는다.
+exact camera/layout binding으로 수집된 source를 read-only 입력 삼아 run-owned hidden candidate를 만든다. 성공/실패 의미는 writer 연결 검사에 사용하지 않는다. `fr5260902`는 official reader와 reference export까지만 통과했으며, 현재 r002 binding이 `PREPARED_NOT_VERIFIED`이므로 production candidate·publish integration PASS 근거로 승격하지 않는다.
 
 - source digest·mtime 변화 0
 - source/derived episode·frame 수, task와 순서 동일
@@ -557,13 +665,15 @@ RF-DETR weight는 repository 밖 격리된 환경에만 내려받는다. 먼저 
 - video codec이 명시한 H.264이고 LeRobot default codec 변화에 의존하지 않음
 - source timing provenance는 frame 순서를 유지하고, derived up의 pixel 품질 지표는 raw 지표와 구분됨
 - source approval·quarantine metadata 자동 상속 없음
-- 같은 source/profile은 같은 profile·decision digest 생성
+- 같은 source/profile/policy/seed는 같은 sample manifest와 candidate content identity 생성
+- `REVIEW_READY`까지 final output 없음; candidate H.264와 review policy panel frame 대응
+- approve/reject decision은 exact candidate/review에 결속되고 process 재시작 뒤에도 같은 run에서 검증
 - 실패 시 partial output이 완성 dataset 이름으로 publish되지 않음
 - existing `validate_dataset.sh`가 파생 root를 구조적으로 읽음
 
 ### 10.4 유일한 curator 사람 gate
 
-사람 profile owner는 새 camera/task-geometry profile마다 5.4의 동일한 full-resolution review bundle을 직접 본다. episode별 review나 AI 선판정은 요구하지 않는다.
+사람 candidate owner는 각 `REVIEW_READY` run마다 5.4의 시간 제한 review 영상 하나를 직접 본다. 모든 episode를 수동 순회하거나 AI 선판정을 통과할 필요는 없다. 표본 coverage는 프로그램 책임이고 사람은 제시된 최종 결과가 받아들일 수 있는지만 결정한다.
 
 - 보이는 테이블 상판 전체와 red/blue A/B grounding cue가 keep 영역 안에 있다.
 - 표시된 A/B page corner와 투영 사각형이 실제 인쇄 경계·색 영역에 맞는다.
@@ -573,7 +683,7 @@ RF-DETR weight는 repository 밖 격리된 환경에만 내려받는다. 먼저 
 - motion support 안에 남을 수 있는 먼 사람 팔·하체 영역이 overlay에서 명확히 드러난다.
 - plate에 사람 ghost·robot 잔상·심한 seam이나 새 task cue가 없다.
 
-하나라도 불명확하면 승인 artifact를 만들지 않고 polygon 또는 plate를 수정한다. 수정하면 새 digest와 새 bundle을 다시 본다. 제가 이미지를 함께 검토할 수 있지만 최종 승인과 artifact 발급은 사람만 한다.
+하나라도 불명확하면 `REJECT`한다. 필요하면 setup owner가 polygon 또는 plate를 수정하고 새 profile·새 candidate run을 만든다. 제가 영상을 함께 검토할 수 있지만 최종 candidate 결정과 artifact 발급은 사람만 한다.
 
 ### 10.5 학습 smoke와 두-arm 성능 평가
 
@@ -604,7 +714,7 @@ live rollout이 아직 없으므로 구현 직후 가능한 주장은 “표준 
 
 ### 10.6 부산물 정리
 
-각 test·smoke는 자신이 만든 exact run directory와 ownership marker·temporary directory의 device/inode를 기록한다. writer/encoder를 먼저 종료한 뒤 identity가 모두 그대로인 decoded cache, failed temporary dataset과 disposable smoke checkpoint만 그 경계 안에서 삭제한다. source dataset, 외부 profile·approval, 최종 review bundle, published derived root와 receipt는 자동 삭제하지 않는다. identity mismatch나 publish commit 이후 오류는 삭제하지 않고 recovery evidence와 남긴 artifact를 run summary에 기록한다.
+각 test·smoke는 자신이 만든 exact run directory와 ownership marker·candidate directory의 device/inode를 기록한다. writer/encoder를 먼저 종료한 뒤 identity가 모두 그대로인 decoded cache, failed/rejected hidden candidate와 disposable smoke checkpoint만 그 경계 안에서 삭제한다. source dataset, 외부 profile asset, review·decision evidence, published derived root와 receipt는 자동 삭제하지 않는다. 작은 review evidence는 명시된 retention policy 뒤 별도 housekeeping 대상이며, identity mismatch나 publish commit 이후 오류는 삭제하지 않고 recovery evidence와 남긴 artifact를 run summary에 기록한다.
 
 ## 11. 확장 조건
 
@@ -613,8 +723,8 @@ live rollout이 아직 없으므로 구현 직후 가능한 주장은 “표준 
 | 관찰 | 다음 조치 |
 |---|---|
 | clean 성능 저하 원인이 잘린 cue임 | keep-mask를 넓히고 B를 한 번 재평가 |
-| 같은 A4 위치에서 layout polygon만 바뀜 | tracked JSON을 같은 homography로 재투영하고 새 bundle을 사람이 승인 |
-| camera 또는 A/B sheet가 움직임 | page corner correspondence부터 새 profile로 만들고 기존 승인 거부 |
+| 같은 A4 위치에서 layout polygon만 바뀜 | tracked JSON을 같은 homography로 재투영하고 새 profile/candidate review를 사람이 결정 |
+| camera 또는 A/B sheet가 움직임 | page corner correspondence부터 새 profile로 만들고 이전 candidate decision 재사용 거부 |
 | motion support 안 잔여 사람이 특정 phase에 치우침 | split-aware train-only real-clip counterfactual augmentation 후보 활성화 |
 | 잔여 사람이 cue를 가리지 않아도 B 성능을 흔듦 | clean/person time-shift variant C를 만들고 A/B/C 통제 비교 |
 | 사람이 task cue를 실제로 가림 | safety/camera placement/observation availability 문제로 처리; inpainting으로 성공 label을 복구하지 않음 |
@@ -635,7 +745,7 @@ counterfactual을 추가할 때는 같은 up-camera의 실제 연속 person clip
 - [place-a-red-place-b-blue-r002.json](../config/data_factory/region_bindings/place-a-red-place-b-blue-r002.json): `PREPARED_NOT_VERIFIED`
 - [A4 cross-workspace 계획](a4-cross-workspace-pick-place.md): `PHYSICAL_19_OF_20 / WAITING_FOR_ILLUMINATION`
 
-PDF에는 colored border와 text가 있지만 machine-readable fiducial은 없다. layout 파일은 clean/tracked지만 physical binding은 아직 production 승인 근거가 아니다. curator는 producer 파일을 바꾸지 않고, external profile의 A/B page-corner image correspondence로 각 local polygon을 투영한다. exact binding이 `VERIFIED`된 뒤에만 task-view production approval을 발급한다.
+PDF에는 colored border와 text가 있지만 machine-readable fiducial은 없다. layout 파일은 clean/tracked지만 physical binding은 아직 production candidate 근거가 아니다. curator는 producer 파일을 바꾸지 않고, external profile의 A/B page-corner image correspondence로 각 local polygon을 투영한다. exact binding이 `VERIFIED`된 뒤에만 publish 가능한 candidate를 만든다.
 
 ### 12.2 조사한 표본 dataset
 
@@ -649,6 +759,10 @@ PDF에는 colored border와 text가 있지만 machine-readable fiducial은 없�
 
 - [LeRobotDataset v3와 image transforms](https://huggingface.co/docs/lerobot/lerobot-dataset-v3)
 - [LeRobot dataset edit tools](https://huggingface.co/docs/lerobot/using_dataset_tools)
+- [LeRobotDataset 공식 source](https://github.com/huggingface/lerobot/blob/main/src/lerobot/datasets/lerobot_dataset.py)
+- [FFmpeg video filters](https://ffmpeg.org/ffmpeg-filters.html), [concat demuxer](https://ffmpeg.org/ffmpeg-formats.html)
+- [Python argparse subcommands](https://docs.python.org/3/library/argparse.html)
+- [FiftyOne video clip views](https://docs.voxel51.com/user_guide/using_views.html)
 - [SmolVLA 공식 안내](https://huggingface.co/docs/lerobot/smolvla)
 - [SmolVLA paper](https://arxiv.org/abs/2506.01844)
 - [OpenCV planar homography 공식 설명](https://docs.opencv.org/5.0/tutorials/features/homography/homography.html)
@@ -751,11 +865,13 @@ PDF에는 colored border와 text가 있지만 machine-readable fiducial은 없�
 - `KeyboardInterrupt`에도 writer 종료·owned temporary cleanup·failure evidence를 수행한 뒤 원래 중단을 다시 올리며, source/output repo ID 충돌을 사전 거부한다.
 - current focused 38/38과 commit `adb9770` clean isolated 전체 617/617은 PASS했다. 동시에 진행 중인 dirty main 실행은 별도 중간 상태였으므로 이 clean 판정에 섞지 않았다.
 
-### v1.2 UX 목표
+### v1.2 architecture replacement
 
-- 사람에게 request JSON·path·digest·frame index·encoder 설정을 반복 입력시키는 v1.1 CLI를 최종 routine UX로 채택하지 않기로 했다.
-- producer registry, curator view profile, workspace defaults와 generated run manifest를 책임별 SSOT로 두고 routine 명령은 source만 받도록 설계했다.
-- 정지 PNG 탐색 대신 raw·overlay·policy clip을 exact transform·H.264 조건으로 합친 시간 제한 review 영상 하나를 제공한다.
-- 표본은 단순 랜덤이 아니라 task·episode·phase·motion·mask boundary·화질 극값을 결정론적으로 층화하고 coverage를 manifest에 남긴다.
-- 사람은 제시된 최종형 표본에 승인/반려 한 번만 수행하고, 프로그램이 그 exact review digest를 결속한다. full derive 뒤 같은 판단을 다시 요구하지 않는다.
-- 같은 verified binding·collection profile과 compatible view에는 승인된 profile을 재사용하되, camera/view drift가 불명확하면 자동 publish하지 않고 새 review 하나만 요구한다.
+- 사람에게 request JSON·path·digest·frame index·encoder 설정을 반복 입력시키는 v1.1 CLI와 flat internal architecture를 production 구조로 채택하지 않기로 했다.
+- 내부를 `core/profile/dataset/review/workflow` package로 나누고 단방향 import와 application 단일 lifecycle owner를 강제한다. old flat module과 old command는 forwarding wrapper 없이 제거한다.
+- profile preview를 먼저 승인하는 순서를 폐기하고, full hidden candidate를 finalize·기계 검증한 뒤 실제 candidate H.264에서 raw·overlay·policy 시간 제한 review를 만든다.
+- producer registry, curator view profile, review policy와 immutable generated run event를 책임별 SSOT로 두며, routine prepare는 source만 받는다. 필요가 입증되기 전 workspace defaults나 registry index는 만들지 않는다.
+- 표본은 task·episode·relative time·action/state transition·visual/mask-boundary motion·화질 극값을 결정론적으로 층화하고 coverage와 선택 이유를 manifest에 남긴다.
+- 사람은 exact candidate에 승인/반려 한 번만 수행하고 프로그램이 source/candidate/profile/review digest chain을 결속한다. APPROVE 전에는 final dataset 이름이 존재하지 않는다.
+- 장시간 prepare와 사람 검토를 immutable `REVIEW_READY` event로 분리해 process를 껐다 켜도 decision을 이어가며, DB·daemon·web UI는 만들지 않는다.
+- 설치된 FFmpeg로 review를 합성하고 official LeRobot/Rerun viewer는 선택형 deep-dive로만 사용한다. FiftyOne·새 GUI·person model은 실측 필요가 생기기 전 core에 넣지 않는다.
