@@ -40,6 +40,8 @@ from sensor_msgs.msg import Image, JointState
 from ros_image import image_message_to_rgb
 from time_alignment import interpolate_vector, latest_sample, nearest_sample
 
+JOINT_STATE_QOS_DEPTH = 20
+
 class FR5LeRobotRecorder(Node):
     IDLE = "IDLE"
     RECORDING = "RECORDING"
@@ -107,7 +109,14 @@ class FR5LeRobotRecorder(Node):
         self._storage_monitor: dict | None = None
         self.ready_logged = False
 
-        self.create_subscription(JointState, args.joint_states, self._on_joint_state, qos_profile_sensor_data)
+        joint_state_qos = QoSProfile(
+            depth=JOINT_STATE_QOS_DEPTH,
+            reliability=ReliabilityPolicy.BEST_EFFORT,
+            durability=DurabilityPolicy.VOLATILE,
+        )
+        self.create_subscription(
+            JointState, args.joint_states, self._on_joint_state, joint_state_qos,
+        )
         configured_topics = {"up": args.up_image, "side": args.side_image, "wrist": args.wrist_image}
         image_topics = [configured_topics[name] for name in self.camera_names]
         image_qos = QoSProfile(

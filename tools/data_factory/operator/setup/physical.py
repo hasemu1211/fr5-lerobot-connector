@@ -1024,7 +1024,9 @@ def normalize_gripper_after_operator_ready(
                     "time_from_start": {"sec": 2, "nanosec": 0},
                 }],
             },
-            "goal_tolerance": [{"name": "finger_right_joint", "position": 0.000105}],
+            "goal_tolerance": [{
+                "name": "finger_right_joint", "position": 0.021 / 100 + 1e-6,
+            }],
             "goal_time_tolerance": {"sec": 5, "nanosec": 0},
         }
         output = _bounded_command([

@@ -245,6 +245,13 @@ class HandlingSsotTest(unittest.TestCase):
                 self.assertEqual(
                     grasp["gripper_open"]["release_hold_s"], 0.5,
                 )
+                feedback_tick_m = (
+                    grasp["gripper_open"]["command_position_m"] / 100
+                )
+                self.assertGreaterEqual(
+                    grasp["gripper_open"]["completion_tolerance_m"],
+                    feedback_tick_m,
+                )
                 open_step = next(
                     step for step in program["steps"]
                     if step["phase"] == "GRIPPER_OPEN"

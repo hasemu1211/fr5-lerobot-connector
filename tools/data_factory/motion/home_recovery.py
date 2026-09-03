@@ -157,7 +157,7 @@ def _validated_motion(value: object, prefix: str) -> dict[str, Any]:
         or not 0 < numbers[3] <= 0.1
         or any(item <= 0 for item in numbers[4:6])
         or not 0 < numbers[6]
-        or not 0 < numbers[7] <= 0.000105
+        or not 0 < numbers[7] <= numbers[6] / 100 + 1e-6
         or not 0 < numbers[8]
     ):
         raise ContractError(f"{prefix}_QUALIFICATION")

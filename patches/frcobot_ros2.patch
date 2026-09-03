@@ -721,7 +721,7 @@ index ca2d84f..d49fd0d 100644
              [](double c) { return not std::isfinite(c); })) {
              return hardware_interface::return_type::ERROR;
          }
-@@ -211,6 +604,228 @@ hardware_interface::return_type FairinoHardwareInterface::write(const rclcpp::Ti
+@@ -211,6 +604,184 @@ hardware_interface::return_type FairinoHardwareInterface::write(const rclcpp::Ti
      return hardware_interface::return_type::OK;
  }
  
@@ -744,13 +744,12 @@ index ca2d84f..d49fd0d 100644
 +void FairinoHardwareInterface::gripper_worker()
 +{
 +    using namespace std::chrono_literals;
-+    size_t idle_invalid_feedback_samples = 0;
 +    while (true) {
 +        std::optional<int> position;
 +        uint64_t command_generation = 0;
 +        {
 +            std::unique_lock<std::mutex> lock(_gripper_mutex);
-+            _gripper_cv.wait_for(lock, 50ms, [this] {
++            _gripper_cv.wait(lock, [this] {
 +                return _stop_gripper_thread || _pending_gripper_position.has_value();
 +            });
 +            if (_stop_gripper_thread) return;
@@ -840,14 +839,7 @@ index ca2d84f..d49fd0d 100644
 +                    _gripper_position_state =
 +                        _gripper_upper_position * static_cast<double>(feedback) / 100.0;
 +                }
-+                if (motion_done != 0) {
-+                    if (!feedback_is_plausible) {
-+                        _gripper_error = -2;
-+                        RCLCPP_ERROR(rclcpp::get_logger("FairinoHardwareInterface"),
-+                            "Completed gripper motion has implausible feedback target=%d previous=%u raw=%u",
-+                            *position, last_feedback, feedback);
-+                        return;
-+                    }
++                if (motion_done != 0 && feedback_is_plausible) {
 +                    resume_arm = true;
 +                    break;
 +                }
@@ -909,42 +901,6 @@ index ca2d84f..d49fd0d 100644
 +            }
 +            continue;
 +        }
-+
-+        ROBOT_STATE_PKG state{};
-+        _gripper_rpc_active = true;
-+        const int result = _ptr_robot->GetRobotRealTimeState(&state);
-+        _gripper_rpc_active = false;
-+        if (result != 0 || state.gripper_fault != 0) {
-+            _gripper_error = result != 0 ?
-+                result : -static_cast<int>(state.gripper_fault);
-+            RCLCPP_ERROR(rclcpp::get_logger("FairinoHardwareInterface"),
-+                "GetRobotRealTimeState failed in non-realtime worker, error=%d fault=%u",
-+                result, state.gripper_fault);
-+            return;
-+        }
-+        const uint8_t feedback = state.gripper_position;
-+        const double last_command = _last_gripper_command.load();
-+        const int target = static_cast<int>(std::lround(
-+            100.0 * last_command / _gripper_upper_position));
-+        const double previous = _gripper_position_state.load();
-+        if (feedback > 100 ||
-+            (last_command > 0.0 && target > 0 && feedback == 0 && previous > 0.0)) {
-+            ++idle_invalid_feedback_samples;
-+            if (idle_invalid_feedback_samples == 1) {
-+                RCLCPP_WARN(rclcpp::get_logger("FairinoHardwareInterface"),
-+                    "Holding last valid idle gripper feedback target=%d raw=%u",
-+                    target, feedback);
-+            }
-+            continue;
-+        }
-+        if (idle_invalid_feedback_samples != 0) {
-+            RCLCPP_WARN(rclcpp::get_logger("FairinoHardwareInterface"),
-+                "Idle realtime gripper feedback recovered after %zu invalid samples (target=%d feedback=%u)",
-+                idle_invalid_feedback_samples, target, feedback);
-+            idle_invalid_feedback_samples = 0;
-+        }
-+        _gripper_position_state =
-+            _gripper_upper_position * static_cast<double>(feedback) / 100.0;
 +    }
 +}
  

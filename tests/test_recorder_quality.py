@@ -33,7 +33,17 @@ class RecorderContractTest(unittest.TestCase):
     def test_robot_control_keeps_gripper_off_realtime_xmlrpc_path(self):
         root = Path(__file__).resolve().parents[1]
         source = (root / "src/frcobot_ros2/fairino_hardware_v3_9_7/src/fairino_hardware_interface.cpp").read_text()
+        recorder_source = (root / "tools/fr5_lerobot_recorder.py").read_text()
+        setup_source = (
+            root / "tools/data_factory/operator/setup/physical.py"
+        ).read_text()
         command_source = (root / "src/frcobot_ros2/fairino_hardware_v3_9_7/src/command_server.cpp").read_text()
+        self.assertIn("JOINT_STATE_QOS_DEPTH = 20", recorder_source)
+        self.assertIn("JointState, args.joint_states, self._on_joint_state, joint_state_qos", recorder_source)
+        self.assertIn(
+            '"name": "finger_right_joint", "position": 0.021 / 100 + 1e-6',
+            setup_source,
+        )
         write_body = source.split("FairinoHardwareInterface::write", 1)[1].split(
             "void FairinoHardwareInterface::gripper_worker", 1
         )[0]
@@ -95,7 +105,8 @@ class RecorderContractTest(unittest.TestCase):
         self.assertIn("GetRobotRealTimeState", worker_body)
         self.assertNotIn("GetGripperCurPosition", worker_body)
         self.assertIn("feedback <= 100", worker_body)
-        self.assertIn("feedback > 100", worker_body)
+        self.assertNotIn("GetRobotRealTimeState failed in non-realtime worker", worker_body)
+        self.assertIn("_gripper_cv.wait(lock, [this]", worker_body)
         self.assertLess(worker_body.index("MoveGripper("), worker_body.index("ServoMoveStart(1)"))
         self.assertLess(worker_body.index("ServoMoveStart(1)"), worker_body.index("_arm_stream_paused = false"))
         self.assertIn("_gripper_command_generation.load() == command_generation", worker_body)
@@ -105,6 +116,12 @@ class RecorderContractTest(unittest.TestCase):
         )
         self.assertIn("Holding last valid gripper feedback", worker_body)
         self.assertIn("Realtime gripper feedback recovered", worker_body)
+        self.assertIn(
+            "if (motion_done != 0 && feedback_is_plausible)", worker_body,
+        )
+        self.assertNotIn(
+            "Completed gripper motion has implausible feedback", worker_body,
+        )
         settle_branch = worker_body.split(
             "if (feedback_is_plausible && observed_movement &&", 1
         )[1].split("if (std::chrono::steady_clock::now() >= deadline)", 1)[0]
@@ -112,8 +129,8 @@ class RecorderContractTest(unittest.TestCase):
         self.assertIn("resume_arm = true", settle_branch)
         self.assertNotIn("_gripper_error =", settle_branch)
         pending_supersession = worker_body.split(
-            "_gripper_cv.wait_for(lock, 50ms", 2
-        )[2].split("continue;", 1)[0]
+            "_gripper_cv.wait_for(lock, 50ms", 1
+        )[1].split("continue;", 1)[0]
         self.assertIn("_pending_gripper_position.has_value()", pending_supersession)
         self.assertIn("Superseding unsettled gripper command", pending_supersession)
         self.assertLess(
