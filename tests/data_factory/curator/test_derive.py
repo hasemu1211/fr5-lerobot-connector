@@ -20,7 +20,12 @@ from tools.data_factory.curator.contracts import (
     tree_snapshot,
     write_json_atomic,
 )
-from tools.data_factory.curator.derive import _run_existing_validator, _validate_source_contract, derive_dataset
+from tools.data_factory.curator.derive import (
+    _require_spawn_parallel_encoding,
+    _run_existing_validator,
+    _validate_source_contract,
+    derive_dataset,
+)
 from tools.data_factory.curator.verify import (
     _accumulate_metrics,
     _image_metrics,
@@ -46,9 +51,49 @@ def _shape(label: str, points: list[list[float]], shape_type: str) -> dict:
     }
 
 
+class ParallelEncodingContextTest(unittest.TestCase):
+    def test_selects_spawn_before_writer_threads_and_rejects_fork(self):
+        with (
+            mock.patch(
+                "tools.data_factory.curator.derive.multiprocessing.get_start_method",
+                return_value=None,
+            ),
+            mock.patch(
+                "tools.data_factory.curator.derive.multiprocessing.set_start_method",
+            ) as set_start_method,
+        ):
+            _require_spawn_parallel_encoding()
+        set_start_method.assert_called_once_with("spawn")
+
+        with (
+            mock.patch(
+                "tools.data_factory.curator.derive.multiprocessing.get_start_method",
+                return_value="fork",
+            ),
+            self.assertRaisesRegex(CuratorError, "PARALLEL_ENCODING_REQUIRES_SPAWN"),
+        ):
+            _require_spawn_parallel_encoding()
+
+        with (
+            mock.patch(
+                "tools.data_factory.curator.derive.multiprocessing.get_start_method",
+                side_effect=[None, "fork"],
+            ),
+            mock.patch(
+                "tools.data_factory.curator.derive.multiprocessing.set_start_method",
+                side_effect=RuntimeError("context already selected"),
+            ),
+            self.assertRaisesRegex(CuratorError, "PARALLEL_ENCODING_REQUIRES_SPAWN"),
+        ):
+            _require_spawn_parallel_encoding()
+
+
 class DeriveIntegrationTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
+        # The synthetic source writer also owns threads. Mirror the production
+        # CLI invariant before constructing any LeRobot writer in this process.
+        _require_spawn_parallel_encoding()
         try:
             from lerobot.configs.video import RGBEncoderConfig
             from lerobot.datasets.lerobot_dataset import LeRobotDataset
@@ -194,6 +239,19 @@ class DeriveIntegrationTest(unittest.TestCase):
             )
 
     def _write_profile_files(self):
+        repository = Path(__file__).resolve().parents[3]
+        collection_profile = json.loads(
+            (
+                repository
+                / "config/data_factory/collection_profiles/fr5-up-wrist-rgb-30hz-v1.json"
+            ).read_text(encoding="utf-8")
+        )
+        collection_profile.update({
+            "collection_profile_id": "synthetic-up-wrist-30hz-r001",
+            "repo_id": "local/source",
+        })
+        collection_profile_path = self.assets / "collection-profile.json"
+        _write(collection_profile_path, collection_profile)
         layout = {
             "schema_version": "a4_workspace_region_layout.v1",
             "layout_id": "synthetic-red-blue-r001",
@@ -248,12 +306,13 @@ class DeriveIntegrationTest(unittest.TestCase):
         })
         self.approval_path = self.assets / "approval.json"
         request = {
-            "schema_version": "curator.up_view_profile_request.v1",
+            "schema_version": "curator.up_view_profile_request.v2",
             "profile_id": "synthetic-up-view-r001",
             "camera_key": "observation.images.up",
             "width": 640,
             "height": 480,
-            "collection_camera_profile_digest": "sha256:" + "c" * 64,
+            "collection_camera_profile": collection_profile_path.name,
+            "collection_camera_profile_digest": canonical_digest(collection_profile),
             "layout_manifest": layout_path.name,
             "layout_manifest_digest": layout["layout_digest"],
             "physical_region_binding": binding_path.name,
@@ -321,15 +380,24 @@ class DeriveIntegrationTest(unittest.TestCase):
             ],
         )
         self.assertEqual(receipt["verification"]["status"], "PASS")
+        self.assertEqual(receipt["schema_version"], "curator.derive_receipt.v2")
+        self.assertEqual(self.resolved_profile["schema_version"], "curator.up_view_profile.v2")
         self.assertEqual(len(receipt["verification"]["episode_mapping"]), 2)
         self.assertEqual(receipt["verification"]["video_codec"]["expected"], "h264")
         self.assertEqual(receipt["existing_validator"]["status"], "PASS")
         self.assertEqual(receipt["recording_quality_lineage"]["derived_pixel_metrics"], "RECOMPUTED")
         self.assertEqual(
+            receipt["collection_camera_profile_binding"]["status"],
+            "DECLARED_CONFIG_OBSERVABLE_MATCH",
+        )
+        self.assertEqual(
             {key: receipt["encoder"][key] for key in ("vcodec", "preset", "crf")},
             {"vcodec": "h264", "preset": "ultrafast", "crf": 23},
         )
         self.assertIs(receipt["encoder"]["parallel_cameras"], True)
+        self.assertEqual(receipt["encoder"]["multiprocessing_start_method"], "spawn")
+        self.assertLessEqual(receipt["encoder"]["image_writer_threads"], 8)
+        self.assertLessEqual(receipt["encoder"]["encoder_threads_per_camera"], 4)
         self.assertGreater(receipt["encoder"]["image_writer_threads"], 0)
         self.assertGreater(receipt["encoder"]["encoder_threads_per_camera"], 0)
         performance = receipt["performance_observation"]
@@ -437,6 +505,50 @@ class DeriveIntegrationTest(unittest.TestCase):
                     output_repo_id="local/quarantine-derived",
                 )
         self.assertFalse((self.root / "quarantine-derived").exists())
+
+    def test_source_and_output_repo_ids_must_be_distinct(self):
+        with self.assertRaisesRegex(CuratorError, "REPO_ID_COLLISION"):
+            derive_dataset(
+                self.source,
+                self.root / "same-repo-derived",
+                self.request_path,
+                self.approval_path,
+                run_dir=self.root / "runs" / "run-same-repo",
+                run_id="run-same-repo",
+                source_repo_id="local/source",
+                output_repo_id="local/source",
+            )
+        self.assertFalse((self.root / "runs" / "run-same-repo").exists())
+        self.assertFalse((self.root / "same-repo-derived").exists())
+
+    def test_preview_and_reference_interrupts_remove_owned_outputs(self):
+        request = json.loads(self.request_path.read_text(encoding="utf-8"))
+        request.update({
+            "review_bundle": "interrupt-review",
+            "approval_artifact": "interrupt-approval.json",
+        })
+        _write(self.request_path, request)
+        with (
+            mock.patch(
+                "tools.data_factory.curator.verify.write_rgb_png",
+                side_effect=KeyboardInterrupt,
+            ),
+            self.assertRaises(KeyboardInterrupt),
+        ):
+            create_review_bundle(self.source, self.request_path, source_repo_id="local/source")
+        self.assertFalse((self.assets / "interrupt-review").exists())
+        self.assertEqual(list(self.assets.glob(".interrupt-review.curator-*")), [])
+
+        reference = self.assets / "interrupt-reference.png"
+        with (
+            mock.patch(
+                "tools.data_factory.curator.verify.assert_tree_identity",
+                side_effect=KeyboardInterrupt,
+            ),
+            self.assertRaises(KeyboardInterrupt),
+        ):
+            export_reference(self.source, reference, 0, source_repo_id="local/source")
+        self.assertFalse(reference.exists())
 
     def test_asset_tamper_during_source_identity_never_publishes(self):
         import tools.data_factory.curator.derive as derive_module
@@ -700,6 +812,42 @@ class DeriveIntegrationTest(unittest.TestCase):
                 )
                 self.assertEqual(failure["cleanup_state"], "REMOVED")
                 self.assertEqual(failure["writer_shutdown_state"], "FINALIZED_DURING_FAILURE")
+
+    def test_keyboard_interrupt_finalizes_writer_and_cleans_owned_temporary(self):
+        before = tree_snapshot(self.source)
+        output = self.root / "interrupt-derived"
+        temporary = self.root / ".interrupt-derived.run-interrupt.curator-tmp"
+        with (
+            mock.patch(
+                "tools.data_factory.curator.derive.verify_approval",
+                return_value=(self.mocked_approval, self.resolved_profile, self.review_manifest),
+            ),
+            mock.patch.object(
+                self.LeRobotDataset,
+                "add_frame",
+                side_effect=KeyboardInterrupt,
+            ),
+            self.assertRaises(KeyboardInterrupt),
+        ):
+            derive_dataset(
+                self.source,
+                output,
+                self.request_path,
+                self.approval_path,
+                run_dir=self.root / "runs" / "run-interrupt",
+                run_id="run-interrupt",
+                source_repo_id="local/source",
+                output_repo_id="local/interrupt-derived",
+            )
+        self.assertEqual(tree_snapshot(self.source), before)
+        self.assertFalse(output.exists())
+        self.assertFalse(temporary.exists())
+        failure = json.loads(
+            (self.root / "runs" / "run-interrupt" / "failure.json").read_text()
+        )
+        self.assertEqual(failure["reason_code"], "DERIVE_INTERRUPTED")
+        self.assertEqual(failure["cleanup_state"], "REMOVED")
+        self.assertEqual(failure["writer_shutdown_state"], "FINALIZED_DURING_FAILURE")
 
     def test_cleanup_leaks_on_temporary_path_substitution(self):
         output = self.root / "substituted-derived"

@@ -1,10 +1,10 @@
 # 선택형 LeRobot Dataset Curator 구축 계획
 
-- 상태: Software-only implementation v1.0 후보 — core·review hardening·사전 최적화·`data_factory/curator` 책임 경계 정리를 main에 통합했다. H.264 round-trip을 포함한 focused test 32/32와 main 전체 test 724/724를 통과했고 `fr5260902` read-only loader/reference-export도 통과했다. 실물 profile 승인·실제 파생 dataset 발행은 아직 하지 않았다.
+- 상태: Software-only implementation v1.1 후보 — core·review hardening·사전 최적화·`data_factory/curator` 책임 경계 정리를 main worktree에 구현했다. H.264 round-trip을 포함한 현재 focused test 38/38과 `fr5260902` read-only loader/reference-export를 통과했다. 실물 profile 승인·실제 파생 dataset 발행은 아직 하지 않았다.
 - 갱신일: 2026-09-03
 - 대상: FR5 고정 up + raw wrist LeRobot v3 데이터와 향후 A↔B pick-place 데이터
 - 독자: 데이터 생산, 큐레이션, SmolVLA 학습, rollout·안전 담당자
-- 목표: up 배경의 사람·환경 변화가 action shortcut이 되지 않도록 선택형 파생 데이터셋과 동일한 runtime transform을 제공한다.
+- 목표: up keep 영역 밖의 사람·환경 변화를 고정 입력으로 만들어 background action shortcut을 줄이는 선택형 파생 데이터셋과 동일한 runtime transform을 제공한다. keep 영역 안 사람은 별도 측정 대상이며 제거 완료를 주장하지 않는다.
 - 현재 범위: optional curator의 software-only vertical slice를 구현하고 frozen source를 read-only로 검증한다. source data·모델·로봇·recorder는 변경하거나 실행하지 않는다. 실제 파생 발행은 source가 고정되고 producer-owned binding이 `VERIFIED`이며 exact preview를 본 사람이 profile을 승인한 뒤에만 수행한다. 수집은 curator와 독립적으로 계속할 수 있고, 변화 중인 source를 `derive`에 넣으면 publish 없이 fail closed해야 한다.
 
 ## 1. 확정한 기본안
@@ -44,7 +44,7 @@ wrist에는 사람 판정 AI, mask, segmentation, inpainting 또는 별도 backg
 - wrist 원본과 up의 task-support 영역이 정밀 조작 단서를 계속 제공한다.
 - 같은 profile을 dataset materialization과 inference에서 재사용할 수 있다.
 
-runtime transform은 frame당 단순 합성이지만, offline materialization은 source initial/final streaming hash, full decode·H.264 re-encode, derived full decode 검증과 pre-publish fsync 때문에 payload 크기에 선형으로 비례한다. 이는 의도적으로 collection·raw training critical path 밖에서 실행하며 RAM은 MP4 크기에 비례해 늘지 않는다. v0.9 후보는 같은 tree snapshot을 payload hash에 재사용해 중복 directory walk를 줄이고, background plate 입력을 최대 31 frame으로 제한한 뒤 float64 median 대신 in-place uint8 order statistic을 사용한다. derived 품질 통계는 color·brightness·clipping의 running sum과 sharpness 값 하나만 frame별 보관한다. 설치된 LeRobot의 권장치에 맞춰 PNG writer는 host CPU에 따라 최대 8 thread, 두 camera encode는 병렬로 하되 encoder당 최대 4 thread로 제한한다. receipt와 failure evidence는 단계별 wall time, materialization FPS와 end-to-end FPS를 비권한 관측치로 남긴다.
+runtime transform은 frame당 단순 합성이지만, offline materialization은 source initial/final streaming hash, full decode·H.264 re-encode, derived full decode 검증과 pre-publish fsync 때문에 payload 크기에 선형으로 비례한다. 이는 의도적으로 collection·raw training critical path 밖에서 실행하며 RAM은 MP4 크기에 비례해 늘지 않는다. v0.9 후보는 같은 tree snapshot을 payload hash에 재사용해 중복 directory walk를 줄이고, background plate 입력을 최대 31 frame으로 제한한 뒤 float64 median 대신 in-place uint8 order statistic을 사용한다. derived 품질 통계는 color·brightness·clipping의 running sum과 sharpness 값 하나만 frame별 보관한다. 설치된 LeRobot의 권장치에 맞춰 PNG writer는 host CPU에 따라 최대 8 thread, 두 camera encode는 병렬로 하되 encoder당 최대 4 thread로 제한한다. writer thread 생성 전 multiprocessing `spawn`을 선택하고 이미 다른 start method가 선택됐으면 fail closed해 Python 3.12의 multithreaded `fork` 교착 위험을 만들지 않는다. receipt와 failure evidence는 단계별 wall time, materialization FPS와 end-to-end FPS를 비권한 관측치로 남긴다.
 
 이 변경은 검증 단계를 생략하지 않는다. source/derived의 반복 decode·hash와 기존 validator는 아직 가장 큰 비용 후보이며 실데이터 stage timing 없이 제거하거나 합치지 않는다. 실제 처리량이 병목으로 측정될 때만 producer가 발급한 immutable shard digest ledger 같은 최적화를 검토한다. 해당 ledger는 producer 계약 변경이므로 현재 curator가 선행 구현하지 않는다.
 
@@ -199,6 +199,8 @@ background_plate_sha256
 reference_preview_sha256
 ```
 
+`collection_camera_profile_digest`는 현재 producer provenance를 뜻하지 않는다. request가 가리키는 exact `data_factory.collection_profile.v2` JSON의 canonical digest와 source에서 관측 가능한 30 Hz·640×480·up+wrist feature 계약만 대조하며, resolved profile과 receipt에는 `DECLARED_CONFIG_OBSERVABLE_MATCH`로 기록한다. 현재 source metadata에는 collection profile·device serial·placement lineage가 없고 profile도 runtime binding을 사용하므로 모든 episode가 같은 물리 배치에서 수집됐다는 증거는 아니다. 그 승격은 producer-owned immutable lineage가 생긴 뒤에만 가능하며 curator가 사후 생성하지 않는다.
+
 현재 codebase에는 exact camera pose/extrinsic 권위가 없다. 이 profile의 homography는 A4 평면 좌표를 image pixel로 옮길 뿐 3D robot pose나 safety geometry를 만들지 않는다. draft preview는 `PREPARED_NOT_VERIFIED` binding으로 만들 수 있지만 production profile approval은 exact physical binding이 `VERIFIED`일 때만 발급한다. camera placement, crop, 해상도, A/B physical binding, layout polygon, page correspondence, motion support, mask 또는 plate가 바뀌면 profile digest가 바뀌고 기존 승인은 효력을 잃는다.
 
 ### 5.4 단일 사람 profile 승인
@@ -249,7 +251,7 @@ outputs/curator/runs/<run-id>/           # receipt·preview·temporary, ignored
 <external-asset-root>/up-view/<profile>/ # mask·plate, digest로 결속
 ```
 
-source와 derived는 다른 root와 identity를 갖는다. 실패한 run은 완성 dataset 이름으로 publish하지 않는다. cleanup은 marker 내용만 믿지 않고 생성 직후 보관한 marker·temporary의 device/inode가 모두 그대로일 때만 수행한다. writer를 먼저 완전히 종료하고, identity가 애매하면 삭제보다 격리된 부산물을 남기는 쪽으로 fail closed한다.
+source와 derived는 다른 root와 identity 및 서로 다른 repo ID를 갖는다. 위 경로는 책임별 권장 namespace이며 CLI가 특정 절대 prefix를 강제하지는 않는다. 실패한 run은 완성 dataset 이름으로 publish하지 않는다. cleanup은 marker 내용만 믿지 않고 생성 직후 보관한 marker·temporary의 device/inode가 모두 그대로일 때만 수행한다. writer를 먼저 완전히 종료하고, `KeyboardInterrupt`에서도 같은 정리를 거친 뒤 중단을 다시 올리며, identity가 애매하면 삭제보다 격리된 부산물을 남기는 쪽으로 fail closed한다.
 
 ### 6.2 feature 계약
 
@@ -418,7 +420,7 @@ RF-DETR-Seg-N이 10.2의 local bakeoff를 통과했을 때만 같은 entrypoint�
 
 기존 script는 옮기지 않는다. direct raw training path도 그대로 둔다. curator가 발급할 수 있는 유일한 사람 artifact는 task-view profile approval이며 training·motion·scene authority는 항상 `false`다.
 
-active recorder가 source를 쓰는 동안에는 해당 source에 full decode·`derive`를 실행하지 않는다. 사용자가 특정 시점 snapshot 감사를 지시하면 non-mutating metadata/stat/validator/official reader 검사만 할 수 있으며, publish 작업은 하지 않는다. 구현·synthetic test는 별도 child worktree와 `tempfile` root에서 수행한다. 실제 `derive`는 source가 고정된 뒤 initial/final identity가 같을 때만 publish한다.
+active recorder가 source를 쓰는 동안에는 해당 source에 full decode·`derive`를 실행하지 않는다. 사용자가 특정 시점 snapshot 감사를 지시하면 non-mutating metadata/stat/validator/official reader 검사만 할 수 있으며, publish 작업은 하지 않는다. 구현·synthetic test는 별도 child worktree와 `tempfile` root에서 수행한다. 실제 `derive`는 source가 고정된 뒤 initial/final identity가 같을 때만 publish한다. 현재 producer가 curator용 immutable finalize/lease artifact를 발급하지 않으므로 “검사 직후 recorder가 다시 append하는 경우”까지 curator 단독으로 봉쇄하지는 못한다. recorder 종료·다른 dataset으로 전환을 운영 전제로 두며, 이를 보완하려고 curator가 producer lifecycle owner가 되지는 않는다.
 
 ### 9.4 현재 구현 증거
 
@@ -436,7 +438,9 @@ active recorder가 source를 쓰는 동안에는 해당 source에 full decode·`
 
 승인된 main environment와 child `PYTHONPATH`를 사용한 `tests/data_factory/curator` **32/32**가 PASS했다. 이 중 tiny synthetic LeRobot v3 두 episode의 H.264 encode/decode와 official reader/writer round trip, metadata path escape, same-size·preserved-mtime source mutation, tree fsync failure, cleanup-state fault injection, bounded median·metric·parallel encode 회귀가 포함된다. 실제 `fr5260902`에서는 source digest를 유지한 채 official reader 기반 reference export까지 통과했다. 실제 A/B geometry 승인·full derived publish·사람 출현 gold annotation·로봇·rollout 또는 SmolVLA 성능은 아직 증명하지 않는다. 따라서 이는 software component와 read-path evidence이지 physical/profile/training acceptance가 아니다.
 
-main 통합 뒤 같은 focused 32개를 다시 통과했고, `direnv exec . python3 -m unittest discover -s tests` 전체 **724/724**도 PASS했다. `mex check`는 drift `100/100`, error/warning/info 0이었다.
+main 통합 당시 같은 focused 32개를 다시 통과했고, 당시 `direnv exec . python3 -m unittest discover -s tests` 전체 **724/724**도 PASS했다. 당시 `mex check`는 drift `100/100`, error/warning/info 0이었다. 이는 아래 v1.1 변경 전의 역사 증거다.
+
+v1.1 작업본은 collection-profile v2 전체 의미 검증, observable source 계약의 preview 조기검사, spawn 격리, `KeyboardInterrupt` 정리, distinct repo ID를 추가했고 `PYTHONWARNINGS=error::DeprecationWarning` 조건의 focused **38/38**을 67.712초에 통과했다. 실제 `fr5260902`도 현재 v1.1 local-only reader/source-contract 검사에서 8 episode·10,328 frame·30 Hz·FR5 7D+up+wrist로 통과했고 검사 전후 tree snapshot은 동일했다. 앞선 dirty-main 전체 회귀는 **741/742**였고 유일한 실패는 curator 밖 `operator/registries/test_workspace.py`였으며, 같은 10개 workspace test는 clean `curator-v06` worktree에서 **10/10 PASS**했다. 이후 전체 회귀를 다시 실행한 동안 다른 작업이 `test_motion.py`와 `test_run_job.py`를 수정해 실행은 **687개 중 1 failure·3 import error**로 끝났고, `Store`가 정의되기 전에 참조되는 중간 파일 상태였으므로 유효한 통합 판정으로 사용하지 않는다. 따라서 v1.1은 focused PASS로 판정하되 최신 dirty main 전체 PASS라고 주장하지 않는다.
 
 v0.9 최적화는 `11a9956`에 보존했고, profile frame bound, 기존 median의 1~31 frame byte-level 동등성, identity directory-walk 횟수, compact metric 동등성과 두 camera 병렬 H.264 encode/stage timing receipt까지 focused 전체 32개로 재검증했다. 경로 이동 과정에서 옛 `tree_identity`를 patch하던 asset-tamper test가 최적화된 `stable_tree_identity`를 더 이상 가로채지 못한 문제를 발견했으며, product fail-closed 경계는 그대로 두고 test hook을 실제 호출 경계로 고쳤다.
 
@@ -490,6 +494,7 @@ unit fixture는 `tempfile` 아래 synthetic LeRobot dataset만 사용한다. TTY
 
 ```bash
 direnv exec . python3 -m unittest discover -s tests/data_factory/curator
+PYTHONWARNINGS=error::DeprecationWarning direnv exec . python3 -m unittest discover -s tests/data_factory/curator
 direnv exec . python3 -m unittest discover -s tests
 mex check
 ```
@@ -497,6 +502,8 @@ mex check
 ### 10.2 offline person audit model bakeoff
 
 RF-DETR weight는 repository 밖 격리된 환경에만 내려받는다. 먼저 frozen up sample에 full person, partial lower body·arm, robot-only, A4·cube, 사람과 robot이 겹친 frame을 포함하고 사람 mask gold annotation을 별도 test evidence로 만든다.
+
+동적 후보가 필요해져도 [SAM 2.1 official video predictor](https://github.com/facebookresearch/sam2)는 promptable mask propagation 도구이지 자체 person 의미 판정기가 아니다. 따라서 RF-DETR-Seg의 person box/mask를 seed로 SAM 2.1 temporal propagation을 붙이는 조합은 **두 모델의 false positive·false negative와 처리량을 함께 측정할 때만** secondary bakeoff로 둔다. 사람에게 이미 가려진 robot/object pixel을 복원하지는 못하므로, 그 결과를 자동 inpainting이나 episode 승인으로 연결하지 않는다.
 
 - 원본 camera orientation과 180° normalized detector input을 같은 frame에서 비교한다.
 - person pixel recall, instance recall과 robot·gripper·object false-positive overlap을 각각 보고한다.
@@ -704,3 +711,11 @@ PDF에는 colored border와 text가 있지만 machine-readable fiducial은 없�
 - `fr5260902`를 수정하지 않고 official loader·SmolVLA profile·reference export로 read-path를 검증했으며, 물리 binding과 사람 profile 승인이 없으므로 full derived publish와 optimizer smoke는 실행하지 않았다.
 - episode 0–7의 데이터 감사 결과를 별도 보고서로 고정하고 `PILOT_SMOKE_PASS`, `PERFORMANCE_READY` 아님, `TRAINING_APPROVED` 아님을 분리했다.
 - 최신 committed main을 integration branch에 병합해 focused test를 재통과한 뒤 main을 fast-forward했고, 실제 main 전체 test 724/724와 knowledge QA 100/100을 통과했다.
+
+### v1.1 후보
+
+- fixed transform이 동적 사람·로봇 segmentation이 아님을 명시했다. `visual_motion_support` 안의 로봇·사람은 모두 남고, keep 밖 사람만 움직임과 무관하게 매 frame plate로 교체된다.
+- profile request를 v2로 올려 exact collection profile JSON과 digest, 30 Hz·640×480·up+wrist·batch observable 계약을 검사하되 machine status를 `DECLARED_CONFIG_OBSERVABLE_MATCH`로 제한했다.
+- LeRobot 두-camera 병렬 encoder 전에 multiprocessing `spawn`을 강제해 Python 3.12 multithreaded-fork 경고와 교착 위험을 제거하고 concurrency cap을 회귀검사했다.
+- `KeyboardInterrupt`에도 writer 종료·owned temporary cleanup·failure evidence를 수행한 뒤 원래 중단을 다시 올리며, source/output repo ID 충돌을 사전 거부한다.
+- current focused 38/38은 PASS했지만 동시에 진행 중인 operator/catalog 변경 때문에 직전 dirty main 전체는 741/742였음을 분리 기록했다.

@@ -3,10 +3,10 @@
 from __future__ import annotations
 
 from contextlib import suppress
-import copy
 from dataclasses import dataclass
 import hashlib
 import json
+import multiprocessing
 import os
 from pathlib import Path
 import platform
@@ -40,22 +40,35 @@ from tools.data_factory.curator.up_view import apply_up_view, uint8_hwc
 from tools.data_factory.curator.verify import (
     load_profile_assets,
     open_source_dataset,
+    validate_source_contract as _validate_source_contract,
     verify_derived_dataset,
     verify_review_bundle,
 )
 
 
-RECEIPT_SCHEMA = "curator.derive_receipt.v1"
+RECEIPT_SCHEMA = "curator.derive_receipt.v2"
 _REPO_ID = re.compile(r"[^/\s]+/[^/\s]+\Z")
-_CUSTOM_FEATURES = {
-    "observation.state",
-    "action",
-    "observation.images.up",
-    "observation.images.wrist",
-}
 _CPU_COUNT = os.cpu_count() or 2
 _IMAGE_WRITER_THREADS = min(8, max(2, _CPU_COUNT // 2))
 _ENCODER_THREADS = min(4, max(1, _CPU_COUNT // 4))
+
+
+def _require_spawn_parallel_encoding() -> None:
+    """Select a fork-safe process context before LeRobot starts writer threads."""
+    start_method = multiprocessing.get_start_method(allow_none=True)
+    if start_method is None:
+        try:
+            multiprocessing.set_start_method("spawn")
+            return
+        except RuntimeError:
+            # Another owner may have selected the process-wide context between
+            # the read and write. Re-read it instead of forcing a global reset.
+            start_method = multiprocessing.get_start_method(allow_none=True)
+    if start_method != "spawn":
+        raise CuratorError(
+            "PARALLEL_ENCODING_REQUIRES_SPAWN",
+            f"multiprocessing start method is {start_method!r}",
+        )
 
 
 def _repo_id(value: str, code: str) -> str:
@@ -98,45 +111,6 @@ def _no_overlap(source: Path, output: Path, run_dir: Path, bundle: Path) -> None
     for left, right in pairs:
         if left == right or left in right.parents or right in left.parents:
             raise CuratorError("PATH_OVERLAP", f"{left} <> {right}")
-
-
-def _validate_source_contract(dataset: Any, profile: dict[str, Any]) -> dict[str, Any]:
-    try:
-        from lerobot.utils.constants import DEFAULT_FEATURES
-        from tools.fr5_dataset_schema import FEATURE_NAMES
-    except ImportError as exc:
-        raise CuratorError("LEROBOT_IMPORT", str(exc)) from exc
-    features = dataset.meta.features
-    custom = set(features) - set(DEFAULT_FEATURES)
-    if custom != _CUSTOM_FEATURES:
-        raise CuratorError("SOURCE_FEATURE_SET", str(sorted(custom)))
-    for key in ("observation.state", "action"):
-        feature = features[key]
-        if (
-            feature.get("dtype") != "float32"
-            or list(feature.get("shape", [])) != [7]
-            or feature.get("names") != FEATURE_NAMES
-        ):
-            raise CuratorError("SOURCE_NUMERIC_FEATURE", key)
-    expected_shape = [profile["height"], profile["width"], 3]
-    for key in ("observation.images.up", "observation.images.wrist"):
-        feature = features[key]
-        if (
-            feature.get("dtype") != "video"
-            or list(feature.get("shape", [])) != expected_shape
-            or feature.get("names") != ["height", "width", "channels"]
-        ):
-            raise CuratorError("SOURCE_VIDEO_FEATURE", key)
-    if (
-        (profile["width"], profile["height"]) != (640, 480)
-        or type(dataset.meta.fps) is not int
-        or dataset.meta.fps != 30
-        or dataset.meta.robot_type != "fr5_ros2"
-        or dataset.meta.total_episodes <= 0
-        or len(dataset) <= 0
-    ):
-        raise CuratorError("SOURCE_DATASET_CONTRACT")
-    return copy.deepcopy({key: features[key] for key in _CUSTOM_FEATURES})
 
 
 def _numpy(value: Any, *, dtype: np.dtype[Any], shape: tuple[int, ...], code: str) -> np.ndarray:
@@ -509,6 +483,9 @@ def derive_dataset(
         raise CuratorError("RUN_ID")
     source_repo_id = _repo_id(source_repo_id, "SOURCE_REPO_ID")
     output_repo_id = _repo_id(output_repo_id, "OUTPUT_REPO_ID")
+    if source_repo_id == output_repo_id:
+        raise CuratorError("REPO_ID_COLLISION")
+    _require_spawn_parallel_encoding()
     approval, profile, review = verify_approval(profile_request, approval_path)
     request, current_profile, current_review = verify_review_bundle(profile_request)
     if current_profile != profile or current_review != review:
@@ -692,6 +669,7 @@ def derive_dataset(
                 "preset": "ultrafast",
                 "crf": 23,
                 "parallel_cameras": True,
+                "multiprocessing_start_method": "spawn",
                 "image_writer_threads": _IMAGE_WRITER_THREADS,
                 "encoder_threads_per_camera": _ENCODER_THREADS,
             },
@@ -712,6 +690,10 @@ def derive_dataset(
                 "parent_fsync": True,
             },
             "profile_digest": profile["profile_digest"],
+            "collection_camera_profile_binding": {
+                "digest": profile["collection_camera_profile_digest"],
+                "status": profile["collection_camera_profile_binding_status"],
+            },
             "mask_sha256": profile["mask_sha256"],
             "background_plate_sha256": profile["background_plate_sha256"],
             "review_bundle_digest": review["review_bundle_digest"],
@@ -749,7 +731,7 @@ def derive_dataset(
             raise CuratorError(publication_state, str(output)) from receipt_error
         publication_state = "COMMITTED_RECEIPT_RECORDED"
         return receipt
-    except Exception as exc:
+    except BaseException as exc:
         cleanup_safe = writer_closed
         writer_shutdown_state = (
             "FINALIZED_BEFORE_FAILURE"
@@ -785,7 +767,13 @@ def derive_dataset(
                 {
                     "schema_version": "curator.derive_failure.v2",
                     "run_id": run_id,
-                    "reason_code": exc.code if isinstance(exc, CuratorError) else "DERIVE_FAILURE",
+                    "reason_code": (
+                        exc.code
+                        if isinstance(exc, CuratorError)
+                        else "DERIVE_INTERRUPTED"
+                        if isinstance(exc, KeyboardInterrupt)
+                        else "DERIVE_FAILURE"
+                    ),
                     "publication_state": publication_state,
                     "output_committed": published,
                     "output": str(output) if published else None,

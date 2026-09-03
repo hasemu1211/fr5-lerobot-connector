@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
+import copy
 import hashlib
 import inspect
 import json
@@ -56,7 +57,7 @@ from tools.data_factory.curator.up_view import (
 )
 
 
-PROFILE_SCHEMA = "curator.up_view_profile.v1"
+PROFILE_SCHEMA = "curator.up_view_profile.v2"
 BUNDLE_SCHEMA = "curator.task_view_review_bundle.v1"
 GEOMETRY_SCHEMA = "curator.task_view_geometry.v1"
 _BUNDLE_FILES = {
@@ -79,6 +80,7 @@ _PROFILE_FIELDS = {
     "width",
     "height",
     "collection_camera_profile_digest",
+    "collection_camera_profile_binding_status",
     "layout_manifest_digest",
     "physical_region_binding_digest",
     "physical_binding_status",
@@ -102,6 +104,52 @@ _PROFILE_FIELDS = {
 CODEC_MAX_FRAME_MAE = 18.0
 _LEROBOT_VERSION = "0.6.1"
 _LEROBOT_GUARD_LOCK = threading.Lock()
+_CUSTOM_FEATURES = {
+    "observation.state",
+    "action",
+    "observation.images.up",
+    "observation.images.wrist",
+}
+
+
+def validate_source_contract(dataset: Any, profile: dict[str, Any]) -> dict[str, Any]:
+    """Validate observable source fields against the declared collection contract."""
+    try:
+        from lerobot.utils.constants import DEFAULT_FEATURES
+        from tools.fr5_dataset_schema import FEATURE_NAMES
+    except ImportError as exc:
+        raise CuratorError("LEROBOT_IMPORT", str(exc)) from exc
+    features = dataset.meta.features
+    custom = set(features) - set(DEFAULT_FEATURES)
+    if custom != _CUSTOM_FEATURES:
+        raise CuratorError("SOURCE_FEATURE_SET", str(sorted(custom)))
+    for key in ("observation.state", "action"):
+        feature = features[key]
+        if (
+            feature.get("dtype") != "float32"
+            or list(feature.get("shape", [])) != [7]
+            or feature.get("names") != FEATURE_NAMES
+        ):
+            raise CuratorError("SOURCE_NUMERIC_FEATURE", key)
+    expected_shape = [profile["height"], profile["width"], 3]
+    for key in ("observation.images.up", "observation.images.wrist"):
+        feature = features[key]
+        if (
+            feature.get("dtype") != "video"
+            or list(feature.get("shape", [])) != expected_shape
+            or feature.get("names") != ["height", "width", "channels"]
+        ):
+            raise CuratorError("SOURCE_VIDEO_FEATURE", key)
+    if (
+        (profile["width"], profile["height"]) != (640, 480)
+        or type(dataset.meta.fps) is not int
+        or dataset.meta.fps != 30
+        or dataset.meta.robot_type != "fr5_ros2"
+        or dataset.meta.total_episodes <= 0
+        or len(dataset) <= 0
+    ):
+        raise CuratorError("SOURCE_DATASET_CONTRACT")
+    return copy.deepcopy({key: features[key] for key in _CUSTOM_FEATURES})
 
 
 @contextmanager
@@ -333,7 +381,7 @@ def export_reference(
         if created:
             target.unlink(missing_ok=True)
         raise CuratorError("REFERENCE_WRITE", f"{target}: {exc}") from exc
-    except Exception:
+    except BaseException:
         if created:
             target.unlink(missing_ok=True)
         raise
@@ -381,6 +429,7 @@ def _profile_document(
         "width": value["width"],
         "height": value["height"],
         "collection_camera_profile_digest": value["collection_camera_profile_digest"],
+        "collection_camera_profile_binding_status": "DECLARED_CONFIG_OBSERVABLE_MATCH",
         "layout_manifest_digest": value["layout_manifest_digest"],
         "physical_region_binding_digest": value["physical_region_binding_digest"],
         "physical_binding_status": binding["physical_binding_status"],
@@ -446,6 +495,7 @@ def create_review_bundle(
         request.value["dilation_margin_px"],
     )
     dataset = open_source_dataset(source, source_repo_id)
+    validate_source_contract(dataset, request.value)
     reference = _frame(dataset, request.value["reference_frame_index"], request)
     annotated_reference = read_rgb_png(
         request.reference_image_path,
@@ -516,7 +566,7 @@ def create_review_bundle(
             "physical_binding_status": binding["physical_binding_status"],
             "training_authorized": False,
         }
-    except Exception:
+    except BaseException:
         if temporary.exists():
             shutil.rmtree(temporary)
         raise
@@ -595,6 +645,7 @@ def verify_review_bundle(profile_request: str | Path) -> tuple[ProfileRequest, d
         "width": request.value["width"],
         "height": request.value["height"],
         "collection_camera_profile_digest": request.value["collection_camera_profile_digest"],
+        "collection_camera_profile_binding_status": "DECLARED_CONFIG_OBSERVABLE_MATCH",
         "layout_manifest_digest": request.value["layout_manifest_digest"],
         "physical_region_binding_digest": request.value["physical_region_binding_digest"],
         "physical_binding_status": binding["physical_binding_status"],
@@ -921,6 +972,7 @@ __all__ = [
     "export_reference",
     "load_profile_assets",
     "open_source_dataset",
+    "validate_source_contract",
     "verify_derived_dataset",
     "verify_review_bundle",
 ]

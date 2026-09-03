@@ -89,13 +89,29 @@ class GeometryTest(unittest.TestCase):
         }
         self.annotation_path = self.root / "reference.json"
         _write(self.annotation_path, self.annotation)
+        repository = Path(__file__).resolve().parents[3]
+        self.collection_profile = json.loads(
+            (
+                repository
+                / "config/data_factory/collection_profiles/fr5-up-wrist-rgb-30hz-v1.json"
+            ).read_text(encoding="utf-8")
+        )
+        self.collection_profile.update({
+            "collection_profile_id": "synthetic-up-wrist-30hz-r001",
+            "width": 200,
+            "height": 120,
+            "repo_id": "local/synthetic",
+        })
+        self.collection_profile_path = self.root / "collection-profile.json"
+        _write(self.collection_profile_path, self.collection_profile)
         self.request = {
-            "schema_version": "curator.up_view_profile_request.v1",
+            "schema_version": "curator.up_view_profile_request.v2",
             "profile_id": "synthetic-profile-r001",
             "camera_key": "observation.images.up",
             "width": 200,
             "height": 120,
-            "collection_camera_profile_digest": "sha256:" + "c" * 64,
+            "collection_camera_profile": self.collection_profile_path.name,
+            "collection_camera_profile_digest": canonical_digest(self.collection_profile),
             "layout_manifest": self.layout_path.name,
             "layout_manifest_digest": self.layout["layout_digest"],
             "physical_region_binding": self.binding_path.name,
@@ -195,6 +211,38 @@ class GeometryTest(unittest.TestCase):
         _write(self.request_path, self.request)
         with self.assertRaisesRegex(CuratorError, "PROFILE_PLATE_INDICES"):
             load_profile_request(self.request_path)
+
+    def test_collection_profile_digest_and_observable_contract_are_enforced(self):
+        self.collection_profile["fps"] = 29
+        _write(self.collection_profile_path, self.collection_profile)
+        with self.assertRaisesRegex(CuratorError, "COLLECTION_PROFILE_DIGEST"):
+            load_profile_request(self.request_path)
+
+        self.request["collection_camera_profile_digest"] = canonical_digest(
+            self.collection_profile
+        )
+        _write(self.request_path, self.request)
+        with self.assertRaisesRegex(CuratorError, "COLLECTION_PROFILE_CONTRACT"):
+            load_profile_request(self.request_path)
+
+    def test_collection_profile_full_v2_contract_is_enforced(self):
+        invalid_values = {
+            "collection_profile_id": "bad/id",
+            "quality_contract_digest": "not-a-digest",
+            "camera_serials": {"up": "UP", "side": "SIDE"},
+            "camera_topics": {"up": "relative", "wrist": "/camera/wrist"},
+            "writer_queue_size": True,
+            "encoder_threads": -1,
+            "portability_status": "UNKNOWN",
+        }
+        for field, invalid in invalid_values.items():
+            with self.subTest(field=field):
+                profile = {**self.collection_profile, field: invalid}
+                _write(self.collection_profile_path, profile)
+                self.request["collection_camera_profile_digest"] = canonical_digest(profile)
+                _write(self.request_path, self.request)
+                with self.assertRaisesRegex(CuratorError, "COLLECTION_PROFILE_CONTRACT"):
+                    load_profile_request(self.request_path)
 
     def test_semantic_subregion_outside_table_is_rejected(self):
         request = load_profile_request(self.request_path)

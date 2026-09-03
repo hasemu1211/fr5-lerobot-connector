@@ -22,9 +22,10 @@ from tools.data_factory.curator.contracts import (
     reject_symlink_components,
 )
 from tools.data_factory.curator.up_view import MAX_BACKGROUND_PLATE_FRAMES
+from tools.fr5_data_factory import COLLECTION_PROFILE_V2_KEYS
 
 
-PROFILE_REQUEST_SCHEMA = "curator.up_view_profile_request.v1"
+PROFILE_REQUEST_SCHEMA = "curator.up_view_profile_request.v2"
 LABELME_VERSION = "7.0.4"
 LAYOUT_SCHEMA = "a4_workspace_region_layout.v1"
 BINDING_SCHEMA = "data_factory.workspace_region_binding.v1"
@@ -48,6 +49,7 @@ _REQUEST_FIELDS = {
     "camera_key",
     "width",
     "height",
+    "collection_camera_profile",
     "collection_camera_profile_digest",
     "layout_manifest",
     "layout_manifest_digest",
@@ -69,6 +71,7 @@ _REQUEST_FIELDS = {
 class ProfileRequest:
     path: Path
     value: dict[str, Any]
+    collection_profile_path: Path
     layout_path: Path
     binding_path: Path
     annotation_path: Path
@@ -93,6 +96,71 @@ def _path(base: Path, value: object, code: str, *, must_exist: bool) -> Path:
     if not must_exist and (resolved.parent.is_symlink() or not resolved.parent.is_dir()):
         raise CuratorError(code, f"existing regular parent required: {resolved.parent}")
     return resolved
+
+
+def _validate_collection_profile(path: Path, digest: str, width: int, height: int) -> None:
+    profile = exact_fields(
+        load_json(path, code="COLLECTION_PROFILE_JSON"),
+        COLLECTION_PROFILE_V2_KEYS,
+        "COLLECTION_PROFILE_FIELDS",
+    )
+    if canonical_digest(profile) != digest:
+        raise CuratorError("COLLECTION_PROFILE_DIGEST")
+    if (
+        profile["schema_version"] != "data_factory.collection_profile.v2"
+        or not isinstance(profile["collection_profile_id"], str)
+        or SAFE_ID.fullmatch(profile["collection_profile_id"]) is None
+        or profile["qualification_status"] != "QUALIFIED"
+        or not isinstance(profile["quality_contract_digest"], str)
+        or DIGEST.fullmatch(profile["quality_contract_digest"]) is None
+        or profile["camera_profile"] != "up-wrist"
+        or profile["camera_roles"] != ["up", "wrist"]
+        or profile["fps"] != 30
+        or profile["width"] != width
+        or profile["height"] != height
+        or profile["image_qos"] not in ("reliable", "best-effort")
+        or profile["encoding_mode"] != "batch"
+        or profile["encoder_temp_policy"] != "DATASET_LOCAL"
+        or profile["portability_status"]
+        not in ("QUALIFICATION_REQUIRED", "SUPPORTED_8GB")
+        or not isinstance(profile["repo_id"], str)
+        or not profile["repo_id"]
+        or "\x00" in profile["repo_id"]
+    ):
+        raise CuratorError("COLLECTION_PROFILE_CONTRACT")
+    serials = profile["camera_serials"]
+    topics = profile["camera_topics"]
+    if (
+        not isinstance(serials, dict)
+        or set(serials) != {"up", "wrist"}
+        or any(
+            not isinstance(item, str) or not item or "\x00" in item
+            for item in serials.values()
+        )
+        or not isinstance(topics, dict)
+        or set(topics) != {"up", "wrist"}
+        or any(
+            not isinstance(item, str)
+            or not item.startswith("/")
+            or any(character.isspace() for character in item)
+            for item in topics.values()
+        )
+        or any(
+            type(profile[key]) is not int or profile[key] <= 0
+            for key in ("fps", "width", "height", "image_qos_depth", "writer_queue_size")
+        )
+        or type(profile["encoder_threads"]) is not int
+        or profile["encoder_threads"] < 0
+        or any(
+            type(profile[key]) is not int or profile[key] < 0
+            for key in (
+                "dataset_incremental_peak_bytes",
+                "encoder_temp_peak_bytes",
+                "disk_reserve_bytes",
+            )
+        )
+    ):
+        raise CuratorError("COLLECTION_PROFILE_CONTRACT")
 
 
 def load_profile_request(path: str | Path) -> ProfileRequest:
@@ -136,6 +204,18 @@ def load_profile_request(path: str | Path) -> ProfileRequest:
         raise CuratorError("PROFILE_MARGIN")
 
     base = source.parent
+    collection_profile = _path(
+        base,
+        value["collection_camera_profile"],
+        "PROFILE_COLLECTION_PATH",
+        must_exist=True,
+    )
+    _validate_collection_profile(
+        collection_profile,
+        value["collection_camera_profile_digest"],
+        value["width"],
+        value["height"],
+    )
     layout = _path(base, value["layout_manifest"], "PROFILE_LAYOUT_PATH", must_exist=True)
     binding = _path(base, value["physical_region_binding"], "PROFILE_BINDING_PATH", must_exist=True)
     annotation = _path(base, value["labelme_annotation"], "PROFILE_LABELME_PATH", must_exist=True)
@@ -163,6 +243,7 @@ def load_profile_request(path: str | Path) -> ProfileRequest:
     return ProfileRequest(
         source,
         value,
+        collection_profile,
         layout,
         binding,
         annotation,
