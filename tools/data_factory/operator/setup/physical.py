@@ -859,6 +859,45 @@ def _prepare_robot_for_home_recovery(
     collision = float(state.get("collision_err", -1)) > 0
     if has_error and not collision:
         raise ContractError("HOME_RECOVERY_NON_COLLISION_FAULT")
+
+    def switch_mode(target: int) -> None:
+        nonlocal state
+        try:
+            mode_result = remote(f"Mode({target})", expected_fields=1, timeout_s=5)
+        except ContractError as exc:
+            print(json.dumps({
+                "event": "home_recovery_mode_switch_failed",
+                "failure": exc.code,
+                "target_mode": target,
+            }, sort_keys=True), file=sys.stderr, flush=True)
+            raise ContractError("HOME_RECOVERY_MODE_SWITCH") from exc
+        if mode_result != [0]:
+            print(json.dumps({
+                "event": "home_recovery_mode_switch_rejected",
+                "sdk_result": mode_result,
+                "target_mode": target,
+            }, sort_keys=True), file=sys.stderr, flush=True)
+            raise ContractError("HOME_RECOVERY_MODE_SWITCH")
+        for delay_s in (0.1, 0.25, 0.5):
+            settle_call(delay_s)
+            state = read_state()
+            if state.get("robot_mode") == target:
+                return
+        print(json.dumps({
+            "event": (
+                "home_recovery_auto_feedback_missing"
+                if target == 0 else "home_recovery_manual_feedback_missing"
+            ),
+            "robot_mode": state.get("robot_mode"),
+        }, sort_keys=True), file=sys.stderr, flush=True)
+        raise ContractError(
+            "HOME_RECOVERY_AUTO_MODE_REQUIRED"
+            if target == 0 else "HOME_RECOVERY_MODE_SWITCH"
+        )
+
+    # FAIRINO requires MANUAL mode while clearing a confirmed collision.
+    if collision and state["robot_mode"] == 0:
+        switch_mode(1)
     if collision:
         if remote("ResetAllError()", expected_fields=1) != [0]:
             raise ContractError("HOME_RECOVERY_FAULT_CLEAR")
@@ -867,31 +906,7 @@ def _prepare_robot_for_home_recovery(
             raise ContractError("HOME_RECOVERY_FAULT_CLEAR")
     mode_switched = state["robot_mode"] == 1
     if mode_switched:
-        try:
-            mode_result = remote("Mode(0)", expected_fields=1, timeout_s=5)
-        except ContractError as exc:
-            print(json.dumps({
-                "event": "home_recovery_mode_switch_failed",
-                "failure": exc.code,
-            }, sort_keys=True), file=sys.stderr, flush=True)
-            raise ContractError("HOME_RECOVERY_MODE_SWITCH") from exc
-        if mode_result != [0]:
-            print(json.dumps({
-                "event": "home_recovery_mode_switch_rejected",
-                "sdk_result": mode_result,
-            }, sort_keys=True), file=sys.stderr, flush=True)
-            raise ContractError("HOME_RECOVERY_MODE_SWITCH")
-        for delay_s in (0.1, 0.25, 0.5):
-            settle_call(delay_s)
-            state = read_state()
-            if state.get("robot_mode") == 0:
-                break
-        else:
-            print(json.dumps({
-                "event": "home_recovery_auto_feedback_missing",
-                "robot_mode": state.get("robot_mode"),
-            }, sort_keys=True), file=sys.stderr, flush=True)
-            raise ContractError("HOME_RECOVERY_AUTO_MODE_REQUIRED")
+        switch_mode(0)
     if remote("RobotEnable(1)", expected_fields=1) != [0]:
         raise ContractError("HOME_RECOVERY_ENABLE")
     if remote("GetRobotErrorCode()", expected_fields=3) != [0, 0, 0]:
@@ -1009,7 +1024,9 @@ def normalize_gripper_after_operator_ready(
                     "time_from_start": {"sec": 2, "nanosec": 0},
                 }],
             },
-            "goal_tolerance": [{"name": "finger_right_joint", "position": 0.000105}],
+            "goal_tolerance": [{
+                "name": "finger_right_joint", "position": 0.021 / 100 + 1e-6,
+            }],
             "goal_time_tolerance": {"sec": 5, "nanosec": 0},
         }
         output = _bounded_command([

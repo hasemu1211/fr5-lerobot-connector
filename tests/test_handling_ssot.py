@@ -76,7 +76,7 @@ class HandlingSsotTest(unittest.TestCase):
                     grasp["grasp_geometry"]["depth_from_top_mm"], 3.5,
                 )
                 self.assertEqual(
-                    grasp["grasp_geometry"]["release_clearance_mm"], 1.0,
+                    grasp["grasp_geometry"]["release_clearance_mm"], 2.0,
                 )
                 self.assertEqual(
                     grasp["grasp_geometry"]["datum_to_tcp_grasp"][
@@ -93,7 +93,11 @@ class HandlingSsotTest(unittest.TestCase):
                 ][2]
                 self.assertAlmostEqual(final_z, expected_tcp_z[place], places=12)
                 self.assertAlmostEqual(
-                    lower_z, expected_tcp_z[place] + 0.001, places=12,
+                    lower_z, expected_tcp_z[place] + 0.002, places=12,
+                )
+                self.assertEqual(
+                    steps["LOWER_LIN"]["limits"]["velocity_scaling"],
+                    0.015,
                 )
                 self.assertGreater(
                     steps["APPROACH_STOP_LIN"]["target"]["base_tcp"][
@@ -230,6 +234,30 @@ class HandlingSsotTest(unittest.TestCase):
                     motion["gripper_positions_m"]["open"],
                     grasp["gripper_open"]["command_position_m"],
                 )
+                self.assertEqual(
+                    grasp["gripper_open"]["release_position_m"], 0.0126,
+                )
+                self.assertEqual(
+                    grasp["gripper_open"]["release_position_m"]
+                    / grasp["gripper_open"]["command_position_m"],
+                    0.6,
+                )
+                self.assertEqual(
+                    grasp["gripper_open"]["release_hold_s"], 0.5,
+                )
+                feedback_tick_m = (
+                    grasp["gripper_open"]["command_position_m"] / 100
+                )
+                self.assertGreaterEqual(
+                    grasp["gripper_open"]["completion_tolerance_m"],
+                    feedback_tick_m,
+                )
+                open_step = next(
+                    step for step in program["steps"]
+                    if step["phase"] == "GRIPPER_OPEN"
+                )
+                self.assertEqual(open_step["release_position_m"], 0.0126)
+                self.assertEqual(open_step["release_hold_s"], 0.5)
 
     def test_catalog_separates_authoring_domains_from_exact_24mm_motion_bindings(self):
         catalog = load_operator_catalog(ROOT)

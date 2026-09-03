@@ -562,14 +562,15 @@ class RosMoveItTransport:
                 try:
                     if client.wait_for_services(timeout_sec=0.0):
                         parameter_future = client.get_parameters(["robot_description"])
-                except RuntimeError:
-                    parameter_finished = True
+                except (RuntimeError, TimeoutError):
+                    pass
             if parameter_future is not None and parameter_future.done():
                 parameter_finished = True
                 try:
                     response = parameter_future.result()
                 except (RuntimeError, TimeoutError):
                     response = None
+                    parameter_finished = False
                 parameter_future = None
                 values = getattr(response, "values", None)
                 candidate = (
@@ -1171,7 +1172,6 @@ class RosMoveItTransport:
         return constraints
 
     def build_gripper_goal(self, phase, position, limits):
-        del phase
         goal = self._FollowJointTrajectory.Goal()
         goal.trajectory.joint_names = ["finger_right_joint"]
         endpoint = self._JointTrajectoryPoint()

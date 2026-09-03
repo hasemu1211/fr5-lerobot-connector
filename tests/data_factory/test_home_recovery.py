@@ -12,6 +12,11 @@ ROOT = Path(__file__).resolve().parents[2]
 MOTION = json.loads((
     ROOT / "config/data_factory/motion_qualifications/fr5-place-a-wood-cube-r001.json"
 ).read_text(encoding="utf-8"))
+MOTION_24MM = json.loads((
+    ROOT
+    / "config/data_factory/motion_qualifications/"
+    "fr5-place-a-wood-cube-24mm-r001.json"
+).read_text(encoding="utf-8"))
 TARGET = MOTION["qualified_safe_joint_positions_rad"]
 
 
@@ -79,6 +84,16 @@ class FakeTransport:
 
 
 class HomeRecoveryTests(unittest.TestCase):
+    def test_checked_in_24mm_scene_uses_its_normalized_digest(self):
+        target = MOTION_24MM["qualified_safe_joint_positions_rad"]
+        transport = FakeTransport([snapshot(target)])
+        result = recover_home(
+            transport, motion_qualification=MOTION_24MM,
+            sleep_call=lambda _seconds: None,
+        )
+        self.assertEqual(result["status"], "ALREADY_HOME")
+        self.assertEqual(transport.started, [])
+
     def test_open_plan_collision_gate_execute_and_verify_home(self):
         start = [value + 0.2 for value in TARGET]
         transport = FakeTransport([

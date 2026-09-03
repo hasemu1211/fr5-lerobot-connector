@@ -790,6 +790,10 @@ class OperatorSetupTests(unittest.TestCase):
         attached = gripper_setup_projection(readback())
         self.assertEqual(attached["state"], "ATTACHED")
         self.assertRegex(attached["readback_digest"], r"^sha256:[0-9a-f]{64}$")
+        self.assertEqual(
+            gripper_setup_projection(readback(feedback=0.02079))["state"],
+            "ATTACHED",
+        )
         maintenance = gripper_setup_projection(readback(reference=0.012, feedback=0.012))
         self.assertEqual(
             (maintenance["state"], maintenance["supported_action"],

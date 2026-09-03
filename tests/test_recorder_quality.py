@@ -23,6 +23,7 @@ from time_alignment import interpolate_vector, latest_sample, nearest_sample
 from ros_image import image_message_to_rgb
 from measure_ros_topic_age import image_gate_failures
 from validate_lerobot_dataset import (
+    _video_frame_counts,
     has_nonfinite_number,
     transient_gripper_zero_dropouts,
 )
@@ -32,22 +33,58 @@ class RecorderContractTest(unittest.TestCase):
     def test_robot_control_keeps_gripper_off_realtime_xmlrpc_path(self):
         root = Path(__file__).resolve().parents[1]
         source = (root / "src/frcobot_ros2/fairino_hardware_v3_9_7/src/fairino_hardware_interface.cpp").read_text()
+        recorder_source = (root / "tools/fr5_lerobot_recorder.py").read_text()
+        setup_source = (
+            root / "tools/data_factory/operator/setup/physical.py"
+        ).read_text()
         command_source = (root / "src/frcobot_ros2/fairino_hardware_v3_9_7/src/command_server.cpp").read_text()
+        self.assertIn("JOINT_STATE_QOS_DEPTH = 20", recorder_source)
+        self.assertIn("JointState, args.joint_states, self._on_joint_state, joint_state_qos", recorder_source)
+        self.assertIn(
+            '"name": "finger_right_joint", "position": 0.021 / 100 + 1e-6',
+            setup_source,
+        )
         write_body = source.split("FairinoHardwareInterface::write", 1)[1].split(
             "void FairinoHardwareInterface::gripper_worker", 1
         )[0]
         self.assertNotIn("MoveGripper", write_body)
         self.assertNotIn("SetRobotRealtimeStateConfig", source)
-        self.assertIn("ServoMoveStart(1)", source)
-        self.assertIn("ServoMoveEnd(1)", source)
+        self.assertIn("SetCmdRpyCallback(capture_udp_command_reply)", source)
         self.assertNotIn("ActGripper", source)
         activation_body = source.split("FairinoHardwareInterface::on_activate", 1)[1].split(
             "FairinoHardwareInterface::on_deactivate", 1
         )[0]
         self.assertLess(
             activation_body.index("GetRobotErrorCode"),
-            activation_body.index("ServoMoveStart(1)"),
+            activation_body.index("ServoMoveStart()"),
         )
+        self.assertLess(
+            activation_body.index("StopMotion()"),
+            activation_body.index("ServoMoveEnd()"),
+        )
+        self.assertLess(
+            activation_body.index("ServoMoveEnd()"),
+            activation_body.index("ServoMoveStart()"),
+        )
+        self.assertNotIn("MotionQueueClear()", activation_body)
+        self.assertNotIn("sleep_for(200ms)", activation_body)
+        self.assertIn("sleep_for(250ms)", activation_body)
+        self.assertIn("sleep_for(100ms)", activation_body)
+        self.assertIn("send_udp_command_and_observe", activation_body)
+        self.assertIn("std::chrono::milliseconds(50)", source)
+        self.assertIn("return send_error == 0 && controller_error == 0;", source)
+        self.assertIn("stale_pause_is_safe_to_clear", activation_body)
+        self.assertIn("program_state == 1", activation_body)
+        self.assertIn("mc_queue_len == 0", activation_body)
+        self.assertIn("currentLuaFileName[0] == '\\0'", activation_body)
+        self.assertIn("lastServoTarget[joint]", activation_body)
+        self.assertIn("ResumeMotion()", activation_body)
+        self.assertIn("activation_state.robot_state != 1", activation_body)
+        self.assertIn("Servo transport qualification failed", activation_body)
+        start_failure = activation_body.split("if (stop_result != 0", 1)[1].split(
+            "if (_has_arm) {", 2
+        )[0]
+        self.assertIn("ServoMoveEnd(1)", start_failure)
         self.assertNotIn("ResetAllError", activation_body)
         read_body = source.split("FairinoHardwareInterface::read", 1)[1].split(
             "FairinoHardwareInterface::write", 1
@@ -56,29 +93,44 @@ class RecorderContractTest(unittest.TestCase):
             "FairinoHardwareInterface::read", 1
         )[0]
         self.assertNotIn("GetGripperCurPosition", read_body)
-        self.assertLess(deactivate_body.index("ServoMoveEnd(1)"), deactivate_body.index("stop_gripper_worker()"))
-        self.assertIn("_restart_servo_after_gripper.exchange(false)", write_body)
+        self.assertLess(deactivate_body.index("stop_gripper_worker()"), deactivate_body.index("ServoMoveEnd(1)"))
+        self.assertIn("_arm_stream_paused = true", write_body)
+        self.assertIn("if (_arm_stream_paused.load()) return", write_body)
+        self.assertNotIn("_restart_servo_after_gripper", source)
+        self.assertLess(
+            write_body.index("udp_command_error.load()"),
+            write_body.index("_arm_stream_paused.load()"),
+        )
         worker_body = source.split("void FairinoHardwareInterface::gripper_worker", 1)[1]
         self.assertIn("GetRobotRealTimeState", worker_body)
         self.assertNotIn("GetGripperCurPosition", worker_body)
         self.assertIn("feedback <= 100", worker_body)
-        self.assertIn("feedback > 100", worker_body)
-        self.assertLess(worker_body.index("if (result != 0)"), worker_body.index("_restart_servo_after_gripper = true"))
+        self.assertNotIn("GetRobotRealTimeState failed in non-realtime worker", worker_body)
+        self.assertIn("_gripper_cv.wait(lock, [this]", worker_body)
+        self.assertLess(worker_body.index("MoveGripper("), worker_body.index("ServoMoveStart(1)"))
+        self.assertLess(worker_body.index("ServoMoveStart(1)"), worker_body.index("_arm_stream_paused = false"))
+        self.assertIn("_gripper_command_generation.load() == command_generation", worker_body)
         self.assertIn(
             "if (feedback_is_plausible &&",
             worker_body,
         )
         self.assertIn("Holding last valid gripper feedback", worker_body)
         self.assertIn("Realtime gripper feedback recovered", worker_body)
+        self.assertIn(
+            "if (motion_done != 0 && feedback_is_plausible)", worker_body,
+        )
+        self.assertNotIn(
+            "Completed gripper motion has implausible feedback", worker_body,
+        )
         settle_branch = worker_body.split(
             "if (feedback_is_plausible && observed_movement &&", 1
         )[1].split("if (std::chrono::steady_clock::now() >= deadline)", 1)[0]
         self.assertIn("Gripper motion settled away from target", settle_branch)
-        self.assertIn("_restart_servo_after_gripper = true", settle_branch)
+        self.assertIn("resume_arm = true", settle_branch)
         self.assertNotIn("_gripper_error =", settle_branch)
         pending_supersession = worker_body.split(
-            "_gripper_cv.wait_for(lock, 50ms", 2
-        )[2].split("continue;", 1)[0]
+            "_gripper_cv.wait_for(lock, 50ms", 1
+        )[1].split("continue;", 1)[0]
         self.assertIn("_pending_gripper_position.has_value()", pending_supersession)
         self.assertIn("Superseding unsettled gripper command", pending_supersession)
         self.assertLess(
@@ -314,6 +366,28 @@ class RecorderContractTest(unittest.TestCase):
             "frame_start": 2,
             "frame_end": 3,
         }])
+
+    def test_video_frame_counts_are_bounded_parallel_and_ordered(self):
+        barrier = threading.Barrier(4)
+        lock = threading.Lock()
+        started = 0
+        worker_names = set()
+
+        def probe(path):
+            nonlocal started
+            with lock:
+                started += 1
+                should_wait = started <= 4
+                worker_names.add(threading.current_thread().name)
+            if should_wait:
+                barrier.wait(timeout=2.0)
+            return int(path.name), None
+
+        paths = [Path(str(index)) for index in range(6)]
+        with patch("validate_lerobot_dataset._video_frame_count", side_effect=probe):
+            counts = _video_frame_counts(paths)
+        self.assertEqual(counts, [(index, None) for index in range(6)])
+        self.assertEqual(len(worker_names), 4)
 
     def test_collection_defaults_and_supported_camera_path(self):
         root = Path(__file__).resolve().parents[1]

@@ -282,7 +282,7 @@ def _scene_binding(validated, release_pose, run_id, root=ROOT / "outputs/data_fa
         exclusion_geometry_digest=exclusion_geometry_digest,
     )
     allocation = snapshot["scene_state"].get("slot_allocations", {}).get(slot["slot_id"])
-    if allocation is not None and allocation.get("state") not in {"AVAILABLE", "LANDED_FOR_NEXT_SOURCE"}:
+    if allocation is not None and allocation.get("state") != "AVAILABLE":
         raise ContractError("SCENE_SLOT_NOT_READY")
     binding = {
         "scene_state_digest": snapshot["scene_state_digest"],
@@ -845,6 +845,70 @@ def _release_outcome_landed(evidence):
             "HUMAN_TTY", "LOCAL_UI_BUTTON", "CAMPAIGN_CONTROL_PROXY",
         }
     )
+
+
+def _read_live_cell_state(
+    cell_store: CellStateStore, *, data_disposition: str,
+    campaign_authorization: Mapping[str, Any] | None, operator_id: object,
+    run_id: object, scene_binding: Mapping[str, Any] | None,
+    scene_store: SceneStateStore | None,
+) -> dict[str, Any]:
+    """Start a fresh production generation without clearing physical faults."""
+    cell = cell_store.read()
+    if (
+        data_disposition == "PRODUCTION"
+        and campaign_authorization is not None
+        and cell.get("cell_ready") is not True
+        and cell.get("reason_code") == "STATE_MISSING"
+    ):
+        return cell_store.acknowledge_ready(operator_id)
+    scene_snapshot = (
+        scene_store.snapshot()
+        if data_disposition == "PRODUCTION"
+        and campaign_authorization is not None
+        and cell.get("cell_ready") is False
+        and cell.get("reason_code") == "SCENE_SLOT_UNAVAILABLE"
+        and isinstance(run_id, str)
+        and cell.get("run_id") != run_id
+        and isinstance(scene_binding, Mapping)
+        and scene_store is not None
+        else None
+    )
+    scene = scene_snapshot.get("scene_state") if scene_snapshot else None
+    instance = (
+        scene.get("objects", {}).get(scene_binding.get("object_instance_id"))
+        if isinstance(scene, Mapping) and isinstance(scene_binding, Mapping)
+        else None
+    )
+    if (
+        data_disposition == "PRODUCTION"
+        and campaign_authorization is not None
+        and cell.get("cell_ready") is False
+        and cell.get("reason_code") == "SCENE_SLOT_UNAVAILABLE"
+        and isinstance(run_id, str)
+        and cell.get("run_id") != run_id
+        and isinstance(scene, Mapping)
+        and scene.get("slot_allocations") == {}
+        and isinstance(scene_binding, Mapping)
+        and scene_snapshot.get("scene_state_digest")
+        == scene_binding.get("scene_state_digest")
+        and scene.get("revision") == scene_binding.get("revision")
+        and isinstance(instance, Mapping)
+        and instance.get("state") == "ON_SURFACE"
+        and instance.get("source") == "HUMAN"
+        and instance.get("updated_at") == scene.get("updated_at")
+        and datetime.fromisoformat(
+            scene["updated_at"].replace("Z", "+00:00")
+        ) > datetime.fromisoformat(
+            cell["updated_at"].replace("Z", "+00:00")
+        )
+    ):
+        return cell_store.acknowledge_ready(
+            operator_id,
+            expected_run_id=cell["run_id"],
+            expected_plan_digest=cell["plan_digest"],
+        )
+    return cell
 
 
 def _technical_validator(dataset_root, _payload, profile):
@@ -1827,7 +1891,13 @@ def run_live(payload, cancel, publish, *, resolver=resolve_inputs, executor_fact
             return _response(ok=False, code="CANCELLED", state="CANCELLED", run_id=payload["run_id"])
         cell_store = CellStateStore(cell_root, payload["expected_robot_system_id"])
         scene_store = SceneStateStore(cell_root, payload["expected_robot_system_id"])
-        cell = cell_store.read()
+        cell = _read_live_cell_state(
+            cell_store, data_disposition=data_disposition,
+            campaign_authorization=campaign_authorization,
+            operator_id=validated["normalized_job"].get("operator_or_agent_id"),
+            run_id=payload["run_id"], scene_binding=scene_binding,
+            scene_store=scene_store,
+        )
         if cell.get("robot_system_id") != payload["expected_robot_system_id"] or cell.get("cell_ready") is not True:
             return _response(ok=False, code="CELL_NOT_READY", state="BLOCKED", run_id=payload["run_id"])
         _prepare_run_dir(payload)

@@ -38,10 +38,14 @@ def plan_quality_attribute(*, run_id: str, resolved_job_digest: str, plan_digest
         start, final = _joints(step.get("start_joint_state")), _joints(step.get("final_joint_state"))
         chain_error = max(chain_error, *(abs(left - right) for left, right in zip(previous, start)))
         encoded = step.get("trajectory_b64")
-        if not isinstance(encoded, str):
+        continuation = step.get("continuation_trajectory_b64")
+        if not isinstance(encoded, str) or continuation is not None and not isinstance(continuation, str):
             raise ContractError("PLAN_QUALITY_TRAJECTORY")
         try:
-            payload_bytes = len(base64.b64decode(encoded, validate=True))
+            payload_bytes = sum(
+                len(base64.b64decode(value, validate=True))
+                for value in (encoded, continuation) if value is not None
+            )
         except (binascii.Error, ValueError) as exc:
             raise ContractError("PLAN_QUALITY_TRAJECTORY") from exc
         if payload_bytes == 0:

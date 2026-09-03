@@ -1062,6 +1062,28 @@ class RecorderTransactionTest(unittest.TestCase):
             self.assertEqual(recorder.alignment_failures, 0)
             self.assertTrue(recorder.writer_queue.empty())
 
+    def test_readiness_prefix_defers_source_frame_reuse_to_episode_quality(self):
+        with tempfile.TemporaryDirectory() as directory:
+            recorder = self.make_recorder(directory)
+            self.assertTrue(recorder.begin_episode(self.transaction(directory))["ok"])
+            recorder.frames = 60
+            recorder._quality_snapshot = lambda: {
+                "accepted": False,
+                "reasons": ["wrist image repeat ratio 32.2% is too high"],
+                "frames": 60,
+                "cameras": {"wrist": {"repeat_ratio": 0.322}},
+            }
+
+            result = recorder.trim_readiness_prefix()
+
+            self.assertTrue(result["ok"])
+            self.assertEqual(result["reason_code"], "READINESS_PREFIX_TRIMMED")
+            self.assertEqual(result["quality"]["reasons"], [])
+            self.assertEqual(
+                result["quality"]["discarded_prefix_diagnostics"],
+                ["wrist image repeat ratio 32.2% is too high"],
+            )
+
     def test_abort_is_idempotent_and_recorder_is_reusable(self):
         with tempfile.TemporaryDirectory() as directory:
             recorder = self.make_recorder(directory)

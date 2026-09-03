@@ -1959,6 +1959,14 @@ class OperatorConsole:
             ):
                 raise ContractError("OPERATOR_CONSOLE_CANDIDATE_STATE")
             item = self._active_candidate_review
+            matches = [
+                history for history in self._episode_history
+                if isinstance(history.get("intent_binding"), Mapping)
+                and history["intent_binding"].get("run_id") == item["run_id"]
+            ]
+            if len(matches) != 1:
+                raise ContractError("OPERATOR_CONSOLE_CANDIDATE_STATE")
+            history = matches[0]
             resolved = self.candidate_review_port.resolve_deferred(payload)
             try:
                 ledger_reference = self.candidate_state_bind_call(
@@ -1971,17 +1979,11 @@ class OperatorConsole:
                 raise ContractError("OPERATOR_CONSOLE_CANDIDATE_STATE") from exc
             if (
                 ledger_reference.get("review_status") != resolved["status"]
+                or resolved.get("run_id") != item["run_id"]
                 or ledger_reference.get("training_status") != "NOT_AUTHORIZED"
                 or ledger_reference.get("retention_state") != "PRESERVE"
             ):
                 raise ContractError("OPERATOR_CONSOLE_CANDIDATE_STATE")
-            matches = [
-                history for history in self._episode_history
-                if history.get("intent_binding", {}).get("run_id") == resolved["run_id"]
-            ]
-            if len(matches) != 1:
-                raise ContractError("OPERATOR_CONSOLE_CANDIDATE_STATE")
-            history = matches[0]
             history["episode_ledger"] = copy.deepcopy(ledger_reference)
             history["human_semantic"] = resolved["status"]
             history["result_digest"] = canonical_digest({

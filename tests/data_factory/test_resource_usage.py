@@ -5,6 +5,32 @@ from tools.data_factory.resource_usage import ResourceMonitor
 
 
 class ResourceUsageTest(unittest.TestCase):
+    def test_finish_interrupts_default_sampling_wait(self):
+        monitor = ResourceMonitor(
+            "run", "sha256:profile", interval_s=1.0,
+        )
+        monitor._host_info = lambda: {}
+        monitor._sample = lambda: None
+        waiting = threading.Event()
+        wait_results = []
+        wait = monitor._sleep
+
+        def observed_wait(seconds):
+            waiting.set()
+            result = wait(seconds)
+            wait_results.append(result)
+            return result
+
+        monitor._sleep = observed_wait
+        monitor.start()
+        self.assertTrue(waiting.wait(1.0))
+        monitor.finish({
+            "writer_queue": 0,
+            "writer_queue_drops": 0,
+            "alignment_failures": 0,
+        })
+        self.assertEqual(wait_results, [True])
+
     def test_child_exit_does_not_poison_resource_report(self):
         child_stat_reads = 0
 

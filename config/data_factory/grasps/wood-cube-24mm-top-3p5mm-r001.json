@@ -8,7 +8,7 @@
   "grasp_geometry": {
     "contact_surface": "TOP",
     "depth_from_top_mm": 3.5,
-    "release_clearance_mm": 1.0,
+    "release_clearance_mm": 2.0,
     "datum_to_tcp_grasp": {
       "translation_m": [
         0.0,
@@ -46,9 +46,11 @@
   },
   "gripper_open": {
     "command_position_m": 0.021,
+    "release_position_m": 0.0126,
+    "release_hold_s": 0.5,
     "velocity_percent": 10,
     "force_percent": 50,
-    "completion_tolerance_m": 0.000105,
+    "completion_tolerance_m": 0.000211,
     "evidence_digest": "sha256:24369d1fbbbdda1af18578521dad72f37a8073c8fe080c7cc6ef1418a6e65ce2"
   }
 }

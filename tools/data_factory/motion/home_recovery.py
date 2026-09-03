@@ -13,6 +13,7 @@ from tools.fr5_data_factory import (
     MOTION_QUALIFICATION_KEYS_BY_SCHEMA,
     SAFE_ID,
     canonical_digest,
+    normalize_planning_scene,
 )
 
 
@@ -100,7 +101,7 @@ def _validated_motion(value: object, prefix: str) -> dict[str, Any]:
     motion = copy.deepcopy(dict(value))
     try:
         safe = motion["qualified_safe_joint_positions_rad"]
-        scene = motion["planning_scene"]
+        scene = normalize_planning_scene(motion["planning_scene"])
         frames = motion["frames"]
         tolerances = motion["goal_tolerances"]
         arm_limits = motion["phase_limits"]["SAFE_POSE_PTP"]
@@ -116,7 +117,7 @@ def _validated_motion(value: object, prefix: str) -> dict[str, Any]:
             float(gripper_limits["completion_tolerance_m"]),
             float(motion["execution_timeouts_s"]["cancel"]),
         )
-    except (KeyError, TypeError, ValueError) as exc:
+    except (ContractError, KeyError, TypeError, ValueError) as exc:
         raise ContractError(f"{prefix}_QUALIFICATION", str(exc)) from exc
     if (
         motion.get("qualification_status") != "QUALIFIED"
@@ -156,11 +157,17 @@ def _validated_motion(value: object, prefix: str) -> dict[str, Any]:
         or not 0 < numbers[3] <= 0.1
         or any(item <= 0 for item in numbers[4:6])
         or not 0 < numbers[6]
-        or not 0 < numbers[7] <= 0.000105
+        or not 0 < numbers[7] <= numbers[6] / 100 + 1e-6
         or not 0 < numbers[8]
     ):
         raise ContractError(f"{prefix}_QUALIFICATION")
+    motion["planning_scene"] = scene
     return motion
+
+
+def validate_home_recovery_qualification(value: object) -> dict[str, Any]:
+    """Validate and normalize HOME inputs before any physical preparation."""
+    return _validated_motion(value, "HOME_RECOVERY")
 
 
 def _validated_start_pose(
@@ -368,7 +375,7 @@ def recover_home(
     transport, *, motion_qualification: Mapping[str, Any], sleep_call=time.sleep,
 ) -> dict[str, Any]:
     """Open the gripper, move once to qualified HOME, and verify."""
-    motion = _validated_motion(motion_qualification, "HOME_RECOVERY")
+    motion = validate_home_recovery_qualification(motion_qualification)
     _ready_graph(transport.preflight(), "HOME_RECOVERY_GRAPH")
     max_age = float(motion["max_joint_state_age_s"])
     before = _snapshot(transport.snapshot(max_age), "HOME_RECOVERY")
@@ -468,5 +475,6 @@ def transition_to_start_live(
 
 __all__ = [
     "recover_home", "recover_home_live",
+    "validate_home_recovery_qualification",
     "transition_to_start", "transition_to_start_live",
 ]

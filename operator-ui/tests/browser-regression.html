@@ -69,6 +69,8 @@
     let stateKey = "authoring";
     let postResult = "accepted";
     let networkFailure = false;
+    let postTransportFailure = false;
+    let intentAttempts = 0;
     let bridgeTokenRejected = false;
     let sessionIdOverride;
     let draftAuthoringMode;
@@ -177,6 +179,11 @@
         else init.signal?.addEventListener("abort", abort, {once: true});
       });
       if (path === "/api/intent") {
+        intentAttempts += 1;
+        if (postTransportFailure) {
+          postTransportFailure = false;
+          throw new TypeError("fixture response lost");
+        }
         const fixture = await fixturePromise;
         const request = {headers: new Headers(init.headers), body: JSON.parse(init.body)};
         posted.push(request);
@@ -265,6 +272,16 @@
         check(["상단", "측면", "손목", "사용 안 함"].every((label) => document.querySelector("#camera-role-list").textContent.includes(label)), "each camera exposes plain-language role choices");
         check(!document.querySelector("#camera-setup").textContent.includes("usb-") && document.querySelector("#technical-content").textContent.includes("usb-Generic"), "technical camera identity stays in collapsed technical details");
         check(document.querySelector('[data-axis="camera"]').hidden && document.querySelector('[data-axis="camera"]').disabled && document.querySelector("#camera-selection-label").textContent.includes("상단 RGB"), "camera profile is derived instead of manually selected in the plan");
+        const attemptsBeforeLostResponse = intentAttempts;
+        postTransportFailure = true;
+        submitIntent("update_draft", {draft_id: currentView.draft.draft_id, repeat: currentView.draft.repeat});
+        await waitFor(() => !intentBusy && document.body.dataset.bridge === "ready");
+        check(intentAttempts === attemptsBeforeLostResponse + 1 && document.querySelector("#connection-banner").textContent.includes("재전송하지 않았습니다"), "lost intent response resynchronizes from the authoritative view without replay");
+        if (new URLSearchParams(location.search).get("only") === "intent-recovery") {
+          document.body.dataset.result = "pass";
+          output.textContent = `${checks.length} checks passed\n${checks.join("\n")}`;
+          return;
+        }
         const camera2 = document.querySelector('[data-camera-logical-id="camera-2"]');
         camera2.value = "WRIST";
         camera2.dispatchEvent(new Event("change", {bubbles: true}));

@@ -1861,7 +1861,7 @@ def load_camera_binding_receipt(*, repository_root: str | Path) -> dict[str, Any
 
 def gripper_setup_projection(
     readback: Mapping[str, Any] | None, *,
-    open_target_m: float = 0.021, tolerance_m: float = 0.000105,
+    open_target_m: float = 0.021, tolerance_m: float = 0.021 / 100 + 1e-6,
 ) -> dict[str, Any]:
     """Classify one fresh controller readback without invoking activation."""
     if readback is None:

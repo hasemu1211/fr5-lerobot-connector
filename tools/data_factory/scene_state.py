@@ -476,7 +476,15 @@ class SceneStateStore:
                 "updated_by": updated_by,
                 "updated_at": now,
             }
-            scene = _validate({**current, "revision": current["revision"] + 1, "objects": objects, "updated_at": now}, self.robot_system_id)
+            next_scene = {
+                **current,
+                "revision": current["revision"] + 1,
+                "objects": objects,
+                "updated_at": now,
+            }
+            if source == "HUMAN" and "slot_allocations" in current:
+                next_scene["slot_allocations"] = {}
+            scene = _validate(next_scene, self.robot_system_id)
             write_json_atomic(self._path(create=True), scene)
             return {"scene_state": scene, "scene_state_digest": canonical_digest(scene)}
         finally:

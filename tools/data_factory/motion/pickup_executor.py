@@ -370,6 +370,7 @@ class PickupExecutor:
         for step in motion_program["steps"]:
             phase = step["phase"]
             planned_duration_s = None
+            continuation = None
             if phase in ARM_PHASES:
                 result = _exact(
                     self.transport.plan_arm(
@@ -412,10 +413,26 @@ class PickupExecutor:
                     if planned_duration_s + EXECUTION_RESULT_MARGIN_S > step["limits"]["execution_timeout_s"]:
                         raise ContractError("EXECUTION_TIMEOUT_INSUFFICIENT")
             else:
-                serialized = self.transport.build_gripper_goal(
-                    phase, step["gripper_position_m"], step["limits"]
-                )
+                if phase == "GRIPPER_OPEN" and "release_position_m" in step:
+                    stage_limits = {
+                        **step["limits"],
+                        "command_duration_s": step["release_hold_s"],
+                    }
+                    serialized = self.transport.build_gripper_goal(
+                        phase, step["release_position_m"], stage_limits,
+                    )
+                    continuation = self.transport.build_gripper_goal(
+                        phase, step["gripper_position_m"], step["limits"],
+                    )
+                else:
+                    serialized = self.transport.build_gripper_goal(
+                        phase, step["gripper_position_m"], step["limits"],
+                    )
                 if not isinstance(serialized, bytes) or not serialized:
+                    raise ContractError("GRIPPER_GOAL")
+                if continuation is not None and (
+                    not isinstance(continuation, bytes) or not continuation
+                ):
                     raise ContractError("GRIPPER_GOAL")
                 final_state = state
                 step_type = "GRIPPER"
@@ -430,10 +447,16 @@ class PickupExecutor:
             }
             if planned_duration_s is not None:
                 compiled["planned_duration_s"] = float(planned_duration_s)
+            if step_type == "GRIPPER" and continuation is not None:
+                compiled["continuation_trajectory_b64"] = base64.b64encode(
+                    continuation
+                ).decode("ascii")
             for key in (
                 "target",
                 "joint_positions_rad",
                 "gripper_position_m",
+                "release_position_m",
+                "release_hold_s",
                 "requires_confirmation",
                 "pause_after",
             ):
@@ -913,6 +936,22 @@ class PickupExecutor:
                 if active is not None:
                     execution["active"] = False
                     completed_step = run["plan"]["steps"][execution["step_index"]]
+                    continuation = completed_step.get("continuation_trajectory_b64")
+                    if continuation is not None and not execution.get("continuation_dispatched"):
+                        continued_step = {**completed_step, "trajectory_b64": continuation}
+                        try:
+                            self.transport.start_phase(continued_step)
+                        except Exception as exc:
+                            self._fault(
+                                run,
+                                exc.code if isinstance(exc, ContractError)
+                                else "ROS_EXEC_GOAL_FAILED",
+                            )
+                            continue
+                        execution["continuation_dispatched"] = True
+                        execution["active"] = True
+                        continue
+                    execution.pop("continuation_dispatched", None)
                     execution["terminal_phases"].append(completed_step["phase"])
                     self._emit_phase_event(run, "ACTION_TERMINAL", completed_step, "SUCCEEDED", {"step": completed_step, "terminal_status": "SUCCEEDED"})
                     if completed_step["phase"] in {"GRIPPER_CLOSE", "LIFT_LIN"}:
