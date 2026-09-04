@@ -68,17 +68,21 @@ class RosCapture:
     def capture(self,timeout_s,max_age_s):
         self.samples.clear()
         deadline=self.clock()+timeout_s
+        fresh_sample_seen=False
         while self.clock()<deadline:
             self.rclpy.spin_once(self.node,timeout_sec=min(.05,max(0.,deadline-self.clock())))
             for message,received_at in reversed(self.samples):
                 try:
                     joint_stamp=stamp_ns(message.header.stamp); ros_now_ns=self.node.get_clock().now().nanoseconds
-                    if ros_now_ns-joint_stamp<0 or (ros_now_ns-joint_stamp)/1_000_000_000>max_age_s: continue
+                    received_age=self.clock()-received_at; ros_age=(ros_now_ns-joint_stamp)/1_000_000_000
+                    if received_age<0 or received_age>max_age_s or ros_age<0 or ros_age>max_age_s: continue
+                    fresh_sample_seen=True
                     transform=self.tf_buffer.lookup_transform("base_link","wrist3_link",self.rclpy.time.Time.from_msg(message.header.stamp))
                 except self.transient_exceptions: continue
                 if transform.header.frame_id!="base_link" or transform.child_frame_id!="wrist3_link" or abs(stamp_ns(transform.header.stamp,"ROS_TF_STAMP")-joint_stamp)>TF_SKEW_NS: continue
                 return message,received_at,transform,ros_now_ns
         if not self.samples: raise ContractError("ROS_JOINT_STATE_MISSING")
+        if not fresh_sample_seen: raise ContractError("ROS_JOINT_STATE_STALE")
         raise ContractError("ROS_TF")
 
 def _snapshot_from_path(path):

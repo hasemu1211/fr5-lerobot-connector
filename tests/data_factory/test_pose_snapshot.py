@@ -2,17 +2,87 @@ import copy
 import hashlib
 import json
 import shutil
+import sys
 import unittest
 from collections import deque
 from types import SimpleNamespace as NS
+from unittest import mock
 
 from tools import fr5_data_factory as factory
 from tools.fr5_data_factory import ContractError, canonical_digest
 from tools.a4_place_yaw.generate_place_yaw_a4 import build_places, make_manifest
+from tools.data_factory.motion.pose_snapshot import JOINTS
 from tools.data_factory.motion.pose_snapshot import RosCapture, build_pose_snapshot, calibrate_place, joint_positions, main as pose_snapshot_main, quaternion_to_rotation_columns, qualify_place, render_text, resolve_place, tcp_candidate
 
 
 class PoseSnapshotTest(unittest.TestCase):
+    def test_ros_capture_constructs_the_production_bounded_history(self):
+        messages = NS(JointState=object)
+        node = NS(create_subscription=mock.Mock(return_value=object()))
+        with mock.patch.dict(sys.modules, {
+            "sensor_msgs": NS(msg=messages), "sensor_msgs.msg": messages,
+        }):
+            capture = RosCapture(node, NS(), NS())
+        self.assertIsInstance(capture.samples, deque)
+        self.assertEqual(capture.samples.maxlen, 32)
+        node.create_subscription.assert_called_once_with(
+            object, "/joint_states", capture._joint_state, 10,
+        )
+
+    def test_capture_distinguishes_missing_stale_and_tf_unavailable(self):
+        class Transient(Exception):
+            pass
+
+        def joint(nanosec=0):
+            return NS(
+                name=list(JOINTS), position=[0.] * 6,
+                header=NS(stamp=NS(sec=10, nanosec=nanosec)),
+            )
+
+        def capture_with(message, buffer, *, ros_now_ns, transform=None):
+            ticks = [0.]
+
+            class FakeRclpy:
+                time = NS(Time=NS(from_msg=lambda stamp: stamp))
+                sent = False
+
+                def spin_once(self, *_args, timeout_sec=0.):
+                    ticks[0] += timeout_sec
+                    if message is not None and not self.sent:
+                        self.sent = True
+                        capture._joint_state(message)
+
+            capture = RosCapture.__new__(RosCapture)
+            capture.rclpy = FakeRclpy()
+            capture.tf_buffer = buffer
+            capture.clock = lambda: ticks[0]
+            capture.samples = deque(maxlen=32)
+            capture.node = NS(get_clock=lambda: NS(
+                now=lambda: NS(nanoseconds=ros_now_ns),
+            ))
+            capture.transient_exceptions = (Transient,)
+            return capture.capture(.11, .1)
+
+        unavailable = NS(lookup_transform=lambda *_args: (_ for _ in ()).throw(
+            Transient("tf unavailable"),
+        ))
+        with self.assertRaisesRegex(ContractError, "ROS_JOINT_STATE_MISSING"):
+            capture_with(None, unavailable, ros_now_ns=10_050_000_000)
+        with self.assertRaisesRegex(ContractError, "ROS_JOINT_STATE_STALE"):
+            capture_with(joint(), unavailable, ros_now_ns=10_100_000_001)
+        with self.assertRaisesRegex(ContractError, "ROS_TF"):
+            capture_with(joint(), unavailable, ros_now_ns=10_100_000_000)
+
+        exact_skew = NS(
+            header=NS(frame_id="base_link", stamp=NS(sec=10, nanosec=10_000_000)),
+            child_frame_id="wrist3_link",
+        )
+        matched = capture_with(
+            joint(), NS(lookup_transform=lambda *_args: exact_skew),
+            ros_now_ns=10_100_000_000,
+        )
+        self.assertEqual(matched[3], 10_100_000_000)
+
     def test_capture_contract(self):
         header=NS(stamp=NS(sec=10,nanosec=0));message=NS(name=["j3","j1","j2","j4","j5","j6","finger_right_joint"],position=[3.,1.,2.,4.,5.,6.,.021],header=header)
         self.assertEqual(joint_positions(message,9.8,10,.5),[1.,2.,3.,4.,5.,6.])

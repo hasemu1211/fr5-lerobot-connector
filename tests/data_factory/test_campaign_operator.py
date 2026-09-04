@@ -217,7 +217,7 @@ class CampaignOperatorTests(unittest.TestCase):
                 "session_id": model.session_id, "run_id": run_id,
                 "data_disposition": "PRODUCTION",
             })
-            model.physical_start_binding_call = lambda _run_id, slot: seal({
+            model.physical_start_binding_call = lambda _run_id, slot, _cancel: seal({
                 "data_disposition": "PRODUCTION", "slot_id": slot["slot_id"],
             })
 
@@ -288,7 +288,7 @@ class CampaignOperatorTests(unittest.TestCase):
                 data_disposition="PRODUCTION",
             )
             model.physical_activation_gate = ports.activate
-            model.physical_start_binding_call = lambda _run_id, _slot: {
+            model.physical_start_binding_call = lambda _run_id, _slot, _cancel: {
                 "data_disposition": "PRODUCTION",
             }
             model.physical_root_binding_call = lambda run_id: build_test_only_root_binding(
@@ -312,7 +312,7 @@ class CampaignOperatorTests(unittest.TestCase):
                 directory, session_id=model.session_id, run_id=run_id,
                 dataset_root=f"{directory}/datasets/fr5_episodes/production-dataset",
             )
-            model.physical_start_binding_call = lambda _run_id, _slot: {
+            model.physical_start_binding_call = lambda _run_id, _slot, _cancel: {
                 "data_disposition": "TEST_ONLY", "binding_digest": canonical_digest("start"),
             }
             send(model, "compile_draft", {}, "compile-cross-start-r001")
@@ -364,7 +364,7 @@ class CampaignOperatorTests(unittest.TestCase):
                             data_disposition=disposition,
                         )
                         model.physical_activation_gate = ports.activate
-                        model.physical_start_binding_call = lambda _run_id, _slot: {}
+                        model.physical_start_binding_call = lambda _run_id, _slot, _cancel: {}
                         setattr(model, field, invalid)
                         send(
                             model, "compile_draft", {},
@@ -403,7 +403,7 @@ class CampaignOperatorTests(unittest.TestCase):
                     )
                     model.physical_activation_gate = ports.activate
                     start_calls = []
-                    model.physical_start_binding_call = lambda run_id, _slot: start_calls.append(run_id) or {}
+                    model.physical_start_binding_call = lambda run_id, _slot, _cancel: start_calls.append(run_id) or {}
                     if case in {"stale", "scene-digest"}:
                         observed = NOW - timedelta(seconds=6) if case == "stale" else NOW
 
@@ -457,7 +457,7 @@ class CampaignOperatorTests(unittest.TestCase):
                     model.scene_evidence_call = scene
                     model.physical_activation_gate = activate
                     model.physical_start_binding_call = (
-                        lambda _run_id, _slot: timeline.append("start") or {}
+                        lambda _run_id, _slot, _cancel: timeline.append("start") or {}
                     )
                     if action == "LIVE_COLLECT":
                         model.physical_root_binding_call = lambda run_id: (

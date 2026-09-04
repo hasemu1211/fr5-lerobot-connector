@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import copy
 import json
+import threading
 import unittest
 from pathlib import Path
 
@@ -97,6 +98,46 @@ class FakeTransport:
 
 
 class StartTransitionTests(unittest.TestCase):
+    def test_cancel_stops_start_transition_before_or_during_motion(self):
+        cancelled = threading.Event()
+        cancelled.set()
+        untouched = FakeTransport([])
+        with self.assertRaisesRegex(ContractError, "START_TRANSITION_CANCELLED"):
+            transition_to_start(
+                untouched,
+                motion_qualification=MOTION,
+                robot_start_pose_qualification=qualification(),
+                cancel_event=cancelled,
+            )
+        self.assertEqual((untouched.planned, untouched.precommits, untouched.started), (0, 0, []))
+
+        class WaitingTransport(FakeTransport):
+            def __init__(self, snapshots):
+                super().__init__(snapshots)
+                self.cancelled = 0
+
+            def poll_active(self):
+                cancelled.set()
+                return None
+
+            def cancel_active(self, _timeout):
+                self.cancelled += 1
+                return {"state": "CANCELLED"}
+
+        cancelled.clear()
+        target = list(TARGET.values())
+        start = [item + 0.2 for item in target]
+        waiting = WaitingTransport([snapshot(start), snapshot(start)])
+        with self.assertRaisesRegex(ContractError, "START_TRANSITION_CANCELLED"):
+            transition_to_start(
+                waiting,
+                motion_qualification=MOTION,
+                robot_start_pose_qualification=qualification(),
+                cancel_event=cancelled,
+                sleep_call=lambda _seconds: None,
+            )
+        self.assertEqual((waiting.started, waiting.cancelled), (["SAFE_POSE_PTP"], 1))
+
     def test_qualified_transition_or_noop_and_fail_closed_inputs(self):
         target = list(TARGET.values())
         start = [item + 0.2 for item in target]

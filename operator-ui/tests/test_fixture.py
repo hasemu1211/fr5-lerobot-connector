@@ -177,9 +177,26 @@ class DataFactoryOperatorUiStaticTest(unittest.TestCase):
         self.assertIn("/api/view/watch?after_revision=${afterRevision}", self.js)
         self.assertIn("new AbortController()", self.js)
         self.assertIn("stopWatch();", self.js)
-        submit = self.js.split("async function submitIntent", 1)[1].split("async function loadView", 1)[0]
+        submit = self.js.split("async function submitIntent", 1)[1].split(
+            "async function submitImmediateCancel", 1,
+        )[0]
         self.assertNotIn("stopWatch();", submit)
         self.assertEqual(submit.count("loadView("), 1)
+
+    def test_immediate_cancel_is_independent_and_latched(self):
+        cancel = self.js.split(
+            "async function submitImmediateCancel", 1,
+        )[1].split("async function loadView", 1)[0]
+        self.assertNotIn("intentBusy", cancel)
+        self.assertIn("cancelPending = true", cancel)
+        self.assertIn('fetch("/api/intent"', cancel)
+        for marker in (
+            "immediate cancel remains reachable while an ordinary intent is busy",
+            "immediate cancel latches before its response while RUNNING remains authoritative",
+            "busy-path cancel emits exactly one independent POST",
+            "cancel remains single-submit after the ordinary intent completes",
+        ):
+            self.assertIn(marker, self.browser)
 
     def test_forbidden_copy_and_browser_authority(self):
         product_copy = self.html + self.messages

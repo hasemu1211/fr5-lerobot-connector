@@ -214,7 +214,9 @@ class Harness:
         self.children.append(child)
         return child
 
-    def start_binding(self, _run_id: str, slot: Mapping[str, Any]) -> dict:
+    def start_binding(
+        self, _run_id: str, slot: Mapping[str, Any], _cancel_event,
+    ) -> dict:
         manifest = self.operator.manifest
         pose = next(
             item for item in self.hypothesis["robot_start_poses"]
@@ -867,7 +869,7 @@ class OperatorConsoleTests(unittest.TestCase):
                 physical_lifecycle_factory=lambda: None,
                 physical_live_call=episode_call,
                 physical_root_binding_call=lambda _run_id: {},
-                physical_start_binding_call=lambda _run_id, _slot: {},
+                physical_start_binding_call=lambda _run_id, _slot, _cancel: {},
                 clock=lambda: NOW,
             )
 
@@ -948,7 +950,7 @@ class OperatorConsoleTests(unittest.TestCase):
                     physical_lifecycle_factory=lambda: None,
                     physical_live_call=episode_call,
                     physical_root_binding_call=lambda _run_id: {},
-                    physical_start_binding_call=lambda _run_id, _slot: {},
+                    physical_start_binding_call=lambda _run_id, _slot, _cancel: {},
                     clock=lambda: NOW,
                 )
 
@@ -1083,6 +1085,34 @@ class OperatorConsoleTests(unittest.TestCase):
         urdf = target / "src/fairino_description/urdf/fairino5_v6.urdf"
         urdf.parent.mkdir(parents=True)
         shutil.copy2(source / "src/fairino_description/urdf/fairino5_v6.urdf", urdf)
+
+    @staticmethod
+    def qualified_home_start(target: Path) -> tuple[dict[str, Any], dict[str, Any]]:
+        motion = load_json_strict(
+            target / "config/data_factory/motion_qualifications/"
+            "fr5-place-a-wood-cube-r001.json",
+        )
+        home = load_json_strict(
+            target / "config/data_factory/home_candidates/fr5-lab-a-home-r001.json",
+        )
+        qualification = {
+            "schema_version": "data_factory.robot_start_pose_qualification.v1",
+            "source": "QUALIFICATION_ARTIFACT",
+            "robot_system_id": motion["robot_system_id"],
+            "robot_start_pose_id": home["home_candidate_id"],
+            "joint_order": copy.deepcopy(home["joint_order"]),
+            "target_rad": dict(zip(
+                home["joint_order"], motion["qualified_safe_joint_positions_rad"],
+            )),
+            "tolerance_rad": dict.fromkeys(
+                home["joint_order"], motion["goal_tolerances"]["joint_rad"],
+            ),
+            "home_candidate_digest": canonical_digest(home),
+            "qualification_status": "QUALIFIED",
+            "safety_status": "SAFE_FOR_MOTION",
+        }
+        qualification["qualification_digest"] = canonical_digest(qualification)
+        return motion, qualification
 
     @staticmethod
     def start_bridge(console: OperatorConsole):
@@ -3703,6 +3733,185 @@ feedback:
                 release.set()
                 console.close()
 
+    def test_real_composition_snapshot_failure_precedes_transition_and_all_effects(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.portable_repository(root)
+            _motion, qualification = self.qualified_home_start(root)
+            opened = {
+                "active": True, "position_valid": True, "gripper_index": 1,
+                "reference_position_m": 0.021, "feedback_position_m": 0.021,
+                "sample_age_s": 0.0, "max_age_s": 0.1,
+                "source": "CONTROLLER_STATE",
+            }
+            snapshot = mock.Mock(
+                side_effect=ContractError("PHYSICAL_HOME_SNAPSHOT"),
+            )
+            transition = mock.Mock(
+                side_effect=AssertionError("start transition ran before HOME evidence"),
+            )
+            live = mock.Mock(side_effect=AssertionError("live episode ran"))
+            candidate = mock.Mock(side_effect=AssertionError("candidate write ran"))
+            ledger = mock.Mock(side_effect=AssertionError("ledger write ran"))
+            with (
+                mock.patch.object(run_job, "write_candidate_admission", candidate),
+                mock.patch.object(run_job, "bind_candidate_episode_state", ledger),
+            ):
+                console, _context = build_physical_operator_console(
+                    repository_root=root,
+                    session_id="snapshot-order-r001",
+                    run_id="snapshot-order-run-r001",
+                    operator_label="local-operator",
+                    discovery_call=lambda: ["usb-Goal2_Camera-video-index0"],
+                    activation_call=lambda: True,
+                    snapshot_call=snapshot,
+                    gripper_readback_call=lambda: copy.deepcopy(opened),
+                    run_live_call=live,
+                    selected_start_pose_qualifications=[qualification],
+                    start_transition_call=transition,
+                    environment_prepared=True,
+                    clock=lambda: NOW,
+                )
+                try:
+                    current = console.bridge_core.snapshot()
+                    compiled = console.bridge_core.consume(envelope(
+                        current, "compile_draft", {
+                            "draft_id": current["projection"]["draft"]["draft_id"],
+                            "data_disposition": "TEST_ONLY",
+                        }, "compile-snapshot-order-r001",
+                    ))["result"]
+                    review = console.bridge_core.snapshot()
+                    before_paths = {
+                        path.relative_to(root) for path in root.rglob("*")
+                    }
+                    console.bridge_core.consume(envelope(
+                        review, "authorize_campaign", {
+                            "draft_id": review["projection"]["draft"]["draft_id"],
+                            "manifest_digest": compiled["manifest_digest"],
+                            "envelope_digest": compiled["envelope_digest"],
+                            "data_disposition": "TEST_ONLY",
+                        }, "authorize-snapshot-order-r001",
+                    ))
+
+                    result = console.wait_for_episode(1.0)
+                    projection = console.bridge_core.snapshot()["projection"]
+                    self.assertEqual(
+                        (result["outcome"], result["code"]),
+                        ("FAIL", "PHYSICAL_HOME_SNAPSHOT"),
+                    )
+                    self.assertEqual(
+                        (projection["runtime"]["workflow_state"],
+                         projection["runtime"]["reason_codes"]),
+                        ("BLOCKED", ["PHYSICAL_HOME_SNAPSHOT"]),
+                    )
+                    snapshot.assert_called_once_with()
+                    transition.assert_not_called()
+                    live.assert_not_called()
+                    candidate.assert_not_called()
+                    ledger.assert_not_called()
+                    self.assertTrue(all(
+                        count == 0 for count in projection["effect_counts"].values()
+                    ))
+                    self.assertEqual(
+                        {path.relative_to(root) for path in root.rglob("*")},
+                        before_paths,
+                    )
+                finally:
+                    console.close()
+
+    def test_cancel_interrupts_start_transition_before_child_or_live_effect(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.portable_repository(root)
+            motion, qualification = self.qualified_home_start(root)
+            opened = {
+                "active": True, "position_valid": True, "gripper_index": 1,
+                "reference_position_m": 0.021, "feedback_position_m": 0.021,
+                "sample_age_s": 0.0, "max_age_s": 0.1,
+                "source": "CONTROLLER_STATE",
+            }
+            entered = threading.Event()
+            calls = []
+
+            def snapshot():
+                calls.append("snapshot")
+                return pose_snapshot(
+                    motion["qualified_safe_joint_positions_rad"], age=0.01,
+                )
+
+            def transition(_motion, _qualification, cancel_event):
+                calls.append("transition")
+                entered.set()
+                if not cancel_event.wait(1.0):
+                    raise AssertionError("cancel did not interrupt start transition")
+                calls.append("cancelled")
+                raise ContractError("START_TRANSITION_CANCELLED")
+
+            live = mock.Mock(side_effect=AssertionError("cancelled episode ran"))
+            console, _context = build_physical_operator_console(
+                repository_root=root,
+                session_id="cancel-start-r001",
+                run_id="cancel-start-run-r001",
+                operator_label="local-operator",
+                discovery_call=lambda: ["usb-Goal2_Camera-video-index0"],
+                activation_call=lambda: True,
+                snapshot_call=snapshot,
+                gripper_readback_call=lambda: copy.deepcopy(opened),
+                run_live_call=live,
+                selected_start_pose_qualifications=[qualification],
+                start_transition_call=transition,
+                environment_prepared=True,
+                clock=lambda: NOW,
+            )
+            try:
+                current = console.bridge_core.snapshot()
+                compiled = console.bridge_core.consume(envelope(
+                    current, "compile_draft", {
+                        "draft_id": current["projection"]["draft"]["draft_id"],
+                        "data_disposition": "TEST_ONLY",
+                    }, "compile-cancel-start-r001",
+                ))["result"]
+                review = console.bridge_core.snapshot()
+                console.bridge_core.consume(envelope(
+                    review, "authorize_campaign", {
+                        "draft_id": review["projection"]["draft"]["draft_id"],
+                        "manifest_digest": compiled["manifest_digest"],
+                        "envelope_digest": compiled["envelope_digest"],
+                        "data_disposition": "TEST_ONLY",
+                    }, "authorize-cancel-start-r001",
+                ))
+                self.assertTrue(entered.wait(1.0))
+                running = console.bridge_core.snapshot()
+                cancelled = console.bridge_core.consume(envelope(
+                    running, "cancel_session", {
+                        "active_child_id": running["projection"]["runtime"][
+                            "active_child_id"
+                        ],
+                    }, "cancel-start-r001",
+                ))["result"]
+                self.assertEqual(cancelled["outcome"], "CANCELLING")
+                result = console.wait_for_episode(1.0)
+                projection = console.bridge_core.snapshot()["projection"]
+                self.assertEqual(calls, ["snapshot", "transition", "cancelled"])
+                self.assertEqual(
+                    (result["outcome"], result["code"],
+                     projection["runtime"]["workflow_state"]),
+                    ("CANCEL", "PLAN_CANCELLED", "TERMINAL"),
+                )
+                self.assertTrue(console.session.cancel_event.is_set())
+                with self.assertRaisesRegex(
+                    ContractError, "CAMPAIGN_OPERATOR_TERMINAL",
+                ):
+                    console.campaign_operator.run_next(
+                        {"run_id": "cancel-start-run-r001"}, {},
+                    )
+                live.assert_not_called()
+                self.assertTrue(all(
+                    count == 0 for count in projection["effect_counts"].values()
+                ))
+            finally:
+                console.close()
+
     def test_pre_episode_snapshot_failure_is_published_without_effects(self):
         with tempfile.TemporaryDirectory() as root:
             harness = Harness(root)
@@ -4377,7 +4586,9 @@ class ReusableHarness(Harness):
         self.max_active = max(self.max_active, active + 1)
         return super().fresh_one_job()
 
-    def start_binding(self, _run_id: str, slot: Mapping[str, Any]) -> dict:
+    def start_binding(
+        self, _run_id: str, slot: Mapping[str, Any], _cancel_event,
+    ) -> dict:
         pose = next(
             item for item in self.hypothesis["robot_start_poses"]
             if item["robot_start_pose_id"] == slot["robot_start_pose_id"]

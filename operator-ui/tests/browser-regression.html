@@ -72,6 +72,9 @@
     let networkFailure = false;
     let postTransportFailure = false;
     let intentAttempts = 0;
+    const heldIntentOps = new Set();
+    const heldIntentReleases = new Map();
+    let pendingWatch;
     let bridgeTokenRejected = false;
     let sessionIdOverride;
     let draftAuthoringMode;
@@ -204,8 +207,16 @@
       if (networkFailure && path.startsWith("/api/")) throw new TypeError("fixture network down");
       if (bridgeTokenRejected && path === "/api/view") return new Response(JSON.stringify({schema_version: "data_factory.operator_intent_result.v1", ok: false, code: "BRIDGE_TOKEN", consumed: false}), {status: 403, headers: {"Content-Type": "application/json"}});
       if (path === "/api/view") return new Response(JSON.stringify(await fixtureView()), {status: 200, headers: {"Content-Type": "application/json"}});
-      if (path === "/api/view/watch") return new Promise((_resolve, reject) => {
-        const abort = () => reject(new DOMException("Aborted", "AbortError"));
+      if (path === "/api/view/watch") return new Promise((resolve, reject) => {
+        const publish = (view) => {
+          if (pendingWatch === publish) pendingWatch = undefined;
+          resolve(new Response(JSON.stringify(view), {status: 200, headers: {"Content-Type": "application/json"}}));
+        };
+        pendingWatch = publish;
+        const abort = () => {
+          if (pendingWatch === publish) pendingWatch = undefined;
+          reject(new DOMException("Aborted", "AbortError"));
+        };
         if (init.signal?.aborted) abort();
         else init.signal?.addEventListener("abort", abort, {once: true});
       });
@@ -267,6 +278,13 @@
           if (request.body.op === "review_candidate") stateKey = "complete";
           if (request.body.op === "recover_camera_setup") { cameraRecovered = true; stateKey = "authoring"; }
         }
+        if (heldIntentOps.has(request.body.op)) await new Promise((resolve) => {
+          heldIntentReleases.set(request.body.op, () => {
+            heldIntentOps.delete(request.body.op);
+            heldIntentReleases.delete(request.body.op);
+            resolve();
+          });
+        });
         const result = fixture.intent_results[postResult];
         return new Response(JSON.stringify(result), {status: result.ok ? 200 : 409, headers: {"Content-Type": "application/json"}});
       }
@@ -635,8 +653,14 @@
           invalid.coverage.sequence[0].state_space_slot.sampling_seed = samplingSeed;
           try { validateView(invalid); return false; } catch (error) { return error.message === "YAW_SAMPLE_BINDING_INVALID"; }
         }), "state-space slot seed rejects numbers and non-canonical or out-of-range decimal strings");
+        heldIntentOps.add("authorize_campaign");
+        heldIntentOps.add("cancel_session");
+        await waitFor(() => pendingWatch);
+        const publishRunning = pendingWatch;
         document.querySelector('[data-op="authorize_campaign"]').click();
-        await waitFor(() => currentView?.runtime.workflow_state === "RUNNING");
+        await waitFor(() => heldIntentReleases.has("authorize_campaign") && stateKey === "running" && intentBusy);
+        publishRunning(await fixtureView());
+        await waitFor(() => currentView?.runtime.workflow_state === "RUNNING" && intentBusy);
         check(document.querySelector("#runtime-content").textContent.includes("9223372036854775849")
           && document.querySelector("#runtime-content").textContent.includes("align_clearance_m")
           && document.querySelector("#runtime-content").textContent.includes("848484848484"), "active plan renders exact u64 trajectory seed, phase parameters, and collision evidence");
@@ -688,13 +712,21 @@
         const authorizationPost = posted.find((item) => item.body.op === "authorize_campaign");
         check(authorizationPost.body.payload.manifest_digest && authorizationPost.body.payload.envelope_digest, "authorize_campaign binds manifest and envelope digests");
         check(document.querySelector('[data-fact="completed"]').textContent.includes("1/3") && document.querySelector('[data-fact="current"]').textContent.includes("2/3"), "three serial episodes project completed total and current facts");
-        check(!document.querySelector("#cancel-campaign").hidden && !document.querySelector("#cancel-campaign").disabled, "negative cancel remains reachable during execution");
+        check(!document.querySelector("#cancel-campaign").hidden && !document.querySelector("#cancel-campaign").disabled, "immediate cancel remains reachable while an ordinary intent is busy");
 
-        const beforeCancel = posted.length;
+        const beforeCancel = posted.filter((item) => item.body.op === "cancel_session").length;
         document.querySelector("#cancel-campaign").click();
         document.querySelector("#cancel-campaign").click();
+        await waitFor(() => heldIntentReleases.has("cancel_session"));
+        check(currentView.runtime.workflow_state === "RUNNING" && cancelPending
+          && document.querySelector("#cancel-campaign").disabled
+          && document.querySelector("#cancel-campaign").textContent === "중단 처리 중", "immediate cancel latches before its response while RUNNING remains authoritative");
+        check(posted.filter((item) => item.body.op === "cancel_session").length === beforeCancel + 1, "busy-path cancel emits exactly one independent POST");
+        heldIntentReleases.get("cancel_session")();
         await waitFor(() => currentView?.runtime.workflow_state === "CANCELLING");
-        check(posted.length === beforeCancel + 1, "cancel is single-submit and stops later intent");
+        heldIntentReleases.get("authorize_campaign")();
+        await waitFor(() => !intentBusy);
+        check(posted.filter((item) => item.body.op === "cancel_session").length === beforeCancel + 1, "cancel remains single-submit after the ordinary intent completes");
 
         await show("results");
         check(document.querySelectorAll("#episode-results li").length === 3, "results preserve three completed episodes");

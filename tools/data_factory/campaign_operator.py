@@ -82,7 +82,9 @@ class CampaignOperator:
         physical_plan_call: EpisodeCall | None = None,
         physical_live_call: EpisodeCall | None = None,
         physical_root_binding_call: Callable[[str], Mapping[str, Any]] | None = None,
-        physical_start_binding_call: Callable[[str, Mapping[str, Any]], Mapping[str, Any]] | None = None,
+        physical_start_binding_call: Callable[
+            [str, Mapping[str, Any], threading.Event], Mapping[str, Any]
+        ] | None = None,
         repository_root: str | Path | None = None, current_usage=None, clock=None,
         operator_label: str = "TEST_OPERATOR",
     ):
@@ -100,6 +102,7 @@ class CampaignOperator:
             raise ContractError("CAMPAIGN_OPERATOR_LABEL")
 
         self._lock = threading.RLock()
+        self._run_lock = threading.Lock()
         self.hypothesis = validate_fr5_hypothesis(hypothesis)
         self.draft = validate_campaign_draft(draft, hypothesis=self.hypothesis)
         self.workspace = copy.deepcopy(dict(workspace))
@@ -366,23 +369,32 @@ class CampaignOperator:
         return result
 
     def run_next(self, payload: dict[str, Any], _view: dict[str, Any]) -> dict[str, Any]:
-        session = None
-        try:
-            with self._lock:
-                if set(payload) != {"run_id"}:
-                    raise ContractError("CAMPAIGN_OPERATOR_RUN_FIELDS")
-                run_id = payload["run_id"]
-                session, bindings = self._ensure_session(run_id)
+        with self._run_lock:
+            session = None
+            try:
+                with self._lock:
+                    if set(payload) != {"run_id"}:
+                        raise ContractError("CAMPAIGN_OPERATOR_RUN_FIELDS")
+                    run_id = payload["run_id"]
+                    session, bindings = self._ensure_session(run_id)
                 scene_evidence = self.scene_evidence_call(run_id)
                 if self.effect_scope == "PHYSICAL":
                     session.preflight_next(
                         run_id=run_id, scene_evidence=scene_evidence,
                     )
-                    self._activate_physical()
                     slot = session.next_slot
                     if slot is None:
                         raise ContractError("CAMPAIGN_OPERATOR_NEXT_SLOT")
-                    start_binding = self.physical_start_binding_call(run_id, slot)
+                    if session.cancel_event.is_set():
+                        raise ContractError("CAMPAIGN_SESSION_CANCELLED")
+                    self._activate_physical()
+                    if session.cancel_event.is_set():
+                        raise ContractError("CAMPAIGN_SESSION_CANCELLED")
+                    start_binding = self.physical_start_binding_call(
+                        run_id, slot, session.cancel_event,
+                    )
+                    if session.cancel_event.is_set():
+                        raise ContractError("CAMPAIGN_SESSION_CANCELLED")
                     scene_evidence = self.scene_evidence_call(run_id)
                     bindings["start_binding"] = validate_runtime_start_binding(
                         start_binding,
@@ -391,18 +403,18 @@ class CampaignOperator:
                     )
                     if bindings["start_binding"]["data_disposition"] != self.data_disposition:
                         raise ContractError("CAMPAIGN_OPERATOR_PHYSICAL_START_BINDING")
-            result = session.run_next(
-                run_id=run_id,
-                scene_evidence=scene_evidence,
-                episode_call=self._episode,
-                **bindings,
-            )
-        except ContractError as exc:
-            status = None if session is None else session.status()
-            if status is not None and status["campaign"]["state"] in {"BLOCKED", "CANCELLED"}:
-                return {"ok": False, "code": exc.code, "campaign": status}
-            raise
-        return {"ok": True, **result}
+                result = session.run_next(
+                    run_id=run_id,
+                    scene_evidence=scene_evidence,
+                    episode_call=self._episode,
+                    **bindings,
+                )
+            except ContractError as exc:
+                status = None if session is None else session.status()
+                if status is not None and status["campaign"]["state"] in {"BLOCKED", "CANCELLED"}:
+                    return {"ok": False, "code": exc.code, "campaign": status}
+                raise
+            return {"ok": True, **result}
 
     def cancel_campaign(self, payload: dict[str, Any], _view: dict[str, Any]) -> dict[str, Any]:
         with self._lock:

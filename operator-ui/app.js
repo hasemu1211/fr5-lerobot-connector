@@ -45,6 +45,7 @@ let lastSession;
 let lastRevision = -1;
 let lastDigest;
 let intentBusy = false;
+let cancelPending = false;
 let watchController;
 let manualStep;
 let renderedWorkflow;
@@ -723,6 +724,12 @@ function unwrapViewEnvelope(value) {
 
 function canIntent(op) {
   return Boolean(currentView && currentView.connection_state === "READY" && !intentBusy && currentView.available_ops.includes(op));
+}
+
+function canImmediateCancel() {
+  return Boolean(currentView && currentView.connection_state === "READY" && !cancelPending
+    && ["RUNNING", "PAUSED_AWAITING_OPERATOR"].includes(currentView.runtime.workflow_state)
+    && currentView.available_ops.includes("cancel_session"));
 }
 
 function setBanner(text, tone = "info", announce = true) {
@@ -1512,9 +1519,10 @@ function renderRuntime(view) {
   }
   document.querySelector("#runtime-content").innerHTML = html;
   const showCancel = ["RUNNING", "CANCELLING", "PAUSED_AWAITING_OPERATOR"].includes(runtime.workflow_state);
+  const cancelling = runtime.workflow_state === "CANCELLING" || cancelPending;
   cancelButton.hidden = !showCancel;
-  cancelButton.disabled = runtime.workflow_state === "CANCELLING" || !canIntent("cancel_session");
-  cancelButton.textContent = runtime.workflow_state === "CANCELLING" ? "중단 처리 중" : message("action", "cancel_session");
+  cancelButton.disabled = cancelling || !canImmediateCancel();
+  cancelButton.textContent = cancelling ? "중단 처리 중" : message("action", "cancel_session");
 }
 
 function measurementLabel(value) {
@@ -1632,6 +1640,8 @@ function renderTechnicalDetails(view) {
 }
 
 function render(view) {
+  if (view.session_id !== lastSession
+      || !["RUNNING", "CANCELLING", "PAUSED_AWAITING_OPERATOR"].includes(view.runtime.workflow_state)) cancelPending = false;
   currentView = view;
   lastSession = view.session_id;
   lastRevision = view.revision;
@@ -1685,7 +1695,6 @@ function intentPayload(op) {
     envelope_digest: currentView.campaign_envelope.envelope_digest,
     data_disposition: currentView.data_disposition,
   };
-  if (op === "cancel_session") return {active_child_id: currentView.runtime.active_child_id};
   return currentView.next_campaign?.actions?.[op]?.payload ?? {};
 }
 
@@ -1722,6 +1731,42 @@ async function submitIntent(op, payload = intentPayload(op)) {
     recoveryNotice = "요청 응답을 받지 못해 최신 상태로 다시 맞췄습니다. 요청을 재전송하지 않았습니다.";
   }
   await loadView({releaseIntent: true, rejectionCode, recoveryNotice});
+}
+
+async function submitImmediateCancel() {
+  if (cancelPending) return;
+  if (!canImmediateCancel()) return failClose("VIEW_STALE", "CANCEL_NOT_AVAILABLE");
+  const boundView = currentView;
+  cancelPending = true;
+  render(boundView);
+  const envelope = {
+    schema_version: INTENT_SCHEMA,
+    intent_id: crypto.randomUUID(),
+    session_id: boundView.session_id,
+    view_revision: boundView.revision,
+    view_digest: boundView.view_digest,
+    op: "cancel_session",
+    payload: {active_child_id: boundView.runtime.active_child_id},
+  };
+  let rejectionCode, recoveryNotice;
+  try {
+    const response = await fetch("/api/intent", {
+      method: "POST",
+      credentials: "same-origin",
+      cache: "no-store",
+      headers: {...tokenHeaders(), "Content-Type": "application/json"},
+      body: JSON.stringify(envelope),
+    });
+    const result = await response.json();
+    if (result.schema_version !== RESULT_SCHEMA || typeof result.ok !== "boolean" || typeof result.consumed !== "boolean" || result.ok !== result.consumed) throw new TypeError("INTENT_RESULT_INVALID");
+    if (!response.ok || !result.ok) {
+      rejectionCode = typeof result.code === "string" ? result.code : "VERSION_CONFLICT";
+      cancelPending = false;
+    }
+  } catch (_error) {
+    recoveryNotice = "중단 요청 응답을 받지 못했습니다. 중복 전송하지 않고 최신 상태만 확인합니다.";
+  }
+  await loadView({rejectionCode, recoveryNotice});
 }
 
 async function loadView({releaseIntent = false, rejectionCode, recoveryNotice} = {}) {
@@ -1946,7 +1991,7 @@ document.querySelector("#review-actions").addEventListener("click", (event) => {
   const button = event.target.closest("[data-op]");
   if (button) submitIntent(button.dataset.op);
 });
-cancelButton.addEventListener("click", () => submitIntent("cancel_session"));
+cancelButton.addEventListener("click", submitImmediateCancel);
 document.addEventListener("click", (event) => {
   const button = event.target.closest("[data-recovery-op]");
   if (button) submitIntent(button.dataset.recoveryOp, {});

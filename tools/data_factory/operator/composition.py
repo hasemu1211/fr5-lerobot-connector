@@ -1644,7 +1644,7 @@ def build_physical_operator_console(
     state_space_design_profile: Mapping[str, Any] | None = None,
     direct_start_pose_ids: Sequence[str] | None = None,
     selected_start_pose_qualifications: Sequence[Mapping[str, Any]] | None = None,
-    start_transition_call: Callable[[Mapping[str, Any], Mapping[str, Any]], Mapping[str, Any]] | None = None,
+    start_transition_call: Callable[[Mapping[str, Any], Mapping[str, Any], Any], Mapping[str, Any]] | None = None,
     initial_object_pose: Mapping[str, Any] | None = None,
     data_disposition: str = "TEST_ONLY",
     dataset_root: str | Path | None = None,
@@ -2524,7 +2524,11 @@ def build_physical_operator_console(
         holder["camera_transport_evidence"] = camera_transport_evidence
         return True
 
-    def start_binding(_run_id: str, slot: Mapping[str, Any]) -> dict[str, Any]:
+    def start_binding(
+        _run_id: str, slot: Mapping[str, Any], cancel_event,
+    ) -> dict[str, Any]:
+        if cancel_event.is_set():
+            raise ContractError("CAMPAIGN_SESSION_CANCELLED")
         base = next((
             item for item in hypothesis["base_conditions"]
             if item["base_condition_digest"] == slot.get("base_condition_digest")
@@ -2542,6 +2546,18 @@ def build_physical_operator_console(
         )
         if not isinstance(endpoint_motion, Mapping):
             raise ContractError("PHYSICAL_CONSOLE_WORKSPACE_BINDING")
+        snapshot = (
+            snapshot_call() if snapshot_call is not None
+            else capture_home_snapshot(tcp_candidate_manifest=paths["tcp"])
+        )
+        binding = build_runtime_start_binding(
+            data_disposition=data_disposition,
+            manifest=holder["operator"].manifest, hypothesis=hypothesis,
+            motion_qualification=endpoint_motion,
+            home_candidate=home_candidate, current_snapshot=snapshot, slot=slot,
+        )
+        if cancel_event.is_set():
+            raise ContractError("CAMPAIGN_SESSION_CANCELLED")
         start_pose_id = slot.get("robot_start_pose_id")
         qualification = live_start_qualifications.get(start_pose_id)
         if qualification is not None:
@@ -2552,10 +2568,11 @@ def build_physical_operator_console(
                 transition = transition_to_start_live(
                     motion_qualification=endpoint_motion,
                     robot_start_pose_qualification=qualification,
+                    cancel_event=cancel_event,
                 )
             else:
                 transition = start_transition_call(
-                    endpoint_motion, qualification,
+                    endpoint_motion, qualification, cancel_event,
                 )
             if (
                 not isinstance(transition, Mapping)
@@ -2565,16 +2582,9 @@ def build_physical_operator_console(
                 or transition.get("robot_start_pose_id") != start_pose_id
             ):
                 raise ContractError("PHYSICAL_CONSOLE_START_TRANSITION")
-        snapshot = (
-            snapshot_call() if snapshot_call is not None
-            else capture_home_snapshot(tcp_candidate_manifest=paths["tcp"])
-        )
-        return build_runtime_start_binding(
-            data_disposition=data_disposition,
-            manifest=holder["operator"].manifest, hypothesis=hypothesis,
-            motion_qualification=endpoint_motion,
-            home_candidate=home_candidate, current_snapshot=snapshot, slot=slot,
-        )
+        if cancel_event.is_set():
+            raise ContractError("CAMPAIGN_SESSION_CANCELLED")
+        return binding
 
     def episode(
         intent, lifecycle, cancel_event, episode_context,
@@ -3201,7 +3211,7 @@ def build_physical_operator_application(
     gripper_maintenance_call: Callable[[Mapping[str, Any]], Mapping[str, Any]] | None = None,
     home_recovery_call: Callable[[], Mapping[str, Any]] | None = None,
     home_recovery_prepare_call: Callable[[], Mapping[str, Any]] | None = None,
-    start_transition_call: Callable[[Mapping[str, Any], Mapping[str, Any]], Mapping[str, Any]] | None = None,
+    start_transition_call: Callable[[Mapping[str, Any], Mapping[str, Any], Any], Mapping[str, Any]] | None = None,
     run_live_call: Callable[..., Mapping[str, Any]] = run_job.run_live,
     production_campaign_factory: Callable[
         [str, dict[str, Any], dict[str, Any]], OperatorConsole

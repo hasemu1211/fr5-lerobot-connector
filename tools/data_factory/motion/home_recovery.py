@@ -76,11 +76,20 @@ def _gripper_delta(snapshot: Mapping[str, Any], open_position: float, prefix: st
     return max(abs(value - open_position) for value in values)
 
 
+def _raise_if_cancelled(cancel_event, prefix: str) -> None:
+    if cancel_event is not None and cancel_event.is_set():
+        raise ContractError(f"{prefix}_CANCELLED")
+
+
 def _wait_phase(
     transport, *, cancel_timeout_s: float, prefix: str, sleep_call=time.sleep,
+    cancel_event=None,
 ) -> None:
     try:
-        while transport.poll_active() is None:
+        while True:
+            _raise_if_cancelled(cancel_event, prefix)
+            if transport.poll_active() is not None:
+                break
             sleep_call(0.01)
     except ContractError as original:
         try:
@@ -220,8 +229,9 @@ def _validated_start_pose(
 def _transition(
     transport, *, motion: Mapping[str, Any], before: Mapping[str, Any],
     target: list[float], tolerances: list[float], precommit_call,
-    prefix: str, sleep_call=time.sleep,
+    prefix: str, sleep_call=time.sleep, cancel_event=None,
 ) -> dict[str, Any]:
+    _raise_if_cancelled(cancel_event, prefix)
     motion_tolerance = float(motion["goal_tolerances"]["joint_rad"])
     max_age = float(motion["max_joint_state_age_s"])
     open_position = float(motion["gripper_positions_m"]["open"])
@@ -255,6 +265,7 @@ def _transition(
     planned = transport.plan_arm(
         "SAFE_POSE_PTP", None, target, arm_limits, frames, planning, start,
     )
+    _raise_if_cancelled(cancel_event, prefix)
     if not isinstance(planned, Mapping):
         raise ContractError(f"{prefix}_PLAN")
     final_state = planned.get("final_joint_state")
@@ -289,6 +300,7 @@ def _transition(
         gripper_tolerance_m=gripper_tolerance,
         before_snapshot=before,
     )
+    _raise_if_cancelled(cancel_event, prefix)
     if (
         not isinstance(precommit, Mapping)
         or not isinstance(precommit.get("evidence_digest"), str)
@@ -298,6 +310,7 @@ def _transition(
     fresh = _snapshot(transport.snapshot(max_age), prefix)
     if max(abs(a - b) for a, b in zip(fresh["joint_positions"], start)) > transition_tolerance:
         raise ContractError(f"{prefix}_START_CHANGED")
+    _raise_if_cancelled(cancel_event, prefix)
     transport.start_phase({
         "phase": "SAFE_POSE_PTP", "type": "ARM",
         "trajectory_b64": base64.b64encode(
@@ -308,7 +321,7 @@ def _transition(
     _wait_phase(
         transport,
         cancel_timeout_s=float(motion["execution_timeouts_s"]["cancel"]),
-        prefix=prefix,
+        prefix=prefix, cancel_event=cancel_event,
         sleep_call=sleep_call,
     )
     after = _snapshot(transport.snapshot(max_age), prefix)
@@ -329,12 +342,14 @@ def _transition(
 def transition_to_start(
     transport, *, motion_qualification: Mapping[str, Any],
     robot_start_pose_qualification: Mapping[str, Any], sleep_call=time.sleep,
+    cancel_event=None,
 ) -> dict[str, Any]:
     """Move once to an already-qualified collection start pose, without recording."""
     motion = _validated_motion(motion_qualification, "START_TRANSITION")
     pose, target, tolerances = _validated_start_pose(
         robot_start_pose_qualification, motion=motion,
     )
+    _raise_if_cancelled(cancel_event, "START_TRANSITION")
     _ready_graph(transport.preflight(), "START_TRANSITION_GRAPH")
     before = _snapshot(
         transport.snapshot(float(motion["max_joint_state_age_s"])),
@@ -345,6 +360,7 @@ def transition_to_start(
         tolerances=tolerances,
         precommit_call=transport.precommit_joint_transition,
         prefix="START_TRANSITION", sleep_call=sleep_call,
+        cancel_event=cancel_event,
     )
     result = {
         "schema_version": "data_factory.start_transition_receipt.v1",
@@ -461,6 +477,7 @@ def recover_home_live(*, motion_qualification: Mapping[str, Any]) -> dict[str, A
 def transition_to_start_live(
     *, motion_qualification: Mapping[str, Any],
     robot_start_pose_qualification: Mapping[str, Any],
+    cancel_event=None,
 ) -> dict[str, Any]:
     """Run a qualified start transition in this process and release its node."""
     return _live(
@@ -469,6 +486,7 @@ def transition_to_start_live(
             transport,
             motion_qualification=motion_qualification,
             robot_start_pose_qualification=robot_start_pose_qualification,
+            cancel_event=cancel_event,
         ),
     )
 
