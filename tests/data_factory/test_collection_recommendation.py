@@ -1310,11 +1310,26 @@ class CollectionRecommendationTests(unittest.TestCase):
             claim for claim in self.fixture.claims if claim["subject"] != "quality"
         ]
         rollout_ref = unavailable("NO_CANONICAL_PHYSICAL_ROLLOUT_ANALYSIS")
+        patches = [
+            {
+                "change_id": "adjust-repeat",
+                "field": "repeat",
+                "value": 2,
+                "basis_claim_ids": ["coverage-observed"],
+            },
+            self.fixture.patches[0],
+        ]
         recommendation = self.fixture.build(
             data_quality_analysis_ref=data_quality_ref,
             data_quality_analysis=report,
             rollout_evidence_analysis_ref=rollout_ref,
             claims=claims,
+            suggested_draft_patches=patches,
+        )
+        self.assertEqual(recommendation["authority"], AUTHORITY)
+        self.assertEqual(
+            [patch["change_id"] for patch in recommendation["suggested_draft_patches"]],
+            ["adjust-repeat", "increase-count"],
         )
         self.assertEqual(
             recommendation["input_snapshot"]["data_quality_analysis_ref"],
@@ -1332,21 +1347,14 @@ class CollectionRecommendationTests(unittest.TestCase):
             ],
         )
 
-        external_effects = {
-            name: mock.Mock(side_effect=AssertionError(f"{name} was requested"))
-            for name in (
-                "compile", "authorize", "persistence", "motion", "recorder",
-                "training", "dataset",
-            )
-        }
         campaign_factory = mock.Mock(
-            side_effect=lambda *_args: external_effects["persistence"](),
+            side_effect=AssertionError("campaign factory was requested"),
         )
         application = self.application(campaign_factory=campaign_factory)
         try:
             core = application.bridge_core
-            core.handlers["compile_draft"] = external_effects["compile"]
-            core.handlers["authorize_campaign"] = external_effects["authorize"]
+            update_draft_handler = mock.Mock(wraps=core.handlers["update_draft"])
+            core.handlers["update_draft"] = update_draft_handler
             view = core.snapshot()
             before = copy.deepcopy((recommendation, report, view))
             with (
@@ -1370,11 +1378,12 @@ class CollectionRecommendationTests(unittest.TestCase):
             result = core.consume(intent)
             draft_after = copy.deepcopy(application.draft)
             self.assertEqual(result["result"]["outcome"], "DRAFT_UPDATED")
-            self.assertEqual(draft_after["requested_count"], 3)
-            self.assertEqual(draft_after["revision"], draft_before["revision"] + 1)
-            for field in draft_before:
-                if field not in {"requested_count", "revision"}:
-                    self.assertEqual(draft_after[field], draft_before[field])
+            expected_draft = copy.deepcopy(draft_before)
+            expected_draft.update(
+                requested_count=3, revision=draft_before["revision"] + 1,
+            )
+            self.assertEqual(draft_after, expected_draft)
+            update_draft_handler.assert_called_once()
             updated_view = core.snapshot()
             self.assertEqual(updated_view["revision"], view["revision"] + 1)
             expected_projection = copy.deepcopy(view["projection"])
@@ -1382,11 +1391,7 @@ class CollectionRecommendationTests(unittest.TestCase):
                 requested_count=3, revision=draft_after["revision"],
             )
             self.assertEqual(updated_view["projection"], expected_projection)
-            self.assertEqual(campaign_factory.call_count, 0)
-            self.assertEqual(
-                {name: spy.call_count for name, spy in external_effects.items()},
-                {name: 0 for name in external_effects},
-            )
+            campaign_factory.assert_not_called()
 
             fresh_view = core.snapshot()
             stale = project_update_draft_intent(
@@ -1407,11 +1412,8 @@ class CollectionRecommendationTests(unittest.TestCase):
                 {key: value for key, value in stale_before[1].items()
                  if key != "generated_at"},
             )
-            self.assertEqual(campaign_factory.call_count, 0)
-            self.assertEqual(
-                {name: spy.call_count for name, spy in external_effects.items()},
-                {name: 0 for name in external_effects},
-            )
+            update_draft_handler.assert_called_once()
+            campaign_factory.assert_not_called()
         finally:
             application.close()
 
