@@ -17,7 +17,7 @@ class CliTest(unittest.TestCase):
             {"prepare", "status", "decide", "setup"},
         )
         setup = parser.parse_args(["setup", "export", "--source", "/tmp/source"])
-        self.assertEqual(setup.profile_id, "fr5-up-wrist-fixed-view-r002")
+        self.assertEqual(setup.profile_id, "fr5-up-wrist-fixed-view-r003")
         for arguments in (["derive"], ["prepare", "--sou", "/tmp/source"]):
             stderr = io.StringIO()
             with redirect_stderr(stderr), self.assertRaises(SystemExit) as raised:

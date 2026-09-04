@@ -23,28 +23,32 @@ to fail until the setup owner supplies those verified inputs.
 
 ## Profile setup
 
-Profile setup is a separate offline authoring flow. It exports one source frame
-and a LabelMe JSON, renders review-only geometry/background evidence after the
-setup owner edits that JSON, and can publish the exact reviewed profile only
-after the producer-owned physical binding is already `VERIFIED`.
+Profile setup is a separate offline authoring flow. It exports one source-frame
+PNG and reports the exact path where LabelMe must save its JSON, renders
+review-only geometry/background evidence after the setup owner creates that
+annotation, and can publish the exact reviewed profile only after the
+producer-owned physical binding is already `VERIFIED`.
 
 ```bash
 direnv exec . python3 -m tools.data_factory.curator setup export \
   --source /absolute/frozen/dataset
-# Edit the reported reference.json with LabelMe, then:
+# Open the reported reference.png in LabelMe and save its annotation at the
+# exact reported reference.json path, then:
 direnv exec . python3 -m tools.data_factory.curator setup preview --run <setup-id>
 direnv exec . python3 -m tools.data_factory.curator setup finalize \
   --run <setup-id> --preview <preview-id>
 ```
 
-New exports bind the current canonical collection profile
-`fr5-up-wrist-rgb-30hz-v2.json`. Each immutable setup request pins its exact
-canonical profile path and digest, so an older request remains reproducible
-while that tracked profile still exists; it is never silently rewritten to a
-new default. `preview` labels its third panel as a transform preview, keeps the
-mask/background assets outside the dataset, and grants neither candidate nor
-training authority. `finalize` is idempotent and fails closed before publishing
-config while the binding is `PREPARED_NOT_VERIFIED`.
+New exports use the fresh `fr5-up-wrist-fixed-view-r003` asset/profile namespace
+and bind the current canonical collection profile
+`fr5-up-wrist-rgb-30hz-v2.json`. The accepted r002 geometry and assets remain
+unchanged. Each immutable setup request pins its exact canonical profile path
+and digest, so an older request remains reproducible while that tracked profile
+still exists; it is never silently rewritten to a new default. `preview` labels
+its third panel as a transform preview, keeps the mask/background assets outside
+the dataset, and grants neither candidate nor training authority. `finalize` is
+idempotent and fails closed before publishing config while the binding is
+`PREPARED_NOT_VERIFIED`.
 
 The reviewed r002 boundary overlay, processed reference, and review video from
 2026-09-03 are accepted as the final geometry choice. That approval is geometry

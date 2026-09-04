@@ -6,6 +6,7 @@ import os
 import secrets
 import tempfile
 from collections.abc import Iterable
+from contextlib import ExitStack
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -57,7 +58,7 @@ REPOSITORY = Path(__file__).resolve().parents[4]
 REQUEST_SCHEMA = "curator.profile_setup_request.v1"
 PREVIEW_SCHEMA = "curator.profile_setup_preview.v1"
 FINALIZED_SCHEMA = "curator.profile_setup_finalized.v1"
-DEFAULT_PROFILE_ID = "fr5-up-wrist-fixed-view-r002"
+DEFAULT_PROFILE_ID = "fr5-up-wrist-fixed-view-r003"
 DEFAULT_DILATION_MARGIN_PX = 12
 DEFAULT_PLATE_FRAME_COUNT = MAX_BACKGROUND_PLATE_FRAMES
 SETUP_REVIEW_FPS = 10
@@ -196,18 +197,34 @@ def _root(path: Path, code: str) -> Path:
     return result
 
 
-def _new_directory(parent: Path, name: str, code: str) -> Path:
+def _new_directory(parent: Path, name: str, code: str) -> OwnedDirectory:
     root = _root(parent, code)
     target = root / name
     reject_symlink_components(target, code)
+    owned: OwnedDirectory | None = None
     try:
         target.mkdir(mode=0o700)
+        owned = OwnedDirectory.capture(target)
         fsync_directory(root)
     except FileExistsError as exc:
         raise CuratorError(code, f"already exists: {target}") from exc
     except OSError as exc:
+        if owned is not None:
+            remove_owned_directory(owned)
         raise CuratorError(code, str(exc)) from exc
-    return target
+    except BaseException:
+        if owned is not None:
+            remove_owned_directory(owned)
+        raise
+    if owned is None:
+        raise CuratorError(code, str(target))
+    return owned
+
+
+def _rollback_created_directories(created: list[OwnedDirectory]) -> None:
+    with ExitStack() as rollback:
+        for owned in created:
+            rollback.callback(remove_owned_directory, owned)
 
 
 def _write_bytes_exclusive(path: Path, payload: bytes, code: str) -> None:
@@ -492,6 +509,34 @@ def export_profile_setup(
     _setup_id_value: str | None = None,
 ) -> dict[str, Any]:
     """Freeze exact source/frame choices and export one LabelMe reference PNG."""
+    created: list[OwnedDirectory] = []
+    try:
+        return _export_profile_setup(
+            source,
+            profile_id=profile_id,
+            reference_frame_index=reference_frame_index,
+            dilation_margin_px=dilation_margin_px,
+            plate_frame_count=plate_frame_count,
+            _paths=_paths,
+            _setup_id_value=_setup_id_value,
+            _created=created,
+        )
+    except BaseException:
+        _rollback_created_directories(created)
+        raise
+
+
+def _export_profile_setup(
+    source: str | Path,
+    *,
+    profile_id: str,
+    reference_frame_index: int,
+    dilation_margin_px: int,
+    plate_frame_count: int,
+    _paths: ProfileSetupPaths | None,
+    _setup_id_value: str | None,
+    _created: list[OwnedDirectory],
+) -> dict[str, Any]:
     paths = setup_paths() if _paths is None else _paths
     source_path = _source(source)
     if SAFE_ID.fullmatch(profile_id) is None:
@@ -527,8 +572,11 @@ def export_profile_setup(
     setup_id = _setup_id() if _setup_id_value is None else _setup_id_value
     if SAFE_ID.fullmatch(setup_id) is None:
         raise CuratorError("SETUP_ID")
-    run = _new_directory(paths.run_root, setup_id, "SETUP_RUN_CREATE")
-    asset = _new_directory(paths.asset_root, profile_id, "SETUP_ASSET_CREATE")
+    run_owner = _new_directory(paths.run_root, setup_id, "SETUP_RUN_CREATE")
+    _created.append(run_owner)
+    asset_owner = _new_directory(paths.asset_root, profile_id, "SETUP_ASSET_CREATE")
+    _created.append(asset_owner)
+    run, asset = run_owner.path, asset_owner.path
     reference_path = asset / "reference.png"
     annotation_path = asset / "reference.json"
     _write_rgb(reference_path, reference, "SETUP_REFERENCE_WRITE")
@@ -569,7 +617,7 @@ def export_profile_setup(
     }
     payload["request_digest"] = canonical_digest(payload)
     write_json_exclusive(run / "request.json", payload)
-    return {
+    result = {
         "ok": True,
         "status": "ANNOTATION_REQUIRED",
         "setup_id": setup_id,
@@ -578,6 +626,8 @@ def export_profile_setup(
         "physical_binding_status": binding["physical_binding_status"],
         "training_authority": False,
     }
+    _created.clear()
+    return result
 
 
 def _view_spec(
@@ -635,6 +685,26 @@ def preview_profile_setup(
     _paths: ProfileSetupPaths | None = None,
     _preview_id_value: str | None = None,
 ) -> dict[str, Any]:
+    created: list[OwnedDirectory] = []
+    try:
+        return _preview_profile_setup(
+            setup_id,
+            _paths=_paths,
+            _preview_id_value=_preview_id_value,
+            _created=created,
+        )
+    except BaseException:
+        _rollback_created_directories(created)
+        raise
+
+
+def _preview_profile_setup(
+    setup_id: str,
+    *,
+    _paths: ProfileSetupPaths | None = None,
+    _preview_id_value: str | None = None,
+    _created: list[OwnedDirectory],
+) -> dict[str, Any]:
     """Compile exact transform assets and review-only evidence from LabelMe JSON."""
     paths = setup_paths() if _paths is None else _paths
     run, request = _load_request(setup_id, paths)
@@ -675,7 +745,6 @@ def preview_profile_setup(
     )
     if SAFE_ID.fullmatch(preview_id) is None:
         raise CuratorError("SETUP_PREVIEW_ID")
-    superseded = _superseded_preview_owners(run, request, preview_id)
     working_spec = _view_spec(request, annotation, Path(), Path())
     geometry, _layout, _binding = resolve_geometry(working_spec)
     mask = build_keep_mask(
@@ -726,10 +795,13 @@ def preview_profile_setup(
         code="SETUP_SOURCE_CHANGED",
     )
 
-    review = _new_directory(run / "previews", preview_id, "SETUP_PREVIEW_CREATE")
-    revision = _new_directory(
+    review_owner = _new_directory(run / "previews", preview_id, "SETUP_PREVIEW_CREATE")
+    _created.append(review_owner)
+    revision_owner = _new_directory(
         asset / "revisions", preview_id, "SETUP_ASSET_REVISION_CREATE"
     )
+    _created.append(revision_owner)
+    review, revision = review_owner.path, revision_owner.path
     reference_path = revision / "reference.png"
     annotation_path = revision / "reference.json"
     mask_path = revision / "keep-mask.png"
@@ -879,11 +951,7 @@ def preview_profile_setup(
     checked_preview, _checked_spec = _load_preview(run, request, preview_id)
     if checked_preview != manifest:
         raise CuratorError("SETUP_PREVIEW_COMMIT")
-    removed_preview_ids = []
-    for old_preview_id, old_review, old_revision in superseded:
-        remove_owned_directory(old_review)
-        remove_owned_directory(old_revision)
-        removed_preview_ids.append(old_preview_id)
+    _created.clear()
     return {
         "ok": True,
         "status": "BOUNDARY_REVIEW_REQUIRED",
@@ -892,7 +960,7 @@ def preview_profile_setup(
         "boundary_overlay": str(overlay_path),
         "processed_reference": str(processed_path),
         "review_video": str(video_path),
-        "removed_superseded_preview_ids": removed_preview_ids,
+        "removed_superseded_preview_ids": [],
         "physical_binding_status": binding["physical_binding_status"],
         "candidate_authority": False,
         "training_authority": False,
@@ -1005,40 +1073,6 @@ def _load_preview(
     ):
         raise CuratorError("SETUP_PREVIEW_COVERAGE")
     return preview, spec
-
-
-def _superseded_preview_owners(
-    run: Path,
-    request: dict,
-    current_preview_id: str,
-) -> list[tuple[str, OwnedDirectory, OwnedDirectory]]:
-    """Validate and capture prior unfinalized previews for post-commit removal."""
-    root = run / "previews"
-    if not root.exists():
-        return []
-    reject_symlink_components(root, "SETUP_PREVIEW_NAMESPACE")
-    if not root.is_dir():
-        raise CuratorError("SETUP_PREVIEW_NAMESPACE", str(root))
-    result = []
-    for directory in sorted(root.iterdir(), key=lambda item: item.name):
-        if directory.name == current_preview_id:
-            continue
-        if (
-            directory.is_symlink()
-            or not directory.is_dir()
-            or SAFE_ID.fullmatch(directory.name) is None
-        ):
-            raise CuratorError("SETUP_PREVIEW_NAMESPACE", str(directory))
-        _load_preview(run, request, directory.name)
-        revision = Path(request["asset_directory"]) / "revisions" / directory.name
-        result.append(
-            (
-                directory.name,
-                OwnedDirectory.capture(directory),
-                OwnedDirectory.capture(revision),
-            )
-        )
-    return result
 
 
 def _finalized_result(
