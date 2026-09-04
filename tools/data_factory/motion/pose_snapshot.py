@@ -2,6 +2,7 @@
 """Read one fresh FR5 ROS pose snapshot; never command hardware."""
 from __future__ import annotations
 import argparse, json, math, os, sys, tempfile, time
+from collections import deque
 from pathlib import Path
 if __package__ in (None, ""): sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 from tools.fr5_data_factory import ContractArgumentParser, ContractError, DIGEST, SAFE_ID, _profile, bounded_place_coordinate, canonical_digest, compose_rigid_transform, fit_place_calibration, load_json_strict, resolve_place_pose, validate_cell_calibration_document, validate_rigid_transform, validate_sheet_manifest, validate_yaw0_sheet
@@ -60,24 +61,24 @@ def render_text(snapshot):
 
 class RosCapture:
     def __init__(self,node,rclpy,tf_buffer,clock=time.monotonic,transient_exceptions=()):
-        self.node,self.rclpy,self.tf_buffer,self.clock,self.transient_exceptions=node,rclpy,tf_buffer,clock,tuple(transient_exceptions);self.message=self.received_at=None
+        self.node,self.rclpy,self.tf_buffer,self.clock,self.transient_exceptions=node,rclpy,tf_buffer,clock,tuple(transient_exceptions);self.samples=deque(maxlen=32)
         from sensor_msgs.msg import JointState
         self.subscription=node.create_subscription(JointState,"/joint_states",self._joint_state,10)
-    def _joint_state(self,message): self.message,self.received_at=message,self.clock()
+    def _joint_state(self,message): self.samples.append((message,self.clock()))
     def capture(self,timeout_s,max_age_s):
-        self.message=self.received_at=None
+        self.samples.clear()
         deadline=self.clock()+timeout_s
         while self.clock()<deadline:
             self.rclpy.spin_once(self.node,timeout_sec=min(.05,max(0.,deadline-self.clock())))
-            if self.message is not None:
+            for message,received_at in reversed(self.samples):
                 try:
-                    joint_stamp=stamp_ns(self.message.header.stamp); ros_now_ns=self.node.get_clock().now().nanoseconds
+                    joint_stamp=stamp_ns(message.header.stamp); ros_now_ns=self.node.get_clock().now().nanoseconds
                     if ros_now_ns-joint_stamp<0 or (ros_now_ns-joint_stamp)/1_000_000_000>max_age_s: continue
-                    transform=self.tf_buffer.lookup_transform("base_link","wrist3_link",self.rclpy.time.Time.from_msg(self.message.header.stamp))
+                    transform=self.tf_buffer.lookup_transform("base_link","wrist3_link",self.rclpy.time.Time.from_msg(message.header.stamp))
                 except self.transient_exceptions: continue
                 if transform.header.frame_id!="base_link" or transform.child_frame_id!="wrist3_link" or abs(stamp_ns(transform.header.stamp,"ROS_TF_STAMP")-joint_stamp)>TF_SKEW_NS: continue
-                return self.message,self.received_at,transform,ros_now_ns
-        if self.message is None: raise ContractError("ROS_JOINT_STATE_MISSING")
+                return message,received_at,transform,ros_now_ns
+        if not self.samples: raise ContractError("ROS_JOINT_STATE_MISSING")
         raise ContractError("ROS_TF")
 
 def _snapshot_from_path(path):

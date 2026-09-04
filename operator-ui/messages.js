@@ -47,6 +47,7 @@ const MESSAGE_CATALOG = {
     PHYSICAL_CAMERA_ROLE_BINDING_REQUIRED: "현재 카메라 역할과 녹화 설정이 맞지 않습니다",
     PHYSICAL_CAMERA_TOPIC: "카메라 영상 연결이 중단되었습니다",
     PHYSICAL_CAMERA_TOPIC_MISMATCH: "연결된 카메라 영상이 선택한 역할과 다릅니다",
+    PHYSICAL_HOME_SNAPSHOT: "HOME 시작 자세를 확인할 최신 로봇 상태를 읽지 못해 동작을 시작하지 않았습니다",
     MOTION_QUALIFICATION_REQUIRED: "이 좌표계에서 실제 로봇 동작을 먼저 확인해야 합니다",
     DIRECT_POSE_COUNT_EXCEEDS_EPISODES: "직접 지정한 자세보다 에피소드 수가 적습니다",
     DIRECT_PAIR_COUNT_MISMATCH: "직접 지정한 시작 자세와 물체 위치 순서를 완성해야 합니다",

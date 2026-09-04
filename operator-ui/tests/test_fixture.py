@@ -212,6 +212,7 @@ class DataFactoryOperatorUiStaticTest(unittest.TestCase):
             "RECORDER_WRITER_FAULT",
             "RECORDER_SAMPLER_FAULT",
             "RECORDER_FREEZE_TIMEOUT",
+            "PHYSICAL_HOME_SNAPSHOT",
             "CANDIDATE_REVIEW_STATE",
             "DIRECT_YAW_TRANSITION_UNSAFE",
         ):

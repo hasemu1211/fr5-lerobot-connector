@@ -1342,6 +1342,10 @@ class OperatorConsoleTests(unittest.TestCase):
                 snapshot,
             )
         self.assertEqual(read.call_count, 2)
+        self.assertEqual(
+            read.call_args_list[0].args[0][3:8],
+            ["capture", "--timeout-s", "2", "--max-age-s", "0.1"],
+        )
 
         read = mock.Mock(side_effect=ContractError("PHYSICAL_HOME_SNAPSHOT"))
         with (
@@ -3699,6 +3703,57 @@ feedback:
                 release.set()
                 console.close()
 
+    def test_pre_episode_snapshot_failure_is_published_without_effects(self):
+        with tempfile.TemporaryDirectory() as root:
+            harness = Harness(root)
+            harness.start_binding = mock.Mock(
+                side_effect=ContractError("PHYSICAL_HOME_SNAPSHOT"),
+            )
+            console = harness.console(
+                campaign_approval_once=True,
+                object_reposition_bindings=[None],
+            )
+            try:
+                initial = console.bridge_core.snapshot()
+                compiled = console.bridge_core.consume(envelope(
+                    initial, "compile_draft", {
+                        "draft_id": harness.source_draft["draft_id"],
+                        "data_disposition": "TEST_ONLY",
+                    }, "compile-home-snapshot-failure",
+                ))["result"]
+                review = console.bridge_core.snapshot()
+                started = console.bridge_core.consume(envelope(
+                    review, "authorize_campaign", {
+                        "draft_id": harness.source_draft["draft_id"],
+                        "manifest_digest": compiled["manifest_digest"],
+                        "envelope_digest": compiled["envelope_digest"],
+                        "data_disposition": "TEST_ONLY",
+                    }, "authorize-home-snapshot-failure",
+                ))["result"]
+                self.assertEqual(started["outcome"], "RUNNING")
+
+                result = console.wait_for_episode(1.0)
+                projection = console.bridge_core.snapshot()["projection"]
+                self.assertEqual(
+                    (result["outcome"], result["code"]),
+                    ("FAIL", "PHYSICAL_HOME_SNAPSHOT"),
+                )
+                self.assertEqual(
+                    (projection["runtime"]["workflow_state"],
+                     projection["runtime"]["measurement_outcome"],
+                     projection["runtime"]["reason_codes"],
+                     projection["runtime"]["active_child_id"]),
+                    ("BLOCKED", "NOT_AVAILABLE", ["PHYSICAL_HOME_SNAPSHOT"], None),
+                )
+                self.assertIsNone(result["intent_binding"])
+                self.assertFalse(console.episode_worker.is_alive())
+                harness.start_binding.assert_called_once()
+                self.assertEqual(harness.operator_counters["physical_factory"], 0)
+                self.assertTrue(all(value == 0 for value in harness.forbidden.values()))
+                self.assertEqual(list(Path(root).rglob("*")), [])
+            finally:
+                console.close()
+
     def test_measured_physical_activation_mismatch_projects_fail(self):
         for code, expected_measurement in (
             ("PHYSICAL_SECOND_MOTION_OWNER", "FAIL"),
@@ -4732,6 +4787,11 @@ class ReusableOperatorConsoleTests(unittest.TestCase):
                 self.assertEqual(len(harness.children), 1)
                 self.assertEqual(len(harness.intents), 1)
                 self.assertEqual(harness.operator_counters["physical_factory"], 1)
+                with self.assertRaisesRegex(
+                    ContractError, "CAMPAIGN_OPERATOR_TERMINAL",
+                ):
+                    harness.operator.run_next({"run_id": "reusable-run-2"}, {})
+                self.assertEqual(len(harness.plan_exchanges), 1)
             finally:
                 console.close()
 

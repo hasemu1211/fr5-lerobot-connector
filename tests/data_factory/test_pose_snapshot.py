@@ -3,6 +3,7 @@ import hashlib
 import json
 import shutil
 import unittest
+from collections import deque
 from types import SimpleNamespace as NS
 
 from tools import fr5_data_factory as factory
@@ -21,6 +22,8 @@ class PoseSnapshotTest(unittest.TestCase):
         transform=NS(header=NS(frame_id="base_link",stamp=NS(sec=10,nanosec=1)),child_frame_id="wrist3_link",transform=NS(translation=NS(x=1.,y=2.,z=3.),rotation=NS(x=0.,y=0.,z=2**-.5,w=2**-.5)))
         candidate={"transform":{"translation_m":[1.,0.,0.],"rotation_columns":[[1.,0.,0.],[0.,1.,0.],[0.,0.,1.]]},"status":"CANDIDATE","candidate_source_sha256":"sha256:"+"a"*64,"manifest_source_sha256":"sha256:"+"b"*64}
         snapshot=build_pose_snapshot(message,9.8,10,.5,transform,10_100_000_000,candidate)
+        self.assertEqual(build_pose_snapshot(message,9.9,10,.1,transform,10_100_000_000)["ros_sample_age_s"],.1)
+        with self.assertRaisesRegex(ContractError,"ROS_JOINT_STATE_STALE"): build_pose_snapshot(message,9.9,10,.1,transform,10_100_000_001)
         skew10=NS(header=NS(frame_id="base_link",stamp=NS(sec=10,nanosec=10_000_000)),child_frame_id="wrist3_link",transform=transform.transform)
         self.assertEqual(build_pose_snapshot(message,9.8,10,.5,skew10,10_100_000_000,candidate)["transform_stamp_ns"],10_010_000_000)
         skew11=NS(header=NS(frame_id="base_link",stamp=NS(sec=10,nanosec=10_000_001)),child_frame_id="wrist3_link",transform=transform.transform)
@@ -32,7 +35,7 @@ class PoseSnapshotTest(unittest.TestCase):
         class FakeRclpy:
             time=NS(Time=NS(from_msg=lambda stamp:("time",stamp)))
             def spin_once(self,*_args,**_kwargs):
-                ticks[0]+=.1; capture.message=message; capture.received_at=ticks[0]
+                ticks[0]+=.1; capture._joint_state(message)
         class Transient(Exception): pass
         class FakeBuffer:
             calls=0
@@ -40,7 +43,7 @@ class PoseSnapshotTest(unittest.TestCase):
                 self.calls+=1
                 if self.calls==1: raise Transient("not yet")
                 return transform
-        capture=RosCapture.__new__(RosCapture);capture.rclpy=FakeRclpy();capture.tf_buffer=FakeBuffer();capture.clock=lambda:ticks[0];capture.message=message;capture.received_at=0.;capture.node=NS(get_clock=lambda:NS(now=lambda:NS(nanoseconds=10_100_000_000)));capture.transient_exceptions=(Transient,)
+        capture=RosCapture.__new__(RosCapture);capture.rclpy=FakeRclpy();capture.tf_buffer=FakeBuffer();capture.clock=lambda:ticks[0];capture.samples=deque(maxlen=32);capture.node=NS(get_clock=lambda:NS(now=lambda:NS(nanoseconds=10_100_000_000)));capture.transient_exceptions=(Transient,)
         self.assertIs(capture.capture(.3,.5)[0],message)
         self.assertEqual(capture.tf_buffer.calls,2)
         capture.tf_buffer=NS(lookup_transform=lambda *_:(_ for _ in ()).throw(RuntimeError("unexpected")))
@@ -54,6 +57,35 @@ class PoseSnapshotTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             path=Path(directory)/"m.json";path.write_text(json.dumps(manifest)); self.assertEqual(tcp_candidate(path)["candidate_source_sha256"],manifest["tcp_candidate_digest"]); manifest["tcp_candidate_digest"]="sha256:"+"0"*64;path.write_text(json.dumps(manifest))
             with self.assertRaises(ContractError):tcp_candidate(path)
+
+    def test_capture_matches_a_recent_joint_sample_after_tf_lags(self):
+        ticks=[0.]
+        def joint(nanosec): return NS(name=list(("j1","j2","j3","j4","j5","j6")),position=[0.]*6,header=NS(stamp=NS(sec=10,nanosec=nanosec)))
+        messages=[joint(0),joint(10_000_000),joint(20_000_000)]
+        class Transient(Exception): pass
+        class FakeBuffer:
+            ready=False
+            requested=[]
+            def lookup_transform(self,_base,_wrist,stamp):
+                requested=stamp.nanosec
+                self.requested.append(requested)
+                if not self.ready or requested>5_000_000: raise Transient("tf has not caught up")
+                return NS(header=NS(frame_id="base_link",stamp=stamp),child_frame_id="wrist3_link",transform=NS(translation=NS(x=0.,y=0.,z=0.),rotation=NS(x=0.,y=0.,z=0.,w=1.)))
+        buffer=FakeBuffer()
+        class FakeRclpy:
+            time=NS(Time=NS(from_msg=lambda stamp:stamp))
+            calls=0
+            def spin_once(self,*_args,**_kwargs):
+                ticks[0]+=.01
+                if self.calls<len(messages): capture._joint_state(messages[self.calls])
+                self.calls+=1
+                if self.calls==3: buffer.ready=True
+        capture=RosCapture.__new__(RosCapture);capture.rclpy=FakeRclpy();capture.tf_buffer=buffer;capture.clock=lambda:ticks[0];capture.samples=deque(maxlen=32);capture.node=NS(get_clock=lambda:NS(now=lambda:NS(nanoseconds=10_050_000_000)));capture.transient_exceptions=(Transient,)
+        message,received_at,transform,ros_now_ns=capture.capture(2.,.1)
+        self.assertIs(message,messages[0])
+        self.assertEqual(buffer.requested[-3:],[20_000_000,10_000_000,0])
+        self.assertLessEqual(ticks[0]-received_at,.1)
+        self.assertEqual(build_pose_snapshot(message,received_at,ticks[0],.1,transform,ros_now_ns)["joint_stamp_ns"],10_000_000_000)
 
     def test_place_calibration_preview(self):
         def snapshot_at(point):

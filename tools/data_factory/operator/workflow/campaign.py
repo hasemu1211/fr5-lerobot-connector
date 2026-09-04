@@ -2159,7 +2159,11 @@ class OperatorConsole:
                 result.get("intent_binding", self._active_intent_projection)
             ),
         }
-        expected_reposition = self._expected_object_reposition_binding()
+        expected_reposition = (
+            self._expected_object_reposition_binding()
+            if name == "PASS" or self._active_intent_projection is not None
+            else None
+        )
         reposition_result = result.get("object_reposition")
         if (
             name == "PASS"
