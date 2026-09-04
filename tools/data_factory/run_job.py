@@ -21,7 +21,7 @@ if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from tools.data_factory.candidate_admission import (
-    SCHEMA_VERSION as CANDIDATE_ADMISSION_SCHEMA,
+    SCHEMA_VERSION as _CANDIDATE_ADMISSION_SCHEMA,
     validate_candidate_admission,
 )
 from tools.data_factory.one_job import (
@@ -1645,10 +1645,13 @@ def write_candidate_admission(
 ):
     if technical_reference.get("status") != "PASS":
         raise ContractError("CANDIDATE_ADMISSION_TECHNICAL_PASS")
-    if operational_source not in {"HUMAN_GATED", "HIL_PROXY"}:
+    if (
+        not isinstance(operational_source, str)
+        or operational_source not in {"HUMAN_GATED", "HIL_PROXY"}
+    ):
         raise ContractError("CANDIDATE_ADMISSION_OPERATIONAL_SOURCE")
     admission = validate_candidate_admission({
-        "schema_version": CANDIDATE_ADMISSION_SCHEMA,
+        "schema_version": _CANDIDATE_ADMISSION_SCHEMA,
         "run_id": payload["run_id"],
         "operational_gate": "PASS",
         "operational_source": operational_source,
@@ -1724,7 +1727,9 @@ def review_candidate_admission(
         path.name != "candidate_admission.json"
         or not isinstance(expected_file_digest, str) or not DIGEST.fullmatch(expected_file_digest)
         or not isinstance(expected_review_context_digest, str) or not DIGEST.fullmatch(expected_review_context_digest)
+        or not isinstance(checklist_id, str)
         or checklist_id not in TASK_REVIEW_CHECKLIST_IDS
+        or not isinstance(semantic_status, str)
         or semantic_status not in {"PASS", "FAIL", "UNCERTAIN"}
         or not isinstance(reviewed_by, str) or reviewed_by == "HUMAN" or not SAFE_ID.fullmatch(reviewed_by)
         or (semantic_status == "PASS" and reason is not None)

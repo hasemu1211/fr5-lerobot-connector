@@ -854,6 +854,19 @@ class CollectionRecommendationTests(unittest.TestCase):
             ):
                 self.fixture.build(episode_evidence=evidence)
 
+    def test_malformed_candidate_enums_keep_the_ledger_error_code(self) -> None:
+        for field in (
+            "operational_gate", "operational_source", "checklist_id",
+            "semantic_status",
+        ):
+            evidence = copy.deepcopy(self.fixture.evidence)
+            evidence[0]["candidate"][field] = []
+            self.fixture.rebind_episode(evidence[0])
+            with self.subTest(field=field), self.assertRaisesRegex(
+                ContractError, "EPISODE_LEDGER_CANDIDATE_BINDING",
+            ):
+                self.fixture.build(episode_evidence=evidence)
+
     def test_analysis_owners_availability_alias_and_physical_scope_are_strict(self) -> None:
         report = copy.deepcopy(self.fixture.hypothesis["coverage_report"])
         available_claims = [

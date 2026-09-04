@@ -31,11 +31,15 @@ def validate_candidate_admission(value: object) -> dict[str, Any]:
         candidate["schema_version"] != SCHEMA_VERSION
         or not isinstance(candidate["run_id"], str)
         or SAFE_ID.fullmatch(candidate["run_id"]) is None
+        or not isinstance(candidate["operational_gate"], str)
         or candidate["operational_gate"] not in {"PASS", "FAIL"}
+        or not isinstance(candidate["operational_source"], str)
         or candidate["operational_source"] not in {"HIL_PROXY", "HUMAN_GATED"}
+        or not isinstance(candidate["checklist_id"], str)
         or candidate["checklist_id"] not in TASK_REVIEW_CHECKLIST_IDS
         or not isinstance(candidate["review_context_digest"], str)
         or DIGEST.fullmatch(candidate["review_context_digest"]) is None
+        or not isinstance(semantic, str)
         or semantic not in {"PENDING", "PASS", "FAIL", "UNCERTAIN"}
     ):
         raise ContractError("CANDIDATE_ADMISSION_SCHEMA")

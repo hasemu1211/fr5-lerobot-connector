@@ -1,5 +1,6 @@
 import copy
 import unittest
+from pathlib import Path
 from types import MappingProxyType
 
 from tools.data_factory.candidate_admission import (
@@ -68,6 +69,27 @@ class CandidateAdmissionTest(unittest.TestCase):
         for value in invalid:
             with self.subTest(value=value), self.assertRaises(ContractError):
                 validate_candidate_admission(value)
+
+    def test_enum_fields_reject_non_string_json_as_contract_errors(self):
+        for field in (
+            "operational_gate", "operational_source", "checklist_id",
+            "semantic_status",
+        ):
+            for value in ([], {}, None, False, 1):
+                with self.subTest(field=field, value=value), self.assertRaisesRegex(
+                    ContractError, "CANDIDATE_ADMISSION_SCHEMA",
+                ):
+                    validate_candidate_admission(candidate(**{field: value}))
+
+    def test_schema_literal_has_one_production_owner(self):
+        root = Path(__file__).resolve().parents[2]
+        owners = sorted(
+            path.relative_to(root).as_posix()
+            for path in (root / "tools" / "data_factory").rglob("*.py")
+            if "data_factory.candidate_admission.v1"
+            in path.read_text(encoding="utf-8")
+        )
+        self.assertEqual(owners, ["tools/data_factory/candidate_admission.py"])
 
     def test_review_tuple_is_exact_for_each_semantic_state(self):
         invalid = (

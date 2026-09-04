@@ -4,6 +4,9 @@ from __future__ import annotations
 import copy
 from typing import Any, Mapping, Sequence
 
+from tools.data_factory.candidate_admission import (
+    SCHEMA_VERSION as _CANDIDATE_SCHEMA,
+)
 from tools.data_factory.campaign_authoring import (
     MANIFEST_SCHEMA_V2 as MANIFEST_SCHEMA,
     validate_campaign_compilation_receipt,
@@ -30,7 +33,6 @@ from tools.fr5_data_factory import (
 SCHEMA_VERSION = "data_factory.collection_recommendation.v1"
 SNAPSHOT_SCHEMA = "data_factory.collection_recommendation_input_snapshot.v1"
 EPISODE_REF_SCHEMA = "data_factory.episode_ref.v1"
-CANDIDATE_SCHEMA = "data_factory.candidate_admission.v1"
 VIEW_SCHEMA = "data_factory.operator_session_view.v2"
 INTENT_SCHEMA = "data_factory.operator_intent.v1"
 
@@ -241,7 +243,7 @@ def _episode_snapshot(
             "digest": checked["state"]["state_digest"],
         },
         "candidate": {
-            "schema_version": CANDIDATE_SCHEMA,
+            "schema_version": _CANDIDATE_SCHEMA,
             "digest": canonical_digest(candidate),
         },
         "source_provenance_digest": checked["artifact_refs"][
@@ -637,7 +639,7 @@ def _snapshot(value: object) -> dict[str, Any]:
             "locator": LOCATOR_SCHEMA,
             "ledger": LEDGER_SCHEMA,
             "state": STATE_SCHEMA,
-            "candidate": CANDIDATE_SCHEMA,
+            "candidate": _CANDIDATE_SCHEMA,
         }
         for name, schema in expected_schemas.items():
             nested = _exact(episode[name], SCHEMA_DIGEST_FIELDS, "COLLECTION_RECOMMENDATION_EPISODE_REF")
