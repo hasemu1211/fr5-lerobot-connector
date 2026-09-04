@@ -3,6 +3,7 @@ from __future__ import annotations
 import copy
 import unittest
 from datetime import datetime, timezone
+from pathlib import Path
 from unittest import mock
 
 from tools.data_factory.collection_recommendation import (
@@ -16,12 +17,18 @@ from tools.data_factory.campaign_authoring import (
     compile_collection_campaign,
 )
 from tools.data_factory.operator.workflow.intents import OperatorIntentCore
+from tools.data_factory.operator.workflow.application import (
+    CollectionOperatorApplication,
+)
+from tools.data_factory.operator.catalog import load_operator_catalog
+from tools.data_factory.operator.web import projection
 from tools.fr5_data_factory import ContractError, canonical_digest
 from .operator.fixtures import draft as campaign_draft, hypothesis
 
 
 COMMIT = "f0f380979d24711acca22e8e53da1e7985e0d7ad"
 NOW = datetime(2026, 9, 4, 5, 0, tzinfo=timezone.utc)
+ROOT = Path(__file__).resolve().parents[2]
 
 
 def digest(value: object) -> str:
@@ -132,11 +139,17 @@ class RecommendationFixture:
 
     def episode(self, order_index: int, episode_index: int) -> dict:
         slot = self.manifest["slots"][order_index]
+        base_condition = copy.deepcopy(next(
+            item for item in self.hypothesis["base_conditions"]
+            if item["base_condition_digest"] == slot["base_condition_digest"]
+        ))
         run_id = f"campaign-r1-e{order_index + 1}"
         transaction_id = f"{run_id}:episode-{episode_index:06d}"
         rows = 2
-        resolved_job_digest = digest(["job", order_index])
-        collection_profile_digest = digest("profile")
+        resolved_job_digest = base_condition["resolved_job_digest"]
+        collection_profile_digest = base_condition["coverage_condition"][
+            "collection_profile_digest"
+        ]
         run = {
             "schema_version": "data_factory.recorder_result.v1",
             "run_id": run_id,
@@ -152,10 +165,21 @@ class RecommendationFixture:
             "run_id": run_id,
             "dataset_root": "/dataset/test",
             "episode_index": episode_index,
+            "staging_mode": "batch",
             "binding_digests": {
                 "resolved_job_digest": resolved_job_digest,
+                "selected_sheet_digest": digest(["sheet", order_index]),
+                "yaw0_sheet_digest": digest(["yaw0-sheet", order_index]),
+                "cell_calibration_digest": digest(["cell", order_index]),
+                "robot_system_digest": digest(["robot", order_index]),
                 "collection_profile_digest": collection_profile_digest,
+                "object_profile_digest": digest(["object", order_index]),
+                "grasp_profile_digest": digest(["grasp", order_index]),
             },
+            "camera_staging_dirs": {
+                "up": f"/dataset/test/images/up/episode-{episode_index:06d}",
+            },
+            "begin_snapshot": {"total_episodes": episode_index},
         }
         episode_ref = {
             "schema_version": "data_factory.episode_ref.v1",
@@ -214,10 +238,7 @@ class RecommendationFixture:
             "order_index": order_index,
             "slot": copy.deepcopy(slot),
             "slot_digest": digest(slot),
-            "base_condition": {
-                "base_condition_digest": slot["base_condition_digest"],
-                "resolved_job_digest": resolved_job_digest,
-            },
+            "base_condition": base_condition,
             "robot_start_pose": {
                 "robot_start_pose_id": slot["robot_start_pose_id"],
             },
@@ -228,6 +249,7 @@ class RecommendationFixture:
         }, "intent_digest")
         runtime = redigest({
             "schema_version": "data_factory.test_only_episode_binding.v1",
+            "session_id": "session-r1",
             "run_id": run_id,
             "resolved_job_digest": resolved_job_digest,
             "manifest_digest": self.manifest["manifest_digest"],
@@ -236,9 +258,24 @@ class RecommendationFixture:
             "robot_start_pose_id": slot["robot_start_pose_id"],
             "split_group": slot["split_group"],
             "repeat_index": slot["repeat_index"],
+            "state_initialization_digest": digest(["initial-scene", order_index]),
+            "scene_observation_digest": None,
             "scene_state_digest": scene_state_digest,
             "root_binding_digest": digest(["root", order_index]),
             "start_binding_digest": digest(["start", order_index]),
+            "place_alias": "place-a",
+            "place_id": "PLACE_A",
+            "yaw_deg": 0.0,
+            "x_mm": float(order_index),
+            "y_mm": 0.0,
+            "budget_digests": {
+                "manifest_budget_digest": digest(["manifest-budget", order_index]),
+                "program_budget_digest": digest(["program-budget", order_index]),
+                "planned_usage_digest": digest(["planned-usage", order_index]),
+                "slot_budget_digest": digest(["slot-budget", order_index]),
+            },
+            "expires_at": "2026-09-04T06:00:00Z",
+            "data_disposition": "TEST_ONLY",
             "authority": {
                 "execution": "NONE",
                 "human_approval": "NONE",
@@ -252,19 +289,52 @@ class RecommendationFixture:
             "run_id": run_id,
             "resolved_job_digest": resolved_job_digest,
         }
+        plan_digest = digest(plan)
+        common_safety = {
+            "schema_version": "data_factory.precommit_safety.v1",
+            "run_id": run_id,
+            "approved_plan_digest": plan_digest,
+            "scene_binding_digest": digest(["scene-binding", order_index]),
+            "expected_planning_scene_digest": digest([
+                "planning-scene", order_index,
+            ]),
+            "planning_scene_readback_digest": digest([
+                "scene-readback", order_index,
+            ]),
+            "collision_report_digest": digest(["collision", order_index]),
+            "plan_only_no_motion_digest": digest(["no-motion", order_index]),
+        }
+        plan_envelope = {
+            "plan": plan,
+            "precommit_safety": {
+                **common_safety,
+                "post_reset_safe_snapshot_digest": None,
+                "status": "PENDING",
+            },
+            "precommit_evidence": {
+                "schema_version": "data_factory.precommit_evidence.v1",
+                "run_id": run_id,
+                "approved_plan_digest": plan_digest,
+            },
+            "operator_summary": {"summary": "fixture"},
+        }
         plan_artifact = {
             "schema_version": "data_factory.preapproval_evidence.v1",
             "run_id": run_id,
             "resolved_job_digest": resolved_job_digest,
-            "plan_digest": digest(plan),
-            "plan_envelope": {"plan": plan},
+            "plan_digest": plan_digest,
+            "plan_envelope": plan_envelope,
+            "plan_envelope_digest": digest(plan_envelope),
         }
         technical = {
             "schema_version": "data_factory.technical_validator_result.v1",
             "run_id": run_id,
             "resolved_job_digest": resolved_job_digest,
             "plan_digest": plan_artifact["plan_digest"],
+            "dataset_root": "/dataset/test",
+            "expected_fps": 15.0,
             "status": "PASS",
+            "result_digest": digest(["technical", order_index]),
         }
         review_context_digest = digest({
             "run_id": run_id,
@@ -289,6 +359,21 @@ class RecommendationFixture:
                 "schema_version": "data_factory.storage_usage.v1",
                 "run_id": run_id,
                 "episode_ref": episode_ref,
+                "dataset_filesystem": {
+                    "path": "/dataset/test", "device": 1,
+                    "total_bytes": 10_000,
+                },
+                "encoder_temp_filesystem": {
+                    "path": "/tmp", "device": 1, "total_bytes": 10_000,
+                },
+                "dataset_bytes_before": 100,
+                "dataset_bytes_after": 200,
+                "dataset_delta_bytes": 100,
+                "temporary_peak_bytes_by_filesystem": {"1": 20},
+                "free_bytes_before": {"1": 9_000},
+                "free_bytes_after": {"1": 8_800},
+                "reference_scan_status": "NOT_AVAILABLE",
+                "dataset_prunable": [],
             },
             "run": run,
             "staging_manifest": staging,
@@ -300,14 +385,33 @@ class RecommendationFixture:
             "recording_quality": quality,
             "execution": {
                 "schema_version": "fr5.pickup_executor.response.v3",
+                "mode": "PRE_LIVE",
+                "op_id": f"execute-{order_index}",
+                "op": "execute",
+                "ok": True,
+                "code": "COMPLETE",
                 "run_id": run_id,
                 "plan_digest": plan_artifact["plan_digest"],
+                "state": "COMPLETED",
+                "data": {
+                    "precommit_safety": {
+                        **common_safety,
+                        "post_reset_safe_snapshot_digest": digest([
+                            "safe-reset", order_index,
+                        ]),
+                        "status": "PASS",
+                    },
+                },
             },
             "runtime_binding": runtime,
         }
         refs = {
             name: {
-                "artifact_path": f"/evidence/{run_id}/{name}.json",
+                "artifact_path": (
+                    f"/evidence/{run_id}/episode-{episode_index:06d}.jsonl"
+                    if name == "source_provenance" else
+                    f"/evidence/{run_id}/{name}.json"
+                ),
                 "artifact_digest": digest(value),
             }
             for name, value in artifacts.items()
@@ -378,6 +482,37 @@ class RecommendationFixture:
             "artifacts": artifacts,
         }
 
+    @staticmethod
+    def rebind_episode(evidence: dict) -> None:
+        ledger = evidence["ledger"]
+        artifacts = evidence["artifacts"]
+        for name, payload in artifacts.items():
+            ledger["artifacts"][name]["artifact_digest"] = digest(payload)
+        technical = artifacts["technical"]
+        ref = ledger["episode"]["episode_ref"]
+        review_context_digest = digest({
+            "run_id": ledger["episode"]["run_id"],
+            "resolved_job_digest": ref["resolved_job_digest"],
+            "plan_digest": ledger["bindings"]["plan_digest"],
+            "technical_validator_digest": digest(technical),
+        })
+        ledger["admission"]["technical_status"] = technical.get("status")
+        ledger["admission"]["review_context_digest"] = review_context_digest
+        evidence["candidate"]["review_context_digest"] = review_context_digest
+        state = evidence["state"]
+        state["candidate"]["artifact_digest"] = digest(evidence["candidate"])
+        state["review"] = {
+            "semantic_status": evidence["candidate"]["semantic_status"],
+            "reviewed_by": evidence["candidate"]["reviewed_by"],
+            "reviewed_at": evidence["candidate"]["reviewed_at"],
+            "reason": evidence["candidate"]["reason"],
+            "training_status": "NOT_AUTHORIZED",
+        }
+        redigest(ledger, "ledger_digest")
+        state["ledger_digest"] = ledger["ledger_digest"]
+        state["episode_ref_digest"] = ledger["episode"]["episode_ref_digest"]
+        redigest(state, "state_digest")
+
     def build(self, **changes) -> dict:
         arguments = {
             "recommendation_id": "recommendation-r1",
@@ -400,14 +535,27 @@ class RecommendationFixture:
         projection = {
             "workflow_state": "AUTHORING",
             "available_ops": ["update_draft"],
-            "draft": {"draft_id": "draft-r1", "revision": 4},
+            "draft": {
+                "draft_id": "draft-r1", "revision": 4,
+                "authoring_mode": "ASSISTED", "requested_count": 2,
+                "repeat": 1,
+                "selection": {"task": "pickup_e2e", "split": "TRAIN"},
+            },
             "catalog": {
                 "axes": {
                     "task": [
                         {"id": "pickup_e2e", "available": True},
                         {"id": "pick_place", "available": False},
                     ],
+                    "split": [
+                        {"id": "TRAIN", "available": True},
+                        {"id": "ID", "available": False},
+                        {"id": "OOD", "available": False},
+                    ],
                 },
+            },
+            "sampling_provenance": {
+                "state_space_design_profile": {"profile_digest": digest("design")},
             },
         }
         bound = {"session_id": "session-r1", "revision": 9, "projection": projection}
@@ -426,8 +574,60 @@ class RecommendationFixture:
 
 
 class CollectionRecommendationTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.catalog = load_operator_catalog(
+            ROOT, device_ids=["sampling-camera-a", "sampling-camera-b"],
+        )
+
     def setUp(self) -> None:
         self.fixture = RecommendationFixture()
+
+    def application(self) -> CollectionOperatorApplication:
+        combination = next(
+            item for item in self.catalog["combinations"]
+            if item["execution"]["TEST_COLLECTION"]["executable"]
+            and item["task_id"] == "pickup_e2e"
+            and item["object_id"] == "wood-cube-24mm-r001"
+            and item["variant_id"] == "TWO_STAGE_ALIGN_V2"
+        )
+        selection = {
+            "schema_version": "data_factory.operator_selection.v1",
+            "combination_digest": combination["combination_digest"],
+            "data_mode": "TEST_COLLECTION",
+            **{
+                field: combination[field]
+                for field in (
+                    "workspace_id", "frame_id", "task_id", "object_id",
+                    "grasp_id", "cell_id", "start_pose_id", "motion_id",
+                    "variant_id", "camera_profile_id", "camera_device_id",
+                )
+            },
+            "policy_id": "DETERMINISTIC_SPREAD",
+        }
+        environment = {
+            "schema_version": "data_factory.operator_environment.v1",
+            "state": "READY",
+            "observed_at": "2026-09-04T05:00:00Z",
+            "components": {
+                name: {
+                    "state": "READY", "owner": f"owner-{name}",
+                    "reason": "ATTACHED",
+                }
+                for name in ("robot", "controller", "gripper", "camera")
+            },
+        }
+        return CollectionOperatorApplication(
+            session_id="recommendation-application-r1",
+            operator_label="local-operator", catalog=self.catalog,
+            initial_selection=selection, projector=projection,
+            environment_call=lambda: copy.deepcopy(environment),
+            prepare_environment_call=lambda: copy.deepcopy(environment),
+            campaign_factory=lambda *_args: self.fail(
+                "campaign was not requested",
+            ),
+            initial_environment=environment,
+        )
 
     def test_canonical_manifest_order_is_deterministic_and_rejoinable(self) -> None:
         before = copy.deepcopy(self.fixture.__dict__)
@@ -527,7 +727,7 @@ class CollectionRecommendationTests(unittest.TestCase):
             ]
             redigest(episode["state"], "state_digest")
             with self.subTest(binding=field), self.assertRaisesRegex(
-                ContractError, "SLOT_BINDING",
+                ContractError, "SOURCE_BINDING",
             ):
                 self.fixture.build(episode_evidence=evidence)
 
@@ -581,6 +781,16 @@ class CollectionRecommendationTests(unittest.TestCase):
             with self.subTest(label=label), self.assertRaises(ContractError):
                 self.fixture.build(episode_evidence=evidence)
 
+        same_dataset_episode = [
+            self.fixture.evidence[0], self.fixture.episode(1, 10),
+        ]
+        self.assertNotEqual(
+            same_dataset_episode[0]["ledger"]["dataset"]["dataset_digest"],
+            same_dataset_episode[1]["ledger"]["dataset"]["dataset_digest"],
+        )
+        with self.assertRaisesRegex(ContractError, "EPISODE_DUPLICATE"):
+            self.fixture.build(episode_evidence=same_dataset_episode)
+
     def test_all_join_layers_are_digest_and_identity_bound(self) -> None:
         mutations = {
             "manifest": lambda manifest, evidence: manifest.update(manifest_id="forged"),
@@ -607,6 +817,39 @@ class CollectionRecommendationTests(unittest.TestCase):
             with self.subTest(label=label), self.assertRaises(ContractError):
                 self.fixture.build(campaign_manifest=manifest, episode_evidence=evidence)
 
+    def test_recomputed_invented_pass_evidence_fails_at_the_ledger_owner(self) -> None:
+        cases = (
+            (
+                "technical-schema",
+                lambda item: item["artifacts"]["technical"].update(
+                    schema_version="invented.technical_pass.v1",
+                ),
+                "EPISODE_LEDGER_TECHNICAL",
+            ),
+            (
+                "technical-field-drift",
+                lambda item: item["artifacts"]["technical"].update(
+                    invented_pass=True,
+                ),
+                "EPISODE_LEDGER_TECHNICAL_FIELDS",
+            ),
+            (
+                "semantic-checklist",
+                lambda item: item["candidate"].update(
+                    checklist_id="invented-pass-v1",
+                ),
+                "EPISODE_LEDGER_CANDIDATE_BINDING",
+            ),
+        )
+        for label, mutate, code in cases:
+            evidence = copy.deepcopy(self.fixture.evidence)
+            mutate(evidence[0])
+            self.fixture.rebind_episode(evidence[0])
+            with self.subTest(label=label), self.assertRaisesRegex(
+                ContractError, code,
+            ):
+                self.fixture.build(episode_evidence=evidence)
+
     def test_analysis_owners_availability_alias_and_physical_scope_are_strict(self) -> None:
         report = copy.deepcopy(self.fixture.hypothesis["coverage_report"])
         data_quality_ref = {
@@ -632,6 +875,26 @@ class CollectionRecommendationTests(unittest.TestCase):
             ),
             recommendation,
         )
+        with self.assertRaisesRegex(ContractError, "ANALYSIS_ARTIFACT"):
+            project_update_draft_intent(
+                recommendation, selected_change_id="increase-count",
+                operator_view=self.fixture.view(),
+            )
+        before = copy.deepcopy((recommendation, report))
+        projected = project_update_draft_intent(
+            recommendation, selected_change_id="increase-count",
+            operator_view=self.fixture.view(), data_quality_analysis=report,
+        )
+        self.assertEqual(projected["payload"]["requested_count"], 3)
+        self.assertEqual((recommendation, report), before)
+        forged_report = copy.deepcopy(report)
+        forged_report["collection_profile_id"] = "forged-quality"
+        with self.assertRaises(ContractError):
+            project_update_draft_intent(
+                recommendation, selected_change_id="increase-count",
+                operator_view=self.fixture.view(),
+                data_quality_analysis=forged_report,
+            )
         with self.assertRaisesRegex(ContractError, "ANALYSIS_ARTIFACT"):
             self.fixture.build(data_quality_analysis_ref=data_quality_ref)
 
@@ -800,6 +1063,7 @@ class CollectionRecommendationTests(unittest.TestCase):
         with (
             mock.patch("builtins.open", side_effect=AssertionError("I/O forbidden")),
             mock.patch("pathlib.Path.open", side_effect=AssertionError("I/O forbidden")),
+            mock.patch("pathlib.Path.resolve", side_effect=AssertionError("I/O forbidden")),
         ):
             recommendation = self.fixture.build()
             checked = validate_collection_recommendation(
@@ -880,11 +1144,98 @@ class CollectionRecommendationTests(unittest.TestCase):
                 operator_view=blocked,
             )
 
+        split_patch = [{
+            "change_id": "select-split",
+            "field": "split",
+            "value": "OOD",
+            "basis_claim_ids": ["coverage-observed"],
+        }]
+        recommendation = self.fixture.build(
+            suggested_draft_patches=split_patch,
+        )
+        with self.assertRaisesRegex(ContractError, "PATCH_VALUE"):
+            project_update_draft_intent(
+                recommendation, selected_change_id="select-split",
+                operator_view=self.fixture.view(),
+            )
+        split_patch[0]["value"] = "TRAIN"
+        recommendation = self.fixture.build(
+            suggested_draft_patches=split_patch,
+        )
+        intent = project_update_draft_intent(
+            recommendation, selected_change_id="select-split",
+            operator_view=self.fixture.view(),
+        )
+        self.assertEqual(intent["payload"]["split"], "TRAIN")
+
+    def test_each_patch_kind_round_trips_through_the_canonical_owner(self) -> None:
+        cases = (
+            ("requested_count", 4),
+            ("repeat", 2),
+            ("split", "TRAIN"),
+            ("selection", {"task": "pickup_e2e"}),
+            (
+                "state_space_design_factors",
+                {"columns": 4, "rows": 2, "yaw_cdf_strata": 2},
+            ),
+        )
+        for index, (field, value) in enumerate(cases, 1):
+            patch = {
+                "change_id": f"owner-round-trip-{index}",
+                "field": field,
+                "value": value,
+                "basis_claim_ids": ["coverage-observed"],
+            }
+            recommendation = self.fixture.build(
+                suggested_draft_patches=[patch],
+            )
+            application = self.application()
+            try:
+                view = application.bridge_core.snapshot()
+                before = copy.deepcopy((recommendation, view))
+                with (
+                    mock.patch(
+                        "builtins.open",
+                        side_effect=AssertionError("I/O forbidden"),
+                    ),
+                    mock.patch(
+                        "pathlib.Path.open",
+                        side_effect=AssertionError("I/O forbidden"),
+                    ),
+                    mock.patch(
+                        "pathlib.Path.resolve",
+                        side_effect=AssertionError("I/O forbidden"),
+                    ),
+                ):
+                    intent = project_update_draft_intent(
+                        recommendation,
+                        selected_change_id=patch["change_id"],
+                        operator_view=view,
+                    )
+                self.assertEqual((recommendation, view), before)
+                result = application.bridge_core.consume(intent)
+                self.assertEqual(result["result"]["outcome"], "DRAFT_UPDATED")
+                if field == "selection":
+                    self.assertEqual(application.selection["task_id"], "pickup_e2e")
+                elif field == "state_space_design_factors":
+                    profile = application.draft["state_space_design_profile"]
+                    self.assertEqual(profile["spatial_strata"], {
+                        "columns": 4, "rows": 2,
+                    })
+                    self.assertEqual(profile["yaw_cdf_strata"], 2)
+                else:
+                    self.assertEqual(application.draft[field], value)
+            finally:
+                application.close()
+
     def test_existing_compare_and_swap_rejects_a_once_fresh_intent_after_transition(self) -> None:
         state = {
             "workflow_state": "AUTHORING",
             "available_ops": ["update_draft"],
-            "draft": {"draft_id": "draft-r1", "revision": 0},
+            "draft": {
+                "draft_id": "draft-r1", "revision": 0,
+                "requested_count": 2,
+            },
         }
         core = OperatorIntentCore(
             session_id="session-r1",

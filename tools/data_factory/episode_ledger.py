@@ -358,7 +358,7 @@ def _canonical_file(value: object, code: str) -> Path:
     return resolved
 
 
-def _dataset(value: object) -> dict[str, Any]:
+def _loaded_dataset(value: object) -> dict[str, Any]:
     dataset = _exact(value, DATASET_FIELDS, "EPISODE_LEDGER_DATASET_FIELDS")
     _identifier(dataset["dataset_id"], "EPISODE_LEDGER_DATASET_ID")
     if (
@@ -366,10 +366,20 @@ def _dataset(value: object) -> dict[str, Any]:
         or "\x00" in dataset["repo_id"]
     ):
         raise ContractError("EPISODE_LEDGER_DATASET_REPO")
+    if (
+        not isinstance(dataset["dataset_root"], str)
+        or not dataset["dataset_root"] or "\x00" in dataset["dataset_root"]
+    ):
+        raise ContractError("EPISODE_LEDGER_DATASET_ROOT")
+    _digest(dataset["dataset_digest"], "EPISODE_LEDGER_DATASET_DIGEST")
+    return dataset
+
+
+def _dataset(value: object) -> dict[str, Any]:
+    dataset = _loaded_dataset(value)
     dataset["dataset_root"] = _canonical_directory(
         dataset["dataset_root"], "EPISODE_LEDGER_DATASET_ROOT",
     )
-    _digest(dataset["dataset_digest"], "EPISODE_LEDGER_DATASET_DIGEST")
     return dataset
 
 
@@ -684,29 +694,99 @@ def _plan_binding(
     return plan_digest, safety
 
 
-def _source_bindings(
-    *, dataset_root: str, artifacts: object,
-    expected_episode_ref: Mapping[str, Any] | None = None,
-) -> tuple[
-    dict[str, dict[str, str]], dict[str, str], dict[str, str], str,
-    dict[str, Any], int,
-]:
-    refs = _exact(artifacts, ARTIFACT_NAMES, "EPISODE_LEDGER_ARTIFACTS")
-    loaded: dict[str, object] = {}
-    normalized: dict[str, dict[str, str]] = {}
-    normalized["episode"], loaded["episode"] = _artifact(
-        refs["episode"], name="episode", episode_index=0,
+def _validate_loaded_ledger(
+    value: object, *, dataset_root: str,
+    artifact_refs: Mapping[str, Mapping[str, str]],
+    source: Mapping[str, Any],
+) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
+    ledger = _exact(value, LEDGER_FIELDS, "EPISODE_LEDGER_FIELDS")
+    if ledger["schema_version"] != SCHEMA_VERSION:
+        raise ContractError("EPISODE_LEDGER_SCHEMA")
+    _self_digest(ledger, "ledger_digest", "EPISODE_LEDGER_DIGEST")
+    dataset = _loaded_dataset(ledger["dataset"])
+    if dataset["dataset_root"] != dataset_root:
+        raise ContractError("EPISODE_LEDGER_DATASET_BINDING")
+
+    episode = _exact(
+        ledger["episode"], EPISODE_FIELDS, "EPISODE_LEDGER_EPISODE_FIELDS",
     )
+    ref = _episode_ref(episode["episode_ref"])
+    ref_digest = canonical_digest(ref)
+    locator = _episode_locator(
+        episode["lerobot_v3_locator"], repo_id=dataset["repo_id"],
+        episode_index=ref["episode_index"], rows=source["rows"],
+    )
+    if (
+        ref["repo_id"] != dataset["repo_id"]
+        or ref != source["episode_ref"]
+        or episode["run_id"] != source["run_id"]
+        or episode["episode_index"] != ref["episode_index"]
+        or episode["transaction_id"] != ref["transaction_id"]
+        or episode["episode_ref_digest"] != ref_digest
+        or locator != episode["lerobot_v3_locator"]
+    ):
+        raise ContractError("EPISODE_LEDGER_EPISODE_BINDING")
+    bindings = _exact(
+        ledger["bindings"], BINDING_FIELDS, "EPISODE_LEDGER_BINDING_FIELDS",
+    )
+    admission = _exact(
+        ledger["admission"], ADMISSION_FIELDS, "EPISODE_LEDGER_ADMISSION_FIELDS",
+    )
+    if (
+        ledger["artifacts"] != artifact_refs
+        or bindings != source["bindings"]
+        or admission != source["admission"]
+    ):
+        raise ContractError("EPISODE_LEDGER_SOURCE_BINDING")
+    return ledger, dataset, locator
+
+
+def validate_loaded_episode_evidence(
+    *, artifacts: object, artifact_refs: object | None = None,
+    dataset_root: str | None = None,
+    expected_episode_ref: Mapping[str, Any] | None = None,
+    ledger: Mapping[str, Any] | None = None,
+    state: Mapping[str, Any] | None = None,
+    candidate: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Validate one already-loaded episode join without filesystem access."""
+    if dataset_root is None and isinstance(ledger, Mapping):
+        dataset = ledger.get("dataset")
+        dataset_root = (
+            dataset.get("dataset_root") if isinstance(dataset, Mapping) else None
+        )
+    if not isinstance(dataset_root, str) or not dataset_root or "\x00" in dataset_root:
+        raise ContractError("EPISODE_LEDGER_DATASET_ROOT")
+    if artifact_refs is None and isinstance(ledger, Mapping):
+        artifact_refs = ledger.get("artifacts")
+    refs = _exact(
+        artifact_refs, ARTIFACT_NAMES, "EPISODE_LEDGER_ARTIFACTS",
+    )
+    loaded = _exact(
+        artifacts, ARTIFACT_NAMES, "EPISODE_LEDGER_ARTIFACT_PAYLOADS",
+    )
+    normalized: dict[str, dict[str, str]] = {}
+    for name in sorted(ARTIFACT_NAMES):
+        ref = _exact(
+            refs[name], ARTIFACT_REF_FIELDS,
+            f"EPISODE_LEDGER_{name.upper()}_REF",
+        )
+        path = ref["artifact_path"]
+        expected = _digest(
+            ref["artifact_digest"], f"EPISODE_LEDGER_{name.upper()}_DIGEST",
+        )
+        if not isinstance(path, str) or not path or "\x00" in path:
+            raise ContractError(f"EPISODE_LEDGER_{name.upper()}_PATH")
+        if canonical_digest(loaded[name]) != expected:
+            raise ContractError(f"EPISODE_LEDGER_{name.upper()}_DIGEST")
+        normalized[name] = ref
+
     episode_document = loaded["episode"]
     if not isinstance(episode_document, Mapping):
         raise ContractError("EPISODE_LEDGER_EPISODE_ARTIFACT_FIELDS")
     episode_ref = _episode_ref(episode_document.get("episode_ref"))
     if expected_episode_ref is not None and episode_ref != expected_episode_ref:
         raise ContractError("EPISODE_LEDGER_EPISODE_ARTIFACT_BINDING")
-    for name in sorted(ARTIFACT_NAMES - {"episode"}):
-        normalized[name], loaded[name] = _artifact(
-            refs[name], name=name, episode_index=episode_ref["episode_index"],
-        )
 
     run = _exact(loaded["run"], RUN_FIELDS, "EPISODE_LEDGER_RUN_FIELDS")
     run_id = _identifier(run["run_id"], "EPISODE_LEDGER_RUN_ID")
@@ -855,7 +935,10 @@ def _source_bindings(
     quality = loaded["recording_quality"]
     if (
         not isinstance(provenance, list) or len(provenance) != rows
-        or any(row.get("frame_index") != index for index, row in enumerate(provenance))
+        or any(
+            not isinstance(row, Mapping) or row.get("frame_index") != index
+            for index, row in enumerate(provenance)
+        )
         or Path(normalized["source_provenance"]["artifact_path"]).name
         != f"episode-{episode_ref['episode_index']:06d}.jsonl"
     ):
@@ -922,7 +1005,61 @@ def _source_bindings(
         "review_context_digest": expected_context,
         "training_status": "NOT_AUTHORIZED",
     }
-    return normalized, bindings, admission, run_id, episode_ref, rows
+    result = {
+        "artifact_refs": normalized,
+        "artifacts": loaded,
+        "bindings": bindings,
+        "admission": admission,
+        "run_id": run_id,
+        "episode_ref": episode_ref,
+        "rows": rows,
+    }
+    if (ledger is None) != (state is None) or ledger is None and candidate is not None:
+        raise ContractError("EPISODE_LEDGER_LOADED_EVIDENCE_FIELDS")
+    if ledger is not None:
+        checked_ledger, dataset, locator = _validate_loaded_ledger(
+            ledger, dataset_root=dataset_root, artifact_refs=normalized,
+            source=result,
+        )
+        checked_state, checked_candidate = _validate_loaded_episode_state(
+            state, ledger=checked_ledger, candidate=candidate,
+        )
+        result.update(
+            ledger=checked_ledger, state=checked_state,
+            candidate=checked_candidate, dataset=dataset, locator=locator,
+        )
+    return result
+
+
+def _source_bindings(
+    *, dataset_root: str, artifacts: object,
+    expected_episode_ref: Mapping[str, Any] | None = None,
+) -> tuple[
+    dict[str, dict[str, str]], dict[str, str], dict[str, str], str,
+    dict[str, Any], int,
+]:
+    refs = _exact(artifacts, ARTIFACT_NAMES, "EPISODE_LEDGER_ARTIFACTS")
+    loaded: dict[str, object] = {}
+    normalized: dict[str, dict[str, str]] = {}
+    normalized["episode"], loaded["episode"] = _artifact(
+        refs["episode"], name="episode", episode_index=0,
+    )
+    episode_document = loaded["episode"]
+    if not isinstance(episode_document, Mapping):
+        raise ContractError("EPISODE_LEDGER_EPISODE_ARTIFACT_FIELDS")
+    episode_ref = _episode_ref(episode_document.get("episode_ref"))
+    for name in sorted(ARTIFACT_NAMES - {"episode"}):
+        normalized[name], loaded[name] = _artifact(
+            refs[name], name=name, episode_index=episode_ref["episode_index"],
+        )
+    checked = validate_loaded_episode_evidence(
+        dataset_root=dataset_root, artifact_refs=normalized,
+        artifacts=loaded, expected_episode_ref=expected_episode_ref,
+    )
+    return (
+        checked["artifact_refs"], checked["bindings"], checked["admission"],
+        checked["run_id"], checked["episode_ref"], checked["rows"],
+    )
 
 
 def _retention(value: object) -> dict[str, Any]:
@@ -937,11 +1074,12 @@ def _retention(value: object) -> dict[str, Any]:
     return retention
 
 
-def _candidate_review(
+def _validate_loaded_candidate(
     value: object, *, run_id: str, review_context_digest: str,
-) -> tuple[dict[str, str], dict[str, Any]]:
-    normalized, raw = _artifact(value, name="candidate", episode_index=0)
-    candidate = _exact(raw, CANDIDATE_FIELDS, "EPISODE_LEDGER_CANDIDATE_FIELDS")
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    candidate = _exact(
+        value, CANDIDATE_FIELDS, "EPISODE_LEDGER_CANDIDATE_FIELDS",
+    )
     semantic = candidate["semantic_status"]
     if (
         candidate["schema_version"] != "data_factory.candidate_admission.v1"
@@ -967,13 +1105,99 @@ def _candidate_review(
         or (semantic != "PASS" and not candidate["reason"])
     ):
         raise ContractError("EPISODE_LEDGER_CANDIDATE_STATE")
-    return normalized, {
+    return candidate, {
         "semantic_status": semantic,
         "reviewed_by": candidate["reviewed_by"],
         "reviewed_at": candidate["reviewed_at"],
         "reason": candidate["reason"],
         "training_status": "NOT_AUTHORIZED",
     }
+
+
+def _candidate_review(
+    value: object, *, run_id: str, review_context_digest: str,
+) -> tuple[dict[str, str], dict[str, Any]]:
+    normalized, raw = _artifact(value, name="candidate", episode_index=0)
+    _candidate, review = _validate_loaded_candidate(
+        raw, run_id=run_id, review_context_digest=review_context_digest,
+    )
+    return normalized, review
+
+
+def _validate_loaded_episode_state(
+    value: object, *, ledger: Mapping[str, Any],
+    candidate: Mapping[str, Any] | None,
+    canonical_candidate_ref: Mapping[str, str] | None = None,
+) -> tuple[dict[str, Any], dict[str, Any] | None]:
+    state = _exact(value, STATE_FIELDS, "EPISODE_LEDGER_STATE_FIELDS")
+    if state["schema_version"] != STATE_SCHEMA_VERSION:
+        raise ContractError("EPISODE_LEDGER_STATE_SCHEMA")
+    _self_digest(state, "state_digest", "EPISODE_LEDGER_STATE_DIGEST")
+    if (
+        state["ledger_digest"] != ledger["ledger_digest"]
+        or state["episode_ref_digest"]
+        != ledger["episode"]["episode_ref_digest"]
+    ):
+        raise ContractError("EPISODE_LEDGER_STATE_LEDGER_BINDING")
+
+    technical_status = ledger["admission"]["technical_status"]
+    if technical_status == "PASS":
+        if state["candidate"] is None:
+            if candidate is not None or canonical_candidate_ref is not None:
+                raise ContractError("EPISODE_LEDGER_REVIEW_BINDING")
+            checked_candidate = None
+            review = {
+                "semantic_status": "NOT_MEASURED", "reviewed_by": None,
+                "reviewed_at": None, "reason": None,
+                "training_status": "NOT_AUTHORIZED",
+            }
+        else:
+            candidate_ref = _exact(
+                state["candidate"], ARTIFACT_REF_FIELDS,
+                "EPISODE_LEDGER_CANDIDATE_REF",
+            )
+            if (
+                not isinstance(candidate_ref["artifact_path"], str)
+                or not candidate_ref["artifact_path"]
+                or "\x00" in candidate_ref["artifact_path"]
+            ):
+                raise ContractError("EPISODE_LEDGER_CANDIDATE_PATH")
+            expected_digest = _digest(
+                candidate_ref["artifact_digest"],
+                "EPISODE_LEDGER_CANDIDATE_DIGEST",
+            )
+            if candidate is None:
+                raise ContractError("EPISODE_LEDGER_CANDIDATE_ARTIFACT")
+            checked_candidate, review = _validate_loaded_candidate(
+                candidate, run_id=ledger["episode"]["run_id"],
+                review_context_digest=ledger["admission"][
+                    "review_context_digest"
+                ],
+            )
+            if (
+                canonical_digest(checked_candidate) != expected_digest
+                or canonical_candidate_ref is not None
+                and candidate_ref != canonical_candidate_ref
+            ):
+                raise ContractError("EPISODE_LEDGER_CANDIDATE_DIGEST")
+    else:
+        if state["candidate"] is not None or candidate is not None:
+            raise ContractError("EPISODE_LEDGER_TECHNICAL_FAIL_CANDIDATE")
+        checked_candidate = None
+        review = {
+            "semantic_status": "NOT_AVAILABLE", "reviewed_by": None,
+            "reviewed_at": None, "reason": "TECHNICAL_FAIL",
+            "training_status": "NOT_AUTHORIZED",
+        }
+    checked_review = _exact(
+        state["review"], REVIEW_FIELDS, "EPISODE_LEDGER_REVIEW_FIELDS",
+    )
+    if review != checked_review:
+        raise ContractError("EPISODE_LEDGER_REVIEW_BINDING")
+    retention = _retention(state["retention"])
+    if retention != state["retention"]:
+        raise ContractError("EPISODE_LEDGER_RETENTION_BINDING")
+    return state, checked_candidate
 
 
 def compile_episode_ledger(
@@ -1145,51 +1369,32 @@ def validate_episode_state(
     state = _exact(value, STATE_FIELDS, "EPISODE_LEDGER_STATE_FIELDS")
     if state["schema_version"] != STATE_SCHEMA_VERSION:
         raise ContractError("EPISODE_LEDGER_STATE_SCHEMA")
-    expected_digest = _digest(state["state_digest"], "EPISODE_LEDGER_STATE_DIGEST")
-    if canonical_digest({
-        key: copy.deepcopy(item) for key, item in state.items() if key != "state_digest"
-    }) != expected_digest:
-        raise ContractError("EPISODE_LEDGER_STATE_DIGEST")
+    _self_digest(state, "state_digest", "EPISODE_LEDGER_STATE_DIGEST")
     if (
         state["ledger_digest"] != base["ledger_digest"]
         or state["episode_ref_digest"] != base["episode"]["episode_ref_digest"]
     ):
         raise ContractError("EPISODE_LEDGER_STATE_LEDGER_BINDING")
-    technical_status = base["admission"]["technical_status"]
-    if technical_status == "PASS":
-        if state["candidate"] is None:
-            candidate_ref = None
-            review = {
-                "semantic_status": "NOT_MEASURED", "reviewed_by": None,
-                "reviewed_at": None, "reason": None,
-                "training_status": "NOT_AUTHORIZED",
-            }
-        else:
-            candidate_ref, review = _candidate_review(
-                state["candidate"], run_id=base["episode"]["run_id"],
-                review_context_digest=base["admission"]["review_context_digest"],
-            )
-    else:
-        if state["candidate"] is not None:
-            raise ContractError("EPISODE_LEDGER_TECHNICAL_FAIL_CANDIDATE")
+    if (
+        state["candidate"] is None
+        or base["admission"]["technical_status"] != "PASS"
+    ):
         candidate_ref = None
-        review = {
-            "semantic_status": "NOT_AVAILABLE", "reviewed_by": None,
-            "reviewed_at": None, "reason": "TECHNICAL_FAIL",
-            "training_status": "NOT_AUTHORIZED",
-        }
-    checked_review = _exact(state["review"], REVIEW_FIELDS, "EPISODE_LEDGER_REVIEW_FIELDS")
-    if candidate_ref != state["candidate"] or review != checked_review:
-        raise ContractError("EPISODE_LEDGER_REVIEW_BINDING")
-    retention = _retention(state["retention"])
-    if retention != state["retention"]:
-        raise ContractError("EPISODE_LEDGER_RETENTION_BINDING")
-    return state
+        candidate = None
+    else:
+        candidate_ref, candidate = _artifact(
+            state["candidate"], name="candidate", episode_index=0,
+        )
+    checked, _candidate = _validate_loaded_episode_state(
+        state, ledger=base, candidate=candidate,
+        canonical_candidate_ref=candidate_ref,
+    )
+    return checked
 
 
 __all__ = [
     "EPISODE_LOCATOR_SCHEMA", "SCHEMA_VERSION", "STATE_SCHEMA_VERSION",
     "build_lerobot_v3_episode_locator", "compile_episode_ledger",
     "project_episode_state", "reproject_episode_state", "validate_episode_ledger",
-    "validate_episode_state",
+    "validate_episode_state", "validate_loaded_episode_evidence",
 ]

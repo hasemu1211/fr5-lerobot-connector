@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import copy
-from pathlib import PurePosixPath
 from typing import Any, Mapping, Sequence
 
 from tools.data_factory.campaign_authoring import (
@@ -13,6 +12,7 @@ from tools.data_factory.episode_ledger import (
     EPISODE_LOCATOR_SCHEMA as LOCATOR_SCHEMA,
     SCHEMA_VERSION as LEDGER_SCHEMA,
     STATE_SCHEMA_VERSION as STATE_SCHEMA,
+    validate_loaded_episode_evidence,
 )
 from tools.data_factory.quality.coverage_report import (
     REPORT_SCHEMA as DATA_QUALITY_SCHEMA,
@@ -29,7 +29,6 @@ from tools.fr5_data_factory import (
 
 SCHEMA_VERSION = "data_factory.collection_recommendation.v1"
 SNAPSHOT_SCHEMA = "data_factory.collection_recommendation_input_snapshot.v1"
-RUN_SCHEMA = "data_factory.recorder_result.v1"
 EPISODE_REF_SCHEMA = "data_factory.episode_ref.v1"
 CANDIDATE_SCHEMA = "data_factory.candidate_admission.v1"
 VIEW_SCHEMA = "data_factory.operator_session_view.v2"
@@ -80,69 +79,6 @@ AUTHORITY = {
 }
 EVIDENCE_FIELDS = frozenset({
     "manifest_order_index", "ledger", "state", "candidate", "artifacts",
-})
-RUN_FIELDS = frozenset({
-    "schema_version", "run_id", "transaction_id", "episode_index", "state",
-    "reason_code", "rows", "detail",
-})
-LEDGER_FIELDS = frozenset({
-    "schema_version", "dataset", "episode", "bindings", "artifacts",
-    "admission", "ledger_digest",
-})
-DATASET_FIELDS = frozenset({
-    "dataset_id", "repo_id", "dataset_root", "dataset_digest",
-})
-EPISODE_FIELDS = frozenset({
-    "run_id", "episode_index", "transaction_id", "episode_ref",
-    "episode_ref_digest", "lerobot_v3_locator",
-})
-EPISODE_REF_FIELDS = frozenset({
-    "schema_version", "repo_id", "episode_index", "transaction_id",
-    "resolved_job_digest", "staging_manifest_digest",
-})
-LOCATOR_FIELDS = frozenset({
-    "schema_version", "repo_id", "episode_index", "data", "videos",
-    "locator_digest",
-})
-DATA_LOCATOR_FIELDS = frozenset({
-    "chunk_index", "file_index", "relative_path", "file_row_start",
-    "file_row_end_exclusive",
-})
-VIDEO_LOCATOR_FIELDS = frozenset({
-    "camera_key", "chunk_index", "file_index", "relative_path",
-    "file_frame_start", "file_frame_end_exclusive", "timestamp_start_s",
-    "timestamp_end_s",
-})
-BINDING_FIELDS = frozenset({
-    "resolved_job_digest", "manifest_digest", "intent_digest", "slot_digest",
-    "base_condition_digest", "robot_start_pose_id", "scene_state_digest",
-    "root_binding_digest", "start_binding_digest", "collection_profile_digest",
-    "plan_digest",
-})
-ADMISSION_FIELDS = frozenset({
-    "technical_status", "review_context_digest", "training_status",
-})
-ARTIFACT_NAMES = frozenset({
-    "episode", "run", "staging_manifest", "manifest", "intent", "plan",
-    "technical", "source_provenance", "recording_quality", "execution",
-    "runtime_binding",
-})
-ARTIFACT_REF_FIELDS = frozenset({"artifact_path", "artifact_digest"})
-STATE_FIELDS = frozenset({
-    "schema_version", "ledger_digest", "episode_ref_digest", "candidate",
-    "review", "retention", "state_digest",
-})
-REVIEW_FIELDS = frozenset({
-    "semantic_status", "reviewed_by", "reviewed_at", "reason",
-    "training_status",
-})
-RETENTION_FIELDS = frozenset({
-    "retention_state", "reclaim_state", "physical_deletion", "storage_layout",
-})
-CANDIDATE_FIELDS = frozenset({
-    "schema_version", "run_id", "operational_gate", "operational_source",
-    "checklist_id", "semantic_status", "reviewed_by", "reviewed_at", "reason",
-    "review_context_digest",
 })
 VIEW_FIELDS = frozenset({
     "schema_version", "session_id", "revision", "projection", "generated_at",
@@ -238,155 +174,36 @@ def _campaign(
     return copy.deepcopy(dict(manifest))
 
 
-def _artifact_refs(value: object) -> dict[str, dict[str, str]]:
-    refs = _exact(value, ARTIFACT_NAMES, "COLLECTION_RECOMMENDATION_ARTIFACTS")
-    for name, raw in refs.items():
-        ref = _exact(raw, ARTIFACT_REF_FIELDS, "COLLECTION_RECOMMENDATION_ARTIFACT_REF")
-        if not isinstance(ref["artifact_path"], str) or not ref["artifact_path"] or "\x00" in ref["artifact_path"]:
-            raise ContractError("COLLECTION_RECOMMENDATION_ARTIFACT_REF")
-        _digest(ref["artifact_digest"], "COLLECTION_RECOMMENDATION_ARTIFACT_REF")
-        refs[name] = ref
-    return refs
-
-
-def _artifact_payloads(
-    value: object, refs: Mapping[str, Mapping[str, str]],
-) -> dict[str, Any]:
-    payloads = _exact(
-        value, ARTIFACT_NAMES, "COLLECTION_RECOMMENDATION_ARTIFACT_PAYLOADS",
+def _episode_snapshot(
+    value: object, manifest: Mapping[str, Any],
+) -> tuple[dict[str, Any], tuple[str, str, int]]:
+    evidence = _exact(
+        value, EVIDENCE_FIELDS, "COLLECTION_RECOMMENDATION_EVIDENCE_FIELDS",
     )
-    if any(
-        canonical_digest(payloads[name]) != refs[name]["artifact_digest"]
-        for name in ARTIFACT_NAMES
-    ):
-        raise ContractError("COLLECTION_RECOMMENDATION_ARTIFACT_DIGEST")
-    return payloads
-
-
-def _locator_path(
-    value: object, *, kind: str, chunk_index: int, file_index: int,
-    camera_key: str | None = None,
-) -> str:
-    if not isinstance(value, str) or not value or "\x00" in value or "\\" in value:
-        raise ContractError("COLLECTION_RECOMMENDATION_LOCATOR_PATH")
-    path = PurePosixPath(value)
-    expected = (
-        PurePosixPath("data") / f"chunk-{chunk_index:03d}" / f"file-{file_index:03d}.parquet"
-        if kind == "data"
-        else PurePosixPath("videos") / str(camera_key) / f"chunk-{chunk_index:03d}" / f"file-{file_index:03d}.mp4"
+    order_index = _count(
+        evidence["manifest_order_index"],
+        "COLLECTION_RECOMMENDATION_EVIDENCE_ORDER",
     )
-    if (
-        path.is_absolute() or str(path) != value or ".." in path.parts
-        or len(path.parts) < 3 or path.parts[-2:] != expected.parts[-2:]
-        or kind == "video" and camera_key not in path.parts[:-2]
-    ):
-        raise ContractError("COLLECTION_RECOMMENDATION_LOCATOR_PATH")
-    return value
-
-
-def _locator(value: object, *, repo_id: str, episode_index: int, rows: int) -> dict[str, Any]:
-    locator = _exact(value, LOCATOR_FIELDS, "COLLECTION_RECOMMENDATION_LOCATOR_FIELDS")
-    if (
-        locator["schema_version"] != LOCATOR_SCHEMA
-        or locator["repo_id"] != repo_id
-        or locator["episode_index"] != episode_index
-    ):
-        raise ContractError("COLLECTION_RECOMMENDATION_LOCATOR_BINDING")
-    data = _exact(locator["data"], DATA_LOCATOR_FIELDS, "COLLECTION_RECOMMENDATION_DATA_LOCATOR")
-    for field in ("chunk_index", "file_index", "file_row_start", "file_row_end_exclusive"):
-        _count(data[field], "COLLECTION_RECOMMENDATION_DATA_LOCATOR")
-    if data["file_row_end_exclusive"] - data["file_row_start"] != rows:
-        raise ContractError("COLLECTION_RECOMMENDATION_DATA_LOCATOR")
-    data["relative_path"] = _locator_path(
-        data["relative_path"], kind="data", chunk_index=data["chunk_index"],
-        file_index=data["file_index"],
-    )
-    videos = locator["videos"]
-    if not isinstance(videos, list) or not videos:
-        raise ContractError("COLLECTION_RECOMMENDATION_VIDEO_LOCATOR")
-    normalized_videos = []
-    for raw in videos:
-        video = _exact(raw, VIDEO_LOCATOR_FIELDS, "COLLECTION_RECOMMENDATION_VIDEO_LOCATOR")
-        _identifier(video["camera_key"], "COLLECTION_RECOMMENDATION_VIDEO_LOCATOR")
-        for field in (
-            "chunk_index", "file_index", "file_frame_start",
-            "file_frame_end_exclusive",
-        ):
-            _count(video[field], "COLLECTION_RECOMMENDATION_VIDEO_LOCATOR")
-        if video["file_frame_end_exclusive"] - video["file_frame_start"] != rows:
-            raise ContractError("COLLECTION_RECOMMENDATION_VIDEO_LOCATOR")
-        video["relative_path"] = _locator_path(
-            video["relative_path"], kind="video",
-            chunk_index=video["chunk_index"], file_index=video["file_index"],
-            camera_key=video["camera_key"],
-        )
-        for field in ("timestamp_start_s", "timestamp_end_s"):
-            if isinstance(video[field], bool) or not isinstance(video[field], (int, float)):
-                raise ContractError("COLLECTION_RECOMMENDATION_VIDEO_LOCATOR")
-        if video["timestamp_start_s"] < 0 or video["timestamp_end_s"] <= video["timestamp_start_s"]:
-            raise ContractError("COLLECTION_RECOMMENDATION_VIDEO_LOCATOR")
-        normalized_videos.append(video)
-    cameras = [video["camera_key"] for video in normalized_videos]
-    if cameras != sorted(cameras) or len(cameras) != len(set(cameras)):
-        raise ContractError("COLLECTION_RECOMMENDATION_VIDEO_LOCATOR")
-    locator["data"], locator["videos"] = data, normalized_videos
-    _self_digest(locator, "locator_digest", "COLLECTION_RECOMMENDATION_LOCATOR_DIGEST")
-    return locator
-
-
-def _episode_snapshot(value: object, manifest: Mapping[str, Any]) -> dict[str, Any]:
-    evidence = _exact(value, EVIDENCE_FIELDS, "COLLECTION_RECOMMENDATION_EVIDENCE_FIELDS")
-    order_index = _count(evidence["manifest_order_index"], "COLLECTION_RECOMMENDATION_EVIDENCE_ORDER")
     if order_index >= len(manifest["slots"]):
         raise ContractError("COLLECTION_RECOMMENDATION_EVIDENCE_ORDER")
-    slot = manifest["slots"][order_index]
 
-    ledger = _exact(evidence["ledger"], LEDGER_FIELDS, "COLLECTION_RECOMMENDATION_LEDGER_FIELDS")
-    if ledger["schema_version"] != LEDGER_SCHEMA:
-        raise ContractError("COLLECTION_RECOMMENDATION_LEDGER_SCHEMA")
-    _self_digest(ledger, "ledger_digest", "COLLECTION_RECOMMENDATION_LEDGER_DIGEST")
-    artifacts = _artifact_refs(ledger["artifacts"])
-    payloads = _artifact_payloads(evidence["artifacts"], artifacts)
-    if payloads["manifest"] != manifest:
+    checked = validate_loaded_episode_evidence(
+        ledger=evidence["ledger"], state=evidence["state"],
+        candidate=evidence["candidate"], artifacts=evidence["artifacts"],
+    )
+    payloads = checked["artifacts"]
+    if (
+        payloads["manifest"] != manifest
+        or payloads["intent"].get("order_index") != order_index
+        or payloads["intent"].get("slot") != manifest["slots"][order_index]
+    ):
         raise ContractError("COLLECTION_RECOMMENDATION_MANIFEST_ARTIFACT_BINDING")
+    if checked["admission"]["technical_status"] != "PASS":
+        raise ContractError("COLLECTION_RECOMMENDATION_ADMISSION")
 
-    run = _exact(payloads["run"], RUN_FIELDS, "COLLECTION_RECOMMENDATION_RUN_FIELDS")
-    run_id = _identifier(run["run_id"], "COLLECTION_RECOMMENDATION_RUN_ID")
-    episode_index = _count(run["episode_index"], "COLLECTION_RECOMMENDATION_EPISODE_INDEX")
-    rows = _count(run["rows"], "COLLECTION_RECOMMENDATION_RUN_ROWS", positive=True)
-    if (
-        run["schema_version"] != RUN_SCHEMA
-        or run["state"] != "COMMITTED"
-        or run["reason_code"] != "COMMITTED"
-        or run["transaction_id"] != f"{run_id}:episode-{episode_index:06d}"
-        or not isinstance(run["detail"], str)
-    ):
-        raise ContractError("COLLECTION_RECOMMENDATION_RUN_BINDING")
-
-    dataset = _exact(ledger["dataset"], DATASET_FIELDS, "COLLECTION_RECOMMENDATION_DATASET_FIELDS")
-    _identifier(dataset["dataset_id"], "COLLECTION_RECOMMENDATION_DATASET_ID")
-    if any(not isinstance(dataset[field], str) or not dataset[field] for field in ("repo_id", "dataset_root")):
-        raise ContractError("COLLECTION_RECOMMENDATION_DATASET")
-
-    episode = _exact(ledger["episode"], EPISODE_FIELDS, "COLLECTION_RECOMMENDATION_EPISODE_FIELDS")
-    ref = _exact(episode["episode_ref"], EPISODE_REF_FIELDS, "COLLECTION_RECOMMENDATION_EPISODE_REF_FIELDS")
-    if (
-        ref["schema_version"] != EPISODE_REF_SCHEMA
-        or ref["repo_id"] != dataset["repo_id"]
-        or ref["episode_index"] != episode_index
-        or ref["transaction_id"] != run["transaction_id"]
-    ):
-        raise ContractError("COLLECTION_RECOMMENDATION_EPISODE_REF_BINDING")
-    for field in ("resolved_job_digest", "staging_manifest_digest"):
-        _digest(ref[field], "COLLECTION_RECOMMENDATION_EPISODE_REF_DIGEST")
-    ref_digest = canonical_digest(ref)
-    if (
-        episode["run_id"] != run_id
-        or episode["episode_index"] != episode_index
-        or episode["transaction_id"] != run["transaction_id"]
-        or episode["episode_ref_digest"] != ref_digest
-    ):
-        raise ContractError("COLLECTION_RECOMMENDATION_EPISODE_BINDING")
+    ledger = checked["ledger"]
+    dataset = checked["dataset"]
+    ref = checked["episode_ref"]
     expected_dataset_digest = canonical_digest({
         "repo_id": dataset["repo_id"],
         "dataset_root": dataset["dataset_root"],
@@ -397,237 +214,47 @@ def _episode_snapshot(value: object, manifest: Mapping[str, Any]) -> dict[str, A
         or dataset["dataset_id"] != f"dataset-{expected_dataset_digest[7:23]}"
     ):
         raise ContractError("COLLECTION_RECOMMENDATION_DATASET_DIGEST")
-    locator = _locator(
-        episode["lerobot_v3_locator"], repo_id=dataset["repo_id"],
-        episode_index=episode_index, rows=rows,
-    )
 
-    episode_artifact = payloads["episode"]
-    staging = payloads["staging_manifest"]
-    intent = payloads["intent"]
-    runtime = payloads["runtime_binding"]
-    plan_artifact = payloads["plan"]
-    technical = payloads["technical"]
-    execution = payloads["execution"]
-    if any(
-        not isinstance(item, Mapping)
-        for item in (
-            episode_artifact, staging, intent, runtime, plan_artifact,
-            technical, execution,
-        )
-    ):
-        raise ContractError("COLLECTION_RECOMMENDATION_ARTIFACT_BODY")
-    intent_digest = _self_digest(
-        intent, "intent_digest", "COLLECTION_RECOMMENDATION_INTENT_DIGEST",
-    )
-    _self_digest(
-        runtime, "binding_digest", "COLLECTION_RECOMMENDATION_RUNTIME_DIGEST",
-    )
-    staging_bindings = staging.get("binding_digests")
-    intent_slot = intent.get("slot")
-    base_condition = intent.get("base_condition")
-    robot_pose = intent.get("robot_start_pose")
-    fixed_contract = intent.get("fixed_contract")
-    plan_envelope = plan_artifact.get("plan_envelope")
-    plan = plan_envelope.get("plan") if isinstance(plan_envelope, Mapping) else None
-    if not all(
-        isinstance(item, Mapping)
-        for item in (
-            staging_bindings, intent_slot, base_condition, robot_pose,
-            fixed_contract, plan,
-        )
-    ):
-        raise ContractError("COLLECTION_RECOMMENDATION_ARTIFACT_BODY")
-    plan_digest = _digest(
-        plan_artifact.get("plan_digest"),
-        "COLLECTION_RECOMMENDATION_PLAN_DIGEST",
-    )
-    collection_profile_digest = _digest(
-        staging_bindings.get("collection_profile_digest"),
-        "COLLECTION_RECOMMENDATION_COLLECTION_PROFILE_DIGEST",
-    )
-    scene_state_digest = _digest(
-        runtime.get("scene_state_digest"),
-        "COLLECTION_RECOMMENDATION_RUNTIME_BINDING",
-    )
-    root_binding_digest = _digest(
-        runtime.get("root_binding_digest"),
-        "COLLECTION_RECOMMENDATION_RUNTIME_BINDING",
-    )
-    start_binding_digest = _digest(
-        runtime.get("start_binding_digest"),
-        "COLLECTION_RECOMMENDATION_RUNTIME_BINDING",
-    )
-    runtime_authority = {
-        "execution": "NONE", "human_approval": "NONE",
-        "semantic_pass": "NONE", "training_approval": "NONE",
-        "persistent_start_qualification": "NONE",
-    }
-    if (
-        episode_artifact.get("run_id") != run_id
-        or episode_artifact.get("episode_ref") != ref
-        or staging.get("run_id") != run_id
-        or staging.get("dataset_root") != dataset["dataset_root"]
-        or staging.get("episode_index") != episode_index
-        or canonical_digest(staging) != ref["staging_manifest_digest"]
-        or staging_bindings.get("resolved_job_digest") != ref["resolved_job_digest"]
-        or intent.get("run_id") != run_id
-        or intent.get("manifest_id") != manifest["manifest_id"]
-        or intent.get("manifest_digest") != manifest["manifest_digest"]
-        or intent.get("order_index") != order_index
-        or intent_slot != slot
-        or intent.get("slot_digest") != canonical_digest(slot)
-        or base_condition.get("base_condition_digest") != slot["base_condition_digest"]
-        or base_condition.get("resolved_job_digest") != ref["resolved_job_digest"]
-        or robot_pose.get("robot_start_pose_id") != slot["robot_start_pose_id"]
-        or fixed_contract.get("collection_profile_digest") != collection_profile_digest
-        or runtime.get("run_id") != run_id
-        or runtime.get("resolved_job_digest") != ref["resolved_job_digest"]
-        or runtime.get("manifest_digest") != manifest["manifest_digest"]
-        or runtime.get("intent_digest") != intent_digest
-        or runtime.get("slot_digest") != canonical_digest(slot)
-        or runtime.get("robot_start_pose_id") != slot["robot_start_pose_id"]
-        or runtime.get("split_group") != slot["split_group"]
-        or runtime.get("repeat_index") != slot["repeat_index"]
-        or runtime.get("scene_state_digest") != intent.get("required_scene_digest")
-        or runtime.get("authority") != runtime_authority
-        or plan_artifact.get("run_id") != run_id
-        or plan_artifact.get("resolved_job_digest") != ref["resolved_job_digest"]
-        or canonical_digest(plan) != plan_digest
-        or technical.get("run_id") != run_id
-        or technical.get("resolved_job_digest") != ref["resolved_job_digest"]
-        or technical.get("plan_digest") != plan_digest
-        or execution.get("run_id") != run_id
-        or execution.get("plan_digest") != plan_digest
-    ):
-        raise ContractError("COLLECTION_RECOMMENDATION_ARTIFACT_BINDING")
-
-    bindings = _exact(ledger["bindings"], BINDING_FIELDS, "COLLECTION_RECOMMENDATION_BINDING_FIELDS")
-    for field, item in bindings.items():
-        if field == "robot_start_pose_id":
-            _identifier(item, "COLLECTION_RECOMMENDATION_BINDING")
-        else:
-            _digest(item, "COLLECTION_RECOMMENDATION_BINDING")
-    expected_bindings = {
-        "resolved_job_digest": ref["resolved_job_digest"],
-        "manifest_digest": manifest["manifest_digest"],
-        "intent_digest": intent_digest,
-        "slot_digest": canonical_digest(slot),
-        "base_condition_digest": slot["base_condition_digest"],
-        "robot_start_pose_id": slot["robot_start_pose_id"],
-        "scene_state_digest": scene_state_digest,
-        "root_binding_digest": root_binding_digest,
-        "start_binding_digest": start_binding_digest,
-        "collection_profile_digest": collection_profile_digest,
-        "plan_digest": plan_digest,
-    }
-    if bindings != expected_bindings:
-        raise ContractError("COLLECTION_RECOMMENDATION_SLOT_BINDING")
-    admission = _exact(ledger["admission"], ADMISSION_FIELDS, "COLLECTION_RECOMMENDATION_ADMISSION_FIELDS")
-    expected_review_context = canonical_digest({
-        "run_id": run_id,
-        "resolved_job_digest": ref["resolved_job_digest"],
-        "plan_digest": plan_digest,
-        "technical_validator_digest": canonical_digest(technical),
-    })
-    if (
-        admission["technical_status"] != "PASS"
-        or admission["technical_status"] != technical.get("status")
-        or admission["review_context_digest"] != expected_review_context
-        or admission["training_status"] != "NOT_AUTHORIZED"
-    ):
-        raise ContractError("COLLECTION_RECOMMENDATION_ADMISSION")
-    _digest(admission["review_context_digest"], "COLLECTION_RECOMMENDATION_ADMISSION")
-
-    candidate = _exact(evidence["candidate"], CANDIDATE_FIELDS, "COLLECTION_RECOMMENDATION_CANDIDATE_FIELDS")
-    if (
-        candidate["schema_version"] != CANDIDATE_SCHEMA
-        or candidate["run_id"] != run_id
-        or candidate["operational_gate"] != "PASS"
-        or candidate["operational_source"] not in {"HIL_PROXY", "HUMAN_GATED"}
-        or candidate["review_context_digest"] != admission["review_context_digest"]
-        or candidate["semantic_status"] not in {"PENDING", "PASS", "FAIL", "UNCERTAIN"}
-    ):
+    candidate = checked["candidate"]
+    if candidate is None:
         raise ContractError("COLLECTION_RECOMMENDATION_CANDIDATE_BINDING")
-    _identifier(candidate["checklist_id"], "COLLECTION_RECOMMENDATION_CANDIDATE")
-    status = candidate["semantic_status"]
-    if (
-        status == "PENDING" and any(candidate[field] is not None for field in ("reviewed_by", "reviewed_at", "reason"))
-        or status != "PENDING" and (
-            not isinstance(candidate["reviewed_by"], str)
-            or SAFE_ID.fullmatch(candidate["reviewed_by"]) is None
-            or candidate["reviewed_by"] == "HUMAN"
-            or not isinstance(candidate["reviewed_at"], str)
-            or RFC3339.fullmatch(candidate["reviewed_at"]) is None
-            or status == "PASS" and candidate["reason"] is not None
-            or status != "PASS" and (not isinstance(candidate["reason"], str) or not candidate["reason"])
-        )
-    ):
-        raise ContractError("COLLECTION_RECOMMENDATION_CANDIDATE_STATE")
-    candidate_digest = canonical_digest(candidate)
-
-    state = _exact(evidence["state"], STATE_FIELDS, "COLLECTION_RECOMMENDATION_STATE_FIELDS")
-    if state["schema_version"] != STATE_SCHEMA:
-        raise ContractError("COLLECTION_RECOMMENDATION_STATE_SCHEMA")
-    _self_digest(state, "state_digest", "COLLECTION_RECOMMENDATION_STATE_DIGEST")
-    candidate_ref = _exact(state["candidate"], ARTIFACT_REF_FIELDS, "COLLECTION_RECOMMENDATION_CANDIDATE_REF")
-    if (
-        not isinstance(candidate_ref["artifact_path"], str)
-        or not candidate_ref["artifact_path"]
-        or "\x00" in candidate_ref["artifact_path"]
-    ):
-        raise ContractError("COLLECTION_RECOMMENDATION_CANDIDATE_REF")
-    _digest(
-        candidate_ref["artifact_digest"],
-        "COLLECTION_RECOMMENDATION_CANDIDATE_REF",
-    )
-    review = _exact(state["review"], REVIEW_FIELDS, "COLLECTION_RECOMMENDATION_REVIEW_FIELDS")
-    retention = _exact(state["retention"], RETENTION_FIELDS, "COLLECTION_RECOMMENDATION_RETENTION_FIELDS")
-    if (
-        state["ledger_digest"] != ledger["ledger_digest"]
-        or state["episode_ref_digest"] != ref_digest
-        or candidate_ref["artifact_digest"] != candidate_digest
-        or review != {
-            "semantic_status": candidate["semantic_status"],
-            "reviewed_by": candidate["reviewed_by"],
-            "reviewed_at": candidate["reviewed_at"],
-            "reason": candidate["reason"],
-            "training_status": "NOT_AUTHORIZED",
-        }
-        or retention["retention_state"] != "PRESERVE"
-        or retention["reclaim_state"] not in {"NOT_EVALUATED", "REPACK_REQUIRED"}
-        or retention["physical_deletion"] != "NOT_AUTHORIZED"
-        or retention["storage_layout"] != "SHARED_CHUNK"
-    ):
-        raise ContractError("COLLECTION_RECOMMENDATION_STATE_BINDING")
-
-    provenance = payloads["source_provenance"]
-    quality = payloads["recording_quality"]
-    if (
-        not isinstance(provenance, list)
-        or len(provenance) != rows
-        or any(not isinstance(row, Mapping) or row.get("frame_index") != index for index, row in enumerate(provenance))
-        or not isinstance(quality, Mapping)
-        or quality.get("episode_index") != episode_index
-        or quality.get("frames") != rows
-    ):
-        raise ContractError("COLLECTION_RECOMMENDATION_RECORDING_BINDING")
-    provenance_digest = canonical_digest(provenance)
-    quality_digest = canonical_digest(quality)
-    return {
+    summary = {
         "manifest_order_index": order_index,
-        "run_id": run_id,
-        "episode_index": episode_index,
+        "run_id": checked["run_id"],
+        "episode_index": ref["episode_index"],
         "dataset_id": dataset["dataset_id"],
         "dataset_digest": dataset["dataset_digest"],
-        "episode_ref": {"schema_version": EPISODE_REF_SCHEMA, "digest": ref_digest},
-        "locator": {"schema_version": LOCATOR_SCHEMA, "digest": locator["locator_digest"]},
-        "ledger": {"schema_version": LEDGER_SCHEMA, "digest": ledger["ledger_digest"]},
-        "state": {"schema_version": STATE_SCHEMA, "digest": state["state_digest"]},
-        "candidate": {"schema_version": CANDIDATE_SCHEMA, "digest": candidate_digest},
-        "source_provenance_digest": provenance_digest,
-        "recording_quality_digest": quality_digest,
+        "episode_ref": {
+            "schema_version": EPISODE_REF_SCHEMA,
+            "digest": ledger["episode"]["episode_ref_digest"],
+        },
+        "locator": {
+            "schema_version": LOCATOR_SCHEMA,
+            "digest": checked["locator"]["locator_digest"],
+        },
+        "ledger": {
+            "schema_version": LEDGER_SCHEMA,
+            "digest": ledger["ledger_digest"],
+        },
+        "state": {
+            "schema_version": STATE_SCHEMA,
+            "digest": checked["state"]["state_digest"],
+        },
+        "candidate": {
+            "schema_version": CANDIDATE_SCHEMA,
+            "digest": canonical_digest(candidate),
+        },
+        "source_provenance_digest": checked["artifact_refs"][
+            "source_provenance"
+        ]["artifact_digest"],
+        "recording_quality_digest": checked["artifact_refs"][
+            "recording_quality"
+        ]["artifact_digest"],
     }
+    identity = (
+        dataset["repo_id"], dataset["dataset_root"], ref["episode_index"],
+    )
+    return summary, identity
 
 
 def _episode_summaries(
@@ -635,11 +262,15 @@ def _episode_summaries(
 ) -> list[dict[str, Any]]:
     if not isinstance(values, Sequence) or isinstance(values, (str, bytes)) or not values:
         raise ContractError("COLLECTION_RECOMMENDATION_EPISODES")
-    episodes = [_episode_snapshot(item, manifest) for item in values]
+    checked = [_episode_snapshot(item, manifest) for item in values]
+    episodes = [item[0] for item in checked]
+    identities = [item[1] for item in checked]
     if normalize:
         episodes.sort(key=lambda item: item["manifest_order_index"])
     if [item["manifest_order_index"] for item in episodes] != list(range(len(episodes))):
         raise ContractError("COLLECTION_RECOMMENDATION_EPISODE_ORDER")
+    if len(identities) != len(set(identities)):
+        raise ContractError("COLLECTION_RECOMMENDATION_EPISODE_DUPLICATE")
     unique_fields = (
         "run_id", "dataset_digest", "source_provenance_digest",
         "recording_quality_digest",
@@ -1104,9 +735,18 @@ def validate_collection_recommendation(
 def project_update_draft_intent(
     recommendation: object, *, selected_change_id: str,
     operator_view: Mapping[str, Any], intent_id: str | None = None,
+    data_quality_analysis: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Return one update_draft intent; never consume or apply it."""
     checked = validate_collection_recommendation(recommendation)
+    _analysis_ref(
+        checked["input_snapshot"]["data_quality_analysis_ref"],
+        owner="data_quality", artifact=data_quality_analysis, normalize=False,
+    )
+    _analysis_ref(
+        checked["input_snapshot"]["rollout_evidence_analysis_ref"],
+        owner="rollout", artifact=None, normalize=False,
+    )
     _identifier(selected_change_id, "COLLECTION_RECOMMENDATION_PATCH_SELECTION")
     selected = [
         patch for patch in checked["suggested_draft_patches"]
@@ -1143,18 +783,42 @@ def project_update_draft_intent(
         raise ContractError("COLLECTION_RECOMMENDATION_VIEW_DRAFT")
     draft_id = _identifier(draft.get("draft_id"), "COLLECTION_RECOMMENDATION_VIEW_DRAFT")
     _count(draft.get("revision"), "COLLECTION_RECOMMENDATION_VIEW_DRAFT")
-    if patch["field"] == "selection":
-        axis, selected_value = next(iter(patch["value"].items()))
+    field = patch["field"]
+    selection = draft.get("selection")
+    if field in {"selection", "split"}:
+        axis, selected_value = (
+            next(iter(patch["value"].items()))
+            if field == "selection" else ("split", patch["value"])
+        )
         catalog = projection.get("catalog")
         axes = catalog.get("axes") if isinstance(catalog, Mapping) else None
         options = axes.get(axis) if isinstance(axes, Mapping) else None
-        if not isinstance(options, list) or not any(
-            isinstance(option, Mapping)
-            and option.get("id") == selected_value
-            and option.get("available") is True
-            for option in options
+        matches = [
+            option for option in options or []
+            if isinstance(option, Mapping) and option.get("id") == selected_value
+        ] if isinstance(options, list) else []
+        if (
+            not isinstance(selection, Mapping)
+            or not isinstance(selection.get(axis), str)
+            or len(matches) != 1 or matches[0].get("available") is not True
         ):
             raise ContractError("COLLECTION_RECOMMENDATION_PATCH_VALUE")
+    elif field in {"requested_count", "repeat"}:
+        _count(
+            draft.get(field), "COLLECTION_RECOMMENDATION_VIEW_DRAFT",
+            positive=True,
+        )
+    elif (
+        draft.get("authoring_mode") != "ASSISTED"
+        or not isinstance(projection.get("sampling_provenance"), Mapping)
+        or not isinstance(
+            projection["sampling_provenance"].get(
+                "state_space_design_profile"
+            ),
+            Mapping,
+        )
+    ):
+        raise ContractError("COLLECTION_RECOMMENDATION_PATCH_VALUE")
     if intent_id is None:
         intent_id = "recommendation-" + canonical_digest({
             "recommendation_digest": checked["recommendation_digest"],
@@ -1171,7 +835,7 @@ def project_update_draft_intent(
         "op": "update_draft",
         "payload": {
             "draft_id": draft_id,
-            patch["field"]: copy.deepcopy(patch["value"]),
+            field: copy.deepcopy(patch["value"]),
         },
     }
 

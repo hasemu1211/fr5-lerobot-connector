@@ -20,6 +20,7 @@ from tools.data_factory.episode_ledger import (
     reproject_episode_state,
     validate_episode_ledger,
     validate_episode_state,
+    validate_loaded_episode_evidence,
 )
 from tools.data_factory.task_recipe import (
     compile_episode_instruction_binding,
@@ -405,6 +406,60 @@ class EpisodeLedgerTest(unittest.TestCase):
             b"shared shard may append without a whole-file locator hash",
         )
         self.assertEqual(ledger, validate_episode_ledger(ledger))
+
+    def test_loaded_episode_validator_is_pure_exact_and_owner_canonical(self) -> None:
+        refs = self._artifacts(suffix="loaded")
+        loaded = {}
+        for name, ref in refs.items():
+            path = Path(ref["artifact_path"])
+            if name in {"source_provenance", "recording_quality"}:
+                rows = [
+                    json.loads(line)
+                    for line in path.read_text(encoding="utf-8").splitlines()
+                ]
+                loaded[name] = (
+                    rows if name == "source_provenance" else
+                    next(row for row in rows if row["episode_index"] == 0)
+                )
+            else:
+                loaded[name] = json.loads(path.read_text(encoding="utf-8"))
+        before = copy.deepcopy((refs, loaded))
+        dataset_root = str(self.dataset.resolve())
+        with (
+            mock.patch("builtins.open", side_effect=AssertionError("I/O forbidden")),
+            mock.patch("pathlib.Path.open", side_effect=AssertionError("I/O forbidden")),
+            mock.patch("pathlib.Path.resolve", side_effect=AssertionError("I/O forbidden")),
+        ):
+            checked = validate_loaded_episode_evidence(
+                dataset_root=dataset_root,
+                artifact_refs=refs, artifacts=loaded,
+            )
+        self.assertEqual(checked["episode_ref"], self.episode_ref)
+        self.assertEqual((refs, loaded), before)
+
+        for label, change, code in (
+            (
+                "invented-schema",
+                {"schema_version": "invented.technical.v1"},
+                "EPISODE_LEDGER_TECHNICAL_BINDING",
+            ),
+            (
+                "field-drift", {"invented_pass": True},
+                "EPISODE_LEDGER_TECHNICAL_FIELDS",
+            ),
+        ):
+            forged_refs, forged = copy.deepcopy((refs, loaded))
+            forged["technical"].update(change)
+            forged_refs["technical"]["artifact_digest"] = digest(
+                forged["technical"],
+            )
+            with self.subTest(label=label), self.assertRaisesRegex(
+                ContractError, code,
+            ):
+                validate_loaded_episode_evidence(
+                    dataset_root=dataset_root,
+                    artifact_refs=forged_refs, artifacts=forged,
+                )
 
     def test_plan_artifact_preserves_the_episode_instruction_binding(self) -> None:
         artifacts = self._artifacts(suffix="instruction-v2")
