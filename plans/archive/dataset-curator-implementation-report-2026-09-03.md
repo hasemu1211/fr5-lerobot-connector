@@ -7,7 +7,7 @@
 
 ## 0. 2026-09-04 current-main 통합 추가 기록
 
-이 절은 아래 2026-09-03 v1.2 보고를 덮어쓰지 않고, 그 checkpoint와 2026-09-04 current main을 비교해 추가한 통합 증거다. 역사 branch `hasemu1211/curator-profile-setup`은 `245f0ccd4712157f270f55010edd52052e866019`에 그대로 보존했다. 새 `hasemu1211/curator-profile-main-integration` branch는 당시 `origin/main`의 exact SHA `3a8383582bcb90277ed1c917c62e475a6358c6a0`를 parent로 시작했다. 통합 commit SHA는 commit 생성 뒤 coordinator에게 보내는 `worker_done`에 기록한다.
+이 절은 아래 2026-09-03 v1.2 보고를 덮어쓰지 않고, 그 checkpoint와 2026-09-04 current main을 비교해 추가한 통합 증거다. 역사 branch `hasemu1211/curator-profile-setup`은 `245f0ccd4712157f270f55010edd52052e866019`에 그대로 보존했다. 새 `hasemu1211/curator-profile-main-integration` branch는 당시 `origin/main`의 exact SHA `3a8383582bcb90277ed1c917c62e475a6358c6a0`를 parent로 시작했다. Integration commit은 `ff22b9a2fa97c1bf4ded66258bbd75b2e2cacc9f`, retry-safety commit은 `038d9f04468713dd9fa5c075b7c73b3766479124`다.
 
 ### 0.1 결론과 변경 범위
 
@@ -86,7 +86,7 @@ worktree에는 `.venv`가 없고 `.envrc`는 local `.venv`가 있을 때만 활�
 
 | 항목 | 현재 판정 | 의미 |
 |---|---|---|
-| v1.2 코드 구조·계약 | GO | main 통합, focused 71/71, repository 전체 808/808, knowledge QA 100/100과 독립 P0/P1 재감사 통과 |
+| v1.2 코드 구조·계약 | GO | current-main 통합은 focused 80/80, final tree repository 전체 726/726 통과. 아래 71/808은 2026-09-03 역사 snapshot |
 | synthetic LeRobot/H.264 흐름 | GO | 실제 writer/reader/FFmpeg encode·decode로 prepare, publish, reject와 복구 확인 |
 | 원본 추적성 | GO | full source-tree digest, episode/frame mapping, transform asset, copied provenance와 candidate digest 결속 |
 | 실제 현장 candidate 생성 | NO-GO | physical binding·LabelMe geometry·mask·plate가 아직 `VERIFIED` profile로 결속되지 않음 |

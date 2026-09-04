@@ -197,7 +197,12 @@ def _root(path: Path, code: str) -> Path:
     return result
 
 
-def _new_directory(parent: Path, name: str, code: str) -> OwnedDirectory:
+def _new_directory(
+    parent: Path,
+    name: str,
+    code: str,
+    created: list[OwnedDirectory],
+) -> OwnedDirectory:
     root = _root(parent, code)
     target = root / name
     reject_symlink_components(target, code)
@@ -205,15 +210,16 @@ def _new_directory(parent: Path, name: str, code: str) -> OwnedDirectory:
     try:
         target.mkdir(mode=0o700)
         owned = OwnedDirectory.capture(target)
+        created.append(owned)
         fsync_directory(root)
     except FileExistsError as exc:
         raise CuratorError(code, f"already exists: {target}") from exc
     except OSError as exc:
-        if owned is not None:
+        if owned is not None and owned not in created:
             remove_owned_directory(owned)
         raise CuratorError(code, str(exc)) from exc
     except BaseException:
-        if owned is not None:
+        if owned is not None and owned not in created:
             remove_owned_directory(owned)
         raise
     if owned is None:
@@ -572,10 +578,10 @@ def _export_profile_setup(
     setup_id = _setup_id() if _setup_id_value is None else _setup_id_value
     if SAFE_ID.fullmatch(setup_id) is None:
         raise CuratorError("SETUP_ID")
-    run_owner = _new_directory(paths.run_root, setup_id, "SETUP_RUN_CREATE")
-    _created.append(run_owner)
-    asset_owner = _new_directory(paths.asset_root, profile_id, "SETUP_ASSET_CREATE")
-    _created.append(asset_owner)
+    run_owner = _new_directory(paths.run_root, setup_id, "SETUP_RUN_CREATE", _created)
+    asset_owner = _new_directory(
+        paths.asset_root, profile_id, "SETUP_ASSET_CREATE", _created
+    )
     run, asset = run_owner.path, asset_owner.path
     reference_path = asset / "reference.png"
     annotation_path = asset / "reference.json"
@@ -795,12 +801,12 @@ def _preview_profile_setup(
         code="SETUP_SOURCE_CHANGED",
     )
 
-    review_owner = _new_directory(run / "previews", preview_id, "SETUP_PREVIEW_CREATE")
-    _created.append(review_owner)
-    revision_owner = _new_directory(
-        asset / "revisions", preview_id, "SETUP_ASSET_REVISION_CREATE"
+    review_owner = _new_directory(
+        run / "previews", preview_id, "SETUP_PREVIEW_CREATE", _created
     )
-    _created.append(revision_owner)
+    revision_owner = _new_directory(
+        asset / "revisions", preview_id, "SETUP_ASSET_REVISION_CREATE", _created
+    )
     review, revision = review_owner.path, revision_owner.path
     reference_path = revision / "reference.png"
     annotation_path = revision / "reference.json"

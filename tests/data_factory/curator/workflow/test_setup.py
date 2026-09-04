@@ -87,23 +87,37 @@ class ProfileSetupTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             source, _fixture_value, paths = _fixture(root)
+            preserved = export_profile_setup(
+                source,
+                profile_id="preserved-view-r001",
+                plate_frame_count=2,
+                _paths=paths,
+                _setup_id_value="setup-preserved",
+            )
+            preserved_run = paths.run_root / "setup-preserved"
+            preserved_asset = Path(preserved["reference_image"]).parent
+            preserved_before = (
+                stable_tree_identity(preserved_run, code="TEST_PRESERVED_EXPORT"),
+                stable_tree_identity(preserved_asset, code="TEST_PRESERVED_EXPORT"),
+            )
             original = setup_workflow._new_directory
             calls = 0
 
-            def fail_between_creates(*args, **kwargs):
+            def interrupt_after_create(*args, **kwargs):
                 nonlocal calls
                 calls += 1
+                owned = original(*args, **kwargs)
                 if calls == 2:
-                    raise CuratorError("INJECTED_EXPORT_CREATE")
-                return original(*args, **kwargs)
+                    raise KeyboardInterrupt
+                return owned
 
             with (
                 mock.patch.object(
                     setup_workflow,
                     "_new_directory",
-                    side_effect=fail_between_creates,
+                    side_effect=interrupt_after_create,
                 ),
-                self.assertRaisesRegex(CuratorError, "INJECTED_EXPORT_CREATE"),
+                self.assertRaises(KeyboardInterrupt),
             ):
                 export_profile_setup(
                     source,
@@ -114,6 +128,13 @@ class ProfileSetupTest(unittest.TestCase):
                 )
             self.assertFalse((paths.run_root / "setup-retry").exists())
             self.assertFalse((paths.asset_root / "retry-view-r001").exists())
+            self.assertEqual(
+                (
+                    stable_tree_identity(preserved_run, code="TEST_PRESERVED_EXPORT"),
+                    stable_tree_identity(preserved_asset, code="TEST_PRESERVED_EXPORT"),
+                ),
+                preserved_before,
+            )
 
             with (
                 mock.patch.object(
@@ -141,6 +162,13 @@ class ProfileSetupTest(unittest.TestCase):
                 _setup_id_value="setup-retry",
             )
             self.assertEqual(result["status"], "ANNOTATION_REQUIRED")
+            self.assertEqual(
+                (
+                    stable_tree_identity(preserved_run, code="TEST_PRESERVED_EXPORT"),
+                    stable_tree_identity(preserved_asset, code="TEST_PRESERVED_EXPORT"),
+                ),
+                preserved_before,
+            )
 
     def test_preview_failures_preserve_prior_evidence_and_retry_succeeds(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -164,25 +192,30 @@ class ProfileSetupTest(unittest.TestCase):
             )
             old_review = paths.run_root / "setup-preview-retry/previews/preview-old"
             old_revision = paths.asset_root / "preview-retry-r001/revisions/preview-old"
+            old_before = (
+                stable_tree_identity(old_review, code="TEST_PRESERVED_PREVIEW"),
+                stable_tree_identity(old_revision, code="TEST_PRESERVED_PREVIEW"),
+            )
             annotation["shapes"][1]["points"][0][1] += 1
             write_json(annotation_path, annotation)
             original = setup_workflow._new_directory
             calls = 0
 
-            def fail_between_creates(*args, **kwargs):
+            def interrupt_after_create(*args, **kwargs):
                 nonlocal calls
                 calls += 1
+                owned = original(*args, **kwargs)
                 if calls == 2:
-                    raise CuratorError("INJECTED_PREVIEW_CREATE")
-                return original(*args, **kwargs)
+                    raise KeyboardInterrupt
+                return owned
 
             with (
                 mock.patch.object(
                     setup_workflow,
                     "_new_directory",
-                    side_effect=fail_between_creates,
+                    side_effect=interrupt_after_create,
                 ),
-                self.assertRaisesRegex(CuratorError, "INJECTED_PREVIEW_CREATE"),
+                self.assertRaises(KeyboardInterrupt),
             ):
                 preview_profile_setup(
                     "setup-preview-retry",
@@ -196,6 +229,13 @@ class ProfileSetupTest(unittest.TestCase):
             )
             self.assertFalse(
                 (paths.asset_root / "preview-retry-r001/revisions/preview-new").exists()
+            )
+            self.assertEqual(
+                (
+                    stable_tree_identity(old_review, code="TEST_PRESERVED_PREVIEW"),
+                    stable_tree_identity(old_revision, code="TEST_PRESERVED_PREVIEW"),
+                ),
+                old_before,
             )
 
             with (
@@ -226,8 +266,13 @@ class ProfileSetupTest(unittest.TestCase):
                 _preview_id_value="preview-new",
             )
             self.assertEqual(result["status"], "BOUNDARY_REVIEW_REQUIRED")
-            self.assertTrue(old_review.is_dir())
-            self.assertTrue(old_revision.is_dir())
+            self.assertEqual(
+                (
+                    stable_tree_identity(old_review, code="TEST_PRESERVED_PREVIEW"),
+                    stable_tree_identity(old_revision, code="TEST_PRESERVED_PREVIEW"),
+                ),
+                old_before,
+            )
 
     def test_old_request_pins_profile_through_preview_and_verified_finalize(self):
         with tempfile.TemporaryDirectory() as temporary:
