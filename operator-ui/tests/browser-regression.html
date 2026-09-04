@@ -33,6 +33,7 @@
           <fieldset id="authoring-mode"><label><input type="radio" name="authoring_mode" value="ASSISTED">assisted</label><label><input type="radio" name="authoring_mode" value="DIRECT_EDIT">direct</label></fieldset>
           <label>count<input id="count-input" type="number" min="1" max="100"></label><label>repeat<input id="repeat-input" type="number" min="1" max="100"></label><label>Campaign seed<input id="seed-input" type="number" min="0" max="9007199254740991" step="1"></label><select id="split-select" data-axis="split"></select>
           <h4 id="current-object-title">current object</h4><p id="current-object-status"></p><form id="current-object-form"><label>X<input id="current-object-x" type="number" step="any" required></label><label>Y<input id="current-object-y" type="number" step="any" required></label><label>yaw<input id="current-object-yaw" type="number" step="any" required></label><button id="apply-current-object" type="submit">apply</button></form>
+          <form id="experiment-design-form" hidden><strong id="experiment-design-title">design</strong><label>Nx<input id="design-columns-input" type="number" min="1" max="100" required></label><label>Ny<input id="design-rows-input" type="number" min="1" max="100" required></label><label>Nyaw<input id="design-yaw-input" type="number" min="1" max="100" required></label><button id="apply-experiment-design" type="submit">apply design</button><p id="experiment-design-status"></p></form>
           <dl id="state-space-summary" hidden></dl><p id="workspace-domain-summary"></p>
           <section id="direct-pose-editor" hidden><h4 id="direct-pose-title">direct</h4><p id="direct-domain-status"></p><form id="direct-pose-form"><label id="direct-start-label" hidden>start<select id="direct-start-select"></select></label><label>X<input id="direct-x-input" type="number" step="any" required></label><label>Y<input id="direct-y-input" type="number" step="any" required></label><label>yaw<input id="direct-yaw-input" type="number" step="any" required></label><button id="add-direct-pose" type="submit">add</button></form><span id="direct-selection-count"></span><ol id="direct-pose-list"></ol></section>
           <p id="plan-lock-reason"></p><details id="cell-grid-disclosure" hidden><summary>grid</summary><div id="cell-grid"></div></details><button id="plan-back">back</button><button id="compile-campaign">compile</button>
@@ -139,8 +140,29 @@
         flat.camera_setup = clone(cameraSetupState);
         flat.start_pose_setup = clone(startPoseSetupState);
         flat.state_space_summary.selected_start_pose_count = startPoseSetupState.selected_start_pose_ids.length;
-        flat.state_space_summary.eligible_pair_count = 15 * startPoseSetupState.selected_start_pose_ids.length;
-        flat.state_space_summary.planned_count = flat.draft.requested_count;
+        flat.state_space_summary.eligible_start_condition_pair_count = flat.state_space_summary.catalog_eligible_condition_count
+          * startPoseSetupState.selected_start_pose_ids.length;
+        flat.state_space_summary.planned_episode_count = flat.draft.requested_count;
+        flat.state_space_summary.object_position_count = flat.draft.workspace_route.length;
+        const profile = flat.sampling_provenance.state_space_design_profile;
+        const perWorkspace = profile.spatial_strata.columns * profile.spatial_strata.rows * profile.yaw_cdf_strata;
+        const fullPerWorkspace = perWorkspace * flat.draft.repeat;
+        flat.state_space_summary.design_shape = {
+          columns: profile.spatial_strata.columns,
+          rows: profile.spatial_strata.rows,
+          yaw_cdf_strata: profile.yaw_cdf_strata,
+        };
+        flat.state_space_summary.per_workspace_condition_count = perWorkspace;
+        flat.state_space_summary.per_workspace_target_episode_count = fullPerWorkspace;
+        const sourceRoute = flat.draft.workspace_route.slice(0, flat.draft.requested_count);
+        const endpointOrder = [...new Map(flat.draft.workspace_route.map((item) => [`${item.workspace_id}\u0000${item.frame_id}`, item])).values()];
+        flat.state_space_summary.workspace_coverage = endpointOrder.map((endpoint) => ({
+          workspace_id: endpoint.workspace_id,
+          frame_id: endpoint.frame_id,
+          planned_episode_count: sourceRoute.filter((item) => item.workspace_id === endpoint.workspace_id && item.frame_id === endpoint.frame_id).length,
+          full_coverage_episode_count: fullPerWorkspace,
+        }));
+        flat.state_space_summary.full_coverage_episode_count = fullPerWorkspace * endpointOrder.length;
         if (!stateSpaceProjectionAvailable) {
           delete flat.start_pose_setup;
           delete flat.state_space_summary;
@@ -311,6 +333,18 @@
         } catch (error) {
           check(error.message === "SAMPLING_PROFILE_INVALID", "sampling profile schema rejects browser-side sampling fields");
         }
+        const mismatchedDesignSummary = clone(currentView);
+        mismatchedDesignSummary.state_space_summary.design_shape = {columns: 3, rows: 3, yaw_cdf_strata: 3};
+        mismatchedDesignSummary.state_space_summary.per_workspace_condition_count = 27;
+        mismatchedDesignSummary.state_space_summary.per_workspace_target_episode_count = 27;
+        mismatchedDesignSummary.state_space_summary.workspace_coverage.forEach((item) => { item.full_coverage_episode_count = 27; });
+        mismatchedDesignSummary.state_space_summary.full_coverage_episode_count = 27;
+        try {
+          validateView(mismatchedDesignSummary);
+          check(false, "coverage summary and sampler profile mismatch must fail closed");
+        } catch (error) {
+          check(error.message === "STATE_SPACE_SUMMARY_INVALID", "coverage summary and sampler profile mismatch fails closed");
+        }
         const attemptsBeforeLostResponse = intentAttempts;
         postTransportFailure = true;
         submitIntent("update_draft", {draft_id: currentView.draft.draft_id, repeat: currentView.draft.repeat});
@@ -401,8 +435,26 @@
         document.querySelector("#seed-input").value = "-1";
         document.querySelector("#seed-input").dispatchEvent(new Event("change", {bubbles: true}));
         check(document.querySelector("#seed-input").validity.rangeUnderflow && posted.length === beforeInvalidSeed, "negative campaign seed is blocked without an intent");
+        check(document.querySelector("#design-columns-input").valueAsNumber === 5
+          && document.querySelector("#design-rows-input").valueAsNumber === 3
+          && document.querySelector("#design-yaw-input").valueAsNumber === 3,
+        "experiment design controls render the backend profile factors");
+        const designPostStart = posted.length;
+        document.querySelector("#experiment-design-form").requestSubmit();
+        await waitFor(() => !intentBusy && posted.length > designPostStart);
+        const designPost = posted.slice(designPostStart).find((item) => item.body.op === "update_draft");
+        check(JSON.stringify(designPost.body.payload) === JSON.stringify({
+          draft_id: currentView.draft.draft_id,
+          state_space_design_factors: {columns: 5, rows: 3, yaw_cdf_strata: 3},
+        }), "experiment design posts one atomic backend update");
         check(document.querySelector("#cell-grid-disclosure").hidden && document.querySelectorAll("#cell-grid .cell").length === 0, "assisted mode omits the full state-space grid");
-        check(!document.querySelector("#state-space-summary").hidden && document.querySelector("#state-space-summary").textContent.includes("시작 자세") && document.querySelector("#state-space-summary").textContent.includes("기준점 조합"), "assisted mode labels finite anchors without claiming the continuous domain is fully executable");
+        const designSummary = document.querySelector("#state-space-summary").textContent;
+        check(!document.querySelector("#state-space-summary").hidden
+          && designSummary.includes("등록된 적격 조건")
+          && designSummary.includes("현재 자동 실험 설계")
+          && designSummary.includes("5 × 3 × 3 = 45")
+          && designSummary.includes("모든 작업영역 완전 coverage"),
+        "catalog conditions, sampled design, and coverage are rendered as distinct meanings");
 
         check(!document.querySelector("#start-pose-entry").hidden, "start-pose management is separate from HOME recovery");
         document.querySelector("#open-start-pose").click();
@@ -511,6 +563,9 @@
         await waitFor(() => currentView?.draft.repeat === 2 && !intentBusy);
         document.querySelector('[name="authoring_mode"][value="DIRECT_EDIT"]').click();
         await waitFor(() => currentView?.draft.authoring_mode === "DIRECT_EDIT" && !document.querySelector("#direct-pose-editor").hidden);
+        check(document.querySelector("#design-columns-input").disabled
+          && document.querySelector("#apply-experiment-design").disabled,
+        "direct mode preserves materialized coordinates by disabling design changes");
         check(currentView.draft.requested_count === 5 && currentView.draft.repeat === 2 && document.querySelectorAll("#direct-pose-list [data-pair-index]").length === 3, "assisted plan materializes ordered start-pose and position pairs without changing N or repeat");
         check(!document.querySelector("#direct-start-label").hidden && [...document.querySelector("#direct-start-select").options].map((option) => option.textContent).join(",") === "HOME,측면 준비 자세", "direct mode selects among the projected usable start poses");
         const gridDisclosure = document.querySelector("#cell-grid-disclosure");

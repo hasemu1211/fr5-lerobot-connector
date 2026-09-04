@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import json
 import shutil
 import tempfile
@@ -25,7 +26,11 @@ from tools.data_factory.operator.setup.camera import (
     query_realsense_serials,
     resolve_camera_setup,
 )
-from tools.data_factory.operator.setup.contracts import build_camera_role_bindings
+from tools.data_factory.operator.setup.contracts import (
+    build_camera_role_bindings,
+    load_camera_role_bindings,
+    write_camera_role_bindings,
+)
 from tools.data_factory.operator.setup.physical import passive_physical_gate
 from tools.fr5_data_factory import ContractError
 ROOT = Path(__file__).resolve().parents[4]
@@ -176,9 +181,163 @@ class CameraRoleSetupTests(unittest.TestCase):
             )
             self.assertEqual(
                 no_silent_fallback["reason"],
-                "SAVED_CAMERA_BINDING_NOT_AVAILABLE",
+                "CAMERA_PROFILE_REVISION_INCOMPATIBLE",
             )
             self.assertIsNone(fallback_resolution)
+
+    def test_saved_binding_migrates_only_a_stream_identical_profile_revision(self):
+        with tempfile.TemporaryDirectory() as directory:
+            repository = Path(directory)
+            profiles = repository / "config/data_factory/collection_profiles"
+            profiles.mkdir(parents=True)
+            v1 = json.loads((
+                ROOT / "config/data_factory/collection_profiles/"
+                "fr5-up-wrist-rgb-30hz-v1.json"
+            ).read_text(encoding="utf-8"))
+            v2 = json.loads((
+                ROOT / "config/data_factory/collection_profiles/"
+                "fr5-up-wrist-rgb-30hz-v2.json"
+            ).read_text(encoding="utf-8"))
+            (profiles / "v1.json").write_text(json.dumps(v1), encoding="utf-8")
+            (profiles / "v2.json").write_text(json.dumps(v2), encoding="utf-8")
+            up = "254622073507"
+            wrist = "usb-Generic_USB2.0_PC_CAMERA-video-index0"
+            cameras = [device(up, "REALSENSE"), device(wrist, "UVC")]
+            stored = build_camera_role_bindings(
+                collection_profile=v1, discovered_device_ids=cameras,
+                assignments={up: "UP", wrist: "WRIST"},
+            )
+            write_camera_role_bindings(stored, repository_root=repository)
+
+            view, resolution = resolve_camera_setup(
+                repository_root=repository, devices=cameras,
+                preferred_profile_id=v2["collection_profile_id"],
+                persist=True,
+            )
+            self.assertEqual((view["status"], view["reason"]), ("READY", None))
+            self.assertEqual(
+                resolution["collection_profile"]["collection_profile_id"],
+                v2["collection_profile_id"],
+            )
+            self.assertEqual(
+                resolution["role_bindings"]["assignments"],
+                stored["assignments"],
+            )
+            self.assertEqual(
+                load_camera_role_bindings(repository_root=repository)
+                ["collection_profile_id"],
+                v2["collection_profile_id"],
+            )
+
+            incompatible = copy.deepcopy(v2)
+            incompatible["collection_profile_id"] = (
+                "fr5-up-wrist-rgb-30hz-incompatible-v3"
+            )
+            incompatible["width"] = 800
+            (profiles / "incompatible.json").write_text(
+                json.dumps(incompatible), encoding="utf-8",
+            )
+            write_camera_role_bindings(stored, repository_root=repository)
+            blocked, blocked_resolution = resolve_camera_setup(
+                repository_root=repository, devices=cameras,
+                preferred_profile_id=incompatible["collection_profile_id"],
+                persist=True,
+            )
+            self.assertEqual(blocked["status"], "BINDING_REQUIRED")
+            self.assertEqual(
+                blocked["reason"], "CAMERA_PROFILE_REVISION_INCOMPATIBLE",
+            )
+            self.assertIsNone(blocked_resolution)
+            self.assertEqual(
+                load_camera_role_bindings(repository_root=repository)
+                ["collection_profile_id"],
+                v1["collection_profile_id"],
+            )
+
+    def test_compatible_revision_keeps_environment_catalog_and_gate_on_one_binding(self):
+        v1 = json.loads((
+            ROOT / "config/data_factory/collection_profiles/"
+            "fr5-up-wrist-rgb-30hz-v1.json"
+        ).read_text(encoding="utf-8"))
+        v2 = json.loads((
+            ROOT / "config/data_factory/collection_profiles/"
+            "fr5-up-wrist-rgb-30hz-v2.json"
+        ).read_text(encoding="utf-8"))
+        up = "254622073507"
+        wrist = "usb-Generic_USB2.0_PC_CAMERA-video-index0"
+        cameras = [device(up, "REALSENSE"), device(wrist, "UVC")]
+        stored = build_camera_role_bindings(
+            collection_profile=v1, discovered_device_ids=cameras,
+            assignments={up: "UP", wrist: "WRIST"},
+        )
+        catalog = load_operator_catalog(
+            ROOT, device_ids=[up, wrist],
+        )
+        ready = {
+            "schema_version": "data_factory.operator_environment.v1",
+            "state": "READY", "observed_at": "2026-09-04T00:00:00Z",
+            "components": {
+                name: {"state": "READY", "owner": "owner", "reason": "ATTACHED"}
+                for name in ("robot", "controller", "gripper", "camera")
+            },
+        }
+        with (
+            mock.patch(
+                "tools.data_factory.operator.setup.camera."
+                "load_camera_role_bindings",
+                return_value=stored,
+            ),
+            mock.patch(
+                "tools.data_factory.operator.setup.camera."
+                "write_camera_role_bindings",
+            ) as persisted,
+        ):
+            application, _context = build_physical_operator_application(
+                repository_root=ROOT,
+                session_id="camera-revision-consistency-r001",
+                operator_label="operator",
+                environment_call=lambda: copy.deepcopy(ready),
+                prepare_environment_call=lambda: copy.deepcopy(ready),
+                initial_environment=ready, initial_catalog=catalog,
+                initial_camera_devices=cameras,
+                discovery_call=lambda: copy.deepcopy(cameras),
+                camera_environment_call=(
+                    lambda _profile, _devices: copy.deepcopy(ready)
+                ),
+                job_path=(
+                    "config/data_factory/jobs/"
+                    "center-live-24mm-20260903-r002.job.json"
+                ),
+                gripper_retune_path=None,
+                run_live_call=mock.Mock(side_effect=AssertionError("live called")),
+            )
+            try:
+                projected = application.bridge_core.snapshot()["projection"]
+                self.assertEqual(
+                    (projected["camera_setup"]["status"],
+                     projected["camera_setup"]["reason"]),
+                    ("READY", None),
+                )
+                self.assertEqual(
+                    projected["selection"]["camera_profile_id"],
+                    v2["collection_profile_id"],
+                )
+                self.assertTrue(
+                    projected["catalog"]["selection_execution"]["executable"],
+                )
+                self.assertIn("compile_draft", projected["available_ops"])
+                selected = next(
+                    item for item in application.catalog["combinations"]
+                    if item["combination_digest"]
+                    == application.selection["combination_digest"]
+                )
+                self.assertEqual(
+                    application.selection["camera_binding_digest"],
+                    selected["camera_binding_digest"],
+                )
+                persisted.assert_called_once()
+            finally:
+                application.close()
 
     def test_realsense_discovery_single_mixed_and_exact_restore(self):
         short = (

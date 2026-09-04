@@ -3,12 +3,15 @@ from __future__ import annotations
 import copy
 import json
 import unittest
+from pathlib import Path
 
 from .operator.fixtures import (
     base_qualification, catalog, draft, hypothesis, qualification_inputs,
 )
 from tools.data_factory.campaign_authoring import (
     DRAFT_SCHEMA,
+    DRAFT_SCHEMA_V2,
+    MANIFEST_SCHEMA_V2,
     campaign_cell_id,
     compile_collection_campaign,
     direct_draft_from_manifest,
@@ -16,11 +19,16 @@ from tools.data_factory.campaign_authoring import (
     validate_campaign_draft,
     validate_collection_campaign_manifest,
 )
+from tools.data_factory.state_space import (
+    configure_state_space_design_profile,
+    validate_state_space_design_profile,
+)
 from tools.data_factory.experiment_manifest import compile_fr5_hypothesis
 from tools.data_factory.quality.coverage_report import build_coverage_report
 from tools.fr5_data_factory import ContractError, canonical_digest
 
 
+ROOT = Path(__file__).resolve().parents[2]
 
 
 class CampaignAuthoringTests(unittest.TestCase):
@@ -77,6 +85,74 @@ class CampaignAuthoringTests(unittest.TestCase):
             key=lambda item: item["slot_id"],
         )
         self.assertEqual(normalized(direct_manifest), normalized(manifest))
+
+    def test_v2_manifest_freezes_effective_sampler_profile_with_seed(self):
+        contract = hypothesis()
+        source = draft(contract, count=2)
+        base = validate_state_space_design_profile(json.loads((
+            ROOT / "config/data_factory/state_space_design_profiles/"
+            "wood-cube-24mm-a4-cdf3-r001.json"
+        ).read_text(encoding="utf-8")))
+        configured = configure_state_space_design_profile(base, {
+            "columns": 4, "rows": 2, "yaw_cdf_strata": 2,
+        })
+        source.update(
+            schema_version=DRAFT_SCHEMA_V2,
+            normalized_seed=7761137905102010,
+            state_space_design_profile=configured,
+        )
+
+        first = compile_collection_campaign(source, hypothesis=contract)
+        second = compile_collection_campaign(
+            copy.deepcopy(source), hypothesis=copy.deepcopy(contract),
+        )
+        manifest, _receipt = first
+        self.assertEqual(first, second)
+        self.assertEqual(manifest["schema_version"], MANIFEST_SCHEMA_V2)
+        self.assertEqual(manifest["normalized_seed"], 7761137905102010)
+        self.assertEqual(manifest["state_space_design_profile"], configured)
+        self.assertEqual(
+            validate_collection_campaign_manifest(
+                manifest, hypothesis=contract,
+            ),
+            manifest,
+        )
+        direct = direct_draft_from_manifest(
+            source, manifest, hypothesis=contract,
+        )
+        self.assertEqual(direct["state_space_design_profile"], configured)
+        replay, _ = compile_collection_campaign(direct, hypothesis=contract)
+        self.assertEqual(
+            replay["state_space_design_profile"],
+            manifest["state_space_design_profile"],
+        )
+
+        changed = copy.deepcopy(source)
+        changed["state_space_design_profile"] = (
+            configure_state_space_design_profile(base, {
+                "columns": 3, "rows": 3, "yaw_cdf_strata": 3,
+            })
+        )
+        changed_manifest, _ = compile_collection_campaign(
+            changed, hypothesis=contract,
+        )
+        self.assertNotEqual(
+            changed_manifest["manifest_digest"], manifest["manifest_digest"],
+        )
+        mismatched = copy.deepcopy(manifest)
+        mismatched["state_space_design_profile"] = changed[
+            "state_space_design_profile"
+        ]
+        mismatched["manifest_digest"] = canonical_digest({
+            key: value for key, value in mismatched.items()
+            if key != "manifest_digest"
+        })
+        with self.assertRaisesRegex(
+            ContractError, "CAMPAIGN_STATE_SPACE_DESIGN_BINDING",
+        ):
+            direct_draft_from_manifest(
+                source, mismatched, hypothesis=contract,
+            )
 
     def test_pending_review_and_budget_fail_before_any_effect(self):
         fixed, old_report, resolvers, _, poses, _ = qualification_inputs()

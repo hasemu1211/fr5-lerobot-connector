@@ -45,15 +45,15 @@ This separation keeps environment setup independent of collection logic and keep
 
 ## Authoring and campaign lifecycle
 
-The authoring view exposes workspace, task, object, grasp, start, motion, variant, camera and data mode. The catalog keeps frame as an internal exact-binding axis, and a workspace choice atomically resolves its compatible frame revision instead of exposing a second operator control. Episode count, assisted per-condition maximum repeat, split and eligible poses are editable.
+The authoring view exposes workspace, task, object, grasp, start, motion, variant, camera and data mode. The catalog keeps frame as an internal exact-binding axis, and a workspace choice atomically resolves its compatible frame revision instead of exposing a second operator control. Episode count, assisted per-condition maximum repeat, split and eligible poses are editable. When the selected backend profile defines a finite state-space design, the view also projects editable `Nₓ`, `Nᵧ` and `N_yaw`; one atomic intent sends all three values to backend validation. The browser never samples positions.
 
-`ASSISTED` and `DIRECT_EDIT` mutate the same draft; they are not parallel schedulers. Switching to direct mode materializes the assisted sequence's first-seen unique non-anchor conditions. Preset clicks and numeric X/Y/yaw entry feed that same list, and compile cycles the full anchor-plus-list order to the exact episode count.
+`ASSISTED` and `DIRECT_EDIT` mutate the same draft; they are not parallel schedulers. Switching to direct mode materializes the exact backend-assisted sequence. Preset clicks and numeric X/Y/yaw entry feed that same ordered list. Design controls are disabled in direct mode so a profile change cannot silently replace materialized coordinates.
 
 Frame or axis changes preserve the current logical preset when a compatible combination exists instead of choosing a digest-arbitrary anchor.
 
 Only coherent combinations are enabled. Choosing one axis may atomically resolve dependent axes to the closest executable combination with canonical digest tie-breaking. Unregistered or unqualified values remain visible with stable reason codes instead of disappearing.
 
-`compile_draft` validates that the draft has at least one included pose and that the selected combination is executable for the chosen data mode. It creates a finite manifest and envelope but performs no motion, recorder begin or dataset episode commit. The projected `coverage.sequence` is the backend-owned exact episode order shown on the review screen. The current PHYSICAL factory can bind the machine-local camera and initialize isolated TEST_ONLY cell/scene setup state while constructing that compiled campaign. The review screen can discard the compile and return to a fresh draft.
+`compile_draft` validates that the draft has at least one included pose and that the selected combination is executable for the chosen data mode. It creates a finite manifest and envelope but performs no motion, recorder begin or dataset episode commit. A configured design freezes its complete profile beside the master seed in the existing v2 campaign draft/manifest and therefore participates in the manifest digest. The projected `coverage.sequence` is the backend-owned exact episode order shown on the review screen. The current PHYSICAL factory can bind the machine-local camera and initialize isolated TEST_ONLY cell/scene setup state while constructing that compiled campaign. The review screen can discard the compile and return to a fresh draft.
 
 `authorize_campaign` binds the current draft ID, manifest digest, envelope digest, disposition, budgets and expiry once. It is the only normal positive operator action before a serial campaign. The backend still validates each episode's slot, start, scene, root and exact plan digest against that authorization. Only technical PASS opens the next intent. Cancel, fault, mismatch, expiry or exhausted budget terminates or blocks the remaining sequence.
 
@@ -64,6 +64,8 @@ At terminal state, `new_campaign_same_settings` copies editable settings into a 
 ## Results, coverage and retention
 
 Episode history keeps technical evidence, semantic state and ledger reference separate. Coverage is projected by cell and target count; it does not turn a TEST_ONLY episode into production coverage. Candidate review appears only when a backend has offered a compare-and-swap review binding.
+
+Authoring coverage separates catalog eligible-condition count from the sampled design shape. It reports conditions per workspace, the current source-episode prefix per workspace, full-coverage requirements derived from the workspace route, and N+1 object positions for N `pick_place` movements. The UI does not treat catalog anchors as the experiment grid or hard-code the default 90-episode two-workspace requirement.
 
 The immutable episode ledger binds dataset identity, episode reference, artifacts, plan/start/scene and technical admission. The adjacent ledger-state projection starts with `retention_state=PRESERVE`, keeps semantic/training state distinct and reports reclaim as a separate state. The UI does not delete rows or shared Parquet/video chunks. Physical deletion remains unauthorized until a separate reference scan and repack process can prove eligibility.
 
@@ -86,6 +88,8 @@ All normal interaction uses native buttons, radios, number inputs and selects. C
 FAKE is the full reusable product flow with synthetic, temporary fixtures and zero robot, gripper, production recorder, dataset, run-state, production-approval and training effects.
 
 PHYSICAL uses the same application flow and internally broad catalog, then scopes the operator surface to the active `--job` handling family. The default family is the qualified 24 mm wooden cube with the top-below-3.5 mm grasp, `pickup_e2e` and `pick_place`, `DIRECT` and `TWO_STAGE_ALIGN_V2`, `fr5-lab-a-home-r001`, `PLACE_A@place-a-yaw0-r003`, `PLACE_B@place-b-yaw0-r001`, `fr5-up-wrist-rgb-30hz-v2` and RealSense `UP` + UVC `WRIST`. Historical object and collection-profile revisions remain readable for reproduction but are not duplicated as choices in this product run.
+
+A saved camera binding may move to the job's current profile revision only when the physical device identity is unchanged and every camera/stream/quality field is identical apart from non-decreasing resource ceilings. The backend rebuilds the receipt for that current profile before projecting environment and catalog state. Unknown or incompatible revisions remain blocked and cannot be made executable by the UI.
 
 `pickup_e2e` plans inside the selected workspace. `pick_place` derives the opposite A/B endpoint and projects N+1 object poses for N episodes. Each endpoint keeps its own frame, sheet, cell calibration and motion qualification. The browser selects only the starting workspace and displays the derived route.
 

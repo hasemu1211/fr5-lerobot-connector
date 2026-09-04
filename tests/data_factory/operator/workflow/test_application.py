@@ -24,6 +24,7 @@ from tools.data_factory.operator.catalog import (
     project_balanced_start_pose_ids,
     load_operator_catalog,
     project_assisted_poses,
+    project_workspace_cycle_poses,
     validate_operator_selection,
 )
 from tools.data_factory.task_recipe import (
@@ -942,6 +943,185 @@ class CollectionOperatorApplicationTests(unittest.TestCase):
         )
         self.assertNotIn("sampling_seed", str(provenance))
 
+    def test_experiment_design_controls_derive_coverage_and_preserve_sampler_parity(self):
+        catalog = load_operator_catalog(
+            ROOT, device_ids=["design-camera-a", "design-camera-b"],
+        )
+        combination = next(
+            item for item in catalog["combinations"]
+            if item["task_id"] == "pick_place"
+            and item["workspace_id"] == "PLACE_A"
+            and item["object_id"] == "wood-cube-24mm-r001"
+            and item["variant_id"] == "TWO_STAGE_ALIGN_V2"
+            and item["execution"]["TEST_COLLECTION"]["executable"]
+        )
+        selection = {
+            "schema_version": "data_factory.operator_selection.v1",
+            "combination_digest": combination["combination_digest"],
+            "data_mode": "TEST_COLLECTION",
+            **{
+                field: combination[field]
+                for field in (
+                    "workspace_id", "frame_id", "task_id", "object_id",
+                    "grasp_id", "cell_id", "start_pose_id", "motion_id",
+                    "variant_id", "camera_profile_id", "camera_device_id",
+                )
+            },
+            "policy_id": "DETERMINISTIC_SPREAD",
+        }
+        ready = copy.deepcopy(self.environment)
+        ready["state"] = "READY"
+        ready["components"] = {
+            name: {"state": "READY", "owner": "owner", "reason": "ATTACHED"}
+            for name in ready["components"]
+        }
+        setup = {
+            "profiles": [{
+                "start_pose_id": selection["start_pose_id"],
+                "display_name": "HOME", "status": "AVAILABLE",
+            }],
+            "selected_start_pose_ids": [selection["start_pose_id"]],
+        }
+        application = CollectionOperatorApplication(
+            session_id="experiment-design-controls-r001",
+            operator_label="local-operator", catalog=catalog,
+            initial_selection=selection, projector=projection,
+            environment_call=lambda: copy.deepcopy(ready),
+            prepare_environment_call=lambda: copy.deepcopy(ready),
+            campaign_factory=lambda *_args: self.fail("campaign was requested"),
+            start_pose_setup=setup,
+            start_pose_capture_call=lambda _name: copy.deepcopy(setup),
+            initial_environment=ready, effect_scope="PHYSICAL",
+        )
+        self.addCleanup(application.close)
+
+        initial = application.bridge_core.snapshot()
+        application.bridge_core.consume(intent(initial, "update_draft", {
+            "draft_id": initial["projection"]["draft"]["draft_id"],
+            "normalized_seed": 7761137905102010,
+        }, "design-confirmed-seed"))
+        seeded = application.bridge_core.snapshot()
+        application.bridge_core.consume(intent(seeded, "update_draft", {
+            "draft_id": initial["projection"]["draft"]["draft_id"],
+            "requested_count": 45,
+        }, "design-count-45"))
+        projected = application.bridge_core.snapshot()["projection"]
+        summary = projected["state_space_summary"]
+        self.assertEqual(summary["design_shape"], {
+            "columns": 5, "rows": 3, "yaw_cdf_strata": 3,
+        })
+        self.assertEqual(
+            (summary["planned_episode_count"], summary["object_position_count"]),
+            (45, 46),
+        )
+        self.assertEqual(
+            {
+                item["workspace_id"]: (
+                    item["planned_episode_count"],
+                    item["full_coverage_episode_count"],
+                )
+                for item in summary["workspace_coverage"]
+            },
+            {"PLACE_A": (23, 45), "PLACE_B": (22, 45)},
+        )
+        self.assertEqual(summary["full_coverage_episode_count"], 90)
+        sampling_kwargs = {
+            "repeat": 1,
+            "normalized_seed": derive_domain_seed(
+                application.draft["normalized_seed"], "spatial",
+            ),
+            "yaw_sampling_seed": derive_domain_seed(
+                application.draft["normalized_seed"], "yaw",
+            ),
+        }
+        previous_default = project_workspace_cycle_poses(
+            application.catalog, application.selection,
+            application.draft["current_object_pose"], 45,
+            **sampling_kwargs,
+        )
+        configured_default = project_workspace_cycle_poses(
+            application.catalog, application.selection,
+            application.draft["current_object_pose"], 45,
+            state_space_design_profile=application.draft[
+                "state_space_design_profile"
+            ],
+            **sampling_kwargs,
+        )
+        self.assertEqual(configured_default, previous_default)
+        self.assertEqual(len(configured_default), 46)
+
+        before_invalid = application.bridge_core.snapshot()
+        for index, factors in enumerate((
+            {"columns": 0, "rows": 3, "yaw_cdf_strata": 3},
+            {"columns": -1, "rows": 3, "yaw_cdf_strata": 3},
+            {"columns": 3.0, "rows": 3, "yaw_cdf_strata": 3},
+            {"columns": 11, "rows": 10, "yaw_cdf_strata": 3},
+            {"columns": 2, "rows": 2, "yaw_cdf_strata": 5},
+        )):
+            with self.assertRaisesRegex(
+                ContractError, "OPERATOR_APPLICATION_STATE_SPACE_DESIGN",
+            ):
+                application.bridge_core.consume(intent(
+                    application.bridge_core.snapshot(), "update_draft", {
+                        "draft_id": projected["draft"]["draft_id"],
+                        "state_space_design_factors": factors,
+                    }, f"invalid-design-{index}",
+                ))
+        self.assertEqual(
+            application.bridge_core.snapshot()["projection"]["sampling_provenance"],
+            before_invalid["projection"]["sampling_provenance"],
+        )
+
+        current = application.bridge_core.snapshot()
+        application.bridge_core.consume(intent(current, "update_draft", {
+            "draft_id": projected["draft"]["draft_id"],
+            "requested_count": 6,
+        }, "design-count-six"))
+        current = application.bridge_core.snapshot()
+        application.bridge_core.consume(intent(current, "update_draft", {
+            "draft_id": projected["draft"]["draft_id"],
+            "state_space_design_factors": {
+                "columns": 4, "rows": 2, "yaw_cdf_strata": 2,
+            },
+        }, "design-valid"))
+        configured = application.bridge_core.snapshot()["projection"]
+        profile = application.draft["state_space_design_profile"]
+        self.assertEqual(
+            configured["sampling_provenance"]["state_space_design_profile"]
+            ["spatial_strata"],
+            {"columns": 4, "rows": 2},
+        )
+        self.assertEqual(
+            configured["state_space_summary"]["per_workspace_condition_count"],
+            16,
+        )
+        expected = project_workspace_cycle_poses(
+            application.catalog, application.selection,
+            application.draft["current_object_pose"], 6, repeat=1,
+            normalized_seed=derive_domain_seed(
+                application.draft["normalized_seed"], "spatial",
+            ),
+            yaw_sampling_seed=derive_domain_seed(
+                application.draft["normalized_seed"], "yaw",
+            ),
+            state_space_design_profile=profile,
+        )
+        application.bridge_core.consume(intent(
+            application.bridge_core.snapshot(), "update_draft", {
+                "draft_id": projected["draft"]["draft_id"],
+                "authoring_mode": "DIRECT_EDIT",
+            }, "design-materialize",
+        ))
+        direct = application.bridge_core.snapshot()["projection"]["draft"]
+        self.assertEqual(
+            [
+                {key: pair[key] for key in ("place_id", "yaw_deg", "x_mm", "y_mm")}
+                for pair in direct["direct_pairs"]
+            ],
+            expected,
+        )
+        self.assertEqual(len(direct["direct_pairs"]), 7)
+
     def test_draft_seed_accepts_only_js_safe_nonnegative_integers(self):
         self.consume("prepare_environment", {}, "prepare-seed-validation")
         maximum = (1 << 53) - 1
@@ -1648,8 +1828,10 @@ class CollectionOperatorApplicationTests(unittest.TestCase):
         ready = application.bridge_core.snapshot()
         projected = ready["projection"]
         self.assertEqual(
-            projected["state_space_summary"]["eligible_pair_count"],
-            2 * projected["state_space_summary"]["selected_condition_count"],
+            projected["state_space_summary"]
+            ["eligible_start_condition_pair_count"],
+            2 * projected["state_space_summary"]
+            ["catalog_eligible_condition_count"],
         )
         application.bridge_core.consume(intent(ready, "update_draft", {
             "draft_id": projected["draft"]["draft_id"],

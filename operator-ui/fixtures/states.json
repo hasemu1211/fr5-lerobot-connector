@@ -39,9 +39,26 @@
     },
     "state_space_summary": {
       "selected_start_pose_count": 1,
-      "selected_condition_count": 15,
-      "eligible_pair_count": 15,
-      "planned_count": 3
+      "catalog_eligible_condition_count": 15,
+      "eligible_start_condition_pair_count": 15,
+      "design_shape": {
+        "columns": 5,
+        "rows": 3,
+        "yaw_cdf_strata": 3
+      },
+      "per_workspace_condition_count": 45,
+      "per_workspace_target_episode_count": 45,
+      "planned_episode_count": 3,
+      "object_position_count": 3,
+      "workspace_coverage": [
+        {
+          "workspace_id": "PLACE_A",
+          "frame_id": "place-a-frame-r002",
+          "planned_episode_count": 3,
+          "full_coverage_episode_count": 45
+        }
+      ],
+      "full_coverage_episode_count": 45
     },
     "sampling_provenance": {
       "object_dimensions_mm": [24, 24, 24],

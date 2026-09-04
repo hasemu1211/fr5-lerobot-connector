@@ -132,7 +132,13 @@ select:disabled, input:disabled { background: #e9eef0; color: #596872; }
 .section-title h3, .section-title > p { margin-bottom: 0; }
 .section-title > p { max-width: 34rem; color: var(--muted); font-size: .75rem; text-align: right; }
 .range-controls { display: grid; grid-template-columns: minmax(17rem, 1fr) repeat(3, minmax(7rem, .38fr)); gap: .7rem; align-items: end; margin: 1rem 0; }
-.state-space-summary { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); margin: 0 0 1rem; border: 1px solid #8fa9b5; background: #f5f8f9; }
+.experiment-design-form { margin: 0 0 1rem; padding: .85rem; border: 1px solid #8fa9b5; border-left: 5px solid var(--blue); background: var(--blue-soft); }
+.experiment-design-heading { display: flex; justify-content: space-between; gap: 1rem; align-items: baseline; }
+.experiment-design-heading span, .experiment-design-form > p { color: var(--muted); font-size: .75rem; }
+.experiment-design-inputs { display: grid; grid-template-columns: repeat(3, minmax(6rem, 1fr)) auto; gap: .7rem; align-items: end; margin-top: .65rem; }
+.experiment-design-inputs label { display: grid; gap: .3rem; color: var(--muted); font-size: .75rem; font-weight: 750; }
+.experiment-design-form > p { margin: .6rem 0 0; }
+.state-space-summary { display: grid; grid-template-columns: repeat(auto-fit, minmax(11rem, 1fr)); margin: 0 0 1rem; border: 1px solid #8fa9b5; background: #f5f8f9; }
 .state-space-summary div { min-width: 0; padding: .7rem .8rem; border-right: 1px solid var(--line); }
 .state-space-summary div:last-child { border-right: 0; }
 .state-space-summary dt { color: var(--muted); font-size: .68rem; }
@@ -277,6 +283,8 @@ footer { display: flex; justify-content: space-between; gap: 1rem; padding: 1rem
 @media (max-width: 1050px) {
   .range-controls { grid-template-columns: repeat(3, minmax(0, 1fr)); }
   .range-controls .segmented-control { grid-column: 1 / -1; }
+  .experiment-design-inputs { grid-template-columns: repeat(3, minmax(6rem, 1fr)); }
+  .experiment-design-inputs button { grid-column: 1 / -1; }
   .direct-pose-editor form, .direct-pose-editor[data-pair-mode="true"] form { grid-template-columns: repeat(2, minmax(8rem, 1fr)); }
   .cell-grid { grid-template-columns: repeat(2, minmax(8rem, 1fr)); }
   .campaign-facts { grid-template-columns: repeat(3, minmax(0, 1fr)); }
@@ -315,6 +323,8 @@ footer { display: flex; justify-content: space-between; gap: 1rem; padding: 1rem
   .review-summary div:nth-child(odd) { border-right: 0; }
   .range-controls { grid-template-columns: 1fr 1fr; }
   .range-controls .segmented-control { grid-column: 1 / -1; }
+  .experiment-design-heading { align-items: stretch; flex-direction: column; }
+  .experiment-design-inputs { grid-template-columns: 1fr 1fr 1fr; }
   .direct-pose-editor > div { align-items: stretch; flex-direction: column; }
   .direct-pose-editor p { text-align: left; }
   .review-card > label, .admission-actions { grid-column: 1; }
@@ -330,7 +340,7 @@ footer { display: flex; justify-content: space-between; gap: 1rem; padding: 1rem
   .campaign-facts { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .campaign-facts div { border-top: 1px solid #587181; }
   .campaign-facts div:nth-child(even) { border-right: 0; }
-  .range-controls, .direct-pose-editor form, .direct-pose-editor[data-pair-mode="true"] form, .registration-name-form, .cell-grid { grid-template-columns: 1fr; }
+  .range-controls, .experiment-design-inputs, .direct-pose-editor form, .direct-pose-editor[data-pair-mode="true"] form, .registration-name-form, .cell-grid { grid-template-columns: 1fr; }
   .admission-actions { display: grid; }
 }
 

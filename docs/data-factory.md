@@ -216,6 +216,12 @@ Web UI의 `Trajectory recipe`는 `DIRECT`와 `TWO_STAGE_ALIGN_V2`를 제공한�
 
 Yaw, state-space design, approach profile은 같은 family의 `-rNNN` 중 최신 numeric revision만 operator catalog에 활성화한다. Collection profile은 `-vN`에 같은 규칙을 쓴다. 과거 파일과 digest는 replay를 위해 남기되, 최신 design이 최신 yaw ID/digest와 정확히 결속되지 않거나 서로 다른 family가 같은 semantic key를 동시에 주장하면 catalog는 설정 오류로 닫힌다.
 
+Operator UI의 `Nₓ`, `Nᵧ`, `N_yaw`는 browser 상수가 아니라 선택 조합의 현재 backend profile에서 읽는다. 변경 요청은 세 정수를 한 번에 보내며 backend가 각 값 `1..100`, `NₓNᵧ≤100`, `N_yaw≤NₓNᵧ`를 검증한다. 유효한 custom shape는 catalog profile에서 이 세 factor만 바꾼 새 ID/digest로 파생된다. Full profile과 master seed는 기존 campaign draft/manifest의 v2 contract와 manifest digest에 동결되므로 같은 입력과 seed는 같은 materialized sequence를 만든다. `DIRECT_EDIT`에서는 이미 materialize된 좌표를 보존하기 위해 factor 변경을 받지 않는다.
+
+화면의 `등록된 적격 조건`은 catalog condition 수이고 `현재 자동 실험 설계`는 workspace당 `Nₓ×Nᵧ×N_yaw` condition 수다. 둘은 같은 숫자를 뜻하지 않는다. `pick_place`의 N회 이동에는 source와 각 destination을 포함한 N+1 object positions가 필요하다. A/B 교대 route에서 45회는 A source 23회와 B source 22회의 balanced prefix이며, 기본 5×3×3을 A와 B 각각 한 번 완전히 채우려면 45+45=90회다. 이 값들은 상수가 아니라 현재 shape, repeat와 실제 workspace route에서 계산한다.
+
+저장 camera role binding의 profile revision이 현재 job과 다를 때는 role 이름만 보고 승격하지 않는다. Physical camera identity가 그대로이고 collection profile의 stream, topic, serial constraint, 해상도, fps, QoS, encoding과 quality contract가 모두 같으며 resource ceiling만 증가한 revision에 한해 현재 profile로 receipt를 다시 결속한다. 이때 environment와 catalog selection은 같은 새 binding digest를 사용한다. 다른 camera, 감소한 ceiling, 다른 stream contract 또는 알 수 없는 revision은 계속 `CAMERA_PROFILE_REVISION_INCOMPATIBLE`로 fail-close한다.
+
 Web UI에는 JS-safe 비음수 campaign master seed 하나만 노출한다. Backend는 `spatial`, `start_pose`, `yaw`, `trajectory` domain seed를 분리한다. Master seed는 2^53−1 이하이고 파생 seed는 u64이며 browser에는 10진 문자열로 투영한다. Yaw와 trajectory parameter는 stable finite slot의 rank/design size에 결속되며 browser는 이를 다시 표본화하지 않는다.
 
 Sampling은 plan compile 때 한 번만 수행된다. 이 recipe는 새 polling·sleep·service를 추가하지 않으며 기존 ROS action result가 terminal 상태가 된 뒤에만 다음 phase를 연다.

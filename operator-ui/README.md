@@ -37,7 +37,7 @@ direnv exec . python3 -m tools.data_factory.operator_console --effect-scope FAKE
 
 1. 환경 준비 후 plan 단계가 열리는지 확인한다.
 2. 작업영역부터 데이터 모드까지 운영자가 선택하는 항목이 보이고, 사용할 수 없는 항목은 disabled reason과 함께 남는지 확인한다. 좌표계 revision은 작업영역 선택에 따라 자동으로 바뀌는지 확인한다.
-3. 총 에피소드 수와 자동 모드의 조건별 최대 반복을 바꾸고, 자동 선택과 직접 선택이 같은 draft를 수정하는지 확인한다. 직접 모드에서는 preset click과 numeric X/Y/yaw가 같은 ordered pose list에 나타나는지도 확인한다.
+3. 총 에피소드 수, 자동 모드의 조건별 최대 반복과 backend가 투영한 `Nₓ`, `Nᵧ`, `N_yaw`를 바꾼다. catalog 적격 조건 수와 현재 자동 설계 크기가 별도로 보이는지, 자동 선택과 직접 선택이 같은 draft를 수정하는지 확인한다. 직접 모드에서는 설계 입력이 잠기고 preset click과 numeric X/Y/yaw가 같은 ordered pose list에 나타나는지도 확인한다.
 4. 계획을 compile한 뒤 다시 편집하면 새 draft ID가 생기고 이전 envelope를 재사용하지 않는지 확인한다.
 5. 캠페인을 한 번 시작해 에피소드가 한 개씩 직렬로 실행되고 목표 횟수만큼 끝나는지 확인한다.
 6. 결과에서 technical result, coverage, semantic/training 상태와 retention 상태가 합쳐지지 않는지 확인한다.
@@ -57,17 +57,21 @@ direnv exec . python3 -m tools.data_factory.operator_console --effect-scope FAKE
 - RealSense `UP` + stable `/dev/v4l/by-id/*-video-index0` UVC `WRIST`의 machine-local role binding
 - 기본 `GENERAL_COLLECTION` production root와 선택 가능한 격리 `TEST_COLLECTION` root
 
-현재 catalog는 workspace/frame/task/object/grasp/start/motion/variant/camera/data mode 축을 내부 계약으로 유지하되, 제품 화면에는 실행 시 지정한 active job family만 투영한다. 기본 화면에는 24 mm 큐브와 상단 아래 3.5 mm 파지만 남고 과거 25 mm 재현 profile은 선택지로 나오지 않는다. 작업영역을 선택하면 그 조합의 frame revision을 자동 적용하며 별도 좌표계 선택란을 노출하지 않는다. A/B의 bounded continuous X/Y와 object/grasp profile의 yaw를 자동 설계하거나 pose를 직접 입력할 수 있고, checked-in cells와 HOME·원점·yaw 0은 빠른 preset이다. UI는 `Campaign seed` 하나만 보내며 backend가 `spatial/start_pose/yaw/trajectory` domain, finite rank와 실제 parameter를 계산한다. Compile만 exact finite slots를 만들고 각 slot은 fresh scene/start/plan 검증을 거친다.
+현재 catalog는 workspace/frame/task/object/grasp/start/motion/variant/camera/data mode 축을 내부 계약으로 유지하되, 제품 화면에는 실행 시 지정한 active job family만 투영한다. 기본 화면에는 24 mm 큐브와 상단 아래 3.5 mm 파지만 남고 과거 25 mm 재현 profile은 선택지로 나오지 않는다. 작업영역을 선택하면 그 조합의 frame revision을 자동 적용하며 별도 좌표계 선택란을 노출하지 않는다. A/B의 bounded continuous X/Y와 object/grasp profile의 yaw를 자동 설계하거나 pose를 직접 입력할 수 있고, checked-in cells와 HOME·원점·yaw 0은 빠른 preset이다. UI는 backend profile의 `Nₓ`, `Nᵧ`, `N_yaw`를 표시하고 한 요청으로 변경하지만 좌표를 직접 표본화하지 않는다. `Campaign seed` 하나에서 backend가 `spatial/start_pose/yaw/trajectory` domain, finite rank와 실제 parameter를 계산한다. Compile은 effective profile과 seed를 digest-bound manifest에 동결해 exact finite slots를 만들고 각 slot은 fresh scene/start/plan 검증을 거친다.
 
 `pick_place` DIRECT_EDIT은 각 pose의 단독 범위뿐 아니라 직전 recorded yaw와 다음 target yaw가 공유하는 object-safe release 영역도 backend에서 검사한다. 불가능한 pair는 위치를 몰래 보정하지 않고 `DIRECT_YAW_TRANSITION_UNSAFE`로 compile을 잠근다.
 
 `pickup_e2e`는 고른 작업영역 안에서 계획한다. `pick_place`는 고른 곳을 SOURCE로 두고 반대 작업영역을 자동 DESTINATION으로 정해 `A → B → A …` 또는 `B → A → B …` 경로를 표시한다. N회 실행에는 N+1개 물체 pose가 결속된다. 녹화되는 place는 source yaw를 보존하는 DIRECT이고 다음 source yaw가 다를 때만 commit 뒤 `OUT_OF_DATASET` 재배치가 같은 위치에서 실행된다. UI는 그 source/target, 실행 시점, yaw seed/rank와 binding digest를 표시하며 recorder/dataset 권한을 만들지 않는다.
+
+상태공간 요약의 `등록된 적격 조건`은 catalog 후보 수이고 `현재 자동 실험 설계`는 workspace당 `Nₓ×Nᵧ×N_yaw`다. 기본 5×3×3에서 45회 `pick_place`는 46개 위치, A source 23회/B source 22회의 prefix다. A/B를 각각 완전 coverage하려는 요구량 90회는 고정 숫자가 아니라 현재 shape, repeat와 route에서 backend가 계산한다.
 
 좌표계 wizard는 인쇄 source와 최종 100 mm 막대 실측을 분리한다. 현재 실물 sheet의 `96 → 100 mm` 보정 이력은 exact checked-in print profile로 기록되며 별도 좌표계나 기존 `place1` 재등록 조건이 아니다.
 
 Tracked qualification과 current physical caller가 함께 존재하는 coherent combination만 실행 가능하다. `TWO_STAGE_ALIGN_V2`는 등록된 조합에서 선택 가능하며 pickup prefix만 관측 높이→XY·yaw 정렬→수직 하강으로 바꾼다. ID/OOD split, 새 workspace 또는 등록되지 않은 cell은 해당 caller가 갖춰질 때까지 이유와 함께 비활성이다.
 
 연결된 camera는 환경 준비 화면에 `카메라 1`, `카메라 2`처럼 나타난다. 운영자는 각 장치를 상단·측면·손목·사용 안 함으로만 지정하고, backend가 완전한 역할 map에서 녹화 profile을 결정한다. USB 경로, serial, profile ID와 topic은 주 화면에서 입력하지 않으며 접힌 기술 정보에만 남는다. 호환 camera가 0대여도 앱은 종료하지 않고 camera 미연결을 표시하는 blocked shell을 연다.
+
+저장된 role binding과 current collection profile의 revision이 다르면 backend가 physical identity와 전체 stream/quality contract를 비교한다. 동일 contract에서 resource ceiling만 증가한 revision은 새 profile receipt로 재결속해 environment와 catalog가 같은 digest를 보게 한다. 다른 camera, stream 변경 또는 compatibility를 증명할 수 없는 revision은 역할 확인 상태로 남고 compile을 열지 않는다.
 
 실행 중 카메라 topic이 끊기고 active child가 종료되면 `카메라 다시 연결`이 나타날 수 있다. 이 동작은 현재 장치와 역할을 다시 읽고 환경 준비로 돌아간다. 브라우저 새로고침이 종료된 backend를 다시 시작한다고 표시하지 않으며, camera 복구가 robot motion이나 recording을 자동으로 재개하지 않는다.
 

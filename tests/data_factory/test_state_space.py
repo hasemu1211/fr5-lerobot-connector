@@ -8,9 +8,11 @@ from tools.data_factory.state_space import (
     YAW_BINDING_SCHEMA,
     bind_yaw_sample_to_state_space,
     canonical_yaw_for_profile,
+    configure_state_space_design_profile,
     rotating_balanced_yaw_ranks,
     sample_yaw_cdf_strata,
     validate_approach_sampling_profile,
+    validate_configured_state_space_design_profile,
     validate_state_space_design_profile,
     validate_yaw_sample_binding,
     validate_yaw_sampling_profile,
@@ -151,6 +153,50 @@ class YawStateSpaceTest(unittest.TestCase):
                 grasp_profile=self.grasp_profile,
                 yaw_sampling_profile=yaw,
             )
+
+    def test_configured_design_changes_only_factors_and_has_stable_identity(self):
+        source = validate_state_space_design_profile(
+            self.state_space_design_profile,
+        )
+        unchanged = configure_state_space_design_profile(source, {
+            "columns": 5, "rows": 3, "yaw_cdf_strata": 3,
+        })
+        self.assertEqual(unchanged, source)
+
+        factors = {"columns": 4, "rows": 2, "yaw_cdf_strata": 2}
+        first = configure_state_space_design_profile(source, factors)
+        second = configure_state_space_design_profile(
+            copy.deepcopy(source), copy.deepcopy(factors),
+        )
+        self.assertEqual(first, second)
+        self.assertEqual(first["spatial_strata"], {"columns": 4, "rows": 2})
+        self.assertEqual(first["yaw_cdf_strata"], 2)
+        self.assertIn("-n4x2x2", first["state_space_design_profile_id"])
+        self.assertEqual(
+            validate_configured_state_space_design_profile(
+                first, source_profile=source,
+            ),
+            first,
+        )
+
+        tampered = copy.deepcopy(first)
+        tampered.pop("profile_digest")
+        tampered["assignment"] = "OTHER"
+        with self.assertRaisesRegex(ContractError, "STATE_SPACE_DESIGN_SCHEMA"):
+            validate_configured_state_space_design_profile(
+                tampered, source_profile=source,
+            )
+        for invalid in (
+            {"columns": 0, "rows": 2, "yaw_cdf_strata": 2},
+            {"columns": -1, "rows": 2, "yaw_cdf_strata": 2},
+            {"columns": 2.0, "rows": 2, "yaw_cdf_strata": 2},
+            {"columns": 11, "rows": 10, "yaw_cdf_strata": 2},
+            {"columns": 2, "rows": 2, "yaw_cdf_strata": 5},
+        ):
+            with self.assertRaisesRegex(
+                ContractError, "STATE_SPACE_DESIGN_FACTORS",
+            ):
+                configure_state_space_design_profile(source, invalid)
 
     def test_rotating_fractional_factor_is_balanced_without_xy_yaw_locking(self):
         sweeps = [

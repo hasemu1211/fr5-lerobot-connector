@@ -160,9 +160,22 @@ function validateView(value) {
     const selectedStartIds = new Set(view.start_pose_setup.selected_start_pose_ids);
     if (view.draft.direct_pairs.some((pair) => pair.start_pose_id !== null && !selectedStartIds.has(pair.start_pose_id))) throw new TypeError("DIRECT_PAIRS_INVALID");
   }
-  if (view.state_space_summary && (view.state_space_summary.planned_count !== view.draft.requested_count
+  if (view.state_space_summary && (view.state_space_summary.planned_episode_count !== view.draft.requested_count
+      || view.state_space_summary.object_position_count !== spatialNodeCount(view)
       || view.start_pose_setup && view.state_space_summary.selected_start_pose_count !== view.start_pose_setup.selected_start_pose_ids.length
-      || view.state_space_summary.eligible_pair_count > view.state_space_summary.selected_start_pose_count * view.state_space_summary.selected_condition_count)) throw new TypeError("STATE_SPACE_SUMMARY_INVALID");
+      || view.state_space_summary.eligible_start_condition_pair_count !== view.state_space_summary.selected_start_pose_count * view.state_space_summary.catalog_eligible_condition_count
+      || (view.state_space_summary.design_shape !== null
+      && view.state_space_summary.per_workspace_target_episode_count !== view.state_space_summary.per_workspace_condition_count * view.draft.repeat)
+      || (view.state_space_summary.design_shape !== null
+      && view.state_space_summary.workspace_coverage.reduce((sum, item) => sum + item.planned_episode_count, 0) !== view.draft.requested_count))) throw new TypeError("STATE_SPACE_SUMMARY_INVALID");
+  if (view.state_space_summary) {
+    const shape = view.state_space_summary.design_shape;
+    const design = view.sampling_provenance.state_space_design_profile;
+    if ((shape === null) !== (design === null)
+        || design && (shape.columns !== design.spatial_strata.columns
+          || shape.rows !== design.spatial_strata.rows
+          || shape.yaw_cdf_strata !== design.yaw_cdf_strata)) throw new TypeError("STATE_SPACE_SUMMARY_INVALID");
+  }
   if (view.draft.selection.data_mode !== view.data_disposition) throw new TypeError("DATA_MODE_MISMATCH");
   const cellIds = new Set();
   view.draft.cells.forEach((cell) => {
@@ -283,8 +296,39 @@ function validateStartPoseSetup(setup) {
 function validateStateSpaceSummary(summary) {
   if (summary === undefined || summary === null) return;
   assertObject(summary, "STATE_SPACE_SUMMARY_INVALID");
-  const fields = ["selected_start_pose_count", "selected_condition_count", "eligible_pair_count", "planned_count"];
-  if (Object.keys(summary).length !== fields.length || fields.some((field) => !Number.isInteger(summary[field]) || summary[field] < 0)) throw new TypeError("STATE_SPACE_SUMMARY_INVALID");
+  const fields = [
+    "selected_start_pose_count", "catalog_eligible_condition_count", "eligible_start_condition_pair_count",
+    "design_shape", "per_workspace_condition_count", "per_workspace_target_episode_count",
+    "planned_episode_count", "object_position_count", "workspace_coverage", "full_coverage_episode_count",
+  ];
+  if (Object.keys(summary).length !== fields.length
+      || ["selected_start_pose_count", "catalog_eligible_condition_count", "eligible_start_condition_pair_count", "planned_episode_count", "object_position_count"].some((field) => !Number.isInteger(summary[field]) || summary[field] < 0)
+      || !Array.isArray(summary.workspace_coverage)) throw new TypeError("STATE_SPACE_SUMMARY_INVALID");
+  if (summary.design_shape === null) {
+    if (summary.per_workspace_condition_count !== null || summary.per_workspace_target_episode_count !== null
+        || summary.full_coverage_episode_count !== null || summary.workspace_coverage.length) throw new TypeError("STATE_SPACE_SUMMARY_INVALID");
+    return;
+  }
+  assertObject(summary.design_shape, "STATE_SPACE_SUMMARY_INVALID");
+  const shapeFields = ["columns", "rows", "yaw_cdf_strata"];
+  if (Object.keys(summary.design_shape).length !== shapeFields.length
+      || shapeFields.some((field) => !Number.isInteger(summary.design_shape[field]) || summary.design_shape[field] < 1)
+      || !Number.isInteger(summary.per_workspace_condition_count) || summary.per_workspace_condition_count < 1
+      || summary.per_workspace_condition_count !== summary.design_shape.columns * summary.design_shape.rows * summary.design_shape.yaw_cdf_strata
+      || !Number.isInteger(summary.per_workspace_target_episode_count) || summary.per_workspace_target_episode_count < summary.per_workspace_condition_count
+      || !Number.isInteger(summary.full_coverage_episode_count) || summary.full_coverage_episode_count < summary.per_workspace_target_episode_count
+      || !summary.workspace_coverage.length) throw new TypeError("STATE_SPACE_SUMMARY_INVALID");
+  const endpoints = new Set();
+  summary.workspace_coverage.forEach((item) => {
+    assertObject(item, "STATE_SPACE_SUMMARY_INVALID");
+    const key = `${item.workspace_id}\u0000${item.frame_id}`;
+    if (Object.keys(item).length !== 4 || typeof item.workspace_id !== "string" || !item.workspace_id
+        || typeof item.frame_id !== "string" || !item.frame_id || endpoints.has(key)
+        || !Number.isInteger(item.planned_episode_count) || item.planned_episode_count < 0
+        || item.full_coverage_episode_count !== summary.per_workspace_target_episode_count) throw new TypeError("STATE_SPACE_SUMMARY_INVALID");
+    endpoints.add(key);
+  });
+  if (summary.full_coverage_episode_count !== summary.workspace_coverage.length * summary.per_workspace_target_episode_count) throw new TypeError("STATE_SPACE_SUMMARY_INVALID");
 }
 
 function validateSamplingProvenance(provenance) {
@@ -886,12 +930,56 @@ function renderStateSpaceSummary(view) {
   const summary = view.state_space_summary;
   const element = document.querySelector("#state-space-summary");
   element.hidden = !summary;
-  element.innerHTML = summary ? [
+  if (!summary) {
+    element.innerHTML = "";
+    return;
+  }
+  const shape = summary.design_shape;
+  const rows = [
     ["시작 자세", `${summary.selected_start_pose_count}개`],
-    ["A4 기준점", `${summary.selected_condition_count}개`],
-    ["기준점 조합", `${summary.eligible_pair_count}개`],
-    ["계획된 에피소드", `${summary.planned_count}개`],
-  ].map(([term, value]) => `<div><dt>${term}</dt><dd>${escapeHtml(value)}</dd></div>`).join("") : "";
+    ["등록된 적격 조건", `${summary.catalog_eligible_condition_count}개 (catalog)`],
+    ["적격 시작자세 × 조건", `${summary.eligible_start_condition_pair_count}개`],
+    ["계획", isPickPlace(view)
+      ? `${summary.planned_episode_count} 이동 episodes · 물체 위치 ${summary.object_position_count}개 (최초 source + 각 destination)`
+      : `${summary.planned_episode_count} episodes`],
+  ];
+  if (shape) {
+    rows.splice(3, 0, [
+      "현재 자동 실험 설계",
+      `${shape.columns} × ${shape.rows} × ${shape.yaw_cdf_strata} = ${summary.per_workspace_condition_count}개 (작업영역별)`,
+    ]);
+    summary.workspace_coverage.forEach((item) => rows.push([
+      `${workspaceName(view, item.workspace_id)} 계획 coverage`,
+      `${item.planned_episode_count} / ${item.full_coverage_episode_count} episodes`,
+    ]));
+    rows.push([
+      "모든 작업영역 완전 coverage",
+      `${summary.full_coverage_episode_count} episodes 필요`,
+    ]);
+  }
+  element.innerHTML = rows.map(([term, value]) => `<div><dt>${term}</dt><dd>${escapeHtml(value)}</dd></div>`).join("");
+}
+
+function renderExperimentDesign(view, editable) {
+  const form = document.querySelector("#experiment-design-form");
+  const profile = view.sampling_provenance.state_space_design_profile;
+  form.hidden = !profile;
+  if (!profile) return;
+  const values = {
+    "#design-columns-input": profile.spatial_strata.columns,
+    "#design-rows-input": profile.spatial_strata.rows,
+    "#design-yaw-input": profile.yaw_cdf_strata,
+  };
+  const direct = view.draft.authoring_mode === "DIRECT_EDIT";
+  Object.entries(values).forEach(([selector, value]) => {
+    const input = document.querySelector(selector);
+    if (document.activeElement !== input) input.value = value;
+    input.disabled = !editable || direct;
+  });
+  document.querySelector("#apply-experiment-design").disabled = !editable || direct;
+  document.querySelector("#experiment-design-status").textContent = direct
+    ? "직접 선택 좌표를 보존하기 위해 자동 선택 모드에서만 설계를 변경할 수 있습니다."
+    : `backend sampler profile ${profile.state_space_design_profile_id}을 사용합니다. 적용 전에는 현재 좌표와 seed가 바뀌지 않습니다.`;
 }
 
 function renderStartPoseSetup(view) {
@@ -1119,6 +1207,7 @@ function renderCatalog(view) {
   document.querySelector("#compile-campaign").disabled = !canIntent("compile_draft");
 
   renderCurrentObjectPose(view, editable);
+  renderExperimentDesign(view, editable);
   renderStateSpaceSummary(view);
   renderDirectPoseEditor(view, editable);
   const disclosure = document.querySelector("#cell-grid-disclosure");
@@ -1728,6 +1817,24 @@ document.querySelector("#seed-input").addEventListener("change", (event) => {
   const normalizedSeed = event.target.valueAsNumber;
   if (!Number.isSafeInteger(normalizedSeed) || normalizedSeed < 0 || normalizedSeed > Number(event.target.max)) return event.target.reportValidity();
   submitIntent("update_draft", {draft_id: currentView.draft.draft_id, normalized_seed: normalizedSeed});
+});
+document.querySelector("#experiment-design-form").addEventListener("submit", (event) => {
+  event.preventDefault();
+  if (!currentView || !canIntent("update_draft") || currentView.draft.authoring_mode !== "ASSISTED") return;
+  const form = event.currentTarget;
+  const columnsInput = document.querySelector("#design-columns-input");
+  const rowsInput = document.querySelector("#design-rows-input");
+  const yawInput = document.querySelector("#design-yaw-input");
+  [columnsInput, rowsInput, yawInput].forEach((input) => input.setCustomValidity(""));
+  const [columns, rows, yaw_cdf_strata] = [columnsInput, rowsInput, yawInput].map((input) => input.valueAsNumber);
+  if (![columns, rows, yaw_cdf_strata].every((value) => Number.isInteger(value) && value >= 1 && value <= 100)) return form.reportValidity();
+  if (columns * rows > 100) rowsInput.setCustomValidity("Nₓ × Nᵧ는 100 이하여야 합니다.");
+  if (yaw_cdf_strata > columns * rows) yawInput.setCustomValidity("N_yaw는 Nₓ × Nᵧ 이하여야 합니다.");
+  if (!form.checkValidity()) return form.reportValidity();
+  submitIntent("update_draft", {
+    draft_id: currentView.draft.draft_id,
+    state_space_design_factors: {columns, rows, yaw_cdf_strata},
+  });
 });
 document.querySelector("#current-object-form").addEventListener("submit", (event) => {
   event.preventDefault();

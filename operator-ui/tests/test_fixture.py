@@ -29,6 +29,10 @@ class DataFactoryOperatorUiStaticTest(unittest.TestCase):
             "compile-campaign",
             "cancel-campaign",
             "seed-input",
+            "experiment-design-form",
+            "design-columns-input",
+            "design-rows-input",
+            "design-yaw-input",
             "technical-details",
         ):
             self.assertIn(f'id="{element_id}"', self.html)
@@ -49,6 +53,28 @@ class DataFactoryOperatorUiStaticTest(unittest.TestCase):
         self.assertIn('normalized_seed: normalizedSeed', self.js)
         self.assertIn('"normalized_seed": 0', (ROOT / "fixtures/states.json").read_text(encoding="utf-8"))
         self.assertIn("campaign seed posts one exact draft update", self.browser)
+
+    def test_experiment_design_is_backend_owned_and_coverage_terms_are_distinct(self):
+        for marker in (
+            "state_space_design_factors",
+            'state_space_design_factors: {columns, rows, yaw_cdf_strata}',
+            "등록된 적격 조건",
+            "현재 자동 실험 설계",
+            "모든 작업영역 완전 coverage",
+            "catalog_eligible_condition_count",
+            "per_workspace_condition_count",
+            "full_coverage_episode_count",
+            "물체 위치 ${summary.object_position_count}개",
+            "최초 source + 각 destination",
+            "shape.columns !== design.spatial_strata.columns",
+        ):
+            self.assertIn(marker, self.js)
+        self.assertNotIn("A4 기준점", self.html + self.js)
+        self.assertNotIn("Math.random", self.js)
+        self.assertIn(
+            "experiment design posts one atomic backend update",
+            self.browser,
+        )
 
     def test_sampling_and_reposition_provenance_are_read_only(self):
         fixture = (ROOT / "fixtures/states.json").read_text(encoding="utf-8")

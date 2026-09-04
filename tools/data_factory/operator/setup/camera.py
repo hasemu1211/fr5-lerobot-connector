@@ -21,6 +21,7 @@ from tools.data_factory.operator.setup.contracts import (
     write_camera_role_bindings,
 )
 from tools.fr5_data_factory import (
+    COLLECTION_PROFILE_V2_KEYS,
     ContractError,
     SAFE_ID,
     canonical_digest,
@@ -29,6 +30,36 @@ from tools.fr5_data_factory import (
 
 
 REALSENSE_QUERY_RETRY_DELAYS = (0.5, 1.0)
+_CAMERA_BINDING_REVISION_FIELDS = (
+    COLLECTION_PROFILE_V2_KEYS
+    - {
+        "collection_profile_id",
+        "dataset_incremental_peak_bytes",
+        "encoder_temp_peak_bytes",
+    }
+)
+
+
+def _camera_binding_revision_compatible(
+    stored: Mapping[str, Any], preferred: Mapping[str, Any],
+) -> bool:
+    """Accept only stream-identical revisions with non-decreasing ceilings."""
+    if (
+        set(stored) != COLLECTION_PROFILE_V2_KEYS
+        or set(preferred) != COLLECTION_PROFILE_V2_KEYS
+        or stored.get("schema_version") != "data_factory.collection_profile.v2"
+        or preferred.get("schema_version") != "data_factory.collection_profile.v2"
+        or any(stored[field] != preferred[field] for field in _CAMERA_BINDING_REVISION_FIELDS)
+    ):
+        return False
+    return all(
+        type(stored[field]) is int
+        and type(preferred[field]) is int
+        and preferred[field] >= stored[field]
+        for field in (
+            "dataset_incremental_peak_bytes", "encoder_temp_peak_bytes",
+        )
+    )
 
 
 def discover_uvc_devices(device_root: str | Path = "/dev/v4l/by-id") -> list[dict[str, str]]:
@@ -161,6 +192,7 @@ def resolve_camera_setup(
     preferred_profile_id: str,
     requested_bindings: Mapping[str, str] | None = None,
     persist: bool = False,
+    persist_compatible_revision: bool = False,
 ) -> tuple[dict[str, Any], dict[str, Any] | None]:
     """Resolve camera cards and roles to a profile without opening any device."""
     repository = Path(repository_root).resolve(strict=True)
@@ -262,31 +294,73 @@ def resolve_camera_setup(
     except ContractError:
         pass
     if stored is not None:
-        profile = profiles.get(stored["collection_profile_id"])
-        if profile is not None:
+        stored_profile = profiles.get(stored["collection_profile_id"])
+        if preferred is not None:
             try:
                 restored = reuse_camera_role_bindings(
                     stored, discovered_device_ids=logical_devices,
-                    collection_profile=profile,
+                    collection_profile=preferred,
                 )
             except ContractError:
                 restored = None
             if restored is not None:
                 return view(
                     "READY", restored["assignments"], None,
-                    [role.upper() for role in profile["camera_roles"]],
-                    profile,
-                ), {"collection_profile": profile, "role_bindings": restored}
+                    [role.upper() for role in preferred["camera_roles"]],
+                    preferred,
+                ), {"collection_profile": preferred, "role_bindings": restored}
+        restored = None
+        if stored_profile is not None:
+            try:
+                restored = reuse_camera_role_bindings(
+                    stored, discovered_device_ids=logical_devices,
+                    collection_profile=stored_profile,
+                )
+            except ContractError:
+                pass
+        if (
+            restored is not None
+            and preferred is not None
+            and _camera_binding_revision_compatible(
+                stored_profile, preferred,
+            )
+        ):
+            migrated = build_camera_role_bindings(
+                collection_profile=preferred,
+                discovered_device_ids=logical_devices,
+                assignments=restored["assignments"],
+            )
+            if persist or persist_compatible_revision:
+                write_camera_role_bindings(
+                    migrated, repository_root=repository,
+                )
+            return view(
+                "READY", migrated["assignments"], None,
+                [role.upper() for role in preferred["camera_roles"]],
+                preferred,
+            ), {"collection_profile": preferred, "role_bindings": migrated}
         return view(
             "BINDING_REQUIRED", {device: "UNUSED" for device in device_ids},
-            "SAVED_CAMERA_BINDING_NOT_AVAILABLE",
+            (
+                "CAMERA_PROFILE_REVISION_INCOMPATIBLE"
+                if stored_profile is not None and preferred is not None
+                else "SAVED_CAMERA_BINDING_NOT_AVAILABLE"
+            ),
         ), None
 
     # Preserve the established single-camera receipt without rewriting it.
     try:
         legacy = load_camera_binding_receipt(repository_root=repository)
         profile = profiles.get(legacy["collection_profile_id"])
-        if profile is not None and len(profile["camera_roles"]) == 1:
+        compatible = (
+            profile is not None
+            and preferred is not None
+            and (
+                canonical_digest(profile) == canonical_digest(preferred)
+                or _camera_binding_revision_compatible(profile, preferred)
+            )
+        )
+        if compatible and len(profile["camera_roles"]) == 1:
             restored = reuse_camera_binding_receipt(
                 legacy, discovered_device_ids=logical_devices,
                 collection_profile=profile,

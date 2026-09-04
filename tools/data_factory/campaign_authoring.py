@@ -20,11 +20,14 @@ from tools.data_factory.experiment_manifest import (
     validate_fr5_hypothesis,
 )
 from tools.data_factory.training_split import GROUPS, validate_program_budget
+from tools.data_factory.state_space import validate_state_space_design_profile
 from tools.fr5_data_factory import ContractError, DIGEST, SAFE_ID, canonical_digest
 
 
 DRAFT_SCHEMA = "data_factory.campaign_draft.v1"
+DRAFT_SCHEMA_V2 = "data_factory.campaign_draft.v2"
 MANIFEST_SCHEMA = "data_factory.collection_campaign_manifest.v1"
+MANIFEST_SCHEMA_V2 = "data_factory.collection_campaign_manifest.v2"
 RECEIPT_SCHEMA = "data_factory.campaign_compilation_receipt.v1"
 SELECTORS = frozenset({"BALANCED_INITIAL", "DIRECT_LIST"})
 SELECTOR_VERSION = "campaign-selector-v1"
@@ -35,12 +38,14 @@ DRAFT_FIELDS = frozenset({
     "requested_count", "normalized_seed", "pinned", "excluded", "direct_slots",
     "manifest_id", "manifest_budget", "program_budget",
 })
+DRAFT_V2_FIELDS = DRAFT_FIELDS | {"state_space_design_profile"}
 SOURCE_FIELDS = frozenset({"hypothesis_digest", "catalog_digest", "coverage_digest"})
 MANIFEST_FIELDS = frozenset({
     "schema_version", "manifest_id", "kind", "hypothesis_digest", "fixed_contract_digest", "catalog_digest",
     "coverage_digest", "selector", "selector_version", "normalized_seed", "slots",
     "manifest_budget", "program_budget", "planned_usage", "authority", "manifest_digest",
 })
+MANIFEST_V2_FIELDS = MANIFEST_FIELDS | {"state_space_design_profile"}
 RECEIPT_FIELDS = frozenset({
     "schema_version", "receipt_id", "draft_digest", "hypothesis_digest",
     "catalog_digest", "coverage_digest", "eligible_set_digest", "selector",
@@ -100,8 +105,12 @@ def _validate_source(value: object, hypothesis: Mapping[str, Any]) -> dict[str, 
 def validate_campaign_draft(value: object, *, hypothesis: Mapping[str, Any]) -> dict[str, Any]:
     """Validate one mutable session draft without attaching an effect scope."""
     hypothesis = validate_fr5_hypothesis(hypothesis)
-    result = copy.deepcopy(dict(_exact(value, DRAFT_FIELDS, "CAMPAIGN_DRAFT_FIELDS")))
-    if result["schema_version"] != DRAFT_SCHEMA:
+    if not isinstance(value, Mapping):
+        raise ContractError("CAMPAIGN_DRAFT_FIELDS")
+    schema = value.get("schema_version")
+    fields = DRAFT_V2_FIELDS if schema == DRAFT_SCHEMA_V2 else DRAFT_FIELDS
+    result = copy.deepcopy(dict(_exact(value, fields, "CAMPAIGN_DRAFT_FIELDS")))
+    if schema not in {DRAFT_SCHEMA, DRAFT_SCHEMA_V2}:
         raise ContractError("CAMPAIGN_DRAFT_SCHEMA")
     _identifier(result["draft_id"], "CAMPAIGN_DRAFT_ID")
     _identifier(result["manifest_id"], "CAMPAIGN_MANIFEST_ID")
@@ -128,6 +137,12 @@ def validate_campaign_draft(value: object, *, hypothesis: Mapping[str, Any]) -> 
         raise ContractError("CAMPAIGN_DRAFT_DIRECT")
     result["manifest_budget"] = _manifest_budget(result["manifest_budget"])
     result["program_budget"] = validate_program_budget(result["program_budget"])
+    if schema == DRAFT_SCHEMA_V2:
+        result["state_space_design_profile"] = (
+            validate_state_space_design_profile(
+                result["state_space_design_profile"],
+            )
+        )
     forbidden = {
         "effect_scope", "lifecycle_action", "approval", "scene", "lease",
         "execution_authorized", "training_approved",
@@ -272,8 +287,12 @@ def validate_collection_campaign_manifest(
     value: object, *, hypothesis: Mapping[str, Any],
 ) -> dict[str, Any]:
     hypothesis = validate_fr5_hypothesis(hypothesis)
-    result = copy.deepcopy(dict(_exact(value, MANIFEST_FIELDS, "COLLECTION_MANIFEST_FIELDS")))
-    if result["schema_version"] != MANIFEST_SCHEMA or result["kind"] != "collection":
+    if not isinstance(value, Mapping):
+        raise ContractError("COLLECTION_MANIFEST_FIELDS")
+    schema = value.get("schema_version")
+    fields = MANIFEST_V2_FIELDS if schema == MANIFEST_SCHEMA_V2 else MANIFEST_FIELDS
+    result = copy.deepcopy(dict(_exact(value, fields, "COLLECTION_MANIFEST_FIELDS")))
+    if schema not in {MANIFEST_SCHEMA, MANIFEST_SCHEMA_V2} or result["kind"] != "collection":
         raise ContractError("COLLECTION_MANIFEST_SCHEMA")
     _identifier(result["manifest_id"], "CAMPAIGN_MANIFEST_ID")
     expected_source = _source(hypothesis)
@@ -305,9 +324,29 @@ def validate_collection_campaign_manifest(
     _check_budgets(manifest_budget, program_budget, planned)
     if result["authority"] != NO_AUTHORITY:
         raise ContractError("COLLECTION_MANIFEST_AUTHORITY")
+    if schema == MANIFEST_SCHEMA_V2:
+        result["state_space_design_profile"] = (
+            validate_state_space_design_profile(
+                result["state_space_design_profile"],
+            )
+        )
     if result["manifest_digest"] != canonical_digest({key: result[key] for key in result if key != "manifest_digest"}):
         raise ContractError("COLLECTION_MANIFEST_DIGEST_MISMATCH")
     return result
+
+
+def _validate_state_space_design_binding(
+    draft: Mapping[str, Any], manifest: Mapping[str, Any],
+) -> None:
+    draft_v2 = draft["schema_version"] == DRAFT_SCHEMA_V2
+    manifest_v2 = manifest["schema_version"] == MANIFEST_SCHEMA_V2
+    if (
+        draft_v2 != manifest_v2
+        or draft_v2
+        and draft["state_space_design_profile"]
+        != manifest["state_space_design_profile"]
+    ):
+        raise ContractError("CAMPAIGN_STATE_SPACE_DESIGN_BINDING")
 
 
 def validate_campaign_compilation_receipt(
@@ -317,6 +356,7 @@ def validate_campaign_compilation_receipt(
     hypothesis = validate_fr5_hypothesis(hypothesis)
     draft = validate_campaign_draft(draft, hypothesis=hypothesis)
     manifest = validate_collection_campaign_manifest(manifest, hypothesis=hypothesis)
+    _validate_state_space_design_binding(draft, manifest)
     result = copy.deepcopy(dict(_exact(value, RECEIPT_FIELDS, "CAMPAIGN_RECEIPT_FIELDS")))
     if result["schema_version"] != RECEIPT_SCHEMA:
         raise ContractError("CAMPAIGN_RECEIPT_SCHEMA")
@@ -424,7 +464,11 @@ def _compile_documents(
         selected = anchors + remainder
     ordered = [{**item, "order_index": index} for index, item in enumerate(selected)]
     manifest = {
-        "schema_version": MANIFEST_SCHEMA,
+        "schema_version": (
+            MANIFEST_SCHEMA_V2
+            if draft["schema_version"] == DRAFT_SCHEMA_V2
+            else MANIFEST_SCHEMA
+        ),
         "manifest_id": draft["manifest_id"],
         "kind": "collection",
         **_source(hypothesis),
@@ -437,6 +481,14 @@ def _compile_documents(
         "program_budget": copy.deepcopy(draft["program_budget"]),
         "planned_usage": _usage("seed", ordered),
         "authority": NO_AUTHORITY,
+        **(
+            {
+                "state_space_design_profile": copy.deepcopy(
+                    draft["state_space_design_profile"],
+                ),
+            }
+            if draft["schema_version"] == DRAFT_SCHEMA_V2 else {}
+        ),
     }
     manifest["manifest_digest"] = canonical_digest(manifest)
     decisions = _decisions(
@@ -483,6 +535,7 @@ def direct_draft_from_manifest(
     """Round-trip an automatic result into the same authoring draft shape."""
     draft = validate_campaign_draft(draft, hypothesis=hypothesis)
     manifest = validate_collection_campaign_manifest(manifest, hypothesis=hypothesis)
+    _validate_state_space_design_binding(draft, manifest)
     result = copy.deepcopy(draft)
     result["revision"] += 1
     result["selector"] = "DIRECT_LIST"

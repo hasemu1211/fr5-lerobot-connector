@@ -14,6 +14,7 @@ from typing import Any, Callable, Mapping, Sequence
 
 from tools.data_factory.campaign_authoring import (
     DRAFT_SCHEMA,
+    DRAFT_SCHEMA_V2,
     campaign_cell_id,
     validate_campaign_draft,
 )
@@ -44,7 +45,10 @@ from tools.data_factory.motion.trajectory_variants import (
 from tools.data_factory.motion.object_reposition import (
     validate_object_reposition_binding,
 )
-from tools.data_factory.state_space import validate_yaw_sample_binding
+from tools.data_factory.state_space import (
+    validate_state_space_design_profile,
+    validate_yaw_sample_binding,
+)
 from tools.data_factory.quality.coverage_report import build_coverage_report
 from tools.data_factory import run_job
 from tools.data_factory.task_recipe import (
@@ -467,6 +471,7 @@ def _build_physical_campaign_contract(
     test_only_gripper_retune_digest: str | None = None,
     qualification_source: str = "SYNTHETIC_TEST_ONLY",
     motion_recipe: str = "DIRECT",
+    state_space_design_profile: Mapping[str, Any] | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     """Compile a finite physical condition domain without execution authority."""
     if (
@@ -864,8 +869,17 @@ def _build_physical_campaign_contract(
             anchor_resolved_job_digest
         ]["base_condition_digest"]
         pinned = [campaign_cell_id(base_digest, start_pose_id, "TRAIN", 0)]
+    checked_state_space_design = (
+        None if state_space_design_profile is None
+        else validate_state_space_design_profile(
+            state_space_design_profile,
+        )
+    )
     draft = validate_campaign_draft({
-        "schema_version": DRAFT_SCHEMA,
+        "schema_version": (
+            DRAFT_SCHEMA_V2
+            if checked_state_space_design is not None else DRAFT_SCHEMA
+        ),
         "draft_id": draft_id, "revision": 0,
         "source": {
             "hypothesis_digest": hypothesis["hypothesis_digest"],
@@ -877,6 +891,10 @@ def _build_physical_campaign_contract(
         "pinned": pinned, "excluded": [], "direct_slots": direct_slots,
         "manifest_id": manifest_id,
         "manifest_budget": manifest_budget, "program_budget": program_budget,
+        **(
+            {"state_space_design_profile": checked_state_space_design}
+            if checked_state_space_design is not None else {}
+        ),
     }, hypothesis=hypothesis)
     return hypothesis, draft
 

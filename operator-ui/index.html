@@ -122,6 +122,16 @@
               <label for="seed-input">Campaign seed<input id="seed-input" type="number" min="0" max="9007199254740991" step="1" inputmode="numeric"></label>
               <label for="split-select">데이터 구분<select id="split-select" data-axis="split"></select></label>
             </div>
+            <form id="experiment-design-form" class="experiment-design-form" aria-labelledby="experiment-design-title" hidden>
+              <div class="experiment-design-heading"><strong id="experiment-design-title">자동 실험 설계</strong><span>공간 strata와 물체별 yaw CDF strata</span></div>
+              <div class="experiment-design-inputs">
+                <label for="design-columns-input">N<sub>x</sub><input id="design-columns-input" type="number" min="1" max="100" step="1" inputmode="numeric" required aria-describedby="experiment-design-status"></label>
+                <label for="design-rows-input">N<sub>y</sub><input id="design-rows-input" type="number" min="1" max="100" step="1" inputmode="numeric" required aria-describedby="experiment-design-status"></label>
+                <label for="design-yaw-input">N<sub>yaw</sub><input id="design-yaw-input" type="number" min="1" max="100" step="1" inputmode="numeric" required aria-describedby="experiment-design-status"></label>
+                <button id="apply-experiment-design" type="submit">설계 적용</button>
+              </div>
+              <p id="experiment-design-status" role="status"></p>
+            </form>
             <dl id="state-space-summary" class="state-space-summary" aria-label="선택한 수집 상태공간" hidden></dl>
             <p id="workspace-domain-summary" class="cell-help"></p>
             <section id="direct-pose-editor" class="direct-pose-editor" aria-labelledby="direct-pose-title" hidden>

@@ -201,16 +201,24 @@ The optional start-pose projection is:
   },
   "state_space_summary": {
     "selected_start_pose_count": 1,
-    "selected_condition_count": 15,
-    "eligible_pair_count": 15,
-    "planned_count": 3
+    "catalog_eligible_condition_count": 15,
+    "eligible_start_condition_pair_count": 15,
+    "design_shape": {"columns": 5, "rows": 3, "yaw_cdf_strata": 3},
+    "per_workspace_condition_count": 45,
+    "per_workspace_target_episode_count": 45,
+    "planned_episode_count": 3,
+    "object_position_count": 3,
+    "workspace_coverage": [
+      {"workspace_id": "PLACE_A", "frame_id": "place-a-frame-r002", "planned_episode_count": 3, "full_coverage_episode_count": 45}
+    ],
+    "full_coverage_episode_count": 45
   }
 }
 ```
 
 Profile status is exactly `CANDIDATE | AVAILABLE | QUALIFICATION_REQUIRED`. Only `AVAILABLE` profiles may appear in `selected_start_pose_ids`. `capture_start_pose` sends `{"display_name":"…"}` and reads current joints without motion. `update_start_pose_selection` sends one complete ordered `selected_start_pose_ids` list. HOME 복귀는 시작 자세 registry와 별도이며 기존 safe recovery operation을 계속 사용한다.
 
-The collection domain is selected start poses × eligible workspace X/Y/yaw conditions. `state_space_summary` is backend-owned and optional; its finite counts describe registered A4 anchor points and anchor/start pairs, not every point in the continuous plane or a claim that every future path executes. When absent the UI hides it rather than calculating or guessing counts. Assisted mode shows the summary and keeps the full cell grid closed. Direct mode consumes projected rows such as:
+The collection domain is selected start poses × eligible workspace X/Y/yaw conditions. `state_space_summary` is backend-owned and optional. It separates catalog eligible conditions from the current sampled design, reports workspace-prefix coverage and distinguishes N movement episodes from N+1 `pick_place` object positions. When absent the UI hides it rather than calculating or guessing counts. Assisted mode shows the summary and keeps the full cell grid closed. The adjacent design control sends only one atomic `state_space_design_factors={columns,rows,yaw_cdf_strata}` update; backend validation and sampling remain authoritative. Direct mode disables that control and consumes projected rows such as:
 
 ```json
 {

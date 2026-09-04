@@ -27,6 +27,7 @@ from tools.data_factory.state_space import (
     rotating_balanced_yaw_ranks,
     sample_yaw_cdf_strata,
     validate_approach_sampling_profile,
+    validate_configured_state_space_design_profile,
     validate_state_space_design_profile,
     validate_yaw_sample_binding,
     validate_yaw_sampling_profile,
@@ -1133,6 +1134,7 @@ def selected_state_space_design_profile(
 
 def _yaw_selection_contexts(
     catalog: Mapping[str, Any], selections: Sequence[Mapping[str, Any]],
+    state_space_design_profile: Mapping[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     if (
         not isinstance(selections, Sequence)
@@ -1161,6 +1163,24 @@ def _yaw_selection_contexts(
             )
             raw_profile = combination.get("yaw_sampling_profile")
             raw_design = combination.get("state_space_design_profile")
+            base_design = (
+                None if raw_design is None
+                else validate_state_space_design_profile(raw_design)
+            )
+            if state_space_design_profile is not None:
+                if base_design is None:
+                    raise ContractError("OPERATOR_YAW_PROFILE_CHAIN")
+                try:
+                    configured_design = (
+                        validate_configured_state_space_design_profile(
+                            state_space_design_profile,
+                            source_profile=base_design,
+                        )
+                    )
+                except ContractError as exc:
+                    raise ContractError("OPERATOR_YAW_PROFILE_CHAIN") from exc
+            else:
+                configured_design = base_design
             context = {
                 "selection": selected,
                 "domain": _operator_pose_domain(catalog, selected),
@@ -1168,10 +1188,7 @@ def _yaw_selection_contexts(
                     None if raw_profile is None
                     else validate_yaw_sampling_profile(raw_profile)
                 ),
-                "design": (
-                    None if raw_design is None
-                    else validate_state_space_design_profile(raw_design)
-                ),
+                "design": configured_design,
             }
             cache[key] = context
         result.append(context)
@@ -1605,6 +1622,7 @@ def project_yaw_sample_bindings(
     catalog: Mapping[str, Any], selections: Sequence[Mapping[str, Any]],
     poses: Sequence[Mapping[str, Any]], yaw_sampling_seed: int | None, *,
     repeat: int = 1,
+    state_space_design_profile: Mapping[str, Any] | None = None,
 ) -> list[dict[str, Any] | None]:
     """Project one seeded yaw per complete object-safe spatial block."""
     if (
@@ -1612,7 +1630,9 @@ def project_yaw_sample_bindings(
         or not poses or len(selections) != len(poses)
     ):
         raise ContractError("OPERATOR_YAW_PROFILE_CHAIN")
-    contexts = _yaw_selection_contexts(catalog, selections)
+    contexts = _yaw_selection_contexts(
+        catalog, selections, state_space_design_profile,
+    )
     bindings = _yaw_block_bindings(
         catalog, contexts, yaw_sampling_seed, repeat=repeat,
         anchor_pose=poses[0],
@@ -1856,10 +1876,13 @@ def _project_state_space_cell(
 
 def project_state_space_cell(
     catalog: Mapping[str, Any], selection: Mapping[str, Any],
-    pose: Mapping[str, Any],
+    pose: Mapping[str, Any], *,
+    state_space_design_profile: Mapping[str, Any] | None = None,
 ) -> dict[str, Any] | None:
     """Project one pose into the selected design's fixed workspace cell."""
-    context = _yaw_selection_contexts(catalog, [selection])[0]
+    context = _yaw_selection_contexts(
+        catalog, [selection], state_space_design_profile,
+    )[0]
     return _project_state_space_cell(
         context["selection"], context["domain"], context["design"], pose,
     )
@@ -2253,6 +2276,7 @@ def project_workspace_cycle_poses(
     catalog: Mapping[str, Any], selection: Mapping[str, Any],
     source_pose: Mapping[str, Any], requested_count: int, *, repeat: int = 1,
     normalized_seed: int = 0, yaw_sampling_seed: int | None = None,
+    state_space_design_profile: Mapping[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     """Project N+1 A/B poses, validating every pose in its own endpoint."""
     if (
@@ -2265,7 +2289,9 @@ def project_workspace_cycle_poses(
     )
     source = validate_operator_pose(catalog, cycle[0], source_pose)
     if yaw_sampling_seed is not None:
-        contexts = _yaw_selection_contexts(catalog, cycle)
+        contexts = _yaw_selection_contexts(
+            catalog, cycle, state_space_design_profile,
+        )
         if any(context["profile"] is not None for context in contexts):
             bindings = _yaw_block_bindings(
                 catalog, contexts, yaw_sampling_seed, repeat=repeat,
@@ -2341,6 +2367,7 @@ def project_workspace_cycle_poses(
             normalized_seed=(
                 normalized_seed + endpoint_index
             ) % (MAX_DERIVED_SEED + 1),
+            state_space_design_profile=state_space_design_profile,
         )
         offsets[digest] = 0
     result = []
@@ -2351,6 +2378,9 @@ def project_workspace_cycle_poses(
         result.append(validate_operator_pose(catalog, endpoint, pose))
     return _project_transition_safe_cycle(
         catalog, cycle, result, normalized_seed=normalized_seed,
+        contexts=_yaw_selection_contexts(
+            catalog, cycle, state_space_design_profile,
+        ),
     )
 
 
@@ -2379,6 +2409,7 @@ def project_assisted_poses(
     catalog: Mapping[str, Any], selection: Mapping[str, Any],
     source_pose: Mapping[str, Any], requested_count: int, *, repeat: int = 1,
     normalized_seed: int = 0, yaw_sampling_seed: int | None = None,
+    state_space_design_profile: Mapping[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     """Stratify continuous poses around the registered A4 grid."""
     if type(requested_count) is not int or not 1 <= requested_count <= 100:
@@ -2440,7 +2471,17 @@ def project_assisted_poses(
         spatial_anchors[point_id] = xy
         yaw_anchors.add(float(yaw))
     columns, rows = region["strata"]["columns"], region["strata"]["rows"]
-    design_profile = selected_state_space_design_profile(catalog, selected)
+    base_design_profile = selected_state_space_design_profile(catalog, selected)
+    design_profile = base_design_profile
+    if state_space_design_profile is not None:
+        if base_design_profile is None:
+            raise ContractError("OPERATOR_ASSISTED_DOMAIN")
+        try:
+            design_profile = validate_configured_state_space_design_profile(
+                state_space_design_profile, source_profile=base_design_profile,
+            )
+        except ContractError as exc:
+            raise ContractError("OPERATOR_ASSISTED_DOMAIN") from exc
     if (
         not yaw_anchors
         or design_profile is None and len(spatial_anchors) != columns * rows
@@ -2450,7 +2491,9 @@ def project_assisted_poses(
     source = _canonical_operator_pose(selected, domain, source_pose)
     if yaw_sampling_seed is not None:
         selections = [selected] * requested_count
-        contexts = _yaw_selection_contexts(catalog, selections)
+        contexts = _yaw_selection_contexts(
+            catalog, selections, design_profile,
+        )
         if contexts[0]["profile"] is not None:
             bindings = _yaw_block_bindings(
                 catalog, contexts, yaw_sampling_seed, repeat=repeat,

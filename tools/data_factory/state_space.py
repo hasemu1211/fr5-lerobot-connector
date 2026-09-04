@@ -56,6 +56,9 @@ _STATE_SPACE_YAW_BINDING_FIELDS = frozenset({
     "state_space_design_profile_id", "state_space_design_profile_digest",
     "spatial_cell_index", "spatial_row", "spatial_column",
 })
+STATE_SPACE_DESIGN_FACTOR_FIELDS = frozenset({
+    "columns", "rows", "yaw_cdf_strata",
+})
 
 
 def _number(value: object, code: str) -> float:
@@ -262,6 +265,62 @@ def validate_state_space_design_profile(
         raise ContractError("STATE_SPACE_DESIGN_DIGEST")
     result["profile_digest"] = profile_digest
     return result
+
+
+def configure_state_space_design_profile(
+    source_profile: Mapping[str, Any], factors: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Derive one immutable sampler profile from its catalog-owned source."""
+    source = validate_state_space_design_profile(source_profile)
+    if (
+        not isinstance(factors, Mapping)
+        or set(factors) != STATE_SPACE_DESIGN_FACTOR_FIELDS
+    ):
+        raise ContractError("STATE_SPACE_DESIGN_FACTORS")
+    columns = factors.get("columns")
+    rows = factors.get("rows")
+    yaw_count = factors.get("yaw_cdf_strata")
+    if (
+        type(columns) is not int or type(rows) is not int
+        or not 1 <= columns <= 100 or not 1 <= rows <= 100
+        or columns * rows > 100
+        or type(yaw_count) is not int
+        or not 1 <= yaw_count <= columns * rows
+    ):
+        raise ContractError("STATE_SPACE_DESIGN_FACTORS")
+    current = source["spatial_strata"]
+    if (
+        columns == current["columns"]
+        and rows == current["rows"]
+        and yaw_count == source["yaw_cdf_strata"]
+    ):
+        return source
+    candidate = {
+        key: copy.deepcopy(value)
+        for key, value in source.items()
+        if key != "profile_digest"
+    }
+    candidate["state_space_design_profile_id"] = (
+        f"{source['state_space_design_profile_id']}-n{columns}x{rows}x{yaw_count}"
+    )
+    candidate["spatial_strata"] = {"columns": columns, "rows": rows}
+    candidate["yaw_cdf_strata"] = yaw_count
+    return validate_state_space_design_profile(candidate)
+
+
+def validate_configured_state_space_design_profile(
+    value: Mapping[str, Any], *, source_profile: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Require a configured profile to differ only by its finite factors."""
+    checked = validate_state_space_design_profile(value)
+    expected = configure_state_space_design_profile(source_profile, {
+        "columns": checked["spatial_strata"]["columns"],
+        "rows": checked["spatial_strata"]["rows"],
+        "yaw_cdf_strata": checked["yaw_cdf_strata"],
+    })
+    if checked != expected:
+        raise ContractError("STATE_SPACE_DESIGN_BINDING")
+    return checked
 
 
 def validate_approach_sampling_profile(
@@ -833,10 +892,13 @@ def validate_yaw_sample_binding(
 
 __all__ = [
     "APPROACH_PROFILE_SCHEMA", "STATE_SPACE_DESIGN_PROFILE_SCHEMA",
+    "STATE_SPACE_DESIGN_FACTOR_FIELDS",
     "UNSLOTTED_YAW_BINDING_SCHEMA", "YAW_BINDING_SCHEMA",
     "YAW_PROFILE_SCHEMA", "bind_yaw_sample_to_state_space",
-    "canonical_yaw_for_profile", "rotating_balanced_yaw_ranks",
+    "canonical_yaw_for_profile", "configure_state_space_design_profile",
+    "rotating_balanced_yaw_ranks",
     "sample_yaw_cdf_strata", "validate_approach_sampling_profile",
+    "validate_configured_state_space_design_profile",
     "validate_state_space_design_profile", "validate_yaw_sample_binding",
     "validate_yaw_sampling_profile", "yaw_cdf_quantile",
     "yaw_cdf_strata_bounds",

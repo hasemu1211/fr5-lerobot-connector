@@ -17,7 +17,10 @@ from tools.a4_place_yaw.region_layout import (
     workspace_region,
 )
 from tools.data_factory import run_job
-from tools.data_factory.campaign_authoring import campaign_cell_id
+from tools.data_factory.campaign_authoring import (
+    DRAFT_SCHEMA_V2,
+    campaign_cell_id,
+)
 from tools.data_factory.campaign_operator import CampaignOperator, SIDE_EFFECT_COUNTERS
 from tools.data_factory.cell_state import CellStateStore
 from tools.data_factory.collection_seed import (
@@ -690,6 +693,13 @@ def _source_draft(
         direct_slots=[],
         manifest_id=f"{campaign_id}-manifest",
     )
+    if draft.get("state_space_design_profile") is not None:
+        result.update(
+            schema_version=DRAFT_SCHEMA_V2,
+            state_space_design_profile=copy.deepcopy(
+                draft["state_space_design_profile"],
+            ),
+        )
     result["manifest_budget"].update({
         "max_physical_episodes": count, "max_rollout_trials": count,
         "max_hil_prompts": count, "max_reviews": count,
@@ -972,6 +982,10 @@ class ProductFakeOperator:
                     draft.get("current_object_pose"),
                 )
                 if draft["authoring_mode"] == "ASSISTED":
+                    design_kwargs = (
+                        {"state_space_design_profile": draft["state_space_design_profile"]}
+                        if draft.get("state_space_design_profile") is not None else {}
+                    )
                     pose_sequence = project_assisted_poses(
                         self.application.catalog, selected, initial_pose,
                         draft["requested_count"], repeat=draft["repeat"],
@@ -981,6 +995,7 @@ class ProductFakeOperator:
                         yaw_sampling_seed=_domain_seed(
                             draft["normalized_seed"], "yaw",
                         ),
+                        **design_kwargs,
                     )
                     campaign_hypothesis, campaign_template = _product_fixture(
                         pose_sequence,
@@ -2256,6 +2271,7 @@ def build_physical_operator_console(
         ),
         qualification_source=qualification_source,
         motion_recipe=trajectory_variant_id,
+        state_space_design_profile=checked_state_space_design_profile,
     )
     resolved_by_digest = {
         item["resolved_job_digest"]: item
@@ -3316,6 +3332,7 @@ def build_physical_operator_application(
         repository_root=repository, devices=camera_devices,
         preferred_profile_id=initial_job.get("collection_profile_id", ""),
         requested_bindings=requested,
+        persist_compatible_revision=requested is None,
     )
     selected_camera_bindings: dict[str, str] = {}
     selected_camera_binding_digest = None
@@ -3843,6 +3860,10 @@ def build_physical_operator_application(
         )
         if draft.get("authoring_mode") == "ASSISTED":
             spatial_seed = _domain_seed(draft["normalized_seed"], "spatial")
+            design_kwargs = (
+                {"state_space_design_profile": draft["state_space_design_profile"]}
+                if draft.get("state_space_design_profile") is not None else {}
+            )
             poses = (
                 project_workspace_cycle_poses(
                     current_catalog, selected, anchor, count,
@@ -3851,6 +3872,7 @@ def build_physical_operator_application(
                     yaw_sampling_seed=_domain_seed(
                         draft["normalized_seed"], "yaw",
                     ),
+                    **design_kwargs,
                 )
                 if selected["task_id"] == "pick_place"
                 else project_assisted_poses(
@@ -3860,6 +3882,7 @@ def build_physical_operator_application(
                     yaw_sampling_seed=_domain_seed(
                         draft["normalized_seed"], "yaw",
                     ),
+                    **design_kwargs,
                 )
             )
             start_ids = project_balanced_start_pose_ids(
@@ -3892,6 +3915,7 @@ def build_physical_operator_application(
                 current_catalog, route, poses,
                 _domain_seed(draft["normalized_seed"], "yaw"),
                 repeat=draft["repeat"],
+                **design_kwargs,
             )
             if draft.get("authoring_mode") == "ASSISTED" else
             [None for _pose in poses]
@@ -4061,7 +4085,7 @@ def build_physical_operator_application(
             requested_count=draft["requested_count"],
             normalized_seed=draft["normalized_seed"],
             yaw_sampling_profile=chosen.get("yaw_sampling_profile"),
-            state_space_design_profile=chosen.get(
+            state_space_design_profile=draft.get(
                 "state_space_design_profile",
             ),
             initial_object_pose=campaign_initial_pose,

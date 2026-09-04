@@ -31,6 +31,7 @@ from tools.data_factory.operator.catalog import (
     project_state_space_cell,
     project_workspace_cycle_poses,
     resolve_workspace_cycle_selections,
+    selected_state_space_design_profile,
     validate_operator_pose,
     validate_operator_selection,
     validate_yaw_preserving_transitions,
@@ -43,7 +44,9 @@ from tools.data_factory.motion.trajectory_variants import (
 )
 from tools.data_factory.state_space import (
     YAW_BINDING_SCHEMA,
+    configure_state_space_design_profile,
     validate_approach_sampling_profile,
+    validate_configured_state_space_design_profile,
     validate_state_space_design_profile,
     validate_yaw_sample_binding,
     validate_yaw_sampling_profile,
@@ -130,13 +133,21 @@ def _sampling_profile(
 
 def _sampling_provenance(
     catalog: Mapping[str, Any], combination: Mapping[str, Any],
+    state_space_design_profile: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     raw_yaw = combination.get("yaw_sampling_profile")
     yaw = _sampling_profile(raw_yaw, approach=False)
     raw_design = combination.get("state_space_design_profile")
     design = None
     if raw_design is not None:
-        checked_design = validate_state_space_design_profile(raw_design)
+        source_design = validate_state_space_design_profile(raw_design)
+        checked_design = (
+            source_design
+            if state_space_design_profile is None else
+            validate_configured_state_space_design_profile(
+                state_space_design_profile, source_profile=source_design,
+            )
+        )
         checked_yaw = (
             None if raw_yaw is None else validate_yaw_sampling_profile(raw_yaw)
         )
@@ -506,6 +517,48 @@ class CollectionOperatorApplication:
     def _id(self, kind: str) -> str:
         return f"{self.session_id}-{kind}-{self._generation:04d}"
 
+    def _configured_state_space_design(
+        self, value: Mapping[str, Any] | None,
+    ) -> dict[str, Any] | None:
+        source = selected_state_space_design_profile(
+            self.catalog, self.selection,
+        )
+        if source is None:
+            if value is not None:
+                raise ContractError("OPERATOR_APPLICATION_STATE_SPACE_DESIGN")
+            return None
+        if value is None:
+            return source
+        try:
+            return validate_configured_state_space_design_profile(
+                value, source_profile=source,
+            )
+        except ContractError as exc:
+            raise ContractError(
+                "OPERATOR_APPLICATION_STATE_SPACE_DESIGN",
+            ) from exc
+
+    def _sync_state_space_design(
+        self, previous_source: Mapping[str, Any] | None,
+    ) -> bool:
+        """Preserve factors only while the catalog-owned source is unchanged."""
+        current = self.draft.get("state_space_design_profile")
+        source = selected_state_space_design_profile(
+            self.catalog, self.selection,
+        )
+        same_source = (
+            previous_source is not None
+            and source is not None
+            and previous_source["profile_digest"] == source["profile_digest"]
+        )
+        configured = (
+            self._configured_state_space_design(current)
+            if same_source else copy.deepcopy(source)
+        )
+        changed = configured != current
+        self.draft["state_space_design_profile"] = configured
+        return changed
+
     def _new_draft(self, previous: Mapping[str, Any] | None) -> dict[str, Any]:
         values = copy.deepcopy(dict(previous or {}))
         requested_count = values.get("requested_count", 3)
@@ -551,6 +604,9 @@ class CollectionOperatorApplication:
         ]
         if len({canonical_digest(value) for value in direct_pairs}) != len(direct_pairs):
             raise ContractError("OPERATOR_APPLICATION_DRAFT")
+        state_space_design_profile = self._configured_state_space_design(
+            values.get("state_space_design_profile"),
+        )
         return {
             "draft_id": f"{self._id('campaign')}-draft",
             "revision": 0,
@@ -565,6 +621,7 @@ class CollectionOperatorApplication:
             "direct_poses": copy.deepcopy(direct_poses),
             "selected_start_pose_ids": selected_start_pose_ids,
             "direct_pairs": direct_pairs,
+            "state_space_design_profile": state_space_design_profile,
         }
 
     @staticmethod
@@ -735,6 +792,79 @@ class CollectionOperatorApplication:
             for _index in range(self._spatial_node_count())
         ]
 
+    def _state_space_summary(
+        self, cells: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        eligible_conditions = sum(
+            cell["eligibility_status"] == "ELIGIBLE" for cell in cells
+        )
+        design = self.draft["state_space_design_profile"]
+        shape = None
+        per_workspace_condition_count = None
+        per_workspace_target_episode_count = None
+        workspace_coverage = []
+        full_coverage_episode_count = None
+        if design is not None:
+            columns = design["spatial_strata"]["columns"]
+            rows = design["spatial_strata"]["rows"]
+            yaw_count = design["yaw_cdf_strata"]
+            shape = {
+                "columns": columns, "rows": rows,
+                "yaw_cdf_strata": yaw_count,
+            }
+            per_workspace_condition_count = columns * rows * yaw_count
+            per_workspace_target_episode_count = (
+                per_workspace_condition_count * self.draft["repeat"]
+            )
+            route = self._workspace_cycle()
+            sources = route[:self.draft["requested_count"]]
+            endpoint_counts: dict[tuple[str, str], int] = {}
+            endpoint_order = []
+            for endpoint in route:
+                key = (endpoint["workspace_id"], endpoint["frame_id"])
+                if key not in endpoint_counts:
+                    endpoint_order.append(key)
+                    endpoint_counts[key] = 0
+            for endpoint in sources:
+                key = (endpoint["workspace_id"], endpoint["frame_id"])
+                endpoint_counts[key] += 1
+            workspace_coverage = [
+                {
+                    "workspace_id": workspace_id,
+                    "frame_id": frame_id,
+                    "planned_episode_count": endpoint_counts[
+                        (workspace_id, frame_id)
+                    ],
+                    "full_coverage_episode_count": (
+                        per_workspace_target_episode_count
+                    ),
+                }
+                for workspace_id, frame_id in endpoint_order
+            ]
+            full_coverage_episode_count = sum(
+                item["full_coverage_episode_count"]
+                for item in workspace_coverage
+            )
+        selected_start_pose_count = len(
+            self.draft["selected_start_pose_ids"],
+        )
+        return {
+            "selected_start_pose_count": selected_start_pose_count,
+            "catalog_eligible_condition_count": eligible_conditions,
+            "eligible_start_condition_pair_count": (
+                selected_start_pose_count * eligible_conditions
+            ),
+            "design_shape": shape,
+            "per_workspace_condition_count": per_workspace_condition_count,
+            "per_workspace_target_episode_count": (
+                per_workspace_target_episode_count
+            ),
+            "planned_episode_count": self.draft["requested_count"],
+            "object_position_count": self._spatial_node_count(),
+            "workspace_coverage": workspace_coverage,
+            "full_coverage_episode_count": full_coverage_episode_count,
+        }
+
     def _direct_draft_reason(self) -> str | None:
         if self.draft["authoring_mode"] != "DIRECT_EDIT":
             return None
@@ -818,6 +948,9 @@ class CollectionOperatorApplication:
                 yaw_sampling_seed=derive_domain_seed(
                     self.draft["normalized_seed"], "yaw",
                 ),
+                state_space_design_profile=self.draft[
+                    "state_space_design_profile"
+                ],
             )
             if (
                 self.selection["task_id"] == "pick_place"
@@ -831,6 +964,9 @@ class CollectionOperatorApplication:
                 yaw_sampling_seed=derive_domain_seed(
                     self.draft["normalized_seed"], "yaw",
                 ),
+                state_space_design_profile=self.draft[
+                    "state_space_design_profile"
+                ],
             )
         )
         starts = project_balanced_start_pose_ids(
@@ -986,6 +1122,7 @@ class CollectionOperatorApplication:
             raise ContractError("OPERATOR_APPLICATION_SELECTION")
         sampling_provenance = _sampling_provenance(
             self.catalog, selected_combination,
+            self.draft["state_space_design_profile"],
         )
         selection_execution = selected_combination["execution"][
             self.selection["data_mode"]
@@ -1220,6 +1357,9 @@ class CollectionOperatorApplication:
                                 "place_id", "yaw_deg", "x_mm", "y_mm",
                             )
                         },
+                        state_space_design_profile=self.draft[
+                            "state_space_design_profile"
+                        ],
                     )
                     if (
                         not isinstance(design, Mapping)
@@ -1364,20 +1504,7 @@ class CollectionOperatorApplication:
             start_pose_setup["selected_start_pose_ids"] = copy.deepcopy(
                 self.draft["selected_start_pose_ids"],
             )
-            eligible_conditions = sum(
-                cell["eligibility_status"] == "ELIGIBLE" for cell in cells
-            )
-            state_space_summary = {
-                "selected_start_pose_count": len(
-                    self.draft["selected_start_pose_ids"],
-                ),
-                "selected_condition_count": eligible_conditions,
-                "eligible_pair_count": (
-                    len(self.draft["selected_start_pose_ids"])
-                    * eligible_conditions
-                ),
-                "planned_count": self.draft["requested_count"],
-            }
+            state_space_summary = self._state_space_summary(cells)
         return {
             "connection_state": "READY",
             "effect_scope": self.effect_scope,
@@ -1541,9 +1668,17 @@ class CollectionOperatorApplication:
         catalog = copy.deepcopy(dict(updated["catalog"]))
         selection = validate_operator_selection(catalog, updated["selection"])
         environment = self._validated_environment(updated["environment"])
+        previous_design_source = selected_state_space_design_profile(
+            self.catalog, self.selection,
+        )
         self.camera_setup = camera_setup
         self.catalog = catalog
         self.selection = selection
+        design_changed = self._sync_state_space_design(
+            previous_design_source,
+        )
+        if design_changed and self.draft["authoring_mode"] == "DIRECT_EDIT":
+            self._reset_direct_pairs()
         self._environment_view = environment
         return camera_setup
 
@@ -1573,6 +1708,9 @@ class CollectionOperatorApplication:
         }
 
     def _update_browser_selection(self, axis: str, value: object) -> None:
+        previous_design_source = selected_state_space_design_profile(
+            self.catalog, self.selection,
+        )
         previous_workspace = (
             self.selection["workspace_id"], self.selection["frame_id"],
         )
@@ -1678,6 +1816,9 @@ class CollectionOperatorApplication:
                 camera_bindings=copy.deepcopy(combination["camera_bindings"]),
                 camera_binding_digest=combination["camera_binding_digest"],
             )
+        design_changed = self._sync_state_space_design(
+            previous_design_source,
+        )
         if previous_workspace != (
             self.selection["workspace_id"], self.selection["frame_id"],
         ):
@@ -1693,6 +1834,11 @@ class CollectionOperatorApplication:
             previous_task != self.selection["task_id"]
             and self.draft["authoring_mode"] == "DIRECT_EDIT"
         ):
+            if self.start_pose_setup is not None:
+                self._reset_direct_pairs()
+            else:
+                self.draft["direct_poses"] = []
+        elif design_changed and self.draft["authoring_mode"] == "DIRECT_EDIT":
             if self.start_pose_setup is not None:
                 self._reset_direct_pairs()
             else:
@@ -1728,6 +1874,9 @@ class CollectionOperatorApplication:
                         yaw_sampling_seed=derive_domain_seed(
                             self.draft["normalized_seed"], "yaw",
                         ),
+                        state_space_design_profile=self.draft[
+                            "state_space_design_profile"
+                        ],
                     ):
                         if pose != anchor and pose not in direct_poses:
                             direct_poses.append(pose)
@@ -1743,6 +1892,25 @@ class CollectionOperatorApplication:
             self.draft[field] = value
             if self.draft["authoring_mode"] == "DIRECT_EDIT":
                 self._reset_direct_pairs()
+        elif field == "state_space_design_factors":
+            source = selected_state_space_design_profile(
+                self.catalog, self.selection,
+            )
+            if (
+                source is None
+                or self.draft["authoring_mode"] != "ASSISTED"
+            ):
+                raise ContractError(
+                    "OPERATOR_APPLICATION_STATE_SPACE_DESIGN",
+                )
+            try:
+                self.draft["state_space_design_profile"] = (
+                    configure_state_space_design_profile(source, value)
+                )
+            except ContractError as exc:
+                raise ContractError(
+                    "OPERATOR_APPLICATION_STATE_SPACE_DESIGN",
+                ) from exc
         elif field == "normalized_seed":
             self.draft[field] = _validated_normalized_seed(value)
         elif field == "current_object_pose" and isinstance(value, Mapping):

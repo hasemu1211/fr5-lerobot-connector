@@ -63,7 +63,13 @@ PROGRAM_LIMITS = {
 
 def _campaign_manifest(value: Mapping[str, Any], hypothesis: Mapping[str, Any]) -> dict[str, Any]:
     """Read legacy seed v1 or the narrow subset campaign adapter."""
-    if isinstance(value, Mapping) and value.get("schema_version") == "data_factory.collection_campaign_manifest.v1":
+    if (
+        isinstance(value, Mapping)
+        and value.get("schema_version") in {
+            "data_factory.collection_campaign_manifest.v1",
+            "data_factory.collection_campaign_manifest.v2",
+        }
+    ):
         from tools.data_factory.campaign_authoring import validate_collection_campaign_manifest
 
         return validate_collection_campaign_manifest(value, hypothesis=hypothesis)
