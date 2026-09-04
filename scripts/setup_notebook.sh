@@ -42,4 +42,4 @@ colcon build --symlink-install
 mkdir -p datasets/fr5_episodes
 [[ -f config/fr5.env ]] || cp config/fr5.env.example config/fr5.env
 scripts/preflight_collection.sh
-echo "Setup complete. Edit config/fr5.env, then follow docs/data-collection.md."
+echo "Setup complete. Edit config/fr5.env, then follow docs/getting-started.md."

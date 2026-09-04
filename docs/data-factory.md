@@ -17,7 +17,7 @@
 
 데이터팩토리는 카탈로그에서 호환되는 작업·물체·시작 자세·카메라·데이터 모드를 읽고, 유한한 manifest를 만든다. manifest는 선택한 셀, 순서, 분할, 반복 수와 digest를 고정한다. 승인된 campaign은 한 번에 하나의 `OneJob`만 열며 각 episode는 새 작업으로 실행한다.
 
-각 기록 row에는 feedback state, reference action, RGB 관측과 자연어 `task`가 들어간다. 기본 7D 계약과 30 Hz timebase는 schema와 recorder가 강제한다. source timestamp, 정합 정보와 validator 결과는 dataset metadata에 남기며, 영상·Parquet 본문을 control-plane 증거로 복사하지 않는다.
+각 기록 row에는 feedback state, reference action, RGB 관측과 자연어 `task`가 들어간다. 기본 7D 계약과 30 Hz timebase는 schema와 recorder가 강제한다. recorder의 source provenance와 recording quality는 dataset metadata에 남는다. 데이터팩토리의 `technical_validator.json`은 해당 실행의 per-run output에 남는다. standalone `tools/validate_lerobot_dataset.py`는 판정을 stdout에 출력할 뿐 판정 파일을 저장하지 않는다. 영상·Parquet 본문은 control-plane 증거로 복사하지 않는다.
 
 ## 권한과 실패 경계
 

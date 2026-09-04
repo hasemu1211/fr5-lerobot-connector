@@ -48,6 +48,17 @@ scripts/evaluate_smolvla.sh --check-env
 
 설치 확인은 환경과 명령의 사용 가능성만 확인한다. checkpoint의 품질이나 실물 작업 성공을 판정하지 않는다.
 
+## 문서 검사
+
+깨끗한 checkout에서 재현 가능한 Markdown 검사는 다음 순서로 실행한다.
+
+```bash
+npm ci
+npm run docs:lint
+```
+
+`npm run docs:lint`가 현재 필수 실행 gate다. Vale는 한국어 fixture가 유용하고 잡음이 적은 규칙을 확립할 때까지 advisory다. `.lychee.toml` 설정은 준비되어 있지만 link checking은 아직 필수 실행 gate가 아니다.
+
 ## 다음 문서
 
 - 데이터팩토리 입력·출력과 소유권은 [데이터팩토리 계약](data-factory.md)을 읽는다.

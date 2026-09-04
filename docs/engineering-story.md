@@ -22,8 +22,8 @@ catalog에 값이 있거나 plan이 성공했다는 사실은 물리 적격화, 
 
 | claim | output | evidence | limitation | next consumer |
 |---|---|---|---|---|
-| compile은 외부 효과가 없다 | finite manifest/envelope | campaign·operator tests | authorization 전용 | 운영자 런북 |
-| 저장 입력을 재현할 수 있다 | dataset metadata와 provenance | schema·recorder·validator | raw runtime은 문서에 없음 | 데이터셋 품질 |
-| checkpoint를 비교할 수 있다 | offline loss result | evaluation tool/tests | rollout·physical effectiveness 미제공 | 학습과 평가 |
+| compile은 외부 효과가 없다 | `NO_EXECUTION_AUTHORITY` manifest와 compilation receipt | `python3 -m unittest tests.data_factory.test_campaign_authoring` → `OK` | authorization은 생성하지 않는다 | 운영자 런북 |
+| 저장 입력을 재현할 수 있다 | dataset metadata의 source provenance·recording quality와 per-run artifact refs | `python3 -m unittest tests.data_factory.test_episode_ledger` → `OK` | raw runtime은 문서에 없음 | 데이터셋 품질 |
+| checkpoint를 비교할 수 있다 | checkpoint digest에 결합된 offline evaluation receipt | `python3 -m unittest tests.data_factory.test_training_orchestration` → `OK` | rollout·physical effectiveness 미제공 | 학습과 평가 |
 
 각 claim은 위 표의 output과 executable evidence로만 소비한다. 측정되지 않은 효율, 성공률, 미래 기능은 이 문서의 결론이 아니다.
