@@ -86,6 +86,9 @@ class LoopbackBridgeTests(unittest.TestCase):
 
         handler.wfile = DisconnectedClient()
         self.assertIsNone(handler._json(200, {"ok": True}))
+        handler.headers = {"Host": f"127.0.0.1:{self.bridge.port}"}
+        handler.path = "/app.js"
+        self.assertIsNone(handler.do_GET())
 
     def test_startup_call_runs_once_after_serve_loop_begins(self):
         calls = []

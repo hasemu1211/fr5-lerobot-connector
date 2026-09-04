@@ -139,14 +139,21 @@ class LoopbackBridge:
                 self.send_header("Content-Security-Policy", "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; base-uri 'none'; frame-ancestors 'none'")
                 self.end_headers()
 
-            def _json(self, status: int, value: Mapping[str, Any]):
-                payload = json.dumps(value, sort_keys=True, separators=(",", ":"), allow_nan=False).encode()
+            def _write_response(
+                self, status: int, content_type: str, payload: bytes,
+            ):
                 try:
-                    self._headers(status, "application/json; charset=utf-8", len(payload))
+                    self._headers(status, content_type, len(payload))
                     self.wfile.write(payload)
                 except (BrokenPipeError, ConnectionResetError):
-                    # The browser may leave while a long snapshot is being built.
+                    # The browser may leave while a response is being built or sent.
                     return
+
+            def _json(self, status: int, value: Mapping[str, Any]):
+                payload = json.dumps(value, sort_keys=True, separators=(",", ":"), allow_nan=False).encode()
+                return self._write_response(
+                    status, "application/json; charset=utf-8", payload,
+                )
 
             def _error(self, status: int, code: str):
                 self._json(status, {
@@ -211,8 +218,7 @@ class LoopbackBridge:
                 content_type = mimetypes.guess_type(target.name)[0] or "application/octet-stream"
                 if content_type.startswith("text/") or content_type in {"application/javascript", "application/json"}:
                     content_type += "; charset=utf-8"
-                self._headers(HTTPStatus.OK, content_type, len(payload))
-                self.wfile.write(payload)
+                return self._write_response(HTTPStatus.OK, content_type, payload)
 
             def do_POST(self):
                 if not self._host_ok():
