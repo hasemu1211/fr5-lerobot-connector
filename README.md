@@ -1,95 +1,35 @@
 # FR5 Robot Learning Data Factory
 
-FAIRINO FR5의 학습용 demonstration을 계획·실행·시간 정합·검증·추적하여 LeRobot v3 데이터셋으로 만드는 로봇 학습 데이터 팩토리다. ROS 2↔LeRobot 연결을 기반으로 source provenance, transaction 품질, finite campaign과 학습 진입 계약을 함께 관리한다.
+FAIRINO FR5의 demonstration을 LeRobot v3 dataset으로 기록·검증하고, 승인된 dataset을 policy 학습과 오프라인 평가로 연결하는 저장소다. 입력 계약은 7D state/action, RGB 관측, source timestamp와 provenance를 포함한다.
 
-## 제공 기능
+## 확인된 범위
 
-- FR5 6축 + 평행 그리퍼 1축의 7D state/action 기록
-- `up`, `up-side`, `up-wrist` 1·2카메라 프로파일
-- source timestamp 기반 30 Hz row 생성과 provenance 저장
-- 키 기반 episode 시작·저장·폐기 및 자동 디렉터리 구성
-- LeRobot v3 구조·시간·RGB 검사, 명시적 HIL 동작 검사와 사람 승인 절차
-- catalog 기반 상태공간 작성, finite campaign 한 번 승인과 fresh `OneJob` 직렬 실행
-- A4 `(place,yaw,x,y)` Job, scene/cell state, episode ledger와 production/TEST_ONLY 분리
-- SmolVLA·ACT·VQ-BeT용 공식 `lerobot-train` 학습 profile
-- SmolVLA 검증 episode의 오프라인 loss 평가
+지원하는 경로는 데이터 수집, 유한 campaign과 episode별 `OneJob`, LeRobot 구조·시간·RGB 검증, `smolvla`·`act`·`vqbet-*` 학습 wrapper, SmolVLA offline checkpoint 평가다. 실행 가능한 값은 `tools/`, `scripts/`, `config/`와 schema가 소유한다.
 
-학습된 정책의 실물 실행(rollout)은 아직 제공하지 않는다. `scripts/evaluate_smolvla.sh`는 로봇을 움직이지 않는 오프라인 검사다. Browser operator는 일반 수집과 격리된 TEST_ONLY 수집을 같은 lifecycle로 제공하지만 저장 위치와 admission authority는 섞지 않는다. live 성공도 자동 학습 승인을 만들지 않는다.
+실물 policy rollout, 자동 semantic PASS, 자동 training approval과 미적격 장비·작업의 실행 권한은 제공하지 않는다. offline 평가는 FR5를 움직이지 않으며, technical PASS와 사람의 의미 판정은 별도 상태다.
 
-## 빠른 시작
+## 로봇 없이 시작하기
 
-지원 기준은 Ubuntu 24.04, ROS 2 Jazzy, Python 3.12, LeRobot 0.6.1이다.
+FAKE 범위는 합성 입력으로 운영 화면을 확인하며 robot·recorder·dataset을 변경하지 않는다.
 
 ```bash
-git clone --recurse-submodules https://github.com/hasemu1211/fr5-lerobot-connector.git
-cd fr5-lerobot-connector
-scripts/setup_notebook.sh
+direnv exec . python3 -m tools.data_factory.operator_console --effect-scope FAKE
 ```
 
-`config/fr5.env`와 빈 작업 셀을 확인한 뒤, 보이는 터미널 하나에서 Web UI를 실행한다.
-
-```bash
-scripts/start_collection_ui.sh
-```
-
-출력된 loopback URL을 브라우저에서 연다. 기본값은 24 mm 큐브, `PLACE_A`, RealSense `UP` + UVC `WRIST`, `GENERAL_COLLECTION`이며 환경 준비가 로봇·카메라 foreground owner를 한 번만 관리한다. 기본 저장 위치는 `datasets/fr5_episodes/fr5_smolvla_up_wrist_30hz`다. 연결 시험만 할 때는 `scripts/start_collection_ui.sh --data-mode TEST_COLLECTION`을 사용하며 결과는 production dataset에 쓰지 않는다.
-
-이 수집 호스트의 기존 HIL·qualification 데이터는 checksum inventory와 함께 `datasets/legacy_physical/`에 격리되어 새 수집과 섞이지 않는다. 수동 recorder와 개별 ROS launcher가 필요한 진단 절차는 [데이터 수집 따라 하기](docs/data-collection.md)에 남겨 둔다.
-
-## 명령
-
-| 명령 | 역할 |
-|---|---|
-| `scripts/collect.sh` | 이 저장소의 ROS 2 → LeRobot v3 대화형 리코더 실행 |
-| `scripts/validate_dataset.sh` | 학습 전 구조·시간·동작·RGB 품질 검사 |
-| `scripts/train_policy.sh` | 검사된 데이터셋을 정책별 공식 `lerobot-train` profile에 전달 |
-| `scripts/evaluate_smolvla.sh` | 검증용으로 분리한 episode의 오프라인 SmolVLA loss 계산 |
-| `python3 -m tools.data_factory.run_job` | 사람/AI 공통 one-job plan-only/live pickup runner ([사용법](docs/data-factory.md#one-job-runner)) |
-| `scripts/start_collection_ui.sh` | 환경 준비→상태공간 계획→직렬 production/TEST_ONLY campaign을 제공하는 foreground browser operator |
-
-표의 `scripts/` wrapper는 `--help`, 경로 지정 옵션, `--dry-run`을 제공한다. factory runner의 live는 qualified profile·scene·cell과 exact plan 승인을 요구하는 별도 경로다.
-
-## 데이터 형식과 공식 학습 경로
-
-각 30 Hz row에 다음 값이 함께 저장된다.
-
-```text
-observation.state = [j1..j6 feedback(rad), gripper feedback(m)]  # float32[7]
-action            = [j1..j6 reference(rad), gripper reference(m)] # float32[7]
-observation.images.up|side|wrist = RGB 640x480
-task              = 자연어 작업 지시
-```
-
-episode별 Parquet/MP4와 LeRobot v3 metadata 외에 source timestamp와 정합 품질을 `meta/source_provenance/`와 `meta/recording_quality.jsonl`에 보존한다.
-
-| profile | 입력 카메라 | 자연어 `task` | 지원 범위 |
-|---|---|---|---|
-| `smolvla` | 수집된 1~2개 view를 `camera1..3`에 매핑 | 사용 | 7D 파인튜닝, checkpoint 저장·재로딩, 오프라인 loss |
-| `act` | 수집된 모든 view | 사용하지 않음 | 7D scratch 학습과 checkpoint resume |
-| `vqbet-up`, `vqbet-side`, `vqbet-wrist` | 선택한 한 view | 사용하지 않음 | 7D scratch 학습과 checkpoint resume |
-
-profile은 FR5의 절대 joint-position action, 7D state/action과 카메라 키를 정책 계약에 맞춘다. 실물 정책 실행은 아직 지원하지 않으며, VQ-BeT 카메라 profile은 실제 작업에서 검증용으로 분리한 episode의 결과로 선택해야 한다. 명령과 검증 범위는 [정책 학습과 오프라인 검사](docs/training.md)에 정리한다.
+화면 순서는 `environment → plan → review → execution → results → next campaign`다. 연결이 끊겨도 browser가 실행 상태를 소유하거나 자동 재시도하지 않는다.
 
 ## 문서
 
-| 목적 | 문서 |
+| 알고 싶은 것 | 문서 |
 |---|---|
-| 새 수집 노트북·학습 PC 설치 | [설치와 이식](docs/setup.md) |
-| 장비 실행과 episode 녹화 | [데이터 수집 따라 하기](docs/data-collection.md) |
-| 첫 학습 전 필수·권장 확인 | [첫 FR5 학습 체크리스트](docs/first-training-checklist.md) |
-| FR5·PGEA-100-40 제원과 소프트웨어 단위 | [하드웨어 계약](docs/hardware.md) |
-| 저장 형식·시간 정합·통과 기준 | [입력 구조와 품질 기준](docs/architecture-and-quality.md) |
-| 자연어 지시와 물체·장면 구성 | [작업 지시와 데이터셋 설계](docs/task-and-dataset-design.md) |
-| A4 pose·JobSpec·품질·안전·산출물 소유권 | [FR5 데이터팩토리 계약](docs/data-factory.md) |
-| 수집할 증거·피드백·보존·사람 개입 지점 | [데이터 수집·학습·피드백 운영 계약](docs/data-collection-and-feedback.md) |
-| SmolVLA·ACT·VQ-BeT 학습과 checkpoint 검사 | [정책 학습과 오프라인 검사](docs/training.md) |
-| 학습 조사·실험·반증과 미결정 항목 | [학습 정책 근거 장부](docs/training-evidence.md) |
-| checkpoint 실물 비교와 안전 판정 | [FR5 실물 정책 평가 프로토콜](docs/real-robot-evaluation.md) |
-
-## 배포 주의
-
-로봇은 비상정지 접근, 충돌 없는 작업공간, 저속 설정을 확인한 뒤 사용한다.
+| 설치와 로봇 없는 첫 실행 | [시작하기](docs/getting-started.md) |
+| 입력·출력·권한·산출물 소유권 | [데이터팩토리 계약](docs/data-factory.md) |
+| 장비 준비·안전·중단·복구 | [운영자 런북](docs/operator-runbook.md) |
+| 시스템과 브라우저의 책임 경계 | [아키텍처](docs/architecture.md) |
+| 저장 구조·시간 정합·품질 판정 | [데이터셋 품질](docs/dataset-quality.md) |
+| policy 학습·checkpoint·오프라인 평가 | [학습과 평가](docs/training-and-evaluation.md) |
+| 설계 선택과 검증 근거 | [엔지니어링 이야기](docs/engineering-story.md) |
 
 ## 라이선스
 
-이 프로젝트가 직접 작성한 코드와 문서는 [Apache License 2.0](LICENSE)으로 배포한다. FAIRINO submodule, 파생 robot description과 DH-Robotics CAD mesh에는 이 라이선스를 재부여하지 않으며 각각의 권리 조건은 [Third-party notices](THIRD_PARTY_NOTICES.md)를 따른다.
+직접 작성한 코드와 문서는 [Apache License 2.0](LICENSE)을 따른다. FAIRINO 하위 모듈과 DH-Robotics CAD mesh의 권리·고지는 [Third-party notices](THIRD_PARTY_NOTICES.md)에 보존한다.

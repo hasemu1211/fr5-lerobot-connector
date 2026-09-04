@@ -1,0 +1,9 @@
+{
+  "private": true,
+  "scripts": {
+    "docs:lint": "markdownlint-cli2"
+  },
+  "devDependencies": {
+    "markdownlint-cli2": "0.18.1"
+  }
+}

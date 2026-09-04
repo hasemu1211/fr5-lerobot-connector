@@ -1,0 +1,3 @@
+max_retries = 2
+timeout = 20
+exclude = ["^https://localhost", "^http://localhost"]

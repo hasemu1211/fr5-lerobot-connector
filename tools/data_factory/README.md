@@ -124,6 +124,6 @@ direnv exec . python3 -m unittest discover -s tests
 mex check
 ```
 
-The canonical rationale, responsibility boundaries, and physical follow-up are
-in the [dataset curator plan](../../plans/dataset-curator-pipeline.md). The dated
-software evidence is in the [implementation report](../../plans/archive/dataset-curator-implementation-report-2026-09-03.md).
+The canonical data-factory contract and responsibility boundaries are in the
+[data-factory contract](../../docs/data-factory.md). Runtime evidence remains
+outside public documentation and is consumed by the owning tools and tests.
