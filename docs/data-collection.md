@@ -28,6 +28,10 @@ scripts/start_collection_ui.sh
 4. 실행 중 이상이 보이면 즉시 중단한다. 성공 episode는 recorder commit 뒤 기술 검사와 필요한 비녹화 surface 재배치를 모두 마쳐야 다음 episode가 열린다.
 5. 캠페인 중이나 종료 뒤 candidate review를 처리한다. review와 training approval은 로봇 실행 경로를 멈추게 하지 않으며 서로 다른 authority다.
 
+실행 화면은 `로봇 동작`과 `기록기`를 별도로 표시한다. `MOTION_STARTING`은 readiness 통과 뒤 execute goal을 보내기 직전, `RECYCLING`은 녹화가 끝난 뒤 복귀·재배치 동작, `FINALIZING`은 모든 로봇 동작이 끝난 뒤 dataset commit을 뜻한다. 화면 문구는 이 lifecycle을 투영하며 safety gate나 motion authority를 대신하지 않는다.
+
+브라우저나 campaign이 중단돼 review queue를 다시 열 수 없어도 이미 commit되고 technical `PASS`한 episode는 hardware를 시작하지 않는 `review-episode` command로 분류할 수 있다. 정확한 command와 idempotency 규칙은 [중단 뒤 committed episode 분류](data-collection-and-feedback.md#중단-뒤-committed-episode-분류)를 따른다.
+
 기본 active job family에는 24 mm 큐브와 상단 아래 3.5 mm 파지만 표시된다. 과거 25 mm profile은 재현용 설정으로 남지만 이 실행의 선택지가 아니다. `pickup_e2e`는 고른 작업영역 안에서 수집하고, `pick_place`는 반대 작업영역을 목적지로 자동 결속해 `A → B → A …` 또는 `B → A → B …`로 왕복한다. 좌표계 revision을 사용자가 별도로 고르지 않는다.
 
 `TWO_STAGE_ALIGN_V2`의 55–60 mm clearance와 접근 `dXY` 분포는 UI 숫자 slider가 아니라 object/grasp/camera-bound versioned profile에서 결정된다. 현재 24 mm 큐브의 `dXY` 절삭 반경은 최대 12 mm이고 seed마다 중심 집중형으로 달라진다. 수집 위치는 별도의 설정 기반 `Nₓ×Nᵧ×N_yaw` 설계다. 각 XY cell은 물체 footprint와 yaw로 침식한 안전영역과의 교집합에서 면적 균등하게 표본화되며, yaw는 object/grasp profile이 선언한 `[-45°, +45°)` 균등 CDF를 계층화한다. 현재 A4 profile의 값은 `Nₓ=5`, `Nᵧ=3`, `N_yaw=3`이고, 짧은 campaign도 yaw 계층별 수를 최대 1회 차이로 맞춘다. 이 값은 고정 아키텍처가 아니다. 관측된 실제 yaw는 그대로 유지하며 symmetry canonical yaw는 계층 계산에만 쓴다. `pick_place`에서도 접근 변화는 pickup prefix에만 적용되며 녹화되는 destination place는 source yaw를 보존하는 `DIRECT`다. 선택한 recipe도 기존 plan digest·collision·사람 승인 절차를 생략하지 않는다.

@@ -60,7 +60,9 @@ class DataFactoryOperatorUiStaticTest(unittest.TestCase):
             'state_space_design_factors: {columns, rows, yaw_cdf_strata}',
             "등록된 적격 조건",
             "현재 자동 실험 설계",
-            "모든 작업영역 완전 coverage",
+            "모든 작업영역 A4-local 설계 완전 coverage",
+            "실제 색상/시트 결속 검증 전",
+            "물리 A4 결속",
             "catalog_eligible_condition_count",
             "per_workspace_condition_count",
             "full_coverage_episode_count",
@@ -256,6 +258,23 @@ class DataFactoryOperatorUiStaticTest(unittest.TestCase):
 
     def test_recorder_fact_never_invents_an_unknown_status(self):
         self.assertNotIn('"상태 확인 전"', self.js)
+
+    def test_runtime_separates_motion_authority_from_recorder_state(self):
+        for marker in (
+            '"NOT_AUTHORIZED", "DISPATCHING", "ACTIVE", "PAUSED_AT_GATE"',
+            'data-fact="motion"',
+            '["로봇 동작", runtime.motion.label]',
+            '["기록기", runtime.recorder.label',
+        ):
+            self.assertIn(marker, self.js)
+
+    def test_live_details_and_results_prioritize_operator_action(self):
+        self.assertIn(
+            '<details class="runtime-evidence"><summary>현재 실행할 정확한 궤적</summary>',
+            self.js,
+        )
+        results = self.html.split('id="step-results"', 1)[1].split("</section>", 1)[0]
+        self.assertLess(results.index('id="review-queue"'), results.index('class="result-layout"'))
 
 
 if __name__ == "__main__":

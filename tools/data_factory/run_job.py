@@ -38,6 +38,8 @@ from tools.data_factory.episode_ledger import (
     compile_episode_ledger,
     project_episode_state,
     reproject_episode_state,
+    validate_episode_ledger,
+    validate_episode_state,
 )
 from tools.data_factory.experiment_manifest import (
     FIXED_CONTRACT_ENDPOINT_SCHEMAS,
@@ -86,6 +88,7 @@ from tools.fr5_data_factory import (
     ContractArgumentParser,
     ContractError,
     DIGEST,
+    RFC3339,
     SAFE_ID,
     TASK_REVIEW_CHECKLIST_IDS,
     bounded_place_coordinate,
@@ -1698,7 +1701,8 @@ def bind_candidate_episode_state(ledger_reference, candidate_path):
     updated = reproject_episode_state(
         ledger=ledger, current_state=current_state, candidate=candidate_ref,
     )
-    write_json_atomic(state_path, updated)
+    if updated != current_state:
+        write_json_atomic(state_path, updated)
     reference = copy.deepcopy(dict(ledger_reference))
     reference.update({
         "state_digest": updated["state_digest"],
@@ -1747,8 +1751,21 @@ def review_candidate_admission(
             or current.get("operational_source") not in {"HUMAN_GATED", "HIL_PROXY"}
             or current.get("checklist_id") != checklist_id
             or current.get("review_context_digest") != expected_review_context_digest
-            or current.get("semantic_status") != "PENDING"
-            or any(current.get(key) is not None for key in ("reviewed_by", "reviewed_at", "reason"))
+        ):
+            raise ContractError("CANDIDATE_REVIEW_STATE")
+        if current.get("semantic_status") != "PENDING":
+            if (
+                current.get("semantic_status") != semantic_status
+                or current.get("reviewed_by") != reviewed_by
+                or current.get("reason") != reason
+                or not isinstance(current.get("reviewed_at"), str)
+                or not RFC3339.fullmatch(current["reviewed_at"])
+            ):
+                raise ContractError("CANDIDATE_REVIEW_STATE")
+            return current
+        if any(
+            current.get(key) is not None
+            for key in ("reviewed_by", "reviewed_at", "reason")
         ):
             raise ContractError("CANDIDATE_REVIEW_STATE")
         reviewed_at = clock()
@@ -1763,6 +1780,99 @@ def review_candidate_admission(
         return updated
     finally:
         os.close(descriptor)
+
+
+def apply_episode_review(
+    run_dir, *, semantic_status, reviewed_by, reason=None,
+    clock=lambda: datetime.now(timezone.utc),
+):
+    """Idempotently review one committed episode through its canonical artifacts."""
+    source = Path(run_dir)
+    try:
+        if source.is_symlink() or not source.is_dir():
+            raise ContractError("EPISODE_REVIEW_PATH")
+        run_dir = source.resolve(strict=True)
+    except OSError as exc:
+        raise ContractError("EPISODE_REVIEW_PATH") from exc
+    ledger_path = run_dir / "episode_ledger.json"
+    state_path = run_dir / "episode_ledger_state.json"
+    candidate_path = run_dir / "candidate_admission.json"
+    if any(
+        path.is_symlink() or not path.is_file()
+        for path in (ledger_path, state_path, candidate_path)
+    ):
+        raise ContractError("EPISODE_REVIEW_PATH")
+
+    ledger = validate_episode_ledger(
+        load_json_strict(ledger_path.read_text(encoding="utf-8")),
+    )
+    # The candidate CAS may have landed immediately before a process failure.
+    # Let reproject_episode_state validate the old state's own digest, ledger
+    # binding, and retention while replacing its now-stale candidate reference.
+    current_state = load_json_strict(state_path.read_text(encoding="utf-8"))
+    current = load_json_strict(candidate_path.read_text(encoding="utf-8"))
+    if (
+        ledger["admission"]["technical_status"] != "PASS"
+        or not isinstance(current, Mapping)
+        or set(current) != CANDIDATE_ADMISSION_KEYS
+        or current.get("run_id") != ledger["episode"]["run_id"]
+        or current.get("review_context_digest")
+        != ledger["admission"]["review_context_digest"]
+    ):
+        raise ContractError("EPISODE_REVIEW_BINDING")
+    reproject_episode_state(
+        ledger=ledger,
+        current_state=current_state,
+        candidate={
+            "artifact_path": str(candidate_path),
+            "artifact_digest": canonical_digest(current),
+        },
+    )
+    reviewed = review_candidate_admission(
+        candidate_path,
+        expected_file_digest=canonical_digest(current),
+        expected_review_context_digest=ledger["admission"][
+            "review_context_digest"
+        ],
+        checklist_id=current["checklist_id"],
+        semantic_status=semantic_status,
+        reviewed_by=reviewed_by,
+        reason=reason,
+        clock=clock,
+    )
+    reference = bind_candidate_episode_state({
+        "path": str(ledger_path),
+        "state_path": str(state_path),
+    }, candidate_path)
+    final_state = validate_episode_state(
+        load_json_strict(state_path.read_text(encoding="utf-8")),
+        ledger=ledger,
+    )
+    if (
+        final_state["review"]["semantic_status"] != semantic_status
+        or final_state["review"]["reviewed_by"] != reviewed_by
+        or final_state["review"]["reviewed_at"] != reviewed["reviewed_at"]
+        or final_state["review"]["reason"] != reason
+        or final_state["review"]["training_status"] != "NOT_AUTHORIZED"
+        or reference["state_digest"] != final_state["state_digest"]
+    ):
+        raise ContractError("EPISODE_REVIEW_PROJECTION")
+    result = {
+        "schema_version": "data_factory.episode_review_result.v1",
+        "run_id": ledger["episode"]["run_id"],
+        "episode_index": ledger["episode"]["episode_index"],
+        "semantic_status": reviewed["semantic_status"],
+        "reviewed_by": reviewed["reviewed_by"],
+        "reviewed_at": reviewed["reviewed_at"],
+        "reason": reviewed["reason"],
+        "ledger_digest": ledger["ledger_digest"],
+        "review_context_digest": reviewed["review_context_digest"],
+        "candidate_digest": canonical_digest(reviewed),
+        "state_digest": final_state["state_digest"],
+        "training_status": "NOT_AUTHORIZED",
+    }
+    result["result_digest"] = canonical_digest(result)
+    return result
 
 
 def _campaign_candidate_reviews(campaign, tty_decision=_tty_decision):
@@ -3024,6 +3134,27 @@ def run_object_reposition(
             raise ContractError("CANCELLED")
         lease_id = f"{checked['continuation_run_id']}-lease"
         job.lease_id = lease_id
+        publish(_response(
+            ok=True, code="OBJECT_REPOSITION_EXECUTING", state="RUNNING",
+            run_id=payload["run_id"], plan_digest=parent_plan_digest,
+            data={
+                "mode": "live", "progress": 93,
+                "object_reposition_binding_digest": checked["binding_digest"],
+                "object_reposition_run_id": checked["continuation_run_id"],
+                "object_reposition_plan_digest": plan_digest,
+                "object_reposition_plan_artifact_digest": plan_artifact_digest,
+                "object_reposition_collision_report_digest": (
+                    planned["plan_envelope"]["precommit_safety"][
+                        "collision_report_digest"
+                    ]
+                ),
+                "object_reposition_plan_only_no_motion_digest": (
+                    planned["plan_envelope"]["precommit_safety"][
+                        "plan_only_no_motion_digest"
+                    ]
+                ),
+            },
+        ))
         response = job._request(
             "executor", "execute", {
                 "run_id": checked["continuation_run_id"],
@@ -3400,6 +3531,24 @@ def run_live(payload, cancel, publish, *, resolver=resolve_inputs, executor_fact
             else executor_factory(payload, timeout_s)
         )
         forbidden = lambda _request: (_ for _ in ()).throw(ContractError("LIVE_RECORDER_NOT_STARTED"))
+        lifecycle_progress = {
+            "MOTION_STARTING": 45,
+            "EXECUTING": 50,
+            "RECYCLING": 70,
+            "FINALIZING": 80,
+        }
+
+        def lifecycle_event(code):
+            progress = lifecycle_progress.get(code)
+            if progress is None:
+                raise ContractError("ONE_JOB_LIFECYCLE_EVENT")
+            publish(_response(
+                ok=True, code=code, state="RUNNING",
+                run_id=payload["run_id"],
+                plan_digest=job.plan_digest,
+                data={"mode": "live", "progress": progress},
+            ))
+
         if one_job is None:
             arguments = (
                 forbidden,
@@ -3424,6 +3573,10 @@ def run_live(payload, cancel, publish, *, resolver=resolve_inputs, executor_fact
                 executor, request, cancel,
             )
             job.cell_state_call = cell_store.read
+        lifecycle_setter = getattr(job, "set_lifecycle_event_call", None)
+        if not callable(lifecycle_setter):
+            raise ContractError("ONE_JOB_LIFECYCLE_EVENT")
+        lifecycle_setter(lifecycle_event)
         planned = None
         plan_error = None
         try:
@@ -4076,19 +4229,16 @@ def run_live(payload, cancel, publish, *, resolver=resolve_inputs, executor_fact
                     "camera_semantic_authority": False, "training_authorized": False,
                 })
             if result["state"] in {"GRASP_VERDICT", "SEMANTIC_VERDICT"}:
-                if result["state"] == "SEMANTIC_VERDICT":
+                if pending is None:
                     publish(_response(
-                        ok=True,
-                        code=(
-                            "RECYCLING"
-                            if summary.get("recycle", {}).get(
-                                "recording_boundary_after"
-                            ) == "LIFT_LIN"
-                            else "FINALIZING"
+                        ok=True, code=(
+                            "GRASP_REVIEW"
+                            if result["state"] == "GRASP_VERDICT"
+                            else "SEMANTIC_REVIEW"
                         ),
                         state="RUNNING",
                         run_id=payload["run_id"], plan_digest=planned["plan_digest"],
-                        data={"mode": "live", "progress": 70},
+                        data={"mode": "live", "progress": 60},
                     ))
                 if approval_scope == "HIL_NUMERIC_PROXY":
                     decision = hil_numeric_gripper_verdict(
@@ -4165,6 +4315,12 @@ def run_live(payload, cancel, publish, *, resolver=resolve_inputs, executor_fact
                     raise ContractError("RECYCLE_EVIDENCE")
                 recycle = summary["recycle"]
                 if pending is None:
+                    publish(_response(
+                        ok=True, code="RELEASE_REVIEW", state="RUNNING",
+                        run_id=payload["run_id"],
+                        plan_digest=planned["plan_digest"],
+                        data={"mode": "live", "progress": 75},
+                    ))
                     pending = result["state"]
                     release_prompt = (
                         f"Confirm object inside release slot {recycle['release_target']}, gripper empty, "
@@ -4228,11 +4384,6 @@ def run_live(payload, cancel, publish, *, resolver=resolve_inputs, executor_fact
                 acted = job.release_verdict(decision, operator_id, source=source)
                 if not acted["ok"]:
                     return _response(ok=False, code=acted["code"], state=acted["state"], run_id=payload["run_id"], plan_digest=planned["plan_digest"])
-                publish(_response(
-                    ok=True, code="FINALIZING", state="RUNNING",
-                    run_id=payload["run_id"], plan_digest=planned["plan_digest"],
-                    data={"mode": "live", "progress": 80},
-                ))
                 continue
             if result["state"] == "PRECONTACT_HUMAN":
                 if campaign_authorization is not None:
@@ -4246,6 +4397,12 @@ def run_live(payload, cancel, publish, *, resolver=resolve_inputs, executor_fact
                         )
                     continue
                 if pending is None:
+                    publish(_response(
+                        ok=True, code="PRECONTACT_REVIEW", state="RUNNING",
+                        run_id=payload["run_id"],
+                        plan_digest=planned["plan_digest"],
+                        data={"mode": "live", "progress": 55},
+                    ))
                     pending = result["state"]
                     def confirm_in_background():
                         try:
@@ -4664,6 +4821,19 @@ def _review_parser():
     return parser
 
 
+def _episode_review_parser():
+    parser = ContractArgumentParser(
+        description="Review one committed episode without starting hardware.",
+    )
+    parser.add_argument("--run-dir", required=True)
+    parser.add_argument(
+        "--choice", required=True, choices=("PASS", "FAIL", "UNCERTAIN"),
+    )
+    parser.add_argument("--reviewed-by", required=True)
+    parser.add_argument("--reason")
+    return parser
+
+
 def main(argv=None):
     try:
         arguments = list(sys.argv[1:] if argv is None else argv)
@@ -4688,6 +4858,16 @@ def main(argv=None):
                 run_id=payload["campaign_id"], data={"candidate_admissions": reviews, "training_authorized": False},
             )
             print(json.dumps(result, sort_keys=True, separators=(",", ":"), allow_nan=False))
+            return 0
+        if arguments[:1] == ["review-episode"]:
+            args = _episode_review_parser().parse_args(arguments[1:])
+            result = apply_episode_review(
+                args.run_dir, semantic_status=args.choice,
+                reviewed_by=args.reviewed_by, reason=args.reason,
+            )
+            print(json.dumps(
+                result, sort_keys=True, separators=(",", ":"), allow_nan=False,
+            ))
             return 0
         args = _parser().parse_args(arguments)
         if args.factory_jsonl:

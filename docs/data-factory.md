@@ -50,6 +50,8 @@ r007의 체감 정지는 runner queue 적체와 구분한다. terminal 뒤 다�
 - camera transport age: 300 ms 이하
 - writer queue drop과 alignment failure: 0
 
+motion 전 readiness에서 이 기준을 벗어나면 episode는 저장·실행 없이 중단된다. `readiness_failure.json`의 `alignment_failure_sources`는 state, arm/gripper action, camera별 image, transport 중 어느 입력이 실패했는지 보존한다. 진단을 위해 허용치를 늘리거나 자동 재실행하지 않는다.
+
 brightness, clipping, sharpness와 색 변화량은 정성 검토를 돕는 warning이다. 이 값만으로 episode를 폐기하지 않는다. 학습 승격은 실제 dataset의 validator `PASS`와 사람 preview 승인을 모두 요구한다.
 
 2026-08-14의 8초 UVC raw probe에서는 약 14.5 Hz가 관찰됐다. 이는 30 Hz profile의 startup 최소 22.5 Hz보다 낮은 **해당 probe 경로의 경고/실패**다. 카메라 연결이 불안정하다는 판정이나 dataset validator 결과가 아니다. 실제 ROS camera profile은 `scripts/preflight_collection.sh --live`와 저장된 `recording_quality.jsonl`·provenance를 사용하는 validator로 다시 판정한다. probe에 맞춰 기존 threshold를 낮추거나 dataset FPS를 자동 변경하지 않는다.
@@ -167,7 +169,7 @@ AI는 같은 모듈의 `--factory-jsonl`을 사용한다. command envelope는 ex
 python3 -m tools.data_factory.run_job --factory-jsonl
 ```
 
-technical validator가 `PASS`한 live run은 같은 run directory에 `candidate_admission.json`을 atomic 생성한다. 이 파일은 `checklist_id=pickup-v2`, `operational_source=HUMAN_GATED`, `semantic_status=PENDING`이며 reviewer/time/reason은 `null`이다. 기존 executor의 사람 verdict를 semantic 또는 training approval로 승격하지 않는다.
+technical validator가 `PASS`한 live run은 같은 run directory에 `candidate_admission.json`을 atomic 생성한다. 이 파일은 task-specific `checklist_id`(`pickup-v2` 또는 `pick-place-v1`), `operational_source`, `semantic_status=PENDING`을 갖고 reviewer/time/reason은 `null`이다. 기존 executor의 사람 verdict를 semantic 또는 training approval로 승격하지 않는다. Process 중단 뒤 committed episode를 같은 canonical review 경로로 완료하는 command는 [중단 뒤 committed episode 분류](data-collection-and-feedback.md#중단-뒤-committed-episode-분류)에 정의한다.
 
 Coverage reporting은 finite domain과 저장 episode reference를 명시한 두 JSON manifest만 offline으로 읽는다. domain manifest의 exact key는 `schema_version=data_factory.coverage_domain.v1`, `collection_profile_id`, `conditions`, `slots`이고 stored manifest의 exact key는 `schema_version=data_factory.coverage_stored_episodes.v2`, `episodes`다.
 
@@ -296,6 +298,7 @@ validate
 
 - 오케스트레이터는 승인된 한 job만 소유하고 다음 job을 자동 시작하지 않는다.
 - recorder의 기술 gate와 사람의 의미 성공 판정은 서로 대신하지 않는다.
+- Browser projection의 `MOTION_STARTING`은 recorder readiness와 safety 조건을 통과한 뒤 execute goal을 보내기 직전이다. `EXECUTING`은 active motion, `RECYCLING`은 recorder freeze 뒤의 복귀·재배치 motion, `FINALIZING`은 terminal safety 뒤 dataset commit을 뜻한다. Motion과 recorder status는 별도 truth로 투영하며 lifecycle callback 실패는 motion 전에 fail-close한다.
 - 공개 resolver의 `HUMAN_GATED` 프로그램은 exact plan을 한 번 승인한 뒤 lift까지 연속 실행하고 post-lift semantic 판정만 사람에게 받는다. close/lift의 profile-bound gripper reference·feedback은 제어 안전 evidence일 뿐 파지 성공 label이 아니다.
 - 이전 exact legacy marker pair(`PRECONTACT_HUMAN`, `GRASP_VERDICT`)를 가진 v2 program은 재현을 위해 validator가 계속 읽지만 새 resolver는 만들지 않는다. `HIL_NUMERIC_PROXY` evidence도 물체 식별·영상 의미 성공이나 training 승인을 증명하지 않는다.
 - 정상 recycle·release scene 전이까지 통과한 semantic success만 commit한다.
@@ -306,7 +309,7 @@ validate
 
 factory recorder는 transaction 동안 dataset 전용 커널 lock을 유지한다. 정상 종료는 lock을 명시적으로 해제하고 `SIGKILL`은 운영체제가 자동 해제한다. 중단 뒤에는 다음 명령으로 orphan 여부를 검사한다.
 
-factory commit은 LeRobot의 camera encode를 현재 recorder process에서 순차 실행한다. multithreaded ROS process에서 `fork` 기반 encoder worker를 만들지 않아 capture loop와 저장 phase를 분리하고, commit 실패는 기존 quarantine 계약으로 처리한다.
+factory commit은 카메라가 둘 이상이면 LeRobot의 spawn-isolated per-camera encoding을 camera count로 한정해 병렬 실행한다. Capture loop와 저장 phase는 계속 분리하며 commit 실패는 기존 quarantine 계약으로 처리한다.
 
 ```bash
 python3 tools/data_factory_recovery.py \
@@ -421,10 +424,13 @@ outputs/
 │   │   ├── resolved_pose.json
 │   │   ├── plan.json
 │   │   ├── preapproval_evidence.json  # 사람이 본 exact plan envelope
+│   │   ├── object_reposition_preapproval.json # 필요한 run만; parent run에 exact binding
 │   │   ├── events.jsonl
 │   │   ├── phase_events.jsonl         # executor control event; RGB/row를 복사하지 않음
 │   │   ├── episode_quality.json       # validator reference와 scalar report
-│   │   ├── candidate_admission.json   # technical PASS 뒤 semantic PENDING
+│   │   ├── episode_ledger.json         # immutable episode/data/provenance binding
+│   │   ├── candidate_admission.json   # technical PASS 뒤 mutable semantic review
+│   │   ├── episode_ledger_state.json   # candidate의 canonical mutable projection
 │   │   ├── result.json
 │   │   ├── staging_manifest.json       # 실제 LeRobot staging 경로의 한정된 목록
 │   │   ├── diagnostic.json             # 실패 시 최소 봉투 하나

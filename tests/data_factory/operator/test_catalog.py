@@ -2,12 +2,15 @@ import copy
 import unittest
 from collections import Counter
 from pathlib import Path
+from unittest import mock
 
+from tools.data_factory.operator import catalog as catalog_module
 from tools.data_factory.operator.catalog import (
     load_operator_catalog,
     project_assisted_poses,
     project_balanced_start_pose_ids,
     project_state_space_cell,
+    project_state_space_cells,
     project_yaw_sample_bindings,
     project_workspace_cycle_poses,
     resolve_workspace_cycle_selections,
@@ -320,6 +323,25 @@ class OperatorCatalogTests(unittest.TestCase):
             normalized_seed=derive_domain_seed(4242424, "spatial"),
             yaw_sampling_seed=yaw_seed,
         )
+        with mock.patch.object(
+            catalog_module, "_validate_operator_selection",
+            wraps=catalog_module._validate_operator_selection,
+        ) as validate_selection:
+            batched_cells = project_state_space_cells(
+                catalog, long_cycle, long_poses,
+            )
+        self.assertEqual(validate_selection.call_count, 2)
+        self.assertEqual(
+            batched_cells,
+            [
+                project_state_space_cell(catalog, endpoint, pose)
+                for endpoint, pose in zip(long_cycle, long_poses)
+            ],
+        )
+        with self.assertRaisesRegex(
+            ContractError, "OPERATOR_STATE_SPACE_CHAIN",
+        ):
+            project_state_space_cells(catalog, long_cycle, long_poses[:-1])
         bindings = project_yaw_sample_bindings(
             catalog, long_cycle, long_poses, yaw_seed,
         )

@@ -1043,6 +1043,21 @@ class EpisodeLedgerTest(unittest.TestCase):
         self.assertEqual(ledger, unchanged_ledger)
         self.assertEqual(ledger, validate_episode_ledger(unchanged_ledger))
 
+        state_bytes = state_path.read_bytes()
+        candidate_bytes = candidate_path.read_bytes()
+        damaged_state = json.loads(state_bytes)
+        damaged_state.pop("state_digest")
+        state_path.write_text(json.dumps(damaged_state), encoding="utf-8")
+        with self.assertRaisesRegex(
+            ContractError, "EPISODE_LEDGER_STATE_FIELDS",
+        ):
+            run_job.apply_episode_review(
+                run_dir, semantic_status="PASS",
+                reviewed_by="local-operator", reason=None,
+            )
+        self.assertEqual(candidate_path.read_bytes(), candidate_bytes)
+        state_path.write_bytes(state_bytes)
+
         run_job.review_candidate_admission(
             candidate_path,
             expected_file_digest=digest(json.loads(candidate_path.read_text())),
@@ -1050,18 +1065,40 @@ class EpisodeLedgerTest(unittest.TestCase):
             checklist_id="pickup-v2", semantic_status="PASS",
             reviewed_by="local-operator", reason=None,
         )
-        reviewed = run_job.bind_candidate_episode_state(pending, candidate_path)
+        ledger_bytes = ledger_path.read_bytes()
+        result = run_job.apply_episode_review(
+            run_dir, semantic_status="PASS", reviewed_by="local-operator",
+            reason=None,
+        )
         state = json.loads(state_path.read_text())
         self.assertEqual(
-            (reviewed["review_status"], state["review"]["semantic_status"],
+            (result["semantic_status"], state["review"]["semantic_status"],
              state["retention"]["reclaim_state"], state["review"]["training_status"]),
             ("PASS", "PASS", "REPACK_REQUIRED", "NOT_AUTHORIZED"),
         )
+        self.assertEqual(ledger_path.read_bytes(), ledger_bytes)
+        with mock.patch.object(
+            run_job, "write_json_atomic", wraps=run_job.write_json_atomic,
+        ) as write:
+            retried = run_job.apply_episode_review(
+                run_dir, semantic_status="PASS", reviewed_by="local-operator",
+                reason=None,
+                clock=lambda: (_ for _ in ()).throw(
+                    AssertionError("clock reused")
+                ),
+            )
+        self.assertEqual(retried, result)
+        write.assert_not_called()
+        with self.assertRaisesRegex(ContractError, "CANDIDATE_REVIEW_STATE"):
+            run_job.apply_episode_review(
+                run_dir, semantic_status="FAIL", reviewed_by="local-operator",
+                reason="TASK_GOAL",
+            )
 
         sibling = self.base / "candidate_admission.json"
         sibling.write_bytes(candidate_path.read_bytes())
         with self.assertRaisesRegex(ContractError, "EPISODE_LEDGER_REFERENCE"):
-            run_job.bind_candidate_episode_state(reviewed, sibling)
+            run_job.bind_candidate_episode_state(pending, sibling)
 
 
 if __name__ == "__main__":

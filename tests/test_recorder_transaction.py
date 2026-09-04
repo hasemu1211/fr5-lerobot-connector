@@ -558,7 +558,15 @@ class RecorderTransactionTest(unittest.TestCase):
             self.assertTrue(status["sampler_alive"])
             self.assertEqual(
                 set(status["metrics"]),
-                {"rows", "writer_queue", "writer_queue_high_water", "writer_queue_drops", "alignment_failures", "observed_monotonic_ns"},
+                {
+                    "rows", "writer_queue", "writer_queue_high_water",
+                    "writer_queue_drops", "alignment_failures",
+                    "alignment_failure_sources", "observed_monotonic_ns",
+                },
+            )
+            self.assertEqual(
+                status["metrics"]["alignment_failure_sources"],
+                recorder.alignment_failure_sources,
             )
             quality_snapshot.assert_not_called()
             recorder.frames = 1
@@ -920,9 +928,17 @@ class RecorderTransactionTest(unittest.TestCase):
             evidence = {
                 "camera_warmup.json": "data_factory.camera_warmup.v1",
                 "preapproval_evidence.json": "data_factory.preapproval_evidence.v2",
+                "object_reposition_preapproval.json":
+                "data_factory.object_reposition_preapproval.v1",
             }
             for name, schema in evidence.items():
-                (run_dir / name).write_text(json.dumps({"schema_version": schema, "run_id": "run-001"}))
+                binding_field = (
+                    "parent_run_id"
+                    if name == "object_reposition_preapproval.json" else "run_id"
+                )
+                (run_dir / name).write_text(json.dumps({
+                    "schema_version": schema, binding_field: "run-001",
+                }))
             recorder = self.make_recorder(directory)
             self.assertTrue(recorder.begin_episode(self.transaction(directory))["ok"])
             self.assertTrue((run_dir / "staging_manifest.json").is_file())
@@ -942,6 +958,34 @@ class RecorderTransactionTest(unittest.TestCase):
             response = process_recorder_control_line(conflict, json.dumps(request), {})
             self.assertEqual(response["reason_code"], "RUN_EVIDENCE_DIRECTORY_CONFLICT")
             self.assertEqual(conflict.episode_state, conflict.IDLE)
+
+    def test_transaction_rejects_unbound_object_reposition_preapproval(self):
+        with tempfile.TemporaryDirectory() as directory:
+            run_dir = Path(directory) / "runs" / "run-001"
+            run_dir.mkdir(parents=True)
+            evidence = {
+                "camera_warmup_reuse.json": {
+                    "schema_version": "data_factory.camera_warmup_reuse.v1",
+                    "run_id": "run-001",
+                },
+                "preapproval_evidence.json": {
+                    "schema_version": "data_factory.preapproval_evidence.v4",
+                    "run_id": "run-001",
+                },
+                "object_reposition_preapproval.json": {
+                    "schema_version":
+                    "data_factory.object_reposition_preapproval.v1",
+                    "parent_run_id": "another-run",
+                },
+            }
+            for name, value in evidence.items():
+                (run_dir / name).write_text(json.dumps(value))
+            recorder = self.make_recorder(directory)
+            with self.assertRaises(RecoveryError) as conflict:
+                recorder.begin_episode(self.transaction(directory))
+            self.assertEqual(
+                conflict.exception.code, "RUN_EVIDENCE_DIRECTORY_CONFLICT",
+            )
 
     def test_transaction_accepts_one_warmup_receipt_and_rejects_ambiguous_evidence(self):
         for warmup_name, warmup_schema in (

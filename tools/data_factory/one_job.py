@@ -202,8 +202,24 @@ class OneJob:
         self.readiness_failure_evidence = None
         self.plan_envelope = None
         self.frozen_rows = self.rows_after_recycle = None
+        self.lifecycle_event_call = None
         self._sequence = 0
         self._sequence_lock = threading.Lock()
+
+    def set_lifecycle_event_call(self, call):
+        if self.state != "IDLE" or not callable(call):
+            raise ContractError("ONE_JOB_LIFECYCLE_EVENT")
+        self.lifecycle_event_call = call
+
+    def _emit_lifecycle_event(self, code):
+        if self.lifecycle_event_call is None:
+            return
+        try:
+            self.lifecycle_event_call(code)
+        except ContractError:
+            raise
+        except Exception as exc:
+            raise ContractError("ONE_JOB_LIFECYCLE_EVENT") from exc
 
     def _op_id(self, op):
         with self._sequence_lock:
@@ -798,6 +814,7 @@ class OneJob:
                     raise
                 if self._cancel_requested(cancel_event):
                     raise ContractError("START_CANCELLED")
+            self._emit_lifecycle_event("MOTION_STARTING")
             self.lease_id = lease_id  # Arm only when the execute request is about to leave this process.
             response = self._request("executor", "execute", {"run_id": self.run_id, "plan_digest": self.plan_digest, "lease_id": lease_id})
             if response["state"] != "EXECUTING":
@@ -923,6 +940,7 @@ class OneJob:
         ):
             return self._result(False, "CONFIRM_SOURCE")
         try:
+            self._emit_lifecycle_event("EXECUTING")
             response = self._request("executor", "confirm", {"run_id": self.run_id, "plan_digest": self.plan_digest, "confirmed_by": confirmed_by, "source": source})
             if response["state"] != "EXECUTING":
                 raise ContractError("EXECUTOR_STATE")
@@ -938,6 +956,8 @@ class OneJob:
             return self._result(False, "GRASP_VERDICT_SOURCE")
         self.grasp = verdict
         try:
+            if verdict == "PASS":
+                self._emit_lifecycle_event("EXECUTING")
             response = self._request("executor", "grasp_verdict", {"run_id": self.run_id, "plan_digest": self.plan_digest, "verdict": verdict, "decided_by": decided_by, "source": source})
             if response["state"] != "EXECUTING":
                 raise ContractError("EXECUTOR_STATE")
@@ -952,6 +972,8 @@ class OneJob:
         if source not in {"HUMAN", "HIL_PROXY"} or source == "HIL_PROXY" and self.approval_scope != "HIL_NUMERIC_PROXY":
             return self._result(False, "VERDICT_SOURCE")
         try:
+            if verdict == "PASS":
+                self._emit_lifecycle_event("RECYCLING")
             response = self._request("executor", "semantic_verdict", {"run_id": self.run_id, "plan_digest": self.plan_digest, "verdict": verdict, "decided_by": decided_by, "source": source})
             if response["state"] != "EXECUTING":
                 raise ContractError("EXECUTOR_STATE")
@@ -998,6 +1020,7 @@ class OneJob:
                 )
             ):
                 raise ContractError("PRECOMMIT_SAFETY_BINDING")
+            self._emit_lifecycle_event("FINALIZING")
             response = self._request("recorder", "commit", allowed_failure=True)
             if response.get("state") == "QUARANTINED_COMMIT":
                 self.recorder_state = "QUARANTINED_COMMIT"

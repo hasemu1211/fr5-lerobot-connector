@@ -115,6 +115,15 @@ function validateView(value) {
   assertEnum("data_disposition", view.data_disposition);
   assertObject(view.runtime, "RUNTIME_INVALID");
   assertEnum("workflow_state", view.runtime.workflow_state);
+  if (view.runtime.motion !== undefined) {
+    assertObject(view.runtime.motion, "RUNTIME_MOTION_INVALID");
+    if (![
+      "NOT_AUTHORIZED", "DISPATCHING", "ACTIVE", "PAUSED_AT_GATE",
+      "ACTIVE_POST_RECORDING", "COMPLETE",
+    ].includes(view.runtime.motion.status)
+        || typeof view.runtime.motion.label !== "string"
+        || !view.runtime.motion.label) throw new TypeError("RUNTIME_MOTION_INVALID");
+  }
   assertObject(view.setup, "SETUP_INVALID");
   if (typeof view.setup.host_status !== "string" || !Array.isArray(view.setup.subsystems) || !view.setup.subsystems.length) throw new TypeError("SETUP_INVALID");
   view.setup.subsystems.forEach((item) => {
@@ -948,12 +957,29 @@ function renderStateSpaceSummary(view) {
       "현재 자동 실험 설계",
       `${shape.columns} × ${shape.rows} × ${shape.yaw_cdf_strata} = ${summary.per_workspace_condition_count}개 (작업영역별)`,
     ]);
-    summary.workspace_coverage.forEach((item) => rows.push([
-      `${workspaceName(view, item.workspace_id)} 계획 coverage`,
-      `${item.planned_episode_count} / ${item.full_coverage_episode_count} episodes`,
-    ]));
+    summary.workspace_coverage.forEach((item) => {
+      const routeIndex = workspaceRoute(view).findIndex((endpoint) =>
+        endpoint.workspace_id === item.workspace_id
+        && endpoint.frame_id === item.frame_id);
+      const region = routeIndex < 0
+        ? null
+        : directPoseDomain(view, routeIndex)?.coverage_region;
+      const binding = {
+        VERIFIED: "실제 시트 결속 검증됨",
+        PREPARED_NOT_VERIFIED: "실제 색상/시트 결속 검증 전",
+        NOT_CONFIGURED: "색상 영역 미설정",
+      }[region?.physical_binding_status] ?? "물리 결속 상태 확인 불가";
+      rows.push([
+        `${workspaceName(view, item.workspace_id)} A4-local 설계 coverage`,
+        `${item.planned_episode_count} / ${item.full_coverage_episode_count} episodes`,
+      ]);
+      rows.push([
+        `${workspaceName(view, item.workspace_id)} 물리 A4 결속`,
+        `${region?.region_id ?? "영역 미지정"} · ${binding}`,
+      ]);
+    });
     rows.push([
-      "모든 작업영역 완전 coverage",
+      "모든 작업영역 A4-local 설계 완전 coverage",
       `${summary.full_coverage_episode_count} episodes 필요`,
     ]);
   }
@@ -1426,11 +1452,13 @@ function renderFacts(view) {
   const current = view.runtime.current_episode ?? (view.runtime.workflow_state === "RUNNING" ? completed + 1 : null);
   const next = view.runtime.next_episode ?? (current && current < total ? current + 1 : null);
   const recorder = view.runtime.recorder?.label ?? view.runtime.recorder?.status;
+  const motion = view.runtime.motion?.label ?? view.runtime.motion?.status;
   const facts = document.querySelector("#campaign-facts");
   facts.hidden = !view.campaign_envelope && !view.episode_history?.length;
   facts.innerHTML = `<div data-fact="completed"><span>전체 진행</span><strong>${escapeHtml(completed)}/${escapeHtml(total)} · ${escapeHtml(campaignProgress)}%</strong></div>
     <div data-fact="current"><span>현재 에피소드</span><strong>${current ? `${escapeHtml(current)}/${escapeHtml(total)}` : "없음"}</strong></div>
     <div data-fact="next"><span>다음 에피소드</span><strong>${next ? `${escapeHtml(next)}/${escapeHtml(total)}` : "없음"}</strong></div>
+    ${motion ? `<div data-fact="motion"><span>로봇 동작</span><strong>${escapeHtml(motion)}</strong></div>` : ""}
     ${recorder ? `<div data-fact="recorder"><span>기록기</span><strong>${escapeHtml(recorder)}</strong></div>` : ""}`;
 }
 
@@ -1442,11 +1470,13 @@ function renderRuntime(view) {
   if (Number.isFinite(runtime.progress) && runtime.progress >= 0 && runtime.progress <= 100) {
     html += `<div class="progress-block"><div><span>현재 에피소드 · ${escapeHtml(runtime.phase_label ?? "진행 중")}</span><strong>${escapeHtml(runtime.progress)}%</strong></div><progress max="100" value="${escapeHtml(runtime.progress)}">${escapeHtml(runtime.progress)}%</progress><p>${escapeHtml(runtime.detail ?? "")}</p></div>`;
   }
-  if (runtime.recorder) {
-    const recorderRows = [["상태", runtime.recorder.label ?? message("status", runtime.recorder.status)]];
-    if (Number.isInteger(runtime.recorder.frames)) recorderRows.push(["기록 프레임", `${runtime.recorder.frames}`]);
-    if (Number.isFinite(runtime.recorder.fps)) recorderRows.push(["관측 속도", `${runtime.recorder.fps} fps`]);
-    html += `<dl class="runtime-evidence">${recorderRows.map(([term, value]) => `<div><dt>${escapeHtml(term)}</dt><dd>${escapeHtml(value)}</dd></div>`).join("")}</dl>`;
+  if (runtime.motion || runtime.recorder) {
+    const runtimeRows = [];
+    if (runtime.motion) runtimeRows.push(["로봇 동작", runtime.motion.label]);
+    if (runtime.recorder) runtimeRows.push(["기록기", runtime.recorder.label ?? message("status", runtime.recorder.status)]);
+    if (Number.isInteger(runtime.recorder?.frames)) runtimeRows.push(["기록 프레임", `${runtime.recorder.frames}`]);
+    if (Number.isFinite(runtime.recorder?.fps)) runtimeRows.push(["관측 속도", `${runtime.recorder.fps} fps`]);
+    html += `<dl class="runtime-evidence">${runtimeRows.map(([term, value]) => `<div><dt>${escapeHtml(term)}</dt><dd>${escapeHtml(value)}</dd></div>`).join("")}</dl>`;
   }
   const activePlan = view.active_episode_plan;
   if (activePlan) {
@@ -1455,7 +1485,7 @@ function renderRuntime(view) {
     const yawText = yaw
       ? ` · yaw ${yaw.source_object_yaw_deg.toFixed(3)}° (CDF ${yaw.sample_rank + 1}/${yaw.design_size}, seed ${yaw.sampling_seed})`
       : "";
-    html += `<details class="runtime-evidence" open><summary>현재 실행할 정확한 궤적</summary><dl>
+    html += `<details class="runtime-evidence"><summary>현재 실행할 정확한 궤적</summary><dl>
       <div><dt>경로</dt><dd>${escapeHtml(activePlan.operator_summary.path.join(" → "))}</dd></div>
       <div><dt>변형</dt><dd>${escapeHtml(trajectory.trajectory_variant_id)} · ${escapeHtml(trajectory.sample_rank + 1)}/${escapeHtml(trajectory.design_size)} · seed ${escapeHtml(trajectory.sampling_seed)}${escapeHtml(yawText)}</dd></div>
       <div><dt>목표 yaw</dt><dd>${escapeHtml(trajectory.target_yaw_deg)}°</dd></div>

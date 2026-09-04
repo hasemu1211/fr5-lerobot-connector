@@ -560,6 +560,17 @@ class OperatorConsoleTests(unittest.TestCase):
             runtime = console.projection()["runtime"]
             self.assertEqual(runtime["progress"], 92)
             self.assertEqual(runtime["evidence"], evidence)
+            self.assertEqual(runtime["motion"]["status"], "NOT_AUTHORIZED")
+            console.publish_runtime({
+                "code": "OBJECT_REPOSITION_EXECUTING",
+                "run_id": console.run_id, "data": evidence,
+            })
+            runtime = console.projection()["runtime"]
+            self.assertEqual(runtime["progress"], 93)
+            self.assertEqual(
+                runtime["motion"]["status"], "ACTIVE_POST_RECORDING",
+            )
+            self.assertEqual(runtime["recorder"]["status"], "COMMITTED")
 
             sealed = console._publish_outcome({
                 "ok": True, "campaign": {"state": "COMPLETE"},
@@ -2180,6 +2191,7 @@ feedback:
             scope_observed = {}
             runtime_observed = {}
             recorder_runtime_observed = {}
+            motion_runtime_observed = {}
 
             def validate_scope_then_stop(
                 payload, _cancel, publish, resolver, campaign_authorization,
@@ -2191,14 +2203,19 @@ feedback:
                     console.bridge_core.snapshot()["projection"]["runtime"],
                 )
                 for code in (
-                    "RECORDER_STARTING", "EXECUTING", "RECYCLING",
-                    "FINALIZING", "VALIDATING",
+                    "RECORDER_STARTING", "MOTION_STARTING", "EXECUTING",
+                    "PRECONTACT_REVIEW", "GRASP_REVIEW", "SEMANTIC_REVIEW",
+                    "RECYCLING", "RELEASE_REVIEW", "FINALIZING", "VALIDATING",
                 ):
                     publish({"code": code, "run_id": payload["run_id"]})
+                    runtime = console.bridge_core.snapshot()["projection"][
+                        "runtime"
+                    ]
                     recorder_runtime_observed[code] = copy.deepcopy(
-                        console.bridge_core.snapshot()["projection"]["runtime"].get(
-                            "recorder"
-                        )
+                        runtime.get("recorder")
+                    )
+                    motion_runtime_observed[code] = copy.deepcopy(
+                        runtime.get("motion")
                     )
                 validated, program, _scene = resolver(payload)
                 envelope = campaign_authorization["envelope"]
@@ -2395,15 +2412,34 @@ feedback:
                 self.assertEqual(runtime_observed["phase"], "PLANNING")
                 self.assertEqual(runtime_observed["phase_label"], "경로 계획 및 충돌 검사")
                 self.assertNotIn("recorder", runtime_observed)
+                self.assertEqual(runtime_observed["motion"]["status"], "NOT_AUTHORIZED")
                 self.assertEqual(recorder_runtime_observed, {
                     "RECORDER_STARTING": {
                         "status": "CONNECTING", "label": "기록 준비 중",
                     },
+                    "MOTION_STARTING": {"status": "RECORDING", "label": "기록 중"},
                     "EXECUTING": {"status": "RECORDING", "label": "기록 중"},
+                    "PRECONTACT_REVIEW": {"status": "RECORDING", "label": "기록 중"},
+                    "GRASP_REVIEW": {"status": "RECORDING", "label": "기록 중"},
+                    "SEMANTIC_REVIEW": {"status": "FROZEN", "label": "녹화 완료"},
                     "RECYCLING": {"status": "FROZEN", "label": "녹화 완료"},
+                    "RELEASE_REVIEW": {"status": "FROZEN", "label": "녹화 완료"},
                     "FINALIZING": {"status": "FROZEN", "label": "녹화 완료"},
                     "VALIDATING": {"status": "COMMITTED", "label": "저장 완료"},
                 })
+                self.assertEqual(
+                    [motion_runtime_observed[code]["status"] for code in (
+                        "RECORDER_STARTING", "MOTION_STARTING", "EXECUTING",
+                        "PRECONTACT_REVIEW", "GRASP_REVIEW", "SEMANTIC_REVIEW",
+                        "RECYCLING", "RELEASE_REVIEW", "FINALIZING", "VALIDATING",
+                    )],
+                    [
+                        "NOT_AUTHORIZED", "DISPATCHING", "ACTIVE",
+                        "PAUSED_AT_GATE", "PAUSED_AT_GATE", "PAUSED_AT_GATE",
+                        "ACTIVE_POST_RECORDING", "PAUSED_AT_GATE", "COMPLETE",
+                        "COMPLETE",
+                    ],
+                )
                 live.assert_called_once()
             finally:
                 console.close()

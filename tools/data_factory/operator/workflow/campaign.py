@@ -83,21 +83,54 @@ LIVE_RUNTIME_MILESTONES = {
     ),
     "AWAITING_HUMAN_APPROVAL": ("승인 범위 확인", 35, "캠페인 승인 범위와 이번 계획을 대조합니다."),
     "RECORDER_STARTING": ("기록기 준비", 40, "30 Hz readiness와 writer 상태를 확인합니다."),
+    "MOTION_STARTING": ("동작 시작 요청", 45, "readiness와 안전 조건을 통과해 execute goal을 전달합니다."),
     "EXECUTING": ("수집 동작 실행", 50, "로봇 상태·명령·RGB를 동기화해 기록합니다."),
-    "RECYCLING": ("수집 구간 완료 및 복구", 70, "녹화를 멈춘 뒤 물체를 다음 시작 상태로 복구합니다."),
+    "PRECONTACT_REVIEW": ("접촉 전 확인", 55, "로봇은 승인 gate에서 정지했고 기록은 계속됩니다."),
+    "GRASP_REVIEW": ("grasp 결과 확인", 60, "로봇은 판정 gate에서 정지했고 기록은 계속됩니다."),
+    "SEMANTIC_REVIEW": ("수집 구간 판정", 65, "episode를 동결한 상태에서 작업 결과를 판정합니다."),
+    "RECYCLING": ("녹화 밖 안전 복귀", 70, "동결된 episode 밖에서 복귀·재배치 동작을 수행합니다."),
+    "RELEASE_REVIEW": ("복귀 결과 확인", 75, "로봇은 판정 gate에서 정지했고 episode는 동결 상태입니다."),
     "OBJECT_REPOSITION_PLANNED": (
         "다음 물체 자세 계획 확인", 92,
         "녹화 밖 재배치 계획을 기존 캠페인 결속과 대조했습니다.",
+    ),
+    "OBJECT_REPOSITION_EXECUTING": (
+        "다음 물체 자세로 재배치", 93,
+        "commit된 episode 밖에서 다음 시작 자세로 로봇이 이동합니다.",
     ),
     "FINALIZING": ("데이터 저장", 80, "동결된 episode를 commit하고 영상 파일을 마무리합니다."),
     "VALIDATING": ("데이터 품질 검사", 90, "timestamp·drop·provenance·프레임 일치를 검사합니다."),
 }
 RECORDER_RUNTIME_MILESTONES = {
     "RECORDER_STARTING": {"status": "CONNECTING", "label": "기록 준비 중"},
+    "MOTION_STARTING": {"status": "RECORDING", "label": "기록 중"},
     "EXECUTING": {"status": "RECORDING", "label": "기록 중"},
+    "PRECONTACT_REVIEW": {"status": "RECORDING", "label": "기록 중"},
+    "GRASP_REVIEW": {"status": "RECORDING", "label": "기록 중"},
+    "SEMANTIC_REVIEW": {"status": "FROZEN", "label": "녹화 완료"},
     "RECYCLING": {"status": "FROZEN", "label": "녹화 완료"},
+    "RELEASE_REVIEW": {"status": "FROZEN", "label": "녹화 완료"},
     "FINALIZING": {"status": "FROZEN", "label": "녹화 완료"},
     "VALIDATING": {"status": "COMMITTED", "label": "저장 완료"},
+    "OBJECT_REPOSITION_PLANNED": {"status": "COMMITTED", "label": "저장 완료"},
+    "OBJECT_REPOSITION_EXECUTING": {"status": "COMMITTED", "label": "저장 완료"},
+}
+MOTION_RUNTIME_MILESTONES = {
+    "PLANNING": {"status": "NOT_AUTHORIZED", "label": "동작 권한 없음"},
+    "CAMERA_WARMUP": {"status": "NOT_AUTHORIZED", "label": "동작 권한 없음"},
+    "AWAITING_HUMAN_APPROVAL": {"status": "NOT_AUTHORIZED", "label": "승인 전"},
+    "RECORDER_STARTING": {"status": "NOT_AUTHORIZED", "label": "readiness 확인 중"},
+    "MOTION_STARTING": {"status": "DISPATCHING", "label": "동작 시작 요청 중"},
+    "EXECUTING": {"status": "ACTIVE", "label": "로봇 동작 중"},
+    "PRECONTACT_REVIEW": {"status": "PAUSED_AT_GATE", "label": "접촉 전 gate 정지"},
+    "GRASP_REVIEW": {"status": "PAUSED_AT_GATE", "label": "grasp 판정 gate 정지"},
+    "SEMANTIC_REVIEW": {"status": "PAUSED_AT_GATE", "label": "결과 판정 gate 정지"},
+    "RECYCLING": {"status": "ACTIVE_POST_RECORDING", "label": "녹화 밖 복귀 동작 중"},
+    "RELEASE_REVIEW": {"status": "PAUSED_AT_GATE", "label": "복귀 확인 gate 정지"},
+    "FINALIZING": {"status": "COMPLETE", "label": "로봇 동작 완료"},
+    "VALIDATING": {"status": "COMPLETE", "label": "로봇 동작 완료"},
+    "OBJECT_REPOSITION_PLANNED": {"status": "NOT_AUTHORIZED", "label": "재배치 계획만 완료"},
+    "OBJECT_REPOSITION_EXECUTING": {"status": "ACTIVE_POST_RECORDING", "label": "녹화 밖 재배치 동작 중"},
 }
 ROOT = Path(__file__).resolve().parents[4]
 DEFAULT_JOB = Path(
@@ -1465,7 +1498,7 @@ class OperatorConsole:
         label, progress, detail = milestone
         event_data = event.get("data")
         reposition_evidence = None
-        if code == "OBJECT_REPOSITION_PLANNED":
+        if code in {"OBJECT_REPOSITION_PLANNED", "OBJECT_REPOSITION_EXECUTING"}:
             digest_fields = (
                 "object_reposition_binding_digest",
                 "object_reposition_plan_digest",
@@ -1520,6 +1553,9 @@ class OperatorConsole:
             recorder = RECORDER_RUNTIME_MILESTONES.get(code)
             if recorder is not None:
                 self._runtime_milestone["recorder"] = dict(recorder)
+            motion = MOTION_RUNTIME_MILESTONES.get(code)
+            if motion is not None:
+                self._runtime_milestone["motion"] = dict(motion)
 
         self._owner_transition(change)
 

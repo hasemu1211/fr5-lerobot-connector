@@ -1888,6 +1888,30 @@ def project_state_space_cell(
     )
 
 
+def project_state_space_cells(
+    catalog: Mapping[str, Any], selections: Sequence[Mapping[str, Any]],
+    poses: Sequence[Mapping[str, Any]], *,
+    state_space_design_profile: Mapping[str, Any] | None = None,
+) -> list[dict[str, Any] | None]:
+    """Project a sequence while validating each distinct endpoint once."""
+    if (
+        not isinstance(poses, Sequence)
+        or isinstance(poses, (str, bytes))
+        or not poses
+        or len(selections) != len(poses)
+    ):
+        raise ContractError("OPERATOR_STATE_SPACE_CHAIN")
+    contexts = _yaw_selection_contexts(
+        catalog, selections, state_space_design_profile,
+    )
+    return [
+        _project_state_space_cell(
+            context["selection"], context["domain"], context["design"], pose,
+        )
+        for context, pose in zip(contexts, poses)
+    ]
+
+
 def resolve_workspace_cycle_selections(
     catalog: Mapping[str, Any], selection: Mapping[str, Any], requested_count: int,
     *, require_executable: bool = True,
@@ -2608,7 +2632,7 @@ __all__ = [
     "AXES", "CATALOG_SCHEMA", "SELECTION_SCHEMA", "load_operator_catalog",
     "project_assisted_poses", "project_balanced_start_pose_ids",
     "project_direct_poses", "project_operator_pose_domain",
-    "project_state_space_cell",
+    "project_state_space_cell", "project_state_space_cells",
     "project_workspace_cycle_poses",
     "project_yaw_sample_bindings",
     "resolve_workspace_cycle_selections", "UNBOUND_CAMERA_DEVICE_ID",

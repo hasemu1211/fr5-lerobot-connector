@@ -209,7 +209,7 @@ select:disabled, input:disabled { background: #e9eef0; color: #596872; }
 .recovery-card { padding: 1rem; border: 1px solid var(--red); background: var(--red-soft); }
 .recovery-card p { color: var(--muted); }
 
-.result-layout { display: grid; grid-template-columns: minmax(0, 1.25fr) minmax(17rem, .75fr); gap: 1rem; }
+.result-layout { display: grid; grid-template-columns: minmax(0, 1.25fr) minmax(17rem, .75fr); gap: 1rem; margin-top: 1rem; }
 .result-layout > div { min-width: 0; padding: 1rem; border: 1px solid var(--line); }
 .episode-results { list-style: none; margin: 0; padding: 0; }
 .episode-results li { display: grid; grid-template-columns: 2rem 1fr auto; gap: .7rem; align-items: center; padding: .75rem 0; border-top: 1px solid var(--line); }

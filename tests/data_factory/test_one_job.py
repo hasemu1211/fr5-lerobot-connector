@@ -124,11 +124,17 @@ class OneJobTest(unittest.TestCase):
 
     def test_happy_pass_orders_begin_before_execute_and_commits(self):
         job, calls = self.make(["RECORDING", "RECORDING", "RECORDING", "RECORDING", "RECORDING", "FROZEN", "FROZEN", "COMMITTED"], ["PLANNED", "APPROVED", "EXECUTING", "PRECONTACT_HUMAN", "PRECONTACT_HUMAN", "EXECUTING", "GRASP_VERDICT", "EXECUTING", "SEMANTIC_VERDICT", "EXECUTING", "COMPLETED"])
+        job.set_lifecycle_event_call(
+            lambda code: calls.append(("lifecycle", code)),
+        )
         self.prepare_and_start(job); job.poll(); self.assertEqual(job.poll()["state"], "PRECONTACT_HUMAN"); job.confirm("operator"); job.poll(); job.grasp_verdict("PASS", "operator"); job.poll(); job.semantic_verdict("PASS", "operator")
         self.assertEqual(job.poll()["state"], "AWAITING_CELL_READY")
         self.assertEqual(job.finish()["state"], "COMPLETE")
         self.assertLess(calls.index(("recorder", "begin")), calls.index(("executor", "execute")))
         self.assertLess(calls.index(("recorder", "freeze")), calls.index(("executor", "semantic_verdict")))
+        self.assertLess(calls.index(("lifecycle", "MOTION_STARTING")), calls.index(("executor", "execute")))
+        self.assertLess(calls.index(("lifecycle", "RECYCLING")), calls.index(("executor", "semantic_verdict")))
+        self.assertLess(calls.index(("lifecycle", "FINALIZING")), calls.index(("recorder", "commit")))
 
     def test_continuous_plan_needs_only_post_lift_semantic_verdict(self):
         job, calls = self.make(

@@ -260,6 +260,9 @@ class FR5LeRobotRecorder(Node):
                 "writer_queue_high_water": getattr(self, "writer_queue_high_water", 0),
                 "writer_queue_drops": self.writer_queue_drops,
                 "alignment_failures": self.alignment_failures,
+                "alignment_failure_sources": dict(getattr(
+                    self, "alignment_failure_sources", {},
+                )),
                 "observed_monotonic_ns": time.monotonic_ns(),
                 **({"commit_stage_seconds": dict(getattr(self, "commit_stage_seconds", {}))}
                    if getattr(self, "commit_stage_seconds", {}) else {}),
@@ -517,11 +520,11 @@ class FR5LeRobotRecorder(Node):
                 "camera_warmup_reuse.json": "data_factory.camera_warmup_reuse.v1",
             }
             expected = {
-                "preapproval_evidence.json": {
+                "preapproval_evidence.json": ({
                     "data_factory.preapproval_evidence.v1",
                     "data_factory.preapproval_evidence.v2",
                     "data_factory.preapproval_evidence.v4",
-                },
+                }, "run_id"),
             }
             try:
                 entries = {entry.name: entry for entry in directory.iterdir()}
@@ -529,15 +532,19 @@ class FR5LeRobotRecorder(Node):
                 if len(selected_warmup) != 1:
                     raise ValueError("expected exactly one camera warmup receipt")
                 warmup_name = selected_warmup.pop()
-                expected[warmup_name] = {warmup_receipts[warmup_name]}
+                expected[warmup_name] = ({warmup_receipts[warmup_name]}, "run_id")
+                if "object_reposition_preapproval.json" in entries:
+                    expected["object_reposition_preapproval.json"] = ({
+                        "data_factory.object_reposition_preapproval.v1",
+                    }, "parent_run_id")
                 if set(entries) != set(expected):
                     raise ValueError("unexpected files")
-                for name, schemas in expected.items():
+                for name, (schemas, run_id_field) in expected.items():
                     path = entries[name]
                     if path.is_symlink() or not path.is_file():
                         raise ValueError("unsafe evidence path")
                     value = decode_json_strict(path.read_text(encoding="utf-8"), "RUN_EVIDENCE_JSON", path)
-                    if not isinstance(value, dict) or value.get("schema_version") not in schemas or value.get("run_id") != run_id:
+                    if not isinstance(value, dict) or value.get("schema_version") not in schemas or value.get(run_id_field) != run_id:
                         raise ValueError("evidence binding mismatch")
             except (OSError, RecoveryError, ValueError) as exc:
                 raise RecoveryError(

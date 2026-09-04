@@ -6,13 +6,14 @@ SmolVLA 학습·평가·데이터 수집 정책을 결정하기 전에 조사와
 
 새 결과는 기존 항목을 지우지 않고 날짜, 환경, 입력 데이터, 명령 또는 출처, 측정값, 해석, 정책 영향과 함께 추가한다. 실제 FR5 결과와 공개 데이터 결과를 섞지 않고 HIL 배선 시험도 작업 성공 근거로 사용하지 않는다.
 
-## 현재 상태 — 2026-08-21
+## 현재 상태 — 2026-09-04
 
 - 실제 작업을 담은 학습 승인 FR5 데이터셋: 없음
 - 기존 FR5 배선 HIL: 1 episode, 1,040 frames, 30 Hz
 - scripted pickup 통합 HIL: 1 episode, 726 frames, 30 Hz. 물리 경로·그리퍼·한-job·저장 검증용이며 training 미승인
 - 공개 pickup+recycle HIL: 1 episode, 537 frames, 30 Hz. scene transition·공개 인터페이스·지연 검증용이며 training 미승인
 - 공개 supervised two-episode campaign HIL: 2 episodes, 1,072 frames, 30 Hz. exact yaw 0 C→D→E chain/final role mechanism 검증용이며 training 미승인
+- production Data Factory physical canary: `collection-production-20260904T035141Z-campaign-0001`의 e1–e27 cutoff에서 27 episodes, 21,231 frames, 전부 technical `PASS`. Semantic review는 25 `PASS`, visibility 사유 2 `FAIL`이며 training 미승인. 다음 e28은 motion 전에 recorder alignment gate가 중단해 episode 32를 만들지 않음
 - 로컬 FR5 학습 출력과 실물 rollout 결과: 없음
 - 현재 `best` checkpoint: 없음
 
@@ -125,6 +126,7 @@ validation은 checkpoint 후보를 줄이는 용도다. 반복해서 보며 선�
 | `LOCAL-019` | wrist 가시성·궤적 생성 분석 | 2026-09-02 기존 539-frame wrist episode와 phase/robot rows를 동기화해 약 58.5 mm에서 물체 윤곽을 확인했다. 24 mm object profile에 따라 V2 XY 반경 12 mm, σ 4.8 mm를 산출했고 seed 0–255 오프라인 표본은 평균 5.610 mm·p90 9.369 mm였다. 상세 입력·식·한계는 [궤적 생성 근거](evidence/trajectory-generation-2026-09-02.md)에 보존 | 기존 물리 데이터의 관측 근거와 새 generator의 오프라인 검증이다. V2 물리 성공이나 VLA 향상 증거가 아니며 place path는 DIRECT 유지 |
 | `LOCAL-020` | live validation latency | 2026-09-03 최종 코드로 `fr5260902` 8-episode dataset의 마지막 episode를 읽기 전용 비교: incremental 1.46 s/RSS 159,976 KiB, full 2.99 s/RSS 218,680 KiB. Incremental은 신규 episode metadata 1, Parquet 1, up/wrist MP4 2와 quality 신규 한 줄을 검증하고 transaction snapshot은 기존 artifact stat·quality prefix·provenance append를 확인 | 정상 수집 critical path는 episode incremental+append-only를 사용하고 campaign 종료 full 재검사를 하지 않는다. Full은 수동 dataset 승인, training/evaluation, curator source 경계에 유지하며 단일 warm-cache 가능 측정을 장기 scaling 보장으로 일반화하지 않음 |
 | `LOCAL-021` | 적응형 궤적 software verification | 2026-09-03 최종 tree에서 repository unittest 813/813, operator UI 정적 12/12, Chrome browser 회귀 113/113, docs-governance audit/check, `git diff --check`, Python compile과 `mex check` 100/100 통과. 101-node DIRECT yaw-transition batch는 authoring 경계에서 0.160 s 단일 측정 | seed/profile/state-space/reposition/incremental-validation의 소프트웨어 결속 근거다. 새 FR5 실물 motion이나 VLA 학습 성능을 증명하지 않으며 다음 누적 dataset을 별도로 검토해야 함 |
+| `LOCAL-022` | Data Factory stabilization physical canary | 2026-09-04 production campaign `collection-production-20260904T035141Z-campaign-0001`의 immutable e1–e27 cutoff를 재검증했다. 27 episodes·21,231 rows가 모두 `COMMITTED`와 technical `PASS`, 마지막 phase `SAFE_POSE_PTP/SUCCEEDED`였고 queue drop·alignment failure는 0이었다. Dataset save는 11.09–24.41 s, 평균 15.45 s였다. 양 카메라의 episode 29–31은 전구간 decode와 locator frame 수가 일치했고 사용자 판단에 따라 사후 review 경로로 PASS 처리되어 candidate review는 25 `PASS`, `IMAGE_QUALITY_OR_VISIBILITY` 2 `FAIL`로 canonical state에 투영됐다. e28은 recorder 시작 약 0.97 s 뒤 readiness alignment failure 1건을 검출해 6-row prefix를 폐기했고 execute goal과 episode 32는 만들지 않았다 | patched operator→OneJob→recorder→validator→review 경로가 27회 연속 물리 수집에서 진행된 근거다. e28의 fail-close는 안전 허용치를 완화하지 않으며 당시 status가 source별 counter를 내보내지 않아 어느 입력이 miss했는지는 확인 불가다. 이후 status/failure artifact는 source별 counter를 보존한다. Semantic FAIL을 technical failure로 바꾸거나 training authority를 발급하지 않는다. 이 campaign은 `pickup_e2e`이므로 `pick_place`의 standalone postcommit reposition-preapproval 파일 호환은 별도 regression test 근거로 남는다 |
 | `METHOD-001` | validation | 한 run의 고정 validation과 fold마다 재학습하는 교차검증은 다른 절차이며 final test는 별도 유지 | 동적 episode 교체는 기각; 필요할 때만 별도 group CV |
 | `LOCAL-DOC-001` | 외부 조사문 검토 | `ML 에이전트 학습 프레임워크 조사.md`의 full-state resume, top-k, seed·metric 기록 원칙은 유효하지만 Lightning·TRL·SB3·MLflow 중심 제안은 LeRobot SmolVLA 경로와 맞지 않음 | 원칙만 채택하고 새 trainer/runtime는 도입하지 않음 |
 | `SKILL-001` | 스킬 검토 | AREX/Auto-ML-Skills는 별도 DisCo·Node 22.19+·provider와 대형 범용 skill graph를 요구하고, Trackio는 새 로깅 통합이 필요함 | 현재는 미설치; LeRobot 기본 W&B와 기존 연구 스킬 우선 |

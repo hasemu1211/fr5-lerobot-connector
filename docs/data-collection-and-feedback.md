@@ -1,7 +1,7 @@
 # FR5 데이터 수집·학습·피드백 최소 운영 계약
 
 - 상태: `CURRENT_CANONICAL_WITH_PROPOSED_STAGES`
-- 확인일: 2026-08-24
+- 확인일: 2026-09-04
 - 목적: 수집할 증거, 피드백 소비자, 보존 규칙과 사람 개입 지점을 한 곳에 고정한다.
 - 비목적: 기존 recorder/per-frame dataset schema 변경, 새 대시보드·broker·database·per-frame JSON 복제. Technical validator는 단일 owner를 유지하되 live incremental과 명시적 full 범위를 지원한다.
 
@@ -73,6 +73,21 @@ QUARANTINED → 자동 삭제·재사용 금지, recovery 절차로만 해소
 ```
 
 `FAIL`은 rollout failure나 negative demonstration이 아니다. 정상 finalize된 run은 원인 분석에 필요한 immutable audit report와 attempt 진단으로 보존할 수 있지만 학습·coverage 적격 수량·critic·quality-bound calibration 입력은 0이다. finalize 전 실패는 partial LeRobot episode로 승격하지 않고 기존 staging recovery가 exact-owned buffer를 정리하거나 ambiguity를 quarantine한다. retention이 reference 0을 증명한 whole-dataset root만 이후 정리 후보가 될 수 있다.
+
+### 중단 뒤 committed episode 분류
+
+Web UI나 campaign process가 끝난 뒤에도 이미 commit되고 technical `PASS`한 episode의 candidate review는 같은 canonical artifact 경로로 완료할 수 있다.
+
+```bash
+direnv exec . python3 -m tools.data_factory.run_job review-episode \
+  --run-dir outputs/data_factory/runs/<run-id> \
+  --choice PASS \
+  --reviewed-by <operator-id>
+```
+
+`episode_ledger.json`은 immutable provenance owner이고, `candidate_admission.json`은 현재 review decision, `episode_ledger_state.json`은 그 decision의 canonical mutable projection이다. Recovery command는 세 artifact의 same-directory/run/context digest, technical `PASS`, schema와 symlink 금지를 먼저 검증한다. 그 뒤 UI와 같은 candidate compare-and-swap과 state reprojection을 사용하며 dataset video/Parquet와 ledger는 다시 만들거나 수정하지 않는다.
+
+동일한 status·reviewer·reason 재시도는 파일을 쓰지 않는 no-op이다. Candidate write 뒤 process가 끝나 state만 뒤처진 경우 같은 command가 projection을 복구한다. 이미 확정된 decision과 충돌하는 변경은 history 없는 덮어쓰기를 만들지 않고 실패한다. 출력 receipt는 ledger/review/candidate/state digest와 시각을 보고할 뿐 별도 source of truth가 아니며, semantic `PASS`도 training authority를 발급하지 않는다.
 
 ### 행동 품질의 정확한 피드백
 

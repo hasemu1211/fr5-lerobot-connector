@@ -1147,7 +1147,10 @@ class RunJobTest(unittest.TestCase):
             (binding["continuation_run_id"], 1, []),
         )
         self.assertEqual(transport.started, list(PHASES))
-        self.assertEqual(published[0]["code"], "OBJECT_REPOSITION_PLANNED")
+        self.assertEqual(
+            [event["code"] for event in published],
+            ["OBJECT_REPOSITION_PLANNED", "OBJECT_REPOSITION_EXECUTING"],
+        )
         self.assertEqual(
             published[0]["data"]["object_reposition_plan_digest"],
             result["plan_digest"],
@@ -3119,6 +3122,8 @@ class RunJobTest(unittest.TestCase):
                 self.cell_state_call = cell_state_call
                 self.state = "IDLE"
                 self.phase = "SEMANTIC_VERDICT"
+            def set_lifecycle_event_call(self, call):
+                self.lifecycle_event_call = call
             def poll(self):
                 if self.phase == "SEMANTIC_VERDICT":
                     value = {"ok": True, "state": self.phase, "execution_evidence": {"post_lift_gripper_feedback_m": .011}}
@@ -3390,6 +3395,8 @@ class RunJobTest(unittest.TestCase):
             def __init__(self, *_args, **_kwargs):
                 self.finish_calls = 0
                 self.__class__.instances.append(self)
+            def set_lifecycle_event_call(self, call):
+                self.lifecycle_event_call = call
             def plan_only(self, run_id, *_):
                 return {"ok": True, "code": "PLANNED", "state": "PLANNED", "run_id": run_id, "plan_digest": digest, "plan_envelope": {"plan": plan, "precommit_safety": safety, "precommit_evidence": evidence, "operator_summary": {"path": list(PHASES), "flow": {"continuous_through": "LIFT_LIN", "next_human_hold": "POST_LIFT_SEMANTIC"}, "speed": {"max_velocity_scaling": 0.1}, "clearance": {"status": "COLLISION_CHECKED_NO_DISTANCE"}}}}
             def approve(self, _):
@@ -3631,7 +3638,8 @@ class RunJobTest(unittest.TestCase):
             [item["code"] for item in published],
             [
                 "PLANNING", "CAMERA_WARMUP", "AWAITING_HUMAN_APPROVAL",
-                "RECORDER_STARTING", "EXECUTING", "FINALIZING", "VALIDATING",
+                "RECORDER_STARTING", "MOTION_STARTING", "EXECUTING",
+                "SEMANTIC_REVIEW", "RECYCLING", "FINALIZING", "VALIDATING",
             ],
         )
         self.assertEqual(preapproval["plan_digest"], result["plan_digest"])
@@ -4155,6 +4163,15 @@ class RunJobTest(unittest.TestCase):
                 semantic_status="PASS", reviewed_by="operator", clock=lambda: now,
             )
             self.assertEqual((reviewed["semantic_status"], reviewed["reviewed_by"], reviewed["reviewed_at"], reviewed["reason"]), ("PASS", "operator", "2026-08-21T12:00:00Z", None))
+            retried = run_job.review_candidate_admission(
+                first_path,
+                expected_file_digest=run_job.canonical_digest(reviewed),
+                expected_review_context_digest=first_context,
+                checklist_id="pickup-v2", semantic_status="PASS",
+                reviewed_by="operator",
+                clock=lambda: (_ for _ in ()).throw(AssertionError("clock reused")),
+            )
+            self.assertEqual(retried, reviewed)
             with self.assertRaisesRegex(run_job.ContractError, "CANDIDATE_REVIEW_STATE"):
                 run_job.review_candidate_admission(
                     first_path, expected_file_digest=run_job.canonical_digest(reviewed),

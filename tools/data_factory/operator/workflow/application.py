@@ -28,7 +28,7 @@ from tools.data_factory.operator.catalog import (
     project_assisted_poses,
     project_balanced_start_pose_ids,
     project_operator_pose_domain,
-    project_state_space_cell,
+    project_state_space_cells,
     project_workspace_cycle_poses,
     resolve_workspace_cycle_selections,
     selected_state_space_design_profile,
@@ -1314,6 +1314,40 @@ class CollectionOperatorApplication:
         coverage_sequence: list[dict[str, Any]] = []
         if isinstance(campaign_coverage, list) and campaign_coverage:
             coverage_route = self._workspace_cycle()
+            checked_conditions = []
+            for index, planned in enumerate(campaign_coverage):
+                condition = (
+                    planned.get("coverage_condition")
+                    if isinstance(planned, Mapping) else None
+                )
+                if (
+                    not isinstance(condition, Mapping)
+                    or canonical_digest(condition)
+                    != planned.get("coverage_condition_digest")
+                    or any(field not in condition for field in (
+                        "place_id", "x_mm", "y_mm", "yaw_deg",
+                    ))
+                    or planned.get("order_index") != index
+                ):
+                    raise ContractError("OPERATOR_APPLICATION_COVERAGE")
+                checked_conditions.append({
+                    field: condition[field]
+                    for field in ("place_id", "yaw_deg", "x_mm", "y_mm")
+                })
+            projected_state_space_cells = (
+                project_state_space_cells(
+                    self.catalog,
+                    coverage_route[:len(checked_conditions)],
+                    checked_conditions,
+                    state_space_design_profile=self.draft[
+                        "state_space_design_profile"
+                    ],
+                )
+                if any(
+                    planned.get("yaw_sample_binding") is not None
+                    for planned in campaign_coverage
+                ) else [None] * len(checked_conditions)
+            )
             grouped: dict[str, dict[str, Any]] = {}
             for planned in campaign_coverage:
                 if not isinstance(planned, Mapping):
@@ -1347,20 +1381,9 @@ class CollectionOperatorApplication:
                 )
                 if yaw_sample is not None:
                     design = sampling_provenance["state_space_design_profile"]
-                    endpoint = coverage_route[planned["order_index"]]
-                    cell = project_state_space_cell(
-                        self.catalog,
-                        endpoint,
-                        {
-                            field: condition[field]
-                            for field in (
-                                "place_id", "yaw_deg", "x_mm", "y_mm",
-                            )
-                        },
-                        state_space_design_profile=self.draft[
-                            "state_space_design_profile"
-                        ],
-                    )
+                    cell = projected_state_space_cells[
+                        planned["order_index"]
+                    ]
                     if (
                         not isinstance(design, Mapping)
                         or not isinstance(cell, Mapping)
