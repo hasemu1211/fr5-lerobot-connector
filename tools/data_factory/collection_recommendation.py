@@ -5,13 +5,19 @@ import copy
 from pathlib import PurePosixPath
 from typing import Any, Mapping, Sequence
 
-from tools.data_factory.experiment_manifest import (
-    _check_budgets,
-    _manifest_budget,
-    _usage,
+from tools.data_factory.campaign_authoring import (
+    MANIFEST_SCHEMA_V2 as MANIFEST_SCHEMA,
+    validate_campaign_compilation_receipt,
 )
-from tools.data_factory.state_space import validate_state_space_design_profile
-from tools.data_factory.training_split import validate_program_budget
+from tools.data_factory.episode_ledger import (
+    EPISODE_LOCATOR_SCHEMA as LOCATOR_SCHEMA,
+    SCHEMA_VERSION as LEDGER_SCHEMA,
+    STATE_SCHEMA_VERSION as STATE_SCHEMA,
+)
+from tools.data_factory.quality.coverage_report import (
+    REPORT_SCHEMA as DATA_QUALITY_SCHEMA,
+    validate_coverage_report,
+)
 from tools.fr5_data_factory import (
     ContractError,
     DIGEST,
@@ -23,15 +29,9 @@ from tools.fr5_data_factory import (
 
 SCHEMA_VERSION = "data_factory.collection_recommendation.v1"
 SNAPSHOT_SCHEMA = "data_factory.collection_recommendation_input_snapshot.v1"
-MANIFEST_SCHEMA = "data_factory.collection_campaign_manifest.v2"
 RUN_SCHEMA = "data_factory.recorder_result.v1"
-LEDGER_SCHEMA = "data_factory.episode_ledger.v1"
-STATE_SCHEMA = "data_factory.episode_ledger_state.v1"
 EPISODE_REF_SCHEMA = "data_factory.episode_ref.v1"
-LOCATOR_SCHEMA = "data_factory.lerobot_v3_episode_locator.v1"
 CANDIDATE_SCHEMA = "data_factory.candidate_admission.v1"
-DATA_QUALITY_SCHEMA = "data_factory.coverage_report.v1"
-SYNTHETIC_ROLLOUT_SCHEMA = "data_factory.synthetic_rollout_failure_evidence.v1"
 VIEW_SCHEMA = "data_factory.operator_session_view.v2"
 INTENT_SCHEMA = "data_factory.operator_intent.v1"
 
@@ -78,21 +78,8 @@ AUTHORITY = {
     "plan_compile": False,
     "campaign_authorization": False,
 }
-MANIFEST_FIELDS = frozenset({
-    "schema_version", "manifest_id", "kind", "hypothesis_digest",
-    "fixed_contract_digest", "catalog_digest", "coverage_digest", "selector",
-    "selector_version", "normalized_seed", "slots", "manifest_budget",
-    "program_budget", "planned_usage", "authority", "manifest_digest",
-    "state_space_design_profile",
-})
-SLOT_FIELDS = frozenset({
-    "slot_id", "base_condition_digest", "robot_start_pose_id", "split_group",
-    "repeat_index", "hil_prompts", "reviews", "pending_reviews",
-    "storage_bytes", "order_index",
-})
 EVIDENCE_FIELDS = frozenset({
-    "manifest_order_index", "run", "ledger", "state", "candidate",
-    "source_provenance", "recording_quality",
+    "manifest_order_index", "ledger", "state", "candidate", "artifacts",
 })
 RUN_FIELDS = frozenset({
     "schema_version", "run_id", "transaction_id", "episode_index", "state",
@@ -171,22 +158,19 @@ CLAIM_CLASSES = frozenset({"OBSERVED", "SUGGESTED", "UNKNOWN"})
 CLAIM_SUBJECTS = frozenset({
     "person", "background", "robot", "coverage", "quality", "rollout",
 })
+UNKNOWN_REASON_SUBJECTS = {
+    "PERSON_LABELS_UNAVAILABLE": "person",
+    "BACKGROUND_LABELS_UNAVAILABLE": "background",
+    "ROBOT_VARIATION_UNMEASURED": "robot",
+    "COVERAGE_NOT_MEASURED": "coverage",
+    "DATA_QUALITY_ANALYSIS_UNAVAILABLE": "quality",
+    "NO_CANONICAL_PHYSICAL_ROLLOUT_ANALYSIS": "rollout",
+}
+OBSERVED_VALUE_FIELDS = frozenset({"metric", "count"})
+SUGGESTED_VALUES = frozenset({"COLLECT_MORE"})
 PATCH_FIELDS_ALLOWLIST = frozenset({
     "requested_count", "repeat", "split", "selection",
     "state_space_design_factors",
-})
-FORBIDDEN_ACTIONS = frozenset({
-    "compile_draft", "authorize_campaign", "approve_exact_plan", "motion",
-    "record", "delete", "promote", "train",
-})
-FORBIDDEN_ASSERTION_KEYS = frozenset({
-    "causal", "cause", "causes", "benefit", "outcome", "success",
-    "scene_truth", "semantic_pass", "training_approved", "authority",
-    "dataset_mutation", "candidate_mutation", "ledger_mutation",
-    "training_authorization", "motion_authority", "recording_authority",
-    "gate_bypass", "plan_compile", "campaign_authorization",
-    "compile_draft", "authorize_campaign", "approve_exact_plan", "motion",
-    "record", "delete", "promote", "train",
 })
 _MISSING = object()
 
@@ -217,6 +201,7 @@ def _count(value: object, code: str, *, positive: bool = False) -> int:
 
 def _strings(
     value: object, code: str, *, nonempty: bool = False, identifiers: bool = True,
+    normalize: bool = False,
 ) -> list[str]:
     if (
         not isinstance(value, list)
@@ -228,6 +213,7 @@ def _strings(
             for item in value
         )
         or len(value) != len(set(value))
+        or not normalize and value != sorted(value)
     ):
         raise ContractError(code)
     return sorted(value)
@@ -240,77 +226,16 @@ def _self_digest(value: Mapping[str, Any], field: str, code: str) -> str:
     return expected
 
 
-def _forbidden(value: object) -> bool:
-    if isinstance(value, Mapping):
-        if any(str(key).lower() in FORBIDDEN_ASSERTION_KEYS for key in value):
-            return True
-        return any(_forbidden(item) for item in value.values())
-    if isinstance(value, list):
-        return any(_forbidden(item) for item in value)
-    if not isinstance(value, str):
-        return False
-    lowered = value.lower()
-    if lowered in FORBIDDEN_ACTIONS:
-        return True
-    words = {
-        word for word in lowered.replace("-", "_").replace(" ", "_").split("_")
-        if word
-    }
-    return bool(words & {"causal", "cause", "causes", "benefit", "outcome", "success", "improve", "improves"})
-
-
-def _manifest(value: object) -> dict[str, Any]:
-    manifest = _exact(value, MANIFEST_FIELDS, "COLLECTION_RECOMMENDATION_MANIFEST_FIELDS")
-    if (
-        manifest["schema_version"] != MANIFEST_SCHEMA
-        or manifest["kind"] != "collection"
-        or manifest["authority"] != "NO_EXECUTION_AUTHORITY"
-        or manifest["selector"] not in {"BALANCED_INITIAL", "DIRECT_LIST"}
-        or manifest["selector_version"] != "campaign-selector-v1"
-        or type(manifest["normalized_seed"]) is not int
-        or manifest["normalized_seed"] < 0
-        or not isinstance(manifest["slots"], list)
-        or not manifest["slots"]
-    ):
-        raise ContractError("COLLECTION_RECOMMENDATION_MANIFEST")
-    _identifier(manifest["manifest_id"], "COLLECTION_RECOMMENDATION_MANIFEST_ID")
-    for field in (
-        "hypothesis_digest", "fixed_contract_digest", "catalog_digest",
-        "coverage_digest",
-    ):
-        _digest(manifest[field], "COLLECTION_RECOMMENDATION_MANIFEST_DIGEST")
-    slots = []
-    identities = set()
-    for index, raw in enumerate(manifest["slots"]):
-        slot = _exact(raw, SLOT_FIELDS, "COLLECTION_RECOMMENDATION_SLOT_FIELDS")
-        if slot["order_index"] != index or slot["split_group"] not in {"TRAIN", "ID", "OOD"}:
-            raise ContractError("COLLECTION_RECOMMENDATION_SLOT_ORDER")
-        _identifier(slot["slot_id"], "COLLECTION_RECOMMENDATION_SLOT_ID")
-        _identifier(slot["robot_start_pose_id"], "COLLECTION_RECOMMENDATION_SLOT_ID")
-        _digest(slot["base_condition_digest"], "COLLECTION_RECOMMENDATION_SLOT_DIGEST")
-        for field in ("repeat_index", "hil_prompts", "reviews", "pending_reviews"):
-            _count(slot[field], "COLLECTION_RECOMMENDATION_SLOT_COUNT")
-        _count(slot["storage_bytes"], "COLLECTION_RECOMMENDATION_SLOT_COUNT", positive=True)
-        identity = slot["slot_id"]
-        if identity in identities:
-            raise ContractError("COLLECTION_RECOMMENDATION_SLOT_DUPLICATE")
-        identities.add(identity)
-        slots.append(slot)
-    manifest["slots"] = slots
-    manifest_budget = _manifest_budget(manifest["manifest_budget"])
-    program_budget = validate_program_budget(manifest["program_budget"])
-    planned_usage = _usage("seed", slots)
-    if manifest["planned_usage"] != planned_usage:
-        raise ContractError("COLLECTION_RECOMMENDATION_MANIFEST_USAGE")
-    _check_budgets(manifest_budget, program_budget, planned_usage)
-    manifest["manifest_budget"] = manifest_budget
-    manifest["program_budget"] = program_budget
-    manifest["planned_usage"] = planned_usage
-    manifest["state_space_design_profile"] = validate_state_space_design_profile(
-        manifest["state_space_design_profile"],
+def _campaign(
+    manifest: object, *, hypothesis: Mapping[str, Any], draft: Mapping[str, Any],
+    receipt: Mapping[str, Any],
+) -> dict[str, Any]:
+    validate_campaign_compilation_receipt(
+        receipt, draft=draft, manifest=manifest, hypothesis=hypothesis,
     )
-    _self_digest(manifest, "manifest_digest", "COLLECTION_RECOMMENDATION_MANIFEST_DIGEST")
-    return manifest
+    if not isinstance(manifest, Mapping) or manifest.get("schema_version") != MANIFEST_SCHEMA:
+        raise ContractError("COLLECTION_RECOMMENDATION_MANIFEST_SCHEMA")
+    return copy.deepcopy(dict(manifest))
 
 
 def _artifact_refs(value: object) -> dict[str, dict[str, str]]:
@@ -322,6 +247,20 @@ def _artifact_refs(value: object) -> dict[str, dict[str, str]]:
         _digest(ref["artifact_digest"], "COLLECTION_RECOMMENDATION_ARTIFACT_REF")
         refs[name] = ref
     return refs
+
+
+def _artifact_payloads(
+    value: object, refs: Mapping[str, Mapping[str, str]],
+) -> dict[str, Any]:
+    payloads = _exact(
+        value, ARTIFACT_NAMES, "COLLECTION_RECOMMENDATION_ARTIFACT_PAYLOADS",
+    )
+    if any(
+        canonical_digest(payloads[name]) != refs[name]["artifact_digest"]
+        for name in ARTIFACT_NAMES
+    ):
+        raise ContractError("COLLECTION_RECOMMENDATION_ARTIFACT_DIGEST")
+    return payloads
 
 
 def _locator_path(
@@ -402,7 +341,16 @@ def _episode_snapshot(value: object, manifest: Mapping[str, Any]) -> dict[str, A
         raise ContractError("COLLECTION_RECOMMENDATION_EVIDENCE_ORDER")
     slot = manifest["slots"][order_index]
 
-    run = _exact(evidence["run"], RUN_FIELDS, "COLLECTION_RECOMMENDATION_RUN_FIELDS")
+    ledger = _exact(evidence["ledger"], LEDGER_FIELDS, "COLLECTION_RECOMMENDATION_LEDGER_FIELDS")
+    if ledger["schema_version"] != LEDGER_SCHEMA:
+        raise ContractError("COLLECTION_RECOMMENDATION_LEDGER_SCHEMA")
+    _self_digest(ledger, "ledger_digest", "COLLECTION_RECOMMENDATION_LEDGER_DIGEST")
+    artifacts = _artifact_refs(ledger["artifacts"])
+    payloads = _artifact_payloads(evidence["artifacts"], artifacts)
+    if payloads["manifest"] != manifest:
+        raise ContractError("COLLECTION_RECOMMENDATION_MANIFEST_ARTIFACT_BINDING")
+
+    run = _exact(payloads["run"], RUN_FIELDS, "COLLECTION_RECOMMENDATION_RUN_FIELDS")
     run_id = _identifier(run["run_id"], "COLLECTION_RECOMMENDATION_RUN_ID")
     episode_index = _count(run["episode_index"], "COLLECTION_RECOMMENDATION_EPISODE_INDEX")
     rows = _count(run["rows"], "COLLECTION_RECOMMENDATION_RUN_ROWS", positive=True)
@@ -415,10 +363,6 @@ def _episode_snapshot(value: object, manifest: Mapping[str, Any]) -> dict[str, A
     ):
         raise ContractError("COLLECTION_RECOMMENDATION_RUN_BINDING")
 
-    ledger = _exact(evidence["ledger"], LEDGER_FIELDS, "COLLECTION_RECOMMENDATION_LEDGER_FIELDS")
-    if ledger["schema_version"] != LEDGER_SCHEMA:
-        raise ContractError("COLLECTION_RECOMMENDATION_LEDGER_SCHEMA")
-    _self_digest(ledger, "ledger_digest", "COLLECTION_RECOMMENDATION_LEDGER_DIGEST")
     dataset = _exact(ledger["dataset"], DATASET_FIELDS, "COLLECTION_RECOMMENDATION_DATASET_FIELDS")
     _identifier(dataset["dataset_id"], "COLLECTION_RECOMMENDATION_DATASET_ID")
     if any(not isinstance(dataset[field], str) or not dataset[field] for field in ("repo_id", "dataset_root")):
@@ -458,30 +402,142 @@ def _episode_snapshot(value: object, manifest: Mapping[str, Any]) -> dict[str, A
         episode_index=episode_index, rows=rows,
     )
 
+    episode_artifact = payloads["episode"]
+    staging = payloads["staging_manifest"]
+    intent = payloads["intent"]
+    runtime = payloads["runtime_binding"]
+    plan_artifact = payloads["plan"]
+    technical = payloads["technical"]
+    execution = payloads["execution"]
+    if any(
+        not isinstance(item, Mapping)
+        for item in (
+            episode_artifact, staging, intent, runtime, plan_artifact,
+            technical, execution,
+        )
+    ):
+        raise ContractError("COLLECTION_RECOMMENDATION_ARTIFACT_BODY")
+    intent_digest = _self_digest(
+        intent, "intent_digest", "COLLECTION_RECOMMENDATION_INTENT_DIGEST",
+    )
+    _self_digest(
+        runtime, "binding_digest", "COLLECTION_RECOMMENDATION_RUNTIME_DIGEST",
+    )
+    staging_bindings = staging.get("binding_digests")
+    intent_slot = intent.get("slot")
+    base_condition = intent.get("base_condition")
+    robot_pose = intent.get("robot_start_pose")
+    fixed_contract = intent.get("fixed_contract")
+    plan_envelope = plan_artifact.get("plan_envelope")
+    plan = plan_envelope.get("plan") if isinstance(plan_envelope, Mapping) else None
+    if not all(
+        isinstance(item, Mapping)
+        for item in (
+            staging_bindings, intent_slot, base_condition, robot_pose,
+            fixed_contract, plan,
+        )
+    ):
+        raise ContractError("COLLECTION_RECOMMENDATION_ARTIFACT_BODY")
+    plan_digest = _digest(
+        plan_artifact.get("plan_digest"),
+        "COLLECTION_RECOMMENDATION_PLAN_DIGEST",
+    )
+    collection_profile_digest = _digest(
+        staging_bindings.get("collection_profile_digest"),
+        "COLLECTION_RECOMMENDATION_COLLECTION_PROFILE_DIGEST",
+    )
+    scene_state_digest = _digest(
+        runtime.get("scene_state_digest"),
+        "COLLECTION_RECOMMENDATION_RUNTIME_BINDING",
+    )
+    root_binding_digest = _digest(
+        runtime.get("root_binding_digest"),
+        "COLLECTION_RECOMMENDATION_RUNTIME_BINDING",
+    )
+    start_binding_digest = _digest(
+        runtime.get("start_binding_digest"),
+        "COLLECTION_RECOMMENDATION_RUNTIME_BINDING",
+    )
+    runtime_authority = {
+        "execution": "NONE", "human_approval": "NONE",
+        "semantic_pass": "NONE", "training_approval": "NONE",
+        "persistent_start_qualification": "NONE",
+    }
+    if (
+        episode_artifact.get("run_id") != run_id
+        or episode_artifact.get("episode_ref") != ref
+        or staging.get("run_id") != run_id
+        or staging.get("dataset_root") != dataset["dataset_root"]
+        or staging.get("episode_index") != episode_index
+        or canonical_digest(staging) != ref["staging_manifest_digest"]
+        or staging_bindings.get("resolved_job_digest") != ref["resolved_job_digest"]
+        or intent.get("run_id") != run_id
+        or intent.get("manifest_id") != manifest["manifest_id"]
+        or intent.get("manifest_digest") != manifest["manifest_digest"]
+        or intent.get("order_index") != order_index
+        or intent_slot != slot
+        or intent.get("slot_digest") != canonical_digest(slot)
+        or base_condition.get("base_condition_digest") != slot["base_condition_digest"]
+        or base_condition.get("resolved_job_digest") != ref["resolved_job_digest"]
+        or robot_pose.get("robot_start_pose_id") != slot["robot_start_pose_id"]
+        or fixed_contract.get("collection_profile_digest") != collection_profile_digest
+        or runtime.get("run_id") != run_id
+        or runtime.get("resolved_job_digest") != ref["resolved_job_digest"]
+        or runtime.get("manifest_digest") != manifest["manifest_digest"]
+        or runtime.get("intent_digest") != intent_digest
+        or runtime.get("slot_digest") != canonical_digest(slot)
+        or runtime.get("robot_start_pose_id") != slot["robot_start_pose_id"]
+        or runtime.get("split_group") != slot["split_group"]
+        or runtime.get("repeat_index") != slot["repeat_index"]
+        or runtime.get("scene_state_digest") != intent.get("required_scene_digest")
+        or runtime.get("authority") != runtime_authority
+        or plan_artifact.get("run_id") != run_id
+        or plan_artifact.get("resolved_job_digest") != ref["resolved_job_digest"]
+        or canonical_digest(plan) != plan_digest
+        or technical.get("run_id") != run_id
+        or technical.get("resolved_job_digest") != ref["resolved_job_digest"]
+        or technical.get("plan_digest") != plan_digest
+        or execution.get("run_id") != run_id
+        or execution.get("plan_digest") != plan_digest
+    ):
+        raise ContractError("COLLECTION_RECOMMENDATION_ARTIFACT_BINDING")
+
     bindings = _exact(ledger["bindings"], BINDING_FIELDS, "COLLECTION_RECOMMENDATION_BINDING_FIELDS")
     for field, item in bindings.items():
         if field == "robot_start_pose_id":
             _identifier(item, "COLLECTION_RECOMMENDATION_BINDING")
         else:
             _digest(item, "COLLECTION_RECOMMENDATION_BINDING")
-    if (
-        bindings["resolved_job_digest"] != ref["resolved_job_digest"]
-        or bindings["manifest_digest"] != manifest["manifest_digest"]
-        or bindings["slot_digest"] != canonical_digest(slot)
-        or bindings["base_condition_digest"] != slot["base_condition_digest"]
-        or bindings["robot_start_pose_id"] != slot["robot_start_pose_id"]
-    ):
+    expected_bindings = {
+        "resolved_job_digest": ref["resolved_job_digest"],
+        "manifest_digest": manifest["manifest_digest"],
+        "intent_digest": intent_digest,
+        "slot_digest": canonical_digest(slot),
+        "base_condition_digest": slot["base_condition_digest"],
+        "robot_start_pose_id": slot["robot_start_pose_id"],
+        "scene_state_digest": scene_state_digest,
+        "root_binding_digest": root_binding_digest,
+        "start_binding_digest": start_binding_digest,
+        "collection_profile_digest": collection_profile_digest,
+        "plan_digest": plan_digest,
+    }
+    if bindings != expected_bindings:
         raise ContractError("COLLECTION_RECOMMENDATION_SLOT_BINDING")
     admission = _exact(ledger["admission"], ADMISSION_FIELDS, "COLLECTION_RECOMMENDATION_ADMISSION_FIELDS")
-    if admission["technical_status"] != "PASS" or admission["training_status"] != "NOT_AUTHORIZED":
+    expected_review_context = canonical_digest({
+        "run_id": run_id,
+        "resolved_job_digest": ref["resolved_job_digest"],
+        "plan_digest": plan_digest,
+        "technical_validator_digest": canonical_digest(technical),
+    })
+    if (
+        admission["technical_status"] != "PASS"
+        or admission["technical_status"] != technical.get("status")
+        or admission["review_context_digest"] != expected_review_context
+        or admission["training_status"] != "NOT_AUTHORIZED"
+    ):
         raise ContractError("COLLECTION_RECOMMENDATION_ADMISSION")
     _digest(admission["review_context_digest"], "COLLECTION_RECOMMENDATION_ADMISSION")
-    artifacts = _artifact_refs(ledger["artifacts"])
-    if (
-        artifacts["manifest"]["artifact_digest"] != canonical_digest(manifest)
-        or artifacts["run"]["artifact_digest"] != canonical_digest(run)
-    ):
-        raise ContractError("COLLECTION_RECOMMENDATION_ARTIFACT_BINDING")
 
     candidate = _exact(evidence["candidate"], CANDIDATE_FIELDS, "COLLECTION_RECOMMENDATION_CANDIDATE_FIELDS")
     if (
@@ -545,8 +601,8 @@ def _episode_snapshot(value: object, manifest: Mapping[str, Any]) -> dict[str, A
     ):
         raise ContractError("COLLECTION_RECOMMENDATION_STATE_BINDING")
 
-    provenance = evidence["source_provenance"]
-    quality = evidence["recording_quality"]
+    provenance = payloads["source_provenance"]
+    quality = payloads["recording_quality"]
     if (
         not isinstance(provenance, list)
         or len(provenance) != rows
@@ -558,12 +614,6 @@ def _episode_snapshot(value: object, manifest: Mapping[str, Any]) -> dict[str, A
         raise ContractError("COLLECTION_RECOMMENDATION_RECORDING_BINDING")
     provenance_digest = canonical_digest(provenance)
     quality_digest = canonical_digest(quality)
-    if (
-        artifacts["source_provenance"]["artifact_digest"] != provenance_digest
-        or artifacts["recording_quality"]["artifact_digest"] != quality_digest
-    ):
-        raise ContractError("COLLECTION_RECOMMENDATION_RECORDING_DIGEST")
-
     return {
         "manifest_order_index": order_index,
         "run_id": run_id,
@@ -580,13 +630,14 @@ def _episode_snapshot(value: object, manifest: Mapping[str, Any]) -> dict[str, A
     }
 
 
-def _episode_summaries(values: object, manifest: Mapping[str, Any]) -> list[dict[str, Any]]:
+def _episode_summaries(
+    values: object, manifest: Mapping[str, Any], *, normalize: bool,
+) -> list[dict[str, Any]]:
     if not isinstance(values, Sequence) or isinstance(values, (str, bytes)) or not values:
         raise ContractError("COLLECTION_RECOMMENDATION_EPISODES")
-    episodes = sorted(
-        (_episode_snapshot(item, manifest) for item in values),
-        key=lambda item: item["manifest_order_index"],
-    )
+    episodes = [_episode_snapshot(item, manifest) for item in values]
+    if normalize:
+        episodes.sort(key=lambda item: item["manifest_order_index"])
     if [item["manifest_order_index"] for item in episodes] != list(range(len(episodes))):
         raise ContractError("COLLECTION_RECOMMENDATION_EPISODE_ORDER")
     unique_fields = (
@@ -601,28 +652,15 @@ def _episode_summaries(values: object, manifest: Mapping[str, Any]) -> list[dict
     return episodes
 
 
-def _analysis_digest(artifact: Mapping[str, Any]) -> str:
-    if "analysis_digest" not in artifact:
-        return canonical_digest(artifact)
-    expected = _digest(artifact["analysis_digest"], "COLLECTION_RECOMMENDATION_ANALYSIS_DIGEST")
-    if canonical_digest({key: item for key, item in artifact.items() if key != "analysis_digest"}) != expected:
-        raise ContractError("COLLECTION_RECOMMENDATION_ANALYSIS_DIGEST")
-    return expected
-
-
-def _contains_synthetic(value: object) -> bool:
-    if isinstance(value, Mapping):
-        return any(_contains_synthetic(item) for item in value.values())
-    if isinstance(value, list):
-        return any(_contains_synthetic(item) for item in value)
-    return value == "SYNTHETIC_TEST_ONLY" or value == SYNTHETIC_ROLLOUT_SCHEMA
-
-
 def _analysis_ref(
     value: object, *, owner: str, artifact: object = _MISSING,
+    normalize: bool,
 ) -> dict[str, Any]:
     ref = _exact(value, ANALYSIS_REF_FIELDS, "COLLECTION_RECOMMENDATION_ANALYSIS_REF_FIELDS")
-    reasons = _strings(ref["reason_codes"], "COLLECTION_RECOMMENDATION_ANALYSIS_REASONS")
+    reasons = _strings(
+        ref["reason_codes"], "COLLECTION_RECOMMENDATION_ANALYSIS_REASONS",
+        normalize=normalize,
+    )
     if ref["availability"] == "UNAVAILABLE":
         if (
             any(ref[field] is not None for field in ("schema_version", "analysis_id", "analysis_digest"))
@@ -636,26 +674,22 @@ def _analysis_ref(
         return ref
     if ref["availability"] != "AVAILABLE" or reasons:
         raise ContractError("COLLECTION_RECOMMENDATION_ANALYSIS_AVAILABILITY")
+    if owner == "rollout":
+        raise ContractError("COLLECTION_RECOMMENDATION_ROLLOUT_OWNER")
     schema = _identifier(ref["schema_version"], "COLLECTION_RECOMMENDATION_ANALYSIS_SCHEMA")
     analysis_id = _identifier(ref["analysis_id"], "COLLECTION_RECOMMENDATION_ANALYSIS_ID")
     expected_digest = _digest(ref["analysis_digest"], "COLLECTION_RECOMMENDATION_ANALYSIS_DIGEST")
-    if owner == "data_quality" and schema != DATA_QUALITY_SCHEMA:
+    if schema != DATA_QUALITY_SCHEMA:
         raise ContractError("COLLECTION_RECOMMENDATION_DATA_QUALITY_OWNER")
-    if owner == "rollout" and schema in {DATA_QUALITY_SCHEMA, SYNTHETIC_ROLLOUT_SCHEMA}:
-        raise ContractError("COLLECTION_RECOMMENDATION_ROLLOUT_OWNER")
     if artifact is not _MISSING:
-        if not isinstance(artifact, Mapping) or artifact.get("schema_version") != schema:
+        if not isinstance(artifact, Mapping):
             raise ContractError("COLLECTION_RECOMMENDATION_ANALYSIS_ARTIFACT")
-        if owner == "data_quality":
-            if artifact.get("collection_profile_id") != analysis_id or artifact.get("authority") != "REPORT_ONLY":
-                raise ContractError("COLLECTION_RECOMMENDATION_DATA_QUALITY_OWNER")
-        elif (
-            artifact.get("analysis_id") != analysis_id
-            or artifact.get("evidence_scope") != "PHYSICAL"
-            or _contains_synthetic(artifact)
+        report = validate_coverage_report(artifact)
+        if (
+            report["schema_version"] != schema
+            or report["collection_profile_id"] != analysis_id
+            or canonical_digest(report) != expected_digest
         ):
-            raise ContractError("COLLECTION_RECOMMENDATION_ROLLOUT_PHYSICAL")
-        if _analysis_digest(artifact) != expected_digest:
             raise ContractError("COLLECTION_RECOMMENDATION_ANALYSIS_DIGEST")
     ref["reason_codes"] = []
     return ref
@@ -665,18 +699,16 @@ def _analysis_refs(
     data_quality_ref: object, rollout_ref: object, *,
     data_quality_analysis: object = _MISSING,
     rollout_evidence_analysis: object = _MISSING,
+    normalize: bool,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     data_quality = _analysis_ref(
         data_quality_ref, owner="data_quality", artifact=data_quality_analysis,
+        normalize=normalize,
     )
     rollout = _analysis_ref(
         rollout_ref, owner="rollout", artifact=rollout_evidence_analysis,
+        normalize=normalize,
     )
-    if data_quality["availability"] == rollout["availability"] == "AVAILABLE" and (
-        data_quality["analysis_id"] == rollout["analysis_id"]
-        or data_quality["analysis_digest"] == rollout["analysis_digest"]
-    ):
-        raise ContractError("COLLECTION_RECOMMENDATION_ANALYSIS_ALIAS")
     return data_quality, rollout
 
 
@@ -694,7 +726,37 @@ def _known_evidence(snapshot: Mapping[str, Any]) -> set[str]:
     return result
 
 
-def _claims(values: object, snapshot: Mapping[str, Any]) -> list[dict[str, Any]]:
+def _claim_value(claim: Mapping[str, Any]) -> Any:
+    if claim["class"] == "UNKNOWN":
+        if claim["value"] is not None:
+            raise ContractError("COLLECTION_RECOMMENDATION_CLAIM_VALUE")
+        return None
+    if claim["class"] == "SUGGESTED":
+        if (
+            claim["subject"] != "coverage"
+            or not isinstance(claim["value"], str)
+            or claim["value"] not in SUGGESTED_VALUES
+        ):
+            raise ContractError("COLLECTION_RECOMMENDATION_CLAIM_VALUE")
+        return claim["value"]
+    if claim["subject"] != "coverage":
+        raise ContractError("COLLECTION_RECOMMENDATION_CLAIM_VALUE")
+    value = _exact(
+        claim["value"], OBSERVED_VALUE_FIELDS,
+        "COLLECTION_RECOMMENDATION_CLAIM_VALUE",
+    )
+    if (
+        value["metric"] != "COLLECTED_EPISODE_COUNT"
+        or type(value["count"]) is not int
+        or value["count"] < 0
+    ):
+        raise ContractError("COLLECTION_RECOMMENDATION_CLAIM_VALUE")
+    return value
+
+
+def _claims(
+    values: object, snapshot: Mapping[str, Any], *, normalize: bool,
+) -> list[dict[str, Any]]:
     if not isinstance(values, Sequence) or isinstance(values, (str, bytes)) or not values:
         raise ContractError("COLLECTION_RECOMMENDATION_CLAIMS")
     known_evidence = _known_evidence(snapshot)
@@ -706,72 +768,70 @@ def _claims(values: object, snapshot: Mapping[str, Any]) -> list[dict[str, Any]]
             raise ContractError("COLLECTION_RECOMMENDATION_CLAIM_TYPE")
         evidence = _strings(
             claim["evidence_refs"], "COLLECTION_RECOMMENDATION_CLAIM_EVIDENCE",
-            identifiers=False,
+            identifiers=False, normalize=normalize,
         )
         if any(_digest(item, "COLLECTION_RECOMMENDATION_CLAIM_EVIDENCE") not in known_evidence for item in evidence):
             raise ContractError("COLLECTION_RECOMMENDATION_CLAIM_EVIDENCE")
-        basis = _strings(claim["basis_claim_ids"], "COLLECTION_RECOMMENDATION_CLAIM_BASIS")
-        reasons = _strings(claim["reason_codes"], "COLLECTION_RECOMMENDATION_CLAIM_REASONS")
+        basis = _strings(
+            claim["basis_claim_ids"], "COLLECTION_RECOMMENDATION_CLAIM_BASIS",
+            normalize=normalize,
+        )
+        reasons = _strings(
+            claim["reason_codes"], "COLLECTION_RECOMMENDATION_CLAIM_REASONS",
+            normalize=normalize,
+        )
         if (
-            claim["class"] == "OBSERVED" and (claim["value"] is None or not evidence or basis)
-            or claim["class"] == "OBSERVED"
-            and claim["subject"] != "rollout" and _forbidden(claim["value"])
+            claim["class"] == "OBSERVED" and (not evidence or basis or reasons)
             or claim["class"] == "SUGGESTED"
-            and (claim["value"] is None or not basis or _forbidden(claim["value"]))
-            or claim["class"] == "UNKNOWN" and (claim["value"] is not None or basis or not reasons)
-            or claim["subject"] in {"person", "background"} and claim["class"] != "UNKNOWN"
+            and (not basis or reasons != ["COVERAGE_DEFICIT"])
+            or claim["class"] == "UNKNOWN" and (basis or not reasons)
+            or claim["class"] == "UNKNOWN" and any(
+                UNKNOWN_REASON_SUBJECTS.get(reason) != claim["subject"]
+                for reason in reasons
+            )
         ):
             raise ContractError("COLLECTION_RECOMMENDATION_CLAIM_EPISTEMIC")
-        canonical_digest(claim["value"])
-        claim.update(evidence_refs=evidence, basis_claim_ids=basis, reason_codes=reasons)
+        claim.update(
+            value=_claim_value(claim), evidence_refs=evidence,
+            basis_claim_ids=basis, reason_codes=reasons,
+        )
+        if (
+            claim["class"] == "OBSERVED"
+            and (
+                claim["value"]["count"] != len(snapshot["episodes"])
+                or snapshot["campaign"]["manifest_digest"] not in evidence
+            )
+        ):
+            raise ContractError("COLLECTION_RECOMMENDATION_CLAIM_VALUE")
         result.append(claim)
-    result.sort(key=lambda item: item["claim_id"])
+    if normalize:
+        result.sort(key=lambda item: item["claim_id"])
     ids = [claim["claim_id"] for claim in result]
-    if len(ids) != len(set(ids)):
+    if len(ids) != len(set(ids)) or ids != sorted(ids):
         raise ContractError("COLLECTION_RECOMMENDATION_CLAIM_DUPLICATE")
     by_id = {claim["claim_id"]: claim for claim in result}
     for claim in result:
         if any(
             basis_id == claim["claim_id"]
             or basis_id not in by_id
-            or by_id[basis_id]["class"] == "SUGGESTED"
+            or by_id[basis_id]["class"] != "OBSERVED"
             for basis_id in claim["basis_claim_ids"]
         ):
             raise ContractError("COLLECTION_RECOMMENDATION_CLAIM_BASIS")
-    for subject in ("person", "background", "robot"):
+    required_unknowns = {
+        "person": "PERSON_LABELS_UNAVAILABLE",
+        "background": "BACKGROUND_LABELS_UNAVAILABLE",
+        "robot": "ROBOT_VARIATION_UNMEASURED",
+        "rollout": "NO_CANONICAL_PHYSICAL_ROLLOUT_ANALYSIS",
+    }
+    for subject, reason in required_unknowns.items():
         matches = [claim for claim in result if claim["subject"] == subject]
-        if len(matches) != 1:
-            raise ContractError("COLLECTION_RECOMMENDATION_NUISANCE_CLAIM")
-    rollout_ref = snapshot["rollout_evidence_analysis_ref"]
-    if any(
-        claim["subject"] == "rollout" and claim["class"] == "OBSERVED"
-        and (
-            rollout_ref["availability"] != "AVAILABLE"
-            or rollout_ref["analysis_digest"] not in claim["evidence_refs"]
-        )
-        for claim in result
-    ):
-        raise ContractError("COLLECTION_RECOMMENDATION_ROLLOUT_EVIDENCE")
-    if rollout_ref["availability"] == "UNAVAILABLE":
-        rollout_unknowns = [
-            claim for claim in result
-            if claim["subject"] == "rollout" and claim["class"] == "UNKNOWN"
-            and "NO_CANONICAL_PHYSICAL_ROLLOUT_ANALYSIS" in claim["reason_codes"]
-        ]
-        if not rollout_unknowns or any(
-            claim["subject"] == "rollout" and claim["class"] != "UNKNOWN"
-            for claim in result
+        if (
+            len(matches) != 1
+            or matches[0]["class"] != "UNKNOWN"
+            or matches[0]["reason_codes"] != [reason]
         ):
-            raise ContractError("COLLECTION_RECOMMENDATION_ROLLOUT_UNKNOWN")
-    robot = next(claim for claim in result if claim["subject"] == "robot")
-    if robot["class"] == "SUGGESTED":
-        raise ContractError("COLLECTION_RECOMMENDATION_NUISANCE_CLAIM")
-    if robot["class"] == "OBSERVED" and not any(
-        claim["class"] == "UNKNOWN"
-        and "ROBOT_VARIATION_UNMEASURED" in claim["reason_codes"]
-        for claim in result
-    ):
-        raise ContractError("COLLECTION_RECOMMENDATION_NUISANCE_CLAIM")
+            raise ContractError("COLLECTION_RECOMMENDATION_NUISANCE_CLAIM")
     return result
 
 
@@ -801,13 +861,13 @@ def _patch_value(field: str, value: object) -> Any:
         ):
             raise ContractError("COLLECTION_RECOMMENDATION_PATCH_VALUE")
         value = factors
-    if _forbidden(value):
-        raise ContractError("COLLECTION_RECOMMENDATION_PATCH_AUTHORITY")
     canonical_digest(value)
     return copy.deepcopy(value)
 
 
-def _patches(values: object, claims: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
+def _patches(
+    values: object, claims: Sequence[Mapping[str, Any]], *, normalize: bool,
+) -> list[dict[str, Any]]:
     if not isinstance(values, Sequence) or isinstance(values, (str, bytes)):
         raise ContractError("COLLECTION_RECOMMENDATION_PATCHES")
     by_id = {claim["claim_id"]: claim for claim in claims}
@@ -819,22 +879,22 @@ def _patches(values: object, claims: Sequence[Mapping[str, Any]]) -> list[dict[s
             raise ContractError("COLLECTION_RECOMMENDATION_PATCH_FIELD")
         basis = _strings(
             patch["basis_claim_ids"], "COLLECTION_RECOMMENDATION_PATCH_BASIS",
-            nonempty=True,
+            nonempty=True, normalize=normalize,
         )
         if any(item not in by_id for item in basis):
             raise ContractError("COLLECTION_RECOMMENDATION_PATCH_BASIS")
         if any(
-            by_id[item]["subject"] == "rollout"
-            and by_id[item]["class"] == "UNKNOWN"
+            by_id[item]["class"] == "UNKNOWN"
             for item in basis
         ):
             raise ContractError("COLLECTION_RECOMMENDATION_PATCH_CAUSAL")
         patch["value"] = _patch_value(patch["field"], patch["value"])
         patch["basis_claim_ids"] = basis
         result.append(patch)
-    result.sort(key=lambda item: item["change_id"])
+    if normalize:
+        result.sort(key=lambda item: item["change_id"])
     ids = [patch["change_id"] for patch in result]
-    if len(ids) != len(set(ids)):
+    if len(ids) != len(set(ids)) or ids != sorted(ids):
         raise ContractError("COLLECTION_RECOMMENDATION_PATCH_DUPLICATE")
     return result
 
@@ -851,7 +911,10 @@ def _authority(value: object) -> dict[str, Any]:
 
 def build_collection_recommendation(
     *, recommendation_id: str, source_commit: str,
-    campaign_manifest: Mapping[str, Any], episode_evidence: Sequence[Mapping[str, Any]],
+    campaign_manifest: Mapping[str, Any], campaign_hypothesis: Mapping[str, Any],
+    campaign_draft: Mapping[str, Any],
+    campaign_compilation_receipt: Mapping[str, Any],
+    episode_evidence: Sequence[Mapping[str, Any]],
     data_quality_analysis_ref: Mapping[str, Any],
     rollout_evidence_analysis_ref: Mapping[str, Any], claims: Sequence[Mapping[str, Any]],
     suggested_draft_patches: Sequence[Mapping[str, Any]],
@@ -866,12 +929,16 @@ def build_collection_recommendation(
         or any(character not in "0123456789abcdef" for character in source_commit)
     ):
         raise ContractError("COLLECTION_RECOMMENDATION_SOURCE_COMMIT")
-    manifest = _manifest(campaign_manifest)
-    episodes = _episode_summaries(episode_evidence, manifest)
+    manifest = _campaign(
+        campaign_manifest, hypothesis=campaign_hypothesis,
+        draft=campaign_draft, receipt=campaign_compilation_receipt,
+    )
+    episodes = _episode_summaries(episode_evidence, manifest, normalize=True)
     data_quality_ref, rollout_ref = _analysis_refs(
         data_quality_analysis_ref, rollout_evidence_analysis_ref,
         data_quality_analysis=data_quality_analysis,
         rollout_evidence_analysis=rollout_evidence_analysis,
+        normalize=True,
     )
     snapshot = {
         "schema_version": SNAPSHOT_SCHEMA,
@@ -886,13 +953,15 @@ def build_collection_recommendation(
         "rollout_evidence_analysis_ref": rollout_ref,
     }
     snapshot["snapshot_digest"] = canonical_digest(snapshot)
-    checked_claims = _claims(claims, snapshot)
+    checked_claims = _claims(claims, snapshot, normalize=True)
     value = {
         "schema_version": SCHEMA_VERSION,
         "recommendation_id": recommendation_id,
         "input_snapshot": snapshot,
         "claims": checked_claims,
-        "suggested_draft_patches": _patches(suggested_draft_patches, checked_claims),
+        "suggested_draft_patches": _patches(
+            suggested_draft_patches, checked_claims, normalize=True,
+        ),
         "authority": copy.deepcopy(AUTHORITY),
     }
     value["recommendation_digest"] = canonical_digest(value)
@@ -901,6 +970,7 @@ def build_collection_recommendation(
 
 def _snapshot(value: object) -> dict[str, Any]:
     snapshot = _exact(value, SNAPSHOT_FIELDS, "COLLECTION_RECOMMENDATION_SNAPSHOT_FIELDS")
+    _self_digest(snapshot, "snapshot_digest", "COLLECTION_RECOMMENDATION_SNAPSHOT_DIGEST")
     if snapshot["schema_version"] != SNAPSHOT_SCHEMA:
         raise ContractError("COLLECTION_RECOMMENDATION_SNAPSHOT_SCHEMA")
     source_commit = snapshot["source_commit"]
@@ -957,41 +1027,57 @@ def _snapshot(value: object) -> dict[str, Any]:
     snapshot["campaign"], snapshot["episodes"] = campaign, normalized_episodes
     data_quality_ref, rollout_ref = _analysis_refs(
         snapshot["data_quality_analysis_ref"], snapshot["rollout_evidence_analysis_ref"],
+        normalize=False,
     )
     snapshot["data_quality_analysis_ref"] = data_quality_ref
     snapshot["rollout_evidence_analysis_ref"] = rollout_ref
-    _self_digest(snapshot, "snapshot_digest", "COLLECTION_RECOMMENDATION_SNAPSHOT_DIGEST")
     return snapshot
 
 
 def validate_collection_recommendation(
     value: object, *, campaign_manifest: Mapping[str, Any] | None = None,
+    campaign_hypothesis: Mapping[str, Any] | None = None,
+    campaign_draft: Mapping[str, Any] | None = None,
+    campaign_compilation_receipt: Mapping[str, Any] | None = None,
     episode_evidence: Sequence[Mapping[str, Any]] | None = None,
     data_quality_analysis: Mapping[str, Any] | None = None,
     rollout_evidence_analysis: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Validate a self-digested value, optionally rejoining supplied evidence."""
     recommendation = _exact(value, RECOMMENDATION_FIELDS, "COLLECTION_RECOMMENDATION_FIELDS")
+    _self_digest(
+        recommendation, "recommendation_digest",
+        "COLLECTION_RECOMMENDATION_DIGEST",
+    )
     if recommendation["schema_version"] != SCHEMA_VERSION:
         raise ContractError("COLLECTION_RECOMMENDATION_SCHEMA")
     _identifier(recommendation["recommendation_id"], "COLLECTION_RECOMMENDATION_ID")
     snapshot = _snapshot(recommendation["input_snapshot"])
-    claims = _claims(recommendation["claims"], snapshot)
-    patches = _patches(recommendation["suggested_draft_patches"], claims)
+    claims = _claims(recommendation["claims"], snapshot, normalize=False)
+    patches = _patches(
+        recommendation["suggested_draft_patches"], claims, normalize=False,
+    )
     authority = _authority(recommendation["authority"])
     recommendation.update(
         input_snapshot=snapshot, claims=claims,
         suggested_draft_patches=patches, authority=authority,
     )
-    _self_digest(
-        recommendation, "recommendation_digest",
-        "COLLECTION_RECOMMENDATION_DIGEST",
+    campaign_evidence = (
+        campaign_manifest, campaign_hypothesis, campaign_draft,
+        campaign_compilation_receipt, episode_evidence,
     )
-    if (campaign_manifest is None) != (episode_evidence is None):
+    if any(item is None for item in campaign_evidence) and any(
+        item is not None for item in campaign_evidence
+    ):
         raise ContractError("COLLECTION_RECOMMENDATION_EVIDENCE_REQUIRED")
-    if campaign_manifest is not None and episode_evidence is not None:
-        manifest = _manifest(campaign_manifest)
-        episodes = _episode_summaries(episode_evidence, manifest)
+    if all(item is not None for item in campaign_evidence):
+        manifest = _campaign(
+            campaign_manifest, hypothesis=campaign_hypothesis,
+            draft=campaign_draft, receipt=campaign_compilation_receipt,
+        )
+        episodes = _episode_summaries(
+            episode_evidence, manifest, normalize=False,
+        )
         if snapshot["campaign"] != {
             "schema_version": MANIFEST_SCHEMA,
             "manifest_id": manifest["manifest_id"],
@@ -1003,6 +1089,7 @@ def validate_collection_recommendation(
             snapshot["rollout_evidence_analysis_ref"],
             data_quality_analysis=data_quality_analysis,
             rollout_evidence_analysis=rollout_evidence_analysis,
+            normalize=False,
         )
         if checked_refs != (
             snapshot["data_quality_analysis_ref"],
