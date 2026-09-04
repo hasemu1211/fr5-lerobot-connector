@@ -587,7 +587,9 @@ class CollectionRecommendationTests(unittest.TestCase):
     def setUp(self) -> None:
         self.fixture = RecommendationFixture()
 
-    def application(self) -> CollectionOperatorApplication:
+    def application(
+        self, campaign_factory=None,
+    ) -> CollectionOperatorApplication:
         combination = next(
             item for item in self.catalog["combinations"]
             if item["execution"]["TEST_COLLECTION"]["executable"]
@@ -627,8 +629,9 @@ class CollectionRecommendationTests(unittest.TestCase):
             initial_selection=selection, projector=projection,
             environment_call=lambda: copy.deepcopy(environment),
             prepare_environment_call=lambda: copy.deepcopy(environment),
-            campaign_factory=lambda *_args: self.fail(
-                "campaign was not requested",
+            campaign_factory=(
+                campaign_factory if campaign_factory is not None else
+                lambda *_args: self.fail("campaign was not requested")
             ),
             initial_environment=environment,
         )
@@ -1293,6 +1296,124 @@ class CollectionRecommendationTests(unittest.TestCase):
                     self.assertEqual(application.draft[field], value)
             finally:
                 application.close()
+
+    def test_frozen_available_dqa_selected_change_round_trip_and_stale_rejection(self) -> None:
+        report = copy.deepcopy(self.fixture.hypothesis["coverage_report"])
+        data_quality_ref = {
+            "availability": "AVAILABLE",
+            "schema_version": report["schema_version"],
+            "analysis_id": report["collection_profile_id"],
+            "analysis_digest": digest(report),
+            "reason_codes": [],
+        }
+        claims = [
+            claim for claim in self.fixture.claims if claim["subject"] != "quality"
+        ]
+        rollout_ref = unavailable("NO_CANONICAL_PHYSICAL_ROLLOUT_ANALYSIS")
+        recommendation = self.fixture.build(
+            data_quality_analysis_ref=data_quality_ref,
+            data_quality_analysis=report,
+            rollout_evidence_analysis_ref=rollout_ref,
+            claims=claims,
+        )
+        self.assertEqual(
+            recommendation["input_snapshot"]["data_quality_analysis_ref"],
+            data_quality_ref,
+        )
+        self.assertEqual(
+            recommendation["input_snapshot"]["rollout_evidence_analysis_ref"],
+            rollout_ref,
+        )
+        self.assertEqual(
+            [claim["claim_id"] for claim in claims],
+            [
+                claim["claim_id"] for claim in self.fixture.claims
+                if claim["claim_id"] != "quality-unknown"
+            ],
+        )
+
+        external_effects = {
+            name: mock.Mock(side_effect=AssertionError(f"{name} was requested"))
+            for name in (
+                "compile", "authorize", "persistence", "motion", "recorder",
+                "training", "dataset",
+            )
+        }
+        campaign_factory = mock.Mock(
+            side_effect=lambda *_args: external_effects["persistence"](),
+        )
+        application = self.application(campaign_factory=campaign_factory)
+        try:
+            core = application.bridge_core
+            core.handlers["compile_draft"] = external_effects["compile"]
+            core.handlers["authorize_campaign"] = external_effects["authorize"]
+            view = core.snapshot()
+            before = copy.deepcopy((recommendation, report, view))
+            with (
+                mock.patch("builtins.open", side_effect=AssertionError("I/O forbidden")),
+                mock.patch("pathlib.Path.open", side_effect=AssertionError("I/O forbidden")),
+                mock.patch("pathlib.Path.resolve", side_effect=AssertionError("I/O forbidden")),
+            ):
+                intent = project_update_draft_intent(
+                    recommendation,
+                    selected_change_id="increase-count",
+                    operator_view=view,
+                    intent_id="frozen-dqa-update-r1",
+                    data_quality_analysis=report,
+                )
+            self.assertEqual((recommendation, report, view), before)
+            self.assertEqual(intent["payload"], {
+                "draft_id": application.draft["draft_id"], "requested_count": 3,
+            })
+
+            draft_before = copy.deepcopy(application.draft)
+            result = core.consume(intent)
+            draft_after = copy.deepcopy(application.draft)
+            self.assertEqual(result["result"]["outcome"], "DRAFT_UPDATED")
+            self.assertEqual(draft_after["requested_count"], 3)
+            self.assertEqual(draft_after["revision"], draft_before["revision"] + 1)
+            for field in draft_before:
+                if field not in {"requested_count", "revision"}:
+                    self.assertEqual(draft_after[field], draft_before[field])
+            updated_view = core.snapshot()
+            self.assertEqual(updated_view["revision"], view["revision"] + 1)
+            expected_projection = copy.deepcopy(view["projection"])
+            expected_projection["draft"].update(
+                requested_count=3, revision=draft_after["revision"],
+            )
+            self.assertEqual(updated_view["projection"], expected_projection)
+            self.assertEqual(campaign_factory.call_count, 0)
+            self.assertEqual(
+                {name: spy.call_count for name, spy in external_effects.items()},
+                {name: 0 for name in external_effects},
+            )
+
+            fresh_view = core.snapshot()
+            stale = project_update_draft_intent(
+                recommendation,
+                selected_change_id="increase-count",
+                operator_view=fresh_view,
+                intent_id="frozen-dqa-stale-r1",
+                data_quality_analysis=report,
+            )
+            core.transition(lambda: None)
+            stale_before = copy.deepcopy((application.draft, core.snapshot()))
+            with self.assertRaisesRegex(ContractError, "OPERATOR_INTENT_STALE_VIEW"):
+                core.consume(stale)
+            self.assertEqual(application.draft, stale_before[0])
+            self.assertEqual(
+                {key: value for key, value in core.snapshot().items()
+                 if key != "generated_at"},
+                {key: value for key, value in stale_before[1].items()
+                 if key != "generated_at"},
+            )
+            self.assertEqual(campaign_factory.call_count, 0)
+            self.assertEqual(
+                {name: spy.call_count for name, spy in external_effects.items()},
+                {name: 0 for name in external_effects},
+            )
+        finally:
+            application.close()
 
     def test_existing_compare_and_swap_rejects_a_once_fresh_intent_after_transition(self) -> None:
         state = {
