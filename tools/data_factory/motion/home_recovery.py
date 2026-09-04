@@ -311,32 +311,67 @@ def _transition(
     if max(abs(a - b) for a, b in zip(fresh["joint_positions"], start)) > transition_tolerance:
         raise ContractError(f"{prefix}_START_CHANGED")
     _raise_if_cancelled(cancel_event, prefix)
-    transport.start_phase({
-        "phase": "SAFE_POSE_PTP", "type": "ARM",
-        "trajectory_b64": base64.b64encode(
-            planned["serialized_trajectory"]
-        ).decode("ascii"),
-        "limits": arm_limits,
-    })
-    _wait_phase(
-        transport,
-        cancel_timeout_s=float(motion["execution_timeouts_s"]["cancel"]),
-        prefix=prefix, cancel_event=cancel_event,
-        sleep_call=sleep_call,
-    )
-    after = _snapshot(transport.snapshot(max_age), prefix)
-    final = [float(item) for item in after["joint_positions"]]
-    errors = [abs(actual - expected) for actual, expected in zip(final, target)]
-    if any(error > tolerance for error, tolerance in zip(errors, tolerances)):
-        raise ContractError(f"{prefix}_FINAL_MISMATCH")
-    if _gripper_delta(after, open_position, prefix) > gripper_tolerance:
-        raise ContractError(f"{prefix}_GRIPPER_NOT_OPEN")
-    return {
-        "status": "AT_TARGET", "arm_goal_count": 1,
-        "target_rad": target, "final_rad": final,
-        "max_joint_delta_rad": max(errors),
-        "precommit_evidence_digest": precommit["evidence_digest"],
-    }
+    cancel_timeout_s = float(motion["execution_timeouts_s"]["cancel"])
+    claim = getattr(cancel_event, "claim_start_transition", None)
+    finish = getattr(cancel_event, "finish_start_transition", None)
+    claimed = False
+    failure_code = None
+    try:
+        if callable(claim):
+            claim()
+            claimed = True
+        step = {
+            "phase": "SAFE_POSE_PTP", "type": "ARM",
+            "trajectory_b64": base64.b64encode(
+                planned["serialized_trajectory"]
+            ).decode("ascii"),
+            "limits": arm_limits,
+        }
+        try:
+            if cancel_event is None:
+                transport.start_phase(step)
+            else:
+                transport.start_phase(
+                    step, cancel_event=cancel_event,
+                    cancel_timeout_s=cancel_timeout_s,
+                )
+        except ContractError as exc:
+            if exc.code == "ROS_EXEC_CANCELLED":
+                raise ContractError(f"{prefix}_CANCELLED") from exc
+            if exc.code == "ROS_EXEC_CANCEL_UNCERTAIN":
+                raise ContractError(f"{prefix}_CANCEL_UNCERTAIN") from exc
+            raise
+        _wait_phase(
+            transport, cancel_timeout_s=cancel_timeout_s,
+            prefix=prefix, cancel_event=cancel_event,
+            sleep_call=sleep_call,
+        )
+        after = _snapshot(transport.snapshot(max_age), prefix)
+        final = [float(item) for item in after["joint_positions"]]
+        errors = [abs(actual - expected) for actual, expected in zip(final, target)]
+        if any(error > tolerance for error, tolerance in zip(errors, tolerances)):
+            raise ContractError(f"{prefix}_FINAL_MISMATCH")
+        if _gripper_delta(after, open_position, prefix) > gripper_tolerance:
+            raise ContractError(f"{prefix}_GRIPPER_NOT_OPEN")
+        return {
+            "status": "AT_TARGET", "arm_goal_count": 1,
+            "target_rad": target, "final_rad": final,
+            "max_joint_delta_rad": max(errors),
+            "precommit_evidence_digest": precommit["evidence_digest"],
+        }
+    except ContractError as exc:
+        failure_code = exc.code
+        raise
+    except Exception:
+        failure_code = (
+            f"{prefix}_CANCEL_UNCERTAIN"
+            if cancel_event is not None and cancel_event.is_set()
+            else f"{prefix}_FAILED"
+        )
+        raise
+    finally:
+        if claimed and callable(finish):
+            finish(failure_code)
 
 
 def transition_to_start(

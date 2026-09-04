@@ -2110,7 +2110,17 @@ class OperatorConsole:
             and campaign
             and campaign.get("state") == "READY"
         )
-        if self._cancel_requested or campaign and campaign.get("state") == "CANCELLED":
+        if (
+            campaign
+            and campaign.get("state") == "BLOCKED"
+            and campaign.get("last_error") == "START_TRANSITION_CANCEL_UNCERTAIN"
+        ):
+            name, code, workflow = (
+                "FAIL", "START_TRANSITION_CANCEL_UNCERTAIN", "BLOCKED",
+            )
+            self._measurement_outcome = "FAIL"
+            self._last_error = code
+        elif self._cancel_requested or campaign and campaign.get("state") == "CANCELLED":
             name, code, workflow = "CANCEL", "PLAN_CANCELLED", "TERMINAL"
             self._measurement_outcome = "NOT_MEASURED"
             self._last_error = code
@@ -2215,7 +2225,8 @@ class OperatorConsole:
             self._queue_candidate_review(review_offer, sealed)
         sealed["result_digest"] = canonical_digest(sealed)
         self._episode_result, self._workflow = sealed, workflow
-        self._episode_history.append(copy.deepcopy(sealed))
+        if self._active_intent_projection is not None:
+            self._episode_history.append(copy.deepcopy(sealed))
         self._offer_next_candidate_review()
         self._prepared.set()
         return continue_campaign

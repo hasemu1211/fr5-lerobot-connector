@@ -5,8 +5,11 @@ import json
 import threading
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
+from unittest import mock
 
 from tools.data_factory.motion.home_recovery import transition_to_start
+from tools.data_factory.motion.moveit_transport import RosMoveItTransport
 from tools.fr5_data_factory import ContractError, canonical_digest
 
 
@@ -84,7 +87,7 @@ class FakeTransport:
             raise ContractError(self.precommit_error)
         return {"evidence_digest": canonical_digest(["joint-transition"])}
 
-    def start_phase(self, step):
+    def start_phase(self, step, **_kwargs):
         self.started.append(step["phase"])
 
     def poll_active(self):
@@ -98,6 +101,121 @@ class FakeTransport:
 
 
 class StartTransitionTests(unittest.TestCase):
+    @staticmethod
+    def transport(client):
+        value = object.__new__(RosMoveItTransport)
+        value._active = None
+        value._execution_locked = False
+        value._execute_goal_count = 0
+        value._gripper_goal_count = 0
+        value.graph_timeout_s = 0.01
+        value._clock = lambda: 0.0
+        value._rclpy = SimpleNamespace(
+            spin_until_future_complete=lambda *args, **kwargs: None,
+            spin_once=lambda *args, **kwargs: None,
+        )
+        value.node = object()
+        value._goal_canceled = 5
+        value._compiled_execution_goal = lambda _step: (
+            "SAFE_POSE_PTP", "ARM", object(), client, 1.0,
+        )
+        return value
+
+    def test_transport_owns_cancellation_before_dispatch_and_during_acceptance(self):
+        class Future:
+            def __init__(self, value=None, *, done=True, on_result=None):
+                self.value = value
+                self.complete = done
+                self.on_result = on_result
+
+            def done(self):
+                return self.complete
+
+            def result(self):
+                if self.on_result is not None:
+                    self.on_result()
+                return self.value
+
+        class Handle:
+            accepted = True
+
+            def __init__(self, event, *, canceling=True):
+                self.event = event
+                self.canceling = canceling
+                self.cancel_count = 0
+                self.result_future = Future(SimpleNamespace(status=5))
+
+            def get_result_async(self):
+                return self.result_future
+
+            def cancel_goal_async(self):
+                self.cancel_count += 1
+                return Future(SimpleNamespace(
+                    goals_canceling=[object()] if self.canceling else [],
+                ))
+
+        event = threading.Event()
+        client = SimpleNamespace(send_goal_async=mock.Mock())
+        transport = self.transport(client)
+        event.set()
+        with self.assertRaises(ContractError) as caught:
+            transport.start_phase({}, cancel_event=event, cancel_timeout_s=0.1)
+        self.assertEqual(caught.exception.code, "ROS_EXEC_CANCELLED")
+        client.send_goal_async.assert_not_called()
+        self.assertEqual(transport._execute_goal_count, 0)
+        self.assertIsNone(transport._active)
+
+        for canceling, expected in (
+            (True, "ROS_EXEC_CANCELLED"),
+            (False, "ROS_EXEC_CANCEL_UNCERTAIN"),
+        ):
+            with self.subTest(canceling=canceling):
+                event = threading.Event()
+                handle = Handle(event, canceling=canceling)
+                goal_future = Future(handle, on_result=event.set)
+                client = SimpleNamespace(
+                    send_goal_async=mock.Mock(),
+                )
+                transport = self.transport(client)
+
+                def dispatch(_goal):
+                    self.assertIsNotNone(transport._active)
+                    self.assertTrue(transport._execution_locked)
+                    return goal_future
+
+                client.send_goal_async.side_effect = dispatch
+                with self.assertRaises(ContractError) as caught:
+                    transport.start_phase(
+                        {}, cancel_event=event, cancel_timeout_s=0.1,
+                    )
+                self.assertEqual(caught.exception.code, expected)
+                self.assertEqual((client.send_goal_async.call_count, handle.cancel_count), (1, 1))
+                self.assertTrue(transport._execution_locked)
+                if canceling:
+                    self.assertIsNone(transport._active)
+                else:
+                    self.assertIsNotNone(transport._active)
+                with self.assertRaisesRegex(ContractError, "ROS_EXEC_ACTIVE"):
+                    transport.start_phase(
+                        {}, cancel_event=event, cancel_timeout_s=0.1,
+                    )
+                self.assertEqual(client.send_goal_async.call_count, 1)
+
+        event = threading.Event()
+        pending = Future(done=False)
+        client = SimpleNamespace(send_goal_async=mock.Mock(return_value=pending))
+        transport = self.transport(client)
+        transport._rclpy.spin_until_future_complete = (
+            lambda *args, **kwargs: event.set()
+        )
+        with self.assertRaises(ContractError) as caught:
+            transport.start_phase({}, cancel_event=event, cancel_timeout_s=0.1)
+        self.assertEqual(caught.exception.code, "ROS_EXEC_CANCEL_UNCERTAIN")
+        self.assertIs(transport._active.goal_future, pending)
+        with self.assertRaisesRegex(ContractError, "ROS_EXEC_ACTIVE"):
+            transport.start_phase({}, cancel_event=event, cancel_timeout_s=0.1)
+        self.assertEqual(client.send_goal_async.call_count, 1)
+
     def test_cancel_stops_start_transition_before_or_during_motion(self):
         cancelled = threading.Event()
         cancelled.set()

@@ -34,6 +34,20 @@ TERMINAL_CHILD_STATES = frozenset({
 })
 
 
+class _SessionCancelEvent(threading.Event):
+    """Cancellation signal that lets the session own startup motion."""
+
+    def __init__(self, session):
+        super().__init__()
+        self._session = session
+
+    def claim_start_transition(self) -> None:
+        self._session._claim_start_transition()
+
+    def finish_start_transition(self, code: str | None) -> None:
+        self._session._finish_start_transition(code)
+
+
 class CampaignSession:
     """Own exactly one serial campaign and at most one fresh OneJob child."""
 
@@ -71,8 +85,9 @@ class CampaignSession:
         self.data_disposition = data_disposition
         self.repository_root = repository_root
         self._factory = fake_lifecycle_factory if effect_scope == "FAKE" else physical_lifecycle_factory
-        self._cancel = threading.Event()
         self._lock = threading.RLock()
+        self._cancel = _SessionCancelEvent(self)
+        self._start_transition_active = False
         self._active = None
         self._active_intent = None
         self._active_run_id = None
@@ -117,6 +132,34 @@ class CampaignSession:
         self._active = self._active_intent = self._active_run_id = None
         self._active_roots = self._active_start = None
         self._active_cancel_attempted = False
+
+    def _claim_start_transition(self) -> None:
+        with self._lock:
+            if self._cancel.is_set():
+                raise ContractError("START_TRANSITION_CANCELLED")
+            if self._start_transition_active or self._active is not None:
+                raise ContractError("CAMPAIGN_SESSION_ACTIVE_CHILD")
+            self._start_transition_active = True
+            self._termination_error = None
+            self._bump()
+
+    def _finish_start_transition(self, code: str | None) -> None:
+        with self._lock:
+            if not self._start_transition_active:
+                return
+            self._start_transition_active = False
+            if self._campaign.state in {"READY", "ACTIVE"}:
+                if self._cancel.is_set() and code in {
+                    None, "START_TRANSITION_CANCELLED",
+                }:
+                    self._termination_error = None
+                    self._campaign.cancel(owner=self.lifecycle_owner)
+                elif code is not None:
+                    self._termination_error = code
+                    self._campaign.fault(
+                        owner=self.lifecycle_owner, code=code,
+                    )
+            self._bump()
 
     def _terminate_active(self) -> tuple[dict[str, Any] | None, bool]:
         """Attempt one bounded child cancel; retain an uncertain child handle."""
@@ -201,7 +244,7 @@ class CampaignSession:
             raise ContractError("CAMPAIGN_SESSION_AUTHOR_ONLY")
         if self._cancel.is_set():
             raise ContractError("CAMPAIGN_SESSION_CANCELLED")
-        if self._active is not None:
+        if self._start_transition_active or self._active is not None:
             raise ContractError("CAMPAIGN_SESSION_ACTIVE_CHILD")
         if not isinstance(run_id, str) or not SAFE_ID.fullmatch(run_id):
             raise ContractError("CAMPAIGN_SESSION_RUN_ID")
@@ -320,6 +363,9 @@ class CampaignSession:
             if self._campaign.state not in {"READY", "ACTIVE"}:
                 raise ContractError("CAMPAIGN_SESSION_TERMINAL")
             self._cancel.set()
+            if self._start_transition_active:
+                self._bump()
+                return {"campaign": self._campaign.status(), "child": None}
             child_result, terminal = self._terminate_active()
             campaign = (
                 self._campaign.cancel(owner=self.lifecycle_owner)

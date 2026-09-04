@@ -732,6 +732,21 @@
         check(document.querySelectorAll("#episode-results li").length === 3, "results preserve three completed episodes");
         check(document.querySelector("#episode-results").textContent.includes("분류 전"), "NOT_MEASURED is shown as unclassified data");
         check(document.querySelector("#episode-results").textContent.includes("보존 · 재패킹 필요") && document.querySelector("#technical-content").textContent.includes("retention_states") && document.querySelector("#technical-content").textContent.includes("reclaim_states"), "results expose ledger retention and reclaim state without changing it");
+        const canonicalHistory = Array.from({length: 32}, (_, index) => ({
+          ...clone(currentView.episode_history[index % currentView.episode_history.length]),
+          intent_binding: {run_id: `canonical-run-${index + 1}`},
+          result_digest: `sha256:${String(index + 1).padStart(64, "0")}`,
+        }));
+        const canonicalRefs = canonicalHistory.map((item) => [item.intent_binding.run_id, item.result_digest]);
+        renderResults({...currentView, episode_history: canonicalHistory, episode_result: {
+          outcome: "FAIL", code: "PHYSICAL_HOME_SNAPSHOT", intent_binding: null,
+        }});
+        check(document.querySelectorAll("#episode-results li").length === 32
+          && document.querySelector("#episode-results").textContent.includes("에피소드 32")
+          && !document.querySelector("#episode-results").textContent.includes("에피소드 33")
+          && !document.querySelector("#episode-results").textContent.includes("PHYSICAL_HOME_SNAPSHOT")
+          && JSON.stringify(canonicalHistory.map((item) => [item.intent_binding.run_id, item.result_digest])) === JSON.stringify(canonicalRefs), "pre-episode failure preserves 32 canonical episodes and never renders episode 33");
+        renderResults(currentView);
         check(document.querySelectorAll("[data-review-choice]").length === 3 && ["사용 후보", "제외", "보류"].every((label) => document.querySelector("#review-queue").textContent.includes(label)) && document.querySelector("#review-queue").textContent.includes("파일 보존과 학습 사용 승인"), "semantic review labels data use candidate state without changing retention or training authority");
         const focusedReason = document.querySelector("#candidate-reason");
         focusedReason.value = focusedReason.options[1].value;

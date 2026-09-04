@@ -23,9 +23,10 @@ ACTION_TYPES = {
 class _ActivePhase:
     phase: str
     type: str
-    goal_handle: object
-    result_future: object
     deadline: float
+    goal_future: object | None = None
+    goal_handle: object | None = None
+    result_future: object | None = None
 
 
 def _rotation_quaternion(columns):
@@ -371,42 +372,86 @@ class RosMoveItTransport:
             raise ContractError("ROS_EXEC_DESERIALIZATION", str(exc)) from exc
         return phase, step_type, goal, client, float(timeout)
 
-    def start_phase(self, compiled_step):
+    def start_phase(
+        self, compiled_step, *, cancel_event=None, cancel_timeout_s=None,
+    ):
         """Start one approved serialized action and retain its sole active handle."""
         if self._execution_locked or self._active is not None:
             raise ContractError("ROS_EXEC_ACTIVE")
         phase, step_type, goal, client, timeout = self._compiled_execution_goal(compiled_step)
+        if cancel_event is not None and (
+            not callable(getattr(cancel_event, "is_set", None))
+            or isinstance(cancel_timeout_s, bool)
+            or not isinstance(cancel_timeout_s, (int, float))
+            or not math.isfinite(cancel_timeout_s)
+            or cancel_timeout_s <= 0
+        ):
+            raise ContractError("ROS_EXEC_CANCEL_TIMEOUT")
+        active = _ActivePhase(phase, step_type, self._clock() + timeout)
+        self._active = active
+        self._execution_locked = True
+        if cancel_event is not None and cancel_event.is_set():
+            self._active = None
+            self._execution_locked = False
+            raise ContractError("ROS_EXEC_CANCELLED")
         try:
             sent = client.send_goal_async(goal)
         except RuntimeError as exc:
+            self._active = None
+            self._execution_locked = False
             raise ContractError("ROS_EXEC_GOAL_FAILED", str(exc)) from exc
+        active.goal_future = sent
         if step_type == "ARM":
             self._execute_goal_count += 1
         else:
             self._gripper_goal_count += 1
-        self._execution_locked = True
-        handle = self._wait(sent, self.graph_timeout_s, "ROS_EXEC_GOAL_TIMEOUT")
-        accepted = getattr(handle, "accepted", None)
-        if accepted is False:
-            self._execution_locked = False
-            raise ContractError("ROS_EXEC_REJECTED")
-        if accepted is not True:
-            raise ContractError("ROS_EXEC_GOAL_RESPONSE_INVALID")
         try:
-            result_future = handle.get_result_async()
+            handle = self._wait(sent, self.graph_timeout_s, "ROS_EXEC_GOAL_TIMEOUT")
+            accepted = getattr(handle, "accepted", None)
+            if accepted is False:
+                self._active = None
+                self._execution_locked = False
+                if cancel_event is not None and cancel_event.is_set():
+                    raise ContractError("ROS_EXEC_CANCELLED")
+                raise ContractError("ROS_EXEC_REJECTED")
+            if accepted is not True:
+                raise ContractError("ROS_EXEC_GOAL_RESPONSE_INVALID")
+            active.goal_handle = handle
+            active.result_future = handle.get_result_async()
+        except ContractError as exc:
+            if exc.code == "ROS_EXEC_CANCELLED":
+                raise
+            if cancel_event is None or not cancel_event.is_set():
+                raise
+            try:
+                self.cancel_active(float(cancel_timeout_s))
+            except ContractError as cancel_exc:
+                raise ContractError("ROS_EXEC_CANCEL_UNCERTAIN") from cancel_exc
+            raise ContractError("ROS_EXEC_CANCELLED") from exc
         except RuntimeError as exc:
+            if cancel_event is not None and cancel_event.is_set():
+                try:
+                    self.cancel_active(float(cancel_timeout_s))
+                except ContractError as cancel_exc:
+                    raise ContractError("ROS_EXEC_CANCEL_UNCERTAIN") from cancel_exc
+                raise ContractError("ROS_EXEC_CANCELLED") from exc
             raise ContractError("ROS_EXEC_RESULT_FAILED", str(exc)) from exc
+        if cancel_event is not None and cancel_event.is_set():
+            try:
+                self.cancel_active(float(cancel_timeout_s))
+            except ContractError as exc:
+                raise ContractError("ROS_EXEC_CANCEL_UNCERTAIN") from exc
+            raise ContractError("ROS_EXEC_CANCELLED")
         self._execution_locked = False
-        self._active = _ActivePhase(
-            phase, step_type, handle, result_future, self._clock() + timeout
-        )
-        return self._active
+        return active
 
     def poll_active(self):
         """Return None while active, or a successful phase handle when terminal."""
         active = getattr(self, "_active", None)
         if active is None:
             raise ContractError("ROS_EXEC_NO_ACTIVE")
+        if active.result_future is None:
+            raise ContractError("ROS_EXEC_GOAL_PENDING")
         if self._clock() > active.deadline:
             raise ContractError("ROS_EXEC_RESULT_TIMEOUT")
         try:
@@ -444,6 +489,21 @@ class RosMoveItTransport:
             raise ContractError("ROS_EXEC_CANCEL_TIMEOUT")
         self._execution_locked = True
         try:
+            if active.goal_handle is None:
+                if active.goal_future is None:
+                    raise ContractError("ROS_EXEC_CANCEL_ACK_TIMEOUT")
+                handle = self._wait(
+                    active.goal_future, float(cancel_timeout_s),
+                    "ROS_EXEC_CANCEL_ACK_TIMEOUT",
+                )
+                accepted = getattr(handle, "accepted", None)
+                if accepted is False:
+                    self._active = None
+                    return active
+                if accepted is not True:
+                    raise ContractError("ROS_EXEC_GOAL_RESPONSE_INVALID")
+                active.goal_handle = handle
+                active.result_future = handle.get_result_async()
             canceled = active.goal_handle.cancel_goal_async()
             response = self._wait(canceled, float(cancel_timeout_s), "ROS_EXEC_CANCEL_ACK_TIMEOUT")
             if not response.goals_canceling:

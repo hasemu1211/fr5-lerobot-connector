@@ -198,6 +198,12 @@ class DataFactoryOperatorUiStaticTest(unittest.TestCase):
         ):
             self.assertIn(marker, self.browser)
 
+    def test_pre_episode_failure_does_not_render_or_renumber_history(self):
+        self.assertIn(
+            "pre-episode failure preserves 32 canonical episodes and never renders episode 33",
+            self.browser,
+        )
+
     def test_forbidden_copy_and_browser_authority(self):
         product_copy = self.html + self.messages
         for retired in (

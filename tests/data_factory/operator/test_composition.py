@@ -3923,6 +3923,20 @@ feedback:
                 object_reposition_bindings=[None],
             )
             try:
+                canonical_history = [
+                    {
+                        "outcome": "PASS", "code": "TECHNICAL_PASS",
+                        "technical_evidence": {"status": "PASS"},
+                        "intent_binding": {"run_id": f"canonical-run-{index + 1}"},
+                        "result_digest": canonical_digest(["canonical", index + 1]),
+                    }
+                    for index in range(32)
+                ]
+                console._episode_history.extend(copy.deepcopy(canonical_history))
+                canonical_refs = [
+                    (item["intent_binding"]["run_id"], item["result_digest"])
+                    for item in canonical_history
+                ]
                 initial = console.bridge_core.snapshot()
                 compiled = console.bridge_core.consume(envelope(
                     initial, "compile_draft", {
@@ -3955,11 +3969,100 @@ feedback:
                     ("BLOCKED", "NOT_AVAILABLE", ["PHYSICAL_HOME_SNAPSHOT"], None),
                 )
                 self.assertIsNone(result["intent_binding"])
+                self.assertEqual(len(projection["episode_history"]), 32)
+                self.assertEqual(
+                    [
+                        (item["intent_binding"]["run_id"], item["result_digest"])
+                        for item in projection["episode_history"]
+                    ],
+                    canonical_refs,
+                )
+                self.assertEqual(projection["episode_result"], result)
+                self.assertEqual(console._episode_history, canonical_history)
                 self.assertFalse(console.episode_worker.is_alive())
                 harness.start_binding.assert_called_once()
                 self.assertEqual(harness.operator_counters["physical_factory"], 0)
                 self.assertTrue(all(value == 0 for value in harness.forbidden.values()))
                 self.assertEqual(list(Path(root).rglob("*")), [])
+            finally:
+                console.close()
+
+    def test_cancel_uncertainty_before_intent_stays_blocked_without_effects(self):
+        with tempfile.TemporaryDirectory() as root:
+            harness = Harness(root)
+            entered = threading.Event()
+            calls = []
+
+            def uncertain_start(_run_id, _slot, cancel_event):
+                cancel_event.claim_start_transition()
+                calls.append("claimed-before-dispatch")
+                entered.set()
+                if not cancel_event.wait(1.0):
+                    raise AssertionError("cancel did not reach startup owner")
+                calls.append("cancel-uncertain")
+                try:
+                    raise ContractError("START_TRANSITION_CANCEL_UNCERTAIN")
+                finally:
+                    cancel_event.finish_start_transition(
+                        "START_TRANSITION_CANCEL_UNCERTAIN",
+                    )
+
+            harness.start_binding = uncertain_start
+            console = harness.console(
+                campaign_approval_once=True,
+                object_reposition_bindings=[None],
+            )
+            try:
+                initial = console.bridge_core.snapshot()
+                compiled = console.bridge_core.consume(envelope(
+                    initial, "compile_draft", {
+                        "draft_id": harness.source_draft["draft_id"],
+                        "data_disposition": "TEST_ONLY",
+                    }, "compile-start-cancel-uncertain",
+                ))["result"]
+                review = console.bridge_core.snapshot()
+                console.bridge_core.consume(envelope(
+                    review, "authorize_campaign", {
+                        "draft_id": harness.source_draft["draft_id"],
+                        "manifest_digest": compiled["manifest_digest"],
+                        "envelope_digest": compiled["envelope_digest"],
+                        "data_disposition": "TEST_ONLY",
+                    }, "authorize-start-cancel-uncertain",
+                ))
+                self.assertTrue(entered.wait(1.0))
+                running = console.bridge_core.snapshot()
+                console.bridge_core.consume(envelope(
+                    running, "cancel_session", {
+                        "active_child_id": running["projection"]["runtime"][
+                            "active_child_id"
+                        ],
+                    }, "cancel-start-uncertain",
+                ))
+
+                result = console.wait_for_episode(1.0)
+                projection = console.bridge_core.snapshot()["projection"]
+                self.assertEqual(calls, ["claimed-before-dispatch", "cancel-uncertain"])
+                self.assertEqual(
+                    (result["outcome"], result["code"],
+                     projection["runtime"]["workflow_state"]),
+                    ("FAIL", "START_TRANSITION_CANCEL_UNCERTAIN", "BLOCKED"),
+                )
+                self.assertEqual(
+                    (console.session.status()["campaign"]["state"],
+                     console.session.status()["termination_error"]),
+                    ("BLOCKED", "START_TRANSITION_CANCEL_UNCERTAIN"),
+                )
+                self.assertEqual(projection["episode_history"], [])
+                self.assertEqual(projection["episode_result"], result)
+                self.assertEqual(harness.operator_counters["physical_factory"], 0)
+                self.assertTrue(all(value == 0 for value in harness.forbidden.values()))
+                self.assertEqual(list(Path(root).rglob("*")), [])
+                with self.assertRaisesRegex(
+                    ContractError, "CAMPAIGN_OPERATOR_TERMINAL",
+                ):
+                    console.campaign_operator.run_next(
+                        {"run_id": "uncertain-retry-r001"}, {},
+                    )
             finally:
                 console.close()
 
