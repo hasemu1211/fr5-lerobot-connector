@@ -2548,11 +2548,17 @@ class OperatorConsole:
 
     def close(self) -> None:
         thread = self._thread
-        if thread is None or not thread.is_alive():
-            self.checkpoint_port.close()
-            return
-        with self._lock:
-            self._cancel_owner()
-        thread.join(self.close_timeout_s)
-        if thread.is_alive():
-            raise ContractError("OPERATOR_CONSOLE_THREAD_LEAK")
+        if thread is not None and thread.is_alive():
+            with self._lock:
+                self._cancel_owner()
+            thread.join(self.close_timeout_s)
+            if thread.is_alive():
+                raise ContractError("OPERATOR_CONSOLE_THREAD_LEAK")
+        session = None if self.session is None else self.session.status()
+        owner = (
+            session.get("start_transition_owner")
+            if isinstance(session, Mapping) else None
+        )
+        if isinstance(owner, Mapping) and owner.get("active") is True:
+            raise ContractError("OPERATOR_CONSOLE_START_OWNER_ACTIVE")
+        self.checkpoint_port.close()

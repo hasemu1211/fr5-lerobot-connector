@@ -2306,16 +2306,34 @@ class CollectionOperatorApplication:
             if self._closed:
                 return
             preparation = None
-            campaign = None
 
             def detach() -> None:
-                nonlocal preparation, campaign
+                nonlocal preparation
+                _snapshot, inner = self._campaign_snapshot()
+                session = (
+                    inner.get("campaign_session")
+                    if isinstance(inner, Mapping) else None
+                )
+                owner = (
+                    session.get("start_transition_owner")
+                    if isinstance(session, Mapping) else None
+                )
+                if (
+                    isinstance(owner, Mapping)
+                    and owner.get("active") is True
+                    and owner.get("action_owner_retained") is True
+                ):
+                    raise ContractError(
+                        "OPERATOR_APPLICATION_START_OWNER_ACTIVE",
+                    )
+                close = getattr(self._campaign, "close", None)
+                if callable(close):
+                    close()
                 self._closed = True
                 preparation = self._preparation
                 if preparation is not None:
                     preparation.state = "CLOSED"
                     self._preparation = None
-                campaign = self._campaign
                 self._campaign = None
 
             try:
@@ -2325,9 +2343,6 @@ class CollectionOperatorApplication:
                     raise
             if preparation is not None:
                 preparation.cleanup()
-            close = getattr(campaign, "close", None)
-            if callable(close):
-                close()
 
 
 __all__ = ["CollectionOperatorApplication"]

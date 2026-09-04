@@ -41,6 +41,7 @@ from tools.data_factory.operator.catalog import (
 )
 from tools.data_factory.operator.cli import main as operator_console_main
 from tools.data_factory.operator.composition import (
+    OperatorRuntime,
     _campaign_authorization_ttl,
     _domain_seed,
     build_physical_operator_application,
@@ -430,6 +431,41 @@ class Harness:
 
 
 class OperatorConsoleTests(unittest.TestCase):
+    def test_runtime_close_waits_after_retained_owner_refuses_teardown(self):
+        terminal = threading.Event()
+        refused = threading.Event()
+        calls = []
+
+        def close_application():
+            if not terminal.is_set():
+                refused.set()
+                raise ContractError("OPERATOR_APPLICATION_START_OWNER_ACTIVE")
+            calls.append("application")
+
+        runtime = OperatorRuntime(
+            bridge=object(), announcement={},
+            close_calls=(
+                close_application,
+                lambda: calls.append("environment"),
+                lambda: calls.append("bridge"),
+            ),
+        )
+        worker = threading.Thread(target=runtime.close)
+        worker.start()
+        self.assertTrue(refused.wait(1.0))
+        self.assertTrue(worker.is_alive())
+        self.assertFalse(runtime._closed)
+        self.assertEqual(calls, [])
+
+        terminal.set()
+        worker.join(1.0)
+        self.assertFalse(worker.is_alive())
+        runtime.close()
+        self.assertTrue(runtime._closed)
+        self.assertEqual(
+            calls, ["application", "environment", "bridge"],
+        )
+
     def test_domain_seeds_are_deterministic_and_slot_order_independent(self):
         slot = {
             "slot_id": "stable-slot-r001",
@@ -4109,8 +4145,6 @@ feedback:
                 calls.append("cancel-uncertain")
                 cancel_event.finish_start_transition(
                     "START_TRANSITION_CANCEL_UNCERTAIN",
-                )
-                cancel_event.retain_start_transition_owner(
                     lambda: terminal[0],
                 )
                 raise ContractError("START_TRANSITION_CANCEL_UNCERTAIN")
@@ -4179,7 +4213,8 @@ feedback:
                 with self.assertRaisesRegex(
                     ContractError, "CAMPAIGN_SESSION_START_OWNER",
                 ):
-                    console.session.cancel_event.retain_start_transition_owner(
+                    console.session.cancel_event.finish_start_transition(
+                        "START_TRANSITION_CANCEL_UNCERTAIN",
                         lambda: terminal[0],
                     )
                 self.assertEqual(projection["episode_history"], [])
@@ -4193,6 +4228,13 @@ feedback:
                     console.campaign_operator.run_next(
                         {"run_id": "uncertain-retry-r001"}, {},
                     )
+                with self.assertRaisesRegex(
+                    ContractError, "OPERATOR_CONSOLE_START_OWNER_ACTIVE",
+                ):
+                    console.close()
+                self.assertIsNotNone(
+                    console.session.status()["start_transition_owner"],
+                )
                 terminal[0] = {
                     "schema_version": (
                         "data_factory.ros_action_terminal_evidence.v1"

@@ -230,7 +230,7 @@ class StartTransitionTests(unittest.TestCase):
             transport.start_phase({}, cancel_event=event, cancel_timeout_s=0.1)
         self.assertEqual(client.send_goal_async.call_count, 1)
 
-    def test_live_cancel_uncertainty_retains_one_owner_until_rejection(self):
+    def test_live_acceptance_timeout_retains_one_owner_without_user_cancel(self):
         class Future:
             def __init__(self):
                 self.complete = False
@@ -252,10 +252,8 @@ class StartTransitionTests(unittest.TestCase):
             def claim_start_transition(self):
                 self.claims += 1
 
-            def finish_start_transition(self, code):
+            def finish_start_transition(self, code, owner=None):
                 self.finishes.append(code)
-
-            def retain_start_transition_owner(self, owner):
                 self.owner = owner
 
         pending = Future()
@@ -266,7 +264,7 @@ class StartTransitionTests(unittest.TestCase):
         event = OwnerEvent()
         transport.node = node = mock.Mock()
         transport._rclpy.spin_until_future_complete = (
-            lambda *_args, **_kwargs: event.set()
+            lambda *_args, **_kwargs: None
         )
         transport.preflight = lambda: {
             name: {"ready": True}
@@ -317,10 +315,11 @@ class StartTransitionTests(unittest.TestCase):
             ))
             self.assertTrue(transport.owns_active_goal)
             self.assertIsNotNone(event.owner)
+            self.assertFalse(event.is_set())
             self.assertEqual(
                 (client.send_goal_async.call_count,
                  transport.cancel_active.call_count),
-                (1, 1),
+                (1, 0),
             )
             node.destroy_node.assert_not_called()
             stop.assert_not_called()
@@ -338,9 +337,102 @@ class StartTransitionTests(unittest.TestCase):
             self.assertEqual(
                 (client.send_goal_async.call_count,
                  transport.cancel_active.call_count),
-                (1, 1),
+                (1, 0),
             )
             initialize.assert_called_once_with()
+            node.destroy_node.assert_called_once_with()
+            stop.assert_called_once_with()
+
+    def test_live_automatic_cancel_timeout_retains_owner_until_result(self):
+        class OwnerEvent(threading.Event):
+            def __init__(self):
+                super().__init__()
+                self.claims = 0
+                self.finishes = []
+                self.owner = None
+
+            def claim_start_transition(self):
+                self.claims += 1
+
+            def finish_start_transition(self, code, owner=None):
+                self.finishes.append(code)
+                self.owner = owner
+
+        class UncertainTransport(FakeTransport):
+            def __init__(self, snapshots):
+                super().__init__(snapshots)
+                self.cancelled = 0
+                self.evidence = None
+                self.owner = True
+
+            @property
+            def owns_active_goal(self):
+                return self.owner
+
+            def poll_active(self):
+                raise ContractError("ROS_EXEC_RESULT_TIMEOUT")
+
+            def cancel_active(self, _timeout):
+                self.cancelled += 1
+                raise ContractError("ROS_EXEC_CANCEL_RESULT_TIMEOUT")
+
+            def poll_terminal_evidence(self):
+                if self.evidence is not None:
+                    self.owner = False
+                return self.evidence
+
+        event = OwnerEvent()
+        target = list(TARGET.values())
+        start = [item + 0.2 for item in target]
+        transport = UncertainTransport([
+            snapshot(start), snapshot(start),
+        ])
+        node = mock.Mock()
+        context = [False]
+
+        def init():
+            context[0] = True
+
+        def shutdown():
+            context[0] = False
+
+        with (
+            mock.patch("rclpy.ok", side_effect=lambda: context[0]),
+            mock.patch("rclpy.init", side_effect=init),
+            mock.patch("rclpy.create_node", return_value=node),
+            mock.patch("rclpy.shutdown", side_effect=shutdown) as stop,
+            mock.patch(
+                "tools.data_factory.motion.moveit_transport.RosMoveItTransport",
+                return_value=transport,
+            ),
+        ):
+            with self.assertRaisesRegex(
+                ContractError, "START_TRANSITION_CANCEL_UNCERTAIN",
+            ):
+                transition_to_start_live(
+                    motion_qualification=MOTION,
+                    robot_start_pose_qualification=qualification(),
+                    cancel_event=event,
+                )
+            self.assertFalse(event.is_set())
+            self.assertEqual(
+                (event.claims, event.finishes, transport.cancelled),
+                (1, ["START_TRANSITION_CANCEL_UNCERTAIN"], 1),
+            )
+            self.assertIsNone(event.owner())
+            node.destroy_node.assert_not_called()
+            stop.assert_not_called()
+
+            transport.evidence = {
+                "schema_version": "data_factory.ros_action_terminal_evidence.v1",
+                "terminal": True,
+                "phase": "SAFE_POSE_PTP",
+                "type": "ARM",
+                "goal_acceptance": "ACCEPTED",
+                "result_status": 6,
+            }
+            self.assertEqual(event.owner(), transport.evidence)
+            self.assertFalse(transport.owns_active_goal)
             node.destroy_node.assert_called_once_with()
             stop.assert_called_once_with()
 

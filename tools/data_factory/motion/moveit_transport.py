@@ -477,7 +477,7 @@ class RosMoveItTransport:
         return active
 
     def cancel_active(self, cancel_timeout_s):
-        """Cancel the active action; it is never exposed as active again."""
+        """Cancel the active action, retaining non-cancel results for evidence."""
         active = getattr(self, "_active", None)
         if active is None:
             raise ContractError("ROS_EXEC_NO_ACTIVE")
@@ -517,7 +517,6 @@ class RosMoveItTransport:
         except RuntimeError as exc:
             raise ContractError("ROS_EXEC_CANCEL_FAILED", str(exc)) from exc
         if result.status != self._goal_canceled:
-            self._active = None
             raise ContractError("ROS_EXEC_CANCEL_NOT_CANCELED")
         self._active = None
         return active

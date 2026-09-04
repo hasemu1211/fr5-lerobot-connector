@@ -44,11 +44,10 @@ class _SessionCancelEvent(threading.Event):
     def claim_start_transition(self) -> None:
         self._session._claim_start_transition()
 
-    def finish_start_transition(self, code: str | None) -> None:
-        self._session._finish_start_transition(code)
-
-    def retain_start_transition_owner(self, owner: Callable[[], object]) -> None:
-        self._session._retain_start_transition_owner(owner)
+    def finish_start_transition(
+        self, code: str | None, owner: Callable[[], object] | None = None,
+    ) -> None:
+        self._session._finish_start_transition(code, owner)
 
 
 class CampaignSession:
@@ -151,19 +150,6 @@ class CampaignSession:
             self._termination_error = None
             self._bump()
 
-    def _retain_start_transition_owner(self, owner: Callable[[], object]) -> None:
-        with self._lock:
-            if (
-                not self._start_transition_active
-                or self._termination_error
-                != "START_TRANSITION_CANCEL_UNCERTAIN"
-                or not callable(owner)
-                or self._start_transition_owner is not None
-            ):
-                raise ContractError("CAMPAIGN_SESSION_START_OWNER")
-            self._start_transition_owner = owner
-            self._bump()
-
     def _refresh_start_transition_owner(self) -> None:
         owner = self._start_transition_owner
         if owner is None:
@@ -180,14 +166,23 @@ class CampaignSession:
         self._start_transition_run_id = None
         self._bump()
 
-    def _finish_start_transition(self, code: str | None) -> None:
+    def _finish_start_transition(
+        self, code: str | None,
+        owner: Callable[[], object] | None = None,
+    ) -> None:
         with self._lock:
             if not self._start_transition_active:
                 return
             uncertain = code == "START_TRANSITION_CANCEL_UNCERTAIN"
+            if (
+                self._start_transition_owner is not None
+                or (uncertain and not callable(owner))
+                or (not uncertain and owner is not None)
+            ):
+                raise ContractError("CAMPAIGN_SESSION_START_OWNER")
             self._start_transition_active = uncertain
+            self._start_transition_owner = owner if uncertain else None
             if not uncertain:
-                self._start_transition_owner = None
                 self._start_transition_run_id = None
             if self._campaign.state in {"READY", "ACTIVE"}:
                 if self._cancel.is_set() and code in {

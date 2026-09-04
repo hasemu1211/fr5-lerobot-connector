@@ -16,6 +16,61 @@ from tools.data_factory.motion.moveit_transport import RosMoveItTransport
 
 
 class TestExecutionTransport(unittest.TestCase):
+    def test_cancel_race_keeps_non_cancel_terminal_result_pollable(self):
+        class Future:
+            def __init__(self, value):
+                self.value = value
+
+            def done(self):
+                return True
+
+            def result(self):
+                return self.value
+
+        class Handle:
+            def __init__(self, result):
+                self.result = result
+
+            def cancel_goal_async(self):
+                return Future(SimpleNamespace(goals_canceling=[object()]))
+
+        for status in (
+            GoalStatus.STATUS_SUCCEEDED,
+            GoalStatus.STATUS_CANCELED,
+            GoalStatus.STATUS_ABORTED,
+        ):
+            with self.subTest(status=status):
+                result = Future(SimpleNamespace(status=status))
+                active = SimpleNamespace(
+                    phase="SAFE_POSE_PTP", type="ARM",
+                    goal_handle=Handle(result), result_future=result,
+                )
+                transport = object.__new__(RosMoveItTransport)
+                transport._active = active
+                transport._execution_locked = False
+                transport._goal_succeeded = GoalStatus.STATUS_SUCCEEDED
+                transport._goal_canceled = GoalStatus.STATUS_CANCELED
+                transport._goal_aborted = GoalStatus.STATUS_ABORTED
+                transport.node = object()
+                transport._rclpy = SimpleNamespace(
+                    spin_until_future_complete=lambda *_args, **_kwargs: None,
+                    spin_once=lambda *_args, **_kwargs: None,
+                )
+
+                if status == GoalStatus.STATUS_CANCELED:
+                    self.assertIs(transport.cancel_active(1.0), active)
+                    self.assertFalse(transport.owns_active_goal)
+                    continue
+                with self.assertRaisesRegex(
+                    ContractError, "ROS_EXEC_CANCEL_NOT_CANCELED",
+                ):
+                    transport.cancel_active(1.0)
+                self.assertTrue(transport.owns_active_goal)
+                self.assertEqual(
+                    transport.poll_terminal_evidence()["result_status"], status,
+                )
+                self.assertFalse(transport.owns_active_goal)
+
     def test_robot_description_parameter_retries_transient_future_failure(self):
         description = (
             "<robot><ros2_control><hardware>"

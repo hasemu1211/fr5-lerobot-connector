@@ -62,6 +62,7 @@ class StubCampaign:
         self.campaign_coverage = None
         self.reason_codes = []
         self.start_transition_owner = None
+        self.start_transition_terminal_evidence = None
         self.core = OperatorIntentCore(
             session_id=campaign_id,
             projection_call=self.projection,
@@ -181,6 +182,9 @@ class StubCampaign:
                 },
                 "start_transition_owner": copy.deepcopy(
                     self.start_transition_owner
+                ),
+                "start_transition_terminal_evidence": copy.deepcopy(
+                    self.start_transition_terminal_evidence
                 ),
             },
             "episode_history": copy.deepcopy(self.history),
@@ -1703,6 +1707,54 @@ class CollectionOperatorApplicationTests(unittest.TestCase):
         self.assertEqual(
             released["available_ops"],
             ["recover_home", "new_campaign_same_settings"],
+        )
+
+    def test_close_preserves_uncertain_start_owner_until_terminal_evidence(self):
+        self.consume("prepare_environment", {}, "prepare-close-owner")
+        authored = self.application.bridge_core.snapshot()["projection"]
+        compiled = self.consume("compile_draft", {
+            "draft_id": authored["draft"]["draft_id"],
+            "data_disposition": "TEST_ONLY",
+        }, "compile-close-owner")
+        self.consume("authorize_campaign", {
+            "draft_id": authored["draft"]["draft_id"],
+            "manifest_digest": compiled["manifest_digest"],
+            "envelope_digest": compiled["envelope_digest"],
+            "data_disposition": "TEST_ONLY",
+        }, "authorize-close-owner")
+        campaign = self.campaigns[0]
+        campaign.state = "BLOCKED"
+        campaign.start_transition_owner = {
+            "active": True,
+            "run_id": f"{campaign.campaign_id}-run-1",
+            "state": "TERMINALITY_UNCERTAIN",
+            "owner_reachable": True,
+            "action_owner_retained": True,
+            "code": "START_TRANSITION_CANCEL_UNCERTAIN",
+        }
+
+        with self.assertRaisesRegex(
+            ContractError, "OPERATOR_APPLICATION_START_OWNER_ACTIVE",
+        ):
+            self.application.close()
+        self.assertIs(self.application._campaign, campaign)
+        self.assertFalse(self.application._closed)
+        self.assertFalse(campaign.closed)
+
+        campaign.start_transition_terminal_evidence = {
+            "schema_version": "data_factory.ros_action_terminal_evidence.v1",
+            "terminal": True,
+            "phase": "SAFE_POSE_PTP",
+            "type": "ARM",
+            "goal_acceptance": "ACCEPTED",
+            "result_status": 6,
+        }
+        campaign.start_transition_owner = None
+        self.application.close()
+        self.assertTrue(self.application._closed)
+        self.assertTrue(campaign.closed)
+        self.assertEqual(
+            campaign.start_transition_terminal_evidence["result_status"], 6,
         )
 
     def test_camera_recovery_preserves_seed(self):

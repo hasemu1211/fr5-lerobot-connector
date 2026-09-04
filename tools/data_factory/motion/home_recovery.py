@@ -230,6 +230,7 @@ def _transition(
     transport, *, motion: Mapping[str, Any], before: Mapping[str, Any],
     target: list[float], tolerances: list[float], precommit_call,
     prefix: str, sleep_call=time.sleep, cancel_event=None,
+    terminal_owner=None,
 ) -> dict[str, Any]:
     _raise_if_cancelled(cancel_event, prefix)
     motion_tolerance = float(motion["goal_tolerances"]["joint_rad"])
@@ -360,24 +361,37 @@ def _transition(
             "precommit_evidence_digest": precommit["evidence_digest"],
         }
     except ContractError as exc:
-        failure_code = exc.code
-        raise
-    except Exception:
         failure_code = (
             f"{prefix}_CANCEL_UNCERTAIN"
-            if cancel_event is not None and cancel_event.is_set()
+            if cancel_event is not None
+            and getattr(transport, "owns_active_goal", False)
+            else exc.code
+        )
+        if failure_code != exc.code:
+            raise ContractError(failure_code) from exc
+        raise
+    except Exception as exc:
+        failure_code = (
+            f"{prefix}_CANCEL_UNCERTAIN"
+            if cancel_event is not None
+            and getattr(transport, "owns_active_goal", False)
             else f"{prefix}_FAILED"
         )
+        if failure_code.endswith("_CANCEL_UNCERTAIN"):
+            raise ContractError(failure_code) from exc
         raise
     finally:
         if claimed and callable(finish):
-            finish(failure_code)
+            if failure_code == f"{prefix}_CANCEL_UNCERTAIN":
+                finish(failure_code, terminal_owner)
+            else:
+                finish(failure_code)
 
 
 def transition_to_start(
     transport, *, motion_qualification: Mapping[str, Any],
     robot_start_pose_qualification: Mapping[str, Any], sleep_call=time.sleep,
-    cancel_event=None,
+    cancel_event=None, _terminal_owner=None,
 ) -> dict[str, Any]:
     """Move once to an already-qualified collection start pose, without recording."""
     motion = _validated_motion(motion_qualification, "START_TRANSITION")
@@ -395,7 +409,7 @@ def transition_to_start(
         tolerances=tolerances,
         precommit_call=transport.precommit_joint_transition,
         prefix="START_TRANSITION", sleep_call=sleep_call,
-        cancel_event=cancel_event,
+        cancel_event=cancel_event, terminal_owner=_terminal_owner,
     )
     result = {
         "schema_version": "data_factory.start_transition_receipt.v1",
@@ -492,6 +506,7 @@ def _live(
     transport = None
     retained = False
     closed = False
+    evidence = None
 
     def close() -> None:
         nonlocal closed
@@ -505,30 +520,26 @@ def _live(
             if owned_context and rclpy.ok():
                 rclpy.shutdown()
 
+    def terminal_owner():
+        nonlocal evidence
+        if evidence is None:
+            evidence = transport.poll_terminal_evidence()
+        if evidence is not None:
+            close()
+        return evidence
+
     try:
         if owned_context:
             rclpy.init()
         node = rclpy.create_node(node_name)
         transport = RosMoveItTransport(node)
-        return call(transport)
+        return call(transport, terminal_owner)
     except Exception:
         if (
             cancel_event is not None
-            and cancel_event.is_set()
             and transport is not None
             and transport.owns_active_goal
         ):
-            evidence = None
-
-            def terminal_owner():
-                nonlocal evidence
-                if evidence is None:
-                    evidence = transport.poll_terminal_evidence()
-                if evidence is not None:
-                    close()
-                return evidence
-
-            cancel_event.retain_start_transition_owner(terminal_owner)
             retained = True
         raise
     finally:
@@ -540,7 +551,7 @@ def recover_home_live(*, motion_qualification: Mapping[str, Any]) -> dict[str, A
     """Run HOME recovery in this foreground process and release its ROS node."""
     return _live(
         "fr5_operator_home_recovery", "HOME_RECOVERY_ROS_UNAVAILABLE",
-        lambda transport: recover_home(
+        lambda transport, _terminal_owner: recover_home(
             transport, motion_qualification=motion_qualification,
         ),
     )
@@ -552,20 +563,21 @@ def transition_to_start_live(
     cancel_event=None,
 ) -> dict[str, Any]:
     """Run a qualified start transition in this process and release its node."""
-    if cancel_event is not None and (
-        not callable(getattr(cancel_event, "is_set", None))
-        or not callable(
-            getattr(cancel_event, "retain_start_transition_owner", None)
+    if cancel_event is None or any(
+        not callable(getattr(cancel_event, name, None))
+        for name in (
+            "is_set", "claim_start_transition", "finish_start_transition",
         )
     ):
         raise ContractError("START_TRANSITION_OWNER")
     return _live(
         "fr5_operator_start_transition", "START_TRANSITION_ROS_UNAVAILABLE",
-        lambda transport: transition_to_start(
+        lambda transport, terminal_owner: transition_to_start(
             transport,
             motion_qualification=motion_qualification,
             robot_start_pose_qualification=robot_start_pose_qualification,
             cancel_event=cancel_event,
+            _terminal_owner=terminal_owner,
         ),
         cancel_event=cancel_event,
     )

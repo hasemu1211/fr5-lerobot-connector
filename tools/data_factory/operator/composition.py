@@ -6,6 +6,7 @@ import math
 import re
 import shutil
 import tempfile
+import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -1322,7 +1323,6 @@ class OperatorRuntime:
     def close(self) -> None:
         if self._closed:
             return
-        self._closed = True
         seen = set()
         for close in self._close_calls:
             owner = getattr(close, "__self__", None)
@@ -1330,7 +1330,18 @@ class OperatorRuntime:
             if key in seen:
                 continue
             seen.add(key)
-            close()
+            while True:
+                try:
+                    close()
+                    break
+                except ContractError as exc:
+                    if exc.code not in {
+                        "OPERATOR_APPLICATION_START_OWNER_ACTIVE",
+                        "OPERATOR_CONSOLE_START_OWNER_ACTIVE",
+                    }:
+                        raise
+                    time.sleep(0.01)
+        self._closed = True
 
 
 def _load_fixture(root: Path) -> tuple[dict[str, Any], dict[str, Any]]:
