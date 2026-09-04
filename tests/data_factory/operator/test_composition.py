@@ -56,6 +56,7 @@ from tools.data_factory.operator.setup.physical import (
     passive_physical_gate,
 )
 from tools.data_factory.operator.workflow.campaign import (
+    OperatorConsole as WorkflowOperatorConsole,
     _derive_test_only_gripper_program,
     _campaign_camera_warmup,
     _validate_successful_object_reposition_result,
@@ -404,12 +405,13 @@ class Harness:
         self, *, episode_call=None, prepare_timeout_s=1.0,
         candidate_review_port=None, campaign_approval_once=False,
         object_reposition_bindings=None, close_timeout_s=1.0,
+        console_class=OperatorConsole,
     ) -> OperatorConsole:
         def forbidden_review(*_args, **_kwargs):
             self.forbidden["candidate"] += 1
             raise AssertionError("TEST_ONLY must not review a production candidate")
 
-        return OperatorConsole(
+        return console_class(
             session_id="physical-console-r001", operator_label="local-operator",
             campaign_operator_factory=self.operator_factory,
             episode_call=episode_call or self.episode, projection_call=self.projection,
@@ -432,6 +434,45 @@ class Harness:
 
 
 class OperatorConsoleTests(unittest.TestCase):
+    def test_workflow_base_console_uses_the_composition_close_authority(self):
+        self.assertIs(OperatorConsole, WorkflowOperatorConsole)
+        with tempfile.TemporaryDirectory() as root:
+            harness = Harness(root)
+            claimed = threading.Event()
+            release = threading.Event()
+
+            def held_start(_run_id, _slot, cancel_event):
+                cancel_event.claim_start_transition()
+                claimed.set()
+                if not cancel_event.wait(1.0):
+                    raise AssertionError("cancellation did not reach startup owner")
+                if not release.wait(1.0):
+                    raise AssertionError("startup worker was not released")
+                cancel_event.finish_start_transition(
+                    "START_TRANSITION_CANCELLED",
+                )
+                raise ContractError("START_TRANSITION_CANCELLED")
+
+            harness.start_binding = held_start
+            console = harness.console(
+                campaign_approval_once=True,
+                object_reposition_bindings=[None],
+                close_timeout_s=0.01,
+                console_class=WorkflowOperatorConsole,
+            )
+            try:
+                start_campaign(console, harness, "workflow-base-close")
+                self.assertTrue(claimed.wait(1.0))
+                with self.assertRaisesRegex(
+                    ContractError, "OPERATOR_CONSOLE_START_OWNER_ACTIVE",
+                ):
+                    console.close()
+            finally:
+                release.set()
+                if console.episode_worker is not None:
+                    console.episode_worker.join(1.0)
+                console.close()
+
     def test_runtime_close_waits_after_retained_owner_refuses_teardown(self):
         terminal = threading.Event()
         refused = threading.Event()
@@ -614,6 +655,129 @@ class OperatorConsoleTests(unittest.TestCase):
             finally:
                 release.set()
                 worker.join(1.0)
+                console.close()
+
+    def test_console_close_retries_until_terminal_start_worker_unwinds(self):
+        with tempfile.TemporaryDirectory() as root:
+            harness = Harness(root)
+            claimed = threading.Event()
+            owner_published = threading.Event()
+            release_worker = threading.Event()
+            terminal = [None]
+            terminal_evidence = {
+                "schema_version": (
+                    "data_factory.ros_action_terminal_evidence.v1"
+                ),
+                "terminal": True,
+                "phase": "SAFE_POSE_PTP",
+                "type": "ARM",
+                "goal_acceptance": "REJECTED",
+                "result_status": None,
+            }
+
+            def uncertain_start(_run_id, _slot, cancel_event):
+                cancel_event.claim_start_transition()
+                claimed.set()
+                if not cancel_event.wait(1.0):
+                    raise AssertionError("cancellation did not reach startup owner")
+                cancel_event.finish_start_transition(
+                    "START_TRANSITION_CANCEL_UNCERTAIN",
+                    lambda: terminal[0],
+                )
+                owner_published.set()
+                if not release_worker.wait(1.0):
+                    raise AssertionError("startup worker was not released")
+                raise ContractError("START_TRANSITION_CANCEL_UNCERTAIN")
+
+            harness.start_binding = uncertain_start
+            console = harness.console(
+                campaign_approval_once=True,
+                object_reposition_bindings=[None],
+                close_timeout_s=0.01,
+            )
+            try:
+                start_campaign(console, harness, "terminal-before-unwind")
+                self.assertTrue(claimed.wait(1.0))
+                with self.assertRaisesRegex(
+                    ContractError, "OPERATOR_CONSOLE_START_OWNER_ACTIVE",
+                ):
+                    console.close()
+                self.assertTrue(owner_published.wait(1.0))
+
+                terminal[0] = terminal_evidence
+                status = console.session.status()
+                self.assertIsNone(status["start_transition_owner"])
+                self.assertEqual(
+                    status["start_transition_terminal_evidence"],
+                    terminal_evidence,
+                )
+                self.assertTrue(console.episode_worker.is_alive())
+                with self.assertRaisesRegex(
+                    ContractError, "OPERATOR_CONSOLE_START_OWNER_ACTIVE",
+                ):
+                    console.close()
+            finally:
+                terminal[0] = terminal_evidence
+                release_worker.set()
+                if console.episode_worker is not None:
+                    console.episode_worker.join(1.0)
+                console.close()
+
+    def test_console_close_rejects_unrelated_worker_with_stale_start_owner(self):
+        with tempfile.TemporaryDirectory() as root:
+            harness = Harness(root)
+            claimed = threading.Event()
+            owner_published = threading.Event()
+            terminal = [None]
+
+            def uncertain_start(_run_id, _slot, cancel_event):
+                cancel_event.claim_start_transition()
+                claimed.set()
+                if not cancel_event.wait(1.0):
+                    raise AssertionError("cancellation did not reach startup owner")
+                cancel_event.finish_start_transition(
+                    "START_TRANSITION_CANCEL_UNCERTAIN",
+                    lambda: terminal[0],
+                )
+                owner_published.set()
+                raise ContractError("START_TRANSITION_CANCEL_UNCERTAIN")
+
+            harness.start_binding = uncertain_start
+            console = harness.console(
+                campaign_approval_once=True,
+                object_reposition_bindings=[None],
+                close_timeout_s=0.01,
+            )
+            release_unrelated = threading.Event()
+            unrelated = threading.Thread(
+                target=lambda: release_unrelated.wait(1.0),
+            )
+            try:
+                start_campaign(console, harness, "stale-start-owner")
+                self.assertTrue(claimed.wait(1.0))
+                with self.assertRaisesRegex(
+                    ContractError, "OPERATOR_CONSOLE_START_OWNER_ACTIVE",
+                ):
+                    console.close()
+                self.assertTrue(owner_published.wait(1.0))
+                startup_worker = console.episode_worker
+                startup_worker.join(1.0)
+                self.assertFalse(startup_worker.is_alive())
+                self.assertIsNotNone(
+                    console.session.status()["start_transition_owner"],
+                )
+
+                console._thread = unrelated
+                unrelated.start()
+                with self.assertRaisesRegex(
+                    ContractError, "OPERATOR_CONSOLE_THREAD_LEAK",
+                ):
+                    console.close()
+            finally:
+                release_unrelated.set()
+                if unrelated.ident is not None:
+                    unrelated.join(1.0)
+                terminal[0] = {"terminal": True}
                 console.close()
 
     def test_domain_seeds_are_deterministic_and_slot_order_independent(self):

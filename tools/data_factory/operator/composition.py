@@ -124,7 +124,7 @@ from tools.data_factory.operator.workflow.campaign import (
     DEFAULT_TCP_MANIFEST,
     DEFAULT_URDF,
     DEFAULT_YAW0,
-    OperatorConsole as _WorkflowOperatorConsole,
+    OperatorConsole,
     _build_physical_campaign_contract,
     _campaign_camera_warmup,
     _derive_test_only_gripper_program,
@@ -161,27 +161,6 @@ ROOT = Path(__file__).resolve().parents[3]
 MIN_CAMPAIGN_AUTHORIZATION_TTL = timedelta(hours=1)
 CAMPAIGN_STARTUP_MARGIN = timedelta(minutes=15)
 QUALIFIED_EPISODE_RUNTIME = timedelta(minutes=2)
-
-
-class OperatorConsole(_WorkflowOperatorConsole):
-    """Classify an owned startup worker separately from an unrelated leak."""
-
-    def close(self) -> None:
-        try:
-            super().close()
-        except ContractError as exc:
-            if exc.code != "OPERATOR_CONSOLE_THREAD_LEAK":
-                raise
-            session = None if self.session is None else self.session.status()
-            owner = (
-                session.get("start_transition_owner")
-                if isinstance(session, Mapping) else None
-            )
-            if isinstance(owner, Mapping) and owner.get("active") is True:
-                raise ContractError(
-                    "OPERATOR_CONSOLE_START_OWNER_ACTIVE",
-                ) from exc
-            raise
 
 
 def _campaign_authorization_ttl(requested_count: int) -> timedelta:
@@ -4052,7 +4031,7 @@ def build_physical_operator_application(
                 campaign_id, copy.deepcopy(selected), copy.deepcopy(draft),
             )
             if (
-                not isinstance(console, _WorkflowOperatorConsole)
+                not isinstance(console, OperatorConsole)
                 or console.campaign_operator.effect_scope != "PHYSICAL"
                 or console.campaign_operator.data_disposition != "PRODUCTION"
             ):

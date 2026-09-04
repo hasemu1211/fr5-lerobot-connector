@@ -2547,12 +2547,21 @@ class OperatorConsole:
             return copy.deepcopy(self._episode_result)
 
     def close(self) -> None:
-        thread = self._thread
-        if thread is not None and thread.is_alive():
-            with self._lock:
+        with self._lock:
+            thread = self._thread
+            if thread is not None and thread.is_alive():
                 self._cancel_owner()
+        if thread is not None and thread.is_alive():
             thread.join(self.close_timeout_s)
             if thread.is_alive():
+                session = self.session
+                if (
+                    session is not None
+                    and session.owns_start_transition_worker(thread)
+                ):
+                    raise ContractError(
+                        "OPERATOR_CONSOLE_START_OWNER_ACTIVE",
+                    )
                 raise ContractError("OPERATOR_CONSOLE_THREAD_LEAK")
         session = None if self.session is None else self.session.status()
         owner = (

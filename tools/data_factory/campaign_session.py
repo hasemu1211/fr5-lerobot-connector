@@ -93,6 +93,7 @@ class CampaignSession:
         self._start_transition_owner = None
         self._start_transition_run_id = None
         self._start_transition_terminal_evidence = None
+        self._start_transition_worker = None
         self._active = None
         self._active_intent = None
         self._active_run_id = None
@@ -147,8 +148,14 @@ class CampaignSession:
             self._start_transition_active = True
             self._start_transition_owner = None
             self._start_transition_terminal_evidence = None
+            self._start_transition_worker = threading.current_thread()
             self._termination_error = None
             self._bump()
+
+    def owns_start_transition_worker(self, worker: threading.Thread) -> bool:
+        """Correlate close retry with the worker that claimed startup motion."""
+        with self._lock:
+            return self._start_transition_worker is worker
 
     def _refresh_start_transition_owner(self) -> None:
         owner = self._start_transition_owner
@@ -184,6 +191,7 @@ class CampaignSession:
             self._start_transition_owner = owner if uncertain else None
             if not uncertain:
                 self._start_transition_run_id = None
+                self._start_transition_worker = None
             if self._campaign.state in {"READY", "ACTIVE"}:
                 if self._cancel.is_set() and code in {
                     None, "START_TRANSITION_CANCELLED",
