@@ -9,6 +9,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
+from tools.data_factory.candidate_admission import validate_candidate_admission
 from tools.data_factory.motion.object_reposition import (
     validate_object_reposition_binding,
 )
@@ -184,12 +185,6 @@ def validate_preapproval_evidence(value: object) -> dict[str, Any]:
         ):
             raise ContractError("PREAPPROVAL_EVIDENCE_SCHEMA")
     return result
-
-
-CANDIDATE_FIELDS = frozenset({
-    "schema_version", "run_id", "operational_gate", "operational_source", "checklist_id",
-    "review_context_digest", "semantic_status", "reviewed_by", "reviewed_at", "reason",
-})
 
 
 def _condition(value: Mapping[str, Any]) -> dict[str, Any]:
@@ -468,18 +463,15 @@ def build_and_publish_coverage_report(
             raise ContractError("COVERAGE_TECHNICAL_VALIDATOR")
         if technical["resolved_job_digest"] != resolved_job_digest or technical["plan_digest"] != preapproval["plan_digest"]:
             raise ContractError("COVERAGE_PLAN_BINDING")
+        try:
+            admission = validate_candidate_admission(admission)
+        except ContractError as exc:
+            raise ContractError("COVERAGE_CANDIDATE_ADMISSION") from exc
         if (
-            set(admission) != CANDIDATE_FIELDS
-            or admission.get("schema_version") != "data_factory.candidate_admission.v1"
-            or admission.get("run_id") != episode_id
-            or admission.get("operational_gate") not in {"PASS", "FAIL"}
-            or admission.get("operational_source") not in {"HIL_PROXY", "HUMAN_GATED"}
-            or admission.get("checklist_id")
+            admission["run_id"] != episode_id
+            or admission["checklist_id"]
             != task_review_checklist_id(job["task"])
-            or not isinstance(admission.get("review_context_digest"), str)
-            or not DIGEST.fullmatch(admission["review_context_digest"])
-            or admission.get("semantic_status") not in {"PENDING", "PASS", "FAIL", "UNCERTAIN"}
-            or admission.get("review_context_digest") != canonical_digest({
+            or admission["review_context_digest"] != canonical_digest({
                 "run_id": episode_id,
                 "resolved_job_digest": resolved_job_digest,
                 "plan_digest": preapproval["plan_digest"],
@@ -488,20 +480,6 @@ def build_and_publish_coverage_report(
         ):
             raise ContractError("COVERAGE_CANDIDATE_ADMISSION")
         pending = admission["semantic_status"] == "PENDING"
-        passed = admission["semantic_status"] == "PASS"
-        if (
-            (pending and any(admission[key] is not None for key in ("reviewed_by", "reviewed_at", "reason")))
-            or (not pending and (
-                not isinstance(admission["reviewed_by"], str)
-                or admission["reviewed_by"] == "HUMAN"
-                or not SAFE_ID.fullmatch(admission["reviewed_by"])
-                or not isinstance(admission["reviewed_at"], str)
-                or not admission["reviewed_at"]
-            ))
-            or (passed and admission["reason"] is not None)
-            or (admission["semantic_status"] in {"FAIL", "UNCERTAIN"} and (not isinstance(admission["reason"], str) or not admission["reason"]))
-        ):
-            raise ContractError("COVERAGE_CANDIDATE_ADMISSION")
 
         matches = [condition for condition in conditions if job["job_id"] == episode_id and job["schema_version"] == condition["task_schema_version"] and all(job[field] == condition[field] for field in (
             "task", "robot_system_id", "place_id", "cell_calibration_id",

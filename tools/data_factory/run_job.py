@@ -20,6 +20,10 @@ from pathlib import Path
 if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
+from tools.data_factory.candidate_admission import (
+    SCHEMA_VERSION as CANDIDATE_ADMISSION_SCHEMA,
+    validate_candidate_admission,
+)
 from tools.data_factory.one_job import (
     JsonlProcess,
     OneJob,
@@ -134,10 +138,6 @@ DESTINATION_KEYS = {
 LIVE_RUN_KEYS = COMMON_RUN_KEYS | {"camera_profile", "dataset_root", "run_root"}
 RESPONSE_KEYS = {"schema_version", "op_id", "op", "ok", "code", "state", "run_id", "plan_digest", "data"}
 EVENT_KEYS = {"schema_version", "event", "sequence", "origin_op_id", "ok", "code", "state", "run_id", "plan_digest", "data"}
-CANDIDATE_ADMISSION_KEYS = {
-    "schema_version", "run_id", "operational_gate", "operational_source", "checklist_id",
-    "review_context_digest", "semantic_status", "reviewed_by", "reviewed_at", "reason",
-}
 EPISODE_LEDGER_CONTEXT_FIELDS = frozenset({"manifest", "intent"})
 OBJECT_REPOSITION_PREAPPROVAL_FIELDS = frozenset({
     "schema_version", "parent_run_id", "parent_plan_digest",
@@ -1647,8 +1647,8 @@ def write_candidate_admission(
         raise ContractError("CANDIDATE_ADMISSION_TECHNICAL_PASS")
     if operational_source not in {"HUMAN_GATED", "HIL_PROXY"}:
         raise ContractError("CANDIDATE_ADMISSION_OPERATIONAL_SOURCE")
-    admission = {
-        "schema_version": "data_factory.candidate_admission.v1",
+    admission = validate_candidate_admission({
+        "schema_version": CANDIDATE_ADMISSION_SCHEMA,
         "run_id": payload["run_id"],
         "operational_gate": "PASS",
         "operational_source": operational_source,
@@ -1665,7 +1665,7 @@ def write_candidate_admission(
         "reviewed_by": None,
         "reviewed_at": None,
         "reason": None,
-    }
+    })
     write_json_atomic(_run_dir(payload) / "candidate_admission.json", admission)
     return admission
 
@@ -1743,14 +1743,14 @@ def review_candidate_admission(
         current = _load(path, "CANDIDATE_REVIEW_IO")
         if canonical_digest(current) != expected_file_digest:
             raise ContractError("CANDIDATE_REVIEW_FILE_CHANGED")
+        try:
+            current = validate_candidate_admission(current)
+        except ContractError as exc:
+            raise ContractError("CANDIDATE_REVIEW_STATE") from exc
         if (
-            not isinstance(current, dict) or set(current) != CANDIDATE_ADMISSION_KEYS
-            or current.get("schema_version") != "data_factory.candidate_admission.v1"
-            or not isinstance(current.get("run_id"), str) or not SAFE_ID.fullmatch(current["run_id"])
-            or current.get("operational_gate") != "PASS"
-            or current.get("operational_source") not in {"HUMAN_GATED", "HIL_PROXY"}
-            or current.get("checklist_id") != checklist_id
-            or current.get("review_context_digest") != expected_review_context_digest
+            current["operational_gate"] != "PASS"
+            or current["checklist_id"] != checklist_id
+            or current["review_context_digest"] != expected_review_context_digest
         ):
             raise ContractError("CANDIDATE_REVIEW_STATE")
         if current.get("semantic_status") != "PENDING":
@@ -1810,11 +1810,14 @@ def apply_episode_review(
     # Let reproject_episode_state validate the old state's own digest, ledger
     # binding, and retention while replacing its now-stale candidate reference.
     current_state = load_json_strict(state_path.read_text(encoding="utf-8"))
-    current = load_json_strict(candidate_path.read_text(encoding="utf-8"))
+    try:
+        current = validate_candidate_admission(
+            load_json_strict(candidate_path.read_text(encoding="utf-8")),
+        )
+    except ContractError as exc:
+        raise ContractError("EPISODE_REVIEW_BINDING") from exc
     if (
         ledger["admission"]["technical_status"] != "PASS"
-        or not isinstance(current, Mapping)
-        or set(current) != CANDIDATE_ADMISSION_KEYS
         or current.get("run_id") != ledger["episode"]["run_id"]
         or current.get("review_context_digest")
         != ledger["admission"]["review_context_digest"]
@@ -1893,26 +1896,17 @@ def _campaign_candidate_reviews(campaign, tty_decision=_tty_decision):
         })
         current = _load(path, "CANDIDATE_REVIEW_IO")
         current_digest = canonical_digest(current)
-        pending = current.get("semantic_status") == "PENDING" if isinstance(current, dict) else False
-        passed = current.get("semantic_status") == "PASS" if isinstance(current, dict) else False
+        try:
+            current = validate_candidate_admission(current)
+        except ContractError as exc:
+            raise ContractError("CANDIDATE_REVIEW_STATE") from exc
+        pending = current["semantic_status"] == "PENDING"
+        passed = current["semantic_status"] == "PASS"
         if (
-            not isinstance(current, dict) or set(current) != CANDIDATE_ADMISSION_KEYS
-            or current.get("schema_version") != "data_factory.candidate_admission.v1"
-            or current.get("run_id") != run["run_id"]
-            or current.get("operational_gate") != "PASS"
-            or current.get("operational_source") not in {"HUMAN_GATED", "HIL_PROXY"}
-            or current.get("checklist_id") != checklist_id
-            or current.get("review_context_digest") != expected_context
-            or current.get("semantic_status") not in {"PENDING", "PASS", "FAIL", "UNCERTAIN"}
-            or pending and any(current.get(key) is not None for key in ("reviewed_by", "reviewed_at", "reason"))
-            or not pending and (
-                not isinstance(current.get("reviewed_by"), str)
-                or current["reviewed_by"] == "HUMAN"
-                or not SAFE_ID.fullmatch(current["reviewed_by"])
-                or not isinstance(current.get("reviewed_at"), str)
-                or not current["reviewed_at"]
-            )
-            or passed and current.get("reason") is not None
+            current["run_id"] != run["run_id"]
+            or current["operational_gate"] != "PASS"
+            or current["checklist_id"] != checklist_id
+            or current["review_context_digest"] != expected_context
             or not pending and not passed and current.get("reason") not in CANDIDATE_REVIEW_REASONS
         ):
             raise ContractError("CANDIDATE_REVIEW_STATE")

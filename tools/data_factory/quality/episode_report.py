@@ -8,8 +8,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
+from tools.data_factory.candidate_admission import validate_candidate_admission
 from tools.fr5_data_factory import ContractError, DIGEST, MOTION_QUALIFICATION_KEYS_BY_SCHEMA, SAFE_ID, _cross, _dot, _mul, _sub, _timestamp, _unit, _vec, canonical_digest, load_json_strict, normalize_job_spec, resolve_pose, task_review_checklist_id, validate_rigid_transform
-from tools.data_factory.quality.coverage_report import CANDIDATE_FIELDS, PLAN_BINDING_DIGEST_FIELDS, RESOLVED_INPUT_DIGEST_FIELDS, STORED_EPISODE_FIELDS, TECHNICAL_FIELDS, validate_preapproval_evidence
+from tools.data_factory.quality.coverage_report import PLAN_BINDING_DIGEST_FIELDS, RESOLVED_INPUT_DIGEST_FIELDS, STORED_EPISODE_FIELDS, TECHNICAL_FIELDS, validate_preapproval_evidence
 from tools.data_factory.quality.phase_metrics import ATTRIBUTE_SCHEMA, STATUS, quality_attribute
 
 
@@ -87,6 +88,10 @@ def _object_frame_binding(accepted_episode: Mapping[str, Any], resolved_job: Map
         if isinstance(motion_qualification, Mapping) else None
     )
     motion_keys = MOTION_QUALIFICATION_KEYS_BY_SCHEMA.get(motion_schema)
+    try:
+        admission = validate_candidate_admission(admission)
+    except ContractError as exc:
+        raise ContractError("OBJECT_FRAME_ACCEPTED_EPISODE") from exc
     if (
         preapproval.get("run_id") != episode_id
         or not isinstance(envelope, Mapping)
@@ -124,21 +129,12 @@ def _object_frame_binding(accepted_episode: Mapping[str, Any], resolved_job: Map
         or technical["expected_fps"] <= 0
         or technical.get("resolved_job_digest") != preapproval["resolved_job_digest"]
         or technical.get("plan_digest") != preapproval["plan_digest"]
-        or set(admission) != CANDIDATE_FIELDS
-        or admission.get("schema_version") != "data_factory.candidate_admission.v1"
-        or admission.get("run_id") != episode_id
-        or admission.get("operational_gate") != "PASS"
-        or admission.get("operational_source") not in {"HIL_PROXY", "HUMAN_GATED"}
-        or admission.get("checklist_id")
+        or admission["run_id"] != episode_id
+        or admission["operational_gate"] != "PASS"
+        or admission["checklist_id"]
         != task_review_checklist_id(job["task"])
-        or admission.get("semantic_status") != "PASS"
-        or not isinstance(admission.get("reviewed_by"), str)
-        or admission["reviewed_by"] == "HUMAN"
-        or not SAFE_ID.fullmatch(admission["reviewed_by"])
-        or not isinstance(admission.get("reviewed_at"), str)
-        or not admission["reviewed_at"]
-        or admission.get("reason") is not None
-        or admission.get("review_context_digest") != canonical_digest({"run_id": episode_id, "resolved_job_digest": preapproval["resolved_job_digest"], "plan_digest": preapproval["plan_digest"], "technical_validator_digest": canonical_digest(technical)})
+        or admission["semantic_status"] != "PASS"
+        or admission["review_context_digest"] != canonical_digest({"run_id": episode_id, "resolved_job_digest": preapproval["resolved_job_digest"], "plan_digest": preapproval["plan_digest"], "technical_validator_digest": canonical_digest(technical)})
     ):
         raise ContractError("OBJECT_FRAME_ACCEPTED_EPISODE")
     _timestamp(admission["reviewed_at"], "OBJECT_FRAME_ACCEPTED_EPISODE", now=datetime.max.replace(tzinfo=timezone.utc))

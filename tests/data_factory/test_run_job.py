@@ -4183,6 +4183,7 @@ class RunJobTest(unittest.TestCase):
                 ({"expected_review_context_digest": "sha256:" + "8" * 64}, "CANDIDATE_REVIEW_STATE"),
                 ({"checklist_id": "pickup-v1"}, "CANDIDATE_REVIEW_SCHEMA"),
                 ({"reviewed_by": "HUMAN"}, "CANDIDATE_REVIEW_SCHEMA"),
+                ({"reason": "CALLER_SPECIFIC_REASON"}, "CANDIDATE_REVIEW_SCHEMA"),
             ):
                 arguments = {
                     "expected_file_digest": run_job.canonical_digest(second),

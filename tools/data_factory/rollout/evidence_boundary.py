@@ -8,11 +8,11 @@ import sys
 from pathlib import Path
 from typing import Any, Mapping
 
+from tools.data_factory.candidate_admission import validate_candidate_admission
 from tools.data_factory.episode_ledger import (
     validate_episode_ledger,
     validate_episode_state,
 )
-from tools.data_factory.quality.coverage_report import CANDIDATE_FIELDS
 from tools.data_factory.task_recipe import (
     EPISODE_INSTRUCTION_SCHEMA,
     TASK_IDS,
@@ -108,14 +108,15 @@ def _state_candidate(
         candidate = load_json_strict(Path(reference["artifact_path"]))
     except (OSError, ContractError) as exc:
         raise ContractError("ROLLOUT_EVIDENCE_CANDIDATE") from exc
+    try:
+        candidate = validate_candidate_admission(candidate)
+    except ContractError as exc:
+        raise ContractError("ROLLOUT_EVIDENCE_CANDIDATE_BINDING") from exc
     review = state["review"]
     if (
-        set(candidate) != CANDIDATE_FIELDS
-        or canonical_digest(candidate) != reference["artifact_digest"]
-        or candidate["schema_version"] != "data_factory.candidate_admission.v1"
+        canonical_digest(candidate) != reference["artifact_digest"]
         or candidate["run_id"] != ledger["episode"]["run_id"]
         or candidate["operational_gate"] != "PASS"
-        or candidate["operational_source"] not in {"HIL_PROXY", "HUMAN_GATED"}
         or candidate["checklist_id"] != task_review_checklist_id(task_id)
         or candidate["review_context_digest"]
         != ledger["admission"]["review_context_digest"]

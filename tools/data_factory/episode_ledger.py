@@ -13,6 +13,7 @@ from pathlib import Path
 from pathlib import PurePosixPath
 from typing import Any, Mapping
 
+from tools.data_factory.candidate_admission import validate_candidate_admission
 from tools.data_factory.collection_seed import (
     derive_domain_seed,
     trajectory_sampling_binding,
@@ -24,15 +25,13 @@ from tools.data_factory.motion.trajectory_variants import (
     validate_trajectory_variant_binding,
 )
 from tools.data_factory.quality.coverage_report import (
-    CANDIDATE_FIELDS,
     TECHNICAL_FIELDS,
     validate_preapproval_campaign_binding,
 )
 from tools.data_factory.task_recipe import validate_episode_instruction_binding
 from tools.data_factory.state_space import validate_yaw_sample_binding
 from tools.fr5_data_factory import (
-    ContractError, DIGEST, RFC3339, SAFE_ID, TASK_REVIEW_CHECKLIST_IDS,
-    canonical_digest, load_json_strict,
+    ContractError, DIGEST, RFC3339, SAFE_ID, canonical_digest, load_json_strict,
 )
 
 
@@ -1083,33 +1082,25 @@ def _retention(value: object) -> dict[str, Any]:
 def _validate_loaded_candidate(
     value: object, *, run_id: str, review_context_digest: str,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
-    candidate = _exact(
-        value, CANDIDATE_FIELDS, "EPISODE_LEDGER_CANDIDATE_FIELDS",
-    )
+    try:
+        candidate = validate_candidate_admission(value)
+    except ContractError as exc:
+        code = (
+            "EPISODE_LEDGER_CANDIDATE_FIELDS"
+            if exc.code == "CANDIDATE_ADMISSION_FIELDS"
+            else "EPISODE_LEDGER_CANDIDATE_STATE"
+            if exc.code == "CANDIDATE_ADMISSION_REVIEW"
+            else "EPISODE_LEDGER_CANDIDATE_BINDING"
+        )
+        raise ContractError(code) from exc
     semantic = candidate["semantic_status"]
     if (
-        candidate["schema_version"] != "data_factory.candidate_admission.v1"
-        or candidate["run_id"] != run_id
+        candidate["run_id"] != run_id
         or candidate["operational_gate"] != "PASS"
-        or candidate["operational_source"] not in {"HIL_PROXY", "HUMAN_GATED"}
-        or candidate["checklist_id"] not in TASK_REVIEW_CHECKLIST_IDS
         or candidate["review_context_digest"] != review_context_digest
-        or semantic not in {"PENDING", "PASS", "FAIL", "UNCERTAIN"}
     ):
         raise ContractError("EPISODE_LEDGER_CANDIDATE_BINDING")
-    if semantic == "PENDING":
-        if any(candidate[key] is not None for key in ("reviewed_by", "reviewed_at", "reason")):
-            raise ContractError("EPISODE_LEDGER_CANDIDATE_STATE")
-    elif (
-        not isinstance(candidate["reviewed_by"], str)
-        or not SAFE_ID.fullmatch(candidate["reviewed_by"])
-        or candidate["reviewed_by"] == "HUMAN"
-        or not isinstance(candidate["reviewed_at"], str)
-        or not RFC3339.fullmatch(candidate["reviewed_at"])
-        or (semantic == "PASS" and candidate["reason"] is not None)
-        or (semantic != "PASS" and not isinstance(candidate["reason"], str))
-        or (semantic != "PASS" and not candidate["reason"])
-    ):
+    if semantic != "PENDING" and not RFC3339.fullmatch(candidate["reviewed_at"]):
         raise ContractError("EPISODE_LEDGER_CANDIDATE_STATE")
     return candidate, {
         "semantic_status": semantic,

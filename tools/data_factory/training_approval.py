@@ -9,8 +9,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
-from tools.data_factory.quality.coverage_report import CANDIDATE_FIELDS, TECHNICAL_FIELDS
-from tools.fr5_data_factory import ContractError, DIGEST, RFC3339, SAFE_ID, TASK_REVIEW_CHECKLIST_IDS, canonical_digest, load_json_strict
+from tools.data_factory.candidate_admission import validate_candidate_admission
+from tools.data_factory.quality.coverage_report import TECHNICAL_FIELDS
+from tools.fr5_data_factory import ContractError, DIGEST, RFC3339, SAFE_ID, canonical_digest, load_json_strict
 
 
 APPROVAL_SCHEMA = "data_factory.training_approval.v2"
@@ -169,6 +170,10 @@ def _technical(path: object, digest: object, *, episode_id: str, dataset_root: s
 
 def _semantic(path: object, digest: object, *, episode_id: str, technical: Mapping[str, Any]) -> dict[str, Any]:
     value = _artifact(path, digest, "TRAINING_SEMANTIC_ARTIFACT")
+    try:
+        value = validate_candidate_admission(value)
+    except ContractError as exc:
+        raise ContractError("TRAINING_SEMANTIC_PASS") from exc
     reviewer = value.get("reviewed_by")
     expected_context = canonical_digest({
         "run_id": episode_id,
@@ -177,15 +182,10 @@ def _semantic(path: object, digest: object, *, episode_id: str, technical: Mappi
         "technical_validator_digest": canonical_digest(technical),
     })
     if (
-        set(value) != CANDIDATE_FIELDS
-        or value.get("schema_version") != "data_factory.candidate_admission.v1"
-        or value.get("run_id") != episode_id
-        or value.get("operational_gate") != "PASS"
-        or value.get("operational_source") not in {"HIL_PROXY", "HUMAN_GATED"}
-        or value.get("checklist_id") not in TASK_REVIEW_CHECKLIST_IDS
-        or value.get("review_context_digest") != expected_context
-        or value.get("semantic_status") != "PASS"
-        or value.get("reason") is not None
+        value["run_id"] != episode_id
+        or value["operational_gate"] != "PASS"
+        or value["review_context_digest"] != expected_context
+        or value["semantic_status"] != "PASS"
     ):
         raise ContractError("TRAINING_SEMANTIC_PASS")
     _id(reviewer, "TRAINING_SEMANTIC_REVIEWER")
