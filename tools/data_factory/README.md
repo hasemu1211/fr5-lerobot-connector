@@ -21,6 +21,36 @@ approval. The existing raw-dataset training path remains valid without it.
 No production view profile is checked in yet, so a routine prepare is expected
 to fail until the setup owner supplies those verified inputs.
 
+## Profile setup
+
+Profile setup is a separate offline authoring flow. It exports one source frame
+and a LabelMe JSON, renders review-only geometry/background evidence after the
+setup owner edits that JSON, and can publish the exact reviewed profile only
+after the producer-owned physical binding is already `VERIFIED`.
+
+```bash
+direnv exec . python3 -m tools.data_factory.curator setup export \
+  --source /absolute/frozen/dataset
+# Edit the reported reference.json with LabelMe, then:
+direnv exec . python3 -m tools.data_factory.curator setup preview --run <setup-id>
+direnv exec . python3 -m tools.data_factory.curator setup finalize \
+  --run <setup-id> --preview <preview-id>
+```
+
+New exports bind the current canonical collection profile
+`fr5-up-wrist-rgb-30hz-v2.json`. Each immutable setup request pins its exact
+canonical profile path and digest, so an older request remains reproducible
+while that tracked profile still exists; it is never silently rewritten to a
+new default. `preview` labels its third panel as a transform preview, keeps the
+mask/background assets outside the dataset, and grants neither candidate nor
+training authority. `finalize` is idempotent and fails closed before publishing
+config while the binding is `PREPARED_NOT_VERIFIED`.
+
+The reviewed r002 boundary overlay, processed reference, and review video from
+2026-09-03 are accepted as the final geometry choice. That approval is geometry
+only: the current binding remains `PREPARED_NOT_VERIFIED`, no canonical view
+profile exists, and candidate publish and training remain unauthorized.
+
 ## Routine commands
 
 Run repository Python commands through the approved environment:

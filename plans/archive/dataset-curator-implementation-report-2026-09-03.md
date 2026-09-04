@@ -5,6 +5,74 @@
 - 구현 위치: `tools/data_factory/curator/`
 - 판정 범위: software component, synthetic end-to-end와 repository 전체 회귀 검증. 현장 profile·학습 성능·rollout은 제외
 
+## 0. 2026-09-04 current-main 통합 추가 기록
+
+이 절은 아래 2026-09-03 v1.2 보고를 덮어쓰지 않고, 그 checkpoint와 2026-09-04 current main을 비교해 추가한 통합 증거다. 역사 branch `hasemu1211/curator-profile-setup`은 `245f0ccd4712157f270f55010edd52052e866019`에 그대로 보존했다. 새 `hasemu1211/curator-profile-main-integration` branch는 당시 `origin/main`의 exact SHA `3a8383582bcb90277ed1c917c62e475a6358c6a0`를 parent로 시작했다. 통합 commit SHA는 commit 생성 뒤 coordinator에게 보내는 `worker_done`에 기록한다.
+
+### 0.1 결론과 변경 범위
+
+checkpoint 세 commit `617caa5`, `62c9c83`, `245f0cc`을 common base `23c83ec25f4fb27147849a312a7670d1c8aa4b00` 및 current main과 비교했다. Curator 경로는 common base 이후 main에서 바뀌지 않았지만 collection/operator 계약은 v2로 진행됐으므로 checkpoint를 cherry-pick하거나 old main을 병합하지 않았다. 기존 Data Factory materialization, canonical candidate admission/episode ledger, recorder와 motion lifecycle은 그대로 재사용하고 다음 profile-setup gap만 통합했다.
+
+- `workflow/setup.py`: frozen source의 reference/LabelMe export, current-only preview retention, exact digest chain, review-only overlay/processed reference/H.264, producer binding이 `VERIFIED`일 때만 가능한 idempotent profile finalize
+- `cli.py`: 기존 `prepare/status/decide`에 독립된 `setup export/preview/finalize` dispatch 추가
+- `review/render.py`: 기존 candidate renderer를 재사용하고 setup에서만 third-panel title을 `TRANSFORM PREVIEW - NOT DATASET`으로 지정
+- 새 export default: current-main `config/data_factory/collection_profiles/fr5-up-wrist-rgb-30hz-v2.json`, canonical digest `sha256:d8288e4b3cbd34dc646949985658c786d8b9945ed368d67b412a1dec93a4931d`
+- 기존 request replay: request가 pin한 canonical sibling profile과 exact digest를 읽으므로 accepted v1 geometry evidence를 v2로 재작성하거나 다시 승인받지 않음; symlink, profile-root escape와 non-JSON path는 거부
+
+변경한 path는 다음뿐이다.
+
+- `tools/data_factory/curator/workflow/setup.py`
+- `tools/data_factory/curator/cli.py`
+- `tools/data_factory/curator/review/render.py`
+- `tests/data_factory/curator/workflow/test_setup.py`
+- `tests/data_factory/curator/test_cli.py`
+- `tests/data_factory/curator/test_architecture.py`
+- `tests/data_factory/curator/review/test_render.py`
+- `tools/data_factory/README.md`
+- `plans/dataset-curator-pipeline.md`
+- `plans/archive/dataset-curator-implementation-report-2026-09-03.md`
+
+producer, recorder, motion, rollout, Observatory, ROS/robot/safety, training code/config, source dataset와 `.mex`는 변경하지 않았다. 실제 source와 supplied setup evidence도 read-only로만 검사했다.
+
+### 0.2 실제 evidence와 gate 판정
+
+사람이 승인한 최종 r002 geometry evidence root는 `/home/codelab/Desktop/Project/fr5_ws/outputs/curator/setup/profile-20260903T120215Z-bc219c35/previews/preview-3c30e345df1ec8eb-8187f256/`다. `boundary-overlay.png`, `processed-reference.png`, `boundary-review.mp4`를 직접 확인했고 preview digest는 `sha256:b012e9b7d8bd1f4ee088a420455b56679f0f5e02a160c0f0519c06f5bef756ef`다. mask `sha256:a23d70c57bd5ec62be7a7f90e020854e6c4ca80c0b1f8421930fd49a8f225fd9`, background plate `sha256:a8acda8aa805705df3e2b1775ec94dc7db6dc5944c0511086deca8fa4b004c3b`, review video `sha256:28dcbc28bdd1e8ffcd0c6c1a3cf83031361dd9f2fafaa1696e1b90b236c3889a`이며 keep/replace pixel은 85.7255859375%/14.2744140625%다. preview 자체도 `purpose=REVIEW_ONLY_NOT_TRAINING_DATA`, `candidate_authority=false`, `training_authority=false`다.
+
+setup request는 `/home/codelab/Desktop/Project/fr5_ws/datasets/fr5_episodes/fr5260902`의 8 episode/10,328 frame과 source tree `sha256:fbe9bfd10174a740cdf7b381c00ef7a7f6975deb7463587ea61b57ef39ec8924`를 pin한다. official local LeRobot reader와 current-main source validator로 30 Hz, 640×480 up+wrist H.264, 7D state/action 및 snapshot identity가 현재도 정확히 일치함을 read-only로 확인했다. recorder/operator process나 두 dataset transaction lock의 active holder는 관찰되지 않았고 lock path는 zero-byte sentinel일 뿐이었다. 그러나 producer-issued immutable freeze/lease가 없으므로 이 순간의 quiescence를 지속 권한으로 해석하지 않는다.
+
+current binding `config/data_factory/region_bindings/place-a-red-place-b-blue-r002.json`은 digest `sha256:3a3daaa9a3eb49db44fb53dddac899307539d7b37df15fed9c5798d6f230f7b3`, 상태 `PREPARED_NOT_VERIFIED`다. `config/data_factory/curator/view_profiles/`에는 canonical JSON이 없다. 따라서 geometry approval만 수용했고 profile finalize, actual candidate prepare/inspection, 사람 `APPROVE/REJECT`, publish와 training을 실행하지 않았다. 다음 exact step은 producer owner가 동일 physical A/B assignment를 정식 절차로 `VERIFIED`하고 setup owner가 그 binding과 accepted preview를 canonical profile로 finalize하는 것이며, 그 전 상태는 `BLOCKED_EXTERNAL`이다.
+
+latest campaign root `/home/codelab/Desktop/Project/fr5_ws/outputs/data_factory/runs/collection-production-20260904T035141Z-campaign-0001-run-1`부터 `-e27`까지 각 canonical `candidate_admission.json`과 `episode_ledger_state.json`을 읽고 existing `validate_episode_state()`와 candidate ref를 입력한 `reproject_episode_state()`로 exact idempotence를 확인했다. artifact에서 계산한 값은 stored 27, technical `PASS` 27, semantic `PASS` 25/`FAIL` 2, training `NOT_AUTHORIZED` 27이다. `-e28/result.json`은 attempted episode index 32에서 `state=ABORTED`, `rows=6`이며 candidate admission/ledger/state가 없으므로 e28은 stored episode가 아니다. 이 관찰은 Curator 안에 campaign count나 두 번째 episode metadata를 추가하지 않았다.
+
+### 0.3 R1–R7 coverage
+
+| 요구 | 판정 | exact evidence |
+|---|---|---|
+| R1 current-main semantic adaptation | `IMPLEMENTED_THIS_ITERATION` | integration parent `3a838358…`; three checkpoint commits를 비교하고 setup files만 재구성; cherry-pick/merge/rebase 없음 |
+| R2 immutable source와 canonical episode truth | `ALREADY_SATISFIED` | source는 read-only digest 재검증; current-main `candidate_admission.json` + `episode_ledger_state.json` 27쌍을 existing reprojection으로 idempotent 확인; producer/data 변경 0 |
+| R3 technical/semantic/training 분리와 actual campaign facts | `ALREADY_SATISFIED` | canonical artifact projection이 technical 27 PASS, semantic 25 PASS/2 FAIL, training 27 NOT_AUTHORIZED를 산출; artifact 없는 aborted e28 제외 |
+| R4 motion/recorder lifecycle 분리 | `ALREADY_SATISFIED` | 변경은 offline Curator setup/review/CLI와 tests/docs뿐; recorder, motion, robot, ROS 호출·수정 0 |
+| R5 r002 geometry-only approval, no authority promotion | `ALREADY_SATISFIED` | supplied three visual artifacts와 preview digest를 geometry로만 수용; binding은 `PREPARED_NOT_VERIFIED`; preview candidate/training authority false |
+| R6 current-main image/background/profile/data representation reuse | `IMPLEMENTED_THIS_ITERATION` | new export는 v2 default; immutable old request는 exact canonical v1 digest로 replay; existing `apply_up_view`, renderer, source validator와 LeRobot representation 재사용 |
+| R7 gated real-data prepare→human decision | `BLOCKED_EXTERNAL` | source snapshot/quiescence는 관찰됐지만 physical binding 미검증 + canonical view profile 부재; actual prepare/APPROVE/REJECT/publish 쓰기 0; software focused/contract/static/docs checks complete |
+
+### 0.4 검증
+
+worktree에는 `.venv`가 없고 `.envrc`는 local `.venv`가 있을 때만 활성화한다. repository나 environment를 수정하지 않고 기존 `/home/codelab/Desktop/Project/fr5_ws/.venv`의 LeRobot 0.6.1 interpreter를 `direnv exec . env PATH=...`로 선택했다. 모든 repository Python 명령은 계속 `direnv exec .` 경계 안에서 실행했다.
+
+| 명령 | 결과 |
+|---|---|
+| `direnv exec . env PATH=/home/codelab/Desktop/Project/fr5_ws/.venv/bin:$PATH python3 -W error -m unittest discover -s tests/data_factory/curator -t .` | **77/77 PASS**; synthetic LeRobot/H.264 포함 |
+| `direnv exec . env PATH=/home/codelab/Desktop/Project/fr5_ws/.venv/bin:$PATH python3 -W error -m unittest tests.data_factory.test_episode_ledger tests.data_factory.test_software_contract tests.data_factory.test_training_approval` | **31/31 PASS** |
+| selected current-main `test_live_collection_profile_binds_camera_and_recorder_settings` + `test_bound_production_live_commits_and_binds_one_candidate_to_one_ledger` | **2/2 PASS** |
+| `direnv exec . uvx --from ruff==0.12.11 ruff format --check ...` 및 `ruff check ...` | PASS |
+| `direnv exec . env PATH=... python3 -W error -m compileall -q tools/data_factory/curator tests/data_factory/curator` | PASS |
+| `git diff --check` | PASS |
+| documentation governance `audit`, `content-qa`, `check` | `content-qa` 실행 완료; `audit/check`는 unchanged `plans/collection-operator-architecture-refactor.md`의 missing `closed-loop-rollout-observatory.md` link 한 건으로 exit 1; changed Curator docs의 broken-link 진단 0 |
+| `direnv exec . mex check --json` | exit 1, `No .mex/ scaffold found`; local-only scaffold를 만들지 않았고 historical 100/100을 current branch 결과로 재사용하지 않음 |
+
+coordinator 요청에 따라 repository 전체 suite는 이 worktree에서 중복 실행하지 않았으며, clean immutable integration commit에서 coordinator가 한 번 실행한다. 문서 영향은 quick start에 setup 사용법/권한 경계를 추가하고, active plan에 v2/current campaign/geometry-only/blocker 상태를 반영하며, 이 dated report에 historical 결과와 current-main 결과를 분리한 것이다. maintenance candidate는 `[]`다.
+
 ## 1. 결론
 
 선택형 curator v1.2 software component는 **GO**로 확정했다. 원본 dataset을 바꾸지 않고 별도 LeRobot v3/H.264 파생 후보를 만들며, 원본부터 후보·검토 영상·사람 결정·최종 결과까지 digest chain으로 추적한다. curator를 사용하지 않는 기존 원본 학습 경로도 그대로 남아 있다.

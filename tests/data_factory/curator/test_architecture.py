@@ -3,8 +3,8 @@ from __future__ import annotations
 import ast
 import importlib
 import importlib.util
-from pathlib import Path
 import unittest
+from pathlib import Path
 
 
 class ArchitectureTest(unittest.TestCase):
@@ -61,6 +61,7 @@ class ArchitectureTest(unittest.TestCase):
             "review.decision": "read_foreground_decision",
             "workflow.state": "load_events",
             "workflow.application": "prepare",
+            "workflow.setup": "export_profile_setup",
         }
         for module_name, symbol in owners.items():
             module = f"tools.data_factory.curator.{module_name}"

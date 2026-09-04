@@ -199,6 +199,7 @@ def render_review_mp4(
     height: int,
     fps: int,
     expected_frames: int,
+    candidate_panel_title: str = "ACTUAL CANDIDATE H264 DECODE",
 ) -> dict[str, object]:
     target = Path(output)
     reject_symlink_components(target, "REVIEW_VIDEO_PATH")
@@ -218,6 +219,8 @@ def render_review_mp4(
         or fps <= 0
         or type(expected_frames) is not int
         or expected_frames <= 0
+        or not isinstance(candidate_panel_title, str)
+        or not candidate_panel_title
     ):
         raise CuratorError("REVIEW_RENDER_CONTRACT")
 
@@ -305,7 +308,7 @@ def render_review_mp4(
                     panels = (
                         _panel(raw, "RAW UP", detail),
                         _panel(overlay, "KEEP / GEOMETRY OVERLAY", detail),
-                        _panel(candidate, "ACTUAL CANDIDATE H264 DECODE", detail),
+                        _panel(candidate, candidate_panel_title, detail),
                     )
                     process.stdin.write(np.concatenate(panels, axis=1).tobytes())
                     count += 1

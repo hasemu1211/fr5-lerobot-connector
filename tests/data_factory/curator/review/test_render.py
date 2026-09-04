@@ -110,6 +110,36 @@ class RenderTest(unittest.TestCase):
                 )
             self.assertFalse(output.exists())
 
+    def test_setup_can_label_third_panel_as_non_dataset_preview(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            fixture = make_profile_fixture(root, width=64, height=48)
+            frame = ReviewFrame(
+                raw_up=np.zeros((48, 64, 3), dtype=np.uint8),
+                candidate_up=np.zeros((48, 64, 3), dtype=np.uint8),
+                clip_id="profile-setup",
+                episode_index=0,
+                frame_index=0,
+                timestamp=0.0,
+                reasons=("global_index:0",),
+            )
+            with mock.patch.object(render, "_panel", wraps=render._panel) as panel:
+                render_review_mp4(
+                    [frame],
+                    root / "setup-review.mp4",
+                    keep_mask=fixture.mask,
+                    geometry=fixture.resolved.geometry,
+                    width=64,
+                    height=48,
+                    fps=10,
+                    expected_frames=1,
+                    candidate_panel_title="TRANSFORM PREVIEW - NOT DATASET",
+                )
+            self.assertEqual(
+                panel.call_args_list[2].args[1],
+                "TRANSFORM PREVIEW - NOT DATASET",
+            )
+
 
 if __name__ == "__main__":
     unittest.main()
