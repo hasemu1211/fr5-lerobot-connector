@@ -61,6 +61,7 @@ class StubCampaign:
         self.candidate_pending = False
         self.campaign_coverage = None
         self.reason_codes = []
+        self.start_transition_owner = None
         self.core = OperatorIntentCore(
             session_id=campaign_id,
             projection_call=self.projection,
@@ -126,6 +127,10 @@ class StubCampaign:
 
     def projection(self):
         total = self.draft["requested_count"]
+        start_owner_active = (
+            isinstance(self.start_transition_owner, dict)
+            and self.start_transition_owner.get("active") is True
+        )
         result = {
             "runtime": {
                 "workflow_state": self.state,
@@ -133,8 +138,17 @@ class StubCampaign:
                 "reason_codes": copy.deepcopy(self.reason_codes),
                 "active_child_id": (
                     f"{self.campaign_id}-run-{self.completed + 1}"
-                    if self.state == "RUNNING" else None
+                    if self.state == "RUNNING"
+                    else self.start_transition_owner["run_id"]
+                    if start_owner_active else None
                 ),
+                **({
+                    "motion_owner": copy.deepcopy(self.start_transition_owner),
+                    "motion": {
+                        "status": "ACTIVE",
+                        "label": "시작 자세 전환 종료 확인 대기",
+                    },
+                } if start_owner_active else {}),
                 **({
                     "phase": "EXECUTING", "phase_label": "수집 동작 실행",
                     "progress": 50,
@@ -165,6 +179,9 @@ class StubCampaign:
                     "completed_intents": self.completed,
                     "remaining_intents": total - self.completed,
                 },
+                "start_transition_owner": copy.deepcopy(
+                    self.start_transition_owner
+                ),
             },
             "episode_history": copy.deepcopy(self.history),
             "effect_counts": {"robot": 0, "dataset": 0, "training": 0},
@@ -1609,6 +1626,84 @@ class CollectionOperatorApplicationTests(unittest.TestCase):
         self.assertEqual(recovered["draft"]["requested_count"], 3)
         self.assertEqual(recovered["draft"]["normalized_seed"], 73)
         self.assertTrue(self.campaigns[0].closed)
+
+    def test_uncertain_start_owner_blocks_recovery_and_campaign_replacement(self):
+        ready = self.application.prepare_environment_call()
+        campaigns = []
+        recovery = mock.Mock(side_effect=AssertionError("HOME recovery ran"))
+
+        def factory(campaign_id, _selection, draft):
+            campaign = StubCampaign(campaign_id, draft, "TEST_ONLY")
+            campaigns.append(campaign)
+            return campaign
+
+        application = CollectionOperatorApplication(
+            session_id="uncertain-start-application-r001",
+            operator_label="local-operator",
+            catalog=self.catalog,
+            initial_selection=self.selection,
+            projector=projection,
+            environment_call=lambda: copy.deepcopy(ready),
+            prepare_environment_call=lambda: copy.deepcopy(ready),
+            campaign_factory=factory,
+            home_recovery_call=recovery,
+            initial_environment=ready,
+            effect_scope="PHYSICAL",
+        )
+        self.addCleanup(application.close)
+
+        def consume(op, payload, suffix):
+            view = application.bridge_core.snapshot()
+            return application.bridge_core.consume(
+                intent(view, op, payload, suffix),
+            )["result"]
+
+        authored = application.bridge_core.snapshot()["projection"]
+        compiled = consume("compile_draft", {
+            "draft_id": authored["draft"]["draft_id"],
+            "data_disposition": "TEST_ONLY",
+        }, "uncertain-start-compile")
+        consume("authorize_campaign", {
+            "draft_id": authored["draft"]["draft_id"],
+            "manifest_digest": compiled["manifest_digest"],
+            "envelope_digest": compiled["envelope_digest"],
+            "data_disposition": "TEST_ONLY",
+        }, "uncertain-start-authorize")
+        campaign = campaigns[0]
+        campaign.state = "BLOCKED"
+        campaign.reason_codes = ["START_TRANSITION_CANCEL_UNCERTAIN"]
+        campaign.start_transition_owner = {
+            "active": True,
+            "run_id": f"{campaign.campaign_id}-run-1",
+            "state": "TERMINALITY_UNCERTAIN",
+            "owner_reachable": True,
+            "action_owner_retained": True,
+            "code": "START_TRANSITION_CANCEL_UNCERTAIN",
+        }
+
+        blocked = application.bridge_core.snapshot()["projection"]
+        self.assertEqual(blocked["available_ops"], [])
+        self.assertEqual(
+            (blocked["runtime"]["active_child_id"],
+             blocked["runtime"]["motion_owner"]),
+            (campaign.start_transition_owner["run_id"],
+             campaign.start_transition_owner),
+        )
+        for op in ("recover_home", "new_campaign_same_settings"):
+            with self.subTest(op=op), self.assertRaisesRegex(
+                ContractError, "OPERATOR_INTENT_OP",
+            ):
+                consume(op, {}, f"uncertain-start-{op}")
+        recovery.assert_not_called()
+        self.assertEqual(len(campaigns), 1)
+        self.assertFalse(campaign.closed)
+
+        campaign.start_transition_owner = None
+        released = application.bridge_core.snapshot()["projection"]
+        self.assertEqual(
+            released["available_ops"],
+            ["recover_home", "new_campaign_same_settings"],
+        )
 
     def test_camera_recovery_preserves_seed(self):
         ready = self.application.prepare_environment_call()

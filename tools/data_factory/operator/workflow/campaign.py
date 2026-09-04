@@ -1406,10 +1406,20 @@ class OperatorConsole:
                     ),
                 })
             campaign_session = None if self.session is None else self.session.status()
+            start_owner = (
+                campaign_session.get("start_transition_owner")
+                if isinstance(campaign_session, Mapping) else None
+            )
+            start_owner_active = (
+                isinstance(start_owner, Mapping)
+                and start_owner.get("active") is True
+            )
             active = (
                 campaign_session.get("active_run_id")
                 if isinstance(campaign_session, Mapping)
                 and campaign_session.get("active_child") is True
+                else start_owner.get("run_id")
+                if start_owner_active
                 else self.run_id if self._workflow in {
                     "AWAITING_APPROVAL", "RUNNING", "CANCELLING",
                 } else None
@@ -1420,6 +1430,14 @@ class OperatorConsole:
                 "reason_codes": [] if self._last_error is None else [self._last_error],
                 "active_child_id": active,
             }
+            if start_owner_active:
+                runtime.update({
+                    "motion_owner": copy.deepcopy(dict(start_owner)),
+                    "motion": {
+                        "status": "ACTIVE",
+                        "label": "시작 자세 전환 종료 확인 대기",
+                    },
+                })
             if self._workflow in {"RUNNING", "CANCELLING"}:
                 runtime.update(copy.deepcopy(
                     self._runtime_milestone

@@ -47,6 +47,9 @@ class _SessionCancelEvent(threading.Event):
     def finish_start_transition(self, code: str | None) -> None:
         self._session._finish_start_transition(code)
 
+    def retain_start_transition_owner(self, owner: Callable[[], object]) -> None:
+        self._session._retain_start_transition_owner(owner)
+
 
 class CampaignSession:
     """Own exactly one serial campaign and at most one fresh OneJob child."""
@@ -88,6 +91,9 @@ class CampaignSession:
         self._lock = threading.RLock()
         self._cancel = _SessionCancelEvent(self)
         self._start_transition_active = False
+        self._start_transition_owner = None
+        self._start_transition_run_id = None
+        self._start_transition_terminal_evidence = None
         self._active = None
         self._active_intent = None
         self._active_run_id = None
@@ -140,14 +146,49 @@ class CampaignSession:
             if self._start_transition_active or self._active is not None:
                 raise ContractError("CAMPAIGN_SESSION_ACTIVE_CHILD")
             self._start_transition_active = True
+            self._start_transition_owner = None
+            self._start_transition_terminal_evidence = None
             self._termination_error = None
             self._bump()
+
+    def _retain_start_transition_owner(self, owner: Callable[[], object]) -> None:
+        with self._lock:
+            if (
+                not self._start_transition_active
+                or self._termination_error
+                != "START_TRANSITION_CANCEL_UNCERTAIN"
+                or not callable(owner)
+                or self._start_transition_owner is not None
+            ):
+                raise ContractError("CAMPAIGN_SESSION_START_OWNER")
+            self._start_transition_owner = owner
+            self._bump()
+
+    def _refresh_start_transition_owner(self) -> None:
+        owner = self._start_transition_owner
+        if owner is None:
+            return
+        try:
+            evidence = owner()
+        except Exception:
+            return
+        if not isinstance(evidence, Mapping) or evidence.get("terminal") is not True:
+            return
+        self._start_transition_terminal_evidence = copy.deepcopy(dict(evidence))
+        self._start_transition_owner = None
+        self._start_transition_active = False
+        self._start_transition_run_id = None
+        self._bump()
 
     def _finish_start_transition(self, code: str | None) -> None:
         with self._lock:
             if not self._start_transition_active:
                 return
-            self._start_transition_active = False
+            uncertain = code == "START_TRANSITION_CANCEL_UNCERTAIN"
+            self._start_transition_active = uncertain
+            if not uncertain:
+                self._start_transition_owner = None
+                self._start_transition_run_id = None
             if self._campaign.state in {"READY", "ACTIVE"}:
                 if self._cancel.is_set() and code in {
                     None, "START_TRANSITION_CANCELLED",
@@ -253,6 +294,7 @@ class CampaignSession:
                 owner=self.lifecycle_owner, run_id=run_id,
                 scene_evidence=scene_evidence,
             )
+            self._start_transition_run_id = run_id
         except ContractError as exc:
             if self._campaign.state == "READY":
                 self._campaign.fault(owner=self.lifecycle_owner, code=exc.code)
@@ -284,6 +326,7 @@ class CampaignSession:
             self._active = lifecycle
             self._active_intent = intent
             self._active_run_id = run_id
+            self._start_transition_run_id = None
             self._active_roots = checked_roots
             self._active_start = checked_start
             self._active_cancel_attempted = False
@@ -378,7 +421,29 @@ class CampaignSession:
 
     def status(self) -> dict[str, Any]:
         with self._lock:
+            self._refresh_start_transition_owner()
             campaign = self._campaign.status()
+            start_owner = None
+            if self._start_transition_active:
+                uncertain = (
+                    self._termination_error
+                    == "START_TRANSITION_CANCEL_UNCERTAIN"
+                )
+                start_owner = {
+                    "active": True,
+                    "run_id": self._start_transition_run_id,
+                    "state": (
+                        "TERMINALITY_UNCERTAIN" if uncertain else "ACTIVE"
+                    ),
+                    "owner_reachable": (
+                        self._start_transition_owner is not None
+                        if uncertain else True
+                    ),
+                    "action_owner_retained": (
+                        self._start_transition_owner is not None
+                    ),
+                    "code": self._termination_error if uncertain else None,
+                }
             return {
                 "session_id": self.session_id,
                 "revision": self._revision,
@@ -392,6 +457,10 @@ class CampaignSession:
                 "root_binding_digest": None if self._active_roots is None else self._active_roots["binding_digest"],
                 "start_binding_digest": None if self._active_start is None else self._active_start["binding_digest"],
                 "termination_error": self._termination_error,
+                "start_transition_owner": start_owner,
+                "start_transition_terminal_evidence": copy.deepcopy(
+                    self._start_transition_terminal_evidence
+                ),
                 "authority": {
                     "browser": "VIEW_AND_INTENT_ONLY",
                     "execution": "ONE_JOB_ONLY",

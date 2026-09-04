@@ -132,6 +132,7 @@ class RosMoveItTransport:
         self._GetStateValidity = GetStateValidity
         self._goal_succeeded = GoalStatus.STATUS_SUCCEEDED
         self._goal_canceled = GoalStatus.STATUS_CANCELED
+        self._goal_aborted = GoalStatus.STATUS_ABORTED
         self._moveit_success = MoveItErrorCodes.SUCCESS
         self._gripper_success = FollowJointTrajectory.Result.SUCCESSFUL
         self._parameter_string = ParameterType.PARAMETER_STRING
@@ -520,6 +521,64 @@ class RosMoveItTransport:
             raise ContractError("ROS_EXEC_CANCEL_NOT_CANCELED")
         self._active = None
         return active
+
+    @property
+    def owns_active_goal(self):
+        """Report whether this transport still owns a nonterminal action."""
+        return getattr(self, "_active", None) is not None
+
+    def poll_terminal_evidence(self):
+        """Observe an uncertain action without retrying or cancelling it again."""
+        active = getattr(self, "_active", None)
+        if active is None:
+            raise ContractError("ROS_EXEC_NO_ACTIVE")
+        try:
+            if active.goal_handle is None:
+                if active.goal_future is None:
+                    return None
+                if not active.goal_future.done():
+                    self._rclpy.spin_once(self.node, timeout_sec=0.0)
+                if not active.goal_future.done():
+                    return None
+                handle = active.goal_future.result()
+                accepted = getattr(handle, "accepted", None)
+                if accepted is False:
+                    self._active = None
+                    return {
+                        "schema_version": "data_factory.ros_action_terminal_evidence.v1",
+                        "terminal": True,
+                        "phase": active.phase,
+                        "type": active.type,
+                        "goal_acceptance": "REJECTED",
+                        "result_status": None,
+                    }
+                if accepted is not True:
+                    return None
+                active.goal_handle = handle
+                active.result_future = handle.get_result_async()
+            if active.result_future is None:
+                return None
+            if not active.result_future.done():
+                self._rclpy.spin_once(self.node, timeout_sec=0.0)
+            if not active.result_future.done():
+                return None
+            result = active.result_future.result()
+            status = getattr(result, "status", None)
+            if type(status) is not int or status not in {
+                self._goal_succeeded, self._goal_canceled, self._goal_aborted,
+            }:
+                return None
+        except Exception:
+            return None
+        self._active = None
+        return {
+            "schema_version": "data_factory.ros_action_terminal_evidence.v1",
+            "terminal": True,
+            "phase": active.phase,
+            "type": active.type,
+            "goal_acceptance": "ACCEPTED",
+            "result_status": status,
+        }
 
     def _fresh(self, received_at, max_age_s, code):
         if received_at is None:

@@ -3819,6 +3819,112 @@ feedback:
                 finally:
                     console.close()
 
+    def test_real_composition_binds_distinct_start_after_home_transition(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.portable_repository(root)
+            motion, qualification = self.qualified_home_start(root)
+            target = [
+                item + 0.05
+                for item in motion["qualified_safe_joint_positions_rad"]
+            ]
+            qualification.update({
+                "robot_start_pose_id": "fr5-lab-a-distinct-start-r001",
+                "target_rad": dict(zip(qualification["joint_order"], target)),
+            })
+            qualification["qualification_digest"] = canonical_digest({
+                key: value for key, value in qualification.items()
+                if key != "qualification_digest"
+            })
+            snapshots = [
+                pose_snapshot(
+                    motion["qualified_safe_joint_positions_rad"], age=0.01,
+                ),
+                pose_snapshot(target, age=0.01),
+            ]
+            calls = []
+
+            def snapshot():
+                calls.append(
+                    "home_snapshot" if not calls else "selected_snapshot",
+                )
+                return copy.deepcopy(snapshots.pop(0))
+
+            def transition(checked_motion, checked_pose, cancel_event):
+                calls.append("transition")
+                self.assertFalse(cancel_event.is_set())
+                self.assertEqual(checked_motion, motion)
+                self.assertEqual(checked_pose, qualification)
+                return {
+                    "status": "AT_START",
+                    "robot_start_pose_id": qualification["robot_start_pose_id"],
+                }
+
+            opened = {
+                "active": True, "position_valid": True, "gripper_index": 1,
+                "reference_position_m": 0.021, "feedback_position_m": 0.021,
+                "sample_age_s": 0.0, "max_age_s": 0.1,
+                "source": "CONTROLLER_STATE",
+            }
+            live = mock.Mock(side_effect=AssertionError("episode ran"))
+            candidate = mock.Mock(side_effect=AssertionError("candidate write ran"))
+            ledger = mock.Mock(side_effect=AssertionError("ledger write ran"))
+            with (
+                mock.patch.object(run_job, "write_candidate_admission", candidate),
+                mock.patch.object(run_job, "bind_candidate_episode_state", ledger),
+            ):
+                console, context = build_physical_operator_console(
+                    repository_root=root,
+                    session_id="distinct-start-r001",
+                    run_id="distinct-start-run-r001",
+                    operator_label="local-operator",
+                    discovery_call=lambda: ["usb-Goal2_Camera-video-index0"],
+                    activation_call=lambda: True,
+                    snapshot_call=snapshot,
+                    gripper_readback_call=lambda: copy.deepcopy(opened),
+                    run_live_call=live,
+                    selected_start_pose_qualifications=[qualification],
+                    start_transition_call=transition,
+                    environment_prepared=True,
+                    clock=lambda: NOW,
+                )
+                try:
+                    current = console.bridge_core.snapshot()
+                    console.bridge_core.consume(envelope(
+                        current, "compile_draft", {
+                            "draft_id": current["projection"]["draft"]["draft_id"],
+                            "data_disposition": "TEST_ONLY",
+                        }, "compile-distinct-start-r001",
+                    ))
+                    slot = console.campaign_operator.manifest["slots"][0]
+                    binding = console.campaign_operator.physical_start_binding_call(
+                        "distinct-start-run-r001", slot, threading.Event(),
+                    )
+
+                    self.assertEqual(calls, [
+                        "home_snapshot", "transition", "selected_snapshot",
+                    ])
+                    self.assertEqual(
+                        (binding["robot_start_pose_id"], binding["target_rad"],
+                         binding["current_rad"]),
+                        (qualification["robot_start_pose_id"], target, target),
+                    )
+                    self.assertEqual(
+                        binding["snapshot_digest"],
+                        canonical_digest(pose_snapshot(target, age=0.01)),
+                    )
+                    self.assertFalse(context["production_writers_enabled"])
+                    live.assert_not_called()
+                    candidate.assert_not_called()
+                    ledger.assert_not_called()
+                    self.assertTrue(all(
+                        value == 0 for value in console.bridge_core.snapshot()[
+                            "projection"
+                        ]["effect_counts"].values()
+                    ))
+                finally:
+                    console.close()
+
     def test_cancel_interrupts_start_transition_before_child_or_live_effect(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -3992,6 +4098,7 @@ feedback:
             harness = Harness(root)
             entered = threading.Event()
             calls = []
+            terminal = [None]
 
             def uncertain_start(_run_id, _slot, cancel_event):
                 cancel_event.claim_start_transition()
@@ -4000,12 +4107,13 @@ feedback:
                 if not cancel_event.wait(1.0):
                     raise AssertionError("cancel did not reach startup owner")
                 calls.append("cancel-uncertain")
-                try:
-                    raise ContractError("START_TRANSITION_CANCEL_UNCERTAIN")
-                finally:
-                    cancel_event.finish_start_transition(
-                        "START_TRANSITION_CANCEL_UNCERTAIN",
-                    )
+                cancel_event.finish_start_transition(
+                    "START_TRANSITION_CANCEL_UNCERTAIN",
+                )
+                cancel_event.retain_start_transition_owner(
+                    lambda: terminal[0],
+                )
+                raise ContractError("START_TRANSITION_CANCEL_UNCERTAIN")
 
             harness.start_binding = uncertain_start
             console = harness.console(
@@ -4052,6 +4160,28 @@ feedback:
                      console.session.status()["termination_error"]),
                     ("BLOCKED", "START_TRANSITION_CANCEL_UNCERTAIN"),
                 )
+                owner = projection["runtime"]["motion_owner"]
+                self.assertEqual(
+                    (projection["runtime"]["active_child_id"],
+                     projection["runtime"]["motion"], owner["state"],
+                     owner["owner_reachable"], owner["action_owner_retained"]),
+                    (
+                        "physical-console-r001-run-0",
+                        {
+                            "status": "ACTIVE",
+                            "label": "시작 자세 전환 종료 확인 대기",
+                        },
+                        "TERMINALITY_UNCERTAIN", True, True,
+                    ),
+                )
+                pending_status = console.session.status()
+                self.assertEqual(pending_status, console.session.status())
+                with self.assertRaisesRegex(
+                    ContractError, "CAMPAIGN_SESSION_START_OWNER",
+                ):
+                    console.session.cancel_event.retain_start_transition_owner(
+                        lambda: terminal[0],
+                    )
                 self.assertEqual(projection["episode_history"], [])
                 self.assertEqual(projection["episode_result"], result)
                 self.assertEqual(harness.operator_counters["physical_factory"], 0)
@@ -4063,6 +4193,27 @@ feedback:
                     console.campaign_operator.run_next(
                         {"run_id": "uncertain-retry-r001"}, {},
                     )
+                terminal[0] = {
+                    "schema_version": (
+                        "data_factory.ros_action_terminal_evidence.v1"
+                    ),
+                    "terminal": True,
+                    "phase": "SAFE_POSE_PTP",
+                    "type": "ARM",
+                    "goal_acceptance": "REJECTED",
+                    "result_status": None,
+                }
+                released = console.bridge_core.snapshot()["projection"]
+                self.assertIsNone(released["runtime"]["active_child_id"])
+                self.assertIsNone(
+                    console.session.status()["start_transition_owner"],
+                )
+                self.assertEqual(
+                    console.session.status()[
+                        "start_transition_terminal_evidence"
+                    ],
+                    terminal[0],
+                )
             finally:
                 console.close()
 

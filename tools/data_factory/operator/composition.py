@@ -31,6 +31,10 @@ from tools.data_factory.collection_seed import (
 from tools.data_factory.experiment_manifest import compile_fr5_hypothesis
 from tools.data_factory.one_job import OneJob, TEST_ONLY_READINESS_CONTRACT
 from tools.data_factory.motion.trajectory_variants import VARIANT_IDS
+from tools.data_factory.motion.pose_snapshot import (
+    JOINTS as SNAPSHOT_JOINTS,
+    _validate_snapshot,
+)
 from tools.data_factory.motion.object_reposition import (
     build_object_reposition_binding,
     yaw_preserving_destination,
@@ -2546,16 +2550,25 @@ def build_physical_operator_console(
         )
         if not isinstance(endpoint_motion, Mapping):
             raise ContractError("PHYSICAL_CONSOLE_WORKSPACE_BINDING")
-        snapshot = (
+        home_snapshot = (
             snapshot_call() if snapshot_call is not None
             else capture_home_snapshot(tcp_candidate_manifest=paths["tcp"])
         )
-        binding = build_runtime_start_binding(
-            data_disposition=data_disposition,
-            manifest=holder["operator"].manifest, hypothesis=hypothesis,
-            motion_qualification=endpoint_motion,
-            home_candidate=home_candidate, current_snapshot=snapshot, slot=slot,
-        )
+        checked_home = _validate_snapshot(copy.deepcopy(dict(home_snapshot)))
+        max_age = min(0.1, float(endpoint_motion["max_joint_state_age_s"]))
+        if max(
+            checked_home["joint_state_age_s"],
+            checked_home["ros_sample_age_s"],
+        ) > max_age:
+            raise ContractError("TEST_ONLY_START_STALE")
+        home_target = endpoint_motion["qualified_safe_joint_positions_rad"]
+        home_tolerance = float(endpoint_motion["goal_tolerances"]["joint_rad"])
+        if any(
+            abs(checked_home["joint_positions_rad"][joint] - target)
+            > home_tolerance
+            for joint, target in zip(SNAPSHOT_JOINTS, home_target)
+        ):
+            raise ContractError("TEST_ONLY_START_OUTSIDE_HOME")
         if cancel_event.is_set():
             raise ContractError("CAMPAIGN_SESSION_CANCELLED")
         start_pose_id = slot.get("robot_start_pose_id")
@@ -2582,6 +2595,19 @@ def build_physical_operator_console(
                 or transition.get("robot_start_pose_id") != start_pose_id
             ):
                 raise ContractError("PHYSICAL_CONSOLE_START_TRANSITION")
+        if cancel_event.is_set():
+            raise ContractError("CAMPAIGN_SESSION_CANCELLED")
+        selected_snapshot = (
+            snapshot_call() if snapshot_call is not None
+            else capture_home_snapshot(tcp_candidate_manifest=paths["tcp"])
+        ) if qualification is not None else checked_home
+        binding = build_runtime_start_binding(
+            data_disposition=data_disposition,
+            manifest=holder["operator"].manifest, hypothesis=hypothesis,
+            motion_qualification=endpoint_motion,
+            home_candidate=home_candidate,
+            current_snapshot=selected_snapshot, slot=slot,
+        )
         if cancel_event.is_set():
             raise ContractError("CAMPAIGN_SESSION_CANCELLED")
         return binding

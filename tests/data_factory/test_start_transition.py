@@ -8,7 +8,10 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
-from tools.data_factory.motion.home_recovery import transition_to_start
+from tools.data_factory.motion.home_recovery import (
+    transition_to_start,
+    transition_to_start_live,
+)
 from tools.data_factory.motion.moveit_transport import RosMoveItTransport
 from tools.fr5_data_factory import ContractError, canonical_digest
 
@@ -115,7 +118,9 @@ class StartTransitionTests(unittest.TestCase):
             spin_once=lambda *args, **kwargs: None,
         )
         value.node = object()
+        value._goal_succeeded = 4
         value._goal_canceled = 5
+        value._goal_aborted = 6
         value._compiled_execution_goal = lambda _step: (
             "SAFE_POSE_PTP", "ARM", object(), client, 1.0,
         )
@@ -200,6 +205,15 @@ class StartTransitionTests(unittest.TestCase):
                         {}, cancel_event=event, cancel_timeout_s=0.1,
                     )
                 self.assertEqual(client.send_goal_async.call_count, 1)
+                if not canceling:
+                    terminal = transport.poll_terminal_evidence()
+                    self.assertEqual(
+                        (terminal["terminal"], terminal["goal_acceptance"],
+                         terminal["result_status"]),
+                        (True, "ACCEPTED", 5),
+                    )
+                    self.assertFalse(transport.owns_active_goal)
+                    self.assertEqual(handle.cancel_count, 1)
 
         event = threading.Event()
         pending = Future(done=False)
@@ -215,6 +229,120 @@ class StartTransitionTests(unittest.TestCase):
         with self.assertRaisesRegex(ContractError, "ROS_EXEC_ACTIVE"):
             transport.start_phase({}, cancel_event=event, cancel_timeout_s=0.1)
         self.assertEqual(client.send_goal_async.call_count, 1)
+
+    def test_live_cancel_uncertainty_retains_one_owner_until_rejection(self):
+        class Future:
+            def __init__(self):
+                self.complete = False
+                self.value = None
+
+            def done(self):
+                return self.complete
+
+            def result(self):
+                return self.value
+
+        class OwnerEvent(threading.Event):
+            def __init__(self):
+                super().__init__()
+                self.claims = 0
+                self.finishes = []
+                self.owner = None
+
+            def claim_start_transition(self):
+                self.claims += 1
+
+            def finish_start_transition(self, code):
+                self.finishes.append(code)
+
+            def retain_start_transition_owner(self, owner):
+                self.owner = owner
+
+        pending = Future()
+        client = SimpleNamespace(
+            send_goal_async=mock.Mock(return_value=pending),
+        )
+        transport = self.transport(client)
+        event = OwnerEvent()
+        transport.node = node = mock.Mock()
+        transport._rclpy.spin_until_future_complete = (
+            lambda *_args, **_kwargs: event.set()
+        )
+        transport.preflight = lambda: {
+            name: {"ready": True}
+            for name in (
+                "move_action", "execute_trajectory", "gripper", "joint_states",
+            )
+        } | {"joint_order": JOINTS}
+        start = [item + 0.2 for item in TARGET.values()]
+        transport.snapshot = mock.Mock(side_effect=[snapshot(start), snapshot(start)])
+        transport.plan_arm = lambda _phase, _target, joint_target, *_args: {
+            "terminal_status": "SUCCEEDED",
+            "moveit_success": True,
+            "serialized_trajectory": b"start",
+            "final_joint_state": list(joint_target),
+        }
+        transport.precommit_joint_transition = lambda **_kwargs: {
+            "evidence_digest": canonical_digest(["joint-transition"]),
+        }
+        transport.cancel_active = mock.Mock(wraps=transport.cancel_active)
+        context = [False]
+
+        def init():
+            context[0] = True
+
+        def shutdown():
+            context[0] = False
+
+        with (
+            mock.patch("rclpy.ok", side_effect=lambda: context[0]),
+            mock.patch("rclpy.init", side_effect=init) as initialize,
+            mock.patch("rclpy.create_node", return_value=node),
+            mock.patch("rclpy.shutdown", side_effect=shutdown) as stop,
+            mock.patch(
+                "tools.data_factory.motion.moveit_transport.RosMoveItTransport",
+                return_value=transport,
+            ),
+        ):
+            with self.assertRaisesRegex(
+                ContractError, "START_TRANSITION_CANCEL_UNCERTAIN",
+            ):
+                transition_to_start_live(
+                    motion_qualification=MOTION,
+                    robot_start_pose_qualification=qualification(),
+                    cancel_event=event,
+                )
+            self.assertEqual((event.claims, event.finishes), (
+                1, ["START_TRANSITION_CANCEL_UNCERTAIN"],
+            ))
+            self.assertTrue(transport.owns_active_goal)
+            self.assertIsNotNone(event.owner)
+            self.assertEqual(
+                (client.send_goal_async.call_count,
+                 transport.cancel_active.call_count),
+                (1, 1),
+            )
+            node.destroy_node.assert_not_called()
+            stop.assert_not_called()
+            self.assertIsNone(event.owner())
+            node.destroy_node.assert_not_called()
+
+            pending.value = SimpleNamespace(accepted=False)
+            pending.complete = True
+            evidence = event.owner()
+            self.assertEqual(
+                (evidence["terminal"], evidence["goal_acceptance"]),
+                (True, "REJECTED"),
+            )
+            self.assertFalse(transport.owns_active_goal)
+            self.assertEqual(
+                (client.send_goal_async.call_count,
+                 transport.cancel_active.call_count),
+                (1, 1),
+            )
+            initialize.assert_called_once_with()
+            node.destroy_node.assert_called_once_with()
+            stop.assert_called_once_with()
 
     def test_cancel_stops_start_transition_before_or_during_motion(self):
         cancelled = threading.Event()

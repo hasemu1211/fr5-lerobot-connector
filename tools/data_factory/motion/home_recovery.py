@@ -479,7 +479,9 @@ def recover_home(
     return result
 
 
-def _live(node_name: str, unavailable_code: str, call) -> dict[str, Any]:
+def _live(
+    node_name: str, unavailable_code: str, call, *, cancel_event=None,
+) -> dict[str, Any]:
     try:
         import rclpy
         from tools.data_factory.motion.moveit_transport import RosMoveItTransport
@@ -487,16 +489,51 @@ def _live(node_name: str, unavailable_code: str, call) -> dict[str, Any]:
         raise ContractError(unavailable_code) from exc
     owned_context = not rclpy.ok()
     node = None
+    transport = None
+    retained = False
+    closed = False
+
+    def close() -> None:
+        nonlocal closed
+        if closed:
+            return
+        closed = True
+        try:
+            if node is not None:
+                node.destroy_node()
+        finally:
+            if owned_context and rclpy.ok():
+                rclpy.shutdown()
+
     try:
         if owned_context:
             rclpy.init()
         node = rclpy.create_node(node_name)
-        return call(RosMoveItTransport(node))
+        transport = RosMoveItTransport(node)
+        return call(transport)
+    except Exception:
+        if (
+            cancel_event is not None
+            and cancel_event.is_set()
+            and transport is not None
+            and transport.owns_active_goal
+        ):
+            evidence = None
+
+            def terminal_owner():
+                nonlocal evidence
+                if evidence is None:
+                    evidence = transport.poll_terminal_evidence()
+                if evidence is not None:
+                    close()
+                return evidence
+
+            cancel_event.retain_start_transition_owner(terminal_owner)
+            retained = True
+        raise
     finally:
-        if node is not None:
-            node.destroy_node()
-        if owned_context and rclpy.ok():
-            rclpy.shutdown()
+        if not retained:
+            close()
 
 
 def recover_home_live(*, motion_qualification: Mapping[str, Any]) -> dict[str, Any]:
@@ -515,6 +552,13 @@ def transition_to_start_live(
     cancel_event=None,
 ) -> dict[str, Any]:
     """Run a qualified start transition in this process and release its node."""
+    if cancel_event is not None and (
+        not callable(getattr(cancel_event, "is_set", None))
+        or not callable(
+            getattr(cancel_event, "retain_start_transition_owner", None)
+        )
+    ):
+        raise ContractError("START_TRANSITION_OWNER")
     return _live(
         "fr5_operator_start_transition", "START_TRANSITION_ROS_UNAVAILABLE",
         lambda transport: transition_to_start(
@@ -523,6 +567,7 @@ def transition_to_start_live(
             robot_start_pose_qualification=robot_start_pose_qualification,
             cancel_event=cancel_event,
         ),
+        cancel_event=cancel_event,
     )
 
 
