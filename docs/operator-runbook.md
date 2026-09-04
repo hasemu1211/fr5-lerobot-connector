@@ -38,7 +38,7 @@ technical PASS가 나와도 의미 있는 작업 성공을 뜻하지 않는다. 
 
 ## 브라우저 운영 경계
 
-browser는 robot, recorder, dataset, campaign 또는 review state의 owner가 아니다. server가 제공한 token은 local page channel의 possession만 증명하고 OS 인증이나 사람의 신원을 증명하지 않는다. stale view, replayed intent, revision rollback, unknown enum과 cancel-pending에서는 mutation을 거부하고 마지막으로 수락한 projection만 표시한다. bridge 장애에서는 `currentView`를 지우고 fail-closed 복구 shell만 표시한다.
+browser는 robot, recorder, dataset, campaign 또는 review state의 owner가 아니다. server가 제공한 token은 local page channel의 possession만 증명하고 OS 인증이나 사람의 신원을 증명하지 않는다. stale view, replayed intent, revision rollback, unknown enum, cancel-pending 또는 bridge 장애는 모두 mutation을 거부하고 `currentView`를 지우며 controls를 비활성화한 뒤 fail-closed 복구 shell만 표시한다.
 
 ## 사고와 복구
 
