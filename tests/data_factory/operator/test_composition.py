@@ -41,6 +41,7 @@ from tools.data_factory.operator.catalog import (
 )
 from tools.data_factory.operator.cli import main as operator_console_main
 from tools.data_factory.operator.composition import (
+    OperatorConsole,
     OperatorRuntime,
     _campaign_authorization_ttl,
     _domain_seed,
@@ -55,7 +56,6 @@ from tools.data_factory.operator.setup.physical import (
     passive_physical_gate,
 )
 from tools.data_factory.operator.workflow.campaign import (
-    OperatorConsole,
     _derive_test_only_gripper_program,
     _campaign_camera_warmup,
     _validate_successful_object_reposition_result,
@@ -403,7 +403,7 @@ class Harness:
     def console(
         self, *, episode_call=None, prepare_timeout_s=1.0,
         candidate_review_port=None, campaign_approval_once=False,
-        object_reposition_bindings=None,
+        object_reposition_bindings=None, close_timeout_s=1.0,
     ) -> OperatorConsole:
         def forbidden_review(*_args, **_kwargs):
             self.forbidden["candidate"] += 1
@@ -426,7 +426,8 @@ class Harness:
             gripper_setup_resolution_call=self.setup_resolution_call,
             object_reposition_bindings=object_reposition_bindings,
             campaign_approval_once=campaign_approval_once,
-            prepare_timeout_s=prepare_timeout_s, close_timeout_s=1.0,
+            prepare_timeout_s=prepare_timeout_s,
+            close_timeout_s=close_timeout_s,
         )
 
 
@@ -465,6 +466,155 @@ class OperatorConsoleTests(unittest.TestCase):
         self.assertEqual(
             calls, ["application", "environment", "bridge"],
         )
+
+    def test_runtime_close_waits_for_start_owner_publication_and_terminal_cleanup(self):
+        with tempfile.TemporaryDirectory() as root:
+            harness = Harness(root)
+            claimed = threading.Event()
+            cancel_seen = threading.Event()
+            publish_owner = threading.Event()
+            owner_published = threading.Event()
+            terminal_polled = threading.Event()
+            terminal_ready = threading.Event()
+            runtime_entered = threading.Event()
+            cleanup = []
+            unexpected = []
+            terminal_evidence = {
+                "schema_version": (
+                    "data_factory.ros_action_terminal_evidence.v1"
+                ),
+                "terminal": True,
+                "phase": "SAFE_POSE_PTP",
+                "type": "ARM",
+                "goal_acceptance": "REJECTED",
+                "result_status": None,
+            }
+
+            def terminal_owner():
+                terminal_polled.set()
+                return (
+                    copy.deepcopy(terminal_evidence)
+                    if terminal_ready.is_set() else None
+                )
+
+            def over_timeout_start(_run_id, _slot, cancel_event):
+                cancel_event.claim_start_transition()
+                claimed.set()
+                if not cancel_event.wait(1.0):
+                    raise AssertionError("cancellation did not reach startup owner")
+                cancel_seen.set()
+                if not publish_owner.wait(1.0):
+                    raise AssertionError("owner publication was not released")
+                cancel_event.finish_start_transition(
+                    "START_TRANSITION_CANCEL_UNCERTAIN", terminal_owner,
+                )
+                owner_published.set()
+                raise ContractError("START_TRANSITION_CANCEL_UNCERTAIN")
+
+            harness.start_binding = over_timeout_start
+            console = harness.console(
+                campaign_approval_once=True,
+                object_reposition_bindings=[None],
+                close_timeout_s=0.01,
+            )
+            closer = None
+            try:
+                start_campaign(
+                    console, harness, "close-owner-publication",
+                )
+                self.assertTrue(claimed.wait(1.0))
+                with self.assertRaisesRegex(
+                    ContractError, "OPERATOR_CONSOLE_START_OWNER_ACTIVE",
+                ):
+                    console.close()
+                self.assertTrue(cancel_seen.is_set())
+                owner = console.session.status()["start_transition_owner"]
+                self.assertEqual(
+                    (
+                        owner["state"], owner["owner_reachable"],
+                        owner["action_owner_retained"],
+                    ),
+                    ("ACTIVE", True, False),
+                )
+
+                def close_console():
+                    runtime_entered.set()
+                    console.close()
+
+                runtime = OperatorRuntime(
+                    bridge=object(), announcement={},
+                    close_calls=(
+                        close_console,
+                        lambda: cleanup.append("terminal-cleanup"),
+                    ),
+                )
+
+                def close_runtime():
+                    try:
+                        runtime.close()
+                    except Exception as exc:
+                        unexpected.append(exc)
+
+                closer = threading.Thread(target=close_runtime)
+                closer.start()
+                self.assertTrue(runtime_entered.wait(1.0))
+                self.assertTrue(closer.is_alive())
+                self.assertFalse(runtime._closed)
+                self.assertEqual(cleanup, [])
+
+                publish_owner.set()
+                self.assertTrue(owner_published.wait(1.0))
+                console.episode_worker.join(1.0)
+                self.assertFalse(console.episode_worker.is_alive())
+                self.assertTrue(terminal_polled.wait(1.0))
+                self.assertTrue(closer.is_alive())
+                self.assertEqual(cleanup, [])
+
+                terminal_ready.set()
+                closer.join(1.0)
+                self.assertFalse(closer.is_alive())
+                self.assertEqual(unexpected, [])
+                self.assertTrue(runtime._closed)
+                self.assertEqual(cleanup, ["terminal-cleanup"])
+                status = console.session.status()
+                self.assertIsNone(status["start_transition_owner"])
+                self.assertEqual(
+                    status["start_transition_terminal_evidence"],
+                    terminal_evidence,
+                )
+            finally:
+                publish_owner.set()
+                terminal_ready.set()
+                if closer is not None:
+                    closer.join(1.0)
+                if console.episode_worker is not None:
+                    console.episode_worker.join(1.0)
+                console.close()
+
+    def test_console_close_keeps_unowned_thread_leak(self):
+        with tempfile.TemporaryDirectory() as root:
+            console = Harness(root).console(close_timeout_s=0.01)
+            entered = threading.Event()
+            release = threading.Event()
+
+            def unrelated_worker():
+                entered.set()
+                release.wait(1.0)
+
+            worker = threading.Thread(target=unrelated_worker)
+            console._thread = worker
+            worker.start()
+            self.assertTrue(entered.wait(1.0))
+            try:
+                with self.assertRaisesRegex(
+                    ContractError, "OPERATOR_CONSOLE_THREAD_LEAK",
+                ):
+                    console.close()
+                self.assertIsNone(console.session)
+            finally:
+                release.set()
+                worker.join(1.0)
+                console.close()
 
     def test_domain_seeds_are_deterministic_and_slot_order_independent(self):
         slot = {
