@@ -455,6 +455,10 @@ def _claims(
         "robot": "ROBOT_VARIATION_UNMEASURED",
         "rollout": "NO_CANONICAL_PHYSICAL_ROLLOUT_ANALYSIS",
     }
+    if snapshot["data_quality_analysis_ref"]["availability"] == "UNAVAILABLE":
+        required_unknowns["quality"] = "DATA_QUALITY_ANALYSIS_UNAVAILABLE"
+    elif any(claim["subject"] == "quality" for claim in result):
+        raise ContractError("COLLECTION_RECOMMENDATION_NUISANCE_CLAIM")
     for subject, reason in required_unknowns.items():
         matches = [claim for claim in result if claim["subject"] == subject]
         if (

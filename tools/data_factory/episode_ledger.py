@@ -757,6 +757,12 @@ def validate_loaded_episode_evidence(
         )
     if not isinstance(dataset_root, str) or not dataset_root or "\x00" in dataset_root:
         raise ContractError("EPISODE_LEDGER_DATASET_ROOT")
+    root = PurePosixPath(dataset_root)
+    if (
+        not root.is_absolute() or root.anchor != "/"
+        or str(root) != dataset_root or ".." in root.parts
+    ):
+        raise ContractError("EPISODE_LEDGER_DATASET_ROOT")
     if artifact_refs is None and isinstance(ledger, Mapping):
         artifact_refs = ledger.get("artifacts")
     refs = _exact(

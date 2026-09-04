@@ -349,6 +349,24 @@ class EpisodeLedgerTest(unittest.TestCase):
             "runtime_binding": self._json(f"runtime-binding{suffix}.json", runtime_binding),
         }
 
+    @staticmethod
+    def _loaded_artifacts(refs: dict) -> dict:
+        loaded = {}
+        for name, ref in refs.items():
+            path = Path(ref["artifact_path"])
+            if name in {"source_provenance", "recording_quality"}:
+                rows = [
+                    json.loads(line)
+                    for line in path.read_text(encoding="utf-8").splitlines()
+                ]
+                loaded[name] = (
+                    rows if name == "source_provenance" else
+                    next(row for row in rows if row["episode_index"] == 0)
+                )
+            else:
+                loaded[name] = json.loads(path.read_text(encoding="utf-8"))
+        return loaded
+
     def _candidate(self, ledger: dict, semantic_status: str = "PENDING", name: str = "candidate.json"):
         candidate = {
             "schema_version": "data_factory.candidate_admission.v1",
@@ -409,20 +427,7 @@ class EpisodeLedgerTest(unittest.TestCase):
 
     def test_loaded_episode_validator_is_pure_exact_and_owner_canonical(self) -> None:
         refs = self._artifacts(suffix="loaded")
-        loaded = {}
-        for name, ref in refs.items():
-            path = Path(ref["artifact_path"])
-            if name in {"source_provenance", "recording_quality"}:
-                rows = [
-                    json.loads(line)
-                    for line in path.read_text(encoding="utf-8").splitlines()
-                ]
-                loaded[name] = (
-                    rows if name == "source_provenance" else
-                    next(row for row in rows if row["episode_index"] == 0)
-                )
-            else:
-                loaded[name] = json.loads(path.read_text(encoding="utf-8"))
+        loaded = self._loaded_artifacts(refs)
         before = copy.deepcopy((refs, loaded))
         dataset_root = str(self.dataset.resolve())
         with (
@@ -460,6 +465,31 @@ class EpisodeLedgerTest(unittest.TestCase):
                     dataset_root=dataset_root,
                     artifact_refs=forged_refs, artifacts=forged,
                 )
+
+    def test_loaded_episode_validator_rejects_rehashed_dataset_root_alias(self) -> None:
+        refs = self._artifacts(suffix="root-alias")
+        loaded = self._loaded_artifacts(refs)
+        dataset_root = f"{self.dataset.resolve()}/."
+        loaded["staging_manifest"]["dataset_root"] = dataset_root
+        loaded["technical"]["dataset_root"] = dataset_root
+        loaded["episode"]["dataset_filesystem"]["path"] = dataset_root
+        loaded["episode"]["episode_ref"]["staging_manifest_digest"] = digest(
+            loaded["staging_manifest"],
+        )
+        for name in ("episode", "staging_manifest", "technical"):
+            refs[name]["artifact_digest"] = digest(loaded[name])
+        before = copy.deepcopy((refs, loaded))
+
+        with (
+            mock.patch("builtins.open", side_effect=AssertionError("I/O forbidden")),
+            mock.patch("pathlib.Path.open", side_effect=AssertionError("I/O forbidden")),
+            mock.patch("pathlib.Path.resolve", side_effect=AssertionError("I/O forbidden")),
+            self.assertRaisesRegex(ContractError, "EPISODE_LEDGER_DATASET_ROOT"),
+        ):
+            validate_loaded_episode_evidence(
+                dataset_root=dataset_root, artifact_refs=refs, artifacts=loaded,
+            )
+        self.assertEqual((refs, loaded), before)
 
     def test_plan_artifact_preserves_the_episode_instruction_binding(self) -> None:
         artifacts = self._artifacts(suffix="instruction-v2")

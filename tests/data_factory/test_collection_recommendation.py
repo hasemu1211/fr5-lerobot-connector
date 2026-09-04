@@ -83,6 +83,10 @@ class RecommendationFixture:
             self.unknown("background-unknown", "background", "BACKGROUND_LABELS_UNAVAILABLE"),
             self.unknown("robot-unknown", "robot", "ROBOT_VARIATION_UNMEASURED"),
             self.unknown(
+                "quality-unknown", "quality",
+                "DATA_QUALITY_ANALYSIS_UNAVAILABLE",
+            ),
+            self.unknown(
                 "rollout-unknown", "rollout",
                 "NO_CANONICAL_PHYSICAL_ROLLOUT_ANALYSIS",
             ),
@@ -852,6 +856,9 @@ class CollectionRecommendationTests(unittest.TestCase):
 
     def test_analysis_owners_availability_alias_and_physical_scope_are_strict(self) -> None:
         report = copy.deepcopy(self.fixture.hypothesis["coverage_report"])
+        available_claims = [
+            claim for claim in self.fixture.claims if claim["subject"] != "quality"
+        ]
         data_quality_ref = {
             "availability": "AVAILABLE",
             "schema_version": report["schema_version"],
@@ -862,6 +869,7 @@ class CollectionRecommendationTests(unittest.TestCase):
         recommendation = self.fixture.build(
             data_quality_analysis_ref=data_quality_ref,
             data_quality_analysis=report,
+            claims=available_claims,
         )
         self.assertEqual(
             validate_collection_recommendation(
@@ -943,6 +951,51 @@ class CollectionRecommendationTests(unittest.TestCase):
             self.fixture.build(
                 rollout_evidence_analysis_ref=unavailable("ROLLOUT_NOT_RUN"),
             )
+
+    def test_data_quality_availability_and_unknown_claim_are_coupled(self) -> None:
+        missing_claims = [
+            claim for claim in self.fixture.claims if claim["subject"] != "quality"
+        ]
+        with self.assertRaisesRegex(ContractError, "NUISANCE_CLAIM"):
+            self.fixture.build(claims=missing_claims)
+
+        report = copy.deepcopy(self.fixture.hypothesis["coverage_report"])
+        data_quality_ref = {
+            "availability": "AVAILABLE",
+            "schema_version": report["schema_version"],
+            "analysis_id": report["collection_profile_id"],
+            "analysis_digest": digest(report),
+            "reason_codes": [],
+        }
+        with self.assertRaisesRegex(ContractError, "NUISANCE_CLAIM"):
+            self.fixture.build(
+                data_quality_analysis_ref=data_quality_ref,
+                data_quality_analysis=report,
+            )
+
+        before = copy.deepcopy((missing_claims, data_quality_ref, report))
+        recommendation = self.fixture.build(
+            data_quality_analysis_ref=data_quality_ref,
+            data_quality_analysis=report,
+            claims=missing_claims,
+        )
+        self.assertEqual(
+            recommendation["input_snapshot"]["data_quality_analysis_ref"],
+            data_quality_ref,
+        )
+        self.assertEqual(
+            validate_collection_recommendation(
+                recommendation,
+                campaign_manifest=self.fixture.manifest,
+                campaign_hypothesis=self.fixture.hypothesis,
+                campaign_draft=self.fixture.draft,
+                campaign_compilation_receipt=self.fixture.receipt,
+                episode_evidence=self.fixture.evidence,
+                data_quality_analysis=report,
+            ),
+            recommendation,
+        )
+        self.assertEqual((missing_claims, data_quality_ref, report), before)
 
     def test_claim_epistemics_nuisances_and_causal_rollout_fail_closed(self) -> None:
         cases = {}
