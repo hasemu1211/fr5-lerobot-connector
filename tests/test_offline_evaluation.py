@@ -324,6 +324,47 @@ class OfflineEvaluationTest(unittest.TestCase):
             self.assertEqual(json.loads(args.output.read_text()), report)
             self.assertFalse(Path(str(args.output) + ".tmp").exists())
 
+    def test_report_rejects_existing_transitive_evidence_and_dangling_links(self):
+        for kind in ("training_approval", "episode_provenance", "technical_validator",
+                     "human_semantic_evidence", "existing-report", "dangling-output", "dangling-temporary"):
+            with self.subTest(kind=kind), TemporaryDirectory(prefix="SYNTHETIC_TEST_ONLY-") as directory:
+                args, _ = admitted_case(Path(directory))
+                episode = json.loads(args.approved_inventory.read_text())["episodes"][0]
+                if kind in episode:
+                    args.output = Path(episode[kind]["artifact_path"])
+                elif kind == "existing-report":
+                    args.output.write_text("previous report")
+                else:
+                    target = args.output if kind == "dangling-output" else Path(str(args.output) + ".tmp")
+                    target.symlink_to(Path(directory) / "absent")
+                before = {p: p.read_bytes() for p in Path(directory).rglob("*") if p.is_file()}
+                with mock.patch.object(sys, "argv", evaluation_argv(args)), mock.patch(
+                    "tools.evaluate_smolvla_offline.evaluate", return_value={"unexpected": True}
+                ) as inference, mock.patch("builtins.print"):
+                    with self.assertRaisesRegex(ValueError, "immutable evaluation input"):
+                        main()
+                inference.assert_not_called()
+                self.assertEqual({p: p.read_bytes() for p in before}, before)
+
+    def test_report_publication_preserves_files_created_during_inference(self):
+        for temporary in (False, True):
+            with self.subTest(temporary=temporary), TemporaryDirectory(prefix="SYNTHETIC_TEST_ONLY-") as directory:
+                args, _ = admitted_case(Path(directory))
+                target = Path(str(args.output) + ".tmp") if temporary else args.output
+
+                def competing_write(*_args):
+                    target.write_bytes(b"concurrent writer")
+                    return {"schema_version": 3}
+
+                with mock.patch.object(sys, "argv", evaluation_argv(args)), mock.patch(
+                    "tools.evaluate_smolvla_offline.evaluate", side_effect=competing_write
+                ), mock.patch("builtins.print"):
+                    with self.assertRaises(FileExistsError):
+                        main()
+                self.assertEqual(target.read_bytes(), b"concurrent writer")
+                other = args.output if temporary else Path(str(args.output) + ".tmp")
+                self.assertFalse(other.exists())
+
     def test_multibatch_reports_partial_and_complete_coverage_honestly(self):
         with TemporaryDirectory(prefix="SYNTHETIC_TEST_ONLY-") as directory:
             args, _ = admitted_case(Path(directory))

@@ -11,6 +11,7 @@ import argparse
 from contextlib import nullcontext
 import json
 import math
+import os
 from pathlib import Path
 import random
 import statistics
@@ -82,32 +83,23 @@ def _temporary_output_path(output: Path) -> Path:
     return output.with_suffix(output.suffix + ".tmp")
 
 
-def _paths_alias(left: Path, right: Path) -> bool:
-    if left.resolve() == right.resolve():
-        return True
-    return left.exists() and right.exists() and left.samefile(right)
-
-
 def _validate_output_target(
     output: Path,
     *,
     dataset: Path,
     checkpoint_root: Path,
-    protected_files: list[Path],
 ) -> None:
     checkpoint_root = checkpoint_root.resolve()
-    checkpoint_files = [path for path in checkpoint_root.rglob("*") if path.is_file()]
     for candidate in (output.expanduser(), _temporary_output_path(output.expanduser())):
         resolved = candidate.resolve()
         if resolved.is_relative_to(dataset):
             raise ValueError("evaluation output must remain outside the immutable dataset")
         if resolved == checkpoint_root or resolved.is_relative_to(checkpoint_root):
             raise ValueError("evaluation output must not replace an immutable evaluation input")
-        if any(
-            _paths_alias(candidate, protected)
-            for protected in [*protected_files, *checkpoint_files]
-        ):
-            raise ValueError("evaluation output must not replace an immutable evaluation input")
+        if candidate.exists() or candidate.is_symlink():
+            raise ValueError(
+                "evaluation output requires new paths to preserve every immutable evaluation input"
+            )
 
 
 def admit_evaluation(args: argparse.Namespace) -> dict:
@@ -167,7 +159,6 @@ def admit_evaluation(args: argparse.Namespace) -> dict:
             args.output,
             dataset=dataset,
             checkpoint_root=policy_dir.parent,
-            protected_files=[inventory_path, split_path, receipt_path],
         )
 
     return {
@@ -349,10 +340,19 @@ def main() -> None:
     serialized = json.dumps(report, indent=2, sort_keys=True)
     print(serialized)
     if args.output:
-        args.output.parent.mkdir(parents=True, exist_ok=True)
-        temporary = _temporary_output_path(args.output)
-        temporary.write_text(serialized + "\n")
-        temporary.replace(args.output)
+        output = args.output.expanduser()
+        output.parent.mkdir(parents=True, exist_ok=True)
+        temporary = _temporary_output_path(output)
+        stream = temporary.open("x", encoding="utf-8")
+        try:
+            with stream:
+                stream.write(serialized + "\n")
+                stream.flush()
+                os.fsync(stream.fileno())
+            # Publish completely without replacing a concurrent writer's file.
+            os.link(temporary, output)
+        finally:
+            temporary.unlink()
 
 
 if __name__ == "__main__":
