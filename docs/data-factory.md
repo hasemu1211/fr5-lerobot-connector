@@ -47,7 +47,7 @@
 
 출력은 source roots 밖의 전용 derived root 아래 recommendation digest별 디렉터리에 canonical coverage report와 recommendation을 함께 게시한다. 같은 입력의 동시 호출은 같은 완성된 결과를 재사용한다. 두 파일은 임시 디렉터리에서 완성한 뒤 한 번에 공개하며, 기존 결과가 변조되거나 불완전하면 덮어쓰지 않고 실패한다. 바뀐 episode/state/report/commit label은 다른 결과를 만든다. 전체 compiled authoring이 없는 legacy run, 서로 다른 campaign, digest 불일치, 누락된 candidate는 typed `UNAVAILABLE`이며 현재 config로 복원하지 않는다. 현재 recommendation 계약은 v2 campaign manifest와 중복 없는 manifest-order prefix episode 입력을 요구한다.
 
-정확한 slot 제안은 [project_campaign_update_intent](../tools/data_factory/collection_recommendation.py)가 source와 분석 결과를 다시 결속해 현재 CampaignOperator view에 묶인 `update_draft` intent로 만든다. 기존 owner가 적용하고 별도로 compile하면 관측되지 않은 조건을 선택한 manifest가 된다. stale view는 거부된다. 기존 UI용 `project_update_draft_intent`는 일반 편집 제안을 처리하지만 이 slot 제안은 거부한다. UI의 현재 물체 위치를 재해석하거나 자동 후속 실행에 연결한 것은 아니다.
+정확한 slot 제안은 [project_campaign_update_intent](../tools/data_factory/collection_recommendation.py)가 source와 분석 결과를 다시 결속해 현재 CampaignOperator view에 묶인 `update_draft` intent로 만든다. 기존 owner가 적용하고 별도로 compile하면 관측되지 않은 조건을 선택한 manifest가 된다. stale view는 거부된다. 추천 이후 선택 방식·수집 수·seed·고정/제외 위치·직접 선택을 바꿨다면 최신 view여도 이전 추천은 적용하지 않는다. 조건과 무관한 view 갱신은 허용한다. 기존 UI용 `project_update_draft_intent`는 일반 편집 제안을 처리하지만 이 slot 제안은 거부한다. UI의 현재 물체 위치를 재해석하거나 자동 후속 실행에 연결한 것은 아니다.
 
 추천 자체는 compile, authorize, recorder, motion, training을 실행하지 않는다. vision/person/background/robot variation과 physical rollout은 `UNKNOWN`으로 남고, semantic review가 pending이면 semantic proof도 `UNKNOWN`이다. 합성 테스트는 저장·재소비·replay·변경 입력·native draft 적용 후 정확한 조건의 compile을 증명하며, 실물 수집·rollout 효과나 자동 후속 실행을 증명하지 않는다.
 

@@ -29,7 +29,7 @@ from tools.data_factory.campaign_authoring import (
     campaign_cell_id,
     compile_collection_campaign,
 )
-from tools.data_factory.operator.workflow.intents import OperatorIntentCore
+from tools.data_factory.operator.workflow.intents import INTENT_SCHEMA, OperatorIntentCore
 from tools.data_factory.operator.workflow.application import (
     CollectionOperatorApplication,
 )
@@ -726,6 +726,54 @@ class CollectionRecommendationTests(unittest.TestCase):
             )
         self.assertEqual(self.fixture.__dict__, before)
 
+    def test_retained_recommendation_preserves_later_native_draft_edits(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            fixture = RecommendationFixture(
+                dataset_root=str(root / "data"), evidence_root=str(root / "runs"),
+            )
+            runs = fixture.store()
+            result = recommend_stored_collection(run_directories=runs[:1], source_commit=COMMIT)
+            recommendation = result["recommendation"]
+            target = recommendation["suggested_draft_patches"][0]["value"]["direct_slots"][0]["slot_id"]
+            edits = {
+                "excluded": [target], "pinned": [fixture.manifest["slots"][0]["slot_id"]],
+                "normalized_seed": fixture.draft["normalized_seed"] + 1, "requested_count": 1,
+            }
+            for field, value in edits.items():
+                with self.subTest(field=field):
+                    forbidden = mock.Mock(side_effect=AssertionError("no physical effects"))
+                    app = CampaignOperator(
+                        session_id="edited-campaign", lifecycle_owner="TEST_OPERATOR",
+                        workspace={"identity":"SYNTHETIC"}, hypothesis=fixture.hypothesis,
+                        draft=fixture.draft, effect_scope="FAKE", lifecycle_action="AUTHOR_ONLY",
+                        data_disposition="TEST_ONLY",
+                        subsystems={"planner":{"readiness":"READY", "capability":"AUTHOR", "reason":"SYNTHETIC"}},
+                        expires_at="2099-01-01T00:00:00Z", initial_scene_digest=digest("scene"),
+                        scene_evidence_call=forbidden, fake_lifecycle_factory=forbidden,
+                        side_effect_counter_call=lambda: {name:0 for name in SIDE_EFFECT_COUNTERS},
+                        clock=lambda: NOW,
+                    )
+                    view = app.core.snapshot()
+                    payload = {key: copy.deepcopy(fixture.draft[key]) for key in (
+                        "requested_count", "normalized_seed", "pinned", "excluded", "direct_slots",
+                    )}
+                    payload.update(authoring_mode="ASSISTED", **{field:value})
+                    app.core.consume({
+                        "schema_version":INTENT_SCHEMA, "intent_id":"current-user-edit",
+                        "session_id":view["session_id"], "view_revision":view["revision"],
+                        "view_digest":view["view_digest"], "op":"update_draft", "payload":payload,
+                    })
+                    current = app.core.snapshot()
+                    with self.assertRaisesRegex(ContractError, "COLLECTION_RECOMMENDATION_DRAFT_CHANGED"):
+                        project_campaign_update_intent(
+                            recommendation, compiled_authoring=fixture.authoring(), operator_view=current,
+                            data_quality_analysis=result["data_quality_analysis"],
+                        )
+                    self.assertEqual(app.core.snapshot(), current)
+                    self.assertEqual(app.draft[field], value)
+                    forbidden.assert_not_called()
+
     def test_native_stored_consumer_replay_invalidation_and_update_draft(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -754,7 +802,11 @@ class CollectionRecommendationTests(unittest.TestCase):
                 side_effect_counter_call=lambda: {name: 0 for name in SIDE_EFFECT_COUNTERS},
                 fake_lifecycle_factory=factory, clock=lambda: NOW,
             )
+            # Unrelated owner publication does not stale the recommendation.
+            original_view = application.core.snapshot()
+            application.core.transition(lambda: None)
             view = application.core.snapshot()
+            self.assertGreater(view["revision"], original_view["revision"])
             intent = project_campaign_update_intent(
                 advice, compiled_authoring=fixture.authoring(), operator_view=view,
                 data_quality_analysis=first["data_quality_analysis"],

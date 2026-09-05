@@ -1036,6 +1036,12 @@ def project_campaign_update_intent(
         "session_id": view["session_id"], "revision": view["revision"], "projection": projection,
     }):
         raise ContractError("COLLECTION_RECOMMENDATION_VIEW_STALE")
+    # A fresh CAS cannot make advice derived from an older selection current.
+    # Ignore unrelated view revisions, but preserve every later selection edit.
+    if any(projection["draft"].get(key) != source["draft"].get(key) for key in (
+        "selector", "requested_count", "normalized_seed", "pinned", "excluded", "direct_slots",
+    )):
+        raise ContractError("COLLECTION_RECOMMENDATION_DRAFT_CHANGED")
     return {
         "schema_version": INTENT_SCHEMA,
         "intent_id": "recommendation-" + canonical_digest([
