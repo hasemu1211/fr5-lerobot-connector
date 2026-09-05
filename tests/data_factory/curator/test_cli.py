@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import io
 import json
+from pathlib import Path
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
 from unittest import mock
@@ -10,11 +11,30 @@ from tools.data_factory.curator.cli import _parser, main
 
 
 class CliTest(unittest.TestCase):
+    def test_training_request_keeps_explicit_selection_and_nonapproval_boundary(self):
+        output = io.StringIO()
+        with (
+            mock.patch(
+                "tools.data_factory.curator.cli.export_training_request",
+                return_value={"status": "REQUEST_NOT_APPROVED", "training_authority": False},
+            ) as call,
+            redirect_stdout(output),
+        ):
+            main([
+                "training-request", "--run-dir", "/runs/b", "--run-dir", "/runs/a",
+                "--dataset-id", "selection-r1", "--output", "/outputs/request.json",
+            ])
+        call.assert_called_once_with(
+            [Path("/runs/b"), Path("/runs/a")], Path("/outputs/request.json"),
+            dataset_id="selection-r1",
+        )
+        self.assertFalse(json.loads(output.getvalue())["training_authority"])
+
     def test_only_supported_commands_and_no_abbreviated_flags(self):
         parser = _parser()
         self.assertEqual(
             set(parser._subparsers._group_actions[0].choices),
-            {"prepare", "status", "decide", "setup"},
+            {"prepare", "status", "decide", "setup", "training-request"},
         )
         setup = parser.parse_args(["setup", "export", "--source", "/tmp/source"])
         self.assertEqual(setup.profile_id, "fr5-up-wrist-fixed-view-r003")
