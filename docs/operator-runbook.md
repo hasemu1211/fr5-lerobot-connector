@@ -42,6 +42,10 @@ technical PASS가 나와도 의미 있는 작업 성공을 뜻하지 않는다. 
 
 browser는 robot, recorder, dataset, campaign 또는 review state의 owner가 아니다. server가 제공한 token은 local page channel의 possession만 증명하고 OS 인증이나 사람의 신원을 증명하지 않는다. stale view, replayed intent, revision rollback, unknown enum, cancel-pending 또는 bridge 장애는 모두 mutation을 거부하고 `currentView`를 지우며 controls를 비활성화한 뒤 fail-closed 복구 shell만 표시한다.
 
+## 로컬 명령줄 클라이언트
+
+실행 중인 loopback operator의 읽기 전용 상태는 `python3 -m tools.data_factory.operator.web.client --endpoint http://127.0.0.1:PORT view`로 확인한다. 호출자가 이미 만든 정확한 intent envelope 하나는 `... submit intent.json` 또는 stdin의 `... submit`으로 보낸다. 클라이언트는 page에서 token을 찾아 header로만 사용하고, envelope의 session·revision·digest·intent ID·op·payload를 갱신하거나 재구성하지 않으며 POST를 재시도하지 않는다. backend 거절이나 응답 단절 뒤에는 새 요청을 추론하지 말고 JSON 오류와 종료 코드를 확인한다. 이 도구는 운영자 판단, fresh physical verification, motion·semantic·training 승인 중 어느 것도 자동화하지 않으며 기존 backend gate만 권위를 가진다.
+
 ## 사고와 복구
 
 - 중단·fault·timeout 뒤에는 다음 작업을 시작하지 말고 controller, scene, cell과 recorder 상태를 별도로 확인한다.
