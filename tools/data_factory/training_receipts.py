@@ -249,3 +249,33 @@ def validate_reload_receipt(value: object, train_receipt: object) -> dict:
     ):
         raise ReceiptError("RELOAD_NOT_INDEPENDENT")
     return copy.deepcopy(receipt)
+
+
+def compile_launch_receipt(split: Mapping, argv: list[str], inventory_path: str) -> dict:
+    """Record admitted launch inputs; never claim checkpoint/reload or training PASS."""
+    from tools.data_factory.training_split import validate_training_split
+
+    split = validate_training_split(split)
+    if split["schema_version"] != 3:
+        raise ReceiptError("LAUNCH_SPLIT_REQUIRED")
+    argv = normalize_argv(argv)
+    value = {
+        "schema_version": "data_factory.training_launch_receipt.v1",
+        "status": "ADMITTED_NOT_TRAINED",
+        "approved_inventory_path": str(Path(inventory_path).resolve()),
+        "approved_episode_inventory_digest": split["approved_episode_inventory_digest"],
+        "dataset_identity": split["dataset_identity"],
+        "split_digest": split["split_digest"],
+        "selected_episodes": split["selected_episodes"],
+        "train_episodes": split["train_episodes"], "eval_episodes": split["eval_episodes"],
+        "feature_contract": split["feature_contract"],
+        "normalized_argv": argv, "argv_digest": canonical_digest(argv),
+    }
+    return {**value, "receipt_digest": canonical_digest(value)}
+
+
+def validate_launch_receipt(value: Mapping, split: Mapping) -> dict:
+    expected = compile_launch_receipt(split, value["normalized_argv"], value["approved_inventory_path"])
+    if value != expected:
+        raise ReceiptError("LAUNCH_RECEIPT_BINDING")
+    return expected

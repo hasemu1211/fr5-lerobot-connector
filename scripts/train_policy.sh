@@ -15,11 +15,17 @@ Usage:
 
 PROFILE: smolvla | act | vqbet-up | vqbet-side | vqbet-wrist
 AUGMENTATION: none | light-photometric | light-photometric-affine
+Required launch inputs before DATASET_NAME:
+  --approved-inventory PATH   External training_approved_inventory.v2 (not a legacy marker)
+  --collection-profile ID     Qualified collection profile matching the recorded cameras
+Use scripts/approve_training.sh --help for the human approval connection.
 The profile owns policy type, FR5 7D features, and camera mapping.
 All remaining options are passed to official lerobot-train.
 EOF
 }
 
+APPROVED_INVENTORY=""
+COLLECTION_PROFILE=""
 PROFILE=""
 DATASET_ROOT="${FR5_DATASET_ROOT:-$ROOT/datasets/fr5_episodes}"
 OUTPUT=""
@@ -31,6 +37,8 @@ while [[ $# -gt 0 ]]; do
     -h|--help) usage; exit 0 ;;
     --check-env) CHECK_ENV=1; shift ;;
     --resume-from) [[ $# -ge 2 ]] || { echo "--resume-from requires a value" >&2; exit 2; }; RESUME_FROM="$2"; shift 2 ;;
+    --approved-inventory) APPROVED_INVENTORY="${2:?--approved-inventory requires a path}"; shift 2 ;;
+    --collection-profile) COLLECTION_PROFILE="${2:?--collection-profile requires an ID}"; shift 2 ;;
     --profile) [[ $# -ge 2 ]] || { echo "--profile requires a value" >&2; exit 2; }; PROFILE="$2"; shift 2 ;;
     --root) [[ $# -ge 2 ]] || { echo "--root requires a path" >&2; exit 2; }; DATASET_ROOT="$2"; shift 2 ;;
     --output) [[ $# -ge 2 ]] || { echo "--output requires a path" >&2; exit 2; }; OUTPUT="$2"; shift 2 ;;
@@ -41,17 +49,12 @@ while [[ $# -gt 0 ]]; do
 done
 
 if [[ -n "$RESUME_FROM" ]]; then
-  [[ "$CHECK_ENV" == 0 && -z "$PROFILE" && -z "$OUTPUT" && "$DATASET_ROOT" == "${FR5_DATASET_ROOT:-$ROOT/datasets/fr5_episodes}" && $# -eq 0 ]] || {
+  [[ "$CHECK_ENV" == 0 && -z "$PROFILE" && -z "$OUTPUT" && -z "$APPROVED_INVENTORY" && -z "$COLLECTION_PROFILE" && "$DATASET_ROOT" == "${FR5_DATASET_ROOT:-$ROOT/datasets/fr5_episodes}" && $# -eq 0 ]] || {
     echo "--resume-from is a standalone mode; only --dry-run may accompany it." >&2
     exit 2
   }
-  RESUME_INFO_FILE="$(mktemp)"
-  if ! "$ROOT/.venv/bin/python" "$ROOT/tools/validate_training_checkpoint.py" "$RESUME_FROM" --shell >"$RESUME_INFO_FILE"; then
-    rm -f "$RESUME_INFO_FILE"
-    exit 2
-  fi
-  mapfile -d '' -t RESUME_INFO <"$RESUME_INFO_FILE"
-  rm -f "$RESUME_INFO_FILE"
+  RESUME_INFO_JSON="$("$ROOT/.venv/bin/python" "$ROOT/tools/validate_training_checkpoint.py" "$RESUME_FROM" --json)" || exit 2
+  mapfile -d '' -t RESUME_INFO < <("$ROOT/.venv/bin/python" -c 'import json,sys; sys.stdout.buffer.write(b"\0".join(x.encode() for x in json.loads(sys.argv[1])) + b"\0")' "$RESUME_INFO_JSON")
   [[ ${#RESUME_INFO[@]} -eq 2 ]] || { echo "Could not resolve resume checkpoint paths." >&2; exit 2; }
   RESUME_COMMAND=(
     "$ROOT/.venv/bin/lerobot-train"
@@ -69,6 +72,11 @@ if [[ -n "$RESUME_FROM" ]]; then
   PENDING_SPLIT="${RESUME_INFO[1]}.fr5_training_split.json.pending"
   if [[ ! -f "$RESUME_SPLIT" && -f "$PENDING_SPLIT" ]]; then
     mv "$PENDING_SPLIT" "$RESUME_SPLIT"
+  fi
+  RESUME_RECEIPT="${RESUME_INFO[1]}/fr5_training_receipt.json"
+  PENDING_RECEIPT="${RESUME_INFO[1]}.fr5_training_receipt.json.pending"
+  if [[ ! -f "$RESUME_RECEIPT" && -f "$PENDING_RECEIPT" ]]; then
+    mv "$PENDING_RECEIPT" "$RESUME_RECEIPT"
   fi
   exec "${RESUME_COMMAND[@]}"
 fi
@@ -158,7 +166,20 @@ TRANSFORMS="$ROOT/config/image_transforms/$AUGMENTATION.json"
 [[ -n "$OUTPUT" ]] || OUTPUT="${FR5_TRAIN_OUTPUT:-$ROOT/outputs/$PROFILE/$NAME/$AUGMENTATION}"
 [[ ! -e "$OUTPUT" && ! -L "$OUTPUT" ]] || { echo "Output already exists; choose --output or use --resume-from: $OUTPUT" >&2; exit 2; }
 
-"$ROOT/scripts/validate_dataset.sh" --root "$DATASET_ROOT" --require-approved "$NAME"
+[[ -n "$APPROVED_INVENTORY" && -n "$COLLECTION_PROFILE" ]] || {
+  echo "--approved-inventory and --collection-profile are required; use scripts/approve_training.sh --help." >&2
+  exit 2
+}
+EPISODE_ARGS=()
+if has_option --dataset.episodes "$@"; then EPISODE_ARGS=(--episodes "$(option_value --dataset.episodes "$@")"); fi
+# Read-only strict admission precedes technical decoding and profile construction.
+"$ROOT/.venv/bin/python" "$ROOT/tools/data_factory/training_entrypoint.py" check \
+  --dataset "$DATASET" --repo-id "${FR5_REPO_ID:-local/fr5_connector}" \
+  --approved-inventory "$APPROVED_INVENTORY" "${EPISODE_ARGS[@]}"
+if [[ "$DRY_RUN" == 0 ]]; then
+  "$ROOT/scripts/validate_dataset.sh" --root "$DATASET_ROOT" --repo-id "${FR5_REPO_ID:-local/fr5_connector}" \
+    --require-approved --approved-inventory "$APPROVED_INVENTORY" "${EPISODE_ARGS[@]}" "$NAME"
+fi
 
 mapfile -d '' -t TRANSFORM_ARGS < <("$ROOT/.venv/bin/python" - "$TRANSFORMS" <<'PY'
 import json, sys
@@ -174,10 +195,8 @@ for value in values:
     sys.stdout.buffer.write(value.encode() + b"\0")
 PY
 )
-mapfile -d '' -t POLICY_ARGS < <(
-  "$ROOT/.venv/bin/python" "$ROOT/tools/fr5_training_profile.py" "$PROFILE" "$DATASET" \
-    --repo-id="${FR5_REPO_ID:-local/fr5_connector}"
-)
+POLICY_JSON="$("$ROOT/.venv/bin/python" "$ROOT/tools/fr5_training_profile.py" "$PROFILE" "$DATASET" --json)"
+mapfile -d '' -t POLICY_ARGS < <("$ROOT/.venv/bin/python" -c 'import json,sys; sys.stdout.buffer.write(b"\0".join(x.encode() for x in json.loads(sys.argv[1])) + b"\0")' "$POLICY_JSON")
 HUB_ARGS=(--policy.push_to_hub=false)
 if has_option --policy.repo_id "$@" || has_option --policy.push_to_hub "$@"; then HUB_ARGS=(); fi
 COMMAND=(
@@ -191,53 +210,9 @@ COMMAND=(
   "$@"
 )
 
-if [[ "$DRY_RUN" == 1 ]]; then
-  printf 'Command: '
-  printf '%q ' "${COMMAND[@]}"
-  printf '\n'
-  exit 0
-fi
-
-OUTPUT_PARENT="$(dirname "$OUTPUT")"
-mkdir -p "$OUTPUT_PARENT"
-SPLIT_TMP="${OUTPUT}.fr5_training_split.json.pending"
-[[ ! -e "$SPLIT_TMP" ]] || { echo "Stale training split sidecar exists: $SPLIT_TMP" >&2; exit 2; }
-"$ROOT/.venv/bin/python" - "$ROOT" "$DATASET" "${FR5_REPO_ID:-local/fr5_connector}" "$EVAL_SPLIT" "$SPLIT_TMP" <<'PY'
-import json, sys
-from pathlib import Path
-sys.path.insert(0, sys.argv[1] + "/tools")
-from evaluate_smolvla_offline import select_eval_episodes
-from lerobot.datasets.lerobot_dataset import LeRobotDatasetMetadata
-
-metadata = LeRobotDatasetMetadata(sys.argv[3], root=sys.argv[2])
-episodes = select_eval_episodes(metadata.episodes["tasks"], float(sys.argv[4]))
-report = {
-    "schema_version": 1,
-    "repo_id": sys.argv[3],
-    "total_episodes": metadata.total_episodes,
-    "total_frames": metadata.total_frames,
-    "eval_split": float(sys.argv[4]),
-    "eval_episodes": episodes,
-}
-path = Path(sys.argv[5])
-temporary = path.with_suffix(".tmp")
-temporary.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n")
-temporary.replace(path)
-PY
-
-finalize_split() {
-  if [[ -f "$SPLIT_TMP" ]]; then
-    if [[ -d "$OUTPUT" ]]; then
-      mv "$SPLIT_TMP" "$OUTPUT/fr5_training_split.json"
-    else
-      rm -f "$SPLIT_TMP"
-    fi
-  fi
-}
-trap finalize_split EXIT
-status=0
-"${COMMAND[@]}" || status=$?
-if [[ $status -ne 0 ]]; then
-  echo "Training stopped. Resume only from the last completed checkpoint with --resume-from." >&2
-  exit "$status"
-fi
+LAUNCH_FLAGS=()
+if [[ "$DRY_RUN" == 1 ]]; then LAUNCH_FLAGS=(--dry-run); fi
+exec "$ROOT/.venv/bin/python" "$ROOT/tools/data_factory/training_entrypoint.py" launch \
+  --dataset "$DATASET" --repo-id "${FR5_REPO_ID:-local/fr5_connector}" \
+  --approved-inventory "$APPROVED_INVENTORY" --profile "$PROFILE" \
+  --collection-profile "$COLLECTION_PROFILE" "${LAUNCH_FLAGS[@]}" -- "${COMMAND[@]}"

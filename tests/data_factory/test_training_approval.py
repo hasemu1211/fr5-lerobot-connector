@@ -455,5 +455,75 @@ class TrainingApprovalTest(unittest.TestCase):
             self.assertEqual(target.read_text(encoding="utf-8"), "owned\n")
 
 
+class CollectionLedgerTrainingApprovalTest(unittest.TestCase):
+    def ledger_case(self, *, production=True):
+        from tests.data_factory.test_episode_ledger import EpisodeLedgerTest
+        import pyarrow as pa
+        import pyarrow.parquet as pq
+        from tools.fr5_dataset_schema import dataset_features
+
+        fixture = EpisodeLedgerTest()
+        fixture.setUp()
+        self.addCleanup(fixture.doCleanups)
+        artifacts = fixture._artifacts()
+        if production:
+            path = Path(artifacts["runtime_binding"]["artifact_path"])
+            runtime = json.loads(path.read_text())
+            runtime.update(schema_version="data_factory.production_episode_binding.v1", data_disposition="PRODUCTION",
+                           state_initialization_digest=None, scene_observation_digest=D1)
+            runtime["binding_digest"] = canonical_digest({k: v for k, v in runtime.items() if k != "binding_digest"})
+            artifacts["runtime_binding"] = fixture._json("runtime-production.json", runtime)
+        ledger = fixture._compile(artifacts)
+        ledger_ref = fixture._json("episode_ledger.json", ledger)
+        semantic = fixture._candidate(ledger, "PASS")
+        metadata = fixture.dataset / "meta"
+        (metadata / "source_provenance").mkdir(parents=True)
+        (metadata / "source_provenance/episode-000000.jsonl").write_bytes(Path(artifacts["source_provenance"]["artifact_path"]).read_bytes())
+        (metadata / "episodes/chunk-000").mkdir(parents=True)
+        pq.write_table(pa.Table.from_pylist([{"episode_index": 0, "tasks": ["pick up the cube"], "length": 2}]), metadata / "episodes/chunk-000/file-000.parquet")
+        write_json(metadata / "info.json", {"fps": 30, "total_episodes": 1, "total_frames": 2,
+            "features": dataset_features(fps=30, height=480, width=640, cameras=("up", "wrist"), use_videos=True)})
+        request = {"dataset_root": str(fixture.dataset), "dataset_id": "frozen-r1", "repo_id": fixture.dataset_identity["repo_id"],
+                   "episodes": [{"episode_id": fixture.run_id, "episode_index": 0,
+                       "technical_validator_path": artifacts["technical"]["artifact_path"],
+                       "human_semantic_evidence_path": semantic["artifact_path"],
+                       "episode_ledger_path": ledger_ref["artifact_path"]}]}
+        output = fixture.base / "training-approval"
+        output.mkdir()
+        return fixture, request, output
+
+    def test_public_approval_uses_collection_ledger_without_seed_or_inherited_consent(self):
+        from tools.data_factory.training_entrypoint import approve
+        fixture, request, output = self.ledger_case()
+        before = snapshot(fixture.dataset)
+        original_ledger = Path(request["episodes"][0]["episode_ledger_path"]).read_bytes()
+        with mock.patch.object(training_approval, "_confirm_human_training_approval") as confirm:
+            preview = approve(request, output, "fixture-human", dry_run=True)
+            confirm.assert_not_called()
+            self.assertEqual(list(output.iterdir()), [])
+            issued = approve(request, output, "fixture-human", dry_run=False)
+            confirm.assert_called_once()
+        self.assertEqual(preview["episodes"][0]["provenance"]["schema_version"], training_approval.LEDGER_PROVENANCE_SCHEMA)
+        self.assertNotIn("seed_manifest_digest", preview["episodes"][0]["provenance"])
+        training_approval.validate_current_training_inventory(output / "training_approved.json",
+            dataset_root=fixture.dataset, repo_id=request["repo_id"], selected_episodes=[0])
+        self.assertEqual(issued["episodes"][0]["episode_id"], fixture.run_id)
+        self.assertEqual(snapshot(fixture.dataset), before)
+        self.assertEqual(Path(request["episodes"][0]["episode_ledger_path"]).read_bytes(), original_ledger)
+        ledger = json.loads(original_ledger)
+        self.assertEqual(ledger["admission"]["training_status"], "NOT_AUTHORIZED")
+        # Source changes invalidate the new inventory even if its self-digest is intact.
+        Path(ledger["artifacts"]["runtime_binding"]["artifact_path"]).write_text("{}")
+        with self.assertRaises(ContractError):
+            validate_training_approved_inventory(output / "training_approved.json")
+
+    def test_test_only_collection_cannot_be_promoted_by_approval_request(self):
+        from tools.data_factory.training_entrypoint import approve
+        _, request, output = self.ledger_case(production=False)
+        with self.assertRaisesRegex(ContractError, "TRAINING_APPROVAL_SCOPE"):
+            approve(request, output, "fixture-human", dry_run=True)
+        self.assertEqual(list(output.iterdir()), [])
+
+
 if __name__ == "__main__":
     unittest.main()

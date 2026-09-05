@@ -80,6 +80,7 @@ def _bind_inventory_split(inventory: Mapping, split: Mapping) -> None:
         provenance = validate_episode_training_provenance(
             provenance_ref["artifact_path"], expected_scope=inventory["scope"],
         )
+        _require("seed_manifest_digest" in provenance, "TRAINING_FACTOR_SPLIT_REQUIRES_SEED_PROVENANCE")
         _require(
             canonical_digest(provenance) == provenance_ref["artifact_digest"]
             and provenance["seed_manifest_digest"]

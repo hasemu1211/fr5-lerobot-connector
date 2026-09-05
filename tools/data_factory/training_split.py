@@ -241,6 +241,8 @@ def validate_training_split(source: Mapping[str, Any] | str | Path) -> dict[str,
         return _validate_v1(value)
     if version == 2:
         return _validate_v2(value)
+    if version == 3:
+        return _validate_launch_split(value)
     raise ContractError("SPLIT_SCHEMA")
 
 
@@ -272,3 +274,86 @@ def compile_training_split(
     }
     draft["split_digest"] = canonical_digest(draft)
     return validate_training_split(draft)
+
+
+LAUNCH_FIELDS = frozenset({
+    "schema_version", "repo_id", "dataset_identity", "approved_episode_inventory_digest",
+    "total_episodes", "total_frames", "selected_episodes", "episode_content_digests",
+    "episode_tasks", "eval_split", "train_episodes", "eval_episodes",
+    "feature_contract", "split_algorithm", "split_digest",
+})
+SPLIT_ALGORITHM = "lerobot-0.6.1-last-ceil-per-task-selected-order"
+
+
+def selected_train_eval(episode_tasks: list, selected: list[int], fraction: float) -> tuple[list[int], list[int]]:
+    """Mirror the installed LeRobot 0.6.1 split; tested against its factory.
+
+    This is a fraction-based offline holdout, not a claim of ID/OOD factor coverage.
+    """
+    if (not selected or any(type(index) is not int or not 0 <= index < len(episode_tasks) for index in selected)
+            or selected != sorted(set(selected))):
+        raise ContractError("TRAINING_SELECTED_EPISODE_SET")
+    if isinstance(fraction, bool) or not isinstance(fraction, (float, int)) or not 0 < fraction < 1:
+        raise ContractError("SPLIT_V1_FRACTION")
+    groups: dict[str, list[int]] = {}
+    for index in selected:
+        tasks = episode_tasks[index]
+        if not isinstance(tasks, list) or not tasks or any(not isinstance(task, str) or not task for task in tasks):
+            raise ContractError("TRAINING_EPISODE_TASKS")
+        groups.setdefault(tasks[0], []).append(index)
+    train, heldout = [], []
+    for episodes in groups.values():
+        count = math.ceil(len(episodes) * fraction)
+        train.extend(episodes[:-count])
+        heldout.extend(episodes[-count:])
+    if not train:
+        raise ContractError("TRAINING_SPLIT_EMPTY_TRAIN")
+    return train, heldout
+
+
+def compile_launch_split(*, inventory: Mapping, metadata: Mapping, selected: list[int],
+                         fraction: float, feature_contract: Mapping) -> dict:
+    train, heldout = selected_train_eval(metadata["episode_tasks"], selected, fraction)
+    value = {
+        "schema_version": 3,
+        "repo_id": inventory["dataset_identity"]["repo_id"],
+        "dataset_identity": copy.deepcopy(inventory["dataset_identity"]),
+        "approved_episode_inventory_digest": inventory["inventory_digest"],
+        "total_episodes": metadata["total_episodes"], "total_frames": metadata["total_frames"],
+        "selected_episodes": selected,
+        "episode_content_digests": {str(e["episode_index"]): e["episode_content_digest"] for e in inventory["episodes"]},
+        "episode_tasks": metadata["episode_tasks"],
+        "eval_split": fraction, "train_episodes": train, "eval_episodes": heldout,
+        "feature_contract": copy.deepcopy(dict(feature_contract)),
+        "split_algorithm": SPLIT_ALGORITHM,
+    }
+    value["split_digest"] = canonical_digest(value)
+    return _validate_launch_split(value)
+
+
+def _validate_launch_split(value: Mapping) -> dict:
+    from tools.data_factory.training_approval import _dataset
+    from tools.fr5_training_profile import validate_launch_feature_contract
+
+    _exact(value, LAUNCH_FIELDS, "SPLIT_V3_FIELDS")
+    _dataset(value["dataset_identity"])
+    if value["repo_id"] != value["dataset_identity"]["repo_id"]:
+        raise ContractError("SPLIT_REPO_ID")
+    _digest(value["approved_episode_inventory_digest"], "SPLIT_BINDING_DIGEST")
+    total = _count(value["total_episodes"], "SPLIT_DATASET_COUNT", positive=True)
+    _count(value["total_frames"], "SPLIT_DATASET_COUNT", positive=True)
+    if not isinstance(value["episode_tasks"], list) or len(value["episode_tasks"]) != total:
+        raise ContractError("TRAINING_EPISODE_TASKS")
+    train, heldout = selected_train_eval(value["episode_tasks"], value["selected_episodes"], value["eval_split"])
+    if (value["train_episodes"] != train or value["eval_episodes"] != heldout
+            or value["split_algorithm"] != SPLIT_ALGORITHM):
+        raise ContractError("TRAINING_SPLIT_SELECTION")
+    digests = value["episode_content_digests"]
+    if not isinstance(digests, dict) or set(digests) != {str(i) for i in value["selected_episodes"]}:
+        raise ContractError("TRAINING_SELECTED_EPISODE_SET")
+    for digest in digests.values():
+        _digest(digest, "SPLIT_EPISODE_DIGEST")
+    validate_launch_feature_contract(value["feature_contract"])
+    if value["split_digest"] != canonical_digest({k: v for k, v in value.items() if k != "split_digest"}):
+        raise ContractError("SPLIT_DIGEST_MISMATCH")
+    return copy.deepcopy(dict(value))

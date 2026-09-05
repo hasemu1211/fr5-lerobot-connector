@@ -16,6 +16,7 @@ from tools.fr5_data_factory import ContractError, DIGEST, RFC3339, SAFE_ID, cano
 
 APPROVAL_SCHEMA = "data_factory.training_approval.v2"
 EPISODE_PROVENANCE_SCHEMA = "data_factory.episode_training_provenance.v1"
+LEDGER_PROVENANCE_SCHEMA = "data_factory.episode_training_provenance.v2"
 INVENTORY_SCHEMA = "data_factory.training_approved_inventory.v2"
 PRODUCTION_SCOPE = "PRODUCTION"
 SYNTHETIC_SCOPE = "SYNTHETIC_TEST_ONLY"
@@ -34,6 +35,10 @@ EPISODE_PROVENANCE_KEYS = frozenset({
     "resolved_job_digest", "seed_manifest_id", "seed_manifest_digest",
     "manifest_slot_id", "split_group", "repeat_index",
     "base_condition_digest", "robot_start_pose_id",
+})
+LEDGER_PROVENANCE_KEYS = frozenset({
+    "schema_version", "scope", "dataset_identity_digest", "episode_id", "episode_index",
+    "episode_content_digest", "technical_validator_digest", "resolved_job_digest", "episode_ledger",
 })
 TECHNICAL_REF_KEYS = frozenset({"artifact_path", "artifact_digest", "status"})
 SEMANTIC_REF_KEYS = frozenset({"artifact_path", "artifact_digest", "status", "reviewer_id"})
@@ -248,6 +253,25 @@ def validate_episode_training_provenance(
 ) -> dict[str, Any]:
     """Validate one immutable episode-to-seed-slot provenance artifact."""
     value = _document(source)
+    if value.get("schema_version") == LEDGER_PROVENANCE_SCHEMA:
+        _exact(value, LEDGER_PROVENANCE_KEYS, "TRAINING_EPISODE_PROVENANCE_FIELDS")
+        _scope(value["scope"], expected_scope)
+        _digest(value["dataset_identity_digest"], "TRAINING_EPISODE_PROVENANCE_DATASET")
+        _episode_identity(value["episode_id"], value["episode_index"], value["episode_content_digest"])
+        ref = _exact(value["episode_ledger"], EPISODE_PROVENANCE_REF_KEYS, "TRAINING_LEDGER_REFERENCE")
+        from tools.data_factory.episode_ledger import validate_episode_ledger
+        ledger = validate_episode_ledger(_artifact(ref["artifact_path"], ref["artifact_digest"], "TRAINING_LEDGER_ARTIFACT"))
+        runtime_ref = ledger["artifacts"]["runtime_binding"]
+        runtime = _artifact(runtime_ref["artifact_path"], runtime_ref["artifact_digest"], "TRAINING_LEDGER_RUNTIME")
+        if runtime["data_disposition"] != "PRODUCTION":
+            raise ContractError("TRAINING_APPROVAL_SCOPE")
+        if (ledger["episode"]["run_id"] != value["episode_id"]
+                or ledger["episode"]["episode_index"] != value["episode_index"]
+                or ledger["artifacts"]["technical"]["artifact_digest"] != value["technical_validator_digest"]
+                or ledger["bindings"]["resolved_job_digest"] != value["resolved_job_digest"]
+                or ledger["admission"]["technical_status"] != "PASS"):
+            raise ContractError("TRAINING_LEDGER_BINDING")
+        return value
     _exact(value, EPISODE_PROVENANCE_KEYS, "TRAINING_EPISODE_PROVENANCE_FIELDS")
     if value["schema_version"] != EPISODE_PROVENANCE_SCHEMA:
         raise ContractError("TRAINING_EPISODE_PROVENANCE_SCHEMA")
@@ -303,6 +327,45 @@ def compile_episode_training_provenance(
         "robot_start_pose_id": slot["robot_start_pose_id"],
     }
     return validate_episode_training_provenance(provenance, expected_scope=scope)
+
+
+def compile_ledger_training_provenance(*, dataset_identity: Mapping[str, Any], episode_ledger_path: str | Path) -> dict:
+    """Bind an existing Collection ledger to a frozen revision; grant no consent.
+
+    The ledger's dataset digest is a Collection identity, not a byte snapshot.
+    Its original root/repo/index and source references must match this revision.
+    """
+    from tools.data_factory.episode_ledger import validate_episode_ledger
+    from tools.data_factory.training_receipts import file_digest
+
+    dataset = _dataset(dataset_identity)
+    path = Path(episode_ledger_path).resolve()
+    ledger = validate_episode_ledger(load_json_strict(path))
+    if any(ledger["dataset"][key] != dataset[key] for key in ("dataset_root", "repo_id")):
+        raise ContractError("TRAINING_LEDGER_DATASET_BINDING")
+    episode = ledger["episode"]
+    source = Path(dataset["dataset_root"]) / f"meta/source_provenance/episode-{episode['episode_index']:06d}.jsonl"
+    if file_digest(source) != file_digest(ledger["artifacts"]["source_provenance"]["artifact_path"]):
+        raise ContractError("TRAINING_LEDGER_SOURCE_BINDING")
+    value = {
+        "schema_version": LEDGER_PROVENANCE_SCHEMA, "scope": PRODUCTION_SCOPE,
+        "dataset_identity_digest": canonical_digest(dataset),
+        "episode_id": episode["run_id"], "episode_index": episode["episode_index"],
+        "episode_content_digest": current_episode_digest(dataset, episode["episode_index"]),
+        "technical_validator_digest": ledger["artifacts"]["technical"]["artifact_digest"],
+        "resolved_job_digest": ledger["bindings"]["resolved_job_digest"],
+        "episode_ledger": {"artifact_path": str(path), "artifact_digest": canonical_digest(ledger)},
+    }
+    return validate_episode_training_provenance(value)
+
+
+def _bind_ledger_revision(provenance: Mapping[str, Any], dataset: Mapping[str, Any]) -> None:
+    if provenance["schema_version"] == LEDGER_PROVENANCE_SCHEMA:
+        expected = compile_ledger_training_provenance(
+            dataset_identity=dataset, episode_ledger_path=provenance["episode_ledger"]["artifact_path"],
+        )
+        if provenance != expected:
+            raise ContractError("TRAINING_LEDGER_REVISION_BINDING")
 
 
 def validate_training_approval(
@@ -401,6 +464,7 @@ def issue_training_approval(
         "TRAINING_EPISODE_PROVENANCE_ARTIFACT",
     )
     episode_provenance = validate_episode_training_provenance(provenance_raw)
+    _bind_ledger_revision(episode_provenance, dataset)
     if (
         episode_provenance["dataset_identity_digest"] != canonical_digest(dataset)
         or episode_provenance["episode_id"] != episode_id
@@ -477,6 +541,7 @@ def _episode(
     episode_provenance = validate_episode_training_provenance(
         provenance_raw, expected_scope=scope,
     )
+    _bind_ledger_revision(episode_provenance, dataset)
     if (
         episode_provenance["dataset_identity_digest"] != canonical_digest(dataset)
         or episode_provenance["episode_id"] != episode_id
@@ -513,9 +578,10 @@ def _unique_episodes(
 ) -> None:
     ids = [value["episode_id"] for value in episodes]
     indices = [value["episode_index"] for value in episodes]
+    seed_provenances = [value for value in provenances if value["schema_version"] == EPISODE_PROVENANCE_SCHEMA]
     slot_ids = [
         (value["seed_manifest_id"], value["seed_manifest_digest"], value["manifest_slot_id"])
-        for value in provenances
+        for value in seed_provenances
     ]
     slot_keys = [
         (
@@ -523,7 +589,7 @@ def _unique_episodes(
             value["split_group"], value["base_condition_digest"],
             value["robot_start_pose_id"], value["repeat_index"],
         )
-        for value in provenances
+        for value in seed_provenances
     ]
     if (
         len(ids) != len(set(ids))
@@ -587,3 +653,67 @@ def write_training_approved_inventory(
     target = _target(output_path, "TRAINING_INVENTORY_EXISTS")
     _write_exclusive(target, value, "TRAINING_INVENTORY_EXISTS")
     return target
+
+
+def current_dataset_identity(root: str | Path, *, repo_id: str, dataset_id: str) -> dict:
+    """Bind approval to frozen dataset bytes, including all metadata/provenance.
+
+    Approval artifacts must live outside this tree: publishing consent must not
+    change the bytes being approved. Collection's path identity is not a content
+    snapshot and must never be substituted here.
+    """
+    from tools.data_factory.curator.core.identity import stable_tree_identity
+
+    root = Path(root).expanduser()
+    if root.is_symlink() or not root.is_dir():
+        raise ContractError("TRAINING_DATASET_ROOT")
+    root = root.resolve()
+    quarantine = root / "meta/quarantine.json"
+    if quarantine.exists() or quarantine.is_symlink():
+        raise ContractError("TRAINING_DATASET_QUARANTINED")
+    _, digest = stable_tree_identity(root, code="TRAINING_DATASET_CHANGED")
+    return _dataset({
+        "dataset_id": dataset_id, "repo_id": repo_id,
+        "dataset_root": str(root), "dataset_digest": digest,
+    })
+
+
+def current_episode_digest(dataset: Mapping[str, Any], episode_index: int) -> str:
+    """Identify an episode within the exact frozen revision, not just its count."""
+    from tools.data_factory.training_receipts import file_digest
+
+    if type(episode_index) is not int or episode_index < 0:
+        raise ContractError("TRAINING_EPISODE_INDEX")
+    source = Path(dataset["dataset_root"]) / f"meta/source_provenance/episode-{episode_index:06d}.jsonl"
+    return canonical_digest({
+        "dataset_digest": dataset["dataset_digest"],
+        "episode_index": episode_index,
+        "source_provenance_digest": file_digest(source),
+    })
+
+
+def validate_current_training_inventory(
+    source: str | Path, *, dataset_root: str | Path, repo_id: str,
+    selected_episodes: list[int] | None = None,
+) -> dict:
+    """Public admission gate: strict production approval plus current byte identity."""
+    root = Path(dataset_root).expanduser().resolve()
+    path = Path(source).expanduser()
+    if path.is_symlink() or not path.is_file() or path.resolve().is_relative_to(root):
+        raise ContractError("TRAINING_INVENTORY_EXTERNAL_FILE_REQUIRED")
+    inventory = validate_training_approved_inventory(path)
+    dataset = inventory["dataset_identity"]
+    current = current_dataset_identity(root, repo_id=repo_id, dataset_id=dataset["dataset_id"])
+    if current != dataset:
+        raise ContractError("TRAINING_DATASET_CHANGED")
+    indices = [episode["episode_index"] for episode in inventory["episodes"]]
+    if selected_episodes is not None and (
+        any(type(index) is not int for index in selected_episodes)
+        or selected_episodes != sorted(set(selected_episodes))
+        or selected_episodes != indices
+    ):
+        raise ContractError("TRAINING_SELECTED_EPISODE_SET")
+    for episode in inventory["episodes"]:
+        if episode["episode_content_digest"] != current_episode_digest(current, episode["episode_index"]):
+            raise ContractError("TRAINING_EPISODE_CONTENT_CHANGED")
+    return inventory

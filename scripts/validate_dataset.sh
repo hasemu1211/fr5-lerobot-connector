@@ -15,7 +15,9 @@ Options:
   --require-hil-motion     Require arm and gripper action/feedback motion for HIL
   --min-arm-range RAD      Override HIL arm motion threshold
   --min-gripper-range M    Override HIL gripper motion threshold
-  --require-approved       Require meta/training_approved.json
+  --require-approved       Validate current strict human-approved inventory
+  --approved-inventory PATH  External training_approved_inventory.v2 file
+  --episodes JSON          Exact selected episode indices (default: all)
   --preview                Write outputs/previews/DATASET_NAME.jpg
   --visualize EPISODE_INDEX  Open the official lerobot-dataset-viz
   --dry-run                Print commands without reading the dataset
@@ -25,6 +27,8 @@ EOF
 DATASET_ROOT="${FR5_DATASET_ROOT:-$ROOT/datasets/fr5_episodes}"
 REPO_ID="${FR5_REPO_ID:-local/fr5_smolvla}"
 REQUIRE_APPROVED=0
+APPROVED_INVENTORY=""
+EPISODE_ARGS=()
 MODE=""
 EPISODE=""
 DRY_RUN=0
@@ -38,6 +42,8 @@ while [[ $# -gt 0 ]]; do
       [[ $# -ge 2 ]] || { echo "$1 requires a value" >&2; exit 2; }
       VALIDATOR_ARGS+=("$1" "$2"); shift 2 ;;
     --require-hil-motion) VALIDATOR_ARGS+=(--require-hil-motion); shift ;;
+    --approved-inventory) APPROVED_INVENTORY="${2:?--approved-inventory requires a path}"; shift 2 ;;
+    --episodes) EPISODE_ARGS=(--episodes "${2:?--episodes requires JSON}"); shift 2 ;;
     --require-approved) REQUIRE_APPROVED=1; shift ;;
     --preview) [[ -z "$MODE" ]] || { echo "choose only one display mode" >&2; exit 2; }; MODE=preview; shift ;;
     --visualize)
@@ -68,9 +74,10 @@ if [[ -e "$DATASET/meta/quarantine.json" || -L "$DATASET/meta/quarantine.json" ]
   echo "Dataset is quarantined and cannot be validated for training: $DATASET/meta/quarantine.json" >&2
   exit 4
 fi
-if [[ "$REQUIRE_APPROVED" == 1 && ! -f "$DATASET/meta/training_approved.json" ]]; then
-  echo "Dataset is not approved for training/evaluation: $DATASET/meta/training_approved.json" >&2
-  exit 3
+if [[ "$REQUIRE_APPROVED" == 1 ]]; then
+  [[ -n "$APPROVED_INVENTORY" ]] || { echo "--approved-inventory is required; legacy meta/training_approved.json grants no launch authority." >&2; exit 3; }
+  "$ROOT/.venv/bin/python" "$ROOT/tools/data_factory/training_entrypoint.py" check \
+    --dataset "$DATASET" --repo-id "$REPO_ID" --approved-inventory "$APPROVED_INVENTORY" "${EPISODE_ARGS[@]}"
 fi
 "${VALIDATE[@]}"
 

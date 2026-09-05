@@ -184,6 +184,27 @@ class TrainingSplitTests(unittest.TestCase):
                 )
             self.assertEqual(list(Path(directory).iterdir()), [])
 
+    def test_selected_fraction_split_matches_installed_lerobot_factory(self) -> None:
+        from types import SimpleNamespace
+        from unittest import mock
+        from lerobot.datasets import factory
+        from tools.data_factory.training_split import selected_train_eval
+
+        tasks = [["pick-place"]] * 4
+        metadata = SimpleNamespace(episodes={"tasks": tasks})
+        full = SimpleNamespace(episodes=[0, 2, 3], num_episodes=3, meta=metadata)
+        cfg = SimpleNamespace(dataset=SimpleNamespace(eval_split=0.34, repo_id="fixture", root="fixture",
+            revision=None, video_backend="pyav", use_imagenet_stats=False, image_transforms=None),
+            trainable_config=None, tolerance_s=0.01)
+        with mock.patch.object(factory, "make_dataset", return_value=full), mock.patch.object(factory, "resolve_delta_timestamps", return_value={}), mock.patch.object(factory, "LeRobotDataset") as constructor:
+            # Image transform settings are read, but no transforms or dataset execute.
+            cfg.dataset.image_transforms = SimpleNamespace(enable=False)
+            factory.make_train_eval_datasets(cfg)
+        train, heldout = selected_train_eval(tasks, [0, 2, 3], 0.34)
+        self.assertEqual(constructor.call_args_list[0].kwargs["episodes"], train)
+        self.assertEqual(constructor.call_args_list[1].kwargs["episodes"], heldout)
+        self.assertEqual((train, heldout), ([0], [2, 3]))
+
 
 if __name__ == "__main__":
     unittest.main()
