@@ -83,7 +83,7 @@ def export_training_request(
         # stay in memory; this identifier is not a human approval or attribution.
         # The consumer owns byte identity, metadata, production scope and lineage.
         prepare_approvals(request, target.parent, "curator-preview-only")
-        # Preparation may read a large dataset while a human updates review.
+        # Preparation may read a large dataset while input artifacts change.
         # Reopen the existing owner's state; do not publish a selection based on
         # evidence that changed during that work. This is not a source lock.
         for root, expected_state in observed_states:

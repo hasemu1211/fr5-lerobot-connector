@@ -8,7 +8,7 @@ import unittest
 from unittest import mock
 
 from tests.data_factory import test_training_approval as training_fixtures
-from tools.data_factory import training_approval
+from tools.data_factory import run_job, training_approval
 from tools.data_factory.episode_ledger import project_episode_state
 from tools.data_factory.training_entrypoint import prepare_approvals
 from tools.data_factory.curator.core.errors import CuratorError
@@ -141,6 +141,7 @@ class SelectionTest(unittest.TestCase):
         self.assertEqual((snapshot(fixture.dataset), snapshot(run)), before)
 
     def test_changed_current_review_is_reopened_for_each_new_request(self):
+        """Manual fixture rebinding tests freshness, not supported review transitions."""
         fixture, run, output = self.case()
         original = output / "original.json"
         export_training_request([run], original, dataset_id="selection-r1")
@@ -169,6 +170,7 @@ class SelectionTest(unittest.TestCase):
                 self.assertEqual((run / "episode_ledger.json").read_bytes(), ledger_bytes)
 
     def test_review_changes_during_preparation_prevent_publication(self):
+        """Inject fixture changes; canonical reviewed decisions cannot change to FAIL."""
         for semantic in ("FAIL", "PENDING", "UNCERTAIN", "PASS"):
             with self.subTest(semantic=semantic):
                 fixture, run, output = self.case()
@@ -228,6 +230,31 @@ class SelectionTest(unittest.TestCase):
         self.assertEqual([entry["episode_index"] for entry in request["episodes"]], [0])
         self.assertEqual(list(output.iterdir()), [target])
         self.assertEqual((snapshot(fixture.dataset), snapshot(run)), before)
+
+    def test_canonical_review_to_request_rejects_pass_to_fail_and_preserves_replay(self):
+        fixture, run, output = self.case(semantic="PENDING")
+        ledger = load_json_strict(run / "episode_ledger.json")
+        pending = fixture._candidate(ledger, "PENDING", name="candidate_admission.json")
+        fixture._json("episode_ledger_state.json", project_episode_state(ledger=ledger, candidate=pending))
+        # Only initial evidence is a fixture; actual decisions use the public API.
+        reviewed = run_job.apply_episode_review(
+            run, semantic_status="PASS", reviewed_by="synthetic-reviewer",
+        )
+        target = output / "request.json"
+        export_training_request([run], target, dataset_id="selection-r1")
+        before = snapshot(fixture.dataset), snapshot(run), snapshot(output)
+        with self.assertRaisesRegex(ContractError, "CANDIDATE_REVIEW_STATE"):
+            run_job.apply_episode_review(
+                run, semantic_status="FAIL", reviewed_by="synthetic-reviewer", reason="TASK_GOAL",
+            )
+        self.assertEqual(
+            run_job.apply_episode_review(run, semantic_status="PASS", reviewed_by="synthetic-reviewer"),
+            reviewed,
+        )
+        _, drafts = prepare_approvals(load_json_strict(target), output, "curator-preview-only")
+        self.assertEqual(len(drafts), 1)
+        self.assertEqual((snapshot(fixture.dataset), snapshot(run), snapshot(output)), before)
+        self.assertEqual(list(output.iterdir()), [target])
 
 
 if __name__ == "__main__":
