@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import json
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from threading import Barrier
 import unittest
 from unittest import mock
 
@@ -10,6 +12,7 @@ from tools.data_factory import training_approval
 from tools.data_factory.episode_ledger import project_episode_state
 from tools.data_factory.training_entrypoint import prepare_approvals
 from tools.data_factory.curator.core.errors import CuratorError
+from tools.data_factory.curator.workflow import selection
 from tools.data_factory.curator.workflow.selection import export_training_request
 from tools.fr5_data_factory import ContractError, load_json_strict
 
@@ -164,6 +167,67 @@ class SelectionTest(unittest.TestCase):
                 self.assertEqual((snapshot(fixture.dataset), snapshot(run)), before)
                 self.assertEqual(original.read_bytes(), original_bytes)
                 self.assertEqual((run / "episode_ledger.json").read_bytes(), ledger_bytes)
+
+    def test_review_changes_during_preparation_prevent_publication(self):
+        for semantic in ("FAIL", "PENDING", "UNCERTAIN", "PASS"):
+            with self.subTest(semantic=semantic):
+                fixture, run, output = self.case()
+                ledger = load_json_strict(run / "episode_ledger.json")
+                before = snapshot(fixture.dataset)
+                original_candidate = (run / "candidate.json").read_bytes()
+                target = output / "request.json"
+
+                def prepare_then_change(*args, **kwargs):
+                    result = prepare_approvals(*args, **kwargs)
+                    candidate = fixture._candidate(ledger, semantic, name="later.json")
+                    state = project_episode_state(ledger=ledger, candidate=candidate)
+                    fixture._json("episode_ledger_state.json", state)
+                    return result
+
+                with (
+                    mock.patch.object(selection, "prepare_approvals", side_effect=prepare_then_change),
+                    self.assertRaisesRegex(CuratorError, "SELECTION_INPUT_CHANGED"),
+                ):
+                    export_training_request([run], target, dataset_id="selection-r1")
+                self.assertEqual(list(output.iterdir()), [])
+                self.assertEqual(snapshot(fixture.dataset), before)
+                self.assertEqual((run / "candidate.json").read_bytes(), original_candidate)
+                self.assertEqual(load_json_strict(run / "episode_ledger.json"), ledger)
+                self.assertEqual(
+                    load_json_strict(run / "episode_ledger_state.json")["review"]["semantic_status"],
+                    semantic,
+                )
+
+    def test_concurrent_requests_publish_exactly_one_complete_request(self):
+        fixture, run, output = self.case()
+        before = snapshot(fixture.dataset), snapshot(run)
+        target = output / "request.json"
+        ready = Barrier(2)
+
+        def prepare_together(*args, **kwargs):
+            result = prepare_approvals(*args, **kwargs)
+            ready.wait(timeout=5)
+            return result
+
+        def export(dataset_id):
+            try:
+                export_training_request([run], target, dataset_id=dataset_id)
+                return dataset_id, "PUBLISHED"
+            except CuratorError as exc:
+                return dataset_id, exc.code
+
+        with (
+            mock.patch.object(selection, "prepare_approvals", side_effect=prepare_together),
+            ThreadPoolExecutor(max_workers=2) as executor,
+        ):
+            results = list(executor.map(export, ("selection-a", "selection-b")))
+        self.assertCountEqual([status for _, status in results], ["PUBLISHED", "EVENT_EXISTS"])
+        winner = next(dataset_id for dataset_id, status in results if status == "PUBLISHED")
+        request = load_json_strict(target)
+        self.assertEqual(request["dataset_id"], winner)
+        self.assertEqual([entry["episode_index"] for entry in request["episodes"]], [0])
+        self.assertEqual(list(output.iterdir()), [target])
+        self.assertEqual((snapshot(fixture.dataset), snapshot(run)), before)
 
 
 if __name__ == "__main__":

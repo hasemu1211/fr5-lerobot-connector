@@ -1,12 +1,13 @@
 ## 다음 작은 가치 결과
 
-명시적으로 선택한 현재 Collection 판정을 기존 native training 사전검토에서 실제로 소비한 뒤에만 Curator 요청을 저장한다. TEST_ONLY 선택은 이전에 요청 생성 후 소비자에서 실패했으므로, 경고를 추가하는 대안 대신 기존 `prepare_approvals`를 출력 전에 재사용한다. 승인·학습은 수행하지 않는다.
+native training 사전검토 중 현재 Collection 판정이 바뀌면 Curator 요청을 저장하지 않는다. 실제 소비자 호출 뒤 FAIL 판정이 도착하는 합성 interleaving에서 이전 PASS 요청이 저장되는 문제를 재현했다. 공유 잠금 계약을 도입하는 대안보다 기존 ledger/state 검증을 저장 전에 다시 사용하는 작은 수정을 선택한다. 승인·학습은 수행하지 않는다.
 
 ## 완료 조건
 
 - 선택 전체가 같은 dataset root/repo의 technical·semantic PASS이며, 현재 ledger/state를 기존 API로 검증한다. Collection의 순차 dataset ID/digest를 frozen byte revision으로 오인하지 않는다.
 - native 사전검토가 scope·metadata·원본·계보를 받아들여야 요청을 독점 생성한다. 오류나 재전달은 기존 산출물·원본을 변경하지 않는다.
 - 바뀐 현재 state가 FAIL/PENDING/UNCERTAIN이면 새 요청을 거부한다. 새 PASS이면 그 candidate 경로를 새 요청에 사용하며 기존 요청은 보존한다.
+- 사전검토 도중 state가 바뀌면 새 PASS를 포함해 `SELECTION_INPUT_CHANGED`로 거부한다. 두 요청이 동시에 같은 출력으로 전달되어도 완전한 요청 하나만 저장하고 다른 요청은 `EVENT_EXISTS`로 끝나며 기존 pending human request를 덮어쓰지 않는다.
 - 요청은 승인이나 frozen snapshot이 아니다. 요청 생성 이후 다른 candidate로 바뀐 현재 판정이 과거 PASS를 무효화하는지는 공유 계약으로 조정하며 Curator가 별도 ledger나 권한 규칙을 만들지 않는다.
 - 실제 A/B `PREPARED_NOT_VERIFIED`, finalized main view profile 부재, 별도 기술·semantic·physical·training authority를 보존한다.
 

@@ -35,6 +35,7 @@ def export_training_request(
     selected = set()
     dataset = None
     protected = set()
+    observed_states = []
     try:
         for directory in run_directories:
             root = reject_symlink_components(directory, "SELECTION_RUN").resolve(strict=True)
@@ -44,6 +45,7 @@ def export_training_request(
             state = validate_episode_state(
                 load_json_strict(root / "episode_ledger_state.json"), ledger=ledger,
             )
+            observed_states.append((root, state))
             # Collection identities vary as episodes append to one root. They
             # are not the current frozen byte identity owned by training.
             current = {
@@ -81,6 +83,16 @@ def export_training_request(
         # stay in memory; this identifier is not a human approval or attribution.
         # The consumer owns byte identity, metadata, production scope and lineage.
         prepare_approvals(request, target.parent, "curator-preview-only")
+        # Preparation may read a large dataset while a human updates review.
+        # Reopen the existing owner's state; do not publish a selection based on
+        # evidence that changed during that work. This is not a source lock.
+        for root, expected_state in observed_states:
+            current_state = validate_episode_state(
+                load_json_strict(root / "episode_ledger_state.json"),
+                ledger=load_json_strict(root / "episode_ledger.json"),
+            )
+            if current_state != expected_state:
+                raise CuratorError("SELECTION_INPUT_CHANGED", str(root))
         write_json_exclusive(target, request)
     except ContractError as exc:
         raise CuratorError("SELECTION_SOURCE_INVALID", str(exc)) from exc
