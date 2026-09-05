@@ -58,6 +58,7 @@ class StubCampaign:
         self.completed = 0
         self.closed = False
         self.history = []
+        self.episode_plan = None
         self.candidate_pending = False
         self.campaign_coverage = None
         self.reason_codes = []
@@ -188,6 +189,7 @@ class StubCampaign:
                 ),
             },
             "episode_history": copy.deepcopy(self.history),
+            "episode_plan": copy.deepcopy(self.episode_plan),
             "effect_counts": {"robot": 0, "dataset": 0, "training": 0},
         }
         if self.campaign_coverage is not None:
@@ -322,7 +324,7 @@ class CollectionOperatorApplicationTests(unittest.TestCase):
             intent(view, op, payload, suffix),
         )["result"]
 
-    def test_active_plan_projects_exact_u64_seeds_and_phase_parameters(self):
+    def active_plan_evidence(self):
         object_profile = load_json_strict(
             ROOT / "config/data_factory/objects/wood-cube-24mm-r001.json",
         )
@@ -377,7 +379,7 @@ class CollectionOperatorApplicationTests(unittest.TestCase):
             "post_reset_safe_snapshot_digest": None,
             "status": "PENDING",
         }
-        projected = _project_active_episode_plan({
+        return {
             "plan_digest": plan_digest,
             "approval_scope": "HIL_NUMERIC_PROXY",
             "decision_binding_digest": canonical_digest("decision"),
@@ -391,7 +393,14 @@ class CollectionOperatorApplicationTests(unittest.TestCase):
             "precommit_safety": safety,
             "plan_envelope_digest": canonical_digest("envelope"),
             "preapproval_evidence_digest": canonical_digest("preapproval"),
-        })
+        }
+
+    def test_active_plan_projects_exact_u64_seeds_and_phase_parameters(self):
+        evidence = self.active_plan_evidence()
+        projected = _project_active_episode_plan(evidence)
+        trajectory = evidence["trajectory_variant_binding"]
+        seed = trajectory["sampling_seed"]
+        phase_parameters = trajectory["phase_parameters"]
         self.assertEqual(projected["schema_version"],
                          "data_factory.active_episode_plan.v1")
         self.assertEqual(
@@ -405,6 +414,46 @@ class CollectionOperatorApplicationTests(unittest.TestCase):
             projected["trajectory_variant_binding"]["phase_parameters"],
             phase_parameters,
         )
+
+    def test_released_child_plan_remains_evidence_not_active_ui_plan(self):
+        self.consume("prepare_environment", {}, "prepare-released-plan")
+        authoring = self.application.bridge_core.snapshot()["projection"]
+        compiled = self.consume("compile_draft", {
+            "draft_id": authoring["draft"]["draft_id"],
+            "data_disposition": "TEST_ONLY",
+        }, "compile-released-plan")
+        self.consume("authorize_campaign", {
+            "draft_id": authoring["draft"]["draft_id"],
+            "manifest_digest": compiled["manifest_digest"],
+            "envelope_digest": compiled["envelope_digest"],
+            "data_disposition": "TEST_ONLY",
+        }, "authorize-released-plan")
+        campaign = self.campaigns[0]
+        campaign.episode_plan = self.active_plan_evidence()
+        campaign.episode_plan["precommit_safety"]["run_id"] = (
+            f"{campaign.campaign_id}-run-1"
+        )
+        active = self.application.bridge_core.snapshot()["projection"]
+        self.assertEqual(
+            active["active_episode_plan"]["precommit_safety"]["run_id"],
+            active["runtime"]["active_child_id"],
+        )
+        retained_evidence = copy.deepcopy(campaign.episode_plan)
+        campaign.history = [{"outcome": "PASS", "code": "TECHNICAL_PASS"}]
+        campaign.candidate_pending = True
+        campaign.reason_codes = ["EXECUTION_TIMEOUT_INSUFFICIENT"]
+
+        for state in ("BLOCKED", "TERMINAL"):
+            with self.subTest(state=state):
+                campaign.state = state
+                released = self.application.bridge_core.snapshot()["projection"]
+                self.assertIsNone(released["runtime"]["active_child_id"])
+                self.assertIsNone(released["active_episode_plan"])
+                self.assertIn("review_candidate", released["available_ops"])
+                self.assertNotIn("authorize_campaign", released["available_ops"])
+                self.assertEqual(released["episode_history"], campaign.history)
+                self.assertEqual(released["effect_counts"], active["effect_counts"])
+                self.assertEqual(campaign.episode_plan, retained_evidence)
 
     def test_environment_precedes_factory_and_invalid_mode_has_zero_effects(self):
         view = self.application.bridge_core.snapshot()["projection"]

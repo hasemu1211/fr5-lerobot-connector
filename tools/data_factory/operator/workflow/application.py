@@ -1544,7 +1544,9 @@ class CollectionOperatorApplication:
             ),
             "active_episode_plan": _project_active_episode_plan(
                 inner.get("episode_plan")
-                if isinstance(inner, Mapping) else None
+                if isinstance(inner, Mapping)
+                and ui_runtime.get("active_child_id") is not None
+                else None
             ),
             "campaign_session": copy.deepcopy(session),
             "campaign_operator": (
