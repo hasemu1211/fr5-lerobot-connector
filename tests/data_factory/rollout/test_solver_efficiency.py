@@ -1,20 +1,35 @@
 """Tiny CPU fields and native sampling code; no model download, GPU or device IO."""
-import copy
 import io
 import json
 import unittest
 from contextlib import redirect_stdout
-from types import MethodType, SimpleNamespace
-from unittest import mock
 
 import torch
 
 from tools.data_factory.rollout.solver_efficiency import (
-    METHODS, compare_native, compare_trials, integrate, main, offline_solver,
+    METHODS, compare_trials, integrate, main, tensor_digest,
 )
 
 
 class SolverEfficiencyTest(unittest.TestCase):
+    def test_bfloat16_raw_byte_digest_and_action_dtype_metadata(self):
+        import hashlib
+        value = torch.tensor([[1., -2.], [3., 4.]], dtype=torch.bfloat16).transpose(0, 1)
+        original = value.clone()
+        raw = bytes(value.contiguous().view(torch.uint8).flatten().tolist())
+        self.assertEqual(tensor_digest(value), hashlib.sha256(raw).hexdigest())
+        self.assertEqual(tensor_digest(value), tensor_digest(value.contiguous()))
+        self.assertNotEqual(tensor_digest(value), tensor_digest(value.float()))
+        torch.testing.assert_close(value, original)
+        def trial(noise, method):
+            result, measured = integrate(lambda x, t: x, noise, method)
+            return result.to(torch.bfloat16), measured, measured["solver_wall_s"]
+        report = compare_trials(trial, (1, 2, 7), seeds=(0,), repeats=1, warmups=0)
+        self.assertEqual(report["noise_dtype"], "float32")
+        for row in report["rows"]:
+            self.assertEqual(row["action_dtype"], "torch.bfloat16")
+            self.assertEqual(row["action_shape"], [1, 2, 7])
+
     def test_fixed_baselines_match_installed_euler_and_preserve_noise(self):
         from lerobot.policies.common.flow_matching import euler_integrate
         noise = torch.ones((1, 4, 7))
@@ -71,58 +86,6 @@ class SolverEfficiencyTest(unittest.TestCase):
             self.assertEqual(len(row["rmse_per_dimension_to_fixed10"]), 7)
             if row["method"] == "fixed10":
                 self.assertEqual(row["max_abs_per_dimension_to_fixed10"], [0.] * 7)
-
-    def test_installed_sample_actions_and_saved_processors_reach_offline_comparison(self):
-        from lerobot.policies.smolvla import modeling_smolvla as module
-        from lerobot.policies.factory import make_pre_post_processors
-        from tools.data_factory.learned_action_adapter import NativeSmolVLA, fake_rgb
-        from tests.data_factory.rollout.test_native_policy import NativePolicyTest
-        fixture = NativePolicyTest()
-        fixture.setUp()
-        self.addCleanup(fixture.doCleanups)
-        config = SimpleNamespace(device="cpu", chunk_size=2, max_action_dim=32,
-                                 num_steps=10, use_cache=True, rtc_config=None, adapt_to_pi_aloha=False)
-        model = SimpleNamespace(config=config, rtc_processor=None, _rtc_enabled=lambda: False)
-        model.embed_prefix = mock.Mock(return_value=(torch.zeros(1, 1, 2), torch.ones(1, 1, dtype=torch.bool),
-                                                     torch.zeros(1, 1, dtype=torch.bool)))
-        model.vlm_with_expert = SimpleNamespace(forward=mock.Mock(return_value=(None, None)))
-        model.denoise_step = mock.Mock(side_effect=lambda **kw: torch.ones_like(kw["x_t"]))
-        model.sample_actions = MethodType(module.VLAFlowMatching.sample_actions, model)
-        original = model.sample_actions
-        original_global = module.euler_integrate
-        policy = SimpleNamespace(config=config, model=model, reset=mock.Mock())
-        def predict(batch, noise):
-            self.assertTrue(torch.allclose(batch["observation.state"], torch.full((1, 7), -.5)))
-            return model.sample_actions(None, None, None, None, batch["observation.state"], noise=noise)[..., :7]
-        policy.predict_action_chunk = predict
-        pre, post = make_pre_post_processors(SimpleNamespace(), pretrained_path=str(fixture.policy_dir))
-        with mock.patch.object(NativeSmolVLA, "_load_components", return_value=(policy, pre, post)):
-            native = NativeSmolVLA.load(fixture.policy_dir)
-        observation = {"observation.state": [0.] * 7, "task": "synthetic offline comparison",
-                       "observation.images.camera1": fake_rgb(), "observation.images.camera2": fake_rgb()}
-        original_observation = copy.deepcopy(observation)
-        report = compare_native(native, observation, seeds=(0,), repeats=1, warmups=0)
-        self.assertEqual(report["action_units"], ["rad"] * 6 + ["m"])
-        self.assertEqual([row["nfe"] for row in report["rows"]], [10, 5, 2])
-        self.assertEqual(model.embed_prefix.call_count, 3)
-        self.assertEqual(model.denoise_step.call_count, 17)
-        self.assertEqual(observation, original_observation)
-        self.assertIs(model.sample_actions, original)
-        self.assertIs(module.euler_integrate, original_global)
-        self.assertEqual(config.num_steps, 10)
-        with self.assertRaisesRegex(RuntimeError, "test unwind"):
-            with offline_solver(model, lambda *args: None):
-                raise RuntimeError("test unwind")
-        self.assertIs(model.sample_actions, original)
-        self.assertTrue(native._inference_lock.acquire(blocking=False))
-        native._inference_lock.release()
-        model.denoise_step.side_effect = RuntimeError("synthetic expert failure")
-        with self.assertRaisesRegex(RuntimeError, "synthetic expert failure"):
-            compare_native(native, observation, seeds=(0,), repeats=1, warmups=0)
-        self.assertIs(model.sample_actions, original)
-        self.assertIs(module.euler_integrate, original_global)
-        self.assertTrue(native._inference_lock.acquire(blocking=False))
-        native._inference_lock.release()
 
     def test_synthetic_cli_labels_measurement_scope(self):
         output = io.StringIO()

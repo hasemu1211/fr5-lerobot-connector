@@ -33,7 +33,7 @@ def _sync(device):
 
 def tensor_digest(value):
     value = value.detach().cpu().contiguous()
-    return hashlib.sha256(value.numpy().tobytes()).hexdigest()
+    return hashlib.sha256(value.reshape(-1).view(torch.uint8).numpy().tobytes()).hexdigest()
 
 
 def integrate(denoise, noise, method, *, threshold=.075, max_nfe=20):
@@ -165,7 +165,8 @@ def compare_trials(trial, shape, *, seeds=(0, 1, 2), repeats=3, warmups=1, devic
                 delta = (actions - reference).double().flatten(0, -2)
                 rows.append({"seed": seed, "repeat": repeat, "order": list(order), "method": method,
                              "noise_sha256": tensor_digest(noise), "action_sha256": tensor_digest(actions),
-                             "action_shape": list(actions.shape), "total_wall_s": total, **metrics,
+                             "action_shape": list(actions.shape), "action_dtype": str(actions.dtype),
+                             "total_wall_s": total, **metrics,
                              "rmse_per_dimension_to_fixed10": delta.square().mean(0).sqrt().tolist(),
                              "max_abs_per_dimension_to_fixed10": delta.abs().amax(0).tolist()})
     summary = {}

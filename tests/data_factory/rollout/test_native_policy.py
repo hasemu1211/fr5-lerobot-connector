@@ -121,6 +121,57 @@ class NativePolicyTest(unittest.TestCase):
         self.offline.start()
         self.addCleanup(self.offline.stop)
 
+    def test_installed_sample_actions_and_saved_processors_reach_offline_comparison(self):
+        from lerobot.policies.smolvla import modeling_smolvla as module
+        from lerobot.policies.factory import make_pre_post_processors
+        from tools.data_factory.learned_action_adapter import NativeSmolVLA, fake_rgb
+        import copy
+        from types import MethodType
+        from tools.data_factory.rollout.solver_efficiency import compare_native, offline_solver
+        config = SimpleNamespace(device="cpu", chunk_size=2, max_action_dim=32,
+                                 num_steps=10, use_cache=True, rtc_config=None, adapt_to_pi_aloha=False)
+        model = SimpleNamespace(config=config, rtc_processor=None, _rtc_enabled=lambda: False)
+        model.embed_prefix = mock.Mock(return_value=(torch.zeros(1, 1, 2), torch.ones(1, 1, dtype=torch.bool),
+                                                     torch.zeros(1, 1, dtype=torch.bool)))
+        model.vlm_with_expert = SimpleNamespace(forward=mock.Mock(return_value=(None, None)))
+        model.denoise_step = mock.Mock(side_effect=lambda **kw: torch.ones_like(kw["x_t"]))
+        model.sample_actions = MethodType(module.VLAFlowMatching.sample_actions, model)
+        original = model.sample_actions
+        original_global = module.euler_integrate
+        policy = SimpleNamespace(config=config, model=model, reset=mock.Mock())
+        def predict(batch, noise):
+            self.assertTrue(torch.allclose(batch["observation.state"], torch.full((1, 7), -.5)))
+            return model.sample_actions(None, None, None, None, batch["observation.state"], noise=noise)[..., :7]
+        policy.predict_action_chunk = predict
+        pre, post = make_pre_post_processors(SimpleNamespace(), pretrained_path=str(self.policy_dir))
+        with mock.patch.object(NativeSmolVLA, "_load_components", return_value=(policy, pre, post)):
+            native = NativeSmolVLA.load(self.policy_dir)
+        observation = {"observation.state": [0.] * 7, "task": "synthetic offline comparison",
+                       "observation.images.camera1": fake_rgb(), "observation.images.camera2": fake_rgb()}
+        original_observation = copy.deepcopy(observation)
+        report = compare_native(native, observation, seeds=(0,), repeats=1, warmups=0)
+        self.assertEqual(report["action_units"], ["rad"] * 6 + ["m"])
+        self.assertEqual([row["nfe"] for row in report["rows"]], [10, 5, 2])
+        self.assertEqual(model.embed_prefix.call_count, 3)
+        self.assertEqual(model.denoise_step.call_count, 17)
+        self.assertEqual(observation, original_observation)
+        self.assertIs(model.sample_actions, original)
+        self.assertIs(module.euler_integrate, original_global)
+        self.assertEqual(config.num_steps, 10)
+        with self.assertRaisesRegex(RuntimeError, "test unwind"):
+            with offline_solver(model, lambda *args: None):
+                raise RuntimeError("test unwind")
+        self.assertIs(model.sample_actions, original)
+        self.assertTrue(native._inference_lock.acquire(blocking=False))
+        native._inference_lock.release()
+        model.denoise_step.side_effect = RuntimeError("synthetic expert failure")
+        with self.assertRaisesRegex(RuntimeError, "synthetic expert failure"):
+            compare_native(native, observation, seeds=(0,), repeats=1, warmups=0)
+        self.assertIs(model.sample_actions, original)
+        self.assertIs(module.euler_integrate, original_global)
+        self.assertTrue(native._inference_lock.acquire(blocking=False))
+        native._inference_lock.release()
+
     def test_saved_pre_post_normalization_and_chunk_api_are_consumed(self):
         from lerobot.policies.smolvla.configuration_smolvla import SmolVLAConfig
         from lerobot.policies.smolvla.modeling_smolvla import SmolVLAPolicy
