@@ -57,7 +57,16 @@ wrapper는 공식 `lerobot-train`에 남은 옵션을 전달한다. 임의의 ep
 
 ## 오프라인 평가
 
-`tools/evaluate_smolvla_offline.py`에는 분리 episode의 SmolVLA loss 계산 경로가 있다. 다만 `scripts/evaluate_smolvla.sh`에는 새 외부 승인 목록과 선택 목록을 전달하는 연결이 아직 없으므로, 새 학습 경로의 end-to-end 평가를 완료했다고 주장하지 않는다. ACT 전용 offline evaluator도 아직 제공하지 않는다.
+SmolVLA offline loss 평가는 기존 checkpoint의 `fr5_training_split.json` v3와 `fr5_training_receipt.json`, 그리고 그 학습 실행에 사용된 외부 승인 목록을 다시 검증한다. 평가 episode는 split v3의 `eval_episodes` 전체로만 정하며, `--episodes`를 지정하면 그 목록과 정확히 같아야 한다. 예전 count-only split, 새 fraction 재계산, 누락·변경된 승인 목록, 현재 dataset byte와 다른 lineage, train episode와 겹치는 partition은 model을 load하기 전에 거부한다. ACT 전용 offline evaluator는 제공하지 않는다.
+
+```bash
+FR5_REPO_ID="$REPO_ID" direnv exec . scripts/evaluate_smolvla.sh \
+  --approved-inventory "$APPROVAL_DIR/training_approved.json" \
+  --root "$DATASET_PARENT" --output "$EVALUATION_REPORT" --dry-run \
+  "$CHECKPOINT" "$DATASET_NAME" --episodes "$HELD_OUT_EPISODES_CSV"
+```
+
+`--dry-run`은 승인·checkpoint receipt·dataset·split 연결만 확인하며 inference나 report 파일 생성을 하지 않는다. 검토 뒤 같은 명령에서 `--dry-run`을 제거해야 실제 loss 계산과 report 저장이 수행된다. report의 scope는 승인된 held-out data의 offline flow-matching loss뿐이며 checkpoint 선택 승인, 실물 성공, semantic 성공을 뜻하지 않는다.
 
 ```bash
 direnv exec . scripts/evaluate_smolvla.sh --check-env
