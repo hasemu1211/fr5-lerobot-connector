@@ -2,6 +2,7 @@
 import json
 import os
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -189,6 +190,54 @@ class NativePolicyTest(unittest.TestCase):
             with self.assertRaisesRegex(ContractError, 'LEARNED_CHECKPOINT_LOAD_FAILED'):
                 NativeSmolVLA.load(self.policy_dir)
             components.assert_not_called()
+
+    def test_separate_inference_consumers_cannot_reset_one_active_native_model(self):
+        from lerobot.policies.factory import make_pre_post_processors
+        from tools.data_factory.rollout.finite_plan import FinitePolicyInference
+        from tests.data_factory.rollout.test_finite_plan import observation, XML
+        pre, post = make_pre_post_processors(SimpleNamespace(), pretrained_path=str(self.policy_dir))
+        entered, release = threading.Event(), threading.Event()
+        policy = mock.Mock()
+        def predict(_):
+            if policy.predict_action_chunk.call_count == 1:
+                entered.set()
+                if not release.wait(5):
+                    raise RuntimeError("test consumer did not release inference")
+            return torch.zeros((1, 1, 7))
+        policy.predict_action_chunk.side_effect = predict
+        with mock.patch.object(NativeSmolVLA, "_load_components", return_value=(policy, pre, post)):
+            native = NativeSmolVLA.load(self.policy_dir)
+        def propose():
+            return FinitePolicyInference(native, native.checkpoint, source_clock=lambda: 10.,
+                monotonic_clock=lambda: 10.).propose(observation(), instruction="synthetic probe",
+                                                  robot_description=XML, period_s=1.5)
+        completed, errors = [], []
+        def first_consumer():
+            try:
+                completed.append(propose())
+            except Exception as error:
+                errors.append(error)
+        thread = threading.Thread(target=first_consumer)
+        thread.start()
+        try:
+            self.assertTrue(entered.wait(5))
+            with self.assertRaisesRegex(ContractError, "LEARNED_POLICY_FAILED") as rejected:
+                propose()
+            self.assertEqual(str(rejected.exception.__cause__), "LEARNED_REENTRANT_INFERENCE")
+            self.assertEqual(policy.reset.call_count, 1)
+            self.assertEqual(policy.predict_action_chunk.call_count, 1)
+        finally:
+            release.set()
+            thread.join(5)
+        self.assertFalse(thread.is_alive())
+        self.assertEqual(errors, [])
+        self.assertEqual(len(completed), 1)
+        np.testing.assert_allclose(propose()["actions"], completed[0]["actions"])
+        policy.predict_action_chunk.side_effect = RuntimeError("synthetic inference failure")
+        with self.assertRaisesRegex(ContractError, "LEARNED_POLICY_FAILED"):
+            propose()
+        policy.predict_action_chunk.side_effect = predict
+        np.testing.assert_allclose(propose()["actions"], completed[0]["actions"])
 
     def test_saved_feature_contract_cannot_disable_state_normalization(self):
         cases = (

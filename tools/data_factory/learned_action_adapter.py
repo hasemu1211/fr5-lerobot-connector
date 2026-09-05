@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import copy
 import math
+import threading
 import time
 from typing import Callable
 
@@ -254,6 +255,9 @@ class NativeSmolVLA:
     exist; this loader cannot download or install model/tokenizer dependencies.
     """
 
+    def __init__(self):
+        self._inference_lock = threading.Lock()
+
     @classmethod
     def load(cls, checkpoint, *, device="cpu"):
         import importlib.metadata
@@ -366,6 +370,18 @@ class NativeSmolVLA:
         return policy, pre, post
 
     def __call__(self, observation):
+        from tools.fr5_data_factory import ContractError
+
+        # Separate finite proposal consumers may share this loaded instance.
+        # Protect the model and both processors before any reset or inference.
+        if not self._inference_lock.acquire(blocking=False):
+            raise ContractError("LEARNED_REENTRANT_INFERENCE")
+        try:
+            return self._predict(observation)
+        finally:
+            self._inference_lock.release()
+
+    def _predict(self, observation):
         import torch
         from tools.fr5_data_factory import ContractError
         from tools.data_factory.training_receipts import tree_digest
