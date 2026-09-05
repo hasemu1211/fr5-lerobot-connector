@@ -18,6 +18,17 @@ FR5가 Collection, Curation, Training/Evaluation, Rollout, Learning Evidence, Pu
 - **WHEN** claim의 일부 evidence가 없거나 적용 범위를 벗어난다
 - **THEN** claim은 `PARTIAL` 또는 `UNKNOWN`으로 남고 누락된 의미를 만들어 내지 않는다
 
+### Requirement: Purpose-appropriate production presets preserve quality and lineage
+운용 목적별 생산 프리셋은 구간별 동작과 촬영·기록 품질을 함께 고려해야 하며(SHALL), 실제 적용값은 각 기존 canonical owner에서 일관되게 해석되고 계획과 episode evidence에서 추적 가능해야 한다(SHALL). 적합성은 수집 시간, 안정적인 작업 성공, 사용 가능한 영상·동기화 품질의 소량 실행 evidence로 판단해야 하며(SHALL), 설정의 적격 표기만으로 최적 속도나 충분한 데이터 품질을 주장해서는 안 된다(MUST NOT). 근거 있는 기존 그리퍼 설정과 원본 데이터는 보존해야 한다(SHALL).
+
+#### Scenario: A production preset is selected or revised
+- **WHEN** 운영자가 목적에 맞는 프리셋을 선택하거나 새로운 적용값을 검토한다
+- **THEN** 실제 설정과 그 근거를 재현할 수 있고, 변경된 실행은 기존 exact-plan 및 물리 gate를 충족하며, 검증 전의 용도 적합성은 UNKNOWN으로 남는다
+
+#### Scenario: A faster or higher-fidelity preset is considered
+- **WHEN** 속도 또는 촬영·기록 품질의 상향을 검토한다
+- **THEN** 시간과 충분한 품질을 함께 비교하며 최대 속도·최대 화질 자체를 목표로 삼지 않고, 프리셋 선택이 TEST/GENERAL 데이터 구분이나 technical·semantic·training authority를 자동 변경하지 않는다
+
 ### Requirement: Existing owners retain authority
 OpenSpec은 지속 가능한 외부 행동 intent, 안정된 경계와 outcome 단위의 완료 기준 및 evidence 연결을 소유해야 한다(SHALL). Orca는 상세 실행·의존성·attempt 진척·live resource·blocker·handoff를, source와 tests는 실행 가능한 계약과 수치 truth를, MEX는 파생된 로컬 탐색 정보를, Public Documentation은 검증된 사용자 의미를 계속 소유해야 한다(SHALL).
 
