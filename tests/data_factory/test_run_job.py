@@ -6,6 +6,7 @@ import tempfile
 import threading
 import time
 import unittest
+from contextlib import ExitStack
 from datetime import datetime, timezone
 from unittest import mock
 from pathlib import Path
@@ -13,6 +14,8 @@ from types import SimpleNamespace
 
 from .test_motion import SCENE, T, snapshot
 from . import test_one_job as one_job_test
+from . import test_episode_ledger as episode_ledger_test
+from . import test_campaign_session as campaign_session_test
 from tools.data_factory.motion.pickup_executor import PHASES, PickupExecutor
 from tools.data_factory.motion.object_reposition import (
     build_object_reposition_binding,
@@ -3550,7 +3553,31 @@ class RunJobTest(unittest.TestCase):
                 self.assertFalse((Path(directory) / live_payload["run_id"] / "candidate_admission.json").exists())
 
     def test_bound_production_live_commits_and_binds_one_candidate_to_one_ledger(self):
-        """The public runner owns one production commit, ledger, and candidate chain."""
+        self._bound_production_live()
+
+    def test_bound_production_failed_plan_only_continuation_offers_review_and_releases_parent(self):
+        self._bound_production_live("pending")
+
+    def test_bound_production_continuation_preserves_error_when_candidate_write_fails(self):
+        self._bound_production_live("candidate_write")
+
+    def test_bound_production_continuation_preserves_error_when_ledger_bind_fails(self):
+        self._bound_production_live("ledger_bind")
+
+    def test_bound_production_uncertain_continuation_retains_exact_parent(self):
+        self._bound_production_live("uncertain")
+
+    def _bound_production_live(self, continuation=None):
+        """Drive the real parent lifecycle through the public runner with fixture ports."""
+        validated = runtime_validated(job={
+            **JOB, "operator_or_agent_id": "operator", "instruction": "pick up",
+            "place_id": "PLACE_A", "yaw_deg": 0, "x_mm": -70, "y_mm": 35,
+            "object_profile_id": "wood-cube",
+        })
+        # Keep the recorder/executor builder's planned job joined to this resolver.
+        resolved_patch = mock.patch.object(one_job_test, "RESOLVED", validated["resolved_job_digest"])
+        resolved_patch.start()
+        self.addCleanup(resolved_patch.stop)
         helper = one_job_test.OneJobTest()
         self.addCleanup(helper.doCleanups)
         recorder_call, executor_call = None, None
@@ -3608,9 +3635,30 @@ class RunJobTest(unittest.TestCase):
                         "speed": {"max_velocity_scaling": 0.1},
                         "clearance": {"status": "COLLISION_CHECKED_NO_DISTANCE"},
                     }
+                    if continuation:
+                        response["data"]["operator_summary"]["recycle"] = {
+                            "release_slot_id": run_job.canonical_digest("slot-a"), "recording_boundary_after": "LIFT_LIN",
+                            "path": list(PHASES)[5:],
+                            "release_target": {"place_id": "PLACE_A", "yaw_deg": 0, "x_mm": 60, "y_mm": 0},
+                            "safe_staging_joint_positions_rad": [0] * 6,
+                            "plan_digest": response["plan_digest"],
+                        }
                     cell.plan_digest = response["plan_digest"]
                 elif request["op"] == "execute":
                     cell.value.update(cell_ready=False, reason_code="EXECUTION_IN_PROGRESS")
+                if continuation and response["state"] == "COMPLETED":
+                    release = {
+                        "schema_version": "data_factory.recycle_release_evidence.v2",
+                        "release_outcome": "EXPECTED_LANDED",
+                        "outcome_source": "CAMPAIGN_CONTROL_PROXY", "release_slot_id": run_job.canonical_digest("slot-a"),
+                    }
+                    response["data"].update(
+                        release_evidence=release,
+                        scene_transition={
+                            "scene_state_digest": run_job.canonical_digest("recorded-release"),
+                            "release_evidence_digest": run_job.canonical_digest(release),
+                        },
+                    )
                 return response
 
             def close(self, **_):
@@ -3640,6 +3688,11 @@ class RunJobTest(unittest.TestCase):
             def read(self):
                 return {**self.value, "plan_digest": self.plan_digest}
 
+            def mark_blocked(self, reason_code, run_id, plan_digest):
+                self.value.update(cell_ready=False, reason_code=reason_code, run_id=run_id)
+                self.plan_digest = plan_digest
+                return self.read()
+
             def acknowledge_ready(self, operator, *, expected_run_id=None, expected_plan_digest=None):
                 test_case.assertEqual((expected_run_id, expected_plan_digest), ("run", self.plan_digest))
                 self.value.update(cell_ready=True, reason_code="HUMAN_ACKNOWLEDGED", acknowledged_by=operator)
@@ -3653,11 +3706,6 @@ class RunJobTest(unittest.TestCase):
                 return {"scene_state_digest": "sha256:" + "5" * 64}
 
         cell, scene = Cell(), Scene()
-        validated = runtime_validated(job={
-            **JOB, "operator_or_agent_id": "operator", "instruction": "pick up",
-            "place_id": "PLACE_A", "yaw_deg": 0, "x_mm": -70, "y_mm": 35,
-            "object_profile_id": "wood-cube",
-        })
         with tempfile.TemporaryDirectory() as directory:
             live_payload = payload("live")
             live_payload.update(run_id="run", run_root=directory, dataset_root=str(Path(directory) / "dataset"))
@@ -3697,6 +3745,123 @@ class RunJobTest(unittest.TestCase):
             }
             bound_ledger_reference = {**ledger_reference, "review_status": "PENDING"}
 
+            extra = {}
+            stack = ExitStack()
+            self.addCleanup(stack.close)
+            if continuation:
+                fixture = episode_ledger_test.EpisodeLedgerTest()
+                fixture.setUp()
+                self.addCleanup(fixture.doCleanups)
+                fixture.run_id = "run"
+                fixture.episode_ref.update(
+                    transaction_id="run:episode-000000",
+                    resolved_job_digest=validated["resolved_job_digest"],
+                )
+                live_payload["dataset_root"] = roots["dataset_root"] = str(fixture.dataset.resolve())
+                roots["binding_digest"] = run_job.canonical_digest({
+                    key: value for key, value in roots.items() if key != "binding_digest"
+                })
+                originals = {path: path.read_bytes() for path in fixture.dataset.rglob("*") if path.is_file()}
+                ledger_snapshot = {}
+                terminal_error = "ROS_GRIPPER_SETTINGS_UNVERIFIED"
+                binding = {
+                    "parent_run_id": "run", "continuation_run_id": "run-reposition",
+                    "next_run_id": "next-run", "start_state": "ON_SURFACE",
+                    "binding_digest": run_job.canonical_digest("reposition-fixture"),
+                }
+                scope = {
+                    "scope_digest": run_job.canonical_digest("preapproval-fixture"),
+                    "resolved_job_digest": run_job.canonical_digest("continuation-job"),
+                }
+                # Setup/authorization and motion are external ports; the public
+                # postcommit failure branch and candidate/state writers stay real.
+                for name, value in (
+                    ("validate_object_reposition_binding", binding),
+                    ("_validate_parent_reposition_edge", binding),
+                    ("_load_reposition_yaw_profile", None),
+                    ("validate_campaign_authorization", {}),
+                    ("validate_runtime_campaign_scope", {}),
+                    ("_write_object_reposition_preapproval", scope),
+                    ("_validate_object_reposition_preapproval", scope),
+                ):
+                    stack.enter_context(mock.patch.object(run_job, name, return_value=value))
+
+                def reposition(parent_payload, checked, *_args, **_kwargs):
+                    self.assertEqual((job.state, job.recorder_state, job.executor_state),
+                                     ("AWAITING_CELL_READY", "COMMITTED", "COMPLETED"))
+                    timeline.append(("continuation", "plan_only"))
+                    return run_job._object_reposition_result(
+                        parent_payload, checked, status="FAIL", code=terminal_error,
+                        plan_digest=None, resolved_job_digest=None, plan_artifact_digest=None,
+                        preapproval_scope_digest=scope["scope_digest"],
+                        execution_response={
+                            "ok": False, "code": terminal_error, "state": "BLOCKED",
+                            "executor_state": "IDLE", "plan_envelope": None,
+                            "execution_evidence": None,
+                            "cancel_error": "CANCEL_UNCONFIRMED" if continuation == "uncertain" else None,
+                            "recording_scope": "OUT_OF_DATASET",
+                        },
+                    )
+
+                def checkpoint(request):
+                    bound = {key: request[key] for key in (
+                        "kind", "run_id", "plan_digest", "prompt", "choices", "evidence",
+                    )}
+                    return {
+                        "kind": request["kind"], "choice": request["choices"][0],
+                        "run_id": request["run_id"], "plan_digest": request["plan_digest"],
+                        "checkpoint_binding_digest": run_job.canonical_digest(bound),
+                        "decision_source": "CAMPAIGN_AUTHORIZATION", "operator_label": "operator",
+                    }
+
+                extra = {
+                    "object_reposition_binding": binding,
+                    "preapproval_checklist": {"object_reposition_binding": binding},
+                    "object_reposition_source_payload": live_payload,
+                    "object_reposition_call": reposition,
+                    "campaign_authorization": {"fixture": "authorization"},
+                    "approval_scope": "HIL_NUMERIC_PROXY", "checkpoint_provider": checkpoint,
+                }
+
+                def materialize_ledger(*_args, **_kwargs):
+                    artifacts = fixture._artifacts()
+                    preapproval = json.loads((Path(directory) / "run" / "preapproval_evidence.json").read_text())
+                    # Reuse the ledger builder's legacy envelope fixture while
+                    # joining it to the exact plan and technical result from run_live.
+                    plan = {key: preapproval[key] for key in (
+                        "run_id", "resolved_job_digest", "plan_digest",
+                        "plan_envelope", "plan_envelope_digest",
+                    )}
+                    plan["schema_version"] = "data_factory.preapproval_evidence.v1"
+                    artifacts["plan"] = fixture._json("parent-plan.json", plan)
+                    technical_path = Path(directory) / "run" / "technical_validator.json"
+                    artifacts["technical"] = {
+                        "artifact_path": str(technical_path),
+                        "artifact_digest": run_job.canonical_digest(json.loads(technical_path.read_text())),
+                    }
+                    execution = json.loads(Path(artifacts["execution"]["artifact_path"]).read_text())
+                    execution["plan_digest"] = plan["plan_digest"]
+                    execution["data"]["precommit_safety"] = {
+                        **plan["plan_envelope"]["precommit_safety"],
+                        "status": "PASS", "post_reset_safe_snapshot_digest": run_job.canonical_digest("safe"),
+                    }
+                    artifacts["execution"] = fixture._json("parent-execution.json", execution)
+                    ledger = fixture._compile(artifacts)
+                    state = episode_ledger_test.project_episode_state(ledger=ledger, reclaim_state="REPACK_REQUIRED")
+                    for key, value in (("path", ledger), ("state_path", state)):
+                        path = Path(ledger_reference[key])
+                        path.write_text(json.dumps(value), encoding="utf-8")
+                        ledger_snapshot[key] = path.read_bytes()
+                    originals.update({
+                        Path(ref["artifact_path"]): Path(ref["artifact_path"]).read_bytes()
+                        for ref in artifacts.values()
+                    })
+                    originals.update({
+                        path: path.read_bytes() for path in (Path(directory) / "run").iterdir()
+                        if path.is_file() and path.name != "episode_ledger_state.json"
+                    })
+                    return ledger_reference
+
             def approve(request):
                 return {
                     "choice": "APPROVE", "run_id": request["run_id"],
@@ -3708,7 +3873,7 @@ class RunJobTest(unittest.TestCase):
                         "approval_scope": request["approval_scope"],
                         "decision_binding": request["decision_binding"],
                     }),
-                    "decision_source": "LOCAL_UI_BUTTON", "operator_label": "operator",
+                    "decision_source": "CAMPAIGN_AUTHORIZATION" if continuation else "LOCAL_UI_BUTTON", "operator_label": "operator",
                 }
 
             with (
@@ -3719,23 +3884,122 @@ class RunJobTest(unittest.TestCase):
                 mock.patch.object(run_job, "validate_runtime_episode_binding", return_value=episode),
                 mock.patch.object(run_job, "validate_runtime_planned_start", return_value=planned_start),
                 mock.patch.object(run_job, "_validate_episode_ledger_context", return_value=ledger_context),
-                mock.patch.object(run_job, "_write_episode_ledger", return_value=ledger_reference) as ledger_writer,
-                mock.patch.object(run_job, "write_candidate_admission", return_value={"semantic_status": "PENDING"}) as candidate_writer,
-                mock.patch.object(run_job, "bind_candidate_episode_state", return_value=bound_ledger_reference) as candidate_binder,
+                mock.patch.object(run_job, "_write_episode_ledger", side_effect=materialize_ledger if continuation else None, return_value=ledger_reference) as ledger_writer,
+                mock.patch.object(run_job, "write_candidate_admission", wraps=run_job.write_candidate_admission if continuation else None, return_value=mock.DEFAULT if continuation else {"semantic_status": "PENDING"}) as candidate_writer,
+                mock.patch.object(run_job, "bind_candidate_episode_state", wraps=run_job.bind_candidate_episode_state if continuation else None, return_value=mock.DEFAULT if continuation else bound_ledger_reference) as candidate_binder,
             ):
-                result = run_job.run_live(
-                    live_payload, threading.Event(), published.append,
-                    resolver=lambda _: (validated, runtime_motion(validated, continuous=True), SCENE), executor_factory=lambda *_: Executor(), recorder_factory=lambda *_: Recorder(),
-                    validator_call=lambda *_: (validator_calls.append("validator"), timeline.append(("validator", "PASS")), {"ok": True, "code": "PASS", "result_digest": "sha256:" + "6" * 64})[2],
-                    tty_decision=lambda _prompt, expected: "PASS" if expected == ("PASS", "FAIL") else None,
-                    camera_warmup_call=lambda *_: {"schema_version": "data_factory.camera_warmup.v1", "run_id": "run", "camera_profile": "up", "attempts": []},
-                    one_job=job,
-                    decision_provider=approve,
-                    runtime_root_binding={"fixture": "production-root"},
-                    runtime_episode_binding={"fixture": "production-episode"},
-                    runtime_start_binding={"fixture": "production-start"},
-                    episode_ledger_context={"fixture": "production-ledger"},
-                )
+                def invoke():
+                    return run_job.run_live(
+                        live_payload, threading.Event(), published.append,
+                        resolver=lambda _: (validated, runtime_motion(validated, continuous=True), SCENE), executor_factory=lambda *_: Executor(), recorder_factory=lambda *_: Recorder(),
+                        validator_call=lambda *_: (validator_calls.append("validator"), timeline.append(("validator", "PASS")), {"ok": True, "code": "PASS", "result_digest": "sha256:" + "6" * 64})[2],
+                        tty_decision=lambda _prompt, expected: "PASS" if expected == ("PASS", "FAIL") else None,
+                        camera_warmup_call=lambda *_: {"schema_version": "data_factory.camera_warmup.v1", "run_id": "run", "camera_profile": "up", "attempts": []},
+                        one_job=job,
+                        decision_provider=approve,
+                        runtime_root_binding={"fixture": "production-root"},
+                        runtime_episode_binding={"fixture": "production-episode"},
+                        runtime_start_binding={"fixture": "production-start"},
+                        episode_ledger_context={"fixture": "production-ledger"},
+                        **extra,
+                    )
+                if continuation:
+                    atomic_write = run_job.write_json_atomic
+                    def write(path, value):
+                        if Path(path).name == "candidate_admission.json" and continuation == "candidate_write":
+                            raise OSError("candidate disk failure")
+                        if Path(path).name == "episode_ledger_state.json" and continuation == "ledger_bind":
+                            raise run_job.ContractError("EPISODE_LEDGER_STATE_WRITE_ERROR")
+                        return atomic_write(path, value)
+                    factories = campaign_session_test.Factories()
+                    factories.fake = mock.Mock(return_value=job)
+                    _, _, _, session = campaign_session_test.make_session(2, factories=factories)
+                    def episode_call(_intent, lifecycle, _cancel, _context):
+                        nonlocal result
+                        self.assertIs(lifecycle, job)
+                        result = invoke()
+                        self.assertEqual((result["ok"], result["code"], result["state"]),
+                                         (False, terminal_error, "BLOCKED"), result)
+                        raise run_job.ContractError(result["code"])
+                    result = None
+                    with mock.patch.object(run_job, "write_json_atomic", side_effect=write), mock.patch.object(job, "cancel", wraps=job.cancel) as cancel_job:
+                        with self.assertRaisesRegex(run_job.ContractError, terminal_error):
+                            session.run_next(
+                                run_id="run",
+                                scene_evidence=campaign_session_test.scene(run_job.canonical_digest("scene-0")),
+                                episode_call=episode_call,
+                            )
+                    status = session.status()
+                    uncertain = continuation == "uncertain"
+                    self.assertEqual(status["active_child"], uncertain)
+                    self.assertEqual(job.state, "AWAITING_CELL_READY" if uncertain else "COMMITTED_BLOCKED")
+                    self.assertEqual(cancel_job.call_count, int(uncertain))
+                    self.assertEqual(status["termination_error"], "CAMPAIGN_SESSION_CHILD_TERMINATION_UNCERTAIN" if uncertain else None)
+                    if uncertain:
+                        self.assertIs(session._active, job)
+                    self.assertEqual(status["campaign"]["state"], "BLOCKED")
+                    with self.assertRaises(run_job.ContractError):
+                        session.open_next(run_id="next-run", scene_evidence=campaign_session_test.scene(run_job.canonical_digest("scene-0")))
+                    factories.fake.assert_called_once_with()
+                    self.assertEqual((job.recorder_state, job.executor_state), ("COMMITTED", "COMPLETED"))
+                    self.assertEqual(calls.count(("recorder", "commit")), 1)
+                    self.assertEqual(calls.count(("executor", "execute")), 1)
+                    self.assertEqual(timeline.count(("continuation", "plan_only")), 1)
+                    self.assertLess(timeline.index(("recorder", "commit")), timeline.index(("continuation", "plan_only")))
+                    self.assertEqual(validator_calls, ["validator"])
+                    continuation_result = result["data"]["object_reposition"]
+                    self.assertEqual(continuation_result["execution_response"]["recording_scope"], "OUT_OF_DATASET")
+                    self.assertIsNone(continuation_result["plan_digest"])
+                    self.assertIsNone(continuation_result["plan_artifact_digest"])
+                    self.assertNotIn(("recorder", "abort"), calls)
+                    self.assertNotIn(("cell", "ack"), timeline)
+                    self.assertFalse(cell.read()["cell_ready"])
+                    self.assertEqual((cell.read()["reason_code"], cell.read()["run_id"], cell.read()["plan_digest"]),
+                                     (terminal_error, "run", result["plan_digest"]))
+                    self.assertEqual(result["data"]["postcommit_cell_state"], cell.read())
+                    self.assertFalse(result["data"]["training_authorized"])
+                    self.assertFalse(result["data"]["camera_semantic_authority"])
+                    self.assertEqual(result["data"]["technical_validator"]["status"], "PASS")
+                    ledger_writer.assert_called_once()
+                    candidate_writer.assert_called_once()
+                    self.assertEqual(Path(ledger_reference["path"]).read_bytes(), ledger_snapshot["path"])
+                    for path, before in originals.items():
+                        self.assertEqual(path.read_bytes(), before, str(path))
+                    candidate_path = Path(directory) / "run" / "candidate_admission.json"
+                    state_path = Path(ledger_reference["state_path"])
+                    review_error = {
+                        "candidate_write": "CANDIDATE_ADMISSION_WRITE_ERROR",
+                        "ledger_bind": "EPISODE_LEDGER_STATE_WRITE_ERROR",
+                    }.get(continuation)
+                    self.assertEqual(result["data"]["candidate_review_error"], review_error)
+                    if continuation == "candidate_write":
+                        self.assertFalse(candidate_path.exists())
+                        candidate_binder.assert_not_called()
+                    else:
+                        candidate_binder.assert_called_once_with(ledger_reference, candidate_path)
+                        candidate = json.loads(candidate_path.read_text())
+                        self.assertEqual((candidate["run_id"], candidate["semantic_status"], candidate["operational_source"]), ("run", "PENDING", "HIL_PROXY"))
+                    if review_error:
+                        self.assertIsNone(result["data"]["candidate_review_offer"])
+                        self.assertEqual(state_path.read_bytes(), ledger_snapshot["state_path"])
+                        self.assertEqual(result["data"]["episode_ledger"], ledger_reference)
+                    else:
+                        state = json.loads(state_path.read_text())
+                        self.assertEqual((state["review"]["semantic_status"], state["review"]["training_status"]), ("PENDING", "NOT_AUTHORIZED"))
+                        offer = result["data"]["candidate_review_offer"]
+                        self.assertEqual((offer["run_id"], offer["candidate_path"]), ("run", str(candidate_path)))
+                        self.assertEqual(offer["expected_file_digest"], run_job.canonical_digest(candidate))
+                        self.assertEqual(offer["expected_review_context_digest"], candidate["review_context_digest"])
+                        self.assertEqual(offer["ledger_reference"], result["data"]["episode_ledger"])
+                        self.assertEqual(offer["ledger_reference"]["review_status"], "PENDING")
+                        self.assertEqual(offer["ledger_reference"]["training_status"], "NOT_AUTHORIZED")
+                        self.assertEqual(state["candidate"], {
+                            "artifact_path": str(candidate_path),
+                            "artifact_digest": run_job.canonical_digest(candidate),
+                        })
+                        self.assertEqual(state["retention"]["reclaim_state"], "REPACK_REQUIRED")
+                    return
+                result = invoke()
                 self.assertTrue(result["ok"], result)
                 preapproval = json.loads((Path(directory) / "run" / "preapproval_evidence.json").read_text(encoding="utf-8"))
 
