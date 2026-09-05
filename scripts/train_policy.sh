@@ -78,7 +78,7 @@ if [[ -n "$RESUME_FROM" ]]; then
   if [[ ! -f "$RESUME_RECEIPT" && -f "$PENDING_RECEIPT" ]]; then
     mv "$PENDING_RECEIPT" "$RESUME_RECEIPT"
   fi
-  exec "${RESUME_COMMAND[@]}"
+  exec "$ROOT/.venv/bin/python" "$ROOT/tools/data_factory/training_entrypoint.py" resume --checkpoint "$RESUME_FROM"
 fi
 
 case "$PROFILE" in

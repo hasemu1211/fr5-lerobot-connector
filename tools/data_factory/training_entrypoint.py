@@ -16,7 +16,6 @@ from datetime import datetime, timezone
 import json
 from pathlib import Path
 import shlex
-import subprocess
 
 if __package__ in {None, ""}:
     sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
@@ -75,6 +74,8 @@ def prepare_launch(*, dataset: Path, repo_id: str, inventory: Path,
     if version("lerobot") != "0.6.1":
         raise ContractError("TRAINING_SPLIT_RUNTIME_UNVERIFIED", "This split adapter is verified against LeRobot 0.6.1")
     config = options(argv[1:])
+    if config.get("--job.target", "local") != "local" or any(key.startswith("--env.") for key in config):
+        raise ContractError("TRAINING_LOCAL_OFFLINE_ONLY")
     # Streaming, renamed roots, alternate episode order and resume are separate contracts.
     if (config.get("--dataset.root") != str(dataset)
             or config.get("--dataset.repo_id") != repo_id
@@ -113,7 +114,7 @@ def prepare_launch(*, dataset: Path, repo_id: str, inventory: Path,
 
 def launch(*, dataset: Path, repo_id: str, inventory: Path, profile: str,
            collection_profile: str, argv: list[str], dry_run: bool = False,
-           runner=subprocess.run) -> int:
+           runner=None) -> int:
     kwargs = dict(dataset=dataset, repo_id=repo_id, inventory=inventory, profile=profile,
                   collection_profile=collection_profile, argv=argv)
     split, receipt = prepare_launch(**kwargs)
@@ -136,7 +137,9 @@ def launch(*, dataset: Path, repo_id: str, inventory: Path, profile: str,
         for path, value in zip(pending, (split, receipt)):
             approval._write_exclusive(path, value, "TRAINING_OUTPUT_EXISTS")
             written.append(path)
-        return runner(argv, check=False).returncode
+        if runner is not None:
+            return runner(argv, check=False).returncode
+        return run_native_training(argv, split, receipt)
     finally:
         for path in written:
             if output.is_dir() and not output.is_symlink():
@@ -147,6 +150,60 @@ def launch(*, dataset: Path, repo_id: str, inventory: Path, profile: str,
                 path.rename(target)
             else:
                 path.unlink()
+
+
+def run_native_training(argv: list[str], split: dict, receipt: dict) -> int:
+    """Use the official trainer with admitted partitions and TRAIN-only normalization.
+
+    LeRobot 0.6.1 selects samples but retains global metadata statistics. Adapt
+    its dataset factory in this process only, before policy/processors are made.
+    """
+    from lerobot.scripts import lerobot_train
+    import numpy as np
+
+    original_factory = lerobot_train.make_train_eval_datasets
+    original_argv = sys.argv
+
+    def admitted_datasets(cfg):
+        dataset = cfg.dataset
+        if (str(dataset.root) != split["dataset_identity"]["dataset_root"]
+                or dataset.repo_id != split["repo_id"]
+                or (dataset.episodes or list(range(split["total_episodes"]))) != split["selected_episodes"]
+                or dataset.eval_split != split["eval_split"] or dataset.streaming
+                or dataset.use_imagenet_stats != receipt["normalization"]["use_imagenet_stats"]):
+            raise ContractError("TRAINING_RUNTIME_DATASET")
+        train, heldout = original_factory(cfg)
+        for actual, expected in ((train, split["train_episodes"]), (heldout, split["eval_episodes"])):
+            if actual is None or actual.episodes != expected:
+                raise ContractError("TRAINING_RUNTIME_SPLIT")
+            actual.meta.stats = {key: {name: np.asarray(value) for name, value in stats.items()}
+                                 for key, stats in receipt["normalization"]["stats"].items()}
+        return train, heldout
+
+    try:
+        sys.argv = list(argv)
+        lerobot_train.make_train_eval_datasets = admitted_datasets
+        lerobot_train.main()
+        return 0
+    finally:
+        lerobot_train.make_train_eval_datasets = original_factory
+        sys.argv = original_argv
+
+
+def resume_training(checkpoint: Path) -> int:
+    from tools.validate_training_checkpoint import validate_checkpoint
+
+    policy, output = validate_checkpoint(checkpoint)
+    # Checkpoint validation accepts pending manifests from an interrupted launch.
+    values = []
+    for name in ("fr5_training_split.json", "fr5_training_receipt.json"):
+        path = output / name
+        if not path.is_file():
+            path = Path(str(output) + f".{name}.pending")
+        values.append(load_json_strict(path))
+    split, receipt = values
+    return run_native_training([receipt["normalized_argv"][0], "--resume=true",
+        f"--config_path={policy / 'train_config.json'}", f"--output_dir={output}"], split, receipt)
 
 
 def prepare_approvals(request: dict, output: Path, approved_by: str) -> tuple[dict, list[dict]]:
@@ -283,6 +340,8 @@ def approve(request: dict, output: Path, approved_by: str, *, dry_run: bool) -> 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest="mode", required=True)
+    resume = sub.add_parser("resume", help="Resume an admitted checkpoint with its TRAIN normalization")
+    resume.add_argument("--checkpoint", type=Path, required=True)
     human = sub.add_parser("approve", help="Preview a frozen revision; issue approval only through a controlling human TTY",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog='''Request JSON (paths reference existing evidence; no consent field):
@@ -324,7 +383,9 @@ for a new reviewed attempt. This command never starts training or robot executio
             command.add_argument("argv", nargs=argparse.REMAINDER)
     args = parser.parse_args()
     try:
-        if args.mode == "approve":
+        if args.mode == "resume":
+            raise SystemExit(resume_training(args.checkpoint))
+        elif args.mode == "approve":
             print(json.dumps(approve(load_json_strict(args.request), args.output_dir.resolve(), args.approved_by, dry_run=args.dry_run), indent=2, sort_keys=True))
         elif args.mode == "check":
             check_inventory(args.dataset, args.repo_id, args.approved_inventory, args.episodes)
