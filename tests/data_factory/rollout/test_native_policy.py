@@ -15,6 +15,67 @@ from tools.data_factory.learned_action_adapter import NativeSmolVLA, fake_rgb
 from tools.fr5_data_factory import ContractError
 
 
+def saved_processor_fixture(policy_dir, fault=None):
+    """Reusable CPU fixture for Learning's validator and actual Rollout processing.
+
+    Both state files contain identical admitted tensors; only configuration is
+    changed. No checkpoint admission, policy weights or dataset are fabricated.
+    """
+    stats = {"observation.state": {"mean": [1.] * 7, "std": [2.] * 7},
+             "action": {"mean": [.01] * 7, "std": [2.] * 7}}
+    tensors = {f"{key}.{name}": np.asarray(value, dtype=np.float32)
+               for key, values in stats.items() for name, value in values.items()}
+    for pipeline, registry in (("policy_preprocessor", "normalizer_processor"),
+                               ("policy_postprocessor", "unnormalizer_processor")):
+        config = {"features": {"observation.state": {"type": "STATE", "shape": [7]},
+                               "action": {"type": "ACTION", "shape": [7]}},
+                  "norm_map": {"STATE": "MEAN_STD", "ACTION": "MEAN_STD"}, "eps": 1e-8}
+        if pipeline == "policy_preprocessor":
+            if fault == "excluded":
+                config["normalize_observation_keys"] = []
+            elif fault == "missing":
+                config["features"].pop("observation.state")
+            elif fault == "wrong-type":
+                config["features"]["observation.state"]["type"] = "VISUAL"
+            elif fault == "identity":
+                config["norm_map"]["STATE"] = "IDENTITY"
+        if fault == ("inline-state" if pipeline == "policy_preprocessor" else "inline-action"):
+            feature = "observation.state" if pipeline == "policy_preprocessor" else "action"
+            config["stats"] = {feature: {"mean": [0.] * 7, "std": [1.] * 7}}
+        state_file = pipeline + ".safetensors"
+        steps = [{"registry_name": registry, "config": config, "state_file": state_file}]
+        if pipeline == "policy_preprocessor":
+            steps.insert(0, {"registry_name": "to_batch_processor", "config": {}})
+        (policy_dir / (pipeline + ".json")).write_text(json.dumps({"name": pipeline, "steps": steps}))
+        save_file(tensors, policy_dir / state_file)
+    return {"stats": stats}
+
+
+class SavedProcessorBypassTest(unittest.TestCase):
+    def test_config_bypasses_identical_saved_tensors_in_installed_cpu_processors(self):
+        from lerobot.policies.factory import make_pre_post_processors
+        from safetensors.numpy import load_file
+        with tempfile.TemporaryDirectory() as directory:
+            policy_dir = Path(directory)
+            baseline = saved_processor_fixture(policy_dir)
+            pre, post = make_pre_post_processors(SimpleNamespace(), pretrained_path=directory)
+            torch.testing.assert_close(pre({"observation.state": torch.zeros(7)})["observation.state"],
+                                       torch.full((1, 7), -.5))
+            torch.testing.assert_close(post(torch.zeros((1, 1, 7))), torch.full((1, 1, 7), .01))
+            for fault in ("excluded", "missing", "wrong-type", "identity", "inline-state", "inline-action"):
+                with self.subTest(fault=fault):
+                    self.assertEqual(saved_processor_fixture(policy_dir, fault), baseline)
+                    for pipeline in ("policy_preprocessor", "policy_postprocessor"):
+                        saved = load_file(policy_dir / (pipeline + ".safetensors"))
+                        for key, values in baseline["stats"].items():
+                            for stat, value in values.items():
+                                np.testing.assert_array_equal(saved[f"{key}.{stat}"], np.asarray(value, dtype=np.float32))
+                    pre, post = make_pre_post_processors(SimpleNamespace(), pretrained_path=directory)
+                    actual = (post(torch.zeros((1, 1, 7))) if fault == "inline-action" else
+                              pre({"observation.state": torch.zeros(7)})["observation.state"])
+                    torch.testing.assert_close(actual, torch.zeros_like(actual))
+
+
 class NativePolicyTest(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
