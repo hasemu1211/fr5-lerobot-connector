@@ -153,6 +153,8 @@ class PlanningFailureTests(unittest.TestCase):
         program = with_timeouts(motion(True))
         corruptions = [
             (("code",), "OTHER_FAILURE"),
+            (("mode",), "LIVE_EXECUTION"),
+            (("mode",), ""),
             (("run_id",), None),
             (("state",), "EXECUTING"),
             (("plan_digest",), canonical_digest("not-admitted")),
@@ -192,6 +194,27 @@ class PlanningFailureTests(unittest.TestCase):
                 self.assertIsNone(result["execution_evidence"])
                 recorder.assert_not_called()
                 self.assertEqual([item["op"] for item in port.requests], ["plan"])
+
+    def test_failure_evidence_preserves_supported_executor_modes(self):
+        program = with_timeouts(motion(True))
+        for mode in ("PRE_LIVE", "LIVE", "LIVE_MOTION_ONLY"):
+            with self.subTest(mode=mode):
+                node = PickupExecutor(TimedTransport(), execution_enabled=mode != "PRE_LIVE")
+                recorder = mock.Mock()
+                def response(request):
+                    value = node.process(request)
+                    # Motion-only continuation binding is covered by test_motion;
+                    # this case exercises its response at the evidence consumer.
+                    if mode == "LIVE_MOTION_ONLY":
+                        value["mode"] = mode
+                    return value
+                result = OneJob(recorder, response).plan_only("mode-check", program, SCENE)
+                self.assert_failure(result["planning_response"], program, "mode-check")
+                self.assertEqual(result["planning_response"]["mode"], mode)
+                self.assertIsNone(result["execution_evidence"])
+                self.assertIsNone(result["plan_digest"])
+                self.assertEqual(node.runs, {})
+                recorder.assert_not_called()
 
     def test_live_planning_failure_preserves_evidence_before_recorder_or_approval(self):
         validated = runtime_validated()

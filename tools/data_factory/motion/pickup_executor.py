@@ -32,6 +32,8 @@ from tools.data_factory.quality.phase_events import PhaseEventWriter
 
 
 MODE = "PRE_LIVE"
+LIVE_MODE = "LIVE"
+MOTION_ONLY_MODE = "LIVE_MOTION_ONLY"
 PHASES = (
     "PREGRASP_PTP",
     "APPROACH_STOP_LIN",
@@ -293,8 +295,8 @@ class PickupExecutor:
         self.phase_events_root = Path(phase_events_root) if phase_events_root is not None else None
         self.event_clock = event_clock or (lambda: (time.time_ns(), "SYSTEM_TIME"))
         self.mode = (
-            "LIVE_MOTION_ONLY" if motion_only_binding_digest is not None
-            else "LIVE" if execution_enabled else MODE
+            MOTION_ONLY_MODE if motion_only_binding_digest is not None
+            else LIVE_MODE if execution_enabled else MODE
         )
         self.cache = {}
         self.runs = {}

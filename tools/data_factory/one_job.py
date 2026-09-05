@@ -494,7 +494,9 @@ class OneJob:
     def _validate_planning_failure(self, response, run_id, program):
         # The producer owns phase membership and its result margin; do not
         # duplicate those policy values in the evidence consumer.
-        from tools.data_factory.motion.pickup_executor import ARM_PHASES, EXECUTION_RESULT_MARGIN_S
+        from tools.data_factory.motion.pickup_executor import (
+            ARM_PHASES, EXECUTION_RESULT_MARGIN_S, LIVE_MODE, MODE, MOTION_ONLY_MODE,
+        )
 
         data = response["data"]
         if not isinstance(data, dict) or set(data) != {"planning_failure"}:
@@ -514,6 +516,7 @@ class OneJob:
         step = next((step for step in program["steps"] if step["phase"] == failure["phase"]), None)
         if (
             response["code"] != "EXECUTION_TIMEOUT_INSUFFICIENT"
+            or response["mode"] not in (MODE, LIVE_MODE, MOTION_ONLY_MODE)
             or response["run_id"] != run_id or response["state"] != "IDLE"
             or response["plan_digest"] is not None
             or not isinstance(failure["phase"], str) or failure["phase"] not in ARM_PHASES
