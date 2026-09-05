@@ -349,10 +349,21 @@ def sample_frames(
     )
     ranked = mandatory_candidates[:clip_budget]
     selected_positions = {position for item in ranked for position in item["positions"]}
+    selected_reasons = {reason for item in ranked for reason in item["reasons"]}
     remaining = [item for item in candidates.values() if not item["mandatory"]]
     while len(ranked) < clip_budget and remaining:
+        # A longer ordinary window must not crowd out unseen review evidence.
+        # Keep exact reasons: brightness:min and brightness:max are distinct.
+        remaining = [
+            item
+            for item in remaining
+            if set(item["positions"]) - selected_positions
+        ]
+        if not remaining:
+            break
         remaining.sort(
             key=lambda item: (
+                -len(item["reasons"] - selected_reasons),
                 -len(set(item["positions"]) - selected_positions),
                 -len(item["reasons"]),
                 _seed_key(seed, item["anchor"]),
@@ -360,10 +371,9 @@ def sample_frames(
         )
         item = remaining.pop(0)
         new_positions = set(item["positions"]) - selected_positions
-        if not new_positions:
-            break
         ranked.append(item)
         selected_positions.update(new_positions)
+        selected_reasons.update(item["reasons"])
     covered_tasks = {
         normalized[item["anchor"]]["task"] for item in ranked if item["mandatory"]
     }
