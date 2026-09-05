@@ -101,6 +101,28 @@ lane handoff는 claim, evidence state, exact reference 또는 digest, 적용 범
 - **WHEN** 조사 가능한 engineering unknown을 해소한 뒤에도 가치·안전·의미에 관한 선택이 남는다
 - **THEN** 기존 Goal과 acceptance를 자동 변경하지 않고 bounded human decision을 요청한다
 
+### Requirement: Lane owners evolve bounded outcomes autonomously
+lane 책임자는 기존 프로젝트 연구, 중요한 판단에 필요한 최신 primary evidence, 실제 source/tests와 PC·물리 runtime 제약을 비례적으로 검토하고, 제품 가치가 높은 발전 가설을 선택해 완료 가능한 작은 결과로 구현·검증해야 한다(SHALL). 미리 정한 작은 기능에 연구 인용만 덧붙이거나 조사 보고서만으로 제품 발전을 완료해서는 안 된다(MUST NOT). 할당된 결과·자원·쓰기 경계 안의 engineering 선택에는 반복적인 사람 승인을 요구하지 않아야 한다(SHALL). 공동 계약이나 owner 간 책임 변경은 영향받는 소비자와 완료 기준을 명시해 coordinator가 통합 조율해야 하며(SHALL), lane의 Goal이나 미합의 OpenSpec 초안을 실행 권한으로 해석해서는 안 된다(MUST NOT).
+
+#### Scenario: A lane selects its next improvement
+- **WHEN** lane의 dogfooding 또는 새 근거가 발전 후보를 드러낸다
+- **THEN** 책임자는 실제 다음 소비자, 반증 가능한 완료 기준, 자원 범위와 한계를 정해 할당된 경계 안에서 진행하고, 결과는 canonical evidence로 전달한다
+
+#### Scenario: A useful idea crosses a shared boundary
+- **WHEN** 선택한 개선이 다른 owner의 계약·source 또는 공유 실행 자원에 영향을 준다
+- **THEN** coordinator가 충돌 범위와 소비자 검증을 조율하며, 미합의 효과만 보류하고 독립적인 안전 작업은 계속한다
+
+### Requirement: Rollout feedback tests data needs rather than assuming them
+rollout 분석은 관측·추론 지연, 제어·실행 실패와 데이터의 가시성·분포 부족을 근거에 따라 구분하고, 추가 데이터가 필요한 경우 반증 가능한 수집 가설과 평가 조건을 다음 제품 소비자에게 전달해야 한다(SHALL). 제품은 선택한 가설을 적격 수집·선별·승인된 학습·재평가로 연결해야 하며(SHALL), 상관관계나 recommendation 출력만으로 데이터 부족의 원인 또는 정책 개선을 주장해서는 안 된다(MUST NOT). 개선 주장은 비교 가능한 수집·학습 비용, 고정된 held-out 평가 조건, 입력·정책 계보와 불확실성을 포함해야 한다(SHALL).
+
+#### Scenario: A failed rollout suggests targeted collection
+- **WHEN** 실패 evidence가 특정 조건의 데이터 부족을 가설로 지지한다
+- **THEN** 해당 조건과 근거가 기존 수집 owner에 소비되고, 선택된 실행과 재평가를 추적하며, 가능한 동일 비용의 비표적 수집 또는 기존 데이터 기준선과 비교하기 전에는 개선 효과를 UNKNOWN으로 유지한다
+
+#### Scenario: Failure is attributable to runtime rather than data
+- **WHEN** 유효한 관측에서 출발했지만 추론·전송 지연이나 제어 실패가 실행을 무효화한 근거가 있다
+- **THEN** 해당 runtime 교정과 같은 조건의 재검증을 준비하고 추가 데이터 수집을 필수 해결책으로 단정하지 않는다
+
 ### Requirement: Evidence-leveraged collection may proceed without a renewed scheduling prompt
 canonical evidence가 높은 downstream uncertainty-reduction 또는 portfolio/evidence leverage를 보이고 Orca가 기존 production system의 operational availability를 보고하면, coordinator는 추가 human scheduling 또는 availability prompt 없이 collection을 선택하고 시작할 수 있다(MAY). 이 scheduling permission은 timing만 다루며, runtime availability, individual execution, progress, UI/terminal mechanics, blocker는 Orca가 소유한다(SHALL). 이 permission은 hardware, scene, cell, plan-digest, motion lifecycle, recorder lifecycle, semantic, physical-binding, training-authorization 또는 다른 production authority를 생성·대체·충족·우회하지 않는다(MUST NOT); gate가 차단되면 dependent collection effect만 멈추고 독립적인 safe lane은 계속 eligible하다(SHALL).
 
