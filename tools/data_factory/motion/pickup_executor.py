@@ -519,7 +519,17 @@ class PickupExecutor:
                     ):
                         raise ContractError("PLAN_TRAJECTORY_DURATION")
                     if planned_duration_s + EXECUTION_RESULT_MARGIN_S > step["limits"]["execution_timeout_s"]:
-                        raise ContractError("EXECUTION_TIMEOUT_INSUFFICIENT")
+                        return _response(
+                            code="EXECUTION_TIMEOUT_INSUFFICIENT",
+                            run_id=run_id,
+                            data={"planning_failure": {
+                                "phase": phase,
+                                "motion_program_digest": canonical_digest(motion_program),
+                                "planned_duration_s": planned_duration_s,
+                                "execution_timeout_s": step["limits"]["execution_timeout_s"],
+                                "result_margin_s": EXECUTION_RESULT_MARGIN_S,
+                            }},
+                        )
             else:
                 if phase == "GRIPPER_OPEN" and "release_position_m" in step:
                     stage_limits = {

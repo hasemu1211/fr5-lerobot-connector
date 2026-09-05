@@ -2293,7 +2293,12 @@ def run_plan_only(payload, cancel, publish, *, resolver=resolve_inputs, executor
         if cancel.is_set():
             return _response(ok=False, code="CANCELLED", state="CANCELLED", run_id=payload["run_id"])
         if not result["ok"]:
-            return _response(ok=False, code=result["code"], state=result["state"], run_id=payload["run_id"], plan_digest=result["plan_digest"])
+            return _response(
+                ok=False, code=result["code"], state=result["state"],
+                run_id=payload["run_id"], plan_digest=result["plan_digest"],
+                data={"planning_response": result["planning_response"]}
+                if "planning_response" in result else None,
+            )
         trajectory_binding = _bind_trajectory_to_planned_program(
             trajectory_binding, payload=payload, validated=validated,
             planned=result,
@@ -3664,7 +3669,12 @@ def run_live(payload, cancel, publish, *, resolver=resolve_inputs, executor_fact
         if plan_error is not None:
             raise plan_error
         if not planned["ok"]:
-            return _response(ok=False, code=planned["code"], state=planned["state"], run_id=payload["run_id"], plan_digest=planned["plan_digest"])
+            return _response(
+                ok=False, code=planned["code"], state=planned["state"],
+                run_id=payload["run_id"], plan_digest=planned["plan_digest"],
+                data={"planning_response": planned["planning_response"]}
+                if "planning_response" in planned else None,
+            )
         trajectory_binding = _bind_trajectory_to_planned_program(
             trajectory_binding, payload=payload, validated=validated,
             planned=planned,

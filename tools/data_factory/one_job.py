@@ -501,7 +501,18 @@ class OneJob:
             scene_binding = validate_scene_binding(scene_binding)
             if setup_approval is not None:
                 self._approval(setup_approval, resolved_job_digest=program["resolved_job_digest"], include_digest=True)
-            response = self._request("executor", "plan", {"run_id": run_id, "motion_program": program, "scene_binding": scene_binding})
+            response = self._request(
+                "executor", "plan",
+                {"run_id": run_id, "motion_program": program, "scene_binding": scene_binding},
+                allowed_failure=True,
+            )
+            if not response["ok"]:
+                self.state = "BLOCKED"
+                return self._result(
+                    False, response["code"] or "EXECUTOR_RESPONSE",
+                    **({"planning_response": copy.deepcopy(response)}
+                       if response["data"] is not None else {}),
+                )
             digest = response.get("plan_digest")
             envelope = response.get("data")
             if not isinstance(envelope, dict) or set(envelope) != {"plan", "precommit_safety", "precommit_evidence", "operator_summary"} or not isinstance(envelope["operator_summary"], dict):
