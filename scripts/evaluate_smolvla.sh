@@ -61,10 +61,12 @@ COMMAND=(
   --approved-inventory "$APPROVED_INVENTORY" --output "$OUTPUT" "$@"
 )
 
+# The evaluator owns exact inventory/split admission, including selected subsets.
+# Check it before technical decode; actual inference rechecks it afterward.
+"${COMMAND[@]}" --dry-run
 "$ROOT/scripts/validate_dataset.sh" --root "$DATASET_ROOT" \
-  --repo-id "${FR5_REPO_ID:-local/fr5_smolvla}" --require-approved \
-  --approved-inventory "$APPROVED_INVENTORY" "$NAME"
+  --repo-id "${FR5_REPO_ID:-local/fr5_smolvla}" "$NAME"
 if [[ "$DRY_RUN" == 1 ]]; then
-  COMMAND+=(--dry-run)
+  exit 0
 fi
 exec "${COMMAND[@]}"

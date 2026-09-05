@@ -448,12 +448,44 @@ class OfflineEvaluationTest(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stderr)
             calls = trace.read_bytes().split(b"\0")
             self.assertIn(str(inventory).encode(), calls)
-            self.assertIn(b"--require-approved", calls)
+            self.assertNotIn(b"--require-approved", calls)
+            self.assertLess(calls.index(b"python"), calls.index(b"validate"))
             self.assertIn(b"--episodes", calls)
             self.assertIn(b"2,3", calls)
             self.assertIn(b"--batch-size", calls)
             self.assertIn(b"4", calls)
             self.assertIn(b"--dry-run", calls)
+
+    def test_public_wrapper_admits_selected_inventory_before_technical_validation(self):
+        project = Path(__file__).resolve().parents[1]
+        with TemporaryDirectory(prefix="SYNTHETIC_TEST_ONLY-") as directory:
+            root = Path(directory)
+            (root / "fixture").mkdir()
+            args, _ = admitted_case(root / "fixture")
+            (root / "scripts").mkdir()
+            (root / "tools/data_factory").mkdir(parents=True)
+            (root / ".venv").symlink_to(project / ".venv", target_is_directory=True)
+            for name in ("evaluate_smolvla.sh", "validate_dataset.sh"):
+                shutil.copy2(project / "scripts" / name, root / "scripts" / name)
+            for name in ("evaluate_smolvla_offline.py", "data_factory/training_entrypoint.py"):
+                (root / "tools" / name).symlink_to(project / "tools" / name)
+            # Keep the real shell and admission path; only the heavy video decoder is a stand-in.
+            (root / "tools/validate_lerobot_dataset.py").write_text("print('TECHNICAL_VALIDATION_REACHED')\n")
+            command = [root / "scripts/evaluate_smolvla.sh",
+                       "--approved-inventory", args.approved_inventory,
+                       "--root", args.dataset.parent, "--output", args.output,
+                       "--dry-run", args.checkpoint, args.dataset.name, "--episodes", "2,3"]
+            env = {**os.environ, "FR5_REPO_ID": args.repo_id}
+            result = subprocess.run(command, env=env, capture_output=True, text=True, timeout=20)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("inference not run and output not created", result.stdout)
+            self.assertIn("TECHNICAL_VALIDATION_REACHED", result.stdout)
+            self.assertFalse(args.output.exists())
+            args.approved_inventory.unlink()
+            rejected = subprocess.run(command, env=env, capture_output=True, text=True, timeout=20)
+            self.assertNotEqual(rejected.returncode, 0)
+            self.assertNotIn("TECHNICAL_VALIDATION_REACHED", rejected.stdout)
+            self.assertFalse(args.output.exists())
 
 
 if __name__ == "__main__":
