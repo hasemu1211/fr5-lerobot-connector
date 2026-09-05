@@ -12,7 +12,9 @@ from pathlib import Path
 from typing import BinaryIO, TextIO
 from urllib.parse import urlsplit
 
-from tools.data_factory.operator.web.bridge import MAX_BODY_BYTES
+from tools.data_factory.operator.web.bridge import MAX_BODY_BYTES, _json_loads
+from tools.data_factory.operator.workflow.intents import RESULT_SCHEMA
+from tools.fr5_data_factory import ContractError
 
 
 DEFAULT_ENDPOINT = "http://127.0.0.1:4174"
@@ -52,7 +54,7 @@ class _TokenParser(HTMLParser):
         if str(values.get("name", "")).lower() == "operator-token":
             content = values.get("content")
             if isinstance(content, str):
-                self.tokens.append(content.strip())
+                self.tokens.append(content)
 
 
 def _endpoint(raw: str) -> Endpoint:
@@ -125,7 +127,7 @@ def _request(
         if ambiguous_on_failure and request_started:
             raise ClientError(
                 "CLIENT_TRANSPORT_AMBIGUOUS",
-                "intent was sent once; its outcome is unknown and it was not retried",
+                "intent submission was attempted once; its outcome is unknown and it was not retried",
             ) from exc
         raise ClientError("CLIENT_TRANSPORT", "loopback request failed") from exc
     finally:
@@ -149,18 +151,15 @@ def _bootstrap_token(endpoint: Endpoint) -> str:
     if len(parser.tokens) != 1:
         raise ClientError("CLIENT_BOOTSTRAP", "operator page must contain one token")
     token = parser.tokens[0]
-    if not token or len(token) > 4096 or any(ord(character) < 33 for character in token):
+    if not 24 <= len(token) <= 4096 or any(not 33 <= ord(character) <= 126 for character in token):
         raise ClientError("CLIENT_BOOTSTRAP", "operator page token is invalid")
     return token
 
 
 def _json_response(payload: bytes) -> dict:
-    def invalid_constant(_value):
-        raise ValueError
-
     try:
-        value = json.loads(payload.decode("utf-8"), parse_constant=invalid_constant)
-    except (UnicodeDecodeError, ValueError) as exc:
+        value = _json_loads(payload)
+    except (ContractError, ValueError, RecursionError) as exc:
         raise ClientError("CLIENT_RESPONSE_JSON", "backend response is not valid JSON") from exc
     if not isinstance(value, dict):
         raise ClientError("CLIENT_RESPONSE_JSON", "backend response must be a JSON object")
@@ -190,7 +189,10 @@ def _read_intent(path: str, stdin: BinaryIO | TextIO) -> bytes:
 
 
 def _emit(stream: TextIO, value: dict) -> None:
-    rendered = json.dumps(value, sort_keys=True, separators=(",", ":"), allow_nan=False)
+    try:
+        rendered = json.dumps(value, sort_keys=True, separators=(",", ":"), allow_nan=False)
+    except (ValueError, TypeError, RecursionError) as exc:
+        raise ClientError("CLIENT_RESPONSE_JSON", "backend response is not finite JSON") from exc
     if len(rendered.encode("utf-8")) > MAX_RESPONSE_BYTES:
         raise ClientError("CLIENT_RESPONSE_SIZE", "response exceeds the client limit")
     stream.write(rendered + "\n")
@@ -231,6 +233,16 @@ def main(argv=None, *, stdin=None, stdout=None) -> int:
                 ambiguous_on_failure=True,
             )
         value = _json_response(payload)
+        if args.command == "submit" and (
+            value.get("schema_version") != RESULT_SCHEMA
+            or type(value.get("ok")) is not bool
+            or type(value.get("consumed")) is not bool
+            or value["ok"] != value["consumed"]
+        ):
+            raise ClientError(
+                "CLIENT_INTENT_RESULT",
+                "invalid intent receipt; outcome is unknown and the request was not retried",
+            )
         _emit(output, value)
         if status != 200 or args.command == "submit" and value.get("ok") is not True:
             return EXIT_REJECTED

@@ -20,7 +20,8 @@ TOKEN = "client-test-bootstrap-token-that-stays-secret"
 
 
 class _Boundary:
-    def __init__(self, *, root_redirect=False, post_mode="success", view_body=None):
+    def __init__(self, *, root_redirect=False, post_mode="success", view_body=None,
+                 token=TOKEN, post_body=None):
         boundary = self
         self.root_redirect = root_redirect
         self.post_mode = post_mode
@@ -49,7 +50,7 @@ class _Boundary:
                 if self.path == "/":
                     page = (
                         '<html><head><meta name="operator-token" content="'
-                        + TOKEN + '"></head></html>'
+                        + token + '"></head></html>'
                     ).encode()
                     return self._write(200, page, Content_Type="text/html; charset=utf-8")
                 if self.path == "/api/view":
@@ -73,6 +74,8 @@ class _Boundary:
                     "schema_version": "data_factory.operator_intent_result.v1",
                     "ok": True, "code": "INTENT_CONSUMED", "consumed": True,
                 }
+                if post_body is not None:
+                    result = post_body
                 return self._write(
                     200, json.dumps(result).encode(),
                     Content_Type="application/json",
@@ -276,6 +279,49 @@ class OperatorWebClientTests(unittest.TestCase):
         self.assertEqual((exit_code, json.loads(output.getvalue())["error"]["code"]), (3, "CLIENT_RESPONSE_SIZE"))
         self.assertLess(len(output.getvalue()), 256)
         self.assertNotIn(TOKEN, output.getvalue())
+
+    def test_malformed_json_responses_are_bounded_errors(self):
+        for body in (
+            b'{"ok":false,"ok":true}', b'{"nested":{"x":1,"x":2}}',
+            b'{"value":1e999}', b'{"value":NaN}', b'\xff',
+        ):
+            with self.subTest(body=body), _Boundary(view_body=body) as boundary:
+                output = io.StringIO()
+                code = client.main(["--endpoint", boundary.origin, "view"], stdout=output)
+                self.assertEqual((code, json.loads(output.getvalue())["error"]["code"]),
+                                 (3, "CLIENT_RESPONSE_JSON"))
+                self.assertNotIn(TOKEN, output.getvalue())
+
+    def test_header_unsafe_bootstrap_tokens_never_reach_api(self):
+        for token in ("short", TOKEN + "\u0100", TOKEN + "\r\n", TOKEN + "\x7f"):
+            with self.subTest(token=repr(token)), _Boundary(token=token) as boundary:
+                output = io.StringIO()
+                code = client.main(["--endpoint", boundary.origin, "view"], stdout=output)
+                self.assertEqual((code, json.loads(output.getvalue())["error"]["code"]),
+                                 (3, "CLIENT_BOOTSTRAP"))
+                self.assertEqual(len(boundary.requests), 1)
+                self.assertNotIn(token, output.getvalue())
+
+    def test_invalid_submit_receipt_is_unknown_not_success_and_never_retried(self):
+        valid = {"schema_version": client.RESULT_SCHEMA, "ok": True, "consumed": True}
+        for result in (
+            {**valid, "schema_version": "wrong"}, {**valid, "consumed": False},
+            {"schema_version": client.RESULT_SCHEMA, "ok": True},
+            {**valid, "ok": 1, "consumed": 1},
+        ):
+            with self.subTest(result=result), _Boundary(post_body=result) as boundary:
+                output = io.StringIO()
+                code = client.main(
+                    ["--endpoint", boundary.origin, "submit"],
+                    stdin=io.BytesIO(b'{"caller":"supplied"}'), stdout=output,
+                )
+                error = json.loads(output.getvalue())["error"]
+                self.assertEqual((code, error["code"]), (3, "CLIENT_INTENT_RESULT"))
+                self.assertIn("unknown", error["message"])
+                self.assertIn("not retried", error["message"])
+                self.assertEqual(sum(item[0] == "POST" for item in boundary.requests), 1)
+                self.assertEqual(len(boundary.requests), 2)
+                self.assertNotIn(TOKEN, output.getvalue())
 
 
 if __name__ == "__main__":
