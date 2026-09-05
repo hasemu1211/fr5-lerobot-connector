@@ -5,6 +5,7 @@ import copy
 import json
 import math
 import os
+import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Mapping, Sequence
@@ -15,6 +16,7 @@ from tools.fr5_data_factory import ContractError, DIGEST, RFC3339, SAFE_ID, cano
 
 
 APPROVAL_SCHEMA = "data_factory.training_approval.v2"
+BATCH_APPROVAL_SCHEMA = "data_factory.training_approval.v3"
 EPISODE_PROVENANCE_SCHEMA = "data_factory.episode_training_provenance.v1"
 LEDGER_PROVENANCE_SCHEMA = "data_factory.episode_training_provenance.v2"
 INVENTORY_SCHEMA = "data_factory.training_approved_inventory.v2"
@@ -373,8 +375,11 @@ def validate_training_approval(
 ) -> dict[str, Any]:
     """Validate one immutable human training-admission artifact."""
     value = _document(source)
-    _exact(value, APPROVAL_KEYS, "TRAINING_APPROVAL_FIELDS")
-    if value["schema_version"] != APPROVAL_SCHEMA or value["provenance"] != PROVENANCE:
+    batch = value.get("schema_version") == BATCH_APPROVAL_SCHEMA
+    _exact(value, APPROVAL_KEYS | {"batch_digest"} if batch else APPROVAL_KEYS, "TRAINING_APPROVAL_FIELDS")
+    if batch:
+        _digest(value["batch_digest"], "TRAINING_BATCH_BINDING")
+    if value["schema_version"] not in {APPROVAL_SCHEMA, BATCH_APPROVAL_SCHEMA} or value["provenance"] != PROVENANCE:
         raise ContractError("TRAINING_APPROVAL_SCHEMA")
     _scope(value["scope"], expected_scope)
     value["dataset_identity"] = _dataset(value["dataset_identity"])
@@ -388,7 +393,7 @@ def validate_training_approval(
     return value
 
 
-def _confirm_human_training_approval(confirmation: str) -> None:
+def _confirm_human_training_approval(confirmation: str, *, summary: str = "") -> None:
     """Read the decision only from the controlling terminal, never stdin/JSONL."""
     try:
         with open("/dev/tty", "r", encoding="utf-8", buffering=1) as tty_in, open(
@@ -396,6 +401,8 @@ def _confirm_human_training_approval(confirmation: str) -> None:
         ) as tty_out:
             if not tty_in.isatty() or not tty_out.isatty():
                 raise ContractError("HUMAN_TTY_REQUIRED")
+            if summary:
+                tty_out.write(summary + "\n")
             tty_out.write(f"Type exactly '{confirmation}' to issue training approval:\n")
             tty_out.flush()
             if tty_in.readline().rstrip("\r\n") != confirmation:
@@ -420,49 +427,45 @@ def _target(path: str | Path, exists_code: str) -> Path:
 
 def _write_exclusive(target: Path, value: Mapping[str, Any], exists_code: str) -> None:
     data = (json.dumps(dict(value), sort_keys=True, separators=(",", ":"), allow_nan=False) + "\n").encode()
-    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+    # Publish complete bytes atomically, including under interruption; link never
+    # replaces a competing producer's artifact. A killed writer can leave only
+    # an unreferenced temporary file, never a half-written approval/inventory.
     try:
-        descriptor = os.open(target, flags, 0o600)
+        with tempfile.NamedTemporaryFile(dir=target.parent, prefix=".training-", suffix=".tmp") as file:
+            file.write(data)
+            file.flush()
+            os.fsync(file.fileno())
+            os.link(file.name, target)
     except FileExistsError as exc:
         raise ContractError(exists_code) from exc
     except OSError as exc:
         raise ContractError("TRAINING_OUTPUT_IO", str(exc)) from exc
-    try:
-        with os.fdopen(descriptor, "wb") as file:
-            file.write(data)
-            file.flush()
-            os.fsync(file.fileno())
-    except (OSError, TypeError, ValueError) as exc:
-        try:
-            target.unlink()
-        except OSError:
-            pass
-        raise ContractError("TRAINING_OUTPUT_IO", str(exc)) from exc
 
 
-def issue_training_approval(
-    output_path: str | Path, *, scope: str, dataset_identity: Mapping[str, Any],
+def _prepare_training_approval(
+    *, scope: str, dataset_identity: Mapping[str, Any],
     episode_id: str, episode_index: int, episode_content_digest: str,
     technical_validator_path: str | Path, technical_validator_digest: str,
     human_semantic_evidence_path: str | Path, human_semantic_evidence_digest: str,
-    episode_provenance_path: str | Path, episode_provenance_digest: str,
+    episode_provenance_path: Mapping[str, Any] | str | Path, episode_provenance_digest: str,
     approved_by: str, clock=lambda: datetime.now(timezone.utc),
 ) -> dict[str, Any]:
-    """Issue one production approval after all bindings pass and a human confirms on /dev/tty."""
+    """Validate exact evidence and prepare a document; this grants no consent."""
     if scope != PRODUCTION_SCOPE:
         raise ContractError("TRAINING_APPROVAL_SCOPE")
     dataset = _dataset(dataset_identity)
     episode_id, episode_index, episode_content_digest = _episode_identity(episode_id, episode_index, episode_content_digest)
     approved_by = _id(approved_by, "TRAINING_APPROVER_ID")
-    target = _target(output_path, "TRAINING_APPROVAL_EXISTS")
     technical_path = str(technical_validator_path)
     semantic_path = str(human_semantic_evidence_path)
     technical = _technical(technical_path, technical_validator_digest, episode_id=episode_id, dataset_root=dataset["dataset_root"])
     _semantic(semantic_path, human_semantic_evidence_digest, episode_id=episode_id, technical=technical)
-    provenance_raw = _artifact(
-        str(episode_provenance_path), episode_provenance_digest,
-        "TRAINING_EPISODE_PROVENANCE_ARTIFACT",
+    provenance_raw = (
+        _document(episode_provenance_path) if isinstance(episode_provenance_path, Mapping)
+        else _artifact(str(episode_provenance_path), episode_provenance_digest, "TRAINING_EPISODE_PROVENANCE_ARTIFACT")
     )
+    if canonical_digest(provenance_raw) != episode_provenance_digest:
+        raise ContractError("TRAINING_EPISODE_PROVENANCE_ARTIFACT")
     episode_provenance = validate_episode_training_provenance(provenance_raw)
     _bind_ledger_revision(episode_provenance, dataset)
     if (
@@ -492,13 +495,58 @@ def issue_training_approval(
         "provenance": PROVENANCE,
     }
     validate_training_approval(approval)
+    return approval
+
+
+def issue_training_approval(
+    output_path: str | Path, *, scope: str, dataset_identity: Mapping[str, Any],
+    episode_id: str, episode_index: int, episode_content_digest: str,
+    technical_validator_path: str | Path, technical_validator_digest: str,
+    human_semantic_evidence_path: str | Path, human_semantic_evidence_digest: str,
+    episode_provenance_path: str | Path, episode_provenance_digest: str,
+    approved_by: str, clock=lambda: datetime.now(timezone.utc),
+) -> dict[str, Any]:
+    """Issue one production approval with the original exact /dev/tty phrase."""
+    if scope != PRODUCTION_SCOPE:
+        raise ContractError("TRAINING_APPROVAL_SCOPE")
+    target = _target(output_path, "TRAINING_APPROVAL_EXISTS")
+    arguments = dict(scope=scope, dataset_identity=copy.deepcopy(dataset_identity),
+        episode_id=episode_id, episode_index=episode_index, episode_content_digest=episode_content_digest,
+        technical_validator_path=technical_validator_path, technical_validator_digest=technical_validator_digest,
+        human_semantic_evidence_path=human_semantic_evidence_path, human_semantic_evidence_digest=human_semantic_evidence_digest,
+        episode_provenance_path=str(episode_provenance_path), episode_provenance_digest=episode_provenance_digest,
+        approved_by=approved_by)
+    approval = _prepare_training_approval(**arguments, clock=clock)
     confirmation = (
-        f"{PROVENANCE} {dataset['dataset_id']} {episode_id} {episode_index} "
+        f"{PROVENANCE} {approval['dataset_identity']['dataset_id']} {episode_id} {episode_index} "
         f"{canonical_digest(approval)}"
     )
     _confirm_human_training_approval(confirmation)
+    # Reload consumed evidence after the human wait, retaining the reviewed time.
+    reviewed_at = datetime.fromisoformat(approval["approved_at"].replace("Z", "+00:00"))
+    if _prepare_training_approval(**arguments, clock=lambda: reviewed_at) != approval:
+        raise ContractError("TRAINING_INPUT_CHANGED")
     _write_exclusive(target, approval, "TRAINING_APPROVAL_EXISTS")
     return approval
+
+
+def _batch_digest(approvals: Sequence[Mapping[str, Any]]) -> str:
+    # v3 binds the complete sorted set of independent v2 evidence documents.
+    return canonical_digest([
+        {**{key: item[key] for key in APPROVAL_KEYS}, "schema_version": APPROVAL_SCHEMA}
+        for item in sorted(approvals, key=lambda item: (item["episode_index"], item["episode_id"]))
+    ])
+
+
+def _validate_batch_inventory(episodes: Sequence[Mapping[str, Any]]) -> None:
+    approvals = [
+        _artifact(item["training_approval"]["artifact_path"], item["training_approval"]["artifact_digest"], "TRAINING_APPROVAL_ARTIFACT")
+        for item in episodes
+    ]
+    if any(item["schema_version"] == BATCH_APPROVAL_SCHEMA for item in approvals):
+        digest = _batch_digest(approvals)
+        if any(item.get("batch_digest") != digest for item in approvals):
+            raise ContractError("TRAINING_BATCH_BINDING")
 
 
 def _episode(
@@ -611,6 +659,7 @@ def build_training_approved_inventory(
     checked = [_episode(value, dataset=dataset, scope=scope) for value in episodes]
     parsed = [value for value, _ in checked]
     _unique_episodes(parsed, [provenance for _, provenance in checked])
+    _validate_batch_inventory(parsed)
     parsed.sort(key=lambda value: (value["episode_index"], value["episode_id"]))
     body = {
         "schema_version": INVENTORY_SCHEMA,
@@ -637,6 +686,7 @@ def validate_training_approved_inventory(
     checked = [_episode(item, dataset=dataset, scope=value["scope"]) for item in episodes]
     parsed = [item for item, _ in checked]
     _unique_episodes(parsed, [provenance for _, provenance in checked])
+    _validate_batch_inventory(parsed)
     if parsed != sorted(parsed, key=lambda item: (item["episode_index"], item["episode_id"])):
         raise ContractError("TRAINING_INVENTORY_ORDER")
     body = {key: value[key] for key in ("schema_version", "scope", "dataset_identity", "episodes")}

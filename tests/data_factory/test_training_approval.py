@@ -1,6 +1,8 @@
 import copy
+from contextlib import contextmanager
 import io
 import json
+import re
 import tempfile
 import unittest
 from pathlib import Path
@@ -455,6 +457,295 @@ class TrainingApprovalTest(unittest.TestCase):
             self.assertEqual(target.read_text(encoding="utf-8"), "owned\n")
 
 
+class NativeBatchTrainingApprovalTest(unittest.TestCase):
+    """Exercise real native validation and terminal code using only temporary data."""
+
+    def setUp(self):
+        import pyarrow as pa
+        import pyarrow.parquet as pq
+        from tools.fr5_dataset_schema import dataset_features
+        from tools.data_factory.training_entrypoint import approve
+
+        self.approve = approve
+        directory = tempfile.TemporaryDirectory(prefix="SYNTHETIC_TEST_ONLY-batch-")
+        self.addCleanup(directory.cleanup)
+        self.root = Path(directory.name)
+        self.sources = []
+        for index in range(3):
+            dataset, _, _, _, entry = synthetic_fixture(self.root, f"episode-{index}", index)
+            self.sources.append({
+                "episode_id": entry["episode_id"], "episode_index": index,
+                "technical_validator_path": entry["technical_validator"]["artifact_path"],
+                "human_semantic_evidence_path": entry["human_semantic_evidence"]["artifact_path"],
+                "seed_manifest_path": str(self.root / f"episode-{index}.seed-manifest.SYNTHETIC_TEST_ONLY.json"),
+                "manifest_slot_id": f"slot-episode-{index}",
+            })
+        self.dataset = Path(dataset["dataset_root"])
+        meta = self.dataset / "meta"
+        (meta / "source_provenance").mkdir(parents=True)
+        for index in range(3):
+            (meta / f"source_provenance/episode-{index:06d}.jsonl").write_text('{"synthetic":true}\n')
+        (meta / "episodes/chunk-000").mkdir(parents=True)
+        pq.write_table(pa.Table.from_pylist([
+            {"episode_index": i, "tasks": ["pick up the cube"], "length": 2} for i in range(3)
+        ]), meta / "episodes/chunk-000/file-000.parquet")
+        write_json(meta / "info.json", {"fps": 30, "total_episodes": 3, "total_frames": 6,
+            "features": dataset_features(fps=30, height=480, width=640, cameras=("up", "wrist"), use_videos=True)})
+        self.request = {"dataset_root": str(self.dataset), "dataset_id": "synthetic-frozen-r1",
+                        "repo_id": "tests/synthetic-dataset", "episodes": [self.sources[0], self.sources[2]]}
+        self.output = self.root / "approvals"
+        self.output.mkdir()
+
+    @contextmanager
+    def terminal(self, *, answer=None, tty=True, during_read=None):
+        output = FakeTTY(tty=tty)
+        reader = FakeTTY(tty=tty)
+        def read():
+            if during_read:
+                during_read()
+            phrase = re.search(r"Type exactly '([^']+)'", output.getvalue()).group(1)
+            return (phrase + "\n") if answer is None else answer
+        reader.readline = mock.Mock(side_effect=read)
+        native_open = open
+        def open_terminal(path, mode="r", *args, **kwargs):
+            if path == "/dev/tty":
+                return reader if mode == "r" else output
+            return native_open(path, mode, *args, **kwargs)
+        with mock.patch("builtins.open", side_effect=open_terminal):
+            yield reader, output
+
+    def issue(self):
+        return self.approve(self.request, self.output, "fixture-human", dry_run=False)
+
+    def test_native_batch_one_real_terminal_decision_and_exact_subset(self):
+        before = snapshot(self.dataset)
+        with self.terminal() as (reader, terminal):
+            inventory = self.issue()
+        reader.readline.assert_called_once()
+        summary = terminal.getvalue()
+        self.assertIn("Selected episodes (2): 0, 2", summary)
+        self.assertIn("semantic PASS by synthetic-reviewer-1", summary)
+        self.assertIn(str(self.dataset), summary)
+        self.assertIn(inventory["dataset_identity"]["dataset_digest"], summary)
+        self.assertEqual(snapshot(self.dataset), before)
+        self.assertEqual(len(list(self.output.iterdir())), 5)
+        approvals = [load_json_strict(e["training_approval"]["artifact_path"]) for e in inventory["episodes"]]
+        for document in approvals:
+            self.assertEqual(document["schema_version"], training_approval.BATCH_APPROVAL_SCHEMA)
+            self.assertEqual(document["batch_digest"], training_approval._batch_digest(approvals))
+            self.assertIn(document["batch_digest"], summary)
+        training_approval.validate_current_training_inventory(self.output / "training_approved.json",
+            dataset_root=self.dataset, repo_id=self.request["repo_id"], selected_episodes=[0, 2])
+        with self.assertRaisesRegex(ContractError, "TRAINING_SELECTED_EPISODE_SET"):
+            training_approval.validate_current_training_inventory(self.output / "training_approved.json",
+                dataset_root=self.dataset, repo_id=self.request["repo_id"], selected_episodes=[0])
+        subset = copy.deepcopy(inventory)
+        subset["episodes"] = subset["episodes"][:1]
+        subset["inventory_digest"] = canonical_digest({k: v for k, v in subset.items() if k != "inventory_digest"})
+        with self.assertRaisesRegex(ContractError, "TRAINING_BATCH_BINDING"):
+            validate_training_approved_inventory(subset)
+        with self.assertRaisesRegex(ContractError, "TRAINING_BATCH_BINDING"):
+            build_training_approved_inventory(scope=PRODUCTION_SCOPE,
+                dataset_identity=inventory["dataset_identity"], episodes=subset["episodes"])
+
+    def test_independently_reviewed_batches_cannot_be_combined(self):
+        with self.terminal():
+            first = self.issue()
+        self.output = self.root / "second-approval"
+        self.output.mkdir()
+        self.request["episodes"] = [self.sources[2]]
+        with self.terminal():
+            second = self.issue()
+        with self.assertRaisesRegex(ContractError, "TRAINING_BATCH_BINDING"):
+            build_training_approved_inventory(scope=PRODUCTION_SCOPE,
+                dataset_identity=first["dataset_identity"], episodes=[first["episodes"][0], second["episodes"][0]])
+
+    def test_preview_is_not_consent_and_does_not_open_terminal(self):
+        before = snapshot(self.root)
+        with mock.patch.object(training_approval, "_confirm_human_training_approval") as confirm:
+            preview = self.approve(self.request, self.output, "fixture-human", dry_run=True)
+        confirm.assert_not_called()
+        self.assertEqual(preview["status"], "PREVIEW_NOT_APPROVED")
+        self.assertEqual(preview["human_confirmation"], "REQUIRED_ONCE_FOR_EXACT_BATCH_ON_DEV_TTY")
+        self.assertEqual(snapshot(self.root), before)
+
+    def test_refusal_eof_and_non_tty_publish_nothing(self):
+        before = snapshot(self.root)
+        for answer, tty in [("NO\n", True), ("", True), ("APPROVE\n", True), (None, False)]:
+            with self.subTest(answer=answer, tty=tty), self.terminal(answer=answer, tty=tty):
+                with self.assertRaisesRegex(ContractError, "HUMAN_CONFIRMATION_FAILED|HUMAN_TTY_REQUIRED"):
+                    self.issue()
+            self.assertEqual(snapshot(self.root), before)
+        native_open = open
+        def no_terminal(path, *args, **kwargs):
+            if path == "/dev/tty":
+                raise OSError("no controlling terminal")
+            return native_open(path, *args, **kwargs)
+        with mock.patch("builtins.open", side_effect=no_terminal):
+            with self.assertRaisesRegex(ContractError, "HUMAN_TTY_REQUIRED"):
+                self.issue()
+        self.assertEqual(snapshot(self.root), before)
+
+    def test_evidence_changed_during_human_wait_publishes_nothing(self):
+        paths = [self.dataset / "unchanged.marker",
+                 self.dataset / "meta/source_provenance/episode-000000.jsonl",
+                 Path(self.sources[0]["technical_validator_path"]),
+                 Path(self.sources[0]["human_semantic_evidence_path"]),
+                 Path(self.sources[0]["seed_manifest_path"])]
+        for path in paths:
+            with self.subTest(path=path.name):
+                original = path.read_bytes()
+                def change():
+                    if path.name.endswith(".json"):
+                        value = load_json_strict(path)
+                        if "semantic_status" in value:
+                            value["reviewed_at"] = "2026-08-25T00:00:00Z"
+                        elif "expected_fps" in value:
+                            value["expected_fps"] = 31
+                        else:
+                            value["randomization_seed"] += 1
+                            value["manifest_digest"] = canonical_digest({k: v for k, v in value.items() if k != "manifest_digest"})
+                        write_json(path, value)
+                    else:
+                        path.write_bytes(original + b"changed\n")
+                with self.terminal(during_read=change):
+                    with self.assertRaises(ContractError):
+                        self.issue()
+                self.assertEqual(list(self.output.iterdir()), [])
+                path.write_bytes(original)
+
+    def test_no_overwrite_before_or_during_confirmation(self):
+        for name in ("episode-2.provenance.json", "episode-2.approval.json", "training_approved.json"):
+            target = self.output / name
+            for during_wait in (False, True):
+                with self.subTest(name=name, during_wait=during_wait):
+                    if not during_wait:
+                        target.write_text("owned")
+                    with self.terminal(during_read=lambda: target.write_text("owned")) as (reader, _):
+                        with self.assertRaisesRegex(ContractError, "TRAINING_APPROVAL_EXISTS|TRAINING_INVENTORY_EXISTS"):
+                            self.issue()
+                    self.assertEqual(target.read_text(), "owned")
+                    self.assertEqual(list(self.output.iterdir()), [target])
+                    self.assertEqual(reader.readline.call_count, int(during_wait))
+                    target.unlink()
+        target = self.output / "training_approved.json"
+        target.symlink_to(self.root / "missing")
+        with self.terminal() as (reader, _):
+            with self.assertRaisesRegex(ContractError, "TRAINING_INVENTORY_EXISTS"):
+                self.issue()
+        reader.readline.assert_not_called()
+        self.assertTrue(target.is_symlink())
+
+    def test_invalid_evidence_and_consent_fields_fail_before_terminal(self):
+        cases = [
+            ("technical_validator_path", "status", "FAIL"),
+            ("human_semantic_evidence_path", "semantic_status", "FAIL"),
+            ("seed_manifest_path", "manifest_digest", D3),
+        ]
+        for source_key, field, value in cases:
+            path = Path(self.sources[0][source_key])
+            original = path.read_bytes()
+            changed = load_json_strict(path)
+            changed[field] = value
+            write_json(path, changed)
+            with self.subTest(field=field), self.terminal() as (reader, _):
+                with self.assertRaises(ContractError):
+                    self.issue()
+            reader.readline.assert_not_called()
+            self.assertEqual(list(self.output.iterdir()), [])
+            path.write_bytes(original)
+        self.request["consent"] = True
+        with self.terminal() as (reader, _):
+            with self.assertRaisesRegex(ContractError, "TRAINING_PREAPPROVAL_FIELDS"):
+                self.issue()
+        reader.readline.assert_not_called()
+        self.assertEqual(list(self.output.iterdir()), [])
+
+    def test_selection_is_frozen_and_duplicate_selection_is_rejected(self):
+        with self.terminal(during_read=lambda: self.request["episodes"].append(self.sources[1])):
+            inventory = self.issue()
+        self.assertEqual([e["episode_index"] for e in inventory["episodes"]], [0, 2])
+        other = self.root / "other"
+        other.mkdir()
+        self.request["episodes"] = [self.sources[0], self.sources[0]]
+        with self.terminal() as (reader, _):
+            with self.assertRaisesRegex(ContractError, "TRAINING_SELECTED_EPISODE_SET"):
+                self.approve(self.request, other, "fixture-human", dry_run=False)
+        reader.readline.assert_not_called()
+        self.assertEqual(list(other.iterdir()), [])
+
+    def test_interruption_never_yields_a_usable_partial_inventory(self):
+        def interrupt():
+            raise KeyboardInterrupt()
+        with self.terminal(during_read=interrupt):
+            with self.assertRaises(KeyboardInterrupt):
+                self.issue()
+        self.assertEqual(list(self.output.iterdir()), [])
+        native_write = training_approval._write_exclusive
+        for stop_at in ("episode-2.approval.json", "training_approved.json"):
+            with self.subTest(stop_at=stop_at):
+                def interrupted_write(path, value, code):
+                    if path.name == stop_at:
+                        raise KeyboardInterrupt()
+                    return native_write(path, value, code)
+                with self.terminal(), mock.patch.object(training_approval, "_write_exclusive", side_effect=interrupted_write):
+                    with self.assertRaises(KeyboardInterrupt):
+                        self.issue()
+                self.assertFalse((self.output / "training_approved.json").exists())
+                # A new attempt cannot silently reuse artifacts from this decision.
+                with self.terminal() as (reader, _):
+                    with self.assertRaisesRegex(ContractError, "TRAINING_APPROVAL_EXISTS"):
+                        self.issue()
+                reader.readline.assert_not_called()
+                for path in self.output.iterdir():
+                    path.unlink()
+
+    def test_atomic_writer_never_exposes_partial_json_or_overwrites(self):
+        target = self.output / "atomic.json"
+        native_link = training_approval.os.link
+        def interrupted_link(source, destination):
+            self.assertEqual(load_json_strict(Path(source)), {"complete": True})
+            self.assertFalse(target.exists())
+            raise KeyboardInterrupt()
+        with mock.patch.object(training_approval.os, "link", side_effect=interrupted_link):
+            with self.assertRaises(KeyboardInterrupt):
+                training_approval._write_exclusive(target, {"complete": True}, "EXISTS")
+        self.assertEqual(list(self.output.iterdir()), [])
+        with mock.patch.object(training_approval.os, "link", side_effect=OSError("disk error")):
+            with self.assertRaises(ContractError) as caught:
+                training_approval._write_exclusive(target, {"complete": True}, "EXISTS")
+            self.assertEqual(caught.exception.code, "TRAINING_OUTPUT_IO")
+        self.assertEqual(list(self.output.iterdir()), [])
+        def competing_link(source, destination):
+            target.write_text("owned")
+            return native_link(source, destination)
+        with mock.patch.object(training_approval.os, "link", side_effect=competing_link):
+            with self.assertRaisesRegex(ContractError, "EXISTS"):
+                training_approval._write_exclusive(target, {"complete": True}, "EXISTS")
+        self.assertEqual(target.read_text(), "owned")
+        self.assertEqual(list(self.output.iterdir()), [target])
+
+    def test_single_episode_api_keeps_v2_phrase_and_reloads_evidence(self):
+        from tools.data_factory.training_entrypoint import prepare_approvals
+        _, drafts = prepare_approvals(self.request, self.output, "fixture-human")
+        draft = drafts[0]
+        args = draft["approval_arguments"]
+        write_json(Path(args["episode_provenance_path"]), draft["provenance"])
+        with self.terminal() as (reader, terminal):
+            document = issue_training_approval(draft["output_path"], **args)
+        reader.readline.assert_called_once()
+        self.assertEqual(document["schema_version"], APPROVAL_SCHEMA)
+        self.assertNotIn("batch_digest", document)
+        phrase = f"{PROVENANCE} {document['dataset_identity']['dataset_id']} episode-0 0 {canonical_digest(document)}"
+        self.assertIn(phrase, terminal.getvalue())
+        target = self.output / "single-stale.json"
+        semantic = Path(args["human_semantic_evidence_path"])
+        with self.terminal(during_read=lambda: semantic.write_text("{}")):
+            with self.assertRaisesRegex(ContractError, "TRAINING_SEMANTIC_ARTIFACT"):
+                issue_training_approval(target, **args)
+        self.assertFalse(target.exists())
+
+
 class CollectionLedgerTrainingApprovalTest(unittest.TestCase):
     def ledger_case(self, *, production=True):
         from tests.data_factory.test_episode_ledger import EpisodeLedgerTest
@@ -501,8 +792,10 @@ class CollectionLedgerTrainingApprovalTest(unittest.TestCase):
             preview = approve(request, output, "fixture-human", dry_run=True)
             confirm.assert_not_called()
             self.assertEqual(list(output.iterdir()), [])
+        with NativeBatchTrainingApprovalTest.terminal(self) as (reader, terminal):
             issued = approve(request, output, "fixture-human", dry_run=False)
-            confirm.assert_called_once()
+        reader.readline.assert_called_once()
+        self.assertIn("Selected episodes (1): 0", terminal.getvalue())
         self.assertEqual(preview["episodes"][0]["provenance"]["schema_version"], training_approval.LEDGER_PROVENANCE_SCHEMA)
         self.assertNotIn("seed_manifest_digest", preview["episodes"][0]["provenance"])
         training_approval.validate_current_training_inventory(output / "training_approved.json",
@@ -516,6 +809,19 @@ class CollectionLedgerTrainingApprovalTest(unittest.TestCase):
         Path(ledger["artifacts"]["runtime_binding"]["artifact_path"]).write_text("{}")
         with self.assertRaises(ContractError):
             validate_training_approved_inventory(output / "training_approved.json")
+
+    def test_collection_sources_are_revalidated_after_native_confirmation(self):
+        from tools.data_factory.training_entrypoint import approve
+        for source in ("ledger", "runtime_binding"):
+            with self.subTest(source=source):
+                _, request, output = self.ledger_case()
+                ledger_path = Path(request["episodes"][0]["episode_ledger_path"])
+                ledger = load_json_strict(ledger_path)
+                path = ledger_path if source == "ledger" else Path(ledger["artifacts"][source]["artifact_path"])
+                with NativeBatchTrainingApprovalTest.terminal(self, during_read=lambda: path.write_text("{}")):
+                    with self.assertRaises(ContractError):
+                        approve(request, output, "fixture-human", dry_run=False)
+                self.assertEqual(list(output.iterdir()), [])
 
     def test_test_only_collection_cannot_be_promoted_by_approval_request(self):
         from tools.data_factory.training_entrypoint import approve

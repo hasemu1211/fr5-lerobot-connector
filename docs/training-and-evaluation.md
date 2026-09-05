@@ -35,7 +35,9 @@ direnv exec . scripts/approve_training.sh \
   --approved-by "$HUMAN_ID" --dry-run
 ```
 
-미리보기는 파일을 쓰거나 동의를 발급하지 않는다. 검토 후 같은 명령에서 `--dry-run`을 빼면 사람이 자신의 터미널에서 episode별 digest에 묶인 확인문을 입력한다. 인자·환경변수·stdin으로 동의를 전달할 수 없다. 중단된 시도의 개별 산출물은 보존하고 새 승인 디렉터리를 사용한다.
+미리보기는 파일을 쓰거나 동의를 발급하지 않는다. 같은 명령에서 `--dry-run`을 빼면 사람의 `/dev/tty`에 dataset 경로·revision digest, 정확한 선택 episode 목록, 각 episode의 technical PASS·semantic PASS와 검토자·증거 digest, batch digest와 출력 경로가 표시된다. 사람은 이 **동결된 batch 전체를 한 번 검토하고**, 표시된 짧은 `APPROVE BATCH …` 확인문을 한 번 입력한다. episode별 긴 digest 문구를 반복 입력하지 않는다. 이 결정은 표시된 revision과 선택 집합에만 적용되며, 학습 시작이나 로봇·하드웨어 실행 권한을 부여하지 않는다.
+
+인자·환경변수·stdin·JSON으로 동의를 전달할 수 없다. 거절, TTY 부재, 확인 대기 중 증거 변경은 승인과 inventory를 발급하지 않는다. 대기 후 dataset·episode·technical·semantic·provenance 원본을 다시 검증한 뒤 개별 provenance와 `training_approval.v3`를 새 파일로 쓰고, 완성된 `training_approved_inventory.v2`를 마지막에 원자적으로 발행한다. 각 v3 승인에는 동일한 exact-batch digest가 있어 일부 episode만 떼어내거나 다른 batch와 섞은 inventory는 검증에 실패한다. 기존 단일 episode API와 v2 승인은 계속 지원한다. 중단된 발행 시도의 개별 산출물은 보존하고 새 승인 디렉터리에서 다시 검토한다. 기존 파일은 덮어쓰지 않는다.
 
 학습 미리보기는 승인 목록과 **정확히 같은** 선택 목록, 실제 수집 camera profile을 사용한다. 다음은 ACT 명령의 형식이며 학습량이나 성능을 권장하는 측정값은 아니다.
 
