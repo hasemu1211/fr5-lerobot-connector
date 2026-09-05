@@ -35,11 +35,15 @@ class SelectionTest(unittest.TestCase):
         fixture, run, output = self.case()
         before = snapshot(fixture.dataset), snapshot(run)
         target = output / "request.json"
-        with mock.patch.object(training_approval, "_confirm_human_training_approval") as confirm:
+        with (
+            mock.patch.object(training_approval, "_confirm_human_training_approval") as confirm,
+            mock.patch.object(training_approval, "_prepare_training_approval") as approval_draft,
+        ):
             result = export_training_request([run], target, dataset_id="selection-r1")
             request = load_json_strict(target)
             dataset, drafts = prepare_approvals(request, output, "curator-preview-only")
             confirm.assert_not_called()
+            approval_draft.assert_not_called()
         self.assertEqual(result["status"], "REQUEST_NOT_APPROVED")
         self.assertFalse(result["training_authority"])
         self.assertEqual(result["episode_indices"], [0])
@@ -112,15 +116,54 @@ class SelectionTest(unittest.TestCase):
     def test_native_training_scope_and_quarantine_gates_are_preserved(self):
         _, run, output = self.case(production=False)
         target = output / "request.json"
-        export_training_request([run], target, dataset_id="selection-r1")
-        with self.assertRaisesRegex(ContractError, "TRAINING_APPROVAL_SCOPE"):
-            prepare_approvals(load_json_strict(target), output, "curator-preview-only")
-        self.assertEqual(list(output.iterdir()), [target])
+        with self.assertRaisesRegex(CuratorError, "TRAINING_APPROVAL_SCOPE"):
+            export_training_request([run], target, dataset_id="selection-r1")
+        self.assertEqual(list(output.iterdir()), [])
         fixture, run, output = self.case()
         (fixture.dataset / "meta/quarantine.json").write_text("{}")
         with self.assertRaisesRegex(CuratorError, "TRAINING_DATASET_QUARANTINED"):
             export_training_request([run], output / "request.json", dataset_id="selection-r1")
         self.assertEqual(list(output.iterdir()), [])
+
+    def test_native_metadata_failure_prevents_request_publication(self):
+        fixture, run, output = self.case()
+        info = fixture.dataset / "meta/info.json"
+        metadata = load_json_strict(info)
+        metadata["total_episodes"] = 0
+        info.write_text(json.dumps(metadata))
+        before = snapshot(fixture.dataset), snapshot(run)
+        with self.assertRaisesRegex(CuratorError, "TRAINING_METADATA_EPISODES"):
+            export_training_request([run], output / "request.json", dataset_id="selection-r1")
+        self.assertEqual(list(output.iterdir()), [])
+        self.assertEqual((snapshot(fixture.dataset), snapshot(run)), before)
+
+    def test_changed_current_review_is_reopened_for_each_new_request(self):
+        fixture, run, output = self.case()
+        original = output / "original.json"
+        export_training_request([run], original, dataset_id="selection-r1")
+        original_bytes = original.read_bytes()
+        ledger = load_json_strict(run / "episode_ledger.json")
+        ledger_bytes = (run / "episode_ledger.json").read_bytes()
+        for semantic in ("FAIL", "PENDING", "UNCERTAIN", "PASS"):
+            with self.subTest(semantic=semantic):
+                candidate = fixture._candidate(ledger, semantic, name=f"later-{semantic}.json")
+                state = project_episode_state(ledger=ledger, candidate=candidate)
+                fixture._json("episode_ledger_state.json", state)
+                target = output / f"request-{semantic}.json"
+                before = snapshot(fixture.dataset), snapshot(run)
+                if semantic == "PASS":
+                    export_training_request([run], target, dataset_id="selection-r2")
+                    self.assertEqual(
+                        load_json_strict(target)["episodes"][0]["human_semantic_evidence_path"],
+                        candidate["artifact_path"],
+                    )
+                else:
+                    with self.assertRaisesRegex(CuratorError, "SELECTION_REVIEW_REQUIRED"):
+                        export_training_request([run], target, dataset_id="selection-r2")
+                    self.assertFalse(target.exists())
+                self.assertEqual((snapshot(fixture.dataset), snapshot(run)), before)
+                self.assertEqual(original.read_bytes(), original_bytes)
+                self.assertEqual((run / "episode_ledger.json").read_bytes(), ledger_bytes)
 
 
 if __name__ == "__main__":

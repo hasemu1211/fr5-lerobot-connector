@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Sequence
 
 from tools.data_factory.episode_ledger import validate_episode_state
-from tools.data_factory.training_approval import current_dataset_identity
+from tools.data_factory.training_entrypoint import prepare_approvals
 from tools.fr5_data_factory import ContractError, load_json_strict
 
 from ..core.errors import CuratorError
@@ -21,7 +21,7 @@ def export_training_request(
     run_directories: Sequence[str | Path], output: str | Path,
     *, dataset_id: str,
 ) -> dict:
-    """Publish one request exclusively; selected runs need existing review PASS.
+    """Publish one request after native preparation validates selected runs.
 
     Output parents must already exist. An existing output is never overwritten,
     including on replay; requests confer no training or semantic authority.
@@ -75,13 +75,12 @@ def export_training_request(
             })
         if any(target.is_relative_to(path.resolve()) for path in protected):
             raise CuratorError("SELECTION_OUTPUT_OVERLAP")
-        current_identity = current_dataset_identity(
-            dataset["dataset_root"], repo_id=dataset["repo_id"], dataset_id=dataset_id,
-        )
-        request = {
-            key: current_identity[key] for key in ("dataset_root", "dataset_id", "repo_id")
-        }
+        request = {**dataset, "dataset_id": dataset_id}
         request["episodes"] = sorted(episodes, key=lambda episode: episode["episode_index"])
+        # Exercise the actual read-only consumer before publication. Its drafts
+        # stay in memory; this identifier is not a human approval or attribution.
+        # The consumer owns byte identity, metadata, production scope and lineage.
+        prepare_approvals(request, target.parent, "curator-preview-only")
         write_json_exclusive(target, request)
     except ContractError as exc:
         raise CuratorError("SELECTION_SOURCE_INVALID", str(exc)) from exc
