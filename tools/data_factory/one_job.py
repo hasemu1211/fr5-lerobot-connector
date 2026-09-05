@@ -491,6 +491,40 @@ class OneJob:
         else: self.state = "BLOCKED"
         return self._result(False, code)
 
+    def _validate_planning_failure(self, response, run_id, program):
+        # The producer owns phase membership and its result margin; do not
+        # duplicate those policy values in the evidence consumer.
+        from tools.data_factory.motion.pickup_executor import ARM_PHASES, EXECUTION_RESULT_MARGIN_S
+
+        data = response["data"]
+        if not isinstance(data, dict) or set(data) != {"planning_failure"}:
+            raise ContractError("EXECUTOR_RESPONSE")
+        failure = data["planning_failure"]
+        fields = {"phase", "motion_program_digest", "planned_duration_s", "execution_timeout_s", "result_margin_s"}
+        if not isinstance(failure, dict) or set(failure) != fields:
+            raise ContractError("EXECUTOR_RESPONSE")
+        try:
+            numeric = all(
+                type(failure[key]) in (int, float)
+                and math.isfinite(failure[key]) and failure[key] > 0
+                for key in ("planned_duration_s", "execution_timeout_s", "result_margin_s")
+            )
+        except OverflowError:
+            numeric = False
+        step = next((step for step in program["steps"] if step["phase"] == failure["phase"]), None)
+        if (
+            response["code"] != "EXECUTION_TIMEOUT_INSUFFICIENT"
+            or response["run_id"] != run_id or response["state"] != "IDLE"
+            or response["plan_digest"] is not None
+            or not isinstance(failure["phase"], str) or failure["phase"] not in ARM_PHASES
+            or step is None or not numeric
+            or failure["motion_program_digest"] != canonical_digest(program)
+            or failure["execution_timeout_s"] != step["limits"]["execution_timeout_s"]
+            or failure["result_margin_s"] != EXECUTION_RESULT_MARGIN_S
+            or failure["planned_duration_s"] + failure["result_margin_s"] <= failure["execution_timeout_s"]
+        ):
+            raise ContractError("EXECUTOR_RESPONSE")
+
     def _prepare_plan(self, run_id, program, scene_binding, setup_approval=None):
         if self.state != "IDLE":
             return self._result(False, "ONE_JOB_ONLY")
@@ -507,6 +541,8 @@ class OneJob:
                 allowed_failure=True,
             )
             if not response["ok"]:
+                if response["data"] is not None:
+                    self._validate_planning_failure(response, run_id, program)
                 self.state = "BLOCKED"
                 return self._result(
                     False, response["code"] or "EXECUTOR_RESPONSE",

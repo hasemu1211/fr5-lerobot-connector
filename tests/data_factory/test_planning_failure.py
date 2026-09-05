@@ -149,6 +149,50 @@ class PlanningFailureTests(unittest.TestCase):
                 self.assertIsNone(result["plan_digest"])
                 self.assertIsNone(result["plan_envelope"])
 
+    def test_failure_diagnostics_are_validated_before_becoming_evidence(self):
+        program = with_timeouts(motion(True))
+        corruptions = [
+            (("code",), "OTHER_FAILURE"),
+            (("run_id",), None),
+            (("state",), "EXECUTING"),
+            (("plan_digest",), canonical_digest("not-admitted")),
+            (("data",), []),
+            (("data",), {}),
+            (("data", "extra"), "unvalidated"),
+            (("data", "planning_failure"), None),
+        ]
+        for field, values in {
+            "phase": ("UNKNOWN", "GRIPPER_CLOSE", []),
+            "motion_program_digest": (canonical_digest("other-program"), None),
+            "planned_duration_s": (18.0, 0, -1, True, "18.25", float("nan"), float("inf"), 10 ** 400),
+            "execution_timeout_s": (19.0, True, "20", float("nan")),
+            "result_margin_s": (0, 3.0, True, "2", float("nan")),
+            "extra": ("unvalidated",),
+        }.items():
+            corruptions.extend((("data", "planning_failure", field), value) for value in values)
+        for path, value in corruptions:
+            with self.subTest(path=path, value=value):
+                port = ExecutorPort(TimedTransport())
+                recorder = mock.Mock()
+                def corrupted(request):
+                    response = port.request(request)
+                    target = response
+                    for key in path[:-1]:
+                        target = target[key]
+                    target[path[-1]] = value
+                    return response
+                job = OneJob(recorder, corrupted)
+                result = job.plan_only("bound", program, SCENE)
+                self.assertEqual(result["code"], "EXECUTOR_RESPONSE")
+                self.assertFalse(result["ok"])
+                self.assertEqual(result["state"], "BLOCKED")
+                self.assertNotIn("planning_response", result)
+                self.assertIsNone(result["plan_digest"])
+                self.assertIsNone(result["plan_envelope"])
+                self.assertIsNone(result["execution_evidence"])
+                recorder.assert_not_called()
+                self.assertEqual([item["op"] for item in port.requests], ["plan"])
+
     def test_live_planning_failure_preserves_evidence_before_recorder_or_approval(self):
         validated = runtime_validated()
         program = with_timeouts(runtime_motion(validated))
