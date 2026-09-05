@@ -66,7 +66,9 @@ FR5_REPO_ID="$REPO_ID" direnv exec . scripts/evaluate_smolvla.sh \
   "$CHECKPOINT" "$DATASET_NAME" --episodes "$HELD_OUT_EPISODES_CSV"
 ```
 
-`--dry-run`은 승인·checkpoint receipt·dataset·split 연결만 확인하며 inference나 report 파일 생성을 하지 않는다. 검토 뒤 같은 명령에서 `--dry-run`을 제거해야 실제 loss 계산과 report 저장이 수행된다. report의 scope는 승인된 held-out data의 offline flow-matching loss뿐이며 checkpoint 선택 승인, 실물 성공, semantic 성공을 뜻하지 않는다.
+`--dry-run`은 승인·checkpoint receipt·dataset·split 연결만 확인하며 inference나 report 파일 생성을 하지 않는다. 검토 뒤 같은 명령에서 `--dry-run`을 제거해야 실제 loss 계산과 report 저장이 수행된다. report 경로와 atomic temporary 경로는 dataset, 승인 목록, split, receipt, checkpoint 입력의 경로·alias와 겹칠 수 없다. report의 scope는 승인된 held-out data의 offline flow-matching loss뿐이며 checkpoint 선택 승인, 실물 성공, semantic 성공을 뜻하지 않는다.
+
+`--max-batches` 양수로 제한한 report는 요청 limit, 전체·실제 평가 batch 수, completeness, 실제 loss에 포함된 episode와 승인된 held-out episode 전체를 따로 기록한다. 전체 batch와 승인된 episode 전체를 평가하지 않은 경우 scope는 `bounded_admitted_heldout_offline_loss`이며, 이 결과를 held-out partition 전체의 loss로 해석하지 않는다.
 
 ```bash
 direnv exec . scripts/evaluate_smolvla.sh --check-env

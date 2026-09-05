@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 
+from contextlib import nullcontext
 import json
 import os
 from pathlib import Path
@@ -7,7 +8,7 @@ import shutil
 import subprocess
 import sys
 from tempfile import TemporaryDirectory
-from types import SimpleNamespace
+from types import ModuleType, SimpleNamespace
 import unittest
 from unittest import mock
 
@@ -15,6 +16,7 @@ from tests.test_train_wrapper import launch_fixture
 from tools.data_factory.training_entrypoint import options, prepare_launch
 from tools.evaluate_smolvla_offline import (
     admit_evaluation,
+    evaluate,
     main,
     normalize_checkpoint_path,
     parse_episode_indices,
@@ -78,8 +80,134 @@ def admitted_case(root: Path) -> tuple[SimpleNamespace, dict]:
         checkpoint=str(policy_dir), dataset=kwargs["dataset"], repo_id=kwargs["repo_id"],
         approved_inventory=kwargs["inventory"], episodes=None, batch_size=1,
         num_workers=0, max_batches=0, output=root / "evaluation.json",
+        seed=1000, device="cpu", use_amp=False,
     )
     return args, split
+
+
+def evaluation_argv(args: SimpleNamespace) -> list[str]:
+    return [
+        "evaluate_smolvla_offline.py", args.checkpoint, str(args.dataset),
+        "--repo-id", args.repo_id, "--approved-inventory", str(args.approved_inventory),
+        "--output", str(args.output),
+    ]
+
+
+def immutable_input_bytes(args: SimpleNamespace) -> dict[Path, bytes]:
+    output_dir = Path(args.checkpoint).parents[2]
+    paths = [
+        args.approved_inventory,
+        output_dir / "fr5_training_split.json",
+        output_dir / "fr5_training_receipt.json",
+        *(path for path in Path(args.checkpoint).parent.rglob("*") if path.is_file()),
+    ]
+    return {path: path.read_bytes() for path in paths}
+
+
+def fake_inference_modules(admission: dict, batches: list[dict]) -> dict[str, ModuleType]:
+    class FakeTensor:
+        def __init__(self, values, dtype=None):
+            self.values = values
+            self.dtype = dtype
+
+        def detach(self):
+            return self
+
+        def cpu(self):
+            return self
+
+        def tolist(self):
+            return list(self.values)
+
+        def __iter__(self):
+            return iter(self.values)
+
+        def float(self):
+            return self
+
+        def __truediv__(self, _value):
+            return self
+
+    class FakeDataset:
+        def __init__(self, *_args, **_kwargs):
+            self.meta = SimpleNamespace(camera_keys=["camera"])
+            self.batches = batches
+
+    class FakeLoader:
+        def __init__(self, dataset, **_kwargs):
+            self.batches = dataset.batches
+
+        def __iter__(self):
+            return iter(self.batches)
+
+        def __len__(self):
+            return len(self.batches)
+
+    class FakePolicy:
+        config = SimpleNamespace(
+            robot_state_feature=SimpleNamespace(shape=(7,)),
+            action_feature=SimpleNamespace(shape=(7,)),
+        )
+
+        def eval(self):
+            return None
+
+        def forward(self, batch, reduction):
+            if reduction != "none":
+                raise AssertionError(reduction)
+            return FakeTensor(batch["loss"]), None
+
+    class FakeConfig:
+        @classmethod
+        def from_pretrained(cls, _checkpoint):
+            return cls()
+
+    torch = ModuleType("torch")
+    torch.uint8 = "uint8"
+    torch.cuda = SimpleNamespace(is_available=lambda: False, manual_seed_all=lambda _seed: None)
+    torch.manual_seed = lambda _seed: None
+    torch.no_grad = nullcontext
+    torch.autocast = lambda **_kwargs: nullcontext()
+    torch_utils = ModuleType("torch.utils")
+    torch_data = ModuleType("torch.utils.data")
+    torch_data.DataLoader = FakeLoader
+
+    numpy = ModuleType("numpy")
+    numpy.random = SimpleNamespace(seed=lambda _seed: None)
+    lerobot = ModuleType("lerobot")
+    datasets = ModuleType("lerobot.datasets")
+    dataset_factory = ModuleType("lerobot.datasets.factory")
+    dataset_factory.resolve_delta_timestamps = lambda *_args: {}
+    dataset_module = ModuleType("lerobot.datasets.lerobot_dataset")
+    dataset_module.LeRobotDataset = FakeDataset
+    dataset_module.LeRobotDatasetMetadata = lambda *_args, **_kwargs: SimpleNamespace(
+        total_episodes=admission["split"]["total_episodes"],
+        total_frames=admission["split"]["total_frames"],
+        camera_keys=["camera"],
+        features={},
+    )
+    configs = ModuleType("lerobot.configs")
+    configs.FeatureType = SimpleNamespace(ACTION="action")
+    policies = ModuleType("lerobot.policies")
+    policy_factory = ModuleType("lerobot.policies.factory")
+    policy_factory.make_policy = lambda *_args, **_kwargs: FakePolicy()
+    policy_factory.make_pre_post_processors = lambda **_kwargs: (lambda batch: batch, None)
+    smolvla = ModuleType("lerobot.policies.smolvla")
+    smolvla_config = ModuleType("lerobot.policies.smolvla.configuration_smolvla")
+    smolvla_config.SmolVLAConfig = FakeConfig
+    utils = ModuleType("lerobot.utils")
+    feature_utils = ModuleType("lerobot.utils.feature_utils")
+    feature_utils.dataset_to_policy_features = lambda _features: {}
+    return {
+        "numpy": numpy, "torch": torch, "torch.utils": torch_utils,
+        "torch.utils.data": torch_data, "lerobot": lerobot,
+        "lerobot.datasets": datasets, "lerobot.datasets.factory": dataset_factory,
+        "lerobot.datasets.lerobot_dataset": dataset_module, "lerobot.configs": configs,
+        "lerobot.policies": policies, "lerobot.policies.factory": policy_factory,
+        "lerobot.policies.smolvla": smolvla,
+        "lerobot.policies.smolvla.configuration_smolvla": smolvla_config,
+        "lerobot.utils": utils, "lerobot.utils.feature_utils": feature_utils,
+    }
 
 
 class OfflineEvaluationTest(unittest.TestCase):
@@ -151,6 +279,89 @@ class OfflineEvaluationTest(unittest.TestCase):
                 main()
             inference.assert_not_called()
             self.assertFalse(args.output.exists())
+
+    def test_output_and_temporary_aliases_cannot_replace_inputs(self):
+        cases = ("inventory", "receipt", "split", "checkpoint", "symlink", "hardlink", "temporary")
+        for kind in cases:
+            with self.subTest(kind=kind), TemporaryDirectory(prefix="SYNTHETIC_TEST_ONLY-") as directory:
+                root = Path(directory)
+                args, _ = admitted_case(root)
+                output_dir = Path(args.checkpoint).parents[2]
+                protected = {
+                    "inventory": args.approved_inventory,
+                    "receipt": output_dir / "fr5_training_receipt.json",
+                    "split": output_dir / "fr5_training_split.json",
+                    "checkpoint": Path(args.checkpoint) / "model.safetensors",
+                }
+                if kind in protected:
+                    args.output = protected[kind]
+                elif kind == "symlink":
+                    args.output = root / "inventory-alias.json"
+                    args.output.symlink_to(protected["inventory"])
+                elif kind == "hardlink":
+                    args.output = root / "checkpoint-alias.bin"
+                    os.link(protected["checkpoint"], args.output)
+                else:
+                    args.output = root / "report.json"
+                    Path(str(args.output) + ".tmp").symlink_to(protected["receipt"])
+                before = immutable_input_bytes(args)
+                with mock.patch.object(sys, "argv", evaluation_argv(args)), mock.patch(
+                    "tools.evaluate_smolvla_offline.evaluate", return_value={"unexpected": True}
+                ) as inference:
+                    with self.assertRaisesRegex(ValueError, "immutable evaluation input"):
+                        main()
+                inference.assert_not_called()
+                self.assertEqual(immutable_input_bytes(args), before)
+
+    def test_external_report_path_is_still_written_atomically(self):
+        with TemporaryDirectory(prefix="SYNTHETIC_TEST_ONLY-") as directory:
+            args, _ = admitted_case(Path(directory))
+            report = {"schema_version": 3, "evaluation_complete": True}
+            with mock.patch.object(sys, "argv", evaluation_argv(args)), mock.patch(
+                "tools.evaluate_smolvla_offline.evaluate", return_value=report
+            ), mock.patch("builtins.print"):
+                main()
+            self.assertEqual(json.loads(args.output.read_text()), report)
+            self.assertFalse(Path(str(args.output) + ".tmp").exists())
+
+    def test_multibatch_reports_partial_and_complete_coverage_honestly(self):
+        with TemporaryDirectory(prefix="SYNTHETIC_TEST_ONLY-") as directory:
+            args, _ = admitted_case(Path(directory))
+            admission = admit_evaluation(args)
+            batches = [
+                {"episode_index": None, "camera": None, "loss": [1.0, 3.0]},
+                {"episode_index": None, "camera": None, "loss": [5.0]},
+                {"episode_index": None, "camera": None, "loss": [7.0]},
+            ]
+            for batch, episode_indices in zip(batches, ([2, 2], [3], [3]), strict=True):
+                batch["episode_index"] = SimpleNamespace(
+                    detach=lambda values=episode_indices: SimpleNamespace(
+                        cpu=lambda: SimpleNamespace(tolist=lambda: list(values))
+                    )
+                )
+                batch["camera"] = SimpleNamespace(dtype="float")
+
+            with mock.patch.dict(sys.modules, fake_inference_modules(admission, batches)), mock.patch(
+                "tools.evaluate_smolvla_offline.smolvla_camera_mapping", return_value=({}, [])
+            ):
+                for limit, complete, expected_batches, expected_episodes in (
+                    (1, False, 1, [2]),
+                    (3, True, 3, [2, 3]),
+                ):
+                    with self.subTest(max_batches=limit):
+                        args.max_batches = limit
+                        report = evaluate(args, admission)
+                        self.assertEqual(report["requested_max_batches"], limit)
+                        self.assertEqual(report["available_batches"], 3)
+                        self.assertEqual(report["evaluated_batches"], expected_batches)
+                        self.assertEqual(report["evaluation_complete"], complete)
+                        self.assertEqual(report["episodes"], expected_episodes)
+                        self.assertEqual(report["admitted_episodes"], [2, 3])
+                        self.assertEqual(
+                            report["evidence_scope"],
+                            "admitted_heldout_offline_loss"
+                            if complete else "bounded_admitted_heldout_offline_loss",
+                        )
 
     def test_direct_script_dry_run_without_pythonpath_from_another_directory(self):
         script = Path(__file__).resolve().parents[1] / "tools/evaluate_smolvla_offline.py"

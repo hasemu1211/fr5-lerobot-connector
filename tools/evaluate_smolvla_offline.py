@@ -78,6 +78,38 @@ def _output_artifact(output_dir: Path, name: str) -> Path:
     raise ValueError(f"checkpoint {name} is missing")
 
 
+def _temporary_output_path(output: Path) -> Path:
+    return output.with_suffix(output.suffix + ".tmp")
+
+
+def _paths_alias(left: Path, right: Path) -> bool:
+    if left.resolve() == right.resolve():
+        return True
+    return left.exists() and right.exists() and left.samefile(right)
+
+
+def _validate_output_target(
+    output: Path,
+    *,
+    dataset: Path,
+    checkpoint_root: Path,
+    protected_files: list[Path],
+) -> None:
+    checkpoint_root = checkpoint_root.resolve()
+    checkpoint_files = [path for path in checkpoint_root.rglob("*") if path.is_file()]
+    for candidate in (output.expanduser(), _temporary_output_path(output.expanduser())):
+        resolved = candidate.resolve()
+        if resolved.is_relative_to(dataset):
+            raise ValueError("evaluation output must remain outside the immutable dataset")
+        if resolved == checkpoint_root or resolved.is_relative_to(checkpoint_root):
+            raise ValueError("evaluation output must not replace an immutable evaluation input")
+        if any(
+            _paths_alias(candidate, protected)
+            for protected in [*protected_files, *checkpoint_files]
+        ):
+            raise ValueError("evaluation output must not replace an immutable evaluation input")
+
+
 def admit_evaluation(args: argparse.Namespace) -> dict:
     """Validate existing admission artifacts before loading torch or a policy."""
     from tools.data_factory import training_approval
@@ -130,8 +162,13 @@ def admit_evaluation(args: argparse.Namespace) -> dict:
         or set(episodes) | set(split["train_episodes"]) != set(split["selected_episodes"])
     ):
         raise ValueError("training split is not a disjoint partition of selected episodes")
-    if args.output and args.output.expanduser().resolve().is_relative_to(dataset):
-        raise ValueError("evaluation output must remain outside the immutable dataset")
+    if args.output:
+        _validate_output_target(
+            args.output,
+            dataset=dataset,
+            checkpoint_root=policy_dir.parent,
+            protected_files=[inventory_path, split_path, receipt_path],
+        )
 
     return {
         "checkpoint": str(policy_dir),
@@ -222,36 +259,62 @@ def evaluate(args: argparse.Namespace, admission: dict | None = None) -> dict:
     )
 
     losses: list[float] = []
+    evaluated_batches = 0
+    evaluated_episodes: set[int] = set()
+    available_batches = len(loader)
     amp = torch.autocast(device_type="cuda") if args.use_amp and device.startswith("cuda") else nullcontext()
     with torch.no_grad(), amp:
         for batch_index, batch in enumerate(loader):
             if args.max_batches and batch_index >= args.max_batches:
                 break
+            if "episode_index" not in batch:
+                raise RuntimeError("evaluation batch is missing episode_index coverage metadata")
+            batch_episodes = [int(value) for value in batch["episode_index"].detach().cpu().tolist()]
+            if not set(batch_episodes).issubset(episodes):
+                raise RuntimeError("evaluation batch contains an episode outside the admitted partition")
             for key in dataset.meta.camera_keys:
                 if key in batch and batch[key].dtype == torch.uint8:
                     batch[key] = batch[key].float() / 255.0
             batch = preprocessor(batch)
             per_sample_loss, _ = policy.forward(batch, reduction="none")
-            losses.extend(float(value) for value in per_sample_loss.detach().cpu())
+            batch_losses = [float(value) for value in per_sample_loss.detach().cpu()]
+            if len(batch_losses) != len(batch_episodes):
+                raise RuntimeError("loss count differs from evaluated episode coverage metadata")
+            losses.extend(batch_losses)
+            evaluated_batches += 1
+            evaluated_episodes.update(batch_episodes)
 
     if not losses:
         raise RuntimeError("no samples were evaluated")
     ordered = sorted(losses)
+    evaluation_complete = (
+        evaluated_batches == available_batches
+        and sorted(evaluated_episodes) == episodes
+    )
     report = {
-        "schema_version": 2,
+        "schema_version": 3,
         "metric": "smolvla_offline_flow_matching_loss",
         "warning": "Offline loss does not measure real-robot task success.",
-        "evidence_scope": "admitted_heldout_offline_loss",
+        "evidence_scope": (
+            "admitted_heldout_offline_loss"
+            if evaluation_complete
+            else "bounded_admitted_heldout_offline_loss"
+        ),
         "checkpoint": checkpoint,
         "checkpoint_tree_digest": admission["checkpoint_tree_digest"],
         "dataset": str(args.dataset.resolve()),
         "dataset_digest": split["dataset_identity"]["dataset_digest"],
         "repo_id": args.repo_id,
-        "episodes": episodes,
+        "episodes": sorted(evaluated_episodes),
+        "admitted_episodes": episodes,
         "selected_episodes": split["selected_episodes"],
         "train_episodes": split["train_episodes"],
         "samples": len(losses),
         "batch_size": args.batch_size,
+        "requested_max_batches": args.max_batches,
+        "available_batches": available_batches,
+        "evaluated_batches": evaluated_batches,
+        "evaluation_complete": evaluation_complete,
         "seed": args.seed,
         "device": device,
         "use_amp": args.use_amp,
@@ -287,7 +350,7 @@ def main() -> None:
     print(serialized)
     if args.output:
         args.output.parent.mkdir(parents=True, exist_ok=True)
-        temporary = args.output.with_suffix(args.output.suffix + ".tmp")
+        temporary = _temporary_output_path(args.output)
         temporary.write_text(serialized + "\n")
         temporary.replace(args.output)
 
