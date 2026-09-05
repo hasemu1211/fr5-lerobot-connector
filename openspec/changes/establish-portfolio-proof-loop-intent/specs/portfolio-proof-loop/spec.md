@@ -114,6 +114,13 @@ lane handoff는 claim, evidence state, exact reference 또는 digest, 적용 범
 ### Requirement: Work and intent evolve only on evidence
 각 lane의 작업은 다음 lane unblock, 중요한 불확실성 또는 실패 원인 감소, 재현 가능한 evidence 강화, 외부에서 확인 가능한 portfolio proof 생성 중 적어도 하나를 충족해야 한다(SHALL). OpenSpec revision은 새 evidence가 지속 가능한 행동·authority·acceptance·handoff 의미를 흔들 때만 제안해야 한다(SHALL).
 
+중요한 portfolio 가치 선택은 기존 프로젝트 연구, 판단 시점의 관련 최신 primary research, 실행 가능한 source/tests와 현재 PC·FR5 제약을 비교해 반증 가능한 질문과 최소 실험을 정해야 한다(SHALL). 연결·자동화·기능 개수만으로 연구에 부합하는 학습 가치를 달성했다고 간주해서는 안 된다(MUST NOT). 선택한 실험은 비교 기준, 자원 비용, 실제 관측 결과와 한계를 남겨 외부인이 결론을 검토할 수 있어야 한다(SHALL). 특정 논문의 알고리즘이나 성공 결과를 재현 전의 FR5 성능으로 전제해서는 안 된다(MUST NOT). 과거 노트의 보류 항목은 영구 금지가 아니며 현재 근거와 비용으로 다시 판단해야 한다(SHALL).
+
+#### Scenario: A connected loop has not established learning value
+- **WHEN** 수집부터 재평가까지 실행은 연결됐지만 데이터 선택의 유용성이나 중요한 실패 원인의 비교 근거가 없다
+- **THEN** 연결은 enabling evidence로만 표시하고, 연구 질문을 검증할 가장 작은 실험을 다음 결과로 선택한다
+- **AND** 개선이 없거나 부정적인 결과도 비용·적용 범위·불확실성과 함께 보존하며 유리한 사례만 공개하지 않는다
+
 #### Scenario: Candidate work has no evidence value
 - **WHEN** 구현·분석·문서·추상화가 네 가지 가치 조건을 하나도 충족하지 않는다
 - **THEN** 작업은 보기 좋은 기능이라는 이유만으로 실행되지 않고 defer된다
@@ -143,6 +150,12 @@ rollout 분석은 관측·추론 지연, 제어·실행 실패와 데이터의 �
 #### Scenario: Failure is attributable to runtime rather than data
 - **WHEN** 유효한 관측에서 출발했지만 추론·전송 지연이나 제어 실패가 실행을 무효화한 근거가 있다
 - **THEN** 해당 runtime 교정과 같은 조건의 재검증을 준비하고 추가 데이터 수집을 필수 해결책으로 단정하지 않는다
+
+#### Scenario: Adaptive selection is compared on an untouched evaluation cohort
+- **WHEN** 성공·실패 관측이나 validation 결과로 선별 또는 추가 수집을 선택한다
+- **THEN** 선택에 사용한 development evidence와 최종 비교용 평가 조건을 구분하고, 최종 평가 결과를 같은 비교의 다음 선택 입력으로 재사용하지 않는다
+- **AND** 기존 균형 수집 등 명시적 기준선과 비교하며 수집 수뿐 아니라 실제 수집·학습 시간, reset·중단·사람 개입을 포함한 비용을 보고한다
+- **AND** 물리 phase 판정과 runtime 진단이 불확실하면 그대로 남기며, 소표본 결과나 offline loss만으로 일반화된 실물 성능 개선을 주장하지 않는다
 
 ### Requirement: Evidence-leveraged collection may proceed without a renewed scheduling prompt
 canonical evidence가 높은 downstream uncertainty-reduction 또는 portfolio/evidence leverage를 보이고 Orca가 기존 production system의 operational availability를 보고하면, coordinator는 추가 human scheduling 또는 availability prompt 없이 collection을 선택하고 시작할 수 있다(MAY). 이 scheduling permission은 timing만 다루며, runtime availability, individual execution, progress, UI/terminal mechanics, blocker는 Orca가 소유한다(SHALL). 이 permission은 hardware, scene, cell, plan-digest, motion lifecycle, recorder lifecycle, semantic, physical-binding, training-authorization 또는 다른 production authority를 생성·대체·충족·우회하지 않는다(MUST NOT); gate가 차단되면 dependent collection effect만 멈추고 독립적인 safe lane은 계속 eligible하다(SHALL).

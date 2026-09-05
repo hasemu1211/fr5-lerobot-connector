@@ -27,6 +27,15 @@
 
 ## Risks / Trade-offs
 
+최소화 대상은 연결 단계만이 아니라 검증할 질문에 불필요한 비용이다. 현재 선택 후보는 **같은 추가 수집 예산에서 정책 관측에 근거한 표적 수집이 기존 균형 수집보다 고정 조건의 정책 결과를 개선하는가**이다. 성공 시연 분석은 expert 자체의 문제와 정책 문제를 구분하는 기준선이며, 기하 분산이나 technical/semantic PASS만으로 학습 기여를 판정하지 않는다.
+
+- [CUPID, CoRL 2025](https://proceedings.mlr.press/v305/agia25a.html)는 rollout return에 대한 demonstration 기여를 추정한다. 이는 FR5에서 coverage와 정책 유용성을 구분할 근거이지, influence-function 구현을 먼저 추가할 이유는 아니다.
+- [Quality over Quantity, 2026-03 preprint](https://arxiv.org/html/2603.09056v1)는 목표 행동의 validation loss에 대한 기여를 다루며, 전이 단위의 선택이 일부 행동을 과대표집할 수 있음을 보고한다. FR5에서는 phase 분석과 전체 episode 선별을 우선 비교 후보로 삼되 논문의 GR00T/Franka 결과를 SmolVLA/FR5 재현 근거로 사용하지 않는다.
+- [DataMIL](https://robin-lab.cs.utexas.edu/datamodels4imitation/)의 validation-loss 대리 지표는 저비용 탐색의 근거지만 최종 실물 성공률을 대체하지 않는다. 적응적 선택에 쓴 development 결과와 최종 비교 cohort를 분리한다.
+- [AdaVLA, 2026-08, IROS accepted](https://arxiv.org/html/2608.29208v1)는 flow solver의 적응적 진행과 MLP pruning을 결합하고 SmolVLA 실물 실험도 보고한다. 현재 LeRobot SmolVLA의 solver 경계는 작은 독립 비교 후보다. 고정 step 기준선과 동일 입력·노이즈에서 총 지연, 함수 평가 수와 action 차이를 비교하고, 일부 solver만 적용하면 full AdaVLA 재현으로 부르지 않는다. 내부 flow 곡률은 물리 TCP 곡률이나 안전 확신도가 아니며 action 근접도 역시 실물 성공의 대리 증명은 아니다.
+
+기존 7D·듀얼 RGB·조건/phase 계보·선별 요청·checkpoint/evaluation 계약을 재사용하고 실제 PC에서 학습·추론의 메모리와 시간을 측정해 실험 크기를 정한다. 추론 가속 등 저비용 독립 실험은 첫 폐루프 완료를 기다릴 필요가 없으며, 고정 baseline·같은 입력·품질과 시간 비교를 갖추어 판단한다. 과거 노트의 보류 목록은 영구 roadmap이 아니다. 이 선택은 연구·사용자 학습 노트·source/runtime을 종합한 제품 판단이며 새 알고리즘이나 성능 우위를 주장하지 않는다. 개선 없음도 판정 가능한 결과로 남긴다.
+
 - [경계가 추상적이면 실제 검증과 멀어질 수 있음] → 각 scenario를 owner-native evidence와 연결한 뒤에만 archive한다.
 - [OpenSpec tasks와 Orca Task가 중복될 수 있음] → OpenSpec에는 결과와 완료 기준, canonical evidence의 연결만 두고 수치 및 상세 DAG는 Orca와 기존 owner에 둔다.
 - [조사가 실행을 대체할 수 있음] → 중요한 설계 판단에 한해 기존 프로젝트 리서치·source/tests, 최신 primary evidence, 실제 PC/runtime 제약을 함께 확인한다. 이미 검토된 통합을 위해 같은 조사를 반복하지 않는다.
