@@ -179,11 +179,15 @@ class OperatorIntentCore:
             if (
                 intent["session_id"] != self.session_id
                 or type(intent["view_revision"]) is not int
-                or intent["view_revision"] != current["revision"]
+                or not 0 <= intent["view_revision"] <= current["revision"]
                 or not isinstance(intent["view_digest"], str)
                 or not DIGEST.fullmatch(intent["view_digest"])
-                or intent["view_digest"] != current["view_digest"]
             ):
+                raise ContractError("OPERATOR_INTENT_STALE_VIEW")
+            if (
+                intent["view_revision"] != current["revision"]
+                or intent["view_digest"] != current["view_digest"]
+            ) and not self._current_candidate_review(intent, current):
                 raise ContractError("OPERATOR_INTENT_STALE_VIEW")
             op = intent["op"]
             available_ops = current["projection"].get("available_ops")
@@ -249,6 +253,26 @@ class OperatorIntentCore:
         if cleanup is not None:
             cleanup()
         return self._result(intent_id, op, response, latest)
+
+    @staticmethod
+    def _current_candidate_review(intent: Mapping[str, Any], current: Mapping[str, Any]) -> bool:
+        """A review compares the candidate, not unrelated campaign progress.
+
+        The pending binding contains the canonical file/context digests. Its
+        owner still performs the durable candidate CAS and ledger handoff.
+        All motion, approval and draft intents retain whole-view CAS.
+        """
+        review = current["projection"].get("candidate_review")
+        payload = intent["payload"]
+        return (
+            intent["op"] == "review_candidate"
+            and isinstance(review, Mapping)
+            and review.get("status") == "PENDING"
+            and isinstance(review.get("review_binding_digest"), str)
+            and DIGEST.fullmatch(review["review_binding_digest"]) is not None
+            and isinstance(payload, Mapping)
+            and payload.get("review_binding_digest") == review["review_binding_digest"]
+        )
 
     @staticmethod
     def _result(

@@ -25,6 +25,65 @@ from tools.fr5_data_factory import ContractError, canonical_digest
 
 
 class OperatorIntentCoreTests(unittest.TestCase):
+    def test_same_pending_review_survives_progress_but_other_intents_stay_strict(self):
+        binding = canonical_digest("pending-candidate")
+        state = {
+            "progress": 1,
+            "available_ops": ["review_candidate", "cancel_session", "edit_draft", "approve_exact_plan"],
+            "candidate_review": {"status": "PENDING", "review_binding_digest": binding},
+        }
+        calls = []
+        core = OperatorIntentCore(
+            session_id="scoped-review", projection_call=lambda: state,
+            handlers={op: lambda payload, view: calls.append(payload) or {}
+                      for op in state["available_ops"]}, clock=lambda: NOW,
+        )
+        viewed = core.snapshot()
+        payload = {"review_binding_digest": binding, "choice": "PASS", "reason": None}
+        state["progress"] = 2  # Progress arrives after the operator's GET.
+        for op in ("cancel_session", "edit_draft", "approve_exact_plan"):
+            with self.subTest(op=op), self.assertRaisesRegex(ContractError, "OPERATOR_INTENT_STALE_VIEW"):
+                core.consume(intent(viewed, op, payload, f"stale-{op}"))
+        request = intent(viewed, "review_candidate", payload, "same-review")
+        self.assertTrue(core.consume(request)["consumed"])
+        self.assertEqual(calls, [payload])
+        with self.assertRaisesRegex(ContractError, "OPERATOR_INTENT_REPLAY"):
+            core.consume(request)
+
+    def test_review_scope_rejects_changed_target_session_invalid_view_or_unavailable_op(self):
+        binding = canonical_digest("pending-candidate")
+        for case in ("target", "resolved", "session", "negative", "future", "bool", "digest", "unavailable"):
+            with self.subTest(case=case):
+                state = {
+                    "progress": 1, "available_ops": ["review_candidate"],
+                    "candidate_review": {"status": "PENDING", "review_binding_digest": binding},
+                }
+                calls = []
+                core = OperatorIntentCore(
+                    session_id="scoped-review", projection_call=lambda: state,
+                    handlers={"review_candidate": lambda *_: calls.append(True) or {}},
+                    clock=lambda: NOW,
+                )
+                request = intent(core.snapshot(), "review_candidate", {
+                    "review_binding_digest": binding, "choice": "PASS", "reason": None,
+                })
+                state["progress"] = 2
+                if case == "target":
+                    state["candidate_review"]["review_binding_digest"] = canonical_digest("next-candidate")
+                elif case == "resolved":
+                    state["candidate_review"]["status"] = "PASS"
+                elif case == "session":
+                    request["session_id"] = "other-session"
+                elif case in {"negative", "future", "bool"}:
+                    request["view_revision"] = {"negative": -1, "future": 99, "bool": False}[case]
+                elif case == "digest":
+                    request["view_digest"] = "malformed"
+                elif case == "unavailable":
+                    state["available_ops"] = []
+                with self.assertRaises(ContractError):
+                    core.consume(request)
+                self.assertEqual(calls, [])
+
     def test_revision_digest_replay_and_browser_authority_fail_closed(self):
         state = {"mode": "FAKE", "count": 1, "hardware_calls": 0}
 
@@ -301,9 +360,10 @@ class OperatorIntentCoreTests(unittest.TestCase):
             })
             self.assertIn("IMAGE_QUALITY_OR_VISIBILITY", projection["reasons"])
             self.assertNotIn(str(path), json.dumps(projection))
+            progress = [0]
             core = OperatorIntentCore(
                 session_id="review-session-r001",
-                projection_call=lambda: {"candidate_review": port.projection()},
+                projection_call=lambda: {"candidate_review": port.projection(), "progress": progress[0]},
                 handlers={"review_candidate": port.resolve}, clock=lambda: NOW,
             )
             snapshot = core.snapshot()
@@ -317,6 +377,7 @@ class OperatorIntentCoreTests(unittest.TestCase):
                     "review_binding_digest": projection["review_binding_digest"],
                     "choice": "PASS", "reason": "TASK_GOAL",
                 }, "review-intent-reason"))
+            progress[0] = 1
             result = core.consume(intent(snapshot, "review_candidate", {
                 "review_binding_digest": projection["review_binding_digest"],
                 "choice": "FAIL", "reason": "TASK_GOAL",

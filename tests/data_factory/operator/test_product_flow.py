@@ -1297,7 +1297,8 @@ class ProductFakeOperatorTests(unittest.TestCase):
         campaign.episode_call = delayed_second
         self.authorize(product, compiled, "async-review-authorize")
         self.assertTrue(second_started.wait(2.0))
-        running = product.bridge_core.snapshot()["projection"]
+        reviewed_view = product.bridge_core.snapshot()
+        running = reviewed_view["projection"]
         self.assertEqual(running["workflow_state"], "RUNNING")
         self.assertEqual(
             running["available_ops"], ["review_candidate", "cancel_session"],
@@ -1307,10 +1308,16 @@ class ProductFakeOperatorTests(unittest.TestCase):
              running["candidate_review"]["queue_remaining"]),
             (1, 1),
         )
-        reviewed = self.send(product, "review_candidate", {
+        # The operator's view is still reviewing episode 1 when episode 2
+        # publishes a milestone. Neither application's nor console's global
+        # revision is the semantic decision's concurrency boundary.
+        campaign.bridge_core.transition(lambda: setattr(campaign, "_runtime_milestone", {
+            "phase": "EXECUTING", "detail": "episode 2 progress",
+        }))
+        reviewed = product.bridge_core.consume(intent(reviewed_view, "review_candidate", {
             "review_binding_digest": running["candidate_review"]["review_binding_digest"],
             "choice": "PASS", "reason": None,
-        }, "async-review-first")
+        }, "async-review-first"))["result"]
         self.assertEqual(
             (reviewed["status"], reviewed["remaining_reviews"]), ("PASS", 0),
         )
