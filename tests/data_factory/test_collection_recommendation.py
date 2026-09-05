@@ -15,11 +15,14 @@ from tools.data_factory.collection_recommendation import (
     AUTHORITY,
     build_collection_recommendation,
     project_update_draft_intent,
+    project_campaign_update_intent,
     validate_collection_recommendation,
     derive_collection_recommendation,
 )
 from tools.data_factory.collection_recommendation_io import recommend_stored_collection, main as recommend_main
-from tools.data_factory.campaign_operator import AUTHORING_EVIDENCE_SCHEMA
+from tools.data_factory.campaign_operator import (
+    AUTHORING_EVIDENCE_SCHEMA, CampaignOperator, SIDE_EFFECT_COUNTERS,
+)
 from tools.data_factory import run_job
 from tools.data_factory.campaign_authoring import (
     DRAFT_SCHEMA_V2,
@@ -736,25 +739,66 @@ class CollectionRecommendationTests(unittest.TestCase):
             self.assertEqual(first["availability"], "AVAILABLE", first)
             self.assertEqual(first, recommend_stored_collection(**arguments))
             advice = first["recommendation"]
-            self.assertEqual(advice["suggested_draft_patches"], [{
-                "change_id": "cover-unobserved-conditions", "field": "requested_count",
-                "value": 1, "basis_claim_ids": ["coverage-suggested"],
-            }])
+            patch = advice["suggested_draft_patches"][0]
+            self.assertEqual(patch["field"], "campaign_selection")
+            self.assertEqual(patch["value"]["requested_count"], 1)
             factory = mock.Mock(side_effect=AssertionError("collection must not start"))
-            application = self.application(campaign_factory=factory)
-            try:
-                view = application.bridge_core.snapshot()
-                intent = project_update_draft_intent(
-                    advice, selected_change_id="cover-unobserved-conditions",
-                    operator_view=view, data_quality_analysis=first["data_quality_analysis"],
+            application = CampaignOperator(
+                session_id="recommendation-campaign", lifecycle_owner="TEST_OPERATOR",
+                workspace={"identity": "SYNTHETIC"}, hypothesis=fixture.hypothesis,
+                draft=fixture.draft, effect_scope="FAKE", lifecycle_action="AUTHOR_ONLY",
+                data_disposition="TEST_ONLY",
+                subsystems={"planner": {"readiness": "READY", "capability": "AUTHOR", "reason": "SYNTHETIC"}},
+                expires_at="2099-01-01T00:00:00Z",
+                initial_scene_digest=digest("scene"), scene_evidence_call=factory,
+                side_effect_counter_call=lambda: {name: 0 for name in SIDE_EFFECT_COUNTERS},
+                fake_lifecycle_factory=factory, clock=lambda: NOW,
+            )
+            view = application.core.snapshot()
+            intent = project_campaign_update_intent(
+                advice, compiled_authoring=fixture.authoring(), operator_view=view,
+                data_quality_analysis=first["data_quality_analysis"],
+            )
+            application.core.consume(intent)
+            self.assertEqual(application.draft["requested_count"], 1)
+            with self.assertRaisesRegex(ContractError, "STALE_VIEW"):
+                application.core.consume({**intent, "intent_id": "stale-native-advice"})
+            compile_view = application.core.snapshot()
+            application.core.consume({
+                **intent, "intent_id": "compile-selected-condition", "op": "compile_draft",
+                "view_revision": compile_view["revision"], "view_digest": compile_view["view_digest"],
+                "payload": {},
+            })
+            missing = {digest(cell["condition"]) for cell in first["data_quality_analysis"]["cells"]
+                       if cell["counts"]["collected"] == 0}
+            bases = {base["base_condition_digest"]: base for base in fixture.hypothesis["base_conditions"]}
+            compiled_conditions = {digest(bases[slot["base_condition_digest"]]["coverage_condition"])
+                                   for slot in application.manifest["slots"]}
+            self.assertEqual(compiled_conditions, missing)
+            self.assertNotEqual(application.manifest["slots"][0]["base_condition_digest"],
+                                fixture.manifest["slots"][0]["base_condition_digest"])
+            factory.assert_not_called()
+            self.assertFalse(any(application.projection()["side_effect_counters"].values()))
+            with self.assertRaisesRegex(ContractError, "CAMPAIGN_OWNER_REQUIRED"):
+                project_update_draft_intent(
+                    advice, selected_change_id=patch["change_id"], operator_view=view,
+                    data_quality_analysis=first["data_quality_analysis"],
                 )
-                application.bridge_core.consume(intent)
-                self.assertEqual(application.draft["requested_count"], 1)
-                factory.assert_not_called()
-                with self.assertRaisesRegex(ContractError, "STALE_VIEW"):
-                    application.bridge_core.consume({**intent, "intent_id": "stale-native-advice"})
-            finally:
-                application.close()
+            altered = copy.deepcopy(advice)
+            altered["suggested_draft_patches"][0]["value"]["normalized_seed"] += 1
+            redigest(altered, "recommendation_digest")
+            with self.assertRaisesRegex(ContractError, "SELECTION_BINDING"):
+                project_campaign_update_intent(
+                    altered, compiled_authoring=fixture.authoring(), operator_view=view,
+                    data_quality_analysis=first["data_quality_analysis"],
+                )
+            altered_view = copy.deepcopy(view)
+            altered_view["projection"]["draft"]["source"]["hypothesis_digest"] = digest("other-source")
+            with self.assertRaisesRegex(ContractError, "CAMPAIGN_VIEW"):
+                project_campaign_update_intent(
+                    advice, compiled_authoring=fixture.authoring(), operator_view=altered_view,
+                    data_quality_analysis=first["data_quality_analysis"],
+                )
             second = recommend_stored_collection(**{**arguments, "run_directories": runs})
             self.assertEqual(second["availability"], "AVAILABLE", second)
             self.assertNotEqual(first["output_path"], second["output_path"])
@@ -917,7 +961,7 @@ class CollectionRecommendationTests(unittest.TestCase):
                 run_directories=[run_dir], source_commit=COMMIT, output_root=root / "derived",
             )
             self.assertEqual(result["availability"], "AVAILABLE", result)
-            self.assertEqual(result["recommendation"]["suggested_draft_patches"][0]["value"], 1)
+            self.assertEqual(result["recommendation"]["suggested_draft_patches"][0]["value"]["requested_count"], 1)
             with self.assertRaisesRegex(ContractError, "AUTHORING_BINDING"):
                 other = copy.deepcopy(context)
                 other["manifest"] = copy.deepcopy(context["manifest"])
@@ -965,6 +1009,21 @@ class CollectionRecommendationTests(unittest.TestCase):
         self.assertEqual(sum(cell["counts"]["human_semantic_pass"] for cell in report["cells"]), 0)
         self.assertEqual({claim["subject"] for claim in advice["claims"] if claim["class"] == "UNKNOWN"},
                          {"person", "background", "robot", "rollout", "semantic"})
+
+    def test_native_slot_advice_does_not_discard_explicit_selection_constraints(self) -> None:
+        fixture = self.fixture
+        fixture.draft["pinned"] = [fixture.manifest["slots"][0]["slot_id"]]
+        fixture.manifest, fixture.receipt = compile_collection_campaign(
+            fixture.draft, hypothesis=fixture.hypothesis,
+        )
+        fixture.evidence = [fixture.episode(0, 10)]
+        before = copy.deepcopy(fixture.__dict__)
+        _, advice = derive_collection_recommendation(
+            compiled_authoring=fixture.authoring(), episode_evidence=fixture.evidence,
+            source_commit=COMMIT,
+        )
+        self.assertEqual(advice["suggested_draft_patches"], [])
+        self.assertEqual(fixture.__dict__, before)
 
     def test_received_digests_and_list_order_are_validated_before_parsing(self) -> None:
         recommendation = self.fixture.build()
