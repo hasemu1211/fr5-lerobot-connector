@@ -18,7 +18,8 @@ separate saved-artifact validation policy.
 - **WHEN** the saved state normalization tensors are present and valid but the
   feature declaration is absent, has an incompatible type/shape, or its filter
   excludes `observation.state`
-- **THEN** native admission rejects with `LEARNED_PROCESSOR_FEATURES`
+- **THEN** canonical validation rejects, surfaced by the native loader as
+  `LEARNED_CHECKPOINT_LOAD_FAILED`
 - **AND** no model is loaded, inference performed or plan produced
 
 #### Scenario: Saved action declaration disagrees with the native output layout
@@ -31,7 +32,8 @@ separate saved-artifact validation policy.
 
 - **WHEN** either saved normalizer configuration contains a nonempty `stats`
   override despite valid saved tensors
-- **THEN** native admission rejects with `LEARNED_PROCESSOR_NORMALIZATION`
+- **THEN** canonical validation rejects, surfaced by the native loader as
+  `LEARNED_CHECKPOINT_LOAD_FAILED`
 - **AND** no model is loaded
 
 #### Scenario: Valid saved configuration applies normalization

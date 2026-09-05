@@ -270,7 +270,7 @@ class NativeSmolVLA:
 
         try:
             # Admission is necessary but does not prove that weights can load.
-            policy_dir, output_dir = validate_checkpoint(Path(checkpoint))
+            policy_dir, output_dir = validate_checkpoint(Path(checkpoint), verify_dataset=True)
             if importlib.metadata.version("lerobot") != "0.6.1":
                 raise ContractError("LEARNED_RUNTIME_VERSION")
             if os.environ.get("HF_HUB_OFFLINE") != "1" or os.environ.get("TRANSFORMERS_OFFLINE") != "1":
@@ -280,12 +280,9 @@ class NativeSmolVLA:
             with safe_open(policy_dir / "model.safetensors", framework="numpy") as tensors:
                 if not tensors.keys():
                     raise ContractError("LEARNED_EMPTY_WEIGHTS")
-            # Saved normalization state is mandatory: LeRobot can otherwise
-            # silently treat a feature without statistics as identity.
-            for filename, registry, features in (
-                ("policy_preprocessor.json", "normalizer_processor", ("observation.state",)),
-                ("policy_postprocessor.json", "unnormalizer_processor", ("action",)),
-            ):
+            # Canonical admission owns saved normalization semantics/state.
+            # This runtime only permits its supported processor implementations.
+            for filename in ("policy_preprocessor.json", "policy_postprocessor.json"):
                 config = json.loads((policy_dir / filename).read_text())
                 allowed = ({"rename_observations_processor", "to_batch_processor", "smolvla_new_line_processor",
                             "tokenizer_processor", "device_processor", "normalizer_processor"}
@@ -293,39 +290,6 @@ class NativeSmolVLA:
                            else {"unnormalizer_processor", "device_processor"})
                 if any("class" in step or step.get("registry_name") not in allowed for step in config["steps"]):
                     raise ContractError("LEARNED_PROCESSOR_CONTRACT")
-                matching = [s for s in config["steps"] if s.get("registry_name") == registry]
-                if len(matching) != 1:
-                    raise ContractError("LEARNED_PROCESSOR_NORMALIZATION")
-                step = matching[0]
-                feature_type = "STATE" if registry == "normalizer_processor" else "ACTION"
-                processor_config = step.get("config")
-                declared = processor_config.get("features") if isinstance(processor_config, dict) else None
-                if (not isinstance(declared, dict)
-                        or declared.get(features[0]) != {"type": feature_type, "shape": [7]}):
-                    raise ContractError("LEARNED_PROCESSOR_FEATURES")
-                selected_keys = processor_config.get("normalize_observation_keys")
-                if feature_type == "STATE" and selected_keys is not None and (
-                    not isinstance(selected_keys, list)
-                    or not all(isinstance(key, str) for key in selected_keys)
-                    or "observation.state" not in selected_keys
-                ):
-                    raise ContractError("LEARNED_PROCESSOR_FEATURES")
-                # LeRobot gives constructor stats precedence over state_file.
-                # Only the saved tensors validated below may supply statistics.
-                if processor_config.get("stats"):
-                    raise ContractError("LEARNED_PROCESSOR_NORMALIZATION")
-                state_file = step.get("state_file")
-                if not isinstance(state_file, str) or Path(state_file).name != state_file:
-                    raise ContractError("LEARNED_PROCESSOR_STATE")
-                if step["config"]["norm_map"].get("STATE" if features[0] == "observation.state" else "ACTION") != "MEAN_STD":
-                    raise ContractError("LEARNED_PROCESSOR_NORMALIZATION")
-                with safe_open(policy_dir / state_file, framework="numpy") as tensors:
-                    import numpy as np
-                    for feature in features:
-                        for stat in ("mean", "std"):
-                            tensor = tensors.get_tensor(f"{feature}.{stat}")
-                            if tensor.shape != (7,) or not np.isfinite(tensor).all() or stat == "std" and (tensor < 0).any():
-                                raise ContractError("LEARNED_PROCESSOR_STATE")
             policy, preprocessor, postprocessor = cls._load_components(policy_dir, device)
             if tree_digest(policy_dir) != before:
                 raise ContractError("LEARNED_CHECKPOINT_CHANGED")

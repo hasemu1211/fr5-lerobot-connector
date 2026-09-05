@@ -4,7 +4,7 @@
 - [x] Reject incompatible state/action declarations and state filters at the existing native loader boundary.
 - [x] Reject inline statistics that supersede validated saved tensors.
 - [x] Verify rejection before model loading and preserve valid saved-processor behavior with focused tests.
-- [ ] Consolidate saved-artifact validation in Learning's canonical validator when its owner merge is available.
+- [x] Consolidate saved-artifact validation in Learning's canonical validator and verify native failure propagation before model loading.
 
 ## Native runtime ownership
 

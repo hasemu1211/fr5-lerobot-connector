@@ -1,4 +1,4 @@
-"""CPU-only saved-processor tests; model and admission are explicit synthetic seams."""
+"""CPU processors and canonical normalization; model/dataset admission are synthetic seams."""
 import json
 import os
 import tempfile
@@ -87,21 +87,35 @@ class NativePolicyTest(unittest.TestCase):
         (self.root / 'fr5_training_receipt.json').write_text('{}')
         save_file({'synthetic.weight': np.ones(1, dtype=np.float32)}, self.policy_dir / 'model.safetensors')
         self.mean_action = np.array([.01] * 6 + [.012], dtype=np.float32)
-        for name, registry, feature, mean in (
-            ('policy_preprocessor', 'normalizer_processor', 'observation.state', np.ones(7, dtype=np.float32)),
-            ('policy_postprocessor', 'unnormalizer_processor', 'action', self.mean_action),
+        self.normalization = {"stats": {
+            "observation.state": {"mean": [1.] * 7, "std": [2.] * 7},
+            "action": {"mean": self.mean_action.tolist(), "std": [2.] * 7},
+        }}
+        for name, registry in (
+            ('policy_preprocessor', 'normalizer_processor'),
+            ('policy_postprocessor', 'unnormalizer_processor'),
         ):
-            config = {'features': {feature: {'type': 'STATE' if feature == 'observation.state' else 'ACTION', 'shape': [7]}},
+            config = {'features': {'observation.state': {'type': 'STATE', 'shape': [7]},
+                                   'action': {'type': 'ACTION', 'shape': [7]}},
                       'norm_map': {'STATE': 'MEAN_STD', 'ACTION': 'MEAN_STD'}, 'eps': 1e-8}
             steps = [{'registry_name': 'device_processor', 'config': {'device': 'cpu'}}]
             if name == 'policy_preprocessor':
                 steps.insert(0, {'registry_name': 'to_batch_processor', 'config': {}})
             steps.append({'registry_name': registry, 'config': config, 'state_file': name + '.safetensors'})
             (self.policy_dir / (name + '.json')).write_text(json.dumps({'name': name, 'steps': steps}))
-            save_file({feature + '.mean': mean, feature + '.std': np.full(7, 2., dtype=np.float32)},
+            save_file({f"{key}.{stat}": np.asarray(value, dtype=np.float32)
+                       for key, stats in self.normalization["stats"].items() for stat, value in stats.items()},
                       self.policy_dir / (name + '.safetensors'))
-        self.admission = mock.patch('tools.validate_training_checkpoint.validate_checkpoint', return_value=(self.policy_dir, self.root))
-        self.admission.start()
+        def admitted_checkpoint(path, *, verify_dataset):
+            from tools.validate_training_checkpoint import validate_normalization_state
+            self.assertEqual(path, self.policy_dir)
+            self.assertIs(verify_dataset, True)
+            # Only dataset/receipt admission is synthetic; the canonical saved
+            # artifact checks execute unchanged, as they do in validate_checkpoint.
+            validate_normalization_state(path, self.normalization)
+            return self.policy_dir, self.root
+        self.admission = mock.patch('tools.validate_training_checkpoint.validate_checkpoint', side_effect=admitted_checkpoint)
+        self.admitted_checkpoint = self.admission.start()
         self.addCleanup(self.admission.stop)
         self.offline = mock.patch.dict(os.environ, {'HF_HUB_OFFLINE': '1', 'TRANSFORMERS_OFFLINE': '1'})
         self.offline.start()
@@ -122,6 +136,7 @@ class NativePolicyTest(unittest.TestCase):
         with mock.patch.object(SmolVLAConfig, 'from_pretrained', return_value=config), \
              mock.patch.object(SmolVLAPolicy, 'from_pretrained', return_value=policy) as load:
             native = NativeSmolVLA.load(self.policy_dir)
+        self.admitted_checkpoint.assert_called_once_with(self.policy_dir, verify_dataset=True)
         self.assertTrue(load.call_args.kwargs['strict'])
         self.assertTrue(load.call_args.kwargs['local_files_only'])
         value = {'observation.state': [0.] * 7, 'observation.images.camera1': fake_rgb(),
@@ -269,7 +284,7 @@ class NativePolicyTest(unittest.TestCase):
                 path.write_text(json.dumps(document))
                 try:
                     with mock.patch.object(NativeSmolVLA, "_load_components", return_value=(object(), object(), object())) as components:
-                        with self.assertRaisesRegex(ContractError, "LEARNED_PROCESSOR_FEATURES"):
+                        with self.assertRaisesRegex(ContractError, "LEARNED_CHECKPOINT_LOAD_FAILED"):
                             NativeSmolVLA.load(self.policy_dir)
                         components.assert_not_called()
                 finally:
@@ -298,6 +313,34 @@ class NativePolicyTest(unittest.TestCase):
             with self.assertRaisesRegex(ContractError, 'LEARNED_CHECKPOINT_LOAD_FAILED'):
                 NativeSmolVLA.load(self.policy_dir)
 
+    def test_canonical_admission_failure_prevents_native_component_loading(self):
+        failure = ValueError("synthetic canonical admission rejection")
+        self.admitted_checkpoint.side_effect = failure
+        with mock.patch.object(NativeSmolVLA, "_load_components") as components:
+            with self.assertRaisesRegex(ContractError, "LEARNED_CHECKPOINT_LOAD_FAILED") as rejected:
+                NativeSmolVLA.load(self.policy_dir)
+            self.assertIs(rejected.exception.__cause__, failure)
+            components.assert_not_called()
+
+    def test_runtime_restricts_processors_after_canonical_normalization_passes(self):
+        for filename, step in (
+            ("policy_preprocessor.json", {"registry_name": "unsupported_processor", "config": {}}),
+            ("policy_postprocessor.json", {"registry_name": "device_processor", "config": {}, "class": "custom.Device"}),
+        ):
+            with self.subTest(filename=filename):
+                path = self.policy_dir / filename
+                original = path.read_bytes()
+                document = json.loads(original)
+                document["steps"].append(step)
+                path.write_text(json.dumps(document))
+                try:
+                    with mock.patch.object(NativeSmolVLA, "_load_components") as components:
+                        with self.assertRaisesRegex(ContractError, "LEARNED_PROCESSOR_CONTRACT"):
+                            NativeSmolVLA.load(self.policy_dir)
+                        components.assert_not_called()
+                finally:
+                    path.write_bytes(original)
+
     def test_inline_statistics_cannot_override_valid_saved_tensors(self):
         from lerobot.policies.factory import make_pre_post_processors
         for filename, feature in (("policy_preprocessor", "observation.state"),
@@ -317,7 +360,7 @@ class NativePolicyTest(unittest.TestCase):
                               if feature == "observation.state" else post(torch.zeros((1, 1, 7))))
                     torch.testing.assert_close(actual, torch.zeros_like(actual))
                     with mock.patch.object(NativeSmolVLA, "_load_components") as components:
-                        with self.assertRaisesRegex(ContractError, "LEARNED_PROCESSOR_NORMALIZATION"):
+                        with self.assertRaisesRegex(ContractError, "LEARNED_CHECKPOINT_LOAD_FAILED"):
                             NativeSmolVLA.load(self.policy_dir)
                         components.assert_not_called()
                 finally:

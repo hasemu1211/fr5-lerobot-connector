@@ -45,7 +45,8 @@ safety thresholds are not current implementation or authority.
 ## Concrete interfaces and consumers
 
 - `NativeSmolVLA.load` first reuses `validate_checkpoint` training admission,
-  requires local/offline dependencies, checks saved normalization tensors, then
+  including Learning-owned saved normalization validation, requires local/offline
+  dependencies and supported processor implementations, then
   strictly loads the model and saved pre/postprocessors. CPU is the default.
   No model/tokenizer download, installation, or training is performed. A failed
   model load cannot create a successful native inference instance.
@@ -91,7 +92,8 @@ The tests use synthetic observations, temporary synthetic checkpoint files,
 actual installed saved processors, a synthetic model, native ROS message
 serialization, and synthetic action clients. They never initialize ROS or
 contact devices. Native model loading and training admission are explicitly
-mocked only in the CPU processor test; the canonical motion validator,
+mocked only in the CPU processor test; saved normalization validation executes
+the canonical Learning implementation. The canonical motion validator,
 PickupExecutor, OneJob lifecycle and transport goal ownership are not patched.
 
 - `tests/data_factory/test_learned_action_adapter.py`: capture 10.0, inference

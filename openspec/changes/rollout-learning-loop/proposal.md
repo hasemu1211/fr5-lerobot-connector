@@ -35,7 +35,8 @@ None.
 ## Impact
 
 Runtime changes are confined to the existing Rollout native loader and its tests.
-Artifact validation consolidation depends on the canonical Learning owner merge.
+Artifact validation is consumed from the canonical Learning owner; Rollout retains
+its supported-processor restrictions and actual runtime checks.
 It changes no checkpoint schema, training statistics, executor, recorder,
 physical authority or dataset admission. This bounded readiness outcome does not
 complete the continuing Rollout responsibility or qualify a learned policy.
