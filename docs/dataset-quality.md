@@ -74,3 +74,15 @@ source preflight 진단을 추가하는 방향과 검토 clip 선택을 고치�
 원본을 읽는 사전검토 도중 사람이 판정을 변경할 수 있으므로, 완료 후 기존 ledger/state 검증을 다시 수행한다. 처음 읽은 state와 다르면 `SELECTION_INPUT_CHANGED`로 요청 생성을 거부한다. 새 판정도 PASS인 경우를 포함하며, 자동 재시도로 바뀐 근거를 받아들이지 않는다. 합성 interleaving에서 사전검토 뒤 FAIL로 바뀐 state를 무시하고 이전 PASS 요청을 저장하던 문제를 재현하여 이 경계를 추가했다. 공유 잠금이나 transaction을 새로 만드는 대안 대신 Curator의 저장 전 재검증으로 범위를 제한했다. 이는 마지막 확인 이후의 변경까지 막는 원자적 snapshot이 아니다. 동시 요청 두 개가 같은 출력 경로를 사용해도 기존 독점 writer가 하나만 저장하고 다른 요청은 `EVENT_EXISTS`로 거부한다.
 
 상태는 여전히 `REQUEST_NOT_APPROVED`이며 요청은 경로를 가진 입력이지 승인이나 frozen snapshot이 아니다. 실제 승인은 기존 사람 전용 경계에 남으며 Curator가 호출하지 않는다. [focused 검증](../tests/data_factory/curator/workflow/test_selection.py)은 소비자 연결·stale 근거·pending·재전달·source 불변성·training scope와 quarantine 경계를 확인한다. 새 요청은 현재 state의 판정과 candidate 경로를 다시 읽지만, 저장된 요청이 이후 state 변경을 자동 반영하지는 않는다. 현재 native 사전검토는 요청이 참조한 semantic 파일을 검증한다. 별도 candidate에 대한 새 FAIL 판정으로 state가 바뀌어도 과거 PASS 파일이 유효하면 이전 요청을 받아들이는 합성 관측이 있다. 이 경우 과거 판정의 유효성과 현재 판정 우선 규칙은 training·Collection 소유자의 공유 계약으로 정해야 하며 Curator의 사전검사로 해결했다고 주장하지 않는다. 이 연결만으로 품질 분포, 학습 성능 또는 다음 수집의 실행 권한을 증명하지 않는다.
+
+## 성공 예제의 다양성과 비용 가설
+
+기존 사람이 PASS로 판정한 예제 안에서도 동작 경로, 관측 가능한 장면, 시연 속도와 녹화량은 서로 다를 수 있다. 이 차이를 곧바로 좋고 나쁜 데이터의 점수로 바꾸지 않고, 기존 native 요청으로 학습 소비자가 검증할 구체적인 선택 가설을 만든다. Curator는 명시한 선택과 계보를 구성하고, Learning/Evaluation 소유자는 공통 held-out cohort와 비교 가능한 학습 비용을 설계한다. 조건별 수량·admission·다음 수집 추천은 계속 기존 Data Quality Analysis와 Collection이 소유한다.
+
+Hejna 등의 [DemInf](https://arxiv.org/abs/2502.08623v3)는 보조 VAE와 상호정보량 추정으로 시연을 평가한다. Sirigiri 등의 [FAKTUAL 연구](https://arxiv.org/abs/2603.11634v1)는 궤적 kernel 기반 다양성을 다루며 품질·다양성·주변 사례의 밀도가 함께 필요함을 설명한다. 현재 PC와 학습을 수행하지 않는 실험 범위에서는 보조 모델 학습 대신 CPU에서 계산하는 작은 기준선을 선택했다. 여섯 arm joint의 절대 경로를 누적 경로 길이의 같은 비율에서 비교하고, 녹화 frame 수를 별도 비용 대리값으로 유지한다. 이는 signature kernel이나 검증된 학습 utility 점수의 구현이 아니다.
+
+실제 성공 예제의 가까운 쌍과 먼 쌍을 이 기준선으로 비교하고, 서로 다른 resampling 해상도에서 순위가 유지되는지 확인한 뒤 두 명시적 요청을 native 사전검토에 전달했다. 반복 정지점·직선 구간 재표본화에 대한 불변성, 절대 위치 차이와 순서 차이의 관측 가능성은 합성 입력으로 확인했다. 이 실험의 helper와 상세 수치는 worktree의 `outputs/curator/success-geometry-cost-20260905/`에만 남긴다. 아직 일반 제품의 선별 정책으로 승격하지 않는다.
+
+관절 경로만으로 물체·배경·조명·gripper의 다양성을 알 수 없고, 경로 길이에 따른 재표본화는 정지 시간의 의미를 제거하며 센서 잡음에는 영향을 받는다. 녹화 시간은 reset·사람 노력·전체 취득 비용을 포함하지 않는다. 다음 반증 가능한 질문은 비슷한 데이터량과 같은 평가 cohort에서 경로 차이가 학습 이득으로 이어지는지이다. 쌍마다 다르게 제외된 episode를 평가 세트로 쓰면 비교 대상 자체가 바뀌므로, 이 실험만으로 우수한 선택이나 일반화를 선언하지 않는다.
+
+저장된 intent를 연결하면 가까운 쌍은 같은 명령상 place를, 먼 쌍은 서로 다른 place를 포함한다. 같은 place의 예제도 요청된 위치·yaw가 다르므로 관절 기하의 순위에는 수집 조건의 차이가 섞여 있다. 이에 따라 학습 소유자에게 넘기는 질문도 조건별 분포와 궤적 차이를 함께 다루어야 한다. 기존 intent의 관측된 조건을 읽는 것은 누락된 과거 authoring이나 전체 domain을 복원하는 작업이 아니며, 명령된 place 명칭은 물리 A/B 검증을 대신하지 않는다.
