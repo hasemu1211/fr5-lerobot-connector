@@ -11,7 +11,7 @@
 현재 validator와 recorder가 사용하는 기본 기준은 다음과 같다.
 
 | 영역 | 기준 |
-|---|---:|
+| --- | ---: |
 | row FPS | 설정 FPS의 ±10% |
 | row gap | 설정 주기의 2배 초과가 전체 1% 이하 |
 | row·camera pause | 250 ms 이하 |
@@ -36,7 +36,7 @@
 ## 소유권과 보존
 
 | 결과 | 소유자 |
-|---|---|
+| --- | --- |
 | schema와 feature 단위 | `tools/fr5_dataset_schema.py` |
 | 수집 transaction과 incremental gate | `tools/fr5_lerobot_recorder.py` |
 | 전체 dataset 판정 | `tools/validate_lerobot_dataset.py` |

@@ -7,7 +7,7 @@
 지원 wrapper와 profile 이름은 `scripts/train_policy.sh --help`가 정본이다.
 
 | profile | 입력 | 범위 |
-|---|---|---|
+| --- | --- | --- |
 | `smolvla` | 1–2개 view를 policy camera key에 매핑 | 7D fine-tuning과 checkpoint 저장·재로딩 |
 | `act` | 수집된 모든 view | 7D scratch 학습과 resume |
 | `vqbet-up`, `vqbet-side`, `vqbet-wrist` | 선택한 한 view | 7D scratch 학습과 resume |

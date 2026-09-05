@@ -5,7 +5,7 @@
 ## 책임 경계
 
 | 질문 | 정본 | 이 문서의 역할 |
-|---|---|---|
+| --- | --- | --- |
 | 데이터 열과 단위 | `tools/fr5_dataset_schema.py` 및 recorder | 계약의 의미를 설명하고 소스를 연결한다 |
 | 저장 후 판정 | `tools/validate_lerobot_dataset.py` | 판정 결과의 소비자를 설명한다 |
 | 카메라·환경 설정 | `config/`와 `scripts/` | 장비별 값의 저장 위치를 안내한다 |

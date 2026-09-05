@@ -18,7 +18,7 @@
 ## 책임 표
 
 | 구성요소 | 소유 | 소유하지 않음 |
-|---|---|---|
+| --- | --- | --- |
 | catalog와 registry | 읽기 전용 적격화와 호환 조합 | qualification 승격, motion·dataset write |
 | environment/setup | 장비 사실과 준비 결과 | planning, collection, semantic judgment |
 | workflow application | draft, campaign 교체, finite operation | robot·recorder·dataset lifecycle |

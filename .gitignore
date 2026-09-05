@@ -2,6 +2,7 @@
 /install/
 /log/
 /.venv/
+/node_modules/
 /.omx/
 /omx_wiki/
 /.docs-governance/
