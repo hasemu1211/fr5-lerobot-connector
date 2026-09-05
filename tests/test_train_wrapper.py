@@ -333,9 +333,14 @@ class TrainingLaunchConnectionTest(unittest.TestCase):
             # Test double only: no real controlling-terminal consent is manufactured.
             with mock.patch.object(approval, "_confirm_human_training_approval") as confirm:
                 issued = approve(request, output, "fixture-human", dry_run=False)
-            self.assertEqual(confirm.call_count, 3)
-            for call in confirm.call_args_list:
-                self.assertTrue(call.args[0].startswith("HUMAN_TRAINING_APPROVED synthetic-dataset-r1 episode-"))
+            confirm.assert_called_once()
+            documents = [json.loads(path.read_text()) for path in sorted(output.glob("*.approval.json"))]
+            self.assertEqual(len(documents), 3)
+            batch_digest = approval._batch_digest(documents)
+            self.assertEqual(confirm.call_args.args, ("APPROVE BATCH " + batch_digest.removeprefix("sha256:")[:12],))
+            self.assertIn("Selected episodes (3): 0, 2, 3", confirm.call_args.kwargs["summary"])
+            self.assertTrue(all(document["schema_version"] == approval.BATCH_APPROVAL_SCHEMA
+                and document["batch_digest"] == batch_digest for document in documents))
             self.assertEqual(approval.validate_current_training_inventory(output / "training_approved.json",
                 dataset_root=kwargs["dataset"], repo_id=kwargs["repo_id"], selected_episodes=[0, 2, 3]), issued)
             self.assertEqual(snapshot(kwargs["dataset"]), before)
