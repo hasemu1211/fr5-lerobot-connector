@@ -129,10 +129,89 @@ class NativePolicyTest(unittest.TestCase):
                 NativeSmolVLA.load(self.policy_dir)
             components.assert_not_called()
 
+    def test_saved_feature_contract_cannot_disable_state_normalization(self):
+        cases = (
+            ("policy_preprocessor", "observation.state", "missing"),
+            ("policy_preprocessor", "observation.state", "wrong-type"),
+            ("policy_preprocessor", "observation.state", "wrong-shape"),
+            ("policy_preprocessor", "observation.state", "excluded"),
+            ("policy_preprocessor", "observation.state", "string-filter"),
+            ("policy_postprocessor", "action", "missing"),
+            ("policy_postprocessor", "action", "wrong-type"),
+            ("policy_postprocessor", "action", "wrong-shape"),
+        )
+        for filename, feature, fault in cases:
+            with self.subTest(filename=filename, fault=fault):
+                path = self.policy_dir / (filename + ".json")
+                original = path.read_bytes()
+                document = json.loads(original)
+                config = document["steps"][-1]["config"]
+                if fault == "missing":
+                    config["features"].pop(feature)
+                elif fault == "wrong-type":
+                    config["features"][feature]["type"] = "VISUAL"
+                elif fault == "wrong-shape":
+                    config["features"][feature]["shape"] = [6]
+                elif fault == "excluded":
+                    config["normalize_observation_keys"] = []
+                else:
+                    config["normalize_observation_keys"] = "observation.state"
+                path.write_text(json.dumps(document))
+                try:
+                    with mock.patch.object(NativeSmolVLA, "_load_components", return_value=(object(), object(), object())) as components:
+                        with self.assertRaisesRegex(ContractError, "LEARNED_PROCESSOR_FEATURES"):
+                            NativeSmolVLA.load(self.policy_dir)
+                        components.assert_not_called()
+                finally:
+                    path.write_bytes(original)
+
+    def test_explicit_state_filter_consumes_saved_normalization(self):
+        from lerobot.policies.factory import make_pre_post_processors
+        path = self.policy_dir / "policy_preprocessor.json"
+        document = json.loads(path.read_text())
+        config = document["steps"][-1]["config"]
+        batch = {"observation.state": torch.zeros(7)}
+        # Reproduce LeRobot's silent bypass independently of our loader guard.
+        config["normalize_observation_keys"] = []
+        path.write_text(json.dumps(document))
+        pre, _ = make_pre_post_processors(SimpleNamespace(), pretrained_path=str(self.policy_dir))
+        torch.testing.assert_close(pre(batch)["observation.state"], torch.zeros((1, 7)))
+        config["normalize_observation_keys"] = ["observation.state"]
+        path.write_text(json.dumps(document))
+        pre, post = make_pre_post_processors(SimpleNamespace(), pretrained_path=str(self.policy_dir))
+        with mock.patch.object(NativeSmolVLA, "_load_components", return_value=(mock.Mock(), pre, post)):
+            native = NativeSmolVLA.load(self.policy_dir)
+        torch.testing.assert_close(native.preprocessor(batch)["observation.state"], torch.full((1, 7), -.5))
+
     def test_native_model_load_exception_is_typed_and_not_a_receipt(self):
         with mock.patch.object(NativeSmolVLA, '_load_components', side_effect=RuntimeError('tensor mismatch')):
             with self.assertRaisesRegex(ContractError, 'LEARNED_CHECKPOINT_LOAD_FAILED'):
                 NativeSmolVLA.load(self.policy_dir)
+
+    def test_inline_statistics_cannot_override_valid_saved_tensors(self):
+        from lerobot.policies.factory import make_pre_post_processors
+        for filename, feature in (("policy_preprocessor", "observation.state"),
+                                  ("policy_postprocessor", "action")):
+            with self.subTest(filename=filename):
+                path = self.policy_dir / (filename + ".json")
+                original = path.read_bytes()
+                document = json.loads(original)
+                document["steps"][-1]["config"]["stats"] = {
+                    feature: {"mean": [0.] * 7, "std": [1.] * 7}}
+                path.write_text(json.dumps(document))
+                try:
+                    # The installed library uses inline stats instead of its
+                    # saved nonzero means; native admission must reject this.
+                    pre, post = make_pre_post_processors(SimpleNamespace(), pretrained_path=str(self.policy_dir))
+                    actual = (pre({feature: torch.zeros(7)})[feature]
+                              if feature == "observation.state" else post(torch.zeros((1, 1, 7))))
+                    torch.testing.assert_close(actual, torch.zeros_like(actual))
+                    with mock.patch.object(NativeSmolVLA, "_load_components") as components:
+                        with self.assertRaisesRegex(ContractError, "LEARNED_PROCESSOR_NORMALIZATION"):
+                            NativeSmolVLA.load(self.policy_dir)
+                        components.assert_not_called()
+                finally:
+                    path.write_bytes(original)
 
 
 if __name__ == '__main__':

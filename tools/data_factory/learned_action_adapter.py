@@ -293,6 +293,23 @@ class NativeSmolVLA:
                 if len(matching) != 1:
                     raise ContractError("LEARNED_PROCESSOR_NORMALIZATION")
                 step = matching[0]
+                feature_type = "STATE" if registry == "normalizer_processor" else "ACTION"
+                processor_config = step.get("config")
+                declared = processor_config.get("features") if isinstance(processor_config, dict) else None
+                if (not isinstance(declared, dict)
+                        or declared.get(features[0]) != {"type": feature_type, "shape": [7]}):
+                    raise ContractError("LEARNED_PROCESSOR_FEATURES")
+                selected_keys = processor_config.get("normalize_observation_keys")
+                if feature_type == "STATE" and selected_keys is not None and (
+                    not isinstance(selected_keys, list)
+                    or not all(isinstance(key, str) for key in selected_keys)
+                    or "observation.state" not in selected_keys
+                ):
+                    raise ContractError("LEARNED_PROCESSOR_FEATURES")
+                # LeRobot gives constructor stats precedence over state_file.
+                # Only the saved tensors validated below may supply statistics.
+                if processor_config.get("stats"):
+                    raise ContractError("LEARNED_PROCESSOR_NORMALIZATION")
                 state_file = step.get("state_file")
                 if not isinstance(state_file, str) or Path(state_file).name != state_file:
                     raise ContractError("LEARNED_PROCESSOR_STATE")
