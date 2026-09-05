@@ -152,6 +152,23 @@ class OfflineEvaluationTest(unittest.TestCase):
             inference.assert_not_called()
             self.assertFalse(args.output.exists())
 
+    def test_direct_script_dry_run_without_pythonpath_from_another_directory(self):
+        script = Path(__file__).resolve().parents[1] / "tools/evaluate_smolvla_offline.py"
+        with TemporaryDirectory(prefix="SYNTHETIC_TEST_ONLY-") as directory:
+            root = Path(directory)
+            args, _ = admitted_case(root)
+            result = subprocess.run(
+                [sys.executable, str(script), args.checkpoint, str(args.dataset),
+                 "--repo-id", args.repo_id, "--approved-inventory", str(args.approved_inventory),
+                 "--output", str(args.output), "--dry-run"],
+                cwd=root,
+                env={key: value for key, value in os.environ.items() if key != "PYTHONPATH"},
+                capture_output=True, text=True, timeout=20,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("inference not run and output not created", result.stdout)
+            self.assertFalse(args.output.exists())
+
     def test_public_wrapper_forwards_inventory_partition_and_dry_run(self):
         project = Path(__file__).resolve().parents[1]
         with TemporaryDirectory() as directory:
