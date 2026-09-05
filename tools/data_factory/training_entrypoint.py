@@ -1,7 +1,8 @@
 """Public offline admission, human approval and selected-episode launch connection.
 
 No consent is accepted from arguments, stdin, environment variables or JSON.
-Single-episode and exact-batch decisions both require a controlling /dev/tty.
+CLI decisions require /dev/tty; the Web UI server retains a prepared batch and
+calls the shared publisher only after its explicit human decision.
 """
 from __future__ import annotations
 
@@ -12,8 +13,11 @@ if __package__ in {None, ""}:
 
 import argparse
 import copy
+from dataclasses import dataclass
 from datetime import datetime, timezone
+import fcntl
 import json
+import os
 from pathlib import Path
 import shlex
 
@@ -207,6 +211,10 @@ def resume_training(checkpoint: Path) -> int:
 
 
 def prepare_approvals(request: dict, output: Path, approved_by: str) -> tuple[dict, list[dict]]:
+    return _prepare_approvals(request, output, approved_by, check_targets=True)
+
+
+def _prepare_approvals(request: dict, output: Path, approved_by: str, *, check_targets: bool) -> tuple[dict, list[dict]]:
     approval._exact(request, frozenset({"dataset_root", "dataset_id", "repo_id", "episodes"}), "TRAINING_PREAPPROVAL_FIELDS")
     dataset = approval.current_dataset_identity(request["dataset_root"], repo_id=request["repo_id"], dataset_id=request["dataset_id"])
     if output.resolve().is_relative_to(Path(dataset["dataset_root"])) or output.is_symlink() or not output.is_dir():
@@ -244,8 +252,9 @@ def prepare_approvals(request: dict, output: Path, approved_by: str) -> tuple[di
             )
         provenance_path = output / f"{source['episode_id']}.provenance.json"
         target = output / f"{source['episode_id']}.approval.json"
-        for path in (provenance_path, target):
-            approval._target(path, "TRAINING_APPROVAL_EXISTS")
+        if check_targets:
+            for path in (provenance_path, target):
+                approval._target(path, "TRAINING_APPROVAL_EXISTS")
         kwargs = dict(scope=approval.PRODUCTION_SCOPE, dataset_identity=dataset,
             episode_id=source["episode_id"], episode_index=source["episode_index"], episode_content_digest=content_digest,
             technical_validator_path=str(technical_path), technical_validator_digest=technical_digest,
@@ -254,7 +263,8 @@ def prepare_approvals(request: dict, output: Path, approved_by: str) -> tuple[di
         drafts.append({"output_path": str(target), "approval_arguments": kwargs, "provenance": provenance,
                        "reviewer_id": semantic["reviewed_by"]})
     approval._unique_episodes([d["approval_arguments"] for d in drafts], [d["provenance"] for d in drafts])
-    approval._target(output / "training_approved.json", "TRAINING_INVENTORY_EXISTS")
+    if check_targets:
+        approval._target(output / "training_approved.json", "TRAINING_INVENTORY_EXISTS")
     return dataset, drafts
 
 
@@ -286,34 +296,95 @@ def _batch_summary(dataset: dict, drafts: list[dict], batch_digest: str, output:
     return "\n".join(lines)
 
 
-def approve(request: dict, output: Path, approved_by: str, *, dry_run: bool) -> dict:
-    # Freeze caller-owned selection as well as the evidence. There is no caller
-    # supplied confirmation, consent flag, or production confirmation callback.
+@dataclass(frozen=True)
+class PreparedApprovalBatch:
+    """Server-held value, never deserialized from browser input or a consent token.
+
+    Preparing or displaying it grants no approval. The server owns the human
+    decision, configured approver identity and access to publish_approval_batch.
+    """
+
+    _snapshot: str
+
+    @property
+    def preview(self) -> dict:
+        value = json.loads(self._snapshot)
+        return {
+            "status": "PREVIEW_NOT_APPROVED", "dataset_identity": value["dataset"],
+            "selected_count": len(value["drafts"]),
+            "episodes": [{"episode_id": draft["approval_arguments"]["episode_id"],
+                          "episode_index": draft["approval_arguments"]["episode_index"],
+                          "technical_status": "PASS", "semantic_status": "PASS",
+                          "reviewer_id": draft["reviewer_id"]} for draft in value["drafts"]],
+            "batch_digest": value["batch_digest"], "starts_training": False,
+            "limitations": ["Approves only this exact frozen batch for training admission.",
+                            "Does not establish learning performance or authorize robot execution."],
+        }
+
+
+def _approval_documents(drafts: list[dict], reviewed_at: datetime) -> list[dict]:
+    return [approval._prepare_training_approval(
+        **{**draft["approval_arguments"], "episode_provenance_path": draft["provenance"]},
+        clock=lambda: reviewed_at,
+    ) for draft in drafts]
+
+
+def prepare_approval_batch(request: dict, output: Path, approved_by: str) -> PreparedApprovalBatch:
+    """Prepare without writes; arguments come from trusted server configuration."""
     request = copy.deepcopy(request)
     output = output.resolve() if not output.is_symlink() else output
     dataset, drafts = prepare_approvals(request, output, approved_by)
     reviewed_at = datetime.now(timezone.utc)
-    documents = [approval._prepare_training_approval(
-        **{**draft["approval_arguments"], "episode_provenance_path": draft["provenance"]},
-        clock=lambda: reviewed_at,
-    ) for draft in drafts]
+    documents = _approval_documents(drafts, reviewed_at)
     batch_digest = approval._batch_digest(documents)
-    summary = _batch_summary(dataset, drafts, batch_digest, output, approved_by)
-    if dry_run:
-        return {"status": "PREVIEW_NOT_APPROVED", "dataset_identity": dataset, "episodes": drafts,
-                "inventory_path": str(output / "training_approved.json"),
-                "human_confirmation": "REQUIRED_ONCE_FOR_EXACT_BATCH_ON_DEV_TTY", "review_summary": summary}
-    approval._confirm_human_training_approval("APPROVE BATCH " + batch_digest.removeprefix("sha256:")[:12], summary=summary)
-    # The complete source graph (including seed/ledger sources, metadata, and
-    # dataset bytes) must still derive exactly what the human just reviewed.
-    if prepare_approvals(request, output, approved_by) != (dataset, drafts):
+    directory = output.stat()
+    return PreparedApprovalBatch(json.dumps({
+        "request": request, "output": str(output), "approved_by": approved_by,
+        "output_identity": [directory.st_dev, directory.st_ino],
+        "dataset": dataset, "drafts": drafts, "documents": documents,
+        "reviewed_at": reviewed_at.isoformat(), "batch_digest": batch_digest,
+    }, sort_keys=True, separators=(",", ":"), allow_nan=False))
+
+
+def _revalidate_approval_batch(value: dict, *, check_targets: bool) -> None:
+    # Reopen the complete source graph, even after per-episode publication.
+    if _prepare_approvals(value["request"], Path(value["output"]), value["approved_by"],
+                          check_targets=check_targets) != (value["dataset"], value["drafts"]):
         raise ContractError("TRAINING_INPUT_CHANGED")
-    rechecked = [approval._prepare_training_approval(
-        **{**draft["approval_arguments"], "episode_provenance_path": draft["provenance"]},
-        clock=lambda: reviewed_at,
-    ) for draft in drafts]
-    if rechecked != documents:
+    if _approval_documents(value["drafts"], datetime.fromisoformat(value["reviewed_at"])) != value["documents"]:
         raise ContractError("TRAINING_INPUT_CHANGED")
+
+
+def publish_approval_batch(prepared: PreparedApprovalBatch) -> dict:
+    """Publish only after the trusted caller's explicit human decision.
+
+    No JSON/dict confirmation or callback is accepted. This function does not
+    authenticate a human: the CLI or Web UI owns that interaction boundary.
+    Concurrent publishers serialize on the existing output directory; exclusive
+    artifacts reject replay. A partial attempt cannot publish an inventory.
+    """
+    if type(prepared) is not PreparedApprovalBatch:
+        raise ContractError("TRAINING_PREPARED_BATCH_REQUIRED")
+    value = json.loads(prepared._snapshot)
+    output = Path(value["output"])
+    fd = os.open(output, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError as exc:
+            raise ContractError("TRAINING_APPROVAL_BUSY") from exc
+        directory = os.fstat(fd)
+        if [directory.st_dev, directory.st_ino] != value["output_identity"]:
+            raise ContractError("TRAINING_APPROVAL_OUTPUT_CHANGED")
+        _revalidate_approval_batch(value, check_targets=True)
+        return _publish_approval_batch(value)
+    finally:
+        os.close(fd)
+
+
+def _publish_approval_batch(value: dict) -> dict:
+    dataset, drafts, documents = value["dataset"], value["drafts"], value["documents"]
+    output, batch_digest = Path(value["output"]), value["batch_digest"]
     entries = []
     for draft, document in zip(drafts, documents):
         args = draft["approval_arguments"]
@@ -331,10 +402,26 @@ def approve(request: dict, output: Path, approved_by: str, *, dry_run: bool) -> 
             "training_approval": {"artifact_path": draft["output_path"], "artifact_digest": canonical_digest(issued), "provenance": approval.PROVENANCE},
         })
     inventory = approval.build_training_approved_inventory(scope=approval.PRODUCTION_SCOPE, dataset_identity=dataset, episodes=entries)
-    if approval.current_dataset_identity(request["dataset_root"], repo_id=request["repo_id"], dataset_id=request["dataset_id"]) != dataset:
-        raise ContractError("TRAINING_DATASET_CHANGED")
+    _revalidate_approval_batch(value, check_targets=False)
+    directory = output.stat()
+    if [directory.st_dev, directory.st_ino] != value["output_identity"]:
+        raise ContractError("TRAINING_APPROVAL_OUTPUT_CHANGED")
     approval.write_training_approved_inventory(output / "training_approved.json", inventory)
     return inventory
+
+
+def approve(request: dict, output: Path, approved_by: str, *, dry_run: bool) -> dict:
+    prepared = prepare_approval_batch(request, output, approved_by)
+    value = json.loads(prepared._snapshot)
+    dataset, drafts = value["dataset"], value["drafts"]
+    output, batch_digest = Path(value["output"]), value["batch_digest"]
+    summary = _batch_summary(dataset, drafts, batch_digest, output, approved_by)
+    if dry_run:
+        return {"status": "PREVIEW_NOT_APPROVED", "dataset_identity": dataset, "episodes": drafts,
+                "inventory_path": str(output / "training_approved.json"),
+                "human_confirmation": "REQUIRED_ONCE_FOR_EXACT_BATCH_ON_DEV_TTY", "review_summary": summary}
+    approval._confirm_human_training_approval("APPROVE BATCH " + batch_digest.removeprefix("sha256:")[:12], summary=summary)
+    return publish_approval_batch(prepared)
 
 
 def main() -> None:

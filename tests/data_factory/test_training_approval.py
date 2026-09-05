@@ -517,6 +517,124 @@ class NativeBatchTrainingApprovalTest(unittest.TestCase):
     def issue(self):
         return self.approve(self.request, self.output, "fixture-human", dry_run=False)
 
+    def test_server_preview_is_immutable_detached_and_writes_nothing(self):
+        from dataclasses import FrozenInstanceError
+        from tools.data_factory.training_entrypoint import prepare_approval_batch, publish_approval_batch
+
+        before = snapshot(self.root)
+        with mock.patch.object(training_approval, "_confirm_human_training_approval") as confirm:
+            prepared = prepare_approval_batch(self.request, self.output, "server-human")
+            display = prepared.preview
+        confirm.assert_not_called()
+        self.assertEqual(snapshot(self.root), before)
+        self.assertEqual(display["selected_count"], 2)
+        self.assertEqual([e["episode_index"] for e in display["episodes"]], [0, 2])
+        self.assertFalse(display["starts_training"])
+        self.assertTrue(display["limitations"])
+        self.assertTrue(all(e["technical_status"] == e["semantic_status"] == "PASS" for e in display["episodes"]))
+        with self.assertRaises(FrozenInstanceError):
+            prepared._snapshot = "{}"
+        self.request["episodes"] = [self.sources[1]]
+        display["episodes"].clear()
+        display["dataset_identity"]["dataset_id"] = "browser-mutation"
+        with self.assertRaisesRegex(ContractError, "TRAINING_PREPARED_BATCH_REQUIRED"):
+            publish_approval_batch(display)
+        self.assertEqual(snapshot(self.root), before)
+        # Synthetic trusted-server decision; no browser or actual human claimed.
+        inventory = publish_approval_batch(prepared)
+        self.assertEqual([e["episode_index"] for e in inventory["episodes"]], [0, 2])
+        for entry in inventory["episodes"]:
+            document = load_json_strict(entry["training_approval"]["artifact_path"])
+            self.assertEqual(document["approved_by"], "server-human")
+            self.assertEqual(document["batch_digest"], prepared.preview["batch_digest"])
+        training_approval.validate_current_training_inventory(self.output / "training_approved.json",
+            dataset_root=self.dataset, repo_id=self.request["repo_id"], selected_episodes=[0, 2])
+
+    def test_server_publication_rejects_input_change_and_replaced_output(self):
+        from tools.data_factory.training_entrypoint import prepare_approval_batch, publish_approval_batch
+
+        prepared = prepare_approval_batch(self.request, self.output, "server-human")
+        for path in (self.dataset / "unchanged.marker",
+                     Path(self.sources[0]["technical_validator_path"]),
+                     Path(self.sources[0]["human_semantic_evidence_path"]),
+                     Path(self.sources[0]["seed_manifest_path"])):
+            with self.subTest(source=path.name):
+                original = path.read_bytes()
+                path.write_bytes(original + b"changed")
+                with self.assertRaises((ContractError, ValueError)):
+                    publish_approval_batch(prepared)
+                self.assertEqual(list(self.output.iterdir()), [])
+                path.write_bytes(original)
+        self.output.rename(self.root / "old-output")
+        self.output.mkdir()
+        with self.assertRaisesRegex(ContractError, "TRAINING_APPROVAL_OUTPUT_CHANGED"):
+            publish_approval_batch(prepared)
+        self.assertEqual(list(self.output.iterdir()), [])
+
+    def test_server_publish_serializes_concurrent_batches_and_rejects_replay(self):
+        import threading
+        from concurrent.futures import ThreadPoolExecutor
+        from tools.data_factory.training_entrypoint import prepare_approval_batch, publish_approval_batch
+
+        first = prepare_approval_batch(self.request, self.output, "server-human")
+        second = prepare_approval_batch(self.request, self.output, "other-server-human")
+        entered, release = threading.Event(), threading.Event()
+        native_write = training_approval._write_exclusive
+        def paused_write(path, value, code):
+            if not entered.is_set():
+                entered.set()
+                if not release.wait(5):
+                    raise AssertionError("test publisher was not released")
+            return native_write(path, value, code)
+        with ThreadPoolExecutor(max_workers=1) as pool, mock.patch.object(
+            training_approval, "_write_exclusive", side_effect=paused_write
+        ):
+            future = pool.submit(publish_approval_batch, first)
+            try:
+                self.assertTrue(entered.wait(5))
+                with self.assertRaisesRegex(ContractError, "TRAINING_APPROVAL_BUSY"):
+                    publish_approval_batch(second)
+            finally:
+                release.set()
+            inventory = future.result(timeout=5)
+        before = snapshot(self.output)
+        for prepared in (first, second):
+            with self.assertRaisesRegex(ContractError, "TRAINING_APPROVAL_EXISTS|TRAINING_INVENTORY_EXISTS"):
+                publish_approval_batch(prepared)
+        self.assertEqual(snapshot(self.output), before)
+        self.assertEqual(len(inventory["episodes"]), 2)
+
+    def test_server_source_change_during_publication_leaves_no_inventory(self):
+        from tools.data_factory.training_entrypoint import prepare_approval_batch, publish_approval_batch
+
+        prepared = prepare_approval_batch(self.request, self.output, "server-human")
+        native_write = training_approval._write_exclusive
+        def change_after_write(path, value, code):
+            native_write(path, value, code)
+            if path.name == "episode-2.approval.json":
+                (self.dataset / "unchanged.marker").write_text("changed after publication began")
+        with mock.patch.object(training_approval, "_write_exclusive", side_effect=change_after_write):
+            with self.assertRaisesRegex(ContractError, "TRAINING_INPUT_CHANGED"):
+                publish_approval_batch(prepared)
+        self.assertFalse((self.output / "training_approved.json").exists())
+
+    def test_server_partial_publication_cannot_be_replayed_into_inventory(self):
+        from tools.data_factory.training_entrypoint import prepare_approval_batch, publish_approval_batch
+
+        prepared = prepare_approval_batch(self.request, self.output, "server-human")
+        native_write = training_approval._write_exclusive
+        def interrupted_write(path, value, code):
+            if path.name == "episode-2.approval.json":
+                raise KeyboardInterrupt()
+            return native_write(path, value, code)
+        with mock.patch.object(training_approval, "_write_exclusive", side_effect=interrupted_write):
+            with self.assertRaises(KeyboardInterrupt):
+                publish_approval_batch(prepared)
+        self.assertFalse((self.output / "training_approved.json").exists())
+        with self.assertRaisesRegex(ContractError, "TRAINING_APPROVAL_EXISTS"):
+            publish_approval_batch(prepared)
+        self.assertFalse((self.output / "training_approved.json").exists())
+
     def test_native_batch_one_real_terminal_decision_and_exact_subset(self):
         before = snapshot(self.dataset)
         with self.terminal() as (reader, terminal):
