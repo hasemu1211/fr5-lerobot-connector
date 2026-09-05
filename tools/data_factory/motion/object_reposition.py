@@ -70,6 +70,10 @@ def yaw_preserving_destination(
     """Use destination sheet position/workspace while preserving source yaw."""
     source = _pose(source_pose)
     destination = _pose(destination_pose)
+    if source["yaw_deg"] == destination["yaw_deg"]:
+        # A same-frame round trip adds float drift to the exact next-source
+        # pose and its scene slot digest, despite requiring no rotation.
+        return destination
     sheet_xy = rotate_xy(
         (destination["x_mm"], destination["y_mm"]),
         destination["yaw_deg"],

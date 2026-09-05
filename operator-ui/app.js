@@ -49,6 +49,7 @@ let cancelPending = false;
 let watchController;
 let manualStep;
 let renderedWorkflow;
+let renderedWorkflowStep;
 
 const escapeHtml = (value) => String(value).replace(/[&<>"']/g, (character) => ({
   "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
@@ -821,19 +822,21 @@ function showStep(name, focus = false) {
     else button.removeAttribute("aria-current");
     button.classList.toggle("active", active);
   });
-  manualStep = name;
+  if (focus) manualStep = name;
   if (focus) document.querySelector(`#step-${name}`).focus({preventScroll: true});
 }
 
 function renderSteps(view) {
   const unlocked = unlockedSteps(view);
+  const automaticStep = workflowStep(view);
   document.querySelectorAll("[data-step-target]").forEach((button) => {
     button.disabled = !unlocked.has(button.dataset.stepTarget);
     button.closest("li").classList.toggle("complete", FLOW.indexOf(button.dataset.stepTarget) < FLOW.indexOf(workflowStep(view)));
   });
-  if (renderedWorkflow !== view.runtime.workflow_state) manualStep = undefined;
+  if (renderedWorkflow !== view.runtime.workflow_state && manualStep === renderedWorkflowStep) manualStep = undefined;
   renderedWorkflow = view.runtime.workflow_state;
-  showStep(manualStep && unlocked.has(manualStep) ? manualStep : workflowStep(view));
+  renderedWorkflowStep = automaticStep;
+  showStep(manualStep && unlocked.has(manualStep) ? manualStep : automaticStep);
 }
 
 function renderConnection(view) {
@@ -1569,6 +1572,7 @@ function renderResults(view) {
     const passed = history.filter((item) => (item.technical_evidence?.status ?? item.technical_status) === "PASS").length;
     delete reviewQueue.dataset.reviewBindingDigest;
     delete reviewQueue.dataset.reviewRenderKey;
+    delete reviewQueue.dataset.reviewReasonDraft;
     reviewQueue.innerHTML = `<div class="notice"><strong>분류 대기 0개</strong><span>${escapeHtml(passed)}개 에피소드가 기술 검사를 통과했습니다. 보존 상태와 학습 사용 승인은 별도입니다.</span></div>`;
     return;
   }
@@ -1587,14 +1591,21 @@ function renderResults(view) {
     pending, reasons, pose,
   ]);
   if (reviewQueue.dataset.reviewRenderKey === reviewRenderKey) return;
-  if (document.activeElement === document.querySelector("#candidate-reason")
-      && reviewQueue.dataset.reviewBindingDigest === review.review_binding_digest) return;
+  const previousReason = document.querySelector("#candidate-reason");
+  const sameBinding = reviewQueue.dataset.reviewBindingDigest === review.review_binding_digest;
+  if (sameBinding && previousReason) reviewQueue.dataset.reviewReasonDraft = previousReason.value;
+  if (!sameBinding) delete reviewQueue.dataset.reviewReasonDraft;
+  const reasonDraft = reviewQueue.dataset.reviewReasonDraft ?? "";
+  const restoreFocus = document.activeElement === previousReason;
   reviewQueue.dataset.reviewBindingDigest = review.review_binding_digest;
   reviewQueue.dataset.reviewRenderKey = reviewRenderKey;
   reviewQueue.innerHTML = `<section class="review-card" aria-labelledby="review-queue-title"><div><p class="step-number">수집 데이터 분류</p><h3 id="review-queue-title">기술 검사를 통과한 에피소드를 분류하세요.</h3>${context ? `<p>${escapeHtml(context)}</p>` : ""}</div>
     ${pending ? `<label for="candidate-reason">실패 또는 보류 이유<select id="candidate-reason" required><option value="">이유 선택</option>${reasons.map((reason) => `<option value="${escapeHtml(reason)}">${escapeHtml(message("review_reason", reason))}</option>`).join("")}</select></label>
     <div class="admission-actions"><button type="button" data-review-choice="PASS">사용 후보</button><button type="button" data-review-choice="FAIL">제외</button><button type="button" data-review-choice="UNCERTAIN">보류</button></div>` : `<p>${escapeHtml(semanticReviewLabel(review.status))}</p>`}
     <p class="cell-help">이 분류는 데이터의 사후 사용 후보 상태만 기록합니다. 파일 보존과 학습 사용 승인은 바꾸지 않습니다.</p></section>`;
+  const nextReason = document.querySelector("#candidate-reason");
+  if (nextReason && reasons.includes(reasonDraft)) nextReason.value = reasonDraft;
+  if (restoreFocus) nextReason?.focus({preventScroll: true});
 }
 
 function renderNext(view) {
@@ -1726,6 +1737,7 @@ async function submitIntent(op, payload = intentPayload(op)) {
     if (!response.ok || !result.ok) {
       const code = typeof result.code === "string" ? result.code : "VERSION_CONFLICT";
       rejectionCode = code;
+      if (op === "review_candidate") recoveryNotice = `${humanReason(code)}. 최신 분류 대상을 다시 확인하고 분류를 다시 선택하세요. 요청은 실행되지 않았습니다.`;
     }
   } catch (error) {
     recoveryNotice = "요청 응답을 받지 못해 최신 상태로 다시 맞췄습니다. 요청을 재전송하지 않았습니다.";

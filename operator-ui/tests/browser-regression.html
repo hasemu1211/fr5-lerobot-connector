@@ -748,11 +748,40 @@
           && JSON.stringify(canonicalHistory.map((item) => [item.intent_binding.run_id, item.result_digest])) === JSON.stringify(canonicalRefs), "pre-episode failure preserves 32 canonical episodes and never renders episode 33");
         renderResults(currentView);
         check(document.querySelectorAll("[data-review-choice]").length === 3 && ["사용 후보", "제외", "보류"].every((label) => document.querySelector("#review-queue").textContent.includes(label)) && document.querySelector("#review-queue").textContent.includes("파일 보존과 학습 사용 승인"), "semantic review labels data use candidate state without changing retention or training authority");
-        const focusedReason = document.querySelector("#candidate-reason");
-        focusedReason.value = focusedReason.options[1].value;
-        focusedReason.focus();
-        await loadView();
-        check(document.querySelector("#candidate-reason") === focusedReason && document.activeElement === focusedReason && focusedReason.value, "status refresh preserves the focused candidate reason control");
+        const reviewView = currentView;
+        let reasonControl = document.querySelector("#candidate-reason");
+        const chosenReason = reasonControl.options[1].value;
+        reasonControl.value = chosenReason;
+        reasonControl.focus();
+        render({...reviewView, candidate_review: {...reviewView.candidate_review, queue_remaining: reviewView.candidate_review.queue_remaining + 1}});
+        reasonControl = document.querySelector("#candidate-reason");
+        check(reasonControl.value === chosenReason && document.activeElement === reasonControl
+          && document.querySelector("#review-queue").textContent.includes(`남은 분류 ${reviewView.candidate_review.queue_remaining + 1}개`), "same candidate refresh updates queue context while preserving the focused reason control");
+        document.querySelector("#step-results").focus();
+        render({...reviewView, candidate_review: {...reviewView.candidate_review, queue_remaining: reviewView.candidate_review.queue_remaining + 2}});
+        check(document.querySelector("#candidate-reason").value === chosenReason, "same candidate refresh preserves the chosen reason after focus loss");
+        render({...reviewView, candidate_review: {...reviewView.candidate_review, review_binding_digest: "sha256:abababababababababababababababababababababababababababababababab"}});
+        check(document.querySelector("#candidate-reason").value === "", "changed candidate binding clears the prior reason draft");
+
+        render({...reviewView, runtime: {...reviewView.runtime, workflow_state: "RUNNING"}});
+        showStep("results", true);
+        render({...reviewView, runtime: {...reviewView.runtime, workflow_state: "CANCELLING"}});
+        check(!document.querySelector("#step-results").hidden, "explicit results view survives a live workflow transition");
+        render(reviewView);
+
+        reasonControl = document.querySelector("#candidate-reason");
+        reasonControl.value = chosenReason;
+        const reviewPostsBeforeConflict = posted.filter((item) => item.body.op === "review_candidate").length;
+        postResult = "stale";
+        document.querySelector('[data-review-choice="FAIL"]').click();
+        await waitFor(() => !intentBusy);
+        const reviewPostsAfterConflict = posted.filter((item) => item.body.op === "review_candidate");
+        check(document.querySelector("#connection-banner").textContent.includes("최신 분류 대상을 다시 확인하고 분류를 다시 선택하세요")
+          && document.querySelector("#candidate-reason").value === chosenReason, "stale semantic review requires an explicit human retry while preserving the same-bound draft");
+        check(reviewPostsAfterConflict.length === reviewPostsBeforeConflict + 1
+          && reviewPostsAfterConflict.at(-1).body.payload.review_binding_digest === reviewView.candidate_review.review_binding_digest
+          && reviewPostsAfterConflict.at(-1).body.payload.reason === chosenReason, "stale semantic review is never replayed and remains digest-bound");
+        postResult = "accepted";
         check(document.querySelectorAll("#coverage-summary progress").length === 3, "coverage renders without a chart dependency");
         check(!document.querySelector("#technical-details").open && document.querySelector("#technical-content").textContent.includes("manifest_digest"), "raw digests stay in collapsed technical details");
 

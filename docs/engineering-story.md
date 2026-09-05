@@ -18,6 +18,18 @@ timestamp, queue drop, RGB decode와 row 구조는 기계적으로 검사할 수
 
 catalog에 값이 있거나 plan이 성공했다는 사실은 물리 적격화, semantic 성공 또는 training authorization을 증명하지 않는다. 검증 가능한 caller와 fresh evidence가 없는 post-cutoff interface, physical result, mutable episode count는 공개 capability로 승격하지 않는다. 제공 범위와 제한은 [데이터팩토리 계약](data-factory.md)과 [학습과 평가](training-and-evaluation.md)에서 소비한다.
 
+## 실제 중단을 어떻게 회귀 근거로 남기는가
+
+연속 pick-place 수집에서 로봇이 놓은 위치와 다음 episode의 시작 위치가 같은데도 서버가 다음 시작을 거절한 사례가 있었다. 원인은 같은 yaw의 좌표를 회전했다가 역회전하며 생긴 부동소수점 오차였다. 위치 허용오차를 넓히는 대신, 변환이 필요 없는 경우 원래 좌표를 그대로 전달해 scene slot과 다음 source의 정확한 결속을 유지한다.
+
+실제 실패 좌표는 [좌표 회귀 테스트](../tests/data_factory/test_object_reposition.py)에, source·slot·run 결속과 잘못된 다음 위치의 거절은 [runner 계약 테스트](../tests/data_factory/test_run_job.py)에 남긴다. 아래 명령은 로봇 없이 이 오류와 fail-closed 경계를 검증한다. 통과 자체가 실물 연속 수집 성공률을 증명하지는 않는다.
+
+```sh
+direnv exec . python3 -m unittest \
+  tests.data_factory.test_object_reposition \
+  tests.data_factory.test_run_job.RunJobTest.test_chain_landed_source_is_bound_by_the_root_resolver_before_live_side_effects
+```
+
 ## claim → output → evidence → limitation → next consumer
 
 | claim | output | evidence | limitation | next consumer |
@@ -27,3 +39,5 @@ catalog에 값이 있거나 plan이 성공했다는 사실은 물리 적격화, 
 | checkpoint를 비교할 수 있다 | checkpoint digest에 결합된 offline evaluation receipt | `python3 -m unittest tests.data_factory.test_training_orchestration` → `OK` | rollout·physical effectiveness 미제공 | 학습과 평가 |
 
 각 claim은 위 표의 output과 executable evidence로만 소비한다. 측정되지 않은 효율, 성공률, 미래 기능은 이 문서의 결론이 아니다.
+
+증거를 다시 확인할 때는 검증한 Git cutoff, 실행 명령, 정본 산출물 위치와 알려진 한계를 함께 확인한다. 코드 변경은 테스트를 다시 실행할 이유이고, 새 runtime 관찰은 기존 실험과 구별할 새 근거다. 원본 dataset과 per-run evidence를 문서 폴더로 복사하거나, 과거의 통과 숫자를 현재 상태로 유지하지 않는다.

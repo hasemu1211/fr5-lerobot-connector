@@ -58,6 +58,32 @@ class ObjectRepositionTest(unittest.TestCase):
         ):
             self.assertAlmostEqual(actual, expected)
 
+    def test_same_yaw_keeps_the_exact_next_source_pose(self):
+        # Real pilot: a rotate/inverse-rotate changed y by 3.55e-15 mm,
+        # so the exact scene/next-source binding rejected episode four.
+        destination = {
+            "place_id": "PLACE_B", "yaw_deg": 32.01437316452481,
+            "x_mm": 59.99527764922155, "y_mm": 0.17407256236996815,
+        }
+        source = {**destination, "place_id": "PLACE_A", "x_mm": -60.0}
+        before = copy.deepcopy((source, destination))
+        result = yaw_preserving_destination(source, destination)
+        self.assertEqual(result, destination)
+        self.assertIsNot(result, destination)
+        self.assertEqual((source, destination), before)
+
+    def test_equivalent_canonical_yaw_keeps_destination_coordinates(self):
+        destination = {
+            "place_id": "PLACE_B", "yaw_deg": 37.0,
+            "x_mm": 59.99527764922155, "y_mm": 0.17407256236996815,
+        }
+        for source_yaw in (37.0, 397.0, -323.0):
+            with self.subTest(source_yaw=source_yaw):
+                self.assertEqual(yaw_preserving_destination(
+                    {**destination, "place_id": "PLACE_A", "yaw_deg": source_yaw},
+                    destination,
+                ), destination)
+
     def test_both_entry_states_share_one_non_recording_contract(self):
         target = {
             "place_id": "PLACE_A",

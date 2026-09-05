@@ -262,12 +262,26 @@ class DataFactoryOperatorUiStaticTest(unittest.TestCase):
         ):
             self.assertIn(marker, self.html + self.js)
 
-    def test_status_refresh_preserves_candidate_reason_control(self):
+    def test_status_refresh_preserves_only_same_candidate_reason_draft(self):
         for marker in (
             "reviewRenderKey",
             "reviewBindingDigest",
-            'document.activeElement === document.querySelector("#candidate-reason")',
-            "status refresh preserves the focused candidate reason control",
+            "sameBinding",
+            "reasonDraft",
+            "reviewReasonDraft",
+            "reasons.includes(reasonDraft)",
+            "same candidate refresh preserves the chosen reason after focus loss",
+            "changed candidate binding clears the prior reason draft",
+        ):
+            self.assertIn(marker, self.js + self.browser)
+
+    def test_live_revision_preserves_explicit_results_and_stale_review_is_single_shot(self):
+        for marker in (
+            "renderedWorkflowStep",
+            "explicit results view survives a live workflow transition",
+            "stale semantic review requires an explicit human retry",
+            "stale semantic review is never replayed",
+            "최신 분류 대상을 다시 확인하고 분류를 다시 선택하세요",
         ):
             self.assertIn(marker, self.js + self.browser)
 

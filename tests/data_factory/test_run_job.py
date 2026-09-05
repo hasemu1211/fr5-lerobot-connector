@@ -2592,6 +2592,10 @@ class RunJobTest(unittest.TestCase):
         self.assertEqual(resolve.call_args.kwargs["release_pose"], binding)
 
     def test_chain_landed_source_is_bound_by_the_root_resolver_before_live_side_effects(self):
+        next_source_pose = {
+            "place_id": "place-a", "yaw_deg": 32.01437316452481,
+            "x_mm": 59.99527764922155, "y_mm": 0.17407256236996815,
+        }
         def landed():
             directory = tempfile.TemporaryDirectory()
             self.addCleanup(directory.cleanup)
@@ -2604,7 +2608,9 @@ class RunJobTest(unittest.TestCase):
             )
             source_slot = run_job.release_slot(
                 robot_system_id="fr5-lab-a",
-                pose={"place_id": "place-a", "yaw_deg": 0, "x_mm": 0, "y_mm": 0},
+                pose=yaw_preserving_destination(
+                    {**next_source_pose, "place_id": "place-b"}, next_source_pose,
+                ),
                 object_profile_id="wood-cube", exclusion_geometry_digest=run_job.canonical_digest({"shape": "BOX", "dimensions_mm": [25, 25, 25]}),
                 role="DESTINATION_THEN_NEXT_SOURCE",
             )
@@ -2626,8 +2632,8 @@ class RunJobTest(unittest.TestCase):
 
         validated = {
             "normalized_job": {
-                **JOB, "job_id": "run-2", "place_id": "place-a", "yaw_deg": 0,
-                "x_mm": 0, "y_mm": 0, "object_profile_id": "wood-cube",
+                **JOB, **next_source_pose, "job_id": "run-2",
+                "object_profile_id": "wood-cube",
             },
             "object_profile": {"dimensions_mm": [25, 25, 25]},
         }
@@ -2638,9 +2644,21 @@ class RunJobTest(unittest.TestCase):
             "slot_digest": run_job.canonical_digest(landed_state["scene_state"]["slot_allocations"][source_slot["slot_id"]]),
             "allowed_run_id": "run-2",
         }
+        before_binding = store.snapshot()
         binding = run_job._scene_binding(validated, release_pose, "run-2", root=root)
         self.assertEqual(binding["source_slot"], expected_source)
         self.assertEqual(binding["scene_state_digest"], landed_state["scene_state_digest"])
+        for changed_pose in (
+            {"y_mm": 0.1740725623699646}, {"x_mm": 60.0}, {"yaw_deg": 32.0},
+        ):
+            with self.subTest(changed_pose=changed_pose):
+                mismatched = {
+                    **validated,
+                    "normalized_job": {**validated["normalized_job"], **changed_pose},
+                }
+                with self.assertRaisesRegex(run_job.ContractError, "SCENE_OBJECT_NOT_READY"):
+                    run_job._scene_binding(mismatched, release_pose, "run-2", root=root)
+        self.assertEqual(store.snapshot(), before_binding)
 
         same_slot_binding = run_job._scene_binding(
             validated, source_slot["pose"], "run-2", root=root,
@@ -2658,7 +2676,7 @@ class RunJobTest(unittest.TestCase):
         human_root = Path(human_directory.name) / "cells"
         run_job.SceneStateStore(human_root, "fr5-lab-a").update_object(
             instance_id="cube-1", object_profile_id="wood-cube", state="ON_SURFACE",
-            pose={"place_id": "place-a", "yaw_deg": 0, "x_mm": 0, "y_mm": 0},
+            pose=next_source_pose,
             source="HUMAN", updated_by="operator", expected_revision=0,
         )
         self.assertNotIn("source_slot", run_job._scene_binding(validated, release_pose, "run-2", root=human_root))
@@ -2667,7 +2685,7 @@ class RunJobTest(unittest.TestCase):
         stale_scene = copy.deepcopy(stale_state["scene_state"])
         stale_scene["revision"] += 1
         stale_scene["objects"]["cube-1"].update({
-            "pose": {"place_id": "place-a", "yaw_deg": 0, "x_mm": -60, "y_mm": 0},
+            "pose": {**next_source_pose, "x_mm": -60, "y_mm": 0},
             "source": "HUMAN",
         })
         stale_store._path().write_text(json.dumps(stale_scene), encoding="utf-8")
@@ -2676,7 +2694,7 @@ class RunJobTest(unittest.TestCase):
         with self.assertRaisesRegex(run_job.ContractError, "SCENE_SLOT_NOT_READY"):
             run_job._scene_binding(
                 stale_validated,
-                {"place_id": "place-a", "yaw_deg": 0, "x_mm": 0, "y_mm": 0},
+                next_source_pose,
                 "new-run",
                 root=stale_root,
             )
