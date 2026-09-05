@@ -2825,6 +2825,12 @@ feedback:
                     ],
                 )
                 live.assert_called_once()
+                retained = live.call_args.kwargs["episode_ledger_context"]
+                self.assertEqual(
+                    retained["compiled_authoring"],
+                    console.campaign_operator.compiled_authoring_evidence(),
+                )
+                self.assertEqual(retained["compiled_authoring"]["manifest"], retained["manifest"])
             finally:
                 console.close()
 

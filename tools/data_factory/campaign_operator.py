@@ -8,6 +8,7 @@ from typing import Any, Callable, Mapping
 
 from tools.data_factory.campaign_authoring import (
     compile_collection_campaign,
+    validate_campaign_compilation_receipt,
     validate_campaign_draft,
 )
 from tools.data_factory.campaign_session import CampaignSession, DISPOSITIONS
@@ -17,7 +18,7 @@ from tools.data_factory.operator.setup.contracts import (
     validate_runtime_root_binding,
     validate_runtime_start_binding,
 )
-from tools.fr5_data_factory import ContractError, SAFE_ID
+from tools.fr5_data_factory import ContractError, SAFE_ID, canonical_digest
 
 
 PROJECTION_SCHEMA = "data_factory.campaign_operator_projection.v1"
@@ -49,6 +50,27 @@ SIDE_EFFECT_COUNTERS = FAKE_RECORDER_COUNTERS + FORBIDDEN_FAKE_COUNTERS
 EpisodeCall = Callable[
     [dict[str, Any], object, threading.Event, dict[str, Any]], Mapping[str, Any],
 ]
+
+AUTHORING_EVIDENCE_SCHEMA = "data_factory.compiled_authoring_evidence.v1"
+
+
+def validate_compiled_authoring_evidence(value: object) -> dict[str, Any]:
+    """Retained compiler inputs, checked by the compiler's existing owner."""
+    if not isinstance(value, Mapping) or set(value) != {
+        "schema_version", "hypothesis", "draft", "manifest",
+        "compilation_receipt", "authoring_digest",
+    } or value.get("schema_version") != AUTHORING_EVIDENCE_SCHEMA:
+        raise ContractError("COMPILED_AUTHORING_EVIDENCE_FIELDS")
+    result = copy.deepcopy(dict(value))
+    if result["authoring_digest"] != canonical_digest({
+        key: item for key, item in result.items() if key != "authoring_digest"
+    }):
+        raise ContractError("COMPILED_AUTHORING_EVIDENCE_DIGEST")
+    validate_campaign_compilation_receipt(
+        result["compilation_receipt"], hypothesis=result["hypothesis"],
+        draft=result["draft"], manifest=result["manifest"],
+    )
+    return result
 
 
 def _subsystems(value: object) -> dict[str, dict[str, str]]:
@@ -274,6 +296,20 @@ class CampaignOperator:
                 "receipt_digest": self.compilation_receipt["receipt_digest"],
                 "authority": self.manifest["authority"],
             }
+
+    def compiled_authoring_evidence(self) -> dict[str, Any]:
+        """Snapshot the exact compiled sources for postcommit reuse."""
+        with self._lock:
+            if self.manifest is None or self.compilation_receipt is None:
+                raise ContractError("CAMPAIGN_OPERATOR_NOT_COMPILED")
+            value = copy.deepcopy({
+                "schema_version": AUTHORING_EVIDENCE_SCHEMA,
+                "hypothesis": self.hypothesis, "draft": self.draft,
+                "manifest": self.manifest,
+                "compilation_receipt": self.compilation_receipt,
+            })
+            value["authoring_digest"] = canonical_digest(value)
+            return validate_compiled_authoring_evidence(value)
 
     def _activate_physical(self) -> None:
         if self.effect_scope != "PHYSICAL" or self._physical_activated:

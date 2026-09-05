@@ -2010,7 +2010,10 @@ def _write_resource_reference(payload, monitor, recorder_evidence, profile):
 
 def _validate_episode_ledger_context(value, *, episode_binding, run_id):
     """Bind campaign-owned immutable inputs before any postcommit file is written."""
-    if not isinstance(value, Mapping) or set(value) != EPISODE_LEDGER_CONTEXT_FIELDS:
+    if not isinstance(value, Mapping) or set(value) not in (
+        EPISODE_LEDGER_CONTEXT_FIELDS,
+        EPISODE_LEDGER_CONTEXT_FIELDS | {"compiled_authoring"},
+    ):
         raise ContractError("EPISODE_LEDGER_CONTEXT_FIELDS")
     manifest = value["manifest"]
     intent = value["intent"]
@@ -2040,7 +2043,14 @@ def _validate_episode_ledger_context(value, *, episode_binding, run_id):
         or episode_binding.get("slot_digest") != canonical_digest(slot)
     ):
         raise ContractError("EPISODE_LEDGER_CONTEXT_BINDING")
-    return {"manifest": manifest, "intent": intent}
+    result = {"manifest": manifest, "intent": intent}
+    if "compiled_authoring" in value:
+        from tools.data_factory.campaign_operator import validate_compiled_authoring_evidence
+        authoring = validate_compiled_authoring_evidence(value["compiled_authoring"])
+        if authoring["manifest"] != manifest:
+            raise ContractError("EPISODE_LEDGER_AUTHORING_BINDING")
+        result["compiled_authoring"] = authoring
+    return result
 
 
 def _json_artifact_ref(path, payload):
@@ -2185,6 +2195,10 @@ def _write_episode_ledger(
         "execution": (run_dir / "execution_response.json", execution_document),
         "runtime_binding": (run_dir / "runtime_episode_binding.json", copy.deepcopy(dict(episode_binding))),
     }
+    if "compiled_authoring" in context:
+        documents["compiled_authoring"] = (
+            run_dir / "compiled_authoring_evidence.json", context["compiled_authoring"],
+        )
     for path, document in documents.values():
         write_json_atomic(path, document)
     dataset_root = Path(payload["dataset_root"]).resolve(strict=True)

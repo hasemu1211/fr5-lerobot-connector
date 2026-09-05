@@ -193,6 +193,21 @@ def make_operator(
 
 
 class CampaignOperatorTests(unittest.TestCase):
+    def test_compiled_authoring_snapshot_is_exact_detached_and_requires_compile(self):
+        with tempfile.TemporaryDirectory() as directory:
+            model, ports = make_operator(directory, lifecycle_action="PLAN_ONLY")
+            with self.assertRaisesRegex(ContractError, "NOT_COMPILED"):
+                model.compiled_authoring_evidence()
+            send(model, "compile_draft", {}, "compile-for-retention")
+            value = model.compiled_authoring_evidence()
+            self.assertEqual(value["hypothesis"], model.hypothesis)
+            self.assertEqual(value["draft"], model.draft)
+            self.assertEqual(value["manifest"], model.manifest)
+            self.assertEqual(value["compilation_receipt"], model.compilation_receipt)
+            value["draft"]["revision"] += 1
+            self.assertNotEqual(value, model.compiled_authoring_evidence())
+            self.assertTrue(all(count == 0 for count in ports.counters.values()))
+
     def test_production_live_uses_the_same_serial_session_and_one_job_dag(self):
         with tempfile.TemporaryDirectory() as directory:
             model, ports = make_operator(

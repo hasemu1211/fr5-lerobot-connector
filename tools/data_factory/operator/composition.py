@@ -2849,6 +2849,7 @@ def build_physical_operator_console(
                 episode_ledger_context={
                     "manifest": holder["operator"].manifest,
                     "intent": intent,
+                    "compiled_authoring": holder["operator"].compiled_authoring_evidence(),
                 },
                 preapproval_checklist=checklist,
                 episode_instruction_binding=(

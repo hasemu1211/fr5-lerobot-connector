@@ -19,6 +19,7 @@ from tools.data_factory.episode_ledger import (
 )
 from tools.data_factory.quality.coverage_report import (
     REPORT_SCHEMA as DATA_QUALITY_SCHEMA,
+    build_coverage_report,
     validate_coverage_report,
 )
 from tools.fr5_data_factory import (
@@ -94,7 +95,7 @@ VIEW_AUTHORITY = {
 }
 CLAIM_CLASSES = frozenset({"OBSERVED", "SUGGESTED", "UNKNOWN"})
 CLAIM_SUBJECTS = frozenset({
-    "person", "background", "robot", "coverage", "quality", "rollout",
+    "person", "background", "robot", "coverage", "quality", "rollout", "semantic",
 })
 UNKNOWN_REASON_SUBJECTS = {
     "PERSON_LABELS_UNAVAILABLE": "person",
@@ -103,6 +104,7 @@ UNKNOWN_REASON_SUBJECTS = {
     "COVERAGE_NOT_MEASURED": "coverage",
     "DATA_QUALITY_ANALYSIS_UNAVAILABLE": "quality",
     "NO_CANONICAL_PHYSICAL_ROLLOUT_ANALYSIS": "rollout",
+    "SEMANTIC_PROOF_UNAVAILABLE": "semantic",
 }
 OBSERVED_VALUE_FIELDS = frozenset({"metric", "count"})
 SUGGESTED_VALUES = frozenset({"COLLECT_MORE"})
@@ -605,6 +607,105 @@ def build_collection_recommendation(
     return validate_collection_recommendation(value)
 
 
+def derive_collection_recommendation(
+    *, compiled_authoring: Mapping[str, Any],
+    episode_evidence: Sequence[Mapping[str, Any]], source_commit: str,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Measure the retained domain and advise a bounded first coverage pass.
+
+    Historical aggregate counts are deliberately not merged with these episodes:
+    their overlap is unknown. No semantic, vision or rollout conclusion is inferred.
+    """
+    from tools.data_factory.campaign_operator import validate_compiled_authoring_evidence
+
+    source = validate_compiled_authoring_evidence(compiled_authoring)
+    manifest, hypothesis = source["manifest"], source["hypothesis"]
+    summaries = _episode_summaries(episode_evidence, manifest, normalize=True)
+    bases = {item["base_condition_digest"]: item for item in hypothesis["base_conditions"]}
+    jobs = {item["resolved_job_digest"]: item["normalized_job"] for item in hypothesis["resolver_receipts"]}
+    episodes = []
+    for evidence in sorted(episode_evidence, key=lambda item: item["manifest_order_index"]):
+        ledger, state = evidence["ledger"], evidence["state"]
+        semantic = state["review"]["semantic_status"]
+        episodes.append({
+            "episode_id": ledger["episode"]["run_id"],
+            "condition": bases[ledger["bindings"]["base_condition_digest"]]["coverage_condition"],
+            "admission_state": (
+                "HUMAN_SEMANTIC_PASS" if semantic == "PASS"
+                else "PENDING_REVIEW" if semantic == "PENDING"
+                else "REJECTED"
+            ),
+            "evidence_digests": {
+                "job_spec": canonical_digest(jobs[ledger["bindings"]["resolved_job_digest"]]),
+                "technical_validator_result": ledger["artifacts"]["technical"]["artifact_digest"],
+                "candidate_admission": canonical_digest(evidence["candidate"]),
+            },
+            "trajectory_continuity": {},
+        })
+    previous = hypothesis["coverage_report"]
+    report = build_coverage_report(
+        collection_profile_id=previous["collection_profile_id"],
+        domain=[cell["condition"] for cell in previous["cells"]], episodes=episodes,
+    )
+    report_digest = canonical_digest(report)
+    claims = [{
+        "claim_id": "coverage-observed", "class": "OBSERVED", "subject": "coverage",
+        "value": {"metric": "COLLECTED_EPISODE_COUNT", "count": len(summaries)},
+        "evidence_refs": [manifest["manifest_digest"], report_digest],
+        "basis_claim_ids": [], "reason_codes": [],
+    }]
+    for reason, subject in UNKNOWN_REASON_SUBJECTS.items():
+        if subject in {"person", "background", "robot", "rollout"} or (
+            subject == "semantic" and any(
+                item["state"]["review"]["semantic_status"] == "PENDING" for item in episode_evidence
+            )
+        ):
+            claims.append({
+                "claim_id": f"{subject}-unknown", "class": "UNKNOWN", "subject": subject,
+                "value": None, "evidence_refs": [], "basis_claim_ids": [],
+                "reason_codes": [reason],
+            })
+    # One attempt per unobserved qualified condition is a finite coverage proposal,
+    # not an assertion of data sufficiency or a reason to repeat approved cells.
+    qualified = {canonical_digest(base["coverage_condition"]) for base in bases.values()}
+    missing = [cell for cell in report["cells"] if not cell["counts"]["collected"]
+               and canonical_digest(cell["condition"]) in qualified]
+    patches = []
+    if any(cell["condition"] == report["suggest_next"] for cell in missing):
+        claims.append({
+            "claim_id": "coverage-suggested", "class": "SUGGESTED", "subject": "coverage",
+            "value": "COLLECT_MORE", "evidence_refs": [report_digest],
+            "basis_claim_ids": ["coverage-observed"], "reason_codes": ["COVERAGE_DEFICIT"],
+        })
+        count = min(len(missing), 100)
+        if count != source["draft"]["requested_count"]:
+            patches.append({
+                "change_id": "cover-unobserved-conditions", "field": "requested_count",
+                "value": count, "basis_claim_ids": ["coverage-suggested"],
+            })
+    recommendation = build_collection_recommendation(
+        recommendation_id="collection-" + canonical_digest({
+            "authoring": source["authoring_digest"], "episodes": summaries,
+            "quality": report_digest, "source_commit": source_commit,
+        })[7:31],
+        source_commit=source_commit, campaign_manifest=manifest,
+        campaign_hypothesis=hypothesis, campaign_draft=source["draft"],
+        campaign_compilation_receipt=source["compilation_receipt"],
+        episode_evidence=episode_evidence, data_quality_analysis=report,
+        data_quality_analysis_ref={
+            "availability": "AVAILABLE", "schema_version": report["schema_version"],
+            "analysis_id": report["collection_profile_id"], "analysis_digest": report_digest,
+            "reason_codes": [],
+        },
+        rollout_evidence_analysis_ref={
+            "availability": "UNAVAILABLE", "schema_version": None, "analysis_id": None,
+            "analysis_digest": None, "reason_codes": ["NO_CANONICAL_PHYSICAL_ROLLOUT_ANALYSIS"],
+        },
+        claims=claims, suggested_draft_patches=patches,
+    )
+    return report, recommendation
+
+
 def _snapshot(value: object) -> dict[str, Any]:
     snapshot = _exact(value, SNAPSHOT_FIELDS, "COLLECTION_RECOMMENDATION_SNAPSHOT_FIELDS")
     _self_digest(snapshot, "snapshot_digest", "COLLECTION_RECOMMENDATION_SNAPSHOT_DIGEST")
@@ -849,5 +950,6 @@ def project_update_draft_intent(
 __all__ = [
     "AUTHORITY", "SCHEMA_VERSION", "SNAPSHOT_SCHEMA",
     "build_collection_recommendation", "project_update_draft_intent",
+    "derive_collection_recommendation",
     "validate_collection_recommendation",
 ]

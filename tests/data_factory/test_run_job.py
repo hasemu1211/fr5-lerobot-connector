@@ -4063,10 +4063,12 @@ class RunJobTest(unittest.TestCase):
         session = run_job.RunSession(lambda value, cancel, publish: run_job.run_plan_only(
             value, cancel, publish, resolver=resolver, executor_factory=factory,
         ))
-        started = session.process(command())
-        self.assertEqual((started["ok"], started["state"]), (True, "RUNNING"))
-        result = session.events.get(timeout=1)
-        session.worker.join(1)
+        with mock.patch.object(run_job, "_write_episode_ledger", side_effect=AssertionError("plan-only retained collection evidence")) as writer:
+            started = session.process(command())
+            self.assertEqual((started["ok"], started["state"]), (True, "RUNNING"))
+            result = session.events.get(timeout=1)
+            session.worker.join(1)
+            writer.assert_not_called()
         self.assertEqual(set(result), run_job.EVENT_KEYS)
         self.assertEqual((result["ok"], result["state"], result["origin_op_id"]), (True, "PLANNED", "run-1"))
         self.assertEqual(result["data"]["motion_program_digest"], run_job.canonical_digest(motion()))
