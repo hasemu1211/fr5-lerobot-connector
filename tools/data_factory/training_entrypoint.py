@@ -1,7 +1,7 @@
 """Public offline admission, human approval and selected-episode launch connection.
 
 No consent is accepted from arguments, stdin, environment variables or JSON.
-The only approval writer is training_approval.issue_training_approval (/dev/tty).
+Single-episode and exact-batch decisions both require a controlling /dev/tty.
 """
 from __future__ import annotations
 
@@ -11,6 +11,8 @@ if __package__ in {None, ""}:
     sys.path.pop(0)
 
 import argparse
+import copy
+from datetime import datetime, timezone
 import json
 from pathlib import Path
 import shlex
@@ -199,18 +201,69 @@ def prepare_approvals(request: dict, output: Path, approved_by: str) -> tuple[di
     return dataset, drafts
 
 
-def approve(request: dict, output: Path, approved_by: str, *, dry_run: bool) -> dict:
-    dataset, drafts = prepare_approvals(request, output, approved_by)
-    if dry_run:
-        return {"status": "PREVIEW_NOT_APPROVED", "dataset_identity": dataset, "episodes": drafts,
-                "inventory_path": str(output / "training_approved.json"), "human_confirmation": "REQUIRED_PER_EPISODE_ON_DEV_TTY"}
-    entries = []
+def _batch_summary(dataset: dict, drafts: list[dict], batch_digest: str, output: Path, approved_by: str) -> str:
+    lines = [
+        "HUMAN TRAINING APPROVAL — EXACT FROZEN BATCH",
+        f"Dataset: {dataset['dataset_id']}  Repo: {dataset['repo_id']}",
+        f"Root: {dataset['dataset_root']}",
+        f"Frozen revision: {dataset['dataset_digest']}",
+        f"Approver: {approved_by}",
+        f"Selected episodes ({len(drafts)}): " + ", ".join(str(d["approval_arguments"]["episode_index"]) for d in drafts),
+    ]
     for draft in drafts:
         args = draft["approval_arguments"]
-        if approval.current_dataset_identity(request["dataset_root"], repo_id=request["repo_id"], dataset_id=request["dataset_id"]) != dataset:
-            raise ContractError("TRAINING_DATASET_CHANGED")
+        lines.extend([
+            f"  [{args['episode_index']}] {args['episode_id']} — technical PASS; semantic PASS by {draft['reviewer_id']}",
+            f"    Content: {args['episode_content_digest']}",
+            f"    Technical: {args['technical_validator_digest']} ({args['technical_validator_path']})",
+            f"    Semantic: {args['human_semantic_evidence_digest']} ({args['human_semantic_evidence_path']})",
+            f"    Provenance: {args['episode_provenance_digest']} ({draft['provenance']['schema_version']})",
+        ])
+    lines.extend([
+        f"Exact batch binding: {batch_digest}",
+        f"New inventory: {output / 'training_approved.json'}",
+        "One decision approves every listed episode in this revision for training admission.",
+        "It does not start training or grant robot/hardware execution authority.",
+        "Any other response refuses the whole batch; no approval or inventory will be published.",
+    ])
+    return "\n".join(lines)
+
+
+def approve(request: dict, output: Path, approved_by: str, *, dry_run: bool) -> dict:
+    # Freeze caller-owned selection as well as the evidence. There is no caller
+    # supplied confirmation, consent flag, or production confirmation callback.
+    request = copy.deepcopy(request)
+    output = output.resolve() if not output.is_symlink() else output
+    dataset, drafts = prepare_approvals(request, output, approved_by)
+    reviewed_at = datetime.now(timezone.utc)
+    documents = [approval._prepare_training_approval(
+        **{**draft["approval_arguments"], "episode_provenance_path": draft["provenance"]},
+        clock=lambda: reviewed_at,
+    ) for draft in drafts]
+    batch_digest = approval._batch_digest(documents)
+    summary = _batch_summary(dataset, drafts, batch_digest, output, approved_by)
+    if dry_run:
+        return {"status": "PREVIEW_NOT_APPROVED", "dataset_identity": dataset, "episodes": drafts,
+                "inventory_path": str(output / "training_approved.json"),
+                "human_confirmation": "REQUIRED_ONCE_FOR_EXACT_BATCH_ON_DEV_TTY", "review_summary": summary}
+    approval._confirm_human_training_approval("APPROVE BATCH " + batch_digest.removeprefix("sha256:")[:12], summary=summary)
+    # The complete source graph (including seed/ledger sources, metadata, and
+    # dataset bytes) must still derive exactly what the human just reviewed.
+    if prepare_approvals(request, output, approved_by) != (dataset, drafts):
+        raise ContractError("TRAINING_INPUT_CHANGED")
+    rechecked = [approval._prepare_training_approval(
+        **{**draft["approval_arguments"], "episode_provenance_path": draft["provenance"]},
+        clock=lambda: reviewed_at,
+    ) for draft in drafts]
+    if rechecked != documents:
+        raise ContractError("TRAINING_INPUT_CHANGED")
+    entries = []
+    for draft, document in zip(drafts, documents):
+        args = draft["approval_arguments"]
+        issued = {**document, "schema_version": approval.BATCH_APPROVAL_SCHEMA, "batch_digest": batch_digest}
+        approval.validate_training_approval(issued)
         approval._write_exclusive(Path(args["episode_provenance_path"]), draft["provenance"], "TRAINING_APPROVAL_EXISTS")
-        issued = approval.issue_training_approval(draft["output_path"], **args)
+        approval._write_exclusive(Path(draft["output_path"]), issued, "TRAINING_APPROVAL_EXISTS")
         entries.append({
             "dataset_identity_digest": canonical_digest(dataset),
             "episode_id": args["episode_id"], "episode_index": args["episode_index"],
@@ -246,11 +299,13 @@ Existing production Collection ledger evidence is required. Seed-based callers
 may replace episode_ledger_path with seed_manifest_path and manifest_slot_id.
 This command does not invent manifest assignments, transfer Curator approval,
 rewrite relocated source roots, or approve unreviewed episodes.
-Run with --dry-run first, then without it in the human's terminal; each episode
-requires the exact digest-bound /dev/tty confirmation. The output inventory is
+Run with --dry-run first, then without it in the human's terminal. Review the
+exact frozen batch summary and confirm once on /dev/tty for all listed episodes.
+Per-episode evidence remains independent. The output inventory is
 OUTPUT_DIR/training_approved.json and must remain outside the dataset.
-An interrupted approval may leave exclusive per-episode artifacts but no inventory;
-preserve them and use a new output directory for a new reviewed attempt.''')
+An interrupted publication may leave exclusive per-episode artifacts; an incomplete
+batch cannot form a valid inventory. Preserve them and use a new output directory
+for a new reviewed attempt. This command never starts training or robot execution.''')
     human.add_argument("--request", type=Path, required=True)
     human.add_argument("--output-dir", type=Path, required=True, help="Existing directory outside the dataset; new exclusive artifacts only")
     human.add_argument("--approved-by", required=True)
