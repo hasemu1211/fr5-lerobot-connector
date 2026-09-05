@@ -29,7 +29,7 @@
 1. recorder가 source와 action/state timestamp 및 transaction 상태를 저장한다.
 2. `tools/validate_lerobot_dataset.py`가 구조·시간·RGB와 필요한 motion 조건을 검사한다.
 3. 사람은 preview에서 task object, gripper/fingers, workspace와 target area가 보이는지 확인한다.
-4. validator PASS와 사람의 preview 승인이 모두 있을 때만 별도의 `training_approved.json`을 만든다.
+4. technical PASS와 human semantic PASS를 확인한 뒤, 별도의 사람 학습 승인으로 dataset 밖에 승인 목록을 발급한다. 파일 존재만으로 허가하지 않으며 정확한 절차는 [학습과 평가](training-and-evaluation.md)가 소유한다.
 
 어느 단계도 policy 성능, camera의 의미 이해, 실물 rollout 성공을 증명하지 않는다. 실패 episode를 성공 수량에 넣지 않으며, HIL 전용 확인은 production training approval과 분리한다.
 
