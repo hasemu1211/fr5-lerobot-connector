@@ -1,5 +1,19 @@
 ## ADDED Requirements
 
+### Requirement: Human training decisions are available in the operator Web UI
+
+The operator SHALL offer a review-only Web UI mode over the canonical prepared exact-batch approval transaction. The server SHALL retain the prepared batch, source selection, output directory and configured operator identity; the browser SHALL only choose approval or refusal against the displayed batch and current session. The interface SHALL distinguish technical PASS, semantic PASS and training authorization, disclose its local unauthenticated identity boundary, and SHALL NOT require typed terminal confirmation. This mode SHALL expose no collection, robot, recorder or trainer operations. Existing terminal approval SHALL remain supported through the same publisher.
+
+#### Scenario: A person approves the displayed frozen batch
+- **WHEN** the person explicitly chooses training use for the currently displayed exact batch
+- **THEN** the canonical publisher revalidates the input graph and exclusively publishes the existing approval inventory
+- **AND** no training or physical execution starts.
+
+#### Scenario: The request is stale, repeated, refused or loses its response
+- **WHEN** the batch or session differs, a decision repeats, the person refuses, or publication has an uncertain response
+- **THEN** the UI does not automatically retry approval or substitute a new batch
+- **AND** refusal publishes nothing; incomplete publication does not become an approved inventory; refreshed server state determines what is known.
+
 ### Requirement: Native training consumes only admitted learning inputs
 
 The public training path SHALL revalidate the human-approved frozen inventory, exact selected episodes and camera/task contract before running the official trainer. Train and evaluation episodes SHALL remain disjoint. Learned preprocessing statistics SHALL derive exclusively from training episodes; ImageNet constants MAY remain the explicit image normalization setting. Original dataset bytes and installed packages SHALL remain unchanged.

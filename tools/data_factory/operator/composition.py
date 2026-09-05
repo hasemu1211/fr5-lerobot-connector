@@ -1616,6 +1616,27 @@ def build_physical_runtime(
 
 
 def build_operator_runtime(*, effect_scope: str = "FAKE", **kwargs) -> OperatorRuntime:
+    training_request = kwargs.pop("training_request", None)
+    training_output = kwargs.pop("training_output", None)
+    if effect_scope == "TRAINING_REVIEW" or training_request is not None or training_output is not None:
+        if training_request is None or training_output is None or effect_scope != "TRAINING_REVIEW":
+            raise ContractError("TRAINING_REVIEW_CONFIGURATION")
+        from tools.data_factory.operator.workflow.training_review import TrainingReviewApplication
+
+        application = TrainingReviewApplication(
+            request=load_json_strict(Path(training_request)),
+            output=Path(training_output),
+            approved_by=kwargs.get("operator_label", "local-operator"),
+        )
+        bridge = LoopbackBridge(
+            core=application.bridge_core, ui_root=ROOT / "operator-ui",
+            port=kwargs.get("port", 4174), index_page="training.html",
+        )
+        return OperatorRuntime(
+            bridge=bridge, announcement={"status": "LISTENING", "url": bridge.origin,
+                                        "effect_scope": "TRAINING_REVIEW", "starts_training": False},
+            close_calls=(bridge.server.server_close,),
+        )
     if effect_scope == "FAKE":
         return build_fake_runtime(
             port=kwargs.get("port", 4174),

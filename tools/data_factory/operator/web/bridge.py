@@ -88,6 +88,7 @@ class LoopbackBridge:
         self, *, core: OperatorIntentCore, ui_root: str | Path,
         host: str = "127.0.0.1", port: int = 0, token: str | None = None,
         watch_timeout_s: float = 5.0,
+        index_page: str = "index.html",
     ):
         if host not in {"127.0.0.1", "::1"}:
             raise ContractError("BRIDGE_LOOPBACK_REQUIRED")
@@ -95,6 +96,9 @@ class LoopbackBridge:
             raise ContractError("BRIDGE_PORT")
         self.core = core
         self.ui_root = Path(ui_root).resolve(strict=True)
+        if index_page not in {"index.html", "training.html"}:
+            raise ContractError("BRIDGE_STATIC_PATH")
+        self.index_page = index_page
         self.token = token or secrets.token_urlsafe(32)
         if not isinstance(self.token, str) or len(self.token) < 24:
             raise ContractError("BRIDGE_TOKEN")
@@ -193,7 +197,7 @@ class LoopbackBridge:
                     if snapshot is None:
                         return self._error(HTTPStatus.SERVICE_UNAVAILABLE, "BRIDGE_CLOSED")
                     return self._json(HTTPStatus.OK, snapshot)
-                relative = "index.html" if path == "/" else unquote(path.lstrip("/"))
+                relative = bridge.index_page if path == "/" else unquote(path.lstrip("/"))
                 if not relative or ".." in Path(relative).parts:
                     return self._error(HTTPStatus.NOT_FOUND, "BRIDGE_STATIC_PATH")
                 candidate = bridge.ui_root / relative
@@ -207,7 +211,7 @@ class LoopbackBridge:
                 if not target.is_file() or target.is_symlink():
                     return self._error(HTTPStatus.NOT_FOUND, "BRIDGE_STATIC_PATH")
                 payload = target.read_bytes()
-                if relative == "index.html":
+                if relative in {"index.html", "training.html"}:
                     marker = b"<!-- OPERATOR_TOKEN -->"
                     injection = (
                         '<meta name="operator-token" content="' + bridge.token + '">'

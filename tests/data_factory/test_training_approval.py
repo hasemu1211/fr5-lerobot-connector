@@ -517,6 +517,121 @@ class NativeBatchTrainingApprovalTest(unittest.TestCase):
     def issue(self):
         return self.approve(self.request, self.output, "fixture-human", dry_run=False)
 
+    @contextmanager
+    def web_review(self):
+        import http.client
+        import threading
+        from tools.data_factory.operator.composition import build_operator_runtime
+
+        request_path = self.root / "review-request.json"
+        write_json(request_path, self.request)
+        with mock.patch("tools.data_factory.operator.composition.build_physical_runtime", side_effect=AssertionError("no physical runtime")), \
+             mock.patch("tools.data_factory.operator.composition.build_fake_runtime", side_effect=AssertionError("no collection runtime")):
+            runtime = build_operator_runtime(effect_scope="TRAINING_REVIEW", training_request=request_path,
+                training_output=self.output, operator_label="fixture-human", port=0)
+        self.assertIsNone(runtime.startup_call)
+        bridge = runtime.bridge
+        thread = threading.Thread(target=bridge.serve_forever)
+        thread.start()
+
+        def call(path="/api/view", intent=None, *, token=None):
+            conn = http.client.HTTPConnection("127.0.0.1", bridge.port, timeout=5)
+            headers = {"X-Operator-Token": bridge.token if token is None else token,
+                       "Origin": bridge.origin, "Content-Type": "application/json"}
+            conn.request("GET" if intent is None else "POST", path,
+                         body=None if intent is None else json.dumps(intent), headers=headers)
+            response = conn.getresponse()
+            body = response.read()
+            result = body.decode() if path == "/" else json.loads(body)
+            conn.close()
+            return response.status, result
+
+        try:
+            yield call
+        finally:
+            bridge.close()
+            thread.join(2)
+            runtime.close()
+            self.assertFalse(thread.is_alive())
+
+    @staticmethod
+    def web_intent(view, op, payload=None, intent_id="review-intent"):
+        return {"schema_version": "data_factory.operator_intent.v1", "intent_id": intent_id,
+                "session_id": view["session_id"], "view_revision": view["revision"],
+                "view_digest": view["view_digest"], "op": op, "payload": payload or {}}
+
+    def test_web_review_exact_batch_native_publication_without_tty_or_motion(self):
+        with self.web_review() as call, mock.patch("tools.data_factory.training_approval._confirm_human_training_approval", side_effect=AssertionError("no TTY")):
+            status, html = call("/")
+            self.assertEqual(status, 200)
+            self.assertIn('src="training.js"', html)
+            self.assertIn('name="operator-token"', html)
+            _, initial = call()
+            self.assertEqual(initial["projection"]["status"], "UNPREPARED")
+            self.assertEqual(list(self.output.iterdir()), [])
+            prepare = self.web_intent(initial, "prepare_training_review")
+            self.assertEqual(call("/api/intent", prepare, token="wrong")[0], 403)
+            self.assertEqual(call("/api/intent", prepare)[0], 200)
+            _, view = call()
+            self.assertEqual(view["projection"]["preview"]["selected_count"], 2)
+            self.assertEqual(list(self.output.iterdir()), [])
+            digest = view["projection"]["preview"]["batch_digest"]
+            approve = self.web_intent(view, "approve_training_batch", {"batch_digest": digest}, "approve")
+            self.assertEqual(call("/api/intent", approve)[0], 200)
+            self.assertEqual(call("/api/intent", approve)[1]["code"], "OPERATOR_INTENT_REPLAY")
+            _, approved = call()
+            self.assertEqual(approved["projection"]["status"], "APPROVED")
+            self.assertFalse(approved["projection"]["starts_training"])
+        inventory = load_json_strict(self.output / "training_approved.json")
+        validate_training_approved_inventory(inventory)
+        self.assertEqual([item["episode_index"] for item in inventory["episodes"]], [0, 2])
+
+    def test_web_review_requires_explicit_effect_scope_and_cli_preserves_configuration(self):
+        from tools.data_factory.operator.composition import build_operator_runtime
+        from tools.data_factory.operator.cli import main
+
+        for scope, values in (("TRAINING_REVIEW", {}),
+                              ("FAKE", {"training_request": "request", "training_output": "output"}),
+                              ("PHYSICAL", {"training_request": "request", "training_output": "output"})):
+            with self.subTest(scope=scope), self.assertRaises(ContractError) as error:
+                build_operator_runtime(effect_scope=scope, **values)
+            self.assertEqual(error.exception.code, "TRAINING_REVIEW_CONFIGURATION")
+        with mock.patch("tools.data_factory.operator.cli._serve", return_value=0) as serve:
+            self.assertEqual(main(["--effect-scope", "TRAINING_REVIEW", "--training-request", "request",
+                                  "--training-output", "output", "--operator-label", "fixture-human"]), 0)
+        self.assertEqual(serve.call_args.kwargs["training_request"], Path("request"))
+        self.assertEqual(serve.call_args.kwargs["operator_label"], "fixture-human")
+
+    def test_web_review_refusal_and_browser_authority_reject_without_writes(self):
+        with self.web_review() as call:
+            _, initial = call()
+            self.assertEqual(call("/api/intent", self.web_intent(initial, "approve_training_batch"))[0], 409)
+            call("/api/intent", self.web_intent(initial, "prepare_training_review"))
+            _, view = call()
+            digest = view["projection"]["preview"]["batch_digest"]
+            for extra in ({"approved_by": "other"}, {"output": "/tmp/other"}):
+                bad = self.web_intent(view, "approve_training_batch", {"batch_digest": digest, **extra}, "bad")
+                self.assertEqual(call("/api/intent", bad)[0], 409)
+            refuse = self.web_intent(view, "refuse_training_batch", {"batch_digest": digest}, "refuse")
+            self.assertEqual(call("/api/intent", refuse)[0], 200)
+            stale = self.web_intent(view, "approve_training_batch", {"batch_digest": digest}, "stale")
+            self.assertEqual(call("/api/intent", stale)[0], 409)
+            self.assertEqual(list(self.output.iterdir()), [])
+
+    def test_web_review_changed_source_fails_closed_and_never_retries(self):
+        with self.web_review() as call:
+            _, initial = call()
+            call("/api/intent", self.web_intent(initial, "prepare_training_review"))
+            _, view = call()
+            digest = view["projection"]["preview"]["batch_digest"]
+            (self.dataset / "unchanged.marker").write_text("changed after preview")
+            approve = self.web_intent(view, "approve_training_batch", {"batch_digest": digest}, "approve")
+            self.assertEqual(call("/api/intent", approve)[0], 409)
+            _, failed = call()
+            self.assertEqual(failed["projection"]["status"], "FAILED")
+            self.assertEqual(failed["projection"]["available_ops"], [])
+            self.assertFalse((self.output / "training_approved.json").exists())
+
     def test_server_preview_is_immutable_detached_and_writes_nothing(self):
         from dataclasses import FrozenInstanceError
         from tools.data_factory.training_entrypoint import prepare_approval_batch, publish_approval_batch

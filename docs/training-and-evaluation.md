@@ -27,6 +27,21 @@ FR5 action은 절대 joint-position과 gripper를 포함하는 7D 계약이다. 
 
 ## 승인과 실행 미리보기
 
+사람은 operator Web UI에서 정확한 묶음을 확인하고 **학습 사용 승인** 또는 **승인하지 않음**을 선택할 수 있다. 운영자가 확정된 request와 dataset 밖의 새 승인 디렉터리를 지정해 검토 모드를 연다.
+
+```bash
+direnv exec . python3 -m tools.data_factory.operator_console \
+  --effect-scope TRAINING_REVIEW --port 4175 \
+  --training-request "$REQUEST" --training-output "$APPROVAL_DIR" \
+  --operator-label "$HUMAN_ID"
+```
+
+출력된 로컬 URL에서 검토할 묶음을 확인한다. 이 모드는 실제 승인 파일을 발행할 수 있으므로 FAKE가 아니지만, 로봇·카메라 준비, 수집과 학습 실행 기능은 없다. 표시된 dataset 식별과 episode 목록을 확인하고 승인하면 기존 publisher가 원본·판정 근거를 재검사한다. 브라우저는 선택 목록·경로·승인자를 정하지 않는다. 운영자 이름은 서버 설정이며 로그인 인증은 아니다. 신뢰할 수 있는 단일 운영자 PC에서 사용한다.
+
+승인은 자동 반복하지 않는다. 연결이 끊기면 **현재 상태 확인**으로 결과를 확인한다. 일부 발행 뒤 실패한 경우 기존 파일을 덮어쓰지 않으며 새 출력 디렉터리를 지정한 재검토가 필요하다. 이 승인 자체는 학습 효과나 실물 성공 증거가 아니다.
+
+기존 터미널 경로도 유지한다.
+
 `scripts/approve_training.sh --help`의 request 형식으로 확정된 revision, 정확한 episode index, 기존 technical·semantic·ledger 경로를 지정한다. 승인 산출물용 디렉터리는 dataset 밖에 미리 준비한다. 아래 변수는 실제 검토한 경로와 사람 식별자로 지정해야 한다.
 
 ```bash
