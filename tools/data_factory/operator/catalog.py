@@ -1135,6 +1135,7 @@ def selected_state_space_design_profile(
 def _yaw_selection_contexts(
     catalog: Mapping[str, Any], selections: Sequence[Mapping[str, Any]],
     state_space_design_profile: Mapping[str, Any] | None = None,
+    *, catalog_digest_checked: bool = False,
 ) -> list[dict[str, Any]]:
     if (
         not isinstance(selections, Sequence)
@@ -1144,7 +1145,6 @@ def _yaw_selection_contexts(
         raise ContractError("OPERATOR_YAW_PROFILE_CHAIN")
     cache: dict[str, dict[str, Any]] = {}
     result = []
-    catalog_digest_checked = False
     for selection in selections:
         if not isinstance(selection, Mapping):
             raise ContractError("OPERATOR_YAW_PROFILE_CHAIN")
@@ -1483,7 +1483,9 @@ def _yaw_block_bindings(
     for index, (key, context) in enumerate(zip(route_keys, route_contexts)):
         endpoint_anchor = (
             source if index == 0
-            else _selected_cell_pose(catalog, context["selection"])
+            else _selected_cell_pose(
+                catalog, context["selection"], catalog_digest_checked=True,
+            )
         )
         endpoint_sheet_xy = rotate_xy(
             (float(endpoint_anchor["x_mm"]), float(endpoint_anchor["y_mm"])),
@@ -1982,8 +1984,9 @@ def resolve_workspace_cycle_selections(
                 camera_bindings=copy.deepcopy(candidate["camera_bindings"]),
                 camera_binding_digest=candidate["camera_binding_digest"],
             )
-        return validate_operator_selection(
+        return _validate_operator_selection(
             catalog, result, require_executable=require_executable,
+            catalog_digest_checked=True,
         )
 
     endpoints = (endpoint(source), endpoint(alternate))
@@ -1994,11 +1997,15 @@ def resolve_workspace_cycle_selections(
 
 
 def _selected_cell_pose(
-    catalog: Mapping[str, Any], selection: Mapping[str, Any],
+    catalog: Mapping[str, Any], selection: Mapping[str, Any], *,
+    catalog_digest_checked: bool = False,
 ) -> dict[str, Any]:
+    selected = _validate_operator_selection(
+        catalog, selection, catalog_digest_checked=catalog_digest_checked,
+    )
     option = next((
         item for item in catalog.get("axes", {}).get("cell", [])
-        if item.get("id") == selection["cell_id"]
+        if item.get("id") == selected["cell_id"]
     ), None)
     metadata = option.get("metadata") if isinstance(option, Mapping) else None
     if not isinstance(metadata, Mapping):
@@ -2009,7 +2016,9 @@ def _selected_cell_pose(
         }
     except KeyError as exc:
         raise ContractError("OPERATOR_WORKSPACE_CYCLE_ENDPOINT") from exc
-    return validate_operator_pose(catalog, selection, pose)
+    return _canonical_operator_pose(
+        selected, _operator_pose_domain(catalog, selected), pose,
+    )
 
 
 def _project_endpoint_yaw_sequence(
@@ -2311,10 +2320,13 @@ def project_workspace_cycle_poses(
     cycle = resolve_workspace_cycle_selections(
         catalog, selection, requested_count, require_executable=False,
     )
-    source = validate_operator_pose(catalog, cycle[0], source_pose)
+    source = _canonical_operator_pose(
+        cycle[0], _operator_pose_domain(catalog, cycle[0]), source_pose,
+    )
     if yaw_sampling_seed is not None:
         contexts = _yaw_selection_contexts(
             catalog, cycle, state_space_design_profile,
+            catalog_digest_checked=True,
         )
         if any(context["profile"] is not None for context in contexts):
             bindings = _yaw_block_bindings(
@@ -2333,7 +2345,7 @@ def project_workspace_cycle_poses(
                 digest = endpoint["combination_digest"]
                 indices = by_digest[digest]
                 anchor = source if endpoint_index == 0 else _selected_cell_pose(
-                    catalog, endpoint,
+                    catalog, endpoint, catalog_digest_checked=True,
                 )
                 context = contexts[indices[0]]
                 has_terminal_destination = indices[-1] == len(cycle) - 1
@@ -2384,7 +2396,7 @@ def project_workspace_cycle_poses(
             item["combination_digest"] == digest for item in cycle
         )
         anchor = source if endpoint_index == 0 else _selected_cell_pose(
-            catalog, endpoint,
+            catalog, endpoint, catalog_digest_checked=True,
         )
         series[digest] = project_assisted_poses(
             catalog, endpoint, anchor, count, repeat=repeat,
@@ -2404,6 +2416,7 @@ def project_workspace_cycle_poses(
         catalog, cycle, result, normalized_seed=normalized_seed,
         contexts=_yaw_selection_contexts(
             catalog, cycle, state_space_design_profile,
+            catalog_digest_checked=True,
         ),
     )
 

@@ -237,7 +237,19 @@ class OperatorCatalogTests(unittest.TestCase):
             "x_mm": 0, "y_mm": 0,
         }
 
-        a_cycle = resolve_workspace_cycle_selections(catalog, selection, 2)
+        with mock.patch.object(
+            catalog_module, "canonical_digest",
+            wraps=catalog_module.canonical_digest,
+        ) as digest:
+            a_cycle = resolve_workspace_cycle_selections(
+                catalog, selection, 2,
+            )
+        catalog_checks = [
+            call for call in digest.call_args_list
+            if isinstance(call.args[0], dict)
+            and set(call.args[0]) == set(catalog) - {"catalog_digest"}
+        ]
+        self.assertEqual(len(catalog_checks), 1)
         self.assertEqual(
             [(item["workspace_id"], item["frame_id"]) for item in a_cycle],
             [
@@ -246,6 +258,10 @@ class OperatorCatalogTests(unittest.TestCase):
                 ("PLACE_A", "place-a-yaw0-r003"),
             ],
         )
+        tampered = copy.deepcopy(catalog)
+        tampered["axes"]["workspace"][0]["label"] = "tampered"
+        with self.assertRaisesRegex(ContractError, "OPERATOR_SELECTION_FIELDS"):
+            resolve_workspace_cycle_selections(tampered, selection, 2)
         poses = project_workspace_cycle_poses(catalog, selection, start, 2)
         self.assertEqual([item["place_id"] for item in poses], [
             "PLACE_A", "PLACE_B", "PLACE_A",
