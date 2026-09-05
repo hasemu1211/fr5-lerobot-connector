@@ -30,6 +30,14 @@ scripts/setup_notebook.sh
 
 설치 스크립트는 ROS·colcon·FFmpeg·카메라 의존성, 고정된 FAIRINO 하위 모듈, CPU PyTorch, LeRobot dataset 기능을 준비하고 사전점검을 실행한다. `sudo` 비밀번호를 저장하지 않는다. 설치 후 읽기 전용 진단은 다음과 같다.
 
+FR5 연결에 필요한 vendor 변경은 `patches/frcobot_ros2.patch`가 소유하며 설치 스크립트가 적용한다. 새 개발 worktree에서 설치를 생략했다면, 테스트 전에 적용 상태를 다음 읽기 전용 명령으로 확인한다. 하위 모듈 초기화만으로는 이 패치가 적용되지 않는다.
+
+```bash
+git -C src/frcobot_ros2 apply --reverse --check ../../patches/frcobot_ros2.patch
+```
+
+검사가 실패하면 기존 변경을 덮어쓰지 말고 패치 미적용인지 충돌인지 확인한다. 초기화된 깨끗한 하위 모듈에서는 같은 패치의 `git apply --check` 후 `git apply`로 설치 단계를 재현할 수 있다. 이는 소스 준비일 뿐 로봇 실행이나 새로운 물리 검증이 아니다.
+
 ```bash
 direnv exec . scripts/setup_doctor.sh
 ```
