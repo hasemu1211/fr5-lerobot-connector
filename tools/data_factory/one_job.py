@@ -1066,8 +1066,25 @@ class OneJob:
         self.state = "COMPLETE"
         return self._result(True, "COMPLETE")
 
+    def block_committed(self, code):
+        """End a committed parent without acknowledging the cell or aborting data.
+
+        Its caller must first settle any separate postcommit motion owner.
+        The parent's own recorder and executor must already be terminal.
+        """
+        if (
+            self.state != "AWAITING_CELL_READY"
+            or self.recorder_state != "COMMITTED"
+            or self.executor_state != "COMPLETED"
+            or self.cancel_error is not None
+            or not isinstance(code, str) or SAFE_ID.fullmatch(code) is None
+        ):
+            return self._result(False, "POSTCOMMIT_BLOCK_STATE")
+        self.state = "COMMITTED_BLOCKED"
+        return self._result(False, code)
+
     def cancel(self):
-        if self.state in {"AWAITING_CELL_READY", "COMPLETE", "ABORTED", "QUARANTINED_COMMIT", "IDLE"}:
+        if self.state in {"AWAITING_CELL_READY", "COMMITTED_BLOCKED", "COMPLETE", "ABORTED", "QUARANTINED_COMMIT", "IDLE"}:
             return self._result(False, "CANCEL_STATE")
         return self._abort("CANCELLED_BY_OPERATOR")
 

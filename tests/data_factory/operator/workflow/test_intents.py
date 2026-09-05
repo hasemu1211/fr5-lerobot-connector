@@ -19,8 +19,8 @@ from tools.data_factory.operator.workflow.intents import (
 from ..fixtures import (
     NOW,
     intent,
-    review_candidate_admission,
 )
+from tools.data_factory.run_job import review_candidate_admission
 from tools.fr5_data_factory import ContractError, canonical_digest
 
 
@@ -378,6 +378,13 @@ class OperatorIntentCoreTests(unittest.TestCase):
                     "choice": "PASS", "reason": "TASK_GOAL",
                 }, "review-intent-reason"))
             progress[0] = 1
+            path.write_text(json.dumps({**admission, "reason": "changed"}), encoding="utf-8")
+            with self.assertRaisesRegex(ContractError, "CANDIDATE_REVIEW_FILE_CHANGED"):
+                core.consume(intent(snapshot, "review_candidate", {
+                    "review_binding_digest": projection["review_binding_digest"],
+                    "choice": "FAIL", "reason": "TASK_GOAL",
+                }, "review-file-changed"))
+            path.write_text(json.dumps(admission), encoding="utf-8")
             result = core.consume(intent(snapshot, "review_candidate", {
                 "review_binding_digest": projection["review_binding_digest"],
                 "choice": "FAIL", "reason": "TASK_GOAL",

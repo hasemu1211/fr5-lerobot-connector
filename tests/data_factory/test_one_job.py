@@ -151,6 +151,38 @@ class OneJobTest(unittest.TestCase):
         self.assertNotIn(("executor", "grasp_verdict"), calls)
         self.assertLess(calls.index(("recorder", "freeze")), calls.index(("executor", "semantic_verdict")))
 
+    def test_committed_block_is_terminal_without_cell_ack_or_data_abort(self):
+        job, calls = self.make(
+            ["RECORDING", "RECORDING", "FROZEN", "FROZEN", "COMMITTED"],
+            ["PLANNED", "APPROVED", "EXECUTING", "SEMANTIC_VERDICT", "EXECUTING", "COMPLETED"],
+            continuous=True,
+        )
+        self.prepare_and_start(job)
+        job.poll()
+        job.semantic_verdict("PASS", "operator")
+        self.assertEqual(job.poll()["state"], "AWAITING_CELL_READY")
+        before = list(calls)
+        result = job.block_committed("ROS_GRIPPER_SETTINGS_UNVERIFIED")
+        self.assertEqual((result["ok"], result["state"]), (False, "COMMITTED_BLOCKED"))
+        self.assertEqual((result["recorder_state"], result["executor_state"]), ("COMMITTED", "COMPLETED"))
+        self.assertEqual(job.finish()["code"], "CELL_READY_STATE")
+        self.assertEqual(job.cancel()["code"], "CANCEL_STATE")
+        self.assertEqual(calls, before)
+
+    def test_committed_block_cannot_settle_an_unfinished_or_uncertain_owner(self):
+        for recorder, executor, cancel_error in (
+            ("RECORDING", "COMPLETED", None), ("COMMITTED", "EXECUTING", None),
+            ("QUARANTINED_COMMIT", "COMPLETED", None),
+            ("COMMITTED", "COMPLETED", "CANCEL_UNCONFIRMED"),
+        ):
+            with self.subTest(recorder=recorder, executor=executor, cancel_error=cancel_error):
+                job, calls = self.make([], [])
+                job.state = "AWAITING_CELL_READY"
+                job.recorder_state, job.executor_state, job.cancel_error = recorder, executor, cancel_error
+                self.assertEqual(job.block_committed("FAULT")["code"], "POSTCOMMIT_BLOCK_STATE")
+                self.assertEqual(job.state, "AWAITING_CELL_READY")
+                self.assertEqual(calls, [])
+
     def test_recycle_stays_frozen_until_release_transition_then_commits(self):
         job, calls = self.make(
             ["RECORDING", "RECORDING", "FROZEN", "FROZEN", "FROZEN", "COMMITTED"],

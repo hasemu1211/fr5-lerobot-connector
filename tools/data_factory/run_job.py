@@ -2973,6 +2973,76 @@ def _postcommit_validate_and_reposition(
     return technical, reposition_result
 
 
+def _validate_committed_recycle(result, summary):
+    """Validate the recorded job's release, independently of its next move."""
+    execution = result.get("execution_evidence")
+    release = execution.get("release_evidence") if isinstance(execution, dict) else None
+    transition = execution.get("scene_transition") if isinstance(execution, dict) else None
+    if (
+        not isinstance(release, dict)
+        or not _release_outcome_landed(release)
+        or release.get("release_slot_id") != summary["recycle"]["release_slot_id"]
+        or not isinstance(transition, dict)
+        or not isinstance(transition.get("scene_state_digest"), str)
+        or not DIGEST.fullmatch(transition["scene_state_digest"])
+        or transition.get("release_evidence_digest") != canonical_digest(release)
+        or result.get("frozen_rows") != result.get("rows_after_recycle")
+    ):
+        raise ContractError("RECYCLE_EVIDENCE")
+    return transition
+
+
+def _reposition_failed_before_motion(result):
+    """Only an explicit failed plan-only receipt proves no continuation goal."""
+    response = result.get("execution_response") if isinstance(result, Mapping) else None
+    return (
+        isinstance(response, Mapping)
+        and result.get("status") == "FAIL"
+        and result.get("plan_digest") is None
+        and result.get("plan_artifact_digest") is None
+        and response.get("ok") is False
+        and response.get("state") == "BLOCKED"
+        and response.get("executor_state") == "IDLE"
+        and response.get("plan_envelope") is None
+        and response.get("execution_evidence") is None
+        and response.get("cancel_error") is None
+    )
+
+
+def _committed_review_handoff(
+    payload, validated, technical_reference, ledger_reference, *,
+    result, summary, approval_scope, enabled, reposition_error, postcommit_error,
+):
+    """Hand off a valid recorded parent, never its failed continuation."""
+    if (
+        not enabled or reposition_error is None or postcommit_error is not None
+        or technical_reference.get("status") != "PASS"
+        or ledger_reference is None or "recycle" not in summary
+    ):
+        return ledger_reference, None
+    _validate_committed_recycle(result, summary)
+    if (
+        result.get("state") != "AWAITING_CELL_READY"
+        or result.get("recorder_state") != "COMMITTED"
+        or result.get("executor_state") != "COMPLETED"
+        or approval_scope not in {"HUMAN_GATED", "HIL_NUMERIC_PROXY"}
+    ):
+        raise ContractError("POSTCOMMIT_REVIEW_EVIDENCE")
+    admission = write_candidate_admission(
+        payload, validated, technical_reference,
+        operational_source="HIL_PROXY" if approval_scope == "HIL_NUMERIC_PROXY" else "HUMAN_GATED",
+    )
+    path = (_run_dir(payload) / "candidate_admission.json").resolve(strict=True)
+    reference = bind_candidate_episode_state(ledger_reference, path)
+    return reference, {
+        "candidate_path": str(path), "run_id": payload["run_id"],
+        "expected_file_digest": canonical_digest(admission),
+        "expected_review_context_digest": admission["review_context_digest"],
+        "checklist_id": admission["checklist_id"],
+        "ledger_reference": copy.deepcopy(reference),
+    }
+
+
 def run_object_reposition(
     payload, binding, cancel, publish, *, parent_plan_digest, operator_id,
     cell_root, resolver=resolve_inputs, executor_factory=_live_motion_executor,
@@ -3951,6 +4021,10 @@ def run_live(payload, cancel, publish, *, resolver=resolve_inputs, executor_fact
                     checked_reposition is not None
                     and checked_reposition["start_state"] == "ON_SURFACE"
                 )
+                recorded_transition = (
+                    _validate_committed_recycle(result, summary)
+                    if "recycle" in summary else None
+                )
                 effective_validator_call = validator_call
                 if validator_call is _technical_validator:
                     recorder_evidence = result.get("recorder_evidence")
@@ -4096,7 +4170,20 @@ def run_live(payload, cancel, publish, *, resolver=resolve_inputs, executor_fact
                     or (None if technical["ok"] else "TECHNICAL_VALIDATOR_FAILED")
                 )
                 if terminal_error is not None:
-                    # A committed episode remains forensic evidence, but cannot unlock the cell.
+                    # A failed OUT_OF_DATASET continuation cannot revoke a
+                    # successfully committed/validated parent's review. It
+                    # still blocks the cell and every later collection goal.
+                    review_offer = None
+                    review_error = None
+                    try:
+                        ledger_reference, review_offer = _committed_review_handoff(
+                            payload, validated, validator_reference, ledger_reference,
+                            result=result, summary=summary, approval_scope=approval_scope,
+                            enabled=candidate_writer_enabled, reposition_error=reposition_error,
+                            postcommit_error=postcommit_error,
+                        )
+                    except (ContractError, OSError) as exc:
+                        review_error = exc.code if isinstance(exc, ContractError) else "CANDIDATE_ADMISSION_WRITE_ERROR"
                     current_cell = cell_store.read()
                     cell = (
                         current_cell
@@ -4111,10 +4198,16 @@ def run_live(payload, cancel, publish, *, resolver=resolve_inputs, executor_fact
                             planned["plan_digest"],
                         )
                     )
+                    if _reposition_failed_before_motion(reposition_result):
+                        # run_object_reposition has returned through its
+                        # cleanup; its failed plan-only receipt owns no goal.
+                        job.block_committed(terminal_error)
                     return _response(ok=False, code=terminal_error, state="BLOCKED", run_id=payload["run_id"], plan_digest=planned["plan_digest"], data={
                         "mode": "live", "operator_summary": summary, "technical_validator": validator_reference,
                         "storage_usage": storage_reference, "resource_usage": resource_reference,
                         "episode_ledger": ledger_reference,
+                        "candidate_review_offer": review_offer,
+                        "candidate_review_error": review_error,
                         "trajectory_variant_binding": trajectory_binding,
                         "object_reposition": reposition_result,
                         "camera_warmup_digest": canonical_digest(camera_warmup),
@@ -4122,20 +4215,7 @@ def run_live(payload, cancel, publish, *, resolver=resolve_inputs, executor_fact
                         "camera_semantic_authority": False, "training_authorized": False,
                     })
                 if "recycle" in summary:
-                    execution = result.get("execution_evidence")
-                    release_evidence = execution.get("release_evidence") if isinstance(execution, dict) else None
-                    transition = execution.get("scene_transition") if isinstance(execution, dict) else None
-                    if (
-                        not isinstance(release_evidence, dict)
-                        or not _release_outcome_landed(release_evidence)
-                        or release_evidence.get("release_slot_id") != summary["recycle"]["release_slot_id"]
-                        or not isinstance(transition, dict)
-                        or not isinstance(transition.get("scene_state_digest"), str)
-                        or not DIGEST.fullmatch(transition["scene_state_digest"])
-                        or transition.get("release_evidence_digest") != canonical_digest(release_evidence)
-                        or result.get("frozen_rows") != result.get("rows_after_recycle")
-                    ):
-                        raise ContractError("RECYCLE_EVIDENCE")
+                    transition = recorded_transition
                     cell = cell_store.acknowledge_ready(
                         operator_id, expected_run_id=payload["run_id"], expected_plan_digest=planned["plan_digest"],
                     )

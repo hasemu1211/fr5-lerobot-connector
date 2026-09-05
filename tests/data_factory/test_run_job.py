@@ -370,6 +370,94 @@ class RunJobTest(unittest.TestCase):
         )
         self.assertEqual((serial_calls, moved), (["validator"], None))
 
+    def test_only_an_explicit_failed_plan_only_receipt_releases_committed_parent(self):
+        failed = {
+            "status": "FAIL", "plan_digest": None, "plan_artifact_digest": None,
+            "execution_response": {
+                "ok": False, "state": "BLOCKED", "executor_state": "IDLE",
+                "plan_envelope": None, "execution_evidence": None, "cancel_error": None,
+            },
+        }
+        self.assertTrue(run_job._reposition_failed_before_motion(failed))
+        for response in (
+            None, {}, {**failed["execution_response"], "executor_state": "EXECUTING"},
+            {**failed["execution_response"], "cancel_error": "CANCEL_UNCONFIRMED"},
+            {**failed["execution_response"], "execution_evidence": {}},
+        ):
+            with self.subTest(response=response):
+                self.assertFalse(run_job._reposition_failed_before_motion({
+                    **failed, "execution_response": response,
+                }))
+        self.assertFalse(run_job._reposition_failed_before_motion({
+            **failed, "plan_digest": "sha256:" + "1" * 64,
+        }))
+        self.assertFalse(run_job._reposition_failed_before_motion(None))
+
+    def test_committed_parent_review_handoff_keeps_raw_data_and_all_other_gates(self):
+        release = {
+            "schema_version": "data_factory.recycle_release_evidence.v2",
+            "release_outcome": "EXPECTED_LANDED", "outcome_source": "CAMPAIGN_CONTROL_PROXY",
+            "release_slot_id": "slot-a",
+        }
+        recorded = {
+            "state": "AWAITING_CELL_READY", "recorder_state": "COMMITTED",
+            "executor_state": "COMPLETED", "frozen_rows": 12, "rows_after_recycle": 12,
+            "execution_evidence": {
+                "release_evidence": release,
+                "scene_transition": {
+                    "scene_state_digest": run_job.canonical_digest("scene"),
+                    "release_evidence_digest": run_job.canonical_digest(release),
+                },
+            },
+        }
+        technical = {"status": "PASS", "plan_digest": run_job.canonical_digest("plan")}
+        validated = {"resolved_job_digest": run_job.canonical_digest("job"), "normalized_job": {"task": "pick_place"}}
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            run_dir = root / "parent-run"
+            run_dir.mkdir()
+            raw = root / "raw-episode.bin"
+            raw.write_bytes(b"immutable recording and provenance")
+            payload_value = {"run_id": "parent-run", "run_root": directory}
+            ledger = {"path": str(run_dir / "episode_ledger.json"), "technical_status": "PASS"}
+            bound = {**ledger, "review_status": "PENDING", "training_status": "NOT_AUTHORIZED"}
+            options = {
+                "result": recorded, "summary": {"recycle": {"release_slot_id": "slot-a"}},
+                "approval_scope": "HIL_NUMERIC_PROXY", "enabled": True,
+                "reposition_error": "ROS_GRIPPER_SETTINGS_UNVERIFIED", "postcommit_error": None,
+            }
+            with mock.patch.object(run_job, "bind_candidate_episode_state", return_value=bound) as binder:
+                reference, offer = run_job._committed_review_handoff(
+                    payload_value, validated, technical, ledger, **options,
+                )
+            path = run_dir / "candidate_admission.json"
+            original = path.read_bytes()
+            candidate = json.loads(original)
+            self.assertEqual((candidate["operational_gate"], candidate["operational_source"], candidate["semantic_status"]), ("PASS", "HIL_PROXY", "PENDING"))
+            self.assertEqual(offer["expected_file_digest"], run_job.canonical_digest(candidate))
+            self.assertEqual(offer["ledger_reference"], reference)
+            binder.assert_called_once_with(ledger, path)
+            self.assertEqual(raw.read_bytes(), b"immutable recording and provenance")
+            with mock.patch.object(run_job, "write_candidate_admission") as writer:
+                for override in (
+                    {"enabled": False}, {"postcommit_error": "RESOURCE_EVIDENCE_ERROR"},
+                    {"reposition_error": None}, {"summary": {}},
+                ):
+                    self.assertEqual(run_job._committed_review_handoff(
+                        payload_value, validated, technical, ledger, **{**options, **override},
+                    ), (ledger, None))
+                self.assertEqual(run_job._committed_review_handoff(
+                    payload_value, validated, {**technical, "status": "FAIL"}, ledger, **options,
+                ), (ledger, None))
+                for field, value in (("recorder_state", "FROZEN"), ("executor_state", "EXECUTING"), ("rows_after_recycle", 13)):
+                    with self.subTest(field=field), self.assertRaises(run_job.ContractError):
+                        run_job._committed_review_handoff(
+                            payload_value, validated, technical, ledger,
+                            **{**options, "result": {**recorded, field: value}},
+                        )
+                writer.assert_not_called()
+            self.assertEqual(path.read_bytes(), original)
+
     def test_reposition_cancel_after_planning_never_dispatches_motion(self):
         object_profile = {"object_profile_id": "object-r1"}
         grasp_profile = {

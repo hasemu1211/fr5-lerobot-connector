@@ -4813,6 +4813,60 @@ feedback:
                 "run_state", "candidate", "inventory", "training",
             )))
 
+    def test_committed_review_survives_failed_continuation_without_unblocking_campaign(self):
+        with tempfile.TemporaryDirectory() as root:
+            root_path = Path(root).resolve()
+            run_id = "committed-parent"
+            reference = {
+                "path": str(root_path / run_id / "episode_ledger.json"),
+                "state_path": str(root_path / run_id / "episode_ledger_state.json"),
+                "technical_status": "PASS", "review_status": "PENDING",
+                "retention_state": "PRESERVE", "training_status": "NOT_AUTHORIZED",
+            }
+            offer = {
+                "candidate_path": str(root_path / run_id / "candidate_admission.json"),
+                "run_id": run_id, "expected_file_digest": canonical_digest("candidate"),
+                "expected_review_context_digest": canonical_digest("context"),
+                "checklist_id": "pick-place-v1", "ledger_reference": reference,
+            }
+            port = CandidateReviewPort(
+                operator_label="local-operator",
+                review_call=lambda _path, **kw: {
+                    "run_id": run_id, "semantic_status": kw["semantic_status"],
+                    "reviewed_by": kw["reviewed_by"],
+                },
+            )
+            harness = Harness(root, terminal_response={
+                "ok": False, "state": "BLOCKED", "code": "ROS_GRIPPER_SETTINGS_UNVERIFIED",
+                "data": {
+                    "technical_validator": {"status": "PASS"},
+                    "episode_ledger": reference, "candidate_review_offer": offer,
+                },
+            })
+            console = harness.console(candidate_review_port=port, campaign_approval_once=True)
+            self.addCleanup(console.close)
+            console._active_intent_projection = {
+                "run_id": run_id, "coverage_condition": {"place_id": "PLACE_A"},
+            }
+            self.assertFalse(console._publish_outcome({
+                "ok": False, "campaign": {"state": "BLOCKED"},
+            }))
+            projection = console.projection()
+            self.assertEqual(projection["runtime"]["workflow_state"], "BLOCKED")
+            self.assertEqual(projection["available_ops"], ["review_candidate"])
+            self.assertEqual(projection["episode_history"][0]["outcome"], "FAIL")
+            console.candidate_state_bind_call = lambda ref, _path: {**ref, "review_status": "PASS"}
+            result = console.review_candidate({
+                "review_binding_digest": projection["candidate_review"]["review_binding_digest"],
+                "choice": "PASS", "reason": None,
+            })
+            self.assertFalse(result["training_authorized"])
+            after = console.projection()
+            self.assertEqual(after["runtime"]["workflow_state"], "BLOCKED")
+            self.assertEqual(after["episode_history"][0]["human_semantic"], "PASS")
+            self.assertEqual(after["available_ops"], [])
+            self.assertTrue(all(value == 0 for value in harness.forbidden.values()))
+
     def test_three_episode_reviews_queue_without_blocking_campaign_and_preserve_authority(self):
         with tempfile.TemporaryDirectory() as root:
             root_path = Path(root).resolve()

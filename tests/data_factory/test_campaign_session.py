@@ -424,6 +424,27 @@ class CampaignSessionTests(unittest.TestCase):
         self.assertFalse(raised.status()["active_child"])
         self.assertEqual(factories.children[0].cancel_calls, 1)
 
+    def test_committed_block_releases_parent_but_never_opens_a_later_episode(self):
+        _, _, factories, session = make_session(2)
+
+        def blocked_after_commit(intent, lifecycle, cancel, context):
+            lifecycle.state = "COMMITTED_BLOCKED"
+            raise ContractError("ROS_GRIPPER_SETTINGS_UNVERIFIED")
+
+        with self.assertRaisesRegex(ContractError, "ROS_GRIPPER_SETTINGS_UNVERIFIED"):
+            session.run_next(
+                run_id="fake-run-0", scene_evidence=scene(canonical_digest("scene-0")),
+                episode_call=blocked_after_commit,
+            )
+        status = session.status()
+        self.assertFalse(status["active_child"])
+        self.assertIsNone(status["termination_error"])
+        self.assertEqual(status["campaign"]["state"], "BLOCKED")
+        self.assertEqual(factories.children[0].cancel_calls, 0)
+        with self.assertRaises(ContractError):
+            session.open_next(run_id="fake-run-1", scene_evidence=scene(canonical_digest("scene-0")))
+        self.assertEqual(factories.fake_calls, 1)
+
 
 if __name__ == "__main__":
     unittest.main()

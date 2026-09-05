@@ -34,6 +34,8 @@ A4·TCP·fingertip을 바꾸거나 새 위치로 옮기면 같은 place/frame/ca
 
 technical PASS가 나와도 의미 있는 작업 성공을 뜻하지 않는다. 사람은 preview에서 작업 대상·손가락·작업 공간·목표 영역을 확인하고, 그 결과를 training approval과 별도로 기록한다. 실패하거나 중단된 episode를 성공 수량에 넣지 않는다.
 
+분류 요청은 화면 전체의 진행률이 아니라 현재 후보의 정확한 파일·검토 맥락에 묶인다. 다음 episode가 진행 중이어도 같은 후보를 분류할 수 있지만, 후보가 바뀌었거나 원본 검토 대상이 변경된 요청은 거절된다. 기록된 작업과 기술검사가 완료된 뒤 녹화 밖의 다음 위치 준비만 실패했다면, 저장본 분류와 다음 실행 차단은 별개다. 분류 PASS는 cell 복구나 다음 motion, 학습을 승인하지 않는다.
+
 저장 후에는 `tools/validate_lerobot_dataset.py`의 판정을 확인하고, dataset root의 provenance·quality metadata와 사람이 본 preview의 관계를 보존한다. robot reset과 recovery는 녹화 payload와 분리한다. 다음 episode를 열기 전에 scene transition, recorder commit과 cell readiness를 다시 확인한다.
 
 ## 브라우저 운영 경계

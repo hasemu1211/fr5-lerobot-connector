@@ -2236,9 +2236,17 @@ class OperatorConsole:
                 raise ContractError("OPERATOR_CONSOLE_TERMINAL_OBJECT_POSE")
             self._terminal_object_pose = copy.deepcopy(dict(terminal_pose))
             sealed["terminal_object_pose"] = copy.deepcopy(self._terminal_object_pose)
-        review_offer = result.get("candidate_review_offer")
+        review_offer = result.get("candidate_review_offer", terminal_data.get("candidate_review_offer"))
         if review_offer is not None:
-            if name != "PASS":
+            ledger = sealed.get("episode_ledger")
+            if name != "PASS" and not (
+                isinstance(review_offer, Mapping)
+                and isinstance(ledger, Mapping)
+                and ledger.get("technical_status") == "PASS"
+                and ledger.get("review_status") == "PENDING"
+                and ledger.get("training_status") == "NOT_AUTHORIZED"
+                and review_offer.get("ledger_reference") == ledger
+            ):
                 raise ContractError("OPERATOR_CONSOLE_CANDIDATE_OFFER")
             self._queue_candidate_review(review_offer, sealed)
         sealed["result_digest"] = canonical_digest(sealed)
