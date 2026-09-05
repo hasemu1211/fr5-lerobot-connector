@@ -50,7 +50,7 @@ scripts/evaluate_smolvla.sh --check-env
 
 ## 문서 검사
 
-깨끗한 checkout에서 재현 가능한 Markdown 검사는 다음 순서로 실행한다.
+문서 검사는 Node.js 22 이상을 사용한다. 깨끗한 checkout에서 다음 순서로 실행한다.
 
 ```bash
 npm ci

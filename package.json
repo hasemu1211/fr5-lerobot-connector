@@ -1,6 +1,9 @@
 {
   "name": "fr5-public-docs",
   "private": true,
+  "engines": {
+    "node": ">=22"
+  },
   "scripts": {
     "docs:lint": "markdownlint-cli2"
   },
