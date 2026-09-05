@@ -62,3 +62,11 @@ source preflight 진단을 추가하는 방향과 검토 clip 선택을 고치�
 이 표본은 분포 추정용 무작위 표본이 아니며, 모든 episode·극값·작업 의미를 검토했다는 뜻도 아니다. manifest의 `coverage`는 영상에 선택된 범위만 나타낸다. 조건별 수집·admission 분포는 기존 [Data Quality Analysis](../tools/data_factory/quality/coverage_report.py), 의미 판정은 [candidate admission](../tools/data_factory/candidate_admission.py), 다음 수집 제안은 [Collection recommendation](../tools/data_factory/collection_recommendation.py)이 소유한다. Curator의 pixel metric이나 review coverage를 이들의 판정·수량으로 승격하지 않는다. 사람의 candidate 판단도 별도 training approval이나 motion authority를 만들지 않는다.
 
 연구 근거는 선택 규칙의 성능 보증이 아니라 검증할 가설의 범위를 정한다. Belkhale·Cui·Sadigh의 [Data Quality in Imitation Learning](https://arxiv.org/abs/2306.02437)은 분포 이동과 action divergence·transition diversity를 구분하며 상태 다양성이 항상 유익하지는 않다고 설명한다. Lin 등의 [Data Scaling Laws in Imitation Learning for Robotic Manipulation](https://arxiv.org/abs/2410.18647v4)은 실험한 작업에서 단순 시연 수보다 환경·물체 다양성이 중요함을 보고한다. 여기서 도출한 제한된 가설은 같은 검토 시간에 서로 다른 사건을 노출하면 사람이 view 변환의 손실을 발견하기 쉬워질 수 있다는 것이다. 다음 검증은 사람이 표시한 mask 손실 사건에 대해 동일 시간 예산의 발견률을 비교하는 것이며, 현재 합성 검증은 semantic 정확도·학습 이득·실물 성공을 입증하지 않는다.
+
+## 기존 판정으로 학습 요청 준비
+
+`python3 -m tools.data_factory.curator training-request --help`는 명시적으로 선택한 Collection run을 기존 학습 사전검토 요청으로 내보내는 경로다. [선택 소유자](../tools/data_factory/curator/workflow/selection.py)는 현재 ledger/state를 기존 API로 재검증하고, technical·semantic PASS인 선택 전체를 보존한다. pending·실패·stale 근거, 중복 episode, 서로 다른 dataset root/repo는 출력 전에 거부하며, 조건에 맞지 않는 항목을 조용히 제외하지 않는다. 출력 부모는 미리 존재해야 하며, 원본과 근거 경로에는 쓰지 않고 기존 출력도 덮어쓰지 않는다.
+
+같은 root에 순차 저장한 episode들의 Collection dataset ID/digest는 서로 다를 수 있다. 이 값을 frozen training revision으로 사용하지 않는다. 요청의 dataset ID는 별도로 지정하고, 현재 원본의 byte identity와 quarantine 검사는 기존 `training_approval.current_dataset_identity`가 수행한다. source·provenance를 복사하거나 바꾸지 않으며 view profile 확정·candidate 생성도 수행하지 않는다.
+
+출력은 [기존 학습 사전검토](../tools/data_factory/training_entrypoint.py)의 `prepare_approvals`가 그대로 읽는 요청이고 상태는 `REQUEST_NOT_APPROVED`다. 요청은 경로를 가진 입력이지 승인이나 frozen snapshot이 아니다. 소비자는 현재 원본과 기존 사람의 semantic 근거, ledger 계보, production scope를 다시 검사한다. 실제 승인은 기존 사람 전용 경계에 남으며 Curator가 호출하지 않는다. [focused 검증](../tests/data_factory/curator/workflow/test_selection.py)은 소비자 연결·stale 근거·pending·재전달·source 불변성·training scope와 quarantine 경계를 확인한다. 이 연결만으로 품질 분포, 학습 성능 또는 다음 수집의 실행 권한을 증명하지 않는다.

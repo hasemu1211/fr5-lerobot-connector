@@ -9,6 +9,7 @@ from pathlib import Path
 
 from .core.errors import CuratorError
 from .workflow.application import decide, prepare, status
+from .workflow.selection import export_training_request
 from .workflow.setup import (
     DEFAULT_DILATION_MARGIN_PX,
     DEFAULT_PLATE_FRAME_COUNT,
@@ -30,6 +31,10 @@ def _parser() -> argparse.ArgumentParser:
     commands = parser.add_subparsers(dest="command", required=True)
     make = commands.add_parser("prepare", allow_abbrev=False)
     make.add_argument("--source", type=Path, required=True)
+    selection = commands.add_parser("training-request", allow_abbrev=False)
+    selection.add_argument("--run-dir", type=Path, action="append", required=True)
+    selection.add_argument("--output", type=Path, required=True)
+    selection.add_argument("--dataset-id", required=True)
     for name in ("status", "decide"):
         command = commands.add_parser(name, allow_abbrev=False)
         command.add_argument("--run", required=True)
@@ -71,6 +76,10 @@ def main(argv: list[str] | None = None) -> None:
                 result = preview_profile_setup(args.run, _paths=paths)
             else:
                 result = finalize_profile_setup(args.run, args.preview, _paths=paths)
+        elif args.command == "training-request":
+            result = export_training_request(
+                args.run_dir, args.output, dataset_id=args.dataset_id,
+            )
         elif args.command == "prepare":
             result = prepare(args.source)
         elif args.command == "status":
