@@ -25,6 +25,17 @@ def digest(label):
     return "sha256:" + hashlib.sha256(label.encode()).hexdigest()
 
 
+class LearnedMotionEntryTest(unittest.TestCase):
+    def test_learned_entry_rejects_missing_or_recursive_source(self):
+        from tools.fr5_data_factory import ContractError, validate_motion_program
+
+        schema = "fr5.learned_motion_program.v1"
+        for source in (None, {"schema_version": schema}):
+            with self.subTest(source=source):
+                with self.assertRaisesRegex(ContractError, "LEARNED_SOURCE_PROGRAM"):
+                    validate_motion_program({"schema_version": schema, "source_program": source})
+
+
 class DataFactoryTest(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory(); self.root = Path(self.temp.name)
