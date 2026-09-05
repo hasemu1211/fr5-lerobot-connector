@@ -5,11 +5,40 @@ FR5가 Collection, Curation, Training/Evaluation, Rollout, Learning Evidence, Pu
 ## ADDED Requirements
 
 ### Requirement: Portfolio proof loop outcome
-시스템은 각 lane이 한 개의 canonical downstream output과 handoff를 제공하는 Collection → Curation → Training/Evaluation → Rollout → Learning Evidence → Public Documentation 흐름을 유지해야 한다(SHALL). 외부에 공개할 결과는 현재 범위에 맞는 immutable evidence로 추적할 수 있어야 한다(SHALL).
+시스템은 Collection, Curation, Training/Evaluation, Rollout, Learning Evidence, Public Documentation의 결과와 소비자를 canonical output과 handoff로 연결해야 한다(SHALL). 이 연결은 모든 작업이 같은 순서를 통과하는 선형 파이프라인이 아니라, 필요한 증거와 권한이 충족된 작업들이 분기·병렬 진행·재평가할 수 있는 제품의 동작이어야 한다(SHALL). 외부에 공개할 결과는 현재 범위에 맞는 immutable evidence로 추적할 수 있어야 한다(SHALL).
 
 #### Scenario: Evidence-backed result reaches public documentation
-- **WHEN** 한 결과가 모든 선행 lane을 통과해 공개 후보가 된다
+- **WHEN** 한 결과가 그 주장에 필요한 선행 증거를 갖추어 공개 후보가 된다
 - **THEN** 각 handoff는 canonical output과 exact evidence reference를 가리키고 Public Documentation은 증명된 범위만 설명한다
+
+### Requirement: Evidence enables independent work and bounded feedback
+새로운 canonical evidence는 관련된 복수 소비자가 독립적으로 사용할 수 있어야 하며(SHALL), 평가 완료를 모든 수집의 선행 조건으로 강제해서는 안 된다(MUST NOT). 데이터 부족, 선별 결과, 학습·평가 결과와 실물 관찰은 각각 필요한 수집·선별·평가 작업을 열 수 있어야 한다(SHALL). 같은 입력과 같은 작업의 재전달은 중복 실행을 만들지 않아야 하며(SHALL), 변경된 입력은 영향을 받는 결과를 식별하고 이전 결과를 해당 입력에 대한 현재 증거로 오인하지 않게 해야 한다(SHALL). 반복 작업에는 유한한 자원·시도 범위와 종료 사유가 있어야 한다(SHALL).
+
+#### Scenario: New data has several consumers
+- **WHEN** 새 episode가 canonical technical admission을 완료한다
+- **THEN** 품질 분석과 검토 준비는 각자의 입력 조건에 따라 진행할 수 있고, semantic 또는 training 승인을 기다리는 작업이 독립적인 safe 작업을 막지 않는다
+
+#### Scenario: Evidence changes a previous conclusion
+- **WHEN** 새 데이터 또는 평가 결과가 이전 판단의 입력을 바꾼다
+- **THEN** 시스템은 영향받는 작업과 입력 계보를 구분해 필요한 작업을 다시 준비하며, 변경되지 않은 입력의 중복 작업이나 무한 재시도를 만들지 않는다
+
+### Requirement: Product owns collection and evaluation execution
+장기 완료 결과는 recommendation 생성이나 에이전트의 수동 연결에 그쳐서는 안 된다(MUST NOT). 제품은 적격 범위 안에서 필요한 수집을 선택하고 기존 execution owner를 통해 실행하며, 저장된 결과를 선별·승인된 학습 및 평가로 전달하고 후속 행동을 결정할 수 있어야 한다(SHALL). Recommendation의 advisory authority는 유지하며, 실제 효과와 실패 복구는 해당 제품 owner가 책임져야 한다(SHALL). Orca의 개발 Task 그래프는 이 제품 동작의 구현 증거를 대신하지 않는다(MUST NOT).
+
+#### Scenario: A selected collection action becomes real evidence
+- **WHEN** 수집 필요성이 선택되고 해당 실행의 입력·권한·자원 조건이 모두 충족된다
+- **THEN** 제품은 기존 single motion owner로 유한한 수집을 실행하고 canonical commit 또는 failure evidence를 소비자에게 전달하며, 추천 파일만 만든 상태를 수집 완료로 표시하지 않는다
+
+#### Scenario: Collected experience reaches evaluation
+- **WHEN** 데이터 선별, training authorization 및 실행 자원이 해당 학습·평가에 충족된다
+- **THEN** 제품은 실제 학습·평가 결과를 정확한 데이터·split·checkpoint 계보로 연결하고, offline loss와 physical effectiveness를 구분해 다음 작업에 사용한다
+
+### Requirement: Automation takes over qualified responsibilities rather than bypassing gates
+반복적인 사람 입력을 줄이는 전환은 그 입력이 담당하던 관찰·판정·권한 범위·실패 대응을 명시하고 검증된 시스템 책임으로 인수해야 한다(SHALL). 관측 정확도, 잘못된 승인과 중단, 복구 가능성 및 사람 개입 빈도를 적용 범위 안에서 평가해야 한다(SHALL). 기존 gate를 바꾸는 개별 전환은 해당 authority의 승인된 계약과 회귀·실물 evidence를 갖추어야 하며(SHALL), 장기 자동화 intent 자체를 현재 gate 충족이나 승인으로 해석해서는 안 된다(MUST NOT).
+
+#### Scenario: Repeated confirmation is replaced within a qualified scope
+- **WHEN** 한 확인 책임을 시스템이 인수할 근거와 해당 authority의 변경 계약이 충족된다
+- **THEN** 적격 범위의 반복 입력을 줄일 수 있지만 범위 밖·오래된 관측·불확실한 판정은 자동 승인하지 않고 안전한 중단 또는 사람 판단으로 전달한다
 
 ### Requirement: Evidence state has one meaning
 모든 material claim은 `SUPPORTED`, `PARTIAL`, `UNKNOWN` 중 하나여야 한다(SHALL). `PARTIAL`은 제한을 보존해야 하고(MUST), `UNKNOWN`은 실패·안전·승인·효과로 추정되어서는 안 된다(MUST NOT).

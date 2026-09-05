@@ -11,6 +11,14 @@
 - [ ] 첫 학습·평가 근거: 현재 PC에서 가능한 설정, 고정 split, 승인 dataset과 checkpoint 계보를 연결해 실제 학습 및 held-out 평가를 수행한다. 추가 수집과 평가 조건은 기존 리서치, 최신 primary evidence와 실제 coverage를 함께 근거로 선택한다.
 - [ ] 포트폴리오 proof 연결: 지원되는 claim과 limitation을 Learning Evidence 및 public docs에 연결한다. physical rollout owner와 실행 evidence가 없으면 실물 effectiveness는 UNKNOWN으로 남긴다. 전체 scenario 충족 후에만 사람에게 archive 확인을 요청한다.
 
+## 증거 기반 자동화의 구현 범위
+
+아래는 고정 실행 순서가 아니라 연결의 완료 기준이다. 기존 소량 수집과 첫 학습·평가는 전체 그래프 구현을 기다리지 않는다. 코드로 구현된 연결, 실제 실데이터 실행, 장기 자율 운용을 각각 구분하며 앞 단계의 성공으로 뒤 단계를 완료 처리하지 않는다.
+
+- [ ] 첫 제품 연결: 실제 frozen evidence에서 복수 소비자의 작업이 독립적으로 준비되고, 적어도 한 결과가 다음 제품 owner에 실제 소비되는 경로를 재현한다. 에이전트가 claim이나 다음 입력을 수동으로 조립한 시연만으로 완료하지 않는다. 재전달·입력 변경·실패·승인 대기 시 중복 효과와 권한 전파가 없음을 검증한다.
+- [ ] 적격 범위의 자율 실행: 제품이 필요한 수집을 선택하고 기존 owner를 통해 실행한 결과를 선별·승인된 학습·평가와 후속 행동까지 연결한다. 실제 수집·평가·중단·복구 evidence가 필요하며 추천 출력, synthetic test 또는 개발용 Orca Task 완료만으로 달성했다고 말하지 않는다.
+- [ ] 사람 개입의 책임별 축소: 반복 확인별 현재 owner와 대체할 관측·판정·권한을 식별한다. 검증 가능한 전환부터 구현하고 잘못된 승인·안전 중단·사람 개입 빈도와 품질·시간 비용을 측정한다. scene, semantic, physical binding, training authority의 현재 미충족 상태를 자동화 계획으로 대신하지 않는다.
+
 ## 증거와 환경 정리의 시점
 
 검증된 결과가 생길 때 기존 public docs의 claim → output → evidence → limitation → next consumer 연결을 갱신한다. raw evidence는 원래 owner에 두며 문서가 현재 상태의 복제 장부가 되지 않게 한다.
