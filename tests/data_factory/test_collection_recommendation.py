@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import copy
+from concurrent.futures import ThreadPoolExecutor
 import json
 import tempfile
+import threading
 from types import SimpleNamespace
 import unittest
 from datetime import datetime, timezone
@@ -808,6 +810,64 @@ class CollectionRecommendationTests(unittest.TestCase):
             changed = recommend_stored_collection(**arguments)
             self.assertEqual(changed["availability"], "UNAVAILABLE")
             self.assertIn("DIGEST", changed["reason_codes"][0])
+
+    def test_native_concurrent_identical_publish_reuses_complete_output(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            fixture = RecommendationFixture(
+                dataset_root=str(root / "synthetic-data"), evidence_root=str(root / "runs"),
+            )
+            runs = fixture.store()
+            start = threading.Barrier(8)
+
+            def publish(_):
+                start.wait(timeout=10)
+                return recommend_stored_collection(
+                    run_directories=runs[:1], source_commit=COMMIT,
+                    output_root=root / "derived",
+                )
+
+            with ThreadPoolExecutor(max_workers=8) as pool:
+                results = list(pool.map(publish, range(8)))
+            self.assertTrue(all(result == results[0] for result in results))
+            self.assertEqual(results[0]["availability"], "AVAILABLE")
+            self.assertEqual(len(list((root / "derived").iterdir())), 1)
+
+    def test_native_failed_publication_does_not_expose_partial_result(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            fixture = RecommendationFixture(
+                dataset_root=str(root / "synthetic-data"), evidence_root=str(root / "runs"),
+            )
+            runs = fixture.store()
+            arguments = dict(run_directories=runs[:1], source_commit=COMMIT,
+                             output_root=root / "derived")
+            original = json.dump
+            calls = 0
+
+            def fail_second(*args, **kwargs):
+                nonlocal calls
+                calls += 1
+                if calls == 2:
+                    raise OSError("interrupted publication")
+                return original(*args, **kwargs)
+
+            with mock.patch("tools.data_factory.collection_recommendation_io.json.dump", side_effect=fail_second):
+                with self.assertRaisesRegex(OSError, "interrupted publication"):
+                    recommend_stored_collection(**arguments)
+            self.assertEqual(list((root / "derived").iterdir()), [])
+            self.assertEqual(recommend_stored_collection(**arguments)["availability"], "AVAILABLE")
+
+    def test_native_source_commit_is_explicitly_unverified_caller_label(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            fixture = RecommendationFixture(
+                dataset_root=str(root / "synthetic-data"), evidence_root=str(root / "runs"),
+            )
+            result = recommend_stored_collection(run_directories=fixture.store()[:1], source_commit="0" * 40)
+            self.assertEqual(result["implementation_provenance"], {
+                "source_commit": "0" * 40, "verification": "CALLER_SUPPLIED_UNVERIFIED",
+            })
 
     def test_postcommit_owner_retains_exact_authoring_for_native_consumer(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

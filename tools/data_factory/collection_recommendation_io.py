@@ -1,8 +1,11 @@
 """Explicit offline collection consumer; no runtime or collection callbacks."""
 from __future__ import annotations
 
+import fcntl
 import json
+import os
 import sys
+import tempfile
 from pathlib import Path
 from typing import Sequence
 
@@ -16,17 +19,47 @@ from tools.data_factory.episode_ledger import (
 from tools.fr5_data_factory import ContractArgumentParser, ContractError, load_json_strict
 
 
+def _publish(destination: Path, documents: dict) -> None:
+    """Publish both files together; cooperating callers reuse identical output."""
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    descriptor = os.open(destination.parent, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        # A short root-directory lock covers publication, not source analysis.
+        fcntl.flock(descriptor, fcntl.LOCK_EX)
+        if destination.is_symlink() or destination.exists():
+            if (destination.is_symlink() or not destination.is_dir()
+                    or set(path.name for path in destination.iterdir()) != set(documents)):
+                raise ContractError("COLLECTION_RECOMMENDATION_OUTPUT_CONFLICT")
+            for name, value in documents.items():
+                path = destination / name
+                if path.is_symlink() or load_json_strict(path) != value:
+                    raise ContractError("COLLECTION_RECOMMENDATION_OUTPUT_CONFLICT")
+            return
+        with tempfile.TemporaryDirectory(prefix=".pending-", dir=destination.parent) as temporary:
+            staged = Path(temporary) / "result"
+            staged.mkdir()
+            for name, value in documents.items():
+                with (staged / name).open("x", encoding="utf-8") as stream:
+                    json.dump(value, stream, sort_keys=True, indent=2)
+                    stream.write("\n")
+            staged.rename(destination)
+    finally:
+        os.close(descriptor)
+
+
 def recommend_stored_collection(
     *, run_directories: Sequence[str | Path], source_commit: str,
     output_root: str | Path | None = None,
 ) -> dict:
     """Load canonical run evidence and optionally publish immutable derived files.
 
-    source_commit identifies the analysis implementation, not a historical run.
+    source_commit is a caller-supplied implementation label, not verified running
+    code identity or a historical run commit. This consumer does not attest Git.
     Missing/invalid legacy sources are unavailable; never consult current config.
     """
     if not run_directories:
         raise ContractError("COLLECTION_RECOMMENDATION_RUNS_REQUIRED")
+    provenance = {"source_commit": source_commit, "verification": "CALLER_SUPPLIED_UNVERIFIED"}
     try:
         sources = None
         evidence = []
@@ -71,6 +104,7 @@ def recommend_stored_collection(
             "reason_codes": [str(exc) if isinstance(exc, ContractError)
                              else "COLLECTION_RECOMMENDATION_SOURCE_IO"],
             "data_quality_analysis": None, "recommendation": None, "output_path": None,
+            "implementation_provenance": provenance,
         }
     output_path = None
     if output_root is not None:
@@ -80,33 +114,20 @@ def recommend_stored_collection(
             raise ContractError("COLLECTION_RECOMMENDATION_OUTPUT_OVERLAP")
         destination = destination / recommendation["recommendation_digest"].removeprefix("sha256:")
         documents = {"coverage_report.json": report, "collection_recommendation.json": recommendation}
-        # An identical replay reuses its immutable directory. A partial or altered
-        # publication fails closed, rather than repairing/overwriting source truth.
-        if destination.exists():
-            if destination.is_symlink() or set(path.name for path in destination.iterdir()) != set(documents):
-                raise ContractError("COLLECTION_RECOMMENDATION_OUTPUT_CONFLICT")
-            for name, value in documents.items():
-                path = destination / name
-                if path.is_symlink() or load_json_strict(path) != value:
-                    raise ContractError("COLLECTION_RECOMMENDATION_OUTPUT_CONFLICT")
-        else:
-            destination.mkdir(parents=True, exist_ok=False)
-            for name, value in documents.items():
-                with (destination / name).open("x", encoding="utf-8") as stream:
-                    json.dump(value, stream, sort_keys=True, indent=2)
-                    stream.write("\n")
+        _publish(destination, documents)
         output_path = str(destination)
     return {
         "availability": "AVAILABLE", "reason_codes": [],
         "data_quality_analysis": report, "recommendation": recommendation,
         "output_path": output_path,
+        "implementation_provenance": provenance,
     }
 
 
 def main(argv=None) -> int:
     parser = ContractArgumentParser(description=__doc__)
     parser.add_argument("--run-dir", action="append", required=True)
-    parser.add_argument("--source-commit", required=True, help="analysis implementation commit")
+    parser.add_argument("--source-commit", required=True, help="caller-supplied implementation commit label (not attested)")
     parser.add_argument("--output-root", required=True, help="exclusive derived output root")
     try:
         args = parser.parse_args(argv)
