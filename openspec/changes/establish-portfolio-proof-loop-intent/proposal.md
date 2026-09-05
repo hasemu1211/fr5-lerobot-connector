@@ -7,7 +7,8 @@ FR5의 장기 의도와 실행 상태가 plan 문서에 함께 쌓이면서, 현
 - Collection에서 Public Documentation까지 이어지는 Portfolio Proof Loop의 지속 가능한 결과를 정의한다.
 - 주장 상태, lane별 authority, fail-closed gate, downstream handoff의 의미를 고정한다.
 - 실제 작업의 가치 필터와 evidence가 기존 경계를 흔들 때만 intent를 재검토하는 규칙을 둔다.
-- 실행 상태, 수치 스냅샷, evidence 원본, backlog와 plan 이력은 OpenSpec 소유에서 제외한다.
+- OpenSpec tasks를 작은 가치 결과와 완료 기준을 관리하는 실행 데스크로 사용한다. 상세 attempt, live resource, blocker와 evidence 원본은 Orca 및 기존 owner가 보존한다.
+- 수치 스냅샷, 별도 runtime ledger와 과거 plan 이력은 복제하지 않는다.
 
 ## Capabilities
 

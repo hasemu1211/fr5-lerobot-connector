@@ -19,11 +19,15 @@ FR5가 Collection, Curation, Training/Evaluation, Rollout, Learning Evidence, Pu
 - **THEN** claim은 `PARTIAL` 또는 `UNKNOWN`으로 남고 누락된 의미를 만들어 내지 않는다
 
 ### Requirement: Existing owners retain authority
-OpenSpec은 지속 가능한 외부 행동 intent와 안정된 경계만 소유해야 한다(SHALL). Orca는 실행·의존성·진척·blocker·handoff를, source와 tests는 실행 가능한 계약과 수치 truth를, MEX는 파생된 로컬 탐색 정보를, Public Documentation은 검증된 사용자 의미를 계속 소유해야 한다(SHALL).
+OpenSpec은 지속 가능한 외부 행동 intent, 안정된 경계와 outcome 단위의 완료 기준 및 evidence 연결을 소유해야 한다(SHALL). Orca는 상세 실행·의존성·attempt 진척·live resource·blocker·handoff를, source와 tests는 실행 가능한 계약과 수치 truth를, MEX는 파생된 로컬 탐색 정보를, Public Documentation은 검증된 사용자 의미를 계속 소유해야 한다(SHALL).
 
 #### Scenario: Execution state changes
 - **WHEN** task의 담당자, 순서, 진행 상태 또는 blocker가 바뀐다
-- **THEN** Orca만 그 변경을 기록하고 OpenSpec intent는 바뀌지 않는다
+- **THEN** Orca가 상세 변경을 기록하며 OpenSpec의 outcome·완료 기준·evidence 연결이 달라지지 않는 한 OpenSpec을 갱신하지 않는다
+
+#### Scenario: A small outcome is completed
+- **WHEN** outcome의 완료 기준을 canonical evidence로 검증한다
+- **THEN** OpenSpec tasks는 해당 결과를 완료하고 evidence owner를 참조하지만 누락된 downstream 학습·실물 효과나 승인을 완료로 간주하지 않는다
 
 ### Requirement: Learning evidence analysis stays separated from authority
 Data Quality Analysis와 Rollout Evidence Analysis는 각자 canonical output을 가져야 한다(SHALL). Recommendation은 두 결과를 읽어 advisory synthesis만 제공해야 하며(MUST), recorder·motion·collection·promotion·training·publication authority를 가져서는 안 된다(MUST NOT).
