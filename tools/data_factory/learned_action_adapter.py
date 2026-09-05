@@ -1,4 +1,4 @@
-"""Pure fake learned-action stop/fault harness; it has no robot integration."""
+"""Legacy fake fault harness and strict local SmolVLA inference for finite plans."""
 
 from __future__ import annotations
 
@@ -71,7 +71,10 @@ def fake_observation(
 
 
 def _finite_number(value: object) -> bool:
-    return not isinstance(value, bool) and isinstance(value, (int, float)) and math.isfinite(value)
+    try:
+        return not isinstance(value, bool) and isinstance(value, (int, float)) and math.isfinite(value)
+    except OverflowError:
+        return False
 
 
 def _rgb(value: object) -> dict:
@@ -128,6 +131,7 @@ class LearnedActionAdapter:
         self.last_progress_s: float | None = None
         self.policy_calls = 0
         self._owns_sink = False
+        self._in_step = False
 
     def _now(self) -> float:
         value = self.clock()
@@ -199,6 +203,15 @@ class LearnedActionAdapter:
         }
 
     def step(self, observation: object) -> str:
+        if self._in_step:
+            return self._terminal(FAULT, "REENTRANT_STEP")
+        self._in_step = True
+        try:
+            return self._step(observation)
+        finally:
+            self._in_step = False
+
+    def _step(self, observation: object) -> str:
         if self.state != ACTIVE:
             return self.state
         if self.check_watchdog() != ACTIVE:
@@ -222,8 +235,136 @@ class LearnedActionAdapter:
         except Exception:
             return self._terminal(FAULT, "INVALID_ACTION")
         try:
+            # Inference can outlive source freshness without tripping the watchdog.
+            self._observation(observation, self._now())
+        except Exception as error:
+            return self._terminal(FAULT, str(error) or "STALE_OBSERVATION")
+        try:
             self.sink.send(self.owner_id, action)
             self.last_progress_s = self._now()
         except Exception:
             return self._terminal(FAULT, "SINK_FAULT")
         return self.state
+
+
+class NativeSmolVLA:
+    """Strict local checkpoint + saved processor inference, with no execution API.
+
+    Resource qualification is external. Offline dependency caches must already
+    exist; this loader cannot download or install model/tokenizer dependencies.
+    """
+
+    @classmethod
+    def load(cls, checkpoint, *, device="cpu"):
+        import importlib.metadata
+        import json
+        import os
+        from pathlib import Path
+        from tools.fr5_data_factory import ContractError, canonical_digest
+        from tools.data_factory.training_receipts import tree_digest
+        from tools.validate_training_checkpoint import validate_checkpoint
+
+        try:
+            # Admission is necessary but does not prove that weights can load.
+            policy_dir, output_dir = validate_checkpoint(Path(checkpoint))
+            if importlib.metadata.version("lerobot") != "0.6.1":
+                raise ContractError("LEARNED_RUNTIME_VERSION")
+            if os.environ.get("HF_HUB_OFFLINE") != "1" or os.environ.get("TRANSFORMERS_OFFLINE") != "1":
+                raise ContractError("LEARNED_OFFLINE_RUNTIME_REQUIRED")
+            before = tree_digest(policy_dir)
+            from safetensors import safe_open
+            with safe_open(policy_dir / "model.safetensors", framework="numpy") as tensors:
+                if not tensors.keys():
+                    raise ContractError("LEARNED_EMPTY_WEIGHTS")
+            # Saved normalization state is mandatory: LeRobot can otherwise
+            # silently treat a feature without statistics as identity.
+            for filename, registry, features in (
+                ("policy_preprocessor.json", "normalizer_processor", ("observation.state",)),
+                ("policy_postprocessor.json", "unnormalizer_processor", ("action",)),
+            ):
+                config = json.loads((policy_dir / filename).read_text())
+                allowed = ({"rename_observations_processor", "to_batch_processor", "smolvla_new_line_processor",
+                            "tokenizer_processor", "device_processor", "normalizer_processor"}
+                           if filename == "policy_preprocessor.json"
+                           else {"unnormalizer_processor", "device_processor"})
+                if any("class" in step or step.get("registry_name") not in allowed for step in config["steps"]):
+                    raise ContractError("LEARNED_PROCESSOR_CONTRACT")
+                matching = [s for s in config["steps"] if s.get("registry_name") == registry]
+                if len(matching) != 1:
+                    raise ContractError("LEARNED_PROCESSOR_NORMALIZATION")
+                step = matching[0]
+                state_file = step.get("state_file")
+                if not isinstance(state_file, str) or Path(state_file).name != state_file:
+                    raise ContractError("LEARNED_PROCESSOR_STATE")
+                if step["config"]["norm_map"].get("STATE" if features[0] == "observation.state" else "ACTION") != "MEAN_STD":
+                    raise ContractError("LEARNED_PROCESSOR_NORMALIZATION")
+                with safe_open(policy_dir / state_file, framework="numpy") as tensors:
+                    import numpy as np
+                    for feature in features:
+                        for stat in ("mean", "std"):
+                            tensor = tensors.get_tensor(f"{feature}.{stat}")
+                            if tensor.shape != (7,) or not np.isfinite(tensor).all() or stat == "std" and (tensor < 0).any():
+                                raise ContractError("LEARNED_PROCESSOR_STATE")
+            policy, preprocessor, postprocessor = cls._load_components(policy_dir, device)
+            if tree_digest(policy_dir) != before:
+                raise ContractError("LEARNED_CHECKPOINT_CHANGED")
+            receipt = output_dir / "fr5_training_receipt.json"
+            if not receipt.is_file():
+                receipt = Path(str(output_dir) + ".fr5_training_receipt.json.pending")
+            instance = cls()
+            instance.policy, instance.preprocessor, instance.postprocessor = policy, preprocessor, postprocessor
+            instance.checkpoint = {"tree_digest": before,
+                                   "training_receipt_digest": canonical_digest(json.loads(receipt.read_text())),
+                                   "runtime": "lerobot-0.6.1-native"}
+            instance.policy_dir = policy_dir
+            return instance
+        except ContractError:
+            raise
+        except Exception as exc:
+            raise ContractError("LEARNED_CHECKPOINT_LOAD_FAILED") from exc
+
+    @staticmethod
+    def _load_components(policy_dir, device):
+        from lerobot.policies.smolvla.configuration_smolvla import SmolVLAConfig
+        from lerobot.policies.smolvla.modeling_smolvla import SmolVLAPolicy
+        from lerobot.policies.factory import make_pre_post_processors
+        from tools.fr5_data_factory import ContractError
+
+        config = SmolVLAConfig.from_pretrained(policy_dir, local_files_only=True)
+        if (list(config.input_features["observation.state"].shape) != [7]
+                or list(config.output_features["action"].shape) != [7]
+                or config.adapt_to_pi_aloha or config.rtc_config is not None):
+            raise ContractError("LEARNED_MODEL_FEATURES")
+        cameras = {key for key in config.input_features if key.startswith("observation.images.") and not key.startswith("observation.images.empty_camera_")}
+        if cameras != {"observation.images.camera1", "observation.images.camera2"}:
+            raise ContractError("LEARNED_MODEL_CAMERAS")
+        config.device = device
+        config.load_vlm_weights = False
+        policy = SmolVLAPolicy.from_pretrained(policy_dir, config=config, strict=True, local_files_only=True)
+        pre, post = make_pre_post_processors(
+            config, pretrained_path=str(policy_dir),
+            preprocessor_overrides={"device_processor": {"device": device}},
+            postprocessor_overrides={"device_processor": {"device": "cpu"}},
+        )
+        return policy, pre, post
+
+    def __call__(self, observation):
+        import torch
+        from tools.fr5_data_factory import ContractError
+        from tools.data_factory.training_receipts import tree_digest
+
+        if tree_digest(self.policy_dir) != self.checkpoint["tree_digest"]:
+            raise ContractError("LEARNED_CHECKPOINT_CHANGED")
+        value = {"observation.state": torch.tensor(observation["observation.state"], dtype=torch.float32),
+                 "task": observation["task"]}
+        for key in ("observation.images.camera1", "observation.images.camera2"):
+            frame = _rgb(observation[key])
+            value[key] = torch.frombuffer(bytearray(frame["data"]), dtype=torch.uint8).reshape(frame["shape"]).permute(2, 0, 1).float() / 255
+        self.policy.reset()
+        self.preprocessor.reset()
+        self.postprocessor.reset()
+        with torch.inference_mode():
+            output = self.postprocessor(self.policy.predict_action_chunk(self.preprocessor(value)))
+        if not isinstance(output, torch.Tensor) or output.ndim != 3 or output.shape[0] != 1 or output.shape[2] != 7:
+            raise ContractError("LEARNED_ACTION_7D")
+        return output[0].detach().cpu().tolist()

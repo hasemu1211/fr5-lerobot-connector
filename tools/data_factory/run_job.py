@@ -1192,7 +1192,7 @@ def _operator_summary(result):
     if not isinstance(summary, dict):
         raise ContractError("OPERATOR_SUMMARY_UNAVAILABLE")
     required = {"path", "flow", "speed", "clearance"}
-    if frozenset(summary) not in {frozenset(required), frozenset(required | {"recycle"})} or not isinstance(summary["path"], list) or not all(isinstance(value, str) for value in summary["path"]):
+    if frozenset(summary) not in {frozenset(required), frozenset(required | {"recycle"}), frozenset(required | {"learned"})} or not isinstance(summary["path"], list) or not all(isinstance(value, str) for value in summary["path"]):
         raise ContractError("OPERATOR_SUMMARY_SCHEMA")
     if not isinstance(summary["speed"], dict) or not summary["speed"]:
         raise ContractError("OPERATOR_SUMMARY_SCHEMA")
@@ -1220,6 +1220,16 @@ def _operator_summary(result):
             else "POST_RETREAT_SEMANTIC"
         ),
     }
+    if "learned" in summary:
+        from tools.data_factory.rollout.finite_plan import proposal_summary
+        if (not isinstance(plan, dict) or plan.get("execution_kind") != "FINITE_LEARNED_PROBE"
+                or summary["path"] != ["LEARNED_CHUNK"] or boundary != "LEARNED_CHUNK"
+                or "learned_proposal" not in plan
+                or summary["learned"] != proposal_summary(plan["learned_proposal"])
+                or summary["flow"] != {"continuous_through": "LEARNED_CHUNK", "next_human_hold": "PRECONTACT_HUMAN"}
+                or summary["clearance"].get("status") != "COLLISION_CHECKED_NO_DISTANCE"):
+            raise ContractError("OPERATOR_SUMMARY_SCHEMA")
+        return copy.deepcopy(summary)
     if boundary not in allowed_boundaries or summary["flow"] not in (
         {"continuous_through": "APPROACH_STOP_LIN", "next_human_hold": "PRECONTACT_HUMAN"},
         expected_flow,
@@ -2272,6 +2282,46 @@ def _write_episode_ledger(
     }
 
 
+def run_learned_plan_only(payload, cancel, publish, *, checkpoint, observation,
+                          instruction, period_s, max_observation_age_s=.3,
+                          device="cpu", resolver=resolve_inputs, executor_factory=_executor):
+    """Native checkpoint-to-existing-planner entry point; no recorder or motion.
+
+    The returned exact finite plan still needs all existing physical bindings and
+    human approvals. This API authorizes neither online outputs nor dataset commit.
+    """
+    from tools.data_factory.learned_action_adapter import NativeSmolVLA
+    from tools.data_factory.rollout.finite_plan import FinitePolicyInference, compile_program
+    try:
+        validated, source, scene = resolver(payload)
+        if cancel.is_set():
+            raise ContractError("LEARNED_CANCELLED")
+        native = NativeSmolVLA.load(checkpoint, device=device)
+        inference = FinitePolicyInference(native, native.checkpoint, cancel_event=cancel)
+        proposal = inference.propose(
+            observation() if callable(observation) else observation, instruction=instruction,
+            robot_description=Path(payload["urdf"]).read_text(),
+            period_s=period_s, max_observation_age_s=max_observation_age_s,
+            velocity_scaling=min(step["limits"]["velocity_scaling"] for step in source["steps"] if "velocity_scaling" in step["limits"]),
+        )
+        program = compile_program(source, proposal)
+        return run_plan_only(payload, cancel, publish,
+                             resolver=lambda _: (validated, program, scene), executor_factory=executor_factory)
+    except ContractError as exc:
+        return _response(ok=False, code=exc.code, state="BLOCKED", run_id=payload.get("run_id"))
+    except Exception:
+        return _response(ok=False, code="LEARNED_PREPARATION_FAILED", state="BLOCKED", run_id=payload.get("run_id"))
+
+
+def learned_run_diagnostic(result):
+    """Attach the canonical read-only rollout projection to an existing run result."""
+    evidence = result.get("execution_evidence")
+    if not isinstance(evidence, dict) or "learned_execution" not in evidence:
+        return None
+    from tools.data_factory.rollout.evidence_boundary import build_run_diagnostic
+    return build_run_diagnostic(result)
+
+
 def run_plan_only(payload, cancel, publish, *, resolver=resolve_inputs, executor_factory=_executor):
     """Resolve and plan once; recorder, dataset, camera, and robot execution stay absent."""
     try:
@@ -2329,6 +2379,7 @@ def run_plan_only(payload, cancel, publish, *, resolver=resolve_inputs, executor
             plan_digest=result["plan_digest"],
             data={
                 "mode": "plan_only",
+                **({"finite_learned_plan": copy.deepcopy(envelope)} if "learned_proposal" in program else {}),
                 "normalized_job": validated["normalized_job"],
                 "resolved_job_digest": validated["resolved_job_digest"],
                 "motion_program_digest": canonical_digest(program),
@@ -3997,7 +4048,7 @@ def run_live(payload, cancel, publish, *, resolver=resolve_inputs, executor_fact
         while True:
             if cancel.is_set():
                 result = job.cancel()
-                return _response(ok=False, code=result["code"], state=result["state"], run_id=payload["run_id"], plan_digest=planned["plan_digest"])
+                return _response(ok=False, code=result["code"], state=result["state"], run_id=payload["run_id"], plan_digest=planned["plan_digest"], data=learned_run_diagnostic(result))
             poll_started = time.monotonic()
             result = job.poll()
             poll_elapsed = time.monotonic() - poll_started
@@ -4023,7 +4074,7 @@ def run_live(payload, cancel, publish, *, resolver=resolve_inputs, executor_fact
                         "frozen_rows": result["frozen_rows"], "rows_after_recycle": result["rows_after_recycle"],
                         "camera_semantic_authority": False, "training_authorized": False,
                     })
-                return _response(ok=False, code=result["code"], state=result["state"], run_id=payload["run_id"], plan_digest=planned["plan_digest"])
+                return _response(ok=False, code=result["code"], state=result["state"], run_id=payload["run_id"], plan_digest=planned["plan_digest"], data=learned_run_diagnostic(result))
             if result["state"] in {"AWAITING_CELL_READY", "COMMITTED"}:
                 publish(_response(
                     ok=True, code="VALIDATING", state="RUNNING",

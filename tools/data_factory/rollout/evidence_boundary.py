@@ -334,3 +334,42 @@ def main(argv: list[str] | None = None) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
+
+
+def build_run_diagnostic(lifecycle_result: Mapping[str, Any]) -> dict[str, Any]:
+    """Project a finite learned run without inventing a committed episode/ledger.
+
+    The existing OneJob result owns recorder disposition and executor evidence.
+    This read-only diagnostic can target later collection/re-evaluation; neither
+    controller completion nor human semantic PASS grants terminal/reset safety.
+    """
+    from tools.data_factory.rollout.finite_plan import validate_execution_trace
+    try:
+        result = copy.deepcopy(dict(lifecycle_result))
+        plan = result["plan_envelope"]["plan"]
+        if (canonical_digest(plan) != result["plan_digest"] or plan["run_id"] != result["run_id"]
+                or result["recorder_state"] not in {"ABORTED", "FROZEN", "QUARANTINED_COMMIT"}
+                or result["state"] not in {"ABORTED", "BLOCKED", "QUARANTINED_COMMIT"}):
+            raise ContractError("ROLLOUT_RUN_DIAGNOSTIC_BINDING")
+        trace = validate_execution_trace(plan, result["execution_evidence"]["learned_execution"])
+        if trace["status"] not in {"COMPLETED", "FAILED"}:
+            raise ContractError("ROLLOUT_RUN_DIAGNOSTIC_TERMINAL")
+        recorder = result["recorder_evidence"]
+        if not isinstance(recorder, dict) or recorder.get("state") != result["recorder_state"]:
+            raise ContractError("ROLLOUT_RUN_DIAGNOSTIC_RECORDER")
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ContractError("ROLLOUT_RUN_DIAGNOSTIC_BINDING") from exc
+    diagnostic = {
+        "schema_version": "data_factory.rollout_run_diagnostic.v1",
+        "run_id": result["run_id"], "plan_digest": result["plan_digest"],
+        "proposal_digest": trace["proposal_digest"], "checkpoint": trace["checkpoint"],
+        "execution_trace": trace, "lifecycle_result_digest": canonical_digest(result),
+        "recorder_disposition": result["recorder_state"], "recorder_evidence_digest": canonical_digest(recorder),
+        "disposition_reason": result["code"], "episode_ledger": None,
+        "human_semantic_verdict": result.get("semantic_verdict"),
+        "human_semantic_decision": copy.deepcopy(result["execution_evidence"].get("semantic_decision")),
+        "task_effectiveness": UNKNOWN, "physical_qualification": UNKNOWN,
+        "training_authorized": False, "online_policy_authorized": False,
+    }
+    diagnostic["diagnostic_digest"] = canonical_digest(diagnostic)
+    return diagnostic

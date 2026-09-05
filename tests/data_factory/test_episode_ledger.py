@@ -389,6 +389,16 @@ class EpisodeLedgerTest(unittest.TestCase):
             episode_locator=self.episode_locator if locator is None else locator,
         )
 
+    def test_learned_diagnostic_cannot_be_admitted_as_a_committed_episode(self):
+        refs = self._artifacts(suffix="learned")
+        loaded = self._loaded_artifacts(refs)
+        loaded["execution"]["data"]["learned_execution"] = {"status": "COMPLETED"}
+        refs["execution"]["artifact_digest"] = digest(loaded["execution"])
+        with self.assertRaisesRegex(ContractError, "EPISODE_LEDGER_LEARNED_TERMINAL_UNQUALIFIED"):
+            validate_loaded_episode_evidence(
+                dataset_root=str(self.dataset.resolve()), artifact_refs=refs, artifacts=loaded,
+            )
+
     def test_base_receipt_is_immutable_metadata_join(self) -> None:
         artifacts = self._artifacts()
         before = {path: path.read_bytes() for path in self.base.rglob("*") if path.is_file()}

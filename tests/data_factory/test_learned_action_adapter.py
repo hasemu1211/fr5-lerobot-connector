@@ -151,6 +151,27 @@ class LearnedActionAdapterTest(unittest.TestCase):
         self.assertEqual(adapter.step(fake_observation(20.0)), FAULT)
         self.assertEqual((adapter.terminal_reason, sink.commands), ("WATCHDOG", []))
 
+    def test_fresh_before_inference_but_stale_at_send_is_rejected(self):
+        clock, sink = Clock(), FakeCommandSink()
+        def policy(_):
+            clock.value += .4
+            return [0] * 7
+        adapter = LearnedActionAdapter(policy, sink, clock=clock, max_observation_age_s=.3)
+        adapter.start("goal")
+        self.assertEqual(adapter.step(fake_observation(10.)), FAULT)
+        self.assertEqual((adapter.terminal_reason, sink.commands), ("STALE_OBSERVATION", []))
+
+    def test_recursive_step_never_sends_two_commands(self):
+        clock, sink = Clock(), FakeCommandSink()
+        adapter = None
+        def policy(_):
+            adapter.step(fake_observation(10.))
+            return [0] * 7
+        adapter = LearnedActionAdapter(policy, sink, clock=clock)
+        adapter.start("goal")
+        self.assertEqual(adapter.step(fake_observation(10.)), FAULT)
+        self.assertEqual((adapter.terminal_reason, sink.commands, adapter.policy_calls), ("REENTRANT_STEP", [], 1))
+
     def test_watchdog_and_command_owner_prevent_competing_active_goal(self):
         clock = Clock()
         sink = FakeCommandSink()
