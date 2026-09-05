@@ -12,7 +12,7 @@ from types import ModuleType, SimpleNamespace
 import unittest
 from unittest import mock
 
-from tests.test_train_wrapper import launch_fixture
+from tests.test_train_wrapper import launch_fixture, write_normalization_fixture
 from tools.data_factory.training_entrypoint import options, prepare_launch
 from tools.evaluate_smolvla_offline import (
     admit_evaluation,
@@ -76,6 +76,7 @@ def admitted_case(root: Path) -> tuple[SimpleNamespace, dict]:
     (state_dir / "optimizer_state.safetensors").write_bytes(b"fixture-optimizer")
     (state_dir / "rng_state.safetensors").write_bytes(b"fixture-rng")
     write_json(state_dir / "training_step.json", {"step": 1})
+    write_normalization_fixture(policy_dir, receipt)
     args = SimpleNamespace(
         checkpoint=str(policy_dir), dataset=kwargs["dataset"], repo_id=kwargs["repo_id"],
         approved_inventory=kwargs["inventory"], episodes=None, batch_size=1,
@@ -130,15 +131,20 @@ def fake_inference_modules(admission: dict, batches: list[dict]) -> dict[str, Mo
 
     class FakeDataset:
         def __init__(self, *_args, **_kwargs):
-            self.meta = SimpleNamespace(camera_keys=["camera"])
+            self.meta = SimpleNamespace(camera_keys=["camera"], episodes=[{"length": 2}] * 4)
             self.batches = batches
 
     class FakeLoader:
+        fetched_count = 0
+
         def __init__(self, dataset, **_kwargs):
             self.batches = dataset.batches
+            type(self).fetched_count = 0
 
         def __iter__(self):
-            return iter(self.batches)
+            for batch in self.batches:
+                type(self).fetched_count += 1
+                yield batch
 
         def __len__(self):
             return len(self.batches)
@@ -382,27 +388,91 @@ class OfflineEvaluationTest(unittest.TestCase):
                 )
                 batch["camera"] = SimpleNamespace(dtype="float")
 
-            with mock.patch.dict(sys.modules, fake_inference_modules(admission, batches)), mock.patch(
+            modules = fake_inference_modules(admission, batches)
+            with mock.patch.dict(sys.modules, modules), mock.patch(
                 "tools.evaluate_smolvla_offline.smolvla_camera_mapping", return_value=({}, [])
             ):
                 for limit, complete, expected_batches, expected_episodes in (
                     (1, False, 1, [2]),
+                    (2, False, 2, [2, 3]),
                     (3, True, 3, [2, 3]),
                 ):
                     with self.subTest(max_batches=limit):
                         args.max_batches = limit
-                        report = evaluate(args, admission)
+                        with mock.patch("tools.evaluate_smolvla_offline.time.perf_counter", side_effect=[10., 12., 14.]):
+                            report = evaluate(args, admission)
+                        self.assertEqual(modules["torch.utils.data"].DataLoader.fetched_count, expected_batches)
                         self.assertEqual(report["requested_max_batches"], limit)
                         self.assertEqual(report["available_batches"], 3)
                         self.assertEqual(report["evaluated_batches"], expected_batches)
                         self.assertEqual(report["evaluation_complete"], complete)
                         self.assertEqual(report["episodes"], expected_episodes)
                         self.assertEqual(report["admitted_episodes"], [2, 3])
+                        self.assertEqual(report["available_samples"], 4)
+                        self.assertEqual(report["episode_metrics"][0], {
+                            "episode_index": 2, "samples": 2, "available_samples": 2,
+                            "evaluation_complete": True, "loss_mean": 2.0,
+                        })
+                        self.assertEqual(report["episode_metrics"][1]["samples"], limit - 1)
+                        self.assertEqual(report["episode_macro_scope"],
+                            "complete_heldout" if complete else "observed_samples_only")
+                        if limit == 2:
+                            self.assertEqual(report["loss_mean"], 3.0)
+                            self.assertEqual(report["episode_macro_loss_mean"], 3.5)
+                        elif limit == 1:
+                            self.assertIsNone(report["episode_metrics"][1]["loss_mean"])
+                        self.assertEqual(report["resource_usage"], {
+                            "scope": "evaluation_after_admission", "setup_wall_time_s": 2.,
+                            "batches_wall_time_s": 2., "samples_per_second": report["samples"] / 2.,
+                            "torch_cuda_peak_allocated_bytes": None,
+                        })
                         self.assertEqual(
                             report["evidence_scope"],
                             "admitted_heldout_offline_loss"
                             if complete else "bounded_admitted_heldout_offline_loss",
                         )
+
+    def test_nonfinite_loss_never_publishes_a_report(self):
+        for loss in (float("nan"), float("inf"), -float("inf")):
+            with self.subTest(loss=loss), TemporaryDirectory(prefix="SYNTHETIC_TEST_ONLY-") as directory:
+                args, _ = admitted_case(Path(directory))
+                admission = admit_evaluation(args)
+                batches = [{"episode_index": SimpleNamespace(detach=lambda: SimpleNamespace(
+                    cpu=lambda: SimpleNamespace(tolist=lambda: [2]))),
+                    "camera": SimpleNamespace(dtype="float"), "loss": [loss]}]
+                with mock.patch.dict(sys.modules, fake_inference_modules(admission, batches)), \
+                        mock.patch("tools.evaluate_smolvla_offline.smolvla_camera_mapping", return_value=({}, [])), \
+                        mock.patch("tools.evaluate_smolvla_offline.admit_evaluation", return_value=admission), \
+                        mock.patch.object(sys, "argv", evaluation_argv(args)):
+                    with self.assertRaisesRegex(RuntimeError, "non-finite loss"):
+                        main()
+                self.assertFalse(args.output.exists())
+                self.assertFalse(Path(str(args.output) + ".tmp").exists())
+
+    def test_cuda_resource_counter_brackets_model_loading_with_injected_backend(self):
+        with TemporaryDirectory(prefix="SYNTHETIC_TEST_ONLY-") as directory:
+            args, _ = admitted_case(Path(directory))
+            admission = admit_evaluation(args)
+            args.device = "cuda:0"
+            batches = [{"episode_index": SimpleNamespace(detach=lambda: SimpleNamespace(
+                cpu=lambda: SimpleNamespace(tolist=lambda: [2]))),
+                "camera": SimpleNamespace(dtype="float"), "loss": [1.0]}]
+            modules = fake_inference_modules(admission, batches)
+            events = []
+            cuda = modules["torch"].cuda
+            cuda.is_available = lambda: True
+            cuda.init = lambda: events.append("init")
+            cuda.reset_peak_memory_stats = lambda device: events.append(("reset", device))
+            cuda.max_memory_allocated = lambda device: events.append(("peak", device)) or 1234
+            factory = modules["lerobot.policies.factory"]
+            original = factory.make_policy
+            factory.make_policy = lambda *a, **kw: events.append("model") or original(*a, **kw)
+            with mock.patch.dict(sys.modules, modules), mock.patch(
+                "tools.evaluate_smolvla_offline.smolvla_camera_mapping", return_value=({}, [])
+            ):
+                report = evaluate(args, admission)
+            self.assertEqual(events, ["init", ("reset", "cuda:0"), "model", ("peak", "cuda:0")])
+            self.assertEqual(report["resource_usage"]["torch_cuda_peak_allocated_bytes"], 1234)
 
     def test_direct_script_dry_run_without_pythonpath_from_another_directory(self):
         script = Path(__file__).resolve().parents[1] / "tools/evaluate_smolvla_offline.py"

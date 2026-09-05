@@ -160,10 +160,16 @@ def launch_fixture(root):
     info = {"codebase_version": "v3.0", "fps": 30, "total_episodes": 4, "total_frames": 8,
             "features": dataset_features(fps=30, height=480, width=640, cameras=("up", "wrist"), use_videos=True)}
     write_json(metadata / "info.json", info)
-    pq.write_table(pa.Table.from_pylist([
-        {"episode_index": i, "tasks": ["pick up the cube and place it at the destination"], "length": 2}
-        for i in range(4)
-    ]), metadata / "episodes/chunk-000/file-000.parquet")
+    rows = []
+    for i in range(4):
+        row = {"episode_index": i, "tasks": ["pick up the cube and place it at the destination"], "length": 2}
+        for key in ("action", "observation.state", "observation.images.up", "observation.images.wrist"):
+            for name in ("min", "max", "mean", "std", "count"):
+                number = 1.0 if name == "std" else float(i * 100)
+                row[f"stats/{key}/{name}"] = ([2] if name == "count" else
+                    [[[number]]] * 3 if key.startswith("observation.images.") else [number] * 7)
+        rows.append(row)
+    pq.write_table(pa.Table.from_pylist(rows), metadata / "episodes/chunk-000/file-000.parquet")
     for index in range(4):
         (metadata / f"source_provenance/episode-{index:06d}.jsonl").write_text('{"frame_index":0}\n{"frame_index":1}\n')
     identity = approval.current_dataset_identity(dataset, repo_id="tests/synthetic-dataset", dataset_id="synthetic-dataset-r1")
@@ -204,7 +210,98 @@ def launch_fixture(root):
     return kwargs, request, inventory
 
 
+def write_normalization_fixture(policy, receipt):
+    """Synthetic processor state only; never a real policy/checkpoint success claim."""
+    import numpy as np
+    from safetensors.numpy import save_file
+
+    stats = {f"{key}.{name}": np.asarray(value, dtype=np.float32)
+             for key, values in receipt["normalization"]["stats"].items() for name, value in values.items()}
+    for pipeline, registry in (("policy_preprocessor", "normalizer_processor"),
+                               ("policy_postprocessor", "unnormalizer_processor")):
+        state_file = f"{pipeline}_normalization.safetensors"
+        save_file(stats, policy / state_file)
+        config = {"features": {"observation.state": {"type": "STATE", "shape": [7]},
+                               "action": {"type": "ACTION", "shape": [7]}},
+                  "norm_map": {"STATE": "MEAN_STD", "ACTION": "MEAN_STD"}}
+        write_json(policy / f"{pipeline}.json", {"steps": [
+            {"registry_name": registry, "state_file": state_file, "config": config}]})
+
+
 class TrainingLaunchConnectionTest(unittest.TestCase):
+    def test_native_consumer_keeps_official_split_and_excludes_nontrain_statistics(self):
+        import math
+        import sys
+        from types import ModuleType
+        from lerobot.datasets import factory
+        from tools.data_factory.training_entrypoint import run_native_training
+        from tools.fr5_training_profile import training_normalization
+
+        with TemporaryDirectory(prefix="SYNTHETIC_TEST_ONLY-") as directory:
+            kwargs, _, _ = launch_fixture(Path(directory))
+            kwargs["argv"] = [arg.replace("eval_split=0.34", "eval_split=0.2") for arg in kwargs["argv"]]
+            split, receipt = prepare_launch(**kwargs)
+            stats = receipt["normalization"]["stats"]
+            self.assertEqual(split["train_episodes"], [0, 2])
+            self.assertEqual(stats["action"]["mean"], [100.0] * 7)
+            self.assertAlmostEqual(stats["action"]["std"][0], math.sqrt(10001))
+            self.assertEqual(stats["action"]["count"], [4])
+            before = snapshot(kwargs["dataset"])
+            cfg = SimpleNamespace(dataset=SimpleNamespace(root=str(kwargs["dataset"]),
+                repo_id=kwargs["repo_id"], episodes=[0, 2, 3], eval_split=0.2,
+                streaming=False, use_imagenet_stats=True, revision=None, video_backend="pyav",
+                image_transforms=SimpleNamespace(enable=False)), trainable_config=None, tolerance_s=1e-4)
+            full = SimpleNamespace(episodes=[0, 2, 3], meta=SimpleNamespace(
+                episodes={"tasks": split["episode_tasks"]}))
+            created = []
+            def dataset(*_args, **values):
+                value = SimpleNamespace(episodes=values["episodes"], meta=SimpleNamespace(
+                    stats={"action": {"mean": [99999.0] * 7}}, camera_keys=[]))
+                created.append(value)
+                return value
+            native = ModuleType("lerobot.scripts.lerobot_train")
+            native.make_train_eval_datasets = factory.make_train_eval_datasets
+            def main():
+                train, heldout = native.make_train_eval_datasets(cfg)
+                self.assertEqual((train.episodes, heldout.episodes), ([0, 2], [3]))
+                self.assertEqual(train.meta.stats["action"]["mean"].tolist(), [100.0] * 7)
+                self.assertEqual(heldout.meta.stats["action"]["mean"].tolist(), [100.0] * 7)
+            native.main = main
+            original_argv = sys.argv
+            with mock.patch.dict(sys.modules, {"lerobot.scripts.lerobot_train": native}), \
+                    mock.patch.object(factory, "make_dataset", return_value=full), \
+                    mock.patch.object(factory, "resolve_delta_timestamps", return_value={}), \
+                    mock.patch.object(factory, "LeRobotDataset", side_effect=dataset):
+                self.assertEqual(run_native_training(kwargs["argv"], split, receipt), 0)
+                cfg.dataset.episodes = [0, 1, 3]
+                with self.assertRaisesRegex(ContractError, "TRAINING_RUNTIME_DATASET"):
+                    run_native_training(kwargs["argv"], split, receipt)
+            self.assertIs(sys.argv, original_argv)
+            self.assertIs(native.make_train_eval_datasets, factory.make_train_eval_datasets)
+            self.assertEqual(len(created), 2)
+            self.assertEqual(snapshot(kwargs["dataset"]), before)
+            self.assertEqual(training_normalization(split), receipt["normalization"])
+
+    def test_normalization_rejects_missing_or_malformed_train_metadata(self):
+        import pyarrow as pa
+        import pyarrow.parquet as pq
+        from tools.fr5_training_profile import training_normalization
+
+        for kind in ("missing", "shape", "nonfinite", "count"):
+            with self.subTest(kind=kind), TemporaryDirectory(prefix="SYNTHETIC_TEST_ONLY-") as directory:
+                kwargs, _, _ = launch_fixture(Path(directory))
+                split, _ = prepare_launch(**kwargs)
+                path = next((kwargs["dataset"] / "meta/episodes").rglob("*.parquet"))
+                rows = pq.read_table(path).to_pylist()
+                if kind == "missing":
+                    rows = rows[1:]
+                else:
+                    key = "stats/action/count" if kind == "count" else "stats/action/mean"
+                    rows[0][key] = {"shape": [0.0], "nonfinite": [float("nan")] * 7, "count": [99]}[kind]
+                pq.write_table(pa.Table.from_pylist(rows), path)
+                with self.assertRaisesRegex(ContractError, "TRAINING_NORMALIZATION"):
+                    training_normalization(split)
+
     def test_selected_subset_matches_receipt_and_dry_run_is_nonmutating(self):
         with TemporaryDirectory(prefix="SYNTHETIC_TEST_ONLY-") as directory:
             root = Path(directory)
@@ -231,7 +328,7 @@ class TrainingLaunchConnectionTest(unittest.TestCase):
             self.assertEqual(snapshot(root), before)
 
     def test_missing_stale_forged_and_changed_provenance_fail_before_runner_or_output(self):
-        for kind in ("missing", "legacy", "forged", "same-count-provenance", "same-count-payload", "selection", "duplicate", "synthetic", "camera-profile"):
+        for kind in ("missing", "legacy", "forged", "same-count-provenance", "same-count-payload", "selection", "duplicate", "synthetic", "camera-profile", "remote", "environment"):
             with self.subTest(kind=kind), TemporaryDirectory(prefix="SYNTHETIC_TEST_ONLY-") as directory:
                 root = Path(directory)
                 kwargs, _, inventory = launch_fixture(root)
@@ -254,6 +351,10 @@ class TrainingLaunchConnectionTest(unittest.TestCase):
                 elif kind == "synthetic":
                     inventory["scope"] = approval.SYNTHETIC_SCOPE
                     write_json(kwargs["inventory"], inventory)
+                elif kind == "remote":
+                    kwargs["argv"].append("--job.target=remote")
+                elif kind == "environment":
+                    kwargs["argv"].append("--env.type=pusht")
                 else:
                     kwargs["collection_profile"] = "fr5-up-side-rgb-30hz-v1"
                 before = snapshot(root)

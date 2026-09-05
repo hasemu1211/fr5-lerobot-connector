@@ -21,6 +21,56 @@ except ImportError:  # Direct script execution.
 PROFILE_NAMES = ("smolvla", "act", "vqbet-up", "vqbet-side", "vqbet-wrist")
 
 
+def training_normalization(split: dict, *, use_imagenet_stats: bool = True) -> dict:
+    """Aggregate frozen TRAIN metadata only; never read frames or rewrite stats.json."""
+    import numpy as np
+    import pyarrow.parquet as pq
+    from lerobot.datasets.compute_stats import aggregate_stats
+    from lerobot.datasets.factory import IMAGENET_STATS
+    from tools.fr5_data_factory import ContractError
+
+    features = split["feature_contract"]["dataset_features"]
+    keys = [key for key in features if key in {"action", "observation.state"}
+            or key.startswith("observation.images.")]
+    names = ("min", "max", "mean", "std", "count")
+    columns = [f"stats/{key}/{name}" for key in keys for name in names]
+    rows = []
+    root = Path(split["dataset_identity"]["dataset_root"])
+    for path in sorted((root / "meta/episodes").rglob("*.parquet")):
+        rows.extend(pq.read_table(path, columns=["episode_index", "length", *columns],
+            filters=[("episode_index", "in", split["train_episodes"])]).to_pylist())
+    if sorted(row["episode_index"] for row in rows) != sorted(split["train_episodes"]):
+        raise ContractError("TRAINING_NORMALIZATION_EPISODES")
+    episode_stats = []
+    for row in sorted(rows, key=lambda row: row["episode_index"]):
+        stats = {}
+        for key in keys:
+            shape = (3, 1, 1) if key.startswith("observation.images.") else (7,)
+            stats[key] = {name: np.asarray(row[f"stats/{key}/{name}"], dtype=np.float64)
+                          for name in names}
+            for name, value in stats[key].items():
+                if value.shape != ((1,) if name == "count" else shape) or not np.isfinite(value).all():
+                    raise ContractError("TRAINING_NORMALIZATION_STATS")
+            count = stats[key]["count"][0]
+            if (not 0 < count <= row["length"] or count != int(count)
+                    or (key in {"action", "observation.state"} and count != row["length"])
+                    or (stats[key]["std"] < 0).any()):
+                raise ContractError("TRAINING_NORMALIZATION_STATS")
+        episode_stats.append(stats)
+    aggregated = aggregate_stats(episode_stats)
+    if use_imagenet_stats:
+        for key in keys:
+            if key.startswith("observation.images."):
+                aggregated[key].update({name: np.asarray(value) for name, value in IMAGENET_STATS.items()})
+    return {
+        "algorithm": "lerobot-0.6.1-train-episode-moments-v1",
+        "episodes": list(split["train_episodes"]),
+        "use_imagenet_stats": use_imagenet_stats,
+        "stats": {key: {name: value.tolist() for name, value in stats.items()}
+                  for key, stats in aggregated.items()},
+    }
+
+
 def read_metadata(root: Path) -> dict:
     """Read local v3 metadata without constructing/downloading a dataset or cache."""
     import pyarrow.parquet as pq
