@@ -16,7 +16,7 @@ from tools.data_factory.scene_state import validate_scene_binding
 
 
 RECORDER_READINESS_CONTRACT = {
-    "schema_version": "data_factory.recorder_readiness_contract.v1",
+    "schema_version": "data_factory.recorder_readiness_contract.v2",
     "deadline_s": 5.0,
     "min_durable_rows": 60,
     "target_fps": 30,
@@ -28,6 +28,8 @@ RECORDER_READINESS_CONTRACT = {
     "max_writer_queue_drops": 0,
     "max_alignment_failures": 0,
     "require_quality_accepted": True,
+    "scene_camera": "up",
+    "min_scene_brightness": 20.0,
 }
 # Compatibility name; the predicates are recorder quality, not a disposition.
 TEST_ONLY_READINESS_CONTRACT = RECORDER_READINESS_CONTRACT
@@ -793,6 +795,17 @@ class OneJob:
             if source_fps < contract["min_camera_source_fps"]:
                 raise ContractError("RECORDER_READINESS_CAMERA_FPS")
             camera_fps[name] = float(source_fps)
+        # Operational start condition, not dataset/semantic acceptance. Reuse
+        # the fresh sealed prefix; never rescan videos or gate on wrist occlusion.
+        scene_camera = cameras.get(contract["scene_camera"])
+        scene_brightness = scene_camera.get("brightness_mean") if isinstance(scene_camera, dict) else None
+        if (
+            not isinstance(scene_brightness, (int, float)) or isinstance(scene_brightness, bool)
+            or not math.isfinite(scene_brightness) or not 0 <= scene_brightness <= 255
+        ):
+            raise ContractError("RECORDER_READINESS_SCENE_VISIBILITY")
+        if scene_brightness < contract["min_scene_brightness"]:
+            raise ContractError("RECORDER_READINESS_SCENE_DARK")
         if contract["require_quality_accepted"] and (quality["accepted"] is not True or quality["reasons"]):
             raise ContractError("RECORDER_READINESS_QUALITY")
         if (
@@ -813,6 +826,8 @@ class OneJob:
                 "durable_rows": rows,
                 "effective_fps": float(row_fps),
                 "camera_source_fps": camera_fps,
+                "scene_camera": contract["scene_camera"],
+                "scene_brightness_mean": float(scene_brightness),
                 "writer_alive": True,
                 "writer_error": None,
                 "sampler_alive": True,

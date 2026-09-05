@@ -76,12 +76,33 @@ Data Quality Analysis와 Rollout Evidence Analysis는 각자 canonical output을
 - **WHEN** 두 분석 owner의 evidence가 recommendation에 전달된다
 - **THEN** recommendation은 근거와 제한을 제시하지만 어떤 runtime 또는 승인 상태도 변경하지 않는다
 
+### Requirement: Policy artifacts and evaluation comparisons have distinct owners from execution
+정책 학습·평가 owner는 승인된 데이터에서 만들어지는 checkpoint와 저장 processor의 canonical 계약을 소유해야 하며(SHALL), resume·offline evaluation·Rollout은 그 검증을 재사용해야 한다(SHALL). 같은 owner가 비교 질문·고정 cohort·예산·지표 집계를 책임지고, Rollout은 기존 single execution owner를 통해 trial별 실행·시각·중단·결과 근거를 생산해야 한다(SHALL). Offline loss, 제어 완료, semantic 성공과 데이터 유용성을 서로 대신하는 지표로 사용해서는 안 된다(MUST NOT).
+
+#### Scenario: A policy result informs collection
+- **WHEN** 정책 평가 결과가 다음 수집 조건 선택에 사용된다
+- **THEN** 비교 조건과 실제 trial 근거를 추적할 수 있고 성공·실패 데이터 모두의 유용성을 검토한다
+- **AND** Curation의 기존 데이터 선별, 다음 데이터 획득 전략과 실제 수집 실행은 각 결정의 owner를 유지한다
+
 ### Requirement: Immutable and human gates fail closed
 기존 hardware, human, scene, cell, plan-digest, semantic, physical-binding, training-authorization gate는 서로 분리되어 유지되어야 한다(SHALL). 누락되거나 `PARTIAL` 또는 `UNKNOWN`인 evidence는 어떤 외부 효과도 허가해서는 안 된다(MUST NOT).
 
 #### Scenario: Required gate evidence is missing
 - **WHEN** downstream 작업에 필요한 gate evidence가 없거나 검증되지 않았다
 - **THEN** 해당 외부 효과는 차단되고 다른 gate의 PASS가 이를 대신하지 않는다
+
+### Requirement: Continuation preserves completed physical effects
+시스템은 검증된 실행의 위치 계보를 기존 scene owner에서 이어받아야 하며(SHALL), UI·분류·저장 실패만으로 완료된 놓기 동작을 재실행하거나 그 위치 증거를 폐기해서는 안 된다(MUST NOT). 새 동작은 현재 scene·cell·exact plan과 단일 motion owner의 조건을 계속 충족해야 한다(SHALL). 물리 상태를 알 수 없는 실패와 후처리 실패는 서로 다른 복구 대상을 가져야 한다(SHALL).
+
+#### Scenario: Postprocessing fails after a completed placement
+- **WHEN** 실행 완료와 놓기 계보는 유효하지만 독립적인 후처리가 실패한다
+- **THEN** 해당 처리만 복구 대상으로 남기고 기존 위치 증거와 원본을 보존하며, 완료한 동작을 자동 재실행하지 않는다
+- **AND** 다음 episode가 필요로 하는 미완료 저장·기술검사 또는 물리 gate를 우회하지 않는다
+
+#### Scenario: The work surface is dark before new motion
+- **WHEN** 이동 전 fresh 준비 구간에서 작업대 카메라가 어둡거나 필요한 밝기 증거를 확인할 수 없다
+- **THEN** 새 motion을 시작하지 않고 준비 녹화만 정리하며, 이전 완료 episode의 물리 결과나 semantic·training 상태를 변경하지 않는다
+- **AND** 이 시작 조건을 동작 중 소등 감지나 일반 물체 인식의 증명으로 사용하지 않는다
 
 ### Requirement: Handoff preserves claim lineage
 lane handoff는 claim, evidence state, exact reference 또는 digest, 적용 범위와 known limitation, next owner를 포함해야 한다(SHALL). 각 사실은 기존 canonical owner의 output을 참조해야 하며(MUST), 별도 ledger나 복제된 truth를 만들어서는 안 된다(MUST NOT).

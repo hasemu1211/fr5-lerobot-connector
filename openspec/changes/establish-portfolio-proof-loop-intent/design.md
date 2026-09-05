@@ -21,8 +21,9 @@
 2. evidence는 복사하지 않고 owner-native locator와 digest로 참조한다. OpenSpec은 의미를 정의하고 source, tests, Orca와 immutable artifacts가 사실을 보관한다.
 3. OpenSpec tasks는 outcome 단위의 완료 기준과 evidence 연결을 관리한다. 실제 attempt, review, live resource, 상세 의존성, blocker와 handoff는 Orca Task가 소유한다. 작은 outcome은 검증 후 완료하되, 전체 loop의 성공으로 확대하지 않는다.
 4. change는 구현 evidence가 요구사항을 충족하고 사람이 archive를 확인할 때까지 active로 둔다. archive confirmation은 일반 runtime approval을 대신하지 않는다.
-5. lane 책임자는 할당된 결과·자원·쓰기 경계 안에서 짧고 완료 가능한 Goal을 스스로 나누어 조사·구현·dogfooding한다. 작은 engineering 선택마다 coordinator의 승인을 기다리지 않는다. 공동 계약, 다른 owner의 source 또는 공유 GPU·물리 runtime을 변경·점유할 때만 coordinator가 영향받는 소비자와 실행 경계를 조율한다. 사람에게는 조사 후 남은 의미·위험·권한 선택만 요청한다.
-6. Goal은 작업의 지속 조건이지 별도 실행 권한이나 장부가 아니다. 실제 런타임이 제공하는 Goal 기능만 사용하고, Orca Dispatch 완료 이후의 감독 작업은 새 assignment로 연결한다. 이를 위해 중첩 worker나 상시 planner를 추가하지 않는다. 초기 운용은 한 사이클의 실제 소비 결과, 사용자 개입과 통합 재작업을 Orca evidence로 평가한 뒤 조정한다.
+5. lane 책임자는 지속적인 가치 Goal을 유지하고, 그 안의 짧고 완료 가능한 OpenSpec 결과를 조사·구현·dogfooding한다. 작은 engineering 선택마다 coordinator의 승인을 기다리지 않는다. 공동 계약, 다른 owner의 source 또는 공유 GPU·물리 runtime을 변경·점유할 때만 coordinator가 영향받는 소비자와 실행 경계를 조율한다. 사람에게는 조사 후 남은 의미·위험·권한 선택만 요청한다.
+6. Goal은 작업의 지속 조건이지 별도 실행 권한이나 장부가 아니다. 실제 런타임의 Goal을 사용하되 진행 가능한 일이 없는 레인은 세션·결과를 보존하고 의존성이 해결될 때 재개한다. 변경 없는 상태의 반복 확인을 자율 작업으로 세지 않는다. 직접 운용과 Dispatch는 필요한 추적 수준에 따라 선택하며 작은 결과마다 새 세션·Goal을 만들지 않는다.
+7. 기능 책임은 폴더·에이전트 수가 아니라 결정과 canonical output으로 나눈다. Collection은 실제 수집과 scene 이어받기, Curation은 기존 데이터의 품질·분포·선별과 정확한 요청, 정책 학습·평가는 승인 데이터의 최적화와 checkpoint/processor 계약 및 고정 비교 평가를 소유한다. Rollout은 승인된 정책의 실행과 trial별 측정 근거를 소유하고, 평가 owner가 그 근거를 비교·집계한다. 획득 전략은 이 근거들로 다음 조건과 비용을 선택하되 실행은 기존 Collection/Rollout owner를 소비한다. 새로운 package나 서비스는 이 구분만으로 만들지 않는다.
 
 ## Risks / Trade-offs
 

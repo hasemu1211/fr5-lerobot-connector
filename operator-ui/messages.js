@@ -78,6 +78,8 @@ const MESSAGE_CATALOG = {
     RECORDER_READINESS_STALE: "기록기 준비 검사 결과가 최신 상태가 아닙니다",
     RECORDER_READINESS_ROW_FPS: "저장 프레임 속도가 30 Hz 허용 범위를 벗어났습니다",
     RECORDER_READINESS_CAMERA_FPS: "카메라 원본 프레임 속도가 준비 기준보다 낮습니다",
+    RECORDER_READINESS_SCENE_DARK: "작업대 영상이 어두워 새 동작을 시작하지 않았습니다. 조명 상태를 확인하세요",
+    RECORDER_READINESS_SCENE_VISIBILITY: "상단 카메라의 최신 밝기를 확인할 수 없어 새 동작을 시작하지 않았습니다",
     RECORDER_READINESS_DROPS: "기록기 대기열에서 프레임 손실이 확인되었습니다",
     RECORDER_READINESS_ALIGNMENT: "카메라와 로봇 timestamp 정합에 실패했습니다",
     RECORDER_READINESS_QUALITY: "봉인된 준비 구간이 데이터 품질 검사를 통과하지 못했습니다",
