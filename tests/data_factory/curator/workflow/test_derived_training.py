@@ -235,6 +235,44 @@ class DerivedTrainingTest(unittest.TestCase):
         state_path.write_bytes(original_state)
         self.assertEqual((snapshot(source), [snapshot(run) for run in runs]), before)
 
+    def test_saved_observation_view_binds_child_train_and_rejects_tampering(self):
+        root, source, profile, runs, before, published, reference, output = self.native_case(train_fit=True)
+        reference_path = root / 'derivation-reference.json'
+        write_json(reference_path, reference)
+        request_path = output / 'request.json'
+        export_training_request(runs, request_path, dataset_id='derived-r1', derivation=reference)
+        request = load_json_strict(request_path)
+        inventory = training.publish_approval_batch(
+            training.prepare_approval_batch(request, output, 'synthetic-human')
+        )
+        child = Path(request['dataset_root'])
+        argv = ['synthetic-lerobot-train', *build_profile('act', policy_metadata(read_metadata(child))),
+                f'--dataset.root={child}', f'--dataset.repo_id={request["repo_id"]}',
+                '--dataset.episodes=[0,2]', '--dataset.eval_split=0.5',
+                f'--output_dir={root / "never-launched"}', '--batch_size=1', '--steps=2',
+                '--eval_steps=1', '--save_freq=1']
+        split, receipt = training.prepare_launch(
+            dataset=child, repo_id=request['repo_id'], inventory=output / 'training_approved.json',
+            profile='act', collection_profile='fr5-up-wrist-rgb-30hz-v2', argv=argv,
+        )
+        from tools.validate_training_checkpoint import validate_saved_observation_view
+        binding = validate_saved_observation_view(split, receipt)
+        self.assertEqual(binding['representation'], 'baked')
+        self.assertEqual(binding['transform_application'], 'none')
+        fitting = load_json_strict(Path(binding['view_profile']['path']))['fitting']
+        self.assertTrue(all(frame['episode_index'] in split['train_episodes'] for frame in
+                            [fitting['reference_frame'], *fitting['background_plate_frames']]))
+        profile_path = Path(binding['view_profile']['path'])
+        original = profile_path.read_bytes()
+        try:
+            tampered = json.loads(original)
+            tampered['mask_sha256'] = 'sha256:' + '0' * 64
+            write_json(profile_path, tampered)
+            with self.assertRaises(ValueError):
+                validate_saved_observation_view(split, receipt)
+        finally:
+            profile_path.write_bytes(original)
+
     def test_changed_evidence_replay_refusal_and_raw_authority_cannot_publish_child(self):
         root, source, profile, runs, before, published, reference, output = self.native_case(episodes=4)
         export_training_request(runs, output / 'request.json', dataset_id='derived-r1', derivation=reference)
