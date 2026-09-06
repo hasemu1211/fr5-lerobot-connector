@@ -1,0 +1,262 @@
+<!doctype html><html lang="ko"><meta charset="utf-8"><title>실제 수집 기록 — FR5</title><link rel="stylesheet" href="../site.css"><main class="source-page"><a href="../collection.html#recorded-example">← 실제 수집 기록으로 돌아가기</a><h1>Episode 27의 수집·평가 입력</h1><p class="note">보존된 원본의 관련 필드를 발췌했다. SHA-256은 발췌 전 원본 파일을 식별한다. 수집 당시의 판정과 이후의 학습 입력 참조를 구분한다.</p><section><h2>result.json</h2><p class="locator">outputs/data_factory/runs/collection-production-20260904T035141Z-campaign-0001-run-1-e23/result.json<br>sha256:dd4ed17b405e72330239780b83bb58545fa333085acbd331d446ac79395f6692</p><pre>{
+  &quot;detail&quot;: &quot;&quot;,
+  &quot;episode_index&quot;: 27,
+  &quot;reason_code&quot;: &quot;COMMITTED&quot;,
+  &quot;rows&quot;: 633,
+  &quot;run_id&quot;: &quot;collection-production-20260904T035141Z-campaign-0001-run-1-e23&quot;,
+  &quot;schema_version&quot;: &quot;data_factory.recorder_result.v1&quot;,
+  &quot;state&quot;: &quot;COMMITTED&quot;,
+  &quot;transaction_id&quot;: &quot;collection-production-20260904T035141Z-campaign-0001-run-1-e23:episode-000027&quot;
+}</pre></section><section><h2>episode_ledger.json</h2><p class="locator">outputs/data_factory/runs/collection-production-20260904T035141Z-campaign-0001-run-1-e23/episode_ledger.json<br>sha256:de577a7fa421200c67af27ca882a9c91414930c894874837d5b1e741b8e82607</p><pre>{
+  &quot;episode&quot;: {
+    &quot;episode_index&quot;: 27,
+    &quot;episode_ref&quot;: {
+      &quot;episode_index&quot;: 27,
+      &quot;repo_id&quot;: &quot;local/fr5_smolvla_up_wrist_30hz&quot;,
+      &quot;resolved_job_digest&quot;: &quot;sha256:293fdd7ccffd3f09f7fd039d483008c1ee327162c6ecfb2e8e8cb3126a60d909&quot;,
+      &quot;schema_version&quot;: &quot;data_factory.episode_ref.v1&quot;,
+      &quot;staging_manifest_digest&quot;: &quot;sha256:929b4cd6c6334b84023caeb65a767fa931b15980127a5e01aa6607d58516b041&quot;,
+      &quot;transaction_id&quot;: &quot;collection-production-20260904T035141Z-campaign-0001-run-1-e23:episode-000027&quot;
+    },
+    &quot;episode_ref_digest&quot;: &quot;sha256:b86cf042678ab74e522ddb4fe1de5725b7daa17aae5efaccbc3de82860961b00&quot;,
+    &quot;lerobot_v3_locator&quot;: {
+      &quot;data&quot;: {
+        &quot;chunk_index&quot;: 0,
+        &quot;file_index&quot;: 27,
+        &quot;file_row_end_exclusive&quot;: 633,
+        &quot;file_row_start&quot;: 0,
+        &quot;relative_path&quot;: &quot;data/chunk-000/file-027.parquet&quot;
+      },
+      &quot;episode_index&quot;: 27,
+      &quot;locator_digest&quot;: &quot;sha256:230152caf3ae9b5e034ee1303ee3e6426a7d4f210671656e701a24a5a065637d&quot;,
+      &quot;repo_id&quot;: &quot;local/fr5_smolvla_up_wrist_30hz&quot;,
+      &quot;schema_version&quot;: &quot;data_factory.lerobot_v3_episode_locator.v1&quot;,
+      &quot;videos&quot;: [
+        {
+          &quot;camera_key&quot;: &quot;observation.images.up&quot;,
+          &quot;chunk_index&quot;: 0,
+          &quot;file_frame_end_exclusive&quot;: 633,
+          &quot;file_frame_start&quot;: 0,
+          &quot;file_index&quot;: 27,
+          &quot;relative_path&quot;: &quot;videos/observation.images.up/chunk-000/file-027.mp4&quot;,
+          &quot;timestamp_end_s&quot;: 21.1,
+          &quot;timestamp_start_s&quot;: 0.0
+        },
+        {
+          &quot;camera_key&quot;: &quot;observation.images.wrist&quot;,
+          &quot;chunk_index&quot;: 0,
+          &quot;file_frame_end_exclusive&quot;: 633,
+          &quot;file_frame_start&quot;: 0,
+          &quot;file_index&quot;: 27,
+          &quot;relative_path&quot;: &quot;videos/observation.images.wrist/chunk-000/file-027.mp4&quot;,
+          &quot;timestamp_end_s&quot;: 21.1,
+          &quot;timestamp_start_s&quot;: 0.0
+        }
+      ]
+    },
+    &quot;run_id&quot;: &quot;collection-production-20260904T035141Z-campaign-0001-run-1-e23&quot;,
+    &quot;transaction_id&quot;: &quot;collection-production-20260904T035141Z-campaign-0001-run-1-e23:episode-000027&quot;
+  },
+  &quot;admission&quot;: {
+    &quot;review_context_digest&quot;: &quot;sha256:600fbb206c32e5f15e4e8ae4b75339f8beb1c4c4a53d69e952c2d3d6300e21b6&quot;,
+    &quot;technical_status&quot;: &quot;PASS&quot;,
+    &quot;training_status&quot;: &quot;NOT_AUTHORIZED&quot;
+  }
+}</pre></section><section><h2>technical_validator.json</h2><p class="locator">outputs/data_factory/runs/collection-production-20260904T035141Z-campaign-0001-run-1-e23/technical_validator.json<br>sha256:a45ecf7feded2f24ba52e2a647111cea92e8c03db2e3e230d8cdc3894cce9509</p><pre>{
+  &quot;run_id&quot;: &quot;collection-production-20260904T035141Z-campaign-0001-run-1-e23&quot;,
+  &quot;status&quot;: &quot;PASS&quot;,
+  &quot;expected_fps&quot;: 30,
+  &quot;result_digest&quot;: &quot;sha256:3b148a5f85eb51315d17fd85d7f3b2d00071f26368c33315088363fd804e9bb4&quot;
+}</pre></section><section><h2>collection-production-20260904T035141Z-campaign-0001-run-1-e23.provenance.json</h2><p class="locator">outputs/training-admission/fr5260903-pickup-r1-20260905/web-review-r1/collection-production-20260904T035141Z-campaign-0001-run-1-e23.provenance.json<br>sha256:80eb71f58a74258c3df7edd3c3882edb898700e0a232a7f1bcea9d4e9e498b75</p><pre>{
+  &quot;dataset_identity_digest&quot;: &quot;sha256:1519c0edc0f8ebc88ba6f900114c84c12c42f41fefd34c1cccfd4c810e27e5db&quot;,
+  &quot;episode_content_digest&quot;: &quot;sha256:b9158cb118c2986a90900b7a40781a3850ae5ebd8e58a5efce32782f71fbfa48&quot;,
+  &quot;episode_id&quot;: &quot;collection-production-20260904T035141Z-campaign-0001-run-1-e23&quot;,
+  &quot;episode_index&quot;: 27,
+  &quot;episode_ledger&quot;: {
+    &quot;artifact_path&quot;: &quot;outputs/data_factory/runs/collection-production-20260904T035141Z-campaign-0001-run-1-e23/episode_ledger.json&quot;,
+    &quot;artifact_digest&quot;: &quot;sha256:de577a7fa421200c67af27ca882a9c91414930c894874837d5b1e741b8e82607&quot;
+  },
+  &quot;resolved_job_digest&quot;: &quot;sha256:293fdd7ccffd3f09f7fd039d483008c1ee327162c6ecfb2e8e8cb3126a60d909&quot;,
+  &quot;schema_version&quot;: &quot;data_factory.episode_training_provenance.v2&quot;,
+  &quot;scope&quot;: &quot;PRODUCTION&quot;,
+  &quot;technical_validator_digest&quot;: &quot;sha256:a45ecf7feded2f24ba52e2a647111cea92e8c03db2e3e230d8cdc3894cce9509&quot;
+}</pre></section><section><h2>episode-000027.jsonl</h2><p class="locator">datasets/fr5_episodes/fr5260903/meta/source_provenance/episode-000027.jsonl<br>sha256:77fc2e4276fbc9134a07e9a4720789d5b64120c8cf0515d0a0305a30f3f32b85</p><pre>[
+  {
+    &quot;target_ros_s&quot;: 1788496070.4582584,
+    &quot;joint_bracket_ros_s&quot;: [
+      1788496070.4572754,
+      1788496070.467279
+    ],
+    &quot;arm_action_bracket_ros_s&quot;: [
+      1788496070.457282,
+      1788496070.467287
+    ],
+    &quot;gripper_action_ros_s&quot;: 1788496070.4572597,
+    &quot;image_raw_ros_s&quot;: {
+      &quot;up&quot;: 1788496070.447953,
+      &quot;wrist&quot;: 1788496070.465145
+    },
+    &quot;image_corrected_ros_s&quot;: {
+      &quot;up&quot;: 1788496070.447953,
+      &quot;wrist&quot;: 1788496070.465145
+    },
+    &quot;image_received_ros_s&quot;: {
+      &quot;up&quot;: 1788496070.4914212,
+      &quot;wrist&quot;: 1788496070.5059562
+    },
+    &quot;frame_index&quot;: 63,
+    &quot;enqueue_attempt_index&quot;: 63
+  },
+  {
+    &quot;target_ros_s&quot;: 1788496078.8915837,
+    &quot;joint_bracket_ros_s&quot;: [
+      1788496078.8872695,
+      1788496078.89726
+    ],
+    &quot;arm_action_bracket_ros_s&quot;: [
+      1788496078.8872743,
+      1788496078.8972642
+    ],
+    &quot;gripper_action_ros_s&quot;: 1788496078.887256,
+    &quot;image_raw_ros_s&quot;: {
+      &quot;up&quot;: 1788496078.8873935,
+      &quot;wrist&quot;: 1788496078.901036
+    },
+    &quot;image_corrected_ros_s&quot;: {
+      &quot;up&quot;: 1788496078.8873935,
+      &quot;wrist&quot;: 1788496078.901036
+    },
+    &quot;image_received_ros_s&quot;: {
+      &quot;up&quot;: 1788496078.9310086,
+      &quot;wrist&quot;: 1788496078.9517102
+    },
+    &quot;frame_index&quot;: 316,
+    &quot;enqueue_attempt_index&quot;: 316
+  },
+  {
+    &quot;target_ros_s&quot;: 1788496087.2915757,
+    &quot;joint_bracket_ros_s&quot;: [
+      1788496087.2872512,
+      1788496087.2972631
+    ],
+    &quot;arm_action_bracket_ros_s&quot;: [
+      1788496087.2872555,
+      1788496087.2972677
+    ],
+    &quot;gripper_action_ros_s&quot;: 1788496087.2872446,
+    &quot;image_raw_ros_s&quot;: {
+      &quot;up&quot;: 1788496087.2934437,
+      &quot;wrist&quot;: 1788496087.304931
+    },
+    &quot;image_corrected_ros_s&quot;: {
+      &quot;up&quot;: 1788496087.2934437,
+      &quot;wrist&quot;: 1788496087.304931
+    },
+    &quot;image_received_ros_s&quot;: {
+      &quot;up&quot;: 1788496087.3269265,
+      &quot;wrist&quot;: 1788496087.354787
+    },
+    &quot;frame_index&quot;: 568,
+    &quot;enqueue_attempt_index&quot;: 568
+  }
+]</pre></section><section><h2>manifest.json</h2><p class="locator">frozen-heldout-r2-v1/manifest.json<br>sha256:205515f842621efa14165f4d926b7c09eb3cdc5ed9a5458c4c6c17667404e68c</p><pre>{
+  &quot;selection_rule&quot;: &quot;all six heldout episodes; floor((length-1)*q) for q=0.1,0.5,0.9; no solver outcome selection&quot;,
+  &quot;selection_limits&quot;: &quot;temporal coverage only; not semantic phase labels, random independent episodes, or untouched test data&quot;,
+  &quot;camera_rename_map&quot;: {
+    &quot;observation.images.up&quot;: &quot;observation.images.camera1&quot;,
+    &quot;observation.images.wrist&quot;: &quot;observation.images.camera2&quot;
+  },
+  &quot;files&quot;: [
+    {
+      &quot;episode_index&quot;: 27,
+      &quot;frame_index&quot;: 63,
+      &quot;subset_index&quot;: 63,
+      &quot;fraction&quot;: 0.1,
+      &quot;dataset_index&quot;: 23876,
+      &quot;timestamp_s&quot;: 2.0999999046325684,
+      &quot;sha256&quot;: &quot;f959f51b2a90ee01ef03304e113e12ecabdd0f60185bb42d429a71288073a62a&quot;,
+      &quot;bytes&quot;: 3686806
+    },
+    {
+      &quot;episode_index&quot;: 27,
+      &quot;frame_index&quot;: 316,
+      &quot;subset_index&quot;: 316,
+      &quot;fraction&quot;: 0.5,
+      &quot;dataset_index&quot;: 24129,
+      &quot;timestamp_s&quot;: 10.533333778381348,
+      &quot;sha256&quot;: &quot;05ed6006d773a3c8bbc02ae1fadfef79b763917f2d73eb24b1e5d37690d2953b&quot;,
+      &quot;bytes&quot;: 3686804
+    },
+    {
+      &quot;episode_index&quot;: 27,
+      &quot;frame_index&quot;: 568,
+      &quot;subset_index&quot;: 568,
+      &quot;fraction&quot;: 0.9,
+      &quot;dataset_index&quot;: 24381,
+      &quot;timestamp_s&quot;: 18.933332443237305,
+      &quot;sha256&quot;: &quot;e01f55d28ed1b3bc2ecbb3e11ee9032559de81d1597cd8e835f19f6e108abb97&quot;,
+      &quot;bytes&quot;: 3686803
+    }
+  ]
+}</pre></section><section><h2>fr5_training_receipt.json</h2><p class="locator">outputs/local-learning/smolvla-raw26-quality-10000-r1/fr5_training_receipt.json<br>sha256:f8bfaf51b5a7f1a30992bfd7a99d7695db459c07754d57afb1d98abf09e5d658</p><pre>{
+  &quot;selected_episodes&quot;: [
+    5,
+    6,
+    7,
+    8,
+    9,
+    10,
+    11,
+    14,
+    15,
+    16,
+    17,
+    18,
+    19,
+    20,
+    21,
+    22,
+    23,
+    24,
+    25,
+    26,
+    27,
+    28,
+    29,
+    30,
+    31,
+    32
+  ],
+  &quot;train_episodes&quot;: [
+    5,
+    6,
+    7,
+    8,
+    9,
+    10,
+    11,
+    14,
+    15,
+    16,
+    17,
+    18,
+    19,
+    20,
+    21,
+    22,
+    23,
+    24,
+    25,
+    26
+  ],
+  &quot;eval_episodes&quot;: [
+    27,
+    28,
+    29,
+    30,
+    31,
+    32
+  ],
+  &quot;split_digest&quot;: &quot;sha256:938dfdac3defe49a267d3178f61af5f32896ce6bafff4c62bb2fca63ac264b0d&quot;,
+  &quot;receipt_digest&quot;: &quot;sha256:3fabce2ea28858778abd8508a3277aa9e0520b45964d40a8e21c09cec0bfdf31&quot;
+}</pre></section></main></html>
