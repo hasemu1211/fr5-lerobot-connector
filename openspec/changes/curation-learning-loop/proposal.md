@@ -15,7 +15,7 @@ Curation은 어떤 원본·시연 구성·관측 표현이 downstream 학습과 
 
 [ARRO v3](https://arxiv.org/html/2505.08627v3)는 task 관련 영역의 보존과 학습·추론의 일관성을 지지하고, 단순 masking과 공간 단서를 갖춘 표현의 차이를 보여준다. 그 동적 segmentation·가상 배경을 현재 고정 mask의 성능 보증으로 해석하지 않는다. [Multi-Camera View Scaling](https://arxiv.org/abs/2604.00557v1)은 유용한 관측 변화의 가치를 보여주지만, FR5에서 특정 camera를 버리거나 mask를 채택할 근거는 아니다. 현재 CPU/GPU 제약에서는 새 segmentation 모델보다 이미 있는 mask와 원본의 통제된 비교가 먼저다.
 
-첫 실행 가능한 연결은 기존 native review 영상·coverage·exact identity를 Web UI가 소비하고, 명시적 결정과 응답 손실 후 복구를 같은 Curator lifecycle로 처리하는 것이다. 이 결과는 새 승인 시스템이나 utility 판정이 아니다. 파생 dataset admission과 저장된 transform의 학습·추론 소비는 Learning/root 계약이며, 원본 Collection ledger를 파생 데이터의 ledger로 가장하지 않는다.
+첫 실행 가능한 연결은 기존 native review 영상·coverage·exact identity를 Web UI가 소비하고, 명시적 결정과 응답 손실 후 복구를 같은 Curator lifecycle로 처리하는 것이다. 이 결과는 새 승인 시스템이나 utility 판정이 아니다. Curator는 출판 후보의 명시적 파생 요청·provenance를 기존 native prepared-batch 승인과 inventory 사전검증에 연결하는 좁은 경계를 소유한다. 새 training authority의 인간 경로와 전체 통합은 root, 저장된 observation view와 학습·추론의 일관된 변환은 Learning이 소유한다. 원본 Collection ledger를 파생 데이터의 ledger로 가장하지 않는다.
 
 비교에서는 episode/frame, TRAIN/heldout, action normalization, 학습 예산과 평가 척도를 맞추고 H.264 재인코딩 효과를 구분한다. 원본으로 학습한 모델에 추론 시 mask만 적용한 결과를 정제 학습의 효과로 부르지 않는다. 같은 데이터에서 배경판을 추정한다면 사전에 정한 TRAIN만 사용하거나 독립 calibration source임을 입증해야 한다. setup의 선택적 native `fit_split`은 부모 원본을 결속하고 TRAIN에서만 기준/배경 프레임을 선택하며, 최종 v2 profile과 resolved digest에 실제 입력 출처를 유지한다. 기존 전체 episode 표본을 쓰는 v1 동작은 유지하지만 같은 통제를 입증하지 않는다. Learning의 저장된 변환·split 결속과 파생 데이터 admission은 여전히 별도 소비 경계다.
 
@@ -48,6 +48,6 @@ Curation은 어떤 원본·시연 구성·관측 표현이 downstream 학습과 
 - 제품: `tools/data_factory/curator/workflow/selection.py` → 기존 `prepare_approvals`, `selected_train_eval`, `read_metadata`.
 - 기존 사실: `tools/data_factory/episode_ledger.py`, `tools/data_factory/quality/phase_metrics.py`; phase 시간은 검증된 frame join 없이 frame 라벨로 해석하지 않는다.
 - 실행 가능한 경계 검증: `tests/data_factory/curator/workflow/test_selection.py`, `tests/data_factory/curator/test_cli.py`.
-- 로컬 재현·반증 후 수정: `outputs/curator/utility-cohort-20260906/experiment-r1.py`, `experiment.py`, `results-r1/observation.json`, `results-r2/observation.json`과 각 native 요청. 수치와 검색 기록은 이 ignored 산출물에 유지한다.
+- 파생본의 다음 소비: `tests/data_factory/curator/workflow/test_derived_training.py`가 native TRAIN-fit setup·출판과 기존 batch 검토·새 승인·inventory·launch 사전검증을 연결한다. fitting이 있는 경우에도 실제 child TRAIN과의 결속 및 저장된 observation view는 Learning의 별도 검증 대상이다. 실행별 수치와 검색 기록은 OpenSpec 정본에 누적하지 않는다.
 
 이전 기하 near/far 실험은 비교 가설을 실제 요청으로 연결한 선행 근거이며, 현재 전략을 제한하는 알고리즘 계약이 아니다. 선별 효용의 채택은 이후 동일 조건의 downstream 측정이 있어야 성립한다.
