@@ -49,7 +49,7 @@ The public training path SHALL revalidate the frozen inventory authorized by an 
 
 ### Requirement: Learning and pipeline evidence remain distinguishable
 
-The lane SHALL distinguish admitted input, executable pipeline, checkpoint reload, offline validation and physical learning evidence. A short probe within warmup SHALL NOT establish learning effectiveness. A fair checkpoint comparison SHALL bind the same normalization, held-out episodes, seed, batch/precision and sample coverage; repeated model selection on that holdout SHALL be described as validation, not an untouched generalization test.
+The lane SHALL distinguish admitted input, executable pipeline, checkpoint reload, offline validation and physical learning evidence. A completed short probe, including one that finishes learning-rate decay, SHALL NOT alone establish learning effectiveness. A fair checkpoint comparison SHALL bind the same normalization, held-out episodes, seed, batch/precision and sample coverage; repeated model selection on that holdout SHALL be described as validation, not an untouched generalization test.
 
 #### Scenario: A bounded reload probe finishes
 - **WHEN** only part of the held-out set is evaluated
@@ -84,6 +84,16 @@ The lane SHALL choose the next safe valuable outcome using code/tests, current a
 - **WHEN** the evaluator finishes its requested batch limit
 - **THEN** it does not fetch an additional batch merely to stop the loop
 - **AND** setup time, batch processing time and sample throughput are reported separately, with CUDA tensor allocation peak distinguished from whole-device memory.
+
+#### Scenario: Native configuration changes the requested recipe
+- **WHEN** policy preset resolution or the chosen training horizon changes the optimizer or schedule
+- **THEN** the lane verifies the resolved native configuration and actual optimizer/scheduler behavior instead of interpreting requested flags or nominal warmup values as executed settings
+- **AND** changing the horizon or resuming a decayed checkpoint is disclosed as a schedule change, not assumed equivalent to the prefix of a longer fresh run.
+
+#### Scenario: A larger batch improves measured throughput
+- **WHEN** a bounded resource comparison changes batch size at fixed update count
+- **THEN** it reports actual sample exposure and precision and establishes only resource behavior
+- **AND** a subsequent learning comparison declares its matched sample or compute budget and schedule, rather than attributing extra sample exposure to superior data or optimization.
 
 #### Scenario: Approval or GPU ownership is unavailable
 - **WHEN** gated execution cannot proceed

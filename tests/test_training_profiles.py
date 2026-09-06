@@ -2,6 +2,7 @@
 
 import unittest
 from types import SimpleNamespace
+from unittest.mock import patch
 
 from tools.fr5_training_profile import build_profile, launch_feature_contract, instruction_task
 
@@ -60,6 +61,66 @@ class TrainingProfileTest(unittest.TestCase):
             self.assertEqual(instruction_task(task_instruction(task, "wood cube")), task)
         self.assertEqual(instruction_task(task_instruction("pick_place", "cube", source_region_id="RED",
             destination_region_id="BLUE", region_binding_active=True)), "pick_place")
+
+
+class NativeTrainingConfigurationTest(unittest.TestCase):
+    """Exercise installed configuration/scheduler consumers on CPU, without a model or dataset."""
+
+    def config(self, **kwargs):
+        from lerobot.configs.default import DatasetConfig
+        from lerobot.configs.train import TrainPipelineConfig
+        from lerobot.policies.smolvla.configuration_smolvla import SmolVLAConfig
+
+        policy = kwargs.pop("policy", SmolVLAConfig(device="cpu", push_to_hub=False))
+        config = TrainPipelineConfig(dataset=DatasetConfig(repo_id="local/config-test"), policy=policy, **kwargs)
+        with patch("sys.argv", ["config-test"]):
+            config.validate()
+        return config
+
+    def test_policy_preset_resolves_over_top_level_optimizer_override(self):
+        from lerobot.optim.optimizers import AdamWConfig
+        from lerobot.policies.smolvla.configuration_smolvla import SmolVLAConfig
+
+        overridden = self.config(optimizer=AdamWConfig(lr=5e-5))
+        self.assertEqual(overridden.optimizer.lr, 1e-4)
+        resolved = self.config(policy=SmolVLAConfig(device="cpu", push_to_hub=False, optimizer_lr=5e-5))
+        self.assertEqual(resolved.optimizer.lr, 5e-5)
+        self.assertEqual(resolved.scheduler.peak_lr, 5e-5)
+        self.assertEqual(resolved.to_dict()["optimizer"]["lr"], 5e-5)
+
+    def test_explicit_native_schedule_requires_disabling_policy_preset(self):
+        from lerobot.optim.optimizers import AdamWConfig
+        from lerobot.optim.schedulers import ConstantWithWarmupSchedulerConfig
+
+        scheduler = ConstantWithWarmupSchedulerConfig(num_warmup_steps=20)
+        resolved = self.config(use_policy_training_preset=False, optimizer=AdamWConfig(lr=5e-5),
+                               scheduler=scheduler)
+        self.assertIs(resolved.scheduler, scheduler)
+        self.assertEqual(resolved.optimizer.lr, 5e-5)
+        with self.assertRaisesRegex(ValueError, "Optimizer and Scheduler must be set"):
+            self.config(use_policy_training_preset=False, optimizer=AdamWConfig(lr=5e-5))
+
+    def test_short_native_horizon_reaches_decay_floor_and_changes_schedule_prefix(self):
+        import torch
+
+        config = self.config(steps=200)
+        parameter = torch.nn.Parameter(torch.zeros(1))
+        optimizer = config.optimizer.build([parameter])
+        scheduler = config.scheduler.build(optimizer, config.steps)
+        short_initial_lr = optimizer.param_groups[0]["lr"]
+        for _ in range(6):
+            optimizer.step()
+            scheduler.step()
+        self.assertGreater(optimizer.param_groups[0]["lr"], 0.99 * config.optimizer.lr)
+        for _ in range(194):
+            optimizer.step()
+            scheduler.step()
+        self.assertAlmostEqual(optimizer.param_groups[0]["lr"], config.scheduler.decay_lr, places=12)
+        # Saved nominal config alone does not describe the built schedule's warmup.
+        self.assertEqual(config.to_dict()["scheduler"]["num_warmup_steps"], 1000)
+        longer_optimizer = config.optimizer.build([parameter])
+        config.scheduler.build(longer_optimizer, 1000)
+        self.assertNotEqual(short_initial_lr, longer_optimizer.param_groups[0]["lr"])
 
 
 if __name__ == "__main__":

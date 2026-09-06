@@ -96,7 +96,11 @@ resume·offline 평가·Rollout은 같은 `validate_checkpoint` 경계를 사용
 
 첫 실행은 승인과 GPU owner 배정 후 batch 1, data-loader worker 0, AMP, 기존 SmolVLA expert-only 설정, local cached weights와 새 output으로 시작할 수 있다. 이는 VRAM 적합성을 확인할 실행 가설이며 8GB에서 load 또는 학습 성공이 검증되었다는 뜻은 아니다. download를 금지할 실행은 process에 `HF_HUB_OFFLINE=1`을 지정하고, cache 누락 시 설치나 download로 자동 전환하지 않는다.
 
-짧은 probe에서는 마지막 checkpoint 하나, bounded offline reload 평가, wall time·peak GPU memory·초당 학습 sample·checkpoint bytes를 함께 보존한다. 200 update가 끝나도 기본 warmup 1,000 step 안에 있으므로 pipeline 증거일 뿐이다. 학습 효과 비교에는 warmup 이후의 학습량, 같은 train normalization·held-out episode·평가 seed·batch/precision·coverage를 사용한 checkpoint 비교가 필요하다. 같은 held-out으로 반복 선택한 결과는 validation이며 독립 test 일반화로 표시하지 않는다.
+짧은 probe에서는 마지막 checkpoint 하나, bounded offline reload 평가, wall time·peak GPU memory·초당 학습 sample·checkpoint bytes를 함께 보존한다. 설치된 LeRobot의 `cosine_decay_with_warmup`은 전체 학습 step이 설정된 decay보다 작으면 warmup과 decay를 비례 축소한다. SmolVLA preset의 warmup 1,000·decay 30,000으로 200-step 실행을 만들면 실제 warmup은 6 step이며 마지막 LR은 floor에 도달한다. 따라서 200-step smoke가 pipeline 증거인 이유는 warmup 안에 있기 때문이 아니라 학습 비교·행동 검증이 없기 때문이다. 같은 held-out으로 반복 선택한 결과는 validation이며 독립 test 일반화로 표시하지 않는다.
+
+`train_config.json`의 nominal scheduler 값만으로 실제 LR 경로를 판단하지 않는다. native config 검증 이후 optimizer parameter group의 LR, scheduler 초기값·전환점·종료값과 저장된 scheduler state를 연결한다. `use_policy_training_preset=true`인 새 실행은 top-level optimizer/scheduler를 policy preset으로 다시 설정하므로 LR 변경에는 `policy.optimizer_lr`를 사용하고 실제 resolved 값을 확인한다. 별도 native scheduler를 비교하려면 `use_policy_training_preset=false`와 optimizer·scheduler 모두가 필요하다. feature profile은 hyperparameter recipe를 소유하지 않는다.
+
+전체 horizon 변경은 같은 초기 step의 LR도 바꾼다. 종료까지 decay한 smoke의 resume은 처음부터 더 긴 horizon으로 실행한 것과 같은 비교군이 아니다. batch 비교도 동일 update 수에서는 sample 노출량이 다르므로 처리량 비교와 학습 효과 비교를 구분한다. 실제 accumulation이 없는 실행의 effective batch를 임의로 부풀리거나 AMP를 BF16으로 단정하지 않는다. 초기 선택·경쟁 가설·변경 조건은 [Learning 설계](../openspec/changes/learning-evaluation-loop/design.md)를 따른다.
 
 [SmolVLA 원 논문](https://huggingface.co/papers/2506.01844)은 작은 policy와 공개 robot data를 이용한 학습을 연구한다. [저자들의 현재 LeRobot 안내](https://huggingface.co/docs/lerobot/smolvla)는 작은 batch부터 시도하고 작업 변형마다 충분한 시연을 확보하도록 설명한다. 안내의 다른 robot·dataset 학습량이나 성공률은 FR5의 episode 수·학습 budget·일반화 보장이 아니다. 성공 data의 조건별 coverage와 held-out 오차도 실패 data와 함께 다음 수집의 근거로 사용한다.
 
