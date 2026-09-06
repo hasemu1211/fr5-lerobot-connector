@@ -229,6 +229,165 @@ def write_normalization_fixture(policy, receipt):
 
 
 class TrainingLaunchConnectionTest(unittest.TestCase):
+    def _warm_start_case(self, root):
+        from tests.test_offline_evaluation import admitted_case
+
+        args, split = admitted_case(root)
+        parent = Path(args.checkpoint)
+        receipt = json.loads((parent.parents[2] / "fr5_training_receipt.json").read_text())
+        output = root / "outputs/child"
+        argv = [f"--policy.path={parent}" if arg.startswith("--policy.path=") else
+                f"--output_dir={output}" if arg.startswith("--output_dir=") else arg
+                for arg in receipt["normalized_argv"]]
+        kwargs = dict(dataset=args.dataset, repo_id=args.repo_id, inventory=args.approved_inventory,
+                      profile="smolvla", collection_profile=split["feature_contract"]["collection_profile_id"], argv=argv)
+        return parent, output, kwargs
+
+    def test_warm_start_binds_parent_and_child_reload_and_resume(self):
+        import shutil
+        from tools.validate_training_checkpoint import validate_checkpoint
+        from tools.data_factory.training_entrypoint import resume_training
+
+        with TemporaryDirectory(prefix="SYNTHETIC_TEST_ONLY-") as directory:
+            parent, output, kwargs = self._warm_start_case(Path(directory))
+            before = {p: p.read_bytes() for p in parent.parents[2].rglob("*") if p.is_file()}
+            split, receipt = prepare_launch(**kwargs)
+            self.assertEqual(receipt["initialization"]["checkpoint"], str(parent))
+            self.assertEqual(receipt["initialization"]["mode"], "warm_start")
+            self.assertEqual(receipt["initialization"]["reset"], ["optimizer", "scheduler", "rng", "sample_stream", "step"])
+            output.mkdir(parents=True)
+            write_json(output / "fr5_training_split.json", split)
+            write_json(output / "fr5_training_receipt.json", receipt)
+            child = output / "checkpoints/000001/pretrained_model"
+            shutil.copytree(parent.parent, child.parent)
+            config = json.loads((child / "train_config.json").read_text())
+            config["policy"]["pretrained_path"] = str(parent)
+            write_json(child / "train_config.json", config)
+            self.assertEqual(validate_checkpoint(child), (child, output))
+            with mock.patch("tools.data_factory.training_entrypoint.run_native_training", return_value=0) as native:
+                self.assertEqual(resume_training(child), 0)
+            self.assertIn("--resume=true", native.call_args.args[0])
+            self.assertIn(f"--config_path={child / 'train_config.json'}", native.call_args.args[0])
+            self.assertEqual(before, {p: p.read_bytes() for p in before})
+            config["policy"]["pretrained_path"] = "lerobot/smolvla_base"
+            write_json(child / "train_config.json", config)
+            with self.assertRaisesRegex(ValueError, "warm-start parent"):
+                validate_checkpoint(child)
+
+    def test_warm_start_rejects_mismatched_cohort_normalization_and_parent_output(self):
+        from tools.validate_training_checkpoint import warm_start_binding
+
+        with TemporaryDirectory(prefix="SYNTHETIC_TEST_ONLY-") as directory:
+            parent, output, kwargs = self._warm_start_case(Path(directory))
+            split, receipt = prepare_launch(**kwargs)
+            altered = copy.deepcopy(split)
+            altered["train_episodes"] = list(reversed(split["train_episodes"])) + [999]
+            with self.assertRaisesRegex(ValueError, "must match"):
+                warm_start_binding(parent, altered, receipt["normalization"])
+            with self.assertRaisesRegex(ValueError, "must match"):
+                warm_start_binding(parent, split, {})
+            kwargs["argv"] = [f"--output_dir={parent.parents[2] / 'child'}" if arg.startswith("--output_dir=") else arg
+                              for arg in kwargs["argv"]]
+            with self.assertRaisesRegex(ContractError, "TRAINING_OUTPUT_INSIDE_PARENT"):
+                prepare_launch(**kwargs)
+            self.assertFalse(output.exists())
+
+    def test_warm_start_revalidates_parent_before_any_output(self):
+        with TemporaryDirectory(prefix="SYNTHETIC_TEST_ONLY-") as directory:
+            parent, output, kwargs = self._warm_start_case(Path(directory))
+            calls = 0
+
+            def changing_parent(**arguments):
+                nonlocal calls
+                result = prepare_launch(**arguments)
+                if arguments["argv"] == kwargs["argv"]:
+                    calls += 1
+                    if calls == 1:
+                        (parent / "model.safetensors").write_bytes(b"SYNTHETIC_CHANGED_PARENT")
+                return result
+
+            with mock.patch("tools.data_factory.training_entrypoint.prepare_launch", side_effect=changing_parent), \
+                    mock.patch("tools.data_factory.training_entrypoint.run_native_training") as native:
+                with self.assertRaisesRegex(ContractError, "TRAINING_INPUT_CHANGED"):
+                    launch(**kwargs)
+            native.assert_not_called()
+            self.assertFalse(output.exists())
+            self.assertFalse(list(output.parent.glob("child.*.pending")))
+
+    def test_warm_start_rejects_forged_or_cyclic_initialization(self):
+        from tools.data_factory.training_receipts import validate_launch_receipt, ReceiptError
+
+        with TemporaryDirectory(prefix="SYNTHETIC_TEST_ONLY-") as directory:
+            parent, _, kwargs = self._warm_start_case(Path(directory))
+            split, receipt = prepare_launch(**kwargs)
+            forged = copy.deepcopy(receipt)
+            forged["initialization"]["checkpoint_artifact_digest"] = "sha256:" + "0" * 64
+            forged["receipt_digest"] = canonical_digest({k: v for k, v in forged.items() if k != "receipt_digest"})
+            with self.assertRaises(ReceiptError):
+                validate_launch_receipt(forged, split)
+            path = parent.parents[2] / "fr5_training_receipt.json"
+            cyclic = json.loads(path.read_text())
+            cyclic["normalized_argv"] = [f"--policy.path={parent}" if arg.startswith("--policy.path=") else arg
+                                         for arg in cyclic["normalized_argv"]]
+            write_json(path, cyclic)
+            with self.assertRaisesRegex(ValueError, "cyclic warm-start"):
+                prepare_launch(**kwargs)
+
+    def test_warm_start_native_adapter_rechecks_parent_after_policy_loading(self):
+        import sys
+        from types import ModuleType
+        from tools.data_factory.training_entrypoint import run_native_training
+
+        with TemporaryDirectory(prefix="SYNTHETIC_TEST_ONLY-") as directory:
+            parent, _, kwargs = self._warm_start_case(Path(directory))
+            split, receipt = prepare_launch(**kwargs)
+            native = ModuleType("lerobot.scripts.lerobot_train")
+            native.make_train_eval_datasets = mock.Mock()
+
+            def changed_during_load():
+                (parent / "model.safetensors").write_bytes(b"SYNTHETIC_CHANGED_DURING_LOAD")
+                return object()
+
+            native.make_policy = changed_during_load
+            native.main = lambda: native.make_policy()
+            with mock.patch.dict(sys.modules, {"lerobot.scripts.lerobot_train": native}):
+                with self.assertRaisesRegex(ContractError, "TRAINING_RUNTIME_WARM_START"):
+                    run_native_training(kwargs["argv"], split, receipt)
+            self.assertIs(native.make_policy, changed_during_load)
+
+    def test_warm_start_public_wrapper_dry_run_reaches_native_admission(self):
+        import os
+        import shutil
+        import sys
+
+        project = Path(__file__).resolve().parents[1]
+        with TemporaryDirectory(prefix="SYNTHETIC_TEST_ONLY-") as directory:
+            root = Path(directory)
+            parent, output, kwargs = self._warm_start_case(root)
+            shell = root / "shell"
+            (shell / "scripts").mkdir(parents=True)
+            shutil.copy2(project / "scripts/train_policy.sh", shell / "scripts/train_policy.sh")
+            # Disposable test checkout references the installed interpreter and
+            # current product sources; no workspace/shared environment changes.
+            (shell / ".venv").symlink_to(sys.prefix, target_is_directory=True)
+            (shell / "tools").symlink_to(project / "tools", target_is_directory=True)
+            (shell / "config").symlink_to(project / "config", target_is_directory=True)
+            result = subprocess.run([
+                shell / "scripts/train_policy.sh", "--warm-start-from", parent,
+                "--profile", "smolvla", "--root", kwargs["dataset"].parent,
+                "--output", output, "--approved-inventory", kwargs["inventory"],
+                "--collection-profile", kwargs["collection_profile"], "--dry-run",
+                kwargs["dataset"].name, "none", "--dataset.episodes=[0,2,3]",
+                "--dataset.eval_split=0.34", "--batch_size=4", "--steps=100",
+                "--eval_steps=100", "--save_freq=100",
+            ], env={**os.environ, "FR5_REPO_ID": kwargs["repo_id"], "PYTHONDONTWRITEBYTECODE": "1"},
+                text=True, capture_output=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn(f"--policy.path={parent}", result.stdout)
+            self.assertIn('"mode": "warm_start"', result.stdout)
+            self.assertIn('optimizer, scheduler, RNG, sample stream and step reset', result.stdout)
+            self.assertFalse(output.exists())
+
     def test_native_consumer_keeps_official_split_and_excludes_nontrain_statistics(self):
         import math
         import sys

@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+from contextvars import ContextVar
 import json
 from pathlib import Path
 import sys
@@ -18,6 +19,44 @@ REQUIRED_TRAINING_STATE = (
     "rng_state.safetensors",
     "training_step.json",
 )
+
+_WARM_START_ANCESTORS = ContextVar("warm_start_ancestors", default=())
+
+
+def warm_start_binding(value: Path, split: dict, normalization: dict) -> dict:
+    """Validate a local parent for a fresh optimizer run on the same learning data."""
+    from tools.data_factory.training_receipts import tree_digest
+    from tools.fr5_data_factory import canonical_digest, load_json_strict
+
+    policy_dir = normalize_policy_dir(value)
+    ancestors = _WARM_START_ANCESTORS.get()
+    if policy_dir in ancestors:
+        raise ValueError("cyclic warm-start checkpoint lineage")
+    token = _WARM_START_ANCESTORS.set((*ancestors, policy_dir))
+    try:
+        before = tree_digest(policy_dir.parent)
+        policy_dir, output = validate_checkpoint(policy_dir)
+        manifests = []
+        for name in ("fr5_training_split.json", "fr5_training_receipt.json"):
+            path = output / name
+            if not path.is_file():
+                path = Path(str(output) + f".{name}.pending")
+            manifests.append(load_json_strict(path))
+        parent_split, parent_receipt = manifests
+        authority_fields = {"split_digest", "approved_episode_inventory_digest"}
+        if ({key: val for key, val in parent_split.items() if key not in authority_fields}
+                != {key: val for key, val in split.items() if key not in authority_fields}
+                or parent_receipt["normalization"] != normalization):
+            raise ValueError("warm-start parent must match dataset, partition, features and TRAIN normalization")
+        if before != tree_digest(policy_dir.parent):
+            raise ValueError("warm-start checkpoint changed during validation")
+        return {"mode": "warm_start", "checkpoint": str(policy_dir),
+                "checkpoint_artifact_digest": before,
+                "training_receipt_digest": canonical_digest(parent_receipt),
+                "split_digest": parent_split["split_digest"],
+                "reset": ["optimizer", "scheduler", "rng", "sample_stream", "step"]}
+    finally:
+        _WARM_START_ANCESTORS.reset(token)
 
 
 def normalize_policy_dir(value: Path) -> Path:
@@ -89,6 +128,44 @@ def validate_normalization_state(policy_dir: Path, normalization: dict, *, profi
             raise ValueError("checkpoint normalization differs from admitted TRAIN statistics")
 
 
+def validate_policy_feature_contract(policy: dict, feature: dict) -> None:
+    """Match saved policy features, including SmolVLA's inert native image slots."""
+    from tools.data_factory.training_entrypoint import options
+
+    for option, expected in options(feature["policy_argv"]).items():
+        if not option.startswith("--policy.") or option == "--policy.path":
+            continue
+        key = option.removeprefix("--policy.")
+        try:
+            expected = json.loads(expected)
+        except json.JSONDecodeError:
+            pass
+        actual = policy.get(key)
+        if key == "input_features" and isinstance(actual, dict) and isinstance(expected, dict):
+            # The pretrained parser retains camera3; native validate_features adds
+            # empty_camera_0. Neither is a dataset input. prepare_images emits at
+            # most empty_cameras masked blanks, independent of missing-slot names.
+            extras = {}
+            if (feature["profile"] == "smolvla" and policy.get("empty_cameras") == 1
+                    and {name for name, value in expected.items() if value.get("type") == "VISUAL"}
+                    == {"observation.images.camera1", "observation.images.camera2"}):
+                extras = {
+                    "observation.images.camera3": {"type": "VISUAL", "shape": [3, 256, 256]},
+                    "observation.images.empty_camera_0": {"type": "VISUAL", "shape": [3, 480, 640]},
+                }
+            if any(name not in extras or value != extras[name]
+                   for name, value in actual.items() if name not in expected):
+                raise ValueError("checkpoint policy has unadmitted image/input features")
+            actual = {name: value for name, value in actual.items() if name in expected}
+            if actual != expected:
+                raise ValueError("checkpoint policy differs from admitted feature contract")
+            if ([name for name in actual if actual[name].get("type") == "VISUAL"]
+                    != [name for name in expected if expected[name].get("type") == "VISUAL"]):
+                raise ValueError("checkpoint policy camera order differs from admitted feature contract")
+        if actual != expected:
+            raise ValueError("checkpoint policy differs from admitted feature contract")
+
+
 def validate_checkpoint(value: Path, *, verify_dataset: bool = True) -> tuple[Path, Path]:
     policy_dir = normalize_policy_dir(value)
     checkpoint_dir = policy_dir.parent
@@ -131,6 +208,9 @@ def validate_checkpoint(value: Path, *, verify_dataset: bool = True) -> tuple[Pa
         if not receipt_path.is_file():
             receipt_path = Path(str(output_dir) + ".fr5_training_receipt.json.pending")
         receipt = validate_launch_receipt(json.loads(receipt_path.read_text()), split)
+        if "initialization" in receipt and not config.get("resume", False):
+            if config.get("policy", {}).get("pretrained_path") != receipt["initialization"]["checkpoint"]:
+                raise ValueError("checkpoint warm-start parent differs from admitted initialization")
         root = Path(dataset_cfg.get("root", "")).expanduser()
         if (str(root) != split["dataset_identity"]["dataset_root"]
                 or dataset_cfg.get("repo_id") != split["dataset_identity"]["repo_id"]
@@ -138,20 +218,11 @@ def validate_checkpoint(value: Path, *, verify_dataset: bool = True) -> tuple[Pa
                 or (dataset_cfg.get("episodes") or list(range(split["total_episodes"]))) != split["selected_episodes"]):
             raise ValueError("checkpoint dataset selection differs from admitted launch")
         feature = split["feature_contract"]
+        validate_policy_feature_contract(config.get("policy", {}), feature)
+        validate_policy_feature_contract(json.loads((policy_dir / "config.json").read_text()), feature)
         expected_policy = options(feature["policy_argv"])
         for option, expected in expected_policy.items():
-            if option.startswith("--policy."):
-                key = option.removeprefix("--policy.")
-                # policy.path is resolved into a concrete config by LeRobot.
-                if key == "path":
-                    continue
-                try:
-                    expected = json.loads(expected)
-                except json.JSONDecodeError:
-                    pass
-                if config.get("policy", {}).get(key) != expected:
-                    raise ValueError("checkpoint policy differs from admitted feature contract")
-            elif option == "--rename_map" and config.get("rename_map", {}) != json.loads(expected):
+            if option == "--rename_map" and config.get("rename_map", {}) != json.loads(expected):
                 raise ValueError("checkpoint camera mapping differs from admitted feature contract")
         current_split, current_receipt = prepare_launch(
             dataset=root, repo_id=dataset_cfg["repo_id"], inventory=Path(receipt["approved_inventory_path"]),

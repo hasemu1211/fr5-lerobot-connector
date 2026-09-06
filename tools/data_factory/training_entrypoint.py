@@ -210,12 +210,20 @@ def prepare_launch(*, dataset: Path, repo_id: str, inventory: Path,
                 raise ContractError("TRAINING_COLLECTION_PROFILE_LEDGER_BINDING")
     for key, value in options(feature["policy_argv"]).items():
         if config.get(key) != value:
+            if key == "--policy.path" and profile == "smolvla":
+                # The receipt compiler validates and binds the exact local parent.
+                continue
             raise ContractError("TRAINING_POLICY_FEATURE_BINDING")
     split = compile_launch_split(
         inventory=approved, metadata=metadata, selected=selected,
         fraction=float(config["--dataset.eval_split"]), feature_contract=feature,
     )
-    return split, compile_launch_receipt(split, argv, str(inventory))
+    receipt = compile_launch_receipt(split, argv, str(inventory))
+    if "initialization" in receipt:
+        parent_output = Path(receipt["initialization"]["checkpoint"]).parents[2]
+        if Path(config["--output_dir"]).resolve().is_relative_to(parent_output):
+            raise ContractError("TRAINING_OUTPUT_INSIDE_PARENT")
+    return split, receipt
 
 
 def launch(*, dataset: Path, repo_id: str, inventory: Path, profile: str,
@@ -275,10 +283,18 @@ def _run_native_training(argv: list[str], split: dict, receipt: dict) -> int:
     import numpy as np
 
     original_factory = lerobot_train.make_train_eval_datasets
+    original_policy_factory = getattr(lerobot_train, "make_policy", None)
     original_argv = sys.argv
 
     def admitted_datasets(cfg):
         dataset = cfg.dataset
+        if "initialization" in receipt and not cfg.resume:
+            from tools.validate_training_checkpoint import warm_start_binding
+
+            parent = receipt["initialization"]["checkpoint"]
+            if (str(cfg.policy.pretrained_path) != parent
+                    or warm_start_binding(Path(parent), split, receipt["normalization"]) != receipt["initialization"]):
+                raise ContractError("TRAINING_RUNTIME_WARM_START")
         if (str(dataset.root) != split["dataset_identity"]["dataset_root"]
                 or dataset.repo_id != split["repo_id"]
                 or (dataset.episodes or list(range(split["total_episodes"]))) != split["selected_episodes"]
@@ -293,13 +309,26 @@ def _run_native_training(argv: list[str], split: dict, receipt: dict) -> int:
                                  for key, stats in receipt["normalization"]["stats"].items()}
         return train, heldout
 
+    def admitted_policy(*args, **kwargs):
+        from tools.data_factory.training_receipts import tree_digest
+
+        policy = original_policy_factory(*args, **kwargs)
+        initialization = receipt["initialization"]
+        if tree_digest(Path(initialization["checkpoint"]).parent) != initialization["checkpoint_artifact_digest"]:
+            raise ContractError("TRAINING_RUNTIME_WARM_START")
+        return policy
+
     try:
         sys.argv = list(argv)
         lerobot_train.make_train_eval_datasets = admitted_datasets
+        if "initialization" in receipt:
+            lerobot_train.make_policy = admitted_policy
         lerobot_train.main()
         return 0
     finally:
         lerobot_train.make_train_eval_datasets = original_factory
+        if "initialization" in receipt:
+            lerobot_train.make_policy = original_policy_factory
         sys.argv = original_argv
 
 

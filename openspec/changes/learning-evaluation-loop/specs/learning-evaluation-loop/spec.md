@@ -47,9 +47,14 @@ The public training path SHALL revalidate the frozen inventory authorized by an 
 - **THEN** the shared checkpoint validator rejects it before resume, offline evaluation or Rollout loading
 - **AND** the validator accepts the admitted profile's native normalization mode, including VQ-BeT MIN_MAX.
 
+#### Scenario: Native serialization adds inert missing-image slots
+- **WHEN** a checkpoint saves source-verified SmolVLA placeholder features for the admitted camera and blank-slot budget
+- **THEN** the shared validator recognizes only that equivalent native expansion in both saved policy and training configurations
+- **AND** unknown extra inputs or altered real camera order, shapes, state/action features or blank count remain rejected without changing checkpoint bytes.
+
 ### Requirement: Learning and pipeline evidence remain distinguishable
 
-The lane SHALL distinguish admitted input, executable pipeline, checkpoint reload, offline validation and physical learning evidence. A short probe within warmup SHALL NOT establish learning effectiveness. A fair checkpoint comparison SHALL bind the same normalization, held-out episodes, seed, batch/precision and sample coverage; repeated model selection on that holdout SHALL be described as validation, not an untouched generalization test.
+The lane SHALL distinguish admitted input, executable pipeline, checkpoint reload, offline validation and physical learning evidence. A completed short probe, including one that finishes learning-rate decay, SHALL NOT alone establish learning effectiveness. A fair checkpoint comparison SHALL bind the same normalization, held-out episodes, seed, batch/precision and sample coverage; repeated model selection on that holdout SHALL be described as validation, not an untouched generalization test.
 
 #### Scenario: A bounded reload probe finishes
 - **WHEN** only part of the held-out set is evaluated
@@ -70,6 +75,17 @@ The lane SHALL distinguish admitted input, executable pipeline, checkpoint reloa
 - **THEN** a common held-out cohort alone does not make their normalized flow-matching losses a data-utility ranking
 - **AND** each arm retains leakage-free statistics, while an improvement claim requires a comparable downstream measure after its own saved postprocessor or a matched physical evaluation; the system does not fit statistics on held-out data to equalize the scores.
 
+### Requirement: Sampled physical-action assessment uses the native admitted evaluator
+
+The existing evaluator SHALL offer saved-policy/postprocessor action assessment while preserving its default flow-loss mode. It SHALL retain exact admitted cohort, observation, noise, solver, target-padding and artifact identities and report per-axis physical-unit errors without implying physical success.
+
+#### Scenario: A consumer evaluates sampled actions
+- **WHEN** a consumer selects sampled-action evaluation on an admitted checkpoint
+- **THEN** every held-out episode contributes deterministic early/middle/late frame samples selected before inference, deduplicated for short episodes
+- **AND** native policy and saved processors are reset for each observation, future recorded actions are used only as targets, and common seeded noise is retained
+- **AND** padded target steps are excluded, non-finite predicted actions are rejected, and separate radian/metre MAE and RMSE are reported per episode and over the sample
+- **AND** completing this sparse cohort is explicitly distinguished from evaluating every held-out frame; injected tests do not establish real model performance.
+
 ### Requirement: Resource cost and data utility guide continued learning
 
 The lane SHALL choose the next safe valuable outcome using code/tests, current author-primary research and actual workstation/data evidence in proportion to the decision. Real runs SHALL report wall time, peak GPU memory, sample throughput and checkpoint storage alongside learning results. Successful demonstration coverage and held-out errors SHALL inform data utility analysis alongside failure cases.
@@ -84,6 +100,22 @@ The lane SHALL choose the next safe valuable outcome using code/tests, current a
 - **WHEN** the evaluator finishes its requested batch limit
 - **THEN** it does not fetch an additional batch merely to stop the loop
 - **AND** setup time, batch processing time and sample throughput are reported separately, with CUDA tensor allocation peak distinguished from whole-device memory.
+
+#### Scenario: Native configuration changes the requested recipe
+- **WHEN** policy preset resolution or the chosen training horizon changes the optimizer or schedule
+- **THEN** the lane verifies the resolved native configuration and actual optimizer/scheduler behavior instead of interpreting requested flags or nominal warmup values as executed settings
+- **AND** changing the horizon or resuming a decayed checkpoint is disclosed as a schedule change, not assumed equivalent to the prefix of a longer fresh run.
+
+#### Scenario: A larger batch improves measured throughput
+- **WHEN** a bounded resource comparison changes batch size at fixed update count
+- **THEN** it reports actual sample exposure and precision and establishes only resource behavior
+- **AND** a subsequent learning comparison declares its matched sample or compute budget and schedule, rather than attributing extra sample exposure to superior data or optimization.
+
+#### Scenario: A bounded feasibility run starts from learned weights
+- **WHEN** a consumer requests a warm-start from an admitted local SmolVLA checkpoint
+- **THEN** the native launch uses a new output and current authority, verifies the same dataset, partition, features and TRAIN normalization, and binds the immutable parent checkpoint and receipt
+- **AND** optimizer, scheduler, RNG, sample stream and step reset are explicit; a changed parent or inconsistent lineage is rejected before publication and native consumption
+- **AND** child reload and legacy same-run resume validate the parent lineage without overwriting it or claiming mixed-batch true continuation is supported.
 
 #### Scenario: Approval or GPU ownership is unavailable
 - **WHEN** gated execution cannot proceed

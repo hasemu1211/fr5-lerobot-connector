@@ -5,16 +5,24 @@
 
 ## 2. Genuine checkpoint and fair evidence
 
-- [ ] Establish an evidence-backed training start set and verify its resolved configuration and actual trainable components; revise targeted comparisons from measured results.
+- [x] Establish a primary-source-backed training start set with competing hypotheses, bounded comparisons and change triggers; verify native configuration precedence and horizon-dependent scheduling on CPU.
+- [x] Verify the actual loaded model's trainable components, precision and finite optimizer update with scoped parameter-change evidence; use those observations to revise the start set.
 - [x] The native evaluator reports finite per-episode and frame-weighted loss with observed/available sample coverage, scoped timing and CUDA allocator metrics; bounded evaluation stops fetching at its limit.
-- [ ] Support explicitly delegated local training without repeated human batch confirmation, preserving truthful authority lineage and native admission checks.
-- [ ] With exact-batch human approval or valid standing local delegation and available GPU ownership, produce a genuine checkpoint and independent reload evidence while preserving the original dataset bytes.
-- [ ] Record measured wall time, peak GPU memory, sample throughput and storage; distinguish a warmup/pipeline probe from a learned result.
-- [ ] Compare learned checkpoints on a fixed held-out validation scope and disclose coverage, stochastic evaluation settings and lack of independent physical/generalization evidence.
+- [x] Support explicitly delegated local training without repeated human batch confirmation, preserving truthful authority lineage and native admission checks.
+- [x] With exact-batch human approval or valid standing local delegation and available GPU ownership, produce a genuine checkpoint and independent reload evidence while preserving the original dataset bytes.
+- [x] Record measured wall time, scoped GPU memory, sample throughput and storage; distinguish a pipeline probe from a learned result even when its schedule reaches the decay floor.
+- [x] Compare learned checkpoints on a fixed held-out validation scope and disclose coverage, stochastic evaluation settings and lack of independent physical/generalization evidence.
 
 ## 3. Data utility and continued learning
 
-- [ ] Relate successful-data condition coverage and held-out error to at least one actionable collection/evaluation hypothesis, including its falsifier and evidence limits.
-- [ ] Agree any required Curator/Rollout input-output contract with its existing owner, preserving admission and physical gates.
+- [ ] Qualify larger-batch native throughput from an immutable learned checkpoint using an explicitly labelled warm-start fork; retain reset semantics and parent/child reload lineage without claiming exact continuation or superior learning from extra exposure.
+
+- [x] Relate successful-data condition coverage and held-out error to competing coverage and optimization hypotheses, with falsifiers and evidence limits.
+- [x] Provide Rollout a deterministic frozen held-out observation cohort and native input/identity contract for offline solver comparisons, preserving admission and physical gates.
+- [x] Compare learned checkpoints before attributing improvement to data selection or acquisition; revise the recipe or coverage hypothesis from matched evidence.
+- [x] Measure paired saved-postprocessor action errors on the frozen observation cohort, separating arm and gripper units and preserving native temporal alignment/padding; qualify any resulting data-utility interpretation.
+- [ ] Expose admitted sampled physical-action evaluation through the existing public consumer and establish native inference equivalence, retaining default flow-loss reports and explicit sparse coverage.
+- [x] Distinguish stochastic action-sampling sensitivity from persistent per-joint/chunk errors before choosing further training or data-utility comparisons.
+- [ ] Establish reproducible evidence for the next acquisition or selection decision, separating sampled policy errors from recorded condition coverage.
 
 Runtime checkpoints, attempts, blockers and numerical measurements belong in Orca and their native evidence artifacts, not this outcome checklist.
