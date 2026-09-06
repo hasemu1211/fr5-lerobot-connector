@@ -1664,7 +1664,7 @@ def build_operator_runtime(*, effect_scope: str = "FAKE", **kwargs) -> OperatorR
         return OperatorRuntime(
             bridge=bridge, announcement={"status": "LISTENING", "url": bridge.origin,
                                         "effect_scope": "TRAINING_REVIEW", "starts_training": False},
-            close_calls=(bridge.server.server_close,),
+            close_calls=(application.close, bridge.server.server_close),
         )
     if effect_scope == "FAKE":
         return build_fake_runtime(

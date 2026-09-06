@@ -2,6 +2,29 @@
 
 ## ADDED Requirements
 
+### Requirement: Exact native episode inspection returns to its original review
+
+The existing prepared training review SHALL offer read-only native LeRobot/Rerun inspection of a named episode in its frozen batch. The server SHALL derive dataset paths from that prepared target; the browser SHALL send only the expected batch identity and episode index through the existing fresh-view intent contract. Inspection SHALL NOT approve, refuse, relabel, collect, train or authorize motion. The original preview and independent approval actions SHALL remain available after viewer failure or return.
+
+#### Scenario: Open, inspect and return
+
+- **WHEN** a person selects a committed episode in the existing Web review
+- **THEN** the product opens the installed native viewer with synchronized UP/WRIST, action and state, and exposes the exact episode, dataset digest, feature order/units and canonical global/local frame mapping
+- **AND** the person can inspect a nonterminal frame and return to the same batch and episode without path transcription, a new approval or an automatic decision retry.
+
+#### Scenario: Evidence changes or the viewer cannot complete
+
+- **WHEN** the target is missing, changed, outside the prepared batch, or has an unsupported frame/feature mapping
+- **THEN** inspection rejects or explicitly reports that the prior target is no longer current, without changing the review's evidence or authority
+- **AND** an export/viewer failure remains an inspection error; lost responses use the existing canonical state read without repeating the command.
+
+#### Scenario: Exploration stays bounded and local
+
+- **WHEN** native inspection runs
+- **THEN** only one episode is exported per review process, with finite frame, output, resident-memory and lifetime limits; export uses local offline data and no GPU model
+- **AND** viewer endpoints bind loopback, temporary output remains server-owned, and return, expiry or application shutdown cleans up only owned processes and temporary artifacts
+- **AND** the Web flow closes its own viewer tab on return when it retains that tab handle; reloading the review does not grant authority over unrelated browser tabs.
+
 ### Requirement: Recover current training-review evidence without repeating authority
 
 When a training-review intent response fails, the product SHALL make one automatic read of the existing canonical view and render the returned review status, exact batch and available operations. It SHALL NOT resend the intent or infer approval from a transport error. A successful read SHALL remove the need for an extra human refresh merely to discover an already completed result. Human and automation surfaces SHALL derive review meaning from the same domain projection; neither surface grants authority by refreshing it.

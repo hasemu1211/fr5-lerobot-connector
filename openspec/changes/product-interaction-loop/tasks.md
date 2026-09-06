@@ -29,3 +29,9 @@ This change completes one interaction increment. Learning, physical effectivenes
 - [x] Retain completed campaign evidence server-side, automatically inspect it when returning to drafting, and expose the same apply/keep result to Web and automation without path or digest transcription.
 - [x] Verify native stored-evidence, placement, later edits, exclusion/repeat limits, compilation parity, duplicate choice and lost-response recovery with synthetic fixtures and shipped UI code in `test_collection_advice`; applying creates no campaign or execution authority.
 - [x] Dogfood actual browser apply/refresh, stale edit rejection and unavailable advice; preserve existing browser regressions and focused operator/training/Curator consumers. Exact cutoffs, counts, screenshots and limitations are handed to root in the existing mailbox. Pick/place transition projection and physical effectiveness remain outside this bounded increment.
+
+## 5. Native episode inspection from the existing review
+
+- [x] Consume Portfolio's installed-viewer render evidence and bind the existing prepared review's frozen episode to native LeRobot/Rerun, without duplicating analysis or admission authority.
+- [x] Implement Web entry/return and one bounded local viewer lifecycle; preserve batch, path binding, approval freshness and lost-response recovery.
+- [x] Verify actual nonterminal frame inspection and same-target return, synthetic stale/missing/unsupported/failure cases, owned cleanup and focused existing review regressions; publish exact evidence to root for integration. Actual frozen episode evidence and immutable cutoffs remain in the existing Orca run; no physical or learning-effect claim follows from inspection.
