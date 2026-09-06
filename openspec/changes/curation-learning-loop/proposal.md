@@ -17,7 +17,7 @@ Curation은 어떤 원본·시연 구성·관측 표현이 downstream 학습과 
 
 첫 실행 가능한 연결은 기존 native review 영상·coverage·exact identity를 Web UI가 소비하고, 명시적 결정과 응답 손실 후 복구를 같은 Curator lifecycle로 처리하는 것이다. 이 결과는 새 승인 시스템이나 utility 판정이 아니다. 파생 dataset admission과 저장된 transform의 학습·추론 소비는 Learning/root 계약이며, 원본 Collection ledger를 파생 데이터의 ledger로 가장하지 않는다.
 
-비교에서는 episode/frame, TRAIN/heldout, action normalization, 학습 예산과 평가 척도를 맞추고 H.264 재인코딩 효과를 구분한다. 원본으로 학습한 모델에 추론 시 mask만 적용한 결과를 정제 학습의 효과로 부르지 않는다. 같은 데이터에서 배경판을 추정한다면 사전에 정한 TRAIN만 사용하거나 독립 calibration source임을 입증해야 한다. 현재 setup의 전체 episode 표본은 그 통제를 자동 보장하지 않으므로, 명시적 fitting pool 지원과 최종 profile까지의 출처 연결은 다음 필요한 준비 경계다.
+비교에서는 episode/frame, TRAIN/heldout, action normalization, 학습 예산과 평가 척도를 맞추고 H.264 재인코딩 효과를 구분한다. 원본으로 학습한 모델에 추론 시 mask만 적용한 결과를 정제 학습의 효과로 부르지 않는다. 같은 데이터에서 배경판을 추정한다면 사전에 정한 TRAIN만 사용하거나 독립 calibration source임을 입증해야 한다. setup의 선택적 native `fit_split`은 부모 원본을 결속하고 TRAIN에서만 기준/배경 프레임을 선택하며, 최종 v2 profile과 resolved digest에 실제 입력 출처를 유지한다. 기존 전체 episode 표본을 쓰는 v1 동작은 유지하지만 같은 통제를 입증하지 않는다. Learning의 저장된 변환·split 결속과 파생 데이터 admission은 여전히 별도 소비 경계다.
 
 완료 근거는 native synthetic publication/replay 검증, 실제 UI 소비 수용, 적격 파생 계보의 native 학습 수용과 일관된 inference 입력, 그리고 사전에 정한 비교에서의 측정이다. 실제 physical binding·semantic 판단·training 실행이 불가한 효과는 분리해 미검증으로 남긴다. 현재 인간 경로를 연결하는 것만으로 장기 자동 판단 책임이나 전체 효용 검증을 완료했다고 선언하지 않는다.
 

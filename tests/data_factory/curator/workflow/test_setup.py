@@ -15,6 +15,8 @@ from tests.data_factory.curator.support import (
 from tools.data_factory.curator.core.errors import CuratorError
 from tools.data_factory.curator.core.identity import stable_tree_identity
 from tools.data_factory.curator.core.jsonio import canonical_digest
+from tools.data_factory.curator.profile.schema import load_view_profile
+from tools.data_factory.curator.profile.registry import resolve_view_profile
 from tools.data_factory.curator.workflow import setup as setup_workflow
 from tools.data_factory.curator.workflow.setup import (
     ProfileSetupPaths,
@@ -44,6 +46,129 @@ def _fixture(root: Path):
 
 
 class ProfileSetupTest(unittest.TestCase):
+    def test_native_train_fit_survives_preview_and_finalization_without_heldout_pixels(self):
+        from tools.data_factory.training_approval import current_dataset_identity, current_episode_digest
+        from tools.data_factory.training_split import compile_launch_split
+        from tools.fr5_training_profile import read_metadata, launch_feature_contract
+        from tools.data_factory.curator.workflow.application import prepare, review_candidate
+        from tools.data_factory.curator.workflow.state import load_events
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = make_source_dataset(root / "source-fixture", episodes=6, frames_per_episode=2)
+            fixture = make_profile_fixture(root / "profile-fixture", verified=False)
+            paths = ProfileSetupPaths(
+                repository=root, run_root=root / "outputs/setup", asset_root=root / "assets",
+                profile_root=root / "published-profiles", collection_profile=fixture.collection_path,
+                layout_manifest=fixture.layout_path, physical_region_binding=fixture.binding_path,
+            )
+            before = stable_tree_identity(source, code="TEST_SOURCE")
+            identity = current_dataset_identity(source, repo_id="local/synthetic-source", dataset_id="synthetic-fit")
+            metadata = read_metadata(source)
+            selected = [0, 2, 3, 5]
+            # Synthetic inventory fields only; no approval is issued or model run.
+            split = compile_launch_split(
+                inventory={"dataset_identity": identity, "inventory_digest": "sha256:" + "1" * 64,
+                           "episodes": [{"episode_index": i, "episode_content_digest": current_episode_digest(identity, i)} for i in selected]},
+                metadata=metadata, selected=selected, fraction=.2,
+                feature_contract=launch_feature_contract("smolvla", "fr5-up-wrist-rgb-30hz-v2", "pickup_e2e", metadata),
+            )
+            self.assertEqual(split["train_episodes"], [0, 3])
+            self.assertEqual(split["eval_episodes"], [2, 5])
+            split_path = root / "native-split.json"
+            write_json(split_path, split)
+            split_bytes = split_path.read_bytes()
+            with self.assertRaisesRegex(CuratorError, "FIT_SPLIT_PATH"):
+                export_profile_setup(source, fit_split=root / "missing-split.json", _paths=paths)
+            self.assertFalse(paths.run_root.exists())
+            with self.assertRaisesRegex(CuratorError, "SETUP_FIT_REFERENCE"):
+                export_profile_setup(source, fit_split=split_path, reference_frame_index=4, _paths=paths)
+            self.assertFalse(paths.run_root.exists())
+            with self.assertRaisesRegex(CuratorError, "SETUP_FIT_SOURCE"):
+                changed = {**split, "dataset_identity": {**identity, "dataset_digest": "sha256:" + "9" * 64}}
+                changed["split_digest"] = canonical_digest({k: v for k, v in changed.items() if k != "split_digest"})
+                write_json(root / "wrong-source-split.json", changed)
+                export_profile_setup(source, fit_split=root / "wrong-source-split.json", _paths=paths)
+            self.assertFalse(paths.run_root.exists())
+
+            exported = export_profile_setup(source, fit_split=split_path, reference_frame_index=7, plate_frame_count=3,
+                profile_id="train-fitted-view", _paths=paths, _setup_id_value="fit-setup")
+            request_path = paths.run_root / "fit-setup/request.json"
+            request = json.loads(request_path.read_bytes())
+            self.assertEqual(request["schema_version"], "curator.profile_setup_request.v2")
+            self.assertEqual(request["background_plate_frame_indices"], [0, 6, 7])
+            annotation = json.loads(fixture.annotation_path.read_bytes())
+            annotation["imagePath"] = Path(exported["reference_image"]).name
+            write_json(Path(exported["labelme_annotation"]), annotation)
+            split_path.write_bytes(split_bytes + b"\n")
+            with self.assertRaisesRegex(CuratorError, "FIT_SPLIT_CHANGED"):
+                preview_profile_setup("fit-setup", _paths=paths)
+            self.assertFalse((paths.run_root / "fit-setup/previews").exists())
+            split_path.write_bytes(split_bytes)
+            preview = preview_profile_setup("fit-setup", _paths=paths)
+            draft_path = Path(preview["review_video"]).with_name("view-profile-draft.json")
+            draft = load_view_profile(draft_path)
+            fit = draft.value["fitting"]
+            self.assertEqual(fit["training_split"]["split_digest"], split["split_digest"])
+            self.assertEqual([row["episode_index"] for row in fit["background_plate_frames"]], [0, 3, 3])
+            self.assertEqual([row["frame_index"] for row in fit["background_plate_frames"]], [0, 0, 1])
+            self.assertEqual(fit["reference_frame"]["episode_index"], 3)
+            self.assertEqual(fit["reference_frame"]["frame_index"], 1)
+            self.assertTrue(all(row["rgb_sha256"].startswith("sha256:") for row in fit["background_plate_frames"]))
+            altered = json.loads(draft_path.read_bytes())
+            altered["fitting"]["reference_frame"]["episode_index"] = 5
+            write_json(root / "heldout-reference-profile.json", altered)
+            with self.assertRaisesRegex(CuratorError, "PROFILE_FITTING_FRAME"):
+                load_view_profile(root / "heldout-reference-profile.json")
+            with self.assertRaisesRegex(CuratorError, "SETUP_PHYSICAL_BINDING_NOT_VERIFIED"):
+                finalize_profile_setup("fit-setup", preview["preview_id"], _paths=paths)
+            # Qualify only this synthetic fixture to exercise final profile publication.
+            binding = json.loads(fixture.binding_path.read_bytes())
+            binding.update(physical_binding_status="VERIFIED", verified_at="2026-09-03T00:00:00Z",
+                           verified_by="synthetic-operator", evidence_digest="sha256:" + "d" * 64)
+            binding["binding_digest"] = canonical_digest({k: v for k, v in binding.items() if k != "binding_digest"})
+            write_json(fixture.binding_path, binding)
+            finalized = finalize_profile_setup("fit-setup", preview["preview_id"], _paths=paths)
+            resolved = resolve_view_profile(paths.profile_root, "train-fitted-view",
+                binding_root=fixture.binding_path.parent, collection_profile_root=fixture.collection_path.parent)
+            self.assertEqual(resolved.profile["schema_version"], "curator.resolved_view_profile.v2")
+            self.assertEqual(resolved.profile["fitting"], fit)
+            self.assertEqual(resolved.profile["profile_digest"], finalized["profile_digest"])
+            consumer_paths = replace(fixture.paths, profile_root=paths.profile_root)
+            prepared = prepare(source, _paths=consumer_paths, _run_id_value="train-fit-consumer")
+            shown = review_candidate(prepared["run_id"], _paths=consumer_paths)
+            self.assertEqual(shown["status"], "REVIEW_READY")
+            self.assertFalse(shown["training_authority"])
+            events = load_events(consumer_paths.run_root / prepared["run_id"])
+            candidate = Path(events["request"]["payload"]["candidate_path"])
+            lineage = json.loads((candidate / "meta/curator_lineage.json").read_bytes())
+            self.assertEqual(lineage["transform"]["profile_digest"], resolved.profile["profile_digest"])
+            self.assertFalse(lineage["approval_inherited"])
+            self.assertFalse(Path(events["request"]["payload"]["output_path"]).exists())
+            self.assertEqual(stable_tree_identity(source, code="TEST_SOURCE"), before)
+            self.assertEqual(split_path.read_bytes(), split_bytes)
+            # A different native selection excludes episode 0; no implicit frame 0 fit.
+            alternate_selected = [1, 2, 3, 4, 5]
+            alternate = compile_launch_split(
+                inventory={"dataset_identity": identity, "inventory_digest": "sha256:" + "2" * 64,
+                           "episodes": [{"episode_index": i, "episode_content_digest": current_episode_digest(identity, i)} for i in alternate_selected]},
+                metadata=metadata, selected=alternate_selected, fraction=.2,
+                feature_contract=split["feature_contract"],
+            )
+            write_json(root / "alternate-split.json", alternate)
+            export_profile_setup(source, fit_split=root / "alternate-split.json", profile_id="alternate-fit",
+                                 _paths=paths, _setup_id_value="alternate-setup")
+            alternate_request = json.loads((paths.run_root / "alternate-setup/request.json").read_bytes())
+            self.assertEqual(alternate_request["reference_frame_index"], 2)
+            self.assertEqual(alternate_request["background_plate_frame_indices"], [2, 3, 4, 5, 6, 7])
+            self.assertEqual(stable_tree_identity(source, code="TEST_SOURCE"), before)
+            split_path.write_bytes(split_bytes + b"\n")
+            with self.assertRaisesRegex(CuratorError, "FIT_SPLIT_CHANGED"):
+                load_view_profile(paths.profile_root / "train-fitted-view.json")
+            with self.assertRaisesRegex(CuratorError, "FIT_SPLIT_CHANGED"):
+                review_candidate(prepared["run_id"], _paths=consumer_paths)
+            self.assertEqual(load_events(consumer_paths.run_root / prepared["run_id"]), events)
+
     def test_indices_are_bounded_deterministic_and_cover_endpoints(self):
         self.assertEqual(evenly_spaced_indices(1, 31), [0])
         self.assertEqual(evenly_spaced_indices(5, 3), [0, 2, 4])

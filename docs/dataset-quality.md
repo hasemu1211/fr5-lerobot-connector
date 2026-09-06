@@ -65,6 +65,14 @@ source preflight 진단을 추가하는 방향과 검토 clip 선택을 고치�
 
 연구 근거는 선택 규칙의 성능 보증이 아니라 검증할 가설의 범위를 정한다. Belkhale·Cui·Sadigh의 [Data Quality in Imitation Learning](https://arxiv.org/abs/2306.02437)은 분포 이동과 action divergence·transition diversity를 구분하며 상태 다양성이 항상 유익하지는 않다고 설명한다. Lin 등의 [Data Scaling Laws in Imitation Learning for Robotic Manipulation](https://arxiv.org/abs/2410.18647v4)은 실험한 작업에서 단순 시연 수보다 환경·물체 다양성이 중요함을 보고한다. 여기서 도출한 제한된 가설은 같은 검토 시간에 서로 다른 사건을 노출하면 사람이 view 변환의 손실을 발견하기 쉬워질 수 있다는 것이다. 다음 검증은 사람이 표시한 mask 손실 사건에 대해 동일 시간 예산의 발견률을 비교하는 것이며, 현재 합성 검증은 semantic 정확도·학습 이득·실물 성공을 입증하지 않는다.
 
+## 이미지 정제 비교의 TRAIN 전용 fitting
+
+같은 dataset에서 원본과 정제 입력을 비교할 때, 배경판과 검토 기준 이미지를 heldout에서 고르면 평가 영상의 외관이 변환에 들어갈 수 있다. [setup export](../tools/data_factory/curator/workflow/setup.py)의 선택적 `fit_split` 인자(에이전트 CLI의 `setup export --fit-split`)는 기존 native v3 split을 검증하고 원본 경로·내용 digest가 일치할 때만 그 TRAIN 프레임에서 기준 이미지와 배경판 표본을 고른다. 기준 frame을 명시하면 TRAIN 소속이어야 하며, 생략하면 첫 TRAIN frame을 사용한다. episode 수나 길이를 고정하지 않고 기존 표본 예산을 적용한다.
+
+이 모드의 v2 profile은 split 경로·파일 hash·native digest와 실제 해독한 기준/배경 프레임의 global·episode·local index 및 RGB 배열 digest를 보존한다. [profile resolution](../tools/data_factory/curator/profile/registry.py)은 이 근거를 profile digest에 포함하고 기존 파생 dataset 계보가 그 digest를 참조한다. 원본과 참조 split은 동결해 유지해야 하며, split 변경은 검토·확정 경로에서 거부한다. [native 검증](../tests/data_factory/curator/workflow/test_setup.py)은 export → preview → 합성 binding의 finalize → 실제 candidate prepare/review와 stale split 거부를 실행한다.
+
+옵션을 생략한 v1 profile은 기존 동작을 유지하지만 TRAIN 전용 fitting을 입증하지 않는다. 이 근거는 입력 구성의 출처이며 mask의 의미적 정확성이나 heldout을 보지 않고 사람이 조정했다는 증명은 아니다. 실제 physical binding gate는 그대로이며, 다음 Learning 소비자가 부모 split·평가 cohort·저장된 변환과 추론 시 정확히 한 번의 적용을 별도로 결속해야 한다. profile 파일만으로 자산과 split이 함께 패키징되지는 않고, 원본 승인이나 training authority도 상속하지 않는다.
+
 ## 기존 판정으로 학습 요청 준비
 
 `python3 -m tools.data_factory.curator training-request --help`는 명시적으로 선택한 Collection run을 기존 학습 사전검토 요청으로 내보내는 경로다. [선택 소유자](../tools/data_factory/curator/workflow/selection.py)는 현재 ledger/state를 기존 API로 재검증하고, technical·semantic PASS인 선택 전체를 보존한다. pending·실패·stale 근거, 중복 episode, 서로 다른 dataset root/repo는 출력 전에 거부하며, 조건에 맞지 않는 항목을 조용히 제외하지 않는다. 출력 부모는 미리 존재해야 하며, 원본과 근거 경로에는 쓰지 않고 기존 출력도 덮어쓰지 않는다.
