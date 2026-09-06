@@ -28,13 +28,19 @@
     if (p.preview) {
       const preview = p.preview;
       element("dataset").textContent = preview.dataset_identity.dataset_id;
-      element("count").textContent = `${preview.selected_count}개 에피소드 · 기술 검사 PASS · 내용 판정 PASS · 학습 사용 승인 별도`;
+      const statuses = (field) => [...new Set(preview.episodes.map((episode) => episode[field] || "확인되지 않음"))].join(", ") || "확인되지 않음";
+      element("count").textContent = `${preview.selected_count}개 에피소드 · 기술 검사 ${statuses("technical_status")} · 내용 판정 ${statuses("semantic_status")} · 학습 사용 승인 별도`;
       element("identity").textContent = JSON.stringify(preview.dataset_identity);
       element("digest").textContent = preview.batch_digest;
       element("output").textContent = p.inventory_path;
       element("episodes").replaceChildren(...preview.episodes.map((episode) => {
         const row = document.createElement("li");
-        row.textContent = `에피소드 ${episode.episode_index} · ${episode.episode_id} · 기술 ${episode.technical_status} · 내용 ${episode.semantic_status} (${episode.reviewer_id})`;
+        const semantic = episode.semantic_status === "NOT_ASSERTED" ? "NOT_ASSERTED (별도 판정 없음)" : `${episode.semantic_status || "확인되지 않음"} (${episode.reviewer_id || "검토자 미표시"})`;
+        row.textContent = `에피소드 ${episode.episode_index} · ${episode.episode_id} · 기술 ${episode.technical_status || "확인되지 않음"} · 내용 ${semantic}`;
+        if (episode.parent_semantic_status) row.textContent += ` · 부모 내용 ${episode.parent_semantic_status} (${episode.reviewer_id || "검토자 미표시"})`;
+        if (episode.parent_dataset_identity) row.textContent += ` · 부모 데이터셋 ${episode.parent_dataset_identity.dataset_id} (${episode.parent_dataset_identity.dataset_digest})`;
+        const coverage = episode.curator_review?.coverage;
+        if (coverage) row.textContent += ` · Curator 묶음 검토 범위: 에피소드 ${coverage.covered_episodes.length}/${coverage.episodes.length} · 프레임 ${coverage.unique_selected_frames}/${coverage.population_frames}`;
         return row;
       }));
     }
