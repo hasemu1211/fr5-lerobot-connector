@@ -89,6 +89,44 @@ def validate_normalization_state(policy_dir: Path, normalization: dict, *, profi
             raise ValueError("checkpoint normalization differs from admitted TRAIN statistics")
 
 
+def validate_policy_feature_contract(policy: dict, feature: dict) -> None:
+    """Match saved policy features, including SmolVLA's inert native image slots."""
+    from tools.data_factory.training_entrypoint import options
+
+    for option, expected in options(feature["policy_argv"]).items():
+        if not option.startswith("--policy.") or option == "--policy.path":
+            continue
+        key = option.removeprefix("--policy.")
+        try:
+            expected = json.loads(expected)
+        except json.JSONDecodeError:
+            pass
+        actual = policy.get(key)
+        if key == "input_features" and isinstance(actual, dict) and isinstance(expected, dict):
+            # The pretrained parser retains camera3; native validate_features adds
+            # empty_camera_0. Neither is a dataset input. prepare_images emits at
+            # most empty_cameras masked blanks, independent of missing-slot names.
+            extras = {}
+            if (feature["profile"] == "smolvla" and policy.get("empty_cameras") == 1
+                    and {name for name, value in expected.items() if value.get("type") == "VISUAL"}
+                    == {"observation.images.camera1", "observation.images.camera2"}):
+                extras = {
+                    "observation.images.camera3": {"type": "VISUAL", "shape": [3, 256, 256]},
+                    "observation.images.empty_camera_0": {"type": "VISUAL", "shape": [3, 480, 640]},
+                }
+            if any(name not in extras or value != extras[name]
+                   for name, value in actual.items() if name not in expected):
+                raise ValueError("checkpoint policy has unadmitted image/input features")
+            actual = {name: value for name, value in actual.items() if name in expected}
+            if actual != expected:
+                raise ValueError("checkpoint policy differs from admitted feature contract")
+            if ([name for name in actual if actual[name].get("type") == "VISUAL"]
+                    != [name for name in expected if expected[name].get("type") == "VISUAL"]):
+                raise ValueError("checkpoint policy camera order differs from admitted feature contract")
+        if actual != expected:
+            raise ValueError("checkpoint policy differs from admitted feature contract")
+
+
 def validate_checkpoint(value: Path, *, verify_dataset: bool = True) -> tuple[Path, Path]:
     policy_dir = normalize_policy_dir(value)
     checkpoint_dir = policy_dir.parent
@@ -138,20 +176,11 @@ def validate_checkpoint(value: Path, *, verify_dataset: bool = True) -> tuple[Pa
                 or (dataset_cfg.get("episodes") or list(range(split["total_episodes"]))) != split["selected_episodes"]):
             raise ValueError("checkpoint dataset selection differs from admitted launch")
         feature = split["feature_contract"]
+        validate_policy_feature_contract(config.get("policy", {}), feature)
+        validate_policy_feature_contract(json.loads((policy_dir / "config.json").read_text()), feature)
         expected_policy = options(feature["policy_argv"])
         for option, expected in expected_policy.items():
-            if option.startswith("--policy."):
-                key = option.removeprefix("--policy.")
-                # policy.path is resolved into a concrete config by LeRobot.
-                if key == "path":
-                    continue
-                try:
-                    expected = json.loads(expected)
-                except json.JSONDecodeError:
-                    pass
-                if config.get("policy", {}).get(key) != expected:
-                    raise ValueError("checkpoint policy differs from admitted feature contract")
-            elif option == "--rename_map" and config.get("rename_map", {}) != json.loads(expected):
+            if option == "--rename_map" and config.get("rename_map", {}) != json.loads(expected):
                 raise ValueError("checkpoint camera mapping differs from admitted feature contract")
         current_split, current_receipt = prepare_launch(
             dataset=root, repo_id=dataset_cfg["repo_id"], inventory=Path(receipt["approved_inventory_path"]),
