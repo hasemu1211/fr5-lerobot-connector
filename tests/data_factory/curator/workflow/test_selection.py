@@ -21,6 +21,39 @@ snapshot = training_fixtures.snapshot
 
 
 class SelectionTest(unittest.TestCase):
+    def test_comparison_options_and_drift_fail_before_request_publication(self):
+        _, run, output = self.case()
+        for options in ({"eval_split": .2}, {"expected_eval_episodes": [0]}):
+            with self.assertRaisesRegex(CuratorError, "SELECTION_EVALUATION_OPTIONS"):
+                export_training_request([run], output / "request.json", dataset_id="comparison", **options)
+        with mock.patch.object(selection, "check_evaluation_cohort", side_effect=CuratorError("SELECTION_EVALUATION_CHANGED")):
+            with self.assertRaisesRegex(CuratorError, "SELECTION_EVALUATION_CHANGED"):
+                export_training_request([run], output / "request.json", dataset_id="comparison",
+                                        eval_split=.2, expected_eval_episodes=[0])
+        self.assertEqual(list(output.iterdir()), [])
+
+    def test_cohort_uses_native_taskwise_split_and_rejects_subset_drift(self):
+        fixture = training_fixtures.NativeBatchTrainingApprovalTest()
+        fixture.setUp()
+        self.addCleanup(fixture.doCleanups)
+        before = snapshot(fixture.root)
+        result = selection.check_evaluation_cohort(fixture.request, eval_split=.2, expected_eval_episodes=[2])
+        self.assertEqual(result, {"eval_split": .2, "train_episodes": [0], "eval_episodes": [2]})
+        changed = {**fixture.request, "episodes": fixture.sources[:2]}
+        with self.assertRaisesRegex(CuratorError, "SELECTION_EVALUATION_CHANGED"):
+            selection.check_evaluation_cohort(changed, eval_split=.2, expected_eval_episodes=[2])
+        for expected in ([], [True], [2, 2], [2, 0]):
+            with self.assertRaisesRegex(CuratorError, "SELECTION_EVALUATION_COHORT"):
+                selection.check_evaluation_cohort(fixture.request, eval_split=.2, expected_eval_episodes=expected)
+        self.assertEqual(snapshot(fixture.root), before)
+        # A task-wise split can reserve more than the global ceil(N*fraction).
+        request = {"dataset_root": str(fixture.dataset), "episodes": [{"episode_index": i} for i in range(5)]}
+        with mock.patch.object(selection, "read_metadata", return_value={"episode_tasks": [["a"], ["b"], ["a"], ["b"], ["a"]]}):
+            result = selection.check_evaluation_cohort(request, eval_split=.2, expected_eval_episodes=[3, 4])
+            self.assertEqual(set(result["train_episodes"]), {0, 1, 2})
+            with self.assertRaisesRegex(CuratorError, "SELECTION_EVALUATION_CHANGED"):
+                selection.check_evaluation_cohort(request, eval_split=.2, expected_eval_episodes=[4])
+
     def case(self, *, semantic="PASS", production=True):
         fixture, native_request, output = (
             training_fixtures.CollectionLedgerTrainingApprovalTest.ledger_case(

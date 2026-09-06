@@ -86,3 +86,22 @@ Hejna 등의 [DemInf](https://arxiv.org/abs/2502.08623v3)는 보조 VAE와 상�
 관절 경로만으로 물체·배경·조명·gripper의 다양성을 알 수 없고, 경로 길이에 따른 재표본화는 정지 시간의 의미를 제거하며 센서 잡음에는 영향을 받는다. 녹화 시간은 reset·사람 노력·전체 취득 비용을 포함하지 않는다. 다음 반증 가능한 질문은 비슷한 데이터량과 같은 평가 cohort에서 경로 차이가 학습 이득으로 이어지는지이다. 쌍마다 다르게 제외된 episode를 평가 세트로 쓰면 비교 대상 자체가 바뀌므로, 이 실험만으로 우수한 선택이나 일반화를 선언하지 않는다.
 
 저장된 intent를 연결하면 가까운 쌍은 같은 명령상 place를, 먼 쌍은 서로 다른 place를 포함한다. 같은 place의 예제도 요청된 위치·yaw가 다르므로 관절 기하의 순위에는 수집 조건의 차이가 섞여 있다. 이에 따라 학습 소유자에게 넘기는 질문도 조건별 분포와 궤적 차이를 함께 다루어야 한다. 기존 intent의 관측된 조건을 읽는 것은 누락된 과거 authoring이나 전체 domain을 복원하는 작업이 아니며, 명령된 place 명칭은 물리 A/B 검증을 대신하지 않는다.
+
+## 통제된 selection utility 비교
+
+[DataMIL 최신 개정본](https://arxiv.org/abs/2505.09603v2)은 외형·행동 유사성과 학습된 정책의 실제 효용을 구분하고, [ReMix](https://proceedings.mlr.press/v270/hejna25a.html)는 데이터 혼합 비율과 action 척도가 downstream 측정에 영향을 줄 수 있음을 보여 준다. 이 연구들이 현재 FR5의 조건 분산 점수를 보증하는 것은 아니다. 먼저 조건이 넓은 선택과 밀집한 선택을 같은 데이터량·평가 조건에서 비교하는 반증 가능한 가설로 다룬다.
+
+현재 CPU 실험은 기존 ledger/state와 native 사전검토를 통과한 선택에서 TRAIN pool만 사용한다. 보존된 x/y/yaw와 녹화량, 기존 DQA phase 시간을 읽고, frame 양과 episode 수를 맞춘 두 요청을 만든다. 최초 후보에서 발견한 동일 명령 조건의 train/heldout 노출 불균형은 양쪽의 공통 train anchor로 맞춘다. 조건 일치는 동일 영상이나 잘못된 누출의 증거가 아니며, 이미지·근접 시연의 검증은 별도다. 구체 수치·재현 코드는 `outputs/curator/utility-cohort-20260906/`에 둔다.
+
+`training-request`의 선택적 `--eval-split`과 반복 가능한 `--expected-eval-episode`는 함께 지정한다. 예를 들어 비교 계획에서 fraction과 heldout을 정했다면 다음과 같이 native split을 확인하며 요청을 만든다. 값은 각 데이터와 비교 계획에서 정하며 고정 수량을 제품 가정으로 삼지 않는다.
+
+```sh
+python3 -m tools.data_factory.curator training-request \
+  --run-dir "$RUN_A" --run-dir "$RUN_B" --run-dir "$RUN_C" \
+  --dataset-id "$DATASET_ID" --output "$NEW_REQUEST" \
+  --eval-split "$EVAL_FRACTION" --expected-eval-episode "$HELDOUT_EPISODE"
+```
+
+기존 `selected_train_eval`의 task별 분할과 기대 cohort가 다르면 `SELECTION_EVALUATION_CHANGED`로 파일 출판을 거부한다. 원본 metadata·선택을 자동 수정하지 않는다. 분할 preview는 반환값의 `evaluation_cohort`에만 포함되며 기존 native request 형식은 유지한다. **이 검사는 launch 강제가 아니다.** Learning 소비자는 같은 fraction을 사용하고 실제 launch split의 train/heldout을 다시 비교해야 한다.
+
+같은 frame 양도 optimizer 노출·전체 취득 비용의 동일성을 보장하지 않는다. Learning에서 모델·seed·학습 예산을 맞추고, 각 checkpoint의 저장된 postprocessor를 거친 비교 가능한 출력으로 판단한다. TRAIN subset별 normalization이 다른 normalized flow loss를 직접 utility 순위로 쓰지 않는다. 개발에 사용한 heldout은 독립 최종 시험이 아니며, 조건 분산의 차이는 학습 이득이나 physical generalization을 증명하지 않는다. Curation은 선택 가설·근거·요청을 소유하고 DQA, Policy Training/Evaluation, Rollout, Collection의 사실과 권한을 재사용한다.

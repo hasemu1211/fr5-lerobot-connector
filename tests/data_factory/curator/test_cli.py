@@ -11,6 +11,14 @@ from tools.data_factory.curator.cli import _parser, main
 
 
 class CliTest(unittest.TestCase):
+    def test_training_request_passes_explicit_comparison_cohort(self):
+        with mock.patch("tools.data_factory.curator.cli.export_training_request", return_value={}) as call, redirect_stdout(io.StringIO()):
+            main(["training-request", "--run-dir", "/runs/a", "--dataset-id", "comparison",
+                  "--output", "/outputs/request.json", "--eval-split", "0.3",
+                  "--expected-eval-episode", "8", "--expected-eval-episode", "9"])
+        self.assertEqual(call.call_args.kwargs, {"dataset_id": "comparison", "eval_split": .3,
+                                                "expected_eval_episodes": [8, 9]})
+
     def test_training_request_keeps_explicit_selection_and_nonapproval_boundary(self):
         output = io.StringIO()
         with (
