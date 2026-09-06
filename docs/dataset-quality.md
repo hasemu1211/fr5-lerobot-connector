@@ -111,6 +111,12 @@ Hejna 등의 [DemInf](https://arxiv.org/abs/2502.08623v3)는 보조 VAE와 상�
 
 ### 기존 subset의 분포 대비
 
+여러 frozen source를 합칠 때는 [mapped request producer](../tools/data_factory/curator/workflow/mapping.py)의 `publish_mapped_training_request`가 기존 raw 요청과 ledger/state를 확인하고 native merge의 별도 영상 복사를 사용한다. 전체 원본 내용은 새 dataset에 보존하되, 요청에는 명시적으로 선택한 episode만 넣는다. source마다 episode 수가 달라도 원본 dataset identity와 episode/global index 매핑을 유지하며, 기존 native split의 평가 예제가 정확히 대응하지 않으면 출판하지 않는다. 복사 예산은 caller가 명시하고 실제 검증은 새 outputs 경로에서 수행한다.
+
+`meta/curator_mapping.json`은 원본 provenance 바이트와 episode 번호만 재결속한 recording-quality projection을 구분한다. [기존 FR5 validator](../tools/validate_lerobot_dataset.py)가 매핑, task 의미, action/state/timestamp/frame, 영상 바이트·시각 구간과 timing 근거를 확인한다. native merge가 Arrow 고정 길이 벡터를 리스트로 저장하는 차이는 원소 dtype·길이·값이 모두 같을 때만 허용한다. 결과의 `request.json`은 `mapping.publication_root`와 `mapping.manifest_digest`를 참조하며, 새 dataset·technical result·publication과 함께 원자적으로 출판된다.
+
+다음 소비자는 [기존 training admission](../tools/data_factory/training_approval.py)의 `prepare_mapped_approvals(request, output, approved_by, check_targets=True)`다. 반환값은 기존 `(dataset, drafts)`이며, provenance v4는 부모 semantic 참조와 새 destination identity를 구분한다. 이 함수는 승인이나 inventory를 쓰지 않는다. training entrypoint/Web의 dispatch·표시와 실제 split/runtime 연결은 Learning/root 통합 대상으로 남으며, Curator의 이미지 파생 v3 계약을 reindexing에 확장하지 않는다. [합성 native 검증](../tests/data_factory/curator/workflow/test_mapping.py)은 출판·준비, 평가 identity, 재전달·변조·원본 보존을 확인한다.
+
 [DataMIL 최신 개정본](https://arxiv.org/abs/2505.09603v2)은 외형·행동 유사성과 학습된 정책의 실제 효용을 구분하고, [ReMix](https://proceedings.mlr.press/v270/hejna25a.html)는 데이터 혼합 비율과 action 척도가 downstream 측정에 영향을 줄 수 있음을 보여 준다. 이 연구들이 현재 FR5의 조건 분산 점수를 보증하는 것은 아니다. 먼저 조건이 넓은 선택과 밀집한 선택을 같은 데이터량·평가 조건에서 비교하는 반증 가능한 가설로 다룬다.
 
 비교를 구성할 때는 기존 ledger/state와 native 사전검토를 통과한 TRAIN pool에서 선택한다. 보존된 x/y/yaw와 녹화량, 기존 DQA phase 시간을 읽고, frame 양과 episode 수를 맞춘 두 요청을 만든다. 동일 명령 조건의 train/heldout 노출도 양쪽에서 확인하고, 차이가 있으면 비교 설계에 명시하거나 공통 train anchor 등으로 맞춘다. 조건 일치는 동일 영상이나 잘못된 누출의 증거가 아니며, 이미지·근접 시연의 검증은 별도다. 이 비교 설계는 caller의 책임이며 아래 API가 데이터량이나 조건 노출까지 자동으로 맞추지는 않는다.
