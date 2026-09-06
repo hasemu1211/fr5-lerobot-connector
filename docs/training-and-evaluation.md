@@ -84,6 +84,10 @@ FR5_REPO_ID="$REPO_ID" direnv exec . scripts/train_policy.sh \
 
 실행 시 `fr5_training_split.json`과 `fr5_training_receipt.json`이 output에 연결된다. split v3는 설치된 LeRobot 0.6.1의 선택 episode 기반 분할과 실제 train/held-out index를 기록하며, 별도의 factor 기반 ID/OOD 보장을 뜻하지 않는다. receipt의 `ADMITTED_NOT_TRAINED`는 입력 허가이지 학습 성공이 아니다. Resume은 현재 바이트·승인·선택·feature 연결을 다시 확인하며, 예전 count-only split만 가진 checkpoint는 실행 권한으로 인정하지 않는다.
 
+SmolVLA의 기존 launch 명령에 `--warm-start-from "$PARENT_CHECKPOINT"`를 dataset 이름 앞에 추가하면 검증된 로컬 checkpoint 가중치에서 새 학습을 시작한다. 새 output과 현재 유효한 승인·위임이 필요하며, 부모의 dataset·선택·TRAIN/held-out 분할·feature·TRAIN 정규화가 자식과 같아야 한다. 위임 예산 변경으로 inventory와 split digest가 달라도 나머지 partition 내용은 정확히 비교한다. 부모 checkpoint 전체와 receipt identity 및 optimizer·scheduler·RNG·sample stream·step의 reset 의미가 자식 receipt의 `initialization`에 연결된다. 부모 output 안에 자식을 쓰거나 원본 checkpoint를 수정하지 않는다. 입력이 바뀌면 발행 전 및 native dataset 구성 시 다시 거부한다.
+
+Warm-start는 가중치를 이어받지만 optimizer 상태를 이어받는 resume은 아니다. `--resume-from`은 기존 저장 horizon 안에서 같은 run의 optimizer·scheduler·RNG를 복원하는 별도 단독 모드다. 완료된 horizon을 늘리거나 batch를 바꾸는 true continuation은 현재 지원하지 않는다. 이 경우 scheduler 재구성에 따른 LR 변화와 batch 이력에 따른 누적 sample 위치를 명시적으로 처리해야 하며, 짧은 warm-start 처리량 실험을 그 문제의 해결 또는 학습 품질 비교로 표시하지 않는다.
+
 wrapper는 공식 LeRobot trainer의 parser·optimizer·checkpoint 저장을 사용한다. 설치된 0.6.1은 episode를 나누어도 전역 `meta/stats.json`을 유지하므로, connector는 같은 process의 dataset factory에 좁은 adapter를 적용한다. 실제 train/eval index가 승인 split과 같은지 검사한 뒤 **train episode의 기존 metadata 통계만** 합산해 policy와 processor에 전달한다. dataset이나 설치 패키지를 수정하지 않는다. state/action은 count로 가중한 mean·variance와 min/max를 사용하고, 영상 통계는 기존 `dataset.use_imagenet_stats` 설정에 따라 ImageNet 상수 또는 train episode 통계를 사용한다. 학습용 frame/video 재검사는 이 합산의 일부가 아니다.
 
 launch receipt v2는 normalization algorithm·train episode·실제 통계를 함께 고정한다. checkpoint의 pre/postprocessor 설정과 작은 safetensors 통계가 이 값과 정확히 같아야 resume과 평가가 허용된다. 저장된 model weight를 load하지 않는 이 검사는 실제 policy reload 성공 증거가 아니다. 전역 통계의 영향을 배제할 수 없는 예전 launch receipt v1은 현재 resume/평가 증거로 받아들이지 않는다. 파일을 v2로 고쳐 과거 학습의 leakage를 없앨 수는 없다. 새로 승인 검증된 native launch가 필요하다.
