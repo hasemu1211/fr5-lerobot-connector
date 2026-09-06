@@ -14,6 +14,20 @@ Curator SHALL expose a read-only native projection of the source, candidate, pro
 - **THEN** the projection exposes the recorded result and permits only its existing choice for recovery, or no choice when terminal
 - **AND** reading the projection performs no publication or duplicate decision.
 
+### Requirement: Terminal outcome remains readable when review media is unavailable
+
+After the canonical terminal decision and receipt pass existing binding validation, and a published output passes its existing content check, Curator SHALL keep that result readable even if the review media or manifest fails validation. The projection SHALL explicitly return `media_available: false` and `media_error.reason_code`, null media paths, identities and coverage, empty clips and `allowed_decisions: []`. Frozen review digests and the validated decision and receipt SHALL remain available without training authority. Verified media SHALL return `media_available: true` and `media_error: null`. A media failure SHALL NOT suppress receipt or output validation, weaken decision-time validation, or create another decision or publication.
+
+#### Scenario: Media fails after a terminal receipt is committed
+- **WHEN** native submission commits a PUBLISHED or REJECTED receipt and the review video subsequently becomes missing or corrupt, or its manifest fails validation
+- **THEN** submission or a subsequent read returns the validated terminal outcome with explicit media unavailability and no playable paths or permitted decisions
+- **AND** an identical retry preserves the recorded actor, decision, receipt and publication without repeating the completed action.
+
+#### Scenario: The failure is before a decision or concerns committed output
+- **WHEN** review media fails validation before a decision, or a terminal receipt or published output fails its canonical validation
+- **THEN** native review or submission rejects the invalid evidence under the existing checks
+- **AND** it does not reinterpret that failure as a valid completed outcome with merely unavailable playback.
+
 ### Requirement: Bound explicit decisions reuse canonical publication and recovery
 
 The current human decision endpoint SHALL require an explicit choice and expected review-ready digest, enforce both under the existing run lock, and reuse existing revalidation, decision events, publication and recovery. Stale or wrong-run identities and conflicting replays SHALL be rejected without a new decision or publication. Identical retries SHALL preserve the recorded actor and decision and recover the existing action. Candidate approval SHALL NOT inherit original approval or confer semantic, physical, training or motion authority beyond the existing candidate-review scope. Future qualified automated judgments SHALL have distinct decision-source provenance and permitted effects; they SHALL NOT be serialized as human choices through this endpoint.
