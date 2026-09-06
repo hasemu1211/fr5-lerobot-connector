@@ -1,5 +1,30 @@
 ## ADDED Requirements
 
+### Requirement: Offline solver evidence must separate numerical and deployed usefulness
+
+Rollout's offline native comparison SHALL reuse canonical checkpoint admission
+and saved processors, pairing each candidate with the same observation and
+explicit noise. It SHALL report all expert evaluations, total chunk and solver
+wall time, action dtype and per-dimension postprocessed deviation from native
+Euler10. Fixed10 SHALL be labeled a native numerical reference, not ground truth.
+Synthetic exact ODE errors SHALL remain separately labeled dimensionless evidence.
+Unmeasured memory, task success and physical qualification SHALL NOT be inferred
+from solver work or internal vector changes. Candidate outputs SHALL NOT become
+executable proposals or new execution authority through this experiment.
+
+#### Scenario: A shorter update uses a remaining-interval midpoint
+
+- **WHEN** the partial AdaVLA candidate integrates `v=t` from zero at `t=1`
+- **THEN** its bounded result is reproduced independently from local midpoint RK2
+- **AND** all 20 evaluations and its forced tail are visible alongside the six-NFE local control
+- **AND** agreement with paper equations does not label this rule a local error bound
+
+#### Scenario: Better ODE accuracy differs from native action fidelity
+
+- **WHEN** a candidate improves exact error on a synthetic field but moves farther from fixed10
+- **THEN** both comparisons remain visible without a task-success or adoption verdict
+- **AND** Learning's evaluation protocol and actual downstream evidence determine usefulness
+
 ### Requirement: Saved processor configuration must preserve the native feature contract
 
 Learning's canonical checkpoint validator SHALL require a saved preprocessor declaration of

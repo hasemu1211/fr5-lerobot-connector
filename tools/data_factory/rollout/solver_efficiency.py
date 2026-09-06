@@ -22,7 +22,7 @@ from types import FunctionType, MethodType
 
 import torch
 
-METHODS = ("fixed10", "fixed5", "adaptive")
+METHODS = ("fixed10", "fixed5", "adaptive", "midpoint3")
 PAPER = "https://arxiv.org/html/2608.29208v1"
 
 
@@ -52,8 +52,17 @@ def integrate(denoise, noise, method, *, threshold=.075, max_nfe=20):
     _sync(noise.device)
     started = time.perf_counter()
     with torch.inference_mode():
-        if method != "adaptive":
+        if method in ("fixed10", "fixed5"):
             x = euler_integrate(field, x, 10 if method == "fixed10" else 5)
+        elif method == "midpoint3":
+            # Local RK2 control: both probes refer to the actual 1/3 interval.
+            # No adaptive rejection, curvature decision or forced terminal jump.
+            step = 1. / 3
+            for index in range(3):
+                t = torch.full((1,), 1. - index * step, dtype=torch.float32, device=x.device)
+                v = field(x, t)
+                mid_v = field(x - step * .5 * v, t - step * .5)
+                x = x - step * mid_v
         else:
             remaining = 1.
             while remaining > 0:
@@ -230,7 +239,7 @@ def main(argv=None):
     options = dict(seeds=tuple(int(s) for s in args.seeds.split(",")), repeats=args.repeats, warmups=args.warmups)
     settings = dict(threshold=args.threshold, max_nfe=args.max_nfe)
     report = {"experiment": "offline_solver_efficiency", "paper": PAPER,
-              "reproduction": "IV-A only; no MLP pruning; bounded forced terminal midpoint jump",
+              "reproduction": "adaptive: IV-A only, no pruning, forced tail; midpoint3: separate local RK2 control",
               "solver_settings": {**settings, "base_step": .1, "epsilon": 1e-8, "time_direction": "1_to_0"},
               "reference": "fixed10 numerical endpoint, not ground truth or task success",
               "physical_qualification": "NOT_MEASURED", "task_success": "NOT_MEASURED",
@@ -247,7 +256,10 @@ def main(argv=None):
             parser.error("synthetic mode is CPU-only")
         fields = {"constant": lambda x, t: torch.ones_like(x),
                   "linear": lambda x, t: x,
+                  "time_linear": lambda x, t: torch.ones_like(x) * t.reshape(-1, 1, 1),
                   "hidden_bend": lambda x, t: torch.ones_like(x) * ((t - .5)**2 * (t - 1)**2).reshape(-1, 1, 1)}
+        exact = {"constant": lambda x: x - 1, "linear": lambda x: x * math.exp(-1),
+                 "time_linear": lambda x: x - .5, "hidden_bend": lambda x: x - 1 / 30}
         report["measurement_scope"] = "synthetic_ode_only_not_model_speed"
         report["action_units"] = ["dimensionless"] * 7
         report["cases"] = {}
@@ -255,7 +267,10 @@ def main(argv=None):
             def trial(noise, method):
                 started = time.perf_counter()
                 output, measured = integrate(field, noise, method, **settings)
-                return output, measured, time.perf_counter() - started
+                elapsed = time.perf_counter() - started
+                error = (output.double() - exact[name](noise.double())).flatten(0, -2)
+                measured["max_abs_per_dimension_to_exact_ode"] = error.abs().amax(0).tolist()
+                return output, measured, elapsed
             report["cases"][name] = compare_trials(trial, (1, 4, 7), **options)
     else:
         if args.observation is None:

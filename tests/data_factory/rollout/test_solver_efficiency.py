@@ -12,6 +12,40 @@ from tools.data_factory.rollout.solver_efficiency import (
 
 
 class SolverEfficiencyTest(unittest.TestCase):
+    def test_remaining_midpoint_counterexample_and_local_midpoint_control(self):
+        noise = torch.zeros((1, 1, 32))
+        field = lambda x, t: torch.ones_like(x) * t.reshape(-1, 1, 1)
+        for method, expected, nfe in (("fixed10", -.55, 10), ("fixed5", -.6, 5),
+                                      ("adaptive", -.275, 20), ("midpoint3", -.5, 6)):
+            with self.subTest(method=method):
+                result, evidence = integrate(field, noise, method)
+                torch.testing.assert_close(result, torch.full_like(result, expected))
+                self.assertEqual(evidence["nfe"], nfe)
+                self.assertEqual(evidence["forced_terminal_jump"], method == "adaptive")
+                if method == "adaptive":
+                    self.assertEqual(evidence["steps"][0]["step"], .1)
+        torch.testing.assert_close(noise, torch.zeros_like(noise))
+
+    def test_local_midpoint_probes_actual_step_and_improves_linear_ode_error(self):
+        import math
+        times = []
+        def field(x, t):
+            times.append(t.item())
+            return x
+        noise = torch.ones((1, 1, 32))
+        result, evidence = integrate(field, noise, "midpoint3")
+        for actual, expected in zip(times, (1., 5/6, 2/3, .5, 1/3, 1/6), strict=True):
+            self.assertAlmostEqual(actual, expected, places=6)
+        self.assertEqual(evidence["nfe"], 6)
+        # x' = x: RK2 amplification (1-h+h*h/2)^3, exact endpoint exp(-1).
+        self.assertAlmostEqual(result[0, 0, 0].item(), (1 - 1/3 + 1/18)**3, places=6)
+        euler, _ = integrate(field, noise, "fixed10")
+        self.assertLess(abs(result[0, 0, 0].item() - math.exp(-1)),
+                        abs(euler[0, 0, 0].item() - math.exp(-1)))
+        fixed5, _ = integrate(lambda x, t: x, noise, "fixed5")
+        self.assertGreater((result - euler).abs().max().item(),
+                           (fixed5 - euler).abs().max().item())
+
     def test_bfloat16_raw_byte_digest_and_action_dtype_metadata(self):
         import hashlib
         value = torch.tensor([[1., -2.], [3., 4.]], dtype=torch.bfloat16).transpose(0, 1)
@@ -79,8 +113,8 @@ class SolverEfficiencyTest(unittest.TestCase):
             result, measured = integrate(lambda x, t: x, noise, method)
             return result, measured, measured["solver_wall_s"]
         report = compare_trials(trial, (1, 2, 7), seeds=(10,), repeats=3, warmups=0)
-        self.assertEqual(calls[:3], ["fixed10", "fixed5", "adaptive"])
-        self.assertEqual(calls[3:6], ["fixed5", "adaptive", "fixed10"])
+        self.assertEqual(calls[:4], ["fixed10", "fixed5", "adaptive", "midpoint3"])
+        self.assertEqual(calls[4:8], ["fixed5", "adaptive", "midpoint3", "fixed10"])
         self.assertEqual(len({row["noise_sha256"] for row in report["rows"]}), 1)
         for row in report["rows"]:
             self.assertEqual(len(row["rmse_per_dimension_to_fixed10"]), 7)
@@ -94,7 +128,13 @@ class SolverEfficiencyTest(unittest.TestCase):
         report = json.loads(output.getvalue())
         self.assertEqual(report["measurement_scope"], "synthetic_ode_only_not_model_speed")
         self.assertEqual(report["physical_qualification"], "NOT_MEASURED")
-        self.assertEqual(set(report["cases"]), {"constant", "linear", "hidden_bend"})
+        self.assertEqual(set(report["cases"]), {"constant", "linear", "time_linear", "hidden_bend"})
+        for row in report["cases"]["time_linear"]["rows"]:
+            error = max(row["max_abs_per_dimension_to_exact_ode"])
+            if row["method"] == "midpoint3":
+                self.assertLess(error, 1e-6)
+            elif row["method"] == "adaptive":
+                self.assertAlmostEqual(error, .225, places=5)
 
 
 if __name__ == '__main__':
