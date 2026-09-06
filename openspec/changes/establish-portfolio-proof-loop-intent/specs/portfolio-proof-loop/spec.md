@@ -111,6 +111,22 @@ lane handoff는 claim, evidence state, exact reference 또는 digest, 적용 범
 - **WHEN** 다음 lane이 upstream 결과를 받는다
 - **THEN** 소비자는 claim에서 canonical output과 evidence, limitation, owner까지 끊김 없이 추적할 수 있다
 
+### Requirement: Portfolio communication demonstrates job-relevant capability
+Portfolio 표현 책임자는 모방학습과 데이터 엔지니어링 직무의 외부 검토자가 실제 역량을 확인할 수 있도록 연구 결과와 시스템 구현의 가치를 함께 발견·검증·표현해야 한다(SHALL). 기존 프로젝트 연구, 필요한 외부 우수 사례와 실제 source/tests/runtime을 직접 소비하며 사례·서사·매체를 자율적으로 선택하고, 산출물을 독자의 관점에서 사용·렌더링·검토해 개선해야 한다(SHALL). 아키텍처와 SSOT 등의 설계 선택은 관련성이 있을 때 실제 문제·trade-off·동작 근거로 설명하며, 기능 목록이나 좋은 원칙의 나열만으로 가치가 입증됐다고 간주해서는 안 된다(MUST NOT). 이 책임은 제품 UX나 기술 owner의 canonical 판단·출력을 대체하지 않는다(MUST NOT).
+
+#### Scenario: The lane chooses what to communicate
+- **WHEN** 표현 책임자가 다음 portfolio 결과를 선택한다
+- **THEN** 직무 관련성, 실제 증거와 설명의 설득력으로 선택을 정당화하고, 미리 지정된 항목·템플릿의 소진이나 문서 수 증가를 완료 기준으로 삼지 않는다
+- **AND** 전체 확장 전에 작은 실제 표현물로 사람의 취향 피드백을 받을 수 있게 하되 독립적인 기술 작업을 멈추지 않는다
+
+### Requirement: Portfolio evidence evolves without becoming a second truth
+검증된 성과와 미검증 가설은 구분하되 새 증거가 나오면 같은 설명과 근거 연결을 갱신할 수 있어야 한다(SHALL). 문서·시각화·발표 자료의 수치와 주장은 기존 canonical evidence에서 추적 가능해야 하며, 독립적인 결과 장부나 중복된 수작업 정본을 만들지 않아야 한다(SHALL). 시각적 완성도는 실제 렌더 결과의 가독성·비교 가능성·정직한 범위 표현을 포함해야 하며, 장식이나 유리한 사례 선택으로 한계를 숨겨서는 안 된다(MUST NOT).
+
+#### Scenario: New results support or refute an earlier hypothesis
+- **WHEN** 새로운 canonical evidence가 기존 가설이나 공개 후보 주장을 지지·제한·반박한다
+- **THEN** 해당 설명과 시각적 근거를 함께 갱신하고 과거 비교의 적용 범위를 보존하며, 같은 수치나 서사를 매체마다 별도로 재작성하도록 강제하지 않는다
+- **AND** 미검증 미래 결과를 현재 성과로 선반영하지 않는다
+
 ### Requirement: Work and intent evolve only on evidence
 각 lane의 작업은 다음 lane unblock, 중요한 불확실성 또는 실패 원인 감소, 재현 가능한 evidence 강화, 외부에서 확인 가능한 portfolio proof 생성 중 적어도 하나를 충족해야 한다(SHALL). OpenSpec revision은 새 evidence가 지속 가능한 행동·authority·acceptance·handoff 의미를 흔들 때만 제안해야 한다(SHALL).
 
