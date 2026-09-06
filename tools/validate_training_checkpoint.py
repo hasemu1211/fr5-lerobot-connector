@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+from contextvars import ContextVar
 import json
 from pathlib import Path
 import sys
@@ -18,6 +19,44 @@ REQUIRED_TRAINING_STATE = (
     "rng_state.safetensors",
     "training_step.json",
 )
+
+_WARM_START_ANCESTORS = ContextVar("warm_start_ancestors", default=())
+
+
+def warm_start_binding(value: Path, split: dict, normalization: dict) -> dict:
+    """Validate a local parent for a fresh optimizer run on the same learning data."""
+    from tools.data_factory.training_receipts import tree_digest
+    from tools.fr5_data_factory import canonical_digest, load_json_strict
+
+    policy_dir = normalize_policy_dir(value)
+    ancestors = _WARM_START_ANCESTORS.get()
+    if policy_dir in ancestors:
+        raise ValueError("cyclic warm-start checkpoint lineage")
+    token = _WARM_START_ANCESTORS.set((*ancestors, policy_dir))
+    try:
+        before = tree_digest(policy_dir.parent)
+        policy_dir, output = validate_checkpoint(policy_dir)
+        manifests = []
+        for name in ("fr5_training_split.json", "fr5_training_receipt.json"):
+            path = output / name
+            if not path.is_file():
+                path = Path(str(output) + f".{name}.pending")
+            manifests.append(load_json_strict(path))
+        parent_split, parent_receipt = manifests
+        authority_fields = {"split_digest", "approved_episode_inventory_digest"}
+        if ({key: val for key, val in parent_split.items() if key not in authority_fields}
+                != {key: val for key, val in split.items() if key not in authority_fields}
+                or parent_receipt["normalization"] != normalization):
+            raise ValueError("warm-start parent must match dataset, partition, features and TRAIN normalization")
+        if before != tree_digest(policy_dir.parent):
+            raise ValueError("warm-start checkpoint changed during validation")
+        return {"mode": "warm_start", "checkpoint": str(policy_dir),
+                "checkpoint_artifact_digest": before,
+                "training_receipt_digest": canonical_digest(parent_receipt),
+                "split_digest": parent_split["split_digest"],
+                "reset": ["optimizer", "scheduler", "rng", "sample_stream", "step"]}
+    finally:
+        _WARM_START_ANCESTORS.reset(token)
 
 
 def normalize_policy_dir(value: Path) -> Path:
@@ -169,6 +208,9 @@ def validate_checkpoint(value: Path, *, verify_dataset: bool = True) -> tuple[Pa
         if not receipt_path.is_file():
             receipt_path = Path(str(output_dir) + ".fr5_training_receipt.json.pending")
         receipt = validate_launch_receipt(json.loads(receipt_path.read_text()), split)
+        if "initialization" in receipt and not config.get("resume", False):
+            if config.get("policy", {}).get("pretrained_path") != receipt["initialization"]["checkpoint"]:
+                raise ValueError("checkpoint warm-start parent differs from admitted initialization")
         root = Path(dataset_cfg.get("root", "")).expanduser()
         if (str(root) != split["dataset_identity"]["dataset_root"]
                 or dataset_cfg.get("repo_id") != split["dataset_identity"]["repo_id"]

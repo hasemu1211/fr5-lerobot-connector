@@ -15,6 +15,8 @@
 
 ## 3. Data utility and continued learning
 
+- [ ] Qualify larger-batch native throughput from an immutable learned checkpoint using an explicitly labelled warm-start fork; retain reset semantics and parent/child reload lineage without claiming exact continuation or superior learning from extra exposure.
+
 - [x] Relate successful-data condition coverage and held-out error to competing coverage and optimization hypotheses, with falsifiers and evidence limits.
 - [x] Provide Rollout a deterministic frozen held-out observation cohort and native input/identity contract for offline solver comparisons, preserving admission and physical gates.
 - [x] Compare learned checkpoints before attributing improvement to data selection or acquisition; revise the recipe or coverage hypothesis from matched evidence.

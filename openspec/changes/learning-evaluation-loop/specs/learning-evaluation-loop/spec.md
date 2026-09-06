@@ -111,6 +111,12 @@ The lane SHALL choose the next safe valuable outcome using code/tests, current a
 - **THEN** it reports actual sample exposure and precision and establishes only resource behavior
 - **AND** a subsequent learning comparison declares its matched sample or compute budget and schedule, rather than attributing extra sample exposure to superior data or optimization.
 
+#### Scenario: A bounded feasibility run starts from learned weights
+- **WHEN** a consumer requests a warm-start from an admitted local SmolVLA checkpoint
+- **THEN** the native launch uses a new output and current authority, verifies the same dataset, partition, features and TRAIN normalization, and binds the immutable parent checkpoint and receipt
+- **AND** optimizer, scheduler, RNG, sample stream and step reset are explicit; a changed parent or inconsistent lineage is rejected before publication and native consumption
+- **AND** child reload and legacy same-run resume validate the parent lineage without overwriting it or claiming mixed-batch true continuation is supported.
+
 #### Scenario: Approval or GPU ownership is unavailable
 - **WHEN** gated execution cannot proceed
 - **THEN** the lane reports the exact blocker to root and continues independent scoped software, metadata or research work

@@ -277,6 +277,14 @@ def compile_launch_receipt(split: Mapping, argv: list[str], inventory_path: str)
         "normalization": training_normalization(split, use_imagenet_stats=imagenet == "true"),
         "normalized_argv": argv, "argv_digest": canonical_digest(argv),
     }
+    source = options(argv[1:]).get("--policy.path")
+    base = options(split["feature_contract"]["policy_argv"]).get("--policy.path")
+    if source != base:
+        from tools.validate_training_checkpoint import warm_start_binding
+
+        if split["feature_contract"]["profile"] != "smolvla" or not source:
+            raise ReceiptError("TRAINING_WARM_START_PROFILE")
+        value["initialization"] = warm_start_binding(Path(source), split, value["normalization"])
     return {**value, "receipt_digest": canonical_digest(value)}
 
 

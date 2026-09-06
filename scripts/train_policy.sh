@@ -8,6 +8,7 @@ usage() {
 Usage:
   scripts/train_policy.sh --check-env [--profile PROFILE]
   scripts/train_policy.sh --resume-from CHECKPOINT [--dry-run]
+  scripts/train_policy.sh --warm-start-from CHECKPOINT --profile smolvla [launch options]
   scripts/train_policy.sh --profile PROFILE [--root PATH] [--output PATH] [--dry-run] \
     DATASET_NAME [AUGMENTATION] --batch_size=N --steps=N --dataset.eval_split=FRACTION \
     --eval_steps=N --save_freq=N \
@@ -32,11 +33,13 @@ OUTPUT=""
 DRY_RUN=0
 CHECK_ENV=0
 RESUME_FROM=""
+WARM_START_FROM=""
 while [[ $# -gt 0 ]]; do
   case "$1" in
     -h|--help) usage; exit 0 ;;
     --check-env) CHECK_ENV=1; shift ;;
     --resume-from) [[ $# -ge 2 ]] || { echo "--resume-from requires a value" >&2; exit 2; }; RESUME_FROM="$2"; shift 2 ;;
+    --warm-start-from) [[ $# -ge 2 ]] || { echo "--warm-start-from requires a value" >&2; exit 2; }; WARM_START_FROM="$2"; shift 2 ;;
     --approved-inventory) APPROVED_INVENTORY="${2:?--approved-inventory requires a path}"; shift 2 ;;
     --collection-profile) COLLECTION_PROFILE="${2:?--collection-profile requires an ID}"; shift 2 ;;
     --profile) [[ $# -ge 2 ]] || { echo "--profile requires a value" >&2; exit 2; }; PROFILE="$2"; shift 2 ;;
@@ -49,7 +52,7 @@ while [[ $# -gt 0 ]]; do
 done
 
 if [[ -n "$RESUME_FROM" ]]; then
-  [[ "$CHECK_ENV" == 0 && -z "$PROFILE" && -z "$OUTPUT" && -z "$APPROVED_INVENTORY" && -z "$COLLECTION_PROFILE" && "$DATASET_ROOT" == "${FR5_DATASET_ROOT:-$ROOT/datasets/fr5_episodes}" && $# -eq 0 ]] || {
+  [[ "$CHECK_ENV" == 0 && -z "$WARM_START_FROM" && -z "$PROFILE" && -z "$OUTPUT" && -z "$APPROVED_INVENTORY" && -z "$COLLECTION_PROFILE" && "$DATASET_ROOT" == "${FR5_DATASET_ROOT:-$ROOT/datasets/fr5_episodes}" && $# -eq 0 ]] || {
     echo "--resume-from is a standalone mode; only --dry-run may accompany it." >&2
     exit 2
   }
@@ -110,6 +113,10 @@ PY
 fi
 
 [[ -n "$PROFILE" ]] || { echo "--profile is required" >&2; usage >&2; exit 2; }
+if [[ -n "$WARM_START_FROM" && "$PROFILE" != smolvla ]]; then
+  echo "--warm-start-from requires --profile smolvla" >&2
+  exit 2
+fi
 [[ $# -ge 1 ]] || { usage >&2; exit 2; }
 NAME="$1"
 shift
@@ -197,6 +204,13 @@ PY
 )
 POLICY_JSON="$("$ROOT/.venv/bin/python" "$ROOT/tools/fr5_training_profile.py" "$PROFILE" "$DATASET" --json)"
 mapfile -d '' -t POLICY_ARGS < <("$ROOT/.venv/bin/python" -c 'import json,sys; sys.stdout.buffer.write(b"\0".join(x.encode() for x in json.loads(sys.argv[1])) + b"\0")' "$POLICY_JSON")
+if [[ -n "$WARM_START_FROM" ]]; then
+  WARM_START_FROM="$("$ROOT/.venv/bin/python" -c 'from pathlib import Path; import sys; sys.path.insert(0, sys.argv[1]); from tools.validate_training_checkpoint import normalize_policy_dir; print(normalize_policy_dir(Path(sys.argv[2])))' "$ROOT" "$WARM_START_FROM")"
+  for index in "${!POLICY_ARGS[@]}"; do
+    [[ "${POLICY_ARGS[$index]}" != --policy.path=* ]] || POLICY_ARGS[$index]="--policy.path=$WARM_START_FROM"
+  done
+  echo "Warm start: parent policy weights; optimizer, scheduler, RNG, sample stream and step reset."
+fi
 REMOTE_DISABLE_ARGS=()
 for option in --policy.push_to_hub --save_checkpoint_to_hub --wandb.enable; do
   if ! has_option "$option" "$@"; then REMOTE_DISABLE_ARGS+=("$option=false"); fi
