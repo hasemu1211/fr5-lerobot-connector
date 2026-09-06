@@ -781,4 +781,115 @@
       &quot;color_space&quot;: &quot;RGB&quot;
     }
   }
+}</pre></section><a href="../data.html?episode=29&amp;moment=1#inspection">← 동기 탐색 설명으로 돌아가기</a><section id="native-inspection"><h2>Episode 29의 실제 Rerun 탐색</h2><p>UX owner의 2097c27 실행 기록을 소비했다. 이 연결의 제품 소스는 main add4d24에 통합됐다. 이미지와 실행 기록의 원본 SHA를 보존하며 임시 서버 주소와 운영자 식별 정보는 발췌하지 않았다.</p><p class="locator">fr5-ux-rerun-2097c27-frame470.png<br>sha256:00eb6fe91135c357defc2516f184edf44aeb23d8d0573f2d90631c0878efb5ef</p><h3>fr5-ux-rerun-2097c27-open.json</h3><p class="locator">sha256:8a6786ef077256c06520b9355f6abddcc4f3fd241fb65a7d1a058feb235a34cd</p><p class="note">원문에서 발췌한 필드.</p><pre>{
+  &quot;cutoff&quot;: &quot;2097c27586c46d484ff7d89ce4c4e42346c15b06&quot;,
+  &quot;inspection&quot;: {
+    &quot;mapping&quot;: {
+      &quot;episode_index&quot;: 29,
+      &quot;features&quot;: {
+        &quot;action&quot;: {
+          &quot;dtype&quot;: &quot;float32&quot;,
+          &quot;names&quot;: [
+            &quot;j1&quot;,
+            &quot;j2&quot;,
+            &quot;j3&quot;,
+            &quot;j4&quot;,
+            &quot;j5&quot;,
+            &quot;j6&quot;,
+            &quot;gripper.pos&quot;
+          ],
+          &quot;shape&quot;: [
+            7
+          ]
+        },
+        &quot;observation.images.up&quot;: {
+          &quot;dtype&quot;: &quot;video&quot;,
+          &quot;names&quot;: [
+            &quot;height&quot;,
+            &quot;width&quot;,
+            &quot;channels&quot;
+          ],
+          &quot;shape&quot;: [
+            480,
+            640,
+            3
+          ]
+        },
+        &quot;observation.images.wrist&quot;: {
+          &quot;dtype&quot;: &quot;video&quot;,
+          &quot;names&quot;: [
+            &quot;height&quot;,
+            &quot;width&quot;,
+            &quot;channels&quot;
+          ],
+          &quot;shape&quot;: [
+            480,
+            640,
+            3
+          ]
+        },
+        &quot;observation.state&quot;: {
+          &quot;dtype&quot;: &quot;float32&quot;,
+          &quot;names&quot;: [
+            &quot;j1&quot;,
+            &quot;j2&quot;,
+            &quot;j3&quot;,
+            &quot;j4&quot;,
+            &quot;j5&quot;,
+            &quot;j6&quot;,
+            &quot;gripper.pos&quot;
+          ],
+          &quot;shape&quot;: [
+            7
+          ]
+        }
+      },
+      &quot;first_frame_index&quot;: 0,
+      &quot;first_global_index&quot;: 25078,
+      &quot;first_timestamp_seconds&quot;: 0,
+      &quot;frames&quot;: 940,
+      &quot;last_frame_index&quot;: 939,
+      &quot;last_global_index&quot;: 26017,
+      &quot;last_timestamp_seconds&quot;: 31.299999237060547,
+      &quot;rrd_bytes&quot;: 97753306,
+      &quot;versions&quot;: {
+        &quot;lerobot&quot;: &quot;0.6.1&quot;,
+        &quot;rerun&quot;: &quot;0.33.1&quot;
+      },
+      &quot;viewer_frame_rule&quot;: &quot;global_index - first_global_index = canonical frame_index&quot;
+    },
+    &quot;read_only&quot;: true,
+    &quot;status&quot;: &quot;READY&quot;,
+    &quot;target&quot;: {
+      &quot;batch_digest&quot;: &quot;sha256:7828f9467ca526874d2b27a2ed30d318fb0ed5f791c289947cd735f0c9f5907a&quot;,
+      &quot;dataset_digest&quot;: &quot;sha256:564ca492246687ce3cf96b08d0458dd59edebec1d67e4d48ef4dabf90e93d41d&quot;,
+      &quot;dataset_id&quot;: &quot;fr5260903-frozen-pickup-r1&quot;,
+      &quot;episode_id&quot;: &quot;collection-production-20260904T035141Z-campaign-0001-run-1-e25&quot;,
+      &quot;episode_index&quot;: 29
+    }
+  },
+  &quot;status&quot;: &quot;PREVIEW_NOT_APPROVED&quot;,
+  &quot;starts_training&quot;: false
+}</pre><h3>fr5-ux-rerun-2097c27-return.json</h3><p class="locator">sha256:bd6f084e3a537acfb17319b14cea1933a40ef03ab15fba897064f121f6b8715d</p><p class="note">원문에서 발췌한 필드.</p><pre>{
+  &quot;cutoff&quot;: &quot;2097c27586c46d484ff7d89ce4c4e42346c15b06&quot;,
+  &quot;same_preview&quot;: true,
+  &quot;same_target&quot;: true,
+  &quot;before_status&quot;: &quot;PREVIEW_NOT_APPROVED&quot;,
+  &quot;after_status&quot;: &quot;PREVIEW_NOT_APPROVED&quot;,
+  &quot;inspection&quot;: {
+    &quot;status&quot;: &quot;CLOSED&quot;,
+    &quot;target&quot;: {
+      &quot;batch_digest&quot;: &quot;sha256:7828f9467ca526874d2b27a2ed30d318fb0ed5f791c289947cd735f0c9f5907a&quot;,
+      &quot;dataset_digest&quot;: &quot;sha256:564ca492246687ce3cf96b08d0458dd59edebec1d67e4d48ef4dabf90e93d41d&quot;,
+      &quot;dataset_id&quot;: &quot;fr5260903-frozen-pickup-r1&quot;,
+      &quot;episode_id&quot;: &quot;collection-production-20260904T035141Z-campaign-0001-run-1-e25&quot;,
+      &quot;episode_index&quot;: 29
+    }
+  },
+  &quot;observed_scrub&quot;: {
+    &quot;episode_index&quot;: 29,
+    &quot;frame_index&quot;: 470,
+    &quot;global_index&quot;: 25548
+  },
+  &quot;starts_training&quot;: false
 }</pre></section></main><script src="../source-return.js"></script></body></html>
