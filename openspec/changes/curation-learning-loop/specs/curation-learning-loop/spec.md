@@ -26,10 +26,17 @@ use existing exclusive atomic directory publication and preserve all originals.
 - **THEN** preparation SHALL reject even if the mapped content is otherwise valid
 - **AND** frozen provenance validation SHALL continue to validate its bound original artifacts without inventing retrospective revocation solely from loss of a mutable projection.
 
-#### Scenario: Training consumer integration remains with its owner
+#### Scenario: Mapped candidate reaches the existing exact-batch training consumer
 - **WHEN** the candidate's `mapping` reference is consumed
 - **THEN** `prepare_mapped_approvals` SHALL validate its exact publication and return mapped drafts without issuing consent
-- **AND** the existing training entrypoint/Web consumer owner SHALL integrate dispatch and explicit parent-versus-destination presentation before claiming its full admission or launch path is complete.
+- **AND** the existing training entrypoint and Web preview SHALL distinguish parent semantic PASS from destination semantic NOT_ASSERTED, show the source episode correspondence, and require a new exact batch authorization before inventory publication
+- **AND** the inventory SHALL preserve PARENT_PASS references rather than manufacturing a new semantic verdict or inheriting raw training authority.
+
+#### Scenario: Actual launch preserves the original evaluation identity
+- **WHEN** an authorized mapped inventory reaches native launch preparation
+- **THEN** the consumer SHALL verify its original collection-profile ledger and compare the actual dataset, selected episodes, TRAIN episodes, EVAL episodes and fraction against the verified mapped publication
+- **AND** a changed cohort or selection SHALL reject before launch receipt publication or trainer construction
+- **AND** the saved observation-view consumer SHALL treat this verified lossless mapping as raw imagery without introducing or applying an image transform.
 
 ### Requirement: Success coverage proposals reuse native Collection authoring
 
