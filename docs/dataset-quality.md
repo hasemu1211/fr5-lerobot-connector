@@ -81,7 +81,7 @@ source preflight 진단을 추가하는 방향과 검토 clip 선택을 고치�
 
 Hejna 등의 [DemInf](https://arxiv.org/abs/2502.08623v3)는 보조 VAE와 상호정보량 추정으로 시연을 평가한다. Sirigiri 등의 [FAKTUAL 연구](https://arxiv.org/abs/2603.11634v1)는 궤적 kernel 기반 다양성을 다루며 품질·다양성·주변 사례의 밀도가 함께 필요함을 설명한다. 현재 PC와 학습을 수행하지 않는 실험 범위에서는 보조 모델 학습 대신 CPU에서 계산하는 작은 기준선을 선택했다. 여섯 arm joint의 절대 경로를 누적 경로 길이의 같은 비율에서 비교하고, 녹화 frame 수를 별도 비용 대리값으로 유지한다. 이는 signature kernel이나 검증된 학습 utility 점수의 구현이 아니다.
 
-실제 성공 예제의 가까운 쌍과 먼 쌍을 이 기준선으로 비교하고, 서로 다른 resampling 해상도에서 순위가 유지되는지 확인한 뒤 두 명시적 요청을 native 사전검토에 전달했다. 반복 정지점·직선 구간 재표본화에 대한 불변성, 절대 위치 차이와 순서 차이의 관측 가능성은 합성 입력으로 확인했다. 이 실험의 helper와 상세 수치는 worktree의 `outputs/curator/success-geometry-cost-20260905/`에만 남긴다. 아직 일반 제품의 선별 정책으로 승격하지 않는다.
+가까운 쌍과 먼 쌍의 비교는 선택 가설이며 일반 제품의 선별 정책이 아니다. 이를 재현할 때는 선택한 episode, 경로 표현과 resampling 해상도, 녹화량을 명시하고 [기존 요청 exporter](../tools/data_factory/curator/workflow/selection.py)로 native 사전검토를 통과시킨다. 아래 cohort 검사는 이런 선택 간에 평가 대상이 달라지는 문제를 드러내지만, 경로 기준선의 유효성이나 학습 이득을 검증하지는 않는다.
 
 관절 경로만으로 물체·배경·조명·gripper의 다양성을 알 수 없고, 경로 길이에 따른 재표본화는 정지 시간의 의미를 제거하며 센서 잡음에는 영향을 받는다. 녹화 시간은 reset·사람 노력·전체 취득 비용을 포함하지 않는다. 다음 반증 가능한 질문은 비슷한 데이터량과 같은 평가 cohort에서 경로 차이가 학습 이득으로 이어지는지이다. 쌍마다 다르게 제외된 episode를 평가 세트로 쓰면 비교 대상 자체가 바뀌므로, 이 실험만으로 우수한 선택이나 일반화를 선언하지 않는다.
 
@@ -91,7 +91,7 @@ Hejna 등의 [DemInf](https://arxiv.org/abs/2502.08623v3)는 보조 VAE와 상�
 
 [DataMIL 최신 개정본](https://arxiv.org/abs/2505.09603v2)은 외형·행동 유사성과 학습된 정책의 실제 효용을 구분하고, [ReMix](https://proceedings.mlr.press/v270/hejna25a.html)는 데이터 혼합 비율과 action 척도가 downstream 측정에 영향을 줄 수 있음을 보여 준다. 이 연구들이 현재 FR5의 조건 분산 점수를 보증하는 것은 아니다. 먼저 조건이 넓은 선택과 밀집한 선택을 같은 데이터량·평가 조건에서 비교하는 반증 가능한 가설로 다룬다.
 
-현재 CPU 실험은 기존 ledger/state와 native 사전검토를 통과한 선택에서 TRAIN pool만 사용한다. 보존된 x/y/yaw와 녹화량, 기존 DQA phase 시간을 읽고, frame 양과 episode 수를 맞춘 두 요청을 만든다. 최초 후보에서 발견한 동일 명령 조건의 train/heldout 노출 불균형은 양쪽의 공통 train anchor로 맞춘다. 조건 일치는 동일 영상이나 잘못된 누출의 증거가 아니며, 이미지·근접 시연의 검증은 별도다. 구체 수치·재현 코드는 `outputs/curator/utility-cohort-20260906/`에 둔다.
+비교를 구성할 때는 기존 ledger/state와 native 사전검토를 통과한 TRAIN pool에서 선택한다. 보존된 x/y/yaw와 녹화량, 기존 DQA phase 시간을 읽고, frame 양과 episode 수를 맞춘 두 요청을 만든다. 동일 명령 조건의 train/heldout 노출도 양쪽에서 확인하고, 차이가 있으면 비교 설계에 명시하거나 공통 train anchor 등으로 맞춘다. 조건 일치는 동일 영상이나 잘못된 누출의 증거가 아니며, 이미지·근접 시연의 검증은 별도다. 이 비교 설계는 caller의 책임이며 아래 API가 데이터량이나 조건 노출까지 자동으로 맞추지는 않는다.
 
 `training-request`의 선택적 `--eval-split`과 반복 가능한 `--expected-eval-episode`는 함께 지정한다. 예를 들어 비교 계획에서 fraction과 heldout을 정했다면 다음과 같이 native split을 확인하며 요청을 만든다. 값은 각 데이터와 비교 계획에서 정하며 고정 수량을 제품 가정으로 삼지 않는다.
 
@@ -103,5 +103,14 @@ python3 -m tools.data_factory.curator training-request \
 ```
 
 기존 `selected_train_eval`의 task별 분할과 기대 cohort가 다르면 `SELECTION_EVALUATION_CHANGED`로 파일 출판을 거부한다. 원본 metadata·선택을 자동 수정하지 않는다. 분할 preview는 반환값의 `evaluation_cohort`에만 포함되며 기존 native request 형식은 유지한다. **이 검사는 launch 강제가 아니다.** Learning 소비자는 같은 fraction을 사용하고 실제 launch split의 train/heldout을 다시 비교해야 한다.
+
+공개 재현 경계는 커밋된 [요구사항과 시나리오](../openspec/changes/curation-learning-loop/specs/curation-learning-loop/spec.md), [selection 검증](../tests/data_factory/curator/workflow/test_selection.py), [CLI 검증](../tests/data_factory/curator/test_cli.py)이다. 다음 명령은 실제 데이터나 학습 없이 합성 입력으로 native task별 분할·subset 변경 거부, 출판 전 오류, 기존 소비자의 요청 수용과 원본 보존을 확인한다. 분할 자체는 native helper로 검증하며, exporter의 mismatch 출판 방지는 주입한 오류로 별도 검증한다.
+
+```sh
+PYTHONDONTWRITEBYTECODE=1 direnv exec . python3 -m unittest \
+  tests.data_factory.curator.workflow.test_selection \
+  tests.data_factory.curator.test_cli \
+  tests.data_factory.curator.test_architecture --durations 5
+```
 
 같은 frame 양도 optimizer 노출·전체 취득 비용의 동일성을 보장하지 않는다. Learning에서 모델·seed·학습 예산을 맞추고, 각 checkpoint의 저장된 postprocessor를 거친 비교 가능한 출력으로 판단한다. TRAIN subset별 normalization이 다른 normalized flow loss를 직접 utility 순위로 쓰지 않는다. 개발에 사용한 heldout은 독립 최종 시험이 아니며, 조건 분산의 차이는 학습 이득이나 physical generalization을 증명하지 않는다. Curation은 선택 가설·근거·요청을 소유하고 DQA, Policy Training/Evaluation, Rollout, Collection의 사실과 권한을 재사용한다.
