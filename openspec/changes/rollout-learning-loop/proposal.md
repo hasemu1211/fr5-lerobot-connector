@@ -84,3 +84,29 @@ two-camera observation references. Later assigned measurements must separate
 cold load, warmed total chunk/solver cost, all NFE, physical seven-dimensional
 deviation and peak memory. These reports do not feed physical success evidence
 or authorize future online outputs.
+
+## Next execution boundary: controller references are not measured trajectories
+
+Recorded `action` uses arm/gripper controller references, while
+`observation.state` uses measured joint state. The recorder holds the latest
+gripper reference. The existing gripper goal starts with its target at time zero
+and retains that target until a bounded completion check. In contrast, the
+finite learned proposal treats every seven-dimensional row as a timed waypoint
+after the observed initial state. Aligned production reference, feedback and
+phase evidence confirms that these interpretations differ; exact windows and
+artifact identities remain in Orca (`msg_6d0e6476b080`).
+
+The [ROS controller trajectory contract](https://control.ros.org/jazzy/doc/ros2_controllers/joint_trajectory_controller/doc/trajectory.html)
+also distinguishes a time-zero first target from interpolation out of an initial
+state. This supports the interpretation boundary, not a new safety limit or a
+claim that published feedback reveals continuous finger velocity.
+
+The next consumer hypothesis is to reuse the existing bounded gripper target
+and completion owner while coordinating arm motion through the same executor.
+First replay recorded target/feedback/terminal sequences with a synthetic
+transport: repeated held targets must not restart motion; completion uses the
+bound tolerance; stale input, unresolved goals and cancellation remain guarded.
+Preserve original policy outputs and expose any consumption or timing change in
+the exact plan. This is proposed acceptance, not an implemented controller or
+physical qualification. It does not solve out-of-range model outputs, justify
+silent clipping, or replace the existing finite diagnostic contract.

@@ -1,5 +1,35 @@
 ## ADDED Requirements
 
+### Requirement: Execution consumers preserve reference and trajectory meaning
+
+A learned-action consumer SHALL distinguish recorded controller references,
+observed feedback and timed executable waypoints. The existing finite learned
+proposal SHALL retain its current exact-waypoint validation; rejection there
+SHALL NOT by itself establish that a demonstration is unsafe or that a policy
+cannot be consumed under a different explicitly qualified contract. A new target
+consumer SHALL retain the original policy output identity and bind any selection,
+timing or command transformation to the exact plan. It SHALL reuse the existing
+motion lifecycle owner and SHALL NOT inherit physical approval from offline
+prediction or recorded demonstration success.
+
+#### Scenario: A gripper reference changes before feedback follows
+
+- **WHEN** recorded command and feedback evidence show a held target followed by later published feedback
+- **THEN** interpretation distinguishes the requested target from a measured continuous finger trajectory
+- **AND** any target consumer uses its explicitly bound completion tolerance and timeout rather than assuming arrival within one dataset frame.
+
+#### Scenario: The same held target is consumed again
+
+- **WHEN** a bounded target consumer receives the same active target again
+- **THEN** it does not create a second motion owner or restart an unresolved goal
+- **AND** arm coordination, cancellation, fresh observations and terminal outcome evidence remain owned by the existing executor.
+
+#### Scenario: A proposed mapping would hide a policy-output violation
+
+- **WHEN** original outputs exceed admitted physical limits or cannot satisfy the declared consumption contract
+- **THEN** the consumer rejects or reports the unresolved limitation without silently clipping or relabeling outputs as successful execution
+- **AND** an alternative mapping requires explicit plan-bound semantics and its own verification before physical use.
+
 ### Requirement: Offline solver evidence must separate numerical and deployed usefulness
 
 Rollout's offline native comparison SHALL reuse canonical checkpoint admission
