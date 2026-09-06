@@ -1,0 +1,15 @@
+<!doctype html>
+<html lang="ko"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>시스템 구성 — FR5</title><link rel="stylesheet" href="site.css">
+<a class="skip" href="#main">본문으로 이동</a><header><a class="brand" href="index.html">FR5<span>.</span></a><nav aria-label="구성 검토"><a href="index.html">전체 개요</a><a href="architecture.html" aria-current="page">시스템 구성</a><a href="topics.html">세부 주제</a></nav></header>
+<main id="main"><div class="page-head"><p class="crumb"><a href="index.html">FR5 전체</a> / 시스템 구성</p><span class="eyebrow">SYSTEM SCOPE</span><h1>어떤 부분들이<br>연결되는 프로젝트인가</h1><p class="lead">구성 영역과 서로 주고받을 내용을 먼저 정리합니다. 아래 목록은 설명 범위이며, 구현 완료 순서나 성과의 중요도를 나타내지 않습니다.</p></div>
+<div class="page-body"><aside class="contents" aria-label="이 페이지에서"><span>이 페이지에서</span><a href="#areas">구성 영역</a><a href="#relations">살펴볼 연결</a><a href="#conditions">공통 조건</a></aside><article class="essay">
+<section id="areas"><h2>구성 영역</h2><div class="roles">
+<div class="role"><h3>로봇 운용과 수집</h3><p>환경 준비, 작업 계획, 실행, 관측과 동작의 기록</p></div>
+<div class="role"><h3>데이터 검토와 선별</h3><p>저장본의 기술 품질, 검토 자료, 작업 의미 판정, 데이터 선택</p></div>
+<div class="role"><h3>정책 학습과 평가</h3><p>학습 입력, 정책과 processor, 비교 조건, 오프라인 평가</p></div>
+<div class="role"><h3>정책 실행과 관찰</h3><p>실행 조건, trial, 실제 작업의 관찰, 중단과 결과 기록</p></div>
+<div class="role"><h3>분석과 다음 작업</h3><p>데이터·정책 결과의 해석, 후속 수집·선별·학습·평가의 검토</p></div>
+<div class="role"><h3>근거와 외부 설명</h3><p>원래 결과의 추적 경로, 설명의 범위, 공개 자료의 일관된 갱신</p></div>
+</div><p class="note">실행 가능한 기능, 실제 수행한 결과, 앞으로 검증할 연결의 구분은 세부 내용을 채울 때 각 owner의 최신 근거로 확인합니다. 특히 정책의 실물 실행과 자율적인 후속 작업이 완료됐다는 뜻은 아닙니다.</p></section>
+<section id="relations"><h2>함께 살펴볼 연결</h2><ul class="topic-list"><li><strong>새 기록의 소비</strong><span>수집한 결과를 품질 분석, 검토와 선별이 어떻게 사용하는가</span></li><li><strong>학습 입력의 준비</strong><span>선택한 데이터가 어떤 조건과 승인을 거쳐 학습에 들어가는가</span></li><li><strong>정책과 실행의 관계</strong><span>학습한 정책의 오프라인 평가와 실제 실행을 어떻게 연결하는가</span></li><li><strong>결과에서 다음 작업으로</strong><span>새 관찰이 어떤 수집·검토·학습·평가를 다시 열 수 있는가</span></li><li><strong>각 결과에서 외부 설명으로</strong><span>원래 출력과 한계를 유지하면서 설명을 어떻게 갱신하는가</span></li></ul><p class="note">모든 작업이 한 번씩 통과하는 일렬 순서로 단순화하지 않습니다. 분기, 독립 작업, 재검토와 되돌아오는 관계를 세부 설계에서 살펴봅니다.</p></section>
+<section id="conditions"><h2>여러 영역에 걸치는 조건</h2><p>사람의 판단과 실행 권한 · 단일 실행 책임 · 데이터 보존과 계보 · 환경과 자원 · 중단과 복구 · 재현과 검증</p><p class="note">각 조건의 설계 선택이나 효과는 아직 대표 가치로 정렬하지 않습니다.</p></section><div class="next-links"><a href="index.html">← 전체 개요</a><a href="topics.html">세부 주제 목록 →</a></div></article></div></main><footer><span>FR5 · 시스템을 읽을 범위</span><span>기능·성과·미래 연결의 완료 현황표가 아님</span></footer></html>
