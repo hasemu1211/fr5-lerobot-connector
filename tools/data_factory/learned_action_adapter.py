@@ -327,7 +327,8 @@ class NativeSmolVLA:
         }.issubset(config.input_features)):
             raise ContractError("LEARNED_MODEL_CAMERAS")
         config.device = device
-        config.load_vlm_weights = False
+        # Preserve saved construction settings: changing load_vlm_weights changes
+        # parameter dtypes before native checkpoint tensors are copied into them.
         policy = SmolVLAPolicy.from_pretrained(policy_dir, config=config, strict=True, local_files_only=True)
         pre, post = make_pre_post_processors(
             config, pretrained_path=str(policy_dir),

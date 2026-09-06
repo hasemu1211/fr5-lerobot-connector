@@ -55,6 +55,18 @@ executable proposals or new execution authority through this experiment.
 - **THEN** both comparisons remain visible without a task-success or adoption verdict
 - **AND** Learning's evaluation protocol and actual downstream evidence determine usefulness
 
+### Requirement: Saved model construction preserves declared precision
+
+The native loader SHALL preserve saved model-construction settings that determine
+parameter precision. Identical checkpoint bytes and an identical AMP setting
+SHALL NOT alone establish numerically equivalent inference across loaders.
+
+#### Scenario: A saved constructor setting affects parameter precision
+
+- **WHEN** native reload reads the saved `load_vlm_weights` setting
+- **THEN** it preserves that value rather than forcing a different constructor
+- **AND** cache-only loading, canonical admission and saved processor checks remain in force.
+
 ### Requirement: Saved processor configuration must preserve the native feature contract
 
 Learning's canonical checkpoint validator SHALL require a saved preprocessor declaration of

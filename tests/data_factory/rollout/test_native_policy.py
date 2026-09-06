@@ -155,10 +155,17 @@ class NativePolicyTest(unittest.TestCase):
         validate_policy_feature_contract(json.loads((self.policy_dir / "config.json").read_text()), feature)
 
         policy = mock.Mock()
-        with mock.patch.object(SmolVLAPolicy, "from_pretrained", return_value=policy) as weight_load:
-            loaded, preprocessor, postprocessor = NativeSmolVLA._load_components(
-                self.policy_dir, "cpu"
-            )
+        for saved_vlm_load in (True, False):
+            with self.subTest(load_vlm_weights=saved_vlm_load):
+                config.load_vlm_weights = saved_vlm_load
+                config.save_pretrained(self.policy_dir)
+                saved_bytes = (self.policy_dir / "config.json").read_bytes()
+                with mock.patch.object(SmolVLAPolicy, "from_pretrained", return_value=policy) as weight_load:
+                    loaded, preprocessor, postprocessor = NativeSmolVLA._load_components(
+                        self.policy_dir, "cpu"
+                    )
+                self.assertIs(weight_load.call_args.kwargs["config"].load_vlm_weights, saved_vlm_load)
+                self.assertEqual((self.policy_dir / "config.json").read_bytes(), saved_bytes)
         self.assertIs(loaded, policy)
         self.assertIsNotNone(preprocessor)
         self.assertIsNotNone(postprocessor)
