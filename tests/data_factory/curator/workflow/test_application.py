@@ -34,6 +34,90 @@ from tools.data_factory.curator.workflow.state import load_events
 
 
 class ApplicationTest(unittest.TestCase):
+    def test_terminal_receipt_remains_readable_when_review_media_is_unavailable(self):
+        for choice, outcome in (("APPROVE", "PUBLISHED"), ("REJECT", "REJECTED")):
+            with self.subTest(choice=choice), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                source = make_source_dataset(root, episodes=1, frames_per_episode=2)
+                fixture = make_profile_fixture(root)
+                before = stable_tree_identity(source, code="TEST_SOURCE_IDENTITY")
+                prepared = prepare(source, _paths=fixture.paths, _run_id_value="media-failure")
+                shown = review_candidate("media-failure", _paths=fixture.paths)
+                run = fixture.paths.run_root / "media-failure"
+                original_events = load_events(run)
+                video = Path(prepared["review_video"])
+                original_video = video.read_bytes()
+                # Deliberate damage to test-owned frozen media, not a native review update.
+                video.parent.chmod(0o700)
+                video.chmod(0o600)
+                kwargs = dict(decision=choice, expected_review_digest=shown["review_ready_digest"], _paths=fixture.paths)
+                video.write_bytes(original_video + b"corrupted")
+                for operation in (
+                    lambda: review_candidate("media-failure", _paths=fixture.paths),
+                    lambda: submit_human_review_decision("media-failure", **kwargs),
+                ):
+                    with self.assertRaisesRegex(CuratorError, "REVIEW_VIDEO_DIGEST"):
+                        operation()
+                self.assertEqual(load_events(run), original_events)
+                video.write_bytes(original_video)
+
+                write_receipt = application._write_receipt
+                def corrupt_after_commit(*args, **options):
+                    result = write_receipt(*args, **options)
+                    video.write_bytes(original_video + b"corrupted after commit")
+                    return result
+
+                with mock.patch.object(application, "_write_receipt", side_effect=corrupt_after_commit) as commit:
+                    result = submit_human_review_decision("media-failure", **kwargs)
+                self.assertEqual(commit.call_count, 1)
+                recorded = load_events(run)
+                self.assertEqual(result["status"], outcome)
+                self.assertEqual(result["receipt"], recorded["receipt"]["payload"])
+                self.assertFalse(result["media_available"])
+                self.assertEqual(result["media_error"], {"reason_code": "REVIEW_VIDEO_DIGEST"})
+                self.assertEqual(result["allowed_decisions"], [])
+                self.assertEqual(result["clips"], [])
+                for field in ("review_video_path", "review_manifest_path", "coverage", "identities"):
+                    self.assertIsNone(result[field])
+                self.assertFalse(result["training_authority"])
+                with self.assertRaisesRegex(CuratorError, "REVIEW_CHANGED"):
+                    submit_human_review_decision("media-failure", **{
+                        **kwargs, "expected_review_digest": "sha256:" + "0" * 64,
+                    })
+                with self.assertRaisesRegex(CuratorError, "DECISION_CONFLICT"):
+                    submit_human_review_decision("media-failure", **{
+                        **kwargs, "decision": "REJECT" if choice == "APPROVE" else "APPROVE",
+                    })
+                with mock.patch.object(application, "publish_candidate", side_effect=AssertionError("duplicate publication")), \
+                     mock.patch.object(application, "cleanup_candidate", side_effect=AssertionError("duplicate cleanup")):
+                    self.assertEqual(review_candidate("media-failure", _paths=fixture.paths), result)
+                    self.assertEqual(submit_human_review_decision("media-failure", **kwargs), result)
+                self.assertEqual(load_events(run), recorded)
+                video.unlink()
+                missing = review_candidate("media-failure", _paths=fixture.paths)
+                self.assertFalse(missing["media_available"])
+                self.assertEqual(missing["receipt"], result["receipt"])
+                self.assertEqual(missing["allowed_decisions"], [])
+                video.write_bytes(original_video)
+                restored = review_candidate("media-failure", _paths=fixture.paths)
+                self.assertTrue(restored["media_available"])
+                self.assertIsNone(restored["media_error"])
+                self.assertTrue(restored["clips"])
+                manifest_path = Path(prepared["review_manifest"])
+                manifest_path.chmod(0o600)
+                manifest_path.write_text("{}")
+                damaged_manifest = review_candidate("media-failure", _paths=fixture.paths)
+                self.assertFalse(damaged_manifest["media_available"])
+                self.assertEqual(damaged_manifest["receipt"], result["receipt"])
+                if choice == "APPROVE":
+                    output = Path(result["receipt"]["output"]["root"])
+                    (output / "meta/info.json").chmod(0o600)
+                    (output / "meta/info.json").write_bytes(b"changed published data")
+                    with self.assertRaisesRegex(CuratorError, "COMMITTED_OUTPUT_CHANGED"):
+                        review_candidate("media-failure", _paths=fixture.paths)
+                self.assertEqual(stable_tree_identity(source, code="TEST_SOURCE_IDENTITY"), before)
+                self.assertEqual(load_events(run), recorded)
+
     def test_web_review_choices_bind_exact_evidence_and_replay_without_tty(self):
         for choice, terminal in (("APPROVE", "PUBLISHED"), ("REJECT", "REJECTED")):
             with self.subTest(choice=choice), tempfile.TemporaryDirectory() as directory:
@@ -103,6 +187,14 @@ class ApplicationTest(unittest.TestCase):
             pending = review_candidate("web-recovery", _paths=fixture.paths)
             self.assertEqual(pending["status"], "PUBLISHED_RECEIPT_PENDING")
             self.assertEqual(pending["allowed_decisions"], ["APPROVE"])
+            video = Path(pending["review_video_path"])
+            original_video = video.read_bytes()
+            video.chmod(0o600)
+            video.write_bytes(original_video + b"corrupted while receipt pending")
+            with self.assertRaisesRegex(CuratorError, "REVIEW_VIDEO_DIGEST"):
+                review_candidate("web-recovery", _paths=fixture.paths)
+            self.assertNotIn("receipt", load_events(run))
+            video.write_bytes(original_video)
             with mock.patch.object(application, "publish_candidate", side_effect=AssertionError("already published")):
                 result = submit_human_review_decision("web-recovery", **kwargs)
             self.assertEqual(result["status"], "PUBLISHED")

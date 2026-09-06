@@ -1386,7 +1386,16 @@ def _review_candidate_locked(run: Path, paths: WorkflowPaths) -> dict[str, Any]:
             raise CuratorError("RECEIPT_BINDING")
         if outcome == "PUBLISHED" and not _published_output_matches(evidence):
             raise CuratorError("COMMITTED_OUTPUT_CHANGED")
-    manifest = _verified_review_manifest(run, events)
+    media_error = None
+    try:
+        manifest = _verified_review_manifest(run, events)
+    except CuratorError as exc:
+        # A validated terminal receipt survives loss of its playback assets.
+        # Pending actions and decision-time evidence still fail closed.
+        if receipt is None:
+            raise
+        manifest = None
+        media_error = {"reason_code": exc.code}
     failure = events.get("failure", {}).get("payload")
     allowed = []
     if receipt is None:
@@ -1399,12 +1408,17 @@ def _review_candidate_locked(run: Path, paths: WorkflowPaths) -> dict[str, Any]:
     return {
         **project_state(run),
         "review_ready_digest": events["review_ready"]["event_digest"],
-        **{key: evidence.ready[key] for key in (
+        **{key: evidence.ready[key] if manifest is not None else None for key in (
             "review_manifest_path", "review_video_path",
+        )},
+        **{key: evidence.ready[key] for key in (
             "review_manifest_digest", "review_video_sha256",
         )},
-        "identities": manifest["identities"], "coverage": manifest["coverage"],
-        "clips": manifest["clips"], "allowed_decisions": allowed, "failure": failure,
+        "media_available": manifest is not None, "media_error": media_error,
+        "identities": manifest["identities"] if manifest is not None else None,
+        "coverage": manifest["coverage"] if manifest is not None else None,
+        "clips": manifest["clips"] if manifest is not None else [],
+        "allowed_decisions": allowed, "failure": failure,
         "decision": decision, "receipt": receipt, "training_authority": False,
     }
 
