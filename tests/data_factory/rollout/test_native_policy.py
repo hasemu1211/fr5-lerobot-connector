@@ -121,6 +121,65 @@ class NativePolicyTest(unittest.TestCase):
         self.offline.start()
         self.addCleanup(self.offline.stop)
 
+    def test_component_loader_accepts_canonically_admitted_native_image_slots(self):
+        from lerobot.configs import FeatureType, PolicyFeature
+        from lerobot.policies.smolvla.configuration_smolvla import SmolVLAConfig
+        from lerobot.policies.smolvla.modeling_smolvla import SmolVLAPolicy
+        from tools.validate_training_checkpoint import validate_policy_feature_contract
+
+        inputs = {
+            "observation.state": {"type": "STATE", "shape": [7]},
+            "observation.images.camera1": {"type": "VISUAL", "shape": [3, 480, 640]},
+            "observation.images.camera2": {"type": "VISUAL", "shape": [3, 480, 640]},
+        }
+        feature = {"profile": "smolvla", "policy_argv": [
+            "--policy.empty_cameras=1",
+            "--policy.input_features=" + json.dumps(inputs),
+            "--policy.output_features=" + json.dumps(
+                {"action": {"type": "ACTION", "shape": [7]}}
+            ),
+        ]}
+        config = SmolVLAConfig(
+            device="cpu", push_to_hub=False, empty_cameras=1,
+            input_features={
+                key: PolicyFeature(type=FeatureType(value["type"]), shape=tuple(value["shape"]))
+                for key, value in inputs.items()
+            },
+            output_features={"action": PolicyFeature(type=FeatureType.ACTION, shape=(7,))},
+        )
+        config.input_features["observation.images.camera3"] = PolicyFeature(
+            type=FeatureType.VISUAL, shape=(3, 256, 256)
+        )
+        config.validate_features()
+        config.save_pretrained(self.policy_dir)
+        validate_policy_feature_contract(json.loads((self.policy_dir / "config.json").read_text()), feature)
+
+        policy = mock.Mock()
+        with mock.patch.object(SmolVLAPolicy, "from_pretrained", return_value=policy) as weight_load:
+            loaded, preprocessor, postprocessor = NativeSmolVLA._load_components(
+                self.policy_dir, "cpu"
+            )
+        self.assertIs(loaded, policy)
+        self.assertIsNotNone(preprocessor)
+        self.assertIsNotNone(postprocessor)
+        self.assertTrue(weight_load.call_args.kwargs["strict"])
+        self.assertTrue(weight_load.call_args.kwargs["local_files_only"])
+
+        one_view = SmolVLAConfig(
+            device="cpu", push_to_hub=False, empty_cameras=2,
+            input_features={
+                key: PolicyFeature(type=FeatureType(value["type"]), shape=tuple(value["shape"]))
+                for key, value in inputs.items() if key != "observation.images.camera2"
+            },
+            output_features={"action": PolicyFeature(type=FeatureType.ACTION, shape=(7,))},
+        )
+        one_view.validate_features()
+        one_view.save_pretrained(self.policy_dir)
+        with mock.patch.object(SmolVLAPolicy, "from_pretrained") as weight_load:
+            with self.assertRaisesRegex(ContractError, "LEARNED_MODEL_CAMERAS"):
+                NativeSmolVLA._load_components(self.policy_dir, "cpu")
+            weight_load.assert_not_called()
+
     def test_installed_sample_actions_and_saved_processors_reach_offline_comparison(self):
         from lerobot.policies.smolvla import modeling_smolvla as module
         from lerobot.policies.factory import make_pre_post_processors
@@ -183,7 +242,8 @@ class NativePolicyTest(unittest.TestCase):
         policy.predict_action_chunk.side_effect = predict
         config = SimpleNamespace(input_features={'observation.state': SimpleNamespace(shape=[7]),
             'observation.images.camera1': object(), 'observation.images.camera2': object()},
-            output_features={'action': SimpleNamespace(shape=[7])}, adapt_to_pi_aloha=False, rtc_config=None)
+            output_features={'action': SimpleNamespace(shape=[7])}, empty_cameras=1,
+            adapt_to_pi_aloha=False, rtc_config=None)
         with mock.patch.object(SmolVLAConfig, 'from_pretrained', return_value=config), \
              mock.patch.object(SmolVLAPolicy, 'from_pretrained', return_value=policy) as load:
             native = NativeSmolVLA.load(self.policy_dir)
