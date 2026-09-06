@@ -42,6 +42,44 @@ v2 profile은 native split의 경로·파일 hash·split digest와 실제 해독
 
 현재 채택 대상은 재현 가능한 통제 비교와 요청 시 cohort 확인이다. universal scorer, 별도 실험 엔진, 새 execution ledger, 모듈 재배치는 필요하지 않다. 두 선택 모두 유효한 downstream 측정에 연결되지 않으면 선택 효용은 UNKNOWN으로 남긴다.
 
+## Mapped native dataset candidate and request
+
+Native multi-dataset training is disabled in the installed LeRobot factory.
+Reuse native merge with separate video/data files instead of adding a parallel
+training dataset factory. A new candidate contains the immutable source datasets'
+content and an explicit selected request; unselected episodes do not acquire
+semantic or training eligibility. No source file is changed or re-encoded.
+
+`publish_mapped_training_request(source_requests, output, *, dataset_id, repo_id,
+evaluation_split, eval_fraction, max_copy_bytes)` publishes one new directory
+containing `dataset/`, `technical.json`, `publication.json`, and `request.json`. Source requests are
+ordered, native raw requests with current ledger/state PASS evidence; the caller
+controls order and selected episodes. `evaluation_split` is an existing native
+split whose original dataset identity and heldout indices must map exactly to
+the new native split. Mismatch, changed evidence or an existing output rejects
+before publication. Copy size is explicitly bounded before any materialization.
+
+The dataset's `meta/curator_mapping.json` (`curator.dataset_mapping.v1`) binds
+ordered source dataset identities and each original-to-destination episode/global
+frame offset. Original per-frame provenance bytes are preserved; the recording
+quality projection may change only its episode index under that mapping. The
+existing FR5 validator checks the mapping, source byte identities, exact preserved
+Parquet columns/task meaning, video-file bytes/timestamp ranges and sidecars.
+The separately bound technical result describes this new dataset; it is not an
+original Collection technical report or human review.
+
+The request adds `mapping` with `publication_root` and `manifest_digest` to the
+existing dataset/episode fields. Publication binds the parent request documents,
+original semantic references and evaluation identity. The next native consumer
+is `prepare_mapped_approvals(request, output, approved_by, *, check_targets=True)`
+in the existing training admission owner, returning the same `(dataset, drafts)`
+shape as native preparation. Drafts retain parent semantic evidence and new
+mapped provenance, never copied approvals. Root integrates its dispatch and Web
+projection into Learning-owned `training_entrypoint`; Curator does not edit that
+file, `training_split`, `training_receipts`, checkpoint or runtime code. This
+boundary is a technically validated request candidate, not new training consent
+or a claim that later launch/inference contracts are already integrated.
+
 ## Published candidate → existing native training admission
 
 The optional native request field `derivation` contains exactly `run_directory`,

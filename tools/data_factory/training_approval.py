@@ -24,6 +24,7 @@ DELEGATION_SCHEMA = "data_factory.local_training_delegation.v1"
 EPISODE_PROVENANCE_SCHEMA = "data_factory.episode_training_provenance.v1"
 LEDGER_PROVENANCE_SCHEMA = "data_factory.episode_training_provenance.v2"
 DERIVED_PROVENANCE_SCHEMA = "data_factory.episode_training_provenance.v3"
+MAPPED_PROVENANCE_SCHEMA = "data_factory.episode_training_provenance.v4"
 INVENTORY_SCHEMA = "data_factory.training_approved_inventory.v2"
 PRODUCTION_SCOPE = "PRODUCTION"
 SYNTHETIC_SCOPE = "SYNTHETIC_TEST_ONLY"
@@ -279,6 +280,8 @@ def validate_episode_training_provenance(
 ) -> dict[str, Any]:
     """Validate one immutable episode-to-seed-slot provenance artifact."""
     value = _document(source)
+    if value.get("schema_version") == MAPPED_PROVENANCE_SCHEMA:
+        return _validate_mapped_provenance(value, expected_scope=expected_scope)
     if value.get("schema_version") == DERIVED_PROVENANCE_SCHEMA:
         return _validate_derived_provenance(value, expected_scope=expected_scope)
     if value.get("schema_version") == LEDGER_PROVENANCE_SCHEMA:
@@ -484,10 +487,96 @@ def _validate_derived_provenance(value: dict, *, expected_scope: str) -> dict:
     return value
 
 
+def prepare_mapped_approvals(request, output, approved_by, *, check_targets=True):
+    """Read-only mapped preparation hook for the existing batch consumer."""
+    from tools.data_factory.curator.workflow.mapping import prepare_mapped_approvals as prepare
+    from tools.data_factory.curator.core.errors import CuratorError
+    try:
+        return prepare(request, output, approved_by, check_targets=check_targets)
+    except (CuratorError, OSError, ValueError, KeyError, TypeError, StopIteration) as exc:
+        raise ContractError("TRAINING_MAPPING_EVIDENCE", str(exc)) from exc
+
+
+def _mapped_publication(reference):
+    from tools.data_factory.curator.workflow.mapping import mapped_publication
+    from tools.data_factory.curator.core.errors import CuratorError
+    try:
+        return mapped_publication(reference)
+    except (CuratorError, OSError, ValueError, KeyError, TypeError) as exc:
+        raise ContractError("TRAINING_MAPPING_EVIDENCE", str(exc)) from exc
+
+
+def compile_mapped_training_provenance(dataset, mapping, entry, parent_draft):
+    manifest = _mapped_publication(mapping)
+    args = parent_draft["approval_arguments"]
+    value = {
+        "schema_version": MAPPED_PROVENANCE_SCHEMA, "scope": PRODUCTION_SCOPE,
+        "dataset_identity_digest": canonical_digest(dataset),
+        "episode_id": entry["episode_id"], "episode_index": entry["episode_index"],
+        "episode_content_digest": current_episode_digest(dataset, entry["episode_index"]),
+        "technical_validator_digest": manifest["technical"]["artifact_digest"],
+        "resolved_job_digest": parent_draft["provenance"]["resolved_job_digest"],
+        "mapping": copy.deepcopy(mapping),
+        "parent": {"dataset_identity": args["dataset_identity"], "provenance": parent_draft["provenance"],
+                   "technical_validator": {"artifact_path": args["technical_validator_path"], "artifact_digest": args["technical_validator_digest"]},
+                   "human_semantic_evidence": {"artifact_path": args["human_semantic_evidence_path"], "artifact_digest": args["human_semantic_evidence_digest"]}},
+    }
+    return validate_episode_training_provenance(value)
+
+
+def _validate_mapped_provenance(value, *, expected_scope):
+    _exact(value, (LEDGER_PROVENANCE_KEYS - {"episode_ledger"}) | {"mapping", "parent"}, "TRAINING_EPISODE_PROVENANCE_FIELDS")
+    _scope(value["scope"], expected_scope)
+    _episode_identity(value["episode_id"], value["episode_index"], value["episode_content_digest"])
+    parent = _exact(value["parent"], frozenset({"dataset_identity", "provenance", "technical_validator", "human_semantic_evidence"}), "TRAINING_MAPPING_PARENT")
+    _dataset(parent["dataset_identity"])
+    for field in ("technical_validator", "human_semantic_evidence"):
+        _exact(parent[field], EPISODE_PROVENANCE_REF_KEYS, "TRAINING_MAPPING_PARENT_REFERENCE")
+    if parent["provenance"].get("schema_version") != LEDGER_PROVENANCE_SCHEMA:
+        raise ContractError("TRAINING_MAPPING_PARENT")
+    original = validate_episode_training_provenance(parent["provenance"], expected_scope=expected_scope)
+    _bind_ledger_revision(original, parent["dataset_identity"])
+    technical = _technical(parent["technical_validator"]["artifact_path"], parent["technical_validator"]["artifact_digest"],
+                           episode_id=original["episode_id"], dataset_root=parent["dataset_identity"]["dataset_root"])
+    _semantic(parent["human_semantic_evidence"]["artifact_path"], parent["human_semantic_evidence"]["artifact_digest"],
+              episode_id=original["episode_id"], technical=technical)
+    manifest = _mapped_publication(value["mapping"])
+    matches = [e for e in manifest["episodes"] if e["episode_id"] == value["episode_id"] and e["episode_index"] == value["episode_index"]]
+    if len(matches) != 1:
+        raise ContractError("TRAINING_MAPPING_EPISODE")
+    entry = matches[0]
+    source_request = load_json_strict(Path(manifest["sources"][entry["source_index"]]["request_path"]))
+    source_entry = next(e for e in source_request["episodes"] if e["episode_index"] == entry["source_episode_index"])
+    if (manifest["sources"][entry["source_index"]]["dataset_identity"] != parent["dataset_identity"]
+            or entry["source_episode_index"] != original["episode_index"]
+            or original["episode_id"] != source_entry["episode_id"]
+            or original["episode_ledger"]["artifact_path"] != source_entry["episode_ledger_path"]
+            or parent["technical_validator"]["artifact_path"] != source_entry["technical_validator_path"]
+            or parent["human_semantic_evidence"]["artifact_path"] != source_entry["human_semantic_evidence_path"]
+            or parent["technical_validator"]["artifact_digest"] != original["technical_validator_digest"]
+            or value["resolved_job_digest"] != original["resolved_job_digest"]
+            or value["dataset_identity_digest"] != canonical_digest(manifest["dataset_identity"])
+            or value["episode_content_digest"] != current_episode_digest(manifest["dataset_identity"], value["episode_index"])
+            or value["technical_validator_digest"] != manifest["technical"]["artifact_digest"]):
+        raise ContractError("TRAINING_MAPPING_BINDING")
+    return value
+
+
 def _training_evidence(provenance: dict, dataset: dict, *, episode_id: str,
                        technical_path: str, technical_digest: str,
                        semantic_path: str, semantic_digest: str) -> tuple[dict, dict]:
     """Validate raw facts or explicitly parent-only semantics with child pixels."""
+    if provenance["schema_version"] == MAPPED_PROVENANCE_SCHEMA:
+        manifest = _mapped_publication(provenance["mapping"])
+        parent = provenance["parent"]
+        if (manifest["dataset_identity"] != dataset
+                or manifest["technical"] != {"artifact_path": technical_path, "artifact_digest": technical_digest}
+                or parent["human_semantic_evidence"] != {"artifact_path": semantic_path, "artifact_digest": semantic_digest}):
+            raise ContractError("TRAINING_MAPPING_BINDING")
+        original_id = parent["provenance"]["episode_id"]
+        technical = _technical(parent["technical_validator"]["artifact_path"], parent["technical_validator"]["artifact_digest"],
+                               episode_id=original_id, dataset_root=parent["dataset_identity"]["dataset_root"])
+        return technical, _semantic(semantic_path, semantic_digest, episode_id=original_id, technical=technical)
     semantic_dataset = dataset
     if provenance["schema_version"] == DERIVED_PROVENANCE_SCHEMA:
         evidence = _derived_publication(provenance["derivation"], dataset)
@@ -889,7 +978,7 @@ def _episode(
         technical_path=technical_ref["artifact_path"], technical_digest=technical_ref["artifact_digest"],
         semantic_path=semantic_ref["artifact_path"], semantic_digest=semantic_ref["artifact_digest"],
     )
-    expected_semantic = "PARENT_PASS" if episode_provenance["schema_version"] == DERIVED_PROVENANCE_SCHEMA else "PASS"
+    expected_semantic = "PARENT_PASS" if episode_provenance["schema_version"] in {DERIVED_PROVENANCE_SCHEMA, MAPPED_PROVENANCE_SCHEMA} else "PASS"
     if semantic_ref["status"] != expected_semantic:
         raise ContractError("TRAINING_SEMANTIC_PASS")
     if semantic_ref["reviewer_id"] != semantic["reviewed_by"]:
