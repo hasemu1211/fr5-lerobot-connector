@@ -8,6 +8,7 @@ from contextvars import ContextVar
 import json
 from pathlib import Path
 import sys
+from typing import Mapping
 
 if __package__ in {None, ""}:
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -128,6 +129,91 @@ def validate_normalization_state(policy_dir: Path, normalization: dict, *, profi
             raise ValueError("checkpoint normalization differs from admitted TRAIN statistics")
 
 
+def validate_saved_observation_view(split: Mapping, receipt: Mapping) -> dict:
+    """Return the one saved observation-view contract shared by Learning/Rollout.
+
+    Curator remains the producer of publication, profile and transform facts.  This
+    consumer only reuses that evidence and checks that every fitted frame belongs to
+    this launch's TRAIN partition.  Raw checkpoints intentionally return a raw
+    representation; they do not acquire derived-view semantics by inference.
+    """
+    from tools.data_factory.training_approval import (
+        DERIVED_PROVENANCE_SCHEMA,
+        EPISODE_PROVENANCE_SCHEMA,
+        LEDGER_PROVENANCE_SCHEMA,
+        validate_current_training_inventory,
+    )
+    from tools.data_factory.curator.core.errors import CuratorError
+    from tools.data_factory.training_split import validate_training_split
+    from tools.fr5_data_factory import load_json_strict
+    from tools.data_factory.curator.workflow.derivation import published_training_evidence
+    from tools.data_factory.curator.profile.registry import resolve_view_profile
+    from tools.data_factory.curator.profile.schema import load_view_profile
+    from tools.data_factory.training_receipts import file_digest
+
+    split = validate_training_split(split)
+    if not isinstance(receipt, Mapping):
+        raise ValueError("saved observation-view receipt is invalid")
+    inventory_path = receipt.get("approved_inventory_path")
+    if not isinstance(inventory_path, str):
+        raise ValueError("saved observation-view inventory is missing")
+    inventory = validate_current_training_inventory(
+        inventory_path,
+        dataset_root=split["dataset_identity"]["dataset_root"],
+        repo_id=split["repo_id"],
+        selected_episodes=split["selected_episodes"],
+    )
+    derived = []
+    for episode in inventory["episodes"]:
+        provenance = load_json_strict(Path(episode["episode_provenance"]["artifact_path"]))
+        if provenance.get("schema_version") == DERIVED_PROVENANCE_SCHEMA:
+            derived.append(provenance["derivation"])
+        elif provenance.get("schema_version") not in {EPISODE_PROVENANCE_SCHEMA, LEDGER_PROVENANCE_SCHEMA}:
+            raise ValueError("saved observation-view provenance is unknown")
+    if not derived:
+        return {"representation": "raw", "transform_application": "rollout_once"}
+    if len(derived) != len(inventory["episodes"]) or any(item != derived[0] for item in derived[1:]):
+        raise ValueError("saved observation-view derivation is inconsistent across episodes")
+    try:
+        evidence = published_training_evidence(derived[0])
+    except (CuratorError, OSError, ValueError) as exc:
+        raise ValueError("saved observation-view publication is invalid") from exc
+    output = evidence["output"]
+    dataset = split["dataset_identity"]
+    if any(dataset[key] != output[source] for key, source in
+           (("dataset_root", "root"), ("repo_id", "repo_id"), ("dataset_digest", "dataset_digest"))):
+        raise ValueError("saved observation-view dataset binding differs from launch")
+    profile_path = Path(evidence["view_profile"]["path"])
+    if file_digest(profile_path) != evidence["view_profile"]["file_sha256"]:
+        raise ValueError("saved observation-view profile changed")
+    spec = load_view_profile(profile_path)
+    resolved = resolve_view_profile(
+        profile_path.parent,
+        spec.value["profile_id"],
+        binding_root=spec.binding_path.parent,
+        collection_profile_root=spec.collection_profile_path.parent,
+    )
+    if resolved.profile["profile_digest"] != evidence["view_profile"]["profile_digest"]:
+        raise ValueError("saved observation-view assets differ from publication")
+    fitting = spec.value.get("fitting")
+    if spec.value.get("schema_version") != "curator.view_profile.v2" or not isinstance(fitting, dict):
+        raise ValueError("saved observation-view lacks TRAIN fitting evidence")
+    train = set(split["train_episodes"])
+    frames = [fitting.get("reference_frame"), *fitting.get("background_plate_frames", [])]
+    if (not frames or any(not isinstance(frame, dict) or frame.get("episode_index") not in train
+                          for frame in frames)):
+        raise ValueError("saved observation-view fitted frame is outside child TRAIN")
+    return {
+        "representation": "baked",
+        "transform_application": "none",
+        "dataset": output,
+        "parent_dataset_identity": evidence["parent_dataset_identity"],
+        "lineage_digest": evidence["lineage_digest"],
+        "view_profile": evidence["view_profile"],
+        "transform": evidence["transform"],
+    }
+
+
 def validate_policy_feature_contract(policy: dict, feature: dict) -> None:
     """Match saved policy features, including SmolVLA's inert native image slots."""
     from tools.data_factory.training_entrypoint import options
@@ -233,6 +319,11 @@ def validate_checkpoint(value: Path, *, verify_dataset: bool = True) -> tuple[Pa
             if config.get("policy", {}).get("pretrained_path") != receipt["initialization"]["checkpoint"]:
                 raise ValueError("checkpoint warm-start parent differs from admitted initialization")
         validate_normalization_state(policy_dir, receipt["normalization"], profile=feature["profile"])
+        # Saved observation-view provenance is validated at the same boundary as
+        # normalization and dataset lineage; consumers can call the public helper
+        # to obtain the exact raw-versus-baked representation without reapplying a
+        # Curator transform.
+        validate_saved_observation_view(split, receipt)
         return policy_dir, output_dir
 
     # Historical inspection only; this never grants permission to resume.
