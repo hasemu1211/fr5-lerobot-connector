@@ -1650,6 +1650,48 @@ function renderTechnicalDetails(view) {
   });
 }
 
+function renderCollectionAdvice(view) {
+  const panel = document.querySelector("#collection-advice");
+  const advice = view.collection_advice;
+  panel.hidden = !advice;
+  if (!advice) return;
+  const labels = {
+    NOT_CHECKED: "이전 수집의 저장 근거를 확인하면 다음 조건을 살펴볼 수 있습니다.",
+    READY: "기존 고정 조건을 유지하면서 미수집 조건을 제안합니다. 비교한 뒤 적용하거나 현재 설정을 유지하세요.",
+    UNAVAILABLE: "현재 근거와 설정으로 적용할 수 있는 추천이 없습니다. 현재 설정으로 계속할 수 있습니다.",
+    DRAFT_CHANGED: "추천 확인 뒤 작성안이 바뀌었습니다. 현재 수정은 유지됩니다. 근거를 다시 확인하세요.",
+    APPLIED: "추천 조건을 작성안에 적용했습니다. 아직 수집을 실행하지 않았습니다.",
+    KEPT: "현재 설정을 유지했습니다. 추천으로 작성안을 변경하지 않았습니다.",
+  };
+  const reasons = {
+    COLLECTION_ADVICE_NO_STORED_EVIDENCE: "이전 실행에 저장된 수집 근거가 없습니다.",
+    COLLECTION_ADVICE_NO_ELIGIBLE_CHANGE: "수집하지 않은 적격 조건이 없거나, 기존 고정·제외 조건을 유지해야 합니다.",
+    COLLECTION_ADVICE_SELECTION_CHANGED: "이전 수집과 현재 대상·설정이 다릅니다.",
+    COLLECTION_ADVICE_PLACEMENT_OR_SPLIT_MISMATCH: "추천의 첫 위치 또는 데이터 분할이 현재 작성안과 다릅니다. 물체 위치는 바꾸지 않았습니다.",
+    COLLECTION_ADVICE_START_SELECTION_MISMATCH: "추천에 필요한 시작 자세가 현재 선택에 없습니다.",
+    COLLECTION_ADVICE_TRANSITION_NOT_REPRESENTABLE: "이 추천에는 놓기 작업의 도착점·이동 결속이 없어 적용할 수 없습니다.",
+    COLLECTION_ADVICE_SEQUENCE_NOT_REPRESENTABLE: "추천의 조건 순서를 현재 작성안으로 보존할 수 없습니다.",
+    COLLECTION_ADVICE_SOURCE_CHANGED: "저장 근거가 이전 수집의 결속과 달라졌습니다.",
+  };
+  const status = advice.status === "DRAFT_CHANGED" && advice.last_choice
+    ? "이미 처리한 추천입니다. 이후 수정한 작성안을 유지하며, 같은 추천을 다시 적용하지 않습니다."
+    : labels[advice.status] ?? "추천 상태를 다시 확인하세요.";
+  document.querySelector("#collection-advice-status").textContent = [status,
+    ...(advice.reason_codes ?? []).map((code) => reasons[code] ?? "저장 근거를 확인할 수 없습니다. 세부 근거를 확인하세요.")].join(" ");
+  document.querySelector("#collection-advice-conditions").innerHTML = (advice.conditions ?? []).map((item) =>
+    `<li><strong>${advice.native_selection?.pinned.includes(item.slot.slot_id) ? "고정 조건 유지" : "미수집 조건"}</strong> · ${escapeHtml(poseText(item.condition))} · ${escapeHtml(item.slot.robot_start_pose_id)} · ${escapeHtml(item.slot.split_group)}</li>`).join("");
+  document.querySelector("#collection-advice-refresh").disabled = !canIntent("refresh_collection_advice");
+  for (const choice of ["apply", "keep"]) {
+    const button = document.querySelector(`#collection-advice-${choice}`);
+    button.hidden = advice.status !== "READY";
+    button.disabled = !canIntent("choose_collection_advice");
+  }
+  document.querySelector("#collection-advice-evidence").textContent = JSON.stringify({
+    recommendation: advice.recommendation, coverage: advice.data_quality_analysis,
+    reason_codes: advice.reason_codes, last_choice: advice.last_choice,
+  }, null, 2);
+}
+
 function render(view) {
   if (view.session_id !== lastSession
       || !["RUNNING", "CANCELLING", "PAUSED_AWAITING_OPERATOR"].includes(view.runtime.workflow_state)) cancelPending = false;
@@ -1667,6 +1709,7 @@ function render(view) {
   renderRuntime(view);
   renderResults(view);
   renderNext(view);
+  renderCollectionAdvice(view);
   renderTechnicalDetails(view);
   renderSteps(view);
 }
@@ -1999,6 +2042,12 @@ document.querySelector("#direct-pose-list").addEventListener("click", (event) =>
   if (pose && canIntent("update_draft")) submitIntent("update_draft", {draft_id: currentView.draft.draft_id, remove_pose: pose});
 });
 document.querySelector("#compile-campaign").addEventListener("click", () => submitIntent("compile_draft"));
+document.querySelector("#collection-advice-refresh").addEventListener("click", () => submitIntent("refresh_collection_advice", {}));
+for (const choice of ["apply", "keep"]) {
+  document.querySelector(`#collection-advice-${choice}`).addEventListener("click", () => submitIntent("choose_collection_advice", {
+    choice: choice.toUpperCase(), expected_recommendation_digest: currentView.collection_advice.recommendation_digest,
+  }));
+}
 document.querySelector("#review-actions").addEventListener("click", (event) => {
   const button = event.target.closest("[data-op]");
   if (button) submitIntent(button.dataset.op);

@@ -1074,7 +1074,13 @@ class CollectionRecommendationTests(unittest.TestCase):
             compiled_authoring=fixture.authoring(), episode_evidence=fixture.evidence,
             source_commit=COMMIT,
         )
-        self.assertEqual(advice["suggested_draft_patches"], [])
+        selection = advice["suggested_draft_patches"][0]["value"]
+        self.assertEqual(selection["pinned"], fixture.draft["pinned"])
+        self.assertEqual(selection["excluded"], fixture.draft["excluded"])
+        self.assertEqual(selection["direct_slots"][0]["slot_id"], fixture.draft["pinned"][0])
+        self.assertLessEqual(selection["requested_count"], fixture.draft["requested_count"])
+        missing = selection["direct_slots"][1]
+        self.assertNotEqual(missing["base_condition_digest"], fixture.manifest["slots"][0]["base_condition_digest"])
         self.assertEqual(fixture.__dict__, before)
 
     def test_received_digests_and_list_order_are_validated_before_parsing(self) -> None:

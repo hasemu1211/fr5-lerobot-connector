@@ -17,6 +17,7 @@ from tools.data_factory.operator.workflow.intents import (
     OperatorIntentCore,
     UnlockedIntent,
 )
+from tools.data_factory.operator.workflow.collection_advice import derive_next_draft, draft_binding
 from tools.data_factory.collection_seed import (
     MAX_CAMPAIGN_SEED,
     MAX_DERIVED_SEED,
@@ -407,6 +408,7 @@ class CollectionOperatorApplication:
         ] | None = None,
         initial_environment: Mapping[str, Any] | None = None,
         effect_scope: str = "FAKE",
+        collection_evidence_call: Callable[[], Mapping[str, Any]] | None = None,
     ):
         if (
             not isinstance(operator_label, str)
@@ -414,6 +416,7 @@ class CollectionOperatorApplication:
             or not callable(environment_call)
             or not callable(prepare_environment_call)
             or not callable(campaign_factory)
+            or collection_evidence_call is not None and not callable(collection_evidence_call)
             or effect_scope not in {"FAKE", "PHYSICAL"}
         ):
             raise ContractError("OPERATOR_APPLICATION_INPUT")
@@ -472,6 +475,13 @@ class CollectionOperatorApplication:
         self._preparation = None
         self._inner_intent_sequence = 0
         self._campaign = None
+        self._campaign_source_selection = None
+        self._collection_source = (
+            None if collection_evidence_call is None
+            else copy.deepcopy(dict(collection_evidence_call()))
+        )
+        self._collection_advice = None
+        self._collection_choice = None
         self._closed = False
         self._close_lock = threading.Lock()
         self._environment_view = (
@@ -488,6 +498,8 @@ class CollectionOperatorApplication:
             "cancel_session": self.cancel_session,
             "review_candidate": self.review_candidate,
             "new_campaign_same_settings": self.new_campaign_same_settings,
+            "refresh_collection_advice": self.refresh_collection_advice,
+            "choose_collection_advice": self.choose_collection_advice,
             "recover_home": self.recover_home,
             "capture_workspace_point": self.capture_workspace_point,
             "preview_workspace": self.preview_workspace,
@@ -1214,6 +1226,11 @@ class CollectionOperatorApplication:
             operations.append("new_campaign_same_settings")
         else:
             operations = []
+        collection_advice = self._advice_projection()
+        if workflow == "AUTHORING" and self._collection_source is not None:
+            operations.append("refresh_collection_advice")
+            if collection_advice["status"] == "READY":
+                operations.append("choose_collection_advice")
         if (
             self.camera_bindings_call is not None
             and self.camera_setup is not None
@@ -1583,6 +1600,8 @@ class CollectionOperatorApplication:
                 "completed": completed, "planned": total,
             },
             "available_ops": operations,
+            **({"collection_advice": collection_advice}
+               if self._collection_source is not None else {}),
             "technical_details": {
                 "application_generation": self._generation,
                 "catalog_digest": self.catalog.get("catalog_digest"),
@@ -2012,6 +2031,57 @@ class CollectionOperatorApplication:
         self.draft["revision"] += 1
         return {"outcome": "DRAFT_UPDATED", "draft": copy.deepcopy(self.draft)}
 
+    def _advice_projection(self):
+        advice = copy.deepcopy(self._collection_advice or {
+            "status": "NOT_CHECKED", "reason_codes": [], "conditions": [],
+        })
+        current = draft_binding(self.catalog, self.selection, self.draft)
+        if self._collection_choice is not None:
+            advice["last_choice"] = copy.deepcopy(self._collection_choice)
+            if self._collection_choice["recommendation_digest"] == advice.get("recommendation_digest"):
+                advice["status"] = (
+                    self._collection_choice["outcome"]
+                    if current == self._collection_choice["draft_binding"] else "DRAFT_CHANGED"
+                )
+        if advice["status"] == "READY" and current != advice["draft_binding"]:
+            advice["status"] = "DRAFT_CHANGED"
+        return advice
+
+    def refresh_collection_advice(self, payload, _view):
+        self._require("AUTHORING", payload, set())
+        advice, _candidate = derive_next_draft(
+            self._collection_source, catalog=self.catalog, selection=self.selection,
+            draft=self.draft, paired=self.start_pose_setup is not None,
+        )
+        self._collection_advice = advice
+        return {"outcome": "COLLECTION_ADVICE_REFRESHED", "collection_advice": self._advice_projection()}
+
+    def choose_collection_advice(self, payload, _view):
+        self._require("AUTHORING", payload, {"choice", "expected_recommendation_digest"})
+        displayed = self._advice_projection()
+        if (payload["choice"] not in {"APPLY", "KEEP"}
+                or displayed["status"] != "READY"
+                or payload["expected_recommendation_digest"] != displayed["recommendation_digest"]):
+            raise ContractError("COLLECTION_ADVICE_STALE")
+        fresh, candidate = derive_next_draft(
+            self._collection_source, catalog=self.catalog, selection=self.selection,
+            draft=self.draft, paired=self.start_pose_setup is not None,
+        )
+        if fresh != self._collection_advice or candidate is None:
+            raise ContractError("COLLECTION_ADVICE_STALE")
+        if payload["choice"] == "APPLY":
+            self.draft = candidate
+            self.selection["policy_id"] = "DIRECT_SELECTION"
+        self._collection_choice = {
+            "choice": payload["choice"],
+            "outcome": "APPLIED" if payload["choice"] == "APPLY" else "KEPT",
+            "recommendation_digest": fresh["recommendation_digest"],
+            "draft_binding": draft_binding(self.catalog, self.selection, self.draft),
+            "draft_id": self.draft["draft_id"], "draft_revision": self.draft["revision"],
+            "authority": copy.deepcopy(fresh["authority"]),
+        }
+        return copy.deepcopy(self._collection_choice)
+
     def compile_draft(self, payload: dict[str, Any], _view: dict[str, Any]) -> dict[str, Any]:
         self._require("AUTHORING", payload, {"draft_id", "data_disposition"})
         if (
@@ -2030,7 +2100,32 @@ class CollectionOperatorApplication:
             if callable(close):
                 close()
             raise ContractError("OPERATOR_APPLICATION_CAMPAIGN")
+        if self._advice_projection()["status"] == "APPLIED":
+            from tools.data_factory.campaign_authoring import compile_collection_campaign
+
+            try:
+                owner = campaign.campaign_operator
+                manifest, _receipt = compile_collection_campaign(owner.draft, hypothesis=owner.hypothesis)
+                bases = {base["base_condition_digest"]: base for base in owner.hypothesis["base_conditions"]}
+                actual = [{"condition": bases[slot["base_condition_digest"]]["coverage_condition"],
+                           "start": slot["robot_start_pose_id"], "split": slot["split_group"]}
+                          for slot in manifest["slots"]]
+                expected = [{"condition": item["condition"], "start": item["slot"]["robot_start_pose_id"],
+                             "split": item["slot"]["split_group"]}
+                            for item in self._collection_advice["conditions"]]
+                if actual != expected:
+                    raise ContractError("COLLECTION_ADVICE_COMPILED_SELECTION_MISMATCH")
+            except (AttributeError, ContractError):
+                close = getattr(campaign, "close", None)
+                if callable(close):
+                    close()
+                raise ContractError("COLLECTION_ADVICE_COMPILED_SELECTION_MISMATCH")
         self._campaign = campaign
+        self._campaign_source_selection = {
+            "selection": copy.deepcopy(self.selection),
+            "catalog_digest": self.catalog["catalog_digest"],
+            "draft_constraints": {key: copy.deepcopy(self.draft[key]) for key in ("pinned", "excluded")},
+        }
         return self._forward("compile_draft", copy.deepcopy(payload))
 
     def capture_workspace_point(
@@ -2281,6 +2376,13 @@ class CollectionOperatorApplication:
             ]
             previous["direct_pairs"] = []
         fresh_environment = self._read_environment()
+        evidence_call = getattr(self._campaign, "collection_evidence", None)
+        if callable(evidence_call) and self._campaign_source_selection is not None:
+            evidence = evidence_call()
+            self._collection_source = {
+                **copy.deepcopy(self._campaign_source_selection), **evidence,
+            }
+            self._collection_advice = self._collection_choice = None
         close = getattr(self._campaign, "close", None)
         if callable(close):
             close()
@@ -2297,6 +2399,11 @@ class CollectionOperatorApplication:
             and self.start_pose_setup is not None
         ):
             self._reset_direct_pairs()
+        if self._collection_source is not None:
+            self._collection_advice, _candidate = derive_next_draft(
+                self._collection_source, catalog=self.catalog, selection=self.selection,
+                draft=self.draft, paired=self.start_pose_setup is not None,
+            )
         return {
             "outcome": (
                 "AUTHORING"

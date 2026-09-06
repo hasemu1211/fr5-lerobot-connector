@@ -350,3 +350,8 @@ footer { display: flex; justify-content: space-between; gap: 1rem; padding: 1rem
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { scroll-behavior: auto !important; transition-duration: .01ms !important; animation-duration: .01ms !important; animation-iteration-count: 1 !important; }
 }
+/* Evidence and its next conditions stay beside the existing draft controls. */
+.collection-advice { margin-block: 1.25rem; padding: 1rem; border: 1px solid currentColor; border-radius: .5rem; }
+.collection-advice ol { padding-inline-start: 1.5rem; }
+.collection-advice pre { max-height: 18rem; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; }
+.collection-advice .step-actions { flex-wrap: wrap; }
