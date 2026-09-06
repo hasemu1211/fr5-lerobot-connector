@@ -1,5 +1,33 @@
 ## ADDED Requirements
 
+### Requirement: Product consumption of exact candidate review
+
+Curator SHALL expose a read-only native projection of the source, candidate, profile and review identities already bound by its existing lifecycle. It SHALL include the verified synchronized raw/overlay/candidate video reference, manifest clips and coverage limits, recorded decision provenance, receipt and currently permitted decisions. Its Web UI consumer SHALL use server-configured run roots and media paths; browser input SHALL NOT provide an actor, source path or output path. Reading the projection SHALL NOT create consent, publish a candidate or resume an interrupted action.
+
+#### Scenario: The UI presents a reviewable candidate
+- **WHEN** current source, profile, candidate and review evidence pass native validation
+- **THEN** the projection supplies the immutable review-ready digest and existing review media/coverage
+- **AND** the current explicit human path offers APPROVE and REJECT without a default or training authority.
+
+#### Scenario: A response was lost after the decision was recorded
+- **WHEN** the UI reloads a recoverable pending decision or terminal receipt
+- **THEN** the projection exposes the recorded result and permits only its existing choice for recovery, or no choice when terminal
+- **AND** reading the projection performs no publication or duplicate decision.
+
+### Requirement: Bound explicit decisions reuse canonical publication and recovery
+
+The current human decision endpoint SHALL require an explicit choice and expected review-ready digest, enforce both under the existing run lock, and reuse existing revalidation, decision events, publication and recovery. Stale or wrong-run identities and conflicting replays SHALL be rejected without a new decision or publication. Identical retries SHALL preserve the recorded actor and decision and recover the existing action. Candidate approval SHALL NOT inherit original approval or confer semantic, physical, training or motion authority beyond the existing candidate-review scope. Future qualified automated judgments SHALL have distinct decision-source provenance and permitted effects; they SHALL NOT be serialized as human choices through this endpoint.
+
+#### Scenario: A browser submits stale evidence or a conflicting retry
+- **WHEN** the expected review digest differs or a prior decision has the opposite choice
+- **THEN** native submission fails with REVIEW_CHANGED or DECISION_CONFLICT, respectively
+- **AND** the original source, recorded decision and published outputs are preserved.
+
+#### Scenario: Concurrent identical choices or publication receipt recovery
+- **WHEN** identical explicit choices arrive concurrently or are retried after publication completed but its receipt could not be returned
+- **THEN** native locking and recovery retain one decision and one publication
+- **AND** the result remains without training authority and without approval inheritance.
+
 ### Requirement: Optional native evaluation cohort preview
 
 Curator's explicit selection request exporter SHALL accept an optional evaluation fraction and expected held-out episode indices as a pair. When supplied, it SHALL read the current dataset metadata and reuse the native task-wise `selected_train_eval` split over the explicitly selected episodes. A matching preview SHALL be returned as `evaluation_cohort`, without changing the native request file schema or silently changing the selection. Omitting both options SHALL preserve existing request export behavior.

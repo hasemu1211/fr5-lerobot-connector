@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
+from concurrent.futures import ThreadPoolExecutor
 import json
 import os
 from pathlib import Path
@@ -25,12 +26,88 @@ from tools.data_factory.curator.workflow.application import (
     _decision_actor,
     _exclusive_run,
     prepare,
+    review_candidate,
     status,
+    submit_human_review_decision,
 )
 from tools.data_factory.curator.workflow.state import load_events
 
 
 class ApplicationTest(unittest.TestCase):
+    def test_web_review_choices_bind_exact_evidence_and_replay_without_tty(self):
+        for choice, terminal in (("APPROVE", "PUBLISHED"), ("REJECT", "REJECTED")):
+            with self.subTest(choice=choice), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                source = make_source_dataset(root, episodes=2, frames_per_episode=2)
+                fixture = make_profile_fixture(root)
+                before = stable_tree_identity(source, code="TEST_SOURCE_IDENTITY")
+                prepared = prepare(source, _paths=fixture.paths, _run_id_value="web-review")
+                run = fixture.paths.run_root / prepared["run_id"]
+                initial_events = load_events(run)
+                shown = review_candidate(prepared["run_id"], _paths=fixture.paths)
+                self.assertEqual(shown["status"], "REVIEW_READY")
+                self.assertEqual(shown["allowed_decisions"], ["APPROVE", "REJECT"])
+                self.assertTrue(shown["clips"])
+                self.assertEqual(shown["review_video_path"], prepared["review_video"])
+                self.assertEqual(load_events(run), initial_events)
+                self.assertIsNone(shown["decision"])
+                self.assertFalse(shown["training_authority"])
+                kwargs = dict(expected_review_digest=shown["review_ready_digest"], _paths=fixture.paths)
+                for invalid in (None, "", "approve", [], True):
+                    with self.assertRaisesRegex(CuratorError, "REVIEW_DECISION"):
+                        submit_human_review_decision("web-review", decision=invalid, **kwargs)
+                with self.assertRaisesRegex(CuratorError, "REVIEW_CHANGED"):
+                    submit_human_review_decision("web-review", decision=choice,
+                        expected_review_digest="sha256:" + "0" * 64, _paths=fixture.paths)
+                if choice == "APPROVE":
+                    prepare(source, _paths=fixture.paths, _run_id_value="other-review")
+                    other = review_candidate("other-review", _paths=fixture.paths)
+                    with self.assertRaisesRegex(CuratorError, "REVIEW_CHANGED"):
+                        submit_human_review_decision("web-review", decision=choice,
+                            expected_review_digest=other["review_ready_digest"], _paths=fixture.paths)
+                self.assertEqual(load_events(run), initial_events)
+                with mock.patch.object(application, "read_foreground_decision", side_effect=AssertionError("TTY forbidden")):
+                    with ThreadPoolExecutor(max_workers=2) as workers:
+                        results = list(workers.map(lambda _: submit_human_review_decision(
+                            "web-review", decision=choice, **kwargs), range(2)))
+                    self.assertEqual(results[0], results[1])
+                    result = results[0]
+                    recorded = load_events(run)
+                    self.assertEqual(result["status"], terminal)
+                    self.assertEqual(result["allowed_decisions"], [])
+                    self.assertEqual(submit_human_review_decision("web-review", decision=choice, **kwargs), result)
+                    self.assertEqual(review_candidate("web-review", _paths=fixture.paths), result)
+                    with self.assertRaisesRegex(CuratorError, "DECISION_CONFLICT"):
+                        submit_human_review_decision("web-review", decision="REJECT" if choice == "APPROVE" else "APPROVE", **kwargs)
+                    with self.assertRaisesRegex(CuratorError, "REVIEW_CHANGED"):
+                        submit_human_review_decision("web-review", decision=choice,
+                            expected_review_digest="sha256:" + "0" * 64, _paths=fixture.paths)
+                    self.assertEqual(load_events(run), recorded)
+                self.assertFalse(result["receipt"]["approval_inherited"])
+                self.assertFalse(result["decision"]["training_authorized"])
+                self.assertEqual(stable_tree_identity(source, code="TEST_SOURCE_IDENTITY"), before)
+
+    def test_web_decision_recovers_publication_after_receipt_response_failure(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = make_source_dataset(root, episodes=1, frames_per_episode=2)
+            fixture = make_profile_fixture(root)
+            prepare(source, _paths=fixture.paths, _run_id_value="web-recovery")
+            shown = review_candidate("web-recovery", _paths=fixture.paths)
+            kwargs = dict(decision="APPROVE", expected_review_digest=shown["review_ready_digest"], _paths=fixture.paths)
+            with mock.patch.object(application, "_write_receipt", side_effect=OSError("injected receipt failure")):
+                with self.assertRaisesRegex(CuratorError, "OUTPUT_COMMITTED_RECEIPT_PENDING"):
+                    submit_human_review_decision("web-recovery", **kwargs)
+            run = fixture.paths.run_root / "web-recovery"
+            decision = load_events(run)["decision"]
+            pending = review_candidate("web-recovery", _paths=fixture.paths)
+            self.assertEqual(pending["status"], "PUBLISHED_RECEIPT_PENDING")
+            self.assertEqual(pending["allowed_decisions"], ["APPROVE"])
+            with mock.patch.object(application, "publish_candidate", side_effect=AssertionError("already published")):
+                result = submit_human_review_decision("web-recovery", **kwargs)
+            self.assertEqual(result["status"], "PUBLISHED")
+            self.assertEqual(load_events(run)["decision"], decision)
+
     def test_native_prepare_review_preserves_source_and_rejects_changed_configuration(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

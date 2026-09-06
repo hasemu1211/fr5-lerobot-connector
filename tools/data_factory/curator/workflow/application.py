@@ -757,6 +757,27 @@ def _validate_evidence(
     if not all(checks):
         raise CuratorError("DECISION_DIGEST_CHAIN")
 
+    _verified_review_manifest(run, events)
+
+    snapshot: dict[str, list[int]] | None = None
+    if require_candidate:
+        snapshot, current_digest = candidate_identity(owned)
+        if current_digest != digest:
+            raise CuratorError("CANDIDATE_CHANGED_BEFORE_DECISION")
+    return _Evidence(
+        request=request,
+        candidate=candidate,
+        ready=ready,
+        owned=owned,
+        candidate_snapshot=snapshot,
+        candidate_digest=digest,
+    )
+
+
+def _verified_review_manifest(run: Path, events: dict[str, dict[str, Any]]) -> dict:
+    request = events["request"]["payload"]
+    ready = events["review_ready"]["payload"]
+    digest = events["candidate_ready"]["payload"]["candidate_tree_digest"]
     review_directory, video_path, manifest_path = _review_paths(run)
     if (
         Path(ready["review_video_path"]) != video_path
@@ -782,19 +803,7 @@ def _validate_evidence(
     ):
         raise CuratorError("REVIEW_DIGEST_CHAIN")
 
-    snapshot: dict[str, list[int]] | None = None
-    if require_candidate:
-        snapshot, current_digest = candidate_identity(owned)
-        if current_digest != digest:
-            raise CuratorError("CANDIDATE_CHANGED_BEFORE_DECISION")
-    return _Evidence(
-        request=request,
-        candidate=candidate,
-        ready=ready,
-        owned=owned,
-        candidate_snapshot=snapshot,
-        candidate_digest=digest,
-    )
+    return manifest
 
 
 def _recorded_action_evidence(
@@ -1272,8 +1281,16 @@ def _abort_before_decision(
     )
 
 
-def _decide_locked(run: Path, paths: WorkflowPaths) -> dict[str, Any]:
+def _decide_locked(
+    run: Path, paths: WorkflowPaths, *,
+    decision: str | None = None, expected_review_digest: str | None = None,
+) -> dict[str, Any]:
     events = load_events(run)
+    if decision is not None:
+        if events.get("review_ready", {}).get("event_digest") != expected_review_digest:
+            raise CuratorError("REVIEW_CHANGED")
+        if "decision" in events and events["decision"]["payload"]["decision"] != decision:
+            raise CuratorError("DECISION_CONFLICT")
     if "receipt" in events:
         fsync_directory(run)
         return project_state(run)
@@ -1285,7 +1302,9 @@ def _decide_locked(run: Path, paths: WorkflowPaths) -> dict[str, Any]:
         raise CuratorError("RUN_NOT_REVIEW_READY")
 
     evidence = _validate_evidence(run, events, paths, require_candidate=True)
-    choice = read_foreground_decision(evidence.ready["review_video_path"])
+    choice = decision if decision is not None else read_foreground_decision(
+        evidence.ready["review_video_path"]
+    )
     current_events = load_events(run)
     if current_events != events:
         raise CuratorError("RUN_CHANGED_DURING_DECISION")
@@ -1346,6 +1365,87 @@ def decide(
         return _decide_locked(run, _paths)
 
 
+def _review_candidate_locked(run: Path, paths: WorkflowPaths) -> dict[str, Any]:
+    events = load_events(run)
+    # Recorded decisions bind frozen evidence; this is not retrospective
+    # revocation when the original source/profile later changes.
+    evidence = (
+        _recorded_action_evidence(run, events, paths) if "decision" in events
+        else _validate_evidence(run, events, paths, require_candidate=True)
+    )
+    decision = None
+    if "decision" in events:
+        value = _validate_decision(events, evidence)
+        decision = {key: value[key] for key in (
+            "decision", "provenance", "actor", "training_authorized",
+        )}
+    receipt = events.get("receipt", {}).get("payload")
+    if receipt is not None:
+        outcome = "PUBLISHED" if decision["decision"] == "APPROVE" else "REJECTED"
+        if receipt != _receipt_payload(evidence, events["decision"], outcome):
+            raise CuratorError("RECEIPT_BINDING")
+        if outcome == "PUBLISHED" and not _published_output_matches(evidence):
+            raise CuratorError("COMMITTED_OUTPUT_CHANGED")
+    manifest = _verified_review_manifest(run, events)
+    failure = events.get("failure", {}).get("payload")
+    allowed = []
+    if receipt is None:
+        if decision is None and failure is None:
+            allowed = ["APPROVE", "REJECT"]
+        elif decision is not None and (
+            failure is None or failure["state"] in RECOVERABLE_FAILURE_STATES
+        ):
+            allowed = [decision["decision"]]
+    return {
+        **project_state(run),
+        "review_ready_digest": events["review_ready"]["event_digest"],
+        **{key: evidence.ready[key] for key in (
+            "review_manifest_path", "review_video_path",
+            "review_manifest_digest", "review_video_sha256",
+        )},
+        "identities": manifest["identities"], "coverage": manifest["coverage"],
+        "clips": manifest["clips"], "allowed_decisions": allowed, "failure": failure,
+        "decision": decision, "receipt": receipt, "training_authority": False,
+    }
+
+
+def review_candidate(
+    run_id: str, *, _paths: WorkflowPaths = DEFAULT_PATHS,
+) -> dict[str, Any]:
+    """Revalidate exact candidate review evidence for a trusted local UI.
+
+    Returned media paths belong to the server; they are not client path inputs.
+    This read never records consent or resumes an interrupted publication.
+    """
+    run = _run_path(run_id, _paths)
+    with _exclusive_run(run):
+        return _review_candidate_locked(run, _paths)
+
+
+def submit_human_review_decision(
+    run_id: str, *, decision: str, expected_review_digest: str,
+    _paths: WorkflowPaths = DEFAULT_PATHS,
+) -> dict[str, Any]:
+    """Consume one explicit human choice from the trusted local UI boundary.
+
+    The transport owns CSRF/origin checks and displaying the bound evidence.
+    Actor and paths come from the server. This is the current human path, not
+    an automated judgment API: qualified automation needs its own provenance
+    and permitted-effects contract, never a fabricated human decision.
+    """
+    if not isinstance(decision, str) or decision not in {"APPROVE", "REJECT"}:
+        raise CuratorError("REVIEW_DECISION")
+    if (not isinstance(expected_review_digest, str)
+            or DIGEST.fullmatch(expected_review_digest) is None):
+        raise CuratorError("REVIEW_CHANGED")
+    run = _run_path(run_id, _paths)
+    with _exclusive_run(run):
+        _decide_locked(
+            run, _paths, decision=decision, expected_review_digest=expected_review_digest,
+        )
+        return _review_candidate_locked(run, _paths)
+
+
 def status(
     run_id: str,
     *,
@@ -1354,4 +1454,7 @@ def status(
     return project_state(_run_path(run_id, _paths))
 
 
-__all__ = ["WorkflowPaths", "decide", "prepare", "status"]
+__all__ = [
+    "WorkflowPaths", "decide", "prepare", "review_candidate",
+    "submit_human_review_decision", "status",
+]
