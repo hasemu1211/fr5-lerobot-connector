@@ -65,9 +65,20 @@ The lane SHALL distinguish admitted input, executable pipeline, checkpoint reloa
 - **WHEN** a policy returns NaN or Infinity
 - **THEN** evaluation fails without publishing a metric report.
 
+#### Scenario: Different data selections produce different normalization scales
+- **WHEN** comparison arms fit state/action statistics from different training subsets
+- **THEN** a common held-out cohort alone does not make their normalized flow-matching losses a data-utility ranking
+- **AND** each arm retains leakage-free statistics, while an improvement claim requires a comparable downstream measure after its own saved postprocessor or a matched physical evaluation; the system does not fit statistics on held-out data to equalize the scores.
+
 ### Requirement: Resource cost and data utility guide continued learning
 
 The lane SHALL choose the next safe valuable outcome using code/tests, current author-primary research and actual workstation/data evidence in proportion to the decision. Real runs SHALL report wall time, peak GPU memory, sample throughput and checkpoint storage alongside learning results. Successful demonstration coverage and held-out errors SHALL inform data utility analysis alongside failure cases.
+
+#### Scenario: Selecting or revising a training start set
+- **WHEN** the lane prepares a substantive training comparison
+- **THEN** it reviews prior project findings, the installed trainer and pretrained configuration, current author-primary evidence, and measured local resource limits to justify the trainable/frozen components, optimizer and schedule, effective batch and precision, data transforms, training budget, and checkpoint comparison scope
+- **AND** the native resolved configuration and execution evidence identify what actually ran; a model default or short warmup probe alone does not establish suitability
+- **AND** subsequent comparisons target an observed uncertainty with a falsifier and bounded cost, without requiring an exhaustive hyperparameter search or treating repeated validation selection as independent test evidence.
 
 #### Scenario: A bounded evaluation consumes local resources
 - **WHEN** the evaluator finishes its requested batch limit

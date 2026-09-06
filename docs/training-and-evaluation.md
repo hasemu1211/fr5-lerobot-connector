@@ -121,6 +121,8 @@ report v4의 `episode_metrics`는 승인된 모든 held-out episode의 평가 sa
 
 후속 data utility 분석은 `episode_index`와 dataset·split·receipt digest로 기존 condition metadata에 연결한다. 긴 성공 시연의 비중, 짧은 시연의 오차와 조건별 coverage를 함께 해석하며, 이 report가 Curator의 selection이나 Rollout의 실물 판단을 대신하지 않는다.
 
+선별 전략마다 train subset이 달라지면 state/action 정규화 통계도 달라진다. 같은 held-out episode를 평가해도 normalized flow-matching loss의 크기를 그대로 비교해 어느 데이터가 더 유용하다고 결론내릴 수 없다. 각 loss는 해당 정규화 안의 최적화 추이를 설명한다. 전략 간 개선은 각 checkpoint의 저장 postprocessor를 거친 비교 가능한 출력이나 같은 조건의 실물 평가로 확인해야 한다. 점수의 척도를 맞추려고 held-out 데이터까지 통계 계산에 포함하지 않는다.
+
 ```bash
 direnv exec . scripts/evaluate_smolvla.sh --check-env
 ```
