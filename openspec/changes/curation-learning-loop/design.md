@@ -26,6 +26,8 @@ Learning의 저장된 postprocessor 출력은 조건 근거와 연결하되, 입
 
 author-only 검증은 실행 consumer를 호출하지 않으며 카메라를 탐색하지 않는다. 이때 장치 없는 catalog의 unavailable 표시는 실물 상태 관측이 아니다. Collection Web은 실제 현재 preset·장치·scene·qualification·자원·권한을 다시 확인해 소비한다. authoring의 저장 예산과 현재 여유 공간을 함께 보고하며, 녹화 길이를 reset·검토를 포함한 취득 시간으로 대체하지 않는다.
 
+누적 추가 수집 목표는 단일 campaign의 필수 수량이 아니다. 현재 자원에 맞는 짧은 batch로 명시적 순서를 나누되 native slot당 예산을 낮추거나 quota를 우회하지 않는다. 각 batch에는 해당 pose 목록과 count만 전달해 native direct-count 검증을 통과시키고, 이후 batch도 실행 전 현재 자원과 근거를 다시 확인한다. offline authoring의 장치 placeholder는 실제 Web의 현재 장치 결속을 덮어쓰지 않는다.
+
 기존 평가 source와 cohort는 별도로 유지한다. 새 고번호 episode를 같은 task에 추가하면 native last-ceil splitter가 heldout을 이동시키므로, 이 제안으로 확장 TRAIN과 기존 heldout의 결속이 완료되었다고 주장하지 않는다. Learning의 실제 분할 소비 계약이 확인되기 전에는 고정 cohort를 표방하는 확장 요청을 만들지 않는다. 반복 수집 뒤에도 원본 고정 평가·비교 가능한 출력에서 개선이 없으면 utility 가설은 미결 또는 기각이며, 같은 조건 반복 자체를 성능으로 세지 않는다.
 
 ## 다음 소비와 채택 기준
