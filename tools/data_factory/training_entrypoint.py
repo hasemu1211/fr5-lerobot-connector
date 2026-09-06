@@ -247,7 +247,7 @@ def launch(*, dataset: Path, repo_id: str, inventory: Path, profile: str,
         if runner is not None:
             with approval.local_hf_offline(local_offline):
                 return runner(argv, check=False).returncode
-        return run_native_training(argv, split, receipt, local_offline=local_offline)
+        return run_native_training(argv, split, receipt)
     finally:
         for path in written:
             if output.is_dir() and not output.is_symlink():

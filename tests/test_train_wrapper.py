@@ -421,6 +421,47 @@ class TrainingLaunchConnectionTest(unittest.TestCase):
                     profile="smolvla", collection_profile="fixture", argv=argv, runner=runner,
                 ), 0)
 
+    def test_fresh_native_launch_reaches_trainer_for_human_and_delegated_inventory(self):
+        import os
+
+        for delegated in (False, True):
+            with self.subTest(delegated=delegated), TemporaryDirectory(
+                prefix="SYNTHETIC_TEST_ONLY-",
+            ) as directory:
+                root = Path(directory)
+                dataset = root / "dataset"
+                dataset.mkdir()
+                inventory = root / "inventory.json"
+                split = {
+                    "selected_episodes": [0],
+                    "dataset_identity": {"dataset_root": str(dataset)},
+                    "repo_id": "tests/local",
+                }
+                receipt = {"approved_inventory_path": str(inventory)}
+                argv = ["fixture-lerobot-train", f"--output_dir={root / 'run'}"]
+
+                def native(_argv, _split, _receipt):
+                    self.assertEqual(os.environ.get("HF_HUB_OFFLINE"), "1" if delegated else None)
+                    return 0
+
+                with mock.patch(
+                    "tools.data_factory.training_entrypoint.prepare_launch",
+                    return_value=(split, receipt),
+                ), mock.patch.object(
+                    approval, "validate_current_training_inventory", return_value={"episodes": []},
+                ), mock.patch.object(
+                    approval, "inventory_local_training_delegation",
+                    return_value={"delegated": True} if delegated else None,
+                ), mock.patch(
+                    "tools.data_factory.training_entrypoint._run_native_training",
+                    side_effect=native,
+                ) as native_runner:
+                    self.assertEqual(launch(
+                        dataset=dataset, repo_id="tests/local", inventory=inventory,
+                        profile="smolvla", collection_profile="fixture", argv=argv,
+                    ), 0)
+                native_runner.assert_called_once_with(argv, split, receipt)
+
     def test_public_shell_dry_run_and_validator_reject_legacy_marker(self):
         project = Path(__file__).resolve().parents[1]
         with TemporaryDirectory(prefix="SYNTHETIC_TEST_ONLY-") as directory:

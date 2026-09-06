@@ -652,6 +652,7 @@ class NativeBatchTrainingApprovalTest(unittest.TestCase):
             ("profile", "act", {**base, "--batch_size": "2"}, "TRAINING_DELEGATION_LIMITS"),
             ("profile", "vqbet-up", base, "TRAINING_DELEGATION_SCOPE"),
             ("remote", "smolvla", {**base, "--job.target": "remote"}, "TRAINING_DELEGATION_SCOPE"),
+            ("reward-model", "smolvla", {**base, "--reward_model.path": "cached/model"}, "TRAINING_DELEGATION_SCOPE"),
             ("implicit-policy-upload", "smolvla", {key: value for key, value in base.items() if key != "--policy.push_to_hub"}, "TRAINING_DELEGATION_SCOPE"),
             ("implicit-checkpoint-upload", "smolvla", {key: value for key, value in base.items() if key != "--save_checkpoint_to_hub"}, "TRAINING_DELEGATION_SCOPE"),
             ("implicit-logging", "smolvla", {key: value for key, value in base.items() if key != "--wandb.enable"}, "TRAINING_DELEGATION_SCOPE"),
@@ -750,6 +751,7 @@ class NativeBatchTrainingApprovalTest(unittest.TestCase):
                 ("steps", {**saved, "steps": 3}, "TRAINING_DELEGATION_LIMITS"),
                 ("upload", {**saved, "policy": {"push_to_hub": True}}, "TRAINING_DELEGATION_SCOPE"),
                 ("remote", {**saved, "job": {"target": "remote"}}, "TRAINING_DELEGATION_SCOPE"),
+                ("streaming", {**saved, "dataset": {**saved["dataset"], "streaming": True}}, "TRAINING_DELEGATION_SCOPE"),
             ):
                 with self.subTest(saved_config=name):
                     write_json(saved_path, changed)
