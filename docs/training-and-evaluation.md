@@ -17,13 +17,13 @@ FR5 action은 절대 joint-position과 gripper를 포함하는 7D 계약이다. 
 ## 학습 전 조건
 
 - dataset validator가 PASS여야 한다.
-- 각 선택 episode의 technical PASS, human semantic PASS와 별도의 human training approval이 있어야 한다.
+- 각 선택 episode의 technical PASS, human semantic PASS와 별도의 학습 사용 권한이 있어야 한다. 학습 권한은 사람이 검토한 exact batch 또는 명시적으로 위임한 로컬 학습 범위에서 나온다.
 - 수집이 종료된 revision을 사용한다. 승인 목록은 dataset **밖의** `training_approved_inventory.v2` 파일이며, 기존 `meta/training_approved.json`의 존재만으로는 실행할 수 없다.
 - train/validation을 한 run 동안 고정하고, ID/OOD test 조건은 별도 dataset으로 격리한다.
 - `batch_size`, `steps`, `dataset.eval_split`, `eval_steps`, `save_freq`와 새 output 경로를 명시한다.
 - checkpoint와 split의 경로·digest를 결과와 함께 보존한다.
 
-승인은 episode 수가 아니라 dataset 전체 바이트와 원래 provenance에 묶인다. 파일 내용이나 선택 목록이 바뀌면 다시 검토해야 한다. Collection ledger를 사용하는 경우 원래 dataset 경로와 증거 참조도 일치해야 하며, Curator 판단을 학습 승인으로 대신하거나 seed 배정을 만들어 넣지 않는다.
+학습 권한은 episode 수가 아니라 dataset 전체 바이트와 원래 provenance에 묶인다. 파일 내용이나 선택 목록이 바뀌면 새 exact batch를 검증해야 한다. 유효한 로컬 위임 안에서는 이 검증 때문에 사람의 동의를 다시 요구하지 않는다. Collection ledger를 사용하는 경우 원래 dataset 경로와 증거 참조도 일치해야 하며, Curator 판단을 학습 승인으로 대신하거나 seed 배정을 만들어 넣지 않는다.
 
 ## 승인과 실행 미리보기
 
@@ -52,7 +52,21 @@ direnv exec . scripts/approve_training.sh \
 
 미리보기는 파일을 쓰거나 동의를 발급하지 않는다. 같은 명령에서 `--dry-run`을 빼면 사람의 `/dev/tty`에 dataset 경로·revision digest, 정확한 선택 episode 목록, 각 episode의 technical PASS·semantic PASS와 검토자·증거 digest, batch digest와 출력 경로가 표시된다. 사람은 이 **동결된 batch 전체를 한 번 검토하고**, 표시된 짧은 `APPROVE BATCH …` 확인문을 한 번 입력한다. episode별 긴 digest 문구를 반복 입력하지 않는다. 이 결정은 표시된 revision과 선택 집합에만 적용되며, 학습 시작이나 로봇·하드웨어 실행 권한을 부여하지 않는다.
 
-인자·환경변수·stdin·JSON으로 동의를 전달할 수 없다. 거절, TTY 부재, 확인 대기 중 증거 변경은 승인과 inventory를 발급하지 않는다. 대기 후 dataset·episode·technical·semantic·provenance 원본을 다시 검증한 뒤 개별 provenance와 `training_approval.v3`를 새 파일로 쓰고, 완성된 `training_approved_inventory.v2`를 마지막에 원자적으로 발행한다. 각 v3 승인에는 동일한 exact-batch digest가 있어 일부 episode만 떼어내거나 다른 batch와 섞은 inventory는 검증에 실패한다. 기존 단일 episode API와 v2 승인은 계속 지원한다. 중단된 발행 시도의 개별 산출물은 보존하고 새 승인 디렉터리에서 다시 검토한다. 기존 파일은 덮어쓰지 않는다.
+이 사람 확인 경로에서는 인자·환경변수·stdin·JSON으로 개별 동의를 대신할 수 없다. 거절, TTY 부재, 확인 대기 중 증거 변경은 승인과 inventory를 발급하지 않는다. 대기 후 dataset·episode·technical·semantic·provenance 원본을 다시 검증한 뒤 개별 provenance와 `training_approval.v3`를 새 파일로 쓰고, 완성된 `training_approved_inventory.v2`를 마지막에 원자적으로 발행한다. 각 v3 승인에는 동일한 exact-batch digest가 있어 일부 episode만 떼어내거나 다른 batch와 섞은 inventory는 검증에 실패한다. 기존 단일 episode API와 v2 승인은 계속 지원한다. 중단된 발행 시도의 개별 산출물은 보존하고 새 승인 디렉터리에서 다시 검토한다. 기존 파일은 덮어쓰지 않는다.
+
+### 반복 로컬 학습을 위임한 경우
+
+프로젝트 소유자가 로컬 학습을 명시적으로 위임했다면 자동화 호출자는 매번 Web UI를 대신 클릭하지 않는다. 기존 admission 경로가 technical·semantic PASS와 동결된 batch를 다시 검증하고, 사람의 개별 승인과 구분되는 `STANDING_LOCAL_TRAINING_DELEGATION` 근거를 남긴다.
+
+```bash
+direnv exec . python3 -m tools.data_factory.training_entrypoint delegate \
+  --request "$REQUEST" --output-dir "$APPROVAL_DIR" \
+  --delegation "$DELEGATION_FILE" --authorized-actor "$LOCAL_ACTOR"
+```
+
+`data_factory.local_training_delegation.v1`은 위임자·호출자·실제 위임의 출처, 허용 dataset/repo·output 경로·profile과 실행 한도를 명시하는 로컬 기록이다. 신뢰할 수 있는 단일 운영자 PC를 전제로 하며 파일 자체가 사람의 신원을 인증하거나 동의를 만들어 내지는 않는다. 실제 위임이 먼저 있어야 한다. 산출물은 기존 inventory 형식을 사용하며 원본을 덮어쓰지 않는다. 위임 파일이 없어지거나 바뀌면 다음 소비 시 검증에 실패하므로 과거 근거는 보존하고 새 위임은 별도 revision으로 기록한다. 로봇 실행·외부 업로드·원격 자원 사용은 이 위임에 포함되지 않는다.
+
+### 학습 명령 검증
 
 학습 미리보기는 승인 목록과 **정확히 같은** 선택 목록, 실제 수집 camera profile을 사용한다. 다음은 ACT 명령의 형식이며 학습량이나 성능을 권장하는 측정값은 아니다.
 

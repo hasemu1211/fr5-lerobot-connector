@@ -517,6 +517,253 @@ class NativeBatchTrainingApprovalTest(unittest.TestCase):
     def issue(self):
         return self.approve(self.request, self.output, "fixture-human", dry_run=False)
 
+    def delegation(self, *, values=None, name="delegation"):
+        output_root = self.root / f"{name}-outputs"
+        output_root.mkdir()
+        output = output_root / "batch"
+        output.mkdir()
+        delegation = {
+            "schema_version": training_approval.DELEGATION_SCHEMA,
+            "delegation_id": f"{name}-r1",
+            "scope": PRODUCTION_SCOPE,
+            "delegated_by": "workspace-user",
+            "authorized_actor": "local-training-owner",
+            "authorization_source_ref": "explicit-user-message-current-session",
+            "dataset": {
+                "repo_id": self.request["repo_id"],
+                "dataset_root": self.request["dataset_root"],
+            },
+            "output_root": str(output_root),
+            "profiles": ["act", "smolvla"],
+            "limits": {"max_steps": 2, "max_batch_size": 1, "max_checkpoints": 2},
+            "authority": copy.deepcopy(training_approval.DELEGATION_AUTHORITY),
+        }
+        if values:
+            delegation.update(values)
+        path = self.root / f"{name}.json"
+        write_json(path, delegation)
+        return path, output, delegation
+
+    def delegated_launch_config(self, output_root):
+        return {
+            "--dataset.root": str(self.dataset),
+            "--dataset.repo_id": self.request["repo_id"],
+            "--dataset.episodes": "[0,2]",
+            "--dataset.eval_split": "0.5",
+            "--output_dir": str(output_root / "run"),
+            "--batch_size": "1", "--steps": "2",
+            "--eval_steps": "1", "--save_freq": "1",
+            "--policy.push_to_hub": "false",
+            "--save_checkpoint_to_hub": "false",
+            "--wandb.enable": "false",
+        }
+
+    def test_standing_delegation_issues_distinct_exact_batch_and_human_stays_compatible(self):
+        from tools.data_factory.training_entrypoint import (
+            _enforce_delegated_launch, delegate_training_batch,
+        )
+
+        path, output, _ = self.delegation()
+        inventory = delegate_training_batch(
+            self.request, output, "local-training-owner", path,
+        )
+        self.assertEqual([episode["episode_index"] for episode in inventory["episodes"]], [0, 2])
+        documents = [load_json_strict(episode["training_approval"]["artifact_path"])
+                     for episode in inventory["episodes"]]
+        self.assertTrue(all(
+            document["schema_version"] == training_approval.DELEGATED_APPROVAL_SCHEMA
+            and document["provenance"] == training_approval.DELEGATED_PROVENANCE
+            and "approved_by" not in document for document in documents
+        ))
+        self.assertEqual(
+            {document["batch_digest"] for document in documents},
+            {training_approval.delegated_batch_digest(documents)},
+        )
+        self.assertEqual(training_approval.validate_current_training_inventory(
+            output / "training_approved.json", dataset_root=self.dataset,
+            repo_id=self.request["repo_id"], selected_episodes=[0, 2],
+        ), inventory)
+        _enforce_delegated_launch(
+            inventory, dataset=self.dataset, repo_id=self.request["repo_id"],
+            profile="smolvla", config=self.delegated_launch_config(output.parent),
+        )
+
+        with self.terminal():
+            human_inventory = self.issue()
+        self.assertIsNone(training_approval.inventory_local_training_delegation(human_inventory))
+        validate_training_approved_inventory(human_inventory)
+
+    def test_delegation_missing_wrong_actor_scope_and_changed_bytes_fail_closed(self):
+        from tools.data_factory.training_entrypoint import (
+            _enforce_delegated_launch, delegate_training_batch,
+        )
+
+        path, output, delegation = self.delegation()
+        missing = self.root / "missing-delegation.json"
+        with self.assertRaisesRegex(ContractError, "TRAINING_DELEGATION_ARTIFACT"):
+            delegate_training_batch(self.request, output, "local-training-owner", missing)
+        with self.assertRaisesRegex(ContractError, "TRAINING_DELEGATION_WRONG_ACTOR"):
+            delegate_training_batch(self.request, output, "other-actor", path)
+        outside = self.root / "outside"
+        outside.mkdir()
+        with self.assertRaisesRegex(ContractError, "TRAINING_DELEGATION_OUTPUT"):
+            delegate_training_batch(self.request, outside, "local-training-owner", path)
+
+        inventory = delegate_training_batch(
+            self.request, output, "local-training-owner", path,
+        )
+        base = self.delegated_launch_config(output.parent)
+        variants = (
+            ("profile", "act", {**base, "--batch_size": "2"}, "TRAINING_DELEGATION_LIMITS"),
+            ("profile", "vqbet-up", base, "TRAINING_DELEGATION_SCOPE"),
+            ("remote", "smolvla", {**base, "--job.target": "remote"}, "TRAINING_DELEGATION_SCOPE"),
+            ("implicit-policy-upload", "smolvla", {key: value for key, value in base.items() if key != "--policy.push_to_hub"}, "TRAINING_DELEGATION_SCOPE"),
+            ("implicit-checkpoint-upload", "smolvla", {key: value for key, value in base.items() if key != "--save_checkpoint_to_hub"}, "TRAINING_DELEGATION_SCOPE"),
+            ("implicit-logging", "smolvla", {key: value for key, value in base.items() if key != "--wandb.enable"}, "TRAINING_DELEGATION_SCOPE"),
+            ("upload", "smolvla", {**base, "--policy.push_to_hub": "true"}, "TRAINING_DELEGATION_SCOPE"),
+            ("checkpoint-upload", "smolvla", {**base, "--save_checkpoint_to_hub": "true"}, "TRAINING_DELEGATION_SCOPE"),
+            ("logging", "smolvla", {**base, "--wandb.enable": "true"}, "TRAINING_DELEGATION_SCOPE"),
+            ("output", "smolvla", {**base, "--output_dir": str(outside / "run")}, "TRAINING_DELEGATION_OUTPUT"),
+        )
+        for name, profile, config, code in variants:
+            with self.subTest(name=name), self.assertRaisesRegex(ContractError, code):
+                _enforce_delegated_launch(
+                    inventory, dataset=self.dataset, repo_id=self.request["repo_id"],
+                    profile=profile, config=config,
+                )
+
+        tight_path, tight_output, _ = self.delegation(
+            name="tight-checkpoints", values={
+                "limits": {"max_steps": 3, "max_batch_size": 1, "max_checkpoints": 1},
+            },
+        )
+        tight_inventory = delegate_training_batch(
+            self.request, tight_output, "local-training-owner", tight_path,
+        )
+        final_checkpoint = {
+            **self.delegated_launch_config(tight_output.parent),
+            "--steps": "3", "--save_freq": "2",
+        }
+        with self.assertRaisesRegex(ContractError, "TRAINING_DELEGATION_LIMITS"):
+            _enforce_delegated_launch(
+                tight_inventory, dataset=self.dataset, repo_id=self.request["repo_id"],
+                profile="smolvla", config=final_checkpoint,
+            )
+        _enforce_delegated_launch(
+            tight_inventory, dataset=self.dataset, repo_id=self.request["repo_id"],
+            profile="smolvla",
+            config={**final_checkpoint, "--save_checkpoint": "false"},
+        )
+
+        delegation["authorization_source_ref"] = "changed-after-authorization"
+        write_json(path, delegation)
+        with self.assertRaisesRegex(ContractError, "TRAINING_DELEGATION_ARTIFACT"):
+            validate_training_approved_inventory(inventory)
+
+    def test_delegated_resume_and_offline_evaluation_recheck_current_limits(self):
+        from tools.data_factory.training_entrypoint import (
+            delegate_training_batch, resume_training,
+        )
+        from tools.evaluate_smolvla_offline import _enforce_delegated_evaluation
+
+        path, approval_output, _ = self.delegation()
+        inventory = delegate_training_batch(
+            self.request, approval_output, "local-training-owner", path,
+        )
+        run_output = approval_output.parent / "run"
+        run_output.mkdir()
+        config = self.delegated_launch_config(approval_output.parent)
+        argv = ["fixture-lerobot-train", *(f"{key}={value}" for key, value in config.items())]
+        write_json(run_output / "fr5_training_split.json", {
+            "dataset_identity": inventory["dataset_identity"],
+            "repo_id": self.request["repo_id"], "selected_episodes": [0, 2],
+            "feature_contract": {"profile": "smolvla"},
+        })
+        receipt_path = run_output / "fr5_training_receipt.json"
+        receipt = {
+            "approved_inventory_path": str(approval_output / "training_approved.json"),
+            "normalized_argv": argv,
+        }
+        write_json(receipt_path, receipt)
+        policy = run_output / "checkpoints/000002/pretrained_model"
+        with mock.patch(
+            "tools.validate_training_checkpoint.validate_checkpoint",
+            return_value=(policy, run_output),
+        ), mock.patch(
+            "tools.data_factory.training_entrypoint.run_native_training", return_value=0,
+        ) as runner:
+            self.assertEqual(resume_training(policy), 0)
+            runner.assert_called_once()
+            receipt["normalized_argv"] = [
+                value.replace("--policy.push_to_hub=false", "--policy.push_to_hub=true")
+                for value in argv
+            ]
+            write_json(receipt_path, receipt)
+            with self.assertRaisesRegex(ContractError, "TRAINING_DELEGATION_SCOPE"):
+                resume_training(policy)
+            runner.assert_called_once()
+
+        report = approval_output.parent / "offline-report.json"
+        _enforce_delegated_evaluation(
+            inventory, dataset=self.dataset, repo_id=self.request["repo_id"],
+            output_dir=run_output, output=report, batch_size=1,
+        )
+        with self.assertRaisesRegex(ValueError, "batch-size limit"):
+            _enforce_delegated_evaluation(
+                inventory, dataset=self.dataset, repo_id=self.request["repo_id"],
+                output_dir=run_output, output=report, batch_size=2,
+            )
+        with self.assertRaisesRegex(ValueError, "delegation scope"):
+            _enforce_delegated_evaluation(
+                inventory, dataset=self.dataset, repo_id=self.request["repo_id"],
+                output_dir=run_output, output=self.root / "outside-report.json",
+                batch_size=1,
+            )
+
+    def test_delegation_preserves_semantic_gate_and_rejects_mixed_or_incomplete_batches(self):
+        from tools.data_factory.training_entrypoint import delegate_training_batch
+
+        path, output, _ = self.delegation()
+        semantic_path = Path(self.sources[0]["human_semantic_evidence_path"])
+        semantic = load_json_strict(semantic_path)
+        semantic.update(semantic_status="FAIL", reason="TASK_GOAL")
+        write_json(semantic_path, semantic)
+        with self.assertRaisesRegex(ContractError, "TRAINING_SEMANTIC_PASS"):
+            delegate_training_batch(self.request, output, "local-training-owner", path)
+        self.assertFalse((output / "training_approved.json").exists())
+
+        semantic.update(semantic_status="PASS", reason=None)
+        write_json(semantic_path, semantic)
+        delegated = delegate_training_batch(
+            self.request, output, "local-training-owner", path,
+        )
+        incomplete = copy.deepcopy(delegated)
+        incomplete["episodes"] = incomplete["episodes"][:1]
+        incomplete["inventory_digest"] = canonical_digest({
+            key: incomplete[key]
+            for key in ("schema_version", "scope", "dataset_identity", "episodes")
+        })
+        with self.assertRaisesRegex(ContractError, "TRAINING_BATCH_BINDING"):
+            validate_training_approved_inventory(incomplete)
+
+        mislabeled = copy.deepcopy(delegated)
+        mislabeled["episodes"][0]["training_approval"]["provenance"] = PROVENANCE
+        mislabeled["inventory_digest"] = canonical_digest({
+            key: mislabeled[key]
+            for key in ("schema_version", "scope", "dataset_identity", "episodes")
+        })
+        with self.assertRaisesRegex(ContractError, "TRAINING_APPROVAL_PROVENANCE"):
+            validate_training_approved_inventory(mislabeled)
+
+        with self.terminal():
+            human = self.issue()
+        mixed = [delegated["episodes"][0], human["episodes"][1]]
+        with self.assertRaisesRegex(ContractError, "TRAINING_AUTHORIZATION_MIXED"):
+            build_training_approved_inventory(
+                scope=PRODUCTION_SCOPE, dataset_identity=delegated["dataset_identity"],
+                episodes=mixed,
+            )
+
     @contextmanager
     def web_review(self):
         import http.client

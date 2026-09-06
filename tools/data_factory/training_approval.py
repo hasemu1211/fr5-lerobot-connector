@@ -17,12 +17,15 @@ from tools.fr5_data_factory import ContractError, DIGEST, RFC3339, SAFE_ID, cano
 
 APPROVAL_SCHEMA = "data_factory.training_approval.v2"
 BATCH_APPROVAL_SCHEMA = "data_factory.training_approval.v3"
+DELEGATED_APPROVAL_SCHEMA = "data_factory.training_authorization.v1"
+DELEGATION_SCHEMA = "data_factory.local_training_delegation.v1"
 EPISODE_PROVENANCE_SCHEMA = "data_factory.episode_training_provenance.v1"
 LEDGER_PROVENANCE_SCHEMA = "data_factory.episode_training_provenance.v2"
 INVENTORY_SCHEMA = "data_factory.training_approved_inventory.v2"
 PRODUCTION_SCOPE = "PRODUCTION"
 SYNTHETIC_SCOPE = "SYNTHETIC_TEST_ONLY"
 PROVENANCE = "HUMAN_TRAINING_APPROVED"
+DELEGATED_PROVENANCE = "STANDING_LOCAL_TRAINING_DELEGATION"
 
 DATASET_KEYS = frozenset({"dataset_id", "repo_id", "dataset_root", "dataset_digest"})
 APPROVAL_KEYS = frozenset({
@@ -30,6 +33,24 @@ APPROVAL_KEYS = frozenset({
     "episode_content_digest", "technical_validator_digest",
     "human_semantic_evidence_digest", "episode_provenance_digest",
     "approved_by", "approved_at", "provenance",
+})
+DELEGATION_KEYS = frozenset({
+    "schema_version", "delegation_id", "scope", "delegated_by",
+    "authorized_actor", "authorization_source_ref", "dataset",
+    "output_root", "profiles", "limits", "authority",
+})
+DELEGATION_DATASET_KEYS = frozenset({"repo_id", "dataset_root"})
+DELEGATION_LIMIT_KEYS = frozenset({"max_steps", "max_batch_size", "max_checkpoints"})
+DELEGATION_AUTHORITY = {
+    "training": "LOCAL_OFFLINE_ONLY",
+    "physical_execution": False,
+    "remote_effects": False,
+}
+DELEGATED_APPROVAL_KEYS = frozenset({
+    "schema_version", "scope", "dataset_identity", "episode_id", "episode_index",
+    "episode_content_digest", "technical_validator_digest",
+    "human_semantic_evidence_digest", "episode_provenance_digest",
+    "authorized_actor", "authorized_at", "provenance", "delegation", "batch_digest",
 })
 EPISODE_PROVENANCE_KEYS = frozenset({
     "schema_version", "scope", "dataset_identity_digest", "episode_id",
@@ -370,6 +391,121 @@ def _bind_ledger_revision(provenance: Mapping[str, Any], dataset: Mapping[str, A
             raise ContractError("TRAINING_LEDGER_REVISION_BINDING")
 
 
+def validate_local_training_delegation(
+    source: Mapping[str, Any] | str | Path, *, authorized_actor: str | None = None,
+    dataset: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Validate recorded user-authorized local trust, not human authentication."""
+    value = _document(source)
+    _exact(value, DELEGATION_KEYS, "TRAINING_DELEGATION_FIELDS")
+    if value["schema_version"] != DELEGATION_SCHEMA:
+        raise ContractError("TRAINING_DELEGATION_SCHEMA")
+    _scope(value["scope"], PRODUCTION_SCOPE)
+    _id(value["delegation_id"], "TRAINING_DELEGATION_ID")
+    _id(value["delegated_by"], "TRAINING_DELEGATOR_ID")
+    actor = _id(value["authorized_actor"], "TRAINING_DELEGATION_ACTOR")
+    _text(value["authorization_source_ref"], "TRAINING_DELEGATION_SOURCE")
+    declared_dataset = dict(_exact(
+        value["dataset"], DELEGATION_DATASET_KEYS, "TRAINING_DELEGATION_DATASET",
+    ))
+    declared_dataset["repo_id"] = _text(
+        declared_dataset["repo_id"], "TRAINING_DELEGATION_DATASET",
+    )
+    declared_dataset["dataset_root"] = _text(
+        declared_dataset["dataset_root"], "TRAINING_DELEGATION_DATASET",
+    )
+    if not Path(declared_dataset["dataset_root"]).is_absolute():
+        raise ContractError("TRAINING_DELEGATION_DATASET")
+    output_root = _text(value["output_root"], "TRAINING_DELEGATION_OUTPUT")
+    if not Path(output_root).is_absolute():
+        raise ContractError("TRAINING_DELEGATION_OUTPUT")
+    from tools.fr5_training_profile import PROFILE_NAMES
+    profiles = value["profiles"]
+    if (
+        not isinstance(profiles, list) or not profiles
+        or any(not isinstance(profile, str) for profile in profiles)
+        or profiles != sorted(set(profiles))
+        or any(profile not in PROFILE_NAMES for profile in profiles)
+    ):
+        raise ContractError("TRAINING_DELEGATION_PROFILES")
+    limits = _exact(value["limits"], DELEGATION_LIMIT_KEYS, "TRAINING_DELEGATION_LIMITS")
+    for limit in DELEGATION_LIMIT_KEYS:
+        _count(limits[limit], "TRAINING_DELEGATION_LIMITS", positive=True)
+    if value["authority"] != DELEGATION_AUTHORITY:
+        raise ContractError("TRAINING_DELEGATION_AUTHORITY")
+    if authorized_actor is not None and actor != authorized_actor:
+        raise ContractError("TRAINING_DELEGATION_WRONG_ACTOR")
+    if dataset is not None:
+        checked_dataset = _dataset(dataset)
+        if any(checked_dataset[key] != declared_dataset[key] for key in DELEGATION_DATASET_KEYS):
+            raise ContractError("TRAINING_DELEGATION_DATASET")
+    value["dataset"] = declared_dataset
+    canonical_digest(value)
+    return value
+
+
+def validate_training_authorization(
+    source: Mapping[str, Any] | str | Path, *, expected_scope: str = PRODUCTION_SCOPE,
+) -> dict[str, Any]:
+    """Validate either the original human approval or delegated local authority."""
+    value = _document(source)
+    if value.get("schema_version") != DELEGATED_APPROVAL_SCHEMA:
+        return validate_training_approval(value, expected_scope=expected_scope)
+    _exact(value, DELEGATED_APPROVAL_KEYS, "TRAINING_AUTHORIZATION_FIELDS")
+    if value["provenance"] != DELEGATED_PROVENANCE:
+        raise ContractError("TRAINING_AUTHORIZATION_SCHEMA")
+    _scope(value["scope"], expected_scope)
+    dataset = _dataset(value["dataset_identity"])
+    _episode_identity(value["episode_id"], value["episode_index"], value["episode_content_digest"])
+    for field in (
+        "technical_validator_digest", "human_semantic_evidence_digest",
+        "episode_provenance_digest", "batch_digest",
+    ):
+        _digest(value[field], "TRAINING_AUTHORIZATION_BINDING")
+    actor = _id(value["authorized_actor"], "TRAINING_DELEGATION_ACTOR")
+    _timestamp(value["authorized_at"], "TRAINING_AUTHORIZATION_TIME")
+    reference = _exact(
+        value["delegation"], EPISODE_PROVENANCE_REF_KEYS,
+        "TRAINING_DELEGATION_REFERENCE",
+    )
+    delegation = _artifact(
+        reference["artifact_path"], reference["artifact_digest"],
+        "TRAINING_DELEGATION_ARTIFACT",
+    )
+    validate_local_training_delegation(
+        delegation, authorized_actor=actor, dataset=dataset,
+    )
+    canonical_digest(value)
+    return value
+
+
+def inventory_local_training_delegation(inventory: Mapping[str, Any]) -> dict[str, Any] | None:
+    """Return the current delegation behind a validated inventory, if any."""
+    references = []
+    modes = {
+        episode["training_approval"]["provenance"]
+        for episode in inventory["episodes"]
+    }
+    if len(modes) != 1:
+        raise ContractError("TRAINING_AUTHORIZATION_MIXED")
+    if modes == {PROVENANCE}:
+        return None
+    if modes != {DELEGATED_PROVENANCE}:
+        raise ContractError("TRAINING_APPROVAL_PROVENANCE")
+    for episode in inventory["episodes"]:
+        reference = episode["training_approval"]
+        authorization = validate_training_authorization(
+            _artifact(
+                reference["artifact_path"], reference["artifact_digest"],
+                "TRAINING_APPROVAL_ARTIFACT",
+            ),
+        )
+        references.append(authorization["delegation"])
+    if not references or any(reference != references[0] for reference in references[1:]):
+        raise ContractError("TRAINING_AUTHORIZATION_MIXED")
+    return validate_local_training_delegation(references[0]["artifact_path"])
+
+
 def validate_training_approval(
     source: Mapping[str, Any] | str | Path, *, expected_scope: str = PRODUCTION_SCOPE,
 ) -> dict[str, Any]:
@@ -538,12 +674,35 @@ def _batch_digest(approvals: Sequence[Mapping[str, Any]]) -> str:
     ])
 
 
+def delegated_batch_digest(authorizations: Sequence[Mapping[str, Any]]) -> str:
+    return canonical_digest([
+        {key: item[key] for key in DELEGATED_APPROVAL_KEYS if key != "batch_digest"}
+        for item in sorted(
+            authorizations, key=lambda item: (item["episode_index"], item["episode_id"]),
+        )
+    ])
+
+
 def _validate_batch_inventory(episodes: Sequence[Mapping[str, Any]]) -> None:
     approvals = [
         _artifact(item["training_approval"]["artifact_path"], item["training_approval"]["artifact_digest"], "TRAINING_APPROVAL_ARTIFACT")
         for item in episodes
     ]
-    if any(item["schema_version"] == BATCH_APPROVAL_SCHEMA for item in approvals):
+    modes = {item.get("provenance") for item in approvals}
+    if len(modes) != 1 or not modes <= {PROVENANCE, DELEGATED_PROVENANCE}:
+        raise ContractError("TRAINING_AUTHORIZATION_MIXED")
+    if modes == {DELEGATED_PROVENANCE}:
+        if any(item.get("schema_version") != DELEGATED_APPROVAL_SCHEMA for item in approvals):
+            raise ContractError("TRAINING_AUTHORIZATION_SCHEMA")
+        if (
+            len({json.dumps(item["delegation"], sort_keys=True) for item in approvals}) != 1
+            or len({item["authorized_actor"] for item in approvals}) != 1
+        ):
+            raise ContractError("TRAINING_AUTHORIZATION_MIXED")
+        digest = delegated_batch_digest(approvals)
+        if any(item.get("batch_digest") != digest for item in approvals):
+            raise ContractError("TRAINING_BATCH_BINDING")
+    elif any(item["schema_version"] == BATCH_APPROVAL_SCHEMA for item in approvals):
         digest = _batch_digest(approvals)
         if any(item.get("batch_digest") != digest for item in approvals):
             raise ContractError("TRAINING_BATCH_BINDING")
@@ -601,12 +760,14 @@ def _episode(
         raise ContractError("TRAINING_EPISODE_PROVENANCE_BINDING")
 
     approval_ref = _exact(result["training_approval"], APPROVAL_REF_KEYS, "TRAINING_APPROVAL_REFERENCE")
-    if approval_ref.get("provenance") != PROVENANCE:
+    if approval_ref.get("provenance") not in {PROVENANCE, DELEGATED_PROVENANCE}:
         raise ContractError("TRAINING_APPROVAL_PROVENANCE")
     approval_raw = _artifact(
         approval_ref.get("artifact_path"), approval_ref.get("artifact_digest"), "TRAINING_APPROVAL_ARTIFACT",
     )
-    approval = validate_training_approval(approval_raw, expected_scope=scope)
+    approval = validate_training_authorization(approval_raw, expected_scope=scope)
+    if approval_ref["provenance"] != approval["provenance"]:
+        raise ContractError("TRAINING_APPROVAL_PROVENANCE")
     if (
         approval["dataset_identity"] != dataset
         or approval["episode_id"] != episode_id
