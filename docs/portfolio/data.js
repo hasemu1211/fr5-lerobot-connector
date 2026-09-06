@@ -43,7 +43,7 @@ if (observations) {
       const image = document.getElementById(`${camera}-image`);
       image.hidden = false;
       image.src = item.images[i];
-      image.alt = `Episode ${episode}, frame ${item.frame}의 ${i === 0 ? '상부' : '손목'} 카메라 저장 관측`;
+      image.alt = `Episode ${episode}, frame ${item.frame}의 카메라 ${i + 1} 저장 관측`;
     });
     document.getElementById('frame-caption').textContent = `Episode ${episode} · frame ${item.frame} · ${item.timestamp.toFixed(3)} s · ${[10, 50, 90][moment]}% 위치의 표본`;
     document.getElementById('frame-source').href = `sources/observations.html#ep${episode}-f${item.frame}`;

@@ -1,0 +1,178 @@
+<!doctype html><html lang="ko"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>MoveIt 요청과 실행 연결 — FR5 근거</title><link rel="stylesheet" href="../site.css"></head><body><main class="source-page"><a href="../architecture.html#foundation">← 설명으로 돌아가기</a><h1>MoveIt 요청과 실행 연결</h1><p class="note">설명에 사용한 구현·측정 자료의 발췌이다. SHA-256은 발췌 전 원본 파일을 식별한다. 실행 PC의 절대 경로와 계정 정보는 포함하지 않으며, 측정값과 해석 조건을 함께 제시한다.</p><section id="moveit_transport"><h2>moveit_transport.py</h2><p class="locator">tools/data_factory/motion/moveit_transport.py<br>sha256:3af920a3b0e1907dcee09a6cb22e1cdaf732ad553008d83aa8bd6f6467ef1d35</p><p class="note">해당 기능의 함수 발췌. 줄 번호와 digest는 원본 기준이다.</p><pre># tools/data_factory/motion/moveit_transport.py:379 · start_phase
+    def start_phase(
+        self, compiled_step, *, cancel_event=None, cancel_timeout_s=None,
+    ):
+        &quot;&quot;&quot;Start one approved serialized action and retain its sole active handle.&quot;&quot;&quot;
+        if self._execution_locked or self._active is not None:
+            raise ContractError(&quot;ROS_EXEC_ACTIVE&quot;)
+        phase, step_type, goal, client, timeout = self._compiled_execution_goal(compiled_step)
+        if cancel_event is not None and (
+            not callable(getattr(cancel_event, &quot;is_set&quot;, None))
+            or isinstance(cancel_timeout_s, bool)
+            or not isinstance(cancel_timeout_s, (int, float))
+            or not math.isfinite(cancel_timeout_s)
+            or cancel_timeout_s &lt;= 0
+        ):
+            raise ContractError(&quot;ROS_EXEC_CANCEL_TIMEOUT&quot;)
+        if phase == &quot;LEARNED_CHUNK&quot;:
+            from tools.data_factory.rollout.finite_plan import check_freshness
+            check_freshness(compiled_step[&quot;learned_proposal&quot;], time.time())
+        active = _ActivePhase(phase, step_type, self._clock() + timeout)
+        self._active = active
+        self._execution_locked = True
+        if cancel_event is not None and cancel_event.is_set():
+            self._active = None
+            self._execution_locked = False
+            raise ContractError(&quot;ROS_EXEC_CANCELLED&quot;)
+        try:
+            sent = client.send_goal_async(goal)
+        except RuntimeError as exc:
+            self._active = None
+            self._execution_locked = False
+            raise ContractError(&quot;ROS_EXEC_GOAL_FAILED&quot;, str(exc)) from exc
+        active.goal_future = sent
+        if step_type == &quot;ARM&quot;:
+            self._execute_goal_count += 1
+        else:
+            self._gripper_goal_count += 1
+        try:
+            handle = self._wait(sent, self.graph_timeout_s, &quot;ROS_EXEC_GOAL_TIMEOUT&quot;)
+            accepted = getattr(handle, &quot;accepted&quot;, None)
+            if accepted is False:
+                self._active = None
+                self._execution_locked = False
+                if cancel_event is not None and cancel_event.is_set():
+                    raise ContractError(&quot;ROS_EXEC_CANCELLED&quot;)
+                raise ContractError(&quot;ROS_EXEC_REJECTED&quot;)
+            if accepted is not True:
+                raise ContractError(&quot;ROS_EXEC_GOAL_RESPONSE_INVALID&quot;)
+            active.goal_handle = handle
+            active.result_future = handle.get_result_async()
+        except ContractError as exc:
+            if exc.code == &quot;ROS_EXEC_CANCELLED&quot;:
+                raise
+            if cancel_event is None or not cancel_event.is_set():
+                raise
+            try:
+                self.cancel_active(float(cancel_timeout_s))
+            except ContractError as cancel_exc:
+                raise ContractError(&quot;ROS_EXEC_CANCEL_UNCERTAIN&quot;) from cancel_exc
+            raise ContractError(&quot;ROS_EXEC_CANCELLED&quot;) from exc
+        except RuntimeError as exc:
+            if cancel_event is not None and cancel_event.is_set():
+                try:
+                    self.cancel_active(float(cancel_timeout_s))
+                except ContractError as cancel_exc:
+                    raise ContractError(&quot;ROS_EXEC_CANCEL_UNCERTAIN&quot;) from cancel_exc
+                raise ContractError(&quot;ROS_EXEC_CANCELLED&quot;) from exc
+            raise ContractError(&quot;ROS_EXEC_RESULT_FAILED&quot;, str(exc)) from exc
+        if cancel_event is not None and cancel_event.is_set():
+            try:
+                self.cancel_active(float(cancel_timeout_s))
+            except ContractError as exc:
+                raise ContractError(&quot;ROS_EXEC_CANCEL_UNCERTAIN&quot;) from exc
+            raise ContractError(&quot;ROS_EXEC_CANCELLED&quot;)
+        self._execution_locked = False
+        return active
+
+# tools/data_factory/motion/moveit_transport.py:1146 · plan_arm
+    def plan_arm(
+        self,
+        phase,
+        target,
+        joint_target,
+        limits,
+        frames,
+        planning,
+        start_joint_state,
+    ):
+        goal = self._move_group_goal(
+            phase,
+            target,
+            joint_target,
+            limits,
+            frames,
+            planning,
+            start_joint_state,
+        )
+        try:
+            send_future = self.move_group.send_goal_async(goal)
+        except RuntimeError as exc:
+            raise ContractError(&quot;ROS_PLAN_GOAL_FAILED&quot;, str(exc)) from exc
+        handle = self._wait(
+            send_future, self.graph_timeout_s, &quot;ROS_PLAN_GOAL_TIMEOUT&quot;
+        )
+        if handle is None or not handle.accepted:
+            raise ContractError(&quot;ROS_PLAN_REJECTED&quot;)
+        try:
+            result = self._wait(
+                handle.get_result_async(),
+                limits[&quot;planning_timeout_s&quot;] + self.graph_timeout_s,
+                &quot;ROS_PLAN_RESULT_TIMEOUT&quot;,
+            )
+        except ContractError as exc:
+            if exc.code == &quot;ROS_PLAN_RESULT_TIMEOUT&quot;:
+                self._cancel_planning(handle)
+            raise
+        if (
+            result.status != self._goal_succeeded
+            or result.result.error_code.val != self._moveit_success
+        ):
+            raise ContractError(&quot;ROS_PLAN_FAILED&quot;)
+
+        trajectory = result.result.planned_trajectory
+        names = list(trajectory.joint_trajectory.joint_names)
+        points = trajectory.joint_trajectory.points
+        if len(names) != len(set(names)) or set(names) != set(JOINT_ORDER) or not points:
+            raise ContractError(&quot;ROS_FINAL_JOINTS&quot;)
+        positions = list(points[-1].positions)
+        if len(positions) != len(names) or any(not math.isfinite(value) for value in positions):
+            raise ContractError(&quot;ROS_FINAL_JOINTS&quot;)
+        by_name = dict(zip(names, positions))
+        serialized = self._serialize_message(trajectory)
+        if not serialized:
+            raise ContractError(&quot;ROS_PLAN_SERIALIZATION&quot;)
+        return {
+            &quot;terminal_status&quot;: &quot;SUCCEEDED&quot;,
+            &quot;moveit_success&quot;: True,
+            &quot;serialized_trajectory&quot;: serialized,
+            &quot;final_joint_state&quot;: [by_name[name] for name in JOINT_ORDER],
+        }
+
+# tools/data_factory/motion/moveit_transport.py:1239 · _move_group_goal
+    def _move_group_goal(
+        self,
+        phase,
+        target,
+        joint_target,
+        limits,
+        frames,
+        planning,
+        start_joint_state,
+    ):
+        goal = self._MoveGroup.Goal()
+        request = goal.request
+        request.pipeline_id = planning[&quot;pipeline_id&quot;]
+        request.planner_id = (
+            planning[&quot;ptp_planner_id&quot;]
+            if phase.endswith(&quot;_PTP&quot;)
+            else planning[&quot;lin_planner_id&quot;]
+        )
+        request.group_name = frames[&quot;planning_group&quot;]
+        request.num_planning_attempts = 1
+        request.allowed_planning_time = float(limits[&quot;planning_timeout_s&quot;])
+        request.max_velocity_scaling_factor = float(limits[&quot;velocity_scaling&quot;])
+        request.max_acceleration_scaling_factor = float(limits[&quot;acceleration_scaling&quot;])
+        request.start_state = self._RobotState(
+            joint_state=self._JointState(
+                name=list(JOINT_ORDER), position=list(map(float, start_joint_state))
+            ),
+            is_diff=True,
+        )
+        request.goal_constraints = [
+            self._constraints(phase, target, joint_target, frames, planning)
+        ]
+        goal.planning_options.plan_only = True
+        goal.planning_options.planning_scene_diff.is_diff = True
+        goal.planning_options.planning_scene_diff.robot_state.is_diff = True
+        return goal</pre></section></main></body></html>

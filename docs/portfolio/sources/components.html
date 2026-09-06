@@ -1,0 +1,10 @@
+<!doctype html><html lang="ko"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>외부 구성 요소의 출처 — FR5 근거</title><link rel="stylesheet" href="../site.css"></head><body><main class="source-page"><a href="../architecture.html#foundation">← 설명으로 돌아가기</a><h1>외부 구성 요소의 출처</h1><p class="note">설명에 사용한 구현·측정 자료의 발췌이다. SHA-256은 발췌 전 원본 파일을 식별한다. 실행 PC의 절대 경로와 계정 정보는 포함하지 않으며, 측정값과 해석 조건을 함께 제시한다.</p><section id="THIRD_PARTY_NOTICES"><h2>THIRD_PARTY_NOTICES.md</h2><p class="locator">THIRD_PARTY_NOTICES.md<br>sha256:8bef1035c71c98df4ef299b166eff7c1177ba776d15d12322cf274fe4894a0ed</p><p class="note">원문 전체.</p><pre># Third-party components
+
+This repository links FAIRINO&#x27;s ROS 2 repository as a submodule, applies a local patch, and includes an FR5-only robot-description subset for the current MoveIt configuration.
+
+- [FAIR-INNOVATION/frcobot_ros2](https://github.com/FAIR-INNOVATION/frcobot_ros2): ROS 2 packages referenced by `src/frcobot_ros2` and modified at setup time by `patches/frcobot_ros2.patch`. The FR5 meshes and URDF under `src/fairino_description` are a reduced derivative of this upstream material. Its package manifests currently contain unresolved `TODO` license declarations; confirm redistribution terms before granting reuse rights.
+- [FAIR-INNOVATION/fairino-cpp-sdk](https://github.com/FAIR-INNOVATION/fairino-cpp-sdk): `libfairino` headers and Linux shared library. The upstream repository declares Apache-2.0.
+- [DH-Robotics PGEA-100-40](https://en.dh-robotics.com/product/pgea): the gripper CAD mesh under `src/fairino_description/meshes/gripper` is included for the current robot description. Confirm the CAD file&#x27;s redistribution terms with its original provider before granting reuse rights.
+
+The top-level Apache License 2.0 applies to repository-authored scripts, tools, tests, configuration, and documentation. It does not relicense the third-party submodule, derived robot-description files, vendor patch context, or CAD meshes listed above; those remain subject to their respective owners&#x27; terms.
+</pre></section></main></body></html>
