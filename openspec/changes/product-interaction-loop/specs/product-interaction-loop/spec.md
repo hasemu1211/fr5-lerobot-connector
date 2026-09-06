@@ -44,3 +44,44 @@ The product SHALL avoid resolving an identical workspace cycle repeatedly within
 
 - **WHEN** a consumer changes displayed route fields in its returned view
 - **THEN** the canonical route, sibling projection fields and subsequent views remain unchanged.
+
+### Requirement: Complete an exact Curator review through the Web surface
+
+For an existing native Curator review run, the product SHALL let a local person inspect the synchronized raw, keep/geometry overlay and actual candidate video, its selected clip coverage and exact evidence identities, explicitly approve or reject the candidate, and read the native durable result in the Web UI. The current constraint is a trusted local loopback server bound to one run, with a server-owned OS actor that is not authenticated personal identity. The browser SHALL send only the explicit choice and expected review digest inside the existing intent envelope. It SHALL NOT select paths, claim an actor, prepare production candidates, grant training authority or inherit source approvals.
+
+#### Scenario: Review evidence and make an explicit decision
+
+- **WHEN** a configured native review is valid and its bound video is available
+- **THEN** the page presents the actual three-panel video with native playback, clip seeking and explicit sample-coverage limits
+- **AND** the person's approve or reject choice is consumed by Curator's existing lock, exact-evidence validation, event and atomic publication/cleanup owner without a TTY, typed acknowledgment or filesystem approval errand.
+
+#### Scenario: A stale, wrong-run or forged request arrives
+
+- **WHEN** a request has a stale view, a different review identity, an extra actor/run/path input, or a choice conflicting with an already recorded decision
+- **THEN** the existing view CAS and native review owner reject it without recording a new decision or granting additional authority
+- **AND** media retrieval requires the loopback token and current native review identity; browser-provided paths are never read.
+
+#### Scenario: A response is lost or a page is reopened
+
+- **WHEN** a decision response is lost or the page is refreshed or reopened
+- **THEN** the page reads the authoritative result without automatically sending the decision again
+- **AND** only an explicitly pending in-process request may cause bounded state reads; there is no idle whole-dataset polling
+- **AND** if the read fails, decision actions remain unavailable and an explicit state refresh remains possible.
+
+#### Scenario: A recorded action needs completion
+
+- **WHEN** native Curator reports a recorded decision with a recoverable publication or receipt failure
+- **THEN** the page shows that recorded choice and offers only native-permitted completion of it
+- **AND** recovery retains the original decision and actor without conflicting consent, duplicate publication, new approval authority or a required media-watching ritual.
+
+#### Scenario: The next domain consumes the result
+
+- **WHEN** Curator publishes or rejects the exact candidate
+- **THEN** the Web view exposes the native receipt, exact target/evidence identities, decision provenance and permitted effects for the next native consumer without manual path or digest transcription
+- **AND** this current human decision path does not define qualified future system judgment as human provenance or imply training admission. Curator retains lifecycle and lineage; training admission remains its existing owner's separate decision.
+
+#### Scenario: Review media fails after a durable decision
+
+- **WHEN** publication and its receipt are committed but the review video subsequently becomes missing or corrupt
+- **THEN** the page distinguishes the native committed decision/receipt from unavailable playback evidence
+- **AND** it does not describe the transport or media failure as rollback, permit an opposite choice, re-publish automatically, or claim the unavailable video remains valid.

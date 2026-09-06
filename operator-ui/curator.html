@@ -1,0 +1,47 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <!-- OPERATOR_TOKEN -->
+  <title>FR5 · 변환 후보 검토</title>
+  <link rel="stylesheet" href="styles.css">
+  <link rel="stylesheet" href="curator.css">
+  <script src="curator.js" defer></script>
+</head>
+<body>
+  <a class="skip-link" href="#curator-review">후보 검토로 건너뛰기</a>
+  <header class="app-header"><div class="brand">
+    <span class="brand-mark" aria-hidden="true">FR5</span>
+    <div><p>ROBOT LEARNING DATA FACTORY · CURATOR</p><h1>변환 후보 검토</h1></div>
+  </div></header>
+  <p id="curator-status" class="connection-banner" role="status" aria-live="polite">검토 근거를 확인하고 있습니다.</p>
+  <main id="curator-review" tabindex="-1">
+    <section class="curator-evidence" aria-labelledby="evidence-title">
+      <header class="curator-heading"><div><p class="step-number">같은 시점 · 세 가지 보기</p><h2 id="evidence-title">무엇을 남길까요?</h2></div>
+        <p>원본, 보존 영역, 실제 변환 후보를 함께 비교하세요. 아래 영상은 선택된 표본이며 전체 데이터의 품질을 보증하지 않습니다.</p></header>
+      <figure class="curator-film">
+        <div class="curator-panels" aria-hidden="true"><span>원본 UP</span><span>보존 영역 · 기하 overlay</span><span>실제 candidate</span></div>
+        <video id="curator-video" controls muted playsinline preload="metadata" aria-label="원본, 보존 영역, 실제 후보의 동기화된 검토 영상" aria-describedby="curator-video-note"></video>
+        <figcaption id="curator-video-note">재생하거나 장면 목록에서 검토할 위치로 이동하세요. 세 화면은 같은 프레임입니다.</figcaption>
+      </figure>
+      <p id="curator-media-status" role="status" aria-live="polite"></p>
+      <div class="curator-coverage"><h3>이번 영상에 포함된 범위</h3><p id="curator-coverage"></p></div>
+      <ol id="curator-clips" class="curator-clips" aria-label="검토 장면"></ol>
+    </section>
+    <aside class="curator-decision" aria-labelledby="decision-title">
+      <p class="step-number">이 후보에 대한 결정</p><h2 id="decision-title">검토 결과</h2>
+      <p id="curator-run"></p><p id="curator-actor"></p>
+      <p>승인하면 이 변환 후보를 출력 위치에 공개합니다. 반려하면 이 후보를 정리합니다. 원본은 보존되며 학습 사용 승인은 별도입니다.</p>
+      <div id="curator-actions" class="curator-actions">
+        <button id="curator-approve" type="button" hidden>이 후보 공개 승인</button>
+        <button id="curator-reject" type="button" class="secondary-button" hidden>이 후보 반려</button>
+        <button id="curator-recover" type="button" hidden>기록된 결정 마무리</button>
+        <button id="curator-refresh" type="button" class="secondary-button">현재 상태 확인</button>
+      </div>
+      <section id="curator-result" hidden aria-label="결정 결과"><h3>저장된 결과</h3><p id="curator-result-summary"></p><code id="curator-output"></code></section>
+      <details><summary>검토 식별과 근거</summary><p>이 서버에 연결된 후보만 검토합니다. 운영자 표시는 인증된 개인 신원을 뜻하지 않습니다.</p><pre id="curator-details"></pre></details>
+    </aside>
+  </main>
+</body>
+</html>

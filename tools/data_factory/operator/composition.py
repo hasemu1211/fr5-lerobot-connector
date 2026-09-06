@@ -1618,6 +1618,35 @@ def build_physical_runtime(
 def build_operator_runtime(*, effect_scope: str = "FAKE", **kwargs) -> OperatorRuntime:
     training_request = kwargs.pop("training_request", None)
     training_output = kwargs.pop("training_output", None)
+    curator_run_id = kwargs.pop("curator_run_id", None)
+    curator_run_root = kwargs.pop("curator_run_root", None)
+    curator_paths = kwargs.pop("curator_paths", None)
+    if (effect_scope == "CURATOR_REVIEW" or curator_run_id is not None
+            or curator_run_root is not None or curator_paths is not None):
+        if (effect_scope != "CURATOR_REVIEW" or not curator_run_id
+                or training_request is not None or training_output is not None
+                or curator_paths is not None and curator_run_root is not None):
+            raise ContractError("CURATOR_REVIEW_CONFIGURATION")
+        from dataclasses import replace
+        from tools.data_factory.curator.workflow.application import DEFAULT_PATHS
+        from tools.data_factory.operator.workflow.curator_review import CuratorReviewApplication
+
+        paths = curator_paths or DEFAULT_PATHS
+        if curator_run_root is not None:
+            paths = replace(paths, run_root=Path(curator_run_root))
+        application = CuratorReviewApplication(run_id=curator_run_id, paths=paths)
+        application.bridge_core.snapshot()  # Fail before listening if the configured review is unavailable.
+        bridge = LoopbackBridge(
+            core=application.bridge_core, ui_root=ROOT / "operator-ui",
+            port=kwargs.get("port", 4174), index_page="curator.html",
+            review_video_call=application.review_video,
+        )
+        return OperatorRuntime(
+            bridge=bridge, announcement={"status": "LISTENING", "url": bridge.origin,
+                                        "effect_scope": "CURATOR_REVIEW", "run_id": curator_run_id,
+                                        "starts_training": False},
+            close_calls=(bridge.server.server_close,),
+        )
     if effect_scope == "TRAINING_REVIEW" or training_request is not None or training_output is not None:
         if training_request is None or training_output is None or effect_scope != "TRAINING_REVIEW":
             raise ContractError("TRAINING_REVIEW_CONFIGURATION")
