@@ -16,7 +16,7 @@ from tools.data_factory.scene_state import validate_scene_binding
 
 
 RECORDER_READINESS_CONTRACT = {
-    "schema_version": "data_factory.recorder_readiness_contract.v1",
+    "schema_version": "data_factory.recorder_readiness_contract.v2",
     "deadline_s": 5.0,
     "min_durable_rows": 60,
     "target_fps": 30,
@@ -28,6 +28,8 @@ RECORDER_READINESS_CONTRACT = {
     "max_writer_queue_drops": 0,
     "max_alignment_failures": 0,
     "require_quality_accepted": True,
+    "scene_camera": "up",
+    "min_scene_brightness": 20.0,
 }
 # Compatibility name; the predicates are recorder quality, not a disposition.
 TEST_ONLY_READINESS_CONTRACT = RECORDER_READINESS_CONTRACT
@@ -439,6 +441,9 @@ class OneJob:
                 raise ContractError("EXECUTOR_BINDING")
             self.executor_state = response["state"]
             if op != "plan" and isinstance(response.get("data"), dict):
+                if self.plan_envelope and "learned_proposal" in self.plan_envelope["plan"]:
+                    from tools.data_factory.rollout.finite_plan import validate_execution_trace
+                    validate_execution_trace(self.plan_envelope["plan"], response["data"].get("learned_execution"))
                 self.execution_evidence = copy.deepcopy(response["data"])
                 self.execution_response = copy.deepcopy(response)
         if not response["ok"] and not allowed_failure:
@@ -570,7 +575,11 @@ class OneJob:
                 or dry_run.get("resolved_job_digest") != program["resolved_job_digest"]
                 or dry_run.get("binding_digests") != program["binding_digests"]
                 or [step.get("phase") for step in dry_run.get("steps", [])] != [step["phase"] for step in program["steps"]]
-                or dry_run["steps"][-1]["phase"] != "SAFE_POSE_PTP"
+                or ("learned_proposal" not in program and dry_run["steps"][-1]["phase"] != "SAFE_POSE_PTP")
+                or ("learned_proposal" in program and (
+                    dry_run.get("learned_proposal") != program["learned_proposal"]
+                    or dry_run.get("execution_kind") != "FINITE_LEARNED_PROBE"
+                ))
             ):
                 raise ContractError("EXECUTOR_RESPONSE")
             if not isinstance(envelope["precommit_safety"], dict) or envelope["precommit_safety"].get("run_id") != run_id or envelope["precommit_safety"].get("approved_plan_digest") != digest:
@@ -591,6 +600,19 @@ class OneJob:
     def plan_only(self, run_id, motion_program, scene_binding):
         """Compile a non-moving plan without manufacturing a human approval."""
         return self._prepare_plan(run_id, motion_program, scene_binding)
+
+    def plan_learned(self, run_id, motion_program, scene_binding, inference, observation, **options):
+        """Consume a native inference session through the existing zero-motion planner."""
+        from tools.data_factory.rollout.finite_plan import compile_program
+        if self.state != "IDLE":
+            return self._result(False, "ONE_JOB_ONLY")
+        try:
+            proposal = inference.propose(observation, **options)
+            program = compile_program(motion_program, proposal)
+        except ContractError as exc:
+            self.state = "BLOCKED"
+            return self._result(False, exc.code)
+        return self.plan_only(run_id, program, scene_binding)
 
     def prepare(self, plan):
         if not isinstance(plan, dict) or set(plan) != {"run_id", "motion_program", "scene_binding", "setup_approval"}:
@@ -793,6 +815,17 @@ class OneJob:
             if source_fps < contract["min_camera_source_fps"]:
                 raise ContractError("RECORDER_READINESS_CAMERA_FPS")
             camera_fps[name] = float(source_fps)
+        # Operational start condition, not dataset/semantic acceptance. Reuse
+        # the fresh sealed prefix; never rescan videos or gate on wrist occlusion.
+        scene_camera = cameras.get(contract["scene_camera"])
+        scene_brightness = scene_camera.get("brightness_mean") if isinstance(scene_camera, dict) else None
+        if (
+            not isinstance(scene_brightness, (int, float)) or isinstance(scene_brightness, bool)
+            or not math.isfinite(scene_brightness) or not 0 <= scene_brightness <= 255
+        ):
+            raise ContractError("RECORDER_READINESS_SCENE_VISIBILITY")
+        if scene_brightness < contract["min_scene_brightness"]:
+            raise ContractError("RECORDER_READINESS_SCENE_DARK")
         if contract["require_quality_accepted"] and (quality["accepted"] is not True or quality["reasons"]):
             raise ContractError("RECORDER_READINESS_QUALITY")
         if (
@@ -813,6 +846,8 @@ class OneJob:
                 "durable_rows": rows,
                 "effective_fps": float(row_fps),
                 "camera_source_fps": camera_fps,
+                "scene_camera": contract["scene_camera"],
+                "scene_brightness_mean": float(scene_brightness),
                 "writer_alive": True,
                 "writer_error": None,
                 "sampler_alive": True,
@@ -867,7 +902,7 @@ class OneJob:
             self._emit_lifecycle_event("MOTION_STARTING")
             self.lease_id = lease_id  # Arm only when the execute request is about to leave this process.
             response = self._request("executor", "execute", {"run_id": self.run_id, "plan_digest": self.plan_digest, "lease_id": lease_id})
-            if response["state"] != "EXECUTING":
+            if response["state"] not in ({"PRECONTACT_HUMAN"} if "learned_proposal" in self._program else {"EXECUTING"}):
                 raise ContractError("EXECUTOR_STATE")
         except ContractError as exc:
             return self._abort(exc.code)
@@ -1022,10 +1057,10 @@ class OneJob:
         if source not in {"HUMAN", "HIL_PROXY"} or source == "HIL_PROXY" and self.approval_scope != "HIL_NUMERIC_PROXY":
             return self._result(False, "VERDICT_SOURCE")
         try:
-            if verdict == "PASS":
+            if verdict == "PASS" and "learned_proposal" not in self._program:
                 self._emit_lifecycle_event("RECYCLING")
             response = self._request("executor", "semantic_verdict", {"run_id": self.run_id, "plan_digest": self.plan_digest, "verdict": verdict, "decided_by": decided_by, "source": source})
-            if response["state"] != "EXECUTING":
+            if response["state"] not in ({"COMPLETED"} if "learned_proposal" in self._program else {"EXECUTING"}):
                 raise ContractError("EXECUTOR_STATE")
         except ContractError as exc:
             return self._abort(exc.code)

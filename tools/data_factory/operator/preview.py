@@ -201,7 +201,7 @@ def make_fake_one_job(*, trace: list[str], counters: dict[str, int],
         return {
             "accepted": not reasons, "reasons": reasons, "frames": 60,
             "target_fps": 30, "effective_fps": row_fps,
-            "cameras": {"synthetic-up": {"source_fps": 30.0}},
+            "cameras": {"up": {"source_fps": 30.0, "brightness_mean": 120.0}},
             "writer_queue_drops": int(fault == "readiness_drop"),
             "alignment_failures": 0, "image_quality_warnings": [],
         }

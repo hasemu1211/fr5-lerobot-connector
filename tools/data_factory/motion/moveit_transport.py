@@ -371,6 +371,9 @@ class RosMoveItTransport:
                 client = self.gripper
         except RuntimeError as exc:
             raise ContractError("ROS_EXEC_DESERIALIZATION", str(exc)) from exc
+        if phase == "LEARNED_CHUNK":
+            if step_type != "ARM" or serialized != self.build_learned_trajectory(compiled_step.get("learned_proposal")):
+                raise ContractError("LEARNED_SERIALIZED_ACTION_MISMATCH")
         return phase, step_type, goal, client, float(timeout)
 
     def start_phase(
@@ -388,6 +391,9 @@ class RosMoveItTransport:
             or cancel_timeout_s <= 0
         ):
             raise ContractError("ROS_EXEC_CANCEL_TIMEOUT")
+        if phase == "LEARNED_CHUNK":
+            from tools.data_factory.rollout.finite_plan import check_freshness
+            check_freshness(compiled_step["learned_proposal"], time.time())
         active = _ActivePhase(phase, step_type, self._clock() + timeout)
         self._active = active
         self._execution_locked = True
@@ -891,7 +897,7 @@ class RosMoveItTransport:
             if len(joints) != len(JOINT_ORDER) or any(not math.isfinite(value) for value in joints):
                 raise ContractError("COLLISION_STATE")
             request = request_type()
-            request.group_name = plan["frames"]["planning_group"]
+            request.group_name = "" if "learned_proposal" in plan else plan["frames"]["planning_group"]
             request.robot_state = self._RobotState(
                 joint_state=self._JointState(
                     name=[*JOINT_ORDER, "finger_right_joint"],
@@ -917,18 +923,26 @@ class RosMoveItTransport:
                 names, points = list(trajectory.joint_names), list(trajectory.points)
             except (ValueError, RuntimeError, TypeError) as exc:
                 raise ContractError("COLLISION_TRAJECTORY", str(exc)) from exc
-            if names != JOINT_ORDER or not points:
+            learned = step["phase"] == "LEARNED_CHUNK"
+            expected_names = [*JOINT_ORDER, "finger_right_joint"] if learned else JOINT_ORDER
+            if names != expected_names or not points:
                 raise ContractError("COLLISION_TRAJECTORY")
-            previous, previous_time = step["start_joint_state"], -1.0
+            previous = [*step["start_joint_state"], gripper] if learned else step["start_joint_state"]
+            previous_time = -1.0
             for index, point in enumerate(points):
                 current = list(point.positions)
                 seconds = point.time_from_start.sec + point.time_from_start.nanosec / 1e9
-                if len(current) != len(JOINT_ORDER) or seconds <= previous_time:
+                if len(current) != len(expected_names) or seconds <= previous_time:
                     raise ContractError("COLLISION_TRAJECTORY")
                 for part in range(1, 5):
                     ratio = part / 5
-                    check(f"{step['phase']}:interp:{index}:{part}", [a + (b - a) * ratio for a, b in zip(previous, current)])
-                check(f"{step['phase']}:point:{index}", current)
+                    interpolated = [a + (b - a) * ratio for a, b in zip(previous, current)]
+                    if learned:
+                        gripper = interpolated[-1]
+                    check(f"{step['phase']}:interp:{index}:{part}", interpolated[:6])
+                if learned:
+                    gripper = current[-1]
+                check(f"{step['phase']}:point:{index}", current[:6])
                 previous, previous_time = current, seconds
         report = {"schema_version": "data_factory.collision_report.v1", "plan_digest": canonical_digest(plan), "sample_count": len(samples), "samples": samples, "failure_count": len(failures), "all_valid": not failures}
         if failures:
@@ -945,9 +959,13 @@ class RosMoveItTransport:
             before_gripper = before_snapshot["gripper_controller"]
             initial_gripper = float(before_gripper["feedback_position_m"])
             initial_reference = float(before_gripper["reference_position_m"])
-            open_step = next(step for step in plan["steps"] if step["phase"] == "GRIPPER_OPEN")
-            open_target = float(open_step["gripper_position_m"])
-            gripper_tolerance = float(open_step["limits"]["completion_tolerance_m"])
+            if "learned_proposal" in plan:
+                open_target = float(plan["learned_proposal"]["initial_state"][-1])
+                gripper_tolerance = float(plan["steps"][0]["gripper_tolerance_m"])
+            else:
+                open_step = next(step for step in plan["steps"] if step["phase"] == "GRIPPER_OPEN")
+                open_target = float(open_step["gripper_position_m"])
+                gripper_tolerance = float(open_step["limits"]["completion_tolerance_m"])
             if abs(initial_gripper - open_target) > gripper_tolerance or abs(initial_reference - open_target) > gripper_tolerance:
                 raise ContractError("GRIPPER_INITIAL_NOT_OPEN")
             collision = self._check_plan_collision(plan, initial_gripper)
@@ -1187,6 +1205,23 @@ class RosMoveItTransport:
             "serialized_trajectory": serialized,
             "final_joint_state": [by_name[name] for name in JOINT_ORDER],
         }
+
+    def build_learned_trajectory(self, proposal):
+        """Serialize exact absolute 7D knots for the existing ExecuteTrajectory owner.
+
+        No retiming, clipping, delta conversion or secondary gripper goal is used.
+        Controller support for the combined trajectory needs physical qualification.
+        """
+        from tools.data_factory.rollout.finite_plan import validate_proposal, JOINTS
+        proposal = validate_proposal(proposal)
+        trajectory = self._RobotTrajectory()
+        trajectory.joint_trajectory.joint_names = list(JOINTS)
+        for index, row in enumerate([proposal["initial_state"], *proposal["actions"]]):
+            point = self._JointTrajectoryPoint()
+            point.positions = list(map(float, row))
+            point.time_from_start = self._duration(index * proposal["period_s"])
+            trajectory.joint_trajectory.points.append(point)
+        return self._serialize_message(trajectory)
 
     def arm_trajectory_duration_s(self, serialized):
         """Return the approved trajectory's controller time horizon."""

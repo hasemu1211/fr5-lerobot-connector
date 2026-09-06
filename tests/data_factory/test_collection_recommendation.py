@@ -1,6 +1,11 @@
 from __future__ import annotations
 
 import copy
+from concurrent.futures import ThreadPoolExecutor
+import json
+import tempfile
+import threading
+from types import SimpleNamespace
 import unittest
 from datetime import datetime, timezone
 from pathlib import Path
@@ -10,13 +15,21 @@ from tools.data_factory.collection_recommendation import (
     AUTHORITY,
     build_collection_recommendation,
     project_update_draft_intent,
+    project_campaign_update_intent,
     validate_collection_recommendation,
+    derive_collection_recommendation,
 )
+from tools.data_factory.collection_recommendation_io import recommend_stored_collection, main as recommend_main
+from tools.data_factory.campaign_operator import (
+    AUTHORING_EVIDENCE_SCHEMA, CampaignOperator, SIDE_EFFECT_COUNTERS,
+)
+from tools.data_factory import run_job
 from tools.data_factory.campaign_authoring import (
     DRAFT_SCHEMA_V2,
+    campaign_cell_id,
     compile_collection_campaign,
 )
-from tools.data_factory.operator.workflow.intents import OperatorIntentCore
+from tools.data_factory.operator.workflow.intents import INTENT_SCHEMA, OperatorIntentCore
 from tools.data_factory.operator.workflow.application import (
     CollectionOperatorApplication,
 )
@@ -51,7 +64,9 @@ def unavailable(reason: str) -> dict:
 
 
 class RecommendationFixture:
-    def __init__(self) -> None:
+    def __init__(self, *, dataset_root="/dataset/test", evidence_root="/evidence") -> None:
+        self.dataset_root = dataset_root
+        self.evidence_root = evidence_root
         state_space_profile = redigest({
             "schema_version": "data_factory.state_space_design_profile.v1",
             "state_space_design_profile_id": "design-r1",
@@ -167,7 +182,7 @@ class RecommendationFixture:
         staging = {
             "schema_version": "data_factory.staging_manifest.v1",
             "run_id": run_id,
-            "dataset_root": "/dataset/test",
+            "dataset_root": self.dataset_root,
             "episode_index": episode_index,
             "staging_mode": "batch",
             "binding_digests": {
@@ -181,7 +196,7 @@ class RecommendationFixture:
                 "grasp_profile_digest": digest(["grasp", order_index]),
             },
             "camera_staging_dirs": {
-                "up": f"/dataset/test/images/up/episode-{episode_index:06d}",
+                "up": f"{self.dataset_root}/images/up/episode-{episode_index:06d}",
             },
             "begin_snapshot": {"total_episodes": episode_index},
         }
@@ -196,7 +211,7 @@ class RecommendationFixture:
         episode_ref_digest = digest(episode_ref)
         dataset_digest = digest({
             "repo_id": "local/test-dataset",
-            "dataset_root": "/dataset/test",
+            "dataset_root": self.dataset_root,
             "episode_ref": episode_ref,
         })
         locator = redigest({
@@ -335,7 +350,7 @@ class RecommendationFixture:
             "run_id": run_id,
             "resolved_job_digest": resolved_job_digest,
             "plan_digest": plan_artifact["plan_digest"],
-            "dataset_root": "/dataset/test",
+            "dataset_root": self.dataset_root,
             "expected_fps": 15.0,
             "status": "PASS",
             "result_digest": digest(["technical", order_index]),
@@ -364,7 +379,7 @@ class RecommendationFixture:
                 "run_id": run_id,
                 "episode_ref": episode_ref,
                 "dataset_filesystem": {
-                    "path": "/dataset/test", "device": 1,
+                    "path": self.dataset_root, "device": 1,
                     "total_bytes": 10_000,
                 },
                 "encoder_temp_filesystem": {
@@ -412,9 +427,9 @@ class RecommendationFixture:
         refs = {
             name: {
                 "artifact_path": (
-                    f"/evidence/{run_id}/episode-{episode_index:06d}.jsonl"
+                    f"{self.evidence_root}/{run_id}/episode-{episode_index:06d}.jsonl"
                     if name == "source_provenance" else
-                    f"/evidence/{run_id}/{name}.json"
+                    f"{self.evidence_root}/{run_id}/{name}.json"
                 ),
                 "artifact_digest": digest(value),
             }
@@ -425,7 +440,7 @@ class RecommendationFixture:
             "dataset": {
                 "dataset_id": f"dataset-{dataset_digest[7:23]}",
                 "repo_id": "local/test-dataset",
-                "dataset_root": "/dataset/test",
+                "dataset_root": self.dataset_root,
                 "dataset_digest": dataset_digest,
             },
             "episode": {
@@ -461,7 +476,7 @@ class RecommendationFixture:
             "ledger_digest": ledger["ledger_digest"],
             "episode_ref_digest": episode_ref_digest,
             "candidate": {
-                "artifact_path": f"/evidence/{run_id}/candidate_admission.json",
+                "artifact_path": f"{self.evidence_root}/{run_id}/candidate_admission.json",
                 "artifact_digest": digest(candidate),
             },
             "review": {
@@ -533,6 +548,41 @@ class RecommendationFixture:
         }
         arguments.update(changes)
         return build_collection_recommendation(**arguments)
+
+    def authoring(self) -> dict:
+        return redigest({
+            "schema_version": AUTHORING_EVIDENCE_SCHEMA,
+            "hypothesis": self.hypothesis, "draft": self.draft,
+            "manifest": self.manifest, "compilation_receipt": self.receipt,
+        }, "authoring_digest")
+
+    def store(self) -> list[Path]:
+        """Write synthetic owner artifacts, including dummy locator targets."""
+        roots = []
+        for evidence in self.evidence:
+            ledger = evidence["ledger"]
+            root = Path(self.evidence_root) / ledger["episode"]["run_id"]
+            root.mkdir(parents=True)
+            roots.append(root)
+            for name, value in evidence["artifacts"].items():
+                path = Path(ledger["artifacts"][name]["artifact_path"])
+                if name in {"source_provenance", "recording_quality"}:
+                    rows = value if name == "source_provenance" else [value]
+                    path.write_text("".join(json.dumps(row) + "\n" for row in rows))
+                else:
+                    path.write_text(json.dumps(value))
+            for name, value in {
+                "episode_ledger.json": ledger, "episode_ledger_state.json": evidence["state"],
+                "candidate_admission.json": evidence["candidate"],
+                "compiled_authoring_evidence.json": self.authoring(),
+            }.items():
+                (root / name).write_text(json.dumps(value))
+            locator = ledger["episode"]["lerobot_v3_locator"]
+            for location in [locator["data"], *locator["videos"]]:
+                path = Path(self.dataset_root) / location["relative_path"]
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes(b"synthetic locator target; not a real dataset")
+        return roots
 
     @staticmethod
     def view() -> dict:
@@ -645,6 +695,7 @@ class CollectionRecommendationTests(unittest.TestCase):
             suggested_draft_patches=list(reversed(self.fixture.patches)),
         )
         self.assertEqual(first, second)
+
         self.assertEqual(
             [episode["manifest_order_index"] for episode in first["input_snapshot"]["episodes"]],
             [0, 1],
@@ -674,6 +725,357 @@ class CollectionRecommendationTests(unittest.TestCase):
                 episode_evidence=list(reversed(self.fixture.evidence)),
             )
         self.assertEqual(self.fixture.__dict__, before)
+
+    def test_retained_recommendation_preserves_later_native_draft_edits(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            fixture = RecommendationFixture(
+                dataset_root=str(root / "data"), evidence_root=str(root / "runs"),
+            )
+            runs = fixture.store()
+            result = recommend_stored_collection(run_directories=runs[:1], source_commit=COMMIT)
+            recommendation = result["recommendation"]
+            target = recommendation["suggested_draft_patches"][0]["value"]["direct_slots"][0]["slot_id"]
+            edits = {
+                "excluded": [target], "pinned": [fixture.manifest["slots"][0]["slot_id"]],
+                "normalized_seed": fixture.draft["normalized_seed"] + 1, "requested_count": 1,
+            }
+            for field, value in edits.items():
+                with self.subTest(field=field):
+                    forbidden = mock.Mock(side_effect=AssertionError("no physical effects"))
+                    app = CampaignOperator(
+                        session_id="edited-campaign", lifecycle_owner="TEST_OPERATOR",
+                        workspace={"identity":"SYNTHETIC"}, hypothesis=fixture.hypothesis,
+                        draft=fixture.draft, effect_scope="FAKE", lifecycle_action="AUTHOR_ONLY",
+                        data_disposition="TEST_ONLY",
+                        subsystems={"planner":{"readiness":"READY", "capability":"AUTHOR", "reason":"SYNTHETIC"}},
+                        expires_at="2099-01-01T00:00:00Z", initial_scene_digest=digest("scene"),
+                        scene_evidence_call=forbidden, fake_lifecycle_factory=forbidden,
+                        side_effect_counter_call=lambda: {name:0 for name in SIDE_EFFECT_COUNTERS},
+                        clock=lambda: NOW,
+                    )
+                    view = app.core.snapshot()
+                    payload = {key: copy.deepcopy(fixture.draft[key]) for key in (
+                        "requested_count", "normalized_seed", "pinned", "excluded", "direct_slots",
+                    )}
+                    payload.update(authoring_mode="ASSISTED", **{field:value})
+                    app.core.consume({
+                        "schema_version":INTENT_SCHEMA, "intent_id":"current-user-edit",
+                        "session_id":view["session_id"], "view_revision":view["revision"],
+                        "view_digest":view["view_digest"], "op":"update_draft", "payload":payload,
+                    })
+                    current = app.core.snapshot()
+                    with self.assertRaisesRegex(ContractError, "COLLECTION_RECOMMENDATION_DRAFT_CHANGED"):
+                        project_campaign_update_intent(
+                            recommendation, compiled_authoring=fixture.authoring(), operator_view=current,
+                            data_quality_analysis=result["data_quality_analysis"],
+                        )
+                    self.assertEqual(app.core.snapshot(), current)
+                    self.assertEqual(app.draft[field], value)
+                    forbidden.assert_not_called()
+
+    def test_native_stored_consumer_replay_invalidation_and_update_draft(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            fixture = RecommendationFixture(
+                dataset_root=str(root / "synthetic-data"), evidence_root=str(root / "runs"),
+            )
+            runs = fixture.store()
+            before = {str(p): p.read_bytes() for p in root.rglob("*") if p.is_file()}
+            arguments = dict(run_directories=runs[:1], source_commit=COMMIT, output_root=root / "derived")
+            first = recommend_stored_collection(**arguments)
+            self.assertEqual(first["availability"], "AVAILABLE", first)
+            self.assertEqual(first, recommend_stored_collection(**arguments))
+            advice = first["recommendation"]
+            patch = advice["suggested_draft_patches"][0]
+            self.assertEqual(patch["field"], "campaign_selection")
+            self.assertEqual(patch["value"]["requested_count"], 1)
+            factory = mock.Mock(side_effect=AssertionError("collection must not start"))
+            application = CampaignOperator(
+                session_id="recommendation-campaign", lifecycle_owner="TEST_OPERATOR",
+                workspace={"identity": "SYNTHETIC"}, hypothesis=fixture.hypothesis,
+                draft=fixture.draft, effect_scope="FAKE", lifecycle_action="AUTHOR_ONLY",
+                data_disposition="TEST_ONLY",
+                subsystems={"planner": {"readiness": "READY", "capability": "AUTHOR", "reason": "SYNTHETIC"}},
+                expires_at="2099-01-01T00:00:00Z",
+                initial_scene_digest=digest("scene"), scene_evidence_call=factory,
+                side_effect_counter_call=lambda: {name: 0 for name in SIDE_EFFECT_COUNTERS},
+                fake_lifecycle_factory=factory, clock=lambda: NOW,
+            )
+            # Unrelated owner publication does not stale the recommendation.
+            original_view = application.core.snapshot()
+            application.core.transition(lambda: None)
+            view = application.core.snapshot()
+            self.assertGreater(view["revision"], original_view["revision"])
+            intent = project_campaign_update_intent(
+                advice, compiled_authoring=fixture.authoring(), operator_view=view,
+                data_quality_analysis=first["data_quality_analysis"],
+            )
+            application.core.consume(intent)
+            self.assertEqual(application.draft["requested_count"], 1)
+            with self.assertRaisesRegex(ContractError, "STALE_VIEW"):
+                application.core.consume({**intent, "intent_id": "stale-native-advice"})
+            compile_view = application.core.snapshot()
+            application.core.consume({
+                **intent, "intent_id": "compile-selected-condition", "op": "compile_draft",
+                "view_revision": compile_view["revision"], "view_digest": compile_view["view_digest"],
+                "payload": {},
+            })
+            missing = {digest(cell["condition"]) for cell in first["data_quality_analysis"]["cells"]
+                       if cell["counts"]["collected"] == 0}
+            bases = {base["base_condition_digest"]: base for base in fixture.hypothesis["base_conditions"]}
+            compiled_conditions = {digest(bases[slot["base_condition_digest"]]["coverage_condition"])
+                                   for slot in application.manifest["slots"]}
+            self.assertEqual(compiled_conditions, missing)
+            self.assertNotEqual(application.manifest["slots"][0]["base_condition_digest"],
+                                fixture.manifest["slots"][0]["base_condition_digest"])
+            factory.assert_not_called()
+            self.assertFalse(any(application.projection()["side_effect_counters"].values()))
+            with self.assertRaisesRegex(ContractError, "CAMPAIGN_OWNER_REQUIRED"):
+                project_update_draft_intent(
+                    advice, selected_change_id=patch["change_id"], operator_view=view,
+                    data_quality_analysis=first["data_quality_analysis"],
+                )
+            altered = copy.deepcopy(advice)
+            altered["suggested_draft_patches"][0]["value"]["normalized_seed"] += 1
+            redigest(altered, "recommendation_digest")
+            with self.assertRaisesRegex(ContractError, "SELECTION_BINDING"):
+                project_campaign_update_intent(
+                    altered, compiled_authoring=fixture.authoring(), operator_view=view,
+                    data_quality_analysis=first["data_quality_analysis"],
+                )
+            altered_view = copy.deepcopy(view)
+            altered_view["projection"]["draft"]["source"]["hypothesis_digest"] = digest("other-source")
+            with self.assertRaisesRegex(ContractError, "CAMPAIGN_VIEW"):
+                project_campaign_update_intent(
+                    advice, compiled_authoring=fixture.authoring(), operator_view=altered_view,
+                    data_quality_analysis=first["data_quality_analysis"],
+                )
+            second = recommend_stored_collection(**{**arguments, "run_directories": runs})
+            self.assertEqual(second["availability"], "AVAILABLE", second)
+            self.assertNotEqual(first["output_path"], second["output_path"])
+            self.assertEqual(second, recommend_stored_collection(**{**arguments, "run_directories": runs[::-1]}))
+            self.assertNotEqual(advice["input_snapshot"]["snapshot_digest"], second["recommendation"]["input_snapshot"]["snapshot_digest"])
+            for path, content in before.items():
+                self.assertEqual(Path(path).read_bytes(), content)
+            self.assertTrue(Path(first["output_path"]).is_dir())
+            with mock.patch("builtins.print"):
+                self.assertEqual(recommend_main([
+                    "--run-dir", str(runs[0]), "--source-commit", COMMIT,
+                    "--output-root", str(root / "derived"),
+                ]), 0)
+
+    def test_native_missing_mismatched_changed_sources_and_exclusive_outputs(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            fixture = RecommendationFixture(
+                dataset_root=str(root / "synthetic-data"), evidence_root=str(root / "runs"),
+            )
+            runs = fixture.store()
+            arguments = dict(run_directories=runs[:1], source_commit=COMMIT)
+            for output in (runs[0], root / "synthetic-data", root):
+                with self.subTest(output=output), self.assertRaisesRegex(ContractError, "OUTPUT_OVERLAP"):
+                    recommend_stored_collection(**arguments, output_root=output)
+            output = root / "derived"
+            first = recommend_stored_collection(**arguments, output_root=output)
+            path = Path(first["output_path"]) / "coverage_report.json"
+            path.write_text("{}")
+            with self.assertRaisesRegex(ContractError, "OUTPUT_CONFLICT"):
+                recommend_stored_collection(**arguments, output_root=output)
+            authoring_path = runs[0] / "compiled_authoring_evidence.json"
+            original = authoring_path.read_text()
+            authoring_path.unlink()
+            missing = recommend_stored_collection(**arguments)
+            self.assertEqual(missing["reason_codes"], ["COLLECTION_RECOMMENDATION_AUTHORING_UNAVAILABLE"])
+            self.assertIsNone(missing["recommendation"])
+            altered = json.loads(original)
+            altered["draft"]["normalized_seed"] += 1
+            redigest(altered, "authoring_digest")
+            authoring_path.write_text(json.dumps(altered))
+            self.assertEqual(recommend_stored_collection(**arguments)["availability"], "UNAVAILABLE")
+            authoring_path.write_text(original)
+            other = copy.deepcopy(fixture)
+            other.draft["manifest_id"] = "another-valid-campaign"
+            other.manifest, other.receipt = compile_collection_campaign(other.draft, hypothesis=other.hypothesis)
+            authoring_path.write_text(json.dumps(other.authoring()))
+            self.assertEqual(recommend_stored_collection(**arguments)["reason_codes"],
+                             ["COLLECTION_RECOMMENDATION_AUTHORING_MISMATCH"])
+            authoring_path.write_text(original)
+            technical = Path(fixture.evidence[0]["ledger"]["artifacts"]["technical"]["artifact_path"])
+            technical.write_text("{}")
+            changed = recommend_stored_collection(**arguments)
+            self.assertEqual(changed["availability"], "UNAVAILABLE")
+            self.assertIn("DIGEST", changed["reason_codes"][0])
+
+    def test_native_concurrent_identical_publish_reuses_complete_output(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            fixture = RecommendationFixture(
+                dataset_root=str(root / "synthetic-data"), evidence_root=str(root / "runs"),
+            )
+            runs = fixture.store()
+            start = threading.Barrier(8)
+
+            def publish(_):
+                start.wait(timeout=10)
+                return recommend_stored_collection(
+                    run_directories=runs[:1], source_commit=COMMIT,
+                    output_root=root / "derived",
+                )
+
+            with ThreadPoolExecutor(max_workers=8) as pool:
+                results = list(pool.map(publish, range(8)))
+            self.assertTrue(all(result == results[0] for result in results))
+            self.assertEqual(results[0]["availability"], "AVAILABLE")
+            self.assertEqual(len(list((root / "derived").iterdir())), 1)
+
+    def test_native_failed_publication_does_not_expose_partial_result(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            fixture = RecommendationFixture(
+                dataset_root=str(root / "synthetic-data"), evidence_root=str(root / "runs"),
+            )
+            runs = fixture.store()
+            arguments = dict(run_directories=runs[:1], source_commit=COMMIT,
+                             output_root=root / "derived")
+            original = json.dump
+            calls = 0
+
+            def fail_second(*args, **kwargs):
+                nonlocal calls
+                calls += 1
+                if calls == 2:
+                    raise OSError("interrupted publication")
+                return original(*args, **kwargs)
+
+            with mock.patch("tools.data_factory.collection_recommendation_io.json.dump", side_effect=fail_second):
+                with self.assertRaisesRegex(OSError, "interrupted publication"):
+                    recommend_stored_collection(**arguments)
+            self.assertEqual(list((root / "derived").iterdir()), [])
+            self.assertEqual(recommend_stored_collection(**arguments)["availability"], "AVAILABLE")
+
+    def test_native_source_commit_is_explicitly_unverified_caller_label(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            fixture = RecommendationFixture(
+                dataset_root=str(root / "synthetic-data"), evidence_root=str(root / "runs"),
+            )
+            result = recommend_stored_collection(run_directories=fixture.store()[:1], source_commit="0" * 40)
+            self.assertEqual(result["implementation_provenance"], {
+                "source_commit": "0" * 40, "verification": "CALLER_SUPPLIED_UNVERIFIED",
+            })
+
+    def test_postcommit_owner_retains_exact_authoring_for_native_consumer(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            fixture = RecommendationFixture(
+                dataset_root=str(root / "synthetic-data"), evidence_root=str(root / "runs"),
+            )
+            runs = fixture.store()
+            evidence = fixture.evidence[0]
+            artifacts = evidence["artifacts"]
+            run_dir = runs[0]
+            (run_dir / "compiled_authoring_evidence.json").unlink()
+            for name, artifact in {
+                "result.json": "run", "storage_usage.json": "episode",
+                "staging_manifest.json": "staging_manifest", "preapproval_evidence.json": "plan",
+                "technical_validator.json": "technical",
+            }.items():
+                (run_dir / name).write_text(json.dumps(artifacts[artifact]))
+            metadata = Path(fixture.dataset_root) / "meta"
+            (metadata / "source_provenance").mkdir(parents=True)
+            (metadata / "source_provenance/episode-000010.jsonl").write_text(
+                "".join(json.dumps(row) + "\n" for row in artifacts["source_provenance"]),
+            )
+            (metadata / "recording_quality.jsonl").write_text(json.dumps(artifacts["recording_quality"]) + "\n")
+            context = {
+                "manifest": fixture.manifest, "intent": artifacts["intent"],
+                "compiled_authoring": fixture.authoring(),
+            }
+            before = copy.deepcopy(context)
+            payload = {
+                "run_id": artifacts["run"]["run_id"], "run_root": fixture.evidence_root,
+                "dataset_root": fixture.dataset_root,
+            }
+            # This fixture predates trajectory v2; isolate that unrelated runtime
+            # input validator, while exercising real ledger/compiler/state owners.
+            with mock.patch.object(run_job, "_validated_trajectory_binding", return_value=None):
+                reference = run_job._write_episode_ledger(
+                    payload, {}, {"repo_id": evidence["ledger"]["dataset"]["repo_id"]},
+                    SimpleNamespace(execution_response=artifacts["execution"], plan_envelope=artifacts["plan"]["plan_envelope"]),
+                    artifacts["episode"], artifacts["runtime_binding"], context,
+                    trajectory_binding=None, episode_locator=evidence["ledger"]["episode"]["lerobot_v3_locator"],
+                )
+            self.assertEqual(json.loads((run_dir / "compiled_authoring_evidence.json").read_text()), before["compiled_authoring"])
+            self.assertEqual(context, before)
+            run_job.bind_candidate_episode_state(reference, run_dir / "candidate_admission.json")
+            result = recommend_stored_collection(
+                run_directories=[run_dir], source_commit=COMMIT, output_root=root / "derived",
+            )
+            self.assertEqual(result["availability"], "AVAILABLE", result)
+            self.assertEqual(result["recommendation"]["suggested_draft_patches"][0]["value"]["requested_count"], 1)
+            with self.assertRaisesRegex(ContractError, "AUTHORING_BINDING"):
+                other = copy.deepcopy(context)
+                other["manifest"] = copy.deepcopy(context["manifest"])
+                other["manifest"]["manifest_id"] = "other-manifest"
+                redigest(other["manifest"], "manifest_digest")
+                other["intent"]["manifest_digest"] = other["manifest"]["manifest_digest"]
+                redigest(other["intent"], "intent_digest")
+                binding = {**artifacts["runtime_binding"],
+                           "manifest_digest": other["manifest"]["manifest_digest"],
+                           "intent_digest": other["intent"]["intent_digest"]}
+                run_job._validate_episode_ledger_context(other, episode_binding=binding, run_id=payload["run_id"])
+            legacy = {key: context[key] for key in ("manifest", "intent")}
+            self.assertEqual(run_job._validate_episode_ledger_context(
+                legacy, episode_binding=artifacts["runtime_binding"], run_id=payload["run_id"],
+            ), legacy)
+
+    def test_native_quality_pending_review_and_covered_domain_do_not_invent_deficits(self) -> None:
+        fixture = self.fixture
+        first_slot = {key: value for key, value in fixture.manifest["slots"][0].items() if key != "order_index"}
+        other_base = next(base for base in fixture.hypothesis["base_conditions"]
+                          if base["base_condition_digest"] != first_slot["base_condition_digest"])
+        fixture.draft.update(selector="DIRECT_LIST", direct_slots=[first_slot, {
+            **first_slot, "slot_id": campaign_cell_id(other_base["base_condition_digest"], "start-3", "OOD", 0),
+            "robot_start_pose_id": "start-3",
+            "base_condition_digest": other_base["base_condition_digest"], "split_group": "OOD",
+        }])
+        fixture.manifest, fixture.receipt = compile_collection_campaign(
+            fixture.draft, hypothesis=fixture.hypothesis,
+        )
+        fixture.evidence = [fixture.episode(index, index + 10) for index in range(len(fixture.manifest["slots"]))]
+        report, advice = derive_collection_recommendation(
+            compiled_authoring=fixture.authoring(), episode_evidence=fixture.evidence,
+            source_commit=COMMIT,
+        )
+        self.assertTrue(all(cell["counts"]["collected"] for cell in report["cells"]))
+        self.assertEqual(advice["suggested_draft_patches"], [])
+        self.assertFalse(any(claim["class"] == "SUGGESTED" for claim in advice["claims"]))
+        pending = fixture.evidence[0]
+        pending["candidate"].update(semantic_status="PENDING", reviewed_by=None, reviewed_at=None)
+        fixture.rebind_episode(pending)
+        report, advice = derive_collection_recommendation(
+            compiled_authoring=fixture.authoring(), episode_evidence=[pending], source_commit=COMMIT,
+        )
+        self.assertEqual(sum(cell["counts"]["pending_review"] for cell in report["cells"]), 1)
+        self.assertEqual(sum(cell["counts"]["human_semantic_pass"] for cell in report["cells"]), 0)
+        self.assertEqual({claim["subject"] for claim in advice["claims"] if claim["class"] == "UNKNOWN"},
+                         {"person", "background", "robot", "rollout", "semantic"})
+
+    def test_native_slot_advice_does_not_discard_explicit_selection_constraints(self) -> None:
+        fixture = self.fixture
+        fixture.draft["pinned"] = [fixture.manifest["slots"][0]["slot_id"]]
+        fixture.manifest, fixture.receipt = compile_collection_campaign(
+            fixture.draft, hypothesis=fixture.hypothesis,
+        )
+        fixture.evidence = [fixture.episode(0, 10)]
+        before = copy.deepcopy(fixture.__dict__)
+        _, advice = derive_collection_recommendation(
+            compiled_authoring=fixture.authoring(), episode_evidence=fixture.evidence,
+            source_commit=COMMIT,
+        )
+        self.assertEqual(advice["suggested_draft_patches"], [])
+        self.assertEqual(fixture.__dict__, before)
 
     def test_received_digests_and_list_order_are_validated_before_parsing(self) -> None:
         recommendation = self.fixture.build()

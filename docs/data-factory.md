@@ -37,6 +37,20 @@
 
 ## 산출물 보존
 
+### 저장된 수집 증거에서 품질·추천으로
+
+새 operator 수집은 [CampaignOperator](../tools/data_factory/campaign_operator.py)의 정확한 compiled hypothesis, draft, manifest, compilation receipt를 `compiled_authoring_evidence.json`으로 run directory에 보존한다. [run_job](../tools/data_factory/run_job.py)의 기존 postcommit owner가 이를 기록하며, 원본 episode ledger나 recorder 소유권은 바뀌지 않는다. plan-only는 이 파일이나 dataset을 만들지 않는다.
+
+[collection_recommendation_io](../tools/data_factory/collection_recommendation_io.py)는 명시적으로 실행하는 offline CLI/library 소비자다. `python3 -m tools.data_factory.collection_recommendation_io --help`가 옵션의 정본이며, 동일 campaign의 run directories와 호출자가 지정한 분석 구현의 source commit label을 받는다. 이 label은 실행 중인 코드나 과거 수집 코드의 검증된 identity가 아니며, 결과에도 `CALLER_SUPPLIED_UNVERIFIED`로 표시한다. 호출자가 claims, verdicts, patches를 조립하지 않아도 ledger/state/candidate와 참조 artifact를 정본 validator로 확인하고, 기존 [coverage owner](../tools/data_factory/quality/coverage_report.py)의 report를 만들어 advisory recommendation으로 연결한다. 이 분석은 live collection의 선행 조건이나 background daemon이 아니다.
+
+측정 범위는 보존된 qualified domain과 입력으로 제공한 episode 집합이다. 과거 aggregate counts는 중복 여부를 알 수 없어 합산하지 않는다. coverage owner가 아직 관측되지 않은 qualified condition을 제안하면, compiler의 기존 admitted pair에서 조건별 하나의 명시적 slot을 고른다. 원래 요청 수와 100회 상한을 넘지 않으며, 원래 draft에 pinned/excluded 제약이 있으면 이를 해석해 바꾸지 않고 slot 제안을 생략한다. 기존 pending-review 조건도 선택하지 않는다. 이미 모두 관측한 domain에는 collect-more를 제안하지 않는다. 이 유한한 coverage 제안은 전체 이력의 데이터 부족, 충분한 품질이나 정책 효과를 입증하지 않는다.
+
+출력은 source roots 밖의 전용 derived root 아래 recommendation digest별 디렉터리에 canonical coverage report와 recommendation을 함께 게시한다. 같은 입력의 동시 호출은 같은 완성된 결과를 재사용한다. 두 파일은 임시 디렉터리에서 완성한 뒤 한 번에 공개하며, 기존 결과가 변조되거나 불완전하면 덮어쓰지 않고 실패한다. 바뀐 episode/state/report/commit label은 다른 결과를 만든다. 전체 compiled authoring이 없는 legacy run, 서로 다른 campaign, digest 불일치, 누락된 candidate는 typed `UNAVAILABLE`이며 현재 config로 복원하지 않는다. 현재 recommendation 계약은 v2 campaign manifest와 중복 없는 manifest-order prefix episode 입력을 요구한다.
+
+정확한 slot 제안은 [project_campaign_update_intent](../tools/data_factory/collection_recommendation.py)가 source와 분석 결과를 다시 결속해 현재 CampaignOperator view에 묶인 `update_draft` intent로 만든다. 기존 owner가 적용하고 별도로 compile하면 관측되지 않은 조건을 선택한 manifest가 된다. stale view는 거부된다. 추천 이후 선택 방식·수집 수·seed·고정/제외 위치·직접 선택을 바꿨다면 최신 view여도 이전 추천은 적용하지 않는다. 조건과 무관한 view 갱신은 허용한다. 기존 UI용 `project_update_draft_intent`는 일반 편집 제안을 처리하지만 이 slot 제안은 거부한다. UI의 현재 물체 위치를 재해석하거나 자동 후속 실행에 연결한 것은 아니다.
+
+추천 자체는 compile, authorize, recorder, motion, training을 실행하지 않는다. vision/person/background/robot variation과 physical rollout은 `UNKNOWN`으로 남고, semantic review가 pending이면 semantic proof도 `UNKNOWN`이다. 합성 테스트는 저장·재소비·replay·변경 입력·native draft 적용 후 정확한 조건의 compile을 증명하며, 실물 수집·rollout 효과나 자동 후속 실행을 증명하지 않는다.
+
 dataset의 `data/`, `meta/`, `videos/`는 하나의 dataset root로 이동하고, 이동 후 validator를 다시 실행한다. 원본과 파생 dataset의 lineage digest는 metadata에 보존한다. raw runtime state, temporary run directory와 장비별 경로는 public docs에 복사하지 않는다.
 
 품질 기준과 사람 검토 순서는 [데이터셋 품질](dataset-quality.md), 물리 작업의 안전·중단 절차는 [운영자 런북](operator-runbook.md), 브라우저와 backend의 경계는 [아키텍처](architecture.md)가 소유한다.

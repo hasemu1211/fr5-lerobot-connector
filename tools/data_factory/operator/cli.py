@@ -62,13 +62,17 @@ def main(argv=None) -> int:
     parser = argparse.ArgumentParser(
         description="Serve the reusable foreground FR5 collection operator",
     )
-    parser.add_argument("--effect-scope", choices=("FAKE", "PHYSICAL"), default="FAKE")
+    parser.add_argument("--effect-scope", choices=("FAKE", "PHYSICAL", "TRAINING_REVIEW"), default="FAKE")
     parser.add_argument("--port", type=int, default=4174)
     parser.add_argument(
         "--repository-root", default=str(Path(__file__).resolve().parents[3]),
     )
     parser.add_argument("--session-id")
     parser.add_argument("--operator-label", default="local-operator")
+    parser.add_argument("--training-request", type=Path,
+                        help="Review a configured frozen training batch in the Web UI; no robot or collection runtime")
+    parser.add_argument("--training-output", type=Path,
+                        help="Existing empty approval output directory, paired with --training-request")
     parser.add_argument("--camera-device-id")
     parser.add_argument(
         "--job", default=DEFAULT_JOB,
@@ -95,7 +99,7 @@ def main(argv=None) -> int:
     args = parser.parse_args(argv)
     values = vars(args)
     values["auto_prepare"] = not values.pop("no_auto_prepare")
-    if args.effect_scope == "FAKE":
+    if args.effect_scope == "FAKE" and args.training_request is None and args.training_output is None:
         values = {
             "effect_scope": "FAKE", "port": args.port,
             "fixture_root": None,

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
+import json
 import os
 from pathlib import Path
 import tempfile
@@ -9,9 +10,15 @@ from types import SimpleNamespace
 import unittest
 from unittest import mock
 
-from tests.data_factory.curator.support import make_profile_fixture
+from tests.data_factory.curator.support import (
+    make_profile_fixture,
+    make_source_dataset,
+    write_json,
+)
 from tools.data_factory.curator.core.errors import CuratorError
 from tools.data_factory.curator.core.filesystem import OwnedDirectory
+from tools.data_factory.curator.core.identity import stable_tree_identity
+from tools.data_factory.curator.review.manifest import verify_manifest
 from tools.data_factory.curator.workflow import application
 from tools.data_factory.curator.workflow.application import (
     _decide_locked,
@@ -20,9 +27,57 @@ from tools.data_factory.curator.workflow.application import (
     prepare,
     status,
 )
+from tools.data_factory.curator.workflow.state import load_events
 
 
 class ApplicationTest(unittest.TestCase):
+    def test_native_prepare_review_preserves_source_and_rejects_changed_configuration(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = make_source_dataset(root, episodes=3, frames_per_episode=3)
+            fixture = make_profile_fixture(root)
+            before = stable_tree_identity(source, code="TEST_SOURCE_IDENTITY")
+            prepared = prepare(
+                source,
+                _paths=fixture.paths,
+                _run_id_value="curator-native-review",
+            )
+            self.assertEqual(prepared["status"], "REVIEW_READY")
+            manifest = verify_manifest(
+                prepared["review_manifest"], prepared["review_video"],
+            )
+            self.assertEqual(manifest["coverage"]["population_frames"], 9)
+            self.assertEqual(len(manifest["coverage"]["covered_tasks"]), 2)
+            self.assertEqual(
+                stable_tree_identity(source, code="TEST_SOURCE_IDENTITY"), before
+            )
+            run = fixture.paths.run_root / prepared["run_id"]
+            events = load_events(run)
+            self.assertEqual(set(events), {"request", "candidate_ready", "review_ready"})
+            self.assertIs(events["request"]["payload"]["training_authority"], False)
+            application._validate_evidence(
+                run, events, fixture.paths, require_candidate=True
+            )
+            policy_bytes = fixture.policy_path.read_bytes()
+            policy = json.loads(policy_bytes)
+            policy["seed"] += 1
+            write_json(fixture.policy_path, policy)
+            with self.assertRaisesRegex(CuratorError, "CONFIGURATION_CHANGED"):
+                application._validate_evidence(
+                    run, events, fixture.paths, require_candidate=True
+                )
+            fixture.policy_path.write_bytes(policy_bytes)
+            fixture.profile_path.write_bytes(fixture.profile_path.read_bytes() + b"\n")
+            with self.assertRaisesRegex(CuratorError, "CONFIGURATION_CHANGED"):
+                application._validate_evidence(
+                    run, events, fixture.paths, require_candidate=True
+                )
+            self.assertEqual(
+                stable_tree_identity(source, code="TEST_SOURCE_IDENTITY"), before
+            )
+            self.assertEqual(load_events(run), events)
+            self.assertFalse(Path(events["request"]["payload"]["output_path"]).exists())
+
     def test_unverified_producer_binding_creates_no_run_or_candidate(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

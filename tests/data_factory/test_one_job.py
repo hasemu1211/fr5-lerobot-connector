@@ -86,7 +86,7 @@ class OneJobTest(unittest.TestCase):
                 quality = {
                     "accepted":not quality_reasons, "reasons":quality_reasons,
                     "frames":last_readiness_rows, "target_fps":30, "effective_fps":30.0,
-                    "cameras":{"up":{"source_fps":30.0}}, "writer_queue_drops":0,
+                    "cameras":{"up":{"source_fps":30.0, "brightness_mean":120.0}}, "writer_queue_drops":0,
                     "alignment_failures":0, "image_quality_warnings":[],
                 }
                 if quality_mutation is not None:
@@ -314,6 +314,41 @@ class OneJobTest(unittest.TestCase):
         self.assertLess(calls.index(("recorder", "trim_readiness_prefix")), calls.index(("executor", "execute")))
         with self.assertRaisesRegex(ContractError, "RECORDER_READINESS_CONTRACT"):
             OneJob(lambda _: None, lambda _: None, readiness_contract={})
+
+    def test_scene_darkness_blocks_new_motion_without_changing_technical_quality(self):
+        for brightness in (0.0, 19.9, None, float("nan"), True, 256.0):
+            with self.subTest(brightness=brightness):
+                def dark_scene(quality):
+                    quality["cameras"]["up"]["brightness_mean"] = brightness
+                    self.assertTrue(quality["accepted"])
+                job, calls = self.make(
+                    ["RECORDING", "ABORTED"], ["PLANNED", "APPROVED"], first_row_rows=60,
+                    readiness_contract=TEST_ONLY_READINESS_CONTRACT,
+                    quality_mutation=dark_scene,
+                )
+                self.assertTrue(job.prepare(PLAN)["ok"])
+                self.assertTrue(job.approve(MOTION_APPROVAL)["ok"])
+                result = job.start()
+                self.assertFalse(result["ok"])
+                self.assertIn(result["code"], {
+                    "RECORDER_READINESS_SCENE_DARK", "RECORDER_READINESS_SCENE_VISIBILITY",
+                })
+                self.assertNotIn(("executor", "execute"), calls)
+                self.assertNotIn(("executor", "cancel"), calls)
+                self.assertEqual(calls.count(("recorder", "abort")), 1)
+
+    def test_scene_visibility_uses_up_camera_not_occluded_wrist(self):
+        def visible_scene(quality):
+            quality["cameras"]["up"]["brightness_mean"] = 20.0
+            quality["cameras"]["wrist"] = {"source_fps":30.0, "brightness_mean":0.0}
+            quality["image_quality_warnings"] = ["wrist brightness warning"]
+        job, calls = self.make(
+            ["RECORDING"], ["PLANNED", "APPROVED", "EXECUTING"], first_row_rows=60,
+            readiness_contract=TEST_ONLY_READINESS_CONTRACT, quality_mutation=visible_scene,
+        )
+        self.prepare_and_start(job)
+        self.assertEqual(calls.count(("executor", "execute")), 1)
+        self.assertEqual(job.readiness_evidence["metrics"]["scene_brightness_mean"], 20.0)
 
     def test_test_only_readiness_enters_barrier_with_live_writer_backlog(self):
         def active_writer(status):

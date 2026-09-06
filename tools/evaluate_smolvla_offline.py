@@ -105,6 +105,33 @@ def _validate_output_target(
             )
 
 
+def _enforce_delegated_evaluation(
+    inventory: dict, *, dataset: Path, repo_id: str, output_dir: Path,
+    output: Path | None, batch_size: int,
+) -> None:
+    """Apply the current local delegation before inference imports or output."""
+    from tools.data_factory import training_approval
+
+    delegation = training_approval.inventory_local_training_delegation(inventory)
+    if delegation is None:
+        return
+    root = Path(delegation["output_root"])
+    candidates = [output_dir.resolve()]
+    if output is not None:
+        candidates.append(output.expanduser().resolve())
+    if (
+        delegation["dataset"] != {
+            "dataset_root": str(dataset.resolve()), "repo_id": repo_id,
+        }
+        or "smolvla" not in delegation["profiles"]
+        or root.is_symlink() or not root.is_dir()
+        or any(not candidate.is_relative_to(root.resolve()) for candidate in candidates)
+    ):
+        raise ValueError("offline evaluation exceeds local delegation scope")
+    if batch_size > delegation["limits"]["max_batch_size"]:
+        raise ValueError("offline evaluation exceeds delegated batch-size limit")
+
+
 def admit_evaluation(args: argparse.Namespace) -> dict:
     """Validate existing admission artifacts before loading torch or a policy."""
     from tools.data_factory import training_approval
@@ -144,6 +171,11 @@ def admit_evaluation(args: argparse.Namespace) -> dict:
         or inventory_path.resolve() != Path(receipt["approved_inventory_path"]).resolve()
     ):
         raise ValueError("approved inventory differs from the admitted training launch")
+
+    _enforce_delegated_evaluation(
+        inventory, dataset=dataset, repo_id=args.repo_id, output_dir=output_dir,
+        output=args.output, batch_size=args.batch_size,
+    )
 
     feature = split["feature_contract"]
     if feature["profile"] != "smolvla":
