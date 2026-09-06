@@ -11,12 +11,13 @@
 - [x] Support explicitly delegated local training without repeated human batch confirmation, preserving truthful authority lineage and native admission checks.
 - [x] With exact-batch human approval or valid standing local delegation and available GPU ownership, produce a genuine checkpoint and independent reload evidence while preserving the original dataset bytes.
 - [x] Record measured wall time, scoped GPU memory, sample throughput and storage; distinguish a pipeline probe from a learned result even when its schedule reaches the decay floor.
-- [ ] Compare learned checkpoints on a fixed held-out validation scope and disclose coverage, stochastic evaluation settings and lack of independent physical/generalization evidence.
+- [x] Compare learned checkpoints on a fixed held-out validation scope and disclose coverage, stochastic evaluation settings and lack of independent physical/generalization evidence.
 
 ## 3. Data utility and continued learning
 
 - [x] Relate successful-data condition coverage and held-out error to competing coverage and optimization hypotheses, with falsifiers and evidence limits.
 - [x] Provide Rollout a deterministic frozen held-out observation cohort and native input/identity contract for offline solver comparisons, preserving admission and physical gates.
-- [ ] Compare learned checkpoints before attributing improvement to data selection or acquisition; revise the recipe or coverage hypothesis from matched evidence.
+- [x] Compare learned checkpoints before attributing improvement to data selection or acquisition; revise the recipe or coverage hypothesis from matched evidence.
+- [ ] Measure paired saved-postprocessor action errors on the frozen observation cohort, separating arm and gripper units and preserving native temporal alignment/padding; qualify any resulting data-utility interpretation.
 
 Runtime checkpoints, attempts, blockers and numerical measurements belong in Orca and their native evidence artifacts, not this outcome checklist.
