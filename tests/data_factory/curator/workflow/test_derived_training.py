@@ -2,6 +2,7 @@
 import copy
 import io
 from contextlib import redirect_stdout
+from dataclasses import replace
 import json
 import os
 from pathlib import Path
@@ -24,7 +25,7 @@ from tools.fr5_training_profile import launch_feature_contract, read_metadata, b
 
 
 class DerivedTrainingTest(unittest.TestCase):
-    def native_case(self, *, episodes=3):
+    def native_case(self, *, episodes=3, train_fit=False):
         fixture = ledger_fixtures.EpisodeLedgerTest()
         fixture.setUp()
         self.addCleanup(fixture.doCleanups)
@@ -33,7 +34,8 @@ class DerivedTrainingTest(unittest.TestCase):
         profile = make_profile_fixture(root)
         feature = launch_feature_contract('act', 'fr5-up-wrist-rgb-30hz-v2', 'pick_place', read_metadata(source))
         runs = []
-        for index in (0, 2):
+        selected = list(range(0, episodes, 2))
+        for index in selected:
             fixture.dataset = source
             fixture.run_id = f'synthetic-episode-{index}'
             fixture.evidence = root / f'evidence-{index}'
@@ -82,6 +84,43 @@ class DerivedTrainingTest(unittest.TestCase):
             fixture._json('episode_ledger_state.json', project_episode_state(ledger=ledger, candidate=candidate_ref))
             runs.append(fixture.evidence)
         before = snapshot(source), [snapshot(run) for run in runs]
+        if train_fit:
+            from tools.data_factory.training_split import compile_launch_split
+            from tools.data_factory.curator.workflow.setup import (
+                ProfileSetupPaths, export_profile_setup, preview_profile_setup, finalize_profile_setup,
+            )
+            from tools.data_factory.curator.profile.schema import load_view_profile
+            # Build the fitting split from an actual synthetic native parent
+            # approval. No production data or human decisions are represented.
+            parent_output = root / 'synthetic-parent-approval'
+            parent_output.mkdir()
+            export_training_request(runs, parent_output / 'request.json', dataset_id='parent-r1')
+            parent_request = load_json_strict(parent_output / 'request.json')
+            parent_inventory = training.publish_approval_batch(training.prepare_approval_batch(
+                parent_request, parent_output, 'synthetic-human'))
+            fit_split = compile_launch_split(inventory=parent_inventory, metadata=read_metadata(source),
+                selected=selected, fraction=.5, feature_contract=feature)
+            fit_path = root / 'native-parent-fit-split.json'
+            write_json(fit_path, fit_split)
+            setup_paths = ProfileSetupPaths(repository=root, run_root=root / 'fit-setup',
+                asset_root=root / 'fitted-assets', profile_root=root / 'fitted-profiles',
+                collection_profile=profile.collection_path, layout_manifest=profile.layout_path,
+                physical_region_binding=profile.binding_path)
+            exported = export_profile_setup(source, profile_id='synthetic-train-fitted', fit_split=fit_path,
+                plate_frame_count=2, _paths=setup_paths, _setup_id_value='synthetic-fit')
+            annotation = load_json_strict(profile.annotation_path)
+            annotation['imagePath'] = Path(exported['reference_image']).name
+            write_json(Path(exported['labelme_annotation']), annotation)
+            preview = preview_profile_setup('synthetic-fit', _paths=setup_paths)
+            finalized = finalize_profile_setup('synthetic-fit', preview['preview_id'], _paths=setup_paths)
+            profile_path = setup_paths.profile_root / 'synthetic-train-fitted.json'
+            fitted = load_view_profile(profile_path)
+            self.assertEqual(fitted.value['schema_version'], 'curator.view_profile.v2')
+            self.assertEqual(fitted.value['fitting']['training_split']['split_digest'], fit_split['split_digest'])
+            self.assertTrue(all(frame['episode_index'] in fit_split['train_episodes'] for frame in
+                [fitted.value['fitting']['reference_frame'], *fitted.value['fitting']['background_plate_frames']]))
+            profile = replace(profile, paths=replace(profile.paths, profile_root=setup_paths.profile_root),
+                              profile_path=profile_path)
         pending = prepare(source, _paths=profile.paths, _run_id_value='synthetic-published')
         shown = review_candidate(pending['run_id'], _paths=profile.paths)
         from tools.data_factory.curator.workflow.derivation import published_training_evidence
@@ -99,7 +138,7 @@ class DerivedTrainingTest(unittest.TestCase):
         return root, source, profile, runs, before, published, reference, output
 
     def test_native_published_selection_web_approval_inventory_and_launch_validation(self):
-        root, source, profile, runs, before, published, reference, output = self.native_case()
+        root, source, profile, runs, before, published, reference, output = self.native_case(train_fit=True)
         from tools.data_factory.curator.cli import main
         reference_path = root / 'derivation-reference.json'
         write_json(reference_path, reference)
@@ -153,6 +192,10 @@ class DerivedTrainingTest(unittest.TestCase):
                 profile='act', collection_profile='fr5-up-wrist-rgb-30hz-v2', argv=argv)
         self.assertEqual(split['train_episodes'], [0])
         self.assertEqual(split['eval_episodes'], [2])
+        fitted = load_json_strict(Path(evidence['view_profile']['path']))
+        fitting = fitted['fitting']
+        self.assertTrue(all(frame['episode_index'] in split['train_episodes'] for frame in
+            [fitting['reference_frame'], *fitting['background_plate_frames']]))
         self.assertFalse((root / 'never-launched').exists())
         after = snapshot(output)
         with self.assertRaisesRegex(ContractError, 'TRAINING_APPROVAL_EXISTS'):
