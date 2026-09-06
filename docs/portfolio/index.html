@@ -1,9 +1,18 @@
 <!doctype html>
-<html lang="ko"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>FR5 — 프로젝트 전체 구성</title><link rel="stylesheet" href="site.css">
-<a class="skip" href="#main">본문으로 이동</a><header><a class="brand" href="index.html">FR5<span>.</span></a><nav aria-label="구성 검토"><a href="index.html" aria-current="page">전체 개요</a><a href="architecture.html">시스템 구성</a><a href="topics.html">세부 주제</a></nav></header>
-<main id="main"><section class="overview"><div><span class="eyebrow">FR5 PROJECT · STRUCTURE STUDY</span><h1>프로젝트 전체를<br>어떻게 보여줄까</h1></div><div><p class="lead">FR5의 로봇 운용, 데이터 수집과 선별,<br>정책 학습과 평가를 함께 다룹니다.</p><p class="note">지금은 영역과 연결 관계를 정리하는 단계입니다.<br>대표 성과, 내용의 비중, 최종 매체는 아직 정하지 않았습니다.</p></div></section>
-<section class="index" aria-labelledby="scope"><span class="eyebrow">PROJECT SCOPE</span><h2 id="scope">큰 틀에서 살펴볼 내용</h2><p class="lead">프로젝트의 목적과 범위, 시스템의 구성, 각 영역의 세부 내용을 구분합니다. 전체를 이해하는 경로와 관심 있는 부분으로 들어가는 경로를 함께 마련합니다.</p>
-<div class="outline-row"><h3>프로젝트 개요</h3><div><p>어떤 문제를 다루는지 · 사용 환경과 제약 · 프로젝트가 향하는 방향</p><span class="note">이 화면이 맡을 내용. 소개 문구와 대표 매체는 추후 구성</span></div></div>
-<a class="chapter-link" href="architecture.html"><strong>시스템 구성</strong><p>전체 구성 영역 · 영역 간 연결 · 함께 고려할 운용 조건</p><small>구성 살펴보기 ↗</small></a>
-<a class="chapter-link" href="topics.html"><strong>세부 주제</strong><p>기능 설명 · 연구와 실험 · 실제 운용 · 검증 방법의 후보 목록</p><small>주제 목록 보기 ↗</small></a>
-</section><div class="editor-note"><p>페이지의 목적은 구분하되, 세부 내용의 우선순위는 열어둡니다. 증거는 각 기술 영역의 원래 출력에서 추적하고, 이 틀에 현재 수치나 결과 장부를 옮기지 않습니다.</p></div></main><footer><span>FR5 · 포트폴리오 구성 검토</span><span>범위와 탐색 구조만 다루는 로컬 시안</span></footer></html>
+<html lang="ko"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>FR5 — 로봇 데이터와 모방학습</title><link rel="stylesheet" href="site.css"></head><body>
+<a class="skip" href="#main">본문으로 이동</a>
+<header><a class="brand" href="index.html" aria-label="FR5 프로젝트">FR5<span>.</span></a><nav aria-label="프로젝트 탐색"><a href="index.html" aria-current="page">프로젝트</a><a href="architecture.html">시스템</a><a href="data.html">기록과 검토</a><a href="learning.html">학습과 평가</a></nav></header>
+<main id="main">
+<section class="project-hero">
+<div class="hero-copy"><p class="kicker">로봇 데이터 · 모방학습</p><h1>FR5 모방학습<br>데이터 시스템</h1><p class="hero-description">FR5 로봇의 시연을 수집하고, 검토한 데이터로 정책을 학습·평가하는 시스템이다. 로봇 제어, 다중 센서 기록, 데이터 관리와 학습 실행을 연결한다.</p><a class="text-link" href="architecture.html">시스템 구성 <span aria-hidden="true">↗</span></a></div>
+<figure class="hero-image"><img src="assets/ep27-f316-camera1.png" alt="저장된 상부 카메라 관측. 작업대 위 FR5 로봇 팔과 그리퍼가 보입니다." width="640" height="480" fetchpriority="high"><figcaption><span>실제 저장 관측 · 상부 카메라</span><a href="data.html?episode=27&amp;moment=1#observations">이 기록 살펴보기 ↗</a></figcaption></figure>
+</section>
+<section class="project-intro" aria-labelledby="whole"><p class="kicker">프로젝트 구성</p><div><h2 id="whole">로봇 운용과<br>학습 데이터 파이프라인</h2><p>수집 실행기는 작업 계획과 로봇 동작을 관리한다. 기록기는 영상·관절·그리퍼 신호를 시간 기준에 맞춰 저장한다. 검토 모듈은 데이터 품질과 작업 의미를 확인하고, 학습 모듈은 승인된 데이터와 평가 조건을 검증한다.</p><p>실행 실패와 저장 실패를 구분하고, 데이터 원본부터 학습 입력까지 추적할 수 있도록 설계했다. 로봇 운용의 안정성과 모방학습 실험의 재현성을 함께 다룬다.</p></div></section>
+<section class="reading-paths" aria-labelledby="read"><h2 id="read">주요 구성</h2>
+<a class="reading-link" href="architecture.html"><span class="path-label">시스템 설계</span><div><h3>작업 실행·저장 관리</h3><p>단일 작업 실행, 데이터 저장 확정, 운영 화면의 상태 관리.</p></div><span aria-hidden="true">↗</span></a>
+<a class="reading-link" href="data.html"><span class="path-label">데이터 엔지니어링</span><div><h3>다중 센서 기록·데이터 검토</h3><p>영상·로봇 상태 동기화, 기술 품질 검사, 데이터 검토와 선별.</p></div><span aria-hidden="true">↗</span></a>
+<a class="reading-link" href="learning.html"><span class="path-label">모방학습</span><div><h3>SmolVLA 학습·평가</h3><p>학습 입력 검증, TRAIN 정규화, 오프라인 정책 비교.</p></div><span aria-hidden="true">↗</span></a>
+</section>
+
+</main><footer><span>FR5 · 로봇 데이터와 모방학습</span><span>로봇 운용 · 데이터 수집 · 정책 학습</span></footer>
+</body></html>
