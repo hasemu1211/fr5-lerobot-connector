@@ -166,6 +166,12 @@ Portfolio 표현 책임자는 모방학습과 데이터 엔지니어링 직무�
 - **AND** 필요한 범위의 primary research를 다시 조사해 다음 유한한 실험을 선택하며, 한 번의 문헌 조사나 사용자 제안으로 구현 방향을 영구 고정하지 않는다
 - **AND** 미검증·환경 부적합·실험으로 반증됨을 구분하고, 반복 조사 자체나 새 실험 관리 계층을 만드는 것을 성과로 간주하지 않는다
 
+#### Scenario: Training feasibility has already been established
+- **WHEN** 실제 학습·저장·재로딩·평가와 자원 적합성이 해당 입력 및 runtime에서 확인됐다
+- **THEN** 후속 실험은 남은 학습·데이터·실물 성능 질문과 유한한 예산, 비교 범위, 종료 후 다음 결정을 실행 전에 정하며 동일한 feasibility 확인만을 반복하지 않는다
+- **AND** 데이터 보강은 알려진 조건별 공백과 수집 가치에 따라 독립적으로 준비할 수 있고 모든 학습 설정 비교의 완료를 선행 조건으로 요구하지 않는다
+- **AND** 검증 손실, 실행 가능한 checkpoint 및 시연 생성기의 성공은 학습 정책의 실물 작업 성능을 대신하지 않으며, 평가와 준비를 포함한 전체 비용으로 실험 가치를 판단한다
+
 #### Scenario: New evidence challenges an intent boundary
 - **WHEN** 조사 가능한 engineering unknown을 해소한 뒤에도 가치·안전·의미에 관한 선택이 남는다
 - **THEN** 기존 Goal과 acceptance를 자동 변경하지 않고 bounded human decision을 요청한다
