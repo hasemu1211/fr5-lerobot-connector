@@ -221,6 +221,12 @@ def prepare_launch(*, dataset: Path, repo_id: str, inventory: Path,
         fraction=float(config["--dataset.eval_split"]), feature_contract=feature,
     )
     receipt = compile_launch_receipt(split, argv, str(inventory))
+    # Validate and persist the single saved observation-view binding before any
+    # trainer construction.  Curator remains the producer of derived evidence;
+    # this call only consumes it and records the exact raw/baked representation.
+    from tools.validate_training_checkpoint import validate_saved_observation_view
+    receipt["observation_view"] = validate_saved_observation_view(split, receipt)
+    receipt["receipt_digest"] = canonical_digest(receipt)
     if "initialization" in receipt:
         parent_output = Path(receipt["initialization"]["checkpoint"]).parents[2]
         if Path(config["--output_dir"]).resolve().is_relative_to(parent_output):
