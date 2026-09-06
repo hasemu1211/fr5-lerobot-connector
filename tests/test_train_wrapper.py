@@ -274,6 +274,45 @@ class TrainingLaunchConnectionTest(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "warm-start parent"):
                 validate_checkpoint(child)
 
+    def test_checkpoint_revalidates_each_warm_start_ancestor_once_per_call(self):
+        import shutil
+        from tools.validate_training_checkpoint import validate_checkpoint
+
+        with TemporaryDirectory(prefix="SYNTHETIC_TEST_ONLY-") as directory:
+            root = Path(directory)
+            parent, output, kwargs = self._warm_start_case(root)
+            for generation in range(2):
+                split, receipt = prepare_launch(**kwargs)
+                output.mkdir(parents=True)
+                write_json(output / "fr5_training_split.json", split)
+                write_json(output / "fr5_training_receipt.json", receipt)
+                child = output / "checkpoints/000001/pretrained_model"
+                shutil.copytree(parent.parent, child.parent)
+                config = json.loads((child / "train_config.json").read_text())
+                config["policy"]["pretrained_path"] = str(parent)
+                write_json(child / "train_config.json", config)
+                parent = child
+                output = root / f"outputs/descendant-{generation}"
+                kwargs["argv"] = [
+                    f"--policy.path={parent}" if arg.startswith("--policy.path=") else
+                    f"--output_dir={output}" if arg.startswith("--output_dir=") else arg
+                    for arg in kwargs["argv"]
+                ]
+            # Three immutable checkpoints require three current admissions, not
+            # recursively duplicated checks or a cache that outlives this call.
+            with mock.patch("tools.data_factory.training_entrypoint.prepare_launch", wraps=prepare_launch) as admission:
+                self.assertEqual(validate_checkpoint(child), (child, child.parents[2]))
+                self.assertEqual(admission.call_count, 3)
+                admission.reset_mock()
+                self.assertEqual(validate_checkpoint(child), (child, child.parents[2]))
+                self.assertEqual(admission.call_count, 3)
+            receipt_path = child.parents[2] / "fr5_training_receipt.json"
+            altered = json.loads(receipt_path.read_text())
+            altered["normalization"]["stats"]["action"]["mean"][0] += 1
+            write_json(receipt_path, altered)
+            with self.assertRaises((ValueError, ContractError)):
+                validate_checkpoint(child)
+
     def test_warm_start_rejects_mismatched_cohort_normalization_and_parent_output(self):
         from tools.validate_training_checkpoint import warm_start_binding
 

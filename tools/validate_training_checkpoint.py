@@ -198,7 +198,6 @@ def validate_checkpoint(value: Path, *, verify_dataset: bool = True) -> tuple[Pa
     dataset_cfg = config.get("dataset") or {}
     if verify_dataset:
         from tools.data_factory.training_entrypoint import prepare_launch, options
-        from tools.data_factory.training_receipts import validate_launch_receipt
         from tools.data_factory.training_split import validate_training_split
 
         split = validate_training_split(split)
@@ -207,10 +206,7 @@ def validate_checkpoint(value: Path, *, verify_dataset: bool = True) -> tuple[Pa
         receipt_path = output_dir / "fr5_training_receipt.json"
         if not receipt_path.is_file():
             receipt_path = Path(str(output_dir) + ".fr5_training_receipt.json.pending")
-        receipt = validate_launch_receipt(json.loads(receipt_path.read_text()), split)
-        if "initialization" in receipt and not config.get("resume", False):
-            if config.get("policy", {}).get("pretrained_path") != receipt["initialization"]["checkpoint"]:
-                raise ValueError("checkpoint warm-start parent differs from admitted initialization")
+        receipt = json.loads(receipt_path.read_text())
         root = Path(dataset_cfg.get("root", "")).expanduser()
         if (str(root) != split["dataset_identity"]["dataset_root"]
                 or dataset_cfg.get("repo_id") != split["dataset_identity"]["repo_id"]
@@ -230,6 +226,12 @@ def validate_checkpoint(value: Path, *, verify_dataset: bool = True) -> tuple[Pa
         )
         if current_split != split or current_receipt != receipt:
             raise ValueError("dataset or launch provenance changed after training admission")
+        # prepare_launch recompiles the complete receipt, including each parent.
+        # Its exact comparison above supplies current validation without a second
+        # recursive recompilation or any cross-call authority cache.
+        if "initialization" in receipt and not config.get("resume", False):
+            if config.get("policy", {}).get("pretrained_path") != receipt["initialization"]["checkpoint"]:
+                raise ValueError("checkpoint warm-start parent differs from admitted initialization")
         validate_normalization_state(policy_dir, receipt["normalization"], profile=feature["profile"])
         return policy_dir, output_dir
 
