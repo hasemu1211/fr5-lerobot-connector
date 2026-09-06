@@ -274,6 +274,55 @@ class DerivedTrainingTest(unittest.TestCase):
         finally:
             profile_path.write_bytes(original)
 
+    def test_native_transform_rechecks_profile_and_assets_at_runtime(self):
+        root, source, profile, runs, before, published, reference, output = self.native_case(train_fit=True)
+        reference_path = root / 'derivation-reference.json'
+        write_json(reference_path, reference)
+        export_training_request(
+            runs, output / 'request.json', dataset_id='derived-r1', derivation=reference
+        )
+        request = load_json_strict(output / 'request.json')
+        inventory = training.publish_approval_batch(
+            training.prepare_approval_batch(request, output, 'synthetic-human')
+        )
+        child = Path(request['dataset_root'])
+        argv = ['synthetic-lerobot-train', *build_profile('act', policy_metadata(read_metadata(child))),
+                f'--dataset.root={child}', f'--dataset.repo_id={request["repo_id"]}',
+                '--dataset.episodes=[0,2]', '--dataset.eval_split=0.5',
+                f'--output_dir={root / "never-launched"}', '--batch_size=1', '--steps=2',
+                '--eval_steps=1', '--save_freq=1']
+        _, receipt = training.prepare_launch(
+            dataset=child, repo_id=request['repo_id'], inventory=output / 'training_approved.json',
+            profile='act', collection_profile='fr5-up-wrist-rgb-30hz-v2', argv=argv,
+        )
+        from tools.data_factory.learned_action_adapter import NativeSmolVLA, fake_rgb
+        from tools.data_factory.curator.profile.schema import load_view_profile
+        from tools.data_factory.training_receipts import file_digest
+
+        native = NativeSmolVLA()
+        native.observation_view = receipt['observation_view']
+        spec = load_view_profile(Path(native.observation_view['view_profile']['path']))
+        frame = fake_rgb(bytes(spec.value['width'] * spec.value['height'] * 3),
+                         height=spec.value['height'], width=spec.value['width'])
+        native._transform_raw_up(frame)
+
+        profile_path = Path(native.observation_view['view_profile']['path'])
+        plate_path = spec.background_plate_path
+        profile_before, plate_before = profile_path.read_bytes(), plate_path.read_bytes()
+        try:
+            # A coherent post-load profile+plate replacement is exactly the
+            # mutable external state the saved binding must reject.
+            replacement = spec.reference_image_path.read_bytes()
+            plate_path.write_bytes(replacement)
+            changed = json.loads(profile_before)
+            changed['background_plate_sha256'] = file_digest(plate_path)
+            write_json(profile_path, changed)
+            with self.assertRaisesRegex(ValueError, 'LEARNED_VIEW_PROFILE_CHANGED'):
+                native._transform_raw_up(frame)
+        finally:
+            profile_path.write_bytes(profile_before)
+            plate_path.write_bytes(plate_before)
+
     def test_changed_evidence_replay_refusal_and_raw_authority_cannot_publish_child(self):
         root, source, profile, runs, before, published, reference, output = self.native_case(episodes=4)
         export_training_request(runs, output / 'request.json', dataset_id='derived-r1', derivation=reference)

@@ -429,6 +429,7 @@ class TrainingLaunchConnectionTest(unittest.TestCase):
 
     def test_native_consumer_keeps_official_split_and_excludes_nontrain_statistics(self):
         import math
+        import os
         import sys
         from types import ModuleType
         from lerobot.datasets import factory
@@ -471,12 +472,18 @@ class TrainingLaunchConnectionTest(unittest.TestCase):
                     mock.patch.object(factory, "resolve_delta_timestamps", return_value={}), \
                     mock.patch.object(factory, "LeRobotDataset", side_effect=dataset):
                 self.assertEqual(run_native_training(kwargs["argv"], split, receipt), 0)
+                cfg.dataset.root = os.path.relpath(kwargs["dataset"], Path.cwd())
+                self.assertEqual(run_native_training(kwargs["argv"], split, receipt), 0)
+                cfg.dataset.root = str(kwargs["dataset"] / "different-root")
+                with self.assertRaisesRegex(ContractError, "TRAINING_RUNTIME_DATASET"):
+                    run_native_training(kwargs["argv"], split, receipt)
+                cfg.dataset.root = str(kwargs["dataset"])
                 cfg.dataset.episodes = [0, 1, 3]
                 with self.assertRaisesRegex(ContractError, "TRAINING_RUNTIME_DATASET"):
                     run_native_training(kwargs["argv"], split, receipt)
             self.assertIs(sys.argv, original_argv)
             self.assertIs(native.make_train_eval_datasets, factory.make_train_eval_datasets)
-            self.assertEqual(len(created), 2)
+            self.assertEqual(len(created), 4)
             self.assertEqual(snapshot(kwargs["dataset"]), before)
             self.assertEqual(training_normalization(split), receipt["normalization"])
 

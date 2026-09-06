@@ -26,7 +26,7 @@ if __package__ in {None, ""}:
     sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from tools.data_factory import training_approval as approval
-from tools.data_factory.training_receipts import compile_launch_receipt
+from tools.data_factory.training_receipts import compile_launch_receipt, launch_receipt_digest
 from tools.data_factory.training_split import compile_launch_split
 from tools.fr5_data_factory import ContractError, TASK_CONTRACTS, canonical_digest, load_json_strict
 from tools.fr5_training_profile import instruction_task, launch_feature_contract, read_metadata
@@ -180,7 +180,8 @@ def prepare_launch(*, dataset: Path, repo_id: str, inventory: Path,
     if config.get("--job.target", "local") != "local" or any(key.startswith("--env.") for key in config):
         raise ContractError("TRAINING_LOCAL_OFFLINE_ONLY")
     # Streaming, renamed roots, alternate episode order and resume are separate contracts.
-    if (config.get("--dataset.root") != str(dataset)
+    if (not config.get("--dataset.root")
+            or Path(config["--dataset.root"]).expanduser().resolve() != dataset.expanduser().resolve()
             or config.get("--dataset.repo_id") != repo_id
             or config.get("--dataset.streaming", "false") != "false"
             or "--config_path" in config or "--resume" in config):
@@ -226,7 +227,7 @@ def prepare_launch(*, dataset: Path, repo_id: str, inventory: Path,
     # this call only consumes it and records the exact raw/baked representation.
     from tools.validate_training_checkpoint import validate_saved_observation_view
     receipt["observation_view"] = validate_saved_observation_view(split, receipt)
-    receipt["receipt_digest"] = canonical_digest(receipt)
+    receipt["receipt_digest"] = launch_receipt_digest(receipt)
     if "initialization" in receipt:
         parent_output = Path(receipt["initialization"]["checkpoint"]).parents[2]
         if Path(config["--output_dir"]).resolve().is_relative_to(parent_output):
@@ -303,7 +304,7 @@ def _run_native_training(argv: list[str], split: dict, receipt: dict) -> int:
             if (str(cfg.policy.pretrained_path) != parent
                     or warm_start_binding(Path(parent), split, receipt["normalization"]) != receipt["initialization"]):
                 raise ContractError("TRAINING_RUNTIME_WARM_START")
-        if (str(dataset.root) != split["dataset_identity"]["dataset_root"]
+        if (Path(dataset.root).expanduser().resolve() != Path(split["dataset_identity"]["dataset_root"]).expanduser().resolve()
                 or dataset.repo_id != split["repo_id"]
                 or (dataset.episodes or list(range(split["total_episodes"]))) != split["selected_episodes"]
                 or dataset.eval_split != split["eval_split"] or dataset.streaming
