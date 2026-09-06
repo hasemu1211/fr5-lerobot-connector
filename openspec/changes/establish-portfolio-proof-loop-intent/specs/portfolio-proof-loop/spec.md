@@ -125,6 +125,12 @@ lane handoff는 claim, evidence state, exact reference 또는 digest, 적용 범
 - **WHEN** 구현·분석·문서·추상화가 네 가지 가치 조건을 하나도 충족하지 않는다
 - **THEN** 작업은 보기 좋은 기능이라는 이유만으로 실행되지 않고 defer된다
 
+#### Scenario: Comparison results revise the research hypothesis
+- **WHEN** 비교 실험, 교차 검토 또는 실제 환경 evidence가 선택한 가설의 전제나 예상 효과를 흔든다
+- **THEN** 책임자는 단순한 기준선과 경쟁 가설을 다시 비교하고 유지·수정·폐기 근거 및 다음 선택을 바꿀 수 있는 불확실성을 명시한다
+- **AND** 필요한 범위의 primary research를 다시 조사해 다음 유한한 실험을 선택하며, 한 번의 문헌 조사나 사용자 제안으로 구현 방향을 영구 고정하지 않는다
+- **AND** 미검증·환경 부적합·실험으로 반증됨을 구분하고, 반복 조사 자체나 새 실험 관리 계층을 만드는 것을 성과로 간주하지 않는다
+
 #### Scenario: New evidence challenges an intent boundary
 - **WHEN** 조사 가능한 engineering unknown을 해소한 뒤에도 가치·안전·의미에 관한 선택이 남는다
 - **THEN** 기존 Goal과 acceptance를 자동 변경하지 않고 bounded human decision을 요청한다

@@ -14,9 +14,23 @@ The operator SHALL offer a review-only Web UI mode over the canonical prepared e
 - **THEN** the UI does not automatically retry approval or substitute a new batch
 - **AND** refusal publishes nothing; incomplete publication does not become an approved inventory; refreshed server state determines what is known.
 
+### Requirement: Standing delegation authorizes bounded local learning
+
+An explicit standing human delegation MAY authorize the configured local actor to admit eligible frozen batches and run local training and offline evaluation without another per-batch human interaction. The native admission owner SHALL distinguish delegated authority from an exact-batch human decision and bind the delegation source, actor, dataset scope, output scope and finite execution limits to the existing authorization lineage. A local declaration is not authenticated human identity. Missing, changed or out-of-scope delegation SHALL reject the affected consumption; it SHALL NOT invalidate unrelated safe work or manufacture semantic approval. Original data, technical and semantic admission, exact batch validation, train/evaluation separation and exclusive output publication SHALL remain enforced.
+
+#### Scenario: An eligible local run is covered by standing delegation
+- **WHEN** the configured actor selects a technically and semantically admitted frozen batch within an explicit delegation
+- **THEN** native admission revalidates and publishes its exact delegated authorization without a new human click or terminal confirmation
+- **AND** launch and resume enforce the local execution and resource scope; the delegation does not authorize robot execution, external upload or paid remote resources.
+
+#### Scenario: The delegation no longer covers the requested effect
+- **WHEN** the referenced authority is missing or changed, or the actor, data, output or execution limits differ
+- **THEN** the affected authorization or execution is rejected before its side effects
+- **AND** the system preserves existing evidence and continues independent in-scope work rather than treating the entire project as blocked.
+
 ### Requirement: Native training consumes only admitted learning inputs
 
-The public training path SHALL revalidate the human-approved frozen inventory, exact selected episodes and camera/task contract before running the official trainer. Train and evaluation episodes SHALL remain disjoint. Learned preprocessing statistics SHALL derive exclusively from training episodes; ImageNet constants MAY remain the explicit image normalization setting. Original dataset bytes and installed packages SHALL remain unchanged.
+The public training path SHALL revalidate the frozen inventory authorized by an exact-batch human decision or standing local delegation, exact selected episodes and camera/task contract before running the official trainer. Train and evaluation episodes SHALL remain disjoint. Learned preprocessing statistics SHALL derive exclusively from training episodes; ImageNet constants MAY remain the explicit image normalization setting. Original dataset bytes and installed packages SHALL remain unchanged.
 
 #### Scenario: Global statistics contain excluded or held-out episodes
 - **WHEN** an approved selection is split for a native launch

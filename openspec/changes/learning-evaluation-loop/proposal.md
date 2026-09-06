@@ -7,7 +7,7 @@ Approved FR5 demonstrations must become learned behavior with fair evaluation an
 - Keep one native admitted training path through the existing public wrapper and official LeRobot trainer. Bind the exact selected data, train-only normalization, checkpoint processors and held-out evaluation.
 - Measure resource use and learning progress separately. Use cheap bounded pipeline probes to decide whether a sustained learning run is viable; compare learned checkpoints on fixed evaluation conditions.
 - Analyze successful demonstration coverage and held-out errors alongside failures to identify useful data acquisition, while preserving Curator and Rollout ownership.
-- Preserve human training approval, immutable original data, no train/evaluation leakage, one GPU owner and separate physical authority.
+- Support exact-batch human decisions and explicit standing local-training delegation through the same admission owner. Preserve immutable original data, no train/evaluation leakage, one GPU owner and separate physical authority; delegation is not a fabricated human batch decision.
 
 ## Capabilities
 

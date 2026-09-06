@@ -6,7 +6,8 @@
 ## 2. Genuine checkpoint and fair evidence
 
 - [x] The native evaluator reports finite per-episode and frame-weighted loss with observed/available sample coverage, scoped timing and CUDA allocator metrics; bounded evaluation stops fetching at its limit.
-- [ ] With actual human approval and root-assigned GPU ownership, produce a genuine checkpoint and independent reload evidence while preserving the original dataset bytes.
+- [ ] Support explicitly delegated local training without repeated human batch confirmation, preserving truthful authority lineage and native admission checks.
+- [ ] With exact-batch human approval or valid standing local delegation and available GPU ownership, produce a genuine checkpoint and independent reload evidence while preserving the original dataset bytes.
 - [ ] Record measured wall time, peak GPU memory, sample throughput and storage; distinguish a warmup/pipeline probe from a learned result.
 - [ ] Compare learned checkpoints on a fixed held-out validation scope and disclose coverage, stochastic evaluation settings and lack of independent physical/generalization evidence.
 
