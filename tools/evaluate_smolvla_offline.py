@@ -15,6 +15,7 @@ from itertools import islice
 import json
 import math
 import os
+import operator
 from pathlib import Path
 import random
 import statistics
@@ -242,6 +243,9 @@ def action_error_metrics(predicted: list, targets: list, padding: list) -> dict:
 
 def sampled_action_indices(episode_indices: list[int], frame_indices: list[int], episodes: list[int]) -> list[int]:
     """Freeze early/middle/late frames in every admitted episode before inference."""
+    # LeRobot's HF dataset formats integer columns as zero-dimensional tensors.
+    episode_indices = [operator.index(value) for value in episode_indices]
+    frame_indices = [operator.index(value) for value in frame_indices]
     if len(episode_indices) != len(frame_indices) or set(episode_indices) != set(episodes):
         raise ValueError("sampled action metadata differs from the admitted held-out scope")
     selected = []
