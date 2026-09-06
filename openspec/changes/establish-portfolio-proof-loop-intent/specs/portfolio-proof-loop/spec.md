@@ -40,6 +40,19 @@ FR5가 Collection, Curation, Training/Evaluation, Rollout, Learning Evidence, Pu
 - **WHEN** 한 확인 책임을 시스템이 인수할 근거와 해당 authority의 변경 계약이 충족된다
 - **THEN** 적격 범위의 반복 입력을 줄일 수 있지만 범위 밖·오래된 관측·불확실한 판정은 자동 승인하지 않고 안전한 중단 또는 사람 판단으로 전달한다
 
+### Requirement: Decisions are product-consumable beyond the interaction surface
+사람 또는 적격 시스템이 내린 판단은 정확한 대상·입력 근거·판정 주체와 적용 범위를 기존 결정 owner의 결과로 결속하여 다음 제품 기능이 소비할 수 있어야 한다(SHALL). 화면 표시, 터미널 입력 또는 에이전트의 수동 전달만으로 handoff가 완료됐다고 간주해서는 안 된다(MUST NOT). 소비자는 판단의 현재 적용 가능성과 자신의 실행 권한을 검증해야 하며(SHALL), 하나의 판단을 semantic·physical·training 등 다른 권한으로 확대해서는 안 된다(MUST NOT). 이 요구는 별도 범용 decision framework나 중복 ledger를 요구하지 않는다.
+
+#### Scenario: A reviewed candidate reaches the next product function
+- **WHEN** 정확한 candidate와 review 근거에 대한 유효한 판단이 기존 owner에 기록된다
+- **THEN** 다음 기능은 경로나 digest를 사람이 옮겨 적지 않아도 기존 결과를 소비하고 입력 계보와 판단 범위를 검증한다
+- **AND** 변경된 대상이나 충돌하는 재전달은 기존 판단으로 실행되지 않으며, 응답 유실 복구는 동일 효과를 다시 만들지 않는다
+
+#### Scenario: A qualified system takes over a bounded judgment
+- **WHEN** 해당 판단 owner의 승인된 계약과 실제 검증이 시스템의 관찰·판정 범위 및 실패 대응을 충족한다
+- **THEN** 제품은 그 범위에서 반복적인 사람 선택 없이 시스템 판단을 소비할 수 있고, 시스템 판정을 사람 승인으로 기록하지 않는다
+- **AND** 불확실하거나 범위 밖인 판정은 명시적인 미결 상태와 필요한 사람 판단으로 이어지며, 독립적으로 적격인 작업은 계속할 수 있다
+
 ### Requirement: Evidence state has one meaning
 모든 material claim은 `SUPPORTED`, `PARTIAL`, `UNKNOWN` 중 하나여야 한다(SHALL). `PARTIAL`은 제한을 보존해야 하고(MUST), `UNKNOWN`은 실패·안전·승인·효과로 추정되어서는 안 된다(MUST NOT).
 
