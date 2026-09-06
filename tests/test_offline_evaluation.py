@@ -15,11 +15,14 @@ from unittest import mock
 from tests.test_train_wrapper import launch_fixture, write_normalization_fixture
 from tools.data_factory.training_entrypoint import options, prepare_launch
 from tools.evaluate_smolvla_offline import (
+    action_error_metrics,
     admit_evaluation,
     evaluate,
     main,
     normalize_checkpoint_path,
     parse_episode_indices,
+    sampled_action_indices,
+    _evaluate_sampled_actions,
 )
 from tools.fr5_training_profile import build_profile, policy_metadata
 
@@ -217,6 +220,101 @@ def fake_inference_modules(admission: dict, batches: list[dict]) -> dict[str, Mo
 
 
 class OfflineEvaluationTest(unittest.TestCase):
+    def test_action_metrics_keep_units_and_exclude_padding(self):
+        measured = action_error_metrics(
+            [[1.] * 6 + [.001], [2.] * 6 + [.002], [999.] * 7],
+            [[0.] * 7] * 3, [False, False, True],
+        )
+        self.assertEqual(measured['valid_action_steps'], 2)
+        self.assertEqual(measured['mae_per_axis'], [1.5] * 6 + [.0015])
+        self.assertAlmostEqual(measured['rmse_per_axis'][0], 2.5 ** .5)
+        self.assertAlmostEqual(measured['rmse_per_axis'][6], 2.5e-6 ** .5)
+        for predicted, target, pad in (
+            ([[float('nan')] * 7], [[0.] * 7], [True]),
+            ([[0.] * 7], [[float('inf')] * 7], [False]),
+            ([[0.] * 7], [[0.] * 7], [True]),
+            ([[0.] * 6], [[0.] * 7], [False]),
+            ([[0.] * 7], [[0.] * 7], [0]),
+        ):
+            with self.assertRaises(ValueError):
+                action_error_metrics(predicted, target, pad)
+
+    def test_action_sampling_covers_every_episode_without_short_episode_duplicates(self):
+        self.assertEqual(sampled_action_indices([2] * 10 + [9] * 3,
+            list(range(10)) + list(range(3)), [2, 9]), [0, 4, 8, 10, 11])
+        for episode, frame, admitted in (([2], [0], [2, 9]), ([2, 2], [0, 2], [2]), ([2], [], [2])):
+            with self.assertRaises(ValueError):
+                sampled_action_indices(episode, frame, admitted)
+
+    def test_sampled_action_loop_uses_saved_postprocessor_and_no_future_targets(self):
+        import torch
+
+        class Pipeline:
+            def __init__(self, post=False):
+                self.post, self.resets = post, 0
+            def reset(self):
+                self.resets += 1
+            def __call__(self, value):
+                if self.post:
+                    return value * 2
+                self_keys = set(value)
+                assert self_keys == {'observation.state', 'task', 'camera'}
+                assert value['camera'].dtype == torch.float32
+                return value
+
+        class Policy:
+            config = SimpleNamespace(chunk_size=2, max_action_dim=8, num_steps=10)
+            def __init__(self):
+                self.noises = []
+            def reset(self):
+                pass
+            def predict_action_chunk(self, observed, noise):
+                self.noises.append(noise.clone())
+                return torch.ones((1, 2, 7))
+
+        class Dataset:
+            hf_dataset = {'episode_index': [2] * 10 + [3] * 10, 'frame_index': list(range(10)) * 2}
+            meta = SimpleNamespace(camera_keys=['camera'])
+            def __len__(self):
+                return 20
+            def __getitem__(self, index):
+                return {'episode_index': torch.tensor(2 + index // 10), 'frame_index': torch.tensor(index % 10),
+                    'index': torch.tensor(index + 100), 'action': torch.zeros(2, 7),
+                    'action_is_pad': torch.tensor([False, True]), 'observation.state': torch.zeros(7),
+                    'camera': torch.full((3, 2, 2), 255, dtype=torch.uint8), 'task': 'SYNTHETIC_TEST_ONLY'}
+
+        with TemporaryDirectory(prefix='SYNTHETIC_TEST_ONLY-') as directory:
+            args, _ = admitted_case(Path(directory))
+            admission = admit_evaluation(args)
+            policy, pre, post = Policy(), Pipeline(), Pipeline(post=True)
+            report = _evaluate_sampled_actions(args, admission, policy, pre, post, Dataset(), 'cpu', 0.)
+            self.assertEqual(report['samples'], 6)
+            self.assertTrue(report['sampling_complete'])
+            self.assertFalse(report['evaluation_complete'])
+            self.assertEqual(report['pooled']['mae_per_axis'], [2.] * 7)
+            self.assertEqual(report['pooled']['valid_action_steps'], 6)
+            self.assertEqual(pre.resets, 6)
+            self.assertEqual(post.resets, 6)
+            self.assertTrue(all(torch.equal(policy.noises[0], n) for n in policy.noises))
+            self.assertEqual(report['action_units'], ['rad'] * 6 + ['m'])
+            with mock.patch.object(Dataset, 'hf_dataset', {
+                'episode_index': [2] * 9 + [3] * 11,
+                'frame_index': list(range(9)) + list(range(11)),
+            }):
+                with self.assertRaisesRegex(ValueError, 'frozen episode/frame selection'):
+                    _evaluate_sampled_actions(args, admission, policy, pre, post, Dataset(), 'cpu', 0.)
+
+    def test_sampled_action_admission_rejects_incomparable_precision_and_partial_scope(self):
+        with TemporaryDirectory(prefix='SYNTHETIC_TEST_ONLY-') as directory:
+            args, _ = admitted_case(Path(directory))
+            args.metric = 'sampled-actions'
+            for key, value in (('batch_size', 2), ('num_workers', 1), ('max_batches', 1), ('use_amp', True)):
+                original = getattr(args, key)
+                setattr(args, key, value)
+                with self.assertRaisesRegex(ValueError, 'sampled actions require'):
+                    admit_evaluation(args)
+                setattr(args, key, original)
+
     def test_episode_parser_and_checkpoint_normalization(self):
         self.assertEqual(parse_episode_indices("3,1,3"), [1, 3])
         with self.assertRaises(ValueError):

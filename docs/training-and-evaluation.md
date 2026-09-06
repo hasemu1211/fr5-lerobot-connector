@@ -117,7 +117,7 @@ FR5_REPO_ID="$REPO_ID" direnv exec . scripts/evaluate_smolvla.sh \
   "$CHECKPOINT" "$DATASET_NAME" --episodes "$HELD_OUT_EPISODES_CSV"
 ```
 
-`--dry-run`은 승인·checkpoint receipt·dataset·split 연결만 확인하며 inference나 report 파일 생성을 하지 않는다. 검토 뒤 같은 명령에서 `--dry-run`을 제거해야 실제 loss 계산과 report 저장이 수행된다. report와 임시 파일에는 존재하지 않는 새 경로가 필요하며 dataset·checkpoint 내부에는 저장할 수 없다. 저장 중 같은 경로에 다른 파일이 생겨도 덮어쓰지 않는다. 재평가에는 새 report 이름을 사용한다. report의 scope는 승인된 held-out data의 offline flow-matching loss뿐이며 checkpoint 선택 승인, 실물 성공, semantic 성공을 뜻하지 않는다.
+`--dry-run`은 승인·checkpoint receipt·dataset·split 연결만 확인하며 inference나 report 파일 생성을 하지 않는다. 검토 뒤 같은 명령에서 `--dry-run`을 제거해야 실제 평가와 report 저장이 수행된다. report와 임시 파일에는 존재하지 않는 새 경로가 필요하며 dataset·checkpoint 내부에는 저장할 수 없다. 저장 중 같은 경로에 다른 파일이 생겨도 덮어쓰지 않는다. 재평가에는 새 report 이름을 사용한다. 기본 `--metric flow-loss`는 승인된 held-out data의 offline flow-matching loss를 측정하며 checkpoint 선택 승인, 실물 성공, semantic 성공을 뜻하지 않는다.
 
 `--max-batches` 양수로 제한한 report는 요청 limit, 전체·실제 평가 batch 수, completeness, 실제 loss에 포함된 episode와 승인된 held-out episode 전체를 따로 기록한다. 전체 batch와 승인된 episode 전체를 평가하지 않은 경우 scope는 `bounded_admitted_heldout_offline_loss`이며, 이 결과를 held-out partition 전체의 loss로 해석하지 않는다.
 
@@ -128,6 +128,10 @@ report v4의 `episode_metrics`는 승인된 모든 held-out episode의 평가 sa
 후속 data utility 분석은 `episode_index`와 dataset·split·receipt digest로 기존 condition metadata에 연결한다. 긴 성공 시연의 비중, 짧은 시연의 오차와 조건별 coverage를 함께 해석하며, 이 report가 Curator의 selection이나 Rollout의 실물 판단을 대신하지 않는다.
 
 선별 전략마다 train subset이 달라지면 state/action 정규화 통계도 달라진다. 같은 held-out episode를 평가해도 normalized flow-matching loss의 크기를 그대로 비교해 어느 데이터가 더 유용하다고 결론내릴 수 없다. 각 loss는 해당 정규화 안의 최적화 추이를 설명한다. 전략 간 개선은 각 checkpoint의 저장 postprocessor를 거친 비교 가능한 출력이나 같은 조건의 실물 평가로 확인해야 한다. 점수의 척도를 맞추려고 held-out 데이터까지 통계 계산에 포함하지 않는다.
+
+같은 명령의 checkpoint·dataset 뒤에 `--metric sampled-actions --seed 1000`을 추가하면 저장된 native policy와 postprocessor로 물리 단위 action chunk를 측정한다. 이 모드는 batch 1, worker 0, `--max-batches 0`, AMP 비활성만 지원한다. 추론 전에 승인된 각 held-out episode에서 `floor((길이-1)*q)`, q=0.1/0.5/0.9 frame을 고정하고 짧은 episode의 중복 frame은 제거한다. 미래 action은 정답에만 사용하며, 각 관측마다 policy·processor를 reset하고 같은 CPU float32 noise를 사용한다. 다른 seed 비교에는 새 report 경로를 사용하며 좋은 seed만 골라 비교하지 않는다.
+
+물리 출력 report는 별도 metric `smolvla_sampled_physical_action_error`의 schema 1이다. 관측 tensor hash·좌표, noise hash·값, 예측·기록 action 및 padding, 관절 6축 rad와 gripper m의 개별 MAE/RMSE, episode별·전체 집계를 보존한다. padded target step은 제외하고 비유한 출력은 거부한다. `sampling_complete=true`는 고정 표본을 모두 평가했다는 뜻이며 `evaluation_complete=false`는 전체 held-out frame 평가와 구분한다. 시간 비율은 semantic phase가 아니며, 물리 단위만 같아도 dataset·관측·noise·precision이 다르면 공정한 비교가 되지 않는다. 단위가 다른 축을 한 scalar로 합치거나 이 오차를 실물 성공률로 해석하지 않는다.
 
 ```bash
 direnv exec . scripts/evaluate_smolvla.sh --check-env

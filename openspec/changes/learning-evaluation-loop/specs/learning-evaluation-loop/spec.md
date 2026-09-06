@@ -75,6 +75,17 @@ The lane SHALL distinguish admitted input, executable pipeline, checkpoint reloa
 - **THEN** a common held-out cohort alone does not make their normalized flow-matching losses a data-utility ranking
 - **AND** each arm retains leakage-free statistics, while an improvement claim requires a comparable downstream measure after its own saved postprocessor or a matched physical evaluation; the system does not fit statistics on held-out data to equalize the scores.
 
+### Requirement: Sampled physical-action assessment uses the native admitted evaluator
+
+The existing evaluator SHALL offer saved-policy/postprocessor action assessment while preserving its default flow-loss mode. It SHALL retain exact admitted cohort, observation, noise, solver, target-padding and artifact identities and report per-axis physical-unit errors without implying physical success.
+
+#### Scenario: A consumer evaluates sampled actions
+- **WHEN** a consumer selects sampled-action evaluation on an admitted checkpoint
+- **THEN** every held-out episode contributes deterministic early/middle/late frame samples selected before inference, deduplicated for short episodes
+- **AND** native policy and saved processors are reset for each observation, future recorded actions are used only as targets, and common seeded noise is retained
+- **AND** padded target steps are excluded, non-finite predicted actions are rejected, and separate radian/metre MAE and RMSE are reported per episode and over the sample
+- **AND** completing this sparse cohort is explicitly distinguished from evaluating every held-out frame; injected tests do not establish real model performance.
+
 ### Requirement: Resource cost and data utility guide continued learning
 
 The lane SHALL choose the next safe valuable outcome using code/tests, current author-primary research and actual workstation/data evidence in proportion to the decision. Real runs SHALL report wall time, peak GPU memory, sample throughput and checkpoint storage alongside learning results. Successful demonstration coverage and held-out errors SHALL inform data utility analysis alongside failure cases.
