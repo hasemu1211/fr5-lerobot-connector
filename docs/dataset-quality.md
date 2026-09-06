@@ -67,6 +67,8 @@ source preflight 진단을 추가하는 방향과 검토 clip 선택을 고치�
 
 ## 이미지 정제 비교의 TRAIN 전용 fitting
 
+사용자가 승인한 `fr5-up-wrist-fixed-view-r002`의 이미지 정제 기준은 유지한다. 로봇 동작 범위나 작업 영역 바깥에 사람이 가끔 보일 수 있다는 알려진 한계가 있으며, 이를 이유로 승인 기준을 폐기하거나 자동으로 다시 판정하지 않는다. 이 시각 기준의 승인과 profile finalization, TRAIN fitting, physical binding, training authority는 각각 별도 근거다.
+
 같은 dataset에서 원본과 정제 입력을 비교할 때, 배경판과 검토 기준 이미지를 heldout에서 고르면 평가 영상의 외관이 변환에 들어갈 수 있다. [setup export](../tools/data_factory/curator/workflow/setup.py)의 선택적 `fit_split` 인자(에이전트 CLI의 `setup export --fit-split`)는 기존 native v3 split을 검증하고 원본 경로·내용 digest가 일치할 때만 그 TRAIN 프레임에서 기준 이미지와 배경판 표본을 고른다. 기준 frame을 명시하면 TRAIN 소속이어야 하며, 생략하면 첫 TRAIN frame을 사용한다. episode 수나 길이를 고정하지 않고 기존 표본 예산을 적용한다.
 
 이 모드의 v2 profile은 split 경로·파일 hash·native digest와 실제 해독한 기준/배경 프레임의 global·episode·local index 및 RGB 배열 digest를 보존한다. [profile resolution](../tools/data_factory/curator/profile/registry.py)은 이 근거를 profile digest에 포함하고 기존 파생 dataset 계보가 그 digest를 참조한다. 원본과 참조 split은 동결해 유지해야 하며, split 변경은 검토·확정 경로에서 거부한다. [native 검증](../tests/data_factory/curator/workflow/test_setup.py)은 export → preview → 합성 binding의 finalize → 실제 candidate prepare/review와 stale split 거부를 실행한다.
@@ -87,7 +89,7 @@ source preflight 진단을 추가하는 방향과 검토 clip 선택을 고치�
 
 ## 성공 예제의 다양성과 비용 가설
 
-기존 사람이 PASS로 판정한 예제 안에서도 동작 경로, 관측 가능한 장면, 시연 속도와 녹화량은 서로 다를 수 있다. 이 차이를 곧바로 좋고 나쁜 데이터의 점수로 바꾸지 않고, 기존 native 요청으로 학습 소비자가 검증할 구체적인 선택 가설을 만든다. Curator는 명시한 선택과 계보를 구성하고, Learning/Evaluation 소유자는 공통 held-out cohort와 비교 가능한 학습 비용을 설계한다. 조건별 수량·admission·다음 수집 추천은 계속 기존 Data Quality Analysis와 Collection이 소유한다.
+기존 사람이 PASS로 판정한 예제 안에서도 동작 경로, 관측 가능한 장면, 시연 속도와 녹화량은 서로 다를 수 있다. 이 차이를 곧바로 좋고 나쁜 데이터의 점수로 바꾸지 않고, 기존 native 요청으로 학습 소비자가 검증할 구체적인 선택 가설을 만든다. Curator는 명시한 선택과 계보 및 advisory 수집 가설을 구성하고, Learning/Evaluation 소유자는 공통 held-out cohort와 비교 가능한 학습 비용을 설계한다. 조건별 수량은 기존 DQA, admission은 기존 ledger/검토 소비자, 수집 실행은 Collection이 소유한다.
 
 Hejna 등의 [DemInf](https://arxiv.org/abs/2502.08623v3)는 보조 VAE와 상호정보량 추정으로 시연을 평가한다. Sirigiri 등의 [FAKTUAL 연구](https://arxiv.org/abs/2603.11634v1)는 궤적 kernel 기반 다양성을 다루며 품질·다양성·주변 사례의 밀도가 함께 필요함을 설명한다. 현재 PC와 학습을 수행하지 않는 실험 범위에서는 보조 모델 학습 대신 CPU에서 계산하는 작은 기준선을 선택했다. 여섯 arm joint의 절대 경로를 누적 경로 길이의 같은 비율에서 비교하고, 녹화 frame 수를 별도 비용 대리값으로 유지한다. 이는 signature kernel이나 검증된 학습 utility 점수의 구현이 아니다.
 
@@ -98,6 +100,16 @@ Hejna 등의 [DemInf](https://arxiv.org/abs/2502.08623v3)는 보조 VAE와 상�
 저장된 intent를 연결하면 가까운 쌍은 같은 명령상 place를, 먼 쌍은 서로 다른 place를 포함한다. 같은 place의 예제도 요청된 위치·yaw가 다르므로 관절 기하의 순위에는 수집 조건의 차이가 섞여 있다. 이에 따라 학습 소유자에게 넘기는 질문도 조건별 분포와 궤적 차이를 함께 다루어야 한다. 기존 intent의 관측된 조건을 읽는 것은 누락된 과거 authoring이나 전체 domain을 복원하는 작업이 아니며, 명령된 place 명칭은 물리 A/B 검증을 대신하지 않는다.
 
 ## 통제된 selection utility 비교
+
+### 다음 수집에서 성공 조건의 반복을 관측하기
+
+새 위치를 더 넓히는 것과 이미 성공한 조건을 반복하는 것은 서로 다른 가설이다. 현재 성공 예제가 여러 조건에 한 번씩 분산되어 있다면, 먼저 TRAIN에서 관측한 조건을 제한된 횟수 반복해 그 변동을 관측할 수 있다. [SmolVLA 공식 가이드](https://huggingface.co/docs/lerobot/main/smolvla)는 SO100에서 5개 위치별 10회 시연을 사용한 사례와 약 50개라는 출발점을 제시한다. 이것은 FR5의 최소 수량이나 반복의 성능 보장이 아니다.
+
+재현 경로는 [기존 ledger validator](../tools/data_factory/episode_ledger.py)와 [native split](../tools/data_factory/training_split.py)로 현재 합격 TRAIN을 확인하고, [DQA](../tools/data_factory/quality/coverage_report.py)의 조건별 관측을 선택 이유로 사용하는 것이다. 기존 [catalog의 direct pose projection](../tools/data_factory/operator/catalog.py)으로 등록된 preset과 명시적 위치·yaw·시도 수를 정하고, [CampaignOperator](../tools/data_factory/campaign_operator.py)의 `update_draft`와 `compile_draft`로 실제 slot 순서와 수량을 검증한다. 입력 dataset/split, source digests, 선택한 조건, compiler receipt를 함께 유지한다. 구체적인 대표 선택과 반증 조건은 [Curation design](../openspec/changes/curation-learning-loop/design.md)에 둔다.
+
+이 author-only 산출물은 새 campaign의 수집 권한이나 기존 승인 상속이 아니다. 과거 coverage와 새 authoring을 구분하고, 자원·scene·장치·실행 자격은 Collection Web 소비자가 현재 상태로 검증한다. 새 episode를 추가하면 native sorted-last 분할이 기존 heldout을 바꿀 수 있으므로, Learning 소비자가 실제 분할을 검증하기 전에는 고정 평가 비교가 완성되었다고 하지 않는다. 반복 시도는 합격 episode 수가 아니며, 녹화량은 전체 취득 비용이 아니다.
+
+### 기존 subset의 분포 대비
 
 [DataMIL 최신 개정본](https://arxiv.org/abs/2505.09603v2)은 외형·행동 유사성과 학습된 정책의 실제 효용을 구분하고, [ReMix](https://proceedings.mlr.press/v270/hejna25a.html)는 데이터 혼합 비율과 action 척도가 downstream 측정에 영향을 줄 수 있음을 보여 준다. 이 연구들이 현재 FR5의 조건 분산 점수를 보증하는 것은 아니다. 먼저 조건이 넓은 선택과 밀집한 선택을 같은 데이터량·평가 조건에서 비교하는 반증 가능한 가설로 다룬다.
 
