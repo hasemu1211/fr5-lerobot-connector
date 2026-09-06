@@ -216,7 +216,7 @@ def mapped_publication(reference):
 
 def prepare_mapped_approvals(request, output, approved_by, *, check_targets=True):
     """Native preparation hook; root integrates dispatch, no consent is issued."""
-    manifest = mapped_publication(request["mapping"])
+    manifest = approval._mapped_publication(request["mapping"])
     identity = manifest["dataset_identity"]
     expected = {k:identity[k] for k in ("dataset_root","repo_id","dataset_id")}
     expected.update(episodes=manifest["episodes"], mapping=request["mapping"])
@@ -248,4 +248,5 @@ def prepare_mapped_approvals(request, output, approved_by, *, check_targets=True
     if check_targets:
         approval._target(output / "training_approved.json", "TRAINING_INVENTORY_EXISTS")
     approval._unique_episodes([d["approval_arguments"] for d in result], [d["provenance"] for d in result])
+    _parents(manifest["sources"], output, approved_by, fresh=True)
     return identity, result

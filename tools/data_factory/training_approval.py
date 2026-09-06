@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import copy
 from contextlib import contextmanager
+from contextvars import ContextVar
 import json
 import math
 import os
@@ -487,6 +488,30 @@ def _validate_derived_provenance(value: dict, *, expected_scope: str) -> dict:
     return value
 
 
+# Only mapped publication proofs are shared within one synchronous read operation.
+# The context carries no approval and is discarded before the final full recheck.
+_MAPPED_READ = ContextVar("mapped_admission_read", default=None)
+
+
+@contextmanager
+def _mapped_read():
+    if _MAPPED_READ.get() is not None:
+        yield
+        return
+    checked = {}
+    token = _MAPPED_READ.set(checked)
+    try:
+        yield
+    finally:
+        _MAPPED_READ.reset(token)
+    # On success, re-read every full proof without the operation-local results.
+    # Exceptions discard the results; no caller receives partially checked data.
+    for reference, manifest in checked.values():
+        if _mapped_publication(reference) != manifest:
+            raise ContractError("TRAINING_MAPPING_EVIDENCE", "publication changed during validation")
+
+
+@_mapped_read()
 def prepare_mapped_approvals(request, output, approved_by, *, check_targets=True):
     """Read-only mapped preparation hook for the existing batch consumer."""
     from tools.data_factory.curator.workflow.mapping import prepare_mapped_approvals as prepare
@@ -501,7 +526,14 @@ def _mapped_publication(reference):
     from tools.data_factory.curator.workflow.mapping import mapped_publication
     from tools.data_factory.curator.core.errors import CuratorError
     try:
-        return mapped_publication(reference)
+        checked = _MAPPED_READ.get()
+        key = canonical_digest(reference)
+        if checked is not None and key in checked:
+            return copy.deepcopy(checked[key][1])
+        manifest = mapped_publication(reference)
+        if checked is not None:
+            checked[key] = (copy.deepcopy(reference), copy.deepcopy(manifest))
+        return manifest
     except (CuratorError, OSError, ValueError, KeyError, TypeError) as exc:
         raise ContractError("TRAINING_MAPPING_EVIDENCE", str(exc)) from exc
 
@@ -1043,6 +1075,7 @@ def _unique_episodes(
         raise ContractError("TRAINING_INVENTORY_DUPLICATE")
 
 
+@_mapped_read()
 def build_training_approved_inventory(
     *, scope: str, dataset_identity: Mapping[str, Any], episodes: Sequence[Mapping[str, Any]],
 ) -> dict[str, Any]:
@@ -1065,6 +1098,7 @@ def build_training_approved_inventory(
     return {**body, "inventory_digest": canonical_digest(body)}
 
 
+@_mapped_read()
 def validate_training_approved_inventory(
     source: Mapping[str, Any] | str | Path, *, expected_scope: str = PRODUCTION_SCOPE,
 ) -> dict[str, Any]:
