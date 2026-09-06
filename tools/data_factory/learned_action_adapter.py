@@ -275,6 +275,15 @@ class NativeSmolVLA:
                 raise ContractError("LEARNED_RUNTIME_VERSION")
             if os.environ.get("HF_HUB_OFFLINE") != "1" or os.environ.get("TRANSFORMERS_OFFLINE") != "1":
                 raise ContractError("LEARNED_OFFLINE_RUNTIME_REQUIRED")
+            receipt = output_dir / "fr5_training_receipt.json"
+            if not receipt.is_file():
+                receipt = Path(str(output_dir) + ".fr5_training_receipt.json.pending")
+            split_path = output_dir / "fr5_training_split.json"
+            if not split_path.is_file():
+                split_path = output_dir.with_name(output_dir.name + ".fr5_training_split.json.pending")
+            # Launch evidence lives outside policy_dir: bind it separately across
+            # model construction, without substituting raw pixels if it vanishes.
+            manifests = {path: path.read_bytes() for path in (split_path, receipt)}
             before = tree_digest(policy_dir)
             from safetensors import safe_open
             with safe_open(policy_dir / "model.safetensors", framework="numpy") as tensors:
@@ -293,25 +302,15 @@ class NativeSmolVLA:
             policy, preprocessor, postprocessor = cls._load_components(policy_dir, device)
             if tree_digest(policy_dir) != before:
                 raise ContractError("LEARNED_CHECKPOINT_CHANGED")
-            receipt = output_dir / "fr5_training_receipt.json"
-            if not receipt.is_file():
-                receipt = Path(str(output_dir) + ".fr5_training_receipt.json.pending")
-            split_path = output_dir / "fr5_training_split.json"
-            if not split_path.is_file():
-                split_path = output_dir.with_name(output_dir.name + ".fr5_training_split.json.pending")
             from tools.fr5_data_factory import load_json_strict
             from tools.validate_training_checkpoint import validate_saved_observation_view
-            if split_path.is_file() and receipt.is_file():
-                split = load_json_strict(split_path)
-                receipt_value = load_json_strict(receipt)
-                observation_view = validate_saved_observation_view(split, receipt_value)
-            else:
-                # Synthetic native-policy fixtures predate launch manifests. A
-                # real admitted checkpoint always has both files and takes the
-                # strict saved-view path above.
-                receipt_value = json.loads(receipt.read_text()) if receipt.is_file() else {}
-                observation_view = {"representation": "raw", "transform_application": "none",
-                                    "training_transform": "raw_once"}
+            if any(not path.is_file() or path.read_bytes() != value for path, value in manifests.items()):
+                raise ContractError("LEARNED_CHECKPOINT_CHANGED")
+            split = load_json_strict(split_path)
+            receipt_value = load_json_strict(receipt)
+            observation_view = validate_saved_observation_view(split, receipt_value)
+            if any(not path.is_file() or path.read_bytes() != value for path, value in manifests.items()):
+                raise ContractError("LEARNED_CHECKPOINT_CHANGED")
             instance = cls()
             instance.policy, instance.preprocessor, instance.postprocessor = policy, preprocessor, postprocessor
             instance.checkpoint = {"tree_digest": before,
