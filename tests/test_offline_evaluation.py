@@ -273,7 +273,8 @@ class OfflineEvaluationTest(unittest.TestCase):
                 return torch.ones((1, 2, 7))
 
         class Dataset:
-            hf_dataset = {'episode_index': [2] * 10 + [3] * 10, 'frame_index': list(range(10)) * 2}
+            hf_dataset = {'episode_index': torch.tensor([2] * 10 + [3] * 10),
+                          'frame_index': torch.tensor(list(range(10)) * 2)}
             meta = SimpleNamespace(camera_keys=['camera'])
             def __len__(self):
                 return 20
