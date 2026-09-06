@@ -63,8 +63,14 @@
           view_revision: view.revision, view_digest: view.view_digest,
           op: operations[action], payload: action === "prepare" ? {} : {batch_digest: view.projection.preview.batch_digest}};
         // Never retry a decision automatically, including after a lost response.
-        await request("/api/intent", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(intent)});
+        let responseFailed = false;
+        try {
+          await request("/api/intent", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(intent)});
+        } catch (_error) {
+          responseFailed = true;
+        }
         render(await request("/api/view"));
+        if (responseFailed) element("status").textContent += " 요청을 반복하지 않고 현재 검토 상태를 다시 확인했습니다.";
       }
     } catch (error) {
       view = null;
