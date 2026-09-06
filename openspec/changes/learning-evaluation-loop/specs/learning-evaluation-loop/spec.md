@@ -117,6 +117,13 @@ The lane SHALL choose the next safe valuable outcome using code/tests, current a
 - **AND** optimizer, scheduler, RNG, sample stream and step reset are explicit; a changed parent or inconsistent lineage is rejected before publication and native consumption
 - **AND** child reload and legacy same-run resume validate the parent lineage without overwriting it or claiming mixed-batch true continuation is supported.
 
+#### Scenario: A continued run is interrupted and resumed again
+- **WHEN** a native continuation changes batch size and later resumes from its own checkpoint
+- **THEN** immutable parent state and explicit schedule-prefix semantics are preserved, and the consumed sample cursor is restored independently of absolute update count and the latest batch
+- **AND** the prepared data loader preserves that epoch and offset, accounts for partial batches, and does not treat prefetched samples as optimizer-consumed data
+- **AND** resumed iterator construction preserves the declared policy RNG sequence; tests compare uninterrupted and repeated-resume optimizer, scheduler, RNG and sample traces through an epoch boundary
+- **AND** CPU fixture equivalence alone does not establish real policy continuation; the native admitted trainer, saved checkpoint and independent reload must verify the supported runtime scope.
+
 #### Scenario: Approval or GPU ownership is unavailable
 - **WHEN** gated execution cannot proceed
 - **THEN** the lane reports the exact blocker to root and continues independent scoped software, metadata or research work
