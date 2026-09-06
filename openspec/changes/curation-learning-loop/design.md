@@ -14,6 +14,8 @@ heldout은 기존 native 분할에서 고정한다. 첫 후보의 동일 명령 
 
 이 조정은 관측된 heldout loss 순위로 좋은 예제를 고르는 작업이 아니다. 단일 checkpoint의 episode별 loss는 미해결 질문을 찾는 근거이며 선별 utility의 정답이 아니다. yaw별 수량과 전체 frame 수를 맞춰도 phase별 노출, 영상 분포, optimizer 노출은 같아지지 않는다. 분산 차이가 큰 한 쌍의 결과를 일반적인 평균 효과로 해석하지 않으며, 두 후보의 비교 가능한 downstream 출력이 없으면 가설은 미결로 남긴다.
 
+Learning의 저장된 postprocessor 출력은 조건 근거와 연결하되, 입력 source pose의 coverage와 실제 action 범위를 구분한다. 전체 TRAIN action 범위 밖의 목표는 기존 TRAIN subset을 다시 고르는 것만으로 추가할 수 없다. 가까운 yaw의 기존 성공 예제도 XY에 따라 다른 관절 목표를 가질 수 있으며, 동일 task·source coverage는 reset 목적지·trajectory 변형·scene 계보까지 같은 비교를 뜻하지 않는다. 따라서 다음 수집에는 필요한 목표 범위와 기존 qualified plan의 연결, 비교할 장면·reset·trajectory 조건을 advisory 근거로 명시한다. 계획상 endpoint의 수치 일치는 timestamp로 검증한 기록 phase나 실행 권한이 아니다. noise seed에 따라 방향이 바뀌는 episode 오류 순위로 수집 대상을 정하지 않고, 범위 안의 오류와 범위 밖의 목표를 구분하는 Learning 측정을 먼저 재사용한다. 현재 두 요청은 유지하며, 이 근거만으로 추가 수집이나 물리 효용을 선언하지 않는다.
+
 ## 다음 소비와 채택 기준
 
 - Learning: 두 요청과 분할 preview를 받아 실제 launch의 같은 heldout·seed·예산을 확인하고, 저장된 postprocessor를 거친 비교 가능한 출력으로 측정한다. 학습 실행·평가 metric 구현은 해당 owner가 담당한다.
