@@ -6,6 +6,23 @@ Curation은 어떤 원본·시연 구성·관측 표현이 downstream 학습과 
 
 ## 채택한 다음 결과
 
+**관측 표현의 실제 효용을 검증할 수 있도록, exact 후보 검토와 다음 소비를 연결한다.**
+
+과거 Curator 계획에서 유지하는 가치는 배경 제거 자체가 아니라 task 단서를 보존하는 관측, background/action shortcut의 감소, 학습·추론의 동일 base transform이다. 과거의 TTY-only 제약은 현재 Web UI 요구로 대체한다. 자동화도 Curation의 책임이지만, 아직 적격성이 입증되지 않은 자동 판단을 인간 승인으로 기록하지 않는다.
+
+- Hmask: 기존 고정 up mask와 배경판이 task 밖 시각 변동에 대한 민감도를 줄인다.
+- Hraw: 원본의 공간·문맥 단서가 더 유용하며, mask나 재인코딩이 관측 손실을 만든다.
+
+[ARRO v3](https://arxiv.org/html/2505.08627v3)는 task 관련 영역의 보존과 학습·추론의 일관성을 지지하고, 단순 masking과 공간 단서를 갖춘 표현의 차이를 보여준다. 그 동적 segmentation·가상 배경을 현재 고정 mask의 성능 보증으로 해석하지 않는다. [Multi-Camera View Scaling](https://arxiv.org/abs/2604.00557v1)은 유용한 관측 변화의 가치를 보여주지만, FR5에서 특정 camera를 버리거나 mask를 채택할 근거는 아니다. 현재 CPU/GPU 제약에서는 새 segmentation 모델보다 이미 있는 mask와 원본의 통제된 비교가 먼저다.
+
+첫 실행 가능한 연결은 기존 native review 영상·coverage·exact identity를 Web UI가 소비하고, 명시적 결정과 응답 손실 후 복구를 같은 Curator lifecycle로 처리하는 것이다. 이 결과는 새 승인 시스템이나 utility 판정이 아니다. 파생 dataset admission과 저장된 transform의 학습·추론 소비는 Learning/root 계약이며, 원본 Collection ledger를 파생 데이터의 ledger로 가장하지 않는다.
+
+비교에서는 episode/frame, TRAIN/heldout, action normalization, 학습 예산과 평가 척도를 맞추고 H.264 재인코딩 효과를 구분한다. 원본으로 학습한 모델에 추론 시 mask만 적용한 결과를 정제 학습의 효과로 부르지 않는다. 같은 데이터에서 배경판을 추정한다면 사전에 정한 TRAIN만 사용하거나 독립 calibration source임을 입증해야 한다. 현재 setup의 전체 episode 표본은 그 통제를 자동 보장하지 않으므로, 명시적 fitting pool 지원과 최종 profile까지의 출처 연결은 다음 필요한 준비 경계다.
+
+완료 근거는 native synthetic publication/replay 검증, 실제 UI 소비 수용, 적격 파생 계보의 native 학습 수용과 일관된 inference 입력, 그리고 사전에 정한 비교에서의 측정이다. 실제 physical binding·semantic 판단·training 실행이 불가한 효과는 분리해 미검증으로 남긴다. 현재 인간 경로를 연결하는 것만으로 장기 자동 판단 책임이나 전체 효용 검증을 완료했다고 선언하지 않는다.
+
+## 유지하는 조건 분포 비교
+
 **학습량과 평가 대상을 통제한 조건 분포 비교를 실제 native 요청으로 만든다.**
 
 - H1: 같은 데이터량에서 넓은 명령 조건 분포가 부족한 조건에 대한 학습을 돕는다.
