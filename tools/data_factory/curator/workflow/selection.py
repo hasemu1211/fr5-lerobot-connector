@@ -11,15 +11,38 @@ from typing import Sequence
 
 from tools.data_factory.episode_ledger import validate_episode_state
 from tools.data_factory.training_entrypoint import prepare_approvals
+from tools.data_factory.training_split import selected_train_eval
 from tools.fr5_data_factory import ContractError, load_json_strict
+from tools.fr5_training_profile import read_metadata
 
 from ..core.errors import CuratorError
 from ..core.filesystem import reject_symlink_components, write_json_exclusive
 
 
+def check_evaluation_cohort(
+    request: dict, *, eval_split: float, expected_eval_episodes: Sequence[int],
+) -> dict:
+    """Check an explicit comparison cohort against the existing native splitter.
+
+    This is a preview, not a launch split or admission artifact. Selection never
+    changes metadata or silently moves examples to satisfy the expected cohort.
+    """
+    expected = list(expected_eval_episodes)
+    if (not expected or any(type(index) is not int or index < 0 for index in expected)
+            or expected != sorted(set(expected))):
+        raise CuratorError("SELECTION_EVALUATION_COHORT")
+    metadata = read_metadata(Path(request["dataset_root"]))
+    selected = [episode["episode_index"] for episode in request["episodes"]]
+    train, heldout = selected_train_eval(metadata["episode_tasks"], selected, eval_split)
+    if sorted(heldout) != expected:
+        raise CuratorError("SELECTION_EVALUATION_CHANGED", f"expected {expected}; native {sorted(heldout)}")
+    return {"eval_split": eval_split, "train_episodes": train, "eval_episodes": heldout}
+
+
 def export_training_request(
     run_directories: Sequence[str | Path], output: str | Path,
-    *, dataset_id: str,
+    *, dataset_id: str, eval_split: float | None = None,
+    expected_eval_episodes: Sequence[int] | None = None,
 ) -> dict:
     """Publish one request after native preparation validates selected runs.
 
@@ -28,6 +51,8 @@ def export_training_request(
     """
     if not run_directories:
         raise CuratorError("SELECTION_RUNS_REQUIRED")
+    if (eval_split is None) != (expected_eval_episodes is None):
+        raise CuratorError("SELECTION_EVALUATION_OPTIONS")
     target = reject_symlink_components(output, "SELECTION_OUTPUT").resolve()
     if target.exists():
         raise CuratorError("EVENT_EXISTS", str(target))
@@ -83,6 +108,9 @@ def export_training_request(
         # stay in memory; this identifier is not a human approval or attribution.
         # The consumer owns byte identity, metadata, production scope and lineage.
         prepare_approvals(request, target.parent, "curator-preview-only")
+        cohort = None if eval_split is None else check_evaluation_cohort(
+            request, eval_split=eval_split, expected_eval_episodes=expected_eval_episodes,
+        )
         # Preparation may read a large dataset while input artifacts change.
         # Reopen the existing owner's state; do not publish a selection based on
         # evidence that changed during that work. This is not a source lock.
@@ -102,7 +130,8 @@ def export_training_request(
         "ok": True, "status": "REQUEST_NOT_APPROVED", "request_path": str(target),
         "episode_indices": [episode["episode_index"] for episode in request["episodes"]],
         "training_authority": False,
+        **({"evaluation_cohort": cohort} if cohort is not None else {}),
     }
 
 
-__all__ = ["export_training_request"]
+__all__ = ["check_evaluation_cohort", "export_training_request"]

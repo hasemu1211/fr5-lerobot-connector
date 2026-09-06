@@ -35,6 +35,8 @@ def _parser() -> argparse.ArgumentParser:
     selection.add_argument("--run-dir", type=Path, action="append", required=True)
     selection.add_argument("--output", type=Path, required=True)
     selection.add_argument("--dataset-id", required=True)
+    selection.add_argument("--eval-split", type=float)
+    selection.add_argument("--expected-eval-episode", type=int, action="append")
     for name in ("status", "decide"):
         command = commands.add_parser(name, allow_abbrev=False)
         command.add_argument("--run", required=True)
@@ -77,8 +79,12 @@ def main(argv: list[str] | None = None) -> None:
             else:
                 result = finalize_profile_setup(args.run, args.preview, _paths=paths)
         elif args.command == "training-request":
+            cohort = {} if args.eval_split is None and args.expected_eval_episode is None else {
+                "eval_split": args.eval_split,
+                "expected_eval_episodes": args.expected_eval_episode,
+            }
             result = export_training_request(
-                args.run_dir, args.output, dataset_id=args.dataset_id,
+                args.run_dir, args.output, dataset_id=args.dataset_id, **cohort,
             )
         elif args.command == "prepare":
             result = prepare(args.source)
