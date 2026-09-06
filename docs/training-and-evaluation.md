@@ -94,7 +94,9 @@ resume·offline 평가·Rollout은 같은 `validate_checkpoint` 경계를 사용
 
 ## 작은 GPU에서 첫 실행의 의미
 
-첫 실행은 승인과 GPU owner 배정 후 batch 1, data-loader worker 0, AMP, 기존 SmolVLA expert-only 설정, local cached weights와 새 output으로 시작할 수 있다. 이는 VRAM 적합성을 확인할 실행 가설이며 8GB에서 load 또는 학습 성공이 검증되었다는 뜻은 아니다. download를 금지할 실행은 process에 `HF_HUB_OFFLINE=1`을 지정하고, cache 누락 시 설치나 download로 자동 전환하지 않는다.
+첫 실행은 유효한 native 승인·위임과 단일 GPU ownership 아래 batch 1, data-loader worker 0, 기존 SmolVLA expert-only 설정, local cached weights와 새 output으로 시작한다. 현재 설치 조합에서는 `policy.use_amp=false`와 Accelerator mixed precision `no`를 사용한다. 이는 native BF16/FP32 parameter와 명시적인 dtype 변환을 유지하며 전부 FP32로 학습한다는 뜻이 아니다. AMP fallback의 FP16 GradScaler는 이 모델의 BF16 gradient를 unscale하지 못하므로 AMP flag만으로 precision 적합성을 판단하지 않는다. 실제 finite gradient·parameter 변화·메모리와 독립 reload를 확인한다. download를 금지할 실행은 process에 `HF_HUB_OFFLINE=1`을 지정하고, cache 누락 시 설치나 download로 자동 전환하지 않는다.
+
+재현할 native 실행에는 process 환경 `ACCELERATE_MIXED_PRECISION=no`와 wrapper 인자 `--policy.use_amp=false`를 함께 고정한다. 설치된 SmolVLA config에 `dtype` 속성이 없고 AMP가 꺼져 있을 때 trainer가 `Accelerator(mixed_precision=None)`을 호출하므로 이 환경값이 적용된다. AMP를 켠 채 환경값만 바꾸면 trainer의 명시적인 FP16 설정을 덮어쓰지 못한다. `--policy.dtype` 같은 지원되지 않는 옵션을 만들거나 설치 패키지를 수정하지 않는다.
 
 짧은 probe에서는 마지막 checkpoint 하나, bounded offline reload 평가, wall time·peak GPU memory·초당 학습 sample·checkpoint bytes를 함께 보존한다. 설치된 LeRobot의 `cosine_decay_with_warmup`은 전체 학습 step이 설정된 decay보다 작으면 warmup과 decay를 비례 축소한다. SmolVLA preset의 warmup 1,000·decay 30,000으로 200-step 실행을 만들면 실제 warmup은 6 step이며 마지막 LR은 floor에 도달한다. 따라서 200-step smoke가 pipeline 증거인 이유는 warmup 안에 있기 때문이 아니라 학습 비교·행동 검증이 없기 때문이다. 같은 held-out으로 반복 선택한 결과는 validation이며 독립 test 일반화로 표시하지 않는다.
 

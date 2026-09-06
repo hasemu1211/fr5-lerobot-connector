@@ -47,6 +47,11 @@ The public training path SHALL revalidate the frozen inventory authorized by an 
 - **THEN** the shared checkpoint validator rejects it before resume, offline evaluation or Rollout loading
 - **AND** the validator accepts the admitted profile's native normalization mode, including VQ-BeT MIN_MAX.
 
+#### Scenario: Native serialization adds inert missing-image slots
+- **WHEN** a checkpoint saves source-verified SmolVLA placeholder features for the admitted camera and blank-slot budget
+- **THEN** the shared validator recognizes only that equivalent native expansion in both saved policy and training configurations
+- **AND** unknown extra inputs or altered real camera order, shapes, state/action features or blank count remain rejected without changing checkpoint bytes.
+
 ### Requirement: Learning and pipeline evidence remain distinguishable
 
 The lane SHALL distinguish admitted input, executable pipeline, checkpoint reload, offline validation and physical learning evidence. A completed short probe, including one that finishes learning-rate decay, SHALL NOT alone establish learning effectiveness. A fair checkpoint comparison SHALL bind the same normalization, held-out episodes, seed, batch/precision and sample coverage; repeated model selection on that holdout SHALL be described as validation, not an untouched generalization test.
