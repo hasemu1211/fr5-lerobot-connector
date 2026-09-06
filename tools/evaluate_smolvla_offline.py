@@ -1,14 +1,15 @@
 #!/usr/bin/env python3
 """Evaluate a trained SmolVLA checkpoint on held-out LeRobot episodes.
 
-This reports deterministic offline flow-matching loss. It does not measure
-real-robot task success and never sends robot commands.
+Report seeded offline flow-matching loss or sampled physical-unit action errors.
+Neither metric measures real-robot task success or sends robot commands.
 """
 
 from __future__ import annotations
 
 import argparse
 import copy
+import hashlib
 from contextlib import nullcontext
 from itertools import islice
 import json
@@ -64,6 +65,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--device", default="auto")
     parser.add_argument("--use-amp", action="store_true")
     parser.add_argument("--seed", type=int, default=1000)
+    parser.add_argument("--metric", choices=("flow-loss", "sampled-actions"), default="flow-loss")
     parser.add_argument("--output", type=Path)
     parser.add_argument(
         "--dry-run", action="store_true",
@@ -145,6 +147,10 @@ def admit_evaluation(args: argparse.Namespace) -> dict:
 
     if args.batch_size < 1 or args.num_workers < 0 or args.max_batches < 0:
         raise ValueError("batch size must be positive; worker and batch limits must be non-negative")
+    if getattr(args, "metric", "flow-loss") == "sampled-actions" and (
+        args.batch_size != 1 or args.num_workers or args.max_batches or args.use_amp
+    ):
+        raise ValueError("sampled actions require batch-size 1, num-workers 0, all selected observations and no AMP")
     policy_dir, output_dir = validate_checkpoint(Path(args.checkpoint))
     split_path = _output_artifact(output_dir, "fr5_training_split.json")
     receipt_path = _output_artifact(output_dir, "fr5_training_receipt.json")
@@ -208,6 +214,128 @@ def admit_evaluation(args: argparse.Namespace) -> dict:
         "inventory_path": str(inventory_path.resolve()),
         "episodes": episodes,
         "receipt_digest": canonical_digest(receipt),
+    }
+
+
+def action_error_metrics(predicted: list, targets: list, padding: list) -> dict:
+    """Aggregate seven physical axes separately, excluding padded target steps."""
+    if not predicted or not len(predicted) == len(targets) == len(padding):
+        raise ValueError("action chunk, target and padding lengths must agree")
+    errors = []
+    for action, target, pad in zip(predicted, targets, padding, strict=True):
+        if type(pad) is not bool or len(action) != 7 or len(target) != 7:
+            raise ValueError("action metric requires seven axes and boolean padding")
+        if not all(math.isfinite(value) for value in action):
+            raise ValueError("sampled action is non-finite")
+        if not pad:
+            if not all(math.isfinite(value) for value in target):
+                raise ValueError("recorded action is non-finite")
+            errors.append([p - t for p, t in zip(action, target, strict=True)])
+    if not errors:
+        raise ValueError("action metric has no valid target steps")
+    return {
+        "valid_action_steps": len(errors),
+        "mae_per_axis": [math.fsum(abs(e[j]) for e in errors) / len(errors) for j in range(7)],
+        "rmse_per_axis": [math.sqrt(math.fsum(e[j] ** 2 for e in errors) / len(errors)) for j in range(7)],
+    }
+
+
+def sampled_action_indices(episode_indices: list[int], frame_indices: list[int], episodes: list[int]) -> list[int]:
+    """Freeze early/middle/late frames in every admitted episode before inference."""
+    if len(episode_indices) != len(frame_indices) or set(episode_indices) != set(episodes):
+        raise ValueError("sampled action metadata differs from the admitted held-out scope")
+    selected = []
+    for episode in episodes:
+        positions = [i for i, value in enumerate(episode_indices) if value == episode]
+        if [frame_indices[i] for i in positions] != list(range(len(positions))):
+            raise ValueError("held-out frames must have contiguous episode-local indices")
+        offsets = sorted({math.floor((len(positions) - 1) * q) for q in (0.1, 0.5, 0.9)})
+        selected.extend(positions[offset] for offset in offsets)
+    return selected
+
+
+def _evaluate_sampled_actions(args, admission, policy, preprocessor, postprocessor, dataset, device, started):
+    import torch
+
+    def tensor_identity(value):
+        value = value.detach().cpu().contiguous()
+        return {"dtype": str(value.dtype), "shape": list(value.shape),
+                "sha256": hashlib.sha256(value.numpy().tobytes()).hexdigest()}
+
+    episode_indices = list(dataset.hf_dataset["episode_index"])
+    frame_indices = list(dataset.hf_dataset["frame_index"])
+    indices = sampled_action_indices(episode_indices, frame_indices, admission["episodes"])
+    config = policy.config
+    noise = torch.randn((1, config.chunk_size, config.max_action_dim),
+                        generator=torch.Generator(device="cpu").manual_seed(args.seed))
+    rows = []
+    inference_started = time.perf_counter()
+    for index in indices:
+        sample = dataset[index]
+        episode, frame = int(sample["episode_index"]), int(sample["frame_index"])
+        if (episode, frame) != (episode_indices[index], frame_indices[index]):
+            raise ValueError("sampled observation differs from the frozen episode/frame selection")
+        target = sample["action"].detach().cpu().tolist()
+        padding = sample["action_is_pad"].detach().cpu().tolist()
+        # Future recorded actions are targets only, never policy input.
+        observed = {"observation.state": sample["observation.state"], "task": sample["task"]}
+        identity = {"observation.state": tensor_identity(sample["observation.state"])}
+        for camera in dataset.meta.camera_keys:
+            identity[camera] = tensor_identity(sample[camera])
+            observed[camera] = sample[camera].float() / 255 if sample[camera].dtype == torch.uint8 else sample[camera]
+        policy.reset()
+        preprocessor.reset()
+        postprocessor.reset()
+        with torch.inference_mode():
+            action = postprocessor(policy.predict_action_chunk(preprocessor(observed), noise=noise.to(device).clone()))
+        if list(action.shape) != [1, config.chunk_size, 7]:
+            raise ValueError("native sampled action shape differs from the saved chunk contract")
+        predicted = action[0].detach().cpu().tolist()
+        rows.append({"episode_index": episode, "frame_index": frame, "dataset_index": int(sample["index"]),
+            "observation_tensors": identity, "observation_state": sample["observation.state"].tolist(),
+            "task": sample["task"], "action": predicted, "recorded_action": target,
+            "action_is_pad": padding, **action_error_metrics(predicted, target, padding)})
+
+    def aggregate(selected):
+        return action_error_metrics(
+            [a for row in selected for a in row["action"]],
+            [a for row in selected for a in row["recorded_action"]],
+            [p for row in selected for p in row["action_is_pad"]])
+
+    split = admission["split"]
+    elapsed = time.perf_counter() - inference_started
+    return {
+        "schema_version": 1, "metric": "smolvla_sampled_physical_action_error",
+        "evidence_scope": "sampled_admitted_heldout_actions",
+        "warning": "Open-loop errors against recorded continuations do not measure physical success.",
+        "checkpoint": admission["checkpoint"], "checkpoint_tree_digest": admission["checkpoint_tree_digest"],
+        "dataset": str(args.dataset.resolve()), "dataset_digest": split["dataset_identity"]["dataset_digest"],
+        "repo_id": args.repo_id, "selected_episodes": split["selected_episodes"],
+        "train_episodes": split["train_episodes"], "episodes": admission["episodes"],
+        "approved_inventory": admission["inventory_path"],
+        "approved_episode_inventory_digest": split["approved_episode_inventory_digest"],
+        "training_split": admission["split_path"], "split_digest": split["split_digest"],
+        "training_receipt": admission["receipt_path"], "training_receipt_digest": admission["receipt_digest"],
+        "normalization_algorithm": admission["receipt"]["normalization"]["algorithm"],
+        "normalization_episodes": admission["receipt"]["normalization"]["episodes"],
+        "sampling_rule": "unique floor((episode_length-1)*q), q=0.1,0.5,0.9, every held-out episode",
+        "samples": len(rows), "available_samples": len(dataset), "sampling_complete": True,
+        "evaluation_complete": False, "seed": args.seed, "noise": {**tensor_identity(noise), "values": noise.tolist()},
+        "noise_scope": "same CPU float32 noise for every selected observation",
+        "solver": {"implementation": "native_saved_policy", "num_steps": config.num_steps},
+        "device": device, "use_amp": False, "batch_size": 1, "num_workers": 0,
+        "action_units": ["rad"] * 6 + ["m"],
+        "pooled": aggregate(rows),
+        "episode_metrics": [{"episode_index": ep, **aggregate([r for r in rows if r["episode_index"] == ep])}
+                            for ep in admission["episodes"]],
+        "observations": rows,
+        "resource_usage": {"scope": "sampled_evaluation_after_admission",
+            "setup_wall_time_s": inference_started - started, "inference_wall_time_s": elapsed,
+            "torch_cuda_peak_allocated_bytes": torch.cuda.max_memory_allocated(device) if device.startswith("cuda") else None},
+        "limitations": ["Sparse reused development observations and correlated target chunks; no independent generalization claim.",
+            "Time fractions are not semantic phases; recorded actions are one demonstrated continuation.",
+            "Physical units permit comparison across TRAIN normalizers, but dataset/cohort/noise/precision must also match.",
+            "No mixed-unit scalar or policy selection from a favorable noise seed."],
     }
 
 
@@ -276,7 +404,7 @@ def _evaluate(args: argparse.Namespace, admission: dict) -> dict:
         raise RuntimeError(f"FR5 policy feature mismatch: state={state_dim}, action={action_dim}, expected 7/7")
     policy.eval()
 
-    preprocessor, _ = make_pre_post_processors(
+    preprocessor, postprocessor = make_pre_post_processors(
         policy_cfg=policy_config,
         pretrained_path=checkpoint,
         preprocessor_overrides={
@@ -291,6 +419,8 @@ def _evaluate(args: argparse.Namespace, admission: dict) -> dict:
         delta_timestamps=resolve_delta_timestamps(policy_config, metadata),
         return_uint8=True,
     )
+    if getattr(args, "metric", "flow-loss") == "sampled-actions":
+        return _evaluate_sampled_actions(args, admission, policy, preprocessor, postprocessor, dataset, device, started)
     loader = DataLoader(
         dataset,
         batch_size=args.batch_size,
