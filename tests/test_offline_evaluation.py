@@ -228,6 +228,24 @@ class OfflineEvaluationTest(unittest.TestCase):
             (root / "pretrained_model/config.json").write_text("{}")
             self.assertEqual(normalize_checkpoint_path(str(root)), str(root / "pretrained_model"))
 
+    def test_delegated_evaluation_enters_cache_only_mode_and_restores_it(self):
+        from huggingface_hub import constants as hub_constants
+
+        before = os.environ.get("HF_HUB_OFFLINE")
+        admission = {"inventory": {"episodes": []}}
+
+        def inside(_args, _admission):
+            self.assertTrue(hub_constants.is_offline_mode())
+            self.assertEqual(os.environ["TRANSFORMERS_OFFLINE"], "1")
+            return {"offline": True}
+
+        with mock.patch(
+            "tools.data_factory.training_approval.inventory_local_training_delegation",
+            return_value={"delegated": True},
+        ), mock.patch("tools.evaluate_smolvla_offline._evaluate", side_effect=inside):
+            self.assertEqual(evaluate(SimpleNamespace(), admission), {"offline": True})
+        self.assertEqual(os.environ.get("HF_HUB_OFFLINE"), before)
+
     def test_admission_uses_exact_v3_heldout_partition(self):
         with TemporaryDirectory(prefix="SYNTHETIC_TEST_ONLY-") as directory:
             args, split = admitted_case(Path(directory))
