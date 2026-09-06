@@ -40,6 +40,7 @@ from ..profile.geometry import (
     resolve_geometry,
 )
 from ..profile.registry import resolve_view_profile
+from ..profile.fitting import fit_split_reference, load_fit_split, train_frame_ranges
 from ..profile.schema import (
     CAMERA_KEY,
     LABELME_VERSION,
@@ -49,6 +50,7 @@ from ..profile.schema import (
 from ..profile.transform import (
     MAX_BACKGROUND_PLATE_FRAMES,
     apply_up_view,
+    array_digest,
     make_background_plate,
     uint8_hwc,
 )
@@ -56,6 +58,7 @@ from ..review.render import ReviewFrame, render_keep_overlay, render_review_mp4
 
 REPOSITORY = Path(__file__).resolve().parents[4]
 REQUEST_SCHEMA = "curator.profile_setup_request.v1"
+FITTED_REQUEST_SCHEMA = "curator.profile_setup_request.v2"
 PREVIEW_SCHEMA = "curator.profile_setup_preview.v1"
 FINALIZED_SCHEMA = "curator.profile_setup_finalized.v1"
 DEFAULT_PROFILE_ID = "fr5-up-wrist-fixed-view-r003"
@@ -415,9 +418,11 @@ def _request_path(setup_id: str, paths: ProfileSetupPaths) -> Path:
 
 def _load_request(setup_id: str, paths: ProfileSetupPaths) -> tuple[Path, dict]:
     path = _request_path(setup_id, paths)
+    document = load_json(path, code="SETUP_REQUEST_JSON")
+    fitted = isinstance(document, dict) and document.get("schema_version") == FITTED_REQUEST_SCHEMA
     value = exact_fields(
-        load_json(path, code="SETUP_REQUEST_JSON"),
-        _REQUEST_FIELDS,
+        document,
+        _REQUEST_FIELDS | ({"fit_split"} if fitted else set()),
         "SETUP_REQUEST_FIELDS",
     )
     digest = value.get("request_digest")
@@ -452,7 +457,7 @@ def _load_request(setup_id: str, paths: ProfileSetupPaths) -> tuple[Path, dict]:
         value.get("dilation_margin_px"),
     )
     if (
-        value.get("schema_version") != REQUEST_SCHEMA
+        value.get("schema_version") not in {REQUEST_SCHEMA, FITTED_REQUEST_SCHEMA}
         or value.get("setup_id") != setup_id
         or not isinstance(profile_id, str)
         or SAFE_ID.fullmatch(profile_id) is None
@@ -501,16 +506,40 @@ def _load_request(setup_id: str, paths: ProfileSetupPaths) -> tuple[Path, dict]:
         or any(index >= value.get("source_total_frames", 0) for index in indices)
     ):
         raise CuratorError("SETUP_REQUEST_CONTRACT")
+    if fitted:
+        ranges = _fit_ranges(value["fit_split"], Path(source_value), value["source_tree_digest"])
+        if (indices != _fit_plate_indices(ranges, len(indices))
+                or not any(start <= value["reference_frame_index"] < end for _, start, end in ranges)):
+            raise CuratorError("SETUP_FIT_FRAMES")
     return path.parent, value
+
+
+def _fit_ranges(reference: dict, source: Path, source_digest: str) -> list[tuple[int, int, int]]:
+    split = load_fit_split(reference)
+    identity = split["dataset_identity"]
+    if identity["dataset_root"] != str(source) or identity["dataset_digest"] != source_digest:
+        raise CuratorError("SETUP_FIT_SOURCE")
+    return train_frame_ranges(split)
+
+
+def _fit_plate_indices(ranges: list[tuple[int, int, int]], count: int) -> list[int]:
+    positions = evenly_spaced_indices(sum(end - start for _, start, end in ranges), count)
+    result = []
+    offset = 0
+    for _, start, end in ranges:
+        result.extend(start + position - offset for position in positions if offset <= position < offset + end - start)
+        offset += end - start
+    return result
 
 
 def export_profile_setup(
     source: str | Path,
     *,
     profile_id: str = DEFAULT_PROFILE_ID,
-    reference_frame_index: int = 0,
+    reference_frame_index: int | None = None,
     dilation_margin_px: int = DEFAULT_DILATION_MARGIN_PX,
     plate_frame_count: int = DEFAULT_PLATE_FRAME_COUNT,
+    fit_split: str | Path | None = None,
     _paths: ProfileSetupPaths | None = None,
     _setup_id_value: str | None = None,
 ) -> dict[str, Any]:
@@ -523,6 +552,7 @@ def export_profile_setup(
             reference_frame_index=reference_frame_index,
             dilation_margin_px=dilation_margin_px,
             plate_frame_count=plate_frame_count,
+            fit_split=fit_split,
             _paths=_paths,
             _setup_id_value=_setup_id_value,
             _created=created,
@@ -536,9 +566,10 @@ def _export_profile_setup(
     source: str | Path,
     *,
     profile_id: str,
-    reference_frame_index: int,
+    reference_frame_index: int | None,
     dilation_margin_px: int,
     plate_frame_count: int,
+    fit_split: str | Path | None,
     _paths: ProfileSetupPaths | None,
     _setup_id_value: str | None,
     _created: list[OwnedDirectory],
@@ -547,7 +578,7 @@ def _export_profile_setup(
     source_path = _source(source)
     if SAFE_ID.fullmatch(profile_id) is None:
         raise CuratorError("SETUP_PROFILE_ID")
-    if type(reference_frame_index) is not int or reference_frame_index < 0:
+    if reference_frame_index is not None and (type(reference_frame_index) is not int or reference_frame_index < 0):
         raise CuratorError("SETUP_REFERENCE_INDEX")
     if type(dilation_margin_px) is not int or not 0 <= dilation_margin_px <= 256:
         raise CuratorError("SETUP_MARGIN")
@@ -562,9 +593,20 @@ def _export_profile_setup(
     dataset = open_source_dataset(source_path, source_repo_id)
     validate_source_contract(dataset, {"width": width, "height": height})
     total_frames = len(dataset)
+    fit_reference = None
+    if fit_split is not None:
+        fit_reference = fit_split_reference(fit_split)
+        ranges = _fit_ranges(fit_reference, source_path, source_digest)
+        if reference_frame_index is None:
+            reference_frame_index = ranges[0][1]
+        if not any(start <= reference_frame_index < end for _, start, end in ranges):
+            raise CuratorError("SETUP_FIT_REFERENCE")
+        plate_indices = _fit_plate_indices(ranges, plate_frame_count)
+    else:
+        reference_frame_index = 0 if reference_frame_index is None else reference_frame_index
+        plate_indices = evenly_spaced_indices(total_frames, plate_frame_count)
     if reference_frame_index >= total_frames:
         raise CuratorError("SETUP_REFERENCE_INDEX", str(reference_frame_index))
-    plate_indices = evenly_spaced_indices(total_frames, plate_frame_count)
     row = dataset[reference_frame_index]
     reference = _image(row, width, height)
     reference_episode = _scalar(row["episode_index"], "SETUP_EPISODE", integer=True)
@@ -587,7 +629,7 @@ def _export_profile_setup(
     annotation_path = asset / "reference.json"
     _write_rgb(reference_path, reference, "SETUP_REFERENCE_WRITE")
     payload = {
-        "schema_version": REQUEST_SCHEMA,
+        "schema_version": FITTED_REQUEST_SCHEMA if fit_reference is not None else REQUEST_SCHEMA,
         "setup_id": setup_id,
         "created_at": _now(),
         "profile_id": profile_id,
@@ -621,6 +663,8 @@ def _export_profile_setup(
         "labelme_annotation": str(annotation_path),
         "training_authority": False,
     }
+    if fit_reference is not None:
+        payload["fit_split"] = fit_reference
     payload["request_digest"] = canonical_digest(payload)
     write_json_exclusive(run / "request.json", payload)
     result = {
@@ -839,7 +883,7 @@ def _preview_profile_setup(
     )
     geometry, _layout, _binding = resolve_geometry(spec)
     profile = {
-        "schema_version": "curator.view_profile.v1",
+        "schema_version": "curator.view_profile.v2" if "fit_split" in request else "curator.view_profile.v1",
         "profile_id": request["profile_id"],
         "camera_key": CAMERA_KEY,
         "width": request["width"],
@@ -863,6 +907,18 @@ def _preview_profile_setup(
         "background_plate": str(plate_path),
         "background_plate_sha256": file_sha256(plate_path),
     }
+    if "fit_split" in request:
+        def frame_identity(index, row, image):
+            return {"global_index": index,
+                    "episode_index": _scalar(row["episode_index"], "SETUP_EPISODE", integer=True),
+                    "frame_index": _scalar(row["frame_index"], "SETUP_EPISODE_FRAME", integer=True),
+                    "rgb_sha256": array_digest(image)}
+
+        profile["fitting"] = {
+            "training_split": request["fit_split"],
+            "reference_frame": frame_identity(request["reference_frame_index"], reference_row, reference),
+            "background_plate_frames": [frame_identity(index, row, image) for index, row, image in rows],
+        }
     draft_path = review / "view-profile-draft.json"
     write_json_exclusive(draft_path, profile)
     checked = load_view_profile(draft_path)
@@ -1044,6 +1100,8 @@ def _load_preview(
         if file_sha256(path) != preview[field]:
             raise CuratorError("SETUP_PREVIEW_ARTIFACT_CHANGED", path.name)
     spec = load_view_profile(draft_path)
+    if spec.value.get("fitting", {}).get("training_split") != request.get("fit_split"):
+        raise CuratorError("SETUP_PREVIEW_FITTING_BINDING")
     expected_assets = (
         asset / "reference.json",
         asset / "reference.png",

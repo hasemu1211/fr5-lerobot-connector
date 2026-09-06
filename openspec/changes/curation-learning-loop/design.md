@@ -18,6 +18,10 @@ Learning의 저장된 postprocessor 출력은 조건 근거와 연결하되, 입
 
 ## 다음 소비와 채택 기준
 
+이미지 정제 비교의 fitting 입력은 별도 pool ledger를 만들지 않고 기존 native v3 split을 참조한다. 임의 global frame 목록을 수동으로 제한하는 대안보다 native TRAIN 선택을 소비하는 쪽을 채택한다. 기존 setup은 전체 source에서 표본을 뽑으므로 split을 나중에 적용하면 이미 heldout 외관을 배경판에 사용했을 수 있기 때문이다. 선택적 `fit_split`을 주면 원본 경로/내용 digest를 검증한 뒤 TRAIN frame 구간에서 기존 예산만큼 표본을 고른다. 명시적 reference가 TRAIN 밖이면 거부하고, 생략한 reference는 첫 TRAIN frame으로 정한다.
+
+v2 profile은 native split의 경로·파일 hash·split digest와 실제 해독한 프레임의 global/episode/local index 및 RGB 배열 digest를 유지한다. 기존 resolver가 이를 profile digest에 포함하고 기존 derivative lineage가 참조한다. 이 결속은 split과 원본을 동결해 유지하는 조건에서 producer 입력을 설명하며, 파일 한 개의 이식성이나 독립 calibration·사람의 heldout 미열람·학습 효용을 보장하지 않는다. v1 profile에 출처를 소급 작성하지 않는다. 실제 다음 소비 검증은 `tests/data_factory/curator/workflow/test_setup.py`의 export/preview/finalize/prepare/review와 변경된 split 거부로 유지한다. Learning은 이를 저장된 observation transform과 부모 TRAIN/heldout 계약에 결속하고, root는 별도 파생 admission을 연결한다.
+
 - Learning: 두 요청과 분할 preview를 받아 실제 launch의 같은 heldout·seed·예산을 확인하고, 저장된 postprocessor를 거친 비교 가능한 출력으로 측정한다. 학습 실행·평가 metric 구현은 해당 owner가 담당한다.
 - Rollout: 이후 같은 물리 평가 조건에서 정책 차이를 측정한다. 현재 offline 비교를 physical generalization으로 확장하지 않는다.
 - Collection/advisory 전략: 조건 coverage와 학습 결과를 함께 사용해 다음 수집 가설을 제안한다. 이번 proxy만으로 실행이나 추가 수집을 지시하지 않는다.

@@ -13,9 +13,11 @@ from ..core.filesystem import reject_symlink_components
 from ..core.identity import file_sha256
 from ..core.jsonio import DIGEST, SAFE_ID, canonical_digest, exact_fields, load_json
 from .transform import MAX_BACKGROUND_PLATE_FRAMES
+from .fitting import validate_profile_fitting
 
 
 VIEW_PROFILE_SCHEMA = "curator.view_profile.v1"
+FITTED_VIEW_PROFILE_SCHEMA = "curator.view_profile.v2"
 REVIEW_POLICY_SCHEMA = "curator.review_policy.v1"
 CAMERA_KEY = "observation.images.up"
 LABELME_VERSION = "7.0.4"
@@ -81,7 +83,8 @@ class ViewProfileSpec:
             self.reference_image_path,
             self.keep_mask_path,
             self.background_plate_path,
-        )
+        ) + ((Path(self.value["fitting"]["training_split"]["path"]),)
+             if "fitting" in self.value else ())
 
 
 def _asset_path(base: Path, value: object, code: str) -> Path:
@@ -185,12 +188,14 @@ def load_view_profile(path: str | Path) -> ViewProfileSpec:
         source = Path(path).resolve(strict=True)
     except OSError as exc:
         raise CuratorError("VIEW_PROFILE_PATH", str(exc)) from exc
+    document = load_json(source, code="VIEW_PROFILE_JSON")
+    fitted = isinstance(document, dict) and document.get("schema_version") == FITTED_VIEW_PROFILE_SCHEMA
     value = exact_fields(
-        load_json(source, code="VIEW_PROFILE_JSON"),
-        _VIEW_PROFILE_FIELDS,
+        document,
+        _VIEW_PROFILE_FIELDS | ({"fitting"} if fitted else set()),
         "VIEW_PROFILE_FIELDS",
     )
-    if value["schema_version"] != VIEW_PROFILE_SCHEMA:
+    if value["schema_version"] not in {VIEW_PROFILE_SCHEMA, FITTED_VIEW_PROFILE_SCHEMA}:
         raise CuratorError("VIEW_PROFILE_SCHEMA")
     if (
         not isinstance(value["profile_id"], str)
@@ -233,6 +238,9 @@ def load_view_profile(path: str | Path) -> ViewProfileSpec:
         or not 0 <= value["dilation_margin_px"] <= 256
     ):
         raise CuratorError("VIEW_PROFILE_MARGIN")
+    if fitted:
+        validate_profile_fitting(value["fitting"], reference_index=value["reference_frame_index"],
+                                 plate_indices=value["background_plate_frame_indices"])
 
     base = source.parent
     collection = _asset_path(

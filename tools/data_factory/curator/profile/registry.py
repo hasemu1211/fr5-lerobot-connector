@@ -177,6 +177,9 @@ def _resolve_profile(
         "background_plate_sha256": spec.value["background_plate_sha256"],
         **geometry_digests(geometry),
     }
+    if "fitting" in spec.value:
+        profile["schema_version"] = "curator.resolved_view_profile.v2"
+        profile["fitting"] = spec.value["fitting"]
     profile["profile_digest"] = canonical_digest(profile)
     return ResolvedViewProfile(
         config_path=path,

@@ -45,7 +45,9 @@ def _parser() -> argparse.ArgumentParser:
     export = setup_commands.add_parser("export", allow_abbrev=False)
     export.add_argument("--source", type=Path, required=True)
     export.add_argument("--profile-id", default=DEFAULT_PROFILE_ID)
-    export.add_argument("--reference-index", type=int, default=0)
+    export.add_argument("--reference-index", type=int)
+    export.add_argument("--fit-split", type=Path,
+                        help="native TRAIN split for reference/background fitting; grants no authority")
     export.add_argument(
         "--dilation-margin-px", type=int, default=DEFAULT_DILATION_MARGIN_PX
     )
@@ -72,6 +74,7 @@ def main(argv: list[str] | None = None) -> None:
                     reference_frame_index=args.reference_index,
                     dilation_margin_px=args.dilation_margin_px,
                     plate_frame_count=args.plate_frames,
+                    fit_split=args.fit_split,
                     _paths=paths,
                 )
             elif args.setup_command == "preview":

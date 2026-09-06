@@ -1,5 +1,24 @@
 ## ADDED Requirements
 
+### Requirement: Optional native TRAIN-only view fitting preserves its inputs
+
+Profile setup SHALL accept an optional existing native v3 `fit_split`, reuse its validator, and require its parent dataset root and content digest to match the frozen source. In this mode it SHALL select reference and background-plate frames only from that split's TRAIN episodes using the existing bounded sampling budget. An explicit non-TRAIN reference SHALL be rejected; an omitted reference SHALL select the first TRAIN frame. A v2 profile SHALL retain the split path, file hash and native digest plus the actual decoded reference and plate frame global, episode and local indices and RGB array digests through preview and finalization. The resolved profile digest SHALL bind this evidence for the existing candidate lineage consumer. This SHALL NOT replace the native split or create admission, training, physical or motion authority.
+
+#### Scenario: A native split excludes early episodes and holds out others
+- **WHEN** setup uses a validated split matching the frozen source
+- **THEN** its reference and bounded background samples use only TRAIN frames, regardless of episode count or length
+- **AND** preview and final profile retain exact fit provenance, and native candidate prepare/review binds the resolved profile through existing lineage without inherited approval.
+
+#### Scenario: Fitting evidence changes or names another source
+- **WHEN** the parent root/content digest differs, an explicit reference belongs outside TRAIN, or the referenced split bytes change before preview, finalization or candidate review
+- **THEN** the corresponding native operation rejects the invalid evidence without publishing its requested result or rewriting source, split or existing evidence
+- **AND** the existing physical-binding and decision-time gates remain in force.
+
+#### Scenario: A legacy profile has no declared native fit split
+- **WHEN** setup omits `fit_split` or a consumer loads a v1 profile
+- **THEN** the existing source-wide sampling and v1 contract remain available under existing gates
+- **AND** the consumer does not infer TRAIN-only fitting, independent calibration, downstream utility or new authority from that absence.
+
 ### Requirement: Product consumption of exact candidate review
 
 Curator SHALL expose a read-only native projection of the source, candidate, profile and review identities already bound by its existing lifecycle. It SHALL include the verified synchronized raw/overlay/candidate video reference, manifest clips and coverage limits, recorded decision provenance, receipt and currently permitted decisions. Its Web UI consumer SHALL use server-configured run roots and media paths; browser input SHALL NOT provide an actor, source path or output path. Reading the projection SHALL NOT create consent, publish a candidate or resume an interrupted action.

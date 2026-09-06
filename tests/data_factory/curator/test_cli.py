@@ -11,6 +11,12 @@ from tools.data_factory.curator.cli import _parser, main
 
 
 class CliTest(unittest.TestCase):
+    def test_setup_export_passes_native_fit_split_without_implicit_reference_frame(self):
+        with mock.patch("tools.data_factory.curator.cli.export_profile_setup", return_value={}) as call, redirect_stdout(io.StringIO()):
+            main(["setup", "export", "--source", "/source", "--fit-split", "/native-split.json"])
+        self.assertEqual(call.call_args.kwargs["fit_split"], Path("/native-split.json"))
+        self.assertIsNone(call.call_args.kwargs["reference_frame_index"])
+
     def test_training_request_passes_explicit_comparison_cohort(self):
         with mock.patch("tools.data_factory.curator.cli.export_training_request", return_value={}) as call, redirect_stdout(io.StringIO()):
             main(["training-request", "--run-dir", "/runs/a", "--dataset-id", "comparison",
