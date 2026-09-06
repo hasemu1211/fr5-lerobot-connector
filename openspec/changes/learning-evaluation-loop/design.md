@@ -38,6 +38,14 @@ The competing hypothesis is that a cooled schedule limits useful adaptation desp
 
 For the first sustained run, compute the affordable update count from measured setup, steady update, planned full held-out evaluation, checkpoint save/reload and storage costs, leaving measured host/device headroom. Compare checkpoint progress inside that fixed schedule before adding another recipe arm. Failure to improve offline diagnostics is evidence to investigate, not proof of physical failure; improvement is not proof of physical success. Keep optimizer instability, insufficient exposure, stochastic metric variation and perception/coverage limitations as competing explanations.
 
+## Saved observation view for derived learning
+
+Use Curator's canonical published derivation and profile/asset resolution as the source of a saved observation-view binding in the existing training receipt. Bind the exact derived dataset, parent identity, publication and profile identities, transform version and input representation. Do not infer view semantics from a dataset path or filename, recreate Curator's transform, or inherit raw training authority for a derivative.
+
+The native trainer and offline evaluator consume an already-baked derived dataset without applying the view again. A raw Rollout camera observation uses the same canonical up-view transform once before native image preprocessing; the wrist has no pre-encode pixel transform. H264 re-encoding in the materialized dataset means raw runtime versus baked decoded pixels are not asserted bit-identical. The shared checkpoint validator owns the saved contract; Rollout consumes it instead of maintaining another profile-validation policy.
+
+For qualified held-out evidence, verify the fitted source identity and each actual reference/background frame against the child TRAIN partition. A historically valid fit split can have different episode roles after a new selection. Its entire declared TRAIN set need not equal the child's if every actual fitted input belongs to child TRAIN and its provenance remains bound. A legacy profile without fitting evidence does not establish that condition; visual publication and training authority remain separate from learning/evaluation qualification. Missing or changed assets, altered profile identities and held-out fitting must not silently become a qualified comparison.
+
 ## Verification required from the first native smoke
 
 1. Bind the exact source/cache revisions, admitted selected IDs, canonical train/held-out split, train-only normalization and native saved `train_config.json`/receipt. Confirm requested settings survived native resolution; feature profiles remain feature contracts.
