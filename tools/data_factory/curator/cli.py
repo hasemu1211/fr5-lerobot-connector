@@ -35,6 +35,8 @@ def _parser() -> argparse.ArgumentParser:
     selection.add_argument("--run-dir", type=Path, action="append", required=True)
     selection.add_argument("--output", type=Path, required=True)
     selection.add_argument("--dataset-id", required=True)
+    selection.add_argument("--eval-split", type=float)
+    selection.add_argument("--expected-eval-episode", type=int, action="append")
     for name in ("status", "decide"):
         command = commands.add_parser(name, allow_abbrev=False)
         command.add_argument("--run", required=True)
@@ -43,7 +45,9 @@ def _parser() -> argparse.ArgumentParser:
     export = setup_commands.add_parser("export", allow_abbrev=False)
     export.add_argument("--source", type=Path, required=True)
     export.add_argument("--profile-id", default=DEFAULT_PROFILE_ID)
-    export.add_argument("--reference-index", type=int, default=0)
+    export.add_argument("--reference-index", type=int)
+    export.add_argument("--fit-split", type=Path,
+                        help="native TRAIN split for reference/background fitting; grants no authority")
     export.add_argument(
         "--dilation-margin-px", type=int, default=DEFAULT_DILATION_MARGIN_PX
     )
@@ -70,6 +74,7 @@ def main(argv: list[str] | None = None) -> None:
                     reference_frame_index=args.reference_index,
                     dilation_margin_px=args.dilation_margin_px,
                     plate_frame_count=args.plate_frames,
+                    fit_split=args.fit_split,
                     _paths=paths,
                 )
             elif args.setup_command == "preview":
@@ -77,8 +82,12 @@ def main(argv: list[str] | None = None) -> None:
             else:
                 result = finalize_profile_setup(args.run, args.preview, _paths=paths)
         elif args.command == "training-request":
+            cohort = {} if args.eval_split is None and args.expected_eval_episode is None else {
+                "eval_split": args.eval_split,
+                "expected_eval_episodes": args.expected_eval_episode,
+            }
             result = export_training_request(
-                args.run_dir, args.output, dataset_id=args.dataset_id,
+                args.run_dir, args.output, dataset_id=args.dataset_id, **cohort,
             )
         elif args.command == "prepare":
             result = prepare(args.source)

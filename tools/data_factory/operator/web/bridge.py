@@ -16,7 +16,7 @@ from tools.data_factory.operator.workflow.intents import (
     OperatorIntentCore,
     RESULT_SCHEMA,
 )
-from tools.fr5_data_factory import ContractError
+from tools.fr5_data_factory import ContractError, DIGEST
 
 
 MAX_BODY_BYTES = 65_536
@@ -89,6 +89,7 @@ class LoopbackBridge:
         host: str = "127.0.0.1", port: int = 0, token: str | None = None,
         watch_timeout_s: float = 5.0,
         index_page: str = "index.html",
+        review_video_call=None,
     ):
         if host not in {"127.0.0.1", "::1"}:
             raise ContractError("BRIDGE_LOOPBACK_REQUIRED")
@@ -96,8 +97,11 @@ class LoopbackBridge:
             raise ContractError("BRIDGE_PORT")
         self.core = core
         self.ui_root = Path(ui_root).resolve(strict=True)
-        if index_page not in {"index.html", "training.html"}:
+        if index_page not in {"index.html", "training.html", "curator.html"}:
             raise ContractError("BRIDGE_STATIC_PATH")
+        if review_video_call is not None and not callable(review_video_call):
+            raise ContractError("BRIDGE_REVIEW_VIDEO_CALLABLE")
+        self.review_video_call = review_video_call
         self.index_page = index_page
         self.token = token or secrets.token_urlsafe(32)
         if not isinstance(self.token, str) or len(self.token) < 24:
@@ -140,7 +144,7 @@ class LoopbackBridge:
                 self.send_header("Cache-Control", "no-store")
                 self.send_header("X-Content-Type-Options", "nosniff")
                 self.send_header("Referrer-Policy", "no-referrer")
-                self.send_header("Content-Security-Policy", "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; base-uri 'none'; frame-ancestors 'none'")
+                self.send_header("Content-Security-Policy", "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; media-src 'self' blob:; connect-src 'self'; base-uri 'none'; frame-ancestors 'none'")
                 self.end_headers()
 
             def _write_response(
@@ -173,6 +177,25 @@ class LoopbackBridge:
                     return self._error(HTTPStatus.BAD_REQUEST, "BRIDGE_HOST")
                 request = urlsplit(self.path)
                 path = request.path
+                if path == "/api/curator-review/video" and bridge.review_video_call is not None:
+                    if self.headers.get("X-Operator-Token") != bridge.token:
+                        return self._error(HTTPStatus.FORBIDDEN, "BRIDGE_TOKEN")
+                    try:
+                        query = parse_qs(request.query, keep_blank_values=True,
+                                         strict_parsing=True, max_num_fields=1)
+                        digests = query.get("review_digest", [])
+                        if set(query) != {"review_digest"} or len(digests) != 1:
+                            raise ValueError()
+                        digest = digests[0]
+                        if DIGEST.fullmatch(digest) is None:
+                            raise ValueError()
+                    except ValueError:
+                        return self._error(HTTPStatus.BAD_REQUEST, "BRIDGE_REVIEW_QUERY")
+                    try:
+                        video = bridge.review_video_call(digest)
+                    except ContractError as exc:
+                        return self._error(HTTPStatus.CONFLICT, exc.code)
+                    return self._write_response(HTTPStatus.OK, "video/mp4", video)
                 if path == "/api/view":
                     if self.headers.get("X-Operator-Token") != bridge.token:
                         return self._error(HTTPStatus.FORBIDDEN, "BRIDGE_TOKEN")
@@ -211,7 +234,7 @@ class LoopbackBridge:
                 if not target.is_file() or target.is_symlink():
                     return self._error(HTTPStatus.NOT_FOUND, "BRIDGE_STATIC_PATH")
                 payload = target.read_bytes()
-                if relative in {"index.html", "training.html"}:
+                if relative in {"index.html", "training.html", "curator.html"}:
                     marker = b"<!-- OPERATOR_TOKEN -->"
                     injection = (
                         '<meta name="operator-token" content="' + bridge.token + '">'

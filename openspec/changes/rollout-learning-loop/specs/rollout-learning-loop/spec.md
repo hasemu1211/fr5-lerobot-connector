@@ -1,5 +1,72 @@
 ## ADDED Requirements
 
+### Requirement: Execution consumers preserve reference and trajectory meaning
+
+A learned-action consumer SHALL distinguish recorded controller references,
+observed feedback and timed executable waypoints. The existing finite learned
+proposal SHALL retain its current exact-waypoint validation; rejection there
+SHALL NOT by itself establish that a demonstration is unsafe or that a policy
+cannot be consumed under a different explicitly qualified contract. A new target
+consumer SHALL retain the original policy output identity and bind any selection,
+timing or command transformation to the exact plan. It SHALL reuse the existing
+motion lifecycle owner and SHALL NOT inherit physical approval from offline
+prediction or recorded demonstration success.
+
+#### Scenario: A gripper reference changes before feedback follows
+
+- **WHEN** recorded command and feedback evidence show a held target followed by later published feedback
+- **THEN** interpretation distinguishes the requested target from a measured continuous finger trajectory
+- **AND** any target consumer uses its explicitly bound completion tolerance and timeout rather than assuming arrival within one dataset frame.
+
+#### Scenario: The same held target is consumed again
+
+- **WHEN** a bounded target consumer receives the same active target again
+- **THEN** it does not create a second motion owner or restart an unresolved goal
+- **AND** arm coordination, cancellation, fresh observations and terminal outcome evidence remain owned by the existing executor.
+
+#### Scenario: A proposed mapping would hide a policy-output violation
+
+- **WHEN** original outputs exceed admitted physical limits or cannot satisfy the declared consumption contract
+- **THEN** the consumer rejects or reports the unresolved limitation without silently clipping or relabeling outputs as successful execution
+- **AND** an alternative mapping requires explicit plan-bound semantics and its own verification before physical use.
+
+### Requirement: Offline solver evidence must separate numerical and deployed usefulness
+
+Rollout's offline native comparison SHALL reuse canonical checkpoint admission
+and saved processors, pairing each candidate with the same observation and
+explicit noise. It SHALL report all expert evaluations, total chunk and solver
+wall time, action dtype and per-dimension postprocessed deviation from native
+Euler10. Fixed10 SHALL be labeled a native numerical reference, not ground truth.
+Synthetic exact ODE errors SHALL remain separately labeled dimensionless evidence.
+Unmeasured memory, task success and physical qualification SHALL NOT be inferred
+from solver work or internal vector changes. Candidate outputs SHALL NOT become
+executable proposals or new execution authority through this experiment.
+
+#### Scenario: A shorter update uses a remaining-interval midpoint
+
+- **WHEN** the partial AdaVLA candidate integrates `v=t` from zero at `t=1`
+- **THEN** its bounded result is reproduced independently from local midpoint RK2
+- **AND** all 20 evaluations and its forced tail are visible alongside the six-NFE local control
+- **AND** agreement with paper equations does not label this rule a local error bound
+
+#### Scenario: Better ODE accuracy differs from native action fidelity
+
+- **WHEN** a candidate improves exact error on a synthetic field but moves farther from fixed10
+- **THEN** both comparisons remain visible without a task-success or adoption verdict
+- **AND** Learning's evaluation protocol and actual downstream evidence determine usefulness
+
+### Requirement: Saved model construction preserves declared precision
+
+The native loader SHALL preserve saved model-construction settings that determine
+parameter precision. Identical checkpoint bytes and an identical AMP setting
+SHALL NOT alone establish numerically equivalent inference across loaders.
+
+#### Scenario: A saved constructor setting affects parameter precision
+
+- **WHEN** native reload reads the saved `load_vlm_weights` setting
+- **THEN** it preserves that value rather than forcing a different constructor
+- **AND** cache-only loading, canonical admission and saved processor checks remain in force.
+
 ### Requirement: Saved processor configuration must preserve the native feature contract
 
 Learning's canonical checkpoint validator SHALL require a saved preprocessor declaration of

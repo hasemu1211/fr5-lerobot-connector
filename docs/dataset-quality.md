@@ -55,6 +55,8 @@ dataset root의 `data/`, `meta/`, `videos/`는 함께 보존하고 이동 후 �
 
 Curator의 `prepare`는 local source 계약과 검증된 view profile을 확인하고, 원본을 보존하는 hidden candidate를 만든다. 모든 파생 frame을 원본과 비교하고 pixel metric을 다시 계산하며, source timing/provenance는 보존한다. 기존 dataset validator를 통과한 candidate의 실제 decode 결과로 검토 영상을 만들고 source·candidate·profile·policy digest를 manifest에 묶는다. 물리 binding이 `PREPARED_NOT_VERIFIED`이면 profile 최종 확정이나 candidate 생성을 허용하지 않는다.
 
+Web UI의 native 소비 경계는 [application](../tools/data_factory/curator/workflow/application.py)의 `review_candidate`와 `submit_human_review_decision`이다. 전자는 검증된 영상·clip·coverage·review digest, 현재 허용된 결정과 기존 결과를 읽기 전용으로 반환한다. 후자는 명시적 선택과 화면에 표시한 review digest를 기존 lock·검증·출판·복구 로직에 넘긴다. 오래된 화면과 다른 run의 digest, 상반된 재전달은 거부하고, 동일한 재전달은 이미 기록된 결정을 복구한다. 서버가 actor와 경로를 정하며 브라우저는 이 값을 주입하지 않는다. 후보 승인은 training 승인이 아니고, 현재 인간 endpoint는 적격 자동 판단을 대신하지 않는다. [실행 가능한 검증](../tests/data_factory/curator/workflow/test_application.py)은 TTY 없는 명시적 결정, 동시 재전달, receipt 실패 후 복구와 원본 보존을 다룬다.
+
 검토 예산 안에서 task 대표 clip을 먼저 선택한 뒤, [review sampler](../tools/data_factory/curator/review/sampling.py)는 아직 선택하지 않은 검토 이유를 많이 포함하는 clip을 우선한다. 그다음 새 frame 수, 전체 이유 수, 고정 seed 순으로 결정한다. 이미 선택한 frame만 반복하는 clip은 추가하지 않는다. `brightness:min`과 `brightness:max` 같은 서로 다른 이유는 별도로 센다. 이 순서는 짧은 mask-boundary motion 사건이 긴 일반 clip에 밀리는 경우를 줄인다. 다음 소비자는 `prepare`의 실제 raw/overlay/candidate 영상과 이를 보는 사람이며, 별도 보고서나 실행 ledger를 만들지 않는다.
 
 source preflight 진단을 추가하는 방향과 검토 clip 선택을 고치는 방향을 비교했다. source 구조·품질 검증은 기존 소유자가 수행하는 반면, native sampler의 합성 실행에서는 같은 task의 긴 episode가 짧은 경계 사건을 검토 영상에서 밀어내는 문제가 재현됐다. 따라서 선택 단계만 고쳤다. [영상·manifest 회귀 검증](../tests/data_factory/curator/review/test_manifest.py)은 여러 episode 길이, 바뀐 사건 위치와 예산에서 실제 rendering·영상 재해독·digest 검증까지 수행한다. [native prepare 검증](../tests/data_factory/curator/workflow/test_application.py)은 합성 LeRobot source부터 review-ready까지 실행하고, 원본 불변성과 변경된 policy·profile의 재검증 실패를 확인한다.
@@ -62,6 +64,14 @@ source preflight 진단을 추가하는 방향과 검토 clip 선택을 고치�
 이 표본은 분포 추정용 무작위 표본이 아니며, 모든 episode·극값·작업 의미를 검토했다는 뜻도 아니다. manifest의 `coverage`는 영상에 선택된 범위만 나타낸다. 조건별 수집·admission 분포는 기존 [Data Quality Analysis](../tools/data_factory/quality/coverage_report.py), 의미 판정은 [candidate admission](../tools/data_factory/candidate_admission.py), 다음 수집 제안은 [Collection recommendation](../tools/data_factory/collection_recommendation.py)이 소유한다. Curator의 pixel metric이나 review coverage를 이들의 판정·수량으로 승격하지 않는다. 사람의 candidate 판단도 별도 training approval이나 motion authority를 만들지 않는다.
 
 연구 근거는 선택 규칙의 성능 보증이 아니라 검증할 가설의 범위를 정한다. Belkhale·Cui·Sadigh의 [Data Quality in Imitation Learning](https://arxiv.org/abs/2306.02437)은 분포 이동과 action divergence·transition diversity를 구분하며 상태 다양성이 항상 유익하지는 않다고 설명한다. Lin 등의 [Data Scaling Laws in Imitation Learning for Robotic Manipulation](https://arxiv.org/abs/2410.18647v4)은 실험한 작업에서 단순 시연 수보다 환경·물체 다양성이 중요함을 보고한다. 여기서 도출한 제한된 가설은 같은 검토 시간에 서로 다른 사건을 노출하면 사람이 view 변환의 손실을 발견하기 쉬워질 수 있다는 것이다. 다음 검증은 사람이 표시한 mask 손실 사건에 대해 동일 시간 예산의 발견률을 비교하는 것이며, 현재 합성 검증은 semantic 정확도·학습 이득·실물 성공을 입증하지 않는다.
+
+## 이미지 정제 비교의 TRAIN 전용 fitting
+
+같은 dataset에서 원본과 정제 입력을 비교할 때, 배경판과 검토 기준 이미지를 heldout에서 고르면 평가 영상의 외관이 변환에 들어갈 수 있다. [setup export](../tools/data_factory/curator/workflow/setup.py)의 선택적 `fit_split` 인자(에이전트 CLI의 `setup export --fit-split`)는 기존 native v3 split을 검증하고 원본 경로·내용 digest가 일치할 때만 그 TRAIN 프레임에서 기준 이미지와 배경판 표본을 고른다. 기준 frame을 명시하면 TRAIN 소속이어야 하며, 생략하면 첫 TRAIN frame을 사용한다. episode 수나 길이를 고정하지 않고 기존 표본 예산을 적용한다.
+
+이 모드의 v2 profile은 split 경로·파일 hash·native digest와 실제 해독한 기준/배경 프레임의 global·episode·local index 및 RGB 배열 digest를 보존한다. [profile resolution](../tools/data_factory/curator/profile/registry.py)은 이 근거를 profile digest에 포함하고 기존 파생 dataset 계보가 그 digest를 참조한다. 원본과 참조 split은 동결해 유지해야 하며, split 변경은 검토·확정 경로에서 거부한다. [native 검증](../tests/data_factory/curator/workflow/test_setup.py)은 export → preview → 합성 binding의 finalize → 실제 candidate prepare/review와 stale split 거부를 실행한다.
+
+옵션을 생략한 v1 profile은 기존 동작을 유지하지만 TRAIN 전용 fitting을 입증하지 않는다. 이 근거는 입력 구성의 출처이며 mask의 의미적 정확성이나 heldout을 보지 않고 사람이 조정했다는 증명은 아니다. 실제 physical binding gate는 그대로이며, 다음 Learning 소비자가 부모 split·평가 cohort·저장된 변환과 추론 시 정확히 한 번의 적용을 별도로 결속해야 한다. profile 파일만으로 자산과 split이 함께 패키징되지는 않고, 원본 승인이나 training authority도 상속하지 않는다.
 
 ## 기존 판정으로 학습 요청 준비
 
@@ -81,8 +91,36 @@ source preflight 진단을 추가하는 방향과 검토 clip 선택을 고치�
 
 Hejna 등의 [DemInf](https://arxiv.org/abs/2502.08623v3)는 보조 VAE와 상호정보량 추정으로 시연을 평가한다. Sirigiri 등의 [FAKTUAL 연구](https://arxiv.org/abs/2603.11634v1)는 궤적 kernel 기반 다양성을 다루며 품질·다양성·주변 사례의 밀도가 함께 필요함을 설명한다. 현재 PC와 학습을 수행하지 않는 실험 범위에서는 보조 모델 학습 대신 CPU에서 계산하는 작은 기준선을 선택했다. 여섯 arm joint의 절대 경로를 누적 경로 길이의 같은 비율에서 비교하고, 녹화 frame 수를 별도 비용 대리값으로 유지한다. 이는 signature kernel이나 검증된 학습 utility 점수의 구현이 아니다.
 
-실제 성공 예제의 가까운 쌍과 먼 쌍을 이 기준선으로 비교하고, 서로 다른 resampling 해상도에서 순위가 유지되는지 확인한 뒤 두 명시적 요청을 native 사전검토에 전달했다. 반복 정지점·직선 구간 재표본화에 대한 불변성, 절대 위치 차이와 순서 차이의 관측 가능성은 합성 입력으로 확인했다. 이 실험의 helper와 상세 수치는 worktree의 `outputs/curator/success-geometry-cost-20260905/`에만 남긴다. 아직 일반 제품의 선별 정책으로 승격하지 않는다.
+가까운 쌍과 먼 쌍의 비교는 선택 가설이며 일반 제품의 선별 정책이 아니다. 이를 재현할 때는 선택한 episode, 경로 표현과 resampling 해상도, 녹화량을 명시하고 [기존 요청 exporter](../tools/data_factory/curator/workflow/selection.py)로 native 사전검토를 통과시킨다. 아래 cohort 검사는 이런 선택 간에 평가 대상이 달라지는 문제를 드러내지만, 경로 기준선의 유효성이나 학습 이득을 검증하지는 않는다.
 
 관절 경로만으로 물체·배경·조명·gripper의 다양성을 알 수 없고, 경로 길이에 따른 재표본화는 정지 시간의 의미를 제거하며 센서 잡음에는 영향을 받는다. 녹화 시간은 reset·사람 노력·전체 취득 비용을 포함하지 않는다. 다음 반증 가능한 질문은 비슷한 데이터량과 같은 평가 cohort에서 경로 차이가 학습 이득으로 이어지는지이다. 쌍마다 다르게 제외된 episode를 평가 세트로 쓰면 비교 대상 자체가 바뀌므로, 이 실험만으로 우수한 선택이나 일반화를 선언하지 않는다.
 
 저장된 intent를 연결하면 가까운 쌍은 같은 명령상 place를, 먼 쌍은 서로 다른 place를 포함한다. 같은 place의 예제도 요청된 위치·yaw가 다르므로 관절 기하의 순위에는 수집 조건의 차이가 섞여 있다. 이에 따라 학습 소유자에게 넘기는 질문도 조건별 분포와 궤적 차이를 함께 다루어야 한다. 기존 intent의 관측된 조건을 읽는 것은 누락된 과거 authoring이나 전체 domain을 복원하는 작업이 아니며, 명령된 place 명칭은 물리 A/B 검증을 대신하지 않는다.
+
+## 통제된 selection utility 비교
+
+[DataMIL 최신 개정본](https://arxiv.org/abs/2505.09603v2)은 외형·행동 유사성과 학습된 정책의 실제 효용을 구분하고, [ReMix](https://proceedings.mlr.press/v270/hejna25a.html)는 데이터 혼합 비율과 action 척도가 downstream 측정에 영향을 줄 수 있음을 보여 준다. 이 연구들이 현재 FR5의 조건 분산 점수를 보증하는 것은 아니다. 먼저 조건이 넓은 선택과 밀집한 선택을 같은 데이터량·평가 조건에서 비교하는 반증 가능한 가설로 다룬다.
+
+비교를 구성할 때는 기존 ledger/state와 native 사전검토를 통과한 TRAIN pool에서 선택한다. 보존된 x/y/yaw와 녹화량, 기존 DQA phase 시간을 읽고, frame 양과 episode 수를 맞춘 두 요청을 만든다. 동일 명령 조건의 train/heldout 노출도 양쪽에서 확인하고, 차이가 있으면 비교 설계에 명시하거나 공통 train anchor 등으로 맞춘다. 조건 일치는 동일 영상이나 잘못된 누출의 증거가 아니며, 이미지·근접 시연의 검증은 별도다. 이 비교 설계는 caller의 책임이며 아래 API가 데이터량이나 조건 노출까지 자동으로 맞추지는 않는다.
+
+`training-request`의 선택적 `--eval-split`과 반복 가능한 `--expected-eval-episode`는 함께 지정한다. 예를 들어 비교 계획에서 fraction과 heldout을 정했다면 다음과 같이 native split을 확인하며 요청을 만든다. 값은 각 데이터와 비교 계획에서 정하며 고정 수량을 제품 가정으로 삼지 않는다.
+
+```sh
+python3 -m tools.data_factory.curator training-request \
+  --run-dir "$RUN_A" --run-dir "$RUN_B" --run-dir "$RUN_C" \
+  --dataset-id "$DATASET_ID" --output "$NEW_REQUEST" \
+  --eval-split "$EVAL_FRACTION" --expected-eval-episode "$HELDOUT_EPISODE"
+```
+
+기존 `selected_train_eval`의 task별 분할과 기대 cohort가 다르면 `SELECTION_EVALUATION_CHANGED`로 파일 출판을 거부한다. 원본 metadata·선택을 자동 수정하지 않는다. 분할 preview는 반환값의 `evaluation_cohort`에만 포함되며 기존 native request 형식은 유지한다. **이 검사는 launch 강제가 아니다.** Learning 소비자는 같은 fraction을 사용하고 실제 launch split의 train/heldout을 다시 비교해야 한다.
+
+공개 재현 경계는 커밋된 [요구사항과 시나리오](../openspec/changes/curation-learning-loop/specs/curation-learning-loop/spec.md), [selection 검증](../tests/data_factory/curator/workflow/test_selection.py), [CLI 검증](../tests/data_factory/curator/test_cli.py)이다. 다음 명령은 실제 데이터나 학습 없이 합성 입력으로 native task별 분할·subset 변경 거부, 출판 전 오류, 기존 소비자의 요청 수용과 원본 보존을 확인한다. 분할 자체는 native helper로 검증하며, exporter의 mismatch 출판 방지는 주입한 오류로 별도 검증한다.
+
+```sh
+PYTHONDONTWRITEBYTECODE=1 direnv exec . python3 -m unittest \
+  tests.data_factory.curator.workflow.test_selection \
+  tests.data_factory.curator.test_cli \
+  tests.data_factory.curator.test_architecture --durations 5
+```
+
+같은 frame 양도 optimizer 노출·전체 취득 비용의 동일성을 보장하지 않는다. Learning에서 모델·seed·학습 예산을 맞추고, 각 checkpoint의 저장된 postprocessor를 거친 비교 가능한 출력으로 판단한다. TRAIN subset별 normalization이 다른 normalized flow loss를 직접 utility 순위로 쓰지 않는다. 개발에 사용한 heldout은 독립 최종 시험이 아니며, 조건 분산의 차이는 학습 이득이나 physical generalization을 증명하지 않는다. Curation은 선택 가설·근거·요청을 소유하고 DQA, Policy Training/Evaluation, Rollout, Collection의 사실과 권한을 재사용한다.

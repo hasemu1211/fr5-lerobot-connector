@@ -793,7 +793,7 @@ class CollectionOperatorApplication:
         ]
 
     def _state_space_summary(
-        self, cells: list[dict[str, Any]],
+        self, cells: list[dict[str, Any]], route: list[dict[str, Any]],
     ) -> dict[str, Any]:
         eligible_conditions = sum(
             cell["eligibility_status"] == "ELIGIBLE" for cell in cells
@@ -816,7 +816,6 @@ class CollectionOperatorApplication:
             per_workspace_target_episode_count = (
                 per_workspace_condition_count * self.draft["repeat"]
             )
-            route = self._workspace_cycle()
             sources = route[:self.draft["requested_count"]]
             endpoint_counts: dict[tuple[str, str], int] = {}
             endpoint_order = []
@@ -865,12 +864,14 @@ class CollectionOperatorApplication:
             "full_coverage_episode_count": full_coverage_episode_count,
         }
 
-    def _direct_draft_reason(self) -> str | None:
+    def _direct_draft_reason(
+        self, route: list[dict[str, Any]] | None = None,
+    ) -> str | None:
         if self.draft["authoring_mode"] != "DIRECT_EDIT":
             return None
         if self.start_pose_setup is not None:
             pairs = self.draft["direct_pairs"]
-            route = self._workspace_cycle()
+            route = self._workspace_cycle() if route is None else route
             repeated = 1
             repeats_valid = True
             for left, right in zip(pairs, pairs[1:]):
@@ -1157,7 +1158,13 @@ class CollectionOperatorApplication:
             campaign_review["gripper_tuning"] = copy.deepcopy(
                 inner["gripper_tuning"]
             )
-        direct_draft_reason = self._direct_draft_reason()
+        # Share only within this projection; retain the first validation point.
+        workspace_cycle = (
+            self._workspace_cycle()
+            if self.draft["authoring_mode"] == "DIRECT_EDIT"
+            and self.start_pose_setup is not None else None
+        )
+        direct_draft_reason = self._direct_draft_reason(workspace_cycle)
         if workflow == "ENVIRONMENT":
             if self._preparation is not None:
                 operations = ["cancel_session"]
@@ -1250,6 +1257,8 @@ class CollectionOperatorApplication:
                         for pose in selected_poses
                     ) else "AVAILABLE"
                 )
+        if workspace_cycle is None:
+            workspace_cycle = self._workspace_cycle()
         browser_draft = {
             "draft_id": self.draft["draft_id"],
             "revision": self.draft["revision"],
@@ -1264,7 +1273,7 @@ class CollectionOperatorApplication:
                     "workspace_id": endpoint["workspace_id"],
                     "frame_id": endpoint["frame_id"],
                 }
-                for endpoint in self._workspace_cycle()
+                for endpoint in workspace_cycle
             ],
             "execution_ready": selection_execution["executable"],
             "execution_reason": (
@@ -1313,7 +1322,6 @@ class CollectionOperatorApplication:
         )
         coverage_sequence: list[dict[str, Any]] = []
         if isinstance(campaign_coverage, list) and campaign_coverage:
-            coverage_route = self._workspace_cycle()
             checked_conditions = []
             for index, planned in enumerate(campaign_coverage):
                 condition = (
@@ -1337,7 +1345,7 @@ class CollectionOperatorApplication:
             projected_state_space_cells = (
                 project_state_space_cells(
                     self.catalog,
-                    coverage_route[:len(checked_conditions)],
+                    workspace_cycle[:len(checked_conditions)],
                     checked_conditions,
                     state_space_design_profile=self.draft[
                         "state_space_design_profile"
@@ -1501,7 +1509,7 @@ class CollectionOperatorApplication:
         )
         browser_catalog["workspace_domains"] = []
         projected_endpoints = set()
-        for endpoint in self._workspace_cycle():
+        for endpoint in workspace_cycle:
             key = (endpoint["workspace_id"], endpoint["frame_id"])
             if key in projected_endpoints:
                 continue
@@ -1527,7 +1535,7 @@ class CollectionOperatorApplication:
             start_pose_setup["selected_start_pose_ids"] = copy.deepcopy(
                 self.draft["selected_start_pose_ids"],
             )
-            state_space_summary = self._state_space_summary(cells)
+            state_space_summary = self._state_space_summary(cells, workspace_cycle)
         return {
             "connection_state": "READY",
             "effect_scope": self.effect_scope,
