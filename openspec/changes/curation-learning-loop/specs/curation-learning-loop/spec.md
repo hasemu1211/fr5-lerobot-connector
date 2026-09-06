@@ -1,5 +1,19 @@
 ## ADDED Requirements
 
+### Requirement: Success coverage proposals reuse native Collection authoring
+
+Curation acquisition proposals SHALL distinguish observed successful conditions from proposed attempts, reuse current ledger/state and DQA evidence, and retain exact source/split references, registered selection/source digests, pose sequence and requested count. They SHALL use existing native Collection authoring to verify that compiled slots preserve the explicit proposal. Historical observations SHALL remain selection evidence, not reconstructed historical authoring or new campaign admission. This authoring outcome SHALL confer no collection, semantic, training or motion authority.
+
+#### Scenario: Existing successful TRAIN conditions are proposed for repetition
+- **WHEN** a bounded proposal selects representative conditions from validated TRAIN evidence and requests repetitions using the existing direct-selection consumer
+- **THEN** native `update_draft` and `compile_draft` SHALL preserve the requested pose order, count and split group
+- **AND** the proposal SHALL retain native compilation identity, original evidence and explicit qualification/resource limits without invoking physical or training consumers.
+
+#### Scenario: Additional episodes would move the evaluation cohort
+- **WHEN** the existing native splitter would assign a different heldout after adding episodes
+- **THEN** the acquisition proposal SHALL expose that mismatch and retain the original cohort reference
+- **AND** it SHALL NOT claim a fixed-cohort expanded training request or learning improvement until the existing training consumer verifies that separate contract.
+
 ### Requirement: Optional native TRAIN-only view fitting preserves its inputs
 
 Profile setup SHALL accept an optional existing native v3 `fit_split`, reuse its validator, and require its parent dataset root and content digest to match the frozen source. In this mode it SHALL select reference and background-plate frames only from that split's TRAIN episodes using the existing bounded sampling budget. An explicit non-TRAIN reference SHALL be rejected; an omitted reference SHALL select the first TRAIN frame. A v2 profile SHALL retain the split path, file hash and native digest plus the actual decoded reference and plate frame global, episode and local indices and RGB array digests through preview and finalization. The resolved profile digest SHALL bind this evidence for the existing candidate lineage consumer. This SHALL NOT replace the native split or create admission, training, physical or motion authority.

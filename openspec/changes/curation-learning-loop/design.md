@@ -16,6 +16,18 @@ heldout은 기존 native 분할에서 고정한다. 첫 후보의 동일 명령 
 
 Learning의 저장된 postprocessor 출력은 조건 근거와 연결하되, 입력 source pose의 coverage와 실제 action 범위를 구분한다. 전체 TRAIN action 범위 밖의 목표는 기존 TRAIN subset을 다시 고르는 것만으로 추가할 수 없다. 가까운 yaw의 기존 성공 예제도 XY에 따라 다른 관절 목표를 가질 수 있으며, 동일 task·source coverage는 reset 목적지·trajectory 변형·scene 계보까지 같은 비교를 뜻하지 않는다. 따라서 다음 수집에는 필요한 목표 범위와 기존 qualified plan의 연결, 비교할 장면·reset·trajectory 조건을 advisory 근거로 명시한다. 계획상 endpoint의 수치 일치는 timestamp로 검증한 기록 phase나 실행 권한이 아니다. noise seed에 따라 방향이 바뀌는 episode 오류 순위로 수집 대상을 정하지 않고, 범위 안의 오류와 범위 밖의 목표를 구분하는 Learning 측정을 먼저 재사용한다. 현재 두 요청은 유지하며, 이 근거만으로 추가 수집이나 물리 효용을 선언하지 않는다.
 
+## 성공 조건 반복의 native Collection 소비
+
+현재 조건의 수량은 기존 `build_coverage_report`로 계산한다. source request와 native split의 선택을 일치시키고, 기존 ledger/state validator로 technical/semantic PASS와 candidate·intent digest를 확인한다. 명령된 x/y/yaw는 물리 실측이나 영상 다양성이 아니다. 실제 성공 조건의 반복 부족은 새 조건 확대와 비교할 수 있는 근거이며, task 성공의 자동 판정 모델을 추가할 이유가 아니다.
+
+현재 작은 실험은 TRAIN의 관측 yaw별로 XY 제곱거리 합이 최소인 실제 episode를 대표로 선택한다. 동률은 episode index로 정하고, 대표를 index 순으로 나열해 정해진 추가 시도 수만큼 순환한다. heldout의 위치나 loss로 대표를 fit하지 않는다. 이 규칙은 제한된 취득 제안의 재현 방법이며 영구 selector나 utility scorer가 아니다. 예제 수, yaw 수와 반복 횟수는 제품 상수가 아니다.
+
+소비 경로는 기존 `load_operator_catalog` / `project_direct_poses` → native pose resolver와 campaign contract → `CampaignOperator`의 `update_draft` / `compile_draft`다. 제안에는 원본 dataset/split과 입력 hash, 명시적 selection과 source digests, 정확한 pose sequence 및 추가 시도 수를 남긴다. compiler가 반환한 slot 순서·수량·TRAIN group을 비교하고 native compilation receipt를 유지한다. 현재 qualification이 묶는 새 campaign domain과 별도로 과거 DQA를 선택 이유로 참조한다. 과거 관측을 새 campaign의 admission으로 복사하지 않는다.
+
+author-only 검증은 실행 consumer를 호출하지 않으며 카메라를 탐색하지 않는다. 이때 장치 없는 catalog의 unavailable 표시는 실물 상태 관측이 아니다. Collection Web은 실제 현재 preset·장치·scene·qualification·자원·권한을 다시 확인해 소비한다. authoring의 저장 예산과 현재 여유 공간을 함께 보고하며, 녹화 길이를 reset·검토를 포함한 취득 시간으로 대체하지 않는다.
+
+기존 평가 source와 cohort는 별도로 유지한다. 새 고번호 episode를 같은 task에 추가하면 native last-ceil splitter가 heldout을 이동시키므로, 이 제안으로 확장 TRAIN과 기존 heldout의 결속이 완료되었다고 주장하지 않는다. Learning의 실제 분할 소비 계약이 확인되기 전에는 고정 cohort를 표방하는 확장 요청을 만들지 않는다. 반복 수집 뒤에도 원본 고정 평가·비교 가능한 출력에서 개선이 없으면 utility 가설은 미결 또는 기각이며, 같은 조건 반복 자체를 성능으로 세지 않는다.
+
 ## 다음 소비와 채택 기준
 
 이미지 정제 비교의 fitting 입력은 별도 pool ledger를 만들지 않고 기존 native v3 split을 참조한다. 임의 global frame 목록을 수동으로 제한하는 대안보다 native TRAIN 선택을 소비하는 쪽을 채택한다. 기존 setup은 전체 source에서 표본을 뽑으므로 split을 나중에 적용하면 이미 heldout 외관을 배경판에 사용했을 수 있기 때문이다. 선택적 `fit_split`을 주면 원본 경로/내용 digest를 검증한 뒤 TRAIN frame 구간에서 기존 예산만큼 표본을 고른다. 명시적 reference가 TRAIN 밖이면 거부하고, 생략한 reference는 첫 TRAIN frame으로 정한다.
