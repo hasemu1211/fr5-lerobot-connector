@@ -213,6 +213,16 @@ def admit_evaluation(args: argparse.Namespace) -> dict:
 
 def evaluate(args: argparse.Namespace, admission: dict | None = None) -> dict:
     admission = admission or admit_evaluation(args)
+    from tools.data_factory import training_approval
+
+    delegated = training_approval.inventory_local_training_delegation(
+        admission["inventory"],
+    ) is not None
+    with training_approval.local_hf_offline(delegated):
+        return _evaluate(args, admission)
+
+
+def _evaluate(args: argparse.Namespace, admission: dict) -> dict:
     started = time.perf_counter()
     import numpy as np
     import torch

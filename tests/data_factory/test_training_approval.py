@@ -593,6 +593,41 @@ class NativeBatchTrainingApprovalTest(unittest.TestCase):
         self.assertIsNone(training_approval.inventory_local_training_delegation(human_inventory))
         validate_training_approved_inventory(human_inventory)
 
+        import os
+        from huggingface_hub import constants as hub_constants
+        before = {name: os.environ.get(name) for name in (
+            "HF_HUB_OFFLINE", "TRANSFORMERS_OFFLINE", "HF_DATASETS_OFFLINE",
+        )}
+        with training_approval.local_hf_offline(True):
+            self.assertTrue(hub_constants.is_offline_mode())
+            self.assertTrue(all(os.environ[name] == "1" for name in before))
+        self.assertEqual({name: os.environ.get(name) for name in before}, before)
+
+    def test_inventory_delegation_resolution_rejects_a_post_digest_path_swap(self):
+        from tools.data_factory.training_entrypoint import delegate_training_batch
+
+        path, output, delegation = self.delegation()
+        inventory = delegate_training_batch(
+            self.request, output, "local-training-owner", path,
+        )
+        replacement = {**delegation, "delegation_id": "replacement-r1"}
+        native_artifact = training_approval._artifact
+        reads = 0
+
+        def swap_after_last_authorization_read(source, digest, code):
+            nonlocal reads
+            value = native_artifact(source, digest, code)
+            if code == "TRAINING_DELEGATION_ARTIFACT":
+                reads += 1
+                if reads == len(inventory["episodes"]):
+                    write_json(path, replacement)
+            return value
+
+        with mock.patch.object(
+            training_approval, "_artifact", side_effect=swap_after_last_authorization_read,
+        ), self.assertRaisesRegex(ContractError, "TRAINING_DELEGATION_ARTIFACT"):
+            training_approval.inventory_local_training_delegation(inventory)
+
     def test_delegation_missing_wrong_actor_scope_and_changed_bytes_fail_closed(self):
         from tools.data_factory.training_entrypoint import (
             _enforce_delegated_launch, delegate_training_batch,
@@ -686,21 +721,40 @@ class NativeBatchTrainingApprovalTest(unittest.TestCase):
         }
         write_json(receipt_path, receipt)
         policy = run_output / "checkpoints/000002/pretrained_model"
+        policy.mkdir(parents=True)
+        saved = {
+            "dataset": {"root": str(self.dataset), "repo_id": self.request["repo_id"]},
+            "policy": {"push_to_hub": False}, "wandb": {"enable": False},
+            "job": {"target": None}, "env": None, "output_dir": str(run_output),
+            "steps": 2, "batch_size": 1, "save_freq": 1,
+            "save_checkpoint": True, "save_checkpoint_to_hub": False,
+        }
+        saved_path = policy / "train_config.json"
+        write_json(saved_path, saved)
+        from huggingface_hub import constants as hub_constants
+
+        def offline_runner(_argv, _split, _receipt):
+            self.assertTrue(hub_constants.is_offline_mode())
+            return 0
+
         with mock.patch(
             "tools.validate_training_checkpoint.validate_checkpoint",
             return_value=(policy, run_output),
         ), mock.patch(
-            "tools.data_factory.training_entrypoint.run_native_training", return_value=0,
+            "tools.data_factory.training_entrypoint._run_native_training",
+            side_effect=offline_runner,
         ) as runner:
             self.assertEqual(resume_training(policy), 0)
             runner.assert_called_once()
-            receipt["normalized_argv"] = [
-                value.replace("--policy.push_to_hub=false", "--policy.push_to_hub=true")
-                for value in argv
-            ]
-            write_json(receipt_path, receipt)
-            with self.assertRaisesRegex(ContractError, "TRAINING_DELEGATION_SCOPE"):
-                resume_training(policy)
+            for name, changed, code in (
+                ("steps", {**saved, "steps": 3}, "TRAINING_DELEGATION_LIMITS"),
+                ("upload", {**saved, "policy": {"push_to_hub": True}}, "TRAINING_DELEGATION_SCOPE"),
+                ("remote", {**saved, "job": {"target": "remote"}}, "TRAINING_DELEGATION_SCOPE"),
+            ):
+                with self.subTest(saved_config=name):
+                    write_json(saved_path, changed)
+                    with self.assertRaisesRegex(ContractError, code):
+                        resume_training(policy)
             runner.assert_called_once()
 
         report = approval_output.parent / "offline-report.json"

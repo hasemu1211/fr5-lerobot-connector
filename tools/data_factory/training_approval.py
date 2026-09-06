@@ -2,9 +2,11 @@
 from __future__ import annotations
 
 import copy
+from contextlib import contextmanager
 import json
 import math
 import os
+import sys
 import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
@@ -479,6 +481,35 @@ def validate_training_authorization(
     return value
 
 
+@contextmanager
+def local_hf_offline(enabled: bool):
+    """Keep delegated Hugging Face and Transformers loads cache-only."""
+    if not enabled:
+        yield
+        return
+    names = ("HF_HUB_OFFLINE", "TRANSFORMERS_OFFLINE", "HF_DATASETS_OFFLINE")
+    previous = {name: os.environ.get(name) for name in names}
+    constants = sys.modules.get("huggingface_hub.constants")
+    previous_constant = getattr(constants, "HF_HUB_OFFLINE", any(
+        value is not None and value.upper() in {"1", "ON", "YES", "TRUE"}
+        for value in previous.values()
+    ))
+    try:
+        os.environ.update({name: "1" for name in names})
+        if constants is not None:
+            constants.HF_HUB_OFFLINE = True
+        yield
+    finally:
+        for name, value in previous.items():
+            if value is None:
+                os.environ.pop(name, None)
+            else:
+                os.environ[name] = value
+        constants = sys.modules.get("huggingface_hub.constants")
+        if constants is not None:
+            constants.HF_HUB_OFFLINE = bool(previous_constant)
+
+
 def inventory_local_training_delegation(inventory: Mapping[str, Any]) -> dict[str, Any] | None:
     """Return the current delegation behind a validated inventory, if any."""
     references = []
@@ -503,7 +534,11 @@ def inventory_local_training_delegation(inventory: Mapping[str, Any]) -> dict[st
         references.append(authorization["delegation"])
     if not references or any(reference != references[0] for reference in references[1:]):
         raise ContractError("TRAINING_AUTHORIZATION_MIXED")
-    return validate_local_training_delegation(references[0]["artifact_path"])
+    reference = references[0]
+    return validate_local_training_delegation(_artifact(
+        reference["artifact_path"], reference["artifact_digest"],
+        "TRAINING_DELEGATION_ARTIFACT",
+    ))
 
 
 def validate_training_approval(

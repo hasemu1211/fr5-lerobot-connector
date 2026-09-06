@@ -380,6 +380,47 @@ class TrainingLaunchConnectionTest(unittest.TestCase):
             self.assertEqual(receipt["split_digest"], split["split_digest"])
             self.assertEqual(snapshot(kwargs["dataset"]), before)
 
+    def test_delegated_fresh_launch_runs_the_runner_in_cache_only_mode(self):
+        import os
+        from huggingface_hub import constants as hub_constants
+
+        with TemporaryDirectory(prefix="SYNTHETIC_TEST_ONLY-") as directory:
+            root = Path(directory)
+            dataset = root / "dataset"
+            dataset.mkdir()
+            output = root / "outputs/run"
+            inventory = root / "inventory.json"
+            split = {
+                "selected_episodes": [0],
+                "dataset_identity": {"dataset_root": str(dataset)},
+                "repo_id": "tests/local",
+            }
+            receipt = {
+                "status": "ADMITTED_NOT_TRAINED",
+                "approved_inventory_path": str(inventory),
+            }
+            argv = ["fixture-lerobot-train", f"--output_dir={output}"]
+
+            def runner(_argv, check):
+                self.assertFalse(check)
+                self.assertTrue(hub_constants.is_offline_mode())
+                self.assertEqual(os.environ["TRANSFORMERS_OFFLINE"], "1")
+                output.mkdir(parents=True)
+                return SimpleNamespace(returncode=0)
+
+            with mock.patch(
+                "tools.data_factory.training_entrypoint.prepare_launch",
+                return_value=(split, receipt),
+            ), mock.patch.object(
+                approval, "validate_current_training_inventory", return_value={"episodes": []},
+            ), mock.patch.object(
+                approval, "inventory_local_training_delegation", return_value={"delegated": True},
+            ):
+                self.assertEqual(launch(
+                    dataset=dataset, repo_id="tests/local", inventory=inventory,
+                    profile="smolvla", collection_profile="fixture", argv=argv, runner=runner,
+                ), 0)
+
     def test_public_shell_dry_run_and_validator_reject_legacy_marker(self):
         project = Path(__file__).resolve().parents[1]
         with TemporaryDirectory(prefix="SYNTHETIC_TEST_ONLY-") as directory:
@@ -394,6 +435,26 @@ class TrainingLaunchConnectionTest(unittest.TestCase):
             result = subprocess.run(args, capture_output=True, text=True, env={**os.environ, "FR5_REPO_ID": kwargs["repo_id"]})
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertIn('"eval_episodes": [2, 3]', result.stdout)
+            for option in (
+                "--policy.push_to_hub=false",
+                "--save_checkpoint_to_hub=false",
+                "--wandb.enable=false",
+            ):
+                self.assertIn(option, result.stdout)
+            explicit = [
+                *args, "--policy.push_to_hub=true",
+                "--save_checkpoint_to_hub=true", "--wandb.enable=true",
+            ]
+            explicit_result = subprocess.run(
+                explicit, capture_output=True, text=True,
+                env={**os.environ, "FR5_REPO_ID": kwargs["repo_id"]},
+            )
+            self.assertEqual(explicit_result.returncode, 0, explicit_result.stderr)
+            for option in (
+                "--policy.push_to_hub", "--save_checkpoint_to_hub", "--wandb.enable",
+            ):
+                self.assertIn(f"{option}=true", explicit_result.stdout)
+                self.assertNotIn(f"{option}=false", explicit_result.stdout)
             self.assertEqual(snapshot(root), before)
             write_json(kwargs["dataset"] / "meta/training_approved.json", {"approved": True})
             result = subprocess.run([str(project / "scripts/validate_dataset.sh"), "--root", str(kwargs["dataset"].parent), "--require-approved", kwargs["dataset"].name], capture_output=True, text=True)

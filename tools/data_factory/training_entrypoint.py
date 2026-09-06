@@ -85,15 +85,17 @@ def _positive_option(config: dict[str, str], key: str) -> int:
 def _enforce_delegated_launch(
     inventory: dict, *, dataset: Path, repo_id: str, profile: str,
     config: dict[str, str],
-) -> None:
+) -> bool:
     delegation = approval.inventory_local_training_delegation(inventory)
     if delegation is None:
-        return
+        return False
     if (
         delegation["dataset"] != {"dataset_root": str(dataset.resolve()), "repo_id": repo_id}
         or profile not in delegation["profiles"]
         or config.get("--job.target", "local") != "local"
-        or any(key.startswith("--env.") for key in config)
+        or config.get("--dataset.streaming", "false") != "false"
+        or config.get("--dataset.repo_type", "dataset") != "dataset"
+        or any(key.startswith(("--env.", "--reward_model.")) for key in config)
         or config.get("--policy.push_to_hub") != "false"
         or config.get("--save_checkpoint_to_hub") != "false"
         or config.get("--wandb.enable") != "false"
@@ -121,6 +123,51 @@ def _enforce_delegated_launch(
         or checkpoints > limits["max_checkpoints"]
     ):
         raise ContractError("TRAINING_DELEGATION_LIMITS")
+    return True
+
+
+def _saved_launch_options(saved: dict, output: Path) -> dict[str, str]:
+    """Project the fields the resume CLI will consume from train_config.json."""
+    dataset, policy = saved.get("dataset"), saved.get("policy")
+    wandb, job = saved.get("wandb"), saved.get("job")
+    if not all(isinstance(value, dict) for value in (dataset, policy, wandb, job)):
+        raise ContractError("TRAINING_DELEGATION_SAVED_CONFIG")
+
+    def boolean(value: object) -> str:
+        if type(value) is not bool:
+            raise ContractError("TRAINING_DELEGATION_SAVED_CONFIG")
+        return str(value).lower()
+
+    config = {
+        "--dataset.root": str(dataset.get("root", "")),
+        "--dataset.repo_id": str(dataset.get("repo_id", "")),
+        "--dataset.repo_type": str(dataset.get("repo_type", "dataset")),
+        "--dataset.streaming": boolean(dataset.get("streaming", False)),
+        "--output_dir": str(output),
+        "--steps": str(saved.get("steps", "")),
+        "--batch_size": str(saved.get("batch_size", "")),
+        "--save_freq": str(saved.get("save_freq", "")),
+        "--save_checkpoint": boolean(saved.get("save_checkpoint")),
+        "--policy.push_to_hub": boolean(policy.get("push_to_hub")),
+        "--save_checkpoint_to_hub": boolean(saved.get("save_checkpoint_to_hub")),
+        "--wandb.enable": boolean(wandb.get("enable")),
+    }
+    if job.get("target") is not None:
+        config["--job.target"] = str(job["target"])
+    if saved.get("env") is not None:
+        config["--env.saved"] = "configured"
+    if saved.get("reward_model") is not None:
+        config["--reward_model.saved"] = "configured"
+    return config
+
+
+def _delegated_training(split: dict, receipt: dict) -> bool:
+    inventory = approval.validate_current_training_inventory(
+        receipt["approved_inventory_path"],
+        dataset_root=split["dataset_identity"]["dataset_root"],
+        repo_id=split["repo_id"], selected_episodes=split["selected_episodes"],
+    )
+    return approval.inventory_local_training_delegation(inventory) is not None
 
 
 def prepare_launch(*, dataset: Path, repo_id: str, inventory: Path,
@@ -190,6 +237,7 @@ def launch(*, dataset: Path, repo_id: str, inventory: Path, profile: str,
     # Recheck all bytes/references immediately before the first output write.
     if prepare_launch(**kwargs) != (split, receipt):
         raise ContractError("TRAINING_INPUT_CHANGED")
+    local_offline = _delegated_training(split, receipt)
     output.parent.mkdir(parents=True, exist_ok=True)
     written = []
     try:
@@ -197,8 +245,9 @@ def launch(*, dataset: Path, repo_id: str, inventory: Path, profile: str,
             approval._write_exclusive(path, value, "TRAINING_OUTPUT_EXISTS")
             written.append(path)
         if runner is not None:
-            return runner(argv, check=False).returncode
-        return run_native_training(argv, split, receipt)
+            with approval.local_hf_offline(local_offline):
+                return runner(argv, check=False).returncode
+        return run_native_training(argv, split, receipt, local_offline=local_offline)
     finally:
         for path in written:
             if output.is_dir() and not output.is_symlink():
@@ -212,6 +261,11 @@ def launch(*, dataset: Path, repo_id: str, inventory: Path, profile: str,
 
 
 def run_native_training(argv: list[str], split: dict, receipt: dict) -> int:
+    with approval.local_hf_offline(_delegated_training(split, receipt)):
+        return _run_native_training(argv, split, receipt)
+
+
+def _run_native_training(argv: list[str], split: dict, receipt: dict) -> int:
     """Use the official trainer with admitted partitions and TRAIN-only normalization.
 
     LeRobot 0.6.1 selects samples but retains global metadata statistics. Adapt
@@ -266,13 +320,21 @@ def resume_training(checkpoint: Path) -> int:
         dataset_root=split["dataset_identity"]["dataset_root"],
         repo_id=split["repo_id"], selected_episodes=split["selected_episodes"],
     )
-    _enforce_delegated_launch(
+    delegated = _enforce_delegated_launch(
         inventory, dataset=Path(split["dataset_identity"]["dataset_root"]),
         repo_id=split["repo_id"], profile=split["feature_contract"]["profile"],
         config=options(receipt["normalized_argv"][1:]),
     )
+    if delegated:
+        saved = load_json_strict(policy / "train_config.json")
+        _enforce_delegated_launch(
+            inventory, dataset=Path(split["dataset_identity"]["dataset_root"]),
+            repo_id=split["repo_id"], profile=split["feature_contract"]["profile"],
+            config=_saved_launch_options(saved, output),
+        )
     return run_native_training([receipt["normalized_argv"][0], "--resume=true",
-        f"--config_path={policy / 'train_config.json'}", f"--output_dir={output}"], split, receipt)
+        f"--config_path={policy / 'train_config.json'}", f"--output_dir={output}"],
+        split, receipt)
 
 
 def prepare_approvals(request: dict, output: Path, approved_by: str) -> tuple[dict, list[dict]]:
