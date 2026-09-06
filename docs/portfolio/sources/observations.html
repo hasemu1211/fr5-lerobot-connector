@@ -1,0 +1,784 @@
+<!doctype html><html lang="ko"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>저장 관측의 원본과 추출 범위 — FR5 근거</title><link rel="stylesheet" href="../site.css"></head><body><main class="source-page"><a href="../data.html#observations">← 설명으로 돌아가기</a><h1>저장 관측의 원본과 추출 범위</h1><p class="note">설명에 사용한 구현·측정 자료의 발췌이다. SHA-256은 발췌 전 원본 파일을 식별한다. 실행 PC의 절대 경로와 계정 정보는 포함하지 않으며, 측정값과 해석 조건을 함께 제시한다.</p><section id="manifest"><h2>manifest.json</h2><p class="locator">frozen-heldout-r2-v1/manifest.json<br>sha256:205515f842621efa14165f4d926b7c09eb3cdc5ed9a5458c4c6c17667404e68c</p><p class="note">원문에서 발췌한 필드. 실행 환경의 절대 경로는 자료 식별자로 표시한다.</p><pre>{
+  &quot;scope&quot;: &quot;frozen_offline_observations_no_execution_or_task_success_authority&quot;,
+  &quot;selection_rule&quot;: &quot;all six heldout episodes; floor((length-1)*q) for q=0.1,0.5,0.9; no solver outcome selection&quot;,
+  &quot;selection_limits&quot;: &quot;temporal coverage only; not semantic phase labels, random independent episodes, or untouched test data&quot;,
+  &quot;checkpoint&quot;: &quot;outputs/local-learning/smolvla-raw26-smoke-200-r2/checkpoints/000200/pretrained_model&quot;,
+  &quot;checkpoint_tree_digest&quot;: &quot;sha256:64e4c464aa12525730375dfda54dfb195a338209d93d86e5f0ae01e75422eda4&quot;,
+  &quot;split_digest&quot;: &quot;sha256:e1d4a27ea7e8498cd3b503e0d387395b24e32fbd1a2db6d8245bd5395e800c0f&quot;,
+  &quot;dataset&quot;: &quot;datasets/fr5_episodes/fr5260903&quot;,
+  &quot;dataset_digest&quot;: &quot;sha256:564ca492246687ce3cf96b08d0458dd59edebec1d67e4d48ef4dabf90e93d41d&quot;,
+  &quot;inventory_digest&quot;: &quot;sha256:d7c4856a1ec15ecc75b28ebde58fda6f877788f2780370d1e88b541c092c2b72&quot;,
+  &quot;training_receipt_digest&quot;: &quot;sha256:9ed921176c9f49d0eb1bbe9c51f60406e986dbfc9b4d952c7f90c5abe35ba189&quot;,
+  &quot;evaluation_report&quot;: &quot;outputs/local-learning/smolvla-raw26-smoke-200-r2-heldout-evaluation-e2.json&quot;,
+  &quot;evaluation_report_sha256&quot;: &quot;45a4f6f95b1da43c8d9af89f8ccae65074f756ac1982c5371e362c206902f32c&quot;,
+  &quot;camera_rename_map&quot;: {
+    &quot;observation.images.up&quot;: &quot;observation.images.camera1&quot;,
+    &quot;observation.images.wrist&quot;: &quot;observation.images.camera2&quot;
+  },
+  &quot;files&quot;: [
+    {
+      &quot;episode_index&quot;: 27,
+      &quot;frame_index&quot;: 63,
+      &quot;subset_index&quot;: 63,
+      &quot;fraction&quot;: 0.1,
+      &quot;dataset_index&quot;: 23876,
+      &quot;timestamp_s&quot;: 2.0999999046325684,
+      &quot;path&quot;: &quot;frozen-heldout-r2-v1/episode-027-frame-0063.json&quot;,
+      &quot;sha256&quot;: &quot;f959f51b2a90ee01ef03304e113e12ecabdd0f60185bb42d429a71288073a62a&quot;,
+      &quot;bytes&quot;: 3686806
+    },
+    {
+      &quot;episode_index&quot;: 27,
+      &quot;frame_index&quot;: 316,
+      &quot;subset_index&quot;: 316,
+      &quot;fraction&quot;: 0.5,
+      &quot;dataset_index&quot;: 24129,
+      &quot;timestamp_s&quot;: 10.533333778381348,
+      &quot;path&quot;: &quot;frozen-heldout-r2-v1/episode-027-frame-0316.json&quot;,
+      &quot;sha256&quot;: &quot;05ed6006d773a3c8bbc02ae1fadfef79b763917f2d73eb24b1e5d37690d2953b&quot;,
+      &quot;bytes&quot;: 3686804
+    },
+    {
+      &quot;episode_index&quot;: 27,
+      &quot;frame_index&quot;: 568,
+      &quot;subset_index&quot;: 568,
+      &quot;fraction&quot;: 0.9,
+      &quot;dataset_index&quot;: 24381,
+      &quot;timestamp_s&quot;: 18.933332443237305,
+      &quot;path&quot;: &quot;frozen-heldout-r2-v1/episode-027-frame-0568.json&quot;,
+      &quot;sha256&quot;: &quot;e01f55d28ed1b3bc2ecbb3e11ee9032559de81d1597cd8e835f19f6e108abb97&quot;,
+      &quot;bytes&quot;: 3686803
+    },
+    {
+      &quot;episode_index&quot;: 28,
+      &quot;frame_index&quot;: 63,
+      &quot;subset_index&quot;: 696,
+      &quot;fraction&quot;: 0.1,
+      &quot;dataset_index&quot;: 24509,
+      &quot;timestamp_s&quot;: 2.0999999046325684,
+      &quot;path&quot;: &quot;frozen-heldout-r2-v1/episode-028-frame-0063.json&quot;,
+      &quot;sha256&quot;: &quot;20322a76e3b760a957e41a44a959db375951d7f19b8a34d64d3fede915cf71f4&quot;,
+      &quot;bytes&quot;: 3686806
+    },
+    {
+      &quot;episode_index&quot;: 28,
+      &quot;frame_index&quot;: 315,
+      &quot;subset_index&quot;: 948,
+      &quot;fraction&quot;: 0.5,
+      &quot;dataset_index&quot;: 24761,
+      &quot;timestamp_s&quot;: 10.5,
+      &quot;path&quot;: &quot;frozen-heldout-r2-v1/episode-028-frame-0315.json&quot;,
+      &quot;sha256&quot;: &quot;c0766da655817a4ec5b3df2dc636a91d2d13a68c0716299a21ac8822cb524e3d&quot;,
+      &quot;bytes&quot;: 3686805
+    },
+    {
+      &quot;episode_index&quot;: 28,
+      &quot;frame_index&quot;: 567,
+      &quot;subset_index&quot;: 1200,
+      &quot;fraction&quot;: 0.9,
+      &quot;dataset_index&quot;: 25013,
+      &quot;timestamp_s&quot;: 18.899999618530273,
+      &quot;path&quot;: &quot;frozen-heldout-r2-v1/episode-028-frame-0567.json&quot;,
+      &quot;sha256&quot;: &quot;a66f2741c26bd1f71a4414ceb6f0766f9832e004fcc46f4e75cd307f3c83db4a&quot;,
+      &quot;bytes&quot;: 3686806
+    },
+    {
+      &quot;episode_index&quot;: 29,
+      &quot;frame_index&quot;: 93,
+      &quot;subset_index&quot;: 1358,
+      &quot;fraction&quot;: 0.1,
+      &quot;dataset_index&quot;: 25171,
+      &quot;timestamp_s&quot;: 3.0999999046325684,
+      &quot;path&quot;: &quot;frozen-heldout-r2-v1/episode-029-frame-0093.json&quot;,
+      &quot;sha256&quot;: &quot;e33d65716c685c994080207541a74a35f57b403d0ffb571fd64f48a083b4d8e7&quot;,
+      &quot;bytes&quot;: 3686802
+    },
+    {
+      &quot;episode_index&quot;: 29,
+      &quot;frame_index&quot;: 469,
+      &quot;subset_index&quot;: 1734,
+      &quot;fraction&quot;: 0.5,
+      &quot;dataset_index&quot;: 25547,
+      &quot;timestamp_s&quot;: 15.633333206176758,
+      &quot;path&quot;: &quot;frozen-heldout-r2-v1/episode-029-frame-0469.json&quot;,
+      &quot;sha256&quot;: &quot;e8a8e102885afc140a1ee435eadae142ce829fa8ec0da51d706bf10447dd9d78&quot;,
+      &quot;bytes&quot;: 3686804
+    },
+    {
+      &quot;episode_index&quot;: 29,
+      &quot;frame_index&quot;: 845,
+      &quot;subset_index&quot;: 2110,
+      &quot;fraction&quot;: 0.9,
+      &quot;dataset_index&quot;: 25923,
+      &quot;timestamp_s&quot;: 28.16666603088379,
+      &quot;path&quot;: &quot;frozen-heldout-r2-v1/episode-029-frame-0845.json&quot;,
+      &quot;sha256&quot;: &quot;e139f69ba701ce0ca6ee9c2f3395cb878fcbb2e698c8131e29e42ac9c39ec411&quot;,
+      &quot;bytes&quot;: 3686802
+    },
+    {
+      &quot;episode_index&quot;: 30,
+      &quot;frame_index&quot;: 96,
+      &quot;subset_index&quot;: 2301,
+      &quot;fraction&quot;: 0.1,
+      &quot;dataset_index&quot;: 26114,
+      &quot;timestamp_s&quot;: 3.200000047683716,
+      &quot;path&quot;: &quot;frozen-heldout-r2-v1/episode-030-frame-0096.json&quot;,
+      &quot;sha256&quot;: &quot;fc2929746a9eba452f63c6d2ed88ce243a710ebdca051e68fdb3ab181d01931d&quot;,
+      &quot;bytes&quot;: 3686805
+    },
+    {
+      &quot;episode_index&quot;: 30,
+      &quot;frame_index&quot;: 482,
+      &quot;subset_index&quot;: 2687,
+      &quot;fraction&quot;: 0.5,
+      &quot;dataset_index&quot;: 26500,
+      &quot;timestamp_s&quot;: 16.066667556762695,
+      &quot;path&quot;: &quot;frozen-heldout-r2-v1/episode-030-frame-0482.json&quot;,
+      &quot;sha256&quot;: &quot;3c4e702bf5fd6fb2fe40adbd4f3f0f06e4342baa78792de1b686ec7786df4d5f&quot;,
+      &quot;bytes&quot;: 3686803
+    },
+    {
+      &quot;episode_index&quot;: 30,
+      &quot;frame_index&quot;: 868,
+      &quot;subset_index&quot;: 3073,
+      &quot;fraction&quot;: 0.9,
+      &quot;dataset_index&quot;: 26886,
+      &quot;timestamp_s&quot;: 28.933332443237305,
+      &quot;path&quot;: &quot;frozen-heldout-r2-v1/episode-030-frame-0868.json&quot;,
+      &quot;sha256&quot;: &quot;f1cb952c5ffc1b990f983140719085f975d44ab1ae74f9992147e6fa55b589c7&quot;,
+      &quot;bytes&quot;: 3686801
+    },
+    {
+      &quot;episode_index&quot;: 31,
+      &quot;frame_index&quot;: 95,
+      &quot;subset_index&quot;: 3266,
+      &quot;fraction&quot;: 0.1,
+      &quot;dataset_index&quot;: 27079,
+      &quot;timestamp_s&quot;: 3.1666667461395264,
+      &quot;path&quot;: &quot;frozen-heldout-r2-v1/episode-031-frame-0095.json&quot;,
+      &quot;sha256&quot;: &quot;464aacad6c44d17b508afbb7a529cfb49bae2fa53fa0c72ec016a93ea0e3a5cd&quot;,
+      &quot;bytes&quot;: 3686805
+    },
+    {
+      &quot;episode_index&quot;: 31,
+      &quot;frame_index&quot;: 476,
+      &quot;subset_index&quot;: 3647,
+      &quot;fraction&quot;: 0.5,
+      &quot;dataset_index&quot;: 27460,
+      &quot;timestamp_s&quot;: 15.866666793823242,
+      &quot;path&quot;: &quot;frozen-heldout-r2-v1/episode-031-frame-0476.json&quot;,
+      &quot;sha256&quot;: &quot;48a6d85d80ee76096bed54174ea94ec7aff570798b3061d2b851edf9a621fb9d&quot;,
+      &quot;bytes&quot;: 3686804
+    },
+    {
+      &quot;episode_index&quot;: 31,
+      &quot;frame_index&quot;: 856,
+      &quot;subset_index&quot;: 4027,
+      &quot;fraction&quot;: 0.9,
+      &quot;dataset_index&quot;: 27840,
+      &quot;timestamp_s&quot;: 28.53333282470703,
+      &quot;path&quot;: &quot;frozen-heldout-r2-v1/episode-031-frame-0856.json&quot;,
+      &quot;sha256&quot;: &quot;99aba3b48c38599295560d083820b47304d283ea34d31a6e280bcced50bda90e&quot;,
+      &quot;bytes&quot;: 3686804
+    },
+    {
+      &quot;episode_index&quot;: 32,
+      &quot;frame_index&quot;: 51,
+      &quot;subset_index&quot;: 4175,
+      &quot;fraction&quot;: 0.1,
+      &quot;dataset_index&quot;: 27988,
+      &quot;timestamp_s&quot;: 1.7000000476837158,
+      &quot;path&quot;: &quot;frozen-heldout-r2-v1/episode-032-frame-0051.json&quot;,
+      &quot;sha256&quot;: &quot;9c0369eb52270197c018a2bad9c20755e366fcba6b38d31151a2ba55d3297617&quot;,
+      &quot;bytes&quot;: 3686805
+    },
+    {
+      &quot;episode_index&quot;: 32,
+      &quot;frame_index&quot;: 259,
+      &quot;subset_index&quot;: 4383,
+      &quot;fraction&quot;: 0.5,
+      &quot;dataset_index&quot;: 28196,
+      &quot;timestamp_s&quot;: 8.633333206176758,
+      &quot;path&quot;: &quot;frozen-heldout-r2-v1/episode-032-frame-0259.json&quot;,
+      &quot;sha256&quot;: &quot;73e0c5ff0174ae95e7441839c34fec5f2aa697e3ef2b1f59d1a7a775d46b7a46&quot;,
+      &quot;bytes&quot;: 3686804
+    },
+    {
+      &quot;episode_index&quot;: 32,
+      &quot;frame_index&quot;: 467,
+      &quot;subset_index&quot;: 4591,
+      &quot;fraction&quot;: 0.9,
+      &quot;dataset_index&quot;: 28404,
+      &quot;timestamp_s&quot;: 15.566666603088379,
+      &quot;path&quot;: &quot;frozen-heldout-r2-v1/episode-032-frame-0467.json&quot;,
+      &quot;sha256&quot;: &quot;cb3d88ee0d2b1710e5bcc5e968e8bf829ac16909b89702879d23d53aa51fc9a4&quot;,
+      &quot;bytes&quot;: 3686804
+    }
+  ],
+  &quot;artifact_sha256&quot;: {
+    &quot;config.json&quot;: &quot;3a56fd691e52fca1f9910aec655179a0baa3b3fcc7d551d03b9351fd375dfccf&quot;,
+    &quot;train_config.json&quot;: &quot;99dedf1641183ad5c14681d9d2721a43c88157efe256a08c7b23ea21a6ffc9cf&quot;,
+    &quot;policy_postprocessor.json&quot;: &quot;3b51f092c70c710ce0213ee1b63bf51b4878ec67828dd2d67daf9ef51081a41a&quot;,
+    &quot;policy_preprocessor.json&quot;: &quot;66c0832e3ac8fdb162362ea06105fada8bd716b0512556b291dde4e1ceafbe0d&quot;
+  },
+  &quot;capture_wall_time_s&quot;: 0.5053910340066068,
+  &quot;total_observation_bytes&quot;: 66362473
+}</pre></section><a href="../data.html?episode=27&amp;moment=0#observations">이 관측으로 돌아가기 ↗</a><section id="ep27-f63"><h2>episode-027-frame-0063.json</h2><p class="locator">frozen-heldout-r2-v1/episode-027-frame-0063.json<br>sha256:f959f51b2a90ee01ef03304e113e12ecabdd0f60185bb42d429a71288073a62a</p><p class="note">원문에서 발췌한 필드. 실행 환경의 절대 경로는 자료 식별자로 표시한다.</p><pre>{
+  &quot;observation.state&quot;: [
+    -1.6130971908569336,
+    -1.5288888216018677,
+    1.5618746280670166,
+    -1.6037647724151611,
+    -1.5707998275756836,
+    -0.042201440781354904,
+    0.02078999951481819
+  ],
+  &quot;task&quot;: &quot;pick up the 24 mm wooden cube&quot;,
+  &quot;image_fields&quot;: {
+    &quot;observation.images.camera1&quot;: {
+      &quot;shape&quot;: [
+        480,
+        640,
+        3
+      ],
+      &quot;dtype&quot;: &quot;uint8&quot;,
+      &quot;color_space&quot;: &quot;RGB&quot;
+    },
+    &quot;observation.images.camera2&quot;: {
+      &quot;shape&quot;: [
+        480,
+        640,
+        3
+      ],
+      &quot;dtype&quot;: &quot;uint8&quot;,
+      &quot;color_space&quot;: &quot;RGB&quot;
+    }
+  }
+}</pre></section><a href="../data.html?episode=27&amp;moment=1#observations">이 관측으로 돌아가기 ↗</a><section id="ep27-f316"><h2>episode-027-frame-0316.json</h2><p class="locator">frozen-heldout-r2-v1/episode-027-frame-0316.json<br>sha256:05ed6006d773a3c8bbc02ae1fadfef79b763917f2d73eb24b1e5d37690d2953b</p><p class="note">원문에서 발췌한 필드. 실행 환경의 절대 경로는 자료 식별자로 표시한다.</p><pre>{
+  &quot;observation.state&quot;: [
+    -2.1898810863494873,
+    -0.9568701386451721,
+    1.4408814907073975,
+    -2.0546975135803223,
+    -1.5707995891571045,
+    -0.6191942691802979,
+    0.02078999951481819
+  ],
+  &quot;task&quot;: &quot;pick up the 24 mm wooden cube&quot;,
+  &quot;image_fields&quot;: {
+    &quot;observation.images.camera1&quot;: {
+      &quot;shape&quot;: [
+        480,
+        640,
+        3
+      ],
+      &quot;dtype&quot;: &quot;uint8&quot;,
+      &quot;color_space&quot;: &quot;RGB&quot;
+    },
+    &quot;observation.images.camera2&quot;: {
+      &quot;shape&quot;: [
+        480,
+        640,
+        3
+      ],
+      &quot;dtype&quot;: &quot;uint8&quot;,
+      &quot;color_space&quot;: &quot;RGB&quot;
+    }
+  }
+}</pre></section><a href="../data.html?episode=27&amp;moment=2#observations">이 관측으로 돌아가기 ↗</a><section id="ep27-f568"><h2>episode-027-frame-0568.json</h2><p class="locator">frozen-heldout-r2-v1/episode-027-frame-0568.json<br>sha256:e01f55d28ed1b3bc2ecbb3e11ee9032559de81d1597cd8e835f19f6e108abb97</p><p class="note">원문에서 발췌한 필드. 실행 환경의 절대 경로는 자료 식별자로 표시한다.</p><pre>{
+  &quot;observation.state&quot;: [
+    -2.196150064468384,
+    -0.8924068808555603,
+    1.5114039182662964,
+    -2.189854621887207,
+    -1.5708017349243164,
+    -0.4500237703323364,
+    0.012179999612271786
+  ],
+  &quot;task&quot;: &quot;pick up the 24 mm wooden cube&quot;,
+  &quot;image_fields&quot;: {
+    &quot;observation.images.camera1&quot;: {
+      &quot;shape&quot;: [
+        480,
+        640,
+        3
+      ],
+      &quot;dtype&quot;: &quot;uint8&quot;,
+      &quot;color_space&quot;: &quot;RGB&quot;
+    },
+    &quot;observation.images.camera2&quot;: {
+      &quot;shape&quot;: [
+        480,
+        640,
+        3
+      ],
+      &quot;dtype&quot;: &quot;uint8&quot;,
+      &quot;color_space&quot;: &quot;RGB&quot;
+    }
+  }
+}</pre></section><a href="../data.html?episode=28&amp;moment=0#observations">이 관측으로 돌아가기 ↗</a><section id="ep28-f63"><h2>episode-028-frame-0063.json</h2><p class="locator">frozen-heldout-r2-v1/episode-028-frame-0063.json<br>sha256:20322a76e3b760a957e41a44a959db375951d7f19b8a34d64d3fede915cf71f4</p><p class="note">원문에서 발췌한 필드. 실행 환경의 절대 경로는 자료 식별자로 표시한다.</p><pre>{
+  &quot;observation.state&quot;: [
+    -1.6129705905914307,
+    -1.5417715311050415,
+    1.5833582878112793,
+    -1.6124608516693115,
+    -1.5708001852035522,
+    -0.04207153245806694,
+    0.020999999716877937
+  ],
+  &quot;task&quot;: &quot;pick up the 24 mm wooden cube&quot;,
+  &quot;image_fields&quot;: {
+    &quot;observation.images.camera1&quot;: {
+      &quot;shape&quot;: [
+        480,
+        640,
+        3
+      ],
+      &quot;dtype&quot;: &quot;uint8&quot;,
+      &quot;color_space&quot;: &quot;RGB&quot;
+    },
+    &quot;observation.images.camera2&quot;: {
+      &quot;shape&quot;: [
+        480,
+        640,
+        3
+      ],
+      &quot;dtype&quot;: &quot;uint8&quot;,
+      &quot;color_space&quot;: &quot;RGB&quot;
+    }
+  }
+}</pre></section><a href="../data.html?episode=28&amp;moment=1#observations">이 관측으로 돌아가기 ↗</a><section id="ep28-f315"><h2>episode-028-frame-0315.json</h2><p class="locator">frozen-heldout-r2-v1/episode-028-frame-0315.json<br>sha256:c0766da655817a4ec5b3df2dc636a91d2d13a68c0716299a21ac8822cb524e3d</p><p class="note">원문에서 발췌한 필드. 실행 환경의 절대 경로는 자료 식별자로 표시한다.</p><pre>{
+  &quot;observation.state&quot;: [
+    -2.1878581047058105,
+    -1.1463156938552856,
+    1.7539373636245728,
+    -2.1785035133361816,
+    -1.5707992315292358,
+    -0.6170676946640015,
+    0.020999999716877937
+  ],
+  &quot;task&quot;: &quot;pick up the 24 mm wooden cube&quot;,
+  &quot;image_fields&quot;: {
+    &quot;observation.images.camera1&quot;: {
+      &quot;shape&quot;: [
+        480,
+        640,
+        3
+      ],
+      &quot;dtype&quot;: &quot;uint8&quot;,
+      &quot;color_space&quot;: &quot;RGB&quot;
+    },
+    &quot;observation.images.camera2&quot;: {
+      &quot;shape&quot;: [
+        480,
+        640,
+        3
+      ],
+      &quot;dtype&quot;: &quot;uint8&quot;,
+      &quot;color_space&quot;: &quot;RGB&quot;
+    }
+  }
+}</pre></section><a href="../data.html?episode=28&amp;moment=2#observations">이 관측으로 돌아가기 ↗</a><section id="ep28-f567"><h2>episode-028-frame-0567.json</h2><p class="locator">frozen-heldout-r2-v1/episode-028-frame-0567.json<br>sha256:a66f2741c26bd1f71a4414ceb6f0766f9832e004fcc46f4e75cd307f3c83db4a</p><p class="note">원문에서 발췌한 필드. 실행 환경의 절대 경로는 자료 식별자로 표시한다.</p><pre>{
+  &quot;observation.state&quot;: [
+    -2.1978118419647217,
+    -1.0512818098068237,
+    1.7941946983337402,
+    -2.3138468265533447,
+    -1.5708115100860596,
+    -0.45168519020080566,
+    0.011970000341534615
+  ],
+  &quot;task&quot;: &quot;pick up the 24 mm wooden cube&quot;,
+  &quot;image_fields&quot;: {
+    &quot;observation.images.camera1&quot;: {
+      &quot;shape&quot;: [
+        480,
+        640,
+        3
+      ],
+      &quot;dtype&quot;: &quot;uint8&quot;,
+      &quot;color_space&quot;: &quot;RGB&quot;
+    },
+    &quot;observation.images.camera2&quot;: {
+      &quot;shape&quot;: [
+        480,
+        640,
+        3
+      ],
+      &quot;dtype&quot;: &quot;uint8&quot;,
+      &quot;color_space&quot;: &quot;RGB&quot;
+    }
+  }
+}</pre></section><a href="../data.html?episode=29&amp;moment=0#observations">이 관측으로 돌아가기 ↗</a><section id="ep29-f93"><h2>episode-029-frame-0093.json</h2><p class="locator">frozen-heldout-r2-v1/episode-029-frame-0093.json<br>sha256:e33d65716c685c994080207541a74a35f57b403d0ffb571fd64f48a083b4d8e7</p><p class="note">원문에서 발췌한 필드. 실행 환경의 절대 경로는 자료 식별자로 표시한다.</p><pre>{
+  &quot;observation.state&quot;: [
+    -1.6608225107192993,
+    -1.492105484008789,
+    1.586679220199585,
+    -1.665351152420044,
+    -1.5707963705062866,
+    -0.09012943506240845,
+    0.02078999951481819
+  ],
+  &quot;task&quot;: &quot;pick up the 24 mm wooden cube&quot;,
+  &quot;image_fields&quot;: {
+    &quot;observation.images.camera1&quot;: {
+      &quot;shape&quot;: [
+        480,
+        640,
+        3
+      ],
+      &quot;dtype&quot;: &quot;uint8&quot;,
+      &quot;color_space&quot;: &quot;RGB&quot;
+    },
+    &quot;observation.images.camera2&quot;: {
+      &quot;shape&quot;: [
+        480,
+        640,
+        3
+      ],
+      &quot;dtype&quot;: &quot;uint8&quot;,
+      &quot;color_space&quot;: &quot;RGB&quot;
+    }
+  }
+}</pre></section><a href="../data.html?episode=29&amp;moment=1#observations">이 관측으로 돌아가기 ↗</a><section id="ep29-f469"><h2>episode-029-frame-0469.json</h2><p class="locator">frozen-heldout-r2-v1/episode-029-frame-0469.json<br>sha256:e8a8e102885afc140a1ee435eadae142ce829fa8ec0da51d706bf10447dd9d78</p><p class="note">원문에서 발췌한 필드. 실행 환경의 절대 경로는 자료 식별자로 표시한다.</p><pre>{
+  &quot;observation.state&quot;: [
+    -2.1242990493774414,
+    -1.0888010263442993,
+    1.6739712953567505,
+    -2.1559629440307617,
+    -1.5708034038543701,
+    -0.3392900228500366,
+    0.02078999951481819
+  ],
+  &quot;task&quot;: &quot;pick up the 24 mm wooden cube&quot;,
+  &quot;image_fields&quot;: {
+    &quot;observation.images.camera1&quot;: {
+      &quot;shape&quot;: [
+        480,
+        640,
+        3
+      ],
+      &quot;dtype&quot;: &quot;uint8&quot;,
+      &quot;color_space&quot;: &quot;RGB&quot;
+    },
+    &quot;observation.images.camera2&quot;: {
+      &quot;shape&quot;: [
+        480,
+        640,
+        3
+      ],
+      &quot;dtype&quot;: &quot;uint8&quot;,
+      &quot;color_space&quot;: &quot;RGB&quot;
+    }
+  }
+}</pre></section><a href="../data.html?episode=29&amp;moment=2#observations">이 관측으로 돌아가기 ↗</a><section id="ep29-f845"><h2>episode-029-frame-0845.json</h2><p class="locator">frozen-heldout-r2-v1/episode-029-frame-0845.json<br>sha256:e139f69ba701ce0ca6ee9c2f3395cb878fcbb2e698c8131e29e42ac9c39ec411</p><p class="note">원문에서 발췌한 필드. 실행 환경의 절대 경로는 자료 식별자로 표시한다.</p><pre>{
+  &quot;observation.state&quot;: [
+    -2.1200661659240723,
+    -1.0147603750228882,
+    1.729962706565857,
+    -2.285959243774414,
+    -1.5707963705062866,
+    0.13624027371406555,
+    0.02078999951481819
+  ],
+  &quot;task&quot;: &quot;pick up the 24 mm wooden cube&quot;,
+  &quot;image_fields&quot;: {
+    &quot;observation.images.camera1&quot;: {
+      &quot;shape&quot;: [
+        480,
+        640,
+        3
+      ],
+      &quot;dtype&quot;: &quot;uint8&quot;,
+      &quot;color_space&quot;: &quot;RGB&quot;
+    },
+    &quot;observation.images.camera2&quot;: {
+      &quot;shape&quot;: [
+        480,
+        640,
+        3
+      ],
+      &quot;dtype&quot;: &quot;uint8&quot;,
+      &quot;color_space&quot;: &quot;RGB&quot;
+    }
+  }
+}</pre></section><a href="../data.html?episode=30&amp;moment=0#observations">이 관측으로 돌아가기 ↗</a><section id="ep30-f96"><h2>episode-030-frame-0096.json</h2><p class="locator">frozen-heldout-r2-v1/episode-030-frame-0096.json<br>sha256:fc2929746a9eba452f63c6d2ed88ce243a710ebdca051e68fdb3ab181d01931d</p><p class="note">원문에서 발췌한 필드. 실행 환경의 절대 경로는 자료 식별자로 표시한다.</p><pre>{
+  &quot;observation.state&quot;: [
+    -1.6543223857879639,
+    -1.5182000398635864,
+    1.6193934679031372,
+    -1.6720514297485352,
+    -1.5707958936691284,
+    -0.08347972482442856,
+    0.02078999951481819
+  ],
+  &quot;task&quot;: &quot;pick up the 24 mm wooden cube&quot;,
+  &quot;image_fields&quot;: {
+    &quot;observation.images.camera1&quot;: {
+      &quot;shape&quot;: [
+        480,
+        640,
+        3
+      ],
+      &quot;dtype&quot;: &quot;uint8&quot;,
+      &quot;color_space&quot;: &quot;RGB&quot;
+    },
+    &quot;observation.images.camera2&quot;: {
+      &quot;shape&quot;: [
+        480,
+        640,
+        3
+      ],
+      &quot;dtype&quot;: &quot;uint8&quot;,
+      &quot;color_space&quot;: &quot;RGB&quot;
+    }
+  }
+}</pre></section><a href="../data.html?episode=30&amp;moment=1#observations">이 관측으로 돌아가기 ↗</a><section id="ep30-f482"><h2>episode-030-frame-0482.json</h2><p class="locator">frozen-heldout-r2-v1/episode-030-frame-0482.json<br>sha256:3c4e702bf5fd6fb2fe40adbd4f3f0f06e4342baa78792de1b686ec7786df4d5f</p><p class="note">원문에서 발췌한 필드. 실행 환경의 절대 경로는 자료 식별자로 표시한다.</p><pre>{
+  &quot;observation.state&quot;: [
+    -2.1135311126708984,
+    -1.2328214645385742,
+    1.8898152112960815,
+    -2.2278013229370117,
+    -1.5707963705062866,
+    -0.343411922454834,
+    0.02078999951481819
+  ],
+  &quot;task&quot;: &quot;pick up the 24 mm wooden cube&quot;,
+  &quot;image_fields&quot;: {
+    &quot;observation.images.camera1&quot;: {
+      &quot;shape&quot;: [
+        480,
+        640,
+        3
+      ],
+      &quot;dtype&quot;: &quot;uint8&quot;,
+      &quot;color_space&quot;: &quot;RGB&quot;
+    },
+    &quot;observation.images.camera2&quot;: {
+      &quot;shape&quot;: [
+        480,
+        640,
+        3
+      ],
+      &quot;dtype&quot;: &quot;uint8&quot;,
+      &quot;color_space&quot;: &quot;RGB&quot;
+    }
+  }
+}</pre></section><a href="../data.html?episode=30&amp;moment=2#observations">이 관측으로 돌아가기 ↗</a><section id="ep30-f868"><h2>episode-030-frame-0868.json</h2><p class="locator">frozen-heldout-r2-v1/episode-030-frame-0868.json<br>sha256:f1cb952c5ffc1b990f983140719085f975d44ab1ae74f9992147e6fa55b589c7</p><p class="note">원문에서 발췌한 필드. 실행 환경의 절대 경로는 자료 식별자로 표시한다.</p><pre>{
+  &quot;observation.state&quot;: [
+    -2.117988348007202,
+    -1.1447700262069702,
+    1.9469406604766846,
+    -2.372910976409912,
+    -1.570797085762024,
+    0.13831646740436554,
+    0.02078999951481819
+  ],
+  &quot;task&quot;: &quot;pick up the 24 mm wooden cube&quot;,
+  &quot;image_fields&quot;: {
+    &quot;observation.images.camera1&quot;: {
+      &quot;shape&quot;: [
+        480,
+        640,
+        3
+      ],
+      &quot;dtype&quot;: &quot;uint8&quot;,
+      &quot;color_space&quot;: &quot;RGB&quot;
+    },
+    &quot;observation.images.camera2&quot;: {
+      &quot;shape&quot;: [
+        480,
+        640,
+        3
+      ],
+      &quot;dtype&quot;: &quot;uint8&quot;,
+      &quot;color_space&quot;: &quot;RGB&quot;
+    }
+  }
+}</pre></section><a href="../data.html?episode=31&amp;moment=0#observations">이 관측으로 돌아가기 ↗</a><section id="ep31-f95"><h2>episode-031-frame-0095.json</h2><p class="locator">frozen-heldout-r2-v1/episode-031-frame-0095.json<br>sha256:464aacad6c44d17b508afbb7a529cfb49bae2fa53fa0c72ec016a93ea0e3a5cd</p><p class="note">원문에서 발췌한 필드. 실행 환경의 절대 경로는 자료 식별자로 표시한다.</p><pre>{
+  &quot;observation.state&quot;: [
+    -1.6519439220428467,
+    -1.5023444890975952,
+    1.6016693115234375,
+    -1.669833779335022,
+    -1.5707972049713135,
+    -0.08095315098762512,
+    0.020999999716877937
+  ],
+  &quot;task&quot;: &quot;pick up the 24 mm wooden cube&quot;,
+  &quot;image_fields&quot;: {
+    &quot;observation.images.camera1&quot;: {
+      &quot;shape&quot;: [
+        480,
+        640,
+        3
+      ],
+      &quot;dtype&quot;: &quot;uint8&quot;,
+      &quot;color_space&quot;: &quot;RGB&quot;
+    },
+    &quot;observation.images.camera2&quot;: {
+      &quot;shape&quot;: [
+        480,
+        640,
+        3
+      ],
+      &quot;dtype&quot;: &quot;uint8&quot;,
+      &quot;color_space&quot;: &quot;RGB&quot;
+    }
+  }
+}</pre></section><a href="../data.html?episode=31&amp;moment=1#observations">이 관측으로 돌아가기 ↗</a><section id="ep31-f476"><h2>episode-031-frame-0476.json</h2><p class="locator">frozen-heldout-r2-v1/episode-031-frame-0476.json<br>sha256:48a6d85d80ee76096bed54174ea94ec7aff570798b3061d2b851edf9a621fb9d</p><p class="note">원문에서 발췌한 필드. 실행 환경의 절대 경로는 자료 식별자로 표시한다.</p><pre>{
+  &quot;observation.state&quot;: [
+    -2.067487955093384,
+    -1.1456339359283447,
+    1.7571057081222534,
+    -2.1822736263275146,
+    -1.570790410041809,
+    -0.28748756647109985,
+    0.020999999716877937
+  ],
+  &quot;task&quot;: &quot;pick up the 24 mm wooden cube&quot;,
+  &quot;image_fields&quot;: {
+    &quot;observation.images.camera1&quot;: {
+      &quot;shape&quot;: [
+        480,
+        640,
+        3
+      ],
+      &quot;dtype&quot;: &quot;uint8&quot;,
+      &quot;color_space&quot;: &quot;RGB&quot;
+    },
+    &quot;observation.images.camera2&quot;: {
+      &quot;shape&quot;: [
+        480,
+        640,
+        3
+      ],
+      &quot;dtype&quot;: &quot;uint8&quot;,
+      &quot;color_space&quot;: &quot;RGB&quot;
+    }
+  }
+}</pre></section><a href="../data.html?episode=31&amp;moment=2#observations">이 관측으로 돌아가기 ↗</a><section id="ep31-f856"><h2>episode-031-frame-0856.json</h2><p class="locator">frozen-heldout-r2-v1/episode-031-frame-0856.json<br>sha256:99aba3b48c38599295560d083820b47304d283ea34d31a6e280bcced50bda90e</p><p class="note">원문에서 발췌한 필드. 실행 환경의 절대 경로는 자료 식별자로 표시한다.</p><pre>{
+  &quot;observation.state&quot;: [
+    -2.056962013244629,
+    -1.0525792837142944,
+    1.7937557697296143,
+    -2.3119466304779053,
+    -1.5707963705062866,
+    0.19933396577835083,
+    0.020999999716877937
+  ],
+  &quot;task&quot;: &quot;pick up the 24 mm wooden cube&quot;,
+  &quot;image_fields&quot;: {
+    &quot;observation.images.camera1&quot;: {
+      &quot;shape&quot;: [
+        480,
+        640,
+        3
+      ],
+      &quot;dtype&quot;: &quot;uint8&quot;,
+      &quot;color_space&quot;: &quot;RGB&quot;
+    },
+    &quot;observation.images.camera2&quot;: {
+      &quot;shape&quot;: [
+        480,
+        640,
+        3
+      ],
+      &quot;dtype&quot;: &quot;uint8&quot;,
+      &quot;color_space&quot;: &quot;RGB&quot;
+    }
+  }
+}</pre></section><a href="../data.html?episode=32&amp;moment=0#observations">이 관측으로 돌아가기 ↗</a><section id="ep32-f51"><h2>episode-032-frame-0051.json</h2><p class="locator">frozen-heldout-r2-v1/episode-032-frame-0051.json<br>sha256:9c0369eb52270197c018a2bad9c20755e366fcba6b38d31151a2ba55d3297617</p><p class="note">원문에서 발췌한 필드. 실행 환경의 절대 경로는 자료 식별자로 표시한다.</p><pre>{
+  &quot;observation.state&quot;: [
+    -1.594956874847412,
+    -1.5521377325057983,
+    1.5790791511535645,
+    -1.5977075099945068,
+    -1.5707955360412598,
+    -0.02432078868150711,
+    0.020999999716877937
+  ],
+  &quot;task&quot;: &quot;pick up the 24 mm wooden cube&quot;,
+  &quot;image_fields&quot;: {
+    &quot;observation.images.camera1&quot;: {
+      &quot;shape&quot;: [
+        480,
+        640,
+        3
+      ],
+      &quot;dtype&quot;: &quot;uint8&quot;,
+      &quot;color_space&quot;: &quot;RGB&quot;
+    },
+    &quot;observation.images.camera2&quot;: {
+      &quot;shape&quot;: [
+        480,
+        640,
+        3
+      ],
+      &quot;dtype&quot;: &quot;uint8&quot;,
+      &quot;color_space&quot;: &quot;RGB&quot;
+    }
+  }
+}</pre></section><a href="../data.html?episode=32&amp;moment=1#observations">이 관측으로 돌아가기 ↗</a><section id="ep32-f259"><h2>episode-032-frame-0259.json</h2><p class="locator">frozen-heldout-r2-v1/episode-032-frame-0259.json<br>sha256:73e0c5ff0174ae95e7441839c34fec5f2aa697e3ef2b1f59d1a7a775d46b7a46</p><p class="note">원문에서 발췌한 필드. 실행 환경의 절대 경로는 자료 식별자로 표시한다.</p><pre>{
+  &quot;observation.state&quot;: [
+    -2.067730188369751,
+    -1.1899285316467285,
+    1.7415988445281982,
+    -2.122593641281128,
+    -1.5707974433898926,
+    -0.49703681468963623,
+    0.020999999716877937
+  ],
+  &quot;task&quot;: &quot;pick up the 24 mm wooden cube&quot;,
+  &quot;image_fields&quot;: {
+    &quot;observation.images.camera1&quot;: {
+      &quot;shape&quot;: [
+        480,
+        640,
+        3
+      ],
+      &quot;dtype&quot;: &quot;uint8&quot;,
+      &quot;color_space&quot;: &quot;RGB&quot;
+    },
+    &quot;observation.images.camera2&quot;: {
+      &quot;shape&quot;: [
+        480,
+        640,
+        3
+      ],
+      &quot;dtype&quot;: &quot;uint8&quot;,
+      &quot;color_space&quot;: &quot;RGB&quot;
+    }
+  }
+}</pre></section><a href="../data.html?episode=32&amp;moment=2#observations">이 관측으로 돌아가기 ↗</a><section id="ep32-f467"><h2>episode-032-frame-0467.json</h2><p class="locator">frozen-heldout-r2-v1/episode-032-frame-0467.json<br>sha256:cb3d88ee0d2b1710e5bcc5e968e8bf829ac16909b89702879d23d53aa51fc9a4</p><p class="note">원문에서 발췌한 필드. 실행 환경의 절대 경로는 자료 식별자로 표시한다.</p><pre>{
+  &quot;observation.state&quot;: [
+    -2.1232099533081055,
+    -1.0723873376846313,
+    1.8302031755447388,
+    -2.328219413757324,
+    -1.5707945823669434,
+    -0.5523414611816406,
+    0.011970000341534615
+  ],
+  &quot;task&quot;: &quot;pick up the 24 mm wooden cube&quot;,
+  &quot;image_fields&quot;: {
+    &quot;observation.images.camera1&quot;: {
+      &quot;shape&quot;: [
+        480,
+        640,
+        3
+      ],
+      &quot;dtype&quot;: &quot;uint8&quot;,
+      &quot;color_space&quot;: &quot;RGB&quot;
+    },
+    &quot;observation.images.camera2&quot;: {
+      &quot;shape&quot;: [
+        480,
+        640,
+        3
+      ],
+      &quot;dtype&quot;: &quot;uint8&quot;,
+      &quot;color_space&quot;: &quot;RGB&quot;
+    }
+  }
+}</pre></section></main></body></html>

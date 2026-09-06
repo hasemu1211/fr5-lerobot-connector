@@ -1,0 +1,672 @@
+<!doctype html><html lang="ko"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>실제 학습 입력 — FR5 근거</title><link rel="stylesheet" href="../site.css"></head><body><main class="source-page"><a href="../learning.html#inputs">← 설명으로 돌아가기</a><h1>실제 학습 입력</h1><p class="note">설명에 사용한 구현·측정 자료의 발췌이다. SHA-256은 발췌 전 원본 파일을 식별한다. 실행 PC의 절대 경로와 계정 정보는 포함하지 않으며, 측정값과 해석 조건을 함께 제시한다.</p><section id="fr5_training_receipt"><h2>fr5_training_receipt.json</h2><p class="locator">outputs/local-learning/smolvla-raw26-quality-10000-r1/fr5_training_receipt.json<br>sha256:f8bfaf51b5a7f1a30992bfd7a99d7695db459c07754d57afb1d98abf09e5d658</p><p class="note">원문에서 발췌한 필드. 실행 환경의 절대 경로는 자료 식별자로 표시한다.</p><pre>{
+  &quot;status&quot;: &quot;ADMITTED_NOT_TRAINED&quot;,
+  &quot;dataset_identity&quot;: {
+    &quot;dataset_digest&quot;: &quot;sha256:564ca492246687ce3cf96b08d0458dd59edebec1d67e4d48ef4dabf90e93d41d&quot;,
+    &quot;dataset_id&quot;: &quot;fr5260903-frozen-pickup-r1&quot;,
+    &quot;dataset_root&quot;: &quot;datasets/fr5_episodes/fr5260903&quot;,
+    &quot;repo_id&quot;: &quot;local/fr5_smolvla_up_wrist_30hz&quot;
+  },
+  &quot;approved_inventory_path&quot;: &quot;outputs/local-learning/authorizations/fr5260903-raw26-r2/training_approved.json&quot;,
+  &quot;approved_episode_inventory_digest&quot;: &quot;sha256:f0538658665a5648da8ad51d08856064fd7cfda2aa2f02c7a6a052c4a990e0a9&quot;,
+  &quot;selected_episodes&quot;: [
+    5,
+    6,
+    7,
+    8,
+    9,
+    10,
+    11,
+    14,
+    15,
+    16,
+    17,
+    18,
+    19,
+    20,
+    21,
+    22,
+    23,
+    24,
+    25,
+    26,
+    27,
+    28,
+    29,
+    30,
+    31,
+    32
+  ],
+  &quot;train_episodes&quot;: [
+    5,
+    6,
+    7,
+    8,
+    9,
+    10,
+    11,
+    14,
+    15,
+    16,
+    17,
+    18,
+    19,
+    20,
+    21,
+    22,
+    23,
+    24,
+    25,
+    26
+  ],
+  &quot;eval_episodes&quot;: [
+    27,
+    28,
+    29,
+    30,
+    31,
+    32
+  ],
+  &quot;split_digest&quot;: &quot;sha256:938dfdac3defe49a267d3178f61af5f32896ce6bafff4c62bb2fca63ac264b0d&quot;,
+  &quot;normalization&quot;: {
+    &quot;algorithm&quot;: &quot;lerobot-0.6.1-train-episode-moments-v1&quot;,
+    &quot;episodes&quot;: [
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      14,
+      15,
+      16,
+      17,
+      18,
+      19,
+      20,
+      21,
+      22,
+      23,
+      24,
+      25,
+      26
+    ],
+    &quot;stats&quot;: {
+      &quot;action&quot;: {
+        &quot;count&quot;: [
+          15492.0
+        ],
+        &quot;max&quot;: [
+          -1.5707924365997314,
+          -0.8986161351203918,
+          2.0923800468444824,
+          -1.5707887411117554,
+          -1.5707924365997314,
+          0.04959632083773613,
+          0.020999999716877937
+        ],
+        &quot;mean&quot;: [
+          -2.002418084205228,
+          -1.231720016918655,
+          1.7267253728005858,
+          -2.0658042659185174,
+          -1.5708001096935627,
+          -0.45426675337569955,
+          0.01992635276029596
+        ],
+        &quot;min&quot;: [
+          -2.3287556171417236,
+          -1.5708022117614746,
+          1.470271110534668,
+          -2.4304087162017822,
+          -1.5708001852035522,
+          -1.189908742904663,
+          0.011760000139474869
+        ],
+        &quot;std&quot;: [
+          0.2193453937118144,
+          0.1755906119104504,
+          0.1444722386125407,
+          0.2326122738332069,
+          4.827536203311282e-07,
+          0.340920655151087,
+          0.0029615653287356275
+        ]
+      },
+      &quot;observation.images.up&quot;: {
+        &quot;count&quot;: [
+          2914.0
+        ],
+        &quot;max&quot;: [
+          [
+            [
+              1.0
+            ]
+          ],
+          [
+            [
+              0.9764705896377563
+            ]
+          ],
+          [
+            [
+              1.0
+            ]
+          ]
+        ],
+        &quot;mean&quot;: [
+          [
+            [
+              0.485
+            ]
+          ],
+          [
+            [
+              0.456
+            ]
+          ],
+          [
+            [
+              0.406
+            ]
+          ]
+        ],
+        &quot;min&quot;: [
+          [
+            [
+              0.0
+            ]
+          ],
+          [
+            [
+              0.0
+            ]
+          ],
+          [
+            [
+              0.0
+            ]
+          ]
+        ],
+        &quot;std&quot;: [
+          [
+            [
+              0.229
+            ]
+          ],
+          [
+            [
+              0.224
+            ]
+          ],
+          [
+            [
+              0.225
+            ]
+          ]
+        ]
+      },
+      &quot;observation.images.wrist&quot;: {
+        &quot;count&quot;: [
+          2914.0
+        ],
+        &quot;max&quot;: [
+          [
+            [
+              0.6352941393852234
+            ]
+          ],
+          [
+            [
+              0.6392157077789307
+            ]
+          ],
+          [
+            [
+              0.6235294342041016
+            ]
+          ]
+        ],
+        &quot;mean&quot;: [
+          [
+            [
+              0.485
+            ]
+          ],
+          [
+            [
+              0.456
+            ]
+          ],
+          [
+            [
+              0.406
+            ]
+          ]
+        ],
+        &quot;min&quot;: [
+          [
+            [
+              0.0
+            ]
+          ],
+          [
+            [
+              0.0
+            ]
+          ],
+          [
+            [
+              0.0
+            ]
+          ]
+        ],
+        &quot;std&quot;: [
+          [
+            [
+              0.229
+            ]
+          ],
+          [
+            [
+              0.224
+            ]
+          ],
+          [
+            [
+              0.225
+            ]
+          ]
+        ]
+      },
+      &quot;observation.state&quot;: {
+        &quot;count&quot;: [
+          15492.0
+        ],
+        &quot;max&quot;: [
+          -1.5707924365997314,
+          -0.8986194133758545,
+          2.0923590660095215,
+          -1.570788860321045,
+          -1.570726752281189,
+          0.049611371010541916,
+          0.020999999716877937
+        ],
+        &quot;mean&quot;: [
+          -2.001230415096278,
+          -1.2326635688720302,
+          1.7262747256508977,
+          -2.064406225809348,
+          -1.5708001929523099,
+          -0.45298040032736897,
+          0.019989757594096276
+        ],
+        &quot;min&quot;: [
+          -2.3287601470947266,
+          -1.5708035230636597,
+          1.470290184020996,
+          -2.4305131435394287,
+          -1.5708305835723877,
+          -1.1899510622024536,
+          0.011970000341534615
+        ],
+        &quot;std&quot;: [
+          0.22009184621912212,
+          0.17617169327206988,
+          0.14448773142666207,
+          0.23360654672432368,
+          3.8395222580507e-07,
+          0.340895538479413,
+          0.0026808223566467575
+        ]
+      }
+    },
+    &quot;use_imagenet_stats&quot;: true
+  },
+  &quot;receipt_digest&quot;: &quot;sha256:3fabce2ea28858778abd8508a3277aa9e0520b45964d40a8e21c09cec0bfdf31&quot;
+}</pre></section><section id="fr5_training_split"><h2>fr5_training_split.json</h2><p class="locator">outputs/local-learning/smolvla-raw26-quality-10000-r1/fr5_training_split.json<br>sha256:46b6d9cd6375f1c5c1308d04b7d3bafd154ab5d0cce79d11517e0940981999aa</p><p class="note">원문에서 발췌한 필드. 실행 환경의 절대 경로는 자료 식별자로 표시한다.</p><pre>{
+  &quot;approved_episode_inventory_digest&quot;: &quot;sha256:f0538658665a5648da8ad51d08856064fd7cfda2aa2f02c7a6a052c4a990e0a9&quot;,
+  &quot;dataset_identity&quot;: {
+    &quot;dataset_digest&quot;: &quot;sha256:564ca492246687ce3cf96b08d0458dd59edebec1d67e4d48ef4dabf90e93d41d&quot;,
+    &quot;dataset_id&quot;: &quot;fr5260903-frozen-pickup-r1&quot;,
+    &quot;dataset_root&quot;: &quot;datasets/fr5_episodes/fr5260903&quot;,
+    &quot;repo_id&quot;: &quot;local/fr5_smolvla_up_wrist_30hz&quot;
+  },
+  &quot;episode_content_digests&quot;: {
+    &quot;10&quot;: &quot;sha256:53ab60e373353f54aa4b8119204640dbd5a99f080968194505a897834164ea13&quot;,
+    &quot;11&quot;: &quot;sha256:ffa85c33c65aa2d010fd8948fb6cd8fc35e273f896c7f7a17cec0bbbfc5db982&quot;,
+    &quot;14&quot;: &quot;sha256:5159d7ee38acc0fa65920ee176576fa0b932836ee42b9e8c645f471e2510dffb&quot;,
+    &quot;15&quot;: &quot;sha256:9921061c9f0c675bfcd67d45eed2695b1f311d4afa9775758a73081be23271bd&quot;,
+    &quot;16&quot;: &quot;sha256:223d9223708645f2e657e2b55e0da7a40d93369e103fced249f494310cfe3494&quot;,
+    &quot;17&quot;: &quot;sha256:9204079da79cc91c07899249065882e1b3c007f5526922cab4d1b27db09c0c67&quot;,
+    &quot;18&quot;: &quot;sha256:1d48373be04de94d099bc200db2990f25b09d9cb28dd7b286f4b0b1f3bb4aede&quot;,
+    &quot;19&quot;: &quot;sha256:c0dd451ededca06d9dabde67b641b4a8600476e1271d30ff02c7dfc7d55cc3ec&quot;,
+    &quot;20&quot;: &quot;sha256:46d34408892f51ddc379b5a3603dac2cd3313b88b4e75ed1f92dda1b46e08a18&quot;,
+    &quot;21&quot;: &quot;sha256:97a25c515d3e320acb4989fce5877fb3f8a6065eaae3cb5bf5ae0eb95963625c&quot;,
+    &quot;22&quot;: &quot;sha256:0703e51b3559aeaf2161f07063e3ef58c620c9ff3852c6fce2fda065219997fe&quot;,
+    &quot;23&quot;: &quot;sha256:4b5422c9f135ef8180a29d1dc1ae3bea9af53418c9efca0bc24cce6468e21164&quot;,
+    &quot;24&quot;: &quot;sha256:7320b55ce56cd4006aa0047ad63833e22b806ae262bbf8d89c608df9f982e66b&quot;,
+    &quot;25&quot;: &quot;sha256:8e774b1261e93d271ec89bc637555e2c89aa2883dc5b630580b06e52c54d3581&quot;,
+    &quot;26&quot;: &quot;sha256:6e17169b1ec4852f8e3fda01d5808e79bb1ca08739dc35633a8d33b4b7dc2dc7&quot;,
+    &quot;27&quot;: &quot;sha256:b9158cb118c2986a90900b7a40781a3850ae5ebd8e58a5efce32782f71fbfa48&quot;,
+    &quot;28&quot;: &quot;sha256:f3ce133d595d56a5ab0e9bfc205f6b76136c71b0c1cee0e85fbda242abb14bc0&quot;,
+    &quot;29&quot;: &quot;sha256:8fb6805054d85276bed083732548b81f053ca450fe5d643267ae395f3a8d57b8&quot;,
+    &quot;30&quot;: &quot;sha256:9e9657a607822a53538ee4aa96d73d5aa8309c53fb5ce203e053b5d8d895852c&quot;,
+    &quot;31&quot;: &quot;sha256:a79a0a109b2c84a6ad254b2f7f23f639a51ccca603de966d7fbe49bc087f224c&quot;,
+    &quot;32&quot;: &quot;sha256:562c37d9583ca52e3392c893d49394818271a093cac08bbe70192ea54db2dc9d&quot;,
+    &quot;5&quot;: &quot;sha256:e6771ae2ad9c99c69b6b7a55eae85523f7b27ad8629c579d043ab4584345389d&quot;,
+    &quot;6&quot;: &quot;sha256:a3f424e82f7ec39e8cccbf2045c6d51f8596162f99c918c9d499d2245a4f68bf&quot;,
+    &quot;7&quot;: &quot;sha256:74eb777efb2ad806b30b81d4f21877bdc1bd0217bbb9dfcee2bb8965fd6c028f&quot;,
+    &quot;8&quot;: &quot;sha256:d94e2da0dd7bd10f5c42e7b592889fbc9150042396ec4913c643a85f5f93ba70&quot;,
+    &quot;9&quot;: &quot;sha256:b18a749e85bd792b51a5bbcda0e36ed01b80c4d99ba48a3b7c2e41f91f5b749e&quot;
+  },
+  &quot;episode_tasks&quot;: [
+    [
+      &quot;pick up the 24 mm wooden cube from the red zone and place it in the blue zone&quot;
+    ],
+    [
+      &quot;pick up the 24 mm wooden cube from the blue zone and place it in the red zone&quot;
+    ],
+    [
+      &quot;pick up the 24 mm wooden cube from the red zone and place it in the blue zone&quot;
+    ],
+    [
+      &quot;pick up the 24 mm wooden cube from the blue zone and place it in the red zone&quot;
+    ],
+    [
+      &quot;pick up the 24 mm wooden cube from the red zone and place it in the blue zone&quot;
+    ],
+    [
+      &quot;pick up the 24 mm wooden cube&quot;
+    ],
+    [
+      &quot;pick up the 24 mm wooden cube&quot;
+    ],
+    [
+      &quot;pick up the 24 mm wooden cube&quot;
+    ],
+    [
+      &quot;pick up the 24 mm wooden cube&quot;
+    ],
+    [
+      &quot;pick up the 24 mm wooden cube&quot;
+    ],
+    [
+      &quot;pick up the 24 mm wooden cube&quot;
+    ],
+    [
+      &quot;pick up the 24 mm wooden cube&quot;
+    ],
+    [
+      &quot;pick up the 24 mm wooden cube&quot;
+    ],
+    [
+      &quot;pick up the 24 mm wooden cube&quot;
+    ],
+    [
+      &quot;pick up the 24 mm wooden cube&quot;
+    ],
+    [
+      &quot;pick up the 24 mm wooden cube&quot;
+    ],
+    [
+      &quot;pick up the 24 mm wooden cube&quot;
+    ],
+    [
+      &quot;pick up the 24 mm wooden cube&quot;
+    ],
+    [
+      &quot;pick up the 24 mm wooden cube&quot;
+    ],
+    [
+      &quot;pick up the 24 mm wooden cube&quot;
+    ],
+    [
+      &quot;pick up the 24 mm wooden cube&quot;
+    ],
+    [
+      &quot;pick up the 24 mm wooden cube&quot;
+    ],
+    [
+      &quot;pick up the 24 mm wooden cube&quot;
+    ],
+    [
+      &quot;pick up the 24 mm wooden cube&quot;
+    ],
+    [
+      &quot;pick up the 24 mm wooden cube&quot;
+    ],
+    [
+      &quot;pick up the 24 mm wooden cube&quot;
+    ],
+    [
+      &quot;pick up the 24 mm wooden cube&quot;
+    ],
+    [
+      &quot;pick up the 24 mm wooden cube&quot;
+    ],
+    [
+      &quot;pick up the 24 mm wooden cube&quot;
+    ],
+    [
+      &quot;pick up the 24 mm wooden cube&quot;
+    ],
+    [
+      &quot;pick up the 24 mm wooden cube&quot;
+    ],
+    [
+      &quot;pick up the 24 mm wooden cube&quot;
+    ],
+    [
+      &quot;pick up the 24 mm wooden cube&quot;
+    ]
+  ],
+  &quot;eval_episodes&quot;: [
+    27,
+    28,
+    29,
+    30,
+    31,
+    32
+  ],
+  &quot;eval_split&quot;: 0.2,
+  &quot;feature_contract&quot;: {
+    &quot;camera_profile&quot;: &quot;up-wrist&quot;,
+    &quot;collection_profile_digest&quot;: &quot;sha256:d8288e4b3cbd34dc646949985658c786d8b9945ed368d67b412a1dec93a4931d&quot;,
+    &quot;collection_profile_id&quot;: &quot;fr5-up-wrist-rgb-30hz-v2&quot;,
+    &quot;dataset_features&quot;: {
+      &quot;action&quot;: {
+        &quot;dtype&quot;: &quot;float32&quot;,
+        &quot;fps&quot;: 30.0,
+        &quot;names&quot;: [
+          &quot;j1&quot;,
+          &quot;j2&quot;,
+          &quot;j3&quot;,
+          &quot;j4&quot;,
+          &quot;j5&quot;,
+          &quot;j6&quot;,
+          &quot;gripper.pos&quot;
+        ],
+        &quot;shape&quot;: [
+          7
+        ]
+      },
+      &quot;episode_index&quot;: {
+        &quot;dtype&quot;: &quot;int64&quot;,
+        &quot;names&quot;: null,
+        &quot;shape&quot;: [
+          1
+        ]
+      },
+      &quot;frame_index&quot;: {
+        &quot;dtype&quot;: &quot;int64&quot;,
+        &quot;names&quot;: null,
+        &quot;shape&quot;: [
+          1
+        ]
+      },
+      &quot;index&quot;: {
+        &quot;dtype&quot;: &quot;int64&quot;,
+        &quot;names&quot;: null,
+        &quot;shape&quot;: [
+          1
+        ]
+      },
+      &quot;observation.images.up&quot;: {
+        &quot;dtype&quot;: &quot;video&quot;,
+        &quot;info&quot;: {
+          &quot;has_audio&quot;: false,
+          &quot;is_depth_map&quot;: false,
+          &quot;video.channels&quot;: 3,
+          &quot;video.codec&quot;: &quot;h264&quot;,
+          &quot;video.crf&quot;: 23,
+          &quot;video.extra_options&quot;: {},
+          &quot;video.fast_decode&quot;: 0,
+          &quot;video.fps&quot;: 30,
+          &quot;video.g&quot;: 2,
+          &quot;video.height&quot;: 480,
+          &quot;video.pix_fmt&quot;: &quot;yuv420p&quot;,
+          &quot;video.preset&quot;: &quot;ultrafast&quot;,
+          &quot;video.video_backend&quot;: &quot;pyav&quot;,
+          &quot;video.width&quot;: 640
+        },
+        &quot;names&quot;: [
+          &quot;height&quot;,
+          &quot;width&quot;,
+          &quot;channels&quot;
+        ],
+        &quot;shape&quot;: [
+          480,
+          640,
+          3
+        ]
+      },
+      &quot;observation.images.wrist&quot;: {
+        &quot;dtype&quot;: &quot;video&quot;,
+        &quot;info&quot;: {
+          &quot;has_audio&quot;: false,
+          &quot;is_depth_map&quot;: false,
+          &quot;video.channels&quot;: 3,
+          &quot;video.codec&quot;: &quot;h264&quot;,
+          &quot;video.crf&quot;: 23,
+          &quot;video.extra_options&quot;: {},
+          &quot;video.fast_decode&quot;: 0,
+          &quot;video.fps&quot;: 30,
+          &quot;video.g&quot;: 2,
+          &quot;video.height&quot;: 480,
+          &quot;video.pix_fmt&quot;: &quot;yuv420p&quot;,
+          &quot;video.preset&quot;: &quot;ultrafast&quot;,
+          &quot;video.video_backend&quot;: &quot;pyav&quot;,
+          &quot;video.width&quot;: 640
+        },
+        &quot;names&quot;: [
+          &quot;height&quot;,
+          &quot;width&quot;,
+          &quot;channels&quot;
+        ],
+        &quot;shape&quot;: [
+          480,
+          640,
+          3
+        ]
+      },
+      &quot;observation.state&quot;: {
+        &quot;dtype&quot;: &quot;float32&quot;,
+        &quot;fps&quot;: 30.0,
+        &quot;names&quot;: [
+          &quot;j1&quot;,
+          &quot;j2&quot;,
+          &quot;j3&quot;,
+          &quot;j4&quot;,
+          &quot;j5&quot;,
+          &quot;j6&quot;,
+          &quot;gripper.pos&quot;
+        ],
+        &quot;shape&quot;: [
+          7
+        ]
+      },
+      &quot;task_index&quot;: {
+        &quot;dtype&quot;: &quot;int64&quot;,
+        &quot;names&quot;: null,
+        &quot;shape&quot;: [
+          1
+        ]
+      },
+      &quot;timestamp&quot;: {
+        &quot;dtype&quot;: &quot;float32&quot;,
+        &quot;names&quot;: null,
+        &quot;shape&quot;: [
+          1
+        ]
+      }
+    },
+    &quot;fps&quot;: 30,
+    &quot;policy_argv&quot;: [
+      &quot;--policy.path=lerobot/smolvla_base&quot;,
+      &quot;--rename_map={\&quot;observation.images.up\&quot;:\&quot;observation.images.camera1\&quot;,\&quot;observation.images.wrist\&quot;:\&quot;observation.images.camera2\&quot;}&quot;,
+      &quot;--policy.empty_cameras=1&quot;,
+      &quot;--policy.input_features={\&quot;observation.images.camera1\&quot;:{\&quot;shape\&quot;:[3,480,640],\&quot;type\&quot;:\&quot;VISUAL\&quot;},\&quot;observation.images.camera2\&quot;:{\&quot;shape\&quot;:[3,480,640],\&quot;type\&quot;:\&quot;VISUAL\&quot;},\&quot;observation.state\&quot;:{\&quot;shape\&quot;:[7],\&quot;type\&quot;:\&quot;STATE\&quot;}}&quot;,
+      &quot;--policy.output_features={\&quot;action\&quot;:{\&quot;shape\&quot;:[7],\&quot;type\&quot;:\&quot;ACTION\&quot;}}&quot;
+    ],
+    &quot;profile&quot;: &quot;smolvla&quot;,
+    &quot;task&quot;: &quot;pickup_e2e&quot;,
+    &quot;task_contract_digest&quot;: &quot;sha256:7d712461671dd44ef9da32961aff9c99e112c335a818ac07b123dd8a6bf851b0&quot;
+  },
+  &quot;repo_id&quot;: &quot;local/fr5_smolvla_up_wrist_30hz&quot;,
+  &quot;schema_version&quot;: 3,
+  &quot;selected_episodes&quot;: [
+    5,
+    6,
+    7,
+    8,
+    9,
+    10,
+    11,
+    14,
+    15,
+    16,
+    17,
+    18,
+    19,
+    20,
+    21,
+    22,
+    23,
+    24,
+    25,
+    26,
+    27,
+    28,
+    29,
+    30,
+    31,
+    32
+  ],
+  &quot;split_algorithm&quot;: &quot;lerobot-0.6.1-last-ceil-per-task-selected-order&quot;,
+  &quot;split_digest&quot;: &quot;sha256:938dfdac3defe49a267d3178f61af5f32896ce6bafff4c62bb2fca63ac264b0d&quot;,
+  &quot;total_episodes&quot;: 33,
+  &quot;total_frames&quot;: 28457,
+  &quot;train_episodes&quot;: [
+    5,
+    6,
+    7,
+    8,
+    9,
+    10,
+    11,
+    14,
+    15,
+    16,
+    17,
+    18,
+    19,
+    20,
+    21,
+    22,
+    23,
+    24,
+    25,
+    26
+  ]
+}</pre></section></main></body></html>

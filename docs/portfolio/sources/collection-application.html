@@ -1,0 +1,95 @@
+<!doctype html><html lang="ko"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>작업 계획과 캠페인 관리 — FR5 근거</title><link rel="stylesheet" href="../site.css"></head><body><main class="source-page"><a href="../collection.html#planning">← 설명으로 돌아가기</a><h1>작업 계획과 캠페인 관리</h1><p class="note">설명에 사용한 구현·측정 자료의 발췌이다. SHA-256은 발췌 전 원본 파일을 식별한다. 실행 PC의 절대 경로와 계정 정보는 포함하지 않으며, 측정값과 해석 조건을 함께 제시한다.</p><section id="application"><h2>application.py</h2><p class="locator">tools/data_factory/operator/workflow/application.py<br>sha256:e02e22d826840a697671d26428c122e6517eb2e3cc0e2ccab1f33d455125b556</p><p class="note">해당 기능의 함수 발췌. 줄 번호와 digest는 원본 기준이다.</p><pre># tools/data_factory/operator/workflow/application.py:2015 · compile_draft
+    def compile_draft(self, payload: dict[str, Any], _view: dict[str, Any]) -&gt; dict[str, Any]:
+        self._require(&quot;AUTHORING&quot;, payload, {&quot;draft_id&quot;, &quot;data_disposition&quot;})
+        if (
+            payload[&quot;draft_id&quot;] != self.draft[&quot;draft_id&quot;]
+            or payload[&quot;data_disposition&quot;] != self._disposition(self.selection[&quot;data_mode&quot;])
+            or not self._direct_draft_ready()
+        ):
+            raise ContractError(&quot;OPERATOR_APPLICATION_DRAFT&quot;)
+        validate_operator_selection(self.catalog, self.selection, require_executable=True)
+        campaign_id = self._id(&quot;campaign&quot;)
+        campaign = self.campaign_factory(
+            campaign_id, copy.deepcopy(self.selection), copy.deepcopy(self.draft),
+        )
+        if not isinstance(getattr(campaign, &quot;bridge_core&quot;, None), OperatorIntentCore):
+            close = getattr(campaign, &quot;close&quot;, None)
+            if callable(close):
+                close()
+            raise ContractError(&quot;OPERATOR_APPLICATION_CAMPAIGN&quot;)
+        self._campaign = campaign
+        return self._forward(&quot;compile_draft&quot;, copy.deepcopy(payload))
+
+# tools/data_factory/operator/workflow/application.py:2242 · _replace_campaign
+    def _replace_campaign(self) -&gt; dict[str, Any]:
+        projection = self.projection()
+        workflow = projection[&quot;workflow_state&quot;]
+        if (
+            workflow not in {&quot;BLOCKED&quot;, &quot;TERMINAL&quot;}
+            or &quot;new_campaign_same_settings&quot; not in projection[&quot;available_ops&quot;]
+        ):
+            raise ContractError(&quot;OPERATOR_APPLICATION_STATE&quot;)
+        previous = copy.deepcopy(self.draft)
+        _snapshot, inner = self._campaign_snapshot()
+        session = inner.get(&quot;campaign_session&quot;) if isinstance(inner, Mapping) else None
+        campaign = session.get(&quot;campaign&quot;) if isinstance(session, Mapping) else None
+        terminal_pose = (
+            inner.get(&quot;terminal_object_pose&quot;) if isinstance(inner, Mapping) else None
+        )
+        campaign_complete = (
+            isinstance(campaign, Mapping)
+            and campaign.get(&quot;state&quot;) == &quot;COMPLETE&quot;
+            and campaign.get(&quot;remaining_intents&quot;) == 0
+            and type(campaign.get(&quot;completed_intents&quot;)) is int
+            and campaign[&quot;completed_intents&quot;] &gt; 0
+        )
+        if (
+            campaign_complete
+            and isinstance(terminal_pose, Mapping)
+        ):
+            endpoint = next((
+                item for item in self._workspace_cycle()
+                if item[&quot;workspace_id&quot;] == terminal_pose.get(&quot;place_id&quot;)
+            ), None)
+            if not isinstance(endpoint, Mapping):
+                raise ContractError(&quot;OPERATOR_APPLICATION_DRAFT&quot;)
+            self.selection = copy.deepcopy(endpoint)
+            previous[&quot;current_object_pose&quot;] = validate_operator_pose(
+                self.catalog, self.selection, terminal_pose,
+            )
+            previous[&quot;direct_poses&quot;] = [
+                pose for pose in previous[&quot;direct_poses&quot;]
+                if pose != previous[&quot;current_object_pose&quot;]
+            ]
+            previous[&quot;direct_pairs&quot;] = []
+        fresh_environment = self._read_environment()
+        close = getattr(self._campaign, &quot;close&quot;, None)
+        if callable(close):
+            close()
+        self._campaign = None
+        self._environment_view = fresh_environment
+        self._generation += 1
+        if campaign_complete:
+            previous[&quot;normalized_seed&quot;] = (
+                _validated_normalized_seed(previous[&quot;normalized_seed&quot;]) + 1
+            ) % (MAX_CAMPAIGN_SEED + 1)
+        self.draft = self._new_draft(previous)
+        if (
+            self.draft[&quot;authoring_mode&quot;] == &quot;DIRECT_EDIT&quot;
+            and self.start_pose_setup is not None
+        ):
+            self._reset_direct_pairs()
+        return {
+            &quot;outcome&quot;: (
+                &quot;AUTHORING&quot;
+                if self._environment_view[&quot;state&quot;] == &quot;READY&quot;
+                else &quot;ENVIRONMENT&quot;
+            ),
+            &quot;draft_id&quot;: self.draft[&quot;draft_id&quot;],
+        }
+
+# tools/data_factory/operator/workflow/application.py:2309 · new_campaign_same_settings
+    def new_campaign_same_settings(self, payload: dict[str, Any], _view: dict[str, Any]) -&gt; dict[str, Any]:
+        if payload:
+            raise ContractError(&quot;OPERATOR_APPLICATION_STATE&quot;)
+        return self._replace_campaign()</pre></section></main></body></html>

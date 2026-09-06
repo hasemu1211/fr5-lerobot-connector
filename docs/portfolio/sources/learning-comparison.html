@@ -1,0 +1,528 @@
+<!doctype html><html lang="ko"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>학습 설정 비교의 원래 결과 — FR5 근거</title><link rel="stylesheet" href="../site.css"></head><body><main class="source-page"><a href="../learning.html#comparison">← 설명으로 돌아가기</a><h1>학습 설정 비교의 원래 결과</h1><p class="note">설명에 사용한 구현·측정 자료의 발췌이다. SHA-256은 발췌 전 원본 파일을 식별한다. 실행 PC의 절대 경로와 계정 정보는 포함하지 않으며, 측정값과 해석 조건을 함께 제시한다.</p><section id="quality-10000-r1-comparison"><h2>quality-10000-r1-comparison.json</h2><p class="locator">quality-10000-r1-comparison.json<br>sha256:00359df8b13826e468c660d3e571f8141bac11a65dee80e2aa14490172743ad4</p><p class="note">원문에서 발췌한 필드. 실행 환경의 절대 경로는 자료 식별자로 표시한다.</p><pre>{
+  &quot;approved_episode_inventory_digests&quot;: [
+    &quot;sha256:d7c4856a1ec15ecc75b28ebde58fda6f877788f2780370d1e88b541c092c2b72&quot;,
+    &quot;sha256:f0538658665a5648da8ad51d08856064fd7cfda2aa2f02c7a6a052c4a990e0a9&quot;
+  ],
+  &quot;authority_note&quot;: &quot;Native evaluated launches bind their own inventories; any revised per-run allowance is distinct from matched dataset/split/normalization.&quot;,
+  &quot;declared_exploratory_screen&quot;: {
+    &quot;improved_episodes&quot;: 6,
+    &quot;minimum_improved_episodes&quot;: 4,
+    &quot;minimum_relative_reduction&quot;: 0.1,
+    &quot;passed&quot;: true
+  },
+  &quot;episode_macro_loss&quot;: [
+    0.2607568816269398,
+    0.21821404700759536
+  ],
+  &quot;episode_metrics&quot;: [
+    {
+      &quot;baseline&quot;: 0.13264853703255336,
+      &quot;candidate&quot;: 0.10096262569581917,
+      &quot;episode_index&quot;: 27,
+      &quot;relative_reduction&quot;: 0.23887117073110375,
+      &quot;samples&quot;: 633
+    },
+    {
+      &quot;baseline&quot;: 0.6153679326002757,
+      &quot;candidate&quot;: 0.5478187799361635,
+      &quot;episode_index&quot;: 28,
+      &quot;relative_reduction&quot;: 0.109770348901151,
+      &quot;samples&quot;: 632
+    },
+    {
+      &quot;baseline&quot;: 0.10771672914716157,
+      &quot;candidate&quot;: 0.07525848327551354,
+      &quot;episode_index&quot;: 29,
+      &quot;relative_reduction&quot;: 0.30132966465500344,
+      &quot;samples&quot;: 940
+    },
+    {
+      &quot;baseline&quot;: 0.12416907366920517,
+      &quot;candidate&quot;: 0.09173611341397168,
+      &quot;episode_index&quot;: 30,
+      &quot;relative_reduction&quot;: 0.26119998560702073,
+      &quot;samples&quot;: 966
+    },
+    {
+      &quot;baseline&quot;: 0.4673846039006336,
+      &quot;candidate&quot;: 0.41353422564191494,
+      &quot;episode_index&quot;: 31,
+      &quot;relative_reduction&quot;: 0.11521641451023767,
+      &quot;samples&quot;: 953
+    },
+    {
+      &quot;baseline&quot;: 0.11725441341180927,
+      &quot;candidate&quot;: 0.07997405408218933,
+      &quot;episode_index&quot;: 32,
+      &quot;relative_reduction&quot;: 0.31794418857981555,
+      &quot;samples&quot;: 520
+    }
+  ],
+  &quot;equal_receipt_fields&quot;: {
+    &quot;dataset_identity&quot;: true,
+    &quot;eval_episodes&quot;: true,
+    &quot;feature_contract&quot;: true,
+    &quot;normalization&quot;: true,
+    &quot;selected_episodes&quot;: true,
+    &quot;split_digest&quot;: false,
+    &quot;status&quot;: true,
+    &quot;train_episodes&quot;: true
+  },
+  &quot;equal_report_fields&quot;: {
+    &quot;action_dim&quot;: true,
+    &quot;available_samples&quot;: true,
+    &quot;batch_size&quot;: true,
+    &quot;camera_rename_map&quot;: true,
+    &quot;dataset_digest&quot;: true,
+    &quot;device&quot;: true,
+    &quot;empty_cameras&quot;: true,
+    &quot;episodes&quot;: true,
+    &quot;evaluation_complete&quot;: true,
+    &quot;metric&quot;: true,
+    &quot;normalization_algorithm&quot;: true,
+    &quot;normalization_episodes&quot;: true,
+    &quot;requested_max_batches&quot;: true,
+    &quot;samples&quot;: true,
+    &quot;seed&quot;: true,
+    &quot;selected_episodes&quot;: true,
+    &quot;split_digest&quot;: false,
+    &quot;state_dim&quot;: true,
+    &quot;train_episodes&quot;: true,
+    &quot;use_amp&quot;: true
+  },
+  &quot;frame_weighted_loss&quot;: [
+    0.2584991236863069,
+    0.21644605856620835
+  ],
+  &quot;frame_weighted_relative_reduction&quot;: 0.16268165446909078,
+  &quot;limitations&quot;: [
+    &quot;One common evaluation seed and reused development heldout; no significance estimate.&quot;,
+    &quot;Longer horizon recipe changes native resolved warmup/decay; not pure exposure ablation.&quot;,
+    &quot;Flow matching velocity loss is not sampled physical action error or task success.&quot;,
+    &quot;No claim that normalization-sensitive losses can compare different TRAIN subsets.&quot;
+  ],
+  &quot;reports&quot;: [
+    {
+      &quot;path&quot;: &quot;outputs/local-learning/smolvla-raw26-quality-3000-r1-heldout-evaluation.json&quot;,
+      &quot;sha256&quot;: &quot;sha256:947d7ac26d38d13c6429143fb84b757cdf134b7c61c7156884c0f4891b03dc05&quot;
+    },
+    {
+      &quot;path&quot;: &quot;outputs/local-learning/smolvla-raw26-quality-10000-r1-heldout-evaluation.json&quot;,
+      &quot;sha256&quot;: &quot;sha256:41acb7c7e4e5cdcbe2678f1c075f4bcae9ba7fd6dd1ee4c1469680a6e69f3840&quot;
+    }
+  ],
+  &quot;saved_processors_and_policy&quot;: {
+    &quot;config.json&quot;: {
+      &quot;byte_equal&quot;: true,
+      &quot;sha256&quot;: [
+        &quot;sha256:3a56fd691e52fca1f9910aec655179a0baa3b3fcc7d551d03b9351fd375dfccf&quot;,
+        &quot;sha256:3a56fd691e52fca1f9910aec655179a0baa3b3fcc7d551d03b9351fd375dfccf&quot;
+      ]
+    },
+    &quot;policy_postprocessor.json&quot;: {
+      &quot;byte_equal&quot;: true,
+      &quot;sha256&quot;: [
+        &quot;sha256:3b51f092c70c710ce0213ee1b63bf51b4878ec67828dd2d67daf9ef51081a41a&quot;,
+        &quot;sha256:3b51f092c70c710ce0213ee1b63bf51b4878ec67828dd2d67daf9ef51081a41a&quot;
+      ]
+    },
+    &quot;policy_postprocessor_step_0_unnormalizer_processor.safetensors&quot;: {
+      &quot;byte_equal&quot;: true,
+      &quot;sha256&quot;: [
+        &quot;sha256:e504c0d10085dec42596d97a2e771d9648638f5cd3eeff8ef9d1c306aa38f178&quot;,
+        &quot;sha256:e504c0d10085dec42596d97a2e771d9648638f5cd3eeff8ef9d1c306aa38f178&quot;
+      ]
+    },
+    &quot;policy_preprocessor.json&quot;: {
+      &quot;byte_equal&quot;: true,
+      &quot;sha256&quot;: [
+        &quot;sha256:66c0832e3ac8fdb162362ea06105fada8bd716b0512556b291dde4e1ceafbe0d&quot;,
+        &quot;sha256:66c0832e3ac8fdb162362ea06105fada8bd716b0512556b291dde4e1ceafbe0d&quot;
+      ]
+    },
+    &quot;policy_preprocessor_step_5_normalizer_processor.safetensors&quot;: {
+      &quot;byte_equal&quot;: true,
+      &quot;sha256&quot;: [
+        &quot;sha256:e504c0d10085dec42596d97a2e771d9648638f5cd3eeff8ef9d1c306aa38f178&quot;,
+        &quot;sha256:e504c0d10085dec42596d97a2e771d9648638f5cd3eeff8ef9d1c306aa38f178&quot;
+      ]
+    }
+  },
+  &quot;saved_train_config_delta&quot;: {
+    &quot;eval_steps&quot;: [
+      3000,
+      10000
+    ],
+    &quot;output_dir&quot;: [
+      &quot;outputs/local-learning/smolvla-raw26-quality-3000-r1&quot;,
+      &quot;outputs/local-learning/smolvla-raw26-quality-10000-r1&quot;
+    ],
+    &quot;save_freq&quot;: [
+      1500,
+      5000
+    ],
+    &quot;steps&quot;: [
+      3000,
+      10000
+    ]
+  },
+  &quot;split_content_equal_except_authority_binding&quot;: {
+    &quot;dataset_identity&quot;: true,
+    &quot;episode_content_digests&quot;: true,
+    &quot;episode_tasks&quot;: true,
+    &quot;eval_episodes&quot;: true,
+    &quot;eval_split&quot;: true,
+    &quot;feature_contract&quot;: true,
+    &quot;repo_id&quot;: true,
+    &quot;schema_version&quot;: true,
+    &quot;selected_episodes&quot;: true,
+    &quot;split_algorithm&quot;: true,
+    &quot;total_episodes&quot;: true,
+    &quot;total_frames&quot;: true,
+    &quot;train_episodes&quot;: true
+  }
+}</pre></section><section id="smolvla-raw26-quality-3000-r1-heldout-evaluation"><h2>smolvla-raw26-quality-3000-r1-heldout-evaluation.json</h2><p class="locator">outputs/local-learning/smolvla-raw26-quality-3000-r1-heldout-evaluation.json<br>sha256:947d7ac26d38d13c6429143fb84b757cdf134b7c61c7156884c0f4891b03dc05</p><p class="note">원문에서 발췌한 필드. 실행 환경의 절대 경로는 자료 식별자로 표시한다.</p><pre>{
+  &quot;action_dim&quot;: 7,
+  &quot;admitted_episodes&quot;: [
+    27,
+    28,
+    29,
+    30,
+    31,
+    32
+  ],
+  &quot;approved_episode_inventory_digest&quot;: &quot;sha256:d7c4856a1ec15ecc75b28ebde58fda6f877788f2780370d1e88b541c092c2b72&quot;,
+  &quot;approved_inventory&quot;: &quot;outputs/local-learning/authorizations/fr5260903-raw26-r1/training_approved.json&quot;,
+  &quot;available_batches&quot;: 4644,
+  &quot;available_samples&quot;: 4644,
+  &quot;batch_size&quot;: 1,
+  &quot;camera_rename_map&quot;: {
+    &quot;observation.images.up&quot;: &quot;observation.images.camera1&quot;,
+    &quot;observation.images.wrist&quot;: &quot;observation.images.camera2&quot;
+  },
+  &quot;checkpoint&quot;: &quot;outputs/local-learning/smolvla-raw26-quality-3000-r1/checkpoints/003000/pretrained_model&quot;,
+  &quot;checkpoint_tree_digest&quot;: &quot;sha256:26a553a8541f6f1acf9c573191d32091b8d169d68b4a0a88ca284b063fdea470&quot;,
+  &quot;dataset&quot;: &quot;datasets/fr5_episodes/fr5260903&quot;,
+  &quot;dataset_digest&quot;: &quot;sha256:564ca492246687ce3cf96b08d0458dd59edebec1d67e4d48ef4dabf90e93d41d&quot;,
+  &quot;device&quot;: &quot;cuda&quot;,
+  &quot;empty_cameras&quot;: 1,
+  &quot;episode_macro_loss_mean&quot;: 0.2607568816269398,
+  &quot;episode_macro_scope&quot;: &quot;complete_heldout&quot;,
+  &quot;episode_metrics&quot;: [
+    {
+      &quot;available_samples&quot;: 633,
+      &quot;episode_index&quot;: 27,
+      &quot;evaluation_complete&quot;: true,
+      &quot;loss_mean&quot;: 0.13264853703255336,
+      &quot;samples&quot;: 633
+    },
+    {
+      &quot;available_samples&quot;: 632,
+      &quot;episode_index&quot;: 28,
+      &quot;evaluation_complete&quot;: true,
+      &quot;loss_mean&quot;: 0.6153679326002757,
+      &quot;samples&quot;: 632
+    },
+    {
+      &quot;available_samples&quot;: 940,
+      &quot;episode_index&quot;: 29,
+      &quot;evaluation_complete&quot;: true,
+      &quot;loss_mean&quot;: 0.10771672914716157,
+      &quot;samples&quot;: 940
+    },
+    {
+      &quot;available_samples&quot;: 966,
+      &quot;episode_index&quot;: 30,
+      &quot;evaluation_complete&quot;: true,
+      &quot;loss_mean&quot;: 0.12416907366920517,
+      &quot;samples&quot;: 966
+    },
+    {
+      &quot;available_samples&quot;: 953,
+      &quot;episode_index&quot;: 31,
+      &quot;evaluation_complete&quot;: true,
+      &quot;loss_mean&quot;: 0.4673846039006336,
+      &quot;samples&quot;: 953
+    },
+    {
+      &quot;available_samples&quot;: 520,
+      &quot;episode_index&quot;: 32,
+      &quot;evaluation_complete&quot;: true,
+      &quot;loss_mean&quot;: 0.11725441341180927,
+      &quot;samples&quot;: 520
+    }
+  ],
+  &quot;episodes&quot;: [
+    27,
+    28,
+    29,
+    30,
+    31,
+    32
+  ],
+  &quot;evaluated_batches&quot;: 4644,
+  &quot;evaluation_complete&quot;: true,
+  &quot;evidence_scope&quot;: &quot;admitted_heldout_offline_loss&quot;,
+  &quot;loss_mean&quot;: 0.2584991236863069,
+  &quot;loss_p95&quot;: 0.7026028633117676,
+  &quot;loss_std&quot;: 0.7385692097456765,
+  &quot;metric&quot;: &quot;smolvla_offline_flow_matching_loss&quot;,
+  &quot;normalization_algorithm&quot;: &quot;lerobot-0.6.1-train-episode-moments-v1&quot;,
+  &quot;normalization_episodes&quot;: [
+    5,
+    6,
+    7,
+    8,
+    9,
+    10,
+    11,
+    14,
+    15,
+    16,
+    17,
+    18,
+    19,
+    20,
+    21,
+    22,
+    23,
+    24,
+    25,
+    26
+  ],
+  &quot;repo_id&quot;: &quot;local/fr5_smolvla_up_wrist_30hz&quot;,
+  &quot;requested_max_batches&quot;: 0,
+  &quot;samples&quot;: 4644,
+  &quot;schema_version&quot;: 4,
+  &quot;seed&quot;: 1000,
+  &quot;selected_episodes&quot;: [
+    5,
+    6,
+    7,
+    8,
+    9,
+    10,
+    11,
+    14,
+    15,
+    16,
+    17,
+    18,
+    19,
+    20,
+    21,
+    22,
+    23,
+    24,
+    25,
+    26,
+    27,
+    28,
+    29,
+    30,
+    31,
+    32
+  ],
+  &quot;split_digest&quot;: &quot;sha256:e1d4a27ea7e8498cd3b503e0d387395b24e32fbd1a2db6d8245bd5395e800c0f&quot;,
+  &quot;split_verified&quot;: true,
+  &quot;state_dim&quot;: 7,
+  &quot;train_episodes&quot;: [
+    5,
+    6,
+    7,
+    8,
+    9,
+    10,
+    11,
+    14,
+    15,
+    16,
+    17,
+    18,
+    19,
+    20,
+    21,
+    22,
+    23,
+    24,
+    25,
+    26
+  ],
+  &quot;training_receipt&quot;: &quot;outputs/local-learning/smolvla-raw26-quality-3000-r1/fr5_training_receipt.json&quot;,
+  &quot;training_receipt_digest&quot;: &quot;sha256:8d7cdaf0ccb9a593f93421b2a65f43b9efb691273ca92f84317f378b77b8458b&quot;,
+  &quot;training_split&quot;: &quot;outputs/local-learning/smolvla-raw26-quality-3000-r1/fr5_training_split.json&quot;,
+  &quot;use_amp&quot;: false,
+  &quot;warning&quot;: &quot;Offline loss does not measure real-robot task success.&quot;
+}</pre></section><section id="smolvla-raw26-quality-10000-r1-heldout-evaluation"><h2>smolvla-raw26-quality-10000-r1-heldout-evaluation.json</h2><p class="locator">outputs/local-learning/smolvla-raw26-quality-10000-r1-heldout-evaluation.json<br>sha256:41acb7c7e4e5cdcbe2678f1c075f4bcae9ba7fd6dd1ee4c1469680a6e69f3840</p><p class="note">원문에서 발췌한 필드. 실행 환경의 절대 경로는 자료 식별자로 표시한다.</p><pre>{
+  &quot;action_dim&quot;: 7,
+  &quot;admitted_episodes&quot;: [
+    27,
+    28,
+    29,
+    30,
+    31,
+    32
+  ],
+  &quot;approved_episode_inventory_digest&quot;: &quot;sha256:f0538658665a5648da8ad51d08856064fd7cfda2aa2f02c7a6a052c4a990e0a9&quot;,
+  &quot;approved_inventory&quot;: &quot;outputs/local-learning/authorizations/fr5260903-raw26-r2/training_approved.json&quot;,
+  &quot;available_batches&quot;: 4644,
+  &quot;available_samples&quot;: 4644,
+  &quot;batch_size&quot;: 1,
+  &quot;camera_rename_map&quot;: {
+    &quot;observation.images.up&quot;: &quot;observation.images.camera1&quot;,
+    &quot;observation.images.wrist&quot;: &quot;observation.images.camera2&quot;
+  },
+  &quot;checkpoint&quot;: &quot;outputs/local-learning/smolvla-raw26-quality-10000-r1/checkpoints/010000/pretrained_model&quot;,
+  &quot;checkpoint_tree_digest&quot;: &quot;sha256:33b05de2c4b48231509556b4e61564840ed7f4e90749cdb25bee8660fc6e08fe&quot;,
+  &quot;dataset&quot;: &quot;datasets/fr5_episodes/fr5260903&quot;,
+  &quot;dataset_digest&quot;: &quot;sha256:564ca492246687ce3cf96b08d0458dd59edebec1d67e4d48ef4dabf90e93d41d&quot;,
+  &quot;device&quot;: &quot;cuda&quot;,
+  &quot;empty_cameras&quot;: 1,
+  &quot;episode_macro_loss_mean&quot;: 0.21821404700759536,
+  &quot;episode_macro_scope&quot;: &quot;complete_heldout&quot;,
+  &quot;episode_metrics&quot;: [
+    {
+      &quot;available_samples&quot;: 633,
+      &quot;episode_index&quot;: 27,
+      &quot;evaluation_complete&quot;: true,
+      &quot;loss_mean&quot;: 0.10096262569581917,
+      &quot;samples&quot;: 633
+    },
+    {
+      &quot;available_samples&quot;: 632,
+      &quot;episode_index&quot;: 28,
+      &quot;evaluation_complete&quot;: true,
+      &quot;loss_mean&quot;: 0.5478187799361635,
+      &quot;samples&quot;: 632
+    },
+    {
+      &quot;available_samples&quot;: 940,
+      &quot;episode_index&quot;: 29,
+      &quot;evaluation_complete&quot;: true,
+      &quot;loss_mean&quot;: 0.07525848327551354,
+      &quot;samples&quot;: 940
+    },
+    {
+      &quot;available_samples&quot;: 966,
+      &quot;episode_index&quot;: 30,
+      &quot;evaluation_complete&quot;: true,
+      &quot;loss_mean&quot;: 0.09173611341397168,
+      &quot;samples&quot;: 966
+    },
+    {
+      &quot;available_samples&quot;: 953,
+      &quot;episode_index&quot;: 31,
+      &quot;evaluation_complete&quot;: true,
+      &quot;loss_mean&quot;: 0.41353422564191494,
+      &quot;samples&quot;: 953
+    },
+    {
+      &quot;available_samples&quot;: 520,
+      &quot;episode_index&quot;: 32,
+      &quot;evaluation_complete&quot;: true,
+      &quot;loss_mean&quot;: 0.07997405408218933,
+      &quot;samples&quot;: 520
+    }
+  ],
+  &quot;episodes&quot;: [
+    27,
+    28,
+    29,
+    30,
+    31,
+    32
+  ],
+  &quot;evaluated_batches&quot;: 4644,
+  &quot;evaluation_complete&quot;: true,
+  &quot;evidence_scope&quot;: &quot;admitted_heldout_offline_loss&quot;,
+  &quot;loss_mean&quot;: 0.21644605856620835,
+  &quot;loss_p95&quot;: 0.6395568251609802,
+  &quot;loss_std&quot;: 0.6940825042975743,
+  &quot;metric&quot;: &quot;smolvla_offline_flow_matching_loss&quot;,
+  &quot;normalization_algorithm&quot;: &quot;lerobot-0.6.1-train-episode-moments-v1&quot;,
+  &quot;normalization_episodes&quot;: [
+    5,
+    6,
+    7,
+    8,
+    9,
+    10,
+    11,
+    14,
+    15,
+    16,
+    17,
+    18,
+    19,
+    20,
+    21,
+    22,
+    23,
+    24,
+    25,
+    26
+  ],
+  &quot;repo_id&quot;: &quot;local/fr5_smolvla_up_wrist_30hz&quot;,
+  &quot;requested_max_batches&quot;: 0,
+  &quot;samples&quot;: 4644,
+  &quot;schema_version&quot;: 4,
+  &quot;seed&quot;: 1000,
+  &quot;selected_episodes&quot;: [
+    5,
+    6,
+    7,
+    8,
+    9,
+    10,
+    11,
+    14,
+    15,
+    16,
+    17,
+    18,
+    19,
+    20,
+    21,
+    22,
+    23,
+    24,
+    25,
+    26,
+    27,
+    28,
+    29,
+    30,
+    31,
+    32
+  ],
+  &quot;split_digest&quot;: &quot;sha256:938dfdac3defe49a267d3178f61af5f32896ce6bafff4c62bb2fca63ac264b0d&quot;,
+  &quot;split_verified&quot;: true,
+  &quot;state_dim&quot;: 7,
+  &quot;train_episodes&quot;: [
+    5,
+    6,
+    7,
+    8,
+    9,
+    10,
+    11,
+    14,
+    15,
+    16,
+    17,
+    18,
+    19,
+    20,
+    21,
+    22,
+    23,
+    24,
+    25,
+    26
+  ],
+  &quot;training_receipt&quot;: &quot;outputs/local-learning/smolvla-raw26-quality-10000-r1/fr5_training_receipt.json&quot;,
+  &quot;training_receipt_digest&quot;: &quot;sha256:10e983b0450d209f9874ced5c4d2224d62202379a6af27acc89f019974c611e3&quot;,
+  &quot;training_split&quot;: &quot;outputs/local-learning/smolvla-raw26-quality-10000-r1/fr5_training_split.json&quot;,
+  &quot;use_amp&quot;: false,
+  &quot;warning&quot;: &quot;Offline loss does not measure real-robot task success.&quot;
+}</pre></section></main></body></html>

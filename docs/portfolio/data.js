@@ -37,7 +37,8 @@ if (observations) {
     }
     if (version !== renderVersion) return;
     delete study.dataset.loading; study.setAttribute('aria-busy', 'false');
-    history.replaceState(null, '', `?episode=${episode}&moment=${moment}${location.hash}`);
+    try { history.replaceState(null, '', `?episode=${episode}&moment=${moment}${location.hash}`); }
+    catch { /* A browser may restrict local-file history; keep the observation usable. */ }
     ['up', 'wrist'].forEach((camera, i) => {
       const image = document.getElementById(`${camera}-image`);
       image.hidden = false;

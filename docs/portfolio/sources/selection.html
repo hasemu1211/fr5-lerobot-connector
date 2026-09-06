@@ -1,0 +1,138 @@
+<!doctype html><html lang="ko"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>기존 기록에서 학습 요청 발행 — FR5 근거</title><link rel="stylesheet" href="../site.css"></head><body><main class="source-page"><a href="../architecture.html#review">← 설명으로 돌아가기</a><h1>기존 기록에서 학습 요청 발행</h1><p class="note">설명에 사용한 구현·측정 자료의 발췌이다. SHA-256은 발췌 전 원본 파일을 식별한다. 실행 PC의 절대 경로와 계정 정보는 포함하지 않으며, 측정값과 해석 조건을 함께 제시한다.</p><section id="selection"><h2>selection.py</h2><p class="locator">tools/data_factory/curator/workflow/selection.py<br>sha256:8edd6d0cde320542db58a72c74d80cdb0a53e67f9f21538c82d44a0650df2a83</p><p class="note">원문 전체.</p><pre>&quot;&quot;&quot;Export explicit Collection episode selections to the native training request.
+
+This selects existing human-reviewed evidence, never issues approval or creates
+a candidate. The training consumer revalidates current bytes before approval.
+&quot;&quot;&quot;
+
+from __future__ import annotations
+
+from pathlib import Path
+from typing import Sequence
+
+from tools.data_factory.episode_ledger import validate_episode_state
+from tools.data_factory.training_entrypoint import prepare_approvals
+from tools.data_factory.training_split import selected_train_eval
+from tools.fr5_data_factory import ContractError, load_json_strict
+from tools.fr5_training_profile import read_metadata
+
+from ..core.errors import CuratorError
+from ..core.filesystem import reject_symlink_components, write_json_exclusive
+
+
+def check_evaluation_cohort(
+    request: dict, *, eval_split: float, expected_eval_episodes: Sequence[int],
+) -&gt; dict:
+    &quot;&quot;&quot;Check an explicit comparison cohort against the existing native splitter.
+
+    This is a preview, not a launch split or admission artifact. Selection never
+    changes metadata or silently moves examples to satisfy the expected cohort.
+    &quot;&quot;&quot;
+    expected = list(expected_eval_episodes)
+    if (not expected or any(type(index) is not int or index &lt; 0 for index in expected)
+            or expected != sorted(set(expected))):
+        raise CuratorError(&quot;SELECTION_EVALUATION_COHORT&quot;)
+    metadata = read_metadata(Path(request[&quot;dataset_root&quot;]))
+    selected = [episode[&quot;episode_index&quot;] for episode in request[&quot;episodes&quot;]]
+    train, heldout = selected_train_eval(metadata[&quot;episode_tasks&quot;], selected, eval_split)
+    if sorted(heldout) != expected:
+        raise CuratorError(&quot;SELECTION_EVALUATION_CHANGED&quot;, f&quot;expected {expected}; native {sorted(heldout)}&quot;)
+    return {&quot;eval_split&quot;: eval_split, &quot;train_episodes&quot;: train, &quot;eval_episodes&quot;: heldout}
+
+
+def export_training_request(
+    run_directories: Sequence[str | Path], output: str | Path,
+    *, dataset_id: str, eval_split: float | None = None,
+    expected_eval_episodes: Sequence[int] | None = None,
+) -&gt; dict:
+    &quot;&quot;&quot;Publish one request after native preparation validates selected runs.
+
+    Output parents must already exist. An existing output is never overwritten,
+    including on replay; requests confer no training or semantic authority.
+    &quot;&quot;&quot;
+    if not run_directories:
+        raise CuratorError(&quot;SELECTION_RUNS_REQUIRED&quot;)
+    if (eval_split is None) != (expected_eval_episodes is None):
+        raise CuratorError(&quot;SELECTION_EVALUATION_OPTIONS&quot;)
+    target = reject_symlink_components(output, &quot;SELECTION_OUTPUT&quot;).resolve()
+    if target.exists():
+        raise CuratorError(&quot;EVENT_EXISTS&quot;, str(target))
+    episodes = []
+    selected = set()
+    dataset = None
+    protected = set()
+    observed_states = []
+    try:
+        for directory in run_directories:
+            root = reject_symlink_components(directory, &quot;SELECTION_RUN&quot;).resolve(strict=True)
+            ledger_path = root / &quot;episode_ledger.json&quot;
+            ledger = load_json_strict(ledger_path)
+            # This existing owner reopens and validates the ledger&#x27;s source graph.
+            state = validate_episode_state(
+                load_json_strict(root / &quot;episode_ledger_state.json&quot;), ledger=ledger,
+            )
+            observed_states.append((root, state))
+            # Collection identities vary as episodes append to one root. They
+            # are not the current frozen byte identity owned by training.
+            current = {
+                key: ledger[&quot;dataset&quot;][key] for key in (&quot;dataset_root&quot;, &quot;repo_id&quot;)
+            }
+            if dataset is not None and current != dataset:
+                raise CuratorError(&quot;SELECTION_DATASET_MISMATCH&quot;)
+            dataset = current
+            episode = ledger[&quot;episode&quot;]
+            index = episode[&quot;episode_index&quot;]
+            if index in selected:
+                raise CuratorError(&quot;SELECTION_DUPLICATE_EPISODE&quot;)
+            selected.add(index)
+            if (
+                ledger[&quot;admission&quot;][&quot;technical_status&quot;] != &quot;PASS&quot;
+                or state[&quot;review&quot;][&quot;semantic_status&quot;] != &quot;PASS&quot;
+            ):
+                raise CuratorError(&quot;SELECTION_REVIEW_REQUIRED&quot;, episode[&quot;run_id&quot;])
+            protected.update((root, Path(dataset[&quot;dataset_root&quot;])))
+            protected.update(
+                Path(ref[&quot;artifact_path&quot;]).parent for ref in ledger[&quot;artifacts&quot;].values()
+            )
+            protected.add(Path(state[&quot;candidate&quot;][&quot;artifact_path&quot;]).parent)
+            episodes.append({
+                &quot;episode_id&quot;: episode[&quot;run_id&quot;], &quot;episode_index&quot;: index,
+                &quot;episode_ledger_path&quot;: str(ledger_path),
+                &quot;technical_validator_path&quot;: ledger[&quot;artifacts&quot;][&quot;technical&quot;][&quot;artifact_path&quot;],
+                &quot;human_semantic_evidence_path&quot;: state[&quot;candidate&quot;][&quot;artifact_path&quot;],
+            })
+        if any(target.is_relative_to(path.resolve()) for path in protected):
+            raise CuratorError(&quot;SELECTION_OUTPUT_OVERLAP&quot;)
+        request = {**dataset, &quot;dataset_id&quot;: dataset_id}
+        request[&quot;episodes&quot;] = sorted(episodes, key=lambda episode: episode[&quot;episode_index&quot;])
+        # Exercise the actual read-only consumer before publication. Its drafts
+        # stay in memory; this identifier is not a human approval or attribution.
+        # The consumer owns byte identity, metadata, production scope and lineage.
+        prepare_approvals(request, target.parent, &quot;curator-preview-only&quot;)
+        cohort = None if eval_split is None else check_evaluation_cohort(
+            request, eval_split=eval_split, expected_eval_episodes=expected_eval_episodes,
+        )
+        # Preparation may read a large dataset while input artifacts change.
+        # Reopen the existing owner&#x27;s state; do not publish a selection based on
+        # evidence that changed during that work. This is not a source lock.
+        for root, expected_state in observed_states:
+            current_state = validate_episode_state(
+                load_json_strict(root / &quot;episode_ledger_state.json&quot;),
+                ledger=load_json_strict(root / &quot;episode_ledger.json&quot;),
+            )
+            if current_state != expected_state:
+                raise CuratorError(&quot;SELECTION_INPUT_CHANGED&quot;, str(root))
+        write_json_exclusive(target, request)
+    except ContractError as exc:
+        raise CuratorError(&quot;SELECTION_SOURCE_INVALID&quot;, str(exc)) from exc
+    except OSError as exc:
+        raise CuratorError(&quot;SELECTION_IO&quot;, str(exc)) from exc
+    return {
+        &quot;ok&quot;: True, &quot;status&quot;: &quot;REQUEST_NOT_APPROVED&quot;, &quot;request_path&quot;: str(target),
+        &quot;episode_indices&quot;: [episode[&quot;episode_index&quot;] for episode in request[&quot;episodes&quot;]],
+        &quot;training_authority&quot;: False,
+        **({&quot;evaluation_cohort&quot;: cohort} if cohort is not None else {}),
+    }
+
+
+__all__ = [&quot;check_evaluation_cohort&quot;, &quot;export_training_request&quot;]
+</pre></section></main></body></html>

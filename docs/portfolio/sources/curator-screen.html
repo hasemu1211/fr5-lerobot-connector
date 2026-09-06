@@ -1,0 +1,82 @@
+<!doctype html><html lang="ko"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Curator 제품 화면의 실행 근거 — FR5 근거</title><link rel="stylesheet" href="../site.css"></head><body><main class="source-page"><a href="../data.html#checks">← 설명으로 돌아가기</a><h1>Curator 제품 화면의 실행 근거</h1><p class="note">설명에 사용한 구현·측정 자료의 발췌이다. SHA-256은 발췌 전 원본 파일을 식별한다. 실행 PC의 절대 경로와 계정 정보는 포함하지 않으며, 측정값과 해석 조건을 함께 제시한다.</p><p>실제 브라우저의 Curator 검토 화면. 기능 통합 버전은 02f4173/a782c1e. 합성 LeRobot 60-frame fixture이며 물리 FR5 데이터가 아니다.</p><p>화면 SHA-256: 27acc7307c1ecfe39a84dab55dbdf0494b9f380ea120e33380bb3da91ba80281</p><section id="fr5-curator-ux-final-approve"><h2>fr5-curator-ux-final-approve.json</h2><p class="locator">fr5-curator-ux-final-approve.json<br>sha256:926939e86ee5feabb9ac9f67f2a1f198011383dfde12e3e7ca3f3ca169d26986</p><p class="note">원문에서 발췌한 필드. 실행 환경의 절대 경로는 자료 식별자로 표시한다.</p><pre>{
+  &quot;details&quot;: {
+    &quot;decision&quot;: {
+      &quot;decision&quot;: &quot;APPROVE&quot;,
+      &quot;provenance&quot;: &quot;HUMAN_CURATED_CANDIDATE_APPROVED&quot;,
+      &quot;training_authorized&quot;: false
+    },
+    &quot;failure_history&quot;: null,
+    &quot;identities&quot;: {
+      &quot;candidate_ready_event_digest&quot;: &quot;sha256:6608015c46af6903a01679bd1a93ad89b59a056e77287592001c25f5b4424353&quot;,
+      &quot;candidate_tree_digest&quot;: &quot;sha256:a1434dd9a43332e67deb20d4c699a49d9b7fde79566b7f26cad5e8b9332e3774&quot;,
+      &quot;policy_digest&quot;: &quot;sha256:19707e9f72179ec600a5feff127d37d353179bae90e0f725c34a73766b0a2850&quot;,
+      &quot;policy_file_sha256&quot;: &quot;sha256:19707e9f72179ec600a5feff127d37d353179bae90e0f725c34a73766b0a2850&quot;,
+      &quot;profile_digest&quot;: &quot;sha256:1da8b9e763a32850cf3616e850ef73ea978b031e04767f8e196af2fc9605a970&quot;,
+      &quot;profile_file_sha256&quot;: &quot;sha256:35c5840e4d279369dbeb4ca97b9f701cab457a6f5ef3aab5c6e7b07f2a33b8b2&quot;,
+      &quot;request_event_digest&quot;: &quot;sha256:50debc007813e83a6ed2cd4385027edc05979567643c0b2131bc27be7cfcd354&quot;,
+      &quot;source_tree_digest&quot;: &quot;sha256:2fedfb95330c24945c87f36aadf7e9f574696d69854286e201e72428939fccca&quot;
+    },
+    &quot;media_error&quot;: null,
+    &quot;receipt&quot;: {
+      &quot;approval_inherited&quot;: false,
+      &quot;candidate_tree_digest&quot;: &quot;sha256:a1434dd9a43332e67deb20d4c699a49d9b7fde79566b7f26cad5e8b9332e3774&quot;,
+      &quot;committed_durable&quot;: true,
+      &quot;decision_digest&quot;: &quot;sha256:c48489706d45b9f67e9d3584cd279003199b5803fe44b43060cca2a6a05cdc57&quot;,
+      &quot;outcome&quot;: &quot;PUBLISHED&quot;,
+      &quot;output&quot;: {
+        &quot;dataset_digest&quot;: &quot;sha256:a1434dd9a43332e67deb20d4c699a49d9b7fde79566b7f26cad5e8b9332e3774&quot;,
+        &quot;repo_id&quot;: &quot;local/source-synthetic-up-view-r001&quot;,
+        &quot;root&quot;: &quot;source-synthetic-up-view-r001&quot;
+      },
+      &quot;profile_digest&quot;: &quot;sha256:1da8b9e763a32850cf3616e850ef73ea978b031e04767f8e196af2fc9605a970&quot;,
+      &quot;review_manifest_digest&quot;: &quot;sha256:9b94519f4123698b06664ad8dcc4da742cf9060d0e9833dc574aa606ceb4552f&quot;,
+      &quot;source&quot;: {
+        &quot;dataset_digest&quot;: &quot;sha256:2fedfb95330c24945c87f36aadf7e9f574696d69854286e201e72428939fccca&quot;,
+        &quot;repo_id&quot;: &quot;local/source&quot;,
+        &quot;root&quot;: &quot;source&quot;
+      },
+      &quot;training_authority&quot;: false
+    },
+    &quot;review_ready_digest&quot;: &quot;sha256:d24f58d492de64dbce3085f9da4e2318130a855f9c5bb5bb1470fcd3dc7a4329&quot;
+  },
+  &quot;mediaStatus&quot;: &quot;원본 · overlay · 실제 후보 영상 준비 완료&quot;,
+  &quot;status&quot;: &quot;이 후보를 공개했습니다. 원본은 보존되며 학습 사용 승인은 별도입니다. 요청을 반복하지 않고 저장된 상태를 확인했습니다. (synthetic response lost after native commit)&quot;,
+  &quot;actions&quot;: []
+}</pre></section><section id="fr5-curator-ux-media-browser-after"><h2>fr5-curator-ux-media-browser-after.json</h2><p class="locator">fr5-curator-ux-media-browser-after.json<br>sha256:86e6deb99c432f6f739a5de9455218395cbdb674eaf5534468a2094e121ffc30</p><p class="note">원문에서 발췌한 필드. 실행 환경의 절대 경로는 자료 식별자로 표시한다.</p><pre>{
+  &quot;details&quot;: {
+    &quot;decision&quot;: {
+      &quot;decision&quot;: &quot;APPROVE&quot;,
+      &quot;provenance&quot;: &quot;HUMAN_CURATED_CANDIDATE_APPROVED&quot;,
+      &quot;training_authorized&quot;: false
+    },
+    &quot;failure_history&quot;: null,
+    &quot;identities&quot;: null,
+    &quot;media_error&quot;: {
+      &quot;reason_code&quot;: &quot;REVIEW_VIDEO_DIGEST&quot;
+    },
+    &quot;receipt&quot;: {
+      &quot;approval_inherited&quot;: false,
+      &quot;candidate_tree_digest&quot;: &quot;sha256:a1434dd9a43332e67deb20d4c699a49d9b7fde79566b7f26cad5e8b9332e3774&quot;,
+      &quot;committed_durable&quot;: true,
+      &quot;decision_digest&quot;: &quot;sha256:4c4cae5b3fdec4d13714043e2f7b7bcd326b70b3573e5e3516172285f19fbff1&quot;,
+      &quot;outcome&quot;: &quot;PUBLISHED&quot;,
+      &quot;output&quot;: {
+        &quot;dataset_digest&quot;: &quot;sha256:a1434dd9a43332e67deb20d4c699a49d9b7fde79566b7f26cad5e8b9332e3774&quot;,
+        &quot;repo_id&quot;: &quot;local/source-synthetic-up-view-r001&quot;,
+        &quot;root&quot;: &quot;source-synthetic-up-view-r001&quot;
+      },
+      &quot;profile_digest&quot;: &quot;sha256:1da8b9e763a32850cf3616e850ef73ea978b031e04767f8e196af2fc9605a970&quot;,
+      &quot;review_manifest_digest&quot;: &quot;sha256:797e7b64fcc79468945f07cf887b94657d43372b7a44828b2e543b70171a176a&quot;,
+      &quot;source&quot;: {
+        &quot;dataset_digest&quot;: &quot;sha256:2fedfb95330c24945c87f36aadf7e9f574696d69854286e201e72428939fccca&quot;,
+        &quot;repo_id&quot;: &quot;local/source&quot;,
+        &quot;root&quot;: &quot;source&quot;
+      },
+      &quot;training_authority&quot;: false
+    },
+    &quot;review_ready_digest&quot;: &quot;sha256:7400b7207bb971753feca1d64bf488108356f97a1cfd2bebaaccfd9289989125&quot;
+  },
+  &quot;mediaStatus&quot;: &quot;검토 영상을 사용할 수 없습니다. 저장된 결정 결과는 유지됩니다. (REVIEW_VIDEO_DIGEST)&quot;,
+  &quot;status&quot;: &quot;이 후보를 공개했습니다. 원본은 보존되며 학습 사용 승인은 별도입니다.&quot;,
+  &quot;actions&quot;: []
+}</pre></section></main></body></html>

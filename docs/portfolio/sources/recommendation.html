@@ -1,0 +1,147 @@
+<!doctype html><html lang="ko"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>추천의 입력과 발행 경계 — FR5 근거</title><link rel="stylesheet" href="../site.css"></head><body><main class="source-page"><a href="../architecture.html#feedback">← 설명으로 돌아가기</a><h1>추천의 입력과 발행 경계</h1><p class="note">설명에 사용한 구현·측정 자료의 발췌이다. SHA-256은 발췌 전 원본 파일을 식별한다. 실행 PC의 절대 경로와 계정 정보는 포함하지 않으며, 측정값과 해석 조건을 함께 제시한다.</p><section id="collection_recommendation_io"><h2>collection_recommendation_io.py</h2><p class="locator">tools/data_factory/collection_recommendation_io.py<br>sha256:b43c58591eec7610f95980730fa2fa72812063d817bc5e39b3d7962587d01268</p><p class="note">원문 전체.</p><pre>&quot;&quot;&quot;Explicit offline collection consumer; no runtime or collection callbacks.&quot;&quot;&quot;
+from __future__ import annotations
+
+import fcntl
+import json
+import os
+import sys
+import tempfile
+from pathlib import Path
+from typing import Sequence
+
+from tools.data_factory.campaign_operator import validate_compiled_authoring_evidence
+from tools.data_factory.collection_recommendation import derive_collection_recommendation
+from tools.data_factory.episode_ledger import (
+    _artifact,
+    validate_episode_ledger,
+    validate_episode_state,
+)
+from tools.fr5_data_factory import ContractArgumentParser, ContractError, load_json_strict
+
+
+def _publish(destination: Path, documents: dict) -&gt; None:
+    &quot;&quot;&quot;Publish both files together; cooperating callers reuse identical output.&quot;&quot;&quot;
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    descriptor = os.open(destination.parent, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        # A short root-directory lock covers publication, not source analysis.
+        fcntl.flock(descriptor, fcntl.LOCK_EX)
+        if destination.is_symlink() or destination.exists():
+            if (destination.is_symlink() or not destination.is_dir()
+                    or set(path.name for path in destination.iterdir()) != set(documents)):
+                raise ContractError(&quot;COLLECTION_RECOMMENDATION_OUTPUT_CONFLICT&quot;)
+            for name, value in documents.items():
+                path = destination / name
+                if path.is_symlink() or load_json_strict(path) != value:
+                    raise ContractError(&quot;COLLECTION_RECOMMENDATION_OUTPUT_CONFLICT&quot;)
+            return
+        with tempfile.TemporaryDirectory(prefix=&quot;.pending-&quot;, dir=destination.parent) as temporary:
+            staged = Path(temporary) / &quot;result&quot;
+            staged.mkdir()
+            for name, value in documents.items():
+                with (staged / name).open(&quot;x&quot;, encoding=&quot;utf-8&quot;) as stream:
+                    json.dump(value, stream, sort_keys=True, indent=2)
+                    stream.write(&quot;\n&quot;)
+            staged.rename(destination)
+    finally:
+        os.close(descriptor)
+
+
+def recommend_stored_collection(
+    *, run_directories: Sequence[str | Path], source_commit: str,
+    output_root: str | Path | None = None,
+) -&gt; dict:
+    &quot;&quot;&quot;Load canonical run evidence and optionally publish immutable derived files.
+
+    source_commit is a caller-supplied implementation label, not verified running
+    code identity or a historical run commit. This consumer does not attest Git.
+    Missing/invalid legacy sources are unavailable; never consult current config.
+    &quot;&quot;&quot;
+    if not run_directories:
+        raise ContractError(&quot;COLLECTION_RECOMMENDATION_RUNS_REQUIRED&quot;)
+    provenance = {&quot;source_commit&quot;: source_commit, &quot;verification&quot;: &quot;CALLER_SUPPLIED_UNVERIFIED&quot;}
+    try:
+        sources = None
+        evidence = []
+        protected = set()
+        for directory in run_directories:
+            root = Path(directory).resolve(strict=True)
+            protected.add(root)
+            authoring_path = root / &quot;compiled_authoring_evidence.json&quot;
+            if not authoring_path.is_file():
+                raise ContractError(&quot;COLLECTION_RECOMMENDATION_AUTHORING_UNAVAILABLE&quot;)
+            authoring = validate_compiled_authoring_evidence(load_json_strict(authoring_path))
+            if sources is not None and sources != authoring:
+                raise ContractError(&quot;COLLECTION_RECOMMENDATION_AUTHORING_MISMATCH&quot;)
+            sources = authoring
+            ledger = validate_episode_ledger(load_json_strict(root / &quot;episode_ledger.json&quot;))
+            state = validate_episode_state(
+                load_json_strict(root / &quot;episode_ledger_state.json&quot;), ledger=ledger,
+            )
+            protected.add(Path(ledger[&quot;dataset&quot;][&quot;dataset_root&quot;]).resolve(strict=True))
+            artifacts = {}
+            for name, ref in ledger[&quot;artifacts&quot;].items():
+                _, artifacts[name] = _artifact(
+                    ref, name=name, episode_index=ledger[&quot;episode&quot;][&quot;episode_index&quot;],
+                )
+                protected.add(Path(ref[&quot;artifact_path&quot;]).resolve(strict=True).parent)
+            if artifacts[&quot;manifest&quot;] != authoring[&quot;manifest&quot;]:
+                raise ContractError(&quot;COLLECTION_RECOMMENDATION_AUTHORING_MISMATCH&quot;)
+            if state[&quot;candidate&quot;] is None:
+                raise ContractError(&quot;COLLECTION_RECOMMENDATION_CANDIDATE_UNAVAILABLE&quot;)
+            _, candidate = _artifact(state[&quot;candidate&quot;], name=&quot;candidate&quot;, episode_index=0)
+            protected.add(Path(state[&quot;candidate&quot;][&quot;artifact_path&quot;]).resolve(strict=True).parent)
+            evidence.append({
+                &quot;manifest_order_index&quot;: artifacts[&quot;intent&quot;][&quot;order_index&quot;],
+                &quot;ledger&quot;: ledger, &quot;state&quot;: state, &quot;candidate&quot;: candidate, &quot;artifacts&quot;: artifacts,
+            })
+        report, recommendation = derive_collection_recommendation(
+            compiled_authoring=sources, episode_evidence=evidence, source_commit=source_commit,
+        )
+    except (ContractError, OSError) as exc:
+        return {
+            &quot;availability&quot;: &quot;UNAVAILABLE&quot;,
+            &quot;reason_codes&quot;: [str(exc) if isinstance(exc, ContractError)
+                             else &quot;COLLECTION_RECOMMENDATION_SOURCE_IO&quot;],
+            &quot;data_quality_analysis&quot;: None, &quot;recommendation&quot;: None, &quot;output_path&quot;: None,
+            &quot;implementation_provenance&quot;: provenance,
+        }
+    output_path = None
+    if output_root is not None:
+        destination = Path(output_root).resolve()
+        if any(destination.is_relative_to(path) or path.is_relative_to(destination)
+               for path in protected):
+            raise ContractError(&quot;COLLECTION_RECOMMENDATION_OUTPUT_OVERLAP&quot;)
+        destination = destination / recommendation[&quot;recommendation_digest&quot;].removeprefix(&quot;sha256:&quot;)
+        documents = {&quot;coverage_report.json&quot;: report, &quot;collection_recommendation.json&quot;: recommendation}
+        _publish(destination, documents)
+        output_path = str(destination)
+    return {
+        &quot;availability&quot;: &quot;AVAILABLE&quot;, &quot;reason_codes&quot;: [],
+        &quot;data_quality_analysis&quot;: report, &quot;recommendation&quot;: recommendation,
+        &quot;output_path&quot;: output_path,
+        &quot;implementation_provenance&quot;: provenance,
+    }
+
+
+def main(argv=None) -&gt; int:
+    parser = ContractArgumentParser(description=__doc__)
+    parser.add_argument(&quot;--run-dir&quot;, action=&quot;append&quot;, required=True)
+    parser.add_argument(&quot;--source-commit&quot;, required=True, help=&quot;caller-supplied implementation commit label (not attested)&quot;)
+    parser.add_argument(&quot;--output-root&quot;, required=True, help=&quot;exclusive derived output root&quot;)
+    try:
+        args = parser.parse_args(argv)
+        result = recommend_stored_collection(
+            run_directories=args.run_dir, source_commit=args.source_commit,
+            output_root=args.output_root,
+        )
+        print(json.dumps(result, sort_keys=True))
+        return 0 if result[&quot;availability&quot;] == &quot;AVAILABLE&quot; else 2
+    except (ContractError, OSError) as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
+
+
+if __name__ == &quot;__main__&quot;:
+    raise SystemExit(main())
+</pre></section></main></body></html>

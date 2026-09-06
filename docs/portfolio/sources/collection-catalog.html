@@ -1,0 +1,198 @@
+<!doctype html><html lang="ko"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>수집 조건 생성 — FR5 근거</title><link rel="stylesheet" href="../site.css"></head><body><main class="source-page"><a href="../collection.html#planning">← 설명으로 돌아가기</a><h1>수집 조건 생성</h1><p class="note">설명에 사용한 구현·측정 자료의 발췌이다. SHA-256은 발췌 전 원본 파일을 식별한다. 실행 PC의 절대 경로와 계정 정보는 포함하지 않으며, 측정값과 해석 조건을 함께 제시한다.</p><section id="catalog"><h2>catalog.py</h2><p class="locator">tools/data_factory/operator/catalog.py<br>sha256:48201709e00314f61df1aadedaede1276057b42e3b771a583292691bb7bb332c</p><p class="note">해당 기능의 함수 발췌. 줄 번호와 digest는 원본 기준이다.</p><pre># tools/data_factory/operator/catalog.py:2445 · project_assisted_poses
+def project_assisted_poses(
+    catalog: Mapping[str, Any], selection: Mapping[str, Any],
+    source_pose: Mapping[str, Any], requested_count: int, *, repeat: int = 1,
+    normalized_seed: int = 0, yaw_sampling_seed: int | None = None,
+    state_space_design_profile: Mapping[str, Any] | None = None,
+) -&gt; list[dict[str, Any]]:
+    &quot;&quot;&quot;Stratify continuous poses around the registered A4 grid.&quot;&quot;&quot;
+    if type(requested_count) is not int or not 1 &lt;= requested_count &lt;= 100:
+        raise ContractError(&quot;OPERATOR_ASSISTED_COUNT&quot;)
+    if type(repeat) is not int or not 1 &lt;= repeat &lt;= 100:
+        raise ContractError(&quot;OPERATOR_ASSISTED_REPEAT&quot;)
+    if (
+        type(normalized_seed) is not int
+        or not 0 &lt;= normalized_seed &lt;= MAX_DERIVED_SEED
+    ):
+        raise ContractError(&quot;OPERATOR_ASSISTED_SEED&quot;)
+    if yaw_sampling_seed is not None and (
+        isinstance(yaw_sampling_seed, bool)
+        or not isinstance(yaw_sampling_seed, int)
+        or not 0 &lt;= yaw_sampling_seed &lt;= MAX_DERIVED_SEED
+    ):
+        raise ContractError(&quot;OPERATOR_YAW_SAMPLING_SEED&quot;)
+    selected = validate_operator_selection(catalog, selection)
+    try:
+        domain = _operator_pose_domain(catalog, selected)
+    except ContractError as exc:
+        raise ContractError(&quot;OPERATOR_ASSISTED_DOMAIN&quot;) from exc
+    region = domain[&quot;coverage_region&quot;]
+    preset_ids = domain.get(&quot;preset_cell_ids&quot;)
+    if (
+        not isinstance(preset_ids, list)
+        or any(not isinstance(item, str) or not item for item in preset_ids)
+        or preset_ids != sorted(set(preset_ids))
+    ):
+        raise ContractError(&quot;OPERATOR_ASSISTED_DOMAIN&quot;)
+    cell_options = {
+        item.get(&quot;id&quot;): item for item in catalog.get(&quot;axes&quot;, {}).get(&quot;cell&quot;, [])
+        if isinstance(item, Mapping) and isinstance(item.get(&quot;id&quot;), str)
+    }
+    spatial_anchors: dict[str, tuple[float, float]] = {}
+    yaw_anchors = set()
+    for identifier in preset_ids:
+        option = cell_options.get(identifier)
+        metadata = option.get(&quot;metadata&quot;) if isinstance(option, Mapping) else None
+        point_id = metadata.get(&quot;point_id&quot;) if isinstance(metadata, Mapping) else None
+        if (
+            not isinstance(point_id, str) or not point_id
+            or metadata.get(&quot;place_id&quot;) != selected[&quot;workspace_id&quot;]
+        ):
+            raise ContractError(&quot;OPERATOR_ASSISTED_DOMAIN&quot;)
+        try:
+            yaw = normalize_yaw_deg(metadata[&quot;yaw_deg&quot;])
+            x_mm, y_mm = float(metadata[&quot;x_mm&quot;]), float(metadata[&quot;y_mm&quot;])
+            if not point_in_convex_polygon(
+                rotate_xy((x_mm, y_mm), yaw),
+                region[&quot;polygon_local_xy_mm&quot;],
+            ):
+                raise ValueError(&quot;anchor&quot;)
+        except (KeyError, TypeError, ValueError, ContractError) as exc:
+            raise ContractError(&quot;OPERATOR_ASSISTED_DOMAIN&quot;) from exc
+        xy = (float(x_mm), float(y_mm))
+        if point_id in spatial_anchors and spatial_anchors[point_id] != xy:
+            raise ContractError(&quot;OPERATOR_ASSISTED_DOMAIN&quot;)
+        spatial_anchors[point_id] = xy
+        yaw_anchors.add(float(yaw))
+    columns, rows = region[&quot;strata&quot;][&quot;columns&quot;], region[&quot;strata&quot;][&quot;rows&quot;]
+    base_design_profile = selected_state_space_design_profile(catalog, selected)
+    design_profile = base_design_profile
+    if state_space_design_profile is not None:
+        if base_design_profile is None:
+            raise ContractError(&quot;OPERATOR_ASSISTED_DOMAIN&quot;)
+        try:
+            design_profile = validate_configured_state_space_design_profile(
+                state_space_design_profile, source_profile=base_design_profile,
+            )
+        except ContractError as exc:
+            raise ContractError(&quot;OPERATOR_ASSISTED_DOMAIN&quot;) from exc
+    if (
+        not yaw_anchors
+        or design_profile is None and len(spatial_anchors) != columns * rows
+    ):
+        raise ContractError(&quot;OPERATOR_ASSISTED_DOMAIN&quot;)
+
+    source = _canonical_operator_pose(selected, domain, source_pose)
+    if yaw_sampling_seed is not None:
+        selections = [selected] * requested_count
+        contexts = _yaw_selection_contexts(
+            catalog, selections, design_profile,
+        )
+        if contexts[0][&quot;profile&quot;] is not None:
+            bindings = _yaw_block_bindings(
+                catalog, contexts, yaw_sampling_seed, repeat=repeat,
+                anchor_pose=source,
+            )
+            if any(binding is None for binding in bindings):
+                raise ContractError(&quot;OPERATOR_YAW_PROFILE_CHAIN&quot;)
+            return _project_endpoint_yaw_sequence(
+                selected, domain, source,
+                bindings, yaw_profile=contexts[0][&quot;profile&quot;],
+                design_profile=contexts[0][&quot;design&quot;],
+                normalized_seed=normalized_seed, repeat=repeat,
+            )
+    result = [source]
+    seen = {tuple(source[field] for field in POSE_ORDER)}
+    unique_count = math.ceil(requested_count / repeat)
+    if unique_count == 1:
+        return [copy.deepcopy(source) for _ in range(requested_count)]
+
+    yaw_values = sorted(yaw_anchors)
+
+    def yaw_distance(left: float, right: float) -&gt; float:
+        delta = abs(left - right) % 360.0
+        return min(delta, 360.0 - delta) / 180.0
+
+    yaw_variants = sorted(
+        (
+            value for value in yaw_values
+            if value != float(source[&quot;yaw_deg&quot;])
+        ),
+        key=lambda value: (
+            yaw_distance(value, float(source[&quot;yaw_deg&quot;])), value,
+        ),
+    ) or [float(source[&quot;yaw_deg&quot;])]
+
+    current_sheet_xy = rotate_xy(
+        (float(source[&quot;x_mm&quot;]), float(source[&quot;y_mm&quot;])),
+        float(source[&quot;yaw_deg&quot;]),
+    )
+    pass_index = 0
+    while len(result) &lt; unique_count:
+        yaw_anchor = (
+            float(source[&quot;yaw_deg&quot;])
+            if pass_index == 0
+            else yaw_variants[(pass_index - 1) % len(yaw_variants)]
+        )
+        try:
+            safe_polygon = safe_convex_polygon(
+                polygon=region[&quot;polygon_local_xy_mm&quot;],
+                object_size_xy_mm=region[&quot;object_size_xy_mm&quot;],
+                uncertainty_mm=region[&quot;uncertainty_mm&quot;],
+                yaw_deg=yaw_anchor,
+            )
+            count = min(
+                unique_count - len(result),
+                columns * rows - int(pass_index == 0),
+            )
+            samples = stratified_convex_polygon_samples(
+                polygon=safe_polygon,
+                columns=columns, rows=rows, start_xy=current_sheet_xy,
+                count=count, seed=normalized_seed, pass_index=pass_index,
+                skip_start_cell=pass_index == 0,
+            )
+        except ValueError as exc:
+            raise ContractError(&quot;OPERATOR_ASSISTED_DOMAIN&quot;) from exc
+        for sheet_x, sheet_y, _row, _column in samples:
+            local_x, local_y = rotate_xy((sheet_x, sheet_y), -yaw_anchor)
+            proposed = {
+                &quot;place_id&quot;: selected[&quot;workspace_id&quot;],
+                &quot;x_mm&quot;: local_x, &quot;y_mm&quot;: local_y,
+                &quot;yaw_deg&quot;: yaw_anchor,
+            }
+            checked = _canonical_operator_pose(selected, domain, proposed)
+            checked_key = tuple(checked[field] for field in POSE_ORDER)
+            if checked_key in seen:
+                raise ContractError(&quot;OPERATOR_ASSISTED_STRATUM_EXHAUSTION&quot;)
+            seen.add(checked_key)
+            result.append(checked)
+            current_sheet_xy = (sheet_x, sheet_y)
+        pass_index += 1
+    return [
+        copy.deepcopy(result[index % unique_count])
+        for index in range(requested_count)
+    ]
+
+# tools/data_factory/operator/catalog.py:2620 · project_direct_poses
+def project_direct_poses(
+    catalog: Mapping[str, Any], selection: Mapping[str, Any],
+    source_pose: Mapping[str, Any], direct_poses: Sequence[Mapping[str, Any]],
+    requested_count: int,
+) -&gt; list[dict[str, Any]]:
+    &quot;&quot;&quot;Repeat one ordered, unique condition list to an exact finite count.&quot;&quot;&quot;
+    if type(requested_count) is not int or not 1 &lt;= requested_count &lt;= 100:
+        raise ContractError(&quot;OPERATOR_DIRECT_COUNT&quot;)
+    if not isinstance(direct_poses, (list, tuple)):
+        raise ContractError(&quot;OPERATOR_DIRECT_POSES&quot;)
+    source = validate_operator_pose(catalog, selection, source_pose)
+    conditions = [source]
+    for value in direct_poses:
+        checked = validate_operator_pose(catalog, selection, value)
+        if checked != source and checked not in conditions:
+            conditions.append(checked)
+    if len(conditions) &gt; requested_count:
+        raise ContractError(&quot;OPERATOR_DIRECT_COUNT&quot;)
+    return [
+        copy.deepcopy(conditions[index % len(conditions)])
+        for index in range(requested_count)
+    ]</pre></section></main></body></html>

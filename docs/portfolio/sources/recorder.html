@@ -1,0 +1,41 @@
+<!doctype html><html lang="ko"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>기록기 commit 응답과 종료 — FR5 근거</title><link rel="stylesheet" href="../site.css"></head><body><main class="source-page"><a href="../architecture.html#recording">← 설명으로 돌아가기</a><h1>기록기 commit 응답과 종료</h1><p class="note">설명에 사용한 구현·측정 자료의 발췌이다. SHA-256은 발췌 전 원본 파일을 식별한다. 실행 PC의 절대 경로와 계정 정보는 포함하지 않으며, 측정값과 해석 조건을 함께 제시한다.</p><section id="one_job"><h2>one_job.py</h2><p class="locator">tools/data_factory/one_job.py<br>sha256:bac68bdfe99ad356dce44f1f6a7bcfc23d1039161a7263473caba456bc9bd1b7</p><p class="note">해당 기능의 함수 발췌. 줄 번호와 digest는 원본 기준이다.</p><pre># tools/data_factory/one_job.py:112 · request_terminal
+    def request_terminal(self, request):
+        &quot;&quot;&quot;Wait for an irreversible transaction response or child EOF.&quot;&quot;&quot;
+        return self._request(request, wait_for_response=True)
+
+# tools/data_factory/one_job.py:1090 · _finalize
+    def _finalize(self):
+        if self.semantic == &quot;FAIL&quot;:
+            return self._abort(&quot;SEMANTIC_FAIL&quot;)
+        if (self._grasp_verdict_required() and self.grasp != &quot;PASS&quot;) or self.semantic != &quot;PASS&quot; or self.recorder_state != &quot;FROZEN&quot;:
+            return self._abort(&quot;COMMIT_GUARD&quot;)
+        try:
+            evidence = self.execution_evidence
+            if not isinstance(evidence, dict):
+                raise ContractError(&quot;PRECOMMIT_SAFETY&quot;)
+            safety = self._precommit_safety(evidence.get(&quot;precommit_safety&quot;), terminal=True)
+            planned_safety = self.plan_envelope[&quot;precommit_safety&quot;] if isinstance(self.plan_envelope, dict) else None
+            if not isinstance(planned_safety, dict) or any(
+                safety[key] != planned_safety[key] for key in (
+                    &quot;approved_plan_digest&quot;, &quot;scene_binding_digest&quot;, &quot;expected_planning_scene_digest&quot;,
+                    &quot;planning_scene_readback_digest&quot;, &quot;collision_report_digest&quot;, &quot;plan_only_no_motion_digest&quot;,
+                )
+            ):
+                raise ContractError(&quot;PRECOMMIT_SAFETY_BINDING&quot;)
+            self._emit_lifecycle_event(&quot;FINALIZING&quot;)
+            response = self._request(&quot;recorder&quot;, &quot;commit&quot;, allowed_failure=True)
+            if response.get(&quot;state&quot;) == &quot;QUARANTINED_COMMIT&quot;:
+                self.recorder_state = &quot;QUARANTINED_COMMIT&quot;
+                self.state = &quot;QUARANTINED_COMMIT&quot;
+                return self._result(False, &quot;QUARANTINED_COMMIT&quot;)
+            if not response[&quot;ok&quot;]:
+                return self._abort(response[&quot;reason_code&quot;] or &quot;RECORDER_COMMIT&quot;)
+            if response[&quot;state&quot;] != &quot;COMMITTED&quot;:
+                return self._abort(&quot;RECORDER_COMMIT&quot;)
+        except ContractError as exc:
+            if self.recorder_state == &quot;FROZEN&quot;:
+                return self._abort(exc.code)  # QUALITY_REJECTED remains frozen until explicitly aborted.
+            self.state = &quot;QUARANTINED_COMMIT&quot;
+            return self._result(False, exc.code)
+        self.state = &quot;AWAITING_CELL_READY&quot;
+        return self._result(True, &quot;COMMITTED&quot;)</pre></section></main></body></html>

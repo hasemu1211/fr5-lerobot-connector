@@ -1,7 +1,7 @@
 <!doctype html>
 <html lang="ko"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>FR5 — 로봇 데이터와 모방학습</title><link rel="stylesheet" href="site.css"></head><body>
 <a class="skip" href="#main">본문으로 이동</a>
-<header><a class="brand" href="index.html" aria-label="FR5 프로젝트">FR5<span>.</span></a><nav aria-label="프로젝트 탐색"><a href="index.html" aria-current="page">프로젝트</a><a href="architecture.html">시스템</a><a href="data.html">기록과 검토</a><a href="learning.html">학습과 평가</a></nav></header>
+<header><a class="brand" href="index.html" aria-label="FR5 프로젝트">FR5<span>.</span></a><nav aria-label="프로젝트 탐색"><a href="index.html" aria-current="page">프로젝트</a><a href="architecture.html">시스템</a><a href="collection.html">수집</a><a href="data.html">데이터</a><a href="learning.html">학습·평가</a></nav></header>
 <main id="main">
 <section class="project-hero">
 <div class="hero-copy"><p class="kicker">로봇 데이터 · 모방학습</p><h1>FR5 모방학습<br>데이터 시스템</h1><p class="hero-description">FR5 로봇의 시연을 수집하고, 검토한 데이터로 정책을 학습·평가하는 시스템이다. 로봇 제어, 다중 센서 기록, 데이터 관리와 학습 실행을 연결한다.</p><a class="text-link" href="architecture.html">시스템 구성 <span aria-hidden="true">↗</span></a></div>
@@ -9,7 +9,8 @@
 </section>
 <section class="project-intro" aria-labelledby="whole"><p class="kicker">프로젝트 구성</p><div><h2 id="whole">로봇 운용과<br>학습 데이터 파이프라인</h2><p>수집 실행기는 작업 계획과 로봇 동작을 관리한다. 기록기는 영상·관절·그리퍼 신호를 시간 기준에 맞춰 저장한다. 검토 모듈은 데이터 품질과 작업 의미를 확인하고, 학습 모듈은 승인된 데이터와 평가 조건을 검증한다.</p><p>실행 실패와 저장 실패를 구분하고, 데이터 원본부터 학습 입력까지 추적할 수 있도록 설계했다. 로봇 운용의 안정성과 모방학습 실험의 재현성을 함께 다룬다.</p></div></section>
 <section class="reading-paths" aria-labelledby="read"><h2 id="read">주요 구성</h2>
-<a class="reading-link" href="architecture.html"><span class="path-label">시스템 설계</span><div><h3>작업 실행·저장 관리</h3><p>단일 작업 실행, 데이터 저장 확정, 운영 화면의 상태 관리.</p></div><span aria-hidden="true">↗</span></a>
+<a class="reading-link" href="architecture.html"><span class="path-label">시스템 설계</span><div><h3>시스템 아키텍처</h3><p>수집·기록·데이터 관리·학습 모듈의 구성과 연결.</p></div><span aria-hidden="true">↗</span></a>
+<a class="reading-link" href="collection.html"><span class="path-label">로봇 운용</span><div><h3>로봇 시연 수집</h3><p>작업 조건 작성, 반복 수집과 작업별 기록 구간.</p></div><span aria-hidden="true">↗</span></a>
 <a class="reading-link" href="data.html"><span class="path-label">데이터 엔지니어링</span><div><h3>다중 센서 기록·데이터 검토</h3><p>영상·로봇 상태 동기화, 기술 품질 검사, 데이터 검토와 선별.</p></div><span aria-hidden="true">↗</span></a>
 <a class="reading-link" href="learning.html"><span class="path-label">모방학습</span><div><h3>SmolVLA 학습·평가</h3><p>학습 입력 검증, TRAIN 정규화, 오프라인 정책 비교.</p></div><span aria-hidden="true">↗</span></a>
 </section>
