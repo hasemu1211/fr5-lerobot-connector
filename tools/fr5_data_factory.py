@@ -1366,6 +1366,10 @@ def resolve_motion_program(
 
 def validate_motion_program(value):
     """Validate the exact offline motion-program contract emitted above."""
+    if isinstance(value, dict) and value.get("schema_version") == "fr5.learned_motion_program.v1":
+        from tools.data_factory.rollout.finite_plan import validate_learned_program
+
+        return validate_learned_program(value)
     keys = {"schema_version", "robot_system_id", "resolved_job_digest", "binding_digests", "frames", "planning_scene", "planning", "gripper_requirements", "execution_timeouts_s", "steps"}
     schema = value.get("schema_version") if isinstance(value, dict) else None
     if schema == "fr5.motion_program.v4":

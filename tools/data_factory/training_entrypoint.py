@@ -1,7 +1,8 @@
-"""Public offline admission, human approval and selected-episode launch connection.
+"""Public offline admission, human approval and delegated local launch connection.
 
-No consent is accepted from arguments, stdin, environment variables or JSON.
-Single-episode and exact-batch decisions both require a controlling /dev/tty.
+Human approval still requires /dev/tty or the trusted Web UI. A separate,
+recorded user-authorized delegation may authorize bounded local training without
+being relabeled as a human approval.
 """
 from __future__ import annotations
 
@@ -12,11 +13,14 @@ if __package__ in {None, ""}:
 
 import argparse
 import copy
+from dataclasses import dataclass
 from datetime import datetime, timezone
+import fcntl
 import json
+import math
+import os
 from pathlib import Path
 import shlex
-import subprocess
 
 if __package__ in {None, ""}:
     sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
@@ -68,6 +72,104 @@ def check_inventory(dataset: Path, repo_id: str, inventory: Path, episodes: str 
     return approved, metadata, selected
 
 
+def _positive_option(config: dict[str, str], key: str) -> int:
+    try:
+        value = int(config[key])
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ContractError("TRAINING_DELEGATION_LIMITS") from exc
+    if value < 1:
+        raise ContractError("TRAINING_DELEGATION_LIMITS")
+    return value
+
+
+def _enforce_delegated_launch(
+    inventory: dict, *, dataset: Path, repo_id: str, profile: str,
+    config: dict[str, str],
+) -> bool:
+    delegation = approval.inventory_local_training_delegation(inventory)
+    if delegation is None:
+        return False
+    if (
+        delegation["dataset"] != {"dataset_root": str(dataset.resolve()), "repo_id": repo_id}
+        or profile not in delegation["profiles"]
+        or config.get("--job.target", "local") != "local"
+        or config.get("--dataset.streaming", "false") != "false"
+        or config.get("--dataset.repo_type", "dataset") != "dataset"
+        or any(key.startswith(("--env.", "--reward_model.")) for key in config)
+        or config.get("--policy.push_to_hub") != "false"
+        or config.get("--save_checkpoint_to_hub") != "false"
+        or config.get("--wandb.enable") != "false"
+    ):
+        raise ContractError("TRAINING_DELEGATION_SCOPE")
+    output_root = Path(delegation["output_root"])
+    if output_root.is_symlink() or not output_root.is_dir():
+        raise ContractError("TRAINING_DELEGATION_OUTPUT")
+    if "--output_dir" not in config:
+        raise ContractError("TRAINING_DELEGATION_OUTPUT")
+    output = Path(config.get("--output_dir", "")).resolve()
+    if not output.is_relative_to(output_root.resolve()):
+        raise ContractError("TRAINING_DELEGATION_OUTPUT")
+    steps = _positive_option(config, "--steps")
+    batch_size = _positive_option(config, "--batch_size")
+    save_frequency = _positive_option(config, "--save_freq")
+    limits = delegation["limits"]
+    save_checkpoints = config.get("--save_checkpoint", "true")
+    if save_checkpoints not in {"true", "false"}:
+        raise ContractError("TRAINING_DELEGATION_LIMITS")
+    checkpoints = math.ceil(steps / save_frequency) if save_checkpoints == "true" else 0
+    if (
+        steps > limits["max_steps"]
+        or batch_size > limits["max_batch_size"]
+        or checkpoints > limits["max_checkpoints"]
+    ):
+        raise ContractError("TRAINING_DELEGATION_LIMITS")
+    return True
+
+
+def _saved_launch_options(saved: dict, output: Path) -> dict[str, str]:
+    """Project the fields the resume CLI will consume from train_config.json."""
+    dataset, policy = saved.get("dataset"), saved.get("policy")
+    wandb, job = saved.get("wandb"), saved.get("job")
+    if not all(isinstance(value, dict) for value in (dataset, policy, wandb, job)):
+        raise ContractError("TRAINING_DELEGATION_SAVED_CONFIG")
+
+    def boolean(value: object) -> str:
+        if type(value) is not bool:
+            raise ContractError("TRAINING_DELEGATION_SAVED_CONFIG")
+        return str(value).lower()
+
+    config = {
+        "--dataset.root": str(dataset.get("root", "")),
+        "--dataset.repo_id": str(dataset.get("repo_id", "")),
+        "--dataset.repo_type": str(dataset.get("repo_type", "dataset")),
+        "--dataset.streaming": boolean(dataset.get("streaming", False)),
+        "--output_dir": str(output),
+        "--steps": str(saved.get("steps", "")),
+        "--batch_size": str(saved.get("batch_size", "")),
+        "--save_freq": str(saved.get("save_freq", "")),
+        "--save_checkpoint": boolean(saved.get("save_checkpoint")),
+        "--policy.push_to_hub": boolean(policy.get("push_to_hub")),
+        "--save_checkpoint_to_hub": boolean(saved.get("save_checkpoint_to_hub")),
+        "--wandb.enable": boolean(wandb.get("enable")),
+    }
+    if job.get("target") is not None:
+        config["--job.target"] = str(job["target"])
+    if saved.get("env") is not None:
+        config["--env.saved"] = "configured"
+    if saved.get("reward_model") is not None:
+        config["--reward_model.saved"] = "configured"
+    return config
+
+
+def _delegated_training(split: dict, receipt: dict) -> bool:
+    inventory = approval.validate_current_training_inventory(
+        receipt["approved_inventory_path"],
+        dataset_root=split["dataset_identity"]["dataset_root"],
+        repo_id=split["repo_id"], selected_episodes=split["selected_episodes"],
+    )
+    return approval.inventory_local_training_delegation(inventory) is not None
+
+
 def prepare_launch(*, dataset: Path, repo_id: str, inventory: Path,
                    profile: str, collection_profile: str, argv: list[str]) -> tuple[dict, dict]:
     from importlib.metadata import version
@@ -75,6 +177,8 @@ def prepare_launch(*, dataset: Path, repo_id: str, inventory: Path,
     if version("lerobot") != "0.6.1":
         raise ContractError("TRAINING_SPLIT_RUNTIME_UNVERIFIED", "This split adapter is verified against LeRobot 0.6.1")
     config = options(argv[1:])
+    if config.get("--job.target", "local") != "local" or any(key.startswith("--env.") for key in config):
+        raise ContractError("TRAINING_LOCAL_OFFLINE_ONLY")
     # Streaming, renamed roots, alternate episode order and resume are separate contracts.
     if (config.get("--dataset.root") != str(dataset)
             or config.get("--dataset.repo_id") != repo_id
@@ -82,6 +186,9 @@ def prepare_launch(*, dataset: Path, repo_id: str, inventory: Path,
             or "--config_path" in config or "--resume" in config):
         raise ContractError("TRAINING_COMMAND_DATASET")
     approved, metadata, selected = check_inventory(dataset, repo_id, inventory, config.get("--dataset.episodes"))
+    _enforce_delegated_launch(
+        approved, dataset=dataset, repo_id=repo_id, profile=profile, config=config,
+    )
     checklist_to_task = {contract["review_checklist_id"]: task for task, contract in TASK_CONTRACTS.items()}
     tasks = set()
     for episode in approved["episodes"]:
@@ -113,7 +220,7 @@ def prepare_launch(*, dataset: Path, repo_id: str, inventory: Path,
 
 def launch(*, dataset: Path, repo_id: str, inventory: Path, profile: str,
            collection_profile: str, argv: list[str], dry_run: bool = False,
-           runner=subprocess.run) -> int:
+           runner=None) -> int:
     kwargs = dict(dataset=dataset, repo_id=repo_id, inventory=inventory, profile=profile,
                   collection_profile=collection_profile, argv=argv)
     split, receipt = prepare_launch(**kwargs)
@@ -130,13 +237,17 @@ def launch(*, dataset: Path, repo_id: str, inventory: Path, profile: str,
     # Recheck all bytes/references immediately before the first output write.
     if prepare_launch(**kwargs) != (split, receipt):
         raise ContractError("TRAINING_INPUT_CHANGED")
+    local_offline = _delegated_training(split, receipt)
     output.parent.mkdir(parents=True, exist_ok=True)
     written = []
     try:
         for path, value in zip(pending, (split, receipt)):
             approval._write_exclusive(path, value, "TRAINING_OUTPUT_EXISTS")
             written.append(path)
-        return runner(argv, check=False).returncode
+        if runner is not None:
+            with approval.local_hf_offline(local_offline):
+                return runner(argv, check=False).returncode
+        return run_native_training(argv, split, receipt)
     finally:
         for path in written:
             if output.is_dir() and not output.is_symlink():
@@ -149,7 +260,88 @@ def launch(*, dataset: Path, repo_id: str, inventory: Path, profile: str,
                 path.unlink()
 
 
+def run_native_training(argv: list[str], split: dict, receipt: dict) -> int:
+    with approval.local_hf_offline(_delegated_training(split, receipt)):
+        return _run_native_training(argv, split, receipt)
+
+
+def _run_native_training(argv: list[str], split: dict, receipt: dict) -> int:
+    """Use the official trainer with admitted partitions and TRAIN-only normalization.
+
+    LeRobot 0.6.1 selects samples but retains global metadata statistics. Adapt
+    its dataset factory in this process only, before policy/processors are made.
+    """
+    from lerobot.scripts import lerobot_train
+    import numpy as np
+
+    original_factory = lerobot_train.make_train_eval_datasets
+    original_argv = sys.argv
+
+    def admitted_datasets(cfg):
+        dataset = cfg.dataset
+        if (str(dataset.root) != split["dataset_identity"]["dataset_root"]
+                or dataset.repo_id != split["repo_id"]
+                or (dataset.episodes or list(range(split["total_episodes"]))) != split["selected_episodes"]
+                or dataset.eval_split != split["eval_split"] or dataset.streaming
+                or dataset.use_imagenet_stats != receipt["normalization"]["use_imagenet_stats"]):
+            raise ContractError("TRAINING_RUNTIME_DATASET")
+        train, heldout = original_factory(cfg)
+        for actual, expected in ((train, split["train_episodes"]), (heldout, split["eval_episodes"])):
+            if actual is None or actual.episodes != expected:
+                raise ContractError("TRAINING_RUNTIME_SPLIT")
+            actual.meta.stats = {key: {name: np.asarray(value) for name, value in stats.items()}
+                                 for key, stats in receipt["normalization"]["stats"].items()}
+        return train, heldout
+
+    try:
+        sys.argv = list(argv)
+        lerobot_train.make_train_eval_datasets = admitted_datasets
+        lerobot_train.main()
+        return 0
+    finally:
+        lerobot_train.make_train_eval_datasets = original_factory
+        sys.argv = original_argv
+
+
+def resume_training(checkpoint: Path) -> int:
+    from tools.validate_training_checkpoint import validate_checkpoint
+
+    policy, output = validate_checkpoint(checkpoint)
+    # Checkpoint validation accepts pending manifests from an interrupted launch.
+    values = []
+    for name in ("fr5_training_split.json", "fr5_training_receipt.json"):
+        path = output / name
+        if not path.is_file():
+            path = Path(str(output) + f".{name}.pending")
+        values.append(load_json_strict(path))
+    split, receipt = values
+    inventory = approval.validate_current_training_inventory(
+        receipt["approved_inventory_path"],
+        dataset_root=split["dataset_identity"]["dataset_root"],
+        repo_id=split["repo_id"], selected_episodes=split["selected_episodes"],
+    )
+    delegated = _enforce_delegated_launch(
+        inventory, dataset=Path(split["dataset_identity"]["dataset_root"]),
+        repo_id=split["repo_id"], profile=split["feature_contract"]["profile"],
+        config=options(receipt["normalized_argv"][1:]),
+    )
+    if delegated:
+        saved = load_json_strict(policy / "train_config.json")
+        _enforce_delegated_launch(
+            inventory, dataset=Path(split["dataset_identity"]["dataset_root"]),
+            repo_id=split["repo_id"], profile=split["feature_contract"]["profile"],
+            config=_saved_launch_options(saved, output),
+        )
+    return run_native_training([receipt["normalized_argv"][0], "--resume=true",
+        f"--config_path={policy / 'train_config.json'}", f"--output_dir={output}"],
+        split, receipt)
+
+
 def prepare_approvals(request: dict, output: Path, approved_by: str) -> tuple[dict, list[dict]]:
+    return _prepare_approvals(request, output, approved_by, check_targets=True)
+
+
+def _prepare_approvals(request: dict, output: Path, approved_by: str, *, check_targets: bool) -> tuple[dict, list[dict]]:
     approval._exact(request, frozenset({"dataset_root", "dataset_id", "repo_id", "episodes"}), "TRAINING_PREAPPROVAL_FIELDS")
     dataset = approval.current_dataset_identity(request["dataset_root"], repo_id=request["repo_id"], dataset_id=request["dataset_id"])
     if output.resolve().is_relative_to(Path(dataset["dataset_root"])) or output.is_symlink() or not output.is_dir():
@@ -187,8 +379,9 @@ def prepare_approvals(request: dict, output: Path, approved_by: str) -> tuple[di
             )
         provenance_path = output / f"{source['episode_id']}.provenance.json"
         target = output / f"{source['episode_id']}.approval.json"
-        for path in (provenance_path, target):
-            approval._target(path, "TRAINING_APPROVAL_EXISTS")
+        if check_targets:
+            for path in (provenance_path, target):
+                approval._target(path, "TRAINING_APPROVAL_EXISTS")
         kwargs = dict(scope=approval.PRODUCTION_SCOPE, dataset_identity=dataset,
             episode_id=source["episode_id"], episode_index=source["episode_index"], episode_content_digest=content_digest,
             technical_validator_path=str(technical_path), technical_validator_digest=technical_digest,
@@ -197,7 +390,8 @@ def prepare_approvals(request: dict, output: Path, approved_by: str) -> tuple[di
         drafts.append({"output_path": str(target), "approval_arguments": kwargs, "provenance": provenance,
                        "reviewer_id": semantic["reviewed_by"]})
     approval._unique_episodes([d["approval_arguments"] for d in drafts], [d["provenance"] for d in drafts])
-    approval._target(output / "training_approved.json", "TRAINING_INVENTORY_EXISTS")
+    if check_targets:
+        approval._target(output / "training_approved.json", "TRAINING_INVENTORY_EXISTS")
     return dataset, drafts
 
 
@@ -229,60 +423,264 @@ def _batch_summary(dataset: dict, drafts: list[dict], batch_digest: str, output:
     return "\n".join(lines)
 
 
-def approve(request: dict, output: Path, approved_by: str, *, dry_run: bool) -> dict:
-    # Freeze caller-owned selection as well as the evidence. There is no caller
-    # supplied confirmation, consent flag, or production confirmation callback.
+@dataclass(frozen=True)
+class PreparedApprovalBatch:
+    """Server-held value, never deserialized from browser input or a consent token.
+
+    Preparing or displaying it grants no approval. The server owns the human
+    decision, configured approver identity and access to publish_approval_batch.
+    """
+
+    _snapshot: str
+
+    @property
+    def preview(self) -> dict:
+        value = json.loads(self._snapshot)
+        return {
+            "status": "PREVIEW_NOT_APPROVED", "dataset_identity": value["dataset"],
+            "selected_count": len(value["drafts"]),
+            "episodes": [{"episode_id": draft["approval_arguments"]["episode_id"],
+                          "episode_index": draft["approval_arguments"]["episode_index"],
+                          "technical_status": "PASS", "semantic_status": "PASS",
+                          "reviewer_id": draft["reviewer_id"]} for draft in value["drafts"]],
+            "batch_digest": value["batch_digest"], "starts_training": False,
+            "limitations": ["Approves only this exact frozen batch for training admission.",
+                            "Does not establish learning performance or authorize robot execution."],
+        }
+
+
+def _approval_documents(drafts: list[dict], reviewed_at: datetime) -> list[dict]:
+    return [approval._prepare_training_approval(
+        **{**draft["approval_arguments"], "episode_provenance_path": draft["provenance"]},
+        clock=lambda: reviewed_at,
+    ) for draft in drafts]
+
+
+def _delegation_reference(path: Path, *, actor: str, dataset: dict) -> tuple[dict, dict]:
+    path = path.expanduser()
+    if path.is_symlink() or not path.is_file():
+        raise ContractError("TRAINING_DELEGATION_ARTIFACT")
+    path = path.resolve()
+    value = load_json_strict(path)
+    delegation = approval.validate_local_training_delegation(
+        value, authorized_actor=actor, dataset=dataset,
+    )
+    return delegation, {"artifact_path": str(path), "artifact_digest": canonical_digest(value)}
+
+
+def _delegation_output(delegation: dict, output: Path, dataset: dict) -> None:
+    root = Path(delegation["output_root"])
+    if root.is_symlink() or not root.is_dir():
+        raise ContractError("TRAINING_DELEGATION_OUTPUT")
+    resolved = output.resolve()
+    if (
+        output.is_symlink() or not output.is_dir()
+        or not resolved.is_relative_to(root.resolve())
+        or resolved.is_relative_to(Path(dataset["dataset_root"]))
+    ):
+        raise ContractError("TRAINING_DELEGATION_OUTPUT")
+
+
+def _delegated_documents(
+    drafts: list[dict], *, actor: str, authorized_at: datetime,
+    delegation_reference: dict,
+) -> list[dict]:
+    documents = []
+    for draft in drafts:
+        human_shape = approval._prepare_training_approval(
+            **{**draft["approval_arguments"], "episode_provenance_path": draft["provenance"]},
+            clock=lambda: authorized_at,
+        )
+        documents.append({
+            **{key: human_shape[key] for key in approval.APPROVAL_KEYS
+               if key not in {"approved_by", "approved_at", "provenance"}},
+            "schema_version": approval.DELEGATED_APPROVAL_SCHEMA,
+            "authorized_actor": actor,
+            "authorized_at": human_shape["approved_at"],
+            "provenance": approval.DELEGATED_PROVENANCE,
+            "delegation": copy.deepcopy(delegation_reference),
+        })
+    batch_digest = approval.delegated_batch_digest(documents)
+    result = [{**document, "batch_digest": batch_digest} for document in documents]
+    for document in result:
+        approval.validate_training_authorization(document)
+    return result
+
+
+def delegate_training_batch(
+    request: dict, output: Path, authorized_actor: str, delegation_path: Path,
+    *, clock=lambda: datetime.now(timezone.utc),
+) -> dict:
+    """Issue an exact batch under recorded user-authorized local delegation."""
+    request = copy.deepcopy(request)
+    actor = approval._id(authorized_actor, "TRAINING_DELEGATION_ACTOR")
+    output = output.resolve() if not output.is_symlink() else output
+    dataset, drafts = prepare_approvals(request, output, actor)
+    delegation, reference = _delegation_reference(
+        delegation_path, actor=actor, dataset=dataset,
+    )
+    _delegation_output(delegation, output, dataset)
+    authorized_at = clock()
+    if not isinstance(authorized_at, datetime) or authorized_at.tzinfo is None:
+        raise ContractError("TRAINING_AUTHORIZATION_TIME")
+    documents = _delegated_documents(
+        drafts, actor=actor, authorized_at=authorized_at,
+        delegation_reference=reference,
+    )
+    directory = output.stat()
+    value = {
+        "request": request, "output": str(output), "approved_by": actor,
+        "output_identity": [directory.st_dev, directory.st_ino],
+        "dataset": dataset, "drafts": drafts, "documents": documents,
+        "authorized_at": authorized_at.isoformat(),
+        "delegation_path": reference["artifact_path"], "delegation": delegation,
+        "delegation_reference": reference,
+    }
+    return _publish_authorization_batch(
+        value, documents=documents, provenance=approval.DELEGATED_PROVENANCE,
+        revalidate=_revalidate_delegated_batch,
+    )
+
+
+def _revalidate_delegated_batch(value: dict, *, check_targets: bool) -> None:
+    output = Path(value["output"])
+    if _prepare_approvals(
+        value["request"], output, value["approved_by"], check_targets=check_targets,
+    ) != (value["dataset"], value["drafts"]):
+        raise ContractError("TRAINING_INPUT_CHANGED")
+    delegation, reference = _delegation_reference(
+        Path(value["delegation_path"]), actor=value["approved_by"], dataset=value["dataset"],
+    )
+    _delegation_output(delegation, output, value["dataset"])
+    if (
+        delegation != value["delegation"]
+        or reference != value["delegation_reference"]
+        or _delegated_documents(
+            value["drafts"], actor=value["approved_by"],
+            authorized_at=datetime.fromisoformat(value["authorized_at"]),
+            delegation_reference=value["delegation_reference"],
+        ) != value["documents"]
+    ):
+        raise ContractError("TRAINING_INPUT_CHANGED")
+
+
+def prepare_approval_batch(request: dict, output: Path, approved_by: str) -> PreparedApprovalBatch:
+    """Prepare without writes; arguments come from trusted server configuration."""
     request = copy.deepcopy(request)
     output = output.resolve() if not output.is_symlink() else output
     dataset, drafts = prepare_approvals(request, output, approved_by)
     reviewed_at = datetime.now(timezone.utc)
-    documents = [approval._prepare_training_approval(
-        **{**draft["approval_arguments"], "episode_provenance_path": draft["provenance"]},
-        clock=lambda: reviewed_at,
-    ) for draft in drafts]
+    documents = _approval_documents(drafts, reviewed_at)
     batch_digest = approval._batch_digest(documents)
+    directory = output.stat()
+    return PreparedApprovalBatch(json.dumps({
+        "request": request, "output": str(output), "approved_by": approved_by,
+        "output_identity": [directory.st_dev, directory.st_ino],
+        "dataset": dataset, "drafts": drafts, "documents": documents,
+        "reviewed_at": reviewed_at.isoformat(), "batch_digest": batch_digest,
+    }, sort_keys=True, separators=(",", ":"), allow_nan=False))
+
+
+def _revalidate_approval_batch(value: dict, *, check_targets: bool) -> None:
+    # Reopen the complete source graph, even after per-episode publication.
+    if _prepare_approvals(value["request"], Path(value["output"]), value["approved_by"],
+                          check_targets=check_targets) != (value["dataset"], value["drafts"]):
+        raise ContractError("TRAINING_INPUT_CHANGED")
+    if _approval_documents(value["drafts"], datetime.fromisoformat(value["reviewed_at"])) != value["documents"]:
+        raise ContractError("TRAINING_INPUT_CHANGED")
+
+
+def publish_approval_batch(prepared: PreparedApprovalBatch) -> dict:
+    """Publish only after the trusted caller's explicit human decision.
+
+    No JSON/dict confirmation or callback is accepted. This function does not
+    authenticate a human: the CLI or Web UI owns that interaction boundary.
+    Concurrent publishers serialize on the existing output directory; exclusive
+    artifacts reject replay. A partial attempt cannot publish an inventory.
+    """
+    if type(prepared) is not PreparedApprovalBatch:
+        raise ContractError("TRAINING_PREPARED_BATCH_REQUIRED")
+    value = json.loads(prepared._snapshot)
+    documents = [
+        {**document, "schema_version": approval.BATCH_APPROVAL_SCHEMA,
+         "batch_digest": value["batch_digest"]}
+        for document in value["documents"]
+    ]
+    for document in documents:
+        approval.validate_training_approval(document)
+    return _publish_authorization_batch(
+        value, documents=documents, provenance=approval.PROVENANCE,
+        revalidate=_revalidate_approval_batch,
+    )
+
+
+def _publish_authorization_batch(
+    value: dict, *, documents: list[dict], provenance: str, revalidate,
+) -> dict:
+    """Publish either authority mode through one locked exact-batch transaction."""
+    dataset, drafts = value["dataset"], value["drafts"]
+    output = Path(value["output"])
+    fd = os.open(output, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError as exc:
+            raise ContractError("TRAINING_APPROVAL_BUSY") from exc
+        directory = os.fstat(fd)
+        if [directory.st_dev, directory.st_ino] != value["output_identity"]:
+            raise ContractError("TRAINING_APPROVAL_OUTPUT_CHANGED")
+        revalidate(value, check_targets=True)
+        entries = []
+        for draft, document in zip(drafts, documents):
+            args = draft["approval_arguments"]
+            approval._write_exclusive(
+                Path(args["episode_provenance_path"]), draft["provenance"],
+                "TRAINING_APPROVAL_EXISTS",
+            )
+            approval._write_exclusive(
+                Path(draft["output_path"]), document, "TRAINING_APPROVAL_EXISTS",
+            )
+            entries.append({
+                "dataset_identity_digest": canonical_digest(dataset),
+                "episode_id": args["episode_id"], "episode_index": args["episode_index"],
+                "episode_content_digest": args["episode_content_digest"],
+                "technical_validator": {"artifact_path": args["technical_validator_path"], "artifact_digest": args["technical_validator_digest"], "status": "PASS"},
+                "human_semantic_evidence": {"artifact_path": args["human_semantic_evidence_path"], "artifact_digest": args["human_semantic_evidence_digest"], "status": "PASS", "reviewer_id": draft["reviewer_id"]},
+                "episode_provenance": {"artifact_path": args["episode_provenance_path"], "artifact_digest": args["episode_provenance_digest"]},
+                "training_approval": {"artifact_path": draft["output_path"], "artifact_digest": canonical_digest(document), "provenance": provenance},
+            })
+        inventory = approval.build_training_approved_inventory(
+            scope=approval.PRODUCTION_SCOPE, dataset_identity=dataset, episodes=entries,
+        )
+        revalidate(value, check_targets=False)
+        directory = output.stat()
+        if [directory.st_dev, directory.st_ino] != value["output_identity"]:
+            raise ContractError("TRAINING_APPROVAL_OUTPUT_CHANGED")
+        approval.write_training_approved_inventory(output / "training_approved.json", inventory)
+        return inventory
+    finally:
+        os.close(fd)
+
+
+def approve(request: dict, output: Path, approved_by: str, *, dry_run: bool) -> dict:
+    prepared = prepare_approval_batch(request, output, approved_by)
+    value = json.loads(prepared._snapshot)
+    dataset, drafts = value["dataset"], value["drafts"]
+    output, batch_digest = Path(value["output"]), value["batch_digest"]
     summary = _batch_summary(dataset, drafts, batch_digest, output, approved_by)
     if dry_run:
         return {"status": "PREVIEW_NOT_APPROVED", "dataset_identity": dataset, "episodes": drafts,
                 "inventory_path": str(output / "training_approved.json"),
                 "human_confirmation": "REQUIRED_ONCE_FOR_EXACT_BATCH_ON_DEV_TTY", "review_summary": summary}
     approval._confirm_human_training_approval("APPROVE BATCH " + batch_digest.removeprefix("sha256:")[:12], summary=summary)
-    # The complete source graph (including seed/ledger sources, metadata, and
-    # dataset bytes) must still derive exactly what the human just reviewed.
-    if prepare_approvals(request, output, approved_by) != (dataset, drafts):
-        raise ContractError("TRAINING_INPUT_CHANGED")
-    rechecked = [approval._prepare_training_approval(
-        **{**draft["approval_arguments"], "episode_provenance_path": draft["provenance"]},
-        clock=lambda: reviewed_at,
-    ) for draft in drafts]
-    if rechecked != documents:
-        raise ContractError("TRAINING_INPUT_CHANGED")
-    entries = []
-    for draft, document in zip(drafts, documents):
-        args = draft["approval_arguments"]
-        issued = {**document, "schema_version": approval.BATCH_APPROVAL_SCHEMA, "batch_digest": batch_digest}
-        approval.validate_training_approval(issued)
-        approval._write_exclusive(Path(args["episode_provenance_path"]), draft["provenance"], "TRAINING_APPROVAL_EXISTS")
-        approval._write_exclusive(Path(draft["output_path"]), issued, "TRAINING_APPROVAL_EXISTS")
-        entries.append({
-            "dataset_identity_digest": canonical_digest(dataset),
-            "episode_id": args["episode_id"], "episode_index": args["episode_index"],
-            "episode_content_digest": args["episode_content_digest"],
-            "technical_validator": {"artifact_path": args["technical_validator_path"], "artifact_digest": args["technical_validator_digest"], "status": "PASS"},
-            "human_semantic_evidence": {"artifact_path": args["human_semantic_evidence_path"], "artifact_digest": args["human_semantic_evidence_digest"], "status": "PASS", "reviewer_id": draft["reviewer_id"]},
-            "episode_provenance": {"artifact_path": args["episode_provenance_path"], "artifact_digest": args["episode_provenance_digest"]},
-            "training_approval": {"artifact_path": draft["output_path"], "artifact_digest": canonical_digest(issued), "provenance": approval.PROVENANCE},
-        })
-    inventory = approval.build_training_approved_inventory(scope=approval.PRODUCTION_SCOPE, dataset_identity=dataset, episodes=entries)
-    if approval.current_dataset_identity(request["dataset_root"], repo_id=request["repo_id"], dataset_id=request["dataset_id"]) != dataset:
-        raise ContractError("TRAINING_DATASET_CHANGED")
-    approval.write_training_approved_inventory(output / "training_approved.json", inventory)
-    return inventory
+    return publish_approval_batch(prepared)
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest="mode", required=True)
+    resume = sub.add_parser("resume", help="Resume an admitted checkpoint with its TRAIN normalization")
+    resume.add_argument("--checkpoint", type=Path, required=True)
     human = sub.add_parser("approve", help="Preview a frozen revision; issue approval only through a controlling human TTY",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog='''Request JSON (paths reference existing evidence; no consent field):
@@ -310,6 +708,13 @@ for a new reviewed attempt. This command never starts training or robot executio
     human.add_argument("--output-dir", type=Path, required=True, help="Existing directory outside the dataset; new exclusive artifacts only")
     human.add_argument("--approved-by", required=True)
     human.add_argument("--dry-run", "--preview", action="store_true")
+    delegated = sub.add_parser(
+        "delegate", help="Issue a frozen batch under an existing local delegation",
+    )
+    delegated.add_argument("--request", type=Path, required=True)
+    delegated.add_argument("--output-dir", type=Path, required=True)
+    delegated.add_argument("--delegation", type=Path, required=True)
+    delegated.add_argument("--authorized-actor", required=True)
     for mode in ("check", "launch"):
         command = sub.add_parser(mode)
         command.add_argument("--dataset", type=Path, required=True)
@@ -324,11 +729,18 @@ for a new reviewed attempt. This command never starts training or robot executio
             command.add_argument("argv", nargs=argparse.REMAINDER)
     args = parser.parse_args()
     try:
-        if args.mode == "approve":
+        if args.mode == "resume":
+            raise SystemExit(resume_training(args.checkpoint))
+        elif args.mode == "approve":
             print(json.dumps(approve(load_json_strict(args.request), args.output_dir.resolve(), args.approved_by, dry_run=args.dry_run), indent=2, sort_keys=True))
+        elif args.mode == "delegate":
+            print(json.dumps(delegate_training_batch(
+                load_json_strict(args.request), args.output_dir,
+                args.authorized_actor, args.delegation,
+            ), indent=2, sort_keys=True))
         elif args.mode == "check":
             check_inventory(args.dataset, args.repo_id, args.approved_inventory, args.episodes)
-            print("PASS current human-approved inventory and exact selected episodes")
+            print("PASS current training-authorized inventory and exact selected episodes")
         else:
             argv = args.argv[1:] if args.argv[:1] == ["--"] else args.argv
             raise SystemExit(launch(dataset=args.dataset, repo_id=args.repo_id, inventory=args.approved_inventory,

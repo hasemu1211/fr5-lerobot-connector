@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <!-- OPERATOR_TOKEN -->
+  <title>FR5 · 학습 데이터 검토</title>
+  <link rel="stylesheet" href="styles.css">
+  <script src="training.js" defer></script>
+</head>
+<body>
+  <a class="skip-link" href="#training-review">학습 검토로 건너뛰기</a>
+  <header class="app-header"><div class="brand">
+    <span class="brand-mark" aria-hidden="true">FR5</span>
+    <div><p>FR5 · ROBOT LEARNING DATA FACTORY</p><h1>학습 데이터 검토</h1></div>
+  </div></header>
+  <p id="training-status" class="connection-banner" role="status" aria-live="polite">현재 검토 상태를 확인하고 있습니다.</p>
+  <main class="work-area" id="training-review" tabindex="-1">
+    <section class="flow-step" aria-labelledby="review-title">
+      <header class="step-heading"><h2 id="review-title">이 묶음을 학습에 사용할까요?</h2>
+        <p>기술 검사와 내용 판정을 통과한 에피소드만 표시합니다. 승인은 학습 사용을 허용할 뿐, 학습이나 로봇 동작을 시작하지 않습니다.</p></header>
+      <p id="training-operator"></p>
+      <p>로컬 단일 운영자 화면입니다. 설정된 운영자 이름은 로그인으로 인증된 신원이 아닙니다.</p>
+      <div id="training-preview" hidden>
+        <h3 id="training-dataset"></h3>
+        <p id="training-count"></p>
+        <ul id="training-episodes" class="training-episodes"></ul>
+        <details><summary>묶음 식별과 저장 위치</summary>
+          <p>데이터 식별: <code id="training-identity"></code></p>
+          <p>승인 묶음: <code id="training-digest"></code></p>
+          <p>승인 결과: <code id="training-output"></code></p>
+        </details>
+        <p>승인 직전에 원본과 판정 근거를 다시 검사합니다. 변경된 입력이나 일부만 저장된 결과는 학습 승인으로 인정하지 않습니다.</p>
+      </div>
+      <div class="step-actions">
+        <button id="training-refresh" class="secondary-button" type="button">현재 상태 확인</button>
+        <button id="training-prepare" type="button" hidden>검토할 묶음 확인</button>
+        <button id="training-refuse" class="secondary-button" type="button" hidden>승인하지 않음</button>
+        <button id="training-approve" type="button" hidden>표시된 묶음의 학습 사용 승인</button>
+      </div>
+    </section>
+  </main>
+</body>
+</html>

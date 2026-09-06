@@ -78,7 +78,7 @@ if [[ -n "$RESUME_FROM" ]]; then
   if [[ ! -f "$RESUME_RECEIPT" && -f "$PENDING_RECEIPT" ]]; then
     mv "$PENDING_RECEIPT" "$RESUME_RECEIPT"
   fi
-  exec "${RESUME_COMMAND[@]}"
+  exec "$ROOT/.venv/bin/python" "$ROOT/tools/data_factory/training_entrypoint.py" resume --checkpoint "$RESUME_FROM"
 fi
 
 case "$PROFILE" in
@@ -197,8 +197,10 @@ PY
 )
 POLICY_JSON="$("$ROOT/.venv/bin/python" "$ROOT/tools/fr5_training_profile.py" "$PROFILE" "$DATASET" --json)"
 mapfile -d '' -t POLICY_ARGS < <("$ROOT/.venv/bin/python" -c 'import json,sys; sys.stdout.buffer.write(b"\0".join(x.encode() for x in json.loads(sys.argv[1])) + b"\0")' "$POLICY_JSON")
-HUB_ARGS=(--policy.push_to_hub=false)
-if has_option --policy.repo_id "$@" || has_option --policy.push_to_hub "$@"; then HUB_ARGS=(); fi
+REMOTE_DISABLE_ARGS=()
+for option in --policy.push_to_hub --save_checkpoint_to_hub --wandb.enable; do
+  if ! has_option "$option" "$@"; then REMOTE_DISABLE_ARGS+=("$option=false"); fi
+done
 COMMAND=(
   "$ROOT/.venv/bin/lerobot-train"
   "${POLICY_ARGS[@]}"
@@ -206,7 +208,7 @@ COMMAND=(
   --dataset.root="$DATASET"
   "${TRANSFORM_ARGS[@]}"
   --output_dir="$OUTPUT"
-  "${HUB_ARGS[@]}"
+  "${REMOTE_DISABLE_ARGS[@]}"
   "$@"
 )
 

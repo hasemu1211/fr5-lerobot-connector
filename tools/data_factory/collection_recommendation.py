@@ -9,6 +9,9 @@ from tools.data_factory.candidate_admission import (
 )
 from tools.data_factory.campaign_authoring import (
     MANIFEST_SCHEMA_V2 as MANIFEST_SCHEMA,
+    _base_counts,
+    _candidate_slots,
+    _slot_template,
     validate_campaign_compilation_receipt,
 )
 from tools.data_factory.episode_ledger import (
@@ -19,6 +22,7 @@ from tools.data_factory.episode_ledger import (
 )
 from tools.data_factory.quality.coverage_report import (
     REPORT_SCHEMA as DATA_QUALITY_SCHEMA,
+    build_coverage_report,
     validate_coverage_report,
 )
 from tools.fr5_data_factory import (
@@ -94,7 +98,7 @@ VIEW_AUTHORITY = {
 }
 CLAIM_CLASSES = frozenset({"OBSERVED", "SUGGESTED", "UNKNOWN"})
 CLAIM_SUBJECTS = frozenset({
-    "person", "background", "robot", "coverage", "quality", "rollout",
+    "person", "background", "robot", "coverage", "quality", "rollout", "semantic",
 })
 UNKNOWN_REASON_SUBJECTS = {
     "PERSON_LABELS_UNAVAILABLE": "person",
@@ -103,12 +107,13 @@ UNKNOWN_REASON_SUBJECTS = {
     "COVERAGE_NOT_MEASURED": "coverage",
     "DATA_QUALITY_ANALYSIS_UNAVAILABLE": "quality",
     "NO_CANONICAL_PHYSICAL_ROLLOUT_ANALYSIS": "rollout",
+    "SEMANTIC_PROOF_UNAVAILABLE": "semantic",
 }
 OBSERVED_VALUE_FIELDS = frozenset({"metric", "count"})
 SUGGESTED_VALUES = frozenset({"COLLECT_MORE"})
 PATCH_FIELDS_ALLOWLIST = frozenset({
     "requested_count", "repeat", "split", "selection",
-    "state_space_design_factors",
+    "state_space_design_factors", "campaign_selection",
 })
 _MISSING = object()
 
@@ -473,7 +478,20 @@ def _claims(
 
 
 def _patch_value(field: str, value: object) -> Any:
-    if field in {"requested_count", "repeat"}:
+    if field == "campaign_selection":
+        from tools.data_factory.campaign_operator import UPDATE_FIELDS
+        value = _exact(value, UPDATE_FIELDS | {"source_hypothesis_digest"},
+                       "COLLECTION_RECOMMENDATION_PATCH_VALUE")
+        _digest(value["source_hypothesis_digest"], "COLLECTION_RECOMMENDATION_PATCH_VALUE")
+        if (value["authoring_mode"] != "DIRECT_EDIT"
+                or type(value["requested_count"]) is not int
+                or not 1 <= value["requested_count"] <= 100
+                or type(value["normalized_seed"]) is not int or value["normalized_seed"] < 0
+                or value["pinned"] != [] or value["excluded"] != []
+                or not isinstance(value["direct_slots"], list)
+                or len(value["direct_slots"]) != value["requested_count"]):
+            raise ContractError("COLLECTION_RECOMMENDATION_PATCH_VALUE")
+    elif field in {"requested_count", "repeat"}:
         if type(value) is not int or not 1 <= value <= 100:
             raise ContractError("COLLECTION_RECOMMENDATION_PATCH_VALUE")
     elif field == "split":
@@ -603,6 +621,138 @@ def build_collection_recommendation(
     }
     value["recommendation_digest"] = canonical_digest(value)
     return validate_collection_recommendation(value)
+
+
+def _unobserved_selection(source: Mapping[str, Any], report: Mapping[str, Any]) -> dict | None:
+    """Choose explicit admitted slots; a count alone cannot target a condition."""
+    hypothesis, draft = source["hypothesis"], source["draft"]
+    # Explicit human selection constraints are not ours to discard or reinterpret.
+    if draft["pinned"] or draft["excluded"]:
+        return None
+    counts = _base_counts(hypothesis)
+    missing = {canonical_digest(cell["condition"]) for cell in report["cells"]
+               if not cell["counts"]["collected"]}
+    bases = {base["base_condition_digest"]: base for base in hypothesis["base_conditions"]}
+    slots = []
+    selected_conditions = set()
+    # Reuse the compiler owner's candidate enumeration and budget accounting.
+    for slot in sorted(_candidate_slots(hypothesis, 1, _slot_template(draft)),
+                       key=lambda item: item["slot_id"]):
+        if counts[slot["base_condition_digest"]]["pending_review"]:
+            continue
+        condition = canonical_digest(bases[slot["base_condition_digest"]]["coverage_condition"])
+        if condition in missing and condition not in selected_conditions:
+            slots.append(slot)
+            selected_conditions.add(condition)
+        if len(slots) >= min(draft["requested_count"], 100):
+            break
+    if not slots:
+        return None
+    return {
+        "source_hypothesis_digest": hypothesis["hypothesis_digest"],
+        "authoring_mode": "DIRECT_EDIT", "requested_count": len(slots),
+        "normalized_seed": draft["normalized_seed"], "pinned": [], "excluded": [],
+        "direct_slots": slots,
+    }
+
+
+def derive_collection_recommendation(
+    *, compiled_authoring: Mapping[str, Any],
+    episode_evidence: Sequence[Mapping[str, Any]], source_commit: str,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Measure the retained domain and advise a bounded first coverage pass.
+
+    Historical aggregate counts are deliberately not merged with these episodes:
+    their overlap is unknown. No semantic, vision or rollout conclusion is inferred.
+    """
+    from tools.data_factory.campaign_operator import validate_compiled_authoring_evidence
+
+    source = validate_compiled_authoring_evidence(compiled_authoring)
+    manifest, hypothesis = source["manifest"], source["hypothesis"]
+    summaries = _episode_summaries(episode_evidence, manifest, normalize=True)
+    bases = {item["base_condition_digest"]: item for item in hypothesis["base_conditions"]}
+    jobs = {item["resolved_job_digest"]: item["normalized_job"] for item in hypothesis["resolver_receipts"]}
+    episodes = []
+    for evidence in sorted(episode_evidence, key=lambda item: item["manifest_order_index"]):
+        ledger, state = evidence["ledger"], evidence["state"]
+        semantic = state["review"]["semantic_status"]
+        episodes.append({
+            "episode_id": ledger["episode"]["run_id"],
+            "condition": bases[ledger["bindings"]["base_condition_digest"]]["coverage_condition"],
+            "admission_state": (
+                "HUMAN_SEMANTIC_PASS" if semantic == "PASS"
+                else "PENDING_REVIEW" if semantic == "PENDING"
+                else "REJECTED"
+            ),
+            "evidence_digests": {
+                "job_spec": canonical_digest(jobs[ledger["bindings"]["resolved_job_digest"]]),
+                "technical_validator_result": ledger["artifacts"]["technical"]["artifact_digest"],
+                "candidate_admission": canonical_digest(evidence["candidate"]),
+            },
+            "trajectory_continuity": {},
+        })
+    previous = hypothesis["coverage_report"]
+    report = build_coverage_report(
+        collection_profile_id=previous["collection_profile_id"],
+        domain=[cell["condition"] for cell in previous["cells"]], episodes=episodes,
+    )
+    report_digest = canonical_digest(report)
+    claims = [{
+        "claim_id": "coverage-observed", "class": "OBSERVED", "subject": "coverage",
+        "value": {"metric": "COLLECTED_EPISODE_COUNT", "count": len(summaries)},
+        "evidence_refs": [manifest["manifest_digest"], report_digest],
+        "basis_claim_ids": [], "reason_codes": [],
+    }]
+    for reason, subject in UNKNOWN_REASON_SUBJECTS.items():
+        if subject in {"person", "background", "robot", "rollout"} or (
+            subject == "semantic" and any(
+                item["state"]["review"]["semantic_status"] == "PENDING" for item in episode_evidence
+            )
+        ):
+            claims.append({
+                "claim_id": f"{subject}-unknown", "class": "UNKNOWN", "subject": subject,
+                "value": None, "evidence_refs": [], "basis_claim_ids": [],
+                "reason_codes": [reason],
+            })
+    # One attempt per unobserved qualified condition is a finite coverage proposal,
+    # not an assertion of data sufficiency or a reason to repeat approved cells.
+    qualified = {canonical_digest(base["coverage_condition"]) for base in bases.values()}
+    missing = [cell for cell in report["cells"] if not cell["counts"]["collected"]
+               and canonical_digest(cell["condition"]) in qualified]
+    patches = []
+    if any(cell["condition"] == report["suggest_next"] for cell in missing):
+        claims.append({
+            "claim_id": "coverage-suggested", "class": "SUGGESTED", "subject": "coverage",
+            "value": "COLLECT_MORE", "evidence_refs": [report_digest],
+            "basis_claim_ids": ["coverage-observed"], "reason_codes": ["COVERAGE_DEFICIT"],
+        })
+        selection = _unobserved_selection(source, report)
+        if selection is not None:
+            patches.append({
+                "change_id": "cover-unobserved-conditions", "field": "campaign_selection",
+                "value": selection, "basis_claim_ids": ["coverage-suggested"],
+            })
+    recommendation = build_collection_recommendation(
+        recommendation_id="collection-" + canonical_digest({
+            "authoring": source["authoring_digest"], "episodes": summaries,
+            "quality": report_digest, "source_commit": source_commit,
+        })[7:31],
+        source_commit=source_commit, campaign_manifest=manifest,
+        campaign_hypothesis=hypothesis, campaign_draft=source["draft"],
+        campaign_compilation_receipt=source["compilation_receipt"],
+        episode_evidence=episode_evidence, data_quality_analysis=report,
+        data_quality_analysis_ref={
+            "availability": "AVAILABLE", "schema_version": report["schema_version"],
+            "analysis_id": report["collection_profile_id"], "analysis_digest": report_digest,
+            "reason_codes": [],
+        },
+        rollout_evidence_analysis_ref={
+            "availability": "UNAVAILABLE", "schema_version": None, "analysis_id": None,
+            "analysis_digest": None, "reason_codes": ["NO_CANONICAL_PHYSICAL_ROLLOUT_ANALYSIS"],
+        },
+        claims=claims, suggested_draft_patches=patches,
+    )
+    return report, recommendation
 
 
 def _snapshot(value: object) -> dict[str, Any]:
@@ -761,6 +911,8 @@ def project_update_draft_intent(
     if len(selected) != 1:
         raise ContractError("COLLECTION_RECOMMENDATION_PATCH_SELECTION")
     patch = selected[0]
+    if patch["field"] == "campaign_selection":
+        raise ContractError("COLLECTION_RECOMMENDATION_CAMPAIGN_OWNER_REQUIRED")
     view = _exact(operator_view, VIEW_FIELDS, "COLLECTION_RECOMMENDATION_VIEW_FIELDS")
     projection = view["projection"]
     if (
@@ -846,8 +998,66 @@ def project_update_draft_intent(
     }
 
 
+def project_campaign_update_intent(
+    recommendation: object, *, compiled_authoring: Mapping[str, Any],
+    operator_view: Mapping[str, Any], data_quality_analysis: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Project exact condition selection to the existing CampaignOperator CAS.
+
+    This does not rewrite the Collection UI's observed object pose, compile a
+    plan, create a campaign, or obtain physical/training authority.
+    """
+    from tools.data_factory.campaign_operator import (
+        PROJECTION_SCHEMA, validate_compiled_authoring_evidence,
+    )
+
+    checked = validate_collection_recommendation(recommendation)
+    source = validate_compiled_authoring_evidence(compiled_authoring)
+    _analysis_ref(checked["input_snapshot"]["data_quality_analysis_ref"],
+                  owner="data_quality", artifact=data_quality_analysis, normalize=False)
+    selection = _unobserved_selection(source, data_quality_analysis)
+    patches = [patch for patch in checked["suggested_draft_patches"]
+               if patch["field"] == "campaign_selection"]
+    if (source["manifest"]["manifest_digest"] != checked["input_snapshot"]["campaign"]["manifest_digest"]
+            or selection is None or len(patches) != 1 or patches[0]["value"] != selection):
+        raise ContractError("COLLECTION_RECOMMENDATION_SELECTION_BINDING")
+    view = _exact(operator_view, VIEW_FIELDS, "COLLECTION_RECOMMENDATION_VIEW_FIELDS")
+    projection = view["projection"]
+    if (view["schema_version"] != VIEW_SCHEMA or view["authority"] != VIEW_AUTHORITY
+            or not isinstance(projection, Mapping) or projection.get("schema_version") != PROJECTION_SCHEMA
+            or not isinstance(projection.get("draft"), Mapping)
+            or projection["draft"].get("source") != source["draft"]["source"]
+            or type(view["revision"]) is not int or view["revision"] < 0
+            or not isinstance(view["generated_at"], str)
+            or RFC3339.fullmatch(view["generated_at"]) is None):
+        raise ContractError("COLLECTION_RECOMMENDATION_CAMPAIGN_VIEW")
+    _identifier(view["session_id"], "COLLECTION_RECOMMENDATION_VIEW_SESSION")
+    if view["view_digest"] != canonical_digest({
+        "session_id": view["session_id"], "revision": view["revision"], "projection": projection,
+    }):
+        raise ContractError("COLLECTION_RECOMMENDATION_VIEW_STALE")
+    # A fresh CAS cannot make advice derived from an older selection current.
+    # Ignore unrelated view revisions, but preserve every later selection edit.
+    if any(projection["draft"].get(key) != source["draft"].get(key) for key in (
+        "selector", "requested_count", "normalized_seed", "pinned", "excluded", "direct_slots",
+    )):
+        raise ContractError("COLLECTION_RECOMMENDATION_DRAFT_CHANGED")
+    return {
+        "schema_version": INTENT_SCHEMA,
+        "intent_id": "recommendation-" + canonical_digest([
+            checked["recommendation_digest"], view["view_digest"],
+        ])[7:31],
+        "session_id": view["session_id"], "view_revision": view["revision"],
+        "view_digest": view["view_digest"], "op": "update_draft",
+        "payload": {key: copy.deepcopy(value) for key, value in selection.items()
+                    if key != "source_hypothesis_digest"},
+    }
+
+
 __all__ = [
     "AUTHORITY", "SCHEMA_VERSION", "SNAPSHOT_SCHEMA",
     "build_collection_recommendation", "project_update_draft_intent",
+    "derive_collection_recommendation",
+    "project_campaign_update_intent",
     "validate_collection_recommendation",
 ]

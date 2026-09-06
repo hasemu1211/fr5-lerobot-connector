@@ -67,6 +67,9 @@ code { font-family: "SFMono-Regular", Consolas, monospace; overflow-wrap: anywhe
 .step-rail button small { color: var(--muted); font-size: .68rem; }
 
 .work-area { min-width: 0; padding: clamp(1.2rem, 3vw, 3rem); }
+#training-review { max-width: 85rem; margin: auto; }
+.training-episodes { overflow-wrap: anywhere; padding-left: 1.5rem; line-height: 1.8; }
+#training-review .step-actions { flex-wrap: wrap; }
 .campaign-facts { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); margin-bottom: 1rem; border: 1px solid #91a5b0; background: #1b2d3b; color: #fff; }
 .campaign-facts div { min-width: 0; padding: .7rem .8rem; border-right: 1px solid #587181; }
 .campaign-facts div:last-child { border-right: 0; }

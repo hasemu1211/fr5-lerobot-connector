@@ -915,6 +915,14 @@ def validate_loaded_episode_evidence(
         intent=intent, intent_digest=intent_digest,
         slot=slot, runtime=runtime,
     )
+    # A finite learned probe has no qualified reset/terminal protocol yet.
+    # Even a forged PASS wrapper must not turn its diagnostics into an episode.
+    envelope = loaded["plan"].get("plan_envelope", {})
+    learned_plan = envelope.get("plan", {}) if isinstance(envelope, Mapping) else {}
+    learned_data = loaded["execution"].get("data", {}) if isinstance(loaded["execution"], Mapping) else {}
+    if (isinstance(learned_plan, Mapping) and "learned_proposal" in learned_plan
+            or isinstance(learned_data, Mapping) and "learned_execution" in learned_data):
+        raise ContractError("EPISODE_LEDGER_LEARNED_TERMINAL_UNQUALIFIED")
     technical = _exact(loaded["technical"], TECHNICAL_FIELDS, "EPISODE_LEDGER_TECHNICAL_FIELDS")
     expected_fps = technical["expected_fps"]
     if (

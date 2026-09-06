@@ -8,7 +8,9 @@ real-robot task success and never sends robot commands.
 from __future__ import annotations
 
 import argparse
+import copy
 from contextlib import nullcontext
+from itertools import islice
 import json
 import math
 import os
@@ -16,6 +18,7 @@ from pathlib import Path
 import random
 import statistics
 import sys
+import time
 
 if __package__ in {None, ""}:
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -102,6 +105,33 @@ def _validate_output_target(
             )
 
 
+def _enforce_delegated_evaluation(
+    inventory: dict, *, dataset: Path, repo_id: str, output_dir: Path,
+    output: Path | None, batch_size: int,
+) -> None:
+    """Apply the current local delegation before inference imports or output."""
+    from tools.data_factory import training_approval
+
+    delegation = training_approval.inventory_local_training_delegation(inventory)
+    if delegation is None:
+        return
+    root = Path(delegation["output_root"])
+    candidates = [output_dir.resolve()]
+    if output is not None:
+        candidates.append(output.expanduser().resolve())
+    if (
+        delegation["dataset"] != {
+            "dataset_root": str(dataset.resolve()), "repo_id": repo_id,
+        }
+        or "smolvla" not in delegation["profiles"]
+        or root.is_symlink() or not root.is_dir()
+        or any(not candidate.is_relative_to(root.resolve()) for candidate in candidates)
+    ):
+        raise ValueError("offline evaluation exceeds local delegation scope")
+    if batch_size > delegation["limits"]["max_batch_size"]:
+        raise ValueError("offline evaluation exceeds delegated batch-size limit")
+
+
 def admit_evaluation(args: argparse.Namespace) -> dict:
     """Validate existing admission artifacts before loading torch or a policy."""
     from tools.data_factory import training_approval
@@ -142,11 +172,16 @@ def admit_evaluation(args: argparse.Namespace) -> dict:
     ):
         raise ValueError("approved inventory differs from the admitted training launch")
 
+    _enforce_delegated_evaluation(
+        inventory, dataset=dataset, repo_id=args.repo_id, output_dir=output_dir,
+        output=args.output, batch_size=args.batch_size,
+    )
+
     feature = split["feature_contract"]
     if feature["profile"] != "smolvla":
         raise ValueError("offline evaluator only accepts an admitted SmolVLA partition")
     episodes = list(split["eval_episodes"])
-    if args.episodes is not None and parse_episode_indices(args.episodes) != episodes:
+    if args.episodes is not None and parse_episode_indices(args.episodes) != sorted(episodes):
         raise ValueError(f"episodes must exactly match held-out split episodes: {episodes}")
     if (
         not episodes
@@ -178,6 +213,17 @@ def admit_evaluation(args: argparse.Namespace) -> dict:
 
 def evaluate(args: argparse.Namespace, admission: dict | None = None) -> dict:
     admission = admission or admit_evaluation(args)
+    from tools.data_factory import training_approval
+
+    delegated = training_approval.inventory_local_training_delegation(
+        admission["inventory"],
+    ) is not None
+    with training_approval.local_hf_offline(delegated):
+        return _evaluate(args, admission)
+
+
+def _evaluate(args: argparse.Namespace, admission: dict) -> dict:
+    started = time.perf_counter()
     import numpy as np
     import torch
     from torch.utils.data import DataLoader
@@ -194,6 +240,9 @@ def evaluate(args: argparse.Namespace, admission: dict | None = None) -> dict:
         device = "cuda" if torch.cuda.is_available() else "cpu"
     if device.startswith("cuda") and not torch.cuda.is_available():
         raise RuntimeError("CUDA was requested but is not available")
+    if device.startswith("cuda"):
+        torch.cuda.init()
+        torch.cuda.reset_peak_memory_stats(device)
 
     random.seed(args.seed)
     np.random.seed(args.seed)
@@ -203,6 +252,7 @@ def evaluate(args: argparse.Namespace, admission: dict | None = None) -> dict:
 
     checkpoint = admission["checkpoint"]
     metadata = LeRobotDatasetMetadata(args.repo_id, root=args.dataset)
+    metadata.stats = copy.deepcopy(admission["receipt"]["normalization"]["stats"])
     rename_map, empty_cameras = smolvla_camera_mapping(metadata.camera_keys)
     episodes = admission["episodes"]
     split = admission["split"]
@@ -250,14 +300,17 @@ def evaluate(args: argparse.Namespace, admission: dict | None = None) -> dict:
     )
 
     losses: list[float] = []
+    episode_losses: dict[int, list[float]] = {episode: [] for episode in episodes}
+    episode_lengths = {episode: int(dataset.meta.episodes[episode]["length"]) for episode in episodes}
+    if any(length < 1 for length in episode_lengths.values()):
+        raise RuntimeError("held-out metadata must contain positive episode lengths")
     evaluated_batches = 0
     evaluated_episodes: set[int] = set()
     available_batches = len(loader)
     amp = torch.autocast(device_type="cuda") if args.use_amp and device.startswith("cuda") else nullcontext()
+    batches_started = time.perf_counter()
     with torch.no_grad(), amp:
-        for batch_index, batch in enumerate(loader):
-            if args.max_batches and batch_index >= args.max_batches:
-                break
+        for batch in islice(loader, args.max_batches or None):
             if "episode_index" not in batch:
                 raise RuntimeError("evaluation batch is missing episode_index coverage metadata")
             batch_episodes = [int(value) for value in batch["episode_index"].detach().cpu().tolist()]
@@ -271,19 +324,33 @@ def evaluate(args: argparse.Namespace, admission: dict | None = None) -> dict:
             batch_losses = [float(value) for value in per_sample_loss.detach().cpu()]
             if len(batch_losses) != len(batch_episodes):
                 raise RuntimeError("loss count differs from evaluated episode coverage metadata")
+            if not all(math.isfinite(loss) for loss in batch_losses):
+                raise RuntimeError("evaluation produced a non-finite loss; no report is valid")
+            for episode, loss in zip(batch_episodes, batch_losses, strict=True):
+                episode_losses[episode].append(loss)
+                if len(episode_losses[episode]) > episode_lengths[episode]:
+                    raise RuntimeError("evaluated samples exceed the admitted episode length")
             losses.extend(batch_losses)
             evaluated_batches += 1
             evaluated_episodes.update(batch_episodes)
 
+    batches_seconds = time.perf_counter() - batches_started
     if not losses:
         raise RuntimeError("no samples were evaluated")
     ordered = sorted(losses)
+    episode_metrics = [{
+        "episode_index": episode,
+        "samples": len(episode_losses[episode]),
+        "available_samples": episode_lengths[episode],
+        "evaluation_complete": len(episode_losses[episode]) == episode_lengths[episode],
+        "loss_mean": statistics.fmean(episode_losses[episode]) if episode_losses[episode] else None,
+    } for episode in sorted(episodes)]
     evaluation_complete = (
         evaluated_batches == available_batches
-        and sorted(evaluated_episodes) == episodes
+        and all(item["evaluation_complete"] for item in episode_metrics)
     )
     report = {
-        "schema_version": 3,
+        "schema_version": 4,
         "metric": "smolvla_offline_flow_matching_loss",
         "warning": "Offline loss does not measure real-robot task success.",
         "evidence_scope": (
@@ -301,6 +368,12 @@ def evaluate(args: argparse.Namespace, admission: dict | None = None) -> dict:
         "selected_episodes": split["selected_episodes"],
         "train_episodes": split["train_episodes"],
         "samples": len(losses),
+        "available_samples": sum(episode_lengths.values()),
+        "episode_metrics": episode_metrics,
+        "episode_macro_loss_mean": statistics.fmean(
+            item["loss_mean"] for item in episode_metrics if item["samples"]
+        ),
+        "episode_macro_scope": "complete_heldout" if evaluation_complete else "observed_samples_only",
         "batch_size": args.batch_size,
         "requested_max_batches": args.max_batches,
         "available_batches": available_batches,
@@ -319,10 +392,21 @@ def evaluate(args: argparse.Namespace, admission: dict | None = None) -> dict:
         "split_digest": split["split_digest"],
         "training_receipt": admission["receipt_path"],
         "training_receipt_digest": admission["receipt_digest"],
+        "normalization_algorithm": admission["receipt"]["normalization"]["algorithm"],
+        "normalization_episodes": admission["receipt"]["normalization"]["episodes"],
         "split_verified": True,
         "loss_mean": statistics.fmean(losses),
         "loss_std": statistics.pstdev(losses),
         "loss_p95": ordered[min(len(ordered) - 1, math.ceil(0.95 * len(ordered)) - 1)],
+        "resource_usage": {
+            "scope": "evaluation_after_admission",
+            "setup_wall_time_s": batches_started - started,
+            "batches_wall_time_s": batches_seconds,
+            "samples_per_second": len(losses) / batches_seconds if batches_seconds > 0 else None,
+            "torch_cuda_peak_allocated_bytes": (
+                torch.cuda.max_memory_allocated(device) if device.startswith("cuda") else None
+            ),
+        },
     }
     return report
 
@@ -337,7 +421,7 @@ def main() -> None:
         )
         return
     report = evaluate(args, admission)
-    serialized = json.dumps(report, indent=2, sort_keys=True)
+    serialized = json.dumps(report, indent=2, sort_keys=True, allow_nan=False)
     print(serialized)
     if args.output:
         output = args.output.expanduser()

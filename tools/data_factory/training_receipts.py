@@ -254,13 +254,18 @@ def validate_reload_receipt(value: object, train_receipt: object) -> dict:
 def compile_launch_receipt(split: Mapping, argv: list[str], inventory_path: str) -> dict:
     """Record admitted launch inputs; never claim checkpoint/reload or training PASS."""
     from tools.data_factory.training_split import validate_training_split
+    from tools.data_factory.training_entrypoint import options
+    from tools.fr5_training_profile import training_normalization
 
     split = validate_training_split(split)
     if split["schema_version"] != 3:
         raise ReceiptError("LAUNCH_SPLIT_REQUIRED")
     argv = normalize_argv(argv)
+    imagenet = options(argv[1:]).get("--dataset.use_imagenet_stats", "true")
+    if imagenet not in {"true", "false"}:
+        raise ReceiptError("TRAINING_NORMALIZATION_OPTION")
     value = {
-        "schema_version": "data_factory.training_launch_receipt.v1",
+        "schema_version": "data_factory.training_launch_receipt.v2",
         "status": "ADMITTED_NOT_TRAINED",
         "approved_inventory_path": str(Path(inventory_path).resolve()),
         "approved_episode_inventory_digest": split["approved_episode_inventory_digest"],
@@ -269,6 +274,7 @@ def compile_launch_receipt(split: Mapping, argv: list[str], inventory_path: str)
         "selected_episodes": split["selected_episodes"],
         "train_episodes": split["train_episodes"], "eval_episodes": split["eval_episodes"],
         "feature_contract": split["feature_contract"],
+        "normalization": training_normalization(split, use_imagenet_stats=imagenet == "true"),
         "normalized_argv": argv, "argv_digest": canonical_digest(argv),
     }
     return {**value, "receipt_digest": canonical_digest(value)}
