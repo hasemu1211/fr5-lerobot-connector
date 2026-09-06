@@ -153,6 +153,7 @@ class MappedTrainingTest(unittest.TestCase):
             projected = app.bridge_core.snapshot()['projection']
             self.assertEqual(projected['status'], 'PREVIEW_NOT_APPROVED', projected)
             preview = projected['preview']
+            self.assertIsNone(approval._MAPPED_READ.get())
             self.assertEqual(list(output.iterdir()), [])
             self.assertFalse(preview['starts_training'])
             self.assertEqual([e['episode_index'] for e in preview['episodes']], [0,2,3,5,7])
@@ -164,6 +165,7 @@ class MappedTrainingTest(unittest.TestCase):
             consume('approve_training_batch', {'batch_digest':preview['batch_digest']}, 'approve')
             projected = app.bridge_core.snapshot()['projection']
             self.assertEqual(projected['status'], 'APPROVED', projected)
+            self.assertIsNone(approval._MAPPED_READ.get())
             inventory_path = output/'training_approved.json'
             inventory = approval.validate_current_training_inventory(
                 inventory_path, dataset_root=request['dataset_root'], repo_id=request['repo_id'],
@@ -177,7 +179,10 @@ class MappedTrainingTest(unittest.TestCase):
                     '--eval_steps=1', '--save_freq=1']
             kwargs = dict(dataset=child, repo_id=request['repo_id'], inventory=inventory_path,
                           profile='act', collection_profile='fr5-up-wrist-rgb-30hz-v2', argv=argv)
-            split, receipt = training.prepare_launch(**kwargs)
+            with mock.patch.object(mapping_workflow, 'verify_mapped_dataset', wraps=mapping_workflow.verify_mapped_dataset) as proof:
+                split, receipt = training.prepare_launch(**kwargs)
+                self.assertEqual(proof.call_count, 2)
+            self.assertIsNone(approval._MAPPED_READ.get())
             self.assertEqual(split['train_episodes'], [0,2,3])
             self.assertEqual(split['eval_episodes'], [5,7])
             self.assertEqual(receipt['observation_view']['representation'], 'raw')
@@ -193,6 +198,24 @@ class MappedTrainingTest(unittest.TestCase):
             with mock.patch.object(training, 'launch_feature_contract', return_value=feature):
                 with self.assertRaisesRegex(ContractError, 'TRAINING_COLLECTION_PROFILE_LEDGER_BINDING'):
                     training.prepare_launch(**kwargs)
+            # Reuse is confined to the read operation: even a late source change
+            # after receipt compilation must fail before returning launch data.
+            original = requests[0].read_bytes()
+            mode = requests[0].stat().st_mode & 0o777
+            compile_receipt = training.compile_launch_receipt
+            requests[0].chmod(0o600)
+            def late_change(*args):
+                value = compile_receipt(*args)
+                requests[0].write_bytes(original + b'\n')
+                return value
+            try:
+                with mock.patch.object(training, 'compile_launch_receipt', side_effect=late_change):
+                    with self.assertRaisesRegex(ContractError, 'MAPPING_REQUEST_CHANGED'):
+                        training.prepare_launch(**kwargs)
+            finally:
+                requests[0].write_bytes(original)
+                requests[0].chmod(mode)
+            self.assertIsNone(approval._MAPPED_READ.get())
         self.assertFalse((root/'never-launched').exists())
         self.assertEqual([snapshot(p) for p in sources], before)
 

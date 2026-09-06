@@ -170,6 +170,7 @@ def _delegated_training(split: dict, receipt: dict) -> bool:
     return approval.inventory_local_training_delegation(inventory) is not None
 
 
+@approval._mapped_read()
 def prepare_launch(*, dataset: Path, repo_id: str, inventory: Path,
                    profile: str, collection_profile: str, argv: list[str]) -> tuple[dict, dict]:
     from importlib.metadata import version
@@ -546,6 +547,7 @@ class PreparedApprovalBatch:
         }
 
 
+@approval._mapped_read()
 def _approval_documents(drafts: list[dict], reviewed_at: datetime) -> list[dict]:
     return [approval._prepare_training_approval(
         **{**draft["approval_arguments"], "episode_provenance_path": draft["provenance"]},
@@ -578,6 +580,7 @@ def _delegation_output(delegation: dict, output: Path, dataset: dict) -> None:
         raise ContractError("TRAINING_DELEGATION_OUTPUT")
 
 
+@approval._mapped_read()
 def _delegated_documents(
     drafts: list[dict], *, actor: str, authorized_at: datetime,
     delegation_reference: dict,
