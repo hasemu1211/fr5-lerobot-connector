@@ -8,6 +8,7 @@ import sys
 from pathlib import Path
 
 from .core.errors import CuratorError
+from .core.jsonio import load_json
 from .workflow.application import decide, prepare, status
 from .workflow.selection import export_training_request
 from .workflow.setup import (
@@ -35,6 +36,7 @@ def _parser() -> argparse.ArgumentParser:
     selection.add_argument("--run-dir", type=Path, action="append", required=True)
     selection.add_argument("--output", type=Path, required=True)
     selection.add_argument("--dataset-id", required=True)
+    selection.add_argument("--derivation", type=Path, help="published Curator reference JSON; parent evidence remains parent-only")
     selection.add_argument("--eval-split", type=float)
     selection.add_argument("--expected-eval-episode", type=int, action="append")
     for name in ("status", "decide"):
@@ -88,6 +90,7 @@ def main(argv: list[str] | None = None) -> None:
             }
             result = export_training_request(
                 args.run_dir, args.output, dataset_id=args.dataset_id, **cohort,
+                **({"derivation": load_json(args.derivation, code="DERIVATION_REFERENCE_JSON")} if args.derivation else {}),
             )
         elif args.command == "prepare":
             result = prepare(args.source)

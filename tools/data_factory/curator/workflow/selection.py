@@ -42,7 +42,7 @@ def check_evaluation_cohort(
 def export_training_request(
     run_directories: Sequence[str | Path], output: str | Path,
     *, dataset_id: str, eval_split: float | None = None,
-    expected_eval_episodes: Sequence[int] | None = None,
+    expected_eval_episodes: Sequence[int] | None = None, derivation: dict | None = None,
 ) -> dict:
     """Publish one request after native preparation validates selected runs.
 
@@ -104,6 +104,16 @@ def export_training_request(
             raise CuratorError("SELECTION_OUTPUT_OVERLAP")
         request = {**dataset, "dataset_id": dataset_id}
         request["episodes"] = sorted(episodes, key=lambda episode: episode["episode_index"])
+        if derivation is not None:
+            from .derivation import published_training_evidence
+            evidence = published_training_evidence(derivation)
+            if any(dataset[key] != evidence["parent_dataset_identity"][key] for key in ("dataset_root", "repo_id")):
+                raise CuratorError("SELECTION_DATASET_MISMATCH")
+            derived = evidence["output"]
+            protected.update((Path(derived["root"]), Path(derivation["run_directory"])))
+            if any(target.is_relative_to(path.resolve()) for path in protected):
+                raise CuratorError("SELECTION_OUTPUT_OVERLAP")
+            request.update(dataset_root=derived["root"], repo_id=derived["repo_id"], derivation=derivation)
         # Exercise the actual read-only consumer before publication. Its drafts
         # stay in memory; this identifier is not a human approval or attribution.
         # The consumer owns byte identity, metadata, production scope and lineage.
@@ -130,6 +140,7 @@ def export_training_request(
         "ok": True, "status": "REQUEST_NOT_APPROVED", "request_path": str(target),
         "episode_indices": [episode["episode_index"] for episode in request["episodes"]],
         "training_authority": False,
+        **({"derivation": request["derivation"]} if "derivation" in request else {}),
         **({"evaluation_cohort": cohort} if cohort is not None else {}),
     }
 

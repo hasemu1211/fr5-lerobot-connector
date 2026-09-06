@@ -102,3 +102,30 @@ Request export and cohort preview SHALL preserve original dataset bytes, provena
 - **WHEN** the output already exists or current selected evidence fails the existing admission or freshness checks
 - **THEN** export rejects the request without overwriting the existing output or silently removing selected episodes
 - **AND** technical, semantic, physical binding and training authority remain separate.
+
+### Requirement: Published derived selections reach native batch admission
+
+Curator SHALL connect explicitly selected parent-reviewed episodes of a genuinely
+published candidate to the existing native prepared-batch authorization and
+current-inventory consumers, preserving distinct parent, derived, visual-review,
+and training authority identities.
+
+#### Scenario: Published candidate is reviewed for a new exact training batch
+- **GIVEN** a native published candidate with unchanged parent lineage and explicit parent episode selection
+- **WHEN** a request binds `derivation.run_directory`, `derivation.receipt_digest`, and `derivation.parent_dataset_identity`
+- **THEN** native preparation SHALL verify the derived pixel/technical evidence and preserved action/state/task/timestamp/episode/frame mapping
+- **AND** the existing prepared Web preview SHALL retain bounded review coverage and distinguish parent semantic PASS from unasserted derived semantic status
+- **AND** only a new exact batch authorization SHALL produce inventory accepted by current native launch validation without launching training
+
+#### Scenario: Stale, tampered or unqualified derivation fails without publication
+- **GIVEN** a pending/rejected candidate, mismatched parent or receipt, changed bytes, missing recorded coverage, or unsupported transform
+- **WHEN** a derived request or prepared authorization is consumed
+- **THEN** the consumer SHALL reject the exact missing or changed evidence before publishing a request or inventory
+- **AND** it SHALL preserve original dataset, provenance, decisions, and existing outputs
+
+#### Scenario: Original authority and replay confer no child consent
+- **GIVEN** parent raw approval or standing delegation, or an already published derived batch
+- **WHEN** that authority or publication is replayed for different derived data
+- **THEN** existing exact-dataset and exclusive-publication gates SHALL reject it
+- **AND** no parent ledger or semantic approval SHALL be relabeled as child truth
+- **AND** physical binding, training execution, and checkpoint observation-view authority SHALL remain with their existing owners

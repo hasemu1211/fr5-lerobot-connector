@@ -124,3 +124,36 @@ PYTHONDONTWRITEBYTECODE=1 direnv exec . python3 -m unittest \
 ```
 
 같은 frame 양도 optimizer 노출·전체 취득 비용의 동일성을 보장하지 않는다. Learning에서 모델·seed·학습 예산을 맞추고, 각 checkpoint의 저장된 postprocessor를 거친 비교 가능한 출력으로 판단한다. TRAIN subset별 normalization이 다른 normalized flow loss를 직접 utility 순위로 쓰지 않는다. 개발에 사용한 heldout은 독립 최종 시험이 아니며, 조건 분산의 차이는 학습 이득이나 physical generalization을 증명하지 않는다. Curation은 선택 가설·근거·요청을 소유하고 DQA, Policy Training/Evaluation, Rollout, Collection의 사실과 권한을 재사용한다.
+
+### 출판된 이미지 파생본의 별도 학습 요청
+
+`export_training_request(..., derivation=reference)` 또는 agent용
+`training-request --derivation reference.json`은 기존의 명시적 Collection run
+선택을 출판된 Curator 파생본에 연결한다. reference의 정확한 필드는
+`run_directory`, `receipt_digest`(Curator receipt event digest),
+`parent_dataset_identity`(`dataset_id`, `repo_id`, `dataset_root`, `dataset_digest`)다.
+새 요청의 dataset identity는 파생본이고 episode의 ledger/semantic 참조는 부모다.
+반환 상태는 `REQUEST_NOT_APPROVED`이며 원본과 기존 요청을 덮어쓰지 않는다.
+
+기존 `prepare_approval_batch`와 Web training review가 새 exact batch를 검토한다.
+부모 semantic PASS는 부모의 판정으로만 보존하며, 파생본은 자체 기술 검증과
+Curator의 제한된 시각 검토 coverage/clip 매핑을 가진다. child semantic 상태는
+`NOT_ASSERTED`, inventory의 부모 semantic 참조는 `PARENT_PASS`다. 파생 provenance
+v3와 새 dataset digest를 결속한 별도 승인이 있어야 기존 current inventory 및
+native launch 사전검증을 통과한다. raw batch의 승인·standing delegation은
+다른 파생 root/repo를 승인하지 않는다.
+
+지원 범위는 기존 static up keep-mask/background-plate와 wrist H264 재인코딩이다.
+원본/파생본의 action·state·task·timestamp·episode/frame 매핑과 원본 provenance를
+검증하고, 이미 검증된 파생 pixel evidence를 동결된 내용 digest에 결속한다.
+출판 후 playback을 잃어도 검증된 recorded manifest의 coverage는 유지하지만,
+manifest·계보·원본·파생 내용이 없거나 변하면 admission을 거부한다. 이 경로는
+physical binding을 확정하거나 새 semantic PASS·학습 효용을 만들지 않는다.
+Learning 소유의 저장된 observation view와 raw/baked 변환 1회 적용, 실제 파생
+학습·평가는 별도 검증 대상이다. mask 효과는 raw 대비 실험으로 판단한다.
+
+재현 가능한 소프트웨어 경계는
+[합성 native 연계 테스트](../tests/data_factory/curator/workflow/test_derived_training.py)다.
+실제 Curator 출판 → 기존 Web batch 결정 → 새 inventory → `prepare_launch`를
+검증하며, 원본 보존·변조·replay·거절·부분 출판과 raw 권한 재사용 거부를 포함한다.
+실제 학습이나 물리 효과는 실행하지 않는다.

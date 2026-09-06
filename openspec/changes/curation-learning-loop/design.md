@@ -20,10 +20,68 @@ Learning의 저장된 postprocessor 출력은 조건 근거와 연결하되, 입
 
 이미지 정제 비교의 fitting 입력은 별도 pool ledger를 만들지 않고 기존 native v3 split을 참조한다. 임의 global frame 목록을 수동으로 제한하는 대안보다 native TRAIN 선택을 소비하는 쪽을 채택한다. 기존 setup은 전체 source에서 표본을 뽑으므로 split을 나중에 적용하면 이미 heldout 외관을 배경판에 사용했을 수 있기 때문이다. 선택적 `fit_split`을 주면 원본 경로/내용 digest를 검증한 뒤 TRAIN frame 구간에서 기존 예산만큼 표본을 고른다. 명시적 reference가 TRAIN 밖이면 거부하고, 생략한 reference는 첫 TRAIN frame으로 정한다.
 
-v2 profile은 native split의 경로·파일 hash·split digest와 실제 해독한 프레임의 global/episode/local index 및 RGB 배열 digest를 유지한다. 기존 resolver가 이를 profile digest에 포함하고 기존 derivative lineage가 참조한다. 이 결속은 split과 원본을 동결해 유지하는 조건에서 producer 입력을 설명하며, 파일 한 개의 이식성이나 독립 calibration·사람의 heldout 미열람·학습 효용을 보장하지 않는다. v1 profile에 출처를 소급 작성하지 않는다. 실제 다음 소비 검증은 `tests/data_factory/curator/workflow/test_setup.py`의 export/preview/finalize/prepare/review와 변경된 split 거부로 유지한다. Learning은 이를 저장된 observation transform과 부모 TRAIN/heldout 계약에 결속하고, root는 별도 파생 admission을 연결한다.
+v2 profile은 native split의 경로·파일 hash·split digest와 실제 해독한 프레임의 global/episode/local index 및 RGB 배열 digest를 유지한다. 기존 resolver가 이를 profile digest에 포함하고 기존 derivative lineage가 참조한다. 이 결속은 split과 원본을 동결해 유지하는 조건에서 producer 입력을 설명하며, 파일 한 개의 이식성이나 독립 calibration·사람의 heldout 미열람·학습 효용을 보장하지 않는다. v1 profile에 출처를 소급 작성하지 않는다. 실제 다음 소비 검증은 `tests/data_factory/curator/workflow/test_setup.py`의 export/preview/finalize/prepare/review와 변경된 split 거부로 유지한다. Learning은 이를 저장된 observation transform과 부모 TRAIN/heldout 계약에 결속한다. Curator는 아래의 좁은 native 파생 admission 연결을 소유하고 root가 shared 경계의 통합을 검토한다.
 
 - Learning: 두 요청과 분할 preview를 받아 실제 launch의 같은 heldout·seed·예산을 확인하고, 저장된 postprocessor를 거친 비교 가능한 출력으로 측정한다. 학습 실행·평가 metric 구현은 해당 owner가 담당한다.
 - Rollout: 이후 같은 물리 평가 조건에서 정책 차이를 측정한다. 현재 offline 비교를 physical generalization으로 확장하지 않는다.
 - Collection/advisory 전략: 조건 coverage와 학습 결과를 함께 사용해 다음 수집 가설을 제안한다. 이번 proxy만으로 실행이나 추가 수집을 지시하지 않는다.
 
 현재 채택 대상은 재현 가능한 통제 비교와 요청 시 cohort 확인이다. universal scorer, 별도 실험 엔진, 새 execution ledger, 모듈 재배치는 필요하지 않다. 두 선택 모두 유효한 downstream 측정에 연결되지 않으면 선택 효용은 UNKNOWN으로 남긴다.
+
+## Published candidate → existing native training admission
+
+The optional native request field `derivation` contains exactly `run_directory`,
+`receipt_digest` (the canonical Curator receipt event digest), and
+`parent_dataset_identity` (`dataset_id`, `repo_id`, `dataset_root`, `dataset_digest`).
+The request's existing dataset fields identify the **derived** frozen dataset;
+its explicit episode entries reference the **parent** Collection evidence.
+`export_training_request(..., derivation=...)` retains the existing
+`REQUEST_NOT_APPROVED` return contract and adds `derivation` to its result.
+No approval is copied and no episode selection is inferred from publication.
+
+Native preparation consumes the published receipt, its bound materialization
+verification and lineage, unchanged parent bytes, and recorded review manifest.
+It preserves coverage and clip mappings rather than upgrading a bounded visual
+review into all-frame semantic review. Playback loss does not erase an already
+recorded review; missing or changed manifest/lineage or dataset bytes reject the
+new admission. Only the existing static up keep-mask/background-plate transform
+and wrist re-encode, with preserved action/state/task/timestamp/index mapping,
+are eligible for this narrow connection. Other transforms need their own proof.
+
+Derived episode provenance uses `data_factory.episode_training_provenance.v3`:
+existing episode/dataset/content/technical/resolved-job bindings plus `derivation`,
+`parent` (dataset identity, original provenance and technical/semantic references),
+and `curator_review` (receipt/decision/manifest digests, coverage and clips).
+Its technical reference is the canonical `candidate_ready.json` event containing
+the derived full-decode, pixel-transform and existing dataset-validator evidence.
+The inventory's semantic reference is explicitly `PARENT_PASS`; the prepared Web
+preview reports child `semantic_status: NOT_ASSERTED`, parent semantic PASS and
+bounded Curator publication separately. The existing batch approval binds these
+exact provenance and evidence digests and the new derived dataset identity.
+`prepare_approval_batch` still returns `PreparedApprovalBatch`; publication still
+returns the existing `training_approved_inventory.v2`, consumable by
+`validate_current_training_inventory` and `prepare_launch`. Preparing, exporting,
+or viewing this evidence grants no consent or launch authority.
+
+Raw requests and approvals retain their existing schema and behavior. Raw local
+standing delegation cannot authorize a different derived root/repo. A new exact
+batch decision through the existing Web review application, or independently
+scoped standing delegation, is required. Learning continues to own saved
+observation-view and exactly-once raw-versus-baked processing; this admission
+connection establishes neither that runtime behavior nor learned mask utility.
+
+Current parent ledger-state freshness is checked again during each new batch
+preparation/publication. An issued batch instead validates its frozen parent
+references and derived provenance; later loss/change of a mutable state projection
+is not a newly invented retrospective revocation policy. Changed bound artifacts
+or dataset bytes still fail current admission. Pixel proof is reused from native
+materialization, while exact preserved Parquet columns and episode task mappings
+are checked without replaying video decoding or model observations.
+
+The read-only `published_training_evidence(reference)` consumer returns `output`,
+`parent_dataset_identity`, `technical`, `lineage_digest`, `view_profile`
+(`path`, `file_sha256`, `profile_digest` from the recorded request), `transform`
+(the existing lineage transform object), and `review`. Learning resolves and
+verifies the referenced profile/assets before saving its own observation-view
+contract. An immutable reference is not a claim that later mutable assets still
+match it; this API neither saves a checkpoint view nor applies inference pixels.

@@ -204,6 +204,8 @@ def prepare_launch(*, dataset: Path, repo_id: str, inventory: Path,
     feature = launch_feature_contract(profile, collection_profile, tasks.pop(), metadata)
     for episode in approved["episodes"]:
         provenance = load_json_strict(Path(episode["episode_provenance"]["artifact_path"]))
+        if provenance["schema_version"] == approval.DERIVED_PROVENANCE_SCHEMA:
+            provenance = provenance["parent"]["provenance"]
         if provenance["schema_version"] == approval.LEDGER_PROVENANCE_SCHEMA:
             ledger = load_json_strict(Path(provenance["episode_ledger"]["artifact_path"]))
             if ledger["bindings"]["collection_profile_digest"] != feature["collection_profile_digest"]:
@@ -371,7 +373,8 @@ def prepare_approvals(request: dict, output: Path, approved_by: str) -> tuple[di
 
 
 def _prepare_approvals(request: dict, output: Path, approved_by: str, *, check_targets: bool) -> tuple[dict, list[dict]]:
-    approval._exact(request, frozenset({"dataset_root", "dataset_id", "repo_id", "episodes"}), "TRAINING_PREAPPROVAL_FIELDS")
+    fields = {"dataset_root", "dataset_id", "repo_id", "episodes"}
+    approval._exact(request, frozenset(fields | ({"derivation"} if "derivation" in request else set())), "TRAINING_PREAPPROVAL_FIELDS")
     dataset = approval.current_dataset_identity(request["dataset_root"], repo_id=request["repo_id"], dataset_id=request["dataset_id"])
     if output.resolve().is_relative_to(Path(dataset["dataset_root"])) or output.is_symlink() or not output.is_dir():
         raise ContractError("TRAINING_APPROVAL_OUTPUT_EXTERNAL_DIRECTORY")
@@ -382,6 +385,30 @@ def _prepare_approvals(request: dict, output: Path, approved_by: str, *, check_t
         raise ContractError("TRAINING_INVENTORY_EPISODES")
     indices = [entry["episode_index"] for entry in sources]
     selected_episodes(json.dumps(indices), metadata["total_episodes"])
+    if "derivation" in request:
+        evidence = approval._derived_publication(request["derivation"], dataset)
+        parent = evidence["parent_dataset_identity"]
+        protected = [Path(request["derivation"]["run_directory"])]
+        protected.extend(Path(entry["episode_ledger_path"]).parent for entry in sources if "episode_ledger_path" in entry)
+        if any(output.resolve().is_relative_to(path.resolve()) for path in protected):
+            raise ContractError("TRAINING_DERIVATION_OUTPUT_OVERLAP")
+        parent_request = {key: parent[key] for key in ("dataset_root", "dataset_id", "repo_id")}
+        parent_request["episodes"] = sources
+        parent_dataset, drafts = _prepare_approvals(parent_request, output, approved_by, check_targets=check_targets)
+        if parent_dataset != parent:
+            raise ContractError("TRAINING_DERIVATION_PARENT")
+        for draft in drafts:
+            provenance = approval.compile_derived_training_provenance(
+                dataset=dataset, derivation=request["derivation"], parent_draft=draft,
+            )
+            args = draft["approval_arguments"]
+            args.update(dataset_identity=dataset,
+                        episode_content_digest=provenance["episode_content_digest"],
+                        technical_validator_path=evidence["technical"]["artifact_path"],
+                        technical_validator_digest=evidence["technical"]["artifact_digest"],
+                        episode_provenance_digest=canonical_digest(provenance))
+            draft["provenance"] = provenance
+        return dataset, drafts
     drafts = []
     for source in sources:
         base_keys = {"episode_id", "episode_index", "technical_validator_path", "human_semantic_evidence_path"}
@@ -436,7 +463,10 @@ def _batch_summary(dataset: dict, drafts: list[dict], batch_digest: str, output:
     for draft in drafts:
         args = draft["approval_arguments"]
         lines.extend([
-            f"  [{args['episode_index']}] {args['episode_id']} — technical PASS; semantic PASS by {draft['reviewer_id']}",
+            f"  [{args['episode_index']}] {args['episode_id']} — technical PASS; " + (
+                "parent semantic PASS only; child semantic NOT_ASSERTED; bounded Curator visual publication"
+                if draft["provenance"]["schema_version"] == approval.DERIVED_PROVENANCE_SCHEMA
+                else f"semantic PASS by {draft['reviewer_id']}"),
             f"    Content: {args['episode_content_digest']}",
             f"    Technical: {args['technical_validator_digest']} ({args['technical_validator_path']})",
             f"    Semantic: {args['human_semantic_evidence_digest']} ({args['human_semantic_evidence_path']})",
@@ -470,8 +500,13 @@ class PreparedApprovalBatch:
             "selected_count": len(value["drafts"]),
             "episodes": [{"episode_id": draft["approval_arguments"]["episode_id"],
                           "episode_index": draft["approval_arguments"]["episode_index"],
-                          "technical_status": "PASS", "semantic_status": "PASS",
-                          "reviewer_id": draft["reviewer_id"]} for draft in value["drafts"]],
+                          "technical_status": "PASS", "semantic_status": (
+                              "NOT_ASSERTED" if draft["provenance"]["schema_version"] == approval.DERIVED_PROVENANCE_SCHEMA else "PASS"),
+                          "reviewer_id": draft["reviewer_id"],
+                          **({"parent_semantic_status": "PASS",
+                              "parent_dataset_identity": draft["provenance"]["parent"]["dataset_identity"],
+                              "curator_review": draft["provenance"]["curator_review"]}
+                             if draft["provenance"]["schema_version"] == approval.DERIVED_PROVENANCE_SCHEMA else {})} for draft in value["drafts"]],
             "batch_digest": value["batch_digest"], "starts_training": False,
             "limitations": ["Approves only this exact frozen batch for training admission.",
                             "Does not establish learning performance or authorize robot execution."],
@@ -674,7 +709,7 @@ def _publish_authorization_batch(
                 "episode_id": args["episode_id"], "episode_index": args["episode_index"],
                 "episode_content_digest": args["episode_content_digest"],
                 "technical_validator": {"artifact_path": args["technical_validator_path"], "artifact_digest": args["technical_validator_digest"], "status": "PASS"},
-                "human_semantic_evidence": {"artifact_path": args["human_semantic_evidence_path"], "artifact_digest": args["human_semantic_evidence_digest"], "status": "PASS", "reviewer_id": draft["reviewer_id"]},
+                "human_semantic_evidence": {"artifact_path": args["human_semantic_evidence_path"], "artifact_digest": args["human_semantic_evidence_digest"], "status": ("PARENT_PASS" if draft["provenance"]["schema_version"] == approval.DERIVED_PROVENANCE_SCHEMA else "PASS"), "reviewer_id": draft["reviewer_id"]},
                 "episode_provenance": {"artifact_path": args["episode_provenance_path"], "artifact_digest": args["episode_provenance_digest"]},
                 "training_approval": {"artifact_path": draft["output_path"], "artifact_digest": canonical_digest(document), "provenance": provenance},
             })

@@ -308,3 +308,28 @@ __all__ = [
     "verify_derived_dataset",
     "verify_h264",
 ]
+
+
+def verify_preserved_columns(source: Path, derived: Path) -> None:
+    """Recheck exact non-image bytes semantically through native Parquet columns.
+
+    Admission reuses frozen pixel verification, without decoding videos again.
+    The explicit timestamp comparison also excludes the historical codec
+    verifier's floating tolerance from the new unchanged-mapping contract.
+    """
+    import pyarrow.dataset as ds
+    from tools.fr5_training_profile import read_metadata
+
+    columns = ['index', 'episode_index', 'frame_index', 'task_index', 'timestamp',
+               'observation.state', 'action']
+    try:
+        parent = ds.dataset(source / 'data', format='parquet').to_table(columns=columns)
+        child = ds.dataset(derived / 'data', format='parquet').to_table(columns=columns)
+        if not parent.equals(child):
+            raise CuratorError('DERIVATION_EXACT_MAPPING')
+        if read_metadata(source)['episode_tasks'] != read_metadata(derived)['episode_tasks']:
+            raise CuratorError('DERIVATION_EXACT_TASKS')
+    except CuratorError:
+        raise
+    except Exception as exc:
+        raise CuratorError('DERIVATION_MAPPING_EVIDENCE', str(exc)) from exc

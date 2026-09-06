@@ -93,7 +93,7 @@ def _integer_list(value: object) -> bool:
     )
 
 
-def _validate(value: dict[str, Any], *, video_path: str | Path) -> dict[str, Any]:
+def _validate(value: dict[str, Any], *, video_path: str | Path | None) -> dict[str, Any]:
     exact_fields(value, FIELDS, "REVIEW_MANIFEST_FIELDS")
     if value["schema_version"] != SCHEMA:
         raise CuratorError("REVIEW_MANIFEST_SCHEMA")
@@ -138,16 +138,17 @@ def _validate(value: dict[str, Any], *, video_path: str | Path) -> dict[str, Any
     if (
         not isinstance(review_digest, str)
         or DIGEST.fullmatch(review_digest) is None
-        or review_digest != file_sha256(video_path)
+        or (video_path is not None and review_digest != file_sha256(video_path))
     ):
         raise CuratorError("REVIEW_VIDEO_DIGEST")
-    verify_review_video(
-        Path(video_path),
-        width=video["width"] // 3,
-        height=video["height"],
-        frames=video["frames"],
-        fps=video["fps"],
-    )
+    if video_path is not None:
+        verify_review_video(
+            Path(video_path),
+            width=video["width"] // 3,
+            height=video["height"],
+            frames=video["frames"],
+            fps=video["fps"],
+        )
 
     coverage = exact_fields(
         value["coverage"], COVERAGE_FIELDS, "REVIEW_COVERAGE_FIELDS"
@@ -276,8 +277,22 @@ def create_manifest(
 
 
 def verify_manifest(path: str | Path, video_path: str | Path) -> dict[str, Any]:
+    if video_path is None:
+        raise CuratorError("REVIEW_VIDEO_PATH")
     value = load_json(path, code="REVIEW_MANIFEST_JSON")
     return _validate(value, video_path=video_path)
+
+
+def verify_recorded_manifest(path: str | Path, *, expected_digest: str) -> dict[str, Any]:
+    """Read coverage bound by a completed decision; never qualify playback/decision.
+
+    The caller must first validate the terminal receipt that owns this digest.
+    Ordinary review and decision validation still require the complete video.
+    """
+    value = _validate(load_json(path, code="REVIEW_MANIFEST_JSON"), video_path=None)
+    if value["review_manifest_digest"] != expected_digest:
+        raise CuratorError("REVIEW_MANIFEST_DIGEST")
+    return value
 
 
 __all__ = ["create_manifest", "verify_manifest"]
