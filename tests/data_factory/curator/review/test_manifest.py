@@ -21,6 +21,10 @@ from tools.data_factory.curator.workflow.application import _selected_review_fra
 
 
 class ManifestTest(unittest.TestCase):
+    def test_normal_review_cannot_skip_video_by_passing_none(self):
+        with self.assertRaisesRegex(CuratorError, "REVIEW_VIDEO_PATH"):
+            verify_manifest(Path("not-read.json"), None)
+
     def test_short_boundary_event_reaches_video_and_manifest_under_fixed_budget(self):
         # Two ordinary episodes compete with one short boundary-motion event.
         # The former new-frame-first ranking omitted the event for length=12.

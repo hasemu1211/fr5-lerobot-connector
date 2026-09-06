@@ -784,6 +784,7 @@ class CollectionOperatorApplicationTests(unittest.TestCase):
             "prepare_environment", "update_draft", "compile_draft",
             "edit_campaign_draft", "authorize_campaign", "cancel_session",
             "review_candidate", "new_campaign_same_settings",
+            "refresh_collection_advice", "choose_collection_advice",
             "recover_home",
             "capture_workspace_point", "preview_workspace",
             "discard_workspace_preview",

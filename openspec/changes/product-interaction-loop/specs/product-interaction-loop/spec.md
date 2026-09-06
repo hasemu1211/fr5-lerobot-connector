@@ -85,3 +85,32 @@ For an existing native Curator review run, the product SHALL let a local person 
 - **WHEN** publication and its receipt are committed but the review video subsequently becomes missing or corrupt
 - **THEN** the page distinguishes the native committed decision/receipt from unavailable playback evidence
 - **AND** it does not describe the transport or media failure as rollback, permit an opposite choice, re-publish automatically, or claim the unavailable video remains valid.
+
+### Requirement: Consume stored collection advice as the next actual draft
+
+The Collection application SHALL retain the preceding campaign's server-owned stored-evidence and authoring bindings when returning to drafting. People and automation SHALL inspect and choose the same native evidence-derived recommendation through the existing view and intentional commands, without transcribing paths or digests. Applying advice SHALL only author a draft; it SHALL NOT create a campaign, obtain approval or cause robot, recorder, dataset or training effects. The next consumer is the existing collection compiler and execution owner with its unchanged gates.
+
+#### Scenario: A pinned observed source still permits useful advice
+
+- **WHEN** stored native evidence identifies an unobserved qualified condition and the finite budget has room after mandatory pinned conditions
+- **THEN** the native recommendation retains exact pins and exclusions and includes the unobserved condition within the existing count bound
+- **AND** the actual application presents the exact ordered conditions, distinguishes mandatory conditions from coverage deficits, and applies them without changing the current object placement
+- **AND** compilation rejects a translation that changes the selected conditions, start poses or split.
+
+#### Scenario: The current application cannot represent the source
+
+- **WHEN** stored authoring is absent or changed, current selection is incompatible, no eligible change remains, or the proposed sequence cannot preserve current placement and required transition bindings
+- **THEN** the application exposes an unavailable reason and retains the current draft
+- **AND** source-only advice is not presented as a complete pick/place transition or evidence of physical effectiveness.
+
+#### Scenario: A person edits after inspecting advice
+
+- **WHEN** the draft or selection changes after recommendation inspection
+- **THEN** the previous choice is unavailable until a fresh derivation and current view establish eligibility
+- **AND** a stale choice cannot overwrite the later edit; choosing to keep settings records the choice without changing the draft.
+
+#### Scenario: Choice completion is ambiguous to the caller
+
+- **WHEN** an apply or keep response is lost, the page is refreshed, or the same choice is delivered again
+- **THEN** the Web surface reads the canonical choice result without automatically repeating the command; automation can read that same result
+- **AND** duplicate or conflicting delivery cannot create another campaign or effect, changed stored evidence is revalidated before choice, and a failed recovery read leaves actions unavailable with explicit refresh available.

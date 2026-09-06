@@ -1219,6 +1219,19 @@ class OperatorConsole:
         nested = value.get("campaign")
         return copy.deepcopy(dict(nested if isinstance(nested, Mapping) else value))
 
+    def collection_evidence(self) -> dict[str, Any]:
+        """Retain completed native evidence for the next application draft.
+
+        Paths stay server-owned; browser history intentionally omits them.
+        """
+        with self._lock:
+            runs = sorted({str(Path(item["episode_ledger"]["path"]).parent)
+                           for item in self._episode_history
+                           if isinstance(item.get("episode_ledger"), Mapping)
+                           and isinstance(item["episode_ledger"].get("path"), str)})
+            return {"run_directories": runs,
+                    "authoring": self.campaign_operator.compiled_authoring_evidence() if runs else None}
+
     @staticmethod
     def _browser_result(value: object) -> dict[str, Any] | None:
         if not isinstance(value, Mapping):

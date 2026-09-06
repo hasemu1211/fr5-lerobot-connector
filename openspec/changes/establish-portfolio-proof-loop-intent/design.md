@@ -31,7 +31,21 @@
 
 프로젝트의 목적은 범용 데이터 인프라를 모두 자체 구현하는 것이 아니라, 현재 PC와 FR5에서 데이터·학습·추론의 선택이 만드는 효과를 검증하고 실제로 반복 운용할 수 있는 제품을 제공하는 것이다. 연구 비교 결과, 재현 가능한 시스템 동작, 사용자 작업 비용의 개선은 각각의 증거로 평가한다. 한 종류의 성과가 나머지를 자동으로 증명하지 않는다.
 
-기존 제품의 적용 범위를 비교 기준에 포함한다. [Rerun 공식 범위](https://rerun.io/docs/overview/what-is-rerun)는 시각화뿐 아니라 기록·저장·조회·변환·학습 데이터 공급을 포함하고, [LeRobot 데이터 지원](https://rerun.io/docs/howto/logging-and-ingestion/lerobot)도 제공한다. 따라서 Rerun을 단순 뷰어로 축소하거나 FR5의 모든 기능을 대체한다고 전제하지 않는다. 재사용·얇은 연결·자체 구현은 실제 요구 충족, 설치 버전과 환경 적합성, 전체 작업 비용으로 선택한다. 이는 특정 제품 도입이나 저장 형식·authority 변경의 결정이 아니다. 기존 구현을 보존하기 위한 차별화나 새 도구 도입 자체를 목표로 삼지 않는다.
+기존 제품의 적용 범위를 비교 기준에 포함한다. [Rerun 공식 범위](https://rerun.io/docs/overview/what-is-rerun)는 시각화뿐 아니라 기록·저장·조회·변환·학습 데이터 공급을 포함하고, [LeRobot 데이터 지원](https://rerun.io/docs/howto/logging-and-ingestion/lerobot)도 제공한다. 따라서 Rerun을 단순 뷰어로 축소하거나 FR5의 모든 기능을 대체한다고 전제하지 않는다. 재사용·얇은 연결·자체 구현은 실제 요구 충족, 설치 버전과 환경 적합성, 전체 작업 비용으로 선택한다. 기존 구현을 보존하기 위한 차별화나 새 도구 도입 자체를 목표로 삼지 않는다.
+
+### Rerun 재사용 경계
+
+선택은 **기존 LeRobot/Rerun의 읽기 전용 evidence 탐색을 재사용**하는 것이다. 설치된 native 경로의 실제 episode export와 source 검토를 근거로, 카메라·action·state의 범용 동기 타임라인을 별도 개발하지 않는다. 미도입은 이미 제공되는 탐색 기능을 중복 구현할 비용이 있고, RRD/catalog를 즉시 수집·학습 정본으로 전환하는 선택은 아직 검증되지 않은 정합·계보 이관을 요구한다. 후자의 가능성을 영구 배제하지 않되 현재 제품 연결의 선행 조건으로 삼지 않는다. 실제 검증 cutoff·명령·자원 측정과 독립 검토는 Orca Run `run_45e15721f588`이 소유한다.
+
+FR5는 수집 실행, 저장 정합성, scene/phase 의미, 선별·review·training authority와 비교 실험의 의미를 계속 소유한다. Rerun은 이 결과를 표현·탐색할 수 있지만 화면 선택이나 범용 query 결과만으로 원본, 판정, 승인 또는 motion을 변경하지 않는다. 성공 시연의 분포·카메라 기여·명령과 feedback·정책 비교도 탐색 대상이며 실패 분석에만 가두지 않는다. 각 분석 owner의 수치를 viewer 내부에서 새 정본으로 재계산하지 않는다.
+
+[Rerun의 LeRobot export](https://rerun.io/docs/howto/train/lerobot_export)는 기본적으로 목표 FPS로 새 시각을 만들고 latest-at 값으로 채워 새 dataset을 생성한다. 이것만으로 FR5의 bounded sample age, qualified clock/phase join, episode/global/frame identity, TRAIN-only fitting, parent/child 판정과 승인 결속이 보존됐다고 볼 수 없다. 현재 native viewer의 `frame_index`도 선택 데이터의 첫 global index를 뺀 표시값이므로 consumer는 canonical identity와 명시적으로 대응시켜야 한다. 이 계약들을 보존하는 더 저렴한 대체가 검증되면 reader·transform·writer 구현 역시 재사용할 수 있다.
+
+통합 완료는 export 성공만으로 선언하지 않는다. 기존 사용자 Web 경로에서 선택한 evidence를 열어 두 카메라와 action/state의 같은 시각을 확인하고, 원래 대상의 검토 화면으로 돌아오며, 변경·누락된 evidence를 현재 대상으로 오인하지 않는 실제 소비 경로를 검증한다. viewer 실패는 수집·승인의 실패나 재실행으로 전파하지 않는다. SDK/viewer 버전, 로컬 노출, 메모리·저장 비용과 종료를 확인하고 원본 불변을 검증한다. 최신 문서의 직접 dataset 열기·MCP·catalog 기능은 설치 버전의 동작을 확인하기 전까지 현재 capability로 표기하지 않는다.
+
+외부 포트폴리오는 경량의 설명·비교 그림·출처 연결을 유지하고 심층 탐색을 선택적으로 제공한다. 모든 episode의 RRD 생성이나 viewer 상시 실행을 기본값으로 두지 않는다. JPEG frame export의 저장 증가와 원본 MP4 재사용 가능성을 구분하고, 영상 표시 결과를 학습용 pixel 정본으로 사용하지 않는다. 제품 UX owner는 Web 진입·복귀를, 분석 owner는 의미와 canonical locator를, Portfolio owner는 독자용 표현을 맡으며 범용 viewer를 각 lane이 따로 만들지 않는다.
+
+### 연구 질문과 비용
 
 최소화 대상은 연결 단계만이 아니라 검증할 질문에 불필요한 비용이다. 현재 선택 후보는 **같은 추가 수집 예산에서 정책 관측에 근거한 표적 수집이 기존 균형 수집보다 고정 조건의 정책 결과를 개선하는가**이다. 성공 시연 분석은 expert 자체의 문제와 정책 문제를 구분하는 기준선이며, 기하 분산이나 technical/semantic PASS만으로 학습 기여를 판정하지 않는다.
 

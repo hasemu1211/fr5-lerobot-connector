@@ -487,7 +487,9 @@ def _patch_value(field: str, value: object) -> Any:
                 or type(value["requested_count"]) is not int
                 or not 1 <= value["requested_count"] <= 100
                 or type(value["normalized_seed"]) is not int or value["normalized_seed"] < 0
-                or value["pinned"] != [] or value["excluded"] != []
+                or any(not isinstance(value[key], list)
+                       or any(not isinstance(item, str) or not SAFE_ID.fullmatch(item) for item in value[key])
+                       or len(value[key]) != len(set(value[key])) for key in ("pinned", "excluded"))
                 or not isinstance(value["direct_slots"], list)
                 or len(value["direct_slots"]) != value["requested_count"]):
             raise ContractError("COLLECTION_RECOMMENDATION_PATCH_VALUE")
@@ -626,32 +628,45 @@ def build_collection_recommendation(
 def _unobserved_selection(source: Mapping[str, Any], report: Mapping[str, Any]) -> dict | None:
     """Choose explicit admitted slots; a count alone cannot target a condition."""
     hypothesis, draft = source["hypothesis"], source["draft"]
-    # Explicit human selection constraints are not ours to discard or reinterpret.
-    if draft["pinned"] or draft["excluded"]:
-        return None
     counts = _base_counts(hypothesis)
     missing = {canonical_digest(cell["condition"]) for cell in report["cells"]
                if not cell["counts"]["collected"]}
     bases = {base["base_condition_digest"]: base for base in hypothesis["base_conditions"]}
-    slots = []
-    selected_conditions = set()
+    candidates = sorted(_candidate_slots(hypothesis, 1, _slot_template(draft)),
+                        key=lambda item: item["slot_id"])
+    by_id = {item["slot_id"]: item for item in candidates}
+    if not set(draft["pinned"]).issubset(by_id):
+        by_id.update({item["slot_id"]: item for item in
+                      _candidate_slots(hypothesis, draft["requested_count"], _slot_template(draft))})
+    # Mandatory pinned conditions lead the sequence even when already observed.
+    # They are constraints, not claimed coverage deficits; exclusions stay exact.
+    if any(identifier not in by_id or counts[by_id[identifier]["base_condition_digest"]]["pending_review"]
+           for identifier in draft["pinned"]):
+        return None
+    slots = [by_id[identifier] for identifier in sorted(draft["pinned"])]
+    selected_conditions = {canonical_digest(bases[slot["base_condition_digest"]]["coverage_condition"])
+                           for slot in slots}
+    capacity = min(draft["requested_count"], 100)
+    added = 0
     # Reuse the compiler owner's candidate enumeration and budget accounting.
-    for slot in sorted(_candidate_slots(hypothesis, 1, _slot_template(draft)),
-                       key=lambda item: item["slot_id"]):
-        if counts[slot["base_condition_digest"]]["pending_review"]:
+    for slot in candidates:
+        if len(slots) >= capacity:
+            break
+        if (counts[slot["base_condition_digest"]]["pending_review"]
+                or slot["slot_id"] in draft["excluded"]):
             continue
         condition = canonical_digest(bases[slot["base_condition_digest"]]["coverage_condition"])
         if condition in missing and condition not in selected_conditions:
             slots.append(slot)
             selected_conditions.add(condition)
-        if len(slots) >= min(draft["requested_count"], 100):
-            break
-    if not slots:
+            added += 1
+    if not added:
         return None
     return {
         "source_hypothesis_digest": hypothesis["hypothesis_digest"],
         "authoring_mode": "DIRECT_EDIT", "requested_count": len(slots),
-        "normalized_seed": draft["normalized_seed"], "pinned": [], "excluded": [],
+        "normalized_seed": draft["normalized_seed"],
+        "pinned": copy.deepcopy(draft["pinned"]), "excluded": copy.deepcopy(draft["excluded"]),
         "direct_slots": slots,
     }
 
