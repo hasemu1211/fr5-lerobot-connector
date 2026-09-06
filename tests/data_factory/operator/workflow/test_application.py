@@ -832,6 +832,76 @@ class CollectionOperatorApplicationTests(unittest.TestCase):
         self.assertNotIn("direct_slots", self.application.draft)
         self.assertEqual(self.campaigns, [])
 
+    def test_projection_shares_only_one_read_only_cycle_and_revalidates_new_views(self):
+        self.consume("prepare_environment", {}, "prepare-cycle-reuse")
+        catalog = load_operator_catalog(ROOT, device_ids=["design-camera-a", "design-camera-b"])
+        combination = next(item for item in catalog["combinations"]
+            if item["task_id"] == "pick_place"
+            and item["workspace_id"] == "PLACE_A"
+            and item["object_id"] == "wood-cube-24mm-r001"
+            and item["variant_id"] == "TWO_STAGE_ALIGN_V2"
+            and item["execution"]["TEST_COLLECTION"]["executable"])
+        selection = {key: combination.get(key, value) for key, value in self.selection.items()}
+        setup = {"profiles": [{"start_pose_id": selection["start_pose_id"],
+            "display_name": "HOME", "status": "AVAILABLE"}],
+            "selected_start_pose_ids": [selection["start_pose_id"]]}
+        application = CollectionOperatorApplication(
+            session_id="projection-cycle-reuse", operator_label="local-operator",
+            catalog=catalog, initial_selection=selection, projector=projection,
+            environment_call=lambda: copy.deepcopy(self.environment),
+            prepare_environment_call=lambda: copy.deepcopy(self.environment),
+            campaign_factory=lambda *_args: self.fail("campaign was requested"),
+            initial_environment=self.environment, start_pose_setup=setup,
+            start_pose_capture_call=lambda _name: copy.deepcopy(setup),
+            effect_scope="PHYSICAL",
+        )
+        self.addCleanup(application.close)
+        core = application.bridge_core
+        now = core.clock()
+        core.clock = lambda: now
+        resolve = application._workspace_cycle
+        routes = []
+
+        def observed_cycle():
+            route = resolve()
+            routes.append((route, copy.deepcopy(route)))
+            return route
+
+        for mode in ("ASSISTED", "DIRECT_EDIT"):
+            current = core.snapshot()
+            core.consume(intent(current, "update_draft", {
+                "draft_id": application.draft["draft_id"], "authoring_mode": mode,
+            }, f"cycle-mode-{mode}"))
+            with mock.patch.object(application, "_workspace_cycle", side_effect=observed_cycle) as cycle:
+                first = core.snapshot()
+                second = core.snapshot()
+                self.assertEqual(cycle.call_count, 2)
+            self.assertEqual(first, second)
+            self.assertIsNot(routes[-1][0], routes[-2][0])
+            self.assertTrue(all(route == original for route, original in routes))
+            first["projection"]["draft"]["workspace_route"][0]["workspace_id"] = "CLIENT_ONLY"
+            self.assertEqual(core.snapshot(), second)
+
+        core.consume(intent(second, "update_draft", {
+            "draft_id": application.draft["draft_id"], "requested_count": 4,
+        }, "cycle-count"))
+        changed = core.snapshot()
+        self.assertNotEqual(changed["view_digest"], second["view_digest"])
+        self.assertEqual(len(changed["projection"]["draft"]["workspace_route"]), 5)
+        with self.assertRaisesRegex(ContractError, "OPERATOR_INTENT_STALE_VIEW"):
+            core.consume(intent(second, "update_draft", {
+                "draft_id": application.draft["draft_id"], "requested_count": 3,
+            }, "stale-cycle-count"))
+
+        application.draft["direct_pairs"][-1]["place_id"] = "INVALID_ENDPOINT"
+        self.assertNotIn("compile_draft", core.snapshot()["projection"]["available_ops"])
+        with mock.patch.object(application, "_workspace_cycle", wraps=resolve) as cycle:
+            self.assertFalse(application._direct_draft_ready())
+            self.assertEqual(cycle.call_count, 1)
+        application.catalog["catalog_digest"] = "sha256:" + "0" * 64
+        with self.assertRaises(ContractError):
+            core.snapshot()
+
     def test_projection_is_the_reusable_browser_product_contract(self):
         initial = self.application.bridge_core.snapshot()["projection"]
         self.assertEqual(initial["runtime"]["workflow_state"], "PREPARING")

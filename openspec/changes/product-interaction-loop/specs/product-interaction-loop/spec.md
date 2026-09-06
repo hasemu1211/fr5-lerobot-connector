@@ -23,3 +23,24 @@ When a training-review intent response fails, the product SHALL make one automat
 - **WHEN** the response arrives successfully
 - **THEN** the page retains its existing single post-decision state read and renders only backend-permitted actions
 - **AND** there is no additional confirmation, typed acknowledgment or filesystem approval step.
+
+### Requirement: State-read efficiency preserves canonical meaning
+
+The product SHALL avoid resolving an identical workspace cycle repeatedly within one operator projection when its consumers only read that value. This reduction SHALL preserve complete view content, view digests, available operations and rejection behavior for human and automation consumers. Reuse SHALL end with that projection; subsequent reads and commands SHALL validate current state without a cross-view cache or catalog-digest bypass.
+
+#### Scenario: Several projection consumers need the same workspace cycle
+
+- **WHEN** one current view needs the route for draft readiness, displayed endpoints, coverage or state-space summary
+- **THEN** it resolves the route once and produces the same detached output as independent resolution
+- **AND** the unchanged sampler-parity journey passes with fewer route calls and lower measured unprofiled elapsed time on the same machine.
+
+#### Scenario: A later read observes a changed draft or catalog
+
+- **WHEN** a prior view was returned and a canonical input subsequently changes
+- **THEN** the next read resolves current state again, changes the digest when output changes, and rejects invalid catalog state
+- **AND** a command bound to a stale view remains rejected and compile-time readiness validation remains independent.
+
+#### Scenario: A consumer mutates a returned view
+
+- **WHEN** a consumer changes displayed route fields in its returned view
+- **THEN** the canonical route, sibling projection fields and subsequent views remain unchanged.
