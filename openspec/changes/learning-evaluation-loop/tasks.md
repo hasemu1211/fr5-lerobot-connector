@@ -19,6 +19,7 @@
 - [x] Provide Rollout a deterministic frozen held-out observation cohort and native input/identity contract for offline solver comparisons, preserving admission and physical gates.
 - [x] Compare learned checkpoints before attributing improvement to data selection or acquisition; revise the recipe or coverage hypothesis from matched evidence.
 - [x] Measure paired saved-postprocessor action errors on the frozen observation cohort, separating arm and gripper units and preserving native temporal alignment/padding; qualify any resulting data-utility interpretation.
-- [ ] Distinguish stochastic action-sampling sensitivity from persistent per-joint/chunk errors before choosing further training or data-utility comparisons.
+- [x] Distinguish stochastic action-sampling sensitivity from persistent per-joint/chunk errors before choosing further training or data-utility comparisons.
+- [ ] Establish reproducible evidence for the next acquisition or selection decision, separating sampled policy errors from recorded condition coverage.
 
 Runtime checkpoints, attempts, blockers and numerical measurements belong in Orca and their native evidence artifacts, not this outcome checklist.
