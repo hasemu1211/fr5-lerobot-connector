@@ -258,7 +258,8 @@ class DerivedTrainingTest(unittest.TestCase):
         from tools.validate_training_checkpoint import validate_saved_observation_view
         binding = validate_saved_observation_view(split, receipt)
         self.assertEqual(binding['representation'], 'baked')
-        self.assertEqual(binding['transform_application'], 'none')
+        self.assertEqual(binding['transform_application'], 'rollout_once')
+        self.assertEqual(receipt['observation_view'], binding)
         fitting = load_json_strict(Path(binding['view_profile']['path']))['fitting']
         self.assertTrue(all(frame['episode_index'] in split['train_episodes'] for frame in
                             [fitting['reference_frame'], *fitting['background_plate_frames']]))

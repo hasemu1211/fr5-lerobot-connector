@@ -290,6 +290,13 @@ def compile_launch_receipt(split: Mapping, argv: list[str], inventory_path: str)
 
 def validate_launch_receipt(value: Mapping, split: Mapping) -> dict:
     expected = compile_launch_receipt(split, value["normalized_argv"], value["approved_inventory_path"])
+    if "observation_view" in value:
+        try:
+            from tools.validate_training_checkpoint import validate_saved_observation_view
+            expected["observation_view"] = validate_saved_observation_view(split, expected)
+        except (OSError, TypeError, ValueError, KeyError) as exc:
+            raise ReceiptError("OBSERVATION_VIEW_BINDING") from exc
+        expected["receipt_digest"] = canonical_digest(expected)
     if value != expected:
         raise ReceiptError("LAUNCH_RECEIPT_BINDING")
     return expected

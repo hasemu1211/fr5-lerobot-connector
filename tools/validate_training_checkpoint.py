@@ -171,7 +171,8 @@ def validate_saved_observation_view(split: Mapping, receipt: Mapping) -> dict:
         elif provenance.get("schema_version") not in {EPISODE_PROVENANCE_SCHEMA, LEDGER_PROVENANCE_SCHEMA}:
             raise ValueError("saved observation-view provenance is unknown")
     if not derived:
-        return {"representation": "raw", "transform_application": "rollout_once"}
+        return {"representation": "raw", "transform_application": "none",
+                "training_transform": "raw_once"}
     if len(derived) != len(inventory["episodes"]) or any(item != derived[0] for item in derived[1:]):
         raise ValueError("saved observation-view derivation is inconsistent across episodes")
     try:
@@ -203,9 +204,21 @@ def validate_saved_observation_view(split: Mapping, receipt: Mapping) -> dict:
     if (not frames or any(not isinstance(frame, dict) or frame.get("episode_index") not in train
                           for frame in frames)):
         raise ValueError("saved observation-view fitted frame is outside child TRAIN")
+    fit_split_path = Path(fitting["training_split"]["path"])
+    if file_digest(fit_split_path) != fitting["training_split"]["file_sha256"]:
+        raise ValueError("saved observation-view fitting split changed")
+    fit_split = validate_training_split(fit_split_path)
+    if fit_split["split_digest"] != fitting["training_split"]["split_digest"]:
+        raise ValueError("saved observation-view fitting split digest differs")
+    if fit_split["dataset_identity"] != evidence["parent_dataset_identity"]:
+        raise ValueError("saved observation-view fitting parent differs from publication")
+    fit_train = set(fit_split["train_episodes"])
+    if any(frame["episode_index"] not in fit_train for frame in frames):
+        raise ValueError("saved observation-view fitted frame is outside fitting TRAIN")
     return {
         "representation": "baked",
-        "transform_application": "none",
+        "transform_application": "rollout_once",
+        "training_transform": "baked_once",
         "dataset": output,
         "parent_dataset_identity": evidence["parent_dataset_identity"],
         "lineage_digest": evidence["lineage_digest"],
