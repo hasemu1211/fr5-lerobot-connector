@@ -9,6 +9,65 @@ from tools.validate_training_checkpoint import REQUIRED_TRAINING_STATE, normaliz
 
 
 class TrainingCheckpointTest(unittest.TestCase):
+    def test_native_smolvla_missing_slots_preserve_exact_admitted_images(self):
+        import copy
+        import draccus
+        import torch
+        from types import SimpleNamespace
+        from lerobot.configs import FeatureType, PolicyFeature
+        from lerobot.policies.smolvla.configuration_smolvla import SmolVLAConfig
+        from lerobot.policies.smolvla.modeling_smolvla import SmolVLAPolicy
+        from tools.validate_training_checkpoint import validate_policy_feature_contract
+
+        inputs = {name: {"type": "VISUAL", "shape": [3, 480, 640]}
+                  for name in ("observation.images.camera1", "observation.images.camera2")}
+        inputs["observation.state"] = {"type": "STATE", "shape": [7]}
+        outputs = {"action": {"type": "ACTION", "shape": [7]}}
+        feature = {"profile": "smolvla", "policy_argv": [
+            "--policy.empty_cameras=1", "--policy.input_features=" + json.dumps(inputs),
+            "--policy.output_features=" + json.dumps(outputs),
+        ]}
+        native = SmolVLAConfig(device="cpu", push_to_hub=False, empty_cameras=1,
+                              resize_imgs_with_padding=(4, 4),
+                              input_features={key: PolicyFeature(type=FeatureType(value["type"]),
+                                                                 shape=tuple(value["shape"]))
+                                              for key, value in inputs.items()},
+                              output_features={"action": PolicyFeature(type=FeatureType.ACTION, shape=(7,))})
+        # Reproduce the pretrained config's retained slot and the native serializer.
+        native.input_features["observation.images.camera3"] = PolicyFeature(
+            type=FeatureType.VISUAL, shape=(3, 256, 256))
+        native.validate_features()
+        saved = draccus.encode(native)
+        validate_policy_feature_contract(saved, feature)
+        baseline = copy.deepcopy(native)
+        baseline.input_features.pop("observation.images.camera3")
+        batch = {"observation.images.camera1": torch.full((1, 3, 4, 4), .2),
+                 "observation.images.camera2": torch.full((1, 3, 4, 4), .8)}
+        actual = SmolVLAPolicy.prepare_images(SimpleNamespace(config=native), batch)
+        expected = SmolVLAPolicy.prepare_images(SimpleNamespace(config=baseline), batch)
+        torch.testing.assert_close(actual, expected)
+        self.assertEqual(len(actual[0]), 3)
+        self.assertEqual([mask.tolist() for mask in actual[1]], [[True], [True], [False]])
+
+        for fault in ("unknown", "placeholder_shape", "real_shape", "order", "empty_count", "action"):
+            with self.subTest(fault=fault):
+                altered = copy.deepcopy(saved)
+                if fault == "unknown":
+                    altered["input_features"]["observation.images.camera4"] = inputs["observation.images.camera1"]
+                elif fault == "placeholder_shape":
+                    altered["input_features"]["observation.images.camera3"]["shape"] = [3, 480, 640]
+                elif fault == "real_shape":
+                    altered["input_features"]["observation.images.camera2"]["shape"] = [3, 256, 256]
+                elif fault == "order":
+                    first = altered["input_features"].pop("observation.images.camera1")
+                    altered["input_features"]["observation.images.camera1"] = first
+                elif fault == "empty_count":
+                    altered["empty_cameras"] = 2
+                else:
+                    altered["output_features"]["action"]["shape"] = [6]
+                with self.assertRaisesRegex(ValueError, "checkpoint policy"):
+                    validate_policy_feature_contract(altered, feature)
+
     def test_complete_checkpoint_is_accepted_and_partial_is_rejected(self):
         with TemporaryDirectory() as directory:
             output = Path(directory) / "run"
@@ -158,6 +217,7 @@ class CurrentTrainingCheckpointTest(unittest.TestCase):
                         pass
                     policy_cfg[option.removeprefix("--policy.")] = value
             config = {"dataset": {"root": str(kwargs["dataset"]), "repo_id": kwargs["repo_id"], "episodes": [0, 2, 3], "eval_split": 0.34}, "policy": policy_cfg}
+            (policy / "config.json").write_text(json.dumps(policy_cfg))
             (policy / "train_config.json").write_text(json.dumps(config))
             for name in REQUIRED_TRAINING_STATE:
                 (state / name).write_text('{"step": 100}' if name == "training_step.json" else "")
@@ -165,6 +225,12 @@ class CurrentTrainingCheckpointTest(unittest.TestCase):
             (output / "fr5_training_receipt.json").write_text(json.dumps(receipt))
             write_normalization_fixture(policy, receipt)
             self.assertEqual(validate_checkpoint(policy), (policy, output))
+            saved_policy = json.loads(json.dumps(policy_cfg))
+            saved_policy["input_features"]["observation.state"]["shape"] = [6]
+            (policy / "config.json").write_text(json.dumps(saved_policy))
+            with self.assertRaisesRegex(ValueError, "feature contract"):
+                validate_checkpoint(policy)
+            (policy / "config.json").write_text(json.dumps(policy_cfg))
             from safetensors.numpy import load_file, save_file
             normalizer = policy / "policy_preprocessor_normalization.safetensors"
             tensors = load_file(normalizer)

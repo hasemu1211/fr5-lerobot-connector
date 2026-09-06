@@ -69,7 +69,7 @@ def admitted_case(root: Path) -> tuple[SimpleNamespace, dict]:
             config["policy"][key.removeprefix("--policy.")] = parsed
         elif key == "--rename_map":
             config["rename_map"] = parsed
-    write_json(policy_dir / "config.json", {})
+    write_json(policy_dir / "config.json", config["policy"])
     write_json(policy_dir / "train_config.json", config)
     (policy_dir / "model.safetensors").write_bytes(b"fixture-model")
     write_json(state_dir / "optimizer_param_groups.json", {})
@@ -552,7 +552,7 @@ class OfflineEvaluationTest(unittest.TestCase):
             args, _ = admitted_case(root / "fixture")
             (root / "scripts").mkdir()
             (root / "tools/data_factory").mkdir(parents=True)
-            (root / ".venv").symlink_to(project / ".venv", target_is_directory=True)
+            (root / ".venv").symlink_to(Path(sys.prefix), target_is_directory=True)
             for name in ("evaluate_smolvla.sh", "validate_dataset.sh"):
                 shutil.copy2(project / "scripts" / name, root / "scripts" / name)
             for name in ("evaluate_smolvla_offline.py", "data_factory/training_entrypoint.py"):
