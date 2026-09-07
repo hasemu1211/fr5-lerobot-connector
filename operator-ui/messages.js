@@ -18,6 +18,8 @@ const MESSAGE_CATALOG = {
     TERMINAL: "이번 수집이 끝났습니다.",
   },
   reason: {
+    MOTION_PRESET_BINDING: "속도 정책 또는 결속된 자격이 변경되었습니다. 최신 정책을 다시 선택하세요.",
+    MOTION_PRESET_QUALIFICATION_REQUIRED: "선택한 속도 정책에 대한 작업영역별 물리 자격이 필요합니다. 기존 검증 설정을 유지할 수 있습니다.",
     BRIDGE_UNAVAILABLE: "로컬 수집 서비스에 연결할 수 없습니다",
     BRIDGE_SESSION_EXPIRED: "로컬 수집 서비스가 재시작되었습니다",
     VIEW_STALE: "화면 정보가 최신 상태와 다릅니다",

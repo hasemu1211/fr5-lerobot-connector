@@ -960,6 +960,7 @@ class OperatorConsole:
         candidate_state_bind_call: Callable[
             [Mapping[str, Any], str | Path], Mapping[str, Any]
         ] | None = None,
+        candidate_state_observe_call: Callable | None = None,
         terminal_response_call: Callable[[], Mapping[str, Any] | None] | None = None,
         gripper_setup_request: Mapping[str, Any] | None = None,
         gripper_setup_resolution_call: Callable[[Mapping[str, Any]], Mapping[str, Any]] | None = None,
@@ -969,6 +970,7 @@ class OperatorConsole:
         object_reposition_bindings: Sequence[Mapping[str, Any] | None] | None = None,
         initial_block_code: str | None = None,
         campaign_approval_once: bool = False,
+        prepare_campaign_call: Callable[[], None] | None = None,
         run_id_factory: Callable[[int], str] | None = None,
         prepare_timeout_s: float = 5.0, close_timeout_s: float = 5.0,
         clock=None,
@@ -986,6 +988,8 @@ class OperatorConsole:
         if not all(callable(call) for call in (
             campaign_operator_factory, episode_call, projection_call,
         )):
+            raise ContractError("OPERATOR_CONSOLE_CALLABLE")
+        if prepare_campaign_call is not None and not callable(prepare_campaign_call):
             raise ContractError("OPERATOR_CONSOLE_CALLABLE")
         if not isinstance(test_only_paths, str) or not test_only_paths or "\x00" in test_only_paths:
             raise ContractError("OPERATOR_CONSOLE_TEST_ONLY_PATHS")
@@ -1019,6 +1023,7 @@ class OperatorConsole:
             lambda index: run_id if index == 0 else f"{run_id}-e{index + 1}"
         )
         self.campaign_approval_once = campaign_approval_once
+        self.prepare_campaign_call = prepare_campaign_call
         self.episode_call, self.projection_call = episode_call, projection_call
         self.test_only_paths = test_only_paths
         self.prepare_timeout_s, self.close_timeout_s = float(prepare_timeout_s), float(close_timeout_s)
@@ -1033,6 +1038,7 @@ class OperatorConsole:
         self.candidate_state_bind_call = (
             candidate_state_bind_call or run_job.bind_candidate_episode_state
         )
+        self.candidate_state_observe_call = candidate_state_observe_call
         self._lock = threading.RLock()
         self._prepared = threading.Event()
         self._thread = None
@@ -1219,6 +1225,19 @@ class OperatorConsole:
         nested = value.get("campaign")
         return copy.deepcopy(dict(nested if isinstance(nested, Mapping) else value))
 
+    def collection_evidence(self) -> dict[str, Any]:
+        """Retain completed native evidence for the next application draft.
+
+        Paths stay server-owned; browser history intentionally omits them.
+        """
+        with self._lock:
+            runs = sorted({str(Path(item["episode_ledger"]["path"]).parent)
+                           for item in self._episode_history
+                           if isinstance(item.get("episode_ledger"), Mapping)
+                           and isinstance(item["episode_ledger"].get("path"), str)})
+            return {"run_directories": runs,
+                    "authoring": self.campaign_operator.compiled_authoring_evidence() if runs else None}
+
     @staticmethod
     def _browser_result(value: object) -> dict[str, Any] | None:
         if not isinstance(value, Mapping):
@@ -1391,12 +1410,48 @@ class OperatorConsole:
             return ["review_candidate"]
         return []
 
+    def _observe_candidate_reviews(self) -> str | None:
+        if self.candidate_state_observe_call is None:
+            return None
+        while self._active_candidate_review is not None:
+            item = self._active_candidate_review
+            try:
+                observed = self.candidate_state_observe_call(
+                    item["ledger_reference"], item["candidate_path"],
+                    expected_file_digest=item["expected_file_digest"],
+                )
+                candidate, reference = observed["candidate"], observed["ledger_reference"]
+                if candidate["semantic_status"] == "PENDING":
+                    return None
+                matches = [entry for entry in self._episode_history
+                           if entry.get("intent_binding", {}).get("run_id") == item["run_id"]]
+                if (len(matches) != 1 or reference["training_status"] != "NOT_AUTHORIZED"
+                        or reference["retention_state"] != "PRESERVE"
+                        or reference["review_status"] != candidate["semantic_status"]):
+                    raise ContractError("OPERATOR_CONSOLE_CANDIDATE_STATE")
+                resolved = self.candidate_review_port.observe_resolved(candidate)
+                history = matches[0]
+                history["episode_ledger"] = copy.deepcopy(reference)
+                history["human_semantic"] = resolved["status"]
+                history["result_digest"] = canonical_digest({
+                    key: value for key, value in history.items() if key != "result_digest"
+                })
+                self.candidate_review_port.acknowledge(resolved["review_binding_digest"])
+                self._active_candidate_review = None
+                self._offer_next_candidate_review()
+            except (ContractError, OSError, KeyError, TypeError, ValueError):
+                return "CANDIDATE_REVIEW_OBSERVATION_UNAVAILABLE"
+        return None
+
     def projection(self) -> dict[str, Any]:
         with self._lock:
+            review_error = self._observe_candidate_reviews()
             base = self._base_projection()
             pending = self._pending_plan()
             checkpoint = self._checkpoint_projection()
             candidate = None if self.candidate_review_port is None else self.candidate_review_port.projection()
+            if candidate is not None and review_error is not None:
+                candidate.update(status="UNAVAILABLE", reason_code=review_error)
             if candidate is not None and self._active_candidate_review is not None:
                 candidate.update({
                     "episode_number": self._active_candidate_review["episode_number"],
@@ -2355,7 +2410,10 @@ class OperatorConsole:
                 or self._campaign_authorization is not None
             ):
                 raise ContractError("OPERATOR_CONSOLE_CAMPAIGN_AUTHORIZATION")
-            self._campaign_authorization = self._build_campaign_authorization()
+            authorization = self._build_campaign_authorization()
+            if self.prepare_campaign_call is not None:
+                self.prepare_campaign_call()
+            self._campaign_authorization = authorization
             self._workflow, self._last_error = "RUNNING", None
             self._thread = threading.Thread(
                 target=self._worker_target,

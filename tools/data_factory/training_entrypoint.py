@@ -212,7 +212,9 @@ def prepare_launch(*, dataset: Path, repo_id: str, inventory: Path,
             key = canonical_digest(reference)
             if key not in mapped:
                 mapped[key] = approval._mapped_publication(reference)
-        if provenance["schema_version"] in {approval.DERIVED_PROVENANCE_SCHEMA, approval.MAPPED_PROVENANCE_SCHEMA}:
+        if provenance["schema_version"] == approval.MAPPED_PROVENANCE_SCHEMA:
+            provenance = provenance["parent"]["provenance"]
+        if provenance["schema_version"] == approval.DERIVED_PROVENANCE_SCHEMA:
             provenance = provenance["parent"]["provenance"]
         if provenance["schema_version"] == approval.LEDGER_PROVENANCE_SCHEMA:
             ledger = load_json_strict(Path(provenance["episode_ledger"]["artifact_path"]))
@@ -471,6 +473,19 @@ def run_delegated_request(request: dict, *, approval_output: Path,
     if profile != "smolvla":
         raise ContractError("TRAINING_EVALUATOR_UNSUPPORTED")
     request = copy.deepcopy(request)
+    if "evaluation_cohort" in request:
+        from tools.data_factory.training_receipts import file_digest
+        reference = request["evaluation_cohort"]
+        approval._exact(reference, frozenset({"path", "sha256", "cohort_digest"}), "COHORT_REQUEST")
+        path = Path(reference["path"]).expanduser().resolve()
+        if evaluation_cohort is not None and evaluation_cohort.expanduser().resolve() != path:
+            raise ContractError("COHORT_OVERRIDE_CONFLICT")
+        if file_digest(path) != reference["sha256"]:
+            raise ContractError("COHORT_REQUEST_CHANGED")
+        cohort = revalidate_evaluation_cohort(path)
+        if cohort["cohort_digest"] != reference["cohort_digest"]:
+            raise ContractError("COHORT_REQUEST_CHANGED")
+        evaluation_cohort = path
     dataset = Path(request["dataset_root"]).expanduser().resolve()
     argv = _request_argv(
         request, dataset=dataset, repo_id=request["repo_id"], profile=profile,
@@ -615,7 +630,8 @@ def prepare_approvals(request: dict, output: Path, approved_by: str) -> tuple[di
     return _prepare_approvals(request, output, approved_by, check_targets=True)
 
 
-def _prepare_approvals(request: dict, output: Path, approved_by: str, *, check_targets: bool) -> tuple[dict, list[dict]]:
+def _prepare_approvals(request: dict, output: Path, approved_by: str, *, check_targets: bool,
+                       check_parent_freshness: bool = True) -> tuple[dict, list[dict]]:
     if "mapping" in request:
         return approval.prepare_mapped_approvals(request, output, approved_by, check_targets=check_targets)
     fields = {"dataset_root", "dataset_id", "repo_id", "episodes"}
@@ -645,6 +661,7 @@ def _prepare_approvals(request: dict, output: Path, approved_by: str, *, check_t
         for draft in drafts:
             provenance = approval.compile_derived_training_provenance(
                 dataset=dataset, derivation=request["derivation"], parent_draft=draft,
+                check_parent_freshness=check_parent_freshness,
             )
             args = draft["approval_arguments"]
             args.update(dataset_identity=dataset,
@@ -732,6 +749,19 @@ def _batch_summary(dataset: dict, drafts: list[dict], batch_digest: str, output:
     return "\n".join(lines)
 
 
+def _mapped_original_preview(provenance: dict) -> dict:
+    """Expose recorded original review without claiming derivative semantics."""
+    parent = provenance["parent"]["provenance"]
+    if parent["schema_version"] != approval.DERIVED_PROVENANCE_SCHEMA:
+        return {}
+    return {
+        "original_parent_semantic_status": "PASS",
+        "original_parent_dataset_identity": parent["parent"]["dataset_identity"],
+        "original_source_episode_index": parent["parent"]["provenance"]["episode_index"],
+        "curator_review": parent["curator_review"],
+    }
+
+
 @dataclass(frozen=True)
 class PreparedApprovalBatch:
     """Server-held value, never deserialized from browser input or a consent token.
@@ -757,7 +787,9 @@ class PreparedApprovalBatch:
                               "parent_dataset_identity": draft["provenance"]["parent"]["dataset_identity"],
                               "curator_review": draft["provenance"]["curator_review"]}
                              if draft["provenance"]["schema_version"] == approval.DERIVED_PROVENANCE_SCHEMA else {}),
-                          **({"parent_semantic_status": "PASS",
+                          **({"parent_semantic_status": (
+                                  "NOT_ASSERTED" if draft["provenance"]["parent"]["provenance"]["schema_version"] == approval.DERIVED_PROVENANCE_SCHEMA else "PASS"),
+                              **_mapped_original_preview(draft["provenance"]),
                               "parent_dataset_identity": draft["provenance"]["parent"]["dataset_identity"],
                               "source_episode_index": draft["provenance"]["parent"]["provenance"]["episode_index"],
                               "mapping": draft["provenance"]["mapping"]}
@@ -998,28 +1030,41 @@ def approve(request: dict, output: Path, approved_by: str, *, dry_run: bool) -> 
 
 
 def prepare_evaluation_cohort(request_path: Path, *, evidence_directory: Path,
-                              eval_fraction: float) -> dict:
+                              eval_fraction: float | None = None,
+                              eval_episodes: list[int] | None = None) -> dict:
     """Revalidate canonical selected evidence without publishing any authority."""
     from tools.data_factory.training_receipts import file_digest
     from tools.data_factory.training_split import (
         COHORT_SCHEMA, selected_train_eval, source_episode_identity, validate_evaluation_cohort,
     )
+    if eval_episodes is None and (type(eval_fraction) not in (int, float) or not 0 < eval_fraction < 1):
+        raise ContractError("COHORT_FRACTION")
     request_path = request_path.resolve()
     before = file_digest(request_path)
     request = load_json_strict(request_path)
     dataset, drafts = _prepare_approvals(
         request, evidence_directory, "cohort-preview-only", check_targets=False,
     )
-    metadata = read_metadata(Path(dataset["dataset_root"]))
-    train, evaluation = selected_train_eval(
-        metadata["episode_tasks"], [e["episode_index"] for e in request["episodes"]], eval_fraction,
-    )
+    selected = [e["episode_index"] for e in request["episodes"]]
+    if eval_episodes is not None:
+        if (eval_fraction is not None or not isinstance(eval_episodes, list) or not eval_episodes
+                or any(type(i) is not int for i in eval_episodes)
+                or len(set(eval_episodes)) != len(eval_episodes)
+                or not set(eval_episodes) < set(selected)):
+            raise ContractError("COHORT_PARTITION")
+        evaluation = sorted(eval_episodes)
+        train = sorted(set(selected) - set(evaluation))
+    else:
+        metadata = read_metadata(Path(dataset["dataset_root"]))
+        train, evaluation = selected_train_eval(metadata["episode_tasks"], selected, eval_fraction)
     origins = {d["approval_arguments"]["episode_index"]: source_episode_identity(d["provenance"])
                for d in drafts}
     value = dict(schema_version=COHORT_SCHEMA, training_authority=False,
                  request={"path": str(request_path), "sha256": before}, dataset_identity=dataset,
                  eval_fraction=eval_fraction, train=[origins[i] for i in train],
                  eval=[origins[i] for i in evaluation])
+    if eval_episodes is not None:
+        value["evaluation_episode_indices"] = evaluation
     value["cohort_digest"] = canonical_digest(value)
     if file_digest(request_path) != before:
         raise ContractError("COHORT_REQUEST_CHANGED")
@@ -1030,12 +1075,21 @@ def revalidate_evaluation_cohort(path: Path) -> dict:
     """Reopen the frozen source graph; a changed source is not a new cohort."""
     from tools.data_factory.training_split import validate_evaluation_cohort
     value = validate_evaluation_cohort(load_json_strict(path))
+    _revalidate_cohort_sources(value, path.parent)
+    return value
+
+
+def _revalidate_cohort_sources(value: dict, evidence_directory: Path) -> None:
+    if "cohorts" in value:
+        for component in value["cohorts"]:
+            _revalidate_cohort_sources(component, evidence_directory)
+        return
     current = prepare_evaluation_cohort(Path(value["request"]["path"]),
-                                        evidence_directory=path.parent,
-                                        eval_fraction=value["eval_fraction"])
+                                        evidence_directory=evidence_directory,
+                                        eval_fraction=value["eval_fraction"],
+                                        eval_episodes=value.get("evaluation_episode_indices"))
     if current != value:
         raise ContractError("COHORT_SOURCE_CHANGED")
-    return value
 
 
 def main() -> None:
@@ -1044,7 +1098,12 @@ def main() -> None:
     cohort = sub.add_parser("prepare-cohort", help="Freeze planning-only source evaluation identities; no approval")
     cohort.add_argument("--request", type=Path, required=True)
     cohort.add_argument("--output", type=Path, required=True)
-    cohort.add_argument("--eval-fraction", type=float, required=True)
+    selection = cohort.add_mutually_exclusive_group(required=True)
+    selection.add_argument("--eval-fraction", type=float)
+    selection.add_argument("--eval-episodes", type=json.loads, help="Predeclared selected episode indices as JSON")
+    union = sub.add_parser("compose-cohorts", help="Preserve disjoint frozen assignments; no approval")
+    union.add_argument("--cohort", type=Path, action="append", required=True)
+    union.add_argument("--output", type=Path, required=True)
     resume = sub.add_parser("resume", help="Resume an admitted checkpoint with its TRAIN normalization")
     resume.add_argument("--checkpoint", type=Path, required=True)
     human = sub.add_parser("approve", help="Preview a frozen revision; issue approval only through a controlling human TTY",
@@ -1113,10 +1172,16 @@ for a new reviewed attempt. This command never starts training or robot executio
     try:
         if args.mode == "prepare-cohort":
             value = prepare_evaluation_cohort(args.request, evidence_directory=args.output.parent,
-                                              eval_fraction=args.eval_fraction)
+                                              eval_fraction=args.eval_fraction, eval_episodes=args.eval_episodes)
             if prepare_evaluation_cohort(args.request, evidence_directory=args.output.parent,
-                                         eval_fraction=args.eval_fraction) != value:
+                                         eval_fraction=args.eval_fraction, eval_episodes=args.eval_episodes) != value:
                 raise ContractError("COHORT_SOURCE_CHANGED")
+            approval._write_exclusive(args.output, value, "COHORT_OUTPUT_EXISTS")
+            print(json.dumps(value, indent=2, sort_keys=True))
+        elif args.mode == "compose-cohorts":
+            from tools.data_factory.training_split import compose_evaluation_cohorts
+            value = compose_evaluation_cohorts([revalidate_evaluation_cohort(p) for p in args.cohort])
+            _revalidate_cohort_sources(value, args.output.parent)
             approval._write_exclusive(args.output, value, "COHORT_OUTPUT_EXISTS")
             print(json.dumps(value, indent=2, sort_keys=True))
         elif args.mode == "resume":

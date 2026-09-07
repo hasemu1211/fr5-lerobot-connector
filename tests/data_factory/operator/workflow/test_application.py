@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+import json
 import threading
 import unittest
 from pathlib import Path
@@ -455,6 +456,33 @@ class CollectionOperatorApplicationTests(unittest.TestCase):
                 self.assertEqual(released["effect_counts"], active["effect_counts"])
                 self.assertEqual(campaign.episode_plan, retained_evidence)
 
+    def test_motion_preset_selection_replay_stale_and_keep_preserve_draft(self):
+        self.consume("prepare_environment", {}, "preset-prepare")
+        view = self.application.bridge_core.snapshot()
+        draft = copy.deepcopy(self.application.draft)
+        preset = view["projection"]["motion_presets"][0]
+        self.assertEqual(preset["status"], "QUALIFICATION_REQUIRED")
+        self.assertNotIn("source", json.dumps(preset))
+        binding = {key: preset[key] for key in ("id", "digest")}
+        command = intent(view, "update_draft", {"draft_id": draft["draft_id"], "motion_preset": binding}, "preset-choice")
+        self.application.bridge_core.consume(command)
+        # A lost response is recovered by reading; duplicate intents have no effects.
+        with self.assertRaisesRegex(ContractError, "OPERATOR_INTENT_REPLAY"):
+            self.application.bridge_core.consume(command)
+        self.assertEqual(self.application.draft["revision"], draft["revision"] + 1)
+        selected = self.application.bridge_core.snapshot()["projection"]
+        self.assertEqual(selected["draft"]["motion_preset"], binding)
+        self.assertFalse(selected["draft"]["execution_ready"])
+        self.assertNotIn("compile_draft", selected["available_ops"])
+        for key in ("current_object_pose", "direct_poses", "requested_count", "normalized_seed"):
+            self.assertEqual(self.application.draft[key], draft[key])
+        with self.assertRaisesRegex(ContractError, "MOTION_PRESET_BINDING"):
+            self.consume("update_draft", {"draft_id": draft["draft_id"], "motion_preset": {**binding, "digest": "sha256:" + "0" * 64}}, "preset-stale")
+        self.consume("update_draft", {"draft_id": draft["draft_id"], "motion_preset": None}, "preset-keep")
+        self.assertIsNone(self.application.draft["motion_preset"])
+        self.assertIn("compile_draft", self.application.bridge_core.snapshot()["projection"]["available_ops"])
+        self.assertEqual(self.campaigns, [])
+
     def test_environment_precedes_factory_and_invalid_mode_has_zero_effects(self):
         view = self.application.bridge_core.snapshot()["projection"]
         self.assertEqual(view["workflow_state"], "ENVIRONMENT")
@@ -784,6 +812,7 @@ class CollectionOperatorApplicationTests(unittest.TestCase):
             "prepare_environment", "update_draft", "compile_draft",
             "edit_campaign_draft", "authorize_campaign", "cancel_session",
             "review_candidate", "new_campaign_same_settings",
+            "refresh_collection_advice", "choose_collection_advice",
             "recover_home",
             "capture_workspace_point", "preview_workspace",
             "discard_workspace_preview",
@@ -1794,6 +1823,7 @@ class CollectionOperatorApplicationTests(unittest.TestCase):
         }, "uncertain-start-authorize")
         campaign = campaigns[0]
         campaign.state = "BLOCKED"
+        campaign.candidate_pending = True
         campaign.reason_codes = ["START_TRANSITION_CANCEL_UNCERTAIN"]
         campaign.start_transition_owner = {
             "active": True,
@@ -1805,18 +1835,25 @@ class CollectionOperatorApplicationTests(unittest.TestCase):
         }
 
         blocked = application.bridge_core.snapshot()["projection"]
-        self.assertEqual(blocked["available_ops"], [])
+        self.assertEqual(blocked["available_ops"], ["review_candidate"])
         self.assertEqual(
             (blocked["runtime"]["active_child_id"],
              blocked["runtime"]["motion_owner"]),
             (campaign.start_transition_owner["run_id"],
              campaign.start_transition_owner),
         )
-        for op in ("recover_home", "new_campaign_same_settings"):
-            with self.subTest(op=op), self.assertRaisesRegex(
-                ContractError, "OPERATOR_INTENT_OP",
-            ):
-                consume(op, {}, f"uncertain-start-{op}")
+        for state in ("BLOCKED", "TERMINAL"):
+            campaign.state = state
+            self.assertEqual(application.projection()["available_ops"], ["review_candidate"])
+            for op in ("recover_home", "new_campaign_same_settings"):
+                with self.subTest(state=state, op=op), self.assertRaisesRegex(
+                    ContractError, "OPERATOR_INTENT_OP",
+                ):
+                    consume(op, {}, f"uncertain-start-{state}-{op}")
+            with self.assertRaisesRegex(ContractError, "OPERATOR_APPLICATION_RECOVERY_STATE"):
+                application.recover_home({}, {})
+            with self.assertRaisesRegex(ContractError, "OPERATOR_APPLICATION_STATE"):
+                application._replace_campaign()
         recovery.assert_not_called()
         self.assertEqual(len(campaigns), 1)
         self.assertFalse(campaign.closed)
@@ -1825,7 +1862,7 @@ class CollectionOperatorApplicationTests(unittest.TestCase):
         released = application.bridge_core.snapshot()["projection"]
         self.assertEqual(
             released["available_ops"],
-            ["recover_home", "new_campaign_same_settings"],
+            ["review_candidate", "recover_home", "new_campaign_same_settings"],
         )
 
     def test_close_preserves_uncertain_start_owner_until_terminal_evidence(self):
@@ -2008,7 +2045,7 @@ class CollectionOperatorApplicationTests(unittest.TestCase):
         self.assertIs(self.application._campaign, campaign)
         self.assertFalse(campaign.closed)
 
-    def test_blocked_candidate_is_reviewed_before_fresh_campaign_is_offered(self):
+    def test_blocked_pending_review_does_not_hide_independent_recovery(self):
         self.consume("prepare_environment", {}, "prepare-blocked-review")
         authored = self.application.bridge_core.snapshot()["projection"]
         compiled = self.consume("compile_draft", {
@@ -2024,16 +2061,26 @@ class CollectionOperatorApplicationTests(unittest.TestCase):
         campaign = self.campaigns[0]
         campaign.state = "BLOCKED"
         campaign.candidate_pending = True
+        campaign.reason_codes = ["RECORDER_READINESS_ALIGNMENT"]
+        self.application.effect_scope = "PHYSICAL"
+        recovery = mock.Mock(return_value={"schema_version": "data_factory.home_recovery.v1",
+            "status": "ALREADY_HOME", "gripper_open": True, "arm_goal_count": 0})
+        self.application.home_recovery_call = recovery
 
         blocked = self.application.bridge_core.snapshot()["projection"]
-        self.assertEqual(blocked["available_ops"], ["review_candidate"])
-        self.consume("review_candidate", {
-            "review_binding_digest": canonical_digest("review-binding"),
-            "choice": "FAIL", "reason": "TASK_GOAL",
-        }, "review-blocked")
-
+        self.assertIsNone(blocked["runtime"]["active_child_id"])
+        self.assertEqual(blocked["available_ops"], ["review_candidate", "recover_home", "new_campaign_same_settings"])
+        self.consume("recover_home", {}, "recover-with-pending-review")
+        recovery.assert_called_once_with()
+        self.assertTrue(campaign.candidate_pending)
         recovered = self.application.bridge_core.snapshot()["projection"]
-        self.assertEqual(recovered["available_ops"], ["new_campaign_same_settings"])
+        self.assertIn("review_candidate", recovered["available_ops"])
+        self.consume("new_campaign_same_settings", {}, "restart-with-pending-review")
+        self.assertTrue(campaign.closed)
+        self.assertTrue(campaign.candidate_pending)
+        self.assertEqual(len(self.campaigns), 1)
+        self.assertEqual(self.application.projection()["workflow_state"], "AUTHORING")
+        self.assertIsNone(self.application.projection()["campaign_authorization"])
 
     def test_compiled_campaign_can_be_discarded_before_authorization(self):
         self.consume("prepare_environment", {}, "prepare-edit")

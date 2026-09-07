@@ -1,0 +1,139 @@
+<!doctype html><html lang="ko"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>학습 입력과 정규화 경계 — 데이터 엔진 근거</title><link rel="stylesheet" href="../site.css"></head><body><main class="source-page"><a href="../learning.html#inputs">← 설명으로 돌아가기</a><h1>학습 입력과 정규화 경계</h1><p class="note">설명에 사용한 구현·측정 자료의 발췌이다. SHA-256은 발췌 전 원본 파일을 식별한다. 실행 PC의 절대 경로와 계정 정보는 포함하지 않으며, 측정값과 해석 조건을 함께 제시한다.</p><section id="training_entrypoint"><h2>training_entrypoint.py</h2><p class="locator">tools/data_factory/training_entrypoint.py<br>sha256:3fddbcb80c1e5792dc6a72f91322cafa1a3c70561b8c3907c0001fb6e773fc1f</p><p class="note">해당 기능의 함수 발췌. 줄 번호와 digest는 원본 기준이다.</p><pre># tools/data_factory/training_entrypoint.py:268 · _run_native_training
+def _run_native_training(argv: list[str], split: dict, receipt: dict) -&gt; int:
+    &quot;&quot;&quot;Use the official trainer with admitted partitions and TRAIN-only normalization.
+
+    LeRobot 0.6.1 selects samples but retains global metadata statistics. Adapt
+    its dataset factory in this process only, before policy/processors are made.
+    &quot;&quot;&quot;
+    from lerobot.scripts import lerobot_train
+    import numpy as np
+
+    original_factory = lerobot_train.make_train_eval_datasets
+    original_argv = sys.argv
+
+    def admitted_datasets(cfg):
+        dataset = cfg.dataset
+        if (str(dataset.root) != split[&quot;dataset_identity&quot;][&quot;dataset_root&quot;]
+                or dataset.repo_id != split[&quot;repo_id&quot;]
+                or (dataset.episodes or list(range(split[&quot;total_episodes&quot;]))) != split[&quot;selected_episodes&quot;]
+                or dataset.eval_split != split[&quot;eval_split&quot;] or dataset.streaming
+                or dataset.use_imagenet_stats != receipt[&quot;normalization&quot;][&quot;use_imagenet_stats&quot;]):
+            raise ContractError(&quot;TRAINING_RUNTIME_DATASET&quot;)
+        train, heldout = original_factory(cfg)
+        for actual, expected in ((train, split[&quot;train_episodes&quot;]), (heldout, split[&quot;eval_episodes&quot;])):
+            if actual is None or actual.episodes != expected:
+                raise ContractError(&quot;TRAINING_RUNTIME_SPLIT&quot;)
+            actual.meta.stats = {key: {name: np.asarray(value) for name, value in stats.items()}
+                                 for key, stats in receipt[&quot;normalization&quot;][&quot;stats&quot;].items()}
+        return train, heldout
+
+    try:
+        sys.argv = list(argv)
+        lerobot_train.make_train_eval_datasets = admitted_datasets
+        lerobot_train.main()
+        return 0
+    finally:
+        lerobot_train.make_train_eval_datasets = original_factory
+        sys.argv = original_argv</pre></section><section id="source-cohort"><h2>데이터 확장과 TRAIN·EVAL 배정 보존</h2><p>main d23eb57는 별도로 고정한 cohort의 TRAIN·EVAL 배정을 합성하는 경로를 추가했다. 원본 데이터 식별값·시연 번호·내용 식별값을 유지하며, Curator의 원본 매핑을 통해 통합 데이터의 새 번호로 연결한다. 기존 평가 시연을 유지하는 비교와 새 평가 조건을 별도로 포함하는 비교를 모두 준비할 수 있다.</p><p>아래는 구현 발췌와 synthetic 회귀의 검증 범위이다. 기존 26개 시연 실험의 20/6 분할과 측정 결과는 당시 출처를 보존한다. 신규 실제 학습·실물 정책 평가 결과를 뜻하지 않는다.</p><h3>tools/data_factory/training_split.py · compose_evaluation_cohorts</h3><p class="locator">main d23eb57 · sha256:381e25232b255d19245de701a1c508c5db424d80ffb4e6c616060b60d48fc76a</p><pre>390: def compose_evaluation_cohorts(cohorts: Sequence[Mapping]) -&gt; dict:
+391:     &quot;&quot;&quot;Combine disjoint frozen assignments without selecting or approving data.&quot;&quot;&quot;
+392:     if len(cohorts) &lt; 2:
+393:         raise ContractError(&quot;COHORT_COMPONENTS&quot;)
+394:     leaves = []
+395:     for cohort in cohorts:
+396:         cohort = validate_evaluation_cohort(cohort)
+397:         leaves.extend(cohort.get(&quot;cohorts&quot;, [cohort]))
+398:     value = dict(schema_version=COHORT_UNION_SCHEMA, training_authority=False,
+399:                  cohorts=leaves, train=[row for c in leaves for row in c[&quot;train&quot;]],
+400:                  eval=[row for c in leaves for row in c[&quot;eval&quot;]])
+401:     value[&quot;cohort_digest&quot;] = canonical_digest(value)
+402:     return validate_evaluation_cohort(value)</pre><h3>tools/data_factory/training_split.py · source_episode_identity</h3><p class="locator">main d23eb57 · sha256:381e25232b255d19245de701a1c508c5db424d80ffb4e6c616060b60d48fc76a</p><pre>405: def source_episode_identity(provenance: Mapping) -&gt; dict:
+406:     &quot;&quot;&quot;Resolve an already-validated mapping/derivation to its original episode.&quot;&quot;&quot;
+407:     while &quot;parent&quot; in provenance:
+408:         provenance = provenance[&quot;parent&quot;][&quot;provenance&quot;]
+409:     return {key: copy.deepcopy(provenance[key]) for key in
+410:             (&quot;dataset_identity_digest&quot;, &quot;episode_index&quot;, &quot;episode_content_digest&quot;)}</pre><h3>tools/data_factory/training_split.py · resolve_evaluation_cohort</h3><p class="locator">main d23eb57 · sha256:381e25232b255d19245de701a1c508c5db424d80ffb4e6c616060b60d48fc76a</p><pre>472: def resolve_evaluation_cohort(value: Mapping, origins: Mapping[int, Mapping]) -&gt; tuple[list[int], list[int]]:
+473:     &quot;&quot;&quot;Map proven source identities to new indices; never retune a fraction.
+474:
+475:     Caller must validate the source publication and each origin&#x27;s provenance.
+476:     A matching identity at two destination indices is leakage, not extra data.
+477:     &quot;&quot;&quot;
+478:     value = validate_evaluation_cohort(value)
+479:     if not origins or any(type(i) is not int or i &lt; 0 for i in origins):
+480:         raise ContractError(&quot;COHORT_DESTINATION&quot;)
+481:     keys = [canonical_digest(origin) for origin in origins.values()]
+482:     coordinates = [(origin[&quot;dataset_identity_digest&quot;], origin[&quot;episode_index&quot;]) for origin in origins.values()]
+483:     if len(coordinates) != len(set(coordinates)):
+484:         raise ContractError(&quot;COHORT_OVERLAP&quot;)
+485:     heldout = {canonical_digest(row) for row in value[&quot;eval&quot;]}
+486:     if not heldout.issubset(keys):
+487:         raise ContractError(&quot;COHORT_MISSING_HELDOUT&quot;)
+488:     train = [i for i in sorted(origins) if canonical_digest(origins[i]) not in heldout]
+489:     evaluation = [i for i in sorted(origins) if canonical_digest(origins[i]) in heldout]
+490:     if not train:
+491:         raise ContractError(&quot;COHORT_PARTITION&quot;)
+492:     return train, evaluation</pre><h3>tools/data_factory/training_entrypoint.py · prepare_evaluation_cohort</h3><p class="locator">main d23eb57 · sha256:3cbd01feaca8b99355d22f72600abe57c1283ecf2537cafef1d0b1012116e6f9</p><pre>1013: def prepare_evaluation_cohort(request_path: Path, *, evidence_directory: Path,
+1014:                               eval_fraction: float | None = None,
+1015:                               eval_episodes: list[int] | None = None) -&gt; dict:
+1016:     &quot;&quot;&quot;Revalidate canonical selected evidence without publishing any authority.&quot;&quot;&quot;
+1017:     from tools.data_factory.training_receipts import file_digest
+1018:     from tools.data_factory.training_split import (
+1019:         COHORT_SCHEMA, selected_train_eval, source_episode_identity, validate_evaluation_cohort,
+1020:     )
+1021:     if eval_episodes is None and (type(eval_fraction) not in (int, float) or not 0 &lt; eval_fraction &lt; 1):
+1022:         raise ContractError(&quot;COHORT_FRACTION&quot;)
+1023:     request_path = request_path.resolve()
+1024:     before = file_digest(request_path)
+1025:     request = load_json_strict(request_path)
+1026:     dataset, drafts = _prepare_approvals(
+1027:         request, evidence_directory, &quot;cohort-preview-only&quot;, check_targets=False,
+1028:     )
+1029:     selected = [e[&quot;episode_index&quot;] for e in request[&quot;episodes&quot;]]
+1030:     if eval_episodes is not None:
+1031:         if (eval_fraction is not None or not isinstance(eval_episodes, list) or not eval_episodes
+1032:                 or any(type(i) is not int for i in eval_episodes)
+1033:                 or len(set(eval_episodes)) != len(eval_episodes)
+1034:                 or not set(eval_episodes) &lt; set(selected)):
+1035:             raise ContractError(&quot;COHORT_PARTITION&quot;)
+1036:         evaluation = sorted(eval_episodes)
+1037:         train = sorted(set(selected) - set(evaluation))
+1038:     else:
+1039:         metadata = read_metadata(Path(dataset[&quot;dataset_root&quot;]))
+1040:         train, evaluation = selected_train_eval(metadata[&quot;episode_tasks&quot;], selected, eval_fraction)
+1041:     origins = {d[&quot;approval_arguments&quot;][&quot;episode_index&quot;]: source_episode_identity(d[&quot;provenance&quot;])
+1042:                for d in drafts}
+1043:     value = dict(schema_version=COHORT_SCHEMA, training_authority=False,
+1044:                  request={&quot;path&quot;: str(request_path), &quot;sha256&quot;: before}, dataset_identity=dataset,
+1045:                  eval_fraction=eval_fraction, train=[origins[i] for i in train],
+1046:                  eval=[origins[i] for i in evaluation])
+1047:     if eval_episodes is not None:
+1048:         value[&quot;evaluation_episode_indices&quot;] = evaluation
+1049:     value[&quot;cohort_digest&quot;] = canonical_digest(value)
+1050:     if file_digest(request_path) != before:
+1051:         raise ContractError(&quot;COHORT_REQUEST_CHANGED&quot;)
+1052:     return validate_evaluation_cohort(value)</pre><h3>tools/data_factory/training_entrypoint.py · _revalidate_cohort_sources</h3><p class="locator">main d23eb57 · sha256:3cbd01feaca8b99355d22f72600abe57c1283ecf2537cafef1d0b1012116e6f9</p><pre>1063: def _revalidate_cohort_sources(value: dict, evidence_directory: Path) -&gt; None:
+1064:     if &quot;cohorts&quot; in value:
+1065:         for component in value[&quot;cohorts&quot;]:
+1066:             _revalidate_cohort_sources(component, evidence_directory)
+1067:         return
+1068:     current = prepare_evaluation_cohort(Path(value[&quot;request&quot;][&quot;path&quot;]),
+1069:                                         evidence_directory=evidence_directory,
+1070:                                         eval_fraction=value[&quot;eval_fraction&quot;],
+1071:                                         eval_episodes=value.get(&quot;evaluation_episode_indices&quot;))
+1072:     if current != value:
+1073:         raise ContractError(&quot;COHORT_SOURCE_CHANGED&quot;)</pre><h3>tools/data_factory/training_entrypoint.py · _explicit_cohort_datasets</h3><p class="locator">main d23eb57 · sha256:3cbd01feaca8b99355d22f72600abe57c1283ecf2537cafef1d0b1012116e6f9</p><pre>504: def _explicit_cohort_datasets(cfg, split):
+505:     &quot;&quot;&quot;Use installed native constructors with the admitted explicit partitions.&quot;&quot;&quot;
+506:     from lerobot.datasets.factory import LeRobotDataset, LeRobotDatasetMetadata, resolve_delta_timestamps, ImageTransforms
+507:     from tools.data_factory.training_split import validate_training_split
+508:     validate_training_split(split)
+509:     binding = split[&quot;evaluation_cohort&quot;]
+510:     if revalidate_evaluation_cohort(Path(binding[&quot;path&quot;])) != binding[&quot;cohort&quot;]:
+511:         raise ContractError(&quot;COHORT_SOURCE_CHANGED&quot;)
+512:     metadata = LeRobotDatasetMetadata(cfg.dataset.repo_id, root=cfg.dataset.root, revision=cfg.dataset.revision)
+513:     delta = resolve_delta_timestamps(cfg.trainable_config, metadata)
+514:     transform = ImageTransforms(cfg.dataset.image_transforms) if cfg.dataset.image_transforms.enable else None
+515:     return tuple(LeRobotDataset(
+516:         cfg.dataset.repo_id, root=cfg.dataset.root, episodes=split[group],
+517:         delta_timestamps=delta, image_transforms=transform if group == &quot;train_episodes&quot; else None,
+518:         revision=cfg.dataset.revision, video_backend=cfg.dataset.video_backend,
+519:         return_uint8=True, tolerance_s=cfg.tolerance_s,
+520:     ) for group in (&quot;train_episodes&quot;, &quot;eval_episodes&quot;))</pre><h3>공개 학습 진입점의 회귀 범위</h3><p>tests/test_train_wrapper.py의 test_public_cohort_union_preserves_roles_and_revalidates_sources는 합성 후 역할 보존, 원본 중복·배정 충돌·평가 누락·source 변경 거부와 기존 승인 원본 불변을 확인한다. test_curator_union_cohort_reaches_public_admitted_partitions는 source 순서를 뒤집은 합성 요청이 실제 학습 진입점에 TRAIN[0,4,5], EVAL[2,7]로 전달되고 정규화 대상이 TRAIN과 일치하는지 확인한다. 테스트는 native 학습 호출을 대체하며 checkpoint를 만들지 않는다.</p></section></main><script src="../source-return.js"></script></body></html>

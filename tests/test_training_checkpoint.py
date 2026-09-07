@@ -195,8 +195,10 @@ class CurrentTrainingCheckpointTest(unittest.TestCase):
                             validate_normalization_state(policy, receipt["normalization"], profile="smolvla")
 
     def test_resume_rechecks_current_inventory_subset_and_same_count_provenance(self):
+        import os
         from tests.test_train_wrapper import launch_fixture, write_normalization_fixture
         from tools.data_factory.training_entrypoint import prepare_launch, options
+        from tools.data_factory.training_receipts import compile_launch_receipt
         with TemporaryDirectory(prefix="SYNTHETIC_TEST_ONLY-") as directory:
             root = Path(directory)
             kwargs, _, _ = launch_fixture(root)
@@ -224,6 +226,33 @@ class CurrentTrainingCheckpointTest(unittest.TestCase):
             (output / "fr5_training_split.json").write_text(json.dumps(split))
             (output / "fr5_training_receipt.json").write_text(json.dumps(receipt))
             write_normalization_fixture(policy, receipt)
+            from tools.data_factory.training_receipts import launch_receipt_digest
+            self.assertEqual(receipt["receipt_digest"], launch_receipt_digest(receipt))
+            self.assertEqual(validate_checkpoint(policy), (policy, output))
+            config["dataset"]["root"] = os.path.relpath(kwargs["dataset"], Path.cwd())
+            relative = Path(config["dataset"]["root"])
+            relative_kwargs = {**kwargs, "dataset": relative, "argv": [
+                f"--dataset.root={relative}" if arg.startswith("--dataset.root=") else arg
+                for arg in kwargs["argv"]
+            ]}
+            relative_split, relative_receipt = prepare_launch(**relative_kwargs)
+            self.assertEqual(relative_split, split)
+            (output / "fr5_training_receipt.json").write_text(json.dumps(relative_receipt))
+            (policy / "train_config.json").write_text(json.dumps(config))
+            # A producer-shaped relative saved config must close the same
+            # launch -> checkpoint -> reload contract as its absolute form.
+            self.assertEqual(validate_checkpoint(policy), (policy, output))
+            config["dataset"]["root"] = str(kwargs["dataset"])
+            (output / "fr5_training_receipt.json").write_text(json.dumps(receipt))
+            (policy / "train_config.json").write_text(json.dumps(config))
+            # A pre-saved-view raw receipt remains valid when current launch
+            # preparation now enriches raw launches with the explicit binding.
+            legacy = compile_launch_receipt(
+                split, receipt["normalized_argv"], receipt["approved_inventory_path"]
+            )
+            self.assertNotIn("observation_view", legacy)
+            self.assertEqual(legacy["receipt_digest"], launch_receipt_digest(legacy))
+            (output / "fr5_training_receipt.json").write_text(json.dumps(legacy))
             self.assertEqual(validate_checkpoint(policy), (policy, output))
             saved_policy = json.loads(json.dumps(policy_cfg))
             saved_policy["input_features"]["observation.state"]["shape"] = [6]

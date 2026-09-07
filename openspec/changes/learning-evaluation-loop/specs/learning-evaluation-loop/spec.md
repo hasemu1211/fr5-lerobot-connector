@@ -28,6 +28,11 @@ An explicit standing human delegation MAY authorize the configured local actor t
 - **THEN** the affected authorization or execution is rejected before its side effects
 - **AND** the system preserves existing evidence and continues independent in-scope work rather than treating the entire project as blocked.
 
+#### Scenario: A prepared delegated request is retried or interrupted
+- **WHEN** the same Curator request and delegated authority are submitted again, or an earlier attempt left an authority directory or training output
+- **THEN** the native consumer revalidates the exact dataset, delegation and inventory and returns existing evidence without issuing duplicate authority or starting a second trainer
+- **AND** an incomplete authority publication fails closed with its next recovery consumer named, without claiming a checkpoint, evaluation result or physical proficiency.
+
 ### Requirement: Native training consumes only admitted learning inputs
 
 The public training path SHALL revalidate the frozen inventory authorized by an exact-batch human decision or standing local delegation, exact selected episodes and camera/task contract before running the official trainer. Train and evaluation episodes SHALL remain disjoint. Learned preprocessing statistics SHALL derive exclusively from training episodes; ImageNet constants MAY remain the explicit image normalization setting. Original dataset bytes and installed packages SHALL remain unchanged.
@@ -75,6 +80,13 @@ The lane SHALL distinguish admitted input, executable pipeline, checkpoint reloa
 - **THEN** a common held-out cohort alone does not make their normalized flow-matching losses a data-utility ranking
 - **AND** each arm retains leakage-free statistics, while an improvement claim requires a comparable downstream measure after its own saved postprocessor or a matched physical evaluation; the system does not fit statistics on held-out data to equalize the scores.
 
+#### Scenario: A prepared delegated request reaches the native checkpoint consumer
+- **WHEN** the supported request entrypoint receives an immutable Curator request and a valid standing delegation
+- **THEN** it derives the bounded native recipe, revalidates the exact inventory and launches through the existing admission boundary
+- **AND** a successful trainer result is consumed by the existing checkpoint validator and offline evaluator before the entrypoint reports an evaluated checkpoint
+- **AND** a missing or out-of-scope delegation, missing checkpoint, validator failure or evaluator failure is reported as that bounded state without a physical-proficiency claim
+- **AND** a repeated same-input request reuses immutable manifests/checkpoint evidence without starting a second trainer.
+
 ### Requirement: Sampled physical-action assessment uses the native admitted evaluator
 
 The existing evaluator SHALL offer saved-policy/postprocessor action assessment while preserving its default flow-loss mode. It SHALL retain exact admitted cohort, observation, noise, solver, target-padding and artifact identities and report per-axis physical-unit errors without implying physical success.
@@ -117,6 +129,13 @@ The lane SHALL choose the next safe valuable outcome using code/tests, current a
 - **AND** optimizer, scheduler, RNG, sample stream and step reset are explicit; a changed parent or inconsistent lineage is rejected before publication and native consumption
 - **AND** child reload and legacy same-run resume validate the parent lineage without overwriting it or claiming mixed-batch true continuation is supported.
 
+#### Scenario: A continued run is interrupted and resumed again
+- **WHEN** a native continuation changes batch size and later resumes from its own checkpoint
+- **THEN** immutable parent state and explicit schedule-prefix semantics are preserved, and the consumed sample cursor is restored independently of absolute update count and the latest batch
+- **AND** the prepared data loader preserves that epoch and offset, accounts for partial batches, and does not treat prefetched samples as optimizer-consumed data
+- **AND** resumed iterator construction preserves the declared policy RNG sequence; tests compare uninterrupted and repeated-resume optimizer, scheduler, RNG and sample traces through an epoch boundary
+- **AND** CPU fixture equivalence alone does not establish real policy continuation; the native admitted trainer, saved checkpoint and independent reload must verify the supported runtime scope.
+
 #### Scenario: Approval or GPU ownership is unavailable
 - **WHEN** gated execution cannot proceed
 - **THEN** the lane reports the exact blocker to root and continues independent scoped software, metadata or research work
@@ -125,3 +144,64 @@ The lane SHALL choose the next safe valuable outcome using code/tests, current a
 #### Scenario: A learning result suggests different data or physical testing
 - **WHEN** the next outcome crosses Curator or Rollout ownership
 - **THEN** the lane proposes a bounded input/output evidence contract to the existing owner instead of implementing a competing owner.
+
+#### Scenario: Native evaluation support and unsettled outputs
+- **WHEN** the request entrypoint receives a profile unsupported by the native offline evaluator
+- **THEN** it rejects the request before authority publication or training, including injected calls.
+- **WHEN** either launch manifest remains pending, including after an interrupted final publication
+- **THEN** recovery preserves evidence and refuses to launch or evaluate; pending evidence alone does not prove a live process.
+- **AND** trainer failure and missing-checkpoint outcomes produce a nonzero public CLI exit status.
+
+### Requirement: Evaluation planning does not require training authority
+
+The native preparation consumer SHALL freeze a non-authorizing evaluation cohort from canonical selected evidence without creating an approved inventory or executing training. Original source identity SHALL survive destination-index remapping. A frozen source revision remains immutable; appending new source material does not redefine earlier source identities.
+
+#### Scenario: Reviewed data grows before training
+- **WHEN** a consumer prepares a cohort and subsequently maps its proven source episodes alongside new data
+- **THEN** the original held-out sources resolve to their new indices without fraction or ordering adjustments
+- **AND** missing held-out sources, duplicate source identities, overlap and changed frozen evidence are rejected
+- **AND** the artifact grants no training authority and does not replace an admitted v3 split.
+
+#### Scenario: A mapper consumes a planned cohort
+- **WHEN** Curator accepts the cohort reference
+- **THEN** it revalidates the source evidence and maps canonical parent identities through the shared resolver
+- **AND** subsequent native launch must enforce those identities in its real partition before using TRAIN-only statistics; a planning artifact alone does not enable this execution path.
+
+### Requirement: Admitted explicit cohorts control native data construction
+
+An admitted v3 split MAY carry an explicit evaluation-cohort binding under the distinct `fr5-source-evaluation-cohort-v1` algorithm. The binding SHALL include the revalidated cohort reference and canonical selected source identities. Existing fraction-only v3 artifacts SHALL retain their original schema and algorithm. Neither binding substitutes for current training authorization.
+
+#### Scenario: New sources join an admitted dataset
+- **WHEN** an admitted launch selects an explicit frozen cohort
+- **THEN** it resolves preserved held-out source identities to destination indices and assigns other selected origins to TRAIN, rejecting missing or duplicate held-out identities
+- **AND** the native dataset constructors consume those explicit lists rather than recomputing a fractional partition
+- **AND** saved receipt normalization uses only the resolved TRAIN episodes, and independent reload/resume revalidates the binding with existing strict dataset and parent rules.
+
+#### Scenario: A mapped request owns its cohort reference
+- **WHEN** the public delegated request consumer receives a Curator-owned evaluation cohort reference
+- **THEN** it validates and consumes that reference without requiring a duplicate path argument
+- **AND** a conflicting override is rejected before authority publication or training; requests without a cohort retain their existing behavior.
+
+
+### Requirement: Predeclared evaluation composition preserves source roles
+Offline preparation SHALL accept an explicit nonempty proper subset of a canonical reviewed request as evaluation, without issuing training authority. Legacy fraction preparation and its existing artifacts SHALL remain supported. Composition SHALL preserve each disjoint source cohort's TRAIN/EVAL identities, bind the complete constituent planning artifacts, and reject repeated source coordinates, including conflicting roles. Revalidation SHALL reopen every constituent request and reject changed evidence. Native admitted partition resolution SHALL consume the composite through the same source-identity resolver; newly selected origins remain TRAIN, and missing or duplicated heldout origins fail closed. This planning contract SHALL NOT alter strict resume, checkpoint warm-start policy, or TRAIN-only normalization.
+
+#### Scenario: Preserve old evaluation while adding a predeclared new cohort
+- **WHEN** an existing frozen cohort and a separately reviewed, explicitly assigned new cohort are composed before training
+- **THEN** the composite retains both sets of heldout original identities through destination remapping, retains old TRAIN assignments, grants no approval, and leaves subsequent admission mandatory
+
+#### Scenario: Reject overlap or stale source
+- **WHEN** constituent cohorts repeat an original source coordinate or a constituent request changes after preparation
+- **THEN** composition or source revalidation rejects the artifact before admission or training
+
+
+### Requirement: Common deterministic view fitting follows original TRAIN identities
+The saved observation-view consumer SHALL support direct derived and mapped-derived-ledger inputs only when all selected derived publications share the same bound deterministic profile and transform. It SHALL validate each application publication separately from the fitting source. Every fitted reference/background frame SHALL belong to both its bound fitting TRAIN split and the actual launch TRAIN set by original dataset, episode and content identity, with no heldout overlap. Equal destination indices SHALL NOT establish membership. Profile, asset, fitting split and publication hashes SHALL remain binding. Baked observations SHALL be consumed once during training/evaluation, and the identical deterministic transform SHALL be applied once to raw Rollout input. Raw behavior and training authority SHALL remain unchanged.
+
+#### Scenario: Fit on one training source and apply a common view to another
+- **WHEN** a common bound profile fitted on selected TRAIN originals from source A is applied to sources A and B before mapping
+- **THEN** native launch and saved-view validation accept the common view only while all fitted A originals remain TRAIN after mapping, and preserve each application publication
+
+#### Scenario: Reject destination-index coincidence or incompatible profiles
+- **WHEN** a fitted original is absent or held out despite a matching destination integer, or an application uses another profile or transform
+- **THEN** saved-view validation rejects the launch before trainer construction

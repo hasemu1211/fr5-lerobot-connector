@@ -22,6 +22,7 @@ direnv exec . python3 -m tools.data_factory.operator_console --effect-scope FAKE
 
 | 알고 싶은 것 | 문서 |
 | --- | --- |
+| 실제 화면·관측·수치로 프로젝트 살펴보기 | [포트폴리오 열람 안내](docs/portfolio/README.md) |
 | 설치와 로봇 없는 첫 실행 | [시작하기](docs/getting-started.md) |
 | 입력·출력·권한·산출물 소유권 | [데이터팩토리 계약](docs/data-factory.md) |
 | 장비 준비·안전·중단·복구 | [운영자 런북](docs/operator-runbook.md) |

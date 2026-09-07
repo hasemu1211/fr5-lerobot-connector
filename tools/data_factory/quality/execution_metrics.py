@@ -4,7 +4,7 @@ from __future__ import annotations
 import math
 from typing import Any, Mapping, Sequence
 
-from tools.data_factory.quality.phase_events import validate_phase_event
+from tools.data_factory.quality.phase_events import validate_phase_event_sequence
 from tools.data_factory.quality.phase_metrics import phase_row_windows, quality_attribute
 from tools.fr5_data_factory import ContractError, DIGEST, canonical_digest
 
@@ -34,7 +34,7 @@ def joint_execution_attribute(
     """Report raw joint tracking/progress values; it does not admit or delete data."""
     if not DIGEST.fullmatch(recorder_rows_digest) or not math.isfinite(stall_epsilon_rad) or stall_epsilon_rad <= 0:
         raise ContractError("EXECUTION_QUALITY_CONFIG")
-    parsed_events = [validate_phase_event(event) for event in events]
+    parsed_events = validate_phase_event_sequence(events, plan=plan)
     source_digests = {
         "phase_events": canonical_digest(parsed_events),
         "recorder_rows": recorder_rows_digest,
@@ -49,15 +49,18 @@ def joint_execution_attribute(
         events=parsed_events,
         recorder_rows=recorder_rows,
         recorder_ros_clock_type=recorder_ros_clock_type,
+        plan=plan,
     )
     flags.extend(join_flags)
     steps = plan.get("steps") if isinstance(plan, Mapping) else None
     if not isinstance(steps, list):
         raise ContractError("EXECUTION_QUALITY_PLAN")
-    by_phase = {step.get("phase"): step for step in steps if isinstance(step, Mapping)}
+    by_phase = {(step.get("phase"), index): child
+                for step in steps if isinstance(step, Mapping)
+                for index, child in enumerate(step.get("held_target_segments", [step]))}
     phase_metrics = []
     for window in windows:
-        step = by_phase.get(window["phase"])
+        step = by_phase.get((window["phase"], window["segment_index"]))
         if not isinstance(step, Mapping) or step.get("type") != "ARM":
             continue
         target = step.get("final_joint_state")

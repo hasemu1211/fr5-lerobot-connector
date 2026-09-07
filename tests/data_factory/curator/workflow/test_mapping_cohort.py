@@ -7,7 +7,7 @@ from types import SimpleNamespace
 import unittest
 from unittest import mock
 
-from tests.data_factory.curator.workflow import test_mapping as fixtures
+from tests.data_factory.curator.support import make_mapping_cohort_case
 from tests.data_factory.test_training_approval import snapshot
 from tools.data_factory import training_approval as approval, training_entrypoint as training
 from tools.data_factory.curator import cli
@@ -20,15 +20,7 @@ from tools.fr5_training_profile import read_metadata, launch_feature_contract
 
 class MappingCohortTests(unittest.TestCase):
     def case(self):
-        fixture = fixtures.MappedTrainingTest()
-        self.addCleanup(fixture.doCleanups)
-        requests, sources, root, options = fixture.case()
-        cohort = training.prepare_evaluation_cohort(requests[0], evidence_directory=root, eval_fraction=.2)
-        path = root/'cohort.json'
-        path.write_text(json.dumps(cohort))
-        options.pop('evaluation_split'); options.pop('eval_fraction')
-        options['evaluation_cohort'] = path
-        return requests, sources, root, options, cohort
+        return make_mapping_cohort_case(self.addCleanup)
 
     def test_cli_publication_preparation_and_native_partitions_use_proven_origins(self):
         requests, sources, root, options, cohort = self.case()

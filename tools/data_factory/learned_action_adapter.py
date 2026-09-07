@@ -275,6 +275,15 @@ class NativeSmolVLA:
                 raise ContractError("LEARNED_RUNTIME_VERSION")
             if os.environ.get("HF_HUB_OFFLINE") != "1" or os.environ.get("TRANSFORMERS_OFFLINE") != "1":
                 raise ContractError("LEARNED_OFFLINE_RUNTIME_REQUIRED")
+            receipt = output_dir / "fr5_training_receipt.json"
+            if not receipt.is_file():
+                receipt = Path(str(output_dir) + ".fr5_training_receipt.json.pending")
+            split_path = output_dir / "fr5_training_split.json"
+            if not split_path.is_file():
+                split_path = output_dir.with_name(output_dir.name + ".fr5_training_split.json.pending")
+            # Launch evidence lives outside policy_dir: bind it separately across
+            # model construction, without substituting raw pixels if it vanishes.
+            manifests = {path: path.read_bytes() for path in (split_path, receipt)}
             before = tree_digest(policy_dir)
             from safetensors import safe_open
             with safe_open(policy_dir / "model.safetensors", framework="numpy") as tensors:
@@ -293,15 +302,22 @@ class NativeSmolVLA:
             policy, preprocessor, postprocessor = cls._load_components(policy_dir, device)
             if tree_digest(policy_dir) != before:
                 raise ContractError("LEARNED_CHECKPOINT_CHANGED")
-            receipt = output_dir / "fr5_training_receipt.json"
-            if not receipt.is_file():
-                receipt = Path(str(output_dir) + ".fr5_training_receipt.json.pending")
+            from tools.fr5_data_factory import load_json_strict
+            from tools.validate_training_checkpoint import validate_saved_observation_view
+            if any(not path.is_file() or path.read_bytes() != value for path, value in manifests.items()):
+                raise ContractError("LEARNED_CHECKPOINT_CHANGED")
+            split = load_json_strict(split_path)
+            receipt_value = load_json_strict(receipt)
+            observation_view = validate_saved_observation_view(split, receipt_value)
+            if any(not path.is_file() or path.read_bytes() != value for path, value in manifests.items()):
+                raise ContractError("LEARNED_CHECKPOINT_CHANGED")
             instance = cls()
             instance.policy, instance.preprocessor, instance.postprocessor = policy, preprocessor, postprocessor
             instance.checkpoint = {"tree_digest": before,
-                                   "training_receipt_digest": canonical_digest(json.loads(receipt.read_text())),
+                                   "training_receipt_digest": canonical_digest(receipt_value),
                                    "runtime": "lerobot-0.6.1-native"}
             instance.policy_dir = policy_dir
+            instance.observation_view = observation_view
             return instance
         except ContractError:
             raise
@@ -350,6 +366,7 @@ class NativeSmolVLA:
             self._inference_lock.release()
 
     def _predict(self, observation):
+        import numpy as np
         import torch
         from tools.fr5_data_factory import ContractError
         from tools.data_factory.training_receipts import tree_digest
@@ -360,6 +377,10 @@ class NativeSmolVLA:
                  "task": observation["task"]}
         for key in ("observation.images.camera1", "observation.images.camera2"):
             frame = _rgb(observation[key])
+            if (key == "observation.images.camera1"
+                    and self.observation_view.get("representation") == "baked"
+                    and self.observation_view.get("transform_application") == "rollout_once"):
+                frame = self._transform_raw_up(frame)
             value[key] = torch.frombuffer(bytearray(frame["data"]), dtype=torch.uint8).reshape(frame["shape"]).permute(2, 0, 1).float() / 255
         self.policy.reset()
         self.preprocessor.reset()
@@ -369,3 +390,36 @@ class NativeSmolVLA:
         if not isinstance(output, torch.Tensor) or output.ndim != 3 or output.shape[0] != 1 or output.shape[2] != 7:
             raise ContractError("LEARNED_ACTION_7D")
         return output[0].detach().cpu().tolist()
+
+    def _transform_raw_up(self, frame: dict) -> dict:
+        """Apply Curator's published up-view transform exactly once for raw Rollout input."""
+        import numpy as np
+        from pathlib import Path
+        from tools.fr5_data_factory import ContractError
+        from tools.data_factory.curator.core.errors import CuratorError
+        from tools.data_factory.curator.profile.registry import load_profile_assets, resolve_view_profile
+        from tools.data_factory.curator.profile.schema import load_view_profile
+        from tools.data_factory.curator.profile.transform import apply_up_view
+
+        profile = self.observation_view["view_profile"]
+        path = profile["path"]
+        try:
+            spec = load_view_profile(path)
+            resolved = resolve_view_profile(
+                str(Path(path).parent), spec.value["profile_id"],
+                binding_root=spec.binding_path.parent,
+                collection_profile_root=spec.collection_profile_path.parent,
+            )
+            if (resolved.config_file_sha256 != profile.get("file_sha256")
+                    or resolved.profile["profile_digest"] != profile.get("profile_digest")):
+                raise ContractError("LEARNED_VIEW_PROFILE_CHANGED")
+            mask, plate = load_profile_assets(resolved)
+        except ContractError:
+            raise
+        except (CuratorError, OSError, ValueError, KeyError) as error:
+            raise ContractError("LEARNED_VIEW_PROFILE_CHANGED") from error
+        rgb = np.frombuffer(frame["data"], dtype=np.uint8).reshape(frame["shape"])
+        if [frame["shape"][1], frame["shape"][0]] != [spec.value["width"], spec.value["height"]]:
+            raise ContractError("LEARNED_VIEW_FRAME_SHAPE")
+        transformed = apply_up_view(rgb, mask, plate)
+        return {**frame, "shape": list(transformed.shape), "data": transformed.tobytes()}

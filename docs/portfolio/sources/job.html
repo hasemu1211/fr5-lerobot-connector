@@ -1,0 +1,143 @@
+<!doctype html><html lang="ko"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>episode 실행과 저장 경계 — 데이터 엔진 근거</title><link rel="stylesheet" href="../site.css"></head><body><main class="source-page"><a href="../architecture.html#recording">← 설명으로 돌아가기</a><h1>episode 실행과 저장 경계</h1><p class="note">설명에 사용한 구현·측정 자료의 발췌이다. SHA-256은 발췌 전 원본 파일을 식별한다. 실행 PC의 절대 경로와 계정 정보는 포함하지 않으며, 측정값과 해석 조건을 함께 제시한다.</p><section id="one_job"><h2>one_job.py</h2><p class="locator">tools/data_factory/one_job.py<br>sha256:bac68bdfe99ad356dce44f1f6a7bcfc23d1039161a7263473caba456bc9bd1b7</p><p class="note">해당 기능의 함수 발췌. 줄 번호와 digest는 원본 기준이다.</p><pre># tools/data_factory/one_job.py:112 · request_terminal
+    def request_terminal(self, request):
+        &quot;&quot;&quot;Wait for an irreversible transaction response or child EOF.&quot;&quot;&quot;
+        return self._request(request, wait_for_response=True)
+
+# tools/data_factory/one_job.py:1090 · _finalize
+    def _finalize(self):
+        if self.semantic == &quot;FAIL&quot;:
+            return self._abort(&quot;SEMANTIC_FAIL&quot;)
+        if (self._grasp_verdict_required() and self.grasp != &quot;PASS&quot;) or self.semantic != &quot;PASS&quot; or self.recorder_state != &quot;FROZEN&quot;:
+            return self._abort(&quot;COMMIT_GUARD&quot;)
+        try:
+            evidence = self.execution_evidence
+            if not isinstance(evidence, dict):
+                raise ContractError(&quot;PRECOMMIT_SAFETY&quot;)
+            safety = self._precommit_safety(evidence.get(&quot;precommit_safety&quot;), terminal=True)
+            planned_safety = self.plan_envelope[&quot;precommit_safety&quot;] if isinstance(self.plan_envelope, dict) else None
+            if not isinstance(planned_safety, dict) or any(
+                safety[key] != planned_safety[key] for key in (
+                    &quot;approved_plan_digest&quot;, &quot;scene_binding_digest&quot;, &quot;expected_planning_scene_digest&quot;,
+                    &quot;planning_scene_readback_digest&quot;, &quot;collision_report_digest&quot;, &quot;plan_only_no_motion_digest&quot;,
+                )
+            ):
+                raise ContractError(&quot;PRECOMMIT_SAFETY_BINDING&quot;)
+            self._emit_lifecycle_event(&quot;FINALIZING&quot;)
+            response = self._request(&quot;recorder&quot;, &quot;commit&quot;, allowed_failure=True)
+            if response.get(&quot;state&quot;) == &quot;QUARANTINED_COMMIT&quot;:
+                self.recorder_state = &quot;QUARANTINED_COMMIT&quot;
+                self.state = &quot;QUARANTINED_COMMIT&quot;
+                return self._result(False, &quot;QUARANTINED_COMMIT&quot;)
+            if not response[&quot;ok&quot;]:
+                return self._abort(response[&quot;reason_code&quot;] or &quot;RECORDER_COMMIT&quot;)
+            if response[&quot;state&quot;] != &quot;COMMITTED&quot;:
+                return self._abort(&quot;RECORDER_COMMIT&quot;)
+        except ContractError as exc:
+            if self.recorder_state == &quot;FROZEN&quot;:
+                return self._abort(exc.code)  # QUALITY_REJECTED remains frozen until explicitly aborted.
+            self.state = &quot;QUARANTINED_COMMIT&quot;
+            return self._result(False, exc.code)
+        self.state = &quot;AWAITING_CELL_READY&quot;
+        return self._result(True, &quot;COMMITTED&quot;)</pre></section><section id="start-conditions"><h2>수집 시작 전 확인</h2><p>현재 main 구현의 계획 승인·기록기 준비 확인이다. 실제 실행 시간 사례와는 별도 발췌이다.</p><p class="locator">tools/data_factory/one_job.py<br>sha256:bac68bdfe99ad356dce44f1f6a7bcfc23d1039161a7263473caba456bc9bd1b7</p><h3>원본 622–637행</h3><pre>622:     def approve(self, approval):
+623:         if self.state != &quot;PLANNED&quot; or not isinstance(approval, dict):
+624:             return self._result(False, &quot;APPROVAL_STATE&quot;)
+625:         try:
+626:             self._approval(approval, resolved_job_digest=self._program[&quot;resolved_job_digest&quot;], include_digest=False)
+627:             payload = {key: approval[key] for key in (&quot;approval_id&quot;, &quot;approved_by&quot;, &quot;approval_expiry&quot;)}
+628:             payload.update(run_id=self.run_id, plan_digest=self.plan_digest,
+629:                            resolved_job_digest=self._program[&quot;resolved_job_digest&quot;], approval_scope=approval[&quot;approval_scope&quot;])
+630:             response = self._request(&quot;executor&quot;, &quot;approve&quot;, payload)
+631:             if response[&quot;state&quot;] != &quot;APPROVED&quot;:
+632:                 raise ContractError(&quot;APPROVAL_STATE&quot;)
+633:         except (ContractError, KeyError) as exc:
+634:             return self._result(False, exc.code if isinstance(exc, ContractError) else &quot;APPROVAL_SCHEMA&quot;)
+635:         self.approval_scope, self.state = approval[&quot;approval_scope&quot;], &quot;APPROVED&quot;
+636:         return self._result(True, &quot;APPROVED&quot;)
+637: </pre><h3>원본 652–693행</h3><pre>652:
+653:     def _wait_for_first_recorder_row(self, cancel=None):
+654:         &quot;&quot;&quot;Do not arm robot motion until the recorder has durably written a hold row.&quot;&quot;&quot;
+655:         deadline = self.monotonic_clock() + (
+656:             self.readiness_contract[&quot;deadline_s&quot;]
+657:             if self.readiness_contract is not None else self.RECORDER_FIRST_ROW_TIMEOUT_S
+658:         )
+659:         while True:
+660:             if self._cancel_requested(cancel):
+661:                 raise ContractError(&quot;START_CANCELLED&quot;)
+662:             status_started_ns = time.monotonic_ns()
+663:             status = self._request(&quot;recorder&quot;, &quot;status&quot;)
+664:             status_received_ns = time.monotonic_ns()
+665:             if self._cancel_requested(cancel):
+666:                 raise ContractError(&quot;START_CANCELLED&quot;)
+667:             try:
+668:                 if status[&quot;state&quot;] != &quot;RECORDING&quot;:
+669:                     raise ContractError(&quot;RECORDER_STATE&quot;)
+670:                 if status.get(&quot;writer_alive&quot;) is not True or status.get(&quot;writer_error&quot;) is not None:
+671:                     raise ContractError(&quot;RECORDER_WRITER_FAULT&quot;)
+672:                 if status.get(&quot;sampler_alive&quot;) is not True:
+673:                     raise ContractError(&quot;RECORDER_SAMPLER_FAULT&quot;)
+674:                 rows = status[&quot;metrics&quot;].get(&quot;rows&quot;)
+675:                 if type(rows) is not int or rows &lt; 0:
+676:                     raise ContractError(&quot;RECORDER_HEALTH_SCHEMA&quot;)
+677:                 if self.readiness_contract is None and rows &gt;= 1:
+678:                     return status
+679:                 if self.readiness_contract is not None:
+680:                     if self._readiness_status_ready(
+681:                         status, status_started_ns, status_received_ns,
+682:                     ):
+683:                         return status
+684:             except ContractError as exc:
+685:                 self._capture_readiness_failure(exc.code, status)
+686:                 raise
+687:             if self.monotonic_clock() &gt;= deadline:
+688:                 code = (
+689:                     &quot;RECORDER_READINESS_TIMEOUT&quot; if self.readiness_contract is not None
+690:                     else &quot;RECORDER_FIRST_ROW_TIMEOUT&quot;
+691:                 )
+692:                 self._capture_readiness_failure(code, status)
+693:                 raise ContractError(code)</pre></section><section id="review-queue"><h2>수집 진행과 Candidate Review의 분리</h2><p class="locator">tools/data_factory/operator/workflow/campaign.py · main 881cfdd<br>sha256:446f56b90eb8390126255ab7c62b3cb9965492fc1979cc325f640d3a79577d2e</p><p>2137–2160, 2252–2271행 발췌. 다음 수집 여부를 결정하는 경로와 검토 대기열을 갱신하는 경로를 구분한다.</p><pre>        continue_campaign = bool(
+            outcome.get(&quot;ok&quot;) is True
+            and not self._cancel_requested
+            and self.campaign_approval_once
+            and campaign
+            and campaign.get(&quot;state&quot;) == &quot;READY&quot;
+        )
+        if (
+            campaign
+            and campaign.get(&quot;state&quot;) == &quot;BLOCKED&quot;
+            and campaign.get(&quot;last_error&quot;) == &quot;START_TRANSITION_CANCEL_UNCERTAIN&quot;
+        ):
+            name, code, workflow = (
+                &quot;FAIL&quot;, &quot;START_TRANSITION_CANCEL_UNCERTAIN&quot;, &quot;BLOCKED&quot;,
+            )
+            self._measurement_outcome = &quot;FAIL&quot;
+            self._last_error = code
+        elif self._cancel_requested or campaign and campaign.get(&quot;state&quot;) == &quot;CANCELLED&quot;:
+            name, code, workflow = &quot;CANCEL&quot;, &quot;PLAN_CANCELLED&quot;, &quot;TERMINAL&quot;
+            self._measurement_outcome = &quot;NOT_MEASURED&quot;
+            self._last_error = code
+        elif outcome.get(&quot;ok&quot;) is True:
+            name, code = &quot;PASS&quot;, &quot;TECHNICAL_PASS&quot;
+            workflow = &quot;RUNNING&quot; if continue_campaign else &quot;TERMINAL&quot;
+
+…
+
+        review_offer = result.get(&quot;candidate_review_offer&quot;, terminal_data.get(&quot;candidate_review_offer&quot;))
+        if review_offer is not None:
+            ledger = sealed.get(&quot;episode_ledger&quot;)
+            if name != &quot;PASS&quot; and not (
+                isinstance(review_offer, Mapping)
+                and isinstance(ledger, Mapping)
+                and ledger.get(&quot;technical_status&quot;) == &quot;PASS&quot;
+                and ledger.get(&quot;review_status&quot;) == &quot;PENDING&quot;
+                and ledger.get(&quot;training_status&quot;) == &quot;NOT_AUTHORIZED&quot;
+                and review_offer.get(&quot;ledger_reference&quot;) == ledger
+            ):
+                raise ContractError(&quot;OPERATOR_CONSOLE_CANDIDATE_OFFER&quot;)
+            self._queue_candidate_review(review_offer, sealed)
+        sealed[&quot;result_digest&quot;] = canonical_digest(sealed)
+        self._episode_result, self._workflow = sealed, workflow
+        if self._active_intent_projection is not None:
+            self._episode_history.append(copy.deepcopy(sealed))
+        self._offer_next_candidate_review()
+        self._prepared.set()
+        return continue_campaign</pre></section></main><script src="../source-return.js"></script></body></html>

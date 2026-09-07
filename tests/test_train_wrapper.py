@@ -274,6 +274,45 @@ class TrainingLaunchConnectionTest(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "warm-start parent"):
                 validate_checkpoint(child)
 
+    def test_checkpoint_revalidates_each_warm_start_ancestor_once_per_call(self):
+        import shutil
+        from tools.validate_training_checkpoint import validate_checkpoint
+
+        with TemporaryDirectory(prefix="SYNTHETIC_TEST_ONLY-") as directory:
+            root = Path(directory)
+            parent, output, kwargs = self._warm_start_case(root)
+            for generation in range(2):
+                split, receipt = prepare_launch(**kwargs)
+                output.mkdir(parents=True)
+                write_json(output / "fr5_training_split.json", split)
+                write_json(output / "fr5_training_receipt.json", receipt)
+                child = output / "checkpoints/000001/pretrained_model"
+                shutil.copytree(parent.parent, child.parent)
+                config = json.loads((child / "train_config.json").read_text())
+                config["policy"]["pretrained_path"] = str(parent)
+                write_json(child / "train_config.json", config)
+                parent = child
+                output = root / f"outputs/descendant-{generation}"
+                kwargs["argv"] = [
+                    f"--policy.path={parent}" if arg.startswith("--policy.path=") else
+                    f"--output_dir={output}" if arg.startswith("--output_dir=") else arg
+                    for arg in kwargs["argv"]
+                ]
+            # Three immutable checkpoints require three current admissions, not
+            # recursively duplicated checks or a cache that outlives this call.
+            with mock.patch("tools.data_factory.training_entrypoint.prepare_launch", wraps=prepare_launch) as admission:
+                self.assertEqual(validate_checkpoint(child), (child, child.parents[2]))
+                self.assertEqual(admission.call_count, 3)
+                admission.reset_mock()
+                self.assertEqual(validate_checkpoint(child), (child, child.parents[2]))
+                self.assertEqual(admission.call_count, 3)
+            receipt_path = child.parents[2] / "fr5_training_receipt.json"
+            altered = json.loads(receipt_path.read_text())
+            altered["normalization"]["stats"]["action"]["mean"][0] += 1
+            write_json(receipt_path, altered)
+            with self.assertRaises((ValueError, ContractError)):
+                validate_checkpoint(child)
+
     def test_warm_start_rejects_mismatched_cohort_normalization_and_parent_output(self):
         from tools.validate_training_checkpoint import warm_start_binding
 
@@ -390,6 +429,7 @@ class TrainingLaunchConnectionTest(unittest.TestCase):
 
     def test_native_consumer_keeps_official_split_and_excludes_nontrain_statistics(self):
         import math
+        import os
         import sys
         from types import ModuleType
         from lerobot.datasets import factory
@@ -432,12 +472,18 @@ class TrainingLaunchConnectionTest(unittest.TestCase):
                     mock.patch.object(factory, "resolve_delta_timestamps", return_value={}), \
                     mock.patch.object(factory, "LeRobotDataset", side_effect=dataset):
                 self.assertEqual(run_native_training(kwargs["argv"], split, receipt), 0)
+                cfg.dataset.root = os.path.relpath(kwargs["dataset"], Path.cwd())
+                self.assertEqual(run_native_training(kwargs["argv"], split, receipt), 0)
+                cfg.dataset.root = str(kwargs["dataset"] / "different-root")
+                with self.assertRaisesRegex(ContractError, "TRAINING_RUNTIME_DATASET"):
+                    run_native_training(kwargs["argv"], split, receipt)
+                cfg.dataset.root = str(kwargs["dataset"])
                 cfg.dataset.episodes = [0, 1, 3]
                 with self.assertRaisesRegex(ContractError, "TRAINING_RUNTIME_DATASET"):
                     run_native_training(kwargs["argv"], split, receipt)
             self.assertIs(sys.argv, original_argv)
             self.assertIs(native.make_train_eval_datasets, factory.make_train_eval_datasets)
-            self.assertEqual(len(created), 2)
+            self.assertEqual(len(created), 4)
             self.assertEqual(snapshot(kwargs["dataset"]), before)
             self.assertEqual(training_normalization(split), receipt["normalization"])
 
@@ -620,6 +666,471 @@ class TrainingLaunchConnectionTest(unittest.TestCase):
                         profile="smolvla", collection_profile="fixture", argv=argv,
                     ), 0)
                 native_runner.assert_called_once_with(argv, split, receipt)
+
+    def test_delegated_request_launch_recovers_same_input_without_rerun(self):
+        from tools.data_factory.training_entrypoint import run_delegated_request
+
+        with TemporaryDirectory(prefix="SYNTHETIC_TEST_ONLY-") as directory:
+            root = Path(directory)
+            kwargs, request, _ = launch_fixture(root)
+            authority_root = root / "delegated"
+            authority_root.mkdir()
+            approval_output = authority_root / "batch"
+            approval_output.mkdir()
+            delegation = {
+                "schema_version": approval.DELEGATION_SCHEMA,
+                "delegation_id": "synthetic-launch-r1",
+                "scope": approval.PRODUCTION_SCOPE,
+                "delegated_by": "workspace-user",
+                "authorized_actor": "local-training-owner",
+                "authorization_source_ref": "synthetic-test-only",
+                "dataset": {"repo_id": request["repo_id"], "dataset_root": request["dataset_root"]},
+                "output_root": str(authority_root),
+                "profiles": ["smolvla"],
+                "limits": {"max_steps": 2, "max_batch_size": 2, "max_checkpoints": 2},
+                "authority": copy.deepcopy(approval.DELEGATION_AUTHORITY),
+            }
+            delegation_path = root / "delegation.json"
+            write_json(delegation_path, delegation)
+            output = authority_root / "run"
+            calls = []
+            retry_errors = []
+            retry_call = None
+
+            def runner(_argv, check):
+                self.assertFalse(check)
+                calls.append(True)
+                output.mkdir(parents=True)
+                (output / "checkpoints/000001/pretrained_model").mkdir(parents=True)
+                if retry_call is not None:
+                    try:
+                        from concurrent.futures import ThreadPoolExecutor
+                        with ThreadPoolExecutor(max_workers=1) as pool:
+                            pool.submit(retry_call).result(timeout=15)
+                    except ContractError as error:
+                        retry_errors.append(str(error))
+                self.assertEqual(validated, [])
+                self.assertEqual(evaluated, [])
+                return SimpleNamespace(returncode=0)
+
+            validated, evaluated = [], []
+            def validator(checkpoint):
+                validated.append(checkpoint)
+                return checkpoint, output
+            def evaluator(checkpoint, dataset, repo_id, inventory_path, output_dir):
+                evaluated.append((checkpoint, dataset, repo_id, inventory_path, output_dir))
+                return {"evaluation_complete": True, "evidence_scope": "synthetic_injected_native_consumer"}
+
+            retry_call = lambda: run_delegated_request(
+                request, approval_output=approval_output,
+                authorized_actor="local-training-owner", delegation_path=delegation_path,
+                profile="smolvla", collection_profile=kwargs["collection_profile"],
+                output=output, steps=2, batch_size=2, eval_split=0.34, eval_steps=1,
+                save_freq=1, runner=runner, checkpoint_validator=validator, evaluator=evaluator,
+            )
+
+            # Interrupt the real publisher after its first exclusive write.
+            original_write = approval._write_exclusive
+            def interrupted_write(path, value, code):
+                original_write(path, value, code)
+                raise OSError("injected publication interruption")
+            with mock.patch.object(approval, "_write_exclusive", side_effect=interrupted_write):
+                with self.assertRaisesRegex(OSError, "injected publication"):
+                    retry_call()
+            partial = snapshot(approval_output)
+            self.assertFalse((approval_output / "training_approved.json").exists())
+            with self.assertRaisesRegex(ContractError, "TRAINING_AUTHORIZATION_RECOVERY_INCOMPLETE"):
+                retry_call()
+            self.assertEqual(snapshot(approval_output), partial)
+            self.assertEqual(calls, [])
+            approval_output = authority_root / "complete-batch"
+            approval_output.mkdir()
+
+            first = run_delegated_request(
+                request, approval_output=approval_output,
+                authorized_actor="local-training-owner", delegation_path=delegation_path,
+                profile="smolvla", collection_profile=kwargs["collection_profile"],
+                output=output, steps=2, batch_size=2, eval_split=0.34, eval_steps=1,
+                save_freq=1, runner=runner, checkpoint_validator=validator, evaluator=evaluator,
+            )
+            second = run_delegated_request(
+                request, approval_output=approval_output,
+                authorized_actor="local-training-owner", delegation_path=delegation_path,
+                profile="smolvla", collection_profile=kwargs["collection_profile"],
+                output=output, steps=2, batch_size=2, eval_split=0.34, eval_steps=1,
+                save_freq=1, runner=runner, checkpoint_validator=validator, evaluator=evaluator,
+            )
+            self.assertEqual(first["status"], "EVALUATED_CHECKPOINT")
+            self.assertEqual(first["returncode"], 0)
+            self.assertEqual(second["status"], "EVALUATED_EXISTING_OUTPUT")
+            self.assertEqual(calls, [True])
+            self.assertEqual(len(retry_errors), 1)
+            self.assertIn("TRAINING_OUTPUT_PENDING", retry_errors[0])
+            self.assertEqual(first["evaluation"]["evidence_scope"], "synthetic_injected_native_consumer")
+            self.assertEqual(len(validated), 2)
+            self.assertEqual(len(evaluated), 2)
+            pending = Path(str(output) + ".fr5_training_split.json.pending")
+            pending.write_text("active")
+            with self.assertRaisesRegex(ContractError, "TRAINING_OUTPUT_PENDING"):
+                run_delegated_request(
+                    request, approval_output=approval_output,
+                    authorized_actor="local-training-owner", delegation_path=delegation_path,
+                    profile="smolvla", collection_profile=kwargs["collection_profile"],
+                    output=output, steps=2, batch_size=2, eval_split=0.34, eval_steps=1,
+                    save_freq=1, runner=runner, checkpoint_validator=validator, evaluator=evaluator,
+                )
+            pending.unlink()
+            saved_receipt = json.loads((output / "fr5_training_receipt.json").read_text())
+            saved_receipt["normalized_argv"] = ["different-input"]
+            write_json(output / "fr5_training_receipt.json", saved_receipt)
+            with self.assertRaisesRegex(ContractError, "TRAINING_OUTPUT_RECOVERY_MISMATCH"):
+                run_delegated_request(
+                    request, approval_output=approval_output,
+                    authorized_actor="local-training-owner", delegation_path=delegation_path,
+                    profile="smolvla", collection_profile=kwargs["collection_profile"],
+                    output=output, steps=2, batch_size=2, eval_split=0.34, eval_steps=1,
+                    save_freq=1, runner=runner, checkpoint_validator=validator, evaluator=evaluator,
+                )
+            self.assertEqual(calls, [True])
+
+            # Failure before output creation retains receipts and cannot rerun.
+            failed_output = authority_root / "failed"
+            failure_runner = mock.Mock(return_value=SimpleNamespace(returncode=7))
+            failure_kwargs = dict(
+                approval_output=approval_output, authorized_actor="local-training-owner",
+                delegation_path=delegation_path, profile="smolvla",
+                collection_profile=kwargs["collection_profile"], output=failed_output,
+                steps=2, batch_size=2, eval_split=0.34, eval_steps=1, save_freq=1,
+                runner=failure_runner, checkpoint_validator=validator, evaluator=evaluator,
+            )
+            failed = run_delegated_request(request, **failure_kwargs)
+            self.assertEqual(failed["status"], "TRAINING_FAILED")
+            self.assertEqual(failed["returncode"], 7)
+            with self.assertRaisesRegex(ContractError, "TRAINING_OUTPUT_PENDING"):
+                run_delegated_request(request, **failure_kwargs)
+            failure_runner.assert_called_once()
+
+            # A crash between the two final manifest renames is not settled.
+            interrupted_output = authority_root / "interrupted"
+            def interrupted_runner(argv, check):
+                (interrupted_output / "checkpoints/000001/pretrained_model").mkdir(parents=True)
+                return SimpleNamespace(returncode=0)
+            recovery_kwargs = {**failure_kwargs, "output": interrupted_output,
+                               "runner": mock.Mock(side_effect=interrupted_runner)}
+            original_rename = Path.rename
+            def interrupted_rename(path, target):
+                original_rename(path, target)
+                raise OSError("injected final publication interruption")
+            with mock.patch.object(Path, "rename", interrupted_rename):
+                with self.assertRaisesRegex(OSError, "injected final publication"):
+                    run_delegated_request(request, **recovery_kwargs)
+            before = snapshot(authority_root)
+            with self.assertRaisesRegex(ContractError, "TRAINING_OUTPUT_PENDING"):
+                run_delegated_request(request, **recovery_kwargs)
+            recovery_kwargs["runner"].assert_called_once()
+            self.assertEqual(snapshot(authority_root), before)
+
+    def test_planning_cohort_survives_remapping_without_authority(self):
+        from tools.data_factory.training_entrypoint import prepare_evaluation_cohort, revalidate_evaluation_cohort
+        from tools.data_factory.training_split import resolve_evaluation_cohort, validate_evaluation_cohort
+        with TemporaryDirectory(prefix="SYNTHETIC_TEST_ONLY-") as directory:
+            root = Path(directory)
+            _, request, _ = launch_fixture(root)
+            request_path = root / "request.json"
+            write_json(request_path, request)
+            before = snapshot(root)
+            value = prepare_evaluation_cohort(request_path, evidence_directory=root, eval_fraction=.34)
+            self.assertEqual(snapshot(root), before)
+            self.assertIs(value["training_authority"], False)
+            self.assertNotIn("approved_episode_inventory_digest", value)
+            path = root / "cohort.json"
+            write_json(path, value)
+            self.assertEqual(revalidate_evaluation_cohort(path), value)
+            origins = {10: value["train"][0], 20: value["eval"][0], 30: value["eval"][1]}
+            self.assertEqual(resolve_evaluation_cohort(value, origins), ([10], [20, 30]))
+            extra = {**value["train"][0], "episode_index": 99}
+            self.assertEqual(resolve_evaluation_cohort(value, {**origins, 0: extra}), ([0, 10], [20, 30]))
+            with self.assertRaisesRegex(ContractError, "COHORT_OVERLAP"):
+                resolve_evaluation_cohort(value, {**origins, 40: value["eval"][0]})
+            with self.assertRaisesRegex(ContractError, "COHORT_MISSING_HELDOUT"):
+                resolve_evaluation_cohort(value, {10: value["train"][0]})
+            bad = copy.deepcopy(value)
+            bad["train"].append(bad["eval"][0])
+            bad["cohort_digest"] = canonical_digest({k:v for k,v in bad.items() if k != "cohort_digest"})
+            with self.assertRaisesRegex(ContractError, "COHORT_OVERLAP"):
+                validate_evaluation_cohort(bad)
+            request_path.write_text(request_path.read_text() + " ")
+            with self.assertRaisesRegex(ContractError, "COHORT_SOURCE_CHANGED"):
+                revalidate_evaluation_cohort(path)
+
+    def test_mapped_derived_preview_separates_original_review(self):
+        from tools.data_factory.training_entrypoint import PreparedApprovalBatch
+        original = {"schema_version": approval.LEDGER_PROVENANCE_SCHEMA, "episode_index": 7}
+        derived = {"schema_version": approval.DERIVED_PROVENANCE_SCHEMA, "episode_index": 7,
+                   "parent": {"dataset_identity": {"dataset_id": "original"}, "provenance": original},
+                   "curator_review": {"coverage": {"population_frames": 100, "reviewed_frames": 4}}}
+        provenance = {"schema_version": approval.MAPPED_PROVENANCE_SCHEMA,
+                      "parent": {"dataset_identity": {"dataset_id": "derived"}, "provenance": derived},
+                      "mapping": {"synthetic": True}}
+        snapshot_value = {"dataset": {"dataset_id": "mapped"}, "batch_digest": "synthetic",
+            "drafts": [{"approval_arguments": {"episode_id": "synthetic", "episode_index": 0},
+                        "reviewer_id": "synthetic-reviewer", "provenance": provenance}]}
+        episode = PreparedApprovalBatch(json.dumps(snapshot_value)).preview["episodes"][0]
+        self.assertEqual(episode["semantic_status"], "NOT_ASSERTED")
+        self.assertEqual(episode["parent_semantic_status"], "NOT_ASSERTED")
+        self.assertEqual(episode["parent_dataset_identity"], {"dataset_id": "derived"})
+        self.assertEqual(episode["original_parent_semantic_status"], "PASS")
+        self.assertEqual(episode["original_parent_dataset_identity"], {"dataset_id": "original"})
+        self.assertEqual(episode["original_source_episode_index"], 7)
+        self.assertEqual(episode["curator_review"], derived["curator_review"])
+        provenance["parent"] = derived["parent"]
+        raw = PreparedApprovalBatch(json.dumps(snapshot_value)).preview["episodes"][0]
+        self.assertEqual(raw["parent_semantic_status"], "PASS")
+        self.assertNotIn("original_parent_semantic_status", raw)
+        self.assertNotIn("curator_review", raw)
+
+    def test_public_cohort_union_preserves_roles_and_revalidates_sources(self):
+        import sys
+        from tools.data_factory import training_entrypoint as entry
+        from tools.data_factory.training_split import resolve_evaluation_cohort, compose_evaluation_cohorts
+        with TemporaryDirectory(prefix="SYNTHETIC_TEST_ONLY-") as directory:
+            root = Path(directory)
+            paths = []
+            for name in ("old", "new"):
+                source = root / name
+                source.mkdir()
+                _, request, _ = launch_fixture(source)
+                rp = source / "request.json"
+                write_json(rp, request)
+                cp = source / "cohort.json"
+                before = snapshot(source)
+                value = entry.prepare_evaluation_cohort(rp, evidence_directory=source,
+                    **({"eval_fraction": .34} if name == "old" else {"eval_episodes": [2]}))
+                self.assertEqual(snapshot(source), before)
+                if name == "new":
+                    self.assertEqual(value["evaluation_episode_indices"], [2])
+                    for invalid in ([], [1], [2, 2], [0, 2, 3], [True], [-1]):
+                        with self.subTest(invalid=invalid), self.assertRaisesRegex(ContractError, "COHORT_PARTITION"):
+                            entry.prepare_evaluation_cohort(rp, evidence_directory=source, eval_episodes=invalid)
+                else:
+                    self.assertNotIn("evaluation_episode_indices", value)
+                    self.assertEqual(set(value), {"schema_version", "training_authority", "request",
+                        "dataset_identity", "eval_fraction", "train", "eval", "cohort_digest"})
+                write_json(cp, value)
+                paths.append(cp)
+            authority_before = {str(p): p.read_bytes() for p in root.rglob("training_approved.json")}
+            output = root / "union.json"
+            argv = ["training_entrypoint", "compose-cohorts", "--cohort", str(paths[0]),
+                    "--cohort", str(paths[1]), "--output", str(output)]
+            with mock.patch.object(sys, "argv", argv):
+                entry.main()
+            value = entry.revalidate_evaluation_cohort(output)
+            self.assertIs(value["training_authority"], False)
+            origins = {i: row for i, row in enumerate(value["train"] + value["eval"])}
+            train, evaluation = resolve_evaluation_cohort(value, origins)
+            self.assertEqual([origins[i] for i in train], value["train"])
+            self.assertEqual([origins[i] for i in evaluation], value["eval"])
+            extra = {**value["train"][0], "episode_index": 100}
+            self.assertIn(100, resolve_evaluation_cohort(value, {**origins, 100: extra})[0])
+            with self.assertRaisesRegex(ContractError, "COHORT_OVERLAP"):
+                compose_evaluation_cohorts([value["cohorts"][0], value["cohorts"][0]])
+            for changed_content in (False, True):
+                conflicting = copy.deepcopy(value["cohorts"][0])
+                conflicting["train"], conflicting["eval"] = conflicting["eval"], conflicting["train"]
+                if changed_content:
+                    conflicting["eval"][0]["episode_content_digest"] = "sha256:" + "f" * 64
+                conflicting["cohort_digest"] = canonical_digest({k: v for k, v in conflicting.items()
+                                                                  if k != "cohort_digest"})
+                with self.subTest(changed_content=changed_content), self.assertRaisesRegex(ContractError, "COHORT_OVERLAP"):
+                    compose_evaluation_cohorts([value["cohorts"][0], conflicting])
+            with self.assertRaisesRegex(ContractError, "COHORT_MISSING_HELDOUT"):
+                resolve_evaluation_cohort(value, {i: origins[i] for i in train})
+            rp.write_text(rp.read_text() + " ")
+            with self.assertRaisesRegex(ContractError, "COHORT_SOURCE_CHANGED"):
+                entry.revalidate_evaluation_cohort(output)
+            self.assertEqual({str(p): p.read_bytes() for p in root.rglob("training_approved.json")},
+                             authority_before)
+
+    def test_explicit_cohort_drives_admitted_native_partitions(self):
+        import sys
+        from types import ModuleType
+        from lerobot.datasets import factory
+        from tools.data_factory.training_entrypoint import prepare_evaluation_cohort, run_native_training
+        with TemporaryDirectory(prefix="SYNTHETIC_TEST_ONLY-") as directory:
+            root = Path(directory)
+            kwargs, request, _ = launch_fixture(root)
+            request["episodes"] = [e for e in request["episodes"] if e["episode_index"] in (0, 3)]
+            request_path = root / "request.json"
+            write_json(request_path, request)
+            cohort = prepare_evaluation_cohort(request_path, evidence_directory=root, eval_fraction=.2)
+            cohort_path = root / "cohort.json"
+            write_json(cohort_path, cohort)
+            kwargs["argv"].append(f"--fr5.evaluation_cohort={cohort_path}")
+            split, receipt = prepare_launch(**kwargs)
+            self.assertEqual((split["train_episodes"], split["eval_episodes"]), ([0, 2], [3]))
+            self.assertEqual(receipt["normalization"]["episodes"], [0, 2])
+            cfg = SimpleNamespace(dataset=SimpleNamespace(root=str(kwargs["dataset"]),
+                repo_id=kwargs["repo_id"], episodes=[0, 2, 3], eval_split=.34,
+                streaming=False, use_imagenet_stats=True, revision=None, video_backend="pyav",
+                image_transforms=SimpleNamespace(enable=False)), trainable_config=None, tolerance_s=1e-4)
+            native = ModuleType("lerobot.scripts.lerobot_train")
+            native.make_train_eval_datasets = mock.Mock(side_effect=AssertionError("fraction factory used"))
+            def dataset(*args, **values):
+                return SimpleNamespace(episodes=values["episodes"], meta=SimpleNamespace(stats={}))
+            def main():
+                self.assertFalse(any(a.startswith("--fr5.") for a in sys.argv))
+                train, heldout = native.make_train_eval_datasets(cfg)
+                self.assertEqual((train.episodes, heldout.episodes), ([0, 2], [3]))
+                self.assertEqual(train.meta.stats["action"]["mean"].tolist(), [100.] * 7)
+                self.assertEqual(heldout.meta.stats["action"]["mean"].tolist(), [100.] * 7)
+            native.main = main
+            before = snapshot(kwargs["dataset"])
+            with mock.patch.dict(sys.modules, {"lerobot.scripts.lerobot_train": native}), \
+                 mock.patch.object(factory, "LeRobotDatasetMetadata"), \
+                 mock.patch.object(factory, "resolve_delta_timestamps", return_value={}), \
+                 mock.patch.object(factory, "LeRobotDataset", side_effect=dataset):
+                self.assertEqual(run_native_training(kwargs["argv"], split, receipt), 0)
+            self.assertEqual(snapshot(kwargs["dataset"]), before)
+            # Tampering either the source or the selected identity cannot enter training.
+            cohort_path.write_text("{}")
+            with self.assertRaises(ContractError):
+                prepare_launch(**kwargs)
+
+    def test_explicit_cohort_survives_saved_checkpoint_admission(self):
+        from tests.test_offline_evaluation import admitted_case
+        from tools.data_factory.training_entrypoint import prepare_evaluation_cohort, options
+        from tools.validate_training_checkpoint import validate_checkpoint
+        from tools.evaluate_smolvla_offline import admit_evaluation
+        with TemporaryDirectory(prefix="SYNTHETIC_TEST_ONLY-") as directory:
+            root = Path(directory)
+            args, old_split = admitted_case(root)
+            inventory = json.loads(args.approved_inventory.read_text())
+            request = {k: inventory["dataset_identity"][k] for k in ("dataset_root", "dataset_id", "repo_id")}
+            request["episodes"] = []
+            for e in inventory["episodes"]:
+                if e["episode_index"] == 2:
+                    continue
+                provenance = json.loads(Path(e["episode_provenance"]["artifact_path"]).read_text())
+                request["episodes"].append(dict(episode_id=e["episode_id"], episode_index=e["episode_index"],
+                    technical_validator_path=e["technical_validator"]["artifact_path"],
+                    human_semantic_evidence_path=e["human_semantic_evidence"]["artifact_path"],
+                    seed_manifest_path=str(root / f"{e['episode_id']}.seed-manifest.SYNTHETIC_TEST_ONLY.json"),
+                    manifest_slot_id=provenance["manifest_slot_id"]))
+            rp=root / "request.json"
+            write_json(rp, request)
+            cp=root / "cohort.json"
+            write_json(cp, prepare_evaluation_cohort(rp, evidence_directory=root, eval_fraction=.2))
+            output=Path(args.checkpoint).parents[2]
+            argv=json.loads((output / "fr5_training_receipt.json").read_text())["normalized_argv"]
+            argv.append(f"--fr5.evaluation_cohort={cp}")
+            split, receipt=prepare_launch(dataset=args.dataset, repo_id=args.repo_id, inventory=args.approved_inventory,
+                profile="smolvla", collection_profile=old_split["feature_contract"]["collection_profile_id"], argv=argv)
+            write_json(output / "fr5_training_split.json", split)
+            write_json(output / "fr5_training_receipt.json", receipt)
+            write_normalization_fixture(Path(args.checkpoint), receipt)
+            self.assertEqual(validate_checkpoint(Path(args.checkpoint)), (Path(args.checkpoint), output))
+            self.assertEqual(admit_evaluation(args)["episodes"], [3])
+            cp.write_text("{}")
+            with self.assertRaises(ValueError):
+                validate_checkpoint(Path(args.checkpoint))
+
+    def test_curator_request_cohort_reaches_public_recipe_without_override(self):
+        self._curator_cohort_public_recipe(union=False)
+
+    def test_curator_union_cohort_reaches_public_admitted_partitions(self):
+        self._curator_cohort_public_recipe(union=True)
+
+    def _curator_cohort_public_recipe(self, *, union):
+        import sys
+        import io
+        from tests.data_factory.curator.support import make_mapping_cohort_case
+        from tools.data_factory.curator.workflow.mapping import publish_mapped_training_request
+        from tools.data_factory import training_entrypoint as training
+        requests, sources, root, mapping_options, cohort = make_mapping_cohort_case(self.addCleanup)
+        expected_train, expected_eval = [0, 2, 4, 5], [7]
+        if union:
+            from tools.data_factory.training_split import compose_evaluation_cohorts
+            new = training.prepare_evaluation_cohort(requests[1], evidence_directory=root, eval_episodes=[2])
+            cohort = compose_evaluation_cohorts([cohort, new])
+            write_json(mapping_options["evaluation_cohort"], cohort)
+            expected_train, expected_eval = [0, 4, 5], [2, 7]
+        requests.reverse()
+        result = publish_mapped_training_request(requests, root / "mapped", **mapping_options)
+        request_path = Path(result["request_path"])
+        request = json.loads(request_path.read_text())
+        authority_root = root / "learning"
+        authority_root.mkdir()
+        batch = authority_root / "batch"
+        batch.mkdir()
+        delegation = dict(schema_version=approval.DELEGATION_SCHEMA, delegation_id="synthetic-cohort-r1",
+            scope=approval.PRODUCTION_SCOPE, delegated_by="workspace-user", authorized_actor="learning-fixture",
+            authorization_source_ref="SYNTHETIC_TEST_ONLY", dataset={k:request[k] for k in ("repo_id", "dataset_root")},
+            output_root=str(authority_root), profiles=["smolvla"],
+            limits=dict(max_steps=2,max_batch_size=2,max_checkpoints=1), authority=copy.deepcopy(approval.DELEGATION_AUTHORITY))
+        delegation_path=root / "delegation.json"
+        write_json(delegation_path, delegation)
+        argv=["training_entrypoint.py", "run-delegated", "--request", str(request_path),
+              "--approval-output", str(batch), "--delegation", str(delegation_path),
+              "--authorized-actor", "learning-fixture", "--profile", "smolvla",
+              "--collection-profile", "fr5-up-wrist-rgb-30hz-v2", "--output", str(authority_root / "run"),
+              "--steps", "2", "--batch-size", "1", "--eval-split", ".4", "--eval-steps", "2", "--save-freq", "2"]
+        before=snapshot(authority_root)
+        with mock.patch.object(sys, "argv", argv+["--evaluation-cohort",str(root / "other.json")]), \
+             mock.patch.object(training, "delegate_training_batch") as issue, \
+             mock.patch.object(training, "run_native_training") as trainer, \
+             mock.patch("sys.stderr",new_callable=io.StringIO):
+            with self.assertRaises(SystemExit) as failed:
+                training.main()
+            self.assertEqual(failed.exception.code,2)
+            issue.assert_not_called(); trainer.assert_not_called()
+        self.assertEqual(snapshot(authority_root),before)
+        def native(command, split, receipt):
+            self.assertEqual(split["train_episodes"],expected_train)
+            self.assertEqual(split["eval_episodes"],expected_eval)
+            self.assertEqual(receipt["normalization"]["episodes"],expected_train)
+            self.assertEqual(split["evaluation_cohort"]["cohort"]["cohort_digest"],cohort["cohort_digest"])
+            self.assertIn("--fr5.evaluation_cohort",training.options(command[1:]))
+            return 0  # No checkpoint: public CLI must report this truthfully.
+        with mock.patch.object(sys,"argv",argv), mock.patch.object(training,"run_native_training",side_effect=native) as trainer, \
+             mock.patch("sys.stdout",new_callable=io.StringIO):
+            with self.assertRaises(SystemExit) as ended:
+                training.main()
+            self.assertEqual(ended.exception.code,1)
+        trainer.assert_called_once()
+
+    def test_unsupported_act_native_evaluation_rejected_before_authority(self):
+        from tools.data_factory.training_entrypoint import run_delegated_request
+
+        with TemporaryDirectory(prefix="SYNTHETIC_TEST_ONLY-") as directory:
+            root = Path(directory)
+            _, request, _ = launch_fixture(root)
+            before = snapshot(root)
+            with self.assertRaisesRegex(ContractError, "TRAINING_EVALUATOR_UNSUPPORTED"):
+                run_delegated_request(
+                    request, approval_output=root / "authority", authorized_actor="actor",
+                    delegation_path=root / "missing-delegation.json", profile="act",
+                    collection_profile="fixture", output=root / "run", steps=2,
+                    batch_size=1, eval_split=0.34, eval_steps=1, save_freq=1,
+                )
+            self.assertEqual(snapshot(root), before)
+
+    def test_cli_failed_or_checkpointless_run_returns_nonzero(self):
+        import sys
+        from tools.data_factory import training_entrypoint
+
+        for status in ("TRAINING_FAILED", "TRAINING_RETURNED_NO_CHECKPOINT", "EXISTING_OUTPUT"):
+            with mock.patch.object(training_entrypoint, "run_delegated_request",
+                                   return_value={"status": status}):
+                argv = ["training_entrypoint.py", "run-delegated", "--request", "r",
+                        "--approval-output", "a", "--delegation", "d", "--authorized-actor", "x",
+                        "--profile", "smolvla", "--collection-profile", "c", "--output", "o",
+                        "--steps", "1", "--batch-size", "1", "--eval-split", "0.2",
+                        "--eval-steps", "1", "--save-freq", "1"]
+                with mock.patch.object(sys, "argv", argv), mock.patch.object(
+                        training_entrypoint, "load_json_strict", return_value={}):
+                    with self.assertRaises(SystemExit) as raised:
+                        training_entrypoint.main()
+                self.assertEqual(raised.exception.code, 1)
 
     def test_public_shell_dry_run_and_validator_reject_legacy_marker(self):
         project = Path(__file__).resolve().parents[1]

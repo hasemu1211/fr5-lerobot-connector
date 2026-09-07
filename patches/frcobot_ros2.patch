@@ -1,99 +1,3 @@
-diff --git a/fairino_hardware_v3_9_7/include/fairino_hardware/fairino_hardware_interface.hpp b/fairino_hardware_v3_9_7/include/fairino_hardware/fairino_hardware_interface.hpp
-index cd06d65..ef88774 100644
---- a/fairino_hardware_v3_9_7/include/fairino_hardware/fairino_hardware_interface.hpp
-+++ b/fairino_hardware_v3_9_7/include/fairino_hardware/fairino_hardware_interface.hpp
-@@ -9,6 +9,16 @@
- #include "hardware_interface/types/hardware_interface_type_values.hpp"
- #include "visibility_control.h"
- #include <vector>
-+#include <array>
-+#include <string>
-+#include <algorithm>
-+#include <atomic>
-+#include <cmath>
-+#include <condition_variable>
-+#include <chrono>
-+#include <mutex>
-+#include <optional>
-+#include <thread>
- #include "libfairino/include/robot.h"
- 
- 
-@@ -21,6 +31,8 @@ class FairinoHardwareInterface: public hardware_interface::SystemInterface{
- public:
-   RCLCPP_SHARED_PTR_DEFINITIONS(FairinoHardwareInterface)
- 
-+  ~FairinoHardwareInterface() override;
-+
-   FAIRINO_HARDWARE_PUBLIC
-   hardware_interface::CallbackReturn on_init(const hardware_interface::HardwareInfo& info) override;
- 
-@@ -32,6 +44,12 @@ public:
-   
-   FAIRINO_HARDWARE_PUBLIC
-   hardware_interface::CallbackReturn on_deactivate(const rclcpp_lifecycle::State& previous_state) override;
-+
-+  FAIRINO_HARDWARE_PUBLIC
-+  hardware_interface::CallbackReturn on_shutdown(const rclcpp_lifecycle::State& previous_state) override;
-+
-+  FAIRINO_HARDWARE_PUBLIC
-+  hardware_interface::CallbackReturn on_error(const rclcpp_lifecycle::State& previous_state) override;
-   
-   FAIRINO_HARDWARE_PUBLIC
-   std::vector<hardware_interface::StateInterface> export_state_interfaces() override;
-@@ -53,18 +71,44 @@ public:
-   hardware_interface::return_type write(const rclcpp::Time & time, const rclcpp::Duration & period) override;
-   
- private:
--  double _jnt_position_command[6];
--  double _jnt_velocity_command[6];
--  double _jnt_torque_command[6];
--  double _jnt_position_state[6];
--  double _jnt_velocity_state[6];
--  double _jnt_torque_state[6];
-+  std::vector<double> _jnt_position_command;
-+  std::vector<double> _jnt_velocity_command;
-+  std::vector<double> _jnt_torque_command;
-+  std::vector<double> _jnt_position_state;
-+  std::vector<double> _jnt_velocity_state;
-+  std::vector<double> _jnt_torque_state;
-   int _control_mode;
-+  bool _is_gripper{false};
-+  bool _has_arm{false};
-+  std::array<size_t, 6> _arm_joint_indices{};
-+  size_t _gripper_joint_index{0};
-+  int _gripper_index{1};
-+  int _gripper_velocity{80};
-+  int _gripper_open_velocity{80};
-+  int _gripper_force{50};
-+  int _gripper_open_force{50};
-+  int _gripper_max_time{30000};
-+  int _gripper_settle_time_ms{500};
-+  double _gripper_upper_position{0.021};
-+  std::atomic<double> _last_gripper_command{-1.0};
-   std::string _controller_ip = CONTROLLER_IP_ADDRESS;
-   std::unique_ptr<FRRobot> _ptr_robot;
-+  std::thread _gripper_thread;
-+  std::mutex _gripper_mutex;
-+  std::condition_variable _gripper_cv;
-+  std::optional<int> _pending_gripper_position;
-+  bool _stop_gripper_thread{false};
-+  std::atomic<uint64_t> _gripper_command_generation{0};
-+  std::atomic<bool> _arm_stream_paused{true};
-+  std::atomic<double> _gripper_position_state{0.0};
-+  std::atomic<int> _gripper_error{0};
-+  std::atomic<bool> _gripper_rpc_active{false};
-+
-+  void stop_gripper_worker();
-+  void gripper_worker();
- };
- 
- } //end namespace
- 
- 
--#endif
-\ No newline at end of file
-+#endif
 diff --git a/fairino_hardware_v3_9_7/src/CNDE_thread.cpp b/fairino_hardware_v3_9_7/src/CNDE_thread.cpp
 index 6ed2f6a..3d4e0cc 100644
 --- a/fairino_hardware_v3_9_7/src/CNDE_thread.cpp
@@ -182,8 +86,106 @@ index c793c2a..fe3ad76 100644
          msg.reconnect_flag = 1;
          _state_publisher->publish(msg);
          
+diff --git a/fairino_hardware_v3_9_7/include/fairino_hardware/fairino_hardware_interface.hpp b/fairino_hardware_v3_9_7/include/fairino_hardware/fairino_hardware_interface.hpp
+--- a/fairino_hardware_v3_9_7/include/fairino_hardware/fairino_hardware_interface.hpp
++++ b/fairino_hardware_v3_9_7/include/fairino_hardware/fairino_hardware_interface.hpp
+@@ -9,6 +9,17 @@
+ #include "hardware_interface/types/hardware_interface_type_values.hpp"
+ #include "visibility_control.h"
+ #include <vector>
++#include "gripper_execution_evidence.hpp"
++#include <array>
++#include <string>
++#include <algorithm>
++#include <atomic>
++#include <cmath>
++#include <condition_variable>
++#include <chrono>
++#include <mutex>
++#include <optional>
++#include <thread>
+ #include "libfairino/include/robot.h"
+ 
+ 
+@@ -21,6 +32,8 @@
+ public:
+   RCLCPP_SHARED_PTR_DEFINITIONS(FairinoHardwareInterface)
+ 
++  ~FairinoHardwareInterface() override;
++
+   FAIRINO_HARDWARE_PUBLIC
+   hardware_interface::CallbackReturn on_init(const hardware_interface::HardwareInfo& info) override;
+ 
+@@ -32,6 +45,12 @@
+   
+   FAIRINO_HARDWARE_PUBLIC
+   hardware_interface::CallbackReturn on_deactivate(const rclcpp_lifecycle::State& previous_state) override;
++
++  FAIRINO_HARDWARE_PUBLIC
++  hardware_interface::CallbackReturn on_shutdown(const rclcpp_lifecycle::State& previous_state) override;
++
++  FAIRINO_HARDWARE_PUBLIC
++  hardware_interface::CallbackReturn on_error(const rclcpp_lifecycle::State& previous_state) override;
+   
+   FAIRINO_HARDWARE_PUBLIC
+   std::vector<hardware_interface::StateInterface> export_state_interfaces() override;
+@@ -53,18 +72,47 @@
+   hardware_interface::return_type write(const rclcpp::Time & time, const rclcpp::Duration & period) override;
+   
+ private:
+-  double _jnt_position_command[6];
+-  double _jnt_velocity_command[6];
+-  double _jnt_torque_command[6];
+-  double _jnt_position_state[6];
+-  double _jnt_velocity_state[6];
+-  double _jnt_torque_state[6];
++  std::vector<double> _jnt_position_command;
++  std::vector<double> _jnt_velocity_command;
++  std::vector<double> _jnt_torque_command;
++  std::vector<double> _jnt_position_state;
++  std::vector<double> _jnt_velocity_state;
++  std::vector<double> _jnt_torque_state;
+   int _control_mode;
++  bool _is_gripper{false};
++  bool _has_arm{false};
++  std::array<size_t, 6> _arm_joint_indices{};
++  size_t _gripper_joint_index{0};
++  int _gripper_index{1};
++  int _gripper_velocity{80};
++  int _gripper_open_velocity{80};
++  int _gripper_force{50};
++  int _gripper_open_force{50};
++  int _gripper_max_time{30000};
++  int _gripper_settle_time_ms{500};
++  double _gripper_upper_position{0.021};
++  std::atomic<double> _last_gripper_command{-1.0};
+   std::string _controller_ip = CONTROLLER_IP_ADDRESS;
+   std::unique_ptr<FRRobot> _ptr_robot;
++  std::thread _gripper_thread;
++  std::mutex _gripper_mutex;
++  std::condition_variable _gripper_cv;
++  std::optional<int> _pending_gripper_position;
++  bool _stop_gripper_thread{false};
++  std::atomic<uint64_t> _gripper_command_generation{0};
++  std::atomic<bool> _arm_stream_paused{true};
++  std::atomic<double> _gripper_position_state{0.0};
++  std::atomic<int> _gripper_error{0};
++  std::atomic<bool> _gripper_rpc_active{false};
++
++  GripperExecutionEvidence _gripper_evidence;
++  std::array<double, GripperExecutionEvidence::names.size()> _gripper_evidence_values{};
++  void sample_gripper_evidence();
++  void stop_gripper_worker();
++  void gripper_worker();
+ };
+ 
+ } //end namespace
+ 
+ 
+-#endif
+\ No newline at end of file
++#endif
 diff --git a/fairino_hardware_v3_9_7/src/fairino_hardware_interface.cpp b/fairino_hardware_v3_9_7/src/fairino_hardware_interface.cpp
-index ca2d84f..d49fd0d 100644
 --- a/fairino_hardware_v3_9_7/src/fairino_hardware_interface.cpp
 +++ b/fairino_hardware_v3_9_7/src/fairino_hardware_interface.cpp
 @@ -1,12 +1,139 @@
@@ -252,12 +254,12 @@ index ca2d84f..d49fd0d 100644
 +}  // namespace
 +
  namespace fairino_hardware{
- 
++
 +FairinoHardwareInterface::~FairinoHardwareInterface()
 +{
 +    stop_gripper_worker();
 +}
-+
+ 
  hardware_interface::CallbackReturn FairinoHardwareInterface::on_init(const hardware_interface::HardwareInfo& sysinfo){
      if (hardware_interface::SystemInterface::on_init(sysinfo) != hardware_interface::CallbackReturn::SUCCESS) {
          return hardware_interface::CallbackReturn::ERROR;
@@ -326,7 +328,18 @@ index ca2d84f..d49fd0d 100644
      
      for (const hardware_interface::ComponentInfo& joint : info_.joints) {
  
-@@ -108,7 +235,7 @@ hardware_interface::CallbackReturn FairinoHardwareInterface::on_activate(const r
+@@ -82,6 +209,10 @@
+     //     info_.joints[i].name, hardware_interface::HW_IF_EFFORT, &_jnt_torque_state.at(i)));
+   }
+ 
++  if (_is_gripper) for (size_t i = 0; i < GripperExecutionEvidence::names.size(); ++i) {
++    state_interfaces.emplace_back(hardware_interface::StateInterface(
++      "fr5_gripper_execution", GripperExecutionEvidence::names[i], &_gripper_evidence_values[i]));
++  }
+   //导出
+   return state_interfaces;
+ }
+@@ -108,7 +239,7 @@
      RCLCPP_INFO(rclcpp::get_logger("FairinoHardwareInterface"), "Starting ...please wait...");
      //做变量的初始化工作
      _ptr_robot = std::make_unique<FRRobot>();//创建机器人实例
@@ -335,7 +348,7 @@ index ca2d84f..d49fd0d 100644
          _jnt_position_command[i] = 0;
          _jnt_velocity_command[i] = 0;
          _jnt_torque_command[i] = 0;
-@@ -117,24 +244,220 @@ hardware_interface::CallbackReturn FairinoHardwareInterface::on_activate(const r
+@@ -117,24 +248,223 @@
          _jnt_torque_state[i] = 0;
      }
      _control_mode = 0;//默认是位置控制,0-位置控制，1-扭矩控制 2-速度控制
@@ -420,6 +433,9 @@ index ca2d84f..d49fd0d 100644
 +        _gripper_error = 0;
 +        _arm_stream_paused = true;
 +        _last_gripper_command = _jnt_position_command[_gripper_joint_index];
++        _gripper_evidence.activate();
++        _gripper_command_generation = 0;
++        _gripper_evidence_values.fill(0.);
 +        RCLCPP_INFO(rclcpp::get_logger("FairinoHardwareInterface"),
 +            "Real gripper hardware ready (index=%d, position=%u)", _gripper_index, position);
 +        if (!_has_arm) return hardware_interface::CallbackReturn::SUCCESS;
@@ -562,7 +578,7 @@ index ca2d84f..d49fd0d 100644
          }
          RCLCPP_INFO(rclcpp::get_logger("FairinoHardwareInterface"),"初始指令位置: %f,%f,%f,%f,%f,%f",_jnt_position_command[0],\
          _jnt_position_command[1],_jnt_position_command[2],_jnt_position_command[3],_jnt_position_command[4],_jnt_position_command[5]);    
-@@ -142,6 +465,8 @@ hardware_interface::CallbackReturn FairinoHardwareInterface::on_activate(const r
+@@ -142,6 +472,8 @@
          return hardware_interface::CallbackReturn::SUCCESS;
      }else{
          RCLCPP_INFO(rclcpp::get_logger("FairinoHardwareInterface"), "读取初始关节角度错误，硬件无法启动！请检查通讯内容");
@@ -571,7 +587,7 @@ index ca2d84f..d49fd0d 100644
          return hardware_interface::CallbackReturn::ERROR;
      }
  }
-@@ -151,54 +476,122 @@ hardware_interface::CallbackReturn FairinoHardwareInterface::on_activate(const r
+@@ -151,54 +483,142 @@
  hardware_interface::CallbackReturn FairinoHardwareInterface::on_deactivate(const rclcpp_lifecycle::State& previous_state)
  {
      RCLCPP_INFO(rclcpp::get_logger("FairinoHardwareInterface"), "Stopping ...please wait...");
@@ -603,6 +619,7 @@ index ca2d84f..d49fd0d 100644
      return hardware_interface::CallbackReturn::SUCCESS;
  }
  
+-
 +hardware_interface::CallbackReturn FairinoHardwareInterface::on_shutdown(
 +    const rclcpp_lifecycle::State& previous_state)
 +{
@@ -615,7 +632,23 @@ index ca2d84f..d49fd0d 100644
 +    return on_deactivate(previous_state);
 +}
 +
- 
++
++
++void FairinoHardwareInterface::sample_gripper_evidence()
++{
++    // Reuse the existing SDK cached-state reader; never label local read time source time.
++    ROBOT_STATE_PKG state{};
++    const int result = _ptr_robot->GetRobotRealTimeState(&state);
++    const double system_s = std::chrono::duration<double>(std::chrono::system_clock::now().time_since_epoch()).count();
++    const double steady_s = std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
++    std::unique_lock<std::mutex> lock(_gripper_mutex, std::try_to_lock);
++    if (!lock.owns_lock()) return;
++    _gripper_evidence_values = _gripper_evidence.snapshot(
++      _gripper_command_generation.load(), _last_gripper_command.load(), system_s, steady_s,
++      state, _gripper_upper_position, _pending_gripper_position.has_value(),
++      _gripper_rpc_active.load(), _arm_stream_paused.load(), _stop_gripper_thread,
++      _gripper_error.load() != 0 ? _gripper_error.load() : udp_command_error.load(), result == 0);
++}
  
  hardware_interface::return_type FairinoHardwareInterface::read(const rclcpp::Time& time,const rclcpp::Duration& period)
 -{//从RTDE反馈数据中获取所需的位置，速度和扭矩信息
@@ -625,7 +658,16 @@ index ca2d84f..d49fd0d 100644
 -        for(int i=0;i<6;i++){
 -            _jnt_position_state[i] = state_data.jPos[i]/180.0*M_PI;//注意单位转换，moveit统一用弧度
 -            //_jnt_torque_state[i] = state_data.jt_cur_tor[i];//注意单位转换
+-        }
+-    }else{
+-        hardware_interface::return_type::ERROR;
+-    }
+-    //RCLCPP_INFO(rclcpp::get_logger("FairinoHardwareInterface"), "System successfully read: %f,%f,%f,%f,%f,%f",_jnt_position_state[0],\
+-    _jnt_position_state[1],_jnt_position_state[2],_jnt_position_state[3],_jnt_position_state[4],_jnt_position_state[5]);
+-
+-  return hardware_interface::return_type::OK;
 +{
++    _gripper_evidence_values[27] = 0.; // contention/read failure cannot republish validity
 +    // 从RTDE反馈数据中获取所需的位置，速度和扭矩信息
 +    if (_has_arm) {
 +        JointPos state_data{};
@@ -636,15 +678,10 @@ index ca2d84f..d49fd0d 100644
 +            }
 +        } else {
 +            return hardware_interface::return_type::ERROR;
-         }
--    }else{
--        hardware_interface::return_type::ERROR;
-     }
--    //RCLCPP_INFO(rclcpp::get_logger("FairinoHardwareInterface"), "System successfully read: %f,%f,%f,%f,%f,%f",_jnt_position_state[0],\
--    _jnt_position_state[1],_jnt_position_state[2],_jnt_position_state[3],_jnt_position_state[4],_jnt_position_state[5]);
--
--  return hardware_interface::return_type::OK;
++        }
++    }
 +    if (_is_gripper) {
++        sample_gripper_evidence();
 +        if (_gripper_error.load() != 0) {
 +            return hardware_interface::return_type::ERROR;
 +        }
@@ -682,6 +719,8 @@ index ca2d84f..d49fd0d 100644
 +            // Gripper motion interrupts servo mode. Stop producing hold packets until it completes.
 +            {
 +                std::lock_guard<std::mutex> lock(_gripper_mutex);
++                if (_gripper_command_generation.load() == GripperExecutionEvidence::MAX_GENERATION)
++                    return hardware_interface::return_type::ERROR;
 +                _pending_gripper_position = position;
 +                _gripper_command_generation.fetch_add(1);
 +                _arm_stream_paused = true;
@@ -701,27 +740,29 @@ index ca2d84f..d49fd0d 100644
          ExaxisPos extcmd{0,0,0,0};
 -        for(auto j=0;j<6;j++){
 -            cmd.jPos[j] = _jnt_position_command[j]/M_PI*180; //注意单位转换
-+        for(size_t arm = 0; arm < _arm_joint_indices.size(); ++arm) {
-+            cmd.jPos[arm] = _jnt_position_command[_arm_joint_indices[arm]] / M_PI * 180;
-         }
+-        }
 -        //RCLCPP_INFO(rclcpp::get_logger("FairinoHardwareInterface"), "ServoJ下发位置:%f,%f,%f,%f,%f,%f",\
 -            cmd.jPos[0],cmd.jPos[1],cmd.jPos[2],cmd.jPos[3],cmd.jPos[4],cmd.jPos[5]);
 -        int returncode = _ptr_robot->ServoJ(&cmd,&extcmd,0,0,0.008,0,0);
++        for(size_t arm = 0; arm < _arm_joint_indices.size(); ++arm) {
++            cmd.jPos[arm] = _jnt_position_command[_arm_joint_indices[arm]] / M_PI * 180;
++        }
 +        int returncode = _ptr_robot->ServoJ(
 +            &cmd, &extcmd, 0, 0, 0.008, 0, 0, 0, 1);
          if(returncode != 0){
 -            RCLCPP_INFO(rclcpp::get_logger("FairinoHardwareInterface"), "ServoJ指令下发错误,错误码:%d",returncode);
-+            RCLCPP_ERROR(rclcpp::get_logger("FairinoHardwareInterface"), "ServoJ指令下发错误,错误码:%d",returncode);
-+            return hardware_interface::return_type::ERROR;
-         }
+-        }
 -    }else if(_control_mode == 1){//扭矩控制模式
 -        if (std::any_of(&_jnt_torque_command[0], &_jnt_torque_command[5],\
++            RCLCPP_ERROR(rclcpp::get_logger("FairinoHardwareInterface"), "ServoJ指令下发错误,错误码:%d",returncode);
++            return hardware_interface::return_type::ERROR;
++        }
 +    }else if(!_has_arm || _control_mode == 1){//扭矩控制模式
 +        if (std::any_of(_jnt_torque_command.begin(), _jnt_torque_command.end(),\
              [](double c) { return not std::isfinite(c); })) {
              return hardware_interface::return_type::ERROR;
          }
-@@ -211,6 +604,184 @@ hardware_interface::return_type FairinoHardwareInterface::write(const rclcpp::Ti
+@@ -211,6 +631,203 @@
      return hardware_interface::return_type::OK;
  }
  
@@ -759,6 +800,8 @@ index ca2d84f..d49fd0d 100644
 +        }
 +        if (position.has_value()) {
 +            bool resume_arm = false;
++            int completion_reason = 0;
++            ROBOT_STATE_PKG completion_state{};
 +            ROBOT_STATE_PKG initial_state{};
 +            _gripper_rpc_active = true;
 +            const int initial_state_result =
@@ -783,7 +826,14 @@ index ca2d84f..d49fd0d 100644
 +            RCLCPP_INFO(rclcpp::get_logger("FairinoHardwareInterface"),
 +                "Gripper command direction=%s target=%d feedback=%u velocity=%d force=%d",
 +                opening ? "OPEN" : "CLOSE", *position, last_feedback, velocity, force);
-+            _gripper_rpc_active = true;
++            {
++                std::lock_guard<std::mutex> lock(_gripper_mutex);
++                if (_stop_gripper_thread || _gripper_error.load() != 0 || udp_command_error.load() != 0) return;
++                if (_pending_gripper_position.has_value() || _gripper_command_generation.load() != command_generation) continue;
++                _gripper_evidence.begin(command_generation,
++                  std::chrono::duration<double>(std::chrono::system_clock::now().time_since_epoch()).count());
++                _gripper_rpc_active = true;
++            }
 +            const int result = _ptr_robot->MoveGripper(
 +                _gripper_index, *position, velocity, force,
 +                _gripper_max_time, 1, 0, 0, 0, 0);
@@ -840,6 +890,7 @@ index ca2d84f..d49fd0d 100644
 +                        _gripper_upper_position * static_cast<double>(feedback) / 100.0;
 +                }
 +                if (motion_done != 0 && feedback_is_plausible) {
++                    completion_state = state; completion_reason = 1;
 +                    resume_arm = true;
 +                    break;
 +                }
@@ -856,6 +907,7 @@ index ca2d84f..d49fd0d 100644
 +                        RCLCPP_WARN(rclcpp::get_logger("FairinoHardwareInterface"),
 +                            "Gripper motion settled away from target (target=%d, feedback=%u, dwell=%d ms)",
 +                            *position, feedback, _gripper_settle_time_ms);
++                        completion_state = state; completion_reason = 2;
 +                        resume_arm = true;
 +                        break;
 +                    }
@@ -882,6 +934,11 @@ index ca2d84f..d49fd0d 100644
 +                }
 +            }
 +            if (resume_arm) {
++                {
++                    std::lock_guard<std::mutex> lock(_gripper_mutex);
++                    if (_stop_gripper_thread || _gripper_error.load() != 0 || udp_command_error.load() != 0) return;
++                    if (_pending_gripper_position.has_value() || _gripper_command_generation.load() != command_generation) continue;
++                }
 +                const auto servo_result = send_udp_command_and_observe(
 +                    [this] { return _ptr_robot->ServoMoveStart(1); });
 +                if (!servo_result.ok()) {
@@ -895,7 +952,10 @@ index ca2d84f..d49fd0d 100644
 +                        servo_result.controller_error);
 +                    return;
 +                }
-+                if (_gripper_command_generation.load() == command_generation) {
++                std::lock_guard<std::mutex> lock(_gripper_mutex);
++                if (!_stop_gripper_thread && _gripper_error.load() == 0 && udp_command_error.load() == 0 &&
++                    !_pending_gripper_position.has_value() && _gripper_command_generation.load() == command_generation) {
++                    _gripper_evidence.complete(command_generation, _gripper_command_generation.load(), completion_reason, completion_state);
 +                    _arm_stream_paused = false;
 +                }
 +            }
@@ -906,3 +966,77 @@ index ca2d84f..d49fd0d 100644
  
  }//end namesapce
  
+diff --git a/fairino_hardware_v3_9_7/include/fairino_hardware/gripper_execution_evidence.hpp b/fairino_hardware_v3_9_7/include/fairino_hardware/gripper_execution_evidence.hpp
+new file mode 100644
+--- /dev/null
++++ b/fairino_hardware_v3_9_7/include/fairino_hardware/gripper_execution_evidence.hpp
+@@ -0,0 +1,69 @@
++#ifndef FAIRINO_GRIPPER_EXECUTION_EVIDENCE_HPP
++#define FAIRINO_GRIPPER_EXECUTION_EVIDENCE_HPP
++#include <array>
++#include <cmath>
++#include <cstdint>
++#include <limits>
++#include <random>
++
++namespace fairino_hardware {
++// Protected by the existing gripper mutex. No queue, RPC or execution owner.
++struct GripperExecutionEvidence {
++  inline static constexpr std::array<const char *, 35> names{
++    "version", "incarnation_0", "incarnation_1", "incarnation_2", "incarnation_3",
++    "generation", "active_generation", "completed_generation", "raw_reference_m",
++    "sample_system_s", "sample_steady_s", "command_started_system_s",
++    "year", "month", "day", "hour", "minute", "second", "millisecond", "frame",
++    "feedback_m", "completion_reason", "pending", "rpc_active", "arm_resumed",
++    "stopped", "error", "valid", "completion_year", "completion_month", "completion_day",
++    "completion_hour", "completion_minute", "completion_second", "completion_millisecond"};
++  static constexpr uint64_t MAX_GENERATION = (uint64_t{1} << 53) - 1;
++  std::array<uint32_t, 4> incarnation{};
++  uint64_t active{0}, completed{0};
++  int reason{0}; // 0 unknown, 1 motion_done, 2 settled_away: not task semantics
++  double command_started{0};
++  std::array<double, 7> completion_source{};
++
++  void activate() {
++    std::random_device random;
++    for (auto &value : incarnation) value = random();
++    active = completed = 0; reason = 0; command_started = 0;
++    completion_source.fill(0);
++  }
++  void begin(uint64_t generation, double system_time) {
++    active = generation; reason = 0; command_started = system_time;
++    completion_source.fill(0);
++  }
++  template<class State> static std::array<double, 7> source(const State &state) {
++    const auto &t = state.robotTime;
++    return {double(t.year), double(t.mouth), double(t.day), double(t.hour),
++            double(t.minute), double(t.second), double(t.millisecond)};
++  }
++  template<class State> void complete(uint64_t generation, uint64_t current,
++                                      int completion_reason, const State &state) {
++    if (generation == 0 || generation != current || generation != active) return;
++    completed = generation; active = 0; reason = completion_reason;
++    completion_source = source(state);
++  }
++  template<class State> std::array<double, 35> snapshot(
++      uint64_t generation, double reference, double system_time, double steady_time,
++      const State &state, double upper, bool pending, bool rpc, bool paused,
++      bool stopped, int error, bool source_ok) const {
++    const auto stamp = source(state);
++    // Calendar has no assumed host epoch/timezone. Consumer requires a measured mapping.
++    const bool valid = source_ok && stamp[0] > 0 && std::isfinite(reference) &&
++      std::isfinite(system_time) && std::isfinite(steady_time) &&
++      generation <= MAX_GENERATION && state.gripper_position <= 100 &&
++      state.gripper_fault == 0 && !(stamp < completion_source);
++    const bool resumed = !pending && !rpc && !paused && !stopped && error == 0;
++    return {1., double(incarnation[0]), double(incarnation[1]), double(incarnation[2]), double(incarnation[3]),
++      double(generation), double(active), double(completed), reference,
++      system_time, steady_time, command_started,
++      stamp[0], stamp[1], stamp[2], stamp[3], stamp[4], stamp[5], stamp[6], double(state.frame_cnt),
++      upper * state.gripper_position / 100., double(reason), pending ? 1. : 0., rpc ? 1. : 0.,
++      resumed ? 1. : 0., stopped ? 1. : 0., double(error), valid ? 1. : 0., completion_source[0], completion_source[1],
++      completion_source[2], completion_source[3], completion_source[4], completion_source[5], completion_source[6]};
++  }
++};
++}
++#endif

@@ -9,20 +9,30 @@
 - [x] Verify the actual loaded model's trainable components, precision and finite optimizer update with scoped parameter-change evidence; use those observations to revise the start set.
 - [x] The native evaluator reports finite per-episode and frame-weighted loss with observed/available sample coverage, scoped timing and CUDA allocator metrics; bounded evaluation stops fetching at its limit.
 - [x] Support explicitly delegated local training without repeated human batch confirmation, preserving truthful authority lineage and native admission checks.
+- [x] Consume a prepared delegated request through one native admission/launch boundary with same-input recovery and fail-closed interruption handling; report existing evidence without duplicate training.
+- [x] Provide a supported request-driven entrypoint that derives the bounded native recipe and consumes a produced checkpoint through the existing validator and offline evaluator, with injected end-to-end proof and truthful missing-authority behavior.
 - [x] With exact-batch human approval or valid standing local delegation and available GPU ownership, produce a genuine checkpoint and independent reload evidence while preserving the original dataset bytes.
 - [x] Record measured wall time, scoped GPU memory, sample throughput and storage; distinguish a pipeline probe from a learned result even when its schedule reaches the decay floor.
 - [x] Compare learned checkpoints on a fixed held-out validation scope and disclose coverage, stochastic evaluation settings and lack of independent physical/generalization evidence.
 
 ## 3. Data utility and continued learning
 
-- [ ] Qualify larger-batch native throughput from an immutable learned checkpoint using an explicitly labelled warm-start fork; retain reset semantics and parent/child reload lineage without claiming exact continuation or superior learning from extra exposure.
+- [ ] Support genuine new-output native continuation with immutable parent state, explicit schedule-prefix meaning and cumulative sample position verified through a second resume; preserve legacy resume and explicit warm-start reset behavior.
+
+- [x] Qualify larger-batch native throughput from an immutable learned checkpoint using an explicitly labelled warm-start fork; retain reset semantics and parent/child reload lineage without claiming exact continuation or superior learning from extra exposure.
 
 - [x] Relate successful-data condition coverage and held-out error to competing coverage and optimization hypotheses, with falsifiers and evidence limits.
 - [x] Provide Rollout a deterministic frozen held-out observation cohort and native input/identity contract for offline solver comparisons, preserving admission and physical gates.
 - [x] Compare learned checkpoints before attributing improvement to data selection or acquisition; revise the recipe or coverage hypothesis from matched evidence.
 - [x] Measure paired saved-postprocessor action errors on the frozen observation cohort, separating arm and gripper units and preserving native temporal alignment/padding; qualify any resulting data-utility interpretation.
-- [ ] Expose admitted sampled physical-action evaluation through the existing public consumer and establish native inference equivalence, retaining default flow-loss reports and explicit sparse coverage.
+- [x] Expose admitted sampled physical-action evaluation through the existing public consumer and establish native inference equivalence, retaining default flow-loss reports and explicit sparse coverage.
 - [x] Distinguish stochastic action-sampling sensitivity from persistent per-joint/chunk errors before choosing further training or data-utility comparisons.
 - [ ] Establish reproducible evidence for the next acquisition or selection decision, separating sampled policy errors from recorded condition coverage.
 
 Runtime checkpoints, attempts, blockers and numerical measurements belong in Orca and their native evidence artifacts, not this outcome checklist.
+
+## Non-authorizing cohort preparation
+
+- [x] Prepare and revalidate frozen source evaluation identities through the public native CLI without issuing inventory or training authority; resolve proven mappings and reject missing/overlapping identities.
+- [x] Enforce explicit source-cohort partitions at native admitted launch, dataset construction and saved checkpoint/evaluation revalidation; retain fraction-only v3 and strict resume contracts.
+- [ ] Curator consumes the planning reference and supplies its validated publication; qualify actual growing-data execution only after that owner integration and real authorization.

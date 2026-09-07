@@ -11,6 +11,7 @@ from tests.data_factory.curator.support import make_profile_fixture
 from tests.data_factory.curator.workflow import test_derived_training as source_fixtures
 from tests.data_factory.test_training_approval import snapshot
 from tools.data_factory import training_approval as approval, training_entrypoint as training
+from tools.data_factory.operator.workflow.training_review import TrainingReviewApplication
 from tools.data_factory.curator.core.errors import CuratorError
 from tools.data_factory.curator.dataset.mapping import verify_mapped_dataset
 from tools.data_factory.curator.dataset.verify import run_existing_validator
@@ -22,7 +23,7 @@ from tools.data_factory.curator.workflow import mapping as mapping_workflow
 from tools.data_factory.curator.workflow.selection import export_training_request
 from tools.data_factory.curator.workflow.state import load_events
 from tools.data_factory.training_split import compile_launch_split, source_episode_identity
-from tools.fr5_training_profile import read_metadata, launch_feature_contract
+from tools.fr5_training_profile import read_metadata, launch_feature_contract, build_profile, policy_metadata
 from tools.fr5_data_factory import canonical_digest, load_json_strict, ContractError
 
 
@@ -139,6 +140,90 @@ class MappedTrainingTest(unittest.TestCase):
                     verify_mapped_dataset(root/'candidate/dataset', 'local/mapped-test')
                 data_path.write_bytes(parquet_bytes)
             self.assertEqual(list(review_output.iterdir()), [])
+
+    def test_native_web_authorization_and_launch_preserve_original_eval(self):
+        requests, sources, root, options = self.case()
+        before = [snapshot(p) for p in sources]
+        result = publish_mapped_training_request(requests, root/'candidate', **options)
+        request = load_json_strict(Path(result['request_path']))
+        output = root/'authorized'
+        output.mkdir()
+        app = TrainingReviewApplication(request=request, output=output, approved_by='synthetic-human')
+        self.addCleanup(app.close)
+
+        def consume(op, payload, suffix):
+            return app.bridge_core.consume(source_fixtures.intent(app.bridge_core.snapshot(), op, payload, suffix))
+
+        with mock.patch.object(training, 'run_native_training', side_effect=AssertionError('No trainer')):
+            consume('prepare_training_review', {}, 'prepare')
+            projected = app.bridge_core.snapshot()['projection']
+            self.assertEqual(projected['status'], 'PREVIEW_NOT_APPROVED', projected)
+            preview = projected['preview']
+            self.assertIsNone(approval._MAPPED_READ.get())
+            self.assertEqual(list(output.iterdir()), [])
+            self.assertFalse(preview['starts_training'])
+            self.assertEqual([e['episode_index'] for e in preview['episodes']], [0,2,3,5,7])
+            for episode in preview['episodes']:
+                self.assertEqual(episode['semantic_status'], 'NOT_ASSERTED')
+                self.assertEqual(episode['parent_semantic_status'], 'PASS')
+                self.assertEqual(episode['mapping'], request['mapping'])
+                self.assertNotIn('curator_review', episode)
+            consume('approve_training_batch', {'batch_digest':preview['batch_digest']}, 'approve')
+            projected = app.bridge_core.snapshot()['projection']
+            self.assertEqual(projected['status'], 'APPROVED', projected)
+            self.assertIsNone(approval._MAPPED_READ.get())
+            inventory_path = output/'training_approved.json'
+            inventory = approval.validate_current_training_inventory(
+                inventory_path, dataset_root=request['dataset_root'], repo_id=request['repo_id'],
+                selected_episodes=[0,2,3,5,7])
+            self.assertTrue(all(e['human_semantic_evidence']['status'] == 'PARENT_PASS' for e in inventory['episodes']))
+            child = Path(request['dataset_root'])
+            argv = ['synthetic-lerobot-train', *build_profile('act', policy_metadata(read_metadata(child))),
+                    f'--dataset.root={child}', f'--dataset.repo_id={request["repo_id"]}',
+                    '--dataset.episodes=[0,2,3,5,7]', '--dataset.eval_split=0.4',
+                    f'--output_dir={root / "never-launched"}', '--batch_size=1', '--steps=2',
+                    '--eval_steps=1', '--save_freq=1']
+            kwargs = dict(dataset=child, repo_id=request['repo_id'], inventory=inventory_path,
+                          profile='act', collection_profile='fr5-up-wrist-rgb-30hz-v2', argv=argv)
+            with mock.patch.object(mapping_workflow, 'verify_mapped_dataset', wraps=mapping_workflow.verify_mapped_dataset) as proof:
+                split, receipt = training.prepare_launch(**kwargs)
+                self.assertEqual(proof.call_count, 2)
+            self.assertIsNone(approval._MAPPED_READ.get())
+            self.assertEqual(split['train_episodes'], [0,2,3])
+            self.assertEqual(split['eval_episodes'], [5,7])
+            self.assertEqual(receipt['observation_view']['representation'], 'raw')
+            self.assertEqual(receipt['normalization']['episodes'], [0,2,3])
+            changed = [arg.replace('--dataset.eval_split=0.4', '--dataset.eval_split=0.2') for arg in argv]
+            with self.assertRaisesRegex(ContractError, 'TRAINING_MAPPING_EVALUATION_COHORT'):
+                training.prepare_launch(**{**kwargs, 'argv':changed})
+            changed = [arg.replace('--dataset.episodes=[0,2,3,5,7]', '--dataset.episodes=[0,2,3,5]') for arg in argv]
+            with self.assertRaisesRegex(ContractError, 'TRAINING_SELECTED_EPISODE_SET'):
+                training.prepare_launch(**{**kwargs, 'argv':changed})
+            feature = launch_feature_contract('act', kwargs['collection_profile'], 'pick_place', read_metadata(child))
+            feature['collection_profile_digest'] = canonical_digest('different-profile')
+            with mock.patch.object(training, 'launch_feature_contract', return_value=feature):
+                with self.assertRaisesRegex(ContractError, 'TRAINING_COLLECTION_PROFILE_LEDGER_BINDING'):
+                    training.prepare_launch(**kwargs)
+            # Reuse is confined to the read operation: even a late source change
+            # after receipt compilation must fail before returning launch data.
+            original = requests[0].read_bytes()
+            mode = requests[0].stat().st_mode & 0o777
+            compile_receipt = training.compile_launch_receipt
+            requests[0].chmod(0o600)
+            def late_change(*args):
+                value = compile_receipt(*args)
+                requests[0].write_bytes(original + b'\n')
+                return value
+            try:
+                with mock.patch.object(training, 'compile_launch_receipt', side_effect=late_change):
+                    with self.assertRaisesRegex(ContractError, 'MAPPING_REQUEST_CHANGED'):
+                        training.prepare_launch(**kwargs)
+            finally:
+                requests[0].write_bytes(original)
+                requests[0].chmod(mode)
+            self.assertIsNone(approval._MAPPED_READ.get())
+        self.assertFalse((root/'never-launched').exists())
+        self.assertEqual([snapshot(p) for p in sources], before)
 
     def test_mismatch_and_copy_budget_publish_nothing(self):
         requests, sources, root, options = self.case()

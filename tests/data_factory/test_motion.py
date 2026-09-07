@@ -129,7 +129,7 @@ class Test(unittest.TestCase):
   class Store:
    def __init__(self,parent="parent-run"):self.parent=parent;self.consumed=[];self.blocked=[]
    def read(self):return {"robot_system_id":"fr5-lab-a","cell_ready":False,"run_id":self.parent,"plan_digest":parent_digest}
-   def consume_next_source(self,**value):self.consumed.append(value);return {"scene_state_digest":"sha256:"+"9"*64,"scene_state":{"revision":2}}
+   def consume_next_source(self,**value):self.consumed.append(value);return {"scene_state_digest":"sha256:"+"9"*64,"scene_state":{"revision":2,"slot_allocations":{source["slot_id"]:{"state":"CONSUMED_PENDING_REVIEW","allowed_run_id":value["run_id"]}}}}
    @contextmanager
    def locked_snapshot(self,digest):yield {"scene_state_digest":digest,"scene_state":{"revision":2,"objects":{"cube-1":{"object_profile_id":"wood-cube-25mm-r001","state":"ON_SURFACE"}}}}
    def mark_blocked(self,*value):self.blocked.append(value)

@@ -1,0 +1,1442 @@
+<!doctype html><html lang="ko"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>수집 조건 생성 — 데이터 엔진 근거</title><link rel="stylesheet" href="../site.css"></head><body><main class="source-page"><a href="../collection.html#planning">← 설명으로 돌아가기</a><h1>수집 조건 생성</h1><p class="note">설명에 사용한 구현·측정 자료의 발췌이다. SHA-256은 발췌 전 원본 파일을 식별한다. 실행 PC의 절대 경로와 계정 정보는 포함하지 않으며, 측정값과 해석 조건을 함께 제시한다.</p><section id="catalog"><h2>catalog.py</h2><p class="locator">tools/data_factory/operator/catalog.py<br>sha256:48201709e00314f61df1aadedaede1276057b42e3b771a583292691bb7bb332c</p><p class="note">해당 기능의 함수 발췌. 줄 번호와 digest는 원본 기준이다.</p><pre># tools/data_factory/operator/catalog.py:2445 · project_assisted_poses
+def project_assisted_poses(
+    catalog: Mapping[str, Any], selection: Mapping[str, Any],
+    source_pose: Mapping[str, Any], requested_count: int, *, repeat: int = 1,
+    normalized_seed: int = 0, yaw_sampling_seed: int | None = None,
+    state_space_design_profile: Mapping[str, Any] | None = None,
+) -&gt; list[dict[str, Any]]:
+    &quot;&quot;&quot;Stratify continuous poses around the registered A4 grid.&quot;&quot;&quot;
+    if type(requested_count) is not int or not 1 &lt;= requested_count &lt;= 100:
+        raise ContractError(&quot;OPERATOR_ASSISTED_COUNT&quot;)
+    if type(repeat) is not int or not 1 &lt;= repeat &lt;= 100:
+        raise ContractError(&quot;OPERATOR_ASSISTED_REPEAT&quot;)
+    if (
+        type(normalized_seed) is not int
+        or not 0 &lt;= normalized_seed &lt;= MAX_DERIVED_SEED
+    ):
+        raise ContractError(&quot;OPERATOR_ASSISTED_SEED&quot;)
+    if yaw_sampling_seed is not None and (
+        isinstance(yaw_sampling_seed, bool)
+        or not isinstance(yaw_sampling_seed, int)
+        or not 0 &lt;= yaw_sampling_seed &lt;= MAX_DERIVED_SEED
+    ):
+        raise ContractError(&quot;OPERATOR_YAW_SAMPLING_SEED&quot;)
+    selected = validate_operator_selection(catalog, selection)
+    try:
+        domain = _operator_pose_domain(catalog, selected)
+    except ContractError as exc:
+        raise ContractError(&quot;OPERATOR_ASSISTED_DOMAIN&quot;) from exc
+    region = domain[&quot;coverage_region&quot;]
+    preset_ids = domain.get(&quot;preset_cell_ids&quot;)
+    if (
+        not isinstance(preset_ids, list)
+        or any(not isinstance(item, str) or not item for item in preset_ids)
+        or preset_ids != sorted(set(preset_ids))
+    ):
+        raise ContractError(&quot;OPERATOR_ASSISTED_DOMAIN&quot;)
+    cell_options = {
+        item.get(&quot;id&quot;): item for item in catalog.get(&quot;axes&quot;, {}).get(&quot;cell&quot;, [])
+        if isinstance(item, Mapping) and isinstance(item.get(&quot;id&quot;), str)
+    }
+    spatial_anchors: dict[str, tuple[float, float]] = {}
+    yaw_anchors = set()
+    for identifier in preset_ids:
+        option = cell_options.get(identifier)
+        metadata = option.get(&quot;metadata&quot;) if isinstance(option, Mapping) else None
+        point_id = metadata.get(&quot;point_id&quot;) if isinstance(metadata, Mapping) else None
+        if (
+            not isinstance(point_id, str) or not point_id
+            or metadata.get(&quot;place_id&quot;) != selected[&quot;workspace_id&quot;]
+        ):
+            raise ContractError(&quot;OPERATOR_ASSISTED_DOMAIN&quot;)
+        try:
+            yaw = normalize_yaw_deg(metadata[&quot;yaw_deg&quot;])
+            x_mm, y_mm = float(metadata[&quot;x_mm&quot;]), float(metadata[&quot;y_mm&quot;])
+            if not point_in_convex_polygon(
+                rotate_xy((x_mm, y_mm), yaw),
+                region[&quot;polygon_local_xy_mm&quot;],
+            ):
+                raise ValueError(&quot;anchor&quot;)
+        except (KeyError, TypeError, ValueError, ContractError) as exc:
+            raise ContractError(&quot;OPERATOR_ASSISTED_DOMAIN&quot;) from exc
+        xy = (float(x_mm), float(y_mm))
+        if point_id in spatial_anchors and spatial_anchors[point_id] != xy:
+            raise ContractError(&quot;OPERATOR_ASSISTED_DOMAIN&quot;)
+        spatial_anchors[point_id] = xy
+        yaw_anchors.add(float(yaw))
+    columns, rows = region[&quot;strata&quot;][&quot;columns&quot;], region[&quot;strata&quot;][&quot;rows&quot;]
+    base_design_profile = selected_state_space_design_profile(catalog, selected)
+    design_profile = base_design_profile
+    if state_space_design_profile is not None:
+        if base_design_profile is None:
+            raise ContractError(&quot;OPERATOR_ASSISTED_DOMAIN&quot;)
+        try:
+            design_profile = validate_configured_state_space_design_profile(
+                state_space_design_profile, source_profile=base_design_profile,
+            )
+        except ContractError as exc:
+            raise ContractError(&quot;OPERATOR_ASSISTED_DOMAIN&quot;) from exc
+    if (
+        not yaw_anchors
+        or design_profile is None and len(spatial_anchors) != columns * rows
+    ):
+        raise ContractError(&quot;OPERATOR_ASSISTED_DOMAIN&quot;)
+
+    source = _canonical_operator_pose(selected, domain, source_pose)
+    if yaw_sampling_seed is not None:
+        selections = [selected] * requested_count
+        contexts = _yaw_selection_contexts(
+            catalog, selections, design_profile,
+        )
+        if contexts[0][&quot;profile&quot;] is not None:
+            bindings = _yaw_block_bindings(
+                catalog, contexts, yaw_sampling_seed, repeat=repeat,
+                anchor_pose=source,
+            )
+            if any(binding is None for binding in bindings):
+                raise ContractError(&quot;OPERATOR_YAW_PROFILE_CHAIN&quot;)
+            return _project_endpoint_yaw_sequence(
+                selected, domain, source,
+                bindings, yaw_profile=contexts[0][&quot;profile&quot;],
+                design_profile=contexts[0][&quot;design&quot;],
+                normalized_seed=normalized_seed, repeat=repeat,
+            )
+    result = [source]
+    seen = {tuple(source[field] for field in POSE_ORDER)}
+    unique_count = math.ceil(requested_count / repeat)
+    if unique_count == 1:
+        return [copy.deepcopy(source) for _ in range(requested_count)]
+
+    yaw_values = sorted(yaw_anchors)
+
+    def yaw_distance(left: float, right: float) -&gt; float:
+        delta = abs(left - right) % 360.0
+        return min(delta, 360.0 - delta) / 180.0
+
+    yaw_variants = sorted(
+        (
+            value for value in yaw_values
+            if value != float(source[&quot;yaw_deg&quot;])
+        ),
+        key=lambda value: (
+            yaw_distance(value, float(source[&quot;yaw_deg&quot;])), value,
+        ),
+    ) or [float(source[&quot;yaw_deg&quot;])]
+
+    current_sheet_xy = rotate_xy(
+        (float(source[&quot;x_mm&quot;]), float(source[&quot;y_mm&quot;])),
+        float(source[&quot;yaw_deg&quot;]),
+    )
+    pass_index = 0
+    while len(result) &lt; unique_count:
+        yaw_anchor = (
+            float(source[&quot;yaw_deg&quot;])
+            if pass_index == 0
+            else yaw_variants[(pass_index - 1) % len(yaw_variants)]
+        )
+        try:
+            safe_polygon = safe_convex_polygon(
+                polygon=region[&quot;polygon_local_xy_mm&quot;],
+                object_size_xy_mm=region[&quot;object_size_xy_mm&quot;],
+                uncertainty_mm=region[&quot;uncertainty_mm&quot;],
+                yaw_deg=yaw_anchor,
+            )
+            count = min(
+                unique_count - len(result),
+                columns * rows - int(pass_index == 0),
+            )
+            samples = stratified_convex_polygon_samples(
+                polygon=safe_polygon,
+                columns=columns, rows=rows, start_xy=current_sheet_xy,
+                count=count, seed=normalized_seed, pass_index=pass_index,
+                skip_start_cell=pass_index == 0,
+            )
+        except ValueError as exc:
+            raise ContractError(&quot;OPERATOR_ASSISTED_DOMAIN&quot;) from exc
+        for sheet_x, sheet_y, _row, _column in samples:
+            local_x, local_y = rotate_xy((sheet_x, sheet_y), -yaw_anchor)
+            proposed = {
+                &quot;place_id&quot;: selected[&quot;workspace_id&quot;],
+                &quot;x_mm&quot;: local_x, &quot;y_mm&quot;: local_y,
+                &quot;yaw_deg&quot;: yaw_anchor,
+            }
+            checked = _canonical_operator_pose(selected, domain, proposed)
+            checked_key = tuple(checked[field] for field in POSE_ORDER)
+            if checked_key in seen:
+                raise ContractError(&quot;OPERATOR_ASSISTED_STRATUM_EXHAUSTION&quot;)
+            seen.add(checked_key)
+            result.append(checked)
+            current_sheet_xy = (sheet_x, sheet_y)
+        pass_index += 1
+    return [
+        copy.deepcopy(result[index % unique_count])
+        for index in range(requested_count)
+    ]
+
+# tools/data_factory/operator/catalog.py:2620 · project_direct_poses
+def project_direct_poses(
+    catalog: Mapping[str, Any], selection: Mapping[str, Any],
+    source_pose: Mapping[str, Any], direct_poses: Sequence[Mapping[str, Any]],
+    requested_count: int,
+) -&gt; list[dict[str, Any]]:
+    &quot;&quot;&quot;Repeat one ordered, unique condition list to an exact finite count.&quot;&quot;&quot;
+    if type(requested_count) is not int or not 1 &lt;= requested_count &lt;= 100:
+        raise ContractError(&quot;OPERATOR_DIRECT_COUNT&quot;)
+    if not isinstance(direct_poses, (list, tuple)):
+        raise ContractError(&quot;OPERATOR_DIRECT_POSES&quot;)
+    source = validate_operator_pose(catalog, selection, source_pose)
+    conditions = [source]
+    for value in direct_poses:
+        checked = validate_operator_pose(catalog, selection, value)
+        if checked != source and checked not in conditions:
+            conditions.append(checked)
+    if len(conditions) &gt; requested_count:
+        raise ContractError(&quot;OPERATOR_DIRECT_COUNT&quot;)
+    return [
+        copy.deepcopy(conditions[index % len(conditions)])
+        for index in range(requested_count)
+    ]</pre></section><section id="sampling-principle"><h2>영역 계산과 층화 표본화</h2><h3>좌표 생성 도해의 계산 조건</h3><p>가상 직사각형 작업영역 240 × 180 mm, 물체 100 × 30 mm, 보정 여유 5 mm를 사용했다. 고정 main 3d98547의 <code>safe_convex_polygon</code>과 <code>polygon_bounds</code>를 직접 실행한 별도 기하 계산 예시이다. 현재 main 0149201의 해당 파일도 같은 SHA-256이다. 아래 표는 각 회전각에서 물체 중심을 배치할 수 있는 범위를 나타낸다. 0°·45°·90° 각각에 대해 허용 영역의 모든 꼭짓점에 물체를 배치하고, 회전한 물체의 네 모서리가 바깥 작업영역에서 최소 5 mm 안쪽에 있는지 직접 계산했다.</p><p class="locator">tools/data_factory/workspace_geometry.py<br>sha256:3c57f4af3a9ae0a973ca15a38b9933d36ec082c3f72112a10d67cb7206f922f7</p><table><caption>100 × 30 mm 물체의 기하 예시 · mm · 소수 첫째 자리 반올림</caption><thead><tr><th>회전각</th><th>X</th><th>Y</th></tr></thead><tbody><tr><td>0°</td><td>55.0–185.0</td><td>20.0–160.0</td></tr><tr><td>45°</td><td>51.0–189.0</td><td>51.0–129.0</td></tr><tr><td>90°</td><td>20.0–220.0</td><td>55.0–125.0</td></tr></tbody></table><h3>각도 구간의 순회 배정 · 465–490행</h3><p class="locator">tools/data_factory/state_space.py<br>sha256:80c491626f25bf6645d426cf2c4080c519ff21a5771f95f957fa8de4b58b454a</p><p class="note">원본 필드 또는 명시한 구현 구간의 발췌.</p><pre>def rotating_balanced_yaw_ranks(
+    spatial_count: int, yaw_strata_count: int, *, sweep_index: int,
+    anchor_cell_index: int, anchor_yaw_rank: int,
+) -&gt; list[int]:
+    &quot;&quot;&quot;Assign every spatial cell to one yaw tier and rotate tiers per sweep.&quot;&quot;&quot;
+    if (
+        type(spatial_count) is not int or spatial_count &lt; 1
+        or type(yaw_strata_count) is not int
+        or not 1 &lt;= yaw_strata_count &lt;= spatial_count
+        or type(sweep_index) is not int or sweep_index &lt; 0
+        or type(anchor_cell_index) is not int
+        or not 0 &lt;= anchor_cell_index &lt; spatial_count
+        or type(anchor_yaw_rank) is not int
+        or not 0 &lt;= anchor_yaw_rank &lt; yaw_strata_count
+    ):
+        raise ContractError(&quot;STATE_SPACE_DESIGN_ASSIGNMENT&quot;)
+    return [
+        (
+            anchor_yaw_rank + cell_index - anchor_cell_index + sweep_index
+        ) % yaw_strata_count
+        for cell_index in range(spatial_count)
+    ]
+
+
+def yaw_cdf_quantile(profile: Mapping[str, Any], yaw_deg: int | float) -&gt; float:
+    &quot;&quot;&quot;Map one canonical yaw to its declared distribution CDF.&quot;&quot;&quot;</pre><h3>물체 footprint에 따른 경계 축소 · 116–176행</h3><p class="locator">tools/data_factory/workspace_geometry.py<br>sha256:3c57f4af3a9ae0a973ca15a38b9933d36ec082c3f72112a10d67cb7206f922f7</p><p class="note">원본 필드 또는 명시한 구현 구간의 발췌.</p><pre>def safe_convex_polygon_for_yaws(
+    *, polygon: Sequence[Sequence[float]],
+    object_size_xy_mm: Sequence[float], uncertainty_mm: float,
+    yaw_degs: Sequence[float],
+) -&gt; list[tuple[float, float]]:
+    &quot;&quot;&quot;Erode a convex zone by the largest support over several object yaws.&quot;&quot;&quot;
+    checked = _convex_polygon(polygon)
+    object_x, object_y = _pair(
+        object_size_xy_mm, &quot;object_size_xy_mm&quot;,
+    )
+    uncertainty = _number(uncertainty_mm, &quot;uncertainty_mm&quot;)
+    if (
+        min(object_x, object_y, uncertainty) &lt; 0
+        or isinstance(yaw_degs, (str, bytes)) or not yaw_degs
+    ):
+        raise ValueError(&quot;safe_polygon&quot;)
+    axes = []
+    for yaw_deg in yaw_degs:
+        angle = math.radians(_number(yaw_deg, &quot;yaw_deg&quot;))
+        axes.append((
+            (math.cos(angle), math.sin(angle)),
+            (-math.sin(angle), math.cos(angle)),
+        ))
+    shifted = []
+    for left, right in zip(checked, checked[1:] + checked[:1]):
+        dx, dy = right[0] - left[0], right[1] - left[1]
+        length = math.hypot(dx, dy)
+        inward = (-dy / length, dx / length)
+        support = max(
+            object_x / 2.0 * abs(
+                inward[0] * axis_x[0] + inward[1] * axis_x[1]
+            )
+            + object_y / 2.0 * abs(
+                inward[0] * axis_y[0] + inward[1] * axis_y[1]
+            )
+            for axis_x, axis_y in axes
+        )
+        support += uncertainty
+        shifted.append((
+            (left[0] + inward[0] * support, left[1] + inward[1] * support),
+            (dx / length, dy / length),
+        ))
+
+    def cross(left, right):
+        return left[0] * right[1] - left[1] * right[0]
+
+    result = []
+    for index, (point, direction) in enumerate(shifted):
+        previous_point, previous_direction = shifted[index - 1]
+        denominator = cross(previous_direction, direction)
+        if abs(denominator) &lt;= 1e-12:
+            raise ValueError(&quot;safe_polygon&quot;)
+        delta = (
+            point[0] - previous_point[0], point[1] - previous_point[1],
+        )
+        distance = cross(delta, direction) / denominator
+        result.append((
+            previous_point[0] + distance * previous_direction[0],
+            previous_point[1] + distance * previous_direction[1],
+        ))
+    return _convex_polygon(result, &quot;safe_polygon&quot;)</pre><h3>다각형 안의 면적 균등 표본화 · 346–405행</h3><p class="locator">tools/data_factory/workspace_geometry.py<br>sha256:3c57f4af3a9ae0a973ca15a38b9933d36ec082c3f72112a10d67cb7206f922f7</p><p class="note">원본 필드 또는 명시한 구현 구간의 발췌.</p><pre>def _polygon_triangles(
+    polygon: Sequence[tuple[float, float]],
+) -&gt; list[tuple[tuple[float, float], tuple[float, float], tuple[float, float], float]]:
+    &quot;&quot;&quot;Triangulate one convex polygon and retain each triangle&#x27;s area.&quot;&quot;&quot;
+    origin = polygon[0]
+    result = []
+    for left, right in zip(polygon[1:-1], polygon[2:]):
+        area = abs(
+            (left[0] - origin[0]) * (right[1] - origin[1])
+            - (left[1] - origin[1]) * (right[0] - origin[0])
+        ) / 2.0
+        if area &gt; 1e-12:
+            result.append((origin, left, right, area))
+    if not result:
+        raise ValueError(&quot;polygon&quot;)
+    return result
+
+
+def _area_centroid(
+    triangles: Sequence[
+        tuple[tuple[float, float], tuple[float, float], tuple[float, float], float]
+    ],
+) -&gt; tuple[float, float]:
+    total = sum(triangle[3] for triangle in triangles)
+    return tuple(
+        sum(
+            (triangle[0][axis] + triangle[1][axis] + triangle[2][axis])
+            / 3.0 * triangle[3]
+            for triangle in triangles
+        ) / total
+        for axis in range(2)
+    )
+
+
+def _uniform_polygon_point(
+    triangles: Sequence[
+        tuple[tuple[float, float], tuple[float, float], tuple[float, float], float]
+    ],
+    *, seed: int, pass_index: int, row: int, column: int,
+) -&gt; tuple[float, float]:
+    &quot;&quot;&quot;Draw one deterministic area-uniform point from a triangulated polygon.&quot;&quot;&quot;
+    total = sum(triangle[3] for triangle in triangles)
+    threshold = _fraction(
+        seed, pass_index, row, column, &quot;triangle&quot;,
+    ) * total
+    cumulative = 0.0
+    selected = triangles[-1]
+    for triangle in triangles:
+        cumulative += triangle[3]
+        if threshold &lt; cumulative:
+            selected = triangle
+            break
+    origin, left, right, _area = selected
+    radial = math.sqrt(_fraction(seed, pass_index, row, column, &quot;radial&quot;))
+    tangent = _fraction(seed, pass_index, row, column, &quot;tangent&quot;)
+    return tuple(
+        (1.0 - radial) * origin[axis]
+        + radial * (1.0 - tangent) * left[axis]
+        + radial * tangent * right[axis]
+        for axis in range(2)</pre></section><section id="grasp-orientation"><h2>물체 회전과 파지 자세</h2><p>물체 yaw로 작업 좌표계의 X·Y축을 회전시키고, 파지 프로필의 datum-to-TCP 변환을 합성한다. TWO_STAGE_ALIGN_V2의 정렬 목표는 최종 파지 목표와 같은 회전 행렬을 사용한다. 그림의 그리퍼 표시는 이 회전 관계를 설명하며 실제 도구의 치수·오프셋은 파지 프로필이 소유한다.</p><h3>tools/fr5_data_factory.py</h3><p class="locator">main 3d98547<br>sha256:1a89d22d1ce31a8cef58f6609bcc3c077c806dccc10ff21bae51d1ab53586e41</p><pre>768: def resolve_place_pose(center_base_m, x_axis_base, y_axis_base, normal_base, yaw_deg, x_mm, y_mm):
+769:     &quot;&quot;&quot;Resolve a local place coordinate into base_link without authorizing motion.&quot;&quot;&quot;
+770:     center = _vec(center_base_m, &quot;PLACE_CALIBRATION_VECTOR&quot;)
+771:     x_axis, y_axis, normal = (_unit(value, &quot;PLACE_CALIBRATION_AXIS&quot;) for value in (x_axis_base, y_axis_base, normal_base))
+772:     if abs(_dot(x_axis, y_axis)) &gt; 1e-9 or abs(_dot(x_axis, normal)) &gt; 1e-9 or abs(_dot(y_axis, normal)) &gt; 1e-9 or _norm(_sub(_cross(x_axis, y_axis), normal)) &gt; 1e-9:
+773:         raise ContractError(&quot;PLACE_CALIBRATION_AXIS&quot;)
+774:     angle = math.radians(_input_number(yaw_deg, &quot;PLACE_COORDINATE&quot;))
+775:     x_col = _add(_mul(x_axis, math.cos(angle)), _mul(y_axis, math.sin(angle)))
+776:     y_col = _add(_mul(x_axis, -math.sin(angle)), _mul(y_axis, math.cos(angle)))
+777:     position = _add(center, _add(_mul(x_col, _input_number(x_mm, &quot;PLACE_COORDINATE&quot;) / 1000), _mul(y_col, _input_number(y_mm, &quot;PLACE_COORDINATE&quot;) / 1000)))
+778:     return {&quot;position_base_m&quot;: position, &quot;rotation_base_columns&quot;: [x_col, y_col, normal]}
+779: </pre><pre>1350:         )
+1351:     datum = {&quot;translation_m&quot;: pose[&quot;position_base_m&quot;], &quot;rotation_columns&quot;: pose[&quot;rotation_base_columns&quot;]}
+1352:     release_datum = {&quot;translation_m&quot;: release_resolved[&quot;position_base_m&quot;], &quot;rotation_columns&quot;: release_resolved[&quot;rotation_base_columns&quot;]}
+1353:     tool_inverse = inverse_rigid_transform(q[&quot;transforms&quot;][&quot;tool_to_tcp&quot;])
+1354:     release_clearance_m = (
+1355:         validated[&quot;grasp_profile&quot;][&quot;grasp_geometry&quot;][
+1356:             &quot;release_clearance_mm&quot;
+1357:         ] / 1000.0
+1358:         if validated[&quot;grasp_profile&quot;].get(&quot;schema_version&quot;)
+1359:         == &quot;data_factory.grasp_profile.v3&quot;
+1360:         else 0.0
+1361:     )
+1362:     def target(frame, offset):
+1363:         tcp = compose_rigid_transform(frame, q[&quot;transforms&quot;][&quot;datum_to_tcp_grasp&quot;])
+1364:         shifted = {&quot;translation_m&quot;: _add(tcp[&quot;translation_m&quot;], _mul(frame[&quot;rotation_columns&quot;][2], offset)), &quot;rotation_columns&quot;: tcp[&quot;rotation_columns&quot;]}
+1365:         return {&quot;base_tcp&quot;: shifted, &quot;base_tool&quot;: compose_rigid_transform(shifted, tool_inverse)}
+1366:     offsets = {
+1367:         &quot;PREGRASP_PTP&quot;: (datum, q[&quot;offsets&quot;][&quot;pregrasp&quot;]),
+1368:         &quot;APPROACH_STOP_LIN&quot;: (datum, q[&quot;offsets&quot;][&quot;approach_stop&quot;]),
+1369:         &quot;FINAL_APPROACH_LIN&quot;: (datum, 0),
+1370:         &quot;LIFT_LIN&quot;: (datum, q[&quot;offsets&quot;][&quot;lift&quot;]),</pre><h3>tools/data_factory/motion/trajectory_variants.py</h3><p class="locator">main 3d98547<br>sha256:04aa3f6e98fb3597550356f557f7a2d11557dfd55b81d0208ec8fc6fc283a92a</p><pre>504:     pregrasp: Mapping[str, Any], endpoint: Mapping[str, Any], *,
+505:     clearance_m: float, offset_x_m: float, offset_y_m: float,
+506:     target_yaw_deg: float,
+507: ) -&gt; tuple[dict[str, Any], dict[str, Any]]:
+508:     axis = _unit_axis(pregrasp[&quot;base_tcp&quot;], endpoint[&quot;base_tcp&quot;])
+509:     final_tcp = endpoint[&quot;base_tcp&quot;]
+510:     canonical_rotation = [
+511:         _rotate(list(column), axis, math.radians(-target_yaw_deg))
+512:         for column in final_tcp[&quot;rotation_columns&quot;]
+513:     ]
+514:     align_translation = [
+515:         float(value) + axis[index] * clearance_m
+516:         for index, value in enumerate(final_tcp[&quot;translation_m&quot;])
+517:     ]
+518:     object_x, object_y = _planar_axes(
+519:         axis, final_tcp[&quot;rotation_columns&quot;],
+520:     )
+521:     view_translation = [
+522:         align_translation[index]
+523:         + object_x[index] * offset_x_m
+524:         + object_y[index] * offset_y_m
+525:         for index in range(3)
+526:     ]
+527:     view_tcp = {
+528:         &quot;translation_m&quot;: view_translation,
+529:         &quot;rotation_columns&quot;: canonical_rotation,
+530:     }
+531:     align_tcp = {</pre><h3>tests/data_factory/test_trajectory_variants.py</h3><p class="locator">main 3d98547<br>sha256:160b38f6417a1366d6ee1fa8ed3cd3b152a1bb81f275bfb8e2d33d84327cc8ea</p><pre>368:             view[&quot;target&quot;][&quot;base_tcp&quot;][&quot;translation_m&quot;][index]
+369:             - align[&quot;target&quot;][&quot;base_tcp&quot;][&quot;translation_m&quot;][index]
+370:             for index in range(3)
+371:         ]
+372:         self.assertAlmostEqual(sum(
+373:             left * right for left, right in zip(axis, offset)
+374:         ), 0.0)
+375:         self.assertEqual(
+376:             align[&quot;target&quot;][&quot;base_tcp&quot;][&quot;rotation_columns&quot;],
+377:             descend[&quot;target&quot;][&quot;base_tcp&quot;][&quot;rotation_columns&quot;],
+378:         )
+379: </pre></section><section id="angle-conditions"><h2>각도별 배치와 모든 각도의 교차 조건</h2><p>고정 main ade5c5b의 실제 호출 경로이다. yaw를 정한 뒤 해당 각도의 허용 다각형에서 위치를 표본화한다. 재배치의 두 yaw 검사는 시작·종료 배치의 공통 위치 조건이며, 연속 회전의 swept volume 검사가 아니다. 물체를 든 동작은 기존 실행 경로가 담당한다.</p><h3>선택한 yaw에 맞는 공간 표본화</h3><p class="locator">ade5c5b · tools/data_factory/operator/catalog.py:2142<br>sha256:58e13d4870e814291376fe7ec2c0fcd99b12430b7a106bbdce9ad715ce03f20a</p><pre>2142:             sweep_index += 1
+2143:             sweep_samples.clear()
+2144:             sweep_poses.clear()
+2145:             sweep_offsets.clear()
+2146:         sweep_samples[rank] = sample_identity
+2147:         if rank not in sweep_poses:
+2148:             assigned_cells = {
+2149:                 index for index, assigned_rank in enumerate(
+2150:                     rotating_balanced_yaw_ranks(
+2151:                         strata_count, yaw_count, sweep_index=sweep_index,
+2152:                         anchor_cell_index=anchor_cell,
+2153:                         anchor_yaw_rank=anchor_rank,
+2154:                     )
+2155:                 )
+2156:                 if assigned_rank == rank
+2157:             }
+2158:             first_block = not result
+2159:             try:
+2160:                 safe_polygon = safe_convex_polygon(
+2161:                     polygon=partition_polygon,
+2162:                     object_size_xy_mm=region[&quot;object_size_xy_mm&quot;],
+2163:                     uncertainty_mm=region[&quot;uncertainty_mm&quot;], yaw_deg=yaw,
+2164:                 )
+2165:                 samples = stratified_convex_polygon_samples(
+2166:                     polygon=safe_polygon, columns=columns, rows=rows,
+2167:                     partition_polygon=partition_polygon,
+2168:                     start_xy=current_sheet_xy, count=strata_count,
+2169:                     seed=normalized_seed,
+2170:                     pass_index=sweep_index * yaw_count + rank,
+2171:                 )
+2172:             except ValueError as exc:
+2173:                 raise ContractError(&quot;OPERATOR_ASSISTED_DOMAIN&quot;) from exc
+2174:             by_cell = {</pre><h3>놓기 위치의 두 yaw 검사</h3><p class="locator">ade5c5b · tools/data_factory/operator/catalog.py:1853<br>sha256:58e13d4870e814291376fe7ec2c0fcd99b12430b7a106bbdce9ad715ce03f20a</p><pre>1853:
+1854:
+1855: def _validate_yaw_preserving_transition(
+1856:     destination_selection: Mapping[str, Any], domain: Mapping[str, Any],
+1857:     source_pose: Mapping[str, Any], destination_pose: Mapping[str, Any],
+1858: ) -&gt; dict[str, Any]:
+1859:     target = _canonical_operator_pose(
+1860:         destination_selection, domain, destination_pose,
+1861:     )
+1862:     recorded = yaw_preserving_destination(source_pose, target)
+1863:     region = domain[&quot;coverage_region&quot;]
+1864:     try:
+1865:         feasible = safe_convex_polygon_for_yaws(
+1866:             polygon=region[&quot;polygon_local_xy_mm&quot;],
+1867:             object_size_xy_mm=region[&quot;object_size_xy_mm&quot;],
+1868:             uncertainty_mm=region[&quot;uncertainty_mm&quot;],
+1869:             yaw_degs=(recorded[&quot;yaw_deg&quot;], target[&quot;yaw_deg&quot;]),
+1870:         )
+1871:         sheet_xy = rotate_xy(
+1872:             (recorded[&quot;x_mm&quot;], recorded[&quot;y_mm&quot;]), recorded[&quot;yaw_deg&quot;],
+1873:         )
+1874:     except (KeyError, TypeError, ValueError) as exc:
+1875:         raise ContractError(&quot;OPERATOR_POSE_DOMAIN&quot;) from exc
+1876:     if not point_in_convex_polygon(sheet_xy, feasible):
+1877:         raise ContractError(
+1878:             &quot;JOB_COORDINATE_BOUNDS&quot;,
+1879:             str((recorded[&quot;x_mm&quot;], recorded[&quot;y_mm&quot;])),
+1880:         )
+1881:     return target
+1882:
+1883:</pre><h3>기록 밖 DIRECT 재배치 입력</h3><p class="locator">ade5c5b · tools/data_factory/run_job.py:2483<br>sha256:deb8189b5bd1541b0e1d3a82ff50432b1edbb4f81067b336d349294748b43cd1</p><pre>2483: def _object_reposition_payload(payload, binding, source_payload=None):
+2484:     &quot;&quot;&quot;Project a recorded pick-place run into one recorder-free DIRECT move.&quot;&quot;&quot;
+2485:     if binding[&quot;start_state&quot;] != &quot;ON_SURFACE&quot;:
+2486:         raise ContractError(&quot;OBJECT_REPOSITION_START_STATE&quot;)
+2487:     value = copy.deepcopy(payload if source_payload is None else source_payload)
+2488:     if any(
+2489:         value.get(key) != payload.get(key)
+2490:         for key in (
+2491:             &quot;mode&quot;, &quot;config_root&quot;, &quot;home_candidate&quot;, &quot;urdf&quot;,
+2492:             &quot;expected_robot_system_id&quot;, &quot;camera_profile&quot;, &quot;dataset_root&quot;,
+2493:             &quot;run_root&quot;, &quot;motion_preset&quot;,
+2494:         )
+2495:     ):
+2496:         raise ContractError(&quot;OBJECT_REPOSITION_PAYLOAD&quot;)
+2497:     value[&quot;run_id&quot;] = binding[&quot;continuation_run_id&quot;]
+2498:     value[&quot;job&quot;][&quot;job_id&quot;] = binding[&quot;continuation_run_id&quot;]
+2499:     value[&quot;job&quot;].update(binding[&quot;source_pose&quot;])
+2500:     value.update({
+2501:         &quot;recycle_x_mm&quot;: binding[&quot;target_pose&quot;][&quot;x_mm&quot;],
+2502:         &quot;recycle_y_mm&quot;: binding[&quot;target_pose&quot;][&quot;y_mm&quot;],
+2503:         &quot;recycle_yaw_deg&quot;: binding[&quot;target_pose&quot;][&quot;yaw_deg&quot;],
+2504:     })
+2505:     value.pop(DESTINATION_KEY, None)
+2506:     for key in (
+2507:         TRAJECTORY_VARIANT_KEY, TRAJECTORY_SAMPLING_SEED_KEY,
+2508:         TRAJECTORY_DESIGN_KEY,
+2509:     ):
+2510:         value.pop(key, None)
+2511:     return value</pre><h3>들어 올리기·재배치 접근·내려놓기</h3><p class="locator">ade5c5b · tools/fr5_data_factory.py:1364<br>sha256:1a89d22d1ce31a8cef58f6609bcc3c077c806dccc10ff21bae51d1ab53586e41</p><pre>1364:         shifted = {&quot;translation_m&quot;: _add(tcp[&quot;translation_m&quot;], _mul(frame[&quot;rotation_columns&quot;][2], offset)), &quot;rotation_columns&quot;: tcp[&quot;rotation_columns&quot;]}
+1365:         return {&quot;base_tcp&quot;: shifted, &quot;base_tool&quot;: compose_rigid_transform(shifted, tool_inverse)}
+1366:     offsets = {
+1367:         &quot;PREGRASP_PTP&quot;: (datum, q[&quot;offsets&quot;][&quot;pregrasp&quot;]),
+1368:         &quot;APPROACH_STOP_LIN&quot;: (datum, q[&quot;offsets&quot;][&quot;approach_stop&quot;]),
+1369:         &quot;FINAL_APPROACH_LIN&quot;: (datum, 0),
+1370:         &quot;LIFT_LIN&quot;: (datum, q[&quot;offsets&quot;][&quot;lift&quot;]),
+1371:         &quot;RECYCLE_APPROACH_PTP&quot;: (release_datum, q[&quot;offsets&quot;][&quot;pregrasp&quot;]),
+1372:         &quot;LOWER_LIN&quot;: (release_datum, release_clearance_m),
+1373:         &quot;RETREAT_LIN&quot;: (release_datum, q[&quot;offsets&quot;][&quot;retreat&quot;]),
+1374:     }
+1375:     recording_boundary = TASK_CONTRACTS[job[&quot;task&quot;]][&quot;recording_boundary&quot;]
+1376:     steps = []
+1377:     for phase in MOTION_PHASES:
+1378:         step = {&quot;phase&quot;: phase, &quot;limits&quot;: q[&quot;limits&quot;][phase]}
+1379:         if phase in offsets: step[&quot;target&quot;] = target(*offsets[phase])
+1380:         elif phase.startswith(&quot;GRIPPER&quot;):
+1381:             step[&quot;gripper_position_m&quot;] = q[&quot;gripper&quot;][
+1382:                 &quot;closed&quot; if phase == &quot;GRIPPER_CLOSE&quot; else &quot;open&quot;
+1383:             ]
+1384:             if phase == &quot;GRIPPER_OPEN&quot; and validated[&quot;grasp_profile&quot;].get(
+1385:                 &quot;schema_version&quot;</pre><h3>독립 계산 대조</h3><p>100×30mm 직사각형, 240×180mm 작업영역, 경계 여유5mm의 해석식이다. 외접 반지름52.20153254455275mm로 전각도 범위 X[57.20153254455275,182.79846745544725], Y[57.20153254455275,122.79846745544725]를 구했다. 반폭의 최대를 만드는 두 임계각을 safe_convex_polygon_for_yaws에 입력한 출력과 일치했고, 0.1도 간격의 3,600각도에서 모든 허용 꼭짓점의 물체 외곽을 교차 확인했다. 중심(55,90)은0/90도 교차영역에 포함되지만16.69924423399362도에서 왼쪽끝2.798467455447252mm로5mm 여유를 충족하지 못한다. 이 반례는 수학적 계산이며 실제 로봇 실패 관측이 아니다.</p><p><a href="https://lavalle.pl/planning/node161.html">LaValle · Planning Algorithms: 물체 형상을 반영한 구성 공간</a></p></section><section id="approach-distribution"><h2>정렬 전 관측과 접근 위치의 분포</h2><p>main MEX의 TWO_STAGE_ALIGN_V2 책임을 먼저 확인하고, 다음 고정 구현과 등록된 접근 설정을 대조했다. 관측 위치를 물체 근처에서 표본화하고 XY·yaw 정렬을 기록 구간에 남기는 설계이다. 이 발췌는 경로 생성과 설정의 근거이며, 해당 시연의 학습 효과는 별도 평가 대상이다.</p><h3>등록된 24 mm 물체의 접근 설정</h3><p class="locator">0149201 · config/data_factory/approach_sampling_profiles/wood-cube-24mm-top-wrist-r001.json<br>sha256:bd1da64ab64f79217302cc99acac7c6a1c3f4ded598e5ca3ad599641c49e3205</p><pre>{
+  &quot;schema_version&quot;: &quot;data_factory.approach_sampling_profile.v1&quot;,
+  &quot;approach_sampling_profile_id&quot;: &quot;wood-cube-24mm-top-wrist-approach-r001&quot;,
+  &quot;qualification_status&quot;: &quot;QUALIFIED&quot;,
+  &quot;trajectory_variant_id&quot;: &quot;TWO_STAGE_ALIGN_V2&quot;,
+  &quot;object_profile_id&quot;: &quot;wood-cube-24mm-r001&quot;,
+  &quot;object_profile_digest&quot;: &quot;sha256:fd93d2fb05d9ddd05a040e823b2d2b31428a79a7ae7ce07a1ad8cf519c66489a&quot;,
+  &quot;grasp_profile_id&quot;: &quot;wood-cube-24mm-top-3p5mm-r001&quot;,
+  &quot;grasp_profile_digest&quot;: &quot;sha256:d260ca29a2f70258f43d53e2127e0a5d307fef0fc7cbbadb093278391a509173&quot;,
+  &quot;collection_profile_id&quot;: &quot;fr5-up-wrist-rgb-30hz-v2&quot;,
+  &quot;collection_profile_digest&quot;: &quot;sha256:d8288e4b3cbd34dc646949985658c786d8b9945ed368d67b412a1dec93a4931d&quot;,
+  &quot;required_camera_roles&quot;: [
+    &quot;wrist&quot;
+  ],
+  &quot;observation_cue&quot;: &quot;WRIST_OBJECT_VISIBLE_BEFORE_XY_YAW_ALIGNMENT&quot;,
+  &quot;parameter_distribution&quot;: {
+    &quot;kind&quot;: &quot;STRATIFIED_BOUNDED&quot;,
+    &quot;align_clearance_m&quot;: {
+      &quot;kind&quot;: &quot;TRUNCATED_NORMAL&quot;,
+      &quot;mean&quot;: 0.0575,
+      &quot;standard_deviation&quot;: 0.00125,
+      &quot;minimum&quot;: 0.055,
+      &quot;maximum&quot;: 0.06
+    },
+    &quot;view_offset_xy_m&quot;: {
+      &quot;kind&quot;: &quot;OBJECT_RELATIVE_TRUNCATED_BIVARIATE_NORMAL&quot;,
+      &quot;object_axes&quot;: [
+        &quot;X&quot;,
+        &quot;Y&quot;
+      ],
+      &quot;maximum_radius_fraction&quot;: 0.5,
+      &quot;absolute_maximum_radius_m&quot;: 0.02,
+      &quot;mahalanobis_radius&quot;: 2.5
+    }
+  }
+}
+</pre><h3>중심 주변의 절단 정규분포</h3><p class="locator">0149201 · tools/data_factory/motion/trajectory_variants.py:291<br>sha256:04aa3f6e98fb3597550356f557f7a2d11557dfd55b81d0208ec8fc6fc283a92a</p><pre>291:     height = distribution[&quot;align_clearance_m&quot;]
+292:     normal = NormalDist(
+293:         mu=height[&quot;mean&quot;], sigma=height[&quot;standard_deviation&quot;],
+294:     )
+295:     lower = normal.cdf(height[&quot;minimum&quot;])
+296:     upper = normal.cdf(height[&quot;maximum&quot;])
+297:     clearance_quantile = stratified_unit(0, &quot;align_clearance&quot;)
+298:     clearance = normal.inv_cdf(
+299:         lower + clearance_quantile * (upper - lower)
+300:     )
+301:     offset = distribution[&quot;view_offset_xy_m&quot;]
+302:     object_size = _object_size_xy_m(object_dimensions_mm)
+303:     # The truncation ellipse is the object&#x27;s inscribed top-face footprint,
+304:     # capped at 20 mm.  A 2.5-sigma Mahalanobis boundary retains 95.6% of the
+305:     # corresponding untruncated bivariate normal without corner-heavy clips.
+306:     radii = [
+307:         min(
+308:             dimension * offset[&quot;maximum_radius_fraction&quot;],
+309:             offset[&quot;absolute_maximum_radius_m&quot;],
+310:         )
+311:         for dimension in object_size
+312:     ]
+313:     mahalanobis_radius = offset[&quot;mahalanobis_radius&quot;]
+314:     sigmas = [radius / mahalanobis_radius for radius in radii]
+315:     radial_mass = 1.0 - math.exp(-(mahalanobis_radius ** 2) / 2.0)
+316:     radial_quantile = stratified_unit(1, &quot;view_offset_radius&quot;)
+317:     angle_quantile = stratified_unit(2, &quot;view_offset_angle&quot;)
+318:     standard_radius = math.sqrt(
+319:         -2.0 * math.log(1.0 - radial_quantile * radial_mass)
+320:     )
+321:     angle = 2.0 * math.pi * angle_quantile
+322:     return {
+323:         &quot;align_clearance_m&quot;: round(clearance, 9),
+324:         &quot;align_clearance_quantile&quot;: clearance_quantile,
+325:         &quot;object_size_xy_m&quot;: object_size,
+326:         &quot;view_offset_radius_xy_m&quot;: [round(value, 9) for value in radii],
+327:         &quot;view_offset_standard_deviation_xy_m&quot;: [
+328:             round(value, 9) for value in sigmas
+329:         ],
+330:         &quot;view_offset_radial_quantile&quot;: radial_quantile,
+331:         &quot;view_offset_angle_quantile&quot;: angle_quantile,
+332:         &quot;view_offset_x_m&quot;: round(sigmas[0] * standard_radius * math.cos(angle), 9),
+333:         &quot;view_offset_y_m&quot;: round(sigmas[1] * standard_radius * math.sin(angle), 9),
+334:     }
+335: </pre><h3>관측·정렬 목표 자세의 계산</h3><p class="locator">0149201 · tools/data_factory/motion/trajectory_variants.py:503<br>sha256:04aa3f6e98fb3597550356f557f7a2d11557dfd55b81d0208ec8fc6fc283a92a</p><pre>503: def _view_and_align_targets(
+504:     pregrasp: Mapping[str, Any], endpoint: Mapping[str, Any], *,
+505:     clearance_m: float, offset_x_m: float, offset_y_m: float,
+506:     target_yaw_deg: float,
+507: ) -&gt; tuple[dict[str, Any], dict[str, Any]]:
+508:     axis = _unit_axis(pregrasp[&quot;base_tcp&quot;], endpoint[&quot;base_tcp&quot;])
+509:     final_tcp = endpoint[&quot;base_tcp&quot;]
+510:     canonical_rotation = [
+511:         _rotate(list(column), axis, math.radians(-target_yaw_deg))
+512:         for column in final_tcp[&quot;rotation_columns&quot;]
+513:     ]
+514:     align_translation = [
+515:         float(value) + axis[index] * clearance_m
+516:         for index, value in enumerate(final_tcp[&quot;translation_m&quot;])
+517:     ]
+518:     object_x, object_y = _planar_axes(
+519:         axis, final_tcp[&quot;rotation_columns&quot;],
+520:     )
+521:     view_translation = [
+522:         align_translation[index]
+523:         + object_x[index] * offset_x_m
+524:         + object_y[index] * offset_y_m
+525:         for index in range(3)
+526:     ]
+527:     view_tcp = {
+528:         &quot;translation_m&quot;: view_translation,
+529:         &quot;rotation_columns&quot;: canonical_rotation,
+530:     }
+531:     align_tcp = {
+532:         &quot;translation_m&quot;: align_translation,
+533:         &quot;rotation_columns&quot;: copy.deepcopy(final_tcp[&quot;rotation_columns&quot;]),
+534:     }
+535:     tcp_to_tool = compose_rigid_transform(
+536:         inverse_rigid_transform(final_tcp), endpoint[&quot;base_tool&quot;],
+537:     )
+538:
+539:     def target(tcp: Mapping[str, Any]) -&gt; dict[str, Any]:
+540:         return {
+541:             &quot;base_tcp&quot;: copy.deepcopy(dict(tcp)),
+542:             &quot;base_tool&quot;: compose_rigid_transform(tcp, tcp_to_tool),
+543:         }
+544:
+545:     return target(view_tcp), target(align_tcp)</pre><h3>기존 실행 단계에 목표 자세 적용</h3><p class="locator">0149201 · tools/data_factory/motion/trajectory_variants.py:818<br>sha256:04aa3f6e98fb3597550356f557f7a2d11557dfd55b81d0208ec8fc6fc283a92a</p><pre>818:     pregrasp = next(
+819:         step for step in result[&quot;steps&quot;] if step[&quot;phase&quot;] == &quot;PREGRASP_PTP&quot;
+820:     )
+821:     approach = next(
+822:         step for step in result[&quot;steps&quot;] if step[&quot;phase&quot;] == &quot;APPROACH_STOP_LIN&quot;
+823:     )
+824:     final = next(
+825:         step for step in result[&quot;steps&quot;] if step[&quot;phase&quot;] == &quot;FINAL_APPROACH_LIN&quot;
+826:     )
+827:     view, align = _view_and_align_targets(
+828:         pregrasp[&quot;target&quot;], final[&quot;target&quot;],
+829:         clearance_m=parameters[&quot;align_clearance_m&quot;],
+830:         offset_x_m=parameters[&quot;view_offset_x_m&quot;],
+831:         offset_y_m=parameters[&quot;view_offset_y_m&quot;],
+832:         target_yaw_deg=yaw,
+833:     )
+834:     pregrasp[&quot;target&quot;] = copy.deepcopy(view)
+835:     approach[&quot;target&quot;] = copy.deepcopy(align)
+836:     return validate_motion_program(result)</pre><h3>기존 회귀 검사의 기하 조건</h3><p class="locator">0149201 · tests/data_factory/test_trajectory_variants.py:236<br>sha256:160b38f6417a1366d6ee1fa8ed3cd3b152a1bb81f275bfb8e2d33d84327cc8ea</p><pre>236:     def test_two_stage_v2_applies_target_yaw_only_at_visible_clearance(self):
+237:         source = program()
+238:         yaw_90 = [[0.0, 1.0, 0.0], [-1.0, 0.0, 0.0], [0.0, 0.0, 1.0]]
+239:         for step in source[&quot;steps&quot;][:3]:
+240:             for frame in (&quot;base_tcp&quot;, &quot;base_tool&quot;):
+241:                 step[&quot;target&quot;][frame][&quot;rotation_columns&quot;] = copy.deepcopy(yaw_90)
+242:
+243:         compiled = compile_execution_motion_program(
+244:             source, trajectory_variant_id=&quot;TWO_STAGE_ALIGN_V2&quot;,
+245:             target_yaw_deg=90.0, sampling_seed=0,
+246:             object_dimensions_mm=OBJECT_DIMENSIONS_MM,
+247:         )
+248:         pregrasp, align, descend = compiled[&quot;steps&quot;][:3]
+249:         identity = [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]]
+250:         for frame in (&quot;base_tcp&quot;, &quot;base_tool&quot;):
+251:             self.assertLessEqual(
+252:                 abs(pregrasp[&quot;target&quot;][frame][&quot;translation_m&quot;][2] - 0.0575),
+253:                 0.0025,
+254:             )
+255:             self.assertEqual(pregrasp[&quot;target&quot;][frame][&quot;rotation_columns&quot;], identity)
+256:             self.assertEqual(align[&quot;target&quot;][frame][&quot;rotation_columns&quot;], yaw_90)
+257:             xy_offset = [
+258:                 pregrasp[&quot;target&quot;][frame][&quot;translation_m&quot;][index]
+259:                 - align[&quot;target&quot;][frame][&quot;translation_m&quot;][index]
+260:                 for index in (0, 1)
+261:             ]
+262:             self.assertGreater(sum(value * value for value in xy_offset), 0.0)
+263:             self.assertLessEqual(sum(value * value for value in xy_offset), 0.012 ** 2)
+264:             self.assertEqual(
+265:                 descend[&quot;target&quot;][frame][&quot;translation_m&quot;][:2],
+266:                 align[&quot;target&quot;][frame][&quot;translation_m&quot;][:2],
+267:             )
+268:             self.assertEqual(descend[&quot;target&quot;][frame][&quot;rotation_columns&quot;], yaw_90)
+269:         self.assertEqual(compiled[&quot;steps&quot;][3:], source[&quot;steps&quot;][3:])
+270: </pre></section><section id="position-distribution"><h2>작업영역의 형상을 반영한 위치 생성</h2><p>고정 main 6a156ec의 순수 함수 safe_convex_polygon과 stratified_convex_polygon_samples를 직접 실행했다. 현재 A/B 작업영역과 같은 [-133.5,133.5] × [-85,85] mm 직사각형, 기존 회귀 검사에 사용된 기울어진 사각형을 같은 mm 축척으로 비교한다. 물체 24 × 24 mm, 여유 4 mm, 5 × 3 분할과 seed 17을 공통으로 사용했다.</p><p>각 회전각·폴리곤에 대해 회전한 물체의 네 모서리와 원래 폴리곤 모든 변의 부호 있는 수직거리를 계산했다. 표시한 모든 배치가 4 mm 이상의 여유를 유지하고, 한 칸에 하나의 중심만 생성됨을 확인했다. 실제 실행은 별도의 등록 영역·보정·장면과 동작 계획 검사를 소비한다.</p><p>이 계산은 표시한 입력에 대한 결과이다. 조사 중 물체보다 작은 영역에서 빈 허용 집합을 판정하지 못하는 반례를 발견해 main에 전달했다. main 0dd7e0b는 계산된 모든 정점이 안쪽으로 이동한 모든 경계 조건을 만족하는지 검사하도록 수정했다. 기존 회귀에는 20 × 20 mm 영역·24 mm 물체·여유 5 mm의 반례와 회전한 같은 영역의 거부가 추가됐다. 위 그림과 수치는 수정 전 6a156ec에서 확인한 유효한 입력의 결과이며, 원래 계산 출처를 유지한다. <a href="#empty-domain-correction">교정 코드와 회귀</a>. 현재 A/B 영역의 24 mm 물체·여유 4 mm는 모든 yaw의 최악 반폭을 적용해도 양의 배치 영역을 유지한다.</p><p class="locator">6a156ec:tools/data_factory/workspace_geometry.py<br>sha256:3c57f4af3a9ae0a973ca15a38b9933d36ec082c3f72112a10d67cb7206f922f7</p><pre>{
+  &quot;source&quot;: &quot;6a156ec:tools/data_factory/workspace_geometry.py&quot;,
+  &quot;sha256&quot;: &quot;3c57f4af3a9ae0a973ca15a38b9933d36ec082c3f72112a10d67cb7206f922f7&quot;,
+  &quot;parameters&quot;: {
+    &quot;object_size_xy_mm&quot;: [
+      24,
+      24
+    ],
+    &quot;uncertainty_mm&quot;: 4,
+    &quot;columns&quot;: 5,
+    &quot;rows&quot;: 3,
+    &quot;seed&quot;: 17
+  },
+  &quot;results&quot;: [
+    {
+      &quot;workspace&quot;: &quot;rectangle&quot;,
+      &quot;polygon_mm&quot;: [
+        [
+          -133.5,
+          -85
+        ],
+        [
+          133.5,
+          -85
+        ],
+        [
+          133.5,
+          85
+        ],
+        [
+          -133.5,
+          85
+        ]
+      ],
+      &quot;yaw_deg&quot;: 0,
+      &quot;samples_xy_row_column&quot;: [
+        [
+          111.32259781002855,
+          68.99913381060732,
+          2,
+          4
+        ],
+        [
+          -114.40618971690812,
+          45.33163717483279,
+          2,
+          0
+        ],
+        [
+          -110.4777375763586,
+          -68.87082660052076,
+          0,
+          0
+        ],
+        [
+          94.80421890616702,
+          -58.18533995711893,
+          0,
+          4
+        ],
+        [
+          43.41281226040475,
+          12.21238906000905,
+          1,
+          3
+        ],
+        [
+          -47.690681303191404,
+          -2.7800732875242744,
+          1,
+          1
+        ],
+        [
+          20.130312862158945,
+          -51.15657769698146,
+          0,
+          2
+        ],
+        [
+          20.42082555756559,
+          62.3596710946712,
+          2,
+          2
+        ],
+        [
+          60.13529234955633,
+          66.034845634668,
+          2,
+          3
+        ],
+        [
+          -54.6760970638518,
+          30.572573802845927,
+          2,
+          1
+        ],
+        [
+          -92.6517356802226,
+          0.5301311208055788,
+          1,
+          0
+        ],
+        [
+          -31.042478312634046,
+          -54.583495320928236,
+          0,
+          1
+        ],
+        [
+          66.50288497327148,
+          -48.342518448047954,
+          0,
+          3
+        ],
+        [
+          80.94717376216519,
+          26.566905092274617,
+          1,
+          4
+        ],
+        [
+          16.521089720300267,
+          14.162537255336256,
+          1,
+          2
+        ]
+      ],
+      &quot;minimum_corner_edge_clearance_mm&quot;: 4.000866189392681
+    },
+    {
+      &quot;workspace&quot;: &quot;oblique&quot;,
+      &quot;polygon_mm&quot;: [
+        [
+          -100,
+          -60
+        ],
+        [
+          100,
+          -40
+        ],
+        [
+          80,
+          60
+        ],
+        [
+          -90,
+          70
+        ]
+      ],
+      &quot;yaw_deg&quot;: 0,
+      &quot;samples_xy_row_column&quot;: [
+        [
+          -74.37901708808552,
+          37.34059264760033,
+          2,
+          0
+        ],
+        [
+          63.90962479000125,
+          44.23331679581924,
+          2,
+          4
+        ],
+        [
+          -77.53757652971501,
+          -40.457298972922025,
+          0,
+          0
+        ],
+        [
+          67.27609615743324,
+          -23.36294505515779,
+          0,
+          4
+        ],
+        [
+          -35.72335678141679,
+          2.874061603657913,
+          1,
+          1
+        ],
+        [
+          32.51896049468522,
+          14.338885751771633,
+          1,
+          3
+        ],
+        [
+          15.296498544992955,
+          43.52639486999562,
+          2,
+          2
+        ],
+        [
+          -49.07262420675419,
+          -35.88905587138285,
+          0,
+          1
+        ],
+        [
+          -65.5034459557067,
+          5.40539438649839,
+          1,
+          0
+        ],
+        [
+          49.81489511106478,
+          -21.64274587030979,
+          0,
+          3
+        ],
+        [
+          -40.95587795045079,
+          27.905749801344808,
+          2,
+          1
+        ],
+        [
+          15.07888603907038,
+          -24.587482837423416,
+          0,
+          2
+        ],
+        [
+          60.38177450050563,
+          25.315868599974714,
+          1,
+          4
+        ],
+        [
+          45.045162808656436,
+          43.87416418734091,
+          2,
+          3
+        ],
+        [
+          12.375348105093838,
+          15.83017554819832,
+          1,
+          2
+        ]
+      ],
+      &quot;minimum_corner_edge_clearance_mm&quot;: 4.000378417473627
+    },
+    {
+      &quot;workspace&quot;: &quot;rectangle&quot;,
+      &quot;polygon_mm&quot;: [
+        [
+          -133.5,
+          -85
+        ],
+        [
+          133.5,
+          -85
+        ],
+        [
+          133.5,
+          85
+        ],
+        [
+          -133.5,
+          85
+        ]
+      ],
+      &quot;yaw_deg&quot;: 45,
+      &quot;samples_xy_row_column&quot;: [
+        [
+          107.173028783686,
+          64.02867693382022,
+          2,
+          4
+        ],
+        [
+          -109.84680285463398,
+          43.253986292983946,
+          2,
+          0
+        ],
+        [
+          -106.44045279614303,
+          -63.91605232304884,
+          0,
+          0
+        ],
+        [
+          92.84998781685026,
+          -54.5366201515907,
+          0,
+          4
+        ],
+        [
+          -47.69068130319141,
+          -2.7800732875242744,
+          1,
+          1
+        ],
+        [
+          43.41281226040475,
+          12.21238906000905,
+          1,
+          3
+        ],
+        [
+          20.130312862158945,
+          -48.366962084686214,
+          0,
+          2
+        ],
+        [
+          20.42082555756559,
+          58.2007355140907,
+          2,
+          2
+        ],
+        [
+          60.13529234955633,
+          61.42670466894014,
+          2,
+          3
+        ],
+        [
+          80.83458204174525,
+          26.566905092274617,
+          1,
+          4
+        ],
+        [
+          66.50288497327148,
+          -45.89685672283688,
+          0,
+          3
+        ],
+        [
+          -31.042478312634053,
+          -51.37501800985373,
+          0,
+          1
+        ],
+        [
+          -90.98357552511979,
+          0.530131120805577,
+          1,
+          0
+        ],
+        [
+          -54.67609706385181,
+          30.298878263600642,
+          2,
+          1
+        ],
+        [
+          16.521089720300264,
+          14.162537255336252,
+          1,
+          2
+        ]
+      ],
+      &quot;minimum_corner_edge_clearance_mm&quot;: 4.000760317702628
+    },
+    {
+      &quot;workspace&quot;: &quot;oblique&quot;,
+      &quot;polygon_mm&quot;: [
+        [
+          -100,
+          -60
+        ],
+        [
+          100,
+          -40
+        ],
+        [
+          80,
+          60
+        ],
+        [
+          -90,
+          70
+        ]
+      ],
+      &quot;yaw_deg&quot;: 45,
+      &quot;samples_xy_row_column&quot;: [
+        [
+          -70.7819510977653,
+          35.48497116623885,
+          2,
+          0
+        ],
+        [
+          62.45863002037148,
+          40.054079870370956,
+          2,
+          4
+        ],
+        [
+          -73.98818350289491,
+          -36.345059360086935,
+          0,
+          0
+        ],
+        [
+          65.99459376212401,
+          -20.72325437314103,
+          0,
+          4
+        ],
+        [
+          -35.72335678141679,
+          2.8740616036579136,
+          1,
+          1
+        ],
+        [
+          32.51896049468522,
+          14.338885751771633,
+          1,
+          3
+        ],
+        [
+          15.296498544992955,
+          39.95808038845474,
+          2,
+          2
+        ],
+        [
+          -49.07262420675419,
+          -32.425114601589,
+          0,
+          1
+        ],
+        [
+          -64.14507771373152,
+          5.40539438649839,
+          1,
+          0
+        ],
+        [
+          49.81489511106478,
+          -19.787519115696846,
+          0,
+          3
+        ],
+        [
+          -40.95587795045079,
+          27.670922466970516,
+          2,
+          1
+        ],
+        [
+          15.07888603907038,
+          -22.47134000962926,
+          0,
+          2
+        ],
+        [
+          45.045162808656436,
+          39.92043712848288,
+          2,
+          3
+        ],
+        [
+          60.32354687177544,
+          25.315868599974714,
+          1,
+          4
+        ],
+        [
+          12.375348105093838,
+          15.83017554819832,
+          1,
+          2
+        ]
+      ],
+      &quot;minimum_corner_edge_clearance_mm&quot;: 4.000287737643621
+    },
+    {
+      &quot;workspace&quot;: &quot;rectangle&quot;,
+      &quot;polygon_mm&quot;: [
+        [
+          -133.5,
+          -85
+        ],
+        [
+          133.5,
+          -85
+        ],
+        [
+          133.5,
+          85
+        ],
+        [
+          -133.5,
+          85
+        ]
+      ],
+      &quot;yaw_deg&quot;: 90,
+      &quot;samples_xy_row_column&quot;: [
+        [
+          111.32259781002855,
+          68.99913381060732,
+          2,
+          4
+        ],
+        [
+          -114.40618971690812,
+          45.33163717483279,
+          2,
+          0
+        ],
+        [
+          -110.4777375763586,
+          -68.87082660052076,
+          0,
+          0
+        ],
+        [
+          94.80421890616702,
+          -58.18533995711893,
+          0,
+          4
+        ],
+        [
+          43.41281226040475,
+          12.21238906000905,
+          1,
+          3
+        ],
+        [
+          -47.690681303191404,
+          -2.7800732875242744,
+          1,
+          1
+        ],
+        [
+          20.130312862158945,
+          -51.15657769698146,
+          0,
+          2
+        ],
+        [
+          20.42082555756559,
+          62.3596710946712,
+          2,
+          2
+        ],
+        [
+          60.13529234955633,
+          66.034845634668,
+          2,
+          3
+        ],
+        [
+          -54.6760970638518,
+          30.572573802845927,
+          2,
+          1
+        ],
+        [
+          -92.6517356802226,
+          0.5301311208055788,
+          1,
+          0
+        ],
+        [
+          -31.042478312634046,
+          -54.583495320928236,
+          0,
+          1
+        ],
+        [
+          66.50288497327148,
+          -48.342518448047954,
+          0,
+          3
+        ],
+        [
+          80.94717376216519,
+          26.566905092274617,
+          1,
+          4
+        ],
+        [
+          16.521089720300267,
+          14.162537255336256,
+          1,
+          2
+        ]
+      ],
+      &quot;minimum_corner_edge_clearance_mm&quot;: 4.000866189392681
+    },
+    {
+      &quot;workspace&quot;: &quot;oblique&quot;,
+      &quot;polygon_mm&quot;: [
+        [
+          -100,
+          -60
+        ],
+        [
+          100,
+          -40
+        ],
+        [
+          80,
+          60
+        ],
+        [
+          -90,
+          70
+        ]
+      ],
+      &quot;yaw_deg&quot;: 90,
+      &quot;samples_xy_row_column&quot;: [
+        [
+          -74.37901708808552,
+          37.34059264760033,
+          2,
+          0
+        ],
+        [
+          63.90962479000125,
+          44.23331679581924,
+          2,
+          4
+        ],
+        [
+          -77.53757652971501,
+          -40.457298972922025,
+          0,
+          0
+        ],
+        [
+          67.27609615743324,
+          -23.36294505515779,
+          0,
+          4
+        ],
+        [
+          -35.72335678141679,
+          2.874061603657913,
+          1,
+          1
+        ],
+        [
+          32.51896049468522,
+          14.338885751771633,
+          1,
+          3
+        ],
+        [
+          15.296498544992955,
+          43.52639486999562,
+          2,
+          2
+        ],
+        [
+          -49.07262420675419,
+          -35.88905587138285,
+          0,
+          1
+        ],
+        [
+          -65.5034459557067,
+          5.40539438649839,
+          1,
+          0
+        ],
+        [
+          49.81489511106478,
+          -21.64274587030979,
+          0,
+          3
+        ],
+        [
+          -40.95587795045079,
+          27.905749801344808,
+          2,
+          1
+        ],
+        [
+          15.07888603907038,
+          -24.587482837423416,
+          0,
+          2
+        ],
+        [
+          60.38177450050563,
+          25.315868599974714,
+          1,
+          4
+        ],
+        [
+          45.045162808656436,
+          43.87416418734091,
+          2,
+          3
+        ],
+        [
+          12.375348105093838,
+          15.83017554819832,
+          1,
+          2
+        ]
+      ],
+      &quot;minimum_corner_edge_clearance_mm&quot;: 4.000378417473627
+    }
+  ]
+}</pre></section><section id="empty-domain-correction"><h2>작은 영역의 빈 허용 집합 교정</h2><p>Portfolio 조사에서 전달한 20 × 20 mm 영역·24 mm 물체·5 mm 여유의 반례는 main 0dd7e0b에서 교정했다. 인접 경계선 교점으로 만들어진 정점 전부가 모든 안쪽 반평면 조건을 만족해야 유효한 결과로 반환한다. 기존 회귀는 원래 반례와 회전한 반례를 거부하고, 다른 유효 영역의 물체 외곽을 확인한다. 위 도해의6a156ec 계산값과 해당 원본 식별은 그대로 유지한다.</p><h3>tools/data_factory/workspace_geometry.py:168</h3><p class="locator">main dee2d6f · sha256:60c638929640da2ebee4f3851f06303140a4c50266b7d78ea4155a40d33e5ea0</p><pre>168:         delta = (
+169:             point[0] - previous_point[0], point[1] - previous_point[1],
+170:         )
+171:         distance = cross(delta, direction) / denominator
+172:         result.append((
+173:             previous_point[0] + distance * previous_direction[0],
+174:             previous_point[1] + distance * previous_direction[1],
+175:         ))
+176:     # Adjacent line intersections can still form a convex polygon after the
+177:     # inset has crossed itself. Every vertex must satisfy every inset half-plane.
+178:     if any(cross(direction, (x - point[0], y - point[1])) &lt; -1e-9
+179:            for x, y in result for point, direction in shifted):
+180:         raise ValueError(&quot;safe_polygon&quot;)
+181:     return _convex_polygon(result, &quot;safe_polygon&quot;)
+182:
+183:</pre><h3>tests/data_factory/test_workspace_geometry.py:149</h3><p class="locator">main dee2d6f · sha256:0bc139e31a9e1282d08bbc150fd7740b3803eade564daf2b619a1bc3efb06432</p><pre>149:     def test_empty_erosion_cannot_return_an_inverted_convex_polygon(self):
+150:         square = [(0, 0), (20, 0), (20, 20), (0, 20)]
+151:         for angle in (0, 30):
+152:             with self.subTest(angle=angle), self.assertRaisesRegex(ValueError, &quot;safe_polygon&quot;):
+153:                 safe_convex_polygon_for_yaws(
+154:                     polygon=[rotate_xy(point, angle) for point in square],
+155:                     object_size_xy_mm=(24, 24), uncertainty_mm=5,
+156:                     yaw_degs=(angle,),
+157:                 )
+158:
+159:     def test_eroded_vertices_keep_the_whole_footprint_inside_the_original_zone(self):
+160:         layout = make_red_blue_region_layout()
+161:         polygons = [workspace_region(layout, place)[&quot;polygon_local_xy_mm&quot;] for place in (&quot;PLACE_A&quot;, &quot;PLACE_B&quot;)]
+162:         polygons.append([(-100, -60), (100, -40), (80, 60), (-90, 70)])
+163:         for polygon in polygons:
+164:             safe = safe_convex_polygon_for_yaws(
+165:                 polygon=polygon, object_size_xy_mm=(30, 18),
+166:                 uncertainty_mm=4, yaw_degs=(-35, 20),
+167:             )
+168:             for x, y in safe:
+169:                 for yaw in (-35, 20):
+170:                     for corner in ((-15, -9), (-15, 9), (15, -9), (15, 9)):
+171:                         dx, dy = rotate_xy(corner, yaw)
+172:                         self.assertTrue(point_in_convex_polygon((x + dx, y + dy), polygon))
+173:
+174:     def test_each_safe_cell_is_sampled_area_uniformly_across_seeds(self):
+175:         polygon = [(-1, -1), (1, -1), (1, 1), (-1, 1)]</pre></section></main><script src="../source-return.js"></script></body></html>

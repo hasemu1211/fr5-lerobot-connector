@@ -85,6 +85,7 @@ class NativePolicyTest(unittest.TestCase):
         self.policy_dir = self.root / 'pretrained_model'
         self.policy_dir.mkdir()
         (self.root / 'fr5_training_receipt.json').write_text('{}')
+        (self.root / 'fr5_training_split.json').write_text('{}')
         save_file({'synthetic.weight': np.ones(1, dtype=np.float32)}, self.policy_dir / 'model.safetensors')
         self.mean_action = np.array([.01] * 6 + [.012], dtype=np.float32)
         self.normalization = {"stats": {
@@ -117,6 +118,10 @@ class NativePolicyTest(unittest.TestCase):
         self.admission = mock.patch('tools.validate_training_checkpoint.validate_checkpoint', side_effect=admitted_checkpoint)
         self.admitted_checkpoint = self.admission.start()
         self.addCleanup(self.admission.stop)
+        self.saved_view = self.enterContext(mock.patch(
+            'tools.validate_training_checkpoint.validate_saved_observation_view',
+            return_value={"representation": "raw", "transform_application": "none",
+                          "training_transform": "raw_once"}))
         self.offline = mock.patch.dict(os.environ, {'HF_HUB_OFFLINE': '1', 'TRANSFORMERS_OFFLINE': '1'})
         self.offline.start()
         self.addCleanup(self.offline.stop)
@@ -307,9 +312,96 @@ class NativePolicyTest(unittest.TestCase):
         self.assertTrue(result["ok"], result)
         self.assertEqual(result["data"]["finite_learned_plan"]["plan"]["execution_kind"], "FINITE_LEARNED_PROBE")
         self.assertEqual(transport2.sent, [])
+        # The top native API must expose the same explicit held-target opt-in;
+        # exercise its real inference/program/planner consumers, not a kwargs spy.
+        held_source = source()
+        held_source["steps"][-1]["limits"]["execution_timeout_s"] = 6.
+        held_source["gripper_requirements"].update(command_position_m=.012, acceptable_feedback_m={"min": .012, "max": .014})
+        close = next(step for step in held_source["steps"] if step["phase"] == "GRIPPER_CLOSE")
+        close["gripper_position_m"] = .012
+        close["limits"]["completion_tolerance_m"] = .014 - .012
+        held_transport = Transport()
+        held_transport.current = [0.] * 7
+        held_transport.build_learned_segment = mock.Mock(return_value=b"synthetic-held-segment")
+        held_executor = PickupExecutor(held_transport)
+        held_child = SimpleNamespace(request=lambda request, _cancel: held_executor.process(request), close=lambda **_: None)
+        with mock.patch.object(NativeSmolVLA, "load", return_value=native):
+            held_result = run_learned_plan_only({**payload, "run_id": "native-held-runner"}, threading.Event(), lambda _: None,
+                checkpoint=self.policy_dir, observation=capture, instruction="synthetic probe", period_s=1.5,
+                held_gripper_targets=True,
+                resolver=lambda _: ({"normalized_job": {}, "resolved_job_digest": held_source["resolved_job_digest"]}, held_source, SCENE),
+                executor_factory=lambda _: held_child)
+        self.assertTrue(held_result["ok"], held_result)
+        held_plan = held_result["data"]["finite_learned_plan"]["plan"]
+        self.assertEqual(held_plan["learned_proposal"]["schema_version"], "data_factory.finite_learned_held_target_proposal.v1")
+        self.assertEqual([step["type"] for step in held_plan["steps"][0]["held_target_segments"]], ["GRIPPER", "ARM"])
+        self.assertEqual(held_transport.sent, [])
         (self.policy_dir / 'model.safetensors').write_bytes(b'changed')
         with self.assertRaisesRegex(ContractError, 'LEARNED_CHECKPOINT_CHANGED'):
             native(value)
+
+    def test_baked_observation_view_transforms_camera1_once(self):
+        from lerobot.policies.smolvla.configuration_smolvla import SmolVLAConfig
+        from lerobot.policies.smolvla.modeling_smolvla import SmolVLAPolicy
+
+        seen = {}
+        policy = mock.Mock()
+        def predict(batch):
+            seen["camera1"] = batch["observation.images.camera1"].clone()
+            seen["camera2"] = batch["observation.images.camera2"].clone()
+            return torch.zeros((1, 1, 7))
+        policy.predict_action_chunk.side_effect = predict
+        config = SimpleNamespace(input_features={
+            'observation.state': SimpleNamespace(shape=[7]),
+            'observation.images.camera1': object(), 'observation.images.camera2': object()},
+            output_features={'action': SimpleNamespace(shape=[7])}, empty_cameras=1,
+            adapt_to_pi_aloha=False, rtc_config=None)
+        self.saved_view.return_value = {"representation": "baked", "transform_application": "rollout_once"}
+        with mock.patch.object(SmolVLAConfig, 'from_pretrained', return_value=config), \
+             mock.patch.object(SmolVLAPolicy, 'from_pretrained', return_value=policy):
+            native = NativeSmolVLA.load(self.policy_dir)
+        native._transform_raw_up = mock.Mock(return_value=fake_rgb(b"\xff\x00\x00"))
+        value = {'observation.state': [0.] * 7, 'observation.images.camera1': fake_rgb(),
+                 'observation.images.camera2': fake_rgb(b"\x00\x00\xff"), 'task': 'synthetic probe'}
+        native(value)
+        native._transform_raw_up.assert_called_once_with(value["observation.images.camera1"])
+        torch.testing.assert_close(seen["camera1"], torch.tensor([[[[1.]], [[0.]], [[0.]]]]))
+        torch.testing.assert_close(seen["camera2"], torch.tensor([[[[0.]], [[0.]], [[1.]]]]))
+
+    def test_launch_manifests_must_survive_model_construction_unchanged(self):
+        for filename in ('fr5_training_split.json', 'fr5_training_receipt.json'):
+            path = self.root / filename
+            for change in ('remove', 'replace'):
+                with self.subTest(filename=filename, change=change):
+                    path.write_text('{}')
+                    def load(*args):
+                        if change == 'remove':
+                            path.unlink()
+                        else:
+                            path.write_text('{"changed":true}')
+                        return object(), object(), object()
+                    with mock.patch.object(NativeSmolVLA, '_load_components', side_effect=load):
+                        with self.assertRaisesRegex(ContractError, 'LEARNED_CHECKPOINT_CHANGED'):
+                            NativeSmolVLA.load(self.policy_dir)
+                    path.write_text('{}')
+
+    def test_pending_launch_manifests_remain_supported(self):
+        for filename in ('fr5_training_split.json', 'fr5_training_receipt.json'):
+            pending = Path(str(self.root) + '.' + filename + '.pending')
+            self.addCleanup(pending.unlink, missing_ok=True)
+            (self.root / filename).rename(pending)
+        with mock.patch.object(NativeSmolVLA, '_load_components', return_value=(object(), object(), object())):
+            native = NativeSmolVLA.load(self.policy_dir)
+        self.assertEqual(native.observation_view['representation'], 'raw')
+
+    def test_launch_manifest_change_during_saved_view_validation_is_rejected(self):
+        def validate(*args):
+            (self.root / 'fr5_training_split.json').write_text('{"changed":true}')
+            return {"representation": "raw"}
+        self.saved_view.side_effect = validate
+        with mock.patch.object(NativeSmolVLA, '_load_components', return_value=(object(), object(), object())):
+            with self.assertRaisesRegex(ContractError, 'LEARNED_CHECKPOINT_CHANGED'):
+                NativeSmolVLA.load(self.policy_dir)
 
     def test_empty_weights_and_missing_normalization_never_reach_model_load(self):
         with mock.patch.object(NativeSmolVLA, '_load_components') as components:

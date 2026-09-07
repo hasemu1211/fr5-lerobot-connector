@@ -1,0 +1,158 @@
+<!doctype html><html lang="ko"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>추천의 입력과 발행 경계 — 데이터 엔진 근거</title><link rel="stylesheet" href="../site.css"><script src="../source-return.js" defer></script></head><body><main class="source-page"><a href="../architecture.html#feedback">← 설명으로 돌아가기</a><h1>추천의 입력과 발행 경계</h1><p class="note">설명에 사용한 구현·측정 자료의 발췌이다. SHA-256은 발췌 전 원본 파일을 식별한다. 실행 PC의 절대 경로와 계정 정보는 포함하지 않으며, 측정값과 해석 조건을 함께 제시한다.</p><section id="loop-intent"><h2>폐루프의 기능 책임과 연구 질문</h2><p class="locator">main 32e709760d97ce9ec5c8bf365d36b005e674feda<br>openspec/changes/establish-portfolio-proof-loop-intent/design.md<br>sha256:5889bdaecd81acd15a8aa3e429238423c106ee1b01f2d2008c454675a69a7432</p><p class="note">원문 26–28행. 구현과 의도를 확인하는 발췌이며 실제 폐루프 실행 결과를 뜻하지 않는다.</p><pre>  26 7. 기능 책임은 폴더·에이전트 수가 아니라 결정과 canonical output으로 나눈다. Collection은 실제 수집과 scene 이어받기, Curation은 기존 데이터의 품질·분포·선별과 정확한 요청, 정책 학습·평가는 승인 데이터의 최적화와 checkpoint/processor 계약 및 고정 비교 평가를 소유한다. Rollout은 승인된 정책의 실행과 trial별 측정 근거를 소유하고, 평가 owner가 그 근거를 비교·집계한다. 획득 전략은 이 근거들로 다음 조건과 비용을 선택하되 실행은 기존 Collection/Rollout owner를 소비한다. 새로운 package나 서비스는 이 구분만으로 만들지 않는다.
+  27
+  28 8. Portfolio 표현은 모방학습·데이터 엔지니어링 직무의 독자가 연구 판단과 시스템 구현 역량을 확인하게 하는 별도 책임이다. 책임자가 실제 사용·근거 소비·외부 사례·렌더 검토를 통해 사례와 매체를 선택한다. Coordinator는 사실·공동 제품 방향을 조율하고 사람은 작은 초안에서 취향을 보정한다. 표현용 도구는 기존 도구 우선으로 필요할 때 격리된 로컬 환경에 복구 가능하게 준비할 수 있다. 공유 데스크톱 입력은 단일 조작자로 조율하고 독립적인 페이지·렌더 작업은 병렬화한다. 학습·ROS 환경 변경, 기존 데이터 변경, 유료 서비스와 외부 공개 권한은 이 표현 책임에 포함되지 않는다. 임시 에이전트 도구는 local-only로 유지한다.</pre></section><section id="recommendation-owner"><h2>Curator의 수집 추천 책임</h2><p>main a29213e의 공동 요구사항은 재사용 가능한 수집 추천을 Curator의 제품 소프트웨어 책임으로 지정한다. 목표 도해의 Acquisition Strategy는 이 책임을 나타낸다. 실제 소비는 Collection의 기존 authoring·계획·실행 경로에서 수행하도록 요구한다. 요구사항의 확정은 그 실행 연결의 완료 증거가 아니다.</p><p class="locator">main a29213eca8bad11a4fa3ece32bdab97028db2da1<br>openspec/changes/establish-portfolio-proof-loop-intent/specs/portfolio-proof-loop/spec.md<br>Requirement: Curator owns reusable acquisition recommendations<br>sha256:bd53bcb5a5d6f9c68cd6683ab0319399170dcdd81ff9112617bf56a9be8ec1b0</p></section><section id="loop-study"><h2>같은 수집 예산의 비교</h2><p class="locator">main 32e709760d97ce9ec5c8bf365d36b005e674feda<br>openspec/changes/establish-portfolio-proof-loop-intent/design.md<br>sha256:5889bdaecd81acd15a8aa3e429238423c106ee1b01f2d2008c454675a69a7432</p><p class="note">원문 76–85행. 구현과 의도를 확인하는 발췌이며 실제 폐루프 실행 결과를 뜻하지 않는다.</p><pre>  76 ### 연구 질문과 비용
+  77
+  78 최소화 대상은 연결 단계만이 아니라 검증할 질문에 불필요한 비용이다. 현재 선택 후보는 **같은 추가 수집 예산에서 정책 관측에 근거한 표적 수집이 기존 균형 수집보다 고정 조건의 정책 결과를 개선하는가**이다. 성공 시연 분석은 expert 자체의 문제와 정책 문제를 구분하는 기준선이며, 기하 분산이나 technical/semantic PASS만으로 학습 기여를 판정하지 않는다.
+  79
+  80 - [CUPID, CoRL 2025](https://proceedings.mlr.press/v305/agia25a.html)는 rollout return에 대한 demonstration 기여를 추정한다. 이는 FR5에서 coverage와 정책 유용성을 구분할 근거이지, influence-function 구현을 먼저 추가할 이유는 아니다.
+  81 - [Quality over Quantity, 2026-03 preprint](https://arxiv.org/html/2603.09056v1)는 목표 행동의 validation loss에 대한 기여를 다루며, 전이 단위의 선택이 일부 행동을 과대표집할 수 있음을 보고한다. FR5에서는 phase 분석과 전체 episode 선별을 우선 비교 후보로 삼되 논문의 GR00T/Franka 결과를 SmolVLA/FR5 재현 근거로 사용하지 않는다.
+  82 - [DataMIL](https://robin-lab.cs.utexas.edu/datamodels4imitation/)의 validation-loss 대리 지표는 저비용 탐색의 근거지만 최종 실물 성공률을 대체하지 않는다. 적응적 선택에 쓴 development 결과와 최종 비교 cohort를 분리한다.
+  83 - [AdaVLA, 2026-08, IROS accepted](https://arxiv.org/html/2608.29208v1)는 flow solver의 적응적 진행과 MLP pruning을 결합하고 SmolVLA 실물 실험도 보고한다. 현재 LeRobot SmolVLA의 solver 경계는 작은 독립 비교 후보다. 고정 step 기준선과 동일 입력·노이즈에서 총 지연, 함수 평가 수와 action 차이를 비교하고, 일부 solver만 적용하면 full AdaVLA 재현으로 부르지 않는다. 내부 flow 곡률은 물리 TCP 곡률이나 안전 확신도가 아니며 action 근접도 역시 실물 성공의 대리 증명은 아니다.
+  84
+  85 기존 7D·듀얼 RGB·조건/phase 계보·선별 요청·checkpoint/evaluation 계약을 재사용하고 실제 PC에서 학습·추론의 메모리와 시간을 측정해 실험 크기를 정한다. 추론 가속 등 저비용 독립 실험은 첫 폐루프 완료를 기다릴 필요가 없으며, 고정 baseline·같은 입력·품질과 시간 비교를 갖추어 판단한다. 과거 노트의 보류 목록은 영구 roadmap이 아니다. 이 선택은 연구·사용자 학습 노트·source/runtime을 종합한 제품 판단이며 새 알고리즘이나 성능 우위를 주장하지 않는다. 개선 없음도 판정 가능한 결과로 남긴다.</pre></section><section id="collection_recommendation_io"><h2>collection_recommendation_io.py</h2><p class="locator">tools/data_factory/collection_recommendation_io.py<br>sha256:b43c58591eec7610f95980730fa2fa72812063d817bc5e39b3d7962587d01268</p><p class="note">원문 전체.</p><pre>&quot;&quot;&quot;Explicit offline collection consumer; no runtime or collection callbacks.&quot;&quot;&quot;
+from __future__ import annotations
+
+import fcntl
+import json
+import os
+import sys
+import tempfile
+from pathlib import Path
+from typing import Sequence
+
+from tools.data_factory.campaign_operator import validate_compiled_authoring_evidence
+from tools.data_factory.collection_recommendation import derive_collection_recommendation
+from tools.data_factory.episode_ledger import (
+    _artifact,
+    validate_episode_ledger,
+    validate_episode_state,
+)
+from tools.fr5_data_factory import ContractArgumentParser, ContractError, load_json_strict
+
+
+def _publish(destination: Path, documents: dict) -&gt; None:
+    &quot;&quot;&quot;Publish both files together; cooperating callers reuse identical output.&quot;&quot;&quot;
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    descriptor = os.open(destination.parent, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        # A short root-directory lock covers publication, not source analysis.
+        fcntl.flock(descriptor, fcntl.LOCK_EX)
+        if destination.is_symlink() or destination.exists():
+            if (destination.is_symlink() or not destination.is_dir()
+                    or set(path.name for path in destination.iterdir()) != set(documents)):
+                raise ContractError(&quot;COLLECTION_RECOMMENDATION_OUTPUT_CONFLICT&quot;)
+            for name, value in documents.items():
+                path = destination / name
+                if path.is_symlink() or load_json_strict(path) != value:
+                    raise ContractError(&quot;COLLECTION_RECOMMENDATION_OUTPUT_CONFLICT&quot;)
+            return
+        with tempfile.TemporaryDirectory(prefix=&quot;.pending-&quot;, dir=destination.parent) as temporary:
+            staged = Path(temporary) / &quot;result&quot;
+            staged.mkdir()
+            for name, value in documents.items():
+                with (staged / name).open(&quot;x&quot;, encoding=&quot;utf-8&quot;) as stream:
+                    json.dump(value, stream, sort_keys=True, indent=2)
+                    stream.write(&quot;\n&quot;)
+            staged.rename(destination)
+    finally:
+        os.close(descriptor)
+
+
+def recommend_stored_collection(
+    *, run_directories: Sequence[str | Path], source_commit: str,
+    output_root: str | Path | None = None,
+) -&gt; dict:
+    &quot;&quot;&quot;Load canonical run evidence and optionally publish immutable derived files.
+
+    source_commit is a caller-supplied implementation label, not verified running
+    code identity or a historical run commit. This consumer does not attest Git.
+    Missing/invalid legacy sources are unavailable; never consult current config.
+    &quot;&quot;&quot;
+    if not run_directories:
+        raise ContractError(&quot;COLLECTION_RECOMMENDATION_RUNS_REQUIRED&quot;)
+    provenance = {&quot;source_commit&quot;: source_commit, &quot;verification&quot;: &quot;CALLER_SUPPLIED_UNVERIFIED&quot;}
+    try:
+        sources = None
+        evidence = []
+        protected = set()
+        for directory in run_directories:
+            root = Path(directory).resolve(strict=True)
+            protected.add(root)
+            authoring_path = root / &quot;compiled_authoring_evidence.json&quot;
+            if not authoring_path.is_file():
+                raise ContractError(&quot;COLLECTION_RECOMMENDATION_AUTHORING_UNAVAILABLE&quot;)
+            authoring = validate_compiled_authoring_evidence(load_json_strict(authoring_path))
+            if sources is not None and sources != authoring:
+                raise ContractError(&quot;COLLECTION_RECOMMENDATION_AUTHORING_MISMATCH&quot;)
+            sources = authoring
+            ledger = validate_episode_ledger(load_json_strict(root / &quot;episode_ledger.json&quot;))
+            state = validate_episode_state(
+                load_json_strict(root / &quot;episode_ledger_state.json&quot;), ledger=ledger,
+            )
+            protected.add(Path(ledger[&quot;dataset&quot;][&quot;dataset_root&quot;]).resolve(strict=True))
+            artifacts = {}
+            for name, ref in ledger[&quot;artifacts&quot;].items():
+                _, artifacts[name] = _artifact(
+                    ref, name=name, episode_index=ledger[&quot;episode&quot;][&quot;episode_index&quot;],
+                )
+                protected.add(Path(ref[&quot;artifact_path&quot;]).resolve(strict=True).parent)
+            if artifacts[&quot;manifest&quot;] != authoring[&quot;manifest&quot;]:
+                raise ContractError(&quot;COLLECTION_RECOMMENDATION_AUTHORING_MISMATCH&quot;)
+            if state[&quot;candidate&quot;] is None:
+                raise ContractError(&quot;COLLECTION_RECOMMENDATION_CANDIDATE_UNAVAILABLE&quot;)
+            _, candidate = _artifact(state[&quot;candidate&quot;], name=&quot;candidate&quot;, episode_index=0)
+            protected.add(Path(state[&quot;candidate&quot;][&quot;artifact_path&quot;]).resolve(strict=True).parent)
+            evidence.append({
+                &quot;manifest_order_index&quot;: artifacts[&quot;intent&quot;][&quot;order_index&quot;],
+                &quot;ledger&quot;: ledger, &quot;state&quot;: state, &quot;candidate&quot;: candidate, &quot;artifacts&quot;: artifacts,
+            })
+        report, recommendation = derive_collection_recommendation(
+            compiled_authoring=sources, episode_evidence=evidence, source_commit=source_commit,
+        )
+    except (ContractError, OSError) as exc:
+        return {
+            &quot;availability&quot;: &quot;UNAVAILABLE&quot;,
+            &quot;reason_codes&quot;: [str(exc) if isinstance(exc, ContractError)
+                             else &quot;COLLECTION_RECOMMENDATION_SOURCE_IO&quot;],
+            &quot;data_quality_analysis&quot;: None, &quot;recommendation&quot;: None, &quot;output_path&quot;: None,
+            &quot;implementation_provenance&quot;: provenance,
+        }
+    output_path = None
+    if output_root is not None:
+        destination = Path(output_root).resolve()
+        if any(destination.is_relative_to(path) or path.is_relative_to(destination)
+               for path in protected):
+            raise ContractError(&quot;COLLECTION_RECOMMENDATION_OUTPUT_OVERLAP&quot;)
+        destination = destination / recommendation[&quot;recommendation_digest&quot;].removeprefix(&quot;sha256:&quot;)
+        documents = {&quot;coverage_report.json&quot;: report, &quot;collection_recommendation.json&quot;: recommendation}
+        _publish(destination, documents)
+        output_path = str(destination)
+    return {
+        &quot;availability&quot;: &quot;AVAILABLE&quot;, &quot;reason_codes&quot;: [],
+        &quot;data_quality_analysis&quot;: report, &quot;recommendation&quot;: recommendation,
+        &quot;output_path&quot;: output_path,
+        &quot;implementation_provenance&quot;: provenance,
+    }
+
+
+def main(argv=None) -&gt; int:
+    parser = ContractArgumentParser(description=__doc__)
+    parser.add_argument(&quot;--run-dir&quot;, action=&quot;append&quot;, required=True)
+    parser.add_argument(&quot;--source-commit&quot;, required=True, help=&quot;caller-supplied implementation commit label (not attested)&quot;)
+    parser.add_argument(&quot;--output-root&quot;, required=True, help=&quot;exclusive derived output root&quot;)
+    try:
+        args = parser.parse_args(argv)
+        result = recommend_stored_collection(
+            run_directories=args.run_dir, source_commit=args.source_commit,
+            output_root=args.output_root,
+        )
+        print(json.dumps(result, sort_keys=True))
+        return 0 if result[&quot;availability&quot;] == &quot;AVAILABLE&quot; else 2
+    except (ContractError, OSError) as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
+
+
+if __name__ == &quot;__main__&quot;:
+    raise SystemExit(main())
+</pre></section></main></body></html>

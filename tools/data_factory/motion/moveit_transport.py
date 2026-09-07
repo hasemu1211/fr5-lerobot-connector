@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import base64
+import copy
 import math
 import time
 import xml.etree.ElementTree as ET
@@ -27,6 +28,10 @@ class _ActivePhase:
     goal_future: object | None = None
     goal_handle: object | None = None
     result_future: object | None = None
+    held_segment: dict | None = None
+    start_observation: dict | None = None
+    action_succeeded: bool = False
+    action_terminal_observation: dict | None = None
 
 
 def _rotation_quaternion(columns):
@@ -77,14 +82,14 @@ class RosMoveItTransport:
 
     def __init__(
         self, node, *, graph_timeout_s=1.0, preflight_timeout_s=5.0,
-        clock=time.monotonic,
+        clock=time.monotonic, gripper_source_clock=None,
     ):
         try:
             import rclpy
             from action_msgs.msg import GoalStatus
             from builtin_interfaces.msg import Duration
             from control_msgs.action import FollowJointTrajectory
-            from control_msgs.msg import JointTolerance, JointTrajectoryControllerState
+            from control_msgs.msg import JointTolerance, JointTrajectoryControllerState, DynamicJointState
             from geometry_msgs.msg import Pose
             from moveit_msgs.action import ExecuteTrajectory, MoveGroup
             from moveit_msgs.msg import (
@@ -161,9 +166,15 @@ class RosMoveItTransport:
         self._joint_state_received_at = None
         self._arm_controller_state = None
         self._arm_controller_received_at = None
+        self._gripper_hardware_state = None
+        self._gripper_hardware_received_at = None
+        from tools.data_factory.rollout.gripper_evidence import validate_clock_binding
+        self._gripper_source_clock = (validate_clock_binding(gripper_source_clock)
+                                      if gripper_source_clock is not None else None)
         self._gripper_controller_state = None
         self._gripper_controller_received_at = None
         self._robot_description = None
+        self._initial_snapshot_complete = False
         self._active = None
         self._execution_locked = False
         self._execute_goal_count = 0
@@ -175,6 +186,9 @@ class RosMoveItTransport:
         self._robot_description_subscription = None
         self._robot_description_client = None
         if hasattr(node, "create_subscription"):
+            if self._gripper_source_clock is not None:
+                self._gripper_hardware_subscription = node.create_subscription(
+                    DynamicJointState, "/dynamic_joint_states", self._on_gripper_hardware_state, 10)
             self._joint_state_subscription = node.create_subscription(
                 JointState, "/joint_states", self._on_joint_state, 10
             )
@@ -204,6 +218,18 @@ class RosMoveItTransport:
             self._robot_description_client = AsyncParameterClient(
                 node, "/robot_state_publisher"
             )
+
+    def _on_gripper_hardware_state(self, message):
+        self._gripper_hardware_state = message
+        self._gripper_hardware_received_at = self._clock()
+
+    def _gripper_hardware_evidence(self):
+        if (getattr(self, "_gripper_hardware_state", None) is None
+                or getattr(self, "_gripper_source_clock", None) is None):
+            return None
+        from tools.data_factory.rollout.gripper_evidence import decode_dynamic_state
+        return decode_dynamic_state(self._gripper_hardware_state, self._gripper_source_clock,
+                                    self._gripper_hardware_received_at)
 
     def _on_joint_state(self, message):
         self._joint_state = message
@@ -372,12 +398,20 @@ class RosMoveItTransport:
         except RuntimeError as exc:
             raise ContractError("ROS_EXEC_DESERIALIZATION", str(exc)) from exc
         if phase == "LEARNED_CHUNK":
-            if step_type != "ARM" or serialized != self.build_learned_trajectory(compiled_step.get("learned_proposal")):
+            if "action_range" not in compiled_step and step_type != "ARM":
+                raise ContractError("LEARNED_SERIALIZED_ACTION_MISMATCH")
+            expected = (self.build_learned_segment(compiled_step["learned_proposal"], compiled_step)
+                        if "action_range" in compiled_step else self.build_learned_trajectory(compiled_step.get("learned_proposal")))
+            # CDR alignment padding is not a trajectory field and can vary on
+            # reserialization. Compare every decoded field; send the approved one.
+            actual_message = goal.trajectory if step_type == "ARM" else goal
+            expected_message = self._deserialize_message(expected, self._RobotTrajectory if step_type == "ARM" else self._FollowJointTrajectory.Goal)
+            if actual_message != expected_message:
                 raise ContractError("LEARNED_SERIALIZED_ACTION_MISMATCH")
         return phase, step_type, goal, client, float(timeout)
 
     def start_phase(
-        self, compiled_step, *, cancel_event=None, cancel_timeout_s=None,
+        self, compiled_step, *, cancel_event=None, cancel_timeout_s=None, start_observation=None,
     ):
         """Start one approved serialized action and retain its sole active handle."""
         if self._execution_locked or self._active is not None:
@@ -394,7 +428,13 @@ class RosMoveItTransport:
         if phase == "LEARNED_CHUNK":
             from tools.data_factory.rollout.finite_plan import check_freshness
             check_freshness(compiled_step["learned_proposal"], time.time())
+            if "action_range" in compiled_step:
+                from tools.data_factory.rollout.finite_plan import check_segment_observation
+                check_segment_observation(compiled_step, start_observation, time.time(), steady_now=self._clock())
         active = _ActivePhase(phase, step_type, self._clock() + timeout)
+        if phase == "LEARNED_CHUNK" and step_type == "GRIPPER" and "action_range" in compiled_step:
+            active.held_segment = copy.deepcopy(compiled_step)
+            active.start_observation = copy.deepcopy(start_observation)
         self._active = active
         self._execution_locked = True
         if cancel_event is not None and cancel_event.is_set():
@@ -460,7 +500,8 @@ class RosMoveItTransport:
         if active.result_future is None:
             raise ContractError("ROS_EXEC_GOAL_PENDING")
         if self._clock() > active.deadline:
-            raise ContractError("ROS_EXEC_RESULT_TIMEOUT")
+            raise ContractError("LEARNED_HARDWARE_COMPLETION_TIMEOUT" if active.action_succeeded
+                                and active.held_segment is not None else "ROS_EXEC_RESULT_TIMEOUT")
         try:
             if not active.result_future.done():
                 self._rclpy.spin_once(self.node, timeout_sec=0.0)
@@ -469,8 +510,8 @@ class RosMoveItTransport:
             result = active.result_future.result()
         except RuntimeError as exc:
             raise ContractError("ROS_EXEC_RESULT_FAILED", str(exc)) from exc
-        self._active = None
         if result.status != self._goal_succeeded:
+            self._active = None
             self._execution_locked = True
             raise ContractError("ROS_EXEC_FAILED")
         if active.type == "ARM":
@@ -478,9 +519,52 @@ class RosMoveItTransport:
         else:
             succeeded = result.result.error_code == self._gripper_success
         if not succeeded:
+            self._active = None
             self._execution_locked = True
             raise ContractError("ROS_EXEC_FAILED")
+        if active.held_segment is not None:
+            if not active.action_succeeded:
+                active.action_terminal_observation = {
+                    "result_status": result.status, "error_code": result.result.error_code,
+                    "observed_at_s": time.time(), "observed_monotonic_s": self._clock()}
+            active.action_succeeded = True
+            if self._execution_locked:
+                raise ContractError("ROS_EXEC_CANCELLED")
+            completed = self._held_hardware_completed(active)
+            if self._execution_locked:
+                raise ContractError("ROS_EXEC_CANCELLED")
+            if not completed:
+                return None
+        self._active = None
         return active
+
+    def _held_hardware_completed(self, active):
+        """Observe one retained command; never resend, renew its deadline or replan."""
+        from tools.data_factory.rollout.finite_plan import check_freshness, check_segment_observation, _number
+        from tools.data_factory.rollout.gripper_evidence import check_transition
+        segment = active.held_segment
+        self._rclpy.spin_once(self.node, timeout_sec=0.0)
+        snapshot = self.snapshot(segment["max_joint_state_age_s"])
+        now, steady = time.time(), self._clock()
+        if steady > active.deadline:
+            raise ContractError("LEARNED_HARDWARE_COMPLETION_TIMEOUT")
+        check_freshness(segment["learned_proposal"], now)
+        evidence = {"captured_at_s": now, "captured_monotonic_s": steady, "snapshot": snapshot}
+        try:
+            check_segment_observation(segment, evidence, now, steady_now=steady, allow_pending=True)
+        except ContractError as exc:
+            if exc.code == "START_STATE_MISMATCH":
+                raise ContractError("LEARNED_TERMINAL_STATE") from exc
+            raise
+        check_transition(active.start_observation, evidence, command=True, allow_queued=True)
+        wire = snapshot["gripper_controller"]["hardware_execution"]["wire"]
+        reference = _number(snapshot["gripper_controller"]["reference_position_m"], "GRIPPER_FEEDBACK_OUT_OF_RANGE")
+        if any(abs(value - segment["gripper_position_m"]) > 1e-9 for value in (reference, wire["raw_reference_m"])):
+            raise ContractError("GRIPPER_FEEDBACK_OUT_OF_RANGE")
+        if wire["completed_generation"] != wire["generation"]:
+            return False
+        check_segment_observation(segment, evidence, now, steady_now=steady, terminal=True)
+        return True
 
     def cancel_active(self, cancel_timeout_s):
         """Cancel the active action, retaining non-cancel results for evidence."""
@@ -495,6 +579,11 @@ class RosMoveItTransport:
         ):
             raise ContractError("ROS_EXEC_CANCEL_TIMEOUT")
         self._execution_locked = True
+        if getattr(active, "action_succeeded", False):
+            # JTC is already terminal. A cancel request fences the handoff but
+            # cannot manufacture CANCELED or stop an in-flight hardware RPC.
+            # Keep the actual terminal result for poll_terminal_evidence.
+            raise ContractError("ROS_EXEC_CANCEL_NOT_CANCELED")
         try:
             if active.goal_handle is None:
                 if active.goal_future is None:
@@ -529,7 +618,7 @@ class RosMoveItTransport:
 
     @property
     def owns_active_goal(self):
-        """Report whether this transport still owns a nonterminal action."""
+        """Report ownership of an action, native handoff or unresolved cancellation."""
         return getattr(self, "_active", None) is not None
 
     def poll_terminal_evidence(self):
@@ -537,6 +626,10 @@ class RosMoveItTransport:
         active = getattr(self, "_active", None)
         if active is None:
             raise ContractError("ROS_EXEC_NO_ACTIVE")
+        if getattr(active, "action_succeeded", False) and not self._execution_locked:
+            # A normal hardware handoff is still owned; diagnostic polling must
+            # not release it early. After cancellation, report the actual JTC result.
+            return None
         try:
             if active.goal_handle is None:
                 if active.goal_future is None:
@@ -603,7 +696,13 @@ class RosMoveItTransport:
         ):
             raise ContractError("ROS_SNAPSHOT_AGE")
         max_age_s = float(max_age_s)
-        deadline = time.monotonic() + self.graph_timeout_s
+        # New DDS participants need discovery time, not a relaxed sample age.
+        # After one complete snapshot, retain the short live observation budget.
+        timeout = (
+            self.graph_timeout_s if self._initial_snapshot_complete
+            else self.preflight_timeout_s
+        )
+        deadline = time.monotonic() + timeout
         self._load_robot_description_parameter(deadline)
         while (
             self._joint_state_received_at is None
@@ -651,7 +750,8 @@ class RosMoveItTransport:
         gripper_speed = self._gripper_controller_state.speed_scaling_factor
         if not isinstance(gripper_speed, (int, float)) or not math.isfinite(gripper_speed):
             raise ContractError("ROS_GRIPPER_CONTROLLER_STATE")
-        return {
+        hardware = self._gripper_hardware_evidence()
+        observation = {
             "joint_positions": [by_name[name] for name in JOINT_ORDER],
             "joint_state_age_s": joint_age,
             "gripper_settings": self._gripper_settings(),
@@ -672,8 +772,11 @@ class RosMoveItTransport:
                 "speed_scaling": float(gripper_speed),
                 "reference_position_m": gripper_values["reference"]["finger_right_joint"],
                 "feedback_position_m": gripper_values["feedback"]["finger_right_joint"],
+                **({"hardware_execution": hardware} if hardware is not None else {}),
             },
         }
+        self._initial_snapshot_complete = True
+        return observation
 
     def _load_robot_description_parameter(self, deadline):
         client = self._robot_description_client
@@ -892,28 +995,38 @@ class RosMoveItTransport:
         request_type = self._GetStateValidity.Request
         gripper = float(initial_gripper)
         samples, failures = [], []
+        feedback_bounds = None
 
         def check(label, joints):
             if len(joints) != len(JOINT_ORDER) or any(not math.isfinite(value) for value in joints):
                 raise ContractError("COLLISION_STATE")
-            request = request_type()
-            request.group_name = "" if "learned_proposal" in plan else plan["frames"]["planning_group"]
-            request.robot_state = self._RobotState(
-                joint_state=self._JointState(
-                    name=[*JOINT_ORDER, "finger_right_joint"],
-                    position=[*map(float, joints), float(gripper)],
+            positions = [gripper] if feedback_bounds is None else sorted({gripper, *feedback_bounds.values()})
+            for position in positions:
+                request = request_type()
+                request.group_name = "" if "learned_proposal" in plan else plan["frames"]["planning_group"]
+                request.robot_state = self._RobotState(
+                    joint_state=self._JointState(
+                        name=[*JOINT_ORDER, "finger_right_joint"],
+                        position=[*map(float, joints), float(position)],
+                    )
                 )
-            )
-            response = self._service(self._GetStateValidity, "/check_state_validity", request, "COLLISION_SERVICE")
-            evidence = {"label": label, "joints_rad": list(map(float, joints)), "finger_right_joint_m": float(gripper), "valid": bool(getattr(response, "valid", False))}
-            samples.append(evidence)
-            if not evidence["valid"]:
-                failures.append(evidence)
+                response = self._service(self._GetStateValidity, "/check_state_validity", request, "COLLISION_SERVICE")
+                evidence = {"label": label, "joints_rad": list(map(float, joints)), "finger_right_joint_m": float(position), "valid": bool(getattr(response, "valid", False))}
+                samples.append(evidence)
+                if not evidence["valid"]:
+                    failures.append(evidence)
 
         check("initial", plan["initial_joint_state"])
-        for step in plan["steps"]:
+        for step in (segment for outer in plan["steps"] for segment in outer.get("held_target_segments", [outer])):
+            feedback_bounds = step.get("acceptable_feedback_m") if step["type"] == "ARM" else None
             if step["type"] == "GRIPPER":
-                gripper = step.get("gripper_position_m", plan["gripper_requirements"]["command_position_m"])
+                target = step.get("gripper_position_m", plan["gripper_requirements"]["command_position_m"])
+                if "action_range" in step:
+                    start = gripper
+                    for part in range(1, 5):
+                        gripper = start + (target - start) * part / 5
+                        check(f"{step['phase']}:gripper:{part}", step["final_joint_state"])
+                gripper = target
                 check(step["phase"], step["final_joint_state"])
                 continue
             try:
@@ -923,7 +1036,7 @@ class RosMoveItTransport:
                 names, points = list(trajectory.joint_names), list(trajectory.points)
             except (ValueError, RuntimeError, TypeError) as exc:
                 raise ContractError("COLLISION_TRAJECTORY", str(exc)) from exc
-            learned = step["phase"] == "LEARNED_CHUNK"
+            learned = step["phase"] == "LEARNED_CHUNK" and "action_range" not in step
             expected_names = [*JOINT_ORDER, "finger_right_joint"] if learned else JOINT_ORDER
             if names != expected_names or not points:
                 raise ContractError("COLLISION_TRAJECTORY")
@@ -1212,14 +1325,42 @@ class RosMoveItTransport:
         No retiming, clipping, delta conversion or secondary gripper goal is used.
         Controller support for the combined trajectory needs physical qualification.
         """
-        from tools.data_factory.rollout.finite_plan import validate_proposal, JOINTS
+        from tools.data_factory.rollout.finite_plan import validate_proposal, JOINTS, PROPOSAL_SCHEMA
         proposal = validate_proposal(proposal)
+        if proposal["schema_version"] != PROPOSAL_SCHEMA:
+            raise ContractError("LEARNED_HELD_SEGMENTS_REQUIRED")
         trajectory = self._RobotTrajectory()
         trajectory.joint_trajectory.joint_names = list(JOINTS)
         for index, row in enumerate([proposal["initial_state"], *proposal["actions"]]):
             point = self._JointTrajectoryPoint()
             point.positions = list(map(float, row))
             point.time_from_start = self._duration(index * proposal["period_s"])
+            trajectory.joint_trajectory.points.append(point)
+        return self._serialize_message(trajectory)
+
+    def build_learned_segment(self, proposal, segment):
+        """Serialize a frozen held target or six-joint slice, without rebasing."""
+        from tools.data_factory.rollout.finite_plan import validate_proposal, HELD_PROPOSAL_SCHEMA
+        p = validate_proposal(proposal)
+        start, end = segment["action_range"]
+        if (p["schema_version"] != HELD_PROPOSAL_SCHEMA or type(start) is not int or type(end) is not int
+                or not 0 <= start <= end <= len(p["actions"]) or start == len(p["actions"])
+                or p["actions"][start][-1] != segment["gripper_position_m"]):
+            raise ContractError("LEARNED_SEGMENT_BINDING")
+        if segment["type"] == "GRIPPER":
+            if start != end or segment["limits"] != segment["gripper_limits"]:
+                raise ContractError("LEARNED_SEGMENT_BINDING")
+            return self.build_gripper_goal("LEARNED_CHUNK", segment["gripper_position_m"], segment["limits"])
+        if (segment["type"] != "ARM" or start == end
+                or any(row[-1] != segment["gripper_position_m"] for row in p["actions"][start:end])):
+            raise ContractError("LEARNED_SEGMENT_BINDING")
+        trajectory = self._RobotTrajectory()
+        trajectory.joint_trajectory.joint_names = list(JOINT_ORDER)
+        initial = p["initial_state"] if start == 0 else p["actions"][start - 1]
+        for index, row in enumerate([initial, *p["actions"][start:end]]):
+            point = self._JointTrajectoryPoint()
+            point.positions = list(map(float, row[:6]))
+            point.time_from_start = self._duration(index * p["period_s"])
             trajectory.joint_trajectory.points.append(point)
         return self._serialize_message(trajectory)
 

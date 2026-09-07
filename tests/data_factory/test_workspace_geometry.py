@@ -146,6 +146,31 @@ class WorkspaceGeometryTests(unittest.TestCase):
             for point in shared for single in singles
         ))
 
+    def test_empty_erosion_cannot_return_an_inverted_convex_polygon(self):
+        square = [(0, 0), (20, 0), (20, 20), (0, 20)]
+        for angle in (0, 30):
+            with self.subTest(angle=angle), self.assertRaisesRegex(ValueError, "safe_polygon"):
+                safe_convex_polygon_for_yaws(
+                    polygon=[rotate_xy(point, angle) for point in square],
+                    object_size_xy_mm=(24, 24), uncertainty_mm=5,
+                    yaw_degs=(angle,),
+                )
+
+    def test_eroded_vertices_keep_the_whole_footprint_inside_the_original_zone(self):
+        layout = make_red_blue_region_layout()
+        polygons = [workspace_region(layout, place)["polygon_local_xy_mm"] for place in ("PLACE_A", "PLACE_B")]
+        polygons.append([(-100, -60), (100, -40), (80, 60), (-90, 70)])
+        for polygon in polygons:
+            safe = safe_convex_polygon_for_yaws(
+                polygon=polygon, object_size_xy_mm=(30, 18),
+                uncertainty_mm=4, yaw_degs=(-35, 20),
+            )
+            for x, y in safe:
+                for yaw in (-35, 20):
+                    for corner in ((-15, -9), (-15, 9), (15, -9), (15, 9)):
+                        dx, dy = rotate_xy(corner, yaw)
+                        self.assertTrue(point_in_convex_polygon((x + dx, y + dy), polygon))
+
     def test_each_safe_cell_is_sampled_area_uniformly_across_seeds(self):
         polygon = [(-1, -1), (1, -1), (1, 1), (-1, 1)]
         points = [

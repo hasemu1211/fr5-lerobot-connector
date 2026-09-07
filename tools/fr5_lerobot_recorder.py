@@ -106,6 +106,7 @@ class FR5LeRobotRecorder(Node):
         self.alignment_failures = 0
         self.alignment_failure_sources = {"state": 0, "arm_action": 0, "gripper_action": 0, "transport": 0}
         self.alignment_failure_sources.update({f"image.{name}": 0 for name in self.camera_names})
+        self.first_transport_failure = None
         self.writer_error: Exception | None = None
         self._storage_monitor: dict | None = None
         self.ready_logged = False
@@ -183,6 +184,7 @@ class FR5LeRobotRecorder(Node):
                 actual = dataset.meta.features.get(key)
                 if actual is None or actual["dtype"] != spec["dtype"] or list(actual["shape"]) != spec["shape"] or actual.get("names") != spec.get("names"):
                     raise SystemExit(f"Existing dataset feature mismatch for {key}: {actual} != {spec}")
+            self._bound_image_writer(dataset)
             return dataset
         if root.exists() and any(root.iterdir()):
             raise SystemExit(
@@ -190,7 +192,7 @@ class FR5LeRobotRecorder(Node):
             )
         if root.exists():
             root.rmdir()
-        return self.LeRobotDataset.create(
+        dataset = self.LeRobotDataset.create(
             repo_id=self.args.repo_id,
             fps=self.args.fps,
             root=root,
@@ -201,13 +203,53 @@ class FR5LeRobotRecorder(Node):
             rgb_encoder=rgb_encoder,
             **encoder_options,
         )
+        self._bound_image_writer(dataset)
+        return dataset
+
+    def _bound_image_writer(self, dataset) -> None:
+        """Configure the native thread queue before any row producer starts.
+
+        LeRobot has no queue-capacity argument. Keep the exact Queue already
+        held by its consumers; replacing it would strand those threads. This
+        startup-only adapter relies on CPython Queue internals and is covered
+        against the installed native writer. No global/dependency patching.
+        """
+        image_writer = getattr(dataset.writer, "image_writer", None)
+        if image_writer is None:
+            return
+        pending = getattr(image_writer, "queue", None)
+        if not isinstance(pending, queue.Queue):
+            raise RuntimeError("IMAGE_WRITER_QUEUE_UNSUPPORTED")
+        capacity = self.args.writer_queue_size * len(self.camera_names)
+        with pending.mutex:
+            if pending.unfinished_tasks:
+                raise RuntimeError("IMAGE_WRITER_ALREADY_ACTIVE")
+            pending.maxsize = min(pending.maxsize, capacity) if pending.maxsize > 0 else capacity
 
     def _drain_image_writer(self) -> None:
-        """Wait for LeRobot's bounded image workers at lifecycle barriers."""
+        """Drain LeRobot image workers; their queue is not necessarily bounded."""
         writer = getattr(self.dataset, "writer", None)
         image_writer = getattr(writer, "image_writer", None)
         if image_writer is not None:
             image_writer.wait_until_done()
+
+    def _image_writer_metrics(self) -> dict:
+        """Observe the downstream PNG queue, not the upstream aligned-row queue.
+
+        Queue size is a sample, not a durability or health verdict. Unknown
+        upstream implementations must not be reported as an empty queue.
+        """
+        writer = getattr(self.dataset, "writer", None)
+        image_writer = getattr(writer, "image_writer", None)
+        pending = getattr(image_writer, "queue", None)
+        if not isinstance(pending, queue.Queue):
+            return {"status": "NOT_AVAILABLE"}
+        return {
+            "status": "AVAILABLE",
+            "queued_images": pending.qsize(),
+            "capacity_images": pending.maxsize if pending.maxsize > 0 else None,
+            "sampled_high_water_images": getattr(self, "image_writer_high_water", 0),
+        }
 
     def _reset_episode(self) -> None:
         # Invalidate targets that the sampler computed before this reset.  The
@@ -232,11 +274,13 @@ class FR5LeRobotRecorder(Node):
         self.enqueue_attempts = 0
         self.writer_queue_drops = 0
         self.writer_queue_high_water = 0
+        self.image_writer_high_water = 0
         self.stale_sample_skips = 0
         self.missing_action_skips = 0
         self.alignment_failures = 0
         self.alignment_failure_sources = {"state": 0, "arm_action": 0, "gripper_action": 0, "transport": 0}
         self.alignment_failure_sources.update({f"image.{name}": 0 for name in self.camera_names})
+        self.first_transport_failure = None
         self.writer_error = None
         self.next_target_stamp = None
         self.alignment_tail_target_ros_s = None
@@ -259,10 +303,13 @@ class FR5LeRobotRecorder(Node):
                 "writer_queue": self.writer_queue.qsize(),
                 "writer_queue_high_water": getattr(self, "writer_queue_high_water", 0),
                 "writer_queue_drops": self.writer_queue_drops,
+                "image_writer": self._image_writer_metrics(),
                 "alignment_failures": self.alignment_failures,
                 "alignment_failure_sources": dict(getattr(
                     self, "alignment_failure_sources", {},
                 )),
+                **({"first_transport_failure": dict(self.first_transport_failure)}
+                   if getattr(self, "first_transport_failure", None) is not None else {}),
                 "observed_monotonic_ns": time.monotonic_ns(),
                 **({"commit_stage_seconds": dict(getattr(self, "commit_stage_seconds", {}))}
                    if getattr(self, "commit_stage_seconds", {}) else {}),
@@ -809,6 +856,7 @@ class FR5LeRobotRecorder(Node):
             "state_age_max_ms": float(max(self.state_ages) * 1000) if self.state_ages else None,
             "writer_queue_drops": self.writer_queue_drops,
             "writer_queue_high_water": getattr(self, "writer_queue_high_water", 0),
+            "image_writer": self._image_writer_metrics(),
             "stale_sample_skips": self.stale_sample_skips,
             "missing_action_skips": self.missing_action_skips,
             "alignment_failures": self.alignment_failures,
@@ -1371,6 +1419,7 @@ class FR5LeRobotRecorder(Node):
 
     def _record_alignment_failure(
         self, sources, *, sampler_epoch: int | None = None,
+        transport_failure: dict | None = None,
     ) -> None:
         with self.lock:
             if (
@@ -1381,6 +1430,8 @@ class FR5LeRobotRecorder(Node):
             self.alignment_failures += 1
             for source in sources:
                 self.alignment_failure_sources[source] += 1
+            if transport_failure is not None and self.first_transport_failure is None:
+                self.first_transport_failure = dict(transport_failure)
 
     def _aligned_sample(
         self, target_stamp: float, *, sampler_epoch: int | None = None,
@@ -1391,6 +1442,7 @@ class FR5LeRobotRecorder(Node):
                 and sampler_epoch != getattr(self, "sampler_epoch", 0)
             ):
                 return None
+            sample_epoch = getattr(self, "sampler_epoch", 0)
             state = interpolate_vector(self.joint_states, target_stamp, self.args.state_max_age)
             arm = interpolate_vector(self.arm_actions, target_stamp, self.args.action_sync_slop)
             gripper = latest_sample(self.gripper_actions, target_stamp, self.args.action_max_age)
@@ -1412,9 +1464,18 @@ class FR5LeRobotRecorder(Node):
         transport_ages = {
             camera: sample[3] - sample[2] for camera, sample in camera_samples.items()
         }
-        if any(age < 0 or age > self.args.image_max_age for age in transport_ages.values()):
-            self._record_alignment_failure(("transport",), sampler_epoch=sampler_epoch)
-            return None
+        for camera, age in transport_ages.items():
+            if age < 0 or age > self.args.image_max_age:
+                # Retain one failing camera at the first rejected target, in
+                # configured camera order. The epoch check and capture are atomic.
+                self._record_alignment_failure(("transport",), sampler_epoch=sample_epoch, transport_failure={
+                    "camera": camera, "target_ros_s": target_stamp,
+                    "image_raw_ros_s": camera_samples[camera][2],
+                    "image_received_ros_s": camera_samples[camera][3],
+                    "transport_age_s": age, "image_max_age_s": self.args.image_max_age,
+                    "sampler_epoch": sample_epoch,
+                })
+                return None
         images = tuple(camera_samples[camera][1] for camera in self.camera_names)
         action = np.r_[arm_value, gripper_value].astype(np.float32)
         image_errors = {
@@ -1529,8 +1590,13 @@ class FR5LeRobotRecorder(Node):
         for camera, image in zip(self.camera_names, images):
             frame[f"observation.images.{camera}"] = image
         self.dataset.add_frame(frame)
+        image_writer_metrics = self._image_writer_metrics()
         quality_images = ()
         with self.lock:
+            self.image_writer_high_water = max(
+                getattr(self, "image_writer_high_water", 0),
+                image_writer_metrics.get("queued_images", 0),
+            )
             self.frames += 1
             self.frame_stamps.append(row_stamp)
             self.sync_spans.append(sync_span)

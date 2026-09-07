@@ -940,6 +940,67 @@ class PhysicalEnvironmentTests(unittest.TestCase):
                 state["command_calls"],
             )
 
+    def test_identical_camera_rebind_refreshes_ready_without_stopping_children(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.make_uvc_links(root)
+            state = {"maintenance": False, "robot": False, "camera": False}
+            environment, calls = self.build(root, state)
+            self.assertEqual(environment.prepare_environment()["state"], "READY")
+            before = environment.stack.status()["children"]
+            process_count = len(calls["process"])
+            maintenance_count = len(calls["maintenance"])
+            for selected in (profile("up"), {**profile("up"), "repo_id": "local/other"}):
+                queries = len(state["command_calls"])
+                rebound = environment.rebind_cameras(selected, {"up": uvc(root, UP_DEVICE)})
+                self.assertEqual(rebound["state"], "READY")
+                self.assertGreater(len(state["command_calls"]), queries)
+                self.assertEqual(environment.stack.status()["children"], before)
+                self.assertEqual(len(calls["process"]), process_count)
+                self.assertEqual(len(calls["maintenance"]), maintenance_count)
+                self.assertTrue(state["robot"] and state["camera"])
+
+    def test_identical_camera_rebind_does_not_reuse_unhealthy_readiness(self):
+        for failure in ("query_forbidden", "camera_node_lag", "camera_returncode"):
+            with self.subTest(failure=failure), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                self.make_uvc_links(root)
+                state = {"maintenance": False, "robot": False, "camera": False}
+                environment, calls = self.build(root, state)
+                self.assertEqual(environment.prepare_environment()["state"], "READY")
+                process_count = len(calls["process"])
+                state[failure] = 7
+                if failure == "camera_returncode":
+                    state["camera"] = False
+                rebound = environment.rebind_cameras(profile("up"), {"up": uvc(root, UP_DEVICE)})
+                self.assertEqual(rebound["state"], "BLOCKED" if failure == "query_forbidden" else "SETUP_REQUIRED")
+                if failure == "query_forbidden":
+                    self.assertEqual(rebound["components"]["camera"]["reason"], "OPERATOR_ENVIRONMENT_QUERY_FAILED")
+                else:
+                    self.assertEqual(rebound["components"]["camera"]["state"], "MISSING")
+                self.assertEqual(len(calls["process"]), process_count)
+                self.assertTrue(state["robot"])
+                self.assertFalse(state["camera"])
+
+    def test_camera_launch_setting_change_still_requires_prepare(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.make_uvc_links(root)
+            state = {"maintenance": False, "robot": False, "camera": False}
+            environment, calls = self.build(root, state)
+            self.assertEqual(environment.prepare_environment()["state"], "READY")
+            process_count = len(calls["process"])
+            rebound = environment.rebind_cameras(
+                {**profile("up"), "fps": 15}, {"up": uvc(root, UP_DEVICE)},
+            )
+            self.assertEqual(rebound["state"], "SETUP_REQUIRED")
+            self.assertTrue(state["robot"])
+            self.assertFalse(state["camera"])
+            self.assertEqual(len(calls["process"]), process_count)
+            self.assertEqual(environment.prepare_environment()["state"], "READY")
+            self.assertEqual(len(calls["process"]), process_count + 1)
+            self.assertIn("CAMERA_FPS=15", calls["process"][-1])
+
     def test_camera_rebind_and_stop_preserve_the_owned_motion_child(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

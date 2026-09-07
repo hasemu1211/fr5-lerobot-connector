@@ -2,6 +2,89 @@
 
 ## ADDED Requirements
 
+### Requirement: Demonstration trial choices are grounded in recorded duration
+
+Collection motion trial selection SHALL state the intended demonstration timing and task boundary before treating planner percentages as a candidate choice. Existing phase policy SHALL be reused when it meets the bounded timing hypothesis. Reference demonstrations SHALL remain evidence of possible cadence, not FR5 safety limits, matched-task performance or physical qualification. The current constraint is that only root may validate candidate motion physically; the next consumer is the existing finite TEST_COLLECTION flow and exact-plan execution owner.
+
+#### Scenario: Native phase policy can test the timing hypothesis
+
+- **WHEN** the recorded FR5 pickup is dominated by unladen approach and air alignment, and a candidate has inspected native plans for the same endpoints
+- **THEN** the candidate decision identifies the exact preset, source plan and recorded phase interval, calculates the expected change in recorded time, and preserves geometry, staged gripper release and qualification authority
+- **AND** unrecorded reset time is reported separately; SO channel values without verified units are not treated as angular velocities, and unlike reference tasks are not treated as matched benchmarks
+- **AND** no validator ceiling change, new runtime timing controller or additional human gate is introduced merely to choose another percentage.
+
+#### Scenario: Physical observation falsifies the prediction
+
+- **WHEN** the same native trial does not reduce the dominant observed durations, or tracking, settling, contact/release, synchronization or accepted episode quality worsens
+- **THEN** the duration hypothesis is revised or rejected using existing plan, phase-event and episode evidence
+- **AND** shorter software plans alone do not establish a useful physical demonstration or confer production qualification.
+
+#### Scenario: Reference cadence does not identify an appropriate phase budget
+
+- **WHEN** a candidate's predicted total lies inside an unrelated demonstration-duration range but matched displacement, orientation, phase boundaries or endpoint velocities are missing
+- **THEN** the product owner reports feasibility separately from duration selection and does not promote the candidate as empirically selected
+- **AND** the owner identifies the smallest missing discriminating evidence; a configured dynamic lower bound is not substituted for an appropriate or safe demonstration duration.
+
+### Requirement: Finite candidate speed trials use the existing Collection authority
+
+The native Collection application SHALL make a registered candidate motion preset usable in TEST_COLLECTION through the existing finite campaign. GENERAL_COLLECTION SHALL still require exact production qualification for every selected endpoint. The browser and automation SHALL select only the native preset identity and digest; trial scope SHALL derive from trusted application mode, never serialized program metadata. Trial selection or success SHALL NOT confer qualification; subsequent explicit engineering registration belongs to the existing qualification owner and does not establish an empirical optimum. The next consumer is the existing Collection executor and root-owned physical validation.
+
+#### Scenario: Compile and consume a candidate trial
+
+- **WHEN** the user chooses a candidate with eligible v2 base qualifications in TEST_COLLECTION and compiles a finite A/B draft
+- **THEN** the existing resolver, live episode and postcommit reposition consumers receive the explicitly bound trial mode and exact candidate arm scaling
+- **AND** base qualification bytes, geometry, timeouts and staged gripper behavior remain unchanged; HOME recovery and movement to a qualified start keep their existing qualified policy, visibly distinguished from in-job trial motion
+- **AND** all existing scene, cell, exact-plan, campaign and single-motion-owner gates remain necessary; trial selection adds no acknowledgment and grants no production, semantic or training authority.
+
+#### Scenario: Choose the bounded demonstration-rhythm candidate
+
+- **WHEN** the person or automation selects `demonstration-rhythm-r001` through the existing native TEST_COLLECTION draft
+- **THEN** all eight in-job ARM phases resolve velocity and acceleration scaling to 0.1, including alignment, final approach, lift and lower; all existing preset files remain byte-identical
+- **AND** trial selection preserves gripper steps including staged opening and grants no production authority; GENERAL_COLLECTION requires separate exact production qualification for each selected endpoint
+- **AND** predicted recording duration is presented as a hypothesis distinct from actual execution evidence; observed timing and technical success do not establish an empirical optimum or semantic/training approval.
+
+#### Scenario: Explicit later registration permits only matched qualified recipes
+
+- **WHEN** the engineering owner separately registers demonstration-rhythm-r001 for the PLACE_A base recipe using the native v3 derivation and a new decision timestamp
+- **THEN** the native catalog matches its unchanged base geometry and exact preset digest, and A production selection and finite compilation use that qualified artifact without trial authority
+- **AND** the original v2 and preset remain unchanged; routes requiring unregistered B or another unqualified policy still reject before physical effects
+- **AND** campaign authorization and scene/cell/hardware/exact-plan/single-owner gates remain necessary; one observed A pickup and same-position release do not prove all A poses/tasks, A/B transfer or a success distribution, and confer no semantic or training approval.
+
+#### Scenario: Production and changed inputs remain blocked
+
+- **WHEN** the same unqualified candidate is selected in GENERAL_COLLECTION, or a selected preset changes before compilation or start
+- **THEN** the application rejects the ineligible or stale binding before external effects instead of copying QUALIFIED flags or silently substituting another policy; unsupported legacy qualification versions are not displayed as trial-available
+- **AND** existing configurations without a preset and exactly qualified preset configurations retain their prior resolution behavior.
+
+#### Scenario: Recover a choice or a failed trial without repeating execution
+
+- **WHEN** a preset-choice response is lost or a finite trial fails
+- **THEN** the Web flow reads canonical state, preserves object placement and later draft edits, and offers the existing keep/edit/recovery actions
+- **AND** it never automatically replays compilation, authorization or motion; stale intent retries do not create another campaign or restart the failed episode.
+
+### Requirement: Exact native episode inspection returns to its original review
+
+The existing prepared training review SHALL offer read-only native LeRobot/Rerun inspection of a named episode in its frozen batch. The server SHALL derive dataset paths from that prepared target; the browser SHALL send only the expected batch identity and episode index through the existing fresh-view intent contract. Inspection SHALL NOT approve, refuse, relabel, collect, train or authorize motion. The original preview and independent approval actions SHALL remain available after viewer failure or return.
+
+#### Scenario: Open, inspect and return
+
+- **WHEN** a person selects a committed episode in the existing Web review
+- **THEN** the product opens the installed native viewer with synchronized UP/WRIST, action and state, and exposes the exact episode, dataset digest, feature order/units and canonical global/local frame mapping
+- **AND** the person can inspect a nonterminal frame and return to the same batch and episode without path transcription, a new approval or an automatic decision retry.
+
+#### Scenario: Evidence changes or the viewer cannot complete
+
+- **WHEN** the target is missing, changed, outside the prepared batch, or has an unsupported frame/feature mapping
+- **THEN** inspection rejects or explicitly reports that the prior target is no longer current, without changing the review's evidence or authority
+- **AND** an export/viewer failure remains an inspection error; lost responses use the existing canonical state read without repeating the command.
+
+#### Scenario: Exploration stays bounded and local
+
+- **WHEN** native inspection runs
+- **THEN** only one episode is exported per review process, with finite frame, output, resident-memory and lifetime limits; export uses local offline data and no GPU model
+- **AND** viewer endpoints bind loopback, temporary output remains server-owned, and return, expiry or application shutdown cleans up only owned processes and temporary artifacts
+- **AND** the Web flow closes its own viewer tab on return when it retains that tab handle; reloading the review does not grant authority over unrelated browser tabs.
+
 ### Requirement: Recover current training-review evidence without repeating authority
 
 When a training-review intent response fails, the product SHALL make one automatic read of the existing canonical view and render the returned review status, exact batch and available operations. It SHALL NOT resend the intent or infer approval from a transport error. A successful read SHALL remove the need for an extra human refresh merely to discover an already completed result. Human and automation surfaces SHALL derive review meaning from the same domain projection; neither surface grants authority by refreshing it.
@@ -85,3 +168,176 @@ For an existing native Curator review run, the product SHALL let a local person 
 - **WHEN** publication and its receipt are committed but the review video subsequently becomes missing or corrupt
 - **THEN** the page distinguishes the native committed decision/receipt from unavailable playback evidence
 - **AND** it does not describe the transport or media failure as rollback, permit an opposite choice, re-publish automatically, or claim the unavailable video remains valid.
+
+### Requirement: Consume stored collection advice as the next actual draft
+
+The Collection application SHALL retain the preceding campaign's server-owned stored-evidence and authoring bindings when returning to drafting. People and automation SHALL inspect and choose the same native evidence-derived recommendation through the existing view and intentional commands, without transcribing paths or digests. Applying advice SHALL only author a draft; it SHALL NOT create a campaign, obtain approval or cause robot, recorder, dataset or training effects. The next consumer is the existing collection compiler and execution owner with its unchanged gates.
+
+#### Scenario: A pinned observed source still permits useful advice
+
+- **WHEN** stored native evidence identifies an unobserved qualified condition and the finite budget has room after mandatory pinned conditions
+- **THEN** the native recommendation retains exact pins and exclusions and includes the unobserved condition within the existing count bound
+- **AND** the actual application presents the exact ordered conditions, distinguishes mandatory conditions from coverage deficits, and applies them without changing the current object placement
+- **AND** compilation rejects a translation that changes the selected conditions, start poses or split.
+
+#### Scenario: The current application cannot represent the source
+
+- **WHEN** legacy advice requires missing or changed stored authoring, current selection is incompatible, no eligible change remains, or the proposed sequence cannot preserve current placement and required transition bindings
+- **THEN** the application exposes an unavailable reason and retains the current draft
+- **AND** source-only advice is not presented as a complete pick/place transition or evidence of physical effectiveness.
+
+#### Scenario: A person edits after inspecting advice
+
+- **WHEN** the draft or selection changes after recommendation inspection
+- **THEN** the previous choice is unavailable until a fresh derivation and current view establish eligibility
+- **AND** a stale choice cannot overwrite the later edit; choosing to keep settings records the choice without changing the draft.
+
+#### Scenario: Choice completion is ambiguous to the caller
+
+- **WHEN** an apply or keep response is lost, the page is refreshed, or the same choice is delivered again
+- **THEN** the Web surface reads the canonical choice result without automatically repeating the command; automation can read that same result
+- **AND** duplicate or conflicting delivery cannot create another campaign or effect, changed stored evidence is revalidated before choice, and a failed recovery read leaves actions unavailable with explicit refresh available.
+
+#### Scenario: Acquisition advice survives application restart with current inputs
+
+- **WHEN** a native physical Collection application explicitly refreshes acquisition advice
+- **THEN** the existing Curator IO owner discovers eligible stored production evidence under the server-bound run root, with inspectable exclusions and no manually entered paths
+- **AND** the producer derives v2 advice from the current catalog, selection, canonical scene, finite count, seed and repeat without requiring historical compiled authoring
+- **AND** the view shows observed compatible semantic-success coverage and the proposed ordered source/destination conditions; it describes balanced sampling as a coverage proxy rather than an optimized deficit selector or execution authority
+- **AND** discovery and full derivation occur on explicit refresh, choice and accepted-advice compilation, never on view polling; browser projections omit filesystem paths.
+
+#### Scenario: Acquisition advice uses the existing draft and native compiler
+
+- **WHEN** an unconstrained ASSISTED draft accepts a freshly revalidated acquisition recommendation
+- **THEN** the application consumes its sampling inputs through existing draft updates, preserving exact current placement, start-pose selection, split, motion preset and all authority gates
+- **AND** actual native compilation verifies the same finite object sequence, including N+1 pick/place positions and yaw bindings, before constructing the campaign
+- **AND** stale scene, newer motion, changed evidence/catalog/selection or compiler disagreement rejects the accepted advice; later user edits require fresh derivation and cannot be overwritten
+- **AND** direct editing, pins, exclusions and custom design constraints remain intact and are reported as unsupported by this acquisition adapter; choosing KEEP does not change them.
+
+### Requirement: Observe canonical reviews across supported interfaces
+
+The existing Collection review projection SHALL observe a canonical episode review
+completed through another supported interface without issuing another decision.
+It SHALL preserve the recorded reviewer and bind the result to the exact candidate,
+immutable ledger and durable state. An unavailable or inconsistent observation
+SHALL disable that review action without discarding unrelated execution facts or
+changing physical or training authority. Observation SHALL NOT repair artifacts.
+
+#### Scenario: Pending review remains independent of settled execution recovery
+
+- **WHEN** a blocked or terminal campaign retains a pending semantic review and has no active execution owner
+- **THEN** the application exposes the review alongside existing HOME recovery and fresh-draft actions, subject to their unchanged physical and source-lineage gates
+- **AND** recovery does not decide the pending review, authorize training or replay the previous campaign approval
+- **AND** an active or uncertain execution owner prevents HOME recovery and campaign replacement even when review remains available.
+
+#### Scenario: A CLI review finishes while the Collection screen remains open
+
+- **WHEN** the native review command durably resolves a queued candidate
+- **THEN** a fresh view adopts its validated result and advances to the next pending candidate without a decision POST
+- **AND** an old review intent cannot overwrite that decision or change its reviewer
+- **AND** unchanged pending candidates do not trigger repeated full ledger validation.
+
+### Requirement: Committed Web reviews outlive the collecting campaign
+
+The Collection application SHALL let people discover and select committed raw episode reviews independently of campaign and process lifetime. The existing native candidate and episode-ledger owners remain canonical; the application SHALL NOT reconstruct an execution campaign to review stored data. Web and automation use the same intents, with server-owned paths and reviewer identity and exact candidate/context comparison. The next consumer is existing Curator selection; semantic PASS remains distinct from training authorization.
+
+#### Scenario: Restart or a newer campaign leaves older reviews accessible
+
+- **WHEN** a fresh application has no campaign, or a newer campaign is being authored or executed
+- **THEN** the person can explicitly load committed reviews and open an episode by its native identity, with available task/direction context and current recorded decision
+- **AND** aborted attempts without committed ledgers do not become candidates; unvalidated evidence is reported separately, and an inventory not yet read is never presented as zero pending reviews
+- **AND** review selection survives campaign replacement, while expensive evidence reads leave execution observation and stop independently available.
+
+#### Scenario: A review response or ledger projection is interrupted
+
+- **WHEN** the native candidate decision was committed but the caller lost its response or the secondary ledger projection did not finish
+- **THEN** state recovery exposes the recorded result, and explicit refresh may finish its native ledger projection without issuing another semantic decision or changing its reviewer
+- **AND** ordinary view polling does not repair artifacts; stale or conflicting candidate/context identities and unknown or client-supplied paths reject without changing the recorded decision
+- **AND** source episodes, physical authority, retention and training authorization remain unchanged.
+
+### Requirement: Restore the last execution-derived object position
+
+The Collection application SHALL restore the exact last eligible object pose from the existing durable scene and execution lineage on supported production-session restart and campaign replacement. The wooden object remains at that position until a reported manual move or invalidating execution evidence; images SHALL NOT be a prerequisite. The Web and automation surfaces SHALL consume the same native position, provenance and current-view binding without path or digest transcription. Restoring a draft SHALL NOT confer motion, semantic, quality or training approval. The next consumer is the existing scene-bound collection planner and lifecycle owner.
+
+#### Scenario: A later non-motion failure interrupts the campaign
+
+- **WHEN** a release is durably recorded and a subsequent recorder, UI or pre-motion startup failure leaves its valid lineage unchanged
+- **THEN** restarting the application or replacing the blocked campaign restores the exact endpoint even though the overall campaign did not complete
+- **AND** the view distinguishes an execution-derived expected landing from a visually measured position; reads do not modify scene, cell or source episodes
+- **AND** independent cell readiness, scene, hardware, exact-plan, single-owner and quality gates remain in force.
+
+#### Scenario: Later motion makes reuse uncertain
+
+- **WHEN** an object is UNKNOWN or HELD, its release lineage conflicts, or a newer execution has consumed or invalidated its last position
+- **THEN** the view exposes the affected position as unavailable and prevents collection effects from consuming it
+- **AND** unrelated review, stop and recovery operations retain their existing authority; displayed draft coordinates are not asserted to be current physical facts
+- **AND** a changed scene invalidates stale intents and requires fresh native derivation before its position is consumed.
+
+#### Scenario: The user moves the object and reports the new position
+
+- **WHEN** a person explicitly submits the moved position through the existing Web editor
+- **THEN** the server-owned actor records that declaration through the existing scene owner with current-state comparison, preserving existing cell gates and immutable source episodes
+- **AND** a restarted application restores the declaration; unrelated later draft edits are preserved when refreshing position
+- **AND** a lost response is recovered by reading the canonical result, without automatic command replay or another acknowledgement phrase.
+
+#### Scenario: A restarted campaign consumes the last landing
+
+- **WHEN** the existing Collection authoring command binds a valid recorded landing to a fresh run
+- **THEN** SceneStateStore compares the exact scene, source slot and cell lineage under its locks before changing the slot's next-run allocation
+- **AND** the physical pose, source, original release timestamp and execution evidence remain unchanged; a concurrent stale handoff or newer active motion rejects
+- **AND** the native planner resolves the exact preserved source coordinates and the fresh run binding without writing scene state; the former next run cannot consume that allocation
+- **AND** a new campaign still requires its own existing approval and all physical gates; this transfer grants no semantic, training or motion approval.
+
+### Requirement: Physical TEST and production share the actual object scene
+
+Physical TEST_COLLECTION SHALL consume the existing canonical robot scene and cell when a source is present, preserving its exact pose and execution or human provenance. TEST run, dataset and admission outputs remain isolated; `production_writers_enabled: false` does not prohibit the sole executor from updating physical scene facts. The current constraint is one physical object and lifecycle owner across dispositions, with B still lacking the selected fast preset's production qualification. The next consumer is the native finite bidirectional collection campaign, without retyping known coordinates or inheriting production, semantic or training approval.
+
+#### Scenario: Author and authorize a two-leg physical trial
+
+- **WHEN** the native application authors A→B→exact A with two pick_place episodes, TWO_STAGE_ALIGN_V2, the selected trial policy, bound UP+WRIST and qualified HOME
+- **THEN** initialization and compilation leave the canonical scene, cell and original source episodes unchanged; a planned return is not an observed return
+- **AND** existing campaign authorization compares the fresh scene, slot and cell before rebinding an eligible landed source to its first run; stale or conflicting authorization cannot start a child or replay an effect
+- **AND** sealed native roots constrain physical state to the repository's registered robot cell, while TEST run/dataset roots stay isolated; legacy isolated fixtures remain compatible and cannot declare a new HUMAN pose into the shared physical root.
+
+#### Scenario: Reuse a vacated source only after actual landing
+
+- **WHEN** the exact executing run has consumed A and durably confirms landing at B with matching cell run/plan lineage
+- **THEN** the existing scene owner atomically records B and makes only that run's vacated source allocation reusable, retaining original release evidence
+- **AND** the actual native second-leg resolver can target exact A; unknown, partial, mismatched or stale execution does not free a source slot or assert a return.
+
+#### Scenario: A yaw continuation retains the parent cell owner
+
+- **WHEN** a preapproved motion-only continuation consumes a source and confirms landing while the validated parent run still owns the blocked cell
+- **THEN** the executor supplies that parent identity and the exact consumed-source digest to the scene owner, which revalidates both under scene and cell locks before atomically freeing that source
+- **AND** release evidence remains bound to the continuation run and plan; the cell is not reassigned to that child
+- **AND** wrong parent run/plan, stale consumed source, partial or UNKNOWN release cannot free the slot; a later native plan can reuse the vacated pose only after valid confirmed landing.
+
+#### Scenario: Production resumes after a physical TEST result
+
+- **WHEN** TEST ends at B after a later recorder/UI failure, returns to A with confirmed release, or fails with unknown motion
+- **THEN** production reads respectively the confirmed B source, the confirmed A source, or an unavailable position; it cannot consume the pre-TEST pose as current
+- **AND** manual movement remains an explicit Web declaration through the same scene CAS and server actor; source episodes, reviews and approvals remain immutable, and independent cell readiness and exact-plan gates still apply.
+
+### Requirement: Preserve execution awareness during Collection connection recovery
+
+The Collection Web surface SHALL retain its last validated execution facts and current screen when state retrieval fails, clearly label them as stale, and state that current robot motion or stop is unknown. A failed browser request SHALL NOT imply that the lifecycle owner stopped, rolled back or remains healthy. The current constraint is the existing loopback state/intent transport; this behavior grants no offline command authority and changes no physical or approval gates. The next consumer is the existing lifecycle owner, whose fresh canonical view and exact intent CAS remain authoritative.
+
+#### Scenario: State retrieval fails while execution continues
+
+- **WHEN** a state read or watch fails during a previously observed execution
+- **THEN** the screen retains the last episode, progress and evidence identities as explicitly stale information, without returning to environment setup or animating a live heartbeat
+- **AND** the stop control remains visible with its existing pending semantics, but no command is emitted using the stale view; unavailable Web stop is not represented as confirmed physical stop.
+
+#### Scenario: Recover current state without replaying effects
+
+- **WHEN** a connection failure or HTTP 5xx prevents reading state
+- **THEN** the browser makes at most three automatic read-only retries with delays, bounds each read's duration, and leaves explicit refresh available after exhaustion
+- **AND** a fresh validated view restores only its native-permitted operations; a rollback or malformed view cannot change the retained identity or confer authority
+- **AND** a response requested before a known disconnect cannot clear the stale indication; recovery requires a subsequent state read
+- **AND** lost intent or stop responses cause state reads only, never automatic intent replay, including when one read supersedes another.
+
+#### Scenario: Distinguish session and response failures
+
+- **WHEN** the server rejects the session, returns an HTTP error, or returns an invalid state payload
+- **THEN** the UI distinguishes these from a connection failure, preserves last-known execution context, and exposes the exact error in technical details
+- **AND** session expiry offers the existing fresh-page bootstrap without token transcription; invalid contracts require explicit refresh rather than an unbounded retry loop.

@@ -187,7 +187,11 @@ class RecorderTransactionTest(unittest.TestCase):
             (root / "meta").mkdir(parents=True)
             (root / "meta" / "info.json").write_text("{}")
             features = {"observation.images.up": {"dtype": "video", "shape": [480, 640, 3], "names": None}}
-            dataset = SimpleNamespace(meta=SimpleNamespace(fps=30, features=features))
+            pending = queue.Queue()
+            dataset = SimpleNamespace(
+                meta=SimpleNamespace(fps=30, features=features),
+                writer=SimpleNamespace(image_writer=SimpleNamespace(queue=pending)),
+            )
             api = SimpleNamespace(resume=mock.Mock(return_value=dataset))
             recorder = FR5LeRobotRecorder.__new__(FR5LeRobotRecorder)
             recorder.LeRobotDataset = api
@@ -196,12 +200,110 @@ class RecorderTransactionTest(unittest.TestCase):
                 root=root, repo_id="local/test", fps=30, no_videos=False,
                 streaming_encoding=False, encoder_threads=2,
                 video_preset=None, video_codec="h264", video_crf=23,
+                writer_queue_size=8,
             )
             recorder._features = lambda: features
             self.assertIs(recorder._open_dataset(), dataset)
             self.assertEqual(api.resume.call_args.kwargs["image_writer_threads"], 2)
+            self.assertEqual(pending.maxsize, 16)
             encoder = api.resume.call_args.kwargs["rgb_encoder"]
             self.assertEqual((encoder.vcodec, encoder.preset, encoder.crf), ("h264", "ultrafast", 23))
+            recorder.args.root = Path(directory) / "new-dataset"
+            pending = queue.Queue()
+            dataset.writer.image_writer.queue = pending
+            api.create = mock.Mock(return_value=dataset)
+            self.assertIs(recorder._open_dataset(), dataset)
+            self.assertEqual(pending.maxsize, 16)
+            self.assertEqual(api.create.call_args.kwargs["image_writer_threads"], 2)
+
+    def test_image_queue_bound_preserves_identity_and_rejects_active_or_unknown_writer(self):
+        recorder = FR5LeRobotRecorder.__new__(FR5LeRobotRecorder)
+        recorder.args = SimpleNamespace(writer_queue_size=8)
+        recorder.camera_names = ("up", "wrist")
+        for original, expected in ((0, 16), (4, 4), (32, 16)):
+            with self.subTest(original=original):
+                pending = queue.Queue(maxsize=original)
+                dataset = SimpleNamespace(writer=SimpleNamespace(
+                    image_writer=SimpleNamespace(queue=pending),
+                ))
+                recorder._bound_image_writer(dataset)
+                self.assertIs(dataset.writer.image_writer.queue, pending)
+                self.assertEqual(pending.maxsize, expected)
+                pending.put(object())
+                with self.assertRaisesRegex(RuntimeError, "IMAGE_WRITER_ALREADY_ACTIVE"):
+                    recorder._bound_image_writer(dataset)
+        with self.assertRaisesRegex(RuntimeError, "IMAGE_WRITER_QUEUE_UNSUPPORTED"):
+            recorder._bound_image_writer(SimpleNamespace(writer=SimpleNamespace(
+                image_writer=SimpleNamespace(queue=object()),
+            )))
+        # Streaming/synchronous writers have no asynchronous PNG backlog.
+        recorder._bound_image_writer(SimpleNamespace(writer=SimpleNamespace(image_writer=None)))
+
+    def test_native_bounded_image_writer_backpressures_then_drains_without_loss(self):
+        from lerobot.datasets.image_writer import AsyncImageWriter
+
+        recorder = FR5LeRobotRecorder.__new__(FR5LeRobotRecorder)
+        recorder.args = SimpleNamespace(writer_queue_size=4)
+        recorder.camera_names = ("up", "wrist")
+        release = threading.Event()
+        entered = threading.Barrier(3)
+        written = []
+        producer_done = threading.Event()
+        drained = threading.Event()
+
+        def write_image(image, path, compress_level):
+            if path < 2:
+                entered.wait(timeout=5)
+            if not release.wait(timeout=5):
+                raise RuntimeError("test storage was not released")
+            written.append(path)
+
+        with mock.patch("lerobot.datasets.image_writer.write_image", side_effect=write_image):
+            writer = AsyncImageWriter(num_processes=0, num_threads=2)
+            recorder.dataset = SimpleNamespace(writer=SimpleNamespace(image_writer=writer))
+            recorder._bound_image_writer(recorder.dataset)
+            producer = None
+            drainer = None
+            try:
+                for index in range(2):
+                    writer.save_image(None, index)
+                entered.wait(timeout=5)
+                for index in range(2, 10):
+                    writer.save_image(None, index)
+
+                def produce():
+                    writer.save_image(None, 10)
+                    producer_done.set()
+
+                def drain():
+                    recorder._drain_image_writer()
+                    drained.set()
+
+                producer = threading.Thread(target=produce, daemon=True)
+                drainer = threading.Thread(target=drain, daemon=True)
+                producer.start()
+                drainer.start()
+                self.assertFalse(producer_done.wait(timeout=0.05))
+                self.assertFalse(drained.is_set())
+                self.assertEqual(writer.queue.qsize(), 8)
+                self.assertEqual(len(writer.threads), 2)
+                release.set()
+                producer.join(timeout=5)
+                drainer.join(timeout=5)
+                self.assertTrue(producer_done.is_set())
+                # A concurrent join may finish before the last put; the final
+                # lifecycle barrier is always after the row producer is sealed.
+                recorder._drain_image_writer()
+                self.assertEqual(sorted(written), list(range(11)))
+                self.assertEqual(writer.queue.unfinished_tasks, 0)
+            finally:
+                release.set()
+                if producer is not None:
+                    producer.join(timeout=5)
+                if drainer is not None:
+                    drainer.join(timeout=5)
+                writer.stop()
+            self.assertTrue(all(not thread.is_alive() for thread in writer.threads))
 
     def make_recorder(self, directory, save_error=None, clear_error=None, finalize_error=None):
         recorder = FR5LeRobotRecorder.__new__(FR5LeRobotRecorder)
@@ -561,6 +663,7 @@ class RecorderTransactionTest(unittest.TestCase):
                 {
                     "rows", "writer_queue", "writer_queue_high_water",
                     "writer_queue_drops", "alignment_failures",
+                    "image_writer",
                     "alignment_failure_sources", "observed_monotonic_ns",
                 },
             )
@@ -574,6 +677,29 @@ class RecorderTransactionTest(unittest.TestCase):
             self.assertEqual(recorder.dataset.clears, 0)
             self.assertEqual(recorder.dataset.saves, 0)
             self.assertEqual(recorder.episode_state, recorder.RECORDING)
+
+    def test_downstream_image_backlog_is_distinct_from_empty_row_queue(self):
+        with tempfile.TemporaryDirectory() as directory:
+            recorder = self.make_recorder(directory)
+            recorder.begin_episode()
+            pending = queue.Queue()
+            recorder.dataset.writer = SimpleNamespace(
+                image_writer=SimpleNamespace(queue=pending),
+            )
+            for _ in range(256):
+                pending.put(object())
+            status = recorder.episode_status()
+            self.assertEqual(status["metrics"]["writer_queue"], 0)
+            self.assertEqual(status["metrics"]["image_writer"], {
+                "status": "AVAILABLE", "queued_images": 256,
+                "capacity_images": None, "sampled_high_water_images": 0,
+            })
+            self.assertEqual(pending.qsize(), 256)
+            recorder.image_writer_high_water = 256
+            recorder._reset_episode()
+            self.assertEqual(recorder.image_writer_high_water, 0)
+            recorder.dataset.writer.image_writer.queue = object()
+            self.assertEqual(recorder._image_writer_metrics(), {"status": "NOT_AVAILABLE"})
 
     def test_jsonl_commands_are_strict_idempotent_core_calls(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -1054,6 +1180,54 @@ class RecorderTransactionTest(unittest.TestCase):
             recorder.stop_threads.set()
             recorder.writer_thread.join(1)
 
+    def test_freeze_and_abort_preserve_native_bounded_writer_drain_order(self):
+        from lerobot.datasets.image_writer import AsyncImageWriter
+
+        with tempfile.TemporaryDirectory() as directory:
+            recorder = self.make_recorder(directory)
+            recorder.args.writer_queue_size = 1
+            entered, release = threading.Event(), threading.Event()
+            written, frozen = [], []
+
+            def delayed_write(image, path, compress_level):
+                entered.set()
+                if not release.wait(timeout=5):
+                    raise RuntimeError("test storage was not released")
+                written.append(path)
+
+            with mock.patch("lerobot.datasets.image_writer.write_image", side_effect=delayed_write):
+                image_writer = AsyncImageWriter(num_processes=0, num_threads=2)
+                recorder.dataset.writer = SimpleNamespace(image_writer=image_writer)
+                recorder._bound_image_writer(recorder.dataset)
+                recorder.begin_episode()
+                recorder._write_frame = lambda index: image_writer.save_image(None, index)
+                recorder.writer_thread = threading.Thread(target=recorder._writer_loop, daemon=True)
+                recorder.writer_thread.start()
+                freezer = threading.Thread(target=lambda: frozen.append(recorder.freeze_episode()), daemon=True)
+                try:
+                    for index in range(8):
+                        recorder.writer_queue.put((index,))
+                    self.assertTrue(entered.wait(timeout=2))
+                    freezer.start()
+                    freezer.join(timeout=0.05)
+                    self.assertFalse(frozen)
+                    self.assertEqual(recorder.dataset.saves, 0)
+                    release.set()
+                    freezer.join(timeout=5)
+                    self.assertFalse(freezer.is_alive())
+                    self.assertTrue(frozen[0]["ok"])
+                    self.assertEqual(sorted(written), list(range(8)))
+                    self.assertEqual(image_writer.queue.unfinished_tasks, 0)
+                    self.assertTrue(recorder.abort_episode()["ok"])
+                    self.assertEqual(recorder.dataset.saves, 0)
+                finally:
+                    release.set()
+                    if freezer.ident is not None:
+                        freezer.join(timeout=5)
+                    recorder.stop_threads.set()
+                    recorder.writer_thread.join(timeout=5)
+                    image_writer.stop()
+
     def test_image_quality_sampling_does_not_hold_alignment_lock(self):
         with tempfile.TemporaryDirectory() as directory:
             recorder = self.make_recorder(directory)
@@ -1207,6 +1381,68 @@ class RecorderTransactionTest(unittest.TestCase):
             self.assertEqual(recorder.enqueue_attempts, 0)
             self.assertEqual(recorder.alignment_failures, 0)
             self.assertTrue(recorder.writer_queue.empty())
+
+    def test_first_rejected_transport_sample_survives_readiness_status(self):
+        from tools.data_factory.one_job import OneJob, TEST_ONLY_READINESS_CONTRACT
+
+        with tempfile.TemporaryDirectory() as directory:
+            recorder = self.make_recorder(directory)
+            self.assertTrue(recorder.begin_episode(self.transaction(directory))["ok"])
+            recorder.joint_states = [(0., [0.] * 6)]
+            recorder.arm_actions = [(0., [0.] * 6)]
+            recorder.gripper_actions = [(0., 0.02)]
+            recorder.camera_frames = {name: [(0., None, 0., .1)] for name in recorder.camera_names}
+            self.assertIsNotNone(recorder._aligned_sample(0.))
+            self.assertNotIn("first_transport_failure", recorder.episode_status()["metrics"])
+            recorder.camera_frames["side"] = [(0., None, 0., recorder.args.image_max_age)]
+            self.assertIsNotNone(recorder._aligned_sample(0.))
+            recorder.camera_frames["side"] = [(0., None, 0., .31)]
+            self.assertIsNone(recorder._aligned_sample(0.))
+            expected = {"camera": "side", "target_ros_s": 0., "image_raw_ros_s": 0.,
+                        "image_received_ros_s": .31, "transport_age_s": .31,
+                        "image_max_age_s": .30, "sampler_epoch": recorder.sampler_epoch}
+            status = recorder.episode_status()
+            self.assertEqual(status["metrics"]["first_transport_failure"], expected)
+            forbidden = mock.Mock(side_effect=AssertionError("no hardware callbacks"))
+            owner = OneJob(forbidden, forbidden, readiness_contract=TEST_ONLY_READINESS_CONTRACT)
+            owner._capture_readiness_failure("RECORDER_READINESS_ALIGNMENT", status)
+            self.assertEqual(owner.readiness_failure_evidence["recorder_status"]["metrics"]["first_transport_failure"], expected)
+            status["metrics"]["first_transport_failure"]["camera"] = "caller-mutation"
+            recorder.camera_frames["up"] = [(0., None, 0., -.01)]
+            self.assertIsNone(recorder._aligned_sample(0.))
+            metrics = recorder.episode_status()["metrics"]
+            self.assertEqual(metrics["first_transport_failure"], expected)
+            self.assertEqual(metrics["alignment_failure_sources"]["transport"], 2)
+            self.assertEqual(metrics["alignment_failures"], 2)
+            self.assertEqual((metrics["rows"], metrics["writer_queue_drops"], recorder.dataset.saves), (0, 0, 0))
+            forbidden.assert_not_called()
+
+    def test_transport_evidence_resets_and_cannot_cross_sampler_epochs(self):
+        with tempfile.TemporaryDirectory() as directory:
+            recorder = self.make_recorder(directory)
+            self.assertTrue(recorder.begin_episode(self.transaction(directory))["ok"])
+            recorder.joint_states = [(0., [0.] * 6)]
+            recorder.arm_actions = [(0., [0.] * 6)]
+            recorder.gripper_actions = [(0., 0.02)]
+            recorder.camera_frames = {name: [(0., None, 0., -.01)] for name in recorder.camera_names}
+            self.assertIsNone(recorder._aligned_sample(0.))
+            old_epoch = recorder.sampler_epoch
+            first = recorder.episode_status()["metrics"]["first_transport_failure"]
+            self.assertEqual((first["camera"], first["transport_age_s"]), ("up", -.01))
+            recorder._reset_episode()
+            self.assertIsNone(recorder._aligned_sample(0., sampler_epoch=old_epoch))
+            self.assertNotIn("first_transport_failure", recorder.episode_status()["metrics"])
+            record_failure = recorder._record_alignment_failure
+            def reset_before_record(*args, **kwargs):
+                with recorder.lock:
+                    recorder._reset_episode()
+                record_failure(*args, **kwargs)
+            with mock.patch.object(recorder, "_record_alignment_failure", side_effect=reset_before_record):
+                self.assertIsNone(recorder._aligned_sample(0.))
+            self.assertEqual(recorder.alignment_failures, 0)
+            self.assertNotIn("first_transport_failure", recorder.episode_status()["metrics"])
+            self.assertIsNone(recorder._aligned_sample(0., sampler_epoch=recorder.sampler_epoch))
+            self.assertEqual(recorder.episode_status()["metrics"]["first_transport_failure"]["sampler_epoch"], recorder.sampler_epoch)
 
     def test_readiness_prefix_defers_source_frame_reuse_to_episode_quality(self):
         with tempfile.TemporaryDirectory() as directory:

@@ -10,7 +10,7 @@ import unittest
 from unittest import mock
 
 from tests.data_factory.curator.support import make_source_dataset, make_profile_fixture, write_json
-from tests.data_factory import test_episode_ledger as ledger_fixtures
+from tests.data_factory.curator.support import make_native_training_source
 from tests.data_factory.test_training_approval import snapshot
 from tests.data_factory.operator.workflow.test_application import intent
 from tools.data_factory import training_approval as approval, training_entrypoint as training
@@ -69,64 +69,9 @@ class DerivedTrainingTest(unittest.TestCase):
         self.assertEqual(published_request.read_bytes(), published_bytes)
 
     def native_case(self, *, episodes=3, train_fit=False, source_only=False, repo_id='local/source'):
-        fixture = ledger_fixtures.EpisodeLedgerTest()
-        fixture.setUp()
-        self.addCleanup(fixture.doCleanups)
-        root = fixture.base
-        source = make_source_dataset(root, episodes=episodes, frames_per_episode=2)
-        profile = make_profile_fixture(root)
-        feature = launch_feature_contract('act', 'fr5-up-wrist-rgb-30hz-v2', 'pick_place', read_metadata(source))
-        runs = []
+        root, source, profile, runs, before = make_native_training_source(self.addCleanup, episodes=episodes, repo_id=repo_id)
         selected = list(range(0, episodes, 2))
-        for index in selected:
-            fixture.dataset = source
-            fixture.run_id = f'synthetic-episode-{index}'
-            fixture.evidence = root / f'evidence-{index}'
-            fixture.evidence.mkdir()
-            fixture.dataset_identity.update(dataset_root=str(source), repo_id=repo_id)
-            fixture.episode_ref.update(repo_id=repo_id, episode_index=index,
-                transaction_id=f'{fixture.run_id}:episode-{index:06d}')
-            locator = copy.deepcopy(fixture.episode_locator)
-            locator['repo_id'] = repo_id
-            locator['episode_index'] = index
-            locator['data'].update(file_row_start=index * 2, file_row_end_exclusive=index * 2 + 2)
-            # Rebuild the locator digest with the existing owner, not an alternate ledger.
-            from tools.data_factory.episode_ledger import build_lerobot_v3_episode_locator
-            locator = build_lerobot_v3_episode_locator(repo_id=repo_id, episode_index=index,
-                data=locator['data'], videos=locator['videos'])
-            refs = fixture._artifacts()
-            loaded = fixture._loaded_artifacts(refs)
-            loaded['run']['episode_index'] = index
-            loaded['staging_manifest']['episode_index'] = index
-            loaded['staging_manifest']['binding_digests']['collection_profile_digest'] = feature['collection_profile_digest']
-            loaded['intent']['fixed_contract']['collection_profile_digest'] = feature['collection_profile_digest']
-            loaded['intent']['intent_digest'] = canonical_digest({k:v for k,v in loaded['intent'].items() if k != 'intent_digest'})
-            runtime = loaded['runtime_binding']
-            runtime.update(schema_version='data_factory.production_episode_binding.v1', data_disposition='PRODUCTION',
-                state_initialization_digest=None, scene_observation_digest=canonical_digest('synthetic-scene'),
-                intent_digest=loaded['intent']['intent_digest'])
-            runtime['binding_digest'] = canonical_digest({k:v for k,v in runtime.items() if k != 'binding_digest'})
-            loaded['episode']['episode_ref']['staging_manifest_digest'] = canonical_digest(loaded['staging_manifest'])
-            loaded['technical']['expected_fps'] = 30
-            loaded['recording_quality']['episode_index'] = index
-            source_rows = [json.loads(line) for line in (source / f'meta/source_provenance/episode-{index:06d}.jsonl').read_text().splitlines()]
-            for name, value in loaded.items():
-                if name == 'source_provenance':
-                    refs[name] = fixture._jsonl(f'episode-{index:06d}.jsonl', source_rows)
-                    Path(refs[name]['artifact_path']).write_bytes((source / f'meta/source_provenance/episode-{index:06d}.jsonl').read_bytes())
-                elif name == 'recording_quality':
-                    refs[name] = fixture._jsonl('quality.jsonl', [value], selected=value)
-                else:
-                    refs[name] = fixture._json(name + '.json', value)
-            ledger = fixture._compile(refs, locator)
-            fixture._json('episode_ledger.json', ledger)
-            candidate_ref = fixture._candidate(ledger, 'PASS')
-            candidate = load_json_strict(Path(candidate_ref['artifact_path']))
-            candidate['checklist_id'] = 'pick-place-v1'
-            candidate_ref = fixture._json('candidate.json', candidate)
-            fixture._json('episode_ledger_state.json', project_episode_state(ledger=ledger, candidate=candidate_ref))
-            runs.append(fixture.evidence)
-        before = snapshot(source), [snapshot(run) for run in runs]
+        feature = launch_feature_contract('act', 'fr5-up-wrist-rgb-30hz-v2', 'pick_place', read_metadata(source))
         if source_only:
             return root, source, runs, before
         source_request = None
@@ -295,6 +240,255 @@ class DerivedTrainingTest(unittest.TestCase):
         self.assertEqual(list(fresh.iterdir()), [])
         state_path.write_bytes(original_state)
         self.assertEqual((snapshot(source), [snapshot(run) for run in runs]), before)
+
+    def test_saved_observation_view_binds_child_train_and_rejects_tampering(self):
+        root, source, profile, runs, before, published, reference, output = self.native_case(train_fit=True)
+        reference_path = root / 'derivation-reference.json'
+        write_json(reference_path, reference)
+        request_path = output / 'request.json'
+        export_training_request(runs, request_path, dataset_id='derived-r1', derivation=reference)
+        request = load_json_strict(request_path)
+        inventory = training.publish_approval_batch(
+            training.prepare_approval_batch(request, output, 'synthetic-human')
+        )
+        child = Path(request['dataset_root'])
+        argv = ['synthetic-lerobot-train', *build_profile('act', policy_metadata(read_metadata(child))),
+                f'--dataset.root={child}', f'--dataset.repo_id={request["repo_id"]}',
+                '--dataset.episodes=[0,2]', '--dataset.eval_split=0.5',
+                f'--output_dir={root / "never-launched"}', '--batch_size=1', '--steps=2',
+                '--eval_steps=1', '--save_freq=1']
+        split, receipt = training.prepare_launch(
+            dataset=child, repo_id=request['repo_id'], inventory=output / 'training_approved.json',
+            profile='act', collection_profile='fr5-up-wrist-rgb-30hz-v2', argv=argv,
+        )
+        from tools.validate_training_checkpoint import validate_saved_observation_view
+        binding = validate_saved_observation_view(split, receipt)
+        self.assertEqual(binding['representation'], 'baked')
+        self.assertEqual(binding['transform_application'], 'rollout_once')
+        self.assertEqual(receipt['observation_view'], binding)
+        fitting = load_json_strict(Path(binding['view_profile']['path']))['fitting']
+        self.assertTrue(all(frame['episode_index'] in split['train_episodes'] for frame in
+                            [fitting['reference_frame'], *fitting['background_plate_frames']]))
+        profile_path = Path(binding['view_profile']['path'])
+        original = profile_path.read_bytes()
+        try:
+            tampered = json.loads(original)
+            tampered['mask_sha256'] = 'sha256:' + '0' * 64
+            write_json(profile_path, tampered)
+            with self.assertRaises(ValueError):
+                validate_saved_observation_view(split, receipt)
+        finally:
+            profile_path.write_bytes(original)
+
+    def test_common_fitted_view_survives_native_derived_mapping(self):
+        from tools.data_factory.curator.workflow.mapping import publish_mapped_training_request
+        from tools.validate_training_checkpoint import validate_saved_observation_view
+        from tools.data_factory.learned_action_adapter import NativeSmolVLA, fake_rgb
+        from tools.data_factory.curator.profile.schema import load_view_profile
+        root, source, profile, runs, before, published, reference, output = self.native_case(train_fit=True)
+        first = root / 'first-derived.json'
+        export_training_request(runs, first, dataset_id='first-derived', derivation=reference)
+        raw = root / 'first-raw.json'
+        export_training_request(runs, raw, dataset_id='parent-r1')
+        cohort = training.prepare_evaluation_cohort(raw, evidence_directory=root, eval_episodes=[2])
+        cohort_path = root / 'common-cohort.json'
+        write_json(cohort_path, cohort)
+        other_root, other_source, _, other_runs, other_before = make_native_training_source(self.addCleanup)
+        paths = replace(profile.paths, output_parent=root / 'other-derived')
+        pending = prepare(other_source, _paths=paths, _run_id_value='common-view-other')
+        shown = review_candidate(pending['run_id'], _paths=paths)
+        submit_human_review_decision(pending['run_id'], decision='APPROVE',
+            expected_review_digest=shown['review_ready_digest'], _paths=paths)
+        run = paths.run_root / pending['run_id']
+        other_reference = {'run_directory': str(run),
+            'receipt_digest': load_events(run)['receipt']['event_digest'],
+            'parent_dataset_identity': approval.current_dataset_identity(
+                other_source, repo_id='local/source', dataset_id='other-parent')}
+        second = root / 'second-derived.json'
+        export_training_request(other_runs, second, dataset_id='second-derived', derivation=other_reference)
+        import tempfile
+        holder = tempfile.TemporaryDirectory(prefix='SYNTHETIC-COMMON-VIEW-')
+        self.addCleanup(holder.cleanup)
+        mapped_root = Path(holder.name)
+        mapped = publish_mapped_training_request([second, first], mapped_root / 'common-mapped',
+            dataset_id='common-mapped', repo_id='local/common-mapped',
+            evaluation_cohort=cohort_path, max_copy_bytes=16*1024*1024)
+        request = load_json_strict(Path(mapped['request_path']))
+        output = mapped_root / 'approval'
+        output.mkdir()
+        training.publish_approval_batch(training.prepare_approval_batch(request, output, 'synthetic-human'))
+        child = Path(request['dataset_root'])
+        selected = [entry['episode_index'] for entry in request['episodes']]
+        argv = ['synthetic-train', *build_profile('act', policy_metadata(read_metadata(child))),
+            f'--dataset.root={child}', f'--dataset.repo_id={request["repo_id"]}',
+            f'--dataset.episodes={json.dumps(selected)}', '--dataset.eval_split=.5',
+            f'--fr5.evaluation_cohort={cohort_path}', f'--output_dir={root / "not-launched"}',
+            '--batch_size=1', '--steps=2', '--eval_steps=1', '--save_freq=1']
+        split, receipt = training.prepare_launch(dataset=child, repo_id=request['repo_id'],
+            inventory=output / 'training_approved.json', profile='act',
+            collection_profile='fr5-up-wrist-rgb-30hz-v2', argv=argv)
+        self.assertEqual(split['train_episodes'], [0, 2, 3])
+        self.assertEqual(split['eval_episodes'], [5])
+        self.assertEqual(receipt['normalization']['episodes'], [0, 2, 3])
+        view = validate_saved_observation_view(split, receipt)
+        self.assertEqual(view, receipt['observation_view'])
+        self.assertEqual(view['representation'], 'baked')
+        self.assertEqual(len(view['application_publications']), 2)
+        native = NativeSmolVLA()
+        native.observation_view = view
+        spec = load_view_profile(Path(view['view_profile']['path']))
+        frame = fake_rgb(bytes(spec.value['width'] * spec.value['height'] * 3),
+                         height=spec.value['height'], width=spec.value['width'])
+        import numpy as np
+        from tools.data_factory.curator.profile.registry import resolve_view_profile, load_profile_assets
+        from tools.data_factory.curator.profile.transform import apply_up_view
+        profile_path = Path(view['view_profile']['path'])
+        resolved = resolve_view_profile(profile_path.parent, spec.value['profile_id'],
+            binding_root=spec.binding_path.parent, collection_profile_root=spec.collection_profile_path.parent)
+        mask, plate = load_profile_assets(resolved)
+        expected = apply_up_view(np.frombuffer(frame['data'], dtype=np.uint8).reshape(frame['shape']), mask, plate)
+        self.assertEqual(native._transform_raw_up(frame)['data'], expected.tobytes())
+        self.assertNotIn('lineage_digest', view)
+        self.assertNotIn('parent_dataset_identity', view)
+        self.assertEqual(view['fitting_dataset_identity'], reference['parent_dataset_identity'])
+        # A synthetic checkpoint envelope exercises the real saved consumer and
+        # installed CPU processors; empty model/state placeholders prove no fit.
+        from tools.validate_training_checkpoint import validate_checkpoint, REQUIRED_TRAINING_STATE
+        from lerobot.configs import FeatureType, PolicyFeature
+        from lerobot.policies.act.configuration_act import ACTConfig
+        from lerobot.policies.factory import make_pre_post_processors
+        saved_output = root / 'not-launched'
+        policy = saved_output / 'checkpoints/000002/pretrained_model'
+        state = policy.parent / 'training_state'
+        policy.mkdir(parents=True)
+        state.mkdir()
+        policy_cfg = {}
+        for option, value in training.options(split['feature_contract']['policy_argv']).items():
+            if option.startswith('--policy.'):
+                try:
+                    value = json.loads(value)
+                except json.JSONDecodeError:
+                    pass
+                policy_cfg[option.removeprefix('--policy.')] = value
+        write_json(policy / 'config.json', policy_cfg)
+        write_json(policy / 'train_config.json', {'dataset': {'root': str(child),
+            'repo_id': request['repo_id'], 'episodes': selected, 'eval_split': .5}, 'policy': policy_cfg})
+        (policy / 'model.safetensors').touch()
+        for name in REQUIRED_TRAINING_STATE:
+            (state / name).write_text('{"step": 2}' if name == 'training_step.json' else '')
+        write_json(saved_output / 'fr5_training_split.json', split)
+        write_json(saved_output / 'fr5_training_receipt.json', receipt)
+        processor_config = ACTConfig(device='cpu', input_features={
+            'observation.state': PolicyFeature(type=FeatureType.STATE, shape=(7,))},
+            output_features={'action': PolicyFeature(type=FeatureType.ACTION, shape=(7,))})
+        pre, post = make_pre_post_processors(processor_config, dataset_stats=receipt['normalization']['stats'])
+        pre.save_pretrained(policy)
+        post.save_pretrained(policy)
+        self.assertEqual(validate_checkpoint(policy), (policy, saved_output))
+        changed_receipt = copy.deepcopy(receipt)
+        changed_receipt['observation_view']['application_publications'][0]['lineage_digest'] = 'sha256:' + 'f' * 64
+        from tools.data_factory.training_receipts import launch_receipt_digest
+        changed_receipt['receipt_digest'] = launch_receipt_digest(changed_receipt)
+        write_json(saved_output / 'fr5_training_receipt.json', changed_receipt)
+        with self.assertRaisesRegex(ValueError, 'provenance changed'):
+            validate_checkpoint(policy)
+        write_json(saved_output / 'fr5_training_receipt.json', receipt)
+
+        # Actual alternate mapped admission: destination zero still exists from B,
+        # but cannot stand in for A's fitted original zero.
+        for scenario in ('absent', 'heldout'):
+            selected_first = load_json_strict(first)
+            negative_cohort = cohort
+            if scenario == 'absent':
+                selected_first['episodes'] = [e for e in selected_first['episodes'] if e['episode_index'] != 0]
+            else:
+                negative_cohort = training.prepare_evaluation_cohort(raw, evidence_directory=root, eval_episodes=[0])
+            negative_request = root / f'{scenario}-request.json'
+            write_json(negative_request, selected_first)
+            negative_cp = root / f'{scenario}-cohort.json'
+            write_json(negative_cp, negative_cohort)
+            negative = publish_mapped_training_request([second, negative_request], mapped_root / scenario,
+                dataset_id=f'common-{scenario}', repo_id=f'local/common-{scenario}',
+                evaluation_cohort=negative_cp, max_copy_bytes=16*1024*1024)
+            negative_request_value = load_json_strict(Path(negative['request_path']))
+            negative_output = mapped_root / f'{scenario}-approval'
+            negative_output.mkdir()
+            training.publish_approval_batch(training.prepare_approval_batch(
+                negative_request_value, negative_output, 'synthetic-human'))
+            negative_child = Path(negative_request_value['dataset_root'])
+            negative_argv = [arg for arg in argv if not arg.startswith((
+                '--dataset.root=', '--dataset.repo_id=', '--dataset.episodes=', '--fr5.evaluation_cohort='))]
+            negative_argv.extend([f'--dataset.root={negative_child}',
+                f'--dataset.repo_id={negative_request_value["repo_id"]}',
+                '--dataset.episodes=' + json.dumps([e['episode_index'] for e in negative_request_value['episodes']]),
+                f'--fr5.evaluation_cohort={negative_cp}'])
+            with self.subTest(scenario=scenario), self.assertRaisesRegex(ValueError, 'outside child TRAIN'):
+                training.prepare_launch(dataset=negative_child, repo_id=negative_request_value['repo_id'],
+                    inventory=negative_output / 'training_approved.json', profile='act',
+                    collection_profile='fr5-up-wrist-rgb-30hz-v2', argv=negative_argv)
+        from tools.data_factory.curator.workflow import derivation
+        real_evidence = derivation.published_training_evidence
+        def incompatible(ref):
+            evidence = real_evidence(ref)
+            if ref == other_reference:
+                evidence = copy.deepcopy(evidence)
+                evidence['transform']['synthetic-incompatible'] = True
+            return evidence
+        with mock.patch.object(derivation, 'published_training_evidence', side_effect=incompatible):
+            with self.assertRaisesRegex(ValueError, 'inconsistent across episodes'):
+                validate_saved_observation_view(split, receipt)
+
+        self.assertEqual((snapshot(source), [snapshot(run) for run in runs]), before)
+        self.assertEqual((snapshot(other_source), [snapshot(run) for run in other_runs]), other_before)
+
+    def test_native_transform_rechecks_profile_and_assets_at_runtime(self):
+        root, source, profile, runs, before, published, reference, output = self.native_case(train_fit=True)
+        reference_path = root / 'derivation-reference.json'
+        write_json(reference_path, reference)
+        export_training_request(
+            runs, output / 'request.json', dataset_id='derived-r1', derivation=reference
+        )
+        request = load_json_strict(output / 'request.json')
+        inventory = training.publish_approval_batch(
+            training.prepare_approval_batch(request, output, 'synthetic-human')
+        )
+        child = Path(request['dataset_root'])
+        argv = ['synthetic-lerobot-train', *build_profile('act', policy_metadata(read_metadata(child))),
+                f'--dataset.root={child}', f'--dataset.repo_id={request["repo_id"]}',
+                '--dataset.episodes=[0,2]', '--dataset.eval_split=0.5',
+                f'--output_dir={root / "never-launched"}', '--batch_size=1', '--steps=2',
+                '--eval_steps=1', '--save_freq=1']
+        _, receipt = training.prepare_launch(
+            dataset=child, repo_id=request['repo_id'], inventory=output / 'training_approved.json',
+            profile='act', collection_profile='fr5-up-wrist-rgb-30hz-v2', argv=argv,
+        )
+        from tools.data_factory.learned_action_adapter import NativeSmolVLA, fake_rgb
+        from tools.data_factory.curator.profile.schema import load_view_profile
+        from tools.data_factory.training_receipts import file_digest
+
+        native = NativeSmolVLA()
+        native.observation_view = receipt['observation_view']
+        spec = load_view_profile(Path(native.observation_view['view_profile']['path']))
+        frame = fake_rgb(bytes(spec.value['width'] * spec.value['height'] * 3),
+                         height=spec.value['height'], width=spec.value['width'])
+        native._transform_raw_up(frame)
+
+        profile_path = Path(native.observation_view['view_profile']['path'])
+        plate_path = spec.background_plate_path
+        profile_before, plate_before = profile_path.read_bytes(), plate_path.read_bytes()
+        try:
+            # A coherent post-load profile+plate replacement is exactly the
+            # mutable external state the saved binding must reject.
+            replacement = spec.reference_image_path.read_bytes()
+            plate_path.write_bytes(replacement)
+            changed = json.loads(profile_before)
+            changed['background_plate_sha256'] = file_digest(plate_path)
+            write_json(profile_path, changed)
+            with self.assertRaisesRegex(ValueError, 'LEARNED_VIEW_PROFILE_CHANGED'):
+                native._transform_raw_up(frame)
+        finally:
+            profile_path.write_bytes(profile_before)
+            plate_path.write_bytes(plate_before)
 
     def test_changed_evidence_replay_refusal_and_raw_authority_cannot_publish_child(self):
         root, source, profile, runs, before, published, reference, output = self.native_case(episodes=4)

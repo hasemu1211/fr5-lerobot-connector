@@ -60,6 +60,7 @@ from tools.data_factory.operator.catalog import (
     SELECTION_SCHEMA,
     camera_binding_digest,
     load_operator_catalog,
+    selected_motion_preset,
     project_assisted_poses,
     project_balanced_start_pose_ids,
     project_direct_poses,
@@ -89,6 +90,7 @@ from tools.data_factory.operator.setup.contracts import (
     build_test_only_start_binding,
     gripper_setup_projection,
     initialize_test_only_state_from_user_declaration,
+    bind_test_only_physical_scene,
     normalize_camera_devices,
     qualified_table_plane_reference,
     reuse_camera_role_bindings,
@@ -152,6 +154,7 @@ from tools.fr5_data_factory import (
     SAFE_ID,
     canonical_digest,
     load_json_strict,
+    load_motion_preset,
     normalize_yaw_deg,
     task_instruction,
 )
@@ -1400,6 +1403,7 @@ def build_physical_runtime(
     camera_device_id: str | None = None, job: str | Path = DEFAULT_JOB,
     gripper_retune: str | Path | None = None,
     data_mode: str = "GENERAL_COLLECTION",
+    motion_preset: str | None = None,
     dataset_name: str = "fr5_smolvla_up_wrist_30hz",
     auto_prepare: bool = True,
 ) -> OperatorRuntime:
@@ -1561,6 +1565,7 @@ def build_physical_runtime(
                 repository / "datasets/fr5_episodes" / dataset_name
             ),
             initial_data_mode=data_mode,
+            initial_motion_preset=motion_preset,
             camera_environment_call=select_camera_environment,
         )
         bridge = LoopbackBridge(
@@ -1664,7 +1669,7 @@ def build_operator_runtime(*, effect_scope: str = "FAKE", **kwargs) -> OperatorR
         return OperatorRuntime(
             bridge=bridge, announcement={"status": "LISTENING", "url": bridge.origin,
                                         "effect_scope": "TRAINING_REVIEW", "starts_training": False},
-            close_calls=(bridge.server.server_close,),
+            close_calls=(application.close, bridge.server.server_close),
         )
     if effect_scope == "FAKE":
         return build_fake_runtime(
@@ -1682,6 +1687,8 @@ def build_physical_operator_console(
     operator_label: str, job_path: str | Path = DEFAULT_JOB,
     yaw0_sheet: str | Path = DEFAULT_YAW0,
     motion_qualification_path: str | Path = DEFAULT_MOTION,
+    motion_preset: Mapping[str, str] | None = None,
+    motion_preset_trial: bool = False,
     home_candidate_path: str | Path = DEFAULT_HOME,
     collection_profile_path: str | Path = DEFAULT_PROFILE,
     urdf_path: str | Path = DEFAULT_URDF,
@@ -1711,12 +1718,17 @@ def build_physical_operator_console(
     selected_start_pose_qualifications: Sequence[Mapping[str, Any]] | None = None,
     start_transition_call: Callable[[Mapping[str, Any], Mapping[str, Any], Any], Mapping[str, Any]] | None = None,
     initial_object_pose: Mapping[str, Any] | None = None,
+    initial_object_position: Mapping[str, Any] | None = None,
     data_disposition: str = "TEST_ONLY",
     dataset_root: str | Path | None = None,
     environment_prepared: bool = False,
     clock=None,
 ) -> tuple[OperatorConsole, dict[str, Any]]:
     """Compose one finite registered-workspace physical campaign without activation."""
+    if type(motion_preset_trial) is not bool or motion_preset_trial and (
+        data_disposition != "TEST_ONLY" or motion_preset is None
+    ):
+        raise ContractError("MOTION_PRESET_TRIAL_SCOPE")
     normalized_seed = validate_campaign_seed(normalized_seed)
     repository = Path(repository_root).resolve(strict=True)
     clock = clock or (lambda: datetime.now(timezone.utc))
@@ -1920,6 +1932,9 @@ def build_physical_operator_console(
         None if gripper_retune_path is None
         else load_json_strict(paths["gripper_retune"])
     )
+    if motion_preset is not None:
+        load_motion_preset(repository / "config/data_factory", motion_preset)
+        payload["motion_preset"] = copy.deepcopy(dict(motion_preset))
     motion_qualification = load_json_strict(paths["motion"])
     endpoint_motion_qualifications = [
         load_json_strict(binding["motion_qualification"])
@@ -1933,6 +1948,7 @@ def build_physical_operator_console(
     def physical_resolver(value, *, scene_binding_call):
         resolved, program, binding = run_job.resolve_inputs(
             value, scene_binding_call=scene_binding_call,
+            motion_preset_trial=motion_preset_trial,
         )
         if retune is not None:
             program = _derive_test_only_gripper_program(
@@ -2235,13 +2251,15 @@ def build_physical_operator_console(
     maintain_gripper = gripper_maintenance_call or normalize_gripper_after_operator_ready
     if type(environment_prepared) is not bool:
         raise ContractError("PHYSICAL_CONSOLE_ENVIRONMENT")
+    physical_test_scene = data_disposition == "TEST_ONLY" and initial_object_position is not None
     first_roots = build_runtime_root_binding(
         repository, session_id=session_id, run_id=run_id,
         data_disposition=data_disposition, dataset_root=dataset_root,
+        physical_scene=physical_test_scene,
     )
     job = resolved["normalized_job"]
     state_initialization = None
-    if data_disposition == "TEST_ONLY":
+    if data_disposition == "TEST_ONLY" and not physical_test_scene:
         state_initialization = initialize_test_only_state_from_user_declaration(
             first_roots, repository_root=repository,
             robot_system_id=job["robot_system_id"],
@@ -2267,6 +2285,8 @@ def build_physical_operator_console(
         ]
         if len(matching) > 1:
             raise ContractError("SCENE_OBJECT_AMBIGUOUS")
+        if physical_test_scene and not matching:
+            raise ContractError("SCENE_OBJECT_NOT_READY")
         instance_id = (
             matching[0]["instance_id"] if matching else
             "production-object-" + canonical_digest({
@@ -2274,17 +2294,51 @@ def build_physical_operator_console(
                 "object_profile_id": job["object_profile_id"],
             }).removeprefix("sha256:")[:20]
         )
-        observed = scene_store.update_object(
-            instance_id=instance_id,
-            object_profile_id=job["object_profile_id"], state="ON_SURFACE",
-            pose={
-                key: job[key]
-                for key in ("place_id", "yaw_deg", "x_mm", "y_mm")
-            },
-            source="HUMAN", updated_by=operator_label,
-            expected_revision=before["scene_state"]["revision"],
-        )
+        if matching:
+            position = scene_store.object_position(
+                object_profile_id=job["object_profile_id"],
+                dimensions_mm=resolved["object_profile"]["dimensions_mm"],
+            )
+            if initial_object_position is not None and position != initial_object_position:
+                raise ContractError("OBJECT_POSITION_CHANGED")
+            if position["status"] != "AVAILABLE":
+                raise ContractError(position["reason"])
+            if position["pose"] != initial_pose:
+                raise ContractError("OBJECT_POSITION_CHANGED")
+            observed = (
+                scene_store.rebind_landed_source(
+                    object_profile_id=job["object_profile_id"],
+                    dimensions_mm=resolved["object_profile"]["dimensions_mm"],
+                    run_id=run_id,
+                    expected_scene_digest=position["scene_state_digest"],
+                    expected_slot_digest=position["slot_digest"],
+                    expected_cell_digest=position["cell_state_digest"],
+                ) if not physical_test_scene and position["source"] in {"ROBOT_RELEASE", "ROBOT_RELEASE_PROXY"}
+                else before
+            )
+        else:
+            if initial_object_position is not None and (
+                initial_object_position["scene_state_digest"] != before["scene_state_digest"]
+            ):
+                raise ContractError("OBJECT_POSITION_CHANGED")
+            observed = scene_store.update_object(
+                instance_id=instance_id,
+                object_profile_id=job["object_profile_id"], state="ON_SURFACE",
+                pose={key: job[key] for key in ("place_id", "yaw_deg", "x_mm", "y_mm")},
+                source="HUMAN", updated_by=operator_label,
+                expected_revision=before["scene_state"]["revision"],
+            )
         initial_scene_digest = observed["scene_state_digest"]
+        if physical_test_scene:
+            state_initialization = bind_test_only_physical_scene(
+                first_roots, repository_root=repository,
+                robot_system_id=job["robot_system_id"],
+                object_profile_id=job["object_profile_id"],
+                dimensions_mm=resolved["object_profile"]["dimensions_mm"],
+                observed_by=operator_label,
+            )
+            if state_initialization["scene_state_digest"] != initial_scene_digest:
+                raise ContractError("OBJECT_POSITION_CHANGED")
     home_candidate = load_json_strict(paths["home"])
     qualification_source = (
         "SYNTHETIC_TEST_ONLY"
@@ -2363,6 +2417,7 @@ def build_physical_operator_console(
         return build_runtime_root_binding(
             repository, session_id=session_id, run_id=active_run_id,
             data_disposition=data_disposition, dataset_root=dataset_root,
+            physical_scene=physical_test_scene,
         )
 
     counters = {name: 0 for name in SIDE_EFFECT_COUNTERS}
@@ -2589,6 +2644,37 @@ def build_physical_operator_console(
         holder["camera_transport_evidence"] = camera_transport_evidence
         return True
 
+    def prepare_campaign():
+        nonlocal state_initialization
+        if physical_test_scene:
+            store = SceneStateStore(first_roots["cell_root"], job["robot_system_id"])
+            current = store.object_position(
+                object_profile_id=job["object_profile_id"],
+                dimensions_mm=resolved["object_profile"]["dimensions_mm"],
+            )
+            if current != state_initialization["source_position"]:
+                raise ContractError("OBJECT_POSITION_CHANGED")
+            expected_digest = current["scene_state_digest"]
+            if current["source"] in {"ROBOT_RELEASE", "ROBOT_RELEASE_PROXY"}:
+                rebound = store.rebind_landed_source(
+                    object_profile_id=job["object_profile_id"],
+                    dimensions_mm=resolved["object_profile"]["dimensions_mm"], run_id=run_id,
+                    expected_scene_digest=current["scene_state_digest"],
+                    expected_slot_digest=current["slot_digest"],
+                    expected_cell_digest=current["cell_state_digest"],
+                )
+                expected_digest = rebound["scene_state_digest"]
+            refreshed = bind_test_only_physical_scene(
+                first_roots, repository_root=repository,
+                robot_system_id=job["robot_system_id"], object_profile_id=job["object_profile_id"],
+                dimensions_mm=resolved["object_profile"]["dimensions_mm"], observed_by=operator_label,
+            )
+            if (refreshed["scene_state_digest"] != expected_digest
+                    or refreshed["source_position"]["cell_state_digest"] != current["cell_state_digest"]):
+                raise ContractError("OBJECT_POSITION_CHANGED")
+            state_initialization = refreshed
+            holder["operator"].initial_scene_digest = state_initialization["scene_state_digest"]
+
     def start_binding(
         _run_id: str, slot: Mapping[str, Any], cancel_event,
     ) -> dict[str, Any]:
@@ -2611,6 +2697,14 @@ def build_physical_operator_console(
         )
         if not isinstance(endpoint_motion, Mapping):
             raise ContractError("PHYSICAL_CONSOLE_WORKSPACE_BINDING")
+        policy = {}
+        if motion_preset is not None:
+            endpoint = resolved_workspace_bindings[receipt["normalized_job"]["place_id"]]
+            if canonical_digest(load_json_strict(endpoint["motion_qualification"])) != canonical_digest(endpoint_motion):
+                raise ContractError("MOTION_PRESET_BINDING")
+            selected_policy = load_motion_preset(repository / "config/data_factory", motion_preset)
+            if not motion_preset_trial:
+                policy["motion_preset"] = selected_policy
         home_snapshot = (
             snapshot_call() if snapshot_call is not None
             else capture_home_snapshot(tcp_candidate_manifest=paths["tcp"])
@@ -2643,6 +2737,7 @@ def build_physical_operator_console(
                     motion_qualification=endpoint_motion,
                     robot_start_pose_qualification=qualification,
                     cancel_event=cancel_event,
+                    **policy,
                 )
             else:
                 transition = start_transition_call(
@@ -2925,6 +3020,7 @@ def build_physical_operator_console(
                 camera_warmup_call=campaign_camera_warmup,
                 candidate_writer_enabled=data_disposition == "PRODUCTION",
                 repository_root=repository,
+                **({"motion_preset_trial": True} if motion_preset_trial else {}),
             )
         except Exception:
             holder.pop("camera_warmup_cache", None)
@@ -3240,6 +3336,7 @@ def build_physical_operator_console(
         campaign_operator_factory=operator_factory, episode_call=episode,
         projection_call=projection, test_only_paths=paths_text,
         terminal_response_call=lambda: holder.get("last_live_response"),
+        candidate_state_observe_call=run_job.read_candidate_episode_state,
         candidate_review_port=CandidateReviewPort(
             operator_label=operator_label,
             review_call=lambda path, **kwargs: run_job.review_candidate_admission(
@@ -3259,6 +3356,7 @@ def build_physical_operator_console(
             else yaw_sample_bindings[:requested_count]
         ),
         campaign_approval_once=True,
+        prepare_campaign_call=prepare_campaign if physical_test_scene else None,
         run_id_factory=run_id_for,
         prepare_timeout_s=8.0, close_timeout_s=5.0, clock=clock,
     )
@@ -3306,9 +3404,11 @@ def build_physical_operator_application(
     ] | None = None,
     production_dataset_root: str | Path | None = None,
     initial_data_mode: str = "TEST_COLLECTION",
+    initial_motion_preset: str | None = None,
     initial_environment: Mapping[str, Any] | None = None,
     initial_catalog: Mapping[str, Any] | None = None,
     initial_camera_devices: Sequence[object] | None = None,
+    collection_evidence_call: Callable[[], Mapping[str, Any]] | None = None,
     job_path: str | Path = DEFAULT_JOB,
     gripper_retune_path: str | Path | None = DEFAULT_GRIPPER_RETUNE,
     camera_environment_call: Callable[
@@ -3584,6 +3684,39 @@ def build_physical_operator_application(
         if len(matches) != 1:
             raise ContractError("OPERATOR_APPLICATION_COMPATIBLE_COMBINATION")
         return matches[0]
+
+    def object_position_call(selected):
+        chosen = next(item for item in active_catalog()["combinations"]
+                      if item["combination_digest"] == selected["combination_digest"])
+        profile = load_json_strict(_repository_path(repository, chosen["sources"]["object"]))
+        position = SceneStateStore(
+            repository / "outputs/data_factory/cells", initial_job["robot_system_id"],
+        ).object_position(
+            object_profile_id=selected["object_id"], dimensions_mm=profile["dimensions_mm"],
+        )
+        # Legacy isolated tests have no physical source to inherit. Once one
+        # exists, disposition cannot hide its current or blocked physical facts.
+        return None if selected["data_mode"] == "TEST_COLLECTION" and position["status"] == "MISSING" else position
+
+    def object_position_declare_call(selected, pose, expected):
+        current = object_position_call(selected)
+        if current is None:
+            return None
+        if current["reason"] == "SCENE_OBJECT_AMBIGUOUS":
+            raise ContractError(current["reason"])
+        if current["binding_digest"] != expected["binding_digest"]:
+            raise ContractError("OBJECT_POSITION_CHANGED")
+        robot_id = initial_job["robot_system_id"]
+        instance_id = current["object_instance_id"] or "production-object-" + canonical_digest({
+            "robot_system_id": robot_id, "object_profile_id": selected["object_id"],
+        }).removeprefix("sha256:")[:20]
+        SceneStateStore(repository / "outputs/data_factory/cells", robot_id).update_object(
+            instance_id=instance_id, object_profile_id=selected["object_id"],
+            state="ON_SURFACE", source="HUMAN", updated_by=operator_label,
+            pose=pose, expected_revision=current["scene_revision"],
+            expected_cell_digest=current["cell_state_digest"],
+        )
+        return object_position_call(selected)
 
     def start_pose_domain(
         selected_ids: Sequence[str] | None = None,
@@ -3899,6 +4032,33 @@ def build_physical_operator_application(
             ),
         )
 
+    def stored_collection_evidence():
+        from tools.data_factory.collection_recommendation_io import discover_stored_collection
+
+        run_root = repository / "outputs/data_factory/runs"
+        try:
+            discovery = discover_stored_collection(run_root)
+        except (ContractError, OSError) as exc:
+            return {"run_directories": [], "scene_state_path": scene_state_path,
+                    "discovery": {"availability": "UNAVAILABLE", "reason_codes": [
+                        exc.code if isinstance(exc, ContractError) else "COLLECTION_RECOMMENDATION_SOURCE_IO"]}}
+        return {"run_directories": discovery["run_directories"], "scene_state_path": scene_state_path,
+                "discovery": {"availability": discovery["availability"],
+                    "discovery_digest": discovery["discovery_digest"], "run_count": len(discovery["run_directories"]),
+                    "excluded": [{"run_id": Path(item["run_directory"]).name, "reason_code": item["reason_code"]}
+                                 for item in discovery["excluded"]]}}
+
+    def preset_qualification(endpoint, preset, *, trial=False):
+        if preset is None or trial:
+            return endpoint["sources"]["motion"]
+        qualified = preset["qualifications"].get(endpoint["motion_id"])
+        if qualified is None:
+            raise ContractError("MOTION_PRESET_QUALIFICATION_REQUIRED")
+        path = _repository_path(repository, qualified["source"])
+        if canonical_digest(load_json_strict(path)) != qualified["digest"]:
+            raise ContractError("MOTION_PRESET_BINDING")
+        return str(path)
+
     def selected_home_recovery_call() -> Mapping[str, Any]:
         if home_recovery_call is not None:
             return home_recovery_call()
@@ -3906,14 +4066,26 @@ def build_physical_operator_application(
             recover_home_live,
             validate_home_recovery_qualification,
         )
-        source = active_combination()["sources"]
-        motion = validate_home_recovery_qualification(load_json_strict(
-            _repository_path(repository, source["motion"]),
-        ))
+        application = application_holder.get("application")
+        binding = application.draft.get("motion_preset") if application is not None else None
+        preset = selected_motion_preset(active_catalog(), binding)
+        trial = (application is not None and application.selection["data_mode"] == "TEST_COLLECTION"
+                 and preset is not None and any(endpoint["motion_id"] not in preset["qualifications"]
+                                               for endpoint in application._workspace_cycle()))
+        policy = {}
+        if binding is not None:
+            selected_policy = load_motion_preset(repository / "config/data_factory", binding)
+            if not trial:
+                policy["motion_preset"] = selected_policy
+        motion = load_json_strict(
+            _repository_path(repository, preset_qualification(active_combination(), preset, trial=trial)),
+        )
+        validate_home_recovery_qualification(motion, **policy)
         if home_recovery_prepare_call is not None:
             home_recovery_prepare_call()
         recovery = recover_home_live(
             motion_qualification=motion,
+            **policy,
         )
         application = application_holder.get("application")
         if (
@@ -4018,6 +4190,14 @@ def build_physical_operator_application(
             if draft.get("authoring_mode") == "ASSISTED" else
             [None for _pose in poses]
         )
+        advice = draft.get("acquisition_recommendation")
+        if advice is not None and (
+            advice["selection"] != selected or advice["object_poses"] != poses
+            or [item["yaw_sample_binding"] for item in advice["conditions"]] != yaw_bindings[:count]
+            or advice["sampling"] != {"authoring_mode": "ASSISTED", **{
+                key: draft[key] for key in ("requested_count", "normalized_seed", "repeat")}}
+        ):
+            raise ContractError("COLLECTION_ADVICE_COMPILER_MISMATCH")
         return {
             "direct_pose_sequence": poses,
             "direct_yaw_sample_bindings": yaw_bindings,
@@ -4078,6 +4258,8 @@ def build_physical_operator_application(
         ):
             raise ContractError("OPERATOR_APPLICATION_CAMPAIGN_FACTORY")
         if mode == "GENERAL_COLLECTION" and production_campaign_factory is not None:
+            if draft.get("acquisition_recommendation") is not None:
+                raise ContractError("COLLECTION_ADVICE_COMPILER_UNAVAILABLE")
             console = production_campaign_factory(
                 campaign_id, copy.deepcopy(selected), copy.deepcopy(draft),
             )
@@ -4117,6 +4299,9 @@ def build_physical_operator_application(
                 raise ContractError("OPERATOR_APPLICATION_CAMPAIGN_FACTORY")
             endpoint_combinations.append(match)
         runtime_workspace_bindings = {}
+        preset = selected_motion_preset(active_catalog(), draft.get("motion_preset"))
+        trial = (mode == "TEST_COLLECTION" and preset is not None
+                 and any(endpoint["motion_id"] not in preset["qualifications"] for endpoint in endpoint_combinations))
         for endpoint in endpoint_combinations:
             domains = [
                 domain for domain in active_catalog()["workspace_domains"]
@@ -4131,7 +4316,7 @@ def build_physical_operator_application(
                 "frame_id": endpoint["frame_id"],
                 "selected_sheet": endpoint["sources"]["selected_sheet"],
                 "yaw0_sheet": endpoint["sources"]["yaw0_sheet"],
-                "motion_qualification": endpoint["sources"]["motion"],
+                "motion_qualification": preset_qualification(endpoint, preset, trial=trial),
                 "region_binding": {
                     key: copy.deepcopy(region[key]) for key in (
                         "layout_id", "layout_digest", "region_id",
@@ -4149,7 +4334,9 @@ def build_physical_operator_application(
             operator_label=operator_label,
             job_path=source["job"],
             yaw0_sheet=source["yaw0_sheet"],
-            motion_qualification_path=source["motion"],
+            motion_qualification_path=preset_qualification(chosen, preset, trial=trial),
+            motion_preset=draft.get("motion_preset"),
+            motion_preset_trial=trial,
             home_candidate_path=source["start_pose"],
             collection_profile_path=source["camera_profile"],
             tcp_candidate_manifest=tcp_manifest_path,
@@ -4187,6 +4374,7 @@ def build_physical_operator_application(
                 "state_space_design_profile",
             ),
             initial_object_pose=campaign_initial_pose,
+            initial_object_position=draft.get("object_position"),
             **pose_plan,
             data_disposition=disposition,
             dataset_root=(
@@ -4196,6 +4384,8 @@ def build_physical_operator_application(
             clock=clock,
         )
         return console
+
+    from tools.data_factory.operator.workflow.stored_reviews import StoredCandidateReviews
 
     application = CollectionOperatorApplication(
         session_id=session_id,
@@ -4223,8 +4413,22 @@ def build_physical_operator_application(
         start_pose_capture_call=start_pose_capture_call,
         initial_environment=initial_environment,
         effect_scope="PHYSICAL",
+        stored_reviews=StoredCandidateReviews(repository / "outputs/data_factory/runs",
+                                             operator_label=operator_label, clock=clock),
+        object_position_call=object_position_call,
+        object_position_declare_call=object_position_declare_call,
     )
     application_holder["application"] = application
+    # Bind the installed source without scanning it at startup or during views.
+    scene_state_path = str(repository / "outputs/data_factory/cells" / initial_job["robot_system_id"] / "scene_state.json")
+    application.collection_evidence_call = collection_evidence_call or stored_collection_evidence
+    application._collection_source = {"run_directories": [], "scene_state_path": scene_state_path}
+    if initial_motion_preset is not None:
+        matches = [item for item in catalog.get("motion_presets", []) if item["id"] == initial_motion_preset]
+        if len(matches) != 1:
+            application.close()
+            raise ContractError("MOTION_PRESET_BINDING")
+        application.draft["motion_preset"] = {key: matches[0][key] for key in ("id", "digest")}
     return application, {
         "session_id": session_id,
         "effect_scope": "PHYSICAL",

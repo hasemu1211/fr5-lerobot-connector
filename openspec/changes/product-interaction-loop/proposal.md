@@ -13,6 +13,7 @@ An existing Curator candidate has native synchronized raw/overlay/actual-candida
 - Preserve exact-batch authorization, semantic and technical admission, and the distinction between training approval and training execution.
 - Reduce repeated workspace-cycle resolution within each canonical operator view while preserving identical output, digests, fresh validation and detached consumer values.
 - Add a server-bound `CURATOR_REVIEW` mode with native video playback, sample coverage, clip navigation, explicit candidate approval/rejection and authoritative result recovery. The browser supplies a choice and expected review identity; paths, actor and lifecycle remain server-owned.
+- Consume stored collection advice in the actual application draft. Retain mandatory pins and exclusions, distinguish them from unobserved conditions, preserve current placement and seed, and expose apply/keep plus canonical result recovery through the existing Web and automation transport. Incompatible selection or transition bindings remain explicitly unavailable.
 
 ## Capabilities
 

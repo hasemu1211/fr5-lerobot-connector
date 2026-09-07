@@ -1,0 +1,1067 @@
+<!doctype html><html lang="ko"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>실제 학습 입력 — 데이터 엔진 근거</title><link rel="stylesheet" href="../site.css"></head><body><main class="source-page"><a href="../learning.html#inputs">← 설명으로 돌아가기</a><h1>실제 학습 입력</h1><p class="note">설명에 사용한 구현·측정 자료의 발췌이다. SHA-256은 발췌 전 원본 파일을 식별한다. 실행 PC의 절대 경로와 계정 정보는 포함하지 않으며, 측정값과 해석 조건을 함께 제시한다.</p><section id="fr5_training_receipt"><h2>fr5_training_receipt.json</h2><p class="locator">outputs/local-learning/smolvla-raw26-quality-10000-r1/fr5_training_receipt.json<br>sha256:f8bfaf51b5a7f1a30992bfd7a99d7695db459c07754d57afb1d98abf09e5d658</p><p class="note">원문에서 발췌한 필드. 실행 환경의 절대 경로는 자료 식별자로 표시한다.</p><pre>{
+  &quot;status&quot;: &quot;ADMITTED_NOT_TRAINED&quot;,
+  &quot;dataset_identity&quot;: {
+    &quot;dataset_digest&quot;: &quot;sha256:564ca492246687ce3cf96b08d0458dd59edebec1d67e4d48ef4dabf90e93d41d&quot;,
+    &quot;dataset_id&quot;: &quot;fr5260903-frozen-pickup-r1&quot;,
+    &quot;dataset_root&quot;: &quot;datasets/fr5_episodes/fr5260903&quot;,
+    &quot;repo_id&quot;: &quot;local/fr5_smolvla_up_wrist_30hz&quot;
+  },
+  &quot;approved_inventory_path&quot;: &quot;outputs/local-learning/authorizations/fr5260903-raw26-r2/training_approved.json&quot;,
+  &quot;approved_episode_inventory_digest&quot;: &quot;sha256:f0538658665a5648da8ad51d08856064fd7cfda2aa2f02c7a6a052c4a990e0a9&quot;,
+  &quot;selected_episodes&quot;: [
+    5,
+    6,
+    7,
+    8,
+    9,
+    10,
+    11,
+    14,
+    15,
+    16,
+    17,
+    18,
+    19,
+    20,
+    21,
+    22,
+    23,
+    24,
+    25,
+    26,
+    27,
+    28,
+    29,
+    30,
+    31,
+    32
+  ],
+  &quot;train_episodes&quot;: [
+    5,
+    6,
+    7,
+    8,
+    9,
+    10,
+    11,
+    14,
+    15,
+    16,
+    17,
+    18,
+    19,
+    20,
+    21,
+    22,
+    23,
+    24,
+    25,
+    26
+  ],
+  &quot;eval_episodes&quot;: [
+    27,
+    28,
+    29,
+    30,
+    31,
+    32
+  ],
+  &quot;split_digest&quot;: &quot;sha256:938dfdac3defe49a267d3178f61af5f32896ce6bafff4c62bb2fca63ac264b0d&quot;,
+  &quot;normalization&quot;: {
+    &quot;algorithm&quot;: &quot;lerobot-0.6.1-train-episode-moments-v1&quot;,
+    &quot;episodes&quot;: [
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      14,
+      15,
+      16,
+      17,
+      18,
+      19,
+      20,
+      21,
+      22,
+      23,
+      24,
+      25,
+      26
+    ],
+    &quot;stats&quot;: {
+      &quot;action&quot;: {
+        &quot;count&quot;: [
+          15492.0
+        ],
+        &quot;max&quot;: [
+          -1.5707924365997314,
+          -0.8986161351203918,
+          2.0923800468444824,
+          -1.5707887411117554,
+          -1.5707924365997314,
+          0.04959632083773613,
+          0.020999999716877937
+        ],
+        &quot;mean&quot;: [
+          -2.002418084205228,
+          -1.231720016918655,
+          1.7267253728005858,
+          -2.0658042659185174,
+          -1.5708001096935627,
+          -0.45426675337569955,
+          0.01992635276029596
+        ],
+        &quot;min&quot;: [
+          -2.3287556171417236,
+          -1.5708022117614746,
+          1.470271110534668,
+          -2.4304087162017822,
+          -1.5708001852035522,
+          -1.189908742904663,
+          0.011760000139474869
+        ],
+        &quot;std&quot;: [
+          0.2193453937118144,
+          0.1755906119104504,
+          0.1444722386125407,
+          0.2326122738332069,
+          4.827536203311282e-07,
+          0.340920655151087,
+          0.0029615653287356275
+        ]
+      },
+      &quot;observation.images.up&quot;: {
+        &quot;count&quot;: [
+          2914.0
+        ],
+        &quot;max&quot;: [
+          [
+            [
+              1.0
+            ]
+          ],
+          [
+            [
+              0.9764705896377563
+            ]
+          ],
+          [
+            [
+              1.0
+            ]
+          ]
+        ],
+        &quot;mean&quot;: [
+          [
+            [
+              0.485
+            ]
+          ],
+          [
+            [
+              0.456
+            ]
+          ],
+          [
+            [
+              0.406
+            ]
+          ]
+        ],
+        &quot;min&quot;: [
+          [
+            [
+              0.0
+            ]
+          ],
+          [
+            [
+              0.0
+            ]
+          ],
+          [
+            [
+              0.0
+            ]
+          ]
+        ],
+        &quot;std&quot;: [
+          [
+            [
+              0.229
+            ]
+          ],
+          [
+            [
+              0.224
+            ]
+          ],
+          [
+            [
+              0.225
+            ]
+          ]
+        ]
+      },
+      &quot;observation.images.wrist&quot;: {
+        &quot;count&quot;: [
+          2914.0
+        ],
+        &quot;max&quot;: [
+          [
+            [
+              0.6352941393852234
+            ]
+          ],
+          [
+            [
+              0.6392157077789307
+            ]
+          ],
+          [
+            [
+              0.6235294342041016
+            ]
+          ]
+        ],
+        &quot;mean&quot;: [
+          [
+            [
+              0.485
+            ]
+          ],
+          [
+            [
+              0.456
+            ]
+          ],
+          [
+            [
+              0.406
+            ]
+          ]
+        ],
+        &quot;min&quot;: [
+          [
+            [
+              0.0
+            ]
+          ],
+          [
+            [
+              0.0
+            ]
+          ],
+          [
+            [
+              0.0
+            ]
+          ]
+        ],
+        &quot;std&quot;: [
+          [
+            [
+              0.229
+            ]
+          ],
+          [
+            [
+              0.224
+            ]
+          ],
+          [
+            [
+              0.225
+            ]
+          ]
+        ]
+      },
+      &quot;observation.state&quot;: {
+        &quot;count&quot;: [
+          15492.0
+        ],
+        &quot;max&quot;: [
+          -1.5707924365997314,
+          -0.8986194133758545,
+          2.0923590660095215,
+          -1.570788860321045,
+          -1.570726752281189,
+          0.049611371010541916,
+          0.020999999716877937
+        ],
+        &quot;mean&quot;: [
+          -2.001230415096278,
+          -1.2326635688720302,
+          1.7262747256508977,
+          -2.064406225809348,
+          -1.5708001929523099,
+          -0.45298040032736897,
+          0.019989757594096276
+        ],
+        &quot;min&quot;: [
+          -2.3287601470947266,
+          -1.5708035230636597,
+          1.470290184020996,
+          -2.4305131435394287,
+          -1.5708305835723877,
+          -1.1899510622024536,
+          0.011970000341534615
+        ],
+        &quot;std&quot;: [
+          0.22009184621912212,
+          0.17617169327206988,
+          0.14448773142666207,
+          0.23360654672432368,
+          3.8395222580507e-07,
+          0.340895538479413,
+          0.0026808223566467575
+        ]
+      }
+    },
+    &quot;use_imagenet_stats&quot;: true
+  },
+  &quot;receipt_digest&quot;: &quot;sha256:3fabce2ea28858778abd8508a3277aa9e0520b45964d40a8e21c09cec0bfdf31&quot;
+}</pre></section><section id="fr5_training_split"><h2>fr5_training_split.json</h2><p class="locator">outputs/local-learning/smolvla-raw26-quality-10000-r1/fr5_training_split.json<br>sha256:46b6d9cd6375f1c5c1308d04b7d3bafd154ab5d0cce79d11517e0940981999aa</p><p class="note">원문에서 발췌한 필드. 실행 환경의 절대 경로는 자료 식별자로 표시한다.</p><pre>{
+  &quot;approved_episode_inventory_digest&quot;: &quot;sha256:f0538658665a5648da8ad51d08856064fd7cfda2aa2f02c7a6a052c4a990e0a9&quot;,
+  &quot;dataset_identity&quot;: {
+    &quot;dataset_digest&quot;: &quot;sha256:564ca492246687ce3cf96b08d0458dd59edebec1d67e4d48ef4dabf90e93d41d&quot;,
+    &quot;dataset_id&quot;: &quot;fr5260903-frozen-pickup-r1&quot;,
+    &quot;dataset_root&quot;: &quot;datasets/fr5_episodes/fr5260903&quot;,
+    &quot;repo_id&quot;: &quot;local/fr5_smolvla_up_wrist_30hz&quot;
+  },
+  &quot;episode_content_digests&quot;: {
+    &quot;10&quot;: &quot;sha256:53ab60e373353f54aa4b8119204640dbd5a99f080968194505a897834164ea13&quot;,
+    &quot;11&quot;: &quot;sha256:ffa85c33c65aa2d010fd8948fb6cd8fc35e273f896c7f7a17cec0bbbfc5db982&quot;,
+    &quot;14&quot;: &quot;sha256:5159d7ee38acc0fa65920ee176576fa0b932836ee42b9e8c645f471e2510dffb&quot;,
+    &quot;15&quot;: &quot;sha256:9921061c9f0c675bfcd67d45eed2695b1f311d4afa9775758a73081be23271bd&quot;,
+    &quot;16&quot;: &quot;sha256:223d9223708645f2e657e2b55e0da7a40d93369e103fced249f494310cfe3494&quot;,
+    &quot;17&quot;: &quot;sha256:9204079da79cc91c07899249065882e1b3c007f5526922cab4d1b27db09c0c67&quot;,
+    &quot;18&quot;: &quot;sha256:1d48373be04de94d099bc200db2990f25b09d9cb28dd7b286f4b0b1f3bb4aede&quot;,
+    &quot;19&quot;: &quot;sha256:c0dd451ededca06d9dabde67b641b4a8600476e1271d30ff02c7dfc7d55cc3ec&quot;,
+    &quot;20&quot;: &quot;sha256:46d34408892f51ddc379b5a3603dac2cd3313b88b4e75ed1f92dda1b46e08a18&quot;,
+    &quot;21&quot;: &quot;sha256:97a25c515d3e320acb4989fce5877fb3f8a6065eaae3cb5bf5ae0eb95963625c&quot;,
+    &quot;22&quot;: &quot;sha256:0703e51b3559aeaf2161f07063e3ef58c620c9ff3852c6fce2fda065219997fe&quot;,
+    &quot;23&quot;: &quot;sha256:4b5422c9f135ef8180a29d1dc1ae3bea9af53418c9efca0bc24cce6468e21164&quot;,
+    &quot;24&quot;: &quot;sha256:7320b55ce56cd4006aa0047ad63833e22b806ae262bbf8d89c608df9f982e66b&quot;,
+    &quot;25&quot;: &quot;sha256:8e774b1261e93d271ec89bc637555e2c89aa2883dc5b630580b06e52c54d3581&quot;,
+    &quot;26&quot;: &quot;sha256:6e17169b1ec4852f8e3fda01d5808e79bb1ca08739dc35633a8d33b4b7dc2dc7&quot;,
+    &quot;27&quot;: &quot;sha256:b9158cb118c2986a90900b7a40781a3850ae5ebd8e58a5efce32782f71fbfa48&quot;,
+    &quot;28&quot;: &quot;sha256:f3ce133d595d56a5ab0e9bfc205f6b76136c71b0c1cee0e85fbda242abb14bc0&quot;,
+    &quot;29&quot;: &quot;sha256:8fb6805054d85276bed083732548b81f053ca450fe5d643267ae395f3a8d57b8&quot;,
+    &quot;30&quot;: &quot;sha256:9e9657a607822a53538ee4aa96d73d5aa8309c53fb5ce203e053b5d8d895852c&quot;,
+    &quot;31&quot;: &quot;sha256:a79a0a109b2c84a6ad254b2f7f23f639a51ccca603de966d7fbe49bc087f224c&quot;,
+    &quot;32&quot;: &quot;sha256:562c37d9583ca52e3392c893d49394818271a093cac08bbe70192ea54db2dc9d&quot;,
+    &quot;5&quot;: &quot;sha256:e6771ae2ad9c99c69b6b7a55eae85523f7b27ad8629c579d043ab4584345389d&quot;,
+    &quot;6&quot;: &quot;sha256:a3f424e82f7ec39e8cccbf2045c6d51f8596162f99c918c9d499d2245a4f68bf&quot;,
+    &quot;7&quot;: &quot;sha256:74eb777efb2ad806b30b81d4f21877bdc1bd0217bbb9dfcee2bb8965fd6c028f&quot;,
+    &quot;8&quot;: &quot;sha256:d94e2da0dd7bd10f5c42e7b592889fbc9150042396ec4913c643a85f5f93ba70&quot;,
+    &quot;9&quot;: &quot;sha256:b18a749e85bd792b51a5bbcda0e36ed01b80c4d99ba48a3b7c2e41f91f5b749e&quot;
+  },
+  &quot;episode_tasks&quot;: [
+    [
+      &quot;pick up the 24 mm wooden cube from the red zone and place it in the blue zone&quot;
+    ],
+    [
+      &quot;pick up the 24 mm wooden cube from the blue zone and place it in the red zone&quot;
+    ],
+    [
+      &quot;pick up the 24 mm wooden cube from the red zone and place it in the blue zone&quot;
+    ],
+    [
+      &quot;pick up the 24 mm wooden cube from the blue zone and place it in the red zone&quot;
+    ],
+    [
+      &quot;pick up the 24 mm wooden cube from the red zone and place it in the blue zone&quot;
+    ],
+    [
+      &quot;pick up the 24 mm wooden cube&quot;
+    ],
+    [
+      &quot;pick up the 24 mm wooden cube&quot;
+    ],
+    [
+      &quot;pick up the 24 mm wooden cube&quot;
+    ],
+    [
+      &quot;pick up the 24 mm wooden cube&quot;
+    ],
+    [
+      &quot;pick up the 24 mm wooden cube&quot;
+    ],
+    [
+      &quot;pick up the 24 mm wooden cube&quot;
+    ],
+    [
+      &quot;pick up the 24 mm wooden cube&quot;
+    ],
+    [
+      &quot;pick up the 24 mm wooden cube&quot;
+    ],
+    [
+      &quot;pick up the 24 mm wooden cube&quot;
+    ],
+    [
+      &quot;pick up the 24 mm wooden cube&quot;
+    ],
+    [
+      &quot;pick up the 24 mm wooden cube&quot;
+    ],
+    [
+      &quot;pick up the 24 mm wooden cube&quot;
+    ],
+    [
+      &quot;pick up the 24 mm wooden cube&quot;
+    ],
+    [
+      &quot;pick up the 24 mm wooden cube&quot;
+    ],
+    [
+      &quot;pick up the 24 mm wooden cube&quot;
+    ],
+    [
+      &quot;pick up the 24 mm wooden cube&quot;
+    ],
+    [
+      &quot;pick up the 24 mm wooden cube&quot;
+    ],
+    [
+      &quot;pick up the 24 mm wooden cube&quot;
+    ],
+    [
+      &quot;pick up the 24 mm wooden cube&quot;
+    ],
+    [
+      &quot;pick up the 24 mm wooden cube&quot;
+    ],
+    [
+      &quot;pick up the 24 mm wooden cube&quot;
+    ],
+    [
+      &quot;pick up the 24 mm wooden cube&quot;
+    ],
+    [
+      &quot;pick up the 24 mm wooden cube&quot;
+    ],
+    [
+      &quot;pick up the 24 mm wooden cube&quot;
+    ],
+    [
+      &quot;pick up the 24 mm wooden cube&quot;
+    ],
+    [
+      &quot;pick up the 24 mm wooden cube&quot;
+    ],
+    [
+      &quot;pick up the 24 mm wooden cube&quot;
+    ],
+    [
+      &quot;pick up the 24 mm wooden cube&quot;
+    ]
+  ],
+  &quot;eval_episodes&quot;: [
+    27,
+    28,
+    29,
+    30,
+    31,
+    32
+  ],
+  &quot;eval_split&quot;: 0.2,
+  &quot;feature_contract&quot;: {
+    &quot;camera_profile&quot;: &quot;up-wrist&quot;,
+    &quot;collection_profile_digest&quot;: &quot;sha256:d8288e4b3cbd34dc646949985658c786d8b9945ed368d67b412a1dec93a4931d&quot;,
+    &quot;collection_profile_id&quot;: &quot;fr5-up-wrist-rgb-30hz-v2&quot;,
+    &quot;dataset_features&quot;: {
+      &quot;action&quot;: {
+        &quot;dtype&quot;: &quot;float32&quot;,
+        &quot;fps&quot;: 30.0,
+        &quot;names&quot;: [
+          &quot;j1&quot;,
+          &quot;j2&quot;,
+          &quot;j3&quot;,
+          &quot;j4&quot;,
+          &quot;j5&quot;,
+          &quot;j6&quot;,
+          &quot;gripper.pos&quot;
+        ],
+        &quot;shape&quot;: [
+          7
+        ]
+      },
+      &quot;episode_index&quot;: {
+        &quot;dtype&quot;: &quot;int64&quot;,
+        &quot;names&quot;: null,
+        &quot;shape&quot;: [
+          1
+        ]
+      },
+      &quot;frame_index&quot;: {
+        &quot;dtype&quot;: &quot;int64&quot;,
+        &quot;names&quot;: null,
+        &quot;shape&quot;: [
+          1
+        ]
+      },
+      &quot;index&quot;: {
+        &quot;dtype&quot;: &quot;int64&quot;,
+        &quot;names&quot;: null,
+        &quot;shape&quot;: [
+          1
+        ]
+      },
+      &quot;observation.images.up&quot;: {
+        &quot;dtype&quot;: &quot;video&quot;,
+        &quot;info&quot;: {
+          &quot;has_audio&quot;: false,
+          &quot;is_depth_map&quot;: false,
+          &quot;video.channels&quot;: 3,
+          &quot;video.codec&quot;: &quot;h264&quot;,
+          &quot;video.crf&quot;: 23,
+          &quot;video.extra_options&quot;: {},
+          &quot;video.fast_decode&quot;: 0,
+          &quot;video.fps&quot;: 30,
+          &quot;video.g&quot;: 2,
+          &quot;video.height&quot;: 480,
+          &quot;video.pix_fmt&quot;: &quot;yuv420p&quot;,
+          &quot;video.preset&quot;: &quot;ultrafast&quot;,
+          &quot;video.video_backend&quot;: &quot;pyav&quot;,
+          &quot;video.width&quot;: 640
+        },
+        &quot;names&quot;: [
+          &quot;height&quot;,
+          &quot;width&quot;,
+          &quot;channels&quot;
+        ],
+        &quot;shape&quot;: [
+          480,
+          640,
+          3
+        ]
+      },
+      &quot;observation.images.wrist&quot;: {
+        &quot;dtype&quot;: &quot;video&quot;,
+        &quot;info&quot;: {
+          &quot;has_audio&quot;: false,
+          &quot;is_depth_map&quot;: false,
+          &quot;video.channels&quot;: 3,
+          &quot;video.codec&quot;: &quot;h264&quot;,
+          &quot;video.crf&quot;: 23,
+          &quot;video.extra_options&quot;: {},
+          &quot;video.fast_decode&quot;: 0,
+          &quot;video.fps&quot;: 30,
+          &quot;video.g&quot;: 2,
+          &quot;video.height&quot;: 480,
+          &quot;video.pix_fmt&quot;: &quot;yuv420p&quot;,
+          &quot;video.preset&quot;: &quot;ultrafast&quot;,
+          &quot;video.video_backend&quot;: &quot;pyav&quot;,
+          &quot;video.width&quot;: 640
+        },
+        &quot;names&quot;: [
+          &quot;height&quot;,
+          &quot;width&quot;,
+          &quot;channels&quot;
+        ],
+        &quot;shape&quot;: [
+          480,
+          640,
+          3
+        ]
+      },
+      &quot;observation.state&quot;: {
+        &quot;dtype&quot;: &quot;float32&quot;,
+        &quot;fps&quot;: 30.0,
+        &quot;names&quot;: [
+          &quot;j1&quot;,
+          &quot;j2&quot;,
+          &quot;j3&quot;,
+          &quot;j4&quot;,
+          &quot;j5&quot;,
+          &quot;j6&quot;,
+          &quot;gripper.pos&quot;
+        ],
+        &quot;shape&quot;: [
+          7
+        ]
+      },
+      &quot;task_index&quot;: {
+        &quot;dtype&quot;: &quot;int64&quot;,
+        &quot;names&quot;: null,
+        &quot;shape&quot;: [
+          1
+        ]
+      },
+      &quot;timestamp&quot;: {
+        &quot;dtype&quot;: &quot;float32&quot;,
+        &quot;names&quot;: null,
+        &quot;shape&quot;: [
+          1
+        ]
+      }
+    },
+    &quot;fps&quot;: 30,
+    &quot;policy_argv&quot;: [
+      &quot;--policy.path=lerobot/smolvla_base&quot;,
+      &quot;--rename_map={\&quot;observation.images.up\&quot;:\&quot;observation.images.camera1\&quot;,\&quot;observation.images.wrist\&quot;:\&quot;observation.images.camera2\&quot;}&quot;,
+      &quot;--policy.empty_cameras=1&quot;,
+      &quot;--policy.input_features={\&quot;observation.images.camera1\&quot;:{\&quot;shape\&quot;:[3,480,640],\&quot;type\&quot;:\&quot;VISUAL\&quot;},\&quot;observation.images.camera2\&quot;:{\&quot;shape\&quot;:[3,480,640],\&quot;type\&quot;:\&quot;VISUAL\&quot;},\&quot;observation.state\&quot;:{\&quot;shape\&quot;:[7],\&quot;type\&quot;:\&quot;STATE\&quot;}}&quot;,
+      &quot;--policy.output_features={\&quot;action\&quot;:{\&quot;shape\&quot;:[7],\&quot;type\&quot;:\&quot;ACTION\&quot;}}&quot;
+    ],
+    &quot;profile&quot;: &quot;smolvla&quot;,
+    &quot;task&quot;: &quot;pickup_e2e&quot;,
+    &quot;task_contract_digest&quot;: &quot;sha256:7d712461671dd44ef9da32961aff9c99e112c335a818ac07b123dd8a6bf851b0&quot;
+  },
+  &quot;repo_id&quot;: &quot;local/fr5_smolvla_up_wrist_30hz&quot;,
+  &quot;schema_version&quot;: 3,
+  &quot;selected_episodes&quot;: [
+    5,
+    6,
+    7,
+    8,
+    9,
+    10,
+    11,
+    14,
+    15,
+    16,
+    17,
+    18,
+    19,
+    20,
+    21,
+    22,
+    23,
+    24,
+    25,
+    26,
+    27,
+    28,
+    29,
+    30,
+    31,
+    32
+  ],
+  &quot;split_algorithm&quot;: &quot;lerobot-0.6.1-last-ceil-per-task-selected-order&quot;,
+  &quot;split_digest&quot;: &quot;sha256:938dfdac3defe49a267d3178f61af5f32896ce6bafff4c62bb2fca63ac264b0d&quot;,
+  &quot;total_episodes&quot;: 33,
+  &quot;total_frames&quot;: 28457,
+  &quot;train_episodes&quot;: [
+    5,
+    6,
+    7,
+    8,
+    9,
+    10,
+    11,
+    14,
+    15,
+    16,
+    17,
+    18,
+    19,
+    20,
+    21,
+    22,
+    23,
+    24,
+    25,
+    26
+  ]
+}</pre></section><section id="model-contract"><h2>모델 입력·학습·추론의 근거</h2><p>LeRobot 구현 발췌: Copyright 2025–2026 The HuggingFace Inc. team. <a href="../assets/licenses/LeRobot-Apache-2.0.txt">Apache License 2.0</a>. 저장 설정은 비교 당시의 checkpoint이며 코드 발췌는 현재 설치 소스의 원리를 설명한다.</p><h3>비교 실험 checkpoint의 저장 설정</h3><p class="locator">outputs/local-learning/smolvla-raw26-quality-10000-r1/checkpoints/010000/pretrained_model/config.json<br>sha256:3a56fd691e52fca1f9910aec655179a0baa3b3fcc7d551d03b9351fd375dfccf</p><p class="note">원본 필드 또는 명시한 구현 구간의 발췌.</p><pre>{
+  &quot;type&quot;: &quot;smolvla&quot;,
+  &quot;n_obs_steps&quot;: 1,
+  &quot;chunk_size&quot;: 50,
+  &quot;n_action_steps&quot;: 50,
+  &quot;num_steps&quot;: 10,
+  &quot;input_features&quot;: {
+    &quot;observation.state&quot;: {
+      &quot;type&quot;: &quot;STATE&quot;,
+      &quot;shape&quot;: [
+        7
+      ]
+    },
+    &quot;observation.images.camera1&quot;: {
+      &quot;type&quot;: &quot;VISUAL&quot;,
+      &quot;shape&quot;: [
+        3,
+        480,
+        640
+      ]
+    },
+    &quot;observation.images.camera2&quot;: {
+      &quot;type&quot;: &quot;VISUAL&quot;,
+      &quot;shape&quot;: [
+        3,
+        480,
+        640
+      ]
+    },
+    &quot;observation.images.camera3&quot;: {
+      &quot;type&quot;: &quot;VISUAL&quot;,
+      &quot;shape&quot;: [
+        3,
+        256,
+        256
+      ]
+    },
+    &quot;observation.images.empty_camera_0&quot;: {
+      &quot;type&quot;: &quot;VISUAL&quot;,
+      &quot;shape&quot;: [
+        3,
+        480,
+        640
+      ]
+    }
+  },
+  &quot;output_features&quot;: {
+    &quot;action&quot;: {
+      &quot;type&quot;: &quot;ACTION&quot;,
+      &quot;shape&quot;: [
+        7
+      ]
+    }
+  },
+  &quot;normalization_mapping&quot;: {
+    &quot;VISUAL&quot;: &quot;IDENTITY&quot;,
+    &quot;STATE&quot;: &quot;MEAN_STD&quot;,
+    &quot;ACTION&quot;: &quot;MEAN_STD&quot;
+  },
+  &quot;empty_cameras&quot;: 1,
+  &quot;resize_imgs_with_padding&quot;: [
+    512,
+    512
+  ],
+  &quot;freeze_vision_encoder&quot;: true,
+  &quot;train_expert_only&quot;: true
+}</pre><h3>설치된 LeRobot의 입력 처리 · 334–380행</h3><p class="locator">installed/lerobot/policies/smolvla/modeling_smolvla.py<br>sha256:37b1d56f37510732a087cf5c32c05cd15d6234201a3f002f108ec4c53438cc7d</p><p class="note">원본 필드 또는 명시한 구현 구간의 발췌.</p><pre>    def prepare_images(self, batch):
+        &quot;&quot;&quot;Apply SmolVLA preprocessing to the images, like resizing to 224x224 and padding to keep aspect ratio, and
+        convert pixel range from [0.0, 1.0] to [-1.0, 1.0] as requested by SigLIP.
+        &quot;&quot;&quot;
+        images = []
+        img_masks = []
+        present_img_keys = [key for key in self.config.image_features if key in batch]
+        missing_img_keys = [key for key in self.config.image_features if key not in batch]
+
+        if len(present_img_keys) == 0:
+            raise ValueError(
+                f&quot;All image features are missing from the batch. At least one expected. (batch: {batch.keys()}) (image_features:{self.config.image_features})&quot;
+            )
+        # Preprocess image features present in the batch
+        for key in present_img_keys:
+            img = batch[key][:, -1, :, :, :] if batch[key].ndim == 5 else batch[key]
+            if self.config.resize_imgs_with_padding is not None:
+                # SmolVLA stores the target as (width, height); the shared helper expects (height, width).
+                img = resize_with_pad(
+                    img,
+                    self.config.resize_imgs_with_padding[1],
+                    self.config.resize_imgs_with_padding[0],
+                    pad_value=0,
+                )
+
+            # Normalize from range [0,1] to [-1,1] as expacted by siglip
+            img = img * 2.0 - 1.0
+
+            bsize = img.shape[0]
+            device = img.device
+            if f&quot;{key}_padding_mask&quot; in batch:
+                mask = batch[f&quot;{key}_padding_mask&quot;].bool()
+            else:
+                mask = torch.ones(bsize, dtype=torch.bool, device=device)
+            images.append(img)
+            img_masks.append(mask)
+
+        # Create image features not present in the batch
+        # as fully 0 padded images.
+        for num_empty_cameras in range(len(missing_img_keys)):
+            if num_empty_cameras &gt;= self.config.empty_cameras:
+                break
+            img = torch.ones_like(img) * -1
+            mask = torch.zeros_like(mask)
+            images.append(img)
+            img_masks.append(mask)
+        return images, img_masks</pre><h3>설치된 LeRobot의 flow matching · 689–772행</h3><p class="locator">installed/lerobot/policies/smolvla/modeling_smolvla.py<br>sha256:37b1d56f37510732a087cf5c32c05cd15d6234201a3f002f108ec4c53438cc7d</p><p class="note">원본 필드 또는 명시한 구현 구간의 발췌.</p><pre>    def forward(
+        self, images, img_masks, lang_tokens, lang_masks, state, actions, noise=None, time=None
+    ) -&gt; Tensor:
+        &quot;&quot;&quot;Do a full training forward pass and compute the loss (batch_size x num_steps x num_motors)&quot;&quot;&quot;
+        if noise is None:
+            noise = self.sample_noise(actions.shape, actions.device)
+
+        if time is None:
+            time = self.sample_time(actions.shape[0], actions.device)
+
+        time_expanded = time[:, None, None]
+        x_t = time_expanded * noise + (1 - time_expanded) * actions
+        u_t = noise - actions
+        prefix_embs, prefix_pad_masks, prefix_att_masks = self.embed_prefix(
+            images, img_masks, lang_tokens, lang_masks, state=state
+        )
+        suffix_embs, suffix_pad_masks, suffix_att_masks = self.embed_suffix(x_t, time)
+
+        pad_masks = torch.cat([prefix_pad_masks, suffix_pad_masks], dim=1)
+        att_masks = torch.cat([prefix_att_masks, suffix_att_masks], dim=1)
+
+        att_2d_masks = make_att_2d_masks(pad_masks, att_masks)
+        position_ids = torch.cumsum(pad_masks, dim=1) - 1
+        (_, suffix_out), _ = self.vlm_with_expert.forward(
+            attention_mask=att_2d_masks,
+            position_ids=position_ids,
+            past_key_values=None,
+            inputs_embeds=[prefix_embs, suffix_embs],
+            use_cache=False,
+        )
+        suffix_out = suffix_out[:, -self.config.chunk_size :]
+        # Original openpi code, upcast attention output
+        suffix_out = suffix_out.to(dtype=torch.float32)
+        v_t = self.action_out_proj(suffix_out)
+        losses = F.mse_loss(u_t, v_t, reduction=&quot;none&quot;)
+        return losses
+
+    def sample_actions(
+        self,
+        images,
+        img_masks,
+        lang_tokens,
+        lang_masks,
+        state,
+        noise=None,
+        **kwargs: Unpack[ActionSelectKwargs],
+    ) -&gt; Tensor:
+        &quot;&quot;&quot;Do a full inference forward and compute the action (batch_size x num_steps x num_motors)&quot;&quot;&quot;
+        bsize = state.shape[0]
+        device = state.device
+
+        if noise is None:
+            actions_shape = (bsize, self.config.chunk_size, self.config.max_action_dim)
+            noise = self.sample_noise(actions_shape, device)
+
+        prefix_embs, prefix_pad_masks, prefix_att_masks = self.embed_prefix(
+            images, img_masks, lang_tokens, lang_masks, state=state
+        )
+        prefix_att_2d_masks = make_att_2d_masks(prefix_pad_masks, prefix_att_masks)
+        prefix_position_ids = torch.cumsum(prefix_pad_masks, dim=1) - 1
+        # Compute image and language key value cache
+        _, past_key_values = self.vlm_with_expert.forward(
+            attention_mask=prefix_att_2d_masks,
+            position_ids=prefix_position_ids,
+            past_key_values=None,
+            inputs_embeds=[prefix_embs, None],
+            use_cache=self.config.use_cache,
+        )
+        num_steps = self.config.num_steps
+
+        return euler_integrate(
+            lambda input_x_t, current_timestep: self.denoise_step(
+                x_t=input_x_t,
+                prefix_pad_masks=prefix_pad_masks,
+                past_key_values=past_key_values,
+                timestep=current_timestep,
+            ),
+            noise,
+            num_steps,
+            rtc_processor=self.rtc_processor,
+            rtc_enabled=self._rtc_enabled(),
+            inference_delay=kwargs.get(&quot;inference_delay&quot;),
+            prev_chunk_left_over=kwargs.get(&quot;prev_chunk_left_over&quot;),
+            execution_horizon=kwargs.get(&quot;execution_horizon&quot;),</pre></section><section id="launch-contract"><h2>학습 시작의 입력과 권한 확인</h2><p>현재 main 구현. 배치 승인 경로와 별도로 기존 사용자 위임의 범위도 실행 시 검사한다. 아래 발췌는 새로운 학습 성과를 뜻하지 않는다.</p><p class="locator">tools/data_factory/training_entrypoint.py<br>sha256:9ce7bf6c27de3cc18c84c410172071268bab548cf0cfd7fafb5b6aa34cfca26d</p><h3>원본 174–207행</h3><pre>174: def prepare_launch(*, dataset: Path, repo_id: str, inventory: Path,
+175:                    profile: str, collection_profile: str, argv: list[str]) -&gt; tuple[dict, dict]:
+176:     from importlib.metadata import version
+177:
+178:     if version(&quot;lerobot&quot;) != &quot;0.6.1&quot;:
+179:         raise ContractError(&quot;TRAINING_SPLIT_RUNTIME_UNVERIFIED&quot;, &quot;This split adapter is verified against LeRobot 0.6.1&quot;)
+180:     config = options(argv[1:])
+181:     if config.get(&quot;--job.target&quot;, &quot;local&quot;) != &quot;local&quot; or any(key.startswith(&quot;--env.&quot;) for key in config):
+182:         raise ContractError(&quot;TRAINING_LOCAL_OFFLINE_ONLY&quot;)
+183:     # Streaming, renamed roots, alternate episode order and resume are separate contracts.
+184:     if (not config.get(&quot;--dataset.root&quot;)
+185:             or Path(config[&quot;--dataset.root&quot;]).expanduser().resolve() != dataset.expanduser().resolve()
+186:             or config.get(&quot;--dataset.repo_id&quot;) != repo_id
+187:             or config.get(&quot;--dataset.streaming&quot;, &quot;false&quot;) != &quot;false&quot;
+188:             or &quot;--config_path&quot; in config or &quot;--resume&quot; in config):
+189:         raise ContractError(&quot;TRAINING_COMMAND_DATASET&quot;)
+190:     approved, metadata, selected = check_inventory(dataset, repo_id, inventory, config.get(&quot;--dataset.episodes&quot;))
+191:     _enforce_delegated_launch(
+192:         approved, dataset=dataset, repo_id=repo_id, profile=profile, config=config,
+193:     )
+194:     checklist_to_task = {contract[&quot;review_checklist_id&quot;]: task for task, contract in TASK_CONTRACTS.items()}
+195:     tasks = set()
+196:     for episode in approved[&quot;episodes&quot;]:
+197:         semantic = load_json_strict(Path(episode[&quot;human_semantic_evidence&quot;][&quot;artifact_path&quot;]))
+198:         task = checklist_to_task[semantic[&quot;checklist_id&quot;]]
+199:         labels = metadata[&quot;episode_tasks&quot;][episode[&quot;episode_index&quot;]]
+200:         if not labels or any(instruction_task(label) != task for label in labels):
+201:             raise ContractError(&quot;TRAINING_TASK_EVIDENCE_BINDING&quot;)
+202:         tasks.add(task)
+203:     # ACT/VQ-BeT have no language conditioning; keep the first baseline one task/instruction.
+204:     if len(tasks) != 1 or (profile != &quot;smolvla&quot; and len({tuple(metadata[&quot;episode_tasks&quot;][i]) for i in selected}) != 1):
+205:         raise ContractError(&quot;TRAINING_MIXED_TASK_SCOPE&quot;)
+206:     feature = launch_feature_contract(profile, collection_profile, tasks.pop(), metadata)
+207:     mapped = {}</pre><h3>원본 224–250행</h3><pre>224:                 # The receipt compiler validates and binds the exact local parent.
+225:                 continue
+226:             raise ContractError(&quot;TRAINING_POLICY_FEATURE_BINDING&quot;)
+227:     split = compile_launch_split(
+228:         inventory=approved, metadata=metadata, selected=selected,
+229:         fraction=float(config[&quot;--dataset.eval_split&quot;]), feature_contract=feature,
+230:     )
+231:     for publication in mapped.values():
+232:         cohort = publication[&quot;evaluation_cohort&quot;]
+233:         if (publication[&quot;dataset_identity&quot;] != split[&quot;dataset_identity&quot;]
+234:                 or [e[&quot;episode_index&quot;] for e in publication[&quot;episodes&quot;]] != split[&quot;selected_episodes&quot;]
+235:                 or cohort[&quot;eval_fraction&quot;] != split[&quot;eval_split&quot;]
+236:                 or cohort[&quot;train_episodes&quot;] != split[&quot;train_episodes&quot;]
+237:                 or cohort[&quot;eval_episodes&quot;] != split[&quot;eval_episodes&quot;]):
+238:             raise ContractError(&quot;TRAINING_MAPPING_EVALUATION_COHORT&quot;)
+239:     receipt = compile_launch_receipt(split, argv, str(inventory))
+240:     # Validate and persist the single saved observation-view binding before any
+241:     # trainer construction.  Curator remains the producer of derived evidence;
+242:     # this call only consumes it and records the exact raw/baked representation.
+243:     from tools.validate_training_checkpoint import validate_saved_observation_view
+244:     receipt[&quot;observation_view&quot;] = validate_saved_observation_view(split, receipt)
+245:     receipt[&quot;receipt_digest&quot;] = launch_receipt_digest(receipt)
+246:     if &quot;initialization&quot; in receipt:
+247:         parent_output = Path(receipt[&quot;initialization&quot;][&quot;checkpoint&quot;]).parents[2]
+248:         if Path(config[&quot;--output_dir&quot;]).resolve().is_relative_to(parent_output):
+249:             raise ContractError(&quot;TRAINING_OUTPUT_INSIDE_PARENT&quot;)
+250:     return split, receipt</pre><h3>원본 667–715행</h3><pre>667: def prepare_approval_batch(request: dict, output: Path, approved_by: str) -&gt; PreparedApprovalBatch:
+668:     &quot;&quot;&quot;Prepare without writes; arguments come from trusted server configuration.&quot;&quot;&quot;
+669:     request = copy.deepcopy(request)
+670:     output = output.resolve() if not output.is_symlink() else output
+671:     dataset, drafts = prepare_approvals(request, output, approved_by)
+672:     reviewed_at = datetime.now(timezone.utc)
+673:     documents = _approval_documents(drafts, reviewed_at)
+674:     batch_digest = approval._batch_digest(documents)
+675:     directory = output.stat()
+676:     return PreparedApprovalBatch(json.dumps({
+677:         &quot;request&quot;: request, &quot;output&quot;: str(output), &quot;approved_by&quot;: approved_by,
+678:         &quot;output_identity&quot;: [directory.st_dev, directory.st_ino],
+679:         &quot;dataset&quot;: dataset, &quot;drafts&quot;: drafts, &quot;documents&quot;: documents,
+680:         &quot;reviewed_at&quot;: reviewed_at.isoformat(), &quot;batch_digest&quot;: batch_digest,
+681:     }, sort_keys=True, separators=(&quot;,&quot;, &quot;:&quot;), allow_nan=False))
+682:
+683:
+684: def _revalidate_approval_batch(value: dict, *, check_targets: bool) -&gt; None:
+685:     # Reopen the complete source graph, even after per-episode publication.
+686:     if _prepare_approvals(value[&quot;request&quot;], Path(value[&quot;output&quot;]), value[&quot;approved_by&quot;],
+687:                           check_targets=check_targets) != (value[&quot;dataset&quot;], value[&quot;drafts&quot;]):
+688:         raise ContractError(&quot;TRAINING_INPUT_CHANGED&quot;)
+689:     if _approval_documents(value[&quot;drafts&quot;], datetime.fromisoformat(value[&quot;reviewed_at&quot;])) != value[&quot;documents&quot;]:
+690:         raise ContractError(&quot;TRAINING_INPUT_CHANGED&quot;)
+691:
+692:
+693: def publish_approval_batch(prepared: PreparedApprovalBatch) -&gt; dict:
+694:     &quot;&quot;&quot;Publish only after the trusted caller&#x27;s explicit human decision.
+695:
+696:     No JSON/dict confirmation or callback is accepted. This function does not
+697:     authenticate a human: the CLI or Web UI owns that interaction boundary.
+698:     Concurrent publishers serialize on the existing output directory; exclusive
+699:     artifacts reject replay. A partial attempt cannot publish an inventory.
+700:     &quot;&quot;&quot;
+701:     if type(prepared) is not PreparedApprovalBatch:
+702:         raise ContractError(&quot;TRAINING_PREPARED_BATCH_REQUIRED&quot;)
+703:     value = json.loads(prepared._snapshot)
+704:     documents = [
+705:         {**document, &quot;schema_version&quot;: approval.BATCH_APPROVAL_SCHEMA,
+706:          &quot;batch_digest&quot;: value[&quot;batch_digest&quot;]}
+707:         for document in value[&quot;documents&quot;]
+708:     ]
+709:     for document in documents:
+710:         approval.validate_training_approval(document)
+711:     return _publish_authorization_batch(
+712:         value, documents=documents, provenance=approval.PROVENANCE,
+713:         revalidate=_revalidate_approval_batch,
+714:     )
+715: </pre></section><section id="request-execution"><h2>Curator 요청에서 학습·평가까지</h2><p>개별 배치 승인과 별도로 기존 사용자 위임을 검증하는 실행 경로이다. 요청과 제한된 학습 설정에서 실행 인자를 구성하고, 기존 결과가 있으면 입력과 receipt를 대조한다. 일치하는 완료 결과는 학습을 다시 시작하지 않고 checkpoint 검사와 평가로 이어진다.</p><p class="locator">main 223da8b · tools/data_factory/training_entrypoint.py<br>sha256:d566ee281d55fa2aa29f85fedee476bcbb9135afa303cd6bee6c719e7b3457f7</p><p>아래는 구현 근거이다. 이 경로의 새로운 실데이터 학습 결과나 영속 평가 보고서를 뜻하지 않는다.</p><h3>원본 301–315행</h3><pre>301:                                   inventory: Path, output: Path, split: dict) -&gt; dict:
+302:     &quot;&quot;&quot;Use the existing validator and offline evaluator as one read-only consumer.&quot;&quot;&quot;
+303:     from tools.validate_training_checkpoint import validate_checkpoint
+304:     policy, _ = validate_checkpoint(checkpoint)
+305:     from tools.evaluate_smolvla_offline import admit_evaluation, evaluate
+306:     args = argparse.Namespace(
+307:         checkpoint=str(policy), dataset=dataset, repo_id=repo_id,
+308:         approved_inventory=inventory, episodes=&quot;,&quot;.join(map(str, split[&quot;eval_episodes&quot;])),
+309:         batch_size=1, num_workers=0, max_batches=0, device=&quot;auto&quot;, use_amp=False,
+310:         seed=1000, metric=&quot;flow-loss&quot;, output=None,
+311:     )
+312:     admission = admit_evaluation(args)
+313:     report = evaluate(args, admission)
+314:     return {&quot;checkpoint&quot;: str(policy), &quot;evaluation&quot;: report}
+315: </pre><h3>원본 334–344행</h3><pre>334:
+335:
+336: def launch_delegated_request(
+337:     request: dict, *, approval_output: Path, authorized_actor: str,
+338:     delegation_path: Path, profile: str, collection_profile: str,
+339:     argv: list[str] | None = None, runner=None, checkpoint_validator=None,
+340:     evaluator=None,
+341: ) -&gt; dict:
+342:     &quot;&quot;&quot;Consume one Curator request through standing delegation and native launch.
+343:
+344:     Existing authority and training outputs are recovery evidence: they are</pre><h3>원본 397–420행</h3><pre>397:         expected_split, expected_receipt = prepare_launch(
+398:             dataset=Path(dataset[&quot;dataset_root&quot;]), repo_id=dataset[&quot;repo_id&quot;],
+399:             inventory=inventory_path, profile=profile,
+400:             collection_profile=collection_profile, argv=argv,
+401:         )
+402:         if manifests != [expected_split, expected_receipt]:
+403:             raise ContractError(&quot;TRAINING_OUTPUT_RECOVERY_MISMATCH&quot;)
+404:         checkpoint = _latest_checkpoint(output)
+405:         if checkpoint is None:
+406:             return {
+407:             &quot;status&quot;: &quot;EXISTING_OUTPUT&quot;,
+408:             &quot;training_started&quot;: False,
+409:             &quot;inventory_path&quot;: str(inventory_path),
+410:             &quot;training_output&quot;: str(output),
+411:             &quot;next_consumer&quot;: &quot;validate_checkpoint_then_offline_evaluate&quot;,
+412:             }
+413:         validator = checkpoint_validator or __import__(&quot;tools.validate_training_checkpoint&quot;, fromlist=[&quot;validate_checkpoint&quot;]).validate_checkpoint
+414:         validator(checkpoint)
+415:         result = (evaluator or _native_checkpoint_evaluation)(
+416:             checkpoint=checkpoint, dataset=Path(dataset[&quot;dataset_root&quot;]), repo_id=request[&quot;repo_id&quot;],
+417:             inventory=inventory_path, output=output, split=load_json_strict(output / &quot;fr5_training_split.json&quot;),
+418:         ) if evaluator is None else evaluator(checkpoint, Path(dataset[&quot;dataset_root&quot;]), request[&quot;repo_id&quot;], inventory_path, output)
+419:         return {&quot;status&quot;: &quot;EVALUATED_EXISTING_OUTPUT&quot;, &quot;training_started&quot;: False,
+420:                 &quot;inventory_path&quot;: str(inventory_path), &quot;training_output&quot;: str(output),</pre><h3>원본 431–477행</h3><pre>431:                 &quot;inventory_path&quot;: str(inventory_path), &quot;training_output&quot;: str(output),
+432:                 &quot;next_consumer&quot;: &quot;inspect_trainer_failure&quot;}
+433:     if checkpoint is None:
+434:         return {&quot;status&quot;: &quot;TRAINING_RETURNED_NO_CHECKPOINT&quot;, &quot;training_started&quot;: True,
+435:                 &quot;returncode&quot;: returncode, &quot;inventory_path&quot;: str(inventory_path),
+436:                 &quot;training_output&quot;: str(output), &quot;next_consumer&quot;: &quot;checkpoint_validation&quot;}
+437:     validator = checkpoint_validator or __import__(&quot;tools.validate_training_checkpoint&quot;, fromlist=[&quot;validate_checkpoint&quot;]).validate_checkpoint
+438:     validator(checkpoint)
+439:     result = (evaluator or _native_checkpoint_evaluation)(
+440:         checkpoint=checkpoint, dataset=Path(dataset[&quot;dataset_root&quot;]), repo_id=request[&quot;repo_id&quot;],
+441:         inventory=inventory_path, output=output, split=load_json_strict(output / &quot;fr5_training_split.json&quot;),
+442:     ) if evaluator is None else evaluator(checkpoint, Path(dataset[&quot;dataset_root&quot;]), request[&quot;repo_id&quot;], inventory_path, output)
+443:     return {
+444:         &quot;status&quot;: &quot;EVALUATED_CHECKPOINT&quot;,
+445:         &quot;training_started&quot;: True,
+446:         &quot;returncode&quot;: returncode,
+447:         &quot;inventory_path&quot;: str(inventory_path),
+448:         &quot;training_output&quot;: str(output),
+449:         &quot;checkpoint&quot;: str(checkpoint), &quot;evaluation&quot;: result,
+450:         &quot;next_consumer&quot;: &quot;offline_evaluation_report&quot;,
+451:     }
+452:
+453:
+454: def run_delegated_request(request: dict, *, approval_output: Path,
+455:                           authorized_actor: str, delegation_path: Path,
+456:                           profile: str, collection_profile: str,
+457:                           output: Path, steps: int, batch_size: int,
+458:                           eval_split: float, eval_steps: int, save_freq: int,
+459:                           runner=None, checkpoint_validator=None,
+460:                           evaluator=None) -&gt; dict:
+461:     &quot;&quot;&quot;Supported product entrypoint: request plus bounded recipe, no raw argv.&quot;&quot;&quot;
+462:     if profile != &quot;smolvla&quot;:
+463:         raise ContractError(&quot;TRAINING_EVALUATOR_UNSUPPORTED&quot;)
+464:     request = copy.deepcopy(request)
+465:     dataset = Path(request[&quot;dataset_root&quot;]).expanduser().resolve()
+466:     argv = _request_argv(
+467:         request, dataset=dataset, repo_id=request[&quot;repo_id&quot;], profile=profile,
+468:         collection_profile=collection_profile, output=output.expanduser().resolve(),
+469:         steps=steps, batch_size=batch_size, eval_split=eval_split,
+470:         eval_steps=eval_steps, save_freq=save_freq,
+471:     )
+472:     return launch_delegated_request(
+473:         request, approval_output=approval_output, authorized_actor=authorized_actor,
+474:         delegation_path=delegation_path, profile=profile,
+475:         collection_profile=collection_profile, argv=argv, runner=runner,
+476:         checkpoint_validator=checkpoint_validator, evaluator=evaluator,
+477:     )</pre></section></main><script src="../source-return.js"></script></body></html>

@@ -24,3 +24,52 @@ condition-level task-effect/data-utility evidence remain separate outcomes.
 - [ ] Consume an immutable admitted trained checkpoint and Learning-selected observation scope after root resource assignment.
 - [ ] Compare warmed chunk cost, per-joint action deviation and peak memory; revise the candidate using measured tradeoffs before any deployed change.
 - [ ] Connect any later authorized runtime change to actual lifecycle traces and task/data-utility evidence; numerical results alone do not finish this outcome.
+
+## Finite held-target consumption
+
+- [x] Distinguish controller-reference targets from observed feedback using native source and primary controller documentation.
+- [x] Add explicit bound held-target proposals consumed by existing OneJob, sole executor and ROS transport without modifying approved arm commands.
+- [x] Expose the default-false held-target option through the native checkpoint-to-plan entrypoint, verified with saved processors and the existing planner consumer.
+- [x] Retain fresh start/terminal observations in the canonical learned trace, preserving failure, cancellation and data-admission boundaries.
+- [x] Replay held completion and failure cases with synthetic clients and actual ROS serializers; check limits, delayed snapshot, cancellation and collision samples.
+- [x] Preserve distinct, exact-plan-bound subsegment identities through the existing event writer/validator and report/phase/joint/interaction consumers; verify [1,2,3] rows join exactly 6 and gripper windows are excluded from arm metrics.
+- [ ] Root integrates the scoped change and reviews the exact plan before any separately authorized physical baseline.
+- [ ] Establish actual FR5 target tracking, task effect and safe-reset evidence; CPU replay does not discharge physical qualification or continuing data-utility ownership.
+
+Runnable CPU check (no ROS node, model, GPU, original dataset or robot effects):
+
+```sh
+direnv exec . python3 -m unittest tests.data_factory.rollout.test_finite_plan tests.data_factory.rollout.test_learned_transport tests.data_factory.test_motion tests.data_factory.test_motion_transport_execution tests.data_factory.rollout.test_evidence_boundary tests.data_factory.test_quality tests.data_factory.rollout.test_native_policy --durations 5
+```
+
+## Continuous model references: consumer compatibility
+
+- [x] Distinguish hardware integer resolution from its raw-reference enqueue deadband using the actual source and a CPU-extracted predicate replay.
+- [x] Compare timed seven-joint execution against serial exact references; retain their timing, completion and staged-source limitations.
+- [x] Verify through existing finite inference and OneJob that continuous in-limit output and staged source reject without input rewriting or executor/recorder effects.
+- [x] Prepare an unapplied, exact-source-bound hardware patch for same-generation completion, coherent read-cycle evidence and native-time gating; verify copied driver methods with the installed sampler on CPU.
+- [x] Reject paused-controller observations through held execution and canonical trace consumers; replay the existing wall-time timeout and sole cancellation owner with frozen controller time.
+- [x] Falsify equal scaling as start synchronization and unscoped generation/time as sufficient identity; retain activation generation zero as observation only.
+- [x] Correct the isolated worker's known stop/error and supersession fence before MoveGripper; preserve original patch evidence and the in-flight cancellation limitation.
+- [x] Bind held-target evidence to hardware incarnation, command generation, explicit bounded source-clock mapping and independent monotonic freshness in existing native transport/executor/trace consumers.
+- [x] Prepare tracked native export/known-stop patch and verify actual extracted C++ methods plus ROS serializers on CPU, including stale completion, supersession and paused-time rejection.
+- [ ] Root deploys the exact driver residual and measures the same-incarnation source clock mapping; verify actual DynamicJointState export before physical consumption.
+- [ ] Prove controller-start coherence and coherent seven-joint physical sampling; held-target metadata does not discharge these continuous-consumer requirements.
+- [x] Retain successful JTC terminal evidence while waiting for fresh expected native completion under the same owner and original phase deadline; verify later completion, queued callbacks, cancel/lease/deadline and late-snapshot fences on CPU.
+- [ ] Root verifies real same-command hardware completion/arm resume and clock mapping after driver integration; JTC tolerance and CPU replay alone remain insufficient.
+- [ ] Implement an explicitly bounded native continuous-reference consumer with original full output, consumed indices and staged-release compatibility retained; do not automatically truncate or snap.
+- [ ] Verify its normal executor/trace consumers and failure/cancellation before any separately assigned physical qualification.
+
+Focused CPU acceptance (the vendor predicate replay is separate analytical
+source evidence, not a simulated complete hardware execution):
+
+```sh
+direnv exec . python3 -m unittest tests.data_factory.rollout.test_finite_plan --durations 5
+```
+
+Focused held hardware evidence acceptance (CPU only; no driver installation):
+
+```sh
+direnv exec . python3 -m unittest discover -s tests/data_factory/rollout
+direnv exec . python3 -m unittest tests.data_factory.test_motion_transport_execution tests.data_factory.test_motion
+```

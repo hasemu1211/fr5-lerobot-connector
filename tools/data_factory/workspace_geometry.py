@@ -173,6 +173,11 @@ def safe_convex_polygon_for_yaws(
             previous_point[0] + distance * previous_direction[0],
             previous_point[1] + distance * previous_direction[1],
         ))
+    # Adjacent line intersections can still form a convex polygon after the
+    # inset has crossed itself. Every vertex must satisfy every inset half-plane.
+    if any(cross(direction, (x - point[0], y - point[1])) < -1e-9
+           for x, y in result for point, direction in shifted):
+        raise ValueError("safe_polygon")
     return _convex_polygon(result, "safe_polygon")
 
 

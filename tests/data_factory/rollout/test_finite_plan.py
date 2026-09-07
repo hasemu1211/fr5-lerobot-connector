@@ -133,6 +133,741 @@ class Recorder:
 
 
 class FinitePlanTest(unittest.TestCase):
+    def make_held_job(self, initial_feedback=.021):
+        # Reuse this file's lifecycle fixtures with the actual ROS serializers,
+        # action dispatch, polling and cancellation; no ROS node is constructed.
+        from builtin_interfaces.msg import Duration
+        from control_msgs.action import FollowJointTrajectory
+        from control_msgs.msg import JointTolerance
+        from moveit_msgs.action import ExecuteTrajectory
+        from moveit_msgs.msg import RobotTrajectory
+        from trajectory_msgs.msg import JointTrajectoryPoint
+        from rclpy.serialization import serialize_message, deserialize_message
+        from tools.data_factory.motion.moveit_transport import RosMoveItTransport
+
+        from control_msgs.msg import DynamicJointState, InterfaceValue
+        from tools.data_factory.rollout.gripper_evidence import FIELDS, RESOURCE, CALENDAR
+        import datetime
+        now = [10.]
+        state = {"joints": [0.] * 6, "feedback": initial_feedback, "reference": .021, "age": 0., "complete": False,
+                 "generation": 0, "completed_generation": 0, "started": 0., "finished": 0., "hardware_override": {}}
+        mapping = {"schema_version": "fr5.gripper_source_clock.v1", "incarnation": [1, 2, 3, 4],
+                   "calendar_to_system_offset_s": 0., "uncertainty_s": .001,
+                   "system_anchor_s": 9., "steady_anchor_s": 9., "valid_until_system_s": 100.}
+        def calendar(stamp):
+            t = datetime.datetime.fromtimestamp(stamp, datetime.timezone.utc)
+            return [t.year, t.month, t.day, t.hour, t.minute, t.second, t.microsecond // 1000]
+        def hardware():
+            if state["complete"] and state["generation"] > state["completed_generation"]:
+                state["completed_generation"] = state["generation"]
+                state["finished"] = now[0] - .002
+            wire = dict.fromkeys(FIELDS, 0.)
+            wire.update(version=1., incarnation_0=1., incarnation_1=2., incarnation_2=3., incarnation_3=4.,
+                        generation=float(state["generation"]), completed_generation=float(state["completed_generation"]),
+                        raw_reference_m=state["reference"], sample_system_s=now[0], sample_steady_s=now[0],
+                        command_started_system_s=state["started"], feedback_m=state["feedback"],
+                        completion_reason=2. if state["completed_generation"] else 0., arm_resumed=1., valid=1.)
+            wire.update(zip(CALENDAR, calendar(now[0] - .002)))
+            if state["finished"]:
+                wire.update(zip(["completion_" + k for k in CALENDAR], calendar(state["finished"])))
+            wire.update(state["hardware_override"])
+            message = DynamicJointState(joint_names=[RESOURCE], interface_values=[InterfaceValue(
+                interface_names=list(FIELDS), values=[float(wire[k]) for k in FIELDS])])
+            # Real wire round trip and the actual native transport callback/decoder.
+            t._on_gripper_hardware_state(deserialize_message(serialize_message(message), DynamicJointState))
+            return t._gripper_hardware_evidence()
+        class SyntheticTransport(RosMoveItTransport):
+            """Synthetic clients only; retain production rejection of synthetic ROS runs."""
+        t = object.__new__(SyntheticTransport)
+        t._RobotTrajectory, t._JointTrajectoryPoint, t._Duration = RobotTrajectory, JointTrajectoryPoint, Duration
+        t._ExecuteTrajectory, t._FollowJointTrajectory, t._JointTolerance = ExecuteTrajectory, FollowJointTrajectory, JointTolerance
+        t._serialize_message, t._deserialize_message = serialize_message, deserialize_message
+        t._goal_succeeded, t._goal_canceled, t._goal_aborted = 4, 5, 6
+        t._moveit_success, t._gripper_success = 1, 0
+        t._active, t._execution_locked = None, False
+        t._execute_goal_count = t._gripper_goal_count = 0
+        t._clock, t.graph_timeout_s, t.node = lambda: now[0], .1, object()
+        t._gripper_source_clock = mapping
+        t._rclpy = SimpleNamespace(spin_until_future_complete=lambda *a, **kw: None, spin_once=lambda *a, **kw: None)
+        t.preflight, t.precommit_safety = T().preflight, T().precommit_safety
+        def observe(*_):
+            value = snapshot(state["joints"][:], gripper_position=state["feedback"])
+            value["gripper_controller"]["reference_position_m"] = state["reference"]
+            value["joint_state_age_s"] = state["age"]
+            value["gripper_controller"]["hardware_execution"] = hardware()
+            return value
+        t.snapshot = observe
+        sent, handles = [], []
+        def send(goal):
+            sent.append(goal)
+            if isinstance(goal, FollowJointTrajectory.Goal):
+                state["generation"] += 1
+                state["started"] = now[0]
+            state["complete"] = False
+            result = (ExecuteTrajectory.Result() if isinstance(goal, ExecuteTrajectory.Goal) else FollowJointTrajectory.Result())
+            if isinstance(goal, ExecuteTrajectory.Goal):
+                result.error_code.val = 1
+            packet = SimpleNamespace(status=4, result=result)
+            future = mock.Mock()
+            future.done.side_effect = lambda: state["complete"]
+            future.result.return_value = packet
+            handle = mock.Mock(accepted=True)
+            handle.get_result_async.return_value = future
+            def cancel():
+                state["complete"], packet.status = True, 5
+                return mock.Mock(done=lambda: True, result=lambda: SimpleNamespace(goals_canceling=[object()]))
+            handle.cancel_goal_async.side_effect = cancel
+            handles.append(handle)
+            return mock.Mock(done=lambda: True, result=lambda: handle)
+        t.execute_trajectory, t.gripper = mock.Mock(), mock.Mock()
+        t.execute_trajectory.send_goal_async.side_effect = send
+        t.gripper.send_goal_async.side_effect = send
+        src = source()
+        xml = XML.replace('upper="0.02"', 'upper="0.021"')
+        src["binding_digests"]["robot_description_digest"] = 'sha256:' + hashlib.sha256(xml.encode()).hexdigest()
+        src["gripper_requirements"].update(command_position_m=.01176, acceptable_feedback_m={"min": .01176, "max": .01218})
+        for step in src["steps"]:
+            if step["phase"] == "GRIPPER_OPEN":
+                step["gripper_position_m"] = .021
+            if step["phase"] == "GRIPPER_CLOSE":
+                step["gripper_position_m"] = .01176
+                step["limits"]["completion_tolerance_m"] = .01218 - .01176
+        obs = observation()
+        obs["observation.state"] = [0.] * 6 + [initial_feedback]
+        actions = [[0.] * 6 + [.021] for _ in range(4)] + [[.001] * 6 + [.01176] for _ in range(8)]
+        calls, cell, scene = [], Cell(), Scene()
+        executor = PickupExecutor(t, execution_enabled=True, cell_state_store=cell, scene_state_store=scene,
+                                  source_clock=lambda: now[0], monotonic_clock=lambda: now[0])
+        job = OneJob(Recorder(calls), executor.process)
+        inference = FinitePolicyInference(lambda _: actions, CHECKPOINT, source_clock=lambda: now[0])
+        planned = job.plan_learned("run", src, SCENE, inference, obs, **{**OPTIONS, "robot_description": xml, "period_s": 1 / 30,
+                                  "held_gripper_targets": True, "max_observation_age_s": 5.})
+        self.assertTrue(planned["ok"], planned)
+        return job, executor, t, state, now, sent, handles, calls
+
+    def test_held_reference_replay_uses_one_gripper_goal_then_fresh_arm_start(self):
+        job, executor, transport, state, now, sent, _, calls = self.make_held_job(initial_feedback=.02079)
+        frozen = copy.deepcopy(executor.runs["run"]["plan"])
+        from tools.data_factory.quality.phase_events import validate_phase_event, validate_phase_event_sequence
+        events = []
+        def emit(record):
+            events.append(validate_phase_event(record, plan=frozen))
+            return True
+        executor._phase_event_writer = SimpleNamespace(emit=emit, ready=True, error_code=None)
+        executor.event_clock = lambda: (int(now[0] * 1e9), "SYSTEM_TIME")
+        self.assertEqual(sent, [])
+
+        self.assertEqual(calls, [])
+        self.assertTrue(job.approve(APPROVAL)["ok"])
+        self.assertTrue(job.start()["ok"])
+        self.assertEqual(job.poll()["state"], "PRECONTACT_HUMAN")
+        with mock.patch('tools.data_factory.motion.moveit_transport.time.time', side_effect=lambda: now[0]):
+            confirmed = job.confirm("operator")
+            self.assertTrue(confirmed["ok"], confirmed["code"])
+            self.assertEqual(len(sent), 1)
+            state["complete"] = True  # first arm segment completed at open reference
+            job.poll()
+            self.assertEqual(len(sent), 2)
+            self.assertEqual([list(p.positions) for p in sent[1].trajectory.points], [[.01176], [.01176]])
+            for _ in range(11):
+                job.poll()
+            self.assertEqual(len(sent), 2)  # no repeated close / no early arm send
+            now[0] += 11 / 30
+            state.update(reference=.01176, feedback=.01218)
+            job.poll()
+            self.assertEqual(len(sent), 2)  # matching feedback is not terminal evidence
+            now[0] += 1.01 - 11 / 30
+            state["complete"] = True
+            job.poll()
+            self.assertEqual(len(sent), 3)
+            self.assertEqual(transport._gripper_goal_count, 1)
+            self.assertEqual(list(sent[2].trajectory.joint_trajectory.joint_names), JOINTS[:6])
+            self.assertEqual(list(sent[2].trajectory.joint_trajectory.points[0].positions), [0.] * 6)
+            start = executor.runs["run"]["execution"]["learned_start_observation"]
+            self.assertEqual(start["snapshot"]["gripper_controller"]["feedback_position_m"], .01218)
+            self.assertEqual(start["captured_at_s"], now[0])
+            state.update(complete=True, joints=[.001] * 6)
+            self.assertEqual(job.poll()["state"], "SEMANTIC_VERDICT")
+        self.assertEqual(executor.runs["run"]["plan"], frozen)
+        self.assertTrue(job.semantic_verdict("PASS", "operator")["ok"])
+        diagnostic = learned_run_diagnostic(job.poll())
+        self.assertEqual(diagnostic["execution_trace"]["status"], "COMPLETED")
+        self.assertEqual(len(diagnostic["execution_trace"]["segments"]), 3)
+        self.assertEqual(diagnostic["task_effectiveness"], "UNKNOWN")
+        self.assertNotIn(("recorder", "commit"), calls)
+        self.assertEqual(validate_phase_event_sequence(events, plan=frozen), events)
+        for event_type in ("GOAL_ACCEPTED", "ACTION_TERMINAL"):
+            self.assertEqual([(e["segment_index"], e["segment_count"]) for e in events if e["event"] == event_type],
+                             [(0, 3), (1, 3), (2, 3)])
+        from tools.data_factory.rollout.finite_plan import validate_execution_trace
+        for controller in ("arm_controller", "gripper_controller"):
+            trace = copy.deepcopy(diagnostic["execution_trace"])
+            trace["segments"][1]["terminal_observation"]["snapshot"][controller]["speed_scaling"] = 0.
+            trace["trace_digest"] = canonical_digest({k: v for k, v in trace.items() if k != "trace_digest"})
+            with self.assertRaisesRegex(ContractError, "LEARNED_CONTROLLER_PAUSED"):
+                validate_execution_trace(frozen, trace)
+        for field, value, code in (("generation", 2., "LEARNED_HARDWARE_SUPERSEDED"),
+                                    ("completion_reason", 0., "LEARNED_HARDWARE_COMPLETION"),
+                                    ("sample_steady_s", 0., "LEARNED_HARDWARE_STALE")):
+            trace = copy.deepcopy(diagnostic["execution_trace"])
+            trace["segments"][1]["terminal_observation"]["snapshot"]["gripper_controller"]["hardware_execution"]["wire"][field] = value
+            trace["trace_digest"] = canonical_digest({k: v for k, v in trace.items() if k != "trace_digest"})
+            with self.assertRaisesRegex(ContractError, code):
+                validate_execution_trace(frozen, trace)
+        trace = copy.deepcopy(diagnostic["execution_trace"])
+        trace["terminal_state"][0] += .001
+        trace["trace_digest"] = canonical_digest({k: v for k, v in trace.items() if k != "trace_digest"})
+        with self.assertRaisesRegex(ContractError, "LEARNED_TRACE_TERMINAL"):
+            validate_execution_trace(frozen, trace)
+
+    def test_native_hardware_fences_before_first_goal(self):
+        cases = [({"incarnation_0": 9.}, "LEARNED_HARDWARE_INCARNATION"),
+                 ({"sample_steady_s": 0.}, "LEARNED_HARDWARE_STALE"),
+                 ({"second": 0.}, "LEARNED_HARDWARE_STALE"),
+                 ({"pending": 1.}, "LEARNED_HARDWARE_UNRESOLVED"),
+                 ({"stopped": 1.}, "LEARNED_HARDWARE_UNRESOLVED"),
+                 ({"error": -1.}, "LEARNED_HARDWARE_UNRESOLVED"),
+                 ({"valid": 0.}, "LEARNED_HARDWARE_INVALID"),
+                 ({"generation": float(2**53)}, "LEARNED_HARDWARE_SCHEMA")]
+        for override, code in cases:
+            with self.subTest(override=override):
+                job, executor, t, state, now, sent, _, calls = self.make_held_job()
+                job.approve(APPROVAL)
+                job.start()
+                job.poll()
+                state["hardware_override"] = override
+                with mock.patch('tools.data_factory.motion.moveit_transport.time.time', side_effect=lambda: now[0]):
+                    result = job.confirm("operator")
+                self.assertEqual(result["code"], code)
+                self.assertEqual(sent, [])
+                self.assertNotIn(("recorder", "commit"), calls)
+        # Installed old driver or absent measured mapping cannot acquire completion authority.
+        job, _, t, _, now, sent, _, _ = self.make_held_job()
+        t._gripper_source_clock = None
+        job.approve(APPROVAL)
+        job.start()
+        job.poll()
+        with mock.patch('tools.data_factory.motion.moveit_transport.time.time', return_value=now[0]):
+            self.assertEqual(job.confirm("operator")["code"], "LEARNED_HARDWARE_SCHEMA")
+        self.assertEqual(sent, [])
+
+    def test_same_command_hardware_completion_required_after_jtc_success(self):
+        cases = [({"completed_generation": 0.}, "LEARNED_HARDWARE_COMPLETION"),
+                 ({"generation": 2., "completed_generation": 2.}, "LEARNED_HARDWARE_SUPERSEDED"),
+                 ({"completion_second": 9.}, "LEARNED_HARDWARE_COMPLETION"),
+                 ({"arm_resumed": 0.}, "LEARNED_HARDWARE_UNRESOLVED"),
+                 ({"rpc_active": 1.}, "LEARNED_HARDWARE_UNRESOLVED"),
+                 ({"incarnation_1": 17.}, "LEARNED_HARDWARE_INCARNATION"),
+                 ({"raw_reference_m": .012}, "GRIPPER_FEEDBACK_OUT_OF_RANGE")]
+        for override, code in cases:
+            with self.subTest(override=override):
+                job, executor, t, state, now, sent, _, calls = self.make_held_job()
+                job.approve(APPROVAL)
+                job.start()
+                job.poll()
+                with mock.patch('tools.data_factory.motion.moveit_transport.time.time', side_effect=lambda: now[0]):
+                    job.confirm("operator")
+                    state["complete"] = True
+                    job.poll()
+                    self.assertEqual(len(sent), 2)
+                    now[0] += .1
+                    state.update(complete=True, reference=.01176, feedback=.01218, hardware_override=override)
+                    result = job.poll()
+                self.assertEqual(result["code"], code)
+                self.assertEqual(len(sent), 2)  # no next arm, despite JTC SUCCEEDED
+                self.assertTrue(t.owns_active_goal)
+                terminal = t.poll_terminal_evidence()
+                self.assertEqual(terminal["result_status"], 4)  # actual JTC SUCCEEDED, not fabricated cancel
+                self.assertFalse(t.owns_active_goal)
+                self.assertNotIn(("recorder", "commit"), calls)
+
+    def test_paused_system_clock_after_native_deserialization_prevents_send(self):
+        job, _, t, _, now, sent, _, _ = self.make_held_job()
+        job.approve(APPROVAL)
+        job.start()
+        job.poll()
+        deserialize = t._deserialize_message
+        def delayed(*args):
+            goal = deserialize(*args)
+            t._clock = lambda: now[0] + .2
+            return goal
+        t._deserialize_message = delayed
+        with mock.patch('tools.data_factory.motion.moveit_transport.time.time', return_value=now[0]):
+            self.assertEqual(job.confirm("operator")["code"], "LEARNED_HARDWARE_SOURCE_CLOCK")
+        self.assertEqual(sent, [])
+
+    def make_pending_held_job(self):
+        values = self.make_held_job()
+        job, executor, t, state, now, sent, handles, calls = values
+        job.approve(APPROVAL)
+        job.start()
+        job.poll()
+        with mock.patch('tools.data_factory.motion.moveit_transport.time.time', side_effect=lambda: now[0]):
+            self.assertTrue(job.confirm("operator")["ok"])
+            state["complete"] = True
+            job.poll()
+            now[0] += .5
+            job.poll()
+            now[0] += .51
+            state.update(complete=True, reference=.01176, feedback=.01218,
+                         hardware_override={"active_generation": 1., "completed_generation": 0.,
+                                            "completion_reason": 0., "arm_resumed": 0.})
+            self.assertEqual(job.poll()["state"], "EXECUTING")
+        self.assertEqual(len(sent), 2)
+        self.assertTrue(t.owns_active_goal)
+        self.assertTrue(t._active.action_succeeded)
+        return values
+
+    def test_later_native_completion_advances_once_with_original_deadline_and_targets(self):
+        job, executor, t, state, now, sent, handles, calls = self.make_pending_held_job()
+        frozen = copy.deepcopy(executor.runs["run"]["plan"])
+        deadline = t._active.deadline
+        with mock.patch('tools.data_factory.motion.moveit_transport.time.time', side_effect=lambda: now[0]):
+            for _ in range(3):
+                self.assertEqual(job.poll()["state"], "EXECUTING")
+                self.assertEqual(t._active.deadline, deadline)
+                self.assertIsNone(t.poll_terminal_evidence())
+                self.assertTrue(t.owns_active_goal)
+            with self.assertRaisesRegex(ContractError, "ROS_EXEC_ACTIVE"):
+                t.start_phase(t._active.held_segment)
+            now[0] += .1
+            delivery = mock.Mock(side_effect=lambda *args, **kwargs: state.update(hardware_override={}))
+            t._rclpy.spin_once = delivery
+            self.assertEqual(job.poll()["state"], "EXECUTING")
+            delivery.assert_called_once_with(t.node, timeout_sec=0.0)
+            self.assertEqual(len(sent), 3)
+            self.assertEqual(t._gripper_goal_count, 1)
+            state.update(complete=True, joints=[.001] * 6)
+            self.assertEqual(job.poll()["state"], "SEMANTIC_VERDICT")
+        self.assertEqual(executor.runs["run"]["plan"], frozen)
+        self.assertTrue(job.semantic_verdict("PASS", "operator")["ok"])
+        trace = learned_run_diagnostic(job.poll())["execution_trace"]
+        self.assertEqual(trace["status"], "COMPLETED")
+        self.assertEqual(len(trace["segments"]), 3)
+        terminal = trace["segments"][1]["terminal_observation"]
+        self.assertEqual(terminal["captured_at_s"], 11.11)
+        self.assertEqual(terminal["action_terminal"], {"result_status": 4, "error_code": 0,
+                         "observed_at_s": 11.01, "observed_monotonic_s": 11.01})
+        from tools.data_factory.rollout.finite_plan import validate_execution_trace
+        for field, value in (("result_status", 5), ("observed_at_s", 11.12), ("observed_monotonic_s", 9.)):
+            altered = copy.deepcopy(trace)
+            altered["segments"][1]["terminal_observation"]["action_terminal"][field] = value
+            altered["trace_digest"] = canonical_digest({k: v for k, v in altered.items() if k != "trace_digest"})
+            with self.assertRaisesRegex(ContractError, "LEARNED_TRACE_TERMINAL"):
+                validate_execution_trace(frozen, altered)
+        self.assertNotIn(("recorder", "commit"), calls)
+        handles[1].cancel_goal_async.assert_not_called()
+
+    def test_pending_hardware_faults_are_not_retryable_waits(self):
+        cases = [({"stopped": 1.}, "LEARNED_HARDWARE_UNRESOLVED"),
+                 ({"error": -1.}, "LEARNED_HARDWARE_UNRESOLVED"),
+                 ({"sample_steady_s": 0.}, "LEARNED_HARDWARE_STALE"),
+                 ({"second": 0.}, "LEARNED_HARDWARE_STALE"),
+                 ({"incarnation_0": 7.}, "LEARNED_HARDWARE_INCARNATION"),
+                 ({"generation": 2., "active_generation": 2.}, "LEARNED_HARDWARE_SUPERSEDED"),
+                 ({"raw_reference_m": .013}, "GRIPPER_FEEDBACK_OUT_OF_RANGE"),
+                 ({"completion_reason": 3.}, "LEARNED_HARDWARE_SCHEMA"),
+                 ({"completion_reason": 1.}, "LEARNED_HARDWARE_COMPLETION")]
+        for override, code in cases:
+            with self.subTest(override=override):
+                job, executor, t, state, now, sent, handles, calls = self.make_pending_held_job()
+                state["hardware_override"].update(override)
+                with mock.patch('tools.data_factory.motion.moveit_transport.time.time', side_effect=lambda: now[0]):
+                    self.assertEqual(job.poll()["code"], code)
+                self.assertEqual(len(sent), 2)
+                self.assertEqual(executor.runs["run"]["state"], "BLOCKED")
+                self.assertEqual(t.poll_terminal_evidence()["result_status"], 4)
+                handles[1].cancel_goal_async.assert_not_called()
+                self.assertNotIn(("recorder", "commit"), calls)
+
+    def test_expected_queued_command_can_wait_without_claiming_it_started(self):
+        for flag in ("pending", "rpc_active"):
+            with self.subTest(flag=flag):
+                job, _, t, state, now, sent, handles, _ = self.make_pending_held_job()
+                state["hardware_override"].update(active_generation=0., command_started_system_s=0.)
+                state["hardware_override"][flag] = 1.
+                with mock.patch('tools.data_factory.motion.moveit_transport.time.time', side_effect=lambda: now[0]):
+                    self.assertEqual(job.poll()["state"], "EXECUTING")
+                    self.assertTrue(t.owns_active_goal)
+                    job.cancel()
+                self.assertEqual(t.poll_terminal_evidence()["result_status"], 4)
+                self.assertEqual(len(sent), 2)
+                handles[1].cancel_goal_async.assert_not_called()
+
+    def test_pending_wait_rejects_a_changed_controller_reference(self):
+        job, executor, t, state, now, sent, handles, _ = self.make_pending_held_job()
+        observe = t.snapshot
+        def changed(*args):
+            value = observe(*args)
+            value["gripper_controller"]["reference_position_m"] = .021
+            return value
+        with mock.patch('tools.data_factory.motion.moveit_transport.time.time', side_effect=lambda: now[0]):
+            with mock.patch.object(t, "snapshot", side_effect=changed):
+                self.assertEqual(job.poll()["code"], "GRIPPER_FEEDBACK_OUT_OF_RANGE")
+        self.assertEqual(len(sent), 2)
+        self.assertEqual(t.poll_terminal_evidence()["result_status"], 4)
+        handles[1].cancel_goal_async.assert_not_called()
+
+    def test_pending_native_wait_preserves_deadline_cancel_and_real_action_terminal(self):
+        for failure in ("deadline", "late_snapshot", "lease", "cancel", "paused_system"):
+            with self.subTest(failure=failure):
+                job, executor, t, state, now, sent, handles, _ = self.make_pending_held_job()
+                step = copy.deepcopy(t._active.held_segment)
+                with mock.patch('tools.data_factory.motion.moveit_transport.time.time', side_effect=lambda: now[0]):
+                    if failure == "deadline":
+                        wall = t._active.deadline + .001
+                        t._clock = lambda: wall
+                        result = job.poll()
+                        self.assertEqual(result["code"], "LEARNED_HARDWARE_COMPLETION_TIMEOUT")
+                    elif failure == "late_snapshot":
+                        observe = t.snapshot
+                        def delayed(*args):
+                            value = observe(*args)
+                            t._clock = lambda: t._active.deadline + .001
+                            return value
+                        with mock.patch.object(t, "snapshot", side_effect=delayed):
+                            result = job.poll()
+                        self.assertEqual(result["code"], "LEARNED_HARDWARE_COMPLETION_TIMEOUT")
+                    elif failure == "lease":
+                        now[0] += 2.
+                        result = job.poll()
+                        self.assertEqual(result["code"], "HEARTBEAT_TIMEOUT")
+                    elif failure == "paused_system":
+                        t._clock = lambda: now[0] + .2
+                        result = job.poll()
+                        self.assertEqual(result["code"], "LEARNED_HARDWARE_SOURCE_CLOCK")
+                    else:
+                        job.cancel()
+                        self.assertEqual(executor.runs["run"]["failure_code"], "CANCELLED_BY_OPERATOR")
+                    self.assertTrue(t.owns_active_goal)
+                    self.assertEqual(executor.runs["run"]["execution"]["cancel_error"], "ROS_EXEC_CANCEL_NOT_CANCELED")
+                    terminal = t.poll_terminal_evidence()
+                    self.assertEqual(terminal["result_status"], 4)
+                    self.assertFalse(t.owns_active_goal)
+                    state["hardware_override"] = {}
+                    job.poll()
+                    with self.assertRaisesRegex(ContractError, "ROS_EXEC_ACTIVE"):
+                        t.start_phase(step)
+                self.assertEqual(len(sent), 2)
+                handles[1].cancel_goal_async.assert_not_called()
+
+    def test_held_float32_profile_reference_is_preserved_without_snapping(self):
+        import struct
+        job, executor, _, _, _, _, _, _ = self.make_held_job()
+        p = copy.deepcopy(executor.runs["run"]["plan"]["learned_proposal"])
+        for row in p["actions"]:
+            row[-1] = struct.unpack('f', struct.pack('f', row[-1]))[0]
+        program = compile_program(job._program["source_program"], redigest(p))
+        segments = program["steps"][0]["held_target_segments"]
+        target = p["actions"][4][-1]
+        self.assertNotEqual(target, .01176)
+        self.assertEqual(next(s for s in segments if s["action_range"] == [4, 4])["gripper_position_m"], target)
+
+    def test_paused_controller_blocks_held_start_and_terminal_handoff(self):
+        for controller in ("arm_controller", "gripper_controller"):
+            for at_terminal in (False, True):
+                with self.subTest(controller=controller, at_terminal=at_terminal):
+                    job, executor, t, state, now, sent, _, _ = self.make_held_job()
+                    job.approve(APPROVAL)
+                    job.start()
+                    job.poll()
+                    observe = t.snapshot
+                    def paused(*args):
+                        value = observe(*args)
+                        value[controller]["speed_scaling"] = 0.
+                        return value
+                    with mock.patch('tools.data_factory.motion.moveit_transport.time.time', side_effect=lambda: now[0]):
+                        if at_terminal:
+                            job.confirm("operator")
+                            state["complete"] = True
+                            job.poll()
+                            state.update(complete=True, reference=.01176, feedback=.01218)
+                        with mock.patch.object(t, 'snapshot', side_effect=paused):
+                            result = job.poll() if at_terminal else job.confirm("operator")
+                    self.assertEqual(result["code"], "LEARNED_CONTROLLER_PAUSED")
+                    self.assertEqual(len(sent), 2 if at_terminal else 0)
+                    self.assertEqual(executor.runs["run"]["state"], "BLOCKED")
+
+    def test_frozen_controller_time_does_not_suspend_transport_deadline_or_cancel_owner(self):
+        job, executor, t, state, now, sent, handles, _ = self.make_held_job()
+        wall = [10.]
+        t._clock = lambda: wall[0]
+        job.approve(APPROVAL)
+        job.start()
+        job.poll()
+        with mock.patch('tools.data_factory.motion.moveit_transport.time.time', side_effect=lambda: now[0]):
+            job.confirm("operator")
+            state["complete"] = True
+            job.poll()
+            # Source/controller observations stay frozen; only the transport's
+            # monotonic clock advances while the gripper result is unresolved.
+            wall[0] = t._active.deadline + .001
+            result = job.poll()
+            job.poll()
+        self.assertEqual(result["code"], "ROS_EXEC_RESULT_TIMEOUT")
+        self.assertEqual(len(sent), 2)
+        handles[-1].cancel_goal_async.assert_called_once()
+        self.assertFalse(t.owns_active_goal)
+        self.assertEqual(executor.runs["run"]["state"], "BLOCKED")
+
+    def test_held_reference_replay_failure_staleness_and_cancel_never_send_next_arm(self):
+        failures = {"stale": "LEARNED_STALE_STATE", "future": "LEARNED_STALE_STATE",
+                    "feedback": "GRIPPER_FEEDBACK_OUT_OF_RANGE", "reference": "GRIPPER_FEEDBACK_OUT_OF_RANGE",
+                    "arm_drift": "LEARNED_TERMINAL_STATE", "aborted": "ROS_EXEC_FAILED",
+                    "cancel": "CANCELLED_BY_OPERATOR", "unresolved": "CANCELLED_BY_OPERATOR"}
+        for failure, expected in failures.items():
+            with self.subTest(failure=failure):
+                job, executor, t, state, now, sent, handles, _ = self.make_held_job()
+                job.approve(APPROVAL)
+                job.start()
+                job.poll()
+                with mock.patch('tools.data_factory.motion.moveit_transport.time.time', side_effect=lambda: now[0]):
+                    confirmed = job.confirm("operator")
+                    self.assertTrue(confirmed["ok"], confirmed["code"])
+                    state["complete"] = True
+                    job.poll()
+                    if failure == "cancel":
+                        job.cancel()
+                    elif failure == "unresolved":
+                        handles[-1].cancel_goal_async.return_value = None
+                        handles[-1].cancel_goal_async.side_effect = lambda: mock.Mock(done=lambda: False)
+                        job.cancel()
+                    else:
+                        now[0] += .1
+                        state.update(complete=True, reference=.01176, feedback=.01218)
+                        if failure == "stale": state["age"] = 2.
+                        if failure == "future": state["age"] = -1.
+                        if failure == "feedback": state["feedback"] = .014
+                        if failure == "reference": state["reference"] = .021
+                        if failure == "arm_drift": state["joints"] = [.1] * 6
+                        if failure == "aborted": handles[-1].get_result_async.return_value.result.return_value.status = 6
+                        job.poll()
+                    job.poll()
+                    self.assertEqual(len(sent), 2)
+                    self.assertEqual(executor.runs["run"]["state"], "BLOCKED")
+                    self.assertEqual(executor.runs["run"]["failure_code"], expected)
+                    if failure in {"cancel", "unresolved"}:
+                        handles[-1].cancel_goal_async.assert_called_once()
+                    if failure == "unresolved":
+                        self.assertTrue(t.owns_active_goal)
+
+    def test_held_target_contract_rejects_unbound_targets_limits_and_unbounded_holds(self):
+        job, executor, transport, _, _, sent, _, _ = self.make_held_job()
+        p = executor.runs["run"]["plan"]["learned_proposal"]
+        src = job._program["source_program"]
+        cases = [
+            ("LEARNED_UNBOUND_GRIPPER_TARGET", lambda value: value["actions"][4].__setitem__(6, .012)),
+            ("LEARNED_JOINT_LIMIT", lambda value: value["actions"][4].__setitem__(6, .022)),
+            ("LEARNED_VELOCITY_LIMIT", lambda value: value["actions"][4].__setitem__(0, 2.)),
+            ("LEARNED_ACTION_7D", lambda value: value["actions"].__setitem__(4, [0.] * 6)),
+            ("LEARNED_HELD_HORIZON", lambda value: value.update(actions=[[0.] * 6 + [(.01176 if i % 2 == 0 else .021)] for i in range(6)])),
+            ("LEARNED_VELOCITY_LIMIT", lambda value: value.update(schema_version="data_factory.finite_learned_proposal.v1")),
+        ]
+        for code, mutate in cases:
+            with self.subTest(code=code):
+                value = copy.deepcopy(p)
+                mutate(value)
+                with self.assertRaisesRegex(ContractError, code):
+                    compile_program(src, redigest(value))
+        with self.assertRaisesRegex(ContractError, "LEARNED_HELD_SEGMENTS_REQUIRED"):
+            transport.build_learned_trajectory(p)
+        self.assertEqual(sent, [])
+
+    def test_continuous_references_and_staged_source_reject_without_rewriting_inputs(self):
+        # These are in-limit continuous outputs, not an inferred close/open class.
+        # A production staged source must not be stripped to make them executable.
+        job, executor, _, _, now, sent, _, calls = self.make_held_job()
+        xml = executor.runs["run"]["plan"]["learned_proposal"]["robot_description"]
+        for staged, expected in ((False, "LEARNED_UNBOUND_GRIPPER_TARGET"),
+                                 (True, "LEARNED_HELD_PROFILE_UNSUPPORTED")):
+            with self.subTest(staged=staged):
+                src = copy.deepcopy(job._program["source_program"])
+                if staged:
+                    opened = next(s for s in src["steps"] if s["phase"] == "GRIPPER_OPEN")
+                    opened.update(release_position_m=.0126, release_hold_s=.5)
+                validate_motion_program(src)
+                actions = [[0.] * 6 + [.016342543065547943 + i * .00001] for i in range(50)]
+                original_source, original_actions = copy.deepcopy(src), copy.deepcopy(actions)
+                policy = mock.Mock(return_value=actions)
+                inference = FinitePolicyInference(policy, CHECKPOINT, source_clock=lambda: now[0])
+                consumer = OneJob(Recorder(calls), executor.process)
+                obs = observation()
+                obs["observation.state"] = [0.] * 6 + [.021]
+                result = consumer.plan_learned(
+                    "continuous", src, SCENE, inference, obs,
+                    **{**OPTIONS, "robot_description": xml, "period_s": 1 / 30,
+                       "held_gripper_targets": True, "max_observation_age_s": 5.},
+                )
+                self.assertFalse(result["ok"])
+                self.assertEqual(result["code"], expected)
+                policy.assert_called_once()
+                self.assertEqual(src, original_source)
+                self.assertEqual(actions, original_actions)
+                self.assertNotIn("continuous", executor.runs)
+                self.assertEqual(sent, [])
+                self.assertEqual(calls, [])
+
+    def test_held_start_snapshot_is_rechecked_after_deserialization_before_send(self):
+        job, executor, t, _, now, sent, _, _ = self.make_held_job()
+        job.approve(APPROVAL)
+        job.start()
+        job.poll()
+        original = t._compiled_execution_goal
+        def slow_decode(step):
+            result = original(step)
+            now[0] += 1.1  # proposal is still valid; the arm-start observation is stale
+            return result
+        with mock.patch.object(t, '_compiled_execution_goal', side_effect=slow_decode), mock.patch(
+                'tools.data_factory.motion.moveit_transport.time.time', side_effect=lambda: now[0]):
+            result = job.confirm("operator")
+        self.assertEqual(result["code"], "LEARNED_STALE_STATE")
+        self.assertEqual(sent, [])
+        self.assertEqual(executor.runs["run"]["state"], "BLOCKED")
+
+    def test_native_transport_rejects_changed_held_arm_message(self):
+        _, executor, t, _, _, sent, _, _ = self.make_held_job()
+        step = copy.deepcopy(executor.runs["run"]["plan"]["steps"][0]["held_target_segments"][0])
+        message = t._deserialize_message(base64.b64decode(step["trajectory_b64"]), t._RobotTrajectory)
+        message.joint_trajectory.points[-1].positions[0] += .001
+        step["trajectory_b64"] = base64.b64encode(t._serialize_message(message)).decode()
+        with self.assertRaisesRegex(ContractError, "LEARNED_SERIALIZED_ACTION_MISMATCH"):
+            t.start_phase(step)
+        self.assertEqual(sent, [])
+
+    def test_cancel_during_held_completion_snapshot_fences_late_next_segment(self):
+        job, executor, t, state, now, sent, _, _ = self.make_held_job()
+        job.approve(APPROVAL)
+        job.start()
+        job.poll()
+        with mock.patch('tools.data_factory.motion.moveit_transport.time.time', side_effect=lambda: now[0]):
+            job.confirm("operator")
+            state["complete"] = True
+            job.poll()
+            now[0] += .1
+            state.update(complete=True, reference=.01176, feedback=.01218)
+            observe = t.snapshot
+            def late_observation(*args):
+                value = observe(*args)
+                executor._fault(executor.runs["run"], "SYNTHETIC_CANCEL_DURING_SNAPSHOT")
+                return value
+            with mock.patch.object(t, 'snapshot', side_effect=late_observation):
+                result = job.poll()
+        self.assertEqual(result["code"], "SYNTHETIC_CANCEL_DURING_SNAPSHOT")
+        self.assertEqual(len(sent), 2)
+        self.assertTrue(t.owns_active_goal)
+        self.assertEqual(t.poll_terminal_evidence()["result_status"], 4)
+        self.assertFalse(t.owns_active_goal)
+
+    def test_held_collision_sampling_covers_gripper_travel_and_feedback_bounds(self):
+        from moveit_msgs.msg import RobotState
+        from moveit_msgs.srv import GetStateValidity
+        from sensor_msgs.msg import JointState
+        _, executor, t, _, _, sent, _, _ = self.make_held_job()
+        t._GetStateValidity, t._RobotState, t._JointState = GetStateValidity, RobotState, JointState
+        requests = []
+        def service(_kind, _endpoint, request, _code):
+            requests.append(request)
+            return SimpleNamespace(valid=True)
+        t._service = service
+        plan = executor.runs["run"]["plan"]
+        report = t._check_plan_collision(plan, .021)
+        self.assertTrue(report["all_valid"])
+        self.assertTrue(all(request.group_name == '' for request in requests))
+        values = [request.robot_state.joint_state.position[-1] for request in requests]
+        self.assertIn(.01218, values)
+        self.assertTrue(any(.01218 < value < .020 for value in values))
+        self.assertEqual(sent, [])
+        t._service = lambda *args: SimpleNamespace(valid=args[2].robot_state.joint_state.position[-1] != .01218)
+        with self.assertRaisesRegex(ContractError, "COLLISION_DETECTED"):
+            t._check_plan_collision(plan, .021)
+
+    def held_phase_events(self):
+        from tools.data_factory.quality.phase_events import validate_phase_event
+        _, executor, _, _, _, _, _, _ = self.make_held_job()
+        run = executor.runs["run"]
+        run["execution"] = {"phase_event_sequence": 0, "step_index": 0}
+        events, rows, clock = [], [], [10.]
+        def emit(record):
+            events.append(validate_phase_event(record, plan=run["plan"]))
+            return True
+        executor._phase_event_writer = SimpleNamespace(emit=emit)
+        executor.event_clock = lambda: (int(clock[0] * 1e9), "SYSTEM_TIME")
+        for index, step in enumerate(run["plan"]["steps"][0]["held_target_segments"]):
+            run["execution"]["learned_segment_index"] = index
+            clock[0] = 10. + index * 2
+            executor._emit_phase_event(run, "GOAL_ACCEPTED", step, "ACCEPTED", {"step": step, "accepted": True})
+            rows.extend({"target_ros_s": clock[0] + (j + 1) / (index + 2)} for j in range(index + 1))
+            clock[0] += 1.
+            executor._emit_phase_event(run, "ACTION_TERMINAL", step, "SUCCEEDED", {"step": step, "terminal_status": "SUCCEEDED"})
+        self.assertEqual(len(events), 6)
+        return run["plan"], events, rows
+
+    def test_held_phase_event_identity_requires_exact_plan_and_unique_segments(self):
+        from tools.data_factory.quality.phase_events import validate_phase_event_sequence, validate_phase_event
+        plan, events, _ = self.held_phase_events()
+        self.assertEqual(validate_phase_event_sequence(events, plan=plan), events)
+        self.assertEqual([(event["segment_index"], event["segment_count"]) for event in events[::2]], [(0, 3), (1, 3), (2, 3)])
+        with self.assertRaisesRegex(ContractError, "PHASE_EVENT_PLAN_REQUIRED"):
+            validate_phase_event_sequence(events)
+        for changes, code in (({"segment_index": True}, "PHASE_EVENT_SEGMENT"),
+                              ({"segment_count": 2.5}, "PHASE_EVENT_SEGMENT"),
+                              ({"segment_count": 2}, "PHASE_EVENT_SEGMENT"),
+                              ({"segment_index": 3}, "PHASE_EVENT_SEGMENT"),
+                              ({"segment_index": 1}, "PHASE_EVENT_SEGMENT_BINDING"),
+                              ({"plan_digest": canonical_digest("other")}, "PHASE_EVENT_PLAN_BINDING")):
+            with self.subTest(changes=changes), self.assertRaisesRegex(ContractError, code):
+                validate_phase_event({**events[0], **changes}, plan=plan)
+        with self.assertRaisesRegex(ContractError, "PHASE_EVENT_SEGMENT_DUPLICATE"):
+            validate_phase_event_sequence([*events, {**events[-2], "sequence": 6}], plan=plan)
+        with self.assertRaisesRegex(ContractError, "PHASE_EVENT_SEGMENT_ORDER"):
+            validate_phase_event_sequence([*events[2:4], *events[:2]], plan=plan)
+
+    def test_held_phase_rows_reach_existing_report_without_count_or_arm_aliasing(self):
+        import tempfile
+        from pathlib import Path
+        from tools.data_factory.quality.episode_report import build_episode_report
+        from tools.data_factory.quality.phase_events import PhaseEventWriter, read_phase_events
+        from tools.data_factory.quality.phase_metrics import phase_timing_attribute
+        plan, events, rows = self.held_phase_events()
+        for row in rows:
+            index = int((row["target_ros_s"] - 10.) // 2)
+            step = plan["steps"][0]["held_target_segments"][index]
+            row["action"] = [*step["final_joint_state"], step["gripper_position_m"]]
+            row["observation.state"] = [*step["final_joint_state"], .021 if index == 0 else .01218]
+        common = {"run_id": "run", "resolved_job_digest": plan["resolved_job_digest"],
+                  "plan_digest": canonical_digest(plan), "plan": plan,
+                  "recorder_rows": rows, "recorder_rows_digest": canonical_digest(rows),
+                  "recorder_ros_clock_type": "SYSTEM_TIME"}
+        with tempfile.TemporaryDirectory() as directory:
+            sidecar = Path(directory) / "phase_events.jsonl"
+            writer = PhaseEventWriter(sidecar, plan=plan)
+            for event in events:
+                self.assertTrue(writer.emit(event))
+            self.assertTrue(writer.close())
+            self.assertEqual(read_phase_events(sidecar, plan=plan), events)
+            report = build_episode_report(Path(directory) / "episode_quality.json", **common,
+                phase_events_path=sidecar, execution_evidence={}, stall_epsilon_rad=1e-4,
+                technical_validator={"schema_version": "data_factory.technical_validator_ref.v1",
+                                     "status": "PASS", "result_digest": canonical_digest("synthetic-only")})
+        attributes = {item["attribute"]: item for item in report["attributes"]}
+        timing = attributes["phase_timing_integrity"]
+        self.assertEqual(timing["status"], "AVAILABLE")
+        self.assertEqual([item["row_count"] for item in timing["metrics"]["phase_intervals"]], [1, 2, 3])
+        self.assertEqual(timing["metrics"]["joined_row_count"], 6)
+        joints = attributes["joint_execution_quality"]["metrics"]["phase_metrics"]
+        self.assertEqual([item["segment_index"] for item in joints], [0, 2])
+        self.assertEqual([item["row_count"] for item in joints], [1, 3])
+        self.assertEqual([item["endpoint_joint_error_max_rad"] for item in joints], [0., 0.])
+        interaction = attributes["interaction_quality"]
+        self.assertEqual(interaction["status"], "NOT_AVAILABLE")
+        self.assertEqual(interaction["flags"], ["LEARNED_INTERACTION_UNQUALIFIED"])
+        self.assertIsNone(interaction["metrics"]["gripper_close"])
+        self.assertIsNone(interaction["metrics"]["lift_continuity"])
+        with self.assertRaisesRegex(ContractError, "PHASE_EVENT_SEGMENT_DUPLICATE"):
+            phase_timing_attribute(**common, events=[*events, {**events[0], "sequence": 6}])
+        with self.assertRaisesRegex(ContractError, "PHASE_EVENT_PLAN_REQUIRED"):
+            phase_timing_attribute(**{k: v for k, v in common.items() if k != "plan"}, events=events)
+
     def test_post_inference_source_clock_freshness_and_reentrant_inference(self):
         now = [10.]
         def slow(_):

@@ -33,6 +33,50 @@ FR5가 Collection, Curation, Training/Evaluation, Rollout, Learning Evidence, Pu
 - **WHEN** 데이터 선별, training authorization 및 실행 자원이 해당 학습·평가에 충족된다
 - **THEN** 제품은 실제 학습·평가 결과를 정확한 데이터·split·checkpoint 계보로 연결하고, offline loss와 physical effectiveness를 구분해 다음 작업에 사용한다
 
+### Requirement: Curator owns reusable acquisition recommendations
+Curation은 품질·분포·선별 근거를 다음 수집 조건으로 바꾸는 recommendation의 제품 소프트웨어 책임을 소유해야 한다(SHALL). 지원하는 입력과 정책 범위의 반복 추천은 canonical evidence, 현재 task·조건과 유한한 취득 예산을 받아 재현 가능한 함수 및 기존 제품 진입점으로 산출되어야 하며(SHALL), 매회 AI 조사·수동 좌표 조립·파일 전달을 필수로 요구해서는 안 된다(MUST NOT). 기존 DQA·Rollout/evaluation 결과와 sampler를 재사용하고, 추천의 근거·입력 계보·지원 범위·제한을 다음 소비자에게 전달해야 한다(SHALL). 이는 별도 서비스나 범용 전략 계층을 요구하지 않는다.
+
+#### Scenario: Supported evidence produces the next collection proposal
+- **WHEN** 지원하는 task의 canonical 수집·분석 근거와 현재 조건·예산으로 다음 수집안을 요청한다
+- **THEN** 제품은 같은 입력에서 재현 가능한 수집 조건과 선택 이유를 산출하며, 호환되는 여러 campaign의 근거를 소비할 수 있다
+- **AND** pickup 근거를 pick-place 성공 근거로 바꾸거나 고정 예제 수·seed·좌표를 모든 입력의 정책으로 사용하지 않으며, 지원하지 않는 입력과 실제 데이터 부족을 구분한다
+
+#### Scenario: A recommendation is consumed rather than manually reconstructed
+- **WHEN** 추천을 다음 수집에 적용한다
+- **THEN** Collection은 그 결과를 기존 authoring·계획·실행 owner에서 직접 소비하며, 현재 scene과 실행 조건은 해당 owner가 확인한다
+- **AND** 추천 출력만으로 연결 완료를 선언하지 않고 실제 소비 및 재전달·입력 변경·실패 경로를 검증한다
+- **AND** 연구는 정책을 선택·개선하거나 새 불확실성을 해결할 때 수행하며, 지원 범위의 정상 반복 호출을 대신하지 않는다
+
+### Requirement: Collection cohesion and reusable execution remain distinct
+Collection 전용 계획 작성·campaign 운영 기능은 책임을 식별할 수 있는 `collection/` 패키지 안에 응집되어야 한다(SHALL). 실제 VLA 동작 실행과 rollout 녹화에도 사용하는 실행·기록 기능은 Collection 밖의 독립된 공용 모듈에 있어야 하며(SHALL), 다른 소비자가 Collection UI나 campaign 상태를 구성해야만 재사용할 수 있어서는 안 된다(MUST NOT). 공용화는 기존 motion·recorder·scene·cell·admission owner를 유지하고, 작업별 시연 생성과 학습 정책 실행의 입력·종료·기록 의미를 구분해야 한다(SHALL). Curator의 추천 정책과 여러 도메인을 제공하는 사용자 인터페이스를 Collection 전용 책임으로 흡수해서는 안 된다(MUST NOT).
+
+#### Scenario: Collection-specific behavior changes
+- **WHEN** 수집 계획 작성이나 campaign 운영 기능을 변경한다
+- **THEN** Collection 전용 구현과 외부 계약은 해당 패키지에서 찾고 검증할 수 있으며, 공용 실행·기록 구현을 복제하거나 rollout 전용 정책을 함께 수정하지 않는다
+
+#### Scenario: Learned rollout reuses physical execution and recording
+- **WHEN** 학습 정책 실행 또는 rollout 녹화가 공용 기능을 소비한다
+- **THEN** Collection 전용 UI·draft·campaign 없이 해당 계약을 직접 사용하고, 기존 single motion owner와 기록 lifecycle·실행 권한·원본 provenance를 보존한다
+- **AND** 실제 소비자 연결과 실패·중단·재시작 경로를 검증하며, 폴더 이동이나 사용되지 않는 facade만으로 재사용 완료를 주장하지 않는다
+
+#### Scenario: Migration proceeds without interrupting acquisition
+- **WHEN** 현재 구조를 단계적으로 이전한다
+- **THEN** 활성 수집 프로세스와 원본 데이터를 건드리지 않는 변경·통합 경계를 사용하고, 기존 실행 진입점·저장 경로·schema·digest 의미의 호환성을 검증한다
+- **AND** 작은 계약 추출은 중간 결과일 수 있으나 Collection 응집과 공용 실행·기록 분리의 전체 완료를 대신하지 않는다
+
+### Requirement: Native owners enforce safety without duplicate operator gates
+실행 안전과 데이터·승인의 유효성 검사는 해당 기존 제품 owner가 자신의 소비 경계에서 책임져야 한다(SHALL). Coordinator와 다른 lane은 적용 대상·입력·버전·유효 범위가 일치하는 canonical 검사 결과를 재사용하고, 동일한 사실을 사람이나 AI가 다시 확인하는 절차·확인 문구·별도 safety owner를 추가해서는 안 된다(MUST NOT). 재검증은 변경된 입력·실행 조건, 기존 계약의 freshness 요구 또는 구체적인 실패 근거에 필요한 범위로 제한해야 한다(SHALL). 변경된 코드의 필요한 회귀와 실제 실행 시 필요한 fresh 검사를 생략하거나 기존 gate를 우회한다는 의미가 아니다.
+
+#### Scenario: Existing native admission already covers a repeated operation
+- **WHEN** 기존 허용 범위의 반복 작업을 제품이 처리하고 필요한 native admission이 충족된다
+- **THEN** 별도의 coordinator 재승인·수동 evidence 대조 없이 기존 execution owner가 진행한다
+- **AND** 권한·scene·cell·exact plan·single motion owner·semantic·physical binding·training approval의 의미와 적용 범위는 유지한다
+
+#### Scenario: Only one consumer loses valid evidence
+- **WHEN** 특정 입력 변경이나 실패로 한 소비자의 검증 결과가 더 이상 유효하지 않다
+- **THEN** 해당 결과를 소유한 시스템이 필요한 검사·복구와 중단 사유를 처리하고, 조사 가능한 오류를 사람 확인으로 대체하지 않는다
+- **AND** 영향을 받지 않는 근거와 완료된 물리 효과는 보존하며 독립적인 적격 작업은 계속한다
+
 ### Requirement: Automation takes over qualified responsibilities rather than bypassing gates
 반복적인 사람 입력을 줄이는 전환은 그 입력이 담당하던 관찰·판정·권한 범위·실패 대응을 명시하고 검증된 시스템 책임으로 인수해야 한다(SHALL). 관측 정확도, 잘못된 승인과 중단, 복구 가능성 및 사람 개입 빈도를 적용 범위 안에서 평가해야 한다(SHALL). 기존 gate를 바꾸는 개별 전환은 해당 authority의 승인된 계약과 회귀·실물 evidence를 갖추어야 하며(SHALL), 장기 자동화 intent 자체를 현재 gate 충족이나 승인으로 해석해서는 안 된다(MUST NOT).
 
@@ -71,6 +115,29 @@ FR5가 Collection, Curation, Training/Evaluation, Rollout, Learning Evidence, Pu
 - **WHEN** 속도 또는 촬영·기록 품질의 상향을 검토한다
 - **THEN** 시간과 충분한 품질을 함께 비교하며 최대 속도·최대 화질 자체를 목표로 삼지 않고, 프리셋 선택이 TEST/GENERAL 데이터 구분이나 technical·semantic·training authority를 자동 변경하지 않는다
 
+#### Scenario: One arm policy is selected for multiple workspaces
+- **WHEN** Web 또는 CLI에서 구간별 속도 정책을 선택한다
+- **THEN** 기존 명시적 phase를 사용하는 하나의 version/digest 정책이 A/B에 공통 적용되며, geometry 및 hardware/planner 최대값과 분리된다
+- **AND** 기존 자격과 정확히 결속된 해석 결과만 계획·episode evidence·HOME/시작 자세 복구에 사용되고, 기존 설정을 선택한 과거 프로그램·계획·데이터의 재생은 변경되지 않는다
+
+#### Scenario: A candidate policy has not been physically qualified
+- **WHEN** 기존 자격에서 새 정책의 검증 후보를 준비한다
+- **THEN** 결과는 UNQUALIFIED이며 기존 QUALIFIED 상태·qualified_at을 상속하지 않는다
+- **AND** Web에서 구간별 요청값과 자격 필요 상태를 검토하고 초안에 선택할 수 있지만 필요한 endpoint 자격이 없으면 일반 수집 경로의 계획 확정·실행은 거부된다
+- **AND** 기존 검증 설정으로 돌아가는 데 추가 승인·타이핑이 필요하지 않고, 객체 배치·수량·후속 편집을 보존한다
+
+#### Scenario: A bounded trial evaluates a candidate before production qualification
+- **WHEN** 이미 승인된 시험 범위에서 기존 적격 geometry와 hardware/planner 한계를 보존하는 후보 속도 정책을 평가한다
+- **THEN** 기존 TEST_ONLY 실행 owner가 정확한 후보·계획·유한한 실행 범위를 결속해 시험하고, 기존 hardware·human·scene·cell·exact-plan·single-motion 조건을 그대로 소비한다
+- **AND** 후보의 미검증 상태를 유지한 채 실제 실행 결과와 적용값을 남기며, 시험을 위해 QUALIFIED 표기나 과거 qualified_at을 만들어 넣지 않는다
+- **AND** 영상 위치 추정이나 새 확인 문구를 추가 필수 조건으로 요구하지 않고, 실제 실행 불확실성과 무관한 UI·저장 오류를 구분한다
+- **AND** 시험 성공만으로 production 자격·semantic PASS·training authority를 자동 부여하지 않는다
+
+#### Scenario: Policy or qualification changes after selection
+- **WHEN** 선택한 정책 또는 endpoint 자격의 digest·해석값이 변경되거나 서로 일치하지 않는다
+- **THEN** 계획 생성과 복구는 효과 전에 거부되며, 다른 endpoint 자격이나 과거 정책의 승인으로 대체하지 않는다
+- **AND** 응답 유실은 canonical 상태를 다시 읽어 복구하고 명령을 자동 재전송하지 않는다
+
 ### Requirement: Existing owners retain authority
 OpenSpec은 지속 가능한 외부 행동 intent, 안정된 경계와 outcome 단위의 완료 기준 및 evidence 연결을 소유해야 한다(SHALL). Orca는 상세 실행·의존성·attempt 진척·live resource·blocker·handoff를, source와 tests는 실행 가능한 계약과 수치 truth를, MEX는 파생된 로컬 탐색 정보를, Public Documentation은 검증된 사용자 의미를 계속 소유해야 한다(SHALL).
 
@@ -81,6 +148,13 @@ OpenSpec은 지속 가능한 외부 행동 intent, 안정된 경계와 outcome �
 #### Scenario: A small outcome is completed
 - **WHEN** outcome의 완료 기준을 canonical evidence로 검증한다
 - **THEN** OpenSpec tasks는 해당 결과를 완료하고 evidence owner를 참조하지만 누락된 downstream 학습·실물 효과나 승인을 완료로 간주하지 않는다
+
+#### Scenario: A verified integration checkpoint is ready to publish
+- **WHEN** 독립적으로 통합 가능한 변경을 검토하고 실제 결합된 source cutoff에 필요한 검증을 완료한다
+- **THEN** coordinator는 사용자 변경과 원본을 보존하며 해당 체크포인트를 main에 commit·push하고, 실제 원격 main의 commit이 일치하는지 확인한다
+- **AND** 전체 장기 Goal의 완료까지 공개를 미루지 않되 미검증 변경·비밀·무거운 데이터·run state·로컬 에이전트 도구를 함께 올리거나 원격 이력을 강제로 덮어쓰지 않는다
+- **AND** push 실패나 원격 진전은 Orca에 정확한 commit·검증 범위·미반영 사유를 남겨 해결하며, 독립적인 적격 작업을 멈추지 않는다
+- **AND** source 공개는 실행 중인 프로세스·드라이버의 배포, 실물 검증 또는 데이터·학습 승인을 뜻하지 않는다
 
 ### Requirement: Learning evidence analysis stays separated from authority
 Data Quality Analysis와 Rollout Evidence Analysis는 각자 canonical output을 가져야 한다(SHALL). Recommendation은 두 결과를 읽어 advisory synthesis만 제공해야 하며(MUST), recorder·motion·collection·promotion·training·publication authority를 가져서는 안 된다(MUST NOT).
@@ -96,6 +170,26 @@ Data Quality Analysis와 Rollout Evidence Analysis는 각자 canonical output을
 - **WHEN** 정책 평가 결과가 다음 수집 조건 선택에 사용된다
 - **THEN** 비교 조건과 실제 trial 근거를 추적할 수 있고 성공·실패 데이터 모두의 유용성을 검토한다
 - **AND** Curation의 기존 데이터 선별, 다음 데이터 획득 전략과 실제 수집 실행은 각 결정의 owner를 유지한다
+
+### Requirement: Evaluation and execution balance reuse with independent responsibilities
+온라인·오프라인의 평가와 실행은 지원하는 정책별 checkpoint·저장 processor 검증, 결정적 관측 처리, 추론과 행동 단위·의미 해석 중 같은 의미를 가진 기능을 기존 owner에서 재사용해야 한다(SHALL). 재사용 범위는 평가 함수뿐 아니라 실제 정책 계산 경로를 포함해야 하며(SHALL), 학습 손실·open-loop 출력 비교·실물 제어처럼 다른 의미의 계산이나 lifecycle을 단일 경로로 억지로 합쳐서는 안 된다(MUST NOT). 저장 관측의 오프라인 실행, 실시간 관측의 명령 없는 실행과 허가된 실물 실행은 입력 출처·시간 의미와 효과 권한을 구분해야 하며(SHALL), 공통 코어를 사용한다는 이유로 과거 관측을 fresh로 표시하거나 로봇 명령 권한을 부여해서는 안 된다(MUST NOT). 이 요구는 새 범용 harness·서비스·모델 registry를 만들라는 뜻이 아니다.
+
+공유와 분리는 일관성뿐 아니라 독립적인 변경·검증, 자원 사용, 실패 복구 및 전체 개발·운용 비용으로 판단해야 한다(SHALL). 서로 다른 결정·출력·lifecycle을 소유하는 기능은 그 책임을 독립적으로 개발·사용·검증할 수 있게 분리해야 하며(SHALL), 호출 모양이 비슷하다는 이유만으로 공통 계층에 결합하거나 폴더 수를 늘리는 것 자체를 개선으로 간주해서는 안 된다(MUST NOT).
+
+#### Scenario: Stored observations exercise the same policy computation
+- **WHEN** 저장 관측과 검증된 checkpoint로 오프라인 추론 또는 실행 재생을 수행한다
+- **THEN** 온라인 경로와 같은 저장 전처리·추론·후처리 구현을 소비하고, 비교에 필요한 관측·checkpoint·processor·설정 및 stochastic 입력의 계보를 보존한다
+- **AND** 오프라인 결과를 실제 명령·측정된 로봇 동작·작업 성공으로 표시하지 않으며, 원본 dataset과 실행·학습 승인 상태를 변경하지 않는다
+
+#### Scenario: A policy proposal reaches authorized hardware
+- **WHEN** 같은 정책 계산 결과를 실제 로봇에 적용한다
+- **THEN** 기존 실행 owner가 현재 관측·시작 상태·scene·cell·exact plan 및 단일 motion 조건을 확인하며, 예측 원본·실제로 소비한 구간·전송 명령·관측된 동작과 중단 사유를 구분해 추적할 수 있다
+- **AND** 모델 출력을 맞추기 위해 조용히 자르거나 반올림하거나 시간 의미를 바꾸지 않으며, 명시적 실행 변환이 있다면 비교 조건과 결과에 그 차이를 보존한다
+
+#### Scenario: Reuse is verified through real consumers
+- **WHEN** 공통 실행 코어의 연결 완료를 검증한다
+- **THEN** 저장 관측 소비와 온라인 adapter가 같은 구현을 사용하는 정상 경로 및 잘못된 입력·중단 경로를 검증하고, 오프라인 재생·합성 transport·실물 실행의 증거 범위를 각각 명시한다
+- **AND** 공통 인터페이스 선언이나 별도 fake 구현의 통과만으로 실제 정책·하드웨어 연결 완료를 주장하지 않는다
 
 ### Requirement: Immutable and human gates fail closed
 기존 hardware, human, scene, cell, plan-digest, semantic, physical-binding, training-authorization gate는 서로 분리되어 유지되어야 한다(SHALL). 누락되거나 `PARTIAL` 또는 `UNKNOWN`인 evidence는 어떤 외부 효과도 허가해서는 안 된다(MUST NOT).
@@ -132,6 +226,30 @@ Portfolio 표현 책임자는 모방학습과 데이터 엔지니어링 직무�
 - **THEN** 직무 관련성, 실제 증거와 설명의 설득력으로 선택을 정당화하고, 미리 지정된 항목·템플릿의 소진이나 문서 수 증가를 완료 기준으로 삼지 않는다
 - **AND** 전체 확장 전에 작은 실제 표현물로 사람의 취향 피드백을 받을 수 있게 하되 독립적인 기술 작업을 멈추지 않는다
 
+### Requirement: Portfolio technical explanations grow from investigated design intent
+
+Portfolio 표현 책임자는 핵심 기술을 새로 소개하거나 설명의 의미를 바꾸기 전에, 해결하려는 문제·설계 의도·실제 작동 원리와 기대한 이점을 조사해야 한다(SHALL). main MEX를 현재 맥락과 근거 경로의 출발점으로 사용하되 유일하거나 최종적인 진실원으로 간주해서는 안 된다(MUST NOT). 사용자 의도와 설계·변경 기록, 실제 호출 코드와 입력 계약, 관련 테스트·canonical 산출물·운용 관찰을 필요한 깊이로 대조하고, 기술적 해석에 필요한 외부 일차 자료를 활용해야 한다(SHALL). 과거 의도, 현재 구현, 관측된 효과와 표현 책임자의 추론은 구분해야 한다(SHALL).
+
+글과 그림은 기술이 해결하려는 문제와 선택한 방법의 관계를 독자가 이해하도록 구성해야 한다(SHALL). 기능·수식·주의사항의 나열이나 오독 방지 문구만으로 설계 의도의 설명을 대신해서는 안 된다(MUST NOT). 상세 계산·조건·근거는 해당 의도를 뒷받침하도록 배치하고, 그림의 대상·좌표계·범위와 연결선이 실제 메커니즘을 표현하는지 렌더·사용으로 검토해야 한다(SHALL). 이 원칙은 공통 페이지 템플릿이나 매 편집의 승인 절차를 요구하지 않는다.
+
+#### Scenario: An explanation is prepared from project knowledge
+
+- **WHEN** 표현 책임자가 핵심 알고리즘이나 아키텍처를 설명할 준비를 한다
+- **THEN** MEX의 요약에서 원래 의도와 실제 소비 경로를 따라가고, 입력 변화·다른 지원 조건·반례를 통해 설명하려는 일반화가 성립하는지 확인한다
+- **AND** 한 예시나 테스트 PASS를 기술 전체의 성능으로 확대하지 않으며, 조사 결과를 목적이 읽히는 실제 표현물로 발전시킨다
+
+#### Scenario: Investigation reveals a missing mechanism or contradiction
+
+- **WHEN** MEX·설계 기록·코드·실제 산출물의 대조에서 누락, 불일치 또는 계산 반례를 발견한다
+- **THEN** 표현 책임자는 자신의 설명을 바로잡고, 재현 입력과 고정 근거·영향 범위를 기존 main 또는 기술 owner에게 전달한다
+- **AND** 기술 owner의 원본을 직접 바꾸거나 미검증 수정을 완료 성과로 반영하지 않으며, 관련 없는 표현 작업은 계속한다
+
+#### Scenario: A technically correct figure obscures the purpose
+
+- **WHEN** 실제 렌더와 독자 피드백에서 도형·용어·배치가 설계 의도보다 계산 중간값이나 다른 기능을 먼저 떠올리게 한다
+- **THEN** 설명 대상과 시각적 구성을 다시 선택해 무엇을 위해 어떻게 동작하는지 드러내고, 필요한 세부는 그 설명에서 탐색할 수 있게 한다
+- **AND** 기존 그림의 유지나 주의 문구 추가만을 해결로 간주하지 않는다
+
 ### Requirement: Portfolio evidence evolves without becoming a second truth
 검증된 성과와 미검증 가설은 구분하되 새 증거가 나오면 같은 설명과 근거 연결을 갱신할 수 있어야 한다(SHALL). 문서·시각화·발표 자료의 수치와 주장은 기존 canonical evidence에서 추적 가능해야 하며, 독립적인 결과 장부나 중복된 수작업 정본을 만들지 않아야 한다(SHALL). 시각적 완성도는 실제 렌더 결과의 가독성·비교 가능성·정직한 범위 표현을 포함해야 하며, 장식이나 유리한 사례 선택으로 한계를 숨겨서는 안 된다(MUST NOT).
 
@@ -154,11 +272,29 @@ Portfolio 표현 책임자는 모방학습과 데이터 엔지니어링 직무�
 - **WHEN** 구현·분석·문서·추상화가 네 가지 가치 조건을 하나도 충족하지 않는다
 - **THEN** 작업은 보기 좋은 기능이라는 이유만으로 실행되지 않고 defer된다
 
+#### Scenario: An existing product overlaps a proposed capability
+- **WHEN** 기존 제품이 만들려는 기능 또는 이미 구현한 기능과 실질적으로 겹친다
+- **THEN** 책임자는 현재 환경에서 요구 충족과 전체 비용을 근거로 재사용·최소 연결·자체 구현을 비교하고, 기존 코드를 보존하거나 새 도구를 도입하는 것 자체를 목표로 삼지 않는다
+- **AND** 공개 주장은 재사용한 기능, 프로젝트가 추가한 동작과 검증한 효과를 구분하며, 기능 연결이나 기반 안정성을 학습 성능 개선의 증명으로 사용하지 않는다
+- **AND** 대체 또는 연결은 원본·계보와 기존 실행 authority를 보존하며, 특정 제품 선택을 위해 프로젝트의 필수 결과를 축소하지 않는다
+
 #### Scenario: Comparison results revise the research hypothesis
 - **WHEN** 비교 실험, 교차 검토 또는 실제 환경 evidence가 선택한 가설의 전제나 예상 효과를 흔든다
 - **THEN** 책임자는 단순한 기준선과 경쟁 가설을 다시 비교하고 유지·수정·폐기 근거 및 다음 선택을 바꿀 수 있는 불확실성을 명시한다
 - **AND** 필요한 범위의 primary research를 다시 조사해 다음 유한한 실험을 선택하며, 한 번의 문헌 조사나 사용자 제안으로 구현 방향을 영구 고정하지 않는다
 - **AND** 미검증·환경 부적합·실험으로 반증됨을 구분하고, 반복 조사 자체나 새 실험 관리 계층을 만드는 것을 성과로 간주하지 않는다
+
+#### Scenario: Training feasibility has already been established
+- **WHEN** 실제 학습·저장·재로딩·평가와 자원 적합성이 해당 입력 및 runtime에서 확인됐다
+- **THEN** 후속 실험은 남은 학습·데이터·실물 성능 질문과 유한한 예산, 비교 범위, 종료 후 다음 결정을 실행 전에 정하며 동일한 feasibility 확인만을 반복하지 않는다
+- **AND** 데이터 보강은 알려진 조건별 공백과 수집 가치에 따라 독립적으로 준비할 수 있고 모든 학습 설정 비교의 완료를 선행 조건으로 요구하지 않는다
+- **AND** 검증 손실, 실행 가능한 checkpoint 및 시연 생성기의 성공은 학습 정책의 실물 작업 성능을 대신하지 않으며, 평가와 준비를 포함한 전체 비용으로 실험 가치를 판단한다
+
+#### Scenario: Research findings improve subsequent acquisition and data use
+- **WHEN** 수집·선별·학습이 진행되는 동안 새로운 연구 또는 실험 결과가 다음 데이터의 조건·구성·관측 표현을 바꿀 가치가 있다
+- **THEN** 해당 owner는 외부에서 보고된 효과와 현재 환경에서 검증한 효과를 구분하고, 기대 효용·적용 비용·기존 데이터 재사용 가능성을 근거로 다음 수집·선별·학습 비교에 반영하거나 반영하지 않는 이유를 정한다
+- **AND** 이미 승인된 진행 중 실행의 입력·계획을 소급 변경하지 않고, 변경된 조건은 다음 적절한 실행 경계에서 기존 owner와 native admission을 통해 적용하며, 관련 없는 연구나 구현 완료를 유효한 수집의 선행 조건으로 삼지 않는다
+- **AND** 원본과 기존 판정·분할을 보존하고 파생본·제외·혼합 선택은 기존 request와 provenance로 추적하며, 후속 비교가 가설을 반박하면 구성과 공개 설명도 그 근거에 맞춰 수정한다
 
 #### Scenario: New evidence challenges an intent boundary
 - **WHEN** 조사 가능한 engineering unknown을 해소한 뒤에도 가치·안전·의미에 관한 선택이 남는다
@@ -191,6 +327,13 @@ rollout 분석은 관측·추론 지연, 제어·실행 실패와 데이터의 �
 - **THEN** 선택에 사용한 development evidence와 최종 비교용 평가 조건을 구분하고, 최종 평가 결과를 같은 비교의 다음 선택 입력으로 재사용하지 않는다
 - **AND** 기존 균형 수집 등 명시적 기준선과 비교하며 수집 수뿐 아니라 실제 수집·학습 시간, reset·중단·사람 개입을 포함한 비용을 보고한다
 - **AND** 물리 phase 판정과 runtime 진단이 불확실하면 그대로 남기며, 소표본 결과나 offline loss만으로 일반화된 실물 성능 개선을 주장하지 않는다
+
+#### Scenario: A proposed experiment is selected for discriminating value
+- **WHEN** 모델 비교, 표적 수집, 카메라 비교 또는 latent 분석을 다음 실험 후보로 검토한다
+- **THEN** 현재 PC·FR5의 비용과 미해결 질문을 기준으로 최소 비교를 선택하며, 제안된 실험 목록이나 특정 모델의 우승을 완료 조건으로 고정하지 않는다
+- **AND** 서로 다른 모델의 실용 성능 비교와 같은 checkpoint의 solver 비교를 구분하고, 추가 최적화만의 효과와 데이터 선택 효과를 구분하는 데 필요한 기준선을 사용한다
+- **AND** 카메라 입력 손상에 대한 민감도를 별도 단일 카메라 학습의 효용으로, probe의 정보 판독 가능성을 실패 원인의 증명으로, 조건별 수량을 데이터 충분성으로 해석하지 않는다
+- **AND** 수집에 사용한 조건과 새 데이터의 포함 범위를 갱신하여 이미 보강한 조건을 계속 미관측 OOD로 주장하지 않으며, 관측한 차이와 인과적 해석을 구분한다
 
 ### Requirement: Evidence-leveraged collection may proceed without a renewed scheduling prompt
 canonical evidence가 높은 downstream uncertainty-reduction 또는 portfolio/evidence leverage를 보이고 Orca가 기존 production system의 operational availability를 보고하면, coordinator는 추가 human scheduling 또는 availability prompt 없이 collection을 선택하고 시작할 수 있다(MAY). 이 scheduling permission은 timing만 다루며, runtime availability, individual execution, progress, UI/terminal mechanics, blocker는 Orca가 소유한다(SHALL). 이 permission은 hardware, scene, cell, plan-digest, motion lifecycle, recorder lifecycle, semantic, physical-binding, training-authorization 또는 다른 production authority를 생성·대체·충족·우회하지 않는다(MUST NOT); gate가 차단되면 dependent collection effect만 멈추고 독립적인 safe lane은 계속 eligible하다(SHALL).

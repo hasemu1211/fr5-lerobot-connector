@@ -566,6 +566,30 @@ class CameraRoleSetupTests(unittest.TestCase):
                         "capture_endpoint": serial,
                     },
                 })
+                # A repeated choice must still refresh the catalog and ask the
+                # lifecycle owner for current readiness, not reuse a UI cache.
+                snapshot = application.bridge_core.snapshot()
+                repeated = {
+                    "schema_version": "data_factory.operator_intent.v1",
+                    "intent_id": "mixed-camera-bind-r002",
+                    "session_id": snapshot["session_id"],
+                    "view_revision": snapshot["revision"],
+                    "view_digest": snapshot["view_digest"],
+                    "op": "update_camera_bindings",
+                    "payload": {"bindings": {uvc: "UP", serial: "SIDE"}},
+                }
+                calls_before = camera_environment.call_count
+                with mock.patch(
+                    "tools.data_factory.operator.composition.load_operator_catalog",
+                    wraps=load_operator_catalog,
+                ) as refresh:
+                    application.bridge_core.consume(repeated)
+                    refresh.assert_called_once()
+                self.assertEqual(camera_environment.call_count, calls_before + 1)
+                self.assertEqual(camera_environment.call_args.args, (profile_arg, descriptors))
+                with self.assertRaises(ContractError):
+                    application.bridge_core.consume(repeated)
+                self.assertEqual(camera_environment.call_count, calls_before + 1)
             finally:
                 application.close()
 

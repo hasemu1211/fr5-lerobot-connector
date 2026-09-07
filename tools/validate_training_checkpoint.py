@@ -8,6 +8,7 @@ from contextvars import ContextVar
 import json
 from pathlib import Path
 import sys
+from typing import Mapping
 
 if __package__ in {None, ""}:
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -128,6 +129,139 @@ def validate_normalization_state(policy_dir: Path, normalization: dict, *, profi
             raise ValueError("checkpoint normalization differs from admitted TRAIN statistics")
 
 
+def validate_saved_observation_view(split: Mapping, receipt: Mapping) -> dict:
+    """Return the one saved observation-view contract shared by Learning/Rollout.
+
+    Curator remains the producer of publication, profile and transform facts.  This
+    consumer only reuses that evidence and checks that every fitted frame belongs to
+    this launch's TRAIN partition.  Raw checkpoints intentionally return a raw
+    representation; they do not acquire derived-view semantics by inference.
+    """
+    from tools.data_factory.training_approval import (
+        DERIVED_PROVENANCE_SCHEMA,
+        EPISODE_PROVENANCE_SCHEMA,
+        LEDGER_PROVENANCE_SCHEMA,
+        MAPPED_PROVENANCE_SCHEMA,
+        validate_current_training_inventory,
+    )
+    from tools.data_factory.curator.core.errors import CuratorError
+    from tools.data_factory.training_split import validate_training_split
+    from tools.fr5_data_factory import load_json_strict
+    from tools.data_factory.curator.workflow.derivation import published_training_evidence
+    from tools.data_factory.curator.profile.registry import resolve_view_profile
+    from tools.data_factory.curator.profile.schema import load_view_profile
+    from tools.data_factory.training_receipts import file_digest
+
+    split = validate_training_split(split)
+    if not isinstance(receipt, Mapping):
+        raise ValueError("saved observation-view receipt is invalid")
+    inventory_path = receipt.get("approved_inventory_path")
+    if not isinstance(inventory_path, str):
+        raise ValueError("saved observation-view inventory is missing")
+    inventory = validate_current_training_inventory(
+        inventory_path,
+        dataset_root=split["dataset_identity"]["dataset_root"],
+        repo_id=split["repo_id"],
+        selected_episodes=split["selected_episodes"],
+    )
+    from tools.data_factory.training_split import source_episode_identity
+    from tools.fr5_data_factory import canonical_digest
+
+    derived = []
+    train_origins, eval_origins = set(), set()
+    mapped_view = False
+    for episode in inventory["episodes"]:
+        provenance = load_json_strict(Path(episode["episode_provenance"]["artifact_path"]))
+        origin = canonical_digest(source_episode_identity(provenance))
+        (train_origins if episode["episode_index"] in split["train_episodes"] else eval_origins).add(origin)
+        application_dataset = split["dataset_identity"]
+        if provenance.get("schema_version") == MAPPED_PROVENANCE_SCHEMA:
+            mapped_view = True
+            application_dataset = provenance["parent"]["dataset_identity"]
+            provenance = provenance["parent"]["provenance"]
+        if provenance.get("schema_version") == DERIVED_PROVENANCE_SCHEMA:
+            derived.append((provenance["derivation"], application_dataset))
+        elif provenance.get("schema_version") not in {EPISODE_PROVENANCE_SCHEMA, LEDGER_PROVENANCE_SCHEMA}:
+            raise ValueError("saved observation-view provenance is unknown")
+    if not derived:
+        return {"representation": "raw", "transform_application": "none",
+                "training_transform": "raw_once"}
+    if len(derived) != len(inventory["episodes"]) or train_origins & eval_origins:
+        raise ValueError("saved observation-view derivation is inconsistent across episodes")
+    publications = {}
+    for reference, application_dataset in derived:
+        key = canonical_digest(reference)
+        if key not in publications:
+            try:
+                publications[key] = published_training_evidence(reference)
+            except (CuratorError, OSError, ValueError) as exc:
+                raise ValueError("saved observation-view publication is invalid") from exc
+        publication = publications[key]
+        if any(application_dataset[k] != publication["output"][v] for k, v in
+               (("dataset_root", "root"), ("repo_id", "repo_id"), ("dataset_digest", "dataset_digest"))):
+            raise ValueError("saved observation-view dataset binding differs from launch")
+    evidence = next(iter(publications.values()))
+    if any(p["view_profile"] != evidence["view_profile"] or p["transform"] != evidence["transform"]
+           for p in publications.values()):
+        raise ValueError("saved observation-view derivation is inconsistent across episodes")
+    output = evidence["output"]
+    profile_path = Path(evidence["view_profile"]["path"])
+    if file_digest(profile_path) != evidence["view_profile"]["file_sha256"]:
+        raise ValueError("saved observation-view profile changed")
+    spec = load_view_profile(profile_path)
+    resolved = resolve_view_profile(
+        profile_path.parent,
+        spec.value["profile_id"],
+        binding_root=spec.binding_path.parent,
+        collection_profile_root=spec.collection_profile_path.parent,
+    )
+    if resolved.profile["profile_digest"] != evidence["view_profile"]["profile_digest"]:
+        raise ValueError("saved observation-view assets differ from publication")
+    fitting = spec.value.get("fitting")
+    if spec.value.get("schema_version") != "curator.view_profile.v2" or not isinstance(fitting, dict):
+        raise ValueError("saved observation-view lacks TRAIN fitting evidence")
+    frames = [fitting.get("reference_frame"), *fitting.get("background_plate_frames", [])]
+    if not frames or any(not isinstance(frame, dict) for frame in frames):
+        raise ValueError("saved observation-view fitted frame is outside child TRAIN")
+    fit_split_path = Path(fitting["training_split"]["path"])
+    if file_digest(fit_split_path) != fitting["training_split"]["file_sha256"]:
+        raise ValueError("saved observation-view fitting split changed")
+    fit_split = validate_training_split(fit_split_path)
+    if fit_split["split_digest"] != fitting["training_split"]["split_digest"]:
+        raise ValueError("saved observation-view fitting split digest differs")
+    fit_train = set(fit_split["train_episodes"])
+    if any(frame["episode_index"] not in fit_train for frame in frames):
+        raise ValueError("saved observation-view fitted frame is outside fitting TRAIN")
+    for frame in frames:
+        index = frame["episode_index"]
+        origin = {"dataset_identity_digest": canonical_digest(fit_split["dataset_identity"]),
+                  "episode_index": index,
+                  "episode_content_digest": fit_split["episode_content_digests"][str(index)]}
+        if "evaluation_cohort" in fit_split:
+            origin = fit_split["evaluation_cohort"]["origins"][str(index)]
+        if canonical_digest(origin) not in train_origins or canonical_digest(origin) in eval_origins:
+            raise ValueError("saved observation-view fitted frame is outside child TRAIN")
+    return {
+        **({"fitting_dataset_identity": fit_split["dataset_identity"],
+            "application_publications": [
+                {"reference": next(ref for ref, _ in derived if canonical_digest(ref) == k),
+                 "dataset": publications[k]["output"],
+                 "parent_dataset_identity": publications[k]["parent_dataset_identity"],
+                 "lineage_digest": publications[k]["lineage_digest"]}
+                for k in sorted(publications)]}
+           if mapped_view else {"parent_dataset_identity": evidence["parent_dataset_identity"],
+                                "lineage_digest": evidence["lineage_digest"]}),
+        "representation": "baked",
+        "transform_application": "rollout_once",
+        "training_transform": "baked_once",
+        "dataset": ({**output, "root": split["dataset_identity"]["dataset_root"],
+                     "repo_id": split["repo_id"], "dataset_digest": split["dataset_identity"]["dataset_digest"]}
+                    if mapped_view else output),
+        "view_profile": evidence["view_profile"],
+        "transform": evidence["transform"],
+    }
+
+
 def validate_policy_feature_contract(policy: dict, feature: dict) -> None:
     """Match saved policy features, including SmolVLA's inert native image slots."""
     from tools.data_factory.training_entrypoint import options
@@ -198,7 +332,6 @@ def validate_checkpoint(value: Path, *, verify_dataset: bool = True) -> tuple[Pa
     dataset_cfg = config.get("dataset") or {}
     if verify_dataset:
         from tools.data_factory.training_entrypoint import prepare_launch, options
-        from tools.data_factory.training_receipts import validate_launch_receipt
         from tools.data_factory.training_split import validate_training_split
 
         split = validate_training_split(split)
@@ -207,12 +340,9 @@ def validate_checkpoint(value: Path, *, verify_dataset: bool = True) -> tuple[Pa
         receipt_path = output_dir / "fr5_training_receipt.json"
         if not receipt_path.is_file():
             receipt_path = Path(str(output_dir) + ".fr5_training_receipt.json.pending")
-        receipt = validate_launch_receipt(json.loads(receipt_path.read_text()), split)
-        if "initialization" in receipt and not config.get("resume", False):
-            if config.get("policy", {}).get("pretrained_path") != receipt["initialization"]["checkpoint"]:
-                raise ValueError("checkpoint warm-start parent differs from admitted initialization")
+        receipt = json.loads(receipt_path.read_text())
         root = Path(dataset_cfg.get("root", "")).expanduser()
-        if (str(root) != split["dataset_identity"]["dataset_root"]
+        if (root.expanduser().resolve() != Path(split["dataset_identity"]["dataset_root"]).expanduser().resolve()
                 or dataset_cfg.get("repo_id") != split["dataset_identity"]["repo_id"]
                 or dataset_cfg.get("eval_split") != split["eval_split"]
                 or (dataset_cfg.get("episodes") or list(range(split["total_episodes"]))) != split["selected_episodes"]):
@@ -225,12 +355,32 @@ def validate_checkpoint(value: Path, *, verify_dataset: bool = True) -> tuple[Pa
             if option == "--rename_map" and config.get("rename_map", {}) != json.loads(expected):
                 raise ValueError("checkpoint camera mapping differs from admitted feature contract")
         current_split, current_receipt = prepare_launch(
-            dataset=root, repo_id=dataset_cfg["repo_id"], inventory=Path(receipt["approved_inventory_path"]),
+            dataset=root.expanduser().resolve(), repo_id=dataset_cfg["repo_id"], inventory=Path(receipt["approved_inventory_path"]),
             profile=feature["profile"], collection_profile=feature["collection_profile_id"], argv=receipt["normalized_argv"],
         )
+        # Receipts written before saved observation-view binding was introduced
+        # are still valid for raw launches.  Compare their original canonical
+        # shape while keeping the enriched binding mandatory for derived data.
+        if ("observation_view" not in receipt
+                and current_receipt.get("observation_view", {}).get("representation") == "raw"):
+            current_receipt = dict(current_receipt)
+            current_receipt.pop("observation_view")
+            from tools.data_factory.training_receipts import launch_receipt_digest
+            current_receipt["receipt_digest"] = launch_receipt_digest(current_receipt)
         if current_split != split or current_receipt != receipt:
             raise ValueError("dataset or launch provenance changed after training admission")
+        # prepare_launch recompiles the complete receipt, including each parent.
+        # Its exact comparison above supplies current validation without a second
+        # recursive recompilation or any cross-call authority cache.
+        if "initialization" in receipt and not config.get("resume", False):
+            if config.get("policy", {}).get("pretrained_path") != receipt["initialization"]["checkpoint"]:
+                raise ValueError("checkpoint warm-start parent differs from admitted initialization")
         validate_normalization_state(policy_dir, receipt["normalization"], profile=feature["profile"])
+        # Saved observation-view provenance is validated at the same boundary as
+        # normalization and dataset lineage; consumers can call the public helper
+        # to obtain the exact raw-versus-baked representation without reapplying a
+        # Curator transform.
+        validate_saved_observation_view(split, receipt)
         return policy_dir, output_dir
 
     # Historical inspection only; this never grants permission to resume.
