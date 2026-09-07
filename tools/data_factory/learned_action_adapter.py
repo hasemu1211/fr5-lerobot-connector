@@ -394,26 +394,33 @@ class NativeSmolVLA:
 
     def _transform_raw_up(self, frame: dict) -> dict:
         """Apply Curator's published up-view transform exactly once for raw Rollout input."""
-        import cv2
+        import numpy as np
         from pathlib import Path
-        from tools.data_factory.curator.profile.registry import resolve_view_profile
+        from tools.fr5_data_factory import ContractError
+        from tools.data_factory.curator.core.errors import CuratorError
+        from tools.data_factory.curator.profile.registry import load_profile_assets, resolve_view_profile
         from tools.data_factory.curator.profile.schema import load_view_profile
         from tools.data_factory.curator.profile.transform import apply_up_view
 
         profile = self.observation_view["view_profile"]
         path = profile["path"]
-        spec = load_view_profile(path)
-        resolved = resolve_view_profile(
-            str(Path(path).parent), spec.value["profile_id"],
-            binding_root=spec.binding_path.parent,
-            collection_profile_root=spec.collection_profile_path.parent,
-        )
+        try:
+            spec = load_view_profile(path)
+            resolved = resolve_view_profile(
+                str(Path(path).parent), spec.value["profile_id"],
+                binding_root=spec.binding_path.parent,
+                collection_profile_root=spec.collection_profile_path.parent,
+            )
+            if (resolved.config_file_sha256 != profile.get("file_sha256")
+                    or resolved.profile["profile_digest"] != profile.get("profile_digest")):
+                raise ContractError("LEARNED_VIEW_PROFILE_CHANGED")
+            mask, plate = load_profile_assets(resolved)
+        except ContractError:
+            raise
+        except (CuratorError, OSError, ValueError, KeyError) as error:
+            raise ContractError("LEARNED_VIEW_PROFILE_CHANGED") from error
         rgb = np.frombuffer(frame["data"], dtype=np.uint8).reshape(frame["shape"])
         if [frame["shape"][1], frame["shape"][0]] != [spec.value["width"], spec.value["height"]]:
             raise ContractError("LEARNED_VIEW_FRAME_SHAPE")
-        mask_payload = Path(spec.keep_mask_path).read_bytes()
-        plate_payload = Path(spec.background_plate_path).read_bytes()
-        mask = cv2.imdecode(np.frombuffer(mask_payload, dtype=np.uint8), cv2.IMREAD_GRAYSCALE) == 255
-        plate = cv2.cvtColor(cv2.imdecode(np.frombuffer(plate_payload, dtype=np.uint8), cv2.IMREAD_COLOR), cv2.COLOR_BGR2RGB)
         transformed = apply_up_view(rgb, mask, plate)
         return {**frame, "shape": list(transformed.shape), "data": transformed.tobytes()}

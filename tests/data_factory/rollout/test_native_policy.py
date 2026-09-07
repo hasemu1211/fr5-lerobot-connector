@@ -311,6 +311,34 @@ class NativePolicyTest(unittest.TestCase):
         with self.assertRaisesRegex(ContractError, 'LEARNED_CHECKPOINT_CHANGED'):
             native(value)
 
+    def test_baked_observation_view_transforms_camera1_once(self):
+        from lerobot.policies.smolvla.configuration_smolvla import SmolVLAConfig
+        from lerobot.policies.smolvla.modeling_smolvla import SmolVLAPolicy
+
+        seen = {}
+        policy = mock.Mock()
+        def predict(batch):
+            seen["camera1"] = batch["observation.images.camera1"].clone()
+            seen["camera2"] = batch["observation.images.camera2"].clone()
+            return torch.zeros((1, 1, 7))
+        policy.predict_action_chunk.side_effect = predict
+        config = SimpleNamespace(input_features={
+            'observation.state': SimpleNamespace(shape=[7]),
+            'observation.images.camera1': object(), 'observation.images.camera2': object()},
+            output_features={'action': SimpleNamespace(shape=[7])}, empty_cameras=1,
+            adapt_to_pi_aloha=False, rtc_config=None)
+        with mock.patch.object(SmolVLAConfig, 'from_pretrained', return_value=config), \
+             mock.patch.object(SmolVLAPolicy, 'from_pretrained', return_value=policy):
+            native = NativeSmolVLA.load(self.policy_dir)
+        native.observation_view = {"representation": "baked", "transform_application": "rollout_once"}
+        native._transform_raw_up = mock.Mock(return_value=fake_rgb(b"\xff\x00\x00"))
+        value = {'observation.state': [0.] * 7, 'observation.images.camera1': fake_rgb(),
+                 'observation.images.camera2': fake_rgb(b"\x00\x00\xff"), 'task': 'synthetic probe'}
+        native(value)
+        native._transform_raw_up.assert_called_once_with(value["observation.images.camera1"])
+        torch.testing.assert_close(seen["camera1"], torch.tensor([[[[1.]], [[0.]], [[0.]]]]))
+        torch.testing.assert_close(seen["camera2"], torch.tensor([[[[0.]], [[0.]], [[1.]]]]))
+
     def test_empty_weights_and_missing_normalization_never_reach_model_load(self):
         with mock.patch.object(NativeSmolVLA, '_load_components') as components:
             (self.policy_dir / 'model.safetensors').write_bytes(b'')

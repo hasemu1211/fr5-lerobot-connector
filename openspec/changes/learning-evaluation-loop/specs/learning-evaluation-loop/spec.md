@@ -28,6 +28,11 @@ An explicit standing human delegation MAY authorize the configured local actor t
 - **THEN** the affected authorization or execution is rejected before its side effects
 - **AND** the system preserves existing evidence and continues independent in-scope work rather than treating the entire project as blocked.
 
+#### Scenario: A prepared delegated request is retried or interrupted
+- **WHEN** the same Curator request and delegated authority are submitted again, or an earlier attempt left an authority directory or training output
+- **THEN** the native consumer revalidates the exact dataset, delegation and inventory and returns existing evidence without issuing duplicate authority or starting a second trainer
+- **AND** an incomplete authority publication fails closed with its next recovery consumer named, without claiming a checkpoint, evaluation result or physical proficiency.
+
 ### Requirement: Native training consumes only admitted learning inputs
 
 The public training path SHALL revalidate the frozen inventory authorized by an exact-batch human decision or standing local delegation, exact selected episodes and camera/task contract before running the official trainer. Train and evaluation episodes SHALL remain disjoint. Learned preprocessing statistics SHALL derive exclusively from training episodes; ImageNet constants MAY remain the explicit image normalization setting. Original dataset bytes and installed packages SHALL remain unchanged.
@@ -74,6 +79,13 @@ The lane SHALL distinguish admitted input, executable pipeline, checkpoint reloa
 - **WHEN** comparison arms fit state/action statistics from different training subsets
 - **THEN** a common held-out cohort alone does not make their normalized flow-matching losses a data-utility ranking
 - **AND** each arm retains leakage-free statistics, while an improvement claim requires a comparable downstream measure after its own saved postprocessor or a matched physical evaluation; the system does not fit statistics on held-out data to equalize the scores.
+
+#### Scenario: A prepared delegated request reaches the native checkpoint consumer
+- **WHEN** the supported request entrypoint receives an immutable Curator request and a valid standing delegation
+- **THEN** it derives the bounded native recipe, revalidates the exact inventory and launches through the existing admission boundary
+- **AND** a successful trainer result is consumed by the existing checkpoint validator and offline evaluator before the entrypoint reports an evaluated checkpoint
+- **AND** a missing or out-of-scope delegation, missing checkpoint, validator failure or evaluator failure is reported as that bounded state without a physical-proficiency claim
+- **AND** a repeated same-input request reuses immutable manifests/checkpoint evidence without starting a second trainer.
 
 ### Requirement: Sampled physical-action assessment uses the native admitted evaluator
 
@@ -132,3 +144,10 @@ The lane SHALL choose the next safe valuable outcome using code/tests, current a
 #### Scenario: A learning result suggests different data or physical testing
 - **WHEN** the next outcome crosses Curator or Rollout ownership
 - **THEN** the lane proposes a bounded input/output evidence contract to the existing owner instead of implementing a competing owner.
+
+#### Scenario: Native evaluation support and unsettled outputs
+- **WHEN** the request entrypoint receives a profile unsupported by the native offline evaluator
+- **THEN** it rejects the request before authority publication or training, including injected calls.
+- **WHEN** either launch manifest remains pending, including after an interrupted final publication
+- **THEN** recovery preserves evidence and refuses to launch or evaluate; pending evidence alone does not prove a live process.
+- **AND** trainer failure and missing-checkpoint outcomes produce a nonzero public CLI exit status.

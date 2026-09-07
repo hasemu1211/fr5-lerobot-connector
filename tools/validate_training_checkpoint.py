@@ -307,7 +307,7 @@ def validate_checkpoint(value: Path, *, verify_dataset: bool = True) -> tuple[Pa
             receipt_path = Path(str(output_dir) + ".fr5_training_receipt.json.pending")
         receipt = json.loads(receipt_path.read_text())
         root = Path(dataset_cfg.get("root", "")).expanduser()
-        if (str(root) != split["dataset_identity"]["dataset_root"]
+        if (root.expanduser().resolve() != Path(split["dataset_identity"]["dataset_root"]).expanduser().resolve()
                 or dataset_cfg.get("repo_id") != split["dataset_identity"]["repo_id"]
                 or dataset_cfg.get("eval_split") != split["eval_split"]
                 or (dataset_cfg.get("episodes") or list(range(split["total_episodes"]))) != split["selected_episodes"]):
@@ -320,9 +320,18 @@ def validate_checkpoint(value: Path, *, verify_dataset: bool = True) -> tuple[Pa
             if option == "--rename_map" and config.get("rename_map", {}) != json.loads(expected):
                 raise ValueError("checkpoint camera mapping differs from admitted feature contract")
         current_split, current_receipt = prepare_launch(
-            dataset=root, repo_id=dataset_cfg["repo_id"], inventory=Path(receipt["approved_inventory_path"]),
+            dataset=root.expanduser().resolve(), repo_id=dataset_cfg["repo_id"], inventory=Path(receipt["approved_inventory_path"]),
             profile=feature["profile"], collection_profile=feature["collection_profile_id"], argv=receipt["normalized_argv"],
         )
+        # Receipts written before saved observation-view binding was introduced
+        # are still valid for raw launches.  Compare their original canonical
+        # shape while keeping the enriched binding mandatory for derived data.
+        if ("observation_view" not in receipt
+                and current_receipt.get("observation_view", {}).get("representation") == "raw"):
+            current_receipt = dict(current_receipt)
+            current_receipt.pop("observation_view")
+            from tools.data_factory.training_receipts import launch_receipt_digest
+            current_receipt["receipt_digest"] = launch_receipt_digest(current_receipt)
         if current_split != split or current_receipt != receipt:
             raise ValueError("dataset or launch provenance changed after training admission")
         # prepare_launch recompiles the complete receipt, including each parent.
