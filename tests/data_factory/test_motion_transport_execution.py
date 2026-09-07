@@ -7,6 +7,7 @@ from unittest import mock
 
 from action_msgs.msg import GoalStatus
 from control_msgs.action import FollowJointTrajectory
+from control_msgs.msg import JointTrajectoryControllerState
 from moveit_msgs.msg import MoveItErrorCodes, RobotTrajectory
 from rclpy.serialization import deserialize_message, serialize_message
 from trajectory_msgs.msg import JointTrajectoryPoint
@@ -54,15 +55,16 @@ class TestExecutionTransport(unittest.TestCase):
                         name=["j1", "j2", "j3", "j4", "j5", "j6"],
                         position=[0.0] * 6,
                     ))
-                    point = SimpleNamespace(positions=[0.0])
                     for callback, name in (
                         (transport._on_arm_controller_state, "j1"),
                         (transport._on_gripper_controller_state, "finger_right_joint"),
                     ):
-                        callback(SimpleNamespace(
-                            joint_names=[name], reference=point, feedback=point,
-                            speed_scaling_factor=1.0,
-                        ))
+                        message = JointTrajectoryControllerState()
+                        message.joint_names = [name]
+                        message.reference.positions = [0.0]
+                        message.feedback.positions = [0.0]
+                        message.speed_scaling_factor = 1.0
+                        callback(message)
                     if clock[0] >= 1.5 and mode != "missing_description":
                         transport._on_robot_description(SimpleNamespace(
                             data=description if mode == "late_description" else "<robot/>",
