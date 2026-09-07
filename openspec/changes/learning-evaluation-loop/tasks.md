@@ -17,6 +17,8 @@
 
 ## 3. Data utility and continued learning
 
+- [x] Make a same-parent, matched-exposure lower-peak adaptation comparison executable through the existing native warm-start path; verify policy CLI precedence and the built schedule, and hand off checkpoint/evaluation, resource and stop/extend criteria without issuing training authority.
+
 - [ ] Support genuine new-output native continuation with immutable parent state, explicit schedule-prefix meaning and cumulative sample position verified through a second resume; preserve legacy resume and explicit warm-start reset behavior.
 
 - [x] Qualify larger-batch native throughput from an immutable learned checkpoint using an explicitly labelled warm-start fork; retain reset semantics and parent/child reload lineage without claiming exact continuation or superior learning from extra exposure.

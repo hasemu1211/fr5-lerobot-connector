@@ -100,6 +100,46 @@ class NativeTrainingConfigurationTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "Optimizer and Scheduler must be set"):
             self.config(use_policy_training_preset=False, optimizer=AdamWConfig(lr=5e-5))
 
+    def test_same_parent_lower_lr_cli_preserves_matched_schedule_and_parent(self):
+        from pathlib import Path
+        from tempfile import TemporaryDirectory
+        import torch
+        from lerobot.configs.default import DatasetConfig
+        from lerobot.configs.train import TrainPipelineConfig
+        from lerobot.policies.smolvla.configuration_smolvla import SmolVLAConfig
+
+        # Resolve the real --policy.path/--policy.* consumer, without model weights,
+        # dataset access or a trainer. Top-level --optimizer.lr alone is insufficient.
+        with TemporaryDirectory() as directory:
+            parent = Path(directory)
+            SmolVLAConfig(device="cpu", push_to_hub=False).save_pretrained(parent)
+            original = (parent / "config.json").read_bytes()
+            traces = []
+            for peak in (1e-4, 5e-5):
+                cfg = TrainPipelineConfig(dataset=DatasetConfig(repo_id="local/config-test"), steps=8000)
+                with patch("sys.argv", ["config-test", f"--policy.path={parent}",
+                        f"--policy.optimizer_lr={peak}", "--policy.scheduler_decay_lr=2.5e-6",
+                        "--policy.scheduler_warmup_steps=1000", "--policy.scheduler_decay_steps=30000"]):
+                    cfg.validate()
+                self.assertFalse(cfg.resume)
+                self.assertEqual(cfg.policy.pretrained_path, parent)
+                self.assertEqual(cfg.optimizer.lr, peak)
+                self.assertEqual(cfg.scheduler.peak_lr, peak)
+                optimizer = cfg.optimizer.build([torch.nn.Parameter(torch.zeros(1))])
+                scheduler = cfg.scheduler.build(optimizer, cfg.steps)
+                lrs = [optimizer.param_groups[0]["lr"]]
+                for _ in range(cfg.steps):
+                    optimizer.step()
+                    scheduler.step()
+                    lrs.append(optimizer.param_groups[0]["lr"])
+                self.assertAlmostEqual(lrs[0], peak / 267, places=12)
+                self.assertAlmostEqual(lrs[4000], (peak + 2.5e-6) / 2, places=12)
+                self.assertAlmostEqual(lrs[8000], 2.5e-6, places=12)
+                self.assertEqual(max(range(len(lrs)), key=lrs.__getitem__), 266)
+                traces.append(lrs)
+            self.assertTrue(all(low < high for high, low in zip(traces[0][:-1], traces[1][:-1])))
+            self.assertEqual((parent / "config.json").read_bytes(), original)
+
     def test_short_native_horizon_reaches_decay_floor_and_changes_schedule_prefix(self):
         import torch
 

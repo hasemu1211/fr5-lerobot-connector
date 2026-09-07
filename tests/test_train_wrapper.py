@@ -419,10 +419,13 @@ class TrainingLaunchConnectionTest(unittest.TestCase):
                 kwargs["dataset"].name, "none", "--dataset.episodes=[0,2,3]",
                 "--dataset.eval_split=0.34", "--batch_size=4", "--steps=100",
                 "--eval_steps=100", "--save_freq=100",
+                "--policy.optimizer_lr=5e-5", "--policy.scheduler_decay_lr=2.5e-6",
             ], env={**os.environ, "FR5_REPO_ID": kwargs["repo_id"], "PYTHONDONTWRITEBYTECODE": "1"},
                 text=True, capture_output=True)
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertIn(f"--policy.path={parent}", result.stdout)
+            self.assertIn("--policy.optimizer_lr=5e-5", result.stdout)
+            self.assertIn("--policy.scheduler_decay_lr=2.5e-6", result.stdout)
             self.assertIn('"mode": "warm_start"', result.stdout)
             self.assertIn('optimizer, scheduler, RNG, sample stream and step reset', result.stdout)
             self.assertFalse(output.exists())
