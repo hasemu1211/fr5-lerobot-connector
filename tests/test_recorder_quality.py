@@ -434,10 +434,11 @@ class RecorderContractTest(unittest.TestCase):
             if line.startswith("diff --git ")
         ]
         self.assertEqual(headers, [
-            "fairino_hardware_v3_9_7/include/fairino_hardware/fairino_hardware_interface.hpp",
             "fairino_hardware_v3_9_7/src/CNDE_thread.cpp",
             "fairino_hardware_v3_9_7/src/command_server.cpp",
+            "fairino_hardware_v3_9_7/include/fairino_hardware/fairino_hardware_interface.hpp",
             "fairino_hardware_v3_9_7/src/fairino_hardware_interface.cpp",
+            "fairino_hardware_v3_9_7/include/fairino_hardware/gripper_execution_evidence.hpp",
         ])
         pinned = subprocess.check_output(
             ["git", "ls-tree", "HEAD", "src/frcobot_ros2"], cwd=root, text=True
