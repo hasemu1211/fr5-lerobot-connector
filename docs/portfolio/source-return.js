@@ -35,8 +35,8 @@ function updateSourceReturn() {
     back.textContent = '← 폐루프 설명으로 돌아가기';
     return;
   }
-  if (back && ['loss', 'actions'].includes(architectureView)) {
-    back.href = `../learning.html#${architectureView === 'loss' ? 'comparison' : 'actions'}`;
+  if (back && ['loss', 'actions', 'actions-1000'].includes(architectureView)) {
+    back.href = `../learning.html#${architectureView === 'loss' ? 'comparison' : architectureView === 'actions-1000' ? 'action-1000' : 'actions'}`;
     back.textContent = '← 학습 비교로 돌아가기';
     return;
   }

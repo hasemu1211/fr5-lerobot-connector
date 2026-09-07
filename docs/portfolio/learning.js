@@ -1,4 +1,5 @@
 'use strict';
+if (location.hash === '#action-1000') document.getElementById('action-1000').open = true;
 if (window.FR5_ACTION_COMPARISONS) {
   const controls = ['action-seed', 'action-metric', 'action-episode'].map(id => document.getElementById(id));
   const params = new URLSearchParams(location.search);
