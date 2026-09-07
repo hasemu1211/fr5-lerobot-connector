@@ -319,7 +319,7 @@ class MappedTrainingTest(unittest.TestCase):
                 )
             self.assertFalse((root / 'missing').exists())
             original = Path(load_json_strict(raw_requests[0])['dataset_root'])
-            with self.assertRaisesRegex(CuratorError, 'MAPPING_OUTPUT_OVERLAP'):
+            with self.assertRaisesRegex(ContractError, 'TRAINING_APPROVAL_OUTPUT_EXTERNAL_DIRECTORY'):
                 publish_mapped_training_request(requests, original / 'forbidden', **options)
             self.assertFalse((original / 'forbidden').exists())
             result = publish_mapped_training_request(requests, root / 'candidate', **options)
