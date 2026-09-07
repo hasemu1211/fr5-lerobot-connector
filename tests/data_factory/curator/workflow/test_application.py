@@ -34,6 +34,37 @@ from tools.data_factory.curator.workflow.state import load_events
 
 
 class ApplicationTest(unittest.TestCase):
+    def test_prepare_rejects_changed_request_or_source_before_candidate_effects(self):
+        from tools.data_factory import training_entrypoint
+
+        for changed in ("digest", "request", "source"):
+            with self.subTest(changed=changed), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                source = root / "source"
+                source.mkdir()
+                (source / "bytes").write_bytes(b"original")
+                _, digest = stable_tree_identity(source, code="TEST_IDENTITY")
+                request = root / "request.json"
+                write_json(request, {"dataset_root": str(source), "dataset_id": "source-r1",
+                                     "repo_id": "local/canonical", "episodes": []})
+                paths = replace(application.DEFAULT_PATHS, run_root=root / "runs", output_parent=root / "outputs")
+
+                def changed_admission(*args, **kwargs):
+                    if changed == "request":
+                        request.write_text("{}")
+                    elif changed == "source":
+                        (source / "bytes").write_bytes(b"changed")
+                    return {"dataset_root": str(source), "repo_id": "local/canonical",
+                            "dataset_digest": "sha256:" + "0" * 64 if changed == "digest" else digest}, []
+
+                with mock.patch.object(training_entrypoint, "_prepare_approvals", side_effect=changed_admission), \
+                        mock.patch.object(application, "_configuration") as configuration:
+                    with self.assertRaisesRegex(CuratorError, "SOURCE_REQUEST_BINDING|SOURCE_REQUEST_CHANGED"):
+                        prepare(source, source_request=request, _paths=paths)
+                configuration.assert_not_called()
+                self.assertFalse(paths.run_root.exists())
+                self.assertFalse(paths.output_parent.exists())
+
     def test_terminal_receipt_remains_readable_when_review_media_is_unavailable(self):
         for choice, outcome in (("APPROVE", "PUBLISHED"), ("REJECT", "REJECTED")):
             with self.subTest(choice=choice), tempfile.TemporaryDirectory() as directory:

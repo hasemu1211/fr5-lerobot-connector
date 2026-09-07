@@ -501,7 +501,7 @@ def source_snapshot(root):
     return {str(p.relative_to(root)): p.read_bytes() for p in root.rglob("*") if p.is_file()}
 
 
-def make_native_training_source(add_cleanup, *, episodes=3):
+def make_native_training_source(add_cleanup, *, episodes=3, repo_id='local/source'):
     fixture = EpisodeLedgerFixture()
     fixture.addCleanup = add_cleanup
     fixture.setUp()
@@ -516,16 +516,16 @@ def make_native_training_source(add_cleanup, *, episodes=3):
         fixture.run_id = f'synthetic-episode-{index}'
         fixture.evidence = root / f'evidence-{index}'
         fixture.evidence.mkdir()
-        fixture.dataset_identity.update(dataset_root=str(source), repo_id='local/source')
-        fixture.episode_ref.update(repo_id='local/source', episode_index=index,
+        fixture.dataset_identity.update(dataset_root=str(source), repo_id=repo_id)
+        fixture.episode_ref.update(repo_id=repo_id, episode_index=index,
             transaction_id=f'{fixture.run_id}:episode-{index:06d}')
         locator = copy.deepcopy(fixture.episode_locator)
-        locator['repo_id'] = 'local/source'
+        locator['repo_id'] = repo_id
         locator['episode_index'] = index
         locator['data'].update(file_row_start=index * 2, file_row_end_exclusive=index * 2 + 2)
         # Rebuild the locator digest with the existing owner, not an alternate ledger.
         from tools.data_factory.episode_ledger import build_lerobot_v3_episode_locator
-        locator = build_lerobot_v3_episode_locator(repo_id='local/source', episode_index=index,
+        locator = build_lerobot_v3_episode_locator(repo_id=repo_id, episode_index=index,
             data=locator['data'], videos=locator['videos'])
         refs = fixture._artifacts()
         loaded = fixture._loaded_artifacts(refs)

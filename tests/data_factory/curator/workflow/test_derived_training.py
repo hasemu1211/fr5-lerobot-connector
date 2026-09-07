@@ -25,12 +25,61 @@ from tools.fr5_training_profile import launch_feature_contract, read_metadata, b
 
 
 class DerivedTrainingTest(unittest.TestCase):
-    def native_case(self, *, episodes=3, train_fit=False, source_only=False):
-        root, source, profile, runs, before = make_native_training_source(self.addCleanup, episodes=episodes)
+    def test_canonical_prepare_rejects_invalid_native_sources_without_effects(self):
+        from tools.data_factory.curator.workflow import application
+
+        root, source, runs, before = self.native_case(source_only=True, repo_id='local/canonical')
+        request_path = root / 'source-request.json'
+        export_training_request(runs, request_path, dataset_id='parent-r1')
+        request = load_json_strict(request_path)
+        published_request = request_path
+        published_bytes = published_request.read_bytes()
+        # Invalid inputs are separate disposable fixtures; the native exported
+        # request stays immutable, just as it does in production.
+        request_path = root / 'invalid-source-request.json'
+        paths = replace(application.DEFAULT_PATHS, run_root=root / 'never-runs', output_parent=root / 'never-candidates')
+        for update, error in (({'repo_id': 'local/wrong'}, 'TRAINING_LEDGER_DATASET_BINDING'),
+                              ({'dataset_root': str(root)}, 'SOURCE_REQUEST_BINDING'),
+                              ({'dataset_root': None}, 'SOURCE_REQUEST_BINDING'),
+                              ({'unexpected': True}, 'SOURCE_REQUEST_FIELDS'),
+                              ({'episodes': []}, 'TRAINING_INVENTORY_EPISODES')):
+            with self.subTest(update=update):
+                write_json(request_path, {**request, **update})
+                with mock.patch.object(application, '_configuration') as configuration:
+                    with self.assertRaisesRegex((CuratorError, ContractError), error):
+                        prepare(source, source_request=request_path, _paths=paths)
+                configuration.assert_not_called()
+                self.assertFalse(paths.run_root.exists())
+                self.assertFalse(paths.output_parent.exists())
+                self.assertEqual((snapshot(source), [snapshot(run) for run in runs]), before)
+        write_json(request_path, request)
+        technical_path = Path(request['episodes'][0]['technical_validator_path'])
+        original = technical_path.read_bytes()
+        technical_path.write_text('{}')
+        try:
+            with mock.patch.object(application, '_configuration') as configuration:
+                with self.assertRaises(ContractError):
+                    prepare(source, source_request=request_path, _paths=paths)
+            configuration.assert_not_called()
+            self.assertFalse(paths.run_root.exists())
+            self.assertFalse(paths.output_parent.exists())
+        finally:
+            technical_path.write_bytes(original)
+        self.assertEqual((snapshot(source), [snapshot(run) for run in runs]), before)
+        self.assertEqual(published_request.read_bytes(), published_bytes)
+
+    def native_case(self, *, episodes=3, train_fit=False, source_only=False, repo_id='local/source'):
+        root, source, profile, runs, before = make_native_training_source(self.addCleanup, episodes=episodes, repo_id=repo_id)
         selected = list(range(0, episodes, 2))
         feature = launch_feature_contract('act', 'fr5-up-wrist-rgb-30hz-v2', 'pick_place', read_metadata(source))
         if source_only:
             return root, source, runs, before
+        source_request = None
+        if repo_id != 'local/source' and not train_fit:
+            request_directory = root / 'canonical-source'
+            request_directory.mkdir()
+            source_request = request_directory / 'request.json'
+            export_training_request(runs, source_request, dataset_id='parent-r1')
         if train_fit:
             from tools.data_factory.training_split import compile_launch_split
             from tools.data_factory.curator.workflow.setup import (
@@ -45,6 +94,8 @@ class DerivedTrainingTest(unittest.TestCase):
             parent_request = load_json_strict(parent_output / 'request.json')
             parent_inventory = training.publish_approval_batch(training.prepare_approval_batch(
                 parent_request, parent_output, 'synthetic-human'))
+            if repo_id != 'local/source':
+                source_request = parent_output / 'request.json'
             fit_split = compile_launch_split(inventory=parent_inventory, metadata=read_metadata(source),
                 selected=selected, fraction=.5, feature_contract=feature)
             fit_path = root / 'native-parent-fit-split.json'
@@ -68,7 +119,11 @@ class DerivedTrainingTest(unittest.TestCase):
                 [fitted.value['fitting']['reference_frame'], *fitted.value['fitting']['background_plate_frames']]))
             profile = replace(profile, paths=replace(profile.paths, profile_root=setup_paths.profile_root),
                               profile_path=profile_path)
-        pending = prepare(source, _paths=profile.paths, _run_id_value='synthetic-published')
+        request_before = None if source_request is None else snapshot(source_request.parent)
+        pending = prepare(source, source_request=source_request,
+                          _paths=profile.paths, _run_id_value='synthetic-published')
+        if source_request is not None:
+            self.assertEqual(snapshot(source_request.parent), request_before)
         shown = review_candidate(pending['run_id'], _paths=profile.paths)
         from tools.data_factory.curator.workflow.derivation import published_training_evidence
         unpublished = {'run_directory': str(profile.paths.run_root / pending['run_id']),
@@ -79,13 +134,16 @@ class DerivedTrainingTest(unittest.TestCase):
             expected_review_digest=shown['review_ready_digest'], _paths=profile.paths)
         run = profile.paths.run_root / pending['run_id']
         reference = {'run_directory': str(run), 'receipt_digest': load_events(run)['receipt']['event_digest'],
-                     'parent_dataset_identity': approval.current_dataset_identity(source, repo_id='local/source', dataset_id='parent-r1')}
+                     'parent_dataset_identity': approval.current_dataset_identity(source, repo_id=repo_id, dataset_id='parent-r1')}
         output = root / 'new-training-batch'
         output.mkdir()
         return root, source, profile, runs, before, published, reference, output
 
     def test_native_published_selection_web_approval_inventory_and_launch_validation(self):
-        root, source, profile, runs, before, published, reference, output = self.native_case(train_fit=True)
+        root, source, profile, runs, before, published, reference, output = self.native_case(
+            train_fit=True, repo_id='local/fr5_smolvla_up_wrist_30hz')
+        self.assertNotEqual(source.name, 'fr5_smolvla_up_wrist_30hz')
+        self.assertEqual(published['receipt']['source']['repo_id'], 'local/fr5_smolvla_up_wrist_30hz')
         from tools.data_factory.curator.cli import main
         reference_path = root / 'derivation-reference.json'
         write_json(reference_path, reference)
@@ -150,7 +208,8 @@ class DerivedTrainingTest(unittest.TestCase):
         self.assertEqual(snapshot(output), after)
         raw_output = root / 'raw-approval'
         raw_output.mkdir()
-        raw_request = {**request, 'dataset_root': str(source), 'repo_id': 'local/source', 'dataset_id': 'parent-r1'}
+        raw_request = {**request, **reference['parent_dataset_identity']}
+        raw_request.pop('dataset_digest')
         raw_request.pop('derivation')
         raw_inventory = training.publish_approval_batch(training.prepare_approval_batch(raw_request, raw_output, 'synthetic-human'))
         copied = copy.deepcopy(inventory)

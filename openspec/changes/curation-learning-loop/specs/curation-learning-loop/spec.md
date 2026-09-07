@@ -222,6 +222,35 @@ Request export and cohort preview SHALL preserve original dataset bytes, provena
 - **THEN** export rejects the request without overwriting the existing output or silently removing selected episodes
 - **AND** technical, semantic, physical binding and training authority remain separate.
 
+### Requirement: Candidate preparation preserves canonical source identity
+
+Native `prepare(source, source_request=path)` and CLI `prepare --source --source-request`
+SHALL optionally consume an existing raw selection request through native read-only
+admission validation. The validated source root and current byte digest SHALL match
+the prepared source, and its canonical repo identity SHALL flow unchanged through
+the existing request event, materialization, receipt and derived training selection.
+Request and source changes during preflight SHALL fail before candidate effects.
+Omitting the request SHALL preserve the legacy source-only repo naming behavior.
+The input supplies identity evidence, not candidate, semantic, physical or training
+authority; all existing downstream checks and Web review boundaries SHALL remain.
+Preparation SHALL continue to transform the complete source; the request's episode
+selection SHALL NOT silently filter the candidate or authorize unselected episodes.
+
+#### Scenario: Canonical repo differs from the source directory name
+- **WHEN** a valid raw selection request names a canonical repo different from `local/<source directory name>`
+- **THEN** native preparation and subsequent reviewed publication retain the canonical repo
+- **AND** derived selection reaches existing native batch admission with the same original identity and no inherited training consent.
+
+#### Scenario: Wrong or changed source evidence is provided
+- **WHEN** the request has a mismatched root or repo, malformed or stale admission evidence, or its bytes or the source identity change during preflight
+- **THEN** preparation rejects before creating a run or candidate
+- **AND** original data, review decisions and existing approvals remain unchanged.
+
+#### Scenario: Existing source-only preparation is used
+- **WHEN** a caller omits the optional source request
+- **THEN** the existing source-only preparation and physical/profile gates remain in force
+- **AND** Web review still consumes a server-bound prepared run rather than browser-supplied source identities.
+
 ### Requirement: Published derived selections reach native batch admission
 
 Curator SHALL connect explicitly selected parent-reviewed episodes of a genuinely

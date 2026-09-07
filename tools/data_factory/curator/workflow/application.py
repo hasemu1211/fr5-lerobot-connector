@@ -18,7 +18,7 @@ import numpy as np
 from ..core.errors import CuratorError
 from ..core.filesystem import OwnedDirectory, fsync_directory, reject_symlink_components
 from ..core.identity import assert_tree_identity, file_sha256, stable_tree_identity
-from ..core.jsonio import DIGEST, SAFE_ID, canonical_digest
+from ..core.jsonio import DIGEST, SAFE_ID, canonical_digest, exact_fields, load_json
 from ..dataset.materialize import MATERIALIZATION_SCHEMA, materialize_candidate
 from ..dataset.publish import (
     candidate_action_path,
@@ -427,6 +427,7 @@ def _record_failure(
 def prepare(
     source: str | Path,
     *,
+    source_request: str | Path | None = None,
     _paths: WorkflowPaths = DEFAULT_PATHS,
     _run_id_value: str | None = None,
 ) -> dict[str, Any]:
@@ -438,6 +439,28 @@ def prepare(
         source_path,
         code="SOURCE_CHANGED_DURING_IDENTITY",
     )
+    source_repo_id = f"local/{source_path.name}"
+    if source_request is not None:
+        from tools.data_factory.training_entrypoint import _prepare_approvals
+
+        request_path = reject_symlink_components(source_request, "SOURCE_REQUEST").resolve(strict=True)
+        request_hash = file_sha256(request_path)
+        selected = load_json(request_path, code="SOURCE_REQUEST_JSON")
+        exact_fields(selected, {"dataset_root", "dataset_id", "repo_id", "episodes"}, "SOURCE_REQUEST_FIELDS")
+        if not isinstance(selected["dataset_root"], str) or _source_path(selected["dataset_root"]) != source_path:
+            raise CuratorError("SOURCE_REQUEST_BINDING")
+        # Reuse native read-only admission, including canonical ledger repo and
+        # artifact binding. Existing approvals beside the request are irrelevant:
+        # no targets, consent documents or inventory are created here.
+        dataset, _ = _prepare_approvals(
+            selected, request_path.parent, "curator-preview-only", check_targets=False,
+        )
+        if dataset["dataset_root"] != str(source_path) or dataset["dataset_digest"] != source_digest:
+            raise CuratorError("SOURCE_REQUEST_BINDING")
+        if file_sha256(request_path) != request_hash:
+            raise CuratorError("SOURCE_REQUEST_CHANGED")
+        source_repo_id = dataset["repo_id"]
+        assert_tree_identity(source_path, source_snapshot, source_digest, code="SOURCE_REQUEST_CHANGED")
     configuration = _configuration(_paths)
     profile = configuration.profile.profile
     keep_mask, _background_plate = load_profile_assets(configuration.profile)
@@ -464,7 +487,6 @@ def prepare(
     if candidate.exists() or candidate.is_symlink():
         run.rmdir()
         raise CuratorError("CANDIDATE_EXISTS", str(candidate))
-    source_repo_id = f"local/{source_path.name}"
     candidate_repo_id = f"local/{output.name}"
     nonce = secrets.token_hex(16)
     request_payload = {
