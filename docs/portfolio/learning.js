@@ -2,6 +2,8 @@
 if (window.FR5_ACTION_COMPARISONS) {
   const controls = ['action-seed', 'action-metric', 'action-episode'].map(id => document.getElementById(id));
   const params = new URLSearchParams(location.search);
+  if (['#actions', '#action-archive'].includes(location.hash) && params.has('episode'))
+    document.getElementById('action-archive').open = true;
   const initial = [params.get('seed'), `${params.get('metric')}_per_axis`, params.get('episode')];
   controls.forEach((control, i) => {
     if ([...control.options].some(option => option.value === initial[i])) control.value = initial[i];
