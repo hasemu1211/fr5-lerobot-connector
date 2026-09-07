@@ -79,8 +79,15 @@ FR5가 Collection, Curation, Training/Evaluation, Rollout, Learning Evidence, Pu
 #### Scenario: A candidate policy has not been physically qualified
 - **WHEN** 기존 자격에서 새 정책의 검증 후보를 준비한다
 - **THEN** 결과는 UNQUALIFIED이며 기존 QUALIFIED 상태·qualified_at을 상속하지 않는다
-- **AND** Web에서 구간별 요청값과 자격 필요 상태를 검토하고 초안에 선택할 수 있지만 필요한 endpoint 자격이 없으면 계획 확정·실행은 거부된다
+- **AND** Web에서 구간별 요청값과 자격 필요 상태를 검토하고 초안에 선택할 수 있지만 필요한 endpoint 자격이 없으면 일반 수집 경로의 계획 확정·실행은 거부된다
 - **AND** 기존 검증 설정으로 돌아가는 데 추가 승인·타이핑이 필요하지 않고, 객체 배치·수량·후속 편집을 보존한다
+
+#### Scenario: A bounded trial evaluates a candidate before production qualification
+- **WHEN** 이미 승인된 시험 범위에서 기존 적격 geometry와 hardware/planner 한계를 보존하는 후보 속도 정책을 평가한다
+- **THEN** 기존 TEST_ONLY 실행 owner가 정확한 후보·계획·유한한 실행 범위를 결속해 시험하고, 기존 hardware·human·scene·cell·exact-plan·single-motion 조건을 그대로 소비한다
+- **AND** 후보의 미검증 상태를 유지한 채 실제 실행 결과와 적용값을 남기며, 시험을 위해 QUALIFIED 표기나 과거 qualified_at을 만들어 넣지 않는다
+- **AND** 영상 위치 추정이나 새 확인 문구를 추가 필수 조건으로 요구하지 않고, 실제 실행 불확실성과 무관한 UI·저장 오류를 구분한다
+- **AND** 시험 성공만으로 production 자격·semantic PASS·training authority를 자동 부여하지 않는다
 
 #### Scenario: Policy or qualification changes after selection
 - **WHEN** 선택한 정책 또는 endpoint 자격의 digest·해석값이 변경되거나 서로 일치하지 않는다
