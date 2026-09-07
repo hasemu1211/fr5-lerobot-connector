@@ -583,6 +583,28 @@ class CandidateReviewPort:
         with self._lock:
             return copy.deepcopy(self._public)
 
+    def observe_resolved(self, candidate: Mapping[str, Any]) -> dict[str, Any]:
+        """Adopt a verified external decision, never impersonating its reviewer."""
+        from tools.data_factory.candidate_admission import validate_candidate_admission
+        with self._lock:
+            candidate = validate_candidate_admission(candidate)
+            if self._pending is None or any(
+                candidate[key] != self._pending[bound]
+                for key, bound in (
+                    ("run_id", "run_id"), ("checklist_id", "checklist_id"),
+                    ("review_context_digest", "review_context_digest"),
+                )
+            ) or candidate["operational_gate"] != "PASS" or candidate["semantic_status"] == "PENDING":
+                raise ContractError("CANDIDATE_REVIEW_RESULT")
+            self._resolved = {
+                "review_binding_digest": self._pending["review_binding_digest"],
+                "run_id": candidate["run_id"], "status": candidate["semantic_status"],
+                "reviewed_by": candidate["reviewed_by"],
+                "reviewed_at": candidate["reviewed_at"], "training_authorized": False,
+            }
+            self._public.update(self._resolved)
+            return copy.deepcopy(self._resolved)
+
     def resolve_deferred(self, payload: dict[str, Any], _view=None) -> dict[str, Any]:
         """Resolve the durable CAS but retain it until its ledger projection lands."""
         with self._lock:

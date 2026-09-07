@@ -1727,6 +1727,45 @@ def bind_candidate_episode_state(ledger_reference, candidate_path):
     return reference
 
 
+def read_candidate_episode_state(ledger_reference, candidate_path, *, expected_file_digest=None):
+    """Observe an already durable review without repairing or writing artifacts."""
+    paths = [Path(ledger_reference[key]) for key in ("path", "state_path")]
+    paths.append(Path(candidate_path))
+    if (
+        [path.name for path in paths] != [
+            "episode_ledger.json", "episode_ledger_state.json", "candidate_admission.json",
+        ]
+        or any(path.is_symlink() or not path.is_file() for path in paths)
+        or len({path.resolve().parent for path in paths}) != 1
+    ):
+        raise ContractError("EPISODE_LEDGER_REFERENCE")
+    candidate = validate_candidate_admission(load_json_strict(paths[2]))
+    # An unchanged pending offer needs only its small canonical candidate read.
+    # Full ledger/state validation is required before adopting a new decision.
+    if candidate["semantic_status"] == "PENDING" and canonical_digest(candidate) == expected_file_digest:
+        return {"candidate": candidate, "ledger_reference": copy.deepcopy(dict(ledger_reference))}
+    ledger = validate_episode_ledger(load_json_strict(paths[0]))
+    if ledger["ledger_digest"] != ledger_reference.get("ledger_digest"):
+        raise ContractError("EPISODE_LEDGER_REFERENCE")
+    state = validate_episode_state(load_json_strict(paths[1]), ledger=ledger)
+    if (
+        state["candidate"] is None
+        or state["candidate"]["artifact_path"] != str(paths[2].resolve())
+        or state["candidate"]["artifact_digest"] != canonical_digest(candidate)
+        or state["review"]["semantic_status"] != candidate["semantic_status"]
+    ):
+        raise ContractError("EPISODE_REVIEW_BINDING")
+    reference = copy.deepcopy(dict(ledger_reference))
+    reference.update(
+        state_digest=state["state_digest"],
+        review_status=state["review"]["semantic_status"],
+        retention_state=state["retention"]["retention_state"],
+        reclaim_state=state["retention"]["reclaim_state"],
+        training_status=state["review"]["training_status"],
+    )
+    return {"candidate": candidate, "ledger_reference": reference}
+
+
 def review_candidate_admission(
     path, *, expected_file_digest, expected_review_context_digest, checklist_id,
     semantic_status, reviewed_by, reason=None, clock=lambda: datetime.now(timezone.utc),

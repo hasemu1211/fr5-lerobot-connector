@@ -138,6 +138,22 @@ The Collection application SHALL retain the preceding campaign's server-owned st
 - **THEN** the Web surface reads the canonical choice result without automatically repeating the command; automation can read that same result
 - **AND** duplicate or conflicting delivery cannot create another campaign or effect, changed stored evidence is revalidated before choice, and a failed recovery read leaves actions unavailable with explicit refresh available.
 
+### Requirement: Observe canonical reviews across supported interfaces
+
+The existing Collection review projection SHALL observe a canonical episode review
+completed through another supported interface without issuing another decision.
+It SHALL preserve the recorded reviewer and bind the result to the exact candidate,
+immutable ledger and durable state. An unavailable or inconsistent observation
+SHALL disable that review action without discarding unrelated execution facts or
+changing physical or training authority. Observation SHALL NOT repair artifacts.
+
+#### Scenario: A CLI review finishes while the Collection screen remains open
+
+- **WHEN** the native review command durably resolves a queued candidate
+- **THEN** a fresh view adopts its validated result and advances to the next pending candidate without a decision POST
+- **AND** an old review intent cannot overwrite that decision or change its reviewer
+- **AND** unchanged pending candidates do not trigger repeated full ledger validation.
+
 ### Requirement: Preserve execution awareness during Collection connection recovery
 
 The Collection Web surface SHALL retain its last validated execution facts and current screen when state retrieval fails, clearly label them as stale, and state that current robot motion or stop is unknown. A failed browser request SHALL NOT imply that the lifecycle owner stopped, rolled back or remains healthy. The current constraint is the existing loopback state/intent transport; this behavior grants no offline command authority and changes no physical or approval gates. The next consumer is the existing lifecycle owner, whose fresh canonical view and exact intent CAS remain authoritative.

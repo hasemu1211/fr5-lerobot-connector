@@ -960,6 +960,7 @@ class OperatorConsole:
         candidate_state_bind_call: Callable[
             [Mapping[str, Any], str | Path], Mapping[str, Any]
         ] | None = None,
+        candidate_state_observe_call: Callable | None = None,
         terminal_response_call: Callable[[], Mapping[str, Any] | None] | None = None,
         gripper_setup_request: Mapping[str, Any] | None = None,
         gripper_setup_resolution_call: Callable[[Mapping[str, Any]], Mapping[str, Any]] | None = None,
@@ -1033,6 +1034,7 @@ class OperatorConsole:
         self.candidate_state_bind_call = (
             candidate_state_bind_call or run_job.bind_candidate_episode_state
         )
+        self.candidate_state_observe_call = candidate_state_observe_call
         self._lock = threading.RLock()
         self._prepared = threading.Event()
         self._thread = None
@@ -1404,12 +1406,48 @@ class OperatorConsole:
             return ["review_candidate"]
         return []
 
+    def _observe_candidate_reviews(self) -> str | None:
+        if self.candidate_state_observe_call is None:
+            return None
+        while self._active_candidate_review is not None:
+            item = self._active_candidate_review
+            try:
+                observed = self.candidate_state_observe_call(
+                    item["ledger_reference"], item["candidate_path"],
+                    expected_file_digest=item["expected_file_digest"],
+                )
+                candidate, reference = observed["candidate"], observed["ledger_reference"]
+                if candidate["semantic_status"] == "PENDING":
+                    return None
+                matches = [entry for entry in self._episode_history
+                           if entry.get("intent_binding", {}).get("run_id") == item["run_id"]]
+                if (len(matches) != 1 or reference["training_status"] != "NOT_AUTHORIZED"
+                        or reference["retention_state"] != "PRESERVE"
+                        or reference["review_status"] != candidate["semantic_status"]):
+                    raise ContractError("OPERATOR_CONSOLE_CANDIDATE_STATE")
+                resolved = self.candidate_review_port.observe_resolved(candidate)
+                history = matches[0]
+                history["episode_ledger"] = copy.deepcopy(reference)
+                history["human_semantic"] = resolved["status"]
+                history["result_digest"] = canonical_digest({
+                    key: value for key, value in history.items() if key != "result_digest"
+                })
+                self.candidate_review_port.acknowledge(resolved["review_binding_digest"])
+                self._active_candidate_review = None
+                self._offer_next_candidate_review()
+            except (ContractError, OSError, KeyError, TypeError, ValueError):
+                return "CANDIDATE_REVIEW_OBSERVATION_UNAVAILABLE"
+        return None
+
     def projection(self) -> dict[str, Any]:
         with self._lock:
+            review_error = self._observe_candidate_reviews()
             base = self._base_projection()
             pending = self._pending_plan()
             checkpoint = self._checkpoint_projection()
             candidate = None if self.candidate_review_port is None else self.candidate_review_port.projection()
+            if candidate is not None and review_error is not None:
+                candidate.update(status="UNAVAILABLE", reason_code=review_error)
             if candidate is not None and self._active_candidate_review is not None:
                 candidate.update({
                     "episode_number": self._active_candidate_review["episode_number"],

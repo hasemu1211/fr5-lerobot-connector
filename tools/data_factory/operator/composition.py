@@ -3240,6 +3240,7 @@ def build_physical_operator_console(
         campaign_operator_factory=operator_factory, episode_call=episode,
         projection_call=projection, test_only_paths=paths_text,
         terminal_response_call=lambda: holder.get("last_live_response"),
+        candidate_state_observe_call=run_job.read_candidate_episode_state,
         candidate_review_port=CandidateReviewPort(
             operator_label=operator_label,
             review_call=lambda path, **kwargs: run_job.review_candidate_admission(

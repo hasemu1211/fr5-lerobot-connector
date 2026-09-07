@@ -272,7 +272,7 @@ function validateView(value) {
   if (view.candidate_review !== undefined && view.candidate_review !== null) {
     assertObject(view.candidate_review, "CANDIDATE_REVIEW_INVALID");
     if (!DIGEST_PATTERN.test(view.candidate_review.review_binding_digest)
-        || !["PENDING", "PASS", "FAIL", "UNCERTAIN"].includes(view.candidate_review.status)
+        || !["PENDING", "PASS", "FAIL", "UNCERTAIN", "UNAVAILABLE"].includes(view.candidate_review.status)
         || !Array.isArray(view.candidate_review.choices) || !view.candidate_review.choices.every((choice) => ["PASS", "FAIL", "UNCERTAIN"].includes(choice))
         || view.candidate_review.episode_number !== undefined && (!Number.isInteger(view.candidate_review.episode_number) || view.candidate_review.episode_number < 1)
         || view.candidate_review.queue_remaining !== undefined && (!Number.isInteger(view.candidate_review.queue_remaining) || view.candidate_review.queue_remaining < 1)) throw new TypeError("CANDIDATE_REVIEW_INVALID");
@@ -1620,6 +1620,11 @@ function renderResults(view) {
     return;
   }
   const pending = review.status === "PENDING" && canIntent("review_candidate");
+  if (review.status === "UNAVAILABLE") {
+    delete reviewQueue.dataset.reviewRenderKey;
+    reviewQueue.innerHTML = `<div class="notice"><strong>분류 상태를 확인할 수 없습니다</strong><span>저장된 검토 결과를 다시 확인할 때까지 분류 요청을 보내지 않습니다.</span></div>`;
+    return;
+  }
   const reasons = Array.isArray(review.reasons) ? review.reasons : [];
   const pose = review.coverage_condition;
   const context = [

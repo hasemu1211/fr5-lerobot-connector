@@ -4873,6 +4873,54 @@ feedback:
             self.assertEqual(after["available_ops"], [])
             self.assertTrue(all(value == 0 for value in harness.forbidden.values()))
 
+    def test_external_review_refresh_preserves_actor_and_never_reissues_decision(self):
+        with tempfile.TemporaryDirectory() as root:
+            run_id = "external-parent"
+            reference = {"path": str(Path(root) / "episode_ledger.json"),
+                         "state_path": str(Path(root) / "episode_ledger_state.json"),
+                         "technical_status": "PASS", "review_status": "PENDING",
+                         "retention_state": "PRESERVE", "training_status": "NOT_AUTHORIZED"}
+            candidate = {
+                "schema_version": "data_factory.candidate_admission.v1", "run_id": run_id,
+                "operational_gate": "PASS", "operational_source": "HIL_PROXY",
+                "checklist_id": "pickup-v2", "review_context_digest": canonical_digest("context"),
+                "semantic_status": "PASS", "reviewed_by": "external-reviewer",
+                "reviewed_at": "2026-08-26T03:00:00Z", "reason": None,
+            }
+            offer = {"candidate_path": str(Path(root) / "candidate_admission.json"),
+                     "run_id": run_id, "expected_file_digest": canonical_digest("pending"),
+                     "expected_review_context_digest": candidate["review_context_digest"],
+                     "checklist_id": "pickup-v2", "ledger_reference": reference}
+            review = mock.Mock(side_effect=AssertionError("duplicate review"))
+            port = CandidateReviewPort(operator_label="local-operator", review_call=review)
+            harness = Harness(root, terminal_response={
+                "ok": False, "state": "BLOCKED", "code": "ROS_GRIPPER_SETTINGS_UNVERIFIED",
+                "data": {"technical_validator": {"status": "PASS"},
+                         "episode_ledger": reference, "candidate_review_offer": offer},
+            })
+            console = harness.console(candidate_review_port=port, campaign_approval_once=True)
+            self.addCleanup(console.close)
+            console._active_intent_projection = {"run_id": run_id, "coverage_condition": {"place_id": "PLACE_A"}}
+            console._publish_outcome({"ok": False, "campaign": {"state": "BLOCKED"}})
+            stale = console.projection()["candidate_review"]
+            observer = mock.Mock(side_effect=ContractError("DAMAGED_STATE"))
+            console.candidate_state_observe_call = observer
+            unavailable = console.projection()
+            self.assertEqual(unavailable["candidate_review"]["status"], "UNAVAILABLE")
+            self.assertNotIn("review_candidate", unavailable["available_ops"])
+            observer.side_effect = None
+            observer.return_value = {"candidate": candidate, "ledger_reference": {**reference, "review_status": "PASS"}}
+            observed = console.projection()
+            self.assertEqual(observed["candidate_review"]["status"], "PASS")
+            self.assertEqual(observed["candidate_review"]["reviewed_by"], "external-reviewer")
+            self.assertEqual(observed["episode_history"][0]["human_semantic"], "PASS")
+            self.assertEqual(observed["runtime"]["workflow_state"], "BLOCKED")
+            self.assertEqual(observed["available_ops"], [])
+            with self.assertRaises(ContractError):
+                console.review_candidate({"review_binding_digest": stale["review_binding_digest"], "choice": "PASS", "reason": None})
+            review.assert_not_called()
+            self.assertTrue(all(value == 0 for value in harness.forbidden.values()))
+
     def test_three_episode_reviews_queue_without_blocking_campaign_and_preserve_authority(self):
         with tempfile.TemporaryDirectory() as root:
             root_path = Path(root).resolve()
