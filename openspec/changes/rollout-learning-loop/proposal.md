@@ -354,3 +354,31 @@ The shared `portfolio-proof-loop` requirements remain the canonical source for
 native safety ownership, authority and evidence lineage. Root retains shared
 integration/resource assignment; these CPU results neither require new data as a
 presumed fix nor establish task effect or data utility.
+
+## Preserve the configured mixed sampling contract
+
+A single seven-joint JTC is not a faithful drop-in synchronization fix. The
+[installed-version sampler](https://github.com/ros-controls/ros2_controllers/blob/4.40.1/joint_trajectory_controller/src/trajectory.cpp)
+uses one interpolation method per controller: NONE selects the next waypoint,
+whereas position-only spline interpolates arm positions. Uniform NONE changes
+the arm command stream; uniform spline invents intermediate gripper references
+that the FR5 raw deadband can enqueue. Native serializer/sampler CPU acceptance
+therefore retains mixed arm/gripper semantics as the next implementation path.
+
+The same sampler exposes a narrower start prerequisite. Before a future header,
+NONE emits the controller's state-before-trajectory. With prior held reference
+0.021 m and feedback 0.02079 m, feedback initialization can enqueue an unintended
+pre-start command. Modeling JTC's existing desired-state initialization removes
+that particular command and preserves the subsequent raw gripper knots, including
+the existing immediate constant staged-release goals. This does not establish
+actual last-command identity or authorize a controller setting change. Equal
+scaling plus a future header still retains phase skew when first sampling occurs
+on different paused cycles. The shared native owner must establish both initial
+command-reference identity and coherent first-sample/time consumption; changing
+interpolation or silently substituting model points is not a solution.
+
+The runnable acceptance is
+`tests.data_factory.rollout.test_finite_plan.FinitePlanTest.test_native_single_clock_interpolation_cannot_replace_mixed_reference_contract`.
+It links the installed sampler without ROS initialization. Its clock scheduling,
+initial state and completion assumptions are synthetic; no command-stream result
+establishes physical velocity, executed holds or learned task success.

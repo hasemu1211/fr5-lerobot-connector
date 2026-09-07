@@ -382,3 +382,24 @@ native safety ownership and evidence lineage; they introduce no operator gate.
 They apply to the supported finite held-target mode. They do not qualify serial
 execution of arbitrary model references as preserving original 30 Hz timing,
 nor supply controller-start coherence or staged-release continuous consumption.
+
+### Requirement: Continuous-reference compatibility includes sampled commands
+
+Any future continuous-reference consumer SHALL preserve the explicitly bound
+arm and gripper interpolation semantics in addition to the original full model
+knots, units and times. Serialization of identical waypoints SHALL NOT establish
+equivalence between one uniform-interpolation controller and the configured mixed
+arm/gripper controllers. Start compatibility SHALL account for the controller's
+pre-trajectory command reference and first-sample time, including a pause before
+the common future start. These are acceptance conditions for the still-unsupported
+consumer, not authorization to modify controller configuration or live commands.
+
+#### Scenario: Feedback initialization changes a held command before launch
+
+- **WHEN** fresh feedback differs from the prior held reference by more than the
+  native raw-reference enqueue deadband before a future trajectory start
+- **THEN** start compatibility cannot be inferred from fresh feedback alone
+- **AND** an initialization correction must preserve subsequent original model
+  references and the explicitly planned staged-release targets and holds
+- **AND** sampler-level compatibility does not prove native stage completion,
+  synchronized physical sampling or task effect

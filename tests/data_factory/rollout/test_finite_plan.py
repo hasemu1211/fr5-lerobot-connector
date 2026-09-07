@@ -551,6 +551,90 @@ class FinitePlanTest(unittest.TestCase):
                 self.assertEqual(len(sent), 2)
                 handles[1].cancel_goal_async.assert_not_called()
 
+    def test_native_single_clock_interpolation_cannot_replace_mixed_reference_contract(self):
+        import pathlib
+        import subprocess
+        import tempfile
+        job, executor, transport, _, _, _, _, _ = self.make_held_job(initial_feedback=.02079)
+        p = copy.deepcopy(executor.runs["run"]["plan"]["learned_proposal"])
+        p.update(schema_version="data_factory.finite_learned_proposal.v1",
+                 actions=[[.006 * i] * 6 + [.021 - .00011 * i] for i in range(1, 4)])
+        p = redigest(p)
+        # Actual native proposal validation and serializer, including unmodified
+        # original 7D rows/timestamps, feed the installed C++ sampler.
+        raw = transport.build_learned_trajectory(p)
+        trajectory = transport._deserialize_message(raw, transport._RobotTrajectory).joint_trajectory
+        self.assertEqual([list(point.positions) for point in trajectory.points], [p["initial_state"], *p["actions"]])
+        lines = [str(len(trajectory.points))]
+        for point in trajectory.points:
+            ns = point.time_from_start.sec * 10**9 + point.time_from_start.nanosec
+            lines.append(" ".join(map(str, [ns, *point.positions])))
+        data = "\n".join(lines) + "\n"
+        with tempfile.TemporaryDirectory() as directory:
+            binary = pathlib.Path(directory) / "sampling"
+            ros = pathlib.Path("/opt/ros/jazzy")
+            fixture = pathlib.Path(__file__).with_name("native_sampling_fixture.cpp")
+            command = ["g++", "-std=c++17", *["-I" + str(x) for x in (ros / "include").iterdir() if x.is_dir()],
+                       str(fixture), "-L" + str(ros / "lib"), "-Wl,-rpath," + str(ros / "lib"),
+                       "-ljoint_trajectory_controller", "-lrclcpp", "-lrcutils", "-o", str(binary)]
+            compiled = subprocess.run(command, capture_output=True, text=True)
+            self.assertEqual(compiled.returncode, 0, compiled.stderr)
+            def sample(mode, first_grip=0, pause=0, prior_reference=None, points=data, immediate=False):
+                command = [str(binary), mode, "0", str(first_grip), str(pause)]
+                if prior_reference is not None:
+                    command.append(str(prior_reference))
+                if immediate:
+                    command.append("immediate")
+                result = subprocess.run(command,
+                                        input=points, capture_output=True, text=True)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                return [[float(x) for x in line.split()] for line in result.stdout.splitlines()]
+            mixed, none, spline = [sample(mode) for mode in ("mixed", "none", "spline")]
+            self.assertTrue(all(a[3:9] == b[3:9] for a, b in zip(mixed, spline)))
+            self.assertTrue(all(a[-1] == b[-1] for a, b in zip(mixed, none)))
+            # Finite-difference command rates, NOT measured physical angular speed.
+            arm_rate = lambda rows: max(abs(b[3] - a[3]) / .01 for a, b in zip(rows, rows[1:]))
+            self.assertLess(arm_rate(mixed), .181)
+            self.assertAlmostEqual(arm_rate(none), .6)
+            refs = [p["initial_state"][-1], *[row[-1] for row in p["actions"]]]
+            self.assertTrue(all(row[-1] in refs for row in mixed))
+            self.assertTrue(any(all(abs(row[-1] - value) > 1e-12 for value in refs) for row in spline))
+            # Common future header + equal factor is insufficient if the two
+            # controllers first sample in different cycles while time is paused.
+            staggered = sample("mixed", first_grip=3, pause=6)
+            self.assertAlmostEqual(staggered[10][2] - staggered[10][1], .03)
+            running = sample("mixed", first_grip=3, pause=0)
+            self.assertAlmostEqual(running[10][2] - running[10][1], 0.)
+
+            desired_start = sample("mixed", prior_reference=.021)
+            self.assertEqual(mixed[0][-1], p["initial_state"][-1])
+            self.assertEqual(desired_start[0][-1], .021)
+            self.assertTrue(all(a[-1] == b[-1] for a, b in zip(mixed[20:], desired_start[20:])))
+
+            # Existing staged release uses two immediate, constant endpoint
+            # goals. Its actual serialized target/hold is unchanged by the
+            # prior-reference initialization branch. This is sampling evidence,
+            # not proof that either hardware stage completed or held physically.
+            for target, duration, previous in ((.0126, .5, .01), (.021, 1., .0126)):
+                with self.subTest(release_target=target):
+                    limits = dict(command_duration_s=duration, execution_timeout_s=2.,
+                                  completion_tolerance_m=.000105)
+                    encoded = transport.build_gripper_goal("GRIPPER_OPEN", target, limits)
+                    goal = transport._deserialize_message(encoded, transport._FollowJointTrajectory.Goal)
+                    self.assertEqual(goal.trajectory.header.stamp.sec, 0)
+                    self.assertEqual(goal.trajectory.header.stamp.nanosec, 0)
+                    release = [str(len(goal.trajectory.points))]
+                    for point in goal.trajectory.points:
+                        ns = point.time_from_start.sec * 10**9 + point.time_from_start.nanosec
+                        self.assertEqual(list(point.positions), [target])
+                        # Padding supplies unrelated zero arm coordinates only
+                        # to the fixture; the native gripper sampler remains 1D.
+                        release.append(" ".join(map(str, [ns, *([0.] * 6), *point.positions])))
+                    self.assertEqual(ns / 1e9, duration)
+                    stream = sample("mixed", prior_reference=previous,
+                                    points="\n".join(release) + "\n", immediate=True)
+                    self.assertTrue(all(row[-1] == target for row in stream))
+
     def test_held_float32_profile_reference_is_preserved_without_snapping(self):
         import struct
         job, executor, _, _, _, _, _, _ = self.make_held_job()
