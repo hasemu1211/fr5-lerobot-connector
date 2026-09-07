@@ -106,6 +106,7 @@ class FR5LeRobotRecorder(Node):
         self.alignment_failures = 0
         self.alignment_failure_sources = {"state": 0, "arm_action": 0, "gripper_action": 0, "transport": 0}
         self.alignment_failure_sources.update({f"image.{name}": 0 for name in self.camera_names})
+        self.first_transport_failure = None
         self.writer_error: Exception | None = None
         self._storage_monitor: dict | None = None
         self.ready_logged = False
@@ -279,6 +280,7 @@ class FR5LeRobotRecorder(Node):
         self.alignment_failures = 0
         self.alignment_failure_sources = {"state": 0, "arm_action": 0, "gripper_action": 0, "transport": 0}
         self.alignment_failure_sources.update({f"image.{name}": 0 for name in self.camera_names})
+        self.first_transport_failure = None
         self.writer_error = None
         self.next_target_stamp = None
         self.alignment_tail_target_ros_s = None
@@ -306,6 +308,8 @@ class FR5LeRobotRecorder(Node):
                 "alignment_failure_sources": dict(getattr(
                     self, "alignment_failure_sources", {},
                 )),
+                **({"first_transport_failure": dict(self.first_transport_failure)}
+                   if getattr(self, "first_transport_failure", None) is not None else {}),
                 "observed_monotonic_ns": time.monotonic_ns(),
                 **({"commit_stage_seconds": dict(getattr(self, "commit_stage_seconds", {}))}
                    if getattr(self, "commit_stage_seconds", {}) else {}),
@@ -1415,6 +1419,7 @@ class FR5LeRobotRecorder(Node):
 
     def _record_alignment_failure(
         self, sources, *, sampler_epoch: int | None = None,
+        transport_failure: dict | None = None,
     ) -> None:
         with self.lock:
             if (
@@ -1425,6 +1430,8 @@ class FR5LeRobotRecorder(Node):
             self.alignment_failures += 1
             for source in sources:
                 self.alignment_failure_sources[source] += 1
+            if transport_failure is not None and self.first_transport_failure is None:
+                self.first_transport_failure = dict(transport_failure)
 
     def _aligned_sample(
         self, target_stamp: float, *, sampler_epoch: int | None = None,
@@ -1435,6 +1442,7 @@ class FR5LeRobotRecorder(Node):
                 and sampler_epoch != getattr(self, "sampler_epoch", 0)
             ):
                 return None
+            sample_epoch = getattr(self, "sampler_epoch", 0)
             state = interpolate_vector(self.joint_states, target_stamp, self.args.state_max_age)
             arm = interpolate_vector(self.arm_actions, target_stamp, self.args.action_sync_slop)
             gripper = latest_sample(self.gripper_actions, target_stamp, self.args.action_max_age)
@@ -1456,9 +1464,18 @@ class FR5LeRobotRecorder(Node):
         transport_ages = {
             camera: sample[3] - sample[2] for camera, sample in camera_samples.items()
         }
-        if any(age < 0 or age > self.args.image_max_age for age in transport_ages.values()):
-            self._record_alignment_failure(("transport",), sampler_epoch=sampler_epoch)
-            return None
+        for camera, age in transport_ages.items():
+            if age < 0 or age > self.args.image_max_age:
+                # Retain one failing camera at the first rejected target, in
+                # configured camera order. The epoch check and capture are atomic.
+                self._record_alignment_failure(("transport",), sampler_epoch=sample_epoch, transport_failure={
+                    "camera": camera, "target_ros_s": target_stamp,
+                    "image_raw_ros_s": camera_samples[camera][2],
+                    "image_received_ros_s": camera_samples[camera][3],
+                    "transport_age_s": age, "image_max_age_s": self.args.image_max_age,
+                    "sampler_epoch": sample_epoch,
+                })
+                return None
         images = tuple(camera_samples[camera][1] for camera in self.camera_names)
         action = np.r_[arm_value, gripper_value].astype(np.float32)
         image_errors = {

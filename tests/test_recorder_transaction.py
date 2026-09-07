@@ -1382,6 +1382,68 @@ class RecorderTransactionTest(unittest.TestCase):
             self.assertEqual(recorder.alignment_failures, 0)
             self.assertTrue(recorder.writer_queue.empty())
 
+    def test_first_rejected_transport_sample_survives_readiness_status(self):
+        from tools.data_factory.one_job import OneJob, TEST_ONLY_READINESS_CONTRACT
+
+        with tempfile.TemporaryDirectory() as directory:
+            recorder = self.make_recorder(directory)
+            self.assertTrue(recorder.begin_episode(self.transaction(directory))["ok"])
+            recorder.joint_states = [(0., [0.] * 6)]
+            recorder.arm_actions = [(0., [0.] * 6)]
+            recorder.gripper_actions = [(0., 0.02)]
+            recorder.camera_frames = {name: [(0., None, 0., .1)] for name in recorder.camera_names}
+            self.assertIsNotNone(recorder._aligned_sample(0.))
+            self.assertNotIn("first_transport_failure", recorder.episode_status()["metrics"])
+            recorder.camera_frames["side"] = [(0., None, 0., recorder.args.image_max_age)]
+            self.assertIsNotNone(recorder._aligned_sample(0.))
+            recorder.camera_frames["side"] = [(0., None, 0., .31)]
+            self.assertIsNone(recorder._aligned_sample(0.))
+            expected = {"camera": "side", "target_ros_s": 0., "image_raw_ros_s": 0.,
+                        "image_received_ros_s": .31, "transport_age_s": .31,
+                        "image_max_age_s": .30, "sampler_epoch": recorder.sampler_epoch}
+            status = recorder.episode_status()
+            self.assertEqual(status["metrics"]["first_transport_failure"], expected)
+            forbidden = mock.Mock(side_effect=AssertionError("no hardware callbacks"))
+            owner = OneJob(forbidden, forbidden, readiness_contract=TEST_ONLY_READINESS_CONTRACT)
+            owner._capture_readiness_failure("RECORDER_READINESS_ALIGNMENT", status)
+            self.assertEqual(owner.readiness_failure_evidence["recorder_status"]["metrics"]["first_transport_failure"], expected)
+            status["metrics"]["first_transport_failure"]["camera"] = "caller-mutation"
+            recorder.camera_frames["up"] = [(0., None, 0., -.01)]
+            self.assertIsNone(recorder._aligned_sample(0.))
+            metrics = recorder.episode_status()["metrics"]
+            self.assertEqual(metrics["first_transport_failure"], expected)
+            self.assertEqual(metrics["alignment_failure_sources"]["transport"], 2)
+            self.assertEqual(metrics["alignment_failures"], 2)
+            self.assertEqual((metrics["rows"], metrics["writer_queue_drops"], recorder.dataset.saves), (0, 0, 0))
+            forbidden.assert_not_called()
+
+    def test_transport_evidence_resets_and_cannot_cross_sampler_epochs(self):
+        with tempfile.TemporaryDirectory() as directory:
+            recorder = self.make_recorder(directory)
+            self.assertTrue(recorder.begin_episode(self.transaction(directory))["ok"])
+            recorder.joint_states = [(0., [0.] * 6)]
+            recorder.arm_actions = [(0., [0.] * 6)]
+            recorder.gripper_actions = [(0., 0.02)]
+            recorder.camera_frames = {name: [(0., None, 0., -.01)] for name in recorder.camera_names}
+            self.assertIsNone(recorder._aligned_sample(0.))
+            old_epoch = recorder.sampler_epoch
+            first = recorder.episode_status()["metrics"]["first_transport_failure"]
+            self.assertEqual((first["camera"], first["transport_age_s"]), ("up", -.01))
+            recorder._reset_episode()
+            self.assertIsNone(recorder._aligned_sample(0., sampler_epoch=old_epoch))
+            self.assertNotIn("first_transport_failure", recorder.episode_status()["metrics"])
+            record_failure = recorder._record_alignment_failure
+            def reset_before_record(*args, **kwargs):
+                with recorder.lock:
+                    recorder._reset_episode()
+                record_failure(*args, **kwargs)
+            with mock.patch.object(recorder, "_record_alignment_failure", side_effect=reset_before_record):
+                self.assertIsNone(recorder._aligned_sample(0.))
+            self.assertEqual(recorder.alignment_failures, 0)
+            self.assertNotIn("first_transport_failure", recorder.episode_status()["metrics"])
+            self.assertIsNone(recorder._aligned_sample(0., sampler_epoch=recorder.sampler_epoch))
+            self.assertEqual(recorder.episode_status()["metrics"]["first_transport_failure"]["sampler_epoch"], recorder.sampler_epoch)
+
     def test_readiness_prefix_defers_source_frame_reuse_to_episode_quality(self):
         with tempfile.TemporaryDirectory() as directory:
             recorder = self.make_recorder(directory)
