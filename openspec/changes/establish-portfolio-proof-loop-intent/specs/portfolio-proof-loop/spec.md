@@ -47,6 +47,23 @@ Curation은 품질·분포·선별 근거를 다음 수집 조건으로 바꾸�
 - **AND** 추천 출력만으로 연결 완료를 선언하지 않고 실제 소비 및 재전달·입력 변경·실패 경로를 검증한다
 - **AND** 연구는 정책을 선택·개선하거나 새 불확실성을 해결할 때 수행하며, 지원 범위의 정상 반복 호출을 대신하지 않는다
 
+### Requirement: Collection cohesion and reusable execution remain distinct
+Collection 전용 계획 작성·campaign 운영 기능은 책임을 식별할 수 있는 `collection/` 패키지 안에 응집되어야 한다(SHALL). 실제 VLA 동작 실행과 rollout 녹화에도 사용하는 실행·기록 기능은 Collection 밖의 독립된 공용 모듈에 있어야 하며(SHALL), 다른 소비자가 Collection UI나 campaign 상태를 구성해야만 재사용할 수 있어서는 안 된다(MUST NOT). 공용화는 기존 motion·recorder·scene·cell·admission owner를 유지하고, 작업별 시연 생성과 학습 정책 실행의 입력·종료·기록 의미를 구분해야 한다(SHALL). Curator의 추천 정책과 여러 도메인을 제공하는 사용자 인터페이스를 Collection 전용 책임으로 흡수해서는 안 된다(MUST NOT).
+
+#### Scenario: Collection-specific behavior changes
+- **WHEN** 수집 계획 작성이나 campaign 운영 기능을 변경한다
+- **THEN** Collection 전용 구현과 외부 계약은 해당 패키지에서 찾고 검증할 수 있으며, 공용 실행·기록 구현을 복제하거나 rollout 전용 정책을 함께 수정하지 않는다
+
+#### Scenario: Learned rollout reuses physical execution and recording
+- **WHEN** 학습 정책 실행 또는 rollout 녹화가 공용 기능을 소비한다
+- **THEN** Collection 전용 UI·draft·campaign 없이 해당 계약을 직접 사용하고, 기존 single motion owner와 기록 lifecycle·실행 권한·원본 provenance를 보존한다
+- **AND** 실제 소비자 연결과 실패·중단·재시작 경로를 검증하며, 폴더 이동이나 사용되지 않는 facade만으로 재사용 완료를 주장하지 않는다
+
+#### Scenario: Migration proceeds without interrupting acquisition
+- **WHEN** 현재 구조를 단계적으로 이전한다
+- **THEN** 활성 수집 프로세스와 원본 데이터를 건드리지 않는 변경·통합 경계를 사용하고, 기존 실행 진입점·저장 경로·schema·digest 의미의 호환성을 검증한다
+- **AND** 작은 계약 추출은 중간 결과일 수 있으나 Collection 응집과 공용 실행·기록 분리의 전체 완료를 대신하지 않는다
+
 ### Requirement: Native owners enforce safety without duplicate operator gates
 실행 안전과 데이터·승인의 유효성 검사는 해당 기존 제품 owner가 자신의 소비 경계에서 책임져야 한다(SHALL). Coordinator와 다른 lane은 적용 대상·입력·버전·유효 범위가 일치하는 canonical 검사 결과를 재사용하고, 동일한 사실을 사람이나 AI가 다시 확인하는 절차·확인 문구·별도 safety owner를 추가해서는 안 된다(MUST NOT). 재검증은 변경된 입력·실행 조건, 기존 계약의 freshness 요구 또는 구체적인 실패 근거에 필요한 범위로 제한해야 한다(SHALL). 변경된 코드의 필요한 회귀와 실제 실행 시 필요한 fresh 검사를 생략하거나 기존 gate를 우회한다는 의미가 아니다.
 
