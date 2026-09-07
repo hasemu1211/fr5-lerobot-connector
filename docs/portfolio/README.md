@@ -24,3 +24,5 @@ python3 docs/portfolio/export_single_file.py .agent-local/portfolio/FR5-Portfoli
 본문은 기능, 해결하려는 문제와 설계 이유, 얻으려는 이점을 먼저 전달한다. 세부 알고리즘과 실행 조건은 그 설명을 뒷받침하는 위치에 둔다. 기대한 효과와 실제 측정 결과를 구분하며, 각 주제에 같은 카드·도해·접기 형식을 강제하지 않는다. 비교 그림은 바뀌는 조건과 고정한 조건을 명시하고, 설명용 표현을 실제 모듈 이름으로 제시하지 않는다. 탐색 검증 통과와 시각적 완성도는 별도로 판단한다.
 
 전체 아키텍처에서 데이터 피드백과 정책 피드백을 모두 드러낸다. 미완성 연결은 목표 구조에 표시하고 구현·실행 결과와 구분한다. 구현이 덜 됐다는 이유로 폐루프 목적을 선형 수집·학습 파이프라인으로 축소하지 않는다. Acquisition Strategy와 Policy Evaluation은 목표 구조의 기능 책임 이름이며, 같은 이름의 독립 패키지가 존재한다는 뜻은 아니다. 기존 모듈 도해는 수집·학습 구현의 세부 설명으로 보존한다.
+
+획득 추천의 소유권과 기존 실행 owner의 검사 책임은 [공동 요구사항](../../openspec/changes/establish-portfolio-proof-loop-intent/specs/portfolio-proof-loop/spec.md)을 따른다. 그림의 Acquisition Strategy는 Curator의 추천 책임으로 표시한다.

@@ -1,4 +1,4 @@
-<!doctype html><html lang="ko"><meta charset="utf-8"><title>실제 수집 기록 — FR5</title><link rel="stylesheet" href="../site.css"><main class="source-page"><a href="../collection.html#recorded-example">← 실제 수집 기록으로 돌아가기</a><h1>Episode 27의 수집·평가 입력</h1><p class="note">보존된 원본의 관련 필드를 발췌했다. SHA-256은 발췌 전 원본 파일을 식별한다. 수집 당시의 판정과 이후의 학습 입력 참조를 구분한다.</p><section><h2>result.json</h2><p class="locator">outputs/data_factory/runs/collection-production-20260904T035141Z-campaign-0001-run-1-e23/result.json<br>sha256:dd4ed17b405e72330239780b83bb58545fa333085acbd331d446ac79395f6692</p><pre>{
+<!doctype html><html lang="ko"><meta charset="utf-8"><title>실제 수집 기록 — 데이터 엔진</title><link rel="stylesheet" href="../site.css"><main class="source-page"><a href="../collection.html#recorded-example">← 실제 수집 기록으로 돌아가기</a><h1>Episode 27의 수집·평가 입력</h1><p class="note">보존된 원본의 관련 필드를 발췌했다. SHA-256은 발췌 전 원본 파일을 식별한다. 수집 당시의 판정과 이후의 학습 입력 참조를 구분한다.</p><section><h2>result.json</h2><p class="locator">outputs/data_factory/runs/collection-production-20260904T035141Z-campaign-0001-run-1-e23/result.json<br>sha256:dd4ed17b405e72330239780b83bb58545fa333085acbd331d446ac79395f6692</p><pre>{
   &quot;detail&quot;: &quot;&quot;,
   &quot;episode_index&quot;: 27,
   &quot;reason_code&quot;: &quot;COMMITTED&quot;,
@@ -453,4 +453,39 @@
     &quot;monotonic_time_ns&quot;: 258054370270135,
     &quot;plan_digest&quot;: &quot;sha256:11599b3602e3caede3956dc1f4b877e8a352f2bf444b34c67d8aeb94240b6369&quot;
   }
-]</pre></section></main></html>
+]</pre></section><section id="playback"><h2>집기 시연의 재생본</h2><p>같은 시연의 두 원본 영상을 좌우로 연결해 하나의 재생 시계로 표시한다. 원래 해상도와 프레임 수·속도를 유지하며 잘라내거나 시간을 줄이지 않았다. 전달 용량을 줄이기 위해 H.264로 다시 압축했으므로 재생본의 픽셀은 원본과 동일하지 않다. 정지 관측·수치 비교는 기존 원본 참조를 유지한다.</p><pre>{
+  &quot;source_videos&quot;: [
+    {
+      &quot;camera&quot;: &quot;up&quot;,
+      &quot;source&quot;: &quot;datasets/fr5_episodes/fr5260903/videos/observation.images.up/chunk-000/file-027.mp4&quot;,
+      &quot;sha256&quot;: &quot;85b2472f25ef39b7697108d03d5594fae4f030c68899cea081b002a1be5e3a57&quot;,
+      &quot;frames&quot;: 633,
+      &quot;fps&quot;: 30,
+      &quot;duration_seconds&quot;: 21.1
+    },
+    {
+      &quot;camera&quot;: &quot;wrist&quot;,
+      &quot;source&quot;: &quot;datasets/fr5_episodes/fr5260903/videos/observation.images.wrist/chunk-000/file-027.mp4&quot;,
+      &quot;sha256&quot;: &quot;f59228475677aa4a7d65db2821a0101faf83b6aa792becdb237df4efc5c99805&quot;,
+      &quot;frames&quot;: 633,
+      &quot;fps&quot;: 30,
+      &quot;duration_seconds&quot;: 21.1
+    }
+  ],
+  &quot;presentation_video&quot;: {
+    &quot;file&quot;: &quot;assets/pickup-recording.mp4&quot;,
+    &quot;sha256&quot;: &quot;f935510fd4c929eaeb821e681944f6df1796d2ff84a7317f6d2ec96c7ddb5194&quot;,
+    &quot;bytes&quot;: 3470118,
+    &quot;frames&quot;: 633,
+    &quot;fps&quot;: 30,
+    &quot;duration_seconds&quot;: 21.1,
+    &quot;width&quot;: 1280,
+    &quot;height&quot;: 480,
+    &quot;transform&quot;: &quot;hstack: UP left, WRIST right; H.264 CRF22; original speed; no cropping or temporal trimming&quot;
+  },
+  &quot;poster&quot;: {
+    &quot;file&quot;: &quot;assets/pickup-recording-poster.jpg&quot;,
+    &quot;sha256&quot;: &quot;b768019db595b1f54c5e8f6fdb5084a3d7b02bd269813473298cce1facd0c671&quot;,
+    &quot;time_seconds&quot;: 10.533333333333333
+  }
+}</pre></section></main></html>

@@ -70,9 +70,10 @@ function show(url) {
   current=url;const token=++epoch;
   const doc=new DOMParser().parseFromString(text.get(key(url)), 'text/html');
   const base=doc.createElement('base');base.href=url.href;doc.head.prepend(base);
-  for (const el of doc.querySelectorAll('link[rel=stylesheet],img[src],video[src],source[src]')) {
-    const attr=el.hasAttribute('href')?'href':'src';
-    el.setAttribute(attr,fr5Asset(new URL(el.getAttribute(attr),url).href));
+  for (const el of doc.querySelectorAll('link[rel=stylesheet],img[src],video[src],video[poster],source[src]')) {
+    for (const attr of ['href','src','poster']) {
+      if (el.hasAttribute(attr)) el.setAttribute(attr,fr5Asset(new URL(el.getAttribute(attr),url).href));
+    }
   }
   // Run the original page scripts in their original order, inside this document.
   const scripts=[];

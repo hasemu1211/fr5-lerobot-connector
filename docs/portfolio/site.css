@@ -121,3 +121,11 @@ header{min-height:100px}.brand{font-size:40px}nav{font-size:14px;gap:34px}
 .strategy-comparison{display:grid;grid-template-columns:1fr 1fr;gap:35px;margin:28px 0}
 .essay .strategy-comparison section{padding:22px 24px;background:#f4f7f9;border-top:2px solid #68808d}
 .strategy-comparison h3{font-size:19px;margin:0 0 12px}.strategy-comparison p{font-size:14px;margin:0}
+
+/* One playback clock keeps both original camera views in temporal correspondence. */
+.recording-video{margin:30px 0 0}.recording-views{display:grid;grid-template-columns:1fr 1fr;gap:0;background:#edf3f5;padding:12px 0;font-size:12px;color:var(--muted)}
+.recording-views span{text-align:center}.recording-views strong{font:900 13px/1.4 'Lato',sans-serif;color:var(--ink);margin-right:14px}
+.recording-video video{display:block;width:100%;height:auto;aspect-ratio:8/3;background:#14212a}
+.recording-video figcaption{display:flex;justify-content:space-between;gap:20px;font-size:12px;color:var(--muted);padding:16px 0;border-bottom:1px solid var(--line)}
+.recorded-example .recorded-connection{margin-top:24px;padding-top:8px;border-top:0}
+.recorded-example .recorded-connection h3{margin-top:0}
