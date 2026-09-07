@@ -1,5 +1,51 @@
 ## 작은 구현과 소비 경계
 
+### 현재 근거로 재계산하는 native acquisition 추천
+
+기존 `recommend_stored_collection` keyword-only API에 선택적 `acquisition`과
+`expected_recommendation_digest`를 추가한다. `acquisition`은 정확히 `catalog`,
+`selection`, `scene_state_path`, `expected_scene_digest`, `object_instance_id`,
+`requested_count`, `normalized_seed`, `repeat`를 받는다. CLI는 같은 입력 문서를
+`--acquisition-input`으로 받으며 출력 경로 생략 시 계산 결과만 반환한다.
+현재 catalog는 호출자 입력이며 연결된 장치의 실시간 증명으로 해석하지 않는다.
+`source_commit`도 검증되지 않은 호출자 구현 label이다.
+
+입력 생략 시 기존 v1의 동일 compiled-authoring 검증을 유지한다. 현재 입력을
+주면 각 immutable run의 ledger/state/candidate/manifest를 기존 validator로
+검증하고 중복 recording을 거부한다. task, robot, endpoint calibration,
+object/grasp digest와 collection profile이 현재 선택과 호환되는 semantic PASS만
+같은 성공 커버리지로 사용한다. 다른 task나 미합격 근거에는 제외 이유를 남기며
+누락된 과거 authoring을 만들지 않는다. DQA가 campaign별 관측 및 호환되는
+성공 조건의 수량을 소유한다. 알려지지 않은 과거 profile ID의 digest label은
+원래 registry ID를 복구했다는 의미가 아니다.
+
+기존 native assisted/cycle sampler가 예산·seed·현재 source로 poses를 만든다.
+pick-place는 N개 전이와 N+1개 pose를 반환한다. 결과 v2는 기존 반환 envelope
+`availability/data_quality_analysis/recommendation/output_path`를 유지하고,
+`data_quality_analysis`에 `campaign_reports`와 `compatible_coverage`를 둔다.
+`recommendation`에는 `selection`, `sampling`, `object_poses`, `conditions`,
+관측/제안 source별 수량, 제외 근거, advisory authority와 `input_snapshot`이 있다.
+snapshot은 현재 context/scene digest·revision, 각 원본 recording과 ledger/state/
+candidate/provenance identity, DQA digest를 결속한다. native 균형 배치를 사용하며
+과거 좌표에 맞춰 seed를 fit하거나 관측되지 않은 조건만 선택한다고 주장하지 않는다.
+
+Collection의 refresh/choose는 현재 입력과 근거로 같은 API를 재호출하고 선택한
+`expected_recommendation_digest`를 비교한 뒤 기존 native authoring/planner에
+조건을 전달한다. changed scene/selection/budget/seed/evidence는 적용 전에 새
+추천을 요구한다. 이 경로는 명시적 ASSISTED 요청이며, Collection은 이후의 direct
+selection·pin·exclusion을 덮어쓰지 않고 비호환 draft 적용을 거부한다. 관련 입력이
+같으면 무관한 view revision만으로 계산을 무효화하지 않는다.
+단순 재출력은 동일 artifact를 재사용하며 충돌은 덮어쓰지 않는다.
+output은 원본 경로와 분리된 새 digest directory에 기존 atomic publisher로 쓴다.
+계산 중 검증된 입력은 동결 유지가 전제이며 publish 이후 freshness는 소비 시
+재검증한다. 카메라·motion·physical scene·execution admission은 Collection 소유다.
+
+추천은 원본 request나 heldout을 재분할하지 않는다. 확장 데이터의 frozen evaluation
+identity는 Learning의 native cohort 계약으로 별도 연결해야 하며, fraction/order 조정은
+그 계약을 대체하지 않는다. 실행 가능한 근거는
+`tests/data_factory/test_collection_acquisition.py`와 기존 추천/selection 테스트다.
+actual Collection의 draft/compile 소비 전에는 end-to-end 완료로 표시하지 않는다.
+
 기존 `export_training_request`에 선택적 `eval_split`과 `expected_eval_episodes`를 함께 전달할 수 있다. 둘을 생략하면 기존 명시적 요청 동작을 유지한다. 함께 주면 기존 `read_metadata`와 `selected_train_eval`을 호출하고, 기대한 평가 episode와 다를 때 파일을 출판하지 않는다. 선별을 자동 보정하거나 원본 순서를 재작성하지 않는다.
 
 native request의 필드는 바꾸지 않는다. 분할 확인 결과는 반환값의 `evaluation_cohort`에 포함한다. 이는 요청 구성 시점의 preview이며 training split이나 admission artifact가 아니다. Learning 소비자는 이 fraction과 cohort를 실제 launch receipt의 분할과 비교해야 한다. 원본을 동결한 상태에서 다음 소비자가 다시 검증하는 기존 계약을 유지한다.

@@ -672,8 +672,9 @@ def _unobserved_selection(source: Mapping[str, Any], report: Mapping[str, Any]) 
 
 
 def derive_collection_recommendation(
-    *, compiled_authoring: Mapping[str, Any],
+    *, compiled_authoring: Mapping[str, Any] | None = None,
     episode_evidence: Sequence[Mapping[str, Any]], source_commit: str,
+    acquisition: Mapping[str, Any] | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     """Measure the retained domain and advise a bounded first coverage pass.
 
@@ -682,6 +683,10 @@ def derive_collection_recommendation(
     """
     from tools.data_factory.campaign_operator import validate_compiled_authoring_evidence
 
+    if acquisition is not None:
+        return _derive_acquisition_recommendation(
+            acquisition=acquisition, episode_evidence=episode_evidence, source_commit=source_commit,
+        )
     source = validate_compiled_authoring_evidence(compiled_authoring)
     manifest, hypothesis = source["manifest"], source["hypothesis"]
     summaries = _episode_summaries(episode_evidence, manifest, normalize=True)
@@ -844,8 +849,19 @@ def validate_collection_recommendation(
     episode_evidence: Sequence[Mapping[str, Any]] | None = None,
     data_quality_analysis: Mapping[str, Any] | None = None,
     rollout_evidence_analysis: Mapping[str, Any] | None = None,
+    acquisition: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Validate a self-digested value, optionally rejoining supplied evidence."""
+    if isinstance(value, Mapping) and value.get("schema_version") == ACQUISITION_SCHEMA:
+        if acquisition is None or episode_evidence is None:
+            raise ContractError("COLLECTION_ACQUISITION_CURRENT_INPUT_REQUIRED")
+        _report, expected = _derive_acquisition_recommendation(
+            acquisition=acquisition, episode_evidence=episode_evidence,
+            source_commit=value.get("input_snapshot", {}).get("source_commit"),
+        )
+        if value != expected:
+            raise ContractError("COLLECTION_ACQUISITION_INPUT_CHANGED")
+        return expected
     recommendation = _exact(value, RECOMMENDATION_FIELDS, "COLLECTION_RECOMMENDATION_FIELDS")
     _self_digest(
         recommendation, "recommendation_digest",
@@ -1076,3 +1092,174 @@ __all__ = [
     "project_campaign_update_intent",
     "validate_collection_recommendation",
 ]
+
+
+ACQUISITION_SCHEMA = "data_factory.collection_recommendation.v2"
+
+
+def _derive_acquisition_recommendation(*, acquisition, episode_evidence, source_commit):
+    """Current-source coverage advice, independent of historical authoring.
+
+    Native ledger/DQA own observations; native samplers own the finite poses.
+    This does not attest device availability, motion qualification or utility.
+    """
+    from collections import Counter
+    from tools.data_factory.collection_seed import derive_domain_seed, validate_campaign_seed
+    from tools.data_factory.operator.catalog import (
+        validate_operator_selection, project_assisted_poses,
+        project_workspace_cycle_poses, resolve_workspace_cycle_selections,
+        project_yaw_sample_bindings, project_state_space_cells,
+    )
+    from tools.data_factory.scene_state import _validate as validate_scene
+
+    required = {"catalog", "selection", "scene_state", "object_instance_id",
+                "requested_count", "normalized_seed", "repeat"}
+    context = _exact(acquisition, required, "COLLECTION_ACQUISITION_INPUT_FIELDS")
+    if (not isinstance(source_commit, str) or len(source_commit) != 40
+            or any(character not in "0123456789abcdef" for character in source_commit)):
+        raise ContractError("COLLECTION_RECOMMENDATION_SOURCE_COMMIT")
+    _identifier(context["object_instance_id"], "COLLECTION_ACQUISITION_SOURCE")
+    catalog = context["catalog"]
+    selected = validate_operator_selection(catalog, context["selection"], require_executable=False)
+    task = selected["task_id"]
+    if task not in {"pickup_e2e", "pick_place"}:
+        raise ContractError("COLLECTION_ACQUISITION_TASK_UNSUPPORTED")
+    count, repeat = context["requested_count"], context["repeat"]
+    if any(type(value) is not int or not 1 <= value <= 100 for value in (count, repeat)):
+        raise ContractError("COLLECTION_ACQUISITION_BUDGET")
+    seed = validate_campaign_seed(context["normalized_seed"])
+    scene = context["scene_state"]
+    if not isinstance(scene, dict):
+        raise ContractError("COLLECTION_ACQUISITION_SCENE")
+    scene = validate_scene(scene, scene.get("robot_system_id"))
+    instance = scene["objects"].get(context["object_instance_id"])
+    if (instance is None or instance["state"] != "ON_SURFACE"
+            or instance["object_profile_id"] != selected["object_id"]
+            or instance["pose"]["place_id"] != selected["workspace_id"]):
+        raise ContractError("COLLECTION_ACQUISITION_SOURCE")
+    source_pose = instance["pose"]
+    cycle = (resolve_workspace_cycle_selections(catalog, selected, count, require_executable=False)
+             if task == "pick_place" else [selected] * count)
+    combinations = {item["combination_digest"]: item for item in catalog["combinations"]}
+    endpoints = {item["workspace_id"]: combinations[item["combination_digest"]] for item in cycle}
+    evidence_rows, reports, compatible, excluded = [], [], [], []
+    groups, profile_ids, seen, seen_refs = {}, {}, set(), set()
+    for evidence in episode_evidence:
+        # Each run has its own immutable manifest. Never synthesize absent
+        # compiled_authoring_evidence or require unrelated campaigns to match.
+        manifest = evidence["artifacts"]["manifest"]
+        summary, identity = _episode_snapshot(evidence, manifest)
+        ledger, state = evidence["ledger"], evidence["state"]
+        recording = (ledger["dataset"]["dataset_root"], ledger["dataset"]["repo_id"],
+                     ledger["episode"]["episode_index"])
+        if recording in seen or identity in seen_refs:
+            raise ContractError("COLLECTION_RECOMMENDATION_EPISODE_DUPLICATE")
+        seen.add(recording)
+        seen_refs.add(identity)
+        condition = evidence["artifacts"]["intent"]["base_condition"]["coverage_condition"]
+        semantic = state["review"]["semantic_status"]
+        row = {"episode_id": ledger["episode"]["run_id"], "condition": condition,
+               "admission_state": "HUMAN_SEMANTIC_PASS" if semantic == "PASS" else
+                   "PENDING_REVIEW" if semantic == "PENDING" else "REJECTED",
+               "evidence_digests": {
+                   "job_spec": ledger["bindings"]["resolved_job_digest"],
+                   "technical_validator_result": ledger["artifacts"]["technical"]["artifact_digest"],
+                   "candidate_admission": canonical_digest(evidence["candidate"])},
+               "trajectory_continuity": {}}
+        # Per-manifest DQA retains distinct task/profile domains and counts each
+        # recording once. It measures observed conditions, not a recovered plan.
+        groups.setdefault(manifest["manifest_digest"], []).append(row)
+        retained_profile = evidence["artifacts"]["intent"]["fixed_contract"].get("feature_contract", {}).get("collection_profile_id")
+        if retained_profile is None:
+            retained_profile = next((item["camera_profile_id"] for item in combinations.values()
+                                     if item["source_digests"]["camera_profile"] == condition["collection_profile_digest"]),
+                                    "unidentified-" + condition["collection_profile_digest"][7:23])
+        profile_ids[manifest["manifest_digest"]] = retained_profile
+        reference = {"recording": {"dataset_root": recording[0], "repo_id": recording[1],
+                                    "episode_index": recording[2]},
+                     "manifest_digest": manifest["manifest_digest"], "episode": summary}
+        evidence_rows.append(reference)
+        endpoint = endpoints.get(condition["place_id"])
+        reason = None
+        if condition["task"] != task:
+            reason = "DIFFERENT_TASK"
+        elif (endpoint is None or condition["robot_system_id"] != scene["robot_system_id"]
+              or condition["object_profile_id"] != selected["object_id"]
+              or condition["grasp_profile_id"] != selected["grasp_id"]
+              or condition["collection_profile_digest"] != endpoint["source_digests"]["camera_profile"]
+              or condition["cell_calibration_id"] != endpoint["frame_id"]
+              or condition["cell_calibration_digest"] != endpoint["source_digests"]["cell"]):
+            reason = "INCOMPATIBLE_COLLECTION_DOMAIN"
+        else:
+            bindings = evidence["artifacts"]["staging_manifest"]["binding_digests"]
+            if any(bindings[name + "_profile_digest"] != endpoint["source_digests"][name]
+                   for name in ("object", "grasp")):
+                reason = "INCOMPATIBLE_OBJECT_OR_GRASP"
+        if reason is None and semantic != "PASS":
+            reason = "SEMANTIC_PASS_UNAVAILABLE"
+        if reason:
+            excluded.append({"recording": reference["recording"], "reason_code": reason})
+        else:
+            compatible.append(row)
+    if not compatible:
+        raise ContractError("COLLECTION_ACQUISITION_NO_COMPATIBLE_EVIDENCE")
+    for manifest_digest, rows in sorted(groups.items()):
+        domain = {canonical_digest(row["condition"]): row["condition"] for row in rows}
+        report = build_coverage_report(collection_profile_id=profile_ids[manifest_digest],
+                                       domain=list(domain.values()), episodes=sorted(rows, key=lambda x:x["episode_id"]))
+        reports.append({"manifest_digest": manifest_digest, "report": report,
+                        "report_digest": canonical_digest(report)})
+    compatible_domain = {canonical_digest(row["condition"]): row["condition"] for row in compatible}
+    compatible_report = build_coverage_report(
+        collection_profile_id=selected["camera_profile_id"],
+        domain=list(compatible_domain.values()),
+        episodes=sorted(compatible, key=lambda row: row["episode_id"]),
+    )
+    analysis = {"campaign_reports": reports, "compatible_coverage": compatible_report}
+    spatial_seed, yaw_seed = derive_domain_seed(seed, "spatial"), derive_domain_seed(seed, "yaw")
+    projector = project_workspace_cycle_poses if task == "pick_place" else project_assisted_poses
+    poses = projector(catalog, selected, source_pose, count, repeat=repeat,
+                      normalized_seed=spatial_seed, yaw_sampling_seed=yaw_seed)
+    if poses[0] != source_pose:
+        raise ContractError("COLLECTION_ACQUISITION_SOURCE_NOT_PRESERVED")
+    yaw_bindings = project_yaw_sample_bindings(catalog, cycle, poses, yaw_seed, repeat=repeat)
+    cells = project_state_space_cells(catalog, cycle, poses)
+    source_poses = poses[:count]
+    conditions = [{"order_index": i, "source": source_poses[i],
+                   "destination": poses[i + 1] if task == "pick_place" else None,
+                   "state_space_cell": cells[i], "yaw_sample_binding": yaw_bindings[i]}
+                  for i in range(count)]
+    observed = {place: sum(cell["counts"]["human_semantic_pass"]
+                           for cell in compatible_report["cells"] if cell["condition"]["place_id"] == place)
+                for place in sorted(endpoints)}
+    suggested = dict(sorted(Counter(p["place_id"] for p in source_poses).items()))
+    snapshot = {"source_commit": source_commit,
+                "implementation_verification": "CALLER_SUPPLIED_UNVERIFIED",
+                "context_digest": canonical_digest(context),
+                "scene_binding": {"scene_state_digest": canonical_digest(scene),
+                                  "revision": scene["revision"],
+                                  "object_instance_id": context["object_instance_id"]},
+                "episodes": sorted(evidence_rows, key=lambda row: tuple(row["recording"].values())),
+                "data_quality_analysis_digest": canonical_digest(analysis)}
+    snapshot["snapshot_digest"] = canonical_digest(snapshot)
+    recommendation = {
+        "schema_version": ACQUISITION_SCHEMA, "input_snapshot": snapshot,
+        "selection": selected,
+        "sampling": {"requested_count": count, "normalized_seed": seed, "repeat": repeat,
+                     "authoring_mode": "ASSISTED"},
+        "object_poses": poses, "conditions": conditions,
+        "observed_semantic_pass_by_source": observed,
+        "proposed_by_source": suggested,
+        "excluded_evidence": sorted(excluded, key=lambda row: tuple(row["recording"].values())),
+        "reason_codes": ["TASK_SEPARATED_SUCCESS_COVERAGE", "NATIVE_BALANCED_STATE_SPACE",
+                         "CURRENT_SOURCE_PRESERVED", "CALLER_BUDGET"],
+        "limitations": ["Coverage is a utility proxy, not a learned value ranking.",
+                        "Native balanced sampling is not an optimized missing-condition selector; evidence determines compatibility and coverage reasons, not a fitted seed.",
+                        "Different motion recipes/speeds remain historical evidence, not current qualification.",
+                        "Source and destination continuity is planned, not observed robot execution.",
+                        "Current camera, motion, scene and admission checks belong to Collection.",
+                        "This advice never repartitions or authorizes training data."],
+        "authority": copy.deepcopy(AUTHORITY),
+    }
+    recommendation["recommendation_digest"] = canonical_digest(recommendation)
+    return analysis, recommendation
