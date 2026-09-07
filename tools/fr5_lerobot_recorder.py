@@ -183,6 +183,7 @@ class FR5LeRobotRecorder(Node):
                 actual = dataset.meta.features.get(key)
                 if actual is None or actual["dtype"] != spec["dtype"] or list(actual["shape"]) != spec["shape"] or actual.get("names") != spec.get("names"):
                     raise SystemExit(f"Existing dataset feature mismatch for {key}: {actual} != {spec}")
+            self._bound_image_writer(dataset)
             return dataset
         if root.exists() and any(root.iterdir()):
             raise SystemExit(
@@ -190,7 +191,7 @@ class FR5LeRobotRecorder(Node):
             )
         if root.exists():
             root.rmdir()
-        return self.LeRobotDataset.create(
+        dataset = self.LeRobotDataset.create(
             repo_id=self.args.repo_id,
             fps=self.args.fps,
             root=root,
@@ -201,6 +202,28 @@ class FR5LeRobotRecorder(Node):
             rgb_encoder=rgb_encoder,
             **encoder_options,
         )
+        self._bound_image_writer(dataset)
+        return dataset
+
+    def _bound_image_writer(self, dataset) -> None:
+        """Configure the native thread queue before any row producer starts.
+
+        LeRobot has no queue-capacity argument. Keep the exact Queue already
+        held by its consumers; replacing it would strand those threads. This
+        startup-only adapter relies on CPython Queue internals and is covered
+        against the installed native writer. No global/dependency patching.
+        """
+        image_writer = getattr(dataset.writer, "image_writer", None)
+        if image_writer is None:
+            return
+        pending = getattr(image_writer, "queue", None)
+        if not isinstance(pending, queue.Queue):
+            raise RuntimeError("IMAGE_WRITER_QUEUE_UNSUPPORTED")
+        capacity = self.args.writer_queue_size * len(self.camera_names)
+        with pending.mutex:
+            if pending.unfinished_tasks:
+                raise RuntimeError("IMAGE_WRITER_ALREADY_ACTIVE")
+            pending.maxsize = min(pending.maxsize, capacity) if pending.maxsize > 0 else capacity
 
     def _drain_image_writer(self) -> None:
         """Drain LeRobot image workers; their queue is not necessarily bounded."""
