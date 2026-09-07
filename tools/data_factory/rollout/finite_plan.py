@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import copy
 import hashlib
+import itertools
 import math
 import threading
 import time
@@ -17,6 +18,7 @@ from tools.data_factory.learned_action_adapter import _action, _rgb
 
 PROGRAM_SCHEMA = "fr5.learned_motion_program.v1"
 PROPOSAL_SCHEMA = "data_factory.finite_learned_proposal.v1"
+HELD_PROPOSAL_SCHEMA = "data_factory.finite_learned_held_target_proposal.v1"
 JOINTS = ["j1", "j2", "j3", "j4", "j5", "j6", "finger_right_joint"]
 UNITS = ["rad"] * 6 + ["m"]
 
@@ -61,7 +63,7 @@ def validate_proposal(value):
               "source_clock", "source_timestamps_s", "max_observation_age_s", "inference_duration_s",
               "inference_started_at_s", "inference_completed_at_s", "joint_order", "units", "action_semantics", "actions",
               "period_s", "robot_description", "velocity_scaling", "proposal_digest"}
-    if not isinstance(value, dict) or set(value) != fields or value["schema_version"] != PROPOSAL_SCHEMA:
+    if not isinstance(value, dict) or set(value) != fields or value["schema_version"] not in {PROPOSAL_SCHEMA, HELD_PROPOSAL_SCHEMA}:
         raise ContractError("LEARNED_PROPOSAL_SCHEMA")
     p = copy.deepcopy(value)
     if p["proposal_digest"] != canonical_digest({k: v for k, v in p.items() if k != "proposal_digest"}):
@@ -106,11 +108,86 @@ def validate_proposal(value):
     for row in rows:
         if any(not low <= v <= high for v, (low, high, _) in zip(row, limits)):
             raise ContractError("LEARNED_JOINT_LIMIT")
+    # A held gripper reference is governed by the bound hardware settings and
+    # completion contract, not a claim about finger speed between samples.
+    checked = 6 if p["schema_version"] == HELD_PROPOSAL_SCHEMA else 7
     for previous, row in zip(rows, rows[1:]):
         if any(abs(v - old) / period > limit[2] * scaling + 1e-9
-               for old, v, limit in zip(previous, row, limits)):
+               for old, v, limit in zip(previous[:checked], row[:checked], limits[:checked])):
             raise ContractError("LEARNED_VELOCITY_LIMIT")
     return p
+
+
+def held_target_segments(source, proposal):
+    """Freeze exact runs of bound references; never classify or round model output."""
+    p = validate_proposal(proposal)
+    if p["schema_version"] != HELD_PROPOSAL_SCHEMA:
+        raise ContractError("LEARNED_HELD_TARGET_SCHEMA")
+    close = next(s for s in source["steps"] if s["phase"] == "GRIPPER_CLOSE")
+    opened = next(s for s in source["steps"] if s["phase"] == "GRIPPER_OPEN")
+    if "release_position_m" in opened or close["gripper_position_m"] == opened["gripper_position_m"]:
+        raise ContractError("LEARNED_HELD_PROFILE_UNSUPPORTED")
+    required = source["gripper_requirements"]
+    profiles = {
+        close["gripper_position_m"]: (close["limits"], required["acceptable_feedback_m"]),
+        opened["gripper_position_m"]: (opened["limits"], {
+            "min": opened["gripper_position_m"] - opened["limits"]["completion_tolerance_m"],
+            "max": opened["gripper_position_m"] + opened["limits"]["completion_tolerance_m"],
+        }),
+    }
+    segments, previous_target = [], p["initial_state"][-1]
+    low, high, _ = _limits(p["robot_description"])[-1]
+    duration = len(p["actions"]) * p["period_s"]
+    for target, group in itertools.groupby(enumerate(p["actions"]), key=lambda item: item[1][-1]):
+        indices = [index for index, _ in group]
+        # Same numerical reference tolerance as the existing executor completion
+        # check, allowing float32 representation without changing the action.
+        matches = [bound for bound in profiles if abs(target - bound) <= 1e-9]
+        if len(matches) != 1:
+            raise ContractError("LEARNED_UNBOUND_GRIPPER_TARGET")
+        limits, feedback = profiles[matches[0]]
+        feedback = {"min": max(low, feedback["min"]), "max": min(high, feedback["max"])}
+        bound = {"gripper_position_m": target, "acceptable_feedback_m": copy.deepcopy(feedback),
+                 "gripper_limits": copy.deepcopy(limits)}
+        if target != previous_target:
+            segments.append({"type": "GRIPPER", "action_range": [indices[0], indices[0]], **bound})
+            duration += limits["command_duration_s"]
+        segments.append({"type": "ARM", "action_range": [indices[0], indices[-1] + 1], **bound})
+        previous_target = target
+    if duration > 5:
+        raise ContractError("LEARNED_HELD_HORIZON")
+    return segments
+
+
+def check_segment_observation(segment, evidence, now, *, terminal=False):
+    """Admit a fresh observation against frozen targets; never rewrite a knot."""
+    try:
+        observed = evidence["snapshot"]
+        elapsed = _number(now, "LEARNED_SOURCE_CLOCK") - _number(evidence["captured_at_s"], "LEARNED_SOURCE_CLOCK")
+        ages = [_number(age, "LEARNED_STALE_STATE") for age in
+                (observed["joint_state_age_s"], observed["arm_controller"]["age_s"], observed["gripper_controller"]["age_s"])]
+        if elapsed < 0 or any(age < 0 or age + elapsed > segment["max_joint_state_age_s"] for age in ages):
+            raise ContractError("LEARNED_STALE_STATE")
+        if any(observed[key]["ready"] is not True for key in ("arm_controller", "gripper_controller")):
+            raise ContractError("CONTROLLER_NOT_READY")
+        gripper = observed["gripper_controller"]
+        state = list(_action([*observed["joint_positions"], gripper["feedback_position_m"]]))
+        limits = _limits(segment["learned_proposal"]["robot_description"])
+        if any(not low <= value <= high for value, (low, high, _) in zip(state, limits)):
+            raise ContractError("LEARNED_JOINT_LIMIT")
+        expected = segment["final_joint_state"] if terminal else segment["start_joint_state"]
+        if any(abs(a - b) > segment["joint_tolerance_rad"] for a, b in zip(state[:6], expected)):
+            raise ContractError("LEARNED_TERMINAL_STATE" if terminal else "START_STATE_MISMATCH")
+        if terminal or segment["type"] == "ARM":
+            reference = _number(gripper["reference_position_m"], "GRIPPER_FEEDBACK_OUT_OF_RANGE")
+            bound = segment["acceptable_feedback_m"]
+            if abs(reference - segment["gripper_position_m"]) > 1e-9 or not bound["min"] <= state[-1] <= bound["max"]:
+                raise ContractError("GRIPPER_FEEDBACK_OUT_OF_RANGE")
+        return state
+    except ContractError:
+        raise
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ContractError("LEARNED_STATE_SCHEMA") from exc
 
 
 def _materialize(source, proposal):
@@ -119,6 +196,8 @@ def _materialize(source, proposal):
     arm = next(step for step in source["steps"] if step["phase"] == "SAFE_POSE_PTP")
     learned = {"phase": "LEARNED_CHUNK", "limits": copy.deepcopy(arm["limits"]),
                "requires_confirmation": "PRECONTACT_HUMAN", "pause_after": "SEMANTIC_VERDICT"}
+    if proposal["schema_version"] == HELD_PROPOSAL_SCHEMA:
+        learned["held_target_segments"] = held_target_segments(source, proposal)
     return {**copy.deepcopy(source), "schema_version": PROGRAM_SCHEMA,
             "source_program": copy.deepcopy(source), "learned_proposal": copy.deepcopy(proposal),
             "steps": [learned]}
@@ -165,7 +244,7 @@ class FinitePolicyInference:
     def cancel(self):
         self._cancel.set()
 
-    def propose(self, observation, *, instruction, robot_description, period_s, max_observation_age_s=.3, velocity_scaling=.1):
+    def propose(self, observation, *, instruction, robot_description, period_s, max_observation_age_s=.3, velocity_scaling=.1, held_gripper_targets=False):
         if not self._lock.acquire(blocking=False):
             self.cancel()
             raise ContractError("LEARNED_REENTRANT_INFERENCE")
@@ -175,7 +254,7 @@ class FinitePolicyInference:
             if self._used:
                 raise ContractError("LEARNED_INFERENCE_ALREADY_USED")
             self._used = True
-            if (not isinstance(instruction, str) or not instruction.strip()
+            if (type(held_gripper_targets) is not bool or not isinstance(instruction, str) or not instruction.strip()
                     or not 1 / 30 <= _number(period_s, "LEARNED_HORIZON") <= 5
                     or not 0 < _number(velocity_scaling, "LEARNED_LIMITS") <= .1):
                 raise ContractError("LEARNED_INFERENCE_CONFIG")
@@ -201,7 +280,7 @@ class FinitePolicyInference:
             digest_input = copy.deepcopy(input_value)
             for key in cameras:
                 digest_input[key]["data"] = cameras[key]["data"].hex()
-            p = {"schema_version": PROPOSAL_SCHEMA, "checkpoint": self.checkpoint,
+            p = {"schema_version": HELD_PROPOSAL_SCHEMA if held_gripper_targets else PROPOSAL_SCHEMA, "checkpoint": self.checkpoint,
                  "instruction": instruction, "observation_digest": canonical_digest(digest_input),
                  "initial_state": initial, "source_clock": "SYSTEM_TIME", "source_timestamps_s": stamps,
                  "max_observation_age_s": age, "joint_order": JOINTS, "units": UNITS,
@@ -231,6 +310,9 @@ def validate_execution_trace(plan, trace):
     fields = {"schema_version", "proposal_digest", "plan_digest", "checkpoint", "status",
               "failure_code", "terminal_state", "terminal_phases", "task_effectiveness",
               "scene_outcome", "cell_ready", "online_policy_authorized", "trace_digest"}
+    held = p["schema_version"] == HELD_PROPOSAL_SCHEMA
+    if held:
+        fields.add("segments")
     if not isinstance(trace, dict) or set(trace) != fields:
         raise ContractError("LEARNED_TRACE_SCHEMA")
     if (trace["schema_version"] != "data_factory.finite_learned_execution.v1"
@@ -255,6 +337,31 @@ def validate_execution_trace(plan, trace):
             raise ContractError("LEARNED_TRACE_TERMINAL") from exc
     if trace["status"] == "COMPLETED" and (trace["terminal_state"] is None or trace["terminal_phases"] != ["LEARNED_CHUNK"]):
         raise ContractError("LEARNED_TRACE_TERMINAL")
+    if held:
+        segments = plan["steps"][0]["held_target_segments"]
+        evidence = trace["segments"]
+        if (not isinstance(evidence, list) or len(evidence) > len(segments)
+                or (trace["status"] == "COMPLETED" and len(evidence) != len(segments))):
+            raise ContractError("LEARNED_TRACE_TERMINAL")
+        previous_terminal = -math.inf
+        for index, item in enumerate(evidence):
+            if (not isinstance(item, dict) or set(item) != {"segment_index", "segment_digest", "start_observation", "terminal_observation"}
+                    or item["segment_index"] != index or item["segment_digest"] != canonical_digest(segments[index])):
+                raise ContractError("LEARNED_TRACE_BINDING")
+            try:
+                started = _number(item["start_observation"]["captured_at_s"], "LEARNED_TRACE_TERMINAL")
+                completed = _number(item["terminal_observation"]["captured_at_s"], "LEARNED_TRACE_TERMINAL")
+            except (KeyError, TypeError) as exc:
+                raise ContractError("LEARNED_TRACE_TERMINAL") from exc
+            if not previous_terminal <= started <= completed:
+                raise ContractError("LEARNED_TRACE_TERMINAL")
+            previous_terminal = completed
+            for key, terminal in (("start_observation", False), ("terminal_observation", True)):
+                check_segment_observation(segments[index], item[key], item[key]["captured_at_s"], terminal=terminal)
+        if evidence:
+            last = evidence[-1]["terminal_observation"]
+            if trace["terminal_state"] != check_segment_observation(segments[len(evidence) - 1], last, last["captured_at_s"], terminal=True):
+                raise ContractError("LEARNED_TRACE_TERMINAL")
     return copy.deepcopy(trace)
 
 

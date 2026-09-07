@@ -24,3 +24,18 @@ condition-level task-effect/data-utility evidence remain separate outcomes.
 - [ ] Consume an immutable admitted trained checkpoint and Learning-selected observation scope after root resource assignment.
 - [ ] Compare warmed chunk cost, per-joint action deviation and peak memory; revise the candidate using measured tradeoffs before any deployed change.
 - [ ] Connect any later authorized runtime change to actual lifecycle traces and task/data-utility evidence; numerical results alone do not finish this outcome.
+
+## Finite held-target consumption
+
+- [x] Distinguish controller-reference targets from observed feedback using native source and primary controller documentation.
+- [x] Add explicit bound held-target proposals consumed by existing OneJob, sole executor and ROS transport without modifying approved arm commands.
+- [x] Retain fresh start/terminal observations in the canonical learned trace, preserving failure, cancellation and data-admission boundaries.
+- [x] Replay held completion and failure cases with synthetic clients and actual ROS serializers; check limits, delayed snapshot, cancellation and collision samples.
+- [ ] Root integrates the scoped change and reviews the exact plan before any separately authorized physical baseline.
+- [ ] Establish actual FR5 target tracking, task effect and safe-reset evidence; CPU replay does not discharge physical qualification or continuing data-utility ownership.
+
+Runnable CPU check (no ROS node, model, GPU, original dataset or robot effects):
+
+```sh
+direnv exec . python3 -m unittest tests.data_factory.rollout.test_finite_plan tests.data_factory.rollout.test_learned_transport tests.data_factory.test_motion tests.data_factory.test_motion_transport_execution tests.data_factory.rollout.test_evidence_boundary --durations 5
+```

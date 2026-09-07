@@ -30,6 +30,69 @@ prediction or recorded demonstration success.
 - **THEN** the consumer rejects or reports the unresolved limitation without silently clipping or relabeling outputs as successful execution
 - **AND** an alternative mapping requires explicit plan-bound semantics and its own verification before physical use.
 
+### Requirement: Finite learned held targets use the sole execution owner
+
+An explicit held-gripper proposal SHALL bind absolute j1..j6 radians and gripper
+joint meters to the existing source program, immutable policy/observation identity
+and exact reviewed plan. It SHALL preserve all position limits, arm velocity
+limits, maximum 50 rows and 30 Hz, and a planned duration of at most five seconds
+including gripper holds. Existing per-goal deadlines and lease/cancel timeouts
+SHALL remain enforced. Unbound gripper targets and staged-open profiles SHALL fail;
+the consumer SHALL NOT infer semantic phases, snap outputs or relax the separate
+seven-joint waypoint contract.
+
+Consecutive identical gripper references SHALL share one bound hold, consumed by
+the existing PickupExecutor and RosMoveItTransport. A redundant initial hold MAY
+be omitted before plan approval when its observed reference/feedback already
+satisfy the bound target. No subsequent arm slice SHALL dispatch before a required
+hold has both successful action terminal evidence and valid reference/feedback.
+Each arm slice SHALL use a fresh observed start as an admission check and retained
+evidence for its frozen commands, never as authority for runtime replan/rebase.
+Observation age SHALL be rechecked after deserialization at send; original policy
+source-clock freshness SHALL still apply. Cancel or unresolved goals SHALL fence
+all later dispatches under the same transport owner.
+
+Plan-only SHALL send no motion, start no recorder, mutate no scene/cell or data,
+and create no approval. Execution SHALL retain existing human, exact-plan,
+hardware, scene/cell, training and physical-binding authority. Per-segment evidence
+SHALL remain in the existing canonical learned trace and diagnostic, with task
+effectiveness and scene outcome UNKNOWN, online policy authority false, and no
+automatic dataset commit or safe-reset claim.
+
+#### Scenario: Held reference completes with different valid feedback
+
+- **WHEN** a frozen proposal repeats a 0.01176 m bound reference
+- **THEN** the transport sends only one gripper hold for that consecutive run
+- **AND** feedback of 0.01218 m alone does not authorize the next arm slice
+- **AND** a successful action result plus the actual bound feedback range and
+  reference permits a fresh start check for the approved arm slice
+- **AND** every sent arm target remains identical to its approved message
+
+#### Scenario: Failure cannot advance a learned slice
+
+- **WHEN** state is stale, the reference/feedback is outside its binding, arm
+  start differs beyond its approved tolerance, or an action fails or is canceled
+- **THEN** the current lifecycle reports a typed failure and sends no later slice
+- **AND** unresolved cancellation remains owned by the existing transport
+- **AND** a late completion snapshot cannot restore dispatch after cancellation
+
+#### Scenario: Model output does not match the supported target contract
+
+- **WHEN** output exceeds a joint position or arm velocity bound, names/units or
+  full seven-dimensional shape disagree, a target lacks its source profile, or
+  the hold schedule exceeds its bound
+- **THEN** admission fails before any command or recorder effect
+- **AND** small floating-point representation differences within the existing
+  reference tolerance preserve the original target rather than snapping it
+
+#### Scenario: Collision admission covers held-target execution
+
+- **WHEN** a held proposal is planned
+- **THEN** existing collision admission samples each frozen arm slice, gripper
+  travel and both acceptable feedback extremes intersected with URDF limits
+- **AND** an invalid sample rejects before approval or execution
+- **AND** sampled collision and CPU replay evidence do not qualify physical pickup
+
 ### Requirement: Offline solver evidence must separate numerical and deployed usefulness
 
 Rollout's offline native comparison SHALL reuse canonical checkpoint admission

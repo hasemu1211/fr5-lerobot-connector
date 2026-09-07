@@ -372,12 +372,20 @@ class RosMoveItTransport:
         except RuntimeError as exc:
             raise ContractError("ROS_EXEC_DESERIALIZATION", str(exc)) from exc
         if phase == "LEARNED_CHUNK":
-            if step_type != "ARM" or serialized != self.build_learned_trajectory(compiled_step.get("learned_proposal")):
+            if "action_range" not in compiled_step and step_type != "ARM":
+                raise ContractError("LEARNED_SERIALIZED_ACTION_MISMATCH")
+            expected = (self.build_learned_segment(compiled_step["learned_proposal"], compiled_step)
+                        if "action_range" in compiled_step else self.build_learned_trajectory(compiled_step.get("learned_proposal")))
+            # CDR alignment padding is not a trajectory field and can vary on
+            # reserialization. Compare every decoded field; send the approved one.
+            actual_message = goal.trajectory if step_type == "ARM" else goal
+            expected_message = self._deserialize_message(expected, self._RobotTrajectory if step_type == "ARM" else self._FollowJointTrajectory.Goal)
+            if actual_message != expected_message:
                 raise ContractError("LEARNED_SERIALIZED_ACTION_MISMATCH")
         return phase, step_type, goal, client, float(timeout)
 
     def start_phase(
-        self, compiled_step, *, cancel_event=None, cancel_timeout_s=None,
+        self, compiled_step, *, cancel_event=None, cancel_timeout_s=None, start_observation=None,
     ):
         """Start one approved serialized action and retain its sole active handle."""
         if self._execution_locked or self._active is not None:
@@ -394,6 +402,9 @@ class RosMoveItTransport:
         if phase == "LEARNED_CHUNK":
             from tools.data_factory.rollout.finite_plan import check_freshness
             check_freshness(compiled_step["learned_proposal"], time.time())
+            if "action_range" in compiled_step:
+                from tools.data_factory.rollout.finite_plan import check_segment_observation
+                check_segment_observation(compiled_step, start_observation, time.time())
         active = _ActivePhase(phase, step_type, self._clock() + timeout)
         self._active = active
         self._execution_locked = True
@@ -892,28 +903,38 @@ class RosMoveItTransport:
         request_type = self._GetStateValidity.Request
         gripper = float(initial_gripper)
         samples, failures = [], []
+        feedback_bounds = None
 
         def check(label, joints):
             if len(joints) != len(JOINT_ORDER) or any(not math.isfinite(value) for value in joints):
                 raise ContractError("COLLISION_STATE")
-            request = request_type()
-            request.group_name = "" if "learned_proposal" in plan else plan["frames"]["planning_group"]
-            request.robot_state = self._RobotState(
-                joint_state=self._JointState(
-                    name=[*JOINT_ORDER, "finger_right_joint"],
-                    position=[*map(float, joints), float(gripper)],
+            positions = [gripper] if feedback_bounds is None else sorted({gripper, *feedback_bounds.values()})
+            for position in positions:
+                request = request_type()
+                request.group_name = "" if "learned_proposal" in plan else plan["frames"]["planning_group"]
+                request.robot_state = self._RobotState(
+                    joint_state=self._JointState(
+                        name=[*JOINT_ORDER, "finger_right_joint"],
+                        position=[*map(float, joints), float(position)],
+                    )
                 )
-            )
-            response = self._service(self._GetStateValidity, "/check_state_validity", request, "COLLISION_SERVICE")
-            evidence = {"label": label, "joints_rad": list(map(float, joints)), "finger_right_joint_m": float(gripper), "valid": bool(getattr(response, "valid", False))}
-            samples.append(evidence)
-            if not evidence["valid"]:
-                failures.append(evidence)
+                response = self._service(self._GetStateValidity, "/check_state_validity", request, "COLLISION_SERVICE")
+                evidence = {"label": label, "joints_rad": list(map(float, joints)), "finger_right_joint_m": float(position), "valid": bool(getattr(response, "valid", False))}
+                samples.append(evidence)
+                if not evidence["valid"]:
+                    failures.append(evidence)
 
         check("initial", plan["initial_joint_state"])
-        for step in plan["steps"]:
+        for step in (segment for outer in plan["steps"] for segment in outer.get("held_target_segments", [outer])):
+            feedback_bounds = step.get("acceptable_feedback_m") if step["type"] == "ARM" else None
             if step["type"] == "GRIPPER":
-                gripper = step.get("gripper_position_m", plan["gripper_requirements"]["command_position_m"])
+                target = step.get("gripper_position_m", plan["gripper_requirements"]["command_position_m"])
+                if "action_range" in step:
+                    start = gripper
+                    for part in range(1, 5):
+                        gripper = start + (target - start) * part / 5
+                        check(f"{step['phase']}:gripper:{part}", step["final_joint_state"])
+                gripper = target
                 check(step["phase"], step["final_joint_state"])
                 continue
             try:
@@ -923,7 +944,7 @@ class RosMoveItTransport:
                 names, points = list(trajectory.joint_names), list(trajectory.points)
             except (ValueError, RuntimeError, TypeError) as exc:
                 raise ContractError("COLLISION_TRAJECTORY", str(exc)) from exc
-            learned = step["phase"] == "LEARNED_CHUNK"
+            learned = step["phase"] == "LEARNED_CHUNK" and "action_range" not in step
             expected_names = [*JOINT_ORDER, "finger_right_joint"] if learned else JOINT_ORDER
             if names != expected_names or not points:
                 raise ContractError("COLLISION_TRAJECTORY")
@@ -1212,14 +1233,42 @@ class RosMoveItTransport:
         No retiming, clipping, delta conversion or secondary gripper goal is used.
         Controller support for the combined trajectory needs physical qualification.
         """
-        from tools.data_factory.rollout.finite_plan import validate_proposal, JOINTS
+        from tools.data_factory.rollout.finite_plan import validate_proposal, JOINTS, PROPOSAL_SCHEMA
         proposal = validate_proposal(proposal)
+        if proposal["schema_version"] != PROPOSAL_SCHEMA:
+            raise ContractError("LEARNED_HELD_SEGMENTS_REQUIRED")
         trajectory = self._RobotTrajectory()
         trajectory.joint_trajectory.joint_names = list(JOINTS)
         for index, row in enumerate([proposal["initial_state"], *proposal["actions"]]):
             point = self._JointTrajectoryPoint()
             point.positions = list(map(float, row))
             point.time_from_start = self._duration(index * proposal["period_s"])
+            trajectory.joint_trajectory.points.append(point)
+        return self._serialize_message(trajectory)
+
+    def build_learned_segment(self, proposal, segment):
+        """Serialize a frozen held target or six-joint slice, without rebasing."""
+        from tools.data_factory.rollout.finite_plan import validate_proposal, HELD_PROPOSAL_SCHEMA
+        p = validate_proposal(proposal)
+        start, end = segment["action_range"]
+        if (p["schema_version"] != HELD_PROPOSAL_SCHEMA or type(start) is not int or type(end) is not int
+                or not 0 <= start <= end <= len(p["actions"]) or start == len(p["actions"])
+                or p["actions"][start][-1] != segment["gripper_position_m"]):
+            raise ContractError("LEARNED_SEGMENT_BINDING")
+        if segment["type"] == "GRIPPER":
+            if start != end or segment["limits"] != segment["gripper_limits"]:
+                raise ContractError("LEARNED_SEGMENT_BINDING")
+            return self.build_gripper_goal("LEARNED_CHUNK", segment["gripper_position_m"], segment["limits"])
+        if (segment["type"] != "ARM" or start == end
+                or any(row[-1] != segment["gripper_position_m"] for row in p["actions"][start:end])):
+            raise ContractError("LEARNED_SEGMENT_BINDING")
+        trajectory = self._RobotTrajectory()
+        trajectory.joint_trajectory.joint_names = list(JOINT_ORDER)
+        initial = p["initial_state"] if start == 0 else p["actions"][start - 1]
+        for index, row in enumerate([initial, *p["actions"][start:end]]):
+            point = self._JointTrajectoryPoint()
+            point.positions = list(map(float, row[:6]))
+            point.time_from_start = self._duration(index * p["period_s"])
             trajectory.joint_trajectory.points.append(point)
         return self._serialize_message(trajectory)
 

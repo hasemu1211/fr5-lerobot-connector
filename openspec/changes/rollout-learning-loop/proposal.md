@@ -42,13 +42,67 @@ None.
 
 ## Impact
 
-Runtime changes are confined to the existing Rollout native loader, offline
-solver experiment and their tests.
+Runtime changes use the existing Rollout native loader, offline solver
+experiment and sole PickupExecutor/ROS transport, with focused tests.
 Artifact validation is consumed from the canonical Learning owner; Rollout retains
 its supported-processor restrictions and actual runtime checks.
-It changes no checkpoint schema, training statistics, executor, recorder,
-physical authority or dataset admission. This bounded readiness outcome does not
+It changes no checkpoint schema, training statistics, recorder,
+physical authority or dataset admission. These bounded outcomes do not
 complete the continuing Rollout responsibility or qualify a learned policy.
+
+## Held controller references
+
+Recorded actions are controller references, while observation.state contains
+feedback. Treating a held gripper reference as a timed waypoint changes its
+meaning. ROS JointTrajectoryController interpolates position-only waypoints,
+preempts an existing action when a new action arrives, and retains its final
+reference after successful completion ([controller documentation](https://control.ros.org/jazzy/doc/ros2_controllers/joint_trajectory_controller/doc/userdoc.html),
+[trajectory representation](https://control.ros.org/jazzy/doc/ros2_controllers/joint_trajectory_controller/doc/trajectory.html)).
+These documented mechanisms support explicit held-target consumption; they do
+not establish FR5 timing or grasp success.
+
+The selected bounded path adds an explicitly requested held-gripper proposal
+to the existing finite learned consumer. It freezes consecutive identical
+references into gripper holds and six-joint arm slices inside the same approved
+LEARNED_CHUNK. It preserves every arm output and its within-slice period, adding
+visible bound hold durations between slices. The alternative combined seven-joint
+waypoint path remains a separate explicit contract; it does not represent the
+recorded reference/feedback lag.
+
+Only the source program's close/open targets and existing settings/completion
+bounds are supported. The existing 1e-9 m reference tolerance accommodates
+float32 representation without snapping the model output. No semantic phase
+detector, smoothing, clipping, new grasp classifier or parallel executor is added.
+Staged-open profiles and unbound targets reject. The proposal preserves all seven
+position limits and six arm velocity limits; the legacy waypoint mode retains
+all seven velocity checks. A held reference jump is not a physical finger-speed
+measurement. Command duration, hardware settings and completion evidence remain
+required in the held mode. This is not approval to relax the legacy contract.
+
+Before approval, a redundant first gripper command can be omitted only when
+observed reference and feedback already satisfy its bound target. At execution,
+fresh observations guard each frozen start and are rechecked at native send.
+After each gripper action's successful terminal result, bound reference/feedback
+completion must pass before a new arm slice starts. Fresh state is recorded and
+validated against the approved start tolerance; it does not rebase or replan the
+approved trajectory. The same transport retains active/unresolved goals and
+cancellation. Collision samples include gripper travel and both accepted feedback
+extremes during arm slices; sampled checks are not continuous collision proof.
+
+The falsifier is executable CPU replay: a repeated reference restart, an arm send
+on feedback alone before terminal evidence, acceptance of stale/mismatched state,
+a send after cancellation, or alteration of approved commands rejects this path.
+The small comparison uses synthetic clients and existing ROS message serialization;
+it requires no model, GPU or robot. Original recorded data remain unchanged.
+
+Root's integration and next bound physical baseline are the next consumer.
+Unsupported continuous model outputs remain failures, and no target quantization
+policy is inferred. Retained per-segment start/terminal evidence joins the existing
+learned execution trace and diagnostic; it does not create a ledger. Task effect,
+scene outcome, safe reset and data utility remain unqualified by this software
+replay. Existing human, exact-plan, scene, cell, hardware, training and physical
+bindings still govern any later execution. The source observation age is checked
+at every send; this path never silently extends that age to finish a hold.
 
 ## Current hypothesis and falsifier
 

@@ -509,12 +509,37 @@ class PickupExecutor:
                         or abs(observed["gripper_controller"]["feedback_position_m"] - proposal["initial_state"][-1]) > gripper_tolerance
                         or abs(observed["gripper_controller"]["reference_position_m"] - proposal["initial_state"][-1]) > gripper_tolerance):
                     raise ContractError("LEARNED_START_STATE")
-                serialized = self.transport.build_learned_trajectory(proposal)
+                held_segments = []
+                for segment in step.get("held_target_segments", []):
+                    begin, end = segment["action_range"]
+                    gripper = observed["gripper_controller"]
+                    if (segment["type"] == "GRIPPER" and begin == 0
+                            and abs(gripper["reference_position_m"] - segment["gripper_position_m"]) <= 1e-9
+                            and segment["acceptable_feedback_m"]["min"] <= gripper["feedback_position_m"] <= segment["acceptable_feedback_m"]["max"]):
+                        # Freeze the omission before exact-plan approval. The
+                        # following arm segment rechecks this held reference.
+                        continue
+                    prior = proposal["initial_state"] if begin == 0 else proposal["actions"][begin - 1]
+                    segment = {**copy.deepcopy(segment), "phase": phase,
+                               "learned_proposal": copy.deepcopy(proposal),
+                               "start_joint_state": list(prior[:6]),
+                               "final_joint_state": list(proposal["actions"][end - 1][:6]) if segment["type"] == "ARM" else list(prior[:6]),
+                               "limits": copy.deepcopy(segment["gripper_limits"] if segment["type"] == "GRIPPER" else step["limits"]),
+                               "max_joint_state_age_s": motion_program["planning"]["max_joint_state_age_s"],
+                               "joint_tolerance_rad": tolerance}
+                    encoded = self.transport.build_learned_segment(proposal, segment)
+                    if not isinstance(encoded, bytes) or not encoded:
+                        raise ContractError("LEARNED_TRAJECTORY")
+                    segment["trajectory_b64"] = base64.b64encode(encoded).decode("ascii")
+                    held_segments.append(segment)
+                serialized = (base64.b64decode(held_segments[0]["trajectory_b64"]) if held_segments
+                              else self.transport.build_learned_trajectory(proposal))
                 if not isinstance(serialized, bytes) or not serialized:
                     raise ContractError("LEARNED_TRAJECTORY")
                 final_state = list(proposal["actions"][-1][:6])
                 step_type = "ARM"
                 planned_duration_s = len(proposal["actions"]) * proposal["period_s"]
+                planned_duration_s += sum(s["limits"]["command_duration_s"] for s in held_segments if s["type"] == "GRIPPER")
                 if planned_duration_s + EXECUTION_RESULT_MARGIN_S > step["limits"]["execution_timeout_s"]:
                     raise ContractError("LEARNED_EXECUTION_TIMEOUT")
             elif phase in ARM_PHASES:
@@ -604,6 +629,8 @@ class PickupExecutor:
             if phase == "LEARNED_CHUNK":
                 compiled["learned_proposal"] = copy.deepcopy(proposal)
                 compiled["gripper_tolerance_m"] = gripper_tolerance
+                if held_segments:
+                    compiled["held_target_segments"] = held_segments
             if planned_duration_s is not None:
                 compiled["planned_duration_s"] = float(planned_duration_s)
             if step_type == "GRIPPER" and continuation is not None:
@@ -931,6 +958,8 @@ class PickupExecutor:
                      "terminal_phases": copy.deepcopy(execution["terminal_phases"]),
                      "task_effectiveness": "UNKNOWN", "scene_outcome": "UNKNOWN",
                      "cell_ready": False, "online_policy_authorized": False}
+            if "held_target_segments" in run["plan"]["steps"][0]:
+                trace["segments"] = copy.deepcopy(execution.get("learned_segments", []))
             trace["trace_digest"] = canonical_digest(trace)
             data["learned_execution"] = trace
         data["precommit_safety"] = copy.deepcopy(run.get("precommit_safety"))
@@ -939,6 +968,8 @@ class PickupExecutor:
         return data
 
     def _start_current_step(self, run):
+        if run["state"] != "EXECUTING" or ("cancel_event" in run and run["cancel_event"].is_set()):
+            return run["state"]
         execution, steps = run["execution"], run["plan"]["steps"]
         if execution["step_index"] >= len(steps) and "learned_proposal" in run["plan"]:
             # Controller completion and human review do not establish a safe reset.
@@ -1018,7 +1049,10 @@ class PickupExecutor:
             execution["wait_deadline"] = self.monotonic_clock() + run["plan"]["execution_timeouts_s"]["precontact_confirmation"]
             self._emit_phase_event(run, "HOLD_ENTERED", step, None, {"hold": "PRECONTACT_HUMAN", "step": step})
             return "PRECONTACT_HUMAN"
+        if "held_target_segments" in step:
+            step = step["held_target_segments"][execution.get("learned_segment_index", 0)]
         try:
+            captured_at = self.source_clock()
             observed = self.transport.snapshot(run["plan"]["planning"]["max_joint_state_age_s"])
             if not observed["arm_controller"]["ready"] or not observed["gripper_controller"]["ready"]:
                 raise ContractError("CONTROLLER_NOT_READY")
@@ -1032,11 +1066,19 @@ class PickupExecutor:
             if step["phase"] == "LEARNED_CHUNK":
                 from tools.data_factory.rollout.finite_plan import check_freshness
                 check_freshness(step["learned_proposal"], self.source_clock())
-                initial = step["learned_proposal"]["initial_state"][-1]
-                gripper = observed["gripper_controller"]
-                if any(abs(gripper[key] - initial) > step["gripper_tolerance_m"] for key in ("feedback_position_m", "reference_position_m")):
-                    raise ContractError("LEARNED_START_STATE")
-                self.transport.start_phase(step, cancel_event=run["cancel_event"], cancel_timeout_s=run["plan"]["execution_timeouts_s"]["cancel"])
+                options = {}
+                if "action_range" in step:
+                    from tools.data_factory.rollout.finite_plan import check_segment_observation
+                    evidence = {"captured_at_s": captured_at, "snapshot": copy.deepcopy(observed)}
+                    check_segment_observation(step, evidence, self.source_clock())
+                    options["start_observation"] = evidence
+                    execution["learned_start_observation"] = evidence
+                else:
+                    initial = step["learned_proposal"]["initial_state"][-1]
+                    gripper = observed["gripper_controller"]
+                    if any(abs(gripper[key] - initial) > step["gripper_tolerance_m"] for key in ("feedback_position_m", "reference_position_m")):
+                        raise ContractError("LEARNED_START_STATE")
+                self.transport.start_phase(step, cancel_event=run["cancel_event"], cancel_timeout_s=run["plan"]["execution_timeouts_s"]["cancel"], **options)
                 if run["state"] != "EXECUTING" or run["cancel_event"].is_set():
                     return run["state"]
             else:
@@ -1059,6 +1101,8 @@ class PickupExecutor:
             try:
                 self.transport.cancel_active(run["plan"]["execution_timeouts_s"]["cancel"])
                 step = run["plan"]["steps"][execution["step_index"]]
+                if "held_target_segments" in step:
+                    step = step["held_target_segments"][execution.get("learned_segment_index", 0)]
                 self._emit_phase_event(run, "ACTION_TERMINAL", step, "CANCELLED", {"failure_code": code, "step": step, "terminal_status": "CANCELLED"})
             except Exception as exc:
                 execution["cancel_error"] = exc.code if isinstance(exc, ContractError) else "CANCEL_FAILED"
@@ -1126,12 +1170,14 @@ class PickupExecutor:
         run["state"] = "BLOCKED"
         return code
 
-    def _verified_gripper_feedback(self, run):
-        observed = self.transport.snapshot(run["plan"]["planning"]["max_joint_state_age_s"])
+    def _verified_gripper_feedback(self, run, required=None, observed=None):
+        if observed is None:
+            observed = self.transport.snapshot(run["plan"]["planning"]["max_joint_state_age_s"])
         controller = observed["gripper_controller"]
         feedback = float(controller["feedback_position_m"])
         reference = float(controller["reference_position_m"])
-        required = run["plan"]["gripper_requirements"]
+        if required is None:
+            required = run["plan"]["gripper_requirements"]
         if (
             not controller["ready"]
             or not math.isfinite(feedback)
@@ -1193,8 +1239,36 @@ class PickupExecutor:
                         execution["active"] = True
                         continue
                     execution.pop("continuation_dispatched", None)
+                    if "held_target_segments" in completed_step:
+                        index = execution.get("learned_segment_index", 0)
+                        segment = completed_step["held_target_segments"][index]
+                        try:
+                            captured_at = self.source_clock()
+                            observed = self.transport.snapshot(run["plan"]["planning"]["max_joint_state_age_s"])
+                            from tools.data_factory.rollout.finite_plan import check_segment_observation
+                            terminal_observation = {"captured_at_s": captured_at, "snapshot": copy.deepcopy(observed)}
+                            terminal = check_segment_observation(segment, terminal_observation, self.source_clock(), terminal=True)
+                            if run["state"] != "EXECUTING" or run["cancel_event"].is_set():
+                                continue
+                            self._verified_gripper_feedback(run, {
+                                "command_position_m": segment["gripper_position_m"],
+                                "acceptable_feedback_m": segment["acceptable_feedback_m"]}, observed)
+                            execution.setdefault("learned_segments", []).append({
+                                "segment_index": index, "segment_digest": canonical_digest(segment),
+                                "start_observation": execution["learned_start_observation"],
+                                "terminal_observation": terminal_observation})
+                            execution["learned_terminal_snapshot"] = terminal
+                        except Exception as exc:
+                            self._fault(run, exc.code if isinstance(exc, ContractError) else "LEARNED_TERMINAL_STATE")
+                            continue
+                        self._emit_phase_event(run, "ACTION_TERMINAL", segment, "SUCCEEDED", {"step": segment, "terminal_status": "SUCCEEDED"})
+                        if index + 1 < len(completed_step["held_target_segments"]):
+                            execution["learned_segment_index"] = index + 1
+                            self._start_current_step(run)
+                            continue
                     execution["terminal_phases"].append(completed_step["phase"])
-                    self._emit_phase_event(run, "ACTION_TERMINAL", completed_step, "SUCCEEDED", {"step": completed_step, "terminal_status": "SUCCEEDED"})
+                    if "held_target_segments" not in completed_step:
+                        self._emit_phase_event(run, "ACTION_TERMINAL", completed_step, "SUCCEEDED", {"step": completed_step, "terminal_status": "SUCCEEDED"})
                     if completed_step["phase"] in {"GRIPPER_CLOSE", "LIFT_LIN"}:
                         try:
                             feedback, reference = self._verified_gripper_feedback(run)
@@ -1206,7 +1280,7 @@ class PickupExecutor:
                         except (ContractError, KeyError, TypeError, ValueError):
                             self._fault(run, "GRIPPER_FEEDBACK_OUT_OF_RANGE")
                             continue
-                    if completed_step["phase"] == "LEARNED_CHUNK":
+                    if completed_step["phase"] == "LEARNED_CHUNK" and "held_target_segments" not in completed_step:
                         try:
                             observed = self.transport.snapshot(run["plan"]["planning"]["max_joint_state_age_s"])
                             joints = _joint_positions(observed["joint_positions"])
