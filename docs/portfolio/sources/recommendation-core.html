@@ -1,4 +1,4 @@
-<!doctype html><html lang="ko"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>추천에서 draft 변경 의도로 — 데이터 엔진 근거</title><link rel="stylesheet" href="../site.css"></head><body><main class="source-page"><a href="../architecture.html#feedback">← 설명으로 돌아가기</a><h1>추천에서 draft 변경 의도로</h1><p class="note">설명에 사용한 구현·측정 자료의 발췌이다. SHA-256은 발췌 전 원본 파일을 식별한다. 실행 PC의 절대 경로와 계정 정보는 포함하지 않으며, 측정값과 해석 조건을 함께 제시한다.</p><section id="coverage-selection"><h2>현재 조건별 추천</h2><p class="locator">main 32e709760d97ce9ec5c8bf365d36b005e674feda<br>tools/data_factory/collection_recommendation.py<br>sha256:ba05c890d94d6fc44323ebd6e69b1901efd65f66f0ec6e0b83546225ba82d46a</p><p class="note">원문 674–770행. 구현과 의도를 확인하는 발췌이며 실제 폐루프 실행 결과를 뜻하지 않는다.</p><pre> 674 def derive_collection_recommendation(
+<!doctype html><html lang="ko"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>추천에서 draft 변경 의도로 — 데이터 엔진 근거</title><link rel="stylesheet" href="../site.css"><script src="../source-return.js" defer></script></head><body><main class="source-page"><a href="../architecture.html#feedback">← 설명으로 돌아가기</a><h1>추천에서 draft 변경 의도로</h1><p class="note">설명에 사용한 구현·측정 자료의 발췌이다. SHA-256은 발췌 전 원본 파일을 식별한다. 실행 PC의 절대 경로와 계정 정보는 포함하지 않으며, 측정값과 해석 조건을 함께 제시한다.</p><section id="coverage-selection"><h2>기존 계획의 조건별 추천</h2><p class="locator">main 32e709760d97ce9ec5c8bf365d36b005e674feda<br>tools/data_factory/collection_recommendation.py<br>sha256:ba05c890d94d6fc44323ebd6e69b1901efd65f66f0ec6e0b83546225ba82d46a</p><p class="note">원문 674–770행. 구현과 의도를 확인하는 발췌이며 실제 폐루프 실행 결과를 뜻하지 않는다.</p><pre> 674 def derive_collection_recommendation(
  675     *, compiled_authoring: Mapping[str, Any],
  676     episode_evidence: Sequence[Mapping[str, Any]], source_commit: str,
  677 ) -&gt; tuple[dict[str, Any], dict[str, Any]]:
@@ -1210,4 +1210,267 @@ __all__ = [
     &quot;project_campaign_update_intent&quot;,
     &quot;validate_collection_recommendation&quot;,
 ]
-</pre></section></main></body></html>
+</pre></section><section id="current-acquisition"><h2>여러 실행 기록과 현재 조건을 사용하는 추천</h2><p>고정 main ade5c5b의 구현 발췌이다. 새 추천 생성과 기존 초안 변경 경로를 구분한다. 실제 수집 실행 결과를 추가하지 않는다.</p><p class="locator">ade5c5b · tools/data_factory/collection_recommendation.py:1100<br>sha256:6157282ece2c83acd41686c34556dc76061436f875f225156ca56113ce4de46a</p><pre>1100: def _derive_acquisition_recommendation(*, acquisition, episode_evidence, source_commit):
+1101:     &quot;&quot;&quot;Current-source coverage advice, independent of historical authoring.
+1102:
+1103:     Native ledger/DQA own observations; native samplers own the finite poses.
+1104:     This does not attest device availability, motion qualification or utility.
+1105:     &quot;&quot;&quot;
+1106:     from collections import Counter
+1107:     from tools.data_factory.collection_seed import derive_domain_seed, validate_campaign_seed
+1108:     from tools.data_factory.operator.catalog import (
+1109:         validate_operator_selection, project_assisted_poses,
+1110:         project_workspace_cycle_poses, resolve_workspace_cycle_selections,
+1111:         project_yaw_sample_bindings, project_state_space_cells,
+1112:     )
+1113:     from tools.data_factory.scene_state import _validate as validate_scene
+1114:
+1115:     required = {&quot;catalog&quot;, &quot;selection&quot;, &quot;scene_state&quot;, &quot;object_instance_id&quot;,
+1116:                 &quot;requested_count&quot;, &quot;normalized_seed&quot;, &quot;repeat&quot;}
+1117:     context = _exact(acquisition, required, &quot;COLLECTION_ACQUISITION_INPUT_FIELDS&quot;)
+1118:     if (not isinstance(source_commit, str) or len(source_commit) != 40
+1119:             or any(character not in &quot;0123456789abcdef&quot; for character in source_commit)):
+1120:         raise ContractError(&quot;COLLECTION_RECOMMENDATION_SOURCE_COMMIT&quot;)
+1121:     _identifier(context[&quot;object_instance_id&quot;], &quot;COLLECTION_ACQUISITION_SOURCE&quot;)
+1122:     catalog = context[&quot;catalog&quot;]
+1123:     selected = validate_operator_selection(catalog, context[&quot;selection&quot;], require_executable=False)
+1124:     task = selected[&quot;task_id&quot;]
+1125:     if task not in {&quot;pickup_e2e&quot;, &quot;pick_place&quot;}:
+1126:         raise ContractError(&quot;COLLECTION_ACQUISITION_TASK_UNSUPPORTED&quot;)
+1127:     count, repeat = context[&quot;requested_count&quot;], context[&quot;repeat&quot;]
+1128:     if any(type(value) is not int or not 1 &lt;= value &lt;= 100 for value in (count, repeat)):
+1129:         raise ContractError(&quot;COLLECTION_ACQUISITION_BUDGET&quot;)
+1130:     seed = validate_campaign_seed(context[&quot;normalized_seed&quot;])
+1131:     scene = context[&quot;scene_state&quot;]
+1132:     if not isinstance(scene, dict):
+1133:         raise ContractError(&quot;COLLECTION_ACQUISITION_SCENE&quot;)
+1134:     scene = validate_scene(scene, scene.get(&quot;robot_system_id&quot;))
+1135:     instance = scene[&quot;objects&quot;].get(context[&quot;object_instance_id&quot;])
+1136:     if (instance is None or instance[&quot;state&quot;] != &quot;ON_SURFACE&quot;
+1137:             or instance[&quot;object_profile_id&quot;] != selected[&quot;object_id&quot;]
+1138:             or instance[&quot;pose&quot;][&quot;place_id&quot;] != selected[&quot;workspace_id&quot;]):
+1139:         raise ContractError(&quot;COLLECTION_ACQUISITION_SOURCE&quot;)
+1140:     source_pose = instance[&quot;pose&quot;]
+1141:     cycle = (resolve_workspace_cycle_selections(catalog, selected, count, require_executable=False)
+1142:              if task == &quot;pick_place&quot; else [selected] * count)
+1143:     combinations = {item[&quot;combination_digest&quot;]: item for item in catalog[&quot;combinations&quot;]}
+1144:     endpoints = {item[&quot;workspace_id&quot;]: combinations[item[&quot;combination_digest&quot;]] for item in cycle}
+1145:     evidence_rows, reports, compatible, excluded = [], [], [], []
+1146:     groups, profile_ids, seen, seen_refs = {}, {}, set(), set()
+1147:     for evidence in episode_evidence:
+1148:         # Each run has its own immutable manifest. Never synthesize absent
+1149:         # compiled_authoring_evidence or require unrelated campaigns to match.
+1150:         manifest = evidence[&quot;artifacts&quot;][&quot;manifest&quot;]
+1151:         summary, identity = _episode_snapshot(evidence, manifest)
+1152:         ledger, state = evidence[&quot;ledger&quot;], evidence[&quot;state&quot;]
+1153:         recording = (ledger[&quot;dataset&quot;][&quot;dataset_root&quot;], ledger[&quot;dataset&quot;][&quot;repo_id&quot;],
+1154:                      ledger[&quot;episode&quot;][&quot;episode_index&quot;])
+1155:         if recording in seen or identity in seen_refs:
+1156:             raise ContractError(&quot;COLLECTION_RECOMMENDATION_EPISODE_DUPLICATE&quot;)
+1157:         seen.add(recording)
+1158:         seen_refs.add(identity)
+1159:         condition = evidence[&quot;artifacts&quot;][&quot;intent&quot;][&quot;base_condition&quot;][&quot;coverage_condition&quot;]
+1160:         semantic = state[&quot;review&quot;][&quot;semantic_status&quot;]
+1161:         row = {&quot;episode_id&quot;: ledger[&quot;episode&quot;][&quot;run_id&quot;], &quot;condition&quot;: condition,
+1162:                &quot;admission_state&quot;: &quot;HUMAN_SEMANTIC_PASS&quot; if semantic == &quot;PASS&quot; else
+1163:                    &quot;PENDING_REVIEW&quot; if semantic == &quot;PENDING&quot; else &quot;REJECTED&quot;,
+1164:                &quot;evidence_digests&quot;: {
+1165:                    &quot;job_spec&quot;: ledger[&quot;bindings&quot;][&quot;resolved_job_digest&quot;],
+1166:                    &quot;technical_validator_result&quot;: ledger[&quot;artifacts&quot;][&quot;technical&quot;][&quot;artifact_digest&quot;],
+1167:                    &quot;candidate_admission&quot;: canonical_digest(evidence[&quot;candidate&quot;])},
+1168:                &quot;trajectory_continuity&quot;: {}}
+1169:         # Per-manifest DQA retains distinct task/profile domains and counts each
+1170:         # recording once. It measures observed conditions, not a recovered plan.
+1171:         groups.setdefault(manifest[&quot;manifest_digest&quot;], []).append(row)
+1172:         retained_profile = evidence[&quot;artifacts&quot;][&quot;intent&quot;][&quot;fixed_contract&quot;].get(&quot;feature_contract&quot;, {}).get(&quot;collection_profile_id&quot;)
+1173:         if retained_profile is None:
+1174:             retained_profile = next((item[&quot;camera_profile_id&quot;] for item in combinations.values()
+1175:                                      if item[&quot;source_digests&quot;][&quot;camera_profile&quot;] == condition[&quot;collection_profile_digest&quot;]),
+1176:                                     &quot;unidentified-&quot; + condition[&quot;collection_profile_digest&quot;][7:23])
+1177:         profile_ids[manifest[&quot;manifest_digest&quot;]] = retained_profile
+1178:         reference = {&quot;recording&quot;: {&quot;dataset_root&quot;: recording[0], &quot;repo_id&quot;: recording[1],
+1179:                                     &quot;episode_index&quot;: recording[2]},
+1180:                      &quot;manifest_digest&quot;: manifest[&quot;manifest_digest&quot;], &quot;episode&quot;: summary}
+1181:         evidence_rows.append(reference)
+1182:         endpoint = endpoints.get(condition[&quot;place_id&quot;])
+1183:         reason = None
+1184:         if condition[&quot;task&quot;] != task:
+1185:             reason = &quot;DIFFERENT_TASK&quot;
+1186:         elif (endpoint is None or condition[&quot;robot_system_id&quot;] != scene[&quot;robot_system_id&quot;]
+1187:               or condition[&quot;object_profile_id&quot;] != selected[&quot;object_id&quot;]
+1188:               or condition[&quot;grasp_profile_id&quot;] != selected[&quot;grasp_id&quot;]
+1189:               or condition[&quot;collection_profile_digest&quot;] != endpoint[&quot;source_digests&quot;][&quot;camera_profile&quot;]
+1190:               or condition[&quot;cell_calibration_id&quot;] != endpoint[&quot;frame_id&quot;]
+1191:               or condition[&quot;cell_calibration_digest&quot;] != endpoint[&quot;source_digests&quot;][&quot;cell&quot;]):
+1192:             reason = &quot;INCOMPATIBLE_COLLECTION_DOMAIN&quot;
+1193:         else:
+1194:             bindings = evidence[&quot;artifacts&quot;][&quot;staging_manifest&quot;][&quot;binding_digests&quot;]
+1195:             if any(bindings[name + &quot;_profile_digest&quot;] != endpoint[&quot;source_digests&quot;][name]
+1196:                    for name in (&quot;object&quot;, &quot;grasp&quot;)):
+1197:                 reason = &quot;INCOMPATIBLE_OBJECT_OR_GRASP&quot;
+1198:         if reason is None and semantic != &quot;PASS&quot;:
+1199:             reason = &quot;SEMANTIC_PASS_UNAVAILABLE&quot;
+1200:         if reason:
+1201:             excluded.append({&quot;recording&quot;: reference[&quot;recording&quot;], &quot;reason_code&quot;: reason})
+1202:         else:
+1203:             compatible.append(row)
+1204:     if not compatible:
+1205:         raise ContractError(&quot;COLLECTION_ACQUISITION_NO_COMPATIBLE_EVIDENCE&quot;)
+1206:     for manifest_digest, rows in sorted(groups.items()):
+1207:         domain = {canonical_digest(row[&quot;condition&quot;]): row[&quot;condition&quot;] for row in rows}
+1208:         report = build_coverage_report(collection_profile_id=profile_ids[manifest_digest],
+1209:                                        domain=list(domain.values()), episodes=sorted(rows, key=lambda x:x[&quot;episode_id&quot;]))
+1210:         reports.append({&quot;manifest_digest&quot;: manifest_digest, &quot;report&quot;: report,
+1211:                         &quot;report_digest&quot;: canonical_digest(report)})
+1212:     compatible_domain = {canonical_digest(row[&quot;condition&quot;]): row[&quot;condition&quot;] for row in compatible}
+1213:     compatible_report = build_coverage_report(
+1214:         collection_profile_id=selected[&quot;camera_profile_id&quot;],
+1215:         domain=list(compatible_domain.values()),
+1216:         episodes=sorted(compatible, key=lambda row: row[&quot;episode_id&quot;]),
+1217:     )
+1218:     analysis = {&quot;campaign_reports&quot;: reports, &quot;compatible_coverage&quot;: compatible_report}
+1219:     spatial_seed, yaw_seed = derive_domain_seed(seed, &quot;spatial&quot;), derive_domain_seed(seed, &quot;yaw&quot;)
+1220:     projector = project_workspace_cycle_poses if task == &quot;pick_place&quot; else project_assisted_poses
+1221:     poses = projector(catalog, selected, source_pose, count, repeat=repeat,
+1222:                       normalized_seed=spatial_seed, yaw_sampling_seed=yaw_seed)
+1223:     if poses[0] != source_pose:
+1224:         raise ContractError(&quot;COLLECTION_ACQUISITION_SOURCE_NOT_PRESERVED&quot;)
+1225:     yaw_bindings = project_yaw_sample_bindings(catalog, cycle, poses, yaw_seed, repeat=repeat)
+1226:     cells = project_state_space_cells(catalog, cycle, poses)
+1227:     source_poses = poses[:count]
+1228:     conditions = [{&quot;order_index&quot;: i, &quot;source&quot;: source_poses[i],
+1229:                    &quot;destination&quot;: poses[i + 1] if task == &quot;pick_place&quot; else None,
+1230:                    &quot;state_space_cell&quot;: cells[i], &quot;yaw_sample_binding&quot;: yaw_bindings[i]}
+1231:                   for i in range(count)]
+1232:     observed = {place: sum(cell[&quot;counts&quot;][&quot;human_semantic_pass&quot;]
+1233:                            for cell in compatible_report[&quot;cells&quot;] if cell[&quot;condition&quot;][&quot;place_id&quot;] == place)
+1234:                 for place in sorted(endpoints)}
+1235:     suggested = dict(sorted(Counter(p[&quot;place_id&quot;] for p in source_poses).items()))
+1236:     snapshot = {&quot;source_commit&quot;: source_commit,
+1237:                 &quot;implementation_verification&quot;: &quot;CALLER_SUPPLIED_UNVERIFIED&quot;,
+1238:                 &quot;context_digest&quot;: canonical_digest(context),
+1239:                 &quot;scene_binding&quot;: {&quot;scene_state_digest&quot;: canonical_digest(scene),
+1240:                                   &quot;revision&quot;: scene[&quot;revision&quot;],
+1241:                                   &quot;object_instance_id&quot;: context[&quot;object_instance_id&quot;]},
+1242:                 &quot;episodes&quot;: sorted(evidence_rows, key=lambda row: tuple(row[&quot;recording&quot;].values())),
+1243:                 &quot;data_quality_analysis_digest&quot;: canonical_digest(analysis)}
+1244:     snapshot[&quot;snapshot_digest&quot;] = canonical_digest(snapshot)
+1245:     recommendation = {
+1246:         &quot;schema_version&quot;: ACQUISITION_SCHEMA, &quot;input_snapshot&quot;: snapshot,
+1247:         &quot;selection&quot;: selected,
+1248:         &quot;sampling&quot;: {&quot;requested_count&quot;: count, &quot;normalized_seed&quot;: seed, &quot;repeat&quot;: repeat,
+1249:                      &quot;authoring_mode&quot;: &quot;ASSISTED&quot;},
+1250:         &quot;object_poses&quot;: poses, &quot;conditions&quot;: conditions,
+1251:         &quot;observed_semantic_pass_by_source&quot;: observed,
+1252:         &quot;proposed_by_source&quot;: suggested,
+1253:         &quot;excluded_evidence&quot;: sorted(excluded, key=lambda row: tuple(row[&quot;recording&quot;].values())),
+1254:         &quot;reason_codes&quot;: [&quot;TASK_SEPARATED_SUCCESS_COVERAGE&quot;, &quot;NATIVE_BALANCED_STATE_SPACE&quot;,
+1255:                          &quot;CURRENT_SOURCE_PRESERVED&quot;, &quot;CALLER_BUDGET&quot;],
+1256:         &quot;limitations&quot;: [&quot;Coverage is a utility proxy, not a learned value ranking.&quot;,
+1257:                         &quot;Native balanced sampling is not an optimized missing-condition selector; evidence determines compatibility and coverage reasons, not a fitted seed.&quot;,
+1258:                         &quot;Different motion recipes/speeds remain historical evidence, not current qualification.&quot;,
+1259:                         &quot;Source and destination continuity is planned, not observed robot execution.&quot;,
+1260:                         &quot;Current camera, motion, scene and admission checks belong to Collection.&quot;,
+1261:                         &quot;This advice never repartitions or authorizes training data.&quot;],
+1262:         &quot;authority&quot;: copy.deepcopy(AUTHORITY),
+1263:     }
+1264:     recommendation[&quot;recommendation_digest&quot;] = canonical_digest(recommendation)
+1265:     return analysis, recommendation</pre><p class="locator">ade5c5b · tools/data_factory/collection_recommendation_io.py:109<br>sha256:bd22220046e18e23b5ecd45c3070896805b6303882994963dad4640247d263e3</p><pre>109:         context = None if acquisition is None else _acquisition_context(acquisition)
+110:         roots = []
+111:         for directory in run_directories:
+112:             root = Path(directory).resolve(strict=True)
+113:             if context is None:
+114:                 authoring_path = root / &quot;compiled_authoring_evidence.json&quot;
+115:                 if not authoring_path.is_file():
+116:                     raise ContractError(&quot;COLLECTION_RECOMMENDATION_AUTHORING_UNAVAILABLE&quot;)
+117:                 authoring = validate_compiled_authoring_evidence(load_json_strict(authoring_path))
+118:                 if sources is not None and sources != authoring:
+119:                     raise ContractError(&quot;COLLECTION_RECOMMENDATION_AUTHORING_MISMATCH&quot;)
+120:                 sources = authoring
+121:             loaded, paths = _load_run(root)
+122:             protected.update(paths)
+123:             if context is None and loaded[&quot;artifacts&quot;][&quot;manifest&quot;] != sources[&quot;manifest&quot;]:
+124:                 raise ContractError(&quot;COLLECTION_RECOMMENDATION_AUTHORING_MISMATCH&quot;)
+125:             evidence.append(loaded)
+126:             roots.append(root)
+127:         report, recommendation = derive_collection_recommendation(
+128:             compiled_authoring=sources, episode_evidence=evidence, source_commit=source_commit,
+129:             **({&quot;acquisition&quot;: context} if context is not None else {}),
+130:         )
+131:         if context is not None:
+132:             protected.add(Path(acquisition[&quot;scene_state_path&quot;]).resolve(strict=True).parent)
+133:             if (_acquisition_context(acquisition) != context
+134:                     or any(_load_run(root)[0] != previous for root, previous in zip(roots, evidence))):
+135:                 raise ContractError(&quot;COLLECTION_ACQUISITION_INPUT_CHANGED&quot;)
+136:         if (expected_recommendation_digest is not None
+137:                 and expected_recommendation_digest != recommendation[&quot;recommendation_digest&quot;]):
+138:             raise ContractError(&quot;COLLECTION_ACQUISITION_INPUT_CHANGED&quot;)
+139:     except (ContractError, OSError) as exc:</pre></section><section id="current-consumer"><h2>새 추천의 검증과 기존 초안 소비 계약</h2><p>고정 main ade5c5b의 구현 발췌이다. 새 추천 생성과 기존 초안 변경 경로를 구분한다. 실제 수집 실행 결과를 추가하지 않는다.</p><p class="locator">ade5c5b · tools/data_factory/collection_recommendation.py:844<br>sha256:6157282ece2c83acd41686c34556dc76061436f875f225156ca56113ce4de46a</p><pre>844: def validate_collection_recommendation(
+845:     value: object, *, campaign_manifest: Mapping[str, Any] | None = None,
+846:     campaign_hypothesis: Mapping[str, Any] | None = None,
+847:     campaign_draft: Mapping[str, Any] | None = None,
+848:     campaign_compilation_receipt: Mapping[str, Any] | None = None,
+849:     episode_evidence: Sequence[Mapping[str, Any]] | None = None,
+850:     data_quality_analysis: Mapping[str, Any] | None = None,
+851:     rollout_evidence_analysis: Mapping[str, Any] | None = None,
+852:     acquisition: Mapping[str, Any] | None = None,
+853: ) -&gt; dict[str, Any]:
+854:     &quot;&quot;&quot;Validate a self-digested value, optionally rejoining supplied evidence.&quot;&quot;&quot;
+855:     if isinstance(value, Mapping) and value.get(&quot;schema_version&quot;) == ACQUISITION_SCHEMA:
+856:         if acquisition is None or episode_evidence is None:
+857:             raise ContractError(&quot;COLLECTION_ACQUISITION_CURRENT_INPUT_REQUIRED&quot;)
+858:         _report, expected = _derive_acquisition_recommendation(
+859:             acquisition=acquisition, episode_evidence=episode_evidence,
+860:             source_commit=value.get(&quot;input_snapshot&quot;, {}).get(&quot;source_commit&quot;),
+861:         )
+862:         if value != expected:
+863:             raise ContractError(&quot;COLLECTION_ACQUISITION_INPUT_CHANGED&quot;)
+864:         return expected
+865:     recommendation = _exact(value, RECOMMENDATION_FIELDS, &quot;COLLECTION_RECOMMENDATION_FIELDS&quot;)
+866:     _self_digest(
+867:         recommendation, &quot;recommendation_digest&quot;,
+868:         &quot;COLLECTION_RECOMMENDATION_DIGEST&quot;,
+869:     )
+870:     if recommendation[&quot;schema_version&quot;] != SCHEMA_VERSION:
+871:         raise ContractError(&quot;COLLECTION_RECOMMENDATION_SCHEMA&quot;)
+872:     _identifier(recommendation[&quot;recommendation_id&quot;], &quot;COLLECTION_RECOMMENDATION_ID&quot;)
+873:     snapshot = _snapshot(recommendation[&quot;input_snapshot&quot;])
+874:     claims = _claims(recommendation[&quot;claims&quot;], snapshot, normalize=False)
+875:     patches = _patches(</pre><p class="locator">ade5c5b · tools/data_factory/collection_recommendation.py:922<br>sha256:6157282ece2c83acd41686c34556dc76061436f875f225156ca56113ce4de46a</p><pre>922: def project_update_draft_intent(
+923:     recommendation: object, *, selected_change_id: str,
+924:     operator_view: Mapping[str, Any], intent_id: str | None = None,
+925:     data_quality_analysis: Mapping[str, Any] | None = None,
+926: ) -&gt; dict[str, Any]:
+927:     &quot;&quot;&quot;Return one update_draft intent; never consume or apply it.&quot;&quot;&quot;
+928:     checked = validate_collection_recommendation(recommendation)
+929:     _analysis_ref(
+930:         checked[&quot;input_snapshot&quot;][&quot;data_quality_analysis_ref&quot;],
+931:         owner=&quot;data_quality&quot;, artifact=data_quality_analysis, normalize=False,
+932:     )
+933:     _analysis_ref(
+934:         checked[&quot;input_snapshot&quot;][&quot;rollout_evidence_analysis_ref&quot;],
+935:         owner=&quot;rollout&quot;, artifact=None, normalize=False,
+936:     )
+937:     _identifier(selected_change_id, &quot;COLLECTION_RECOMMENDATION_PATCH_SELECTION&quot;)</pre><p class="locator">ade5c5b · tools/data_factory/collection_recommendation.py:1032<br>sha256:6157282ece2c83acd41686c34556dc76061436f875f225156ca56113ce4de46a</p><pre>1032: def project_campaign_update_intent(
+1033:     recommendation: object, *, compiled_authoring: Mapping[str, Any],
+1034:     operator_view: Mapping[str, Any], data_quality_analysis: Mapping[str, Any],
+1035: ) -&gt; dict[str, Any]:
+1036:     &quot;&quot;&quot;Project exact condition selection to the existing CampaignOperator CAS.
+1037:
+1038:     This does not rewrite the Collection UI&#x27;s observed object pose, compile a
+1039:     plan, create a campaign, or obtain physical/training authority.
+1040:     &quot;&quot;&quot;
+1041:     from tools.data_factory.campaign_operator import (
+1042:         PROJECTION_SCHEMA, validate_compiled_authoring_evidence,
+1043:     )
+1044:
+1045:     checked = validate_collection_recommendation(recommendation)
+1046:     source = validate_compiled_authoring_evidence(compiled_authoring)
+1047:     _analysis_ref(checked[&quot;input_snapshot&quot;][&quot;data_quality_analysis_ref&quot;],
+1048:                   owner=&quot;data_quality&quot;, artifact=data_quality_analysis, normalize=False)
+1049:     selection = _unobserved_selection(source, data_quality_analysis)
+1050:     patches = [patch for patch in checked[&quot;suggested_draft_patches&quot;]
+1051:                if patch[&quot;field&quot;] == &quot;campaign_selection&quot;]
+1052:     if (source[&quot;manifest&quot;][&quot;manifest_digest&quot;] != checked[&quot;input_snapshot&quot;][&quot;campaign&quot;][&quot;manifest_digest&quot;]
+1053:             or selection is None or len(patches) != 1 or patches[0][&quot;value&quot;] != selection):
+1054:         raise ContractError(&quot;COLLECTION_RECOMMENDATION_SELECTION_BINDING&quot;)</pre></section></main></body></html>

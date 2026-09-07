@@ -13,6 +13,7 @@ python3 docs/portfolio/export_single_file.py .agent-local/portfolio/FR5-Portfoli
 기존 파일을 같은 위치에 다시 생성하므로 배포본을 별도로 관리하거나 사본을 쌓지 않는다. Python 표준 라이브러리만 사용하며, 영상·이미지·글꼴과 근거 페이지를 포함한 결과가 50MB 이상이면 생성을 중단한다. 새 상호작용을 추가한 경우에는 생성된 파일에서도 해당 동작을 확인한다.
 
 - [시스템 아키텍처](architecture.html): 모듈 구성과 데이터 흐름
+- [Acquisition Strategy](acquisition.html): 과거 기록과 현재 조건을 결합한 추천, 수집 전략 비교
 - [Collection Operator](collection.html): 작업 조건, 반복 수집과 기록 구간
 - [Recorder · Curator](data.html): 저장 관측, 시간 정렬과 영상 변환·검토
 - [Policy Learning](learning.html): SmolVLA 학습 입력과 오프라인 비교

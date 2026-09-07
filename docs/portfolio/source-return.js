@@ -9,6 +9,12 @@ function updateSourceReturn() {
     return;
   }
   const architectureView = new URLSearchParams(location.search).get('view');
+  if (back && architectureView === 'acquisition') {
+    const section = new URLSearchParams(location.search).get('section');
+    back.href = `../acquisition.html#${['mechanism','native-draft','policy','study'].includes(section) ? section : 'mechanism'}`;
+    back.textContent = '← 획득 전략 설명으로 돌아가기';
+    return;
+  }
   if (back && ['closed-loop', 'study'].includes(architectureView)) {
     back.href = `../architecture.html#${architectureView}`;
     back.textContent = '← 폐루프 설명으로 돌아가기';

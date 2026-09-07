@@ -141,3 +141,5 @@ header{min-height:100px}.brand{font-size:40px}nav{font-size:14px;gap:34px}
 .selection-next{margin-top:35px;border-top:1px solid var(--line);padding-top:25px}.selection-next p{max-width:60em}
 
 .normalization-figure{margin:30px 0}.normalization-figure img{display:block;width:100%;height:auto}.normalization-figure figcaption{font-size:12px;line-height:1.85;color:var(--muted);margin-top:18px}
+
+.acquisition-mechanism{padding:45px 0 60px;scroll-margin-top:75px}.acquisition-explanation{display:grid;grid-template-columns:1fr 1fr;gap:65px;margin:30px 0}.acquisition-explanation h3{font-size:22px}.acquisition-explanation p{font-size:15px;line-height:1.95}.acquisition-section{border-top:1px solid var(--line);padding:50px 0;scroll-margin-top:75px}.acquisition-section>p{max-width:62em;line-height:1.95}.acquisition-section h2{font-size:30px}.acquisition-mechanism~#study{border-top:1px solid var(--line);padding:50px 0;scroll-margin-top:75px}
