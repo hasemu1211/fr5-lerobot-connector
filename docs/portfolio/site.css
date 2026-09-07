@@ -103,7 +103,7 @@ header{min-height:100px}.brand{font-size:40px}nav{font-size:14px;gap:34px}
 
 .collection-planning .domain-explanation{max-width:none}.workspace-study{max-width:1120px;margin:30px auto}
 
-#workspace{scroll-margin-top:90px}
+#workspace,#approach{scroll-margin-top:90px}
 
 /* The project identity names the research system; FR5 remains its physical platform. */
 .brand{font-size:25px;letter-spacing:-.5px;white-space:nowrap}

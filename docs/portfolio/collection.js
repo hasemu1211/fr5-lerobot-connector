@@ -34,6 +34,8 @@ function showWorkspace(yaw) {
 }
 showWorkspace(new URLSearchParams(location.search).get('yaw'));
 if (location.hash === '#all-angle-condition')
+  document.getElementById('workspace-calculation').open = true;
+if (location.hash === '#all-angle-condition')
   document.getElementById('all-angle-condition').open = true;
 for (const button of document.querySelectorAll('[data-yaw]')) {
   button.addEventListener('click', () => {

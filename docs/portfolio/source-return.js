@@ -20,6 +20,11 @@ function updateSourceReturn() {
     back.textContent = '← 폐루프 설명으로 돌아가기';
     return;
   }
+  if (back && architectureView === 'approach') {
+    back.href = '../collection.html#approach';
+    back.textContent = '← 정렬 동작의 접근 설계로 돌아가기';
+    return;
+  }
   if (back && architectureView === 'workspace') {
     const yaw = new URLSearchParams(location.search).get('yaw');
     const section = location.hash === '#angle-conditions' ? 'all-angle-condition' : 'workspace';

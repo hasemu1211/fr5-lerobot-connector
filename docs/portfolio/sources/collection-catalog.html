@@ -195,7 +195,7 @@ def project_direct_poses(
     return [
         copy.deepcopy(conditions[index % len(conditions)])
         for index in range(requested_count)
-    ]</pre></section><section id="sampling-principle"><h2>영역 계산과 층화 표본화</h2><h3>좌표 생성 도해의 계산 조건</h3><p>가상 직사각형 작업영역 240 × 180 mm, 물체 100 × 30 mm, 보정 여유 5 mm를 사용했다. 고정 main 3d98547의 <code>safe_convex_polygon</code>과 <code>polygon_bounds</code>를 직접 실행한 결과이다. 현재 main ade5c5b의 해당 파일도 같은 SHA-256이다. 왼쪽 도해의 물체 중심은 (120, 90) mm에 고정하고 각도만 바꾼다. 오른쪽 도해는 이 물체가 5 mm 여유를 지키며 놓일 수 있는 중심의 전체 영역과 두 경계 배치를 함께 표시한다. 각 배치의 중심은 허용 영역의 좌하단·우상단이다. 0°·45°·90° 각각에 대해 허용 영역의 모든 꼭짓점에 물체를 배치하고, 회전한 물체의 네 모서리가 바깥 작업영역에서 최소 5 mm 안쪽에 있는지 직접 계산했다.</p><p class="locator">tools/data_factory/workspace_geometry.py<br>sha256:3c57f4af3a9ae0a973ca15a38b9933d36ec082c3f72112a10d67cb7206f922f7</p><table><caption>도해 표시 범위 · mm · 소수 첫째 자리 반올림</caption><thead><tr><th>회전각</th><th>X</th><th>Y</th></tr></thead><tbody><tr><td>0°</td><td>55.0–185.0</td><td>20.0–160.0</td></tr><tr><td>45°</td><td>51.0–189.0</td><td>51.0–129.0</td></tr><tr><td>90°</td><td>20.0–220.0</td><td>55.0–125.0</td></tr></tbody></table><h3>각도 구간의 순회 배정 · 465–490행</h3><p class="locator">tools/data_factory/state_space.py<br>sha256:80c491626f25bf6645d426cf2c4080c519ff21a5771f95f957fa8de4b58b454a</p><p class="note">원본 필드 또는 명시한 구현 구간의 발췌.</p><pre>def rotating_balanced_yaw_ranks(
+    ]</pre></section><section id="sampling-principle"><h2>영역 계산과 층화 표본화</h2><h3>좌표 생성 도해의 계산 조건</h3><p>가상 직사각형 작업영역 240 × 180 mm, 물체 100 × 30 mm, 보정 여유 5 mm를 사용했다. 고정 main 3d98547의 <code>safe_convex_polygon</code>과 <code>polygon_bounds</code>를 직접 실행한 별도 기하 계산 예시이다. 현재 main 0149201의 해당 파일도 같은 SHA-256이다. 아래 표는 각 회전각에서 물체 중심을 배치할 수 있는 범위를 나타낸다. 0°·45°·90° 각각에 대해 허용 영역의 모든 꼭짓점에 물체를 배치하고, 회전한 물체의 네 모서리가 바깥 작업영역에서 최소 5 mm 안쪽에 있는지 직접 계산했다.</p><p class="locator">tools/data_factory/workspace_geometry.py<br>sha256:3c57f4af3a9ae0a973ca15a38b9933d36ec082c3f72112a10d67cb7206f922f7</p><table><caption>100 × 30 mm 물체의 기하 예시 · mm · 소수 첫째 자리 반올림</caption><thead><tr><th>회전각</th><th>X</th><th>Y</th></tr></thead><tbody><tr><td>0°</td><td>55.0–185.0</td><td>20.0–160.0</td></tr><tr><td>45°</td><td>51.0–189.0</td><td>51.0–129.0</td></tr><tr><td>90°</td><td>20.0–220.0</td><td>55.0–125.0</td></tr></tbody></table><h3>각도 구간의 순회 배정 · 465–490행</h3><p class="locator">tools/data_factory/state_space.py<br>sha256:80c491626f25bf6645d426cf2c4080c519ff21a5771f95f957fa8de4b58b454a</p><p class="note">원본 필드 또는 명시한 구현 구간의 발췌.</p><pre>def rotating_balanced_yaw_ranks(
     spatial_count: int, yaw_strata_count: int, *, sweep_index: int,
     anchor_cell_index: int, anchor_yaw_rank: int,
 ) -&gt; list[int]:
@@ -519,4 +519,883 @@ def _uniform_polygon_point(
 1382:                 &quot;closed&quot; if phase == &quot;GRIPPER_CLOSE&quot; else &quot;open&quot;
 1383:             ]
 1384:             if phase == &quot;GRIPPER_OPEN&quot; and validated[&quot;grasp_profile&quot;].get(
-1385:                 &quot;schema_version&quot;</pre><h3>독립 계산 대조</h3><p>100×30mm 직사각형, 240×180mm 작업영역, 경계 여유5mm의 해석식이다. 외접 반지름52.20153254455275mm로 전각도 범위 X[57.20153254455275,182.79846745544725], Y[57.20153254455275,122.79846745544725]를 구했다. 반폭의 최대를 만드는 두 임계각을 safe_convex_polygon_for_yaws에 입력한 출력과 일치했고, 0.1도 간격의 3,600각도에서 모든 허용 꼭짓점의 물체 외곽을 교차 확인했다. 중심(55,90)은0/90도 교차영역에 포함되지만16.69924423399362도에서 왼쪽끝2.798467455447252mm로5mm 여유를 충족하지 못한다. 이 반례는 수학적 계산이며 실제 로봇 실패 관측이 아니다.</p><p><a href="https://lavalle.pl/planning/node161.html">LaValle · Planning Algorithms: 물체 형상을 반영한 구성 공간</a></p></section></main><script src="../source-return.js"></script></body></html>
+1385:                 &quot;schema_version&quot;</pre><h3>독립 계산 대조</h3><p>100×30mm 직사각형, 240×180mm 작업영역, 경계 여유5mm의 해석식이다. 외접 반지름52.20153254455275mm로 전각도 범위 X[57.20153254455275,182.79846745544725], Y[57.20153254455275,122.79846745544725]를 구했다. 반폭의 최대를 만드는 두 임계각을 safe_convex_polygon_for_yaws에 입력한 출력과 일치했고, 0.1도 간격의 3,600각도에서 모든 허용 꼭짓점의 물체 외곽을 교차 확인했다. 중심(55,90)은0/90도 교차영역에 포함되지만16.69924423399362도에서 왼쪽끝2.798467455447252mm로5mm 여유를 충족하지 못한다. 이 반례는 수학적 계산이며 실제 로봇 실패 관측이 아니다.</p><p><a href="https://lavalle.pl/planning/node161.html">LaValle · Planning Algorithms: 물체 형상을 반영한 구성 공간</a></p></section><section id="approach-distribution"><h2>정렬 전 관측과 접근 위치의 분포</h2><p>main MEX의 TWO_STAGE_ALIGN_V2 책임을 먼저 확인하고, 다음 고정 구현과 등록된 접근 설정을 대조했다. 관측 위치를 물체 근처에서 표본화하고 XY·yaw 정렬을 기록 구간에 남기는 설계이다. 이 발췌는 경로 생성과 설정의 근거이며, 해당 시연의 학습 효과는 별도 평가 대상이다.</p><h3>등록된 24 mm 물체의 접근 설정</h3><p class="locator">0149201 · config/data_factory/approach_sampling_profiles/wood-cube-24mm-top-wrist-r001.json<br>sha256:bd1da64ab64f79217302cc99acac7c6a1c3f4ded598e5ca3ad599641c49e3205</p><pre>{
+  &quot;schema_version&quot;: &quot;data_factory.approach_sampling_profile.v1&quot;,
+  &quot;approach_sampling_profile_id&quot;: &quot;wood-cube-24mm-top-wrist-approach-r001&quot;,
+  &quot;qualification_status&quot;: &quot;QUALIFIED&quot;,
+  &quot;trajectory_variant_id&quot;: &quot;TWO_STAGE_ALIGN_V2&quot;,
+  &quot;object_profile_id&quot;: &quot;wood-cube-24mm-r001&quot;,
+  &quot;object_profile_digest&quot;: &quot;sha256:fd93d2fb05d9ddd05a040e823b2d2b31428a79a7ae7ce07a1ad8cf519c66489a&quot;,
+  &quot;grasp_profile_id&quot;: &quot;wood-cube-24mm-top-3p5mm-r001&quot;,
+  &quot;grasp_profile_digest&quot;: &quot;sha256:d260ca29a2f70258f43d53e2127e0a5d307fef0fc7cbbadb093278391a509173&quot;,
+  &quot;collection_profile_id&quot;: &quot;fr5-up-wrist-rgb-30hz-v2&quot;,
+  &quot;collection_profile_digest&quot;: &quot;sha256:d8288e4b3cbd34dc646949985658c786d8b9945ed368d67b412a1dec93a4931d&quot;,
+  &quot;required_camera_roles&quot;: [
+    &quot;wrist&quot;
+  ],
+  &quot;observation_cue&quot;: &quot;WRIST_OBJECT_VISIBLE_BEFORE_XY_YAW_ALIGNMENT&quot;,
+  &quot;parameter_distribution&quot;: {
+    &quot;kind&quot;: &quot;STRATIFIED_BOUNDED&quot;,
+    &quot;align_clearance_m&quot;: {
+      &quot;kind&quot;: &quot;TRUNCATED_NORMAL&quot;,
+      &quot;mean&quot;: 0.0575,
+      &quot;standard_deviation&quot;: 0.00125,
+      &quot;minimum&quot;: 0.055,
+      &quot;maximum&quot;: 0.06
+    },
+    &quot;view_offset_xy_m&quot;: {
+      &quot;kind&quot;: &quot;OBJECT_RELATIVE_TRUNCATED_BIVARIATE_NORMAL&quot;,
+      &quot;object_axes&quot;: [
+        &quot;X&quot;,
+        &quot;Y&quot;
+      ],
+      &quot;maximum_radius_fraction&quot;: 0.5,
+      &quot;absolute_maximum_radius_m&quot;: 0.02,
+      &quot;mahalanobis_radius&quot;: 2.5
+    }
+  }
+}
+</pre><h3>중심 주변의 절단 정규분포</h3><p class="locator">0149201 · tools/data_factory/motion/trajectory_variants.py:291<br>sha256:04aa3f6e98fb3597550356f557f7a2d11557dfd55b81d0208ec8fc6fc283a92a</p><pre>291:     height = distribution[&quot;align_clearance_m&quot;]
+292:     normal = NormalDist(
+293:         mu=height[&quot;mean&quot;], sigma=height[&quot;standard_deviation&quot;],
+294:     )
+295:     lower = normal.cdf(height[&quot;minimum&quot;])
+296:     upper = normal.cdf(height[&quot;maximum&quot;])
+297:     clearance_quantile = stratified_unit(0, &quot;align_clearance&quot;)
+298:     clearance = normal.inv_cdf(
+299:         lower + clearance_quantile * (upper - lower)
+300:     )
+301:     offset = distribution[&quot;view_offset_xy_m&quot;]
+302:     object_size = _object_size_xy_m(object_dimensions_mm)
+303:     # The truncation ellipse is the object&#x27;s inscribed top-face footprint,
+304:     # capped at 20 mm.  A 2.5-sigma Mahalanobis boundary retains 95.6% of the
+305:     # corresponding untruncated bivariate normal without corner-heavy clips.
+306:     radii = [
+307:         min(
+308:             dimension * offset[&quot;maximum_radius_fraction&quot;],
+309:             offset[&quot;absolute_maximum_radius_m&quot;],
+310:         )
+311:         for dimension in object_size
+312:     ]
+313:     mahalanobis_radius = offset[&quot;mahalanobis_radius&quot;]
+314:     sigmas = [radius / mahalanobis_radius for radius in radii]
+315:     radial_mass = 1.0 - math.exp(-(mahalanobis_radius ** 2) / 2.0)
+316:     radial_quantile = stratified_unit(1, &quot;view_offset_radius&quot;)
+317:     angle_quantile = stratified_unit(2, &quot;view_offset_angle&quot;)
+318:     standard_radius = math.sqrt(
+319:         -2.0 * math.log(1.0 - radial_quantile * radial_mass)
+320:     )
+321:     angle = 2.0 * math.pi * angle_quantile
+322:     return {
+323:         &quot;align_clearance_m&quot;: round(clearance, 9),
+324:         &quot;align_clearance_quantile&quot;: clearance_quantile,
+325:         &quot;object_size_xy_m&quot;: object_size,
+326:         &quot;view_offset_radius_xy_m&quot;: [round(value, 9) for value in radii],
+327:         &quot;view_offset_standard_deviation_xy_m&quot;: [
+328:             round(value, 9) for value in sigmas
+329:         ],
+330:         &quot;view_offset_radial_quantile&quot;: radial_quantile,
+331:         &quot;view_offset_angle_quantile&quot;: angle_quantile,
+332:         &quot;view_offset_x_m&quot;: round(sigmas[0] * standard_radius * math.cos(angle), 9),
+333:         &quot;view_offset_y_m&quot;: round(sigmas[1] * standard_radius * math.sin(angle), 9),
+334:     }
+335: </pre><h3>관측·정렬 목표 자세의 계산</h3><p class="locator">0149201 · tools/data_factory/motion/trajectory_variants.py:503<br>sha256:04aa3f6e98fb3597550356f557f7a2d11557dfd55b81d0208ec8fc6fc283a92a</p><pre>503: def _view_and_align_targets(
+504:     pregrasp: Mapping[str, Any], endpoint: Mapping[str, Any], *,
+505:     clearance_m: float, offset_x_m: float, offset_y_m: float,
+506:     target_yaw_deg: float,
+507: ) -&gt; tuple[dict[str, Any], dict[str, Any]]:
+508:     axis = _unit_axis(pregrasp[&quot;base_tcp&quot;], endpoint[&quot;base_tcp&quot;])
+509:     final_tcp = endpoint[&quot;base_tcp&quot;]
+510:     canonical_rotation = [
+511:         _rotate(list(column), axis, math.radians(-target_yaw_deg))
+512:         for column in final_tcp[&quot;rotation_columns&quot;]
+513:     ]
+514:     align_translation = [
+515:         float(value) + axis[index] * clearance_m
+516:         for index, value in enumerate(final_tcp[&quot;translation_m&quot;])
+517:     ]
+518:     object_x, object_y = _planar_axes(
+519:         axis, final_tcp[&quot;rotation_columns&quot;],
+520:     )
+521:     view_translation = [
+522:         align_translation[index]
+523:         + object_x[index] * offset_x_m
+524:         + object_y[index] * offset_y_m
+525:         for index in range(3)
+526:     ]
+527:     view_tcp = {
+528:         &quot;translation_m&quot;: view_translation,
+529:         &quot;rotation_columns&quot;: canonical_rotation,
+530:     }
+531:     align_tcp = {
+532:         &quot;translation_m&quot;: align_translation,
+533:         &quot;rotation_columns&quot;: copy.deepcopy(final_tcp[&quot;rotation_columns&quot;]),
+534:     }
+535:     tcp_to_tool = compose_rigid_transform(
+536:         inverse_rigid_transform(final_tcp), endpoint[&quot;base_tool&quot;],
+537:     )
+538:
+539:     def target(tcp: Mapping[str, Any]) -&gt; dict[str, Any]:
+540:         return {
+541:             &quot;base_tcp&quot;: copy.deepcopy(dict(tcp)),
+542:             &quot;base_tool&quot;: compose_rigid_transform(tcp, tcp_to_tool),
+543:         }
+544:
+545:     return target(view_tcp), target(align_tcp)</pre><h3>기존 실행 단계에 목표 자세 적용</h3><p class="locator">0149201 · tools/data_factory/motion/trajectory_variants.py:818<br>sha256:04aa3f6e98fb3597550356f557f7a2d11557dfd55b81d0208ec8fc6fc283a92a</p><pre>818:     pregrasp = next(
+819:         step for step in result[&quot;steps&quot;] if step[&quot;phase&quot;] == &quot;PREGRASP_PTP&quot;
+820:     )
+821:     approach = next(
+822:         step for step in result[&quot;steps&quot;] if step[&quot;phase&quot;] == &quot;APPROACH_STOP_LIN&quot;
+823:     )
+824:     final = next(
+825:         step for step in result[&quot;steps&quot;] if step[&quot;phase&quot;] == &quot;FINAL_APPROACH_LIN&quot;
+826:     )
+827:     view, align = _view_and_align_targets(
+828:         pregrasp[&quot;target&quot;], final[&quot;target&quot;],
+829:         clearance_m=parameters[&quot;align_clearance_m&quot;],
+830:         offset_x_m=parameters[&quot;view_offset_x_m&quot;],
+831:         offset_y_m=parameters[&quot;view_offset_y_m&quot;],
+832:         target_yaw_deg=yaw,
+833:     )
+834:     pregrasp[&quot;target&quot;] = copy.deepcopy(view)
+835:     approach[&quot;target&quot;] = copy.deepcopy(align)
+836:     return validate_motion_program(result)</pre><h3>기존 회귀 검사의 기하 조건</h3><p class="locator">0149201 · tests/data_factory/test_trajectory_variants.py:236<br>sha256:160b38f6417a1366d6ee1fa8ed3cd3b152a1bb81f275bfb8e2d33d84327cc8ea</p><pre>236:     def test_two_stage_v2_applies_target_yaw_only_at_visible_clearance(self):
+237:         source = program()
+238:         yaw_90 = [[0.0, 1.0, 0.0], [-1.0, 0.0, 0.0], [0.0, 0.0, 1.0]]
+239:         for step in source[&quot;steps&quot;][:3]:
+240:             for frame in (&quot;base_tcp&quot;, &quot;base_tool&quot;):
+241:                 step[&quot;target&quot;][frame][&quot;rotation_columns&quot;] = copy.deepcopy(yaw_90)
+242:
+243:         compiled = compile_execution_motion_program(
+244:             source, trajectory_variant_id=&quot;TWO_STAGE_ALIGN_V2&quot;,
+245:             target_yaw_deg=90.0, sampling_seed=0,
+246:             object_dimensions_mm=OBJECT_DIMENSIONS_MM,
+247:         )
+248:         pregrasp, align, descend = compiled[&quot;steps&quot;][:3]
+249:         identity = [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]]
+250:         for frame in (&quot;base_tcp&quot;, &quot;base_tool&quot;):
+251:             self.assertLessEqual(
+252:                 abs(pregrasp[&quot;target&quot;][frame][&quot;translation_m&quot;][2] - 0.0575),
+253:                 0.0025,
+254:             )
+255:             self.assertEqual(pregrasp[&quot;target&quot;][frame][&quot;rotation_columns&quot;], identity)
+256:             self.assertEqual(align[&quot;target&quot;][frame][&quot;rotation_columns&quot;], yaw_90)
+257:             xy_offset = [
+258:                 pregrasp[&quot;target&quot;][frame][&quot;translation_m&quot;][index]
+259:                 - align[&quot;target&quot;][frame][&quot;translation_m&quot;][index]
+260:                 for index in (0, 1)
+261:             ]
+262:             self.assertGreater(sum(value * value for value in xy_offset), 0.0)
+263:             self.assertLessEqual(sum(value * value for value in xy_offset), 0.012 ** 2)
+264:             self.assertEqual(
+265:                 descend[&quot;target&quot;][frame][&quot;translation_m&quot;][:2],
+266:                 align[&quot;target&quot;][frame][&quot;translation_m&quot;][:2],
+267:             )
+268:             self.assertEqual(descend[&quot;target&quot;][frame][&quot;rotation_columns&quot;], yaw_90)
+269:         self.assertEqual(compiled[&quot;steps&quot;][3:], source[&quot;steps&quot;][3:])
+270: </pre></section><section id="position-distribution"><h2>작업영역의 형상을 반영한 위치 생성</h2><p>고정 main 6a156ec의 순수 함수 safe_convex_polygon과 stratified_convex_polygon_samples를 직접 실행했다. 현재 A/B 작업영역과 같은 [-133.5,133.5] × [-85,85] mm 직사각형, 기존 회귀 검사에 사용된 기울어진 사각형을 같은 mm 축척으로 비교한다. 물체 24 × 24 mm, 여유 4 mm, 5 × 3 분할과 seed 17을 공통으로 사용했다.</p><p>각 회전각·폴리곤에 대해 회전한 물체의 네 모서리와 원래 폴리곤 모든 변의 부호 있는 수직거리를 계산했다. 표시한 모든 배치가 4 mm 이상의 여유를 유지하고, 한 칸에 하나의 중심만 생성됨을 확인했다. 실제 실행은 별도의 등록 영역·보정·장면과 동작 계획 검사를 소비한다.</p><p>이 계산은 표시한 입력에 대한 결과이다. 조사 중 물체보다 작은 영역에서 빈 허용 집합을 판정하지 못하는 반례를 발견해 main에 전달했다. 해당 수정의 구현·검증 전에는 임의 크기의 모든 폴리곤에 대한 보장으로 일반화하지 않는다. 현재 A/B 영역의 24 mm 물체·여유 4 mm는 모든 yaw의 최악 반폭을 적용해도 양의 배치 영역을 유지한다.</p><p class="locator">6a156ec:tools/data_factory/workspace_geometry.py<br>sha256:3c57f4af3a9ae0a973ca15a38b9933d36ec082c3f72112a10d67cb7206f922f7</p><pre>{
+  &quot;source&quot;: &quot;6a156ec:tools/data_factory/workspace_geometry.py&quot;,
+  &quot;sha256&quot;: &quot;3c57f4af3a9ae0a973ca15a38b9933d36ec082c3f72112a10d67cb7206f922f7&quot;,
+  &quot;parameters&quot;: {
+    &quot;object_size_xy_mm&quot;: [
+      24,
+      24
+    ],
+    &quot;uncertainty_mm&quot;: 4,
+    &quot;columns&quot;: 5,
+    &quot;rows&quot;: 3,
+    &quot;seed&quot;: 17
+  },
+  &quot;results&quot;: [
+    {
+      &quot;workspace&quot;: &quot;rectangle&quot;,
+      &quot;polygon_mm&quot;: [
+        [
+          -133.5,
+          -85
+        ],
+        [
+          133.5,
+          -85
+        ],
+        [
+          133.5,
+          85
+        ],
+        [
+          -133.5,
+          85
+        ]
+      ],
+      &quot;yaw_deg&quot;: 0,
+      &quot;samples_xy_row_column&quot;: [
+        [
+          111.32259781002855,
+          68.99913381060732,
+          2,
+          4
+        ],
+        [
+          -114.40618971690812,
+          45.33163717483279,
+          2,
+          0
+        ],
+        [
+          -110.4777375763586,
+          -68.87082660052076,
+          0,
+          0
+        ],
+        [
+          94.80421890616702,
+          -58.18533995711893,
+          0,
+          4
+        ],
+        [
+          43.41281226040475,
+          12.21238906000905,
+          1,
+          3
+        ],
+        [
+          -47.690681303191404,
+          -2.7800732875242744,
+          1,
+          1
+        ],
+        [
+          20.130312862158945,
+          -51.15657769698146,
+          0,
+          2
+        ],
+        [
+          20.42082555756559,
+          62.3596710946712,
+          2,
+          2
+        ],
+        [
+          60.13529234955633,
+          66.034845634668,
+          2,
+          3
+        ],
+        [
+          -54.6760970638518,
+          30.572573802845927,
+          2,
+          1
+        ],
+        [
+          -92.6517356802226,
+          0.5301311208055788,
+          1,
+          0
+        ],
+        [
+          -31.042478312634046,
+          -54.583495320928236,
+          0,
+          1
+        ],
+        [
+          66.50288497327148,
+          -48.342518448047954,
+          0,
+          3
+        ],
+        [
+          80.94717376216519,
+          26.566905092274617,
+          1,
+          4
+        ],
+        [
+          16.521089720300267,
+          14.162537255336256,
+          1,
+          2
+        ]
+      ],
+      &quot;minimum_corner_edge_clearance_mm&quot;: 4.000866189392681
+    },
+    {
+      &quot;workspace&quot;: &quot;oblique&quot;,
+      &quot;polygon_mm&quot;: [
+        [
+          -100,
+          -60
+        ],
+        [
+          100,
+          -40
+        ],
+        [
+          80,
+          60
+        ],
+        [
+          -90,
+          70
+        ]
+      ],
+      &quot;yaw_deg&quot;: 0,
+      &quot;samples_xy_row_column&quot;: [
+        [
+          -74.37901708808552,
+          37.34059264760033,
+          2,
+          0
+        ],
+        [
+          63.90962479000125,
+          44.23331679581924,
+          2,
+          4
+        ],
+        [
+          -77.53757652971501,
+          -40.457298972922025,
+          0,
+          0
+        ],
+        [
+          67.27609615743324,
+          -23.36294505515779,
+          0,
+          4
+        ],
+        [
+          -35.72335678141679,
+          2.874061603657913,
+          1,
+          1
+        ],
+        [
+          32.51896049468522,
+          14.338885751771633,
+          1,
+          3
+        ],
+        [
+          15.296498544992955,
+          43.52639486999562,
+          2,
+          2
+        ],
+        [
+          -49.07262420675419,
+          -35.88905587138285,
+          0,
+          1
+        ],
+        [
+          -65.5034459557067,
+          5.40539438649839,
+          1,
+          0
+        ],
+        [
+          49.81489511106478,
+          -21.64274587030979,
+          0,
+          3
+        ],
+        [
+          -40.95587795045079,
+          27.905749801344808,
+          2,
+          1
+        ],
+        [
+          15.07888603907038,
+          -24.587482837423416,
+          0,
+          2
+        ],
+        [
+          60.38177450050563,
+          25.315868599974714,
+          1,
+          4
+        ],
+        [
+          45.045162808656436,
+          43.87416418734091,
+          2,
+          3
+        ],
+        [
+          12.375348105093838,
+          15.83017554819832,
+          1,
+          2
+        ]
+      ],
+      &quot;minimum_corner_edge_clearance_mm&quot;: 4.000378417473627
+    },
+    {
+      &quot;workspace&quot;: &quot;rectangle&quot;,
+      &quot;polygon_mm&quot;: [
+        [
+          -133.5,
+          -85
+        ],
+        [
+          133.5,
+          -85
+        ],
+        [
+          133.5,
+          85
+        ],
+        [
+          -133.5,
+          85
+        ]
+      ],
+      &quot;yaw_deg&quot;: 45,
+      &quot;samples_xy_row_column&quot;: [
+        [
+          107.173028783686,
+          64.02867693382022,
+          2,
+          4
+        ],
+        [
+          -109.84680285463398,
+          43.253986292983946,
+          2,
+          0
+        ],
+        [
+          -106.44045279614303,
+          -63.91605232304884,
+          0,
+          0
+        ],
+        [
+          92.84998781685026,
+          -54.5366201515907,
+          0,
+          4
+        ],
+        [
+          -47.69068130319141,
+          -2.7800732875242744,
+          1,
+          1
+        ],
+        [
+          43.41281226040475,
+          12.21238906000905,
+          1,
+          3
+        ],
+        [
+          20.130312862158945,
+          -48.366962084686214,
+          0,
+          2
+        ],
+        [
+          20.42082555756559,
+          58.2007355140907,
+          2,
+          2
+        ],
+        [
+          60.13529234955633,
+          61.42670466894014,
+          2,
+          3
+        ],
+        [
+          80.83458204174525,
+          26.566905092274617,
+          1,
+          4
+        ],
+        [
+          66.50288497327148,
+          -45.89685672283688,
+          0,
+          3
+        ],
+        [
+          -31.042478312634053,
+          -51.37501800985373,
+          0,
+          1
+        ],
+        [
+          -90.98357552511979,
+          0.530131120805577,
+          1,
+          0
+        ],
+        [
+          -54.67609706385181,
+          30.298878263600642,
+          2,
+          1
+        ],
+        [
+          16.521089720300264,
+          14.162537255336252,
+          1,
+          2
+        ]
+      ],
+      &quot;minimum_corner_edge_clearance_mm&quot;: 4.000760317702628
+    },
+    {
+      &quot;workspace&quot;: &quot;oblique&quot;,
+      &quot;polygon_mm&quot;: [
+        [
+          -100,
+          -60
+        ],
+        [
+          100,
+          -40
+        ],
+        [
+          80,
+          60
+        ],
+        [
+          -90,
+          70
+        ]
+      ],
+      &quot;yaw_deg&quot;: 45,
+      &quot;samples_xy_row_column&quot;: [
+        [
+          -70.7819510977653,
+          35.48497116623885,
+          2,
+          0
+        ],
+        [
+          62.45863002037148,
+          40.054079870370956,
+          2,
+          4
+        ],
+        [
+          -73.98818350289491,
+          -36.345059360086935,
+          0,
+          0
+        ],
+        [
+          65.99459376212401,
+          -20.72325437314103,
+          0,
+          4
+        ],
+        [
+          -35.72335678141679,
+          2.8740616036579136,
+          1,
+          1
+        ],
+        [
+          32.51896049468522,
+          14.338885751771633,
+          1,
+          3
+        ],
+        [
+          15.296498544992955,
+          39.95808038845474,
+          2,
+          2
+        ],
+        [
+          -49.07262420675419,
+          -32.425114601589,
+          0,
+          1
+        ],
+        [
+          -64.14507771373152,
+          5.40539438649839,
+          1,
+          0
+        ],
+        [
+          49.81489511106478,
+          -19.787519115696846,
+          0,
+          3
+        ],
+        [
+          -40.95587795045079,
+          27.670922466970516,
+          2,
+          1
+        ],
+        [
+          15.07888603907038,
+          -22.47134000962926,
+          0,
+          2
+        ],
+        [
+          45.045162808656436,
+          39.92043712848288,
+          2,
+          3
+        ],
+        [
+          60.32354687177544,
+          25.315868599974714,
+          1,
+          4
+        ],
+        [
+          12.375348105093838,
+          15.83017554819832,
+          1,
+          2
+        ]
+      ],
+      &quot;minimum_corner_edge_clearance_mm&quot;: 4.000287737643621
+    },
+    {
+      &quot;workspace&quot;: &quot;rectangle&quot;,
+      &quot;polygon_mm&quot;: [
+        [
+          -133.5,
+          -85
+        ],
+        [
+          133.5,
+          -85
+        ],
+        [
+          133.5,
+          85
+        ],
+        [
+          -133.5,
+          85
+        ]
+      ],
+      &quot;yaw_deg&quot;: 90,
+      &quot;samples_xy_row_column&quot;: [
+        [
+          111.32259781002855,
+          68.99913381060732,
+          2,
+          4
+        ],
+        [
+          -114.40618971690812,
+          45.33163717483279,
+          2,
+          0
+        ],
+        [
+          -110.4777375763586,
+          -68.87082660052076,
+          0,
+          0
+        ],
+        [
+          94.80421890616702,
+          -58.18533995711893,
+          0,
+          4
+        ],
+        [
+          43.41281226040475,
+          12.21238906000905,
+          1,
+          3
+        ],
+        [
+          -47.690681303191404,
+          -2.7800732875242744,
+          1,
+          1
+        ],
+        [
+          20.130312862158945,
+          -51.15657769698146,
+          0,
+          2
+        ],
+        [
+          20.42082555756559,
+          62.3596710946712,
+          2,
+          2
+        ],
+        [
+          60.13529234955633,
+          66.034845634668,
+          2,
+          3
+        ],
+        [
+          -54.6760970638518,
+          30.572573802845927,
+          2,
+          1
+        ],
+        [
+          -92.6517356802226,
+          0.5301311208055788,
+          1,
+          0
+        ],
+        [
+          -31.042478312634046,
+          -54.583495320928236,
+          0,
+          1
+        ],
+        [
+          66.50288497327148,
+          -48.342518448047954,
+          0,
+          3
+        ],
+        [
+          80.94717376216519,
+          26.566905092274617,
+          1,
+          4
+        ],
+        [
+          16.521089720300267,
+          14.162537255336256,
+          1,
+          2
+        ]
+      ],
+      &quot;minimum_corner_edge_clearance_mm&quot;: 4.000866189392681
+    },
+    {
+      &quot;workspace&quot;: &quot;oblique&quot;,
+      &quot;polygon_mm&quot;: [
+        [
+          -100,
+          -60
+        ],
+        [
+          100,
+          -40
+        ],
+        [
+          80,
+          60
+        ],
+        [
+          -90,
+          70
+        ]
+      ],
+      &quot;yaw_deg&quot;: 90,
+      &quot;samples_xy_row_column&quot;: [
+        [
+          -74.37901708808552,
+          37.34059264760033,
+          2,
+          0
+        ],
+        [
+          63.90962479000125,
+          44.23331679581924,
+          2,
+          4
+        ],
+        [
+          -77.53757652971501,
+          -40.457298972922025,
+          0,
+          0
+        ],
+        [
+          67.27609615743324,
+          -23.36294505515779,
+          0,
+          4
+        ],
+        [
+          -35.72335678141679,
+          2.874061603657913,
+          1,
+          1
+        ],
+        [
+          32.51896049468522,
+          14.338885751771633,
+          1,
+          3
+        ],
+        [
+          15.296498544992955,
+          43.52639486999562,
+          2,
+          2
+        ],
+        [
+          -49.07262420675419,
+          -35.88905587138285,
+          0,
+          1
+        ],
+        [
+          -65.5034459557067,
+          5.40539438649839,
+          1,
+          0
+        ],
+        [
+          49.81489511106478,
+          -21.64274587030979,
+          0,
+          3
+        ],
+        [
+          -40.95587795045079,
+          27.905749801344808,
+          2,
+          1
+        ],
+        [
+          15.07888603907038,
+          -24.587482837423416,
+          0,
+          2
+        ],
+        [
+          60.38177450050563,
+          25.315868599974714,
+          1,
+          4
+        ],
+        [
+          45.045162808656436,
+          43.87416418734091,
+          2,
+          3
+        ],
+        [
+          12.375348105093838,
+          15.83017554819832,
+          1,
+          2
+        ]
+      ],
+      &quot;minimum_corner_edge_clearance_mm&quot;: 4.000378417473627
+    }
+  ]
+}</pre></section></main><script src="../source-return.js"></script></body></html>
