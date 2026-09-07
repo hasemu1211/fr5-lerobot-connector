@@ -1,5 +1,6 @@
 """Acquisition IO/lineage contracts; geometry remains the native sampler's job."""
 import copy
+from collections import Counter
 from contextlib import ExitStack
 import io as text_io
 import json
@@ -13,6 +14,7 @@ from tests.data_factory.test_training_approval import snapshot
 from tools.data_factory.campaign_authoring import compile_collection_campaign
 from tools.data_factory import collection_recommendation as producer
 from tools.data_factory import collection_recommendation_io as io
+from tools.data_factory import episode_ledger
 from tools.data_factory.operator import catalog as sampler
 from tools.fr5_data_factory import canonical_digest, ContractError
 
@@ -79,6 +81,58 @@ class AcquisitionTests(unittest.TestCase):
         self.assertFalse(first['recommendation']['authority']['training_authorization'])
         self.assertEqual(io.recommend_stored_collection(run_directories=self.runs,source_commit=COMMIT)['availability'],'UNAVAILABLE')
 
+    def test_load_run_reads_one_canonical_graph_then_explicit_artifacts(self):
+        before = snapshot(self.root)
+        with (mock.patch.object(episode_ledger, '_source_bindings',
+                                wraps=episode_ledger._source_bindings) as bindings,
+              mock.patch.object(episode_ledger, '_artifact',
+                                wraps=episode_ledger._artifact) as artifact,
+              mock.patch.object(io, '_artifact', artifact)):
+            loaded, _protected = io._load_run(self.runs[0])
+        self.assertEqual(loaded, self.fixture.evidence[0])
+        self.assertEqual(bindings.call_count, 1)
+        # One canonical pass plus the explicit returned payloads; neither is
+        # cached across discovery, recommendation or the final freshness read.
+        self.assertEqual(Counter(call.kwargs['name'] for call in artifact.call_args_list),
+                         Counter({name: 2 for name in episode_ledger.ARTIFACT_NAMES | {'candidate'}}))
+        self.assertEqual(snapshot(self.root), before)
+
+    def test_load_run_still_rejects_bad_digests_and_missing_or_symlink_locators(self):
+        run = self.runs[0]
+        ledger = self.fixture.evidence[0]['ledger']
+        targets = [run/name for name in ('episode_ledger.json', 'episode_ledger_state.json',
+                                         'candidate_admission.json')]
+        targets.append(Path(ledger['artifacts']['technical']['artifact_path']))
+        for path in targets:
+            with self.subTest(artifact=path.name):
+                original = path.read_bytes()
+                value = json.loads(original)
+                field = {'episode_ledger.json': 'ledger_digest',
+                         'episode_ledger_state.json': 'state_digest',
+                         'candidate_admission.json': 'reviewed_by'}.get(path.name, 'status')
+                value[field] = 'tampered'
+                try:
+                    path.write_text(json.dumps(value))
+                    with self.assertRaises(ContractError):
+                        io._load_run(run)
+                finally:
+                    path.write_bytes(original)
+        locator = ledger['episode']['lerobot_v3_locator']
+        for location in [locator['data'], *locator['videos']]:
+            path = Path(self.fixture.dataset_root)/location['relative_path']
+            original = path.read_bytes()
+            try:
+                path.unlink()
+                with self.subTest(locator=path, kind='missing'), self.assertRaisesRegex(ContractError, 'LOCATOR_PATH'):
+                    io._load_run(run)
+                path.symlink_to(run/'candidate_admission.json')
+                with self.subTest(locator=path, kind='symlink'), self.assertRaisesRegex(ContractError, 'LOCATOR_PATH'):
+                    io._load_run(run)
+            finally:
+                if path.is_symlink():
+                    path.unlink()
+                path.write_bytes(original)
+
     def test_duplicate_and_stale_scene_reject_without_publication(self):
         for args, code in [({'run_directories':self.runs*2},'EPISODE_DUPLICATE'),
                            ({'acquisition':{**self.context,'expected_scene_digest':canonical_digest('old')}},'SCENE_CHANGED')]:
@@ -117,6 +171,23 @@ class AcquisitionTests(unittest.TestCase):
             result=self.call(output_root=self.root/'out')
         self.assertEqual(result['availability'],'UNAVAILABLE')
         self.assertIn('SCENE_CHANGED',result['reason_codes'][0])
+        self.assertFalse((self.root/'out').exists())
+
+    def test_valid_review_change_during_derivation_rejects_before_publication(self):
+        native = io.derive_collection_recommendation
+        def change(**kwargs):
+            result = native(**kwargs)
+            evidence = self.fixture.evidence[0]
+            evidence['candidate'].update(semantic_status='FAIL', reason='synthetic rejection')
+            self.fixture.rebind_episode(evidence)
+            for name, value in [('candidate_admission.json', evidence['candidate']),
+                                ('episode_ledger_state.json', evidence['state'])]:
+                (self.runs[0]/name).write_text(json.dumps(value))
+            return result
+        with mock.patch.object(io, 'derive_collection_recommendation', side_effect=change):
+            result = self.call(output_root=self.root/'out')
+        self.assertEqual(result['availability'], 'UNAVAILABLE')
+        self.assertEqual(result['reason_codes'], ['COLLECTION_ACQUISITION_INPUT_CHANGED'])
         self.assertFalse((self.root/'out').exists())
 
     def test_changed_candidate_and_nonpass_evidence_do_not_become_success(self):

@@ -13,7 +13,6 @@ from tools.data_factory.campaign_operator import validate_compiled_authoring_evi
 from tools.data_factory.collection_recommendation import derive_collection_recommendation
 from tools.data_factory.episode_ledger import (
     _artifact,
-    validate_episode_ledger,
     validate_episode_state,
 )
 from tools.fr5_data_factory import ContractArgumentParser, ContractError, load_json_strict, canonical_digest
@@ -62,7 +61,8 @@ def discover_stored_collection(run_root: str | Path) -> dict:
 
 
 def _load_run(root: Path) -> tuple[dict, set[Path]]:
-    ledger = validate_episode_ledger(load_json_strict(root / "episode_ledger.json"))
+    ledger = load_json_strict(root / "episode_ledger.json")
+    # State validation already reopens and validates the ledger's full source graph.
     state = validate_episode_state(load_json_strict(root / "episode_ledger_state.json"), ledger=ledger)
     protected = {root, Path(ledger["dataset"]["dataset_root"]).resolve(strict=True)}
     artifacts = {}
