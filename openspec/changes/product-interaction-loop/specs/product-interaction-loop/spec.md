@@ -27,7 +27,7 @@ Collection motion trial selection SHALL state the intended demonstration timing 
 
 ### Requirement: Finite candidate speed trials use the existing Collection authority
 
-The native Collection application SHALL make a registered candidate motion preset usable in TEST_COLLECTION through the existing finite campaign. GENERAL_COLLECTION SHALL still require exact production qualification for every selected endpoint. The browser and automation SHALL select only the native preset identity and digest; trial scope SHALL derive from trusted application mode, never serialized program metadata. The current candidate is provisional, not an agreed optimum or a physically qualified policy. The next consumer is the existing Collection executor and root-owned physical validation.
+The native Collection application SHALL make a registered candidate motion preset usable in TEST_COLLECTION through the existing finite campaign. GENERAL_COLLECTION SHALL still require exact production qualification for every selected endpoint. The browser and automation SHALL select only the native preset identity and digest; trial scope SHALL derive from trusted application mode, never serialized program metadata. Trial selection or success SHALL NOT confer qualification; subsequent explicit engineering registration belongs to the existing qualification owner and does not establish an empirical optimum. The next consumer is the existing Collection executor and root-owned physical validation.
 
 #### Scenario: Compile and consume a candidate trial
 
@@ -40,8 +40,15 @@ The native Collection application SHALL make a registered candidate motion prese
 
 - **WHEN** the person or automation selects `demonstration-rhythm-r001` through the existing native TEST_COLLECTION draft
 - **THEN** all eight in-job ARM phases resolve velocity and acceleration scaling to 0.1, including alignment, final approach, lift and lower; all existing preset files remain byte-identical
-- **AND** the candidate remains unqualified, preserves gripper steps including staged opening, and requires existing exact production qualification before use in GENERAL_COLLECTION
-- **AND** predicted recording duration is presented as a hypothesis from native plans and prior observed timing; physical smoothness and accepted recording effectiveness remain unverified until actual execution evidence exists.
+- **AND** trial selection preserves gripper steps including staged opening and grants no production authority; GENERAL_COLLECTION requires separate exact production qualification for each selected endpoint
+- **AND** predicted recording duration is presented as a hypothesis distinct from actual execution evidence; observed timing and technical success do not establish an empirical optimum or semantic/training approval.
+
+#### Scenario: Explicit later registration permits only matched qualified recipes
+
+- **WHEN** the engineering owner separately registers demonstration-rhythm-r001 for the PLACE_A base recipe using the native v3 derivation and a new decision timestamp
+- **THEN** the native catalog matches its unchanged base geometry and exact preset digest, and A production selection and finite compilation use that qualified artifact without trial authority
+- **AND** the original v2 and preset remain unchanged; routes requiring unregistered B or another unqualified policy still reject before physical effects
+- **AND** campaign authorization and scene/cell/hardware/exact-plan/single-owner gates remain necessary; one observed A pickup and same-position release do not prove all A poses/tasks, A/B transfer or a success distribution, and confer no semantic or training approval.
 
 #### Scenario: Production and changed inputs remain blocked
 

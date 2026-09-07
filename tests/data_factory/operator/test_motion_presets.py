@@ -464,7 +464,8 @@ class MotionPresetTests(unittest.TestCase):
             self.assertEqual({path: path.read_bytes() for path in sources}, sources)
 
     def test_native_production_keeps_candidate_blocked_before_effects(self):
-        self.use_preset("demonstration-rhythm-r001")
+        # This policy has no engineering registration at either endpoint.
+        self.use_preset("practical-transfer-r001")
         from functools import partial
         from tests.data_factory.operator.test_object_position import ObjectPositionContinuityTests
         from tools.data_factory.operator.composition import build_physical_operator_application, build_physical_operator_console
@@ -487,6 +488,76 @@ class MotionPresetTests(unittest.TestCase):
                                             data_disposition="PRODUCTION", run_live_call=fixture.forbidden)
         fixture.forbidden.assert_not_called()
         self.assertEqual(fixture.scene.snapshot(), scene)
+        self.assertEqual(fixture.episode.read_bytes(), fixture.original)
+        self.assertFalse((fixture.root / "datasets/fr5_episodes/uncreated-dataset").exists())
+
+    def test_registered_a_production_compiles_but_unqualified_b_remains_blocked(self):
+        self.use_preset("demonstration-rhythm-r001")
+        from tools.data_factory.operator.catalog import motion_geometry_digest, selected_motion_preset
+        from tests.data_factory.operator.test_object_position import ObjectPositionContinuityTests
+        a, base, _ = self.endpoint("A")
+        qualified = factory.load_json_strict(CONFIG / "motion_qualifications/fr5-place-a-wood-cube-24mm-r001-demonstration-rhythm-r001.json")
+        expected = factory.prepare_motion_preset_qualification(base, self.preset)
+        expected.update(qualification_status="QUALIFIED", qualified_at="2026-09-07T06:19:08Z")
+        self.assertEqual(qualified, expected)
+        self.assertNotEqual(qualified["qualified_at"], base["qualified_at"])
+        self.assertEqual(motion_geometry_digest(qualified), motion_geometry_digest(base))
+        b, qb, _ = self.endpoint("B")
+        with self.assertRaisesRegex(factory.ContractError, "MOTION_PRESET_QUALIFICATION_REQUIRED"):
+            self.resolve(a, qualified, release_validated=b, release_motion_qualification=qb, motion_preset=self.preset)
+
+        fixture = ObjectPositionContinuityTests()
+        fixture.setUp()
+        self.addCleanup(fixture.doCleanups)
+        app = fixture.application()
+
+        def consume(op, payload, identifier):
+            return app.bridge_core.consume(fixture.request(app, op, payload, identifier))
+
+        consume("update_camera_bindings", {"bindings": {
+            "usb-Generic_USB2.0_PC_CAMERA-video-index0": "UP", "usb-Generic_USB2.0_PC_CAMERA_2-video-index0": "WRIST",
+        }}, "registered-cameras")
+        draft_id = app.draft["draft_id"]
+        consume("update_draft", {"draft_id": draft_id, "motion_preset": self.binding}, "registered-choice")
+        consume("update_draft", {"draft_id": draft_id, "requested_count": 6}, "registered-count")
+        preset = selected_motion_preset(app.catalog, self.binding)
+        self.assertEqual(set(preset["qualifications"]), {base["motion_qualification_id"]})
+        self.assertEqual(preset["qualifications"][base["motion_qualification_id"]]["digest"], factory.canonical_digest(qualified))
+        self.assertEqual(next(item for item in app.projection()["motion_presets"] if item["id"] == self.binding["id"])["status"], "QUALIFIED")
+
+        consume("update_draft", {"draft_id": draft_id, "selection": {"task": "pick_place"}}, "unqualified-b")
+        self.assertIn("PLACE_B", {item["workspace_id"] for item in app._workspace_cycle()})
+        self.assertEqual(next(item for item in app.projection()["motion_presets"] if item["id"] == self.binding["id"])["status"], "QUALIFICATION_REQUIRED")
+        self.assertNotIn("compile_draft", app.projection()["available_ops"])
+        scene = fixture.scene.snapshot()
+        with self.assertRaises(factory.ContractError):
+            consume("compile_draft", {"draft_id": draft_id, "data_disposition": "PRODUCTION"}, "blocked-b-compile")
+        self.assertIsNone(app._campaign)
+        self.assertEqual(fixture.scene.snapshot(), scene)
+        fixture.forbidden.assert_not_called()
+
+        consume("update_draft", {"draft_id": draft_id, "selection": {"task": "pickup_e2e"}}, "registered-a")
+        resolved = []
+        native_resolver = run_job.resolve_inputs
+
+        def observe(payload, **kwargs):
+            self.assertIs(kwargs["motion_preset_trial"], False)
+            result = native_resolver(payload, **kwargs)
+            resolved.append(result[1])
+            return result
+
+        with mock.patch.object(run_job, "resolve_inputs", side_effect=observe):
+            consume("compile_draft", {"draft_id": draft_id, "data_disposition": "PRODUCTION"}, "registered-compile")
+        view = app.projection()
+        self.assertEqual(view["workflow_state"], "REVIEW_CAMPAIGN")
+        self.assertIsNone(view["campaign_authorization"])
+        self.assertEqual(len(app._campaign.campaign_operator.manifest["slots"]), 6)
+        self.assertTrue(resolved)
+        for program in resolved:
+            self.assertEqual(program["binding_digests"]["motion_qualification"], factory.canonical_digest(qualified))
+            self.assertEqual(program["binding_digests"]["motion_preset"], self.binding["digest"])
+            self.assertNotIn("motion_preset_trial", program["binding_digests"])
+        fixture.forbidden.assert_not_called()
         self.assertEqual(fixture.episode.read_bytes(), fixture.original)
         self.assertFalse((fixture.root / "datasets/fr5_episodes/uncreated-dataset").exists())
 
