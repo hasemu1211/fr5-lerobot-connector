@@ -2,13 +2,14 @@
 from __future__ import annotations
 
 import json
+import copy
 import os
 import queue
 import threading
 from pathlib import Path
 from typing import Any, Mapping
 
-from tools.fr5_data_factory import ContractError, DIGEST, SAFE_ID, load_json_strict
+from tools.fr5_data_factory import ContractError, DIGEST, SAFE_ID, canonical_digest, load_json_strict
 
 
 SCHEMA_VERSION = "data_factory.phase_event.v1"
@@ -36,7 +37,7 @@ def writer_resource_contract() -> dict[str, int]:
     return {"queue_capacity": QUEUE_CAPACITY, "max_line_bytes": MAX_LINE_BYTES, "max_text_bytes": MAX_TEXT_BYTES}
 
 
-def validate_phase_event(value: Mapping[str, Any]) -> dict[str, Any]:
+def validate_phase_event(value: Mapping[str, Any], *, plan: Mapping[str, Any] | None = None) -> dict[str, Any]:
     """Return one exact, immutable-by-convention phase-event record."""
     if not isinstance(value, Mapping) or set(value) != EVENT_KEYS:
         raise ContractError("PHASE_EVENT_FIELDS")
@@ -54,9 +55,41 @@ def validate_phase_event(value: Mapping[str, Any]) -> dict[str, Any]:
     if event in {"HOLD_ENTERED", "DECISION_RECEIVED"}:
         if index is not None or count is not None:
             raise ContractError("PHASE_EVENT_SEGMENT")
-    elif index != 0 or count != 1:
-        # v1 intentionally has no multi-segment execution yet.
-        raise ContractError("PHASE_EVENT_SEGMENT")
+    else:
+        _integer(index, "PHASE_EVENT_SEGMENT")
+        _integer(count, "PHASE_EVENT_SEGMENT", minimum=1)
+        if index >= count:
+            raise ContractError("PHASE_EVENT_SEGMENT")
+        if index != 0 or count != 1:
+            if plan is None:
+                raise ContractError("PHASE_EVENT_PLAN_REQUIRED")
+            if value["phase"] != "LEARNED_CHUNK" or value["event_source"] != "pickup_executor":
+                raise ContractError("PHASE_EVENT_SEGMENT")
+    if plan is not None:
+        if not isinstance(plan, Mapping) or plan_digest != canonical_digest(plan) or run_id != plan.get("run_id"):
+            raise ContractError("PHASE_EVENT_PLAN_BINDING")
+        steps = plan.get("steps")
+        if not isinstance(steps, list) or not steps or not isinstance(steps[0], Mapping):
+            raise ContractError("PHASE_EVENT_PLAN_BINDING")
+        held = steps[0].get("held_target_segments")
+        if held is not None:
+            from tools.data_factory.rollout.finite_plan import HELD_PROPOSAL_SCHEMA, validate_proposal
+            proposal = validate_proposal(plan.get("learned_proposal"))
+            if (proposal["schema_version"] != HELD_PROPOSAL_SCHEMA or not isinstance(held, list)
+                    or not 1 <= len(held) <= 2 * len(proposal["actions"])
+                    or value["phase"] != "LEARNED_CHUNK" or value["event_source"] != "pickup_executor"):
+                raise ContractError("PHASE_EVENT_PLAN_BINDING")
+            if event in ACTION_EVENTS:
+                if count != len(held):
+                    raise ContractError("PHASE_EVENT_SEGMENT")
+                step = held[index]
+                expected = ({"step": step, "accepted": True} if event == "GOAL_ACCEPTED" else
+                            {"step": step} if event == "DISPATCH_REQUESTED" else
+                            {"step": step, "terminal_status": "SUCCEEDED"} if value["action_status"] == "SUCCEEDED" else None)
+                if expected is not None and evidence_digest != canonical_digest(expected):
+                    raise ContractError("PHASE_EVENT_SEGMENT_BINDING")
+        elif event in ACTION_EVENTS and (index != 0 or count != 1):
+            raise ContractError("PHASE_EVENT_PLAN_BINDING")
     status = value["action_status"]
     if event in ACTION_EVENTS:
         _text(status, "PHASE_EVENT_ACTION_STATUS")
@@ -74,7 +107,29 @@ def validate_phase_event(value: Mapping[str, Any]) -> dict[str, Any]:
     return record
 
 
-def read_phase_events(path: str | Path) -> list[dict[str, Any]]:
+def validate_phase_event_sequence(events, *, plan=None):
+    """Validate segment identities once, before existing timing/row consumers."""
+    records = [validate_phase_event(event, plan=plan) for event in events]
+    counts, seen, last_index = {}, set(), {}
+    for event in records:
+        if event["event"] not in ACTION_EVENTS:
+            continue
+        phase, count = event["phase"], event["segment_count"]
+        if phase in counts and counts[phase] != count:
+            raise ContractError("PHASE_EVENT_SEGMENT_COUNT")
+        counts[phase] = count
+        key = (phase, event["segment_index"], event["event"])
+        if key in seen:
+            raise ContractError("PHASE_EVENT_SEGMENT_DUPLICATE")
+        previous = last_index.get(phase, -1)
+        if not previous <= event["segment_index"] <= previous + 1:
+            raise ContractError("PHASE_EVENT_SEGMENT_ORDER")
+        last_index[phase] = event["segment_index"]
+        seen.add(key)
+    return records
+
+
+def read_phase_events(path: str | Path, *, plan: Mapping[str, Any] | None = None) -> list[dict[str, Any]]:
     """Read JSONL strictly; malformed sidecars are not silently repaired."""
     try:
         lines = Path(path).read_text(encoding="utf-8").splitlines()
@@ -85,19 +140,20 @@ def read_phase_events(path: str | Path) -> list[dict[str, Any]]:
         if not line.strip():
             raise ContractError("PHASE_EVENT_JSONL", f"blank line {number}")
         try:
-            records.append(validate_phase_event(load_json_strict(line)))
+            records.append(validate_phase_event(load_json_strict(line), plan=plan))
         except ContractError as exc:
             raise ContractError(exc.code, f"line {number}: {exc}") from exc
-    return records
+    return validate_phase_event_sequence(records, plan=plan)
 
 
 class PhaseEventWriter:
     """Best-effort sidecar writer: queue/disk failure only latches report failure."""
 
-    def __init__(self, path: str | Path, *, capacity: int = QUEUE_CAPACITY, max_line_bytes: int = MAX_LINE_BYTES) -> None:
+    def __init__(self, path: str | Path, *, capacity: int = QUEUE_CAPACITY, max_line_bytes: int = MAX_LINE_BYTES, plan: Mapping[str, Any] | None = None) -> None:
         if capacity < 1 or max_line_bytes < 1:
             raise ContractError("PHASE_EVENT_WRITER_CONFIG")
         self.path = Path(path)
+        self._plan = copy.deepcopy(plan)
         self._queue: queue.Queue[tuple[bytes, bool]] = queue.Queue(maxsize=capacity)
         self._max_line_bytes = max_line_bytes
         self._error: str | None = None
@@ -122,7 +178,7 @@ class PhaseEventWriter:
 
     def emit(self, event: Mapping[str, Any], *, flush: bool = False) -> bool:
         try:
-            record = validate_phase_event(event)
+            record = validate_phase_event(event, plan=self._plan)
             line = (json.dumps(record, sort_keys=True, separators=(",", ":"), allow_nan=False) + "\n").encode()
         except (ContractError, TypeError, ValueError):
             self._latch("BEHAVIOR_REPORT_UNAVAILABLE")

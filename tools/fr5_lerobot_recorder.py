@@ -183,6 +183,7 @@ class FR5LeRobotRecorder(Node):
                 actual = dataset.meta.features.get(key)
                 if actual is None or actual["dtype"] != spec["dtype"] or list(actual["shape"]) != spec["shape"] or actual.get("names") != spec.get("names"):
                     raise SystemExit(f"Existing dataset feature mismatch for {key}: {actual} != {spec}")
+            self._bound_image_writer(dataset)
             return dataset
         if root.exists() and any(root.iterdir()):
             raise SystemExit(
@@ -190,7 +191,7 @@ class FR5LeRobotRecorder(Node):
             )
         if root.exists():
             root.rmdir()
-        return self.LeRobotDataset.create(
+        dataset = self.LeRobotDataset.create(
             repo_id=self.args.repo_id,
             fps=self.args.fps,
             root=root,
@@ -201,13 +202,53 @@ class FR5LeRobotRecorder(Node):
             rgb_encoder=rgb_encoder,
             **encoder_options,
         )
+        self._bound_image_writer(dataset)
+        return dataset
+
+    def _bound_image_writer(self, dataset) -> None:
+        """Configure the native thread queue before any row producer starts.
+
+        LeRobot has no queue-capacity argument. Keep the exact Queue already
+        held by its consumers; replacing it would strand those threads. This
+        startup-only adapter relies on CPython Queue internals and is covered
+        against the installed native writer. No global/dependency patching.
+        """
+        image_writer = getattr(dataset.writer, "image_writer", None)
+        if image_writer is None:
+            return
+        pending = getattr(image_writer, "queue", None)
+        if not isinstance(pending, queue.Queue):
+            raise RuntimeError("IMAGE_WRITER_QUEUE_UNSUPPORTED")
+        capacity = self.args.writer_queue_size * len(self.camera_names)
+        with pending.mutex:
+            if pending.unfinished_tasks:
+                raise RuntimeError("IMAGE_WRITER_ALREADY_ACTIVE")
+            pending.maxsize = min(pending.maxsize, capacity) if pending.maxsize > 0 else capacity
 
     def _drain_image_writer(self) -> None:
-        """Wait for LeRobot's bounded image workers at lifecycle barriers."""
+        """Drain LeRobot image workers; their queue is not necessarily bounded."""
         writer = getattr(self.dataset, "writer", None)
         image_writer = getattr(writer, "image_writer", None)
         if image_writer is not None:
             image_writer.wait_until_done()
+
+    def _image_writer_metrics(self) -> dict:
+        """Observe the downstream PNG queue, not the upstream aligned-row queue.
+
+        Queue size is a sample, not a durability or health verdict. Unknown
+        upstream implementations must not be reported as an empty queue.
+        """
+        writer = getattr(self.dataset, "writer", None)
+        image_writer = getattr(writer, "image_writer", None)
+        pending = getattr(image_writer, "queue", None)
+        if not isinstance(pending, queue.Queue):
+            return {"status": "NOT_AVAILABLE"}
+        return {
+            "status": "AVAILABLE",
+            "queued_images": pending.qsize(),
+            "capacity_images": pending.maxsize if pending.maxsize > 0 else None,
+            "sampled_high_water_images": getattr(self, "image_writer_high_water", 0),
+        }
 
     def _reset_episode(self) -> None:
         # Invalidate targets that the sampler computed before this reset.  The
@@ -232,6 +273,7 @@ class FR5LeRobotRecorder(Node):
         self.enqueue_attempts = 0
         self.writer_queue_drops = 0
         self.writer_queue_high_water = 0
+        self.image_writer_high_water = 0
         self.stale_sample_skips = 0
         self.missing_action_skips = 0
         self.alignment_failures = 0
@@ -259,6 +301,7 @@ class FR5LeRobotRecorder(Node):
                 "writer_queue": self.writer_queue.qsize(),
                 "writer_queue_high_water": getattr(self, "writer_queue_high_water", 0),
                 "writer_queue_drops": self.writer_queue_drops,
+                "image_writer": self._image_writer_metrics(),
                 "alignment_failures": self.alignment_failures,
                 "alignment_failure_sources": dict(getattr(
                     self, "alignment_failure_sources", {},
@@ -809,6 +852,7 @@ class FR5LeRobotRecorder(Node):
             "state_age_max_ms": float(max(self.state_ages) * 1000) if self.state_ages else None,
             "writer_queue_drops": self.writer_queue_drops,
             "writer_queue_high_water": getattr(self, "writer_queue_high_water", 0),
+            "image_writer": self._image_writer_metrics(),
             "stale_sample_skips": self.stale_sample_skips,
             "missing_action_skips": self.missing_action_skips,
             "alignment_failures": self.alignment_failures,
@@ -1529,8 +1573,13 @@ class FR5LeRobotRecorder(Node):
         for camera, image in zip(self.camera_names, images):
             frame[f"observation.images.{camera}"] = image
         self.dataset.add_frame(frame)
+        image_writer_metrics = self._image_writer_metrics()
         quality_images = ()
         with self.lock:
+            self.image_writer_high_water = max(
+                getattr(self, "image_writer_high_water", 0),
+                image_writer_metrics.get("queued_images", 0),
+            )
             self.frames += 1
             self.frame_stamps.append(row_stamp)
             self.sync_spans.append(sync_span)

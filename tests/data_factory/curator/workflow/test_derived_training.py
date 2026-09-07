@@ -25,7 +25,7 @@ from tools.fr5_training_profile import launch_feature_contract, read_metadata, b
 
 
 class DerivedTrainingTest(unittest.TestCase):
-    def native_case(self, *, episodes=3, train_fit=False):
+    def native_case(self, *, episodes=3, train_fit=False, source_only=False):
         fixture = ledger_fixtures.EpisodeLedgerTest()
         fixture.setUp()
         self.addCleanup(fixture.doCleanups)
@@ -84,6 +84,8 @@ class DerivedTrainingTest(unittest.TestCase):
             fixture._json('episode_ledger_state.json', project_episode_state(ledger=ledger, candidate=candidate_ref))
             runs.append(fixture.evidence)
         before = snapshot(source), [snapshot(run) for run in runs]
+        if source_only:
+            return root, source, runs, before
         if train_fit:
             from tools.data_factory.training_split import compile_launch_split
             from tools.data_factory.curator.workflow.setup import (

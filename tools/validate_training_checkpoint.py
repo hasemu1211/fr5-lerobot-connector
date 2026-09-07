@@ -141,6 +141,7 @@ def validate_saved_observation_view(split: Mapping, receipt: Mapping) -> dict:
         DERIVED_PROVENANCE_SCHEMA,
         EPISODE_PROVENANCE_SCHEMA,
         LEDGER_PROVENANCE_SCHEMA,
+        MAPPED_PROVENANCE_SCHEMA,
         validate_current_training_inventory,
     )
     from tools.data_factory.curator.core.errors import CuratorError
@@ -168,7 +169,7 @@ def validate_saved_observation_view(split: Mapping, receipt: Mapping) -> dict:
         provenance = load_json_strict(Path(episode["episode_provenance"]["artifact_path"]))
         if provenance.get("schema_version") == DERIVED_PROVENANCE_SCHEMA:
             derived.append(provenance["derivation"])
-        elif provenance.get("schema_version") not in {EPISODE_PROVENANCE_SCHEMA, LEDGER_PROVENANCE_SCHEMA}:
+        elif provenance.get("schema_version") not in {EPISODE_PROVENANCE_SCHEMA, LEDGER_PROVENANCE_SCHEMA, MAPPED_PROVENANCE_SCHEMA}:
             raise ValueError("saved observation-view provenance is unknown")
     if not derived:
         return {"representation": "raw", "transform_application": "none",

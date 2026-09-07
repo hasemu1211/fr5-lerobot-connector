@@ -98,6 +98,7 @@ from tools.fr5_data_factory import (
     bounded_place_coordinate,
     canonical_digest,
     load_json_strict,
+    load_motion_preset,
     normalize_job_spec,
     normalize_yaw_deg,
     resolve_motion_program,
@@ -227,6 +228,12 @@ def _run_payload(value):
     if not isinstance(value, dict) or value.get("mode") not in {"plan_only", "live"}:
         raise ContractError("RUN_PAYLOAD")
     keys = set(COMMON_RUN_KEYS if value["mode"] == "plan_only" else LIVE_RUN_KEYS)
+    if "motion_preset" in value:
+        keys.add("motion_preset")
+        _exact(value["motion_preset"], {"id", "digest"}, "MOTION_PRESET_BINDING")
+        _identifier(value["motion_preset"]["id"], "MOTION_PRESET_BINDING")
+        if not isinstance(value["motion_preset"]["digest"], str) or not DIGEST.fullmatch(value["motion_preset"]["digest"]):
+            raise ContractError("MOTION_PRESET_BINDING")
     supplied_recycle = set(value) & RECYCLE_COORD_KEYS
     supplied_recycle_yaw = RECYCLE_YAW_KEY in value
     supplied_destination = DESTINATION_KEY in value
@@ -263,7 +270,7 @@ def _run_payload(value):
         raise ContractError("RUN_JOB")
     for key in keys - {"job", DESTINATION_KEY} - RECYCLE_COORD_KEYS - {
         RECYCLE_YAW_KEY, TRAJECTORY_SAMPLING_SEED_KEY,
-        TRAJECTORY_DESIGN_KEY,
+        TRAJECTORY_DESIGN_KEY, "motion_preset",
     }:
         _text(value[key], "RUN_PAYLOAD")
     if supplied_variant and (
@@ -321,6 +328,7 @@ def _campaign_manifest(value):
         first["run_id"] == second["run_id"]
         or any(first[key] != second[key] for key in LIVE_RUN_KEYS - {"run_id", "job"})
         or first.get(TRAJECTORY_VARIANT_KEY) != second.get(TRAJECTORY_VARIANT_KEY)
+        or first.get("motion_preset") != second.get("motion_preset")
     ):
         raise ContractError("CAMPAIGN_CHAIN")
     fixed_job = ("robot_system_id", "collection_profile_id", "place_id", "cell_calibration_id", "object_profile_id", "grasp_profile_id")
@@ -560,6 +568,7 @@ def _scene_binding(validated, release_pose, run_id, root=ROOT / "outputs/data_fa
 
 def resolve_inputs(
     payload, *, scene_binding_call=_scene_binding, input_transform=None,
+    motion_preset_trial=False,
 ):
     validated = validate_job_spec(
         payload["job"],
@@ -638,7 +647,7 @@ def resolve_inputs(
     planning_scene_profile = None
     if (
         motion_qualification.get("schema_version")
-        == "data_factory.motion_qualification.v2"
+        in {"data_factory.motion_qualification.v2", "data_factory.motion_qualification.v3"}
     ):
         profile_id = motion_qualification.get("planning_scene_profile_id")
         if not isinstance(profile_id, str) or SAFE_ID.fullmatch(profile_id) is None:
@@ -664,6 +673,9 @@ def resolve_inputs(
         release_validated=destination_validated,
         release_motion_qualification=destination_motion_qualification,
         planning_scene_profile=planning_scene_profile,
+        motion_preset=(load_motion_preset(payload["config_root"], payload["motion_preset"])
+                       if "motion_preset" in payload else None),
+        motion_preset_trial=motion_preset_trial,
     )
     trajectory_variant_id = payload.get(TRAJECTORY_VARIANT_KEY, "DIRECT")
     approach_sampling_profile = _load_approach_sampling_profile(
@@ -1727,6 +1739,45 @@ def bind_candidate_episode_state(ledger_reference, candidate_path):
     return reference
 
 
+def read_candidate_episode_state(ledger_reference, candidate_path, *, expected_file_digest=None):
+    """Observe an already durable review without repairing or writing artifacts."""
+    paths = [Path(ledger_reference[key]) for key in ("path", "state_path")]
+    paths.append(Path(candidate_path))
+    if (
+        [path.name for path in paths] != [
+            "episode_ledger.json", "episode_ledger_state.json", "candidate_admission.json",
+        ]
+        or any(path.is_symlink() or not path.is_file() for path in paths)
+        or len({path.resolve().parent for path in paths}) != 1
+    ):
+        raise ContractError("EPISODE_LEDGER_REFERENCE")
+    candidate = validate_candidate_admission(load_json_strict(paths[2]))
+    # An unchanged pending offer needs only its small canonical candidate read.
+    # Full ledger/state validation is required before adopting a new decision.
+    if candidate["semantic_status"] == "PENDING" and canonical_digest(candidate) == expected_file_digest:
+        return {"candidate": candidate, "ledger_reference": copy.deepcopy(dict(ledger_reference))}
+    ledger = validate_episode_ledger(load_json_strict(paths[0]))
+    if ledger["ledger_digest"] != ledger_reference.get("ledger_digest"):
+        raise ContractError("EPISODE_LEDGER_REFERENCE")
+    state = validate_episode_state(load_json_strict(paths[1]), ledger=ledger)
+    if (
+        state["candidate"] is None
+        or state["candidate"]["artifact_path"] != str(paths[2].resolve())
+        or state["candidate"]["artifact_digest"] != canonical_digest(candidate)
+        or state["review"]["semantic_status"] != candidate["semantic_status"]
+    ):
+        raise ContractError("EPISODE_REVIEW_BINDING")
+    reference = copy.deepcopy(dict(ledger_reference))
+    reference.update(
+        state_digest=state["state_digest"],
+        review_status=state["review"]["semantic_status"],
+        retention_state=state["retention"]["retention_state"],
+        reclaim_state=state["retention"]["reclaim_state"],
+        training_status=state["review"]["training_status"],
+    )
+    return {"candidate": candidate, "ledger_reference": reference}
+
+
 def review_candidate_admission(
     path, *, expected_file_digest, expected_review_context_digest, checklist_id,
     semantic_status, reviewed_by, reason=None, clock=lambda: datetime.now(timezone.utc),
@@ -2284,7 +2335,8 @@ def _write_episode_ledger(
 
 def run_learned_plan_only(payload, cancel, publish, *, checkpoint, observation,
                           instruction, period_s, max_observation_age_s=.3,
-                          device="cpu", resolver=resolve_inputs, executor_factory=_executor):
+                          device="cpu", held_gripper_targets=False,
+                          resolver=resolve_inputs, executor_factory=_executor):
     """Native checkpoint-to-existing-planner entry point; no recorder or motion.
 
     The returned exact finite plan still needs all existing physical bindings and
@@ -2302,6 +2354,7 @@ def run_learned_plan_only(payload, cancel, publish, *, checkpoint, observation,
             observation() if callable(observation) else observation, instruction=instruction,
             robot_description=Path(payload["urdf"]).read_text(),
             period_s=period_s, max_observation_age_s=max_observation_age_s,
+            held_gripper_targets=held_gripper_targets,
             velocity_scaling=min(step["limits"]["velocity_scaling"] for step in source["steps"] if "velocity_scaling" in step["limits"]),
         )
         program = compile_program(source, proposal)
@@ -2437,7 +2490,7 @@ def _object_reposition_payload(payload, binding, source_payload=None):
         for key in (
             "mode", "config_root", "home_candidate", "urdf",
             "expected_robot_system_id", "camera_profile", "dataset_root",
-            "run_root",
+            "run_root", "motion_preset",
         )
     ):
         raise ContractError("OBJECT_REPOSITION_PAYLOAD")
@@ -3113,13 +3166,29 @@ def _committed_review_handoff(
     }
 
 
+def _validate_motion_preset_trial_scope(program, data_disposition, *, motion_preset_trial=False):
+    if type(motion_preset_trial) is not bool:
+        raise ContractError("MOTION_PRESET_TRIAL_SCOPE")
+    trial = any(
+        "motion_preset_trial" in program.get(key, {})
+        for key in ("binding_digests", "destination_binding_digests")
+    )
+    if (motion_preset_trial or trial) and data_disposition != "TEST_ONLY":
+        raise ContractError("MOTION_PRESET_TRIAL_SCOPE")
+
+
 def run_object_reposition(
     payload, binding, cancel, publish, *, parent_plan_digest, operator_id,
     cell_root, resolver=resolve_inputs, executor_factory=_live_motion_executor,
     campaign_authorization, data_disposition, preapproval_scope,
-    source_payload=None, clock=None,
+    source_payload=None, clock=None, motion_preset_trial=False,
 ):
     """Plan and execute one post-commit reposition without recorder/data writes."""
+    _validate_motion_preset_trial_scope({}, data_disposition, motion_preset_trial=motion_preset_trial)
+    if motion_preset_trial and resolver is resolve_inputs:
+        from functools import partial
+
+        resolver = partial(resolve_inputs, motion_preset_trial=True)
     checked = validate_object_reposition_binding(binding)
     scope = _validate_object_reposition_preapproval(preapproval_scope)
     stored_scope = _load(
@@ -3152,6 +3221,7 @@ def run_object_reposition(
         payload, checked, cell_root=cell_root, resolver=resolver,
         source_payload=source_payload,
     )
+    _validate_motion_preset_trial_scope(program, data_disposition)
     continuation = _object_reposition_continuation_expectation(
         scope, authorization=authorization,
         parent_plan_digest=parent_plan_digest, binding=checked,
@@ -3427,7 +3497,7 @@ def run_live(payload, cancel, publish, *, resolver=resolve_inputs, executor_fact
              campaign_authorization=None,
              dataset_validation_scope="INCREMENTAL",
              candidate_writer_enabled=True,
-             repository_root=ROOT, clock=None):
+             repository_root=ROOT, clock=None, motion_preset_trial=False):
     """Public single HIL run: plan and human approval precede recorder begin and motion."""
     executor = recorder = resource_monitor = warmup_pool = None
     resource_finished = False
@@ -3509,6 +3579,13 @@ def run_live(payload, cancel, publish, *, resolver=resolve_inputs, executor_fact
             ):
                 raise ContractError("CANDIDATE_WRITER_SCOPE")
             cell_root = ROOT / "outputs/data_factory/cells"
+        # Resolver callables are trusted application code. Bind trial scope to
+        # the caller as well as the program; optional metadata is not authority.
+        _validate_motion_preset_trial_scope({}, data_disposition, motion_preset_trial=motion_preset_trial)
+        if motion_preset_trial and object_reposition_resolver is resolve_inputs:
+            from functools import partial
+
+            object_reposition_resolver = partial(resolve_inputs, motion_preset_trial=True)
         test_only = bound_runtime and data_disposition == "TEST_ONLY"
         if preapproval_checklist is not None and (
             not bound_runtime
@@ -3529,12 +3606,14 @@ def run_live(payload, cancel, publish, *, resolver=resolve_inputs, executor_fact
         if bound_runtime and resolver is resolve_inputs:
             validated, program, scene_binding = resolve_inputs(
                 payload,
+                motion_preset_trial=motion_preset_trial,
                 scene_binding_call=lambda validated, release_pose, run_id: _scene_binding(
                     validated, release_pose, run_id, root=cell_root,
                 ),
             )
         else:
             validated, program, scene_binding = resolver(payload)
+        _validate_motion_preset_trial_scope(program, data_disposition)
         checked_episode_instruction = (
             _validate_episode_instruction_scope(
                 episode_instruction_binding,
@@ -4134,6 +4213,7 @@ def run_live(payload, cancel, publish, *, resolver=resolve_inputs, executor_fact
                                 preapproval_scope=reposition_preapproval,
                                 source_payload=object_reposition_source_payload,
                                 clock=current_clock,
+                                **({"motion_preset_trial": True} if motion_preset_trial else {}),
                             )
                         except Exception as exc:
                             code = (
@@ -4939,6 +5019,12 @@ def _human_payload(args):
     else:
         job = load_json_strict(sys.stdin.read() if args.job == "-" else Path(args.job).read_text(encoding="utf-8"))
     payload = {"mode": args.mode, **values, "job": job}
+    if getattr(args, "motion_preset", None) is not None:
+        from tools.fr5_data_factory import _safe_profile_path, validate_motion_preset
+        preset = validate_motion_preset(load_json_strict(_safe_profile_path(
+            Path(values["config_root"]), "motion_presets", args.motion_preset,
+        )))
+        payload["motion_preset"] = {"id": preset["motion_preset_id"], "digest": canonical_digest(preset)}
     recycle = {name: getattr(args, name, None) for name in ("recycle_x_mm", "recycle_y_mm")}
     if any(value is not None for value in recycle.values()):
         if any(value is None for value in recycle.values()):
@@ -4959,6 +5045,7 @@ def _parser():
     for name in ("run-id", "job", "selected-sheet", "yaw0-sheet", "config-root", "motion-qualification", "home-candidate", "urdf", "expected-robot-system-id", "camera-profile", "dataset-root", "run-root"):
         parser.add_argument(f"--{name}")
     parser.add_argument("--recycle-x-mm", type=float)
+    parser.add_argument("--motion-preset", help="Requested shared arm policy ID; requires its exact qualification")
     parser.add_argument("--recycle-y-mm", type=float)
     return parser
 

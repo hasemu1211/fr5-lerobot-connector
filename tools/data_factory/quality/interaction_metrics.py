@@ -4,7 +4,7 @@ from __future__ import annotations
 import math
 from typing import Any, Mapping, Sequence
 
-from tools.data_factory.quality.phase_events import validate_phase_event
+from tools.data_factory.quality.phase_events import validate_phase_event_sequence
 from tools.data_factory.quality.phase_metrics import phase_row_windows, quality_attribute
 from tools.fr5_data_factory import ContractError, DIGEST, canonical_digest
 
@@ -34,7 +34,7 @@ def interaction_quality_attribute(
     """Report qualified contact-window and lift continuity evidence, never camera semantics."""
     if not DIGEST.fullmatch(recorder_rows_digest) or not isinstance(execution_evidence, Mapping):
         raise ContractError("INTERACTION_QUALITY_CONFIG")
-    parsed_events = [validate_phase_event(event) for event in events]
+    parsed_events = validate_phase_event_sequence(events, plan=plan)
     source_digests = {
         "phase_events": canonical_digest(parsed_events),
         "recorder_rows": recorder_rows_digest,
@@ -50,8 +50,12 @@ def interaction_quality_attribute(
         events=parsed_events,
         recorder_rows=recorder_rows,
         recorder_ros_clock_type=recorder_ros_clock_type,
+        plan=plan,
     )
     flags.extend(join_flags)
+    learned = "learned_proposal" in plan
+    if learned:
+        flags.append("LEARNED_INTERACTION_UNQUALIFIED")
     by_phase = {window["phase"]: window for window in windows}
     requirements = plan.get("gripper_requirements") if isinstance(plan, Mapping) else None
     if not isinstance(requirements, Mapping):
@@ -78,7 +82,7 @@ def interaction_quality_attribute(
         }
         if not in_window:
             flags.append("GRIPPER_FEEDBACK_OUT_OF_WINDOW")
-    else:
+    elif not learned:
         flags.append("GRIPPER_CLOSE_ROWS_MISSING")
 
     lift = by_phase.get("LIFT_LIN")
@@ -94,7 +98,7 @@ def interaction_quality_attribute(
             "feedback_end_m": end,
             "continuity_delta_m": abs(end - start),
         }
-    else:
+    elif not learned:
         flags.append("LIFT_ROWS_MISSING")
 
     grasp_verdict = execution_evidence.get("grasp_verdict")

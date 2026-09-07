@@ -1,0 +1,37 @@
+<!doctype html><html lang="ko"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>학습 입력과 정규화 경계 — FR5 근거</title><link rel="stylesheet" href="../site.css"></head><body><main class="source-page"><a href="../learning.html#inputs">← 설명으로 돌아가기</a><h1>학습 입력과 정규화 경계</h1><p class="note">설명에 사용한 구현·측정 자료의 발췌이다. SHA-256은 발췌 전 원본 파일을 식별한다. 실행 PC의 절대 경로와 계정 정보는 포함하지 않으며, 측정값과 해석 조건을 함께 제시한다.</p><section id="training_entrypoint"><h2>training_entrypoint.py</h2><p class="locator">tools/data_factory/training_entrypoint.py<br>sha256:3fddbcb80c1e5792dc6a72f91322cafa1a3c70561b8c3907c0001fb6e773fc1f</p><p class="note">해당 기능의 함수 발췌. 줄 번호와 digest는 원본 기준이다.</p><pre># tools/data_factory/training_entrypoint.py:268 · _run_native_training
+def _run_native_training(argv: list[str], split: dict, receipt: dict) -&gt; int:
+    &quot;&quot;&quot;Use the official trainer with admitted partitions and TRAIN-only normalization.
+
+    LeRobot 0.6.1 selects samples but retains global metadata statistics. Adapt
+    its dataset factory in this process only, before policy/processors are made.
+    &quot;&quot;&quot;
+    from lerobot.scripts import lerobot_train
+    import numpy as np
+
+    original_factory = lerobot_train.make_train_eval_datasets
+    original_argv = sys.argv
+
+    def admitted_datasets(cfg):
+        dataset = cfg.dataset
+        if (str(dataset.root) != split[&quot;dataset_identity&quot;][&quot;dataset_root&quot;]
+                or dataset.repo_id != split[&quot;repo_id&quot;]
+                or (dataset.episodes or list(range(split[&quot;total_episodes&quot;]))) != split[&quot;selected_episodes&quot;]
+                or dataset.eval_split != split[&quot;eval_split&quot;] or dataset.streaming
+                or dataset.use_imagenet_stats != receipt[&quot;normalization&quot;][&quot;use_imagenet_stats&quot;]):
+            raise ContractError(&quot;TRAINING_RUNTIME_DATASET&quot;)
+        train, heldout = original_factory(cfg)
+        for actual, expected in ((train, split[&quot;train_episodes&quot;]), (heldout, split[&quot;eval_episodes&quot;])):
+            if actual is None or actual.episodes != expected:
+                raise ContractError(&quot;TRAINING_RUNTIME_SPLIT&quot;)
+            actual.meta.stats = {key: {name: np.asarray(value) for name, value in stats.items()}
+                                 for key, stats in receipt[&quot;normalization&quot;][&quot;stats&quot;].items()}
+        return train, heldout
+
+    try:
+        sys.argv = list(argv)
+        lerobot_train.make_train_eval_datasets = admitted_datasets
+        lerobot_train.main()
+        return 0
+    finally:
+        lerobot_train.make_train_eval_datasets = original_factory
+        sys.argv = original_argv</pre></section></main></body></html>

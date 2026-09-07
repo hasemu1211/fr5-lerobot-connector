@@ -1,0 +1,557 @@
+<!doctype html><html lang="ko"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>집기와 옮기기의 작업 정의 — FR5 근거</title><link rel="stylesheet" href="../site.css"></head><body><main class="source-page"><a href="../collection.html#recording-scope">← 설명으로 돌아가기</a><h1>집기와 옮기기의 작업 정의</h1><p class="note">설명에 사용한 구현·측정 자료의 발췌이다. SHA-256은 발췌 전 원본 파일을 식별한다. 실행 PC의 절대 경로와 계정 정보는 포함하지 않으며, 측정값과 해석 조건을 함께 제시한다.</p><section id="task_recipe"><h2>task_recipe.py</h2><p class="locator">tools/data_factory/task_recipe.py<br>sha256:7ac1782503c12dde1728d0ca41c43f64a19d50cc6bc34bc55f3a87b0de5c691f</p><p class="note">원문 전체.</p><pre>&quot;&quot;&quot;Pure task recipes and spatial bindings for the shared pickup backbone.&quot;&quot;&quot;
+from __future__ import annotations
+
+import copy
+import math
+from collections.abc import Mapping
+from typing import Any
+
+from tools.fr5_data_factory import (
+    TASK_CONTRACTS,
+    ContractError,
+    DIGEST,
+    SAFE_ID,
+    canonical_digest,
+    task_instruction,
+)
+
+
+RECIPE_SCHEMA = &quot;data_factory.task_recipe.v1&quot;
+CATALOG_SCHEMA = &quot;data_factory.task_recipe_catalog.v1&quot;
+BINDING_SCHEMA = &quot;data_factory.task_binding.v2&quot;
+LEGACY_EPISODE_INSTRUCTION_SCHEMA = &quot;data_factory.episode_instruction_binding.v1&quot;
+EPISODE_INSTRUCTION_SCHEMA = &quot;data_factory.episode_instruction_binding.v2&quot;
+TASK_IDS = (&quot;pickup_e2e&quot;, &quot;pick_place&quot;)
+
+_RECIPE_FIELDS = {
+    &quot;schema_version&quot;, &quot;task_id&quot;, &quot;spatial_roles&quot;, &quot;recorded_phases&quot;,
+    &quot;recording_boundary&quot;, &quot;post_recording_phases&quot;, &quot;task_terminal&quot;,
+    &quot;review_checklist_id&quot;, &quot;episode_intent&quot;, &quot;instruction_template&quot;,
+    &quot;recipe_digest&quot;,
+}
+_CATALOG_FIELDS = {&quot;schema_version&quot;, &quot;recipes&quot;, &quot;catalog_digest&quot;}
+_BINDING_FIELDS = {
+    &quot;schema_version&quot;, &quot;task_id&quot;, &quot;recipe_digest&quot;, &quot;spatial_bindings&quot;,
+    &quot;binding_digest&quot;,
+}
+_SPATIAL_FIELDS = {
+    &quot;role&quot;, &quot;workspace_id&quot;, &quot;frame_id&quot;, &quot;pose&quot;, &quot;sheet_digest&quot;,
+    &quot;family_digest&quot;, &quot;region_binding&quot;,
+}
+_POSE_FIELDS = {&quot;place_id&quot;, &quot;yaw_deg&quot;, &quot;x_mm&quot;, &quot;y_mm&quot;}
+_REGION_FIELDS = {
+    &quot;layout_id&quot;, &quot;layout_digest&quot;, &quot;region_id&quot;, &quot;physical_binding_status&quot;,
+}
+_EPISODE_INSTRUCTION_FIELDS = {
+    &quot;schema_version&quot;, &quot;task_binding&quot;, &quot;object_profile_id&quot;,
+    &quot;object_profile_digest&quot;, &quot;object_description&quot;, &quot;instruction&quot;,
+    &quot;binding_digest&quot;,
+}
+
+
+def _phase(phase: str, internal_phase: str, label: str) -&gt; dict[str, str]:
+    return {&quot;phase&quot;: phase, &quot;internal_phase&quot;: internal_phase, &quot;label&quot;: label}
+
+
+def _recipe(
+    task_id: str, spatial_roles: list[dict[str, Any]],
+    recorded_phases: list[dict[str, str]], recording_boundary: str,
+    post_recording_phases: list[dict[str, str]], review_checklist_id: str,
+) -&gt; dict[str, Any]:
+    contract = TASK_CONTRACTS[task_id]
+    if (
+        recording_boundary != contract[&quot;recording_boundary&quot;]
+        or review_checklist_id != contract[&quot;review_checklist_id&quot;]
+    ):
+        raise RuntimeError(&quot;task recipe and task contract disagree&quot;)
+    value = {
+        &quot;schema_version&quot;: RECIPE_SCHEMA,
+        &quot;task_id&quot;: task_id,
+        &quot;spatial_roles&quot;: spatial_roles,
+        &quot;recorded_phases&quot;: recorded_phases,
+        &quot;recording_boundary&quot;: recording_boundary,
+        &quot;post_recording_phases&quot;: post_recording_phases,
+        &quot;task_terminal&quot;: recording_boundary,
+        &quot;review_checklist_id&quot;: review_checklist_id,
+        &quot;episode_intent&quot;: contract[&quot;episode_intent&quot;],
+        &quot;instruction_template&quot;: contract[&quot;instruction_template&quot;],
+    }
+    value[&quot;recipe_digest&quot;] = canonical_digest(value)
+    return value
+
+
+_PICKUP_PHASES = [
+    _phase(&quot;SOURCE_PREGRASP_PTP&quot;, &quot;PREGRASP_PTP&quot;, &quot;Source pregrasp&quot;),
+    _phase(&quot;SOURCE_APPROACH_STOP_LIN&quot;, &quot;APPROACH_STOP_LIN&quot;, &quot;Source approach stop&quot;),
+    _phase(&quot;SOURCE_FINAL_APPROACH_LIN&quot;, &quot;FINAL_APPROACH_LIN&quot;, &quot;Source final approach&quot;),
+    _phase(&quot;SOURCE_GRIPPER_CLOSE&quot;, &quot;GRIPPER_CLOSE&quot;, &quot;Close gripper at source&quot;),
+    _phase(&quot;SOURCE_LIFT_LIN&quot;, &quot;LIFT_LIN&quot;, &quot;Lift from source&quot;),
+]
+_DESTINATION_PHASES = [
+    _phase(&quot;DESTINATION_APPROACH_PTP&quot;, &quot;RECYCLE_APPROACH_PTP&quot;, &quot;Destination approach&quot;),
+    _phase(&quot;DESTINATION_LOWER_LIN&quot;, &quot;LOWER_LIN&quot;, &quot;Lower at destination&quot;),
+    _phase(&quot;DESTINATION_RELEASE&quot;, &quot;GRIPPER_OPEN&quot;, &quot;Release at destination&quot;),
+    _phase(&quot;DESTINATION_RETREAT_LIN&quot;, &quot;RETREAT_LIN&quot;, &quot;Retreat from destination&quot;),
+]
+_RECIPES = (
+    _recipe(
+        &quot;pickup_e2e&quot;,
+        [{&quot;role&quot;: &quot;SOURCE&quot;, &quot;required&quot;: True}, {&quot;role&quot;: &quot;NEXT_SOURCE_RESET&quot;, &quot;required&quot;: False}],
+        copy.deepcopy(_PICKUP_PHASES),
+        &quot;LIFT_LIN&quot;,
+        [
+            _phase(&quot;NEXT_SOURCE_RESET_APPROACH_PTP&quot;, &quot;RECYCLE_APPROACH_PTP&quot;, &quot;Next-source reset approach&quot;),
+            _phase(&quot;NEXT_SOURCE_RESET_LOWER_LIN&quot;, &quot;LOWER_LIN&quot;, &quot;Lower for next-source reset&quot;),
+            _phase(&quot;NEXT_SOURCE_RESET_RELEASE&quot;, &quot;GRIPPER_OPEN&quot;, &quot;Release for next-source reset&quot;),
+            _phase(&quot;NEXT_SOURCE_RESET_RETREAT_LIN&quot;, &quot;RETREAT_LIN&quot;, &quot;Retreat from next-source reset&quot;),
+            _phase(&quot;SAFE_POSE_PTP&quot;, &quot;SAFE_POSE_PTP&quot;, &quot;Return to safe pose&quot;),
+        ],
+        &quot;pickup-v2&quot;,
+    ),
+    _recipe(
+        &quot;pick_place&quot;,
+        [{&quot;role&quot;: &quot;SOURCE&quot;, &quot;required&quot;: True}, {&quot;role&quot;: &quot;DESTINATION&quot;, &quot;required&quot;: True}],
+        copy.deepcopy(_PICKUP_PHASES + _DESTINATION_PHASES),
+        &quot;RETREAT_LIN&quot;,
+        [_phase(&quot;SAFE_POSE_PTP&quot;, &quot;SAFE_POSE_PTP&quot;, &quot;Return to safe pose&quot;)],
+        &quot;pick-place-v1&quot;,
+    ),
+)
+
+
+def get_task_recipe(task_id: str) -&gt; dict[str, Any]:
+    &quot;&quot;&quot;Return one canonical recipe without sharing mutable state.&quot;&quot;&quot;
+    if task_id not in TASK_IDS:
+        raise ContractError(&quot;TASK_RECIPE_ID&quot;)
+    return copy.deepcopy(_RECIPES[TASK_IDS.index(task_id)])
+
+
+def task_catalog() -&gt; dict[str, Any]:
+    &quot;&quot;&quot;Return the canonical two-task catalog in stable task and phase order.&quot;&quot;&quot;
+    value = {
+        &quot;schema_version&quot;: CATALOG_SCHEMA,
+        &quot;recipes&quot;: copy.deepcopy(list(_RECIPES)),
+    }
+    value[&quot;catalog_digest&quot;] = canonical_digest(value)
+    return value
+
+
+def validate_task_recipe(value: Mapping[str, Any]) -&gt; dict[str, Any]:
+    if not isinstance(value, Mapping) or set(value) != _RECIPE_FIELDS:
+        raise ContractError(&quot;TASK_RECIPE_SCHEMA&quot;)
+    task_id = value.get(&quot;task_id&quot;)
+    if task_id not in TASK_IDS or dict(value) != get_task_recipe(task_id):
+        raise ContractError(&quot;TASK_RECIPE_CONTRACT&quot;)
+    return get_task_recipe(task_id)
+
+
+def validate_task_catalog(value: Mapping[str, Any]) -&gt; dict[str, Any]:
+    if not isinstance(value, Mapping) or set(value) != _CATALOG_FIELDS:
+        raise ContractError(&quot;TASK_CATALOG_SCHEMA&quot;)
+    expected = task_catalog()
+    if dict(value) != expected:
+        raise ContractError(&quot;TASK_CATALOG_CONTRACT&quot;)
+    return expected
+
+
+def _identifier(value: object) -&gt; bool:
+    return isinstance(value, str) and SAFE_ID.fullmatch(value) is not None
+
+
+def validate_region_binding(value: Mapping[str, Any]) -&gt; dict[str, Any]:
+    &quot;&quot;&quot;Validate semantic workspace-region evidence without granting authority.&quot;&quot;&quot;
+    if not isinstance(value, Mapping) or set(value) != _REGION_FIELDS:
+        raise ContractError(&quot;TASK_BINDING_REGION&quot;)
+    status = value.get(&quot;physical_binding_status&quot;)
+    if status == &quot;NOT_CONFIGURED&quot;:
+        if any(value.get(field) is not None for field in (
+            &quot;layout_id&quot;, &quot;layout_digest&quot;, &quot;region_id&quot;,
+        )):
+            raise ContractError(&quot;TASK_BINDING_REGION&quot;)
+    elif (
+        status not in {&quot;PREPARED_NOT_VERIFIED&quot;, &quot;VERIFIED&quot;}
+        or not _identifier(value.get(&quot;layout_id&quot;))
+        or not _identifier(value.get(&quot;region_id&quot;))
+        or not isinstance(value.get(&quot;layout_digest&quot;), str)
+        or DIGEST.fullmatch(value[&quot;layout_digest&quot;]) is None
+    ):
+        raise ContractError(&quot;TASK_BINDING_REGION&quot;)
+    return {
+        &quot;layout_id&quot;: value[&quot;layout_id&quot;],
+        &quot;layout_digest&quot;: value[&quot;layout_digest&quot;],
+        &quot;region_id&quot;: value[&quot;region_id&quot;],
+        &quot;physical_binding_status&quot;: status,
+    }
+
+
+def _spatial(value: Mapping[str, Any], expected_role: str) -&gt; dict[str, Any]:
+    if not isinstance(value, Mapping) or set(value) != _SPATIAL_FIELDS:
+        raise ContractError(&quot;TASK_BINDING_SPATIAL&quot;)
+    pose = value.get(&quot;pose&quot;)
+    if not isinstance(pose, Mapping) or set(pose) != _POSE_FIELDS:
+        raise ContractError(&quot;TASK_BINDING_POSE&quot;)
+    region = validate_region_binding(value.get(&quot;region_binding&quot;))
+    coordinates = (pose.get(&quot;yaw_deg&quot;), pose.get(&quot;x_mm&quot;), pose.get(&quot;y_mm&quot;))
+    if (
+        value.get(&quot;role&quot;) != expected_role
+        or any(not _identifier(value.get(field)) for field in (&quot;workspace_id&quot;, &quot;frame_id&quot;))
+        or not _identifier(pose.get(&quot;place_id&quot;))
+        or any(
+            isinstance(item, bool) or not isinstance(item, (int, float)) or not math.isfinite(item)
+            for item in coordinates
+        )
+        or any(
+            not isinstance(value.get(field), str) or DIGEST.fullmatch(value[field]) is None
+            for field in (&quot;sheet_digest&quot;, &quot;family_digest&quot;)
+        )
+    ):
+        raise ContractError(&quot;TASK_BINDING_SPATIAL&quot;)
+    return {
+        &quot;role&quot;: expected_role,
+        &quot;workspace_id&quot;: value[&quot;workspace_id&quot;],
+        &quot;frame_id&quot;: value[&quot;frame_id&quot;],
+        &quot;pose&quot;: {
+            &quot;place_id&quot;: pose[&quot;place_id&quot;],
+            &quot;yaw_deg&quot;: float(pose[&quot;yaw_deg&quot;]),
+            &quot;x_mm&quot;: float(pose[&quot;x_mm&quot;]),
+            &quot;y_mm&quot;: float(pose[&quot;y_mm&quot;]),
+        },
+        &quot;sheet_digest&quot;: value[&quot;sheet_digest&quot;],
+        &quot;family_digest&quot;: value[&quot;family_digest&quot;],
+        &quot;region_binding&quot;: region,
+    }
+
+
+def _make_binding(task_id: str, bindings: list[dict[str, Any]]) -&gt; dict[str, Any]:
+    value = {
+        &quot;schema_version&quot;: BINDING_SCHEMA,
+        &quot;task_id&quot;: task_id,
+        &quot;recipe_digest&quot;: get_task_recipe(task_id)[&quot;recipe_digest&quot;],
+        &quot;spatial_bindings&quot;: copy.deepcopy(bindings),
+    }
+    value[&quot;binding_digest&quot;] = canonical_digest(value)
+    return value
+
+
+def _same_location(left: Mapping[str, Any], right: Mapping[str, Any]) -&gt; bool:
+    return all(left[field] == right[field] for field in _SPATIAL_FIELDS - {&quot;role&quot;})
+
+
+def compile_task_binding(
+    task_id: str, *, source: Mapping[str, Any],
+    destination: Mapping[str, Any] | None = None,
+    next_source_reset: Mapping[str, Any] | None = None,
+) -&gt; dict[str, Any]:
+    &quot;&quot;&quot;Bind already-resolved spatial inputs without qualifying coordinates or granting execution.&quot;&quot;&quot;
+    get_task_recipe(task_id)
+    checked_source = _spatial(source, &quot;SOURCE&quot;)
+    if task_id == &quot;pickup_e2e&quot;:
+        if destination is not None:
+            raise ContractError(&quot;TASK_BINDING_ROLES&quot;)
+        bindings = [checked_source]
+        if next_source_reset is not None:
+            bindings.append(_spatial(next_source_reset, &quot;NEXT_SOURCE_RESET&quot;))
+    else:
+        if destination is None or next_source_reset is not None:
+            raise ContractError(&quot;TASK_BINDING_ROLES&quot;)
+        checked_destination = _spatial(destination, &quot;DESTINATION&quot;)
+        if _same_location(checked_source, checked_destination):
+            raise ContractError(&quot;TASK_BINDING_DISTINCT&quot;)
+        bindings = [checked_source, checked_destination]
+    return _make_binding(task_id, bindings)
+
+
+def validate_task_binding(value: Mapping[str, Any]) -&gt; dict[str, Any]:
+    if not isinstance(value, Mapping) or set(value) != _BINDING_FIELDS:
+        raise ContractError(&quot;TASK_BINDING_SCHEMA&quot;)
+    task_id = value.get(&quot;task_id&quot;)
+    recipe = get_task_recipe(task_id)
+    if value.get(&quot;schema_version&quot;) != BINDING_SCHEMA or value.get(&quot;recipe_digest&quot;) != recipe[&quot;recipe_digest&quot;]:
+        raise ContractError(&quot;TASK_BINDING_RECIPE&quot;)
+    raw = value.get(&quot;spatial_bindings&quot;)
+    expected_roles = (
+        (&quot;SOURCE&quot;,) if task_id == &quot;pickup_e2e&quot; and isinstance(raw, list) and len(raw) == 1
+        else tuple(item[&quot;role&quot;] for item in recipe[&quot;spatial_roles&quot;])
+    )
+    if not isinstance(raw, list) or len(raw) != len(expected_roles):
+        raise ContractError(&quot;TASK_BINDING_ROLES&quot;)
+    checked = [_spatial(item, role) for item, role in zip(raw, expected_roles)]
+    if task_id == &quot;pick_place&quot; and _same_location(checked[0], checked[1]):
+        raise ContractError(&quot;TASK_BINDING_DISTINCT&quot;)
+    expected = _make_binding(task_id, checked)
+    if value.get(&quot;binding_digest&quot;) != expected[&quot;binding_digest&quot;]:
+        raise ContractError(&quot;TASK_BINDING_DIGEST&quot;)
+    return expected
+
+
+def task_binding_instruction(
+    value: Mapping[str, Any], object_description: str, *,
+    prepared_regions_active: bool = True,
+) -&gt; str:
+    &quot;&quot;&quot;Derive one episode label from an exact shared region layout.&quot;&quot;&quot;
+    if type(prepared_regions_active) is not bool:
+        raise ContractError(&quot;TASK_REGION_BINDING&quot;)
+    binding = validate_task_binding(value)
+    if binding[&quot;task_id&quot;] != &quot;pick_place&quot;:
+        return task_instruction(binding[&quot;task_id&quot;], object_description)
+    source, destination = binding[&quot;spatial_bindings&quot;]
+    source_region = source[&quot;region_binding&quot;]
+    destination_region = destination[&quot;region_binding&quot;]
+    active_statuses = (
+        {&quot;PREPARED_NOT_VERIFIED&quot;, &quot;VERIFIED&quot;}
+        if prepared_regions_active else {&quot;VERIFIED&quot;}
+    )
+    active = (
+        source_region[&quot;physical_binding_status&quot;] in active_statuses
+        and destination_region[&quot;physical_binding_status&quot;] in active_statuses
+        and source_region[&quot;layout_digest&quot;]
+        == destination_region[&quot;layout_digest&quot;]
+    )
+    return task_instruction(
+        &quot;pick_place&quot;, object_description,
+        source_region_id=(source_region[&quot;region_id&quot;] if active else None),
+        destination_region_id=(
+            destination_region[&quot;region_id&quot;] if active else None
+        ),
+        region_binding_active=active,
+    )
+
+
+def _object_language_identity(value: Mapping[str, Any]) -&gt; tuple[str, str, str]:
+    if not isinstance(value, Mapping):
+        raise ContractError(&quot;EPISODE_INSTRUCTION_OBJECT&quot;)
+    identifier = value.get(&quot;object_profile_id&quot;)
+    description = value.get(&quot;description&quot;)
+    if (
+        not _identifier(identifier)
+        or not isinstance(description, str)
+        or not description.strip()
+        or description != description.strip()
+        or &quot;\x00&quot; in description
+    ):
+        raise ContractError(&quot;EPISODE_INSTRUCTION_OBJECT&quot;)
+    return identifier, description, canonical_digest(dict(value))
+
+
+def compile_episode_instruction_binding(
+    task_binding: Mapping[str, Any], object_profile: Mapping[str, Any],
+) -&gt; dict[str, Any]:
+    &quot;&quot;&quot;Bind the exact spatial task and object wording used for one episode.&quot;&quot;&quot;
+    checked_task = validate_task_binding(task_binding)
+    object_profile_id, description, object_digest = _object_language_identity(
+        object_profile,
+    )
+    result = {
+        &quot;schema_version&quot;: EPISODE_INSTRUCTION_SCHEMA,
+        &quot;task_binding&quot;: checked_task,
+        &quot;object_profile_id&quot;: object_profile_id,
+        &quot;object_profile_digest&quot;: object_digest,
+        &quot;object_description&quot;: description,
+        &quot;instruction&quot;: task_binding_instruction(checked_task, description),
+    }
+    result[&quot;binding_digest&quot;] = canonical_digest(result)
+    return result
+
+
+def validate_episode_instruction_binding(
+    value: Mapping[str, Any], *,
+    object_profile: Mapping[str, Any] | None = None,
+) -&gt; dict[str, Any]:
+    &quot;&quot;&quot;Validate an episode label; an optional profile closes external identity.&quot;&quot;&quot;
+    if not isinstance(value, Mapping) or set(value) != _EPISODE_INSTRUCTION_FIELDS:
+        raise ContractError(&quot;EPISODE_INSTRUCTION_SCHEMA&quot;)
+    checked_task = validate_task_binding(value.get(&quot;task_binding&quot;))
+    schema_version = value.get(&quot;schema_version&quot;)
+    if (
+        schema_version not in {
+            LEGACY_EPISODE_INSTRUCTION_SCHEMA, EPISODE_INSTRUCTION_SCHEMA,
+        }
+        or not _identifier(value.get(&quot;object_profile_id&quot;))
+        or not isinstance(value.get(&quot;object_profile_digest&quot;), str)
+        or DIGEST.fullmatch(value[&quot;object_profile_digest&quot;]) is None
+        or not isinstance(value.get(&quot;object_description&quot;), str)
+        or not value[&quot;object_description&quot;].strip()
+        or value[&quot;object_description&quot;] != value[&quot;object_description&quot;].strip()
+        or &quot;\x00&quot; in value[&quot;object_description&quot;]
+        or value.get(&quot;instruction&quot;) != task_binding_instruction(
+            checked_task, value[&quot;object_description&quot;],
+            prepared_regions_active=(
+                schema_version == EPISODE_INSTRUCTION_SCHEMA
+            ),
+        )
+    ):
+        raise ContractError(&quot;EPISODE_INSTRUCTION_CONTRACT&quot;)
+    result = {
+        &quot;schema_version&quot;: schema_version,
+        &quot;task_binding&quot;: checked_task,
+        &quot;object_profile_id&quot;: value[&quot;object_profile_id&quot;],
+        &quot;object_profile_digest&quot;: value[&quot;object_profile_digest&quot;],
+        &quot;object_description&quot;: value[&quot;object_description&quot;],
+        &quot;instruction&quot;: value[&quot;instruction&quot;],
+    }
+    result[&quot;binding_digest&quot;] = canonical_digest(result)
+    if value.get(&quot;binding_digest&quot;) != result[&quot;binding_digest&quot;]:
+        raise ContractError(&quot;EPISODE_INSTRUCTION_DIGEST&quot;)
+    if object_profile is not None:
+        identifier, description, digest = _object_language_identity(object_profile)
+        if (
+            result[&quot;object_profile_id&quot;] != identifier
+            or result[&quot;object_description&quot;] != description
+            or result[&quot;object_profile_digest&quot;] != digest
+        ):
+            raise ContractError(&quot;EPISODE_INSTRUCTION_OBJECT&quot;)
+    return result
+</pre></section><section id="task-recipes"><h2>task-recipes.json</h2><p class="locator">task-recipes.json<br>sha256:708d2ba24f9650936a0c77879c66dd04d7307a8c960712919ab413dd9ffa6017</p><p class="note">원문에서 발췌한 필드. 실행 환경의 절대 경로는 자료 식별자로 표시한다.</p><pre>{
+  &quot;schema_version&quot;: &quot;data_factory.task_recipe_catalog.v1&quot;,
+  &quot;recipes&quot;: [
+    {
+      &quot;schema_version&quot;: &quot;data_factory.task_recipe.v1&quot;,
+      &quot;task_id&quot;: &quot;pickup_e2e&quot;,
+      &quot;spatial_roles&quot;: [
+        {
+          &quot;role&quot;: &quot;SOURCE&quot;,
+          &quot;required&quot;: true
+        },
+        {
+          &quot;role&quot;: &quot;NEXT_SOURCE_RESET&quot;,
+          &quot;required&quot;: false
+        }
+      ],
+      &quot;recorded_phases&quot;: [
+        {
+          &quot;phase&quot;: &quot;SOURCE_PREGRASP_PTP&quot;,
+          &quot;internal_phase&quot;: &quot;PREGRASP_PTP&quot;,
+          &quot;label&quot;: &quot;Source pregrasp&quot;
+        },
+        {
+          &quot;phase&quot;: &quot;SOURCE_APPROACH_STOP_LIN&quot;,
+          &quot;internal_phase&quot;: &quot;APPROACH_STOP_LIN&quot;,
+          &quot;label&quot;: &quot;Source approach stop&quot;
+        },
+        {
+          &quot;phase&quot;: &quot;SOURCE_FINAL_APPROACH_LIN&quot;,
+          &quot;internal_phase&quot;: &quot;FINAL_APPROACH_LIN&quot;,
+          &quot;label&quot;: &quot;Source final approach&quot;
+        },
+        {
+          &quot;phase&quot;: &quot;SOURCE_GRIPPER_CLOSE&quot;,
+          &quot;internal_phase&quot;: &quot;GRIPPER_CLOSE&quot;,
+          &quot;label&quot;: &quot;Close gripper at source&quot;
+        },
+        {
+          &quot;phase&quot;: &quot;SOURCE_LIFT_LIN&quot;,
+          &quot;internal_phase&quot;: &quot;LIFT_LIN&quot;,
+          &quot;label&quot;: &quot;Lift from source&quot;
+        }
+      ],
+      &quot;recording_boundary&quot;: &quot;LIFT_LIN&quot;,
+      &quot;post_recording_phases&quot;: [
+        {
+          &quot;phase&quot;: &quot;NEXT_SOURCE_RESET_APPROACH_PTP&quot;,
+          &quot;internal_phase&quot;: &quot;RECYCLE_APPROACH_PTP&quot;,
+          &quot;label&quot;: &quot;Next-source reset approach&quot;
+        },
+        {
+          &quot;phase&quot;: &quot;NEXT_SOURCE_RESET_LOWER_LIN&quot;,
+          &quot;internal_phase&quot;: &quot;LOWER_LIN&quot;,
+          &quot;label&quot;: &quot;Lower for next-source reset&quot;
+        },
+        {
+          &quot;phase&quot;: &quot;NEXT_SOURCE_RESET_RELEASE&quot;,
+          &quot;internal_phase&quot;: &quot;GRIPPER_OPEN&quot;,
+          &quot;label&quot;: &quot;Release for next-source reset&quot;
+        },
+        {
+          &quot;phase&quot;: &quot;NEXT_SOURCE_RESET_RETREAT_LIN&quot;,
+          &quot;internal_phase&quot;: &quot;RETREAT_LIN&quot;,
+          &quot;label&quot;: &quot;Retreat from next-source reset&quot;
+        },
+        {
+          &quot;phase&quot;: &quot;SAFE_POSE_PTP&quot;,
+          &quot;internal_phase&quot;: &quot;SAFE_POSE_PTP&quot;,
+          &quot;label&quot;: &quot;Return to safe pose&quot;
+        }
+      ],
+      &quot;task_terminal&quot;: &quot;LIFT_LIN&quot;,
+      &quot;review_checklist_id&quot;: &quot;pickup-v2&quot;,
+      &quot;episode_intent&quot;: &quot;nominal pickup&quot;,
+      &quot;instruction_template&quot;: &quot;pick up the {object_description}&quot;,
+      &quot;recipe_digest&quot;: &quot;sha256:906ce0961fb26034c2edd22ca8488692e3db07e1a757df29917e782d57c87e96&quot;
+    },
+    {
+      &quot;schema_version&quot;: &quot;data_factory.task_recipe.v1&quot;,
+      &quot;task_id&quot;: &quot;pick_place&quot;,
+      &quot;spatial_roles&quot;: [
+        {
+          &quot;role&quot;: &quot;SOURCE&quot;,
+          &quot;required&quot;: true
+        },
+        {
+          &quot;role&quot;: &quot;DESTINATION&quot;,
+          &quot;required&quot;: true
+        }
+      ],
+      &quot;recorded_phases&quot;: [
+        {
+          &quot;phase&quot;: &quot;SOURCE_PREGRASP_PTP&quot;,
+          &quot;internal_phase&quot;: &quot;PREGRASP_PTP&quot;,
+          &quot;label&quot;: &quot;Source pregrasp&quot;
+        },
+        {
+          &quot;phase&quot;: &quot;SOURCE_APPROACH_STOP_LIN&quot;,
+          &quot;internal_phase&quot;: &quot;APPROACH_STOP_LIN&quot;,
+          &quot;label&quot;: &quot;Source approach stop&quot;
+        },
+        {
+          &quot;phase&quot;: &quot;SOURCE_FINAL_APPROACH_LIN&quot;,
+          &quot;internal_phase&quot;: &quot;FINAL_APPROACH_LIN&quot;,
+          &quot;label&quot;: &quot;Source final approach&quot;
+        },
+        {
+          &quot;phase&quot;: &quot;SOURCE_GRIPPER_CLOSE&quot;,
+          &quot;internal_phase&quot;: &quot;GRIPPER_CLOSE&quot;,
+          &quot;label&quot;: &quot;Close gripper at source&quot;
+        },
+        {
+          &quot;phase&quot;: &quot;SOURCE_LIFT_LIN&quot;,
+          &quot;internal_phase&quot;: &quot;LIFT_LIN&quot;,
+          &quot;label&quot;: &quot;Lift from source&quot;
+        },
+        {
+          &quot;phase&quot;: &quot;DESTINATION_APPROACH_PTP&quot;,
+          &quot;internal_phase&quot;: &quot;RECYCLE_APPROACH_PTP&quot;,
+          &quot;label&quot;: &quot;Destination approach&quot;
+        },
+        {
+          &quot;phase&quot;: &quot;DESTINATION_LOWER_LIN&quot;,
+          &quot;internal_phase&quot;: &quot;LOWER_LIN&quot;,
+          &quot;label&quot;: &quot;Lower at destination&quot;
+        },
+        {
+          &quot;phase&quot;: &quot;DESTINATION_RELEASE&quot;,
+          &quot;internal_phase&quot;: &quot;GRIPPER_OPEN&quot;,
+          &quot;label&quot;: &quot;Release at destination&quot;
+        },
+        {
+          &quot;phase&quot;: &quot;DESTINATION_RETREAT_LIN&quot;,
+          &quot;internal_phase&quot;: &quot;RETREAT_LIN&quot;,
+          &quot;label&quot;: &quot;Retreat from destination&quot;
+        }
+      ],
+      &quot;recording_boundary&quot;: &quot;RETREAT_LIN&quot;,
+      &quot;post_recording_phases&quot;: [
+        {
+          &quot;phase&quot;: &quot;SAFE_POSE_PTP&quot;,
+          &quot;internal_phase&quot;: &quot;SAFE_POSE_PTP&quot;,
+          &quot;label&quot;: &quot;Return to safe pose&quot;
+        }
+      ],
+      &quot;task_terminal&quot;: &quot;RETREAT_LIN&quot;,
+      &quot;review_checklist_id&quot;: &quot;pick-place-v1&quot;,
+      &quot;episode_intent&quot;: &quot;nominal pick and place&quot;,
+      &quot;instruction_template&quot;: &quot;pick up the {object_description} and place it at the destination&quot;,
+      &quot;recipe_digest&quot;: &quot;sha256:7a9eb09df9ef3e983c5b69c6ac7a4960cb5a95f324321e886be2899f793c8c23&quot;
+    }
+  ],
+  &quot;catalog_digest&quot;: &quot;sha256:d978617dcccb08975fcc09291094b18265ce244f90892bb0a9a99d341b82def1&quot;
+}</pre></section></main></body></html>

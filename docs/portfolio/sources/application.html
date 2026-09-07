@@ -1,0 +1,89 @@
+<!doctype html><html lang="ko"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>서버의 의도 소비 — FR5 근거</title><link rel="stylesheet" href="../site.css"></head><body><main class="source-page"><a href="../architecture.html#interface">← 설명으로 돌아가기</a><h1>서버의 의도 소비</h1><p class="note">설명에 사용한 구현·측정 자료의 발췌이다. SHA-256은 발췌 전 원본 파일을 식별한다. 실행 PC의 절대 경로와 계정 정보는 포함하지 않으며, 측정값과 해석 조건을 함께 제시한다.</p><section id="intents"><h2>intents.py</h2><p class="locator">tools/data_factory/operator/workflow/intents.py<br>sha256:86ae9eaf5cb17641418939d56f30c1397a137a49f531cf08f40c76300b150739</p><p class="note">해당 기능의 함수 발췌. 줄 번호와 digest는 원본 기준이다.</p><pre># tools/data_factory/operator/workflow/intents.py:168 · consume
+    def consume(self, value: object) -&gt; dict[str, Any]:
+        with self._lock:
+            if not isinstance(value, Mapping) or set(value) != INTENT_FIELDS or value.get(&quot;schema_version&quot;) != INTENT_SCHEMA:
+                raise ContractError(&quot;OPERATOR_INTENT_FIELDS&quot;)
+            intent = copy.deepcopy(dict(value))
+            intent_id = intent[&quot;intent_id&quot;]
+            if not isinstance(intent_id, str) or not SAFE_ID.fullmatch(intent_id):
+                raise ContractError(&quot;OPERATOR_INTENT_ID&quot;)
+            if intent_id in self._consumed:
+                raise ContractError(&quot;OPERATOR_INTENT_REPLAY&quot;)
+            current = self._snapshot_locked()
+            if (
+                intent[&quot;session_id&quot;] != self.session_id
+                or type(intent[&quot;view_revision&quot;]) is not int
+                or not 0 &lt;= intent[&quot;view_revision&quot;] &lt;= current[&quot;revision&quot;]
+                or not isinstance(intent[&quot;view_digest&quot;], str)
+                or not DIGEST.fullmatch(intent[&quot;view_digest&quot;])
+            ):
+                raise ContractError(&quot;OPERATOR_INTENT_STALE_VIEW&quot;)
+            if (
+                intent[&quot;view_revision&quot;] != current[&quot;revision&quot;]
+                or intent[&quot;view_digest&quot;] != current[&quot;view_digest&quot;]
+            ) and not self._current_candidate_review(intent, current):
+                raise ContractError(&quot;OPERATOR_INTENT_STALE_VIEW&quot;)
+            op = intent[&quot;op&quot;]
+            available_ops = current[&quot;projection&quot;].get(&quot;available_ops&quot;)
+            if (
+                not isinstance(op, str)
+                or op not in self.handlers
+                or available_ops is not None
+                and (not isinstance(available_ops, list) or op not in available_ops)
+            ):
+                raise ContractError(&quot;OPERATOR_INTENT_OP&quot;)
+            payload = intent[&quot;payload&quot;]
+            if not isinstance(payload, dict) or _forbidden(payload):
+                raise ContractError(&quot;OPERATOR_INTENT_AUTHORITY&quot;)
+            result = self.handlers[op](copy.deepcopy(payload), current)
+            if not isinstance(result, (Mapping, UnlockedIntent)):
+                raise ContractError(&quot;OPERATOR_INTENT_RESULT&quot;)
+            self._consumed.add(intent_id)
+            self._publish_locked()
+            if isinstance(result, UnlockedIntent):
+                self._snapshot_locked(observe_external=False)
+            else:
+                latest = self._snapshot_locked(observe_external=False)
+                return self._result(intent_id, op, result, latest)
+
+        produced = None
+        cleanup = None
+        try:
+            produced = result.run()
+            with self._lock:
+                completed = result.complete(produced)
+                if (
+                    not isinstance(completed, tuple)
+                    or len(completed) != 3
+                    or not isinstance(completed[0], Mapping)
+                    or type(completed[1]) is not bool
+                    or completed[2] is not None and not callable(completed[2])
+                ):
+                    raise ContractError(&quot;OPERATOR_INTENT_RESULT&quot;)
+                response, changed, cleanup = completed
+                if changed:
+                    self._publish_locked()
+                latest = self._snapshot_locked(observe_external=False)
+        except BaseException as exc:
+            with self._lock:
+                failed = result.failed(exc, produced)
+                if (
+                    not isinstance(failed, tuple)
+                    or len(failed) != 2
+                    or type(failed[0]) is not bool
+                    or failed[1] is not None and not callable(failed[1])
+                ):
+                    raise ContractError(&quot;OPERATOR_INTENT_RESULT&quot;) from exc
+                changed, cleanup = failed
+                if changed:
+                    self._publish_locked()
+                self._snapshot_locked(observe_external=False)
+            if cleanup is not None:
+                try:
+                    cleanup()
+                except Exception:
+                    pass
+            raise
+        if cleanup is not None:
+            cleanup()
+        return self._result(intent_id, op, response, latest)</pre></section></main></body></html>

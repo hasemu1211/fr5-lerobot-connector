@@ -112,7 +112,8 @@ def _object_frame_binding(accepted_episode: Mapping[str, Any], resolved_job: Map
         or precommit.get("run_id") != episode_id
         or precommit.get("approved_plan_digest") != preapproval.get("plan_digest")
         or not isinstance(bindings, Mapping)
-        or set(bindings) != PLAN_BINDING_DIGEST_FIELDS
+        or set(bindings) != (PLAN_BINDING_DIGEST_FIELDS | {"motion_preset"}
+                             if motion_schema == "data_factory.motion_qualification.v3" else PLAN_BINDING_DIGEST_FIELDS)
         or any(not isinstance(value, str) or not DIGEST.fullmatch(value) for value in bindings.values())
     ):
         raise ContractError("OBJECT_FRAME_PLAN_BINDING")
@@ -192,7 +193,7 @@ def _object_frame_binding(accepted_episode: Mapping[str, Any], resolved_job: Map
         or motion_qualification.get("robot_description_digest") != bindings["robot_description_digest"]
         or not isinstance(motion_qualification.get("frames"), Mapping)
         or motion_qualification["frames"] != {"planning_frame": "base_link", "planning_group": "fairino5_v6_group", "tool_link": "wrist3_link"}
-        or motion_schema == "data_factory.motion_qualification.v2"
+        or motion_schema in {"data_factory.motion_qualification.v2", "data_factory.motion_qualification.v3"}
         and (
             not isinstance(motion_qualification.get("planning_scene_profile_id"), str)
             or SAFE_ID.fullmatch(motion_qualification["planning_scene_profile_id"])
@@ -207,6 +208,16 @@ def _object_frame_binding(accepted_episode: Mapping[str, Any], resolved_job: Map
     ):
         raise ContractError("OBJECT_FRAME_BINDING")
     validate_rigid_transform(motion_qualification.get("tool_to_tcp"), "OBJECT_FRAME_BINDING")
+    if motion_schema == "data_factory.motion_qualification.v3" and (
+        not isinstance(motion_qualification.get("motion_preset"), Mapping)
+        or set(motion_qualification["motion_preset"]) != {"id", "digest"}
+        or not isinstance(motion_qualification["motion_preset"].get("id"), str)
+        or SAFE_ID.fullmatch(motion_qualification["motion_preset"]["id"]) is None
+        or not isinstance(bindings.get("motion_preset"), str)
+        or DIGEST.fullmatch(bindings["motion_preset"]) is None
+        or bindings["motion_preset"] != motion_qualification["motion_preset"].get("digest")
+    ):
+        raise ContractError("OBJECT_FRAME_BINDING")
     validate_rigid_transform(motion_qualification.get("datum_to_tcp_grasp"), "OBJECT_FRAME_BINDING")
     pose = resolve_pose({**resolved_job, "calibration": {**calibration, **derived}})
     transform = validate_rigid_transform({"translation_m": pose["position_base_m"], "rotation_columns": pose["rotation_base_columns"]}, "OBJECT_FRAME_BINDING")
@@ -297,7 +308,7 @@ def build_episode_report(
     from tools.data_factory.quality.phase_metrics import phase_timing_attribute
     from tools.data_factory.quality.plan_metrics import plan_quality_attribute
 
-    events = read_phase_events(phase_events_path)
+    events = read_phase_events(phase_events_path, plan=plan)
     if object_frame_context_inputs is not None:
         required = {"accepted_episode", "resolved_job", "motion_qualification"}
         if not isinstance(object_frame_context_inputs, Mapping) or set(object_frame_context_inputs) != required:
@@ -306,7 +317,7 @@ def build_episode_report(
     row_common = {**common, "plan": plan, "events": events, "recorder_rows": recorder_rows, "recorder_rows_digest": recorder_rows_digest, "recorder_ros_clock_type": recorder_ros_clock_type}
     attributes = [
         plan_quality_attribute(**common, plan=plan),
-        phase_timing_attribute(**common, events=events, recorder_rows=recorder_rows, recorder_rows_digest=recorder_rows_digest, recorder_ros_clock_type=recorder_ros_clock_type),
+        phase_timing_attribute(**common, plan=plan, events=events, recorder_rows=recorder_rows, recorder_rows_digest=recorder_rows_digest, recorder_ros_clock_type=recorder_ros_clock_type),
         joint_execution_attribute(**row_common, stall_epsilon_rad=stall_epsilon_rad),
         interaction_quality_attribute(**row_common, execution_evidence=execution_evidence),
     ]

@@ -15,7 +15,7 @@ const {randomUUID} = require("node:crypto");
   const requests = [];
   let drop = false, lost = false;
   const context = vm.createContext({
-    document: {querySelector: node}, crypto: {randomUUID}, console,
+    document: {querySelector: node}, crypto: {randomUUID}, console, AbortController, DOMException, setTimeout, clearTimeout,
     stopWatch() {}, watchView() {}, setBanner() {},
     fetch: async (path, options = {}) => {
       const method = options.method || "GET";

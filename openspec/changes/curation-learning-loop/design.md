@@ -4,6 +4,12 @@
 
 native request의 필드는 바꾸지 않는다. 분할 확인 결과는 반환값의 `evaluation_cohort`에 포함한다. 이는 요청 구성 시점의 preview이며 training split이나 admission artifact가 아니다. Learning 소비자는 이 fraction과 cohort를 실제 launch receipt의 분할과 비교해야 한다. 원본을 동결한 상태에서 다음 소비자가 다시 검증하는 기존 계약을 유지한다.
 
+## 별도 task의 실제 cohort 준비
+
+기존 ledger/state가 입증하는 task와 정확한 instruction을 유지한다. 별도 pick-place source가 기존 pickup task와 다르면 원본을 수정하거나 mapped merge로 task 경계를 숨기지 않고, 그 source의 명시적 합격 subset을 `export_training_request` → 기존 `prepare_approval_batch`로 전달한다. request의 dataset identity는 원본을 가리키며, native raw feature contract와 instruction별 TRAIN/development EVAL을 확인한다. preview actor와 batch digest는 준비 근거일 뿐 인간 동의가 아니다.
+
+가장 싼 검증은 실제 원본·review hash를 전후 재확인하고, 요청의 selected/fraction/기대한 EVAL과 준비된 exact dataset identity를 연결하는 것이다. 원본 pickup의 split identity도 보존한다. Learning은 새 task의 TRAIN만으로 normalization을 fit하고 실제 launch split을 재검증한다. 다른 normalization의 flow loss로 task 효용을 비교하지 않는다. 다음 취득에서는 방향별 TRAIN 부족과 시작 조건 반복·변화를 분리해 제안하며, 명령 좌표를 물리 검증이나 자동 phase 라벨로 승격하지 않는다. 이 경로에는 새 scorer, dataset 복사, 승인 우회가 필요하지 않다.
+
 ## 경쟁가설의 가장 싼 유효 검증
 
 현재 실험 helper는 TRAIN pool의 x/y/yaw 범위로 척도를 정하고, 같은 episode 수와 좁은 frame 예산 안에서 조건 분산이 큰 후보와 작은 후보를 찾는다. 이 목적함수는 대비를 만드는 도구이며 학습 효용을 추정하는 모델이 아니다. 후보 검색은 작은 CPU 예산으로 제한하고 제품의 일반 selector로 추가하지 않는다.
@@ -16,6 +22,20 @@ heldout은 기존 native 분할에서 고정한다. 첫 후보의 동일 명령 
 
 Learning의 저장된 postprocessor 출력은 조건 근거와 연결하되, 입력 source pose의 coverage와 실제 action 범위를 구분한다. 전체 TRAIN action 범위 밖의 목표는 기존 TRAIN subset을 다시 고르는 것만으로 추가할 수 없다. 가까운 yaw의 기존 성공 예제도 XY에 따라 다른 관절 목표를 가질 수 있으며, 동일 task·source coverage는 reset 목적지·trajectory 변형·scene 계보까지 같은 비교를 뜻하지 않는다. 따라서 다음 수집에는 필요한 목표 범위와 기존 qualified plan의 연결, 비교할 장면·reset·trajectory 조건을 advisory 근거로 명시한다. 계획상 endpoint의 수치 일치는 timestamp로 검증한 기록 phase나 실행 권한이 아니다. noise seed에 따라 방향이 바뀌는 episode 오류 순위로 수집 대상을 정하지 않고, 범위 안의 오류와 범위 밖의 목표를 구분하는 Learning 측정을 먼저 재사용한다. 현재 두 요청은 유지하며, 이 근거만으로 추가 수집이나 물리 효용을 선언하지 않는다.
 
+## 성공 조건 반복의 native Collection 소비
+
+현재 조건의 수량은 기존 `build_coverage_report`로 계산한다. source request와 native split의 선택을 일치시키고, 기존 ledger/state validator로 technical/semantic PASS와 candidate·intent digest를 확인한다. 명령된 x/y/yaw는 물리 실측이나 영상 다양성이 아니다. 실제 성공 조건의 반복 부족은 새 조건 확대와 비교할 수 있는 근거이며, task 성공의 자동 판정 모델을 추가할 이유가 아니다.
+
+현재 작은 실험은 TRAIN의 관측 yaw별로 XY 제곱거리 합이 최소인 실제 episode를 대표로 선택한다. 동률은 episode index로 정하고, 대표를 index 순으로 나열해 정해진 추가 시도 수만큼 순환한다. heldout의 위치나 loss로 대표를 fit하지 않는다. 이 규칙은 제한된 취득 제안의 재현 방법이며 영구 selector나 utility scorer가 아니다. 예제 수, yaw 수와 반복 횟수는 제품 상수가 아니다.
+
+소비 경로는 기존 `load_operator_catalog` / `project_direct_poses` → native pose resolver와 campaign contract → `CampaignOperator`의 `update_draft` / `compile_draft`다. 제안에는 원본 dataset/split과 입력 hash, 명시적 selection과 source digests, 정확한 pose sequence 및 추가 시도 수를 남긴다. compiler가 반환한 slot 순서·수량·TRAIN group을 비교하고 native compilation receipt를 유지한다. 현재 qualification이 묶는 새 campaign domain과 별도로 과거 DQA를 선택 이유로 참조한다. 과거 관측을 새 campaign의 admission으로 복사하지 않는다.
+
+author-only 검증은 실행 consumer를 호출하지 않으며 카메라를 탐색하지 않는다. 이때 장치 없는 catalog의 unavailable 표시는 실물 상태 관측이 아니다. Collection Web은 실제 현재 preset·장치·scene·qualification·자원·권한을 다시 확인해 소비한다. authoring의 저장 예산과 현재 여유 공간을 함께 보고하며, 녹화 길이를 reset·검토를 포함한 취득 시간으로 대체하지 않는다.
+
+누적 추가 수집 목표는 단일 campaign의 필수 수량이 아니다. 현재 자원에 맞는 짧은 batch로 명시적 순서를 나누되 native slot당 예산을 낮추거나 quota를 우회하지 않는다. 각 batch에는 해당 pose 목록과 count만 전달해 native direct-count 검증을 통과시키고, 이후 batch도 실행 전 현재 자원과 근거를 다시 확인한다. offline authoring의 장치 placeholder는 실제 Web의 현재 장치 결속을 덮어쓰지 않는다.
+
+기존 평가 source와 cohort는 별도로 유지한다. 새 고번호 episode를 같은 task에 추가하면 native last-ceil splitter가 heldout을 이동시키므로, 이 제안으로 확장 TRAIN과 기존 heldout의 결속이 완료되었다고 주장하지 않는다. Learning의 실제 분할 소비 계약이 확인되기 전에는 고정 cohort를 표방하는 확장 요청을 만들지 않는다. 반복 수집 뒤에도 원본 고정 평가·비교 가능한 출력에서 개선이 없으면 utility 가설은 미결 또는 기각이며, 같은 조건 반복 자체를 성능으로 세지 않는다.
+
 ## 다음 소비와 채택 기준
 
 이미지 정제 비교의 fitting 입력은 별도 pool ledger를 만들지 않고 기존 native v3 split을 참조한다. 임의 global frame 목록을 수동으로 제한하는 대안보다 native TRAIN 선택을 소비하는 쪽을 채택한다. 기존 setup은 전체 source에서 표본을 뽑으므로 split을 나중에 적용하면 이미 heldout 외관을 배경판에 사용했을 수 있기 때문이다. 선택적 `fit_split`을 주면 원본 경로/내용 digest를 검증한 뒤 TRAIN frame 구간에서 기존 예산만큼 표본을 고른다. 명시적 reference가 TRAIN 밖이면 거부하고, 생략한 reference는 첫 TRAIN frame으로 정한다.
@@ -27,6 +47,44 @@ v2 profile은 native split의 경로·파일 hash·split digest와 실제 해독
 - Collection/advisory 전략: 조건 coverage와 학습 결과를 함께 사용해 다음 수집 가설을 제안한다. 이번 proxy만으로 실행이나 추가 수집을 지시하지 않는다.
 
 현재 채택 대상은 재현 가능한 통제 비교와 요청 시 cohort 확인이다. universal scorer, 별도 실험 엔진, 새 execution ledger, 모듈 재배치는 필요하지 않다. 두 선택 모두 유효한 downstream 측정에 연결되지 않으면 선택 효용은 UNKNOWN으로 남긴다.
+
+## Mapped native dataset candidate and request
+
+Native multi-dataset training is disabled in the installed LeRobot factory.
+Reuse native merge with separate video/data files instead of adding a parallel
+training dataset factory. A new candidate contains the immutable source datasets'
+content and an explicit selected request; unselected episodes do not acquire
+semantic or training eligibility. No source file is changed or re-encoded.
+
+`publish_mapped_training_request(source_requests, output, *, dataset_id, repo_id,
+evaluation_split, eval_fraction, max_copy_bytes)` publishes one new directory
+containing `dataset/`, `technical.json`, `publication.json`, and `request.json`. Source requests are
+ordered, native raw requests with current ledger/state PASS evidence; the caller
+controls order and selected episodes. `evaluation_split` is an existing native
+split whose original dataset identity and heldout indices must map exactly to
+the new native split. Mismatch, changed evidence or an existing output rejects
+before publication. Copy size is explicitly bounded before any materialization.
+
+The dataset's `meta/curator_mapping.json` (`curator.dataset_mapping.v1`) binds
+ordered source dataset identities and each original-to-destination episode/global
+frame offset. Original per-frame provenance bytes are preserved; the recording
+quality projection may change only its episode index under that mapping. The
+existing FR5 validator checks the mapping, source byte identities, exact preserved
+Parquet columns/task meaning, video-file bytes/timestamp ranges and sidecars.
+The separately bound technical result describes this new dataset; it is not an
+original Collection technical report or human review.
+
+The request adds `mapping` with `publication_root` and `manifest_digest` to the
+existing dataset/episode fields. Publication binds the parent request documents,
+original semantic references and evaluation identity. The next native consumer
+is `prepare_mapped_approvals(request, output, approved_by, *, check_targets=True)`
+in the existing training admission owner, returning the same `(dataset, drafts)`
+shape as native preparation. Drafts retain parent semantic evidence and new
+mapped provenance, never copied approvals. Root integrates its dispatch and Web
+projection into Learning-owned `training_entrypoint`; Curator does not edit that
+file, `training_split`, `training_receipts`, checkpoint or runtime code. This
+boundary is a technically validated request candidate, not new training consent
+or a claim that later launch/inference contracts are already integrated.
 
 ## Published candidate → existing native training admission
 

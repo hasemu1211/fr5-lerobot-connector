@@ -30,6 +30,164 @@ prediction or recorded demonstration success.
 - **THEN** the consumer rejects or reports the unresolved limitation without silently clipping or relabeling outputs as successful execution
 - **AND** an alternative mapping requires explicit plan-bound semantics and its own verification before physical use.
 
+### Requirement: Finite learned held targets use the sole execution owner
+
+An explicit held-gripper proposal SHALL bind absolute j1..j6 radians and gripper
+joint meters to the existing source program, immutable policy/observation identity
+and exact reviewed plan. It SHALL preserve all position limits, arm velocity
+limits, maximum 50 rows and 30 Hz, and a planned duration of at most five seconds
+including gripper holds. Existing per-goal deadlines and lease/cancel timeouts
+SHALL remain enforced. Unbound gripper targets and staged-open profiles SHALL fail;
+the consumer SHALL NOT infer semantic phases, snap outputs or relax the separate
+seven-joint waypoint contract.
+
+Consecutive identical gripper references SHALL share one bound hold, consumed by
+the existing PickupExecutor and RosMoveItTransport. A redundant initial hold MAY
+be omitted before plan approval when its observed reference/feedback already
+satisfy the bound target. No subsequent arm slice SHALL dispatch before a required
+hold has both successful action terminal evidence and valid reference/feedback.
+Each arm slice SHALL use a fresh observed start as an admission check and retained
+evidence for its frozen commands, never as authority for runtime replan/rebase.
+Observation age SHALL be rechecked after deserialization at send; original policy
+source-clock freshness SHALL still apply. Cancel or unresolved goals SHALL fence
+all later dispatches under the same transport owner.
+At a segment start or terminal handoff, either controller reporting nonpositive
+speed scaling SHALL reject with `LEARNED_CONTROLLER_PAUSED`, including when its
+action result and reference/feedback otherwise pass. Canonical trace validation
+SHALL enforce the same observation rule. Positive scaling SHALL NOT substitute
+for same-command hardware completion.
+
+Plan-only SHALL send no motion, start no recorder, mutate no scene/cell or data,
+and create no approval. Execution SHALL retain existing human, exact-plan,
+hardware, scene/cell, training and physical-binding authority. Per-segment evidence
+SHALL remain in the existing canonical learned trace and diagnostic, with task
+effectiveness and scene outcome UNKNOWN, online policy authority false, and no
+automatic dataset commit or safe-reset claim.
+
+#### Scenario: Held reference completes with different valid feedback
+
+- **WHEN** a frozen proposal repeats a 0.01176 m bound reference
+- **THEN** the transport sends only one gripper hold for that consecutive run
+- **AND** feedback of 0.01218 m alone does not authorize the next arm slice
+- **AND** a successful action result plus the actual bound feedback range and
+  reference permits a fresh start check for the approved arm slice
+- **AND** every sent arm target remains identical to its approved message
+
+This scenario proves the software action/observation boundary only. It does not
+prove the hardware worker has completed its command or resumed the arm stream;
+physical readiness requires the continuous-consumer requirement below.
+
+#### Scenario: Failure cannot advance a learned slice
+
+- **WHEN** state is stale, the reference/feedback is outside its binding, arm
+  start differs beyond its approved tolerance, or an action fails or is canceled
+- **THEN** the current lifecycle reports a typed failure and sends no later slice
+- **AND** unresolved cancellation remains owned by the existing transport
+- **AND** a late completion snapshot cannot restore dispatch after cancellation
+
+#### Scenario: Model output does not match the supported target contract
+
+- **WHEN** output exceeds a joint position or arm velocity bound, names/units or
+  full seven-dimensional shape disagree, a target lacks its source profile, or
+  the hold schedule exceeds its bound
+- **THEN** admission fails before any command or recorder effect
+- **AND** small floating-point representation differences within the existing
+  reference tolerance preserve the original target rather than snapping it
+
+#### Scenario: Collision admission covers held-target execution
+
+- **WHEN** a held proposal is planned
+- **THEN** existing collision admission samples each frozen arm slice, gripper
+  travel and both acceptable feedback extremes intersected with URDF limits
+- **AND** an invalid sample rejects before approval or execution
+- **AND** sampled collision and CPU replay evidence do not qualify physical pickup
+
+### Requirement: Continuous-reference deployment preserves hardware completion meaning
+
+A continuous model-output consumer SHALL preserve the original full seven-joint
+outputs and identify exactly which rows its frozen approved plan consumes. It
+SHALL NOT silently snap references, infer close/open/release phases, truncate the
+output horizon or inherit a scripted qualification. Reference position limits
+SHALL be checked before the hardware's own clamping can conceal a violation.
+The existing staged release SHALL remain unchanged and unsupported until the
+consumer preserves its ordered intermediate hold and final open when executed.
+
+Hardware integer command resolution SHALL NOT be treated as the raw-reference
+enqueue rule or as task semantics. Before an arm segment follows a gripper
+operation, the sole execution owner SHALL require fresh, same-command evidence
+of hardware completion and arm resume, together with the bound controller
+terminal result, reference and feedback. An unresolved/pending command, stale
+or unrelated completion, hardware error or cancellation SHALL prevent dispatch.
+Elapsed hold time, matching position or JTC success alone SHALL NOT manufacture
+this evidence. The source/transport contract for that evidence remains an
+unimplemented shared requirement, not a new Rollout-owned execution service.
+Generation SHALL be bound to hardware incarnation; generation zero at activation
+SHALL NOT be interpreted as a completed command. Source sample time SHALL carry
+an explicit clock domain and a valid freshness comparison; callback arrival time
+alone SHALL NOT make a retained hardware sample fresh. Equal scaling factors
+SHALL NOT be accepted as proof that independent controllers share a start phase.
+Known stop/error SHALL fence the next SDK motion call, without claiming that an
+already in-flight call can be undone or that action cancellation is a safety stop.
+
+#### Scenario: Paused controller cannot authorize a learned handoff
+
+- **WHEN** either controller reports zero scaling at a held segment start or
+  successful terminal observation
+- **THEN** the sole executor rejects without sending the next segment
+- **AND** a completed canonical trace containing that observation also rejects
+- **AND** the transport's independent monotonic deadline continues to apply
+  while a controller's trajectory time is frozen, using its existing cancel owner
+
+#### Scenario: Continuous references and a staged source are unsupported
+
+- **WHEN** finite inference supplies in-limit continuous gripper references
+  that lack the existing exact close/open binding
+- **THEN** OneJob rejects before executor or recorder effects
+- **AND** a source with staged release rejects as unsupported rather than
+  deleting its intermediate stage
+- **AND** the original model references and source are not rewritten
+
+#### Scenario: Integer-code equivalence does not establish command equivalence
+
+- **WHEN** raw references 0.01041 m and 0.01053 m both map to SDK target 50
+  with upper position 0.021 m
+- **THEN** evidence preserves that the current hardware can enqueue again
+  because the raw-reference difference exceeds 0.0001 m
+- **AND** no completion, throughput or safety claim follows from integer equality
+
+### Requirement: Held execution identities remain bound through existing quality consumers
+
+The sole executor SHALL emit each held subsegment's distinct index and count from
+its exact approved plan. Canonical phase-event validation SHALL require that plan
+for multi-segment records, verify the plan/run and step evidence bindings, and
+reject non-integer or out-of-range indices/counts, inconsistent declarations,
+duplicate identities and reversed segment order. Legacy index 0/count 1 events
+SHALL retain their existing representation. Validation SHALL use the existing
+finite learned proposal bounds; a sidecar declaration SHALL NOT authorize an
+arbitrary multi-segment execution.
+
+Existing episode, timing, joint and interaction quality consumers SHALL carry
+the same plan through canonical phase/row joining. Joint metrics SHALL select the
+actual indexed child step, excluding gripper holds from arm-motion metrics.
+Learned close/lift interaction meaning SHALL remain explicitly unqualified;
+available timing or joint metrics SHALL NOT imply task success or dataset admission.
+
+#### Scenario: Three held subsegments have different recorder row counts
+
+- **WHEN** the existing emitter and report consumer observe bound subsegments
+  0, 1 and 2 with respectively 1, 2 and 3 same-clock recorder rows
+- **THEN** timing preserves counts [1, 2, 3] and reports exactly 6 joined rows
+- **AND** arm metrics use the actual targets of arm children 0 and 2
+- **AND** gripper child 1 is not counted as an arm trajectory
+- **AND** interaction quality remains NOT_AVAILABLE with LEARNED_INTERACTION_UNQUALIFIED
+
+#### Scenario: Segment metadata cannot be trusted against its plan
+
+- **WHEN** the plan is absent or mismatched, a step evidence digest belongs to
+  another child, or a segment event is duplicated or out of order
+- **THEN** the canonical consumer rejects instead of reporting overwritten row
+  counts as AVAILABLE
+
 ### Requirement: Offline solver evidence must separate numerical and deployed usefulness
 
 Rollout's offline native comparison SHALL reuse canonical checkpoint admission

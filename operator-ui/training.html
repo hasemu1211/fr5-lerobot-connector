@@ -18,13 +18,22 @@
   <main class="work-area" id="training-review" tabindex="-1">
     <section class="flow-step" aria-labelledby="review-title">
       <header class="step-heading"><h2 id="review-title">이 묶음을 학습에 사용할까요?</h2>
-        <p>기술 검사와 내용 판정을 통과한 에피소드만 표시합니다. 승인은 학습 사용을 허용할 뿐, 학습이나 로봇 동작을 시작하지 않습니다.</p></header>
+        <p>각 에피소드의 기술 검사와 내용 판정 근거를 확인하세요. 승인은 학습 사용을 허용할 뿐, 학습이나 로봇 동작을 시작하지 않습니다.</p></header>
       <p id="training-operator"></p>
       <p>로컬 단일 운영자 화면입니다. 설정된 운영자 이름은 로그인으로 인증된 신원이 아닙니다.</p>
       <div id="training-preview" hidden>
         <h3 id="training-dataset"></h3>
         <p id="training-count"></p>
-        <ul id="training-episodes" class="training-episodes"></ul>
+        <ul id="training-episodes" class="training-episodes" tabindex="-1"></ul>
+        <aside id="training-inspection" class="notice" hidden aria-label="에피소드 탐색">
+          <p id="training-inspection-status" role="status" aria-live="polite"></p>
+          <p id="training-inspection-target"></p>
+          <p id="training-inspection-mapping"></p>
+          <p>Rerun 하단에서 frame_index를 선택하고 프레임 번호를 더블클릭해 원하는 번호로 이동하세요. 두 영상과 action/state가 같은 프레임으로 바뀝니다. timestamp는 기록된 초 값이며 달력 시각을 뜻하지 않습니다. 탐색은 판정이나 승인이 아닙니다.</p>
+          <p>한 번에 1개 episode, 최대 1,500 frames·256 MiB 출력으로 제한합니다. 준비는 최대 2분이며 종료 시 임시 출력을 정리합니다.</p>
+          <a id="training-inspection-link" target="_blank" rel="noopener noreferrer" hidden>Rerun 열기 (새 탭)</a>
+          <button id="training-return" class="secondary-button" type="button" hidden>탐색 종료 · 같은 검토로 돌아오기</button>
+        </aside>
         <details><summary>묶음 식별과 저장 위치</summary>
           <p>데이터 식별: <code id="training-identity"></code></p>
           <p>승인 묶음: <code id="training-digest"></code></p>

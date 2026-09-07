@@ -47,6 +47,11 @@ let lastDigest;
 let intentBusy = false;
 let cancelPending = false;
 let watchController;
+let viewStale = false;
+let viewController;
+let recoveryTimer;
+let recoveryAttempts = 0;
+let disabledBeforeFailure;
 let manualStep;
 let renderedWorkflow;
 let renderedWorkflowStep;
@@ -138,6 +143,23 @@ function validateView(value) {
   validateSamplingProvenance(view.sampling_provenance);
   validateActiveEpisodePlan(view.active_episode_plan);
   assertObject(view.draft, "DRAFT_INVALID");
+  if (view.motion_presets !== undefined) {
+    if (!Array.isArray(view.motion_presets)) throw new TypeError("MOTION_PRESET_INVALID");
+    view.motion_presets.forEach((item) => {
+      if (!item || typeof item.id !== "string" || !item.id || !/^sha256:[a-f0-9]{64}$/.test(item.digest)
+          || typeof item.purpose !== "string" || !["QUALIFIED", "QUALIFICATION_REQUIRED", "TRIAL_AVAILABLE"].includes(item.status)
+          || !item.phase_scaling || typeof item.phase_scaling !== "object") throw new TypeError("MOTION_PRESET_INVALID");
+      if (item.status === "TRIAL_AVAILABLE" && view.data_disposition !== "TEST_ONLY") throw new TypeError("MOTION_PRESET_INVALID");
+      Object.values(item.phase_scaling).forEach((scaling) => {
+        if (!scaling || ![scaling.velocity_scaling, scaling.acceleration_scaling].every((n) => typeof n === "number" && n > 0 && n <= 1)) throw new TypeError("MOTION_PRESET_INVALID");
+      });
+    });
+  }
+  if (view.draft.motion_preset !== undefined && view.draft.motion_preset !== null) {
+    const binding = view.draft.motion_preset;
+    if (!binding || typeof binding !== "object" || Object.keys(binding).sort().join() !== "digest,id"
+        || typeof binding.id !== "string" || !binding.id || !/^sha256:[a-f0-9]{64}$/.test(binding.digest)) throw new TypeError("MOTION_PRESET_INVALID");
+  }
   assertEnum("authoring_mode", view.draft.authoring_mode);
   if (typeof view.draft.draft_id !== "string" || !view.draft.draft_id || !Number.isInteger(view.draft.requested_count)
       || view.draft.requested_count < 1 || view.draft.requested_count > 100 || !Number.isInteger(view.draft.repeat)
@@ -156,6 +178,14 @@ function validateView(value) {
   if (!currentObject || typeof currentObject !== "object" || Array.isArray(currentObject)
       || currentObject.place_id !== view.draft.selection.workspace
       || ![currentObject.x_mm, currentObject.y_mm, currentObject.yaw_deg].every(Number.isFinite)) throw new TypeError("CURRENT_OBJECT_POSE_INVALID");
+  const position = view.draft.object_position;
+  if (position != null && (!position || typeof position !== "object"
+      || !["AVAILABLE", "MISSING", "BLOCKED", "STALE"].includes(position.status)
+      || position.status === "AVAILABLE" && (!position.pose
+        || !["HUMAN", "ROBOT_RELEASE", "ROBOT_RELEASE_PROXY"].includes(position.source)
+        || ![position.pose.x_mm, position.pose.y_mm, position.pose.yaw_deg].every(Number.isFinite)
+        || position.pose.place_id !== currentObject.place_id
+        || ["x_mm", "y_mm", "yaw_deg"].some((key) => position.pose[key] !== currentObject[key])))) throw new TypeError("OBJECT_POSITION_INVALID");
   if (view.draft.direct_poses !== undefined && (!Array.isArray(view.draft.direct_poses)
       || view.draft.direct_poses.some((pose) => !pose || typeof pose !== "object" || Array.isArray(pose)
         || pose.place_id !== view.draft.selection.workspace
@@ -267,7 +297,7 @@ function validateView(value) {
   if (view.candidate_review !== undefined && view.candidate_review !== null) {
     assertObject(view.candidate_review, "CANDIDATE_REVIEW_INVALID");
     if (!DIGEST_PATTERN.test(view.candidate_review.review_binding_digest)
-        || !["PENDING", "PASS", "FAIL", "UNCERTAIN"].includes(view.candidate_review.status)
+        || !["PENDING", "PASS", "FAIL", "UNCERTAIN", "UNAVAILABLE"].includes(view.candidate_review.status)
         || !Array.isArray(view.candidate_review.choices) || !view.candidate_review.choices.every((choice) => ["PASS", "FAIL", "UNCERTAIN"].includes(choice))
         || view.candidate_review.episode_number !== undefined && (!Number.isInteger(view.candidate_review.episode_number) || view.candidate_review.episode_number < 1)
         || view.candidate_review.queue_remaining !== undefined && (!Number.isInteger(view.candidate_review.queue_remaining) || view.candidate_review.queue_remaining < 1)) throw new TypeError("CANDIDATE_REVIEW_INVALID");
@@ -723,12 +753,28 @@ function unwrapViewEnvelope(value) {
   return {...value.projection, schema_version: value.schema_version, session_id: value.session_id, revision: value.revision, generated_at: value.generated_at, view_digest: value.view_digest};
 }
 
+async function readViewResponse(response) {
+  if (!response.ok) {
+    const error = new Error(`HTTP_${response.status}`);
+    try {
+      const payload = await response.json();
+      if (typeof payload.code === "string") error.nativeCode = payload.code;
+    } catch (_error) { /* HTTP status remains useful even with a non-JSON error body. */ }
+    throw error;
+  }
+  const body = await response.text().catch((error) => {
+    error.bodyReadFailed = true;
+    throw error;
+  });
+  return validateView(JSON.parse(body));
+}
+
 function canIntent(op) {
-  return Boolean(currentView && currentView.connection_state === "READY" && !intentBusy && currentView.available_ops.includes(op));
+  return Boolean(currentView && !viewStale && currentView.connection_state === "READY" && !intentBusy && currentView.available_ops.includes(op));
 }
 
 function canImmediateCancel() {
-  return Boolean(currentView && currentView.connection_state === "READY" && !cancelPending
+  return Boolean(currentView && !viewStale && currentView.connection_state === "READY" && !cancelPending
     && ["RUNNING", "PAUSED_AWAITING_OPERATOR"].includes(currentView.runtime.workflow_state)
     && currentView.available_ops.includes("cancel_session"));
 }
@@ -749,27 +795,46 @@ function renderTechnical(rows) {
     .map(([key, value]) => `<div><dt>${escapeHtml(key)}</dt><dd><code>${escapeHtml(typeof value === "object" ? JSON.stringify(value) : value)}</code></dd></div>`).join("");
 }
 
-function failClose(code, detail = "") {
+function failClose(code, detail = "", recover = false) {
   const bridgeSessionExpired = code === "BRIDGE_SESSION_EXPIRED";
   stopWatch();
-  currentView = undefined;
+  if (viewController?.releaseIntent) intentBusy = false;
+  viewController?.abort();
+  viewController = undefined;
+  clearTimeout(recoveryTimer);
+  viewStale = true;
   document.body.dataset.bridge = "blocked";
   document.querySelector("#connection-dot").className = "connection-dot blocked";
   document.querySelector("#connection-label").textContent = "복구 필요";
-  document.querySelector("#session-label").textContent = "최신 상태를 다시 확인하세요";
+  document.querySelector("#session-label").textContent = currentView
+    ? `오래된 정보 · 마지막 응답 ${currentView.generated_at}` : "아직 실행 상태를 확인하지 못했습니다";
+  disabledBeforeFailure ??= [...document.querySelectorAll("button, input, select")].filter((control) => !control.disabled);
   document.querySelectorAll("button, input, select").forEach((control) => { control.disabled = true; });
-  if (document.querySelector("#workspace-dialog").open) document.querySelector("#workspace-dialog").close();
-  cancelButton.hidden = true;
-  setBanner(`${humanReason(code)}. 새 요청을 보내지 않습니다. 최신 상태를 다시 불러오세요.`, "bad");
-  document.querySelectorAll(".flow-step").forEach((section) => { section.hidden = section.dataset.step !== "environment"; });
-  document.querySelectorAll("[data-step-target]").forEach((button) => button.classList.toggle("active", button.dataset.stepTarget === "environment"));
-  document.querySelector("#setup-summary").innerHTML = `<strong>${escapeHtml(humanReason(code))}</strong><span>장치 상태를 성공으로 표시하지 않습니다. 서비스를 연결한 뒤 다시 확인하세요.</span><button id="retry-view" type="button">${bridgeSessionExpired ? "새 서버에 다시 연결" : "최신 상태 다시 불러오기"}</button>`;
-  document.querySelector("#setup-subsystems").innerHTML = "";
-  document.querySelector("#camera-setup").hidden = true;
-  document.querySelector("#runtime-content").innerHTML = "";
+  document.querySelectorAll("dialog[open]").forEach((dialog) => dialog.close());
+  const reason = {
+    BRIDGE_UNAVAILABLE: "서버 연결 응답을 받지 못했습니다",
+    BRIDGE_SESSION_EXPIRED: "서버 세션을 다시 연결해야 합니다",
+    VIEW_HTTP_ERROR: "서버가 상태 조회 오류를 반환했습니다",
+    VIEW_RESPONSE_INVALID: "서버 응답을 현재 화면의 상태로 해석할 수 없습니다",
+  }[code] ?? humanReason(code);
+  const retrying = recover && recoveryAttempts < 3;
+  setBanner(`${reason}. ${currentView ? "아래는 오래된 마지막 확인 정보입니다. " : ""}로봇이 계속 동작할 수 있으며, 현재 동작·정지 여부는 확인되지 않았습니다. 요청을 재전송하지 않습니다. ${retrying ? `상태 조회만 자동 재시도합니다 (${recoveryAttempts + 1}/3).` : "자동 조회를 하지 않습니다. 최신 상태를 다시 확인하세요."}`, "bad");
+  connectionBanner.insertAdjacentHTML("beforeend", ` <button id="retry-view" type="button">${bridgeSessionExpired ? "새 서버에 다시 연결" : "최신 상태 다시 불러오기"}</button>`);
+  if (currentView) {
+    for (const selector of ["#campaign-facts", "#runtime-content"]) {
+      const panel = document.querySelector(selector);
+      if (!panel.querySelector("[data-stale-label]")) panel.insertAdjacentHTML("afterbegin", '<strong data-stale-label>오래된 마지막 확인 정보 · 현재 상태 미확인</strong>');
+    }
+    document.querySelectorAll(".pulse").forEach((pulse) => { pulse.hidden = true; });
+  }
   const retry = document.querySelector("#retry-view");
   retry.addEventListener("click", () => bridgeSessionExpired ? window.location.reload() : loadView(), {once: true});
-  renderTechnical({error_code: code, detail});
+  renderTechnical({error_code: code, detail, last_session: currentView?.session_id,
+    last_revision: currentView?.revision, last_view_digest: currentView?.view_digest, stale: true});
+  if (retrying) recoveryTimer = setTimeout(() => {
+    recoveryAttempts += 1;
+    loadView({automaticRecovery: true});
+  }, 1000 * 2 ** recoveryAttempts);
 }
 
 function stopWatch() {
@@ -778,13 +843,16 @@ function stopWatch() {
   controller?.abort();
 }
 
-function failViewRequest(error) {
+function failViewRequest(error, stage = "connection") {
   const detail = error instanceof Error ? error.message : String(error);
   const stale = ["OPERATOR_VIEW_REVISION_FUTURE", "RUNNING_CANCEL_UNAVAILABLE"].includes(detail);
-  const code = detail === "HTTP_403" ? "BRIDGE_SESSION_EXPIRED"
+  const code = ["HTTP_401", "HTTP_403", "OPERATOR_TOKEN_MISSING"].includes(detail) ? "BRIDGE_SESSION_EXPIRED"
     : detail.startsWith("UNKNOWN_VIEW_ENUM") || stale ? "VIEW_STALE"
-      : detail === "VIEW_REVISION_ROLLBACK" ? detail : "BRIDGE_UNAVAILABLE";
-  failClose(code, detail);
+      : detail === "VIEW_REVISION_ROLLBACK" ? detail
+        : detail.startsWith("HTTP_") ? "VIEW_HTTP_ERROR"
+          : stage === "connection" || error.bodyReadFailed || error.name === "TimeoutError" ? "BRIDGE_UNAVAILABLE" : "VIEW_RESPONSE_INVALID";
+  failClose(code, error.nativeCode ? `${detail}:${error.nativeCode}` : detail,
+    code === "BRIDGE_UNAVAILABLE" || /^HTTP_5\d\d$/.test(detail));
 }
 
 function setupReady(view) {
@@ -1018,6 +1086,27 @@ function renderExperimentDesign(view, editable) {
     : `backend sampler profile ${profile.state_space_design_profile_id}을 사용합니다. 적용 전에는 현재 좌표와 seed가 바뀌지 않습니다.`;
 }
 
+function renderMotionPreset(view, editable) {
+  const select = document.querySelector("#motion-preset-select");
+  if (!select) return;
+  const presets = view.motion_presets || [];
+  const binding = view.draft.motion_preset;
+  const selected = presets.find((item) => item.id === binding?.id && item.digest === binding?.digest);
+  select.innerHTML = '<option value="">기존 검증 설정 유지</option>' + presets.map((item) =>
+    `<option value="${escapeHtml(item.id)}" ${item.status === "QUALIFICATION_REQUIRED" ? "disabled" : ""}>${escapeHtml(item.purpose)} · ${item.status === "QUALIFIED" ? "자격 결속됨" : item.status === "TRIAL_AVAILABLE" ? "시험 수집 전용 · 미검증 후보" : "물리 자격 필요"}</option>`).join("");
+  if (binding && !selected) select.insertAdjacentHTML("beforeend", '<option value="stale">변경된 정책 — 다시 선택 필요</option>');
+  select.value = selected?.id || (binding ? "stale" : "");
+  select.disabled = !editable;
+  document.querySelector("#motion-preset-summary").textContent = !binding
+    ? "기존 자격에 기록된 구간별 요청값을 유지합니다."
+    : !selected ? "정책이 변경되었습니다. 최신 정책을 선택하거나 기존 설정으로 돌아가세요."
+    : selected.status === "QUALIFIED" ? "선택한 모든 작업영역에 정확히 결속된 자격을 사용합니다. 기존 실행 승인 단계는 유지됩니다."
+    : selected.status === "TRIAL_AVAILABLE" ? "시험 수집의 작업·물체 재배치에 후보 팔 속도를 적용합니다. HOME 복귀·시작 자세 이동은 기존 검증 설정을 유지합니다. 물리 성능은 미검증이며 생산 자격·실행 승인은 부여되지 않습니다."
+    : "선택은 초안에만 반영됩니다. 이 정책의 물리 자격이 없어 계획 확정·실행할 수 없습니다.";
+  document.querySelector("#motion-preset-phases").innerHTML = Object.entries(selected?.phase_scaling || {}).map(([phase, values]) =>
+    `<div><dt>${escapeHtml(phase)}</dt><dd>속도 ${values.velocity_scaling * 100}% · 가속도 ${values.acceleration_scaling * 100}%</dd></div>`).join("");
+}
+
 function renderStartPoseSetup(view) {
   const setup = view.runtime.workflow_state === "AUTHORING" ? view.start_pose_setup : null;
   const entry = document.querySelector("#start-pose-entry");
@@ -1096,6 +1185,22 @@ function renderCurrentObjectPose(view, editable) {
   document.querySelector("#current-object-status").textContent = domain
     ? `작성안 r${view.draft.revision} · ${selectedLabel(view, "workspace")} · ${pickPlace ? "첫 에피소드의 물체 출발점입니다. 로봇 시작 자세와는 별도입니다." : "첫 에피소드와 작업영역 초기화가 이 위치에서 시작합니다."}`
     : "현재 작업영역의 입력 범위를 사용할 수 없습니다.";
+  const position = view.draft.object_position;
+  const restore = document.querySelector("#refresh-object-position");
+  if (restore) {
+    restore.hidden = position == null || position.status !== "STALE";
+    restore.disabled = !canIntent("refresh_object_position");
+  }
+  if (position != null) {
+    document.querySelector("#apply-current-object").textContent = "직접 옮긴 위치 저장";
+    const meaning = position.status === "AVAILABLE"
+      ? position.source === "HUMAN" ? "사람이 보고한 현재 위치입니다."
+        : `마지막 실행의 착지 근거로 복원했습니다${position.run_id ? ` · ${position.run_id}` : ""}. 영상으로 측정한 위치는 아닙니다.`
+      : position.status === "STALE" ? "저장된 위치 근거가 바뀌었습니다. 최신 위치를 사용하거나 직접 옮긴 위치를 보고하세요."
+        : position.status === "MISSING" ? "저장된 물체 위치가 없습니다. 직접 놓은 위치를 입력하세요."
+          : `현재 위치를 확정할 수 없습니다 (${position.reason}). 표시된 입력값은 현재 위치의 증거가 아닙니다.`;
+    document.querySelector("#current-object-status").textContent = `${meaning} 물체를 직접 옮겼을 때만 위치를 수정하세요. 기존 실행·cell 조건은 별도로 유지됩니다.`;
+  }
 }
 
 function renderDirectPoseEditor(view, editable) {
@@ -1244,6 +1349,7 @@ function renderCatalog(view) {
 
   renderCurrentObjectPose(view, editable);
   renderExperimentDesign(view, editable);
+  renderMotionPreset(view, editable);
   renderStateSpaceSummary(view);
   renderDirectPoseEditor(view, editable);
   const disclosure = document.querySelector("#cell-grid-disclosure");
@@ -1577,6 +1683,11 @@ function renderResults(view) {
     return;
   }
   const pending = review.status === "PENDING" && canIntent("review_candidate");
+  if (review.status === "UNAVAILABLE") {
+    delete reviewQueue.dataset.reviewRenderKey;
+    reviewQueue.innerHTML = `<div class="notice"><strong>분류 상태를 확인할 수 없습니다</strong><span>저장된 검토 결과를 다시 확인할 때까지 분류 요청을 보내지 않습니다.</span></div>`;
+    return;
+  }
   const reasons = Array.isArray(review.reasons) ? review.reasons : [];
   const pose = review.coverage_condition;
   const context = [
@@ -1693,6 +1804,11 @@ function renderCollectionAdvice(view) {
 }
 
 function render(view) {
+  viewStale = false;
+  clearTimeout(recoveryTimer);
+  recoveryAttempts = 0;
+  disabledBeforeFailure?.forEach((control) => { if (control.isConnected) control.disabled = false; });
+  disabledBeforeFailure = undefined;
   if (view.session_id !== lastSession
       || !["RUNNING", "CANCELLING", "PAUSED_AWAITING_OPERATOR"].includes(view.runtime.workflow_state)) cancelPending = false;
   currentView = view;
@@ -1715,25 +1831,28 @@ function render(view) {
 }
 
 async function watchView() {
-  if (!currentView || currentView.connection_state !== "READY" || watchController) return;
+  if (!currentView || viewStale || currentView.connection_state !== "READY" || watchController) return;
   const boundSession = currentView.session_id;
   const afterRevision = currentView.revision;
   const controller = new AbortController();
   watchController = controller;
+  const timeout = setTimeout(() => controller.abort(new DOMException("State watch timed out", "TimeoutError")), 70000);
+  let stage = "connection";
   try {
     const response = await fetch(`/api/view/watch?after_revision=${afterRevision}`, {
       method: "GET", credentials: "same-origin", cache: "no-store",
       headers: tokenHeaders(), signal: controller.signal,
     });
-    const payload = await response.json();
-    if (!response.ok) throw new Error(response.status === 403 ? "HTTP_403" : typeof payload.code === "string" ? payload.code : `HTTP_${response.status}`);
+    stage = "response";
+    const view = await readViewResponse(response);
     if (controller.signal.aborted) return;
-    const view = validateView(payload);
     if (controller.signal.aborted || !currentView || currentView.session_id !== boundSession) return;
+    if (view.connection_state !== "READY") return failClose(view.runtime.reason_codes?.[0] ?? "VIEW_STALE", view.connection_state);
     if (view.revision !== currentView.revision || view.view_digest !== currentView.view_digest) render(view);
   } catch (error) {
-    if (!controller.signal.aborted && watchController === controller && error.name !== "AbortError") failViewRequest(error);
+    if (watchController === controller && (!controller.signal.aborted || controller.signal.reason?.name === "TimeoutError")) failViewRequest(error, stage);
   } finally {
+    clearTimeout(timeout);
     if (watchController === controller) {
       watchController = undefined;
       watchView();
@@ -1824,13 +1943,23 @@ async function submitImmediateCancel() {
   await loadView({rejectionCode, recoveryNotice});
 }
 
-async function loadView({releaseIntent = false, rejectionCode, recoveryNotice} = {}) {
+async function loadView({releaseIntent = false, rejectionCode, recoveryNotice, automaticRecovery = false} = {}) {
   stopWatch();
-  setBanner("최신 상태를 다시 읽고 있습니다. 이 동안 요청을 보내지 않습니다.", "info", false);
+  clearTimeout(recoveryTimer);
+  if (!automaticRecovery) recoveryAttempts = 0;
+  releaseIntent ||= viewController?.releaseIntent;
+  viewController?.abort();
+  const controller = new AbortController();
+  controller.releaseIntent = releaseIntent;
+  viewController = controller;
+  const timeout = setTimeout(() => controller.abort(new DOMException("State read timed out", "TimeoutError")), 10000);
+  let stage = "connection";
+  if (!viewStale) setBanner("최신 상태를 다시 읽고 있습니다. 이 동안 요청을 보내지 않습니다.", "info", false);
   try {
-    const response = await fetch("/api/view", {method: "GET", credentials: "same-origin", cache: "no-store", headers: tokenHeaders()});
-    if (!response.ok) throw new Error(`HTTP_${response.status}`);
-    const view = validateView(await response.json());
+    const response = await fetch("/api/view", {method: "GET", credentials: "same-origin", cache: "no-store", headers: tokenHeaders(), signal: controller.signal});
+    stage = "response";
+    const view = await readViewResponse(response);
+    if (viewController !== controller) return;
     if (releaseIntent) intentBusy = false;
     if (view.connection_state !== "READY") {
       failClose(view.runtime.reason_codes?.[0] ?? "VIEW_STALE", view.connection_state);
@@ -1841,8 +1970,12 @@ async function loadView({releaseIntent = false, rejectionCode, recoveryNotice} =
     else if (rejectionCode) setBanner(`${humanReason(rejectionCode)}. 요청은 실행되지 않았습니다.`, "bad");
     watchView();
   } catch (error) {
+    if (viewController !== controller) return;
     if (releaseIntent) intentBusy = false;
-    failViewRequest(error);
+    failViewRequest(error, stage);
+  } finally {
+    clearTimeout(timeout);
+    if (viewController === controller) viewController = undefined;
   }
 }
 
@@ -1948,6 +2081,13 @@ document.querySelector("#seed-input").addEventListener("change", (event) => {
   if (!Number.isSafeInteger(normalizedSeed) || normalizedSeed < 0 || normalizedSeed > Number(event.target.max)) return event.target.reportValidity();
   submitIntent("update_draft", {draft_id: currentView.draft.draft_id, normalized_seed: normalizedSeed});
 });
+document.querySelector("#motion-preset-select")?.addEventListener("change", (event) => {
+  if (!currentView || !canIntent("update_draft")) return;
+  const preset = (currentView.motion_presets || []).find((item) => item.id === event.target.value);
+  if (event.target.value && !preset) return;
+  submitIntent("update_draft", {draft_id: currentView.draft.draft_id,
+    motion_preset: preset ? {id: preset.id, digest: preset.digest} : null});
+});
 document.querySelector("#experiment-design-form").addEventListener("submit", (event) => {
   event.preventDefault();
   if (!currentView || !canIntent("update_draft") || currentView.draft.authoring_mode !== "ASSISTED") return;
@@ -1983,6 +2123,7 @@ document.querySelector("#current-object-form").addEventListener("submit", (event
     },
   });
 });
+document.querySelector("#refresh-object-position")?.addEventListener("click", () => submitIntent("refresh_object_position"));
 document.querySelector("#split-select").addEventListener("change", (event) => submitIntent("update_draft", {draft_id: currentView.draft.draft_id, split: event.target.value}));
 document.querySelector("#cell-grid").addEventListener("click", (event) => {
   const button = event.target.closest("[data-cell-id]");
@@ -2070,7 +2211,12 @@ document.querySelector("#same-settings-action").addEventListener("click", (event
   const button = event.target.closest("[data-op]");
   if (button) submitIntent(button.dataset.op);
 });
-window.addEventListener("offline", () => failClose("BRIDGE_UNAVAILABLE", "BROWSER_OFFLINE"));
-window.addEventListener("online", () => { setBanner("연결을 확인한 뒤 최신 상태를 다시 읽습니다. 이전 요청은 다시 보내지 않습니다.", "info"); loadView(); });
+window.addEventListener("offline", () => failClose("BRIDGE_UNAVAILABLE", "BROWSER_OFFLINE", true));
+window.addEventListener("online", () => {
+  if (viewStale && recoveryAttempts < 3) {
+    recoveryAttempts += 1;
+    loadView({automaticRecovery: true});
+  }
+});
 
 loadView();

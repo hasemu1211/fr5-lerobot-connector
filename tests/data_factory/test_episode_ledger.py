@@ -1107,6 +1107,41 @@ class EpisodeLedgerTest(unittest.TestCase):
         self.assertEqual("PASS", reviewed["review"]["semantic_status"])
         self.assertEqual("NOT_AUTHORIZED", reviewed["review"]["training_status"])
 
+    def test_external_review_observation_is_read_only_and_checks_durable_binding(self):
+        run_dir = self.base / "external-review"
+        run_dir.mkdir()
+        ledger = self._compile(self._artifacts(suffix="external-review"))
+        paths = [run_dir / name for name in (
+            "episode_ledger.json", "episode_ledger_state.json", "candidate_admission.json",
+        )]
+        paths[0].write_text(json.dumps(ledger))
+        paths[1].write_text(json.dumps(project_episode_state(ledger=ledger)))
+        paths[2].write_bytes(Path(self._candidate(ledger)["artifact_path"]).read_bytes())
+        reference = {"path": str(paths[0]), "state_path": str(paths[1]),
+                     "ledger_digest": ledger["ledger_digest"]}
+        reference = run_job.bind_candidate_episode_state(reference, paths[2])
+        self.assertEqual(run_job.read_candidate_episode_state(reference, paths[2])["candidate"]["semantic_status"], "PENDING")
+        with mock.patch.object(run_job, "validate_episode_ledger", side_effect=AssertionError("unchanged pending rescanned ledger")):
+            pending = run_job.read_candidate_episode_state(
+                reference, paths[2], expected_file_digest=digest(json.loads(paths[2].read_text())),
+            )
+        self.assertEqual(pending["candidate"]["semantic_status"], "PENDING")
+        pending_state = paths[1].read_bytes()
+        run_job.apply_episode_review(run_dir, semantic_status="PASS", reviewed_by="external-reviewer")
+        before = [(p.read_bytes(), p.stat().st_mtime_ns) for p in paths]
+        with mock.patch.object(run_job, "write_json_atomic", side_effect=AssertionError("GET wrote state")):
+            observed = run_job.read_candidate_episode_state(reference, paths[2])
+        self.assertEqual(observed["candidate"]["reviewed_by"], "external-reviewer")
+        self.assertEqual(observed["ledger_reference"]["review_status"], "PASS")
+        self.assertEqual(observed["ledger_reference"]["training_status"], "NOT_AUTHORIZED")
+        self.assertEqual(before, [(p.read_bytes(), p.stat().st_mtime_ns) for p in paths])
+        with self.assertRaises(ContractError):
+            run_job.read_candidate_episode_state({**reference, "ledger_digest": digest("wrong")}, paths[2])
+        paths[1].write_bytes(pending_state)
+        with self.assertRaises(ContractError):
+            run_job.read_candidate_episode_state(reference, paths[2])
+        self.assertEqual(paths[1].read_bytes(), pending_state)
+
     def test_runner_candidate_binding_updates_only_the_mutable_ledger_state(self) -> None:
         run_dir = self.base / "run"
         run_dir.mkdir()

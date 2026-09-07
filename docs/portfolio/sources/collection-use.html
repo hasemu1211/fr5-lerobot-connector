@@ -1,0 +1,3095 @@
+<!doctype html><html lang="ko"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>수집 운영 화면의 직접 사용 기록 — FR5 근거</title><link rel="stylesheet" href="../site.css"></head><body><main class="source-page"><a href="../collection.html#console-title">← 설명으로 돌아가기</a><h1>수집 운영 화면의 직접 사용 기록</h1><p class="note">설명에 사용한 구현·측정 자료의 발췌이다. SHA-256은 발췌 전 원본 파일을 식별한다. 실행 PC의 절대 경로와 계정 정보는 포함하지 않으며, 측정값과 해석 조건을 함께 제시한다.</p><p>수집 시스템 362464d의 기본 FAKE 모드를 직접 사용한 기록이다. 실제 로봇·카메라·데이터셋 효과는 없다.</p><p>authoring 화면 SHA-256: f19c0305b026175bb2d949a515237dee89114a7909da9097560483f970cc8e5c</p><p>plan 화면 SHA-256: d90825aff5b063a94ba3261b4c9b9b956425eabcb4d9df10251eae583827782c</p><p>results 화면 SHA-256: 93e206c44a5376cb6bc747f0d45f1ac61dc6e90fd3c5e24251a34f60da3b6861</p><section id="collection-authoring-view"><h2>collection-authoring-view.json</h2><p class="locator">collection-authoring-view.json<br>sha256:6e0bc8d3e2795dc4c48df52c8fa8d988276dae3dc0a00bdc7783e3145cfdaacb</p><p class="note">원문에서 발췌한 필드. 실행 환경의 절대 경로는 자료 식별자로 표시한다.</p><pre>{
+  &quot;workflow_state&quot;: &quot;AUTHORING&quot;,
+  &quot;effect_scope&quot;: &quot;FAKE&quot;,
+  &quot;effect_counts&quot;: {},
+  &quot;draft&quot;: {
+    &quot;authoring_mode&quot;: &quot;ASSISTED&quot;,
+    &quot;cells&quot;: [
+      {
+        &quot;cell_id&quot;: &quot;PLACE_A-yaw0-CENTER&quot;,
+        &quot;coverage_count&quot;: 0,
+        &quot;eligibility_status&quot;: &quot;ELIGIBLE&quot;,
+        &quot;reason_codes&quot;: [
+          &quot;EXACT_QUALIFIED_COMBINATION&quot;
+        ],
+        &quot;repeat&quot;: 1,
+        &quot;selection_state&quot;: &quot;SELECTED&quot;,
+        &quot;split&quot;: &quot;TRAIN&quot;,
+        &quot;x_mm&quot;: 0,
+        &quot;y_mm&quot;: 0,
+        &quot;yaw_deg&quot;: 0
+      },
+      {
+        &quot;cell_id&quot;: &quot;PLACE_A-yaw0-GRID_1&quot;,
+        &quot;coverage_count&quot;: 0,
+        &quot;eligibility_status&quot;: &quot;ELIGIBLE&quot;,
+        &quot;reason_codes&quot;: [
+          &quot;EXACT_QUALIFIED_COMBINATION&quot;
+        ],
+        &quot;repeat&quot;: 1,
+        &quot;selection_state&quot;: &quot;AVAILABLE&quot;,
+        &quot;split&quot;: &quot;TRAIN&quot;,
+        &quot;x_mm&quot;: -70,
+        &quot;y_mm&quot;: 35,
+        &quot;yaw_deg&quot;: 0
+      },
+      {
+        &quot;cell_id&quot;: &quot;PLACE_A-yaw0-GRID_10&quot;,
+        &quot;coverage_count&quot;: 0,
+        &quot;eligibility_status&quot;: &quot;ELIGIBLE&quot;,
+        &quot;reason_codes&quot;: [
+          &quot;EXACT_QUALIFIED_COMBINATION&quot;
+        ],
+        &quot;repeat&quot;: 1,
+        &quot;selection_state&quot;: &quot;AVAILABLE&quot;,
+        &quot;split&quot;: &quot;TRAIN&quot;,
+        &quot;x_mm&quot;: -70,
+        &quot;y_mm&quot;: -35,
+        &quot;yaw_deg&quot;: 0
+      },
+      {
+        &quot;cell_id&quot;: &quot;PLACE_A-yaw0-GRID_11&quot;,
+        &quot;coverage_count&quot;: 0,
+        &quot;eligibility_status&quot;: &quot;ELIGIBLE&quot;,
+        &quot;reason_codes&quot;: [
+          &quot;EXACT_QUALIFIED_COMBINATION&quot;
+        ],
+        &quot;repeat&quot;: 1,
+        &quot;selection_state&quot;: &quot;AVAILABLE&quot;,
+        &quot;split&quot;: &quot;TRAIN&quot;,
+        &quot;x_mm&quot;: -35,
+        &quot;y_mm&quot;: -35,
+        &quot;yaw_deg&quot;: 0
+      },
+      {
+        &quot;cell_id&quot;: &quot;PLACE_A-yaw0-GRID_12&quot;,
+        &quot;coverage_count&quot;: 0,
+        &quot;eligibility_status&quot;: &quot;ELIGIBLE&quot;,
+        &quot;reason_codes&quot;: [
+          &quot;EXACT_QUALIFIED_COMBINATION&quot;
+        ],
+        &quot;repeat&quot;: 1,
+        &quot;selection_state&quot;: &quot;AVAILABLE&quot;,
+        &quot;split&quot;: &quot;TRAIN&quot;,
+        &quot;x_mm&quot;: 0,
+        &quot;y_mm&quot;: -35,
+        &quot;yaw_deg&quot;: 0
+      },
+      {
+        &quot;cell_id&quot;: &quot;PLACE_A-yaw0-GRID_13&quot;,
+        &quot;coverage_count&quot;: 0,
+        &quot;eligibility_status&quot;: &quot;ELIGIBLE&quot;,
+        &quot;reason_codes&quot;: [
+          &quot;EXACT_QUALIFIED_COMBINATION&quot;
+        ],
+        &quot;repeat&quot;: 1,
+        &quot;selection_state&quot;: &quot;AVAILABLE&quot;,
+        &quot;split&quot;: &quot;TRAIN&quot;,
+        &quot;x_mm&quot;: 35,
+        &quot;y_mm&quot;: -35,
+        &quot;yaw_deg&quot;: 0
+      },
+      {
+        &quot;cell_id&quot;: &quot;PLACE_A-yaw0-GRID_14&quot;,
+        &quot;coverage_count&quot;: 0,
+        &quot;eligibility_status&quot;: &quot;ELIGIBLE&quot;,
+        &quot;reason_codes&quot;: [
+          &quot;EXACT_QUALIFIED_COMBINATION&quot;
+        ],
+        &quot;repeat&quot;: 1,
+        &quot;selection_state&quot;: &quot;AVAILABLE&quot;,
+        &quot;split&quot;: &quot;TRAIN&quot;,
+        &quot;x_mm&quot;: 70,
+        &quot;y_mm&quot;: -35,
+        &quot;yaw_deg&quot;: 0
+      },
+      {
+        &quot;cell_id&quot;: &quot;PLACE_A-yaw0-GRID_2&quot;,
+        &quot;coverage_count&quot;: 0,
+        &quot;eligibility_status&quot;: &quot;ELIGIBLE&quot;,
+        &quot;reason_codes&quot;: [
+          &quot;EXACT_QUALIFIED_COMBINATION&quot;
+        ],
+        &quot;repeat&quot;: 1,
+        &quot;selection_state&quot;: &quot;AVAILABLE&quot;,
+        &quot;split&quot;: &quot;TRAIN&quot;,
+        &quot;x_mm&quot;: -35,
+        &quot;y_mm&quot;: 35,
+        &quot;yaw_deg&quot;: 0
+      },
+      {
+        &quot;cell_id&quot;: &quot;PLACE_A-yaw0-GRID_3&quot;,
+        &quot;coverage_count&quot;: 0,
+        &quot;eligibility_status&quot;: &quot;ELIGIBLE&quot;,
+        &quot;reason_codes&quot;: [
+          &quot;EXACT_QUALIFIED_COMBINATION&quot;
+        ],
+        &quot;repeat&quot;: 1,
+        &quot;selection_state&quot;: &quot;AVAILABLE&quot;,
+        &quot;split&quot;: &quot;TRAIN&quot;,
+        &quot;x_mm&quot;: 0,
+        &quot;y_mm&quot;: 35,
+        &quot;yaw_deg&quot;: 0
+      },
+      {
+        &quot;cell_id&quot;: &quot;PLACE_A-yaw0-GRID_4&quot;,
+        &quot;coverage_count&quot;: 0,
+        &quot;eligibility_status&quot;: &quot;ELIGIBLE&quot;,
+        &quot;reason_codes&quot;: [
+          &quot;EXACT_QUALIFIED_COMBINATION&quot;
+        ],
+        &quot;repeat&quot;: 1,
+        &quot;selection_state&quot;: &quot;AVAILABLE&quot;,
+        &quot;split&quot;: &quot;TRAIN&quot;,
+        &quot;x_mm&quot;: 35,
+        &quot;y_mm&quot;: 35,
+        &quot;yaw_deg&quot;: 0
+      },
+      {
+        &quot;cell_id&quot;: &quot;PLACE_A-yaw0-GRID_5&quot;,
+        &quot;coverage_count&quot;: 0,
+        &quot;eligibility_status&quot;: &quot;ELIGIBLE&quot;,
+        &quot;reason_codes&quot;: [
+          &quot;EXACT_QUALIFIED_COMBINATION&quot;
+        ],
+        &quot;repeat&quot;: 1,
+        &quot;selection_state&quot;: &quot;AVAILABLE&quot;,
+        &quot;split&quot;: &quot;TRAIN&quot;,
+        &quot;x_mm&quot;: 70,
+        &quot;y_mm&quot;: 35,
+        &quot;yaw_deg&quot;: 0
+      },
+      {
+        &quot;cell_id&quot;: &quot;PLACE_A-yaw0-GRID_6&quot;,
+        &quot;coverage_count&quot;: 0,
+        &quot;eligibility_status&quot;: &quot;ELIGIBLE&quot;,
+        &quot;reason_codes&quot;: [
+          &quot;EXACT_QUALIFIED_COMBINATION&quot;
+        ],
+        &quot;repeat&quot;: 1,
+        &quot;selection_state&quot;: &quot;AVAILABLE&quot;,
+        &quot;split&quot;: &quot;TRAIN&quot;,
+        &quot;x_mm&quot;: -70,
+        &quot;y_mm&quot;: 0,
+        &quot;yaw_deg&quot;: 0
+      },
+      {
+        &quot;cell_id&quot;: &quot;PLACE_A-yaw0-GRID_7&quot;,
+        &quot;coverage_count&quot;: 0,
+        &quot;eligibility_status&quot;: &quot;ELIGIBLE&quot;,
+        &quot;reason_codes&quot;: [
+          &quot;EXACT_QUALIFIED_COMBINATION&quot;
+        ],
+        &quot;repeat&quot;: 1,
+        &quot;selection_state&quot;: &quot;AVAILABLE&quot;,
+        &quot;split&quot;: &quot;TRAIN&quot;,
+        &quot;x_mm&quot;: -35,
+        &quot;y_mm&quot;: 0,
+        &quot;yaw_deg&quot;: 0
+      },
+      {
+        &quot;cell_id&quot;: &quot;PLACE_A-yaw0-GRID_8&quot;,
+        &quot;coverage_count&quot;: 0,
+        &quot;eligibility_status&quot;: &quot;ELIGIBLE&quot;,
+        &quot;reason_codes&quot;: [
+          &quot;EXACT_QUALIFIED_COMBINATION&quot;
+        ],
+        &quot;repeat&quot;: 1,
+        &quot;selection_state&quot;: &quot;AVAILABLE&quot;,
+        &quot;split&quot;: &quot;TRAIN&quot;,
+        &quot;x_mm&quot;: 35,
+        &quot;y_mm&quot;: 0,
+        &quot;yaw_deg&quot;: 0
+      },
+      {
+        &quot;cell_id&quot;: &quot;PLACE_A-yaw0-GRID_9&quot;,
+        &quot;coverage_count&quot;: 0,
+        &quot;eligibility_status&quot;: &quot;ELIGIBLE&quot;,
+        &quot;reason_codes&quot;: [
+          &quot;EXACT_QUALIFIED_COMBINATION&quot;
+        ],
+        &quot;repeat&quot;: 1,
+        &quot;selection_state&quot;: &quot;AVAILABLE&quot;,
+        &quot;split&quot;: &quot;TRAIN&quot;,
+        &quot;x_mm&quot;: 70,
+        &quot;y_mm&quot;: 0,
+        &quot;yaw_deg&quot;: 0
+      },
+      {
+        &quot;cell_id&quot;: &quot;PLACE_B-yaw0-CENTER&quot;,
+        &quot;coverage_count&quot;: 0,
+        &quot;eligibility_status&quot;: &quot;BLOCKED&quot;,
+        &quot;reason_codes&quot;: [
+          &quot;QUALIFICATION_REQUIRED&quot;
+        ],
+        &quot;repeat&quot;: 1,
+        &quot;selection_state&quot;: &quot;BLOCKED&quot;,
+        &quot;split&quot;: &quot;TRAIN&quot;,
+        &quot;x_mm&quot;: 0,
+        &quot;y_mm&quot;: 0,
+        &quot;yaw_deg&quot;: 0
+      },
+      {
+        &quot;cell_id&quot;: &quot;PLACE_B-yaw0-GRID_1&quot;,
+        &quot;coverage_count&quot;: 0,
+        &quot;eligibility_status&quot;: &quot;BLOCKED&quot;,
+        &quot;reason_codes&quot;: [
+          &quot;QUALIFICATION_REQUIRED&quot;
+        ],
+        &quot;repeat&quot;: 1,
+        &quot;selection_state&quot;: &quot;BLOCKED&quot;,
+        &quot;split&quot;: &quot;TRAIN&quot;,
+        &quot;x_mm&quot;: -70,
+        &quot;y_mm&quot;: 35,
+        &quot;yaw_deg&quot;: 0
+      },
+      {
+        &quot;cell_id&quot;: &quot;PLACE_B-yaw0-GRID_10&quot;,
+        &quot;coverage_count&quot;: 0,
+        &quot;eligibility_status&quot;: &quot;BLOCKED&quot;,
+        &quot;reason_codes&quot;: [
+          &quot;QUALIFICATION_REQUIRED&quot;
+        ],
+        &quot;repeat&quot;: 1,
+        &quot;selection_state&quot;: &quot;BLOCKED&quot;,
+        &quot;split&quot;: &quot;TRAIN&quot;,
+        &quot;x_mm&quot;: -70,
+        &quot;y_mm&quot;: -35,
+        &quot;yaw_deg&quot;: 0
+      },
+      {
+        &quot;cell_id&quot;: &quot;PLACE_B-yaw0-GRID_11&quot;,
+        &quot;coverage_count&quot;: 0,
+        &quot;eligibility_status&quot;: &quot;BLOCKED&quot;,
+        &quot;reason_codes&quot;: [
+          &quot;QUALIFICATION_REQUIRED&quot;
+        ],
+        &quot;repeat&quot;: 1,
+        &quot;selection_state&quot;: &quot;BLOCKED&quot;,
+        &quot;split&quot;: &quot;TRAIN&quot;,
+        &quot;x_mm&quot;: -35,
+        &quot;y_mm&quot;: -35,
+        &quot;yaw_deg&quot;: 0
+      },
+      {
+        &quot;cell_id&quot;: &quot;PLACE_B-yaw0-GRID_12&quot;,
+        &quot;coverage_count&quot;: 0,
+        &quot;eligibility_status&quot;: &quot;BLOCKED&quot;,
+        &quot;reason_codes&quot;: [
+          &quot;QUALIFICATION_REQUIRED&quot;
+        ],
+        &quot;repeat&quot;: 1,
+        &quot;selection_state&quot;: &quot;BLOCKED&quot;,
+        &quot;split&quot;: &quot;TRAIN&quot;,
+        &quot;x_mm&quot;: 0,
+        &quot;y_mm&quot;: -35,
+        &quot;yaw_deg&quot;: 0
+      },
+      {
+        &quot;cell_id&quot;: &quot;PLACE_B-yaw0-GRID_13&quot;,
+        &quot;coverage_count&quot;: 0,
+        &quot;eligibility_status&quot;: &quot;BLOCKED&quot;,
+        &quot;reason_codes&quot;: [
+          &quot;QUALIFICATION_REQUIRED&quot;
+        ],
+        &quot;repeat&quot;: 1,
+        &quot;selection_state&quot;: &quot;BLOCKED&quot;,
+        &quot;split&quot;: &quot;TRAIN&quot;,
+        &quot;x_mm&quot;: 35,
+        &quot;y_mm&quot;: -35,
+        &quot;yaw_deg&quot;: 0
+      },
+      {
+        &quot;cell_id&quot;: &quot;PLACE_B-yaw0-GRID_14&quot;,
+        &quot;coverage_count&quot;: 0,
+        &quot;eligibility_status&quot;: &quot;BLOCKED&quot;,
+        &quot;reason_codes&quot;: [
+          &quot;QUALIFICATION_REQUIRED&quot;
+        ],
+        &quot;repeat&quot;: 1,
+        &quot;selection_state&quot;: &quot;BLOCKED&quot;,
+        &quot;split&quot;: &quot;TRAIN&quot;,
+        &quot;x_mm&quot;: 70,
+        &quot;y_mm&quot;: -35,
+        &quot;yaw_deg&quot;: 0
+      },
+      {
+        &quot;cell_id&quot;: &quot;PLACE_B-yaw0-GRID_2&quot;,
+        &quot;coverage_count&quot;: 0,
+        &quot;eligibility_status&quot;: &quot;BLOCKED&quot;,
+        &quot;reason_codes&quot;: [
+          &quot;QUALIFICATION_REQUIRED&quot;
+        ],
+        &quot;repeat&quot;: 1,
+        &quot;selection_state&quot;: &quot;BLOCKED&quot;,
+        &quot;split&quot;: &quot;TRAIN&quot;,
+        &quot;x_mm&quot;: -35,
+        &quot;y_mm&quot;: 35,
+        &quot;yaw_deg&quot;: 0
+      },
+      {
+        &quot;cell_id&quot;: &quot;PLACE_B-yaw0-GRID_3&quot;,
+        &quot;coverage_count&quot;: 0,
+        &quot;eligibility_status&quot;: &quot;BLOCKED&quot;,
+        &quot;reason_codes&quot;: [
+          &quot;QUALIFICATION_REQUIRED&quot;
+        ],
+        &quot;repeat&quot;: 1,
+        &quot;selection_state&quot;: &quot;BLOCKED&quot;,
+        &quot;split&quot;: &quot;TRAIN&quot;,
+        &quot;x_mm&quot;: 0,
+        &quot;y_mm&quot;: 35,
+        &quot;yaw_deg&quot;: 0
+      },
+      {
+        &quot;cell_id&quot;: &quot;PLACE_B-yaw0-GRID_4&quot;,
+        &quot;coverage_count&quot;: 0,
+        &quot;eligibility_status&quot;: &quot;BLOCKED&quot;,
+        &quot;reason_codes&quot;: [
+          &quot;QUALIFICATION_REQUIRED&quot;
+        ],
+        &quot;repeat&quot;: 1,
+        &quot;selection_state&quot;: &quot;BLOCKED&quot;,
+        &quot;split&quot;: &quot;TRAIN&quot;,
+        &quot;x_mm&quot;: 35,
+        &quot;y_mm&quot;: 35,
+        &quot;yaw_deg&quot;: 0
+      },
+      {
+        &quot;cell_id&quot;: &quot;PLACE_B-yaw0-GRID_5&quot;,
+        &quot;coverage_count&quot;: 0,
+        &quot;eligibility_status&quot;: &quot;BLOCKED&quot;,
+        &quot;reason_codes&quot;: [
+          &quot;QUALIFICATION_REQUIRED&quot;
+        ],
+        &quot;repeat&quot;: 1,
+        &quot;selection_state&quot;: &quot;BLOCKED&quot;,
+        &quot;split&quot;: &quot;TRAIN&quot;,
+        &quot;x_mm&quot;: 70,
+        &quot;y_mm&quot;: 35,
+        &quot;yaw_deg&quot;: 0
+      },
+      {
+        &quot;cell_id&quot;: &quot;PLACE_B-yaw0-GRID_6&quot;,
+        &quot;coverage_count&quot;: 0,
+        &quot;eligibility_status&quot;: &quot;BLOCKED&quot;,
+        &quot;reason_codes&quot;: [
+          &quot;QUALIFICATION_REQUIRED&quot;
+        ],
+        &quot;repeat&quot;: 1,
+        &quot;selection_state&quot;: &quot;BLOCKED&quot;,
+        &quot;split&quot;: &quot;TRAIN&quot;,
+        &quot;x_mm&quot;: -70,
+        &quot;y_mm&quot;: 0,
+        &quot;yaw_deg&quot;: 0
+      },
+      {
+        &quot;cell_id&quot;: &quot;PLACE_B-yaw0-GRID_7&quot;,
+        &quot;coverage_count&quot;: 0,
+        &quot;eligibility_status&quot;: &quot;BLOCKED&quot;,
+        &quot;reason_codes&quot;: [
+          &quot;QUALIFICATION_REQUIRED&quot;
+        ],
+        &quot;repeat&quot;: 1,
+        &quot;selection_state&quot;: &quot;BLOCKED&quot;,
+        &quot;split&quot;: &quot;TRAIN&quot;,
+        &quot;x_mm&quot;: -35,
+        &quot;y_mm&quot;: 0,
+        &quot;yaw_deg&quot;: 0
+      },
+      {
+        &quot;cell_id&quot;: &quot;PLACE_B-yaw0-GRID_8&quot;,
+        &quot;coverage_count&quot;: 0,
+        &quot;eligibility_status&quot;: &quot;BLOCKED&quot;,
+        &quot;reason_codes&quot;: [
+          &quot;QUALIFICATION_REQUIRED&quot;
+        ],
+        &quot;repeat&quot;: 1,
+        &quot;selection_state&quot;: &quot;BLOCKED&quot;,
+        &quot;split&quot;: &quot;TRAIN&quot;,
+        &quot;x_mm&quot;: 35,
+        &quot;y_mm&quot;: 0,
+        &quot;yaw_deg&quot;: 0
+      },
+      {
+        &quot;cell_id&quot;: &quot;PLACE_B-yaw0-GRID_9&quot;,
+        &quot;coverage_count&quot;: 0,
+        &quot;eligibility_status&quot;: &quot;BLOCKED&quot;,
+        &quot;reason_codes&quot;: [
+          &quot;QUALIFICATION_REQUIRED&quot;
+        ],
+        &quot;repeat&quot;: 1,
+        &quot;selection_state&quot;: &quot;BLOCKED&quot;,
+        &quot;split&quot;: &quot;TRAIN&quot;,
+        &quot;x_mm&quot;: 70,
+        &quot;y_mm&quot;: 0,
+        &quot;yaw_deg&quot;: 0
+      }
+    ],
+    &quot;current_object_pose&quot;: {
+      &quot;place_id&quot;: &quot;PLACE_A&quot;,
+      &quot;x_mm&quot;: 0,
+      &quot;y_mm&quot;: 0,
+      &quot;yaw_deg&quot;: 0
+    },
+    &quot;direct_poses&quot;: [],
+    &quot;draft_id&quot;: &quot;product-fake-operator-r001-campaign-0001-draft&quot;,
+    &quot;draft_ready&quot;: true,
+    &quot;draft_reason&quot;: null,
+    &quot;execution_ready&quot;: true,
+    &quot;execution_reason&quot;: null,
+    &quot;normalized_seed&quot;: 591177668257927,
+    &quot;repeat&quot;: 1,
+    &quot;requested_count&quot;: 3,
+    &quot;revision&quot;: 0,
+    &quot;selection&quot;: {
+      &quot;camera&quot;: &quot;fr5-up-rgb-30hz-v1@usb-Generic_USB2.0_PC_CAMERA-video-index0&quot;,
+      &quot;data_mode&quot;: &quot;TEST_ONLY&quot;,
+      &quot;frame&quot;: &quot;place-a-yaw0-r002&quot;,
+      &quot;grasp&quot;: &quot;wood-cube-25mm-top-center-r001&quot;,
+      &quot;motion&quot;: &quot;fr5-place-a-wood-cube-r001&quot;,
+      &quot;object&quot;: &quot;wood-cube-25mm-r001&quot;,
+      &quot;split&quot;: &quot;TRAIN&quot;,
+      &quot;start&quot;: &quot;fr5-lab-a-home-r001&quot;,
+      &quot;task&quot;: &quot;pickup_e2e&quot;,
+      &quot;variant&quot;: &quot;DIRECT&quot;,
+      &quot;workspace&quot;: &quot;PLACE_A&quot;
+    },
+    &quot;workspace_route&quot;: [
+      {
+        &quot;frame_id&quot;: &quot;place-a-yaw0-r002&quot;,
+        &quot;workspace_id&quot;: &quot;PLACE_A&quot;
+      },
+      {
+        &quot;frame_id&quot;: &quot;place-a-yaw0-r002&quot;,
+        &quot;workspace_id&quot;: &quot;PLACE_A&quot;
+      },
+      {
+        &quot;frame_id&quot;: &quot;place-a-yaw0-r002&quot;,
+        &quot;workspace_id&quot;: &quot;PLACE_A&quot;
+      }
+    ]
+  },
+  &quot;campaign_review&quot;: null,
+  &quot;coverage&quot;: {
+    &quot;cells&quot;: [
+      {
+        &quot;cell_id&quot;: &quot;PLACE_A-yaw0-CENTER&quot;,
+        &quot;collected_count&quot;: 0,
+        &quot;coverage_count&quot;: 0,
+        &quot;eligibility_status&quot;: &quot;ELIGIBLE&quot;,
+        &quot;reason_codes&quot;: [
+          &quot;EXACT_QUALIFIED_COMBINATION&quot;
+        ],
+        &quot;repeat&quot;: 1,
+        &quot;selection_state&quot;: &quot;SELECTED&quot;,
+        &quot;split&quot;: &quot;TRAIN&quot;,
+        &quot;target_count&quot;: 3,
+        &quot;x_mm&quot;: 0,
+        &quot;y_mm&quot;: 0,
+        &quot;yaw_deg&quot;: 0
+      },
+      {
+        &quot;cell_id&quot;: &quot;PLACE_A-yaw0-GRID_1&quot;,
+        &quot;collected_count&quot;: 0,
+        &quot;coverage_count&quot;: 0,
+        &quot;eligibility_status&quot;: &quot;ELIGIBLE&quot;,
+        &quot;reason_codes&quot;: [
+          &quot;EXACT_QUALIFIED_COMBINATION&quot;
+        ],
+        &quot;repeat&quot;: 1,
+        &quot;selection_state&quot;: &quot;AVAILABLE&quot;,
+        &quot;split&quot;: &quot;TRAIN&quot;,
+        &quot;target_count&quot;: 1,
+        &quot;x_mm&quot;: -70,
+        &quot;y_mm&quot;: 35,
+        &quot;yaw_deg&quot;: 0
+      },
+      {
+        &quot;cell_id&quot;: &quot;PLACE_A-yaw0-GRID_10&quot;,
+        &quot;collected_count&quot;: 0,
+        &quot;coverage_count&quot;: 0,
+        &quot;eligibility_status&quot;: &quot;ELIGIBLE&quot;,
+        &quot;reason_codes&quot;: [
+          &quot;EXACT_QUALIFIED_COMBINATION&quot;
+        ],
+        &quot;repeat&quot;: 1,
+        &quot;selection_state&quot;: &quot;AVAILABLE&quot;,
+        &quot;split&quot;: &quot;TRAIN&quot;,
+        &quot;target_count&quot;: 1,
+        &quot;x_mm&quot;: -70,
+        &quot;y_mm&quot;: -35,
+        &quot;yaw_deg&quot;: 0
+      },
+      {
+        &quot;cell_id&quot;: &quot;PLACE_A-yaw0-GRID_11&quot;,
+        &quot;collected_count&quot;: 0,
+        &quot;coverage_count&quot;: 0,
+        &quot;eligibility_status&quot;: &quot;ELIGIBLE&quot;,
+        &quot;reason_codes&quot;: [
+          &quot;EXACT_QUALIFIED_COMBINATION&quot;
+        ],
+        &quot;repeat&quot;: 1,
+        &quot;selection_state&quot;: &quot;AVAILABLE&quot;,
+        &quot;split&quot;: &quot;TRAIN&quot;,
+        &quot;target_count&quot;: 1,
+        &quot;x_mm&quot;: -35,
+        &quot;y_mm&quot;: -35,
+        &quot;yaw_deg&quot;: 0
+      },
+      {
+        &quot;cell_id&quot;: &quot;PLACE_A-yaw0-GRID_12&quot;,
+        &quot;collected_count&quot;: 0,
+        &quot;coverage_count&quot;: 0,
+        &quot;eligibility_status&quot;: &quot;ELIGIBLE&quot;,
+        &quot;reason_codes&quot;: [
+          &quot;EXACT_QUALIFIED_COMBINATION&quot;
+        ],
+        &quot;repeat&quot;: 1,
+        &quot;selection_state&quot;: &quot;AVAILABLE&quot;,
+        &quot;split&quot;: &quot;TRAIN&quot;,
+        &quot;target_count&quot;: 1,
+        &quot;x_mm&quot;: 0,
+        &quot;y_mm&quot;: -35,
+        &quot;yaw_deg&quot;: 0
+      },
+      {
+        &quot;cell_id&quot;: &quot;PLACE_A-yaw0-GRID_13&quot;,
+        &quot;collected_count&quot;: 0,
+        &quot;coverage_count&quot;: 0,
+        &quot;eligibility_status&quot;: &quot;ELIGIBLE&quot;,
+        &quot;reason_codes&quot;: [
+          &quot;EXACT_QUALIFIED_COMBINATION&quot;
+        ],
+        &quot;repeat&quot;: 1,
+        &quot;selection_state&quot;: &quot;AVAILABLE&quot;,
+        &quot;split&quot;: &quot;TRAIN&quot;,
+        &quot;target_count&quot;: 1,
+        &quot;x_mm&quot;: 35,
+        &quot;y_mm&quot;: -35,
+        &quot;yaw_deg&quot;: 0
+      },
+      {
+        &quot;cell_id&quot;: &quot;PLACE_A-yaw0-GRID_14&quot;,
+        &quot;collected_count&quot;: 0,
+        &quot;coverage_count&quot;: 0,
+        &quot;eligibility_status&quot;: &quot;ELIGIBLE&quot;,
+        &quot;reason_codes&quot;: [
+          &quot;EXACT_QUALIFIED_COMBINATION&quot;
+        ],
+        &quot;repeat&quot;: 1,
+        &quot;selection_state&quot;: &quot;AVAILABLE&quot;,
+        &quot;split&quot;: &quot;TRAIN&quot;,
+        &quot;target_count&quot;: 1,
+        &quot;x_mm&quot;: 70,
+        &quot;y_mm&quot;: -35,
+        &quot;yaw_deg&quot;: 0
+      },
+      {
+        &quot;cell_id&quot;: &quot;PLACE_A-yaw0-GRID_2&quot;,
+        &quot;collected_count&quot;: 0,
+        &quot;coverage_count&quot;: 0,
+        &quot;eligibility_status&quot;: &quot;ELIGIBLE&quot;,
+        &quot;reason_codes&quot;: [
+          &quot;EXACT_QUALIFIED_COMBINATION&quot;
+        ],
+        &quot;repeat&quot;: 1,
+        &quot;selection_state&quot;: &quot;AVAILABLE&quot;,
+        &quot;split&quot;: &quot;TRAIN&quot;,
+        &quot;target_count&quot;: 1,
+        &quot;x_mm&quot;: -35,
+        &quot;y_mm&quot;: 35,
+        &quot;yaw_deg&quot;: 0
+      },
+      {
+        &quot;cell_id&quot;: &quot;PLACE_A-yaw0-GRID_3&quot;,
+        &quot;collected_count&quot;: 0,
+        &quot;coverage_count&quot;: 0,
+        &quot;eligibility_status&quot;: &quot;ELIGIBLE&quot;,
+        &quot;reason_codes&quot;: [
+          &quot;EXACT_QUALIFIED_COMBINATION&quot;
+        ],
+        &quot;repeat&quot;: 1,
+        &quot;selection_state&quot;: &quot;AVAILABLE&quot;,
+        &quot;split&quot;: &quot;TRAIN&quot;,
+        &quot;target_count&quot;: 1,
+        &quot;x_mm&quot;: 0,
+        &quot;y_mm&quot;: 35,
+        &quot;yaw_deg&quot;: 0
+      },
+      {
+        &quot;cell_id&quot;: &quot;PLACE_A-yaw0-GRID_4&quot;,
+        &quot;collected_count&quot;: 0,
+        &quot;coverage_count&quot;: 0,
+        &quot;eligibility_status&quot;: &quot;ELIGIBLE&quot;,
+        &quot;reason_codes&quot;: [
+          &quot;EXACT_QUALIFIED_COMBINATION&quot;
+        ],
+        &quot;repeat&quot;: 1,
+        &quot;selection_state&quot;: &quot;AVAILABLE&quot;,
+        &quot;split&quot;: &quot;TRAIN&quot;,
+        &quot;target_count&quot;: 1,
+        &quot;x_mm&quot;: 35,
+        &quot;y_mm&quot;: 35,
+        &quot;yaw_deg&quot;: 0
+      },
+      {
+        &quot;cell_id&quot;: &quot;PLACE_A-yaw0-GRID_5&quot;,
+        &quot;collected_count&quot;: 0,
+        &quot;coverage_count&quot;: 0,
+        &quot;eligibility_status&quot;: &quot;ELIGIBLE&quot;,
+        &quot;reason_codes&quot;: [
+          &quot;EXACT_QUALIFIED_COMBINATION&quot;
+        ],
+        &quot;repeat&quot;: 1,
+        &quot;selection_state&quot;: &quot;AVAILABLE&quot;,
+        &quot;split&quot;: &quot;TRAIN&quot;,
+        &quot;target_count&quot;: 1,
+        &quot;x_mm&quot;: 70,
+        &quot;y_mm&quot;: 35,
+        &quot;yaw_deg&quot;: 0
+      },
+      {
+        &quot;cell_id&quot;: &quot;PLACE_A-yaw0-GRID_6&quot;,
+        &quot;collected_count&quot;: 0,
+        &quot;coverage_count&quot;: 0,
+        &quot;eligibility_status&quot;: &quot;ELIGIBLE&quot;,
+        &quot;reason_codes&quot;: [
+          &quot;EXACT_QUALIFIED_COMBINATION&quot;
+        ],
+        &quot;repeat&quot;: 1,
+        &quot;selection_state&quot;: &quot;AVAILABLE&quot;,
+        &quot;split&quot;: &quot;TRAIN&quot;,
+        &quot;target_count&quot;: 1,
+        &quot;x_mm&quot;: -70,
+        &quot;y_mm&quot;: 0,
+        &quot;yaw_deg&quot;: 0
+      },
+      {
+        &quot;cell_id&quot;: &quot;PLACE_A-yaw0-GRID_7&quot;,
+        &quot;collected_count&quot;: 0,
+        &quot;coverage_count&quot;: 0,
+        &quot;eligibility_status&quot;: &quot;ELIGIBLE&quot;,
+        &quot;reason_codes&quot;: [
+          &quot;EXACT_QUALIFIED_COMBINATION&quot;
+        ],
+        &quot;repeat&quot;: 1,
+        &quot;selection_state&quot;: &quot;AVAILABLE&quot;,
+        &quot;split&quot;: &quot;TRAIN&quot;,
+        &quot;target_count&quot;: 1,
+        &quot;x_mm&quot;: -35,
+        &quot;y_mm&quot;: 0,
+        &quot;yaw_deg&quot;: 0
+      },
+      {
+        &quot;cell_id&quot;: &quot;PLACE_A-yaw0-GRID_8&quot;,
+        &quot;collected_count&quot;: 0,
+        &quot;coverage_count&quot;: 0,
+        &quot;eligibility_status&quot;: &quot;ELIGIBLE&quot;,
+        &quot;reason_codes&quot;: [
+          &quot;EXACT_QUALIFIED_COMBINATION&quot;
+        ],
+        &quot;repeat&quot;: 1,
+        &quot;selection_state&quot;: &quot;AVAILABLE&quot;,
+        &quot;split&quot;: &quot;TRAIN&quot;,
+        &quot;target_count&quot;: 1,
+        &quot;x_mm&quot;: 35,
+        &quot;y_mm&quot;: 0,
+        &quot;yaw_deg&quot;: 0
+      },
+      {
+        &quot;cell_id&quot;: &quot;PLACE_A-yaw0-GRID_9&quot;,
+        &quot;collected_count&quot;: 0,
+        &quot;coverage_count&quot;: 0,
+        &quot;eligibility_status&quot;: &quot;ELIGIBLE&quot;,
+        &quot;reason_codes&quot;: [
+          &quot;EXACT_QUALIFIED_COMBINATION&quot;
+        ],
+        &quot;repeat&quot;: 1,
+        &quot;selection_state&quot;: &quot;AVAILABLE&quot;,
+        &quot;split&quot;: &quot;TRAIN&quot;,
+        &quot;target_count&quot;: 1,
+        &quot;x_mm&quot;: 70,
+        &quot;y_mm&quot;: 0,
+        &quot;yaw_deg&quot;: 0
+      },
+      {
+        &quot;cell_id&quot;: &quot;PLACE_B-yaw0-CENTER&quot;,
+        &quot;collected_count&quot;: 0,
+        &quot;coverage_count&quot;: 0,
+        &quot;eligibility_status&quot;: &quot;BLOCKED&quot;,
+        &quot;reason_codes&quot;: [
+          &quot;QUALIFICATION_REQUIRED&quot;
+        ],
+        &quot;repeat&quot;: 1,
+        &quot;selection_state&quot;: &quot;BLOCKED&quot;,
+        &quot;split&quot;: &quot;TRAIN&quot;,
+        &quot;target_count&quot;: 1,
+        &quot;x_mm&quot;: 0,
+        &quot;y_mm&quot;: 0,
+        &quot;yaw_deg&quot;: 0
+      },
+      {
+        &quot;cell_id&quot;: &quot;PLACE_B-yaw0-GRID_1&quot;,
+        &quot;collected_count&quot;: 0,
+        &quot;coverage_count&quot;: 0,
+        &quot;eligibility_status&quot;: &quot;BLOCKED&quot;,
+        &quot;reason_codes&quot;: [
+          &quot;QUALIFICATION_REQUIRED&quot;
+        ],
+        &quot;repeat&quot;: 1,
+        &quot;selection_state&quot;: &quot;BLOCKED&quot;,
+        &quot;split&quot;: &quot;TRAIN&quot;,
+        &quot;target_count&quot;: 1,
+        &quot;x_mm&quot;: -70,
+        &quot;y_mm&quot;: 35,
+        &quot;yaw_deg&quot;: 0
+      },
+      {
+        &quot;cell_id&quot;: &quot;PLACE_B-yaw0-GRID_10&quot;,
+        &quot;collected_count&quot;: 0,
+        &quot;coverage_count&quot;: 0,
+        &quot;eligibility_status&quot;: &quot;BLOCKED&quot;,
+        &quot;reason_codes&quot;: [
+          &quot;QUALIFICATION_REQUIRED&quot;
+        ],
+        &quot;repeat&quot;: 1,
+        &quot;selection_state&quot;: &quot;BLOCKED&quot;,
+        &quot;split&quot;: &quot;TRAIN&quot;,
+        &quot;target_count&quot;: 1,
+        &quot;x_mm&quot;: -70,
+        &quot;y_mm&quot;: -35,
+        &quot;yaw_deg&quot;: 0
+      },
+      {
+        &quot;cell_id&quot;: &quot;PLACE_B-yaw0-GRID_11&quot;,
+        &quot;collected_count&quot;: 0,
+        &quot;coverage_count&quot;: 0,
+        &quot;eligibility_status&quot;: &quot;BLOCKED&quot;,
+        &quot;reason_codes&quot;: [
+          &quot;QUALIFICATION_REQUIRED&quot;
+        ],
+        &quot;repeat&quot;: 1,
+        &quot;selection_state&quot;: &quot;BLOCKED&quot;,
+        &quot;split&quot;: &quot;TRAIN&quot;,
+        &quot;target_count&quot;: 1,
+        &quot;x_mm&quot;: -35,
+        &quot;y_mm&quot;: -35,
+        &quot;yaw_deg&quot;: 0
+      },
+      {
+        &quot;cell_id&quot;: &quot;PLACE_B-yaw0-GRID_12&quot;,
+        &quot;collected_count&quot;: 0,
+        &quot;coverage_count&quot;: 0,
+        &quot;eligibility_status&quot;: &quot;BLOCKED&quot;,
+        &quot;reason_codes&quot;: [
+          &quot;QUALIFICATION_REQUIRED&quot;
+        ],
+        &quot;repeat&quot;: 1,
+        &quot;selection_state&quot;: &quot;BLOCKED&quot;,
+        &quot;split&quot;: &quot;TRAIN&quot;,
+        &quot;target_count&quot;: 1,
+        &quot;x_mm&quot;: 0,
+        &quot;y_mm&quot;: -35,
+        &quot;yaw_deg&quot;: 0
+      },
+      {
+        &quot;cell_id&quot;: &quot;PLACE_B-yaw0-GRID_13&quot;,
+        &quot;collected_count&quot;: 0,
+        &quot;coverage_count&quot;: 0,
+        &quot;eligibility_status&quot;: &quot;BLOCKED&quot;,
+        &quot;reason_codes&quot;: [
+          &quot;QUALIFICATION_REQUIRED&quot;
+        ],
+        &quot;repeat&quot;: 1,
+        &quot;selection_state&quot;: &quot;BLOCKED&quot;,
+        &quot;split&quot;: &quot;TRAIN&quot;,
+        &quot;target_count&quot;: 1,
+        &quot;x_mm&quot;: 35,
+        &quot;y_mm&quot;: -35,
+        &quot;yaw_deg&quot;: 0
+      },
+      {
+        &quot;cell_id&quot;: &quot;PLACE_B-yaw0-GRID_14&quot;,
+        &quot;collected_count&quot;: 0,
+        &quot;coverage_count&quot;: 0,
+        &quot;eligibility_status&quot;: &quot;BLOCKED&quot;,
+        &quot;reason_codes&quot;: [
+          &quot;QUALIFICATION_REQUIRED&quot;
+        ],
+        &quot;repeat&quot;: 1,
+        &quot;selection_state&quot;: &quot;BLOCKED&quot;,
+        &quot;split&quot;: &quot;TRAIN&quot;,
+        &quot;target_count&quot;: 1,
+        &quot;x_mm&quot;: 70,
+        &quot;y_mm&quot;: -35,
+        &quot;yaw_deg&quot;: 0
+      },
+      {
+        &quot;cell_id&quot;: &quot;PLACE_B-yaw0-GRID_2&quot;,
+        &quot;collected_count&quot;: 0,
+        &quot;coverage_count&quot;: 0,
+        &quot;eligibility_status&quot;: &quot;BLOCKED&quot;,
+        &quot;reason_codes&quot;: [
+          &quot;QUALIFICATION_REQUIRED&quot;
+        ],
+        &quot;repeat&quot;: 1,
+        &quot;selection_state&quot;: &quot;BLOCKED&quot;,
+        &quot;split&quot;: &quot;TRAIN&quot;,
+        &quot;target_count&quot;: 1,
+        &quot;x_mm&quot;: -35,
+        &quot;y_mm&quot;: 35,
+        &quot;yaw_deg&quot;: 0
+      },
+      {
+        &quot;cell_id&quot;: &quot;PLACE_B-yaw0-GRID_3&quot;,
+        &quot;collected_count&quot;: 0,
+        &quot;coverage_count&quot;: 0,
+        &quot;eligibility_status&quot;: &quot;BLOCKED&quot;,
+        &quot;reason_codes&quot;: [
+          &quot;QUALIFICATION_REQUIRED&quot;
+        ],
+        &quot;repeat&quot;: 1,
+        &quot;selection_state&quot;: &quot;BLOCKED&quot;,
+        &quot;split&quot;: &quot;TRAIN&quot;,
+        &quot;target_count&quot;: 1,
+        &quot;x_mm&quot;: 0,
+        &quot;y_mm&quot;: 35,
+        &quot;yaw_deg&quot;: 0
+      },
+      {
+        &quot;cell_id&quot;: &quot;PLACE_B-yaw0-GRID_4&quot;,
+        &quot;collected_count&quot;: 0,
+        &quot;coverage_count&quot;: 0,
+        &quot;eligibility_status&quot;: &quot;BLOCKED&quot;,
+        &quot;reason_codes&quot;: [
+          &quot;QUALIFICATION_REQUIRED&quot;
+        ],
+        &quot;repeat&quot;: 1,
+        &quot;selection_state&quot;: &quot;BLOCKED&quot;,
+        &quot;split&quot;: &quot;TRAIN&quot;,
+        &quot;target_count&quot;: 1,
+        &quot;x_mm&quot;: 35,
+        &quot;y_mm&quot;: 35,
+        &quot;yaw_deg&quot;: 0
+      },
+      {
+        &quot;cell_id&quot;: &quot;PLACE_B-yaw0-GRID_5&quot;,
+        &quot;collected_count&quot;: 0,
+        &quot;coverage_count&quot;: 0,
+        &quot;eligibility_status&quot;: &quot;BLOCKED&quot;,
+        &quot;reason_codes&quot;: [
+          &quot;QUALIFICATION_REQUIRED&quot;
+        ],
+        &quot;repeat&quot;: 1,
+        &quot;selection_state&quot;: &quot;BLOCKED&quot;,
+        &quot;split&quot;: &quot;TRAIN&quot;,
+        &quot;target_count&quot;: 1,
+        &quot;x_mm&quot;: 70,
+        &quot;y_mm&quot;: 35,
+        &quot;yaw_deg&quot;: 0
+      },
+      {
+        &quot;cell_id&quot;: &quot;PLACE_B-yaw0-GRID_6&quot;,
+        &quot;collected_count&quot;: 0,
+        &quot;coverage_count&quot;: 0,
+        &quot;eligibility_status&quot;: &quot;BLOCKED&quot;,
+        &quot;reason_codes&quot;: [
+          &quot;QUALIFICATION_REQUIRED&quot;
+        ],
+        &quot;repeat&quot;: 1,
+        &quot;selection_state&quot;: &quot;BLOCKED&quot;,
+        &quot;split&quot;: &quot;TRAIN&quot;,
+        &quot;target_count&quot;: 1,
+        &quot;x_mm&quot;: -70,
+        &quot;y_mm&quot;: 0,
+        &quot;yaw_deg&quot;: 0
+      },
+      {
+        &quot;cell_id&quot;: &quot;PLACE_B-yaw0-GRID_7&quot;,
+        &quot;collected_count&quot;: 0,
+        &quot;coverage_count&quot;: 0,
+        &quot;eligibility_status&quot;: &quot;BLOCKED&quot;,
+        &quot;reason_codes&quot;: [
+          &quot;QUALIFICATION_REQUIRED&quot;
+        ],
+        &quot;repeat&quot;: 1,
+        &quot;selection_state&quot;: &quot;BLOCKED&quot;,
+        &quot;split&quot;: &quot;TRAIN&quot;,
+        &quot;target_count&quot;: 1,
+        &quot;x_mm&quot;: -35,
+        &quot;y_mm&quot;: 0,
+        &quot;yaw_deg&quot;: 0
+      },
+      {
+        &quot;cell_id&quot;: &quot;PLACE_B-yaw0-GRID_8&quot;,
+        &quot;collected_count&quot;: 0,
+        &quot;coverage_count&quot;: 0,
+        &quot;eligibility_status&quot;: &quot;BLOCKED&quot;,
+        &quot;reason_codes&quot;: [
+          &quot;QUALIFICATION_REQUIRED&quot;
+        ],
+        &quot;repeat&quot;: 1,
+        &quot;selection_state&quot;: &quot;BLOCKED&quot;,
+        &quot;split&quot;: &quot;TRAIN&quot;,
+        &quot;target_count&quot;: 1,
+        &quot;x_mm&quot;: 35,
+        &quot;y_mm&quot;: 0,
+        &quot;yaw_deg&quot;: 0
+      },
+      {
+        &quot;cell_id&quot;: &quot;PLACE_B-yaw0-GRID_9&quot;,
+        &quot;collected_count&quot;: 0,
+        &quot;coverage_count&quot;: 0,
+        &quot;eligibility_status&quot;: &quot;BLOCKED&quot;,
+        &quot;reason_codes&quot;: [
+          &quot;QUALIFICATION_REQUIRED&quot;
+        ],
+        &quot;repeat&quot;: 1,
+        &quot;selection_state&quot;: &quot;BLOCKED&quot;,
+        &quot;split&quot;: &quot;TRAIN&quot;,
+        &quot;target_count&quot;: 1,
+        &quot;x_mm&quot;: 70,
+        &quot;y_mm&quot;: 0,
+        &quot;yaw_deg&quot;: 0
+      }
+    ],
+    &quot;completed&quot;: 0,
+    &quot;planned&quot;: 3,
+    &quot;sequence&quot;: []
+  }
+}</pre></section><section id="collection-plan-view"><h2>collection-plan-view.json</h2><p class="locator">collection-plan-view.json<br>sha256:0e9d2071cee5a1cf3f9a638e24f543bd9bff6e61b03ee5bda1f6a1b1ae2892a8</p><p class="note">원문에서 발췌한 필드. 실행 환경의 절대 경로는 자료 식별자로 표시한다.</p><pre>{
+  &quot;workflow_state&quot;: &quot;REVIEW_CAMPAIGN&quot;,
+  &quot;effect_scope&quot;: &quot;FAKE&quot;,
+  &quot;effect_counts&quot;: {
+    &quot;HUMAN&quot;: 0,
+    &quot;camera&quot;: 0,
+    &quot;candidate&quot;: 0,
+    &quot;dataset&quot;: 0,
+    &quot;fake_recorder_begin&quot;: 0,
+    &quot;fake_recorder_commit&quot;: 0,
+    &quot;fake_recorder_freeze&quot;: 0,
+    &quot;fake_recorder_readiness_status&quot;: 0,
+    &quot;gripper&quot;: 0,
+    &quot;inventory&quot;: 0,
+    &quot;physical_factory&quot;: 0,
+    &quot;production_coverage&quot;: 0,
+    &quot;production_recorder&quot;: 0,
+    &quot;production_run_state&quot;: 0,
+    &quot;robot&quot;: 0,
+    &quot;training&quot;: 0
+  },
+  &quot;draft&quot;: {
+    &quot;authoring_mode&quot;: &quot;ASSISTED&quot;,
+    &quot;cells&quot;: [
+      {
+        &quot;cell_id&quot;: &quot;PLACE_A-yaw0-CENTER&quot;,
+        &quot;coverage_count&quot;: 0,
+        &quot;eligibility_status&quot;: &quot;ELIGIBLE&quot;,
+        &quot;reason_codes&quot;: [
+          &quot;EXACT_QUALIFIED_COMBINATION&quot;
+        ],
+        &quot;repeat&quot;: 1,
+        &quot;selection_state&quot;: &quot;SELECTED&quot;,
+        &quot;split&quot;: &quot;TRAIN&quot;,
+        &quot;x_mm&quot;: 0,
+        &quot;y_mm&quot;: 0,
+        &quot;yaw_deg&quot;: 0
+      },
+      {
+        &quot;cell_id&quot;: &quot;PLACE_A-yaw0-GRID_1&quot;,
+        &quot;coverage_count&quot;: 0,
+        &quot;eligibility_status&quot;: &quot;ELIGIBLE&quot;,
+        &quot;reason_codes&quot;: [
+          &quot;EXACT_QUALIFIED_COMBINATION&quot;
+        ],
+        &quot;repeat&quot;: 1,
+        &quot;selection_state&quot;: &quot;AVAILABLE&quot;,
+        &quot;split&quot;: &quot;TRAIN&quot;,
+        &quot;x_mm&quot;: -70,
+        &quot;y_mm&quot;: 35,
+        &quot;yaw_deg&quot;: 0
+      },
+      {
+        &quot;cell_id&quot;: &quot;PLACE_A-yaw0-GRID_10&quot;,
+        &quot;coverage_count&quot;: 0,
+        &quot;eligibility_status&quot;: &quot;ELIGIBLE&quot;,
+        &quot;reason_codes&quot;: [
+          &quot;EXACT_QUALIFIED_COMBINATION&quot;
+        ],
+        &quot;repeat&quot;: 1,
+        &quot;selection_state&quot;: &quot;AVAILABLE&quot;,
+        &quot;split&quot;: &quot;TRAIN&quot;,
+        &quot;x_mm&quot;: -70,
+        &quot;y_mm&quot;: -35,
+        &quot;yaw_deg&quot;: 0
+      },
+      {
+        &quot;cell_id&quot;: &quot;PLACE_A-yaw0-GRID_11&quot;,
+        &quot;coverage_count&quot;: 0,
+        &quot;eligibility_status&quot;: &quot;ELIGIBLE&quot;,
+        &quot;reason_codes&quot;: [
+          &quot;EXACT_QUALIFIED_COMBINATION&quot;
+        ],
+        &quot;repeat&quot;: 1,
+        &quot;selection_state&quot;: &quot;AVAILABLE&quot;,
+        &quot;split&quot;: &quot;TRAIN&quot;,
+        &quot;x_mm&quot;: -35,
+        &quot;y_mm&quot;: -35,
+        &quot;yaw_deg&quot;: 0
+      },
+      {
+        &quot;cell_id&quot;: &quot;PLACE_A-yaw0-GRID_12&quot;,
+        &quot;coverage_count&quot;: 0,
+        &quot;eligibility_status&quot;: &quot;ELIGIBLE&quot;,
+        &quot;reason_codes&quot;: [
+          &quot;EXACT_QUALIFIED_COMBINATION&quot;
+        ],
+        &quot;repeat&quot;: 1,
+        &quot;selection_state&quot;: &quot;AVAILABLE&quot;,
+        &quot;split&quot;: &quot;TRAIN&quot;,
+        &quot;x_mm&quot;: 0,
+        &quot;y_mm&quot;: -35,
+        &quot;yaw_deg&quot;: 0
+      },
+      {
+        &quot;cell_id&quot;: &quot;PLACE_A-yaw0-GRID_13&quot;,
+        &quot;coverage_count&quot;: 0,
+        &quot;eligibility_status&quot;: &quot;ELIGIBLE&quot;,
+        &quot;reason_codes&quot;: [
+          &quot;EXACT_QUALIFIED_COMBINATION&quot;
+        ],
+        &quot;repeat&quot;: 1,
+        &quot;selection_state&quot;: &quot;AVAILABLE&quot;,
+        &quot;split&quot;: &quot;TRAIN&quot;,
+        &quot;x_mm&quot;: 35,
+        &quot;y_mm&quot;: -35,
+        &quot;yaw_deg&quot;: 0
+      },
+      {
+        &quot;cell_id&quot;: &quot;PLACE_A-yaw0-GRID_14&quot;,
+        &quot;coverage_count&quot;: 0,
+        &quot;eligibility_status&quot;: &quot;ELIGIBLE&quot;,
+        &quot;reason_codes&quot;: [
+          &quot;EXACT_QUALIFIED_COMBINATION&quot;
+        ],
+        &quot;repeat&quot;: 1,
+        &quot;selection_state&quot;: &quot;AVAILABLE&quot;,
+        &quot;split&quot;: &quot;TRAIN&quot;,
+        &quot;x_mm&quot;: 70,
+        &quot;y_mm&quot;: -35,
+        &quot;yaw_deg&quot;: 0
+      },
+      {
+        &quot;cell_id&quot;: &quot;PLACE_A-yaw0-GRID_2&quot;,
+        &quot;coverage_count&quot;: 0,
+        &quot;eligibility_status&quot;: &quot;ELIGIBLE&quot;,
+        &quot;reason_codes&quot;: [
+          &quot;EXACT_QUALIFIED_COMBINATION&quot;
+        ],
+        &quot;repeat&quot;: 1,
+        &quot;selection_state&quot;: &quot;AVAILABLE&quot;,
+        &quot;split&quot;: &quot;TRAIN&quot;,
+        &quot;x_mm&quot;: -35,
+        &quot;y_mm&quot;: 35,
+        &quot;yaw_deg&quot;: 0
+      },
+      {
+        &quot;cell_id&quot;: &quot;PLACE_A-yaw0-GRID_3&quot;,
+        &quot;coverage_count&quot;: 0,
+        &quot;eligibility_status&quot;: &quot;ELIGIBLE&quot;,
+        &quot;reason_codes&quot;: [
+          &quot;EXACT_QUALIFIED_COMBINATION&quot;
+        ],
+        &quot;repeat&quot;: 1,
+        &quot;selection_state&quot;: &quot;AVAILABLE&quot;,
+        &quot;split&quot;: &quot;TRAIN&quot;,
+        &quot;x_mm&quot;: 0,
+        &quot;y_mm&quot;: 35,
+        &quot;yaw_deg&quot;: 0
+      },
+      {
+        &quot;cell_id&quot;: &quot;PLACE_A-yaw0-GRID_4&quot;,
+        &quot;coverage_count&quot;: 0,
+        &quot;eligibility_status&quot;: &quot;ELIGIBLE&quot;,
+        &quot;reason_codes&quot;: [
+          &quot;EXACT_QUALIFIED_COMBINATION&quot;
+        ],
+        &quot;repeat&quot;: 1,
+        &quot;selection_state&quot;: &quot;AVAILABLE&quot;,
+        &quot;split&quot;: &quot;TRAIN&quot;,
+        &quot;x_mm&quot;: 35,
+        &quot;y_mm&quot;: 35,
+        &quot;yaw_deg&quot;: 0
+      },
+      {
+        &quot;cell_id&quot;: &quot;PLACE_A-yaw0-GRID_5&quot;,
+        &quot;coverage_count&quot;: 0,
+        &quot;eligibility_status&quot;: &quot;ELIGIBLE&quot;,
+        &quot;reason_codes&quot;: [
+          &quot;EXACT_QUALIFIED_COMBINATION&quot;
+        ],
+        &quot;repeat&quot;: 1,
+        &quot;selection_state&quot;: &quot;AVAILABLE&quot;,
+        &quot;split&quot;: &quot;TRAIN&quot;,
+        &quot;x_mm&quot;: 70,
+        &quot;y_mm&quot;: 35,
+        &quot;yaw_deg&quot;: 0
+      },
+      {
+        &quot;cell_id&quot;: &quot;PLACE_A-yaw0-GRID_6&quot;,
+        &quot;coverage_count&quot;: 0,
+        &quot;eligibility_status&quot;: &quot;ELIGIBLE&quot;,
+        &quot;reason_codes&quot;: [
+          &quot;EXACT_QUALIFIED_COMBINATION&quot;
+        ],
+        &quot;repeat&quot;: 1,
+        &quot;selection_state&quot;: &quot;AVAILABLE&quot;,
+        &quot;split&quot;: &quot;TRAIN&quot;,
+        &quot;x_mm&quot;: -70,
+        &quot;y_mm&quot;: 0,
+        &quot;yaw_deg&quot;: 0
+      },
+      {
+        &quot;cell_id&quot;: &quot;PLACE_A-yaw0-GRID_7&quot;,
+        &quot;coverage_count&quot;: 0,
+        &quot;eligibility_status&quot;: &quot;ELIGIBLE&quot;,
+        &quot;reason_codes&quot;: [
+          &quot;EXACT_QUALIFIED_COMBINATION&quot;
+        ],
+        &quot;repeat&quot;: 1,
+        &quot;selection_state&quot;: &quot;AVAILABLE&quot;,
+        &quot;split&quot;: &quot;TRAIN&quot;,
+        &quot;x_mm&quot;: -35,
+        &quot;y_mm&quot;: 0,
+        &quot;yaw_deg&quot;: 0
+      },
+      {
+        &quot;cell_id&quot;: &quot;PLACE_A-yaw0-GRID_8&quot;,
+        &quot;coverage_count&quot;: 0,
+        &quot;eligibility_status&quot;: &quot;ELIGIBLE&quot;,
+        &quot;reason_codes&quot;: [
+          &quot;EXACT_QUALIFIED_COMBINATION&quot;
+        ],
+        &quot;repeat&quot;: 1,
+        &quot;selection_state&quot;: &quot;AVAILABLE&quot;,
+        &quot;split&quot;: &quot;TRAIN&quot;,
+        &quot;x_mm&quot;: 35,
+        &quot;y_mm&quot;: 0,
+        &quot;yaw_deg&quot;: 0
+      },
+      {
+        &quot;cell_id&quot;: &quot;PLACE_A-yaw0-GRID_9&quot;,
+        &quot;coverage_count&quot;: 0,
+        &quot;eligibility_status&quot;: &quot;ELIGIBLE&quot;,
+        &quot;reason_codes&quot;: [
+          &quot;EXACT_QUALIFIED_COMBINATION&quot;
+        ],
+        &quot;repeat&quot;: 1,
+        &quot;selection_state&quot;: &quot;AVAILABLE&quot;,
+        &quot;split&quot;: &quot;TRAIN&quot;,
+        &quot;x_mm&quot;: 70,
+        &quot;y_mm&quot;: 0,
+        &quot;yaw_deg&quot;: 0
+      },
+      {
+        &quot;cell_id&quot;: &quot;PLACE_B-yaw0-CENTER&quot;,
+        &quot;coverage_count&quot;: 0,
+        &quot;eligibility_status&quot;: &quot;BLOCKED&quot;,
+        &quot;reason_codes&quot;: [
+          &quot;QUALIFICATION_REQUIRED&quot;
+        ],
+        &quot;repeat&quot;: 1,
+        &quot;selection_state&quot;: &quot;BLOCKED&quot;,
+        &quot;split&quot;: &quot;TRAIN&quot;,
+        &quot;x_mm&quot;: 0,
+        &quot;y_mm&quot;: 0,
+        &quot;yaw_deg&quot;: 0
+      },
+      {
+        &quot;cell_id&quot;: &quot;PLACE_B-yaw0-GRID_1&quot;,
+        &quot;coverage_count&quot;: 0,
+        &quot;eligibility_status&quot;: &quot;BLOCKED&quot;,
+        &quot;reason_codes&quot;: [
+          &quot;QUALIFICATION_REQUIRED&quot;
+        ],
+        &quot;repeat&quot;: 1,
+        &quot;selection_state&quot;: &quot;BLOCKED&quot;,
+        &quot;split&quot;: &quot;TRAIN&quot;,
+        &quot;x_mm&quot;: -70,
+        &quot;y_mm&quot;: 35,
+        &quot;yaw_deg&quot;: 0
+      },
+      {
+        &quot;cell_id&quot;: &quot;PLACE_B-yaw0-GRID_10&quot;,
+        &quot;coverage_count&quot;: 0,
+        &quot;eligibility_status&quot;: &quot;BLOCKED&quot;,
+        &quot;reason_codes&quot;: [
+          &quot;QUALIFICATION_REQUIRED&quot;
+        ],
+        &quot;repeat&quot;: 1,
+        &quot;selection_state&quot;: &quot;BLOCKED&quot;,
+        &quot;split&quot;: &quot;TRAIN&quot;,
+        &quot;x_mm&quot;: -70,
+        &quot;y_mm&quot;: -35,
+        &quot;yaw_deg&quot;: 0
+      },
+      {
+        &quot;cell_id&quot;: &quot;PLACE_B-yaw0-GRID_11&quot;,
+        &quot;coverage_count&quot;: 0,
+        &quot;eligibility_status&quot;: &quot;BLOCKED&quot;,
+        &quot;reason_codes&quot;: [
+          &quot;QUALIFICATION_REQUIRED&quot;
+        ],
+        &quot;repeat&quot;: 1,
+        &quot;selection_state&quot;: &quot;BLOCKED&quot;,
+        &quot;split&quot;: &quot;TRAIN&quot;,
+        &quot;x_mm&quot;: -35,
+        &quot;y_mm&quot;: -35,
+        &quot;yaw_deg&quot;: 0
+      },
+      {
+        &quot;cell_id&quot;: &quot;PLACE_B-yaw0-GRID_12&quot;,
+        &quot;coverage_count&quot;: 0,
+        &quot;eligibility_status&quot;: &quot;BLOCKED&quot;,
+        &quot;reason_codes&quot;: [
+          &quot;QUALIFICATION_REQUIRED&quot;
+        ],
+        &quot;repeat&quot;: 1,
+        &quot;selection_state&quot;: &quot;BLOCKED&quot;,
+        &quot;split&quot;: &quot;TRAIN&quot;,
+        &quot;x_mm&quot;: 0,
+        &quot;y_mm&quot;: -35,
+        &quot;yaw_deg&quot;: 0
+      },
+      {
+        &quot;cell_id&quot;: &quot;PLACE_B-yaw0-GRID_13&quot;,
+        &quot;coverage_count&quot;: 0,
+        &quot;eligibility_status&quot;: &quot;BLOCKED&quot;,
+        &quot;reason_codes&quot;: [
+          &quot;QUALIFICATION_REQUIRED&quot;
+        ],
+        &quot;repeat&quot;: 1,
+        &quot;selection_state&quot;: &quot;BLOCKED&quot;,
+        &quot;split&quot;: &quot;TRAIN&quot;,
+        &quot;x_mm&quot;: 35,
+        &quot;y_mm&quot;: -35,
+        &quot;yaw_deg&quot;: 0
+      },
+      {
+        &quot;cell_id&quot;: &quot;PLACE_B-yaw0-GRID_14&quot;,
+        &quot;coverage_count&quot;: 0,
+        &quot;eligibility_status&quot;: &quot;BLOCKED&quot;,
+        &quot;reason_codes&quot;: [
+          &quot;QUALIFICATION_REQUIRED&quot;
+        ],
+        &quot;repeat&quot;: 1,
+        &quot;selection_state&quot;: &quot;BLOCKED&quot;,
+        &quot;split&quot;: &quot;TRAIN&quot;,
+        &quot;x_mm&quot;: 70,
+        &quot;y_mm&quot;: -35,
+        &quot;yaw_deg&quot;: 0
+      },
+      {
+        &quot;cell_id&quot;: &quot;PLACE_B-yaw0-GRID_2&quot;,
+        &quot;coverage_count&quot;: 0,
+        &quot;eligibility_status&quot;: &quot;BLOCKED&quot;,
+        &quot;reason_codes&quot;: [
+          &quot;QUALIFICATION_REQUIRED&quot;
+        ],
+        &quot;repeat&quot;: 1,
+        &quot;selection_state&quot;: &quot;BLOCKED&quot;,
+        &quot;split&quot;: &quot;TRAIN&quot;,
+        &quot;x_mm&quot;: -35,
+        &quot;y_mm&quot;: 35,
+        &quot;yaw_deg&quot;: 0
+      },
+      {
+        &quot;cell_id&quot;: &quot;PLACE_B-yaw0-GRID_3&quot;,
+        &quot;coverage_count&quot;: 0,
+        &quot;eligibility_status&quot;: &quot;BLOCKED&quot;,
+        &quot;reason_codes&quot;: [
+          &quot;QUALIFICATION_REQUIRED&quot;
+        ],
+        &quot;repeat&quot;: 1,
+        &quot;selection_state&quot;: &quot;BLOCKED&quot;,
+        &quot;split&quot;: &quot;TRAIN&quot;,
+        &quot;x_mm&quot;: 0,
+        &quot;y_mm&quot;: 35,
+        &quot;yaw_deg&quot;: 0
+      },
+      {
+        &quot;cell_id&quot;: &quot;PLACE_B-yaw0-GRID_4&quot;,
+        &quot;coverage_count&quot;: 0,
+        &quot;eligibility_status&quot;: &quot;BLOCKED&quot;,
+        &quot;reason_codes&quot;: [
+          &quot;QUALIFICATION_REQUIRED&quot;
+        ],
+        &quot;repeat&quot;: 1,
+        &quot;selection_state&quot;: &quot;BLOCKED&quot;,
+        &quot;split&quot;: &quot;TRAIN&quot;,
+        &quot;x_mm&quot;: 35,
+        &quot;y_mm&quot;: 35,
+        &quot;yaw_deg&quot;: 0
+      },
+      {
+        &quot;cell_id&quot;: &quot;PLACE_B-yaw0-GRID_5&quot;,
+        &quot;coverage_count&quot;: 0,
+        &quot;eligibility_status&quot;: &quot;BLOCKED&quot;,
+        &quot;reason_codes&quot;: [
+          &quot;QUALIFICATION_REQUIRED&quot;
+        ],
+        &quot;repeat&quot;: 1,
+        &quot;selection_state&quot;: &quot;BLOCKED&quot;,
+        &quot;split&quot;: &quot;TRAIN&quot;,
+        &quot;x_mm&quot;: 70,
+        &quot;y_mm&quot;: 35,
+        &quot;yaw_deg&quot;: 0
+      },
+      {
+        &quot;cell_id&quot;: &quot;PLACE_B-yaw0-GRID_6&quot;,
+        &quot;coverage_count&quot;: 0,
+        &quot;eligibility_status&quot;: &quot;BLOCKED&quot;,
+        &quot;reason_codes&quot;: [
+          &quot;QUALIFICATION_REQUIRED&quot;
+        ],
+        &quot;repeat&quot;: 1,
+        &quot;selection_state&quot;: &quot;BLOCKED&quot;,
+        &quot;split&quot;: &quot;TRAIN&quot;,
+        &quot;x_mm&quot;: -70,
+        &quot;y_mm&quot;: 0,
+        &quot;yaw_deg&quot;: 0
+      },
+      {
+        &quot;cell_id&quot;: &quot;PLACE_B-yaw0-GRID_7&quot;,
+        &quot;coverage_count&quot;: 0,
+        &quot;eligibility_status&quot;: &quot;BLOCKED&quot;,
+        &quot;reason_codes&quot;: [
+          &quot;QUALIFICATION_REQUIRED&quot;
+        ],
+        &quot;repeat&quot;: 1,
+        &quot;selection_state&quot;: &quot;BLOCKED&quot;,
+        &quot;split&quot;: &quot;TRAIN&quot;,
+        &quot;x_mm&quot;: -35,
+        &quot;y_mm&quot;: 0,
+        &quot;yaw_deg&quot;: 0
+      },
+      {
+        &quot;cell_id&quot;: &quot;PLACE_B-yaw0-GRID_8&quot;,
+        &quot;coverage_count&quot;: 0,
+        &quot;eligibility_status&quot;: &quot;BLOCKED&quot;,
+        &quot;reason_codes&quot;: [
+          &quot;QUALIFICATION_REQUIRED&quot;
+        ],
+        &quot;repeat&quot;: 1,
+        &quot;selection_state&quot;: &quot;BLOCKED&quot;,
+        &quot;split&quot;: &quot;TRAIN&quot;,
+        &quot;x_mm&quot;: 35,
+        &quot;y_mm&quot;: 0,
+        &quot;yaw_deg&quot;: 0
+      },
+      {
+        &quot;cell_id&quot;: &quot;PLACE_B-yaw0-GRID_9&quot;,
+        &quot;coverage_count&quot;: 0,
+        &quot;eligibility_status&quot;: &quot;BLOCKED&quot;,
+        &quot;reason_codes&quot;: [
+          &quot;QUALIFICATION_REQUIRED&quot;
+        ],
+        &quot;repeat&quot;: 1,
+        &quot;selection_state&quot;: &quot;BLOCKED&quot;,
+        &quot;split&quot;: &quot;TRAIN&quot;,
+        &quot;x_mm&quot;: 70,
+        &quot;y_mm&quot;: 0,
+        &quot;yaw_deg&quot;: 0
+      }
+    ],
+    &quot;current_object_pose&quot;: {
+      &quot;place_id&quot;: &quot;PLACE_A&quot;,
+      &quot;x_mm&quot;: 0,
+      &quot;y_mm&quot;: 0,
+      &quot;yaw_deg&quot;: 0
+    },
+    &quot;direct_poses&quot;: [],
+    &quot;draft_id&quot;: &quot;product-fake-operator-r001-campaign-0001-draft&quot;,
+    &quot;draft_ready&quot;: true,
+    &quot;draft_reason&quot;: null,
+    &quot;execution_ready&quot;: true,
+    &quot;execution_reason&quot;: null,
+    &quot;normalized_seed&quot;: 591177668257927,
+    &quot;repeat&quot;: 1,
+    &quot;requested_count&quot;: 3,
+    &quot;revision&quot;: 0,
+    &quot;selection&quot;: {
+      &quot;camera&quot;: &quot;fr5-up-rgb-30hz-v1@usb-Generic_USB2.0_PC_CAMERA-video-index0&quot;,
+      &quot;data_mode&quot;: &quot;TEST_ONLY&quot;,
+      &quot;frame&quot;: &quot;place-a-yaw0-r002&quot;,
+      &quot;grasp&quot;: &quot;wood-cube-25mm-top-center-r001&quot;,
+      &quot;motion&quot;: &quot;fr5-place-a-wood-cube-r001&quot;,
+      &quot;object&quot;: &quot;wood-cube-25mm-r001&quot;,
+      &quot;split&quot;: &quot;TRAIN&quot;,
+      &quot;start&quot;: &quot;fr5-lab-a-home-r001&quot;,
+      &quot;task&quot;: &quot;pickup_e2e&quot;,
+      &quot;variant&quot;: &quot;DIRECT&quot;,
+      &quot;workspace&quot;: &quot;PLACE_A&quot;
+    },
+    &quot;workspace_route&quot;: [
+      {
+        &quot;frame_id&quot;: &quot;place-a-yaw0-r002&quot;,
+        &quot;workspace_id&quot;: &quot;PLACE_A&quot;
+      },
+      {
+        &quot;frame_id&quot;: &quot;place-a-yaw0-r002&quot;,
+        &quot;workspace_id&quot;: &quot;PLACE_A&quot;
+      },
+      {
+        &quot;frame_id&quot;: &quot;place-a-yaw0-r002&quot;,
+        &quot;workspace_id&quot;: &quot;PLACE_A&quot;
+      }
+    ]
+  },
+  &quot;campaign_review&quot;: {
+    &quot;data_disposition&quot;: &quot;TEST_ONLY&quot;,
+    &quot;envelope_digest&quot;: &quot;sha256:9e35bf3a913a5f694f21c5ce83929e69f6a55dcefd762989683ac2a13bc432ea&quot;,
+    &quot;episode_count&quot;: 3,
+    &quot;manifest_digest&quot;: &quot;sha256:f85dc9522ffdcc8ca946d8aa7bf7669c3cc15d17c1f24e8fd13860b1c82e86ce&quot;
+  },
+  &quot;coverage&quot;: {
+    &quot;cells&quot;: [
+      {
+        &quot;cell_id&quot;: &quot;campaign-24137e8ceb282e5afb11&quot;,
+        &quot;collected_count&quot;: 0,
+        &quot;coverage_condition_digest&quot;: &quot;sha256:24137e8ceb282e5afb11b9be7e5e471e78e5fff4831e25550a37b123c0b9f75f&quot;,
+        &quot;coverage_count&quot;: 0,
+        &quot;eligibility_status&quot;: &quot;ELIGIBLE&quot;,
+        &quot;reason_codes&quot;: [
+          &quot;EXACT_CAMPAIGN_SLOT&quot;
+        ],
+        &quot;repeat&quot;: 1,
+        &quot;selection_state&quot;: &quot;SELECTED&quot;,
+        &quot;split&quot;: &quot;TRAIN&quot;,
+        &quot;target_count&quot;: 1,
+        &quot;x_mm&quot;: 0,
+        &quot;y_mm&quot;: 0,
+        &quot;yaw_deg&quot;: 0
+      },
+      {
+        &quot;cell_id&quot;: &quot;campaign-785876c79033fc25bb3f&quot;,
+        &quot;collected_count&quot;: 0,
+        &quot;coverage_condition_digest&quot;: &quot;sha256:785876c79033fc25bb3fad959f98c31ed8e83a6cb56fa4bb14a6b10cd03d7ade&quot;,
+        &quot;coverage_count&quot;: 0,
+        &quot;eligibility_status&quot;: &quot;ELIGIBLE&quot;,
+        &quot;reason_codes&quot;: [
+          &quot;EXACT_CAMPAIGN_SLOT&quot;
+        ],
+        &quot;repeat&quot;: 1,
+        &quot;selection_state&quot;: &quot;SELECTED&quot;,
+        &quot;split&quot;: &quot;TRAIN&quot;,
+        &quot;target_count&quot;: 1,
+        &quot;x_mm&quot;: 77.42879895742257,
+        &quot;y_mm&quot;: -35.86986149811479,
+        &quot;yaw_deg&quot;: 0
+      },
+      {
+        &quot;cell_id&quot;: &quot;campaign-35cdee037baf9a3c87af&quot;,
+        &quot;collected_count&quot;: 0,
+        &quot;coverage_condition_digest&quot;: &quot;sha256:35cdee037baf9a3c87afa3825ec533d521b6525ce26501a711f75c74f11b6add&quot;,
+        &quot;coverage_count&quot;: 0,
+        &quot;eligibility_status&quot;: &quot;ELIGIBLE&quot;,
+        &quot;reason_codes&quot;: [
+          &quot;EXACT_CAMPAIGN_SLOT&quot;
+        ],
+        &quot;repeat&quot;: 1,
+        &quot;selection_state&quot;: &quot;SELECTED&quot;,
+        &quot;split&quot;: &quot;TRAIN&quot;,
+        &quot;target_count&quot;: 1,
+        &quot;x_mm&quot;: -95.67596076989324,
+        &quot;y_mm&quot;: -53.78952909469229,
+        &quot;yaw_deg&quot;: 0
+      }
+    ],
+    &quot;completed&quot;: 0,
+    &quot;planned&quot;: 3,
+    &quot;sequence&quot;: [
+      {
+        &quot;coverage_condition_digest&quot;: &quot;sha256:24137e8ceb282e5afb11b9be7e5e471e78e5fff4831e25550a37b123c0b9f75f&quot;,
+        &quot;object_reposition&quot;: null,
+        &quot;order_index&quot;: 1,
+        &quot;place_id&quot;: &quot;PLACE_A&quot;,
+        &quot;start_pose_id&quot;: &quot;start-1&quot;,
+        &quot;state_space_slot&quot;: null,
+        &quot;x_mm&quot;: 0,
+        &quot;y_mm&quot;: 0,
+        &quot;yaw_deg&quot;: 0
+      },
+      {
+        &quot;coverage_condition_digest&quot;: &quot;sha256:785876c79033fc25bb3fad959f98c31ed8e83a6cb56fa4bb14a6b10cd03d7ade&quot;,
+        &quot;object_reposition&quot;: null,
+        &quot;order_index&quot;: 2,
+        &quot;place_id&quot;: &quot;PLACE_A&quot;,
+        &quot;start_pose_id&quot;: &quot;start-2&quot;,
+        &quot;state_space_slot&quot;: null,
+        &quot;x_mm&quot;: 77.42879895742257,
+        &quot;y_mm&quot;: -35.86986149811479,
+        &quot;yaw_deg&quot;: 0
+      },
+      {
+        &quot;coverage_condition_digest&quot;: &quot;sha256:35cdee037baf9a3c87afa3825ec533d521b6525ce26501a711f75c74f11b6add&quot;,
+        &quot;object_reposition&quot;: null,
+        &quot;order_index&quot;: 3,
+        &quot;place_id&quot;: &quot;PLACE_A&quot;,
+        &quot;start_pose_id&quot;: &quot;start-3&quot;,
+        &quot;state_space_slot&quot;: null,
+        &quot;x_mm&quot;: -95.67596076989324,
+        &quot;y_mm&quot;: -53.78952909469229,
+        &quot;yaw_deg&quot;: 0
+      }
+    ]
+  }
+}</pre></section><section id="collection-terminal-view"><h2>collection-terminal-view.json</h2><p class="locator">collection-terminal-view.json<br>sha256:5d87f156f09ee6000e9e5d4909909090dac741b2c432a59becb41dfbe8dee1bc</p><p class="note">원문에서 발췌한 필드. 실행 환경의 절대 경로는 자료 식별자로 표시한다.</p><pre>{
+  &quot;workflow_state&quot;: &quot;TERMINAL&quot;,
+  &quot;effect_scope&quot;: &quot;FAKE&quot;,
+  &quot;effect_counts&quot;: {
+    &quot;HUMAN&quot;: 0,
+    &quot;camera&quot;: 0,
+    &quot;candidate&quot;: 0,
+    &quot;dataset&quot;: 0,
+    &quot;fake_recorder_begin&quot;: 3,
+    &quot;fake_recorder_commit&quot;: 3,
+    &quot;fake_recorder_freeze&quot;: 3,
+    &quot;fake_recorder_readiness_status&quot;: 3,
+    &quot;gripper&quot;: 0,
+    &quot;inventory&quot;: 0,
+    &quot;physical_factory&quot;: 0,
+    &quot;production_coverage&quot;: 0,
+    &quot;production_recorder&quot;: 0,
+    &quot;production_run_state&quot;: 0,
+    &quot;robot&quot;: 0,
+    &quot;training&quot;: 0
+  },
+  &quot;draft&quot;: {
+    &quot;authoring_mode&quot;: &quot;ASSISTED&quot;,
+    &quot;cells&quot;: [
+      {
+        &quot;cell_id&quot;: &quot;PLACE_A-yaw0-CENTER&quot;,
+        &quot;coverage_count&quot;: 0,
+        &quot;eligibility_status&quot;: &quot;ELIGIBLE&quot;,
+        &quot;reason_codes&quot;: [
+          &quot;EXACT_QUALIFIED_COMBINATION&quot;
+        ],
+        &quot;repeat&quot;: 1,
+        &quot;selection_state&quot;: &quot;SELECTED&quot;,
+        &quot;split&quot;: &quot;TRAIN&quot;,
+        &quot;x_mm&quot;: 0,
+        &quot;y_mm&quot;: 0,
+        &quot;yaw_deg&quot;: 0
+      },
+      {
+        &quot;cell_id&quot;: &quot;PLACE_A-yaw0-GRID_1&quot;,
+        &quot;coverage_count&quot;: 0,
+        &quot;eligibility_status&quot;: &quot;ELIGIBLE&quot;,
+        &quot;reason_codes&quot;: [
+          &quot;EXACT_QUALIFIED_COMBINATION&quot;
+        ],
+        &quot;repeat&quot;: 1,
+        &quot;selection_state&quot;: &quot;AVAILABLE&quot;,
+        &quot;split&quot;: &quot;TRAIN&quot;,
+        &quot;x_mm&quot;: -70,
+        &quot;y_mm&quot;: 35,
+        &quot;yaw_deg&quot;: 0
+      },
+      {
+        &quot;cell_id&quot;: &quot;PLACE_A-yaw0-GRID_10&quot;,
+        &quot;coverage_count&quot;: 0,
+        &quot;eligibility_status&quot;: &quot;ELIGIBLE&quot;,
+        &quot;reason_codes&quot;: [
+          &quot;EXACT_QUALIFIED_COMBINATION&quot;
+        ],
+        &quot;repeat&quot;: 1,
+        &quot;selection_state&quot;: &quot;AVAILABLE&quot;,
+        &quot;split&quot;: &quot;TRAIN&quot;,
+        &quot;x_mm&quot;: -70,
+        &quot;y_mm&quot;: -35,
+        &quot;yaw_deg&quot;: 0
+      },
+      {
+        &quot;cell_id&quot;: &quot;PLACE_A-yaw0-GRID_11&quot;,
+        &quot;coverage_count&quot;: 0,
+        &quot;eligibility_status&quot;: &quot;ELIGIBLE&quot;,
+        &quot;reason_codes&quot;: [
+          &quot;EXACT_QUALIFIED_COMBINATION&quot;
+        ],
+        &quot;repeat&quot;: 1,
+        &quot;selection_state&quot;: &quot;AVAILABLE&quot;,
+        &quot;split&quot;: &quot;TRAIN&quot;,
+        &quot;x_mm&quot;: -35,
+        &quot;y_mm&quot;: -35,
+        &quot;yaw_deg&quot;: 0
+      },
+      {
+        &quot;cell_id&quot;: &quot;PLACE_A-yaw0-GRID_12&quot;,
+        &quot;coverage_count&quot;: 0,
+        &quot;eligibility_status&quot;: &quot;ELIGIBLE&quot;,
+        &quot;reason_codes&quot;: [
+          &quot;EXACT_QUALIFIED_COMBINATION&quot;
+        ],
+        &quot;repeat&quot;: 1,
+        &quot;selection_state&quot;: &quot;AVAILABLE&quot;,
+        &quot;split&quot;: &quot;TRAIN&quot;,
+        &quot;x_mm&quot;: 0,
+        &quot;y_mm&quot;: -35,
+        &quot;yaw_deg&quot;: 0
+      },
+      {
+        &quot;cell_id&quot;: &quot;PLACE_A-yaw0-GRID_13&quot;,
+        &quot;coverage_count&quot;: 0,
+        &quot;eligibility_status&quot;: &quot;ELIGIBLE&quot;,
+        &quot;reason_codes&quot;: [
+          &quot;EXACT_QUALIFIED_COMBINATION&quot;
+        ],
+        &quot;repeat&quot;: 1,
+        &quot;selection_state&quot;: &quot;AVAILABLE&quot;,
+        &quot;split&quot;: &quot;TRAIN&quot;,
+        &quot;x_mm&quot;: 35,
+        &quot;y_mm&quot;: -35,
+        &quot;yaw_deg&quot;: 0
+      },
+      {
+        &quot;cell_id&quot;: &quot;PLACE_A-yaw0-GRID_14&quot;,
+        &quot;coverage_count&quot;: 0,
+        &quot;eligibility_status&quot;: &quot;ELIGIBLE&quot;,
+        &quot;reason_codes&quot;: [
+          &quot;EXACT_QUALIFIED_COMBINATION&quot;
+        ],
+        &quot;repeat&quot;: 1,
+        &quot;selection_state&quot;: &quot;AVAILABLE&quot;,
+        &quot;split&quot;: &quot;TRAIN&quot;,
+        &quot;x_mm&quot;: 70,
+        &quot;y_mm&quot;: -35,
+        &quot;yaw_deg&quot;: 0
+      },
+      {
+        &quot;cell_id&quot;: &quot;PLACE_A-yaw0-GRID_2&quot;,
+        &quot;coverage_count&quot;: 0,
+        &quot;eligibility_status&quot;: &quot;ELIGIBLE&quot;,
+        &quot;reason_codes&quot;: [
+          &quot;EXACT_QUALIFIED_COMBINATION&quot;
+        ],
+        &quot;repeat&quot;: 1,
+        &quot;selection_state&quot;: &quot;AVAILABLE&quot;,
+        &quot;split&quot;: &quot;TRAIN&quot;,
+        &quot;x_mm&quot;: -35,
+        &quot;y_mm&quot;: 35,
+        &quot;yaw_deg&quot;: 0
+      },
+      {
+        &quot;cell_id&quot;: &quot;PLACE_A-yaw0-GRID_3&quot;,
+        &quot;coverage_count&quot;: 0,
+        &quot;eligibility_status&quot;: &quot;ELIGIBLE&quot;,
+        &quot;reason_codes&quot;: [
+          &quot;EXACT_QUALIFIED_COMBINATION&quot;
+        ],
+        &quot;repeat&quot;: 1,
+        &quot;selection_state&quot;: &quot;AVAILABLE&quot;,
+        &quot;split&quot;: &quot;TRAIN&quot;,
+        &quot;x_mm&quot;: 0,
+        &quot;y_mm&quot;: 35,
+        &quot;yaw_deg&quot;: 0
+      },
+      {
+        &quot;cell_id&quot;: &quot;PLACE_A-yaw0-GRID_4&quot;,
+        &quot;coverage_count&quot;: 0,
+        &quot;eligibility_status&quot;: &quot;ELIGIBLE&quot;,
+        &quot;reason_codes&quot;: [
+          &quot;EXACT_QUALIFIED_COMBINATION&quot;
+        ],
+        &quot;repeat&quot;: 1,
+        &quot;selection_state&quot;: &quot;AVAILABLE&quot;,
+        &quot;split&quot;: &quot;TRAIN&quot;,
+        &quot;x_mm&quot;: 35,
+        &quot;y_mm&quot;: 35,
+        &quot;yaw_deg&quot;: 0
+      },
+      {
+        &quot;cell_id&quot;: &quot;PLACE_A-yaw0-GRID_5&quot;,
+        &quot;coverage_count&quot;: 0,
+        &quot;eligibility_status&quot;: &quot;ELIGIBLE&quot;,
+        &quot;reason_codes&quot;: [
+          &quot;EXACT_QUALIFIED_COMBINATION&quot;
+        ],
+        &quot;repeat&quot;: 1,
+        &quot;selection_state&quot;: &quot;AVAILABLE&quot;,
+        &quot;split&quot;: &quot;TRAIN&quot;,
+        &quot;x_mm&quot;: 70,
+        &quot;y_mm&quot;: 35,
+        &quot;yaw_deg&quot;: 0
+      },
+      {
+        &quot;cell_id&quot;: &quot;PLACE_A-yaw0-GRID_6&quot;,
+        &quot;coverage_count&quot;: 0,
+        &quot;eligibility_status&quot;: &quot;ELIGIBLE&quot;,
+        &quot;reason_codes&quot;: [
+          &quot;EXACT_QUALIFIED_COMBINATION&quot;
+        ],
+        &quot;repeat&quot;: 1,
+        &quot;selection_state&quot;: &quot;AVAILABLE&quot;,
+        &quot;split&quot;: &quot;TRAIN&quot;,
+        &quot;x_mm&quot;: -70,
+        &quot;y_mm&quot;: 0,
+        &quot;yaw_deg&quot;: 0
+      },
+      {
+        &quot;cell_id&quot;: &quot;PLACE_A-yaw0-GRID_7&quot;,
+        &quot;coverage_count&quot;: 0,
+        &quot;eligibility_status&quot;: &quot;ELIGIBLE&quot;,
+        &quot;reason_codes&quot;: [
+          &quot;EXACT_QUALIFIED_COMBINATION&quot;
+        ],
+        &quot;repeat&quot;: 1,
+        &quot;selection_state&quot;: &quot;AVAILABLE&quot;,
+        &quot;split&quot;: &quot;TRAIN&quot;,
+        &quot;x_mm&quot;: -35,
+        &quot;y_mm&quot;: 0,
+        &quot;yaw_deg&quot;: 0
+      },
+      {
+        &quot;cell_id&quot;: &quot;PLACE_A-yaw0-GRID_8&quot;,
+        &quot;coverage_count&quot;: 0,
+        &quot;eligibility_status&quot;: &quot;ELIGIBLE&quot;,
+        &quot;reason_codes&quot;: [
+          &quot;EXACT_QUALIFIED_COMBINATION&quot;
+        ],
+        &quot;repeat&quot;: 1,
+        &quot;selection_state&quot;: &quot;AVAILABLE&quot;,
+        &quot;split&quot;: &quot;TRAIN&quot;,
+        &quot;x_mm&quot;: 35,
+        &quot;y_mm&quot;: 0,
+        &quot;yaw_deg&quot;: 0
+      },
+      {
+        &quot;cell_id&quot;: &quot;PLACE_A-yaw0-GRID_9&quot;,
+        &quot;coverage_count&quot;: 0,
+        &quot;eligibility_status&quot;: &quot;ELIGIBLE&quot;,
+        &quot;reason_codes&quot;: [
+          &quot;EXACT_QUALIFIED_COMBINATION&quot;
+        ],
+        &quot;repeat&quot;: 1,
+        &quot;selection_state&quot;: &quot;AVAILABLE&quot;,
+        &quot;split&quot;: &quot;TRAIN&quot;,
+        &quot;x_mm&quot;: 70,
+        &quot;y_mm&quot;: 0,
+        &quot;yaw_deg&quot;: 0
+      },
+      {
+        &quot;cell_id&quot;: &quot;PLACE_B-yaw0-CENTER&quot;,
+        &quot;coverage_count&quot;: 0,
+        &quot;eligibility_status&quot;: &quot;BLOCKED&quot;,
+        &quot;reason_codes&quot;: [
+          &quot;QUALIFICATION_REQUIRED&quot;
+        ],
+        &quot;repeat&quot;: 1,
+        &quot;selection_state&quot;: &quot;BLOCKED&quot;,
+        &quot;split&quot;: &quot;TRAIN&quot;,
+        &quot;x_mm&quot;: 0,
+        &quot;y_mm&quot;: 0,
+        &quot;yaw_deg&quot;: 0
+      },
+      {
+        &quot;cell_id&quot;: &quot;PLACE_B-yaw0-GRID_1&quot;,
+        &quot;coverage_count&quot;: 0,
+        &quot;eligibility_status&quot;: &quot;BLOCKED&quot;,
+        &quot;reason_codes&quot;: [
+          &quot;QUALIFICATION_REQUIRED&quot;
+        ],
+        &quot;repeat&quot;: 1,
+        &quot;selection_state&quot;: &quot;BLOCKED&quot;,
+        &quot;split&quot;: &quot;TRAIN&quot;,
+        &quot;x_mm&quot;: -70,
+        &quot;y_mm&quot;: 35,
+        &quot;yaw_deg&quot;: 0
+      },
+      {
+        &quot;cell_id&quot;: &quot;PLACE_B-yaw0-GRID_10&quot;,
+        &quot;coverage_count&quot;: 0,
+        &quot;eligibility_status&quot;: &quot;BLOCKED&quot;,
+        &quot;reason_codes&quot;: [
+          &quot;QUALIFICATION_REQUIRED&quot;
+        ],
+        &quot;repeat&quot;: 1,
+        &quot;selection_state&quot;: &quot;BLOCKED&quot;,
+        &quot;split&quot;: &quot;TRAIN&quot;,
+        &quot;x_mm&quot;: -70,
+        &quot;y_mm&quot;: -35,
+        &quot;yaw_deg&quot;: 0
+      },
+      {
+        &quot;cell_id&quot;: &quot;PLACE_B-yaw0-GRID_11&quot;,
+        &quot;coverage_count&quot;: 0,
+        &quot;eligibility_status&quot;: &quot;BLOCKED&quot;,
+        &quot;reason_codes&quot;: [
+          &quot;QUALIFICATION_REQUIRED&quot;
+        ],
+        &quot;repeat&quot;: 1,
+        &quot;selection_state&quot;: &quot;BLOCKED&quot;,
+        &quot;split&quot;: &quot;TRAIN&quot;,
+        &quot;x_mm&quot;: -35,
+        &quot;y_mm&quot;: -35,
+        &quot;yaw_deg&quot;: 0
+      },
+      {
+        &quot;cell_id&quot;: &quot;PLACE_B-yaw0-GRID_12&quot;,
+        &quot;coverage_count&quot;: 0,
+        &quot;eligibility_status&quot;: &quot;BLOCKED&quot;,
+        &quot;reason_codes&quot;: [
+          &quot;QUALIFICATION_REQUIRED&quot;
+        ],
+        &quot;repeat&quot;: 1,
+        &quot;selection_state&quot;: &quot;BLOCKED&quot;,
+        &quot;split&quot;: &quot;TRAIN&quot;,
+        &quot;x_mm&quot;: 0,
+        &quot;y_mm&quot;: -35,
+        &quot;yaw_deg&quot;: 0
+      },
+      {
+        &quot;cell_id&quot;: &quot;PLACE_B-yaw0-GRID_13&quot;,
+        &quot;coverage_count&quot;: 0,
+        &quot;eligibility_status&quot;: &quot;BLOCKED&quot;,
+        &quot;reason_codes&quot;: [
+          &quot;QUALIFICATION_REQUIRED&quot;
+        ],
+        &quot;repeat&quot;: 1,
+        &quot;selection_state&quot;: &quot;BLOCKED&quot;,
+        &quot;split&quot;: &quot;TRAIN&quot;,
+        &quot;x_mm&quot;: 35,
+        &quot;y_mm&quot;: -35,
+        &quot;yaw_deg&quot;: 0
+      },
+      {
+        &quot;cell_id&quot;: &quot;PLACE_B-yaw0-GRID_14&quot;,
+        &quot;coverage_count&quot;: 0,
+        &quot;eligibility_status&quot;: &quot;BLOCKED&quot;,
+        &quot;reason_codes&quot;: [
+          &quot;QUALIFICATION_REQUIRED&quot;
+        ],
+        &quot;repeat&quot;: 1,
+        &quot;selection_state&quot;: &quot;BLOCKED&quot;,
+        &quot;split&quot;: &quot;TRAIN&quot;,
+        &quot;x_mm&quot;: 70,
+        &quot;y_mm&quot;: -35,
+        &quot;yaw_deg&quot;: 0
+      },
+      {
+        &quot;cell_id&quot;: &quot;PLACE_B-yaw0-GRID_2&quot;,
+        &quot;coverage_count&quot;: 0,
+        &quot;eligibility_status&quot;: &quot;BLOCKED&quot;,
+        &quot;reason_codes&quot;: [
+          &quot;QUALIFICATION_REQUIRED&quot;
+        ],
+        &quot;repeat&quot;: 1,
+        &quot;selection_state&quot;: &quot;BLOCKED&quot;,
+        &quot;split&quot;: &quot;TRAIN&quot;,
+        &quot;x_mm&quot;: -35,
+        &quot;y_mm&quot;: 35,
+        &quot;yaw_deg&quot;: 0
+      },
+      {
+        &quot;cell_id&quot;: &quot;PLACE_B-yaw0-GRID_3&quot;,
+        &quot;coverage_count&quot;: 0,
+        &quot;eligibility_status&quot;: &quot;BLOCKED&quot;,
+        &quot;reason_codes&quot;: [
+          &quot;QUALIFICATION_REQUIRED&quot;
+        ],
+        &quot;repeat&quot;: 1,
+        &quot;selection_state&quot;: &quot;BLOCKED&quot;,
+        &quot;split&quot;: &quot;TRAIN&quot;,
+        &quot;x_mm&quot;: 0,
+        &quot;y_mm&quot;: 35,
+        &quot;yaw_deg&quot;: 0
+      },
+      {
+        &quot;cell_id&quot;: &quot;PLACE_B-yaw0-GRID_4&quot;,
+        &quot;coverage_count&quot;: 0,
+        &quot;eligibility_status&quot;: &quot;BLOCKED&quot;,
+        &quot;reason_codes&quot;: [
+          &quot;QUALIFICATION_REQUIRED&quot;
+        ],
+        &quot;repeat&quot;: 1,
+        &quot;selection_state&quot;: &quot;BLOCKED&quot;,
+        &quot;split&quot;: &quot;TRAIN&quot;,
+        &quot;x_mm&quot;: 35,
+        &quot;y_mm&quot;: 35,
+        &quot;yaw_deg&quot;: 0
+      },
+      {
+        &quot;cell_id&quot;: &quot;PLACE_B-yaw0-GRID_5&quot;,
+        &quot;coverage_count&quot;: 0,
+        &quot;eligibility_status&quot;: &quot;BLOCKED&quot;,
+        &quot;reason_codes&quot;: [
+          &quot;QUALIFICATION_REQUIRED&quot;
+        ],
+        &quot;repeat&quot;: 1,
+        &quot;selection_state&quot;: &quot;BLOCKED&quot;,
+        &quot;split&quot;: &quot;TRAIN&quot;,
+        &quot;x_mm&quot;: 70,
+        &quot;y_mm&quot;: 35,
+        &quot;yaw_deg&quot;: 0
+      },
+      {
+        &quot;cell_id&quot;: &quot;PLACE_B-yaw0-GRID_6&quot;,
+        &quot;coverage_count&quot;: 0,
+        &quot;eligibility_status&quot;: &quot;BLOCKED&quot;,
+        &quot;reason_codes&quot;: [
+          &quot;QUALIFICATION_REQUIRED&quot;
+        ],
+        &quot;repeat&quot;: 1,
+        &quot;selection_state&quot;: &quot;BLOCKED&quot;,
+        &quot;split&quot;: &quot;TRAIN&quot;,
+        &quot;x_mm&quot;: -70,
+        &quot;y_mm&quot;: 0,
+        &quot;yaw_deg&quot;: 0
+      },
+      {
+        &quot;cell_id&quot;: &quot;PLACE_B-yaw0-GRID_7&quot;,
+        &quot;coverage_count&quot;: 0,
+        &quot;eligibility_status&quot;: &quot;BLOCKED&quot;,
+        &quot;reason_codes&quot;: [
+          &quot;QUALIFICATION_REQUIRED&quot;
+        ],
+        &quot;repeat&quot;: 1,
+        &quot;selection_state&quot;: &quot;BLOCKED&quot;,
+        &quot;split&quot;: &quot;TRAIN&quot;,
+        &quot;x_mm&quot;: -35,
+        &quot;y_mm&quot;: 0,
+        &quot;yaw_deg&quot;: 0
+      },
+      {
+        &quot;cell_id&quot;: &quot;PLACE_B-yaw0-GRID_8&quot;,
+        &quot;coverage_count&quot;: 0,
+        &quot;eligibility_status&quot;: &quot;BLOCKED&quot;,
+        &quot;reason_codes&quot;: [
+          &quot;QUALIFICATION_REQUIRED&quot;
+        ],
+        &quot;repeat&quot;: 1,
+        &quot;selection_state&quot;: &quot;BLOCKED&quot;,
+        &quot;split&quot;: &quot;TRAIN&quot;,
+        &quot;x_mm&quot;: 35,
+        &quot;y_mm&quot;: 0,
+        &quot;yaw_deg&quot;: 0
+      },
+      {
+        &quot;cell_id&quot;: &quot;PLACE_B-yaw0-GRID_9&quot;,
+        &quot;coverage_count&quot;: 0,
+        &quot;eligibility_status&quot;: &quot;BLOCKED&quot;,
+        &quot;reason_codes&quot;: [
+          &quot;QUALIFICATION_REQUIRED&quot;
+        ],
+        &quot;repeat&quot;: 1,
+        &quot;selection_state&quot;: &quot;BLOCKED&quot;,
+        &quot;split&quot;: &quot;TRAIN&quot;,
+        &quot;x_mm&quot;: 70,
+        &quot;y_mm&quot;: 0,
+        &quot;yaw_deg&quot;: 0
+      }
+    ],
+    &quot;current_object_pose&quot;: {
+      &quot;place_id&quot;: &quot;PLACE_A&quot;,
+      &quot;x_mm&quot;: 0,
+      &quot;y_mm&quot;: 0,
+      &quot;yaw_deg&quot;: 0
+    },
+    &quot;direct_poses&quot;: [],
+    &quot;draft_id&quot;: &quot;product-fake-operator-r001-campaign-0001-draft&quot;,
+    &quot;draft_ready&quot;: true,
+    &quot;draft_reason&quot;: null,
+    &quot;execution_ready&quot;: true,
+    &quot;execution_reason&quot;: null,
+    &quot;normalized_seed&quot;: 591177668257927,
+    &quot;repeat&quot;: 1,
+    &quot;requested_count&quot;: 3,
+    &quot;revision&quot;: 0,
+    &quot;selection&quot;: {
+      &quot;camera&quot;: &quot;fr5-up-rgb-30hz-v1@usb-Generic_USB2.0_PC_CAMERA-video-index0&quot;,
+      &quot;data_mode&quot;: &quot;TEST_ONLY&quot;,
+      &quot;frame&quot;: &quot;place-a-yaw0-r002&quot;,
+      &quot;grasp&quot;: &quot;wood-cube-25mm-top-center-r001&quot;,
+      &quot;motion&quot;: &quot;fr5-place-a-wood-cube-r001&quot;,
+      &quot;object&quot;: &quot;wood-cube-25mm-r001&quot;,
+      &quot;split&quot;: &quot;TRAIN&quot;,
+      &quot;start&quot;: &quot;fr5-lab-a-home-r001&quot;,
+      &quot;task&quot;: &quot;pickup_e2e&quot;,
+      &quot;variant&quot;: &quot;DIRECT&quot;,
+      &quot;workspace&quot;: &quot;PLACE_A&quot;
+    },
+    &quot;workspace_route&quot;: [
+      {
+        &quot;frame_id&quot;: &quot;place-a-yaw0-r002&quot;,
+        &quot;workspace_id&quot;: &quot;PLACE_A&quot;
+      },
+      {
+        &quot;frame_id&quot;: &quot;place-a-yaw0-r002&quot;,
+        &quot;workspace_id&quot;: &quot;PLACE_A&quot;
+      },
+      {
+        &quot;frame_id&quot;: &quot;place-a-yaw0-r002&quot;,
+        &quot;workspace_id&quot;: &quot;PLACE_A&quot;
+      }
+    ]
+  },
+  &quot;campaign_review&quot;: {
+    &quot;data_disposition&quot;: &quot;TEST_ONLY&quot;,
+    &quot;envelope_digest&quot;: &quot;sha256:9e35bf3a913a5f694f21c5ce83929e69f6a55dcefd762989683ac2a13bc432ea&quot;,
+    &quot;episode_count&quot;: 3,
+    &quot;manifest_digest&quot;: &quot;sha256:f85dc9522ffdcc8ca946d8aa7bf7669c3cc15d17c1f24e8fd13860b1c82e86ce&quot;
+  },
+  &quot;coverage&quot;: {
+    &quot;cells&quot;: [
+      {
+        &quot;cell_id&quot;: &quot;campaign-24137e8ceb282e5afb11&quot;,
+        &quot;collected_count&quot;: 1,
+        &quot;coverage_condition_digest&quot;: &quot;sha256:24137e8ceb282e5afb11b9be7e5e471e78e5fff4831e25550a37b123c0b9f75f&quot;,
+        &quot;coverage_count&quot;: 1,
+        &quot;eligibility_status&quot;: &quot;ELIGIBLE&quot;,
+        &quot;reason_codes&quot;: [
+          &quot;EXACT_CAMPAIGN_SLOT&quot;
+        ],
+        &quot;repeat&quot;: 1,
+        &quot;selection_state&quot;: &quot;SELECTED&quot;,
+        &quot;split&quot;: &quot;TRAIN&quot;,
+        &quot;target_count&quot;: 1,
+        &quot;x_mm&quot;: 0,
+        &quot;y_mm&quot;: 0,
+        &quot;yaw_deg&quot;: 0
+      },
+      {
+        &quot;cell_id&quot;: &quot;campaign-785876c79033fc25bb3f&quot;,
+        &quot;collected_count&quot;: 1,
+        &quot;coverage_condition_digest&quot;: &quot;sha256:785876c79033fc25bb3fad959f98c31ed8e83a6cb56fa4bb14a6b10cd03d7ade&quot;,
+        &quot;coverage_count&quot;: 1,
+        &quot;eligibility_status&quot;: &quot;ELIGIBLE&quot;,
+        &quot;reason_codes&quot;: [
+          &quot;EXACT_CAMPAIGN_SLOT&quot;
+        ],
+        &quot;repeat&quot;: 1,
+        &quot;selection_state&quot;: &quot;SELECTED&quot;,
+        &quot;split&quot;: &quot;TRAIN&quot;,
+        &quot;target_count&quot;: 1,
+        &quot;x_mm&quot;: 77.42879895742257,
+        &quot;y_mm&quot;: -35.86986149811479,
+        &quot;yaw_deg&quot;: 0
+      },
+      {
+        &quot;cell_id&quot;: &quot;campaign-35cdee037baf9a3c87af&quot;,
+        &quot;collected_count&quot;: 1,
+        &quot;coverage_condition_digest&quot;: &quot;sha256:35cdee037baf9a3c87afa3825ec533d521b6525ce26501a711f75c74f11b6add&quot;,
+        &quot;coverage_count&quot;: 1,
+        &quot;eligibility_status&quot;: &quot;ELIGIBLE&quot;,
+        &quot;reason_codes&quot;: [
+          &quot;EXACT_CAMPAIGN_SLOT&quot;
+        ],
+        &quot;repeat&quot;: 1,
+        &quot;selection_state&quot;: &quot;SELECTED&quot;,
+        &quot;split&quot;: &quot;TRAIN&quot;,
+        &quot;target_count&quot;: 1,
+        &quot;x_mm&quot;: -95.67596076989324,
+        &quot;y_mm&quot;: -53.78952909469229,
+        &quot;yaw_deg&quot;: 0
+      }
+    ],
+    &quot;completed&quot;: 3,
+    &quot;planned&quot;: 3,
+    &quot;sequence&quot;: [
+      {
+        &quot;coverage_condition_digest&quot;: &quot;sha256:24137e8ceb282e5afb11b9be7e5e471e78e5fff4831e25550a37b123c0b9f75f&quot;,
+        &quot;object_reposition&quot;: null,
+        &quot;order_index&quot;: 1,
+        &quot;place_id&quot;: &quot;PLACE_A&quot;,
+        &quot;start_pose_id&quot;: &quot;start-1&quot;,
+        &quot;state_space_slot&quot;: null,
+        &quot;x_mm&quot;: 0,
+        &quot;y_mm&quot;: 0,
+        &quot;yaw_deg&quot;: 0
+      },
+      {
+        &quot;coverage_condition_digest&quot;: &quot;sha256:785876c79033fc25bb3fad959f98c31ed8e83a6cb56fa4bb14a6b10cd03d7ade&quot;,
+        &quot;object_reposition&quot;: null,
+        &quot;order_index&quot;: 2,
+        &quot;place_id&quot;: &quot;PLACE_A&quot;,
+        &quot;start_pose_id&quot;: &quot;start-2&quot;,
+        &quot;state_space_slot&quot;: null,
+        &quot;x_mm&quot;: 77.42879895742257,
+        &quot;y_mm&quot;: -35.86986149811479,
+        &quot;yaw_deg&quot;: 0
+      },
+      {
+        &quot;coverage_condition_digest&quot;: &quot;sha256:35cdee037baf9a3c87afa3825ec533d521b6525ce26501a711f75c74f11b6add&quot;,
+        &quot;object_reposition&quot;: null,
+        &quot;order_index&quot;: 3,
+        &quot;place_id&quot;: &quot;PLACE_A&quot;,
+        &quot;start_pose_id&quot;: &quot;start-3&quot;,
+        &quot;state_space_slot&quot;: null,
+        &quot;x_mm&quot;: -95.67596076989324,
+        &quot;y_mm&quot;: -53.78952909469229,
+        &quot;yaw_deg&quot;: 0
+      }
+    ]
+  }
+}</pre></section><section id="collection-new-draft-view"><h2>collection-new-draft-view.json</h2><p class="locator">collection-new-draft-view.json<br>sha256:81d10016b721cfc44098eb16e831d12ac85cd29f2d273f3ed5a1647bc0aae2a0</p><p class="note">원문에서 발췌한 필드. 실행 환경의 절대 경로는 자료 식별자로 표시한다.</p><pre>{
+  &quot;workflow_state&quot;: &quot;AUTHORING&quot;,
+  &quot;effect_scope&quot;: &quot;FAKE&quot;,
+  &quot;effect_counts&quot;: {},
+  &quot;draft&quot;: {
+    &quot;authoring_mode&quot;: &quot;ASSISTED&quot;,
+    &quot;cells&quot;: [
+      {
+        &quot;cell_id&quot;: &quot;PLACE_A-yaw0-CENTER&quot;,
+        &quot;coverage_count&quot;: 0,
+        &quot;eligibility_status&quot;: &quot;ELIGIBLE&quot;,
+        &quot;reason_codes&quot;: [
+          &quot;EXACT_QUALIFIED_COMBINATION&quot;
+        ],
+        &quot;repeat&quot;: 1,
+        &quot;selection_state&quot;: &quot;AVAILABLE&quot;,
+        &quot;split&quot;: &quot;TRAIN&quot;,
+        &quot;x_mm&quot;: 0,
+        &quot;y_mm&quot;: 0,
+        &quot;yaw_deg&quot;: 0
+      },
+      {
+        &quot;cell_id&quot;: &quot;PLACE_A-yaw0-GRID_1&quot;,
+        &quot;coverage_count&quot;: 0,
+        &quot;eligibility_status&quot;: &quot;ELIGIBLE&quot;,
+        &quot;reason_codes&quot;: [
+          &quot;EXACT_QUALIFIED_COMBINATION&quot;
+        ],
+        &quot;repeat&quot;: 1,
+        &quot;selection_state&quot;: &quot;AVAILABLE&quot;,
+        &quot;split&quot;: &quot;TRAIN&quot;,
+        &quot;x_mm&quot;: -70,
+        &quot;y_mm&quot;: 35,
+        &quot;yaw_deg&quot;: 0
+      },
+      {
+        &quot;cell_id&quot;: &quot;PLACE_A-yaw0-GRID_10&quot;,
+        &quot;coverage_count&quot;: 0,
+        &quot;eligibility_status&quot;: &quot;ELIGIBLE&quot;,
+        &quot;reason_codes&quot;: [
+          &quot;EXACT_QUALIFIED_COMBINATION&quot;
+        ],
+        &quot;repeat&quot;: 1,
+        &quot;selection_state&quot;: &quot;AVAILABLE&quot;,
+        &quot;split&quot;: &quot;TRAIN&quot;,
+        &quot;x_mm&quot;: -70,
+        &quot;y_mm&quot;: -35,
+        &quot;yaw_deg&quot;: 0
+      },
+      {
+        &quot;cell_id&quot;: &quot;PLACE_A-yaw0-GRID_11&quot;,
+        &quot;coverage_count&quot;: 0,
+        &quot;eligibility_status&quot;: &quot;ELIGIBLE&quot;,
+        &quot;reason_codes&quot;: [
+          &quot;EXACT_QUALIFIED_COMBINATION&quot;
+        ],
+        &quot;repeat&quot;: 1,
+        &quot;selection_state&quot;: &quot;AVAILABLE&quot;,
+        &quot;split&quot;: &quot;TRAIN&quot;,
+        &quot;x_mm&quot;: -35,
+        &quot;y_mm&quot;: -35,
+        &quot;yaw_deg&quot;: 0
+      },
+      {
+        &quot;cell_id&quot;: &quot;PLACE_A-yaw0-GRID_12&quot;,
+        &quot;coverage_count&quot;: 0,
+        &quot;eligibility_status&quot;: &quot;ELIGIBLE&quot;,
+        &quot;reason_codes&quot;: [
+          &quot;EXACT_QUALIFIED_COMBINATION&quot;
+        ],
+        &quot;repeat&quot;: 1,
+        &quot;selection_state&quot;: &quot;AVAILABLE&quot;,
+        &quot;split&quot;: &quot;TRAIN&quot;,
+        &quot;x_mm&quot;: 0,
+        &quot;y_mm&quot;: -35,
+        &quot;yaw_deg&quot;: 0
+      },
+      {
+        &quot;cell_id&quot;: &quot;PLACE_A-yaw0-GRID_13&quot;,
+        &quot;coverage_count&quot;: 0,
+        &quot;eligibility_status&quot;: &quot;ELIGIBLE&quot;,
+        &quot;reason_codes&quot;: [
+          &quot;EXACT_QUALIFIED_COMBINATION&quot;
+        ],
+        &quot;repeat&quot;: 1,
+        &quot;selection_state&quot;: &quot;AVAILABLE&quot;,
+        &quot;split&quot;: &quot;TRAIN&quot;,
+        &quot;x_mm&quot;: 35,
+        &quot;y_mm&quot;: -35,
+        &quot;yaw_deg&quot;: 0
+      },
+      {
+        &quot;cell_id&quot;: &quot;PLACE_A-yaw0-GRID_14&quot;,
+        &quot;coverage_count&quot;: 0,
+        &quot;eligibility_status&quot;: &quot;ELIGIBLE&quot;,
+        &quot;reason_codes&quot;: [
+          &quot;EXACT_QUALIFIED_COMBINATION&quot;
+        ],
+        &quot;repeat&quot;: 1,
+        &quot;selection_state&quot;: &quot;AVAILABLE&quot;,
+        &quot;split&quot;: &quot;TRAIN&quot;,
+        &quot;x_mm&quot;: 70,
+        &quot;y_mm&quot;: -35,
+        &quot;yaw_deg&quot;: 0
+      },
+      {
+        &quot;cell_id&quot;: &quot;PLACE_A-yaw0-GRID_2&quot;,
+        &quot;coverage_count&quot;: 0,
+        &quot;eligibility_status&quot;: &quot;ELIGIBLE&quot;,
+        &quot;reason_codes&quot;: [
+          &quot;EXACT_QUALIFIED_COMBINATION&quot;
+        ],
+        &quot;repeat&quot;: 1,
+        &quot;selection_state&quot;: &quot;AVAILABLE&quot;,
+        &quot;split&quot;: &quot;TRAIN&quot;,
+        &quot;x_mm&quot;: -35,
+        &quot;y_mm&quot;: 35,
+        &quot;yaw_deg&quot;: 0
+      },
+      {
+        &quot;cell_id&quot;: &quot;PLACE_A-yaw0-GRID_3&quot;,
+        &quot;coverage_count&quot;: 0,
+        &quot;eligibility_status&quot;: &quot;ELIGIBLE&quot;,
+        &quot;reason_codes&quot;: [
+          &quot;EXACT_QUALIFIED_COMBINATION&quot;
+        ],
+        &quot;repeat&quot;: 1,
+        &quot;selection_state&quot;: &quot;AVAILABLE&quot;,
+        &quot;split&quot;: &quot;TRAIN&quot;,
+        &quot;x_mm&quot;: 0,
+        &quot;y_mm&quot;: 35,
+        &quot;yaw_deg&quot;: 0
+      },
+      {
+        &quot;cell_id&quot;: &quot;PLACE_A-yaw0-GRID_4&quot;,
+        &quot;coverage_count&quot;: 0,
+        &quot;eligibility_status&quot;: &quot;ELIGIBLE&quot;,
+        &quot;reason_codes&quot;: [
+          &quot;EXACT_QUALIFIED_COMBINATION&quot;
+        ],
+        &quot;repeat&quot;: 1,
+        &quot;selection_state&quot;: &quot;AVAILABLE&quot;,
+        &quot;split&quot;: &quot;TRAIN&quot;,
+        &quot;x_mm&quot;: 35,
+        &quot;y_mm&quot;: 35,
+        &quot;yaw_deg&quot;: 0
+      },
+      {
+        &quot;cell_id&quot;: &quot;PLACE_A-yaw0-GRID_5&quot;,
+        &quot;coverage_count&quot;: 0,
+        &quot;eligibility_status&quot;: &quot;ELIGIBLE&quot;,
+        &quot;reason_codes&quot;: [
+          &quot;EXACT_QUALIFIED_COMBINATION&quot;
+        ],
+        &quot;repeat&quot;: 1,
+        &quot;selection_state&quot;: &quot;AVAILABLE&quot;,
+        &quot;split&quot;: &quot;TRAIN&quot;,
+        &quot;x_mm&quot;: 70,
+        &quot;y_mm&quot;: 35,
+        &quot;yaw_deg&quot;: 0
+      },
+      {
+        &quot;cell_id&quot;: &quot;PLACE_A-yaw0-GRID_6&quot;,
+        &quot;coverage_count&quot;: 0,
+        &quot;eligibility_status&quot;: &quot;ELIGIBLE&quot;,
+        &quot;reason_codes&quot;: [
+          &quot;EXACT_QUALIFIED_COMBINATION&quot;
+        ],
+        &quot;repeat&quot;: 1,
+        &quot;selection_state&quot;: &quot;AVAILABLE&quot;,
+        &quot;split&quot;: &quot;TRAIN&quot;,
+        &quot;x_mm&quot;: -70,
+        &quot;y_mm&quot;: 0,
+        &quot;yaw_deg&quot;: 0
+      },
+      {
+        &quot;cell_id&quot;: &quot;PLACE_A-yaw0-GRID_7&quot;,
+        &quot;coverage_count&quot;: 0,
+        &quot;eligibility_status&quot;: &quot;ELIGIBLE&quot;,
+        &quot;reason_codes&quot;: [
+          &quot;EXACT_QUALIFIED_COMBINATION&quot;
+        ],
+        &quot;repeat&quot;: 1,
+        &quot;selection_state&quot;: &quot;AVAILABLE&quot;,
+        &quot;split&quot;: &quot;TRAIN&quot;,
+        &quot;x_mm&quot;: -35,
+        &quot;y_mm&quot;: 0,
+        &quot;yaw_deg&quot;: 0
+      },
+      {
+        &quot;cell_id&quot;: &quot;PLACE_A-yaw0-GRID_8&quot;,
+        &quot;coverage_count&quot;: 0,
+        &quot;eligibility_status&quot;: &quot;ELIGIBLE&quot;,
+        &quot;reason_codes&quot;: [
+          &quot;EXACT_QUALIFIED_COMBINATION&quot;
+        ],
+        &quot;repeat&quot;: 1,
+        &quot;selection_state&quot;: &quot;AVAILABLE&quot;,
+        &quot;split&quot;: &quot;TRAIN&quot;,
+        &quot;x_mm&quot;: 35,
+        &quot;y_mm&quot;: 0,
+        &quot;yaw_deg&quot;: 0
+      },
+      {
+        &quot;cell_id&quot;: &quot;PLACE_A-yaw0-GRID_9&quot;,
+        &quot;coverage_count&quot;: 0,
+        &quot;eligibility_status&quot;: &quot;ELIGIBLE&quot;,
+        &quot;reason_codes&quot;: [
+          &quot;EXACT_QUALIFIED_COMBINATION&quot;
+        ],
+        &quot;repeat&quot;: 1,
+        &quot;selection_state&quot;: &quot;AVAILABLE&quot;,
+        &quot;split&quot;: &quot;TRAIN&quot;,
+        &quot;x_mm&quot;: 70,
+        &quot;y_mm&quot;: 0,
+        &quot;yaw_deg&quot;: 0
+      },
+      {
+        &quot;cell_id&quot;: &quot;PLACE_B-yaw0-CENTER&quot;,
+        &quot;coverage_count&quot;: 0,
+        &quot;eligibility_status&quot;: &quot;BLOCKED&quot;,
+        &quot;reason_codes&quot;: [
+          &quot;QUALIFICATION_REQUIRED&quot;
+        ],
+        &quot;repeat&quot;: 1,
+        &quot;selection_state&quot;: &quot;BLOCKED&quot;,
+        &quot;split&quot;: &quot;TRAIN&quot;,
+        &quot;x_mm&quot;: 0,
+        &quot;y_mm&quot;: 0,
+        &quot;yaw_deg&quot;: 0
+      },
+      {
+        &quot;cell_id&quot;: &quot;PLACE_B-yaw0-GRID_1&quot;,
+        &quot;coverage_count&quot;: 0,
+        &quot;eligibility_status&quot;: &quot;BLOCKED&quot;,
+        &quot;reason_codes&quot;: [
+          &quot;QUALIFICATION_REQUIRED&quot;
+        ],
+        &quot;repeat&quot;: 1,
+        &quot;selection_state&quot;: &quot;BLOCKED&quot;,
+        &quot;split&quot;: &quot;TRAIN&quot;,
+        &quot;x_mm&quot;: -70,
+        &quot;y_mm&quot;: 35,
+        &quot;yaw_deg&quot;: 0
+      },
+      {
+        &quot;cell_id&quot;: &quot;PLACE_B-yaw0-GRID_10&quot;,
+        &quot;coverage_count&quot;: 0,
+        &quot;eligibility_status&quot;: &quot;BLOCKED&quot;,
+        &quot;reason_codes&quot;: [
+          &quot;QUALIFICATION_REQUIRED&quot;
+        ],
+        &quot;repeat&quot;: 1,
+        &quot;selection_state&quot;: &quot;BLOCKED&quot;,
+        &quot;split&quot;: &quot;TRAIN&quot;,
+        &quot;x_mm&quot;: -70,
+        &quot;y_mm&quot;: -35,
+        &quot;yaw_deg&quot;: 0
+      },
+      {
+        &quot;cell_id&quot;: &quot;PLACE_B-yaw0-GRID_11&quot;,
+        &quot;coverage_count&quot;: 0,
+        &quot;eligibility_status&quot;: &quot;BLOCKED&quot;,
+        &quot;reason_codes&quot;: [
+          &quot;QUALIFICATION_REQUIRED&quot;
+        ],
+        &quot;repeat&quot;: 1,
+        &quot;selection_state&quot;: &quot;BLOCKED&quot;,
+        &quot;split&quot;: &quot;TRAIN&quot;,
+        &quot;x_mm&quot;: -35,
+        &quot;y_mm&quot;: -35,
+        &quot;yaw_deg&quot;: 0
+      },
+      {
+        &quot;cell_id&quot;: &quot;PLACE_B-yaw0-GRID_12&quot;,
+        &quot;coverage_count&quot;: 0,
+        &quot;eligibility_status&quot;: &quot;BLOCKED&quot;,
+        &quot;reason_codes&quot;: [
+          &quot;QUALIFICATION_REQUIRED&quot;
+        ],
+        &quot;repeat&quot;: 1,
+        &quot;selection_state&quot;: &quot;BLOCKED&quot;,
+        &quot;split&quot;: &quot;TRAIN&quot;,
+        &quot;x_mm&quot;: 0,
+        &quot;y_mm&quot;: -35,
+        &quot;yaw_deg&quot;: 0
+      },
+      {
+        &quot;cell_id&quot;: &quot;PLACE_B-yaw0-GRID_13&quot;,
+        &quot;coverage_count&quot;: 0,
+        &quot;eligibility_status&quot;: &quot;BLOCKED&quot;,
+        &quot;reason_codes&quot;: [
+          &quot;QUALIFICATION_REQUIRED&quot;
+        ],
+        &quot;repeat&quot;: 1,
+        &quot;selection_state&quot;: &quot;BLOCKED&quot;,
+        &quot;split&quot;: &quot;TRAIN&quot;,
+        &quot;x_mm&quot;: 35,
+        &quot;y_mm&quot;: -35,
+        &quot;yaw_deg&quot;: 0
+      },
+      {
+        &quot;cell_id&quot;: &quot;PLACE_B-yaw0-GRID_14&quot;,
+        &quot;coverage_count&quot;: 0,
+        &quot;eligibility_status&quot;: &quot;BLOCKED&quot;,
+        &quot;reason_codes&quot;: [
+          &quot;QUALIFICATION_REQUIRED&quot;
+        ],
+        &quot;repeat&quot;: 1,
+        &quot;selection_state&quot;: &quot;BLOCKED&quot;,
+        &quot;split&quot;: &quot;TRAIN&quot;,
+        &quot;x_mm&quot;: 70,
+        &quot;y_mm&quot;: -35,
+        &quot;yaw_deg&quot;: 0
+      },
+      {
+        &quot;cell_id&quot;: &quot;PLACE_B-yaw0-GRID_2&quot;,
+        &quot;coverage_count&quot;: 0,
+        &quot;eligibility_status&quot;: &quot;BLOCKED&quot;,
+        &quot;reason_codes&quot;: [
+          &quot;QUALIFICATION_REQUIRED&quot;
+        ],
+        &quot;repeat&quot;: 1,
+        &quot;selection_state&quot;: &quot;BLOCKED&quot;,
+        &quot;split&quot;: &quot;TRAIN&quot;,
+        &quot;x_mm&quot;: -35,
+        &quot;y_mm&quot;: 35,
+        &quot;yaw_deg&quot;: 0
+      },
+      {
+        &quot;cell_id&quot;: &quot;PLACE_B-yaw0-GRID_3&quot;,
+        &quot;coverage_count&quot;: 0,
+        &quot;eligibility_status&quot;: &quot;BLOCKED&quot;,
+        &quot;reason_codes&quot;: [
+          &quot;QUALIFICATION_REQUIRED&quot;
+        ],
+        &quot;repeat&quot;: 1,
+        &quot;selection_state&quot;: &quot;BLOCKED&quot;,
+        &quot;split&quot;: &quot;TRAIN&quot;,
+        &quot;x_mm&quot;: 0,
+        &quot;y_mm&quot;: 35,
+        &quot;yaw_deg&quot;: 0
+      },
+      {
+        &quot;cell_id&quot;: &quot;PLACE_B-yaw0-GRID_4&quot;,
+        &quot;coverage_count&quot;: 0,
+        &quot;eligibility_status&quot;: &quot;BLOCKED&quot;,
+        &quot;reason_codes&quot;: [
+          &quot;QUALIFICATION_REQUIRED&quot;
+        ],
+        &quot;repeat&quot;: 1,
+        &quot;selection_state&quot;: &quot;BLOCKED&quot;,
+        &quot;split&quot;: &quot;TRAIN&quot;,
+        &quot;x_mm&quot;: 35,
+        &quot;y_mm&quot;: 35,
+        &quot;yaw_deg&quot;: 0
+      },
+      {
+        &quot;cell_id&quot;: &quot;PLACE_B-yaw0-GRID_5&quot;,
+        &quot;coverage_count&quot;: 0,
+        &quot;eligibility_status&quot;: &quot;BLOCKED&quot;,
+        &quot;reason_codes&quot;: [
+          &quot;QUALIFICATION_REQUIRED&quot;
+        ],
+        &quot;repeat&quot;: 1,
+        &quot;selection_state&quot;: &quot;BLOCKED&quot;,
+        &quot;split&quot;: &quot;TRAIN&quot;,
+        &quot;x_mm&quot;: 70,
+        &quot;y_mm&quot;: 35,
+        &quot;yaw_deg&quot;: 0
+      },
+      {
+        &quot;cell_id&quot;: &quot;PLACE_B-yaw0-GRID_6&quot;,
+        &quot;coverage_count&quot;: 0,
+        &quot;eligibility_status&quot;: &quot;BLOCKED&quot;,
+        &quot;reason_codes&quot;: [
+          &quot;QUALIFICATION_REQUIRED&quot;
+        ],
+        &quot;repeat&quot;: 1,
+        &quot;selection_state&quot;: &quot;BLOCKED&quot;,
+        &quot;split&quot;: &quot;TRAIN&quot;,
+        &quot;x_mm&quot;: -70,
+        &quot;y_mm&quot;: 0,
+        &quot;yaw_deg&quot;: 0
+      },
+      {
+        &quot;cell_id&quot;: &quot;PLACE_B-yaw0-GRID_7&quot;,
+        &quot;coverage_count&quot;: 0,
+        &quot;eligibility_status&quot;: &quot;BLOCKED&quot;,
+        &quot;reason_codes&quot;: [
+          &quot;QUALIFICATION_REQUIRED&quot;
+        ],
+        &quot;repeat&quot;: 1,
+        &quot;selection_state&quot;: &quot;BLOCKED&quot;,
+        &quot;split&quot;: &quot;TRAIN&quot;,
+        &quot;x_mm&quot;: -35,
+        &quot;y_mm&quot;: 0,
+        &quot;yaw_deg&quot;: 0
+      },
+      {
+        &quot;cell_id&quot;: &quot;PLACE_B-yaw0-GRID_8&quot;,
+        &quot;coverage_count&quot;: 0,
+        &quot;eligibility_status&quot;: &quot;BLOCKED&quot;,
+        &quot;reason_codes&quot;: [
+          &quot;QUALIFICATION_REQUIRED&quot;
+        ],
+        &quot;repeat&quot;: 1,
+        &quot;selection_state&quot;: &quot;BLOCKED&quot;,
+        &quot;split&quot;: &quot;TRAIN&quot;,
+        &quot;x_mm&quot;: 35,
+        &quot;y_mm&quot;: 0,
+        &quot;yaw_deg&quot;: 0
+      },
+      {
+        &quot;cell_id&quot;: &quot;PLACE_B-yaw0-GRID_9&quot;,
+        &quot;coverage_count&quot;: 0,
+        &quot;eligibility_status&quot;: &quot;BLOCKED&quot;,
+        &quot;reason_codes&quot;: [
+          &quot;QUALIFICATION_REQUIRED&quot;
+        ],
+        &quot;repeat&quot;: 1,
+        &quot;selection_state&quot;: &quot;BLOCKED&quot;,
+        &quot;split&quot;: &quot;TRAIN&quot;,
+        &quot;x_mm&quot;: 70,
+        &quot;y_mm&quot;: 0,
+        &quot;yaw_deg&quot;: 0
+      }
+    ],
+    &quot;current_object_pose&quot;: {
+      &quot;place_id&quot;: &quot;PLACE_A&quot;,
+      &quot;x_mm&quot;: -95.67596076989324,
+      &quot;y_mm&quot;: -53.78952909469229,
+      &quot;yaw_deg&quot;: 0
+    },
+    &quot;direct_poses&quot;: [],
+    &quot;draft_id&quot;: &quot;product-fake-operator-r001-campaign-0002-draft&quot;,
+    &quot;draft_ready&quot;: true,
+    &quot;draft_reason&quot;: null,
+    &quot;execution_ready&quot;: true,
+    &quot;execution_reason&quot;: null,
+    &quot;normalized_seed&quot;: 591177668257928,
+    &quot;repeat&quot;: 1,
+    &quot;requested_count&quot;: 3,
+    &quot;revision&quot;: 0,
+    &quot;selection&quot;: {
+      &quot;camera&quot;: &quot;fr5-up-rgb-30hz-v1@usb-Generic_USB2.0_PC_CAMERA-video-index0&quot;,
+      &quot;data_mode&quot;: &quot;TEST_ONLY&quot;,
+      &quot;frame&quot;: &quot;place-a-yaw0-r002&quot;,
+      &quot;grasp&quot;: &quot;wood-cube-25mm-top-center-r001&quot;,
+      &quot;motion&quot;: &quot;fr5-place-a-wood-cube-r001&quot;,
+      &quot;object&quot;: &quot;wood-cube-25mm-r001&quot;,
+      &quot;split&quot;: &quot;TRAIN&quot;,
+      &quot;start&quot;: &quot;fr5-lab-a-home-r001&quot;,
+      &quot;task&quot;: &quot;pickup_e2e&quot;,
+      &quot;variant&quot;: &quot;DIRECT&quot;,
+      &quot;workspace&quot;: &quot;PLACE_A&quot;
+    },
+    &quot;workspace_route&quot;: [
+      {
+        &quot;frame_id&quot;: &quot;place-a-yaw0-r002&quot;,
+        &quot;workspace_id&quot;: &quot;PLACE_A&quot;
+      },
+      {
+        &quot;frame_id&quot;: &quot;place-a-yaw0-r002&quot;,
+        &quot;workspace_id&quot;: &quot;PLACE_A&quot;
+      },
+      {
+        &quot;frame_id&quot;: &quot;place-a-yaw0-r002&quot;,
+        &quot;workspace_id&quot;: &quot;PLACE_A&quot;
+      }
+    ]
+  },
+  &quot;campaign_review&quot;: null,
+  &quot;coverage&quot;: {
+    &quot;cells&quot;: [
+      {
+        &quot;cell_id&quot;: &quot;PLACE_A-yaw0-CENTER&quot;,
+        &quot;collected_count&quot;: 0,
+        &quot;coverage_count&quot;: 0,
+        &quot;eligibility_status&quot;: &quot;ELIGIBLE&quot;,
+        &quot;reason_codes&quot;: [
+          &quot;EXACT_QUALIFIED_COMBINATION&quot;
+        ],
+        &quot;repeat&quot;: 1,
+        &quot;selection_state&quot;: &quot;AVAILABLE&quot;,
+        &quot;split&quot;: &quot;TRAIN&quot;,
+        &quot;target_count&quot;: 3,
+        &quot;x_mm&quot;: 0,
+        &quot;y_mm&quot;: 0,
+        &quot;yaw_deg&quot;: 0
+      },
+      {
+        &quot;cell_id&quot;: &quot;PLACE_A-yaw0-GRID_1&quot;,
+        &quot;collected_count&quot;: 0,
+        &quot;coverage_count&quot;: 0,
+        &quot;eligibility_status&quot;: &quot;ELIGIBLE&quot;,
+        &quot;reason_codes&quot;: [
+          &quot;EXACT_QUALIFIED_COMBINATION&quot;
+        ],
+        &quot;repeat&quot;: 1,
+        &quot;selection_state&quot;: &quot;AVAILABLE&quot;,
+        &quot;split&quot;: &quot;TRAIN&quot;,
+        &quot;target_count&quot;: 1,
+        &quot;x_mm&quot;: -70,
+        &quot;y_mm&quot;: 35,
+        &quot;yaw_deg&quot;: 0
+      },
+      {
+        &quot;cell_id&quot;: &quot;PLACE_A-yaw0-GRID_10&quot;,
+        &quot;collected_count&quot;: 0,
+        &quot;coverage_count&quot;: 0,
+        &quot;eligibility_status&quot;: &quot;ELIGIBLE&quot;,
+        &quot;reason_codes&quot;: [
+          &quot;EXACT_QUALIFIED_COMBINATION&quot;
+        ],
+        &quot;repeat&quot;: 1,
+        &quot;selection_state&quot;: &quot;AVAILABLE&quot;,
+        &quot;split&quot;: &quot;TRAIN&quot;,
+        &quot;target_count&quot;: 1,
+        &quot;x_mm&quot;: -70,
+        &quot;y_mm&quot;: -35,
+        &quot;yaw_deg&quot;: 0
+      },
+      {
+        &quot;cell_id&quot;: &quot;PLACE_A-yaw0-GRID_11&quot;,
+        &quot;collected_count&quot;: 0,
+        &quot;coverage_count&quot;: 0,
+        &quot;eligibility_status&quot;: &quot;ELIGIBLE&quot;,
+        &quot;reason_codes&quot;: [
+          &quot;EXACT_QUALIFIED_COMBINATION&quot;
+        ],
+        &quot;repeat&quot;: 1,
+        &quot;selection_state&quot;: &quot;AVAILABLE&quot;,
+        &quot;split&quot;: &quot;TRAIN&quot;,
+        &quot;target_count&quot;: 1,
+        &quot;x_mm&quot;: -35,
+        &quot;y_mm&quot;: -35,
+        &quot;yaw_deg&quot;: 0
+      },
+      {
+        &quot;cell_id&quot;: &quot;PLACE_A-yaw0-GRID_12&quot;,
+        &quot;collected_count&quot;: 0,
+        &quot;coverage_count&quot;: 0,
+        &quot;eligibility_status&quot;: &quot;ELIGIBLE&quot;,
+        &quot;reason_codes&quot;: [
+          &quot;EXACT_QUALIFIED_COMBINATION&quot;
+        ],
+        &quot;repeat&quot;: 1,
+        &quot;selection_state&quot;: &quot;AVAILABLE&quot;,
+        &quot;split&quot;: &quot;TRAIN&quot;,
+        &quot;target_count&quot;: 1,
+        &quot;x_mm&quot;: 0,
+        &quot;y_mm&quot;: -35,
+        &quot;yaw_deg&quot;: 0
+      },
+      {
+        &quot;cell_id&quot;: &quot;PLACE_A-yaw0-GRID_13&quot;,
+        &quot;collected_count&quot;: 0,
+        &quot;coverage_count&quot;: 0,
+        &quot;eligibility_status&quot;: &quot;ELIGIBLE&quot;,
+        &quot;reason_codes&quot;: [
+          &quot;EXACT_QUALIFIED_COMBINATION&quot;
+        ],
+        &quot;repeat&quot;: 1,
+        &quot;selection_state&quot;: &quot;AVAILABLE&quot;,
+        &quot;split&quot;: &quot;TRAIN&quot;,
+        &quot;target_count&quot;: 1,
+        &quot;x_mm&quot;: 35,
+        &quot;y_mm&quot;: -35,
+        &quot;yaw_deg&quot;: 0
+      },
+      {
+        &quot;cell_id&quot;: &quot;PLACE_A-yaw0-GRID_14&quot;,
+        &quot;collected_count&quot;: 0,
+        &quot;coverage_count&quot;: 0,
+        &quot;eligibility_status&quot;: &quot;ELIGIBLE&quot;,
+        &quot;reason_codes&quot;: [
+          &quot;EXACT_QUALIFIED_COMBINATION&quot;
+        ],
+        &quot;repeat&quot;: 1,
+        &quot;selection_state&quot;: &quot;AVAILABLE&quot;,
+        &quot;split&quot;: &quot;TRAIN&quot;,
+        &quot;target_count&quot;: 1,
+        &quot;x_mm&quot;: 70,
+        &quot;y_mm&quot;: -35,
+        &quot;yaw_deg&quot;: 0
+      },
+      {
+        &quot;cell_id&quot;: &quot;PLACE_A-yaw0-GRID_2&quot;,
+        &quot;collected_count&quot;: 0,
+        &quot;coverage_count&quot;: 0,
+        &quot;eligibility_status&quot;: &quot;ELIGIBLE&quot;,
+        &quot;reason_codes&quot;: [
+          &quot;EXACT_QUALIFIED_COMBINATION&quot;
+        ],
+        &quot;repeat&quot;: 1,
+        &quot;selection_state&quot;: &quot;AVAILABLE&quot;,
+        &quot;split&quot;: &quot;TRAIN&quot;,
+        &quot;target_count&quot;: 1,
+        &quot;x_mm&quot;: -35,
+        &quot;y_mm&quot;: 35,
+        &quot;yaw_deg&quot;: 0
+      },
+      {
+        &quot;cell_id&quot;: &quot;PLACE_A-yaw0-GRID_3&quot;,
+        &quot;collected_count&quot;: 0,
+        &quot;coverage_count&quot;: 0,
+        &quot;eligibility_status&quot;: &quot;ELIGIBLE&quot;,
+        &quot;reason_codes&quot;: [
+          &quot;EXACT_QUALIFIED_COMBINATION&quot;
+        ],
+        &quot;repeat&quot;: 1,
+        &quot;selection_state&quot;: &quot;AVAILABLE&quot;,
+        &quot;split&quot;: &quot;TRAIN&quot;,
+        &quot;target_count&quot;: 1,
+        &quot;x_mm&quot;: 0,
+        &quot;y_mm&quot;: 35,
+        &quot;yaw_deg&quot;: 0
+      },
+      {
+        &quot;cell_id&quot;: &quot;PLACE_A-yaw0-GRID_4&quot;,
+        &quot;collected_count&quot;: 0,
+        &quot;coverage_count&quot;: 0,
+        &quot;eligibility_status&quot;: &quot;ELIGIBLE&quot;,
+        &quot;reason_codes&quot;: [
+          &quot;EXACT_QUALIFIED_COMBINATION&quot;
+        ],
+        &quot;repeat&quot;: 1,
+        &quot;selection_state&quot;: &quot;AVAILABLE&quot;,
+        &quot;split&quot;: &quot;TRAIN&quot;,
+        &quot;target_count&quot;: 1,
+        &quot;x_mm&quot;: 35,
+        &quot;y_mm&quot;: 35,
+        &quot;yaw_deg&quot;: 0
+      },
+      {
+        &quot;cell_id&quot;: &quot;PLACE_A-yaw0-GRID_5&quot;,
+        &quot;collected_count&quot;: 0,
+        &quot;coverage_count&quot;: 0,
+        &quot;eligibility_status&quot;: &quot;ELIGIBLE&quot;,
+        &quot;reason_codes&quot;: [
+          &quot;EXACT_QUALIFIED_COMBINATION&quot;
+        ],
+        &quot;repeat&quot;: 1,
+        &quot;selection_state&quot;: &quot;AVAILABLE&quot;,
+        &quot;split&quot;: &quot;TRAIN&quot;,
+        &quot;target_count&quot;: 1,
+        &quot;x_mm&quot;: 70,
+        &quot;y_mm&quot;: 35,
+        &quot;yaw_deg&quot;: 0
+      },
+      {
+        &quot;cell_id&quot;: &quot;PLACE_A-yaw0-GRID_6&quot;,
+        &quot;collected_count&quot;: 0,
+        &quot;coverage_count&quot;: 0,
+        &quot;eligibility_status&quot;: &quot;ELIGIBLE&quot;,
+        &quot;reason_codes&quot;: [
+          &quot;EXACT_QUALIFIED_COMBINATION&quot;
+        ],
+        &quot;repeat&quot;: 1,
+        &quot;selection_state&quot;: &quot;AVAILABLE&quot;,
+        &quot;split&quot;: &quot;TRAIN&quot;,
+        &quot;target_count&quot;: 1,
+        &quot;x_mm&quot;: -70,
+        &quot;y_mm&quot;: 0,
+        &quot;yaw_deg&quot;: 0
+      },
+      {
+        &quot;cell_id&quot;: &quot;PLACE_A-yaw0-GRID_7&quot;,
+        &quot;collected_count&quot;: 0,
+        &quot;coverage_count&quot;: 0,
+        &quot;eligibility_status&quot;: &quot;ELIGIBLE&quot;,
+        &quot;reason_codes&quot;: [
+          &quot;EXACT_QUALIFIED_COMBINATION&quot;
+        ],
+        &quot;repeat&quot;: 1,
+        &quot;selection_state&quot;: &quot;AVAILABLE&quot;,
+        &quot;split&quot;: &quot;TRAIN&quot;,
+        &quot;target_count&quot;: 1,
+        &quot;x_mm&quot;: -35,
+        &quot;y_mm&quot;: 0,
+        &quot;yaw_deg&quot;: 0
+      },
+      {
+        &quot;cell_id&quot;: &quot;PLACE_A-yaw0-GRID_8&quot;,
+        &quot;collected_count&quot;: 0,
+        &quot;coverage_count&quot;: 0,
+        &quot;eligibility_status&quot;: &quot;ELIGIBLE&quot;,
+        &quot;reason_codes&quot;: [
+          &quot;EXACT_QUALIFIED_COMBINATION&quot;
+        ],
+        &quot;repeat&quot;: 1,
+        &quot;selection_state&quot;: &quot;AVAILABLE&quot;,
+        &quot;split&quot;: &quot;TRAIN&quot;,
+        &quot;target_count&quot;: 1,
+        &quot;x_mm&quot;: 35,
+        &quot;y_mm&quot;: 0,
+        &quot;yaw_deg&quot;: 0
+      },
+      {
+        &quot;cell_id&quot;: &quot;PLACE_A-yaw0-GRID_9&quot;,
+        &quot;collected_count&quot;: 0,
+        &quot;coverage_count&quot;: 0,
+        &quot;eligibility_status&quot;: &quot;ELIGIBLE&quot;,
+        &quot;reason_codes&quot;: [
+          &quot;EXACT_QUALIFIED_COMBINATION&quot;
+        ],
+        &quot;repeat&quot;: 1,
+        &quot;selection_state&quot;: &quot;AVAILABLE&quot;,
+        &quot;split&quot;: &quot;TRAIN&quot;,
+        &quot;target_count&quot;: 1,
+        &quot;x_mm&quot;: 70,
+        &quot;y_mm&quot;: 0,
+        &quot;yaw_deg&quot;: 0
+      },
+      {
+        &quot;cell_id&quot;: &quot;PLACE_B-yaw0-CENTER&quot;,
+        &quot;collected_count&quot;: 0,
+        &quot;coverage_count&quot;: 0,
+        &quot;eligibility_status&quot;: &quot;BLOCKED&quot;,
+        &quot;reason_codes&quot;: [
+          &quot;QUALIFICATION_REQUIRED&quot;
+        ],
+        &quot;repeat&quot;: 1,
+        &quot;selection_state&quot;: &quot;BLOCKED&quot;,
+        &quot;split&quot;: &quot;TRAIN&quot;,
+        &quot;target_count&quot;: 1,
+        &quot;x_mm&quot;: 0,
+        &quot;y_mm&quot;: 0,
+        &quot;yaw_deg&quot;: 0
+      },
+      {
+        &quot;cell_id&quot;: &quot;PLACE_B-yaw0-GRID_1&quot;,
+        &quot;collected_count&quot;: 0,
+        &quot;coverage_count&quot;: 0,
+        &quot;eligibility_status&quot;: &quot;BLOCKED&quot;,
+        &quot;reason_codes&quot;: [
+          &quot;QUALIFICATION_REQUIRED&quot;
+        ],
+        &quot;repeat&quot;: 1,
+        &quot;selection_state&quot;: &quot;BLOCKED&quot;,
+        &quot;split&quot;: &quot;TRAIN&quot;,
+        &quot;target_count&quot;: 1,
+        &quot;x_mm&quot;: -70,
+        &quot;y_mm&quot;: 35,
+        &quot;yaw_deg&quot;: 0
+      },
+      {
+        &quot;cell_id&quot;: &quot;PLACE_B-yaw0-GRID_10&quot;,
+        &quot;collected_count&quot;: 0,
+        &quot;coverage_count&quot;: 0,
+        &quot;eligibility_status&quot;: &quot;BLOCKED&quot;,
+        &quot;reason_codes&quot;: [
+          &quot;QUALIFICATION_REQUIRED&quot;
+        ],
+        &quot;repeat&quot;: 1,
+        &quot;selection_state&quot;: &quot;BLOCKED&quot;,
+        &quot;split&quot;: &quot;TRAIN&quot;,
+        &quot;target_count&quot;: 1,
+        &quot;x_mm&quot;: -70,
+        &quot;y_mm&quot;: -35,
+        &quot;yaw_deg&quot;: 0
+      },
+      {
+        &quot;cell_id&quot;: &quot;PLACE_B-yaw0-GRID_11&quot;,
+        &quot;collected_count&quot;: 0,
+        &quot;coverage_count&quot;: 0,
+        &quot;eligibility_status&quot;: &quot;BLOCKED&quot;,
+        &quot;reason_codes&quot;: [
+          &quot;QUALIFICATION_REQUIRED&quot;
+        ],
+        &quot;repeat&quot;: 1,
+        &quot;selection_state&quot;: &quot;BLOCKED&quot;,
+        &quot;split&quot;: &quot;TRAIN&quot;,
+        &quot;target_count&quot;: 1,
+        &quot;x_mm&quot;: -35,
+        &quot;y_mm&quot;: -35,
+        &quot;yaw_deg&quot;: 0
+      },
+      {
+        &quot;cell_id&quot;: &quot;PLACE_B-yaw0-GRID_12&quot;,
+        &quot;collected_count&quot;: 0,
+        &quot;coverage_count&quot;: 0,
+        &quot;eligibility_status&quot;: &quot;BLOCKED&quot;,
+        &quot;reason_codes&quot;: [
+          &quot;QUALIFICATION_REQUIRED&quot;
+        ],
+        &quot;repeat&quot;: 1,
+        &quot;selection_state&quot;: &quot;BLOCKED&quot;,
+        &quot;split&quot;: &quot;TRAIN&quot;,
+        &quot;target_count&quot;: 1,
+        &quot;x_mm&quot;: 0,
+        &quot;y_mm&quot;: -35,
+        &quot;yaw_deg&quot;: 0
+      },
+      {
+        &quot;cell_id&quot;: &quot;PLACE_B-yaw0-GRID_13&quot;,
+        &quot;collected_count&quot;: 0,
+        &quot;coverage_count&quot;: 0,
+        &quot;eligibility_status&quot;: &quot;BLOCKED&quot;,
+        &quot;reason_codes&quot;: [
+          &quot;QUALIFICATION_REQUIRED&quot;
+        ],
+        &quot;repeat&quot;: 1,
+        &quot;selection_state&quot;: &quot;BLOCKED&quot;,
+        &quot;split&quot;: &quot;TRAIN&quot;,
+        &quot;target_count&quot;: 1,
+        &quot;x_mm&quot;: 35,
+        &quot;y_mm&quot;: -35,
+        &quot;yaw_deg&quot;: 0
+      },
+      {
+        &quot;cell_id&quot;: &quot;PLACE_B-yaw0-GRID_14&quot;,
+        &quot;collected_count&quot;: 0,
+        &quot;coverage_count&quot;: 0,
+        &quot;eligibility_status&quot;: &quot;BLOCKED&quot;,
+        &quot;reason_codes&quot;: [
+          &quot;QUALIFICATION_REQUIRED&quot;
+        ],
+        &quot;repeat&quot;: 1,
+        &quot;selection_state&quot;: &quot;BLOCKED&quot;,
+        &quot;split&quot;: &quot;TRAIN&quot;,
+        &quot;target_count&quot;: 1,
+        &quot;x_mm&quot;: 70,
+        &quot;y_mm&quot;: -35,
+        &quot;yaw_deg&quot;: 0
+      },
+      {
+        &quot;cell_id&quot;: &quot;PLACE_B-yaw0-GRID_2&quot;,
+        &quot;collected_count&quot;: 0,
+        &quot;coverage_count&quot;: 0,
+        &quot;eligibility_status&quot;: &quot;BLOCKED&quot;,
+        &quot;reason_codes&quot;: [
+          &quot;QUALIFICATION_REQUIRED&quot;
+        ],
+        &quot;repeat&quot;: 1,
+        &quot;selection_state&quot;: &quot;BLOCKED&quot;,
+        &quot;split&quot;: &quot;TRAIN&quot;,
+        &quot;target_count&quot;: 1,
+        &quot;x_mm&quot;: -35,
+        &quot;y_mm&quot;: 35,
+        &quot;yaw_deg&quot;: 0
+      },
+      {
+        &quot;cell_id&quot;: &quot;PLACE_B-yaw0-GRID_3&quot;,
+        &quot;collected_count&quot;: 0,
+        &quot;coverage_count&quot;: 0,
+        &quot;eligibility_status&quot;: &quot;BLOCKED&quot;,
+        &quot;reason_codes&quot;: [
+          &quot;QUALIFICATION_REQUIRED&quot;
+        ],
+        &quot;repeat&quot;: 1,
+        &quot;selection_state&quot;: &quot;BLOCKED&quot;,
+        &quot;split&quot;: &quot;TRAIN&quot;,
+        &quot;target_count&quot;: 1,
+        &quot;x_mm&quot;: 0,
+        &quot;y_mm&quot;: 35,
+        &quot;yaw_deg&quot;: 0
+      },
+      {
+        &quot;cell_id&quot;: &quot;PLACE_B-yaw0-GRID_4&quot;,
+        &quot;collected_count&quot;: 0,
+        &quot;coverage_count&quot;: 0,
+        &quot;eligibility_status&quot;: &quot;BLOCKED&quot;,
+        &quot;reason_codes&quot;: [
+          &quot;QUALIFICATION_REQUIRED&quot;
+        ],
+        &quot;repeat&quot;: 1,
+        &quot;selection_state&quot;: &quot;BLOCKED&quot;,
+        &quot;split&quot;: &quot;TRAIN&quot;,
+        &quot;target_count&quot;: 1,
+        &quot;x_mm&quot;: 35,
+        &quot;y_mm&quot;: 35,
+        &quot;yaw_deg&quot;: 0
+      },
+      {
+        &quot;cell_id&quot;: &quot;PLACE_B-yaw0-GRID_5&quot;,
+        &quot;collected_count&quot;: 0,
+        &quot;coverage_count&quot;: 0,
+        &quot;eligibility_status&quot;: &quot;BLOCKED&quot;,
+        &quot;reason_codes&quot;: [
+          &quot;QUALIFICATION_REQUIRED&quot;
+        ],
+        &quot;repeat&quot;: 1,
+        &quot;selection_state&quot;: &quot;BLOCKED&quot;,
+        &quot;split&quot;: &quot;TRAIN&quot;,
+        &quot;target_count&quot;: 1,
+        &quot;x_mm&quot;: 70,
+        &quot;y_mm&quot;: 35,
+        &quot;yaw_deg&quot;: 0
+      },
+      {
+        &quot;cell_id&quot;: &quot;PLACE_B-yaw0-GRID_6&quot;,
+        &quot;collected_count&quot;: 0,
+        &quot;coverage_count&quot;: 0,
+        &quot;eligibility_status&quot;: &quot;BLOCKED&quot;,
+        &quot;reason_codes&quot;: [
+          &quot;QUALIFICATION_REQUIRED&quot;
+        ],
+        &quot;repeat&quot;: 1,
+        &quot;selection_state&quot;: &quot;BLOCKED&quot;,
+        &quot;split&quot;: &quot;TRAIN&quot;,
+        &quot;target_count&quot;: 1,
+        &quot;x_mm&quot;: -70,
+        &quot;y_mm&quot;: 0,
+        &quot;yaw_deg&quot;: 0
+      },
+      {
+        &quot;cell_id&quot;: &quot;PLACE_B-yaw0-GRID_7&quot;,
+        &quot;collected_count&quot;: 0,
+        &quot;coverage_count&quot;: 0,
+        &quot;eligibility_status&quot;: &quot;BLOCKED&quot;,
+        &quot;reason_codes&quot;: [
+          &quot;QUALIFICATION_REQUIRED&quot;
+        ],
+        &quot;repeat&quot;: 1,
+        &quot;selection_state&quot;: &quot;BLOCKED&quot;,
+        &quot;split&quot;: &quot;TRAIN&quot;,
+        &quot;target_count&quot;: 1,
+        &quot;x_mm&quot;: -35,
+        &quot;y_mm&quot;: 0,
+        &quot;yaw_deg&quot;: 0
+      },
+      {
+        &quot;cell_id&quot;: &quot;PLACE_B-yaw0-GRID_8&quot;,
+        &quot;collected_count&quot;: 0,
+        &quot;coverage_count&quot;: 0,
+        &quot;eligibility_status&quot;: &quot;BLOCKED&quot;,
+        &quot;reason_codes&quot;: [
+          &quot;QUALIFICATION_REQUIRED&quot;
+        ],
+        &quot;repeat&quot;: 1,
+        &quot;selection_state&quot;: &quot;BLOCKED&quot;,
+        &quot;split&quot;: &quot;TRAIN&quot;,
+        &quot;target_count&quot;: 1,
+        &quot;x_mm&quot;: 35,
+        &quot;y_mm&quot;: 0,
+        &quot;yaw_deg&quot;: 0
+      },
+      {
+        &quot;cell_id&quot;: &quot;PLACE_B-yaw0-GRID_9&quot;,
+        &quot;collected_count&quot;: 0,
+        &quot;coverage_count&quot;: 0,
+        &quot;eligibility_status&quot;: &quot;BLOCKED&quot;,
+        &quot;reason_codes&quot;: [
+          &quot;QUALIFICATION_REQUIRED&quot;
+        ],
+        &quot;repeat&quot;: 1,
+        &quot;selection_state&quot;: &quot;BLOCKED&quot;,
+        &quot;split&quot;: &quot;TRAIN&quot;,
+        &quot;target_count&quot;: 1,
+        &quot;x_mm&quot;: 70,
+        &quot;y_mm&quot;: 0,
+        &quot;yaw_deg&quot;: 0
+      }
+    ],
+    &quot;completed&quot;: 0,
+    &quot;planned&quot;: 3,
+    &quot;sequence&quot;: []
+  }
+}</pre></section></main></body></html>

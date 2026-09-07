@@ -2,6 +2,52 @@
 
 ## ADDED Requirements
 
+### Requirement: Finite candidate speed trials use the existing Collection authority
+
+The native Collection application SHALL make a registered candidate motion preset usable in TEST_COLLECTION through the existing finite campaign. GENERAL_COLLECTION SHALL still require exact production qualification for every selected endpoint. The browser and automation SHALL select only the native preset identity and digest; trial scope SHALL derive from trusted application mode, never serialized program metadata. The current candidate is provisional, not an agreed optimum or a physically qualified policy. The next consumer is the existing Collection executor and root-owned physical validation.
+
+#### Scenario: Compile and consume a candidate trial
+
+- **WHEN** the user chooses a candidate with eligible v2 base qualifications in TEST_COLLECTION and compiles a finite A/B draft
+- **THEN** the existing resolver, live episode and postcommit reposition consumers receive the explicitly bound trial mode and exact candidate arm scaling
+- **AND** base qualification bytes, geometry, timeouts and staged gripper behavior remain unchanged; HOME recovery and movement to a qualified start keep their existing qualified policy, visibly distinguished from in-job trial motion
+- **AND** all existing scene, cell, exact-plan, campaign and single-motion-owner gates remain necessary; trial selection adds no acknowledgment and grants no production, semantic or training authority.
+
+#### Scenario: Production and changed inputs remain blocked
+
+- **WHEN** the same unqualified candidate is selected in GENERAL_COLLECTION, or a selected preset changes before compilation or start
+- **THEN** the application rejects the ineligible or stale binding before external effects instead of copying QUALIFIED flags or silently substituting another policy; unsupported legacy qualification versions are not displayed as trial-available
+- **AND** existing configurations without a preset and exactly qualified preset configurations retain their prior resolution behavior.
+
+#### Scenario: Recover a choice or a failed trial without repeating execution
+
+- **WHEN** a preset-choice response is lost or a finite trial fails
+- **THEN** the Web flow reads canonical state, preserves object placement and later draft edits, and offers the existing keep/edit/recovery actions
+- **AND** it never automatically replays compilation, authorization or motion; stale intent retries do not create another campaign or restart the failed episode.
+
+### Requirement: Exact native episode inspection returns to its original review
+
+The existing prepared training review SHALL offer read-only native LeRobot/Rerun inspection of a named episode in its frozen batch. The server SHALL derive dataset paths from that prepared target; the browser SHALL send only the expected batch identity and episode index through the existing fresh-view intent contract. Inspection SHALL NOT approve, refuse, relabel, collect, train or authorize motion. The original preview and independent approval actions SHALL remain available after viewer failure or return.
+
+#### Scenario: Open, inspect and return
+
+- **WHEN** a person selects a committed episode in the existing Web review
+- **THEN** the product opens the installed native viewer with synchronized UP/WRIST, action and state, and exposes the exact episode, dataset digest, feature order/units and canonical global/local frame mapping
+- **AND** the person can inspect a nonterminal frame and return to the same batch and episode without path transcription, a new approval or an automatic decision retry.
+
+#### Scenario: Evidence changes or the viewer cannot complete
+
+- **WHEN** the target is missing, changed, outside the prepared batch, or has an unsupported frame/feature mapping
+- **THEN** inspection rejects or explicitly reports that the prior target is no longer current, without changing the review's evidence or authority
+- **AND** an export/viewer failure remains an inspection error; lost responses use the existing canonical state read without repeating the command.
+
+#### Scenario: Exploration stays bounded and local
+
+- **WHEN** native inspection runs
+- **THEN** only one episode is exported per review process, with finite frame, output, resident-memory and lifetime limits; export uses local offline data and no GPU model
+- **AND** viewer endpoints bind loopback, temporary output remains server-owned, and return, expiry or application shutdown cleans up only owned processes and temporary artifacts
+- **AND** the Web flow closes its own viewer tab on return when it retains that tab handle; reloading the review does not grant authority over unrelated browser tabs.
+
 ### Requirement: Recover current training-review evidence without repeating authority
 
 When a training-review intent response fails, the product SHALL make one automatic read of the existing canonical view and render the returned review status, exact batch and available operations. It SHALL NOT resend the intent or infer approval from a transport error. A successful read SHALL remove the need for an extra human refresh merely to discover an already completed result. Human and automation surfaces SHALL derive review meaning from the same domain projection; neither surface grants authority by refreshing it.
@@ -114,3 +160,76 @@ The Collection application SHALL retain the preceding campaign's server-owned st
 - **WHEN** an apply or keep response is lost, the page is refreshed, or the same choice is delivered again
 - **THEN** the Web surface reads the canonical choice result without automatically repeating the command; automation can read that same result
 - **AND** duplicate or conflicting delivery cannot create another campaign or effect, changed stored evidence is revalidated before choice, and a failed recovery read leaves actions unavailable with explicit refresh available.
+
+### Requirement: Observe canonical reviews across supported interfaces
+
+The existing Collection review projection SHALL observe a canonical episode review
+completed through another supported interface without issuing another decision.
+It SHALL preserve the recorded reviewer and bind the result to the exact candidate,
+immutable ledger and durable state. An unavailable or inconsistent observation
+SHALL disable that review action without discarding unrelated execution facts or
+changing physical or training authority. Observation SHALL NOT repair artifacts.
+
+#### Scenario: A CLI review finishes while the Collection screen remains open
+
+- **WHEN** the native review command durably resolves a queued candidate
+- **THEN** a fresh view adopts its validated result and advances to the next pending candidate without a decision POST
+- **AND** an old review intent cannot overwrite that decision or change its reviewer
+- **AND** unchanged pending candidates do not trigger repeated full ledger validation.
+
+### Requirement: Restore the last execution-derived object position
+
+The Collection application SHALL restore the exact last eligible object pose from the existing durable scene and execution lineage on supported production-session restart and campaign replacement. The wooden object remains at that position until a reported manual move or invalidating execution evidence; images SHALL NOT be a prerequisite. The Web and automation surfaces SHALL consume the same native position, provenance and current-view binding without path or digest transcription. Restoring a draft SHALL NOT confer motion, semantic, quality or training approval. The next consumer is the existing scene-bound collection planner and lifecycle owner.
+
+#### Scenario: A later non-motion failure interrupts the campaign
+
+- **WHEN** a release is durably recorded and a subsequent recorder, UI or pre-motion startup failure leaves its valid lineage unchanged
+- **THEN** restarting the application or replacing the blocked campaign restores the exact endpoint even though the overall campaign did not complete
+- **AND** the view distinguishes an execution-derived expected landing from a visually measured position; reads do not modify scene, cell or source episodes
+- **AND** independent cell readiness, scene, hardware, exact-plan, single-owner and quality gates remain in force.
+
+#### Scenario: Later motion makes reuse uncertain
+
+- **WHEN** an object is UNKNOWN or HELD, its release lineage conflicts, or a newer execution has consumed or invalidated its last position
+- **THEN** the view exposes the affected position as unavailable and prevents collection effects from consuming it
+- **AND** unrelated review, stop and recovery operations retain their existing authority; displayed draft coordinates are not asserted to be current physical facts
+- **AND** a changed scene invalidates stale intents and requires fresh native derivation before its position is consumed.
+
+#### Scenario: The user moves the object and reports the new position
+
+- **WHEN** a person explicitly submits the moved position through the existing Web editor
+- **THEN** the server-owned actor records that declaration through the existing scene owner with current-state comparison, preserving existing cell gates and immutable source episodes
+- **AND** a restarted application restores the declaration; unrelated later draft edits are preserved when refreshing position
+- **AND** a lost response is recovered by reading the canonical result, without automatic command replay or another acknowledgement phrase.
+
+#### Scenario: A restarted campaign consumes the last landing
+
+- **WHEN** the existing Collection authoring command binds a valid recorded landing to a fresh run
+- **THEN** SceneStateStore compares the exact scene, source slot and cell lineage under its locks before changing the slot's next-run allocation
+- **AND** the physical pose, source, original release timestamp and execution evidence remain unchanged; a concurrent stale handoff or newer active motion rejects
+- **AND** the native planner resolves the exact preserved source coordinates and the fresh run binding without writing scene state; the former next run cannot consume that allocation
+- **AND** a new campaign still requires its own existing approval and all physical gates; this transfer grants no semantic, training or motion approval.
+
+### Requirement: Preserve execution awareness during Collection connection recovery
+
+The Collection Web surface SHALL retain its last validated execution facts and current screen when state retrieval fails, clearly label them as stale, and state that current robot motion or stop is unknown. A failed browser request SHALL NOT imply that the lifecycle owner stopped, rolled back or remains healthy. The current constraint is the existing loopback state/intent transport; this behavior grants no offline command authority and changes no physical or approval gates. The next consumer is the existing lifecycle owner, whose fresh canonical view and exact intent CAS remain authoritative.
+
+#### Scenario: State retrieval fails while execution continues
+
+- **WHEN** a state read or watch fails during a previously observed execution
+- **THEN** the screen retains the last episode, progress and evidence identities as explicitly stale information, without returning to environment setup or animating a live heartbeat
+- **AND** the stop control remains visible with its existing pending semantics, but no command is emitted using the stale view; unavailable Web stop is not represented as confirmed physical stop.
+
+#### Scenario: Recover current state without replaying effects
+
+- **WHEN** a connection failure or HTTP 5xx prevents reading state
+- **THEN** the browser makes at most three automatic read-only retries with delays, bounds each read's duration, and leaves explicit refresh available after exhaustion
+- **AND** a fresh validated view restores only its native-permitted operations; a rollback or malformed view cannot change the retained identity or confer authority
+- **AND** a response requested before a known disconnect cannot clear the stale indication; recovery requires a subsequent state read
+- **AND** lost intent or stop responses cause state reads only, never automatic intent replay, including when one read supersedes another.
+
+#### Scenario: Distinguish session and response failures
+
+- **WHEN** the server rejects the session, returns an HTTP error, or returns an invalid state payload
+- **THEN** the UI distinguishes these from a connection failure, preserves last-known execution context, and exposes the exact error in technical details
+- **AND** session expiry offers the existing fresh-page bootstrap without token transcription; invalid contracts require explicit refresh rather than an unbounded retry loop.

@@ -42,13 +42,68 @@ None.
 
 ## Impact
 
-Runtime changes are confined to the existing Rollout native loader, offline
-solver experiment and their tests.
+Runtime changes use the existing Rollout native loader, offline solver
+experiment and sole PickupExecutor/ROS transport, with focused tests.
 Artifact validation is consumed from the canonical Learning owner; Rollout retains
 its supported-processor restrictions and actual runtime checks.
-It changes no checkpoint schema, training statistics, executor, recorder,
-physical authority or dataset admission. This bounded readiness outcome does not
+It changes no checkpoint schema, training statistics, recorder,
+physical authority or dataset admission. These bounded outcomes do not
 complete the continuing Rollout responsibility or qualify a learned policy.
+
+## Held controller references
+
+Recorded actions are controller references, while observation.state contains
+feedback. Treating a held gripper reference as a timed waypoint changes its
+meaning. ROS JointTrajectoryController interpolates position-only waypoints,
+preempts an existing action when a new action arrives, and retains its final
+reference after successful completion ([controller documentation](https://control.ros.org/jazzy/doc/ros2_controllers/joint_trajectory_controller/doc/userdoc.html),
+[trajectory representation](https://control.ros.org/jazzy/doc/ros2_controllers/joint_trajectory_controller/doc/trajectory.html)).
+These documented mechanisms support explicit held-target consumption; they do
+not establish FR5 timing or grasp success.
+
+The selected bounded path adds an explicitly requested held-gripper proposal
+to the existing finite learned consumer. It freezes consecutive identical
+references into gripper holds and six-joint arm slices inside the same approved
+LEARNED_CHUNK. It preserves every arm output and its within-slice period, adding
+visible bound hold durations between slices. The alternative combined seven-joint
+waypoint path remains a separate explicit contract; it does not represent the
+recorded reference/feedback lag.
+
+Only the source program's close/open targets and existing settings/completion
+bounds are supported. The existing 1e-9 m reference tolerance accommodates
+float32 representation without snapping the model output. No semantic phase
+detector, smoothing, clipping, new grasp classifier or parallel executor is added.
+Staged-open profiles and unbound targets reject. The proposal preserves all seven
+position limits and six arm velocity limits; the legacy waypoint mode retains
+all seven velocity checks. A held reference jump is not a physical finger-speed
+measurement. Command duration, hardware settings and completion evidence remain
+required in the held mode. This is not approval to relax the legacy contract.
+
+Before approval, a redundant first gripper command can be omitted only when
+observed reference and feedback already satisfy its bound target. At execution,
+fresh observations guard each frozen start and are rechecked at native send.
+After each gripper action's successful terminal result, bound reference/feedback
+completion must pass before a new arm slice starts. Fresh state is recorded and
+validated against the approved start tolerance; it does not rebase or replan the
+approved trajectory. The same transport retains active/unresolved goals and
+cancellation. Collision samples include gripper travel and both accepted feedback
+extremes during arm slices; sampled checks are not continuous collision proof.
+
+The falsifier is executable CPU replay: a repeated reference restart, an arm send
+on feedback alone before terminal evidence, acceptance of stale/mismatched state,
+a send after cancellation, or alteration of approved commands rejects this path.
+The small comparison uses synthetic clients and existing ROS message serialization;
+it requires no model, GPU or robot. Original recorded data remain unchanged.
+
+Root's integration review is the next consumer; this template-only path is not
+ready for the current production source or continuous native model outputs.
+Unsupported continuous model outputs remain failures, and no target quantization
+policy is inferred. Retained per-segment start/terminal evidence joins the existing
+learned execution trace and diagnostic; it does not create a ledger. Task effect,
+scene outcome, safe reset and data utility remain unqualified by this software
+replay. Existing human, exact-plan, scene, cell, hardware, training and physical
+bindings still govern any later execution. The source observation age is checked
+at every send; this path never silently extends that age to finish a hold.
 
 ## Current hypothesis and falsifier
 
@@ -110,3 +165,141 @@ Preserve original policy outputs and expose any consumption or timing change in
 the exact plan. This is proposed acceptance, not an implemented controller or
 physical qualification. It does not solve out-of-range model outputs, justify
 silent clipping, or replace the existing finite diagnostic contract.
+
+## Continuous-reference consumer decision
+
+The held close/open template does not consume arbitrary native SmolVLA output.
+A retained fixed10 50-row output has 50 distinct in-limit gripper references and
+zero close/open matches. Current 24mm production plans also contain a 12.6 mm,
+0.5 s release stage before 21 mm open, which this consumer explicitly rejects.
+Synthetic held completion is therefore neither production-source compatibility
+nor learned task effectiveness. Original references and staged source remain
+unchanged on rejection.
+
+The actual FR5 hardware has two different discretizations. With configured
+upper position 0.021 m, its integer SDK target uses
+`lround(100 * reference / upper)`, but its enqueue predicate compares raw meters
+against the last dispatched reference with a strict 0.0001 m deadband. Thus equal
+integer targets can cause another command, and crossing an integer boundary need
+not cause a command. Grouping only by integer target would change this behavior.
+The gripper controller explicitly uses `interpolation_method: none`; generic
+spline assumptions do not describe this configured controller.
+
+[FAIRINO's peripheral API](https://fairino-doc-en.readthedocs.io/latest/SDKManual/PythonRobotPeripherals.html)
+specifies percentage targets and a nonblocking command option. Our hardware worker
+owns the subsequent polling, pending-command replacement, arm-stream pause and
+ServoMoveStart acknowledgement. [Humble JointTrajectoryController](https://control.ros.org/humble/doc/ros2_controllers/joint_trajectory_controller/doc/userdoc.html)
+reports action success within configured tolerances and retains its final
+reference. That result is not a publication of our hardware worker's pending,
+RPC, command-generation or arm-resumed state. Current transport snapshots do not
+carry those states. Feedback near a target cannot substitute for their completion.
+These are controller/source findings, not measured physical timing or task success.
+
+| Candidate | What it preserves | Current falsifier and decision |
+| --- | --- | --- |
+| Existing timed seven-joint trajectory | Original model knots and timestamps | Gripper worker may supersede pending commands and pause arm streaming while controller trajectory time advances. Terminal tolerance alone cannot prove faithful intermediate execution. Do not qualify this route from serializer tests. |
+| Serial raw references through the sole executor | Original raw target at each consumed row, explicit held completion before arm continuation | Fifty distinct references with existing one-second holds exceed the five-second finite ceiling and may destroy the learned timing. A smaller explicitly reviewed prefix bounds cost but changes the consumed horizon and is not selected merely because it is easier to verify. It requires a useful task/latency comparison, full original output and consumed indices, hardware completion evidence and staged-release compatibility. |
+
+Do not introduce target snapping, close/open thresholds, guessed settling delays
+or automatic prefix truncation to make either candidate pass. A source-extracted
+CPU replay already falsifies integer-code-only grouping; it models enqueues,
+not completed RPCs. Requiring hardware completion does not authorize a new
+execution owner or expand a tolerance to permit object contact. Intermediate
+reference tracking must either meet its explicitly bound tolerance or fail;
+a successful grasp is still separately reviewed.
+
+The minimal shared requirement goes to the existing hardware/motion owner:
+coherent evidence must identify the accepted command and its generation, expose
+unresolved work/error and establish arm resume for that same command. The sole
+transport must bind it to the approved gripper operation, reject stale or unrelated
+completion, and preserve unresolved cancellation. Root owns this shared change
+and any physical validation. Rollout owns consuming that evidence in the existing
+finite plan/trace and preserving all raw outputs, exact consumed indices and any
+explicit hold-time changes. No message schema or readiness flag is invented here.
+
+If the qualified staged release is executed, its existing ordered intermediate
+hold and final open must remain bound to the exact plan. Merely retaining source
+metadata does not prove that the release occurred; a learned target cannot be
+classified as release by an invented numerical threshold. The current staged-source
+rejection stays until the consumer closes this requirement.
+
+Neither timing mechanism is selected for deployment by this outcome. Shared
+completion evidence is necessary for a faithful comparison; easier serialization
+is not sufficient reason to replace the intended learned behavior. Root assigns
+the shared writer after its physical canary. Further comparison must include
+feasible task latency and actual driver deadband, not only software verifiability.
+
+The next comparison refines the native-timing option using existing JTC virtual
+time instead of replacing it with fixed per-row holds. Installed Jazzy JTC 4.40.1
+supports a hardware `speed_scaling.state_interface`; its update advances trajectory
+time by `period * factor`. A common, coherently sampled hardware pause could keep
+both controllers on the original full sequence during unresolved gripper work,
+with measured stall duration rather than an invented dwell or shortened prefix.
+This is a candidate for the existing shared hardware/controller owner, not a
+Rollout scaling publisher or an implemented runtime route.
+
+[Jazzy speed-scaling documentation](https://control.ros.org/jazzy/doc/ros2_controllers/joint_trajectory_controller/doc/speed_scaling.html)
+and [the matching 4.40.1 update source](https://github.com/ros-controls/ros2_controllers/blob/4.40.1/joint_trajectory_controller/src/joint_trajectory_controller.cpp)
+also expose its limits: command sampling retains a full-cycle lookahead at zero
+factor, and goal-time tolerance follows virtual time. A CPU call to the installed
+Trajectory sampler confirms that, at a 10 ms sample of synthetic 30 Hz knots,
+linear arm interpolation is between knots while gripper NONE already selects the
+next knot. Freezing the synthetic virtual clock retains these samples, but this
+does not prove a synchronized full-controller or hardware execution. Equal factors
+alone do not establish equal start phases or atomic command-generation gating.
+
+FR5 currently exports no hardware scaling state. Before choosing this route,
+the shared owner must establish command/clock coherence, preserve exact-plan and
+staged-release bindings, and retain independent wall-time/source-freshness/cancel
+limits; a zero factor must not permit an indefinite wait. Falsify it if lookahead
+or controller phase skew causes a new gripper command while one is unresolved,
+arm knots advance during pause, or real stalls defeat useful task latency. This
+source comparison supplies no new physical timing, success or qualification claim.
+
+An unapplied hardware candidate now reuses the driver's existing mutex and worker
+to bind completion to the current request generation, including a post-resume
+check. It snapshots state once per read cycle for both native controller clocks
+and fences arm writes when that sampled cycle is paused. The opt-in mode rejects
+unexpected replacement of unresolved work; the original raw deadband and integer
+conversion remain distinct. CPU tests consume copied driver methods and the
+installed JTC sampler, preserving a full synthetic 50-row sequence without fixed
+per-row holds or prefix truncation. The synthetic completion delay is not a measured
+latency or a new dwell rule.
+
+The candidate is bound to exact modified runtime-source bytes and has not been
+integrated or installed. Controller interface registration/start synchronization,
+fresh hardware-state consumption by the sole transport, in-flight SDK cancellation,
+and staged-release timing/physical qualification remain open. No software terminal
+flag upgrades the existing SDK send/error result into a physical acknowledgement.
+
+Consumer replay rejects a paused controller at a held-segment boundary even when
+the action result and reference/feedback pass. The same check is consumed by the
+sole executor, send-time recheck and canonical trace validator. An independent
+transport clock still times out a frozen controller and cancels once; positive
+scaling is only absence of this particular rejection, not hardware completion.
+
+The native timing candidate remains unqualified: two installed Trajectory
+samplers starting four 100 Hz cycles apart preserve their phase difference under
+twenty equal zero-factor cycles. Their full-cycle lookahead still selects noninitial
+commands. This falsifies equal scaling alone as a synchronization mechanism; it
+does not measure physical latency. The metadata candidate also gives identical
+generation packets for separately constructed instances and erases clock type
+when exporting numeric seconds. In installed controller_manager 4.45.2,
+[the trigger clock is steady outside simulation](https://github.com/ros-controls/ros2_control/blob/4.45.2/controller_manager/src/controller_manager.cpp)
+and [the read loop forwards it to hardware](https://github.com/ros-controls/ros2_control/blob/4.45.2/controller_manager/src/ros2_control_node.cpp).
+Transport callback arrival cannot recover the missing source identity or domain.
+
+The next native consumer therefore needs source-bound incarnation and sample-clock
+identity, fresh same-generation completion and a demonstrated controller-start
+mechanism before the full raw horizon can be admitted. The isolated worker
+correction fences stop/error or supersession observed during its initial state
+query before starting MoveGripper. It leaves the SDK call outside the shared lock
+and retains the explicit in-flight cancellation limitation. Neither correction
+changes the intentional 12.6 mm/0.5 s ->21 mm release, deploys a controller setting,
+or makes the unsupported continuous-reference consumer operational.
+
+Falsify the serial candidate if it needs unreviewed target/timing changes, cannot
+establish same-command hardware completion within the bounded horizon, or loses
+fresh state/cancel ownership. After software acceptance, independently assigned
+physical trials must compare executed references, feedback, latency, task effect
+and safe reset. Better solver metrics do not answer those questions.

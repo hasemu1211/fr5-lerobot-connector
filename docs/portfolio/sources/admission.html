@@ -1,0 +1,64 @@
+<!doctype html><html lang="ko"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>기술 판정과 작업 의미 — FR5 근거</title><link rel="stylesheet" href="../site.css"></head><body><main class="source-page"><a href="../data.html">← 설명으로 돌아가기</a><h1>기술 판정과 작업 의미</h1><p class="note">설명에 사용한 구현·측정 자료의 발췌이다. SHA-256은 발췌 전 원본 파일을 식별한다. 실행 PC의 절대 경로와 계정 정보는 포함하지 않으며, 측정값과 해석 조건을 함께 제시한다.</p><section id="candidate_admission"><h2>candidate_admission.py</h2><p class="locator">tools/data_factory/candidate_admission.py<br>sha256:a7594141ee6c0c9d725d24519e4eb4305131bd6b88179c5b9483201673d71e2a</p><p class="note">원문 전체.</p><pre>&quot;&quot;&quot;Pure intrinsic validation for ``candidate_admission.v1`` artifacts.&quot;&quot;&quot;
+from __future__ import annotations
+
+import copy
+from collections.abc import Mapping
+from typing import Any
+
+from tools.fr5_data_factory import (
+    ContractError,
+    DIGEST,
+    SAFE_ID,
+    TASK_REVIEW_CHECKLIST_IDS,
+)
+
+
+SCHEMA_VERSION = &quot;data_factory.candidate_admission.v1&quot;
+FIELDS = frozenset({
+    &quot;schema_version&quot;, &quot;run_id&quot;, &quot;operational_gate&quot;, &quot;operational_source&quot;,
+    &quot;checklist_id&quot;, &quot;review_context_digest&quot;, &quot;semantic_status&quot;,
+    &quot;reviewed_by&quot;, &quot;reviewed_at&quot;, &quot;reason&quot;,
+})
+
+
+def validate_candidate_admission(value: object) -&gt; dict[str, Any]:
+    &quot;&quot;&quot;Return a detached candidate after validating context-free invariants.&quot;&quot;&quot;
+    if not isinstance(value, Mapping) or set(value) != FIELDS:
+        raise ContractError(&quot;CANDIDATE_ADMISSION_FIELDS&quot;)
+    candidate = copy.deepcopy(dict(value))
+    semantic = candidate[&quot;semantic_status&quot;]
+    if (
+        candidate[&quot;schema_version&quot;] != SCHEMA_VERSION
+        or not isinstance(candidate[&quot;run_id&quot;], str)
+        or SAFE_ID.fullmatch(candidate[&quot;run_id&quot;]) is None
+        or not isinstance(candidate[&quot;operational_gate&quot;], str)
+        or candidate[&quot;operational_gate&quot;] not in {&quot;PASS&quot;, &quot;FAIL&quot;}
+        or not isinstance(candidate[&quot;operational_source&quot;], str)
+        or candidate[&quot;operational_source&quot;] not in {&quot;HIL_PROXY&quot;, &quot;HUMAN_GATED&quot;}
+        or not isinstance(candidate[&quot;checklist_id&quot;], str)
+        or candidate[&quot;checklist_id&quot;] not in TASK_REVIEW_CHECKLIST_IDS
+        or not isinstance(candidate[&quot;review_context_digest&quot;], str)
+        or DIGEST.fullmatch(candidate[&quot;review_context_digest&quot;]) is None
+        or not isinstance(semantic, str)
+        or semantic not in {&quot;PENDING&quot;, &quot;PASS&quot;, &quot;FAIL&quot;, &quot;UNCERTAIN&quot;}
+    ):
+        raise ContractError(&quot;CANDIDATE_ADMISSION_SCHEMA&quot;)
+
+    reviewer, reviewed_at, reason = (
+        candidate[&quot;reviewed_by&quot;], candidate[&quot;reviewed_at&quot;], candidate[&quot;reason&quot;],
+    )
+    if semantic == &quot;PENDING&quot;:
+        valid_review = reviewer is None and reviewed_at is None and reason is None
+    else:
+        valid_review = (
+            isinstance(reviewer, str)
+            and reviewer != &quot;HUMAN&quot;
+            and SAFE_ID.fullmatch(reviewer) is not None
+            and isinstance(reviewed_at, str)
+            and bool(reviewed_at)
+            and (reason is None if semantic == &quot;PASS&quot; else isinstance(reason, str) and bool(reason))
+        )
+    if not valid_review:
+        raise ContractError(&quot;CANDIDATE_ADMISSION_REVIEW&quot;)
+    return candidate
+</pre></section></main></body></html>

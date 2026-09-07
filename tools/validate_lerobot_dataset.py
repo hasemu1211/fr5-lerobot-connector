@@ -238,6 +238,14 @@ def main() -> None:
     quarantine = args.root / "meta" / "quarantine.json"
     if quarantine.exists() or quarantine.is_symlink():
         raise SystemExit(f"FAIL: dataset is quarantined: {quarantine}")
+    mapping = args.root / "meta/curator_mapping.json"
+    if mapping.exists() or mapping.is_symlink():
+        from tools.data_factory.curator.dataset.mapping import verify_mapped_dataset
+        from tools.data_factory.curator.core.errors import CuratorError
+        try:
+            verify_mapped_dataset(args.root, args.repo_id)
+        except (CuratorError, ContractError, OSError, ValueError, KeyError, TypeError) as exc:
+            raise SystemExit(f"FAIL: mapped source evidence: {exc}") from exc
     if not np.isfinite([args.min_arm_range, args.min_gripper_range]).all() or min(args.min_arm_range, args.min_gripper_range) <= 0:
         raise SystemExit("HIL motion thresholds must be finite and positive")
     failures: list[str] = []

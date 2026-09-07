@@ -5,6 +5,14 @@ from tools.data_factory.resource_usage import ResourceMonitor
 
 
 class ResourceUsageTest(unittest.TestCase):
+    def test_preserves_downstream_image_queue_without_inventing_health(self):
+        metrics = {"status": "AVAILABLE", "queued_images": 256,
+                   "capacity_images": None, "sampled_high_water_images": 300}
+        report = ResourceMonitor("run", "sha256:profile").finish({"image_writer": metrics})
+        self.assertEqual(report["recorder"]["image_writer"], metrics)
+        metrics["queued_images"] = 0
+        self.assertEqual(report["recorder"]["image_writer"]["queued_images"], 256)
+
     def test_finish_interrupts_default_sampling_wait(self):
         monitor = ResourceMonitor(
             "run", "sha256:profile", interval_s=1.0,

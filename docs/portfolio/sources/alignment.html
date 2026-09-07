@@ -1,0 +1,82 @@
+<!doctype html><html lang="ko"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>다중 센서 시간 정렬 — FR5 근거</title><link rel="stylesheet" href="../site.css"></head><body><main class="source-page"><a href="../data.html#alignment-title">← 설명으로 돌아가기</a><h1>다중 센서 시간 정렬</h1><p class="note">설명에 사용한 구현·측정 자료의 발췌이다. SHA-256은 발췌 전 원본 파일을 식별한다. 실행 PC의 절대 경로와 계정 정보는 포함하지 않으며, 측정값과 해석 조건을 함께 제시한다.</p><section id="fr5_lerobot_recorder"><h2>fr5_lerobot_recorder.py</h2><p class="locator">tools/fr5_lerobot_recorder.py<br>sha256:351b0bffe7c9a0021aa5eaa9eb51c9855cc7c8ee130ec11907aa0765d40a6996</p><p class="note">해당 기능의 함수 발췌. 줄 번호와 digest는 원본 기준이다.</p><pre># tools/fr5_lerobot_recorder.py:1385 · _aligned_sample
+    def _aligned_sample(
+        self, target_stamp: float, *, sampler_epoch: int | None = None,
+    ):
+        with self.lock:
+            if (
+                sampler_epoch is not None
+                and sampler_epoch != getattr(self, &quot;sampler_epoch&quot;, 0)
+            ):
+                return None
+            state = interpolate_vector(self.joint_states, target_stamp, self.args.state_max_age)
+            arm = interpolate_vector(self.arm_actions, target_stamp, self.args.action_sync_slop)
+            gripper = latest_sample(self.gripper_actions, target_stamp, self.args.action_max_age)
+            camera_samples = {
+                camera: nearest_sample(self.camera_frames[camera], target_stamp, self.args.sync_slop)
+                for camera in self.camera_names
+            }
+        missing = []
+        if state is None: missing.append(&quot;state&quot;)
+        if arm is None: missing.append(&quot;arm_action&quot;)
+        if gripper is None: missing.append(&quot;gripper_action&quot;)
+        missing.extend(f&quot;image.{camera}&quot; for camera, sample in camera_samples.items() if sample is None)
+        if missing:
+            self._record_alignment_failure(missing, sampler_epoch=sampler_epoch)
+            return None
+        state_value, state_before, state_after = state
+        arm_value, arm_before, arm_after = arm
+        gripper_stamp, gripper_value = gripper
+        transport_ages = {
+            camera: sample[3] - sample[2] for camera, sample in camera_samples.items()
+        }
+        if any(age &lt; 0 or age &gt; self.args.image_max_age for age in transport_ages.values()):
+            self._record_alignment_failure((&quot;transport&quot;,), sampler_epoch=sampler_epoch)
+            return None
+        images = tuple(camera_samples[camera][1] for camera in self.camera_names)
+        action = np.r_[arm_value, gripper_value].astype(np.float32)
+        image_errors = {
+            camera: abs(camera_samples[camera][0] - target_stamp) for camera in self.camera_names
+        }
+        state_distance = max(target_stamp - state_before, state_after - target_stamp)
+        action_distance = max(
+            target_stamp - arm_before, arm_after - target_stamp, target_stamp - gripper_stamp
+        )
+        provenance = {
+            &quot;target_ros_s&quot;: target_stamp,
+            &quot;joint_bracket_ros_s&quot;: [state_before, state_after],
+            &quot;arm_action_bracket_ros_s&quot;: [arm_before, arm_after],
+            &quot;gripper_action_ros_s&quot;: gripper_stamp,
+            &quot;image_raw_ros_s&quot;: {camera: camera_samples[camera][2] for camera in self.camera_names},
+            &quot;image_corrected_ros_s&quot;: {camera: camera_samples[camera][0] for camera in self.camera_names},
+            &quot;image_received_ros_s&quot;: {camera: camera_samples[camera][3] for camera in self.camera_names},
+        }
+        return state_value, action, images, provenance, max(image_errors.values()), action_distance, state_distance</pre></section><section id="time_alignment"><h2>time_alignment.py</h2><p class="locator">tools/time_alignment.py<br>sha256:da1d38f165ee55be88534bf7d7d3f35cb4fbf0d2d2483b3ff076f9bf4cddae57</p><p class="note">원문 전체.</p><pre>&quot;&quot;&quot;Small timestamp-alignment helpers for buffered robot data.&quot;&quot;&quot;
+
+from __future__ import annotations
+
+import numpy as np
+
+
+def interpolate_vector(samples, target: float, max_distance: float):
+    before = next((sample for sample in reversed(samples) if sample[0] &lt;= target), None)
+    after = next((sample for sample in samples if sample[0] &gt;= target), None)
+    if before is None or after is None:
+        return None
+    if target - before[0] &gt; max_distance or after[0] - target &gt; max_distance:
+        return None
+    if after[0] == before[0]:
+        return np.asarray(before[1]).copy(), before[0], after[0]
+    weight = (target - before[0]) / (after[0] - before[0])
+    value = np.asarray(before[1]) + weight * (np.asarray(after[1]) - np.asarray(before[1]))
+    return value.astype(np.float32), before[0], after[0]
+
+
+def latest_sample(samples, target: float, max_age: float):
+    sample = next((sample for sample in reversed(samples) if sample[0] &lt;= target), None)
+    return sample if sample is not None and target - sample[0] &lt;= max_age else None
+
+
+def nearest_sample(samples, target: float, max_distance: float):
+    sample = min(samples, key=lambda item: abs(item[0] - target), default=None)
+    return sample if sample is not None and abs(sample[0] - target) &lt;= max_distance else None
+</pre></section></main></body></html>

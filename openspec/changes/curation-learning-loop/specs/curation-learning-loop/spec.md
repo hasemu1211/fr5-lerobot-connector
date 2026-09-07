@@ -1,5 +1,57 @@
 ## ADDED Requirements
 
+### Requirement: Mapped immutable sources reach a technically validated request candidate
+
+Curator SHALL reuse native lossless dataset merge and current raw request/ledger
+validation to publish a separate candidate with an explicit selected request.
+It SHALL retain source dataset identities, selected semantic evidence digests,
+original timing provenance bytes and verified episode/global index mapping.
+The existing FR5 technical validator SHALL reject changed mapping, source bytes,
+control values, video correspondence or timing projections. Publication SHALL
+use existing exclusive atomic directory publication and preserve all originals.
+
+#### Scenario: Multiple sources and a declared original evaluation cohort
+- **WHEN** current raw requests pass native preparation and a bounded native merge preserves the original split's dataset/episode identity under its mapping
+- **THEN** Curator SHALL publish the new dataset, mapping, technical result, publication identity and selected request together
+- **AND** the mapped preparation consumer SHALL return existing native dataset/draft shapes with parent semantic references, new mapped provenance, and no issued approval
+- **AND** unselected episodes SHALL remain outside the requested training selection.
+
+#### Scenario: Changed evidence, wrong cohort, budget or replay
+- **WHEN** original request/review/timing evidence changes, the native split maps to a different cohort, the copy budget fails, or the output already exists
+- **THEN** the corresponding operation SHALL reject without overwriting a published result, modifying original inputs or silently changing the selected set
+- **AND** no approval, inventory, training, physical execution or profile finalization SHALL occur.
+
+#### Scenario: Frozen source evidence and mutable review state have different roles
+- **WHEN** a new mapped preparation lacks current valid source review state
+- **THEN** preparation SHALL reject even if the mapped content is otherwise valid
+- **AND** frozen provenance validation SHALL continue to validate its bound original artifacts without inventing retrospective revocation solely from loss of a mutable projection.
+
+#### Scenario: Mapped candidate reaches the existing exact-batch training consumer
+- **WHEN** the candidate's `mapping` reference is consumed
+- **THEN** `prepare_mapped_approvals` SHALL validate its exact publication and return mapped drafts without issuing consent
+- **AND** the existing training entrypoint and Web preview SHALL distinguish parent semantic PASS from destination semantic NOT_ASSERTED, show the source episode correspondence, and require a new exact batch authorization before inventory publication
+- **AND** the inventory SHALL preserve PARENT_PASS references rather than manufacturing a new semantic verdict or inheriting raw training authority.
+
+#### Scenario: Actual launch preserves the original evaluation identity
+- **WHEN** an authorized mapped inventory reaches native launch preparation
+- **THEN** the consumer SHALL verify its original collection-profile ledger and compare the actual dataset, selected episodes, TRAIN episodes, EVAL episodes and fraction against the verified mapped publication
+- **AND** a changed cohort or selection SHALL reject before launch receipt publication or trainer construction
+- **AND** the saved observation-view consumer SHALL treat this verified lossless mapping as raw imagery without introducing or applying an image transform.
+
+### Requirement: Success coverage proposals reuse native Collection authoring
+
+Curation acquisition proposals SHALL distinguish observed successful conditions from proposed attempts, reuse current ledger/state and DQA evidence, and retain exact source/split references, registered selection/source digests, pose sequence and requested count. They SHALL use existing native Collection authoring to verify that compiled slots preserve the explicit proposal. Historical observations SHALL remain selection evidence, not reconstructed historical authoring or new campaign admission. This authoring outcome SHALL confer no collection, semantic, training or motion authority.
+
+#### Scenario: Existing successful TRAIN conditions are proposed for repetition
+- **WHEN** a bounded proposal selects representative conditions from validated TRAIN evidence and requests repetitions using the existing direct-selection consumer
+- **THEN** native `update_draft` and `compile_draft` SHALL preserve the requested pose order, count and split group
+- **AND** the proposal SHALL retain native compilation identity, original evidence and explicit qualification/resource limits without invoking physical or training consumers.
+
+#### Scenario: Additional episodes would move the evaluation cohort
+- **WHEN** the existing native splitter would assign a different heldout after adding episodes
+- **THEN** the acquisition proposal SHALL expose that mismatch and retain the original cohort reference
+- **AND** it SHALL NOT claim a fixed-cohort expanded training request or learning improvement until the existing training consumer verifies that separate contract.
+
 ### Requirement: Optional native TRAIN-only view fitting preserves its inputs
 
 Profile setup SHALL accept an optional existing native v3 `fit_split`, reuse its validator, and require its parent dataset root and content digest to match the frozen source. In this mode it SHALL select reference and background-plate frames only from that split's TRAIN episodes using the existing bounded sampling budget. An explicit non-TRAIN reference SHALL be rejected; an omitted reference SHALL select the first TRAIN frame. A v2 profile SHALL retain the split path, file hash and native digest plus the actual decoded reference and plate frame global, episode and local indices and RGB array digests through preview and finalization. The resolved profile digest SHALL bind this evidence for the existing candidate lineage consumer. This SHALL NOT replace the native split or create admission, training, physical or motion authority.

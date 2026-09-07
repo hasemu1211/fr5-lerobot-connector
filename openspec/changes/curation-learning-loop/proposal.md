@@ -21,7 +21,19 @@ Curation은 어떤 원본·시연 구성·관측 표현이 downstream 학습과 
 
 완료 근거는 native synthetic publication/replay 검증, 실제 UI 소비 수용, 적격 파생 계보의 native 학습 수용과 일관된 inference 입력, 그리고 사전에 정한 비교에서의 측정이다. 실제 physical binding·semantic 판단·training 실행이 불가한 효과는 분리해 미검증으로 남긴다. 현재 인간 경로를 연결하는 것만으로 장기 자동 판단 책임이나 전체 효용 검증을 완료했다고 선언하지 않는다.
 
+## 독립적으로 진행하는 성공 조건 반복 수집
+
+현재 합격 예제가 여러 명령 위치·yaw에 분산되고 TRAIN의 동일 조건 반복은 부족하므로, 다음 작은 수집 가설은 **이미 성공한 TRAIN 조건의 반복 관측을 늘리는 것**이다. 새로운 조건을 더 넓히는 대안과 비교해, 먼저 관측된 yaw마다 기존 성공 위치 하나를 대표로 삼아 제한된 횟수만 반복한다. 이는 반복이 다양성보다 우수하다는 채택이 아니라, 현재 부족한 반복 변동의 근거를 얻는 선택이다. 기존 조건 분포 대비 요청도 유지한다.
+
+[SmolVLA 공식 가이드](https://huggingface.co/docs/lerobot/main/smolvla)의 위치별 반복 시연 사례는 이 질문의 근거다. 약 50개라는 출발점이나 SO100의 결과를 FR5 최소 수량·성능 보장으로 삼지 않는다. 수량은 현재 합격 근거와 추가 취득 예산에서 정하며, 시도 횟수를 새 합격 수량으로 기록하지 않는다.
+
+완료 조건은 현재 ledger/state와 DQA를 읽은 선택 근거가 정확한 preset·명령 pose·반복 수로 기존 Collection native authoring에 전달되고, 실제 `update_draft`와 `compile_draft`의 결과가 그 선택을 보존하는 것이다. 과거 누락된 authoring을 재구성하거나 qualification을 수정하지 않는다. 이후 Collection Web 소비·실제 수집·새 admission과 Learning의 고정 평가 cohort 검증은 별도 다음 소비다. 추가 예제의 학습 이득은 비교 가능한 downstream 측정 전까지 미결이다.
+
 ## 유지하는 조건 분포 비교
+
+별도 task의 성공 시연은 기존 task의 추가 TRAIN으로 자동 합치지 않는다. pick-place처럼 운반·놓기까지 포함하는 task는 현재 합격한 원본을 별도 명시적 요청으로 준비하고, instruction별 native 분할에서 각 방향의 TRAIN 노출과 위치 변화를 확인한다. 중앙 위치만 남기는 대안보다 검토된 방향·위치 변화를 보존하는 선택을 먼저 소비하되, 작은 cohort의 준비 성공을 충분한 학습량이나 pickup 대비 효용으로 해석하지 않는다. 기존 pickup 평가 identity와 요청은 유지한다.
+
+[SmolVLA 원 논문](https://arxiv.org/html/2506.01844v1)은 위치별 반복 시연과 grasp/place를 구분한 task 평가의 근거다. 그 데이터 수량을 FR5의 최소량으로 복사하지 않는다. [Data Scaling Laws v4](https://arxiv.org/abs/2410.18647v4)의 다양성 관측은 다음 취득의 질문을 뒷받침하지만, 해당 연구는 단일 task의 환경·물체 일반화를 다루므로 새 task의 우월성이나 전이를 증명하지 않는다. 다음 수집 제안은 현재 TRAIN에서 부족한 방향·위치 노출을 명시하고, Collection이 유효한 계획과 실행을 소유한다. 학습 이득은 Learning/Rollout의 비교 가능한 task 측정 전까지 미결이다.
 
 **학습량과 평가 대상을 통제한 조건 분포 비교를 실제 native 요청으로 만든다.**
 
