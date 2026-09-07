@@ -292,6 +292,49 @@ class DerivedTrainingTest(unittest.TestCase):
         self.assertNotIn('lineage_digest', view)
         self.assertNotIn('parent_dataset_identity', view)
         self.assertEqual(view['fitting_dataset_identity'], reference['parent_dataset_identity'])
+        # A synthetic checkpoint envelope exercises the real saved consumer and
+        # installed CPU processors; empty model/state placeholders prove no fit.
+        from tools.validate_training_checkpoint import validate_checkpoint, REQUIRED_TRAINING_STATE
+        from lerobot.configs import FeatureType, PolicyFeature
+        from lerobot.policies.act.configuration_act import ACTConfig
+        from lerobot.policies.factory import make_pre_post_processors
+        saved_output = root / 'not-launched'
+        policy = saved_output / 'checkpoints/000002/pretrained_model'
+        state = policy.parent / 'training_state'
+        policy.mkdir(parents=True)
+        state.mkdir()
+        policy_cfg = {}
+        for option, value in training.options(split['feature_contract']['policy_argv']).items():
+            if option.startswith('--policy.'):
+                try:
+                    value = json.loads(value)
+                except json.JSONDecodeError:
+                    pass
+                policy_cfg[option.removeprefix('--policy.')] = value
+        write_json(policy / 'config.json', policy_cfg)
+        write_json(policy / 'train_config.json', {'dataset': {'root': str(child),
+            'repo_id': request['repo_id'], 'episodes': selected, 'eval_split': .5}, 'policy': policy_cfg})
+        (policy / 'model.safetensors').touch()
+        for name in REQUIRED_TRAINING_STATE:
+            (state / name).write_text('{"step": 2}' if name == 'training_step.json' else '')
+        write_json(saved_output / 'fr5_training_split.json', split)
+        write_json(saved_output / 'fr5_training_receipt.json', receipt)
+        processor_config = ACTConfig(device='cpu', input_features={
+            'observation.state': PolicyFeature(type=FeatureType.STATE, shape=(7,))},
+            output_features={'action': PolicyFeature(type=FeatureType.ACTION, shape=(7,))})
+        pre, post = make_pre_post_processors(processor_config, dataset_stats=receipt['normalization']['stats'])
+        pre.save_pretrained(policy)
+        post.save_pretrained(policy)
+        self.assertEqual(validate_checkpoint(policy), (policy, saved_output))
+        changed_receipt = copy.deepcopy(receipt)
+        changed_receipt['observation_view']['application_publications'][0]['lineage_digest'] = 'sha256:' + 'f' * 64
+        from tools.data_factory.training_receipts import launch_receipt_digest
+        changed_receipt['receipt_digest'] = launch_receipt_digest(changed_receipt)
+        write_json(saved_output / 'fr5_training_receipt.json', changed_receipt)
+        with self.assertRaisesRegex(ValueError, 'provenance changed'):
+            validate_checkpoint(policy)
+        write_json(saved_output / 'fr5_training_receipt.json', receipt)
+
         # Actual alternate mapped admission: destination zero still exists from B,
         # but cannot stand in for A's fitted original zero.
         for scenario in ('absent', 'heldout'):
