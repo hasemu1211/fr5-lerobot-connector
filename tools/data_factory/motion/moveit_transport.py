@@ -20,6 +20,43 @@ ACTION_TYPES = {
 }
 
 
+def validate_controller_sample(controller):
+    """Validate retained JTC diagnostics, not goal identity or hardware freshness."""
+    if not isinstance(controller, dict):
+        raise ContractError("ROS_CONTROLLER_SAMPLE")
+    if "sample" not in controller:  # Older/native-independent snapshots lack it.
+        return
+    sample = controller["sample"]
+    fields = {"joint_names", "ros_stamp_ns", "reference_elapsed_ns", "feedback_elapsed_ns",
+              "reference_positions", "feedback_positions", "reported_output_positions"}
+    if not isinstance(sample, dict) or set(sample) != fields:
+        raise ContractError("ROS_CONTROLLER_SAMPLE")
+    names = sample["joint_names"]
+    if (not isinstance(names, list) or not names or any(not isinstance(n, str) or not n for n in names)
+            or len(names) != len(set(names))):
+        raise ContractError("ROS_CONTROLLER_SAMPLE")
+    limit = 2**31 * 10**9
+    for key in ("ros_stamp_ns", "reference_elapsed_ns", "feedback_elapsed_ns"):
+        value = sample[key]
+        if type(value) is not int or not (-limit if key != "ros_stamp_ns" else 0) <= value < limit:
+            raise ContractError("ROS_CONTROLLER_SAMPLE")
+    for key in ("reference_positions", "feedback_positions", "reported_output_positions"):
+        values = sample[key]
+        if (not isinstance(values, list)
+                or len(values) not in ({0, len(names)} if key == "reported_output_positions" else {len(names)})):
+            raise ContractError("ROS_CONTROLLER_SAMPLE")
+        try:
+            if any(isinstance(v, bool) or not isinstance(v, (int, float)) or not math.isfinite(v) for v in values):
+                raise ContractError("ROS_CONTROLLER_SAMPLE")
+        except OverflowError as exc:
+            raise ContractError("ROS_CONTROLLER_SAMPLE") from exc
+    if "reference_position_m" in controller:
+        if (names != ["finger_right_joint"]
+                or sample["reference_positions"] != [controller["reference_position_m"]]
+                or sample["feedback_positions"] != [controller.get("feedback_position_m")]):
+            raise ContractError("ROS_CONTROLLER_SAMPLE_BINDING")
+
+
 @dataclass(slots=True)
 class _ActivePhase:
     phase: str
@@ -738,7 +775,7 @@ class RosMoveItTransport:
         controller_type = "control_msgs/msg/JointTrajectoryControllerState"
         arm_type = topics.get("/fairino5_controller/controller_state", [])
         gripper_type = topics.get("/gripper_controller/controller_state", [])
-        self._controller_values(self._arm_controller_state, "ROS_ARM_CONTROLLER_STATE")
+        arm_values = self._controller_values(self._arm_controller_state, "ROS_ARM_CONTROLLER_STATE")
         gripper_values = self._controller_values(
             self._gripper_controller_state, "ROS_GRIPPER_CONTROLLER_STATE"
         )
@@ -762,6 +799,7 @@ class RosMoveItTransport:
                 "ready": arm_type == [controller_type] and arm_publishers > 0,
                 "age_s": arm_age,
                 "speed_scaling": float(arm_speed),
+                "sample": arm_values["sample"],
             },
             "gripper_controller": {
                 "endpoint": "/gripper_controller/controller_state",
@@ -772,9 +810,12 @@ class RosMoveItTransport:
                 "speed_scaling": float(gripper_speed),
                 "reference_position_m": gripper_values["reference"]["finger_right_joint"],
                 "feedback_position_m": gripper_values["feedback"]["finger_right_joint"],
+                "sample": gripper_values["sample"],
                 **({"hardware_execution": hardware} if hardware is not None else {}),
             },
         }
+        for key in ("arm_controller", "gripper_controller"):
+            validate_controller_sample(observation[key])
         self._initial_snapshot_complete = True
         return observation
 
@@ -897,6 +938,28 @@ class RosMoveItTransport:
             ):
                 raise ContractError(code)
             result[label] = {name: float(value) for name, value in zip(names, positions)}
+        def nanoseconds(stamp, *, signed=False):
+            if (type(stamp.sec) is not int or type(stamp.nanosec) is not int
+                    or not (-2**31 if signed else 0) <= stamp.sec < 2**31
+                    or not 0 <= stamp.nanosec < 10**9):
+                raise ContractError("ROS_CONTROLLER_SAMPLE")
+            return stamp.sec * 10**9 + stamp.nanosec
+        try:
+            # ROS time is retained in its own domain, never relabeled SYSTEM_TIME.
+            # JTC may retain an old output when reading command interfaces fails;
+            # this is reported output, not a fresh hardware acknowledgement.
+            result["sample"] = {
+                "joint_names": names,
+                "ros_stamp_ns": nanoseconds(message.header.stamp),
+                "reference_elapsed_ns": nanoseconds(message.reference.time_from_start, signed=True),
+                "feedback_elapsed_ns": nanoseconds(message.feedback.time_from_start, signed=True),
+                "reference_positions": list(message.reference.positions),
+                "feedback_positions": list(message.feedback.positions),
+                "reported_output_positions": list(message.output.positions),
+            }
+            validate_controller_sample({"sample": result["sample"]})
+        except (AttributeError, TypeError, ValueError) as exc:
+            raise ContractError("ROS_CONTROLLER_SAMPLE") from exc
         return result
 
     def preflight(self):

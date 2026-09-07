@@ -176,6 +176,8 @@ def check_segment_observation(segment, evidence, now, *, terminal=False, steady_
         for key in ("arm_controller", "gripper_controller"):
             if _number(observed[key]["speed_scaling"], "LEARNED_STATE_SCHEMA") <= 0:
                 raise ContractError("LEARNED_CONTROLLER_PAUSED")
+            from tools.data_factory.motion.moveit_transport import validate_controller_sample
+            validate_controller_sample(observed[key])
         gripper = observed["gripper_controller"]
         state = list(_action([*observed["joint_positions"], gripper["feedback_position_m"]]))
         limits = _limits(segment["learned_proposal"]["robot_description"])

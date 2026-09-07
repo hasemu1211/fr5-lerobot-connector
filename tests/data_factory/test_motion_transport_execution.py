@@ -320,12 +320,21 @@ class TestExecutionTransport(unittest.TestCase):
             transport.start_phase(gripper)
         self.assertEqual(caught.exception.code, "ROS_EXEC_ACTIVE")
 
-        point = SimpleNamespace(positions=[0.])
-        gripper_point = SimpleNamespace(positions=[0.01])
+        from builtin_interfaces.msg import Duration
+        from control_msgs.msg import JointTrajectoryControllerState
+        arm_state = JointTrajectoryControllerState(joint_names=["j1"], speed_scaling_factor=.5)
+        gripper_state = JointTrajectoryControllerState(joint_names=["finger_right_joint"], speed_scaling_factor=1.)
+        for message, position in ((arm_state, 0.), (gripper_state, .01)):
+            message.header.stamp.sec = 10
+            message.reference.positions = [position]
+            message.feedback.positions = [position]
+            message.reference.time_from_start = Duration(sec=-1, nanosec=800000000)
+            message.feedback.time_from_start = Duration(sec=-1, nanosec=900000000)
+        arm_state.output.positions = [-.05]
         def populate(*_, **__):
             node.callbacks["/joint_states"](SimpleNamespace(name=["finger", "j6", "j5", "j4", "j3", "j2", "j1"], position=[0., 6., 5., 4., 3., 2., 1.]))
-            node.callbacks["/fairino5_controller/controller_state"](SimpleNamespace(joint_names=["j1"], reference=point, feedback=point, speed_scaling_factor=0.5))
-            node.callbacks["/gripper_controller/controller_state"](SimpleNamespace(joint_names=["finger_right_joint"], reference=gripper_point, feedback=gripper_point, speed_scaling_factor=1.0))
+            node.callbacks["/fairino5_controller/controller_state"](deserialize_message(serialize_message(arm_state), JointTrajectoryControllerState))
+            node.callbacks["/gripper_controller/controller_state"](deserialize_message(serialize_message(gripper_state), JointTrajectoryControllerState))
             node.callbacks["/robot_description"](SimpleNamespace(data="<robot><ros2_control><hardware><plugin>fairino_hardware/FairinoHardwareInterface</plugin><param name='gripper_velocity'>20</param><param name='gripper_force'>50</param><param name='gripper_settle_time_ms'>500</param></hardware><joint name='finger_right_joint'/></ros2_control></robot>"))
         transport._rclpy = SimpleNamespace(spin_until_future_complete=lambda *args, **kwargs: None, spin_once=populate)
         snapshot = transport.snapshot(1.0)
@@ -333,6 +342,23 @@ class TestExecutionTransport(unittest.TestCase):
         self.assertEqual((snapshot["arm_controller"]["ready"], snapshot["arm_controller"]["speed_scaling"]), (True, 0.5))
         self.assertEqual((snapshot["gripper_controller"]["reference_position_m"], snapshot["gripper_controller"]["feedback_position_m"]), (0.01, 0.01))
         self.assertEqual(snapshot["gripper_settings"]["velocity_percent"], 20)
+        retained = snapshot["arm_controller"]["sample"]
+        self.assertEqual((retained["ros_stamp_ns"], retained["reference_elapsed_ns"], retained["feedback_elapsed_ns"]),
+                         (10_000_000_000, -200_000_000, -100_000_000))
+        self.assertEqual((retained["reference_positions"], retained["reported_output_positions"]), ([0.], [-.05]))
+        self.assertEqual(snapshot["gripper_controller"]["sample"]["reported_output_positions"], [])
+        # A later publication may retain an old command output in native JTC.
+        # Capture its literal report; never fill an empty output from reference.
+        arm_state.header.stamp.nanosec = 1
+        populate()
+        self.assertEqual(transport.snapshot(1.)["arm_controller"]["sample"]["reported_output_positions"], [-.05])
+        self.assertEqual(retained["ros_stamp_ns"], 10_000_000_000)
+        arm_state.header.stamp.nanosec = 1_000_000_000
+        populate()
+        with self.assertRaisesRegex(ContractError, "ROS_CONTROLLER_SAMPLE"):
+            transport.snapshot(1.)
+        arm_state.header.stamp.nanosec = 0
+        populate()
 
         # Actual constructor subscription, callback and snapshot consume the wire.
         from control_msgs.msg import DynamicJointState, InterfaceValue

@@ -382,3 +382,16 @@ The runnable acceptance is
 It links the installed sampler without ROS initialization. Its clock scheduling,
 initial state and completion assumptions are synthetic; no command-stream result
 establishes physical velocity, executed holds or learned task success.
+
+The existing native snapshot now retains each JTC's ROS publication stamp,
+reference and feedback elapsed times, and reference/feedback/reported-output
+positions in the existing learned trace. The
+[4.40.1 publisher](https://github.com/ros-controls/ros2_controllers/blob/4.40.1/joint_trajectory_controller/src/joint_trajectory_controller.cpp#L1346)
+preserves distinct virtual/reference and wall/feedback offsets; it can retain old
+output when command-interface reading fails. Raw signed nanoseconds therefore
+remain in the ROS clock domain, and empty or old reported output is not replaced
+with reference positions. These records support the next controller-start
+investigation but do not identify a goal, prove timely first sampling, map clocks
+or acknowledge hardware consumption. Existing authority and completion checks
+remain the only admission path; older traces without these diagnostics remain
+readable without acquiring the missing evidence.

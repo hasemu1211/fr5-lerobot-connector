@@ -489,6 +489,10 @@ class PickupExecutor:
             raise ContractError("GRIPPER_SETTINGS_MISMATCH")
         for controller in ("arm_controller", "gripper_controller"):
             fields = {"endpoint", "type", "publisher_count", "ready", "age_s", "speed_scaling"}
+            if "sample" in observed[controller]:
+                from tools.data_factory.motion.moveit_transport import validate_controller_sample
+                fields.add("sample")
+                validate_controller_sample(observed[controller])
             if controller == "gripper_controller":
                 fields |= {"reference_position_m", "feedback_position_m"}
                 if "hardware_execution" in observed[controller]:

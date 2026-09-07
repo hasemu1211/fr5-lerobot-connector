@@ -133,7 +133,7 @@ class Recorder:
 
 
 class FinitePlanTest(unittest.TestCase):
-    def make_held_job(self, initial_feedback=.021):
+    def make_held_job(self, initial_feedback=.021, *, controller_samples=False):
         # Reuse this file's lifecycle fixtures with the actual ROS serializers,
         # action dispatch, polling and cancellation; no ROS node is constructed.
         from builtin_interfaces.msg import Duration
@@ -195,6 +195,21 @@ class FinitePlanTest(unittest.TestCase):
             value["gripper_controller"]["reference_position_m"] = state["reference"]
             value["joint_state_age_s"] = state["age"]
             value["gripper_controller"]["hardware_execution"] = hardware()
+            if controller_samples:
+                from control_msgs.msg import JointTrajectoryControllerState
+                for key, names, reference, feedback, output in (
+                        ("arm_controller", JOINTS[:6], state["joints"], state["joints"], []),
+                        ("gripper_controller", JOINTS[-1:], [state["reference"]], [state["feedback"]], [.021])):
+                    message = JointTrajectoryControllerState(joint_names=names)
+                    message.header.stamp.sec, message.header.stamp.nanosec = divmod(round(now[0] * 1e9), 10**9)
+                    message.reference.positions = reference
+                    message.feedback.positions = feedback
+                    message.output.positions = output  # Explicitly old/unavailable reported output.
+                    message.reference.time_from_start = Duration(sec=-1, nanosec=800000000)
+                    message.feedback.time_from_start = Duration(sec=-1, nanosec=900000000)
+                    native = deserialize_message(serialize_message(message), JointTrajectoryControllerState)
+                    value[key]["sample"] = t._controller_values(native, "ROS_CONTROLLER_STATE")["sample"]
+                    value[key]["sample"].update(state.get("sample_override", {}).get(key, {}))
             return value
         t.snapshot = observe
         sent, handles = [], []
@@ -246,7 +261,7 @@ class FinitePlanTest(unittest.TestCase):
         return job, executor, t, state, now, sent, handles, calls
 
     def test_held_reference_replay_uses_one_gripper_goal_then_fresh_arm_start(self):
-        job, executor, transport, state, now, sent, _, calls = self.make_held_job(initial_feedback=.02079)
+        job, executor, transport, state, now, sent, _, calls = self.make_held_job(initial_feedback=.02079, controller_samples=True)
         frozen = copy.deepcopy(executor.runs["run"]["plan"])
         from tools.data_factory.quality.phase_events import validate_phase_event, validate_phase_event_sequence
         events = []
@@ -294,12 +309,27 @@ class FinitePlanTest(unittest.TestCase):
         self.assertEqual(diagnostic["execution_trace"]["status"], "COMPLETED")
         self.assertEqual(len(diagnostic["execution_trace"]["segments"]), 3)
         self.assertEqual(diagnostic["task_effectiveness"], "UNKNOWN")
+        retained = diagnostic["execution_trace"]["segments"][1]["terminal_observation"]["snapshot"]
+        sample = retained["gripper_controller"]["sample"]
+        self.assertEqual((sample["reference_elapsed_ns"], sample["feedback_elapsed_ns"]), (-200000000, -100000000))
+        self.assertEqual(sample["reference_positions"], [.01176])
+        self.assertEqual(sample["feedback_positions"], [.01218])
+        self.assertEqual(sample["reported_output_positions"], [.021])
+        self.assertEqual(retained["arm_controller"]["sample"]["reported_output_positions"], [])
+        self.assertEqual(sample["ros_stamp_ns"], round(diagnostic["execution_trace"]["segments"][1]["terminal_observation"]["captured_at_s"] * 1e9))
         self.assertNotIn(("recorder", "commit"), calls)
         self.assertEqual(validate_phase_event_sequence(events, plan=frozen), events)
         for event_type in ("GOAL_ACCEPTED", "ACTION_TERMINAL"):
             self.assertEqual([(e["segment_index"], e["segment_count"]) for e in events if e["event"] == event_type],
                              [(0, 3), (1, 3), (2, 3)])
         from tools.data_factory.rollout.finite_plan import validate_execution_trace
+        for override, code in (({"reference_elapsed_ns": True}, "ROS_CONTROLLER_SAMPLE"),
+                               ({"reference_positions": [.012]}, "ROS_CONTROLLER_SAMPLE_BINDING")):
+            trace = copy.deepcopy(diagnostic["execution_trace"])
+            trace["segments"][1]["terminal_observation"]["snapshot"]["gripper_controller"]["sample"].update(override)
+            trace["trace_digest"] = canonical_digest({k: v for k, v in trace.items() if k != "trace_digest"})
+            with self.assertRaisesRegex(ContractError, code):
+                validate_execution_trace(frozen, trace)
         for controller in ("arm_controller", "gripper_controller"):
             trace = copy.deepcopy(diagnostic["execution_trace"])
             trace["segments"][1]["terminal_observation"]["snapshot"][controller]["speed_scaling"] = 0.
@@ -319,6 +349,21 @@ class FinitePlanTest(unittest.TestCase):
         trace["trace_digest"] = canonical_digest({k: v for k, v in trace.items() if k != "trace_digest"})
         with self.assertRaisesRegex(ContractError, "LEARNED_TRACE_TERMINAL"):
             validate_execution_trace(frozen, trace)
+
+    def test_invalid_controller_sample_fences_before_first_goal(self):
+        for override in ({"ros_stamp_ns": -1}, {"reference_elapsed_ns": True},
+                         {"reported_output_positions": [float("nan")]}, {"joint_names": []}):
+            with self.subTest(override=override):
+                job, _, _, state, now, sent, _, calls = self.make_held_job(controller_samples=True)
+                job.approve(APPROVAL)
+                job.start()
+                job.poll()
+                state["sample_override"] = {"gripper_controller": override}
+                with mock.patch('tools.data_factory.motion.moveit_transport.time.time', side_effect=lambda: now[0]):
+                    result = job.confirm("operator")
+                self.assertEqual(result["code"], "ROS_CONTROLLER_SAMPLE")
+                self.assertEqual(sent, [])
+                self.assertNotIn(("recorder", "commit"), calls)
 
     def test_native_hardware_fences_before_first_goal(self):
         cases = [({"incarnation_0": 9.}, "LEARNED_HARDWARE_INCARNATION"),

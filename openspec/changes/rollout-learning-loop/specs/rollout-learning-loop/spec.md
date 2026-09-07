@@ -403,3 +403,27 @@ consumer, not authorization to modify controller configuration or live commands.
   references and the explicitly planned staged-release targets and holds
 - **AND** sampler-level compatibility does not prove native stage completion,
   synchronized physical sampling or task effect
+
+### Requirement: Controller sampling diagnostics retain source meaning
+
+The native snapshot and existing learned execution trace SHALL retain available
+JTC diagnostics in each controller's `sample`: `joint_names`, `ros_stamp_ns`,
+`reference_elapsed_ns`, `feedback_elapsed_ns`, `reference_positions`,
+`feedback_positions` and `reported_output_positions`. Signed elapsed nanoseconds
+SHALL preserve pre-start values; ROS publication time SHALL NOT be relabeled as
+SYSTEM time. Empty reported output SHALL remain empty, and a reported value SHALL
+NOT be promoted to a fresh command-interface read or hardware acknowledgement.
+Malformed records or disagreement with the same snapshot's gripper
+reference/feedback SHALL reject. Older snapshots and traces MAY omit diagnostics;
+absence supplies no controller-start evidence.
+
+#### Scenario: A fresh publication contains old reported output
+
+- **WHEN** the JTC publication retains an earlier output while reference or
+  publication time changes
+- **THEN** the native snapshot and canonical learned trace preserve that report
+  separately from reference and feedback
+- **AND** matching clock fields or a reported output do not establish goal
+  identity, timely first sampling, source-clock mapping or hardware completion
+- **AND** existing freshness, same-command completion and cancellation checks
+  remain in force without a new execution mode or controller owner
