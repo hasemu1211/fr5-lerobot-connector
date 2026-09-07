@@ -667,6 +667,203 @@ class TrainingLaunchConnectionTest(unittest.TestCase):
                     ), 0)
                 native_runner.assert_called_once_with(argv, split, receipt)
 
+    def test_delegated_request_launch_recovers_same_input_without_rerun(self):
+        from tools.data_factory.training_entrypoint import run_delegated_request
+
+        with TemporaryDirectory(prefix="SYNTHETIC_TEST_ONLY-") as directory:
+            root = Path(directory)
+            kwargs, request, _ = launch_fixture(root)
+            authority_root = root / "delegated"
+            authority_root.mkdir()
+            approval_output = authority_root / "batch"
+            approval_output.mkdir()
+            delegation = {
+                "schema_version": approval.DELEGATION_SCHEMA,
+                "delegation_id": "synthetic-launch-r1",
+                "scope": approval.PRODUCTION_SCOPE,
+                "delegated_by": "workspace-user",
+                "authorized_actor": "local-training-owner",
+                "authorization_source_ref": "synthetic-test-only",
+                "dataset": {"repo_id": request["repo_id"], "dataset_root": request["dataset_root"]},
+                "output_root": str(authority_root),
+                "profiles": ["smolvla"],
+                "limits": {"max_steps": 2, "max_batch_size": 2, "max_checkpoints": 2},
+                "authority": copy.deepcopy(approval.DELEGATION_AUTHORITY),
+            }
+            delegation_path = root / "delegation.json"
+            write_json(delegation_path, delegation)
+            output = authority_root / "run"
+            calls = []
+            retry_errors = []
+            retry_call = None
+
+            def runner(_argv, check):
+                self.assertFalse(check)
+                calls.append(True)
+                output.mkdir(parents=True)
+                (output / "checkpoints/000001/pretrained_model").mkdir(parents=True)
+                if retry_call is not None:
+                    try:
+                        from concurrent.futures import ThreadPoolExecutor
+                        with ThreadPoolExecutor(max_workers=1) as pool:
+                            pool.submit(retry_call).result(timeout=15)
+                    except ContractError as error:
+                        retry_errors.append(str(error))
+                self.assertEqual(validated, [])
+                self.assertEqual(evaluated, [])
+                return SimpleNamespace(returncode=0)
+
+            validated, evaluated = [], []
+            def validator(checkpoint):
+                validated.append(checkpoint)
+                return checkpoint, output
+            def evaluator(checkpoint, dataset, repo_id, inventory_path, output_dir):
+                evaluated.append((checkpoint, dataset, repo_id, inventory_path, output_dir))
+                return {"evaluation_complete": True, "evidence_scope": "synthetic_injected_native_consumer"}
+
+            retry_call = lambda: run_delegated_request(
+                request, approval_output=approval_output,
+                authorized_actor="local-training-owner", delegation_path=delegation_path,
+                profile="smolvla", collection_profile=kwargs["collection_profile"],
+                output=output, steps=2, batch_size=2, eval_split=0.34, eval_steps=1,
+                save_freq=1, runner=runner, checkpoint_validator=validator, evaluator=evaluator,
+            )
+
+            # Interrupt the real publisher after its first exclusive write.
+            original_write = approval._write_exclusive
+            def interrupted_write(path, value, code):
+                original_write(path, value, code)
+                raise OSError("injected publication interruption")
+            with mock.patch.object(approval, "_write_exclusive", side_effect=interrupted_write):
+                with self.assertRaisesRegex(OSError, "injected publication"):
+                    retry_call()
+            partial = snapshot(approval_output)
+            self.assertFalse((approval_output / "training_approved.json").exists())
+            with self.assertRaisesRegex(ContractError, "TRAINING_AUTHORIZATION_RECOVERY_INCOMPLETE"):
+                retry_call()
+            self.assertEqual(snapshot(approval_output), partial)
+            self.assertEqual(calls, [])
+            approval_output = authority_root / "complete-batch"
+            approval_output.mkdir()
+
+            first = run_delegated_request(
+                request, approval_output=approval_output,
+                authorized_actor="local-training-owner", delegation_path=delegation_path,
+                profile="smolvla", collection_profile=kwargs["collection_profile"],
+                output=output, steps=2, batch_size=2, eval_split=0.34, eval_steps=1,
+                save_freq=1, runner=runner, checkpoint_validator=validator, evaluator=evaluator,
+            )
+            second = run_delegated_request(
+                request, approval_output=approval_output,
+                authorized_actor="local-training-owner", delegation_path=delegation_path,
+                profile="smolvla", collection_profile=kwargs["collection_profile"],
+                output=output, steps=2, batch_size=2, eval_split=0.34, eval_steps=1,
+                save_freq=1, runner=runner, checkpoint_validator=validator, evaluator=evaluator,
+            )
+            self.assertEqual(first["status"], "EVALUATED_CHECKPOINT")
+            self.assertEqual(first["returncode"], 0)
+            self.assertEqual(second["status"], "EVALUATED_EXISTING_OUTPUT")
+            self.assertEqual(calls, [True])
+            self.assertEqual(len(retry_errors), 1)
+            self.assertIn("TRAINING_OUTPUT_PENDING", retry_errors[0])
+            self.assertEqual(first["evaluation"]["evidence_scope"], "synthetic_injected_native_consumer")
+            self.assertEqual(len(validated), 2)
+            self.assertEqual(len(evaluated), 2)
+            pending = Path(str(output) + ".fr5_training_split.json.pending")
+            pending.write_text("active")
+            with self.assertRaisesRegex(ContractError, "TRAINING_OUTPUT_PENDING"):
+                run_delegated_request(
+                    request, approval_output=approval_output,
+                    authorized_actor="local-training-owner", delegation_path=delegation_path,
+                    profile="smolvla", collection_profile=kwargs["collection_profile"],
+                    output=output, steps=2, batch_size=2, eval_split=0.34, eval_steps=1,
+                    save_freq=1, runner=runner, checkpoint_validator=validator, evaluator=evaluator,
+                )
+            pending.unlink()
+            saved_receipt = json.loads((output / "fr5_training_receipt.json").read_text())
+            saved_receipt["normalized_argv"] = ["different-input"]
+            write_json(output / "fr5_training_receipt.json", saved_receipt)
+            with self.assertRaisesRegex(ContractError, "TRAINING_OUTPUT_RECOVERY_MISMATCH"):
+                run_delegated_request(
+                    request, approval_output=approval_output,
+                    authorized_actor="local-training-owner", delegation_path=delegation_path,
+                    profile="smolvla", collection_profile=kwargs["collection_profile"],
+                    output=output, steps=2, batch_size=2, eval_split=0.34, eval_steps=1,
+                    save_freq=1, runner=runner, checkpoint_validator=validator, evaluator=evaluator,
+                )
+            self.assertEqual(calls, [True])
+
+            # Failure before output creation retains receipts and cannot rerun.
+            failed_output = authority_root / "failed"
+            failure_runner = mock.Mock(return_value=SimpleNamespace(returncode=7))
+            failure_kwargs = dict(
+                approval_output=approval_output, authorized_actor="local-training-owner",
+                delegation_path=delegation_path, profile="smolvla",
+                collection_profile=kwargs["collection_profile"], output=failed_output,
+                steps=2, batch_size=2, eval_split=0.34, eval_steps=1, save_freq=1,
+                runner=failure_runner, checkpoint_validator=validator, evaluator=evaluator,
+            )
+            failed = run_delegated_request(request, **failure_kwargs)
+            self.assertEqual(failed["status"], "TRAINING_FAILED")
+            self.assertEqual(failed["returncode"], 7)
+            with self.assertRaisesRegex(ContractError, "TRAINING_OUTPUT_PENDING"):
+                run_delegated_request(request, **failure_kwargs)
+            failure_runner.assert_called_once()
+
+            # A crash between the two final manifest renames is not settled.
+            interrupted_output = authority_root / "interrupted"
+            def interrupted_runner(argv, check):
+                (interrupted_output / "checkpoints/000001/pretrained_model").mkdir(parents=True)
+                return SimpleNamespace(returncode=0)
+            recovery_kwargs = {**failure_kwargs, "output": interrupted_output,
+                               "runner": mock.Mock(side_effect=interrupted_runner)}
+            original_rename = Path.rename
+            def interrupted_rename(path, target):
+                original_rename(path, target)
+                raise OSError("injected final publication interruption")
+            with mock.patch.object(Path, "rename", interrupted_rename):
+                with self.assertRaisesRegex(OSError, "injected final publication"):
+                    run_delegated_request(request, **recovery_kwargs)
+            before = snapshot(authority_root)
+            with self.assertRaisesRegex(ContractError, "TRAINING_OUTPUT_PENDING"):
+                run_delegated_request(request, **recovery_kwargs)
+            recovery_kwargs["runner"].assert_called_once()
+            self.assertEqual(snapshot(authority_root), before)
+
+    def test_unsupported_act_native_evaluation_rejected_before_authority(self):
+        from tools.data_factory.training_entrypoint import run_delegated_request
+
+        with TemporaryDirectory(prefix="SYNTHETIC_TEST_ONLY-") as directory:
+            root = Path(directory)
+            _, request, _ = launch_fixture(root)
+            before = snapshot(root)
+            with self.assertRaisesRegex(ContractError, "TRAINING_EVALUATOR_UNSUPPORTED"):
+                run_delegated_request(
+                    request, approval_output=root / "authority", authorized_actor="actor",
+                    delegation_path=root / "missing-delegation.json", profile="act",
+                    collection_profile="fixture", output=root / "run", steps=2,
+                    batch_size=1, eval_split=0.34, eval_steps=1, save_freq=1,
+                )
+            self.assertEqual(snapshot(root), before)
+
+    def test_cli_failed_or_checkpointless_run_returns_nonzero(self):
+        import sys
+        from tools.data_factory import training_entrypoint
+
+        for status in ("TRAINING_FAILED", "TRAINING_RETURNED_NO_CHECKPOINT", "EXISTING_OUTPUT"):
+            with mock.patch.object(training_entrypoint, "run_delegated_request",
+                                   return_value={"status": status}):
+                argv = ["training_entrypoint.py", "run-delegated", "--request", "r",
+                        "--approval-output", "a", "--delegation", "d", "--authorized-actor", "x",
+                        "--profile", "smolvla", "--collection-profile", "c", "--output", "o",
+                        "--steps", "1", "--batch-size", "1", "--eval-split", "0.2",
+                        "--eval-steps", "1", "--save-freq", "1"]
+                with mock.patch.object(sys, "argv", argv), mock.patch.object(
+                        training_entrypoint, "load_json_strict", return_value={}):
+                    with self.assertRaises(SystemExit) as raised:
+                        training_entrypoint.main()
+                self.assertEqual(raised.exception.code, 1)
+
     def test_public_shell_dry_run_and_validator_reject_legacy_marker(self):
         project = Path(__file__).resolve().parents[1]
         with TemporaryDirectory(prefix="SYNTHETIC_TEST_ONLY-") as directory:

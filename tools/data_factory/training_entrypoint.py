@@ -29,7 +29,7 @@ from tools.data_factory import training_approval as approval
 from tools.data_factory.training_receipts import compile_launch_receipt, launch_receipt_digest
 from tools.data_factory.training_split import compile_launch_split
 from tools.fr5_data_factory import ContractError, TASK_CONTRACTS, canonical_digest, load_json_strict
-from tools.fr5_training_profile import instruction_task, launch_feature_contract, read_metadata
+from tools.fr5_training_profile import build_profile, instruction_task, launch_feature_contract, policy_metadata, read_metadata
 
 
 def options(argv: list[str]) -> dict[str, str]:
@@ -288,8 +288,193 @@ def launch(*, dataset: Path, repo_id: str, inventory: Path, profile: str,
                 if target.exists() or target.is_symlink():
                     raise ContractError("TRAINING_OUTPUT_EXISTS", str(target))
                 path.rename(target)
-            else:
-                path.unlink()
+            # If the trainer never created its directory, retain the pending
+            # receipt as interruption evidence; a retry must not start again.
+
+
+def _latest_checkpoint(output: Path) -> Path | None:
+    candidates = sorted(output.glob("checkpoints/*/pretrained_model"))
+    return candidates[-1] if candidates else None
+
+
+def _native_checkpoint_evaluation(*, checkpoint: Path, dataset: Path, repo_id: str,
+                                  inventory: Path, output: Path, split: dict) -> dict:
+    """Use the existing validator and offline evaluator as one read-only consumer."""
+    from tools.validate_training_checkpoint import validate_checkpoint
+    policy, _ = validate_checkpoint(checkpoint)
+    from tools.evaluate_smolvla_offline import admit_evaluation, evaluate
+    args = argparse.Namespace(
+        checkpoint=str(policy), dataset=dataset, repo_id=repo_id,
+        approved_inventory=inventory, episodes=",".join(map(str, split["eval_episodes"])),
+        batch_size=1, num_workers=0, max_batches=0, device="auto", use_amp=False,
+        seed=1000, metric="flow-loss", output=None,
+    )
+    admission = admit_evaluation(args)
+    report = evaluate(args, admission)
+    return {"checkpoint": str(policy), "evaluation": report}
+
+
+def _request_argv(request: dict, *, dataset: Path, repo_id: str, profile: str,
+                  collection_profile: str, output: Path, steps: int, batch_size: int,
+                  eval_split: float, eval_steps: int, save_freq: int) -> list[str]:
+    """Build the managed native launch command from the immutable request."""
+    metadata = policy_metadata(read_metadata(dataset))
+    argv = ["lerobot-train", *build_profile(profile, metadata),
+            f"--dataset.root={dataset}", f"--dataset.repo_id={repo_id}",
+            f"--dataset.episodes={[entry['episode_index'] for entry in request['episodes']]}",
+            f"--dataset.eval_split={eval_split}", f"--output_dir={output}",
+            f"--batch_size={batch_size}", f"--steps={steps}",
+            f"--eval_steps={eval_steps}", f"--save_freq={save_freq}",
+            "--save_checkpoint=true", "--policy.push_to_hub=false",
+            "--save_checkpoint_to_hub=false", "--wandb.enable=false",
+            "--job.target=local", "--dataset.streaming=false", "--dataset.repo_type=dataset"]
+    # Keep task and collection binding in prepare_launch; this only builds recipe flags.
+    _ = collection_profile
+    return argv
+
+
+def launch_delegated_request(
+    request: dict, *, approval_output: Path, authorized_actor: str,
+    delegation_path: Path, profile: str, collection_profile: str,
+    argv: list[str] | None = None, runner=None, checkpoint_validator=None,
+    evaluator=None,
+) -> dict:
+    """Consume one Curator request through standing delegation and native launch.
+
+    Existing authority and training outputs are recovery evidence: they are
+    revalidated and reported without issuing or running a duplicate attempt.
+    An incomplete authority directory fails closed so an interrupted publish is
+    never mistaken for a usable inventory.
+    """
+    # The native offline evaluator currently consumes SmolVLA artifacts only.
+    # Reject an unsupported profile before authority recovery/publication or
+    # trainer construction, including dependency-injected calls.
+    if profile != "smolvla":
+        raise ContractError("TRAINING_EVALUATOR_UNSUPPORTED")
+    request = copy.deepcopy(request)
+    dataset = approval.current_dataset_identity(
+        request["dataset_root"], repo_id=request["repo_id"], dataset_id=request["dataset_id"],
+    )
+    approval_output = approval_output.resolve()
+    inventory_path = approval_output / "training_approved.json"
+    if inventory_path.is_file():
+        inventory = approval.validate_current_training_inventory(
+            inventory_path, dataset_root=dataset["dataset_root"],
+            repo_id=dataset["repo_id"],
+            selected_episodes=[episode["episode_index"] for episode in request["episodes"]],
+        )
+        current = approval.inventory_local_training_delegation(inventory)
+        if current is None:
+            raise ContractError("TRAINING_DELEGATION_REQUIRED")
+        delegation, _ = _delegation_reference(
+            delegation_path, actor=authorized_actor, dataset=dataset,
+        )
+        if current != delegation:
+            raise ContractError("TRAINING_INPUT_CHANGED")
+    else:
+        if not approval_output.is_dir() or any(approval_output.iterdir()):
+            raise ContractError("TRAINING_AUTHORIZATION_RECOVERY_INCOMPLETE")
+        inventory = delegate_training_batch(
+            request, approval_output, authorized_actor, delegation_path,
+        )
+
+    if argv is None:
+        raise ContractError("TRAINING_RECIPE_REQUIRED")
+    config = options(argv[1:])
+    output = Path(config["--output_dir"]).expanduser().resolve()
+    pending = [Path(str(output) + f".{name}.pending")
+               for name in ("fr5_training_split.json", "fr5_training_receipt.json")]
+    active_pending = [path for path in pending if path.exists() or path.is_symlink()]
+    if active_pending:
+        raise ContractError("TRAINING_OUTPUT_PENDING")
+    if output.exists() or output.is_symlink():
+        manifests = []
+        for name in ("fr5_training_split.json", "fr5_training_receipt.json"):
+            path = output / name
+            if not path.is_file():
+                raise ContractError("TRAINING_OUTPUT_RECOVERY_UNVERIFIED")
+            manifests.append(load_json_strict(path))
+        expected_split, expected_receipt = prepare_launch(
+            dataset=Path(dataset["dataset_root"]), repo_id=dataset["repo_id"],
+            inventory=inventory_path, profile=profile,
+            collection_profile=collection_profile, argv=argv,
+        )
+        if manifests != [expected_split, expected_receipt]:
+            raise ContractError("TRAINING_OUTPUT_RECOVERY_MISMATCH")
+        checkpoint = _latest_checkpoint(output)
+        if checkpoint is None:
+            return {
+            "status": "EXISTING_OUTPUT",
+            "training_started": False,
+            "inventory_path": str(inventory_path),
+            "training_output": str(output),
+            "next_consumer": "validate_checkpoint_then_offline_evaluate",
+            }
+        validator = checkpoint_validator or __import__("tools.validate_training_checkpoint", fromlist=["validate_checkpoint"]).validate_checkpoint
+        validator(checkpoint)
+        result = (evaluator or _native_checkpoint_evaluation)(
+            checkpoint=checkpoint, dataset=Path(dataset["dataset_root"]), repo_id=request["repo_id"],
+            inventory=inventory_path, output=output, split=load_json_strict(output / "fr5_training_split.json"),
+        ) if evaluator is None else evaluator(checkpoint, Path(dataset["dataset_root"]), request["repo_id"], inventory_path, output)
+        return {"status": "EVALUATED_EXISTING_OUTPUT", "training_started": False,
+                "inventory_path": str(inventory_path), "training_output": str(output),
+                "checkpoint": str(checkpoint), "evaluation": result,
+                "next_consumer": "offline_evaluation_report"}
+    returncode = launch(
+        dataset=Path(dataset["dataset_root"]), repo_id=dataset["repo_id"],
+        inventory=inventory_path, profile=profile,
+        collection_profile=collection_profile, argv=argv, runner=runner,
+    )
+    checkpoint = _latest_checkpoint(output)
+    if returncode != 0:
+        return {"status": "TRAINING_FAILED", "training_started": True, "returncode": returncode,
+                "inventory_path": str(inventory_path), "training_output": str(output),
+                "next_consumer": "inspect_trainer_failure"}
+    if checkpoint is None:
+        return {"status": "TRAINING_RETURNED_NO_CHECKPOINT", "training_started": True,
+                "returncode": returncode, "inventory_path": str(inventory_path),
+                "training_output": str(output), "next_consumer": "checkpoint_validation"}
+    validator = checkpoint_validator or __import__("tools.validate_training_checkpoint", fromlist=["validate_checkpoint"]).validate_checkpoint
+    validator(checkpoint)
+    result = (evaluator or _native_checkpoint_evaluation)(
+        checkpoint=checkpoint, dataset=Path(dataset["dataset_root"]), repo_id=request["repo_id"],
+        inventory=inventory_path, output=output, split=load_json_strict(output / "fr5_training_split.json"),
+    ) if evaluator is None else evaluator(checkpoint, Path(dataset["dataset_root"]), request["repo_id"], inventory_path, output)
+    return {
+        "status": "EVALUATED_CHECKPOINT",
+        "training_started": True,
+        "returncode": returncode,
+        "inventory_path": str(inventory_path),
+        "training_output": str(output),
+        "checkpoint": str(checkpoint), "evaluation": result,
+        "next_consumer": "offline_evaluation_report",
+    }
+
+
+def run_delegated_request(request: dict, *, approval_output: Path,
+                          authorized_actor: str, delegation_path: Path,
+                          profile: str, collection_profile: str,
+                          output: Path, steps: int, batch_size: int,
+                          eval_split: float, eval_steps: int, save_freq: int,
+                          runner=None, checkpoint_validator=None,
+                          evaluator=None) -> dict:
+    """Supported product entrypoint: request plus bounded recipe, no raw argv."""
+    if profile != "smolvla":
+        raise ContractError("TRAINING_EVALUATOR_UNSUPPORTED")
+    request = copy.deepcopy(request)
+    dataset = Path(request["dataset_root"]).expanduser().resolve()
+    argv = _request_argv(
+        request, dataset=dataset, repo_id=request["repo_id"], profile=profile,
+        collection_profile=collection_profile, output=output.expanduser().resolve(),
+        steps=steps, batch_size=batch_size, eval_split=eval_split,
+        eval_steps=eval_steps, save_freq=save_freq,
+    )
+    return launch_delegated_request(
+        request, approval_output=approval_output, authorized_actor=authorized_actor,
+        delegation_path=delegation_path, profile=profile,
+        collection_profile=collection_profile, argv=argv, runner=runner,
+        checkpoint_validator=checkpoint_validator, evaluator=evaluator,
+    )
 
 
 def run_native_training(argv: list[str], split: dict, receipt: dict) -> int:
@@ -815,6 +1000,21 @@ for a new reviewed attempt. This command never starts training or robot executio
     delegated.add_argument("--output-dir", type=Path, required=True)
     delegated.add_argument("--delegation", type=Path, required=True)
     delegated.add_argument("--authorized-actor", required=True)
+    run_delegated = sub.add_parser(
+        "run-delegated", help="Consume a prepared request with a bounded native train/eval recipe",
+    )
+    run_delegated.add_argument("--request", type=Path, required=True)
+    run_delegated.add_argument("--approval-output", type=Path, required=True)
+    run_delegated.add_argument("--delegation", type=Path, required=True)
+    run_delegated.add_argument("--authorized-actor", required=True)
+    run_delegated.add_argument("--profile", required=True)
+    run_delegated.add_argument("--collection-profile", required=True)
+    run_delegated.add_argument("--output", type=Path, required=True)
+    run_delegated.add_argument("--steps", type=int, required=True)
+    run_delegated.add_argument("--batch-size", type=int, required=True)
+    run_delegated.add_argument("--eval-split", type=float, required=True)
+    run_delegated.add_argument("--eval-steps", type=int, required=True)
+    run_delegated.add_argument("--save-freq", type=int, required=True)
     for mode in ("check", "launch"):
         command = sub.add_parser(mode)
         command.add_argument("--dataset", type=Path, required=True)
@@ -838,6 +1038,18 @@ for a new reviewed attempt. This command never starts training or robot executio
                 load_json_strict(args.request), args.output_dir,
                 args.authorized_actor, args.delegation,
             ), indent=2, sort_keys=True))
+        elif args.mode == "run-delegated":
+            result = run_delegated_request(
+                load_json_strict(args.request), approval_output=args.approval_output,
+                authorized_actor=args.authorized_actor, delegation_path=args.delegation,
+                profile=args.profile, collection_profile=args.collection_profile,
+                output=args.output, steps=args.steps, batch_size=args.batch_size,
+                eval_split=args.eval_split, eval_steps=args.eval_steps,
+                save_freq=args.save_freq,
+            )
+            print(json.dumps(result, indent=2, sort_keys=True))
+            if result["status"] in {"TRAINING_FAILED", "TRAINING_RETURNED_NO_CHECKPOINT", "EXISTING_OUTPUT"}:
+                raise SystemExit(1)
         elif args.mode == "check":
             check_inventory(args.dataset, args.repo_id, args.approved_inventory, args.episodes)
             print("PASS current training-authorized inventory and exact selected episodes")
