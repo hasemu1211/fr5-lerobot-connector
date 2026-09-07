@@ -341,6 +341,8 @@ class MotionPresetTests(unittest.TestCase):
             urdf = root / self.urdf.relative_to(ROOT)
             urdf.parent.mkdir(parents=True)
             shutil.copy2(self.urdf, urdf)
+            # This test exercises a candidate endpoint, even after B is registered.
+            (root / "config/data_factory/motion_qualifications/fr5-place-b-wood-cube-24mm-r001-demonstration-rhythm-r001.json").unlink()
             sources = {path: path.read_bytes() for path in (root / "config/data_factory/motion_qualifications").glob("*.json")}
             _, qa, _ = self.endpoint("A")
             opened = {"active": True, "position_valid": True, "gripper_index": 1,
@@ -509,6 +511,8 @@ class MotionPresetTests(unittest.TestCase):
         fixture = ObjectPositionContinuityTests()
         fixture.setUp()
         self.addCleanup(fixture.doCleanups)
+        # Keep the missing-endpoint rejection independent of production registry growth.
+        (fixture.root / "config/data_factory/motion_qualifications/fr5-place-b-wood-cube-24mm-r001-demonstration-rhythm-r001.json").unlink()
         app = fixture.application()
 
         def consume(op, payload, identifier):
@@ -557,6 +561,40 @@ class MotionPresetTests(unittest.TestCase):
             self.assertEqual(program["binding_digests"]["motion_qualification"], factory.canonical_digest(qualified))
             self.assertEqual(program["binding_digests"]["motion_preset"], self.binding["digest"])
             self.assertNotIn("motion_preset_trial", program["binding_digests"])
+        fixture.forbidden.assert_not_called()
+        self.assertEqual(fixture.episode.read_bytes(), fixture.original)
+        self.assertFalse((fixture.root / "datasets/fr5_episodes/uncreated-dataset").exists())
+
+    def test_registered_ab_production_uses_exact_policy_without_trial_or_effects(self):
+        self.use_preset("demonstration-rhythm-r001")
+        from tests.data_factory.operator.test_object_position import ObjectPositionContinuityTests
+        a, qa, _ = self.endpoint("A")
+        b, qb, _ = self.endpoint("B")
+        qualified = [factory.load_json_strict(CONFIG / f"motion_qualifications/fr5-place-{place}-wood-cube-24mm-r001-demonstration-rhythm-r001.json") for place in ("a", "b")]
+        expected = factory.prepare_motion_preset_qualification(qb, self.preset)
+        expected.update(qualification_status="QUALIFIED", qualified_at="2026-09-07T08:12:15Z")
+        self.assertEqual(qualified[1], expected)
+        for source, destination, source_q, destination_q in ((a, b, *qualified), (b, a, *reversed(qualified))):
+            program = self.resolve(source, source_q, release_validated=destination, release_motion_qualification=destination_q, motion_preset=self.preset)
+            self.assertEqual(program["binding_digests"]["motion_preset"], self.binding["digest"])
+            self.assertEqual(program["destination_binding_digests"]["motion_preset"], self.binding["digest"])
+            self.assertNotIn("motion_preset_trial", program["binding_digests"])
+        fixture = ObjectPositionContinuityTests()
+        fixture.setUp()
+        self.addCleanup(fixture.doCleanups)
+        app = fixture.application()
+        for index, (op, payload) in enumerate((
+            ("update_camera_bindings", {"bindings": {"usb-Generic_USB2.0_PC_CAMERA-video-index0": "UP", "usb-Generic_USB2.0_PC_CAMERA_2-video-index0": "WRIST"}}),
+            ("update_draft", {"draft_id": app.draft["draft_id"], "motion_preset": self.binding}),
+            ("update_draft", {"draft_id": app.draft["draft_id"], "selection": {"task": "pick_place"}}),
+            ("update_draft", {"draft_id": app.draft["draft_id"], "requested_count": 2}),
+            ("compile_draft", {"draft_id": app.draft["draft_id"], "data_disposition": "PRODUCTION"}),
+        )):
+            app.bridge_core.consume(fixture.request(app, op, payload, f"registered-ab-{index}"))
+        view = app.projection()
+        self.assertEqual(view["workflow_state"], "REVIEW_CAMPAIGN")
+        self.assertIsNone(view["campaign_authorization"])
+        self.assertEqual(len(app._campaign.campaign_operator.manifest["slots"]), 2)
         fixture.forbidden.assert_not_called()
         self.assertEqual(fixture.episode.read_bytes(), fixture.original)
         self.assertFalse((fixture.root / "datasets/fr5_episodes/uncreated-dataset").exists())

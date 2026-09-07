@@ -222,6 +222,8 @@ class ObjectPositionContinuityTests(unittest.TestCase):
         self.forbidden.assert_not_called()
 
     def compile_trial(self, builder=build_physical_operator_application, session="restarted-collection"):
+        # Exercise an unqualified endpoint independently of the production registry.
+        (self.root / "config/data_factory/motion_qualifications/fr5-place-b-wood-cube-24mm-r001-demonstration-rhythm-r001.json").unlink(missing_ok=True)
         app = self.application(session=session, builder=builder, data_mode="TEST_COLLECTION")
         self.assertEqual(app.draft["current_object_pose"], POSE)
         self.assertEqual(app.projection()["draft"]["object_position"]["source"], "ROBOT_RELEASE_PROXY")
