@@ -176,3 +176,8 @@ An admitted v3 split MAY carry an explicit evaluation-cohort binding under the d
 - **THEN** it resolves preserved held-out source identities to destination indices and assigns other selected origins to TRAIN, rejecting missing or duplicate held-out identities
 - **AND** the native dataset constructors consume those explicit lists rather than recomputing a fractional partition
 - **AND** saved receipt normalization uses only the resolved TRAIN episodes, and independent reload/resume revalidates the binding with existing strict dataset and parent rules.
+
+#### Scenario: A mapped request owns its cohort reference
+- **WHEN** the public delegated request consumer receives a Curator-owned evaluation cohort reference
+- **THEN** it validates and consumes that reference without requiring a duplicate path argument
+- **AND** a conflicting override is rejected before authority publication or training; requests without a cohort retain their existing behavior.

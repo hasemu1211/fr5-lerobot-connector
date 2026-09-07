@@ -471,6 +471,19 @@ def run_delegated_request(request: dict, *, approval_output: Path,
     if profile != "smolvla":
         raise ContractError("TRAINING_EVALUATOR_UNSUPPORTED")
     request = copy.deepcopy(request)
+    if "evaluation_cohort" in request:
+        from tools.data_factory.training_receipts import file_digest
+        reference = request["evaluation_cohort"]
+        approval._exact(reference, frozenset({"path", "sha256", "cohort_digest"}), "COHORT_REQUEST")
+        path = Path(reference["path"]).expanduser().resolve()
+        if evaluation_cohort is not None and evaluation_cohort.expanduser().resolve() != path:
+            raise ContractError("COHORT_OVERRIDE_CONFLICT")
+        if file_digest(path) != reference["sha256"]:
+            raise ContractError("COHORT_REQUEST_CHANGED")
+        cohort = revalidate_evaluation_cohort(path)
+        if cohort["cohort_digest"] != reference["cohort_digest"]:
+            raise ContractError("COHORT_REQUEST_CHANGED")
+        evaluation_cohort = path
     dataset = Path(request["dataset_root"]).expanduser().resolve()
     argv = _request_argv(
         request, dataset=dataset, repo_id=request["repo_id"], profile=profile,

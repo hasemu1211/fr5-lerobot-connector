@@ -946,6 +946,59 @@ class TrainingLaunchConnectionTest(unittest.TestCase):
             with self.assertRaises(ValueError):
                 validate_checkpoint(Path(args.checkpoint))
 
+    def test_curator_request_cohort_reaches_public_recipe_without_override(self):
+        import sys
+        import io
+        from tests.data_factory.curator.workflow.test_mapping_cohort import MappingCohortTests
+        from tools.data_factory.curator.workflow.mapping import publish_mapped_training_request
+        from tools.data_factory import training_entrypoint as training
+        fixture = MappingCohortTests()
+        self.addCleanup(fixture.doCleanups)
+        requests, sources, root, mapping_options, cohort = fixture.case()
+        requests.reverse()
+        result = publish_mapped_training_request(requests, root / "mapped", **mapping_options)
+        request_path = Path(result["request_path"])
+        request = json.loads(request_path.read_text())
+        authority_root = root / "learning"
+        authority_root.mkdir()
+        batch = authority_root / "batch"
+        batch.mkdir()
+        delegation = dict(schema_version=approval.DELEGATION_SCHEMA, delegation_id="synthetic-cohort-r1",
+            scope=approval.PRODUCTION_SCOPE, delegated_by="workspace-user", authorized_actor="learning-fixture",
+            authorization_source_ref="SYNTHETIC_TEST_ONLY", dataset={k:request[k] for k in ("repo_id", "dataset_root")},
+            output_root=str(authority_root), profiles=["smolvla"],
+            limits=dict(max_steps=2,max_batch_size=2,max_checkpoints=1), authority=copy.deepcopy(approval.DELEGATION_AUTHORITY))
+        delegation_path=root / "delegation.json"
+        write_json(delegation_path, delegation)
+        argv=["training_entrypoint.py", "run-delegated", "--request", str(request_path),
+              "--approval-output", str(batch), "--delegation", str(delegation_path),
+              "--authorized-actor", "learning-fixture", "--profile", "smolvla",
+              "--collection-profile", "fr5-up-wrist-rgb-30hz-v2", "--output", str(authority_root / "run"),
+              "--steps", "2", "--batch-size", "1", "--eval-split", ".4", "--eval-steps", "2", "--save-freq", "2"]
+        before=snapshot(authority_root)
+        with mock.patch.object(sys, "argv", argv+["--evaluation-cohort",str(root / "other.json")]), \
+             mock.patch.object(training, "delegate_training_batch") as issue, \
+             mock.patch.object(training, "run_native_training") as trainer, \
+             mock.patch("sys.stderr",new_callable=io.StringIO):
+            with self.assertRaises(SystemExit) as failed:
+                training.main()
+            self.assertEqual(failed.exception.code,2)
+            issue.assert_not_called(); trainer.assert_not_called()
+        self.assertEqual(snapshot(authority_root),before)
+        def native(command, split, receipt):
+            self.assertEqual(split["train_episodes"],[0,2,4,5])
+            self.assertEqual(split["eval_episodes"],[7])
+            self.assertEqual(receipt["normalization"]["episodes"],[0,2,4,5])
+            self.assertEqual(split["evaluation_cohort"]["cohort"]["cohort_digest"],cohort["cohort_digest"])
+            self.assertIn("--fr5.evaluation_cohort",training.options(command[1:]))
+            return 0  # No checkpoint: public CLI must report this truthfully.
+        with mock.patch.object(sys,"argv",argv), mock.patch.object(training,"run_native_training",side_effect=native) as trainer, \
+             mock.patch("sys.stdout",new_callable=io.StringIO):
+            with self.assertRaises(SystemExit) as ended:
+                training.main()
+            self.assertEqual(ended.exception.code,1)
+        trainer.assert_called_once()
+
     def test_unsupported_act_native_evaluation_rejected_before_authority(self):
         from tools.data_factory.training_entrypoint import run_delegated_request
 
