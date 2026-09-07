@@ -523,7 +523,9 @@ class CollectionOperatorApplication:
         }
         if self.stored_reviews is not None:
             handlers.update(refresh_stored_reviews=self.refresh_stored_reviews,
-                            select_stored_review=self.select_stored_review)
+                            select_stored_review=self.select_stored_review,
+                            inspect_stored_episode=self.inspect_stored_episode,
+                            return_stored_review=self.return_stored_review)
         if self.camera_bindings_call is not None:
             handlers["update_camera_bindings"] = self.update_camera_bindings
         if self.object_position_call is not None:
@@ -1245,6 +1247,11 @@ class CollectionOperatorApplication:
             if not self._stored_review_busy:
                 operations.extend(["refresh_stored_reviews", "select_stored_review"])
             if stored_reviews.get("selected_run_id") is not None:
+                if not self._stored_review_busy and self._stored_review_error is None:
+                    if stored_reviews["inspection"]["status"] not in {"PREPARING", "READY"}:
+                        operations.append("inspect_stored_episode")
+                    if stored_reviews["inspection"]["target"] is not None:
+                        operations.append("return_stored_review")
                 operations = [op for op in operations if op != "review_candidate"]
                 if (not self._stored_review_busy and self._stored_review_error is None
                         and stored_reviews.get("candidate_review", {}).get("status") == "PENDING"):
@@ -2430,6 +2437,12 @@ class CollectionOperatorApplication:
             raise ContractError("STORED_REVIEW_FIELDS")
         return self._stored_review_intent(lambda: self.stored_reviews.select(payload["run_id"]))
 
+    def inspect_stored_episode(self, payload, _view):
+        return self._stored_review_intent(lambda: self.stored_reviews.inspect(payload))
+
+    def return_stored_review(self, payload, _view):
+        return self._stored_review_intent(lambda: self.stored_reviews.return_review(payload))
+
     def recover_home(self, payload: dict[str, Any], _view: dict[str, Any]) -> dict[str, Any]:
         projection = self.projection()
         if (
@@ -2649,6 +2662,8 @@ class CollectionOperatorApplication:
                     raise
             if preparation is not None:
                 preparation.cleanup()
+            if self.stored_reviews is not None:
+                self.stored_reviews.close(permanent=True)
 
 
 __all__ = ["CollectionOperatorApplication"]

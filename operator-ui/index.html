@@ -225,6 +225,16 @@
           <label for="stored-review-select">검토할 에피소드<select id="stored-review-select"><option value="">현재 수집의 리뷰</option></select></label>
           <p id="stored-review-status" role="status"></p>
         </div>
+        <div id="stored-inspection" class="notice" hidden>
+          <p id="stored-inspection-status" role="status"></p>
+          <div class="admission-actions">
+            <button id="inspect-stored-episode" type="button" class="secondary-button">선택한 원본 영상 준비</button>
+            <button id="open-stored-inspection" type="button" class="secondary-button" hidden>원본 영상 보기</button>
+            <button id="return-stored-review" type="button" class="secondary-button" hidden>탐색 종료 · 같은 리뷰로 복귀</button>
+          </div>
+          <p id="stored-video-status" role="status"></p>
+          <video id="stored-video" controls preload="none" hidden aria-label="선택한 에피소드 원본: 왼쪽 UP, 오른쪽 WRIST"></video>
+        </div>
         <div id="review-queue"></div>
       </section>
 

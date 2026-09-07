@@ -1667,7 +1667,56 @@ function episodeRetentionLabel(item) {
   return [retention, reclaim].filter(Boolean).join(" · ");
 }
 
+let storedVideoUrl, storedVideoBinding, storedVideoRequest;
+function storedInspectionKey(view) {
+  const inspection = view?.stored_reviews?.inspection;
+  if (view?.connection_state !== "READY" || inspection?.status !== "READY"
+      || view.stored_reviews.error || inspection.target?.run_id !== view.stored_reviews.selected_run_id
+      || inspection.target?.review_binding_digest !== view.candidate_review?.review_binding_digest) return null;
+  return inspection.inspection_binding_digest ?? null;
+}
+
+function clearStoredVideo() {
+  storedVideoRequest?.abort();
+  storedVideoRequest = null;
+  if (storedVideoUrl) {
+    const video = document.querySelector("#stored-video");
+    video.pause(); video.removeAttribute("src"); video.load(); video.hidden = true;
+    URL.revokeObjectURL(storedVideoUrl); storedVideoUrl = null;
+  }
+}
+
+function renderStoredInspection(view) {
+  const panel = document.querySelector("#stored-inspection");
+  if (!panel) return;
+  const stored = view.stored_reviews;
+  const inspection = stored?.inspection;
+  panel.hidden = !stored?.selected_run_id;
+  const key = storedInspectionKey(view);
+  if (key !== storedVideoBinding) {
+    clearStoredVideo(); storedVideoBinding = key;
+    document.querySelector("#stored-video-status").textContent = "";
+  }
+  document.querySelector("#inspect-stored-episode").disabled = !canIntent("inspect_stored_episode");
+  document.querySelector("#open-stored-inspection").hidden = !key;
+  document.querySelector("#open-stored-inspection").disabled = !!storedVideoRequest;
+  document.querySelector("#return-stored-review").hidden = !inspection?.target;
+  document.querySelector("#return-stored-review").disabled = !canIntent("return_stored_review");
+  const target = inspection?.target;
+  const label = target ? `#${target.episode_index} · ${target.run_id}` : "선택한 에피소드";
+  document.querySelector("#stored-inspection-status").textContent = view.connection_state !== "READY"
+    ? "현재 연결을 확인할 수 없어 영상을 숨겼습니다. 상태를 복구한 뒤 다시 확인하세요."
+    : inspection?.status === "PREPARING"
+    ? `${label} 원본을 준비하고 있습니다. 수집 진행은 별도로 계속됩니다.`
+    : key ? `${label} · ${inspection.mapping.frames}프레임 · 왼쪽 UP, 오른쪽 WRIST. Curator 가공 결과가 아닌 원본 확인용 사본입니다. 이후 수집을 실시간 반영하지 않으며 판정이나 학습 승인은 바뀌지 않습니다.`
+    : inspection?.status === "FAILED" ? `${label} 원본 탐색을 열 수 없습니다 (${inspection.error}). 자동 재시도하지 않았습니다. 리뷰는 계속 사용할 수 있습니다.`
+    : inspection?.status === "STALE" ? "원본 또는 리뷰가 변경되었습니다. 이전 탐색을 닫았습니다. 리뷰를 다시 불러와 원본을 새로 확인하세요."
+    : inspection?.status === "CLOSED" && target ? "영상을 닫고 같은 리뷰로 돌아왔습니다."
+    : "원본 탐색은 선택 사항입니다. 선택한 에피소드만 읽으며 수집·판정·학습을 시작하지 않습니다.";
+}
+
 function renderResults(view) {
+  renderStoredInspection(view);
   const stored = view.stored_reviews;
   const storedControls = document.querySelector("#stored-review-controls");
   if (storedControls) {
@@ -2250,6 +2299,46 @@ document.querySelector("#review-queue").addEventListener("click", (event) => {
 });
 document.querySelector("#refresh-stored-reviews")?.addEventListener("click", () => submitIntent("refresh_stored_reviews", {}));
 document.querySelector("#stored-review-select")?.addEventListener("change", (event) => submitIntent("select_stored_review", {run_id: event.target.value || null}));
+document.querySelector("#inspect-stored-episode")?.addEventListener("click", () => submitIntent("inspect_stored_episode", {review_binding_digest: currentView.candidate_review.review_binding_digest}));
+document.querySelector("#open-stored-inspection")?.addEventListener("click", async () => {
+  const key = storedInspectionKey(currentView);
+  if (!key) return;
+  clearStoredVideo();
+  const controller = storedVideoRequest = new AbortController();
+  const expectedBytes = currentView.stored_reviews.inspection.mapping.mp4_bytes;
+  const status = document.querySelector("#stored-video-status");
+  status.textContent = "선택한 영상을 불러오고 있습니다.";
+  renderStoredInspection(currentView);
+  const timeout = setTimeout(() => controller.abort(), 30000);
+  try {
+    const response = await fetch(`/api/episode-inspection/video?review_digest=${encodeURIComponent(key)}`, {
+      headers: tokenHeaders(), credentials: "same-origin", cache: "no-store", signal: controller.signal,
+    });
+    if (!response.ok) throw new Error((await response.json()).code ?? "MEDIA_UNAVAILABLE");
+    if (response.headers.get("Content-Type") !== "video/mp4") throw new Error("MEDIA_UNAVAILABLE");
+    const blob = await response.blob();
+    if (controller.signal.aborted || storedInspectionKey(currentView) !== key) return;
+    if (blob.size !== expectedBytes) throw new Error("MEDIA_CHANGED");
+    const video = document.querySelector("#stored-video");
+    storedVideoUrl = URL.createObjectURL(blob);
+    video.src = storedVideoUrl; video.hidden = false;
+    status.textContent = "선택한 에피소드의 원본 영상입니다. 재생·탐색 후 아래 리뷰를 계속하세요.";
+  } catch (error) {
+    if (storedInspectionKey(currentView) === key) status.textContent = error.message?.includes("CHANGED")
+      ? "원본 또는 리뷰가 변경되었습니다. 저장된 리뷰를 다시 불러와 원본을 확인하세요. 판정은 바뀌지 않았습니다."
+      : "영상을 불러오지 못했습니다. 자동 재시도하지 않았습니다. 다시 보기 또는 리뷰를 계속할 수 있습니다.";
+  } finally {
+    clearTimeout(timeout);
+    if (storedVideoRequest === controller) { storedVideoRequest = null; renderStoredInspection(currentView); }
+  }
+});
+document.querySelector("#stored-video")?.addEventListener("error", () => {
+  if (storedVideoUrl) document.querySelector("#stored-video-status").textContent = "이 영상을 재생할 수 없습니다. 다시 보기 또는 리뷰를 계속할 수 있습니다.";
+});
+document.querySelector("#return-stored-review")?.addEventListener("click", async () => {
+  await submitIntent("return_stored_review", {review_binding_digest: currentView.stored_reviews.inspection.target.review_binding_digest});
+  document.querySelector("#stored-review-select")?.focus({preventScroll: true});
+});
 document.querySelector("#same-settings-action").addEventListener("click", (event) => {
   const button = event.target.closest("[data-op]");
   if (button) submitIntent(button.dataset.op);

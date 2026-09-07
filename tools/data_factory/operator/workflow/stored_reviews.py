@@ -4,6 +4,7 @@ from __future__ import annotations
 import copy
 import fcntl
 import os
+import threading
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -11,24 +12,35 @@ from tools.data_factory import run_job
 from tools.data_factory.candidate_admission import validate_candidate_admission
 from tools.data_factory.episode_ledger import _artifact
 from tools.data_factory.operator.workflow.intents import CandidateReviewPort
+from tools.data_factory.operator.workflow.inspection import NativeInspection, verify_target
+from tools.data_factory.training_approval import current_dataset_identity
 from tools.data_factory.task_recipe import validate_episode_instruction_binding
 from tools.fr5_data_factory import ContractError, SAFE_ID, canonical_digest, load_json_strict
 
 
 class StoredCandidateReviews:
-    def __init__(self, run_root, *, operator_label, clock=None):
+    def __init__(self, run_root, *, operator_label, clock=None, inspection=None):
         self.root = Path(run_root).absolute()
         self.operator_label = operator_label
         self.clock = clock or (lambda: datetime.now(timezone.utc))
         self.entries = {}
         self.selected = None
         self.port = None
+        self.inspector = inspection if inspection is not None else NativeInspection(video_only=True)
+        self.inspection = {"status": "CLOSED", "target": None}
+        self.inspection_dataset = None
+        self._inspection_cancelled = threading.Event()
+        self._inspection_lock = threading.RLock()
+        self._closed = False
         self.public = {"status": "NOT_CHECKED", "episodes": [], "excluded_count": 0,
                        "selected_run_id": None, "checked_at": None}
 
     def projection(self):
         # Polling never scans datasets or repairs a ledger projection.
-        return copy.deepcopy(self.public)
+        inspection = self.inspection
+        if inspection["status"] == "READY":
+            inspection = {**inspection, **self.inspector.snapshot()}
+        return {**copy.deepcopy(self.public), "inspection": copy.deepcopy(inspection)}
 
     def _paths(self, run_id):
         if not isinstance(run_id, str) or run_id in {".", ".."} or not SAFE_ID.fullmatch(run_id):
@@ -81,6 +93,7 @@ class StoredCandidateReviews:
         if instruction is not None:
             instruction = validate_episode_instruction_binding(instruction)
         return {"candidate": candidate, "reference": reference, "path": candidate_path,
+                "dataset": ledger["dataset"], "locator": ledger["episode"]["lerobot_v3_locator"],
                 "instruction": instruction,
                 "episode_index": ledger["episode"]["episode_index"]}
 
@@ -108,6 +121,7 @@ class StoredCandidateReviews:
                        "checked_at": self.clock().astimezone(timezone.utc).isoformat().replace("+00:00", "Z")}
 
     def refresh(self):
+        self.close()
         entries, excluded = {}, 0
         if self.root.resolve() != self.root:
             raise ContractError("STORED_REVIEW_PATH")
@@ -130,6 +144,7 @@ class StoredCandidateReviews:
         return self.projection()
 
     def select(self, run_id):
+        self.close()
         if run_id is None:
             self.selected, self.port = None, None
         else:
@@ -151,6 +166,7 @@ class StoredCandidateReviews:
         return self.projection()
 
     def review(self, payload):
+        self.close()
         if self.selected is None or self.port is None:
             raise ContractError("STORED_REVIEW_RUN")
         record = self.entries[self.selected]
@@ -165,3 +181,79 @@ class StoredCandidateReviews:
         self.port.acknowledge(result["review_binding_digest"])
         self._publish()
         return result
+
+    def _inspection_record(self, payload):
+        if (set(payload) != {"review_binding_digest"} or self.port is None
+                or payload["review_binding_digest"] != self.port.projection()["review_binding_digest"]):
+            raise ContractError("INSPECTION_TARGET")
+        current = self._load(self.selected)
+        if current != self.entries[self.selected]:
+            raise ContractError("INSPECTION_TARGET_CHANGED")
+        return current
+
+    def inspect(self, payload):
+        record = self._inspection_record(payload)
+        with self._inspection_lock:
+            if self._closed:
+                raise ContractError("INSPECTION_CLOSED")
+            self.close()
+            cancelled = self._inspection_cancelled = threading.Event()
+            target = {**payload, "run_id": self.selected, "episode_index": record["episode_index"],
+                      "ledger_digest": record["reference"]["ledger_digest"]}
+            self.inspection = {"status": "PREPARING", "target": target}
+        try:
+            # A commit receipt may describe an append prefix, not today's tree.
+            source = record["dataset"]
+            dataset = current_dataset_identity(source["dataset_root"], repo_id=source["repo_id"],
+                                               dataset_id=source["dataset_id"])
+            self.inspection_dataset = dataset
+            target.update(dataset_id=dataset["dataset_id"], dataset_digest=dataset["dataset_digest"])
+            value = self.inspector.open(dataset, record["episode_index"], expected_locator=record["locator"],
+                                        cancelled=cancelled)
+            self._inspection_record(payload)
+            with self._inspection_lock:
+                if cancelled.is_set():
+                    return {"inspection_status": "CLOSED"}
+                self.inspection = {**value, "target": target,
+                    "inspection_binding_digest": canonical_digest({"target": target, "mapping": value.get("mapping")})}
+        except (ContractError, OSError, ValueError) as exc:
+            with self._inspection_lock:
+                if cancelled.is_set():
+                    return {"inspection_status": "CLOSED"}
+                self.inspector.close()
+                self.inspection = {"status": "FAILED", "target": target,
+                                   "error": getattr(exc, "code", "INSPECTION_FAILED")}
+        return {"inspection_status": self.inspection["status"]}
+
+    def video(self, inspection_binding_digest):
+        with self._inspection_lock:
+            if (self.inspection["status"] != "READY"
+                    or inspection_binding_digest != self.inspection.get("inspection_binding_digest")):
+                raise ContractError("INSPECTION_TARGET_CHANGED")
+            self._inspection_record({"review_binding_digest": self.inspection["target"]["review_binding_digest"]})
+            verify_target(self.inspection_dataset)
+            return self.inspector.video()
+
+    def return_review(self, payload):
+        target = self.inspection["target"]
+        if (set(payload) != {"review_binding_digest"} or target is None
+                or payload["review_binding_digest"] != target["review_binding_digest"]):
+            raise ContractError("INSPECTION_TARGET")
+        self.inspector.close()
+        self.inspection = {"status": "CLOSED", "target": target}
+        try:
+            self._inspection_record(payload)
+            if self.inspection_dataset is not None:
+                verify_target(self.inspection_dataset)
+        except (ContractError, OSError, ValueError) as exc:
+            self.inspection = {"status": "STALE", "target": target,
+                               "error": getattr(exc, "code", "INSPECTION_TARGET_UNAVAILABLE")}
+        return {"inspection_status": self.inspection["status"]}
+
+    def close(self, *, permanent=False):
+        with self._inspection_lock:
+            self._closed = self._closed or permanent
+            self._inspection_cancelled.set()
+            self.inspector.close()
+            self.inspection = {"status": "CLOSED", "target": None}
+            self.inspection_dataset = None

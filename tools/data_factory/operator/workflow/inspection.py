@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import math
 import os
 from pathlib import Path
@@ -69,13 +70,15 @@ def _export(request_path):
     import resource
     resource.setrlimit(resource.RLIMIT_FSIZE, (MAX_RRD_BYTES, MAX_RRD_BYTES))
     import lerobot
-    import rerun
     from lerobot.datasets import LeRobotDataset
-    from lerobot.scripts.lerobot_dataset_viz import visualize_dataset
 
     request = json.loads(Path(request_path).read_text())
     identity, index = request["dataset"], request["episode_index"]
     verify_target(identity)
+    if request.get("expected_locator") is not None:
+        from tools.data_factory.run_job import _lerobot_v3_episode_locator
+        if _lerobot_v3_episode_locator(identity["dataset_root"], identity["repo_id"], index) != request["expected_locator"]:
+            raise ContractError("INSPECTION_LOCATOR_CHANGED")
     dataset = LeRobotDataset(identity["repo_id"], root=Path(identity["dataset_root"]),
         episodes=[index], download_videos=False, force_cache_sync=False, token=False)
     if not 0 < len(dataset) <= MAX_FRAMES:
@@ -84,8 +87,43 @@ def _export(request_path):
     rows = [{key: value.item() if hasattr(value, "item") else value for key, value in row.items()} for row in rows]
     mapping = frame_mapping(rows, index)
     mapping["features"] = feature_projection(dataset.features)
-    mapping["versions"] = {"lerobot": lerobot.__version__, "rerun": rerun.__version__}
     output = Path(request_path).parent
+    if request.get("video_only"):
+        from fractions import Fraction
+        locator = request["expected_locator"]
+        command = ["ffmpeg", "-nostdin", "-hide_banner", "-loglevel", "error", "-filter_complex_threads", "1"]
+        for camera in ("observation.images.up", "observation.images.wrist"):
+            matches = [video for video in locator["videos"] if video["camera_key"] == camera]
+            if len(matches) != 1:
+                raise ContractError("INSPECTION_FEATURES")
+            video = matches[0]
+            command += ["-threads", "1", "-ss", str(video["timestamp_start_s"]), "-i",
+                        str(Path(identity["dataset_root"]) / video["relative_path"])]
+        clip = output / "episode.mp4"
+        command += ["-filter_complex", "[0:v]setpts=PTS-STARTPTS[up];[1:v]setpts=PTS-STARTPTS[wrist];[up][wrist]hstack[v]",
+                    "-map", "[v]", "-frames:v", str(len(rows)), "-r", str(dataset.fps), "-an",
+                    "-c:v", "libx264", "-preset", "ultrafast", "-crf", "23", "-pix_fmt", "yuv420p",
+                    "-threads", "1", "-movflags", "+faststart", str(clip)]
+        subprocess.run(command, check=True, timeout=EXPORT_SECONDS)
+        probe = subprocess.run(["ffprobe", "-v", "error", "-count_frames", "-select_streams", "v:0",
+            "-show_entries", "stream=codec_name,width,height,nb_read_frames,avg_frame_rate", "-of", "json", str(clip)],
+            check=True, capture_output=True, text=True, timeout=30)
+        streams = json.loads(probe.stdout).get("streams", [])
+        if (len(streams) != 1 or streams[0].get("codec_name") != "h264"
+                or (streams[0].get("width"), streams[0].get("height")) != (1280, 480)
+                or int(streams[0].get("nb_read_frames", -1)) != len(rows)
+                or Fraction(streams[0].get("avg_frame_rate", "0")) != dataset.fps):
+            raise ContractError("INSPECTION_VIDEO_CONTRACT")
+        verify_target(identity)
+        if not 0 < clip.stat().st_size <= MAX_RRD_BYTES:
+            raise ContractError("INSPECTION_DISK_LIMIT")
+        mapping.update(mp4_bytes=clip.stat().st_size, camera_order=["UP", "WRIST"],
+                       media_digest="sha256:" + hashlib.sha256(clip.read_bytes()).hexdigest())
+        (output / "mapping.json").write_text(json.dumps(mapping))
+        return
+    import rerun
+    from lerobot.scripts.lerobot_dataset_viz import visualize_dataset
+    mapping["versions"] = {"lerobot": lerobot.__version__, "rerun": rerun.__version__}
     rrd = visualize_dataset(dataset, index, batch_size=1, num_workers=0,
         save=True, output_dir=output, display_compressed_images=True)
     rerun.disconnect()
@@ -100,11 +138,14 @@ def _export(request_path):
 class NativeInspection:
     """Owned child processes and temporary outputs; no detached/shared viewer."""
 
-    def __init__(self):
+    def __init__(self, *, video_only=False):
         self._lock = threading.RLock()
         self._process = None
         self._directory = None
         self._stop = threading.Event()
+        self._cancelled = None
+        self._video_only = video_only
+        self._expiry = None
         self._value = {"status": "CLOSED"}
 
     def snapshot(self):
@@ -115,7 +156,7 @@ class NativeInspection:
         env = {**os.environ, "CUDA_VISIBLE_DEVICES": "", "HF_HUB_OFFLINE": "1",
                "HF_DATASETS_OFFLINE": "1", "OMP_NUM_THREADS": "2", "OPENBLAS_NUM_THREADS": "2"}
         with self._lock:
-            if self._stop.is_set():
+            if self._stop.is_set() or self._cancelled is not None and self._cancelled.is_set():
                 raise ContractError("INSPECTION_CLOSED")
             self._process = subprocess.Popen(argv, stdout=log, stderr=log,
                 env=env, start_new_session=True)
@@ -123,7 +164,7 @@ class NativeInspection:
 
     def _check(self, process, deadline):
         import psutil
-        if self._stop.is_set():
+        if self._stop.is_set() or self._cancelled is not None and self._cancelled.is_set():
             raise ContractError("INSPECTION_CLOSED")
         if time.monotonic() > deadline:
             raise ContractError("INSPECTION_TIME_LIMIT")
@@ -135,19 +176,24 @@ class NativeInspection:
         except psutil.NoSuchProcess:
             pass
 
-    def open(self, dataset, episode_index):
-        self.close()
+    def open(self, dataset, episode_index, *, expected_locator=None, cancelled=None):
         with self._lock:
+            if cancelled is not None and cancelled.is_set():
+                raise ContractError("INSPECTION_CLOSED")
+            self.close()
             self._stop = threading.Event()
+            self._cancelled = cancelled
             self._directory = tempfile.TemporaryDirectory(prefix="fr5-inspection-")
             directory = Path(self._directory.name)
             self._value = {"status": "PREPARING"}
         try:
             request = directory / "request.json"
-            request.write_text(json.dumps({"dataset": dataset, "episode_index": episode_index}))
+            request.write_text(json.dumps({"dataset": dataset, "episode_index": episode_index,
+                                           "expected_locator": expected_locator, "video_only": self._video_only}))
+            rerun_cli = str(Path(sys.executable).with_name("rerun"))
             with (directory / "export.log").open("wb") as log:
-                process = self._spawn([sys.executable, "-m", __name__, str(request)], log)
                 deadline = time.monotonic() + EXPORT_SECONDS
+                process = self._spawn([sys.executable, "-m", __name__, str(request)], log)
                 while process.poll() is None:
                     self._check(process, deadline)
                     self._stop.wait(.1)
@@ -156,12 +202,27 @@ class NativeInspection:
                     code = json.loads(error_path.read_text())["code"] if error_path.is_file() else "INSPECTION_EXPORT_FAILED"
                     raise ContractError(code if re.fullmatch(r"INSPECTION_[A-Z_]+", code) else "INSPECTION_EXPORT_FAILED")
             mapping = json.loads((directory / "mapping.json").read_text())
+            if self._video_only:
+                with self._lock:
+                    if self._stop.is_set() or cancelled is not None and cancelled.is_set():
+                        raise ContractError("INSPECTION_CLOSED")
+                    self._value = {"status": "READY", "mapping": mapping,
+                                   "expires_after_seconds": VIEWER_SECONDS, "read_only": True}
+                    stopped = self._stop
+                    def expire():
+                        with self._lock:
+                            if self._stop is stopped:
+                                self.close()
+                    self._expiry = threading.Timer(VIEWER_SECONDS, expire)
+                    self._expiry.daemon = True
+                    self._expiry.start()
+                return self.snapshot()
             rrds = list(directory.glob("*.rrd"))
             if len(rrds) != 1:
                 raise ContractError("INSPECTION_EXPORT_FAILED")
             log_path = directory / "viewer.log"
             with log_path.open("wb") as log:
-                process = self._spawn([str(Path(sys.executable).with_name("rerun")),
+                process = self._spawn([rerun_cli,
                     "--serve-web", "--bind", "127.0.0.1", "--port", "auto",
                     "--web-viewer-port", "0", "--server-memory-limit", "1GiB",
                     "--memory-limit", "1GiB", "--threads", "2", str(rrds[0])], log)
@@ -178,6 +239,8 @@ class NativeInspection:
                 raise ContractError("INSPECTION_VIEWER_FAILED")
             verify_target(dataset)
             with self._lock:
+                if self._stop.is_set() or self._cancelled is not None and self._cancelled.is_set():
+                    raise ContractError("INSPECTION_CLOSED")
                 self._value = {"status": "READY", "url": url, "mapping": mapping,
                     "expires_after_seconds": VIEWER_SECONDS, "read_only": True}
             threading.Thread(target=self._watch, args=(process, self._stop), daemon=True).start()
@@ -202,6 +265,9 @@ class NativeInspection:
 
     def close(self):
         with self._lock:
+            if self._expiry is not None:
+                self._expiry.cancel()
+                self._expiry = None
             self._stop.set()
             process, self._process = self._process, None
             if process is not None and process.poll() is None:
@@ -218,6 +284,12 @@ class NativeInspection:
                 self._directory.cleanup()
                 self._directory = None
             self._value = {"status": "CLOSED"}
+
+    def video(self):
+        with self._lock:
+            if not self._video_only or self._value["status"] != "READY" or self._directory is None:
+                raise ContractError("INSPECTION_CLOSED")
+            return (Path(self._directory.name) / "episode.mp4").read_bytes()
 
 
 if __name__ == "__main__":

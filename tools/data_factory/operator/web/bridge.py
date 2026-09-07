@@ -90,6 +90,7 @@ class LoopbackBridge:
         watch_timeout_s: float = 5.0,
         index_page: str = "index.html",
         review_video_call=None,
+        inspection_video_call=None,
     ):
         if host not in {"127.0.0.1", "::1"}:
             raise ContractError("BRIDGE_LOOPBACK_REQUIRED")
@@ -102,6 +103,9 @@ class LoopbackBridge:
         if review_video_call is not None and not callable(review_video_call):
             raise ContractError("BRIDGE_REVIEW_VIDEO_CALLABLE")
         self.review_video_call = review_video_call
+        if inspection_video_call is not None and not callable(inspection_video_call):
+            raise ContractError("BRIDGE_REVIEW_VIDEO_CALLABLE")
+        self.inspection_video_call = inspection_video_call
         self.index_page = index_page
         self.token = token or secrets.token_urlsafe(32)
         if not isinstance(self.token, str) or len(self.token) < 24:
@@ -177,7 +181,9 @@ class LoopbackBridge:
                     return self._error(HTTPStatus.BAD_REQUEST, "BRIDGE_HOST")
                 request = urlsplit(self.path)
                 path = request.path
-                if path == "/api/curator-review/video" and bridge.review_video_call is not None:
+                video_call = {"/api/curator-review/video": bridge.review_video_call,
+                              "/api/episode-inspection/video": bridge.inspection_video_call}.get(path)
+                if video_call is not None:
                     if self.headers.get("X-Operator-Token") != bridge.token:
                         return self._error(HTTPStatus.FORBIDDEN, "BRIDGE_TOKEN")
                     try:
@@ -192,7 +198,7 @@ class LoopbackBridge:
                     except ValueError:
                         return self._error(HTTPStatus.BAD_REQUEST, "BRIDGE_REVIEW_QUERY")
                     try:
-                        video = bridge.review_video_call(digest)
+                        video = video_call(digest)
                     except ContractError as exc:
                         return self._error(HTTPStatus.CONFLICT, exc.code)
                     return self._write_response(HTTPStatus.OK, "video/mp4", video)

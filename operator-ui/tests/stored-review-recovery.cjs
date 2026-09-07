@@ -4,7 +4,7 @@ const vm = require("node:vm");
 const {randomUUID} = require("node:crypto");
 
 (async () => {
-  const [origin, script, runId] = process.argv.slice(2);
+  const [origin, script, runId, mode = "review"] = process.argv.slice(2);
   const html = await (await fetch(origin)).text();
   const token = html.match(/name="operator-token" content="([^"]+)"/)[1];
   const nodes = new Map();
@@ -17,7 +17,7 @@ const {randomUUID} = require("node:crypto");
   let drop = false;
   const context = vm.createContext({
     document: {querySelector: node, activeElement: null}, crypto: {randomUUID}, console,
-    AbortController, DOMException, setTimeout, clearTimeout, selectedRun: runId,
+    AbortController, DOMException, URL, setTimeout, clearTimeout, selectedRun: runId,
     stopWatch() {}, watchView() {}, setBanner() {},
     fetch: async (path, options = {}) => {
       const method = options.method || "GET";
@@ -47,9 +47,12 @@ const {randomUUID} = require("node:crypto");
   await vm.runInContext("loadView()", context);
   await vm.runInContext("submitIntent('refresh_stored_reviews', {})", context);
   await vm.runInContext("submitIntent('select_stored_review', {run_id:selectedRun})", context);
+  if (mode === "return") await vm.runInContext("submitIntent('inspect_stored_episode', {review_binding_digest:currentView.candidate_review.review_binding_digest})", context);
   methods.length = 0;
   drop = true;
-  await vm.runInContext("submitIntent('review_candidate', {review_binding_digest:currentView.candidate_review.review_binding_digest,choice:'PASS',reason:null})", context);
+  if (mode === "review") await vm.runInContext("submitIntent('review_candidate', {review_binding_digest:currentView.candidate_review.review_binding_digest,choice:'PASS',reason:null})", context);
+  else await vm.runInContext(`submitIntent('${mode === "return" ? "return_stored_review" : "inspect_stored_episode"}', {review_binding_digest:currentView.candidate_review.review_binding_digest})`, context);
   console.log(JSON.stringify({methods, review: vm.runInContext("currentView.candidate_review", context),
+    inspection: vm.runInContext("currentView.stored_reviews.inspection", context),
     card: node("#review-queue").innerHTML}));
 })().catch((error) => { console.error(error); process.exitCode = 1; });

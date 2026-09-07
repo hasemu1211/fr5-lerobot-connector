@@ -1571,6 +1571,7 @@ def build_physical_runtime(
         bridge = LoopbackBridge(
             core=application.bridge_core, ui_root=repository / "operator-ui",
             host="127.0.0.1", port=port,
+            inspection_video_call=application.stored_reviews.video,
         )
         startup_call = None
         if initial_resolution is not None and auto_prepare:

@@ -255,6 +255,16 @@ The Collection application SHALL let people discover and select committed raw ep
 - **AND** ordinary view polling does not repair artifacts; stale or conflicting candidate/context identities and unknown or client-supplied paths reject without changing the recorded decision
 - **AND** source episodes, physical authority, retention and training authorization remain unchanged.
 
+#### Scenario: Inspect a committed raw episode and return to its review
+
+- **WHEN** a person explicitly requests inspection of the selected stored review through the fresh-view intent contract
+- **THEN** the server validates its exact candidate/context and ledger and resolves the current native episode locator before preparing a bounded UP/WRIST inspection copy through the existing process owner and loopback media transport, without browser paths or an external-player chore
+- **AND** the inspection binds the current dataset identity, not a historical append-prefix ledger digest; the displayed media is an opening-time snapshot, not live collection state
+- **AND** returning closes the inline video, releases temporary media and revalidates the same review and dataset; selection changes, refresh, shutdown and late completions cannot attach old media to a different review or recreate a closed child
+- **AND** dataset append or media failure reports stale/unavailable inspection without invalidating unrelated committed reviews or blocking collection; inspection remains optional and performs no semantic or training decision
+- **AND** lost responses recover by reading canonical state without repeating intents; polling never hashes or decodes datasets, and expensive preparation leaves collection observation and urgent stop independently accessible.
+- **AND** raw source inspection is visibly distinct from a Curator-processed candidate: camera views are arranged side by side for inspection without changing original source bytes, canonical frame ranges or timebase; no external viewer code, telemetry, examples, credentials or episode payload are requested or uploaded by this inspection flow.
+
 ### Requirement: Restore the last execution-derived object position
 
 The Collection application SHALL restore the exact last eligible object pose from the existing durable scene and execution lineage on supported production-session restart and campaign replacement. The wooden object remains at that position until a reported manual move or invalidating execution evidence; images SHALL NOT be a prerequisite. The Web and automation surfaces SHALL consume the same native position, provenance and current-view binding without path or digest transcription. Restoring a draft SHALL NOT confer motion, semantic, quality or training approval. The next consumer is the existing scene-bound collection planner and lifecycle owner.
