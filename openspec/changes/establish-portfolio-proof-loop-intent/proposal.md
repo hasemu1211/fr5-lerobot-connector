@@ -9,6 +9,7 @@ FR5의 장기 의도와 실행 상태가 plan 문서에 함께 쌓이면서, 현
 - 실제 작업의 가치 필터와 evidence가 기존 경계를 흔들 때만 intent를 재검토하는 규칙을 둔다.
 - OpenSpec tasks를 작은 가치 결과와 완료 기준을 관리하는 실행 데스크로 사용한다. 상세 attempt, live resource, blocker와 evidence 원본은 Orca 및 기존 owner가 보존한다.
 - 수치 스냅샷, 별도 runtime ledger와 과거 plan 이력은 복제하지 않는다.
+- Portfolio의 핵심 기술 설명은 MEX에서 출발해 설계 의도·실제 호출·테스트·산출물과 반례를 조사한 뒤 작성하며, 글과 그림 모두 해결하려는 문제와 선택한 방법의 관계를 드러내도록 한다.
 
 ## Capabilities
 
