@@ -6,6 +6,7 @@ import argparse
 import json
 import sys
 from pathlib import Path
+from tools.fr5_data_factory import ContractError
 
 from .core.errors import CuratorError
 from .core.jsonio import load_json
@@ -39,6 +40,16 @@ def _parser() -> argparse.ArgumentParser:
     selection.add_argument("--derivation", type=Path, help="published Curator reference JSON; parent evidence remains parent-only")
     selection.add_argument("--eval-split", type=float)
     selection.add_argument("--expected-eval-episode", type=int, action="append")
+    mapped = commands.add_parser("mapped-training-request", allow_abbrev=False)
+    mapped.add_argument("--source-request", type=Path, action="append", required=True)
+    mapped.add_argument("--output", type=Path, required=True)
+    mapped.add_argument("--dataset-id", required=True)
+    mapped.add_argument("--repo-id", required=True)
+    mapped.add_argument("--max-copy-bytes", type=int, required=True)
+    evaluation = mapped.add_mutually_exclusive_group(required=True)
+    evaluation.add_argument("--evaluation-cohort", type=Path, help="existing planning-only frozen source cohort")
+    evaluation.add_argument("--evaluation-split", type=Path, help="legacy saved native training split")
+    mapped.add_argument("--eval-fraction", type=float, help="required only with the legacy split")
     for name in ("status", "decide"):
         command = commands.add_parser(name, allow_abbrev=False)
         command.add_argument("--run", required=True)
@@ -83,6 +94,13 @@ def main(argv: list[str] | None = None) -> None:
                 result = preview_profile_setup(args.run, _paths=paths)
             else:
                 result = finalize_profile_setup(args.run, args.preview, _paths=paths)
+        elif args.command == "mapped-training-request":
+            from .workflow.mapping import publish_mapped_training_request
+            result = publish_mapped_training_request(
+                args.source_request, args.output, dataset_id=args.dataset_id, repo_id=args.repo_id,
+                max_copy_bytes=args.max_copy_bytes, evaluation_cohort=args.evaluation_cohort,
+                evaluation_split=args.evaluation_split, eval_fraction=args.eval_fraction,
+            )
         elif args.command == "training-request":
             cohort = {} if args.eval_split is None and args.expected_eval_episode is None else {
                 "eval_split": args.eval_split,
@@ -112,6 +130,9 @@ def main(argv: list[str] | None = None) -> None:
             ),
             file=sys.stderr,
         )
+        raise SystemExit(2) from None
+    except ContractError as exc:
+        print(json.dumps({"ok": False, "reason_code": exc.code}), file=sys.stderr)
         raise SystemExit(2) from None
     except KeyboardInterrupt:
         print(

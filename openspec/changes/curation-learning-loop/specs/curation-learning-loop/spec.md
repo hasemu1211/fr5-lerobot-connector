@@ -16,6 +16,17 @@ use existing exclusive atomic directory publication and preserve all originals.
 - **AND** the mapped preparation consumer SHALL return existing native dataset/draft shapes with parent semantic references, new mapped provenance, and no issued approval
 - **AND** unselected episodes SHALL remain outside the requested training selection.
 
+#### Scenario: A planning-only cohort survives growing data and source reordering
+- **WHEN** publication or its CLI names Learning's planning-only cohort instead of a legacy split/fraction pair
+- **THEN** Curator SHALL revalidate the bound original request and resolve proven parent episode identities using Learning's existing functions
+- **AND** newly selected origins SHALL be TRAIN while original heldout identities retain their membership despite changed destination indices
+- **AND** the native publication and request SHALL bind the cohort path, file hash and digest; native preparation SHALL reject a missing or altered reference without approval.
+
+#### Scenario: Planning cohort consumption is incomplete or stale
+- **WHEN** a required heldout origin is missing, an origin is duplicated, the cohort/source changes, or both cohort and legacy fraction options are supplied
+- **THEN** publication SHALL reject without leaving a candidate or modifying original evidence
+- **AND** existing legacy split consumers SHALL remain compatible; explicit native Learning partitions SHALL match the mapped resolver result without inventing an inventory or launch authority.
+
 #### Scenario: Changed evidence, wrong cohort, budget or replay
 - **WHEN** original request/review/timing evidence changes, the native split maps to a different cohort, the copy budget fails, or the output already exists
 - **THEN** the corresponding operation SHALL reject without overwriting a published result, modifying original inputs or silently changing the selected set
