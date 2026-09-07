@@ -87,6 +87,59 @@ class SceneStateTest(unittest.TestCase):
                         "object_profile_id":"wood-cube-25mm-r001", **target["pose"]},
                         "object_profile":{"dimensions_mm":[25,25,25]}}, pose, "next-run", root=directory)
                     self.assertEqual(next_binding["release_slot"]["pose"], pose)
+                    cell.acknowledge_ready("parent-completed", expected_run_id="parent-run",
+                                           expected_plan_digest=parent_plan)
+                    restarted = scene_state.SceneStateStore(directory, "fr5-lab-a")
+                    position = restarted.object_position(object_profile_id="wood-cube-25mm-r001", dimensions_mm=[25,25,25])
+                    self.assertEqual(position["status"], "AVAILABLE", position)
+                    self.assertEqual(position["pose"], target["pose"])
+                    self.assertEqual((position["run_id"], position["plan_digest"]), ("reposition-run", plan["plan_digest"]))
+                    before = restarted.snapshot()
+                    ready_cell = cell.read()
+                    rebound = restarted.rebind_landed_source(
+                        object_profile_id="wood-cube-25mm-r001", dimensions_mm=[25,25,25], run_id="restarted-run",
+                        expected_scene_digest=position["scene_state_digest"], expected_slot_digest=position["slot_digest"],
+                        expected_cell_digest=position["cell_state_digest"])
+                    self.assertEqual(rebound["scene_state"]["objects"], before["scene_state"]["objects"])
+                    self.assertEqual(rebound["scene_state"]["slot_allocations"][source["slot_id"]], allocation)
+                    old_target = before["scene_state"]["slot_allocations"][target["slot_id"]]
+                    self.assertEqual(rebound["scene_state"]["slot_allocations"][target["slot_id"]],
+                                     {**old_target, "allowed_run_id":"restarted-run"})
+                    self.assertEqual(cell.read(), ready_cell)
+                    with self.assertRaisesRegex(ContractError, "SCENE_STATE_CHANGED"):
+                        restarted.rebind_landed_source(
+                            object_profile_id="wood-cube-25mm-r001", dimensions_mm=[25,25,25], run_id="conflicting-restart",
+                            expected_scene_digest=position["scene_state_digest"], expected_slot_digest=position["slot_digest"],
+                            expected_cell_digest=position["cell_state_digest"])
+                    import copy
+                    from tools.data_factory_recovery import write_json_atomic
+                    for conflict in ("newer_owner", "parent_plan", "active", "failed", "source_pending",
+                                     "wrong_child", "missing_source", "ambiguous_parent", "later_source", "unknown"):
+                        with self.subTest(conflict=conflict):
+                            state = copy.deepcopy(rebound["scene_state"])
+                            source_state = state["slot_allocations"][source["slot_id"]]
+                            write_json_atomic(cell.runtime_path("state.json"), ready_cell)
+                            if conflict in {"newer_owner", "parent_plan", "active", "failed"}:
+                                cell.mark_blocked("ROS_EXEC_FAILED" if conflict == "failed" else "EXECUTION_IN_PROGRESS",
+                                    "other-parent" if conflict == "newer_owner" else "parent-run",
+                                    canonical_digest("other-plan") if conflict == "parent_plan" else parent_plan)
+                                if conflict in {"newer_owner", "parent_plan"}:
+                                    cell.acknowledge_ready("fixture")
+                            elif conflict == "source_pending": source_state["state"] = "CONSUMED_PENDING_REVIEW"
+                            elif conflict == "wrong_child": source_state["allowed_run_id"] = "other-child"
+                            elif conflict == "missing_source": del state["slot_allocations"][source["slot_id"]]
+                            elif conflict == "ambiguous_parent": state["slot_allocations"][canonical_digest("duplicate")] = source_state
+                            elif conflict == "later_source": source_state["updated_at"] = ready_cell["updated_at"]
+                            elif conflict == "unknown": state["objects"]["cube-1"].update(state="UNKNOWN", pose=None, source="ROBOT_ACTION")
+                            write_json_atomic(restarted._path(), state)
+                            blocked = restarted.object_position(object_profile_id="wood-cube-25mm-r001", dimensions_mm=[25,25,25])
+                            self.assertEqual(blocked["status"], "BLOCKED", blocked)
+                            with self.assertRaises(ContractError):
+                                restarted.rebind_landed_source(
+                                    object_profile_id="wood-cube-25mm-r001", dimensions_mm=[25,25,25], run_id="unsafe-restart",
+                                    expected_scene_digest=blocked["scene_state_digest"], expected_slot_digest=canonical_digest(old_target),
+                                    expected_cell_digest=blocked["cell_state_digest"])
+                            self.assertEqual(restarted.read(), state)
 
     def test_only_confirmed_matching_execution_vacates_its_consumed_source(self):
         import copy

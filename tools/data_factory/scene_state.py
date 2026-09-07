@@ -484,9 +484,24 @@ class SceneStateStore:
                                   evidence_digest=slot["evidence_digest"])
                     if (slot["state"] in {"LANDED_FOR_NEXT_SOURCE", "CONSUMED_PENDING_REVIEW"}
                             and slot["updated_at"] == item["updated_at"]):
+                        # A motion-only child leaves cell ownership with its
+                        # parent. Confirmed release atomically vacates that
+                        # parent's source, retaining the exact child binding.
+                        # Reuse this durable relation after parent completion;
+                        # READY alone or a run-name prefix is not evidence.
+                        parent_sources = [source for source_id, source in scene["slot_allocations"].items()
+                            if source_id != slot_id
+                            and source["state"] == "AVAILABLE"
+                            and source["role"] == "DESTINATION_THEN_NEXT_SOURCE"
+                            and source["allowed_run_id"] == slot["evidence_run_id"]
+                            and (source["evidence_run_id"], source["evidence_plan_digest"])
+                            == (cell["run_id"], cell["plan_digest"])
+                            and datetime.fromisoformat(source["updated_at"].replace("Z", "+00:00"))
+                            < datetime.fromisoformat(slot["updated_at"].replace("Z", "+00:00"))]
                         if (cell_precedes_position
                                 or (cell["run_id"], cell["plan_digest"])
-                                == (slot["evidence_run_id"], slot["evidence_plan_digest"])):
+                                == (slot["evidence_run_id"], slot["evidence_plan_digest"])
+                                or cell["cell_ready"] and len(parent_sources) == 1):
                             result.update(status="AVAILABLE", reason=None)
                         else:
                             result["reason"] = "OBJECT_POSITION_NEWER_EXECUTION"
