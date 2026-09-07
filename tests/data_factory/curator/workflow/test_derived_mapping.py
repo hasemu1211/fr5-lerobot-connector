@@ -146,6 +146,14 @@ class DerivedMappedTrainingTest(unittest.TestCase):
             changed['parent']['provenance']['derivation']['receipt_digest'] = 'sha256:' + '0' * 64
             with self.assertRaises(ContractError):
                 approval.validate_episode_training_provenance(changed)
+            # Derived validation leaves the complete child identity to its
+            # consumer: mapping must bind that identity, not just raw ancestry.
+            for field in ('dataset_identity_digest', 'episode_content_digest'):
+                with self.subTest(derived_parent_field=field):
+                    changed = copy.deepcopy(first)
+                    changed['parent']['provenance'][field] = 'sha256:' + '0' * 64
+                    with self.assertRaisesRegex(ContractError, 'TRAINING_MAPPING_BINDING'):
+                        approval.validate_episode_training_provenance(changed)
             with self.assertRaisesRegex(CuratorError, 'OUTPUT_EXISTS'):
                 publish_mapped_training_request(requests, root / 'candidate', **options)
 
