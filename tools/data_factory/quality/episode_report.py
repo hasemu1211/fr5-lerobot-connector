@@ -297,7 +297,7 @@ def build_episode_report(
     from tools.data_factory.quality.phase_metrics import phase_timing_attribute
     from tools.data_factory.quality.plan_metrics import plan_quality_attribute
 
-    events = read_phase_events(phase_events_path)
+    events = read_phase_events(phase_events_path, plan=plan)
     if object_frame_context_inputs is not None:
         required = {"accepted_episode", "resolved_job", "motion_qualification"}
         if not isinstance(object_frame_context_inputs, Mapping) or set(object_frame_context_inputs) != required:
@@ -306,7 +306,7 @@ def build_episode_report(
     row_common = {**common, "plan": plan, "events": events, "recorder_rows": recorder_rows, "recorder_rows_digest": recorder_rows_digest, "recorder_ros_clock_type": recorder_ros_clock_type}
     attributes = [
         plan_quality_attribute(**common, plan=plan),
-        phase_timing_attribute(**common, events=events, recorder_rows=recorder_rows, recorder_rows_digest=recorder_rows_digest, recorder_ros_clock_type=recorder_ros_clock_type),
+        phase_timing_attribute(**common, plan=plan, events=events, recorder_rows=recorder_rows, recorder_rows_digest=recorder_rows_digest, recorder_ros_clock_type=recorder_ros_clock_type),
         joint_execution_attribute(**row_common, stall_epsilon_rad=stall_epsilon_rad),
         interaction_quality_attribute(**row_common, execution_evidence=execution_evidence),
     ]

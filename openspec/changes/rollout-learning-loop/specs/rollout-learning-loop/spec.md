@@ -93,6 +93,39 @@ automatic dataset commit or safe-reset claim.
 - **AND** an invalid sample rejects before approval or execution
 - **AND** sampled collision and CPU replay evidence do not qualify physical pickup
 
+### Requirement: Held execution identities remain bound through existing quality consumers
+
+The sole executor SHALL emit each held subsegment's distinct index and count from
+its exact approved plan. Canonical phase-event validation SHALL require that plan
+for multi-segment records, verify the plan/run and step evidence bindings, and
+reject non-integer or out-of-range indices/counts, inconsistent declarations,
+duplicate identities and reversed segment order. Legacy index 0/count 1 events
+SHALL retain their existing representation. Validation SHALL use the existing
+finite learned proposal bounds; a sidecar declaration SHALL NOT authorize an
+arbitrary multi-segment execution.
+
+Existing episode, timing, joint and interaction quality consumers SHALL carry
+the same plan through canonical phase/row joining. Joint metrics SHALL select the
+actual indexed child step, excluding gripper holds from arm-motion metrics.
+Learned close/lift interaction meaning SHALL remain explicitly unqualified;
+available timing or joint metrics SHALL NOT imply task success or dataset admission.
+
+#### Scenario: Three held subsegments have different recorder row counts
+
+- **WHEN** the existing emitter and report consumer observe bound subsegments
+  0, 1 and 2 with respectively 1, 2 and 3 same-clock recorder rows
+- **THEN** timing preserves counts [1, 2, 3] and reports exactly 6 joined rows
+- **AND** arm metrics use the actual targets of arm children 0 and 2
+- **AND** gripper child 1 is not counted as an arm trajectory
+- **AND** interaction quality remains NOT_AVAILABLE with LEARNED_INTERACTION_UNQUALIFIED
+
+#### Scenario: Segment metadata cannot be trusted against its plan
+
+- **WHEN** the plan is absent or mismatched, a step evidence digest belongs to
+  another child, or a segment event is duplicated or out of order
+- **THEN** the canonical consumer rejects instead of reporting overwritten row
+  counts as AVAILABLE
+
 ### Requirement: Offline solver evidence must separate numerical and deployed usefulness
 
 Rollout's offline native comparison SHALL reuse canonical checkpoint admission

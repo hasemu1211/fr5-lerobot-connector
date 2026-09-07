@@ -214,6 +214,13 @@ class FinitePlanTest(unittest.TestCase):
     def test_held_reference_replay_uses_one_gripper_goal_then_fresh_arm_start(self):
         job, executor, transport, state, now, sent, _, calls = self.make_held_job(initial_feedback=.02079)
         frozen = copy.deepcopy(executor.runs["run"]["plan"])
+        from tools.data_factory.quality.phase_events import validate_phase_event, validate_phase_event_sequence
+        events = []
+        def emit(record):
+            events.append(validate_phase_event(record, plan=frozen))
+            return True
+        executor._phase_event_writer = SimpleNamespace(emit=emit, ready=True, error_code=None)
+        executor.event_clock = lambda: (int(now[0] * 1e9), "SYSTEM_TIME")
         self.assertEqual(sent, [])
 
         self.assertEqual(calls, [])
@@ -254,6 +261,10 @@ class FinitePlanTest(unittest.TestCase):
         self.assertEqual(len(diagnostic["execution_trace"]["segments"]), 3)
         self.assertEqual(diagnostic["task_effectiveness"], "UNKNOWN")
         self.assertNotIn(("recorder", "commit"), calls)
+        self.assertEqual(validate_phase_event_sequence(events, plan=frozen), events)
+        for event_type in ("GOAL_ACCEPTED", "ACTION_TERMINAL"):
+            self.assertEqual([(e["segment_index"], e["segment_count"]) for e in events if e["event"] == event_type],
+                             [(0, 3), (1, 3), (2, 3)])
         from tools.data_factory.rollout.finite_plan import validate_execution_trace
         trace = copy.deepcopy(diagnostic["execution_trace"])
         trace["terminal_state"][0] += .001
@@ -404,6 +415,93 @@ class FinitePlanTest(unittest.TestCase):
         t._service = lambda *args: SimpleNamespace(valid=args[2].robot_state.joint_state.position[-1] != .01218)
         with self.assertRaisesRegex(ContractError, "COLLISION_DETECTED"):
             t._check_plan_collision(plan, .021)
+
+    def held_phase_events(self):
+        from tools.data_factory.quality.phase_events import validate_phase_event
+        _, executor, _, _, _, _, _, _ = self.make_held_job()
+        run = executor.runs["run"]
+        run["execution"] = {"phase_event_sequence": 0, "step_index": 0}
+        events, rows, clock = [], [], [10.]
+        def emit(record):
+            events.append(validate_phase_event(record, plan=run["plan"]))
+            return True
+        executor._phase_event_writer = SimpleNamespace(emit=emit)
+        executor.event_clock = lambda: (int(clock[0] * 1e9), "SYSTEM_TIME")
+        for index, step in enumerate(run["plan"]["steps"][0]["held_target_segments"]):
+            run["execution"]["learned_segment_index"] = index
+            clock[0] = 10. + index * 2
+            executor._emit_phase_event(run, "GOAL_ACCEPTED", step, "ACCEPTED", {"step": step, "accepted": True})
+            rows.extend({"target_ros_s": clock[0] + (j + 1) / (index + 2)} for j in range(index + 1))
+            clock[0] += 1.
+            executor._emit_phase_event(run, "ACTION_TERMINAL", step, "SUCCEEDED", {"step": step, "terminal_status": "SUCCEEDED"})
+        self.assertEqual(len(events), 6)
+        return run["plan"], events, rows
+
+    def test_held_phase_event_identity_requires_exact_plan_and_unique_segments(self):
+        from tools.data_factory.quality.phase_events import validate_phase_event_sequence, validate_phase_event
+        plan, events, _ = self.held_phase_events()
+        self.assertEqual(validate_phase_event_sequence(events, plan=plan), events)
+        self.assertEqual([(event["segment_index"], event["segment_count"]) for event in events[::2]], [(0, 3), (1, 3), (2, 3)])
+        with self.assertRaisesRegex(ContractError, "PHASE_EVENT_PLAN_REQUIRED"):
+            validate_phase_event_sequence(events)
+        for changes, code in (({"segment_index": True}, "PHASE_EVENT_SEGMENT"),
+                              ({"segment_count": 2.5}, "PHASE_EVENT_SEGMENT"),
+                              ({"segment_count": 2}, "PHASE_EVENT_SEGMENT"),
+                              ({"segment_index": 3}, "PHASE_EVENT_SEGMENT"),
+                              ({"segment_index": 1}, "PHASE_EVENT_SEGMENT_BINDING"),
+                              ({"plan_digest": canonical_digest("other")}, "PHASE_EVENT_PLAN_BINDING")):
+            with self.subTest(changes=changes), self.assertRaisesRegex(ContractError, code):
+                validate_phase_event({**events[0], **changes}, plan=plan)
+        with self.assertRaisesRegex(ContractError, "PHASE_EVENT_SEGMENT_DUPLICATE"):
+            validate_phase_event_sequence([*events, {**events[-2], "sequence": 6}], plan=plan)
+        with self.assertRaisesRegex(ContractError, "PHASE_EVENT_SEGMENT_ORDER"):
+            validate_phase_event_sequence([*events[2:4], *events[:2]], plan=plan)
+
+    def test_held_phase_rows_reach_existing_report_without_count_or_arm_aliasing(self):
+        import tempfile
+        from pathlib import Path
+        from tools.data_factory.quality.episode_report import build_episode_report
+        from tools.data_factory.quality.phase_events import PhaseEventWriter, read_phase_events
+        from tools.data_factory.quality.phase_metrics import phase_timing_attribute
+        plan, events, rows = self.held_phase_events()
+        for row in rows:
+            index = int((row["target_ros_s"] - 10.) // 2)
+            step = plan["steps"][0]["held_target_segments"][index]
+            row["action"] = [*step["final_joint_state"], step["gripper_position_m"]]
+            row["observation.state"] = [*step["final_joint_state"], .021 if index == 0 else .01218]
+        common = {"run_id": "run", "resolved_job_digest": plan["resolved_job_digest"],
+                  "plan_digest": canonical_digest(plan), "plan": plan,
+                  "recorder_rows": rows, "recorder_rows_digest": canonical_digest(rows),
+                  "recorder_ros_clock_type": "SYSTEM_TIME"}
+        with tempfile.TemporaryDirectory() as directory:
+            sidecar = Path(directory) / "phase_events.jsonl"
+            writer = PhaseEventWriter(sidecar, plan=plan)
+            for event in events:
+                self.assertTrue(writer.emit(event))
+            self.assertTrue(writer.close())
+            self.assertEqual(read_phase_events(sidecar, plan=plan), events)
+            report = build_episode_report(Path(directory) / "episode_quality.json", **common,
+                phase_events_path=sidecar, execution_evidence={}, stall_epsilon_rad=1e-4,
+                technical_validator={"schema_version": "data_factory.technical_validator_ref.v1",
+                                     "status": "PASS", "result_digest": canonical_digest("synthetic-only")})
+        attributes = {item["attribute"]: item for item in report["attributes"]}
+        timing = attributes["phase_timing_integrity"]
+        self.assertEqual(timing["status"], "AVAILABLE")
+        self.assertEqual([item["row_count"] for item in timing["metrics"]["phase_intervals"]], [1, 2, 3])
+        self.assertEqual(timing["metrics"]["joined_row_count"], 6)
+        joints = attributes["joint_execution_quality"]["metrics"]["phase_metrics"]
+        self.assertEqual([item["segment_index"] for item in joints], [0, 2])
+        self.assertEqual([item["row_count"] for item in joints], [1, 3])
+        self.assertEqual([item["endpoint_joint_error_max_rad"] for item in joints], [0., 0.])
+        interaction = attributes["interaction_quality"]
+        self.assertEqual(interaction["status"], "NOT_AVAILABLE")
+        self.assertEqual(interaction["flags"], ["LEARNED_INTERACTION_UNQUALIFIED"])
+        self.assertIsNone(interaction["metrics"]["gripper_close"])
+        self.assertIsNone(interaction["metrics"]["lift_continuity"])
+        with self.assertRaisesRegex(ContractError, "PHASE_EVENT_SEGMENT_DUPLICATE"):
+            phase_timing_attribute(**common, events=[*events, {**events[0], "sequence": 6}])
+        with self.assertRaisesRegex(ContractError, "PHASE_EVENT_PLAN_REQUIRED"):
+            phase_timing_attribute(**{k: v for k, v in common.items() if k != "plan"}, events=events)
 
     def test_post_inference_source_clock_freshness_and_reentrant_inference(self):
         now = [10.]

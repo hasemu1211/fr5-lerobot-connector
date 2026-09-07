@@ -325,14 +325,17 @@ class PickupExecutor:
         execution["phase_event_sequence"] += 1
         try:
             event_ros_time_ns, ros_clock_type = self.event_clock()
+            segments = run["plan"]["steps"][0].get("held_target_segments") if step["phase"] == "LEARNED_CHUNK" else None
+            index = execution.get("learned_segment_index", 0) if segments else 0
+            count = len(segments) if segments else 1
             record = {
                 "schema_version": "data_factory.phase_event.v1",
                 "run_id": run["plan"]["run_id"],
                 "plan_digest": run["digest"],
                 "sequence": sequence,
                 "phase": step["phase"],
-                "segment_index": None if event in {"HOLD_ENTERED", "DECISION_RECEIVED"} else 0,
-                "segment_count": None if event in {"HOLD_ENTERED", "DECISION_RECEIVED"} else 1,
+                "segment_index": None if event in {"HOLD_ENTERED", "DECISION_RECEIVED"} else index,
+                "segment_count": None if event in {"HOLD_ENTERED", "DECISION_RECEIVED"} else count,
                 "event": event,
                 "event_ros_time_ns": event_ros_time_ns,
                 "monotonic_time_ns": int(round(self.monotonic_clock() * 1_000_000_000)),
@@ -912,7 +915,8 @@ class PickupExecutor:
                 if self.phase_events_root is not None:
                     path = self.phase_events_root / run["plan"]["run_id"] / "phase_events.jsonl"
                     try:
-                        self._phase_event_writer = PhaseEventWriter(path)
+                        event_plan = run["plan"] if "held_target_segments" in run["plan"]["steps"][0] else None
+                        self._phase_event_writer = PhaseEventWriter(path, plan=event_plan)
                         run["execution"]["phase_events_path"] = str(path)
                         run["execution"]["behavior_report_status"] = "PENDING"
                     except Exception:
