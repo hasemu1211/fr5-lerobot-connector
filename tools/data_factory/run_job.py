@@ -2284,7 +2284,8 @@ def _write_episode_ledger(
 
 def run_learned_plan_only(payload, cancel, publish, *, checkpoint, observation,
                           instruction, period_s, max_observation_age_s=.3,
-                          device="cpu", resolver=resolve_inputs, executor_factory=_executor):
+                          device="cpu", held_gripper_targets=False,
+                          resolver=resolve_inputs, executor_factory=_executor):
     """Native checkpoint-to-existing-planner entry point; no recorder or motion.
 
     The returned exact finite plan still needs all existing physical bindings and
@@ -2302,6 +2303,7 @@ def run_learned_plan_only(payload, cancel, publish, *, checkpoint, observation,
             observation() if callable(observation) else observation, instruction=instruction,
             robot_description=Path(payload["urdf"]).read_text(),
             period_s=period_s, max_observation_age_s=max_observation_age_s,
+            held_gripper_targets=held_gripper_targets,
             velocity_scaling=min(step["limits"]["velocity_scaling"] for step in source["steps"] if "velocity_scaling" in step["limits"]),
         )
         program = compile_program(source, proposal)

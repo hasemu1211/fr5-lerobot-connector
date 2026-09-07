@@ -29,8 +29,10 @@ condition-level task-effect/data-utility evidence remain separate outcomes.
 
 - [x] Distinguish controller-reference targets from observed feedback using native source and primary controller documentation.
 - [x] Add explicit bound held-target proposals consumed by existing OneJob, sole executor and ROS transport without modifying approved arm commands.
+- [x] Expose the default-false held-target option through the native checkpoint-to-plan entrypoint, verified with saved processors and the existing planner consumer.
 - [x] Retain fresh start/terminal observations in the canonical learned trace, preserving failure, cancellation and data-admission boundaries.
 - [x] Replay held completion and failure cases with synthetic clients and actual ROS serializers; check limits, delayed snapshot, cancellation and collision samples.
+- [ ] Preserve distinct, exact-plan-bound subsegment identities in existing phase/row quality consumers before integration; repeated phase identities must not overwrite row counts or classify gripper windows as arm motion.
 - [ ] Root integrates the scoped change and reviews the exact plan before any separately authorized physical baseline.
 - [ ] Establish actual FR5 target tracking, task effect and safe-reset evidence; CPU replay does not discharge physical qualification or continuing data-utility ownership.
 

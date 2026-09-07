@@ -312,6 +312,30 @@ class NativePolicyTest(unittest.TestCase):
         self.assertTrue(result["ok"], result)
         self.assertEqual(result["data"]["finite_learned_plan"]["plan"]["execution_kind"], "FINITE_LEARNED_PROBE")
         self.assertEqual(transport2.sent, [])
+        # The top native API must expose the same explicit held-target opt-in;
+        # exercise its real inference/program/planner consumers, not a kwargs spy.
+        held_source = source()
+        held_source["steps"][-1]["limits"]["execution_timeout_s"] = 6.
+        held_source["gripper_requirements"].update(command_position_m=.012, acceptable_feedback_m={"min": .012, "max": .014})
+        close = next(step for step in held_source["steps"] if step["phase"] == "GRIPPER_CLOSE")
+        close["gripper_position_m"] = .012
+        close["limits"]["completion_tolerance_m"] = .014 - .012
+        held_transport = Transport()
+        held_transport.current = [0.] * 7
+        held_transport.build_learned_segment = mock.Mock(return_value=b"synthetic-held-segment")
+        held_executor = PickupExecutor(held_transport)
+        held_child = SimpleNamespace(request=lambda request, _cancel: held_executor.process(request), close=lambda **_: None)
+        with mock.patch.object(NativeSmolVLA, "load", return_value=native):
+            held_result = run_learned_plan_only({**payload, "run_id": "native-held-runner"}, threading.Event(), lambda _: None,
+                checkpoint=self.policy_dir, observation=capture, instruction="synthetic probe", period_s=1.5,
+                held_gripper_targets=True,
+                resolver=lambda _: ({"normalized_job": {}, "resolved_job_digest": held_source["resolved_job_digest"]}, held_source, SCENE),
+                executor_factory=lambda _: held_child)
+        self.assertTrue(held_result["ok"], held_result)
+        held_plan = held_result["data"]["finite_learned_plan"]["plan"]
+        self.assertEqual(held_plan["learned_proposal"]["schema_version"], "data_factory.finite_learned_held_target_proposal.v1")
+        self.assertEqual([step["type"] for step in held_plan["steps"][0]["held_target_segments"]], ["GRIPPER", "ARM"])
+        self.assertEqual(held_transport.sent, [])
         (self.policy_dir / 'model.safetensors').write_bytes(b'changed')
         with self.assertRaisesRegex(ContractError, 'LEARNED_CHECKPOINT_CHANGED'):
             native(value)
