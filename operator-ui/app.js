@@ -294,6 +294,16 @@ function validateView(value) {
   }
   validateActiveEpisodePlanCoherence(view);
   validateRuntimeRepositionEvidence(view);
+  if (view.stored_reviews !== undefined && view.stored_reviews !== null) {
+    const stored = view.stored_reviews;
+    assertObject(stored, "STORED_REVIEW_INVALID");
+    if (!["NOT_CHECKED", "READY"].includes(stored.status) || typeof stored.busy !== "boolean"
+        || !Number.isInteger(stored.excluded_count) || stored.excluded_count < 0
+        || !Array.isArray(stored.episodes) || stored.episodes.some((item) => !item
+          || typeof item.run_id !== "string" || !Number.isInteger(item.episode_index)
+          || !["PENDING", "PASS", "FAIL", "UNCERTAIN"].includes(item.status)
+          || item.training_authorized !== false)) throw new TypeError("STORED_REVIEW_INVALID");
+  }
   if (view.candidate_review !== undefined && view.candidate_review !== null) {
     assertObject(view.candidate_review, "CANDIDATE_REVIEW_INVALID");
     if (!DIGEST_PATTERN.test(view.candidate_review.review_binding_digest)
@@ -1658,6 +1668,25 @@ function episodeRetentionLabel(item) {
 }
 
 function renderResults(view) {
+  const stored = view.stored_reviews;
+  const storedControls = document.querySelector("#stored-review-controls");
+  if (storedControls) {
+    storedControls.hidden = !stored;
+    if (stored) {
+      document.querySelector("#refresh-stored-reviews").disabled = !canIntent("refresh_stored_reviews");
+      const select = document.querySelector("#stored-review-select");
+      const options = `<option value="">현재 수집의 리뷰</option>` + stored.episodes.map((item) =>
+        `<option value="${escapeHtml(item.run_id)}">${escapeHtml(item.task_id ?? item.checklist_id)} · #${escapeHtml(item.episode_index)} · ${escapeHtml(semanticReviewLabel(item.status))} · ${escapeHtml(item.run_id)}</option>`).join("");
+      if (select.dataset.options !== options) { select.innerHTML = options; select.dataset.options = options; }
+      select.value = stored.selected_run_id ?? "";
+      select.disabled = !canIntent("select_stored_review");
+      const pending = stored.episodes.filter((item) => item.status === "PENDING").length;
+      document.querySelector("#stored-review-status").textContent = stored.busy ? "저장된 근거를 확인하고 있습니다. 수집 진행은 별도로 계속됩니다."
+        : stored.error ? "확인이 끝나지 않았습니다. 리뷰를 다시 불러와 저장된 결과를 확인하세요."
+        : stored.status === "NOT_CHECKED" ? "저장된 리뷰를 아직 조회하지 않았습니다. 불러오기를 눌러 확인하세요."
+        : `조회 시점의 분류 대기 ${pending}개 · 확인된 에피소드 ${stored.episodes.length}개${stored.excluded_count ? ` · 근거 확인 불가 ${stored.excluded_count}개` : ""}. 새 기록이나 외부 판정은 다시 불러와 확인하세요.`;
+    }
+  }
   const history = view.episode_history ?? [];
   document.querySelector("#episode-results").innerHTML = history.length ? history.map((item, index) => {
     const technical = item.technical_evidence?.status ?? item.technical_status;
@@ -1679,7 +1708,7 @@ function renderResults(view) {
     delete reviewQueue.dataset.reviewBindingDigest;
     delete reviewQueue.dataset.reviewRenderKey;
     delete reviewQueue.dataset.reviewReasonDraft;
-    reviewQueue.innerHTML = `<div class="notice"><strong>분류 대기 0개</strong><span>${escapeHtml(passed)}개 에피소드가 기술 검사를 통과했습니다. 보존 상태와 학습 사용 승인은 별도입니다.</span></div>`;
+    reviewQueue.innerHTML = `<div class="notice"><strong>현재 열린 리뷰가 없습니다</strong><span>현재 수집에서 ${escapeHtml(passed)}개 에피소드가 기술 검사를 통과했습니다. 저장된 리뷰는 위에서 불러와 선택하세요. 보존 상태와 학습 사용 승인은 별도입니다.</span></div>`;
     return;
   }
   const pending = review.status === "PENDING" && canIntent("review_candidate");
@@ -1691,6 +1720,10 @@ function renderResults(view) {
   const reasons = Array.isArray(review.reasons) ? review.reasons : [];
   const pose = review.coverage_condition;
   const context = [
+    review.source === "STORED" ? `${review.task_id ?? review.checklist_id} · #${review.episode_index} · ${review.run_id}` : null,
+    review.instruction ?? null,
+    review.spatial_roles?.map((item) => `${item.role === "SOURCE" ? "출발" : "도착"} ${item.pose.place_id} · X ${item.pose.x_mm} · Y ${item.pose.y_mm} · ${item.pose.yaw_deg}°`).join(" → ") || null,
+    review.source === "STORED" && review.reviewed_by ? `판정자 ${review.reviewed_by} · ${review.reviewed_at}` : null,
     Number.isInteger(review.episode_number) ? `에피소드 ${review.episode_number}` : null,
     Number.isInteger(review.queue_remaining) ? `남은 분류 ${review.queue_remaining}개` : null,
     pose && Number.isFinite(pose.x_mm) && Number.isFinite(pose.y_mm) && Number.isFinite(pose.yaw_deg)
@@ -1699,7 +1732,7 @@ function renderResults(view) {
   ].filter(Boolean).join(" · ");
   const reviewRenderKey = JSON.stringify([
     review.review_binding_digest, review.status, review.queue_remaining,
-    pending, reasons, pose,
+    pending, reasons, pose, context,
   ]);
   if (reviewQueue.dataset.reviewRenderKey === reviewRenderKey) return;
   const previousReason = document.querySelector("#candidate-reason");
@@ -2215,6 +2248,8 @@ document.querySelector("#review-queue").addEventListener("click", (event) => {
   if (choice !== "PASS" && !reason) return select.reportValidity();
   submitIntent("review_candidate", {review_binding_digest: currentView.candidate_review.review_binding_digest, choice, reason});
 });
+document.querySelector("#refresh-stored-reviews")?.addEventListener("click", () => submitIntent("refresh_stored_reviews", {}));
+document.querySelector("#stored-review-select")?.addEventListener("change", (event) => submitIntent("select_stored_review", {run_id: event.target.value || null}));
 document.querySelector("#same-settings-action").addEventListener("click", (event) => {
   const button = event.target.closest("[data-op]");
   if (button) submitIntent(button.dataset.op);

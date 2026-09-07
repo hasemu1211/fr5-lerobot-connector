@@ -412,6 +412,7 @@ class CollectionOperatorApplication:
         collection_evidence_call: Callable[[], Mapping[str, Any]] | None = None,
         object_position_call: Callable[[Mapping[str, Any]], Mapping[str, Any] | None] | None = None,
         object_position_declare_call: Callable[..., Mapping[str, Any]] | None = None,
+        stored_reviews=None,
     ):
         if (
             not isinstance(operator_label, str)
@@ -459,6 +460,9 @@ class CollectionOperatorApplication:
         self.campaign_factory = campaign_factory
         self.object_position_call = object_position_call
         self.object_position_declare_call = object_position_declare_call
+        self.stored_reviews = stored_reviews
+        self._stored_review_busy = False
+        self._stored_review_error = None
         self.workspace_manager_factory = workspace_manager_factory
         self.workspace_snapshot_call = workspace_snapshot_call
         self.workspace_preview_call = workspace_preview_call
@@ -507,6 +511,8 @@ class CollectionOperatorApplication:
             "authorize_campaign": self.authorize_campaign,
             "cancel_session": self.cancel_session,
             "review_candidate": self.review_candidate,
+            "refresh_stored_reviews": self.refresh_stored_reviews,
+            "select_stored_review": self.select_stored_review,
             "new_campaign_same_settings": self.new_campaign_same_settings,
             "refresh_collection_advice": self.refresh_collection_advice,
             "choose_collection_advice": self.choose_collection_advice,
@@ -1232,6 +1238,16 @@ class CollectionOperatorApplication:
                 operations.append("new_campaign_same_settings")
         else:
             operations = []
+        stored_reviews = None if self.stored_reviews is None else self.stored_reviews.projection()
+        if stored_reviews is not None:
+            stored_reviews.update(busy=self._stored_review_busy, error=self._stored_review_error)
+            if not self._stored_review_busy:
+                operations.extend(["refresh_stored_reviews", "select_stored_review"])
+            if stored_reviews.get("selected_run_id") is not None:
+                operations = [op for op in operations if op != "review_candidate"]
+                if (not self._stored_review_busy and self._stored_review_error is None
+                        and stored_reviews.get("candidate_review", {}).get("status") == "PENDING"):
+                    operations.append("review_candidate")
         collection_advice = self._advice_projection()
         if workflow == "AUTHORING" and self._collection_source is not None:
             operations.append("refresh_collection_advice")
@@ -1604,9 +1620,13 @@ class CollectionOperatorApplication:
                 if isinstance(inner, Mapping) else None
             ),
             "candidate_review": (
+                ({**stored_reviews["candidate_review"], "status": "UNAVAILABLE"}
+                 if self._stored_review_error is not None else copy.deepcopy(stored_reviews["candidate_review"]))
+                if stored_reviews is not None and stored_reviews.get("selected_run_id") is not None else
                 copy.deepcopy(inner.get("candidate_review"))
                 if isinstance(inner, Mapping) else None
             ),
+            "stored_reviews": stored_reviews,
             "episode_history": copy.deepcopy(history if isinstance(history, list) else []),
             "effect_counts": (
                 copy.deepcopy(inner.get("effect_counts", {}))
@@ -2373,6 +2393,8 @@ class CollectionOperatorApplication:
         return self._forward("cancel_session", payload)
 
     def review_candidate(self, payload: dict[str, Any], _view: dict[str, Any]) -> dict[str, Any]:
+        if self.stored_reviews is not None and self.stored_reviews.projection().get("selected_run_id") is not None:
+            return self._stored_review_intent(lambda: self.stored_reviews.review(payload))
         projection = self.projection()
         if (
             projection["workflow_state"] not in {"RUNNING", "BLOCKED", "TERMINAL"}
@@ -2380,6 +2402,32 @@ class CollectionOperatorApplication:
         ):
             raise ContractError("OPERATOR_APPLICATION_STATE")
         return self._forward("review_candidate", payload)
+
+    def _stored_review_intent(self, call):
+        if self.stored_reviews is None or self._stored_review_busy:
+            raise ContractError("STORED_REVIEW_BUSY")
+        self._stored_review_busy = True
+        self._stored_review_error = None
+        def complete(value):
+            self._stored_review_busy = False
+            return value, True, None
+        def failed(exc, _value):
+            self._stored_review_busy = False
+            self._stored_review_error = "STORED_REVIEW_REFRESH_REQUIRED"
+            return True, None
+        # Canonical filesystem checks must not hold the operator intent lock:
+        # current execution facts and stop remain independently accessible.
+        return UnlockedIntent(run=call, complete=complete, failed=failed)
+
+    def refresh_stored_reviews(self, payload, _view):
+        if payload:
+            raise ContractError("STORED_REVIEW_FIELDS")
+        return self._stored_review_intent(self.stored_reviews.refresh)
+
+    def select_stored_review(self, payload, _view):
+        if set(payload) != {"run_id"}:
+            raise ContractError("STORED_REVIEW_FIELDS")
+        return self._stored_review_intent(lambda: self.stored_reviews.select(payload["run_id"]))
 
     def recover_home(self, payload: dict[str, Any], _view: dict[str, Any]) -> dict[str, Any]:
         projection = self.projection()

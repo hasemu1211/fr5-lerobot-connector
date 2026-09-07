@@ -237,6 +237,24 @@ changing physical or training authority. Observation SHALL NOT repair artifacts.
 - **AND** an old review intent cannot overwrite that decision or change its reviewer
 - **AND** unchanged pending candidates do not trigger repeated full ledger validation.
 
+### Requirement: Committed Web reviews outlive the collecting campaign
+
+The Collection application SHALL let people discover and select committed raw episode reviews independently of campaign and process lifetime. The existing native candidate and episode-ledger owners remain canonical; the application SHALL NOT reconstruct an execution campaign to review stored data. Web and automation use the same intents, with server-owned paths and reviewer identity and exact candidate/context comparison. The next consumer is existing Curator selection; semantic PASS remains distinct from training authorization.
+
+#### Scenario: Restart or a newer campaign leaves older reviews accessible
+
+- **WHEN** a fresh application has no campaign, or a newer campaign is being authored or executed
+- **THEN** the person can explicitly load committed reviews and open an episode by its native identity, with available task/direction context and current recorded decision
+- **AND** aborted attempts without committed ledgers do not become candidates; unvalidated evidence is reported separately, and an inventory not yet read is never presented as zero pending reviews
+- **AND** review selection survives campaign replacement, while expensive evidence reads leave execution observation and stop independently available.
+
+#### Scenario: A review response or ledger projection is interrupted
+
+- **WHEN** the native candidate decision was committed but the caller lost its response or the secondary ledger projection did not finish
+- **THEN** state recovery exposes the recorded result, and explicit refresh may finish its native ledger projection without issuing another semantic decision or changing its reviewer
+- **AND** ordinary view polling does not repair artifacts; stale or conflicting candidate/context identities and unknown or client-supplied paths reject without changing the recorded decision
+- **AND** source episodes, physical authority, retention and training authorization remain unchanged.
+
 ### Requirement: Restore the last execution-derived object position
 
 The Collection application SHALL restore the exact last eligible object pose from the existing durable scene and execution lineage on supported production-session restart and campaign replacement. The wooden object remains at that position until a reported manual move or invalidating execution evidence; images SHALL NOT be a prerequisite. The Web and automation surfaces SHALL consume the same native position, provenance and current-view binding without path or digest transcription. Restoring a draft SHALL NOT confer motion, semantic, quality or training approval. The next consumer is the existing scene-bound collection planner and lifecycle owner.

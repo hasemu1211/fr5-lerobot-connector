@@ -4385,6 +4385,8 @@ def build_physical_operator_application(
         )
         return console
 
+    from tools.data_factory.operator.workflow.stored_reviews import StoredCandidateReviews
+
     application = CollectionOperatorApplication(
         session_id=session_id,
         operator_label=operator_label,
@@ -4411,6 +4413,8 @@ def build_physical_operator_application(
         start_pose_capture_call=start_pose_capture_call,
         initial_environment=initial_environment,
         effect_scope="PHYSICAL",
+        stored_reviews=StoredCandidateReviews(repository / "outputs/data_factory/runs",
+                                             operator_label=operator_label, clock=clock),
         object_position_call=object_position_call,
         object_position_declare_call=object_position_declare_call,
     )

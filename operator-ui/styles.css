@@ -20,6 +20,12 @@
 }
 
 * { box-sizing: border-box; }
+.stored-review-panel { margin-block: 1.5rem; padding: 1.5rem; border: 1px solid var(--line); border-radius: .4rem; background: var(--panel); scroll-margin-top: 5rem; }
+#stored-review-controls { display: flex; flex-wrap: wrap; align-items: end; gap: 1rem; margin-bottom: 1rem; }
+#stored-review-controls[hidden] { display: none; }
+#stored-review-controls label { flex: 1 1 18rem; min-width: 0; }
+#stored-review-select { width: 100%; }
+#stored-review-status { flex-basis: 100%; margin: 0; color: var(--muted); }
 html { min-width: 320px; }
 body { min-height: 100vh; margin: 0; background: var(--paper); }
 button, input, select { font: inherit; }

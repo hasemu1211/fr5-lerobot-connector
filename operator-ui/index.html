@@ -41,6 +41,7 @@
         <li><button type="button" data-step-target="results"><span>05</span><strong>결과</strong><small>검토와 커버리지</small></button></li>
         <li><button type="button" data-step-target="next"><span>06</span><strong>다음 수집</strong><small>새 계획</small></button></li>
       </ol>
+      <a href="#stored-review-panel">저장된 에피소드 검토</a>
     </nav>
 
     <div class="work-area">
@@ -201,7 +202,6 @@
             <div><p class="step-number">05 · 수집 뒤 확인</p><h2 id="results-title">결과</h2></div>
             <p>수집이 끝나면 기술 검사를 통과한 에피소드를 사용 후보·제외·보류로 분류할 수 있습니다.</p>
           </header>
-          <div id="review-queue"></div>
           <div class="result-layout"><div><h3>에피소드 결과</h3><ol id="episode-results" class="episode-results"></ol></div><div><h3>수집 커버리지</h3><div id="coverage-summary" class="coverage-summary"></div></div></div>
           <div class="step-actions"><button id="results-next" type="button">다음 수집 보기</button></div>
         </section>
@@ -216,6 +216,17 @@
           </div>
         </section>
       </div>
+
+      <section id="stored-review-panel" class="stored-review-panel" aria-labelledby="stored-review-title">
+        <h2 id="stored-review-title">저장된 에피소드 검토</h2>
+        <p>수집을 계속하거나 새 계획을 만든 뒤에도 저장된 에피소드를 검토할 수 있습니다.</p>
+        <div id="stored-review-controls" hidden>
+          <button id="refresh-stored-reviews" type="button" class="secondary-button">저장된 리뷰 불러오기</button>
+          <label for="stored-review-select">검토할 에피소드<select id="stored-review-select"><option value="">현재 수집의 리뷰</option></select></label>
+          <p id="stored-review-status" role="status"></p>
+        </div>
+        <div id="review-queue"></div>
+      </section>
 
       <details id="technical-details" class="technical-details">
         <summary>기술 정보</summary>
