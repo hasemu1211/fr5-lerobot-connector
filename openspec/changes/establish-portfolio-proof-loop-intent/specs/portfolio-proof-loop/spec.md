@@ -263,6 +263,12 @@ Portfolio 표현 책임자는 핵심 기술을 새로 소개하거나 설명의 
 - **AND** 데이터 보강은 알려진 조건별 공백과 수집 가치에 따라 독립적으로 준비할 수 있고 모든 학습 설정 비교의 완료를 선행 조건으로 요구하지 않는다
 - **AND** 검증 손실, 실행 가능한 checkpoint 및 시연 생성기의 성공은 학습 정책의 실물 작업 성능을 대신하지 않으며, 평가와 준비를 포함한 전체 비용으로 실험 가치를 판단한다
 
+#### Scenario: Research findings improve subsequent acquisition and data use
+- **WHEN** 수집·선별·학습이 진행되는 동안 새로운 연구 또는 실험 결과가 다음 데이터의 조건·구성·관측 표현을 바꿀 가치가 있다
+- **THEN** 해당 owner는 외부에서 보고된 효과와 현재 환경에서 검증한 효과를 구분하고, 기대 효용·적용 비용·기존 데이터 재사용 가능성을 근거로 다음 수집·선별·학습 비교에 반영하거나 반영하지 않는 이유를 정한다
+- **AND** 이미 승인된 진행 중 실행의 입력·계획을 소급 변경하지 않고, 변경된 조건은 다음 적절한 실행 경계에서 기존 owner와 native admission을 통해 적용하며, 관련 없는 연구나 구현 완료를 유효한 수집의 선행 조건으로 삼지 않는다
+- **AND** 원본과 기존 판정·분할을 보존하고 파생본·제외·혼합 선택은 기존 request와 provenance로 추적하며, 후속 비교가 가설을 반박하면 구성과 공개 설명도 그 근거에 맞춰 수정한다
+
 #### Scenario: New evidence challenges an intent boundary
 - **WHEN** 조사 가능한 engineering unknown을 해소한 뒤에도 가치·안전·의미에 관한 선택이 남는다
 - **THEN** 기존 Goal과 acceptance를 자동 변경하지 않고 bounded human decision을 요청한다
