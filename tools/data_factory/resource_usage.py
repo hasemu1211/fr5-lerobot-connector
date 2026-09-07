@@ -265,6 +265,8 @@ class ResourceMonitor:
                 "finalization_round_trip_seconds": {"count": len(self._finalization_round_trips), "p95": self._p95(self._finalization_round_trips), "max": max(self._finalization_round_trips, default=None)},
                 "recorder": {"queue_high_water": recorder_metrics.get("writer_queue_high_water", recorder_metrics.get("writer_queue")),
                              "queue_drops": recorder_metrics.get("writer_queue_drops"), "alignment_failures": recorder_metrics.get("alignment_failures"),
+                             **({"image_writer": copy.deepcopy(recorder_metrics["image_writer"])}
+                                if isinstance(recorder_metrics.get("image_writer"), dict) else {}),
                              **({"commit_stage_seconds": copy.deepcopy(recorder_metrics["commit_stage_seconds"])}
                                 if isinstance(recorder_metrics.get("commit_stage_seconds"), dict) else {})},
                 "oom_observation": "NOT_AVAILABLE", "portability_status": "QUALIFICATION_REQUIRED"}

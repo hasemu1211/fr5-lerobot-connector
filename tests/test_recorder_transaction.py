@@ -561,6 +561,7 @@ class RecorderTransactionTest(unittest.TestCase):
                 {
                     "rows", "writer_queue", "writer_queue_high_water",
                     "writer_queue_drops", "alignment_failures",
+                    "image_writer",
                     "alignment_failure_sources", "observed_monotonic_ns",
                 },
             )
@@ -574,6 +575,29 @@ class RecorderTransactionTest(unittest.TestCase):
             self.assertEqual(recorder.dataset.clears, 0)
             self.assertEqual(recorder.dataset.saves, 0)
             self.assertEqual(recorder.episode_state, recorder.RECORDING)
+
+    def test_downstream_image_backlog_is_distinct_from_empty_row_queue(self):
+        with tempfile.TemporaryDirectory() as directory:
+            recorder = self.make_recorder(directory)
+            recorder.begin_episode()
+            pending = queue.Queue()
+            recorder.dataset.writer = SimpleNamespace(
+                image_writer=SimpleNamespace(queue=pending),
+            )
+            for _ in range(256):
+                pending.put(object())
+            status = recorder.episode_status()
+            self.assertEqual(status["metrics"]["writer_queue"], 0)
+            self.assertEqual(status["metrics"]["image_writer"], {
+                "status": "AVAILABLE", "queued_images": 256,
+                "capacity_images": None, "sampled_high_water_images": 0,
+            })
+            self.assertEqual(pending.qsize(), 256)
+            recorder.image_writer_high_water = 256
+            recorder._reset_episode()
+            self.assertEqual(recorder.image_writer_high_water, 0)
+            recorder.dataset.writer.image_writer.queue = object()
+            self.assertEqual(recorder._image_writer_metrics(), {"status": "NOT_AVAILABLE"})
 
     def test_jsonl_commands_are_strict_idempotent_core_calls(self):
         with tempfile.TemporaryDirectory() as directory:
