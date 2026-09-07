@@ -1,4 +1,153 @@
-<!doctype html><html lang="ko"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>추천에서 draft 변경 의도로 — FR5 근거</title><link rel="stylesheet" href="../site.css"></head><body><main class="source-page"><a href="../architecture.html#feedback">← 설명으로 돌아가기</a><h1>추천에서 draft 변경 의도로</h1><p class="note">설명에 사용한 구현·측정 자료의 발췌이다. SHA-256은 발췌 전 원본 파일을 식별한다. 실행 PC의 절대 경로와 계정 정보는 포함하지 않으며, 측정값과 해석 조건을 함께 제시한다.</p><section id="collection_recommendation"><h2>collection_recommendation.py</h2><p class="locator">tools/data_factory/collection_recommendation.py<br>sha256:76f888a8a7d2a8fa99426ad1f0e70d3233c8df63c5b23486f268caa662a7bdbe</p><p class="note">원문 전체.</p><pre>&quot;&quot;&quot;Pure validation and operator-intent projection for collection advice.&quot;&quot;&quot;
+<!doctype html><html lang="ko"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>추천에서 draft 변경 의도로 — 데이터 엔진 근거</title><link rel="stylesheet" href="../site.css"></head><body><main class="source-page"><a href="../architecture.html#feedback">← 설명으로 돌아가기</a><h1>추천에서 draft 변경 의도로</h1><p class="note">설명에 사용한 구현·측정 자료의 발췌이다. SHA-256은 발췌 전 원본 파일을 식별한다. 실행 PC의 절대 경로와 계정 정보는 포함하지 않으며, 측정값과 해석 조건을 함께 제시한다.</p><section id="coverage-selection"><h2>현재 조건별 추천</h2><p class="locator">main 32e709760d97ce9ec5c8bf365d36b005e674feda<br>tools/data_factory/collection_recommendation.py<br>sha256:ba05c890d94d6fc44323ebd6e69b1901efd65f66f0ec6e0b83546225ba82d46a</p><p class="note">원문 674–770행. 구현과 의도를 확인하는 발췌이며 실제 폐루프 실행 결과를 뜻하지 않는다.</p><pre> 674 def derive_collection_recommendation(
+ 675     *, compiled_authoring: Mapping[str, Any],
+ 676     episode_evidence: Sequence[Mapping[str, Any]], source_commit: str,
+ 677 ) -&gt; tuple[dict[str, Any], dict[str, Any]]:
+ 678     &quot;&quot;&quot;Measure the retained domain and advise a bounded first coverage pass.
+ 679
+ 680     Historical aggregate counts are deliberately not merged with these episodes:
+ 681     their overlap is unknown. No semantic, vision or rollout conclusion is inferred.
+ 682     &quot;&quot;&quot;
+ 683     from tools.data_factory.campaign_operator import validate_compiled_authoring_evidence
+ 684
+ 685     source = validate_compiled_authoring_evidence(compiled_authoring)
+ 686     manifest, hypothesis = source[&quot;manifest&quot;], source[&quot;hypothesis&quot;]
+ 687     summaries = _episode_summaries(episode_evidence, manifest, normalize=True)
+ 688     bases = {item[&quot;base_condition_digest&quot;]: item for item in hypothesis[&quot;base_conditions&quot;]}
+ 689     jobs = {item[&quot;resolved_job_digest&quot;]: item[&quot;normalized_job&quot;] for item in hypothesis[&quot;resolver_receipts&quot;]}
+ 690     episodes = []
+ 691     for evidence in sorted(episode_evidence, key=lambda item: item[&quot;manifest_order_index&quot;]):
+ 692         ledger, state = evidence[&quot;ledger&quot;], evidence[&quot;state&quot;]
+ 693         semantic = state[&quot;review&quot;][&quot;semantic_status&quot;]
+ 694         episodes.append({
+ 695             &quot;episode_id&quot;: ledger[&quot;episode&quot;][&quot;run_id&quot;],
+ 696             &quot;condition&quot;: bases[ledger[&quot;bindings&quot;][&quot;base_condition_digest&quot;]][&quot;coverage_condition&quot;],
+ 697             &quot;admission_state&quot;: (
+ 698                 &quot;HUMAN_SEMANTIC_PASS&quot; if semantic == &quot;PASS&quot;
+ 699                 else &quot;PENDING_REVIEW&quot; if semantic == &quot;PENDING&quot;
+ 700                 else &quot;REJECTED&quot;
+ 701             ),
+ 702             &quot;evidence_digests&quot;: {
+ 703                 &quot;job_spec&quot;: canonical_digest(jobs[ledger[&quot;bindings&quot;][&quot;resolved_job_digest&quot;]]),
+ 704                 &quot;technical_validator_result&quot;: ledger[&quot;artifacts&quot;][&quot;technical&quot;][&quot;artifact_digest&quot;],
+ 705                 &quot;candidate_admission&quot;: canonical_digest(evidence[&quot;candidate&quot;]),
+ 706             },
+ 707             &quot;trajectory_continuity&quot;: {},
+ 708         })
+ 709     previous = hypothesis[&quot;coverage_report&quot;]
+ 710     report = build_coverage_report(
+ 711         collection_profile_id=previous[&quot;collection_profile_id&quot;],
+ 712         domain=[cell[&quot;condition&quot;] for cell in previous[&quot;cells&quot;]], episodes=episodes,
+ 713     )
+ 714     report_digest = canonical_digest(report)
+ 715     claims = [{
+ 716         &quot;claim_id&quot;: &quot;coverage-observed&quot;, &quot;class&quot;: &quot;OBSERVED&quot;, &quot;subject&quot;: &quot;coverage&quot;,
+ 717         &quot;value&quot;: {&quot;metric&quot;: &quot;COLLECTED_EPISODE_COUNT&quot;, &quot;count&quot;: len(summaries)},
+ 718         &quot;evidence_refs&quot;: [manifest[&quot;manifest_digest&quot;], report_digest],
+ 719         &quot;basis_claim_ids&quot;: [], &quot;reason_codes&quot;: [],
+ 720     }]
+ 721     for reason, subject in UNKNOWN_REASON_SUBJECTS.items():
+ 722         if subject in {&quot;person&quot;, &quot;background&quot;, &quot;robot&quot;, &quot;rollout&quot;} or (
+ 723             subject == &quot;semantic&quot; and any(
+ 724                 item[&quot;state&quot;][&quot;review&quot;][&quot;semantic_status&quot;] == &quot;PENDING&quot; for item in episode_evidence
+ 725             )
+ 726         ):
+ 727             claims.append({
+ 728                 &quot;claim_id&quot;: f&quot;{subject}-unknown&quot;, &quot;class&quot;: &quot;UNKNOWN&quot;, &quot;subject&quot;: subject,
+ 729                 &quot;value&quot;: None, &quot;evidence_refs&quot;: [], &quot;basis_claim_ids&quot;: [],
+ 730                 &quot;reason_codes&quot;: [reason],
+ 731             })
+ 732     # One attempt per unobserved qualified condition is a finite coverage proposal,
+ 733     # not an assertion of data sufficiency or a reason to repeat approved cells.
+ 734     qualified = {canonical_digest(base[&quot;coverage_condition&quot;]) for base in bases.values()}
+ 735     missing = [cell for cell in report[&quot;cells&quot;] if not cell[&quot;counts&quot;][&quot;collected&quot;]
+ 736                and canonical_digest(cell[&quot;condition&quot;]) in qualified]
+ 737     patches = []
+ 738     if any(cell[&quot;condition&quot;] == report[&quot;suggest_next&quot;] for cell in missing):
+ 739         claims.append({
+ 740             &quot;claim_id&quot;: &quot;coverage-suggested&quot;, &quot;class&quot;: &quot;SUGGESTED&quot;, &quot;subject&quot;: &quot;coverage&quot;,
+ 741             &quot;value&quot;: &quot;COLLECT_MORE&quot;, &quot;evidence_refs&quot;: [report_digest],
+ 742             &quot;basis_claim_ids&quot;: [&quot;coverage-observed&quot;], &quot;reason_codes&quot;: [&quot;COVERAGE_DEFICIT&quot;],
+ 743         })
+ 744         selection = _unobserved_selection(source, report)
+ 745         if selection is not None:
+ 746             patches.append({
+ 747                 &quot;change_id&quot;: &quot;cover-unobserved-conditions&quot;, &quot;field&quot;: &quot;campaign_selection&quot;,
+ 748                 &quot;value&quot;: selection, &quot;basis_claim_ids&quot;: [&quot;coverage-suggested&quot;],
+ 749             })
+ 750     recommendation = build_collection_recommendation(
+ 751         recommendation_id=&quot;collection-&quot; + canonical_digest({
+ 752             &quot;authoring&quot;: source[&quot;authoring_digest&quot;], &quot;episodes&quot;: summaries,
+ 753             &quot;quality&quot;: report_digest, &quot;source_commit&quot;: source_commit,
+ 754         })[7:31],
+ 755         source_commit=source_commit, campaign_manifest=manifest,
+ 756         campaign_hypothesis=hypothesis, campaign_draft=source[&quot;draft&quot;],
+ 757         campaign_compilation_receipt=source[&quot;compilation_receipt&quot;],
+ 758         episode_evidence=episode_evidence, data_quality_analysis=report,
+ 759         data_quality_analysis_ref={
+ 760             &quot;availability&quot;: &quot;AVAILABLE&quot;, &quot;schema_version&quot;: report[&quot;schema_version&quot;],
+ 761             &quot;analysis_id&quot;: report[&quot;collection_profile_id&quot;], &quot;analysis_digest&quot;: report_digest,
+ 762             &quot;reason_codes&quot;: [],
+ 763         },
+ 764         rollout_evidence_analysis_ref={
+ 765             &quot;availability&quot;: &quot;UNAVAILABLE&quot;, &quot;schema_version&quot;: None, &quot;analysis_id&quot;: None,
+ 766             &quot;analysis_digest&quot;: None, &quot;reason_codes&quot;: [&quot;NO_CANONICAL_PHYSICAL_ROLLOUT_ANALYSIS&quot;],
+ 767         },
+ 768         claims=claims, suggested_draft_patches=patches,
+ 769     )
+ 770     return report, recommendation</pre></section><section id="policy-recollection"><h2>실패 근거와 수집량에 의한 표적 선택</h2><p class="locator">main 32e709760d97ce9ec5c8bf365d36b005e674feda<br>tools/data_factory/recollection.py<br>sha256:60ee11c2ea66babc46144d425a955b476837dd3232b052f2bd65baa1d6bf6b9b</p><p class="note">원문 187–240행. 구현과 의도를 확인하는 발췌이며 실제 폐루프 실행 결과를 뜻하지 않는다.</p><pre> 187 def select_recollection_target(
+ 188     *, failure_evidence: Mapping[str, Any], coverage_report: Mapping[str, Any],
+ 189     p6_decision_evidence: Mapping[str, Any] | None = None,
+ 190 ) -&gt; dict[str, Any] | None:
+ 191     &quot;&quot;&quot;Choose one qualified impacted weak cell, or ``None`` when none exists.&quot;&quot;&quot;
+ 192     evidence, report, decision = _validated_sources(
+ 193         failure_evidence, coverage_report, p6_decision_evidence,
+ 194     )
+ 195     cells = {canonical_digest(cell[&quot;condition&quot;]): cell for cell in report[&quot;cells&quot;]}
+ 196     named = {item[&quot;condition_digest&quot;] for item in evidence[&quot;failures&quot;]}
+ 197     if not named.issubset(cells):
+ 198         raise ContractError(&quot;RECOLLECTION_EVIDENCE_COVERAGE_DISAGREEMENT&quot;)
+ 199
+ 200     by_condition: dict[str, list[dict[str, Any]]] = {}
+ 201     for failure in evidence[&quot;failures&quot;]:
+ 202         cell = cells[failure[&quot;condition_digest&quot;]]
+ 203         if (
+ 204             failure[&quot;qualification_status&quot;] == &quot;QUALIFIED&quot;
+ 205             and failure[&quot;expected_decision_impact&quot;]
+ 206             and cell[&quot;counts&quot;][&quot;human_semantic_pass&quot;] &lt; evidence[&quot;under_covered_below&quot;]
+ 207         ):
+ 208             by_condition.setdefault(failure[&quot;condition_digest&quot;], []).append(failure)
+ 209     if not by_condition:
+ 210         return None
+ 211     for failures in by_condition.values():
+ 212         if len({item[&quot;condition_qualification_digest&quot;] for item in failures}) != 1:
+ 213             raise ContractError(&quot;RECOLLECTION_FAILURE_QUALIFICATION_CONFLICT&quot;)
+ 214
+ 215     condition_digest = min(
+ 216         by_condition,
+ 217         key=lambda item: (cells[item][&quot;counts&quot;][&quot;human_semantic_pass&quot;], item),
+ 218     )
+ 219     selected_failure = min(by_condition[condition_digest], key=canonical_digest)
+ 220     bindings = {
+ 221         &quot;dataset_digest&quot;: evidence[&quot;dataset_digest&quot;],
+ 222         &quot;checkpoint_digest&quot;: evidence[&quot;checkpoint_digest&quot;],
+ 223         &quot;coverage_report_digest&quot;: evidence[&quot;coverage_report_digest&quot;],
+ 224         &quot;failure_evidence_digest&quot;: evidence[&quot;failure_evidence_digest&quot;],
+ 225         &quot;selected_failure_digest&quot;: canonical_digest(selected_failure),
+ 226         &quot;selected_failure_evidence_digest&quot;: selected_failure[&quot;evidence_digest&quot;],
+ 227         &quot;condition_digest&quot;: condition_digest,
+ 228         &quot;condition_qualification_digest&quot;: selected_failure[&quot;condition_qualification_digest&quot;],
+ 229         &quot;variant_id&quot;: evidence[&quot;variant_id&quot;],
+ 230         &quot;variant_digest&quot;: evidence[&quot;variant_digest&quot;],
+ 231         &quot;p6_decision_digest&quot;: None if decision is None else decision[&quot;decision_digest&quot;],
+ 232     }
+ 233     result = {
+ 234         &quot;schema_version&quot;: SELECTION_SCHEMA,
+ 235         &quot;mode&quot;: evidence[&quot;mode&quot;],
+ 236         &quot;target_condition&quot;: copy.deepcopy(cells[condition_digest][&quot;condition&quot;]),
+ 237         &quot;coverage_count&quot;: cells[condition_digest][&quot;counts&quot;][&quot;human_semantic_pass&quot;],
+ 238         &quot;bindings&quot;: bindings,
+ 239         &quot;authority&quot;: &quot;REPORT_ONLY&quot;,
+ 240     }</pre></section><section id="collection_recommendation"><h2>collection_recommendation.py</h2><p class="locator">tools/data_factory/collection_recommendation.py<br>sha256:76f888a8a7d2a8fa99426ad1f0e70d3233c8df63c5b23486f268caa662a7bdbe</p><p class="note">원문 전체.</p><pre>&quot;&quot;&quot;Pure validation and operator-intent projection for collection advice.&quot;&quot;&quot;
 from __future__ import annotations
 
 import copy

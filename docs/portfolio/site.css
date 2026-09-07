@@ -104,3 +104,20 @@ header{min-height:100px}.brand{font-size:40px}nav{font-size:14px;gap:34px}
 .collection-planning .domain-explanation{max-width:none}.workspace-study{max-width:1120px;margin:30px auto}
 
 #workspace{scroll-margin-top:90px}
+
+/* The project identity names the research system; FR5 remains its physical platform. */
+.brand{font-size:25px;letter-spacing:-.5px;white-space:nowrap}
+.project-hero .hero-copy h1{font:700 43px/1.6 'Noto Sans CJK KR',sans-serif;letter-spacing:-1.8px;margin:18px 0 24px}
+.project-hero .hero-copy h1 span{display:block;font-size:56px;line-height:1.4;letter-spacing:-2px}
+.hero-copy .kicker{font-size:12px;letter-spacing:.01em}
+.hero-platform{font-size:12px;color:var(--muted);margin:22px 0}
+.closed-loop-overview{scroll-margin-top:30px;margin-bottom:60px}
+.closed-loop-overview .system-figure{margin-bottom:24px;background:#f7f9fa;padding:24px 18px 18px}
+.loop-reading{display:grid;grid-template-columns:1fr 1fr;gap:70px;margin:28px 0}
+.loop-reading h3{font-size:20px;margin:0 0 12px;color:#2e647f}
+.loop-reading p{font-size:15px;margin:0;color:var(--muted)}
+.loop-scope{font-size:13px;color:var(--muted);max-width:74em;padding:18px 0;border-top:1px solid var(--line)}
+.implementation-overview .system-figure{margin-top:0}
+.strategy-comparison{display:grid;grid-template-columns:1fr 1fr;gap:35px;margin:28px 0}
+.essay .strategy-comparison section{padding:22px 24px;background:#f4f7f9;border-top:2px solid #68808d}
+.strategy-comparison h3{font-size:19px;margin:0 0 12px}.strategy-comparison p{font-size:14px;margin:0}

@@ -14,12 +14,12 @@ import sys
 
 SHELL = r'''<!doctype html><html lang="ko"><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>FR5 포트폴리오</title><style>
+<title>폐루프 데이터 엔진 포트폴리오</title><style>
 html,body{margin:0;width:100%;height:100%;background:white;color:#17252d}
 iframe{display:block;border:0;width:100%;height:100%}#loading{padding:40px;font:18px sans-serif}
-</style><div id="loading" role="status">FR5 포트폴리오를 여는 중입니다.</div>
+</style><div id="loading" role="status">폐루프 데이터 엔진 포트폴리오를 여는 중입니다.</div>
 <noscript>이 파일의 페이지 탐색과 그래프에는 JavaScript가 필요합니다.</noscript>
-<iframe id="reader" title="FR5 포트폴리오" hidden></iframe>
+<iframe id="reader" title="폐루프 데이터 엔진 포트폴리오" hidden></iframe>
 <script type="application/json" id="files">__FILES__</script>
 <script>
 'use strict';
@@ -117,7 +117,7 @@ function show(url) {
     });
   `;
   doc.body.append(bridge);
-  document.title=doc.title+' · FR5 포트폴리오';
+  document.title=doc.title+' · 폐루프 데이터 엔진 포트폴리오';
   reader.srcdoc='<!doctype html>'+doc.documentElement.outerHTML;
   reader.hidden=false;document.getElementById('loading').hidden=true;
 }

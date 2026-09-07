@@ -1,6 +1,6 @@
-# FR5 로봇 수집·학습 시스템
+# 폐루프 모방학습 데이터 엔진
 
-FR5 로봇의 시연 수집, 다중 센서 기록, 데이터 관리와 모방학습을 소개하는 포트폴리오이다.
+데이터의 품질·분포 분석과 정책 평가를 다음 수집으로 연결하는 폐루프 시스템의 포트폴리오이다. FR5는 구현·검증 플랫폼으로 소개한다. 프로젝트 이름과 첫 개요는 폐루프의 목적을 앞세우며, 현재 구현 모듈과 검증된 성과는 그 구조 안에 배치한다.
 
 전달물은 `FR5-Portfolio.html` 파일 하나이다. 데스크톱 Chrome에서 열면 압축 해제·설치·서버 없이 이미지, 동영상, 화면 선택, 수치 비교와 근거 열람을 사용할 수 있다. 외부 문헌 링크만 인터넷을 사용한다.
 
@@ -22,3 +22,5 @@ python3 docs/portfolio/export_single_file.py .agent-local/portfolio/FR5-Portfoli
 모듈 이름은 아키텍처와 본문에서 동일하게 사용한다: Collection Operator, OneJob, Motion Executor, Recorder, Dataset Validator, Curator, Selection, Video Transform, Training Review, Batch Review, NativeInspection, Policy Learning, Training Entrypoint, Split & Normalization. 한국어는 역할과 원리를 설명하는 보조 표현으로 사용하며 원본 코드·측정 자료의 식별자는 바꾸지 않는다.
 
 본문은 기능, 해결하려는 문제와 설계 이유, 얻으려는 이점을 먼저 전달한다. 세부 알고리즘과 실행 조건은 그 설명을 뒷받침하는 위치에 둔다. 기대한 효과와 실제 측정 결과를 구분하며, 각 주제에 같은 카드·도해·접기 형식을 강제하지 않는다. 비교 그림은 바뀌는 조건과 고정한 조건을 명시하고, 설명용 표현을 실제 모듈 이름으로 제시하지 않는다. 탐색 검증 통과와 시각적 완성도는 별도로 판단한다.
+
+전체 아키텍처에서 데이터 피드백과 정책 피드백을 모두 드러낸다. 미완성 연결은 목표 구조에 표시하고 구현·실행 결과와 구분한다. 구현이 덜 됐다는 이유로 폐루프 목적을 선형 수집·학습 파이프라인으로 축소하지 않는다. Acquisition Strategy와 Policy Evaluation은 목표 구조의 기능 책임 이름이며, 같은 이름의 독립 패키지가 존재한다는 뜻은 아니다. 기존 모듈 도해는 수집·학습 구현의 세부 설명으로 보존한다.

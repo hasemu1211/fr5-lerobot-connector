@@ -8,6 +8,12 @@ function updateSourceReturn() {
     back.textContent = '← 데이터 흐름과 병렬 경로로 돌아가기';
     return;
   }
+  const architectureView = new URLSearchParams(location.search).get('view');
+  if (back && ['closed-loop', 'study'].includes(architectureView)) {
+    back.href = `../architecture.html#${architectureView}`;
+    back.textContent = '← 폐루프 설명으로 돌아가기';
+    return;
+  }
   const connection = new URLSearchParams(location.search).get('connection');
   if (back && ['collection', 'selection', 'inspection', 'training'].includes(connection)) {
     back.href = `../architecture.html#handoff-${connection}`;
