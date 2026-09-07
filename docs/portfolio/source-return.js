@@ -14,6 +14,12 @@ function updateSourceReturn() {
     back.textContent = '← 시스템 연결 설명으로 돌아가기';
     return;
   }
+  const view = new URLSearchParams(location.search).get('view');
+  if (back && ['model', 'flow'].includes(view)) {
+    back.href = `../learning.html${location.search}#${view}`;
+    back.textContent = '← 모델 설명으로 돌아가기';
+    return;
+  }
   if (back?.pathname.endsWith('/learning.html')) {
     back.search = location.search;
     return;

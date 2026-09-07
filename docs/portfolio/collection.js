@@ -22,3 +22,12 @@ document.querySelectorAll('[data-screen]').forEach(button => button.addEventList
     if (version === requestVersion) description.textContent = '선택한 화면을 읽지 못했다. 현재 화면을 유지하며 다른 단계를 선택할 수 있다.';
   }
 }));
+
+for (const button of document.querySelectorAll('[data-yaw]')) {
+  button.addEventListener('click', () => {
+    for (const choice of document.querySelectorAll('[data-yaw]'))
+      choice.setAttribute('aria-pressed', String(choice === button));
+    for (const image of document.querySelectorAll('[data-workspace-yaw]'))
+      image.hidden = image.dataset.workspaceYaw !== button.dataset.yaw;
+  });
+}

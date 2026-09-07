@@ -971,4 +971,97 @@
 712:         value, documents=documents, provenance=approval.PROVENANCE,
 713:         revalidate=_revalidate_approval_batch,
 714:     )
-715: </pre></section></main><script src="../source-return.js"></script></body></html>
+715: </pre></section><section id="request-execution"><h2>Curator 요청에서 학습·평가까지</h2><p>개별 배치 승인과 별도로 기존 사용자 위임을 검증하는 실행 경로이다. 요청과 제한된 학습 설정에서 실행 인자를 구성하고, 기존 결과가 있으면 입력과 receipt를 대조한다. 일치하는 완료 결과는 학습을 다시 시작하지 않고 checkpoint 검사와 평가로 이어진다.</p><p class="locator">main 223da8b · tools/data_factory/training_entrypoint.py<br>sha256:d566ee281d55fa2aa29f85fedee476bcbb9135afa303cd6bee6c719e7b3457f7</p><p>아래는 구현 근거이다. 이 경로의 새로운 실데이터 학습 결과나 영속 평가 보고서를 뜻하지 않는다.</p><h3>원본 301–315행</h3><pre>301:                                   inventory: Path, output: Path, split: dict) -&gt; dict:
+302:     &quot;&quot;&quot;Use the existing validator and offline evaluator as one read-only consumer.&quot;&quot;&quot;
+303:     from tools.validate_training_checkpoint import validate_checkpoint
+304:     policy, _ = validate_checkpoint(checkpoint)
+305:     from tools.evaluate_smolvla_offline import admit_evaluation, evaluate
+306:     args = argparse.Namespace(
+307:         checkpoint=str(policy), dataset=dataset, repo_id=repo_id,
+308:         approved_inventory=inventory, episodes=&quot;,&quot;.join(map(str, split[&quot;eval_episodes&quot;])),
+309:         batch_size=1, num_workers=0, max_batches=0, device=&quot;auto&quot;, use_amp=False,
+310:         seed=1000, metric=&quot;flow-loss&quot;, output=None,
+311:     )
+312:     admission = admit_evaluation(args)
+313:     report = evaluate(args, admission)
+314:     return {&quot;checkpoint&quot;: str(policy), &quot;evaluation&quot;: report}
+315: </pre><h3>원본 334–344행</h3><pre>334:
+335:
+336: def launch_delegated_request(
+337:     request: dict, *, approval_output: Path, authorized_actor: str,
+338:     delegation_path: Path, profile: str, collection_profile: str,
+339:     argv: list[str] | None = None, runner=None, checkpoint_validator=None,
+340:     evaluator=None,
+341: ) -&gt; dict:
+342:     &quot;&quot;&quot;Consume one Curator request through standing delegation and native launch.
+343:
+344:     Existing authority and training outputs are recovery evidence: they are</pre><h3>원본 397–420행</h3><pre>397:         expected_split, expected_receipt = prepare_launch(
+398:             dataset=Path(dataset[&quot;dataset_root&quot;]), repo_id=dataset[&quot;repo_id&quot;],
+399:             inventory=inventory_path, profile=profile,
+400:             collection_profile=collection_profile, argv=argv,
+401:         )
+402:         if manifests != [expected_split, expected_receipt]:
+403:             raise ContractError(&quot;TRAINING_OUTPUT_RECOVERY_MISMATCH&quot;)
+404:         checkpoint = _latest_checkpoint(output)
+405:         if checkpoint is None:
+406:             return {
+407:             &quot;status&quot;: &quot;EXISTING_OUTPUT&quot;,
+408:             &quot;training_started&quot;: False,
+409:             &quot;inventory_path&quot;: str(inventory_path),
+410:             &quot;training_output&quot;: str(output),
+411:             &quot;next_consumer&quot;: &quot;validate_checkpoint_then_offline_evaluate&quot;,
+412:             }
+413:         validator = checkpoint_validator or __import__(&quot;tools.validate_training_checkpoint&quot;, fromlist=[&quot;validate_checkpoint&quot;]).validate_checkpoint
+414:         validator(checkpoint)
+415:         result = (evaluator or _native_checkpoint_evaluation)(
+416:             checkpoint=checkpoint, dataset=Path(dataset[&quot;dataset_root&quot;]), repo_id=request[&quot;repo_id&quot;],
+417:             inventory=inventory_path, output=output, split=load_json_strict(output / &quot;fr5_training_split.json&quot;),
+418:         ) if evaluator is None else evaluator(checkpoint, Path(dataset[&quot;dataset_root&quot;]), request[&quot;repo_id&quot;], inventory_path, output)
+419:         return {&quot;status&quot;: &quot;EVALUATED_EXISTING_OUTPUT&quot;, &quot;training_started&quot;: False,
+420:                 &quot;inventory_path&quot;: str(inventory_path), &quot;training_output&quot;: str(output),</pre><h3>원본 431–477행</h3><pre>431:                 &quot;inventory_path&quot;: str(inventory_path), &quot;training_output&quot;: str(output),
+432:                 &quot;next_consumer&quot;: &quot;inspect_trainer_failure&quot;}
+433:     if checkpoint is None:
+434:         return {&quot;status&quot;: &quot;TRAINING_RETURNED_NO_CHECKPOINT&quot;, &quot;training_started&quot;: True,
+435:                 &quot;returncode&quot;: returncode, &quot;inventory_path&quot;: str(inventory_path),
+436:                 &quot;training_output&quot;: str(output), &quot;next_consumer&quot;: &quot;checkpoint_validation&quot;}
+437:     validator = checkpoint_validator or __import__(&quot;tools.validate_training_checkpoint&quot;, fromlist=[&quot;validate_checkpoint&quot;]).validate_checkpoint
+438:     validator(checkpoint)
+439:     result = (evaluator or _native_checkpoint_evaluation)(
+440:         checkpoint=checkpoint, dataset=Path(dataset[&quot;dataset_root&quot;]), repo_id=request[&quot;repo_id&quot;],
+441:         inventory=inventory_path, output=output, split=load_json_strict(output / &quot;fr5_training_split.json&quot;),
+442:     ) if evaluator is None else evaluator(checkpoint, Path(dataset[&quot;dataset_root&quot;]), request[&quot;repo_id&quot;], inventory_path, output)
+443:     return {
+444:         &quot;status&quot;: &quot;EVALUATED_CHECKPOINT&quot;,
+445:         &quot;training_started&quot;: True,
+446:         &quot;returncode&quot;: returncode,
+447:         &quot;inventory_path&quot;: str(inventory_path),
+448:         &quot;training_output&quot;: str(output),
+449:         &quot;checkpoint&quot;: str(checkpoint), &quot;evaluation&quot;: result,
+450:         &quot;next_consumer&quot;: &quot;offline_evaluation_report&quot;,
+451:     }
+452:
+453:
+454: def run_delegated_request(request: dict, *, approval_output: Path,
+455:                           authorized_actor: str, delegation_path: Path,
+456:                           profile: str, collection_profile: str,
+457:                           output: Path, steps: int, batch_size: int,
+458:                           eval_split: float, eval_steps: int, save_freq: int,
+459:                           runner=None, checkpoint_validator=None,
+460:                           evaluator=None) -&gt; dict:
+461:     &quot;&quot;&quot;Supported product entrypoint: request plus bounded recipe, no raw argv.&quot;&quot;&quot;
+462:     if profile != &quot;smolvla&quot;:
+463:         raise ContractError(&quot;TRAINING_EVALUATOR_UNSUPPORTED&quot;)
+464:     request = copy.deepcopy(request)
+465:     dataset = Path(request[&quot;dataset_root&quot;]).expanduser().resolve()
+466:     argv = _request_argv(
+467:         request, dataset=dataset, repo_id=request[&quot;repo_id&quot;], profile=profile,
+468:         collection_profile=collection_profile, output=output.expanduser().resolve(),
+469:         steps=steps, batch_size=batch_size, eval_split=eval_split,
+470:         eval_steps=eval_steps, save_freq=save_freq,
+471:     )
+472:     return launch_delegated_request(
+473:         request, approval_output=approval_output, authorized_actor=authorized_actor,
+474:         delegation_path=delegation_path, profile=profile,
+475:         collection_profile=collection_profile, argv=argv, runner=runner,
+476:         checkpoint_validator=checkpoint_validator, evaluator=evaluator,
+477:     )</pre></section></main><script src="../source-return.js"></script></body></html>

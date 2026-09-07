@@ -38,7 +38,8 @@ if (window.FR5_ACTION_COMPARISONS) {
     }
     caption.textContent = loaded ? label : `${label} · 그래프를 읽지 못했다. 아래 수치 표에서 확인할 수 있다.`;
     document.getElementById('action-caption').textContent = label;
-    const query = new URLSearchParams({seed, metric: metric.split('_')[0], episode});
+    const query = new URLSearchParams(location.search);
+    for (const [key, value] of Object.entries({seed, metric: metric.split('_')[0], episode})) query.set(key, value);
     document.getElementById('action-source').href = `sources/action-comparison.html?${query}#seed-${seed}`;
     try { history.replaceState(null, '', `?${query}${location.hash}`); }
     catch { /* Preserve local-file interaction when browser history is restricted. */ }
@@ -47,3 +48,19 @@ if (window.FR5_ACTION_COMPARISONS) {
   controls.forEach(control => control.addEventListener('change', renderActions));
   renderActions();
 }
+
+// Reveal the distinct computations and retain the selected explanation on source return.
+function showFlow(mode) {
+  for (const button of document.querySelectorAll('[data-flow]')) {
+    const active = button.dataset.flow === mode;
+    button.setAttribute('aria-pressed', String(active));
+    document.getElementById('flow-' + button.dataset.flow).hidden = !active;
+  }
+  document.getElementById('flow-source').href = `sources/training-input.html?view=flow&flow=${mode}#model-contract`;
+  const query = new URLSearchParams(location.search); query.set('flow', mode);
+  try { history.replaceState(null, '', `?${query}${location.hash}`); }
+  catch { /* The diagrams remain usable if a file browser restricts history. */ }
+}
+showFlow(new URLSearchParams(location.search).get('flow') === 'inference' ? 'inference' : 'train');
+for (const button of document.querySelectorAll('[data-flow]'))
+  button.addEventListener('click', () => showFlow(button.dataset.flow));
