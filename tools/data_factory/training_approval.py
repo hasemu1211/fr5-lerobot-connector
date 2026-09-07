@@ -413,7 +413,8 @@ def _derived_publication(reference: dict, dataset: Mapping[str, Any]) -> dict:
     return evidence
 
 
-def compile_derived_training_provenance(*, dataset: dict, derivation: dict, parent_draft: dict) -> dict:
+def compile_derived_training_provenance(*, dataset: dict, derivation: dict, parent_draft: dict,
+                                        check_parent_freshness: bool = True) -> dict:
     """Parent facts remain ancestry; only exact new authority can admit the child."""
     evidence = _derived_publication(derivation, dataset)
     args = parent_draft["approval_arguments"]
@@ -422,14 +423,17 @@ def compile_derived_training_provenance(*, dataset: dict, derivation: dict, pare
         raise ContractError("TRAINING_DERIVATION_PARENT_LEDGER_REQUIRED")
     # Freshness belongs to new request/batch preparation, not retrospective
     # revocation of an issued approval that binds frozen evidence bytes.
-    from tools.data_factory.episode_ledger import validate_episode_state
-    ledger_path = Path(provenance["episode_ledger"]["artifact_path"])
-    state = validate_episode_state(load_json_strict(ledger_path.parent / "episode_ledger_state.json"),
-                                   ledger=load_json_strict(ledger_path))
-    if (state["review"]["semantic_status"] != "PASS"
-            or state["candidate"]["artifact_path"] != args["human_semantic_evidence_path"]
-            or state["candidate"]["artifact_digest"] != args["human_semantic_evidence_digest"]):
+    if type(check_parent_freshness) is not bool:
         raise ContractError("TRAINING_DERIVATION_PARENT_REVIEW")
+    if check_parent_freshness:
+        from tools.data_factory.episode_ledger import validate_episode_state
+        ledger_path = Path(provenance["episode_ledger"]["artifact_path"])
+        state = validate_episode_state(load_json_strict(ledger_path.parent / "episode_ledger_state.json"),
+                                       ledger=load_json_strict(ledger_path))
+        if (state["review"]["semantic_status"] != "PASS"
+                or state["candidate"]["artifact_path"] != args["human_semantic_evidence_path"]
+                or state["candidate"]["artifact_digest"] != args["human_semantic_evidence_digest"]):
+            raise ContractError("TRAINING_DERIVATION_PARENT_REVIEW")
     parent = {
         "dataset_identity": args["dataset_identity"], "provenance": parent_draft["provenance"],
         "technical_validator": {"artifact_path": args["technical_validator_path"],
@@ -564,14 +568,15 @@ def _validate_mapped_provenance(value, *, expected_scope):
     _dataset(parent["dataset_identity"])
     for field in ("technical_validator", "human_semantic_evidence"):
         _exact(parent[field], EPISODE_PROVENANCE_REF_KEYS, "TRAINING_MAPPING_PARENT_REFERENCE")
-    if parent["provenance"].get("schema_version") != LEDGER_PROVENANCE_SCHEMA:
+    if parent["provenance"].get("schema_version") not in {LEDGER_PROVENANCE_SCHEMA, DERIVED_PROVENANCE_SCHEMA}:
         raise ContractError("TRAINING_MAPPING_PARENT")
     original = validate_episode_training_provenance(parent["provenance"], expected_scope=expected_scope)
     _bind_ledger_revision(original, parent["dataset_identity"])
-    technical = _technical(parent["technical_validator"]["artifact_path"], parent["technical_validator"]["artifact_digest"],
-                           episode_id=original["episode_id"], dataset_root=parent["dataset_identity"]["dataset_root"])
-    _semantic(parent["human_semantic_evidence"]["artifact_path"], parent["human_semantic_evidence"]["artifact_digest"],
-              episode_id=original["episode_id"], technical=technical)
+    _training_evidence(original, parent["dataset_identity"], episode_id=original["episode_id"],
+        technical_path=parent["technical_validator"]["artifact_path"],
+        technical_digest=parent["technical_validator"]["artifact_digest"],
+        semantic_path=parent["human_semantic_evidence"]["artifact_path"],
+        semantic_digest=parent["human_semantic_evidence"]["artifact_digest"])
     manifest = _mapped_publication(value["mapping"])
     matches = [e for e in manifest["episodes"] if e["episode_id"] == value["episode_id"] and e["episode_index"] == value["episode_index"]]
     if len(matches) != 1:
@@ -579,11 +584,24 @@ def _validate_mapped_provenance(value, *, expected_scope):
     entry = matches[0]
     source_request = load_json_strict(Path(manifest["sources"][entry["source_index"]]["request_path"]))
     source_entry = next(e for e in source_request["episodes"] if e["episode_index"] == entry["source_episode_index"])
+    ledger_provenance = original
+    ledger_technical = parent["technical_validator"]
+    if original["schema_version"] == DERIVED_PROVENANCE_SCHEMA:
+        # Ledger parents already bind their current revision above. A derived
+        # parent's validator leaves its complete child identity to this caller.
+        if (original["derivation"] != source_request.get("derivation")
+                or original["dataset_identity_digest"] != canonical_digest(parent["dataset_identity"])
+                or original["episode_content_digest"] != current_episode_digest(parent["dataset_identity"], original["episode_index"])):
+            raise ContractError("TRAINING_MAPPING_BINDING")
+        ledger_provenance = original["parent"]["provenance"]
+        ledger_technical = original["parent"]["technical_validator"]
+    elif "derivation" in source_request:
+        raise ContractError("TRAINING_MAPPING_BINDING")
     if (manifest["sources"][entry["source_index"]]["dataset_identity"] != parent["dataset_identity"]
             or entry["source_episode_index"] != original["episode_index"]
             or original["episode_id"] != source_entry["episode_id"]
-            or original["episode_ledger"]["artifact_path"] != source_entry["episode_ledger_path"]
-            or parent["technical_validator"]["artifact_path"] != source_entry["technical_validator_path"]
+            or ledger_provenance["episode_ledger"]["artifact_path"] != source_entry["episode_ledger_path"]
+            or ledger_technical["artifact_path"] != source_entry["technical_validator_path"]
             or parent["human_semantic_evidence"]["artifact_path"] != source_entry["human_semantic_evidence_path"]
             or parent["technical_validator"]["artifact_digest"] != original["technical_validator_digest"]
             or value["resolved_job_digest"] != original["resolved_job_digest"]
@@ -605,10 +623,11 @@ def _training_evidence(provenance: dict, dataset: dict, *, episode_id: str,
                 or manifest["technical"] != {"artifact_path": technical_path, "artifact_digest": technical_digest}
                 or parent["human_semantic_evidence"] != {"artifact_path": semantic_path, "artifact_digest": semantic_digest}):
             raise ContractError("TRAINING_MAPPING_BINDING")
-        original_id = parent["provenance"]["episode_id"]
-        technical = _technical(parent["technical_validator"]["artifact_path"], parent["technical_validator"]["artifact_digest"],
-                               episode_id=original_id, dataset_root=parent["dataset_identity"]["dataset_root"])
-        return technical, _semantic(semantic_path, semantic_digest, episode_id=original_id, technical=technical)
+        return _training_evidence(parent["provenance"], parent["dataset_identity"],
+            episode_id=parent["provenance"]["episode_id"],
+            technical_path=parent["technical_validator"]["artifact_path"],
+            technical_digest=parent["technical_validator"]["artifact_digest"],
+            semantic_path=semantic_path, semantic_digest=semantic_digest)
     semantic_dataset = dataset
     if provenance["schema_version"] == DERIVED_PROVENANCE_SCHEMA:
         evidence = _derived_publication(provenance["derivation"], dataset)

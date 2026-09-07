@@ -42,7 +42,12 @@ def _protected(sources, groups):
     paths.extend(Path(s["request_path"]).parent for s in sources)
     for group in groups:
         for draft in group:
-            ledger = Path(draft["provenance"]["episode_ledger"]["artifact_path"])
+            provenance = draft["provenance"]
+            if provenance["schema_version"] == approval.DERIVED_PROVENANCE_SCHEMA:
+                paths.append(Path(provenance["derivation"]["run_directory"]))
+                paths.append(Path(provenance["parent"]["dataset_identity"]["dataset_root"]))
+                provenance = provenance["parent"]["provenance"]
+            ledger = Path(provenance["episode_ledger"]["artifact_path"])
             paths.append(ledger.parent)
             paths.append(Path(draft["approval_arguments"]["human_semantic_evidence_path"]).parent)
             paths.extend(Path(v["artifact_path"]).parent for v in load_json_strict(ledger)["artifacts"].values())
@@ -57,15 +62,21 @@ def _parents(sources, output, actor, *, fresh):
         if file_sha256(path) != source["request_sha256"]:
             raise CuratorError("MAPPING_REQUEST_CHANGED")
         request = load_json_strict(path)
-        if set(request) != {"dataset_root", "dataset_id", "repo_id", "episodes"}:
-            raise CuratorError("MAPPING_RAW_REQUEST_REQUIRED")
-        dataset, drafts = _prepare_approvals(request, output, actor, check_targets=False)
+        fields = {"dataset_root", "dataset_id", "repo_id", "episodes"}
+        if set(request) not in (fields, fields | {"derivation"}):
+            raise CuratorError("MAPPING_SOURCE_REQUEST_REQUIRED")
+        # Fresh derived preparation remains the default. Only frozen publication
+        # validation omits mutable parent state; all bound artifacts still verify.
+        options = {"check_parent_freshness": False} if "derivation" in request and not fresh else {}
+        dataset, drafts = _prepare_approvals(request, output, actor, check_targets=False, **options)
         if dataset != source["dataset_identity"]:
             raise CuratorError("MAPPING_SOURCE_CHANGED")
         if "evidence_digest" in source and source["evidence_digest"] != _evidence_digest(drafts):
             raise CuratorError("MAPPING_SOURCE_EVIDENCE_CHANGED")
         for draft in drafts:
             provenance = draft["provenance"]
+            if provenance["schema_version"] == approval.DERIVED_PROVENANCE_SCHEMA:
+                provenance = provenance["parent"]["provenance"]
             if provenance["schema_version"] != approval.LEDGER_PROVENANCE_SCHEMA:
                 raise CuratorError("MAPPING_SOURCE_LEDGER_REQUIRED")
             if fresh:
