@@ -1,8 +1,32 @@
 ## ADDED Requirements
 
+### Requirement: Controlled view comparison preserves task evidence and consumers
+
+Curator SHALL support controlled comparison of raw and fixed-view inputs using
+the same original episode identities and heldout cohort, including an original-image
+re-encoding control to separate codec effects. Background fitting SHALL use TRAIN
+or proven independent calibration. Deterministic base-view identity SHALL remain
+consistent across training, evaluation and rollout; stochastic TRAIN augmentation
+SHALL remain separate from EVAL. A valid person-present demonstration SHALL NOT
+be excluded solely because a person is visible. Automatic review SHALL remain a
+distinct required product outcome, not be declared complete by a human-only queue.
+
+#### Scenario: A fixed view is proposed for learning
+- **WHEN** raw and processed inputs are compared
+- **THEN** their original cohort, training exposure, initialization and evaluation noise SHALL be matched and codec effects distinguished
+- **AND** Learning's comparable postprocessed outputs SHALL be reused, without claiming physical utility from normalized loss or preselecting a raw/processed mixture
+- **AND** missing task cues or worse outputs SHALL count against adoption, while raw learning and collection remain independently available.
+
+#### Scenario: Published derivatives become mapped parents
+- **WHEN** native published derived requests with unchanged lineage are selected for mapped publication
+- **THEN** the existing mapped parent contract SHALL retain the exact derived identity, original ledger/semantic references and recorded visual review coverage
+- **AND** Learning's source identity resolver SHALL preserve original heldout membership and reject missing or duplicate origins
+- **AND** new preparation SHALL require current original review, whereas frozen proof validation SHALL NOT infer retrospective revocation from loss of mutable state alone
+- **AND** the existing prepared-batch consumer SHALL receive native dataset/drafts without inherited training authority; incompatible base views remain the Learning consumer's responsibility.
+
 ### Requirement: Mapped immutable sources reach a technically validated request candidate
 
-Curator SHALL reuse native lossless dataset merge and current raw request/ledger
+Curator SHALL reuse native lossless dataset merge and current raw or published derived request/ledger
 validation to publish a separate candidate with an explicit selected request.
 It SHALL retain source dataset identities, selected semantic evidence digests,
 original timing provenance bytes and verified episode/global index mapping.

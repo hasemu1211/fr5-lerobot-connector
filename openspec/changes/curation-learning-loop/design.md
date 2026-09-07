@@ -1,5 +1,50 @@
 ## 작은 구현과 소비 경계
 
+### 사람이 보이는 조건을 포함한 원본·고정 정제 비교
+
+첫 비교는 같은 원본 episode identity와 평가 cohort에서 raw, 원본 이미지의
+재인코딩 대조군, 기존 고정 view 정제를 구분한다. 재인코딩 손실을 마스킹 효과로
+해석하지 않는다. 학습 예산·초기화·noise와 원래 평가 대상을 맞추고 Learning의
+저장된 postprocessor를 거친 행동 출력을 소비한다. 배경 fitting은 TRAIN 또는
+입증된 독립 calibration에서만 수행한다. 결정적 base-view 처리는 학습·평가·
+rollout에 일관되게 결속하며, 별도의 확률적 TRAIN 증강을 EVAL에 적용하지 않는다.
+
+유효한 사람 등장 시연을 자동 제외하지 않는다. 사람의 단순 등장, 작업 단서 가림,
+실제 개입은 같은 관측이 아니다. 고정 keep 영역 안의 사람은 남을 수 있으며,
+배경판은 가려진 물체나 파지를 복원하지 못한다. 작업 단서 손실이나 비교 가능한
+출력 악화는 정제 채택을 반증한다. 원본·정제의 혼합 비율이나 정제의 우월성을
+미리 정하지 않으며, 이 비교는 원본 학습이나 수집의 선행 gate가 아니다.
+기존·신규 데이터에 같은 profile 처리를 적용하되, semantic PASS를 사람 부재의
+라벨로 쓰거나 수집 시기만으로 사람 유무를 나누지 않는다. 외곽에 일부 사람이
+보이는 사용자 관측을 작업 공간 침입이나 실제 가림의 증거로 확대하지 않는다.
+support와 dilation으로 유지되는 경계에는 사람이 남을 수 있으므로 공통 처리만으로
+모든 사람 픽셀 제거 또는 분포 동일성을 주장하지 않는다.
+
+작업 정보를 보존하는 증강의 조건과 정밀도 상충은
+[RoCoDA](https://arxiv.org/html/2411.16959v2), 학습 중 외관 다양성의 대안과
+적용 범위는 [RoboSaGA](https://arxiv.org/html/2608.11870v1)를 참고한다.
+이 근거는 FR5에서의 효용이나 새 모델 채택을 입증하지 않는다. 자동 검토는
+반복적인 수작업을 줄여야 하는 별도 제품 결과이며, 현재 인간 검토 queue만으로
+완료되지 않는다. 새 learned judge·동적 segmentation은 아직 채택하지 않는다.
+
+### 기존 정제 부모의 mapped request 소비
+
+기존 raw request와 `derivation`을 가진 native published request를 부모로 받는다.
+허용하는 계보는 mapped → ledger 또는 mapped → derived → ledger로 한정한다.
+`sources[].request_path/request_sha256/dataset_identity/evidence_digest`와 기존
+mapped provenance의 `parent`가 정확한 파생 identity·Curator review coverage·
+원본 ledger 및 semantic evidence를 결속한다. 새 cohort schema는 만들지 않고
+Learning의 original-source identity resolver로 원래 heldout을 유지한다.
+
+새 publication/preparation은 원본 ledger의 현재 review를 검증한다. 동결된
+publication/provenance 재검증에서는 원본 artifact와 파생 receipt를 재검증하며,
+mutable review projection 부재만으로 소급 철회를 만들지 않는다. 이를 위해
+native preparation의 `check_parent_freshness`는 기본 true이고, mapped frozen
+proof 재검증에서만 false를 명시한다. 기존 dataset/drafts 반환 계약과
+`REQUEST_NOT_APPROVED`, `training_authority: false`를 유지한다. Learning은
+같은 계보에서 base view 호환성과 baked transform의 중복 적용 방지를 검증한다.
+이 연결 자체는 새로운 승인·학습 또는 physical binding을 만들지 않는다.
+
 ### 현재 근거로 재계산하는 native acquisition 추천
 
 기존 `recommend_stored_collection` keyword-only API에 선택적 `acquisition`과
