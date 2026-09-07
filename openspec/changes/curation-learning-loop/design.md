@@ -4,6 +4,12 @@
 
 native request의 필드는 바꾸지 않는다. 분할 확인 결과는 반환값의 `evaluation_cohort`에 포함한다. 이는 요청 구성 시점의 preview이며 training split이나 admission artifact가 아니다. Learning 소비자는 이 fraction과 cohort를 실제 launch receipt의 분할과 비교해야 한다. 원본을 동결한 상태에서 다음 소비자가 다시 검증하는 기존 계약을 유지한다.
 
+## 별도 task의 실제 cohort 준비
+
+기존 ledger/state가 입증하는 task와 정확한 instruction을 유지한다. 별도 pick-place source가 기존 pickup task와 다르면 원본을 수정하거나 mapped merge로 task 경계를 숨기지 않고, 그 source의 명시적 합격 subset을 `export_training_request` → 기존 `prepare_approval_batch`로 전달한다. request의 dataset identity는 원본을 가리키며, native raw feature contract와 instruction별 TRAIN/development EVAL을 확인한다. preview actor와 batch digest는 준비 근거일 뿐 인간 동의가 아니다.
+
+가장 싼 검증은 실제 원본·review hash를 전후 재확인하고, 요청의 selected/fraction/기대한 EVAL과 준비된 exact dataset identity를 연결하는 것이다. 원본 pickup의 split identity도 보존한다. Learning은 새 task의 TRAIN만으로 normalization을 fit하고 실제 launch split을 재검증한다. 다른 normalization의 flow loss로 task 효용을 비교하지 않는다. 다음 취득에서는 방향별 TRAIN 부족과 시작 조건 반복·변화를 분리해 제안하며, 명령 좌표를 물리 검증이나 자동 phase 라벨로 승격하지 않는다. 이 경로에는 새 scorer, dataset 복사, 승인 우회가 필요하지 않다.
+
 ## 경쟁가설의 가장 싼 유효 검증
 
 현재 실험 helper는 TRAIN pool의 x/y/yaw 범위로 척도를 정하고, 같은 episode 수와 좁은 frame 예산 안에서 조건 분산이 큰 후보와 작은 후보를 찾는다. 이 목적함수는 대비를 만드는 도구이며 학습 효용을 추정하는 모델이 아니다. 후보 검색은 작은 CPU 예산으로 제한하고 제품의 일반 selector로 추가하지 않는다.
