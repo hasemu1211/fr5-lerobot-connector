@@ -69,6 +69,11 @@ def canonical_digest(value: object) -> str:
     return "sha256:" + hashlib.sha256(encoded).hexdigest()
 
 
+def launch_receipt_digest(value: Mapping) -> str:
+    """Digest a launch receipt body without recursively hashing its digest."""
+    return canonical_digest({key: item for key, item in value.items() if key != "receipt_digest"})
+
+
 def file_digest(path: str | Path) -> str:
     """Digest exactly one caller-supplied regular file."""
     source = Path(path)
@@ -285,11 +290,18 @@ def compile_launch_receipt(split: Mapping, argv: list[str], inventory_path: str)
         if split["feature_contract"]["profile"] != "smolvla" or not source:
             raise ReceiptError("TRAINING_WARM_START_PROFILE")
         value["initialization"] = warm_start_binding(Path(source), split, value["normalization"])
-    return {**value, "receipt_digest": canonical_digest(value)}
+    return {**value, "receipt_digest": launch_receipt_digest(value)}
 
 
 def validate_launch_receipt(value: Mapping, split: Mapping) -> dict:
     expected = compile_launch_receipt(split, value["normalized_argv"], value["approved_inventory_path"])
+    if "observation_view" in value:
+        try:
+            from tools.validate_training_checkpoint import validate_saved_observation_view
+            expected["observation_view"] = validate_saved_observation_view(split, expected)
+        except (OSError, TypeError, ValueError, KeyError) as exc:
+            raise ReceiptError("OBSERVATION_VIEW_BINDING") from exc
+        expected["receipt_digest"] = launch_receipt_digest(expected)
     if value != expected:
         raise ReceiptError("LAUNCH_RECEIPT_BINDING")
     return expected
