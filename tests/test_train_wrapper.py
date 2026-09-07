@@ -949,12 +949,10 @@ class TrainingLaunchConnectionTest(unittest.TestCase):
     def test_curator_request_cohort_reaches_public_recipe_without_override(self):
         import sys
         import io
-        from tests.data_factory.curator.workflow.test_mapping_cohort import MappingCohortTests
+        from tests.data_factory.curator.support import make_mapping_cohort_case
         from tools.data_factory.curator.workflow.mapping import publish_mapped_training_request
         from tools.data_factory import training_entrypoint as training
-        fixture = MappingCohortTests()
-        self.addCleanup(fixture.doCleanups)
-        requests, sources, root, mapping_options, cohort = fixture.case()
+        requests, sources, root, mapping_options, cohort = make_mapping_cohort_case(self.addCleanup)
         requests.reverse()
         result = publish_mapped_training_request(requests, root / "mapped", **mapping_options)
         request_path = Path(result["request_path"])

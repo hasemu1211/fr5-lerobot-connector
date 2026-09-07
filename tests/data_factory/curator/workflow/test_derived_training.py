@@ -10,7 +10,7 @@ import unittest
 from unittest import mock
 
 from tests.data_factory.curator.support import make_source_dataset, make_profile_fixture, write_json
-from tests.data_factory import test_episode_ledger as ledger_fixtures
+from tests.data_factory.curator.support import make_native_training_source
 from tests.data_factory.test_training_approval import snapshot
 from tests.data_factory.operator.workflow.test_application import intent
 from tools.data_factory import training_approval as approval, training_entrypoint as training
@@ -26,64 +26,9 @@ from tools.fr5_training_profile import launch_feature_contract, read_metadata, b
 
 class DerivedTrainingTest(unittest.TestCase):
     def native_case(self, *, episodes=3, train_fit=False, source_only=False):
-        fixture = ledger_fixtures.EpisodeLedgerTest()
-        fixture.setUp()
-        self.addCleanup(fixture.doCleanups)
-        root = fixture.base
-        source = make_source_dataset(root, episodes=episodes, frames_per_episode=2)
-        profile = make_profile_fixture(root)
-        feature = launch_feature_contract('act', 'fr5-up-wrist-rgb-30hz-v2', 'pick_place', read_metadata(source))
-        runs = []
+        root, source, profile, runs, before = make_native_training_source(self.addCleanup, episodes=episodes)
         selected = list(range(0, episodes, 2))
-        for index in selected:
-            fixture.dataset = source
-            fixture.run_id = f'synthetic-episode-{index}'
-            fixture.evidence = root / f'evidence-{index}'
-            fixture.evidence.mkdir()
-            fixture.dataset_identity.update(dataset_root=str(source), repo_id='local/source')
-            fixture.episode_ref.update(repo_id='local/source', episode_index=index,
-                transaction_id=f'{fixture.run_id}:episode-{index:06d}')
-            locator = copy.deepcopy(fixture.episode_locator)
-            locator['repo_id'] = 'local/source'
-            locator['episode_index'] = index
-            locator['data'].update(file_row_start=index * 2, file_row_end_exclusive=index * 2 + 2)
-            # Rebuild the locator digest with the existing owner, not an alternate ledger.
-            from tools.data_factory.episode_ledger import build_lerobot_v3_episode_locator
-            locator = build_lerobot_v3_episode_locator(repo_id='local/source', episode_index=index,
-                data=locator['data'], videos=locator['videos'])
-            refs = fixture._artifacts()
-            loaded = fixture._loaded_artifacts(refs)
-            loaded['run']['episode_index'] = index
-            loaded['staging_manifest']['episode_index'] = index
-            loaded['staging_manifest']['binding_digests']['collection_profile_digest'] = feature['collection_profile_digest']
-            loaded['intent']['fixed_contract']['collection_profile_digest'] = feature['collection_profile_digest']
-            loaded['intent']['intent_digest'] = canonical_digest({k:v for k,v in loaded['intent'].items() if k != 'intent_digest'})
-            runtime = loaded['runtime_binding']
-            runtime.update(schema_version='data_factory.production_episode_binding.v1', data_disposition='PRODUCTION',
-                state_initialization_digest=None, scene_observation_digest=canonical_digest('synthetic-scene'),
-                intent_digest=loaded['intent']['intent_digest'])
-            runtime['binding_digest'] = canonical_digest({k:v for k,v in runtime.items() if k != 'binding_digest'})
-            loaded['episode']['episode_ref']['staging_manifest_digest'] = canonical_digest(loaded['staging_manifest'])
-            loaded['technical']['expected_fps'] = 30
-            loaded['recording_quality']['episode_index'] = index
-            source_rows = [json.loads(line) for line in (source / f'meta/source_provenance/episode-{index:06d}.jsonl').read_text().splitlines()]
-            for name, value in loaded.items():
-                if name == 'source_provenance':
-                    refs[name] = fixture._jsonl(f'episode-{index:06d}.jsonl', source_rows)
-                    Path(refs[name]['artifact_path']).write_bytes((source / f'meta/source_provenance/episode-{index:06d}.jsonl').read_bytes())
-                elif name == 'recording_quality':
-                    refs[name] = fixture._jsonl('quality.jsonl', [value], selected=value)
-                else:
-                    refs[name] = fixture._json(name + '.json', value)
-            ledger = fixture._compile(refs, locator)
-            fixture._json('episode_ledger.json', ledger)
-            candidate_ref = fixture._candidate(ledger, 'PASS')
-            candidate = load_json_strict(Path(candidate_ref['artifact_path']))
-            candidate['checklist_id'] = 'pick-place-v1'
-            candidate_ref = fixture._json('candidate.json', candidate)
-            fixture._json('episode_ledger_state.json', project_episode_state(ledger=ledger, candidate=candidate_ref))
-            runs.append(fixture.evidence)
-        before = snapshot(source), [snapshot(run) for run in runs]
+        feature = launch_feature_contract('act', 'fr5-up-wrist-rgb-30hz-v2', 'pick_place', read_metadata(source))
         if source_only:
             return root, source, runs, before
         if train_fit:
