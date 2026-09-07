@@ -863,6 +863,68 @@ class TrainingLaunchConnectionTest(unittest.TestCase):
             with self.assertRaisesRegex(ContractError, "COHORT_SOURCE_CHANGED"):
                 revalidate_evaluation_cohort(path)
 
+    def test_public_cohort_union_preserves_roles_and_revalidates_sources(self):
+        import sys
+        from tools.data_factory import training_entrypoint as entry
+        from tools.data_factory.training_split import resolve_evaluation_cohort, compose_evaluation_cohorts
+        with TemporaryDirectory(prefix="SYNTHETIC_TEST_ONLY-") as directory:
+            root = Path(directory)
+            paths = []
+            for name in ("old", "new"):
+                source = root / name
+                source.mkdir()
+                _, request, _ = launch_fixture(source)
+                rp = source / "request.json"
+                write_json(rp, request)
+                cp = source / "cohort.json"
+                before = snapshot(source)
+                value = entry.prepare_evaluation_cohort(rp, evidence_directory=source,
+                    **({"eval_fraction": .34} if name == "old" else {"eval_episodes": [2]}))
+                self.assertEqual(snapshot(source), before)
+                if name == "new":
+                    self.assertEqual(value["evaluation_episode_indices"], [2])
+                    for invalid in ([], [1], [2, 2], [0, 2, 3], [True], [-1]):
+                        with self.subTest(invalid=invalid), self.assertRaisesRegex(ContractError, "COHORT_PARTITION"):
+                            entry.prepare_evaluation_cohort(rp, evidence_directory=source, eval_episodes=invalid)
+                else:
+                    self.assertNotIn("evaluation_episode_indices", value)
+                    self.assertEqual(set(value), {"schema_version", "training_authority", "request",
+                        "dataset_identity", "eval_fraction", "train", "eval", "cohort_digest"})
+                write_json(cp, value)
+                paths.append(cp)
+            authority_before = {str(p): p.read_bytes() for p in root.rglob("training_approved.json")}
+            output = root / "union.json"
+            argv = ["training_entrypoint", "compose-cohorts", "--cohort", str(paths[0]),
+                    "--cohort", str(paths[1]), "--output", str(output)]
+            with mock.patch.object(sys, "argv", argv):
+                entry.main()
+            value = entry.revalidate_evaluation_cohort(output)
+            self.assertIs(value["training_authority"], False)
+            origins = {i: row for i, row in enumerate(value["train"] + value["eval"])}
+            train, evaluation = resolve_evaluation_cohort(value, origins)
+            self.assertEqual([origins[i] for i in train], value["train"])
+            self.assertEqual([origins[i] for i in evaluation], value["eval"])
+            extra = {**value["train"][0], "episode_index": 100}
+            self.assertIn(100, resolve_evaluation_cohort(value, {**origins, 100: extra})[0])
+            with self.assertRaisesRegex(ContractError, "COHORT_OVERLAP"):
+                compose_evaluation_cohorts([value["cohorts"][0], value["cohorts"][0]])
+            for changed_content in (False, True):
+                conflicting = copy.deepcopy(value["cohorts"][0])
+                conflicting["train"], conflicting["eval"] = conflicting["eval"], conflicting["train"]
+                if changed_content:
+                    conflicting["eval"][0]["episode_content_digest"] = "sha256:" + "f" * 64
+                conflicting["cohort_digest"] = canonical_digest({k: v for k, v in conflicting.items()
+                                                                  if k != "cohort_digest"})
+                with self.subTest(changed_content=changed_content), self.assertRaisesRegex(ContractError, "COHORT_OVERLAP"):
+                    compose_evaluation_cohorts([value["cohorts"][0], conflicting])
+            with self.assertRaisesRegex(ContractError, "COHORT_MISSING_HELDOUT"):
+                resolve_evaluation_cohort(value, {i: origins[i] for i in train})
+            rp.write_text(rp.read_text() + " ")
+            with self.assertRaisesRegex(ContractError, "COHORT_SOURCE_CHANGED"):
+                entry.revalidate_evaluation_cohort(output)
+            self.assertEqual({str(p): p.read_bytes() for p in root.rglob("training_approved.json")},
+                             authority_before)
+
     def test_explicit_cohort_drives_admitted_native_partitions(self):
         import sys
         from types import ModuleType
@@ -947,12 +1009,25 @@ class TrainingLaunchConnectionTest(unittest.TestCase):
                 validate_checkpoint(Path(args.checkpoint))
 
     def test_curator_request_cohort_reaches_public_recipe_without_override(self):
+        self._curator_cohort_public_recipe(union=False)
+
+    def test_curator_union_cohort_reaches_public_admitted_partitions(self):
+        self._curator_cohort_public_recipe(union=True)
+
+    def _curator_cohort_public_recipe(self, *, union):
         import sys
         import io
         from tests.data_factory.curator.support import make_mapping_cohort_case
         from tools.data_factory.curator.workflow.mapping import publish_mapped_training_request
         from tools.data_factory import training_entrypoint as training
         requests, sources, root, mapping_options, cohort = make_mapping_cohort_case(self.addCleanup)
+        expected_train, expected_eval = [0, 2, 4, 5], [7]
+        if union:
+            from tools.data_factory.training_split import compose_evaluation_cohorts
+            new = training.prepare_evaluation_cohort(requests[1], evidence_directory=root, eval_episodes=[2])
+            cohort = compose_evaluation_cohorts([cohort, new])
+            write_json(mapping_options["evaluation_cohort"], cohort)
+            expected_train, expected_eval = [0, 4, 5], [2, 7]
         requests.reverse()
         result = publish_mapped_training_request(requests, root / "mapped", **mapping_options)
         request_path = Path(result["request_path"])
@@ -984,9 +1059,9 @@ class TrainingLaunchConnectionTest(unittest.TestCase):
             issue.assert_not_called(); trainer.assert_not_called()
         self.assertEqual(snapshot(authority_root),before)
         def native(command, split, receipt):
-            self.assertEqual(split["train_episodes"],[0,2,4,5])
-            self.assertEqual(split["eval_episodes"],[7])
-            self.assertEqual(receipt["normalization"]["episodes"],[0,2,4,5])
+            self.assertEqual(split["train_episodes"],expected_train)
+            self.assertEqual(split["eval_episodes"],expected_eval)
+            self.assertEqual(receipt["normalization"]["episodes"],expected_train)
             self.assertEqual(split["evaluation_cohort"]["cohort"]["cohort_digest"],cohort["cohort_digest"])
             self.assertIn("--fr5.evaluation_cohort",training.options(command[1:]))
             return 0  # No checkpoint: public CLI must report this truthfully.

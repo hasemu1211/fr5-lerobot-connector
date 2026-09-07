@@ -181,3 +181,15 @@ An admitted v3 split MAY carry an explicit evaluation-cohort binding under the d
 - **WHEN** the public delegated request consumer receives a Curator-owned evaluation cohort reference
 - **THEN** it validates and consumes that reference without requiring a duplicate path argument
 - **AND** a conflicting override is rejected before authority publication or training; requests without a cohort retain their existing behavior.
+
+
+### Requirement: Predeclared evaluation composition preserves source roles
+Offline preparation SHALL accept an explicit nonempty proper subset of a canonical reviewed request as evaluation, without issuing training authority. Legacy fraction preparation and its existing artifacts SHALL remain supported. Composition SHALL preserve each disjoint source cohort's TRAIN/EVAL identities, bind the complete constituent planning artifacts, and reject repeated source coordinates, including conflicting roles. Revalidation SHALL reopen every constituent request and reject changed evidence. Native admitted partition resolution SHALL consume the composite through the same source-identity resolver; newly selected origins remain TRAIN, and missing or duplicated heldout origins fail closed. This planning contract SHALL NOT alter strict resume, checkpoint warm-start policy, or TRAIN-only normalization.
+
+#### Scenario: Preserve old evaluation while adding a predeclared new cohort
+- **WHEN** an existing frozen cohort and a separately reviewed, explicitly assigned new cohort are composed before training
+- **THEN** the composite retains both sets of heldout original identities through destination remapping, retains old TRAIN assignments, grants no approval, and leaves subsequent admission mandatory
+
+#### Scenario: Reject overlap or stale source
+- **WHEN** constituent cohorts repeat an original source coordinate or a constituent request changes after preparation
+- **THEN** composition or source revalidation rejects the artifact before admission or training

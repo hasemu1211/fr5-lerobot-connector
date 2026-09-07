@@ -384,6 +384,22 @@ def _validate_launch_split(value: Mapping) -> dict:
 
 
 COHORT_SCHEMA = "training.evaluation_cohort.v1"
+COHORT_UNION_SCHEMA = "training.evaluation_cohort_union.v1"
+
+
+def compose_evaluation_cohorts(cohorts: Sequence[Mapping]) -> dict:
+    """Combine disjoint frozen assignments without selecting or approving data."""
+    if len(cohorts) < 2:
+        raise ContractError("COHORT_COMPONENTS")
+    leaves = []
+    for cohort in cohorts:
+        cohort = validate_evaluation_cohort(cohort)
+        leaves.extend(cohort.get("cohorts", [cohort]))
+    value = dict(schema_version=COHORT_UNION_SCHEMA, training_authority=False,
+                 cohorts=leaves, train=[row for c in leaves for row in c["train"]],
+                 eval=[row for c in leaves for row in c["eval"]])
+    value["cohort_digest"] = canonical_digest(value)
+    return validate_evaluation_cohort(value)
 
 
 def source_episode_identity(provenance: Mapping) -> dict:
@@ -396,22 +412,47 @@ def source_episode_identity(provenance: Mapping) -> dict:
 
 def validate_evaluation_cohort(value: Mapping) -> dict:
     """Validate a planning artifact; this never supplies training authority."""
-    fields = {"schema_version", "training_authority", "request", "dataset_identity",
-              "eval_fraction", "train", "eval", "cohort_digest"}
+    union = isinstance(value, Mapping) and value.get("schema_version") == COHORT_UNION_SCHEMA
+    explicit = isinstance(value, Mapping) and "evaluation_episode_indices" in value
+    fields = ({"schema_version", "training_authority", "cohorts", "train", "eval", "cohort_digest"}
+              if union else {"schema_version", "training_authority", "request", "dataset_identity",
+                             "eval_fraction", "train", "eval", "cohort_digest"})
+    if explicit:
+        fields.add("evaluation_episode_indices")
     if (not isinstance(value, Mapping) or set(value) != fields
-            or value["schema_version"] != COHORT_SCHEMA or value["training_authority"] is not False
+            or value["schema_version"] != (COHORT_UNION_SCHEMA if union else COHORT_SCHEMA)
+            or value["training_authority"] is not False
             or canonical_digest({k: v for k, v in value.items() if k != "cohort_digest"}) != value["cohort_digest"]):
         raise ContractError("COHORT_BINDING")
-    if (not isinstance(value["request"], dict) or set(value["request"]) != {"path", "sha256"}
-            or not isinstance(value["request"]["path"], str)
-            or not isinstance(value["request"]["sha256"], str)
-            or not DIGEST.fullmatch(value["request"]["sha256"])):
-        raise ContractError("COHORT_REQUEST")
-    from tools.data_factory.training_approval import _dataset
-    _dataset(value["dataset_identity"])
-    if (type(value["eval_fraction"]) not in (float, int) or not 0 < value["eval_fraction"] < 1):
-        raise ContractError("COHORT_FRACTION")
+    if union:
+        if explicit or not isinstance(value["cohorts"], list) or len(value["cohorts"]) < 2:
+            raise ContractError("COHORT_COMPONENTS")
+        for component in value["cohorts"]:
+            if not isinstance(component, Mapping) or component.get("schema_version") != COHORT_SCHEMA:
+                raise ContractError("COHORT_COMPONENTS")
+            validate_evaluation_cohort(component)
+        if any(value[group] != [row for c in value["cohorts"] for row in c[group]]
+               for group in ("train", "eval")):
+            raise ContractError("COHORT_PARTITION")
+    else:
+        if (not isinstance(value["request"], dict) or set(value["request"]) != {"path", "sha256"}
+                or not isinstance(value["request"]["path"], str)
+                or not isinstance(value["request"]["sha256"], str)
+                or not DIGEST.fullmatch(value["request"]["sha256"])):
+            raise ContractError("COHORT_REQUEST")
+        from tools.data_factory.training_approval import _dataset
+        _dataset(value["dataset_identity"])
+        if explicit:
+            indices = value["evaluation_episode_indices"]
+            if (value["eval_fraction"] is not None or not isinstance(indices, list) or not indices
+                    or any(type(i) is not int or i < 0 for i in indices)
+                    or indices != sorted(set(indices)) or not isinstance(value["eval"], list)
+                    or len(indices) != len(value["eval"])):
+                raise ContractError("COHORT_PARTITION")
+        elif type(value["eval_fraction"]) not in (float, int) or not 0 < value["eval_fraction"] < 1:
+            raise ContractError("COHORT_FRACTION")
     all_keys = []
+    coordinates = []
     for group in ("train", "eval"):
         if not isinstance(value[group], list) or not value[group]:
             raise ContractError("COHORT_PARTITION")
@@ -422,7 +463,8 @@ def validate_evaluation_cohort(value: Mapping) -> dict:
                            for k in ("dataset_identity_digest", "episode_content_digest"))):
                 raise ContractError("COHORT_EPISODE")
             all_keys.append(canonical_digest(row))
-    if len(set(all_keys)) != len(all_keys):
+            coordinates.append((row["dataset_identity_digest"], row["episode_index"]))
+    if len(set(all_keys)) != len(all_keys) or len(set(coordinates)) != len(coordinates):
         raise ContractError("COHORT_OVERLAP")
     return copy.deepcopy(dict(value))
 
