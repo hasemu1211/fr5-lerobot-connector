@@ -159,7 +159,7 @@ def held_target_segments(source, proposal):
     return segments
 
 
-def check_segment_observation(segment, evidence, now, *, terminal=False, steady_now=None):
+def check_segment_observation(segment, evidence, now, *, terminal=False, steady_now=None, allow_pending=False):
     """Admit a fresh observation against frozen targets; never rewrite a knot."""
     try:
         observed = evidence["snapshot"]
@@ -192,7 +192,8 @@ def check_segment_observation(segment, evidence, now, *, terminal=False, steady_
         from .gripper_evidence import check_hardware
         wire = check_hardware(evidence, now,
             evidence["captured_monotonic_s"] if steady_now is None else steady_now,
-            segment["max_joint_state_age_s"], completion=terminal and segment["type"] == "GRIPPER")
+            segment["max_joint_state_age_s"], completion=terminal and segment["type"] == "GRIPPER",
+            allow_pending=allow_pending and segment["type"] == "GRIPPER" and not terminal)
         if terminal or segment["type"] == "ARM":
             if (abs(wire["raw_reference_m"] - segment["gripper_position_m"]) > 1e-9
                     or not bound["min"] <= wire["feedback_m"] <= bound["max"]):
@@ -371,6 +372,21 @@ def validate_execution_trace(plan, trace):
             if not previous_terminal <= started <= completed:
                 raise ContractError("LEARNED_TRACE_TERMINAL")
             previous_terminal = completed
+            action = item["terminal_observation"].get("action_terminal")
+            if action is not None:
+                # Older traces omit this optional observation. New held waits retain
+                # actual JTC terminal time separately from native handoff completion.
+                try:
+                    if (set(action) != {"result_status", "error_code", "observed_at_s", "observed_monotonic_s"}
+                            or type(action["result_status"]) is not int or action["result_status"] != 4
+                            or type(action["error_code"]) is not int or action["error_code"] != 0
+                            or segments[index]["type"] != "GRIPPER"
+                            or not started <= _number(action["observed_at_s"], "LEARNED_TRACE_TERMINAL") <= completed
+                            or not item["start_observation"]["captured_monotonic_s"] <= _number(
+                                action["observed_monotonic_s"], "LEARNED_TRACE_TERMINAL") <= item["terminal_observation"]["captured_monotonic_s"]):
+                        raise ContractError("LEARNED_TRACE_TERMINAL")
+                except (TypeError, KeyError) as exc:
+                    raise ContractError("LEARNED_TRACE_TERMINAL") from exc
             check_transition(item["start_observation"], item["terminal_observation"], command=segments[index]["type"] == "GRIPPER")
             if index:
                 check_transition(evidence[index - 1]["terminal_observation"], item["start_observation"], command=False)

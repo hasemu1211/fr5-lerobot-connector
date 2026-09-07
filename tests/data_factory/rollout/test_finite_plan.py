@@ -375,6 +375,9 @@ class FinitePlanTest(unittest.TestCase):
                     result = job.poll()
                 self.assertEqual(result["code"], code)
                 self.assertEqual(len(sent), 2)  # no next arm, despite JTC SUCCEEDED
+                self.assertTrue(t.owns_active_goal)
+                terminal = t.poll_terminal_evidence()
+                self.assertEqual(terminal["result_status"], 4)  # actual JTC SUCCEEDED, not fabricated cancel
                 self.assertFalse(t.owns_active_goal)
                 self.assertNotIn(("recorder", "commit"), calls)
 
@@ -392,6 +395,161 @@ class FinitePlanTest(unittest.TestCase):
         with mock.patch('tools.data_factory.motion.moveit_transport.time.time', return_value=now[0]):
             self.assertEqual(job.confirm("operator")["code"], "LEARNED_HARDWARE_SOURCE_CLOCK")
         self.assertEqual(sent, [])
+
+    def make_pending_held_job(self):
+        values = self.make_held_job()
+        job, executor, t, state, now, sent, handles, calls = values
+        job.approve(APPROVAL)
+        job.start()
+        job.poll()
+        with mock.patch('tools.data_factory.motion.moveit_transport.time.time', side_effect=lambda: now[0]):
+            self.assertTrue(job.confirm("operator")["ok"])
+            state["complete"] = True
+            job.poll()
+            now[0] += .5
+            job.poll()
+            now[0] += .51
+            state.update(complete=True, reference=.01176, feedback=.01218,
+                         hardware_override={"active_generation": 1., "completed_generation": 0.,
+                                            "completion_reason": 0., "arm_resumed": 0.})
+            self.assertEqual(job.poll()["state"], "EXECUTING")
+        self.assertEqual(len(sent), 2)
+        self.assertTrue(t.owns_active_goal)
+        self.assertTrue(t._active.action_succeeded)
+        return values
+
+    def test_later_native_completion_advances_once_with_original_deadline_and_targets(self):
+        job, executor, t, state, now, sent, handles, calls = self.make_pending_held_job()
+        frozen = copy.deepcopy(executor.runs["run"]["plan"])
+        deadline = t._active.deadline
+        with mock.patch('tools.data_factory.motion.moveit_transport.time.time', side_effect=lambda: now[0]):
+            for _ in range(3):
+                self.assertEqual(job.poll()["state"], "EXECUTING")
+                self.assertEqual(t._active.deadline, deadline)
+                self.assertIsNone(t.poll_terminal_evidence())
+                self.assertTrue(t.owns_active_goal)
+            with self.assertRaisesRegex(ContractError, "ROS_EXEC_ACTIVE"):
+                t.start_phase(t._active.held_segment)
+            now[0] += .1
+            delivery = mock.Mock(side_effect=lambda *args, **kwargs: state.update(hardware_override={}))
+            t._rclpy.spin_once = delivery
+            self.assertEqual(job.poll()["state"], "EXECUTING")
+            delivery.assert_called_once_with(t.node, timeout_sec=0.0)
+            self.assertEqual(len(sent), 3)
+            self.assertEqual(t._gripper_goal_count, 1)
+            state.update(complete=True, joints=[.001] * 6)
+            self.assertEqual(job.poll()["state"], "SEMANTIC_VERDICT")
+        self.assertEqual(executor.runs["run"]["plan"], frozen)
+        self.assertTrue(job.semantic_verdict("PASS", "operator")["ok"])
+        trace = learned_run_diagnostic(job.poll())["execution_trace"]
+        self.assertEqual(trace["status"], "COMPLETED")
+        self.assertEqual(len(trace["segments"]), 3)
+        terminal = trace["segments"][1]["terminal_observation"]
+        self.assertEqual(terminal["captured_at_s"], 11.11)
+        self.assertEqual(terminal["action_terminal"], {"result_status": 4, "error_code": 0,
+                         "observed_at_s": 11.01, "observed_monotonic_s": 11.01})
+        from tools.data_factory.rollout.finite_plan import validate_execution_trace
+        for field, value in (("result_status", 5), ("observed_at_s", 11.12), ("observed_monotonic_s", 9.)):
+            altered = copy.deepcopy(trace)
+            altered["segments"][1]["terminal_observation"]["action_terminal"][field] = value
+            altered["trace_digest"] = canonical_digest({k: v for k, v in altered.items() if k != "trace_digest"})
+            with self.assertRaisesRegex(ContractError, "LEARNED_TRACE_TERMINAL"):
+                validate_execution_trace(frozen, altered)
+        self.assertNotIn(("recorder", "commit"), calls)
+        handles[1].cancel_goal_async.assert_not_called()
+
+    def test_pending_hardware_faults_are_not_retryable_waits(self):
+        cases = [({"stopped": 1.}, "LEARNED_HARDWARE_UNRESOLVED"),
+                 ({"error": -1.}, "LEARNED_HARDWARE_UNRESOLVED"),
+                 ({"sample_steady_s": 0.}, "LEARNED_HARDWARE_STALE"),
+                 ({"second": 0.}, "LEARNED_HARDWARE_STALE"),
+                 ({"incarnation_0": 7.}, "LEARNED_HARDWARE_INCARNATION"),
+                 ({"generation": 2., "active_generation": 2.}, "LEARNED_HARDWARE_SUPERSEDED"),
+                 ({"raw_reference_m": .013}, "GRIPPER_FEEDBACK_OUT_OF_RANGE"),
+                 ({"completion_reason": 3.}, "LEARNED_HARDWARE_SCHEMA"),
+                 ({"completion_reason": 1.}, "LEARNED_HARDWARE_COMPLETION")]
+        for override, code in cases:
+            with self.subTest(override=override):
+                job, executor, t, state, now, sent, handles, calls = self.make_pending_held_job()
+                state["hardware_override"].update(override)
+                with mock.patch('tools.data_factory.motion.moveit_transport.time.time', side_effect=lambda: now[0]):
+                    self.assertEqual(job.poll()["code"], code)
+                self.assertEqual(len(sent), 2)
+                self.assertEqual(executor.runs["run"]["state"], "BLOCKED")
+                self.assertEqual(t.poll_terminal_evidence()["result_status"], 4)
+                handles[1].cancel_goal_async.assert_not_called()
+                self.assertNotIn(("recorder", "commit"), calls)
+
+    def test_expected_queued_command_can_wait_without_claiming_it_started(self):
+        for flag in ("pending", "rpc_active"):
+            with self.subTest(flag=flag):
+                job, _, t, state, now, sent, handles, _ = self.make_pending_held_job()
+                state["hardware_override"].update(active_generation=0., command_started_system_s=0.)
+                state["hardware_override"][flag] = 1.
+                with mock.patch('tools.data_factory.motion.moveit_transport.time.time', side_effect=lambda: now[0]):
+                    self.assertEqual(job.poll()["state"], "EXECUTING")
+                    self.assertTrue(t.owns_active_goal)
+                    job.cancel()
+                self.assertEqual(t.poll_terminal_evidence()["result_status"], 4)
+                self.assertEqual(len(sent), 2)
+                handles[1].cancel_goal_async.assert_not_called()
+
+    def test_pending_wait_rejects_a_changed_controller_reference(self):
+        job, executor, t, state, now, sent, handles, _ = self.make_pending_held_job()
+        observe = t.snapshot
+        def changed(*args):
+            value = observe(*args)
+            value["gripper_controller"]["reference_position_m"] = .021
+            return value
+        with mock.patch('tools.data_factory.motion.moveit_transport.time.time', side_effect=lambda: now[0]):
+            with mock.patch.object(t, "snapshot", side_effect=changed):
+                self.assertEqual(job.poll()["code"], "GRIPPER_FEEDBACK_OUT_OF_RANGE")
+        self.assertEqual(len(sent), 2)
+        self.assertEqual(t.poll_terminal_evidence()["result_status"], 4)
+        handles[1].cancel_goal_async.assert_not_called()
+
+    def test_pending_native_wait_preserves_deadline_cancel_and_real_action_terminal(self):
+        for failure in ("deadline", "late_snapshot", "lease", "cancel", "paused_system"):
+            with self.subTest(failure=failure):
+                job, executor, t, state, now, sent, handles, _ = self.make_pending_held_job()
+                step = copy.deepcopy(t._active.held_segment)
+                with mock.patch('tools.data_factory.motion.moveit_transport.time.time', side_effect=lambda: now[0]):
+                    if failure == "deadline":
+                        wall = t._active.deadline + .001
+                        t._clock = lambda: wall
+                        result = job.poll()
+                        self.assertEqual(result["code"], "LEARNED_HARDWARE_COMPLETION_TIMEOUT")
+                    elif failure == "late_snapshot":
+                        observe = t.snapshot
+                        def delayed(*args):
+                            value = observe(*args)
+                            t._clock = lambda: t._active.deadline + .001
+                            return value
+                        with mock.patch.object(t, "snapshot", side_effect=delayed):
+                            result = job.poll()
+                        self.assertEqual(result["code"], "LEARNED_HARDWARE_COMPLETION_TIMEOUT")
+                    elif failure == "lease":
+                        now[0] += 2.
+                        result = job.poll()
+                        self.assertEqual(result["code"], "HEARTBEAT_TIMEOUT")
+                    elif failure == "paused_system":
+                        t._clock = lambda: now[0] + .2
+                        result = job.poll()
+                        self.assertEqual(result["code"], "LEARNED_HARDWARE_SOURCE_CLOCK")
+                    else:
+                        job.cancel()
+                        self.assertEqual(executor.runs["run"]["failure_code"], "CANCELLED_BY_OPERATOR")
+                    self.assertTrue(t.owns_active_goal)
+                    self.assertEqual(executor.runs["run"]["execution"]["cancel_error"], "ROS_EXEC_CANCEL_NOT_CANCELED")
+                    terminal = t.poll_terminal_evidence()
+                    self.assertEqual(terminal["result_status"], 4)
+                    self.assertFalse(t.owns_active_goal)
+                    state["hardware_override"] = {}
+                    job.poll()
+                    with self.assertRaisesRegex(ContractError, "ROS_EXEC_ACTIVE"):
+                        t.start_phase(step)
+                self.assertEqual(len(sent), 2)
+                handles[1].cancel_goal_async.assert_not_called()
 
     def test_held_float32_profile_reference_is_preserved_without_snapping(self):
         import struct
@@ -475,6 +633,7 @@ class FinitePlanTest(unittest.TestCase):
                         handles[-1].cancel_goal_async.side_effect = lambda: mock.Mock(done=lambda: False)
                         job.cancel()
                     else:
+                        now[0] += .1
                         state.update(complete=True, reference=.01176, feedback=.01218)
                         if failure == "stale": state["age"] = 2.
                         if failure == "future": state["age"] = -1.
@@ -584,6 +743,7 @@ class FinitePlanTest(unittest.TestCase):
             job.confirm("operator")
             state["complete"] = True
             job.poll()
+            now[0] += .1
             state.update(complete=True, reference=.01176, feedback=.01218)
             observe = t.snapshot
             def late_observation(*args):
@@ -594,6 +754,9 @@ class FinitePlanTest(unittest.TestCase):
                 result = job.poll()
         self.assertEqual(result["code"], "SYNTHETIC_CANCEL_DURING_SNAPSHOT")
         self.assertEqual(len(sent), 2)
+        self.assertTrue(t.owns_active_goal)
+        self.assertEqual(t.poll_terminal_evidence()["result_status"], 4)
+        self.assertFalse(t.owns_active_goal)
 
     def test_held_collision_sampling_covers_gripper_travel_and_feedback_bounds(self):
         from moveit_msgs.msg import RobotState

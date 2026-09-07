@@ -322,3 +322,35 @@ verifying actual export/configuration. It does not prove source freshness or
 physical completion. The software accepts no inferred controller timezone or
 automatic clock calibration; root supplies measured mapping/uncertainty and
 retains hardware integration authority.
+
+## Bounded completion waiting and the remaining continuous path
+
+JTC goal tolerance and native gripper completion have independent predicates.
+The [JTC 4.40.1 terminal branch](https://github.com/ros-controls/ros2_controllers/blob/4.40.1/joint_trajectory_controller/src/joint_trajectory_controller.cpp#L448)
+can succeed after the last trajectory point when position tolerance passes; it
+does not consume FR5 worker completion metadata. A fresh same-command native
+record arriving later but inside the approved timeout should remain usable.
+
+The selected correction retains that result under the existing transport handle,
+services native callbacks and waits only for fresh expected pending hardware.
+Stale, inconsistent, failed, stopped or superseded evidence still fails. The
+first JTC success observation and final hardware handoff observation are retained
+in the existing trace; neither timestamp is promoted to physical completion
+truth. Cancellation preserves actual action terminal evidence and fences all
+later sends without pretending to stop an in-flight SDK call.
+
+This is enabling evidence toward faithful continuous model-output execution.
+Serially sending every distinct raw gripper reference would preserve values but
+change the original sample timing and repeatedly interrupt the native arm stream.
+The retained write-predicate replay also shows that hardware integer-code equality
+is not the enqueue rule. The competing native shared-time consumption path must
+preserve all original knots, declare virtual versus wall time, bind consumed
+indices and prove its actual start/pause behavior. Earlier isolated sampler replay
+is limited by unproven controller-start coherence and source clock integration;
+it is not deployment proof. Staged release remains intentional and must survive
+that consumer rather than being removed to make the proposal pass.
+
+The shared `portfolio-proof-loop` requirements remain the canonical source for
+native safety ownership, authority and evidence lineage. Root retains shared
+integration/resource assignment; these CPU results neither require new data as a
+presumed fix nor establish task effect or data utility.

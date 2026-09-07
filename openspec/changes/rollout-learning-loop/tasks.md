@@ -55,7 +55,8 @@ direnv exec . python3 -m unittest tests.data_factory.rollout.test_finite_plan te
 - [x] Prepare tracked native export/known-stop patch and verify actual extracted C++ methods plus ROS serializers on CPU, including stale completion, supersession and paused-time rejection.
 - [ ] Root deploys the exact driver residual and measures the same-incarnation source clock mapping; verify actual DynamicJointState export before physical consumption.
 - [ ] Prove controller-start coherence and coherent seven-joint physical sampling; held-target metadata does not discharge these continuous-consumer requirements.
-- [ ] Coordinate same-command hardware completion and arm-resume evidence with the existing hardware/motion owner; JTC tolerance success alone is insufficient.
+- [x] Retain successful JTC terminal evidence while waiting for fresh expected native completion under the same owner and original phase deadline; verify later completion, queued callbacks, cancel/lease/deadline and late-snapshot fences on CPU.
+- [ ] Root verifies real same-command hardware completion/arm resume and clock mapping after driver integration; JTC tolerance and CPU replay alone remain insufficient.
 - [ ] Implement an explicitly bounded native continuous-reference consumer with original full output, consumed indices and staged-release compatibility retained; do not automatically truncate or snap.
 - [ ] Verify its normal executor/trace consumers and failure/cancellation before any separately assigned physical qualification.
 

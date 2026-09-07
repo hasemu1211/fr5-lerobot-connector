@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import base64
+import copy
 import math
 import time
 import xml.etree.ElementTree as ET
@@ -27,6 +28,10 @@ class _ActivePhase:
     goal_future: object | None = None
     goal_handle: object | None = None
     result_future: object | None = None
+    held_segment: dict | None = None
+    start_observation: dict | None = None
+    action_succeeded: bool = False
+    action_terminal_observation: dict | None = None
 
 
 def _rotation_quaternion(columns):
@@ -427,6 +432,9 @@ class RosMoveItTransport:
                 from tools.data_factory.rollout.finite_plan import check_segment_observation
                 check_segment_observation(compiled_step, start_observation, time.time(), steady_now=self._clock())
         active = _ActivePhase(phase, step_type, self._clock() + timeout)
+        if phase == "LEARNED_CHUNK" and step_type == "GRIPPER" and "action_range" in compiled_step:
+            active.held_segment = copy.deepcopy(compiled_step)
+            active.start_observation = copy.deepcopy(start_observation)
         self._active = active
         self._execution_locked = True
         if cancel_event is not None and cancel_event.is_set():
@@ -492,7 +500,8 @@ class RosMoveItTransport:
         if active.result_future is None:
             raise ContractError("ROS_EXEC_GOAL_PENDING")
         if self._clock() > active.deadline:
-            raise ContractError("ROS_EXEC_RESULT_TIMEOUT")
+            raise ContractError("LEARNED_HARDWARE_COMPLETION_TIMEOUT" if active.action_succeeded
+                                and active.held_segment is not None else "ROS_EXEC_RESULT_TIMEOUT")
         try:
             if not active.result_future.done():
                 self._rclpy.spin_once(self.node, timeout_sec=0.0)
@@ -501,8 +510,8 @@ class RosMoveItTransport:
             result = active.result_future.result()
         except RuntimeError as exc:
             raise ContractError("ROS_EXEC_RESULT_FAILED", str(exc)) from exc
-        self._active = None
         if result.status != self._goal_succeeded:
+            self._active = None
             self._execution_locked = True
             raise ContractError("ROS_EXEC_FAILED")
         if active.type == "ARM":
@@ -510,9 +519,52 @@ class RosMoveItTransport:
         else:
             succeeded = result.result.error_code == self._gripper_success
         if not succeeded:
+            self._active = None
             self._execution_locked = True
             raise ContractError("ROS_EXEC_FAILED")
+        if active.held_segment is not None:
+            if not active.action_succeeded:
+                active.action_terminal_observation = {
+                    "result_status": result.status, "error_code": result.result.error_code,
+                    "observed_at_s": time.time(), "observed_monotonic_s": self._clock()}
+            active.action_succeeded = True
+            if self._execution_locked:
+                raise ContractError("ROS_EXEC_CANCELLED")
+            completed = self._held_hardware_completed(active)
+            if self._execution_locked:
+                raise ContractError("ROS_EXEC_CANCELLED")
+            if not completed:
+                return None
+        self._active = None
         return active
+
+    def _held_hardware_completed(self, active):
+        """Observe one retained command; never resend, renew its deadline or replan."""
+        from tools.data_factory.rollout.finite_plan import check_freshness, check_segment_observation, _number
+        from tools.data_factory.rollout.gripper_evidence import check_transition
+        segment = active.held_segment
+        self._rclpy.spin_once(self.node, timeout_sec=0.0)
+        snapshot = self.snapshot(segment["max_joint_state_age_s"])
+        now, steady = time.time(), self._clock()
+        if steady > active.deadline:
+            raise ContractError("LEARNED_HARDWARE_COMPLETION_TIMEOUT")
+        check_freshness(segment["learned_proposal"], now)
+        evidence = {"captured_at_s": now, "captured_monotonic_s": steady, "snapshot": snapshot}
+        try:
+            check_segment_observation(segment, evidence, now, steady_now=steady, allow_pending=True)
+        except ContractError as exc:
+            if exc.code == "START_STATE_MISMATCH":
+                raise ContractError("LEARNED_TERMINAL_STATE") from exc
+            raise
+        check_transition(active.start_observation, evidence, command=True, allow_queued=True)
+        wire = snapshot["gripper_controller"]["hardware_execution"]["wire"]
+        reference = _number(snapshot["gripper_controller"]["reference_position_m"], "GRIPPER_FEEDBACK_OUT_OF_RANGE")
+        if any(abs(value - segment["gripper_position_m"]) > 1e-9 for value in (reference, wire["raw_reference_m"])):
+            raise ContractError("GRIPPER_FEEDBACK_OUT_OF_RANGE")
+        if wire["completed_generation"] != wire["generation"]:
+            return False
+        check_segment_observation(segment, evidence, now, steady_now=steady, terminal=True)
+        return True
 
     def cancel_active(self, cancel_timeout_s):
         """Cancel the active action, retaining non-cancel results for evidence."""
@@ -527,6 +579,11 @@ class RosMoveItTransport:
         ):
             raise ContractError("ROS_EXEC_CANCEL_TIMEOUT")
         self._execution_locked = True
+        if getattr(active, "action_succeeded", False):
+            # JTC is already terminal. A cancel request fences the handoff but
+            # cannot manufacture CANCELED or stop an in-flight hardware RPC.
+            # Keep the actual terminal result for poll_terminal_evidence.
+            raise ContractError("ROS_EXEC_CANCEL_NOT_CANCELED")
         try:
             if active.goal_handle is None:
                 if active.goal_future is None:
@@ -561,7 +618,7 @@ class RosMoveItTransport:
 
     @property
     def owns_active_goal(self):
-        """Report whether this transport still owns a nonterminal action."""
+        """Report ownership of an action, native handoff or unresolved cancellation."""
         return getattr(self, "_active", None) is not None
 
     def poll_terminal_evidence(self):
@@ -569,6 +626,10 @@ class RosMoveItTransport:
         active = getattr(self, "_active", None)
         if active is None:
             raise ContractError("ROS_EXEC_NO_ACTIVE")
+        if getattr(active, "action_succeeded", False) and not self._execution_locked:
+            # A normal hardware handoff is still owned; diagnostic polling must
+            # not release it early. After cancellation, report the actual JTC result.
+            return None
         try:
             if active.goal_handle is None:
                 if active.goal_future is None:

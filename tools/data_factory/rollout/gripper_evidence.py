@@ -97,7 +97,7 @@ def calendar_s(wire, prefix=""):
         raise ContractError("LEARNED_HARDWARE_SOURCE_CLOCK") from exc
 
 
-def check_hardware(evidence, now, steady_now, max_age_s, *, completion=False):
+def check_hardware(evidence, now, steady_now, max_age_s, *, completion=False, allow_pending=False):
     try:
         hw = evidence["snapshot"]["gripper_controller"]["hardware_execution"]
         if not isinstance(hw, dict) or set(hw) != {"wire", "clock_binding", "received_steady_s"}:
@@ -113,12 +113,20 @@ def check_hardware(evidence, now, steady_now, max_age_s, *, completion=False):
         for key in ("generation", "active_generation", "completed_generation"):
             integer(wire[key], 2**53 - 1)
         integer(wire["frame"], 255)
+        integer(wire["completion_reason"], 2)
         for key in ("pending", "rpc_active", "arm_resumed", "stopped", "valid"):
             integer(wire[key], 1)
         if wire["version"] != 1 or wire["valid"] != 1:
             raise ContractError("LEARNED_HARDWARE_INVALID")
-        if (wire["pending"] or wire["rpc_active"] or wire["stopped"] or wire["error"]
-                or not wire["arm_resumed"] or wire["active_generation"]):
+        if wire["stopped"] or wire["error"]:
+            raise ContractError("LEARNED_HARDWARE_UNRESOLVED")
+        unresolved = (wire["pending"] or wire["rpc_active"] or not wire["arm_resumed"]
+                      or wire["active_generation"])
+        pending = (allow_pending and not completion and unresolved and not wire["arm_resumed"]
+                   and wire["generation"] > 0 and wire["completed_generation"] < wire["generation"]
+                   and wire["active_generation"] in (0, wire["generation"])
+                   and (wire["pending"] or wire["rpc_active"] or wire["active_generation"]))
+        if unresolved and not pending:
             raise ContractError("LEARNED_HARDWARE_UNRESOLVED")
         now, steady_now = number(now), number(steady_now)
         uncertainty = mapping["uncertainty_s"]
@@ -138,6 +146,13 @@ def check_hardware(evidence, now, steady_now, max_age_s, *, completion=False):
         source = calendar_s(wire) + mapping["calendar_to_system_offset_s"]
         if source + uncertainty > now or now - (source - uncertainty) > max_age_s:
             raise ContractError("LEARNED_HARDWARE_STALE")
+        if pending:
+            if wire["active_generation"] == wire["generation"] and wire["completion_reason"] != 0:
+                raise ContractError("LEARNED_HARDWARE_COMPLETION")
+            # Only the transport's existing post-JTC handoff uses this branch.
+            # Freshness, identity and hard faults above still apply; the caller
+            # must bind generation/reference to its one retained command.
+            return wire
         generation = wire["generation"]
         if generation == 0:
             if completion or wire["completed_generation"] or wire["completion_reason"]:
@@ -156,7 +171,7 @@ def check_hardware(evidence, now, steady_now, max_age_s, *, completion=False):
         raise ContractError("LEARNED_HARDWARE_SCHEMA") from exc
 
 
-def check_transition(start, terminal, *, command):
+def check_transition(start, terminal, *, command, allow_queued=False):
     """Check association in both the sole executor and the canonical trace reader."""
     try:
         a = start["snapshot"]["gripper_controller"]["hardware_execution"]["wire"]
@@ -165,7 +180,10 @@ def check_transition(start, terminal, *, command):
             raise ContractError("LEARNED_HARDWARE_INCARNATION")
         if b["generation"] != a["generation"] + int(command):
             raise ContractError("LEARNED_HARDWARE_SUPERSEDED")
-        if command and b["command_started_system_s"] < start["captured_at_s"]:
+        if allow_queued and b["completed_generation"] < b["generation"] and b["completed_generation"] != a["generation"]:
+            raise ContractError("LEARNED_HARDWARE_COMPLETION")
+        queued = allow_queued and b["active_generation"] == 0 and (b["pending"] or b["rpc_active"])
+        if command and not queued and b["command_started_system_s"] < start["captured_at_s"]:
             raise ContractError("LEARNED_HARDWARE_COMPLETION")
     except (TypeError, KeyError) as exc:
         raise ContractError("LEARNED_HARDWARE_SCHEMA") from exc

@@ -327,10 +327,14 @@ stop/error or unresolved generation and SHALL show native arm resume. Its
 completed generation SHALL equal the current generation and be exactly one
 beyond the pre-send observation. Its completion source interval SHALL be after
 command start and fresh at handoff. ARM slices and adjacent segment observations
-SHALL retain the same incarnation/generation. JTC success with unresolved native
-evidence SHALL fail explicitly, with no repeated gripper send or next arm send;
-this increment adds no post-JTC waiting/retry behavior. Canonical trace validation
-SHALL consume the same checks and retain clock binding and monotonic capture time.
+SHALL retain the same incarnation/generation. After JTC success, fresh evidence of
+the one expected pending command MAY remain owned by the same transport until
+qualified completion or the original phase deadline. This wait SHALL NOT resend
+a gripper goal, extend the deadline/lease or advance an arm. Stale/paused clocks,
+wrong incarnation/generation/reference, hardware error/stop and inconsistent
+completion SHALL fail immediately; these failures are not retryable waits.
+Canonical trace validation SHALL consume the same completion checks and retain
+clock binding and monotonic capture time.
 
 #### Scenario: Fresh receipt contains an old completion
 
@@ -352,3 +356,29 @@ availability, hardware tracking and physical qualification. CPU native-method
 replay and ROS serializer tests do not discharge those requirements. Fresh
 hardware gripper evidence does not prove coherent seven-joint source sampling
 or synchronized controller starts; continuous references remain unsupported.
+
+#### Scenario: JTC succeeds before native completion becomes available
+
+- **WHEN** the successful JTC result arrives while fresh native state identifies
+  the expected queued or active command without error/stop
+- **THEN** the existing transport retains ownership and services native state
+  callbacks under the original phase deadline and lease
+- **AND** later fresh same-command completion permits exactly one next arm slice
+- **AND** the canonical terminal observation retains first observed JTC success
+  time separately from hardware handoff time; the recorded interval is not a
+  measurement of physical completion latency or policy effectiveness
+
+#### Scenario: Cancel or deadline interrupts a native completion wait
+
+- **WHEN** the original deadline/lease expires or cancellation arrives during
+  the wait, including inside a late snapshot callback
+- **THEN** all future dispatch remains fenced and the native wait cannot restart
+- **AND** a prior JTC SUCCEEDED result remains SUCCEEDED terminal evidence;
+  cancellation cannot relabel it CANCELED or claim an in-flight SDK safety stop
+- **AND** ordinary diagnostic polling cannot release the owned handoff early
+
+These acceptance rules follow the shared portfolio proof-loop requirements for
+native safety ownership and evidence lineage; they introduce no operator gate.
+They apply to the supported finite held-target mode. They do not qualify serial
+execution of arbitrary model references as preserving original 30 Hz timing,
+nor supply controller-start coherence or staged-release continuous consumption.

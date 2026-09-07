@@ -1266,6 +1266,9 @@ class PickupExecutor:
                             from tools.data_factory.rollout.finite_plan import check_segment_observation
                             terminal_observation = {"captured_at_s": self.source_clock(), "captured_monotonic_s": self.monotonic_clock(),
                                                     "snapshot": copy.deepcopy(observed)}
+                            action_terminal = getattr(active, "action_terminal_observation", None)
+                            if action_terminal is not None:
+                                terminal_observation["action_terminal"] = copy.deepcopy(action_terminal)
                             terminal = check_segment_observation(segment, terminal_observation, self.source_clock(), terminal=True,
                                                                  steady_now=self.monotonic_clock())
                             from tools.data_factory.rollout.gripper_evidence import check_transition
