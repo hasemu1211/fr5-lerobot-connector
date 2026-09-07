@@ -511,8 +511,6 @@ class CollectionOperatorApplication:
             "authorize_campaign": self.authorize_campaign,
             "cancel_session": self.cancel_session,
             "review_candidate": self.review_candidate,
-            "refresh_stored_reviews": self.refresh_stored_reviews,
-            "select_stored_review": self.select_stored_review,
             "new_campaign_same_settings": self.new_campaign_same_settings,
             "refresh_collection_advice": self.refresh_collection_advice,
             "choose_collection_advice": self.choose_collection_advice,
@@ -523,6 +521,9 @@ class CollectionOperatorApplication:
             "save_workspace": self.save_workspace,
             "new_workspace_registration": self.new_workspace_registration,
         }
+        if self.stored_reviews is not None:
+            handlers.update(refresh_stored_reviews=self.refresh_stored_reviews,
+                            select_stored_review=self.select_stored_review)
         if self.camera_bindings_call is not None:
             handlers["update_camera_bindings"] = self.update_camera_bindings
         if self.object_position_call is not None:

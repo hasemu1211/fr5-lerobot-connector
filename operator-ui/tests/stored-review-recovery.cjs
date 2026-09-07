@@ -31,8 +31,10 @@ const {randomUUID} = require("node:crypto");
     },
   });
   const source = readFileSync(script, "utf8");
+  vm.runInContext(readFileSync(require("node:path").join(require("node:path").dirname(script), "messages.js"), "utf8"), context);
   const between = (start, end) => source.slice(source.indexOf(start), source.indexOf(end, source.indexOf(start)));
   vm.runInContext(source.slice(0, source.indexOf("function canIntent"))
+    + between("function catalogOption", "function renderCurrentObjectPose")
     + between("function canIntent", "function canImmediateCancel")
     + between("function measurementLabel", "function renderNext")
     + between("async function submitIntent", "async function submitImmediateCancel")
