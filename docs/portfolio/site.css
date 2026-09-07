@@ -149,3 +149,7 @@ header{min-height:100px}.brand{font-size:40px}nav{font-size:14px;gap:34px}
 /* The opening pairs the implemented collection with its data-to-policy purpose. */
 .hero-recording{margin:0;min-width:0}.hero-recording .hero-observation-title{margin-bottom:18px}.hero-recording video{display:block;width:100%;height:auto;aspect-ratio:8/3;background:#14212a}.hero-recording figcaption{display:flex;align-items:start;justify-content:space-between;gap:22px;padding:18px 0;border-bottom:1px solid var(--line);font-size:12px;color:var(--muted)}.hero-recording figcaption p{margin:0}.hero-recording figcaption a{white-space:nowrap;text-decoration:none;color:var(--ink)}
 .project-research{display:grid;grid-template-columns:1fr 2fr;gap:100px;padding:55px 0 65px;border-top:1px solid var(--line)}.project-research h2{font-size:30px;line-height:1.6;margin:0}.project-research p:not(.kicker){font-size:15px;color:var(--muted);max-width:48em}.research-links{display:flex;flex-wrap:wrap;gap:22px;font-size:12px;color:var(--accent)}
+
+.cohort-study{margin-top:42px;scroll-margin-top:35px}.cohort-study h3{font-size:24px;margin-bottom:18px}.cohort-table{font-size:14px}.cohort-table td,.cohort-table th{font-family:inherit;text-align:left;padding:18px 15px}.cohort-preserved{background:#eaf3f7;color:#285c73}.cohort-table th:first-child{width:22%}
+
+.acquisition-mechanism > .source-details p{max-width:85ch;font-size:14px;line-height:1.9}

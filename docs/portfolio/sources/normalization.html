@@ -34,4 +34,166 @@ def _run_native_training(argv: list[str], split: dict, receipt: dict) -&gt; int:
         return 0
     finally:
         lerobot_train.make_train_eval_datasets = original_factory
-        sys.argv = original_argv</pre></section></main></body></html>
+        sys.argv = original_argv</pre></section><section id="source-cohort"><h2>데이터 통합 뒤에도 같은 평가 원본을 유지하는 연결</h2><p>main의 f1bb157·def2680·3397480·709a023은 평가 대상의 원본 정체성을 Curator 매핑과 실제 LeRobot 데이터 생성자까지 연결했다. cohort의 원본 데이터 식별값·시연 번호·내용 식별값은 고정하고, 통합된 데이터에서 대응하는 새 번호를 계산한다. 해당 평가 원본이 빠지거나 같은 원본이 여러 번 매핑되면 요청을 거부한다. 고정된 source revision이 바뀐 경우도 이전 cohort로 통과시키지 않는다.</p><p>표는 이 구현 원리의 비교이며 새로운 실제 학습 결과를 표현하지 않는다. 기존 26개 시연 실험의 20/6 분할은 원래 수치와 출처를 보존한다. 기존 synthetic 회귀는 source 순서를 뒤집어도 원래 평가 시연이 새 번호7로 대응하고, native dataset의 실제 episodes 인자가 TRAIN[0,2,4,5], EVAL[7]이 되는지 확인한다. source metadata 전체를 대상으로 한 새 분할 비율 조정이나 신규 GPU 실행은 수행하지 않았다.</p><h3>tools/data_factory/training_split.py:389</h3><p class="locator">main dee2d6f · sha256:2d824d58139331b46c06553b6fcf0ab7bf6f2b19a4b4965d22e262fb6bf72b50</p><pre>389: def source_episode_identity(provenance: Mapping) -&gt; dict:
+390:     &quot;&quot;&quot;Resolve an already-validated mapping/derivation to its original episode.&quot;&quot;&quot;
+391:     while &quot;parent&quot; in provenance:
+392:         provenance = provenance[&quot;parent&quot;][&quot;provenance&quot;]
+393:     return {key: copy.deepcopy(provenance[key]) for key in
+394:             (&quot;dataset_identity_digest&quot;, &quot;episode_index&quot;, &quot;episode_content_digest&quot;)}
+395:</pre><h3>tools/data_factory/training_split.py:430</h3><p class="locator">main dee2d6f · sha256:2d824d58139331b46c06553b6fcf0ab7bf6f2b19a4b4965d22e262fb6bf72b50</p><pre>430: def resolve_evaluation_cohort(value: Mapping, origins: Mapping[int, Mapping]) -&gt; tuple[list[int], list[int]]:
+431:     &quot;&quot;&quot;Map proven source identities to new indices; never retune a fraction.
+432:
+433:     Caller must validate the source publication and each origin&#x27;s provenance.
+434:     A matching identity at two destination indices is leakage, not extra data.
+435:     &quot;&quot;&quot;
+436:     value = validate_evaluation_cohort(value)
+437:     if not origins or any(type(i) is not int or i &lt; 0 for i in origins):
+438:         raise ContractError(&quot;COHORT_DESTINATION&quot;)
+439:     keys = [canonical_digest(origin) for origin in origins.values()]
+440:     coordinates = [(origin[&quot;dataset_identity_digest&quot;], origin[&quot;episode_index&quot;]) for origin in origins.values()]
+441:     if len(coordinates) != len(set(coordinates)):
+442:         raise ContractError(&quot;COHORT_OVERLAP&quot;)
+443:     heldout = {canonical_digest(row) for row in value[&quot;eval&quot;]}
+444:     if not heldout.issubset(keys):
+445:         raise ContractError(&quot;COHORT_MISSING_HELDOUT&quot;)
+446:     train = [i for i in sorted(origins) if canonical_digest(origins[i]) not in heldout]
+447:     evaluation = [i for i in sorted(origins) if canonical_digest(origins[i]) in heldout]
+448:     if not train:
+449:         raise ContractError(&quot;COHORT_PARTITION&quot;)
+450:     return train, evaluation</pre><h3>tools/data_factory/training_entrypoint.py:1013</h3><p class="locator">main dee2d6f · sha256:809efcacfcfe949bf6b69d733102d38a7308ff9da3892d20616c6b3f12bacb21</p><pre>1013: def prepare_evaluation_cohort(request_path: Path, *, evidence_directory: Path,
+1014:                               eval_fraction: float) -&gt; dict:
+1015:     &quot;&quot;&quot;Revalidate canonical selected evidence without publishing any authority.&quot;&quot;&quot;
+1016:     from tools.data_factory.training_receipts import file_digest
+1017:     from tools.data_factory.training_split import (
+1018:         COHORT_SCHEMA, selected_train_eval, source_episode_identity, validate_evaluation_cohort,
+1019:     )
+1020:     request_path = request_path.resolve()
+1021:     before = file_digest(request_path)
+1022:     request = load_json_strict(request_path)
+1023:     dataset, drafts = _prepare_approvals(
+1024:         request, evidence_directory, &quot;cohort-preview-only&quot;, check_targets=False,
+1025:     )
+1026:     metadata = read_metadata(Path(dataset[&quot;dataset_root&quot;]))
+1027:     train, evaluation = selected_train_eval(
+1028:         metadata[&quot;episode_tasks&quot;], [e[&quot;episode_index&quot;] for e in request[&quot;episodes&quot;]], eval_fraction,
+1029:     )
+1030:     origins = {d[&quot;approval_arguments&quot;][&quot;episode_index&quot;]: source_episode_identity(d[&quot;provenance&quot;])
+1031:                for d in drafts}
+1032:     value = dict(schema_version=COHORT_SCHEMA, training_authority=False,
+1033:                  request={&quot;path&quot;: str(request_path), &quot;sha256&quot;: before}, dataset_identity=dataset,
+1034:                  eval_fraction=eval_fraction, train=[origins[i] for i in train],
+1035:                  eval=[origins[i] for i in evaluation])
+1036:     value[&quot;cohort_digest&quot;] = canonical_digest(value)
+1037:     if file_digest(request_path) != before:
+1038:         raise ContractError(&quot;COHORT_REQUEST_CHANGED&quot;)
+1039:     return validate_evaluation_cohort(value)
+1040:</pre><h3>tools/data_factory/training_entrypoint.py:463</h3><p class="locator">main dee2d6f · sha256:809efcacfcfe949bf6b69d733102d38a7308ff9da3892d20616c6b3f12bacb21</p><pre>463: def run_delegated_request(request: dict, *, approval_output: Path,
+464:                           authorized_actor: str, delegation_path: Path,
+465:                           profile: str, collection_profile: str,
+466:                           output: Path, steps: int, batch_size: int,
+467:                           eval_split: float, eval_steps: int, save_freq: int,
+468:                           runner=None, checkpoint_validator=None,
+469:                           evaluator=None, evaluation_cohort: Path | None = None) -&gt; dict:
+470:     &quot;&quot;&quot;Supported product entrypoint: request plus bounded recipe, no raw argv.&quot;&quot;&quot;
+471:     if profile != &quot;smolvla&quot;:
+472:         raise ContractError(&quot;TRAINING_EVALUATOR_UNSUPPORTED&quot;)
+473:     request = copy.deepcopy(request)
+474:     if &quot;evaluation_cohort&quot; in request:
+475:         from tools.data_factory.training_receipts import file_digest
+476:         reference = request[&quot;evaluation_cohort&quot;]
+477:         approval._exact(reference, frozenset({&quot;path&quot;, &quot;sha256&quot;, &quot;cohort_digest&quot;}), &quot;COHORT_REQUEST&quot;)
+478:         path = Path(reference[&quot;path&quot;]).expanduser().resolve()
+479:         if evaluation_cohort is not None and evaluation_cohort.expanduser().resolve() != path:
+480:             raise ContractError(&quot;COHORT_OVERRIDE_CONFLICT&quot;)
+481:         if file_digest(path) != reference[&quot;sha256&quot;]:
+482:             raise ContractError(&quot;COHORT_REQUEST_CHANGED&quot;)
+483:         cohort = revalidate_evaluation_cohort(path)
+484:         if cohort[&quot;cohort_digest&quot;] != reference[&quot;cohort_digest&quot;]:
+485:             raise ContractError(&quot;COHORT_REQUEST_CHANGED&quot;)
+486:         evaluation_cohort = path
+487:     dataset = Path(request[&quot;dataset_root&quot;]).expanduser().resolve()
+488:     argv = _request_argv(
+489:         request, dataset=dataset, repo_id=request[&quot;repo_id&quot;], profile=profile,
+490:         collection_profile=collection_profile, output=output.expanduser().resolve(),
+491:         steps=steps, batch_size=batch_size, eval_split=eval_split,
+492:         eval_steps=eval_steps, save_freq=save_freq,
+493:     )
+494:     if evaluation_cohort is not None:
+495:         argv.append(f&quot;--fr5.evaluation_cohort={evaluation_cohort.expanduser().resolve()}&quot;)
+496:     return launch_delegated_request(
+497:         request, approval_output=approval_output, authorized_actor=authorized_actor,
+498:         delegation_path=delegation_path, profile=profile,
+499:         collection_profile=collection_profile, argv=argv, runner=runner,
+500:         checkpoint_validator=checkpoint_validator, evaluator=evaluator,
+501:     )
+502:
+503:
+504: def _explicit_cohort_datasets(cfg, split):
+505:     &quot;&quot;&quot;Use installed native constructors with the admitted explicit partitions.&quot;&quot;&quot;
+506:     from lerobot.datasets.factory import LeRobotDataset, LeRobotDatasetMetadata, resolve_delta_timestamps, ImageTransforms
+507:     from tools.data_factory.training_split import validate_training_split
+508:     validate_training_split(split)
+509:     binding = split[&quot;evaluation_cohort&quot;]
+510:     if revalidate_evaluation_cohort(Path(binding[&quot;path&quot;])) != binding[&quot;cohort&quot;]:
+511:         raise ContractError(&quot;COHORT_SOURCE_CHANGED&quot;)
+512:     metadata = LeRobotDatasetMetadata(cfg.dataset.repo_id, root=cfg.dataset.root, revision=cfg.dataset.revision)
+513:     delta = resolve_delta_timestamps(cfg.trainable_config, metadata)
+514:     transform = ImageTransforms(cfg.dataset.image_transforms) if cfg.dataset.image_transforms.enable else None
+515:     return tuple(LeRobotDataset(
+516:         cfg.dataset.repo_id, root=cfg.dataset.root, episodes=split[group],
+517:         delta_timestamps=delta, image_transforms=transform if group == &quot;train_episodes&quot; else None,
+518:         revision=cfg.dataset.revision, video_backend=cfg.dataset.video_backend,
+519:         return_uint8=True, tolerance_s=cfg.tolerance_s,
+520:     ) for group in (&quot;train_episodes&quot;, &quot;eval_episodes&quot;))
+521:
+522:
+523: def run_native_training(argv: list[str], split: dict, receipt: dict) -&gt; int:
+524:     with approval.local_hf_offline(_delegated_training(split, receipt)):
+525:         return _run_native_training(argv, split, receipt)</pre><h3>tests/data_factory/curator/workflow/test_mapping_cohort.py:25</h3><p class="locator">main dee2d6f · sha256:511b0294212d45d3426be9ba9c2338c724bf7a23e15db4ea631a1b068a081d9b</p><pre>25:     def test_cli_publication_preparation_and_native_partitions_use_proven_origins(self):
+26:         requests, sources, root, options, cohort = self.case()
+27:         before = [snapshot(p) for p in sources]
+28:         # Reversing sources moves destination indices, never the source heldout.
+29:         requests.reverse()
+30:         argv = [&#x27;mapped-training-request&#x27;, &#x27;--output&#x27;, str(root/&#x27;candidate&#x27;),
+31:                 &#x27;--dataset-id&#x27;, options[&#x27;dataset_id&#x27;], &#x27;--repo-id&#x27;, options[&#x27;repo_id&#x27;],
+32:                 &#x27;--max-copy-bytes&#x27;, str(options[&#x27;max_copy_bytes&#x27;]),
+33:                 &#x27;--evaluation-cohort&#x27;, str(options[&#x27;evaluation_cohort&#x27;])]
+34:         for request in requests:
+35:             argv.extend([&#x27;--source-request&#x27;, str(request)])
+36:         with mock.patch(&#x27;sys.stdout&#x27;, new_callable=io.StringIO) as stdout:
+37:             cli.main(argv)
+38:         result = json.loads(stdout.getvalue())
+39:         request = load_json_strict(Path(result[&#x27;request_path&#x27;]))
+40:         review = root/&#x27;review&#x27;; review.mkdir()
+41:         with mock.patch.object(approval, &#x27;_confirm_human_training_approval&#x27;, side_effect=AssertionError(&#x27;No approval&#x27;)):
+42:             dataset, drafts = training.prepare_approvals(request, review, &#x27;synthetic-preview&#x27;)
+43:         origins = {d[&#x27;provenance&#x27;][&#x27;episode_index&#x27;]: source_episode_identity(d[&#x27;provenance&#x27;]) for d in drafts}
+44:         expected = resolve_evaluation_cohort(cohort, origins)
+45:         self.assertEqual(expected, ([0,2,4,5], [7]))
+46:         self.assertEqual((result[&#x27;evaluation_cohort&#x27;][&#x27;train_episodes&#x27;], result[&#x27;evaluation_cohort&#x27;][&#x27;eval_episodes&#x27;]), expected)
+47:         self.assertEqual(request[&#x27;evaluation_cohort&#x27;], result[&#x27;evaluation_cohort&#x27;][&#x27;source_cohort&#x27;])
+48:         self.assertIsNone(result[&#x27;evaluation_cohort&#x27;][&#x27;eval_fraction&#x27;])
+49:         self.assertFalse(result[&#x27;training_authority&#x27;])
+50:         # A schema-only synthetic inventory compiles a partition; no inventory
+51:         # or approval is published and no training entrypoint is launched.
+52:         metadata = read_metadata(Path(dataset[&#x27;dataset_root&#x27;]))
+53:         inventory = {&#x27;dataset_identity&#x27;: dataset, &#x27;inventory_digest&#x27;: canonical_digest(&#x27;synthetic-unapproved&#x27;),
+54:                      &#x27;episodes&#x27;: [{&#x27;episode_index&#x27;: d[&#x27;provenance&#x27;][&#x27;episode_index&#x27;],
+55:                                    &#x27;episode_content_digest&#x27;: d[&#x27;provenance&#x27;][&#x27;episode_content_digest&#x27;]} for d in drafts]}
+56:         split = compile_launch_split(inventory=inventory, metadata=metadata, selected=sorted(origins), fraction=.4,
+57:             feature_contract=launch_feature_contract(&#x27;act&#x27;,&#x27;fr5-up-wrist-rgb-30hz-v2&#x27;,&#x27;pick_place&#x27;,metadata),
+58:             evaluation_cohort={&#x27;path&#x27;: str(options[&#x27;evaluation_cohort&#x27;]), &#x27;cohort&#x27;: cohort,
+59:                                &#x27;origins&#x27;: {str(k):v for k,v in origins.items()}})
+60:         cfg = SimpleNamespace(dataset=SimpleNamespace(root=dataset[&#x27;dataset_root&#x27;],repo_id=dataset[&#x27;repo_id&#x27;],
+61:             revision=None,video_backend=&#x27;pyav&#x27;,image_transforms=SimpleNamespace(enable=False)),
+62:             trainable_config=SimpleNamespace(action_delta_indices=None,observation_delta_indices=None,reward_delta_indices=None),
+63:             tolerance_s=1e-4)
+64:         train, evaluation = training._explicit_cohort_datasets(cfg, split)
+65:         self.assertEqual((train.episodes, evaluation.episodes), expected)
+66:         self.assertEqual([snapshot(p) for p in sources], before)
+67:         self.assertEqual(list(review.iterdir()), [])
+68:         altered = copy.deepcopy(request); altered.pop(&#x27;evaluation_cohort&#x27;)
+69:         with self.assertRaisesRegex(ContractError, &#x27;MAPPING_REQUEST_CHANGED&#x27;):
+70:             training.prepare_approvals(altered, review, &#x27;synthetic-preview&#x27;)
+71:         raw = options[&#x27;evaluation_cohort&#x27;].read_bytes()
+72:         options[&#x27;evaluation_cohort&#x27;].write_bytes(raw+b&#x27;\n&#x27;)</pre></section></main><script src="../source-return.js"></script></body></html>

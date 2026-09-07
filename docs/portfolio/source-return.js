@@ -25,6 +25,11 @@ function updateSourceReturn() {
     back.textContent = '← 학습 비교로 돌아가기';
     return;
   }
+  if (back && architectureView === 'cohort') {
+    back.href = '../learning.html#cohort';
+    back.textContent = '← 평가 대상 보존으로 돌아가기';
+    return;
+  }
   if (back && architectureView === 'task-language') {
     back.href = '../collection.html#task-language';
     back.textContent = '← 작업 정의와 언어 조건으로 돌아가기';

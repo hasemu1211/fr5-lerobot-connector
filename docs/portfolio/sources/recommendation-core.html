@@ -1405,7 +1405,177 @@ __all__ = [
 136:         if (expected_recommendation_digest is not None
 137:                 and expected_recommendation_digest != recommendation[&quot;recommendation_digest&quot;]):
 138:             raise ContractError(&quot;COLLECTION_ACQUISITION_INPUT_CHANGED&quot;)
-139:     except (ContractError, OSError) as exc:</pre></section><section id="current-consumer"><h2>새 추천의 검증과 기존 초안 소비 계약</h2><p>고정 main ade5c5b의 구현 발췌이다. 새 추천 생성과 기존 초안 변경 경로를 구분한다. 실제 수집 실행 결과를 추가하지 않는다.</p><p class="locator">ade5c5b · tools/data_factory/collection_recommendation.py:844<br>sha256:6157282ece2c83acd41686c34556dc76061436f875f225156ca56113ce4de46a</p><pre>844: def validate_collection_recommendation(
+139:     except (ContractError, OSError) as exc:</pre></section><section id="native-consumption"><h2>추천의 탐색·선택·계획 반영</h2><p>main ed406e3·5c00e4e에서 연결한 현재 소비 경로이며 아래 발췌의 고정 cutoff는 dee2d6f이다. Production·semantic PASS의 canonical 기록 탐색은 추천 요청 때 수행한다. 화면을 새로 읽는 동작이나 시작 과정에서 반복 탐색하지 않는다. 현재 scene·선택·예산에 맞춰 생성한 추천을 APPLY/KEEP로 선택하고, 실제 plan compiler에서 같은 위치·yaw·표본화 조건을 확인한다.</p><p>기존 회귀는 합성 native 기록으로 추천 적용·계획 확정, 수정한 초안 보존, 오래된 입력·원본 변경·compiler 불일치 거부와 UI 응답 손실을 검증한다. 이는 기존 제품 경로의 구현 근거이며 실제 재수집·학습 성능 결과는 별도이다. 바로 아래 ade5c5b 발췌는 이 연결 이전의 생성·소비 계약으로 보존한다.</p><h3>tools/data_factory/collection_recommendation_io.py:22</h3><p class="locator">main dee2d6f · sha256:076251a9d834d75c6250190b2cd08415da87c0999146c75da0a6af7914ef8f1d</p><pre>22: def discover_stored_collection(run_root: str | Path) -&gt; dict:
+23:     &quot;&quot;&quot;On-demand, one-level discovery; canonical disposition owns eligibility.
+24:
+25:     No persisted inventory, watcher, compatibility ranking or runtime callback.
+26:     Feed returned directories to recommend_stored_collection for current task/
+27:     catalog compatibility and repeat discovery when choosing current advice.
+28:     &quot;&quot;&quot;
+29:     from tools.data_factory.collection_recommendation import _episode_snapshot
+30:     root = Path(run_root)
+31:     if root.is_symlink() or not root.is_dir():
+32:         raise ContractError(&quot;COLLECTION_DISCOVERY_ROOT&quot;)
+33:     root = root.resolve(strict=True)
+34:     selected, excluded, snapshots, seen = [], [], [], set()
+35:     for path in sorted(root.iterdir()):
+36:         if not path.is_dir() and not path.is_symlink():
+37:             continue
+38:         try:
+39:             if path.is_symlink():
+40:                 raise ContractError(&quot;COLLECTION_DISCOVERY_SYMLINK&quot;)
+41:             if not (path / &quot;episode_ledger.json&quot;).is_file():
+42:                 raise ContractError(&quot;COLLECTION_DISCOVERY_LEDGER_UNAVAILABLE&quot;)
+43:             evidence, _protected = _load_run(path)
+44:             summary, identity = _episode_snapshot(evidence, evidence[&quot;artifacts&quot;][&quot;manifest&quot;])
+45:             if evidence[&quot;artifacts&quot;][&quot;runtime_binding&quot;][&quot;data_disposition&quot;] != &quot;PRODUCTION&quot;:
+46:                 raise ContractError(&quot;COLLECTION_DISCOVERY_NOT_PRODUCTION&quot;)
+47:             if evidence[&quot;state&quot;][&quot;review&quot;][&quot;semantic_status&quot;] != &quot;PASS&quot;:
+48:                 raise ContractError(&quot;COLLECTION_DISCOVERY_SEMANTIC_PASS_UNAVAILABLE&quot;)
+49:             if identity in seen:
+50:                 raise ContractError(&quot;COLLECTION_RECOMMENDATION_EPISODE_DUPLICATE&quot;)
+51:             seen.add(identity)
+52:             selected.append(str(path))
+53:             snapshots.append({&quot;run_directory&quot;: str(path), &quot;episode&quot;: summary})
+54:         except (ContractError, OSError) as exc:
+55:             excluded.append({&quot;run_directory&quot;: str(path), &quot;reason_code&quot;:
+56:                              exc.code if isinstance(exc, ContractError) else &quot;COLLECTION_RECOMMENDATION_SOURCE_IO&quot;})
+57:     result = {&quot;availability&quot;: &quot;AVAILABLE&quot; if selected else &quot;UNAVAILABLE&quot;,
+58:               &quot;run_root&quot;: str(root), &quot;run_directories&quot;: selected,
+59:               &quot;episodes&quot;: snapshots, &quot;excluded&quot;: excluded}
+60:     result[&quot;discovery_digest&quot;] = canonical_digest(result)
+61:     return result</pre><h3>tools/data_factory/operator/workflow/collection_advice.py:40</h3><p class="locator">main dee2d6f · sha256:9fce6c79fbf396d368755fe518c221ad095c27931320e1a5c5a33a759c98ecce</p><pre>40:             [&quot;git&quot;, &quot;rev-parse&quot;, &quot;HEAD&quot;], cwd=Path(__file__).resolve().parents[4],
+41:             text=True, stderr=subprocess.DEVNULL,
+42:         ).strip()
+43:         acquisition = None
+44:         if source.get(&quot;scene_state_path&quot;) is not None:
+45:             if (draft[&quot;authoring_mode&quot;] != &quot;ASSISTED&quot; or draft[&quot;pinned&quot;] or draft[&quot;excluded&quot;]
+46:                     or draft[&quot;direct_poses&quot;] or draft.get(&quot;direct_pairs&quot;)
+47:                     or draft[&quot;state_space_design_profile&quot;] != selected_state_space_design_profile(catalog, selection)):
+48:                 raise ContractError(&quot;COLLECTION_ADVICE_CONSTRAINED_DRAFT&quot;)
+49:             if source.get(&quot;catalog_digest&quot;, catalog[&quot;catalog_digest&quot;]) != catalog[&quot;catalog_digest&quot;]:
+50:                 raise ContractError(&quot;COLLECTION_ADVICE_SELECTION_CHANGED&quot;)
+51:             position = draft.get(&quot;object_position&quot;)
+52:             if not isinstance(position, dict) or position.get(&quot;status&quot;) != &quot;AVAILABLE&quot;:
+53:                 raise ContractError(&quot;COLLECTION_ADVICE_SOURCE_CHANGED&quot;)
+54:             acquisition = {&quot;catalog&quot;: catalog, &quot;selection&quot;: selection,
+55:                 &quot;scene_state_path&quot;: source[&quot;scene_state_path&quot;], &quot;expected_scene_digest&quot;: position[&quot;scene_state_digest&quot;],
+56:                 &quot;object_instance_id&quot;: position[&quot;object_instance_id&quot;],
+57:                 **{key: draft[key] for key in (&quot;requested_count&quot;, &quot;normalized_seed&quot;, &quot;repeat&quot;)}}
+58:         stored = recommend_stored_collection(
+59:             run_directories=source[&quot;run_directories&quot;], source_commit=commit,
+60:             **({&quot;acquisition&quot;: acquisition, &quot;expected_recommendation_digest&quot;: expected_recommendation_digest}
+61:                if acquisition is not None else {}),
+62:         )
+63:         result[&quot;reason_codes&quot;] = stored[&quot;reason_codes&quot;]
+64:         if stored[&quot;availability&quot;] != &quot;AVAILABLE&quot;:
+65:             return result, None
+66:         advice = stored[&quot;recommendation&quot;]
+67:         result.update(recommendation=advice, data_quality_analysis=stored[&quot;data_quality_analysis&quot;])
+68:         if acquisition is not None:
+69:             if advice[&quot;object_poses&quot;][0] != draft[&quot;current_object_pose&quot;] or advice[&quot;selection&quot;] != selection:
+70:                 raise ContractError(&quot;COLLECTION_ADVICE_PLACEMENT_OR_SPLIT_MISMATCH&quot;)
+71:             result.update(status=&quot;READY&quot;, reason_codes=[], mode=&quot;ACQUISITION&quot;,
+72:                           conditions=copy.deepcopy(advice[&quot;conditions&quot;]),
+73:                           recommendation_digest=advice[&quot;recommendation_digest&quot;], authority=copy.deepcopy(advice[&quot;authority&quot;]))
+74:             return result, copy.deepcopy(draft)
+75:         if any(load_json_strict(Path(run) / &quot;compiled_authoring_evidence.json&quot;) != source[&quot;authoring&quot;]
+76:                for run in source[&quot;run_directories&quot;]):</pre><h3>tools/data_factory/operator/workflow/application.py:2096</h3><p class="locator">main dee2d6f · sha256:2caa7704d891ec87c662592ca945b2d654f235e8663dab348706d206427943a9</p><pre>2096:     def _derive_collection_advice(self, expected_recommendation_digest=None):
+2097:         source = self._collection_source
+2098:         if self.collection_evidence_call is not None and source is not None and source.get(&quot;scene_state_path&quot;) is not None:
+2099:             source = dict(self.collection_evidence_call())
+2100:         draft = copy.deepcopy(self.draft)
+2101:         if source is not None and source.get(&quot;scene_state_path&quot;) is not None:
+2102:             draft[&quot;object_position&quot;] = self._object_position_projection()
+2103:             if self.catalog_reload_call is not None:
+2104:                 source = {**source, &quot;catalog_digest&quot;: self.catalog_reload_call()[&quot;catalog_digest&quot;]}
+2105:         advice, candidate = derive_next_draft(source, catalog=self.catalog, selection=self.selection,
+2106:                                              draft=draft, paired=self.start_pose_setup is not None,
+2107:                                              expected_recommendation_digest=expected_recommendation_digest)
+2108:         advice[&quot;draft_binding&quot;] = draft_binding(self.catalog, self.selection, self.draft)
+2109:         if source is not None and &quot;discovery&quot; in source:
+2110:             advice[&quot;discovery&quot;] = copy.deepcopy(source[&quot;discovery&quot;])
+2111:         return advice, candidate
+2112:
+2113:     def refresh_collection_advice(self, payload, _view):
+2114:         self._require(&quot;AUTHORING&quot;, payload, set())
+2115:         advice, _candidate = self._derive_collection_advice()
+2116:         self._collection_advice = advice
+2117:         return {&quot;outcome&quot;: &quot;COLLECTION_ADVICE_REFRESHED&quot;, &quot;collection_advice&quot;: self._advice_projection()}
+2118:
+2119:     def choose_collection_advice(self, payload, _view):
+2120:         self._require(&quot;AUTHORING&quot;, payload, {&quot;choice&quot;, &quot;expected_recommendation_digest&quot;})
+2121:         displayed = self._advice_projection()
+2122:         if (payload[&quot;choice&quot;] not in {&quot;APPLY&quot;, &quot;KEEP&quot;}
+2123:                 or displayed[&quot;status&quot;] != &quot;READY&quot;
+2124:                 or payload[&quot;expected_recommendation_digest&quot;] != displayed[&quot;recommendation_digest&quot;]):
+2125:             raise ContractError(&quot;COLLECTION_ADVICE_STALE&quot;)
+2126:         fresh, candidate = self._derive_collection_advice(payload[&quot;expected_recommendation_digest&quot;])
+2127:         if fresh != self._collection_advice or candidate is None:
+2128:             raise ContractError(&quot;COLLECTION_ADVICE_STALE&quot;)
+2129:         if payload[&quot;choice&quot;] == &quot;APPLY&quot;:
+2130:             if fresh.get(&quot;mode&quot;) == &quot;ACQUISITION&quot;:
+2131:                 for field in (&quot;requested_count&quot;, &quot;normalized_seed&quot;, &quot;repeat&quot;):
+2132:                     self.update_draft({&quot;draft_id&quot;: self.draft[&quot;draft_id&quot;], field: fresh[&quot;recommendation&quot;][&quot;sampling&quot;][field]}, _view)
+2133:             else:
+2134:                 self.draft = candidate
+2135:                 self.selection[&quot;policy_id&quot;] = &quot;DIRECT_SELECTION&quot;
+2136:         self._collection_choice = {
+2137:             &quot;choice&quot;: payload[&quot;choice&quot;],
+2138:             &quot;outcome&quot;: &quot;APPLIED&quot; if payload[&quot;choice&quot;] == &quot;APPLY&quot; else &quot;KEPT&quot;,
+2139:             &quot;recommendation_digest&quot;: fresh[&quot;recommendation_digest&quot;],
+2140:             &quot;draft_binding&quot;: draft_binding(self.catalog, self.selection, self.draft),
+2141:             &quot;draft_id&quot;: self.draft[&quot;draft_id&quot;], &quot;draft_revision&quot;: self.draft[&quot;revision&quot;],
+2142:             &quot;authority&quot;: copy.deepcopy(fresh[&quot;authority&quot;]),</pre><h3>tools/data_factory/operator/composition.py:4190</h3><p class="locator">main dee2d6f · sha256:2cba1faf329520fa272f26d14676623cb25c3facb4f66891e510b5d2b9f51712</p><pre>4190:             if draft.get(&quot;authoring_mode&quot;) == &quot;ASSISTED&quot; else
+4191:             [None for _pose in poses]
+4192:         )
+4193:         advice = draft.get(&quot;acquisition_recommendation&quot;)
+4194:         if advice is not None and (
+4195:             advice[&quot;selection&quot;] != selected or advice[&quot;object_poses&quot;] != poses
+4196:             or [item[&quot;yaw_sample_binding&quot;] for item in advice[&quot;conditions&quot;]] != yaw_bindings[:count]
+4197:             or advice[&quot;sampling&quot;] != {&quot;authoring_mode&quot;: &quot;ASSISTED&quot;, **{
+4198:                 key: draft[key] for key in (&quot;requested_count&quot;, &quot;normalized_seed&quot;, &quot;repeat&quot;)}}
+4199:         ):
+4200:             raise ContractError(&quot;COLLECTION_ADVICE_COMPILER_MISMATCH&quot;)
+4201:         return {
+4202:             &quot;direct_pose_sequence&quot;: poses,
+4203:             &quot;direct_yaw_sample_bindings&quot;: yaw_bindings,</pre><h3>tests/data_factory/operator/test_acquisition_advice.py:79</h3><p class="locator">main dee2d6f · sha256:7192bf0a2a2988b64a55396ab14087b7e053c0c92dae0511f7c2409c345611a2</p><pre>79:     def test_native_evidence_apply_and_compile_preserve_pose_and_authority(self):
+80:         from tools.data_factory import collection_recommendation_io as io
+81:         probe = mock.patch.object(io, &quot;discover_stored_collection&quot;, wraps=io.discover_stored_collection)
+82:         discovery = probe.start()
+83:         self.addCleanup(probe.stop)
+84:         before = self.native.scene.snapshot(), self.native.cell.read(), self.native.episode.read_bytes()
+85:         self.app.core.snapshot()
+86:         self.assertEqual(discovery.call_count, 0)
+87:         advice = self.refresh()
+88:         self.assertEqual(discovery.call_count, 1)
+89:         expected = copy.deepcopy(self.app._collection_advice[&quot;recommendation&quot;])
+90:         self.assertEqual(expected[&quot;observed_semantic_pass_by_source&quot;], {&quot;PLACE_A&quot;: 1, &quot;PLACE_B&quot;: 1})
+91:         self.assertEqual(expected[&quot;object_poses&quot;][0], position_fixture.POSE)
+92:         self.assertEqual(len(expected[&quot;object_poses&quot;]), 3)
+93:         self.assertNotIn(str(self.root), json.dumps(advice))
+94:         retained = copy.deepcopy(self.app._collection_advice)
+95:         self.app._collection_advice.pop(&quot;mode&quot;)
+96:         self.app._collection_advice[&quot;status&quot;] = &quot;UNAVAILABLE&quot;
+97:         self.assertNotIn(str(self.root), json.dumps(self.app._advice_projection()))
+98:         self.app._collection_advice = retained
+99:         self.send(self.app, &quot;choose_collection_advice&quot;, {&quot;choice&quot;: &quot;APPLY&quot;, &quot;expected_recommendation_digest&quot;: advice[&quot;recommendation_digest&quot;]})
+100:         self.assertIsNone(self.app._campaign)
+101:         self.assertEqual(self.app.draft[&quot;authoring_mode&quot;], &quot;ASSISTED&quot;)
+102:         self.assertEqual(self.app.projection()[&quot;collection_advice&quot;][&quot;status&quot;], &quot;APPLIED&quot;)
+103:         self.assertEqual(discovery.call_count, 2)
+104:         self.assertEqual((self.native.scene.snapshot(), self.native.cell.read(), self.native.episode.read_bytes()), before)
+105:         self.send(self.app, &quot;compile_draft&quot;, {&quot;draft_id&quot;: self.app.draft[&quot;draft_id&quot;], &quot;data_disposition&quot;: &quot;PRODUCTION&quot;})
+106:         self.assertEqual(self.app.projection()[&quot;workflow_state&quot;], &quot;REVIEW_CAMPAIGN&quot;)
+107:         self.assertEqual(len(self.app._campaign.campaign_operator.manifest[&quot;slots&quot;]), 2)
+108:         self.assertIsNone(self.app.projection()[&quot;campaign_authorization&quot;])
+109:         self.assertEqual(discovery.call_count, 3)
+110:         # The existing compiler may rebind the released slot to the new run;
+111:         # it must retain the original release and exact object position.
+112:         self.assertEqual(self.native.scene.read()[&quot;objects&quot;], before[0][&quot;scene_state&quot;][&quot;objects&quot;])
+113:         self.assertEqual(self.native.cell.read(), before[1])
+114:         self.assertEqual(self.native.episode.read_bytes(), before[2])
+115:         self.native.forbidden.assert_not_called()</pre></section><section id="current-consumer"><h2>이전 추천 검증과 초안 소비 계약 · ade5c5b</h2><p>고정 main ade5c5b의 구현 발췌이다. 새 추천 생성과 기존 초안 변경 경로를 구분한다. 실제 수집 실행 결과를 추가하지 않는다.</p><p class="locator">ade5c5b · tools/data_factory/collection_recommendation.py:844<br>sha256:6157282ece2c83acd41686c34556dc76061436f875f225156ca56113ce4de46a</p><pre>844: def validate_collection_recommendation(
 845:     value: object, *, campaign_manifest: Mapping[str, Any] | None = None,
 846:     campaign_hypothesis: Mapping[str, Any] | None = None,
 847:     campaign_draft: Mapping[str, Any] | None = None,
