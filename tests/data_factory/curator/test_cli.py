@@ -11,6 +11,15 @@ from tools.data_factory.curator.cli import _parser, main
 
 
 class CliTest(unittest.TestCase):
+    def test_prepare_passes_optional_canonical_request_and_preserves_legacy(self):
+        for extra, kwargs in (([], {}), (["--source-request", "/request.json"],
+                                        {"source_request": Path("/request.json")})):
+            with self.subTest(extra=extra), mock.patch(
+                "tools.data_factory.curator.cli.prepare", return_value={}
+            ) as call, redirect_stdout(io.StringIO()):
+                main(["prepare", "--source", "/source", *extra])
+            call.assert_called_once_with(Path("/source"), **kwargs)
+
     def test_setup_export_passes_native_fit_split_without_implicit_reference_frame(self):
         with mock.patch("tools.data_factory.curator.cli.export_profile_setup", return_value={}) as call, redirect_stdout(io.StringIO()):
             main(["setup", "export", "--source", "/source", "--fit-split", "/native-split.json"])

@@ -33,6 +33,8 @@ def _parser() -> argparse.ArgumentParser:
     commands = parser.add_subparsers(dest="command", required=True)
     make = commands.add_parser("prepare", allow_abbrev=False)
     make.add_argument("--source", type=Path, required=True)
+    make.add_argument("--source-request", type=Path,
+                      help="existing raw selection request binding canonical source identity; grants no authority")
     selection = commands.add_parser("training-request", allow_abbrev=False)
     selection.add_argument("--run-dir", type=Path, action="append", required=True)
     selection.add_argument("--output", type=Path, required=True)
@@ -111,7 +113,7 @@ def main(argv: list[str] | None = None) -> None:
                 **({"derivation": load_json(args.derivation, code="DERIVATION_REFERENCE_JSON")} if args.derivation else {}),
             )
         elif args.command == "prepare":
-            result = prepare(args.source)
+            result = prepare(args.source, **({"source_request": args.source_request} if args.source_request else {}))
         elif args.command == "status":
             result = status(args.run)
         else:
