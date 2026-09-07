@@ -51,6 +51,11 @@ evidence for its frozen commands, never as authority for runtime replan/rebase.
 Observation age SHALL be rechecked after deserialization at send; original policy
 source-clock freshness SHALL still apply. Cancel or unresolved goals SHALL fence
 all later dispatches under the same transport owner.
+At a segment start or terminal handoff, either controller reporting nonpositive
+speed scaling SHALL reject with `LEARNED_CONTROLLER_PAUSED`, including when its
+action result and reference/feedback otherwise pass. Canonical trace validation
+SHALL enforce the same observation rule. Positive scaling SHALL NOT substitute
+for same-command hardware completion.
 
 Plan-only SHALL send no motion, start no recorder, mutate no scene/cell or data,
 and create no approval. Execution SHALL retain existing human, exact-plan,
@@ -116,6 +121,22 @@ or unrelated completion, hardware error or cancellation SHALL prevent dispatch.
 Elapsed hold time, matching position or JTC success alone SHALL NOT manufacture
 this evidence. The source/transport contract for that evidence remains an
 unimplemented shared requirement, not a new Rollout-owned execution service.
+Generation SHALL be bound to hardware incarnation; generation zero at activation
+SHALL NOT be interpreted as a completed command. Source sample time SHALL carry
+an explicit clock domain and a valid freshness comparison; callback arrival time
+alone SHALL NOT make a retained hardware sample fresh. Equal scaling factors
+SHALL NOT be accepted as proof that independent controllers share a start phase.
+Known stop/error SHALL fence the next SDK motion call, without claiming that an
+already in-flight call can be undone or that action cancellation is a safety stop.
+
+#### Scenario: Paused controller cannot authorize a learned handoff
+
+- **WHEN** either controller reports zero scaling at a held segment start or
+  successful terminal observation
+- **THEN** the sole executor rejects without sending the next segment
+- **AND** a completed canonical trace containing that observation also rejects
+- **AND** the transport's independent monotonic deadline continues to apply
+  while a controller's trajectory time is frozen, using its existing cancel owner
 
 #### Scenario: Continuous references and a staged source are unsupported
 

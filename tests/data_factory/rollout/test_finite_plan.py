@@ -266,6 +266,12 @@ class FinitePlanTest(unittest.TestCase):
             self.assertEqual([(e["segment_index"], e["segment_count"]) for e in events if e["event"] == event_type],
                              [(0, 3), (1, 3), (2, 3)])
         from tools.data_factory.rollout.finite_plan import validate_execution_trace
+        for controller in ("arm_controller", "gripper_controller"):
+            trace = copy.deepcopy(diagnostic["execution_trace"])
+            trace["segments"][1]["terminal_observation"]["snapshot"][controller]["speed_scaling"] = 0.
+            trace["trace_digest"] = canonical_digest({k: v for k, v in trace.items() if k != "trace_digest"})
+            with self.assertRaisesRegex(ContractError, "LEARNED_CONTROLLER_PAUSED"):
+                validate_execution_trace(frozen, trace)
         trace = copy.deepcopy(diagnostic["execution_trace"])
         trace["terminal_state"][0] += .001
         trace["trace_digest"] = canonical_digest({k: v for k, v in trace.items() if k != "trace_digest"})
@@ -283,6 +289,53 @@ class FinitePlanTest(unittest.TestCase):
         target = p["actions"][4][-1]
         self.assertNotEqual(target, .01176)
         self.assertEqual(next(s for s in segments if s["action_range"] == [4, 4])["gripper_position_m"], target)
+
+    def test_paused_controller_blocks_held_start_and_terminal_handoff(self):
+        for controller in ("arm_controller", "gripper_controller"):
+            for at_terminal in (False, True):
+                with self.subTest(controller=controller, at_terminal=at_terminal):
+                    job, executor, t, state, now, sent, _, _ = self.make_held_job()
+                    job.approve(APPROVAL)
+                    job.start()
+                    job.poll()
+                    observe = t.snapshot
+                    def paused(*args):
+                        value = observe(*args)
+                        value[controller]["speed_scaling"] = 0.
+                        return value
+                    with mock.patch('tools.data_factory.motion.moveit_transport.time.time', side_effect=lambda: now[0]):
+                        if at_terminal:
+                            job.confirm("operator")
+                            state["complete"] = True
+                            job.poll()
+                            state.update(complete=True, reference=.01176, feedback=.01218)
+                        with mock.patch.object(t, 'snapshot', side_effect=paused):
+                            result = job.poll() if at_terminal else job.confirm("operator")
+                    self.assertEqual(result["code"], "LEARNED_CONTROLLER_PAUSED")
+                    self.assertEqual(len(sent), 2 if at_terminal else 0)
+                    self.assertEqual(executor.runs["run"]["state"], "BLOCKED")
+
+    def test_frozen_controller_time_does_not_suspend_transport_deadline_or_cancel_owner(self):
+        job, executor, t, state, now, sent, handles, _ = self.make_held_job()
+        wall = [10.]
+        t._clock = lambda: wall[0]
+        job.approve(APPROVAL)
+        job.start()
+        job.poll()
+        with mock.patch('tools.data_factory.motion.moveit_transport.time.time', side_effect=lambda: now[0]):
+            job.confirm("operator")
+            state["complete"] = True
+            job.poll()
+            # Source/controller observations stay frozen; only the transport's
+            # monotonic clock advances while the gripper result is unresolved.
+            wall[0] = t._active.deadline + .001
+            result = job.poll()
+            job.poll()
+        self.assertEqual(result["code"], "ROS_EXEC_RESULT_TIMEOUT")
+        self.assertEqual(len(sent), 2)
+        handles[-1].cancel_goal_async.assert_called_once()
+        self.assertFalse(t.owns_active_goal)
+        self.assertEqual(executor.runs["run"]["state"], "BLOCKED")
 
     def test_held_reference_replay_failure_staleness_and_cancel_never_send_next_arm(self):
         failures = {"stale": "LEARNED_STALE_STATE", "future": "LEARNED_STALE_STATE",

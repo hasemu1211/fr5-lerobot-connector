@@ -170,6 +170,12 @@ def check_segment_observation(segment, evidence, now, *, terminal=False):
             raise ContractError("LEARNED_STALE_STATE")
         if any(observed[key]["ready"] is not True for key in ("arm_controller", "gripper_controller")):
             raise ContractError("CONTROLLER_NOT_READY")
+        # A successful action/reference match cannot authorize an arm handoff
+        # while a controller reports paused time. Positive scaling alone is
+        # still not same-command hardware completion or physical acknowledgement.
+        for key in ("arm_controller", "gripper_controller"):
+            if _number(observed[key]["speed_scaling"], "LEARNED_STATE_SCHEMA") <= 0:
+                raise ContractError("LEARNED_CONTROLLER_PAUSED")
         gripper = observed["gripper_controller"]
         state = list(_action([*observed["joint_positions"], gripper["feedback_position_m"]]))
         limits = _limits(segment["learned_proposal"]["robot_description"])

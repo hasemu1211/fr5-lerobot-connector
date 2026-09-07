@@ -47,6 +47,11 @@ direnv exec . python3 -m unittest tests.data_factory.rollout.test_finite_plan te
 - [x] Distinguish hardware integer resolution from its raw-reference enqueue deadband using the actual source and a CPU-extracted predicate replay.
 - [x] Compare timed seven-joint execution against serial exact references; retain their timing, completion and staged-source limitations.
 - [x] Verify through existing finite inference and OneJob that continuous in-limit output and staged source reject without input rewriting or executor/recorder effects.
+- [x] Prepare an unapplied, exact-source-bound hardware patch for same-generation completion, coherent read-cycle evidence and native-time gating; verify copied driver methods with the installed sampler on CPU.
+- [x] Reject paused-controller observations through held execution and canonical trace consumers; replay the existing wall-time timeout and sole cancellation owner with frozen controller time.
+- [x] Falsify equal scaling as start synchronization and unscoped generation/time as sufficient identity; retain activation generation zero as observation only.
+- [x] Correct the isolated worker's known stop/error and supersession fence before MoveGripper; preserve original patch evidence and the in-flight cancellation limitation.
+- [ ] Bind hardware incarnation and source clock/freshness, and prove controller-start coherence before consuming the new metadata as completion authority.
 - [ ] Coordinate same-command hardware completion and arm-resume evidence with the existing hardware/motion owner; JTC tolerance success alone is insufficient.
 - [ ] Implement an explicitly bounded native continuous-reference consumer with original full output, consumed indices and staged-release compatibility retained; do not automatically truncate or snap.
 - [ ] Verify its normal executor/trace consumers and failure/cancellation before any separately assigned physical qualification.

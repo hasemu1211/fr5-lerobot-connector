@@ -256,6 +256,48 @@ or controller phase skew causes a new gripper command while one is unresolved,
 arm knots advance during pause, or real stalls defeat useful task latency. This
 source comparison supplies no new physical timing, success or qualification claim.
 
+An unapplied hardware candidate now reuses the driver's existing mutex and worker
+to bind completion to the current request generation, including a post-resume
+check. It snapshots state once per read cycle for both native controller clocks
+and fences arm writes when that sampled cycle is paused. The opt-in mode rejects
+unexpected replacement of unresolved work; the original raw deadband and integer
+conversion remain distinct. CPU tests consume copied driver methods and the
+installed JTC sampler, preserving a full synthetic 50-row sequence without fixed
+per-row holds or prefix truncation. The synthetic completion delay is not a measured
+latency or a new dwell rule.
+
+The candidate is bound to exact modified runtime-source bytes and has not been
+integrated or installed. Controller interface registration/start synchronization,
+fresh hardware-state consumption by the sole transport, in-flight SDK cancellation,
+and staged-release timing/physical qualification remain open. No software terminal
+flag upgrades the existing SDK send/error result into a physical acknowledgement.
+
+Consumer replay rejects a paused controller at a held-segment boundary even when
+the action result and reference/feedback pass. The same check is consumed by the
+sole executor, send-time recheck and canonical trace validator. An independent
+transport clock still times out a frozen controller and cancels once; positive
+scaling is only absence of this particular rejection, not hardware completion.
+
+The native timing candidate remains unqualified: two installed Trajectory
+samplers starting four 100 Hz cycles apart preserve their phase difference under
+twenty equal zero-factor cycles. Their full-cycle lookahead still selects noninitial
+commands. This falsifies equal scaling alone as a synchronization mechanism; it
+does not measure physical latency. The metadata candidate also gives identical
+generation packets for separately constructed instances and erases clock type
+when exporting numeric seconds. In installed controller_manager 4.45.2,
+[the trigger clock is steady outside simulation](https://github.com/ros-controls/ros2_control/blob/4.45.2/controller_manager/src/controller_manager.cpp)
+and [the read loop forwards it to hardware](https://github.com/ros-controls/ros2_control/blob/4.45.2/controller_manager/src/ros2_control_node.cpp).
+Transport callback arrival cannot recover the missing source identity or domain.
+
+The next native consumer therefore needs source-bound incarnation and sample-clock
+identity, fresh same-generation completion and a demonstrated controller-start
+mechanism before the full raw horizon can be admitted. The isolated worker
+correction fences stop/error or supersession observed during its initial state
+query before starting MoveGripper. It leaves the SDK call outside the shared lock
+and retains the explicit in-flight cancellation limitation. Neither correction
+changes the intentional 12.6 mm/0.5 s ->21 mm release, deploys a controller setting,
+or makes the unsupported continuous-reference consumer operational.
+
 Falsify the serial candidate if it needs unreviewed target/timing changes, cannot
 establish same-command hardware completion within the bounded horizon, or loses
 fresh state/cancel ownership. After software acceptance, independently assigned
