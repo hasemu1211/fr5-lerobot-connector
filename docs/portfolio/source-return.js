@@ -3,11 +3,17 @@ function updateSourceReturn() {
   const section = document.getElementById(location.hash.slice(1));
   const observationLink = section?.previousElementSibling;
   const back = document.querySelector('.source-page > a');
+  const connection = new URLSearchParams(location.search).get('connection');
+  if (back && ['collection', 'selection', 'inspection', 'training'].includes(connection)) {
+    back.href = `../architecture.html#handoff-${connection}`;
+    back.textContent = '← 시스템 연결 설명으로 돌아가기';
+    return;
+  }
   if (back?.pathname.endsWith('/learning.html')) {
     back.search = location.search;
     return;
   }
-  if (back) {
+  if (back?.pathname.endsWith('/data.html')) {
     back.href = observationLink?.matches('a[href^="../data.html?episode="]')
       ? observationLink.href : '../data.html#observations';
   }

@@ -135,4 +135,75 @@ def export_training_request(
 
 
 __all__ = [&quot;check_evaluation_cohort&quot;, &quot;export_training_request&quot;]
-</pre></section></main></body></html>
+</pre></section><section id="current-selection"><h2>선택 기록을 학습 요청으로 연결</h2><p>기술 PASS·사람의 작업 판정 PASS, 원본 참조와 발행 전 재검증을 담당한다.</p><p class="locator">tools/data_factory/curator/workflow/selection.py<br>sha256:59397eb15870c37e22958dac6e26e5945dc081c53847d706e7a865e2c50d83c5</p><h3>원본 62–104행</h3><pre>62:     protected = set()
+63:     observed_states = []
+64:     try:
+65:         for directory in run_directories:
+66:             root = reject_symlink_components(directory, &quot;SELECTION_RUN&quot;).resolve(strict=True)
+67:             ledger_path = root / &quot;episode_ledger.json&quot;
+68:             ledger = load_json_strict(ledger_path)
+69:             # This existing owner reopens and validates the ledger&#x27;s source graph.
+70:             state = validate_episode_state(
+71:                 load_json_strict(root / &quot;episode_ledger_state.json&quot;), ledger=ledger,
+72:             )
+73:             observed_states.append((root, state))
+74:             # Collection identities vary as episodes append to one root. They
+75:             # are not the current frozen byte identity owned by training.
+76:             current = {
+77:                 key: ledger[&quot;dataset&quot;][key] for key in (&quot;dataset_root&quot;, &quot;repo_id&quot;)
+78:             }
+79:             if dataset is not None and current != dataset:
+80:                 raise CuratorError(&quot;SELECTION_DATASET_MISMATCH&quot;)
+81:             dataset = current
+82:             episode = ledger[&quot;episode&quot;]
+83:             index = episode[&quot;episode_index&quot;]
+84:             if index in selected:
+85:                 raise CuratorError(&quot;SELECTION_DUPLICATE_EPISODE&quot;)
+86:             selected.add(index)
+87:             if (
+88:                 ledger[&quot;admission&quot;][&quot;technical_status&quot;] != &quot;PASS&quot;
+89:                 or state[&quot;review&quot;][&quot;semantic_status&quot;] != &quot;PASS&quot;
+90:             ):
+91:                 raise CuratorError(&quot;SELECTION_REVIEW_REQUIRED&quot;, episode[&quot;run_id&quot;])
+92:             protected.update((root, Path(dataset[&quot;dataset_root&quot;])))
+93:             protected.update(
+94:                 Path(ref[&quot;artifact_path&quot;]).parent for ref in ledger[&quot;artifacts&quot;].values()
+95:             )
+96:             protected.add(Path(state[&quot;candidate&quot;][&quot;artifact_path&quot;]).parent)
+97:             episodes.append({
+98:                 &quot;episode_id&quot;: episode[&quot;run_id&quot;], &quot;episode_index&quot;: index,
+99:                 &quot;episode_ledger_path&quot;: str(ledger_path),
+100:                 &quot;technical_validator_path&quot;: ledger[&quot;artifacts&quot;][&quot;technical&quot;][&quot;artifact_path&quot;],
+101:                 &quot;human_semantic_evidence_path&quot;: state[&quot;candidate&quot;][&quot;artifact_path&quot;],
+102:             })
+103:         if any(target.is_relative_to(path.resolve()) for path in protected):
+104:             raise CuratorError(&quot;SELECTION_OUTPUT_OVERLAP&quot;)</pre><h3>원본 116–145행</h3><pre>116:             request.update(dataset_root=derived[&quot;root&quot;], repo_id=derived[&quot;repo_id&quot;], derivation=derivation)
+117:         # Exercise the actual read-only consumer before publication. Its drafts
+118:         # stay in memory; this identifier is not a human approval or attribution.
+119:         # The consumer owns byte identity, metadata, production scope and lineage.
+120:         prepare_approvals(request, target.parent, &quot;curator-preview-only&quot;)
+121:         cohort = None if eval_split is None else check_evaluation_cohort(
+122:             request, eval_split=eval_split, expected_eval_episodes=expected_eval_episodes,
+123:         )
+124:         # Preparation may read a large dataset while input artifacts change.
+125:         # Reopen the existing owner&#x27;s state; do not publish a selection based on
+126:         # evidence that changed during that work. This is not a source lock.
+127:         for root, expected_state in observed_states:
+128:             current_state = validate_episode_state(
+129:                 load_json_strict(root / &quot;episode_ledger_state.json&quot;),
+130:                 ledger=load_json_strict(root / &quot;episode_ledger.json&quot;),
+131:             )
+132:             if current_state != expected_state:
+133:                 raise CuratorError(&quot;SELECTION_INPUT_CHANGED&quot;, str(root))
+134:         write_json_exclusive(target, request)
+135:     except ContractError as exc:
+136:         raise CuratorError(&quot;SELECTION_SOURCE_INVALID&quot;, str(exc)) from exc
+137:     except OSError as exc:
+138:         raise CuratorError(&quot;SELECTION_IO&quot;, str(exc)) from exc
+139:     return {
+140:         &quot;ok&quot;: True, &quot;status&quot;: &quot;REQUEST_NOT_APPROVED&quot;, &quot;request_path&quot;: str(target),
+141:         &quot;episode_indices&quot;: [episode[&quot;episode_index&quot;] for episode in request[&quot;episodes&quot;]],
+142:         &quot;training_authority&quot;: False,
+143:         **({&quot;derivation&quot;: request[&quot;derivation&quot;]} if &quot;derivation&quot; in request else {}),
+144:         **({&quot;evaluation_cohort&quot;: cohort} if cohort is not None else {}),
+145:     }</pre></section></main><script src="../source-return.js"></script></body></html>

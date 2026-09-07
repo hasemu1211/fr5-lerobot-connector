@@ -892,4 +892,120 @@
     &quot;global_index&quot;: 25548
   },
   &quot;starts_training&quot;: false
-}</pre></section></main><script src="../source-return.js"></script></body></html>
+}</pre></section><section id="inspection-contract"><h2>FR5의 Rerun 연결 책임</h2><p>선택 데이터의 원본 일치와 프레임·특징 대응을 확인하고 임시 탐색 자원을 관리한다. 화면 탐색은 Rerun의 기능을 사용한다.</p><p class="locator">tools/data_factory/operator/workflow/inspection.py<br>sha256:c95ffbcb021804d281e2652457987ea62b526f9520a521c5905daeca639fb5b0</p><h3>원본 24–58행</h3><pre>24: VIEWER_SECONDS = 900
+25:
+26:
+27: def verify_target(dataset):
+28:     try:
+29:         current = current_dataset_identity(dataset[&quot;dataset_root&quot;],
+30:             repo_id=dataset[&quot;repo_id&quot;], dataset_id=dataset[&quot;dataset_id&quot;])
+31:     except (OSError, ContractError) as exc:
+32:         raise ContractError(&quot;INSPECTION_TARGET_UNAVAILABLE&quot;) from exc
+33:     if current != dataset:
+34:         raise ContractError(&quot;INSPECTION_TARGET_CHANGED&quot;)
+35:
+36:
+37: def frame_mapping(rows, episode_index):
+38:     &quot;&quot;&quot;Accept only the exact contiguous native frame/global mapping we display.&quot;&quot;&quot;
+39:     if not rows or len(rows) &gt; MAX_FRAMES:
+40:         raise ContractError(&quot;INSPECTION_FRAME_LIMIT&quot;)
+41:     first = rows[0][&quot;index&quot;]
+42:     for frame, row in enumerate(rows):
+43:         if (any(type(row[key]) is not int for key in (&quot;index&quot;, &quot;episode_index&quot;, &quot;frame_index&quot;))
+44:                 or row[&quot;episode_index&quot;] != episode_index or row[&quot;frame_index&quot;] != frame
+45:                 or row[&quot;index&quot;] != first + frame or first &lt; 0
+46:                 or not math.isfinite(row[&quot;timestamp&quot;])):
+47:             raise ContractError(&quot;INSPECTION_FRAME_MAPPING&quot;)
+48:     return {&quot;episode_index&quot;: episode_index, &quot;frames&quot;: len(rows),
+49:             &quot;first_global_index&quot;: first, &quot;last_global_index&quot;: rows[-1][&quot;index&quot;],
+50:             &quot;first_frame_index&quot;: 0, &quot;last_frame_index&quot;: len(rows) - 1,
+51:             &quot;first_timestamp_seconds&quot;: rows[0][&quot;timestamp&quot;],
+52:             &quot;last_timestamp_seconds&quot;: rows[-1][&quot;timestamp&quot;],
+53:             &quot;viewer_frame_rule&quot;: &quot;global_index - first_global_index = canonical frame_index&quot;}
+54:
+55:
+56: def feature_projection(features):
+57:     from tools.fr5_dataset_schema import FEATURE_NAMES
+58:     cameras = [&quot;observation.images.up&quot;, &quot;observation.images.wrist&quot;]</pre><h3>원본 70–94행</h3><pre>70:     resource.setrlimit(resource.RLIMIT_FSIZE, (MAX_RRD_BYTES, MAX_RRD_BYTES))
+71:     import lerobot
+72:     import rerun
+73:     from lerobot.datasets import LeRobotDataset
+74:     from lerobot.scripts.lerobot_dataset_viz import visualize_dataset
+75:
+76:     request = json.loads(Path(request_path).read_text())
+77:     identity, index = request[&quot;dataset&quot;], request[&quot;episode_index&quot;]
+78:     verify_target(identity)
+79:     dataset = LeRobotDataset(identity[&quot;repo_id&quot;], root=Path(identity[&quot;dataset_root&quot;]),
+80:         episodes=[index], download_videos=False, force_cache_sync=False, token=False)
+81:     if not 0 &lt; len(dataset) &lt;= MAX_FRAMES:
+82:         raise ContractError(&quot;INSPECTION_FRAME_LIMIT&quot;)
+83:     rows = list(dataset.hf_dataset.select_columns([&quot;index&quot;, &quot;episode_index&quot;, &quot;frame_index&quot;, &quot;timestamp&quot;]))
+84:     rows = [{key: value.item() if hasattr(value, &quot;item&quot;) else value for key, value in row.items()} for row in rows]
+85:     mapping = frame_mapping(rows, index)
+86:     mapping[&quot;features&quot;] = feature_projection(dataset.features)
+87:     mapping[&quot;versions&quot;] = {&quot;lerobot&quot;: lerobot.__version__, &quot;rerun&quot;: rerun.__version__}
+88:     output = Path(request_path).parent
+89:     rrd = visualize_dataset(dataset, index, batch_size=1, num_workers=0,
+90:         save=True, output_dir=output, display_compressed_images=True)
+91:     rerun.disconnect()
+92:     verify_target(identity)
+93:     rrd = Path(rrd)
+94:     if not rrd.is_file() or not 0 &lt; rrd.stat().st_size &lt;= MAX_RRD_BYTES:</pre><h3>원본 206–231행</h3><pre>206:             process, self._process = self._process, None
+207:             if process is not None and process.poll() is None:
+208:                 try:
+209:                     os.killpg(process.pid, signal.SIGTERM)
+210:                 except ProcessLookupError:
+211:                     pass
+212:                 try:
+213:                     process.wait(timeout=3)
+214:                 except subprocess.TimeoutExpired:
+215:                     os.killpg(process.pid, signal.SIGKILL)
+216:                     process.wait(timeout=3)
+217:             if self._directory is not None:
+218:                 self._directory.cleanup()
+219:                 self._directory = None
+220:             self._value = {&quot;status&quot;: &quot;CLOSED&quot;}
+221:
+222:
+223: if __name__ == &quot;__main__&quot;:
+224:     try:
+225:         _export(sys.argv[1])
+226:     except ContractError as exc:
+227:         (Path(sys.argv[1]).parent / &quot;error.json&quot;).write_text(json.dumps({&quot;code&quot;: exc.code}))
+228:         raise</pre></section><section id="inspection-return"><h2>같은 학습 검토로 복귀</h2><p>검토 목록에 포함된 시연만 탐색하며 같은 배치와 원본인지 복귀 시 다시 확인한다.</p><p class="locator">tools/data_factory/operator/workflow/training_review.py<br>sha256:1d5d4da288b7d3e20b0a0c9dee0b5ef2fbac12551d1bbd792034434f7edf71f4</p><h3>원본 60–96행</h3><pre>60:         if (self._preview is None or set(payload) != {&quot;batch_digest&quot;, &quot;episode_index&quot;}
+61:                 or payload[&quot;batch_digest&quot;] != self._preview[&quot;batch_digest&quot;]
+62:                 or type(payload[&quot;episode_index&quot;]) is not int):
+63:             raise ContractError(&quot;INSPECTION_TARGET&quot;)
+64:         episodes = [e for e in self._preview[&quot;episodes&quot;] if e[&quot;episode_index&quot;] == payload[&quot;episode_index&quot;]]
+65:         if len(episodes) != 1:
+66:             raise ContractError(&quot;INSPECTION_TARGET&quot;)
+67:         dataset = copy.deepcopy(self._preview[&quot;dataset_identity&quot;])
+68:         self._inspection_target = {**payload, &quot;episode_id&quot;: episodes[0][&quot;episode_id&quot;],
+69:             &quot;dataset_id&quot;: dataset[&quot;dataset_id&quot;], &quot;dataset_digest&quot;: dataset[&quot;dataset_digest&quot;]}
+70:         self._inspection_status = {&quot;status&quot;: &quot;PREPARING&quot;}
+71:
+72:         def complete(value):
+73:             self._inspection_status = value
+74:             return {&quot;inspection_status&quot;: value[&quot;status&quot;]}, True, None
+75:
+76:         def failed(exc, _value):
+77:             self._inspection.close()
+78:             self._inspection_status = {&quot;status&quot;: &quot;FAILED&quot;, &quot;error&quot;: getattr(exc, &quot;code&quot;, &quot;INSPECTION_FAILED&quot;)}
+79:             return True, None
+80:
+81:         return UnlockedIntent(run=lambda: self._inspection.open(dataset, payload[&quot;episode_index&quot;]),
+82:                               complete=complete, failed=failed)
+83:
+84:     def return_review(self, payload, _view):
+85:         if (set(payload) != {&quot;batch_digest&quot;} or self._inspection_target is None
+86:                 or payload[&quot;batch_digest&quot;] != self._inspection_target[&quot;batch_digest&quot;]):
+87:             raise ContractError(&quot;INSPECTION_TARGET&quot;)
+88:         self._inspection.close()
+89:         self._inspection_status = {&quot;status&quot;: &quot;CLOSED&quot;}
+90:         try:
+91:             if self._preview[&quot;batch_digest&quot;] != payload[&quot;batch_digest&quot;]:
+92:                 raise ContractError(&quot;INSPECTION_TARGET_CHANGED&quot;)
+93:             verify_target(self._preview[&quot;dataset_identity&quot;])
+94:         except ContractError as exc:
+95:             self._inspection_status = {&quot;status&quot;: &quot;STALE&quot;, &quot;error&quot;: exc.code}
+96:         return {&quot;inspection_status&quot;: self._inspection_status[&quot;status&quot;]}</pre></section></main><script src="../source-return.js"></script></body></html>

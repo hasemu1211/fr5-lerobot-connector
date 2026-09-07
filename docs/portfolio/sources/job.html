@@ -38,4 +38,60 @@
             self.state = &quot;QUARANTINED_COMMIT&quot;
             return self._result(False, exc.code)
         self.state = &quot;AWAITING_CELL_READY&quot;
-        return self._result(True, &quot;COMMITTED&quot;)</pre></section></main></body></html>
+        return self._result(True, &quot;COMMITTED&quot;)</pre></section><section id="start-conditions"><h2>수집 시작 전 확인</h2><p>현재 main 구현의 계획 승인·기록기 준비 확인이다. 실제 실행 시간 사례와는 별도 발췌이다.</p><p class="locator">tools/data_factory/one_job.py<br>sha256:bac68bdfe99ad356dce44f1f6a7bcfc23d1039161a7263473caba456bc9bd1b7</p><h3>원본 622–637행</h3><pre>622:     def approve(self, approval):
+623:         if self.state != &quot;PLANNED&quot; or not isinstance(approval, dict):
+624:             return self._result(False, &quot;APPROVAL_STATE&quot;)
+625:         try:
+626:             self._approval(approval, resolved_job_digest=self._program[&quot;resolved_job_digest&quot;], include_digest=False)
+627:             payload = {key: approval[key] for key in (&quot;approval_id&quot;, &quot;approved_by&quot;, &quot;approval_expiry&quot;)}
+628:             payload.update(run_id=self.run_id, plan_digest=self.plan_digest,
+629:                            resolved_job_digest=self._program[&quot;resolved_job_digest&quot;], approval_scope=approval[&quot;approval_scope&quot;])
+630:             response = self._request(&quot;executor&quot;, &quot;approve&quot;, payload)
+631:             if response[&quot;state&quot;] != &quot;APPROVED&quot;:
+632:                 raise ContractError(&quot;APPROVAL_STATE&quot;)
+633:         except (ContractError, KeyError) as exc:
+634:             return self._result(False, exc.code if isinstance(exc, ContractError) else &quot;APPROVAL_SCHEMA&quot;)
+635:         self.approval_scope, self.state = approval[&quot;approval_scope&quot;], &quot;APPROVED&quot;
+636:         return self._result(True, &quot;APPROVED&quot;)
+637: </pre><h3>원본 652–693행</h3><pre>652:
+653:     def _wait_for_first_recorder_row(self, cancel=None):
+654:         &quot;&quot;&quot;Do not arm robot motion until the recorder has durably written a hold row.&quot;&quot;&quot;
+655:         deadline = self.monotonic_clock() + (
+656:             self.readiness_contract[&quot;deadline_s&quot;]
+657:             if self.readiness_contract is not None else self.RECORDER_FIRST_ROW_TIMEOUT_S
+658:         )
+659:         while True:
+660:             if self._cancel_requested(cancel):
+661:                 raise ContractError(&quot;START_CANCELLED&quot;)
+662:             status_started_ns = time.monotonic_ns()
+663:             status = self._request(&quot;recorder&quot;, &quot;status&quot;)
+664:             status_received_ns = time.monotonic_ns()
+665:             if self._cancel_requested(cancel):
+666:                 raise ContractError(&quot;START_CANCELLED&quot;)
+667:             try:
+668:                 if status[&quot;state&quot;] != &quot;RECORDING&quot;:
+669:                     raise ContractError(&quot;RECORDER_STATE&quot;)
+670:                 if status.get(&quot;writer_alive&quot;) is not True or status.get(&quot;writer_error&quot;) is not None:
+671:                     raise ContractError(&quot;RECORDER_WRITER_FAULT&quot;)
+672:                 if status.get(&quot;sampler_alive&quot;) is not True:
+673:                     raise ContractError(&quot;RECORDER_SAMPLER_FAULT&quot;)
+674:                 rows = status[&quot;metrics&quot;].get(&quot;rows&quot;)
+675:                 if type(rows) is not int or rows &lt; 0:
+676:                     raise ContractError(&quot;RECORDER_HEALTH_SCHEMA&quot;)
+677:                 if self.readiness_contract is None and rows &gt;= 1:
+678:                     return status
+679:                 if self.readiness_contract is not None:
+680:                     if self._readiness_status_ready(
+681:                         status, status_started_ns, status_received_ns,
+682:                     ):
+683:                         return status
+684:             except ContractError as exc:
+685:                 self._capture_readiness_failure(exc.code, status)
+686:                 raise
+687:             if self.monotonic_clock() &gt;= deadline:
+688:                 code = (
+689:                     &quot;RECORDER_READINESS_TIMEOUT&quot; if self.readiness_contract is not None
+690:                     else &quot;RECORDER_FIRST_ROW_TIMEOUT&quot;
+691:                 )
+692:                 self._capture_readiness_failure(code, status)
+693:                 raise ContractError(code)</pre></section></main><script src="../source-return.js"></script></body></html>

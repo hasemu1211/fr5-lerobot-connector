@@ -864,4 +864,111 @@
             rtc_enabled=self._rtc_enabled(),
             inference_delay=kwargs.get(&quot;inference_delay&quot;),
             prev_chunk_left_over=kwargs.get(&quot;prev_chunk_left_over&quot;),
-            execution_horizon=kwargs.get(&quot;execution_horizon&quot;),</pre></section></main></body></html>
+            execution_horizon=kwargs.get(&quot;execution_horizon&quot;),</pre></section><section id="launch-contract"><h2>학습 시작의 입력과 권한 확인</h2><p>현재 main 구현. 배치 승인 경로와 별도로 기존 사용자 위임의 범위도 실행 시 검사한다. 아래 발췌는 새로운 학습 성과를 뜻하지 않는다.</p><p class="locator">tools/data_factory/training_entrypoint.py<br>sha256:9ce7bf6c27de3cc18c84c410172071268bab548cf0cfd7fafb5b6aa34cfca26d</p><h3>원본 174–207행</h3><pre>174: def prepare_launch(*, dataset: Path, repo_id: str, inventory: Path,
+175:                    profile: str, collection_profile: str, argv: list[str]) -&gt; tuple[dict, dict]:
+176:     from importlib.metadata import version
+177:
+178:     if version(&quot;lerobot&quot;) != &quot;0.6.1&quot;:
+179:         raise ContractError(&quot;TRAINING_SPLIT_RUNTIME_UNVERIFIED&quot;, &quot;This split adapter is verified against LeRobot 0.6.1&quot;)
+180:     config = options(argv[1:])
+181:     if config.get(&quot;--job.target&quot;, &quot;local&quot;) != &quot;local&quot; or any(key.startswith(&quot;--env.&quot;) for key in config):
+182:         raise ContractError(&quot;TRAINING_LOCAL_OFFLINE_ONLY&quot;)
+183:     # Streaming, renamed roots, alternate episode order and resume are separate contracts.
+184:     if (not config.get(&quot;--dataset.root&quot;)
+185:             or Path(config[&quot;--dataset.root&quot;]).expanduser().resolve() != dataset.expanduser().resolve()
+186:             or config.get(&quot;--dataset.repo_id&quot;) != repo_id
+187:             or config.get(&quot;--dataset.streaming&quot;, &quot;false&quot;) != &quot;false&quot;
+188:             or &quot;--config_path&quot; in config or &quot;--resume&quot; in config):
+189:         raise ContractError(&quot;TRAINING_COMMAND_DATASET&quot;)
+190:     approved, metadata, selected = check_inventory(dataset, repo_id, inventory, config.get(&quot;--dataset.episodes&quot;))
+191:     _enforce_delegated_launch(
+192:         approved, dataset=dataset, repo_id=repo_id, profile=profile, config=config,
+193:     )
+194:     checklist_to_task = {contract[&quot;review_checklist_id&quot;]: task for task, contract in TASK_CONTRACTS.items()}
+195:     tasks = set()
+196:     for episode in approved[&quot;episodes&quot;]:
+197:         semantic = load_json_strict(Path(episode[&quot;human_semantic_evidence&quot;][&quot;artifact_path&quot;]))
+198:         task = checklist_to_task[semantic[&quot;checklist_id&quot;]]
+199:         labels = metadata[&quot;episode_tasks&quot;][episode[&quot;episode_index&quot;]]
+200:         if not labels or any(instruction_task(label) != task for label in labels):
+201:             raise ContractError(&quot;TRAINING_TASK_EVIDENCE_BINDING&quot;)
+202:         tasks.add(task)
+203:     # ACT/VQ-BeT have no language conditioning; keep the first baseline one task/instruction.
+204:     if len(tasks) != 1 or (profile != &quot;smolvla&quot; and len({tuple(metadata[&quot;episode_tasks&quot;][i]) for i in selected}) != 1):
+205:         raise ContractError(&quot;TRAINING_MIXED_TASK_SCOPE&quot;)
+206:     feature = launch_feature_contract(profile, collection_profile, tasks.pop(), metadata)
+207:     mapped = {}</pre><h3>원본 224–250행</h3><pre>224:                 # The receipt compiler validates and binds the exact local parent.
+225:                 continue
+226:             raise ContractError(&quot;TRAINING_POLICY_FEATURE_BINDING&quot;)
+227:     split = compile_launch_split(
+228:         inventory=approved, metadata=metadata, selected=selected,
+229:         fraction=float(config[&quot;--dataset.eval_split&quot;]), feature_contract=feature,
+230:     )
+231:     for publication in mapped.values():
+232:         cohort = publication[&quot;evaluation_cohort&quot;]
+233:         if (publication[&quot;dataset_identity&quot;] != split[&quot;dataset_identity&quot;]
+234:                 or [e[&quot;episode_index&quot;] for e in publication[&quot;episodes&quot;]] != split[&quot;selected_episodes&quot;]
+235:                 or cohort[&quot;eval_fraction&quot;] != split[&quot;eval_split&quot;]
+236:                 or cohort[&quot;train_episodes&quot;] != split[&quot;train_episodes&quot;]
+237:                 or cohort[&quot;eval_episodes&quot;] != split[&quot;eval_episodes&quot;]):
+238:             raise ContractError(&quot;TRAINING_MAPPING_EVALUATION_COHORT&quot;)
+239:     receipt = compile_launch_receipt(split, argv, str(inventory))
+240:     # Validate and persist the single saved observation-view binding before any
+241:     # trainer construction.  Curator remains the producer of derived evidence;
+242:     # this call only consumes it and records the exact raw/baked representation.
+243:     from tools.validate_training_checkpoint import validate_saved_observation_view
+244:     receipt[&quot;observation_view&quot;] = validate_saved_observation_view(split, receipt)
+245:     receipt[&quot;receipt_digest&quot;] = launch_receipt_digest(receipt)
+246:     if &quot;initialization&quot; in receipt:
+247:         parent_output = Path(receipt[&quot;initialization&quot;][&quot;checkpoint&quot;]).parents[2]
+248:         if Path(config[&quot;--output_dir&quot;]).resolve().is_relative_to(parent_output):
+249:             raise ContractError(&quot;TRAINING_OUTPUT_INSIDE_PARENT&quot;)
+250:     return split, receipt</pre><h3>원본 667–715행</h3><pre>667: def prepare_approval_batch(request: dict, output: Path, approved_by: str) -&gt; PreparedApprovalBatch:
+668:     &quot;&quot;&quot;Prepare without writes; arguments come from trusted server configuration.&quot;&quot;&quot;
+669:     request = copy.deepcopy(request)
+670:     output = output.resolve() if not output.is_symlink() else output
+671:     dataset, drafts = prepare_approvals(request, output, approved_by)
+672:     reviewed_at = datetime.now(timezone.utc)
+673:     documents = _approval_documents(drafts, reviewed_at)
+674:     batch_digest = approval._batch_digest(documents)
+675:     directory = output.stat()
+676:     return PreparedApprovalBatch(json.dumps({
+677:         &quot;request&quot;: request, &quot;output&quot;: str(output), &quot;approved_by&quot;: approved_by,
+678:         &quot;output_identity&quot;: [directory.st_dev, directory.st_ino],
+679:         &quot;dataset&quot;: dataset, &quot;drafts&quot;: drafts, &quot;documents&quot;: documents,
+680:         &quot;reviewed_at&quot;: reviewed_at.isoformat(), &quot;batch_digest&quot;: batch_digest,
+681:     }, sort_keys=True, separators=(&quot;,&quot;, &quot;:&quot;), allow_nan=False))
+682:
+683:
+684: def _revalidate_approval_batch(value: dict, *, check_targets: bool) -&gt; None:
+685:     # Reopen the complete source graph, even after per-episode publication.
+686:     if _prepare_approvals(value[&quot;request&quot;], Path(value[&quot;output&quot;]), value[&quot;approved_by&quot;],
+687:                           check_targets=check_targets) != (value[&quot;dataset&quot;], value[&quot;drafts&quot;]):
+688:         raise ContractError(&quot;TRAINING_INPUT_CHANGED&quot;)
+689:     if _approval_documents(value[&quot;drafts&quot;], datetime.fromisoformat(value[&quot;reviewed_at&quot;])) != value[&quot;documents&quot;]:
+690:         raise ContractError(&quot;TRAINING_INPUT_CHANGED&quot;)
+691:
+692:
+693: def publish_approval_batch(prepared: PreparedApprovalBatch) -&gt; dict:
+694:     &quot;&quot;&quot;Publish only after the trusted caller&#x27;s explicit human decision.
+695:
+696:     No JSON/dict confirmation or callback is accepted. This function does not
+697:     authenticate a human: the CLI or Web UI owns that interaction boundary.
+698:     Concurrent publishers serialize on the existing output directory; exclusive
+699:     artifacts reject replay. A partial attempt cannot publish an inventory.
+700:     &quot;&quot;&quot;
+701:     if type(prepared) is not PreparedApprovalBatch:
+702:         raise ContractError(&quot;TRAINING_PREPARED_BATCH_REQUIRED&quot;)
+703:     value = json.loads(prepared._snapshot)
+704:     documents = [
+705:         {**document, &quot;schema_version&quot;: approval.BATCH_APPROVAL_SCHEMA,
+706:          &quot;batch_digest&quot;: value[&quot;batch_digest&quot;]}
+707:         for document in value[&quot;documents&quot;]
+708:     ]
+709:     for document in documents:
+710:         approval.validate_training_approval(document)
+711:     return _publish_authorization_batch(
+712:         value, documents=documents, provenance=approval.PROVENANCE,
+713:         revalidate=_revalidate_approval_batch,
+714:     )
+715: </pre></section></main><script src="../source-return.js"></script></body></html>
