@@ -737,7 +737,14 @@ def build_physical_operator_environment(
         profile: Mapping[str, Any], devices: Mapping[str, Mapping[str, str]],
     ) -> dict[str, Any]:
         specs = _validated_camera_specs(profile, devices, device_root=device_root)
-        stack.reconfigure("camera_group", _camera_command(repository, profile, specs))
+        command = _camera_command(repository, profile, specs)
+        if specs == camera_config["specs"] and command == stack.commands.get("camera_group"):
+            # Reapplying a choice still queries readiness; live handles alone
+            # cannot prove a healthy graph or the current device binding.
+            current = environment.projection()
+            if current["state"] == "READY":
+                return current
+        stack.reconfigure("camera_group", command)
         camera_config["specs"] = specs
         return environment.projection()
 
