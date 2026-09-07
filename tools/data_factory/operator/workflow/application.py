@@ -410,6 +410,8 @@ class CollectionOperatorApplication:
         initial_environment: Mapping[str, Any] | None = None,
         effect_scope: str = "FAKE",
         collection_evidence_call: Callable[[], Mapping[str, Any]] | None = None,
+        object_position_call: Callable[[Mapping[str, Any]], Mapping[str, Any] | None] | None = None,
+        object_position_declare_call: Callable[..., Mapping[str, Any]] | None = None,
     ):
         if (
             not isinstance(operator_label, str)
@@ -418,6 +420,9 @@ class CollectionOperatorApplication:
             or not callable(prepare_environment_call)
             or not callable(campaign_factory)
             or collection_evidence_call is not None and not callable(collection_evidence_call)
+            or (object_position_call is None) != (object_position_declare_call is None)
+            or object_position_call is not None and not callable(object_position_call)
+            or object_position_declare_call is not None and not callable(object_position_declare_call)
             or effect_scope not in {"FAKE", "PHYSICAL"}
         ):
             raise ContractError("OPERATOR_APPLICATION_INPUT")
@@ -452,6 +457,8 @@ class CollectionOperatorApplication:
         self.prepare_environment_call = prepare_environment_call
         self.prepare_environment_owner_call = prepare_environment_owner_call
         self.campaign_factory = campaign_factory
+        self.object_position_call = object_position_call
+        self.object_position_declare_call = object_position_declare_call
         self.workspace_manager_factory = workspace_manager_factory
         self.workspace_snapshot_call = workspace_snapshot_call
         self.workspace_preview_call = workspace_preview_call
@@ -490,6 +497,7 @@ class CollectionOperatorApplication:
             if initial_environment is not None else self._read_environment()
         )
         self.draft = self._new_draft(None)
+        self._restore_object_position()
         handlers = {
             "prepare_environment": self.prepare_environment,
             "update_draft": self.update_draft,
@@ -510,6 +518,8 @@ class CollectionOperatorApplication:
         }
         if self.camera_bindings_call is not None:
             handlers["update_camera_bindings"] = self.update_camera_bindings
+        if self.object_position_call is not None:
+            handlers["refresh_object_position"] = self.refresh_object_position
         if self.camera_refresh_call is not None:
             handlers["recover_camera_setup"] = self.recover_camera_setup
         if self.start_pose_capture_call is not None:
@@ -1279,6 +1289,12 @@ class CollectionOperatorApplication:
         if workspace_cycle is None:
             workspace_cycle = self._workspace_cycle()
         motion_presets = self._motion_presets(workspace_cycle)
+        object_position = self._object_position_projection()
+        if object_position is not None:
+            if workflow == "AUTHORING":
+                operations.append("refresh_object_position")
+            if object_position["status"] in {"BLOCKED", "STALE"}:
+                operations = [op for op in operations if op not in {"compile_draft", "authorize_campaign"}]
         motion_preset = self.draft.get("motion_preset")
         if motion_preset is not None:
             selected_preset = next((item for item in motion_presets
@@ -1297,6 +1313,7 @@ class CollectionOperatorApplication:
             "repeat": self.draft["repeat"],
             "normalized_seed": self.draft["normalized_seed"],
             "current_object_pose": copy.deepcopy(self.draft["current_object_pose"]),
+            "object_position": object_position,
             "direct_poses": copy.deepcopy(self.draft["direct_poses"]),
             "workspace_route": [
                 {
@@ -1990,6 +2007,10 @@ class CollectionOperatorApplication:
             self.draft[field] = _validated_normalized_seed(value)
         elif field == "current_object_pose" and isinstance(value, Mapping):
             checked = validate_operator_pose(self.catalog, self.selection, value)
+            if self.object_position_declare_call is not None:
+                self.draft["object_position"] = self.object_position_declare_call(
+                    self.selection, checked, _view["projection"]["draft"].get("object_position"),
+                )
             self.draft["current_object_pose"] = checked
             self.draft["direct_poses"] = [
                 pose for pose in self.draft["direct_poses"] if pose != checked
@@ -2106,6 +2127,9 @@ class CollectionOperatorApplication:
         return copy.deepcopy(self._collection_choice)
 
     def compile_draft(self, payload: dict[str, Any], _view: dict[str, Any]) -> dict[str, Any]:
+        position = self._object_position_projection()
+        if position is not None and position["status"] in {"BLOCKED", "STALE"}:
+            raise ContractError(position["reason"])
         self._require("AUTHORING", payload, {"draft_id", "data_disposition"})
         if (
             payload["draft_id"] != self.draft["draft_id"]
@@ -2118,8 +2142,10 @@ class CollectionOperatorApplication:
         if preset is not None and any(endpoint["motion_id"] not in preset["qualifications"] for endpoint in self._workspace_cycle()):
             raise ContractError("MOTION_PRESET_QUALIFICATION_REQUIRED")
         campaign_id = self._id("campaign")
+        campaign_draft = copy.deepcopy(self.draft)
+        campaign_draft["object_position"] = position
         campaign = self.campaign_factory(
-            campaign_id, copy.deepcopy(self.selection), copy.deepcopy(self.draft),
+            campaign_id, copy.deepcopy(self.selection), campaign_draft,
         )
         if not isinstance(getattr(campaign, "bridge_core", None), OperatorIntentCore):
             close = getattr(campaign, "close", None)
@@ -2147,6 +2173,8 @@ class CollectionOperatorApplication:
                     close()
                 raise ContractError("COLLECTION_ADVICE_COMPILED_SELECTION_MISMATCH")
         self._campaign = campaign
+        if position is not None:
+            self.draft["object_position"] = copy.deepcopy(self._read_object_position())
         self._campaign_source_selection = {
             "selection": copy.deepcopy(self.selection),
             "catalog_digest": self.catalog["catalog_digest"],
@@ -2360,6 +2388,62 @@ class CollectionOperatorApplication:
             "home_recovery": copy.deepcopy(self._last_home_recovery),
         }
 
+    def _read_object_position(self):
+        if self.object_position_call is None:
+            return None
+        try:
+            return self.object_position_call(self.selection)
+        except (ContractError, OSError) as exc:
+            return {"status": "BLOCKED", "reason": getattr(exc, "code", "OBJECT_POSITION_UNAVAILABLE"),
+                    "source": None, "pose": None, "scene_state_digest": None,
+                    "binding_digest": None}
+
+    def _restore_object_position(self):
+        position = self._read_object_position()
+        self.draft["object_position"] = copy.deepcopy(position)
+        if position is None or position["status"] != "AVAILABLE":
+            return
+        pose = position["pose"]
+        previous_selection, previous_draft = copy.deepcopy(self.selection), copy.deepcopy(self.draft)
+        try:
+            if self.selection["workspace_id"] != pose["place_id"]:
+                self._update_browser_selection("workspace", pose["place_id"])
+            checked = validate_operator_pose(self.catalog, self.selection, pose)
+        except ContractError as exc:
+            self.selection, self.draft = previous_selection, previous_draft
+            self.draft["object_position"].update(status="BLOCKED", reason=exc.code)
+            return
+        if checked == self.draft["current_object_pose"]:
+            return
+        self.draft["current_object_pose"] = checked
+        self.draft["direct_poses"] = [item for item in self.draft["direct_poses"] if item != checked]
+        self.draft["direct_pairs"] = []
+        if self.draft["authoring_mode"] == "DIRECT_EDIT" and self.start_pose_setup is not None:
+            self._reset_direct_pairs()
+
+    def _object_position_projection(self):
+        current = self._read_object_position()
+        if current is None:
+            return None
+        saved = self.draft.get("object_position")
+        current = copy.deepcopy(current)
+        if isinstance(saved, Mapping) and saved["status"] == "BLOCKED" and saved.get("binding_digest") == current.get("binding_digest"):
+            return copy.deepcopy(saved)
+        if current["status"] == "AVAILABLE" and (
+            not isinstance(saved, Mapping)
+            or saved["scene_state_digest"] != current["scene_state_digest"]
+            or self.draft["current_object_pose"] != current["pose"]
+        ):
+            current.update(status="STALE", reason="OBJECT_POSITION_CHANGED")
+        return current
+
+    def refresh_object_position(self, payload, _view):
+        if payload or self._campaign is not None:
+            raise ContractError("OPERATOR_APPLICATION_STATE")
+        self._restore_object_position()
+        self.draft["revision"] += 1
+        return {"outcome": "OBJECT_POSITION_REFRESHED"}
+
     def _replace_campaign(self) -> dict[str, Any]:
         projection = self.projection()
         workflow = projection["workflow_state"]
@@ -2420,6 +2504,7 @@ class CollectionOperatorApplication:
                 _validated_normalized_seed(previous["normalized_seed"]) + 1
             ) % (MAX_CAMPAIGN_SEED + 1)
         self.draft = self._new_draft(previous)
+        self._restore_object_position()
         if (
             self.draft["authoring_mode"] == "DIRECT_EDIT"
             and self.start_pose_setup is not None

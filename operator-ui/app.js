@@ -177,6 +177,14 @@ function validateView(value) {
   if (!currentObject || typeof currentObject !== "object" || Array.isArray(currentObject)
       || currentObject.place_id !== view.draft.selection.workspace
       || ![currentObject.x_mm, currentObject.y_mm, currentObject.yaw_deg].every(Number.isFinite)) throw new TypeError("CURRENT_OBJECT_POSE_INVALID");
+  const position = view.draft.object_position;
+  if (position != null && (!position || typeof position !== "object"
+      || !["AVAILABLE", "MISSING", "BLOCKED", "STALE"].includes(position.status)
+      || position.status === "AVAILABLE" && (!position.pose
+        || !["HUMAN", "ROBOT_RELEASE", "ROBOT_RELEASE_PROXY"].includes(position.source)
+        || ![position.pose.x_mm, position.pose.y_mm, position.pose.yaw_deg].every(Number.isFinite)
+        || position.pose.place_id !== currentObject.place_id
+        || ["x_mm", "y_mm", "yaw_deg"].some((key) => position.pose[key] !== currentObject[key])))) throw new TypeError("OBJECT_POSITION_INVALID");
   if (view.draft.direct_poses !== undefined && (!Array.isArray(view.draft.direct_poses)
       || view.draft.direct_poses.some((pose) => !pose || typeof pose !== "object" || Array.isArray(pose)
         || pose.place_id !== view.draft.selection.workspace
@@ -1175,6 +1183,22 @@ function renderCurrentObjectPose(view, editable) {
   document.querySelector("#current-object-status").textContent = domain
     ? `작성안 r${view.draft.revision} · ${selectedLabel(view, "workspace")} · ${pickPlace ? "첫 에피소드의 물체 출발점입니다. 로봇 시작 자세와는 별도입니다." : "첫 에피소드와 작업영역 초기화가 이 위치에서 시작합니다."}`
     : "현재 작업영역의 입력 범위를 사용할 수 없습니다.";
+  const position = view.draft.object_position;
+  const restore = document.querySelector("#refresh-object-position");
+  if (restore) {
+    restore.hidden = position == null || position.status !== "STALE";
+    restore.disabled = !canIntent("refresh_object_position");
+  }
+  if (position != null) {
+    document.querySelector("#apply-current-object").textContent = "직접 옮긴 위치 저장";
+    const meaning = position.status === "AVAILABLE"
+      ? position.source === "HUMAN" ? "사람이 보고한 현재 위치입니다."
+        : `마지막 실행의 착지 근거로 복원했습니다${position.run_id ? ` · ${position.run_id}` : ""}. 영상으로 측정한 위치는 아닙니다.`
+      : position.status === "STALE" ? "저장된 위치 근거가 바뀌었습니다. 최신 위치를 사용하거나 직접 옮긴 위치를 보고하세요."
+        : position.status === "MISSING" ? "저장된 물체 위치가 없습니다. 직접 놓은 위치를 입력하세요."
+          : `현재 위치를 확정할 수 없습니다 (${position.reason}). 표시된 입력값은 현재 위치의 증거가 아닙니다.`;
+    document.querySelector("#current-object-status").textContent = `${meaning} 물체를 직접 옮겼을 때만 위치를 수정하세요. 기존 실행·cell 조건은 별도로 유지됩니다.`;
+  }
 }
 
 function renderDirectPoseEditor(view, editable) {
@@ -2097,6 +2121,7 @@ document.querySelector("#current-object-form").addEventListener("submit", (event
     },
   });
 });
+document.querySelector("#refresh-object-position")?.addEventListener("click", () => submitIntent("refresh_object_position"));
 document.querySelector("#split-select").addEventListener("change", (event) => submitIntent("update_draft", {draft_id: currentView.draft.draft_id, split: event.target.value}));
 document.querySelector("#cell-grid").addEventListener("click", (event) => {
   const button = event.target.closest("[data-cell-id]");

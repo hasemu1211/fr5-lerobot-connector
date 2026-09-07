@@ -2184,10 +2184,14 @@ def _project_endpoint_yaw_sequence(
                 ):
                     raise ContractError("OPERATOR_ASSISTED_DOMAIN")
                 local_x, local_y = rotate_xy(source_sheet_xy, -yaw)
-                block.append(_canonical_operator_pose(selection, domain, {
-                    "place_id": selection["workspace_id"], "yaw_deg": yaw,
-                    "x_mm": local_x, "y_mm": local_y,
-                }))
+                # A conditioned source is the physical anchor, not a newly
+                # sampled point. Avoid a rotate/unrotate roundoff changing its
+                # exact scene pose and therefore its release-slot identity.
+                block.append(copy.deepcopy(source) if yaw == source["yaw_deg"] else
+                             _canonical_operator_pose(selection, domain, {
+                                 "place_id": selection["workspace_id"], "yaw_deg": yaw,
+                                 "x_mm": local_x, "y_mm": local_y,
+                             }))
             for sheet_x, sheet_y, row, column in samples:
                 cell = row * columns + column
                 if (

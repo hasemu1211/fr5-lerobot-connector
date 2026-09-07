@@ -1716,6 +1716,7 @@ def build_physical_operator_console(
     selected_start_pose_qualifications: Sequence[Mapping[str, Any]] | None = None,
     start_transition_call: Callable[[Mapping[str, Any], Mapping[str, Any], Any], Mapping[str, Any]] | None = None,
     initial_object_pose: Mapping[str, Any] | None = None,
+    initial_object_position: Mapping[str, Any] | None = None,
     data_disposition: str = "TEST_ONLY",
     dataset_root: str | Path | None = None,
     environment_prepared: bool = False,
@@ -2282,16 +2283,40 @@ def build_physical_operator_console(
                 "object_profile_id": job["object_profile_id"],
             }).removeprefix("sha256:")[:20]
         )
-        observed = scene_store.update_object(
-            instance_id=instance_id,
-            object_profile_id=job["object_profile_id"], state="ON_SURFACE",
-            pose={
-                key: job[key]
-                for key in ("place_id", "yaw_deg", "x_mm", "y_mm")
-            },
-            source="HUMAN", updated_by=operator_label,
-            expected_revision=before["scene_state"]["revision"],
-        )
+        if matching:
+            position = scene_store.object_position(
+                object_profile_id=job["object_profile_id"],
+                dimensions_mm=resolved["object_profile"]["dimensions_mm"],
+            )
+            if initial_object_position is not None and position != initial_object_position:
+                raise ContractError("OBJECT_POSITION_CHANGED")
+            if position["status"] != "AVAILABLE":
+                raise ContractError(position["reason"])
+            if position["pose"] != initial_pose:
+                raise ContractError("OBJECT_POSITION_CHANGED")
+            observed = (
+                scene_store.rebind_landed_source(
+                    object_profile_id=job["object_profile_id"],
+                    dimensions_mm=resolved["object_profile"]["dimensions_mm"],
+                    run_id=run_id,
+                    expected_scene_digest=position["scene_state_digest"],
+                    expected_slot_digest=position["slot_digest"],
+                    expected_cell_digest=position["cell_state_digest"],
+                ) if position["source"] in {"ROBOT_RELEASE", "ROBOT_RELEASE_PROXY"}
+                else before
+            )
+        else:
+            if initial_object_position is not None and (
+                initial_object_position["scene_state_digest"] != before["scene_state_digest"]
+            ):
+                raise ContractError("OBJECT_POSITION_CHANGED")
+            observed = scene_store.update_object(
+                instance_id=instance_id,
+                object_profile_id=job["object_profile_id"], state="ON_SURFACE",
+                pose={key: job[key] for key in ("place_id", "yaw_deg", "x_mm", "y_mm")},
+                source="HUMAN", updated_by=operator_label,
+                expected_revision=before["scene_state"]["revision"],
+            )
         initial_scene_digest = observed["scene_state_digest"]
     home_candidate = load_json_strict(paths["home"])
     qualification_source = (
@@ -3602,6 +3627,38 @@ def build_physical_operator_application(
             raise ContractError("OPERATOR_APPLICATION_COMPATIBLE_COMBINATION")
         return matches[0]
 
+    def object_position_call(selected):
+        if selected["data_mode"] != "GENERAL_COLLECTION":
+            return None
+        chosen = next(item for item in active_catalog()["combinations"]
+                      if item["combination_digest"] == selected["combination_digest"])
+        profile = load_json_strict(_repository_path(repository, chosen["sources"]["object"]))
+        return SceneStateStore(
+            repository / "outputs/data_factory/cells", initial_job["robot_system_id"],
+        ).object_position(
+            object_profile_id=selected["object_id"], dimensions_mm=profile["dimensions_mm"],
+        )
+
+    def object_position_declare_call(selected, pose, expected):
+        if selected["data_mode"] != "GENERAL_COLLECTION":
+            return None
+        current = object_position_call(selected)
+        if current["reason"] == "SCENE_OBJECT_AMBIGUOUS":
+            raise ContractError(current["reason"])
+        if current["binding_digest"] != expected["binding_digest"]:
+            raise ContractError("OBJECT_POSITION_CHANGED")
+        robot_id = initial_job["robot_system_id"]
+        instance_id = current["object_instance_id"] or "production-object-" + canonical_digest({
+            "robot_system_id": robot_id, "object_profile_id": selected["object_id"],
+        }).removeprefix("sha256:")[:20]
+        SceneStateStore(repository / "outputs/data_factory/cells", robot_id).update_object(
+            instance_id=instance_id, object_profile_id=selected["object_id"],
+            state="ON_SURFACE", source="HUMAN", updated_by=operator_label,
+            pose=pose, expected_revision=current["scene_revision"],
+            expected_cell_digest=current["cell_state_digest"],
+        )
+        return object_position_call(selected)
+
     def start_pose_domain(
         selected_ids: Sequence[str] | None = None,
     ) -> tuple[dict[str, Any], dict[str, dict[str, Any]]]:
@@ -4222,6 +4279,7 @@ def build_physical_operator_application(
                 "state_space_design_profile",
             ),
             initial_object_pose=campaign_initial_pose,
+            initial_object_position=draft.get("object_position"),
             **pose_plan,
             data_disposition=disposition,
             dataset_root=(
@@ -4258,6 +4316,8 @@ def build_physical_operator_application(
         start_pose_capture_call=start_pose_capture_call,
         initial_environment=initial_environment,
         effect_scope="PHYSICAL",
+        object_position_call=object_position_call,
+        object_position_declare_call=object_position_declare_call,
     )
     application_holder["application"] = application
     if initial_motion_preset is not None:

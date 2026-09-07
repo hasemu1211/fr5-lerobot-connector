@@ -11,6 +11,67 @@ from tools.fr5_data_factory import ContractError, canonical_digest
 
 
 class SceneStateTest(unittest.TestCase):
+    def test_restart_source_handoff_is_atomic_preserves_release_and_rejects_new_motion(self):
+        from concurrent.futures import ThreadPoolExecutor
+        from tools.data_factory.cell_state import CellStateStore
+        with tempfile.TemporaryDirectory() as directory:
+            store = scene_state.SceneStateStore(directory, "robot")
+            cell = CellStateStore(directory, "robot")
+            pose = {"place_id": "place-a", "yaw_deg": -24.25, "x_mm": 12.125, "y_mm": -7.5}
+            start = store.update_object(instance_id="cube", object_profile_id="wood", state="ON_SURFACE",
+                                        source="HUMAN", updated_by="fixture", pose=pose)
+            slot = scene_state.release_slot(robot_system_id="robot", pose=pose, object_profile_id="wood",
+                                            exclusion_geometry_digest=canonical_digest({"shape": "BOX", "dimensions_mm": [24, 24, 24]}))
+            evidence = {"schema_version": "data_factory.recycle_release_evidence.v1", "run_id": "old-run",
+                        "plan_digest": "sha256:" + "a" * 64, "release_slot_id": slot["slot_id"],
+                        "expected_scene_state_digest": start["scene_state_digest"], "expected_scene_revision": start["scene_state"]["revision"],
+                        "gripper_reference_m": .021, "gripper_feedback_m": .021,
+                        "terminal_phases": ["RECYCLE_APPROACH_PTP", "LOWER_LIN", "GRIPPER_OPEN", "RETREAT_LIN", "SAFE_POSE_PTP"],
+                        "post_retreat_snapshot_digest": "sha256:" + "b" * 64, "next_start_tolerance_rad": .01, "human_verdict": "LANDED"}
+            cell.mark_blocked("EXECUTION_IN_PROGRESS", "old-run", evidence["plan_digest"])
+            landed = store.transition_release(instance_id="cube", release_slot=slot, evidence=evidence, updated_by="pickup-executor",
+                                              expected_digest=start["scene_state_digest"], expected_revision=start["scene_state"]["revision"])
+            cell.acknowledge_ready("fixture", expected_run_id="old-run", expected_plan_digest=evidence["plan_digest"])
+            def binding():
+                position = store.object_position(object_profile_id="wood", dimensions_mm=[24, 24, 24])
+                return dict(object_profile_id="wood", dimensions_mm=[24, 24, 24],
+                            expected_scene_digest=position["scene_state_digest"], expected_slot_digest=position["slot_digest"],
+                            expected_cell_digest=position["cell_state_digest"])
+            expected = binding()
+            before_cell = cell.read()
+            def compete(run_id):
+                try:
+                    return store.rebind_landed_source(run_id=run_id, **expected)
+                except ContractError as exc:
+                    return exc.code
+            with ThreadPoolExecutor(max_workers=2) as workers:
+                results = list(workers.map(compete, ["fresh-a", "fresh-b"]))
+            self.assertEqual(sum(isinstance(result, dict) for result in results), 1)
+            self.assertIn("SCENE_STATE_CHANGED", results)
+            after = store.snapshot()
+            self.assertEqual(after["scene_state"]["objects"], landed["scene_state"]["objects"])
+            allocation = after["scene_state"]["slot_allocations"][slot["slot_id"]]
+            self.assertEqual(allocation["evidence_digest"], canonical_digest(evidence))
+            self.assertEqual(allocation["evidence_plan_digest"], evidence["plan_digest"])
+            self.assertEqual(cell.read(), before_cell)
+            self.assertEqual(store.rebind_landed_source(run_id=allocation["allowed_run_id"], **binding()), after)
+            stale_cell = binding()
+            cell.mark_blocked("EXECUTION_IN_PROGRESS", "newer-motion", "sha256:" + "c" * 64)
+            with self.assertRaisesRegex(ContractError, "STATE_CHANGED"):
+                store.rebind_landed_source(run_id="fresh-c", **stale_cell)
+            with self.assertRaisesRegex(ContractError, "STATE_CHANGED"):
+                store.update_object(instance_id="cube", object_profile_id="wood", state="ON_SURFACE",
+                                    source="HUMAN", updated_by="fixture", pose=pose,
+                                    expected_revision=after["scene_state"]["revision"],
+                                    expected_cell_digest=stale_cell["expected_cell_digest"])
+            with self.assertRaisesRegex(ContractError, "OBJECT_POSITION_EXECUTION_IN_PROGRESS"):
+                store.rebind_landed_source(run_id="fresh-c", **binding())
+            self.assertEqual(store.snapshot(), after)
+            cell.mark_blocked("ROS_EXEC_FAILED", "newer-motion", "sha256:" + "c" * 64)
+            with self.assertRaisesRegex(ContractError, "OBJECT_POSITION_NEWER_EXECUTION"):
+                store.rebind_landed_source(run_id="fresh-c", **binding())
+            self.assertEqual(store.snapshot(), after)
+
     def test_intermediate_campaign_binding_has_previous_source_and_next_destination(self):
         destination = scene_state.release_slot(
             robot_system_id="fr5-lab-a",

@@ -154,6 +154,39 @@ changing physical or training authority. Observation SHALL NOT repair artifacts.
 - **AND** an old review intent cannot overwrite that decision or change its reviewer
 - **AND** unchanged pending candidates do not trigger repeated full ledger validation.
 
+### Requirement: Restore the last execution-derived object position
+
+The Collection application SHALL restore the exact last eligible object pose from the existing durable scene and execution lineage on supported production-session restart and campaign replacement. The wooden object remains at that position until a reported manual move or invalidating execution evidence; images SHALL NOT be a prerequisite. The Web and automation surfaces SHALL consume the same native position, provenance and current-view binding without path or digest transcription. Restoring a draft SHALL NOT confer motion, semantic, quality or training approval. The next consumer is the existing scene-bound collection planner and lifecycle owner.
+
+#### Scenario: A later non-motion failure interrupts the campaign
+
+- **WHEN** a release is durably recorded and a subsequent recorder, UI or pre-motion startup failure leaves its valid lineage unchanged
+- **THEN** restarting the application or replacing the blocked campaign restores the exact endpoint even though the overall campaign did not complete
+- **AND** the view distinguishes an execution-derived expected landing from a visually measured position; reads do not modify scene, cell or source episodes
+- **AND** independent cell readiness, scene, hardware, exact-plan, single-owner and quality gates remain in force.
+
+#### Scenario: Later motion makes reuse uncertain
+
+- **WHEN** an object is UNKNOWN or HELD, its release lineage conflicts, or a newer execution has consumed or invalidated its last position
+- **THEN** the view exposes the affected position as unavailable and prevents collection effects from consuming it
+- **AND** unrelated review, stop and recovery operations retain their existing authority; displayed draft coordinates are not asserted to be current physical facts
+- **AND** a changed scene invalidates stale intents and requires fresh native derivation before its position is consumed.
+
+#### Scenario: The user moves the object and reports the new position
+
+- **WHEN** a person explicitly submits the moved position through the existing Web editor
+- **THEN** the server-owned actor records that declaration through the existing scene owner with current-state comparison, preserving existing cell gates and immutable source episodes
+- **AND** a restarted application restores the declaration; unrelated later draft edits are preserved when refreshing position
+- **AND** a lost response is recovered by reading the canonical result, without automatic command replay or another acknowledgement phrase.
+
+#### Scenario: A restarted campaign consumes the last landing
+
+- **WHEN** the existing Collection authoring command binds a valid recorded landing to a fresh run
+- **THEN** SceneStateStore compares the exact scene, source slot and cell lineage under its locks before changing the slot's next-run allocation
+- **AND** the physical pose, source, original release timestamp and execution evidence remain unchanged; a concurrent stale handoff or newer active motion rejects
+- **AND** the native planner resolves the exact preserved source coordinates and the fresh run binding without writing scene state; the former next run cannot consume that allocation
+- **AND** a new campaign still requires its own existing approval and all physical gates; this transfer grants no semantic, training or motion approval.
+
 ### Requirement: Preserve execution awareness during Collection connection recovery
 
 The Collection Web surface SHALL retain its last validated execution facts and current screen when state retrieval fails, clearly label them as stale, and state that current robot motion or stop is unknown. A failed browser request SHALL NOT imply that the lifecycle owner stopped, rolled back or remains healthy. The current constraint is the existing loopback state/intent transport; this behavior grants no offline command authority and changes no physical or approval gates. The next consumer is the existing lifecycle owner, whose fresh canonical view and exact intent CAS remain authoritative.
