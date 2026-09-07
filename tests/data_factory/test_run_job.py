@@ -874,9 +874,16 @@ class RunJobTest(unittest.TestCase):
 
             def consume_next_source(self, **value):
                 self.consumed.append(value)
+                self.consumed_slot = {
+                    "state": "CONSUMED_PENDING_REVIEW",
+                    "allowed_run_id": value["run_id"],
+                }
                 return {
                     "scene_state_digest": "sha256:" + "9" * 64,
-                    "scene_state": {"revision": 2},
+                    "scene_state": {
+                        "revision": 2,
+                        "slot_allocations": {value["slot_id"]: self.consumed_slot},
+                    },
                 }
 
             def locked_snapshot(self, digest):
@@ -1237,6 +1244,12 @@ class RunJobTest(unittest.TestCase):
             (store.consumed[0]["run_id"], len(store.transitions), store.blocked),
             (binding["continuation_run_id"], 1, []),
         )
+        self.assertEqual(store.transitions[0]["parent_cell_binding"], {
+            "run_id": binding["parent_run_id"],
+            "plan_digest": parent_plan_digest,
+            "source_slot_id": source_slot["slot_id"],
+            "source_slot_digest": run_job.canonical_digest(store.consumed_slot),
+        })
         self.assertEqual(transport.started, list(PHASES))
         self.assertEqual(
             [event["code"] for event in published],
