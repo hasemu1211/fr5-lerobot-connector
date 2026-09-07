@@ -41,3 +41,19 @@ Runnable CPU check (no ROS node, model, GPU, original dataset or robot effects):
 ```sh
 direnv exec . python3 -m unittest tests.data_factory.rollout.test_finite_plan tests.data_factory.rollout.test_learned_transport tests.data_factory.test_motion tests.data_factory.test_motion_transport_execution tests.data_factory.rollout.test_evidence_boundary tests.data_factory.test_quality tests.data_factory.rollout.test_native_policy --durations 5
 ```
+
+## Continuous model references: consumer compatibility
+
+- [x] Distinguish hardware integer resolution from its raw-reference enqueue deadband using the actual source and a CPU-extracted predicate replay.
+- [x] Compare timed seven-joint execution against serial exact references; retain their timing, completion and staged-source limitations.
+- [x] Verify through existing finite inference and OneJob that continuous in-limit output and staged source reject without input rewriting or executor/recorder effects.
+- [ ] Coordinate same-command hardware completion and arm-resume evidence with the existing hardware/motion owner; JTC tolerance success alone is insufficient.
+- [ ] Implement an explicitly bounded native continuous-reference consumer with original full output, consumed indices and staged-release compatibility retained; do not automatically truncate or snap.
+- [ ] Verify its normal executor/trace consumers and failure/cancellation before any separately assigned physical qualification.
+
+Focused CPU acceptance (the vendor predicate replay is separate analytical
+source evidence, not a simulated complete hardware execution):
+
+```sh
+direnv exec . python3 -m unittest tests.data_factory.rollout.test_finite_plan --durations 5
+```

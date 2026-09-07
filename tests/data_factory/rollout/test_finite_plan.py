@@ -346,6 +346,40 @@ class FinitePlanTest(unittest.TestCase):
             transport.build_learned_trajectory(p)
         self.assertEqual(sent, [])
 
+    def test_continuous_references_and_staged_source_reject_without_rewriting_inputs(self):
+        # These are in-limit continuous outputs, not an inferred close/open class.
+        # A production staged source must not be stripped to make them executable.
+        job, executor, _, _, now, sent, _, calls = self.make_held_job()
+        xml = executor.runs["run"]["plan"]["learned_proposal"]["robot_description"]
+        for staged, expected in ((False, "LEARNED_UNBOUND_GRIPPER_TARGET"),
+                                 (True, "LEARNED_HELD_PROFILE_UNSUPPORTED")):
+            with self.subTest(staged=staged):
+                src = copy.deepcopy(job._program["source_program"])
+                if staged:
+                    opened = next(s for s in src["steps"] if s["phase"] == "GRIPPER_OPEN")
+                    opened.update(release_position_m=.0126, release_hold_s=.5)
+                validate_motion_program(src)
+                actions = [[0.] * 6 + [.016342543065547943 + i * .00001] for i in range(50)]
+                original_source, original_actions = copy.deepcopy(src), copy.deepcopy(actions)
+                policy = mock.Mock(return_value=actions)
+                inference = FinitePolicyInference(policy, CHECKPOINT, source_clock=lambda: now[0])
+                consumer = OneJob(Recorder(calls), executor.process)
+                obs = observation()
+                obs["observation.state"] = [0.] * 6 + [.021]
+                result = consumer.plan_learned(
+                    "continuous", src, SCENE, inference, obs,
+                    **{**OPTIONS, "robot_description": xml, "period_s": 1 / 30,
+                       "held_gripper_targets": True, "max_observation_age_s": 5.},
+                )
+                self.assertFalse(result["ok"])
+                self.assertEqual(result["code"], expected)
+                policy.assert_called_once()
+                self.assertEqual(src, original_source)
+                self.assertEqual(actions, original_actions)
+                self.assertNotIn("continuous", executor.runs)
+                self.assertEqual(sent, [])
+                self.assertEqual(calls, [])
+
     def test_held_start_snapshot_is_rechecked_after_deserialization_before_send(self):
         job, executor, t, _, now, sent, _, _ = self.make_held_job()
         job.approve(APPROVAL)

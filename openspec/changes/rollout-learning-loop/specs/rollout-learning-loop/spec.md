@@ -68,6 +68,10 @@ automatic dataset commit or safe-reset claim.
   reference permits a fresh start check for the approved arm slice
 - **AND** every sent arm target remains identical to its approved message
 
+This scenario proves the software action/observation boundary only. It does not
+prove the hardware worker has completed its command or resumed the arm stream;
+physical readiness requires the continuous-consumer requirement below.
+
 #### Scenario: Failure cannot advance a learned slice
 
 - **WHEN** state is stale, the reference/feedback is outside its binding, arm
@@ -92,6 +96,43 @@ automatic dataset commit or safe-reset claim.
   travel and both acceptable feedback extremes intersected with URDF limits
 - **AND** an invalid sample rejects before approval or execution
 - **AND** sampled collision and CPU replay evidence do not qualify physical pickup
+
+### Requirement: Continuous-reference deployment preserves hardware completion meaning
+
+A continuous model-output consumer SHALL preserve the original full seven-joint
+outputs and identify exactly which rows its frozen approved plan consumes. It
+SHALL NOT silently snap references, infer close/open/release phases, truncate the
+output horizon or inherit a scripted qualification. Reference position limits
+SHALL be checked before the hardware's own clamping can conceal a violation.
+The existing staged release SHALL remain unchanged and unsupported until the
+consumer preserves its ordered intermediate hold and final open when executed.
+
+Hardware integer command resolution SHALL NOT be treated as the raw-reference
+enqueue rule or as task semantics. Before an arm segment follows a gripper
+operation, the sole execution owner SHALL require fresh, same-command evidence
+of hardware completion and arm resume, together with the bound controller
+terminal result, reference and feedback. An unresolved/pending command, stale
+or unrelated completion, hardware error or cancellation SHALL prevent dispatch.
+Elapsed hold time, matching position or JTC success alone SHALL NOT manufacture
+this evidence. The source/transport contract for that evidence remains an
+unimplemented shared requirement, not a new Rollout-owned execution service.
+
+#### Scenario: Continuous references and a staged source are unsupported
+
+- **WHEN** finite inference supplies in-limit continuous gripper references
+  that lack the existing exact close/open binding
+- **THEN** OneJob rejects before executor or recorder effects
+- **AND** a source with staged release rejects as unsupported rather than
+  deleting its intermediate stage
+- **AND** the original model references and source are not rewritten
+
+#### Scenario: Integer-code equivalence does not establish command equivalence
+
+- **WHEN** raw references 0.01041 m and 0.01053 m both map to SDK target 50
+  with upper position 0.021 m
+- **THEN** evidence preserves that the current hardware can enqueue again
+  because the raw-reference difference exceeds 0.0001 m
+- **AND** no completion, throughput or safety claim follows from integer equality
 
 ### Requirement: Held execution identities remain bound through existing quality consumers
 
