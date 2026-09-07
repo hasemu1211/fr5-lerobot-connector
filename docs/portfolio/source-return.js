@@ -25,6 +25,11 @@ function updateSourceReturn() {
     back.textContent = '← 학습 비교로 돌아가기';
     return;
   }
+  if (back && architectureView === 'task-language') {
+    back.href = '../collection.html#task-language';
+    back.textContent = '← 작업 정의와 언어 조건으로 돌아가기';
+    return;
+  }
   if (back && architectureView === 'approach') {
     back.href = '../collection.html#approach';
     back.textContent = '← 정렬 동작의 접근 설계로 돌아가기';
