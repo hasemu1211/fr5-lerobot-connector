@@ -737,7 +737,11 @@ async function readViewResponse(response) {
     } catch (_error) { /* HTTP status remains useful even with a non-JSON error body. */ }
     throw error;
   }
-  return validateView(await response.json());
+  const body = await response.text().catch((error) => {
+    error.bodyReadFailed = true;
+    throw error;
+  });
+  return validateView(JSON.parse(body));
 }
 
 function canIntent(op) {
@@ -821,7 +825,7 @@ function failViewRequest(error, stage = "connection") {
     : detail.startsWith("UNKNOWN_VIEW_ENUM") || stale ? "VIEW_STALE"
       : detail === "VIEW_REVISION_ROLLBACK" ? detail
         : detail.startsWith("HTTP_") ? "VIEW_HTTP_ERROR"
-          : stage === "connection" || error.name === "TimeoutError" ? "BRIDGE_UNAVAILABLE" : "VIEW_RESPONSE_INVALID";
+          : stage === "connection" || error.bodyReadFailed || error.name === "TimeoutError" ? "BRIDGE_UNAVAILABLE" : "VIEW_RESPONSE_INVALID";
   failClose(code, error.nativeCode ? `${detail}:${error.nativeCode}` : detail,
     code === "BRIDGE_UNAVAILABLE" || /^HTTP_5\d\d$/.test(detail));
 }

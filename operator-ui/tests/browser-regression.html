@@ -74,6 +74,8 @@
     let viewFault;
     let viewReads = 0;
     let hangView = false;
+    let interruptedBodyPath;
+    const bodyResponseStatuses = [];
     let postTransportFailure = false;
     let intentAttempts = 0;
     const heldIntentOps = new Set();
@@ -216,6 +218,11 @@
         if (viewFault) return new Response(viewFault.body, {status: viewFault.status});
       }
       if (networkFailure && path.startsWith("/api/")) throw new TypeError("fixture network down");
+      if (path === interruptedBodyPath) {
+        const response = await nativeFetch("/__test__/interrupted-body", init);
+        bodyResponseStatuses.push(response.status);
+        return response;
+      }
       if (bridgeTokenRejected && path === "/api/view") return new Response(JSON.stringify({schema_version: "data_factory.operator_intent_result.v1", ok: false, code: "BRIDGE_TOKEN", consumed: false}), {status: 403, headers: {"Content-Type": "application/json"}});
       if (path === "/api/view") return new Response(JSON.stringify(await fixtureView()), {status: 200, headers: {"Content-Type": "application/json"}});
       if (path === "/api/view/watch") return new Promise((resolve, reject) => {
@@ -380,6 +387,43 @@
         await waitFor(() => !intentBusy && document.body.dataset.bridge === "ready");
         check(intentAttempts === attemptsBeforeLostResponse + 1 && document.querySelector("#connection-banner").textContent.includes("재전송하지 않았습니다"), "lost intent response resynchronizes from the authoritative view without replay");
         if (new URLSearchParams(location.search).get("only") === "intent-recovery") {
+          document.body.dataset.result = "pass";
+          output.textContent = `${checks.length} checks passed\n${checks.join("\n")}`;
+          return;
+        }
+        if (new URLSearchParams(location.search).get("only") === "body-recovery") {
+          await show("running");
+          const saved = JSON.stringify(currentView);
+          const attempts = intentAttempts;
+          const reads = viewReads;
+          interruptedBodyPath = "/api/view";
+          await loadView();
+          check(bodyResponseStatuses[0] === 200 && viewStale
+            && document.querySelector("#technical-content").textContent.includes("BRIDGE_UNAVAILABLE"), "HTTP200 headers then interrupted native response body is a connection failure");
+          await waitFor(() => recoveryAttempts === 3 && !viewController, 9000);
+          await new Promise((resolve) => setTimeout(resolve, 1100));
+          check(viewReads === reads + 4 && bodyResponseStatuses.length === 4 && bodyResponseStatuses.every((status) => status === 200)
+            && intentAttempts === attempts && JSON.stringify(currentView) === saved && !canImmediateCancel(), "body disconnect makes exactly three GET retries, retains stale CAS and never posts");
+          interruptedBodyPath = undefined;
+          await loadView();
+          check(!viewStale && canImmediateCancel(), "fresh complete body restores canonical state after exhausted retries");
+          stopWatch();
+          interruptedBodyPath = "/api/view/watch";
+          watchView();
+          await waitFor(() => viewStale);
+          check(bodyResponseStatuses.length === 5 && document.querySelector("#technical-content").textContent.includes("BRIDGE_UNAVAILABLE"), "watch body interruption uses the same connection recovery classification");
+          interruptedBodyPath = undefined;
+          await waitFor(() => !viewStale);
+          check(JSON.stringify(currentView) === saved && intentAttempts === attempts, "watch interruption recovers by reading without replaying intents");
+          for (const body of ["not JSON", "{}"]) {
+            viewFault = {status: 200, body};
+            const beforeInvalidRead = viewReads;
+            await loadView();
+            await new Promise((resolve) => setTimeout(resolve, 1100));
+            check(viewStale && !canImmediateCancel() && viewReads === beforeInvalidRead + 1 && intentAttempts === attempts
+              && document.querySelector("#technical-content").textContent.includes("VIEW_RESPONSE_INVALID"), `complete malformed content ${body} stays explicit-only without GET or POST replay`);
+          }
+          viewFault = undefined;
           document.body.dataset.result = "pass";
           output.textContent = `${checks.length} checks passed\n${checks.join("\n")}`;
           return;

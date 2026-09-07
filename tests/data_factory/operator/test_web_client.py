@@ -335,11 +335,23 @@ class CollectionBrowserRecoveryTest(unittest.TestCase):
             def log_message(self, *_args):
                 pass
 
+            def do_GET(self):
+                if self.path == "/__test__/interrupted-body":
+                    self.send_response(200)
+                    self.send_header("Content-Type", "application/json")
+                    self.send_header("Content-Length", "1000")
+                    self.end_headers()
+                    self.wfile.write(b'{"schema_version":')
+                    self.wfile.flush()
+                    self.close_connection = True
+                    return
+                super().do_GET()
+
         server = ThreadingHTTPServer(("127.0.0.1", 0), partial(Handler, directory=str(ui)))
         thread = threading.Thread(target=server.serve_forever)
         thread.start()
         try:
-            for query, minimum in (("?only=state-recovery", 33), ("", 126)):
+            for query, minimum in (("?only=body-recovery", 21), ("?only=state-recovery", 33), ("", 126)):
                 with self.subTest(query=query), tempfile.TemporaryDirectory() as profile:
                     replay = subprocess.run([
                         "/opt/google/chrome/chrome", "--headless=new", "--disable-gpu",
