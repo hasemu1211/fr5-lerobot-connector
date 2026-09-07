@@ -149,6 +149,13 @@ OpenSpec은 지속 가능한 외부 행동 intent, 안정된 경계와 outcome �
 - **WHEN** outcome의 완료 기준을 canonical evidence로 검증한다
 - **THEN** OpenSpec tasks는 해당 결과를 완료하고 evidence owner를 참조하지만 누락된 downstream 학습·실물 효과나 승인을 완료로 간주하지 않는다
 
+#### Scenario: A verified integration checkpoint is ready to publish
+- **WHEN** 독립적으로 통합 가능한 변경을 검토하고 실제 결합된 source cutoff에 필요한 검증을 완료한다
+- **THEN** coordinator는 사용자 변경과 원본을 보존하며 해당 체크포인트를 main에 commit·push하고, 실제 원격 main의 commit이 일치하는지 확인한다
+- **AND** 전체 장기 Goal의 완료까지 공개를 미루지 않되 미검증 변경·비밀·무거운 데이터·run state·로컬 에이전트 도구를 함께 올리거나 원격 이력을 강제로 덮어쓰지 않는다
+- **AND** push 실패나 원격 진전은 Orca에 정확한 commit·검증 범위·미반영 사유를 남겨 해결하며, 독립적인 적격 작업을 멈추지 않는다
+- **AND** source 공개는 실행 중인 프로세스·드라이버의 배포, 실물 검증 또는 데이터·학습 승인을 뜻하지 않는다
+
 ### Requirement: Learning evidence analysis stays separated from authority
 Data Quality Analysis와 Rollout Evidence Analysis는 각자 canonical output을 가져야 한다(SHALL). Recommendation은 두 결과를 읽어 advisory synthesis만 제공해야 하며(MUST), recorder·motion·collection·promotion·training·publication authority를 가져서는 안 된다(MUST NOT).
 
