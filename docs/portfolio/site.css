@@ -129,3 +129,15 @@ header{min-height:100px}.brand{font-size:40px}nav{font-size:14px;gap:34px}
 .recording-video figcaption{display:flex;justify-content:space-between;gap:20px;font-size:12px;color:var(--muted);padding:16px 0;border-bottom:1px solid var(--line)}
 .recorded-example .recorded-connection{margin-top:24px;padding-top:8px;border-top:0}
 .recorded-example .recorded-connection h3{margin-top:0}
+
+.selection-section{border-top:1px solid var(--line);padding:55px 0 65px;scroll-margin-top:80px}
+.selection-explanation{display:grid;grid-template-columns:1.1fr 1fr;gap:65px;margin-top:35px;align-items:start}
+.selection-explanation h3,.selection-next h3{font-size:22px;margin:0 0 18px}
+.selection-explanation p,.selection-next p{font-size:15px;line-height:1.9}
+.selection-case{background:#f4f7f9;padding:28px 30px;border-top:3px solid #68808d}
+.selection-case .kicker{font-size:11px;margin:0 0 15px}.selection-case h3{font-size:20px}
+.selection-case dl{font-size:13px;margin:22px 0}.selection-case dl div{display:flex;justify-content:space-between;gap:25px;border-top:1px solid #d1dde2;padding:12px 0}.selection-case dd{margin:0;text-align:right;font-weight:600}
+.selection-case a,.selection-next a{font-size:13px;color:var(--accent)}
+.selection-next{margin-top:35px;border-top:1px solid var(--line);padding-top:25px}.selection-next p{max-width:60em}
+
+.normalization-figure{margin:30px 0}.normalization-figure img{display:block;width:100%;height:auto}.normalization-figure figcaption{font-size:12px;line-height:1.85;color:var(--muted);margin-top:18px}

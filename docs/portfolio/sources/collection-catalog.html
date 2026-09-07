@@ -339,4 +339,73 @@ def _uniform_polygon_point(
         (1.0 - radial) * origin[axis]
         + radial * (1.0 - tangent) * left[axis]
         + radial * tangent * right[axis]
-        for axis in range(2)</pre></section></main></body></html>
+        for axis in range(2)</pre></section><section id="grasp-orientation"><h2>물체 회전과 파지 자세</h2><p>물체 yaw로 작업 좌표계의 X·Y축을 회전시키고, 파지 프로필의 datum-to-TCP 변환을 합성한다. TWO_STAGE_ALIGN_V2의 정렬 목표는 최종 파지 목표와 같은 회전 행렬을 사용한다. 그림의 그리퍼 표시는 이 회전 관계를 설명하며 실제 도구의 치수·오프셋은 파지 프로필이 소유한다.</p><h3>tools/fr5_data_factory.py</h3><p class="locator">main 3d98547<br>sha256:1a89d22d1ce31a8cef58f6609bcc3c077c806dccc10ff21bae51d1ab53586e41</p><pre>768: def resolve_place_pose(center_base_m, x_axis_base, y_axis_base, normal_base, yaw_deg, x_mm, y_mm):
+769:     &quot;&quot;&quot;Resolve a local place coordinate into base_link without authorizing motion.&quot;&quot;&quot;
+770:     center = _vec(center_base_m, &quot;PLACE_CALIBRATION_VECTOR&quot;)
+771:     x_axis, y_axis, normal = (_unit(value, &quot;PLACE_CALIBRATION_AXIS&quot;) for value in (x_axis_base, y_axis_base, normal_base))
+772:     if abs(_dot(x_axis, y_axis)) &gt; 1e-9 or abs(_dot(x_axis, normal)) &gt; 1e-9 or abs(_dot(y_axis, normal)) &gt; 1e-9 or _norm(_sub(_cross(x_axis, y_axis), normal)) &gt; 1e-9:
+773:         raise ContractError(&quot;PLACE_CALIBRATION_AXIS&quot;)
+774:     angle = math.radians(_input_number(yaw_deg, &quot;PLACE_COORDINATE&quot;))
+775:     x_col = _add(_mul(x_axis, math.cos(angle)), _mul(y_axis, math.sin(angle)))
+776:     y_col = _add(_mul(x_axis, -math.sin(angle)), _mul(y_axis, math.cos(angle)))
+777:     position = _add(center, _add(_mul(x_col, _input_number(x_mm, &quot;PLACE_COORDINATE&quot;) / 1000), _mul(y_col, _input_number(y_mm, &quot;PLACE_COORDINATE&quot;) / 1000)))
+778:     return {&quot;position_base_m&quot;: position, &quot;rotation_base_columns&quot;: [x_col, y_col, normal]}
+779: </pre><pre>1350:         )
+1351:     datum = {&quot;translation_m&quot;: pose[&quot;position_base_m&quot;], &quot;rotation_columns&quot;: pose[&quot;rotation_base_columns&quot;]}
+1352:     release_datum = {&quot;translation_m&quot;: release_resolved[&quot;position_base_m&quot;], &quot;rotation_columns&quot;: release_resolved[&quot;rotation_base_columns&quot;]}
+1353:     tool_inverse = inverse_rigid_transform(q[&quot;transforms&quot;][&quot;tool_to_tcp&quot;])
+1354:     release_clearance_m = (
+1355:         validated[&quot;grasp_profile&quot;][&quot;grasp_geometry&quot;][
+1356:             &quot;release_clearance_mm&quot;
+1357:         ] / 1000.0
+1358:         if validated[&quot;grasp_profile&quot;].get(&quot;schema_version&quot;)
+1359:         == &quot;data_factory.grasp_profile.v3&quot;
+1360:         else 0.0
+1361:     )
+1362:     def target(frame, offset):
+1363:         tcp = compose_rigid_transform(frame, q[&quot;transforms&quot;][&quot;datum_to_tcp_grasp&quot;])
+1364:         shifted = {&quot;translation_m&quot;: _add(tcp[&quot;translation_m&quot;], _mul(frame[&quot;rotation_columns&quot;][2], offset)), &quot;rotation_columns&quot;: tcp[&quot;rotation_columns&quot;]}
+1365:         return {&quot;base_tcp&quot;: shifted, &quot;base_tool&quot;: compose_rigid_transform(shifted, tool_inverse)}
+1366:     offsets = {
+1367:         &quot;PREGRASP_PTP&quot;: (datum, q[&quot;offsets&quot;][&quot;pregrasp&quot;]),
+1368:         &quot;APPROACH_STOP_LIN&quot;: (datum, q[&quot;offsets&quot;][&quot;approach_stop&quot;]),
+1369:         &quot;FINAL_APPROACH_LIN&quot;: (datum, 0),
+1370:         &quot;LIFT_LIN&quot;: (datum, q[&quot;offsets&quot;][&quot;lift&quot;]),</pre><h3>tools/data_factory/motion/trajectory_variants.py</h3><p class="locator">main 3d98547<br>sha256:04aa3f6e98fb3597550356f557f7a2d11557dfd55b81d0208ec8fc6fc283a92a</p><pre>504:     pregrasp: Mapping[str, Any], endpoint: Mapping[str, Any], *,
+505:     clearance_m: float, offset_x_m: float, offset_y_m: float,
+506:     target_yaw_deg: float,
+507: ) -&gt; tuple[dict[str, Any], dict[str, Any]]:
+508:     axis = _unit_axis(pregrasp[&quot;base_tcp&quot;], endpoint[&quot;base_tcp&quot;])
+509:     final_tcp = endpoint[&quot;base_tcp&quot;]
+510:     canonical_rotation = [
+511:         _rotate(list(column), axis, math.radians(-target_yaw_deg))
+512:         for column in final_tcp[&quot;rotation_columns&quot;]
+513:     ]
+514:     align_translation = [
+515:         float(value) + axis[index] * clearance_m
+516:         for index, value in enumerate(final_tcp[&quot;translation_m&quot;])
+517:     ]
+518:     object_x, object_y = _planar_axes(
+519:         axis, final_tcp[&quot;rotation_columns&quot;],
+520:     )
+521:     view_translation = [
+522:         align_translation[index]
+523:         + object_x[index] * offset_x_m
+524:         + object_y[index] * offset_y_m
+525:         for index in range(3)
+526:     ]
+527:     view_tcp = {
+528:         &quot;translation_m&quot;: view_translation,
+529:         &quot;rotation_columns&quot;: canonical_rotation,
+530:     }
+531:     align_tcp = {</pre><h3>tests/data_factory/test_trajectory_variants.py</h3><p class="locator">main 3d98547<br>sha256:160b38f6417a1366d6ee1fa8ed3cd3b152a1bb81f275bfb8e2d33d84327cc8ea</p><pre>368:             view[&quot;target&quot;][&quot;base_tcp&quot;][&quot;translation_m&quot;][index]
+369:             - align[&quot;target&quot;][&quot;base_tcp&quot;][&quot;translation_m&quot;][index]
+370:             for index in range(3)
+371:         ]
+372:         self.assertAlmostEqual(sum(
+373:             left * right for left, right in zip(axis, offset)
+374:         ), 0.0)
+375:         self.assertEqual(
+376:             align[&quot;target&quot;][&quot;base_tcp&quot;][&quot;rotation_columns&quot;],
+377:             descend[&quot;target&quot;][&quot;base_tcp&quot;][&quot;rotation_columns&quot;],
+378:         )
+379: </pre></section></main><script src="../source-return.js"></script></body></html>

@@ -14,6 +14,17 @@ function updateSourceReturn() {
     back.textContent = '← 폐루프 설명으로 돌아가기';
     return;
   }
+  if (back && architectureView === 'workspace') {
+    const yaw = new URLSearchParams(location.search).get('yaw');
+    back.href = `../collection.html?yaw=${['0','45','90'].includes(yaw) ? yaw : '0'}#workspace`;
+    back.textContent = '← 배치·파지 설명으로 돌아가기';
+    return;
+  }
+  if (back && architectureView === 'selection') {
+    back.href = '../data.html#selection';
+    back.textContent = '← 학습 데이터 선별로 돌아가기';
+    return;
+  }
   const connection = new URLSearchParams(location.search).get('connection');
   if (back && ['collection', 'selection', 'inspection', 'training'].includes(connection)) {
     back.href = `../architecture.html#handoff-${connection}`;
