@@ -26,10 +26,10 @@ if __package__ in {None, ""}:
     sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from tools.data_factory import training_approval as approval
-from tools.data_factory.training_receipts import compile_launch_receipt
+from tools.data_factory.training_receipts import compile_launch_receipt, launch_receipt_digest
 from tools.data_factory.training_split import compile_launch_split
 from tools.fr5_data_factory import ContractError, TASK_CONTRACTS, canonical_digest, load_json_strict
-from tools.fr5_training_profile import instruction_task, launch_feature_contract, read_metadata
+from tools.fr5_training_profile import build_profile, instruction_task, launch_feature_contract, policy_metadata, read_metadata
 
 
 def options(argv: list[str]) -> dict[str, str]:
@@ -170,6 +170,7 @@ def _delegated_training(split: dict, receipt: dict) -> bool:
     return approval.inventory_local_training_delegation(inventory) is not None
 
 
+@approval._mapped_read()
 def prepare_launch(*, dataset: Path, repo_id: str, inventory: Path,
                    profile: str, collection_profile: str, argv: list[str]) -> tuple[dict, dict]:
     from importlib.metadata import version
@@ -180,7 +181,8 @@ def prepare_launch(*, dataset: Path, repo_id: str, inventory: Path,
     if config.get("--job.target", "local") != "local" or any(key.startswith("--env.") for key in config):
         raise ContractError("TRAINING_LOCAL_OFFLINE_ONLY")
     # Streaming, renamed roots, alternate episode order and resume are separate contracts.
-    if (config.get("--dataset.root") != str(dataset)
+    if (not config.get("--dataset.root")
+            or Path(config["--dataset.root"]).expanduser().resolve() != dataset.expanduser().resolve()
             or config.get("--dataset.repo_id") != repo_id
             or config.get("--dataset.streaming", "false") != "false"
             or "--config_path" in config or "--resume" in config):
@@ -202,9 +204,15 @@ def prepare_launch(*, dataset: Path, repo_id: str, inventory: Path,
     if len(tasks) != 1 or (profile != "smolvla" and len({tuple(metadata["episode_tasks"][i]) for i in selected}) != 1):
         raise ContractError("TRAINING_MIXED_TASK_SCOPE")
     feature = launch_feature_contract(profile, collection_profile, tasks.pop(), metadata)
+    mapped = {}
     for episode in approved["episodes"]:
         provenance = load_json_strict(Path(episode["episode_provenance"]["artifact_path"]))
-        if provenance["schema_version"] == approval.DERIVED_PROVENANCE_SCHEMA:
+        if provenance["schema_version"] == approval.MAPPED_PROVENANCE_SCHEMA:
+            reference = provenance["mapping"]
+            key = canonical_digest(reference)
+            if key not in mapped:
+                mapped[key] = approval._mapped_publication(reference)
+        if provenance["schema_version"] in {approval.DERIVED_PROVENANCE_SCHEMA, approval.MAPPED_PROVENANCE_SCHEMA}:
             provenance = provenance["parent"]["provenance"]
         if provenance["schema_version"] == approval.LEDGER_PROVENANCE_SCHEMA:
             ledger = load_json_strict(Path(provenance["episode_ledger"]["artifact_path"]))
@@ -216,11 +224,34 @@ def prepare_launch(*, dataset: Path, repo_id: str, inventory: Path,
                 # The receipt compiler validates and binds the exact local parent.
                 continue
             raise ContractError("TRAINING_POLICY_FEATURE_BINDING")
+    evaluation_cohort = None
+    if "--fr5.evaluation_cohort" in config:
+        from tools.data_factory.training_split import source_episode_identity
+        path = Path(config["--fr5.evaluation_cohort"]).expanduser().resolve()
+        evaluation_cohort = {"path": str(path), "cohort": revalidate_evaluation_cohort(path),
+                             "origins": {str(e["episode_index"]): source_episode_identity(
+                                 load_json_strict(Path(e["episode_provenance"]["artifact_path"])))
+                                 for e in approved["episodes"]}}
     split = compile_launch_split(
         inventory=approved, metadata=metadata, selected=selected,
         fraction=float(config["--dataset.eval_split"]), feature_contract=feature,
+        evaluation_cohort=evaluation_cohort,
     )
+    for publication in mapped.values():
+        cohort = publication["evaluation_cohort"]
+        if (publication["dataset_identity"] != split["dataset_identity"]
+                or [e["episode_index"] for e in publication["episodes"]] != split["selected_episodes"]
+                or (evaluation_cohort is None and cohort["eval_fraction"] != split["eval_split"])
+                or cohort["train_episodes"] != split["train_episodes"]
+                or cohort["eval_episodes"] != split["eval_episodes"]):
+            raise ContractError("TRAINING_MAPPING_EVALUATION_COHORT")
     receipt = compile_launch_receipt(split, argv, str(inventory))
+    # Validate and persist the single saved observation-view binding before any
+    # trainer construction.  Curator remains the producer of derived evidence;
+    # this call only consumes it and records the exact raw/baked representation.
+    from tools.validate_training_checkpoint import validate_saved_observation_view
+    receipt["observation_view"] = validate_saved_observation_view(split, receipt)
+    receipt["receipt_digest"] = launch_receipt_digest(receipt)
     if "initialization" in receipt:
         parent_output = Path(receipt["initialization"]["checkpoint"]).parents[2]
         if Path(config["--output_dir"]).resolve().is_relative_to(parent_output):
@@ -266,8 +297,214 @@ def launch(*, dataset: Path, repo_id: str, inventory: Path, profile: str,
                 if target.exists() or target.is_symlink():
                     raise ContractError("TRAINING_OUTPUT_EXISTS", str(target))
                 path.rename(target)
-            else:
-                path.unlink()
+            # If the trainer never created its directory, retain the pending
+            # receipt as interruption evidence; a retry must not start again.
+
+
+def _latest_checkpoint(output: Path) -> Path | None:
+    candidates = sorted(output.glob("checkpoints/*/pretrained_model"))
+    return candidates[-1] if candidates else None
+
+
+def _native_checkpoint_evaluation(*, checkpoint: Path, dataset: Path, repo_id: str,
+                                  inventory: Path, output: Path, split: dict) -> dict:
+    """Use the existing validator and offline evaluator as one read-only consumer."""
+    from tools.validate_training_checkpoint import validate_checkpoint
+    policy, _ = validate_checkpoint(checkpoint)
+    from tools.evaluate_smolvla_offline import admit_evaluation, evaluate
+    args = argparse.Namespace(
+        checkpoint=str(policy), dataset=dataset, repo_id=repo_id,
+        approved_inventory=inventory, episodes=",".join(map(str, split["eval_episodes"])),
+        batch_size=1, num_workers=0, max_batches=0, device="auto", use_amp=False,
+        seed=1000, metric="flow-loss", output=None,
+    )
+    admission = admit_evaluation(args)
+    report = evaluate(args, admission)
+    return {"checkpoint": str(policy), "evaluation": report}
+
+
+def _request_argv(request: dict, *, dataset: Path, repo_id: str, profile: str,
+                  collection_profile: str, output: Path, steps: int, batch_size: int,
+                  eval_split: float, eval_steps: int, save_freq: int) -> list[str]:
+    """Build the managed native launch command from the immutable request."""
+    metadata = policy_metadata(read_metadata(dataset))
+    argv = ["lerobot-train", *build_profile(profile, metadata),
+            f"--dataset.root={dataset}", f"--dataset.repo_id={repo_id}",
+            f"--dataset.episodes={[entry['episode_index'] for entry in request['episodes']]}",
+            f"--dataset.eval_split={eval_split}", f"--output_dir={output}",
+            f"--batch_size={batch_size}", f"--steps={steps}",
+            f"--eval_steps={eval_steps}", f"--save_freq={save_freq}",
+            "--save_checkpoint=true", "--policy.push_to_hub=false",
+            "--save_checkpoint_to_hub=false", "--wandb.enable=false",
+            "--job.target=local", "--dataset.streaming=false", "--dataset.repo_type=dataset"]
+    # Keep task and collection binding in prepare_launch; this only builds recipe flags.
+    _ = collection_profile
+    return argv
+
+
+def launch_delegated_request(
+    request: dict, *, approval_output: Path, authorized_actor: str,
+    delegation_path: Path, profile: str, collection_profile: str,
+    argv: list[str] | None = None, runner=None, checkpoint_validator=None,
+    evaluator=None,
+) -> dict:
+    """Consume one Curator request through standing delegation and native launch.
+
+    Existing authority and training outputs are recovery evidence: they are
+    revalidated and reported without issuing or running a duplicate attempt.
+    An incomplete authority directory fails closed so an interrupted publish is
+    never mistaken for a usable inventory.
+    """
+    # The native offline evaluator currently consumes SmolVLA artifacts only.
+    # Reject an unsupported profile before authority recovery/publication or
+    # trainer construction, including dependency-injected calls.
+    if profile != "smolvla":
+        raise ContractError("TRAINING_EVALUATOR_UNSUPPORTED")
+    request = copy.deepcopy(request)
+    dataset = approval.current_dataset_identity(
+        request["dataset_root"], repo_id=request["repo_id"], dataset_id=request["dataset_id"],
+    )
+    approval_output = approval_output.resolve()
+    inventory_path = approval_output / "training_approved.json"
+    if inventory_path.is_file():
+        inventory = approval.validate_current_training_inventory(
+            inventory_path, dataset_root=dataset["dataset_root"],
+            repo_id=dataset["repo_id"],
+            selected_episodes=[episode["episode_index"] for episode in request["episodes"]],
+        )
+        current = approval.inventory_local_training_delegation(inventory)
+        if current is None:
+            raise ContractError("TRAINING_DELEGATION_REQUIRED")
+        delegation, _ = _delegation_reference(
+            delegation_path, actor=authorized_actor, dataset=dataset,
+        )
+        if current != delegation:
+            raise ContractError("TRAINING_INPUT_CHANGED")
+    else:
+        if not approval_output.is_dir() or any(approval_output.iterdir()):
+            raise ContractError("TRAINING_AUTHORIZATION_RECOVERY_INCOMPLETE")
+        inventory = delegate_training_batch(
+            request, approval_output, authorized_actor, delegation_path,
+        )
+
+    if argv is None:
+        raise ContractError("TRAINING_RECIPE_REQUIRED")
+    config = options(argv[1:])
+    output = Path(config["--output_dir"]).expanduser().resolve()
+    pending = [Path(str(output) + f".{name}.pending")
+               for name in ("fr5_training_split.json", "fr5_training_receipt.json")]
+    active_pending = [path for path in pending if path.exists() or path.is_symlink()]
+    if active_pending:
+        raise ContractError("TRAINING_OUTPUT_PENDING")
+    if output.exists() or output.is_symlink():
+        manifests = []
+        for name in ("fr5_training_split.json", "fr5_training_receipt.json"):
+            path = output / name
+            if not path.is_file():
+                raise ContractError("TRAINING_OUTPUT_RECOVERY_UNVERIFIED")
+            manifests.append(load_json_strict(path))
+        expected_split, expected_receipt = prepare_launch(
+            dataset=Path(dataset["dataset_root"]), repo_id=dataset["repo_id"],
+            inventory=inventory_path, profile=profile,
+            collection_profile=collection_profile, argv=argv,
+        )
+        if manifests != [expected_split, expected_receipt]:
+            raise ContractError("TRAINING_OUTPUT_RECOVERY_MISMATCH")
+        checkpoint = _latest_checkpoint(output)
+        if checkpoint is None:
+            return {
+            "status": "EXISTING_OUTPUT",
+            "training_started": False,
+            "inventory_path": str(inventory_path),
+            "training_output": str(output),
+            "next_consumer": "validate_checkpoint_then_offline_evaluate",
+            }
+        validator = checkpoint_validator or __import__("tools.validate_training_checkpoint", fromlist=["validate_checkpoint"]).validate_checkpoint
+        validator(checkpoint)
+        result = (evaluator or _native_checkpoint_evaluation)(
+            checkpoint=checkpoint, dataset=Path(dataset["dataset_root"]), repo_id=request["repo_id"],
+            inventory=inventory_path, output=output, split=load_json_strict(output / "fr5_training_split.json"),
+        ) if evaluator is None else evaluator(checkpoint, Path(dataset["dataset_root"]), request["repo_id"], inventory_path, output)
+        return {"status": "EVALUATED_EXISTING_OUTPUT", "training_started": False,
+                "inventory_path": str(inventory_path), "training_output": str(output),
+                "checkpoint": str(checkpoint), "evaluation": result,
+                "next_consumer": "offline_evaluation_report"}
+    returncode = launch(
+        dataset=Path(dataset["dataset_root"]), repo_id=dataset["repo_id"],
+        inventory=inventory_path, profile=profile,
+        collection_profile=collection_profile, argv=argv, runner=runner,
+    )
+    checkpoint = _latest_checkpoint(output)
+    if returncode != 0:
+        return {"status": "TRAINING_FAILED", "training_started": True, "returncode": returncode,
+                "inventory_path": str(inventory_path), "training_output": str(output),
+                "next_consumer": "inspect_trainer_failure"}
+    if checkpoint is None:
+        return {"status": "TRAINING_RETURNED_NO_CHECKPOINT", "training_started": True,
+                "returncode": returncode, "inventory_path": str(inventory_path),
+                "training_output": str(output), "next_consumer": "checkpoint_validation"}
+    validator = checkpoint_validator or __import__("tools.validate_training_checkpoint", fromlist=["validate_checkpoint"]).validate_checkpoint
+    validator(checkpoint)
+    result = (evaluator or _native_checkpoint_evaluation)(
+        checkpoint=checkpoint, dataset=Path(dataset["dataset_root"]), repo_id=request["repo_id"],
+        inventory=inventory_path, output=output, split=load_json_strict(output / "fr5_training_split.json"),
+    ) if evaluator is None else evaluator(checkpoint, Path(dataset["dataset_root"]), request["repo_id"], inventory_path, output)
+    return {
+        "status": "EVALUATED_CHECKPOINT",
+        "training_started": True,
+        "returncode": returncode,
+        "inventory_path": str(inventory_path),
+        "training_output": str(output),
+        "checkpoint": str(checkpoint), "evaluation": result,
+        "next_consumer": "offline_evaluation_report",
+    }
+
+
+def run_delegated_request(request: dict, *, approval_output: Path,
+                          authorized_actor: str, delegation_path: Path,
+                          profile: str, collection_profile: str,
+                          output: Path, steps: int, batch_size: int,
+                          eval_split: float, eval_steps: int, save_freq: int,
+                          runner=None, checkpoint_validator=None,
+                          evaluator=None, evaluation_cohort: Path | None = None) -> dict:
+    """Supported product entrypoint: request plus bounded recipe, no raw argv."""
+    if profile != "smolvla":
+        raise ContractError("TRAINING_EVALUATOR_UNSUPPORTED")
+    request = copy.deepcopy(request)
+    dataset = Path(request["dataset_root"]).expanduser().resolve()
+    argv = _request_argv(
+        request, dataset=dataset, repo_id=request["repo_id"], profile=profile,
+        collection_profile=collection_profile, output=output.expanduser().resolve(),
+        steps=steps, batch_size=batch_size, eval_split=eval_split,
+        eval_steps=eval_steps, save_freq=save_freq,
+    )
+    if evaluation_cohort is not None:
+        argv.append(f"--fr5.evaluation_cohort={evaluation_cohort.expanduser().resolve()}")
+    return launch_delegated_request(
+        request, approval_output=approval_output, authorized_actor=authorized_actor,
+        delegation_path=delegation_path, profile=profile,
+        collection_profile=collection_profile, argv=argv, runner=runner,
+        checkpoint_validator=checkpoint_validator, evaluator=evaluator,
+    )
+
+
+def _explicit_cohort_datasets(cfg, split):
+    """Use installed native constructors with the admitted explicit partitions."""
+    from lerobot.datasets.factory import LeRobotDataset, LeRobotDatasetMetadata, resolve_delta_timestamps, ImageTransforms
+    from tools.data_factory.training_split import validate_training_split
+    validate_training_split(split)
+    binding = split["evaluation_cohort"]
+    if revalidate_evaluation_cohort(Path(binding["path"])) != binding["cohort"]:
+        raise ContractError("COHORT_SOURCE_CHANGED")
+    metadata = LeRobotDatasetMetadata(cfg.dataset.repo_id, root=cfg.dataset.root, revision=cfg.dataset.revision)
+    delta = resolve_delta_timestamps(cfg.trainable_config, metadata)
+    transform = ImageTransforms(cfg.dataset.image_transforms) if cfg.dataset.image_transforms.enable else None
+    return tuple(LeRobotDataset(
+        cfg.dataset.repo_id, root=cfg.dataset.root, episodes=split[group],
+        delta_timestamps=delta, image_transforms=transform if group == "train_episodes" else None,
+        revision=cfg.dataset.revision, video_backend=cfg.dataset.video_backend,
+        return_uint8=True, tolerance_s=cfg.tolerance_s,
+    ) for group in ("train_episodes", "eval_episodes"))
 
 
 def run_native_training(argv: list[str], split: dict, receipt: dict) -> int:
@@ -297,13 +534,16 @@ def _run_native_training(argv: list[str], split: dict, receipt: dict) -> int:
             if (str(cfg.policy.pretrained_path) != parent
                     or warm_start_binding(Path(parent), split, receipt["normalization"]) != receipt["initialization"]):
                 raise ContractError("TRAINING_RUNTIME_WARM_START")
-        if (str(dataset.root) != split["dataset_identity"]["dataset_root"]
+        if (Path(dataset.root).expanduser().resolve() != Path(split["dataset_identity"]["dataset_root"]).expanduser().resolve()
                 or dataset.repo_id != split["repo_id"]
                 or (dataset.episodes or list(range(split["total_episodes"]))) != split["selected_episodes"]
                 or dataset.eval_split != split["eval_split"] or dataset.streaming
                 or dataset.use_imagenet_stats != receipt["normalization"]["use_imagenet_stats"]):
             raise ContractError("TRAINING_RUNTIME_DATASET")
-        train, heldout = original_factory(cfg)
+        if "evaluation_cohort" in split:
+            train, heldout = _explicit_cohort_datasets(cfg, split)
+        else:
+            train, heldout = original_factory(cfg)
         for actual, expected in ((train, split["train_episodes"]), (heldout, split["eval_episodes"])):
             if actual is None or actual.episodes != expected:
                 raise ContractError("TRAINING_RUNTIME_SPLIT")
@@ -321,7 +561,10 @@ def _run_native_training(argv: list[str], split: dict, receipt: dict) -> int:
         return policy
 
     try:
-        sys.argv = list(argv)
+        # FR5 connector-only binding is persisted in the receipt, not passed to LeRobot.
+        native_options = options(argv[1:])
+        native_options.pop("--fr5.evaluation_cohort", None)
+        sys.argv = [argv[0], *[f"{key}={value}" for key, value in native_options.items()]]
         lerobot_train.make_train_eval_datasets = admitted_datasets
         if "initialization" in receipt:
             lerobot_train.make_policy = admitted_policy
@@ -373,6 +616,8 @@ def prepare_approvals(request: dict, output: Path, approved_by: str) -> tuple[di
 
 
 def _prepare_approvals(request: dict, output: Path, approved_by: str, *, check_targets: bool) -> tuple[dict, list[dict]]:
+    if "mapping" in request:
+        return approval.prepare_mapped_approvals(request, output, approved_by, check_targets=check_targets)
     fields = {"dataset_root", "dataset_id", "repo_id", "episodes"}
     approval._exact(request, frozenset(fields | ({"derivation"} if "derivation" in request else set())), "TRAINING_PREAPPROVAL_FIELDS")
     dataset = approval.current_dataset_identity(request["dataset_root"], repo_id=request["repo_id"], dataset_id=request["dataset_id"])
@@ -466,12 +711,17 @@ def _batch_summary(dataset: dict, drafts: list[dict], batch_digest: str, output:
             f"  [{args['episode_index']}] {args['episode_id']} — technical PASS; " + (
                 "parent semantic PASS only; child semantic NOT_ASSERTED; bounded Curator visual publication"
                 if draft["provenance"]["schema_version"] == approval.DERIVED_PROVENANCE_SCHEMA
+                else "parent semantic PASS only; child semantic NOT_ASSERTED; lossless dataset mapping"
+                if draft["provenance"]["schema_version"] == approval.MAPPED_PROVENANCE_SCHEMA
                 else f"semantic PASS by {draft['reviewer_id']}"),
             f"    Content: {args['episode_content_digest']}",
             f"    Technical: {args['technical_validator_digest']} ({args['technical_validator_path']})",
             f"    Semantic: {args['human_semantic_evidence_digest']} ({args['human_semantic_evidence_path']})",
             f"    Provenance: {args['episode_provenance_digest']} ({draft['provenance']['schema_version']})",
         ])
+        if draft["provenance"]["schema_version"] == approval.MAPPED_PROVENANCE_SCHEMA:
+            source = draft["provenance"]["parent"]
+            lines.append(f"    Source: {source['dataset_identity']['dataset_id']} episode {source['provenance']['episode_index']}; mapping {draft['provenance']['mapping']}")
     lines.extend([
         f"Exact batch binding: {batch_digest}",
         f"New inventory: {output / 'training_approved.json'}",
@@ -501,18 +751,24 @@ class PreparedApprovalBatch:
             "episodes": [{"episode_id": draft["approval_arguments"]["episode_id"],
                           "episode_index": draft["approval_arguments"]["episode_index"],
                           "technical_status": "PASS", "semantic_status": (
-                              "NOT_ASSERTED" if draft["provenance"]["schema_version"] == approval.DERIVED_PROVENANCE_SCHEMA else "PASS"),
+                              "NOT_ASSERTED" if draft["provenance"]["schema_version"] in {approval.DERIVED_PROVENANCE_SCHEMA, approval.MAPPED_PROVENANCE_SCHEMA} else "PASS"),
                           "reviewer_id": draft["reviewer_id"],
                           **({"parent_semantic_status": "PASS",
                               "parent_dataset_identity": draft["provenance"]["parent"]["dataset_identity"],
                               "curator_review": draft["provenance"]["curator_review"]}
-                             if draft["provenance"]["schema_version"] == approval.DERIVED_PROVENANCE_SCHEMA else {})} for draft in value["drafts"]],
+                             if draft["provenance"]["schema_version"] == approval.DERIVED_PROVENANCE_SCHEMA else {}),
+                          **({"parent_semantic_status": "PASS",
+                              "parent_dataset_identity": draft["provenance"]["parent"]["dataset_identity"],
+                              "source_episode_index": draft["provenance"]["parent"]["provenance"]["episode_index"],
+                              "mapping": draft["provenance"]["mapping"]}
+                             if draft["provenance"]["schema_version"] == approval.MAPPED_PROVENANCE_SCHEMA else {})} for draft in value["drafts"]],
             "batch_digest": value["batch_digest"], "starts_training": False,
             "limitations": ["Approves only this exact frozen batch for training admission.",
                             "Does not establish learning performance or authorize robot execution."],
         }
 
 
+@approval._mapped_read()
 def _approval_documents(drafts: list[dict], reviewed_at: datetime) -> list[dict]:
     return [approval._prepare_training_approval(
         **{**draft["approval_arguments"], "episode_provenance_path": draft["provenance"]},
@@ -545,6 +801,7 @@ def _delegation_output(delegation: dict, output: Path, dataset: dict) -> None:
         raise ContractError("TRAINING_DELEGATION_OUTPUT")
 
 
+@approval._mapped_read()
 def _delegated_documents(
     drafts: list[dict], *, actor: str, authorized_at: datetime,
     delegation_reference: dict,
@@ -709,7 +966,7 @@ def _publish_authorization_batch(
                 "episode_id": args["episode_id"], "episode_index": args["episode_index"],
                 "episode_content_digest": args["episode_content_digest"],
                 "technical_validator": {"artifact_path": args["technical_validator_path"], "artifact_digest": args["technical_validator_digest"], "status": "PASS"},
-                "human_semantic_evidence": {"artifact_path": args["human_semantic_evidence_path"], "artifact_digest": args["human_semantic_evidence_digest"], "status": ("PARENT_PASS" if draft["provenance"]["schema_version"] == approval.DERIVED_PROVENANCE_SCHEMA else "PASS"), "reviewer_id": draft["reviewer_id"]},
+                "human_semantic_evidence": {"artifact_path": args["human_semantic_evidence_path"], "artifact_digest": args["human_semantic_evidence_digest"], "status": ("PARENT_PASS" if draft["provenance"]["schema_version"] in {approval.DERIVED_PROVENANCE_SCHEMA, approval.MAPPED_PROVENANCE_SCHEMA} else "PASS"), "reviewer_id": draft["reviewer_id"]},
                 "episode_provenance": {"artifact_path": args["episode_provenance_path"], "artifact_digest": args["episode_provenance_digest"]},
                 "training_approval": {"artifact_path": draft["output_path"], "artifact_digest": canonical_digest(document), "provenance": provenance},
             })
@@ -740,9 +997,54 @@ def approve(request: dict, output: Path, approved_by: str, *, dry_run: bool) -> 
     return publish_approval_batch(prepared)
 
 
+def prepare_evaluation_cohort(request_path: Path, *, evidence_directory: Path,
+                              eval_fraction: float) -> dict:
+    """Revalidate canonical selected evidence without publishing any authority."""
+    from tools.data_factory.training_receipts import file_digest
+    from tools.data_factory.training_split import (
+        COHORT_SCHEMA, selected_train_eval, source_episode_identity, validate_evaluation_cohort,
+    )
+    request_path = request_path.resolve()
+    before = file_digest(request_path)
+    request = load_json_strict(request_path)
+    dataset, drafts = _prepare_approvals(
+        request, evidence_directory, "cohort-preview-only", check_targets=False,
+    )
+    metadata = read_metadata(Path(dataset["dataset_root"]))
+    train, evaluation = selected_train_eval(
+        metadata["episode_tasks"], [e["episode_index"] for e in request["episodes"]], eval_fraction,
+    )
+    origins = {d["approval_arguments"]["episode_index"]: source_episode_identity(d["provenance"])
+               for d in drafts}
+    value = dict(schema_version=COHORT_SCHEMA, training_authority=False,
+                 request={"path": str(request_path), "sha256": before}, dataset_identity=dataset,
+                 eval_fraction=eval_fraction, train=[origins[i] for i in train],
+                 eval=[origins[i] for i in evaluation])
+    value["cohort_digest"] = canonical_digest(value)
+    if file_digest(request_path) != before:
+        raise ContractError("COHORT_REQUEST_CHANGED")
+    return validate_evaluation_cohort(value)
+
+
+def revalidate_evaluation_cohort(path: Path) -> dict:
+    """Reopen the frozen source graph; a changed source is not a new cohort."""
+    from tools.data_factory.training_split import validate_evaluation_cohort
+    value = validate_evaluation_cohort(load_json_strict(path))
+    current = prepare_evaluation_cohort(Path(value["request"]["path"]),
+                                        evidence_directory=path.parent,
+                                        eval_fraction=value["eval_fraction"])
+    if current != value:
+        raise ContractError("COHORT_SOURCE_CHANGED")
+    return value
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest="mode", required=True)
+    cohort = sub.add_parser("prepare-cohort", help="Freeze planning-only source evaluation identities; no approval")
+    cohort.add_argument("--request", type=Path, required=True)
+    cohort.add_argument("--output", type=Path, required=True)
+    cohort.add_argument("--eval-fraction", type=float, required=True)
     resume = sub.add_parser("resume", help="Resume an admitted checkpoint with its TRAIN normalization")
     resume.add_argument("--checkpoint", type=Path, required=True)
     human = sub.add_parser("approve", help="Preview a frozen revision; issue approval only through a controlling human TTY",
@@ -779,6 +1081,22 @@ for a new reviewed attempt. This command never starts training or robot executio
     delegated.add_argument("--output-dir", type=Path, required=True)
     delegated.add_argument("--delegation", type=Path, required=True)
     delegated.add_argument("--authorized-actor", required=True)
+    run_delegated = sub.add_parser(
+        "run-delegated", help="Consume a prepared request with a bounded native train/eval recipe",
+    )
+    run_delegated.add_argument("--request", type=Path, required=True)
+    run_delegated.add_argument("--evaluation-cohort", type=Path)
+    run_delegated.add_argument("--approval-output", type=Path, required=True)
+    run_delegated.add_argument("--delegation", type=Path, required=True)
+    run_delegated.add_argument("--authorized-actor", required=True)
+    run_delegated.add_argument("--profile", required=True)
+    run_delegated.add_argument("--collection-profile", required=True)
+    run_delegated.add_argument("--output", type=Path, required=True)
+    run_delegated.add_argument("--steps", type=int, required=True)
+    run_delegated.add_argument("--batch-size", type=int, required=True)
+    run_delegated.add_argument("--eval-split", type=float, required=True)
+    run_delegated.add_argument("--eval-steps", type=int, required=True)
+    run_delegated.add_argument("--save-freq", type=int, required=True)
     for mode in ("check", "launch"):
         command = sub.add_parser(mode)
         command.add_argument("--dataset", type=Path, required=True)
@@ -793,7 +1111,15 @@ for a new reviewed attempt. This command never starts training or robot executio
             command.add_argument("argv", nargs=argparse.REMAINDER)
     args = parser.parse_args()
     try:
-        if args.mode == "resume":
+        if args.mode == "prepare-cohort":
+            value = prepare_evaluation_cohort(args.request, evidence_directory=args.output.parent,
+                                              eval_fraction=args.eval_fraction)
+            if prepare_evaluation_cohort(args.request, evidence_directory=args.output.parent,
+                                         eval_fraction=args.eval_fraction) != value:
+                raise ContractError("COHORT_SOURCE_CHANGED")
+            approval._write_exclusive(args.output, value, "COHORT_OUTPUT_EXISTS")
+            print(json.dumps(value, indent=2, sort_keys=True))
+        elif args.mode == "resume":
             raise SystemExit(resume_training(args.checkpoint))
         elif args.mode == "approve":
             print(json.dumps(approve(load_json_strict(args.request), args.output_dir.resolve(), args.approved_by, dry_run=args.dry_run), indent=2, sort_keys=True))
@@ -802,6 +1128,18 @@ for a new reviewed attempt. This command never starts training or robot executio
                 load_json_strict(args.request), args.output_dir,
                 args.authorized_actor, args.delegation,
             ), indent=2, sort_keys=True))
+        elif args.mode == "run-delegated":
+            result = run_delegated_request(
+                load_json_strict(args.request), approval_output=args.approval_output,
+                authorized_actor=args.authorized_actor, delegation_path=args.delegation,
+                profile=args.profile, collection_profile=args.collection_profile,
+                output=args.output, steps=args.steps, batch_size=args.batch_size,
+                eval_split=args.eval_split, eval_steps=args.eval_steps,
+                save_freq=args.save_freq, evaluation_cohort=args.evaluation_cohort,
+            )
+            print(json.dumps(result, indent=2, sort_keys=True))
+            if result["status"] in {"TRAINING_FAILED", "TRAINING_RETURNED_NO_CHECKPOINT", "EXISTING_OUTPUT"}:
+                raise SystemExit(1)
         elif args.mode == "check":
             check_inventory(args.dataset, args.repo_id, args.approved_inventory, args.episodes)
             print("PASS current training-authorized inventory and exact selected episodes")
