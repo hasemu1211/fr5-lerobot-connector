@@ -32,6 +32,11 @@ class DerivedTrainingTest(unittest.TestCase):
         request_path = root / 'source-request.json'
         export_training_request(runs, request_path, dataset_id='parent-r1')
         request = load_json_strict(request_path)
+        published_request = request_path
+        published_bytes = published_request.read_bytes()
+        # Invalid inputs are separate disposable fixtures; the native exported
+        # request stays immutable, just as it does in production.
+        request_path = root / 'invalid-source-request.json'
         paths = replace(application.DEFAULT_PATHS, run_root=root / 'never-runs', output_parent=root / 'never-candidates')
         for update, error in (({'repo_id': 'local/wrong'}, 'TRAINING_LEDGER_DATASET_BINDING'),
                               ({'dataset_root': str(root)}, 'SOURCE_REQUEST_BINDING'),
@@ -61,6 +66,7 @@ class DerivedTrainingTest(unittest.TestCase):
         finally:
             technical_path.write_bytes(original)
         self.assertEqual((snapshot(source), [snapshot(run) for run in runs]), before)
+        self.assertEqual(published_request.read_bytes(), published_bytes)
 
     def native_case(self, *, episodes=3, train_fit=False, source_only=False, repo_id='local/source'):
         fixture = ledger_fixtures.EpisodeLedgerTest()
