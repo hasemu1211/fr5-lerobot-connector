@@ -13,7 +13,7 @@ if (window.FR5_ACTION_COMPARISONS) {
     const comparison = window.FR5_ACTION_COMPARISONS[seed];
     const variants = ['persistence_reference', 'quality3000', 'quality10000'];
     const rows = variants.map(key => episode === 'pooled' ? comparison.summary[key].pooled : comparison.summary[key].per_episode.find(item => item.episode_index === Number(episode)));
-    const label = `Seed ${seed} · ${metric === 'mae_per_axis' ? 'MAE' : 'RMSE'} · ${episode === 'pooled' ? '전체 표본 합산' : `Episode ${episode}`} · ${rows[0].valid_action_steps} 유효 step`;
+    const label = `Seed ${seed} · ${metric === 'mae_per_axis' ? 'MAE' : 'RMSE'} · ${episode === 'pooled' ? '전체 표본 합산' : `길이 ${window.FR5_RECORDING_LABELS[episode]} 시연`} · ${rows[0].valid_action_steps} 유효 step`;
     const results = document.getElementById('action-results');
     const caption = document.getElementById('action-plot-caption');
     results.dataset.loading = 'true'; results.setAttribute('aria-busy', 'true');

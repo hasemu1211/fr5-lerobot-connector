@@ -669,4 +669,199 @@
     25,
     26
   ]
-}</pre></section></main></body></html>
+}</pre></section><section id="model-contract"><h2>모델 입력·학습·추론의 근거</h2><p>LeRobot 구현 발췌: Copyright 2025–2026 The HuggingFace Inc. team. <a href="../assets/licenses/LeRobot-Apache-2.0.txt">Apache License 2.0</a>. 저장 설정은 비교 당시의 checkpoint이며 코드 발췌는 현재 설치 소스의 원리를 설명한다.</p><h3>비교 실험 checkpoint의 저장 설정</h3><p class="locator">outputs/local-learning/smolvla-raw26-quality-10000-r1/checkpoints/010000/pretrained_model/config.json<br>sha256:3a56fd691e52fca1f9910aec655179a0baa3b3fcc7d551d03b9351fd375dfccf</p><p class="note">원본 필드 또는 명시한 구현 구간의 발췌.</p><pre>{
+  &quot;type&quot;: &quot;smolvla&quot;,
+  &quot;n_obs_steps&quot;: 1,
+  &quot;chunk_size&quot;: 50,
+  &quot;n_action_steps&quot;: 50,
+  &quot;num_steps&quot;: 10,
+  &quot;input_features&quot;: {
+    &quot;observation.state&quot;: {
+      &quot;type&quot;: &quot;STATE&quot;,
+      &quot;shape&quot;: [
+        7
+      ]
+    },
+    &quot;observation.images.camera1&quot;: {
+      &quot;type&quot;: &quot;VISUAL&quot;,
+      &quot;shape&quot;: [
+        3,
+        480,
+        640
+      ]
+    },
+    &quot;observation.images.camera2&quot;: {
+      &quot;type&quot;: &quot;VISUAL&quot;,
+      &quot;shape&quot;: [
+        3,
+        480,
+        640
+      ]
+    },
+    &quot;observation.images.camera3&quot;: {
+      &quot;type&quot;: &quot;VISUAL&quot;,
+      &quot;shape&quot;: [
+        3,
+        256,
+        256
+      ]
+    },
+    &quot;observation.images.empty_camera_0&quot;: {
+      &quot;type&quot;: &quot;VISUAL&quot;,
+      &quot;shape&quot;: [
+        3,
+        480,
+        640
+      ]
+    }
+  },
+  &quot;output_features&quot;: {
+    &quot;action&quot;: {
+      &quot;type&quot;: &quot;ACTION&quot;,
+      &quot;shape&quot;: [
+        7
+      ]
+    }
+  },
+  &quot;normalization_mapping&quot;: {
+    &quot;VISUAL&quot;: &quot;IDENTITY&quot;,
+    &quot;STATE&quot;: &quot;MEAN_STD&quot;,
+    &quot;ACTION&quot;: &quot;MEAN_STD&quot;
+  },
+  &quot;empty_cameras&quot;: 1,
+  &quot;resize_imgs_with_padding&quot;: [
+    512,
+    512
+  ],
+  &quot;freeze_vision_encoder&quot;: true,
+  &quot;train_expert_only&quot;: true
+}</pre><h3>설치된 LeRobot의 입력 처리 · 334–380행</h3><p class="locator">installed/lerobot/policies/smolvla/modeling_smolvla.py<br>sha256:37b1d56f37510732a087cf5c32c05cd15d6234201a3f002f108ec4c53438cc7d</p><p class="note">원본 필드 또는 명시한 구현 구간의 발췌.</p><pre>    def prepare_images(self, batch):
+        &quot;&quot;&quot;Apply SmolVLA preprocessing to the images, like resizing to 224x224 and padding to keep aspect ratio, and
+        convert pixel range from [0.0, 1.0] to [-1.0, 1.0] as requested by SigLIP.
+        &quot;&quot;&quot;
+        images = []
+        img_masks = []
+        present_img_keys = [key for key in self.config.image_features if key in batch]
+        missing_img_keys = [key for key in self.config.image_features if key not in batch]
+
+        if len(present_img_keys) == 0:
+            raise ValueError(
+                f&quot;All image features are missing from the batch. At least one expected. (batch: {batch.keys()}) (image_features:{self.config.image_features})&quot;
+            )
+        # Preprocess image features present in the batch
+        for key in present_img_keys:
+            img = batch[key][:, -1, :, :, :] if batch[key].ndim == 5 else batch[key]
+            if self.config.resize_imgs_with_padding is not None:
+                # SmolVLA stores the target as (width, height); the shared helper expects (height, width).
+                img = resize_with_pad(
+                    img,
+                    self.config.resize_imgs_with_padding[1],
+                    self.config.resize_imgs_with_padding[0],
+                    pad_value=0,
+                )
+
+            # Normalize from range [0,1] to [-1,1] as expacted by siglip
+            img = img * 2.0 - 1.0
+
+            bsize = img.shape[0]
+            device = img.device
+            if f&quot;{key}_padding_mask&quot; in batch:
+                mask = batch[f&quot;{key}_padding_mask&quot;].bool()
+            else:
+                mask = torch.ones(bsize, dtype=torch.bool, device=device)
+            images.append(img)
+            img_masks.append(mask)
+
+        # Create image features not present in the batch
+        # as fully 0 padded images.
+        for num_empty_cameras in range(len(missing_img_keys)):
+            if num_empty_cameras &gt;= self.config.empty_cameras:
+                break
+            img = torch.ones_like(img) * -1
+            mask = torch.zeros_like(mask)
+            images.append(img)
+            img_masks.append(mask)
+        return images, img_masks</pre><h3>설치된 LeRobot의 flow matching · 689–772행</h3><p class="locator">installed/lerobot/policies/smolvla/modeling_smolvla.py<br>sha256:37b1d56f37510732a087cf5c32c05cd15d6234201a3f002f108ec4c53438cc7d</p><p class="note">원본 필드 또는 명시한 구현 구간의 발췌.</p><pre>    def forward(
+        self, images, img_masks, lang_tokens, lang_masks, state, actions, noise=None, time=None
+    ) -&gt; Tensor:
+        &quot;&quot;&quot;Do a full training forward pass and compute the loss (batch_size x num_steps x num_motors)&quot;&quot;&quot;
+        if noise is None:
+            noise = self.sample_noise(actions.shape, actions.device)
+
+        if time is None:
+            time = self.sample_time(actions.shape[0], actions.device)
+
+        time_expanded = time[:, None, None]
+        x_t = time_expanded * noise + (1 - time_expanded) * actions
+        u_t = noise - actions
+        prefix_embs, prefix_pad_masks, prefix_att_masks = self.embed_prefix(
+            images, img_masks, lang_tokens, lang_masks, state=state
+        )
+        suffix_embs, suffix_pad_masks, suffix_att_masks = self.embed_suffix(x_t, time)
+
+        pad_masks = torch.cat([prefix_pad_masks, suffix_pad_masks], dim=1)
+        att_masks = torch.cat([prefix_att_masks, suffix_att_masks], dim=1)
+
+        att_2d_masks = make_att_2d_masks(pad_masks, att_masks)
+        position_ids = torch.cumsum(pad_masks, dim=1) - 1
+        (_, suffix_out), _ = self.vlm_with_expert.forward(
+            attention_mask=att_2d_masks,
+            position_ids=position_ids,
+            past_key_values=None,
+            inputs_embeds=[prefix_embs, suffix_embs],
+            use_cache=False,
+        )
+        suffix_out = suffix_out[:, -self.config.chunk_size :]
+        # Original openpi code, upcast attention output
+        suffix_out = suffix_out.to(dtype=torch.float32)
+        v_t = self.action_out_proj(suffix_out)
+        losses = F.mse_loss(u_t, v_t, reduction=&quot;none&quot;)
+        return losses
+
+    def sample_actions(
+        self,
+        images,
+        img_masks,
+        lang_tokens,
+        lang_masks,
+        state,
+        noise=None,
+        **kwargs: Unpack[ActionSelectKwargs],
+    ) -&gt; Tensor:
+        &quot;&quot;&quot;Do a full inference forward and compute the action (batch_size x num_steps x num_motors)&quot;&quot;&quot;
+        bsize = state.shape[0]
+        device = state.device
+
+        if noise is None:
+            actions_shape = (bsize, self.config.chunk_size, self.config.max_action_dim)
+            noise = self.sample_noise(actions_shape, device)
+
+        prefix_embs, prefix_pad_masks, prefix_att_masks = self.embed_prefix(
+            images, img_masks, lang_tokens, lang_masks, state=state
+        )
+        prefix_att_2d_masks = make_att_2d_masks(prefix_pad_masks, prefix_att_masks)
+        prefix_position_ids = torch.cumsum(prefix_pad_masks, dim=1) - 1
+        # Compute image and language key value cache
+        _, past_key_values = self.vlm_with_expert.forward(
+            attention_mask=prefix_att_2d_masks,
+            position_ids=prefix_position_ids,
+            past_key_values=None,
+            inputs_embeds=[prefix_embs, None],
+            use_cache=self.config.use_cache,
+        )
+        num_steps = self.config.num_steps
+
+        return euler_integrate(
+            lambda input_x_t, current_timestep: self.denoise_step(
+                x_t=input_x_t,
+                prefix_pad_masks=prefix_pad_masks,
+                past_key_values=past_key_values,
+                timestep=current_timestep,
+            ),
+            noise,
+            num_steps,
+            rtc_processor=self.rtc_processor,
+            rtc_enabled=self._rtc_enabled(),
+            inference_delay=kwargs.get(&quot;inference_delay&quot;),
+            prev_chunk_left_over=kwargs.get(&quot;prev_chunk_left_over&quot;),
+            execution_horizon=kwargs.get(&quot;execution_horizon&quot;),</pre></section></main></body></html>

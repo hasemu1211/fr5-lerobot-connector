@@ -2,12 +2,12 @@
 <!DOCTYPE svg PUBLIC "-//W3C//DTD SVG 1.1//EN"
   "http://www.w3.org/Graphics/SVG/1.1/DTD/svg11.dtd">
 <svg xmlns:xlink="http://www.w3.org/1999/xlink" width="748.8pt" height="532.8pt" viewBox="0 0 748.8 532.8" xmlns="http://www.w3.org/2000/svg" version="1.1">
- <title>Seed 0 · MAE · Episode 29 · 150 유효 step</title>
+ <title>Seed 0 · MAE · 길이 31.33초 시연 · 150 유효 step</title>
  <metadata>
   <rdf:RDF xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:cc="http://creativecommons.org/ns#" xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">
    <cc:Work>
     <dc:type rdf:resource="http://purl.org/dc/dcmitype/StillImage"/>
-    <dc:title>Seed 0 · MAE · Episode 29 · 150 유효 step</dc:title>
+    <dc:title>Seed 0 · MAE · 길이 31.33초 시연 · 150 유효 step</dc:title>
     <dc:description>Original owner comparison SHA-256: c50cd43f030dd13d172bd74e42f7faff5540ac614543fe8e1c267e9cc4f4b474. Joint axes share rad scale; gripper uses separate m scale. Saved fixed10 postprocessor comparison, not physical task success.</dc:description>
     <dc:format>image/svg+xml</dc:format>
     <dc:creator>

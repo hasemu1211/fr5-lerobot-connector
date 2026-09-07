@@ -228,4 +228,85 @@
   &quot;reference_image_sha256&quot;: &quot;sha256:19dc527ba96c62d6854368d319ef379269415b9c7f3fe1a2b0478da7089a40e9&quot;,
   &quot;schema_version&quot;: &quot;curator.view_profile.v1&quot;,
   &quot;width&quot;: 640
-}</pre></section></main></body></html>
+}</pre></section><section id="transform-principle"><h2>마스크와 중앙값 배경의 합성</h2><h3>중앙값 배경과 픽셀 합성</h3><p class="locator">tools/data_factory/curator/profile/transform.py<br>sha256:3694f4bc7907eac4426fae86a2817d47eafe7e79fbf2b62191898d3df14f813c</p><p class="note">원본 필드 또는 명시한 구현 구간의 발췌.</p><pre>&quot;&quot;&quot;Pure NumPy up-camera transform shared by offline and runtime paths.&quot;&quot;&quot;
+
+from __future__ import annotations
+
+import hashlib
+from typing import Any, Sequence
+
+import numpy as np
+
+from tools.data_factory.curator.core.errors import CuratorError
+
+
+MAX_BACKGROUND_PLATE_FRAMES = 31
+
+
+def uint8_hwc(
+    value: Any, *, width: int, height: int, code: str = &quot;IMAGE&quot;
+) -&gt; np.ndarray:
+    if hasattr(value, &quot;detach&quot;):
+        value = value.detach().cpu().numpy()
+    image = np.asarray(value)
+    if image.shape == (3, height, width):
+        image = np.moveaxis(image, 0, -1)
+    if image.shape != (height, width, 3) or image.dtype != np.uint8:
+        raise CuratorError(
+            code, f&quot;expected uint8[{height},{width},3], got {image.dtype}{image.shape}&quot;
+        )
+    return np.ascontiguousarray(image)
+
+
+def array_digest(value: np.ndarray) -&gt; str:
+    array = np.ascontiguousarray(value)
+    digest = hashlib.sha256()
+    digest.update(str(array.dtype).encode())
+    digest.update(b&quot;\0&quot;)
+    digest.update(&quot;,&quot;.join(str(item) for item in array.shape).encode())
+    digest.update(b&quot;\0&quot;)
+    digest.update(array.tobytes())
+    return &quot;sha256:&quot; + digest.hexdigest()
+
+
+def make_background_plate(frames: Sequence[np.ndarray]) -&gt; np.ndarray:
+    count = len(frames)
+    if not 1 &lt;= count &lt;= MAX_BACKGROUND_PLATE_FRAMES:
+        raise CuratorError(&quot;PLATE_FRAMES&quot;)
+    shape = frames[0].shape
+    if any(frame.dtype != np.uint8 or frame.shape != shape for frame in frames):
+        raise CuratorError(&quot;PLATE_FRAME_CONTRACT&quot;)
+    if count == 1:
+        return frames[0].copy()
+    stacked = np.stack(frames, axis=0)
+    upper = count // 2
+    if count % 2:
+        stacked.partition(upper, axis=0)
+        return stacked[upper].copy()
+    lower = upper - 1
+    stacked.partition((lower, upper), axis=0)
+    return (
+        (stacked[lower].astype(np.uint16) + stacked[upper].astype(np.uint16)) // 2
+    ).astype(np.uint8)
+
+
+def apply_up_view(
+    raw_up: np.ndarray, keep_mask: np.ndarray, background_plate: np.ndarray
+) -&gt; np.ndarray:
+    &quot;&quot;&quot;Apply the one pure policy-image transform; wrist is absent by design.&quot;&quot;&quot;
+    if (
+        raw_up.dtype != np.uint8
+        or raw_up.ndim != 3
+        or raw_up.shape[-1] != 3
+        or keep_mask.dtype != np.bool_
+        or keep_mask.shape != raw_up.shape[:2]
+        or background_plate.dtype != np.uint8
+        or background_plate.shape != raw_up.shape
+    ):
+        raise CuratorError(&quot;UP_VIEW_INPUT&quot;)
+    return np.where(keep_mask[..., None], raw_up, background_plate).astype(
+        np.uint8, copy=False
+    )
+
+
+__all__ = [</pre></section></main></body></html>

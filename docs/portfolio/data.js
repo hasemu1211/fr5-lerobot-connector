@@ -23,7 +23,7 @@ if (observations) {
     const item = observations.filter(item => item.episode === episode)[moment];
     const study = document.getElementById('observations');
     study.dataset.loading = 'true'; study.setAttribute('aria-busy', 'true');
-    document.getElementById('frame-caption').textContent = `Episode ${episode} · 선택한 두 관측을 읽고 있습니다`;
+    document.getElementById('frame-caption').textContent = `집기 시연 · 선택한 두 관측을 읽고 있습니다`;
     document.getElementById('frame-source').href = `sources/observations.html#ep${episode}-f${item.frame}`;
     document.getElementById('state-values').replaceChildren();
     try {
@@ -43,9 +43,9 @@ if (observations) {
       const image = document.getElementById(`${camera}-image`);
       image.hidden = false;
       image.src = item.images[i];
-      image.alt = `Episode ${episode}, frame ${item.frame}의 카메라 ${i + 1} 저장 관측`;
+      image.alt = `집기 시연 ${item.timestamp.toFixed(3)}초의 카메라 ${i + 1} 관측`;
     });
-    document.getElementById('frame-caption').textContent = `Episode ${episode} · frame ${item.frame} · ${item.timestamp.toFixed(3)} s · ${[10, 50, 90][moment]}% 위치의 표본`;
+    document.getElementById('frame-caption').textContent = `집기 시연 · ${item.timestamp.toFixed(3)}초 · 시연의 ${[10, 50, 90][moment]}% 위치`;
     document.getElementById('frame-source').href = `sources/observations.html#ep${episode}-f${item.frame}`;
     const state = document.getElementById('state-values'); state.replaceChildren();
     item.state.forEach((value, i) => {
@@ -55,7 +55,7 @@ if (observations) {
       cell.append(label, number); state.append(cell);
     });
   }
-  choices('episode-options', 'episode', episodes, episodes.map(String), episode, value => { episode = value; });
+  choices('episode-options', 'episode', episodes, episodes.map(value => window.FR5_RECORDING_LABELS[value]), episode, value => { episode = value; });
   choices('moment-options', 'moment', [0, 1, 2], ['10%', '50%', '90%'], moment, value => { moment = value; });
   render();
 }

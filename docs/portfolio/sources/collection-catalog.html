@@ -195,4 +195,148 @@ def project_direct_poses(
     return [
         copy.deepcopy(conditions[index % len(conditions)])
         for index in range(requested_count)
-    ]</pre></section></main></body></html>
+    ]</pre></section><section id="sampling-principle"><h2>영역 계산과 층화 표본화</h2><h3>각도 구간의 순회 배정 · 465–490행</h3><p class="locator">tools/data_factory/state_space.py<br>sha256:80c491626f25bf6645d426cf2c4080c519ff21a5771f95f957fa8de4b58b454a</p><p class="note">원본 필드 또는 명시한 구현 구간의 발췌.</p><pre>def rotating_balanced_yaw_ranks(
+    spatial_count: int, yaw_strata_count: int, *, sweep_index: int,
+    anchor_cell_index: int, anchor_yaw_rank: int,
+) -&gt; list[int]:
+    &quot;&quot;&quot;Assign every spatial cell to one yaw tier and rotate tiers per sweep.&quot;&quot;&quot;
+    if (
+        type(spatial_count) is not int or spatial_count &lt; 1
+        or type(yaw_strata_count) is not int
+        or not 1 &lt;= yaw_strata_count &lt;= spatial_count
+        or type(sweep_index) is not int or sweep_index &lt; 0
+        or type(anchor_cell_index) is not int
+        or not 0 &lt;= anchor_cell_index &lt; spatial_count
+        or type(anchor_yaw_rank) is not int
+        or not 0 &lt;= anchor_yaw_rank &lt; yaw_strata_count
+    ):
+        raise ContractError(&quot;STATE_SPACE_DESIGN_ASSIGNMENT&quot;)
+    return [
+        (
+            anchor_yaw_rank + cell_index - anchor_cell_index + sweep_index
+        ) % yaw_strata_count
+        for cell_index in range(spatial_count)
+    ]
+
+
+def yaw_cdf_quantile(profile: Mapping[str, Any], yaw_deg: int | float) -&gt; float:
+    &quot;&quot;&quot;Map one canonical yaw to its declared distribution CDF.&quot;&quot;&quot;</pre><h3>물체 footprint에 따른 경계 축소 · 116–176행</h3><p class="locator">tools/data_factory/workspace_geometry.py<br>sha256:3c57f4af3a9ae0a973ca15a38b9933d36ec082c3f72112a10d67cb7206f922f7</p><p class="note">원본 필드 또는 명시한 구현 구간의 발췌.</p><pre>def safe_convex_polygon_for_yaws(
+    *, polygon: Sequence[Sequence[float]],
+    object_size_xy_mm: Sequence[float], uncertainty_mm: float,
+    yaw_degs: Sequence[float],
+) -&gt; list[tuple[float, float]]:
+    &quot;&quot;&quot;Erode a convex zone by the largest support over several object yaws.&quot;&quot;&quot;
+    checked = _convex_polygon(polygon)
+    object_x, object_y = _pair(
+        object_size_xy_mm, &quot;object_size_xy_mm&quot;,
+    )
+    uncertainty = _number(uncertainty_mm, &quot;uncertainty_mm&quot;)
+    if (
+        min(object_x, object_y, uncertainty) &lt; 0
+        or isinstance(yaw_degs, (str, bytes)) or not yaw_degs
+    ):
+        raise ValueError(&quot;safe_polygon&quot;)
+    axes = []
+    for yaw_deg in yaw_degs:
+        angle = math.radians(_number(yaw_deg, &quot;yaw_deg&quot;))
+        axes.append((
+            (math.cos(angle), math.sin(angle)),
+            (-math.sin(angle), math.cos(angle)),
+        ))
+    shifted = []
+    for left, right in zip(checked, checked[1:] + checked[:1]):
+        dx, dy = right[0] - left[0], right[1] - left[1]
+        length = math.hypot(dx, dy)
+        inward = (-dy / length, dx / length)
+        support = max(
+            object_x / 2.0 * abs(
+                inward[0] * axis_x[0] + inward[1] * axis_x[1]
+            )
+            + object_y / 2.0 * abs(
+                inward[0] * axis_y[0] + inward[1] * axis_y[1]
+            )
+            for axis_x, axis_y in axes
+        )
+        support += uncertainty
+        shifted.append((
+            (left[0] + inward[0] * support, left[1] + inward[1] * support),
+            (dx / length, dy / length),
+        ))
+
+    def cross(left, right):
+        return left[0] * right[1] - left[1] * right[0]
+
+    result = []
+    for index, (point, direction) in enumerate(shifted):
+        previous_point, previous_direction = shifted[index - 1]
+        denominator = cross(previous_direction, direction)
+        if abs(denominator) &lt;= 1e-12:
+            raise ValueError(&quot;safe_polygon&quot;)
+        delta = (
+            point[0] - previous_point[0], point[1] - previous_point[1],
+        )
+        distance = cross(delta, direction) / denominator
+        result.append((
+            previous_point[0] + distance * previous_direction[0],
+            previous_point[1] + distance * previous_direction[1],
+        ))
+    return _convex_polygon(result, &quot;safe_polygon&quot;)</pre><h3>다각형 안의 면적 균등 표본화 · 346–405행</h3><p class="locator">tools/data_factory/workspace_geometry.py<br>sha256:3c57f4af3a9ae0a973ca15a38b9933d36ec082c3f72112a10d67cb7206f922f7</p><p class="note">원본 필드 또는 명시한 구현 구간의 발췌.</p><pre>def _polygon_triangles(
+    polygon: Sequence[tuple[float, float]],
+) -&gt; list[tuple[tuple[float, float], tuple[float, float], tuple[float, float], float]]:
+    &quot;&quot;&quot;Triangulate one convex polygon and retain each triangle&#x27;s area.&quot;&quot;&quot;
+    origin = polygon[0]
+    result = []
+    for left, right in zip(polygon[1:-1], polygon[2:]):
+        area = abs(
+            (left[0] - origin[0]) * (right[1] - origin[1])
+            - (left[1] - origin[1]) * (right[0] - origin[0])
+        ) / 2.0
+        if area &gt; 1e-12:
+            result.append((origin, left, right, area))
+    if not result:
+        raise ValueError(&quot;polygon&quot;)
+    return result
+
+
+def _area_centroid(
+    triangles: Sequence[
+        tuple[tuple[float, float], tuple[float, float], tuple[float, float], float]
+    ],
+) -&gt; tuple[float, float]:
+    total = sum(triangle[3] for triangle in triangles)
+    return tuple(
+        sum(
+            (triangle[0][axis] + triangle[1][axis] + triangle[2][axis])
+            / 3.0 * triangle[3]
+            for triangle in triangles
+        ) / total
+        for axis in range(2)
+    )
+
+
+def _uniform_polygon_point(
+    triangles: Sequence[
+        tuple[tuple[float, float], tuple[float, float], tuple[float, float], float]
+    ],
+    *, seed: int, pass_index: int, row: int, column: int,
+) -&gt; tuple[float, float]:
+    &quot;&quot;&quot;Draw one deterministic area-uniform point from a triangulated polygon.&quot;&quot;&quot;
+    total = sum(triangle[3] for triangle in triangles)
+    threshold = _fraction(
+        seed, pass_index, row, column, &quot;triangle&quot;,
+    ) * total
+    cumulative = 0.0
+    selected = triangles[-1]
+    for triangle in triangles:
+        cumulative += triangle[3]
+        if threshold &lt; cumulative:
+            selected = triangle
+            break
+    origin, left, right, _area = selected
+    radial = math.sqrt(_fraction(seed, pass_index, row, column, &quot;radial&quot;))
+    tangent = _fraction(seed, pass_index, row, column, &quot;tangent&quot;)
+    return tuple(
+        (1.0 - radial) * origin[axis]
+        + radial * (1.0 - tangent) * left[axis]
+        + radial * tangent * right[axis]
+        for axis in range(2)</pre></section></main></body></html>
