@@ -212,7 +212,9 @@ def prepare_launch(*, dataset: Path, repo_id: str, inventory: Path,
             key = canonical_digest(reference)
             if key not in mapped:
                 mapped[key] = approval._mapped_publication(reference)
-        if provenance["schema_version"] in {approval.DERIVED_PROVENANCE_SCHEMA, approval.MAPPED_PROVENANCE_SCHEMA}:
+        if provenance["schema_version"] == approval.MAPPED_PROVENANCE_SCHEMA:
+            provenance = provenance["parent"]["provenance"]
+        if provenance["schema_version"] == approval.DERIVED_PROVENANCE_SCHEMA:
             provenance = provenance["parent"]["provenance"]
         if provenance["schema_version"] == approval.LEDGER_PROVENANCE_SCHEMA:
             ledger = load_json_strict(Path(provenance["episode_ledger"]["artifact_path"]))
@@ -628,7 +630,8 @@ def prepare_approvals(request: dict, output: Path, approved_by: str) -> tuple[di
     return _prepare_approvals(request, output, approved_by, check_targets=True)
 
 
-def _prepare_approvals(request: dict, output: Path, approved_by: str, *, check_targets: bool) -> tuple[dict, list[dict]]:
+def _prepare_approvals(request: dict, output: Path, approved_by: str, *, check_targets: bool,
+                       check_parent_freshness: bool = True) -> tuple[dict, list[dict]]:
     if "mapping" in request:
         return approval.prepare_mapped_approvals(request, output, approved_by, check_targets=check_targets)
     fields = {"dataset_root", "dataset_id", "repo_id", "episodes"}
@@ -658,6 +661,7 @@ def _prepare_approvals(request: dict, output: Path, approved_by: str, *, check_t
         for draft in drafts:
             provenance = approval.compile_derived_training_provenance(
                 dataset=dataset, derivation=request["derivation"], parent_draft=draft,
+                check_parent_freshness=check_parent_freshness,
             )
             args = draft["approval_arguments"]
             args.update(dataset_identity=dataset,
@@ -745,6 +749,19 @@ def _batch_summary(dataset: dict, drafts: list[dict], batch_digest: str, output:
     return "\n".join(lines)
 
 
+def _mapped_original_preview(provenance: dict) -> dict:
+    """Expose recorded original review without claiming derivative semantics."""
+    parent = provenance["parent"]["provenance"]
+    if parent["schema_version"] != approval.DERIVED_PROVENANCE_SCHEMA:
+        return {}
+    return {
+        "original_parent_semantic_status": "PASS",
+        "original_parent_dataset_identity": parent["parent"]["dataset_identity"],
+        "original_source_episode_index": parent["parent"]["provenance"]["episode_index"],
+        "curator_review": parent["curator_review"],
+    }
+
+
 @dataclass(frozen=True)
 class PreparedApprovalBatch:
     """Server-held value, never deserialized from browser input or a consent token.
@@ -770,7 +787,9 @@ class PreparedApprovalBatch:
                               "parent_dataset_identity": draft["provenance"]["parent"]["dataset_identity"],
                               "curator_review": draft["provenance"]["curator_review"]}
                              if draft["provenance"]["schema_version"] == approval.DERIVED_PROVENANCE_SCHEMA else {}),
-                          **({"parent_semantic_status": "PASS",
+                          **({"parent_semantic_status": (
+                                  "NOT_ASSERTED" if draft["provenance"]["parent"]["provenance"]["schema_version"] == approval.DERIVED_PROVENANCE_SCHEMA else "PASS"),
+                              **_mapped_original_preview(draft["provenance"]),
                               "parent_dataset_identity": draft["provenance"]["parent"]["dataset_identity"],
                               "source_episode_index": draft["provenance"]["parent"]["provenance"]["episode_index"],
                               "mapping": draft["provenance"]["mapping"]}

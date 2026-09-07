@@ -221,6 +221,124 @@ class DerivedTrainingTest(unittest.TestCase):
         finally:
             profile_path.write_bytes(original)
 
+    def test_common_fitted_view_survives_native_derived_mapping(self):
+        from tools.data_factory.curator.workflow.mapping import publish_mapped_training_request
+        from tools.validate_training_checkpoint import validate_saved_observation_view
+        from tools.data_factory.learned_action_adapter import NativeSmolVLA, fake_rgb
+        from tools.data_factory.curator.profile.schema import load_view_profile
+        root, source, profile, runs, before, published, reference, output = self.native_case(train_fit=True)
+        first = root / 'first-derived.json'
+        export_training_request(runs, first, dataset_id='first-derived', derivation=reference)
+        raw = root / 'first-raw.json'
+        export_training_request(runs, raw, dataset_id='parent-r1')
+        cohort = training.prepare_evaluation_cohort(raw, evidence_directory=root, eval_episodes=[2])
+        cohort_path = root / 'common-cohort.json'
+        write_json(cohort_path, cohort)
+        other_root, other_source, _, other_runs, other_before = make_native_training_source(self.addCleanup)
+        paths = replace(profile.paths, output_parent=root / 'other-derived')
+        pending = prepare(other_source, _paths=paths, _run_id_value='common-view-other')
+        shown = review_candidate(pending['run_id'], _paths=paths)
+        submit_human_review_decision(pending['run_id'], decision='APPROVE',
+            expected_review_digest=shown['review_ready_digest'], _paths=paths)
+        run = paths.run_root / pending['run_id']
+        other_reference = {'run_directory': str(run),
+            'receipt_digest': load_events(run)['receipt']['event_digest'],
+            'parent_dataset_identity': approval.current_dataset_identity(
+                other_source, repo_id='local/source', dataset_id='other-parent')}
+        second = root / 'second-derived.json'
+        export_training_request(other_runs, second, dataset_id='second-derived', derivation=other_reference)
+        import tempfile
+        holder = tempfile.TemporaryDirectory(prefix='SYNTHETIC-COMMON-VIEW-')
+        self.addCleanup(holder.cleanup)
+        mapped_root = Path(holder.name)
+        mapped = publish_mapped_training_request([second, first], mapped_root / 'common-mapped',
+            dataset_id='common-mapped', repo_id='local/common-mapped',
+            evaluation_cohort=cohort_path, max_copy_bytes=16*1024*1024)
+        request = load_json_strict(Path(mapped['request_path']))
+        output = mapped_root / 'approval'
+        output.mkdir()
+        training.publish_approval_batch(training.prepare_approval_batch(request, output, 'synthetic-human'))
+        child = Path(request['dataset_root'])
+        selected = [entry['episode_index'] for entry in request['episodes']]
+        argv = ['synthetic-train', *build_profile('act', policy_metadata(read_metadata(child))),
+            f'--dataset.root={child}', f'--dataset.repo_id={request["repo_id"]}',
+            f'--dataset.episodes={json.dumps(selected)}', '--dataset.eval_split=.5',
+            f'--fr5.evaluation_cohort={cohort_path}', f'--output_dir={root / "not-launched"}',
+            '--batch_size=1', '--steps=2', '--eval_steps=1', '--save_freq=1']
+        split, receipt = training.prepare_launch(dataset=child, repo_id=request['repo_id'],
+            inventory=output / 'training_approved.json', profile='act',
+            collection_profile='fr5-up-wrist-rgb-30hz-v2', argv=argv)
+        self.assertEqual(split['train_episodes'], [0, 2, 3])
+        self.assertEqual(split['eval_episodes'], [5])
+        self.assertEqual(receipt['normalization']['episodes'], [0, 2, 3])
+        view = validate_saved_observation_view(split, receipt)
+        self.assertEqual(view, receipt['observation_view'])
+        self.assertEqual(view['representation'], 'baked')
+        self.assertEqual(len(view['application_publications']), 2)
+        native = NativeSmolVLA()
+        native.observation_view = view
+        spec = load_view_profile(Path(view['view_profile']['path']))
+        frame = fake_rgb(bytes(spec.value['width'] * spec.value['height'] * 3),
+                         height=spec.value['height'], width=spec.value['width'])
+        import numpy as np
+        from tools.data_factory.curator.profile.registry import resolve_view_profile, load_profile_assets
+        from tools.data_factory.curator.profile.transform import apply_up_view
+        profile_path = Path(view['view_profile']['path'])
+        resolved = resolve_view_profile(profile_path.parent, spec.value['profile_id'],
+            binding_root=spec.binding_path.parent, collection_profile_root=spec.collection_profile_path.parent)
+        mask, plate = load_profile_assets(resolved)
+        expected = apply_up_view(np.frombuffer(frame['data'], dtype=np.uint8).reshape(frame['shape']), mask, plate)
+        self.assertEqual(native._transform_raw_up(frame)['data'], expected.tobytes())
+        self.assertNotIn('lineage_digest', view)
+        self.assertNotIn('parent_dataset_identity', view)
+        self.assertEqual(view['fitting_dataset_identity'], reference['parent_dataset_identity'])
+        # Actual alternate mapped admission: destination zero still exists from B,
+        # but cannot stand in for A's fitted original zero.
+        for scenario in ('absent', 'heldout'):
+            selected_first = load_json_strict(first)
+            negative_cohort = cohort
+            if scenario == 'absent':
+                selected_first['episodes'] = [e for e in selected_first['episodes'] if e['episode_index'] != 0]
+            else:
+                negative_cohort = training.prepare_evaluation_cohort(raw, evidence_directory=root, eval_episodes=[0])
+            negative_request = root / f'{scenario}-request.json'
+            write_json(negative_request, selected_first)
+            negative_cp = root / f'{scenario}-cohort.json'
+            write_json(negative_cp, negative_cohort)
+            negative = publish_mapped_training_request([second, negative_request], mapped_root / scenario,
+                dataset_id=f'common-{scenario}', repo_id=f'local/common-{scenario}',
+                evaluation_cohort=negative_cp, max_copy_bytes=16*1024*1024)
+            negative_request_value = load_json_strict(Path(negative['request_path']))
+            negative_output = mapped_root / f'{scenario}-approval'
+            negative_output.mkdir()
+            training.publish_approval_batch(training.prepare_approval_batch(
+                negative_request_value, negative_output, 'synthetic-human'))
+            negative_child = Path(negative_request_value['dataset_root'])
+            negative_argv = [arg for arg in argv if not arg.startswith((
+                '--dataset.root=', '--dataset.repo_id=', '--dataset.episodes=', '--fr5.evaluation_cohort='))]
+            negative_argv.extend([f'--dataset.root={negative_child}',
+                f'--dataset.repo_id={negative_request_value["repo_id"]}',
+                '--dataset.episodes=' + json.dumps([e['episode_index'] for e in negative_request_value['episodes']]),
+                f'--fr5.evaluation_cohort={negative_cp}'])
+            with self.subTest(scenario=scenario), self.assertRaisesRegex(ValueError, 'outside child TRAIN'):
+                training.prepare_launch(dataset=negative_child, repo_id=negative_request_value['repo_id'],
+                    inventory=negative_output / 'training_approved.json', profile='act',
+                    collection_profile='fr5-up-wrist-rgb-30hz-v2', argv=negative_argv)
+        from tools.data_factory.curator.workflow import derivation
+        real_evidence = derivation.published_training_evidence
+        def incompatible(ref):
+            evidence = real_evidence(ref)
+            if ref == other_reference:
+                evidence = copy.deepcopy(evidence)
+                evidence['transform']['synthetic-incompatible'] = True
+            return evidence
+        with mock.patch.object(derivation, 'published_training_evidence', side_effect=incompatible):
+            with self.assertRaisesRegex(ValueError, 'inconsistent across episodes'):
+                validate_saved_observation_view(split, receipt)
+
+        self.assertEqual((snapshot(source), [snapshot(run) for run in runs]), before)
+        self.assertEqual((snapshot(other_source), [snapshot(run) for run in other_runs]), other_before)
+
     def test_native_transform_rechecks_profile_and_assets_at_runtime(self):
         root, source, profile, runs, before, published, reference, output = self.native_case(train_fit=True)
         reference_path = root / 'derivation-reference.json'

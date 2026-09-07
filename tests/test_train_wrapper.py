@@ -863,6 +863,32 @@ class TrainingLaunchConnectionTest(unittest.TestCase):
             with self.assertRaisesRegex(ContractError, "COHORT_SOURCE_CHANGED"):
                 revalidate_evaluation_cohort(path)
 
+    def test_mapped_derived_preview_separates_original_review(self):
+        from tools.data_factory.training_entrypoint import PreparedApprovalBatch
+        original = {"schema_version": approval.LEDGER_PROVENANCE_SCHEMA, "episode_index": 7}
+        derived = {"schema_version": approval.DERIVED_PROVENANCE_SCHEMA, "episode_index": 7,
+                   "parent": {"dataset_identity": {"dataset_id": "original"}, "provenance": original},
+                   "curator_review": {"coverage": {"population_frames": 100, "reviewed_frames": 4}}}
+        provenance = {"schema_version": approval.MAPPED_PROVENANCE_SCHEMA,
+                      "parent": {"dataset_identity": {"dataset_id": "derived"}, "provenance": derived},
+                      "mapping": {"synthetic": True}}
+        snapshot_value = {"dataset": {"dataset_id": "mapped"}, "batch_digest": "synthetic",
+            "drafts": [{"approval_arguments": {"episode_id": "synthetic", "episode_index": 0},
+                        "reviewer_id": "synthetic-reviewer", "provenance": provenance}]}
+        episode = PreparedApprovalBatch(json.dumps(snapshot_value)).preview["episodes"][0]
+        self.assertEqual(episode["semantic_status"], "NOT_ASSERTED")
+        self.assertEqual(episode["parent_semantic_status"], "NOT_ASSERTED")
+        self.assertEqual(episode["parent_dataset_identity"], {"dataset_id": "derived"})
+        self.assertEqual(episode["original_parent_semantic_status"], "PASS")
+        self.assertEqual(episode["original_parent_dataset_identity"], {"dataset_id": "original"})
+        self.assertEqual(episode["original_source_episode_index"], 7)
+        self.assertEqual(episode["curator_review"], derived["curator_review"])
+        provenance["parent"] = derived["parent"]
+        raw = PreparedApprovalBatch(json.dumps(snapshot_value)).preview["episodes"][0]
+        self.assertEqual(raw["parent_semantic_status"], "PASS")
+        self.assertNotIn("original_parent_semantic_status", raw)
+        self.assertNotIn("curator_review", raw)
+
     def test_public_cohort_union_preserves_roles_and_revalidates_sources(self):
         import sys
         from tools.data_factory import training_entrypoint as entry

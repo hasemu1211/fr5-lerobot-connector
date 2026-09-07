@@ -164,27 +164,47 @@ def validate_saved_observation_view(split: Mapping, receipt: Mapping) -> dict:
         repo_id=split["repo_id"],
         selected_episodes=split["selected_episodes"],
     )
+    from tools.data_factory.training_split import source_episode_identity
+    from tools.fr5_data_factory import canonical_digest
+
     derived = []
+    train_origins, eval_origins = set(), set()
+    mapped_view = False
     for episode in inventory["episodes"]:
         provenance = load_json_strict(Path(episode["episode_provenance"]["artifact_path"]))
+        origin = canonical_digest(source_episode_identity(provenance))
+        (train_origins if episode["episode_index"] in split["train_episodes"] else eval_origins).add(origin)
+        application_dataset = split["dataset_identity"]
+        if provenance.get("schema_version") == MAPPED_PROVENANCE_SCHEMA:
+            mapped_view = True
+            application_dataset = provenance["parent"]["dataset_identity"]
+            provenance = provenance["parent"]["provenance"]
         if provenance.get("schema_version") == DERIVED_PROVENANCE_SCHEMA:
-            derived.append(provenance["derivation"])
-        elif provenance.get("schema_version") not in {EPISODE_PROVENANCE_SCHEMA, LEDGER_PROVENANCE_SCHEMA, MAPPED_PROVENANCE_SCHEMA}:
+            derived.append((provenance["derivation"], application_dataset))
+        elif provenance.get("schema_version") not in {EPISODE_PROVENANCE_SCHEMA, LEDGER_PROVENANCE_SCHEMA}:
             raise ValueError("saved observation-view provenance is unknown")
     if not derived:
         return {"representation": "raw", "transform_application": "none",
                 "training_transform": "raw_once"}
-    if len(derived) != len(inventory["episodes"]) or any(item != derived[0] for item in derived[1:]):
+    if len(derived) != len(inventory["episodes"]) or train_origins & eval_origins:
         raise ValueError("saved observation-view derivation is inconsistent across episodes")
-    try:
-        evidence = published_training_evidence(derived[0])
-    except (CuratorError, OSError, ValueError) as exc:
-        raise ValueError("saved observation-view publication is invalid") from exc
+    publications = {}
+    for reference, application_dataset in derived:
+        key = canonical_digest(reference)
+        if key not in publications:
+            try:
+                publications[key] = published_training_evidence(reference)
+            except (CuratorError, OSError, ValueError) as exc:
+                raise ValueError("saved observation-view publication is invalid") from exc
+        publication = publications[key]
+        if any(application_dataset[k] != publication["output"][v] for k, v in
+               (("dataset_root", "root"), ("repo_id", "repo_id"), ("dataset_digest", "dataset_digest"))):
+            raise ValueError("saved observation-view dataset binding differs from launch")
+    evidence = next(iter(publications.values()))
+    if any(p["view_profile"] != evidence["view_profile"] or p["transform"] != evidence["transform"]
+           for p in publications.values()):
+        raise ValueError("saved observation-view derivation is inconsistent across episodes")
     output = evidence["output"]
-    dataset = split["dataset_identity"]
-    if any(dataset[key] != output[source] for key, source in
-           (("dataset_root", "root"), ("repo_id", "repo_id"), ("dataset_digest", "dataset_digest"))):
-        raise ValueError("saved observation-view dataset binding differs from launch")
     profile_path = Path(evidence["view_profile"]["path"])
     if file_digest(profile_path) != evidence["view_profile"]["file_sha256"]:
         raise ValueError("saved observation-view profile changed")
@@ -200,10 +220,8 @@ def validate_saved_observation_view(split: Mapping, receipt: Mapping) -> dict:
     fitting = spec.value.get("fitting")
     if spec.value.get("schema_version") != "curator.view_profile.v2" or not isinstance(fitting, dict):
         raise ValueError("saved observation-view lacks TRAIN fitting evidence")
-    train = set(split["train_episodes"])
     frames = [fitting.get("reference_frame"), *fitting.get("background_plate_frames", [])]
-    if (not frames or any(not isinstance(frame, dict) or frame.get("episode_index") not in train
-                          for frame in frames)):
+    if not frames or any(not isinstance(frame, dict) for frame in frames):
         raise ValueError("saved observation-view fitted frame is outside child TRAIN")
     fit_split_path = Path(fitting["training_split"]["path"])
     if file_digest(fit_split_path) != fitting["training_split"]["file_sha256"]:
@@ -211,18 +229,34 @@ def validate_saved_observation_view(split: Mapping, receipt: Mapping) -> dict:
     fit_split = validate_training_split(fit_split_path)
     if fit_split["split_digest"] != fitting["training_split"]["split_digest"]:
         raise ValueError("saved observation-view fitting split digest differs")
-    if fit_split["dataset_identity"] != evidence["parent_dataset_identity"]:
-        raise ValueError("saved observation-view fitting parent differs from publication")
     fit_train = set(fit_split["train_episodes"])
     if any(frame["episode_index"] not in fit_train for frame in frames):
         raise ValueError("saved observation-view fitted frame is outside fitting TRAIN")
+    for frame in frames:
+        index = frame["episode_index"]
+        origin = {"dataset_identity_digest": canonical_digest(fit_split["dataset_identity"]),
+                  "episode_index": index,
+                  "episode_content_digest": fit_split["episode_content_digests"][str(index)]}
+        if "evaluation_cohort" in fit_split:
+            origin = fit_split["evaluation_cohort"]["origins"][str(index)]
+        if canonical_digest(origin) not in train_origins or canonical_digest(origin) in eval_origins:
+            raise ValueError("saved observation-view fitted frame is outside child TRAIN")
     return {
+        **({"fitting_dataset_identity": fit_split["dataset_identity"],
+            "application_publications": [
+                {"reference": next(ref for ref, _ in derived if canonical_digest(ref) == k),
+                 "dataset": publications[k]["output"],
+                 "parent_dataset_identity": publications[k]["parent_dataset_identity"],
+                 "lineage_digest": publications[k]["lineage_digest"]}
+                for k in sorted(publications)]}
+           if mapped_view else {"parent_dataset_identity": evidence["parent_dataset_identity"],
+                                "lineage_digest": evidence["lineage_digest"]}),
         "representation": "baked",
         "transform_application": "rollout_once",
         "training_transform": "baked_once",
-        "dataset": output,
-        "parent_dataset_identity": evidence["parent_dataset_identity"],
-        "lineage_digest": evidence["lineage_digest"],
+        "dataset": ({**output, "root": split["dataset_identity"]["dataset_root"],
+                     "repo_id": split["repo_id"], "dataset_digest": split["dataset_identity"]["dataset_digest"]}
+                    if mapped_view else output),
         "view_profile": evidence["view_profile"],
         "transform": evidence["transform"],
     }

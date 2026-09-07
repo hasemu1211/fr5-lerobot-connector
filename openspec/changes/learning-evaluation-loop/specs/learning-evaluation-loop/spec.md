@@ -193,3 +193,15 @@ Offline preparation SHALL accept an explicit nonempty proper subset of a canonic
 #### Scenario: Reject overlap or stale source
 - **WHEN** constituent cohorts repeat an original source coordinate or a constituent request changes after preparation
 - **THEN** composition or source revalidation rejects the artifact before admission or training
+
+
+### Requirement: Common deterministic view fitting follows original TRAIN identities
+The saved observation-view consumer SHALL support direct derived and mapped-derived-ledger inputs only when all selected derived publications share the same bound deterministic profile and transform. It SHALL validate each application publication separately from the fitting source. Every fitted reference/background frame SHALL belong to both its bound fitting TRAIN split and the actual launch TRAIN set by original dataset, episode and content identity, with no heldout overlap. Equal destination indices SHALL NOT establish membership. Profile, asset, fitting split and publication hashes SHALL remain binding. Baked observations SHALL be consumed once during training/evaluation, and the identical deterministic transform SHALL be applied once to raw Rollout input. Raw behavior and training authority SHALL remain unchanged.
+
+#### Scenario: Fit on one training source and apply a common view to another
+- **WHEN** a common bound profile fitted on selected TRAIN originals from source A is applied to sources A and B before mapping
+- **THEN** native launch and saved-view validation accept the common view only while all fitted A originals remain TRAIN after mapping, and preserve each application publication
+
+#### Scenario: Reject destination-index coincidence or incompatible profiles
+- **WHEN** a fitted original is absent or held out despite a matching destination integer, or an application uses another profile or transform
+- **THEN** saved-view validation rejects the launch before trainer construction
