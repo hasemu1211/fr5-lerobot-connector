@@ -16,7 +16,8 @@ function updateSourceReturn() {
   }
   if (back && architectureView === 'workspace') {
     const yaw = new URLSearchParams(location.search).get('yaw');
-    back.href = `../collection.html?yaw=${['0','45','90'].includes(yaw) ? yaw : '0'}#workspace`;
+    const section = location.hash === '#angle-conditions' ? 'all-angle-condition' : 'workspace';
+    back.href = `../collection.html?yaw=${['0','45','90'].includes(yaw) ? yaw : '0'}#${section}`;
     back.textContent = '← 배치·파지 설명으로 돌아가기';
     return;
   }

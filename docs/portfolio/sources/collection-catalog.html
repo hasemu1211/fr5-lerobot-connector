@@ -408,4 +408,115 @@ def _uniform_polygon_point(
 376:             align[&quot;target&quot;][&quot;base_tcp&quot;][&quot;rotation_columns&quot;],
 377:             descend[&quot;target&quot;][&quot;base_tcp&quot;][&quot;rotation_columns&quot;],
 378:         )
-379: </pre></section></main><script src="../source-return.js"></script></body></html>
+379: </pre></section><section id="angle-conditions"><h2>각도별 배치와 모든 각도의 교차 조건</h2><p>고정 main ade5c5b의 실제 호출 경로이다. yaw를 정한 뒤 해당 각도의 허용 다각형에서 위치를 표본화한다. 재배치의 두 yaw 검사는 시작·종료 배치의 공통 위치 조건이며, 연속 회전의 swept volume 검사가 아니다. 물체를 든 동작은 기존 실행 경로가 담당한다.</p><h3>선택한 yaw에 맞는 공간 표본화</h3><p class="locator">ade5c5b · tools/data_factory/operator/catalog.py:2142<br>sha256:58e13d4870e814291376fe7ec2c0fcd99b12430b7a106bbdce9ad715ce03f20a</p><pre>2142:             sweep_index += 1
+2143:             sweep_samples.clear()
+2144:             sweep_poses.clear()
+2145:             sweep_offsets.clear()
+2146:         sweep_samples[rank] = sample_identity
+2147:         if rank not in sweep_poses:
+2148:             assigned_cells = {
+2149:                 index for index, assigned_rank in enumerate(
+2150:                     rotating_balanced_yaw_ranks(
+2151:                         strata_count, yaw_count, sweep_index=sweep_index,
+2152:                         anchor_cell_index=anchor_cell,
+2153:                         anchor_yaw_rank=anchor_rank,
+2154:                     )
+2155:                 )
+2156:                 if assigned_rank == rank
+2157:             }
+2158:             first_block = not result
+2159:             try:
+2160:                 safe_polygon = safe_convex_polygon(
+2161:                     polygon=partition_polygon,
+2162:                     object_size_xy_mm=region[&quot;object_size_xy_mm&quot;],
+2163:                     uncertainty_mm=region[&quot;uncertainty_mm&quot;], yaw_deg=yaw,
+2164:                 )
+2165:                 samples = stratified_convex_polygon_samples(
+2166:                     polygon=safe_polygon, columns=columns, rows=rows,
+2167:                     partition_polygon=partition_polygon,
+2168:                     start_xy=current_sheet_xy, count=strata_count,
+2169:                     seed=normalized_seed,
+2170:                     pass_index=sweep_index * yaw_count + rank,
+2171:                 )
+2172:             except ValueError as exc:
+2173:                 raise ContractError(&quot;OPERATOR_ASSISTED_DOMAIN&quot;) from exc
+2174:             by_cell = {</pre><h3>놓기 위치의 두 yaw 검사</h3><p class="locator">ade5c5b · tools/data_factory/operator/catalog.py:1853<br>sha256:58e13d4870e814291376fe7ec2c0fcd99b12430b7a106bbdce9ad715ce03f20a</p><pre>1853:
+1854:
+1855: def _validate_yaw_preserving_transition(
+1856:     destination_selection: Mapping[str, Any], domain: Mapping[str, Any],
+1857:     source_pose: Mapping[str, Any], destination_pose: Mapping[str, Any],
+1858: ) -&gt; dict[str, Any]:
+1859:     target = _canonical_operator_pose(
+1860:         destination_selection, domain, destination_pose,
+1861:     )
+1862:     recorded = yaw_preserving_destination(source_pose, target)
+1863:     region = domain[&quot;coverage_region&quot;]
+1864:     try:
+1865:         feasible = safe_convex_polygon_for_yaws(
+1866:             polygon=region[&quot;polygon_local_xy_mm&quot;],
+1867:             object_size_xy_mm=region[&quot;object_size_xy_mm&quot;],
+1868:             uncertainty_mm=region[&quot;uncertainty_mm&quot;],
+1869:             yaw_degs=(recorded[&quot;yaw_deg&quot;], target[&quot;yaw_deg&quot;]),
+1870:         )
+1871:         sheet_xy = rotate_xy(
+1872:             (recorded[&quot;x_mm&quot;], recorded[&quot;y_mm&quot;]), recorded[&quot;yaw_deg&quot;],
+1873:         )
+1874:     except (KeyError, TypeError, ValueError) as exc:
+1875:         raise ContractError(&quot;OPERATOR_POSE_DOMAIN&quot;) from exc
+1876:     if not point_in_convex_polygon(sheet_xy, feasible):
+1877:         raise ContractError(
+1878:             &quot;JOB_COORDINATE_BOUNDS&quot;,
+1879:             str((recorded[&quot;x_mm&quot;], recorded[&quot;y_mm&quot;])),
+1880:         )
+1881:     return target
+1882:
+1883:</pre><h3>기록 밖 DIRECT 재배치 입력</h3><p class="locator">ade5c5b · tools/data_factory/run_job.py:2483<br>sha256:deb8189b5bd1541b0e1d3a82ff50432b1edbb4f81067b336d349294748b43cd1</p><pre>2483: def _object_reposition_payload(payload, binding, source_payload=None):
+2484:     &quot;&quot;&quot;Project a recorded pick-place run into one recorder-free DIRECT move.&quot;&quot;&quot;
+2485:     if binding[&quot;start_state&quot;] != &quot;ON_SURFACE&quot;:
+2486:         raise ContractError(&quot;OBJECT_REPOSITION_START_STATE&quot;)
+2487:     value = copy.deepcopy(payload if source_payload is None else source_payload)
+2488:     if any(
+2489:         value.get(key) != payload.get(key)
+2490:         for key in (
+2491:             &quot;mode&quot;, &quot;config_root&quot;, &quot;home_candidate&quot;, &quot;urdf&quot;,
+2492:             &quot;expected_robot_system_id&quot;, &quot;camera_profile&quot;, &quot;dataset_root&quot;,
+2493:             &quot;run_root&quot;, &quot;motion_preset&quot;,
+2494:         )
+2495:     ):
+2496:         raise ContractError(&quot;OBJECT_REPOSITION_PAYLOAD&quot;)
+2497:     value[&quot;run_id&quot;] = binding[&quot;continuation_run_id&quot;]
+2498:     value[&quot;job&quot;][&quot;job_id&quot;] = binding[&quot;continuation_run_id&quot;]
+2499:     value[&quot;job&quot;].update(binding[&quot;source_pose&quot;])
+2500:     value.update({
+2501:         &quot;recycle_x_mm&quot;: binding[&quot;target_pose&quot;][&quot;x_mm&quot;],
+2502:         &quot;recycle_y_mm&quot;: binding[&quot;target_pose&quot;][&quot;y_mm&quot;],
+2503:         &quot;recycle_yaw_deg&quot;: binding[&quot;target_pose&quot;][&quot;yaw_deg&quot;],
+2504:     })
+2505:     value.pop(DESTINATION_KEY, None)
+2506:     for key in (
+2507:         TRAJECTORY_VARIANT_KEY, TRAJECTORY_SAMPLING_SEED_KEY,
+2508:         TRAJECTORY_DESIGN_KEY,
+2509:     ):
+2510:         value.pop(key, None)
+2511:     return value</pre><h3>들어 올리기·재배치 접근·내려놓기</h3><p class="locator">ade5c5b · tools/fr5_data_factory.py:1364<br>sha256:1a89d22d1ce31a8cef58f6609bcc3c077c806dccc10ff21bae51d1ab53586e41</p><pre>1364:         shifted = {&quot;translation_m&quot;: _add(tcp[&quot;translation_m&quot;], _mul(frame[&quot;rotation_columns&quot;][2], offset)), &quot;rotation_columns&quot;: tcp[&quot;rotation_columns&quot;]}
+1365:         return {&quot;base_tcp&quot;: shifted, &quot;base_tool&quot;: compose_rigid_transform(shifted, tool_inverse)}
+1366:     offsets = {
+1367:         &quot;PREGRASP_PTP&quot;: (datum, q[&quot;offsets&quot;][&quot;pregrasp&quot;]),
+1368:         &quot;APPROACH_STOP_LIN&quot;: (datum, q[&quot;offsets&quot;][&quot;approach_stop&quot;]),
+1369:         &quot;FINAL_APPROACH_LIN&quot;: (datum, 0),
+1370:         &quot;LIFT_LIN&quot;: (datum, q[&quot;offsets&quot;][&quot;lift&quot;]),
+1371:         &quot;RECYCLE_APPROACH_PTP&quot;: (release_datum, q[&quot;offsets&quot;][&quot;pregrasp&quot;]),
+1372:         &quot;LOWER_LIN&quot;: (release_datum, release_clearance_m),
+1373:         &quot;RETREAT_LIN&quot;: (release_datum, q[&quot;offsets&quot;][&quot;retreat&quot;]),
+1374:     }
+1375:     recording_boundary = TASK_CONTRACTS[job[&quot;task&quot;]][&quot;recording_boundary&quot;]
+1376:     steps = []
+1377:     for phase in MOTION_PHASES:
+1378:         step = {&quot;phase&quot;: phase, &quot;limits&quot;: q[&quot;limits&quot;][phase]}
+1379:         if phase in offsets: step[&quot;target&quot;] = target(*offsets[phase])
+1380:         elif phase.startswith(&quot;GRIPPER&quot;):
+1381:             step[&quot;gripper_position_m&quot;] = q[&quot;gripper&quot;][
+1382:                 &quot;closed&quot; if phase == &quot;GRIPPER_CLOSE&quot; else &quot;open&quot;
+1383:             ]
+1384:             if phase == &quot;GRIPPER_OPEN&quot; and validated[&quot;grasp_profile&quot;].get(
+1385:                 &quot;schema_version&quot;</pre><h3>독립 계산 대조</h3><p>100×30mm 직사각형, 240×180mm 작업영역, 경계 여유5mm의 해석식이다. 외접 반지름52.20153254455275mm로 전각도 범위 X[57.20153254455275,182.79846745544725], Y[57.20153254455275,122.79846745544725]를 구했다. 반폭의 최대를 만드는 두 임계각을 safe_convex_polygon_for_yaws에 입력한 출력과 일치했고, 0.1도 간격의 3,600각도에서 모든 허용 꼭짓점의 물체 외곽을 교차 확인했다. 중심(55,90)은0/90도 교차영역에 포함되지만16.69924423399362도에서 왼쪽끝2.798467455447252mm로5mm 여유를 충족하지 못한다. 이 반례는 수학적 계산이며 실제 로봇 실패 관측이 아니다.</p><p><a href="https://lavalle.pl/planning/node161.html">LaValle · Planning Algorithms: 물체 형상을 반영한 구성 공간</a></p></section></main><script src="../source-return.js"></script></body></html>

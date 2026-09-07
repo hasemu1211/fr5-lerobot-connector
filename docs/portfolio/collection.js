@@ -33,6 +33,8 @@ function showWorkspace(yaw) {
     link.setAttribute('href', `sources/collection-catalog.html?view=workspace&yaw=${yaw}#${link.dataset.workspaceSource}`);
 }
 showWorkspace(new URLSearchParams(location.search).get('yaw'));
+if (location.hash === '#all-angle-condition')
+  document.getElementById('all-angle-condition').open = true;
 for (const button of document.querySelectorAll('[data-yaw]')) {
   button.addEventListener('click', () => {
     showWorkspace(button.dataset.yaw);
