@@ -16,6 +16,83 @@ from tools.data_factory.motion.moveit_transport import RosMoveItTransport
 
 
 class TestExecutionTransport(unittest.TestCase):
+    def test_initial_snapshot_discovery_budget_does_not_relax_live_freshness(self):
+        description = (
+            "<robot><ros2_control><hardware>"
+            "<plugin>fairino_hardware/FairinoHardwareInterface</plugin>"
+            "<param name='gripper_velocity'>20</param>"
+            "<param name='gripper_force'>20</param>"
+            "<param name='gripper_settle_time_ms'>500</param>"
+            "</hardware><joint name='finger_right_joint'/>"
+            "</ros2_control></robot>"
+        )
+        controller_type = "control_msgs/msg/JointTrajectoryControllerState"
+        for mode in ("late_description", "missing_description", "invalid_description"):
+            with self.subTest(mode=mode):
+                clock = [0.0]
+                transport = object.__new__(RosMoveItTransport)
+                transport.graph_timeout_s = 1.0
+                transport.preflight_timeout_s = 5.0
+                transport._initial_snapshot_complete = False
+                transport._clock = lambda: clock[0]
+                transport._robot_description = None
+                transport._robot_description_client = None
+                transport._joint_state_received_at = None
+                transport._arm_controller_received_at = None
+                transport._gripper_controller_received_at = None
+                transport.node = SimpleNamespace(
+                    count_publishers=lambda _: 1,
+                    get_topic_names_and_types=lambda: [
+                        ("/fairino5_controller/controller_state", [controller_type]),
+                        ("/gripper_controller/controller_state", [controller_type]),
+                    ],
+                )
+
+                def spin(*_, timeout_sec):
+                    clock[0] += timeout_sec
+                    transport._on_joint_state(SimpleNamespace(
+                        name=["j1", "j2", "j3", "j4", "j5", "j6"],
+                        position=[0.0] * 6,
+                    ))
+                    point = SimpleNamespace(positions=[0.0])
+                    for callback, name in (
+                        (transport._on_arm_controller_state, "j1"),
+                        (transport._on_gripper_controller_state, "finger_right_joint"),
+                    ):
+                        callback(SimpleNamespace(
+                            joint_names=[name], reference=point, feedback=point,
+                            speed_scaling_factor=1.0,
+                        ))
+                    if clock[0] >= 1.5 and mode != "missing_description":
+                        transport._on_robot_description(SimpleNamespace(
+                            data=description if mode == "late_description" else "<robot/>",
+                        ))
+
+                transport._rclpy = SimpleNamespace(spin_once=spin)
+                with mock.patch(
+                    "tools.data_factory.motion.moveit_transport.time.monotonic",
+                    side_effect=lambda: clock[0],
+                ):
+                    if mode != "late_description":
+                        with self.assertRaises(ContractError) as caught:
+                            transport.snapshot(0.1)
+                        self.assertEqual(caught.exception.code, "ROS_GRIPPER_SETTINGS_UNVERIFIED")
+                        self.assertFalse(transport._initial_snapshot_complete)
+                        self.assertLessEqual(clock[0], 5.0)
+                        continue
+                    snapshot = transport.snapshot(0.1)
+                    self.assertEqual(snapshot["gripper_settings"]["velocity_percent"], 20)
+                    self.assertTrue(transport._initial_snapshot_complete)
+                    self.assertLess(clock[0], 1.6)  # No unconditional five-second sleep.
+                    clock[0] += 1.0
+                    stale_started = clock[0]
+                    transport._rclpy.spin_once = (
+                        lambda *_, timeout_sec: clock.__setitem__(0, clock[0] + timeout_sec)
+                    )
+                    with self.assertRaisesRegex(ContractError, "ROS_JOINT_STATE_STALE"):
+                        transport.snapshot(0.1)
+                    self.assertAlmostEqual(clock[0] - stale_started, 1.0)
+
     def test_cancel_race_keeps_non_cancel_terminal_result_pollable(self):
         class Future:
             def __init__(self, value):

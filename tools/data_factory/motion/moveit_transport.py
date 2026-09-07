@@ -164,6 +164,7 @@ class RosMoveItTransport:
         self._gripper_controller_state = None
         self._gripper_controller_received_at = None
         self._robot_description = None
+        self._initial_snapshot_complete = False
         self._active = None
         self._execution_locked = False
         self._execute_goal_count = 0
@@ -614,7 +615,13 @@ class RosMoveItTransport:
         ):
             raise ContractError("ROS_SNAPSHOT_AGE")
         max_age_s = float(max_age_s)
-        deadline = time.monotonic() + self.graph_timeout_s
+        # New DDS participants need discovery time, not a relaxed sample age.
+        # After one complete snapshot, retain the short live observation budget.
+        timeout = (
+            self.graph_timeout_s if self._initial_snapshot_complete
+            else self.preflight_timeout_s
+        )
+        deadline = time.monotonic() + timeout
         self._load_robot_description_parameter(deadline)
         while (
             self._joint_state_received_at is None
@@ -662,7 +669,7 @@ class RosMoveItTransport:
         gripper_speed = self._gripper_controller_state.speed_scaling_factor
         if not isinstance(gripper_speed, (int, float)) or not math.isfinite(gripper_speed):
             raise ContractError("ROS_GRIPPER_CONTROLLER_STATE")
-        return {
+        observation = {
             "joint_positions": [by_name[name] for name in JOINT_ORDER],
             "joint_state_age_s": joint_age,
             "gripper_settings": self._gripper_settings(),
@@ -685,6 +692,8 @@ class RosMoveItTransport:
                 "feedback_position_m": gripper_values["feedback"]["finger_right_joint"],
             },
         }
+        self._initial_snapshot_complete = True
+        return observation
 
     def _load_robot_description_parameter(self, deadline):
         client = self._robot_description_client
