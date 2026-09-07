@@ -45,6 +45,32 @@ Curation acquisition proposals SHALL distinguish observed successful conditions 
 - **THEN** the acquisition proposal SHALL expose that mismatch and retain the original cohort reference
 - **AND** it SHALL NOT claim a fixed-cohort expanded training request or learning improvement until the existing training consumer verifies that separate contract.
 
+### Requirement: Current-source acquisition advice reuses one native producer
+
+The existing collection recommendation API and CLI SHALL accept an optional current native catalog, selection, canonical scene reference and digest, object identity, caller budget, seed and repeat. It SHALL validate each supplied run through the existing ledger/admission validators, retain per-recording provenance, and reuse DQA and the existing native sampler. Compatible campaigns SHALL NOT require identical historical authoring in this explicit mode. Legacy authoring mode SHALL keep its existing validation. Ordinary regeneration SHALL require no AI research or new human confirmation.
+
+#### Scenario: Mixed pickup and full place campaigns
+- **WHEN** canonical evidence contains several campaigns with different tasks and the caller requests supported pick-place acquisition
+- **THEN** only task-compatible semantic PASS evidence with matching robot, object/grasp, camera profile and endpoint calibration SHALL contribute to that success coverage
+- **AND** other evidence SHALL retain explicit exclusion reasons without reconstructed authoring or fabricated semantic judgement.
+
+#### Scenario: A caller changes the budget or current source
+- **WHEN** the caller supplies a valid current source and supported task with an explicit count and seed
+- **THEN** native sampling SHALL deterministically produce the requested number of conditions and preserve the exact first source pose
+- **AND** pick-place SHALL expose an N+1 pose chain for N alternating transitions, with source/destination continuity, observation counts and proposal reasons kept distinct from utility or execution claims.
+
+#### Scenario: Stale, duplicate or tampered advice is replayed
+- **WHEN** scene, selection, budget, seed or canonical evidence no longer matches a selected recommendation, or input recordings are duplicated
+- **THEN** revalidation SHALL reject before publishing new derived output
+- **AND** an unchanged rerun SHALL reuse identical output without overwriting original evidence, while a redigested edited recommendation SHALL NOT pass as current native output.
+
+#### Scenario: Collection consumes the advice and Learning retains the heldout contract
+- **WHEN** Collection chooses a recommendation
+- **THEN** its existing consumer SHALL regenerate against current caller inputs and selected recommendation digest before native draft/planner application
+- **AND** this explicit assisted proposal SHALL NOT silently overwrite later direct selection, pins or exclusions
+- **AND** integrated acceptance SHALL verify actual condition, order and count preservation through that consumer, rather than declare the loop complete from a JSON artifact
+- **AND** original requests and heldout identities SHALL remain unchanged; expanded training partitioning and authority SHALL require the separate existing Learning/admission contract.
+
 ### Requirement: Optional native TRAIN-only view fitting preserves its inputs
 
 Profile setup SHALL accept an optional existing native v3 `fit_split`, reuse its validator, and require its parent dataset root and content digest to match the frozen source. In this mode it SHALL select reference and background-plate frames only from that split's TRAIN episodes using the existing bounded sampling budget. An explicit non-TRAIN reference SHALL be rejected; an omitted reference SHALL select the first TRAIN frame. A v2 profile SHALL retain the split path, file hash and native digest plus the actual decoded reference and plate frame global, episode and local indices and RGB array digests through preview and finalization. The resolved profile digest SHALL bind this evidence for the existing candidate lineage consumer. This SHALL NOT replace the native split or create admission, training, physical or motion authority.

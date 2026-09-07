@@ -23,6 +23,22 @@ Curation은 어떤 원본·시연 구성·관측 표현이 downstream 학습과 
 
 ## 독립적으로 진행하는 성공 조건 반복 수집
 
+현재 다음 제품 결과는 agent가 매번 조건 목록을 작성하는 대신, 기존
+`collection_recommendation` / `collection_recommendation_io`가 호환 가능한
+여러 campaign의 canonical 근거를 현재 task·source·취득 예산에 연결하는 것이다.
+동일한 과거 authoring을 요구하는 기존 경로는 유지하고, 명시적 현재 입력을 받는
+경로는 각 run의 ledger/manifest를 검증한다. pickup 성공은 full pick-place
+커버리지에 합산하지 않는다. 현재 source에서 시작하는 native 균형 sampler를
+재사용하며, 조건 분포는 utility 근거 후보이고 learned ranking이 아니다.
+반복 확대와 위치·yaw·방향 확대는 계속 비교할 가설이며 아래의 반복 실험이
+유일한 수집 전략이나 고정 quota가 되지 않는다.
+
+일반 사용 비용은 지원 task·예산·seed 선택, 소프트웨어 추천 재계산, 기존
+Collection admission이다. 새 연구·사람 확인·실행 gate를 매 재계산에 요구하지
+않는다. 완료에는 추천 JSON뿐 아니라 Collection의 현재 draft 소비와 native
+계획에서 조건·순서·수량 보존이 필요하다. operator 구현은 Collection 소유자가
+담당하며 원본 평가 cohort와 새 TRAIN의 결속은 Learning의 별도 계약으로 유지한다.
+
 현재 합격 예제가 여러 명령 위치·yaw에 분산되고 TRAIN의 동일 조건 반복은 부족하므로, 다음 작은 수집 가설은 **이미 성공한 TRAIN 조건의 반복 관측을 늘리는 것**이다. 새로운 조건을 더 넓히는 대안과 비교해, 먼저 관측된 yaw마다 기존 성공 위치 하나를 대표로 삼아 제한된 횟수만 반복한다. 이는 반복이 다양성보다 우수하다는 채택이 아니라, 현재 부족한 반복 변동의 근거를 얻는 선택이다. 기존 조건 분포 대비 요청도 유지한다.
 
 [SmolVLA 공식 가이드](https://huggingface.co/docs/lerobot/main/smolvla)의 위치별 반복 시연 사례는 이 질문의 근거다. 약 50개라는 출발점이나 SO100의 결과를 FR5 최소 수량·성능 보장으로 삼지 않는다. 수량은 현재 합격 근거와 추가 취득 예산에서 정하며, 시도 횟수를 새 합격 수량으로 기록하지 않는다.

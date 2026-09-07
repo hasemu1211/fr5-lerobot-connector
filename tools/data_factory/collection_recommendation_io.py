@@ -16,7 +16,45 @@ from tools.data_factory.episode_ledger import (
     validate_episode_ledger,
     validate_episode_state,
 )
-from tools.fr5_data_factory import ContractArgumentParser, ContractError, load_json_strict
+from tools.fr5_data_factory import ContractArgumentParser, ContractError, load_json_strict, canonical_digest
+
+
+def _load_run(root: Path) -> tuple[dict, set[Path]]:
+    ledger = validate_episode_ledger(load_json_strict(root / "episode_ledger.json"))
+    state = validate_episode_state(load_json_strict(root / "episode_ledger_state.json"), ledger=ledger)
+    protected = {root, Path(ledger["dataset"]["dataset_root"]).resolve(strict=True)}
+    artifacts = {}
+    for name, ref in ledger["artifacts"].items():
+        _, artifacts[name] = _artifact(ref, name=name, episode_index=ledger["episode"]["episode_index"])
+        protected.add(Path(ref["artifact_path"]).resolve(strict=True).parent)
+    if state["candidate"] is None:
+        raise ContractError("COLLECTION_RECOMMENDATION_CANDIDATE_UNAVAILABLE")
+    _, candidate = _artifact(state["candidate"], name="candidate", episode_index=0)
+    protected.add(Path(state["candidate"]["artifact_path"]).resolve(strict=True).parent)
+    return {"manifest_order_index": artifacts["intent"]["order_index"], "ledger": ledger,
+            "state": state, "candidate": candidate, "artifacts": artifacts}, protected
+
+
+def _acquisition_context(value):
+    """Read the existing canonical scene, retaining the caller's native catalog.
+
+    The catalog is a replayable software input, not a fresh device observation.
+    Consumption must pass its current catalog, selection and scene again.
+    """
+    required = {"catalog", "selection", "scene_state_path", "object_instance_id",
+                "requested_count", "normalized_seed", "repeat", "expected_scene_digest"}
+    if not isinstance(value, dict) or set(value) != required:
+        raise ContractError("COLLECTION_ACQUISITION_INPUT_FIELDS")
+    if not isinstance(value["scene_state_path"], str) or not value["scene_state_path"]:
+        raise ContractError("COLLECTION_ACQUISITION_SCENE_PATH")
+    path = Path(value["scene_state_path"])
+    if path.is_symlink():
+        raise ContractError("COLLECTION_ACQUISITION_SCENE_PATH")
+    scene = load_json_strict(path)
+    if canonical_digest(scene) != value["expected_scene_digest"]:
+        raise ContractError("COLLECTION_ACQUISITION_SCENE_CHANGED")
+    return {**{key: item for key, item in value.items()
+               if key not in {"scene_state_path", "expected_scene_digest"}}, "scene_state": scene}
 
 
 def _publish(destination: Path, documents: dict) -> None:
@@ -50,12 +88,16 @@ def _publish(destination: Path, documents: dict) -> None:
 def recommend_stored_collection(
     *, run_directories: Sequence[str | Path], source_commit: str,
     output_root: str | Path | None = None,
+    acquisition: dict | None = None,
+    expected_recommendation_digest: str | None = None,
 ) -> dict:
     """Load canonical run evidence and optionally publish immutable derived files.
 
     source_commit is a caller-supplied implementation label, not verified running
     code identity or a historical run commit. This consumer does not attest Git.
-    Missing/invalid legacy sources are unavailable; never consult current config.
+    Legacy mode requires retained compiled authoring. Acquisition mode uses each
+    run's canonical ledger/manifest and explicit current caller inputs; it never
+    reconstructs missing historical authoring or claims current execution rights.
     """
     if not run_directories:
         raise ContractError("COLLECTION_RECOMMENDATION_RUNS_REQUIRED")
@@ -64,40 +106,36 @@ def recommend_stored_collection(
         sources = None
         evidence = []
         protected = set()
+        context = None if acquisition is None else _acquisition_context(acquisition)
+        roots = []
         for directory in run_directories:
             root = Path(directory).resolve(strict=True)
-            protected.add(root)
-            authoring_path = root / "compiled_authoring_evidence.json"
-            if not authoring_path.is_file():
-                raise ContractError("COLLECTION_RECOMMENDATION_AUTHORING_UNAVAILABLE")
-            authoring = validate_compiled_authoring_evidence(load_json_strict(authoring_path))
-            if sources is not None and sources != authoring:
+            if context is None:
+                authoring_path = root / "compiled_authoring_evidence.json"
+                if not authoring_path.is_file():
+                    raise ContractError("COLLECTION_RECOMMENDATION_AUTHORING_UNAVAILABLE")
+                authoring = validate_compiled_authoring_evidence(load_json_strict(authoring_path))
+                if sources is not None and sources != authoring:
+                    raise ContractError("COLLECTION_RECOMMENDATION_AUTHORING_MISMATCH")
+                sources = authoring
+            loaded, paths = _load_run(root)
+            protected.update(paths)
+            if context is None and loaded["artifacts"]["manifest"] != sources["manifest"]:
                 raise ContractError("COLLECTION_RECOMMENDATION_AUTHORING_MISMATCH")
-            sources = authoring
-            ledger = validate_episode_ledger(load_json_strict(root / "episode_ledger.json"))
-            state = validate_episode_state(
-                load_json_strict(root / "episode_ledger_state.json"), ledger=ledger,
-            )
-            protected.add(Path(ledger["dataset"]["dataset_root"]).resolve(strict=True))
-            artifacts = {}
-            for name, ref in ledger["artifacts"].items():
-                _, artifacts[name] = _artifact(
-                    ref, name=name, episode_index=ledger["episode"]["episode_index"],
-                )
-                protected.add(Path(ref["artifact_path"]).resolve(strict=True).parent)
-            if artifacts["manifest"] != authoring["manifest"]:
-                raise ContractError("COLLECTION_RECOMMENDATION_AUTHORING_MISMATCH")
-            if state["candidate"] is None:
-                raise ContractError("COLLECTION_RECOMMENDATION_CANDIDATE_UNAVAILABLE")
-            _, candidate = _artifact(state["candidate"], name="candidate", episode_index=0)
-            protected.add(Path(state["candidate"]["artifact_path"]).resolve(strict=True).parent)
-            evidence.append({
-                "manifest_order_index": artifacts["intent"]["order_index"],
-                "ledger": ledger, "state": state, "candidate": candidate, "artifacts": artifacts,
-            })
+            evidence.append(loaded)
+            roots.append(root)
         report, recommendation = derive_collection_recommendation(
             compiled_authoring=sources, episode_evidence=evidence, source_commit=source_commit,
+            **({"acquisition": context} if context is not None else {}),
         )
+        if context is not None:
+            protected.add(Path(acquisition["scene_state_path"]).resolve(strict=True).parent)
+            if (_acquisition_context(acquisition) != context
+                    or any(_load_run(root)[0] != previous for root, previous in zip(roots, evidence))):
+                raise ContractError("COLLECTION_ACQUISITION_INPUT_CHANGED")
+        if (expected_recommendation_digest is not None
+                and expected_recommendation_digest != recommendation["recommendation_digest"]):
+            raise ContractError("COLLECTION_ACQUISITION_INPUT_CHANGED")
     except (ContractError, OSError) as exc:
         return {
             "availability": "UNAVAILABLE",
@@ -128,12 +166,16 @@ def main(argv=None) -> int:
     parser = ContractArgumentParser(description=__doc__)
     parser.add_argument("--run-dir", action="append", required=True)
     parser.add_argument("--source-commit", required=True, help="caller-supplied implementation commit label (not attested)")
-    parser.add_argument("--output-root", required=True, help="exclusive derived output root")
+    parser.add_argument("--output-root", help="optional exclusive derived output root")
+    parser.add_argument("--acquisition-input", help="saved native catalog/selection, budget and canonical scene reference")
+    parser.add_argument("--expected-recommendation-digest", help="reject stale advice before publication")
     try:
         args = parser.parse_args(argv)
         result = recommend_stored_collection(
             run_directories=args.run_dir, source_commit=args.source_commit,
             output_root=args.output_root,
+            acquisition=None if args.acquisition_input is None else load_json_strict(args.acquisition_input),
+            expected_recommendation_digest=args.expected_recommendation_digest,
         )
         print(json.dumps(result, sort_keys=True))
         return 0 if result["availability"] == "AVAILABLE" else 2
