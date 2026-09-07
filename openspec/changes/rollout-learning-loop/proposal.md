@@ -229,6 +229,33 @@ is not sufficient reason to replace the intended learned behavior. Root assigns
 the shared writer after its physical canary. Further comparison must include
 feasible task latency and actual driver deadband, not only software verifiability.
 
+The next comparison refines the native-timing option using existing JTC virtual
+time instead of replacing it with fixed per-row holds. Installed Jazzy JTC 4.40.1
+supports a hardware `speed_scaling.state_interface`; its update advances trajectory
+time by `period * factor`. A common, coherently sampled hardware pause could keep
+both controllers on the original full sequence during unresolved gripper work,
+with measured stall duration rather than an invented dwell or shortened prefix.
+This is a candidate for the existing shared hardware/controller owner, not a
+Rollout scaling publisher or an implemented runtime route.
+
+[Jazzy speed-scaling documentation](https://control.ros.org/jazzy/doc/ros2_controllers/joint_trajectory_controller/doc/speed_scaling.html)
+and [the matching 4.40.1 update source](https://github.com/ros-controls/ros2_controllers/blob/4.40.1/joint_trajectory_controller/src/joint_trajectory_controller.cpp)
+also expose its limits: command sampling retains a full-cycle lookahead at zero
+factor, and goal-time tolerance follows virtual time. A CPU call to the installed
+Trajectory sampler confirms that, at a 10 ms sample of synthetic 30 Hz knots,
+linear arm interpolation is between knots while gripper NONE already selects the
+next knot. Freezing the synthetic virtual clock retains these samples, but this
+does not prove a synchronized full-controller or hardware execution. Equal factors
+alone do not establish equal start phases or atomic command-generation gating.
+
+FR5 currently exports no hardware scaling state. Before choosing this route,
+the shared owner must establish command/clock coherence, preserve exact-plan and
+staged-release bindings, and retain independent wall-time/source-freshness/cancel
+limits; a zero factor must not permit an indefinite wait. Falsify it if lookahead
+or controller phase skew causes a new gripper command while one is unresolved,
+arm knots advance during pause, or real stalls defeat useful task latency. This
+source comparison supplies no new physical timing, success or qualification claim.
+
 Falsify the serial candidate if it needs unreviewed target/timing changes, cannot
 establish same-command hardware completion within the bounded horizon, or loses
 fresh state/cancel ownership. After software acceptance, independently assigned
