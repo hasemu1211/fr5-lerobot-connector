@@ -1246,7 +1246,10 @@ class OperatorConsoleTests(unittest.TestCase):
                 console.close()
 
     def test_product_application_dispatches_executable_general_mode_to_production_factory(self):
-        repository = Path(__file__).resolve().parents[3]
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        repository = Path(directory.name)
+        self.portable_repository(repository)
         device = "usb-Generic_USB2.0_PC_CAMERA-video-index0"
         catalog = load_operator_catalog(repository, device_ids=[device])
         for combination in catalog["combinations"]:
@@ -1357,6 +1360,7 @@ class OperatorConsoleTests(unittest.TestCase):
                 created[0][1].campaign_operator.data_disposition, "PRODUCTION",
             )
             self.assertEqual(counters, {name: 0 for name in SIDE_EFFECT_COUNTERS})
+            self.assertFalse((repository / "outputs").exists())
         finally:
             application.close()
 
