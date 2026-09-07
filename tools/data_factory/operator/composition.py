@@ -3408,6 +3408,7 @@ def build_physical_operator_application(
     initial_environment: Mapping[str, Any] | None = None,
     initial_catalog: Mapping[str, Any] | None = None,
     initial_camera_devices: Sequence[object] | None = None,
+    collection_evidence_call: Callable[[], Mapping[str, Any]] | None = None,
     job_path: str | Path = DEFAULT_JOB,
     gripper_retune_path: str | Path | None = DEFAULT_GRIPPER_RETUNE,
     camera_environment_call: Callable[
@@ -4031,6 +4032,22 @@ def build_physical_operator_application(
             ),
         )
 
+    def stored_collection_evidence():
+        from tools.data_factory.collection_recommendation_io import discover_stored_collection
+
+        run_root = repository / "outputs/data_factory/runs"
+        try:
+            discovery = discover_stored_collection(run_root)
+        except (ContractError, OSError) as exc:
+            return {"run_directories": [], "scene_state_path": scene_state_path,
+                    "discovery": {"availability": "UNAVAILABLE", "reason_codes": [
+                        exc.code if isinstance(exc, ContractError) else "COLLECTION_RECOMMENDATION_SOURCE_IO"]}}
+        return {"run_directories": discovery["run_directories"], "scene_state_path": scene_state_path,
+                "discovery": {"availability": discovery["availability"],
+                    "discovery_digest": discovery["discovery_digest"], "run_count": len(discovery["run_directories"]),
+                    "excluded": [{"run_id": Path(item["run_directory"]).name, "reason_code": item["reason_code"]}
+                                 for item in discovery["excluded"]]}}
+
     def preset_qualification(endpoint, preset, *, trial=False):
         if preset is None or trial:
             return endpoint["sources"]["motion"]
@@ -4173,6 +4190,14 @@ def build_physical_operator_application(
             if draft.get("authoring_mode") == "ASSISTED" else
             [None for _pose in poses]
         )
+        advice = draft.get("acquisition_recommendation")
+        if advice is not None and (
+            advice["selection"] != selected or advice["object_poses"] != poses
+            or [item["yaw_sample_binding"] for item in advice["conditions"]] != yaw_bindings[:count]
+            or advice["sampling"] != {"authoring_mode": "ASSISTED", **{
+                key: draft[key] for key in ("requested_count", "normalized_seed", "repeat")}}
+        ):
+            raise ContractError("COLLECTION_ADVICE_COMPILER_MISMATCH")
         return {
             "direct_pose_sequence": poses,
             "direct_yaw_sample_bindings": yaw_bindings,
@@ -4233,6 +4258,8 @@ def build_physical_operator_application(
         ):
             raise ContractError("OPERATOR_APPLICATION_CAMPAIGN_FACTORY")
         if mode == "GENERAL_COLLECTION" and production_campaign_factory is not None:
+            if draft.get("acquisition_recommendation") is not None:
+                raise ContractError("COLLECTION_ADVICE_COMPILER_UNAVAILABLE")
             console = production_campaign_factory(
                 campaign_id, copy.deepcopy(selected), copy.deepcopy(draft),
             )
@@ -4388,6 +4415,10 @@ def build_physical_operator_application(
         object_position_declare_call=object_position_declare_call,
     )
     application_holder["application"] = application
+    # Bind the installed source without scanning it at startup or during views.
+    scene_state_path = str(repository / "outputs/data_factory/cells" / initial_job["robot_system_id"] / "scene_state.json")
+    application.collection_evidence_call = collection_evidence_call or stored_collection_evidence
+    application._collection_source = {"run_directories": [], "scene_state_path": scene_state_path}
     if initial_motion_preset is not None:
         matches = [item for item in catalog.get("motion_presets", []) if item["id"] == initial_motion_preset]
         if len(matches) != 1:

@@ -9,7 +9,9 @@ from pathlib import Path
 from tools.data_factory.campaign_operator import CampaignOperator, SIDE_EFFECT_COUNTERS
 from tools.data_factory.collection_recommendation import project_campaign_update_intent
 from tools.data_factory.collection_recommendation_io import recommend_stored_collection
-from tools.data_factory.operator.catalog import project_direct_poses, validate_operator_pose
+from tools.data_factory.operator.catalog import (
+    project_direct_poses, selected_state_space_design_profile, validate_operator_pose,
+)
 from tools.fr5_data_factory import ContractError, canonical_digest, load_json_strict
 
 POSE_FIELDS = ("place_id", "yaw_deg", "x_mm", "y_mm")
@@ -23,8 +25,8 @@ def _no_effect(*_args):
     raise ContractError("COLLECTION_ADVICE_AUTHOR_ONLY")
 
 
-def derive_next_draft(source, *, catalog, selection, draft, paired):
-    """The source binding is server-owned, retained from the previous campaign.
+def derive_next_draft(source, *, catalog, selection, draft, paired, expected_recommendation_digest=None):
+    """The source binding is server-owned, discovered or retained from a campaign.
 
     Evidence is read again at choice time. No persistence or execution callback
     is used; the existing native projector and compiler own condition selection.
@@ -38,14 +40,38 @@ def derive_next_draft(source, *, catalog, selection, draft, paired):
             ["git", "rev-parse", "HEAD"], cwd=Path(__file__).resolve().parents[4],
             text=True, stderr=subprocess.DEVNULL,
         ).strip()
+        acquisition = None
+        if source.get("scene_state_path") is not None:
+            if (draft["authoring_mode"] != "ASSISTED" or draft["pinned"] or draft["excluded"]
+                    or draft["direct_poses"] or draft.get("direct_pairs")
+                    or draft["state_space_design_profile"] != selected_state_space_design_profile(catalog, selection)):
+                raise ContractError("COLLECTION_ADVICE_CONSTRAINED_DRAFT")
+            if source.get("catalog_digest", catalog["catalog_digest"]) != catalog["catalog_digest"]:
+                raise ContractError("COLLECTION_ADVICE_SELECTION_CHANGED")
+            position = draft.get("object_position")
+            if not isinstance(position, dict) or position.get("status") != "AVAILABLE":
+                raise ContractError("COLLECTION_ADVICE_SOURCE_CHANGED")
+            acquisition = {"catalog": catalog, "selection": selection,
+                "scene_state_path": source["scene_state_path"], "expected_scene_digest": position["scene_state_digest"],
+                "object_instance_id": position["object_instance_id"],
+                **{key: draft[key] for key in ("requested_count", "normalized_seed", "repeat")}}
         stored = recommend_stored_collection(
             run_directories=source["run_directories"], source_commit=commit,
+            **({"acquisition": acquisition, "expected_recommendation_digest": expected_recommendation_digest}
+               if acquisition is not None else {}),
         )
         result["reason_codes"] = stored["reason_codes"]
         if stored["availability"] != "AVAILABLE":
             return result, None
         advice = stored["recommendation"]
         result.update(recommendation=advice, data_quality_analysis=stored["data_quality_analysis"])
+        if acquisition is not None:
+            if advice["object_poses"][0] != draft["current_object_pose"] or advice["selection"] != selection:
+                raise ContractError("COLLECTION_ADVICE_PLACEMENT_OR_SPLIT_MISMATCH")
+            result.update(status="READY", reason_codes=[], mode="ACQUISITION",
+                          conditions=copy.deepcopy(advice["conditions"]),
+                          recommendation_digest=advice["recommendation_digest"], authority=copy.deepcopy(advice["authority"]))
+            return result, copy.deepcopy(draft)
         if any(load_json_strict(Path(run) / "compiled_authoring_evidence.json") != source["authoring"]
                for run in source["run_directories"]):
             raise ContractError("COLLECTION_ADVICE_SOURCE_CHANGED")

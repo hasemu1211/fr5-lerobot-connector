@@ -1767,7 +1767,7 @@ function renderCollectionAdvice(view) {
   panel.hidden = !advice;
   if (!advice) return;
   const labels = {
-    NOT_CHECKED: "이전 수집의 저장 근거를 확인하면 다음 조건을 살펴볼 수 있습니다.",
+    NOT_CHECKED: "저장된 수집 근거를 확인하면 현재 입력에 맞는 다음 조건을 살펴볼 수 있습니다.",
     READY: "기존 고정 조건을 유지하면서 미수집 조건을 제안합니다. 비교한 뒤 적용하거나 현재 설정을 유지하세요.",
     UNAVAILABLE: "현재 근거와 설정으로 적용할 수 있는 추천이 없습니다. 현재 설정으로 계속할 수 있습니다.",
     DRAFT_CHANGED: "추천 확인 뒤 작성안이 바뀌었습니다. 현재 수정은 유지됩니다. 근거를 다시 확인하세요.",
@@ -1783,14 +1783,21 @@ function renderCollectionAdvice(view) {
     COLLECTION_ADVICE_TRANSITION_NOT_REPRESENTABLE: "이 추천에는 놓기 작업의 도착점·이동 결속이 없어 적용할 수 없습니다.",
     COLLECTION_ADVICE_SEQUENCE_NOT_REPRESENTABLE: "추천의 조건 순서를 현재 작성안으로 보존할 수 없습니다.",
     COLLECTION_ADVICE_SOURCE_CHANGED: "저장 근거가 이전 수집의 결속과 달라졌습니다.",
+    COLLECTION_ADVICE_CONSTRAINED_DRAFT: "직접 편집·고정·제외 또는 사용자 설계 조건은 이 추천으로 덮어쓰지 않습니다. 현재 설정을 유지하세요.",
+    COLLECTION_ACQUISITION_INPUT_CHANGED: "추천을 확인한 뒤 근거 또는 입력이 바뀌었습니다. 현재 입력으로 다시 확인하세요.",
   };
+  if (advice.mode === "ACQUISITION") {
+    labels.READY = "현재 위치와 수집 예산으로 균형 배분한 조건입니다. 관측된 성공 분포를 참고하되, 부족 조건 최적화나 실행 승인을 뜻하지 않습니다.";
+  }
   const status = advice.status === "DRAFT_CHANGED" && advice.last_choice
     ? "이미 처리한 추천입니다. 이후 수정한 작성안을 유지하며, 같은 추천을 다시 적용하지 않습니다."
     : labels[advice.status] ?? "추천 상태를 다시 확인하세요.";
   document.querySelector("#collection-advice-status").textContent = [status,
     ...(advice.reason_codes ?? []).map((code) => reasons[code] ?? "저장 근거를 확인할 수 없습니다. 세부 근거를 확인하세요.")].join(" ");
   document.querySelector("#collection-advice-conditions").innerHTML = (advice.conditions ?? []).map((item) =>
-    `<li><strong>${advice.native_selection?.pinned.includes(item.slot.slot_id) ? "고정 조건 유지" : "미수집 조건"}</strong> · ${escapeHtml(poseText(item.condition))} · ${escapeHtml(item.slot.robot_start_pose_id)} · ${escapeHtml(item.slot.split_group)}</li>`).join("");
+    advice.mode === "ACQUISITION"
+      ? `<li><strong>수집 제안 ${item.order_index + 1}</strong> · ${escapeHtml(poseText(item.source))}${item.destination ? ` → ${escapeHtml(poseText(item.destination))}` : ""}</li>`
+      : `<li><strong>${advice.native_selection?.pinned.includes(item.slot.slot_id) ? "고정 조건 유지" : "미수집 조건"}</strong> · ${escapeHtml(poseText(item.condition))} · ${escapeHtml(item.slot.robot_start_pose_id)} · ${escapeHtml(item.slot.split_group)}</li>`).join("");
   document.querySelector("#collection-advice-refresh").disabled = !canIntent("refresh_collection_advice");
   for (const choice of ["apply", "keep"]) {
     const button = document.querySelector(`#collection-advice-${choice}`);
@@ -1799,6 +1806,7 @@ function renderCollectionAdvice(view) {
   }
   document.querySelector("#collection-advice-evidence").textContent = JSON.stringify({
     recommendation: advice.recommendation, coverage: advice.data_quality_analysis,
+    discovery: advice.discovery,
     reason_codes: advice.reason_codes, last_choice: advice.last_choice,
   }, null, 2);
 }

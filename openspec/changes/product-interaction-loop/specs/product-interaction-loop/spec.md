@@ -182,7 +182,7 @@ The Collection application SHALL retain the preceding campaign's server-owned st
 
 #### Scenario: The current application cannot represent the source
 
-- **WHEN** stored authoring is absent or changed, current selection is incompatible, no eligible change remains, or the proposed sequence cannot preserve current placement and required transition bindings
+- **WHEN** legacy advice requires missing or changed stored authoring, current selection is incompatible, no eligible change remains, or the proposed sequence cannot preserve current placement and required transition bindings
 - **THEN** the application exposes an unavailable reason and retains the current draft
 - **AND** source-only advice is not presented as a complete pick/place transition or evidence of physical effectiveness.
 
@@ -197,6 +197,22 @@ The Collection application SHALL retain the preceding campaign's server-owned st
 - **WHEN** an apply or keep response is lost, the page is refreshed, or the same choice is delivered again
 - **THEN** the Web surface reads the canonical choice result without automatically repeating the command; automation can read that same result
 - **AND** duplicate or conflicting delivery cannot create another campaign or effect, changed stored evidence is revalidated before choice, and a failed recovery read leaves actions unavailable with explicit refresh available.
+
+#### Scenario: Acquisition advice survives application restart with current inputs
+
+- **WHEN** a native physical Collection application explicitly refreshes acquisition advice
+- **THEN** the existing Curator IO owner discovers eligible stored production evidence under the server-bound run root, with inspectable exclusions and no manually entered paths
+- **AND** the producer derives v2 advice from the current catalog, selection, canonical scene, finite count, seed and repeat without requiring historical compiled authoring
+- **AND** the view shows observed compatible semantic-success coverage and the proposed ordered source/destination conditions; it describes balanced sampling as a coverage proxy rather than an optimized deficit selector or execution authority
+- **AND** discovery and full derivation occur on explicit refresh, choice and accepted-advice compilation, never on view polling; browser projections omit filesystem paths.
+
+#### Scenario: Acquisition advice uses the existing draft and native compiler
+
+- **WHEN** an unconstrained ASSISTED draft accepts a freshly revalidated acquisition recommendation
+- **THEN** the application consumes its sampling inputs through existing draft updates, preserving exact current placement, start-pose selection, split, motion preset and all authority gates
+- **AND** actual native compilation verifies the same finite object sequence, including N+1 pick/place positions and yaw bindings, before constructing the campaign
+- **AND** stale scene, newer motion, changed evidence/catalog/selection or compiler disagreement rejects the accepted advice; later user edits require fresh derivation and cannot be overwritten
+- **AND** direct editing, pins, exclusions and custom design constraints remain intact and are reported as unsupported by this acquisition adapter; choosing KEEP does not change them.
 
 ### Requirement: Observe canonical reviews across supported interfaces
 
