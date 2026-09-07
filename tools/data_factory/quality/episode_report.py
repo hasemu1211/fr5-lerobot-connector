@@ -112,7 +112,8 @@ def _object_frame_binding(accepted_episode: Mapping[str, Any], resolved_job: Map
         or precommit.get("run_id") != episode_id
         or precommit.get("approved_plan_digest") != preapproval.get("plan_digest")
         or not isinstance(bindings, Mapping)
-        or set(bindings) != PLAN_BINDING_DIGEST_FIELDS
+        or set(bindings) != (PLAN_BINDING_DIGEST_FIELDS | {"motion_preset"}
+                             if motion_schema == "data_factory.motion_qualification.v3" else PLAN_BINDING_DIGEST_FIELDS)
         or any(not isinstance(value, str) or not DIGEST.fullmatch(value) for value in bindings.values())
     ):
         raise ContractError("OBJECT_FRAME_PLAN_BINDING")
@@ -192,7 +193,7 @@ def _object_frame_binding(accepted_episode: Mapping[str, Any], resolved_job: Map
         or motion_qualification.get("robot_description_digest") != bindings["robot_description_digest"]
         or not isinstance(motion_qualification.get("frames"), Mapping)
         or motion_qualification["frames"] != {"planning_frame": "base_link", "planning_group": "fairino5_v6_group", "tool_link": "wrist3_link"}
-        or motion_schema == "data_factory.motion_qualification.v2"
+        or motion_schema in {"data_factory.motion_qualification.v2", "data_factory.motion_qualification.v3"}
         and (
             not isinstance(motion_qualification.get("planning_scene_profile_id"), str)
             or SAFE_ID.fullmatch(motion_qualification["planning_scene_profile_id"])
@@ -207,6 +208,16 @@ def _object_frame_binding(accepted_episode: Mapping[str, Any], resolved_job: Map
     ):
         raise ContractError("OBJECT_FRAME_BINDING")
     validate_rigid_transform(motion_qualification.get("tool_to_tcp"), "OBJECT_FRAME_BINDING")
+    if motion_schema == "data_factory.motion_qualification.v3" and (
+        not isinstance(motion_qualification.get("motion_preset"), Mapping)
+        or set(motion_qualification["motion_preset"]) != {"id", "digest"}
+        or not isinstance(motion_qualification["motion_preset"].get("id"), str)
+        or SAFE_ID.fullmatch(motion_qualification["motion_preset"]["id"]) is None
+        or not isinstance(bindings.get("motion_preset"), str)
+        or DIGEST.fullmatch(bindings["motion_preset"]) is None
+        or bindings["motion_preset"] != motion_qualification["motion_preset"].get("digest")
+    ):
+        raise ContractError("OBJECT_FRAME_BINDING")
     validate_rigid_transform(motion_qualification.get("datum_to_tcp_grasp"), "OBJECT_FRAME_BINDING")
     pose = resolve_pose({**resolved_job, "calibration": {**calibration, **derived}})
     transform = validate_rigid_transform({"translation_m": pose["position_base_m"], "rotation_columns": pose["rotation_base_columns"]}, "OBJECT_FRAME_BINDING")

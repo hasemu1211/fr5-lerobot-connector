@@ -14,6 +14,7 @@ from tools.fr5_data_factory import (
     SAFE_ID,
     canonical_digest,
     normalize_planning_scene,
+    validate_motion_preset_binding,
 )
 
 
@@ -101,13 +102,14 @@ def _wait_phase(
         raise
 
 
-def _validated_motion(value: object, prefix: str) -> dict[str, Any]:
+def _validated_motion(value: object, prefix: str, motion_preset=None) -> dict[str, Any]:
     if not isinstance(value, Mapping):
         raise ContractError(f"{prefix}_QUALIFICATION")
     keys = MOTION_QUALIFICATION_KEYS_BY_SCHEMA.get(value.get("schema_version"))
     if keys is None or set(value) != keys:
         raise ContractError(f"{prefix}_QUALIFICATION")
     motion = copy.deepcopy(dict(value))
+    validate_motion_preset_binding(motion, motion_preset)
     try:
         safe = motion["qualified_safe_joint_positions_rad"]
         scene = normalize_planning_scene(motion["planning_scene"])
@@ -135,7 +137,7 @@ def _validated_motion(value: object, prefix: str) -> dict[str, Any]:
         or not isinstance(motion.get("home_candidate_digest"), str)
         or not DIGEST.fullmatch(motion["home_candidate_digest"])
         or motion.get("schema_version")
-        == "data_factory.motion_qualification.v2"
+        in {"data_factory.motion_qualification.v2", "data_factory.motion_qualification.v3"}
         and (
             not isinstance(motion.get("planning_scene_profile_id"), str)
             or SAFE_ID.fullmatch(motion["planning_scene_profile_id"]) is None
@@ -174,9 +176,9 @@ def _validated_motion(value: object, prefix: str) -> dict[str, Any]:
     return motion
 
 
-def validate_home_recovery_qualification(value: object) -> dict[str, Any]:
+def validate_home_recovery_qualification(value: object, *, motion_preset=None) -> dict[str, Any]:
     """Validate and normalize HOME inputs before any physical preparation."""
-    return _validated_motion(value, "HOME_RECOVERY")
+    return _validated_motion(value, "HOME_RECOVERY", motion_preset)
 
 
 def _validated_start_pose(
@@ -391,10 +393,10 @@ def _transition(
 def transition_to_start(
     transport, *, motion_qualification: Mapping[str, Any],
     robot_start_pose_qualification: Mapping[str, Any], sleep_call=time.sleep,
-    cancel_event=None, _terminal_owner=None,
+    cancel_event=None, _terminal_owner=None, motion_preset=None,
 ) -> dict[str, Any]:
     """Move once to an already-qualified collection start pose, without recording."""
-    motion = _validated_motion(motion_qualification, "START_TRANSITION")
+    motion = _validated_motion(motion_qualification, "START_TRANSITION", motion_preset)
     pose, target, tolerances = _validated_start_pose(
         robot_start_pose_qualification, motion=motion,
     )
@@ -425,7 +427,7 @@ def transition_to_start(
         "target_rad": dict(zip(JOINT_ORDER, transition["target_rad"])),
         "final_rad": dict(zip(JOINT_ORDER, transition["final_rad"])),
         "max_joint_delta_rad": transition["max_joint_delta_rad"],
-        "motion_qualification_digest": canonical_digest(motion),
+        "motion_qualification_digest": canonical_digest(motion_qualification if motion_preset is not None else motion),
         "robot_start_pose_qualification_digest": pose["qualification_digest"],
         "home_candidate_digest": pose["home_candidate_digest"],
         "precommit_evidence_digest": transition["precommit_evidence_digest"],
@@ -438,9 +440,10 @@ def transition_to_start(
 
 def recover_home(
     transport, *, motion_qualification: Mapping[str, Any], sleep_call=time.sleep,
+    motion_preset=None,
 ) -> dict[str, Any]:
     """Open the gripper, move once to qualified HOME, and verify."""
-    motion = validate_home_recovery_qualification(motion_qualification)
+    motion = validate_home_recovery_qualification(motion_qualification, motion_preset=motion_preset)
     _ready_graph(transport.preflight(), "HOME_RECOVERY_GRAPH")
     max_age = float(motion["max_joint_state_age_s"])
     before = _snapshot(transport.snapshot(max_age), "HOME_RECOVERY")
@@ -482,7 +485,7 @@ def recover_home(
         "gripper_open": True,
         "target_rad": transition["target_rad"],
         "final_rad": transition["final_rad"],
-        "motion_qualification_digest": canonical_digest(motion),
+        "motion_qualification_digest": canonical_digest(motion_qualification if motion_preset is not None else motion),
     }
     if transition["arm_goal_count"]:
         result.update({
@@ -547,12 +550,14 @@ def _live(
             close()
 
 
-def recover_home_live(*, motion_qualification: Mapping[str, Any]) -> dict[str, Any]:
+def recover_home_live(*, motion_qualification: Mapping[str, Any], motion_preset=None) -> dict[str, Any]:
     """Run HOME recovery in this foreground process and release its ROS node."""
+    validate_home_recovery_qualification(motion_qualification, motion_preset=motion_preset)
     return _live(
         "fr5_operator_home_recovery", "HOME_RECOVERY_ROS_UNAVAILABLE",
         lambda transport, _terminal_owner: recover_home(
             transport, motion_qualification=motion_qualification,
+            motion_preset=motion_preset,
         ),
     )
 
@@ -560,7 +565,7 @@ def recover_home_live(*, motion_qualification: Mapping[str, Any]) -> dict[str, A
 def transition_to_start_live(
     *, motion_qualification: Mapping[str, Any],
     robot_start_pose_qualification: Mapping[str, Any],
-    cancel_event=None,
+    cancel_event=None, motion_preset=None,
 ) -> dict[str, Any]:
     """Run a qualified start transition in this process and release its node."""
     if cancel_event is None or any(
@@ -570,11 +575,13 @@ def transition_to_start_live(
         )
     ):
         raise ContractError("START_TRANSITION_OWNER")
+    _validated_motion(motion_qualification, "START_TRANSITION", motion_preset)
     return _live(
         "fr5_operator_start_transition", "START_TRANSITION_ROS_UNAVAILABLE",
         lambda transport, terminal_owner: transition_to_start(
             transport,
             motion_qualification=motion_qualification,
+            motion_preset=motion_preset,
             robot_start_pose_qualification=robot_start_pose_qualification,
             cancel_event=cancel_event,
             _terminal_owner=terminal_owner,

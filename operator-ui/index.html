@@ -112,6 +112,12 @@
                 <button id="apply-current-object" type="submit">현재 위치 적용</button>
               </form>
             </section>
+            <div class="range-workspace">
+              <label for="motion-preset-select">동작 속도 정책<select id="motion-preset-select" aria-describedby="motion-preset-summary"></select></label>
+              <div><p id="motion-preset-summary" role="status"></p>
+                <details><summary>구간별 요청값 보기</summary><dl id="motion-preset-phases"></dl></details>
+              </div>
+            </div>
             <div class="range-controls">
               <fieldset id="authoring-mode" class="segmented-control"><legend>작성 방식</legend>
                 <label><input type="radio" name="authoring_mode" value="ASSISTED"> 자동 선택</label>

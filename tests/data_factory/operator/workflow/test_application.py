@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+import json
 import threading
 import unittest
 from pathlib import Path
@@ -454,6 +455,33 @@ class CollectionOperatorApplicationTests(unittest.TestCase):
                 self.assertEqual(released["episode_history"], campaign.history)
                 self.assertEqual(released["effect_counts"], active["effect_counts"])
                 self.assertEqual(campaign.episode_plan, retained_evidence)
+
+    def test_motion_preset_selection_replay_stale_and_keep_preserve_draft(self):
+        self.consume("prepare_environment", {}, "preset-prepare")
+        view = self.application.bridge_core.snapshot()
+        draft = copy.deepcopy(self.application.draft)
+        preset = view["projection"]["motion_presets"][0]
+        self.assertEqual(preset["status"], "QUALIFICATION_REQUIRED")
+        self.assertNotIn("source", json.dumps(preset))
+        binding = {key: preset[key] for key in ("id", "digest")}
+        command = intent(view, "update_draft", {"draft_id": draft["draft_id"], "motion_preset": binding}, "preset-choice")
+        self.application.bridge_core.consume(command)
+        # A lost response is recovered by reading; duplicate intents have no effects.
+        with self.assertRaisesRegex(ContractError, "OPERATOR_INTENT_REPLAY"):
+            self.application.bridge_core.consume(command)
+        self.assertEqual(self.application.draft["revision"], draft["revision"] + 1)
+        selected = self.application.bridge_core.snapshot()["projection"]
+        self.assertEqual(selected["draft"]["motion_preset"], binding)
+        self.assertFalse(selected["draft"]["execution_ready"])
+        self.assertNotIn("compile_draft", selected["available_ops"])
+        for key in ("current_object_pose", "direct_poses", "requested_count", "normalized_seed"):
+            self.assertEqual(self.application.draft[key], draft[key])
+        with self.assertRaisesRegex(ContractError, "MOTION_PRESET_BINDING"):
+            self.consume("update_draft", {"draft_id": draft["draft_id"], "motion_preset": {**binding, "digest": "sha256:" + "0" * 64}}, "preset-stale")
+        self.consume("update_draft", {"draft_id": draft["draft_id"], "motion_preset": None}, "preset-keep")
+        self.assertIsNone(self.application.draft["motion_preset"])
+        self.assertIn("compile_draft", self.application.bridge_core.snapshot()["projection"]["available_ops"])
+        self.assertEqual(self.campaigns, [])
 
     def test_environment_precedes_factory_and_invalid_mode_has_zero_effects(self):
         view = self.application.bridge_core.snapshot()["projection"]

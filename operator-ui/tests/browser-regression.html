@@ -32,6 +32,7 @@
           </fieldset>
           <label><span id="workspace-select-label">작업영역</span><select id="workspace-select" data-axis="workspace"></select><small data-axis-hint="workspace"></small></label><p id="workspace-route-summary"></p>
           <fieldset id="authoring-mode"><label><input type="radio" name="authoring_mode" value="ASSISTED">assisted</label><label><input type="radio" name="authoring_mode" value="DIRECT_EDIT">direct</label></fieldset>
+          <label>동작 속도 정책<select id="motion-preset-select"></select></label><p id="motion-preset-summary"></p><dl id="motion-preset-phases"></dl>
           <label>count<input id="count-input" type="number" min="1" max="100"></label><label>repeat<input id="repeat-input" type="number" min="1" max="100"></label><label>Campaign seed<input id="seed-input" type="number" min="0" max="9007199254740991" step="1"></label><select id="split-select" data-axis="split"></select>
           <h4 id="current-object-title">current object</h4><p id="current-object-status"></p><form id="current-object-form"><label>X<input id="current-object-x" type="number" step="any" required></label><label>Y<input id="current-object-y" type="number" step="any" required></label><label>yaw<input id="current-object-yaw" type="number" step="any" required></label><button id="apply-current-object" type="submit">apply</button></form>
           <form id="experiment-design-form" hidden><strong id="experiment-design-title">design</strong><label>Nx<input id="design-columns-input" type="number" min="1" max="100" required></label><label>Ny<input id="design-rows-input" type="number" min="1" max="100" required></label><label>Nyaw<input id="design-yaw-input" type="number" min="1" max="100" required></label><button id="apply-experiment-design" type="submit">apply design</button><p id="experiment-design-status"></p></form>
@@ -87,6 +88,9 @@
     let draftRequestedCount;
     let draftRepeat;
     let draftNormalizedSeed;
+    let draftMotionPreset = null;
+    let losePresetResponse = false;
+    const motionPreset = {id: "practical-transfer-r001", digest: "sha256:" + "4".repeat(64), purpose: "이송·복귀 시간 단축 후보", status: "QUALIFICATION_REQUIRED", phase_scaling: {PREGRASP_PTP: {velocity_scaling: .1, acceleration_scaling: .1}}};
     let directPoses = [];
     let directPairs = [];
     let workspaceDomainAvailable = true;
@@ -118,6 +122,12 @@
       const flat = merge(clone(fixture.base_view), fixture.states[stateKey]);
       if (stateKey === "running") flat.coverage = clone(fixture.states.review_campaign.coverage);
       flat.draft.normalized_seed = draftNormalizedSeed ?? flat.draft.normalized_seed;
+      flat.motion_presets = [motionPreset];
+      flat.draft.motion_preset = draftMotionPreset;
+      if (draftMotionPreset) {
+        flat.draft.execution_ready = false;
+        flat.draft.execution_reason = "MOTION_PRESET_QUALIFICATION_REQUIRED";
+      }
       if (stateKey === "results") flat.episode_history.forEach((item, index) => {
         item.episode_ledger = {
           ledger_digest: `sha256:${String(index + 1).repeat(64)}`,
@@ -205,6 +215,7 @@
         flat.catalog.axes.frame.push({id: flat.draft.selection.frame, label: "새 작업영역 좌표계 r1", available: true, reason: null, description: "저장됨"});
       }
       if (sessionIdOverride) flat.session_id = sessionIdOverride;
+      if (draftMotionPreset) flat.available_ops = flat.available_ops.filter((op) => op !== "compile_draft");
       const {schema_version, session_id, revision, generated_at, view_digest, ...projection} = flat;
       return {schema_version, session_id, revision, generated_at, view_digest, projection, authority: {browser: "INTENT_ONLY", training_approval: "SEPARATE"}};
     };
@@ -250,6 +261,7 @@
         if (postResult === "accepted") {
           if (request.body.op === "update_draft") {
             const payload = request.body.payload;
+            if (Object.hasOwn(payload, "motion_preset")) draftMotionPreset = clone(payload.motion_preset);
             if (payload.authoring_mode === "DIRECT_EDIT" && draftAuthoringMode !== "DIRECT_EDIT") directPairs = [
               {start_pose_id: "fr5-home-r001", place_id: "PLACE_A", x_mm: 0, y_mm: 0, yaw_deg: 0},
               {start_pose_id: "fr5-home-r001", place_id: "PLACE_A", x_mm: 10, y_mm: 10, yaw_deg: 90},
@@ -304,6 +316,10 @@
           });
         });
         const result = fixture.intent_results[postResult];
+        if (losePresetResponse && Object.hasOwn(request.body.payload, "motion_preset")) {
+          losePresetResponse = false;
+          throw new TypeError("fixture applied preset response lost");
+        }
         return new Response(JSON.stringify(result), {status: result.ok ? 200 : 409, headers: {"Content-Type": "application/json"}});
       }
       return nativeFetch(input, init);
@@ -332,6 +348,28 @@
     async function run() {
       try {
         await waitFor(() => currentView?.revision === 1);
+        if (new URLSearchParams(location.search).get("only") === "motion-preset") {
+          const select = document.querySelector("#motion-preset-select");
+          check(select.options.length === 2 && select.value === "", "legacy qualification remains the default");
+          const before = intentAttempts;
+          const placement = JSON.stringify(currentView.draft.current_object_pose);
+          losePresetResponse = true;
+          select.value = motionPreset.id;
+          select.dispatchEvent(new Event("change", {bubbles: true}));
+          await waitFor(() => !intentBusy && currentView?.draft.motion_preset?.id === motionPreset.id);
+          check(intentAttempts === before + 1, "lost response recovers by GET with one POST only");
+          check(JSON.stringify(posted.at(-1).body.payload.motion_preset) === JSON.stringify({id: motionPreset.id, digest: motionPreset.digest}), "browser sends only selected native identity and digest");
+          check(document.querySelector("#compile-campaign").disabled && document.querySelector("#motion-preset-summary").textContent.includes("물리 자격"), "unqualified policy is inspectable and blocks compile");
+          check(document.querySelector("#motion-preset-phases").textContent.includes("10%"), "resolved requested phase values render");
+          check(JSON.stringify(currentView.draft.current_object_pose) === placement, "policy selection preserves object placement");
+          select.value = "";
+          select.dispatchEvent(new Event("change", {bubbles: true}));
+          await waitFor(() => !intentBusy && currentView?.draft.motion_preset === null);
+          check(!document.querySelector("#compile-campaign").disabled, "keep original returns to existing gates without typing");
+          document.body.dataset.result = "pass";
+          output.textContent = `${checks.length} checks passed\n${checks.join("\n")}`;
+          return;
+        }
         check(document.body.dataset.bridge === "ready", "ready view is explicit");
         check(document.querySelectorAll("[data-step-target]").length === 6, "six-step product flow renders");
         check(document.querySelector("#step-environment").hidden && !document.querySelector("#step-plan").hidden, "AUTHORING enters collection plan directly");

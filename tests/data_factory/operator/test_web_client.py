@@ -351,7 +351,7 @@ class CollectionBrowserRecoveryTest(unittest.TestCase):
         thread = threading.Thread(target=server.serve_forever)
         thread.start()
         try:
-            for query, minimum in (("?only=body-recovery", 21), ("?only=state-recovery", 33), ("", 126)):
+            for query, minimum in (("?only=motion-preset", 7), ("?only=body-recovery", 21), ("?only=state-recovery", 33), ("", 126)):
                 with self.subTest(query=query), tempfile.TemporaryDirectory() as profile:
                     replay = subprocess.run([
                         "/opt/google/chrome/chrome", "--headless=new", "--disable-gpu",

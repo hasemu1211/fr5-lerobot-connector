@@ -71,6 +71,22 @@ FR5가 Collection, Curation, Training/Evaluation, Rollout, Learning Evidence, Pu
 - **WHEN** 속도 또는 촬영·기록 품질의 상향을 검토한다
 - **THEN** 시간과 충분한 품질을 함께 비교하며 최대 속도·최대 화질 자체를 목표로 삼지 않고, 프리셋 선택이 TEST/GENERAL 데이터 구분이나 technical·semantic·training authority를 자동 변경하지 않는다
 
+#### Scenario: One arm policy is selected for multiple workspaces
+- **WHEN** Web 또는 CLI에서 구간별 속도 정책을 선택한다
+- **THEN** 기존 명시적 phase를 사용하는 하나의 version/digest 정책이 A/B에 공통 적용되며, geometry 및 hardware/planner 최대값과 분리된다
+- **AND** 기존 자격과 정확히 결속된 해석 결과만 계획·episode evidence·HOME/시작 자세 복구에 사용되고, 기존 설정을 선택한 과거 프로그램·계획·데이터의 재생은 변경되지 않는다
+
+#### Scenario: A candidate policy has not been physically qualified
+- **WHEN** 기존 자격에서 새 정책의 검증 후보를 준비한다
+- **THEN** 결과는 UNQUALIFIED이며 기존 QUALIFIED 상태·qualified_at을 상속하지 않는다
+- **AND** Web에서 구간별 요청값과 자격 필요 상태를 검토하고 초안에 선택할 수 있지만 필요한 endpoint 자격이 없으면 계획 확정·실행은 거부된다
+- **AND** 기존 검증 설정으로 돌아가는 데 추가 승인·타이핑이 필요하지 않고, 객체 배치·수량·후속 편집을 보존한다
+
+#### Scenario: Policy or qualification changes after selection
+- **WHEN** 선택한 정책 또는 endpoint 자격의 digest·해석값이 변경되거나 서로 일치하지 않는다
+- **THEN** 계획 생성과 복구는 효과 전에 거부되며, 다른 endpoint 자격이나 과거 정책의 승인으로 대체하지 않는다
+- **AND** 응답 유실은 canonical 상태를 다시 읽어 복구하고 명령을 자동 재전송하지 않는다
+
 ### Requirement: Existing owners retain authority
 OpenSpec은 지속 가능한 외부 행동 intent, 안정된 경계와 outcome 단위의 완료 기준 및 evidence 연결을 소유해야 한다(SHALL). Orca는 상세 실행·의존성·attempt 진척·live resource·blocker·handoff를, source와 tests는 실행 가능한 계약과 수치 truth를, MEX는 파생된 로컬 탐색 정보를, Public Documentation은 검증된 사용자 의미를 계속 소유해야 한다(SHALL).
 

@@ -60,6 +60,7 @@ from tools.data_factory.operator.catalog import (
     SELECTION_SCHEMA,
     camera_binding_digest,
     load_operator_catalog,
+    selected_motion_preset,
     project_assisted_poses,
     project_balanced_start_pose_ids,
     project_direct_poses,
@@ -152,6 +153,7 @@ from tools.fr5_data_factory import (
     SAFE_ID,
     canonical_digest,
     load_json_strict,
+    load_motion_preset,
     normalize_yaw_deg,
     task_instruction,
 )
@@ -1400,6 +1402,7 @@ def build_physical_runtime(
     camera_device_id: str | None = None, job: str | Path = DEFAULT_JOB,
     gripper_retune: str | Path | None = None,
     data_mode: str = "GENERAL_COLLECTION",
+    motion_preset: str | None = None,
     dataset_name: str = "fr5_smolvla_up_wrist_30hz",
     auto_prepare: bool = True,
 ) -> OperatorRuntime:
@@ -1561,6 +1564,7 @@ def build_physical_runtime(
                 repository / "datasets/fr5_episodes" / dataset_name
             ),
             initial_data_mode=data_mode,
+            initial_motion_preset=motion_preset,
             camera_environment_call=select_camera_environment,
         )
         bridge = LoopbackBridge(
@@ -1682,6 +1686,7 @@ def build_physical_operator_console(
     operator_label: str, job_path: str | Path = DEFAULT_JOB,
     yaw0_sheet: str | Path = DEFAULT_YAW0,
     motion_qualification_path: str | Path = DEFAULT_MOTION,
+    motion_preset: Mapping[str, str] | None = None,
     home_candidate_path: str | Path = DEFAULT_HOME,
     collection_profile_path: str | Path = DEFAULT_PROFILE,
     urdf_path: str | Path = DEFAULT_URDF,
@@ -1920,6 +1925,9 @@ def build_physical_operator_console(
         None if gripper_retune_path is None
         else load_json_strict(paths["gripper_retune"])
     )
+    if motion_preset is not None:
+        load_motion_preset(repository / "config/data_factory", motion_preset)
+        payload["motion_preset"] = copy.deepcopy(dict(motion_preset))
     motion_qualification = load_json_strict(paths["motion"])
     endpoint_motion_qualifications = [
         load_json_strict(binding["motion_qualification"])
@@ -2611,6 +2619,12 @@ def build_physical_operator_console(
         )
         if not isinstance(endpoint_motion, Mapping):
             raise ContractError("PHYSICAL_CONSOLE_WORKSPACE_BINDING")
+        policy = {}
+        if motion_preset is not None:
+            endpoint = resolved_workspace_bindings[receipt["normalized_job"]["place_id"]]
+            if canonical_digest(load_json_strict(endpoint["motion_qualification"])) != canonical_digest(endpoint_motion):
+                raise ContractError("MOTION_PRESET_BINDING")
+            policy["motion_preset"] = load_motion_preset(repository / "config/data_factory", motion_preset)
         home_snapshot = (
             snapshot_call() if snapshot_call is not None
             else capture_home_snapshot(tcp_candidate_manifest=paths["tcp"])
@@ -2643,6 +2657,7 @@ def build_physical_operator_console(
                     motion_qualification=endpoint_motion,
                     robot_start_pose_qualification=qualification,
                     cancel_event=cancel_event,
+                    **policy,
                 )
             else:
                 transition = start_transition_call(
@@ -3307,6 +3322,7 @@ def build_physical_operator_application(
     ] | None = None,
     production_dataset_root: str | Path | None = None,
     initial_data_mode: str = "TEST_COLLECTION",
+    initial_motion_preset: str | None = None,
     initial_environment: Mapping[str, Any] | None = None,
     initial_catalog: Mapping[str, Any] | None = None,
     initial_camera_devices: Sequence[object] | None = None,
@@ -3900,6 +3916,17 @@ def build_physical_operator_application(
             ),
         )
 
+    def preset_qualification(endpoint, preset):
+        if preset is None:
+            return endpoint["sources"]["motion"]
+        qualified = preset["qualifications"].get(endpoint["motion_id"])
+        if qualified is None:
+            raise ContractError("MOTION_PRESET_QUALIFICATION_REQUIRED")
+        path = _repository_path(repository, qualified["source"])
+        if canonical_digest(load_json_strict(path)) != qualified["digest"]:
+            raise ContractError("MOTION_PRESET_BINDING")
+        return str(path)
+
     def selected_home_recovery_call() -> Mapping[str, Any]:
         if home_recovery_call is not None:
             return home_recovery_call()
@@ -3907,14 +3934,19 @@ def build_physical_operator_application(
             recover_home_live,
             validate_home_recovery_qualification,
         )
-        source = active_combination()["sources"]
-        motion = validate_home_recovery_qualification(load_json_strict(
-            _repository_path(repository, source["motion"]),
-        ))
+        application = application_holder.get("application")
+        binding = application.draft.get("motion_preset") if application is not None else None
+        preset = selected_motion_preset(active_catalog(), binding)
+        policy = {"motion_preset": load_motion_preset(repository / "config/data_factory", binding)} if binding is not None else {}
+        motion = load_json_strict(
+            _repository_path(repository, preset_qualification(active_combination(), preset)),
+        )
+        validate_home_recovery_qualification(motion, **policy)
         if home_recovery_prepare_call is not None:
             home_recovery_prepare_call()
         recovery = recover_home_live(
             motion_qualification=motion,
+            **policy,
         )
         application = application_holder.get("application")
         if (
@@ -4118,6 +4150,7 @@ def build_physical_operator_application(
                 raise ContractError("OPERATOR_APPLICATION_CAMPAIGN_FACTORY")
             endpoint_combinations.append(match)
         runtime_workspace_bindings = {}
+        preset = selected_motion_preset(active_catalog(), draft.get("motion_preset"))
         for endpoint in endpoint_combinations:
             domains = [
                 domain for domain in active_catalog()["workspace_domains"]
@@ -4132,7 +4165,7 @@ def build_physical_operator_application(
                 "frame_id": endpoint["frame_id"],
                 "selected_sheet": endpoint["sources"]["selected_sheet"],
                 "yaw0_sheet": endpoint["sources"]["yaw0_sheet"],
-                "motion_qualification": endpoint["sources"]["motion"],
+                "motion_qualification": preset_qualification(endpoint, preset),
                 "region_binding": {
                     key: copy.deepcopy(region[key]) for key in (
                         "layout_id", "layout_digest", "region_id",
@@ -4150,7 +4183,8 @@ def build_physical_operator_application(
             operator_label=operator_label,
             job_path=source["job"],
             yaw0_sheet=source["yaw0_sheet"],
-            motion_qualification_path=source["motion"],
+            motion_qualification_path=preset_qualification(chosen, preset),
+            motion_preset=draft.get("motion_preset"),
             home_candidate_path=source["start_pose"],
             collection_profile_path=source["camera_profile"],
             tcp_candidate_manifest=tcp_manifest_path,
@@ -4226,6 +4260,12 @@ def build_physical_operator_application(
         effect_scope="PHYSICAL",
     )
     application_holder["application"] = application
+    if initial_motion_preset is not None:
+        matches = [item for item in catalog.get("motion_presets", []) if item["id"] == initial_motion_preset]
+        if len(matches) != 1:
+            application.close()
+            raise ContractError("MOTION_PRESET_BINDING")
+        application.draft["motion_preset"] = {key: matches[0][key] for key in ("id", "digest")}
     return application, {
         "session_id": session_id,
         "effect_scope": "PHYSICAL",

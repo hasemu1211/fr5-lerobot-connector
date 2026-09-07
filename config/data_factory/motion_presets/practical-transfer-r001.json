@@ -1,0 +1,15 @@
+{
+  "schema_version": "data_factory.motion_preset.v1",
+  "motion_preset_id": "practical-transfer-r001",
+  "purpose": "이송·복귀 시간 단축 후보 — 접촉·하강·그리퍼 설정 유지",
+  "phase_scaling": {
+    "PREGRASP_PTP": {"velocity_scaling": 0.1, "acceleration_scaling": 0.1},
+    "APPROACH_STOP_LIN": {"velocity_scaling": 0.1, "acceleration_scaling": 0.03},
+    "FINAL_APPROACH_LIN": {"velocity_scaling": 0.03, "acceleration_scaling": 0.03},
+    "LIFT_LIN": {"velocity_scaling": 0.03, "acceleration_scaling": 0.03},
+    "RECYCLE_APPROACH_PTP": {"velocity_scaling": 0.1, "acceleration_scaling": 0.1},
+    "LOWER_LIN": {"velocity_scaling": 0.015, "acceleration_scaling": 0.03},
+    "RETREAT_LIN": {"velocity_scaling": 0.03, "acceleration_scaling": 0.03},
+    "SAFE_POSE_PTP": {"velocity_scaling": 0.1, "acceleration_scaling": 0.1}
+  }
+}

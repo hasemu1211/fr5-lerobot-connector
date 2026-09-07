@@ -46,6 +46,8 @@ from tools.fr5_data_factory import (
     ContractError, SAFE_ID,
     canonical_digest,
     load_json_strict,
+    validate_motion_preset,
+    validate_motion_preset_binding,
     normalize_yaw_deg,
     validate_planning_scene_profile,
     validate_sheet_manifest,
@@ -217,6 +219,30 @@ def _sheet_spatial_strata(sheet: Mapping[str, Any]) -> dict[str, int]:
     return {"columns": columns, "rows": rows}
 
 
+def motion_geometry_digest(value):
+    """Compare the existing qualified recipe apart from arm speed policy."""
+    geometry = copy.deepcopy(dict(value))
+    for key in ("schema_version", "motion_qualification_id", "qualification_status", "qualified_at", "motion_preset"):
+        geometry.pop(key, None)
+    for phase, limits in geometry.get("phase_limits", {}).items():
+        if not phase.startswith("GRIPPER"):
+            limits.pop("velocity_scaling", None)
+            limits.pop("acceleration_scaling", None)
+    return canonical_digest(geometry)
+
+
+def selected_motion_preset(catalog, binding):
+    if binding is None:
+        return None
+    if not isinstance(binding, dict) or set(binding) != {"id", "digest"}:
+        raise ContractError("MOTION_PRESET_BINDING")
+    matches = [item for item in catalog.get("motion_presets", [])
+               if {key: item[key] for key in ("id", "digest")} == binding]
+    if len(matches) != 1:
+        raise ContractError("MOTION_PRESET_BINDING")
+    return matches[0]
+
+
 def _motion_matches_profiles(
     motion: Mapping[str, Any], *, robot: Mapping[str, Any],
     cell: Mapping[str, Any], object_profile: Mapping[str, Any],
@@ -300,7 +326,31 @@ def load_operator_catalog(
         identifier_field="approach_sampling_profile_id", revision_marker="-r",
     )
     homes = _files(root, "config/data_factory/home_candidates")
-    motions = _files(root, "config/data_factory/motion_qualifications")
+    all_motions = _files(root, "config/data_factory/motion_qualifications")
+    motions = [(path, value) for path, value in all_motions
+               if value.get("schema_version") != "data_factory.motion_qualification.v3"]
+    motion_presets = []
+    for _path, raw in _files(root, "config/data_factory/motion_presets"):
+        preset = validate_motion_preset(raw)
+        if _path.stem != preset["motion_preset_id"]:
+            raise ContractError("MOTION_PRESET_BINDING")
+        binding = {"id": preset["motion_preset_id"], "digest": canonical_digest(preset)}
+        qualifications = {}
+        for _base_path, base in motions:
+            for path, candidate in all_motions:
+                if (candidate.get("schema_version") == "data_factory.motion_qualification.v3"
+                    and candidate.get("qualification_status") == "QUALIFIED"
+                    and candidate.get("motion_preset") == binding):
+                    validate_motion_preset_binding(candidate, preset)
+                    if motion_geometry_digest(candidate) != motion_geometry_digest(base):
+                        continue
+                    identifier = base["motion_qualification_id"]
+                    if identifier in qualifications:
+                        raise ContractError("MOTION_PRESET_AMBIGUOUS_QUALIFICATION")
+                    qualifications[identifier] = {"source": str(path), "digest": canonical_digest(candidate)}
+        motion_presets.append({**binding, "purpose": preset["purpose"],
+                              "phase_scaling": preset["phase_scaling"],
+                              "qualifications": qualifications})
     planning_scene_files = _files(root, "config/data_factory/planning_scenes")
     planning_scenes = {
         value.get("planning_scene_profile_id"): value
@@ -1034,6 +1084,7 @@ def load_operator_catalog(
 
     result = {
         "schema_version": CATALOG_SCHEMA,
+        "motion_presets": motion_presets,
         "axes": {name: _unique_options(axes[name]) for name in AXES},
         "workspace_domains": sorted(
             workspace_domains, key=lambda item: item["domain_digest"],

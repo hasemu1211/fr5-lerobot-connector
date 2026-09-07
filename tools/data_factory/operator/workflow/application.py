@@ -33,6 +33,7 @@ from tools.data_factory.operator.catalog import (
     project_workspace_cycle_poses,
     resolve_workspace_cycle_selections,
     selected_state_space_design_profile,
+    selected_motion_preset,
     validate_operator_pose,
     validate_operator_selection,
     validate_yaw_preserving_transitions,
@@ -624,6 +625,7 @@ class CollectionOperatorApplication:
             "revision": 0,
             "authoring_mode": values.get("authoring_mode", "ASSISTED"),
             "requested_count": requested_count,
+            "motion_preset": values.get("motion_preset"),
             "repeat": values.get("repeat", 1),
             "split": values.get("split", "TRAIN"),
             "normalized_seed": normalized_seed,
@@ -1276,7 +1278,18 @@ class CollectionOperatorApplication:
                 )
         if workspace_cycle is None:
             workspace_cycle = self._workspace_cycle()
+        motion_presets = self._motion_presets(workspace_cycle)
+        motion_preset = self.draft.get("motion_preset")
+        if motion_preset is not None:
+            selected_preset = next((item for item in motion_presets
+                                    if {key: item[key] for key in ("id", "digest")} == motion_preset), None)
+            preset_reason = ("MOTION_PRESET_BINDING" if selected_preset is None else
+                             "MOTION_PRESET_QUALIFICATION_REQUIRED" if selected_preset["status"] != "QUALIFIED" else None)
+            if preset_reason is not None:
+                selection_execution = {"executable": False, "reason": preset_reason}
+                operations = [op for op in operations if op != "compile_draft"]
         browser_draft = {
+            "motion_preset": copy.deepcopy(motion_preset),
             "draft_id": self.draft["draft_id"],
             "revision": self.draft["revision"],
             "authoring_mode": self.draft["authoring_mode"],
@@ -1562,6 +1575,7 @@ class CollectionOperatorApplication:
             "setup": self.projector.project_environment(environment),
             "catalog": browser_catalog,
             "draft": browser_draft,
+            "motion_presets": motion_presets,
             "campaign_envelope": copy.deepcopy(envelope),
             "campaign_authorization": (
                 copy.deepcopy(inner.get("campaign_authorization"))
@@ -1896,6 +1910,12 @@ class CollectionOperatorApplication:
             else:
                 self.draft["direct_poses"] = []
 
+    def _motion_presets(self, workspace_cycle):
+        required = {endpoint["motion_id"] for endpoint in workspace_cycle}
+        return [{**{key: copy.deepcopy(item[key]) for key in ("id", "digest", "purpose", "phase_scaling")},
+                 "status": "QUALIFIED" if required <= set(item["qualifications"]) else "QUALIFICATION_REQUIRED"}
+                for item in self.catalog.get("motion_presets", [])]
+
     def update_draft(self, payload: dict[str, Any], _view: dict[str, Any]) -> dict[str, Any]:
         if (
             self.projection()["workflow_state"] != "AUTHORING"
@@ -1905,7 +1925,10 @@ class CollectionOperatorApplication:
             raise ContractError("OPERATOR_APPLICATION_STATE")
         field = next(name for name in payload if name != "draft_id")
         value = payload[field]
-        if field == "selection" and isinstance(value, Mapping) and len(value) == 1:
+        if field == "motion_preset":
+            selected_motion_preset(self.catalog, value)
+            self.draft[field] = copy.deepcopy(value)
+        elif field == "selection" and isinstance(value, Mapping) and len(value) == 1:
             axis, selected = next(iter(value.items()))
             self._update_browser_selection(axis, selected)
         elif field == "authoring_mode" and value in {"ASSISTED", "DIRECT_EDIT"}:
@@ -2091,6 +2114,9 @@ class CollectionOperatorApplication:
         ):
             raise ContractError("OPERATOR_APPLICATION_DRAFT")
         validate_operator_selection(self.catalog, self.selection, require_executable=True)
+        preset = selected_motion_preset(self.catalog, self.draft.get("motion_preset"))
+        if preset is not None and any(endpoint["motion_id"] not in preset["qualifications"] for endpoint in self._workspace_cycle()):
+            raise ContractError("MOTION_PRESET_QUALIFICATION_REQUIRED")
         campaign_id = self._id("campaign")
         campaign = self.campaign_factory(
             campaign_id, copy.deepcopy(self.selection), copy.deepcopy(self.draft),

@@ -143,6 +143,22 @@ function validateView(value) {
   validateSamplingProvenance(view.sampling_provenance);
   validateActiveEpisodePlan(view.active_episode_plan);
   assertObject(view.draft, "DRAFT_INVALID");
+  if (view.motion_presets !== undefined) {
+    if (!Array.isArray(view.motion_presets)) throw new TypeError("MOTION_PRESET_INVALID");
+    view.motion_presets.forEach((item) => {
+      if (!item || typeof item.id !== "string" || !item.id || !/^sha256:[a-f0-9]{64}$/.test(item.digest)
+          || typeof item.purpose !== "string" || !["QUALIFIED", "QUALIFICATION_REQUIRED"].includes(item.status)
+          || !item.phase_scaling || typeof item.phase_scaling !== "object") throw new TypeError("MOTION_PRESET_INVALID");
+      Object.values(item.phase_scaling).forEach((scaling) => {
+        if (!scaling || ![scaling.velocity_scaling, scaling.acceleration_scaling].every((n) => typeof n === "number" && n > 0 && n <= 0.1)) throw new TypeError("MOTION_PRESET_INVALID");
+      });
+    });
+  }
+  if (view.draft.motion_preset !== undefined && view.draft.motion_preset !== null) {
+    const binding = view.draft.motion_preset;
+    if (!binding || typeof binding !== "object" || Object.keys(binding).sort().join() !== "digest,id"
+        || typeof binding.id !== "string" || !binding.id || !/^sha256:[a-f0-9]{64}$/.test(binding.digest)) throw new TypeError("MOTION_PRESET_INVALID");
+  }
   assertEnum("authoring_mode", view.draft.authoring_mode);
   if (typeof view.draft.draft_id !== "string" || !view.draft.draft_id || !Number.isInteger(view.draft.requested_count)
       || view.draft.requested_count < 1 || view.draft.requested_count > 100 || !Number.isInteger(view.draft.repeat)
@@ -1061,6 +1077,26 @@ function renderExperimentDesign(view, editable) {
     : `backend sampler profile ${profile.state_space_design_profile_id}을 사용합니다. 적용 전에는 현재 좌표와 seed가 바뀌지 않습니다.`;
 }
 
+function renderMotionPreset(view, editable) {
+  const select = document.querySelector("#motion-preset-select");
+  if (!select) return;
+  const presets = view.motion_presets || [];
+  const binding = view.draft.motion_preset;
+  const selected = presets.find((item) => item.id === binding?.id && item.digest === binding?.digest);
+  select.innerHTML = '<option value="">기존 검증 설정 유지</option>' + presets.map((item) =>
+    `<option value="${escapeHtml(item.id)}">${escapeHtml(item.purpose)} · ${item.status === "QUALIFIED" ? "자격 결속됨" : "물리 자격 필요"}</option>`).join("");
+  if (binding && !selected) select.insertAdjacentHTML("beforeend", '<option value="stale">변경된 정책 — 다시 선택 필요</option>');
+  select.value = selected?.id || (binding ? "stale" : "");
+  select.disabled = !editable;
+  document.querySelector("#motion-preset-summary").textContent = !binding
+    ? "기존 자격에 기록된 구간별 요청값을 유지합니다."
+    : !selected ? "정책이 변경되었습니다. 최신 정책을 선택하거나 기존 설정으로 돌아가세요."
+    : selected.status === "QUALIFIED" ? "선택한 모든 작업영역에 정확히 결속된 자격을 사용합니다. 기존 실행 승인 단계는 유지됩니다."
+    : "선택은 초안에만 반영됩니다. 이 정책의 물리 자격이 없어 계획 확정·실행할 수 없습니다.";
+  document.querySelector("#motion-preset-phases").innerHTML = Object.entries(selected?.phase_scaling || {}).map(([phase, values]) =>
+    `<div><dt>${escapeHtml(phase)}</dt><dd>속도 ${values.velocity_scaling * 100}% · 가속도 ${values.acceleration_scaling * 100}%</dd></div>`).join("");
+}
+
 function renderStartPoseSetup(view) {
   const setup = view.runtime.workflow_state === "AUTHORING" ? view.start_pose_setup : null;
   const entry = document.querySelector("#start-pose-entry");
@@ -1287,6 +1323,7 @@ function renderCatalog(view) {
 
   renderCurrentObjectPose(view, editable);
   renderExperimentDesign(view, editable);
+  renderMotionPreset(view, editable);
   renderStateSpaceSummary(view);
   renderDirectPoseEditor(view, editable);
   const disclosure = document.querySelector("#cell-grid-disclosure");
@@ -2017,6 +2054,13 @@ document.querySelector("#seed-input").addEventListener("change", (event) => {
   const normalizedSeed = event.target.valueAsNumber;
   if (!Number.isSafeInteger(normalizedSeed) || normalizedSeed < 0 || normalizedSeed > Number(event.target.max)) return event.target.reportValidity();
   submitIntent("update_draft", {draft_id: currentView.draft.draft_id, normalized_seed: normalizedSeed});
+});
+document.querySelector("#motion-preset-select")?.addEventListener("change", (event) => {
+  if (!currentView || !canIntent("update_draft")) return;
+  const preset = (currentView.motion_presets || []).find((item) => item.id === event.target.value);
+  if (event.target.value && !preset) return;
+  submitIntent("update_draft", {draft_id: currentView.draft.draft_id,
+    motion_preset: preset ? {id: preset.id, digest: preset.digest} : null});
 });
 document.querySelector("#experiment-design-form").addEventListener("submit", (event) => {
   event.preventDefault();

@@ -90,6 +90,7 @@ def main(argv=None) -> int:
         default="GENERAL_COLLECTION",
         help="GENERAL_COLLECTION writes the dedicated production dataset",
     )
+    parser.add_argument("--motion-preset", help="Shared arm policy ID; selecting it grants no qualification")
     parser.add_argument(
         "--dataset-name", default="fr5_smolvla_up_wrist_30hz",
         help="Direct child name under datasets/fr5_episodes for production episodes",

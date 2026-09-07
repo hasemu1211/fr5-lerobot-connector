@@ -434,7 +434,7 @@ def build_and_publish_coverage_report(
             or precommit.get("run_id") != episode_id
             or precommit.get("approved_plan_digest") != preapproval.get("plan_digest")
             or not isinstance(bindings, Mapping)
-            or set(bindings) != PLAN_BINDING_DIGEST_FIELDS
+            or set(bindings) not in {PLAN_BINDING_DIGEST_FIELDS, PLAN_BINDING_DIGEST_FIELDS | {"motion_preset"}}
             or any(not isinstance(value, str) or not DIGEST.fullmatch(value) for value in bindings.values())
         ):
             raise ContractError("COVERAGE_PLAN_EVIDENCE")

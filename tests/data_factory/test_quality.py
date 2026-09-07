@@ -159,6 +159,22 @@ class QualityTest(unittest.TestCase):
         truncated = [self.event(3,"GOAL_ACCEPTED",100),self.event(4,"ACTION_TERMINAL",200)]
         self.assertEqual(phase_timing_attribute(run_id="run-1",resolved_job_digest=digest("job"),plan_digest=digest("plan"),events=truncated)["status"],"NOT_AVAILABLE")
 
+    def test_object_frame_v3_requires_scene_and_exact_preset_binding(self):
+        with tempfile.TemporaryDirectory() as directory:
+            accepted, resolved, motion, _, bindings = self.accepted_object_context(Path(directory), digest("robot-description"))
+            motion.update(schema_version="data_factory.motion_qualification.v3",
+                          planning_scene_profile_id="synthetic-scene", planning_scene_profile_digest=digest("scene-profile"),
+                          motion_preset={"id": "synthetic-preset", "digest": digest("preset")})
+            for scene_digest, preset_digest in ((digest("scene-profile"), digest("preset")), ("invalid", digest("preset")), (digest("scene-profile"), digest("stale-preset"))):
+                motion["planning_scene_profile_digest"] = scene_digest
+                next_bindings = {**bindings, "motion_qualification": digest(motion), "motion_preset": preset_digest}
+                accepted, resolved = self.rebind_object_context(accepted, resolved, plan_changes={"binding_digests": next_bindings})
+                if scene_digest == "invalid" or preset_digest != digest("preset"):
+                    with self.assertRaisesRegex(ContractError, "OBJECT_FRAME_BINDING"):
+                        object_frame_context_attribute(accepted_episode=accepted, resolved_job=resolved, motion_qualification=motion)
+                else:
+                    self.assertEqual(object_frame_context_attribute(accepted_episode=accepted, resolved_job=resolved, motion_qualification=motion)["status"], "AVAILABLE")
+
     def test_object_frame_context_is_static_and_fk_tf_unavailable(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

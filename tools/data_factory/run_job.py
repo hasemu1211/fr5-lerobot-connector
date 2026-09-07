@@ -98,6 +98,7 @@ from tools.fr5_data_factory import (
     bounded_place_coordinate,
     canonical_digest,
     load_json_strict,
+    load_motion_preset,
     normalize_job_spec,
     normalize_yaw_deg,
     resolve_motion_program,
@@ -227,6 +228,12 @@ def _run_payload(value):
     if not isinstance(value, dict) or value.get("mode") not in {"plan_only", "live"}:
         raise ContractError("RUN_PAYLOAD")
     keys = set(COMMON_RUN_KEYS if value["mode"] == "plan_only" else LIVE_RUN_KEYS)
+    if "motion_preset" in value:
+        keys.add("motion_preset")
+        _exact(value["motion_preset"], {"id", "digest"}, "MOTION_PRESET_BINDING")
+        _identifier(value["motion_preset"]["id"], "MOTION_PRESET_BINDING")
+        if not isinstance(value["motion_preset"]["digest"], str) or not DIGEST.fullmatch(value["motion_preset"]["digest"]):
+            raise ContractError("MOTION_PRESET_BINDING")
     supplied_recycle = set(value) & RECYCLE_COORD_KEYS
     supplied_recycle_yaw = RECYCLE_YAW_KEY in value
     supplied_destination = DESTINATION_KEY in value
@@ -263,7 +270,7 @@ def _run_payload(value):
         raise ContractError("RUN_JOB")
     for key in keys - {"job", DESTINATION_KEY} - RECYCLE_COORD_KEYS - {
         RECYCLE_YAW_KEY, TRAJECTORY_SAMPLING_SEED_KEY,
-        TRAJECTORY_DESIGN_KEY,
+        TRAJECTORY_DESIGN_KEY, "motion_preset",
     }:
         _text(value[key], "RUN_PAYLOAD")
     if supplied_variant and (
@@ -321,6 +328,7 @@ def _campaign_manifest(value):
         first["run_id"] == second["run_id"]
         or any(first[key] != second[key] for key in LIVE_RUN_KEYS - {"run_id", "job"})
         or first.get(TRAJECTORY_VARIANT_KEY) != second.get(TRAJECTORY_VARIANT_KEY)
+        or first.get("motion_preset") != second.get("motion_preset")
     ):
         raise ContractError("CAMPAIGN_CHAIN")
     fixed_job = ("robot_system_id", "collection_profile_id", "place_id", "cell_calibration_id", "object_profile_id", "grasp_profile_id")
@@ -638,7 +646,7 @@ def resolve_inputs(
     planning_scene_profile = None
     if (
         motion_qualification.get("schema_version")
-        == "data_factory.motion_qualification.v2"
+        in {"data_factory.motion_qualification.v2", "data_factory.motion_qualification.v3"}
     ):
         profile_id = motion_qualification.get("planning_scene_profile_id")
         if not isinstance(profile_id, str) or SAFE_ID.fullmatch(profile_id) is None:
@@ -664,6 +672,8 @@ def resolve_inputs(
         release_validated=destination_validated,
         release_motion_qualification=destination_motion_qualification,
         planning_scene_profile=planning_scene_profile,
+        motion_preset=(load_motion_preset(payload["config_root"], payload["motion_preset"])
+                       if "motion_preset" in payload else None),
     )
     trajectory_variant_id = payload.get(TRAJECTORY_VARIANT_KEY, "DIRECT")
     approach_sampling_profile = _load_approach_sampling_profile(
@@ -2478,7 +2488,7 @@ def _object_reposition_payload(payload, binding, source_payload=None):
         for key in (
             "mode", "config_root", "home_candidate", "urdf",
             "expected_robot_system_id", "camera_profile", "dataset_root",
-            "run_root",
+            "run_root", "motion_preset",
         )
     ):
         raise ContractError("OBJECT_REPOSITION_PAYLOAD")
@@ -4980,6 +4990,12 @@ def _human_payload(args):
     else:
         job = load_json_strict(sys.stdin.read() if args.job == "-" else Path(args.job).read_text(encoding="utf-8"))
     payload = {"mode": args.mode, **values, "job": job}
+    if getattr(args, "motion_preset", None) is not None:
+        from tools.fr5_data_factory import _safe_profile_path, validate_motion_preset
+        preset = validate_motion_preset(load_json_strict(_safe_profile_path(
+            Path(values["config_root"]), "motion_presets", args.motion_preset,
+        )))
+        payload["motion_preset"] = {"id": preset["motion_preset_id"], "digest": canonical_digest(preset)}
     recycle = {name: getattr(args, name, None) for name in ("recycle_x_mm", "recycle_y_mm")}
     if any(value is not None for value in recycle.values()):
         if any(value is None for value in recycle.values()):
@@ -5000,6 +5016,7 @@ def _parser():
     for name in ("run-id", "job", "selected-sheet", "yaw0-sheet", "config-root", "motion-qualification", "home-candidate", "urdf", "expected-robot-system-id", "camera-profile", "dataset-root", "run-root"):
         parser.add_argument(f"--{name}")
     parser.add_argument("--recycle-x-mm", type=float)
+    parser.add_argument("--motion-preset", help="Requested shared arm policy ID; requires its exact qualification")
     parser.add_argument("--recycle-y-mm", type=float)
     return parser
 
