@@ -2,6 +2,29 @@
 
 ## ADDED Requirements
 
+### Requirement: Finite candidate speed trials use the existing Collection authority
+
+The native Collection application SHALL make a registered candidate motion preset usable in TEST_COLLECTION through the existing finite campaign. GENERAL_COLLECTION SHALL still require exact production qualification for every selected endpoint. The browser and automation SHALL select only the native preset identity and digest; trial scope SHALL derive from trusted application mode, never serialized program metadata. The current candidate is provisional, not an agreed optimum or a physically qualified policy. The next consumer is the existing Collection executor and root-owned physical validation.
+
+#### Scenario: Compile and consume a candidate trial
+
+- **WHEN** the user chooses a candidate with eligible v2 base qualifications in TEST_COLLECTION and compiles a finite A/B draft
+- **THEN** the existing resolver, live episode and postcommit reposition consumers receive the explicitly bound trial mode and exact candidate arm scaling
+- **AND** base qualification bytes, geometry, timeouts and staged gripper behavior remain unchanged; HOME recovery and movement to a qualified start keep their existing qualified policy, visibly distinguished from in-job trial motion
+- **AND** all existing scene, cell, exact-plan, campaign and single-motion-owner gates remain necessary; trial selection adds no acknowledgment and grants no production, semantic or training authority.
+
+#### Scenario: Production and changed inputs remain blocked
+
+- **WHEN** the same unqualified candidate is selected in GENERAL_COLLECTION, or a selected preset changes before compilation or start
+- **THEN** the application rejects the ineligible or stale binding before external effects instead of copying QUALIFIED flags or silently substituting another policy; unsupported legacy qualification versions are not displayed as trial-available
+- **AND** existing configurations without a preset and exactly qualified preset configurations retain their prior resolution behavior.
+
+#### Scenario: Recover a choice or a failed trial without repeating execution
+
+- **WHEN** a preset-choice response is lost or a finite trial fails
+- **THEN** the Web flow reads canonical state, preserves object placement and later draft edits, and offers the existing keep/edit/recovery actions
+- **AND** it never automatically replays compilation, authorization or motion; stale intent retries do not create another campaign or restart the failed episode.
+
 ### Requirement: Exact native episode inspection returns to its original review
 
 The existing prepared training review SHALL offer read-only native LeRobot/Rerun inspection of a named episode in its frozen batch. The server SHALL derive dataset paths from that prepared target; the browser SHALL send only the expected batch identity and episode index through the existing fresh-view intent contract. Inspection SHALL NOT approve, refuse, relabel, collect, train or authorize motion. The original preview and independent approval actions SHALL remain available after viewer failure or return.

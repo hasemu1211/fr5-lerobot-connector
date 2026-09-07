@@ -127,7 +127,7 @@
       flat.draft.normalized_seed = draftNormalizedSeed ?? flat.draft.normalized_seed;
       flat.motion_presets = [motionPreset];
       flat.draft.motion_preset = draftMotionPreset;
-      if (draftMotionPreset) {
+      if (draftMotionPreset && motionPreset.status === "QUALIFICATION_REQUIRED") {
         flat.draft.execution_ready = false;
         flat.draft.execution_reason = "MOTION_PRESET_QUALIFICATION_REQUIRED";
       }
@@ -224,7 +224,7 @@
         flat.catalog.axes.frame.push({id: flat.draft.selection.frame, label: "새 작업영역 좌표계 r1", available: true, reason: null, description: "저장됨"});
       }
       if (sessionIdOverride) flat.session_id = sessionIdOverride;
-      if (draftMotionPreset) flat.available_ops = flat.available_ops.filter((op) => op !== "compile_draft");
+      if (draftMotionPreset && motionPreset.status === "QUALIFICATION_REQUIRED") flat.available_ops = flat.available_ops.filter((op) => op !== "compile_draft");
       const {schema_version, session_id, revision, generated_at, view_digest, ...projection} = flat;
       return {schema_version, session_id, revision, generated_at, view_digest, projection, authority: {browser: "INTENT_ONLY", training_approval: "SEPARATE"}};
     };
@@ -396,6 +396,8 @@
           return;
         }
         if (new URLSearchParams(location.search).get("only") === "motion-preset") {
+          motionPreset.status = "TRIAL_AVAILABLE";
+          await loadView();
           const select = document.querySelector("#motion-preset-select");
           check(select.options.length === 2 && select.value === "", "legacy qualification remains the default");
           const before = intentAttempts;
@@ -406,9 +408,17 @@
           await waitFor(() => !intentBusy && currentView?.draft.motion_preset?.id === motionPreset.id);
           check(intentAttempts === before + 1, "lost response recovers by GET with one POST only");
           check(JSON.stringify(posted.at(-1).body.payload.motion_preset) === JSON.stringify({id: motionPreset.id, digest: motionPreset.digest}), "browser sends only selected native identity and digest");
-          check(document.querySelector("#compile-campaign").disabled && document.querySelector("#motion-preset-summary").textContent.includes("물리 자격"), "unqualified policy is inspectable and blocks compile");
+          check(!document.querySelector("#compile-campaign").disabled && document.querySelector("#motion-preset-summary").textContent.includes("HOME 복귀·시작 자세"), "test trial can compile and distinguishes existing HOME/start policy");
           check(document.querySelector("#motion-preset-phases").textContent.includes("10%"), "resolved requested phase values render");
           check(JSON.stringify(currentView.draft.current_object_pose) === placement, "policy selection preserves object placement");
+          const invalid = clone(currentView);
+          invalid.data_disposition = "PRODUCTION";
+          let rejected = false;
+          try { validateView(invalid); } catch (_) { rejected = true; }
+          check(rejected, "browser rejects trial availability in a production response");
+          motionPreset.status = "QUALIFICATION_REQUIRED";
+          await loadView();
+          check(document.querySelector("#compile-campaign").disabled && select.options[1].disabled, "unavailable production qualification cannot be selected or compiled");
           select.value = "";
           select.dispatchEvent(new Event("change", {bubbles: true}));
           await waitFor(() => !intentBusy && currentView?.draft.motion_preset === null);

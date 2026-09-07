@@ -350,6 +350,9 @@ def load_operator_catalog(
                     qualifications[identifier] = {"source": str(path), "digest": canonical_digest(candidate)}
         motion_presets.append({**binding, "purpose": preset["purpose"],
                               "phase_scaling": preset["phase_scaling"],
+                              "trial_base_motion_ids": [base["motion_qualification_id"] for _path, base in motions
+                                                        if base.get("schema_version") == "data_factory.motion_qualification.v2"
+                                                        and base.get("qualification_status") == "QUALIFIED"],
                               "qualifications": qualifications})
     planning_scene_files = _files(root, "config/data_factory/planning_scenes")
     planning_scenes = {

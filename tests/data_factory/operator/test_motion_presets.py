@@ -323,3 +323,207 @@ class MotionPresetTests(unittest.TestCase):
                 forbidden.assert_not_called()
             finally:
                 application.close()
+
+    def test_native_candidate_trial_compiles_runs_and_keeps_recovery_qualified(self):
+        from tools.data_factory.operator.composition import build_physical_operator_application
+        from tests.data_factory.operator.test_composition import envelope, pose_snapshot
+        from tools.data_factory.motion import home_recovery
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            shutil.copytree(CONFIG, root / "config/data_factory")
+            urdf = root / self.urdf.relative_to(ROOT)
+            urdf.parent.mkdir(parents=True)
+            shutil.copy2(self.urdf, urdf)
+            sources = {path: path.read_bytes() for path in (root / "config/data_factory/motion_qualifications").glob("*.json")}
+            _, qa, _ = self.endpoint("A")
+            opened = {"active": True, "position_valid": True, "gripper_index": 1,
+                      "reference_position_m": .021, "feedback_position_m": .021,
+                      "sample_age_s": 0., "max_age_s": .1, "source": "CONTROLLER_STATE"}
+            environment = {"schema_version": "data_factory.operator_environment.v1", "state": "READY", "observed_at": "2026-09-07T00:00:00Z",
+                           "components": {name: {"state": "READY", "owner": "synthetic", "reason": "ATTACHED"} for name in ("robot", "controller", "gripper", "camera")}}
+            observed = []
+            forbidden = mock.Mock(side_effect=AssertionError("no device or recorder callback"))
+            stop = mock.Mock(side_effect=factory.ContractError("SYNTHETIC_EXECUTOR_BOUNDARY"))
+
+            def live(payload, cancel, publish, **kwargs):
+                self.assertIs(kwargs["motion_preset_trial"], True)
+                self.assertIs(kwargs["candidate_writer_enabled"], False)
+                resolver = kwargs["resolver"]
+
+                def resolve(value):
+                    result = resolver(value)
+                    observed.append((copy.deepcopy(value), copy.deepcopy(result), kwargs))
+                    return result
+
+                kwargs.update(resolver=resolve, executor_factory=stop, recorder_factory=forbidden,
+                              validator_call=forbidden, camera_warmup_call=lambda *_: {})
+                return run_job.run_live(payload, cancel, publish, **kwargs)
+
+            live_call = mock.Mock(side_effect=live)
+            application, _ = build_physical_operator_application(
+                repository_root=root, session_id="native-preset-trial", operator_label="local-operator",
+                environment_call=lambda: environment, prepare_environment_call=lambda: environment,
+                initial_environment=environment, gripper_retune_path=None,
+                job_path="config/data_factory/jobs/center-live-24mm-20260903-r002.job.json",
+                camera_environment_call=lambda *_: environment,
+                discovery_call=lambda: ["usb-Generic_USB2.0_PC_CAMERA-video-index0", "usb-Generic_USB2.0_PC_CAMERA_2-video-index0"],
+                activation_call=lambda: True, run_live_call=live_call,
+                snapshot_call=lambda: pose_snapshot(qa["qualified_safe_joint_positions_rad"], age=.01),
+                initial_motion_preset=self.binding["id"], gripper_readback_call=lambda: opened)
+            self.addCleanup(application.close)
+
+            def request(op, payload, identifier):
+                return envelope(application.bridge_core.snapshot(), op, payload, identifier)
+
+            def consume(op, payload, identifier):
+                return application.bridge_core.consume(request(op, payload, identifier))
+
+            consume("update_camera_bindings", {"bindings": {"usb-Generic_USB2.0_PC_CAMERA-video-index0": "UP", "usb-Generic_USB2.0_PC_CAMERA_2-video-index0": "WRIST"}}, "trial-cameras")
+            draft_id = application.draft["draft_id"]
+            consume("update_draft", {"draft_id": draft_id, "selection": {"task": "pick_place"}}, "trial-task")
+            consume("update_draft", {"draft_id": draft_id, "requested_count": 2}, "trial-count")
+            self.assertEqual(application.projection()["motion_presets"][0]["status"], "TRIAL_AVAILABLE")
+            # HOME is the actual native recovery consumer, stopped at its transport seam.
+            with mock.patch.object(home_recovery, "recover_home_live", side_effect=factory.ContractError("SYNTHETIC_HOME_BOUNDARY")) as home:
+                with self.assertRaisesRegex(factory.ContractError, "SYNTHETIC_HOME_BOUNDARY"):
+                    application.home_recovery_call()
+                self.assertEqual(home.call_args.kwargs, {"motion_qualification": qa})
+            stale = request("compile_draft", {"draft_id": draft_id, "data_disposition": "TEST_ONLY"}, "trial-stale")
+            consume("update_draft", {"draft_id": draft_id, "normalized_seed": 17}, "trial-edit")
+            with self.assertRaises(factory.ContractError):
+                application.bridge_core.consume(stale)
+            self.assertIsNone(application._campaign)
+            compile_request = request("compile_draft", {"draft_id": draft_id, "data_disposition": "TEST_ONLY"}, "trial-compile")
+            compiled = application.bridge_core.consume(compile_request)["result"]
+            campaign = application._campaign
+            with self.assertRaises(factory.ContractError):
+                application.bridge_core.consume(compile_request)
+            self.assertIs(application._campaign, campaign)
+            owner = campaign.campaign_operator
+            self.assertEqual(len(owner.manifest["slots"]), 2)
+            preset_path = root / "config/data_factory/motion_presets/practical-transfer-r001.json"
+            original_preset = preset_path.read_bytes()
+            changed = json.loads(original_preset)
+            changed["purpose"] += " changed"
+            preset_path.write_text(json.dumps(changed))
+            with self.assertRaisesRegex(factory.ContractError, "MOTION_PRESET_BINDING"):
+                owner.physical_start_binding_call("stale-trial-start", owner.manifest["slots"][0], threading.Event())
+            live_call.assert_not_called()
+            preset_path.write_bytes(original_preset)
+            authorize = request("authorize_campaign", {"draft_id": application.projection()["draft"]["draft_id"], "manifest_digest": compiled["manifest_digest"],
+                                "envelope_digest": compiled["envelope_digest"], "data_disposition": "TEST_ONLY"}, "trial-authorize")
+            with mock.patch.object(home_recovery, "transition_to_start_live", side_effect=lambda **kw: {
+                "status": "ALREADY_AT_START", "robot_start_pose_id": kw["robot_start_pose_qualification"]["robot_start_pose_id"]}) as transition:
+                application.bridge_core.consume(authorize)
+                result = campaign.wait_for_episode(5.)
+                self.assertEqual(result["code"], "SYNTHETIC_EXECUTOR_BOUNDARY", result)
+                transition.assert_not_called()  # Already at the qualified HOME start.
+            self.assertEqual(len(observed), 1)
+            payload, (validated, program, _scene), kwargs = observed[0]
+            self.assertEqual(program["binding_digests"]["motion_preset"], self.binding["digest"])
+            self.assertIn("motion_preset_trial", program["destination_binding_digests"])
+            legacy_payload = copy.deepcopy(payload)
+            legacy_payload.pop("motion_preset")
+            _, legacy_program, _ = run_job.resolve_inputs(legacy_payload, scene_binding_call=lambda *_: SCENE)
+            for key in ("frames", "planning", "planning_scene", "gripper_requirements", "execution_timeouts_s"):
+                self.assertEqual(program[key], legacy_program[key])
+            for old, new in zip(legacy_program["steps"], program["steps"]):
+                expected = copy.deepcopy(old)
+                if old["phase"] in self.preset["phase_scaling"]:
+                    expected["limits"].update(self.preset["phase_scaling"][old["phase"]])
+                self.assertEqual(new, expected)
+            for step in program["steps"]:
+                if step["phase"] in self.preset["phase_scaling"]:
+                    self.assertEqual({key: step["limits"][key] for key in ("velocity_scaling", "acceleration_scaling")}, self.preset["phase_scaling"][step["phase"]])
+            # Reuse the native continuation payload builder and bound resolver.
+            source = kwargs["object_reposition_source_payload"]
+            self.assertIsNotNone(source)
+            continuation = run_job._object_reposition_payload(payload, kwargs["object_reposition_binding"], source_payload=source)
+            _, reposition_program, _ = kwargs["object_reposition_resolver"](continuation, scene_binding_call=lambda *_: SCENE)
+            self.assertEqual(reposition_program["binding_digests"]["motion_preset"], self.binding["digest"])
+            self.assertIn("motion_preset_trial", reposition_program["binding_digests"])
+            for step in reposition_program["steps"]:
+                if step["phase"] in self.preset["phase_scaling"]:
+                    self.assertEqual({key: step["limits"][key] for key in ("velocity_scaling", "acceleration_scaling")}, self.preset["phase_scaling"][step["phase"]])
+            with self.assertRaises(factory.ContractError):
+                application.bridge_core.consume(authorize)
+            self.assertEqual(live_call.call_count, 1)
+            stop.assert_called_once()
+            forbidden.assert_not_called()
+            self.assertEqual({path: path.read_bytes() for path in sources}, sources)
+
+    def test_native_production_keeps_candidate_blocked_before_effects(self):
+        from functools import partial
+        from tests.data_factory.operator.test_object_position import ObjectPositionContinuityTests
+        from tools.data_factory.operator.composition import build_physical_operator_application, build_physical_operator_console
+        fixture = ObjectPositionContinuityTests()
+        fixture.setUp()
+        self.addCleanup(fixture.doCleanups)
+        app = fixture.application(builder=partial(build_physical_operator_application, initial_motion_preset=self.binding["id"]))
+        scene = fixture.scene.snapshot()
+        view = app.projection()
+        self.assertEqual(view["motion_presets"][0]["status"], "QUALIFICATION_REQUIRED")
+        self.assertNotIn("compile_draft", view["available_ops"])
+        request = fixture.request(app, "compile_draft", {"draft_id": app.draft["draft_id"], "data_disposition": "PRODUCTION"}, "production-candidate")
+        for _ in range(2):
+            with self.assertRaises(factory.ContractError):
+                app.bridge_core.consume(request)
+        self.assertIsNone(app._campaign)
+        with self.assertRaisesRegex(factory.ContractError, "MOTION_PRESET_TRIAL_SCOPE"):
+            build_physical_operator_console(repository_root=fixture.root, session_id="forbidden-trial", run_id="forbidden-trial",
+                                            operator_label="fixture", motion_preset=self.binding, motion_preset_trial=True,
+                                            data_disposition="PRODUCTION", run_live_call=fixture.forbidden)
+        fixture.forbidden.assert_not_called()
+        self.assertEqual(fixture.scene.snapshot(), scene)
+        self.assertEqual(fixture.episode.read_bytes(), fixture.original)
+        self.assertFalse((fixture.root / "datasets/fr5_episodes/uncreated-dataset").exists())
+
+    def test_trial_distinct_start_uses_native_base_qualified_transition(self):
+        from tests.data_factory.operator.test_composition import OperatorConsoleTests, envelope, pose_snapshot
+        from tests.data_factory.test_home_recovery import FakeTransport, snapshot as home_snapshot
+        from tools.data_factory.motion import home_recovery
+        from tools.data_factory.operator.composition import build_physical_operator_console
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            OperatorConsoleTests.portable_repository(root)
+            from tools.data_factory.operator.workflow.campaign import _home_start_pose
+            _, motion, _ = self.endpoint("A")
+            qualification = _home_start_pose(motion, self.home, motion["robot_system_id"], source="QUALIFICATION_ARTIFACT")
+            home = motion["qualified_safe_joint_positions_rad"]
+            target = [value + .05 for value in home]
+            qualification.update(robot_start_pose_id="synthetic-trial-start", target_rad=dict(zip(qualification["joint_order"], target)))
+            qualification["qualification_digest"] = factory.canonical_digest({key: value for key, value in qualification.items() if key != "qualification_digest"})
+            snapshots = iter([pose_snapshot(home, age=.01), pose_snapshot(target, age=.01)])
+            transport = FakeTransport([home_snapshot(home), home_snapshot(home), home_snapshot(target)])
+            transport.precommit_joint_transition = mock.Mock(return_value={"evidence_digest": factory.canonical_digest("synthetic-start")})
+            transport.start_phase = mock.Mock(side_effect=lambda step, **_: transport.started.append(step["phase"]))
+
+            def native_transition(**kwargs):
+                self.assertEqual(kwargs["motion_qualification"], motion)
+                self.assertNotIn("motion_preset", kwargs)
+                return home_recovery.transition_to_start(transport, **kwargs, sleep_call=lambda _: None)
+
+            forbidden = mock.Mock(side_effect=AssertionError("no physical callback"))
+            console, _ = build_physical_operator_console(
+                repository_root=root, session_id="trial-start", run_id="trial-start-run", operator_label="fixture",
+                job_path="config/data_factory/jobs/center-live-24mm-20260903-r002.job.json",
+                motion_qualification_path="config/data_factory/motion_qualifications/fr5-place-a-wood-cube-24mm-r001.json",
+                home_candidate_path="config/data_factory/home_candidates/fr5-lab-a-tcp-r002-home-r001.json",
+                motion_preset=self.binding, motion_preset_trial=True, gripper_retune_path=None,
+                discovery_call=lambda: ["usb-Goal2_Camera-video-index0"], activation_call=forbidden,
+                snapshot_call=lambda: next(snapshots), run_live_call=forbidden,
+                selected_start_pose_qualifications=[qualification], environment_prepared=True)
+            try:
+                view = console.bridge_core.snapshot()
+                console.bridge_core.consume(envelope(view, "compile_draft", {"draft_id": view["projection"]["draft"]["draft_id"],
+                                             "data_disposition": "TEST_ONLY"}, "trial-start-compile"))
+                with mock.patch.object(home_recovery, "transition_to_start_live", side_effect=native_transition) as transition:
+                    binding = console.campaign_operator.physical_start_binding_call(
+                        "trial-start-run", console.campaign_operator.manifest["slots"][0], threading.Event())
+                transition.assert_called_once()
+                self.assertEqual(binding["current_rad"], target)
+                self.assertEqual(transport.started, ["SAFE_POSE_PTP"])
+                self.assertEqual(transport.start_phase.call_args.args[0]["limits"], motion["phase_limits"]["SAFE_POSE_PTP"])
+                forbidden.assert_not_called()
+            finally:
+                console.close()

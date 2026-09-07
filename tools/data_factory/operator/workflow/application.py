@@ -1300,7 +1300,7 @@ class CollectionOperatorApplication:
             selected_preset = next((item for item in motion_presets
                                     if {key: item[key] for key in ("id", "digest")} == motion_preset), None)
             preset_reason = ("MOTION_PRESET_BINDING" if selected_preset is None else
-                             "MOTION_PRESET_QUALIFICATION_REQUIRED" if selected_preset["status"] != "QUALIFIED" else None)
+                             "MOTION_PRESET_QUALIFICATION_REQUIRED" if selected_preset["status"] not in {"QUALIFIED", "TRIAL_AVAILABLE"} else None)
             if preset_reason is not None:
                 selection_execution = {"executable": False, "reason": preset_reason}
                 operations = [op for op in operations if op != "compile_draft"]
@@ -1930,7 +1930,9 @@ class CollectionOperatorApplication:
     def _motion_presets(self, workspace_cycle):
         required = {endpoint["motion_id"] for endpoint in workspace_cycle}
         return [{**{key: copy.deepcopy(item[key]) for key in ("id", "digest", "purpose", "phase_scaling")},
-                 "status": "QUALIFIED" if required <= set(item["qualifications"]) else "QUALIFICATION_REQUIRED"}
+                 "status": "QUALIFIED" if required <= set(item["qualifications"]) else
+                 "TRIAL_AVAILABLE" if self.selection["data_mode"] == "TEST_COLLECTION"
+                 and required <= set(item.get("trial_base_motion_ids", [])) else "QUALIFICATION_REQUIRED"}
                 for item in self.catalog.get("motion_presets", [])]
 
     def update_draft(self, payload: dict[str, Any], _view: dict[str, Any]) -> dict[str, Any]:
@@ -2139,8 +2141,13 @@ class CollectionOperatorApplication:
             raise ContractError("OPERATOR_APPLICATION_DRAFT")
         validate_operator_selection(self.catalog, self.selection, require_executable=True)
         preset = selected_motion_preset(self.catalog, self.draft.get("motion_preset"))
-        if preset is not None and any(endpoint["motion_id"] not in preset["qualifications"] for endpoint in self._workspace_cycle()):
-            raise ContractError("MOTION_PRESET_QUALIFICATION_REQUIRED")
+        if preset is not None:
+            required = {endpoint["motion_id"] for endpoint in self._workspace_cycle()}
+            if not required <= set(preset["qualifications"]) and not (
+                self.selection["data_mode"] == "TEST_COLLECTION"
+                and required <= set(preset.get("trial_base_motion_ids", []))
+            ):
+                raise ContractError("MOTION_PRESET_QUALIFICATION_REQUIRED")
         campaign_id = self._id("campaign")
         campaign_draft = copy.deepcopy(self.draft)
         campaign_draft["object_position"] = position

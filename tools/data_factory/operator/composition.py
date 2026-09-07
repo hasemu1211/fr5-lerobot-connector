@@ -1687,6 +1687,7 @@ def build_physical_operator_console(
     yaw0_sheet: str | Path = DEFAULT_YAW0,
     motion_qualification_path: str | Path = DEFAULT_MOTION,
     motion_preset: Mapping[str, str] | None = None,
+    motion_preset_trial: bool = False,
     home_candidate_path: str | Path = DEFAULT_HOME,
     collection_profile_path: str | Path = DEFAULT_PROFILE,
     urdf_path: str | Path = DEFAULT_URDF,
@@ -1723,6 +1724,10 @@ def build_physical_operator_console(
     clock=None,
 ) -> tuple[OperatorConsole, dict[str, Any]]:
     """Compose one finite registered-workspace physical campaign without activation."""
+    if type(motion_preset_trial) is not bool or motion_preset_trial and (
+        data_disposition != "TEST_ONLY" or motion_preset is None
+    ):
+        raise ContractError("MOTION_PRESET_TRIAL_SCOPE")
     normalized_seed = validate_campaign_seed(normalized_seed)
     repository = Path(repository_root).resolve(strict=True)
     clock = clock or (lambda: datetime.now(timezone.utc))
@@ -1942,6 +1947,7 @@ def build_physical_operator_console(
     def physical_resolver(value, *, scene_binding_call):
         resolved, program, binding = run_job.resolve_inputs(
             value, scene_binding_call=scene_binding_call,
+            motion_preset_trial=motion_preset_trial,
         )
         if retune is not None:
             program = _derive_test_only_gripper_program(
@@ -2649,7 +2655,9 @@ def build_physical_operator_console(
             endpoint = resolved_workspace_bindings[receipt["normalized_job"]["place_id"]]
             if canonical_digest(load_json_strict(endpoint["motion_qualification"])) != canonical_digest(endpoint_motion):
                 raise ContractError("MOTION_PRESET_BINDING")
-            policy["motion_preset"] = load_motion_preset(repository / "config/data_factory", motion_preset)
+            selected_policy = load_motion_preset(repository / "config/data_factory", motion_preset)
+            if not motion_preset_trial:
+                policy["motion_preset"] = selected_policy
         home_snapshot = (
             snapshot_call() if snapshot_call is not None
             else capture_home_snapshot(tcp_candidate_manifest=paths["tcp"])
@@ -2965,6 +2973,7 @@ def build_physical_operator_console(
                 camera_warmup_call=campaign_camera_warmup,
                 candidate_writer_enabled=data_disposition == "PRODUCTION",
                 repository_root=repository,
+                **({"motion_preset_trial": True} if motion_preset_trial else {}),
             )
         except Exception:
             holder.pop("camera_warmup_cache", None)
@@ -3973,8 +3982,8 @@ def build_physical_operator_application(
             ),
         )
 
-    def preset_qualification(endpoint, preset):
-        if preset is None:
+    def preset_qualification(endpoint, preset, *, trial=False):
+        if preset is None or trial:
             return endpoint["sources"]["motion"]
         qualified = preset["qualifications"].get(endpoint["motion_id"])
         if qualified is None:
@@ -3994,9 +4003,16 @@ def build_physical_operator_application(
         application = application_holder.get("application")
         binding = application.draft.get("motion_preset") if application is not None else None
         preset = selected_motion_preset(active_catalog(), binding)
-        policy = {"motion_preset": load_motion_preset(repository / "config/data_factory", binding)} if binding is not None else {}
+        trial = (application is not None and application.selection["data_mode"] == "TEST_COLLECTION"
+                 and preset is not None and any(endpoint["motion_id"] not in preset["qualifications"]
+                                               for endpoint in application._workspace_cycle()))
+        policy = {}
+        if binding is not None:
+            selected_policy = load_motion_preset(repository / "config/data_factory", binding)
+            if not trial:
+                policy["motion_preset"] = selected_policy
         motion = load_json_strict(
-            _repository_path(repository, preset_qualification(active_combination(), preset)),
+            _repository_path(repository, preset_qualification(active_combination(), preset, trial=trial)),
         )
         validate_home_recovery_qualification(motion, **policy)
         if home_recovery_prepare_call is not None:
@@ -4208,6 +4224,8 @@ def build_physical_operator_application(
             endpoint_combinations.append(match)
         runtime_workspace_bindings = {}
         preset = selected_motion_preset(active_catalog(), draft.get("motion_preset"))
+        trial = (mode == "TEST_COLLECTION" and preset is not None
+                 and any(endpoint["motion_id"] not in preset["qualifications"] for endpoint in endpoint_combinations))
         for endpoint in endpoint_combinations:
             domains = [
                 domain for domain in active_catalog()["workspace_domains"]
@@ -4222,7 +4240,7 @@ def build_physical_operator_application(
                 "frame_id": endpoint["frame_id"],
                 "selected_sheet": endpoint["sources"]["selected_sheet"],
                 "yaw0_sheet": endpoint["sources"]["yaw0_sheet"],
-                "motion_qualification": preset_qualification(endpoint, preset),
+                "motion_qualification": preset_qualification(endpoint, preset, trial=trial),
                 "region_binding": {
                     key: copy.deepcopy(region[key]) for key in (
                         "layout_id", "layout_digest", "region_id",
@@ -4240,8 +4258,9 @@ def build_physical_operator_application(
             operator_label=operator_label,
             job_path=source["job"],
             yaw0_sheet=source["yaw0_sheet"],
-            motion_qualification_path=preset_qualification(chosen, preset),
+            motion_qualification_path=preset_qualification(chosen, preset, trial=trial),
             motion_preset=draft.get("motion_preset"),
+            motion_preset_trial=trial,
             home_candidate_path=source["start_pose"],
             collection_profile_path=source["camera_profile"],
             tcp_candidate_manifest=tcp_manifest_path,
