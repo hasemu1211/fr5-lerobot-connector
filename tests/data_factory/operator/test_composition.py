@@ -3500,7 +3500,9 @@ feedback:
             self.assertIsNone(captured["startup_call"])
             view = captured["view"]
             self.assertEqual(view["runtime"]["workflow_state"], "BLOCKED")
-            self.assertEqual(view["available_ops"], [])
+            self.assertEqual(view["available_ops"], ["refresh_stored_reviews", "select_stored_review"])
+            self.assertNotIn("authorize_campaign", view["available_ops"])
+            self.assertNotIn("recover_home", view["available_ops"])
             self.assertEqual(view["environment"]["components"]["camera"], {
                 "state": "MISSING", "owner": None,
                 "reason": "DEVICE_NOT_CONNECTED",
@@ -3646,7 +3648,9 @@ feedback:
                     == f"fr5-up-rgb-30hz-v1@{device}"
                 )
                 self.assertTrue(selected_camera["available"])
-                self.assertEqual(view["available_ops"], [])
+                self.assertEqual(view["available_ops"], ["refresh_stored_reviews", "select_stored_review"])
+                self.assertNotIn("authorize_campaign", view["available_ops"])
+                self.assertNotIn("recover_home", view["available_ops"])
                 self.assertFalse((root / "outputs").exists())
                 environment_query.assert_not_called()
                 discovery.assert_not_called()
