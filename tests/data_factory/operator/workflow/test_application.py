@@ -1823,6 +1823,7 @@ class CollectionOperatorApplicationTests(unittest.TestCase):
         }, "uncertain-start-authorize")
         campaign = campaigns[0]
         campaign.state = "BLOCKED"
+        campaign.candidate_pending = True
         campaign.reason_codes = ["START_TRANSITION_CANCEL_UNCERTAIN"]
         campaign.start_transition_owner = {
             "active": True,
@@ -1834,18 +1835,25 @@ class CollectionOperatorApplicationTests(unittest.TestCase):
         }
 
         blocked = application.bridge_core.snapshot()["projection"]
-        self.assertEqual(blocked["available_ops"], [])
+        self.assertEqual(blocked["available_ops"], ["review_candidate"])
         self.assertEqual(
             (blocked["runtime"]["active_child_id"],
              blocked["runtime"]["motion_owner"]),
             (campaign.start_transition_owner["run_id"],
              campaign.start_transition_owner),
         )
-        for op in ("recover_home", "new_campaign_same_settings"):
-            with self.subTest(op=op), self.assertRaisesRegex(
-                ContractError, "OPERATOR_INTENT_OP",
-            ):
-                consume(op, {}, f"uncertain-start-{op}")
+        for state in ("BLOCKED", "TERMINAL"):
+            campaign.state = state
+            self.assertEqual(application.projection()["available_ops"], ["review_candidate"])
+            for op in ("recover_home", "new_campaign_same_settings"):
+                with self.subTest(state=state, op=op), self.assertRaisesRegex(
+                    ContractError, "OPERATOR_INTENT_OP",
+                ):
+                    consume(op, {}, f"uncertain-start-{state}-{op}")
+            with self.assertRaisesRegex(ContractError, "OPERATOR_APPLICATION_RECOVERY_STATE"):
+                application.recover_home({}, {})
+            with self.assertRaisesRegex(ContractError, "OPERATOR_APPLICATION_STATE"):
+                application._replace_campaign()
         recovery.assert_not_called()
         self.assertEqual(len(campaigns), 1)
         self.assertFalse(campaign.closed)
@@ -1854,7 +1862,7 @@ class CollectionOperatorApplicationTests(unittest.TestCase):
         released = application.bridge_core.snapshot()["projection"]
         self.assertEqual(
             released["available_ops"],
-            ["recover_home", "new_campaign_same_settings"],
+            ["review_candidate", "recover_home", "new_campaign_same_settings"],
         )
 
     def test_close_preserves_uncertain_start_owner_until_terminal_evidence(self):
@@ -2037,7 +2045,7 @@ class CollectionOperatorApplicationTests(unittest.TestCase):
         self.assertIs(self.application._campaign, campaign)
         self.assertFalse(campaign.closed)
 
-    def test_blocked_candidate_is_reviewed_before_fresh_campaign_is_offered(self):
+    def test_blocked_pending_review_does_not_hide_independent_recovery(self):
         self.consume("prepare_environment", {}, "prepare-blocked-review")
         authored = self.application.bridge_core.snapshot()["projection"]
         compiled = self.consume("compile_draft", {
@@ -2053,16 +2061,26 @@ class CollectionOperatorApplicationTests(unittest.TestCase):
         campaign = self.campaigns[0]
         campaign.state = "BLOCKED"
         campaign.candidate_pending = True
+        campaign.reason_codes = ["RECORDER_READINESS_ALIGNMENT"]
+        self.application.effect_scope = "PHYSICAL"
+        recovery = mock.Mock(return_value={"schema_version": "data_factory.home_recovery.v1",
+            "status": "ALREADY_HOME", "gripper_open": True, "arm_goal_count": 0})
+        self.application.home_recovery_call = recovery
 
         blocked = self.application.bridge_core.snapshot()["projection"]
-        self.assertEqual(blocked["available_ops"], ["review_candidate"])
-        self.consume("review_candidate", {
-            "review_binding_digest": canonical_digest("review-binding"),
-            "choice": "FAIL", "reason": "TASK_GOAL",
-        }, "review-blocked")
-
+        self.assertIsNone(blocked["runtime"]["active_child_id"])
+        self.assertEqual(blocked["available_ops"], ["review_candidate", "recover_home", "new_campaign_same_settings"])
+        self.consume("recover_home", {}, "recover-with-pending-review")
+        recovery.assert_called_once_with()
+        self.assertTrue(campaign.candidate_pending)
         recovered = self.application.bridge_core.snapshot()["projection"]
-        self.assertEqual(recovered["available_ops"], ["new_campaign_same_settings"])
+        self.assertIn("review_candidate", recovered["available_ops"])
+        self.consume("new_campaign_same_settings", {}, "restart-with-pending-review")
+        self.assertTrue(campaign.closed)
+        self.assertTrue(campaign.candidate_pending)
+        self.assertEqual(len(self.campaigns), 1)
+        self.assertEqual(self.application.projection()["workflow_state"], "AUTHORING")
+        self.assertIsNone(self.application.projection()["campaign_authorization"])
 
     def test_compiled_campaign_can_be_discarded_before_authorization(self):
         self.consume("prepare_environment", {}, "prepare-edit")

@@ -1222,21 +1222,14 @@ class CollectionOperatorApplication:
             if isinstance(inner, Mapping) and "review_candidate" in inner.get("available_ops", []):
                 operations.append("review_candidate")
             operations.append("cancel_session")
-        elif workflow == "BLOCKED":
+        elif workflow in {"BLOCKED", "TERMINAL"}:
             operations = []
             if isinstance(inner, Mapping) and "review_candidate" in inner.get("available_ops", []):
                 operations.append("review_candidate")
-            elif runtime.get("active_child_id") is None:
+            if runtime.get("active_child_id") is None:
                 if self.home_recovery_call is not None:
                     operations.append("recover_home")
                 operations.append("new_campaign_same_settings")
-        elif workflow == "TERMINAL":
-            operations = []
-            if isinstance(inner, Mapping) and "review_candidate" in inner.get("available_ops", []):
-                operations.append("review_candidate")
-            if self.home_recovery_call is not None:
-                operations.append("recover_home")
-            operations.append("new_campaign_same_settings")
         else:
             operations = []
         collection_advice = self._advice_projection()

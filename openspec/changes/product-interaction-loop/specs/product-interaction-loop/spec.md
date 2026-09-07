@@ -223,6 +223,13 @@ immutable ledger and durable state. An unavailable or inconsistent observation
 SHALL disable that review action without discarding unrelated execution facts or
 changing physical or training authority. Observation SHALL NOT repair artifacts.
 
+#### Scenario: Pending review remains independent of settled execution recovery
+
+- **WHEN** a blocked or terminal campaign retains a pending semantic review and has no active execution owner
+- **THEN** the application exposes the review alongside existing HOME recovery and fresh-draft actions, subject to their unchanged physical and source-lineage gates
+- **AND** recovery does not decide the pending review, authorize training or replay the previous campaign approval
+- **AND** an active or uncertain execution owner prevents HOME recovery and campaign replacement even when review remains available.
+
 #### Scenario: A CLI review finishes while the Collection screen remains open
 
 - **WHEN** the native review command durably resolves a queued candidate
