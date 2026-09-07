@@ -1,7 +1,7 @@
 <!doctype html>
 <html lang="ko"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>FR5 — 로봇 데이터와 모방학습</title><link rel="stylesheet" href="site.css"></head><body>
 <a class="skip" href="#main">본문으로 이동</a>
-<header><a class="brand" href="index.html" aria-label="FR5 프로젝트">FR5<span>.</span></a><nav aria-label="프로젝트 탐색"><a href="index.html" aria-current="page">프로젝트</a><a href="architecture.html">시스템</a><a href="collection.html">수집</a><a href="data.html">데이터</a><a href="learning.html">학습·평가</a></nav></header>
+<header><a class="brand" href="index.html" aria-label="FR5 프로젝트">FR5<span>.</span></a><nav aria-label="프로젝트 탐색"><a href="index.html" aria-current="page">프로젝트</a><a href="architecture.html">시스템</a><a href="collection.html">Collection Operator</a><a href="data.html">Recorder · Curator</a><a href="learning.html">Policy Learning</a></nav></header>
 <main id="main">
 <section class="project-hero">
 <div class="hero-copy"><p class="kicker">로봇 데이터 · 모방학습</p><h1>FR5 모방학습<br>데이터 시스템</h1><p class="hero-description">FR5의 집기·옮기기 시연을 학습 데이터로 만드는 시스템이다. 작업 조건 작성, 반복 수집, 영상·로봇 상태 기록과 데이터 검토를 연결하고, 선별한 데이터로 SmolVLA를 학습·평가한다.</p><a class="text-link" href="architecture.html">시스템 구성 <span aria-hidden="true">↗</span></a></div>
@@ -10,9 +10,9 @@
 <section class="project-intro" aria-labelledby="whole"><div class="project-foundation"><p class="kicker">시스템 기반</p><dl><dt>로봇·동작 계획</dt><dd>FAIRINO FR5<br>ROS 2 · MoveIt 2</dd><dt>데이터·정책 학습</dt><dd>LeRobot · SmolVLA</dd></dl><a href="architecture.html#foundation">기반 기술과 구현 범위 ↗</a></div><div><p class="kicker">개발 기능</p><h2 id="whole">데이터 수집과<br>정책 학습 모듈</h2><p>물체의 위치와 각도, 시작 자세를 작업 계획으로 변환한다. 반복 수집 중에는 작업별 기록 구간을 적용하고, 영상·관절·그리퍼 신호를 같은 시간 기준으로 저장한다.</p><p>수집 기록은 품질 검사와 화면 검토를 거쳐 학습 입력으로 선별한다. 학습용 데이터에서 정규화 통계를 계산하며, 정책의 오프라인 비교 결과를 관절·시연별로 살펴볼 수 있다.</p></div></section>
 <section class="reading-paths" aria-labelledby="read"><h2 id="read">주요 구성</h2>
 <a class="reading-link" href="architecture.html"><span class="path-label">시스템 설계</span><div><h3>시스템 아키텍처</h3><p>수집·기록·데이터 관리·학습 모듈의 구성과 연결.</p></div><span aria-hidden="true">↗</span></a>
-<a class="reading-link" href="collection.html"><span class="path-label">로봇 운용</span><div><h3>로봇 시연 수집</h3><p>작업 조건 작성, 반복 수집과 작업별 기록 구간.</p></div><span aria-hidden="true">↗</span></a>
-<a class="reading-link" href="data.html"><span class="path-label">데이터 엔지니어링</span><div><h3>다중 센서 기록·데이터 검토</h3><p>영상·로봇 상태 동기화, 기술 품질 검사, 데이터 검토와 선별.</p></div><span aria-hidden="true">↗</span></a>
-<a class="reading-link" href="learning.html"><span class="path-label">모방학습</span><div><h3>SmolVLA 학습·평가</h3><p>학습 입력 검증, TRAIN 정규화, 오프라인 정책 비교.</p></div><span aria-hidden="true">↗</span></a>
+<a class="reading-link" href="collection.html"><span class="path-label">로봇 운용</span><div><h3>Collection Operator</h3><p>작업 조건 작성, 반복 수집과 작업별 기록 구간.</p></div><span aria-hidden="true">↗</span></a>
+<a class="reading-link" href="data.html"><span class="path-label">데이터 엔지니어링</span><div><h3>Recorder · Curator</h3><p>영상·로봇 상태 동기화, 기술 품질 검사, 데이터 검토와 선별.</p></div><span aria-hidden="true">↗</span></a>
+<a class="reading-link" href="learning.html"><span class="path-label">모방학습</span><div><h3>Policy Learning</h3><p>학습 입력 검증, TRAIN 정규화, 오프라인 정책 비교.</p></div><span aria-hidden="true">↗</span></a>
 </section>
 
 </main><footer><span>FR5 · 로봇 데이터와 모방학습</span><span>로봇 운용 · 데이터 수집 · 정책 학습</span></footer>

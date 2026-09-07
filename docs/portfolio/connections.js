@@ -6,6 +6,11 @@ function showConnection(key) {
   buttons.forEach(button => button.setAttribute('aria-pressed', String(button.dataset.handoff === key)));
   panels.forEach(panel => { panel.hidden = panel.id !== `handoff-${key}`; });
 }
+function revealDependencies() {
+  if (location.hash === '#dependencies') document.getElementById('dependencies').open = true;
+}
+addEventListener('hashchange', revealDependencies);
+revealDependencies();
 if (buttons.length && panels.length) {
   document.querySelector('.handoff-controls').hidden = false;
   showConnection(location.hash.replace('#handoff-', ''));

@@ -94,4 +94,50 @@
 690:                     else &quot;RECORDER_FIRST_ROW_TIMEOUT&quot;
 691:                 )
 692:                 self._capture_readiness_failure(code, status)
-693:                 raise ContractError(code)</pre></section></main><script src="../source-return.js"></script></body></html>
+693:                 raise ContractError(code)</pre></section><section id="review-queue"><h2>수집 진행과 Candidate Review의 분리</h2><p class="locator">tools/data_factory/operator/workflow/campaign.py · main 881cfdd<br>sha256:446f56b90eb8390126255ab7c62b3cb9965492fc1979cc325f640d3a79577d2e</p><p>2137–2160, 2252–2271행 발췌. 다음 수집 여부를 결정하는 경로와 검토 대기열을 갱신하는 경로를 구분한다.</p><pre>        continue_campaign = bool(
+            outcome.get(&quot;ok&quot;) is True
+            and not self._cancel_requested
+            and self.campaign_approval_once
+            and campaign
+            and campaign.get(&quot;state&quot;) == &quot;READY&quot;
+        )
+        if (
+            campaign
+            and campaign.get(&quot;state&quot;) == &quot;BLOCKED&quot;
+            and campaign.get(&quot;last_error&quot;) == &quot;START_TRANSITION_CANCEL_UNCERTAIN&quot;
+        ):
+            name, code, workflow = (
+                &quot;FAIL&quot;, &quot;START_TRANSITION_CANCEL_UNCERTAIN&quot;, &quot;BLOCKED&quot;,
+            )
+            self._measurement_outcome = &quot;FAIL&quot;
+            self._last_error = code
+        elif self._cancel_requested or campaign and campaign.get(&quot;state&quot;) == &quot;CANCELLED&quot;:
+            name, code, workflow = &quot;CANCEL&quot;, &quot;PLAN_CANCELLED&quot;, &quot;TERMINAL&quot;
+            self._measurement_outcome = &quot;NOT_MEASURED&quot;
+            self._last_error = code
+        elif outcome.get(&quot;ok&quot;) is True:
+            name, code = &quot;PASS&quot;, &quot;TECHNICAL_PASS&quot;
+            workflow = &quot;RUNNING&quot; if continue_campaign else &quot;TERMINAL&quot;
+
+…
+
+        review_offer = result.get(&quot;candidate_review_offer&quot;, terminal_data.get(&quot;candidate_review_offer&quot;))
+        if review_offer is not None:
+            ledger = sealed.get(&quot;episode_ledger&quot;)
+            if name != &quot;PASS&quot; and not (
+                isinstance(review_offer, Mapping)
+                and isinstance(ledger, Mapping)
+                and ledger.get(&quot;technical_status&quot;) == &quot;PASS&quot;
+                and ledger.get(&quot;review_status&quot;) == &quot;PENDING&quot;
+                and ledger.get(&quot;training_status&quot;) == &quot;NOT_AUTHORIZED&quot;
+                and review_offer.get(&quot;ledger_reference&quot;) == ledger
+            ):
+                raise ContractError(&quot;OPERATOR_CONSOLE_CANDIDATE_OFFER&quot;)
+            self._queue_candidate_review(review_offer, sealed)
+        sealed[&quot;result_digest&quot;] = canonical_digest(sealed)
+        self._episode_result, self._workflow = sealed, workflow
+        if self._active_intent_projection is not None:
+            self._episode_history.append(copy.deepcopy(sealed))
+        self._offer_next_candidate_review()
+        self._prepared.set()
+        return continue_campaign</pre></section></main><script src="../source-return.js"></script></body></html>
