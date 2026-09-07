@@ -36,11 +36,15 @@
       element("output").textContent = p.inventory_path;
       element("episodes").replaceChildren(...preview.episodes.map((episode) => {
         const row = document.createElement("li");
-        const semantic = episode.semantic_status === "NOT_ASSERTED" ? "NOT_ASSERTED (별도 판정 없음)" : `${episode.semantic_status || "확인되지 않음"} (${episode.reviewer_id || "검토자 미표시"})`;
-        row.textContent = `에피소드 ${episode.episode_index} · ${episode.episode_id} · 기술 ${episode.technical_status || "확인되지 않음"} · 내용 ${semantic}`;
-        if (episode.parent_semantic_status) row.textContent += ` · 부모 내용 ${episode.parent_semantic_status} (${episode.reviewer_id || "검토자 미표시"})`;
-        if (episode.parent_dataset_identity) row.textContent += ` · 부모 데이터셋 ${episode.parent_dataset_identity.dataset_id} (${episode.parent_dataset_identity.dataset_digest})`;
-        if (episode.mapping) row.textContent += ` · 원본 에피소드 ${episode.source_episode_index} → ${episode.episode_index} · 이미지 변환 없음 · 결합 ${episode.mapping.manifest_digest}`;
+        const semantic = (status) => status === "NOT_ASSERTED" ? "NOT_ASSERTED (별도 판정 없음)" : `${status || "확인되지 않음"} (${episode.reviewer_id || "검토자 미표시"})`;
+        const parent = episode.original_parent_dataset_identity ? "Curator 가공 부모" : "부모";
+        row.textContent = `에피소드 ${episode.episode_index} · ${episode.episode_id} · 기술 ${episode.technical_status || "확인되지 않음"} · 내용 ${semantic(episode.semantic_status)}`;
+        if (episode.parent_semantic_status) row.textContent += ` · ${parent} 내용 ${semantic(episode.parent_semantic_status)}`;
+        if (episode.parent_dataset_identity) row.textContent += ` · ${parent} 데이터셋 ${episode.parent_dataset_identity.dataset_id} (${episode.parent_dataset_identity.dataset_digest})`;
+        if (episode.original_parent_semantic_status) row.textContent += ` · 기록 원본 내용 ${semantic(episode.original_parent_semantic_status)}`;
+        if (episode.original_parent_dataset_identity) row.textContent += ` · 기록 원본 데이터셋 ${episode.original_parent_dataset_identity.dataset_id} (${episode.original_parent_dataset_identity.dataset_digest})`;
+        if (episode.original_source_episode_index !== undefined) row.textContent += ` · 기록 원본 에피소드 ${episode.original_source_episode_index}`;
+        if (episode.mapping) row.textContent += ` · 매핑 부모 에피소드 ${episode.source_episode_index} → ${episode.episode_index} · 이번 매핑 단계의 이미지 변환 없음 · 결합 ${episode.mapping.manifest_digest}`;
         const coverage = episode.curator_review?.coverage;
         if (coverage) row.textContent += ` · Curator 묶음 검토 범위: 에피소드 ${coverage.covered_episodes.length}/${coverage.episodes.length} · 프레임 ${coverage.unique_selected_frames}/${coverage.population_frames}`;
         if (p.available_ops.includes("inspect_training_episode")) {
