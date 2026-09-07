@@ -3,10 +3,12 @@ from __future__ import annotations
 import io
 import json
 import socket
+import subprocess
 import tempfile
 import threading
 import unittest
-from http.server import BaseHTTPRequestHandler, HTTPServer
+from functools import partial
+from http.server import BaseHTTPRequestHandler, HTTPServer, SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 from .fixtures import NOW, intent
@@ -322,6 +324,39 @@ class OperatorWebClientTests(unittest.TestCase):
                 self.assertEqual(sum(item[0] == "POST" for item in boundary.requests), 1)
                 self.assertEqual(len(boundary.requests), 2)
                 self.assertNotIn(TOKEN, output.getvalue())
+
+
+class CollectionBrowserRecoveryTest(unittest.TestCase):
+    @unittest.skipUnless(Path("/opt/google/chrome/chrome").is_file(), "local Chrome is not installed")
+    def test_shipped_collection_browser_recovery_and_existing_journeys(self):
+        ui = Path(__file__).resolve().parents[3] / "operator-ui"
+
+        class Handler(SimpleHTTPRequestHandler):
+            def log_message(self, *_args):
+                pass
+
+        server = ThreadingHTTPServer(("127.0.0.1", 0), partial(Handler, directory=str(ui)))
+        thread = threading.Thread(target=server.serve_forever)
+        thread.start()
+        try:
+            for query, minimum in (("?only=state-recovery", 33), ("", 126)):
+                with self.subTest(query=query), tempfile.TemporaryDirectory() as profile:
+                    replay = subprocess.run([
+                        "/opt/google/chrome/chrome", "--headless=new", "--disable-gpu",
+                        "--no-first-run", "--disable-background-networking", "--no-default-browser-check",
+                        f"--user-data-dir={profile}", "--dump-dom", "--virtual-time-budget=30000",
+                        f"http://127.0.0.1:{server.server_port}/tests/browser-regression.html{query}",
+                    ], capture_output=True, text=True, timeout=40)
+                    self.assertEqual(replay.returncode, 0, replay.stderr)
+                    self.assertIn('data-result="pass"', replay.stdout, replay.stdout[-8000:])
+                    result = replay.stdout.split('<pre id="results">', 1)[1].split("</pre>", 1)[0]
+                    self.assertGreaterEqual(int(result.split(" checks passed", 1)[0]), minimum)
+                    print(result)
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(2)
+        self.assertFalse(thread.is_alive())
 
 
 if __name__ == "__main__":

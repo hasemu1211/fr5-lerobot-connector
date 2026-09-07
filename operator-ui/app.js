@@ -47,6 +47,11 @@ let lastDigest;
 let intentBusy = false;
 let cancelPending = false;
 let watchController;
+let viewStale = false;
+let viewController;
+let recoveryTimer;
+let recoveryAttempts = 0;
+let disabledBeforeFailure;
 let manualStep;
 let renderedWorkflow;
 let renderedWorkflowStep;
@@ -723,12 +728,24 @@ function unwrapViewEnvelope(value) {
   return {...value.projection, schema_version: value.schema_version, session_id: value.session_id, revision: value.revision, generated_at: value.generated_at, view_digest: value.view_digest};
 }
 
+async function readViewResponse(response) {
+  if (!response.ok) {
+    const error = new Error(`HTTP_${response.status}`);
+    try {
+      const payload = await response.json();
+      if (typeof payload.code === "string") error.nativeCode = payload.code;
+    } catch (_error) { /* HTTP status remains useful even with a non-JSON error body. */ }
+    throw error;
+  }
+  return validateView(await response.json());
+}
+
 function canIntent(op) {
-  return Boolean(currentView && currentView.connection_state === "READY" && !intentBusy && currentView.available_ops.includes(op));
+  return Boolean(currentView && !viewStale && currentView.connection_state === "READY" && !intentBusy && currentView.available_ops.includes(op));
 }
 
 function canImmediateCancel() {
-  return Boolean(currentView && currentView.connection_state === "READY" && !cancelPending
+  return Boolean(currentView && !viewStale && currentView.connection_state === "READY" && !cancelPending
     && ["RUNNING", "PAUSED_AWAITING_OPERATOR"].includes(currentView.runtime.workflow_state)
     && currentView.available_ops.includes("cancel_session"));
 }
@@ -749,27 +766,46 @@ function renderTechnical(rows) {
     .map(([key, value]) => `<div><dt>${escapeHtml(key)}</dt><dd><code>${escapeHtml(typeof value === "object" ? JSON.stringify(value) : value)}</code></dd></div>`).join("");
 }
 
-function failClose(code, detail = "") {
+function failClose(code, detail = "", recover = false) {
   const bridgeSessionExpired = code === "BRIDGE_SESSION_EXPIRED";
   stopWatch();
-  currentView = undefined;
+  if (viewController?.releaseIntent) intentBusy = false;
+  viewController?.abort();
+  viewController = undefined;
+  clearTimeout(recoveryTimer);
+  viewStale = true;
   document.body.dataset.bridge = "blocked";
   document.querySelector("#connection-dot").className = "connection-dot blocked";
   document.querySelector("#connection-label").textContent = "복구 필요";
-  document.querySelector("#session-label").textContent = "최신 상태를 다시 확인하세요";
+  document.querySelector("#session-label").textContent = currentView
+    ? `오래된 정보 · 마지막 응답 ${currentView.generated_at}` : "아직 실행 상태를 확인하지 못했습니다";
+  disabledBeforeFailure ??= [...document.querySelectorAll("button, input, select")].filter((control) => !control.disabled);
   document.querySelectorAll("button, input, select").forEach((control) => { control.disabled = true; });
-  if (document.querySelector("#workspace-dialog").open) document.querySelector("#workspace-dialog").close();
-  cancelButton.hidden = true;
-  setBanner(`${humanReason(code)}. 새 요청을 보내지 않습니다. 최신 상태를 다시 불러오세요.`, "bad");
-  document.querySelectorAll(".flow-step").forEach((section) => { section.hidden = section.dataset.step !== "environment"; });
-  document.querySelectorAll("[data-step-target]").forEach((button) => button.classList.toggle("active", button.dataset.stepTarget === "environment"));
-  document.querySelector("#setup-summary").innerHTML = `<strong>${escapeHtml(humanReason(code))}</strong><span>장치 상태를 성공으로 표시하지 않습니다. 서비스를 연결한 뒤 다시 확인하세요.</span><button id="retry-view" type="button">${bridgeSessionExpired ? "새 서버에 다시 연결" : "최신 상태 다시 불러오기"}</button>`;
-  document.querySelector("#setup-subsystems").innerHTML = "";
-  document.querySelector("#camera-setup").hidden = true;
-  document.querySelector("#runtime-content").innerHTML = "";
+  document.querySelectorAll("dialog[open]").forEach((dialog) => dialog.close());
+  const reason = {
+    BRIDGE_UNAVAILABLE: "서버 연결 응답을 받지 못했습니다",
+    BRIDGE_SESSION_EXPIRED: "서버 세션을 다시 연결해야 합니다",
+    VIEW_HTTP_ERROR: "서버가 상태 조회 오류를 반환했습니다",
+    VIEW_RESPONSE_INVALID: "서버 응답을 현재 화면의 상태로 해석할 수 없습니다",
+  }[code] ?? humanReason(code);
+  const retrying = recover && recoveryAttempts < 3;
+  setBanner(`${reason}. ${currentView ? "아래는 오래된 마지막 확인 정보입니다. " : ""}로봇이 계속 동작할 수 있으며, 현재 동작·정지 여부는 확인되지 않았습니다. 요청을 재전송하지 않습니다. ${retrying ? `상태 조회만 자동 재시도합니다 (${recoveryAttempts + 1}/3).` : "자동 조회를 하지 않습니다. 최신 상태를 다시 확인하세요."}`, "bad");
+  connectionBanner.insertAdjacentHTML("beforeend", ` <button id="retry-view" type="button">${bridgeSessionExpired ? "새 서버에 다시 연결" : "최신 상태 다시 불러오기"}</button>`);
+  if (currentView) {
+    for (const selector of ["#campaign-facts", "#runtime-content"]) {
+      const panel = document.querySelector(selector);
+      if (!panel.querySelector("[data-stale-label]")) panel.insertAdjacentHTML("afterbegin", '<strong data-stale-label>오래된 마지막 확인 정보 · 현재 상태 미확인</strong>');
+    }
+    document.querySelectorAll(".pulse").forEach((pulse) => { pulse.hidden = true; });
+  }
   const retry = document.querySelector("#retry-view");
   retry.addEventListener("click", () => bridgeSessionExpired ? window.location.reload() : loadView(), {once: true});
-  renderTechnical({error_code: code, detail});
+  renderTechnical({error_code: code, detail, last_session: currentView?.session_id,
+    last_revision: currentView?.revision, last_view_digest: currentView?.view_digest, stale: true});
+  if (retrying) recoveryTimer = setTimeout(() => {
+    recoveryAttempts += 1;
+    loadView({automaticRecovery: true});
+  }, 1000 * 2 ** recoveryAttempts);
 }
 
 function stopWatch() {
@@ -778,13 +814,16 @@ function stopWatch() {
   controller?.abort();
 }
 
-function failViewRequest(error) {
+function failViewRequest(error, stage = "connection") {
   const detail = error instanceof Error ? error.message : String(error);
   const stale = ["OPERATOR_VIEW_REVISION_FUTURE", "RUNNING_CANCEL_UNAVAILABLE"].includes(detail);
-  const code = detail === "HTTP_403" ? "BRIDGE_SESSION_EXPIRED"
+  const code = ["HTTP_401", "HTTP_403", "OPERATOR_TOKEN_MISSING"].includes(detail) ? "BRIDGE_SESSION_EXPIRED"
     : detail.startsWith("UNKNOWN_VIEW_ENUM") || stale ? "VIEW_STALE"
-      : detail === "VIEW_REVISION_ROLLBACK" ? detail : "BRIDGE_UNAVAILABLE";
-  failClose(code, detail);
+      : detail === "VIEW_REVISION_ROLLBACK" ? detail
+        : detail.startsWith("HTTP_") ? "VIEW_HTTP_ERROR"
+          : stage === "connection" || error.name === "TimeoutError" ? "BRIDGE_UNAVAILABLE" : "VIEW_RESPONSE_INVALID";
+  failClose(code, error.nativeCode ? `${detail}:${error.nativeCode}` : detail,
+    code === "BRIDGE_UNAVAILABLE" || /^HTTP_5\d\d$/.test(detail));
 }
 
 function setupReady(view) {
@@ -1693,6 +1732,11 @@ function renderCollectionAdvice(view) {
 }
 
 function render(view) {
+  viewStale = false;
+  clearTimeout(recoveryTimer);
+  recoveryAttempts = 0;
+  disabledBeforeFailure?.forEach((control) => { if (control.isConnected) control.disabled = false; });
+  disabledBeforeFailure = undefined;
   if (view.session_id !== lastSession
       || !["RUNNING", "CANCELLING", "PAUSED_AWAITING_OPERATOR"].includes(view.runtime.workflow_state)) cancelPending = false;
   currentView = view;
@@ -1715,25 +1759,28 @@ function render(view) {
 }
 
 async function watchView() {
-  if (!currentView || currentView.connection_state !== "READY" || watchController) return;
+  if (!currentView || viewStale || currentView.connection_state !== "READY" || watchController) return;
   const boundSession = currentView.session_id;
   const afterRevision = currentView.revision;
   const controller = new AbortController();
   watchController = controller;
+  const timeout = setTimeout(() => controller.abort(new DOMException("State watch timed out", "TimeoutError")), 70000);
+  let stage = "connection";
   try {
     const response = await fetch(`/api/view/watch?after_revision=${afterRevision}`, {
       method: "GET", credentials: "same-origin", cache: "no-store",
       headers: tokenHeaders(), signal: controller.signal,
     });
-    const payload = await response.json();
-    if (!response.ok) throw new Error(response.status === 403 ? "HTTP_403" : typeof payload.code === "string" ? payload.code : `HTTP_${response.status}`);
+    stage = "response";
+    const view = await readViewResponse(response);
     if (controller.signal.aborted) return;
-    const view = validateView(payload);
     if (controller.signal.aborted || !currentView || currentView.session_id !== boundSession) return;
+    if (view.connection_state !== "READY") return failClose(view.runtime.reason_codes?.[0] ?? "VIEW_STALE", view.connection_state);
     if (view.revision !== currentView.revision || view.view_digest !== currentView.view_digest) render(view);
   } catch (error) {
-    if (!controller.signal.aborted && watchController === controller && error.name !== "AbortError") failViewRequest(error);
+    if (watchController === controller && (!controller.signal.aborted || controller.signal.reason?.name === "TimeoutError")) failViewRequest(error, stage);
   } finally {
+    clearTimeout(timeout);
     if (watchController === controller) {
       watchController = undefined;
       watchView();
@@ -1824,13 +1871,23 @@ async function submitImmediateCancel() {
   await loadView({rejectionCode, recoveryNotice});
 }
 
-async function loadView({releaseIntent = false, rejectionCode, recoveryNotice} = {}) {
+async function loadView({releaseIntent = false, rejectionCode, recoveryNotice, automaticRecovery = false} = {}) {
   stopWatch();
-  setBanner("최신 상태를 다시 읽고 있습니다. 이 동안 요청을 보내지 않습니다.", "info", false);
+  clearTimeout(recoveryTimer);
+  if (!automaticRecovery) recoveryAttempts = 0;
+  releaseIntent ||= viewController?.releaseIntent;
+  viewController?.abort();
+  const controller = new AbortController();
+  controller.releaseIntent = releaseIntent;
+  viewController = controller;
+  const timeout = setTimeout(() => controller.abort(new DOMException("State read timed out", "TimeoutError")), 10000);
+  let stage = "connection";
+  if (!viewStale) setBanner("최신 상태를 다시 읽고 있습니다. 이 동안 요청을 보내지 않습니다.", "info", false);
   try {
-    const response = await fetch("/api/view", {method: "GET", credentials: "same-origin", cache: "no-store", headers: tokenHeaders()});
-    if (!response.ok) throw new Error(`HTTP_${response.status}`);
-    const view = validateView(await response.json());
+    const response = await fetch("/api/view", {method: "GET", credentials: "same-origin", cache: "no-store", headers: tokenHeaders(), signal: controller.signal});
+    stage = "response";
+    const view = await readViewResponse(response);
+    if (viewController !== controller) return;
     if (releaseIntent) intentBusy = false;
     if (view.connection_state !== "READY") {
       failClose(view.runtime.reason_codes?.[0] ?? "VIEW_STALE", view.connection_state);
@@ -1841,8 +1898,12 @@ async function loadView({releaseIntent = false, rejectionCode, recoveryNotice} =
     else if (rejectionCode) setBanner(`${humanReason(rejectionCode)}. 요청은 실행되지 않았습니다.`, "bad");
     watchView();
   } catch (error) {
+    if (viewController !== controller) return;
     if (releaseIntent) intentBusy = false;
-    failViewRequest(error);
+    failViewRequest(error, stage);
+  } finally {
+    clearTimeout(timeout);
+    if (viewController === controller) viewController = undefined;
   }
 }
 
@@ -2070,7 +2131,12 @@ document.querySelector("#same-settings-action").addEventListener("click", (event
   const button = event.target.closest("[data-op]");
   if (button) submitIntent(button.dataset.op);
 });
-window.addEventListener("offline", () => failClose("BRIDGE_UNAVAILABLE", "BROWSER_OFFLINE"));
-window.addEventListener("online", () => { setBanner("연결을 확인한 뒤 최신 상태를 다시 읽습니다. 이전 요청은 다시 보내지 않습니다.", "info"); loadView(); });
+window.addEventListener("offline", () => failClose("BRIDGE_UNAVAILABLE", "BROWSER_OFFLINE", true));
+window.addEventListener("online", () => {
+  if (viewStale && recoveryAttempts < 3) {
+    recoveryAttempts += 1;
+    loadView({automaticRecovery: true});
+  }
+});
 
 loadView();

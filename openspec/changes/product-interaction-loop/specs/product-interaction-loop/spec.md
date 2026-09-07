@@ -137,3 +137,27 @@ The Collection application SHALL retain the preceding campaign's server-owned st
 - **WHEN** an apply or keep response is lost, the page is refreshed, or the same choice is delivered again
 - **THEN** the Web surface reads the canonical choice result without automatically repeating the command; automation can read that same result
 - **AND** duplicate or conflicting delivery cannot create another campaign or effect, changed stored evidence is revalidated before choice, and a failed recovery read leaves actions unavailable with explicit refresh available.
+
+### Requirement: Preserve execution awareness during Collection connection recovery
+
+The Collection Web surface SHALL retain its last validated execution facts and current screen when state retrieval fails, clearly label them as stale, and state that current robot motion or stop is unknown. A failed browser request SHALL NOT imply that the lifecycle owner stopped, rolled back or remains healthy. The current constraint is the existing loopback state/intent transport; this behavior grants no offline command authority and changes no physical or approval gates. The next consumer is the existing lifecycle owner, whose fresh canonical view and exact intent CAS remain authoritative.
+
+#### Scenario: State retrieval fails while execution continues
+
+- **WHEN** a state read or watch fails during a previously observed execution
+- **THEN** the screen retains the last episode, progress and evidence identities as explicitly stale information, without returning to environment setup or animating a live heartbeat
+- **AND** the stop control remains visible with its existing pending semantics, but no command is emitted using the stale view; unavailable Web stop is not represented as confirmed physical stop.
+
+#### Scenario: Recover current state without replaying effects
+
+- **WHEN** a connection failure or HTTP 5xx prevents reading state
+- **THEN** the browser makes at most three automatic read-only retries with delays, bounds each read's duration, and leaves explicit refresh available after exhaustion
+- **AND** a fresh validated view restores only its native-permitted operations; a rollback or malformed view cannot change the retained identity or confer authority
+- **AND** a response requested before a known disconnect cannot clear the stale indication; recovery requires a subsequent state read
+- **AND** lost intent or stop responses cause state reads only, never automatic intent replay, including when one read supersedes another.
+
+#### Scenario: Distinguish session and response failures
+
+- **WHEN** the server rejects the session, returns an HTTP error, or returns an invalid state payload
+- **THEN** the UI distinguishes these from a connection failure, preserves last-known execution context, and exposes the exact error in technical details
+- **AND** session expiry offers the existing fresh-page bootstrap without token transcription; invalid contracts require explicit refresh rather than an unbounded retry loop.

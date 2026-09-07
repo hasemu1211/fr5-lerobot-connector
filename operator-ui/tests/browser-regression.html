@@ -71,6 +71,9 @@
     let stateKey = "authoring";
     let postResult = "accepted";
     let networkFailure = false;
+    let viewFault;
+    let viewReads = 0;
+    let hangView = false;
     let postTransportFailure = false;
     let intentAttempts = 0;
     const heldIntentOps = new Set();
@@ -205,6 +208,13 @@
     };
     window.fetch = async (input, init = {}) => {
       const path = new URL(typeof input === "string" ? input : input.url, location.href).pathname;
+      if (path === "/api/view") {
+        viewReads += 1;
+        if (hangView) return new Promise((_resolve, reject) => {
+          init.signal.addEventListener("abort", () => reject(init.signal.reason), {once: true});
+        });
+        if (viewFault) return new Response(viewFault.body, {status: viewFault.status});
+      }
       if (networkFailure && path.startsWith("/api/")) throw new TypeError("fixture network down");
       if (bridgeTokenRejected && path === "/api/view") return new Response(JSON.stringify({schema_version: "data_factory.operator_intent_result.v1", ok: false, code: "BRIDGE_TOKEN", consumed: false}), {status: 403, headers: {"Content-Type": "application/json"}});
       if (path === "/api/view") return new Response(JSON.stringify(await fixtureView()), {status: 200, headers: {"Content-Type": "application/json"}});
@@ -370,6 +380,107 @@
         await waitFor(() => !intentBusy && document.body.dataset.bridge === "ready");
         check(intentAttempts === attemptsBeforeLostResponse + 1 && document.querySelector("#connection-banner").textContent.includes("재전송하지 않았습니다"), "lost intent response resynchronizes from the authoritative view without replay");
         if (new URLSearchParams(location.search).get("only") === "intent-recovery") {
+          document.body.dataset.result = "pass";
+          output.textContent = `${checks.length} checks passed\n${checks.join("\n")}`;
+          return;
+        }
+        if (new URLSearchParams(location.search).get("only") === "state-recovery") {
+          await show("running");
+          const saved = JSON.stringify(currentView);
+          const attempts = intentAttempts;
+          const reads = viewReads;
+          networkFailure = true;
+          await loadView();
+          check(viewStale && JSON.stringify(currentView) === saved && !document.querySelector("#step-execution").hidden,
+            "connection failure preserves exact last-known execution and its screen");
+          check(connectionBanner.textContent.includes("로봇이 계속 동작할 수") && document.querySelector("#runtime-content [data-stale-label]")
+            && document.querySelector("#campaign-facts [data-stale-label]"), "execution facts explicitly stale without implying stopped or healthy");
+          check(!cancelButton.hidden && cancelButton.disabled && !canImmediateCancel() && !canIntent("cancel_session"),
+            "stop stays visible but stale state grants no command authority");
+          await waitFor(() => recoveryAttempts === 3 && !viewController, 9000);
+          await new Promise((resolve) => setTimeout(resolve, 1100));
+          check(viewReads === reads + 4 && intentAttempts === attempts && !watchController,
+            "one failed read plus exactly three bounded GET retries; zero POST and no watch loop");
+          networkFailure = false;
+          document.querySelector("#retry-view").click();
+          await waitFor(() => !viewStale && canImmediateCancel());
+          check(JSON.stringify(currentView) === saved && !cancelButton.disabled && !document.querySelector("[data-stale-label]"),
+            "explicit refresh restores same canonical view and stop authority without a new gate");
+          for (const [fault, code] of [
+            [{status: 403, body: "<html>expired</html>"}, "BRIDGE_SESSION_EXPIRED"],
+            [{status: 200, body: "not JSON"}, "VIEW_RESPONSE_INVALID"],
+            [{status: 200, body: "{}"}, "VIEW_RESPONSE_INVALID"],
+            [{status: 503, body: "not JSON"}, "VIEW_HTTP_ERROR"],
+            [{status: 409, body: '{"code":"OPERATOR_VIEW_REVISION_FUTURE"}'}, "HTTP_409:OPERATOR_VIEW_REVISION_FUTURE"],
+          ]) {
+            viewFault = fault;
+            await loadView();
+            check(document.querySelector("#technical-content").textContent.includes(code)
+              && JSON.stringify(currentView) === saved && !canImmediateCancel(), `classifies ${fault.status}/${fault.body} without erasing or authorizing execution`);
+            if (fault.status === 403) check(document.querySelector("#retry-view").textContent === "새 서버에 다시 연결", "session expiry offers fresh bootstrap without token transcription");
+            viewFault = undefined;
+            await loadView();
+          }
+          const rollback = await fixtureView();
+          rollback.revision -= 1;
+          viewFault = {status: 200, body: JSON.stringify(rollback)};
+          await loadView();
+          check(viewStale && JSON.stringify(currentView) === saved && document.querySelector("#technical-content").textContent.includes("VIEW_REVISION_ROLLBACK"), "recovery cannot admit a rollback or alter the retained CAS identity");
+          viewFault = undefined;
+          await loadView();
+          hangView = true;
+          const timedRead = loadView();
+          await waitFor(() => viewStale, 11500);
+          await timedRead;
+          check(JSON.stringify(currentView) === saved && document.querySelector("#technical-content").textContent.includes("BRIDGE_UNAVAILABLE"), "hung state read times out without clearing last-known execution");
+          const superseded = loadView({releaseIntent: true});
+          intentBusy = true;
+          hangView = false;
+          await loadView();
+          await superseded;
+          check(!intentBusy && !viewStale && canImmediateCancel(), "superseding a recovery read releases the completed intent without locking out stop");
+          const beforeOfflineFetch = window.fetch;
+          let releaseOldRead;
+          window.fetch = async (input, init) => {
+            const response = await beforeOfflineFetch(input, init);
+            return input === "/api/view" ? new Promise((resolve) => { releaseOldRead = () => resolve(response); }) : response;
+          };
+          intentBusy = true;
+          const oldRead = loadView({releaseIntent: true});
+          await waitFor(() => releaseOldRead);
+          window.dispatchEvent(new Event("offline"));
+          releaseOldRead();
+          await oldRead;
+          check(viewStale && !intentBusy && !canImmediateCancel() && JSON.stringify(currentView) === saved,
+            "a response requested before offline cannot clear stale or strand the completed intent");
+          window.fetch = beforeOfflineFetch;
+          await loadView();
+          check(!viewStale && canImmediateCancel(), "only a new post-offline read restores current command authority");
+          pendingWatch({});
+          await waitFor(() => viewStale);
+          check(JSON.stringify(currentView) === saved && !watchController && document.querySelector("#technical-content").textContent.includes("VIEW_RESPONSE_INVALID"), "watch response contract failure uses the same stale recovery path");
+          await loadView();
+          const beforeCancel = intentAttempts;
+          const bound = currentView;
+          const fixtureFetch = window.fetch;
+          window.fetch = async (input, init) => {
+            const response = await fixtureFetch(input, init);
+            if (input === "/api/intent") {
+              networkFailure = true;
+              throw new TypeError("accepted cancel response lost");
+            }
+            return response;
+          };
+          await submitImmediateCancel();
+          check(viewStale && cancelPending && currentView === bound, "lost stop response and failed read preserve uncertainty, not a stopped claim");
+          networkFailure = false;
+          await waitFor(() => !viewStale && currentView.runtime.workflow_state === "CANCELLING");
+          const cancel = posted.at(-1).body;
+          check(intentAttempts === beforeCancel + 1 && cancel.op === "cancel_session"
+            && cancel.session_id === bound.session_id && cancel.view_revision === bound.revision && cancel.view_digest === bound.view_digest
+            && cancel.payload.active_child_id === bound.runtime.active_child_id, "response-loss recovery reads owner CANCELLING with one exact CAS-bound stop, never replayed");
+          window.fetch = fixtureFetch;
+          stopWatch();
           document.body.dataset.result = "pass";
           output.textContent = `${checks.length} checks passed\n${checks.join("\n")}`;
           return;
@@ -622,7 +733,7 @@
         check(posted.some((item) => item.body.payload.remove_pair?.start_pose_id === "fr5-ready-side-r001" && item.body.payload.remove_pair?.yaw_deg === -162.5), "remove uses the exact projected pair");
         workspaceDomainAvailable = false;
         await loadView();
-        check(document.body.dataset.bridge === "blocked" && !currentView, "missing direct-pose domain fails closed");
+        check(document.body.dataset.bridge === "blocked" && viewStale && !canIntent("update_draft"), "missing direct-pose domain fails closed");
         workspaceDomainAvailable = true;
         await loadView();
         document.querySelector("#count-input").value = "3";
@@ -814,13 +925,13 @@
 
         bridgeTokenRejected = true;
         await loadView();
-        await waitFor(() => !currentView && document.body.dataset.bridge === "blocked");
+        await waitFor(() => viewStale && document.body.dataset.bridge === "blocked");
         check(document.querySelector("#retry-view").textContent === "새 서버에 다시 연결", "expired bridge token fails closed and offers one fresh-page reconnect");
         bridgeTokenRejected = false;
 
         networkFailure = true;
         await loadView();
-        await waitFor(() => !currentView && document.body.dataset.bridge === "blocked");
+        await waitFor(() => viewStale && document.body.dataset.bridge === "blocked");
         check(document.querySelector("#connection-label").textContent === "복구 필요", "bridge failure remains fail closed");
 
         document.body.dataset.result = "pass";
