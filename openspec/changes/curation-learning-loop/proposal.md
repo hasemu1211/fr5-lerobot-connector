@@ -31,6 +31,10 @@ Curation은 어떤 원본·시연 구성·관측 표현이 downstream 학습과 
 
 ## 유지하는 조건 분포 비교
 
+별도 task의 성공 시연은 기존 task의 추가 TRAIN으로 자동 합치지 않는다. pick-place처럼 운반·놓기까지 포함하는 task는 현재 합격한 원본을 별도 명시적 요청으로 준비하고, instruction별 native 분할에서 각 방향의 TRAIN 노출과 위치 변화를 확인한다. 중앙 위치만 남기는 대안보다 검토된 방향·위치 변화를 보존하는 선택을 먼저 소비하되, 작은 cohort의 준비 성공을 충분한 학습량이나 pickup 대비 효용으로 해석하지 않는다. 기존 pickup 평가 identity와 요청은 유지한다.
+
+[SmolVLA 원 논문](https://arxiv.org/html/2506.01844v1)은 위치별 반복 시연과 grasp/place를 구분한 task 평가의 근거다. 그 데이터 수량을 FR5의 최소량으로 복사하지 않는다. [Data Scaling Laws v4](https://arxiv.org/abs/2410.18647v4)의 다양성 관측은 다음 취득의 질문을 뒷받침하지만, 해당 연구는 단일 task의 환경·물체 일반화를 다루므로 새 task의 우월성이나 전이를 증명하지 않는다. 다음 수집 제안은 현재 TRAIN에서 부족한 방향·위치 노출을 명시하고, Collection이 유효한 계획과 실행을 소유한다. 학습 이득은 Learning/Rollout의 비교 가능한 task 측정 전까지 미결이다.
+
 **학습량과 평가 대상을 통제한 조건 분포 비교를 실제 native 요청으로 만든다.**
 
 - H1: 같은 데이터량에서 넓은 명령 조건 분포가 부족한 조건에 대한 학습을 돕는다.
