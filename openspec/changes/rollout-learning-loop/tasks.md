@@ -21,7 +21,7 @@ condition-level task-effect/data-utility evidence remain separate outcomes.
 - [x] Add a three-step local midpoint control with six counted expert evaluations to the existing offline native consumer, preserving saved processors and model ownership.
 - [x] Verify paired inputs, actual installed sampling consumption and analytic counterexamples with focused CPU tests.
 - [x] Record the competing async path, bounded cost, falsifier and Learning/root handoff in this change.
-- [ ] Consume an immutable admitted trained checkpoint and Learning-selected observation scope after root resource assignment.
+- [x] Consume an immutable admitted trained checkpoint and Learning-selected observation scope after root resource assignment.
 - [ ] Compare warmed chunk cost, per-joint action deviation and peak memory; revise the candidate using measured tradeoffs before any deployed change.
 - [ ] Connect any later authorized runtime change to actual lifecycle traces and task/data-utility evidence; numerical results alone do not finish this outcome.
 
