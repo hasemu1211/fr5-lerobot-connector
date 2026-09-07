@@ -357,3 +357,70 @@ def _validate_launch_split(value: Mapping) -> dict:
     if value["split_digest"] != canonical_digest({k: v for k, v in value.items() if k != "split_digest"}):
         raise ContractError("SPLIT_DIGEST_MISMATCH")
     return copy.deepcopy(dict(value))
+
+
+COHORT_SCHEMA = "training.evaluation_cohort.v1"
+
+
+def source_episode_identity(provenance: Mapping) -> dict:
+    """Resolve an already-validated mapping/derivation to its original episode."""
+    while "parent" in provenance:
+        provenance = provenance["parent"]["provenance"]
+    return {key: copy.deepcopy(provenance[key]) for key in
+            ("dataset_identity_digest", "episode_index", "episode_content_digest")}
+
+
+def validate_evaluation_cohort(value: Mapping) -> dict:
+    """Validate a planning artifact; this never supplies training authority."""
+    fields = {"schema_version", "training_authority", "request", "dataset_identity",
+              "eval_fraction", "train", "eval", "cohort_digest"}
+    if (not isinstance(value, Mapping) or set(value) != fields
+            or value["schema_version"] != COHORT_SCHEMA or value["training_authority"] is not False
+            or canonical_digest({k: v for k, v in value.items() if k != "cohort_digest"}) != value["cohort_digest"]):
+        raise ContractError("COHORT_BINDING")
+    if (not isinstance(value["request"], dict) or set(value["request"]) != {"path", "sha256"}
+            or not isinstance(value["request"]["path"], str)
+            or not isinstance(value["request"]["sha256"], str)
+            or not DIGEST.fullmatch(value["request"]["sha256"])):
+        raise ContractError("COHORT_REQUEST")
+    from tools.data_factory.training_approval import _dataset
+    _dataset(value["dataset_identity"])
+    if (type(value["eval_fraction"]) not in (float, int) or not 0 < value["eval_fraction"] < 1):
+        raise ContractError("COHORT_FRACTION")
+    all_keys = []
+    for group in ("train", "eval"):
+        if not isinstance(value[group], list) or not value[group]:
+            raise ContractError("COHORT_PARTITION")
+        for row in value[group]:
+            if (not isinstance(row, dict) or set(row) != {"dataset_identity_digest", "episode_index", "episode_content_digest"}
+                    or type(row["episode_index"]) is not int or row["episode_index"] < 0
+                    or any(not isinstance(row[k], str) or not DIGEST.fullmatch(row[k])
+                           for k in ("dataset_identity_digest", "episode_content_digest"))):
+                raise ContractError("COHORT_EPISODE")
+            all_keys.append(canonical_digest(row))
+    if len(set(all_keys)) != len(all_keys):
+        raise ContractError("COHORT_OVERLAP")
+    return copy.deepcopy(dict(value))
+
+
+def resolve_evaluation_cohort(value: Mapping, origins: Mapping[int, Mapping]) -> tuple[list[int], list[int]]:
+    """Map proven source identities to new indices; never retune a fraction.
+
+    Caller must validate the source publication and each origin's provenance.
+    A matching identity at two destination indices is leakage, not extra data.
+    """
+    value = validate_evaluation_cohort(value)
+    if not origins or any(type(i) is not int or i < 0 for i in origins):
+        raise ContractError("COHORT_DESTINATION")
+    keys = [canonical_digest(origin) for origin in origins.values()]
+    coordinates = [(origin["dataset_identity_digest"], origin["episode_index"]) for origin in origins.values()]
+    if len(coordinates) != len(set(coordinates)):
+        raise ContractError("COHORT_OVERLAP")
+    heldout = {canonical_digest(row) for row in value["eval"]}
+    if not heldout.issubset(keys):
+        raise ContractError("COHORT_MISSING_HELDOUT")
+    train = [i for i in sorted(origins) if canonical_digest(origins[i]) not in heldout]
+    evaluation = [i for i in sorted(origins) if canonical_digest(origins[i]) in heldout]
+    if not train:
+        raise ContractError("COHORT_PARTITION")
+    return train, evaluation

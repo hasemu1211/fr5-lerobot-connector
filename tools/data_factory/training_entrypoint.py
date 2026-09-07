@@ -961,9 +961,54 @@ def approve(request: dict, output: Path, approved_by: str, *, dry_run: bool) -> 
     return publish_approval_batch(prepared)
 
 
+def prepare_evaluation_cohort(request_path: Path, *, evidence_directory: Path,
+                              eval_fraction: float) -> dict:
+    """Revalidate canonical selected evidence without publishing any authority."""
+    from tools.data_factory.training_receipts import file_digest
+    from tools.data_factory.training_split import (
+        COHORT_SCHEMA, selected_train_eval, source_episode_identity, validate_evaluation_cohort,
+    )
+    request_path = request_path.resolve()
+    before = file_digest(request_path)
+    request = load_json_strict(request_path)
+    dataset, drafts = _prepare_approvals(
+        request, evidence_directory, "cohort-preview-only", check_targets=False,
+    )
+    metadata = read_metadata(Path(dataset["dataset_root"]))
+    train, evaluation = selected_train_eval(
+        metadata["episode_tasks"], [e["episode_index"] for e in request["episodes"]], eval_fraction,
+    )
+    origins = {d["approval_arguments"]["episode_index"]: source_episode_identity(d["provenance"])
+               for d in drafts}
+    value = dict(schema_version=COHORT_SCHEMA, training_authority=False,
+                 request={"path": str(request_path), "sha256": before}, dataset_identity=dataset,
+                 eval_fraction=eval_fraction, train=[origins[i] for i in train],
+                 eval=[origins[i] for i in evaluation])
+    value["cohort_digest"] = canonical_digest(value)
+    if file_digest(request_path) != before:
+        raise ContractError("COHORT_REQUEST_CHANGED")
+    return validate_evaluation_cohort(value)
+
+
+def revalidate_evaluation_cohort(path: Path) -> dict:
+    """Reopen the frozen source graph; a changed source is not a new cohort."""
+    from tools.data_factory.training_split import validate_evaluation_cohort
+    value = validate_evaluation_cohort(load_json_strict(path))
+    current = prepare_evaluation_cohort(Path(value["request"]["path"]),
+                                        evidence_directory=path.parent,
+                                        eval_fraction=value["eval_fraction"])
+    if current != value:
+        raise ContractError("COHORT_SOURCE_CHANGED")
+    return value
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest="mode", required=True)
+    cohort = sub.add_parser("prepare-cohort", help="Freeze planning-only source evaluation identities; no approval")
+    cohort.add_argument("--request", type=Path, required=True)
+    cohort.add_argument("--output", type=Path, required=True)
+    cohort.add_argument("--eval-fraction", type=float, required=True)
     resume = sub.add_parser("resume", help="Resume an admitted checkpoint with its TRAIN normalization")
     resume.add_argument("--checkpoint", type=Path, required=True)
     human = sub.add_parser("approve", help="Preview a frozen revision; issue approval only through a controlling human TTY",
@@ -1029,7 +1074,15 @@ for a new reviewed attempt. This command never starts training or robot executio
             command.add_argument("argv", nargs=argparse.REMAINDER)
     args = parser.parse_args()
     try:
-        if args.mode == "resume":
+        if args.mode == "prepare-cohort":
+            value = prepare_evaluation_cohort(args.request, evidence_directory=args.output.parent,
+                                              eval_fraction=args.eval_fraction)
+            if prepare_evaluation_cohort(args.request, evidence_directory=args.output.parent,
+                                         eval_fraction=args.eval_fraction) != value:
+                raise ContractError("COHORT_SOURCE_CHANGED")
+            approval._write_exclusive(args.output, value, "COHORT_OUTPUT_EXISTS")
+            print(json.dumps(value, indent=2, sort_keys=True))
+        elif args.mode == "resume":
             raise SystemExit(resume_training(args.checkpoint))
         elif args.mode == "approve":
             print(json.dumps(approve(load_json_strict(args.request), args.output_dir.resolve(), args.approved_by, dry_run=args.dry_run), indent=2, sort_keys=True))

@@ -30,3 +30,8 @@
 - [ ] Establish reproducible evidence for the next acquisition or selection decision, separating sampled policy errors from recorded condition coverage.
 
 Runtime checkpoints, attempts, blockers and numerical measurements belong in Orca and their native evidence artifacts, not this outcome checklist.
+
+## Non-authorizing cohort preparation
+
+- [x] Prepare and revalidate frozen source evaluation identities through the public native CLI without issuing inventory or training authority; resolve proven mappings and reject missing/overlapping identities.
+- [ ] Coordinate Curator publication consumption and native explicit-partition launch enforcement before claiming growth-cohort training support. Preserve existing fraction-based v3 launches and strict resume in this preparation checkpoint.

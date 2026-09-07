@@ -151,3 +151,18 @@ The lane SHALL choose the next safe valuable outcome using code/tests, current a
 - **WHEN** either launch manifest remains pending, including after an interrupted final publication
 - **THEN** recovery preserves evidence and refuses to launch or evaluate; pending evidence alone does not prove a live process.
 - **AND** trainer failure and missing-checkpoint outcomes produce a nonzero public CLI exit status.
+
+### Requirement: Evaluation planning does not require training authority
+
+The native preparation consumer SHALL freeze a non-authorizing evaluation cohort from canonical selected evidence without creating an approved inventory or executing training. Original source identity SHALL survive destination-index remapping. A frozen source revision remains immutable; appending new source material does not redefine earlier source identities.
+
+#### Scenario: Reviewed data grows before training
+- **WHEN** a consumer prepares a cohort and subsequently maps its proven source episodes alongside new data
+- **THEN** the original held-out sources resolve to their new indices without fraction or ordering adjustments
+- **AND** missing held-out sources, duplicate source identities, overlap and changed frozen evidence are rejected
+- **AND** the artifact grants no training authority and does not replace an admitted v3 split.
+
+#### Scenario: A mapper consumes a planned cohort
+- **WHEN** Curator accepts the cohort reference
+- **THEN** it revalidates the source evidence and maps canonical parent identities through the shared resolver
+- **AND** subsequent native launch must enforce those identities in its real partition before using TRAIN-only statistics; a planning artifact alone does not enable this execution path.

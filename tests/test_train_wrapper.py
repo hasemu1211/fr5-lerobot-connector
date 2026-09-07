@@ -830,6 +830,39 @@ class TrainingLaunchConnectionTest(unittest.TestCase):
             recovery_kwargs["runner"].assert_called_once()
             self.assertEqual(snapshot(authority_root), before)
 
+    def test_planning_cohort_survives_remapping_without_authority(self):
+        from tools.data_factory.training_entrypoint import prepare_evaluation_cohort, revalidate_evaluation_cohort
+        from tools.data_factory.training_split import resolve_evaluation_cohort, validate_evaluation_cohort
+        with TemporaryDirectory(prefix="SYNTHETIC_TEST_ONLY-") as directory:
+            root = Path(directory)
+            _, request, _ = launch_fixture(root)
+            request_path = root / "request.json"
+            write_json(request_path, request)
+            before = snapshot(root)
+            value = prepare_evaluation_cohort(request_path, evidence_directory=root, eval_fraction=.34)
+            self.assertEqual(snapshot(root), before)
+            self.assertIs(value["training_authority"], False)
+            self.assertNotIn("approved_episode_inventory_digest", value)
+            path = root / "cohort.json"
+            write_json(path, value)
+            self.assertEqual(revalidate_evaluation_cohort(path), value)
+            origins = {10: value["train"][0], 20: value["eval"][0], 30: value["eval"][1]}
+            self.assertEqual(resolve_evaluation_cohort(value, origins), ([10], [20, 30]))
+            extra = {**value["train"][0], "episode_index": 99}
+            self.assertEqual(resolve_evaluation_cohort(value, {**origins, 0: extra}), ([0, 10], [20, 30]))
+            with self.assertRaisesRegex(ContractError, "COHORT_OVERLAP"):
+                resolve_evaluation_cohort(value, {**origins, 40: value["eval"][0]})
+            with self.assertRaisesRegex(ContractError, "COHORT_MISSING_HELDOUT"):
+                resolve_evaluation_cohort(value, {10: value["train"][0]})
+            bad = copy.deepcopy(value)
+            bad["train"].append(bad["eval"][0])
+            bad["cohort_digest"] = canonical_digest({k:v for k,v in bad.items() if k != "cohort_digest"})
+            with self.assertRaisesRegex(ContractError, "COHORT_OVERLAP"):
+                validate_evaluation_cohort(bad)
+            request_path.write_text(request_path.read_text() + " ")
+            with self.assertRaisesRegex(ContractError, "COHORT_SOURCE_CHANGED"):
+                revalidate_evaluation_cohort(path)
+
     def test_unsupported_act_native_evaluation_rejected_before_authority(self):
         from tools.data_factory.training_entrypoint import run_delegated_request
 
