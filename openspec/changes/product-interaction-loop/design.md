@@ -21,3 +21,21 @@ An Orca browser comparison also served the original and revised scripts over sep
 ## Limits and next consumer
 
 This establishes recovery after a completed synthetic transaction, not a measured improvement in human task duration, policy learning, physical success or real failure frequency. No GPU, hardware, production inventory or standing delegation was used or modified. An interrupted request that leaves the backend still `PREPARING` or `PUBLISHING` is a separate, unverified continuation case; a future bounded dogfood should determine whether it needs the existing view-watch capability. Learning retains publication and admission semantics; root decides the next increment and integration.
+
+## Duration-led Collection trial decision
+
+Use the existing preset catalog and finite TEST_COLLECTION flow for the new `demonstration-rhythm-r001` candidate. All eight existing ARM phases request velocity/acceleration scaling **0.1/0.1**, including air alignment, final approach, lift and lower. Existing preset files, caps, geometry, timeouts and gripper authority remain unchanged. The intended outcome is a shorter useful pickup recording, not a preferred percentage or an empirically optimal rate.
+
+Root's same-geometry native MoveIt/Pilz plan probe `phase-speed-plan-20260907-r3.json` (SHA256 `e3d0b2fa6212fda1a0ef12f9a6c69ab1d2585f184999f90d3b3cdaeff5e064c0`) binds source preapproval SHA256 `1370578f2b8930ee69f4474ba573ffe8d1ddd6062876e5d3ebd293b9ec43c9bb`. All eight ARM phases were actually replanned without execution or gripper goals; saved endpoint joint residuals were at most 9.74e-6 rad. Summed ARM plan duration changes from **60.181247 to 26.858489 seconds**, excluding gripper, runtime and recorder commit.
+
+The original pickup recording spans **25.866642 seconds**. Substituting the new pickup ARM plan durations while holding observed overhead and gripper time fixed predicts **12.573693 seconds**. This is the selected bounded hypothesis, not an observed new recording. Unrecorded recycle/reset time is separate. SO cadence and DROID clocks supply context, not matched-task timing or FR5 limits; encoded video playback is not assumed to be a physical clock.
+
+### Authority and native consumer
+
+Selection sends the existing preset identity/digest through the canonical draft intent. Trusted TEST_COLLECTION mode binds the native trial flag through compilation, live resolution and postcommit reposition; GENERAL_COLLECTION continues to reject this unqualified candidate. No copied QUALIFIED artifact or new approval is created. HOME recovery and movement to a qualified start retain their existing base-qualified policy.
+
+Native regression uses the actual application/composition and run resolver with software-only callback boundaries. It checks selection, A/B binding, every candidate ARM scaling, unchanged geometry/timeouts/gripper steps, staged release **12.6 mm / 0.5 s → 21 mm**, unchanged source qualification bytes, stale binding rejection and no repeated execution after failed authorization. Historical timing calculations are not global product-test invariants.
+
+### Next consumer and falsifier
+
+Root consumes the exact candidate identity in one short native TEST_COLLECTION trial under existing scene/cell/human/exact-plan/single-owner gates. Actual smoothness, tracking, grasp/release, synchronization and accepted recording quality remain unverified. Revise or reject the hypothesis if the useful recording does not shorten or those properties worsen. Existing plan, phase-event and episode evidence suffice; no timing controller, mandatory observer, additional human gate or production promotion is introduced.

@@ -2,6 +2,29 @@
 
 ## ADDED Requirements
 
+### Requirement: Demonstration trial choices are grounded in recorded duration
+
+Collection motion trial selection SHALL state the intended demonstration timing and task boundary before treating planner percentages as a candidate choice. Existing phase policy SHALL be reused when it meets the bounded timing hypothesis. Reference demonstrations SHALL remain evidence of possible cadence, not FR5 safety limits, matched-task performance or physical qualification. The current constraint is that only root may validate candidate motion physically; the next consumer is the existing finite TEST_COLLECTION flow and exact-plan execution owner.
+
+#### Scenario: Native phase policy can test the timing hypothesis
+
+- **WHEN** the recorded FR5 pickup is dominated by unladen approach and air alignment, and a candidate has inspected native plans for the same endpoints
+- **THEN** the candidate decision identifies the exact preset, source plan and recorded phase interval, calculates the expected change in recorded time, and preserves geometry, staged gripper release and qualification authority
+- **AND** unrecorded reset time is reported separately; SO channel values without verified units are not treated as angular velocities, and unlike reference tasks are not treated as matched benchmarks
+- **AND** no validator ceiling change, new runtime timing controller or additional human gate is introduced merely to choose another percentage.
+
+#### Scenario: Physical observation falsifies the prediction
+
+- **WHEN** the same native trial does not reduce the dominant observed durations, or tracking, settling, contact/release, synchronization or accepted episode quality worsens
+- **THEN** the duration hypothesis is revised or rejected using existing plan, phase-event and episode evidence
+- **AND** shorter software plans alone do not establish a useful physical demonstration or confer production qualification.
+
+#### Scenario: Reference cadence does not identify an appropriate phase budget
+
+- **WHEN** a candidate's predicted total lies inside an unrelated demonstration-duration range but matched displacement, orientation, phase boundaries or endpoint velocities are missing
+- **THEN** the product owner reports feasibility separately from duration selection and does not promote the candidate as empirically selected
+- **AND** the owner identifies the smallest missing discriminating evidence; a configured dynamic lower bound is not substituted for an appropriate or safe demonstration duration.
+
 ### Requirement: Finite candidate speed trials use the existing Collection authority
 
 The native Collection application SHALL make a registered candidate motion preset usable in TEST_COLLECTION through the existing finite campaign. GENERAL_COLLECTION SHALL still require exact production qualification for every selected endpoint. The browser and automation SHALL select only the native preset identity and digest; trial scope SHALL derive from trusted application mode, never serialized program metadata. The current candidate is provisional, not an agreed optimum or a physically qualified policy. The next consumer is the existing Collection executor and root-owned physical validation.
@@ -12,6 +35,13 @@ The native Collection application SHALL make a registered candidate motion prese
 - **THEN** the existing resolver, live episode and postcommit reposition consumers receive the explicitly bound trial mode and exact candidate arm scaling
 - **AND** base qualification bytes, geometry, timeouts and staged gripper behavior remain unchanged; HOME recovery and movement to a qualified start keep their existing qualified policy, visibly distinguished from in-job trial motion
 - **AND** all existing scene, cell, exact-plan, campaign and single-motion-owner gates remain necessary; trial selection adds no acknowledgment and grants no production, semantic or training authority.
+
+#### Scenario: Choose the bounded demonstration-rhythm candidate
+
+- **WHEN** the person or automation selects `demonstration-rhythm-r001` through the existing native TEST_COLLECTION draft
+- **THEN** all eight in-job ARM phases resolve velocity and acceleration scaling to 0.1, including alignment, final approach, lift and lower; all existing preset files remain byte-identical
+- **AND** the candidate remains unqualified, preserves gripper steps including staged opening, and requires existing exact production qualification before use in GENERAL_COLLECTION
+- **AND** predicted recording duration is presented as a hypothesis from native plans and prior observed timing; physical smoothness and accepted recording effectiveness remain unverified until actual execution evidence exists.
 
 #### Scenario: Production and changed inputs remain blocked
 

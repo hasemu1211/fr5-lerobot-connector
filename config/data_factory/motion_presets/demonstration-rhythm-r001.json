@@ -1,0 +1,15 @@
+{
+  "schema_version": "data_factory.motion_preset.v1",
+  "motion_preset_id": "demonstration-rhythm-r001",
+  "purpose": "집기 기록 시간 단축 시험 — 동일 기하 계획 근거, 물리 효과 미검증",
+  "phase_scaling": {
+    "PREGRASP_PTP": {"velocity_scaling": 0.1, "acceleration_scaling": 0.1},
+    "APPROACH_STOP_LIN": {"velocity_scaling": 0.1, "acceleration_scaling": 0.1},
+    "FINAL_APPROACH_LIN": {"velocity_scaling": 0.1, "acceleration_scaling": 0.1},
+    "LIFT_LIN": {"velocity_scaling": 0.1, "acceleration_scaling": 0.1},
+    "RECYCLE_APPROACH_PTP": {"velocity_scaling": 0.1, "acceleration_scaling": 0.1},
+    "LOWER_LIN": {"velocity_scaling": 0.1, "acceleration_scaling": 0.1},
+    "RETREAT_LIN": {"velocity_scaling": 0.1, "acceleration_scaling": 0.1},
+    "SAFE_POSE_PTP": {"velocity_scaling": 0.1, "acceleration_scaling": 0.1}
+  }
+}

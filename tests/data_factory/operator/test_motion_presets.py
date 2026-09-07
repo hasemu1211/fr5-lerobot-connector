@@ -21,10 +21,13 @@ CONFIG = ROOT / "config/data_factory"
 
 class MotionPresetTests(unittest.TestCase):
     def setUp(self):
-        self.preset = factory.load_json_strict(CONFIG / "motion_presets/practical-transfer-r001.json")
-        self.binding = {"id": self.preset["motion_preset_id"], "digest": factory.canonical_digest(self.preset)}
+        self.use_preset("practical-transfer-r001")
         self.home = factory.load_json_strict(CONFIG / "home_candidates/fr5-lab-a-tcp-r002-home-r001.json")
         self.urdf = ROOT / "src/fairino_description/urdf/fairino5_v6.urdf"
+
+    def use_preset(self, identifier):
+        self.preset = factory.load_json_strict(CONFIG / f"motion_presets/{identifier}.json")
+        self.binding = {"id": self.preset["motion_preset_id"], "digest": factory.canonical_digest(self.preset)}
 
     def endpoint(self, place):
         suffix = place.lower()
@@ -301,7 +304,7 @@ class MotionPresetTests(unittest.TestCase):
                 consume("update_draft", {"draft_id": draft_id, "selection": {"task": "pick_place"}}, "preset-task")
                 consume("update_draft", {"draft_id": draft_id, "requested_count": 1}, "preset-count")
                 view = application.bridge_core.snapshot()["projection"]
-                self.assertEqual(view["motion_presets"][0]["status"], "QUALIFIED")
+                self.assertEqual(next(item for item in view["motion_presets"] if item["id"] == self.binding["id"])["status"], "QUALIFIED")
                 self.assertIn("compile_draft", view["available_ops"], view["draft"])
                 source_bytes = prepared_paths[0].read_bytes()
                 changed = json.loads(source_bytes)
@@ -325,6 +328,10 @@ class MotionPresetTests(unittest.TestCase):
                 application.close()
 
     def test_native_candidate_trial_compiles_runs_and_keeps_recovery_qualified(self):
+        self.use_preset("demonstration-rhythm-r001")
+        self.assertEqual(set(self.preset["phase_scaling"]), {phase for phase in factory.MOTION_PHASES if not phase.startswith("GRIPPER")})
+        self.assertEqual(len(self.preset["phase_scaling"]), 8)
+        self.assertTrue(all(value == {"velocity_scaling": .1, "acceleration_scaling": .1} for value in self.preset["phase_scaling"].values()))
         from tools.data_factory.operator.composition import build_physical_operator_application
         from tests.data_factory.operator.test_composition import envelope, pose_snapshot
         from tools.data_factory.motion import home_recovery
@@ -369,7 +376,7 @@ class MotionPresetTests(unittest.TestCase):
                 discovery_call=lambda: ["usb-Generic_USB2.0_PC_CAMERA-video-index0", "usb-Generic_USB2.0_PC_CAMERA_2-video-index0"],
                 activation_call=lambda: True, run_live_call=live_call,
                 snapshot_call=lambda: pose_snapshot(qa["qualified_safe_joint_positions_rad"], age=.01),
-                initial_motion_preset=self.binding["id"], gripper_readback_call=lambda: opened)
+                gripper_readback_call=lambda: opened)
             self.addCleanup(application.close)
 
             def request(op, payload, identifier):
@@ -380,9 +387,11 @@ class MotionPresetTests(unittest.TestCase):
 
             consume("update_camera_bindings", {"bindings": {"usb-Generic_USB2.0_PC_CAMERA-video-index0": "UP", "usb-Generic_USB2.0_PC_CAMERA_2-video-index0": "WRIST"}}, "trial-cameras")
             draft_id = application.draft["draft_id"]
+            consume("update_draft", {"draft_id": draft_id, "motion_preset": self.binding}, "trial-preset-choice")
+            self.assertEqual(application.projection()["draft"]["motion_preset"], self.binding)
             consume("update_draft", {"draft_id": draft_id, "selection": {"task": "pick_place"}}, "trial-task")
             consume("update_draft", {"draft_id": draft_id, "requested_count": 2}, "trial-count")
-            self.assertEqual(application.projection()["motion_presets"][0]["status"], "TRIAL_AVAILABLE")
+            self.assertEqual(next(item for item in application.projection()["motion_presets"] if item["id"] == self.binding["id"])["status"], "TRIAL_AVAILABLE")
             # HOME is the actual native recovery consumer, stopped at its transport seam.
             with mock.patch.object(home_recovery, "recover_home_live", side_effect=factory.ContractError("SYNTHETIC_HOME_BOUNDARY")) as home:
                 with self.assertRaisesRegex(factory.ContractError, "SYNTHETIC_HOME_BOUNDARY"):
@@ -401,7 +410,7 @@ class MotionPresetTests(unittest.TestCase):
             self.assertIs(application._campaign, campaign)
             owner = campaign.campaign_operator
             self.assertEqual(len(owner.manifest["slots"]), 2)
-            preset_path = root / "config/data_factory/motion_presets/practical-transfer-r001.json"
+            preset_path = root / "config/data_factory/motion_presets" / f"{self.binding['id']}.json"
             original_preset = preset_path.read_bytes()
             changed = json.loads(original_preset)
             changed["purpose"] += " changed"
@@ -432,6 +441,8 @@ class MotionPresetTests(unittest.TestCase):
                 if old["phase"] in self.preset["phase_scaling"]:
                     expected["limits"].update(self.preset["phase_scaling"][old["phase"]])
                 self.assertEqual(new, expected)
+            release = next(step for step in program["steps"] if step["phase"] == "GRIPPER_OPEN")
+            self.assertEqual([release[key] for key in ("release_position_m", "release_hold_s", "gripper_position_m")], [.0126, .5, .021])
             for step in program["steps"]:
                 if step["phase"] in self.preset["phase_scaling"]:
                     self.assertEqual({key: step["limits"][key] for key in ("velocity_scaling", "acceleration_scaling")}, self.preset["phase_scaling"][step["phase"]])
@@ -453,6 +464,7 @@ class MotionPresetTests(unittest.TestCase):
             self.assertEqual({path: path.read_bytes() for path in sources}, sources)
 
     def test_native_production_keeps_candidate_blocked_before_effects(self):
+        self.use_preset("demonstration-rhythm-r001")
         from functools import partial
         from tests.data_factory.operator.test_object_position import ObjectPositionContinuityTests
         from tools.data_factory.operator.composition import build_physical_operator_application, build_physical_operator_console
@@ -462,7 +474,7 @@ class MotionPresetTests(unittest.TestCase):
         app = fixture.application(builder=partial(build_physical_operator_application, initial_motion_preset=self.binding["id"]))
         scene = fixture.scene.snapshot()
         view = app.projection()
-        self.assertEqual(view["motion_presets"][0]["status"], "QUALIFICATION_REQUIRED")
+        self.assertEqual(next(item for item in view["motion_presets"] if item["id"] == self.binding["id"])["status"], "QUALIFICATION_REQUIRED")
         self.assertNotIn("compile_draft", view["available_ops"])
         request = fixture.request(app, "compile_draft", {"draft_id": app.draft["draft_id"], "data_disposition": "PRODUCTION"}, "production-candidate")
         for _ in range(2):
@@ -479,6 +491,7 @@ class MotionPresetTests(unittest.TestCase):
         self.assertFalse((fixture.root / "datasets/fr5_episodes/uncreated-dataset").exists())
 
     def test_trial_distinct_start_uses_native_base_qualified_transition(self):
+        self.use_preset("demonstration-rhythm-r001")
         from tests.data_factory.operator.test_composition import OperatorConsoleTests, envelope, pose_snapshot
         from tests.data_factory.test_home_recovery import FakeTransport, snapshot as home_snapshot
         from tools.data_factory.motion import home_recovery
