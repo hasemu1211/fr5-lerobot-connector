@@ -48,7 +48,7 @@ class CliTest(unittest.TestCase):
         parser = _parser()
         self.assertEqual(
             set(parser._subparsers._group_actions[0].choices),
-            {"prepare", "status", "decide", "setup", "training-request"},
+            {"prepare", "status", "decide", "setup", "training-request", "mapped-training-request"},
         )
         setup = parser.parse_args(["setup", "export", "--source", "/tmp/source"])
         self.assertEqual(setup.profile_id, "fr5-up-wrist-fixed-view-r003")

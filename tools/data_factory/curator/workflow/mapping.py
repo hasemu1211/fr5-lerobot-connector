@@ -81,10 +81,30 @@ def _parents(sources, output, actor, *, fresh):
     return result
 
 
-def _cohort(dataset_root, entries, sources, split_reference, fraction):
+def _cohort(dataset_root, entries, sources, split_reference, fraction, *, groups=None):
     path = Path(split_reference["path"])
     if file_sha256(path) != split_reference["sha256"]:
         raise CuratorError("MAPPING_EVALUATION_CHANGED")
+    if "cohort_digest" in split_reference:
+        from tools.data_factory.training_entrypoint import revalidate_evaluation_cohort
+        from tools.data_factory.training_split import source_episode_identity, resolve_evaluation_cohort
+        approval._exact(split_reference, frozenset({"path", "sha256", "cohort_digest"}), "MAPPING_EVALUATION_REFERENCE")
+        cohort = revalidate_evaluation_cohort(reject_symlink_components(path, "MAPPING_EVALUATION"))
+        if cohort["cohort_digest"] != split_reference["cohort_digest"]:
+            raise CuratorError("MAPPING_EVALUATION_CHANGED")
+        if groups is None:
+            raise CuratorError("MAPPING_EVALUATION_PROVENANCE_REQUIRED")
+        parents = {(i, draft["provenance"]["episode_index"]): draft["provenance"]
+                   for i, group in enumerate(groups) for draft in group}
+        origins = {}
+        for entry in entries:
+            key = (entry["source_index"], entry["source_episode_index"])
+            if key not in parents or entry["episode_index"] in origins:
+                raise CuratorError("MAPPING_EVALUATION_SELECTION")
+            origins[entry["episode_index"]] = source_episode_identity(parents[key])
+        train, heldout = resolve_evaluation_cohort(cohort, origins)
+        return {"source_cohort": split_reference, "eval_fraction": None,
+                "train_episodes": train, "eval_episodes": heldout}
     split = validate_training_split(path)
     if split["split_digest"] != split_reference["split_digest"]:
         raise CuratorError("MAPPING_EVALUATION_CHANGED")
@@ -105,13 +125,18 @@ def _cohort(dataset_root, entries, sources, split_reference, fraction):
 
 
 def publish_mapped_training_request(source_requests, output, *, dataset_id, repo_id,
-                                    evaluation_split, eval_fraction, max_copy_bytes):
+                                    max_copy_bytes, evaluation_split=None, eval_fraction=None,
+                                    evaluation_cohort=None):
     """No consent: atomically publish one technically validated request candidate."""
     target = reject_symlink_components(output, "MAPPING_OUTPUT").resolve()
     if target.exists():
         raise CuratorError("OUTPUT_EXISTS")
     if type(max_copy_bytes) is not int or max_copy_bytes <= 0:
         raise CuratorError("MAPPING_COPY_BUDGET")
+    if ((evaluation_cohort is None) == (evaluation_split is None)
+            or evaluation_cohort is not None and eval_fraction is not None
+            or evaluation_split is not None and eval_fraction is None):
+        raise CuratorError("MAPPING_EVALUATION_OPTIONS")
     sources = []
     for raw_path in source_requests:
         path = reject_symlink_components(raw_path, "MAPPING_REQUEST").resolve(strict=True)
@@ -131,9 +156,24 @@ def publish_mapped_training_request(source_requests, output, *, dataset_id, repo
     size = sum(sum(v[0] for p,v in tree_snapshot(s["dataset_identity"]["dataset_root"]).items() if not p.endswith("/")) for s in sources)
     if size > max_copy_bytes or shutil.disk_usage(target.parent).free < max_copy_bytes:
         raise CuratorError("MAPPING_COPY_BUDGET")
-    split_path = reject_symlink_components(evaluation_split, "MAPPING_EVALUATION").resolve(strict=True)
-    split = validate_training_split(split_path)
-    split_ref = {"path": str(split_path), "sha256": file_sha256(split_path), "split_digest": split["split_digest"]}
+    split_path = reject_symlink_components(
+        evaluation_cohort if evaluation_cohort is not None else evaluation_split,
+        "MAPPING_EVALUATION").resolve(strict=True)
+    if evaluation_cohort is not None:
+        from tools.data_factory.training_entrypoint import revalidate_evaluation_cohort
+        cohort = revalidate_evaluation_cohort(split_path)
+        split_ref = {"path": str(split_path), "sha256": file_sha256(split_path),
+                     "cohort_digest": cohort["cohort_digest"]}
+        # Check heldout presence and duplicate origins before copying any data.
+        planned = [{"episode_index": j, "source_index": i,
+                    "source_episode_index": draft["provenance"]["episode_index"]}
+                   for j, (i, draft) in enumerate((i, draft) for i, group in enumerate(parents) for draft in group)]
+        _cohort(None, planned, sources, split_ref, None, groups=parents)
+    else:
+        split = validate_training_split(split_path)
+        split_ref = {"path": str(split_path), "sha256": file_sha256(split_path), "split_digest": split["split_digest"]}
+    if target == split_path or split_path.is_relative_to(target):
+        raise CuratorError("MAPPING_OUTPUT_OVERLAP")
     identities = [s["dataset_identity"] for s in sources]
     for source in identities:
         run_existing_validator(source["dataset_root"], source["repo_id"])
@@ -145,7 +185,7 @@ def publish_mapped_training_request(source_requests, output, *, dataset_id, repo
         merge_datasets(readers, repo_id, stage / "dataset", concatenate_videos=False, concatenate_data=False)
         mapping = write_mapping(stage / "dataset", repo_id, identities)
         entries = _entries(parents, mapping)
-        cohort = _cohort(stage / "dataset", entries, sources, split_ref, eval_fraction)
+        cohort = _cohort(stage / "dataset", entries, sources, split_ref, eval_fraction, groups=parents)
         validated_snapshot, validated_digest = stable_tree_identity(stage / "dataset", code="MAPPING_DATASET_CHANGED")
         technical = run_existing_validator(stage / "dataset", repo_id)
         assert_tree_identity(stage / "dataset", validated_snapshot, validated_digest, code="MAPPING_DATASET_CHANGED")
@@ -162,9 +202,12 @@ def publish_mapped_training_request(source_requests, output, *, dataset_id, repo
         reference = {"publication_root": str(target), "manifest_digest": manifest["manifest_digest"]}
         request = {k:identity[k] for k in ("dataset_root","repo_id","dataset_id")}
         request.update(episodes=entries, mapping=reference)
+        if "source_cohort" in cohort:
+            request["evaluation_cohort"] = cohort["source_cohort"]
         write_json_exclusive(stage / "request.json", request)
-        _parents(sources, target.parent, "curator-preview-only", fresh=True)
-        _cohort(stage / "dataset", entries, sources, split_ref, eval_fraction)
+        current_parents = _parents(sources, target.parent, "curator-preview-only", fresh=True)
+        if _cohort(stage / "dataset", entries, sources, split_ref, eval_fraction, groups=current_parents) != cohort:
+            raise CuratorError("MAPPING_EVALUATION_CHANGED")
         verify_mapped_dataset(stage / "dataset", repo_id)
         assert_tree_identity(stage / "dataset", validated_snapshot, validated_digest, code="MAPPING_DATASET_CHANGED")
         snapshot = tree_snapshot(stage)
@@ -209,7 +252,8 @@ def mapped_publication(reference):
             or manifest["technical"] != {"artifact_path": str(root / "technical.json"), "artifact_digest": canonical_digest(technical)}):
         raise CuratorError("MAPPING_TECHNICAL_CHANGED")
     if _cohort(root / "dataset", manifest["episodes"], manifest["sources"],
-               manifest["evaluation_cohort"]["source_split"], manifest["evaluation_cohort"]["eval_fraction"]) != manifest["evaluation_cohort"]:
+               manifest["evaluation_cohort"].get("source_cohort", manifest["evaluation_cohort"].get("source_split")),
+               manifest["evaluation_cohort"]["eval_fraction"], groups=groups) != manifest["evaluation_cohort"]:
         raise CuratorError("MAPPING_EVALUATION_CHANGED")
     return manifest
 
@@ -220,6 +264,8 @@ def prepare_mapped_approvals(request, output, approved_by, *, check_targets=True
     identity = manifest["dataset_identity"]
     expected = {k:identity[k] for k in ("dataset_root","repo_id","dataset_id")}
     expected.update(episodes=manifest["episodes"], mapping=request["mapping"])
+    if "source_cohort" in manifest["evaluation_cohort"]:
+        expected["evaluation_cohort"] = manifest["evaluation_cohort"]["source_cohort"]
     if request != expected:
         raise CuratorError("MAPPING_REQUEST_CHANGED")
     output = reject_symlink_components(output, "MAPPING_APPROVAL_OUTPUT").resolve(strict=True)

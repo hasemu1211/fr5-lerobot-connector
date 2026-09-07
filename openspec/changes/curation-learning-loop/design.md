@@ -103,13 +103,42 @@ content and an explicit selected request; unselected episodes do not acquire
 semantic or training eligibility. No source file is changed or re-encoded.
 
 `publish_mapped_training_request(source_requests, output, *, dataset_id, repo_id,
-evaluation_split, eval_fraction, max_copy_bytes)` publishes one new directory
+max_copy_bytes, evaluation_split=None, eval_fraction=None, evaluation_cohort=None)` publishes one new directory
 containing `dataset/`, `technical.json`, `publication.json`, and `request.json`. Source requests are
 ordered, native raw requests with current ledger/state PASS evidence; the caller
-controls order and selected episodes. `evaluation_split` is an existing native
+controls order and selected episodes. The legacy `evaluation_split` is an existing native
 split whose original dataset identity and heldout indices must map exactly to
 the new native split. Mismatch, changed evidence or an existing output rejects
 before publication. Copy size is explicitly bounded before any materialization.
+
+Alternatively, `evaluation_cohort` names Learning's existing planning-only
+`training.evaluation_cohort.v1` file. It is mutually exclusive with the legacy
+split/fraction pair; a fraction is not retuned to preserve destination indices.
+Curator calls `revalidate_evaluation_cohort` against the original request and uses
+`source_episode_identity` on validated parent drafts, then
+`resolve_evaluation_cohort` for the actual mapped destination indices. Missing
+heldout and duplicate origins reject before copying. New selected origins become
+TRAIN. Source order can change destination numbers, never the original heldout
+identity. The legacy split behavior remains unchanged.
+
+The publication's `evaluation_cohort.source_cohort` contains exactly `path`,
+`sha256`, `cohort_digest`; `train_episodes`/`eval_episodes` contain the resolver's
+destination lists and `eval_fraction` is null. The request carries the same
+reference in its optional `evaluation_cohort` field, bound by `mapping` and the
+publication digest. Preparation rejects missing/changed request references and
+revalidates the cohort and parent graph again without issuing approval.
+CLI `mapped-training-request` accepts repeated `--source-request`, `--output`,
+`--dataset-id`, `--repo-id`, `--max-copy-bytes` and either `--evaluation-cohort`
+or the legacy `--evaluation-split` plus `--eval-fraction`.
+
+Learning's existing `run_delegated_request(..., evaluation_cohort=Path(reference["path"]))`
+or `--fr5.evaluation_cohort` launch option remains the downstream contract. The
+request reference supplies this path; it does not create consent. Omitting that
+explicit contract cannot fall back to a matching legacy fraction for a planning
+cohort publication. Native CPU dataset construction verifies the explicit
+partitions in synthetic evidence; no real expanded dataset, inventory, training
+or GPU run is required to demonstrate this connection. Actual growing-data use
+still requires eligible additional sources and existing exact-batch authority.
 
 The dataset's `meta/curator_mapping.json` (`curator.dataset_mapping.v1`) binds
 ordered source dataset identities and each original-to-destination episode/global
