@@ -568,6 +568,7 @@ def _scene_binding(validated, release_pose, run_id, root=ROOT / "outputs/data_fa
 
 def resolve_inputs(
     payload, *, scene_binding_call=_scene_binding, input_transform=None,
+    motion_preset_trial=False,
 ):
     validated = validate_job_spec(
         payload["job"],
@@ -674,6 +675,7 @@ def resolve_inputs(
         planning_scene_profile=planning_scene_profile,
         motion_preset=(load_motion_preset(payload["config_root"], payload["motion_preset"])
                        if "motion_preset" in payload else None),
+        motion_preset_trial=motion_preset_trial,
     )
     trajectory_variant_id = payload.get(TRAJECTORY_VARIANT_KEY, "DIRECT")
     approach_sampling_profile = _load_approach_sampling_profile(
@@ -3164,6 +3166,15 @@ def _committed_review_handoff(
     }
 
 
+def _validate_motion_preset_trial_scope(program, data_disposition):
+    trial = any(
+        "motion_preset_trial" in program.get(key, {})
+        for key in ("binding_digests", "destination_binding_digests")
+    )
+    if trial and data_disposition != "TEST_ONLY":
+        raise ContractError("MOTION_PRESET_TRIAL_SCOPE")
+
+
 def run_object_reposition(
     payload, binding, cancel, publish, *, parent_plan_digest, operator_id,
     cell_root, resolver=resolve_inputs, executor_factory=_live_motion_executor,
@@ -3203,6 +3214,7 @@ def run_object_reposition(
         payload, checked, cell_root=cell_root, resolver=resolver,
         source_payload=source_payload,
     )
+    _validate_motion_preset_trial_scope(program, data_disposition)
     continuation = _object_reposition_continuation_expectation(
         scope, authorization=authorization,
         parent_plan_digest=parent_plan_digest, binding=checked,
@@ -3586,6 +3598,7 @@ def run_live(payload, cancel, publish, *, resolver=resolve_inputs, executor_fact
             )
         else:
             validated, program, scene_binding = resolver(payload)
+        _validate_motion_preset_trial_scope(program, data_disposition)
         checked_episode_instruction = (
             _validate_episode_instruction_scope(
                 episode_instruction_binding,

@@ -1232,20 +1232,37 @@ def _validate_motion_qualification(
     return {"digest": qualification_digest, "frames": frames, "planning_scene": planning_scene, "transforms": transforms, "offsets": offsets, "gripper": gripper, "gripper_requirements": close, "safe": [_number(v, "MOTION_SAFE_JOINTS") for v in safe], "limits": normalized_limits, "tolerances": tolerance, "max_joint_state_age_s": max_joint_state_age_s, "execution_timeouts_s": execution_timeouts, "pins": {key: qualification[key] for key in ("robot_description_digest", "moveit_config_digest", "planning_scene_digest")}}
 
 
+def _motion_preset_trial_digest(bindings):
+    """Trial identity is separate from the unchanged base qualification."""
+    return canonical_digest({
+        "data_disposition": "TEST_ONLY",
+        "base_motion_qualification": bindings["motion_qualification"],
+        "motion_preset": bindings["motion_preset"],
+    })
+
+
 def resolve_motion_program(
     validated, motion_qualification, home_candidate, *, urdf,
     expected_robot_system_id, release_pose=None,
     release_validated=None, release_motion_qualification=None,
-    planning_scene_profile=None, motion_preset=None, now=None,
+    planning_scene_profile=None, motion_preset=None, motion_preset_trial=False,
+    now=None,
 ):
     """Resolve a qualification-bound, offline-only motion program; it authorizes no execution."""
+    if type(motion_preset_trial) is not bool:
+        raise ContractError("MOTION_PRESET_TRIAL_SCOPE")
+    if motion_preset_trial:
+        motion_preset = validate_motion_preset(motion_preset)
     home_raw = load_json_strict(json.dumps(home_candidate, allow_nan=False)) if isinstance(home_candidate, dict) else load_json_strict(home_candidate)
     home = validate_home_candidate(home_raw, urdf=urdf, expected_robot_system_id=expected_robot_system_id)
     qualification_raw = load_json_strict(json.dumps(motion_qualification, allow_nan=False)) if isinstance(motion_qualification, dict) else load_json_strict(motion_qualification)
+    if motion_preset_trial and qualification_raw.get("schema_version") != "data_factory.motion_qualification.v2":
+        raise ContractError("MOTION_PRESET_TRIAL_BASE")
+    qualified_preset = None if motion_preset_trial else motion_preset
     q = _validate_motion_qualification(
         qualification_raw, validated,
         {**home, "robot_description_digest": home_raw["robot_description_digest"]},
-        urdf=urdf, planning_scene_profile=planning_scene_profile, motion_preset=motion_preset, now=now,
+        urdf=urdf, planning_scene_profile=planning_scene_profile, motion_preset=qualified_preset, now=now,
     )
     pose = resolve_pose(validated)
     job = validated["normalized_job"]
@@ -1290,7 +1307,7 @@ def resolve_motion_program(
         destination_q = _validate_motion_qualification(
             release_motion_qualification, release_validated,
             {**home, "robot_description_digest": home_raw["robot_description_digest"]},
-            urdf=urdf, planning_scene_profile=planning_scene_profile, motion_preset=motion_preset, now=now,
+            urdf=urdf, planning_scene_profile=planning_scene_profile, motion_preset=qualified_preset, now=now,
         )
         compatible_fields = (
             "frames", "planning_scene", "transforms", "offsets", "gripper",
@@ -1306,6 +1323,13 @@ def resolve_motion_program(
         release_resolved = resolve_pose(release_validated)
     elif release_pose is None:
         release_pose = {key: job[key] for key in ("place_id", "yaw_deg", "x_mm", "y_mm")}
+    if motion_preset_trial:
+        # Keep the original qualified artifact/digest; change only requested
+        # arm scaling in the resolved TEST_ONLY program, never its geometry.
+        for phase, scaling in motion_preset["phase_scaling"].items():
+            q["limits"][phase].update(scaling)
+            if destination_q is not None:
+                destination_q["limits"][phase].update(scaling)
     release_pose = _exact(
         release_pose, {"place_id", "yaw_deg", "x_mm", "y_mm"},
         "MOTION_RELEASE_POSE",
@@ -1372,6 +1396,8 @@ def resolve_motion_program(
     binding_digests = {**validated["input_digests"], **q["pins"], "motion_qualification": q["digest"], "home_candidate": home["candidate_digest"]}
     if motion_preset is not None:
         binding_digests["motion_preset"] = canonical_digest(motion_preset)
+    if motion_preset_trial:
+        binding_digests["motion_preset_trial"] = _motion_preset_trial_digest(binding_digests)
     result = {
         "schema_version": (
             "fr5.motion_program.v4" if cross_workspace
@@ -1430,6 +1456,9 @@ def resolve_motion_program(
             endpoint_bindings=endpoint_bindings,
             endpoint_bindings_digest=canonical_digest(endpoint_bindings),
         )
+        if motion_preset_trial:
+            destination_bindings = result["destination_binding_digests"]
+            destination_bindings["motion_preset_trial"] = _motion_preset_trial_digest(destination_bindings)
     return result
 
 
@@ -1454,8 +1483,12 @@ def validate_motion_program(value):
     binding_keys = {"selected_sheet", "yaw0_sheet", "cell_calibration", "robot_system", "collection_profile", "object_profile", "grasp_profile", "robot_description_digest", "moveit_config_digest", "planning_scene_digest", "motion_qualification", "home_candidate"}
     if isinstance(value.get("binding_digests"), dict) and "motion_preset" in value["binding_digests"]:
         binding_keys |= {"motion_preset"}
+        if "motion_preset_trial" in value["binding_digests"]:
+            binding_keys |= {"motion_preset_trial"}
     bindings = _exact(value["binding_digests"], binding_keys, "MOTION_PROGRAM_BINDING")
     for item in bindings.values(): _digest(item, "MOTION_PROGRAM_BINDING")
+    if "motion_preset_trial" in bindings and bindings["motion_preset_trial"] != _motion_preset_trial_digest(bindings):
+        raise ContractError("MOTION_PRESET_TRIAL_BINDING")
     if schema == "fr5.motion_program.v4":
         _digest(
             value["destination_resolved_job_digest"],
@@ -1467,6 +1500,8 @@ def validate_motion_program(value):
         )
         for item in destination_bindings.values():
             _digest(item, "MOTION_PROGRAM_BINDING")
+        if "motion_preset_trial" in destination_bindings and destination_bindings["motion_preset_trial"] != _motion_preset_trial_digest(destination_bindings):
+            raise ContractError("MOTION_PRESET_TRIAL_BINDING")
         if destination_bindings.get("motion_preset") != bindings.get("motion_preset"):
             raise ContractError("MOTION_PROGRAM_BINDING")
         endpoint_keys = {
@@ -1761,6 +1796,10 @@ def _cli():
         command.add_argument("--config-root", required=True)
     motion = sub.add_parser("resolve-motion")
     motion.add_argument("--motion-preset", help="Shared arm policy ID with exact qualification")
+    motion.add_argument(
+        "--trial-motion-preset", action="store_true",
+        help="Resolve a TEST_ONLY candidate on its qualified base; no execution or qualification",
+    )
     for name in ("job", "selected-sheet", "yaw0-sheet", "config-root", "motion-qualification", "home-candidate", "urdf", "expected-robot-system-id"):
         motion.add_argument(f"--{name}", required=True)
     home = sub.add_parser("validate-home-candidate")
@@ -1839,7 +1878,7 @@ def _cli():
                     qualification.get("planning_scene_profile_id"),
                 ))
             preset = (validate_motion_preset(load_json_strict(_safe_profile_path(Path(args.config_root), "motion_presets", args.motion_preset))) if args.motion_preset else None)
-            print(json.dumps(resolve_motion_program(validated, qualification, candidate, urdf=args.urdf, expected_robot_system_id=args.expected_robot_system_id, planning_scene_profile=scene_profile, motion_preset=preset), sort_keys=True, separators=(",", ":"), allow_nan=False)); return 0
+            print(json.dumps(resolve_motion_program(validated, qualification, candidate, urdf=args.urdf, expected_robot_system_id=args.expected_robot_system_id, planning_scene_profile=scene_profile, motion_preset=preset, motion_preset_trial=args.trial_motion_preset), sort_keys=True, separators=(",", ":"), allow_nan=False)); return 0
         output = resolve_pose(validated) if args.command == "resolve-pose" else {"normalized_job": validated["normalized_job"], "input_digests": validated["input_digests"], "resolved_job_digest": validated["resolved_job_digest"]}
         print(json.dumps(output, sort_keys=True, separators=(",", ":"), allow_nan=False)); return 0
     except (ContractError, OSError, UnicodeError) as exc:
