@@ -164,6 +164,26 @@ Data Quality Analysis와 Rollout Evidence Analysis는 각자 canonical output을
 - **THEN** 비교 조건과 실제 trial 근거를 추적할 수 있고 성공·실패 데이터 모두의 유용성을 검토한다
 - **AND** Curation의 기존 데이터 선별, 다음 데이터 획득 전략과 실제 수집 실행은 각 결정의 owner를 유지한다
 
+### Requirement: Evaluation and execution balance reuse with independent responsibilities
+온라인·오프라인의 평가와 실행은 지원하는 정책별 checkpoint·저장 processor 검증, 결정적 관측 처리, 추론과 행동 단위·의미 해석 중 같은 의미를 가진 기능을 기존 owner에서 재사용해야 한다(SHALL). 재사용 범위는 평가 함수뿐 아니라 실제 정책 계산 경로를 포함해야 하며(SHALL), 학습 손실·open-loop 출력 비교·실물 제어처럼 다른 의미의 계산이나 lifecycle을 단일 경로로 억지로 합쳐서는 안 된다(MUST NOT). 저장 관측의 오프라인 실행, 실시간 관측의 명령 없는 실행과 허가된 실물 실행은 입력 출처·시간 의미와 효과 권한을 구분해야 하며(SHALL), 공통 코어를 사용한다는 이유로 과거 관측을 fresh로 표시하거나 로봇 명령 권한을 부여해서는 안 된다(MUST NOT). 이 요구는 새 범용 harness·서비스·모델 registry를 만들라는 뜻이 아니다.
+
+공유와 분리는 일관성뿐 아니라 독립적인 변경·검증, 자원 사용, 실패 복구 및 전체 개발·운용 비용으로 판단해야 한다(SHALL). 서로 다른 결정·출력·lifecycle을 소유하는 기능은 그 책임을 독립적으로 개발·사용·검증할 수 있게 분리해야 하며(SHALL), 호출 모양이 비슷하다는 이유만으로 공통 계층에 결합하거나 폴더 수를 늘리는 것 자체를 개선으로 간주해서는 안 된다(MUST NOT).
+
+#### Scenario: Stored observations exercise the same policy computation
+- **WHEN** 저장 관측과 검증된 checkpoint로 오프라인 추론 또는 실행 재생을 수행한다
+- **THEN** 온라인 경로와 같은 저장 전처리·추론·후처리 구현을 소비하고, 비교에 필요한 관측·checkpoint·processor·설정 및 stochastic 입력의 계보를 보존한다
+- **AND** 오프라인 결과를 실제 명령·측정된 로봇 동작·작업 성공으로 표시하지 않으며, 원본 dataset과 실행·학습 승인 상태를 변경하지 않는다
+
+#### Scenario: A policy proposal reaches authorized hardware
+- **WHEN** 같은 정책 계산 결과를 실제 로봇에 적용한다
+- **THEN** 기존 실행 owner가 현재 관측·시작 상태·scene·cell·exact plan 및 단일 motion 조건을 확인하며, 예측 원본·실제로 소비한 구간·전송 명령·관측된 동작과 중단 사유를 구분해 추적할 수 있다
+- **AND** 모델 출력을 맞추기 위해 조용히 자르거나 반올림하거나 시간 의미를 바꾸지 않으며, 명시적 실행 변환이 있다면 비교 조건과 결과에 그 차이를 보존한다
+
+#### Scenario: Reuse is verified through real consumers
+- **WHEN** 공통 실행 코어의 연결 완료를 검증한다
+- **THEN** 저장 관측 소비와 온라인 adapter가 같은 구현을 사용하는 정상 경로 및 잘못된 입력·중단 경로를 검증하고, 오프라인 재생·합성 transport·실물 실행의 증거 범위를 각각 명시한다
+- **AND** 공통 인터페이스 선언이나 별도 fake 구현의 통과만으로 실제 정책·하드웨어 연결 완료를 주장하지 않는다
+
 ### Requirement: Immutable and human gates fail closed
 기존 hardware, human, scene, cell, plan-digest, semantic, physical-binding, training-authorization gate는 서로 분리되어 유지되어야 한다(SHALL). 누락되거나 `PARTIAL` 또는 `UNKNOWN`인 evidence는 어떤 외부 효과도 허가해서는 안 된다(MUST NOT).
 
@@ -300,6 +320,13 @@ rollout 분석은 관측·추론 지연, 제어·실행 실패와 데이터의 �
 - **THEN** 선택에 사용한 development evidence와 최종 비교용 평가 조건을 구분하고, 최종 평가 결과를 같은 비교의 다음 선택 입력으로 재사용하지 않는다
 - **AND** 기존 균형 수집 등 명시적 기준선과 비교하며 수집 수뿐 아니라 실제 수집·학습 시간, reset·중단·사람 개입을 포함한 비용을 보고한다
 - **AND** 물리 phase 판정과 runtime 진단이 불확실하면 그대로 남기며, 소표본 결과나 offline loss만으로 일반화된 실물 성능 개선을 주장하지 않는다
+
+#### Scenario: A proposed experiment is selected for discriminating value
+- **WHEN** 모델 비교, 표적 수집, 카메라 비교 또는 latent 분석을 다음 실험 후보로 검토한다
+- **THEN** 현재 PC·FR5의 비용과 미해결 질문을 기준으로 최소 비교를 선택하며, 제안된 실험 목록이나 특정 모델의 우승을 완료 조건으로 고정하지 않는다
+- **AND** 서로 다른 모델의 실용 성능 비교와 같은 checkpoint의 solver 비교를 구분하고, 추가 최적화만의 효과와 데이터 선택 효과를 구분하는 데 필요한 기준선을 사용한다
+- **AND** 카메라 입력 손상에 대한 민감도를 별도 단일 카메라 학습의 효용으로, probe의 정보 판독 가능성을 실패 원인의 증명으로, 조건별 수량을 데이터 충분성으로 해석하지 않는다
+- **AND** 수집에 사용한 조건과 새 데이터의 포함 범위를 갱신하여 이미 보강한 조건을 계속 미관측 OOD로 주장하지 않으며, 관측한 차이와 인과적 해석을 구분한다
 
 ### Requirement: Evidence-leveraged collection may proceed without a renewed scheduling prompt
 canonical evidence가 높은 downstream uncertainty-reduction 또는 portfolio/evidence leverage를 보이고 Orca가 기존 production system의 operational availability를 보고하면, coordinator는 추가 human scheduling 또는 availability prompt 없이 collection을 선택하고 시작할 수 있다(MAY). 이 scheduling permission은 timing만 다루며, runtime availability, individual execution, progress, UI/terminal mechanics, blocker는 Orca가 소유한다(SHALL). 이 permission은 hardware, scene, cell, plan-digest, motion lifecycle, recorder lifecycle, semantic, physical-binding, training-authorization 또는 다른 production authority를 생성·대체·충족·우회하지 않는다(MUST NOT); gate가 차단되면 dependent collection effect만 멈추고 독립적인 safe lane은 계속 eligible하다(SHALL).
