@@ -33,6 +33,33 @@ FR5가 Collection, Curation, Training/Evaluation, Rollout, Learning Evidence, Pu
 - **WHEN** 데이터 선별, training authorization 및 실행 자원이 해당 학습·평가에 충족된다
 - **THEN** 제품은 실제 학습·평가 결과를 정확한 데이터·split·checkpoint 계보로 연결하고, offline loss와 physical effectiveness를 구분해 다음 작업에 사용한다
 
+### Requirement: Curator owns reusable acquisition recommendations
+Curation은 품질·분포·선별 근거를 다음 수집 조건으로 바꾸는 recommendation의 제품 소프트웨어 책임을 소유해야 한다(SHALL). 지원하는 입력과 정책 범위의 반복 추천은 canonical evidence, 현재 task·조건과 유한한 취득 예산을 받아 재현 가능한 함수 및 기존 제품 진입점으로 산출되어야 하며(SHALL), 매회 AI 조사·수동 좌표 조립·파일 전달을 필수로 요구해서는 안 된다(MUST NOT). 기존 DQA·Rollout/evaluation 결과와 sampler를 재사용하고, 추천의 근거·입력 계보·지원 범위·제한을 다음 소비자에게 전달해야 한다(SHALL). 이는 별도 서비스나 범용 전략 계층을 요구하지 않는다.
+
+#### Scenario: Supported evidence produces the next collection proposal
+- **WHEN** 지원하는 task의 canonical 수집·분석 근거와 현재 조건·예산으로 다음 수집안을 요청한다
+- **THEN** 제품은 같은 입력에서 재현 가능한 수집 조건과 선택 이유를 산출하며, 호환되는 여러 campaign의 근거를 소비할 수 있다
+- **AND** pickup 근거를 pick-place 성공 근거로 바꾸거나 고정 예제 수·seed·좌표를 모든 입력의 정책으로 사용하지 않으며, 지원하지 않는 입력과 실제 데이터 부족을 구분한다
+
+#### Scenario: A recommendation is consumed rather than manually reconstructed
+- **WHEN** 추천을 다음 수집에 적용한다
+- **THEN** Collection은 그 결과를 기존 authoring·계획·실행 owner에서 직접 소비하며, 현재 scene과 실행 조건은 해당 owner가 확인한다
+- **AND** 추천 출력만으로 연결 완료를 선언하지 않고 실제 소비 및 재전달·입력 변경·실패 경로를 검증한다
+- **AND** 연구는 정책을 선택·개선하거나 새 불확실성을 해결할 때 수행하며, 지원 범위의 정상 반복 호출을 대신하지 않는다
+
+### Requirement: Native owners enforce safety without duplicate operator gates
+실행 안전과 데이터·승인의 유효성 검사는 해당 기존 제품 owner가 자신의 소비 경계에서 책임져야 한다(SHALL). Coordinator와 다른 lane은 적용 대상·입력·버전·유효 범위가 일치하는 canonical 검사 결과를 재사용하고, 동일한 사실을 사람이나 AI가 다시 확인하는 절차·확인 문구·별도 safety owner를 추가해서는 안 된다(MUST NOT). 재검증은 변경된 입력·실행 조건, 기존 계약의 freshness 요구 또는 구체적인 실패 근거에 필요한 범위로 제한해야 한다(SHALL). 변경된 코드의 필요한 회귀와 실제 실행 시 필요한 fresh 검사를 생략하거나 기존 gate를 우회한다는 의미가 아니다.
+
+#### Scenario: Existing native admission already covers a repeated operation
+- **WHEN** 기존 허용 범위의 반복 작업을 제품이 처리하고 필요한 native admission이 충족된다
+- **THEN** 별도의 coordinator 재승인·수동 evidence 대조 없이 기존 execution owner가 진행한다
+- **AND** 권한·scene·cell·exact plan·single motion owner·semantic·physical binding·training approval의 의미와 적용 범위는 유지한다
+
+#### Scenario: Only one consumer loses valid evidence
+- **WHEN** 특정 입력 변경이나 실패로 한 소비자의 검증 결과가 더 이상 유효하지 않다
+- **THEN** 해당 결과를 소유한 시스템이 필요한 검사·복구와 중단 사유를 처리하고, 조사 가능한 오류를 사람 확인으로 대체하지 않는다
+- **AND** 영향을 받지 않는 근거와 완료된 물리 효과는 보존하며 독립적인 적격 작업은 계속한다
+
 ### Requirement: Automation takes over qualified responsibilities rather than bypassing gates
 반복적인 사람 입력을 줄이는 전환은 그 입력이 담당하던 관찰·판정·권한 범위·실패 대응을 명시하고 검증된 시스템 책임으로 인수해야 한다(SHALL). 관측 정확도, 잘못된 승인과 중단, 복구 가능성 및 사람 개입 빈도를 적용 범위 안에서 평가해야 한다(SHALL). 기존 gate를 바꾸는 개별 전환은 해당 authority의 승인된 계약과 회귀·실물 evidence를 갖추어야 하며(SHALL), 장기 자동화 intent 자체를 현재 gate 충족이나 승인으로 해석해서는 안 된다(MUST NOT).
 
