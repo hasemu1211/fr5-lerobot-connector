@@ -19,6 +19,48 @@ from tools.data_factory.episode_ledger import (
 from tools.fr5_data_factory import ContractArgumentParser, ContractError, load_json_strict, canonical_digest
 
 
+def discover_stored_collection(run_root: str | Path) -> dict:
+    """On-demand, one-level discovery; canonical disposition owns eligibility.
+
+    No persisted inventory, watcher, compatibility ranking or runtime callback.
+    Feed returned directories to recommend_stored_collection for current task/
+    catalog compatibility and repeat discovery when choosing current advice.
+    """
+    from tools.data_factory.collection_recommendation import _episode_snapshot
+    root = Path(run_root)
+    if root.is_symlink() or not root.is_dir():
+        raise ContractError("COLLECTION_DISCOVERY_ROOT")
+    root = root.resolve(strict=True)
+    selected, excluded, snapshots, seen = [], [], [], set()
+    for path in sorted(root.iterdir()):
+        if not path.is_dir() and not path.is_symlink():
+            continue
+        try:
+            if path.is_symlink():
+                raise ContractError("COLLECTION_DISCOVERY_SYMLINK")
+            if not (path / "episode_ledger.json").is_file():
+                raise ContractError("COLLECTION_DISCOVERY_LEDGER_UNAVAILABLE")
+            evidence, _protected = _load_run(path)
+            summary, identity = _episode_snapshot(evidence, evidence["artifacts"]["manifest"])
+            if evidence["artifacts"]["runtime_binding"]["data_disposition"] != "PRODUCTION":
+                raise ContractError("COLLECTION_DISCOVERY_NOT_PRODUCTION")
+            if evidence["state"]["review"]["semantic_status"] != "PASS":
+                raise ContractError("COLLECTION_DISCOVERY_SEMANTIC_PASS_UNAVAILABLE")
+            if identity in seen:
+                raise ContractError("COLLECTION_RECOMMENDATION_EPISODE_DUPLICATE")
+            seen.add(identity)
+            selected.append(str(path))
+            snapshots.append({"run_directory": str(path), "episode": summary})
+        except (ContractError, OSError) as exc:
+            excluded.append({"run_directory": str(path), "reason_code":
+                             exc.code if isinstance(exc, ContractError) else "COLLECTION_RECOMMENDATION_SOURCE_IO"})
+    result = {"availability": "AVAILABLE" if selected else "UNAVAILABLE",
+              "run_root": str(root), "run_directories": selected,
+              "episodes": snapshots, "excluded": excluded}
+    result["discovery_digest"] = canonical_digest(result)
+    return result
+
+
 def _load_run(root: Path) -> tuple[dict, set[Path]]:
     ledger = validate_episode_ledger(load_json_strict(root / "episode_ledger.json"))
     state = validate_episode_state(load_json_strict(root / "episode_ledger_state.json"), ledger=ledger)
@@ -164,19 +206,29 @@ def recommend_stored_collection(
 
 def main(argv=None) -> int:
     parser = ContractArgumentParser(description=__doc__)
-    parser.add_argument("--run-dir", action="append", required=True)
+    sources = parser.add_mutually_exclusive_group(required=True)
+    sources.add_argument("--run-dir", action="append")
+    sources.add_argument("--run-root", help="on-demand canonical production PASS discovery, one directory level")
     parser.add_argument("--source-commit", required=True, help="caller-supplied implementation commit label (not attested)")
     parser.add_argument("--output-root", help="optional exclusive derived output root")
     parser.add_argument("--acquisition-input", help="saved native catalog/selection, budget and canonical scene reference")
     parser.add_argument("--expected-recommendation-digest", help="reject stale advice before publication")
     try:
         args = parser.parse_args(argv)
+        discovery = None if args.run_root is None else discover_stored_collection(args.run_root)
+        if discovery is not None and not discovery["run_directories"]:
+            print(json.dumps({"availability": "UNAVAILABLE", "reason_codes": ["COLLECTION_DISCOVERY_NO_ELIGIBLE_RUNS"],
+                              "data_quality_analysis": None, "recommendation": None, "output_path": None,
+                              "discovery": discovery}, sort_keys=True))
+            return 2
         result = recommend_stored_collection(
-            run_directories=args.run_dir, source_commit=args.source_commit,
+            run_directories=args.run_dir if discovery is None else discovery["run_directories"], source_commit=args.source_commit,
             output_root=args.output_root,
             acquisition=None if args.acquisition_input is None else load_json_strict(args.acquisition_input),
             expected_recommendation_digest=args.expected_recommendation_digest,
         )
+        if discovery is not None:
+            result["discovery"] = discovery
         print(json.dumps(result, sort_keys=True))
         return 0 if result["availability"] == "AVAILABLE" else 2
     except (ContractError, OSError) as exc:

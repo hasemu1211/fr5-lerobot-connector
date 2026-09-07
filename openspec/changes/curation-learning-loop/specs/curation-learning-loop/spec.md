@@ -54,6 +54,12 @@ The existing collection recommendation API and CLI SHALL accept an optional curr
 - **THEN** only task-compatible semantic PASS evidence with matching robot, object/grasp, camera profile and endpoint calibration SHALL contribute to that success coverage
 - **AND** other evidence SHALL retain explicit exclusion reasons without reconstructed authoring or fabricated semantic judgement.
 
+#### Scenario: Collection restarts without an injected run list
+- **WHEN** the existing IO discovery function is explicitly called with the server-owned production run root
+- **THEN** it SHALL inspect one directory level, validate canonical ledger/state/candidate evidence, and return deterministic production semantic-PASS run directories plus explicit exclusions and a discovery digest
+- **AND** TEST-only, unavailable, duplicate and symlink inputs SHALL NOT be promoted; an empty result SHALL remain inspectable without a watcher, persisted shadow inventory or fixed episode-count assumption
+- **AND** compatibility and recommendation SHALL remain with the existing producer, with discovery repeated at actual refresh/choose consumption rather than view polling.
+
 #### Scenario: A caller changes the budget or current source
 - **WHEN** the caller supplies a valid current source and supported task with an explicit count and seed
 - **THEN** native sampling SHALL deterministically produce the requested number of conditions and preserve the exact first source pose
