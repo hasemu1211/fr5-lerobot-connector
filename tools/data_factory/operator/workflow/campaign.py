@@ -970,6 +970,7 @@ class OperatorConsole:
         object_reposition_bindings: Sequence[Mapping[str, Any] | None] | None = None,
         initial_block_code: str | None = None,
         campaign_approval_once: bool = False,
+        prepare_campaign_call: Callable[[], None] | None = None,
         run_id_factory: Callable[[int], str] | None = None,
         prepare_timeout_s: float = 5.0, close_timeout_s: float = 5.0,
         clock=None,
@@ -987,6 +988,8 @@ class OperatorConsole:
         if not all(callable(call) for call in (
             campaign_operator_factory, episode_call, projection_call,
         )):
+            raise ContractError("OPERATOR_CONSOLE_CALLABLE")
+        if prepare_campaign_call is not None and not callable(prepare_campaign_call):
             raise ContractError("OPERATOR_CONSOLE_CALLABLE")
         if not isinstance(test_only_paths, str) or not test_only_paths or "\x00" in test_only_paths:
             raise ContractError("OPERATOR_CONSOLE_TEST_ONLY_PATHS")
@@ -1020,6 +1023,7 @@ class OperatorConsole:
             lambda index: run_id if index == 0 else f"{run_id}-e{index + 1}"
         )
         self.campaign_approval_once = campaign_approval_once
+        self.prepare_campaign_call = prepare_campaign_call
         self.episode_call, self.projection_call = episode_call, projection_call
         self.test_only_paths = test_only_paths
         self.prepare_timeout_s, self.close_timeout_s = float(prepare_timeout_s), float(close_timeout_s)
@@ -2406,7 +2410,10 @@ class OperatorConsole:
                 or self._campaign_authorization is not None
             ):
                 raise ContractError("OPERATOR_CONSOLE_CAMPAIGN_AUTHORIZATION")
-            self._campaign_authorization = self._build_campaign_authorization()
+            authorization = self._build_campaign_authorization()
+            if self.prepare_campaign_call is not None:
+                self.prepare_campaign_call()
+            self._campaign_authorization = authorization
             self._workflow, self._last_error = "RUNNING", None
             self._thread = threading.Thread(
                 target=self._worker_target,

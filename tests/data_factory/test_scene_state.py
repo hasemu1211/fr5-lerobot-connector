@@ -11,6 +11,62 @@ from tools.fr5_data_factory import ContractError, canonical_digest
 
 
 class SceneStateTest(unittest.TestCase):
+    def test_only_confirmed_matching_execution_vacates_its_consumed_source(self):
+        import copy
+        from tests.data_factory.operator.test_object_position import ObjectPositionContinuityTests, POSE
+        for condition in ("landed", "unknown", "partial", "wrong_run", "wrong_plan"):
+            with self.subTest(condition=condition):
+                fixture = ObjectPositionContinuityTests()
+                fixture.setUp()
+                self.addCleanup(fixture.doCleanups)
+                before = fixture.scene.snapshot()
+                allocation = before["scene_state"]["slot_allocations"][fixture.slot["slot_id"]]
+                unrelated = {
+                    canonical_digest(state): {**allocation, "state": state, "allowed_run_id": "old-e3"}
+                    for state in ("RESERVED", "QUARANTINED")
+                }
+                unrelated[canonical_digest("other-run")] = {**allocation, "state": "CONSUMED_PENDING_REVIEW", "allowed_run_id": "other-run"}
+                from tools.data_factory_recovery import write_json_atomic
+                initial = before["scene_state"]
+                initial["slot_allocations"].update(unrelated)
+                write_json_atomic(fixture.cells / fixture.robot / "scene_state.json", initial)
+                before = fixture.scene.snapshot()
+                fixture.scene.consume_next_source(
+                    slot_id=fixture.slot["slot_id"], run_id="old-e3",
+                    expected_scene_digest=before["scene_state_digest"], expected_slot_digest=canonical_digest(allocation),
+                )
+                plan = canonical_digest("new-plan")
+                fixture.cell.mark_blocked("EXECUTION_IN_PROGRESS", "other-run" if condition == "wrong_run" else "old-e3",
+                                          canonical_digest("other-plan") if condition == "wrong_plan" else plan)
+                before = fixture.scene.snapshot()
+                consumed = before["scene_state"]["slot_allocations"][fixture.slot["slot_id"]]
+                destination = scene_state.release_slot(
+                    robot_system_id=fixture.robot, pose={**POSE, "place_id": "PLACE_B"},
+                    object_profile_id=fixture.job["object_profile_id"], exclusion_geometry_digest=fixture.slot["exclusion_geometry_digest"],
+                )
+                evidence = copy.deepcopy(json.loads(fixture.original)["release_evidence"])
+                evidence.update(run_id="old-e3", plan_digest=plan, release_slot_id=destination["slot_id"],
+                                expected_scene_state_digest=before["scene_state_digest"], expected_scene_revision=before["scene_state"]["revision"])
+                if condition == "unknown":
+                    evidence.update(release_outcome="UNCERTAIN", outcome_source="EXECUTOR_FAILURE", terminal_phases=[])
+                if condition == "partial":
+                    evidence["terminal_phases"] = evidence["terminal_phases"][:-1]
+                kwargs = dict(instance_id="cube", release_slot=destination, evidence=evidence, updated_by="pickup-executor",
+                              expected_digest=before["scene_state_digest"], expected_revision=before["scene_state"]["revision"])
+                if condition == "partial":
+                    with self.assertRaisesRegex(ContractError, "RELEASE_EVIDENCE"):
+                        fixture.scene.transition_release(**kwargs)
+                    self.assertEqual(fixture.scene.snapshot(), before)
+                else:
+                    fixture.scene.transition_release(**kwargs)
+                    with self.assertRaisesRegex(ContractError, "SCENE_STATE_CHANGED"):
+                        fixture.scene.transition_release(**kwargs)
+                expected = {**consumed, "state": "AVAILABLE"} if condition == "landed" else consumed
+                self.assertEqual(fixture.scene.read()["slot_allocations"][fixture.slot["slot_id"]], expected)
+                for slot_id, allocation in unrelated.items():
+                    self.assertEqual(fixture.scene.read()["slot_allocations"][slot_id], allocation)
+                self.assertEqual(fixture.episode.read_bytes(), fixture.original)
+
     def test_restart_source_handoff_is_atomic_preserves_release_and_rejects_new_motion(self):
         from concurrent.futures import ThreadPoolExecutor
         from tools.data_factory.cell_state import CellStateStore

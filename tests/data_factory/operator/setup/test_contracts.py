@@ -37,6 +37,7 @@ from tools.data_factory.operator.setup.contracts import (
     compile_workspace_registration_candidate,
     gripper_setup_projection,
     initialize_test_only_state_from_user_declaration,
+    bind_test_only_physical_scene,
     load_camera_binding_receipt,
     qualified_table_plane_reference,
     reuse_camera_binding_receipt,
@@ -69,6 +70,50 @@ def load(relative: str) -> dict:
 
 
 class OperatorSetupTests(unittest.TestCase):
+    def test_physical_test_roots_bind_existing_scene_without_declaring_or_approving(self):
+        from tests.data_factory.operator.test_object_position import ObjectPositionContinuityTests
+        fixture = ObjectPositionContinuityTests()
+        fixture.setUp()
+        self.addCleanup(fixture.doCleanups)
+        before = fixture.scene.snapshot(), fixture.cell.read()
+        roots = build_test_only_root_binding(
+            fixture.root, session_id="physical-test", run_id="new-run", physical_scene=True,
+        )
+        self.assertEqual(roots["cell_root"], str(fixture.cells))
+        self.assertIn("test_only_physical/physical-test", roots["run_root"])
+        self.assertIn("test_only_physical/physical-test", roots["dataset_root"])
+        self.assertFalse(roots["production_writers_enabled"])
+        receipt = bind_test_only_physical_scene(
+            roots, repository_root=fixture.root, robot_system_id=fixture.robot,
+            object_profile_id=fixture.job["object_profile_id"], dimensions_mm=[24.0, 24.0, 24.0], observed_by="operator",
+        )
+        self.assertEqual(receipt["source_position"], fixture.read())
+        self.assertEqual(receipt["source_position"]["source"], "ROBOT_RELEASE_PROXY")
+        self.assertEqual(receipt, validate_test_only_state_initialization(receipt, roots=roots))
+        self.assertTrue(all(value == "NONE" for value in receipt["authority"].values()))
+        self.assertEqual((fixture.scene.snapshot(), fixture.cell.read()), before)
+        with self.assertRaisesRegex(ContractError, "TEST_ONLY_STATE_DECLARATION_SCOPE"):
+            initialize_test_only_state_from_user_declaration(
+                roots, repository_root=fixture.root, robot_system_id=fixture.robot,
+                object_instance_id="fake-human", object_profile_id=fixture.job["object_profile_id"],
+                **receipt["pose"], declared_by="operator",
+            )
+        isolated = build_test_only_root_binding(fixture.root, session_id="isolated", run_id="isolated-run")
+        with self.assertRaisesRegex(ContractError, "TEST_ONLY_STATE_PHYSICAL_SCOPE"):
+            bind_test_only_physical_scene(isolated, repository_root=fixture.root, robot_system_id=fixture.robot,
+                                         object_profile_id=fixture.job["object_profile_id"], dimensions_mm=[24, 24, 24], observed_by="operator")
+        for change in ({"scene_scope": "ISOLATED"}, {"cell_root": str(fixture.root / "other")},
+                       {"dataset_root": str(fixture.root / "datasets/fr5_episodes/raw")}, {"production_writers_enabled": True}):
+            forged = {**roots, **change}
+            forged["binding_digest"] = canonical_digest({k: v for k, v in forged.items() if k != "binding_digest"})
+            with self.subTest(change=change), self.assertRaises(ContractError):
+                validate_test_only_root_binding(forged, repository_root=fixture.root)
+        changed = copy.deepcopy(receipt)
+        changed["source_position"]["pose"]["x_mm"] += 1
+        with self.assertRaises(ContractError):
+            validate_test_only_state_initialization(changed, roots=roots)
+        self.assertEqual(fixture.episode.read_bytes(), fixture.original)
+
     def test_production_runtime_reuses_exact_bindings_without_synthetic_initialization(self):
         contract, motion, home = compatible_start_fixture(
             qualification_source="QUALIFICATION_ARTIFACT",

@@ -247,6 +247,29 @@ The Collection application SHALL restore the exact last eligible object pose fro
 - **AND** the native planner resolves the exact preserved source coordinates and the fresh run binding without writing scene state; the former next run cannot consume that allocation
 - **AND** a new campaign still requires its own existing approval and all physical gates; this transfer grants no semantic, training or motion approval.
 
+### Requirement: Physical TEST and production share the actual object scene
+
+Physical TEST_COLLECTION SHALL consume the existing canonical robot scene and cell when a source is present, preserving its exact pose and execution or human provenance. TEST run, dataset and admission outputs remain isolated; `production_writers_enabled: false` does not prohibit the sole executor from updating physical scene facts. The current constraint is one physical object and lifecycle owner across dispositions, with B still lacking the selected fast preset's production qualification. The next consumer is the native finite bidirectional collection campaign, without retyping known coordinates or inheriting production, semantic or training approval.
+
+#### Scenario: Author and authorize a two-leg physical trial
+
+- **WHEN** the native application authors A→B→exact A with two pick_place episodes, TWO_STAGE_ALIGN_V2, the selected trial policy, bound UP+WRIST and qualified HOME
+- **THEN** initialization and compilation leave the canonical scene, cell and original source episodes unchanged; a planned return is not an observed return
+- **AND** existing campaign authorization compares the fresh scene, slot and cell before rebinding an eligible landed source to its first run; stale or conflicting authorization cannot start a child or replay an effect
+- **AND** sealed native roots constrain physical state to the repository's registered robot cell, while TEST run/dataset roots stay isolated; legacy isolated fixtures remain compatible and cannot declare a new HUMAN pose into the shared physical root.
+
+#### Scenario: Reuse a vacated source only after actual landing
+
+- **WHEN** the exact executing run has consumed A and durably confirms landing at B with matching cell run/plan lineage
+- **THEN** the existing scene owner atomically records B and makes only that run's vacated source allocation reusable, retaining original release evidence
+- **AND** the actual native second-leg resolver can target exact A; unknown, partial, mismatched or stale execution does not free a source slot or assert a return.
+
+#### Scenario: Production resumes after a physical TEST result
+
+- **WHEN** TEST ends at B after a later recorder/UI failure, returns to A with confirmed release, or fails with unknown motion
+- **THEN** production reads respectively the confirmed B source, the confirmed A source, or an unavailable position; it cannot consume the pre-TEST pose as current
+- **AND** manual movement remains an explicit Web declaration through the same scene CAS and server actor; source episodes, reviews and approvals remain immutable, and independent cell readiness and exact-plan gates still apply.
+
 ### Requirement: Preserve execution awareness during Collection connection recovery
 
 The Collection Web surface SHALL retain its last validated execution facts and current screen when state retrieval fails, clearly label them as stale, and state that current robot motion or stop is unknown. A failed browser request SHALL NOT imply that the lifecycle owner stopped, rolled back or remains healthy. The current constraint is the existing loopback state/intent transport; this behavior grants no offline command authority and changes no physical or approval gates. The next consumer is the existing lifecycle owner, whose fresh canonical view and exact intent CAS remain authoritative.

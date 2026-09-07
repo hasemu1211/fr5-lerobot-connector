@@ -348,6 +348,17 @@ class SceneStateStore:
 
             now = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
             evidence_digest = canonical_digest(evidence)
+            cell = self._cell.read()
+            if (landed and cell["reason_code"] == "EXECUTION_IN_PROGRESS"
+                    and (cell["run_id"], cell["plan_digest"]) == (evidence["run_id"], evidence["plan_digest"])):
+                # Only this execution's confirmed landing vacates its consumed
+                # source. Review evidence remains immutable in the source run.
+                for slot_id, allocation in slots.items():
+                    if (slot_id != release_slot["slot_id"]
+                            and allocation["state"] == "CONSUMED_PENDING_REVIEW"
+                            and allocation["role"] == "DESTINATION_THEN_NEXT_SOURCE"
+                            and allocation["allowed_run_id"] == evidence["run_id"]):
+                        slots[slot_id] = {**allocation, "state": "AVAILABLE"}
             objects = dict(current["objects"])
             objects[instance_id] = {
                 "instance_id": instance_id,

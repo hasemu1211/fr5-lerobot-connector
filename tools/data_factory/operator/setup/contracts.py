@@ -311,12 +311,21 @@ def build_test_only_root_binding(
     repository_root: str | Path, *, session_id: str, run_id: str,
     run_root: str | Path | None = None, cell_root: str | Path | None = None,
     dataset_root: str | Path | None = None,
+    physical_scene: bool = False,
 ) -> dict[str, Any]:
-    """Seal the exact ignored roots for one TEST_ONLY run without creating them."""
+    """Seal TEST outputs without creating them; physical tests share cell facts.
+
+    production_writers_enabled controls dataset/admission writers, not execution
+    updates to the canonical physical scene and cell lifecycle.
+    """
     session_id = _identifier(session_id, "TEST_ONLY_SESSION_ID")
     run_id = _identifier(run_id, "TEST_ONLY_RUN_ID")
     repository = Path(repository_root).resolve(strict=True)
     targets = _root_targets(repository, session_id, run_id)
+    if type(physical_scene) is not bool:
+        raise ContractError("TEST_ONLY_ROOT_AUTHORITY")
+    if physical_scene:
+        targets["cell_root"] = repository / "outputs/data_factory/cells"
     expected_run = targets["run_root"]
     expected_cell = targets["cell_root"]
     expected_dataset = targets["dataset_root"]
@@ -346,6 +355,8 @@ def build_test_only_root_binding(
         "dataset_root": normalized[2],
         "production_writers_enabled": False,
     }
+    if physical_scene:
+        value["scene_scope"] = "PHYSICAL_CELL"
     value["binding_digest"] = canonical_digest(value)
     return validate_test_only_root_binding(value, repository_root=repository)
 
@@ -353,13 +364,19 @@ def build_test_only_root_binding(
 def validate_test_only_root_binding(
     value: object, *, repository_root: str | Path,
 ) -> dict[str, Any]:
-    result = copy.deepcopy(dict(_exact(value, ROOT_FIELDS, "TEST_ONLY_ROOT_FIELDS")))
+    physical_scene = isinstance(value, Mapping) and "scene_scope" in value
+    fields = ROOT_FIELDS | {"scene_scope"} if physical_scene else ROOT_FIELDS
+    result = copy.deepcopy(dict(_exact(value, fields, "TEST_ONLY_ROOT_FIELDS")))
+    if physical_scene and result["scene_scope"] != "PHYSICAL_CELL":
+        raise ContractError("TEST_ONLY_ROOT_AUTHORITY")
     if result["data_disposition"] != "TEST_ONLY" or result["production_writers_enabled"] is not False:
         raise ContractError("TEST_ONLY_ROOT_AUTHORITY")
     _identifier(result["session_id"], "TEST_ONLY_SESSION_ID")
     _identifier(result["run_id"], "TEST_ONLY_RUN_ID")
     repository = Path(repository_root).resolve(strict=True)
     targets = _root_targets(repository, result["session_id"], result["run_id"])
+    if physical_scene:
+        targets["cell_root"] = repository / "outputs/data_factory/cells"
     wanted = {field: targets[field] for field in ("run_root", "cell_root", "dataset_root")}
     for field, target in wanted.items():
         path = Path(result[field])
@@ -443,13 +460,17 @@ def validate_production_root_binding(
 def build_runtime_root_binding(
     repository_root: str | Path, *, session_id: str, run_id: str,
     data_disposition: str, dataset_root: str | Path | None = None,
+    physical_scene: bool = False,
 ) -> dict[str, Any]:
     if data_disposition == "TEST_ONLY":
         if dataset_root is not None:
             raise ContractError("RUNTIME_ROOT_DISPOSITION")
         return build_test_only_root_binding(
             repository_root, session_id=session_id, run_id=run_id,
+            physical_scene=physical_scene,
         )
+    if physical_scene is not False:
+        raise ContractError("RUNTIME_ROOT_DISPOSITION")
     if data_disposition == "PRODUCTION" and dataset_root is not None:
         return build_production_root_binding(
             repository_root, session_id=session_id, run_id=run_id,
@@ -477,6 +498,8 @@ def initialize_test_only_state_from_user_declaration(
 ) -> dict[str, Any]:
     """Seed only isolated TEST_ONLY scene/cell state from an out-of-band user declaration."""
     roots = validate_test_only_root_binding(roots, repository_root=repository_root)
+    if roots.get("scene_scope") == "PHYSICAL_CELL":
+        raise ContractError("TEST_ONLY_STATE_DECLARATION_SCOPE")
     for value, code in (
         (robot_system_id, "TEST_ONLY_STATE_ROBOT"),
         (object_instance_id, "TEST_ONLY_STATE_OBJECT"),
@@ -523,11 +546,71 @@ def initialize_test_only_state_from_user_declaration(
     return validate_test_only_state_initialization(value, roots=roots)
 
 
+def bind_test_only_physical_scene(
+    roots: Mapping[str, Any], *, repository_root: str | Path,
+    robot_system_id: str, object_profile_id: str, dimensions_mm: Sequence[float],
+    observed_by: str,
+) -> dict[str, Any]:
+    """Bind existing physical facts; create no scene, cell readiness or approval."""
+    roots = validate_test_only_root_binding(roots, repository_root=repository_root)
+    if roots.get("scene_scope") != "PHYSICAL_CELL":
+        raise ContractError("TEST_ONLY_STATE_PHYSICAL_SCOPE")
+    position = SceneStateStore(roots["cell_root"], robot_system_id).object_position(
+        object_profile_id=object_profile_id, dimensions_mm=dimensions_mm,
+    )
+    if position["status"] != "AVAILABLE":
+        raise ContractError(position["reason"])
+    value = {
+        "schema_version": "data_factory.test_only_state_initialization.v2",
+        "session_id": roots["session_id"], "run_id": roots["run_id"],
+        "root_binding_digest": roots["binding_digest"],
+        "robot_system_id": robot_system_id, "data_disposition": "TEST_ONLY",
+        "object_instance_id": position["object_instance_id"],
+        "object_profile_id": object_profile_id, "pose": position["pose"],
+        "observed_by": observed_by, "source_position": position,
+        "scene_state_digest": position["scene_state_digest"],
+        "scene_revision": position["scene_revision"],
+        "production_writers_enabled": False, "authority": copy.deepcopy(NO_AUTHORITY),
+    }
+    value["initialization_digest"] = canonical_digest(value)
+    return validate_test_only_state_initialization(value, roots=roots)
+
+
 def validate_test_only_state_initialization(
     value: object, *, roots: Mapping[str, Any],
 ) -> dict[str, Any]:
+    if isinstance(value, Mapping) and value.get("schema_version") == "data_factory.test_only_state_initialization.v2":
+        fields = (TEST_STATE_FIELDS - {"declared_by", "declaration_source", "cell_ready"}) | {"observed_by", "source_position"}
+        result = copy.deepcopy(dict(_exact(value, fields, "TEST_ONLY_STATE_FIELDS")))
+        position = result["source_position"]
+        if (roots.get("scene_scope") != "PHYSICAL_CELL"
+                or result["session_id"] != roots.get("session_id")
+                or result["run_id"] != roots.get("run_id")
+                or result["root_binding_digest"] != roots.get("binding_digest")
+                or result["data_disposition"] != "TEST_ONLY"
+                or result["production_writers_enabled"] is not False
+                or result["authority"] != NO_AUTHORITY
+                or not isinstance(position, Mapping)
+                or position.get("status") != "AVAILABLE" or position.get("reason") is not None
+                or position.get("source") not in {"HUMAN", "ROBOT_RELEASE", "ROBOT_RELEASE_PROXY"}
+                or position.get("binding_digest") != canonical_digest({k: v for k, v in position.items() if k != "binding_digest"})
+                or any(result[key] != position.get(key) for key in ("pose", "scene_state_digest", "scene_revision"))
+                or result["object_instance_id"] != position.get("object_instance_id")
+                or type(result["scene_revision"]) is not int or result["scene_revision"] < 1
+                or result["initialization_digest"] != canonical_digest({k: v for k, v in result.items() if k != "initialization_digest"})):
+            raise ContractError("TEST_ONLY_STATE_BINDING")
+        for key in ("robot_system_id", "object_instance_id", "object_profile_id", "observed_by"):
+            _identifier(result[key], "TEST_ONLY_STATE_BINDING")
+        _digest(result["scene_state_digest"], "TEST_ONLY_STATE_BINDING")
+        pose = _exact(result["pose"], {"place_id", "yaw_deg", "x_mm", "y_mm"}, "TEST_ONLY_STATE_BINDING")
+        _identifier(pose["place_id"], "TEST_ONLY_STATE_BINDING")
+        for key in ("yaw_deg", "x_mm", "y_mm"):
+            _finite(pose[key], "TEST_ONLY_STATE_BINDING")
+        return result
     result = copy.deepcopy(dict(_exact(value, TEST_STATE_FIELDS, "TEST_ONLY_STATE_FIELDS")))
     if (
+        roots.get("scene_scope") is not None
+        or
         result["schema_version"] != "data_factory.test_only_state_initialization.v1"
         or result["session_id"] != roots.get("session_id")
         or result["run_id"] != roots.get("run_id")

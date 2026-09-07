@@ -90,6 +90,7 @@ from tools.data_factory.operator.setup.contracts import (
     build_test_only_start_binding,
     gripper_setup_projection,
     initialize_test_only_state_from_user_declaration,
+    bind_test_only_physical_scene,
     normalize_camera_devices,
     qualified_table_plane_reference,
     reuse_camera_role_bindings,
@@ -2250,13 +2251,15 @@ def build_physical_operator_console(
     maintain_gripper = gripper_maintenance_call or normalize_gripper_after_operator_ready
     if type(environment_prepared) is not bool:
         raise ContractError("PHYSICAL_CONSOLE_ENVIRONMENT")
+    physical_test_scene = data_disposition == "TEST_ONLY" and initial_object_position is not None
     first_roots = build_runtime_root_binding(
         repository, session_id=session_id, run_id=run_id,
         data_disposition=data_disposition, dataset_root=dataset_root,
+        physical_scene=physical_test_scene,
     )
     job = resolved["normalized_job"]
     state_initialization = None
-    if data_disposition == "TEST_ONLY":
+    if data_disposition == "TEST_ONLY" and not physical_test_scene:
         state_initialization = initialize_test_only_state_from_user_declaration(
             first_roots, repository_root=repository,
             robot_system_id=job["robot_system_id"],
@@ -2282,6 +2285,8 @@ def build_physical_operator_console(
         ]
         if len(matching) > 1:
             raise ContractError("SCENE_OBJECT_AMBIGUOUS")
+        if physical_test_scene and not matching:
+            raise ContractError("SCENE_OBJECT_NOT_READY")
         instance_id = (
             matching[0]["instance_id"] if matching else
             "production-object-" + canonical_digest({
@@ -2308,7 +2313,7 @@ def build_physical_operator_console(
                     expected_scene_digest=position["scene_state_digest"],
                     expected_slot_digest=position["slot_digest"],
                     expected_cell_digest=position["cell_state_digest"],
-                ) if position["source"] in {"ROBOT_RELEASE", "ROBOT_RELEASE_PROXY"}
+                ) if not physical_test_scene and position["source"] in {"ROBOT_RELEASE", "ROBOT_RELEASE_PROXY"}
                 else before
             )
         else:
@@ -2324,6 +2329,16 @@ def build_physical_operator_console(
                 expected_revision=before["scene_state"]["revision"],
             )
         initial_scene_digest = observed["scene_state_digest"]
+        if physical_test_scene:
+            state_initialization = bind_test_only_physical_scene(
+                first_roots, repository_root=repository,
+                robot_system_id=job["robot_system_id"],
+                object_profile_id=job["object_profile_id"],
+                dimensions_mm=resolved["object_profile"]["dimensions_mm"],
+                observed_by=operator_label,
+            )
+            if state_initialization["scene_state_digest"] != initial_scene_digest:
+                raise ContractError("OBJECT_POSITION_CHANGED")
     home_candidate = load_json_strict(paths["home"])
     qualification_source = (
         "SYNTHETIC_TEST_ONLY"
@@ -2402,6 +2417,7 @@ def build_physical_operator_console(
         return build_runtime_root_binding(
             repository, session_id=session_id, run_id=active_run_id,
             data_disposition=data_disposition, dataset_root=dataset_root,
+            physical_scene=physical_test_scene,
         )
 
     counters = {name: 0 for name in SIDE_EFFECT_COUNTERS}
@@ -2627,6 +2643,37 @@ def build_physical_operator_console(
             raise ContractError("GRIPPER_SETUP_NOT_AVAILABLE")
         holder["camera_transport_evidence"] = camera_transport_evidence
         return True
+
+    def prepare_campaign():
+        nonlocal state_initialization
+        if physical_test_scene:
+            store = SceneStateStore(first_roots["cell_root"], job["robot_system_id"])
+            current = store.object_position(
+                object_profile_id=job["object_profile_id"],
+                dimensions_mm=resolved["object_profile"]["dimensions_mm"],
+            )
+            if current != state_initialization["source_position"]:
+                raise ContractError("OBJECT_POSITION_CHANGED")
+            expected_digest = current["scene_state_digest"]
+            if current["source"] in {"ROBOT_RELEASE", "ROBOT_RELEASE_PROXY"}:
+                rebound = store.rebind_landed_source(
+                    object_profile_id=job["object_profile_id"],
+                    dimensions_mm=resolved["object_profile"]["dimensions_mm"], run_id=run_id,
+                    expected_scene_digest=current["scene_state_digest"],
+                    expected_slot_digest=current["slot_digest"],
+                    expected_cell_digest=current["cell_state_digest"],
+                )
+                expected_digest = rebound["scene_state_digest"]
+            refreshed = bind_test_only_physical_scene(
+                first_roots, repository_root=repository,
+                robot_system_id=job["robot_system_id"], object_profile_id=job["object_profile_id"],
+                dimensions_mm=resolved["object_profile"]["dimensions_mm"], observed_by=operator_label,
+            )
+            if (refreshed["scene_state_digest"] != expected_digest
+                    or refreshed["source_position"]["cell_state_digest"] != current["cell_state_digest"]):
+                raise ContractError("OBJECT_POSITION_CHANGED")
+            state_initialization = refreshed
+            holder["operator"].initial_scene_digest = state_initialization["scene_state_digest"]
 
     def start_binding(
         _run_id: str, slot: Mapping[str, Any], cancel_event,
@@ -3309,6 +3356,7 @@ def build_physical_operator_console(
             else yaw_sample_bindings[:requested_count]
         ),
         campaign_approval_once=True,
+        prepare_campaign_call=prepare_campaign if physical_test_scene else None,
         run_id_factory=run_id_for,
         prepare_timeout_s=8.0, close_timeout_s=5.0, clock=clock,
     )
@@ -3637,21 +3685,22 @@ def build_physical_operator_application(
         return matches[0]
 
     def object_position_call(selected):
-        if selected["data_mode"] != "GENERAL_COLLECTION":
-            return None
         chosen = next(item for item in active_catalog()["combinations"]
                       if item["combination_digest"] == selected["combination_digest"])
         profile = load_json_strict(_repository_path(repository, chosen["sources"]["object"]))
-        return SceneStateStore(
+        position = SceneStateStore(
             repository / "outputs/data_factory/cells", initial_job["robot_system_id"],
         ).object_position(
             object_profile_id=selected["object_id"], dimensions_mm=profile["dimensions_mm"],
         )
+        # Legacy isolated tests have no physical source to inherit. Once one
+        # exists, disposition cannot hide its current or blocked physical facts.
+        return None if selected["data_mode"] == "TEST_COLLECTION" and position["status"] == "MISSING" else position
 
     def object_position_declare_call(selected, pose, expected):
-        if selected["data_mode"] != "GENERAL_COLLECTION":
-            return None
         current = object_position_call(selected)
+        if current is None:
+            return None
         if current["reason"] == "SCENE_OBJECT_AMBIGUOUS":
             raise ContractError(current["reason"])
         if current["binding_digest"] != expected["binding_digest"]:
