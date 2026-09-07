@@ -166,3 +166,13 @@ The native preparation consumer SHALL freeze a non-authorizing evaluation cohort
 - **WHEN** Curator accepts the cohort reference
 - **THEN** it revalidates the source evidence and maps canonical parent identities through the shared resolver
 - **AND** subsequent native launch must enforce those identities in its real partition before using TRAIN-only statistics; a planning artifact alone does not enable this execution path.
+
+### Requirement: Admitted explicit cohorts control native data construction
+
+An admitted v3 split MAY carry an explicit evaluation-cohort binding under the distinct `fr5-source-evaluation-cohort-v1` algorithm. The binding SHALL include the revalidated cohort reference and canonical selected source identities. Existing fraction-only v3 artifacts SHALL retain their original schema and algorithm. Neither binding substitutes for current training authorization.
+
+#### Scenario: New sources join an admitted dataset
+- **WHEN** an admitted launch selects an explicit frozen cohort
+- **THEN** it resolves preserved held-out source identities to destination indices and assigns other selected origins to TRAIN, rejecting missing or duplicate held-out identities
+- **AND** the native dataset constructors consume those explicit lists rather than recomputing a fractional partition
+- **AND** saved receipt normalization uses only the resolved TRAIN episodes, and independent reload/resume revalidates the binding with existing strict dataset and parent rules.

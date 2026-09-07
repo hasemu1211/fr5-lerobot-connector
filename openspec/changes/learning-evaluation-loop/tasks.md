@@ -34,4 +34,5 @@ Runtime checkpoints, attempts, blockers and numerical measurements belong in Orc
 ## Non-authorizing cohort preparation
 
 - [x] Prepare and revalidate frozen source evaluation identities through the public native CLI without issuing inventory or training authority; resolve proven mappings and reject missing/overlapping identities.
-- [ ] Coordinate Curator publication consumption and native explicit-partition launch enforcement before claiming growth-cohort training support. Preserve existing fraction-based v3 launches and strict resume in this preparation checkpoint.
+- [x] Enforce explicit source-cohort partitions at native admitted launch, dataset construction and saved checkpoint/evaluation revalidation; retain fraction-only v3 and strict resume contracts.
+- [ ] Curator consumes the planning reference and supplies its validated publication; qualify actual growing-data execution only after that owner integration and real authorization.

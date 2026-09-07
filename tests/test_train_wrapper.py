@@ -863,6 +863,89 @@ class TrainingLaunchConnectionTest(unittest.TestCase):
             with self.assertRaisesRegex(ContractError, "COHORT_SOURCE_CHANGED"):
                 revalidate_evaluation_cohort(path)
 
+    def test_explicit_cohort_drives_admitted_native_partitions(self):
+        import sys
+        from types import ModuleType
+        from lerobot.datasets import factory
+        from tools.data_factory.training_entrypoint import prepare_evaluation_cohort, run_native_training
+        with TemporaryDirectory(prefix="SYNTHETIC_TEST_ONLY-") as directory:
+            root = Path(directory)
+            kwargs, request, _ = launch_fixture(root)
+            request["episodes"] = [e for e in request["episodes"] if e["episode_index"] in (0, 3)]
+            request_path = root / "request.json"
+            write_json(request_path, request)
+            cohort = prepare_evaluation_cohort(request_path, evidence_directory=root, eval_fraction=.2)
+            cohort_path = root / "cohort.json"
+            write_json(cohort_path, cohort)
+            kwargs["argv"].append(f"--fr5.evaluation_cohort={cohort_path}")
+            split, receipt = prepare_launch(**kwargs)
+            self.assertEqual((split["train_episodes"], split["eval_episodes"]), ([0, 2], [3]))
+            self.assertEqual(receipt["normalization"]["episodes"], [0, 2])
+            cfg = SimpleNamespace(dataset=SimpleNamespace(root=str(kwargs["dataset"]),
+                repo_id=kwargs["repo_id"], episodes=[0, 2, 3], eval_split=.34,
+                streaming=False, use_imagenet_stats=True, revision=None, video_backend="pyav",
+                image_transforms=SimpleNamespace(enable=False)), trainable_config=None, tolerance_s=1e-4)
+            native = ModuleType("lerobot.scripts.lerobot_train")
+            native.make_train_eval_datasets = mock.Mock(side_effect=AssertionError("fraction factory used"))
+            def dataset(*args, **values):
+                return SimpleNamespace(episodes=values["episodes"], meta=SimpleNamespace(stats={}))
+            def main():
+                self.assertFalse(any(a.startswith("--fr5.") for a in sys.argv))
+                train, heldout = native.make_train_eval_datasets(cfg)
+                self.assertEqual((train.episodes, heldout.episodes), ([0, 2], [3]))
+                self.assertEqual(train.meta.stats["action"]["mean"].tolist(), [100.] * 7)
+                self.assertEqual(heldout.meta.stats["action"]["mean"].tolist(), [100.] * 7)
+            native.main = main
+            before = snapshot(kwargs["dataset"])
+            with mock.patch.dict(sys.modules, {"lerobot.scripts.lerobot_train": native}), \
+                 mock.patch.object(factory, "LeRobotDatasetMetadata"), \
+                 mock.patch.object(factory, "resolve_delta_timestamps", return_value={}), \
+                 mock.patch.object(factory, "LeRobotDataset", side_effect=dataset):
+                self.assertEqual(run_native_training(kwargs["argv"], split, receipt), 0)
+            self.assertEqual(snapshot(kwargs["dataset"]), before)
+            # Tampering either the source or the selected identity cannot enter training.
+            cohort_path.write_text("{}")
+            with self.assertRaises(ContractError):
+                prepare_launch(**kwargs)
+
+    def test_explicit_cohort_survives_saved_checkpoint_admission(self):
+        from tests.test_offline_evaluation import admitted_case
+        from tools.data_factory.training_entrypoint import prepare_evaluation_cohort, options
+        from tools.validate_training_checkpoint import validate_checkpoint
+        from tools.evaluate_smolvla_offline import admit_evaluation
+        with TemporaryDirectory(prefix="SYNTHETIC_TEST_ONLY-") as directory:
+            root = Path(directory)
+            args, old_split = admitted_case(root)
+            inventory = json.loads(args.approved_inventory.read_text())
+            request = {k: inventory["dataset_identity"][k] for k in ("dataset_root", "dataset_id", "repo_id")}
+            request["episodes"] = []
+            for e in inventory["episodes"]:
+                if e["episode_index"] == 2:
+                    continue
+                provenance = json.loads(Path(e["episode_provenance"]["artifact_path"]).read_text())
+                request["episodes"].append(dict(episode_id=e["episode_id"], episode_index=e["episode_index"],
+                    technical_validator_path=e["technical_validator"]["artifact_path"],
+                    human_semantic_evidence_path=e["human_semantic_evidence"]["artifact_path"],
+                    seed_manifest_path=str(root / f"{e['episode_id']}.seed-manifest.SYNTHETIC_TEST_ONLY.json"),
+                    manifest_slot_id=provenance["manifest_slot_id"]))
+            rp=root / "request.json"
+            write_json(rp, request)
+            cp=root / "cohort.json"
+            write_json(cp, prepare_evaluation_cohort(rp, evidence_directory=root, eval_fraction=.2))
+            output=Path(args.checkpoint).parents[2]
+            argv=json.loads((output / "fr5_training_receipt.json").read_text())["normalized_argv"]
+            argv.append(f"--fr5.evaluation_cohort={cp}")
+            split, receipt=prepare_launch(dataset=args.dataset, repo_id=args.repo_id, inventory=args.approved_inventory,
+                profile="smolvla", collection_profile=old_split["feature_contract"]["collection_profile_id"], argv=argv)
+            write_json(output / "fr5_training_split.json", split)
+            write_json(output / "fr5_training_receipt.json", receipt)
+            write_normalization_fixture(Path(args.checkpoint), receipt)
+            self.assertEqual(validate_checkpoint(Path(args.checkpoint)), (Path(args.checkpoint), output))
+            self.assertEqual(admit_evaluation(args)["episodes"], [3])
+            cp.write_text("{}")
+            with self.assertRaises(ValueError):
+                validate_checkpoint(Path(args.checkpoint))
+
     def test_unsupported_act_native_evaluation_rejected_before_authority(self):
         from tools.data_factory.training_entrypoint import run_delegated_request
 

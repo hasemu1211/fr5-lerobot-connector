@@ -224,15 +224,24 @@ def prepare_launch(*, dataset: Path, repo_id: str, inventory: Path,
                 # The receipt compiler validates and binds the exact local parent.
                 continue
             raise ContractError("TRAINING_POLICY_FEATURE_BINDING")
+    evaluation_cohort = None
+    if "--fr5.evaluation_cohort" in config:
+        from tools.data_factory.training_split import source_episode_identity
+        path = Path(config["--fr5.evaluation_cohort"]).expanduser().resolve()
+        evaluation_cohort = {"path": str(path), "cohort": revalidate_evaluation_cohort(path),
+                             "origins": {str(e["episode_index"]): source_episode_identity(
+                                 load_json_strict(Path(e["episode_provenance"]["artifact_path"])))
+                                 for e in approved["episodes"]}}
     split = compile_launch_split(
         inventory=approved, metadata=metadata, selected=selected,
         fraction=float(config["--dataset.eval_split"]), feature_contract=feature,
+        evaluation_cohort=evaluation_cohort,
     )
     for publication in mapped.values():
         cohort = publication["evaluation_cohort"]
         if (publication["dataset_identity"] != split["dataset_identity"]
                 or [e["episode_index"] for e in publication["episodes"]] != split["selected_episodes"]
-                or cohort["eval_fraction"] != split["eval_split"]
+                or (evaluation_cohort is None and cohort["eval_fraction"] != split["eval_split"])
                 or cohort["train_episodes"] != split["train_episodes"]
                 or cohort["eval_episodes"] != split["eval_episodes"]):
             raise ContractError("TRAINING_MAPPING_EVALUATION_COHORT")
@@ -457,7 +466,7 @@ def run_delegated_request(request: dict, *, approval_output: Path,
                           output: Path, steps: int, batch_size: int,
                           eval_split: float, eval_steps: int, save_freq: int,
                           runner=None, checkpoint_validator=None,
-                          evaluator=None) -> dict:
+                          evaluator=None, evaluation_cohort: Path | None = None) -> dict:
     """Supported product entrypoint: request plus bounded recipe, no raw argv."""
     if profile != "smolvla":
         raise ContractError("TRAINING_EVALUATOR_UNSUPPORTED")
@@ -469,12 +478,33 @@ def run_delegated_request(request: dict, *, approval_output: Path,
         steps=steps, batch_size=batch_size, eval_split=eval_split,
         eval_steps=eval_steps, save_freq=save_freq,
     )
+    if evaluation_cohort is not None:
+        argv.append(f"--fr5.evaluation_cohort={evaluation_cohort.expanduser().resolve()}")
     return launch_delegated_request(
         request, approval_output=approval_output, authorized_actor=authorized_actor,
         delegation_path=delegation_path, profile=profile,
         collection_profile=collection_profile, argv=argv, runner=runner,
         checkpoint_validator=checkpoint_validator, evaluator=evaluator,
     )
+
+
+def _explicit_cohort_datasets(cfg, split):
+    """Use installed native constructors with the admitted explicit partitions."""
+    from lerobot.datasets.factory import LeRobotDataset, LeRobotDatasetMetadata, resolve_delta_timestamps, ImageTransforms
+    from tools.data_factory.training_split import validate_training_split
+    validate_training_split(split)
+    binding = split["evaluation_cohort"]
+    if revalidate_evaluation_cohort(Path(binding["path"])) != binding["cohort"]:
+        raise ContractError("COHORT_SOURCE_CHANGED")
+    metadata = LeRobotDatasetMetadata(cfg.dataset.repo_id, root=cfg.dataset.root, revision=cfg.dataset.revision)
+    delta = resolve_delta_timestamps(cfg.trainable_config, metadata)
+    transform = ImageTransforms(cfg.dataset.image_transforms) if cfg.dataset.image_transforms.enable else None
+    return tuple(LeRobotDataset(
+        cfg.dataset.repo_id, root=cfg.dataset.root, episodes=split[group],
+        delta_timestamps=delta, image_transforms=transform if group == "train_episodes" else None,
+        revision=cfg.dataset.revision, video_backend=cfg.dataset.video_backend,
+        return_uint8=True, tolerance_s=cfg.tolerance_s,
+    ) for group in ("train_episodes", "eval_episodes"))
 
 
 def run_native_training(argv: list[str], split: dict, receipt: dict) -> int:
@@ -510,7 +540,10 @@ def _run_native_training(argv: list[str], split: dict, receipt: dict) -> int:
                 or dataset.eval_split != split["eval_split"] or dataset.streaming
                 or dataset.use_imagenet_stats != receipt["normalization"]["use_imagenet_stats"]):
             raise ContractError("TRAINING_RUNTIME_DATASET")
-        train, heldout = original_factory(cfg)
+        if "evaluation_cohort" in split:
+            train, heldout = _explicit_cohort_datasets(cfg, split)
+        else:
+            train, heldout = original_factory(cfg)
         for actual, expected in ((train, split["train_episodes"]), (heldout, split["eval_episodes"])):
             if actual is None or actual.episodes != expected:
                 raise ContractError("TRAINING_RUNTIME_SPLIT")
@@ -528,7 +561,10 @@ def _run_native_training(argv: list[str], split: dict, receipt: dict) -> int:
         return policy
 
     try:
-        sys.argv = list(argv)
+        # FR5 connector-only binding is persisted in the receipt, not passed to LeRobot.
+        native_options = options(argv[1:])
+        native_options.pop("--fr5.evaluation_cohort", None)
+        sys.argv = [argv[0], *[f"{key}={value}" for key, value in native_options.items()]]
         lerobot_train.make_train_eval_datasets = admitted_datasets
         if "initialization" in receipt:
             lerobot_train.make_policy = admitted_policy
@@ -1049,6 +1085,7 @@ for a new reviewed attempt. This command never starts training or robot executio
         "run-delegated", help="Consume a prepared request with a bounded native train/eval recipe",
     )
     run_delegated.add_argument("--request", type=Path, required=True)
+    run_delegated.add_argument("--evaluation-cohort", type=Path)
     run_delegated.add_argument("--approval-output", type=Path, required=True)
     run_delegated.add_argument("--delegation", type=Path, required=True)
     run_delegated.add_argument("--authorized-actor", required=True)
@@ -1098,7 +1135,7 @@ for a new reviewed attempt. This command never starts training or robot executio
                 profile=args.profile, collection_profile=args.collection_profile,
                 output=args.output, steps=args.steps, batch_size=args.batch_size,
                 eval_split=args.eval_split, eval_steps=args.eval_steps,
-                save_freq=args.save_freq,
+                save_freq=args.save_freq, evaluation_cohort=args.evaluation_cohort,
             )
             print(json.dumps(result, indent=2, sort_keys=True))
             if result["status"] in {"TRAINING_FAILED", "TRAINING_RETURNED_NO_CHECKPOINT", "EXISTING_OUTPUT"}:

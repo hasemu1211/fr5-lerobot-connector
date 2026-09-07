@@ -312,8 +312,9 @@ def selected_train_eval(episode_tasks: list, selected: list[int], fraction: floa
 
 
 def compile_launch_split(*, inventory: Mapping, metadata: Mapping, selected: list[int],
-                         fraction: float, feature_contract: Mapping) -> dict:
-    train, heldout = selected_train_eval(metadata["episode_tasks"], selected, fraction)
+                         fraction: float, feature_contract: Mapping, evaluation_cohort: Mapping | None = None) -> dict:
+    train, heldout = (selected_train_eval(metadata["episode_tasks"], selected, fraction)
+                      if evaluation_cohort is None else ([], []))
     value = {
         "schema_version": 3,
         "repo_id": inventory["dataset_identity"]["repo_id"],
@@ -327,6 +328,11 @@ def compile_launch_split(*, inventory: Mapping, metadata: Mapping, selected: lis
         "feature_contract": copy.deepcopy(dict(feature_contract)),
         "split_algorithm": SPLIT_ALGORITHM,
     }
+    if evaluation_cohort is not None:
+        value["evaluation_cohort"] = copy.deepcopy(dict(evaluation_cohort))
+        value["train_episodes"], value["eval_episodes"] = resolve_evaluation_cohort(
+            evaluation_cohort["cohort"], {int(k): v for k, v in evaluation_cohort["origins"].items()})
+        value["split_algorithm"] = "fr5-source-evaluation-cohort-v1"
     value["split_digest"] = canonical_digest(value)
     return _validate_launch_split(value)
 
@@ -335,7 +341,7 @@ def _validate_launch_split(value: Mapping) -> dict:
     from tools.data_factory.training_approval import _dataset
     from tools.fr5_training_profile import validate_launch_feature_contract
 
-    _exact(value, LAUNCH_FIELDS, "SPLIT_V3_FIELDS")
+    _exact(value, LAUNCH_FIELDS | ({"evaluation_cohort"} if "evaluation_cohort" in value else set()), "SPLIT_V3_FIELDS")
     _dataset(value["dataset_identity"])
     if value["repo_id"] != value["dataset_identity"]["repo_id"]:
         raise ContractError("SPLIT_REPO_ID")
@@ -344,9 +350,27 @@ def _validate_launch_split(value: Mapping) -> dict:
     _count(value["total_frames"], "SPLIT_DATASET_COUNT", positive=True)
     if not isinstance(value["episode_tasks"], list) or len(value["episode_tasks"]) != total:
         raise ContractError("TRAINING_EPISODE_TASKS")
-    train, heldout = selected_train_eval(value["episode_tasks"], value["selected_episodes"], value["eval_split"])
+    if "evaluation_cohort" not in value:
+        train, heldout = selected_train_eval(value["episode_tasks"], value["selected_episodes"], value["eval_split"])
+    else:
+        selected = value["selected_episodes"]
+        if (not isinstance(selected, list) or not selected
+                or any(type(i) is not int or not 0 <= i < total for i in selected)
+                or selected != sorted(set(selected))
+                or type(value["eval_split"]) not in (float, int) or not 0 < value["eval_split"] < 1):
+            raise ContractError("COHORT_DESTINATION")
+    algorithm = SPLIT_ALGORITHM
+    if "evaluation_cohort" in value:
+        binding = value["evaluation_cohort"]
+        _exact(binding, {"path", "cohort", "origins"}, "COHORT_BINDING")
+        if not isinstance(binding["path"], str) or not Path(binding["path"]).is_absolute():
+            raise ContractError("COHORT_BINDING")
+        if set(binding["origins"]) != {str(i) for i in value["selected_episodes"]}:
+            raise ContractError("COHORT_DESTINATION")
+        train, heldout = resolve_evaluation_cohort(binding["cohort"], {int(k): v for k,v in binding["origins"].items()})
+        algorithm = "fr5-source-evaluation-cohort-v1"
     if (value["train_episodes"] != train or value["eval_episodes"] != heldout
-            or value["split_algorithm"] != SPLIT_ALGORITHM):
+            or value["split_algorithm"] != algorithm):
         raise ContractError("TRAINING_SPLIT_SELECTION")
     digests = value["episode_content_digests"]
     if not isinstance(digests, dict) or set(digests) != {str(i) for i in value["selected_episodes"]}:
