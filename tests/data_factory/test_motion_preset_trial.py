@@ -6,7 +6,7 @@ import subprocess
 import sys
 import threading
 import unittest
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 from tools import fr5_data_factory as factory
 from tools.data_factory import run_job
@@ -112,6 +112,38 @@ class MotionPresetTrialTests(unittest.TestCase):
         for effect in (executor, recorder, validator):
             effect.assert_not_called()
 
+    def test_trial_execution_context_survives_stripped_program_markers(self):
+        for removed in (("motion_preset_trial",), ("motion_preset_trial", "motion_preset")):
+            trial = self.trial()
+            for key in removed:
+                del trial["binding_digests"][key]
+            resolver = Mock(return_value=(self.validated, trial, {}))
+            effect = Mock(side_effect=AssertionError("no external effects"))
+            with self.subTest(removed=removed), patch.object(run_job, "_prepare_run_dir", effect):
+                result = run_job.run_live(
+                    {"run_id": "synthetic-stripped-trial"}, threading.Event(), lambda _: None,
+                    motion_preset_trial=True, resolver=resolver,
+                    executor_factory=effect, recorder_factory=effect,
+                    camera_warmup_call=effect, validator_call=effect)
+            self.assertEqual(result["code"], "MOTION_PRESET_TRIAL_SCOPE", result)
+            resolver.assert_not_called()
+            effect.assert_not_called()
+
+    def test_reposition_trial_context_rejects_production_before_binding_or_effects(self):
+        resolver = Mock(side_effect=AssertionError("no resolution"))
+        effect = Mock(side_effect=AssertionError("no external effects"))
+        with patch.object(run_job, "_prepare_run_dir", effect):
+            for trial in (True, None, 1, "true"):
+                with self.subTest(trial=trial), self.assertRaisesRegex(factory.ContractError, "MOTION_PRESET_TRIAL_SCOPE"):
+                    run_job.run_object_reposition(
+                        {}, {}, threading.Event(), lambda _: None,
+                        parent_plan_digest=None, operator_id="synthetic", cell_root=None,
+                        resolver=resolver, executor_factory=effect,
+                        campaign_authorization=None, data_disposition="PRODUCTION",
+                        preapproval_scope=None, motion_preset_trial=trial)
+        resolver.assert_not_called()
+        effect.assert_not_called()
+
     def test_native_runner_resolves_trial_without_touching_qualification(self):
         payload = {
             "mode": "plan_only", "run_id": "synthetic-trial", "job": self.job,
@@ -136,6 +168,14 @@ class MotionPresetTrialTests(unittest.TestCase):
         self.assertEqual((path.read_bytes(), path.stat().st_mtime_ns), before)
         with self.assertRaisesRegex(factory.ContractError, "MOTION_PRESET_QUALIFICATION_REQUIRED"):
             run_job.resolve_inputs(checked, scene_binding_call=lambda *_: {})
+        effect = Mock(side_effect=AssertionError("no external effects"))
+        with patch.object(run_job, "_prepare_run_dir", effect):
+            result = run_job.run_live(
+                checked, threading.Event(), lambda _: None,
+                executor_factory=effect, recorder_factory=effect,
+                camera_warmup_call=effect, validator_call=effect)
+        self.assertEqual(result["code"], "MOTION_PRESET_QUALIFICATION_REQUIRED", result)
+        effect.assert_not_called()
 
     def test_cross_workspace_trial_keeps_each_base_binding(self):
         qb = factory.load_json_strict(

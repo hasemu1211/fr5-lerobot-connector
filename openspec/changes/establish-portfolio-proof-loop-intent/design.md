@@ -33,6 +33,8 @@
 
 시험 계획은 기존 적격 qualification의 검증과 digest를 보존한 채 preset의 phase scaling만 적용하고, 별도의 TEST_ONLY trial 결속을 정확한 motion program에 포함한다. 일반 live 수집과 후속 object reposition은 이 결속을 생산 실행에 사용할 수 없다. 오프라인 resolve API/CLI는 실행이나 적격 승격 권한이 아니며, Collection의 실제 TEST_ONLY 소비자·기존 시작/복귀 경로·유한 캠페인 연결과 실물 결과까지 확인해야 시험 경로가 완료된다.
 
+시험 여부는 실행 owner가 전달하는 명시적 `motion_preset_trial` 문맥에도 결속한다. live와 후속 reposition은 이 문맥이 생산 disposition과 섞이면 resolver 호출이나 외부 효과 전에 거부한다. 프로그램의 선택적 trial digest는 추적·교차검사용이지 독립적인 권한 증명이 아니다. 주입 가능한 Python resolver는 신뢰하는 application 코드이며 임의 프로그램을 받는 외부 파일 API가 아니다. 기본 파일 resolver의 qualification 검증, 실제 Collection의 모드 결속, 실행 소비자의 disposition 검증을 함께 유지한다. 호출 코드와 프로그램 표식을 모두 임의 변경하는 경우까지 방어한다고 주장하지 않는다.
+
 [MoveIt의 Pilz 공식 문서](https://moveit.picknik.ai/main/doc/how_to_guides/pilz_industrial_motion_planner/pilz_industrial_motion_planner.html)는 관절·Cartesian 한계와 요청별 scaling을 구분한다. FR5도 장치·planner 한계는 그대로 두고 기존 phase별 요청 정책을 변경한다. 계획의 한계 준수나 짧아진 예상 시간은 실물의 부드러움·작업 성공·데이터 품질 증명이 아니므로 실제 시험 결과를 별도로 남긴다. 이는 기존 실행 경로를 재사용하는 설계 선택이지 새로운 planner나 안전 인증 계층의 도입 근거가 아니다.
 
 사용자는 마지막 배치를 유지하고 직접 물체를 옮겼을 때 알리는 역할을 맡는다. 시스템은 유효한 실행 기록의 연속성과 기존 scene 조건을 소비한다. 선택적 영상 판독의 부재나 모호함만으로 실행을 막거나, 같은 범위의 반복 실행에 새 확인 문구를 요구하지 않는다. 기록으로 뒷받침되지 않는 완료·위치는 추정 상태로 명시하며 실제 motion 불확실성과 단순 UI·저장 실패를 분리한다.

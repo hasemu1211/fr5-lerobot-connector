@@ -3166,12 +3166,14 @@ def _committed_review_handoff(
     }
 
 
-def _validate_motion_preset_trial_scope(program, data_disposition):
+def _validate_motion_preset_trial_scope(program, data_disposition, *, motion_preset_trial=False):
+    if type(motion_preset_trial) is not bool:
+        raise ContractError("MOTION_PRESET_TRIAL_SCOPE")
     trial = any(
         "motion_preset_trial" in program.get(key, {})
         for key in ("binding_digests", "destination_binding_digests")
     )
-    if trial and data_disposition != "TEST_ONLY":
+    if (motion_preset_trial or trial) and data_disposition != "TEST_ONLY":
         raise ContractError("MOTION_PRESET_TRIAL_SCOPE")
 
 
@@ -3179,9 +3181,14 @@ def run_object_reposition(
     payload, binding, cancel, publish, *, parent_plan_digest, operator_id,
     cell_root, resolver=resolve_inputs, executor_factory=_live_motion_executor,
     campaign_authorization, data_disposition, preapproval_scope,
-    source_payload=None, clock=None,
+    source_payload=None, clock=None, motion_preset_trial=False,
 ):
     """Plan and execute one post-commit reposition without recorder/data writes."""
+    _validate_motion_preset_trial_scope({}, data_disposition, motion_preset_trial=motion_preset_trial)
+    if motion_preset_trial and resolver is resolve_inputs:
+        from functools import partial
+
+        resolver = partial(resolve_inputs, motion_preset_trial=True)
     checked = validate_object_reposition_binding(binding)
     scope = _validate_object_reposition_preapproval(preapproval_scope)
     stored_scope = _load(
@@ -3490,7 +3497,7 @@ def run_live(payload, cancel, publish, *, resolver=resolve_inputs, executor_fact
              campaign_authorization=None,
              dataset_validation_scope="INCREMENTAL",
              candidate_writer_enabled=True,
-             repository_root=ROOT, clock=None):
+             repository_root=ROOT, clock=None, motion_preset_trial=False):
     """Public single HIL run: plan and human approval precede recorder begin and motion."""
     executor = recorder = resource_monitor = warmup_pool = None
     resource_finished = False
@@ -3572,6 +3579,13 @@ def run_live(payload, cancel, publish, *, resolver=resolve_inputs, executor_fact
             ):
                 raise ContractError("CANDIDATE_WRITER_SCOPE")
             cell_root = ROOT / "outputs/data_factory/cells"
+        # Resolver callables are trusted application code. Bind trial scope to
+        # the caller as well as the program; optional metadata is not authority.
+        _validate_motion_preset_trial_scope({}, data_disposition, motion_preset_trial=motion_preset_trial)
+        if motion_preset_trial and object_reposition_resolver is resolve_inputs:
+            from functools import partial
+
+            object_reposition_resolver = partial(resolve_inputs, motion_preset_trial=True)
         test_only = bound_runtime and data_disposition == "TEST_ONLY"
         if preapproval_checklist is not None and (
             not bound_runtime
@@ -3592,6 +3606,7 @@ def run_live(payload, cancel, publish, *, resolver=resolve_inputs, executor_fact
         if bound_runtime and resolver is resolve_inputs:
             validated, program, scene_binding = resolve_inputs(
                 payload,
+                motion_preset_trial=motion_preset_trial,
                 scene_binding_call=lambda validated, release_pose, run_id: _scene_binding(
                     validated, release_pose, run_id, root=cell_root,
                 ),
@@ -4198,6 +4213,7 @@ def run_live(payload, cancel, publish, *, resolver=resolve_inputs, executor_fact
                                 preapproval_scope=reposition_preapproval,
                                 source_payload=object_reposition_source_payload,
                                 clock=current_clock,
+                                **({"motion_preset_trial": True} if motion_preset_trial else {}),
                             )
                         except Exception as exc:
                             code = (
