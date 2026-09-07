@@ -264,6 +264,13 @@ Physical TEST_COLLECTION SHALL consume the existing canonical robot scene and ce
 - **THEN** the existing scene owner atomically records B and makes only that run's vacated source allocation reusable, retaining original release evidence
 - **AND** the actual native second-leg resolver can target exact A; unknown, partial, mismatched or stale execution does not free a source slot or assert a return.
 
+#### Scenario: A yaw continuation retains the parent cell owner
+
+- **WHEN** a preapproved motion-only continuation consumes a source and confirms landing while the validated parent run still owns the blocked cell
+- **THEN** the executor supplies that parent identity and the exact consumed-source digest to the scene owner, which revalidates both under scene and cell locks before atomically freeing that source
+- **AND** release evidence remains bound to the continuation run and plan; the cell is not reassigned to that child
+- **AND** wrong parent run/plan, stale consumed source, partial or UNKNOWN release cannot free the slot; a later native plan can reuse the vacated pose only after valid confirmed landing.
+
 #### Scenario: Production resumes after a physical TEST result
 
 - **WHEN** TEST ends at B after a later recorder/UI failure, returns to A with confirmed release, or fails with unknown motion

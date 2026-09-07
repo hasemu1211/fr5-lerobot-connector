@@ -11,6 +11,83 @@ from tools.fr5_data_factory import ContractError, canonical_digest
 
 
 class SceneStateTest(unittest.TestCase):
+    def test_native_motion_only_release_vacates_source_under_parent_cell_owner(self):
+        from datetime import datetime, timezone
+        from tools.data_factory.cell_state import CellStateStore
+        from tests.data_factory import test_motion as fixture
+        for outcome in ("landed", "unknown", "wrong_parent", "wrong_parent_plan", "partial", "stale_source"):
+            with self.subTest(outcome=outcome), tempfile.TemporaryDirectory() as directory:
+                store = scene_state.SceneStateStore(directory, "fr5-lab-a")
+                cell = CellStateStore(directory, "fr5-lab-a")
+                pose = {"place_id": "place-a", "yaw_deg": 0, "x_mm": 60, "y_mm": 0}
+                initial = store.update_object(instance_id="cube-1", object_profile_id="wood-cube-25mm-r001",
+                                              state="ON_SURFACE", pose=pose, source="HUMAN", updated_by="fixture")
+                source = scene_state.release_slot(robot_system_id="fr5-lab-a", pose=pose,
+                    object_profile_id="wood-cube-25mm-r001", exclusion_geometry_digest=canonical_digest({"shape":"BOX","dimensions_mm":[25,25,25]}), role="DESTINATION_THEN_NEXT_SOURCE")
+                parent_plan = canonical_digest("parent-plan")
+                evidence = {"schema_version":"data_factory.recycle_release_evidence.v1", "run_id":"parent-run", "plan_digest":parent_plan,
+                    "release_slot_id":source["slot_id"], "expected_scene_state_digest":initial["scene_state_digest"],
+                    "expected_scene_revision":initial["scene_state"]["revision"], "gripper_reference_m":.01, "gripper_feedback_m":.01,
+                    "terminal_phases":["RECYCLE_APPROACH_PTP","LOWER_LIN","GRIPPER_OPEN","RETREAT_LIN","SAFE_POSE_PTP"],
+                    "post_retreat_snapshot_digest":canonical_digest("snapshot"), "next_start_tolerance_rad":.01, "human_verdict":"LANDED"}
+                cell.mark_blocked("EXECUTION_IN_PROGRESS", "parent-run", parent_plan)
+                original_cell = cell.read()
+                landed = store.transition_release(instance_id="cube-1", release_slot=source, evidence=evidence,
+                    updated_by="pickup-executor", expected_digest=initial["scene_state_digest"], expected_revision=initial["scene_state"]["revision"],
+                    allowed_next_run_id="reposition-run")
+                original = landed["scene_state"]["slot_allocations"][source["slot_id"]]
+                target = scene_state.release_slot(robot_system_id="fr5-lab-a", pose={**pose,"yaw_deg":20},
+                    object_profile_id="wood-cube-25mm-r001", exclusion_geometry_digest=source["exclusion_geometry_digest"], role="DESTINATION_THEN_NEXT_SOURCE")
+                binding = {"scene_state_digest":landed["scene_state_digest"], "revision":landed["scene_state"]["revision"],
+                    "object_instance_id":"cube-1", "release_slot":target, "allowed_next_run_id":"next-run",
+                    "source_slot":{"slot_id":source["slot_id"],"slot_digest":canonical_digest(original),"allowed_run_id":"reposition-run"}}
+
+                class Live(fixture.T):
+                    def __init__(self): super().__init__(); self.position=[0.]*6
+                    def snapshot(self,*_): return fixture.snapshot(self.position)
+                    def start_phase(self,step): self.position=step["final_joint_state"]
+                    def poll_active(self): return object()
+                    def cancel_active(self,*_): pass
+
+                program = fixture.motion(True)
+                node = fixture.e.PickupExecutor(Live(), clock=lambda:datetime(2026,1,1,tzinfo=timezone.utc), monotonic_clock=lambda:0,
+                    cell_state_store=cell, scene_state_store=store, execution_enabled=True,
+                    **fixture.motion_only(canonical_digest("reposition"),parent_plan,"reposition-run",program,binding))
+                req = fixture.Test().req
+                plan = node.process(req("plan", {"run_id":"reposition-run","motion_program":program,"scene_binding":binding}))
+                self.assertTrue(plan["ok"], plan)
+                node.process(req("approve", {"approval_id":"approval-1","approved_by":"operator","run_id":"reposition-run",
+                    "resolved_job_digest":program["resolved_job_digest"],"plan_digest":plan["plan_digest"],"approval_expiry":"2026-01-02T00:00:00Z","approval_scope":"HIL_NUMERIC_PROXY"}))
+                executed = node.process(req("execute", {"run_id":"reposition-run","plan_digest":plan["plan_digest"],"lease_id":"lease-1"}))
+                self.assertTrue(executed["ok"], executed)
+                self.assertEqual(cell.read(), original_cell)
+                for _ in range(5): node.tick()
+                node.process(req("semantic_verdict", {"run_id":"reposition-run","plan_digest":plan["plan_digest"],"verdict":"PASS","decided_by":"operator","source":"HUMAN"}))
+                for _ in range(5): node.tick()
+                self.assertEqual(node.runs["reposition-run"]["state"], "RELEASE_VERDICT")
+                execution = node.runs["reposition-run"]["execution"]
+                if outcome == "wrong_parent":
+                    cell.mark_blocked("EXECUTION_IN_PROGRESS", "other-parent", canonical_digest("other-plan"))
+                if outcome == "wrong_parent_plan":
+                    cell.mark_blocked("EXECUTION_IN_PROGRESS", "parent-run", canonical_digest("other-plan"))
+                if outcome == "partial": execution["release_evidence"]["terminal_phases"].pop()
+                if outcome == "stale_source": execution["parent_cell_binding"]["source_slot_digest"] = canonical_digest("stale")
+                result = node.process(req("release_verdict", {"run_id":"reposition-run","plan_digest":plan["plan_digest"],
+                    "verdict":"UNCERTAIN" if outcome=="unknown" else "LANDED","decided_by":"operator","source":"LOCAL_UI_BUTTON"}))
+                allocation = store.read()["slot_allocations"][source["slot_id"]]
+                self.assertEqual(allocation["state"], "AVAILABLE" if outcome=="landed" else "CONSUMED_PENDING_REVIEW", result)
+                for key in ("evidence_digest","evidence_run_id","evidence_plan_digest"):
+                    self.assertEqual(allocation[key], original[key])
+                if outcome == "landed":
+                    self.assertEqual(result["state"], "COMPLETED")
+                    self.assertEqual(cell.read(), original_cell)
+                    self.assertEqual(store.read()["objects"]["cube-1"]["pose"], target["pose"])
+                    from tools.data_factory.run_job import _scene_binding
+                    next_binding = _scene_binding({"normalized_job": {"robot_system_id":"fr5-lab-a",
+                        "object_profile_id":"wood-cube-25mm-r001", **target["pose"]},
+                        "object_profile":{"dimensions_mm":[25,25,25]}}, pose, "next-run", root=directory)
+                    self.assertEqual(next_binding["release_slot"]["pose"], pose)
+
     def test_only_confirmed_matching_execution_vacates_its_consumed_source(self):
         import copy
         from tests.data_factory.operator.test_object_position import ObjectPositionContinuityTests, POSE

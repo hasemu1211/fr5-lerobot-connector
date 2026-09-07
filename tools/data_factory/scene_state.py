@@ -254,6 +254,7 @@ class SceneStateStore:
         expected_digest: str,
         expected_revision: int,
         allowed_next_run_id: str | None = None,
+        parent_cell_binding: dict | None = None,
     ) -> dict:
         """Publish the physical object and its slot in one scene-v2 revision."""
         instance_id = _id(instance_id, "SCENE_OBJECT")
@@ -263,6 +264,15 @@ class SceneStateStore:
             raise ContractError("SCENE_BINDING")
         if not isinstance(evidence, dict):
             raise ContractError("RELEASE_EVIDENCE")
+        if parent_cell_binding is not None:
+            if not isinstance(parent_cell_binding, dict) or set(parent_cell_binding) != {"run_id", "plan_digest", "source_slot_id", "source_slot_digest"}:
+                raise ContractError("SCENE_PARENT_CELL")
+            _id(parent_cell_binding["run_id"], "SCENE_PARENT_CELL")
+            if parent_cell_binding["run_id"] == evidence.get("run_id") or any(
+                not isinstance(parent_cell_binding[key], str) or not DIGEST.fullmatch(parent_cell_binding[key])
+                for key in ("plan_digest", "source_slot_id", "source_slot_digest")
+            ):
+                raise ContractError("SCENE_PARENT_CELL")
         chain = release_slot["role"] == "DESTINATION_THEN_NEXT_SOURCE"
         if chain:
             allowed_next_run_id = _id(allowed_next_run_id, "SCENE_SLOT_NEXT_RUN")
@@ -327,6 +337,7 @@ class SceneStateStore:
 
         lock_path = self._cell.runtime_path("scene_state.lock", create_robot=True)
         descriptor = os.open(lock_path, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
+        cell_descriptor = None
         try:
             fcntl.flock(descriptor, fcntl.LOCK_EX)
             current = self.read()
@@ -336,6 +347,19 @@ class SceneStateStore:
             if not isinstance(item, dict) or item.get("object_profile_id") != release_slot["object_profile_id"]:
                 raise ContractError("SCENE_OBJECT_NOT_READY")
             slots = dict(current.get("slot_allocations", {}))
+            if parent_cell_binding is not None:
+                cell_descriptor = os.open(self._cell.runtime_path("state.lock", create_robot=True),
+                                          os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
+                fcntl.flock(cell_descriptor, fcntl.LOCK_EX)
+                parent = self._cell.read()
+                source = slots.get(parent_cell_binding["source_slot_id"])
+                if (parent["cell_ready"] is not False
+                        or (parent["run_id"], parent["plan_digest"]) != (parent_cell_binding["run_id"], parent_cell_binding["plan_digest"])
+                        or not isinstance(source, dict)
+                        or canonical_digest(source) != parent_cell_binding["source_slot_digest"]
+                        or (source["state"], source["role"], source["allowed_run_id"])
+                        != ("CONSUMED_PENDING_REVIEW", "DESTINATION_THEN_NEXT_SOURCE", evidence["run_id"])):
+                    raise ContractError("SCENE_PARENT_CELL")
             prior_slot = slots.get(release_slot["slot_id"])
             if prior_slot is not None and prior_slot.get("state") != "AVAILABLE":
                 consumed_here_by_this_run = (
@@ -349,12 +373,14 @@ class SceneStateStore:
             now = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
             evidence_digest = canonical_digest(evidence)
             cell = self._cell.read()
-            if (landed and cell["reason_code"] == "EXECUTION_IN_PROGRESS"
-                    and (cell["run_id"], cell["plan_digest"]) == (evidence["run_id"], evidence["plan_digest"])):
+            if landed and (parent_cell_binding is not None or (
+                    cell["reason_code"] == "EXECUTION_IN_PROGRESS"
+                    and (cell["run_id"], cell["plan_digest"]) == (evidence["run_id"], evidence["plan_digest"]))):
                 # Only this execution's confirmed landing vacates its consumed
                 # source. Review evidence remains immutable in the source run.
                 for slot_id, allocation in slots.items():
                     if (slot_id != release_slot["slot_id"]
+                            and (parent_cell_binding is None or slot_id == parent_cell_binding["source_slot_id"])
                             and allocation["state"] == "CONSUMED_PENDING_REVIEW"
                             and allocation["role"] == "DESTINATION_THEN_NEXT_SOURCE"
                             and allocation["allowed_run_id"] == evidence["run_id"]):
@@ -397,6 +423,8 @@ class SceneStateStore:
                 "release_evidence_digest": evidence_digest,
             }
         finally:
+            if cell_descriptor is not None:
+                os.close(cell_descriptor)
             os.close(descriptor)
 
     def object_position(self, *, object_profile_id, dimensions_mm):

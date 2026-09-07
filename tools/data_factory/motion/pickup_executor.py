@@ -890,6 +890,7 @@ class PickupExecutor:
             execution_scene_digest = binding["scene_state_digest"]
             execution_scene_revision = binding["revision"]
             source_slot = binding.get("source_slot")
+            parent_cell_binding = None
             if source_slot is not None:
                 if source_slot["allowed_run_id"] != run["plan"]["run_id"]:
                     raise ContractError("SCENE_SLOT_NEXT_RUN")
@@ -899,6 +900,13 @@ class PickupExecutor:
                 )
                 execution_scene_digest = consumed["scene_state_digest"]
                 execution_scene_revision = consumed["scene_state"]["revision"]
+                if self.motion_only_binding_digest is not None:
+                    parent_cell_binding = {
+                        "run_id": self.motion_only_parent_run_id,
+                        "plan_digest": self.motion_only_parent_plan_digest,
+                        "source_slot_id": source_slot["slot_id"],
+                        "source_slot_digest": canonical_digest(consumed["scene_state"]["slot_allocations"][source_slot["slot_id"]]),
+                    }
             with self.scene_state_store.locked_snapshot(execution_scene_digest) as snapshot:
                 scene = snapshot["scene_state"]
                 item = scene["objects"].get(binding["object_instance_id"])
@@ -912,6 +920,8 @@ class PickupExecutor:
                     except Exception as exc:
                         raise ContractError("CELL_STATE_ARMING_FAILED") from exc
                 run["execution"] = {"lease_id": payload["lease_id"], "lease_deadline": self.monotonic_clock() + run["plan"]["execution_timeouts_s"]["heartbeat_lease"], "step_index": 0, "grasp_verdict": None, "semantic_verdict": None, "release_verdict": None, "snapshot": None, "active": False, "scene_object": copy.deepcopy(item), "scene_state_digest": execution_scene_digest, "scene_revision": execution_scene_revision, "terminal_phases": [], "phase_event_sequence": 0}
+                if parent_cell_binding is not None:
+                    run["execution"]["parent_cell_binding"] = parent_cell_binding
                 if self.phase_events_root is not None:
                     path = self.phase_events_root / run["plan"]["run_id"] / "phase_events.jsonl"
                     try:
@@ -1466,6 +1476,8 @@ class PickupExecutor:
                 expected_digest=run["execution"].get("scene_state_digest", run["plan"]["scene_binding"]["scene_state_digest"]),
                 expected_revision=run["execution"].get("scene_revision", run["plan"]["scene_binding"]["revision"]),
                 allowed_next_run_id=run["plan"]["scene_binding"].get("allowed_next_run_id"),
+                **({"parent_cell_binding": execution["parent_cell_binding"]}
+                   if "parent_cell_binding" in execution else {}),
             )
             execution["release_evidence"] = evidence
             execution["scene_transition"] = transition
