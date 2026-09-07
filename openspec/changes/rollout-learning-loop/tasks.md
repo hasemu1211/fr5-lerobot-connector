@@ -51,7 +51,10 @@ direnv exec . python3 -m unittest tests.data_factory.rollout.test_finite_plan te
 - [x] Reject paused-controller observations through held execution and canonical trace consumers; replay the existing wall-time timeout and sole cancellation owner with frozen controller time.
 - [x] Falsify equal scaling as start synchronization and unscoped generation/time as sufficient identity; retain activation generation zero as observation only.
 - [x] Correct the isolated worker's known stop/error and supersession fence before MoveGripper; preserve original patch evidence and the in-flight cancellation limitation.
-- [ ] Bind hardware incarnation and source clock/freshness, and prove controller-start coherence before consuming the new metadata as completion authority.
+- [x] Bind held-target evidence to hardware incarnation, command generation, explicit bounded source-clock mapping and independent monotonic freshness in existing native transport/executor/trace consumers.
+- [x] Prepare tracked native export/known-stop patch and verify actual extracted C++ methods plus ROS serializers on CPU, including stale completion, supersession and paused-time rejection.
+- [ ] Root deploys the exact driver residual and measures the same-incarnation source clock mapping; verify actual DynamicJointState export before physical consumption.
+- [ ] Prove controller-start coherence and coherent seven-joint physical sampling; held-target metadata does not discharge these continuous-consumer requirements.
 - [ ] Coordinate same-command hardware completion and arm-resume evidence with the existing hardware/motion owner; JTC tolerance success alone is insufficient.
 - [ ] Implement an explicitly bounded native continuous-reference consumer with original full output, consumed indices and staged-release compatibility retained; do not automatically truncate or snap.
 - [ ] Verify its normal executor/trace consumers and failure/cancellation before any separately assigned physical qualification.
@@ -61,4 +64,11 @@ source evidence, not a simulated complete hardware execution):
 
 ```sh
 direnv exec . python3 -m unittest tests.data_factory.rollout.test_finite_plan --durations 5
+```
+
+Focused held hardware evidence acceptance (CPU only; no driver installation):
+
+```sh
+direnv exec . python3 -m unittest discover -s tests/data_factory/rollout
+direnv exec . python3 -m unittest tests.data_factory.test_motion_transport_execution tests.data_factory.test_motion
 ```

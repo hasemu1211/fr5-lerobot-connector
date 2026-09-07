@@ -159,7 +159,7 @@ def held_target_segments(source, proposal):
     return segments
 
 
-def check_segment_observation(segment, evidence, now, *, terminal=False):
+def check_segment_observation(segment, evidence, now, *, terminal=False, steady_now=None):
     """Admit a fresh observation against frozen targets; never rewrite a knot."""
     try:
         observed = evidence["snapshot"]
@@ -188,6 +188,14 @@ def check_segment_observation(segment, evidence, now, *, terminal=False):
             reference = _number(gripper["reference_position_m"], "GRIPPER_FEEDBACK_OUT_OF_RANGE")
             bound = segment["acceptable_feedback_m"]
             if abs(reference - segment["gripper_position_m"]) > 1e-9 or not bound["min"] <= state[-1] <= bound["max"]:
+                raise ContractError("GRIPPER_FEEDBACK_OUT_OF_RANGE")
+        from .gripper_evidence import check_hardware
+        wire = check_hardware(evidence, now,
+            evidence["captured_monotonic_s"] if steady_now is None else steady_now,
+            segment["max_joint_state_age_s"], completion=terminal and segment["type"] == "GRIPPER")
+        if terminal or segment["type"] == "ARM":
+            if (abs(wire["raw_reference_m"] - segment["gripper_position_m"]) > 1e-9
+                    or not bound["min"] <= wire["feedback_m"] <= bound["max"]):
                 raise ContractError("GRIPPER_FEEDBACK_OUT_OF_RANGE")
         return state
     except ContractError:
@@ -349,6 +357,7 @@ def validate_execution_trace(plan, trace):
         if (not isinstance(evidence, list) or len(evidence) > len(segments)
                 or (trace["status"] == "COMPLETED" and len(evidence) != len(segments))):
             raise ContractError("LEARNED_TRACE_TERMINAL")
+        from .gripper_evidence import check_transition
         previous_terminal = -math.inf
         for index, item in enumerate(evidence):
             if (not isinstance(item, dict) or set(item) != {"segment_index", "segment_digest", "start_observation", "terminal_observation"}
@@ -362,6 +371,9 @@ def validate_execution_trace(plan, trace):
             if not previous_terminal <= started <= completed:
                 raise ContractError("LEARNED_TRACE_TERMINAL")
             previous_terminal = completed
+            check_transition(item["start_observation"], item["terminal_observation"], command=segments[index]["type"] == "GRIPPER")
+            if index:
+                check_transition(evidence[index - 1]["terminal_observation"], item["start_observation"], command=False)
             for key, terminal in (("start_observation", False), ("terminal_observation", True)):
                 check_segment_observation(segments[index], item[key], item[key]["captured_at_s"], terminal=terminal)
         if evidence:

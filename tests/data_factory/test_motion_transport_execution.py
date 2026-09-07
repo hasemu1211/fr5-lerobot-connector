@@ -262,6 +262,9 @@ class TestExecutionTransport(unittest.TestCase):
             transport.start_phase(gripper)
         self.assertEqual(caught.exception.code, "ROS_EXEC_ACTIVE")
 
+        mapping = {"schema_version": "fr5.gripper_source_clock.v1", "incarnation": [1, 2, 3, 4],
+                   "calendar_to_system_offset_s": 0., "uncertainty_s": .001,
+                   "system_anchor_s": 10., "steady_anchor_s": 10., "valid_until_system_s": 20.}
         with mock.patch("rclpy.action.ActionClient", side_effect=client_factory):
             transport = RosMoveItTransport(node, clock=lambda: clock[0])
         transport._rclpy = SimpleNamespace(
@@ -300,7 +303,7 @@ class TestExecutionTransport(unittest.TestCase):
         self.assertEqual(len(clients["/execute_trajectory"].goals), goal_count)
 
         with mock.patch("rclpy.action.ActionClient", side_effect=client_factory):
-            transport = RosMoveItTransport(node, clock=lambda: clock[0])
+            transport = RosMoveItTransport(node, clock=lambda: clock[0], gripper_source_clock=mapping)
         transport._rclpy = SimpleNamespace(
             spin_until_future_complete=lambda *args, **kwargs: None,
             spin_once=lambda *args, **kwargs: None,
@@ -331,6 +334,17 @@ class TestExecutionTransport(unittest.TestCase):
         self.assertEqual((snapshot["gripper_controller"]["reference_position_m"], snapshot["gripper_controller"]["feedback_position_m"]), (0.01, 0.01))
         self.assertEqual(snapshot["gripper_settings"]["velocity_percent"], 20)
 
+        # Actual constructor subscription, callback and snapshot consume the wire.
+        from control_msgs.msg import DynamicJointState, InterfaceValue
+        from tools.data_factory.rollout.gripper_evidence import FIELDS, RESOURCE
+        raw = DynamicJointState(joint_names=[RESOURCE], interface_values=[InterfaceValue(
+            interface_names=list(FIELDS), values=[0.] * len(FIELDS))])
+        node.callbacks["/dynamic_joint_states"](deserialize_message(serialize_message(raw), DynamicJointState))
+        hardware = transport.snapshot(1.)["gripper_controller"]["hardware_execution"]
+        self.assertEqual(hardware["clock_binding"], mapping)
+        self.assertEqual(hardware["received_steady_s"], clock[0])
+        self.assertEqual(hardware["wire"], dict.fromkeys(FIELDS, 0.))
+        # Decoding conveys the record; held admission, not snapshot presence, checks validity.
         transport._robot_description = None
         transport._robot_description_client = SimpleNamespace(
             wait_for_services=lambda **_: True,

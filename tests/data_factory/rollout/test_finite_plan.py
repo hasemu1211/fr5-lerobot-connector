@@ -145,8 +145,37 @@ class FinitePlanTest(unittest.TestCase):
         from rclpy.serialization import serialize_message, deserialize_message
         from tools.data_factory.motion.moveit_transport import RosMoveItTransport
 
+        from control_msgs.msg import DynamicJointState, InterfaceValue
+        from tools.data_factory.rollout.gripper_evidence import FIELDS, RESOURCE, CALENDAR
+        import datetime
         now = [10.]
-        state = {"joints": [0.] * 6, "feedback": initial_feedback, "reference": .021, "age": 0., "complete": False}
+        state = {"joints": [0.] * 6, "feedback": initial_feedback, "reference": .021, "age": 0., "complete": False,
+                 "generation": 0, "completed_generation": 0, "started": 0., "finished": 0., "hardware_override": {}}
+        mapping = {"schema_version": "fr5.gripper_source_clock.v1", "incarnation": [1, 2, 3, 4],
+                   "calendar_to_system_offset_s": 0., "uncertainty_s": .001,
+                   "system_anchor_s": 9., "steady_anchor_s": 9., "valid_until_system_s": 100.}
+        def calendar(stamp):
+            t = datetime.datetime.fromtimestamp(stamp, datetime.timezone.utc)
+            return [t.year, t.month, t.day, t.hour, t.minute, t.second, t.microsecond // 1000]
+        def hardware():
+            if state["complete"] and state["generation"] > state["completed_generation"]:
+                state["completed_generation"] = state["generation"]
+                state["finished"] = now[0] - .002
+            wire = dict.fromkeys(FIELDS, 0.)
+            wire.update(version=1., incarnation_0=1., incarnation_1=2., incarnation_2=3., incarnation_3=4.,
+                        generation=float(state["generation"]), completed_generation=float(state["completed_generation"]),
+                        raw_reference_m=state["reference"], sample_system_s=now[0], sample_steady_s=now[0],
+                        command_started_system_s=state["started"], feedback_m=state["feedback"],
+                        completion_reason=2. if state["completed_generation"] else 0., arm_resumed=1., valid=1.)
+            wire.update(zip(CALENDAR, calendar(now[0] - .002)))
+            if state["finished"]:
+                wire.update(zip(["completion_" + k for k in CALENDAR], calendar(state["finished"])))
+            wire.update(state["hardware_override"])
+            message = DynamicJointState(joint_names=[RESOURCE], interface_values=[InterfaceValue(
+                interface_names=list(FIELDS), values=[float(wire[k]) for k in FIELDS])])
+            # Real wire round trip and the actual native transport callback/decoder.
+            t._on_gripper_hardware_state(deserialize_message(serialize_message(message), DynamicJointState))
+            return t._gripper_hardware_evidence()
         class SyntheticTransport(RosMoveItTransport):
             """Synthetic clients only; retain production rejection of synthetic ROS runs."""
         t = object.__new__(SyntheticTransport)
@@ -158,17 +187,22 @@ class FinitePlanTest(unittest.TestCase):
         t._active, t._execution_locked = None, False
         t._execute_goal_count = t._gripper_goal_count = 0
         t._clock, t.graph_timeout_s, t.node = lambda: now[0], .1, object()
+        t._gripper_source_clock = mapping
         t._rclpy = SimpleNamespace(spin_until_future_complete=lambda *a, **kw: None, spin_once=lambda *a, **kw: None)
         t.preflight, t.precommit_safety = T().preflight, T().precommit_safety
         def observe(*_):
             value = snapshot(state["joints"][:], gripper_position=state["feedback"])
             value["gripper_controller"]["reference_position_m"] = state["reference"]
             value["joint_state_age_s"] = state["age"]
+            value["gripper_controller"]["hardware_execution"] = hardware()
             return value
         t.snapshot = observe
         sent, handles = [], []
         def send(goal):
             sent.append(goal)
+            if isinstance(goal, FollowJointTrajectory.Goal):
+                state["generation"] += 1
+                state["started"] = now[0]
             state["complete"] = False
             result = (ExecuteTrajectory.Result() if isinstance(goal, ExecuteTrajectory.Goal) else FollowJointTrajectory.Result())
             if isinstance(goal, ExecuteTrajectory.Goal):
@@ -272,11 +306,92 @@ class FinitePlanTest(unittest.TestCase):
             trace["trace_digest"] = canonical_digest({k: v for k, v in trace.items() if k != "trace_digest"})
             with self.assertRaisesRegex(ContractError, "LEARNED_CONTROLLER_PAUSED"):
                 validate_execution_trace(frozen, trace)
+        for field, value, code in (("generation", 2., "LEARNED_HARDWARE_SUPERSEDED"),
+                                    ("completion_reason", 0., "LEARNED_HARDWARE_COMPLETION"),
+                                    ("sample_steady_s", 0., "LEARNED_HARDWARE_STALE")):
+            trace = copy.deepcopy(diagnostic["execution_trace"])
+            trace["segments"][1]["terminal_observation"]["snapshot"]["gripper_controller"]["hardware_execution"]["wire"][field] = value
+            trace["trace_digest"] = canonical_digest({k: v for k, v in trace.items() if k != "trace_digest"})
+            with self.assertRaisesRegex(ContractError, code):
+                validate_execution_trace(frozen, trace)
         trace = copy.deepcopy(diagnostic["execution_trace"])
         trace["terminal_state"][0] += .001
         trace["trace_digest"] = canonical_digest({k: v for k, v in trace.items() if k != "trace_digest"})
         with self.assertRaisesRegex(ContractError, "LEARNED_TRACE_TERMINAL"):
             validate_execution_trace(frozen, trace)
+
+    def test_native_hardware_fences_before_first_goal(self):
+        cases = [({"incarnation_0": 9.}, "LEARNED_HARDWARE_INCARNATION"),
+                 ({"sample_steady_s": 0.}, "LEARNED_HARDWARE_STALE"),
+                 ({"second": 0.}, "LEARNED_HARDWARE_STALE"),
+                 ({"pending": 1.}, "LEARNED_HARDWARE_UNRESOLVED"),
+                 ({"stopped": 1.}, "LEARNED_HARDWARE_UNRESOLVED"),
+                 ({"error": -1.}, "LEARNED_HARDWARE_UNRESOLVED"),
+                 ({"valid": 0.}, "LEARNED_HARDWARE_INVALID"),
+                 ({"generation": float(2**53)}, "LEARNED_HARDWARE_SCHEMA")]
+        for override, code in cases:
+            with self.subTest(override=override):
+                job, executor, t, state, now, sent, _, calls = self.make_held_job()
+                job.approve(APPROVAL)
+                job.start()
+                job.poll()
+                state["hardware_override"] = override
+                with mock.patch('tools.data_factory.motion.moveit_transport.time.time', side_effect=lambda: now[0]):
+                    result = job.confirm("operator")
+                self.assertEqual(result["code"], code)
+                self.assertEqual(sent, [])
+                self.assertNotIn(("recorder", "commit"), calls)
+        # Installed old driver or absent measured mapping cannot acquire completion authority.
+        job, _, t, _, now, sent, _, _ = self.make_held_job()
+        t._gripper_source_clock = None
+        job.approve(APPROVAL)
+        job.start()
+        job.poll()
+        with mock.patch('tools.data_factory.motion.moveit_transport.time.time', return_value=now[0]):
+            self.assertEqual(job.confirm("operator")["code"], "LEARNED_HARDWARE_SCHEMA")
+        self.assertEqual(sent, [])
+
+    def test_same_command_hardware_completion_required_after_jtc_success(self):
+        cases = [({"completed_generation": 0.}, "LEARNED_HARDWARE_COMPLETION"),
+                 ({"generation": 2., "completed_generation": 2.}, "LEARNED_HARDWARE_SUPERSEDED"),
+                 ({"completion_second": 9.}, "LEARNED_HARDWARE_COMPLETION"),
+                 ({"arm_resumed": 0.}, "LEARNED_HARDWARE_UNRESOLVED"),
+                 ({"rpc_active": 1.}, "LEARNED_HARDWARE_UNRESOLVED"),
+                 ({"incarnation_1": 17.}, "LEARNED_HARDWARE_INCARNATION"),
+                 ({"raw_reference_m": .012}, "GRIPPER_FEEDBACK_OUT_OF_RANGE")]
+        for override, code in cases:
+            with self.subTest(override=override):
+                job, executor, t, state, now, sent, _, calls = self.make_held_job()
+                job.approve(APPROVAL)
+                job.start()
+                job.poll()
+                with mock.patch('tools.data_factory.motion.moveit_transport.time.time', side_effect=lambda: now[0]):
+                    job.confirm("operator")
+                    state["complete"] = True
+                    job.poll()
+                    self.assertEqual(len(sent), 2)
+                    now[0] += .1
+                    state.update(complete=True, reference=.01176, feedback=.01218, hardware_override=override)
+                    result = job.poll()
+                self.assertEqual(result["code"], code)
+                self.assertEqual(len(sent), 2)  # no next arm, despite JTC SUCCEEDED
+                self.assertFalse(t.owns_active_goal)
+                self.assertNotIn(("recorder", "commit"), calls)
+
+    def test_paused_system_clock_after_native_deserialization_prevents_send(self):
+        job, _, t, _, now, sent, _, _ = self.make_held_job()
+        job.approve(APPROVAL)
+        job.start()
+        job.poll()
+        deserialize = t._deserialize_message
+        def delayed(*args):
+            goal = deserialize(*args)
+            t._clock = lambda: now[0] + .2
+            return goal
+        t._deserialize_message = delayed
+        with mock.patch('tools.data_factory.motion.moveit_transport.time.time', return_value=now[0]):
+            self.assertEqual(job.confirm("operator")["code"], "LEARNED_HARDWARE_SOURCE_CLOCK")
+        self.assertEqual(sent, [])
 
     def test_held_float32_profile_reference_is_preserved_without_snapping(self):
         import struct

@@ -303,3 +303,22 @@ establish same-command hardware completion within the bounded horizon, or loses
 fresh state/cancel ownership. After software acceptance, independently assigned
 physical trials must compare executed references, feedback, latency, task effect
 and safe reset. Better solver metrics do not answer those questions.
+
+## Native held completion evidence
+
+The bounded correction reuses the existing gripper worker, command generation,
+ROS state broadcaster and sole transport. Checking only JTC tolerance and fresh
+callback receipt admits a cached pre-command completion. Retaining the completion
+sample separately from the latest sample, with incarnation and measured source
+clock mapping, makes that counterexample reject at the existing handoff and
+canonical trace consumers. Raw model references and the existing cancel owner
+remain unchanged; controller-start coherence and continuous reference consumption
+are separate unresolved outcomes.
+
+The standard [Jazzy joint state broadcaster](https://control.ros.org/jazzy/doc/ros2_controllers/joint_state_broadcaster/doc/userdoc.html)
+publishes custom state interfaces through `DynamicJointState` without accepting
+commands. This supports using existing transport plumbing, subject to root
+verifying actual export/configuration. It does not prove source freshness or
+physical completion. The software accepts no inferred controller timezone or
+automatic clock calibration; root supplies measured mapping/uncertainty and
+retains hardware integration authority.

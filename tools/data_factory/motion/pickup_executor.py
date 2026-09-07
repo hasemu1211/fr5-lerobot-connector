@@ -491,6 +491,8 @@ class PickupExecutor:
             fields = {"endpoint", "type", "publisher_count", "ready", "age_s", "speed_scaling"}
             if controller == "gripper_controller":
                 fields |= {"reference_position_m", "feedback_position_m"}
+                if "hardware_execution" in observed[controller]:
+                    fields.add("hardware_execution")
             controller_state = _exact(
                 observed[controller],
                 fields,
@@ -1066,7 +1068,6 @@ class PickupExecutor:
         if "held_target_segments" in step:
             step = step["held_target_segments"][execution.get("learned_segment_index", 0)]
         try:
-            captured_at = self.source_clock()
             observed = self.transport.snapshot(run["plan"]["planning"]["max_joint_state_age_s"])
             if not observed["arm_controller"]["ready"] or not observed["gripper_controller"]["ready"]:
                 raise ContractError("CONTROLLER_NOT_READY")
@@ -1083,8 +1084,12 @@ class PickupExecutor:
                 options = {}
                 if "action_range" in step:
                     from tools.data_factory.rollout.finite_plan import check_segment_observation
-                    evidence = {"captured_at_s": captured_at, "snapshot": copy.deepcopy(observed)}
-                    check_segment_observation(step, evidence, self.source_clock())
+                    evidence = {"captured_at_s": self.source_clock(), "captured_monotonic_s": self.monotonic_clock(),
+                                "snapshot": copy.deepcopy(observed)}
+                    check_segment_observation(step, evidence, self.source_clock(), steady_now=self.monotonic_clock())
+                    if execution.get("learned_segments"):
+                        from tools.data_factory.rollout.gripper_evidence import check_transition
+                        check_transition(execution["learned_segments"][-1]["terminal_observation"], evidence, command=False)
                     options["start_observation"] = evidence
                     execution["learned_start_observation"] = evidence
                 else:
@@ -1257,11 +1262,14 @@ class PickupExecutor:
                         index = execution.get("learned_segment_index", 0)
                         segment = completed_step["held_target_segments"][index]
                         try:
-                            captured_at = self.source_clock()
                             observed = self.transport.snapshot(run["plan"]["planning"]["max_joint_state_age_s"])
                             from tools.data_factory.rollout.finite_plan import check_segment_observation
-                            terminal_observation = {"captured_at_s": captured_at, "snapshot": copy.deepcopy(observed)}
-                            terminal = check_segment_observation(segment, terminal_observation, self.source_clock(), terminal=True)
+                            terminal_observation = {"captured_at_s": self.source_clock(), "captured_monotonic_s": self.monotonic_clock(),
+                                                    "snapshot": copy.deepcopy(observed)}
+                            terminal = check_segment_observation(segment, terminal_observation, self.source_clock(), terminal=True,
+                                                                 steady_now=self.monotonic_clock())
+                            from tools.data_factory.rollout.gripper_evidence import check_transition
+                            check_transition(execution["learned_start_observation"], terminal_observation, command=segment["type"] == "GRIPPER")
                             if run["state"] != "EXECUTING" or run["cancel_event"].is_set():
                                 continue
                             self._verified_gripper_feedback(run, {
@@ -1594,6 +1602,7 @@ def main(argv=None):
     parser.add_argument("--robot-system-id")
     parser.add_argument("--cell-state-root")
     parser.add_argument("--phase-events-root")
+    parser.add_argument("--gripper-source-clock", help="Read a measured same-incarnation clock binding for learned held targets")
     parser.add_argument("--motion-only-binding-digest")
     parser.add_argument("--motion-only-parent-run-id")
     parser.add_argument("--motion-only-parent-plan-digest")
@@ -1636,6 +1645,16 @@ def main(argv=None):
     else:
         cell_state_store = None
         scene_state_store = None
+    gripper_source_clock = None
+    if args.gripper_source_clock:
+        if not (args.ros_live or args.ros_plan_only):
+            parser.error("--gripper-source-clock requires a ROS transport")
+        try:
+            from tools.data_factory.rollout.gripper_evidence import validate_clock_binding
+            with open(args.gripper_source_clock, encoding="utf-8") as stream:
+                gripper_source_clock = validate_clock_binding(json.load(stream))
+        except (OSError, ValueError, ContractError) as exc:
+            parser.error(str(exc))
     transport = None
     node = None
     rclpy = None
@@ -1654,7 +1673,8 @@ def main(argv=None):
                 else "fr5_pickup_live" if args.ros_live
                 else "fr5_pickup_plan_only"
             )
-            transport = RosMoveItTransport(node)
+            transport = RosMoveItTransport(node, **({"gripper_source_clock": gripper_source_clock}
+                                                   if gripper_source_clock is not None else {}))
         except (ContractError, ImportError, RuntimeError) as exc:
             print(
                 json.dumps(

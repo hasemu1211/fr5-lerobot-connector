@@ -77,14 +77,14 @@ class RosMoveItTransport:
 
     def __init__(
         self, node, *, graph_timeout_s=1.0, preflight_timeout_s=5.0,
-        clock=time.monotonic,
+        clock=time.monotonic, gripper_source_clock=None,
     ):
         try:
             import rclpy
             from action_msgs.msg import GoalStatus
             from builtin_interfaces.msg import Duration
             from control_msgs.action import FollowJointTrajectory
-            from control_msgs.msg import JointTolerance, JointTrajectoryControllerState
+            from control_msgs.msg import JointTolerance, JointTrajectoryControllerState, DynamicJointState
             from geometry_msgs.msg import Pose
             from moveit_msgs.action import ExecuteTrajectory, MoveGroup
             from moveit_msgs.msg import (
@@ -161,6 +161,11 @@ class RosMoveItTransport:
         self._joint_state_received_at = None
         self._arm_controller_state = None
         self._arm_controller_received_at = None
+        self._gripper_hardware_state = None
+        self._gripper_hardware_received_at = None
+        from tools.data_factory.rollout.gripper_evidence import validate_clock_binding
+        self._gripper_source_clock = (validate_clock_binding(gripper_source_clock)
+                                      if gripper_source_clock is not None else None)
         self._gripper_controller_state = None
         self._gripper_controller_received_at = None
         self._robot_description = None
@@ -176,6 +181,9 @@ class RosMoveItTransport:
         self._robot_description_subscription = None
         self._robot_description_client = None
         if hasattr(node, "create_subscription"):
+            if self._gripper_source_clock is not None:
+                self._gripper_hardware_subscription = node.create_subscription(
+                    DynamicJointState, "/dynamic_joint_states", self._on_gripper_hardware_state, 10)
             self._joint_state_subscription = node.create_subscription(
                 JointState, "/joint_states", self._on_joint_state, 10
             )
@@ -205,6 +213,18 @@ class RosMoveItTransport:
             self._robot_description_client = AsyncParameterClient(
                 node, "/robot_state_publisher"
             )
+
+    def _on_gripper_hardware_state(self, message):
+        self._gripper_hardware_state = message
+        self._gripper_hardware_received_at = self._clock()
+
+    def _gripper_hardware_evidence(self):
+        if (getattr(self, "_gripper_hardware_state", None) is None
+                or getattr(self, "_gripper_source_clock", None) is None):
+            return None
+        from tools.data_factory.rollout.gripper_evidence import decode_dynamic_state
+        return decode_dynamic_state(self._gripper_hardware_state, self._gripper_source_clock,
+                                    self._gripper_hardware_received_at)
 
     def _on_joint_state(self, message):
         self._joint_state = message
@@ -405,7 +425,7 @@ class RosMoveItTransport:
             check_freshness(compiled_step["learned_proposal"], time.time())
             if "action_range" in compiled_step:
                 from tools.data_factory.rollout.finite_plan import check_segment_observation
-                check_segment_observation(compiled_step, start_observation, time.time())
+                check_segment_observation(compiled_step, start_observation, time.time(), steady_now=self._clock())
         active = _ActivePhase(phase, step_type, self._clock() + timeout)
         self._active = active
         self._execution_locked = True
@@ -669,6 +689,7 @@ class RosMoveItTransport:
         gripper_speed = self._gripper_controller_state.speed_scaling_factor
         if not isinstance(gripper_speed, (int, float)) or not math.isfinite(gripper_speed):
             raise ContractError("ROS_GRIPPER_CONTROLLER_STATE")
+        hardware = self._gripper_hardware_evidence()
         observation = {
             "joint_positions": [by_name[name] for name in JOINT_ORDER],
             "joint_state_age_s": joint_age,
@@ -690,6 +711,7 @@ class RosMoveItTransport:
                 "speed_scaling": float(gripper_speed),
                 "reference_position_m": gripper_values["reference"]["finger_right_joint"],
                 "feedback_position_m": gripper_values["feedback"]["finger_right_joint"],
+                **({"hardware_execution": hardware} if hardware is not None else {}),
             },
         }
         self._initial_snapshot_complete = True

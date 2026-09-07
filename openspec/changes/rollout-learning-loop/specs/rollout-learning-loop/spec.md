@@ -45,7 +45,8 @@ Consecutive identical gripper references SHALL share one bound hold, consumed by
 the existing PickupExecutor and RosMoveItTransport. A redundant initial hold MAY
 be omitted before plan approval when its observed reference/feedback already
 satisfy the bound target. No subsequent arm slice SHALL dispatch before a required
-hold has both successful action terminal evidence and valid reference/feedback.
+hold has successful action terminal evidence, valid reference/feedback and the
+fresh same-incarnation, same-command native completion evidence defined below.
 Each arm slice SHALL use a fresh observed start as an admission check and retained
 evidence for its frozen commands, never as authority for runtime replan/rebase.
 Observation age SHALL be rechecked after deserialization at send; original policy
@@ -69,13 +70,14 @@ automatic dataset commit or safe-reset claim.
 - **WHEN** a frozen proposal repeats a 0.01176 m bound reference
 - **THEN** the transport sends only one gripper hold for that consecutive run
 - **AND** feedback of 0.01218 m alone does not authorize the next arm slice
-- **AND** a successful action result plus the actual bound feedback range and
-  reference permits a fresh start check for the approved arm slice
+- **AND** a successful action result plus the actual bound feedback range,
+  reference and fresh same-command hardware completion permits a fresh start
+  check for the approved arm slice
 - **AND** every sent arm target remains identical to its approved message
 
-This scenario proves the software action/observation boundary only. It does not
-prove the hardware worker has completed its command or resumed the arm stream;
-physical readiness requires the continuous-consumer requirement below.
+CPU replay proves the software boundary with serialized native evidence. It does
+not establish that an actual hardware worker completed a physical command,
+that arm controllers start coherently, or that a pickup succeeds.
 
 #### Scenario: Failure cannot advance a learned slice
 
@@ -119,8 +121,8 @@ of hardware completion and arm resume, together with the bound controller
 terminal result, reference and feedback. An unresolved/pending command, stale
 or unrelated completion, hardware error or cancellation SHALL prevent dispatch.
 Elapsed hold time, matching position or JTC success alone SHALL NOT manufacture
-this evidence. The source/transport contract for that evidence remains an
-unimplemented shared requirement, not a new Rollout-owned execution service.
+this evidence. The held-target evidence contract below supplies the bounded
+source/transport path; continuous-reference consumption remains unimplemented.
 Generation SHALL be bound to hardware incarnation; generation zero at activation
 SHALL NOT be interpreted as a completed command. Source sample time SHALL carry
 an explicit clock domain and a valid freshness comparison; callback arrival time
@@ -290,3 +292,63 @@ so sequential reuse remains possible.
 - **WHEN** another finite proposal consumer invokes the native instance
 - **THEN** it can perform a fresh inference using the same model and processors
 - **AND** proposal timing, cancellation and execution authority checks still apply
+
+### Requirement: Held completion has native command and clock identity
+
+The existing hardware worker SHALL publish diagnostic state interfaces through
+`fr5_gripper_execution` on the existing `DynamicJointState` broadcaster. The
+record SHALL retain activation incarnation, exact integer command generation,
+active/completed generation, original reference in joint meters, raw feedback,
+completion reason, pending/RPC/stop/error and arm-resume state. Activation SHALL
+renew incarnation and reset generation; generation zero is observation only.
+Generation SHALL remain exactly representable in the wire doubles; exhaustion
+SHALL reject a further command. This adds no command endpoint or motion owner.
+
+The record SHALL retain separate raw controller calendar values for the current
+sample and the completion sample, plus host SYSTEM and steady sample time and
+command-start SYSTEM time. A cached SDK read SHALL NOT acquire source freshness
+merely because a callback or read occurred recently. Completion reason describes
+native motion-done or settled-away logic, never grasp/task semantics.
+
+The runtime owner SHALL supply a measured `fr5.gripper_source_clock.v1` binding
+through the existing executor's `--gripper-source-clock` file argument. Its fields
+are `incarnation` (four uint32 words), `calendar_to_system_offset_s`,
+`uncertainty_s`, `system_anchor_s`, `steady_anchor_s`, and
+`valid_until_system_s`, all times in seconds. Calendar-to-SYSTEM comparison SHALL
+use the supplied offset and uncertainty, without assuming controller timezone.
+The binding SHALL be valid at observation/send time on the same host and hardware
+incarnation; SYSTEM elapsed time SHALL agree with steady elapsed time within its
+uncertainty. Both endpoints of the mapped source interval SHALL satisfy the
+existing observation age bound. Missing/expired binding, paused/changed clock,
+stale or malformed state SHALL reject before a learned send.
+
+A required hold's terminal observation SHALL have no pending/active RPC,
+stop/error or unresolved generation and SHALL show native arm resume. Its
+completed generation SHALL equal the current generation and be exactly one
+beyond the pre-send observation. Its completion source interval SHALL be after
+command start and fresh at handoff. ARM slices and adjacent segment observations
+SHALL retain the same incarnation/generation. JTC success with unresolved native
+evidence SHALL fail explicitly, with no repeated gripper send or next arm send;
+this increment adds no post-JTC waiting/retry behavior. Canonical trace validation
+SHALL consume the same checks and retain clock binding and monotonic capture time.
+
+#### Scenario: Fresh receipt contains an old completion
+
+- **WHEN** the SDK returns a pre-command completion calendar in a newly sampled
+  and serialized state, even with matching target/feedback and JTC success
+- **THEN** the existing executor rejects the completion and sends no next arm
+- **AND** a later fresh sample does not replace the retained completion calendar
+- **AND** cancellation and unresolved action ownership remain in the sole transport
+
+#### Scenario: Hardware or command changes during a frozen slice
+
+- **WHEN** incarnation changes, a different command supersedes the expected
+  generation, or native completion remains unresolved
+- **THEN** terminal/start and canonical trace consumers reject the association
+- **AND** full model output, exact-plan and physical authority remain unchanged
+
+Root retains driver deployment, measured clock mapping, actual broadcaster
+availability, hardware tracking and physical qualification. CPU native-method
+replay and ROS serializer tests do not discharge those requirements. Fresh
+hardware gripper evidence does not prove coherent seven-joint source sampling
+or synchronized controller starts; continuous references remain unsupported.
