@@ -1,4 +1,286 @@
-<!doctype html><html lang="ko"><meta charset="utf-8"><title>실제 수집 기록 — 데이터 엔진</title><link rel="stylesheet" href="../site.css"><main class="source-page"><a href="../collection.html#recorded-example">← 실제 수집 기록으로 돌아가기</a><h1>Episode 27의 수집·평가 입력</h1><p class="note">보존된 원본의 관련 필드를 발췌했다. SHA-256은 발췌 전 원본 파일을 식별한다. 수집 당시의 판정과 이후의 학습 입력 참조를 구분한다.</p><section><h2>result.json</h2><p class="locator">outputs/data_factory/runs/collection-production-20260904T035141Z-campaign-0001-run-1-e23/result.json<br>sha256:dd4ed17b405e72330239780b83bb58545fa333085acbd331d446ac79395f6692</p><pre>{
+<!doctype html><html lang="ko"><meta charset="utf-8"><title>실제 수집 기록 — 데이터 엔진</title><link rel="stylesheet" href="../site.css"><main class="source-page"><a href="../collection.html#recorded-example">← 실제 수집 기록으로 돌아가기</a><h1>시연 원본과 재생본</h1><p class="note">보존된 원본의 관련 필드를 발췌했다. SHA-256은 발췌 전 원본 파일을 식별한다. 수집 당시의 판정과 이후의 학습 입력 참조를 구분한다.</p><section id="current-pick"><h2>Pick · 2026-09-07 수집 원본</h2><p>main d23eb57에서 확인한, 해당 작업의 가장 최근 저장 확정 시연이다. 저장 프레임 전체를 30 fps로 재생하며 기록 밖의 재배치·복귀·저장 대기는 포함하지 않는다. Pick은 rhythm-a 수집의 마지막 시연, Pick &amp; Place는 완료된 rhythm-ab-r5 수집의 마지막 시연이다. 기술 검사와 작업 판정은 아래 원본 상태대로 구분한다.</p><h3>result.json</h3><p class="locator">outputs/data_factory/runs/collection-production-20260907-rhythm-a-r1-campaign-0001-run-1-e6/result.json<br>sha256:419e5ec2b956ca9b562fd8fa1b39becf4b1d5de9f728f9cfe0b9b0d50a455322</p><pre>{
+  &quot;detail&quot;: &quot;&quot;,
+  &quot;episode_index&quot;: 5,
+  &quot;reason_code&quot;: &quot;COMMITTED&quot;,
+  &quot;rows&quot;: 364,
+  &quot;run_id&quot;: &quot;collection-production-20260907-rhythm-a-r1-campaign-0001-run-1-e6&quot;,
+  &quot;schema_version&quot;: &quot;data_factory.recorder_result.v1&quot;,
+  &quot;state&quot;: &quot;COMMITTED&quot;,
+  &quot;transaction_id&quot;: &quot;collection-production-20260907-rhythm-a-r1-campaign-0001-run-1-e6:episode-000005&quot;
+}</pre><h3>episode_ledger.json</h3><p class="locator">outputs/data_factory/runs/collection-production-20260907-rhythm-a-r1-campaign-0001-run-1-e6/episode_ledger.json<br>sha256:bc2689ec944aa3d47b15bf118d41c640f2121565b4e3af3f623bfe3a9d888661</p><pre>{
+  &quot;episode&quot;: {
+    &quot;episode_index&quot;: 5,
+    &quot;episode_ref&quot;: {
+      &quot;episode_index&quot;: 5,
+      &quot;repo_id&quot;: &quot;local/fr5_smolvla_up_wrist_30hz&quot;,
+      &quot;resolved_job_digest&quot;: &quot;sha256:87437084c5e48369af2357e8cae7497e05986484e14207362d576bbdeacadfa4&quot;,
+      &quot;schema_version&quot;: &quot;data_factory.episode_ref.v1&quot;,
+      &quot;staging_manifest_digest&quot;: &quot;sha256:deecdde561162a37e8dcac2e735660f5612d622005153de2f7292b4dbe18033b&quot;,
+      &quot;transaction_id&quot;: &quot;collection-production-20260907-rhythm-a-r1-campaign-0001-run-1-e6:episode-000005&quot;
+    },
+    &quot;episode_ref_digest&quot;: &quot;sha256:227d01ed28c2442663fe1b9b0ca35a5059f294cc55d81304a692ee704bb0e350&quot;,
+    &quot;lerobot_v3_locator&quot;: {
+      &quot;data&quot;: {
+        &quot;chunk_index&quot;: 0,
+        &quot;file_index&quot;: 5,
+        &quot;file_row_end_exclusive&quot;: 364,
+        &quot;file_row_start&quot;: 0,
+        &quot;relative_path&quot;: &quot;data/chunk-000/file-005.parquet&quot;
+      },
+      &quot;episode_index&quot;: 5,
+      &quot;locator_digest&quot;: &quot;sha256:9a9eb5484f228bcc07ec3686abaa861cada3a223b54dd6575d0c53e7cfd20fdd&quot;,
+      &quot;repo_id&quot;: &quot;local/fr5_smolvla_up_wrist_30hz&quot;,
+      &quot;schema_version&quot;: &quot;data_factory.lerobot_v3_episode_locator.v1&quot;,
+      &quot;videos&quot;: [
+        {
+          &quot;camera_key&quot;: &quot;observation.images.up&quot;,
+          &quot;chunk_index&quot;: 0,
+          &quot;file_frame_end_exclusive&quot;: 364,
+          &quot;file_frame_start&quot;: 0,
+          &quot;file_index&quot;: 5,
+          &quot;relative_path&quot;: &quot;videos/observation.images.up/chunk-000/file-005.mp4&quot;,
+          &quot;timestamp_end_s&quot;: 12.133333333333333,
+          &quot;timestamp_start_s&quot;: 0.0
+        },
+        {
+          &quot;camera_key&quot;: &quot;observation.images.wrist&quot;,
+          &quot;chunk_index&quot;: 0,
+          &quot;file_frame_end_exclusive&quot;: 364,
+          &quot;file_frame_start&quot;: 0,
+          &quot;file_index&quot;: 5,
+          &quot;relative_path&quot;: &quot;videos/observation.images.wrist/chunk-000/file-005.mp4&quot;,
+          &quot;timestamp_end_s&quot;: 12.133333333333333,
+          &quot;timestamp_start_s&quot;: 0.0
+        }
+      ]
+    },
+    &quot;run_id&quot;: &quot;collection-production-20260907-rhythm-a-r1-campaign-0001-run-1-e6&quot;,
+    &quot;transaction_id&quot;: &quot;collection-production-20260907-rhythm-a-r1-campaign-0001-run-1-e6:episode-000005&quot;
+  },
+  &quot;admission&quot;: {
+    &quot;review_context_digest&quot;: &quot;sha256:1bdd088a823aed4e04a466291fc6aaa9cc9e556d002f76ecd8422b509e8ca11b&quot;,
+    &quot;technical_status&quot;: &quot;PASS&quot;,
+    &quot;training_status&quot;: &quot;NOT_AUTHORIZED&quot;
+  },
+  &quot;ledger_digest&quot;: &quot;sha256:04700ba394311c6bebffa7c7d3127e48bb0086ea46443952ff28df7f7fa07794&quot;,
+  &quot;dataset&quot;: {
+    &quot;dataset_root&quot;: &quot;datasets/fr5_episodes/fr5_pickup_rhythm_a_20260907_r01&quot;,
+    &quot;dataset_digest&quot;: &quot;sha256:aa5c7342950152b819919a58c61a06f6b77e2d8b66861471d4172c53db3e6847&quot;
+  }
+}</pre><h3>technical_validator.json</h3><p class="locator">outputs/data_factory/runs/collection-production-20260907-rhythm-a-r1-campaign-0001-run-1-e6/technical_validator.json<br>sha256:a2ad1251e6922162148820014a0967388902f9d58ca71dbdc34039fc34c2399a</p><pre>{
+  &quot;run_id&quot;: &quot;collection-production-20260907-rhythm-a-r1-campaign-0001-run-1-e6&quot;,
+  &quot;status&quot;: &quot;PASS&quot;,
+  &quot;expected_fps&quot;: 30,
+  &quot;result_digest&quot;: &quot;sha256:4913cccfe09e81c25b16679d4e1f2ba9232bf38e0ff63e6d60e7c443f0949a70&quot;
+}</pre><h3>episode_ledger_state.json</h3><p class="locator">outputs/data_factory/runs/collection-production-20260907-rhythm-a-r1-campaign-0001-run-1-e6/episode_ledger_state.json<br>sha256:20c33a443e731d787cdd511fc804736c4cc7201d51ffe460f228a17ceac81fdd</p><pre>{
+  &quot;review&quot;: {
+    &quot;reason&quot;: null,
+    &quot;reviewed_at&quot;: &quot;2026-09-07T07:07:20.165747Z&quot;,
+    &quot;reviewed_by&quot;: &quot;user-confirmed-via-coordinator&quot;,
+    &quot;semantic_status&quot;: &quot;PASS&quot;,
+    &quot;training_status&quot;: &quot;NOT_AUTHORIZED&quot;
+  },
+  &quot;state_digest&quot;: &quot;sha256:788642427bc6d593b7799d1f2fe428207cf8dbcbdd24b1442c7ad8748c7147af&quot;
+}</pre><h3>preapproval_evidence.json</h3><p class="locator">outputs/data_factory/runs/collection-production-20260907-rhythm-a-r1-campaign-0001-run-1-e6/preapproval_evidence.json<br>sha256:1f67c748489ea51e7d34b7896e1e90607a0e9aeefb0158ebcb7c0301617fa5ab</p><pre>{
+  &quot;run_id&quot;: &quot;collection-production-20260907-rhythm-a-r1-campaign-0001-run-1-e6&quot;,
+  &quot;plan_digest&quot;: &quot;sha256:7d492c26f4498edff288212cfc6032b453fe07783225a89c59d5aaec4a294257&quot;,
+  &quot;instruction&quot;: &quot;pick up the 24 mm wooden cube&quot;,
+  &quot;task_id&quot;: &quot;pickup_e2e&quot;
+}</pre><h3>전달용 재생본</h3><p>UP·WRIST 원본의 ledger frame 범위를 나란히 배치한 H.264 CRF27 재생본이다. 두 시야는 각각 640 × 480이며, 전체 1280 × 480이다. 시간축 변경·프레임 생략·공간 자르기는 적용하지 않았다.</p><pre>{
+  &quot;originals&quot;: [
+    {
+      &quot;path&quot;: &quot;datasets/fr5_episodes/fr5_pickup_rhythm_a_20260907_r01/videos/observation.images.up/chunk-000/file-005.mp4&quot;,
+      &quot;sha256&quot;: &quot;f8dc2dc5b9e5dde28cc376cfdb6b7a1d1f33486568f759fe27a67b98f3d227d6&quot;,
+      &quot;locator&quot;: {
+        &quot;camera_key&quot;: &quot;observation.images.up&quot;,
+        &quot;chunk_index&quot;: 0,
+        &quot;file_frame_end_exclusive&quot;: 364,
+        &quot;file_frame_start&quot;: 0,
+        &quot;file_index&quot;: 5,
+        &quot;relative_path&quot;: &quot;videos/observation.images.up/chunk-000/file-005.mp4&quot;,
+        &quot;timestamp_end_s&quot;: 12.133333333333333,
+        &quot;timestamp_start_s&quot;: 0.0
+      },
+      &quot;probe&quot;: {
+        &quot;width&quot;: 640,
+        &quot;height&quot;: 480,
+        &quot;avg_frame_rate&quot;: &quot;30/1&quot;
+      }
+    },
+    {
+      &quot;path&quot;: &quot;datasets/fr5_episodes/fr5_pickup_rhythm_a_20260907_r01/videos/observation.images.wrist/chunk-000/file-005.mp4&quot;,
+      &quot;sha256&quot;: &quot;e8161504cbcc6206c752218930609e0a13babd8d7fc529f5dd96546616ff9d36&quot;,
+      &quot;locator&quot;: {
+        &quot;camera_key&quot;: &quot;observation.images.wrist&quot;,
+        &quot;chunk_index&quot;: 0,
+        &quot;file_frame_end_exclusive&quot;: 364,
+        &quot;file_frame_start&quot;: 0,
+        &quot;file_index&quot;: 5,
+        &quot;relative_path&quot;: &quot;videos/observation.images.wrist/chunk-000/file-005.mp4&quot;,
+        &quot;timestamp_end_s&quot;: 12.133333333333333,
+        &quot;timestamp_start_s&quot;: 0.0
+      },
+      &quot;probe&quot;: {
+        &quot;width&quot;: 640,
+        &quot;height&quot;: 480,
+        &quot;avg_frame_rate&quot;: &quot;30/1&quot;
+      }
+    }
+  ],
+  &quot;delivery&quot;: {
+    &quot;file&quot;: &quot;docs/portfolio/assets/pick-latest.mp4&quot;,
+    &quot;sha256&quot;: &quot;375842394add931054a182939606886979368601130bacd0772e48b5d515b9a8&quot;,
+    &quot;bytes&quot;: 881471,
+    &quot;probe&quot;: {
+      &quot;width&quot;: 1280,
+      &quot;height&quot;: 480,
+      &quot;avg_frame_rate&quot;: &quot;30/1&quot;,
+      &quot;duration&quot;: &quot;12.133333&quot;,
+      &quot;nb_frames&quot;: &quot;364&quot;
+    }
+  }
+}</pre></section><section id="current-pick-place"><h2>Pick &amp; Place · 2026-09-07 수집 원본</h2><p>main d23eb57에서 확인한, 해당 작업의 가장 최근 저장 확정 시연이다. 저장 프레임 전체를 30 fps로 재생하며 기록 밖의 재배치·복귀·저장 대기는 포함하지 않는다. Pick은 rhythm-a 수집의 마지막 시연, Pick &amp; Place는 완료된 rhythm-ab-r5 수집의 마지막 시연이다. 기술 검사와 작업 판정은 아래 원본 상태대로 구분한다.</p><h3>result.json</h3><p class="locator">outputs/data_factory/runs/collection-production-rhythm-ab-r5-campaign-0001-run-1-e14/result.json<br>sha256:05f6b26945130da73292c5d78a92e0bc81939b6b0996d418394802c84d252e85</p><pre>{
+  &quot;detail&quot;: &quot;&quot;,
+  &quot;episode_index&quot;: 39,
+  &quot;reason_code&quot;: &quot;COMMITTED&quot;,
+  &quot;rows&quot;: 763,
+  &quot;run_id&quot;: &quot;collection-production-rhythm-ab-r5-campaign-0001-run-1-e14&quot;,
+  &quot;schema_version&quot;: &quot;data_factory.recorder_result.v1&quot;,
+  &quot;state&quot;: &quot;COMMITTED&quot;,
+  &quot;transaction_id&quot;: &quot;collection-production-rhythm-ab-r5-campaign-0001-run-1-e14:episode-000039&quot;
+}</pre><h3>episode_ledger.json</h3><p class="locator">outputs/data_factory/runs/collection-production-rhythm-ab-r5-campaign-0001-run-1-e14/episode_ledger.json<br>sha256:63a318c8ddfb80c07f09ec462f861952f3dc6fa87bda782426ca2971a738e290</p><pre>{
+  &quot;episode&quot;: {
+    &quot;episode_index&quot;: 39,
+    &quot;episode_ref&quot;: {
+      &quot;episode_index&quot;: 39,
+      &quot;repo_id&quot;: &quot;local/fr5_smolvla_up_wrist_30hz&quot;,
+      &quot;resolved_job_digest&quot;: &quot;sha256:46729da7be64897727ce30d55995564eccb197e7c7008c2ebd269bc660ef0d66&quot;,
+      &quot;schema_version&quot;: &quot;data_factory.episode_ref.v1&quot;,
+      &quot;staging_manifest_digest&quot;: &quot;sha256:0461e7a10f50273dcb8f823166260ffe91c99b0efc395d198d1177c64d365adc&quot;,
+      &quot;transaction_id&quot;: &quot;collection-production-rhythm-ab-r5-campaign-0001-run-1-e14:episode-000039&quot;
+    },
+    &quot;episode_ref_digest&quot;: &quot;sha256:ce71600d3096c12a3c0b79f8492bd8598d325acd7879dda50074c38be5765d6e&quot;,
+    &quot;lerobot_v3_locator&quot;: {
+      &quot;data&quot;: {
+        &quot;chunk_index&quot;: 0,
+        &quot;file_index&quot;: 39,
+        &quot;file_row_end_exclusive&quot;: 763,
+        &quot;file_row_start&quot;: 0,
+        &quot;relative_path&quot;: &quot;data/chunk-000/file-039.parquet&quot;
+      },
+      &quot;episode_index&quot;: 39,
+      &quot;locator_digest&quot;: &quot;sha256:b6f400e870b55deb9c4fd3910d50d6572a184d1b38e4a71d2922dd68cfffe995&quot;,
+      &quot;repo_id&quot;: &quot;local/fr5_smolvla_up_wrist_30hz&quot;,
+      &quot;schema_version&quot;: &quot;data_factory.lerobot_v3_episode_locator.v1&quot;,
+      &quot;videos&quot;: [
+        {
+          &quot;camera_key&quot;: &quot;observation.images.up&quot;,
+          &quot;chunk_index&quot;: 0,
+          &quot;file_frame_end_exclusive&quot;: 763,
+          &quot;file_frame_start&quot;: 0,
+          &quot;file_index&quot;: 39,
+          &quot;relative_path&quot;: &quot;videos/observation.images.up/chunk-000/file-039.mp4&quot;,
+          &quot;timestamp_end_s&quot;: 25.433333333333334,
+          &quot;timestamp_start_s&quot;: 0.0
+        },
+        {
+          &quot;camera_key&quot;: &quot;observation.images.wrist&quot;,
+          &quot;chunk_index&quot;: 0,
+          &quot;file_frame_end_exclusive&quot;: 763,
+          &quot;file_frame_start&quot;: 0,
+          &quot;file_index&quot;: 39,
+          &quot;relative_path&quot;: &quot;videos/observation.images.wrist/chunk-000/file-039.mp4&quot;,
+          &quot;timestamp_end_s&quot;: 25.433333333333334,
+          &quot;timestamp_start_s&quot;: 0.0
+        }
+      ]
+    },
+    &quot;run_id&quot;: &quot;collection-production-rhythm-ab-r5-campaign-0001-run-1-e14&quot;,
+    &quot;transaction_id&quot;: &quot;collection-production-rhythm-ab-r5-campaign-0001-run-1-e14:episode-000039&quot;
+  },
+  &quot;admission&quot;: {
+    &quot;review_context_digest&quot;: &quot;sha256:0526bdeed7ab2f8da942105acda518d715e7bb7d627d38c04b740039782b82b4&quot;,
+    &quot;technical_status&quot;: &quot;PASS&quot;,
+    &quot;training_status&quot;: &quot;NOT_AUTHORIZED&quot;
+  },
+  &quot;ledger_digest&quot;: &quot;sha256:993cb1b9336eeb627f17a8752f64d3b8c48b85706f6139b5c1bd429b1a5fb29a&quot;,
+  &quot;dataset&quot;: {
+    &quot;dataset_root&quot;: &quot;datasets/fr5_episodes/fr5_pickplace_rhythm_ab_20260907_r01&quot;,
+    &quot;dataset_digest&quot;: &quot;sha256:cdee5d90f613253cd7a32036858561914ed21fbc8e05692b6bc521cf8b96b3ad&quot;
+  }
+}</pre><h3>technical_validator.json</h3><p class="locator">outputs/data_factory/runs/collection-production-rhythm-ab-r5-campaign-0001-run-1-e14/technical_validator.json<br>sha256:99dd15d71769fcd04de2b4e9e90ecec9c453f254ef5b3546d54fd91287448363</p><pre>{
+  &quot;run_id&quot;: &quot;collection-production-rhythm-ab-r5-campaign-0001-run-1-e14&quot;,
+  &quot;status&quot;: &quot;PASS&quot;,
+  &quot;expected_fps&quot;: 30,
+  &quot;result_digest&quot;: &quot;sha256:2afd5b3e82dac899978bf038418eb0bcb2b61ac1861b1d5ef298119442466e33&quot;
+}</pre><h3>episode_ledger_state.json</h3><p class="locator">outputs/data_factory/runs/collection-production-rhythm-ab-r5-campaign-0001-run-1-e14/episode_ledger_state.json<br>sha256:89c9d81fd4a5743ba1a92f90a924f97ab451e0d74143c4ecfbaa86126aa78806</p><pre>{
+  &quot;review&quot;: {
+    &quot;reason&quot;: null,
+    &quot;reviewed_at&quot;: null,
+    &quot;reviewed_by&quot;: null,
+    &quot;semantic_status&quot;: &quot;PENDING&quot;,
+    &quot;training_status&quot;: &quot;NOT_AUTHORIZED&quot;
+  },
+  &quot;state_digest&quot;: &quot;sha256:60a9a482eead3ce618f429522b32ebe6a5f123f0bbf9ca8488591c6dca76ff53&quot;
+}</pre><h3>preapproval_evidence.json</h3><p class="locator">outputs/data_factory/runs/collection-production-rhythm-ab-r5-campaign-0001-run-1-e14/preapproval_evidence.json<br>sha256:eb8b32a268754df817665c647f2e6bda1e3f5698fc56076a68dbd3786b9f40b8</p><pre>{
+  &quot;run_id&quot;: &quot;collection-production-rhythm-ab-r5-campaign-0001-run-1-e14&quot;,
+  &quot;plan_digest&quot;: &quot;sha256:64e651fb4044a2bd374d8a661181fb07326afa8dfef229c62fe2d8b153270f54&quot;,
+  &quot;instruction&quot;: &quot;pick up the 24 mm wooden cube from the blue zone and place it in the red zone&quot;,
+  &quot;task_id&quot;: &quot;pick_place&quot;
+}</pre><h3>전달용 재생본</h3><p>UP·WRIST 원본의 ledger frame 범위를 나란히 배치한 H.264 CRF27 재생본이다. 두 시야는 각각 640 × 480이며, 전체 1280 × 480이다. 시간축 변경·프레임 생략·공간 자르기는 적용하지 않았다.</p><pre>{
+  &quot;originals&quot;: [
+    {
+      &quot;path&quot;: &quot;datasets/fr5_episodes/fr5_pickplace_rhythm_ab_20260907_r01/videos/observation.images.up/chunk-000/file-039.mp4&quot;,
+      &quot;sha256&quot;: &quot;396596348d56c9bf5882e4bf07b19e82e083860b28761ec38af83e48b7e197fd&quot;,
+      &quot;locator&quot;: {
+        &quot;camera_key&quot;: &quot;observation.images.up&quot;,
+        &quot;chunk_index&quot;: 0,
+        &quot;file_frame_end_exclusive&quot;: 763,
+        &quot;file_frame_start&quot;: 0,
+        &quot;file_index&quot;: 39,
+        &quot;relative_path&quot;: &quot;videos/observation.images.up/chunk-000/file-039.mp4&quot;,
+        &quot;timestamp_end_s&quot;: 25.433333333333334,
+        &quot;timestamp_start_s&quot;: 0.0
+      },
+      &quot;probe&quot;: {
+        &quot;width&quot;: 640,
+        &quot;height&quot;: 480,
+        &quot;avg_frame_rate&quot;: &quot;30/1&quot;
+      }
+    },
+    {
+      &quot;path&quot;: &quot;datasets/fr5_episodes/fr5_pickplace_rhythm_ab_20260907_r01/videos/observation.images.wrist/chunk-000/file-039.mp4&quot;,
+      &quot;sha256&quot;: &quot;b9b94f5ff173bdbb250d415d9484a9a61a453d920c5155bffefb26048010925b&quot;,
+      &quot;locator&quot;: {
+        &quot;camera_key&quot;: &quot;observation.images.wrist&quot;,
+        &quot;chunk_index&quot;: 0,
+        &quot;file_frame_end_exclusive&quot;: 763,
+        &quot;file_frame_start&quot;: 0,
+        &quot;file_index&quot;: 39,
+        &quot;relative_path&quot;: &quot;videos/observation.images.wrist/chunk-000/file-039.mp4&quot;,
+        &quot;timestamp_end_s&quot;: 25.433333333333334,
+        &quot;timestamp_start_s&quot;: 0.0
+      },
+      &quot;probe&quot;: {
+        &quot;width&quot;: 640,
+        &quot;height&quot;: 480,
+        &quot;avg_frame_rate&quot;: &quot;30/1&quot;
+      }
+    }
+  ],
+  &quot;delivery&quot;: {
+    &quot;file&quot;: &quot;docs/portfolio/assets/pick-place-latest.mp4&quot;,
+    &quot;sha256&quot;: &quot;afcc9935445c5ac3c6e01595eb75dd3b03c8aace3b849baff8914c51ec4573e9&quot;,
+    &quot;bytes&quot;: 1638688,
+    &quot;probe&quot;: {
+      &quot;width&quot;: 1280,
+      &quot;height&quot;: 480,
+      &quot;avg_frame_rate&quot;: &quot;30/1&quot;,
+      &quot;duration&quot;: &quot;25.433333&quot;,
+      &quot;nb_frames&quot;: &quot;763&quot;
+    }
+  }
+}</pre></section><h2 id="historical-source">이전 Pick 시연 · 학습 비교의 평가 입력</h2><section><h2>result.json</h2><p class="locator">outputs/data_factory/runs/collection-production-20260904T035141Z-campaign-0001-run-1-e23/result.json<br>sha256:dd4ed17b405e72330239780b83bb58545fa333085acbd331d446ac79395f6692</p><pre>{
   &quot;detail&quot;: &quot;&quot;,
   &quot;episode_index&quot;: 27,
   &quot;reason_code&quot;: &quot;COMMITTED&quot;,
@@ -488,4 +770,4 @@
     &quot;sha256&quot;: &quot;b768019db595b1f54c5e8f6fdb5084a3d7b02bd269813473298cce1facd0c671&quot;,
     &quot;time_seconds&quot;: 10.533333333333333
   }
-}</pre></section></main></html>
+}</pre></section></main><script src="../source-return.js"></script></html>

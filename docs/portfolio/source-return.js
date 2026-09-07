@@ -9,6 +9,21 @@ function updateSourceReturn() {
     return;
   }
   const architectureView = new URLSearchParams(location.search).get('view');
+  if (back && architectureView === 'historical-recording') {
+    back.href = '../collection.html#evaluation-recording';
+    back.textContent = '← 이전 평가 시연으로 돌아가기';
+    return;
+  }
+
+  if (back && architectureView === 'recording') {
+    const params = new URLSearchParams(location.search);
+    const page = params.get('page') === 'index' ? 'index' : 'collection';
+    const task = params.get('task') === 'pick-place' ? 'pick-place' : 'pick';
+    back.href = `../${page}.html?task=${task}${page === 'collection' ? '#recorded-example' : ''}`;
+    back.textContent = '← 시연 영상으로 돌아가기';
+    return;
+  }
+
   if (back && architectureView === 'acquisition') {
     const section = new URLSearchParams(location.search).get('section');
     back.href = `../acquisition.html#${['mechanism','native-draft','policy','study'].includes(section) ? section : 'mechanism'}`;

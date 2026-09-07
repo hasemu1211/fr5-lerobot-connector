@@ -153,3 +153,19 @@ header{min-height:100px}.brand{font-size:40px}nav{font-size:14px;gap:34px}
 .cohort-study{margin-top:42px;scroll-margin-top:35px}.cohort-study h3{font-size:24px;margin-bottom:18px}.cohort-table{font-size:14px}.cohort-table td,.cohort-table th{font-family:inherit;text-align:left;padding:18px 15px}.cohort-preserved{background:#eaf3f7;color:#285c73}.cohort-table th:first-child{width:22%}
 
 .acquisition-mechanism > .source-details p{max-width:85ch;font-size:14px;line-height:1.9}
+
+.recording-choices{display:flex;gap:32px;border-bottom:1px solid var(--line);margin:20px 0 0}
+.recording-choices button{background:transparent;border:0;border-bottom:3px solid transparent;padding:12px 2px;font:700 18px/1.5 'Lato','Noto Sans CJK KR',sans-serif;color:var(--muted);cursor:pointer}
+.recording-choices button[aria-pressed=true]{color:var(--ink);border-color:var(--accent)}
+.recording-choices button:focus-visible{outline:3px solid var(--accent);outline-offset:3px}
+.recording-panel[hidden]{display:none}.recording-panel{margin:0}
+.recording-panel figcaption strong,.recording-panel figcaption span{display:block}
+.recording-panel figcaption strong{font-size:16px;color:var(--ink);margin-bottom:5px}
+.recording-panel figcaption p{font-size:14px;margin:8px 0 0}
+.recording-panel figcaption>a{white-space:nowrap;align-self:start}
+.recording-context{font-size:14px;color:var(--muted);max-width:80ch;margin:22px 0}
+.historical-recording{margin:30px 0 0;border-top:1px solid var(--line);padding:18px 0;scroll-margin-top:85px}
+.historical-recording>summary{cursor:pointer;font-size:14px}.historical-recording>p{font-size:14px;max-width:80ch}
+.hero-recording .recording-panel{margin:0}.hero-recording .recording-panel video{display:block;width:100%;height:auto;aspect-ratio:8/3}
+.hero-recording .recording-panel figcaption{display:flex;justify-content:space-between;gap:20px}
+.hero-recording>.text-link{display:inline-block;margin-top:16px}

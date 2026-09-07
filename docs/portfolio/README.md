@@ -20,6 +20,8 @@ python3 docs/portfolio/export_single_file.py .agent-local/portfolio/FR5-Portfoli
 
 실제 저장 관측, FAKE 모드의 제품 화면과 오프라인 학습 결과는 각 매체의 캡션에서 구분한다. 근거 화면에는 원본 파일 식별자와 SHA-256, 발췌 범위를 함께 표시한다.
 
+작업 이름은 `Pick`과 `Pick & Place`로 표시한다. 탭·소제목은 아래 모듈 이름을 사용하고, 한국어는 목적과 원리를 설명한다. 작업명·모듈명·개별 동작의 의미를 문맥에 맞춰 구분하고, 파지·들어 올리기·목적지에 놓기 같은 동작 설명은 자연스러운 한국어를 사용한다. 원본 코드와 데이터의 `pickup`·`pick_place` 식별자는 유지한다.
+
 모듈 이름은 아키텍처와 본문에서 동일하게 사용한다: Collection Operator, OneJob, Motion Executor, Recorder, Dataset Validator, Curator, Selection, Video Transform, Training Review, Batch Review, NativeInspection, Policy Learning, Training Entrypoint, Split & Normalization. 한국어는 역할과 원리를 설명하는 보조 표현으로 사용하며 원본 코드·측정 자료의 식별자는 바꾸지 않는다.
 
 본문은 기능, 해결하려는 문제와 설계 이유, 얻으려는 이점을 먼저 전달한다. 세부 알고리즘과 실행 조건은 그 설명을 뒷받침하는 위치에 둔다. 기대한 효과와 실제 측정 결과를 구분하며, 각 주제에 같은 카드·도해·접기 형식을 강제하지 않는다. 비교 그림은 바뀌는 조건과 고정한 조건을 명시하고, 설명용 표현을 실제 모듈 이름으로 제시하지 않는다. 탐색 검증 통과와 시각적 완성도는 별도로 판단한다.

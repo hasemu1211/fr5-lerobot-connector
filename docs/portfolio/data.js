@@ -23,7 +23,7 @@ if (observations) {
     const item = observations.filter(item => item.episode === episode)[moment];
     const study = document.getElementById('observations');
     study.dataset.loading = 'true'; study.setAttribute('aria-busy', 'true');
-    document.getElementById('frame-caption').textContent = `집기 시연 · 선택한 두 관측을 읽고 있습니다`;
+    document.getElementById('frame-caption').textContent = `Pick 시연 · 선택한 두 관측을 읽고 있습니다`;
     document.getElementById('frame-source').href = `sources/observations.html#ep${episode}-f${item.frame}`;
     document.getElementById('state-values').replaceChildren();
     try {
@@ -43,9 +43,9 @@ if (observations) {
       const image = document.getElementById(`${camera}-image`);
       image.hidden = false;
       image.src = item.images[i];
-      image.alt = `집기 시연 ${item.timestamp.toFixed(3)}초의 카메라 ${i + 1} 관측`;
+      image.alt = `Pick 시연 ${item.timestamp.toFixed(3)}초의 카메라 ${i + 1} 관측`;
     });
-    document.getElementById('frame-caption').textContent = `집기 시연 · ${item.timestamp.toFixed(3)}초 · 시연의 ${[10, 50, 90][moment]}% 위치`;
+    document.getElementById('frame-caption').textContent = `Pick 시연 · ${item.timestamp.toFixed(3)}초 · 시연의 ${[10, 50, 90][moment]}% 위치`;
     document.getElementById('frame-source').href = `sources/observations.html#ep${episode}-f${item.frame}`;
     const state = document.getElementById('state-values'); state.replaceChildren();
     item.state.forEach((value, i) => {
