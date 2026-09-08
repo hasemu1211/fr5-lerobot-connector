@@ -910,7 +910,7 @@ class OneJob:
         return self._result(True, "EXECUTING")
 
     def poll(self):
-        if self.state not in {"EXECUTING", "PRECONTACT_HUMAN", "GRASP_VERDICT", "SEMANTIC_VERDICT", "RELEASE_VERDICT"}:
+        if self.state not in {"EXECUTING", "PRECONTACT_HUMAN", "GRASP_VERDICT", "SEMANTIC_VERDICT", "LEARNED_CHUNK_COMPLETE", "RELEASE_VERDICT"}:
             return self._result(False, "POLL_STATE")
         try:
             status_started = self.monotonic_clock()
@@ -944,6 +944,11 @@ class OneJob:
                 self.state = state
                 return self._result(True, state)
             if state == "GRASP_VERDICT":
+                self.state = state
+                return self._result(True, state)
+            if state == "LEARNED_CHUNK_COMPLETE":
+                if "learned_proposal" not in self._program or self.recorder_state != "RECORDING":
+                    raise ContractError("LEARNED_CHUNK_STATE")
                 self.state = state
                 return self._result(True, state)
             if state == "SEMANTIC_VERDICT":
@@ -1051,12 +1056,42 @@ class OneJob:
         self.state = "EXECUTING"
         return self._result(True, "GRASP_VERDICT_ACCEPTED")
 
+    def observe_learned_boundary(self, camera_topics, max_observation_age_s=.3):
+        """Read fresh inputs under the existing lease; grant no next-plan authority."""
+        if self.state != "LEARNED_CHUNK_COMPLETE":
+            return self._result(False, "LEARNED_CHUNK_STATE")
+        status = self.poll()
+        if not status["ok"]:
+            return status
+        try:
+            response = self._request("executor", "capture_observation", {
+                "run_id": self.run_id, "plan_digest": self.plan_digest,
+                "lease_id": self.lease_id, "camera_topics": camera_topics,
+                "max_observation_age_s": max_observation_age_s,
+            })
+            if response["state"] != "LEARNED_CHUNK_COMPLETE" or "observation" not in response["data"]:
+                raise ContractError("LEARNED_OBSERVATION_SCHEMA")
+            status = self.poll()
+            if not status["ok"]:
+                return status
+            return self._result(True, "LEARNED_OBSERVATION", observation=copy.deepcopy(response["data"]["observation"]))
+        except ContractError as exc:
+            return self._abort(exc.code)
+
     def semantic_verdict(self, verdict, decided_by, source="HUMAN"):
-        if self.state != "SEMANTIC_VERDICT" or verdict not in {"PASS", "FAIL"} or not isinstance(decided_by, str) or not SAFE_ID.fullmatch(decided_by):
+        if self.state not in {"SEMANTIC_VERDICT", "LEARNED_CHUNK_COMPLETE"} or verdict not in {"PASS", "FAIL"} or not isinstance(decided_by, str) or not SAFE_ID.fullmatch(decided_by):
             return self._result(False, "VERDICT_STATE")
         if source not in {"HUMAN", "HIL_PROXY"} or source == "HIL_PROXY" and self.approval_scope != "HIL_NUMERIC_PROXY":
             return self._result(False, "VERDICT_SOURCE")
         try:
+            if self.state == "LEARNED_CHUNK_COMPLETE":
+                status = self.poll()
+                if not status["ok"]:
+                    return status
+                health = {key: self.recorder_evidence[key] for key in ("writer_alive", "writer_error")}
+                self._freeze_recorder_with_heartbeats(health)
+                if self.recorder_state != "FROZEN":
+                    raise ContractError("RECORDER_FREEZE")
             if verdict == "PASS" and "learned_proposal" not in self._program:
                 self._emit_lifecycle_event("RECYCLING")
             response = self._request("executor", "semantic_verdict", {"run_id": self.run_id, "plan_digest": self.plan_digest, "verdict": verdict, "decided_by": decided_by, "source": source})
@@ -1223,7 +1258,7 @@ def run_one_job(job, plan, motion_approval, decision_call, *, operator_id, lease
             return result
         if result["state"] == "AWAITING_CELL_READY":
             continue
-        if result["state"] not in {"PRECONTACT_HUMAN", "GRASP_VERDICT", "SEMANTIC_VERDICT", "RELEASE_VERDICT"}:
+        if result["state"] not in {"PRECONTACT_HUMAN", "GRASP_VERDICT", "SEMANTIC_VERDICT", "LEARNED_CHUNK_COMPLETE", "RELEASE_VERDICT"}:
             sleep(poll_interval_s)
             continue
         if result["state"] in {"GRASP_VERDICT", "SEMANTIC_VERDICT"} and job.approval_scope == "HIL_NUMERIC_PROXY":
@@ -1252,7 +1287,7 @@ def run_one_job(job, plan, motion_approval, decision_call, *, operator_id, lease
             result = job.confirm(operator_id)
         elif result["state"] == "GRASP_VERDICT" and decision in {"PASS", "FAIL"}:
             result = job.grasp_verdict(decision, operator_id)
-        elif result["state"] == "SEMANTIC_VERDICT" and decision in {"PASS", "FAIL"}:
+        elif result["state"] in {"SEMANTIC_VERDICT", "LEARNED_CHUNK_COMPLETE"} and decision in {"PASS", "FAIL"}:
             result = job.semantic_verdict(decision, operator_id)
         elif result["state"] == "RELEASE_VERDICT" and decision in {"LANDED", "OFF_SLOT", "UNCERTAIN"}:
             result = job.release_verdict(decision, operator_id)

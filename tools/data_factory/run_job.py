@@ -1239,7 +1239,7 @@ def _operator_summary(result):
     markers = [
         step.get("phase") for step in steps or []
         if isinstance(step, Mapping)
-        and step.get("pause_after") == "SEMANTIC_VERDICT"
+        and step.get("pause_after") in {"SEMANTIC_VERDICT", "LEARNED_CHUNK_COMPLETE"}
     ]
     boundary = markers[0] if len(markers) == 1 else None
     if boundary is None and isinstance(summary.get("recycle"), Mapping):
@@ -4599,12 +4599,13 @@ def run_live(payload, cancel, publish, *, resolver=resolve_inputs, executor_fact
                     **(runtime_projection if bound_runtime else {}),
                     "camera_semantic_authority": False, "training_authorized": False,
                 })
-            if result["state"] in {"GRASP_VERDICT", "SEMANTIC_VERDICT"}:
+            if result["state"] in {"GRASP_VERDICT", "SEMANTIC_VERDICT", "LEARNED_CHUNK_COMPLETE"}:
                 if pending is None:
                     publish(_response(
                         ok=True, code=(
                             "GRASP_REVIEW"
                             if result["state"] == "GRASP_VERDICT"
+                            else "LEARNED_CHUNK_REVIEW" if result["state"] == "LEARNED_CHUNK_COMPLETE"
                             else "SEMANTIC_REVIEW"
                         ),
                         state="RUNNING",
@@ -4631,9 +4632,13 @@ def run_live(payload, cancel, publish, *, resolver=resolve_inputs, executor_fact
                     prompt = (
                         "Confirm the physical grasp; PASS continues to lift, FAIL aborts"
                         if result["state"] == "GRASP_VERDICT"
+                        else "Review this finite chunk; PASS ends the probe with your review, FAIL discards. This does not qualify task success or dataset commit."
+                        if result["state"] == "LEARNED_CHUNK_COMPLETE"
                         else "Confirm the completed episode; PASS commits, FAIL discards"
                     )
                     checkpoint_evidence = {
+                        "execution_state": result["state"],
+                        "recorder_state": result.get("recorder_state"),
                         "execution_evidence": copy.deepcopy(result.get("execution_evidence")),
                         "operator_summary_digest": canonical_digest(summary),
                         "approval_scope": approval_scope,
@@ -4650,7 +4655,8 @@ def run_live(payload, cancel, publish, *, resolver=resolve_inputs, executor_fact
                             else:
                                 checkpoint = _operator_checkpoint(
                                     checkpoint_provider,
-                                    kind=state, run_id=payload["run_id"],
+                                    kind="SEMANTIC_VERDICT" if state == "LEARNED_CHUNK_COMPLETE" else state,
+                                    run_id=payload["run_id"],
                                     plan_digest=planned["plan_digest"], prompt=text,
                                     choices=("PASS", "FAIL"), operator_id=operator_id,
                                     timeout_s=checkpoint_timeout_s,

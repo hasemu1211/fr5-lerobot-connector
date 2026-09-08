@@ -70,6 +70,10 @@ class Transport(T):
         self.hardware = False
         self.source_clock = lambda: 10.
 
+    @property
+    def owns_active_goal(self):
+        return self.active
+
     def snapshot(self, *_):
         value = snapshot(self.current[:6], gripper_position=self.current[-1])
         value["gripper_controller"]["reference_position_m"] = self.current[-1]
@@ -242,11 +246,22 @@ class FinitePlanTest(unittest.TestCase):
                 return choices if isinstance(choices, str) else "PASS"
             caller_name = "run_live" if mode == "live" else "run_plan_only"
             caller = getattr(run_job, caller_name)
+            def checkpoint(request):
+                from tools.data_factory.operator.workflow.intents import OperatorCheckpointPort
+                port = OperatorCheckpointPort(operator_label="operator")
+                pending = port.offer(request)
+                self.assertEqual(request["kind"], "SEMANTIC_VERDICT")
+                self.assertEqual(request["evidence"]["execution_state"], "LEARNED_CHUNK_COMPLETE")
+                self.assertEqual(request["evidence"]["recorder_state"], "RECORDING")
+                self.assertIn("does not qualify task success or dataset commit", request["prompt"])
+                self.assertNotIn(("recorder", "freeze"), calls)
+                port.resolve({"checkpoint_binding_digest": pending["binding_digest"], "choice": "PASS"})
+                return port.wait(.1)
             def live_ports(*args, **kwargs):
                 if mode == "plan_only":
                     return caller(*args, **kwargs, resolver=lambda _: (validated, program, SCENE), executor_factory=factory)
                 return caller(*args, **kwargs, resolver=lambda _: (validated, program, SCENE), executor_factory=factory,
-                    recorder_factory=lambda *_: recorder, tty_decision=decide,
+                    recorder_factory=lambda *_: recorder, tty_decision=decide, checkpoint_provider=checkpoint,
                     camera_warmup_call=lambda *_: {"schema_version": "data_factory.camera_warmup.v1", "attempts": []})
             with mock.patch.object(NativeSmolVLA, "load", return_value=native), \
                  mock.patch("tools.data_factory.rollout.finite_plan.FinitePolicyInference", side_effect=lambda *a, **kw: real_inference(*a, **kw, source_clock=lambda: 10., monotonic_clock=lambda: 10.)), \
@@ -463,7 +478,7 @@ class FinitePlanTest(unittest.TestCase):
             self.assertEqual(start["snapshot"]["gripper_controller"]["feedback_position_m"], .01218)
             self.assertEqual(start["captured_at_s"], now[0])
             state.update(complete=True, joints=[.001] * 6)
-            self.assertEqual(job.poll()["state"], "SEMANTIC_VERDICT")
+            self.assertEqual(job.poll()["state"], "LEARNED_CHUNK_COMPLETE")
         self.assertEqual(executor.runs["run"]["plan"], frozen)
         self.assertTrue(job.semantic_verdict("PASS", "operator")["ok"])
         diagnostic = learned_run_diagnostic(job.poll())
@@ -642,7 +657,7 @@ class FinitePlanTest(unittest.TestCase):
             self.assertEqual(len(sent), 3)
             self.assertEqual(t._gripper_goal_count, 1)
             state.update(complete=True, joints=[.001] * 6)
-            self.assertEqual(job.poll()["state"], "SEMANTIC_VERDICT")
+            self.assertEqual(job.poll()["state"], "LEARNED_CHUNK_COMPLETE")
         self.assertEqual(executor.runs["run"]["plan"], frozen)
         self.assertTrue(job.semantic_verdict("PASS", "operator")["ok"])
         trace = learned_run_diagnostic(job.poll())["execution_trace"]
@@ -1291,6 +1306,9 @@ class FinitePlanTest(unittest.TestCase):
         p = proposal()
         program = compile_program(src, p)
         self.assertEqual(validate_motion_program(program), program)
+        legacy = copy.deepcopy(program)
+        legacy["steps"][0]["pause_after"] = "SEMANTIC_VERDICT"
+        self.assertEqual(validate_motion_program(legacy), legacy)
         self.assertEqual(src, original)
         self.assertEqual([s["phase"] for s in program["steps"]], ["LEARNED_CHUNK"])
         program["steps"].append(src["steps"][-1])
@@ -1303,11 +1321,114 @@ class FinitePlanTest(unittest.TestCase):
         self.assertEqual(scene.updates, [])
         self.assertEqual(_operator_summary(job._result())["path"], ["LEARNED_CHUNK"])
 
+    def test_chunk_boundary_keeps_one_recorder_and_bound_fresh_observation(self):
+        job, executor, transport, cell, scene, now, calls = self.start_job()
+        self.assertTrue(job.confirm("operator")["ok"])
+        boundary = job.poll()
+        self.assertEqual(boundary["state"], "LEARNED_CHUNK_COMPLETE")
+        self.assertEqual(job.recorder_state, "RECORDING")
+        self.assertIsNone(job.semantic)
+        frozen_plan = copy.deepcopy(job.plan_envelope)
+        tx, lease = job.transaction_id, job.lease_id
+        def capture(topics, age):
+            self.assertEqual(topics, {"camera1": "/up", "camera2": "/wrist"})
+            # Exercise the actual native capture method and ROS serializers;
+            # only subscription delivery is synthetic, without a ROS node.
+            from sensor_msgs.msg import JointState, Image
+            from rclpy.serialization import serialize_message, deserialize_message
+            from tools.data_factory.motion.moveit_transport import RosMoveItTransport
+            joint = JointState(name=JOINTS, position=ACTION)
+            joint.header.stamp.sec = 10
+            image = Image(height=1, width=1, encoding="rgb8", step=3, data=bytes([1, 2, 3]))
+            image.header.stamp.sec = 10
+            joint = deserialize_message(serialize_message(joint), JointState)
+            image = deserialize_message(serialize_message(image), Image)
+            native = object.__new__(RosMoveItTransport)
+            native._active, native._execution_locked = None, False
+            native._clock, native.graph_timeout_s = lambda: 10., .01
+            native._joint_state = native._joint_state_received_at = None
+            callbacks = []
+            native.node = SimpleNamespace(
+                get_parameter=lambda _: SimpleNamespace(value=False),
+                create_subscription=lambda _type, _topic, callback, _qos: callbacks.append(callback),
+                destroy_subscription=lambda _: None)
+            def spin(*_, **__):
+                native._joint_state, native._joint_state_received_at = joint, 10.
+                for callback in callbacks:
+                    callback(image)
+            native._rclpy = SimpleNamespace(spin_once=spin)
+            with mock.patch("tools.data_factory.motion.moveit_transport.time.time", return_value=10.):
+                return native.capture_policy_observation(topics, age)
+        transport.capture_policy_observation = capture
+        result = job.observe_learned_boundary({"camera1": "/up", "camera2": "/wrist"})
+        self.assertTrue(result["ok"], result)
+        self.assertEqual(result["observation"]["observation.state"], ACTION)
+        self.assertEqual(result["observation"]["observation.images.camera1"]["data_hex"], "010203")
+        self.assertEqual(result["state"], "LEARNED_CHUNK_COMPLETE")
+        self.assertEqual((job.transaction_id, job.lease_id), (tx, lease))
+        self.assertEqual(job.plan_envelope, frozen_plan)
+        self.assertEqual(calls.count(("recorder", "begin")), 1)
+        self.assertNotIn(("recorder", "freeze"), calls)
+        self.assertNotIn(("recorder", "commit"), calls)
+        self.assertEqual(len(transport.sent), 1)
+        self.assertEqual(scene.updates, [])
+        self.assertFalse(cell.ready)
+        # Observation is no approval to replace a plan or replay its goal.
+        self.assertEqual(job.start()["code"], "START_STATE")
+        self.assertEqual(job.plan_only("run", source(), SCENE)["code"], "ONE_JOB_ONLY")
+        self.assertTrue(job.semantic_verdict("PASS", "operator")["ok"])
+        self.assertEqual(calls.count(("recorder", "freeze")), 1)
+        self.assertEqual(job.poll()["code"], "PRECOMMIT_SAFETY")
+        self.assertNotIn(("recorder", "commit"), calls)
+
+    def test_chunk_observation_rejects_binding_active_stale_cancel_and_expired_lease(self):
+        for failure in ("wrong_plan", "wrong_lease", "active", "stale", "cancel", "expired", "boundary_timeout", "loosened_age"):
+            with self.subTest(failure=failure):
+                job, executor, transport, _, _, now, calls = self.start_job()
+                self.assertTrue(job.confirm("operator")["ok"])
+                self.assertEqual(job.poll()["state"], "LEARNED_CHUNK_COMPLETE")
+                captured = []
+                def capture(*_):
+                    captured.append(True)
+                    value = observation()
+                    if failure == "stale":
+                        value["source_timestamps_s"]["camera1"] -= 1.
+                    elif failure == "cancel":
+                        executor._fault(executor.runs["run"], "CANCELLED_BY_OPERATOR")
+                    elif failure == "expired":
+                        now[0] += 100.
+                    elif failure == "boundary_timeout":
+                        run = executor.runs["run"]
+                        now[0] = run["execution"]["wait_deadline"] + .01
+                        run["execution"]["lease_deadline"] = now[0] + 1.
+                    return value
+                transport.capture_policy_observation = capture
+                if failure in {"wrong_plan", "wrong_lease"}:
+                    request = {"schema_version": "fr5.pickup_executor.command.v4", "op_id": "bad-observation", "op": "capture_observation", "payload": {
+                        "run_id": "run", "plan_digest": canonical_digest("wrong") if failure == "wrong_plan" else job.plan_digest,
+                        "lease_id": "wrong" if failure == "wrong_lease" else job.lease_id,
+                        "camera_topics": {"camera1": "/up", "camera2": "/wrist"}, "max_observation_age_s": .3}}
+                    result = executor.process(json.loads(json.dumps(request)))
+                    self.assertFalse(captured)
+                else:
+                    transport.active = failure == "active"
+                    result = job.observe_learned_boundary({"camera1": "/up", "camera2": "/wrist"},
+                        max_observation_age_s=1. if failure == "loosened_age" else .3)
+                    if failure in {"active", "loosened_age"}:
+                        self.assertFalse(captured)
+                self.assertFalse(result["ok"], result)
+                self.assertEqual(result["code"], {
+                    "wrong_plan": "PLAN_DIGEST_MISMATCH", "wrong_lease": "LEASE_BINDING", "active": "ROS_EXEC_ACTIVE",
+                    "stale": "LEARNED_STALE_OBSERVATION", "cancel": "CANCELLED_BY_OPERATOR", "expired": "HEARTBEAT_TIMEOUT",
+                    "boundary_timeout": "LEARNED_CHUNK_TIMEOUT", "loosened_age": "LEARNED_STALE_OBSERVATION"}[failure])
+                self.assertEqual(len(transport.sent), 1)
+                self.assertNotIn(("recorder", "commit"), calls)
+
     def test_completed_probe_flows_to_diagnostic_and_cannot_commit_pending_safety(self):
         job, executor, transport, cell, scene, _, calls = self.start_job()
         self.assertTrue(job.confirm("operator")["ok"])
-        self.assertEqual(job.poll()["state"], "SEMANTIC_VERDICT")
-        self.assertEqual(job.recorder_state, "FROZEN")
+        self.assertEqual(job.poll()["state"], "LEARNED_CHUNK_COMPLETE")
+        self.assertEqual(job.recorder_state, "RECORDING")
         self.assertTrue(job.semantic_verdict("PASS", "operator")["ok"])
         result = job.poll()
         self.assertEqual((result["code"], result["recorder_state"]), ("PRECOMMIT_SAFETY", "ABORTED"))
@@ -1321,6 +1442,7 @@ class FinitePlanTest(unittest.TestCase):
         diagnostic = learned_run_diagnostic(result)
         self.assertEqual(diagnostic["execution_trace"]["status"], "COMPLETED")
         self.assertEqual(diagnostic["task_effectiveness"], "UNKNOWN")
+        self.assertEqual(diagnostic["human_semantic_decision"]["review_scope"], "FINITE_LEARNED_CHUNK")
         self.assertIsNone(diagnostic["episode_ledger"])
         self.assertFalse(diagnostic["training_authorized"])
         tampered = copy.deepcopy(result)
@@ -1358,7 +1480,7 @@ class FinitePlanTest(unittest.TestCase):
         self.assertEqual(job.poll()["state"], "PRECONTACT_HUMAN")
         now[0] += .4
         self.assertTrue(job.confirm("operator")["ok"])
-        self.assertEqual(job.poll()["state"], "SEMANTIC_VERDICT")
+        self.assertEqual(job.poll()["state"], "LEARNED_CHUNK_COMPLETE")
         job.semantic_verdict("PASS", "operator")
         result = job.poll()
         diagnostic = learned_run_diagnostic(result)

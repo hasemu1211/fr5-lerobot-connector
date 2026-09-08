@@ -50,7 +50,7 @@ ARM_PHASES = frozenset(PHASES) - {"GRIPPER_CLOSE", "GRIPPER_OPEN"}
 JOINT_ORDER = ["j1", "j2", "j3", "j4", "j5", "j6"]
 COMMAND_FIELDS = {"schema_version", "op_id", "op", "payload"}
 COMMAND_OPS = {"preflight", "capture_observation", "plan", "approve", "execute", "heartbeat", "confirm", "grasp_verdict", "semantic_verdict", "release_verdict", "cancel", "status"}
-ACTIVE_STATES = {"EXECUTING", "PRECONTACT_HUMAN", "GRASP_VERDICT", "SEMANTIC_VERDICT", "RELEASE_VERDICT"}
+ACTIVE_STATES = {"EXECUTING", "PRECONTACT_HUMAN", "GRASP_VERDICT", "SEMANTIC_VERDICT", "LEARNED_CHUNK_COMPLETE", "RELEASE_VERDICT"}
 RECYCLE_PHASES = ("RECYCLE_APPROACH_PTP", "LOWER_LIN", "GRIPPER_OPEN", "RETREAT_LIN", "SAFE_POSE_PTP")
 EXECUTION_RESULT_MARGIN_S = 2.0
 EXPECTED_GRAPH = {
@@ -397,13 +397,44 @@ class PickupExecutor:
         return copy.deepcopy(snapshot)
 
     def _capture_observation(self, payload):
-        _exact(payload, {"camera_topics", "max_observation_age_s"}, "LEARNED_OBSERVATION_SCHEMA")
-        if self.runs or self.motion_only_binding_digest is not None:
+        fields = {"camera_topics", "max_observation_age_s"}
+        bound = isinstance(payload, dict) and "run_id" in payload
+        _exact(payload, fields | ({"run_id", "plan_digest", "lease_id"} if bound else set()), "LEARNED_OBSERVATION_SCHEMA")
+        run = self._bound(payload) if bound else None
+        if self.motion_only_binding_digest is not None or self.runs and not bound:
             raise ContractError("ONE_JOB_ONLY")
+        if bound:
+            if run["state"] != "LEARNED_CHUNK_COMPLETE":
+                raise ContractError("LEARNED_CHUNK_STATE")
+            if payload["lease_id"] != run["execution"]["lease_id"]:
+                raise ContractError("LEASE_BINDING")
+            from tools.data_factory.rollout.finite_plan import _number
+            proposal = run["plan"]["learned_proposal"]
+            age = _number(payload["max_observation_age_s"], "LEARNED_SOURCE_CLOCK")
+            if not 0 < age <= proposal["max_observation_age_s"]:
+                raise ContractError("LEARNED_STALE_OBSERVATION")
+            inputs = proposal.get("runtime_inputs")
+            if inputs is not None and payload["camera_topics"] != inputs["camera_topics"]:
+                raise ContractError("LEARNED_CAMERA_MAPPING")
+            if run["execution"]["active"] or getattr(self.transport, "owns_active_goal", True):
+                raise ContractError("ROS_EXEC_ACTIVE")
         capture = getattr(self.transport, "capture_policy_observation", None)
         if capture is None:
             raise ContractError("LEARNED_OBSERVATION_UNAVAILABLE")
         observation = capture(payload["camera_topics"], payload["max_observation_age_s"])
+        if bound:
+            # A late read cannot renew the lease or revive a cancelled attempt.
+            self.tick()
+            if run["state"] != "LEARNED_CHUNK_COMPLETE":
+                raise ContractError(run.get("failure_code", "LEARNED_CHUNK_STATE"))
+            if run["execution"]["active"] or getattr(self.transport, "owns_active_goal", True):
+                raise ContractError("ROS_EXEC_ACTIVE")
+            from tools.data_factory.rollout.finite_plan import check_freshness
+            check_freshness({"source_timestamps_s": observation["source_timestamps_s"],
+                             "max_observation_age_s": payload["max_observation_age_s"]}, self.source_clock())
+            return _response(code="LEARNED_OBSERVATION", ok=True, run_id=payload["run_id"],
+                plan_digest=payload["plan_digest"], state=run["state"],
+                data={**self._execution_data(run), "observation": observation})
         return _response(code="LEARNED_OBSERVATION", ok=True, state="IDLE", data={"observation": observation})
 
     def _validated_preflight(self, motion_program):
@@ -742,7 +773,7 @@ class PickupExecutor:
         )
         semantic_steps = [
             step for step in planned_steps
-            if step.get("pause_after") == "SEMANTIC_VERDICT"
+            if step.get("pause_after") in {"SEMANTIC_VERDICT", "LEARNED_CHUNK_COMPLETE"}
         ]
         if len(semantic_steps) != 1:
             raise ContractError("MOTION_PROGRAM_MARKER")
@@ -1251,9 +1282,9 @@ class PickupExecutor:
             execution, now = run["execution"], self.monotonic_clock()
             if now >= execution["lease_deadline"]:
                 self._fault(run, "HEARTBEAT_TIMEOUT")
-            elif run["state"] in {"PRECONTACT_HUMAN", "GRASP_VERDICT", "SEMANTIC_VERDICT", "RELEASE_VERDICT"}:
+            elif run["state"] in {"PRECONTACT_HUMAN", "GRASP_VERDICT", "SEMANTIC_VERDICT", "LEARNED_CHUNK_COMPLETE", "RELEASE_VERDICT"}:
                 if now > execution["wait_deadline"]:
-                    self._fault(run, {"PRECONTACT_HUMAN": "PRECONTACT_TIMEOUT", "GRASP_VERDICT": "GRASP_VERDICT_TIMEOUT", "SEMANTIC_VERDICT": "SEMANTIC_TIMEOUT", "RELEASE_VERDICT": "RELEASE_VERDICT_TIMEOUT"}[run["state"]])
+                    self._fault(run, {"PRECONTACT_HUMAN": "PRECONTACT_TIMEOUT", "GRASP_VERDICT": "GRASP_VERDICT_TIMEOUT", "SEMANTIC_VERDICT": "SEMANTIC_TIMEOUT", "LEARNED_CHUNK_COMPLETE": "LEARNED_CHUNK_TIMEOUT", "RELEASE_VERDICT": "RELEASE_VERDICT_TIMEOUT"}[run["state"]])
             else:
                 try:
                     active = self.transport.poll_active()
@@ -1351,9 +1382,9 @@ class PickupExecutor:
                             continue
                     execution["step_index"] += 1
                     pause_after = run["plan"]["steps"][execution["step_index"] - 1].get("pause_after")
-                    if pause_after in {"GRASP_VERDICT", "SEMANTIC_VERDICT"}:
+                    if pause_after in {"GRASP_VERDICT", "SEMANTIC_VERDICT", "LEARNED_CHUNK_COMPLETE"}:
                         run["state"] = pause_after
-                        execution["wait_deadline"] = now + run["plan"]["execution_timeouts_s"][pause_after.lower()]
+                        execution["wait_deadline"] = now + run["plan"]["execution_timeouts_s"]["semantic_verdict" if pause_after == "LEARNED_CHUNK_COMPLETE" else pause_after.lower()]
                         self._emit_phase_event(run, "HOLD_ENTERED", completed_step, None, {"hold": pause_after, "step": completed_step})
                     else:
                         self._start_current_step(run)
@@ -1436,10 +1467,12 @@ class PickupExecutor:
             raise ContractError("VERDICT_SCHEMA")
         if payload["source"] == "HIL_PROXY" and run["approval"]["approval_scope"] != "HIL_NUMERIC_PROXY":
             raise ContractError("VERDICT_SOURCE")
-        if run["state"] != "SEMANTIC_VERDICT":
+        if run["state"] not in {"SEMANTIC_VERDICT", "LEARNED_CHUNK_COMPLETE"}:
             raise ContractError("VERDICT_STATE")
         run["execution"]["semantic_verdict"] = payload["verdict"]
         run["execution"]["semantic_decision"] = {"source": payload["source"], "decided_by": payload["decided_by"], "decided_at": self.clock().isoformat().replace("+00:00", "Z")}
+        if run["state"] == "LEARNED_CHUNK_COMPLETE":
+            run["execution"]["semantic_decision"]["review_scope"] = "FINITE_LEARNED_CHUNK"
         self._emit_phase_event(run, "DECISION_RECEIVED", run["plan"]["steps"][run["execution"]["step_index"] - 1], None, {"decision": "SEMANTIC_VERDICT", "verdict": payload["verdict"], **run["execution"]["semantic_decision"]})
         run["state"] = "EXECUTING"
         self._start_current_step(run)

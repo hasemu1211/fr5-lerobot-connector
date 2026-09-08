@@ -292,12 +292,12 @@ def check_segment_observation(segment, evidence, now, *, terminal=False, steady_
         raise ContractError("LEARNED_STATE_SCHEMA") from exc
 
 
-def _materialize(source, proposal):
+def _materialize(source, proposal, boundary="LEARNED_CHUNK_COMPLETE"):
     # Existing source qualification is retained verbatim as context, not relabeled
     # as evidence of learned effectiveness or physical qualification.
     arm = next(step for step in source["steps"] if step["phase"] == "SAFE_POSE_PTP")
     learned = {"phase": "LEARNED_CHUNK", "limits": copy.deepcopy(arm["limits"]),
-               "requires_confirmation": "PRECONTACT_HUMAN", "pause_after": "SEMANTIC_VERDICT"}
+               "requires_confirmation": "PRECONTACT_HUMAN", "pause_after": boundary}
     if proposal["schema_version"] == HELD_PROPOSAL_SCHEMA:
         learned["held_target_segments"] = held_target_segments(source, proposal)
     return {**copy.deepcopy(source), "schema_version": PROGRAM_SCHEMA,
@@ -319,7 +319,13 @@ def validate_learned_program(value):
         raise ContractError("LEARNED_ROBOT_BINDING")
     if p["velocity_scaling"] > min(step["limits"]["velocity_scaling"] for step in source["steps"] if "velocity_scaling" in step["limits"]):
         raise ContractError("LEARNED_LIMITS")
-    expected = _materialize(source, p)
+    # Preserve old frozen programs verbatim; new programs distinguish a chunk
+    # boundary from the task verdict and recorder freeze.
+    steps = value.get("steps")
+    boundary = steps[0].get("pause_after") if isinstance(steps, list) and len(steps) == 1 and isinstance(steps[0], dict) else None
+    if boundary not in {"SEMANTIC_VERDICT", "LEARNED_CHUNK_COMPLETE"}:
+        raise ContractError("LEARNED_PROGRAM_BINDING")
+    expected = _materialize(source, p, boundary)
     if value != expected:
         raise ContractError("LEARNED_PROGRAM_BINDING")
     return expected

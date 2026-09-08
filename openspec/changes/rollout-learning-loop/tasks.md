@@ -109,6 +109,10 @@ direnv exec . python3 -m unittest tests.data_factory.rollout.test_policy_observa
 
 ## Complete learned task attempt (proposal; no new authority granted)
 
+- [x] Distinguish new finite chunk completion from task review in the native executor and normal caller; retain one recording transaction and lease until explicit terminal review/abort, preserving previously frozen programs.
+- [x] Consume a run/plan/lease-bound fresh observation at that boundary through OneJob and the native serializers; reject active ownership, stale/late/cancelled observations and unchanged plan replay without new sends.
+- [ ] Retain every subsequent chunk plan and approval through canonical execution evidence before implementing same-task replacement planning/execution; the boundary/read increment alone does not implement closed-loop continuation.
+
 - [ ] Resolve the whole-task continuation/terminal distinction with the existing OneJob and authority owners; retain exact-plan limits until any future-output authority is explicitly established.
 - [ ] Compare synchronous same-owner continuation against supervised exact-approved chunks, retaining intervention, total task duration and native gripper/start/prefix evidence.
 - [ ] Demonstrate attributable complete-task success/failure and diagnostic linkage; finite prefix completion, solver metrics and synthetic replay do not satisfy this outcome.

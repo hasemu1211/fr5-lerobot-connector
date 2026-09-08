@@ -650,3 +650,57 @@ not physical qualification or a guarantee that future input paths meet latency.
 One shape-matched warmup addresses observed first-call initialization; it does not
 prove native-resolution latency across all inputs, controller coherence, full
 row consumption, staged-release completion, task success or data utility.
+
+
+### Requirement: A learned chunk boundary retains the task and recording owner
+
+New finite learned programs SHALL bind `LEARNED_CHUNK_COMPLETE` as their
+post-action boundary. Successful controller/terminal checks SHALL enter that
+nonterminal state under the existing executor and lease; OneJob SHALL keep its
+same recorder transaction recording until an explicit terminal review or abort.
+Chunk completion SHALL NOT set a task verdict, release the cell, commit an
+episode, or authorize replay or another policy output. Previously frozen programs
+with `SEMANTIC_VERDICT` SHALL remain valid with their original boundary behavior;
+validation SHALL NOT rewrite their approved programs.
+
+At the new boundary the existing observation command MAY accept the current
+run, exact plan and lease binding. It SHALL reject before capture if the owner
+is elsewhere, the binding differs, or an active/unresolved goal remains.
+Capture SHALL reuse the native state/image serializers, original source stamps
+and admitted camera mapping and SHALL NOT relax the original observation-age
+budget. After capture the owner SHALL reject cancellation, expired lease or
+boundary deadline, and stale/future source timestamps. Observations SHALL NOT
+renew those deadlines or stand in for motion admission, hardware incarnation
+validation, completed gripper commands, or controller-start coherence. Subsequent
+inference and planning retain their own original freshness and hardware checks.
+
+The normal caller SHALL use the existing human review authority when explicitly
+ending this finite probe, with its actual recording state in the bound checkpoint
+evidence and an explicit statement that review does not qualify task success or
+dataset commit. The existing decision evidence SHALL retain
+`review_scope=FINITE_LEARNED_CHUNK`, and the run SHALL NOT promote that decision
+to the task-level human semantic outcome. Only this terminal choice freezes the recorder. Pending reset
+safety SHALL still prevent dataset commit. Repeated planning/execution remains
+unsupported until the same task can retain each plan, approval, complete output
+and terminal/intervention evidence through existing canonical consumers; no
+future output inherits an earlier exact-plan approval.
+
+#### Scenario: Completed chunk remains available for a fresh observation
+
+- **WHEN** the sole executor completes the finite chunk and its existing terminal checks pass
+- **THEN** OneJob retains the same recorder transaction and lease at `LEARNED_CHUNK_COMPLETE`
+- **AND** a correctly bound native observation request returns original-stamped state and images without sending another goal or changing the frozen plan
+- **AND** replay and replacement planning remain rejected until their distinct contracts are implemented and approved
+
+#### Scenario: Observation finishes after cancellation or its allowed wait
+
+- **WHEN** a bound capture returns after cancellation, lease expiry or the existing semantic-wait deadline
+- **THEN** the late observation is rejected and the existing abort/cancellation owner retains responsibility
+- **AND** recording is aborted without commit, another goal or automatic deadline renewal
+
+Runnable CPU replay, including actual ROS serializers and the normal operator
+checkpoint consumer, requires no ROS node, GPU, model download or physical data:
+
+```sh
+direnv exec . python3 -m unittest tests.data_factory.rollout.test_finite_plan tests.data_factory.rollout.test_policy_observation tests.data_factory.test_one_job tests.data_factory.test_run_job
+```
