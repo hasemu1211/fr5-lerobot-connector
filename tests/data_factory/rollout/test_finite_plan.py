@@ -475,7 +475,7 @@ class FinitePlanTest(unittest.TestCase):
             self.assertEqual(plan["learned_proposal"]["runtime_inputs"][hardware_key], str(binding_path))
             self.assertEqual(result["data"]["task_effectiveness"], "UNKNOWN")
 
-    def make_held_job(self, initial_feedback=.021, *, controller_samples=True, arm_target=.001, recorded=None, quantize_gripper=False):
+    def make_held_job(self, initial_feedback=.021, *, controller_samples=True, arm_target=.001, recorded=None, quantize_gripper=False, max_observation_age_s=5.):
         # Reuse this file's lifecycle fixtures with the actual ROS serializers,
         # action dispatch, polling and cancellation; no ROS node is constructed.
         from builtin_interfaces.msg import Duration
@@ -610,7 +610,7 @@ class FinitePlanTest(unittest.TestCase):
         inference = FinitePolicyInference(lambda _: actions, checkpoint if recorded is not None else CHECKPOINT, source_clock=lambda: now[0])
         planned = job.plan_learned("run", src, SCENE, inference, obs, **{**OPTIONS, "robot_description": xml, "period_s": 1 / 30,
                                   "held_gripper_targets": recorded is None, "serialized_references": recorded is not None,
-                                  "quantize_gripper": quantize_gripper, "max_observation_age_s": 5.})
+                                  "quantize_gripper": quantize_gripper, "max_observation_age_s": max_observation_age_s})
         self.assertTrue(planned["ok"], planned)
         return job, executor, t, state, now, sent, handles, calls
 
@@ -1958,6 +1958,44 @@ class FinitePlanTest(unittest.TestCase):
                 self.assertEqual(result["code"], "LEARNED_STALE_OBSERVATION")
                 self.assertEqual(transport.sent, [])
                 self.assertTrue(executor.runs["run"]["cancel_event"].is_set())
+
+    def test_task_admission_does_not_expire_inputs_of_an_already_started_chunk(self):
+        job, executor, _, state, now, sent, _, calls = self.make_held_job(max_observation_age_s=.3)
+        plan = copy.deepcopy(executor.runs["run"]["plan"])
+        grant = task_grant(job._program["source_program"], job.scene_binding, plan["learned_proposal"])
+        self.assertTrue(job.admit_task(grant)["ok"])
+        with mock.patch('tools.data_factory.motion.moveit_transport.time.time', side_effect=lambda: now[0]):
+            self.assertTrue(job.start()["ok"])
+            deadline = executor.runs["run"]["task_deadline"]
+            for index, segment in enumerate(plan["steps"][0]["held_target_segments"]):
+                self.assertEqual(len(sent), index + 1)
+                if segment["type"] == "GRIPPER":
+                    duration = segment["limits"]["command_duration_s"] + .002
+                else:
+                    begin, end = segment["action_range"]
+                    duration = (end - begin) * plan["learned_proposal"]["period_s"]
+                finish = round(now[0] + duration, 9)
+                # Keep the ordinary heartbeat and fresh native state alive while
+                # a command takes longer than the original camera input-age bound.
+                while now[0] + .1 < finish:
+                    now[0] = round(now[0] + .1, 9)
+                    self.assertTrue(job.poll()["ok"])
+                    self.assertEqual(len(sent), index + 1)
+                now[0] = finish
+                if segment["type"] == "GRIPPER":
+                    state.update(reference=segment["gripper_position_m"], feedback=segment["gripper_position_m"])
+                else:
+                    state["joints"] = segment["final_joint_state"][:]
+                state["complete"] = True
+                result = job.poll()
+                self.assertTrue(result["ok"], result["code"])
+                self.assertEqual(executor.runs["run"]["task_deadline"], deadline)
+        self.assertEqual(result["state"], "LEARNED_CHUNK_COMPLETE")
+        self.assertGreater(now[0] - 10., .3)
+        self.assertLess(now[0], deadline)
+        self.assertEqual(executor.runs["run"]["plan"], plan)
+        self.assertEqual(len(sent), 3)
+        self.assertNotIn(("recorder", "commit"), calls)
 
     def test_native_source_verification_leaves_motion_deadline_and_revocation_responsive(self):
         from tools.data_factory.learned_action_adapter import NativeSmolVLA

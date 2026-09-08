@@ -1396,10 +1396,11 @@ class PickupExecutor:
             raise ContractError("PRECONTACT_TIMEOUT")
         if now >= run["execution"].get("reference_deadline", math.inf):
             raise ContractError("LEARNED_REFERENCE_TIMEOUT")
-        if "task_grant" in run:
+        if "task_grant" in run and execution.get("learned_segment_index", 0) == 0:
             from tools.data_factory.rollout.finite_plan import check_freshness
-            # Automatic authority cannot refresh frozen policy camera/state inputs.
-            # Recheck at native send too; assisted exact-plan approval is separate.
+            # Admit each new output against its original inputs at first send.
+            # Later slices retain that output; current state, scene, command and
+            # deadline checks still apply to every slice, without aging images anew.
             check_freshness(run["plan"]["learned_proposal"], self.source_clock())
 
     @staticmethod
