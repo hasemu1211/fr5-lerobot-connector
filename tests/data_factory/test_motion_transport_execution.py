@@ -333,14 +333,22 @@ class TestExecutionTransport(unittest.TestCase):
             message.reference.time_from_start = Duration(sec=-1, nanosec=800000000)
             message.feedback.time_from_start = Duration(sec=-1, nanosec=900000000)
         arm_state.output.positions = [-.05]
+        from sensor_msgs.msg import JointState
+        joint_state = JointState(name=["finger", "j6", "j5", "j4", "j3", "j2", "j1"], position=[0., 6., 5., 4., 3., 2., 1.])
+        joint_state.header.stamp.sec, joint_state.header.stamp.nanosec = 10, 123
         def populate(*_, **__):
-            node.callbacks["/joint_states"](SimpleNamespace(name=["finger", "j6", "j5", "j4", "j3", "j2", "j1"], position=[0., 6., 5., 4., 3., 2., 1.]))
+            node.callbacks["/joint_states"](deserialize_message(serialize_message(joint_state), JointState))
             node.callbacks["/fairino5_controller/controller_state"](deserialize_message(serialize_message(arm_state), JointTrajectoryControllerState))
             node.callbacks["/gripper_controller/controller_state"](deserialize_message(serialize_message(gripper_state), JointTrajectoryControllerState))
             node.callbacks["/robot_description"](SimpleNamespace(data="<robot><ros2_control><hardware><plugin>fairino_hardware/FairinoHardwareInterface</plugin><param name='gripper_velocity'>20</param><param name='gripper_force'>50</param><param name='gripper_settle_time_ms'>500</param></hardware><joint name='finger_right_joint'/></ros2_control></robot>"))
         transport._rclpy = SimpleNamespace(spin_until_future_complete=lambda *args, **kwargs: None, spin_once=populate)
         snapshot = transport.snapshot(1.0)
         self.assertEqual(snapshot["joint_positions"], [1., 2., 3., 4., 5., 6.])
+        self.assertEqual(snapshot["joint_state_stamp_ns"], 10_000_000_123)
+        transport._joint_state.header.stamp.nanosec = 10**9
+        with self.assertRaisesRegex(ContractError, "ROS_JOINT_STATE"):
+            transport.snapshot(1.)
+        transport._joint_state.header.stamp.nanosec = 123
         self.assertEqual((snapshot["arm_controller"]["ready"], snapshot["arm_controller"]["speed_scaling"]), (True, 0.5))
         self.assertEqual((snapshot["gripper_controller"]["reference_position_m"], snapshot["gripper_controller"]["feedback_position_m"]), (0.01, 0.01))
         self.assertEqual(snapshot["gripper_settings"]["velocity_percent"], 20)

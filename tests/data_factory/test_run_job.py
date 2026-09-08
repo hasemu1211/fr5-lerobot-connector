@@ -86,6 +86,13 @@ class Executor:
 
 
 class RunJobTest(unittest.TestCase):
+    def test_learned_planner_forwards_the_existing_measured_clock_file(self):
+        with mock.patch.object(run_job, "JsonlProcess") as child:
+            run_job._executor(3., gripper_source_clock="/synthetic/measured-clock.json")
+        self.assertEqual(child.call_args.args[0][-2:], ["--gripper-source-clock", "/synthetic/measured-clock.json"])
+        self.assertIn("--ros-plan-only", child.call_args.args[0])
+        self.assertNotIn("--ros-live", child.call_args.args[0])
+
     def test_native_observation_failure_and_cancellation_close_the_same_child(self):
         from tools.data_factory.learned_action_adapter import NativeSmolVLA
         from tools.data_factory.rollout.finite_plan import FinitePolicyInference

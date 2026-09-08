@@ -159,14 +159,13 @@ def held_target_segments(source, proposal):
     return segments
 
 
-def check_segment_observation(segment, evidence, now, *, terminal=False, steady_now=None, allow_pending=False):
-    """Admit a fresh observation against frozen targets; never rewrite a knot."""
+def _execution_state(step, evidence, now):
     try:
         observed = evidence["snapshot"]
         elapsed = _number(now, "LEARNED_SOURCE_CLOCK") - _number(evidence["captured_at_s"], "LEARNED_SOURCE_CLOCK")
         ages = [_number(age, "LEARNED_STALE_STATE") for age in
                 (observed["joint_state_age_s"], observed["arm_controller"]["age_s"], observed["gripper_controller"]["age_s"])]
-        if elapsed < 0 or any(age < 0 or age + elapsed > segment["max_joint_state_age_s"] for age in ages):
+        if elapsed < 0 or any(age < 0 or age + elapsed > step["max_joint_state_age_s"] for age in ages):
             raise ContractError("LEARNED_STALE_STATE")
         if any(observed[key]["ready"] is not True for key in ("arm_controller", "gripper_controller")):
             raise ContractError("CONTROLLER_NOT_READY")
@@ -180,9 +179,64 @@ def check_segment_observation(segment, evidence, now, *, terminal=False, steady_
             validate_controller_sample(observed[key])
         gripper = observed["gripper_controller"]
         state = list(_action([*observed["joint_positions"], gripper["feedback_position_m"]]))
-        limits = _limits(segment["learned_proposal"]["robot_description"])
+        limits = _limits(step["learned_proposal"]["robot_description"])
         if any(not low <= value <= high for value, (low, high, _) in zip(state, limits)):
             raise ContractError("LEARNED_JOINT_LIMIT")
+        return state
+    except ContractError:
+        raise
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ContractError("LEARNED_STATE_SCHEMA") from exc
+
+
+def check_execution_start(step, evidence, now, *, steady_now):
+    """Check current execution evidence, never renew frozen inference inputs."""
+    try:
+        if "initial_hardware_binding" in step and step["initial_hardware_binding"] is None:
+            raise ContractError("LEARNED_HARDWARE_UNBOUND")
+        state = _execution_state(step, evidence, now)
+        observed = evidence["snapshot"]
+        stamps = [observed["joint_state_stamp_ns"],
+                  *[observed[k]["sample"]["ros_stamp_ns"] for k in ("arm_controller", "gripper_controller")]]
+        for stamp in stamps:
+            if type(stamp) is not int or not 0 <= now - stamp / 1e9 <= step["max_joint_state_age_s"]:
+                raise ContractError("LEARNED_STALE_STATE")
+        if "action_range" in step:
+            check_segment_observation(step, evidence, now, steady_now=steady_now)
+        else:
+            if any(abs(a - b) > step["joint_tolerance_rad"] for a, b in zip(state[:6], step["start_joint_state"])):
+                raise ContractError("START_STATE_MISMATCH")
+            initial = step["learned_proposal"]["initial_state"][-1]
+            if any(abs(observed["gripper_controller"][k] - initial) > step["gripper_tolerance_m"]
+                   for k in ("reference_position_m", "feedback_position_m")):
+                raise ContractError("LEARNED_START_STATE")
+        from .gripper_evidence import check_hardware, identity, integer
+        wire = check_hardware(evidence, now, steady_now, step["max_joint_state_age_s"])
+        if "initial_hardware_binding" in step:
+            binding = step["initial_hardware_binding"]
+            if (not isinstance(binding, dict) or set(binding) != {"incarnation", "generation"}
+                    or not isinstance(binding["incarnation"], list) or len(binding["incarnation"]) != 4):
+                raise ContractError("LEARNED_HARDWARE_SCHEMA")
+            for part in binding["incarnation"]:
+                integer(part, 2**32 - 1)
+            integer(binding["generation"], 2**53 - 1)
+            if identity(wire) != binding["incarnation"]:
+                raise ContractError("LEARNED_HARDWARE_INCARNATION")
+            if wire["generation"] != binding["generation"]:
+                raise ContractError("LEARNED_HARDWARE_SUPERSEDED")
+        return state
+    except ContractError:
+        raise
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ContractError("LEARNED_STATE_SCHEMA") from exc
+
+
+def check_segment_observation(segment, evidence, now, *, terminal=False, steady_now=None, allow_pending=False):
+    """Admit a fresh observation against frozen targets; never rewrite a knot."""
+    try:
+        observed = evidence["snapshot"]
+        state = _execution_state(segment, evidence, now)
+        gripper = observed["gripper_controller"]
         expected = segment["final_joint_state"] if terminal else segment["start_joint_state"]
         if any(abs(a - b) > segment["joint_tolerance_rad"] for a, b in zip(state[:6], expected)):
             raise ContractError("LEARNED_TERMINAL_STATE" if terminal else "START_STATE_MISMATCH")
@@ -328,8 +382,11 @@ def validate_execution_trace(plan, trace):
               "failure_code", "terminal_state", "terminal_phases", "task_effectiveness",
               "scene_outcome", "cell_ready", "online_policy_authorized", "trace_digest"}
     held = p["schema_version"] == HELD_PROPOSAL_SCHEMA
+    current_start = "initial_hardware_binding" in plan["steps"][0]
     if held:
         fields.add("segments")
+    elif current_start:
+        fields.add("start_observation")
     if not isinstance(trace, dict) or set(trace) != fields:
         raise ContractError("LEARNED_TRACE_SCHEMA")
     if (trace["schema_version"] != "data_factory.finite_learned_execution.v1"
@@ -354,6 +411,12 @@ def validate_execution_trace(plan, trace):
             raise ContractError("LEARNED_TRACE_TERMINAL") from exc
     if trace["status"] == "COMPLETED" and (trace["terminal_state"] is None or trace["terminal_phases"] != ["LEARNED_CHUNK"]):
         raise ContractError("LEARNED_TRACE_TERMINAL")
+    if current_start and not held:
+        start = trace["start_observation"]
+        if start is not None:
+            check_execution_start(plan["steps"][0], start, start["captured_at_s"], steady_now=start["captured_monotonic_s"])
+        elif trace["status"] == "COMPLETED" or trace["terminal_phases"]:
+            raise ContractError("LEARNED_TRACE_TERMINAL")
     if held:
         segments = plan["steps"][0]["held_target_segments"]
         evidence = trace["segments"]
@@ -394,6 +457,9 @@ def validate_execution_trace(plan, trace):
                 check_transition(evidence[index - 1]["terminal_observation"], item["start_observation"], command=False)
             for key, terminal in (("start_observation", False), ("terminal_observation", True)):
                 check_segment_observation(segments[index], item[key], item[key]["captured_at_s"], terminal=terminal)
+                if current_start and not terminal:
+                    check_execution_start(segments[index], item[key], item[key]["captured_at_s"],
+                                          steady_now=item[key]["captured_monotonic_s"])
         if evidence:
             last = evidence[-1]["terminal_observation"]
             if trace["terminal_state"] != check_segment_observation(segments[len(evidence) - 1], last, last["captured_at_s"], terminal=True):

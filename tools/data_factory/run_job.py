@@ -834,9 +834,10 @@ def _bind_trajectory_to_planned_program(
     )
 
 
-def _executor(timeout_s):
+def _executor(timeout_s, *, gripper_source_clock=None):
     return JsonlProcess(
-        [sys.executable, "-u", str(ROOT / "tools/data_factory/motion/pickup_executor.py"), "--factory-jsonl", "--ros-plan-only"],
+        [sys.executable, "-u", str(ROOT / "tools/data_factory/motion/pickup_executor.py"), "--factory-jsonl", "--ros-plan-only"]
+        + (["--gripper-source-clock", str(gripper_source_clock)] if gripper_source_clock is not None else []),
         timeout_s=timeout_s,
     )
 
@@ -2335,7 +2336,7 @@ def _write_episode_ledger(
 
 def run_learned_plan_only(payload, cancel, publish, *, checkpoint, observation=None, camera_topics=None,
                           instruction, period_s, max_observation_age_s=.3,
-                          device="cpu", held_gripper_targets=False,
+                          device="cpu", held_gripper_targets=False, gripper_source_clock=None,
                           resolver=resolve_inputs, executor_factory=_executor):
     """Native checkpoint-to-existing-planner entry point; no recorder or motion.
 
@@ -2347,6 +2348,9 @@ def run_learned_plan_only(payload, cancel, publish, *, checkpoint, observation=N
     """
     from tools.data_factory.learned_action_adapter import NativeSmolVLA
     from tools.data_factory.rollout.finite_plan import FinitePolicyInference, compile_program
+    def acquire_child(timeout_s):
+        return executor_factory(timeout_s, **({"gripper_source_clock": gripper_source_clock}
+                                if gripper_source_clock is not None else {}))
     child, transferred = None, False
     try:
         if observation is not None and camera_topics is not None:
@@ -2359,7 +2363,7 @@ def run_learned_plan_only(payload, cancel, publish, *, checkpoint, observation=N
             raise ContractError("LEARNED_CANCELLED")
         inference = FinitePolicyInference(native, native.checkpoint, cancel_event=cancel)
         if observation is None:
-            child = executor_factory(_timeout_s(source))
+            child = acquire_child(_timeout_s(source))
             captured = _runtime_child_request(child, {
                 "schema_version": "fr5.pickup_executor.command.v4",
                 "op_id": "learned-observation", "op": "capture_observation",
@@ -2386,7 +2390,7 @@ def run_learned_plan_only(payload, cancel, publish, *, checkpoint, observation=N
         def planning_child(timeout_s):
             nonlocal transferred
             transferred = child is not None
-            return child if child is not None else executor_factory(timeout_s)
+            return child if child is not None else acquire_child(timeout_s)
         return run_plan_only(payload, cancel, publish,
                              resolver=lambda _: (validated, program, scene), executor_factory=planning_child)
     except ContractError as exc:

@@ -83,7 +83,7 @@ direnv exec . python3 -m unittest tests.data_factory.test_motion_transport_execu
 - [x] Add bounded source-stamped state and two-camera capture to the sole motion child's existing protocol, reusing the recorder's image conversion and retaining absolute seven-joint feedback.
 - [x] Consume native capture after admitted model load through `run_learned_plan_only`, reusing that child for exact-plan compilation; preserve the supplied offline-observation path.
 - [x] Verify actual ROS serializers, stale/paused/future source rejection, missing input, cancellation and saved-processor-to-plan consumption without goals or recorder effects.
-- [ ] Separate immutable inference input-age evidence from fresh execution-state admission across approval delay; do not renew original input stamps or merely enlarge the age budget.
+- [x] Separate immutable inference input-age evidence from fresh execution-state admission across approval delay; retain original input stamps and require the planning hardware incarnation/generation at initial dispatch.
 - [ ] Connect the resulting exact-plan consumer to current source-clock deployment and continuous seven-joint controller timing before physical execution; no future output inherits its approval.
 
 Focused native capture/consumer checks:
@@ -91,3 +91,13 @@ Focused native capture/consumer checks:
 ```sh
 direnv exec . python3 -m unittest tests.data_factory.rollout.test_policy_observation tests.data_factory.rollout.test_native_policy tests.data_factory.test_run_job.RunJobTest.test_native_observation_failure_and_cancellation_close_the_same_child
 ```
+
+## Frozen-plan execution freshness
+
+- [x] Preserve inference/plan-admission source-age checks while replacing post-approval input-age reuse with current full-state/controller/hardware admission.
+- [x] Bind the first dispatch to the planning hardware incarnation/generation; leave offline plans without that evidence reviewable but non-executable.
+- [x] Retain original JointState/JTC stamps and validate freshness again after native goal deserialization; reject stale, paused, rebound, superseded or out-of-limit state without sends.
+- [x] Retain the raw chunk's start observation in the existing canonical trace and preserve held-command completion/transition validation; reject pre-send state failures before activation and consult native goal ownership before cancellation.
+- [x] Forward the existing measured clock file through the native planner factory; verify delayed-approval replay, failure/cancel and actual ROS serializers on CPU.
+- [ ] Root verifies the deployed publisher clock domains and measured hardware binding; CPU fixtures do not qualify the physical graph.
+- [ ] Close normal live-run invocation and continuous start/pause/full-row/staged-release consumption under the existing executor and authority owners.

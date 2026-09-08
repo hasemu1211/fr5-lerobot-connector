@@ -338,6 +338,7 @@ class NativePolicyTest(unittest.TestCase):
         with mock.patch.object(NativeSmolVLA, "load", side_effect=load):
             captured_result = run_learned_plan_only({**payload, "run_id": "native-capture"}, threading.Event(), lambda _: None,
                 checkpoint=self.policy_dir, camera_topics={"camera1": "/up", "camera2": "/wrist"},
+                gripper_source_clock="/synthetic/measured-clock.json",
                 instruction="synthetic probe", period_s=1.5,
                 resolver=lambda _: ({"normalized_job": {}, "resolved_job_digest": original["resolved_job_digest"]}, original, SCENE),
                 executor_factory=factory)
@@ -346,6 +347,7 @@ class NativePolicyTest(unittest.TestCase):
         np.testing.assert_allclose(frozen_capture["actions"], [self.mean_action, self.mean_action])
         self.assertEqual(requests, ["capture_observation", "plan"])
         factory.assert_called_once()
+        self.assertEqual(factory.call_args.kwargs, {"gripper_source_clock": "/synthetic/measured-clock.json"})
         self.assertEqual(closed, [True])
         self.assertEqual(captured_transport.sent, [])
         # The top native API must expose the same explicit held-target opt-in;

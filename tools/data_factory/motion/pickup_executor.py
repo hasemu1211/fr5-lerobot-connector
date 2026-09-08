@@ -483,7 +483,8 @@ class PickupExecutor:
         observed = self.transport.snapshot(motion_program["planning"]["max_joint_state_age_s"])
         observed = _exact(
             observed,
-            {"joint_positions", "joint_state_age_s", "gripper_settings", "arm_controller", "gripper_controller"},
+            {"joint_positions", "joint_state_age_s", "gripper_settings", "arm_controller", "gripper_controller"}
+            | ({"joint_state_stamp_ns"} if "joint_state_stamp_ns" in observed else set()),
             "SNAPSHOT_SCHEMA",
         )
         settings = _gripper_settings(observed["gripper_settings"])
@@ -515,6 +516,13 @@ class PickupExecutor:
             if controller_state["ready"] is not True:
                 raise ContractError("CONTROLLER_NOT_READY")
         initial_state = _joint_positions(observed.get("joint_positions"))
+        hardware_binding = None
+        if proposal is not None and "hardware_execution" in observed["gripper_controller"]:
+            from tools.data_factory.rollout.gripper_evidence import check_hardware, identity
+            captured = {"captured_at_s": self.source_clock(), "captured_monotonic_s": self.monotonic_clock(), "snapshot": observed}
+            wire = check_hardware(captured, captured["captured_at_s"], captured["captured_monotonic_s"],
+                                  motion_program["planning"]["max_joint_state_age_s"])
+            hardware_binding = {"incarnation": identity(wire), "generation": wire["generation"]}
         state = initial_state
         planned_steps = []
         for step in motion_program["steps"]:
@@ -648,7 +656,11 @@ class PickupExecutor:
             if phase == "LEARNED_CHUNK":
                 compiled["learned_proposal"] = copy.deepcopy(proposal)
                 compiled["gripper_tolerance_m"] = gripper_tolerance
+                compiled["max_joint_state_age_s"] = motion_program["planning"]["max_joint_state_age_s"]
+                compiled["joint_tolerance_rad"] = tolerance
+                compiled["initial_hardware_binding"] = copy.deepcopy(hardware_binding)
                 if held_segments:
+                    held_segments[0]["initial_hardware_binding"] = copy.deepcopy(hardware_binding)
                     compiled["held_target_segments"] = held_segments
             if planned_duration_s is not None:
                 compiled["planned_duration_s"] = float(planned_duration_s)
@@ -867,8 +879,6 @@ class PickupExecutor:
         _future_timestamp(run["approval"]["approval_expiry"], self.clock())
         proposal = run["plan"].get("learned_proposal")
         if proposal is not None:
-            from tools.data_factory.rollout.finite_plan import check_freshness
-            check_freshness(proposal, self.source_clock())
             if run["approval"]["approval_scope"] != "HUMAN_GATED":
                 raise ContractError("LEARNED_HUMAN_APPROVAL_REQUIRED")
             if proposal["checkpoint"]["runtime"] == "SYNTHETIC_TEST_ONLY" and self.transport.__class__.__module__ == "tools.data_factory.motion.moveit_transport":
@@ -878,6 +888,12 @@ class PickupExecutor:
         try:
             observed = self.transport.snapshot(run["plan"]["planning"]["max_joint_state_age_s"])
             settings = _gripper_settings(observed["gripper_settings"])
+            if proposal is not None:
+                from tools.data_factory.rollout.finite_plan import check_execution_start
+                first = run["plan"]["steps"][0]
+                first = first.get("held_target_segments", [first])[0]
+                captured = {"captured_at_s": self.source_clock(), "captured_monotonic_s": self.monotonic_clock(), "snapshot": observed}
+                check_execution_start(first, captured, self.source_clock(), steady_now=self.monotonic_clock())
         except ContractError as exc:
             return _response(code=exc.code, run_id=payload["run_id"], plan_digest=payload["plan_digest"], state="APPROVED")
         except (KeyError, TypeError):
@@ -990,6 +1006,8 @@ class PickupExecutor:
                      "cell_ready": False, "online_policy_authorized": False}
             if "held_target_segments" in run["plan"]["steps"][0]:
                 trace["segments"] = copy.deepcopy(execution.get("learned_segments", []))
+            else:
+                trace["start_observation"] = copy.deepcopy(execution.get("learned_start_observation"))
             trace["trace_digest"] = canonical_digest(trace)
             data["learned_execution"] = trace
         data["precommit_safety"] = copy.deepcopy(run.get("precommit_safety"))
@@ -1090,27 +1108,22 @@ class PickupExecutor:
             tolerance = run["plan"]["planning"]["goal_tolerances"]["joint_rad"]
             if any(abs(a - b) > tolerance for a, b in zip(actual, expected)):
                 raise ContractError("START_STATE_MISMATCH")
-            execution["active"] = True
-            self._emit_phase_event(run, "DISPATCH_REQUESTED", step, "REQUESTED", {"step": step})
             if step["phase"] == "LEARNED_CHUNK":
-                from tools.data_factory.rollout.finite_plan import check_freshness
-                check_freshness(step["learned_proposal"], self.source_clock())
-                options = {}
+                from tools.data_factory.rollout.finite_plan import check_execution_start
+                evidence = {"captured_at_s": self.source_clock(), "captured_monotonic_s": self.monotonic_clock(),
+                            "snapshot": copy.deepcopy(observed)}
+                check_execution_start(step, evidence, self.source_clock(), steady_now=self.monotonic_clock())
+                execution["learned_start_observation"] = evidence
+                options = {"start_observation": evidence}
                 if "action_range" in step:
-                    from tools.data_factory.rollout.finite_plan import check_segment_observation
-                    evidence = {"captured_at_s": self.source_clock(), "captured_monotonic_s": self.monotonic_clock(),
-                                "snapshot": copy.deepcopy(observed)}
-                    check_segment_observation(step, evidence, self.source_clock(), steady_now=self.monotonic_clock())
                     if execution.get("learned_segments"):
                         from tools.data_factory.rollout.gripper_evidence import check_transition
                         check_transition(execution["learned_segments"][-1]["terminal_observation"], evidence, command=False)
-                    options["start_observation"] = evidence
-                    execution["learned_start_observation"] = evidence
-                else:
-                    initial = step["learned_proposal"]["initial_state"][-1]
-                    gripper = observed["gripper_controller"]
-                    if any(abs(gripper[key] - initial) > step["gripper_tolerance_m"] for key in ("feedback_position_m", "reference_position_m")):
-                        raise ContractError("LEARNED_START_STATE")
+            if step["phase"] == "LEARNED_CHUNK" and (run["state"] != "EXECUTING" or run["cancel_event"].is_set()):
+                return run["state"]
+            execution["active"] = True
+            self._emit_phase_event(run, "DISPATCH_REQUESTED", step, "REQUESTED", {"step": step})
+            if step["phase"] == "LEARNED_CHUNK":
                 self.transport.start_phase(step, cancel_event=run["cancel_event"], cancel_timeout_s=run["plan"]["execution_timeouts_s"]["cancel"], **options)
                 if run["state"] != "EXECUTING" or run["cancel_event"].is_set():
                     return run["state"]
@@ -1130,7 +1143,7 @@ class PickupExecutor:
         # Fence callbacks before waiting on the sole transport cancellation owner.
         run["state"] = "BLOCKED"
         execution = run["execution"]
-        if execution.get("active"):
+        if execution.get("active") and getattr(self.transport, "owns_active_goal", True):
             try:
                 self.transport.cancel_active(run["plan"]["execution_timeouts_s"]["cancel"])
                 step = run["plan"]["steps"][execution["step_index"]]
@@ -1139,7 +1152,7 @@ class PickupExecutor:
                 self._emit_phase_event(run, "ACTION_TERMINAL", step, "CANCELLED", {"failure_code": code, "step": step, "terminal_status": "CANCELLED"})
             except Exception as exc:
                 execution["cancel_error"] = exc.code if isinstance(exc, ContractError) else "CANCEL_FAILED"
-            execution["active"] = False
+        execution["active"] = False
         try:
             execution["snapshot"] = self.transport.snapshot(run["plan"]["planning"]["max_joint_state_age_s"])
         except Exception as exc:

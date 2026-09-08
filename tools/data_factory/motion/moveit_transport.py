@@ -463,11 +463,8 @@ class RosMoveItTransport:
         ):
             raise ContractError("ROS_EXEC_CANCEL_TIMEOUT")
         if phase == "LEARNED_CHUNK":
-            from tools.data_factory.rollout.finite_plan import check_freshness
-            check_freshness(compiled_step["learned_proposal"], time.time())
-            if "action_range" in compiled_step:
-                from tools.data_factory.rollout.finite_plan import check_segment_observation
-                check_segment_observation(compiled_step, start_observation, time.time(), steady_now=self._clock())
+            from tools.data_factory.rollout.finite_plan import check_execution_start
+            check_execution_start(compiled_step, start_observation, time.time(), steady_now=self._clock())
         active = _ActivePhase(phase, step_type, self._clock() + timeout)
         if phase == "LEARNED_CHUNK" and step_type == "GRIPPER" and "action_range" in compiled_step:
             active.held_segment = copy.deepcopy(compiled_step)
@@ -577,7 +574,7 @@ class RosMoveItTransport:
 
     def _held_hardware_completed(self, active):
         """Observe one retained command; never resend, renew its deadline or replan."""
-        from tools.data_factory.rollout.finite_plan import check_freshness, check_segment_observation, _number
+        from tools.data_factory.rollout.finite_plan import check_segment_observation, _number
         from tools.data_factory.rollout.gripper_evidence import check_transition
         segment = active.held_segment
         self._rclpy.spin_once(self.node, timeout_sec=0.0)
@@ -585,7 +582,6 @@ class RosMoveItTransport:
         now, steady = time.time(), self._clock()
         if steady > active.deadline:
             raise ContractError("LEARNED_HARDWARE_COMPLETION_TIMEOUT")
-        check_freshness(segment["learned_proposal"], now)
         evidence = {"captured_at_s": now, "captured_monotonic_s": steady, "snapshot": snapshot}
         try:
             check_segment_observation(segment, evidence, now, steady_now=steady, allow_pending=True)
@@ -883,8 +879,13 @@ class RosMoveItTransport:
         if not isinstance(gripper_speed, (int, float)) or not math.isfinite(gripper_speed):
             raise ContractError("ROS_GRIPPER_CONTROLLER_STATE")
         hardware = self._gripper_hardware_evidence()
+        stamp = self._joint_state.header.stamp
+        if (type(stamp.sec) is not int or type(stamp.nanosec) is not int
+                or not 0 <= stamp.sec < 2**31 or not 0 <= stamp.nanosec < 10**9):
+            raise ContractError("ROS_JOINT_STATE")
         observation = {
             "joint_positions": [by_name[name] for name in JOINT_ORDER],
+            "joint_state_stamp_ns": stamp.sec * 1_000_000_000 + stamp.nanosec,
             "joint_state_age_s": joint_age,
             "gripper_settings": self._gripper_settings(),
             "arm_controller": {

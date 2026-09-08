@@ -50,7 +50,7 @@ fresh same-incarnation, same-command native completion evidence defined below.
 Each arm slice SHALL use a fresh observed start as an admission check and retained
 evidence for its frozen commands, never as authority for runtime replan/rebase.
 Observation age SHALL be rechecked after deserialization at send; original policy
-source-clock freshness SHALL still apply. Cancel or unresolved goals SHALL fence
+generation-time source freshness and current execution-state freshness SHALL still apply. Cancel or unresolved goals SHALL fence
 all later dispatches under the same transport owner.
 At a segment start or terminal handoff, either controller reporting nonpositive
 speed scaling SHALL reject with `LEARNED_CONTROLLER_PAUSED`, including when its
@@ -512,3 +512,45 @@ This observation producer does not discharge execution-time state admission,
 controller start/pause coherence, staged-release consumption or physical
 qualification. Generation freshness and execution freshness remain distinct
 requirements; original input timestamps SHALL NOT be silently refreshed.
+
+### Requirement: Frozen approval and current execution evidence have distinct freshness
+
+A finite proposal SHALL retain its original observation timestamps and prove its
+input-age bound at inference and plan admission. After approval, the sole
+executor SHALL admit the current state against the unchanged exact plan rather
+than extend the input-age budget or renew historical image timestamps. Existing
+approval expiry, human/scene/cell/precontact checks, lease and cancellation
+ownership SHALL remain in effect; this SHALL NOT authorize future policy outputs.
+
+The first compiled dispatch SHALL bind the planning hardware incarnation and
+command generation when measured native evidence is available. A plan without
+that evidence MAY remain available for software review but SHALL fail execution
+as unbound. Current admission SHALL require bounded receipt and original
+JointState/controller publication ages, positive controller scaling, full
+seven-joint limits/start agreement and the existing measured native hardware
+clock/completion contract. A changed incarnation or superseding command SHALL
+require a new plan rather than silently acquiring its authority. The native
+transport SHALL recheck the captured start evidence after deserialization and
+before sending. The runtime owner remains responsible for qualifying the actual
+publisher clock domains; numeric timestamp agreement alone is not that proof.
+
+Raw finite traces SHALL retain the admitted start observation; held traces SHALL
+continue to retain segment starts/terminals and same-command transitions. These
+are execution diagnostics, not physical task-effect or semantic success claims.
+
+#### Scenario: Approval delay does not alter inference evidence
+
+- **WHEN** a still-valid exact-plan approval is used after the original inference input-age budget has elapsed
+- **THEN** fresh matching state from the bound incarnation/generation may pass existing execution admission
+- **AND** full model output and original inference timestamps remain unchanged in the canonical evidence
+
+#### Scenario: Fresh delivery cannot disguise stale state or another command
+
+- **WHEN** a newly delivered snapshot has an old/future source header, paused controller, changed incarnation/generation, or invalid start state
+- **THEN** the existing executor rejects before a goal send
+- **AND** missing measured hardware evidence cannot be substituted with a controller tolerance result
+
+#### Scenario: Deserialization consumes the remaining start-state budget
+
+- **WHEN** the captured start observation becomes stale while preparing its serialized goal
+- **THEN** the sole transport refuses the send even though the frozen proposal and approval still match

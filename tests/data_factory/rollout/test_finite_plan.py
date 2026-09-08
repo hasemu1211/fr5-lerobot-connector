@@ -64,10 +64,40 @@ class Transport(T):
         self.current = INITIAL[:]
         self.failure = None
         self.on_start = None
+        self.hardware = False
+        self.source_clock = lambda: 10.
 
     def snapshot(self, *_):
         value = snapshot(self.current[:6], gripper_position=self.current[-1])
         value["gripper_controller"]["reference_position_m"] = self.current[-1]
+        if self.hardware:
+            from control_msgs.msg import DynamicJointState, InterfaceValue, JointTrajectoryControllerState
+            from rclpy.serialization import serialize_message, deserialize_message
+            from tools.data_factory.rollout.gripper_evidence import FIELDS, RESOURCE, CALENDAR, decode_dynamic_state
+            from tools.data_factory.motion.moveit_transport import RosMoveItTransport
+            now = self.source_clock()
+            value["joint_state_stamp_ns"] = round(now * 1e9)
+            wire = dict.fromkeys(FIELDS, 0.)
+            wire.update(version=1., incarnation_0=1., incarnation_1=2., incarnation_2=3., incarnation_3=4.,
+                        sample_system_s=now, sample_steady_s=now, raw_reference_m=self.current[-1],
+                        feedback_m=self.current[-1], arm_resumed=1., valid=1.)
+            date = datetime.fromtimestamp(now - .002, timezone.utc)
+            wire.update(zip(CALENDAR, [date.year, date.month, date.day, date.hour, date.minute, date.second, date.microsecond // 1000]))
+            packet = DynamicJointState(joint_names=[RESOURCE], interface_values=[InterfaceValue(
+                interface_names=list(FIELDS), values=[float(wire[k]) for k in FIELDS])])
+            binding = {"schema_version": "fr5.gripper_source_clock.v1", "incarnation": [1, 2, 3, 4],
+                       "calendar_to_system_offset_s": 0., "uncertainty_s": .001,
+                       "system_anchor_s": 9., "steady_anchor_s": 9., "valid_until_system_s": 100.}
+            value["gripper_controller"]["hardware_execution"] = decode_dynamic_state(
+                deserialize_message(serialize_message(packet), DynamicJointState), binding, now)
+            for key, names, positions in (("arm_controller", JOINTS[:6], self.current[:6]),
+                                           ("gripper_controller", JOINTS[-1:], self.current[-1:])):
+                message = JointTrajectoryControllerState(joint_names=names)
+                message.header.stamp.sec, message.header.stamp.nanosec = divmod(round(now * 1e9), 10**9)
+                message.reference.positions = positions
+                message.feedback.positions = positions
+                native = deserialize_message(serialize_message(message), JointTrajectoryControllerState)
+                value[key]["sample"] = RosMoveItTransport._controller_values(native, "ROS_CONTROLLER_STATE")["sample"]
         return value
 
     def build_learned_trajectory(self, p):
@@ -133,7 +163,7 @@ class Recorder:
 
 
 class FinitePlanTest(unittest.TestCase):
-    def make_held_job(self, initial_feedback=.021, *, controller_samples=False):
+    def make_held_job(self, initial_feedback=.021, *, controller_samples=True):
         # Reuse this file's lifecycle fixtures with the actual ROS serializers,
         # action dispatch, polling and cancellation; no ROS node is constructed.
         from builtin_interfaces.msg import Duration
@@ -194,6 +224,7 @@ class FinitePlanTest(unittest.TestCase):
             value = snapshot(state["joints"][:], gripper_position=state["feedback"])
             value["gripper_controller"]["reference_position_m"] = state["reference"]
             value["joint_state_age_s"] = state["age"]
+            value["joint_state_stamp_ns"] = round(now[0] * 1e9)
             value["gripper_controller"]["hardware_execution"] = hardware()
             if controller_samples:
                 from control_msgs.msg import JointTrajectoryControllerState
@@ -390,10 +421,8 @@ class FinitePlanTest(unittest.TestCase):
         job, _, t, _, now, sent, _, _ = self.make_held_job()
         t._gripper_source_clock = None
         job.approve(APPROVAL)
-        job.start()
-        job.poll()
         with mock.patch('tools.data_factory.motion.moveit_transport.time.time', return_value=now[0]):
-            self.assertEqual(job.confirm("operator")["code"], "LEARNED_HARDWARE_SCHEMA")
+            self.assertEqual(job.start()["code"], "LEARNED_HARDWARE_SCHEMA")
         self.assertEqual(sent, [])
 
     def test_same_command_hardware_completion_required_after_jtc_success(self):
@@ -545,6 +574,7 @@ class FinitePlanTest(unittest.TestCase):
         def changed(*args):
             value = observe(*args)
             value["gripper_controller"]["reference_position_m"] = .021
+            value["gripper_controller"]["sample"]["reference_positions"] = [.021]
             return value
         with mock.patch('tools.data_factory.motion.moveit_transport.time.time', side_effect=lambda: now[0]):
             with mock.patch.object(t, "snapshot", side_effect=changed):
@@ -1056,12 +1086,14 @@ class FinitePlanTest(unittest.TestCase):
                 with self.assertRaisesRegex(ContractError, code):
                     validate_proposal(redigest(p))
 
-    def make_job(self):
+    def make_job(self, *, hardware=True):
         calls = []
         transport, cell, scene = Transport(), Cell(), Scene()
         now = [10.]
+        transport.hardware = hardware
+        transport.source_clock = lambda: now[0]
         executor = PickupExecutor(transport, execution_enabled=True, cell_state_store=cell,
-                                  scene_state_store=scene, source_clock=lambda: now[0], monotonic_clock=lambda: 10.)
+                                  scene_state_store=scene, source_clock=lambda: now[0], monotonic_clock=lambda: now[0])
         def execute(request):
             calls.append(("executor", request["op"]))
             return executor.process(request)
@@ -1122,13 +1154,86 @@ class FinitePlanTest(unittest.TestCase):
         with self.assertRaises(ContractError):
             learned_run_diagnostic(tampered)
 
-    def test_source_clock_ages_between_approval_and_send_rejects_without_goal(self):
+    def test_approval_delay_uses_current_state_without_renewing_inference_sources(self):
         job, _, transport, _, _, now, _ = self.start_job()
         now[0] += .4
         result = job.confirm("operator")
-        self.assertFalse(result["ok"])
+        self.assertTrue(result["ok"], result)
+        self.assertEqual(len(transport.sent), 1)
+        self.assertEqual(transport.sent[0]["learned_proposal"]["source_timestamps_s"], dict.fromkeys(("state", "camera1", "camera2"), 10.))
+
+    def test_stale_state_after_confirmation_never_activates_or_cancels_a_goal(self):
+        job, executor, transport, _, _, now, _ = self.start_job()
+        now[0] += .4
+        observe = transport.snapshot
+        def stale(*args):
+            value = observe(*args)
+            value["joint_state_stamp_ns"] = 8_000_000_000
+            return value
+        transport.snapshot = stale
+        self.assertEqual(job.confirm("operator")["code"], "LEARNED_STALE_STATE")
         self.assertEqual(transport.sent, [])
-        self.assertEqual(result["recorder_state"], "ABORTED")
+        self.assertEqual(transport.cancel_count, 0)
+        self.assertFalse(executor.runs["run"]["execution"]["active"])
+
+    def test_delayed_approved_full_chunk_retains_current_start_in_canonical_diagnostic(self):
+        job, executor, transport, _, _, now, _ = self.make_job()
+        self.assertTrue(job.approve(APPROVAL)["ok"])
+        now[0] = 20.  # Existing approval remains valid; input evidence stays at 10.
+        job.start()
+        self.assertEqual(job.poll()["state"], "PRECONTACT_HUMAN")
+        now[0] += .4
+        self.assertTrue(job.confirm("operator")["ok"])
+        self.assertEqual(job.poll()["state"], "SEMANTIC_VERDICT")
+        job.semantic_verdict("PASS", "operator")
+        result = job.poll()
+        diagnostic = learned_run_diagnostic(result)
+        trace = diagnostic["execution_trace"]
+        self.assertEqual(trace["start_observation"]["captured_at_s"], 20.4)
+        self.assertEqual(trace["start_observation"]["snapshot"]["joint_state_stamp_ns"], 20400000000)
+        self.assertEqual(trace["task_effectiveness"], "UNKNOWN")
+        self.assertEqual(transport.sent[0]["learned_proposal"]["actions"], [ACTION])
+        self.assertEqual(transport.sent[0]["learned_proposal"]["source_timestamps_s"]["camera1"], 10.)
+        tampered = copy.deepcopy(trace)
+        tampered["start_observation"]["snapshot"]["joint_state_stamp_ns"] = 10_000_000_000
+        tampered["trace_digest"] = canonical_digest({k: v for k, v in tampered.items() if k != "trace_digest"})
+        from tools.data_factory.rollout.finite_plan import validate_execution_trace
+        with self.assertRaisesRegex(ContractError, "LEARNED_STALE_STATE"):
+            validate_execution_trace(executor.runs["run"]["plan"], tampered)
+
+    def test_new_execution_state_rejects_stale_rebound_superseded_or_changed_inputs(self):
+        cases = ["old_header", "old_controller", "future_header", "old_receipt", "paused", "rebound", "superseded", "joint_limit", "start", "unbound"]
+        for case in cases:
+            with self.subTest(case=case):
+                job, _, transport, _, _, now, _ = self.make_job(hardware=case != "unbound")
+                job.approve(APPROVAL)
+                now[0] += 10.
+                observe = transport.snapshot
+                def invalid(*args):
+                    value = observe(*args)
+                    if case == "old_header": value["joint_state_stamp_ns"] = 10_000_000_000
+                    if case == "old_controller": value["arm_controller"]["sample"]["ros_stamp_ns"] = 10_000_000_000
+                    if case == "future_header": value["joint_state_stamp_ns"] = 21_000_000_000
+                    if case == "old_receipt": value["joint_state_age_s"] = 10.
+                    if case == "paused": value["arm_controller"]["speed_scaling"] = 0.
+                    if case in {"rebound", "superseded"}:
+                        hw = value["gripper_controller"]["hardware_execution"]
+                        if case == "rebound":
+                            hw["wire"]["incarnation_0"] = hw["clock_binding"]["incarnation"][0] = 5
+                        else:
+                            hw["wire"].update(generation=1., completed_generation=1., command_started_system_s=1., completion_reason=2.,
+                                              completion_year=1970., completion_month=1., completion_day=1., completion_second=2.)
+                    if case in {"joint_limit", "start"}:
+                        value["joint_positions"][0] = 4. if case == "joint_limit" else .1
+                    return value
+                transport.snapshot = invalid
+                result = job.start()
+                expected = {"old_header": "LEARNED_STALE_STATE", "old_controller": "LEARNED_STALE_STATE", "future_header": "LEARNED_STALE_STATE",
+                            "old_receipt": "LEARNED_STALE_STATE", "paused": "LEARNED_CONTROLLER_PAUSED",
+                            "rebound": "LEARNED_HARDWARE_INCARNATION", "superseded": "LEARNED_HARDWARE_SUPERSEDED",
+                            "joint_limit": "LEARNED_JOINT_LIMIT", "start": "START_STATE_MISMATCH", "unbound": "LEARNED_HARDWARE_UNBOUND"}[case]
+                self.assertEqual(result["code"], expected, result)
+                self.assertEqual(transport.sent, [])
 
     def test_controller_fault_uses_existing_cancel_owner_and_failure_diagnostic(self):
         job, _, transport, cell, scene, _, calls = self.start_job()

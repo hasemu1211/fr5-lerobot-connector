@@ -17,7 +17,7 @@ from trajectory_msgs.msg import JointTrajectoryPoint
 
 from tools.fr5_data_factory import ContractError
 from tools.data_factory.motion.moveit_transport import RosMoveItTransport
-from tests.data_factory.rollout.test_finite_plan import proposal, JOINTS, INITIAL, ACTION
+from tests.data_factory.rollout.test_finite_plan import proposal, JOINTS, INITIAL, ACTION, Transport
 
 
 class Future:
@@ -63,6 +63,9 @@ class LearnedTransportTest(unittest.TestCase):
         t.execute_trajectory = mock.Mock()
         t.execute_trajectory.send_goal_async.return_value = Future(handle)
         t.gripper = mock.Mock()
+        observed = Transport()
+        observed.hardware = True
+        t.start_observation = {"captured_at_s": 10., "captured_monotonic_s": 10., "snapshot": observed.snapshot()}
         return t, handle
 
     def step(self, t):
@@ -70,6 +73,8 @@ class LearnedTransportTest(unittest.TestCase):
         data = t.build_learned_trajectory(p)
         return {'phase': 'LEARNED_CHUNK', 'type': 'ARM', 'trajectory_b64': base64.b64encode(data).decode(),
                 'limits': {'execution_timeout_s': 3.}, 'learned_proposal': p,
+                'max_joint_state_age_s': .3, 'joint_tolerance_rad': .01, 'gripper_tolerance_m': .001,
+                'initial_hardware_binding': {'incarnation': [1, 2, 3, 4], 'generation': 0},
                 'start_joint_state': INITIAL[:6], 'final_joint_state': ACTION[:6]}
 
     def test_full_7d_serialization_uses_one_execute_goal_and_one_cancel_owner(self):
@@ -80,7 +85,7 @@ class LearnedTransportTest(unittest.TestCase):
         self.assertEqual([list(point.positions) for point in trajectory.points], [INITIAL, ACTION])
         self.assertEqual(trajectory.points[-1].time_from_start.nanosec, 100_000_000)
         with mock.patch('tools.data_factory.motion.moveit_transport.time.time', return_value=10.):
-            t.start_phase(step)
+            t.start_phase(step, start_observation=t.start_observation)
             self.assertTrue(t.owns_active_goal)
             with self.assertRaisesRegex(ContractError, 'ROS_EXEC_ACTIVE'):
                 t.start_phase(step)
@@ -104,8 +109,8 @@ class LearnedTransportTest(unittest.TestCase):
         t, _ = self.transport()
         step = self.step(t)
         with mock.patch('tools.data_factory.motion.moveit_transport.time.time', return_value=10.4):
-            with self.assertRaisesRegex(ContractError, 'LEARNED_STALE_OBSERVATION'):
-                t.start_phase(step)
+            with self.assertRaisesRegex(ContractError, 'LEARNED_STALE_STATE'):
+                t.start_phase(step, start_observation=t.start_observation)
         t.execute_trajectory.send_goal_async.assert_not_called()
 
     def test_cancel_during_late_goal_acceptance_retains_and_settles_that_goal(self):
@@ -117,7 +122,7 @@ class LearnedTransportTest(unittest.TestCase):
         t.execute_trajectory.send_goal_async.side_effect = send
         with mock.patch('tools.data_factory.motion.moveit_transport.time.time', return_value=10.):
             with self.assertRaisesRegex(ContractError, 'ROS_EXEC_CANCELLED'):
-                t.start_phase(self.step(t), cancel_event=cancel, cancel_timeout_s=.1)
+                t.start_phase(self.step(t), cancel_event=cancel, cancel_timeout_s=.1, start_observation=t.start_observation)
         self.assertEqual(handle.cancels, 1)
         self.assertFalse(t.owns_active_goal)
         self.assertEqual(t.execute_trajectory.send_goal_async.call_count, 1)
