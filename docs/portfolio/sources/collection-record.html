@@ -1,4 +1,214 @@
-<!doctype html><html lang="ko"><meta charset="utf-8"><title>실제 수집 기록 — 데이터 엔진</title><link rel="stylesheet" href="../site.css"><main class="source-page"><a href="../collection.html#recorded-example">← 실제 수집 기록으로 돌아가기</a><h1>시연 원본과 재생본</h1><p class="note">보존된 원본의 관련 필드를 발췌했다. SHA-256은 발췌 전 원본 파일을 식별한다. 수집 당시의 판정과 이후의 학습 입력 참조를 구분한다.</p><section id="current-pick"><h2>Pick · 2026-09-07 수집 원본</h2><p>2026-09-07 저장 기록에서 선별한 시연이다. 저장 프레임 전체를 30 fps로 재생하며 기록 밖의 재배치·복귀·저장 대기는 포함하지 않는다. Pick은 rhythm-a의 12.1초 시연, Pick &amp; Place는 rhythm-ab-r3의 21.1초 시연이다. 짧은 작업 구간과 전체 release·후퇴를 확인해 골랐다. 기술 검사와 작업 판정은 아래 원본 상태대로 구분한다.</p><h3>result.json</h3><p class="locator">outputs/data_factory/runs/collection-production-20260907-rhythm-a-r1-campaign-0001-run-1-e6/result.json<br>sha256:419e5ec2b956ca9b562fd8fa1b39becf4b1d5de9f728f9cfe0b9b0d50a455322</p><pre>{
+<!doctype html><html lang="ko"><meta charset="utf-8"><title>실제 수집 기록 — 데이터 엔진</title><link rel="stylesheet" href="../site.css"><main class="source-page"><a href="../collection.html#recorded-example">← 실제 수집 기록으로 돌아가기</a><h1>시연 원본과 재생본</h1><p class="note">보존된 원본의 관련 필드를 발췌했다. SHA-256은 발췌 전 원본 파일을 식별한다. 수집 당시의 판정과 이후의 학습 입력 참조를 구분한다.</p><section id="continuous-pick"><h2>조건을 바꾼 연속 Pick 수집</h2><p>2026-09-07의 같은 수집 계획에 속한 여섯 기록이다. 위치·각도는 실행 요청값이며 PLACE_A 보정 좌표계를 따른다. 앞선 실행의 release proxy가 남긴 배치 상태와 다음 실행의 요청 좌표가 다섯 연결에서 정확히 일치한다. 배치 상태는 독립된 영상 측정값과 구분한다.</p><table><thead><tr><th scope="col">수집 순서</th><th scope="col">X / Y (mm)</th><th scope="col">yaw (°)</th><th scope="col">저장 프레임</th></tr></thead><tbody><tr><th scope="row"><a href="#pick-condition-1">1</a></th><td>-88.75 / 20.20</td><td>-24.73</td><td>370</td></tr><tr><th scope="row"><a href="#pick-condition-2">2</a></th><td>-1.93 / -55.35</td><td>-24.73</td><td>384</td></tr><tr><th scope="row"><a href="#pick-condition-3">3</a></th><td>-3.16 / 33.51</td><td>10.87</td><td>326</td></tr><tr><th scope="row"><a href="#pick-condition-4">4</a></th><td>-106.43 / -15.24</td><td>10.87</td><td>341</td></tr><tr><th scope="row"><a href="#pick-condition-5">5</a></th><td>-13.48 / 13.14</td><td>15.20</td><td>340</td></tr><tr><th scope="row"><a href="#pick-condition-6">6</a></th><td>73.14 / -75.93</td><td>15.20</td><td>364</td></tr></tbody></table><p>여섯 기록 모두 저장 확정(COMMITTED)·기술 검사 PASS이며, 수집 당시 학습 권한은 NOT_AUTHORIZED이다. 본문의 12.1초 영상은 마지막 기록의 전체 364프레임이다.</p><details class="source-details"><summary>원본 필드와 파일 식별값</summary><section id="pick-condition-1"><h3>수집 순서 1</h3><p class="locator">outputs/data_factory/runs/collection-production-20260907-rhythm-a-r1-campaign-0001-run-1/episode_intent.json<br>sha256:3a962b56bd9849be83d5861616566b18d75c007e40add822b5488c3a75f874fb</p><p class="locator">outputs/data_factory/runs/collection-production-20260907-rhythm-a-r1-campaign-0001-run-1/result.json<br>sha256:be6f623ec6510fc7ac2d95c36e46ba4ffe29a50ab816cf2da17e1f936e9773ff</p><p class="locator">outputs/data_factory/runs/collection-production-20260907-rhythm-a-r1-campaign-0001-run-1/episode_ledger.json<br>sha256:2c953e7accbdcbfaa7be08244d4d083b79f01679e85a8221dd64b1b765e13d59</p><p class="locator">outputs/data_factory/runs/collection-production-20260907-rhythm-a-r1-campaign-0001-run-1/execution_response.json<br>sha256:71e34ac6b55c354e84e42dac8baf6e6f51550cde589a9b967ca23d95ab60d47f</p><pre>{
+  &quot;episode_intent&quot;: {
+    &quot;order_index&quot;: 0,
+    &quot;coverage_condition&quot;: {
+      &quot;place_id&quot;: &quot;PLACE_A&quot;,
+      &quot;cell_calibration_id&quot;: &quot;place-a-yaw0-r003&quot;,
+      &quot;x_mm&quot;: -88.7533061520591,
+      &quot;y_mm&quot;: 20.198281706564718,
+      &quot;yaw_deg&quot;: -24.734637526256734
+    }
+  },
+  &quot;result&quot;: {
+    &quot;state&quot;: &quot;COMMITTED&quot;,
+    &quot;episode_index&quot;: 0,
+    &quot;rows&quot;: 370
+  },
+  &quot;admission&quot;: {
+    &quot;technical_status&quot;: &quot;PASS&quot;,
+    &quot;training_status&quot;: &quot;NOT_AUTHORIZED&quot;
+  },
+  &quot;execution_response&quot;: {
+    &quot;code&quot;: &quot;COMPLETE&quot;,
+    &quot;release_verdict&quot;: &quot;LANDED&quot;,
+    &quot;release_proxy_poses&quot;: [
+      {
+        &quot;pose&quot;: {
+          &quot;place_id&quot;: &quot;PLACE_A&quot;,
+          &quot;x_mm&quot;: -1.934167107122196,
+          &quot;y_mm&quot;: -55.349770508349934,
+          &quot;yaw_deg&quot;: -24.734637526256734
+        },
+        &quot;source&quot;: &quot;ROBOT_RELEASE_PROXY&quot;
+      }
+    ]
+  }
+}</pre></section><section id="pick-condition-2"><h3>수집 순서 2</h3><p class="locator">outputs/data_factory/runs/collection-production-20260907-rhythm-a-r1-campaign-0001-run-1-e2/episode_intent.json<br>sha256:975713faa412a9675483978f95f6ed9893e496f413786cc8b51a479bd647cf19</p><p class="locator">outputs/data_factory/runs/collection-production-20260907-rhythm-a-r1-campaign-0001-run-1-e2/result.json<br>sha256:fec31b5e313faf25d2d625965e01be087d8da1c63f1acc1c9f976247476fe409</p><p class="locator">outputs/data_factory/runs/collection-production-20260907-rhythm-a-r1-campaign-0001-run-1-e2/episode_ledger.json<br>sha256:2736e10c643ce70a3fbd7cf7d3f18399ff7da73c4088941014fbdb0f45f0e229</p><p class="locator">outputs/data_factory/runs/collection-production-20260907-rhythm-a-r1-campaign-0001-run-1-e2/execution_response.json<br>sha256:1b20b41cd67b4825eeb1d52643b7b5c31c6026acbbe922cde7cb5c490b467094</p><pre>{
+  &quot;episode_intent&quot;: {
+    &quot;order_index&quot;: 1,
+    &quot;coverage_condition&quot;: {
+      &quot;place_id&quot;: &quot;PLACE_A&quot;,
+      &quot;cell_calibration_id&quot;: &quot;place-a-yaw0-r003&quot;,
+      &quot;x_mm&quot;: -1.934167107122196,
+      &quot;y_mm&quot;: -55.349770508349934,
+      &quot;yaw_deg&quot;: -24.734637526256734
+    }
+  },
+  &quot;result&quot;: {
+    &quot;state&quot;: &quot;COMMITTED&quot;,
+    &quot;episode_index&quot;: 1,
+    &quot;rows&quot;: 384
+  },
+  &quot;admission&quot;: {
+    &quot;technical_status&quot;: &quot;PASS&quot;,
+    &quot;training_status&quot;: &quot;NOT_AUTHORIZED&quot;
+  },
+  &quot;execution_response&quot;: {
+    &quot;code&quot;: &quot;COMPLETE&quot;,
+    &quot;release_verdict&quot;: &quot;LANDED&quot;,
+    &quot;release_proxy_poses&quot;: [
+      {
+        &quot;pose&quot;: {
+          &quot;place_id&quot;: &quot;PLACE_A&quot;,
+          &quot;x_mm&quot;: -3.1613800128443597,
+          &quot;y_mm&quot;: 33.50514014910731,
+          &quot;yaw_deg&quot;: 10.872971903537177
+        },
+        &quot;source&quot;: &quot;ROBOT_RELEASE_PROXY&quot;
+      }
+    ]
+  }
+}</pre></section><section id="pick-condition-3"><h3>수집 순서 3</h3><p class="locator">outputs/data_factory/runs/collection-production-20260907-rhythm-a-r1-campaign-0001-run-1-e3/episode_intent.json<br>sha256:2eb6e8dcb5f87a53378da7d55c3f0ec37f5771bf364c566a5bbd7393b0873c35</p><p class="locator">outputs/data_factory/runs/collection-production-20260907-rhythm-a-r1-campaign-0001-run-1-e3/result.json<br>sha256:d5c98c8aaed1722d0ea045b1eb5634fb84d6cd3f3dbd571fd20a52d141673010</p><p class="locator">outputs/data_factory/runs/collection-production-20260907-rhythm-a-r1-campaign-0001-run-1-e3/episode_ledger.json<br>sha256:3d76f303f9b2b9dbd690c1da704afc60ae7a6bd6ac3a717a7ed2c5b93778dcd8</p><p class="locator">outputs/data_factory/runs/collection-production-20260907-rhythm-a-r1-campaign-0001-run-1-e3/execution_response.json<br>sha256:5192d741cc0510ccaa04cf8cfe3d53961701c0e2bfbb61ca3ae9958a4478503e</p><pre>{
+  &quot;episode_intent&quot;: {
+    &quot;order_index&quot;: 2,
+    &quot;coverage_condition&quot;: {
+      &quot;place_id&quot;: &quot;PLACE_A&quot;,
+      &quot;cell_calibration_id&quot;: &quot;place-a-yaw0-r003&quot;,
+      &quot;x_mm&quot;: -3.1613800128443597,
+      &quot;y_mm&quot;: 33.50514014910731,
+      &quot;yaw_deg&quot;: 10.872971903537177
+    }
+  },
+  &quot;result&quot;: {
+    &quot;state&quot;: &quot;COMMITTED&quot;,
+    &quot;episode_index&quot;: 2,
+    &quot;rows&quot;: 326
+  },
+  &quot;admission&quot;: {
+    &quot;technical_status&quot;: &quot;PASS&quot;,
+    &quot;training_status&quot;: &quot;NOT_AUTHORIZED&quot;
+  },
+  &quot;execution_response&quot;: {
+    &quot;code&quot;: &quot;COMPLETE&quot;,
+    &quot;release_verdict&quot;: &quot;LANDED&quot;,
+    &quot;release_proxy_poses&quot;: [
+      {
+        &quot;pose&quot;: {
+          &quot;place_id&quot;: &quot;PLACE_A&quot;,
+          &quot;x_mm&quot;: -106.43112426345766,
+          &quot;y_mm&quot;: -15.241804671608438,
+          &quot;yaw_deg&quot;: 10.872971903537177
+        },
+        &quot;source&quot;: &quot;ROBOT_RELEASE_PROXY&quot;
+      }
+    ]
+  }
+}</pre></section><section id="pick-condition-4"><h3>수집 순서 4</h3><p class="locator">outputs/data_factory/runs/collection-production-20260907-rhythm-a-r1-campaign-0001-run-1-e4/episode_intent.json<br>sha256:1678ad22dacadcd6a3fa4c524d01c239680f3ff619f1dc1d560ade96f628579a</p><p class="locator">outputs/data_factory/runs/collection-production-20260907-rhythm-a-r1-campaign-0001-run-1-e4/result.json<br>sha256:7e9accb9bb0bff5c92507fc2a275e4e9b5852fe99766ed27f188fff9496aff96</p><p class="locator">outputs/data_factory/runs/collection-production-20260907-rhythm-a-r1-campaign-0001-run-1-e4/episode_ledger.json<br>sha256:3e41568e5513aebbac42709e94aea90c7fc7aa143c9a4b62d6996735a3279fc0</p><p class="locator">outputs/data_factory/runs/collection-production-20260907-rhythm-a-r1-campaign-0001-run-1-e4/execution_response.json<br>sha256:812cb7b6f78948e8810ee65756dcc15ce66956820eac94fd62fb2f25d9a358e2</p><pre>{
+  &quot;episode_intent&quot;: {
+    &quot;order_index&quot;: 3,
+    &quot;coverage_condition&quot;: {
+      &quot;place_id&quot;: &quot;PLACE_A&quot;,
+      &quot;cell_calibration_id&quot;: &quot;place-a-yaw0-r003&quot;,
+      &quot;x_mm&quot;: -106.43112426345766,
+      &quot;y_mm&quot;: -15.241804671608438,
+      &quot;yaw_deg&quot;: 10.872971903537177
+    }
+  },
+  &quot;result&quot;: {
+    &quot;state&quot;: &quot;COMMITTED&quot;,
+    &quot;episode_index&quot;: 3,
+    &quot;rows&quot;: 341
+  },
+  &quot;admission&quot;: {
+    &quot;technical_status&quot;: &quot;PASS&quot;,
+    &quot;training_status&quot;: &quot;NOT_AUTHORIZED&quot;
+  },
+  &quot;execution_response&quot;: {
+    &quot;code&quot;: &quot;COMPLETE&quot;,
+    &quot;release_verdict&quot;: &quot;LANDED&quot;,
+    &quot;release_proxy_poses&quot;: [
+      {
+        &quot;pose&quot;: {
+          &quot;place_id&quot;: &quot;PLACE_A&quot;,
+          &quot;x_mm&quot;: -13.477994637256861,
+          &quot;y_mm&quot;: 13.139709024893047,
+          &quot;yaw_deg&quot;: 15.201719297245006
+        },
+        &quot;source&quot;: &quot;ROBOT_RELEASE_PROXY&quot;
+      }
+    ]
+  }
+}</pre></section><section id="pick-condition-5"><h3>수집 순서 5</h3><p class="locator">outputs/data_factory/runs/collection-production-20260907-rhythm-a-r1-campaign-0001-run-1-e5/episode_intent.json<br>sha256:879ed1e3bdf6879d3c32bf59134f0b7886dc5129e30cf0e610dc2ac969d19340</p><p class="locator">outputs/data_factory/runs/collection-production-20260907-rhythm-a-r1-campaign-0001-run-1-e5/result.json<br>sha256:0142518b8ffe5f9c4ab523706b8e60f9884058c734d5a0f30b79ce7672a2b995</p><p class="locator">outputs/data_factory/runs/collection-production-20260907-rhythm-a-r1-campaign-0001-run-1-e5/episode_ledger.json<br>sha256:693bae431fba02a22d87a2026875456d93a504e212f43e6cc7fd68a14ec28ba1</p><p class="locator">outputs/data_factory/runs/collection-production-20260907-rhythm-a-r1-campaign-0001-run-1-e5/execution_response.json<br>sha256:d4eb77232452627f89a920a0f082614d6d0a8141729e53c6b5debf06b37f0022</p><pre>{
+  &quot;episode_intent&quot;: {
+    &quot;order_index&quot;: 4,
+    &quot;coverage_condition&quot;: {
+      &quot;place_id&quot;: &quot;PLACE_A&quot;,
+      &quot;cell_calibration_id&quot;: &quot;place-a-yaw0-r003&quot;,
+      &quot;x_mm&quot;: -13.477994637256861,
+      &quot;y_mm&quot;: 13.139709024893047,
+      &quot;yaw_deg&quot;: 15.201719297245006
+    }
+  },
+  &quot;result&quot;: {
+    &quot;state&quot;: &quot;COMMITTED&quot;,
+    &quot;episode_index&quot;: 4,
+    &quot;rows&quot;: 340
+  },
+  &quot;admission&quot;: {
+    &quot;technical_status&quot;: &quot;PASS&quot;,
+    &quot;training_status&quot;: &quot;NOT_AUTHORIZED&quot;
+  },
+  &quot;execution_response&quot;: {
+    &quot;code&quot;: &quot;COMPLETE&quot;,
+    &quot;release_verdict&quot;: &quot;LANDED&quot;,
+    &quot;release_proxy_poses&quot;: [
+      {
+        &quot;pose&quot;: {
+          &quot;place_id&quot;: &quot;PLACE_A&quot;,
+          &quot;x_mm&quot;: 73.14415904458195,
+          &quot;y_mm&quot;: -75.92940695161529,
+          &quot;yaw_deg&quot;: 15.201719297245006
+        },
+        &quot;source&quot;: &quot;ROBOT_RELEASE_PROXY&quot;
+      }
+    ]
+  }
+}</pre></section><section id="pick-condition-6"><h3>수집 순서 6</h3><p class="locator">outputs/data_factory/runs/collection-production-20260907-rhythm-a-r1-campaign-0001-run-1-e6/episode_intent.json<br>sha256:84e3c2196ad323a44f74a3af009707b9f74ba872b69b0a2ca817050ebce0bb97</p><p class="locator">outputs/data_factory/runs/collection-production-20260907-rhythm-a-r1-campaign-0001-run-1-e6/result.json<br>sha256:419e5ec2b956ca9b562fd8fa1b39becf4b1d5de9f728f9cfe0b9b0d50a455322</p><p class="locator">outputs/data_factory/runs/collection-production-20260907-rhythm-a-r1-campaign-0001-run-1-e6/episode_ledger.json<br>sha256:bc2689ec944aa3d47b15bf118d41c640f2121565b4e3af3f623bfe3a9d888661</p><p class="locator">outputs/data_factory/runs/collection-production-20260907-rhythm-a-r1-campaign-0001-run-1-e6/execution_response.json<br>sha256:fc45ec68187b65c2e55f2d08551df48458d1110c931109d8da31f3502992891d</p><pre>{
+  &quot;episode_intent&quot;: {
+    &quot;order_index&quot;: 5,
+    &quot;coverage_condition&quot;: {
+      &quot;place_id&quot;: &quot;PLACE_A&quot;,
+      &quot;cell_calibration_id&quot;: &quot;place-a-yaw0-r003&quot;,
+      &quot;x_mm&quot;: 73.14415904458195,
+      &quot;y_mm&quot;: -75.92940695161529,
+      &quot;yaw_deg&quot;: 15.201719297245006
+    }
+  },
+  &quot;result&quot;: {
+    &quot;state&quot;: &quot;COMMITTED&quot;,
+    &quot;episode_index&quot;: 5,
+    &quot;rows&quot;: 364
+  },
+  &quot;admission&quot;: {
+    &quot;technical_status&quot;: &quot;PASS&quot;,
+    &quot;training_status&quot;: &quot;NOT_AUTHORIZED&quot;
+  },
+  &quot;execution_response&quot;: {
+    &quot;code&quot;: &quot;COMPLETE&quot;,
+    &quot;release_verdict&quot;: &quot;LANDED&quot;,
+    &quot;release_proxy_poses&quot;: [
+      {
+        &quot;pose&quot;: {
+          &quot;place_id&quot;: &quot;PLACE_A&quot;,
+          &quot;x_mm&quot;: 73.14415904458195,
+          &quot;y_mm&quot;: -75.92940695161529,
+          &quot;yaw_deg&quot;: 15.201719297245006
+        },
+        &quot;source&quot;: &quot;ROBOT_RELEASE_PROXY&quot;
+      }
+    ]
+  }
+}</pre></section></details><p><a href="collection-application.html">작업 계획과 캠페인 관리</a> · <a href="job.html">작업 실행과 기록 종료</a> · <a href="../collection.html#recording-scope">시연과 재배치 설명으로 돌아가기</a></p></section><section id="current-pick"><h2>Pick · 2026-09-07 수집 원본</h2><p>2026-09-07 저장 기록에서 선별한 시연이다. 저장 프레임 전체를 30 fps로 재생하며 기록 밖의 재배치·복귀·저장 대기는 포함하지 않는다. Pick은 rhythm-a의 12.1초 시연, Pick &amp; Place는 rhythm-ab-r3의 21.1초 시연이다. 짧은 작업 구간과 전체 release·후퇴를 확인해 골랐다. 기술 검사와 작업 판정은 아래 원본 상태대로 구분한다.</p><h3>result.json</h3><p class="locator">outputs/data_factory/runs/collection-production-20260907-rhythm-a-r1-campaign-0001-run-1-e6/result.json<br>sha256:419e5ec2b956ca9b562fd8fa1b39becf4b1d5de9f728f9cfe0b9b0d50a455322</p><pre>{
   &quot;detail&quot;: &quot;&quot;,
   &quot;episode_index&quot;: 5,
   &quot;reason_code&quot;: &quot;COMMITTED&quot;,
