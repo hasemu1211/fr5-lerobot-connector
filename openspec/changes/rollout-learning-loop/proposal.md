@@ -521,7 +521,14 @@ phase-event and metric consumers: two distinct chunk plans currently collide
 under their phase/segment-only sequence identity. No second ledger or independent
 motion owner is proposed.
 
-## Authority delta still required for an autonomous bounded attempt
+## Bounded attempt authority: accepted direction, implementation pending
+
+The user clarified on 2026-09-08 that grasp and release must fall inside the
+system's authorized operation; this is not a request for another personal grasp
+approval. The selected first path is learned Pick followed by qualified
+mechanical placement/reset. Learning Place is not a prerequisite. Existing
+delegation must be consumed by the native product, not simulated by repeated
+agent approval clicks. This records intent, not a runtime authorization receipt.
 
 The implemented supervised continuation is a software comparison path. It retains
 one task/recorder/stop owner but requires exact approval for each new candidate.
@@ -555,3 +562,84 @@ sole owner, or if task success/utility is inferred from chunk completion. Until
 that contract and the actual continuous-reference producer are qualified, the
 implemented path reports `online_policy_authorized=false` and preserves explicit
 per-candidate approval. No unseen-output authority is implemented here.
+
+The first integration extends OneJob's existing authority/continuation boundary:
+learned Pick outputs remain attributable to the admitted policy, then the same
+motion owner hands current measured arm/gripper state to the existing qualified
+placement/reset planner. The source program retained by `_materialize` is only
+context today: its executable steps contain one learned chunk, not an automatic
+scripted tail. Blindly appending an old tail would assume its planned starting
+pose still matches the learned endpoint. Replan and validate that handoff; do not
+create another executor or claim mechanical placement as learned Place success.
+
+Authorization for the operation, safe command consumption, and task success are
+separate. The authorized scope includes the mechanical release destination and
+terminal handling. Chunk completion alone is neither Pick success nor proof of
+object attachment. SceneStateStore keeps existing evidence-qualified ownership;
+mechanical release may update continuity only through its qualified consumer.
+Recorder evidence separates learned action, mechanical reset and their outcomes.
+Unknown outcome remains diagnosable and cannot silently become training PASS.
+
+Current MoveIt admission binds floor/wall but not cube geometry, so it does not
+establish cube-pressure avoidance. Intended finger contact and prohibited
+arm/palm/table penetration need distinct checks using existing geometry/profile
+owners, not a mandatory new vision service or blanket collision exemptions.
+[MoveIt PlanningScene](https://moveit.picknik.ai/main/doc/examples/planning_scene/planning_scene_tutorial.html)
+provides collision, constraint and feasibility checks; its allowed-collision
+matrix ignores selected pairs, not proves safe contact.
+[EmbodiedSkills](https://arxiv.org/html/2609.01281v1) similarly separates bounded
+execution from verification. These are design references, not FR5 qualification.
+
+### Architecture decision: retain owners and close the handoff contracts
+
+Prefer upstream functionality and a necessary adapter over a parallel product.
+The installed LeRobot `EpisodicStrategy` already owns episode recording and reset
+phases, including optional teleoperation or return to startup joints. It does not
+provide FR5's qualified placement, exact scene/cell handoff, or timestamp-aligned
+recorder contract. Its `finally` attempts to save buffered data independently of
+task success, a useful separation to retain; substituting the whole strategy
+would also replace lifecycle, recording and shutdown ownership. A native adapter
+remains an option when a bounded compatibility check proves that cheaper than
+extending the existing owner, not an unconditional migration or prohibition.
+
+MoveIt's [Task Constructor example](https://moveit.picknik.ai/main/doc/tutorials/pick_and_place_with_moveit_task_constructor/pick_and_place_with_moveit_task_constructor.html)
+separates grasp, attachment, transfer, release, detachment and retreat. Borrow the
+state-dependent handoff and contact semantics; do not add the whole framework
+solely to concatenate two already-owned execution paths. Planning attachment is
+a collision-model assumption, not sensor proof of a successful grasp.
+
+Three existing couplings must be addressed together rather than patched with an
+auto-click loop: `_materialize`/`validate_learned_program` only admit one learned
+step; executor terminal behavior branches on `learned_proposal`; OneJob finalizes
+only semantic-PASS frozen recordings with post-reset safety. In addition, its
+abort path calls recorder `abort_episode`, which clears the episode buffer.
+The learned diagnostic retains JSON execution evidence but does not itself retain
+the failed episode's RGB. Rollout outcome persistence therefore must be separated
+from successful-demonstration admission, reusing the existing LeRobot writer and
+raw evidence owners without a second recorder or falsely marking failure PASS.
+
+The handoff needs two distinct decisions: whether the policy attempt has ended,
+and whether a qualified mechanical release is feasible from its measured state.
+Neither is a semantic success label. An exhausted attempt budget is a termination
+reason, not a successful Pick; unavailable handoff evidence cannot be replaced
+by the expert tail's nominal endpoint. The normal-path integration check must
+exercise both successful and failed policy attempts through retained diagnostics
+and existing recollection consumers, with mechanical stages visibly excluded
+from learned performance and successful training demonstrations.
+
+The held-object geometry/binding is reusable, but the standalone
+`run_object_reposition_live` caller is not this handoff: it accepts POSTCOMMIT
+ON_SURFACE continuation and creates another OneJob/executor. Reuse qualified
+release planning inside the active owner instead. Measured joints and gripper
+completion do not establish arbitrary object-to-tool attachment; release
+feasibility needs the existing qualified grasp relation or a qualified bounded
+uncertainty envelope. No mandatory new detector or personal approval follows.
+
+The operation budget includes safe terminal handling. Stop policy production
+early enough to admit the qualified release inside that same absolute deadline;
+exhausting it neither renews time nor establishes Pick success. Persist failed or
+uncertain policy observations separately from demonstration eligibility, and
+extend the canonical diagnostic plus original-lifecycle Collection reader for
+successful retained terminals too. Today's diagnostic accepts only blocked,
+aborted or quarantined terminals; a successful mechanical ending must not erase
+the original policy history or failure condition.

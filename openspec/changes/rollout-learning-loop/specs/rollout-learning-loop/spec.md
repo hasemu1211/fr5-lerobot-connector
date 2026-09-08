@@ -1123,3 +1123,67 @@ training admission or a confirmed object destination.
 - **WHEN** candidate approval is cancelled or its binding is invalid
 - **THEN** no candidate motion is dispatched
 - **AND** the existing cancellation lifecycle retains the original completed-chunk evidence for diagnosis
+
+### Requirement: A bounded Pick attempt includes qualified mechanical release
+
+The normal product SHALL support a distinct bounded-attempt authority mode for
+learned Pick followed by qualified mechanical placement/reset. A valid existing
+delegation or task grant SHALL be consumed by the native authority owner; normal
+in-scope grasp and release SHALL NOT require repeated personal approval. The
+grant SHALL bind policy/processors, inference/task configuration, hardware/cell,
+scene/object and permitted manipulation/release scope, deadline and termination.
+Every generated plan SHALL retain its immutable identity and native admission;
+an older plan's human approval SHALL NOT authorize a new plan. Assisted mode
+remains separate until this authority is implemented and qualified.
+Policy termination and operation termination SHALL be distinct. Qualified
+release time SHALL fit within the original absolute operation deadline;
+exhaustion or revocation SHALL NOT renew the budget or imply Pick success.
+
+OneJob and its sole motion owner SHALL perform the learned-to-mechanical handoff
+only after prior motion is terminal, from current measured arm/gripper state,
+using the existing qualified planner and release path. Blind replay of an expert
+tail's old start state, a second motion owner, or deadline renewal is forbidden.
+Freshness, command completion, cell/scene binding, cancellation and supported
+contact constraints SHALL still apply. Contact qualification SHALL distinguish
+permitted grasp/release from object pressing and table penetration; floor/wall
+checking alone is not that qualification. Execution is conditional on current
+required illumination evidence; a pre-start camera check SHALL NOT be represented
+as a continuous darkness-stop guarantee.
+Release feasibility SHALL bind the qualified object-to-tool relation or a
+qualified conservative uncertainty envelope as well as current measured state.
+Gripper command completion alone SHALL NOT manufacture this relation.
+
+The existing recorder/diagnostic consumers SHALL distinguish learned Pick output
+and consumed rows from mechanical placement/reset. Mechanical completion SHALL
+NOT count as learned Place success, and a chunk boundary SHALL NOT manufacture
+Pick success or object attachment. Scene continuity SHALL use the existing
+evidence-qualified release consumer; unsupported state remains unknown. Task
+outcome, safe termination, dataset admission and training authority stay distinct.
+The existing recorder transaction SHALL retain available rollout RGB/state/action
+and provenance independently of successful-demonstration admission, including
+semantic failure, cancellation, timeout, infeasible reset and technical rejection.
+Durable acknowledgement, partial/corrupt evidence, storage failure and uncertain
+save outcomes SHALL remain explicit and retry-safe; retention SHALL NOT promote
+technical validity, semantic PASS or training approval. Safe stopping precedes
+encoding, and mechanical phases remain outside learned demonstration rows.
+Canonical diagnostics and the original-lifecycle Collection consumer SHALL
+support both successful and failed retained attempts without losing original
+policy, plan or condition lineage.
+
+#### Scenario: Learned Pick hands off to mechanical placement
+
+- **WHEN** the bounded grant and native checks admit the learned attempt and its mechanical handoff
+- **THEN** the same owner plans from measured state and performs the permitted release/reset without another personal grasp approval
+- **AND** the original learned outcome and mechanical terminal evidence remain distinct and consumable by diagnosis and subsequent Collection
+
+#### Scenario: The proposed handoff is outside the permitted scope
+
+- **WHEN** prior motion is unresolved, the state is stale, the destination is outside the grant, or required contact/illumination checks fail
+- **THEN** no mechanical goal is sent and the existing stop owner preserves the attempt evidence
+- **AND** no successful Pick, confirmed object destination, automatic retry or training approval is inferred
+
+#### Scenario: A failed Pick remains usable for diagnosis and recollection
+
+- **WHEN** a policy attempt fails, times out or cannot safely hand off to release
+- **THEN** the sole stop owner fences motion and the existing recorder retains available evidence or explicitly reports partial/quarantined retention
+- **AND** the canonical diagnostic and Collection consumer preserve the original failure and condition without treating mechanical recovery or data retention as a successful demonstration

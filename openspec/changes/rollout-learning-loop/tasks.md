@@ -119,7 +119,15 @@ direnv exec . python3 -m unittest tests.data_factory.rollout.test_policy_observa
 - [ ] Qualify native-resolution conversion/transfer/inference/plan admission against the unchanged 0.3-second budget on root-assigned runtime resources; synthetic small images and model seams do not establish usability.
 - [ ] Close continuous start/pause/full-row/staged-release consumption under the existing executor and authority owners.
 
-## Complete learned task attempt (proposal; no new authority granted)
+## Complete learned task attempt (direction accepted; native qualification pending)
+
+Priority for the open items below is the smallest real Pick loop: existing
+collected data and trained checkpoint → bounded learned Pick → qualified
+mechanical release/reset → retained success/failure diagnosis → actual targeted
+recollection. Authority, handoff and failure-evidence preservation are enabling
+work for that outcome, not separate completion claims. Independent safe work may
+proceed in parallel; this priority does not impose a serial implementation order.
+Broader framework migration or interface generalization is not a prerequisite.
 
 - [x] Distinguish new finite chunk completion from task review in the native executor and normal caller; retain one recording transaction and lease until explicit terminal review/abort, preserving previously frozen programs.
 - [x] Consume a run/plan/lease-bound fresh observation at that boundary through OneJob and the native serializers; reject active ownership, stale/late/cancelled observations and unchanged plan replay without new sends.
@@ -129,6 +137,10 @@ direnv exec . python3 -m unittest tests.data_factory.rollout.test_policy_observa
 - [x] Retain prior exact plan envelopes, approvals and validated traces through same-run pending-candidate planning and explicitly approved replacement; preserve one lease/recorder, native start/terminal checks and existing report/diagnostic consumers.
 - [ ] Connect native inference and pending-candidate preview to the normal task interaction loop without claiming per-chunk approval as autonomous task usability; resolve the bounded future-output authority and physical producer contracts first.
 
-- [ ] Resolve the whole-task continuation/terminal distinction with the existing OneJob and authority owners; retain exact-plan limits until any future-output authority is explicitly established.
+- [x] Resolve user intent: system-consumed bounded authority covers learned Pick plus qualified mechanical placement/reset; no additional personal grasp gate or learned Place prerequisite. This decision is not runtime qualification.
+- [ ] Implement native bounded-attempt authority through the existing OneJob owner, with exact generated-plan admission and unchanged task deadline, rather than repeated human chunk approval.
+- [ ] Connect learned Pick to existing qualified mechanical placement/reset from current measured state; validate handoff/contact/illumination scope and preserve separate control-source, Scene and recorder evidence through the normal diagnostic/recollection consumers.
+- [ ] Preserve failed or uncertain rollout RGB/state/action evidence through the existing writer independently of successful-demonstration admission; validate retained failure diagnosis and next-Collection consumption without semantic PASS or a second recorder.
 - [ ] Compare synchronous same-owner continuation against supervised exact-approved chunks, retaining intervention, total task duration and native gripper/start/prefix evidence.
 - [ ] Demonstrate attributable complete-task success/failure and diagnostic linkage; finite prefix completion, solver metrics and synthetic replay do not satisfy this outcome.
+- [ ] Conditionally adopt a minimal upstream/commercial-tool adapter when a concrete consumer or measured bottleneck justifies it and implementation plus maintenance cost is lower than duplicating the capability. Reuse existing owners and contracts; bring this forward only when it directly enables the Pick loop or removes evidenced recurring work. Otherwise leave it open, without committing to a new framework, product layer or interface family.
