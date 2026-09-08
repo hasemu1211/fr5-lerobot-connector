@@ -554,3 +554,61 @@ are execution diagnostics, not physical task-effect or semantic success claims.
 
 - **WHEN** the captured start observation becomes stale while preparing its serialized goal
 - **THEN** the sole transport refuses the send even though the frozen proposal and approval still match
+
+
+### Requirement: Explicit learned inputs use the normal finite run lifecycle
+
+The normal CLI and run session SHALL accept explicit `learned_checkpoint` and
+`gripper_source_clock` together, with optional `learned_device` defaulting to
+`cpu`. Omitting these fields SHALL preserve deterministic behavior and the CLI's
+plan-only default. Their presence SHALL NOT grant GPU assignment, physical,
+semantic, training or future-output authority. Incompatible campaign/proxy or
+postcommit reposition authority SHALL reject before child/resource effects.
+
+The existing canonical loader SHALL own checkpoint/processor admission. The
+consumer SHALL match the admitted recipe's camera rename mapping to the current
+validated collection profile, use its camera topics/FPS and the bound job
+instruction, and supply raw RGB to the existing saved processing path without
+applying observation-view transformations twice. Requested checkpoint path,
+device, measured clock binding, camera mapping/topics and FPS SHALL be retained
+in the exact proposal digest. File presence alone SHALL NOT establish freshness;
+execution SHALL require the same bound clock mapping and existing fresh native
+evidence.
+
+Model load and camera readiness SHALL precede original observation capture. One
+existing motion child SHALL own capture, compilation and any subsequently
+approved execution, with existing cleanup, lease, cancellation and recorder
+boundaries. Plan-only SHALL neither begin recording nor send goals. Learned
+preapproval evidence SHALL retain the source program as qualification context
+and set scripted trajectory-variant binding/digest to null; it SHALL NOT label
+learned actions as DIRECT or TWO_STAGE execution. A finite chunk SHALL retain
+unknown task effectiveness and SHALL NOT inherit scripted reset/commit semantics.
+
+#### Scenario: A normal learned live request reaches exact approval
+
+- **WHEN** an explicit admitted learned request passes recipe/profile and native state checks
+- **THEN** the normal session freezes full seven-dimensional output using its existing child
+- **AND** exact-plan approval precedes recorder begin and execution through the sole owner
+- **AND** technical completion alone does not commit a training episode or prove task success
+
+#### Scenario: Artifact preparation is outside the original input-age budget
+
+- **WHEN** the normal caller prepares a loaded native model before fresh capture
+- **THEN** the adapter reserves its existing inference lock and rechecks checkpoint bytes before capture
+- **AND** a single thread-bound call consumes the owned loaded tensors without hashing the checkpoint again in the capture-to-action interval
+- **AND** duplicate, reentrant or escaped prepared calls fail; cancellation/failure releases the scope
+
+Saved CPU processor tensor storage SHALL be detached from file-backed mappings
+at load before the final artifact digest check. The installed native model load
+copies weights into allocated model parameters. Prepared inference binds that
+loaded state, not a claim that checkpoint files cannot change: in-place file
+changes after preparation SHALL NOT change this call's loaded weights or
+normalization; the next preparation SHALL reject changed bytes. Direct adapter
+calls SHALL retain preparation/check behavior. This does not authorize arbitrary
+Python mutation of a loaded policy or change canonical normalization policy.
+
+The unchanged original source-age budget includes native-resolution RGB
+conversion, JSON transfer, inference and plan admission. Removing the full-file
+hash from that interval is a software correction, not a measured runtime fit;
+actual timing and physical continuous-reference consumption remain separately
+qualified by their existing owners.

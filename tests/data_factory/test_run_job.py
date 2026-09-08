@@ -6,7 +6,7 @@ import tempfile
 import threading
 import time
 import unittest
-from contextlib import ExitStack
+from contextlib import ExitStack, nullcontext
 from datetime import datetime, timezone
 from unittest import mock
 from pathlib import Path
@@ -86,6 +86,83 @@ class Executor:
 
 
 class RunJobTest(unittest.TestCase):
+    def test_native_load_mapping_or_cancel_failure_precedes_live_children_and_run_writes(self):
+        from tools.data_factory.learned_action_adapter import NativeSmolVLA
+        for failure in ("load", "mapping", "cancel"):
+            with self.subTest(failure=failure), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                profile = copy.deepcopy(PROFILE)
+                profile.update(camera_profile="up-wrist", camera_roles=["up", "wrist"],
+                    camera_serials={"up": "up", "wrist": "wrist"}, camera_topics={"up": "/up", "wrist": "/wrist"})
+                validated = runtime_validated(profile=profile)
+                program = runtime_motion(validated)
+                binding = {"schema_version": "fr5.gripper_source_clock.v1", "incarnation": [1, 2, 3, 4],
+                    "calendar_to_system_offset_s": 0., "uncertainty_s": .001, "system_anchor_s": 9.,
+                    "steady_anchor_s": 9., "valid_until_system_s": 100.}
+                (root / "clock.json").write_text(json.dumps(binding))
+                (root / "train_config.json").write_text(json.dumps({"rename_map": {"observation.images.side": "observation.images.camera2"}}))
+                value = {**payload("live"), "camera_profile": "up-wrist", "learned_checkpoint": str(root), "gripper_source_clock": str(root / "clock.json")}
+                cancel = threading.Event()
+                def load(*_, **__):
+                    if failure == "load":
+                        raise run_job.ContractError("LEARNED_CHECKPOINT_LOAD_FAILED")
+                    if failure == "cancel": cancel.set()
+                    return SimpleNamespace(policy_dir=root)
+                cell = SimpleNamespace(read=lambda: {"robot_system_id": value["expected_robot_system_id"], "cell_ready": True})
+                with mock.patch.object(NativeSmolVLA, "load", side_effect=load), \
+                     mock.patch.object(run_job, "CellStateStore", return_value=cell), \
+                     mock.patch.object(run_job, "SceneStateStore"), \
+                     mock.patch.object(run_job, "_prepare_run_dir") as writes, \
+                     mock.patch.object(run_job, "ResourceMonitor") as resources:
+                    child, warmup = mock.Mock(), mock.Mock()
+                    result = run_job.run_live(value, cancel, lambda _: None, resolver=lambda _: (validated, program, SCENE),
+                        executor_factory=child, camera_warmup_call=warmup)
+                self.assertEqual(result["code"], {"load": "LEARNED_CHECKPOINT_LOAD_FAILED", "mapping": "LEARNED_CAMERA_MAPPING", "cancel": "LEARNED_CANCELLED"}[failure])
+                child.assert_not_called()
+                warmup.assert_not_called()
+                writes.assert_not_called()
+                resources.assert_not_called()
+
+    def test_explicit_learned_public_fields_reject_incompatible_requests_before_effects(self):
+        base = payload("live")
+        valid = {**base, "learned_checkpoint": "/synthetic/checkpoint", "gripper_source_clock": "/synthetic/clock.json"}
+        self.assertEqual(run_job._run_payload(base), base)
+        self.assertEqual(run_job._run_payload(valid), valid)
+        invalid = [{**base, "learned_device": "cuda"}, {**base, "learned_checkpoint": "/checkpoint"},
+                   {**base, "gripper_source_clock": "/clock"}, {**valid, "learned_device": "auto"},
+                   {**valid, "learned_checkpoint": ""}]
+        for value in invalid:
+            with self.subTest(value=value), mock.patch.object(run_job, "run_live") as live:
+                session = run_job.RunSession()
+                result = session.process(command(value=value))
+                self.assertEqual(result["code"], "LEARNED_RUN_INPUTS")
+                self.assertIsNone(session.worker)
+                live.assert_not_called()
+        for extra in ({"approval_scope": "HIL_NUMERIC_PROXY"}, {"campaign_authorization": {}}, {"object_reposition_binding": {}}):
+            with mock.patch.object(run_job, "resolve_inputs") as resolver, mock.patch.object(run_job, "_live_executor") as child:
+                result = run_job.run_live(valid, threading.Event(), lambda _: None, resolver=resolver, executor_factory=child, **extra)
+                self.assertEqual(result["code"], "LEARNED_HUMAN_APPROVAL_REQUIRED")
+                resolver.assert_not_called()
+                child.assert_not_called()
+
+    def test_learned_cli_preserves_explicit_inputs_without_enabling_live_by_default(self):
+        with tempfile.TemporaryDirectory() as directory:
+            job_path = Path(directory) / "job.json"
+            job_path.write_text(json.dumps(JOB))
+            original = payload()
+            argv = []
+            for key, value in original.items():
+                argv += ["--" + key.replace("_", "-"), str(job_path) if key == "job" else str(value)]
+            argv += ["--learned-checkpoint", "/synthetic/checkpoint", "--gripper-source-clock", "/synthetic/clock.json", "--learned-device", "cuda"]
+            parsed = run_job._human_payload(run_job._parser().parse_args(argv))
+            self.assertEqual(parsed["mode"], "plan_only")
+            self.assertEqual(parsed["learned_checkpoint"], "/synthetic/checkpoint")
+            self.assertEqual(parsed["gripper_source_clock"], "/synthetic/clock.json")
+            self.assertEqual(parsed["learned_device"], "cuda")
+        with mock.patch.object(run_job, "JsonlProcess") as child:
+            run_job._live_executor({**payload("live"), "learned_checkpoint": "checkpoint", "gripper_source_clock": "/synthetic/clock.json"}, 3.)
+        self.assertEqual(child.call_args.args[0][-2:], ["--gripper-source-clock", "/synthetic/clock.json"])
+
     def test_learned_planner_forwards_the_existing_measured_clock_file(self):
         with mock.patch.object(run_job, "JsonlProcess") as child:
             run_job._executor(3., gripper_source_clock="/synthetic/measured-clock.json")
@@ -104,7 +181,7 @@ class RunJobTest(unittest.TestCase):
                 def load(*_, **__):
                     if failure == "cancel_after_load":
                         cancel.set()
-                    return SimpleNamespace(checkpoint={})
+                    return SimpleNamespace(checkpoint={}, prepare_inference=lambda: nullcontext(None))
                 def capture(*_):
                     if failure == "cancel_after_capture":
                         cancel.set()

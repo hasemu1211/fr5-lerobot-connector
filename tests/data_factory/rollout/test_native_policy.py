@@ -192,6 +192,53 @@ class NativePolicyTest(unittest.TestCase):
                 NativeSmolVLA._load_components(self.policy_dir, "cpu")
             weight_load.assert_not_called()
 
+    def test_prepared_capture_owns_loaded_cpu_tensors_and_rejects_next_changed_scope(self):
+        from lerobot.policies.factory import make_pre_post_processors
+        from safetensors.torch import load_model
+        from tools.data_factory.training_receipts import tree_digest
+        class TinyPolicy(torch.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.synthetic = torch.nn.Linear(1, 1, bias=False)
+                self.synthetic.weight = torch.nn.Parameter(torch.zeros(1))
+            def reset(self):
+                pass
+            def predict_action_chunk(self, batch):
+                # Actual copied model storage and both saved CPU processors.
+                return (self.synthetic.weight - 1 + batch["observation.state"].mean() + .5).expand(1, 1, 7)
+        policy = TinyPolicy()
+        load_model(policy, self.policy_dir / "model.safetensors")
+        pre, post = make_pre_post_processors(SimpleNamespace(), pretrained_path=str(self.policy_dir))
+        with mock.patch.object(NativeSmolVLA, "_load_components", return_value=(policy, pre, post)):
+            native = NativeSmolVLA.load(self.policy_dir)
+        value = {"observation.state": [0.] * 7, "task": "synthetic probe",
+                 "observation.images.camera1": fake_rgb(), "observation.images.camera2": fake_rgb()}
+        original = native(value)
+        with mock.patch("tools.data_factory.training_receipts.tree_digest", wraps=tree_digest) as digest:
+            with native.prepare_inference() as predict:
+                self.assertEqual(digest.call_count, 1)  # Before acquiring any input.
+                with self.assertRaisesRegex(ContractError, "LEARNED_REENTRANT_INFERENCE"):
+                    native(value)
+                # In-place same-inode writes challenge mmap-backed CPU state,
+                # unlike rename/replace, which leaves the old mapping intact.
+                for path in self.policy_dir.glob("*.safetensors"):
+                    with path.open("r+b") as stream:
+                        offset = 8 + int.from_bytes(stream.read(8), "little")
+                        size = path.stat().st_size - offset
+                        stream.seek(offset)
+                        stream.write(np.full(size // 4, 9., dtype=np.float32).tobytes())
+                np.testing.assert_allclose(predict(value), original)
+                self.assertEqual(digest.call_count, 1)  # No hash in capture-to-action scope.
+                with self.assertRaisesRegex(ContractError, "LEARNED_INFERENCE_SCOPE"):
+                    predict(value)
+            with self.assertRaisesRegex(ContractError, "LEARNED_INFERENCE_SCOPE"):
+                predict(value)
+            with self.assertRaisesRegex(ContractError, "LEARNED_CHECKPOINT_CHANGED"):
+                with native.prepare_inference():
+                    self.fail("changed artifacts admitted another capture")
+        self.assertTrue(native._inference_lock.acquire(blocking=False))
+        native._inference_lock.release()
+
     def test_installed_sample_actions_and_saved_processors_reach_offline_comparison(self):
         from lerobot.policies.smolvla import modeling_smolvla as module
         from lerobot.policies.factory import make_pre_post_processors

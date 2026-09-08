@@ -701,6 +701,7 @@ class PickupExecutor:
         }
         if proposal is not None:
             plan["learned_proposal"] = copy.deepcopy(proposal)
+            plan["learned_source_program"] = copy.deepcopy(motion_program["source_program"])
             # This is a finite probe, never evidence of a reset or scene transition.
             plan["execution_kind"] = "FINITE_LEARNED_PROBE"
         plan_digest = canonical_digest(plan)

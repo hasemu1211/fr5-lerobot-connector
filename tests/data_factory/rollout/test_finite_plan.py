@@ -4,11 +4,14 @@ import copy
 import hashlib
 import threading
 import time
+import json
+import tempfile
 import unittest
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from types import SimpleNamespace
 from unittest import mock
+from pathlib import Path
 
 from tools.fr5_data_factory import ContractError, canonical_digest, validate_motion_program
 from tools.data_factory.learned_action_adapter import fake_rgb
@@ -163,6 +166,125 @@ class Recorder:
 
 
 class FinitePlanTest(unittest.TestCase):
+    def test_public_live_native_path_keeps_one_child_and_honest_probe_evidence(self):
+        self._public_native_consumer("live")
+
+    def test_public_native_plan_only_never_starts_recorder_or_goal(self):
+        self._public_native_consumer("plan_only")
+
+    def _public_native_consumer(self, mode):
+        from tools.data_factory import run_job
+        from tools.data_factory.learned_action_adapter import NativeSmolVLA
+        from tests.data_factory.operator.fixtures import PROFILE, JOB, runtime_validated, payload
+        profile = copy.deepcopy(PROFILE)
+        profile.update(camera_profile="up-wrist", camera_roles=["up", "wrist"],
+                       camera_serials={"up": "up", "wrist": "wrist"},
+                       camera_topics={"up": "/up", "wrist": "/wrist"})
+        validated = runtime_validated(job={**JOB, "instruction": "synthetic probe", "operator_or_agent_id": "operator"}, profile=profile)
+        program = source()
+        program["resolved_job_digest"] = validated["resolved_job_digest"]
+        program["binding_digests"]["collection_profile"] = validated["input_digests"]["collection_profile"]
+        calls, closed, observed_requests = [], [], []
+        transport, cell, scene = Transport(), Cell(), Scene()
+        transport.hardware = True
+        def capture(topics, age):
+            self.assertEqual(topics, {"camera1": "/up", "camera2": "/wrist"})
+            self.assertEqual(age, .3)
+            value = observation()
+            for name in ("camera1", "camera2"):
+                image = value[f"observation.images.{name}"]
+                image["data_hex"] = image.pop("data").hex()
+            return value
+        transport.capture_policy_observation = capture
+        executor = PickupExecutor(transport, execution_enabled=True, cell_state_store=cell,
+                                  scene_state_store=scene, source_clock=lambda: 10., monotonic_clock=lambda: 10.)
+        def request(value, _cancel):
+            calls.append(("executor", value["op"]))
+            observed_requests.append(copy.deepcopy(value))
+            return executor.process(value)
+        child = SimpleNamespace(request=request, close=lambda **_: closed.append(True))
+        recorder = Recorder(calls)
+        recorder.close = lambda **_: None
+        real_inference = FinitePolicyInference
+        class Native:
+            @contextmanager
+            def prepare_inference(self):
+                yield self
+            checkpoint = CHECKPOINT
+            def __call__(self, value):
+                self_test.assertEqual(value["task"], "synthetic probe")
+                return [ACTION[:]]
+        self_test = self
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "robot.urdf").write_text(XML)
+            mapping = {"observation.images.up": "observation.images.camera1", "observation.images.wrist": "observation.images.camera2"}
+            (root / "train_config.json").write_text(json.dumps({"rename_map": mapping}))
+            clock_binding = transport.snapshot()["gripper_controller"]["hardware_execution"]["clock_binding"]
+            (root / "clock.json").write_text(json.dumps(clock_binding))
+            native = Native()
+            native.policy_dir = root
+            value = {**payload(mode), "run_id": "run",
+                     "job": validated["normalized_job"], "urdf": str(root / "robot.urdf"),
+                     "learned_checkpoint": str(root), "gripper_source_clock": str(root / "clock.json")}
+            if mode == "live":
+                value.update(run_root=str(root / "runs"), dataset_root=str(root / "unused-dataset"), camera_profile="up-wrist")
+            value = run_job._run_payload(value)
+            factory = mock.Mock(return_value=child)
+            def decide(_prompt, choices):
+                calls.append(("operator", "decision"))
+                return choices if isinstance(choices, str) else "PASS"
+            caller_name = "run_live" if mode == "live" else "run_plan_only"
+            caller = getattr(run_job, caller_name)
+            def live_ports(*args, **kwargs):
+                if mode == "plan_only":
+                    return caller(*args, **kwargs, resolver=lambda _: (validated, program, SCENE), executor_factory=factory)
+                return caller(*args, **kwargs, resolver=lambda _: (validated, program, SCENE), executor_factory=factory,
+                    recorder_factory=lambda *_: recorder, tty_decision=decide,
+                    camera_warmup_call=lambda *_: {"schema_version": "data_factory.camera_warmup.v1", "attempts": []})
+            with mock.patch.object(NativeSmolVLA, "load", return_value=native), \
+                 mock.patch("tools.data_factory.rollout.finite_plan.FinitePolicyInference", side_effect=lambda *a, **kw: real_inference(*a, **kw, source_clock=lambda: 10., monotonic_clock=lambda: 10.)), \
+                 mock.patch.object(run_job, "CellStateStore", return_value=cell), \
+                 mock.patch.object(run_job, "SceneStateStore", return_value=scene), \
+                 mock.patch.object(run_job, "ResourceMonitor"), \
+                 mock.patch.object(run_job, caller_name, side_effect=live_ports):
+                session = run_job.RunSession()
+                accepted = session.process(json.loads(json.dumps({"schema_version": run_job.COMMAND_SCHEMA,
+                    "op_id": "native-live", "op": "run", "payload": value})))
+                self.assertTrue(accepted["ok"], accepted)
+                session.worker.join(5.)
+                if session.worker.is_alive():
+                    session.input_closed()
+                    session.worker.join(2.)
+                self.assertFalse(session.worker.is_alive())
+                result = session.snapshot
+            self.assertEqual(result["code"], "PRECOMMIT_SAFETY" if mode == "live" else "PLANNED",
+                             {k: v for k, v in result.items() if k != "data"})
+            factory.assert_called_once()
+            self.assertEqual(closed, [True])
+            self.assertEqual([op for target, op in calls if target == "executor"][:2], ["capture_observation", "plan"])
+            if mode == "plan_only":
+                self.assertEqual(transport.sent, [])
+                self.assertFalse(any(target in {"operator", "recorder"} for target, _ in calls))
+                self.assertFalse((root / "runs").exists())
+                self.assertIsNone(result["data"]["trajectory_variant_binding"])
+                self.assertEqual(result["data"]["finite_learned_plan"]["plan"]["learned_proposal"]["actions"], [ACTION])
+                return
+            self.assertLess(calls.index(("executor", "plan")), calls.index(("operator", "decision")))
+            self.assertLess(calls.index(("operator", "decision")), calls.index(("recorder", "begin")))
+            self.assertLess(calls.index(("recorder", "begin")), calls.index(("executor", "execute")))
+            self.assertEqual(len(transport.sent), 1)
+            self.assertEqual(transport.sent[0]["learned_proposal"]["actions"], [ACTION])
+            self.assertNotIn(("recorder", "commit"), calls)
+            evidence = json.loads((root / "runs" / "run" / "preapproval_evidence.json").read_text())
+            self.assertIsNone(evidence["trajectory_variant_binding"])
+            self.assertIsNone(evidence["trajectory_variant_binding_digest"])
+            plan = evidence["plan_envelope"]["plan"]
+            self.assertEqual(plan["learned_source_program"], program)
+            self.assertEqual(plan["learned_proposal"]["runtime_inputs"]["device"], "cpu")
+            self.assertEqual(plan["learned_proposal"]["runtime_inputs"]["clock_binding"], clock_binding)
+            self.assertEqual(result["data"]["task_effectiveness"], "UNKNOWN")
+
     def make_held_job(self, initial_feedback=.021, *, controller_samples=True):
         # Reuse this file's lifecycle fixtures with the actual ROS serializers,
         # action dispatch, polling and cancellation; no ROS node is constructed.
@@ -1085,6 +1207,38 @@ class FinitePlanTest(unittest.TestCase):
                 mutate(p)
                 with self.assertRaisesRegex(ContractError, code):
                     validate_proposal(redigest(p))
+
+    def test_public_runtime_provenance_rejects_malformed_inputs_and_changed_clock_before_send(self):
+        transport = Transport()
+        transport.hardware = True
+        inputs = {"checkpoint": "/synthetic/checkpoint", "gripper_source_clock": "/synthetic/clock.json", "device": "cpu",
+                  "camera_topics": {"camera1": "/up", "camera2": "/wrist"},
+                  "camera_mapping": {"observation.images.up": "observation.images.camera1", "observation.images.wrist": "observation.images.camera2"},
+                  "fps": 10., "clock_binding": transport.snapshot()["gripper_controller"]["hardware_execution"]["clock_binding"]}
+        p = proposal()
+        p["runtime_inputs"] = inputs
+        redigest(p)
+        for field, invalid in (("device", []), ("fps", 30.), ("camera_topics", {}), ("camera_mapping", {})):
+            with self.subTest(field=field):
+                bad = copy.deepcopy(p)
+                bad["runtime_inputs"][field] = invalid
+                with self.assertRaisesRegex(ContractError, "LEARNED_RUNTIME_INPUTS"):
+                    validate_proposal(redigest(bad))
+        calls = []
+        executor = PickupExecutor(transport, execution_enabled=True, cell_state_store=Cell(), scene_state_store=Scene(),
+                                  source_clock=lambda: 10., monotonic_clock=lambda: 10.)
+        job = OneJob(Recorder(calls), executor.process)
+        self.assertTrue(job.plan_only("run", compile_program(source(), p), SCENE)["ok"])
+        self.assertTrue(job.approve(APPROVAL)["ok"])
+        observe = transport.snapshot
+        def rebound(*args):
+            value = observe(*args)
+            value["gripper_controller"]["hardware_execution"]["clock_binding"]["valid_until_system_s"] = 90.
+            return value
+        transport.snapshot = rebound
+        self.assertEqual(job.start()["code"], "LEARNED_HARDWARE_CLOCK_BINDING")
+        self.assertEqual(transport.sent, [])
+        self.assertEqual(transport.cancel_count, 0)
 
     def make_job(self, *, hardware=True):
         calls = []

@@ -7,6 +7,7 @@ import math
 import threading
 import time
 from typing import Callable
+from contextlib import contextmanager
 
 
 IDLE = "IDLE"
@@ -300,6 +301,13 @@ class NativeSmolVLA:
                 if any("class" in step or step.get("registry_name") not in allowed for step in config["steps"]):
                     raise ContractError("LEARNED_PROCESSOR_CONTRACT")
             policy, preprocessor, postprocessor = cls._load_components(policy_dir, device)
+            # CPU .to() can retain safetensors mmap storage. Own the small saved
+            # processor tensors before checking the final loaded-artifact digest.
+            for processor in (preprocessor, postprocessor):
+                for step in processor.steps:
+                    state = step.state_dict()
+                    if state:
+                        step.load_state_dict({key: tensor.clone() for key, tensor in state.items()})
             if tree_digest(policy_dir) != before:
                 raise ContractError("LEARNED_CHECKPOINT_CHANGED")
             from tools.fr5_data_factory import load_json_strict
@@ -353,26 +361,44 @@ class NativeSmolVLA:
         )
         return policy, pre, post
 
-    def __call__(self, observation):
-        from tools.fr5_data_factory import ContractError
+    @contextmanager
+    def prepare_inference(self):
+        """Check artifacts before capture and reserve one loaded-model call.
 
-        # Separate finite proposal consumers may share this loaded instance.
-        # Protect the model and both processors before any reset or inference.
+        The scope uses owned loaded tensors, not a promise that files cannot
+        change. A subsequent scope rechecks bytes; this scope never reloads them.
+        """
+        from tools.fr5_data_factory import ContractError
+        from tools.data_factory.training_receipts import tree_digest
+
         if not self._inference_lock.acquire(blocking=False):
             raise ContractError("LEARNED_REENTRANT_INFERENCE")
+        available = False
+        owner = threading.get_ident()
         try:
-            return self._predict(observation)
+            if tree_digest(self.policy_dir) != self.checkpoint["tree_digest"]:
+                raise ContractError("LEARNED_CHECKPOINT_CHANGED")
+            available = True
+            def predict(observation):
+                nonlocal available
+                if not available or threading.get_ident() != owner:
+                    raise ContractError("LEARNED_INFERENCE_SCOPE")
+                available = False
+                return self._predict(observation)
+            yield predict
         finally:
+            available = False
             self._inference_lock.release()
+
+    def __call__(self, observation):
+        with self.prepare_inference() as predict:
+            return predict(observation)
 
     def _predict(self, observation):
         import numpy as np
         import torch
         from tools.fr5_data_factory import ContractError
-        from tools.data_factory.training_receipts import tree_digest
 
-        if tree_digest(self.policy_dir) != self.checkpoint["tree_digest"]:
-            raise ContractError("LEARNED_CHECKPOINT_CHANGED")
         value = {"observation.state": torch.tensor(observation["observation.state"], dtype=torch.float32),
                  "task": observation["task"]}
         for key in ("observation.images.camera1", "observation.images.camera2"):

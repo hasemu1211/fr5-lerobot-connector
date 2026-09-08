@@ -137,6 +137,7 @@ DESTINATION_KEYS = {
     "job", "selected_sheet", "yaw0_sheet", "motion_qualification",
 }
 LIVE_RUN_KEYS = COMMON_RUN_KEYS | {"camera_profile", "dataset_root", "run_root"}
+LEARNED_RUN_KEYS = {"learned_checkpoint", "gripper_source_clock", "learned_device"}
 RESPONSE_KEYS = {"schema_version", "op_id", "op", "ok", "code", "state", "run_id", "plan_digest", "data"}
 EVENT_KEYS = {"schema_version", "event", "sequence", "origin_op_id", "ok", "code", "state", "run_id", "plan_digest", "data"}
 EPISODE_LEDGER_CONTEXT_FIELDS = frozenset({"manifest", "intent"})
@@ -224,6 +225,20 @@ def _event(response, origin_op_id):
     return value
 
 
+def _learned_options(value):
+    supplied = set(value) & LEARNED_RUN_KEYS
+    if not supplied:
+        return None
+    if not {"learned_checkpoint", "gripper_source_clock"}.issubset(supplied):
+        raise ContractError("LEARNED_RUN_INPUTS")
+    for key in supplied:
+        _text(value[key], "LEARNED_RUN_INPUTS")
+    if value.get("learned_device", "cpu") not in {"cpu", "cuda"}:
+        raise ContractError("LEARNED_RUN_INPUTS")
+    return {"checkpoint": value["learned_checkpoint"], "gripper_source_clock": value["gripper_source_clock"],
+            "device": value.get("learned_device", "cpu")}
+
+
 def _run_payload(value):
     if not isinstance(value, dict) or value.get("mode") not in {"plan_only", "live"}:
         raise ContractError("RUN_PAYLOAD")
@@ -234,6 +249,8 @@ def _run_payload(value):
         _identifier(value["motion_preset"]["id"], "MOTION_PRESET_BINDING")
         if not isinstance(value["motion_preset"]["digest"], str) or not DIGEST.fullmatch(value["motion_preset"]["digest"]):
             raise ContractError("MOTION_PRESET_BINDING")
+    _learned_options(value)
+    keys |= set(value) & LEARNED_RUN_KEYS
     supplied_recycle = set(value) & RECYCLE_COORD_KEYS
     supplied_recycle_yaw = RECYCLE_YAW_KEY in value
     supplied_destination = DESTINATION_KEY in value
@@ -696,6 +713,8 @@ def resolve_inputs(
 
 
 def _trajectory_binding(payload, validated, program):
+    if "learned_proposal" in program:
+        return None
     job = validated.get("normalized_job")
     object_profile = validated.get("object_profile")
     if not isinstance(job, Mapping) or not isinstance(object_profile, Mapping):
@@ -809,6 +828,11 @@ def _bind_trajectory_to_planned_program(
     value, *, payload, validated, planned,
 ):
     """Bind sampled parameters to the exact planner-normalized program."""
+    plan = planned.get("plan_envelope", {}).get("plan", {})
+    if "learned_proposal" in plan:
+        if value is not None:
+            raise ContractError("LEARNED_SCRIPTED_VARIANT")
+        return None
     if not isinstance(value, Mapping):
         raise ContractError("TRAJECTORY_BINDING")
     checked = _validated_trajectory_binding(
@@ -850,7 +874,8 @@ def _live_executor(payload, timeout_s, *, cell_root=None):
             "--factory-jsonl", "--ros-live", "--robot-system-id", payload["expected_robot_system_id"],
             "--cell-state-root", str(cell_root),
             "--phase-events-root", payload["run_root"],
-        ],
+        ] + (["--gripper-source-clock", payload["gripper_source_clock"]]
+             if "learned_checkpoint" in payload else []),
         timeout_s=timeout_s,
     )
 
@@ -1519,7 +1544,7 @@ def _write_preapproval_evidence(
         ))
     ):
         raise ContractError("PREAPPROVAL_EVIDENCE")
-    checked_trajectory = _validated_trajectory_binding(
+    checked_trajectory = None if "learned_proposal" in plan else _validated_trajectory_binding(
         trajectory_binding, payload=payload, validated=validated,
         motion_program_digest=plan.get(
             "motion_program_digest",
@@ -1527,6 +1552,8 @@ def _write_preapproval_evidence(
             if isinstance(trajectory_binding, Mapping) else None,
         ),
     )
+    if "learned_proposal" in plan and trajectory_binding is not None:
+        raise ContractError("LEARNED_SCRIPTED_VARIANT")
     checked_campaign = validate_preapproval_campaign_binding(campaign_binding)
     checked_reposition = (
         None if object_reposition_binding is None
@@ -1549,7 +1576,7 @@ def _write_preapproval_evidence(
         "plan_envelope": copy.deepcopy(envelope),
         "plan_envelope_digest": canonical_digest(envelope),
         "trajectory_variant_binding": checked_trajectory,
-        "trajectory_variant_binding_digest": checked_trajectory["binding_digest"],
+        "trajectory_variant_binding_digest": None if checked_trajectory is None else checked_trajectory["binding_digest"],
         "campaign_binding": (
             None if checked_campaign is None
             else copy.deepcopy(checked_campaign)
@@ -2334,36 +2361,13 @@ def _write_episode_ledger(
     }
 
 
-def run_learned_plan_only(payload, cancel, publish, *, checkpoint, observation=None, camera_topics=None,
-                          instruction, period_s, max_observation_age_s=.3,
-                          device="cpu", held_gripper_targets=False, gripper_source_clock=None,
-                          resolver=resolve_inputs, executor_factory=_executor):
-    """Native checkpoint-to-existing-planner entry point; no recorder or motion.
-
-    Without a supplied offline observation, the existing motion child captures
-    configured camera topics and seven-joint state after model load, then plans
-    on that same child. Capture subscribes only; it does not start a recorder.
-    The returned exact finite plan still needs all existing physical bindings and
-    human approvals. This API authorizes neither online outputs nor dataset commit.
-    """
-    from tools.data_factory.learned_action_adapter import NativeSmolVLA
+def _infer_native_program(native, source, child, cancel, *, urdf, instruction, period_s,
+                          observation=None, camera_topics=None, max_observation_age_s=.3,
+                          held_gripper_targets=False, runtime_inputs=None):
     from tools.data_factory.rollout.finite_plan import FinitePolicyInference, compile_program
-    def acquire_child(timeout_s):
-        return executor_factory(timeout_s, **({"gripper_source_clock": gripper_source_clock}
-                                if gripper_source_clock is not None else {}))
-    child, transferred = None, False
-    try:
-        if observation is not None and camera_topics is not None:
-            raise ContractError("LEARNED_OBSERVATION_SCHEMA")
-        validated, source, scene = resolver(payload)
-        if cancel.is_set():
-            raise ContractError("LEARNED_CANCELLED")
-        native = NativeSmolVLA.load(checkpoint, device=device)
-        if cancel.is_set():
-            raise ContractError("LEARNED_CANCELLED")
-        inference = FinitePolicyInference(native, native.checkpoint, cancel_event=cancel)
+    with native.prepare_inference() as predict:
+        inference = FinitePolicyInference(predict, native.checkpoint, cancel_event=cancel)
         if observation is None:
-            child = acquire_child(_timeout_s(source))
             captured = _runtime_child_request(child, {
                 "schema_version": "fr5.pickup_executor.command.v4",
                 "op_id": "learned-observation", "op": "capture_observation",
@@ -2381,12 +2385,74 @@ def run_learned_plan_only(payload, cancel, publish, *, checkpoint, observation=N
             raise ContractError("LEARNED_CANCELLED")
         proposal = inference.propose(
             observation() if callable(observation) else observation, instruction=instruction,
-            robot_description=Path(payload["urdf"]).read_text(),
+            robot_description=Path(urdf).read_text(),
             period_s=period_s, max_observation_age_s=max_observation_age_s,
-            held_gripper_targets=held_gripper_targets,
+            held_gripper_targets=held_gripper_targets, runtime_inputs=runtime_inputs,
             velocity_scaling=min(step["limits"]["velocity_scaling"] for step in source["steps"] if "velocity_scaling" in step["limits"]),
         )
-        program = compile_program(source, proposal)
+        return compile_program(source, proposal)
+
+
+def _native_run_inputs(payload, profile, cancel):
+    """Match the current capture contract to canonical admitted native artifacts."""
+    from tools.data_factory.learned_action_adapter import NativeSmolVLA
+    from tools.data_factory.rollout.gripper_evidence import validate_clock_binding
+    from tools.fr5_dataset_schema import smolvla_camera_mapping
+    options = _learned_options(payload)
+    roles = profile["camera_roles"]
+    if len(roles) != 2:
+        raise ContractError("LEARNED_MODEL_CAMERAS")
+    mapping, _ = smolvla_camera_mapping([f"observation.images.{role}" for role in roles])
+    topics = {slot.rsplit(".", 1)[-1]: profile["camera_topics"][key.rsplit(".", 1)[-1]]
+              for key, slot in mapping.items()}
+    binding = validate_clock_binding(load_json_strict(Path(options["gripper_source_clock"])))
+    if cancel.is_set():
+        raise ContractError("LEARNED_CANCELLED")
+    native = NativeSmolVLA.load(options["checkpoint"], device=options["device"])
+    if cancel.is_set():
+        raise ContractError("LEARNED_CANCELLED")
+    # Artifact validation remains Learning-owned. This is the consuming sensor
+    # profile's equality check against that admitted artifact, not a second policy.
+    config = load_json_strict(native.policy_dir / "train_config.json")
+    if config.get("rename_map") != mapping:
+        raise ContractError("LEARNED_CAMERA_MAPPING")
+    inputs = {**options, "clock_binding": binding, "camera_topics": topics,
+              "camera_mapping": mapping, "fps": profile["fps"]}
+    return native, inputs
+
+
+def run_learned_plan_only(payload, cancel, publish, *, checkpoint, observation=None, camera_topics=None,
+                          instruction, period_s, max_observation_age_s=.3,
+                          device="cpu", held_gripper_targets=False, gripper_source_clock=None,
+                          resolver=resolve_inputs, executor_factory=_executor):
+    """Native checkpoint-to-existing-planner entry point; no recorder or motion.
+
+    Without a supplied offline observation, the existing motion child captures
+    configured camera topics and seven-joint state after model load, then plans
+    on that same child. Capture subscribes only; it does not start a recorder.
+    The returned exact finite plan still needs all existing physical bindings and
+    human approvals. This API authorizes neither online outputs nor dataset commit.
+    """
+    from tools.data_factory.learned_action_adapter import NativeSmolVLA
+    def acquire_child(timeout_s):
+        return executor_factory(timeout_s, **({"gripper_source_clock": gripper_source_clock}
+                                if gripper_source_clock is not None else {}))
+    child, transferred = None, False
+    try:
+        if observation is not None and camera_topics is not None:
+            raise ContractError("LEARNED_OBSERVATION_SCHEMA")
+        validated, source, scene = resolver(payload)
+        if cancel.is_set():
+            raise ContractError("LEARNED_CANCELLED")
+        native = NativeSmolVLA.load(checkpoint, device=device)
+        if cancel.is_set():
+            raise ContractError("LEARNED_CANCELLED")
+        if observation is None:
+            child = acquire_child(_timeout_s(source))
+        program = _infer_native_program(native, source, child, cancel,
+            urdf=payload.get("urdf"), instruction=instruction, period_s=period_s,
+            observation=observation, camera_topics=camera_topics, max_observation_age_s=max_observation_age_s,
+            held_gripper_targets=held_gripper_targets)
         def planning_child(timeout_s):
             nonlocal transferred
             transferred = child is not None
@@ -2414,8 +2480,15 @@ def learned_run_diagnostic(result):
 def run_plan_only(payload, cancel, publish, *, resolver=resolve_inputs, executor_factory=_executor):
     """Resolve and plan once; recorder, dataset, camera, and robot execution stay absent."""
     try:
+        learned = _learned_options(payload)
         validated, program, scene_binding = resolver(payload)
         trajectory_binding = _trajectory_binding(payload, validated, program)
+        native = inputs = None
+        if learned is not None:
+            _validate_runtime_collection_binding(validated, program)
+            profile = _collection_profile(validated, {**payload, "camera_profile":
+                payload.get("camera_profile", validated["collection_profile"]["camera_profile"])})
+            native, inputs = _native_run_inputs(payload, profile, cancel)
         if cancel.is_set():
             return _response(ok=False, code="CANCELLED", state="CANCELLED", run_id=payload["run_id"])
         publish(_response(ok=True, code="PLANNING", state="PLANNING", run_id=payload["run_id"], data={
@@ -2423,8 +2496,14 @@ def run_plan_only(payload, cancel, publish, *, resolver=resolve_inputs, executor
             "motion_program_digest": canonical_digest(program),
         }))
         timeout_s = _timeout_s(program)
-        executor = executor_factory(timeout_s)
+        executor = executor_factory(timeout_s, **({"gripper_source_clock": learned["gripper_source_clock"]}
+                                    if learned is not None else {}))
         try:
+            if native is not None:
+                program = _infer_native_program(native, program, executor, cancel,
+                    urdf=payload["urdf"], instruction=validated["normalized_job"]["instruction"],
+                    period_s=1 / inputs["fps"], camera_topics=inputs["camera_topics"], runtime_inputs=inputs)
+                trajectory_binding = None
             def recorder_forbidden(_):
                 raise ContractError("PLAN_ONLY_RECORDER_FORBIDDEN")
 
@@ -3539,6 +3618,10 @@ def run_live(payload, cancel, publish, *, resolver=resolve_inputs, executor_fact
     resource_finished = False
     profile = None
     try:
+        learned = _learned_options(payload)
+        if learned is not None and (approval_scope != "HUMAN_GATED" or campaign_authorization is not None
+                                    or object_reposition_binding is not None):
+            raise ContractError("LEARNED_HUMAN_APPROVAL_REQUIRED")
         current_clock = clock or (lambda: datetime.now(timezone.utc))
         if not callable(current_clock):
             raise ContractError("RUNNER_CLOCK")
@@ -3762,6 +3845,11 @@ def run_live(payload, cancel, publish, *, resolver=resolve_inputs, executor_fact
         )
         if cell.get("robot_system_id") != payload["expected_robot_system_id"] or cell.get("cell_ready") is not True:
             return _response(ok=False, code="CELL_NOT_READY", state="BLOCKED", run_id=payload["run_id"])
+        native = inputs = None
+        if learned is not None:
+            publish(_response(ok=True, code="LEARNED_PREPARING", state="PREPARING", run_id=payload["run_id"],
+                              data={"mode": "live", "progress": 5}))
+            native, inputs = _native_run_inputs(payload, profile, cancel)
         _prepare_run_dir(payload)
         publish(_response(
             ok=True, code="PLANNING", state="PLANNING",
@@ -3834,6 +3922,15 @@ def run_live(payload, cancel, publish, *, resolver=resolve_inputs, executor_fact
         planned = None
         plan_error = None
         try:
+            if native is not None:
+                # Existing camera readiness must finish before acquiring the
+                # original inputs; its waiting time cannot consume their age.
+                camera_warmup_future.result()
+                program = _infer_native_program(native, program, executor, cancel,
+                    urdf=payload["urdf"], instruction=(validated["normalized_job"]["instruction"]
+                        if checked_episode_instruction is None else checked_episode_instruction["instruction"]),
+                    period_s=1 / inputs["fps"], camera_topics=inputs["camera_topics"], runtime_inputs=inputs)
+                trajectory_binding = None
             planned = job.plan_only(payload["run_id"], program, scene_binding)
         except Exception as exc:
             plan_error = exc
@@ -4030,9 +4127,7 @@ def run_live(payload, cancel, publish, *, resolver=resolve_inputs, executor_fact
                     "trajectory_variant_binding": copy.deepcopy(
                         trajectory_binding,
                     ),
-                    "trajectory_variant_binding_digest": trajectory_binding[
-                        "binding_digest"
-                    ],
+                    "trajectory_variant_binding_digest": None if trajectory_binding is None else trajectory_binding["binding_digest"],
                     "yaw_sample_binding": copy.deepcopy(checked_yaw_sample),
                     "yaw_sample_binding_digest": (
                         None if checked_yaw_sample is None
@@ -5061,6 +5156,7 @@ def _human_payload(args):
             Path(values["config_root"]), "motion_presets", args.motion_preset,
         )))
         payload["motion_preset"] = {"id": preset["motion_preset_id"], "digest": canonical_digest(preset)}
+    payload.update({key: getattr(args, key) for key in LEARNED_RUN_KEYS if getattr(args, key, None) is not None})
     recycle = {name: getattr(args, name, None) for name in ("recycle_x_mm", "recycle_y_mm")}
     if any(value is not None for value in recycle.values()):
         if any(value is None for value in recycle.values()):
@@ -5078,6 +5174,9 @@ def _parser():
     parser = ContractArgumentParser(description=__doc__)
     parser.add_argument("--factory-jsonl", action="store_true")
     parser.add_argument("--mode", choices=("plan_only", "live"), default="plan_only")
+    parser.add_argument("--learned-checkpoint", help="Explicitly prepare one admitted finite learned plan")
+    parser.add_argument("--gripper-source-clock", help="Existing measured hardware source-clock binding JSON")
+    parser.add_argument("--learned-device", choices=("cpu", "cuda"), help="Assigned inference device; defaults to cpu")
     for name in ("run-id", "job", "selected-sheet", "yaw0-sheet", "config-root", "motion-qualification", "home-candidate", "urdf", "expected-robot-system-id", "camera-profile", "dataset-root", "run-root"):
         parser.add_argument(f"--{name}")
     parser.add_argument("--recycle-x-mm", type=float)

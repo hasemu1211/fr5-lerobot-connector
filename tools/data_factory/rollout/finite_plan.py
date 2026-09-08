@@ -63,11 +63,28 @@ def validate_proposal(value):
               "source_clock", "source_timestamps_s", "max_observation_age_s", "inference_duration_s",
               "inference_started_at_s", "inference_completed_at_s", "joint_order", "units", "action_semantics", "actions",
               "period_s", "robot_description", "velocity_scaling", "proposal_digest"}
+    if isinstance(value, dict) and "runtime_inputs" in value:
+        fields.add("runtime_inputs")
     if not isinstance(value, dict) or set(value) != fields or value["schema_version"] not in {PROPOSAL_SCHEMA, HELD_PROPOSAL_SCHEMA}:
         raise ContractError("LEARNED_PROPOSAL_SCHEMA")
     p = copy.deepcopy(value)
     if p["proposal_digest"] != canonical_digest({k: v for k, v in p.items() if k != "proposal_digest"}):
         raise ContractError("LEARNED_PROPOSAL_DIGEST")
+    if "runtime_inputs" in p:
+        inputs = p["runtime_inputs"]
+        if (not isinstance(inputs, dict) or set(inputs) != {"checkpoint", "device", "gripper_source_clock", "clock_binding", "camera_topics", "camera_mapping", "fps"}
+                or any(not isinstance(inputs[k], str) or not inputs[k] for k in ("checkpoint", "gripper_source_clock"))
+                or not isinstance(inputs["device"], str) or inputs["device"] not in {"cpu", "cuda"}
+                or not isinstance(inputs["camera_topics"], dict) or set(inputs["camera_topics"]) != {"camera1", "camera2"}
+                or any(not isinstance(t, str) or not t.startswith("/") for t in inputs["camera_topics"].values())
+                or not isinstance(inputs["camera_mapping"], dict) or len(inputs["camera_mapping"]) != 2
+                or any(not isinstance(k, str) or not k.startswith("observation.images.") or not isinstance(v, str)
+                       for k, v in inputs["camera_mapping"].items())
+                or set(inputs["camera_mapping"].values()) != {"observation.images.camera1", "observation.images.camera2"}
+                or abs(_number(inputs["fps"], "LEARNED_HORIZON") * _number(p["period_s"], "LEARNED_HORIZON") - 1) > 1e-9):
+            raise ContractError("LEARNED_RUNTIME_INPUTS")
+        from .gripper_evidence import validate_clock_binding
+        validate_clock_binding(inputs["clock_binding"])
     if (p["joint_order"] != JOINTS or p["units"] != UNITS or p["action_semantics"] != "ABSOLUTE_JOINT_POSITION"
             or p["source_clock"] != "SYSTEM_TIME"):
         raise ContractError("LEARNED_ACTION_CONTRACT")
@@ -212,6 +229,9 @@ def check_execution_start(step, evidence, now, *, steady_now):
                 raise ContractError("LEARNED_START_STATE")
         from .gripper_evidence import check_hardware, identity, integer
         wire = check_hardware(evidence, now, steady_now, step["max_joint_state_age_s"])
+        inputs = step["learned_proposal"].get("runtime_inputs")
+        if inputs is not None and observed["gripper_controller"]["hardware_execution"]["clock_binding"] != inputs["clock_binding"]:
+            raise ContractError("LEARNED_HARDWARE_CLOCK_BINDING")
         if "initial_hardware_binding" in step:
             binding = step["initial_hardware_binding"]
             if (not isinstance(binding, dict) or set(binding) != {"incarnation", "generation"}
@@ -315,7 +335,7 @@ class FinitePolicyInference:
     def cancel(self):
         self._cancel.set()
 
-    def propose(self, observation, *, instruction, robot_description, period_s, max_observation_age_s=.3, velocity_scaling=.1, held_gripper_targets=False):
+    def propose(self, observation, *, instruction, robot_description, period_s, max_observation_age_s=.3, velocity_scaling=.1, held_gripper_targets=False, runtime_inputs=None):
         if not self._lock.acquire(blocking=False):
             self.cancel()
             raise ContractError("LEARNED_REENTRANT_INFERENCE")
@@ -358,6 +378,8 @@ class FinitePolicyInference:
                  "action_semantics": "ABSOLUTE_JOINT_POSITION", "period_s": period_s,
                  "robot_description": robot_description, "velocity_scaling": velocity_scaling}
             p["inference_started_at_s"] = self.source_clock()
+            if runtime_inputs is not None:
+                p["runtime_inputs"] = copy.deepcopy(runtime_inputs)
             check_freshness(p, p["inference_started_at_s"])
             started = _number(self.monotonic_clock(), "LEARNED_SOURCE_CLOCK")
             try:
