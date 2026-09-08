@@ -995,7 +995,7 @@ class PickupExecutor:
             raise ContractError("TASK_DEADLINE_EXHAUSTED")
 
     def _admit_task(self, payload):
-        from tools.data_factory.rollout.task_authority import admission, check_sources
+        from tools.data_factory.rollout.task_authority import admission
         initial = "grant" in payload
         fields = {"run_id", "plan_digest", "grant"} if initial else {"run_id", "plan_digest", "lease_id", "candidate_plan_digest"}
         run = self._bound(_exact(payload, fields, "TASK_GRANT_SCHEMA"))
@@ -1004,7 +1004,6 @@ class PickupExecutor:
                 raise ContractError("TASK_GRANT_STATE")
             grant = payload["grant"]
             receipt = admission(grant, run["plan"], run["digest"], self.source_clock())
-            check_sources(run["plan"])
             remaining = grant["deadline_s"] - self.source_clock()
             if remaining <= grant["terminal_reserve_s"] + 5.:
                 raise ContractError("TASK_POLICY_BUDGET_EXHAUSTED")
@@ -1018,7 +1017,6 @@ class PickupExecutor:
             candidate = run.get("pending_chunk")
             if not candidate or candidate["digest"] != payload["candidate_plan_digest"] or candidate["state"] != "PLANNED":
                 raise ContractError("LEARNED_NEXT_BINDING")
-            check_sources(candidate["plan"])
             candidate["approval"] = admission(run["task_grant"], candidate["plan"], candidate["digest"], self.source_clock())
             candidate["state"] = "APPROVED"
         return self._execution_response(run, payload["run_id"], run["digest"], "TASK_PLAN_ADMITTED") if not initial else _response(
@@ -1398,6 +1396,11 @@ class PickupExecutor:
             raise ContractError("PRECONTACT_TIMEOUT")
         if now >= run["execution"].get("reference_deadline", math.inf):
             raise ContractError("LEARNED_REFERENCE_TIMEOUT")
+        if "task_grant" in run:
+            from tools.data_factory.rollout.finite_plan import check_freshness
+            # Automatic authority cannot refresh frozen policy camera/state inputs.
+            # Recheck at native send too; assisted exact-plan approval is separate.
+            check_freshness(run["plan"]["learned_proposal"], self.source_clock())
 
     @staticmethod
     def _learned_dispatch_deadlines(run):
@@ -1505,14 +1508,6 @@ class PickupExecutor:
                 self._fault(run, "POST_RESET_SAFE_SNAPSHOT")
             return run["state"]
         step = steps[execution["step_index"]]
-        if "task_grant" in run:
-            try:
-                from tools.data_factory.rollout.task_authority import check_sources
-                check_sources(run["plan"])
-                self._check_task(run)
-            except ContractError as exc:
-                self._fault(run, exc.code)
-                return run["state"]
         if "task_grant" not in run and step.get("requires_confirmation") == "PRECONTACT_HUMAN" and execution.get("confirmed_step") != execution["step_index"]:
             run["state"] = "PRECONTACT_HUMAN"
             execution["wait_deadline"] = self.monotonic_clock() + run["plan"]["execution_timeouts_s"]["precontact_confirmation"]

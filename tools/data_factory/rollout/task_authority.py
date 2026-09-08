@@ -65,19 +65,17 @@ def admission(grant, plan, digest, now):
             "task_grant": copy.deepcopy(grant)}
 
 
-def check_sources(plan):
-    """Recheck native artifact authority before each command, never reload tensors."""
-    proposal = plan["learned_proposal"]
-    if proposal["checkpoint"]["runtime"] == "SYNTHETIC_TEST_ONLY":
-        return
+def check_runtime_source(inputs):
+    """Check the bound runtime file in the policy owner, before fresh capture.
+
+    NativeSmolVLA.prepare_inference owns complete checkpoint byte verification
+    and the loaded tensors for this output. Neither check belongs in the motion
+    child's command/tick loop: file I/O must not delay its stop/deadline owner.
+    The file is not consulted again while consuming that immutable output.
+    """
     from pathlib import Path
-    from tools.data_factory.training_receipts import tree_digest
-    from tools.validate_training_checkpoint import normalize_policy_dir
     from tools.fr5_data_factory import load_json_strict
-    inputs = proposal.get("runtime_inputs")
     try:
-        if inputs is None or tree_digest(normalize_policy_dir(Path(inputs["checkpoint"]))) != proposal["checkpoint"]["tree_digest"]:
-            raise ContractError("LEARNED_CHECKPOINT_CHANGED")
         key = "gripper_temporal_policy" if "gripper_temporal_policy" in inputs else "gripper_source_clock"
         if load_json_strict(Path(inputs[key])) != inputs["clock_binding"]:
             raise ContractError("TASK_SOURCE_CHANGED")

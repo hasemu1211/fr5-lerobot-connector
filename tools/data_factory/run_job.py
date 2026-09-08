@@ -2395,6 +2395,13 @@ def _infer_native_program(native, source, child, cancel, *, urdf, instruction, p
                           held_gripper_targets=False, runtime_inputs=None, serialized_references=False):
     from tools.data_factory.rollout.finite_plan import FinitePolicyInference, compile_program
     with native.prepare_inference() as predict:
+        # The existing non-motion owner verifies checkpoint bytes before yielding
+        # its loaded tensors; bind the runtime file here too, before capture.
+        if runtime_inputs is not None:
+            from tools.data_factory.rollout.task_authority import check_runtime_source
+            check_runtime_source(runtime_inputs)
+        if cancel.is_set():
+            raise ContractError("LEARNED_CANCELLED")
         inference = FinitePolicyInference(predict, native.checkpoint, cancel_event=cancel)
         if observation is None:
             captured = _runtime_child_request(child, {

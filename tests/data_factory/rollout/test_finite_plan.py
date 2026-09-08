@@ -1907,7 +1907,8 @@ class FinitePlanTest(unittest.TestCase):
         return compile_program(source(), inference.propose(obs, **OPTIONS))
 
     def test_task_grant_rechecks_native_source_bytes(self):
-        from tools.data_factory.rollout.task_authority import check_sources
+        from tools.data_factory.rollout.task_authority import check_runtime_source
+        from tools.data_factory.learned_action_adapter import NativeSmolVLA
         from tools.data_factory.training_receipts import tree_digest
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -1921,15 +1922,130 @@ class FinitePlanTest(unittest.TestCase):
             p["checkpoint"] = {**CHECKPOINT, "runtime": "lerobot-0.6.1-native", "tree_digest": tree_digest(policy)}
             p["runtime_inputs"] = {"checkpoint": str(policy.parent), "gripper_temporal_policy": str(temporal),
                                    "clock_binding": {"bound": True}}
-            plan = {"learned_proposal": p}
-            check_sources(plan)
+            native = NativeSmolVLA.__new__(NativeSmolVLA)
+            native._inference_lock = threading.Lock()
+            native.policy_dir, native.checkpoint = policy, p["checkpoint"]
+            with native.prepare_inference():
+                check_runtime_source(p["runtime_inputs"])
             processor.write_text('{"scale": 2}')
             with self.assertRaisesRegex(ContractError, "LEARNED_CHECKPOINT_CHANGED"):
-                check_sources(plan)
+                with native.prepare_inference():
+                    self.fail("changed checkpoint acquired inference authority")
             processor.write_text('{"scale": 1}')
             temporal.write_text('{"bound": false}')
             with self.assertRaisesRegex(ContractError, "TASK_SOURCE_CHANGED"):
-                check_sources(plan)
+                with native.prepare_inference():
+                    check_runtime_source(p["runtime_inputs"])
+
+    def test_task_dispatch_rechecks_frozen_inputs_after_preparation_and_at_send(self):
+        for delayed_at in ("snapshot", "native_send"):
+            with self.subTest(delayed_at=delayed_at):
+                job, executor, transport, _, _, now, _ = self.make_job()
+                self.assertTrue(job.admit_task(task_grant(source(), SCENE, job._program["learned_proposal"]))["ok"])
+                original_snapshot, original_send = transport.snapshot, transport.start_phase
+                def snapshot_delay(*args):
+                    now[0] = 10.31
+                    return original_snapshot(*args)
+                def send_delay(step, **kwargs):
+                    now[0] = 10.31
+                    kwargs["dispatch_guard"]()
+                    return original_send(step, **kwargs)
+                if delayed_at == "snapshot":
+                    transport.snapshot = snapshot_delay
+                else:
+                    transport.start_phase = send_delay
+                result = job.start()
+                self.assertEqual(result["code"], "LEARNED_STALE_OBSERVATION")
+                self.assertEqual(transport.sent, [])
+                self.assertTrue(executor.runs["run"]["cancel_event"].is_set())
+
+    def test_native_source_verification_leaves_motion_deadline_and_revocation_responsive(self):
+        from tools.data_factory.learned_action_adapter import NativeSmolVLA
+        from tools.data_factory.run_job import _infer_native_program
+        for stop in ("deadline", "revoke", "cancel", "slow"):
+            with self.subTest(stop=stop):
+                job, executor, transport, _, _, now, _ = self.make_job()
+                grant = task_grant(source(), SCENE, job._program["learned_proposal"])
+                self.assertTrue(job.admit_task(grant)["ok"])
+                self.assertTrue(job.start()["ok"])
+                now[0] = 10.1
+                self.assertEqual(job.poll()["state"], "LEARNED_CHUNK_COMPLETE")
+                original_deadline = executor.runs["run"]["task_deadline"]
+                native = NativeSmolVLA.__new__(NativeSmolVLA)
+                native._inference_lock = threading.Lock()
+                native.policy_dir, native.checkpoint = Path("unused-cpu-fixture"), CHECKPOINT
+                native._predict = mock.Mock(return_value=[ACTION[:]])
+                entered, release, cancel = threading.Event(), threading.Event(), threading.Event()
+                results, errors, captures = [], [], []
+                def verify(_):
+                    entered.set()
+                    if not release.wait(2.):
+                        raise AssertionError("test failed to release source verification")
+                    return CHECKPOINT["tree_digest"]
+                def capture(*_):
+                    captures.append(now[0])
+                    value = observation()
+                    value["observation.state"] = ACTION[:]
+                    value["source_timestamps_s"] = dict.fromkeys(("state", "camera1", "camera2"), now[0])
+                    return value
+                transport.capture_policy_observation = capture
+                def observe():
+                    result = job.observe_learned_boundary({"camera1": "/up", "camera2": "/wrist"})
+                    if not result["ok"]:
+                        raise ContractError(result["code"])
+                    return result["observation"]
+                def infer():
+                    try:
+                        results.append(_infer_native_program(native, source(), executor, cancel,
+                            urdf="unused-cpu-fixture", instruction=OPTIONS["instruction"], period_s=.1, observation=observe))
+                    except Exception as exc:
+                        errors.append(exc)
+                with mock.patch("tools.data_factory.training_receipts.tree_digest", side_effect=verify) as digest, \
+                     mock.patch.object(Path, "read_text", return_value=XML), \
+                     mock.patch("tools.data_factory.rollout.finite_plan.FinitePolicyInference",
+                                side_effect=lambda *a, **kw: FinitePolicyInference(*a, **kw, source_clock=lambda: now[0])):
+                    worker = threading.Thread(target=infer)
+                    worker.start()
+                    try:
+                        self.assertTrue(entered.wait(1.))
+                        if stop == "deadline":
+                            now[0] = 101.
+                            executor.tick()
+                        elif stop == "revoke":
+                            result = executor.process({"schema_version": "fr5.pickup_executor.command.v4", "op_id": "revoke-during-verify",
+                                "op": "revoke_task", "payload": {"run_id": "run", "grant_digest": grant["grant_digest"]}})
+                            self.assertTrue(result["ok"], result)
+                        elif stop == "cancel":
+                            self.assertFalse(job.cancel()["ok"])
+                            cancel.set()
+                        else:
+                            now[0] += .31
+                        self.assertTrue(worker.is_alive())
+                        self.assertEqual(captures, [])
+                        if stop != "slow":
+                            self.assertEqual(executor.runs["run"]["state"], "BLOCKED")
+                            self.assertTrue(executor.runs["run"]["cancel_event"].is_set())
+                    finally:
+                        release.set()
+                        worker.join(2.)
+                    self.assertFalse(worker.is_alive())
+                    self.assertEqual(digest.call_count, 1)
+                self.assertEqual(executor.runs["run"]["task_deadline"], original_deadline)
+                if stop == "slow":
+                    self.assertEqual(errors, [])
+                    self.assertEqual(captures, [10.41])
+                    # The one byte check preceded capture; admission/send do no I/O.
+                    with mock.patch("tools.data_factory.training_receipts.tree_digest", side_effect=AssertionError("motion owner hashed")):
+                        self.assertTrue(job.prepare_next_learned(results[0])["ok"])
+                        self.assertTrue(job.admit_task()["ok"])
+                        self.assertTrue(job.start_next_learned()["ok"])
+                    self.assertEqual(len(transport.sent), 2)
+                else:
+                    self.assertEqual(results, [])
+                    self.assertEqual(len(errors), 1)
+                    self.assertIsInstance(errors[0], ContractError)
+                    self.assertEqual(len(transport.sent), 1)
+                    native._predict.assert_not_called()
 
     def test_task_grant_policy_reserve_handoff_and_monotonic_deadline(self):
         for rollback in (False, True):
