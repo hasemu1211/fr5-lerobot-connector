@@ -192,6 +192,53 @@ class NativePolicyTest(unittest.TestCase):
                 NativeSmolVLA._load_components(self.policy_dir, "cpu")
             weight_load.assert_not_called()
 
+    def test_discarded_warmup_restores_rng_and_releases_owner_on_success_failure_cancel(self):
+        import random
+        from lerobot.policies.factory import make_pre_post_processors
+        python_state, numpy_state = random.getstate(), np.random.get_state()
+        self.addCleanup(random.setstate, python_state)
+        self.addCleanup(np.random.set_state, numpy_state)
+        pre, post = make_pre_post_processors(SimpleNamespace(), pretrained_path=str(self.policy_dir))
+        policy = mock.Mock()
+        with mock.patch.object(NativeSmolVLA, "_load_components", return_value=(policy, pre, post)):
+            native = NativeSmolVLA.load(self.policy_dir)
+        observation = {"observation.state": [0.] * 7, "task": "probe",
+                       "observation.images.camera1": fake_rgb(), "observation.images.camera2": fake_rgb()}
+        for outcome in ("success", "failure", "cancel"):
+            with self.subTest(outcome=outcome), torch.random.fork_rng(devices=[]):
+                cancel = threading.Event()
+                def infer(batch):
+                    self.assertEqual(tuple(batch["observation.images.camera1"].shape), (1, 3, 1, 1))
+                    random.random()
+                    np.random.rand()
+                    output = torch.randn(1, 2, 7)
+                    if outcome == "failure":
+                        raise RuntimeError("synthetic warmup failure")
+                    if outcome == "cancel":
+                        cancel.set()
+                    return output
+                policy.predict_action_chunk.side_effect = infer
+                torch_state = torch.get_rng_state().clone()
+                py_state, np_state = random.getstate(), np.random.get_state()
+                if outcome == "success":
+                    report = native.warmup(instruction="probe", height=1, width=1, cancel_event=cancel)
+                    self.assertEqual(report["output_disposition"], "DISCARDED")
+                    self.assertTrue(report["rng_state_restored"])
+                    self.assertGreaterEqual(report["duration_s"], report["inference_duration_s"])
+                    self.assertNotIn("actions", report)
+                else:
+                    with self.assertRaisesRegex(ContractError, "LEARNED_CANCELLED" if outcome == "cancel" else "LEARNED_WARMUP_FAILED"):
+                        native.warmup(instruction="probe", height=1, width=1, cancel_event=cancel)
+                self.assertTrue(torch.equal(torch.get_rng_state(), torch_state))
+                self.assertEqual(random.getstate(), py_state)
+                self.assertEqual(repr(np.random.get_state()), repr(np_state))
+                self.assertTrue(native._inference_lock.acquire(blocking=False))
+                native._inference_lock.release()
+                if outcome == "success":
+                    after_warmup = native(observation)
+                    torch.set_rng_state(torch_state)
+                    np.testing.assert_array_equal(native(observation), after_warmup)
+
     def test_prepared_capture_owns_loaded_cpu_tensors_and_rejects_next_changed_scope(self):
         from lerobot.policies.factory import make_pre_post_processors
         from safetensors.torch import load_model

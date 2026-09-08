@@ -72,7 +72,7 @@ def validate_proposal(value):
         raise ContractError("LEARNED_PROPOSAL_DIGEST")
     if "runtime_inputs" in p:
         inputs = p["runtime_inputs"]
-        if (not isinstance(inputs, dict) or set(inputs) != {"checkpoint", "device", "gripper_source_clock", "clock_binding", "camera_topics", "camera_mapping", "fps"}
+        if (not isinstance(inputs, dict) or set(inputs) - {"warmup"} != {"checkpoint", "device", "gripper_source_clock", "clock_binding", "camera_topics", "camera_mapping", "fps"}
                 or any(not isinstance(inputs[k], str) or not inputs[k] for k in ("checkpoint", "gripper_source_clock"))
                 or not isinstance(inputs["device"], str) or inputs["device"] not in {"cpu", "cuda"}
                 or not isinstance(inputs["camera_topics"], dict) or set(inputs["camera_topics"]) != {"camera1", "camera2"}
@@ -83,6 +83,17 @@ def validate_proposal(value):
                 or set(inputs["camera_mapping"].values()) != {"observation.images.camera1", "observation.images.camera2"}
                 or abs(_number(inputs["fps"], "LEARNED_HORIZON") * _number(p["period_s"], "LEARNED_HORIZON") - 1) > 1e-9):
             raise ContractError("LEARNED_RUNTIME_INPUTS")
+        if "warmup" in inputs:
+            warmup = inputs["warmup"]
+            if (not isinstance(warmup, dict) or set(warmup) != {"input_kind", "image_shape", "instruction_digest", "device", "model_calls", "output_disposition", "rng_state_restored", "duration_s", "inference_duration_s"}
+                    or warmup["input_kind"] != "SYNTHETIC_ZERO_RGB_STATE"
+                    or not isinstance(warmup["image_shape"], list) or len(warmup["image_shape"]) != 3
+                    or any(type(n) is not int or n < 1 for n in warmup["image_shape"]) or warmup["image_shape"][-1] != 3
+                    or warmup["instruction_digest"] != canonical_digest(p["instruction"])
+                    or warmup["device"] != inputs["device"] or type(warmup["model_calls"]) is not int or warmup["model_calls"] != 1
+                    or warmup["output_disposition"] != "DISCARDED" or warmup["rng_state_restored"] is not True
+                    or not 0 <= _number(warmup["inference_duration_s"], "LEARNED_WARMUP_INPUT") <= _number(warmup["duration_s"], "LEARNED_WARMUP_INPUT")):
+                raise ContractError("LEARNED_WARMUP_INPUT")
         from .gripper_evidence import validate_clock_binding
         validate_clock_binding(inputs["clock_binding"])
     if (p["joint_order"] != JOINTS or p["units"] != UNITS or p["action_semantics"] != "ABSOLUTE_JOINT_POSITION"

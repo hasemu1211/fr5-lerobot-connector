@@ -207,6 +207,12 @@ class FinitePlanTest(unittest.TestCase):
         recorder.close = lambda **_: None
         real_inference = FinitePolicyInference
         class Native:
+            def warmup(self, *, instruction, height, width, cancel_event):
+                calls.append(("native", "warmup"))
+                self_test.assertFalse(cancel_event.is_set())
+                return {"input_kind": "SYNTHETIC_ZERO_RGB_STATE", "image_shape": [height, width, 3],
+                        "instruction_digest": canonical_digest(instruction), "device": "cpu", "model_calls": 1,
+                        "output_disposition": "DISCARDED", "rng_state_restored": True, "duration_s": 2., "inference_duration_s": 1.6}
             @contextmanager
             def prepare_inference(self):
                 yield self
@@ -261,6 +267,7 @@ class FinitePlanTest(unittest.TestCase):
             self.assertEqual(result["code"], "PRECOMMIT_SAFETY" if mode == "live" else "PLANNED",
                              {k: v for k, v in result.items() if k != "data"})
             factory.assert_called_once()
+            self.assertLess(calls.index(("native", "warmup")), calls.index(("executor", "capture_observation")))
             self.assertEqual(closed, [True])
             self.assertEqual([op for target, op in calls if target == "executor"][:2], ["capture_observation", "plan"])
             if mode == "plan_only":
@@ -282,6 +289,7 @@ class FinitePlanTest(unittest.TestCase):
             plan = evidence["plan_envelope"]["plan"]
             self.assertEqual(plan["learned_source_program"], program)
             self.assertEqual(plan["learned_proposal"]["runtime_inputs"]["device"], "cpu")
+            self.assertEqual(plan["learned_proposal"]["runtime_inputs"]["warmup"]["output_disposition"], "DISCARDED")
             self.assertEqual(plan["learned_proposal"]["runtime_inputs"]["clock_binding"], clock_binding)
             self.assertEqual(result["data"]["task_effectiveness"], "UNKNOWN")
 
@@ -1224,6 +1232,18 @@ class FinitePlanTest(unittest.TestCase):
                 bad["runtime_inputs"][field] = invalid
                 with self.assertRaisesRegex(ContractError, "LEARNED_RUNTIME_INPUTS"):
                     validate_proposal(redigest(bad))
+        warmup = {"input_kind": "SYNTHETIC_ZERO_RGB_STATE", "image_shape": [1, 1, 3],
+                  "instruction_digest": canonical_digest(p["instruction"]), "device": "cpu", "model_calls": 1,
+                  "output_disposition": "DISCARDED", "rng_state_restored": True, "duration_s": 2., "inference_duration_s": 1.6}
+        for field, invalid in (("output_disposition", "ADMITTED"), ("rng_state_restored", False),
+                               ("model_calls", True), ("duration_s", -1.), ("instruction_digest", canonical_digest("another task"))):
+            with self.subTest(warmup_field=field):
+                bad = copy.deepcopy(p)
+                bad["runtime_inputs"]["warmup"] = {**warmup, field: invalid}
+                with self.assertRaisesRegex(ContractError, "LEARNED_WARMUP_INPUT"):
+                    validate_proposal(redigest(bad))
+        p["runtime_inputs"]["warmup"] = warmup
+        redigest(p)
         calls = []
         executor = PickupExecutor(transport, execution_enabled=True, cell_state_store=Cell(), scene_state_store=Scene(),
                                   source_clock=lambda: 10., monotonic_clock=lambda: 10.)

@@ -612,3 +612,41 @@ conversion, JSON transfer, inference and plan admission. Removing the full-file
 hash from that interval is a software correction, not a measured runtime fit;
 actual timing and physical continuous-reference consumption remain separately
 qualified by their existing owners.
+
+
+### Requirement: Native cold initialization precedes execution-intended capture
+
+The normal explicit learned caller SHALL complete one discarded native warmup
+on the same loaded policy and saved processors before creating its motion child
+or capturing execution-intended observations. Warmup SHALL use synthetic zero
+state and RGB at the validated collection dimensions with the bound instruction;
+it SHALL NOT reuse those synthetic values as a proposal or receive physical,
+semantic or training authority. Its output SHALL be discarded without selecting,
+snapping or truncating future model output.
+
+The existing inference owner SHALL reserve the model through warmup and cleanup,
+restore Python/NumPy and Torch CPU/assigned-device RNG state, reset model/processor
+queues, and reject cancellation or failure before fresh capture. Device warmup
+SHALL NOT choose or acquire an unassigned GPU. Normal runtime provenance SHALL
+retain its synthetic-input kind, image shape, instruction digest, assigned
+device, one model call, discarded disposition and separate total/inference
+wall times. Warmup timing SHALL NOT be relabeled as execution inference timing.
+Historical/offline proposals MAY lack this preparation record; its presence is
+not physical qualification or a guarantee that future input paths meet latency.
+
+#### Scenario: Cold call exceeds the unchanged source-age budget
+
+- **WHEN** first-call model/device work takes longer than the allowed age of a live observation
+- **THEN** the normal caller performs that discarded work before acquiring the fresh observations used for the actual proposal
+- **AND** the first proposal still passes all original pre/post-inference and plan-admission freshness checks without extending their budget
+- **AND** its RNG stream is the same as if discarded warmup had not consumed random values
+
+#### Scenario: Warmup fails or cancellation arrives during warmup
+
+- **WHEN** warmup raises or completes after cancellation
+- **THEN** no motion child, fresh capture, approval, recorder or later proposal is started
+- **AND** the existing inference lock and random state are restored on the failure path
+
+One shape-matched warmup addresses observed first-call initialization; it does not
+prove native-resolution latency across all inputs, controller coherence, full
+row consumption, staged-release completion, task success or data utility.

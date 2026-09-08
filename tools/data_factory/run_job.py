@@ -2393,7 +2393,7 @@ def _infer_native_program(native, source, child, cancel, *, urdf, instruction, p
         return compile_program(source, proposal)
 
 
-def _native_run_inputs(payload, profile, cancel):
+def _native_run_inputs(payload, profile, cancel, *, instruction):
     """Match the current capture contract to canonical admitted native artifacts."""
     from tools.data_factory.learned_action_adapter import NativeSmolVLA
     from tools.data_factory.rollout.gripper_evidence import validate_clock_binding
@@ -2416,8 +2416,11 @@ def _native_run_inputs(payload, profile, cancel):
     config = load_json_strict(native.policy_dir / "train_config.json")
     if config.get("rename_map") != mapping:
         raise ContractError("LEARNED_CAMERA_MAPPING")
+    warmup = native.warmup(instruction=instruction, height=profile["height"], width=profile["width"], cancel_event=cancel)
+    if cancel.is_set():
+        raise ContractError("LEARNED_CANCELLED")
     inputs = {**options, "clock_binding": binding, "camera_topics": topics,
-              "camera_mapping": mapping, "fps": profile["fps"]}
+              "camera_mapping": mapping, "fps": profile["fps"], "warmup": warmup}
     return native, inputs
 
 
@@ -2488,7 +2491,8 @@ def run_plan_only(payload, cancel, publish, *, resolver=resolve_inputs, executor
             _validate_runtime_collection_binding(validated, program)
             profile = _collection_profile(validated, {**payload, "camera_profile":
                 payload.get("camera_profile", validated["collection_profile"]["camera_profile"])})
-            native, inputs = _native_run_inputs(payload, profile, cancel)
+            native, inputs = _native_run_inputs(payload, profile, cancel,
+                instruction=validated["normalized_job"]["instruction"])
         if cancel.is_set():
             return _response(ok=False, code="CANCELLED", state="CANCELLED", run_id=payload["run_id"])
         publish(_response(ok=True, code="PLANNING", state="PLANNING", run_id=payload["run_id"], data={
@@ -3849,7 +3853,9 @@ def run_live(payload, cancel, publish, *, resolver=resolve_inputs, executor_fact
         if learned is not None:
             publish(_response(ok=True, code="LEARNED_PREPARING", state="PREPARING", run_id=payload["run_id"],
                               data={"mode": "live", "progress": 5}))
-            native, inputs = _native_run_inputs(payload, profile, cancel)
+            native, inputs = _native_run_inputs(payload, profile, cancel,
+                instruction=(validated["normalized_job"]["instruction"] if checked_episode_instruction is None
+                             else checked_episode_instruction["instruction"]))
         _prepare_run_dir(payload)
         publish(_response(
             ok=True, code="PLANNING", state="PLANNING",

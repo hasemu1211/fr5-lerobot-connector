@@ -103,5 +103,6 @@ direnv exec . python3 -m unittest tests.data_factory.rollout.test_policy_observa
 - [x] Connect explicit learned inputs through the normal CLI/session plan-only and live callers, preserving one child, exact approval and honest finite-probe provenance.
 - [x] Bind requested checkpoint/device, measured clock mapping, recipe/profile camera mapping and rate into the exact proposal; reject incompatible scope or changed mapping before effects.
 - [x] Move checkpoint revalidation before fresh capture under one reserved inference scope; isolate saved CPU processor storage and test same-inode file mutation with actual native loading primitives.
+- [x] Complete a discarded, shape-matched native warmup before the normal caller creates its child or captures fresh inputs; preserve random state, cleanup and separate preparation timing.
 - [ ] Qualify native-resolution conversion/transfer/inference/plan admission against the unchanged 0.3-second budget on root-assigned runtime resources; synthetic small images and model seams do not establish usability.
 - [ ] Close continuous start/pause/full-row/staged-release consumption under the existing executor and authority owners.

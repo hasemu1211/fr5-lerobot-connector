@@ -326,6 +326,7 @@ class NativeSmolVLA:
                                    "runtime": "lerobot-0.6.1-native"}
             instance.policy_dir = policy_dir
             instance.observation_view = observation_view
+            instance.device = device
             return instance
         except ContractError:
             raise
@@ -360,6 +361,54 @@ class NativeSmolVLA:
             postprocessor_overrides={"device_processor": {"device": "cpu"}},
         )
         return policy, pre, post
+
+    def warmup(self, *, instruction, height, width, cancel_event=None):
+        """Discard one shape-matched call before capture, restoring RNG streams."""
+        import random
+        import numpy as np
+        import torch
+        from tools.fr5_data_factory import ContractError, canonical_digest
+
+        if (not isinstance(instruction, str) or not instruction.strip()
+                or any(type(n) is not int or n < 1 for n in (height, width))):
+            raise ContractError("LEARNED_WARMUP_INPUT")
+        def check_cancel():
+            if cancel_event is not None and cancel_event.is_set():
+                raise ContractError("LEARNED_CANCELLED")
+        check_cancel()
+        started = time.perf_counter()
+        frame = fake_rgb(bytes(height * width * 3), height=height, width=width)
+        observation = {"observation.state": [0.] * 7, "task": instruction,
+                       "observation.images.camera1": frame, "observation.images.camera2": frame}
+        device = torch.device(self.device)
+        devices = [device.index if device.index is not None else torch.cuda.current_device()] if device.type == "cuda" else []
+        with self.prepare_inference() as predict:
+            check_cancel()
+            python_rng, numpy_rng = random.getstate(), np.random.get_state()
+            try:
+                with torch.random.fork_rng(devices=devices):
+                    try:
+                        inference_started = time.perf_counter()
+                        predict(observation)  # No proposal: these synthetic outputs are discarded.
+                        if device.type == "cuda":
+                            torch.cuda.synchronize(device)
+                        inference_s = time.perf_counter() - inference_started
+                        check_cancel()
+                    finally:
+                        self.policy.reset()
+                        self.preprocessor.reset()
+                        self.postprocessor.reset()
+            except ContractError:
+                raise
+            except Exception as exc:
+                raise ContractError("LEARNED_WARMUP_FAILED") from exc
+            finally:
+                random.setstate(python_rng)
+                np.random.set_state(numpy_rng)
+        return {"input_kind": "SYNTHETIC_ZERO_RGB_STATE", "image_shape": [height, width, 3],
+                "instruction_digest": canonical_digest(instruction), "device": self.device,
+                "model_calls": 1, "output_disposition": "DISCARDED", "rng_state_restored": True,
+                "duration_s": time.perf_counter() - started, "inference_duration_s": inference_s}
 
     @contextmanager
     def prepare_inference(self):

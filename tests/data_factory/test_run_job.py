@@ -88,13 +88,13 @@ class Executor:
 class RunJobTest(unittest.TestCase):
     def test_native_load_mapping_or_cancel_failure_precedes_live_children_and_run_writes(self):
         from tools.data_factory.learned_action_adapter import NativeSmolVLA
-        for failure in ("load", "mapping", "cancel"):
+        for failure in ("load", "mapping", "cancel", "warmup", "warmup_cancel"):
             with self.subTest(failure=failure), tempfile.TemporaryDirectory() as directory:
                 root = Path(directory)
                 profile = copy.deepcopy(PROFILE)
                 profile.update(camera_profile="up-wrist", camera_roles=["up", "wrist"],
                     camera_serials={"up": "up", "wrist": "wrist"}, camera_topics={"up": "/up", "wrist": "/wrist"})
-                validated = runtime_validated(profile=profile)
+                validated = runtime_validated(job={**JOB, "instruction": "synthetic probe"}, profile=profile)
                 program = runtime_motion(validated)
                 binding = {"schema_version": "fr5.gripper_source_clock.v1", "incarnation": [1, 2, 3, 4],
                     "calendar_to_system_offset_s": 0., "uncertainty_s": .001, "system_anchor_s": 9.,
@@ -103,11 +103,18 @@ class RunJobTest(unittest.TestCase):
                 (root / "train_config.json").write_text(json.dumps({"rename_map": {"observation.images.side": "observation.images.camera2"}}))
                 value = {**payload("live"), "camera_profile": "up-wrist", "learned_checkpoint": str(root), "gripper_source_clock": str(root / "clock.json")}
                 cancel = threading.Event()
+                if failure.startswith("warmup"):
+                    (root / "train_config.json").write_text(json.dumps({"rename_map": {"observation.images.up": "observation.images.camera1", "observation.images.wrist": "observation.images.camera2"}}))
+                def discarded_warmup(**_):
+                    if failure == "warmup_cancel":
+                        cancel.set()
+                        return {}
+                    raise run_job.ContractError("LEARNED_WARMUP_FAILED")
                 def load(*_, **__):
                     if failure == "load":
                         raise run_job.ContractError("LEARNED_CHECKPOINT_LOAD_FAILED")
                     if failure == "cancel": cancel.set()
-                    return SimpleNamespace(policy_dir=root)
+                    return SimpleNamespace(policy_dir=root, warmup=discarded_warmup)
                 cell = SimpleNamespace(read=lambda: {"robot_system_id": value["expected_robot_system_id"], "cell_ready": True})
                 with mock.patch.object(NativeSmolVLA, "load", side_effect=load), \
                      mock.patch.object(run_job, "CellStateStore", return_value=cell), \
@@ -117,7 +124,7 @@ class RunJobTest(unittest.TestCase):
                     child, warmup = mock.Mock(), mock.Mock()
                     result = run_job.run_live(value, cancel, lambda _: None, resolver=lambda _: (validated, program, SCENE),
                         executor_factory=child, camera_warmup_call=warmup)
-                self.assertEqual(result["code"], {"load": "LEARNED_CHECKPOINT_LOAD_FAILED", "mapping": "LEARNED_CAMERA_MAPPING", "cancel": "LEARNED_CANCELLED"}[failure])
+                self.assertEqual(result["code"], {"load": "LEARNED_CHECKPOINT_LOAD_FAILED", "mapping": "LEARNED_CAMERA_MAPPING", "cancel": "LEARNED_CANCELLED", "warmup": "LEARNED_WARMUP_FAILED", "warmup_cancel": "LEARNED_CANCELLED"}[failure])
                 child.assert_not_called()
                 warmup.assert_not_called()
                 writes.assert_not_called()
