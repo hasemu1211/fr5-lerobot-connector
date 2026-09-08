@@ -165,7 +165,7 @@ class Scene:
     def __init__(self):
         self.updates = []
     @contextmanager
-    def locked_snapshot(self, digest):
+    def locked_snapshot(self, digest, *, blocking=True):
         yield {"scene_state_digest": digest, "scene_state": {"revision": 1, "objects": {"cube-1": {"state": "ON_SURFACE", "object_profile_id": "cube"}}}}
     def update_object(self, **kwargs):
         self.updates.append(kwargs)
@@ -1794,8 +1794,8 @@ class FinitePlanTest(unittest.TestCase):
             if point == "scene":
                 locked_snapshot = scene.locked_snapshot
                 @contextmanager
-                def delayed_snapshot(digest):
-                    with locked_snapshot(digest) as snapshot:
+                def delayed_snapshot(digest, **options):
+                    with locked_snapshot(digest, **options) as snapshot:
                         now[0] += delay
                         yield snapshot
                 scene.locked_snapshot = delayed_snapshot
