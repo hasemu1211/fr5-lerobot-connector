@@ -27,6 +27,18 @@ condition-level task-effect/data-utility evidence remain separate outcomes.
 
 ## Finite held-target consumption
 
+- [x] Verify the opt-in serialized-reference caller with stored unchanged 4032
+  rows, per-row retiming, explicit integer-percent alternative, ordered native
+  goals and retained raw/proposed/terminal provenance.
+- [ ] Integrate the serialized-reference schema into the existing Quality phase
+  event consumer without changing its plan/segment identity rules (root-owned).
+- [ ] Preserve the root-owned terminal lifecycle source retention in the normal
+  caller when integrating reference options, so Curator can rederive diagnostics
+  from the existing run evidence rather than trust a detached projection.
+- [ ] Qualify total native wait and goal overhead against the unchanged five-second
+  chunk bound before claiming practical physical playback; retain the controller
+  start/sampling and whole-task effectiveness limitations below.
+
 - [x] Distinguish controller-reference targets from observed feedback using native source and primary controller documentation.
 - [x] Add explicit bound held-target proposals consumed by existing OneJob, sole executor and ROS transport without modifying approved arm commands.
 - [x] Expose the default-false held-target option through the native checkpoint-to-plan entrypoint, verified with saved processors and the existing planner consumer.

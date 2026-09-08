@@ -503,6 +503,8 @@ class RosMoveItTransport:
         except RuntimeError as exc:
             raise ContractError("ROS_EXEC_DESERIALIZATION", str(exc)) from exc
         if phase == "LEARNED_CHUNK":
+            from tools.data_factory.rollout.finite_plan import execution_step
+            execution_step(compiled_step, compiled_step["learned_proposal"])
             if "action_range" not in compiled_step and step_type != "ARM":
                 raise ContractError("LEARNED_SERIALIZED_ACTION_MISMATCH")
             expected = (self.build_learned_segment(compiled_step["learned_proposal"], compiled_step)
@@ -1579,27 +1581,34 @@ class RosMoveItTransport:
 
     def build_learned_segment(self, proposal, segment):
         """Serialize a frozen held target or six-joint slice, without rebasing."""
-        from tools.data_factory.rollout.finite_plan import validate_proposal, HELD_PROPOSAL_SCHEMA
+        from tools.data_factory.rollout.finite_plan import validate_proposal, HELD_PROPOSAL_SCHEMA, REFERENCE_PROPOSAL_SCHEMA
         p = validate_proposal(proposal)
         start, end = segment["action_range"]
-        if (p["schema_version"] != HELD_PROPOSAL_SCHEMA or type(start) is not int or type(end) is not int
+        reference = p["schema_version"] == REFERENCE_PROPOSAL_SCHEMA
+        if (p["schema_version"] not in {HELD_PROPOSAL_SCHEMA, REFERENCE_PROPOSAL_SCHEMA} or type(start) is not int or type(end) is not int
                 or not 0 <= start <= end <= len(p["actions"]) or start == len(p["actions"])
-                or p["actions"][start][-1] != segment["gripper_position_m"]):
+                or not (reference and segment["type"] == "ARM") and p["actions"][start][-1] != segment["gripper_position_m"]):
             raise ContractError("LEARNED_SEGMENT_BINDING")
         if segment["type"] == "GRIPPER":
             if start != end or segment["limits"] != segment["gripper_limits"]:
                 raise ContractError("LEARNED_SEGMENT_BINDING")
             return self.build_gripper_goal("LEARNED_CHUNK", segment["gripper_position_m"], segment["limits"])
         if (segment["type"] != "ARM" or start == end
-                or any(row[-1] != segment["gripper_position_m"] for row in p["actions"][start:end])):
+                or not reference and any(row[-1] != segment["gripper_position_m"] for row in p["actions"][start:end])):
+            raise ContractError("LEARNED_SEGMENT_BINDING")
+        if reference and (end != start + 1 or start > 0 and segment["gripper_position_m"] != p["actions"][start - 1][-1]):
             raise ContractError("LEARNED_SEGMENT_BINDING")
         trajectory = self._RobotTrajectory()
         trajectory.joint_trajectory.joint_names = list(JOINT_ORDER)
         initial = p["initial_state"] if start == 0 else p["actions"][start - 1]
+        elapsed = 0.
         for index, row in enumerate([initial, *p["actions"][start:end]]):
             point = self._JointTrajectoryPoint()
             point.positions = list(map(float, row[:6]))
-            point.time_from_start = self._duration(index * p["period_s"])
+            if index:
+                elapsed += (p["reference_timing"]["durations_s"][start + index - 1]
+                            if "reference_timing" in p else p["period_s"])
+            point.time_from_start = self._duration(elapsed)
             trajectory.joint_trajectory.points.append(point)
         return self._serialize_message(trajectory)
 

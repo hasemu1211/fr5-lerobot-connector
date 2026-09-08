@@ -616,16 +616,24 @@ class PickupExecutor:
             planned_duration_s = None
             continuation = None
             if phase == "LEARNED_CHUNK":
+                serialized_references = "reference_timing" in proposal
                 tolerance = motion_program["planning"]["goal_tolerances"]["joint_rad"]
                 gripper_tolerance = next(item["limits"]["completion_tolerance_m"] for item in motion_program["source_program"]["steps"] if item["phase"] == "GRIPPER_OPEN")
                 if (any(abs(a - b) > tolerance for a, b in zip(state, proposal["initial_state"][:6]))
                         or abs(observed["gripper_controller"]["feedback_position_m"] - proposal["initial_state"][-1]) > gripper_tolerance
-                        or abs(observed["gripper_controller"]["reference_position_m"] - proposal["initial_state"][-1]) > gripper_tolerance):
+                        or not serialized_references and abs(observed["gripper_controller"]["reference_position_m"] - proposal["initial_state"][-1]) > gripper_tolerance):
                     raise ContractError("LEARNED_START_STATE")
                 held_segments = []
                 for segment in step.get("held_target_segments", []):
+                    segment = copy.deepcopy(segment)
                     begin, end = segment["action_range"]
                     gripper = observed["gripper_controller"]
+                    if serialized_references and begin == 0 and segment["type"] == "ARM":
+                        from tools.data_factory.rollout.finite_plan import _limits
+                        rate = _limits(proposal["robot_description"])[-1][2] * proposal["velocity_scaling"]
+                        if abs(proposal["actions"][0][-1] - gripper["reference_position_m"]) > rate * proposal["reference_timing"]["durations_s"][0] + 1e-9:
+                            raise ContractError("LEARNED_VELOCITY_LIMIT")
+                        segment["gripper_position_m"] = gripper["reference_position_m"]
                     if (segment["type"] == "GRIPPER" and begin == 0
                             and abs(gripper["reference_position_m"] - segment["gripper_position_m"]) <= 1e-9
                             and segment["acceptable_feedback_m"]["min"] <= gripper["feedback_position_m"] <= segment["acceptable_feedback_m"]["max"]):
@@ -633,6 +641,8 @@ class PickupExecutor:
                         # following arm segment rechecks this held reference.
                         continue
                     prior = proposal["initial_state"] if begin == 0 else proposal["actions"][begin - 1]
+                    if serialized_references and segment["type"] == "GRIPPER":
+                        prior = proposal["actions"][begin]
                     segment = {**copy.deepcopy(segment), "phase": phase,
                                "learned_proposal": copy.deepcopy(proposal),
                                "start_joint_state": list(prior[:6]),
@@ -644,6 +654,9 @@ class PickupExecutor:
                     if not isinstance(encoded, bytes) or not encoded:
                         raise ContractError("LEARNED_TRAJECTORY")
                     segment["trajectory_b64"] = base64.b64encode(encoded).decode("ascii")
+                    if serialized_references:
+                        segment.pop("learned_proposal")
+                        segment["learned_proposal_digest"] = proposal["proposal_digest"]
                     held_segments.append(segment)
                 serialized = (base64.b64decode(held_segments[0]["trajectory_b64"]) if held_segments
                               else self.transport.build_learned_trajectory(proposal))
@@ -652,6 +665,8 @@ class PickupExecutor:
                 final_state = list(proposal["actions"][-1][:6])
                 step_type = "ARM"
                 planned_duration_s = len(proposal["actions"]) * proposal["period_s"]
+                if serialized_references:
+                    planned_duration_s = sum(proposal["reference_timing"]["durations_s"])
                 planned_duration_s += sum(s["limits"]["command_duration_s"] for s in held_segments if s["type"] == "GRIPPER")
                 if planned_duration_s + EXECUTION_RESULT_MARGIN_S > step["limits"]["execution_timeout_s"]:
                     raise ContractError("LEARNED_EXECUTION_TIMEOUT")
@@ -747,6 +762,9 @@ class PickupExecutor:
                 compiled["initial_hardware_binding"] = copy.deepcopy(hardware_binding)
                 if held_segments:
                     held_segments[0]["initial_hardware_binding"] = copy.deepcopy(hardware_binding)
+                    if serialized_references:
+                        held_segments[0]["initial_gripper_reference_m"] = float(observed["gripper_controller"]["reference_position_m"])
+                        held_segments[0]["gripper_tolerance_m"] = gripper_tolerance
                     compiled["held_target_segments"] = held_segments
             if planned_duration_s is not None:
                 compiled["planned_duration_s"] = float(planned_duration_s)
@@ -997,9 +1015,9 @@ class PickupExecutor:
         first = plan["steps"][0]
         first = first.get("held_target_segments", [first])[0]
         observed = self.transport.snapshot(plan["planning"]["max_joint_state_age_s"])
-        from tools.data_factory.rollout.finite_plan import check_execution_start
+        from tools.data_factory.rollout.finite_plan import check_execution_start, execution_step
         captured = {"captured_at_s": self.source_clock(), "captured_monotonic_s": self.monotonic_clock(), "snapshot": observed}
-        check_execution_start(first, captured, self.source_clock(), steady_now=self.monotonic_clock())
+        check_execution_start(execution_step(first, plan["learned_proposal"]), captured, self.source_clock(), steady_now=self.monotonic_clock())
         from tools.data_factory.rollout.gripper_evidence import check_transition
         terminal = (execution["learned_segments"][-1]["terminal_observation"]
                     if execution.get("learned_segments") else execution.get("learned_terminal_observation"))
@@ -1114,11 +1132,11 @@ class PickupExecutor:
             observed = self.transport.snapshot(run["plan"]["planning"]["max_joint_state_age_s"])
             settings = _gripper_settings(observed["gripper_settings"])
             if proposal is not None:
-                from tools.data_factory.rollout.finite_plan import check_execution_start
+                from tools.data_factory.rollout.finite_plan import check_execution_start, execution_step
                 first = run["plan"]["steps"][0]
                 first = first.get("held_target_segments", [first])[0]
                 captured = {"captured_at_s": self.source_clock(), "captured_monotonic_s": self.monotonic_clock(), "snapshot": observed}
-                check_execution_start(first, captured, self.source_clock(), steady_now=self.monotonic_clock())
+                check_execution_start(execution_step(first, run["plan"]["learned_proposal"]), captured, self.source_clock(), steady_now=self.monotonic_clock())
         except ContractError as exc:
             return _response(code=exc.code, run_id=payload["run_id"], plan_digest=payload["plan_digest"], state="APPROVED")
         except (KeyError, TypeError):
@@ -1235,6 +1253,9 @@ class PickupExecutor:
                      "cell_ready": False, "online_policy_authorized": False}
             if "held_target_segments" in run["plan"]["steps"][0]:
                 trace["segments"] = copy.deepcopy(execution.get("learned_segments", []))
+                if "reference_timing" in proposal:
+                    from tools.data_factory.rollout.finite_plan import reference_consumption
+                    trace["reference_consumption"] = reference_consumption(run["plan"], trace["segments"])
             else:
                 trace["start_observation"] = copy.deepcopy(execution.get("learned_start_observation"))
             if "learned_terminal_observation" in execution:
@@ -1265,6 +1286,8 @@ class PickupExecutor:
             raise ContractError("HEARTBEAT_TIMEOUT")
         if confirmation is not None and now > confirmation:
             raise ContractError("PRECONTACT_TIMEOUT")
+        if now >= run["execution"].get("reference_deadline", math.inf):
+            raise ContractError("LEARNED_REFERENCE_TIMEOUT")
 
     @staticmethod
     def _learned_dispatch_deadlines(run):
@@ -1379,6 +1402,8 @@ class PickupExecutor:
             return "PRECONTACT_HUMAN"
         if "held_target_segments" in step:
             step = step["held_target_segments"][execution.get("learned_segment_index", 0)]
+        if step["phase"] == "LEARNED_CHUNK" and "reference_timing" in run["plan"]["learned_proposal"]:
+            execution.setdefault("reference_deadline", self.monotonic_clock() + run["plan"]["learned_proposal"]["reference_timing"]["wall_time_limit_s"])
         deadlines = self._learned_dispatch_deadlines(run) if step["phase"] == "LEARNED_CHUNK" else None
         try:
             with self._learned_dispatch_scene(run):
@@ -1391,10 +1416,11 @@ class PickupExecutor:
                 if any(abs(a - b) > tolerance for a, b in zip(actual, expected)):
                     raise ContractError("START_STATE_MISMATCH")
                 if step["phase"] == "LEARNED_CHUNK":
-                    from tools.data_factory.rollout.finite_plan import check_execution_start
+                    from tools.data_factory.rollout.finite_plan import check_execution_start, execution_step
                     evidence = {"captured_at_s": self.source_clock(), "captured_monotonic_s": self.monotonic_clock(),
                                 "snapshot": copy.deepcopy(observed)}
-                    check_execution_start(step, evidence, self.source_clock(), steady_now=self.monotonic_clock())
+                    resolved_step = execution_step(step, run["plan"]["learned_proposal"])
+                    check_execution_start(resolved_step, evidence, self.source_clock(), steady_now=self.monotonic_clock())
                     execution["learned_start_observation"] = evidence
                     options = {"start_observation": evidence}
                     if "action_range" in step:
@@ -1405,7 +1431,7 @@ class PickupExecutor:
                 self._emit_phase_event(run, "DISPATCH_REQUESTED", step, "REQUESTED", {"step": step})
                 if step["phase"] == "LEARNED_CHUNK":
                     self._check_learned_dispatch(run, deadlines)
-                    self.transport.start_phase(step, cancel_event=run["cancel_event"], cancel_timeout_s=run["plan"]["execution_timeouts_s"]["cancel"],
+                    self.transport.start_phase(resolved_step, cancel_event=run["cancel_event"], cancel_timeout_s=run["plan"]["execution_timeouts_s"]["cancel"],
                                                dispatch_guard=lambda: self._check_learned_dispatch(run, deadlines), **options)
                     if run["state"] != "EXECUTING" or run["cancel_event"].is_set():
                         return run["state"]
@@ -1550,6 +1576,8 @@ class PickupExecutor:
             execution, now = run["execution"], self.monotonic_clock()
             if now >= execution["lease_deadline"]:
                 self._fault(run, "HEARTBEAT_TIMEOUT")
+            elif run["state"] == "EXECUTING" and now >= execution.get("reference_deadline", math.inf):
+                self._fault(run, "LEARNED_REFERENCE_TIMEOUT")
             elif run["state"] in {"PRECONTACT_HUMAN", "GRASP_VERDICT", "SEMANTIC_VERDICT", "LEARNED_CHUNK_COMPLETE", "RELEASE_VERDICT"}:
                 if now > execution["wait_deadline"]:
                     self._fault(run, {"PRECONTACT_HUMAN": "PRECONTACT_TIMEOUT", "GRASP_VERDICT": "GRASP_VERDICT_TIMEOUT", "SEMANTIC_VERDICT": "SEMANTIC_TIMEOUT", "LEARNED_CHUNK_COMPLETE": "LEARNED_CHUNK_TIMEOUT", "RELEASE_VERDICT": "RELEASE_VERDICT_TIMEOUT"}[run["state"]])
@@ -1590,13 +1618,13 @@ class PickupExecutor:
                         segment = completed_step["held_target_segments"][index]
                         try:
                             observed = self.transport.snapshot(run["plan"]["planning"]["max_joint_state_age_s"])
-                            from tools.data_factory.rollout.finite_plan import check_segment_observation
+                            from tools.data_factory.rollout.finite_plan import check_segment_observation, execution_step
                             terminal_observation = {"captured_at_s": self.source_clock(), "captured_monotonic_s": self.monotonic_clock(),
                                                     "snapshot": copy.deepcopy(observed)}
                             action_terminal = getattr(active, "action_terminal_observation", None)
                             if action_terminal is not None:
                                 terminal_observation["action_terminal"] = copy.deepcopy(action_terminal)
-                            terminal = check_segment_observation(segment, terminal_observation, self.source_clock(), terminal=True,
+                            terminal = check_segment_observation(execution_step(segment, run["plan"]["learned_proposal"]), terminal_observation, self.source_clock(), terminal=True,
                                                                  steady_now=self.monotonic_clock())
                             from tools.data_factory.rollout.gripper_evidence import check_transition
                             check_transition(execution["learned_start_observation"], terminal_observation, command=segment["type"] == "GRIPPER")
@@ -1905,7 +1933,13 @@ def run_jsonl(input_stream, output_stream, executor):
         return result["state"] == "COMPLETED"
     while True:
         try:
-            kind, value = events.get(timeout=0.05)
+            # The same owner polls opted-in short reference segments at the
+            # frozen 100 Hz cadence. Legacy Collection keeps its existing tick.
+            from tools.data_factory.rollout.finite_plan import REFERENCE_TICK_S
+            timeout = REFERENCE_TICK_S if any(
+                run["state"] == "EXECUTING" and "reference_deadline" in run.get("execution", {})
+                for run in executor.runs.values()) else .05
+            kind, value = events.get(timeout=timeout)
         except queue.Empty:
             executor.tick()
             continue

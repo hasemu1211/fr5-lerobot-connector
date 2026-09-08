@@ -137,7 +137,7 @@ DESTINATION_KEYS = {
     "job", "selected_sheet", "yaw0_sheet", "motion_qualification",
 }
 LIVE_RUN_KEYS = COMMON_RUN_KEYS | {"camera_profile", "dataset_root", "run_root"}
-LEARNED_RUN_KEYS = {"learned_checkpoint", "gripper_source_clock", "gripper_temporal_policy", "learned_device"}
+LEARNED_RUN_KEYS = {"learned_checkpoint", "gripper_source_clock", "gripper_temporal_policy", "learned_device", "learned_reference_mode"}
 RESPONSE_KEYS = {"schema_version", "op_id", "op", "ok", "code", "state", "run_id", "plan_digest", "data"}
 EVENT_KEYS = {"schema_version", "event", "sequence", "origin_op_id", "ok", "code", "state", "run_id", "plan_digest", "data"}
 EPISODE_LEDGER_CONTEXT_FIELDS = frozenset({"manifest", "intent"})
@@ -236,7 +236,10 @@ def _learned_options(value):
         _text(value[key], "LEARNED_RUN_INPUTS")
     if value.get("learned_device", "cpu") not in {"cpu", "cuda"}:
         raise ContractError("LEARNED_RUN_INPUTS")
+    if "learned_reference_mode" in value and value["learned_reference_mode"] not in {"serialized_retime", "serialized_percent_retime"}:
+        raise ContractError("LEARNED_RUN_INPUTS")
     return {"checkpoint": value["learned_checkpoint"], **{key: value[key] for key in hardware_keys},
+            **({"reference_mode": value["learned_reference_mode"]} if "learned_reference_mode" in value else {}),
             "device": value.get("learned_device", "cpu")}
 
 
@@ -2367,7 +2370,7 @@ def _write_episode_ledger(
 
 def _infer_native_program(native, source, child, cancel, *, urdf, instruction, period_s,
                           observation=None, camera_topics=None, max_observation_age_s=.3,
-                          held_gripper_targets=False, runtime_inputs=None):
+                          held_gripper_targets=False, runtime_inputs=None, serialized_references=False):
     from tools.data_factory.rollout.finite_plan import FinitePolicyInference, compile_program
     with native.prepare_inference() as predict:
         inference = FinitePolicyInference(predict, native.checkpoint, cancel_event=cancel)
@@ -2392,6 +2395,8 @@ def _infer_native_program(native, source, child, cancel, *, urdf, instruction, p
             robot_description=Path(urdf).read_text(),
             period_s=period_s, max_observation_age_s=max_observation_age_s,
             held_gripper_targets=held_gripper_targets, runtime_inputs=runtime_inputs,
+            serialized_references=serialized_references or "reference_mode" in (runtime_inputs or {}),
+            quantize_gripper=(runtime_inputs or {}).get("reference_mode") == "serialized_percent_retime",
             velocity_scaling=min(step["limits"]["velocity_scaling"] for step in source["steps"] if "velocity_scaling" in step["limits"]),
         )
         return compile_program(source, proposal)
@@ -2439,7 +2444,7 @@ def _native_run_inputs(payload, profile, cancel, *, instruction):
 def run_learned_plan_only(payload, cancel, publish, *, checkpoint, observation=None, camera_topics=None,
                           instruction, period_s, max_observation_age_s=.3,
                           device="cpu", held_gripper_targets=False, gripper_source_clock=None, gripper_temporal_policy=None,
-                          resolver=resolve_inputs, executor_factory=_executor):
+                          resolver=resolve_inputs, executor_factory=_executor, serialized_references=False):
     """Native checkpoint-to-existing-planner entry point; no recorder or motion.
 
     Without a supplied offline observation, the existing motion child captures
@@ -2468,7 +2473,7 @@ def run_learned_plan_only(payload, cancel, publish, *, checkpoint, observation=N
         program = _infer_native_program(native, source, child, cancel,
             urdf=payload.get("urdf"), instruction=instruction, period_s=period_s,
             observation=observation, camera_topics=camera_topics, max_observation_age_s=max_observation_age_s,
-            held_gripper_targets=held_gripper_targets)
+            held_gripper_targets=held_gripper_targets, serialized_references=serialized_references)
         def planning_child(timeout_s):
             nonlocal transferred
             transferred = child is not None
@@ -5217,6 +5222,8 @@ def _parser():
     parser.add_argument("--gripper-source-clock", help="Existing measured hardware source-clock binding JSON")
     parser.add_argument("--gripper-temporal-policy", help="Explicit live causal-evidence policy JSON; mutually exclusive with source-clock binding")
     parser.add_argument("--learned-device", choices=("cpu", "cuda"), help="Assigned inference device; defaults to cpu")
+    parser.add_argument("--learned-reference-mode", choices=("serialized_retime", "serialized_percent_retime"),
+                        help="Opt in before approval: retime all rows, optionally represent gripper values as integer percent, and wait for completion; five-second wall limit")
     for name in ("run-id", "job", "selected-sheet", "yaw0-sheet", "config-root", "motion-qualification", "home-candidate", "urdf", "expected-robot-system-id", "camera-profile", "dataset-root", "run-root"):
         parser.add_argument(f"--{name}")
     parser.add_argument("--recycle-x-mm", type=float)

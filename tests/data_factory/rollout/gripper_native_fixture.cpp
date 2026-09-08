@@ -134,6 +134,24 @@ int main(int argc,char **argv) {
   using namespace fairino_hardware;
   assert(argc==2 || argc==3);std::string mode=argv[1];FairinoHardwareInterface h;
   auto &r=*h._ptr_robot;h._gripper_evidence.activate();
+  if(mode=="distinct_reference" || mode=="legacy_deadband") {
+    h._require_gripper_source_clock=mode=="distinct_reference";
+    h._pending_gripper_position.reset();h._gripper_command_generation=0;
+    h._arm_stream_paused=false;h._jnt_position_command[6]=.01177;
+    assert(h.write({}, {})==hardware_interface::return_type::OK);
+    if(mode=="legacy_deadband") {
+      assert(h._gripper_command_generation==0 && !h._pending_gripper_position && r.arm_sends==1);
+    } else {
+      assert(h._gripper_command_generation==1 && h._pending_gripper_position && r.arm_sends==0);
+      assert(h._last_gripper_command==.01177);
+      assert(h.write({}, {})==hardware_interface::return_type::OK); // same reference, no restart
+      assert(h._gripper_command_generation==1 && r.arm_sends==0);
+      h._jnt_position_command[6]=.01178;
+      assert(h.write({}, {})==hardware_interface::return_type::ERROR);
+      assert(h._gripper_command_generation==1 && h._last_gripper_command==.01177 && r.arm_sends==0);
+    }
+    std::cout<<"{\"native_write_only\":true}";return 0;
+  }
   const bool guarded=mode.find("clock_")==0;
   if(guarded){
     assert(argc==3);h._require_gripper_source_clock=true;r.clock_mode=true;

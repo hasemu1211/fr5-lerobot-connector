@@ -52,6 +52,33 @@ complete the continuing Rollout responsibility or qualify a learned policy.
 
 ## Held controller references
 
+The optional serialized-reference mode extends the same segment executor to
+distinct numerical targets. It addresses a concrete FR5 mismatch: the native
+driver suspends arm streaming for `MoveGripper`, while an independently running
+JTC trajectory can continue consuming time. Completing each row's arm slice and
+then its gripper reference before starting the next row avoids that loss without introducing another
+controller or granting authority over future policy output. Per-row retiming
+preserves endpoints and is cheaper than stretching every row to the largest
+initial feedback-to-reference jump.
+
+The alternative of adding a shared pause factor to both JTCs alone is
+insufficient: their initial sampling may occur on different updates, and the
+gripper's `none` interpolation differs from arm spline interpolation. Existing
+native sampler tests retain that counterexample. The selected serialized mode
+trades simultaneous motion for explicit waits and additional goals; its runtime
+overhead must fit the unchanged five-second wall budget. A compiled duration is
+not evidence that the deployed controller can do so.
+
+An additional explicit option represents each in-bound gripper row on the native
+integer-percent lattice, preserving changes rather than choosing a constant
+open/close target. The [FAIRINO peripheral API](https://fairino-doc-en.readthedocs.io/latest/SDKManual/PythonRobotPeripherals.html)
+specifies percent positions and nonblocking return for `block=1`; neither implies
+physical completion or command ordering. The tracked native implementation
+remains the source for FR5 rounding and same-command evidence. Raw values,
+proposed values, endpoint change and completed reference ranges remain distinct.
+Out-of-bound raw values reject before this transformation. No grasp classifier,
+learned effectiveness claim or additional physical authority is introduced.
+
 Recorded actions are controller references, while observation.state contains
 feedback. Treating a held gripper reference as a timed waypoint changes its
 meaning. ROS JointTrajectoryController interpolates position-only waypoints,

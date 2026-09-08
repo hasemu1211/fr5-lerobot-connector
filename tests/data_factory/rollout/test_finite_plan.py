@@ -130,6 +130,10 @@ class Transport(T):
         self.calls.append("compile-learned")
         return repr(p["actions"]).encode()
 
+    def build_learned_segment(self, p, segment):
+        self.calls.append("compile-learned-segment")
+        return repr((p["actions"], segment)).encode()
+
     def start_phase(self, step, **kwargs):
         if self.active:
             raise ContractError("ROS_EXEC_ACTIVE")
@@ -193,6 +197,27 @@ class Recorder:
 
 
 class FinitePlanTest(unittest.TestCase):
+    def test_recorded4032_raw_output_retains_all_rows_and_rejects_limits(self):
+        recorded = json.loads(Path(__file__).with_name("recorded4032.json").read_text())
+        self.assertEqual(recorded["source_report_sha256"],
+                         "0416a02d20ef41ef27137f5b7812b45ca83aa71fcfa3f53024e826a7201379c7")
+        for sample in recorded["samples"]:
+            with self.subTest(sample=sample["index"]):
+                raw = copy.deepcopy(sample["actions"])
+                self.assertEqual(len(raw), 50)
+                self.assertTrue(all(len(row) == 7 for row in raw))
+                obs = observation()
+                obs["observation.state"] = sample["initial_state"]
+                inference = FinitePolicyInference(lambda _: raw, recorded["checkpoint"],
+                                                  source_clock=lambda: 10.)
+                # Only acquisition time is synthetic; every recorded action is
+                # unchanged. Artifact/runtime qualification is not rerun here.
+                code = "LEARNED_VELOCITY_LIMIT" if sample["index"] == 3 else "LEARNED_JOINT_LIMIT"
+                with self.assertRaisesRegex(ContractError, code):
+                    inference.propose(obs, instruction="recorded CPU replay",
+                                      robot_description=recorded["robot_description"], period_s=1 / 30)
+                self.assertEqual(raw, sample["actions"])
+
     def test_public_live_native_path_keeps_one_child_and_honest_probe_evidence(self):
         self._public_native_consumer("live")
 
@@ -205,7 +230,13 @@ class FinitePlanTest(unittest.TestCase):
     def test_public_causal_plan_only_preserves_zero_execution_effects(self):
         self._public_native_consumer("plan_only", causal=True)
 
-    def _public_native_consumer(self, mode, *, causal=False):
+    def test_public_causal_plan_only_freezes_explicit_serialized_retiming(self):
+        self._public_native_consumer("plan_only", causal=True, reference_mode="serialized_retime")
+
+    def test_public_causal_plan_only_freezes_explicit_percent_representation(self):
+        self._public_native_consumer("plan_only", causal=True, reference_mode="serialized_percent_retime")
+
+    def _public_native_consumer(self, mode, *, causal=False, reference_mode=None):
         from tools.data_factory import run_job
         from tools.data_factory.learned_action_adapter import NativeSmolVLA
         from tests.data_factory.operator.fixtures import PROFILE, JOB, runtime_validated, payload
@@ -215,6 +246,8 @@ class FinitePlanTest(unittest.TestCase):
                        camera_topics={"up": "/up", "wrist": "/wrist"})
         validated = runtime_validated(job={**JOB, "instruction": "synthetic probe", "operator_or_agent_id": "operator"}, profile=profile)
         program = source()
+        if reference_mode is not None:
+            next(s for s in program["steps"] if s["phase"] == "GRIPPER_OPEN")["gripper_position_m"] = .02
         program["resolved_job_digest"] = validated["resolved_job_digest"]
         program["binding_digests"]["collection_profile"] = validated["input_digests"]["collection_profile"]
         calls, closed, observed_requests = [], [], []
@@ -270,6 +303,8 @@ class FinitePlanTest(unittest.TestCase):
             value = {**payload(mode), "run_id": "run",
                      "job": validated["normalized_job"], "urdf": str(root / "robot.urdf"),
                      "learned_checkpoint": str(root), hardware_key: str(binding_path)}
+            if reference_mode is not None:
+                value["learned_reference_mode"] = reference_mode
             if mode == "live":
                 value.update(run_root=str(root / "runs"), dataset_root=str(root / "unused-dataset"), camera_profile="up-wrist")
             value = run_job._run_payload(value)
@@ -323,7 +358,13 @@ class FinitePlanTest(unittest.TestCase):
                 self.assertFalse(any(target in {"operator", "recorder"} for target, _ in calls))
                 self.assertFalse((root / "runs").exists())
                 self.assertIsNone(result["data"]["trajectory_variant_binding"])
-                self.assertEqual(result["data"]["finite_learned_plan"]["plan"]["learned_proposal"]["actions"], [ACTION])
+                prepared = result["data"]["finite_learned_plan"]["plan"]["learned_proposal"]
+                self.assertEqual(prepared.get("raw_actions", prepared["actions"]), [ACTION])
+                if reference_mode is not None:
+                    frozen = result["data"]["finite_learned_plan"]["plan"]["learned_proposal"]
+                    self.assertEqual(frozen["runtime_inputs"]["reference_mode"], reference_mode)
+                    self.assertEqual(frozen["reference_timing"]["raw_actions_digest"], canonical_digest([ACTION]))
+                    self.assertEqual(frozen["reference_timing"]["endpoint_changed"], reference_mode == "serialized_percent_retime")
                 return
             self.assertLess(calls.index(("executor", "plan")), calls.index(("operator", "decision")))
             self.assertLess(calls.index(("operator", "decision")), calls.index(("recorder", "begin")))
@@ -343,7 +384,7 @@ class FinitePlanTest(unittest.TestCase):
             self.assertEqual(plan["learned_proposal"]["runtime_inputs"][hardware_key], str(binding_path))
             self.assertEqual(result["data"]["task_effectiveness"], "UNKNOWN")
 
-    def make_held_job(self, initial_feedback=.021, *, controller_samples=True, arm_target=.001):
+    def make_held_job(self, initial_feedback=.021, *, controller_samples=True, arm_target=.001, recorded=None, quantize_gripper=False):
         # Reuse this file's lifecycle fixtures with the actual ROS serializers,
         # action dispatch, polling and cancellation; no ROS node is constructed.
         from builtin_interfaces.msg import Duration
@@ -361,6 +402,9 @@ class FinitePlanTest(unittest.TestCase):
         now = [10.]
         state = {"joints": [0.] * 6, "feedback": initial_feedback, "reference": .021, "age": 0., "complete": False,
                  "generation": 0, "completed_generation": 0, "started": 0., "finished": 0., "hardware_override": {}}
+        if recorded is not None:
+            sample, description, checkpoint = recorded
+            state.update(joints=sample["initial_state"][:6], feedback=sample["initial_state"][-1], reference=.01176)
         mapping = {"schema_version": "fr5.gripper_source_clock.v1", "incarnation": [1, 2, 3, 4],
                    "calendar_to_system_offset_s": 0., "uncertainty_s": .001,
                    "system_anchor_s": 9., "steady_anchor_s": 9., "valid_until_system_s": 100.}
@@ -450,6 +494,10 @@ class FinitePlanTest(unittest.TestCase):
         t.gripper.send_goal_async.side_effect = send
         src = source()
         xml = XML.replace('upper="0.02"', 'upper="0.021"')
+        if recorded is not None:
+            xml = description
+            for step in src["steps"]:
+                step["limits"]["execution_timeout_s"] = 10.
         src["binding_digests"]["robot_description_digest"] = 'sha256:' + hashlib.sha256(xml.encode()).hexdigest()
         src["gripper_requirements"].update(command_position_m=.01176, acceptable_feedback_m={"min": .01176, "max": .01218})
         for step in src["steps"]:
@@ -461,15 +509,178 @@ class FinitePlanTest(unittest.TestCase):
         obs = observation()
         obs["observation.state"] = [0.] * 6 + [initial_feedback]
         actions = [[0.] * 6 + [.021] for _ in range(4)] + [[arm_target] * 6 + [.01176] for _ in range(8)]
+        if recorded is not None:
+            actions = copy.deepcopy(sample["actions"])
+            obs["observation.state"] = sample["initial_state"][:]
         calls, cell, scene = [], Cell(), Scene()
         executor = PickupExecutor(t, execution_enabled=True, cell_state_store=cell, scene_state_store=scene,
                                   source_clock=lambda: now[0], monotonic_clock=lambda: now[0])
         job = OneJob(Recorder(calls), executor.process)
-        inference = FinitePolicyInference(lambda _: actions, CHECKPOINT, source_clock=lambda: now[0])
+        inference = FinitePolicyInference(lambda _: actions, checkpoint if recorded is not None else CHECKPOINT, source_clock=lambda: now[0])
         planned = job.plan_learned("run", src, SCENE, inference, obs, **{**OPTIONS, "robot_description": xml, "period_s": 1 / 30,
-                                  "held_gripper_targets": True, "max_observation_age_s": 5.})
+                                  "held_gripper_targets": recorded is None, "serialized_references": recorded is not None,
+                                  "quantize_gripper": quantize_gripper, "max_observation_age_s": 5.})
         self.assertTrue(planned["ok"], planned)
         return job, executor, t, state, now, sent, handles, calls
+
+    def test_native_percent_adaptation_preserves_transitions_and_exposes_changed_endpoint(self):
+        data = json.loads(Path(__file__).with_name("recorded4032.json").read_text())
+        sample = data["samples"][-1]
+        job, executor, _, _, _, sent, _, _ = self.make_held_job(
+            recorded=(sample, data["robot_description"], data["checkpoint"]), quantize_gripper=True)
+        plan = executor.runs["run"]["plan"]
+        p = plan["learned_proposal"]
+        self.assertEqual(p["raw_actions"], sample["actions"])
+        self.assertEqual([r[:6] for r in p["actions"]], [r[:6] for r in sample["actions"]])
+        self.assertEqual(len(p["actions"]), 50)
+        timing = p["reference_timing"]
+        self.assertAlmostEqual(timing["max_gripper_change_m"], .00010245173782110102)
+        self.assertAlmostEqual(timing["endpoint_delta_m"], -.00006693109482526667)
+        self.assertTrue(timing["endpoint_changed"])
+        segments = plan["steps"][0]["held_target_segments"]
+        self.assertEqual(sum(s["type"] == "GRIPPER" for s in segments), 34)
+        self.assertAlmostEqual(plan["steps"][0]["planned_duration_s"], 4.61)
+        self.assertEqual(sent, [])
+        staged = copy.deepcopy(job._program["source_program"])
+        opened = next(s for s in staged["steps"] if s["phase"] == "GRIPPER_OPEN")
+        opened.update(release_position_m=.015, release_hold_s=.5)
+        staged_program = compile_program(staged, p)
+        self.assertEqual(staged_program["source_program"], staged)
+        self.assertEqual(staged_program["steps"], job._program["steps"])
+        # Scripted staged-release context does not inject an extra policy row.
+        # The mode cannot legalize an out-of-bounds raw policy reference.
+        for raw_sample in data["samples"][:-1]:
+            obs = observation()
+            obs["observation.state"] = raw_sample["initial_state"]
+            with self.assertRaisesRegex(ContractError, "LEARNED_JOINT_LIMIT"):
+                FinitePolicyInference(lambda _: raw_sample["actions"], data["checkpoint"], source_clock=lambda: 10.).propose(
+                    obs, instruction="recorded CPU replay", robot_description=data["robot_description"],
+                    period_s=1 / 30, serialized_references=True, quantize_gripper=True)
+        for change in ("actions", "raw_actions", "reference_timing"):
+            altered = copy.deepcopy(p)
+            if change == "reference_timing":
+                altered[change]["durations_s"][0] /= 2
+            else:
+                altered[change][0][0] += .0001
+            with self.assertRaises(ContractError):
+                validate_proposal(redigest(altered))
+
+    def test_recorded4032_exact_references_reject_native_dispatch_budget(self):
+        data = json.loads(Path(__file__).with_name("recorded4032.json").read_text())
+        sample = data["samples"][-1]
+        obs = observation()
+        obs["observation.state"] = sample["initial_state"]
+        p = FinitePolicyInference(lambda _: sample["actions"], data["checkpoint"], source_clock=lambda: 10.).propose(
+            obs, instruction="recorded CPU replay", robot_description=data["robot_description"],
+            period_s=1 / 30, serialized_references=True)
+        self.assertEqual(p["actions"], sample["actions"])
+        self.assertAlmostEqual(sum(p["reference_timing"]["durations_s"]) + 50 * .04, 5.18)
+        src = source()
+        src["binding_digests"]["robot_description_digest"] = 'sha256:' + hashlib.sha256(data["robot_description"].encode()).hexdigest()
+        next(s for s in src["steps"] if s["phase"] == "GRIPPER_OPEN")["gripper_position_m"] = .021
+        with self.assertRaisesRegex(ContractError, "LEARNED_HELD_HORIZON"):
+            compile_program(src, p)
+
+    def test_recorded4032_percent_references_reach_native_consumers_with_declared_changes(self):
+        self._recorded_reference_replay(True)
+
+    def _recorded_reference_replay(self, quantize):
+        data = json.loads(Path(__file__).with_name("recorded4032.json").read_text())
+        sample = data["samples"][-1]
+        values = self.make_held_job(recorded=(sample, data["robot_description"], data["checkpoint"]), quantize_gripper=quantize)
+        job, executor, transport, state, now, sent, _, calls = values
+        plan = copy.deepcopy(executor.runs["run"]["plan"])
+        events = []
+        executor._phase_event_writer = SimpleNamespace(
+            emit=lambda event: (events.append(event) or True), ready=True, error_code=None)
+        executor.event_clock = lambda: (round(now[0] * 1e9), "SYSTEM_TIME")
+        p = plan["learned_proposal"]
+        self.assertEqual(p.get("raw_actions", p["actions"]), sample["actions"])
+        if not quantize:
+            self.assertEqual(p["actions"][-1], sample["actions"][-1])
+        self.assertAlmostEqual(sum(p["reference_timing"]["durations_s"]), 3.25)
+        segments = plan["steps"][0]["held_target_segments"]
+        self.assertEqual(len(segments), 84 if quantize else 100)
+        self.assertAlmostEqual(plan["steps"][0]["planned_duration_s"], 4.61)
+        self.assertEqual(sent, [])  # all adaptation/compilation precedes approval
+        job.approve(APPROVAL)
+        self.assertTrue(job.start()["ok"])
+        job.poll()
+        consumed = []
+        with mock.patch('tools.data_factory.motion.moveit_transport.time.time', side_effect=lambda: now[0]):
+            self.assertTrue(job.confirm("operator")["ok"])
+            for index, segment in enumerate(segments):
+                self.assertEqual(len(sent), index + 1)
+                self.assertEqual(executor.runs["run"]["plan"], plan)
+                # No next command while native action/physical completion is pending.
+                self.assertEqual(job.poll()["state"], "EXECUTING")
+                self.assertEqual(len(sent), index + 1)
+                if segment["type"] == "GRIPPER":
+                    self.assertEqual([list(point.positions) for point in sent[-1].trajectory.points],
+                                     [[segment["gripper_position_m"]]] * 2)
+                    now[0] += segment["limits"]["command_duration_s"] + .002
+                    state.update(reference=segment["gripper_position_m"], feedback=segment["gripper_position_m"])
+                else:
+                    begin, end = segment["action_range"]
+                    points = sent[-1].trajectory.joint_trajectory.points
+                    self.assertEqual([list(point.positions) for point in points[1:]],
+                                     [row[:6] for row in p["actions"][begin:end]])
+                    now[0] += sum(p["reference_timing"]["durations_s"][begin:end])
+                    state["joints"] = segment["final_joint_state"][:]
+                    consumed.extend(range(begin, end))
+                # ROS header stamps have integer-nanosecond resolution. Keep
+                # the synthetic source clock on that same grid, not 0.2 ns
+                # before a header rounded from a nonuniform duration.
+                now[0] = round(now[0], 9)
+                state["complete"] = True
+                result = job.poll()
+                self.assertTrue(result["ok"], {"segment": index, "code": result["code"],
+                                              "executor_failure": executor.runs["run"].get("failure_code")})
+            self.assertEqual(result["state"], "LEARNED_CHUNK_COMPLETE", result)
+        self.assertEqual(consumed, list(range(50)))
+        self.assertEqual((transport._execute_goal_count, transport._gripper_goal_count), (50, 34 if quantize else 50))
+        self.assertLess(now[0] - 10., 5.)
+        self.assertNotIn(("recorder", "commit"), calls)
+        self.assertEqual(executor.runs["run"]["plan"]["learned_proposal"].get("raw_actions", p["actions"]), sample["actions"])
+        from tools.data_factory.rollout.finite_plan import validate_execution_trace
+        trace = executor._execution_data(executor.runs["run"])["learned_execution"]
+        checked = validate_execution_trace(plan, trace)
+        self.assertEqual(checked["reference_consumption"]["completed_row_indices"], list(range(50)))
+        self.assertEqual(checked["reference_consumption"]["completed_gripper_generations"], list(range(1, 35 if quantize else 51)))
+        self.assertFalse(checked["reference_consumption"]["physical_sample_at_every_knot_proven"])
+        broken = copy.deepcopy(trace)
+        broken["reference_consumption"]["completed_row_indices"].pop()
+        broken["trace_digest"] = canonical_digest({k: v for k, v in broken.items() if k != "trace_digest"})
+        with self.assertRaisesRegex(ContractError, "LEARNED_TRACE_BINDING"):
+            validate_execution_trace(plan, broken)
+        # Root integrates the Quality enum compatibility separately. This returns
+        # actual executor events for that existing validator, without a fake PASS.
+        return plan, events
+
+    def test_serialized_references_deadline_and_changed_initial_reference_send_no_next_goal(self):
+        data = json.loads(Path(__file__).with_name("recorded4032.json").read_text())
+        for failure in ("start_reference", "wall_timeout"):
+            with self.subTest(failure=failure):
+                job, executor, t, state, now, sent, handles, _ = self.make_held_job(
+                    recorded=(data["samples"][-1], data["robot_description"], data["checkpoint"]), quantize_gripper=True)
+                job.approve(APPROVAL)
+                job.start()
+                job.poll()
+                with mock.patch('tools.data_factory.motion.moveit_transport.time.time', side_effect=lambda: now[0]):
+                    if failure == "start_reference":
+                        state["reference"] += .00001
+                        self.assertEqual(job.confirm("operator")["code"], "LEARNED_START_STATE")
+                        self.assertEqual(sent, [])
+                    else:
+                        self.assertTrue(job.confirm("operator")["ok"])
+                        for _ in range(9):
+                            now[0] += .5
+                            self.assertEqual(job.poll()["state"], "EXECUTING")
+                        now[0] += .501
+                        result = job.poll()
+                        self.assertEqual(result["code"], "LEARNED_REFERENCE_TIMEOUT")
+                        self.assertEqual(len(sent), 1)
+                        handles[0].cancel_goal_async.assert_called_once()
 
     def test_held_reference_replay_uses_one_gripper_goal_then_fresh_arm_start(self):
         job, executor, transport, state, now, sent, _, calls = self.make_held_job(initial_feedback=.02079, controller_samples=True)

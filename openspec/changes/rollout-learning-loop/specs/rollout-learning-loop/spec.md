@@ -1,5 +1,83 @@
 ## ADDED Requirements
 
+### Requirement: Explicit finite serialized reference consumption
+
+The normal learned caller SHALL expose serialized reference retiming only as an
+explicit choice made before exact-plan approval. The default combined trajectory
+and existing qualified held-target modes SHALL retain their contracts. Serialized
+execution SHALL preserve every raw seven-dimensional row and endpoint unless the
+caller explicitly selects integer-percent gripper representation; that option
+SHALL retain the raw rows, disclose its quantum, maximum change and endpoint
+delta, preserve all arm values, and reject raw position-limit violations before
+quantization. It SHALL NOT select one constant grasp target or infer a task phase.
+Scripted staged-release settings MAY remain in the qualified source context;
+they SHALL NOT inject unproposed targets or replace the learned rows. The legacy
+held-target mode retains its existing staged-profile rejection.
+
+Per-row retiming SHALL enforce all seven existing scaled reference-rate limits.
+The existing executor SHALL serialize distinct gripper references and their arm
+slices, retaining ordered row ranges and same-command completion evidence. It
+SHALL move to each row's arm endpoint over its incoming retimed interval before
+issuing that row's gripper reference, preserving spacing between distinct
+seven-axis references. The ordering SHALL be visible in the approved proposal. It
+SHALL NOT advance the next arm slice or issue a distinct reference while the
+previous gripper goal/completion remains unresolved. Shortening a JTC endpoint
+check SHALL NOT shorten or replace the native completion predicate. Reference
+time, minimum endpoint-check time and unqualified runtime overhead SHALL be
+reported separately before approval.
+
+The existing executor loop SHALL use the proposal's 10 ms tick for active
+serialized references and retain its legacy cadence otherwise. Retimed intervals
+and minimum JTC check times SHALL include that discretization. New-mode segments
+SHALL bind the single parent proposal by digest rather than duplicate all model
+rows. The same execution and trace validators SHALL resolve that binding; legacy
+inline proposals remain readable.
+
+The five-second wall-time budget SHALL include compilation after confirmation,
+native waits, goal/result overhead and arm execution. It SHALL start once for
+each approved chunk, SHALL NOT renew between segments, and SHALL use the sole
+existing cancellation owner at the next deadline check on expiry. This software
+deadline does not establish a hard physical stopping time. Heartbeat, precontact, current hardware
+evidence, Scene and Cell checks remain independent constraints. Initial measured
+feedback SHALL remain bound to the policy observation; a separately frozen
+controller reference SHALL be checked against current controller and native
+evidence rather than substituted for feedback.
+
+#### Scenario: Position-valid stored policy requires retiming
+- **WHEN** an explicitly opted-in full finite output exceeds reference rates but
+  its retimed rows and endpoint checks fit the finite bound
+- **THEN** the exact plan retains all rows, per-row durations and any declared
+  quantization, and the existing executor dispatches its ordered segments
+- **AND** terminal evidence identifies completed row ranges and native command
+  generations without claiming a physical sample at every knot or task success.
+
+#### Scenario: Controller overhead exhausts the chunk budget
+- **WHEN** gripper completion, goal overhead or arm execution consumes the
+  original five-second budget
+- **THEN** the executor rejects further dispatch, cancels through its existing
+  owner, and retains partial consumption and the typed timeout
+- **AND** neither a new lease nor successful JTC acknowledgement renews that budget.
+
+#### Scenario: A small native reference changes while a command is pending
+- **WHEN** a distinct reference arrives while the previous native command is
+  pending, including a difference below the legacy gripper deadband
+- **THEN** clock-qualified native execution rejects supersession and sends no arm
+  packet; an identical repeated reference does not restart the command
+- **AND** the legacy Collection deadband remains unchanged.
+
+#### Scenario: Quantization would hide an invalid model output
+- **WHEN** a raw gripper value exceeds its position limit or an altered proposal
+  no longer reproduces its declared numerical transformation
+- **THEN** admission rejects before any goal or approval is created.
+
+#### Scenario: Terminal diagnostics feed recollection
+- **WHEN** the normal live caller returns a learned terminal diagnostic
+- **THEN** the existing run directory retains its original OneJob lifecycle result
+  as `learned_lifecycle_result.json`, allowing the canonical diagnostic consumer
+  to rederive the projection and Curator to bind its source condition
+- **AND** this run evidence does not become a committed episode or authorize
+  training, physical success, or further policy output.
+
 ### Requirement: Execution consumers preserve reference and trajectory meaning
 
 A learned-action consumer SHALL distinguish recorded controller references,

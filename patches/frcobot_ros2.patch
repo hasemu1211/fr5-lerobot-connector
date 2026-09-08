@@ -991,7 +991,7 @@ diff --git a/fairino_hardware_v3_9_7/src/fairino_hardware_interface.cpp b/fairin
 +            _jnt_position_command[_gripper_joint_index], 0.0, _gripper_upper_position);
 +        const int position = static_cast<int>(std::lround(100.0 * target / _gripper_upper_position));
 +        const double last_command = _last_gripper_command.load();
-+        if (last_command < 0.0 || std::abs(target - last_command) > 0.0001) {
++        if (last_command < 0.0 || (_require_gripper_source_clock ? target != last_command : std::abs(target - last_command) > 0.0001)) {
 +            // Gripper motion interrupts servo mode. Stop producing hold packets until it completes.
 +            {
 +                std::lock_guard<std::mutex> lock(_gripper_mutex);

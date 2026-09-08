@@ -127,6 +127,11 @@ class NativeGripperEvidenceTest(unittest.TestCase):
             with self.subTest(scenario=scenario):
                 self.run_native(scenario)
 
+    def test_distinct_small_reference_is_not_discarded_or_allowed_to_supersede_pending(self):
+        for scenario in ("distinct_reference", "legacy_deadband"):
+            with self.subTest(scenario=scenario):
+                self.assertEqual(self.run_native(scenario), {"native_write_only": True})
+
     def test_off_target_old_done_needs_command_activity_or_dwell(self):
         # Reuse the actual worker with only device telemetry varied. No ROS/network.
         fixture = Path(__file__).with_name("gripper_native_fixture.cpp").read_text().split("int main(")[0]
