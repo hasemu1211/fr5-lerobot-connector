@@ -435,3 +435,61 @@ claim derived only from technical chunk completion. The next consumer is the
 existing task lifecycle and canonical diagnostic owner; Learning/Curation use
 qualified outcomes rather than counts of completed chunks. Failed attempts need
 attributable evidence even when recorder commit remains forbidden.
+
+
+## Explicit action adaptation: reference basis precedes enforcement
+
+The same frozen windows can fail for two different reasons. A demonstrated
+held gripper reference may differ from feedback without an internal reference
+change; learned outputs may additionally exceed position bounds or contain fast
+internal arm reference changes. Neither case establishes physical speed or task
+failure from finite differences alone. The next common-policy contract must
+preserve raw model output, proposed command output and actual consumed hardware
+output as distinct evidence; it must not silently replace the first with either
+of the others.
+
+The installed ros2_control 4.45.2 position-limit helper uses the previous command
+position for its velocity-derived interval, specifically accounting for feedback
+lag ([primary implementation](https://github.com/ros-controls/ros2_control/blob/4.45.2/joint_limits/src/joint_limits_helpers.cpp)).
+This supports investigating an observed controller-reference basis for command
+limits; it does not establish FR5 command timing, tracking or task semantics.
+LeRobot's installed 0.6.1 Robot interface also distinguishes requested actions
+from returned, possibly modified sent actions ([interface documentation](https://huggingface.co/docs/lerobot/main/api/robots)).
+That interface is evidence for retaining the distinction, not a substitute FR5
+executor. No new inference or model comparison is needed to test this numerical
+boundary on already-recorded raw outputs.
+
+| Bounded candidate | Counterexample and cost |
+| --- | --- |
+| Project position bounds, then uniformly retime the complete chunk | Preserves arm positions, but one of the three stored 50-row windows requires 12.06 seconds at the existing scaled reference-rate ceiling. This exceeds the five-second finite bound; extending the bound is not silently permitted. |
+| Use the installed native position-limit helper at 30 Hz with the current reference as its initial command | Retains all 50 row indices and the 1.67-second duration, but the stored windows require up to 3.81 degrees of arm-command change and 0.754 mm of gripper-command change. Endpoint differences and collision/physical task effects must remain visible. |
+
+These CPU numerical cases configure position and velocity limits only, with the
+existing 0.1 scaling. Constant in-range feedback is used for the helper's state
+check, not as simulated future motion. The recorded action at the observation
+anchor is an offline proxy for the online controller reference. Both candidates
+leave the three demonstrated reference windows unchanged; the current native
+proposal validator still rejects their initial feedback-to-reference jump.
+Thus neither candidate is an executable integration merely because its own
+reference-rate checks pass. A proposed reference-basis contract needs native
+source/time/command identity and must preserve independent feedback/start and
+hardware-completion checks before dispatch.
+
+The native helper also accepts 0.025 m feedback against a 0.021 m upper limit
+because its built-in exception tolerance is 0.0087 units. Its successful return
+must not replace the existing strict seven-joint state-admission guard. The
+installed controller-manager parameter default is `enforce_command_limits=false`;
+[Jazzy's official enablement documentation](https://control.ros.org/jazzy/doc/ros2_control/hardware_interface/doc/joint_limiting.html)
+and installed headers do not prove the running FR5 graph's enforcement state.
+No runtime parameter or hardware configuration is changed by this comparison.
+
+The preferred next software experiment is an explicitly recorded, opt-in
+reference-based adaptation consumed before exact-plan approval, with strict
+feedback limits retained. Its falsifier is failure to preserve the intended
+command endpoint/task behavior or complete native command consumption at the
+allowed duration; passing limit algebra alone does not qualify it. Adoption
+still needs the root-owned common-policy/authority decision and existing physical
+gates. Full-task continuation also needs per-plan identity through the existing
+phase-event and metric consumers: two distinct chunk plans currently collide
+under their phase/segment-only sequence identity. No second ledger or independent
+motion owner is proposed.
