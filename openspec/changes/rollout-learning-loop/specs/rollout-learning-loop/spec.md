@@ -347,6 +347,11 @@ bound in seconds. The existing Python `native_clock_parameter` function SHALL
 encode a validated binding without setting parameters or granting authority.
 Root retains configuration, measured mapping and deployment ownership.
 
+The real-hardware launch description SHALL expose this opt-in through
+`FR5_REQUIRE_GRIPPER_SOURCE_CLOCK`, defaulting to `false`. Fake hardware SHALL
+not receive this native parameter. Enabling it SHALL NOT create a clock binding,
+change the observation age limit or authorize a robot command.
+
 The sole native gripper worker SHALL pin that value to its current command and
 hardware incarnation. Missing, malformed, expired or inconsistent clock binding
 and stale initial source SHALL reject before `MoveGripper`. Completion SHALL
