@@ -106,3 +106,9 @@ direnv exec . python3 -m unittest tests.data_factory.rollout.test_policy_observa
 - [x] Complete a discarded, shape-matched native warmup before the normal caller creates its child or captures fresh inputs; preserve random state, cleanup and separate preparation timing.
 - [ ] Qualify native-resolution conversion/transfer/inference/plan admission against the unchanged 0.3-second budget on root-assigned runtime resources; synthetic small images and model seams do not establish usability.
 - [ ] Close continuous start/pause/full-row/staged-release consumption under the existing executor and authority owners.
+
+## Complete learned task attempt (proposal; no new authority granted)
+
+- [ ] Resolve the whole-task continuation/terminal distinction with the existing OneJob and authority owners; retain exact-plan limits until any future-output authority is explicitly established.
+- [ ] Compare synchronous same-owner continuation against supervised exact-approved chunks, retaining intervention, total task duration and native gripper/start/prefix evidence.
+- [ ] Demonstrate attributable complete-task success/failure and diagnostic linkage; finite prefix completion, solver metrics and synthetic replay do not satisfy this outcome.

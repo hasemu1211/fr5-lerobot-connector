@@ -395,3 +395,43 @@ investigation but do not identify a goal, prove timely first sampling, map clock
 or acknowledge hardware consumption. Existing authority and completion checks
 remain the only admission path; older traces without these diagnostics remain
 readable without acquiring the missing evidence.
+
+## Whole-task attempt beyond the finite probe
+
+The intended result remains an admitted policy attempting the complete task,
+with attributable success/failure and usable diagnostic evidence. A 50-row,
+30 Hz chunk spans about 1.67 seconds; the five-second software ceiling cannot
+stand in for a demonstrated pickup episode. Chunk completion must remain distinct
+from task completion, safe reset and training admission.
+
+Two existing-owner routes are relevant:
+
+| Route | Whole-task fit and unresolved cost |
+| --- | --- |
+| Repeated frozen chunks, each using existing exact-plan human approval | Could support a supervised task attempt after same-attempt continuation is implemented. Approval pauses and interventions change the task cadence and must be retained in evidence; this is not autonomous policy effectiveness. Current OneJob freezes at the chunk's semantic boundary and cannot simply be looped to bypass it. |
+| Bounded synchronous closed-loop policy execution through the sole native executor | Preferred engineering direction for a genuine policy task attempt: refresh observations between chunks, preserve complete outputs and retain one task/recorder/stop owner through terminal evaluation. It requires an explicit resolution of authority over future outputs and the native continuous-reference producer gaps; existing exact-plan approval does not grant that authority. |
+
+Installed LeRobot 0.6.1 includes `lerobot-rollout` and synchronous/RTC strategies.
+Its native base strategy loops over observations and forwards actions to
+`robot.send_action`; it does not establish FR5 exact-plan, scene/cell, hardware,
+recorder or semantic contracts. The [upstream deployment guide](https://github.com/huggingface/lerobot/blob/main/docs/source/inference.mdx)
+and [async guide](https://huggingface.co/docs/lerobot/async) are comparison sources,
+not authorization to introduce their robot/client or storage owner. Existing
+warmed inference is shorter than one chunk; latency alone does not justify an
+async/RTC redesign. Synchronous continuation is the first comparison baseline.
+
+Before broader implementation, root owns coordination of the shared OneJob
+chunk/terminal boundary and the existing authority contract. Whether an unseen
+future policy output is authorized is a physical-risk decision, not something a
+new digest or compiler field can establish. This proposal creates no approval,
+runtime authority envelope, execution mode or automatic reset. Engineering must
+retain original model rows/times, distinguish native gripper references from
+feedback, and prove start/pause/prefix/staged-release consumption at the actual
+producer. Changing the prepended knot alone cannot settle those requirements.
+
+The route is falsified if it needs hidden output modification, unsafe controller
+handoff, a second execution owner, unreported intervention, or a task-success
+claim derived only from technical chunk completion. The next consumer is the
+existing task lifecycle and canonical diagnostic owner; Learning/Curation use
+qualified outcomes rather than counts of completed chunks. Failed attempts need
+attributable evidence even when recorder commit remains forbidden.
