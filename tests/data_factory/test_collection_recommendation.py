@@ -874,7 +874,7 @@ class RolloutRecommendationTests(unittest.TestCase):
         fixture = RecommendationFixture()
         lifecycle = learned_lifecycle(fixture)
         args = dict(compiled_authoring=fixture.authoring(), episode_evidence=fixture.evidence[:1], source_commit=COMMIT)
-        with self.assertRaisesRegex(ContractError, "ROLLOUT_AUTHORING_REQUIRED"):
+        with self.assertRaisesRegex(ContractError, "ACQUISITION_INPUT_FIELDS"):
             derive_collection_recommendation(**args, acquisition={}, rollout_lifecycle_result=lifecycle)
         for key in ("selected_sheet", "collection_profile", "cell_calibration", "object_profile"):
             with self.subTest(key=key):
@@ -887,6 +887,315 @@ class RolloutRecommendationTests(unittest.TestCase):
                 redigest(changed["execution_evidence"]["learned_execution"], "trace_digest")
                 with self.assertRaisesRegex(ContractError, "ROLLOUT_CONDITION_BINDING"):
                     derive_collection_recommendation(**args, rollout_lifecycle_result=changed)
+
+
+class AcquisitionRolloutTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.catalog = load_operator_catalog(ROOT, device_ids=["usb-Generic_USB2.0_PC_CAMERA-video-index0"])
+
+    def setUp(self):
+        from tools.a4_place_yaw.region_layout import a4_printable_polygon
+        from tools.data_factory.workspace_geometry import polygon_bounds, rotation_envelope
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name)
+        self.fixture = RecommendationFixture(dataset_root=str(self.root / "data"), evidence_root=str(self.root / "runs"))
+        # Distinct canonical campaigns, no retained or reconstructed authoring.
+        second = copy.deepcopy(self.fixture)
+        second.draft["manifest_id"] = "second-production-shaped-campaign"
+        second.manifest, second.receipt = compile_collection_campaign(second.draft, hypothesis=second.hypothesis)
+        self.fixture.evidence[1] = second.episode(1, 11)
+        self.runs = self.fixture.store()
+        for run in self.runs:
+            (run / "compiled_authoring_evidence.json").unlink()
+        condition = self.fixture.evidence[0]["artifacts"]["intent"]["base_condition"]["coverage_condition"]
+        self.lifecycle = learned_lifecycle(self.fixture, order=0, reviewed=True)
+        plan = self.lifecycle["plan_envelope"]["plan"]
+        job = copy.deepcopy(next(r["normalized_job"] for r in self.fixture.hypothesis["resolver_receipts"]
+                                 if r["resolved_job_digest"] == plan["resolved_job_digest"]))
+        catalog = copy.deepcopy(self.catalog)
+        combo = copy.deepcopy(next(c for c in catalog["combinations"]
+                                   if c["task_id"] == "pickup_e2e" and c["variant_id"] == "DIRECT"
+                                   and "yaw_sampling_profile" not in c))
+        domain = copy.deepcopy(next(d for d in catalog["workspace_domains"] if
+            (d["workspace_id"], d["frame_id"], d["object_id"]) ==
+            (combo["workspace_id"], combo["frame_id"], combo["object_id"])))
+        # Synthetic identities in a complete native catalog/domain shape. Native
+        # geometry, selection, ledger and diagnostic validators are not mocked.
+        combo.update(workspace_id=condition["place_id"], frame_id=condition["cell_calibration_id"],
+                     object_id=condition["object_profile_id"], grasp_id=condition["grasp_profile_id"],
+                     camera_profile_id=job["collection_profile_id"])
+        domain.update(workspace_id=combo["workspace_id"], frame_id=combo["frame_id"], object_id=combo["object_id"])
+        region = domain["coverage_region"]
+        region.update(physical_binding_status="NOT_CONFIGURED", layout_id=None, layout_digest=None,
+                      region_id=None, polygon_local_xy_mm=a4_printable_polygon())
+        x, y = rotation_envelope(*polygon_bounds(region["polygon_local_xy_mm"]))
+        domain.update(x_mm={"minimum": x[0], "maximum": x[1]}, y_mm={"minimum": y[0], "maximum": y[1]})
+        redigest(domain, "domain_digest")
+        staging = self.fixture.evidence[0]["artifacts"]["staging_manifest"]["binding_digests"]
+        combo["source_digests"].update(cell=condition["cell_calibration_digest"],
+            camera_profile=condition["collection_profile_digest"], object=staging["object_profile_digest"],
+            grasp=staging["grasp_profile_digest"], motion=plan["binding_digests"]["motion_qualification"])
+        redigest(combo, "combination_digest")
+        catalog.update(combinations=[combo], workspace_domains=[domain])
+        for cell in catalog["axes"]["cell"]:
+            cell["metadata"]["place_id"] = combo["workspace_id"]
+        redigest(catalog, "catalog_digest")
+        self.selection = {"schema_version": "data_factory.operator_selection.v1", "data_mode": "GENERAL_COLLECTION",
+            "policy_id": "DETERMINISTIC_SPREAD", **{k: combo[k] for k in (
+                "combination_digest", "workspace_id", "frame_id", "task_id", "object_id", "grasp_id", "cell_id",
+                "start_pose_id", "motion_id", "variant_id", "camera_profile_id", "camera_device_id")}}
+        pose = {k: condition[k] for k in ("place_id", "yaw_deg", "x_mm", "y_mm")}
+        self.scene = {"schema_version": "data_factory.scene_state.v2", "robot_system_id": condition["robot_system_id"],
+            "revision": 3, "updated_at": "2026-09-08T00:00:00Z", "slot_allocations": {}, "objects": {"cube": {
+                "instance_id": "cube", "object_profile_id": condition["object_profile_id"], "state": "ON_SURFACE",
+                "pose": pose, "source": "HUMAN", "updated_by": "synthetic-fixture", "updated_at": "2026-09-08T00:00:00Z"}}}
+        binding = {"scene_state_digest": digest(self.scene), "revision": 3, "object_instance_id": "cube"}
+        self.lifecycle["scene_binding"] = binding
+        plan["scene_binding"] = copy.deepcopy(binding)
+        for key, value in {"object_profile": staging["object_profile_digest"], "grasp_profile": staging["grasp_profile_digest"]}.items():
+            plan["binding_digests"][key] = value
+            plan["learned_source_program"]["binding_digests"][key] = value
+        from tools.data_factory.quality.coverage_report import RESOLVED_INPUT_DIGEST_FIELDS
+        inputs = {key: plan["binding_digests"][key] for key in RESOLVED_INPUT_DIGEST_FIELDS}
+        resolved = digest({"job": job, "input_digests": inputs})
+        plan["resolved_job_digest"] = plan["learned_source_program"]["resolved_job_digest"] = resolved
+        self.rebind(self.lifecycle)
+        self.preapproval = {"schema_version": "data_factory.preapproval_evidence.v4",
+            "run_id": self.lifecycle["run_id"], "plan_digest": self.lifecycle["plan_digest"],
+            "resolved_job_digest": resolved, "plan_envelope": copy.deepcopy(self.lifecycle["plan_envelope"]),
+            "plan_envelope_digest": digest(self.lifecycle["plan_envelope"]),
+            "resolved_inputs": {"normalized_job": job, "input_digests": inputs, "resolved_job_digest": resolved}}
+        self.preapproval_path = self.root / "preapproval_evidence.json"
+        self.preapproval_path.write_text(json.dumps(self.preapproval))
+        # Native learned completion makes the scene UNKNOWN. Later recovery is
+        # a new canonical revision; it must not overwrite the original binding.
+        unknown = copy.deepcopy(self.scene)
+        unknown["revision"] = 4
+        unknown["objects"]["cube"].update(state="UNKNOWN", pose=None, source="ROBOT_ACTION")
+        self.lifecycle["execution_evidence"]["scene_transition"] = {"scene_state": unknown, "scene_state_digest": digest(unknown)}
+        self.scene["revision"] = 5
+        self.scene_path = self.root / "scene.json"
+        self.scene_path.write_text(json.dumps(self.scene))
+        self.lifecycle_path = self.root / "learned_lifecycle_result.json"
+        self.lifecycle_path.write_text(json.dumps(self.lifecycle))
+        self.acquisition = {"catalog": catalog, "selection": self.selection, "scene_state_path": str(self.scene_path),
+            "expected_scene_digest": digest(self.scene), "object_instance_id": "cube",
+            "requested_count": 4, "normalized_seed": 87, "repeat": 1}
+
+    @staticmethod
+    def rebind(lifecycle):
+        lifecycle["plan_digest"] = digest(lifecycle["plan_envelope"]["plan"])
+        lifecycle["execution_evidence"]["learned_execution"]["plan_digest"] = lifecycle["plan_digest"]
+        redigest(lifecycle["execution_evidence"]["learned_execution"], "trace_digest")
+
+    def call(self, **changes):
+        return recommend_stored_collection(**{ "run_directories": self.runs, "source_commit": COMMIT,
+            "acquisition": self.acquisition, "rollout_lifecycle_path": self.lifecycle_path, **changes})
+
+    def test_native_v2_mixed_history_current_target_and_revalidation(self):
+        from tools.data_factory.collection_recommendation_io import _acquisition_context, _load_run
+        before = {p: p.read_bytes() for p in self.root.rglob("*") if p.is_file()}
+        result = self.call()
+        self.assertEqual(result["availability"], "AVAILABLE", result)
+        advice = result["recommendation"]
+        self.assertEqual(self.call(run_directories=self.runs[::-1]), result)
+        self.assertEqual(advice["input_snapshot"]["rollout_condition"]["source"], advice["conditions"][0]["source"])
+        self.assertEqual(advice["input_snapshot"]["rollout_condition"]["data_deficit"], "UNKNOWN")
+        self.assertEqual(advice["input_snapshot"]["rollout_condition"]["condition_indices"], [0])
+        baseline = self.call(rollout_lifecycle_path=None)["recommendation"]
+        self.assertEqual(advice["object_poses"], baseline["object_poses"])
+        self.assertEqual(advice["sampling"], baseline["sampling"])
+        self.assertEqual(advice["authority"], AUTHORITY)
+        args = dict(acquisition=_acquisition_context(self.acquisition), episode_evidence=[_load_run(r)[0] for r in self.runs],
+                    rollout_preapproval_evidence=self.preapproval)
+        self.assertEqual(validate_collection_recommendation(advice, **args, rollout_evidence_analysis=self.lifecycle), advice)
+        self.assertEqual(advice["input_snapshot"]["scene_binding"]["revision"], 5)
+        self.assertEqual(advice["input_snapshot"]["rollout_condition"]["original_scene_binding"]["revision"], 3)
+        with self.assertRaisesRegex(ContractError, "ROLLOUT_LIFECYCLE_REQUIRED"):
+            validate_collection_recommendation(advice, **args)
+        changed = copy.deepcopy(advice)
+        changed["input_snapshot"]["rollout_condition"]["condition_indices"] = [1]
+        redigest(changed["input_snapshot"], "snapshot_digest")
+        redigest(changed, "recommendation_digest")
+        with self.assertRaisesRegex(ContractError, "INPUT_CHANGED"):
+            validate_collection_recommendation(changed, **args, rollout_evidence_analysis=self.lifecycle)
+        for count in (1, 7):
+            variant = self.call(acquisition={**self.acquisition, "requested_count": count})
+            self.assertEqual(variant["availability"], "AVAILABLE", variant)
+            self.assertEqual(len(variant["recommendation"]["conditions"]), count)
+        self.assertTrue(all(p.read_bytes() == value for p, value in before.items()))
+
+    def test_recovered_different_pose_uses_exact_native_direct_condition_within_budget(self):
+        from tools.data_factory.operator.catalog import project_direct_poses
+        from tools.data_factory.collection_recommendation_io import _acquisition_context, _load_run
+        original_pose = copy.deepcopy(self.scene["objects"]["cube"]["pose"])
+        self.scene["objects"]["cube"]["pose"]["x_mm"] += 1.0
+        self.scene_path.write_text(json.dumps(self.scene))
+        acquisition = {**self.acquisition, "expected_scene_digest": digest(self.scene)}
+        before = {p: p.read_bytes() for p in self.root.rglob("*") if p.is_file()}
+        for count in (2, 5):
+            with self.subTest(count=count):
+                request = {**acquisition, "requested_count": count}
+                result = self.call(acquisition=request)
+                self.assertEqual(result["availability"], "AVAILABLE", result)
+                advice = result["recommendation"]
+                self.assertEqual(advice["sampling"], {"authoring_mode": "DIRECT_EDIT",
+                    "requested_count": count, "normalized_seed": 87, "repeat": 1})
+                poses = advice["object_poses"]
+                self.assertEqual(len(poses), count)
+                self.assertEqual(poses[0], self.scene["objects"]["cube"]["pose"])
+                self.assertEqual(poses[1], original_pose)
+                self.assertEqual(advice["input_snapshot"]["rollout_condition"]["condition_indices"], [1])
+                self.assertEqual(poses, project_direct_poses(request["catalog"], self.selection, poses[0], poses[1:], count))
+                self.assertTrue(all(c["yaw_sample_binding"] is None for c in advice["conditions"]))
+                self.assertEqual(validate_collection_recommendation(advice,
+                    acquisition=_acquisition_context(request), episode_evidence=[_load_run(r)[0] for r in self.runs],
+                    rollout_evidence_analysis=self.lifecycle, rollout_preapproval_evidence=self.preapproval), advice)
+                self.assertEqual(self.call(acquisition=request), result)
+        unavailable = self.call(acquisition={**acquisition, "requested_count": 1})
+        self.assertEqual(unavailable["reason_codes"], ["COLLECTION_ACQUISITION_ROLLOUT_BUDGET_INSUFFICIENT"])
+        self.assertIsNone(unavailable["output_path"])
+        self.assertTrue(all(p.read_bytes() == value for p, value in before.items()))
+
+    def test_original_receipt_survives_native_validated_continuation_history(self):
+        first = copy.deepcopy(self.lifecycle)
+        first["plan_envelope"]["precommit_safety"] = {"approved_plan_digest": first["plan_digest"]}
+        history = {"plan_envelope": first["plan_envelope"], "state": "LEARNED_CHUNK_COMPLETE",
+            "approval": {"approval_id": "synthetic-first-chunk", "approval_scope": "HUMAN_GATED",
+                         "plan_digest": first["plan_digest"], "run_id": first["run_id"],
+                         "resolved_job_digest": first["plan_envelope"]["plan"]["resolved_job_digest"]},
+            "execution_evidence": {"learned_execution": first["execution_evidence"]["learned_execution"]}}
+        current = copy.deepcopy(self.lifecycle)
+        current["plan_envelope"]["plan"]["learned_continuation"] = {
+            "previous_plan_digest": first["plan_digest"],
+            "previous_trace_digest": first["execution_evidence"]["learned_execution"]["trace_digest"],
+            "previous_chunk_digest": digest(history), "chunk_index": 1}
+        current["execution_evidence"]["learned_history"] = [history]
+        self.rebind(current)
+        self.lifecycle_path.write_text(json.dumps(current))
+        result = self.call()
+        self.assertEqual(result["availability"], "AVAILABLE", result)
+        target = result["recommendation"]["input_snapshot"]["rollout_condition"]
+        self.assertEqual(target["source_plan_digest"], first["plan_digest"])
+        self.assertNotEqual(target["source_plan_digest"], current["plan_digest"])
+        current["execution_evidence"]["learned_history"][0]["approval"]["run_id"] = "different-run"
+        self.lifecycle_path.write_text(json.dumps(current))
+        self.assertEqual(self.call()["availability"], "UNAVAILABLE")
+
+    def test_native_cli_consumes_original_files_without_publication(self):
+        import io
+        path = self.root / "acquisition.json"
+        path.write_text(json.dumps(self.acquisition))
+        before = {p: p.read_bytes() for p in self.root.rglob("*") if p.is_file()}
+        stdout = io.StringIO()
+        arguments = ["--source-commit", COMMIT, "--acquisition-input", str(path),
+                     "--rollout-lifecycle", str(self.lifecycle_path)]
+        for run in self.runs:
+            arguments.extend(["--run-dir", str(run)])
+        with mock.patch("sys.stdout", stdout):
+            self.assertEqual(recommend_main(arguments), 0)
+        result = json.loads(stdout.getvalue())
+        self.assertEqual(result, self.call())
+        self.assertIsNone(result["output_path"])
+        self.assertEqual({p: p.read_bytes() for p in self.root.rglob("*") if p.is_file()}, before)
+
+    def test_original_source_receipt_is_required_and_bound_without_historical_reconstruction(self):
+        self.preapproval_path.unlink()
+        self.assertEqual(self.call()["reason_codes"], ["COLLECTION_ACQUISITION_ROLLOUT_SOURCE_REQUIRED"])
+        self.assertFalse(self.preapproval_path.exists())
+        for edit in (
+            lambda r: r["resolved_inputs"]["normalized_job"].update(x_mm=55.0),
+            lambda r: r["resolved_inputs"]["input_digests"].update(cell_calibration=digest("different-cell")),
+            lambda r: r.update(run_id="different-run"),
+            lambda r: r.update(plan_digest=digest("different-plan")),
+            lambda r: r.update(plan_envelope_digest=digest("different-envelope")),
+        ):
+            value = copy.deepcopy(self.preapproval)
+            edit(value)
+            self.preapproval_path.write_text(json.dumps(value))
+            before = self.preapproval_path.read_bytes()
+            result = self.call()
+            self.assertEqual(result["availability"], "UNAVAILABLE", result)
+            self.assertEqual(result["reason_codes"], ["COLLECTION_ACQUISITION_ROLLOUT_SOURCE_BINDING"])
+            self.assertIsNone(result["output_path"])
+            self.assertEqual(self.preapproval_path.read_bytes(), before)
+
+    def test_unjustified_or_mismatched_original_cannot_become_a_target(self):
+        edits = [
+            (lambda r: r["execution_evidence"]["semantic_decision"].update(source="HIL_PROXY"), "REDEMONSTRATION_UNPROVEN"),
+            (lambda r: r["execution_evidence"].pop("semantic_decision"), "REDEMONSTRATION_UNPROVEN"),
+            (lambda r: r.update(run_id="different-run"), "DIAGNOSTIC_BINDING"),
+            (lambda r: r["recorder_evidence"].update(state="FROZEN"), "DIAGNOSTIC_BINDING"),
+            (lambda r: r["plan_envelope"]["plan"]["scene_binding"].update(revision=4), "ROLLOUT_OBJECT_MISMATCH"),
+            (lambda r: r["execution_evidence"]["learned_execution"]["checkpoint"].update(tree_digest=digest("other")), "DIAGNOSTIC_BINDING"),
+        ]
+        for edit, code in edits:
+            with self.subTest(code=code):
+                value = copy.deepcopy(self.lifecycle)
+                edit(value)
+                self.rebind(value)
+                self.lifecycle_path.write_text(json.dumps(value))
+                result = self.call()
+                self.assertEqual(result["availability"], "UNAVAILABLE", result)
+                self.assertIn(code, result["reason_codes"][0])
+                self.assertIsNone(result["output_path"])
+        self.lifecycle_path.write_text(json.dumps(self.lifecycle))
+        baseline = self.call()["recommendation"]["recommendation_digest"]
+        self.assertEqual(self.call(acquisition={**self.acquisition, "normalized_seed": 88},
+            expected_recommendation_digest=baseline)["reason_codes"], ["COLLECTION_ACQUISITION_INPUT_CHANGED"])
+
+    def test_controller_fault_task_and_current_profile_changes_remain_insufficient(self):
+        value = copy.deepcopy(self.lifecycle)
+        value.update(code="CONTROLLER_FAULT", semantic_verdict=None)
+        value["execution_evidence"].pop("semantic_decision")
+        value["execution_evidence"].pop("semantic_verdict")
+        value["execution_evidence"]["learned_execution"].update(status="FAILED", failure_code="CONTROLLER_FAULT",
+                                                               terminal_state=None, terminal_phases=[])
+        self.rebind(value)
+        self.lifecycle_path.write_text(json.dumps(value))
+        self.assertEqual(self.call()["reason_codes"], ["COLLECTION_ACQUISITION_ROLLOUT_REDEMONSTRATION_UNPROVEN"])
+        for key in ("cell_calibration", "object_profile", "grasp_profile", "collection_profile", "motion_qualification"):
+            value = copy.deepcopy(self.lifecycle)
+            plan = value["plan_envelope"]["plan"]
+            plan["binding_digests"][key] = digest("different-context")
+            plan["learned_source_program"]["binding_digests"][key] = digest("different-context")
+            self.rebind(value)
+            self.lifecycle_path.write_text(json.dumps(value))
+            self.assertEqual(self.call()["reason_codes"], ["COLLECTION_ACQUISITION_ROLLOUT_SOURCE_BINDING"])
+        value = copy.deepcopy(self.lifecycle)
+        for step in value["plan_envelope"]["plan"]["learned_source_program"]["steps"]:
+            if step.get("pause_after") == "SEMANTIC_VERDICT":
+                del step["pause_after"]
+            if step["phase"] == "RETREAT_LIN":
+                step["pause_after"] = "SEMANTIC_VERDICT"
+        self.rebind(value)
+        self.lifecycle_path.write_text(json.dumps(value))
+        self.assertEqual(self.call()["reason_codes"], ["COLLECTION_ACQUISITION_ROLLOUT_SOURCE_BINDING"])
+
+    def test_v2_rechecks_lifecycle_and_scene_after_native_sampling(self):
+        from tools.data_factory import collection_recommendation_io as io
+        original = io.derive_collection_recommendation
+        for target in ("lifecycle", "preapproval", "scene"):
+            self.lifecycle_path.write_text(json.dumps(self.lifecycle))
+            self.preapproval_path.write_text(json.dumps(self.preapproval))
+            self.scene_path.write_text(json.dumps(self.scene))
+            def changed(**kwargs):
+                result = original(**kwargs)
+                if target == "lifecycle":
+                    self.lifecycle_path.write_text(json.dumps({**self.lifecycle, "code": "REPLACED"}))
+                elif target == "preapproval":
+                    self.preapproval_path.write_text(json.dumps({**self.preapproval, "run_id": "REPLACED"}))
+                else:
+                    self.scene_path.write_text(json.dumps({**self.scene, "revision": 4}))
+                return result
+            with mock.patch.object(io, "derive_collection_recommendation", side_effect=changed):
+                result = self.call()
+            self.assertEqual(result["availability"], "UNAVAILABLE")
+            self.assertEqual(result["reason_codes"], ["COLLECTION_RECOMMENDATION_ROLLOUT_INPUT_CHANGED"
+                if target != "scene" else "COLLECTION_ACQUISITION_SCENE_CHANGED"])
+            self.assertIsNone(result["output_path"])
 
 
 class CollectionRecommendationTests(unittest.TestCase):

@@ -758,6 +758,7 @@ def derive_collection_recommendation(
     episode_evidence: Sequence[Mapping[str, Any]], source_commit: str,
     acquisition: Mapping[str, Any] | None = None,
     rollout_lifecycle_result: Mapping[str, Any] | None = None,
+    rollout_preapproval_evidence: Mapping[str, Any] | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     """Measure the retained domain and advise a bounded first coverage pass.
 
@@ -767,10 +768,10 @@ def derive_collection_recommendation(
     from tools.data_factory.campaign_operator import validate_compiled_authoring_evidence
 
     if acquisition is not None:
-        if rollout_lifecycle_result is not None:
-            raise ContractError("COLLECTION_RECOMMENDATION_ROLLOUT_AUTHORING_REQUIRED")
         return _derive_acquisition_recommendation(
             acquisition=acquisition, episode_evidence=episode_evidence, source_commit=source_commit,
+            rollout_lifecycle_result=rollout_lifecycle_result,
+            rollout_preapproval_evidence=rollout_preapproval_evidence,
         )
     source = validate_compiled_authoring_evidence(compiled_authoring)
     manifest, hypothesis = source["manifest"], source["hypothesis"]
@@ -960,15 +961,21 @@ def validate_collection_recommendation(
     episode_evidence: Sequence[Mapping[str, Any]] | None = None,
     data_quality_analysis: Mapping[str, Any] | None = None,
     rollout_evidence_analysis: Mapping[str, Any] | None = None,
+    rollout_preapproval_evidence: Mapping[str, Any] | None = None,
     acquisition: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Validate a self-digested value, optionally rejoining supplied evidence."""
     if isinstance(value, Mapping) and value.get("schema_version") == ACQUISITION_SCHEMA:
         if acquisition is None or episode_evidence is None:
             raise ContractError("COLLECTION_ACQUISITION_CURRENT_INPUT_REQUIRED")
+        if (value.get("input_snapshot", {}).get("rollout_evidence_analysis_ref") is not None
+                and rollout_evidence_analysis is None):
+            raise ContractError("COLLECTION_RECOMMENDATION_ROLLOUT_LIFECYCLE_REQUIRED")
         _report, expected = _derive_acquisition_recommendation(
             acquisition=acquisition, episode_evidence=episode_evidence,
             source_commit=value.get("input_snapshot", {}).get("source_commit"),
+            rollout_lifecycle_result=rollout_evidence_analysis,
+            rollout_preapproval_evidence=rollout_preapproval_evidence,
         )
         if value != expected:
             raise ContractError("COLLECTION_ACQUISITION_INPUT_CHANGED")
@@ -1218,7 +1225,85 @@ __all__ = [
 ACQUISITION_SCHEMA = "data_factory.collection_recommendation.v2"
 
 
-def _derive_acquisition_recommendation(*, acquisition, episode_evidence, source_commit):
+def _current_rollout_condition(context, selected, lifecycle_result, preapproval):
+    """Bind a reviewed finite chunk to its original native source condition.
+
+    Original resolver fields own source XY/yaw; the current scene owns present
+    placement. A later native recovery does not rewrite the historical result.
+    """
+    from tools.data_factory.rollout.evidence_boundary import build_run_diagnostic
+    from tools.data_factory.scene_state import validate_scene_binding
+    from datetime import datetime, timezone
+    from tools.data_factory.quality.coverage_report import RESOLVED_INPUT_DIGEST_FIELDS
+    from tools.fr5_data_factory import normalize_job_spec, validate_motion_program
+
+    diagnostic = build_run_diagnostic(lifecycle_result)
+    plan = lifecycle_result["plan_envelope"]["plan"]
+    program = validate_motion_program(plan.get("learned_source_program"))
+    binding = validate_scene_binding(plan.get("scene_binding"))
+    scene = context["scene_state"]
+    if (binding["object_instance_id"] != context["object_instance_id"]
+            or lifecycle_result.get("scene_binding") != binding):
+        raise ContractError("COLLECTION_ACQUISITION_ROLLOUT_OBJECT_MISMATCH")
+    if not isinstance(preapproval, Mapping) or preapproval.get("schema_version") != "data_factory.preapproval_evidence.v4":
+        raise ContractError("COLLECTION_ACQUISITION_ROLLOUT_SOURCE_REQUIRED")
+    envelope = preapproval.get("plan_envelope")
+    plans = [plan, *[item["plan_envelope"]["plan"] for item in diagnostic.get("execution_history", [])]]
+    if (not isinstance(envelope, Mapping) or envelope.get("plan") not in plans
+            or preapproval.get("plan_envelope_digest") != canonical_digest(envelope)
+            or preapproval.get("plan_digest") != canonical_digest(envelope["plan"])
+            or preapproval.get("run_id") != diagnostic["run_id"]):
+        raise ContractError("COLLECTION_ACQUISITION_ROLLOUT_SOURCE_BINDING")
+    receipt = _exact(preapproval.get("resolved_inputs"), frozenset({
+        "normalized_job", "input_digests", "resolved_job_digest",
+    }), "COLLECTION_ACQUISITION_ROLLOUT_SOURCE_REQUIRED")
+    # Historical normalization is not renewed execution approval.
+    job = normalize_job_spec(receipt["normalized_job"], now=datetime.min.replace(tzinfo=timezone.utc))
+    inputs = _exact(receipt["input_digests"], frozenset(RESOLVED_INPUT_DIGEST_FIELDS),
+                    "COLLECTION_ACQUISITION_ROLLOUT_SOURCE_BINDING")
+    if (job != receipt["normalized_job"]
+            or canonical_digest({"job": job, "input_digests": inputs}) != receipt["resolved_job_digest"]
+            or receipt["resolved_job_digest"] != plan.get("resolved_job_digest")
+            or preapproval.get("resolved_job_digest") != receipt["resolved_job_digest"]
+            or any(program["binding_digests"].get(key) != value for key, value in inputs.items())):
+        raise ContractError("COLLECTION_ACQUISITION_ROLLOUT_SOURCE_BINDING")
+    combination = next(item for item in context["catalog"]["combinations"]
+                       if item["combination_digest"] == selected["combination_digest"])
+    # A finite chunk's source alone does not bind a pick/place destination or
+    # transition. Preserve ordinary pick/place acquisition without targeting it.
+    if selected["task_id"] != "pickup_e2e":
+        raise ContractError("COLLECTION_ACQUISITION_ROLLOUT_TRANSITION_UNSUPPORTED")
+    required = {"cell_calibration": "cell", "object_profile": "object", "grasp_profile": "grasp",
+                "collection_profile": "camera_profile", "motion_qualification": "motion"}
+    if (plan.get("resolved_job_digest") != program["resolved_job_digest"]
+            or plan.get("binding_digests") != program["binding_digests"]
+            or plan.get("robot_system_id") != scene["robot_system_id"]
+            or program["robot_system_id"] != scene["robot_system_id"]
+            or any(program["binding_digests"][key] != combination["source_digests"].get(name)
+                   for key, name in required.items())):
+        raise ContractError("COLLECTION_ACQUISITION_ROLLOUT_CONTEXT_MISMATCH")
+    if (job["task"] != selected["task_id"] or job["robot_system_id"] != scene["robot_system_id"]
+            or any(job[key] != selected[field] for key, field in {
+                "place_id": "workspace_id", "cell_calibration_id": "frame_id",
+                "object_profile_id": "object_id", "grasp_profile_id": "grasp_id",
+                "collection_profile_id": "camera_profile_id",
+            }.items())):
+        raise ContractError("COLLECTION_ACQUISITION_ROLLOUT_TASK_MISMATCH")
+    if not _human_failed_chunk(lifecycle_result):
+        raise ContractError("COLLECTION_ACQUISITION_ROLLOUT_REDEMONSTRATION_UNPROVEN")
+    return diagnostic, {
+        "resolved_job_digest": program["resolved_job_digest"], "task_id": selected["task_id"],
+        "source": {key: job[key] for key in ("place_id", "yaw_deg", "x_mm", "y_mm")},
+        "preapproval_evidence_digest": canonical_digest(preapproval),
+        "original_scene_binding": binding, "source_plan_digest": preapproval["plan_digest"],
+        "review_scope": "FINITE_LEARNED_CHUNK",
+        "suggestion": "REDEMONSTRATE_CONDITION", "reason_code": "HUMAN_REVIEWED_CHUNK_FAILURE",
+        "task_effectiveness": "UNKNOWN", "data_deficit": "UNKNOWN",
+    }
+
+
+def _derive_acquisition_recommendation(*, acquisition, episode_evidence, source_commit,
+                                      rollout_lifecycle_result=None, rollout_preapproval_evidence=None):
     """Current-source coverage advice, independent of historical authoring.
 
     Native ledger/DQA own observations; native samplers own the finite poses.
@@ -1227,7 +1312,7 @@ def _derive_acquisition_recommendation(*, acquisition, episode_evidence, source_
     from collections import Counter
     from tools.data_factory.collection_seed import derive_domain_seed, validate_campaign_seed
     from tools.data_factory.operator.catalog import (
-        validate_operator_selection, project_assisted_poses,
+        validate_operator_selection, project_assisted_poses, project_direct_poses,
         project_workspace_cycle_poses, resolve_workspace_cycle_selections,
         project_yaw_sample_bindings, project_state_space_cells,
     )
@@ -1259,6 +1344,9 @@ def _derive_acquisition_recommendation(*, acquisition, episode_evidence, source_
             or instance["pose"]["place_id"] != selected["workspace_id"]):
         raise ContractError("COLLECTION_ACQUISITION_SOURCE")
     source_pose = instance["pose"]
+    rollout = None if rollout_lifecycle_result is None else _current_rollout_condition(
+        context, selected, rollout_lifecycle_result, rollout_preapproval_evidence,
+    )
     cycle = (resolve_workspace_cycle_selections(catalog, selected, count, require_executable=False)
              if task == "pick_place" else [selected] * count)
     combinations = {item["combination_digest"]: item for item in catalog["combinations"]}
@@ -1341,9 +1429,23 @@ def _derive_acquisition_recommendation(*, acquisition, episode_evidence, source_
     projector = project_workspace_cycle_poses if task == "pick_place" else project_assisted_poses
     poses = projector(catalog, selected, source_pose, count, repeat=repeat,
                       normalized_seed=spatial_seed, yaw_sampling_seed=yaw_seed)
+    authoring_mode = "ASSISTED"
+    if rollout is not None and rollout[1]["source"] not in poses[:count]:
+        # Recovery can change the current pose. Preserve that first condition,
+        # then reuse native direct authoring for the original reviewed source;
+        # neither a lucky random sample nor resetting scene history is needed.
+        if count < 2:
+            raise ContractError("COLLECTION_ACQUISITION_ROLLOUT_BUDGET_INSUFFICIENT")
+        direct = [rollout[1]["source"]]
+        for pose in poses[1:]:
+            if pose != source_pose and pose not in direct and len(direct) < count - 1:
+                direct.append(pose)
+        poses = project_direct_poses(catalog, selected, source_pose, direct, count)
+        authoring_mode = "DIRECT_EDIT"
     if poses[0] != source_pose:
         raise ContractError("COLLECTION_ACQUISITION_SOURCE_NOT_PRESERVED")
-    yaw_bindings = project_yaw_sample_bindings(catalog, cycle, poses, yaw_seed, repeat=repeat)
+    yaw_bindings = (project_yaw_sample_bindings(catalog, cycle, poses, yaw_seed, repeat=repeat)
+                    if authoring_mode == "ASSISTED" else [None] * len(poses))
     cells = project_state_space_cells(catalog, cycle, poses)
     source_poses = poses[:count]
     conditions = [{"order_index": i, "source": source_poses[i],
@@ -1362,12 +1464,21 @@ def _derive_acquisition_recommendation(*, acquisition, episode_evidence, source_
                                   "object_instance_id": context["object_instance_id"]},
                 "episodes": sorted(evidence_rows, key=lambda row: tuple(row["recording"].values())),
                 "data_quality_analysis_digest": canonical_digest(analysis)}
+    if rollout is not None:
+        diagnostic, target = rollout
+        target["condition_indices"] = [item["order_index"] for item in conditions if item["source"] == target["source"]]
+        if not target["condition_indices"]:
+            raise ContractError("COLLECTION_ACQUISITION_ROLLOUT_CONDITION_NOT_PROPOSED")
+        snapshot.update(rollout_evidence_analysis_ref={
+            "availability": "AVAILABLE", "schema_version": diagnostic["schema_version"],
+            "analysis_id": diagnostic["run_id"], "analysis_digest": canonical_digest(diagnostic), "reason_codes": [],
+        }, rollout_condition=target)
     snapshot["snapshot_digest"] = canonical_digest(snapshot)
     recommendation = {
         "schema_version": ACQUISITION_SCHEMA, "input_snapshot": snapshot,
         "selection": selected,
         "sampling": {"requested_count": count, "normalized_seed": seed, "repeat": repeat,
-                     "authoring_mode": "ASSISTED"},
+                     "authoring_mode": authoring_mode},
         "object_poses": poses, "conditions": conditions,
         "observed_semantic_pass_by_source": observed,
         "proposed_by_source": suggested,
@@ -1382,5 +1493,21 @@ def _derive_acquisition_recommendation(*, acquisition, episode_evidence, source_
                         "This advice never repartitions or authorizes training data."],
         "authority": copy.deepcopy(AUTHORITY),
     }
+    if rollout is not None:
+        recommendation["reason_codes"].extend(["HUMAN_REVIEWED_CHUNK_FAILURE", "REDEMONSTRATE_ORIGINAL_SOURCE"])
+        recommendation["limitations"].append(
+            "The original source condition is a human-reviewed chunk re-demonstration hypothesis; "
+            "task effectiveness and causal data deficit remain unknown."
+        )
+        if authoring_mode == "DIRECT_EDIT":
+            recommendation["reason_codes"].remove("NATIVE_BALANCED_STATE_SPACE")
+            recommendation["reason_codes"].append("NATIVE_DIRECT_REDEMONSTRATION")
+            recommendation["limitations"][1] = (
+                "Remaining sampled coverage is not an optimized missing-condition selector or fitted utility ranking."
+            )
+            recommendation["limitations"].append(
+                "Native direct authoring preserves the current first pose and inserts the original pose within budget; "
+                "remaining unique sampled poses may be truncated. Direct conditions have no stochastic yaw binding."
+            )
     recommendation["recommendation_digest"] = canonical_digest(recommendation)
     return analysis, recommendation

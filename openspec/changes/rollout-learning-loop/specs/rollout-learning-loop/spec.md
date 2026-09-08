@@ -1,5 +1,42 @@
 ## ADDED Requirements
 
+### Requirement: Production acquisition advice retains original and current condition evidence
+
+The existing acquisition-v2 recommendation producer SHALL consume the original
+terminal OneJob lifecycle through the Rollout diagnostic owner and bind its
+original source condition to current canonical acquisition inputs. Historical
+execution evidence and current source readiness SHALL remain distinct. An
+explicit native human FAIL for a completed finite learned chunk MAY support a
+bounded re-demonstration hypothesis at the original source condition;
+controller completion or fault alone SHALL NOT establish task effectiveness or
+a causal data deficit. Historical compiled authoring SHALL NOT be reconstructed.
+
+#### Scenario: Original learned preparation retains source identity
+- **WHEN** native preparation writes preapproval evidence for a plan containing a learned proposal
+- **THEN** it SHALL retain `resolved_inputs` with exactly `normalized_job`, `input_digests` and `resolved_job_digest`
+- **AND** the canonical digest of `{job: normalized_job, input_digests}` SHALL equal both the resolved job digest and the original plan's resolved job digest before writing
+- **AND** this retention SHALL NOT copy current scene state or confer approval, and scripted preapproval evidence SHALL retain its existing schema shape
+- **AND** a historical receipt without these fields SHALL remain unavailable for production diagnostic targeting rather than being reconstructed.
+
+#### Scenario: A reviewed chunk informs an already proposed native condition
+- **WHEN** original run/plan/checkpoint/source evidence matches the current task and profiles, with a native human FAIL scoped to the completed finite chunk, and the original pose occurs in the proposed source conditions
+- **THEN** the existing v2 recommendation SHALL bind that provenance to the exact matching condition indices as a re-demonstration hypothesis
+- **AND** the existing sampler, caller budget, repeat, seed and condition sequence SHALL remain authoritative
+- **AND** task effectiveness, causal data deficit, training authorization and physical qualification SHALL NOT be promoted.
+
+#### Scenario: Source readiness changes after a learned attempt
+- **WHEN** the executor has recorded an UNKNOWN scene after the attempt and existing native recovery later provides a current source pose
+- **THEN** the producer SHALL retain the original condition evidence separately from the current scene revision
+- **AND** the original normalized job and input digests SHALL be read from the run-bound native preapproval receipt, validated against its plan or validated plan history and the resolved source program
+- **AND** for pickup with at least two budgeted conditions, an original pose absent from the assisted sample SHALL be included through existing native direct authoring after the current first pose, with remaining unique samples retained only within the same budget
+- **AND** direct conditions SHALL carry no stochastic yaw binding, and unsupported transitions, insufficient budget or absent original evidence SHALL yield explicit diagnostic insufficiency without resetting scene history or treating UNKNOWN as ready.
+
+#### Scenario: Choose and apply revalidate original evidence and current inputs
+- **WHEN** the production consumer chooses retained advice
+- **THEN** it SHALL forward the server-owned lifecycle reference through the same native producer and revalidate the recommendation digest, original evidence, current scene, selection and collected source graph
+- **AND** changed, mismatched, controller-only or unsupported review evidence SHALL fail without source, lifecycle, scene, candidate, approval or execution effects
+- **AND** legacy advice without rollout input SHALL retain its existing behavior.
+
 ### Requirement: Explicit finite serialized reference consumption
 
 The normal learned caller SHALL expose serialized reference retiming only as an

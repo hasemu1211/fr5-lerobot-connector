@@ -153,6 +153,7 @@ def recommend_stored_collection(
         protected = set()
         lifecycle = None
         diagnostic = None
+        preapproval = None
         if rollout_lifecycle_path is not None:
             from tools.data_factory.rollout.evidence_boundary import build_run_diagnostic
             lifecycle_path = Path(rollout_lifecycle_path)
@@ -161,6 +162,11 @@ def recommend_stored_collection(
             lifecycle = load_json_strict(lifecycle_path)
             diagnostic = build_run_diagnostic(lifecycle)
             protected.add(lifecycle_path.resolve(strict=True).parent)
+            if acquisition is not None:
+                preapproval_path = lifecycle_path.parent / "preapproval_evidence.json"
+                if preapproval_path.is_symlink() or not preapproval_path.is_file():
+                    raise ContractError("COLLECTION_ACQUISITION_ROLLOUT_SOURCE_REQUIRED")
+                preapproval = load_json_strict(preapproval_path)
         context = None if acquisition is None else _acquisition_context(acquisition)
         roots = []
         for directory in run_directories:
@@ -183,11 +189,14 @@ def recommend_stored_collection(
             compiled_authoring=sources, episode_evidence=evidence, source_commit=source_commit,
             **({"acquisition": context} if context is not None else {}),
             rollout_lifecycle_result=lifecycle,
+            rollout_preapproval_evidence=preapproval,
         )
         if lifecycle is not None:
             if (lifecycle_path.is_symlink() or load_json_strict(lifecycle_path) != lifecycle
-                    or any(_load_run(root)[0] != previous for root, previous in zip(roots, evidence))
-                    or any(load_json_strict(root / "compiled_authoring_evidence.json") != sources for root in roots)):
+                    or preapproval is not None and (preapproval_path.is_symlink() or load_json_strict(preapproval_path) != preapproval)
+                    or context is None and (
+                        any(_load_run(root)[0] != previous for root, previous in zip(roots, evidence))
+                        or any(load_json_strict(root / "compiled_authoring_evidence.json") != sources for root in roots))):
                 raise ContractError("COLLECTION_RECOMMENDATION_ROLLOUT_INPUT_CHANGED")
         if context is not None:
             protected.add(Path(acquisition["scene_state_path"]).resolve(strict=True).parent)
@@ -220,7 +229,7 @@ def recommend_stored_collection(
     return {
         "availability": "AVAILABLE", "reason_codes": (
             ["COLLECTION_RECOMMENDATION_ROLLOUT_NO_SUPPORTED_COLLECTION_PATCH"]
-            if diagnostic is not None and not recommendation["suggested_draft_patches"] else []
+            if diagnostic is not None and recommendation.get("suggested_draft_patches") == [] else []
         ),
         "data_quality_analysis": report, "recommendation": recommendation,
         "output_path": output_path,
@@ -238,7 +247,7 @@ def main(argv=None) -> int:
     parser.add_argument("--output-root", help="optional exclusive derived output root")
     parser.add_argument("--acquisition-input", help="saved native catalog/selection, budget and canonical scene reference")
     parser.add_argument("--expected-recommendation-digest", help="reject stale advice before publication")
-    parser.add_argument("--rollout-lifecycle", help="original terminal learned_lifecycle_result.json (requires retained campaign authoring)")
+    parser.add_argument("--rollout-lifecycle", help="original terminal learned_lifecycle_result.json (acquisition requires sibling preapproval_evidence.json with original resolved_inputs; legacy uses retained authoring)")
     try:
         args = parser.parse_args(argv)
         discovery = None if args.run_root is None else discover_stored_collection(args.run_root)
