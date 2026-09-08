@@ -309,6 +309,30 @@ class Test(unittest.TestCase):
   class Output(io.StringIO):
    def flush(self):flushed.set();return super().flush()
   output=Output();worker=__import__("threading").Thread(target=lambda:result.append(e.run_jsonl(reader,output,Terminal())));worker.start();time.sleep(.1);self.assertEqual(output.getvalue(),"");writer.write(__import__("json").dumps({"op_id":"status-1","op":"status"})+"\n");writer.flush();self.assertTrue(flushed.wait(1));response=__import__("json").loads(output.getvalue());self.assertEqual((response["op_id"],response["code"]),("status-1","ROS_EXEC_RESULT_TIMEOUT"));writer.close();worker.join(1);reader.close();self.assertEqual((worker.is_alive(),result),(False,[False]))
+ def test_cell_blocked_compare_and_set_preserves_intervening_state(self):
+  from tools.data_factory.cell_state import CellStateStore
+  from tools.fr5_data_factory import ContractError, canonical_digest
+  with tempfile.TemporaryDirectory() as directory:
+   store=CellStateStore(directory,"synthetic-robot")
+   first=store.mark_blocked("EXECUTION_IN_PROGRESS","run",canonical_digest("plan-1"))
+   second=store.mark_blocked("EXECUTION_IN_PROGRESS","run",canonical_digest("plan-2"),expected_state_digest=canonical_digest(first))
+   self.assertEqual(second["plan_digest"],canonical_digest("plan-2"))
+   for changed in ("foreign", "acknowledgment"):
+    with self.subTest(changed=changed):
+     checked=store.mark_blocked("EXECUTION_IN_PROGRESS","run",canonical_digest("plan-2"))
+     if changed=="foreign":store.mark_blocked("FOREIGN_FAILURE","foreign-run",canonical_digest("foreign"))
+     else:store.acknowledge_ready("synthetic-operator",expected_run_id="run",expected_plan_digest=checked["plan_digest"])
+     before=store.runtime_path("state.json").read_bytes()
+     with self.assertRaisesRegex(ContractError,"STATE_CHANGED"):
+      store.mark_blocked("EXECUTION_IN_PROGRESS","run",canonical_digest("plan-3"),expected_state_digest=canonical_digest(checked))
+     self.assertEqual(store.runtime_path("state.json").read_bytes(),before)
+   for invalid in ([], "bad", True):
+    with self.assertRaisesRegex(ContractError,"STATE_EXPECTED_BINDING"):
+     store.mark_blocked("EXECUTION_IN_PROGRESS","run",canonical_digest("plan-3"),expected_state_digest=invalid)
+    self.assertEqual(store.runtime_path("state.json").read_bytes(),before)
+   # The optional condition does not change legacy unconditional callers.
+   self.assertEqual(store.mark_blocked("LEGACY_BLOCK","legacy",canonical_digest("legacy"))["run_id"],"legacy")
+
  def test_cell_state_is_fail_closed_and_durable(self):
   from contextlib import redirect_stderr, redirect_stdout
   from unittest import mock
