@@ -4,8 +4,6 @@
 
 **[포트폴리오 다운로드 · 38.2MB](https://github.com/hasemu1211/fr5-lerobot-connector/releases/download/portfolio-2026-09-08/FR5-Portfolio.html)** · [시스템 아키텍처](docs/architecture.md)
 
-파일 하나를 브라우저에서 열면 시연 영상·원리 설명·정책 비교를 볼 수 있다. 설치와 서버는 필요하지 않다.
-
 [![Pick & Place 시연의 고정 카메라와 손목 카메라 관측](docs/portfolio/assets/pick-place-latest-poster.jpg)](https://github.com/hasemu1211/fr5-lerobot-connector/releases/download/portfolio-2026-09-08/FR5-Portfolio.html)
 
 **Pick & Place 시연 · 21.1초** — 같은 동작을 작업대와 그리퍼 시점에서 기록한다.

@@ -1,18 +1,8 @@
 # Robot Learning Data Engine · 포트폴리오
 
-로봇 데이터의 수집부터 정책 비교까지, 실제 시연과 기술 원리로 살펴보는 포트폴리오이다. FAIRINO FR5를 구현·검증 플랫폼으로 사용한다.
+**[포트폴리오 다운로드 · 38.2MB · 데스크톱 Chrome](https://github.com/hasemu1211/fr5-lerobot-connector/releases/download/portfolio-2026-09-08/FR5-Portfolio.html)**
 
-## 포트폴리오 다운로드
-
-**[FR5-Portfolio.html 다운로드 · 38.2MB](https://github.com/hasemu1211/fr5-lerobot-connector/releases/download/portfolio-2026-09-08/FR5-Portfolio.html)**
-
-다운로드한 파일을 데스크톱 Chrome에서 연다. 영상 재생, 표본 선택, 정책 비교와 근거 열람을 파일 하나에서 사용할 수 있다. 설치·압축 해제·서버는 필요하지 않으며 외부 문헌 링크만 인터넷을 사용한다.
-
-- **시연과 수집 원리:** Pick·Pick & Place, 작업 조건과 센서 동기화
-- **데이터와 모방학습:** 영상·상태·목표 동작, 데이터 선별과 SmolVLA
-- **시스템과 비교 결과:** 폐루프 구조, 같은 조건의 정책 비교와 원본 근거
-
-GitHub에서 바로 읽을 기술 문서는 [시스템 아키텍처](../architecture.md), [데이터셋 품질](../dataset-quality.md), [학습과 평가](../training-and-evaluation.md)에 있다.
+[시스템 아키텍처](../architecture.md) · [데이터셋 품질](../dataset-quality.md) · [학습과 평가](../training-and-evaluation.md)
 
 <details>
 <summary>편집과 단일 파일 생성</summary>
@@ -25,7 +15,7 @@ GitHub에서 바로 읽을 기술 문서는 [시스템 아키텍처](../architec
 python3 docs/portfolio/export_single_file.py .agent-local/portfolio/FR5-Portfolio.html
 ```
 
-이미지·동영상·글꼴·근거 페이지를 포함해 50MB 미만의 파일을 생성하고, 파일 크기와 SHA-256을 출력한다. 생성된 파일을 그대로 전달하면 된다. 수정은 이 폴더의 원본에 반영한 뒤 같은 명령으로 다시 생성한다.
+이미지·동영상·글꼴·근거 페이지를 포함해 50MB 미만의 파일을 생성하고, 파일 크기와 SHA-256을 출력한다. 수정은 이 폴더의 원본에 반영한 뒤 같은 명령으로 다시 생성한다.
 
 ## 편집 원본
 
