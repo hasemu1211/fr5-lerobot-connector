@@ -230,13 +230,19 @@ class FinitePlanTest(unittest.TestCase):
     def test_public_causal_plan_only_preserves_zero_execution_effects(self):
         self._public_native_consumer("plan_only", causal=True)
 
+    def test_public_native_continuation_reuses_owner_and_recorder_with_exact_approval(self):
+        self._public_native_consumer("live", causal=True, continuation=True)
+
+    def test_public_native_continuation_cancel_does_not_send_next_output(self):
+        self._public_native_consumer("live", causal=True, continuation=True, next_choice="CANCEL")
+
     def test_public_causal_plan_only_freezes_explicit_serialized_retiming(self):
         self._public_native_consumer("plan_only", causal=True, reference_mode="serialized_retime")
 
     def test_public_causal_plan_only_freezes_explicit_percent_representation(self):
         self._public_native_consumer("plan_only", causal=True, reference_mode="serialized_percent_retime")
 
-    def _public_native_consumer(self, mode, *, causal=False, reference_mode=None):
+    def _public_native_consumer(self, mode, *, causal=False, reference_mode=None, continuation=False, next_choice="APPROVE"):
         from tools.data_factory import run_job
         from tools.data_factory.learned_action_adapter import NativeSmolVLA
         from tests.data_factory.operator.fixtures import PROFILE, JOB, runtime_validated, payload
@@ -259,6 +265,7 @@ class FinitePlanTest(unittest.TestCase):
             self.assertEqual(topics, {"camera1": "/up", "camera2": "/wrist"})
             self.assertEqual(age, .3)
             value = observation()
+            value["observation.state"] = transport.current[:]
             for name in ("camera1", "camera2"):
                 image = value[f"observation.images.{name}"]
                 image["data_hex"] = image.pop("data").hex()
@@ -283,6 +290,7 @@ class FinitePlanTest(unittest.TestCase):
                         "output_disposition": "DISCARDED", "rng_state_restored": True, "duration_s": 2., "inference_duration_s": 1.6}
             @contextmanager
             def prepare_inference(self):
+                calls.append(("native", "prepare"))
                 yield self
             checkpoint = CHECKPOINT
             def __call__(self, value):
@@ -318,12 +326,22 @@ class FinitePlanTest(unittest.TestCase):
                 from tools.data_factory.operator.workflow.intents import OperatorCheckpointPort
                 port = OperatorCheckpointPort(operator_label="operator")
                 pending = port.offer(request)
-                self.assertEqual(request["kind"], "SEMANTIC_VERDICT")
-                self.assertEqual(request["evidence"]["execution_state"], "LEARNED_CHUNK_COMPLETE")
-                self.assertEqual(request["evidence"]["recorder_state"], "RECORDING")
-                self.assertIn("does not qualify task success or dataset commit", request["prompt"])
+                kind = request["kind"]
+                if kind == "PRECONTACT_HUMAN":
+                    choice = "CONFIRM"
+                elif kind == "LEARNED_NEXT_PLAN":
+                    self.assertEqual(len(transport.sent), 1)
+                    self.assertNotEqual(request["plan_digest"], request["evidence"]["previous_plan_digest"])
+                    self.assertEqual(request["plan_digest"], canonical_digest(request["evidence"]["plan_envelope"]["plan"]))
+                    choice = next_choice
+                else:
+                    self.assertEqual(kind, "LEARNED_CHUNK_COMPLETE")
+                    self.assertEqual(request["evidence"]["execution_state"], "LEARNED_CHUNK_COMPLETE")
+                    self.assertEqual(request["evidence"]["recorder_state"], "RECORDING")
+                    self.assertIn("does not qualify task success or dataset commit", request["prompt"])
+                    choice = "CONTINUE" if continuation and len(transport.sent) == 1 else "PASS"
                 self.assertNotIn(("recorder", "freeze"), calls)
-                port.resolve({"checkpoint_binding_digest": pending["binding_digest"], "choice": "PASS"})
+                port.resolve({"checkpoint_binding_digest": pending["binding_digest"], "choice": choice})
                 return port.wait(.1)
             def live_ports(*args, **kwargs):
                 if mode == "plan_only":
@@ -347,7 +365,8 @@ class FinitePlanTest(unittest.TestCase):
                     session.worker.join(2.)
                 self.assertFalse(session.worker.is_alive())
                 result = session.snapshot
-            self.assertEqual(result["code"], "PRECOMMIT_SAFETY" if mode == "live" else "PLANNED",
+            expected = "CANCELLED_BY_OPERATOR" if continuation and next_choice == "CANCEL" else "PRECOMMIT_SAFETY"
+            self.assertEqual(result["code"], expected if mode == "live" else "PLANNED",
                              {k: v for k, v in result.items() if k != "data"})
             factory.assert_called_once()
             self.assertLess(calls.index(("native", "warmup")), calls.index(("executor", "capture_observation")))
@@ -369,7 +388,21 @@ class FinitePlanTest(unittest.TestCase):
             self.assertLess(calls.index(("executor", "plan")), calls.index(("operator", "decision")))
             self.assertLess(calls.index(("operator", "decision")), calls.index(("recorder", "begin")))
             self.assertLess(calls.index(("recorder", "begin")), calls.index(("executor", "execute")))
-            self.assertEqual(len(transport.sent), 1)
+            self.assertEqual(len(transport.sent), 2 if continuation and next_choice == "APPROVE" else 1)
+            self.assertEqual(calls.count(("recorder", "begin")), 1)
+            self.assertEqual(calls.count(("native", "warmup")), 1)
+            if continuation:
+                self.assertEqual(calls.count(("native", "prepare")), 2)
+                observations = [v["payload"] for v in observed_requests if v["op"] == "capture_observation"]
+                self.assertEqual(observations[1]["run_id"], "run")
+                self.assertIn("lease_id", observations[1])
+                self.assertIn("plan_digest", observations[1])
+                saved = json.loads((root / "runs" / "run" / "learned_lifecycle_result.json").read_text())
+                history = saved["execution_evidence"].get("learned_history", [])
+                self.assertEqual(len(history), 1 if next_choice == "APPROVE" else 0)
+                if history:
+                    self.assertNotEqual(saved["plan_digest"], history[0]["approval"]["plan_digest"])
+                    self.assertEqual(saved["plan_digest"], result["plan_digest"])
             self.assertEqual(transport.sent[0]["learned_proposal"]["actions"], [ACTION])
             self.assertNotIn(("recorder", "commit"), calls)
             evidence = json.loads((root / "runs" / "run" / "preapproval_evidence.json").read_text())

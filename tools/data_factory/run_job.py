@@ -2382,16 +2382,21 @@ def _infer_native_program(native, source, child, cancel, *, urdf, instruction, p
             }, cancel)
             if not captured.get("ok"):
                 raise ContractError(captured.get("code", "LEARNED_OBSERVATION_UNAVAILABLE"))
-            observation = copy.deepcopy(captured["data"]["observation"])
-            for key in ("observation.images.camera1", "observation.images.camera2"):
-                frame = observation[key]
+            observation = captured["data"]["observation"]
+        observation = copy.deepcopy(observation() if callable(observation) else observation)
+        for key in ("observation.images.camera1", "observation.images.camera2"):
+            frame = observation[key]
+            if "data_hex" in frame:
                 if set(frame) != {"dtype", "color_space", "shape", "data_hex"}:
                     raise ContractError("LEARNED_OBSERVATION_SCHEMA")
-                frame["data"] = bytes.fromhex(frame.pop("data_hex"))
+                try:
+                    frame["data"] = bytes.fromhex(frame.pop("data_hex"))
+                except (TypeError, ValueError) as exc:
+                    raise ContractError("LEARNED_OBSERVATION_SCHEMA") from exc
         if cancel.is_set():
             raise ContractError("LEARNED_CANCELLED")
         proposal = inference.propose(
-            observation() if callable(observation) else observation, instruction=instruction,
+            observation, instruction=instruction,
             robot_description=Path(urdf).read_text(),
             period_s=period_s, max_observation_age_s=max_observation_age_s,
             held_gripper_targets=held_gripper_targets, runtime_inputs=runtime_inputs,
@@ -4632,6 +4637,31 @@ def run_live(payload, cancel, publish, *, resolver=resolve_inputs, executor_fact
                     "camera_semantic_authority": False, "training_authorized": False,
                 })
             if result["state"] in {"GRASP_VERDICT", "SEMANTIC_VERDICT", "LEARNED_CHUNK_COMPLETE"}:
+                if pending == "LEARNED_NEXT_PLAN":
+                    try:
+                        state, decision = decisions.get_nowait()
+                    except queue.Empty:
+                        time.sleep(0.05)
+                        continue
+                    pending = None
+                    if state != "LEARNED_NEXT_PLAN" or decision != "APPROVE" or cancel.is_set():
+                        cancelled = job.cancel()
+                        return _response(ok=False, code=cancelled["code"], state=cancelled["state"],
+                            run_id=payload["run_id"], plan_digest=job.plan_digest,
+                            data=learned_run_diagnostic(cancelled, payload=payload))
+                    approval = _approval(payload["run_id"], next_planned["plan_digest"], operator_id, approval_scope)
+                    approval["approval_id"] = "learned-" + next_planned["plan_digest"].removeprefix("sha256:")
+                    acted = job.approve_next_learned(approval)
+                    if acted["ok"]:
+                        acted = job.start_next_learned()
+                    if not acted["ok"]:
+                        cancelled = job.cancel()
+                        return _response(ok=False, code=acted["code"], state=cancelled["state"],
+                            run_id=payload["run_id"], plan_digest=job.plan_digest,
+                            data=learned_run_diagnostic(cancelled, payload=payload))
+                    planned, program = acted, next_program
+                    summary = _operator_summary(planned)
+                    continue
                 if pending is None:
                     publish(_response(
                         ok=True, code=(
@@ -4664,7 +4694,7 @@ def run_live(payload, cancel, publish, *, resolver=resolve_inputs, executor_fact
                     prompt = (
                         "Confirm the physical grasp; PASS continues to lift, FAIL aborts"
                         if result["state"] == "GRASP_VERDICT"
-                        else "Review this finite chunk; PASS ends the probe with your review, FAIL discards. This does not qualify task success or dataset commit."
+                        else "Review this finite chunk; CONTINUE prepares a fresh output for separate approval, PASS ends the probe with your review, FAIL discards. This does not qualify task success or dataset commit."
                         if result["state"] == "LEARNED_CHUNK_COMPLETE"
                         else "Confirm the completed episode; PASS commits, FAIL discards"
                     )
@@ -4682,22 +4712,23 @@ def run_live(payload, cancel, publish, *, resolver=resolve_inputs, executor_fact
                         evidence=checkpoint_evidence,
                     ):
                         try:
+                            choices = ("CONTINUE", "PASS", "FAIL") if state == "LEARNED_CHUNK_COMPLETE" else ("PASS", "FAIL")
                             if checkpoint_provider is None:
-                                decision = tty_decision(text, ("PASS", "FAIL"))
+                                decision = tty_decision(text, choices)
                             else:
                                 checkpoint = _operator_checkpoint(
                                     checkpoint_provider,
-                                    kind="SEMANTIC_VERDICT" if state == "LEARNED_CHUNK_COMPLETE" else state,
+                                    kind=state,
                                     run_id=payload["run_id"],
                                     plan_digest=planned["plan_digest"], prompt=text,
-                                    choices=("PASS", "FAIL"), operator_id=operator_id,
+                                    choices=choices, operator_id=operator_id,
                                     timeout_s=checkpoint_timeout_s,
                                     evidence=evidence,
                                 )
                                 if checkpoint is None:
                                     raise ContractError("OPERATOR_CHECKPOINT_TIMEOUT")
                                 decision = checkpoint["choice"]
-                            if decision not in {"PASS", "FAIL"}:
+                            if decision not in choices:
                                 raise ContractError("HUMAN_CONFIRMATION_FAILED")
                             decisions.put((state, decision))
                         except Exception as exc:
@@ -4713,6 +4744,50 @@ def run_live(payload, cancel, publish, *, resolver=resolve_inputs, executor_fact
                 if state != result["state"] or isinstance(decision, Exception):
                     cancelled = job.cancel()
                     return _response(ok=False, code=cancelled["code"], state=cancelled["state"], run_id=payload["run_id"], plan_digest=planned["plan_digest"])
+                if state == "LEARNED_CHUNK_COMPLETE" and decision == "CONTINUE":
+                    def observe_boundary():
+                        observed = job.observe_learned_boundary(inputs["camera_topics"])
+                        if not observed["ok"]:
+                            raise ContractError(observed["code"])
+                        return observed["observation"]
+                    try:
+                        next_program = _infer_native_program(native, program["source_program"], executor, cancel,
+                            urdf=payload["urdf"], instruction=program["learned_proposal"]["instruction"],
+                            period_s=1 / inputs["fps"], observation=observe_boundary, runtime_inputs=inputs)
+                        prepared = job.prepare_next_learned(next_program)
+                        if not prepared["ok"]:
+                            raise ContractError(prepared["code"])
+                        next_planned = prepared["pending_chunk"]
+                        next_summary = _operator_summary(next_planned)
+                    except Exception as exc:
+                        cancelled = job.cancel()
+                        return _response(ok=False, code=exc.code if isinstance(exc, ContractError) else "LEARNED_NEXT_PREPARATION_FAILED",
+                            state=cancelled["state"], run_id=payload["run_id"], plan_digest=job.plan_digest,
+                            data=learned_run_diagnostic(cancelled, payload=payload))
+                    pending = "LEARNED_NEXT_PLAN"
+                    def next_approval_in_background(candidate=next_planned, candidate_summary=next_summary):
+                        try:
+                            prompt = "Approve this exact next learned output; the current recorder and motion owner are retained."
+                            if checkpoint_provider is not None:
+                                response = _operator_checkpoint(checkpoint_provider, kind="LEARNED_NEXT_PLAN",
+                                    run_id=payload["run_id"], plan_digest=candidate["plan_digest"], prompt=prompt,
+                                    choices=("APPROVE", "CANCEL"), operator_id=operator_id,
+                                    timeout_s=checkpoint_timeout_s,
+                                    evidence={"previous_plan_digest": planned["plan_digest"],
+                                              "operator_summary": candidate_summary,
+                                              "plan_envelope": candidate["plan_envelope"]})
+                                choice = None if response is None else response["choice"]
+                            elif before_approval is not None:
+                                before_approval(prompt, candidate)
+                                choice = "APPROVE"
+                            else:
+                                tty_decision(prompt, f"APPROVE {candidate['plan_digest']}")
+                                choice = "APPROVE"
+                            decisions.put(("LEARNED_NEXT_PLAN", choice))
+                        except Exception as exc:
+                            decisions.put(("LEARNED_NEXT_PLAN", exc))
+                    threading.Thread(target=next_approval_in_background, daemon=True).start()
+                    continue
                 acted = (job.grasp_verdict if state == "GRASP_VERDICT" else job.semantic_verdict)(decision, operator_id, source="HUMAN")
                 if not acted["ok"]:
                     return _response(ok=False, code=acted["code"], state=acted["state"], run_id=payload["run_id"], plan_digest=planned["plan_digest"])
@@ -4815,7 +4890,17 @@ def run_live(payload, cancel, publish, *, resolver=resolve_inputs, executor_fact
                     pending = result["state"]
                     def confirm_in_background():
                         try:
-                            tty_decision("Confirm the physical precontact pose", f"CONFIRM {planned['plan_digest']}")
+                            if native is not None and checkpoint_provider is not None:
+                                response = _operator_checkpoint(checkpoint_provider, kind="PRECONTACT_HUMAN",
+                                    run_id=payload["run_id"], plan_digest=planned["plan_digest"],
+                                    prompt="Confirm the physical precontact pose for this exact learned plan",
+                                    choices=("CONFIRM", "CANCEL"), operator_id=operator_id,
+                                    timeout_s=checkpoint_timeout_s,
+                                    evidence={"operator_summary": summary})
+                                if response is None or response["choice"] != "CONFIRM":
+                                    raise ContractError("HUMAN_CONFIRMATION_FAILED")
+                            else:
+                                tty_decision("Confirm the physical precontact pose", f"CONFIRM {planned['plan_digest']}")
                             decisions.put(("PRECONTACT_HUMAN", None))
                         except Exception as exc:
                             decisions.put(("PRECONTACT_HUMAN", exc))

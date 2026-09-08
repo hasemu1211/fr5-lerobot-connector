@@ -1049,3 +1049,27 @@ as proof of those properties or permission for physical execution.
 - **THEN** that flag alone SHALL NOT complete the native command
 - **AND** fresh done within the existing one-percent native feedback tick of the quantized requested target remains admissible, while off-target completion requires witnessed post-acknowledgment busy-to-done or plausible observed movement followed by the existing stable-away dwell across valid advancing samples
 - **AND** stable-away completion remains mechanical evidence, not grasp, release or task success
+
+### Requirement: Native caller consumes assisted learned continuation
+
+The normal live runner SHALL expose the existing next-chunk lifecycle through
+the existing decision ports, without restarting the recorder or motion owner.
+Requesting another output SHALL prepare a fresh lease-bound observation and an
+exact candidate plan; it SHALL NOT approve or dispatch that candidate. Each new
+plan SHALL receive distinct exact-plan approval and existing precontact
+confirmation. UI-backed learned checkpoints SHALL NOT fall back to terminal
+input. A completed or reviewed chunk SHALL NOT imply whole-task success,
+training admission or a confirmed object destination.
+
+#### Scenario: Continue within one recorded task
+
+- **WHEN** an operator requests continuation at a learned chunk boundary
+- **THEN** model preparation precedes fresh observation capture under the current run, lease and plan
+- **AND** separate candidate approval and precontact confirmation precede dispatch
+- **AND** the original recorder transaction, motion owner and exact prior-plan history are retained
+
+#### Scenario: Cancel an unexecuted candidate
+
+- **WHEN** candidate approval is cancelled or its binding is invalid
+- **THEN** no candidate motion is dispatched
+- **AND** the existing cancellation lifecycle retains the original completed-chunk evidence for diagnosis
