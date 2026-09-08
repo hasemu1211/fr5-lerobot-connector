@@ -12,8 +12,7 @@ from types import ModuleType, SimpleNamespace
 import unittest
 from unittest import mock
 
-from tests.test_train_wrapper import launch_fixture, write_normalization_fixture
-from tools.data_factory.training_entrypoint import options, prepare_launch
+from tests.data_factory.training_fixtures import launch_fixture, write_normalization_fixture, admitted_case
 from tools.evaluate_smolvla_offline import (
     action_error_metrics,
     admit_evaluation,
@@ -24,69 +23,11 @@ from tools.evaluate_smolvla_offline import (
     sampled_action_indices,
     _evaluate_sampled_actions,
 )
-from tools.fr5_training_profile import build_profile, policy_metadata
 
 
 def write_json(path: Path, value: object) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(value, indent=2) + "\n")
-
-
-def admitted_case(root: Path) -> tuple[SimpleNamespace, dict]:
-    kwargs, _, _ = launch_fixture(root)
-    info = json.loads((kwargs["dataset"] / "meta/info.json").read_text())
-    output = root / "outputs/run"
-    kwargs.update(profile="smolvla", argv=[
-        "fixture-lerobot-train",
-        *build_profile("smolvla", policy_metadata(info)),
-        f"--dataset.root={kwargs['dataset']}",
-        f"--dataset.repo_id={kwargs['repo_id']}",
-        "--dataset.episodes=[0,2,3]",
-        "--dataset.eval_split=0.34",
-        f"--output_dir={output}",
-        "--batch_size=2", "--steps=2", "--eval_steps=1", "--save_freq=1",
-    ])
-    split, receipt = prepare_launch(**kwargs)
-    write_json(output / "fr5_training_split.json", split)
-    write_json(output / "fr5_training_receipt.json", receipt)
-
-    policy_dir = output / "checkpoints/000001/pretrained_model"
-    state_dir = policy_dir.parent / "training_state"
-    policy_dir.mkdir(parents=True)
-    state_dir.mkdir()
-    config = {
-        "scheduler": None,
-        "dataset": {
-            "root": str(kwargs["dataset"]), "repo_id": kwargs["repo_id"],
-            "episodes": [0, 2, 3], "eval_split": 0.34,
-        },
-        "policy": {},
-        "rename_map": {},
-    }
-    for key, value in options(split["feature_contract"]["policy_argv"]).items():
-        try:
-            parsed = json.loads(value)
-        except json.JSONDecodeError:
-            parsed = value
-        if key.startswith("--policy."):
-            config["policy"][key.removeprefix("--policy.")] = parsed
-        elif key == "--rename_map":
-            config["rename_map"] = parsed
-    write_json(policy_dir / "config.json", config["policy"])
-    write_json(policy_dir / "train_config.json", config)
-    (policy_dir / "model.safetensors").write_bytes(b"fixture-model")
-    write_json(state_dir / "optimizer_param_groups.json", {})
-    (state_dir / "optimizer_state.safetensors").write_bytes(b"fixture-optimizer")
-    (state_dir / "rng_state.safetensors").write_bytes(b"fixture-rng")
-    write_json(state_dir / "training_step.json", {"step": 1})
-    write_normalization_fixture(policy_dir, receipt)
-    args = SimpleNamespace(
-        checkpoint=str(policy_dir), dataset=kwargs["dataset"], repo_id=kwargs["repo_id"],
-        approved_inventory=kwargs["inventory"], episodes=None, batch_size=1,
-        num_workers=0, max_batches=0, output=root / "evaluation.json",
-        seed=1000, device="cpu", use_amp=False,
-    )
-    return args, split
 
 
 def evaluation_argv(args: SimpleNamespace) -> list[str]:

@@ -3,6 +3,7 @@
 import copy
 from contextlib import ExitStack
 import json
+import multiprocessing
 from pathlib import Path
 import random
 import sys
@@ -23,6 +24,10 @@ from tools.validate_training_checkpoint import (
 
 
 def setUpModule():
+    # Native loader/optimizer setup may settle the platform default context.
+    # Restore even an unset method so later Curator tests can select spawn.
+    previous_method = multiprocessing.get_start_method(allow_none=True)
+    unittest.addModuleCleanup(multiprocessing.set_start_method, previous_method, force=True)
     # Existing injected consumer tests replace this module through sys.modules.
     # Do not leave a newly cached package attribute that bypasses their fixture.
     import lerobot.scripts
@@ -235,8 +240,8 @@ class NativeContinuationTest(unittest.TestCase):
         self.assertEqual(actual + part, expected)
 
     def test_public_same_output_recovery_twice_with_native_saved_sources(self):
-        from tests.test_offline_evaluation import admitted_case
-        from tests.test_train_wrapper import write_normalization_fixture
+        from tests.data_factory.training_fixtures import admitted_case
+        from tests.data_factory.training_fixtures import write_normalization_fixture
         from tools.data_factory.training_entrypoint import prepare_launch, continue_training, resume_training
         from tools.validate_training_checkpoint import validate_checkpoint
         from lerobot.configs.default import DatasetConfig
@@ -364,7 +369,7 @@ class ContinuationCursorTest(unittest.TestCase):
 class ContinuationAdmissionTest(unittest.TestCase):
     """Existing temporary approval fixtures; no video generation or model loading."""
     def setUp(self):
-        from tests.test_offline_evaluation import admitted_case
+        from tests.data_factory.training_fixtures import admitted_case
         self.tmp = TemporaryDirectory(prefix="SYNTHETIC_CONTINUATION_ADMISSION-")
         self.addCleanup(self.tmp.cleanup)
         self.root = Path(self.tmp.name)

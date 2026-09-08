@@ -139,93 +139,10 @@ import json
 from types import SimpleNamespace
 from unittest import mock
 
-from tests.data_factory.test_training_approval import synthetic_fixture, write_json, snapshot
+from tests.data_factory.training_fixtures import launch_fixture, write_normalization_fixture, write_json, snapshot
 from tools.data_factory import training_approval as approval
 from tools.data_factory.training_entrypoint import approve, launch, prepare_launch, prepare_approvals
 from tools.fr5_data_factory import ContractError, canonical_digest
-from tools.fr5_training_profile import build_profile, policy_metadata
-
-
-def launch_fixture(root):
-    import pyarrow as pa
-    import pyarrow.parquet as pq
-
-    selected = [0, 2, 3]
-    fixtures = [synthetic_fixture(root, f"episode-{index}", index) for index in selected]
-    dataset = Path(fixtures[0][0]["dataset_root"])
-    metadata = dataset / "meta"
-    (metadata / "episodes/chunk-000").mkdir(parents=True)
-    (metadata / "source_provenance").mkdir()
-    from tools.fr5_dataset_schema import dataset_features
-    info = {"codebase_version": "v3.0", "fps": 30, "total_episodes": 4, "total_frames": 8,
-            "features": dataset_features(fps=30, height=480, width=640, cameras=("up", "wrist"), use_videos=True)}
-    write_json(metadata / "info.json", info)
-    rows = []
-    for i in range(4):
-        row = {"episode_index": i, "tasks": ["pick up the cube and place it at the destination"], "length": 2}
-        for key in ("action", "observation.state", "observation.images.up", "observation.images.wrist"):
-            for name in ("min", "max", "mean", "std", "count"):
-                number = 1.0 if name == "std" else float(i * 100)
-                row[f"stats/{key}/{name}"] = ([2] if name == "count" else
-                    [[[number]]] * 3 if key.startswith("observation.images.") else [number] * 7)
-        rows.append(row)
-    pq.write_table(pa.Table.from_pylist(rows), metadata / "episodes/chunk-000/file-000.parquet")
-    for index in range(4):
-        (metadata / f"source_provenance/episode-{index:06d}.jsonl").write_text('{"frame_index":0}\n{"frame_index":1}\n')
-    identity = approval.current_dataset_identity(dataset, repo_id="tests/synthetic-dataset", dataset_id="synthetic-dataset-r1")
-    entries, request_episodes = [], []
-    for _, technical, semantic, approved, entry in fixtures:
-        index = entry["episode_index"]
-        content = approval.current_episode_digest(identity, index)
-        semantic["checklist_id"] = "pick-place-v1"
-        semantic_path = Path(entry["human_semantic_evidence"]["artifact_path"])
-        _, semantic_digest = write_json(semantic_path, semantic)
-        entry["human_semantic_evidence"]["artifact_digest"] = semantic_digest
-        provenance_path = Path(entry["episode_provenance"]["artifact_path"])
-        provenance = json.loads(provenance_path.read_text())
-        provenance.update(scope=approval.PRODUCTION_SCOPE, dataset_identity_digest=canonical_digest(identity), episode_content_digest=content)
-        _, provenance_digest = write_json(provenance_path, provenance)
-        entry["episode_provenance"]["artifact_digest"] = provenance_digest
-        approved.update(scope=approval.PRODUCTION_SCOPE, dataset_identity=identity, episode_content_digest=content,
-                        episode_provenance_digest=provenance_digest, human_semantic_evidence_digest=semantic_digest)
-        _, approved_digest = write_json(Path(entry["training_approval"]["artifact_path"]), approved)
-        entry["training_approval"]["artifact_digest"] = approved_digest
-        entry.update(dataset_identity_digest=canonical_digest(identity), episode_content_digest=content)
-        entries.append(entry)
-        request_episodes.append({"episode_id": entry["episode_id"], "episode_index": index,
-            "technical_validator_path": entry["technical_validator"]["artifact_path"],
-            "human_semantic_evidence_path": str(semantic_path),
-            "seed_manifest_path": str(root / f"{entry['episode_id']}.seed-manifest.SYNTHETIC_TEST_ONLY.json"),
-            "manifest_slot_id": provenance["manifest_slot_id"]})
-    inventory = approval.build_training_approved_inventory(scope=approval.PRODUCTION_SCOPE, dataset_identity=identity, episodes=entries)
-    inventory_path = root / "training_approved.json"
-    write_json(inventory_path, inventory)
-    output = root / "outputs/run"
-    argv = ["fixture-lerobot-train", *build_profile("act", policy_metadata(info)),
-            f"--dataset.root={dataset}", "--dataset.repo_id=tests/synthetic-dataset", "--dataset.episodes=[0,2,3]",
-            "--dataset.eval_split=0.34", f"--output_dir={output}", "--batch_size=2", "--steps=2", "--eval_steps=1", "--save_freq=1"]
-    kwargs = dict(dataset=dataset, repo_id="tests/synthetic-dataset", inventory=inventory_path,
-                  profile="act", collection_profile="fr5-up-wrist-rgb-30hz-v2", argv=argv)
-    request = {"dataset_root": str(dataset), "dataset_id": identity["dataset_id"], "repo_id": identity["repo_id"], "episodes": request_episodes}
-    return kwargs, request, inventory
-
-
-def write_normalization_fixture(policy, receipt):
-    """Synthetic processor state only; never a real policy/checkpoint success claim."""
-    import numpy as np
-    from safetensors.numpy import save_file
-
-    stats = {f"{key}.{name}": np.asarray(value, dtype=np.float32)
-             for key, values in receipt["normalization"]["stats"].items() for name, value in values.items()}
-    for pipeline, registry in (("policy_preprocessor", "normalizer_processor"),
-                               ("policy_postprocessor", "unnormalizer_processor")):
-        state_file = f"{pipeline}_normalization.safetensors"
-        save_file(stats, policy / state_file)
-        config = {"features": {"observation.state": {"type": "STATE", "shape": [7]},
-                               "action": {"type": "ACTION", "shape": [7]}},
-                  "norm_map": {"STATE": "MEAN_STD", "ACTION": "MEAN_STD"}}
-        write_json(policy / f"{pipeline}.json", {"steps": [
-            {"registry_name": registry, "state_file": state_file, "config": config}]})
 
 
 class TrainingLaunchConnectionTest(unittest.TestCase):

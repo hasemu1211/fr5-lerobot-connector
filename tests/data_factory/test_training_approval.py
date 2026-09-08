@@ -8,6 +8,8 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+from tests.data_factory.training_fixtures import D1, D2, D3, write_json, synthetic_fixture, snapshot
+
 from tools.data_factory import training_approval
 from tools.data_factory.training_approval import (
     APPROVAL_SCHEMA,
@@ -26,11 +28,6 @@ from tools.data_factory.training_approval import (
 from tools.fr5_data_factory import ContractError, canonical_digest, load_json_strict
 
 
-D1 = "sha256:" + "1" * 64
-D2 = "sha256:" + "2" * 64
-D3 = "sha256:" + "3" * 64
-
-
 class FakeTTY(io.StringIO):
     def __init__(self, value="", *, tty=True):
         super().__init__(value)
@@ -41,140 +38,6 @@ class FakeTTY(io.StringIO):
 
     def __exit__(self, *_args):
         return None
-
-
-def write_json(path, value):
-    path.write_text(json.dumps(value, sort_keys=True, separators=(",", ":"), allow_nan=False) + "\n", encoding="utf-8")
-    return str(path), canonical_digest(value)
-
-
-def synthetic_fixture(root, episode_id="episode-1", episode_index=0):
-    dataset_root = root / "SYNTHETIC_TEST_ONLY_dataset"
-    dataset_root.mkdir(exist_ok=True)
-    (dataset_root / "unchanged.marker").write_text("synthetic fixture\n", encoding="utf-8")
-    run_state = root / "SYNTHETIC_TEST_ONLY_run_state"
-    run_state.mkdir(exist_ok=True)
-    (run_state / "unchanged.marker").write_text("synthetic fixture\n", encoding="utf-8")
-    dataset = {
-        "dataset_id": "synthetic-dataset-r1",
-        "repo_id": "tests/synthetic-dataset",
-        "dataset_root": str(dataset_root),
-        "dataset_digest": D1,
-    }
-    technical = {
-        "schema_version": "data_factory.technical_validator_result.v1",
-        "run_id": episode_id,
-        "resolved_job_digest": D1,
-        "plan_digest": D2,
-        "dataset_root": str(dataset_root),
-        "expected_fps": 30,
-        "status": "PASS",
-        "result_digest": D3,
-    }
-    technical_path, technical_digest = write_json(root / f"{episode_id}.technical.SYNTHETIC_TEST_ONLY.json", technical)
-    slot = {
-        "slot_id": f"slot-{episode_id}",
-        "base_condition_digest": canonical_digest(["base-condition", episode_id]),
-        "robot_start_pose_id": f"start-{episode_id}",
-        "split_group": ("TRAIN", "ID", "OOD")[episode_index % 3],
-        "repeat_index": episode_index // 3,
-        "hil_prompts": 1,
-        "reviews": 1,
-        "pending_reviews": 0,
-        "storage_bytes": 100,
-        "order_index": 0,
-    }
-    manifest = {
-        "schema_version": "data_factory.seed_manifest.v1",
-        "manifest_id": f"seed-{episode_id}",
-        "kind": "seed",
-        "hypothesis_digest": canonical_digest(["hypothesis", episode_id]),
-        "fixed_contract_digest": canonical_digest(["fixed-contract", episode_id]),
-        "randomization_seed": episode_index,
-        "slots": [slot],
-        "manifest_budget": {"SYNTHETIC_TEST_ONLY": 1},
-        "program_budget": {"SYNTHETIC_TEST_ONLY": 1},
-        "planned_usage": {"SYNTHETIC_TEST_ONLY": 1},
-        "authority": "NO_EXECUTION_AUTHORITY",
-    }
-    manifest["manifest_digest"] = canonical_digest(manifest)
-    manifest_path, _ = write_json(
-        root / f"{episode_id}.seed-manifest.SYNTHETIC_TEST_ONLY.json", manifest,
-    )
-    semantic = {
-        "schema_version": "data_factory.candidate_admission.v1",
-        "run_id": episode_id,
-        "operational_gate": "PASS",
-        "operational_source": "HUMAN_GATED",
-        "checklist_id": "pickup-v2",
-        "review_context_digest": canonical_digest({
-            "run_id": episode_id,
-            "resolved_job_digest": technical["resolved_job_digest"],
-            "plan_digest": technical["plan_digest"],
-            "technical_validator_digest": technical_digest,
-        }),
-        "semantic_status": "PASS",
-        "reviewed_by": "synthetic-reviewer-1",
-        "reviewed_at": "2026-08-24T00:00:00Z",
-        "reason": None,
-    }
-    semantic_path, semantic_digest = write_json(root / f"{episode_id}.semantic.SYNTHETIC_TEST_ONLY.json", semantic)
-    episode_provenance = compile_episode_training_provenance(
-        scope=SYNTHETIC_SCOPE,
-        dataset_identity=dataset,
-        episode_id=episode_id,
-        episode_index=episode_index,
-        episode_content_digest=D2,
-        technical_validator_path=technical_path,
-        technical_validator_digest=technical_digest,
-        seed_manifest=manifest_path,
-        manifest_slot_id=slot["slot_id"],
-    )
-    provenance_path, provenance_digest = write_json(
-        root / f"{episode_id}.provenance.SYNTHETIC_TEST_ONLY.json", episode_provenance,
-    )
-    approval = {
-        "schema_version": APPROVAL_SCHEMA,
-        "scope": SYNTHETIC_SCOPE,
-        "dataset_identity": dataset,
-        "episode_id": episode_id,
-        "episode_index": episode_index,
-        "episode_content_digest": D2,
-        "technical_validator_digest": technical_digest,
-        "human_semantic_evidence_digest": semantic_digest,
-        "episode_provenance_digest": provenance_digest,
-        "approved_by": "synthetic-approver-1",
-        "approved_at": "2026-08-24T00:01:00Z",
-        "provenance": PROVENANCE,
-    }
-    approval_path, approval_digest = write_json(root / f"{episode_id}.approval.SYNTHETIC_TEST_ONLY.json", approval)
-    entry = {
-        "dataset_identity_digest": canonical_digest(dataset),
-        "episode_id": episode_id,
-        "episode_index": episode_index,
-        "episode_content_digest": D2,
-        "technical_validator": {"artifact_path": technical_path, "artifact_digest": technical_digest, "status": "PASS"},
-        "human_semantic_evidence": {
-            "artifact_path": semantic_path,
-            "artifact_digest": semantic_digest,
-            "status": "PASS",
-            "reviewer_id": "synthetic-reviewer-1",
-        },
-        "episode_provenance": {
-            "artifact_path": provenance_path,
-            "artifact_digest": provenance_digest,
-        },
-        "training_approval": {
-            "artifact_path": approval_path,
-            "artifact_digest": approval_digest,
-            "provenance": PROVENANCE,
-        },
-    }
-    return dataset, technical, semantic, approval, entry
-
-
-def snapshot(root):
-    return {str(path.relative_to(root)): path.read_bytes() for path in root.rglob("*") if path.is_file()}
 
 
 class TrainingApprovalTest(unittest.TestCase):
