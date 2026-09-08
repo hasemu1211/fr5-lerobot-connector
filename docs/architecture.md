@@ -28,20 +28,16 @@
 
 ## Collection 실행 구조
 
-Collection Operator는 작업 계획과 시연 기록의 전체 과정을 조정한다. 한 episode의 실행·중단·저장은 OneJob이 관리하며, 아래 단계는 전체 폐루프 중 수집 부분이다.
+Collection Operator는 계획한 위치·각도에 맞춰 시연 수집을 반복한다. OneJob은 한 시연의 동작과 중단을, Recorder는 학습할 구간의 기록과 저장을 맡는다.
 
-## Collection 실행 흐름
+![Pick 시연 기록 후 다음 위치·각도로 재배치하고, 복귀·저장과 기술 검사를 거쳐 다음 조건을 수집하는 순환](portfolio/collection-cycle.drawio.svg)
 
-```text
-환경 사실과 준비
-  → catalog 기반 draft
-  → 유한 manifest와 envelope
-  → campaign authorization
-  → episode별 fresh OneJob
-  → 기술 결과·provenance·coverage projection
-```
+준비 동작이 학습 목표에 섞이지 않도록 기록 구간을 나눈다.
 
-브라우저는 backend가 만든 atomic view를 표시하고 bounded intent를 보낸다. 브라우저는 sampling, retry, approval receipt, robot·recorder·dataset 상태를 소유하지 않는다. compile은 plan-only이며 motion과 episode commit은 authorization 이후의 별도 경계다.
+<details>
+<summary>실행 계획·모듈 책임·상태 계약</summary>
+
+작업 조건을 작성하면 catalog의 호환 설정을 바탕으로 회차별 계획을 확정한다. 계획한 조건을 모두 수집하면 종료한다. 승인에는 계획 식별값과 유효기간이 연결된다. 브라우저는 서버의 현재 상태를 표시하고 명령을 전달하며, 로봇과 기록기의 상태는 서버가 관리한다. 계획 생성에는 로봇 동작이나 데이터 저장이 없다.
 
 ## 책임 표
 
@@ -70,6 +66,8 @@ stale view, replay, digest mismatch, unknown enum, owner ambiguity, camera incom
 ## 실행 자격
 
 Catalog는 호환되는 조합을 제시하고, 실제 실행은 workspace·camera·task의 적격화와 해당 계획의 승인을 확인한다. 사람의 작업 성공 판정과 학습 사용 승인은 각 소비 단계에서 별도로 확인한다. 학습된 정책의 실행은 Collection의 시연 실행과 구분한다.
+
+</details>
 
 ## 관련 문서
 

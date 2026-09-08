@@ -4,11 +4,11 @@
 
 ## 실패 단위에 맞춘 모듈 책임
 
-로봇 제어, 영상·state 데이터, 학습 결과는 실패와 복구의 단위가 서로 다르다. 그래서 catalog와 plan은 실행 전 검토에, `OneJob`은 한 episode의 외부 효과에, recorder는 transaction과 dataset에, validator는 저장 후 품질에, 사람은 의미와 최종 승인에 책임을 둔다. [아키텍처](architecture.md)의 표와 관련 테스트가 이 경계를 실행 가능한 형태로 보여 준다.
+로봇 동작이 끝나도 영상 저장은 계속될 수 있다. 저장 응답이 늦다는 이유로 같은 동작을 다시 실행하면 안 된다. OneJob은 시연의 동작·중단을, Recorder는 기록·저장을 각각 관리하고 완료 상태를 대조한다. [아키텍처](architecture.md)에서 전체 흐름과 모듈 책임을 확인할 수 있다.
 
 ## 재접속해도 중복 실행하지 않는 화면
 
-브라우저 연결은 끊기고 같은 의도가 다시 도착할 수 있다. backend가 revision·digest·replay를 검사하고 browser는 atomic projection만 렌더링하면, 화면의 재접속이 robot 또는 dataset lifecycle을 새로 만들지 않는다. accepted dependency-free UI 결정과 접근성·transport 경계는 `operator-ui/architecture.md`, 회귀는 `operator-ui/tests/`가 근거다.
+수집 시작을 눌렀는데 응답 전에 화면 연결이 끊길 수 있다. 재접속한 화면은 서버에서 진행 중인 작업을 읽어 온다. 서버는 명령의 상태 버전·식별값과 중복 여부를 확인하므로, 재접속을 새 수집으로 처리하지 않는다. 구현 선택은 `operator-ui/architecture.md`, 회귀 검증은 `operator-ui/tests/`에 있다.
 
 ## 데이터 품질과 작업 성공의 분리
 
@@ -18,6 +18,9 @@ timestamp, queue drop, RGB decode와 row 구조는 기계적으로 검사할 수
 
 연속 pick-place 수집에서 로봇이 놓은 위치와 다음 episode의 시작 위치가 같은데도 서버가 다음 시작을 거절한 사례가 있었다. 원인은 같은 yaw의 좌표를 회전했다가 역회전하며 생긴 부동소수점 오차였다. 위치 허용오차를 넓히는 대신, 변환이 필요 없는 경우 원래 좌표를 그대로 전달해 scene slot과 다음 source의 정확한 결속을 유지한다.
 
+<details>
+<summary>좌표 오류의 재현과 회귀 검증</summary>
+
 실제 실패 좌표는 [좌표 회귀 테스트](../tests/data_factory/test_object_reposition.py)에, source·slot·run 결속과 잘못된 다음 위치의 거절은 [runner 계약 테스트](../tests/data_factory/test_run_job.py)에 남긴다. 아래 명령은 로봇 없이 이 오류와 fail-closed 경계를 검증한다. 통과 자체가 실물 연속 수집 성공률을 증명하지는 않는다.
 
 ```sh
@@ -25,6 +28,8 @@ direnv exec . python3 -m unittest \
   tests.data_factory.test_object_reposition \
   tests.data_factory.test_run_job.RunJobTest.test_chain_landed_source_is_bound_by_the_root_resolver_before_live_side_effects
 ```
+
+</details>
 
 ## 원본에서 결과까지의 추적
 
