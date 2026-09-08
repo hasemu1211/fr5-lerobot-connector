@@ -117,6 +117,38 @@ def _rotation_quaternion(columns):
 class RosMoveItTransport:
     """Build plan-only MoveGroup requests and serialized gripper goals."""
 
+    def capture_scene_illumination(self, plan):
+        """Measure the mapped UP frame through the existing observation owner.
+
+        This is a source-timed measurement, not a light-state certificate or a
+        continuous monitor. The terminal consumer applies its brightness rule.
+        """
+        import cv2
+        import numpy as np
+        from tools.data_factory.rollout.finite_plan import check_freshness
+        try:
+            proposal = plan["learned_proposal"]
+            inputs = proposal["runtime_inputs"]
+            camera = inputs["camera_mapping"]["observation.images.up"]
+            slot = camera.removeprefix("observation.images.")
+            if camera not in {"observation.images.camera1", "observation.images.camera2"}:
+                raise ValueError("scene camera mapping")
+            topic = inputs["camera_topics"][slot]
+            age = proposal["max_observation_age_s"]
+        except (KeyError, TypeError, ValueError, AttributeError) as exc:
+            raise ContractError("MECHANICAL_ILLUMINATION_UNAVAILABLE") from exc
+        observation = self.capture_policy_observation(inputs["camera_topics"], age)
+        # capture_policy_observation already validates ROS encoding and shape.
+        frame = observation[camera]
+        rgb = np.frombuffer(bytes.fromhex(frame["data_hex"]), dtype=np.uint8).reshape(frame["shape"])
+        brightness = float(cv2.cvtColor(rgb, cv2.COLOR_RGB2GRAY).mean())
+        check_freshness({"source_timestamps_s": observation["source_timestamps_s"],
+                         "max_observation_age_s": age}, time.time())
+        stamp = observation["source_timestamps_s"][slot]
+        return {"kind": "CURRENT_REQUIRED_ILLUMINATION", "camera_topic": topic,
+                "brightness_mean": brightness, "source_timestamp_s": stamp,
+                "valid_until_s": stamp + age}
+
     def mechanical_contact_context(self, plan, scene_object, snapshot):
         """Report the native producer's available evidence without inventing grasp.
 
@@ -130,6 +162,11 @@ class RosMoveItTransport:
             "missing_measurements": ["QUALIFIED_OBJECT_TOOL_RELATION_OR_CARRIED_ENVELOPE",
                 "QUALIFIED_CONTACT_TRANSITION_AND_APERTURE_MODEL", "CURRENT_REQUIRED_ILLUMINATION"],
             "code": "MECHANICAL_CONTACT_UNAVAILABLE"}
+        try:
+            diagnostic["illumination"] = self.capture_scene_illumination(plan)
+            diagnostic["missing_measurements"].remove("CURRENT_REQUIRED_ILLUMINATION")
+        except ContractError as exc:
+            diagnostic["illumination"] = {"kind": "UNAVAILABLE", "code": exc.code}
         description = getattr(self, "_robot_description", None)
         if isinstance(description,str):
             try:

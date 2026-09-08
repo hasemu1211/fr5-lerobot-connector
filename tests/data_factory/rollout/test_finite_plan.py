@@ -2126,6 +2126,62 @@ class FinitePlanTest(unittest.TestCase):
                 self.assertEqual(len(transport.sent), 1)
                 self.assertNotIn(("recorder", "commit"), calls)
 
+    def test_native_terminal_illumination_uses_current_mapped_scene_image(self):
+        from sensor_msgs.msg import Image, JointState
+        from tools.data_factory.motion.moveit_transport import RosMoveItTransport
+        native = object.__new__(RosMoveItTransport)
+        native._active, native._execution_locked = None, False
+        native._clock, native.graph_timeout_s = lambda: 10., .01
+        native._joint_state = native._joint_state_received_at = None
+        callbacks, destroyed = {}, []
+        native.node = SimpleNamespace(
+            get_parameter=lambda _: SimpleNamespace(value=False),
+            create_subscription=lambda _type, topic, callback, _qos: callbacks.update({topic: callback}) or topic,
+            destroy_subscription=destroyed.append)
+        inputs = {"camera_topics": {"camera1": "/wrist", "camera2": "/up"},
+                  "camera_mapping": {"observation.images.up": "observation.images.camera2",
+                                     "observation.images.wrist": "observation.images.camera1"}}
+        plan = {"learned_proposal": {"runtime_inputs": inputs, "max_observation_age_s": .3},
+                "learned_source_program": {"synthetic_test": True}, "scene_binding": SCENE}
+        frame_value, stamp = [100], [10]
+        def spin(*_, **__):
+            joint = JointState(name=JOINTS, position=ACTION)
+            joint.header.stamp.sec = 10
+            native._joint_state, native._joint_state_received_at = joint, 10.
+            for topic, callback in callbacks.items():
+                # An occluded wrist must not stand in for the UP scene camera.
+                value = frame_value[0] if topic == "/up" else 0
+                image = Image(height=1, width=1, encoding="rgb8", step=3, data=bytes([value] * 3))
+                image.header.stamp.sec = stamp[0]
+                callback(image)
+        native._rclpy = SimpleNamespace(spin_once=spin)
+        frozen = copy.deepcopy(plan)
+        with mock.patch("tools.data_factory.motion.moveit_transport.time.time", return_value=10.):
+            for brightness in (100, 0):
+                frame_value[0] = brightness
+                result = native.capture_scene_illumination(plan)
+                self.assertEqual(result["brightness_mean"], brightness)
+                self.assertEqual(result["camera_topic"], "/up")
+                self.assertEqual(result["source_timestamp_s"], 10.)
+                self.assertEqual(result["valid_until_s"], 10.3)
+                self.assertNotIn("physical_success", result)
+            context = native.mechanical_contact_context(plan, {}, {})
+            self.assertEqual(context["status"], "BLOCKED_UNAVAILABLE")
+            self.assertIs(context["physical_success"], False)
+            self.assertEqual(context["illumination"]["brightness_mean"], 0.)
+            self.assertNotIn("CURRENT_REQUIRED_ILLUMINATION", context["missing_measurements"])
+            stamp[0] = 9
+            with self.assertRaisesRegex(ContractError, "LEARNED_STALE_OBSERVATION"):
+                native.capture_scene_illumination(plan)
+            self.assertEqual(len(destroyed), 8)
+            native._active = object()
+            with self.assertRaisesRegex(ContractError, "ROS_EXEC_ACTIVE"):
+                native.capture_scene_illumination(plan)
+            native._active = None
+            with self.assertRaisesRegex(ContractError, "MECHANICAL_ILLUMINATION_UNAVAILABLE"):
+                native.capture_scene_illumination({"learned_proposal": {}})
+        self.assertEqual(plan, frozen)
+
     def test_native_mechanical_terminal_same_owner_stages_and_retains(self):
         self._native_mechanical_terminal_case()
 
