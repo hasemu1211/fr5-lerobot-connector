@@ -156,7 +156,9 @@ direnv exec . scripts/evaluate_smolvla.sh --check-env
 
 ## 실물 평가 경계
 
-이 저장소는 policy rollout wrapper를 제공하지 않는다. 따라서 checkpoint를 실물 `best`로 승격하거나 physical effectiveness를 주장하지 않는다. 별도 action adapter, joint-limit, E-stop, 동일 작업·조건의 사람 통제 프로토콜과 fresh human review가 없으면 실물 평가를 실행하지 않는다.
+[NativeSmolVLA](../tools/data_factory/learned_action_adapter.py)는 저장된 checkpoint와 전·후처리를 불러와 절대 관절 위치의 동작 묶음을 예측한다. [기존 실행 경로](../tools/data_factory/run_job.py)는 첫 추론의 준비 비용이 새 관측의 유효 시간을 소모하지 않도록 관측 전에 warmup을 수행한다. 이 호출의 출력은 폐기하고 난수 상태를 복원한다.
+
+[Finite plan](../tools/data_factory/rollout/finite_plan.py)은 관측 시각·관절 단위·위치·속도와 실행 시간을 확인해 같은 Motion Executor와 OneJob 기록기로 전달한다. 동작 묶음의 실행 완료는 작업 성공 판정과 구분한다. 현재 소프트웨어 연결과 작업 전체의 후속 실행 범위는 [시스템 아키텍처](architecture.md)에 설명한다. 실물 정책 성공은 같은 작업·조건에서 별도로 평가하며, checkpoint를 실물 `best`로 지정한 결과는 없다.
 
 학습 결과, offline loss, technical validator PASS, human semantic verdict와 training approval은 각각 다른 증거다. 어느 하나를 다른 하나의 대리 지표로 사용하지 않는다.
 

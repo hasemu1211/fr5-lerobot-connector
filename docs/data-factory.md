@@ -31,7 +31,7 @@
 
 ## 현재 제공 범위와 제한
 
-제공되는 것은 FR5 데이터 수집 경로, 유한 campaign과 one-job 조정, LeRobot v3 저장·검증, 정책 학습 wrapper 및 SmolVLA의 오프라인 checkpoint 평가다. 정책의 실물 rollout, 자동 semantic PASS, 자동 training approval, 미적격 workspace·camera·task의 실행 권한은 제공 범위가 아니다.
+FR5 시연 수집, 유한 campaign과 OneJob 조정, LeRobot 저장·검증, 정책 학습과 SmolVLA 오프라인 평가를 제공한다. 학습 정책의 고정된 동작 묶음도 기존 실행기·기록기에 연결하며, 실제 실행에는 해당 관측과 계획의 검사를 적용한다. 다음 예측을 이어 작업 전체를 완료하는 경로와 실물 정책 효과는 별도 검증 대상이다. [정책 실행의 소프트웨어 연결](architecture.md#시스템-아키텍처)에서 구현 범위를 설명한다.
 
 작업 지시의 표현과 물체·장면 변형은 수집 데이터의 설계 문제다. 새로운 작업 문자열을 저장할 수 있다는 사실만으로 해당 작업의 정책 성능을 보장하지 않는다. 지원 profile과 정확한 옵션은 `scripts/collect.sh`, `scripts/train_policy.sh`, `scripts/evaluate_smolvla.sh`의 `--help`와 테스트가 소유한다.
 
