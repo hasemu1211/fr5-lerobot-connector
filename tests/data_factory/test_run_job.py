@@ -86,6 +86,42 @@ class Executor:
 
 
 class RunJobTest(unittest.TestCase):
+    def test_learned_terminal_retains_original_result_for_diagnostic_consumer(self):
+        result = {"run_id": "run-1", "execution_evidence": {"learned_execution": {}}}
+        diagnostic = {"lifecycle_result_digest": run_job.canonical_digest(result)}
+        with tempfile.TemporaryDirectory() as directory, mock.patch(
+            "tools.data_factory.rollout.evidence_boundary.build_run_diagnostic",
+            return_value=diagnostic,
+        ) as derive:
+            request = {"run_root": directory, "run_id": "run-1"}
+            root = run_job._prepare_run_dir(request)
+            self.assertEqual(run_job.learned_run_diagnostic(result, payload=request), diagnostic)
+            target = root / "learned_lifecycle_result.json"
+            self.assertEqual(run_job.load_json_strict(target), result)
+            before = (target.read_bytes(), target.stat().st_mtime_ns)
+            self.assertEqual(run_job.learned_run_diagnostic(result, payload=request), diagnostic)
+            self.assertEqual((target.read_bytes(), target.stat().st_mtime_ns), before)
+            with self.assertRaisesRegex(run_job.ContractError, "LEARNED_RESULT_CONFLICT"):
+                run_job.learned_run_diagnostic({**result, "code": "different"}, payload=request)
+            self.assertEqual((target.read_bytes(), target.stat().st_mtime_ns), before)
+            self.assertEqual(derive.call_args_list[0], mock.call(result))
+
+    def test_learned_diagnostic_rejection_or_wrong_run_does_not_publish(self):
+        result = {"run_id": "run-1", "execution_evidence": {"learned_execution": {}}}
+        with tempfile.TemporaryDirectory() as directory:
+            request = {"run_root": directory, "run_id": "run-1"}
+            root = run_job._prepare_run_dir(request)
+            with mock.patch("tools.data_factory.rollout.evidence_boundary.build_run_diagnostic",
+                            side_effect=run_job.ContractError("INVALID_TRACE")):
+                with self.assertRaisesRegex(run_job.ContractError, "INVALID_TRACE"):
+                    run_job.learned_run_diagnostic(result, payload=request)
+            self.assertEqual(list(root.iterdir()), [])
+            with mock.patch("tools.data_factory.rollout.evidence_boundary.build_run_diagnostic", return_value={}):
+                with self.assertRaisesRegex(run_job.ContractError, "LEARNED_RESULT_RUN"):
+                    run_job.learned_run_diagnostic({**result, "run_id": "other"}, payload=request)
+            self.assertIsNone(run_job.learned_run_diagnostic({}, payload=request))
+            self.assertEqual(list(root.iterdir()), [])
+
     def test_native_load_mapping_or_cancel_failure_precedes_live_children_and_run_writes(self):
         from tools.data_factory.learned_action_adapter import NativeSmolVLA
         for failure in ("load", "mapping", "cancel", "warmup", "warmup_cancel"):

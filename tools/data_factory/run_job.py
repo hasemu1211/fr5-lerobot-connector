@@ -2484,13 +2484,27 @@ def run_learned_plan_only(payload, cancel, publish, *, checkpoint, observation=N
             child.close(timeout_s=1.0 if cancel.is_set() else None)
 
 
-def learned_run_diagnostic(result):
-    """Attach the canonical read-only rollout projection to an existing run result."""
+def learned_run_diagnostic(result, *, payload=None):
+    """Derive the diagnostic; a live caller retains its source in the owned run."""
     evidence = result.get("execution_evidence")
     if not isinstance(evidence, dict) or "learned_execution" not in evidence:
         return None
     from tools.data_factory.rollout.evidence_boundary import build_run_diagnostic
-    return build_run_diagnostic(result)
+    diagnostic = build_run_diagnostic(result)
+    if payload is not None:
+        if result.get("run_id") != payload["run_id"]:
+            raise ContractError("LEARNED_RESULT_RUN")
+        path = _run_dir(payload) / "learned_lifecycle_result.json"
+        if path.is_symlink():
+            raise ContractError("LEARNED_RESULT_CONFLICT")
+        if path.exists():
+            if canonical_digest(load_json_strict(path)) != canonical_digest(result):
+                raise ContractError("LEARNED_RESULT_CONFLICT")
+        else:
+            # The fresh run directory has one lifecycle writer. Never put this
+            # unqualified result in a committed episode or training inventory.
+            write_json_atomic(path, result)
+    return diagnostic
 
 
 def run_plan_only(payload, cancel, publish, *, resolver=resolve_inputs, executor_factory=_executor):
@@ -4277,7 +4291,7 @@ def run_live(payload, cancel, publish, *, resolver=resolve_inputs, executor_fact
         while True:
             if cancel.is_set():
                 result = job.cancel()
-                return _response(ok=False, code=result["code"], state=result["state"], run_id=payload["run_id"], plan_digest=planned["plan_digest"], data=learned_run_diagnostic(result))
+                return _response(ok=False, code=result["code"], state=result["state"], run_id=payload["run_id"], plan_digest=planned["plan_digest"], data=learned_run_diagnostic(result, payload=payload))
             poll_started = time.monotonic()
             result = job.poll()
             poll_elapsed = time.monotonic() - poll_started
@@ -4303,7 +4317,7 @@ def run_live(payload, cancel, publish, *, resolver=resolve_inputs, executor_fact
                         "frozen_rows": result["frozen_rows"], "rows_after_recycle": result["rows_after_recycle"],
                         "camera_semantic_authority": False, "training_authorized": False,
                     })
-                return _response(ok=False, code=result["code"], state=result["state"], run_id=payload["run_id"], plan_digest=planned["plan_digest"], data=learned_run_diagnostic(result))
+                return _response(ok=False, code=result["code"], state=result["state"], run_id=payload["run_id"], plan_digest=planned["plan_digest"], data=learned_run_diagnostic(result, payload=payload))
             if result["state"] in {"AWAITING_CELL_READY", "COMMITTED"}:
                 publish(_response(
                     ok=True, code="VALIDATING", state="RUNNING",
