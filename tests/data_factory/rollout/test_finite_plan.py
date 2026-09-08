@@ -123,6 +123,10 @@ class Transport(T):
                 wire = {**dict.fromkeys(names, 0.), **wire, "version": 3.}
                 binding = {"schema_version": "fr5.gripper_temporal_policy.v1", "incarnation": [1, 2, 3, 4],
                            "max_age_s": .3, "host_clock_tolerance_s": .001}
+                if getattr(self, "hardware_selected", False):
+                    from tools.data_factory.rollout.gripper_evidence import SELECTED_FIELDS
+                    names = SELECTED_FIELDS
+                    wire = {**dict.fromkeys(names, 0.), **wire, "version": 4.}
             packet = DynamicJointState(joint_names=[RESOURCE], interface_values=[InterfaceValue(
                 interface_names=list(names), values=[float(wire[k]) for k in names])])
             value["gripper_controller"]["hardware_execution"] = decode_dynamic_state(
@@ -315,6 +319,7 @@ class FinitePlanTest(unittest.TestCase):
         transport.hardware = True
         transport.hardware_current = True
         transport.hardware_causal = causal
+        transport.hardware_selected = causal
         def capture(topics, age):
             self.assertEqual(topics, {"camera1": "/up", "camera2": "/wrist"})
             self.assertEqual(age, .3)
@@ -376,7 +381,7 @@ class FinitePlanTest(unittest.TestCase):
                 bound_proposal["period_s"] = 1 / profile["fps"]
                 bound_proposal["runtime_inputs"] = {**run_job._learned_options(value), "clock_binding": clock_binding,
                     "camera_topics": {"camera1": "/up", "camera2": "/wrist"}, "camera_mapping": mapping,
-                    "fps": profile["fps"], "hardware_wire_version": 3 if causal else 2}
+                    "fps": profile["fps"], "hardware_wire_version": 4 if causal else 2}
                 value["task_grant"] = task_grant(program, SCENE, bound_proposal)
             value = run_job._run_payload(value)
             factory = mock.Mock(return_value=child)
@@ -500,7 +505,7 @@ class FinitePlanTest(unittest.TestCase):
             self.assertEqual(plan["learned_proposal"]["runtime_inputs"]["device"], "cpu")
             self.assertEqual(plan["learned_proposal"]["runtime_inputs"]["warmup"]["output_disposition"], "DISCARDED")
             self.assertEqual(plan["learned_proposal"]["runtime_inputs"]["clock_binding"], clock_binding)
-            self.assertEqual(plan["learned_proposal"]["runtime_inputs"]["hardware_wire_version"], 3 if causal else 2)
+            self.assertEqual(plan["learned_proposal"]["runtime_inputs"]["hardware_wire_version"], 4 if causal else 2)
             self.assertEqual(plan["learned_proposal"]["runtime_inputs"][hardware_key], str(binding_path))
             self.assertEqual(result["data"]["task_effectiveness"], "UNKNOWN")
 
@@ -683,9 +688,18 @@ class FinitePlanTest(unittest.TestCase):
                                   source_clock=lambda: now[0], monotonic_clock=lambda: now[0])
         job = OneJob(Recorder(calls), executor.process)
         inference = FinitePolicyInference(lambda _: actions, checkpoint if recorded is not None else CHECKPOINT, source_clock=lambda: now[0])
+        runtime_inputs = None
+        if contact_fixture is not None:
+            runtime_inputs = {"checkpoint": "/synthetic/checkpoint", "device": "cpu",
+                "gripper_temporal_policy": "/synthetic/temporal.json", "hardware_wire_version": 4,
+                "clock_binding": t.snapshot()["gripper_controller"]["hardware_execution"]["clock_binding"],
+                "camera_topics": {"camera1": "/up", "camera2": "/wrist"},
+                "camera_mapping": {"observation.images.up": "observation.images.camera1",
+                                   "observation.images.wrist": "observation.images.camera2"}, "fps": 30.}
         planned = job.plan_learned("run", src, SCENE, inference, obs, **{**OPTIONS, "robot_description": xml, "period_s": 1 / 30,
                                   "held_gripper_targets": recorded is None and not mechanical, "serialized_references": recorded is not None or mechanical,
-                                  "quantize_gripper": quantize_gripper, "max_observation_age_s": max_observation_age_s})
+                                  "quantize_gripper": quantize_gripper, "max_observation_age_s": max_observation_age_s,
+                                  "runtime_inputs": runtime_inputs})
         self.assertTrue(planned["ok"], planned)
         return job, executor, t, state, now, sent, handles, calls
 
@@ -2352,6 +2366,48 @@ class FinitePlanTest(unittest.TestCase):
         self._native_mechanical_terminal_case(prospective=1,
             actions=[[.001]*6+[.01177], [.001]*6+[.01178], [.001]*6+[.01179]])
 
+    def test_continuous_calibrated_plateau_survives_arm_and_next_chunk(self):
+        plan, result = self._native_mechanical_terminal_case(prospective=2,
+            actions=[[.001]*6+[.01177], [.002]*6+[.01177]])
+        from tools.data_factory.rollout.finite_plan import validate_execution_trace, held_target_segments
+        trace = result["execution_evidence"]["learned_execution"]
+        self.assertEqual(validate_execution_trace(plan, trace), trace)
+        segments = plan["steps"][0]["held_target_segments"]
+        self.assertLess(segments[1]["acceptable_feedback_m"]["max"], .01218)
+        self.assertEqual(trace["segments"][1]["terminal_observation"]["snapshot"]["gripper_controller"]["feedback_position_m"], .01218)
+        for key, value in (("selected_force", 50.), ("selected_generation", 99.),
+                           ("selected_initial_percent", 55.), ("raw_reference_m", .01178),
+                           ("feedback_m", .01219), ("selected_valid", 0.)):
+            with self.subTest(tampered=key):
+                changed = copy.deepcopy(trace)
+                wire = changed["segments"][1]["terminal_observation"]["snapshot"]["gripper_controller"]["hardware_execution"]["wire"]
+                wire[key] = value
+                changed["trace_digest"] = canonical_digest({k: v for k, v in changed.items() if k != "trace_digest"})
+                with self.assertRaises(ContractError):
+                    validate_execution_trace(plan, changed)
+        p = plan["learned_proposal"]
+        source_program = plan["learned_source_program"]
+        ordinary = [{k: v for k, v in s.items() if k != "native_close_feedback"}
+                    for s in held_target_segments(source_program, p)]
+        for version in (None, 3):
+            legacy = copy.deepcopy(p)
+            if version is None:
+                legacy.pop("runtime_inputs")
+            else:
+                legacy["runtime_inputs"]["hardware_wire_version"] = version
+            redigest(legacy)
+            before = copy.deepcopy(legacy)
+            self.assertEqual(held_target_segments(source_program, legacy), ordinary)
+            self.assertEqual(legacy, before)
+        self._native_mechanical_terminal_case(prospective=2, actions=[[.001]*6+[.01177]],
+            next_actions=[[.001]*6+[.01178], [.001]*6+[.01179]])
+
+    def test_continuous_plateau_rejects_bad_selection_and_outside_calibration(self):
+        for failure in ("tuple_generation", "tuple_force", "tuple_initial", "tuple_missing", "plateau_outside"):
+            with self.subTest(failure=failure):
+                self._native_mechanical_terminal_case(failure, prospective=2,
+                    actions=[[.001]*6+[.01177], [.002]*6+[.01177]])
+
     def test_real_contact_relation_survives_predecessor_bound_chunks(self):
         self._native_mechanical_terminal_case(prospective=1, actions=[[.001]*6+[.01177]],
             next_actions=[[.001]*6+[.01178],[.001]*6+[.01179]])
@@ -2476,6 +2532,8 @@ class FinitePlanTest(unittest.TestCase):
         tcp = compose_rigid_transform(datum, q["datum_to_tcp_grasp"])
         tool = compose_rigid_transform(tcp, inverse_rigid_transform(q["tool_to_tcp"]))
         for step in src["steps"]:
+            if step["phase"] == "GRIPPER_OPEN":
+                step["limits"]["completion_tolerance_m"] = docs["grasp_profile"]["gripper_open"]["completion_tolerance_m"]
             if step["phase"] == "FINAL_APPROACH_LIN":
                 step["target"] = {"base_tcp": tcp, "base_tool": tool}
         transport._fixture_contact_tool = tool
@@ -2689,14 +2747,15 @@ class FinitePlanTest(unittest.TestCase):
                     if recorded is not None or actions is not None:
                         state["feedback"] = math.floor(value/.021*100+.5)*.021/100
                         state["hardware_override"]["completion_reason"] = 1.
-                    if prospective and value == .01176:
+                    if prospective and math.floor(value/.021*100+.5) == 56:
                         state["hardware_override"]["completion_reason"] = float(prospective)
                         if prospective == 2:
-                            state["feedback"] = .01218
+                            state["feedback"] = .01219 if failure == "plateau_outside" else .01218
                         changes = {"tuple_generation":("selected_generation",99.), "tuple_endpoint":("selected_position",55.),
                             "tuple_force":("selected_force",50.), "tuple_velocity":("selected_velocity",10.),
                             "tuple_index":("selected_index",2.), "tuple_max_time":("selected_max_time",10000.),
-                            "tuple_arg5":("selected_arg5",0.), "tuple_missing":("selected_valid",0.)}
+                            "tuple_arg5":("selected_arg5",0.), "tuple_missing":("selected_valid",0.),
+                            "tuple_initial":("selected_initial_percent",55.)}
                         if failure in changes:
                             key,value = changes[failure]
                             state["hardware_override"][key] = value
@@ -2714,11 +2773,22 @@ class FinitePlanTest(unittest.TestCase):
                 return job.poll()
             while job.state != "LEARNED_CHUNK_COMPLETE":
                 completed=complete_goal()
-                if failure and failure.startswith("tuple_") or failure in {"changed_contact_scene","held_opening"}:
+                if failure and failure.startswith("tuple_") or failure in {"changed_contact_scene","held_opening","plateau_outside"}:
                     if not completed["ok"]:
                         self.assertEqual(len(sent), 1 if failure=="changed_contact_scene" else 3 if failure=="held_opening" else 2)
                         self.assertNotIn("mechanical_terminal",executor.runs["run"])
-                        self.assertIn(("recorder","retain"),calls)
+                        if prospective == 2 and (failure.startswith("tuple_") or failure == "plateau_outside"):
+                            # Rejection occurs inside the native handoff, before
+                            # a verified stop. Preserve the recording; do not
+                            # manufacture successful cancellation or export.
+                            self.assertEqual(job.cancel_error, "ROS_EXEC_CANCEL_NOT_CANCELED")
+                            self.assertEqual(job.recorder_state, "RECORDING")
+                            self.assertTrue(transport.owns_active_goal)
+                            self.assertNotIn(("recorder", "retain"), calls)
+                            self.assertNotIn(("recorder", "abort"), calls)
+                        else:
+                            self.assertIn(("recorder","retain"),calls)
+                        self.assertNotIn(("recorder", "commit"), calls)
                         return
                 if recorded is not None and not completed["ok"]:
                     self.assertEqual(completed["code"], "CONTACT_HELD_EVOLUTION_UNSUPPORTED")
@@ -2742,7 +2812,8 @@ class FinitePlanTest(unittest.TestCase):
                 obs["source_timestamps_s"] = dict.fromkeys(("state","camera1","camera2"),now[0])
                 p = FinitePolicyInference(lambda _:next_actions,CHECKPOINT,source_clock=lambda:now[0]).propose(obs,
                     instruction="synthetic probe",robot_description=transport._robot_description,period_s=1/30,
-                    max_observation_age_s=.3,serialized_references=True)
+                    max_observation_age_s=.3,serialized_references=True,
+                    runtime_inputs=original["learned_proposal"].get("runtime_inputs"))
                 built = compile_program(original["learned_source_program"],p)
                 prepared = job.prepare_next_learned(built)
                 self.assertTrue(prepared["ok"],prepared["code"])
@@ -2848,6 +2919,7 @@ class FinitePlanTest(unittest.TestCase):
             self.assertEqual(diagnostic["mechanical_terminal"],terminal)
             self.assertEqual(diagnostic["task_effectiveness"],"UNKNOWN")
             self.assertFalse(diagnostic["training_authorized"])
+            return original, result
 
     def test_task_grant_rejects_illegal_expired_and_revoked_without_goals(self):
         for change, expected in (({"revoked": True}, "TASK_GRANT_REVOKED"),

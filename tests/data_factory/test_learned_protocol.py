@@ -1,6 +1,9 @@
 """Proposal protocol compatibility only; no hardware or model execution."""
 import copy
+from pathlib import Path
+import threading
 import unittest
+from unittest import mock
 
 from tools.data_factory.learned_action_adapter import fake_rgb
 from tools.data_factory.rollout.finite_plan import (
@@ -10,6 +13,36 @@ from tools.fr5_data_factory import ContractError, canonical_digest
 
 
 class LearnedProtocolTest(unittest.TestCase):
+    def test_new_native_temporal_inputs_pin_v4_and_legacy_inputs_keep_v2(self):
+        from tools.data_factory.run_job import _native_run_inputs
+
+        profile = {"camera_roles": ["up", "wrist"], "camera_topics": {"up": "/up", "wrist": "/wrist"},
+                   "fps": 10., "height": 480, "width": 640}
+        for version, key in ((2, "gripper_source_clock"), (4, "gripper_temporal_policy")):
+            with self.subTest(version=version):
+                expected = self.proposal(version)["runtime_inputs"]
+                native = mock.Mock(policy_dir=Path("/synthetic/checkpoint"))
+                native.warmup.return_value = {"synthetic_warmup": True}
+                def load_json(path):
+                    if path.name == "train_config.json":
+                        return {"rename_map": expected["camera_mapping"]}
+                    self.assertEqual(path, Path(expected[key]))
+                    return copy.deepcopy(expected["clock_binding"])
+                cancel = threading.Event()
+                with mock.patch("tools.data_factory.learned_action_adapter.NativeSmolVLA.load", return_value=native) as load, \
+                        mock.patch("tools.data_factory.run_job.load_json_strict", side_effect=load_json):
+                    result, inputs = _native_run_inputs(
+                        {"learned_checkpoint": expected["checkpoint"], key: expected[key]},
+                        profile, cancel, instruction="synthetic protocol check")
+                self.assertIs(result, native)
+                load.assert_called_once_with(expected["checkpoint"], device="cpu")
+                native.warmup.assert_called_once_with(
+                    instruction="synthetic protocol check", height=480, width=640, cancel_event=cancel)
+                self.assertEqual(inputs["hardware_wire_version"], version)
+                self.assertEqual(inputs["clock_binding"], expected["clock_binding"])
+                self.assertEqual(inputs["camera_mapping"], expected["camera_mapping"])
+                self.assertEqual(inputs["warmup"], {"synthetic_warmup": True})
+
     def proposal(self, version):
         state = [0.] * 6 + [.01]
         xml = '<robot name="synthetic">' + ''.join(

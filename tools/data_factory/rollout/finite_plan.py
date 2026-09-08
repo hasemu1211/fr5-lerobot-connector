@@ -222,6 +222,15 @@ def reference_timing(initial, actions, period, limits, scaling, *, raw=None):
     return result
 
 
+def native_close_feedback(source, target):
+    """Pin a possible calibrated bound; actual v4 selection must still prove it."""
+    upper = next(s["gripper_position_m"] for s in source["steps"] if s["phase"] == "GRIPPER_OPEN")
+    required = source["gripper_requirements"]
+    if math.floor(target * 100 / upper + .5) != math.floor(required["command_position_m"] * 100 / upper + .5):
+        return {}
+    return {"native_close_feedback": {"requirements": copy.deepcopy(required), "upper_position_m": upper}}
+
+
 def held_target_segments(source, proposal):
     """Freeze exact runs of bound references; never classify or round model output."""
     p = validate_proposal(proposal)
@@ -233,6 +242,7 @@ def held_target_segments(source, proposal):
     if ("release_position_m" in opened and not reference) or close["gripper_position_m"] == opened["gripper_position_m"]:
         raise ContractError("LEARNED_HELD_PROFILE_UNSUPPORTED")
     required = source["gripper_requirements"]
+    native = reference and p.get("runtime_inputs", {}).get("hardware_wire_version") == 4
     profiles = {
         close["gripper_position_m"]: (close["limits"], required["acceptable_feedback_m"]),
         opened["gripper_position_m"]: (opened["limits"], {
@@ -266,6 +276,8 @@ def held_target_segments(source, proposal):
         feedback = {"min": max(low, feedback["min"]), "max": min(high, feedback["max"])}
         bound = {"gripper_position_m": target, "acceptable_feedback_m": copy.deepcopy(feedback),
                  "gripper_limits": copy.deepcopy(limits)}
+        if native:
+            bound.update(native_close_feedback(source, target))
         if target != previous_target:
             segments.append({"type": "GRIPPER", "action_range": [indices[0], indices[0]], **bound})
             duration += limits["command_duration_s"]
@@ -289,6 +301,8 @@ def held_target_segments(source, proposal):
                             "gripper_position_m": previous_target,
                             "acceptable_feedback_m": {"min": max(low, feedback["min"]), "max": min(high, feedback["max"])},
                             "gripper_limits": copy.deepcopy(opened["limits"])})
+            if native:
+                ordered[-1].update(native_close_feedback(source, previous_target))
             command = next((s for s in segments if s["type"] == "GRIPPER" and s["action_range"] == [index, index]), None)
             if command is not None:
                 ordered.append(command)
@@ -402,7 +416,7 @@ def check_segment_observation(segment, evidence, now, *, terminal=False, steady_
         if terminal or segment["type"] == "ARM":
             reference = _number(gripper["reference_position_m"], "GRIPPER_FEEDBACK_OUT_OF_RANGE")
             bound = segment["acceptable_feedback_m"]
-            if abs(reference - segment["gripper_position_m"]) > 1e-9 or not bound["min"] <= state[-1] <= bound["max"]:
+            if abs(reference - segment["gripper_position_m"]) > 1e-9:
                 raise ContractError("GRIPPER_FEEDBACK_OUT_OF_RANGE")
         from .gripper_evidence import check_hardware
         wire = check_hardware(evidence, now,
@@ -410,9 +424,18 @@ def check_segment_observation(segment, evidence, now, *, terminal=False, steady_
             segment["max_joint_state_age_s"], completion=terminal and segment["type"] == "GRIPPER",
             allow_pending=allow_pending and segment["type"] == "GRIPPER" and not terminal)
         if terminal or segment["type"] == "ARM":
-            if (abs(wire["raw_reference_m"] - segment["gripper_position_m"]) > 1e-9
-                    or not bound["min"] <= wire["feedback_m"] <= bound["max"]):
+            if abs(wire["raw_reference_m"] - segment["gripper_position_m"]) > 1e-9:
                 raise ContractError("GRIPPER_FEEDBACK_OUT_OF_RANGE")
+            feedback = (state[-1], wire["feedback_m"])
+            if not all(bound["min"] <= value <= bound["max"] for value in feedback):
+                calibrated = segment.get("native_close_feedback")
+                if calibrated is None:
+                    raise ContractError("GRIPPER_FEEDBACK_OUT_OF_RANGE")
+                from .gripper_evidence import native_selected_command
+                native_selected_command(wire, calibrated["requirements"], calibrated["upper_position_m"], qualified_close=True)
+                bound = calibrated["requirements"]["acceptable_feedback_m"]
+                if not all(bound["min"] <= value <= bound["max"] for value in feedback):
+                    raise ContractError("GRIPPER_FEEDBACK_OUT_OF_RANGE")
         return state
     except ContractError:
         raise

@@ -1609,6 +1609,12 @@ class RosMoveItTransport:
         check("initial", plan["initial_joint_state"])
         for step in (segment for outer in plan["steps"] for segment in outer.get("held_target_segments", [outer])):
             feedback_bounds = step.get("acceptable_feedback_m") if step["type"] == "ARM" else None
+            if feedback_bounds is not None and "native_close_feedback" in step:
+                calibrated = step["native_close_feedback"]["requirements"]["acceptable_feedback_m"]
+                # Collision coverage includes either possible feedback envelope;
+                # only the live checker can admit a completed native selection.
+                feedback_bounds = {"min": min(feedback_bounds["min"], calibrated["min"]),
+                                   "max": max(feedback_bounds["max"], calibrated["max"])}
             if step["type"] == "GRIPPER":
                 target = step.get("gripper_position_m", plan["gripper_requirements"]["command_position_m"])
                 targets = ([step["release_position_m"],target]

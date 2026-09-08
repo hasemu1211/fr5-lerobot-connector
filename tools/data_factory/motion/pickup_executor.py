@@ -640,6 +640,10 @@ class PickupExecutor:
                         if abs(proposal["actions"][0][-1] - gripper["reference_position_m"]) > rate * proposal["reference_timing"]["durations_s"][0] + 1e-9:
                             raise ContractError("LEARNED_VELOCITY_LIMIT")
                         segment["gripper_position_m"] = gripper["reference_position_m"]
+                        if proposal.get("runtime_inputs", {}).get("hardware_wire_version") == 4:
+                            from tools.data_factory.rollout.finite_plan import native_close_feedback
+                            segment.pop("native_close_feedback", None)
+                            segment.update(native_close_feedback(motion_program["source_program"], gripper["reference_position_m"]))
                     if (segment["type"] == "GRIPPER" and begin == 0
                             and abs(gripper["reference_position_m"] - segment["gripper_position_m"]) <= 1e-9
                             and segment["acceptable_feedback_m"]["min"] <= gripper["feedback_position_m"] <= segment["acceptable_feedback_m"]["max"]):
@@ -1948,9 +1952,8 @@ class PickupExecutor:
                                           execution["prospective_contact"], execution.pop("contact_pending"))
                             if run["state"] != "EXECUTING" or run["cancel_event"].is_set():
                                 continue
-                            self._verified_gripper_feedback(run, {
-                                "command_position_m": segment["gripper_position_m"],
-                                "acceptable_feedback_m": segment["acceptable_feedback_m"]}, observed)
+                            # The shared live/trace checker above owns exact raw
+                            # tracking and source-calibrated native completion.
                             execution.setdefault("learned_segments", []).append({
                                 "segment_index": index, "segment_digest": canonical_digest(segment),
                                 "start_observation": execution["learned_start_observation"],

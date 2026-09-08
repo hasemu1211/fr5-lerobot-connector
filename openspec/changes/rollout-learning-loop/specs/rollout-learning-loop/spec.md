@@ -1177,6 +1177,13 @@ Absent or inconsistent tuple evidence SHALL remain unavailable. Archived evidenc
 versions SHALL retain their original meanings and exact protocol approvals.
 Reason 1 native endpoint completion and reason 2 calibrated plateau completion
 SHALL retain distinct meanings; plateau SHALL NOT become a mandatory extra gate.
+New explicitly v4 continuous plans MAY pin the source-calibrated close feedback
+range separately from their unchanged raw references and ordinary tracking
+tolerances. Shared live/start/trace checks SHALL accept that alternate range only
+with a completed generation-bound native equivalent-close selection and fresh
+controller and hardware feedback within the calibrated range. Collision checking
+SHALL cover the possible calibrated envelope; this is not contact or task success
+authority. Archived plans SHALL NOT acquire the alternate range retroactively.
 Unsupported contact evolution or opening SHALL stop before the next goal without
 truncating the policy output, declaring a partial chunk complete or handing off
 early. Partial-open, the existing command-start-relative hold, and full-open
