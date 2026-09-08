@@ -1,18 +1,18 @@
-# Robot Learning Data Engine
+# Closed-Loop Data Engine for Robot Skill Adaptation
 
-로봇 데이터의 수집·선별·학습·평가를 연결하는 모방학습 데이터 엔진이다. 데이터와 정책 평가에서 찾은 부족한 조건을 다음 수집에 반영해, 정책 개선을 반복해서 검증하는 것이 목표이다. FAIRINO FR5를 구현·검증 플랫폼으로 사용한다.
+실물 demonstration으로 시작하는 VLA skill adaptation. 구현·검증 플랫폼은 FAIRINO FR5이다.
 
-**[포트폴리오 다운로드 · 38.2MB](https://github.com/hasemu1211/fr5-lerobot-connector/releases/download/portfolio-2026-09-08/FR5-Portfolio.html)** · [시스템 아키텍처](docs/architecture.md)
+**[포트폴리오 다운로드 · 38.7MB](https://github.com/hasemu1211/fr5-lerobot-connector/releases/download/portfolio-2026-09-08/FR5-Portfolio.html)** · [시스템 아키텍처](docs/architecture.md)
 
 [![Pick & Place 시연의 고정 카메라와 손목 카메라 관측](docs/portfolio/assets/pick-place-latest-poster.jpg)](https://github.com/hasemu1211/fr5-lerobot-connector/releases/download/portfolio-2026-09-08/FR5-Portfolio.html)
 
-**Pick & Place 시연 · 21.1초** — 같은 동작을 작업대와 그리퍼 시점에서 기록한다.
+Pick & Place · 21.1초
 
-## 데이터에서 정책 비교까지
+## Robot Skill Adaptation
 
-![Collection Operator, Curator, Policy Learning과 다음 수집으로 돌아가는 피드백](docs/portfolio/lifecycle.drawio.svg)
+![상위 계획과 VLA skill의 실행 맥락, 실물 시연 생성·학습·평가와 다음 수집을 연결하는 데이터 엔진의 개발 범위](docs/portfolio/skill-adaptation.drawio.svg)
 
-수집 조건에서 원본 시연, 데이터 선택과 checkpoint까지 출처를 연결한다. 같은 평가 데이터를 유지해 정책을 비교하고, 부족한 조건을 다음 수집의 가설로 만든다. 그림은 폐루프의 목표 구조이며 실물 정책 개선은 후속 검증 대상이다.
+그림은 폐루프의 목표 구조이다. 수집·선별·학습·오프라인 평가와 조건별 수집 추천을 구현했으며, 실물 정책 개선 효과는 후속 검증 대상이다.
 
 | 핵심 기능 | 설계 목적 |
 | --- | --- |

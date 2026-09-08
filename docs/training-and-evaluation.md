@@ -1,6 +1,6 @@
 # 학습과 평가
 
-이 문서는 승인된 dataset을 policy wrapper에 전달하는 방법과 오프라인 평가의 현재 경계를 설명한다. 학습 환경 준비는 [시작하기](getting-started.md), 입력 품질은 [데이터셋 품질](dataset-quality.md)의 책임이다.
+[학습 환경 준비](getting-started.md) · [입력 데이터 품질](dataset-quality.md)
 
 ## 제공 profile
 
