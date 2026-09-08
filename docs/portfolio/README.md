@@ -1,37 +1,45 @@
-# 폐루프 모방학습 데이터 엔진
+# Robot Learning Data Engine · 포트폴리오
 
-데이터의 품질·분포 분석과 정책 평가를 다음 수집으로 연결하는 폐루프 시스템의 포트폴리오이다. FR5는 구현·검증 플랫폼으로 소개한다. 프로젝트 이름과 첫 개요는 폐루프의 목적을 앞세우며, 현재 구현 모듈과 검증된 성과는 그 구조 안에 배치한다.
+로봇 데이터의 수집부터 정책 비교까지, 실제 시연과 기술 원리로 살펴보는 포트폴리오이다. FAIRINO FR5를 구현·검증 플랫폼으로 사용한다.
 
-전달물은 `FR5-Portfolio.html` 파일 하나이다. 데스크톱 Chrome에서 열면 압축 해제·설치·서버 없이 이미지, 동영상, 화면 선택, 수치 비교와 근거 열람을 사용할 수 있다. 외부 문헌 링크만 인터넷을 사용한다.
+## 열람
 
-이 폴더는 편집 원본이다. 평소에는 [index.html](index.html)을 열어 수정한 내용을 확인하고, 전달할 때 아래 명령으로 단일 파일을 생성한다. 생성된 HTML을 직접 편집하지 않는다.
+전달받은 **`FR5-Portfolio.html` 파일 하나**를 데스크톱 Chrome에서 연다. 설치·압축 해제·서버 없이 영상 재생, 표본 선택, 정책 비교와 근거 열람을 사용할 수 있다. 외부 문헌 링크만 인터넷 연결이 필요하다.
+
+저장소에서 살펴보려면 [index.html](index.html)을 브라우저로 연다. GitHub의 HTML 소스 화면에서는 시연과 상호작용이 실행되지 않는다.
+
+| 구간 | 내용 |
+| --- | --- |
+| [시스템](architecture.html) | 폐루프 목적과 모듈의 연결 |
+| [Collection Operator](collection.html) | Pick·Pick & Place 시연, 작업 조건과 기록 원리 |
+| [Recorder · Curator](data.html) | 정책 입출력, 시간 정렬과 영상 변환 |
+| [Policy Learning](learning.html) | SmolVLA 원리와 같은 조건의 정책 비교 |
+| [Acquisition Strategy](acquisition.html) | 데이터·정책 평가를 다음 수집 조건으로 연결하는 방법 |
+
+## 단일 파일 만들기
+
+저장소 루트에서 Python 3으로 실행한다. 추가 패키지는 필요하지 않다.
 
 ```sh
 python3 docs/portfolio/export_single_file.py .agent-local/portfolio/FR5-Portfolio.html
 ```
 
-기존 파일을 같은 위치에 다시 생성하므로 배포본을 별도로 관리하거나 사본을 쌓지 않는다. Python 표준 라이브러리만 사용하며, 영상·이미지·글꼴과 근거 페이지를 포함한 결과가 50MB 이상이면 생성을 중단한다. 새 상호작용을 추가한 경우에는 생성된 파일에서도 해당 동작을 확인한다.
+이미지·동영상·글꼴·근거 페이지를 포함해 50MB 미만의 파일을 생성하고, 파일 크기와 SHA-256을 출력한다. 생성된 파일을 그대로 전달하면 된다. 수정은 이 폴더의 원본에 반영한 뒤 같은 명령으로 다시 생성한다.
 
-- [시스템 아키텍처](architecture.html): 모듈 구성과 데이터 흐름
-- [Acquisition Strategy](acquisition.html): 과거 기록과 현재 조건을 결합한 추천, 수집 전략 비교
-- [Collection Operator](collection.html): 작업 조건, 반복 수집과 기록 구간
-- [Recorder · Curator](data.html): 저장 관측, 시간 정렬과 영상 변환·검토
-- [Policy Learning](learning.html): SmolVLA 학습 입력과 오프라인 비교
+## 편집 원본
 
-실제 저장 관측, FAKE 모드의 제품 화면과 오프라인 학습 결과는 각 매체의 캡션에서 구분한다. 근거 화면에는 원본 파일 식별자와 SHA-256, 발췌 범위를 함께 표시한다.
+| 위치 | 용도 |
+| --- | --- |
+| `index.html` 및 주제별 HTML | 본문과 화면 구성 |
+| `*.drawio.svg`, `assets/` | 도해·그래프·영상·이미지·글꼴 |
+| `sources/` | 실제 코드·데이터·보고서의 출처와 발췌 |
+| `*.js`, `site.css` | 탐색·상호작용·화면 스타일 |
+| `export_single_file.py` | 단일 HTML 생성 |
 
-작업 이름은 `Pick`과 `Pick & Place`로 표시한다. 탭·소제목은 아래 모듈 이름을 사용하고, 한국어는 목적과 원리를 설명한다. 작업명·모듈명·개별 동작의 의미를 문맥에 맞춰 구분하고, 파지·들어 올리기·목적지에 놓기 같은 동작 설명은 자연스러운 한국어를 사용한다. 원본 코드와 데이터의 `pickup`·`pick_place` 식별자는 유지한다.
+페이지 주소와 자산 경로는 상호작용과 내보내기에서 함께 사용한다. 파일 이동 전 소비 경로를 확인한다. 초안·스크린샷·생성본은 원본 폴더 밖에 보관한다. 외부 자산의 라이선스는 해당 자산과 함께 유지한다.
 
-모듈 이름은 아키텍처와 본문에서 동일하게 사용한다: Collection Operator, OneJob, Motion Executor, Recorder, Dataset Validator, Curator, Selection, Video Transform, Training Review, Batch Review, NativeInspection, Policy Learning, Training Entrypoint, Split & Normalization. 한국어는 역할과 원리를 설명하는 보조 표현으로 사용하며 원본 코드·측정 자료의 식별자는 바꾸지 않는다.
+편집 판단은 [OpenSpec의 다섯 원칙](../../openspec/changes/establish-portfolio-proof-loop-intent/specs/portfolio-proof-loop/spec.md#requirement-portfolio-feedback-improves-the-reader-experience-while-preserving-core-value)을 따른다. 목적과 기술적 기여를 앞세우고 반복 설명을 줄이며, 각 주제에 적합한 매체를 선택한다.
 
-피드백을 반영할 때는 [OpenSpec의 다섯 편집 원칙](../../openspec/changes/establish-portfolio-proof-loop-intent/specs/portfolio-proof-loop/spec.md#requirement-portfolio-feedback-improves-the-reader-experience-while-preserving-core-value)을 따른다.
+작업명은 **Pick · Pick & Place**, 모듈명은 실제 아키텍처의 **Collection Operator · Recorder · Curator · Training Review · Policy Learning**을 일관되게 사용한다. 한국어는 목적과 원리를 설명하며, 원본 코드·데이터 식별자는 보존한다.
 
-첫 화면과 각 기술 구간은 목적을 짧게 전하고 그림·영상·그래프로 원리를 보여 준다. 그림 안에는 대상·관계·축·단위에 필요한 라벨을 남긴다. 같은 원리를 본문·그림·표에서 반복하지 않으며, 계산·실행 조건·근거는 가장 적절한 한 곳에 모아 펼치거나 연결한다. 접힌 내용도 중복을 압축한다. 기대한 효과와 실제 측정 결과를 구분하며, 각 주제에 같은 카드·도해·접기 형식을 강제하지 않는다. 비교 그림은 바뀌는 조건과 고정한 조건을 명시하고, 설명용 표현을 실제 모듈 이름으로 제시하지 않는다. 탐색 검증 통과와 시각적 완성도는 별도로 판단한다. 설명용 물체·형상·조건은 원리의 차이가 잘 드러나도록 선택하고 실물 조건과 구분한다. 조작해도 차이가 읽히지 않는 인터랙션은 나란한 비교로 바꾼다. 같은 카메라 자료도 시연의 전체 동작과 학습 표본의 입출력처럼 서로 다른 설명 책임이 있을 때 사용한다.
-
-전체 아키텍처에서 데이터 피드백과 정책 피드백을 모두 드러낸다. 미완성 연결은 목표 구조에 표시하고 구현·실행 결과와 구분한다. 구현이 덜 됐다는 이유로 폐루프 목적을 선형 수집·학습 파이프라인으로 축소하지 않는다. Acquisition Strategy와 Policy Evaluation은 목표 구조의 기능 책임 이름이며, 같은 이름의 독립 패키지가 존재한다는 뜻은 아니다. 기존 모듈 도해는 수집·학습 구현의 세부 설명으로 보존한다.
-
-획득 추천의 소유권과 기존 실행 owner의 검사 책임은 [공동 요구사항](../../openspec/changes/establish-portfolio-proof-loop-intent/specs/portfolio-proof-loop/spec.md)을 따른다. 그림의 Acquisition Strategy는 Curator의 추천 책임으로 표시한다.
-
-기여는 실제 구현이 제공하는 실험 능력으로 설명한다. 수집 조건과 원본 시연의 연결, 데이터 통합 뒤 평가 대상 보존, TRAIN 정규화와 checkpoint의 대응을 통해 어떤 비교가 가능해지는지 보여 준다. 기존 알고리즘을 사용했다는 이유로 시스템 기여를 축소하거나, 개별 기능의 조합만으로 연구적 독창성과 실물 개선을 주장하지 않는다. 선행연구는 해결한 문제·입력·검증 환경을 비교하며, 기능 유무 표나 별점으로 프로젝트의 가치를 판정하지 않는다.
-
-최근 커밋은 의도 변경, 실행 코드, 회귀 검증, 실제 운용 결과를 구분해 소비한다. 코드가 제공하는 실험 조건과 그 조건으로 얻은 측정 결과를 같은 것으로 취급하지 않는다. 수집 속도와 정책 효용의 비교는 유용한 후속 가설이며, 기존 획득 전략 비교의 확정 대체안이나 완료 성과로 선반영하지 않는다.
+새 근거는 기존 `sources/` 연결에 반영한다. 설명용 예시, 실제 시연, 오프라인 정책 비교와 폐루프의 목표를 구분하고, 달성한 범위를 넘어 성능을 주장하지 않는다. 전달 전에는 단일 파일에서 바뀐 구간의 가독성·조작·근거 복귀를 직접 확인한다.

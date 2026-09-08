@@ -1,6 +1,6 @@
 # 시작하기
 
-이 문서는 저장소를 읽고 오프라인에서 준비하는 사람을 위한 안내다. 로봇을 움직이거나 데이터를 수집하는 절차는 [운영자 런북](operator-runbook.md)의 책임이며, 이 문서의 첫 단계는 장비가 없는 환경에서도 끝난다.
+Collection 화면을 살펴보고 수집·학습 환경을 준비하는 안내이다. 시연과 기술 설명은 [포트폴리오](portfolio/README.md), 실물 장비의 실행·중단 절차는 [운영자 런북](operator-runbook.md)에서 확인한다.
 
 ## 먼저 확인할 범위
 
@@ -65,7 +65,7 @@ npm ci
 npm run docs:lint
 ```
 
-`npm run docs:lint`가 현재 필수 실행 gate다. Vale는 한국어 fixture가 유용하고 잡음이 적은 규칙을 확립할 때까지 advisory다. `.lychee.toml` 설정은 준비되어 있지만 link checking은 아직 필수 실행 gate가 아니다.
+`docs:lint`는 README와 공개 Markdown 문서의 형식을 검사한다. 링크 대상과 실행 명령은 수정한 내용에 맞춰 별도로 확인한다.
 
 ## 다음 문서
 

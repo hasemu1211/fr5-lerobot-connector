@@ -1,8 +1,8 @@
-# 아키텍처
+# Collection 아키텍처
 
-이 문서는 FR5 데이터 수집 제품의 경계와 책임을 설명한다. 현재 상태를 복사한 운영 장부가 아니며, 실행 가능한 계약은 코드·설정·schema·generated help가 소유한다.
+Collection Operator가 작업 계획을 만들고 시연을 기록하는 구조이다. 데이터 선별·정책 학습·후속 수집을 포함한 전체 구성은 [시스템 아키텍처](portfolio/architecture.html)에서 볼 수 있다.
 
-## 전체 흐름
+## Collection 실행 흐름
 
 ```text
 환경 사실과 준비
@@ -31,7 +31,7 @@
 
 ## 데이터와 상태
 
-선택은 coherent catalog 조합으로 compile되고, manifest digest는 workspace/frame/task/object/grasp/start/motion/variant/camera/data mode와 finite slots를 결속한다. 변경된 draft는 이전 compile을 무효화하며 새 lineage가 필요하다. runtime 상태는 API projection과 run receipt에 있고, public docs에는 mutable counter나 raw runtime state를 복사하지 않는다.
+선택은 coherent catalog 조합으로 compile되고, manifest digest는 workspace/frame/task/object/grasp/start/motion/variant/camera/data mode와 finite slots를 결속한다. 변경된 draft는 이전 compile을 무효화하며 새 lineage가 필요하다. 실행 상태와 결과는 API projection과 run receipt로 확인한다.
 
 technical result, human semantic state, retention state와 training state는 서로 다른 축이다. coverage projection은 TEST_ONLY 기록을 production coverage로 승격하지 않는다. 삭제나 repack은 reference scan과 별도 권한이 없으면 수행하지 않는다.
 
@@ -39,9 +39,9 @@ technical result, human semantic state, retention state와 training state는 서
 
 stale view, replay, digest mismatch, unknown enum, owner ambiguity, camera incompatibility, cancel, timeout과 expiry는 fail closed 한다. reconnect는 GET만 수행한다. foreground application이 종료되면 자신이 시작한 child만 닫으며, 이미 존재하는 다른 owner를 임의로 종료하지 않는다.
 
-## 지원하지 않는 승격
+## 실행 자격
 
-현재 구조는 catalog에 보이는 모든 조합을 실행 가능하다고 주장하지 않는다. 적격화되지 않은 workspace·camera·task, depth semantics, 자동 성공 판정, training approval과 policy rollout은 별도 계약 없이는 실행하지 않는다. 이는 기능 부족을 현재 capability로 포장하지 않기 위한 public boundary다.
+Catalog는 호환되는 조합을 제시하고, 실제 실행은 workspace·camera·task의 적격화와 해당 계획의 승인을 확인한다. 사람의 작업 성공 판정과 학습 사용 승인은 각 소비 단계에서 별도로 확인한다. 학습된 정책의 실행은 Collection의 시연 실행과 구분한다.
 
 ## 관련 문서
 
