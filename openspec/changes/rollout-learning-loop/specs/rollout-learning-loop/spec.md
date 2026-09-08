@@ -840,6 +840,14 @@ inside that interval SHALL NOT renew either deadline. Learned Scene acquisition
 and fault writes SHALL fail promptly with distinct `SCENE_STATE_BUSY` on lock
 contention, retaining the foreign state and zero new sends. Legacy Collection
 locking SHALL retain its existing default behavior.
+Learned initial/next-chunk Cell arming and fault persistence SHALL likewise use
+nonblocking acquisition in the existing CellStateStore, returning `STATE_BUSY`
+on contention without changing the foreign Cell bytes. Next-chunk exact-state
+compare-and-swap SHALL remain inside the acquired lock. Fault handling SHALL
+fence the run and cancel its owned goal before attempting persistence; a failed
+write SHALL remain explicit as `durable_blocked=false` with `cell_state_error`,
+never as a successfully persisted block. Legacy Cell callers retain blocking
+acquisition by default.
 Reentrant fault handling SHALL set the existing cancellation event immediately
 and defer Scene-writing fault work until the lock is released. Cancellation after
 submission SHALL cancel that owned goal; it SHALL NOT be reported as zero sends.
@@ -868,6 +876,13 @@ This ordering adds no Scene store, execution owner or task-success authority.
 - **WHEN** learned confirmation or fault cleanup encounters a held Scene lock
 - **THEN** it returns the distinct contention result without waiting for the foreign holder to release it
 - **AND** the foreign Scene bytes and legacy Collection locking behavior remain unchanged
+
+#### Scenario: A foreign owner retains the Cell lock
+
+- **WHEN** learned initial/next-chunk arming or fault cleanup encounters a held Cell lock
+- **THEN** it returns without waiting for that holder and submits zero new goals
+- **AND** an already active owned goal is cancelled before fault persistence is attempted
+- **AND** Cell bytes remain unchanged and a failed durable block is reported explicitly
 
 ### Requirement: Current source freshness is independent of retained command completion
 

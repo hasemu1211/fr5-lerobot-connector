@@ -114,18 +114,24 @@ class CellStateStore:
         except (OSError, RecoveryError) as exc:
             raise ContractError("STATE_JSON", str(exc)) from exc
 
-    def mark_blocked(self, reason_code: str, run_id: str, plan_digest: str, *, expected_state_digest: str | None = None) -> dict:
+    def mark_blocked(self, reason_code: str, run_id: str, plan_digest: str, *, expected_state_digest: str | None = None,
+                     blocking: bool = True) -> dict:
         reason_code = self._safe_id(reason_code, "STATE_REASON")
         run_id = self._safe_id(run_id, "STATE_RUN_ID")
         if not isinstance(plan_digest, str) or not DIGEST.fullmatch(plan_digest):
             raise ContractError("STATE_PLAN_DIGEST")
         if expected_state_digest is not None and (not isinstance(expected_state_digest, str) or not DIGEST.fullmatch(expected_state_digest)):
             raise ContractError("STATE_EXPECTED_BINDING")
+        if type(blocking) is not bool:
+            raise ContractError("STATE_LOCK_MODE")
         state = self.runtime_path("state.json", create_robot=True)
         lock_path = self.runtime_path("state.lock", create_robot=True)
         descriptor = os.open(lock_path, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
         try:
-            fcntl.flock(descriptor, fcntl.LOCK_EX)
+            try:
+                fcntl.flock(descriptor, fcntl.LOCK_EX | (0 if blocking else fcntl.LOCK_NB))
+            except BlockingIOError as exc:
+                raise ContractError("STATE_BUSY") from exc
             if expected_state_digest is not None and canonical_digest(self.read()) != expected_state_digest:
                 raise ContractError("STATE_CHANGED")
             value = {"schema_version": SCHEMA_VERSION, "robot_system_id": self.robot_system_id, "cell_ready": False, "reason_code": reason_code, "run_id": run_id, "plan_digest": plan_digest, "acknowledged_by": "UNACKNOWLEDGED", "updated_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")}

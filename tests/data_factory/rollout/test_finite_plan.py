@@ -160,7 +160,7 @@ class Cell:
         self.binding = {}
     def read(self):
         return {"robot_system_id": "fr5-lab-a", "cell_ready": self.ready, **self.binding}
-    def mark_blocked(self, reason, run_id, plan_digest, *, expected_state_digest=None):
+    def mark_blocked(self, reason, run_id, plan_digest, *, expected_state_digest=None, blocking=True):
         if expected_state_digest is not None and canonical_digest(self.read()) != expected_state_digest:
             raise ContractError("STATE_CHANGED")
         self.ready = False
@@ -1763,6 +1763,70 @@ class FinitePlanTest(unittest.TestCase):
             self.assertEqual(calls.count(("recorder", "begin")), 1)
             self.assertNotIn(("recorder", "freeze"), calls)
             self.assertNotIn(("recorder", "commit"), calls)
+
+    def test_foreign_cell_lock_does_not_hold_learned_arming_or_fault_cleanup(self):
+        import fcntl
+        from tools.data_factory.cell_state import CellStateStore
+
+        for point in ("initial", "fault", "next"):
+            with self.subTest(point=point), tempfile.TemporaryDirectory() as directory:
+                job, executor, transport, _, scene, _, calls = self.make_job()
+                self.assertTrue(job.approve(APPROVAL)["ok"])
+                if point != "initial":
+                    self.assertTrue(job.start()["ok"])
+                    self.assertEqual(job.poll()["state"], "PRECONTACT_HUMAN")
+                    self.assertTrue(job.confirm("operator")["ok"])
+                if point == "next":
+                    self.assertEqual(job.poll()["state"], "LEARNED_CHUNK_COMPLETE")
+                    self.assertTrue(job.prepare_next_learned(self.next_raw_program(job))["ok"])
+                    self.assertTrue(job.approve_next_learned({**APPROVAL, "approval_id": "next"})["ok"])
+                store = CellStateStore(directory, "fr5-lab-a")
+                store.mark_blocked("EXECUTION_IN_PROGRESS", "run", job.plan_digest)
+                if point == "initial":
+                    store.acknowledge_ready("synthetic-operator")
+                executor.cell_state_store = store
+                path = store.runtime_path("state.json")
+                before, sent = path.read_bytes(), len(transport.sent)
+                results, errors = [], []
+                def work():
+                    try:
+                        if point == "fault":
+                            results.append(executor._fault(executor.runs["run"], "SCENE_STATE_BUSY"))
+                        else:
+                            results.append(job.start() if point == "initial" else job.start_next_learned())
+                    except Exception as exc:
+                        errors.append(exc)
+                # Independent open descriptions contend on the actual kernel
+                # lock; no mocked store/persistence can hide the blocking call.
+                with store.runtime_path("state.lock").open("rb") as holder:
+                    fcntl.flock(holder, fcntl.LOCK_EX)
+                    worker = threading.Thread(target=work, daemon=True)
+                    worker.start()
+                    try:
+                        worker.join(1)
+                        returned_while_locked = not worker.is_alive()
+                        unchanged_while_locked = path.read_bytes() == before
+                    finally:
+                        fcntl.flock(holder, fcntl.LOCK_UN)
+                        worker.join(2)
+                self.assertTrue(returned_while_locked, point)
+                self.assertFalse(worker.is_alive())
+                self.assertEqual(errors, [])
+                self.assertTrue(unchanged_while_locked)
+                self.assertEqual(path.read_bytes(), before)
+                self.assertEqual(len(transport.sent), sent)
+                self.assertNotIn(("recorder", "commit"), calls)
+                if point == "fault":
+                    run = executor.runs["run"]
+                    self.assertEqual(run["state"], "BLOCKED")
+                    self.assertTrue(run["cancel_event"].is_set())
+                    self.assertFalse(run["execution"]["durable_blocked"])
+                    self.assertEqual(run["execution"]["cell_state_error"], "STATE_BUSY")
+                    self.assertEqual(transport.cancel_count, 1)
+                    self.assertEqual(results, ["SCENE_STATE_BUSY"])
+                else:
+                    self.assertFalse(results[0]["ok"], results)
+                    self.assertEqual(results[0]["code"], "STATE_BUSY")
 
     def test_next_chunk_deadline_expiry_releases_actual_scene_lock(self):
         import faulthandler

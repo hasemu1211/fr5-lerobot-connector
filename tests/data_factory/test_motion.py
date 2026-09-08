@@ -346,6 +346,42 @@ class Test(unittest.TestCase):
    # The optional condition does not change legacy unconditional callers.
    self.assertEqual(store.mark_blocked("LEGACY_BLOCK","legacy",canonical_digest("legacy"))["run_id"],"legacy")
 
+ def test_cell_lock_mode_preserves_legacy_wait_and_nonblocking_cas(self):
+  import fcntl, threading
+  from unittest import mock
+  from tools.data_factory.cell_state import CellStateStore
+  with tempfile.TemporaryDirectory() as directory:
+   store=CellStateStore(directory,"synthetic-robot")
+   first=store.mark_blocked("EXECUTION_IN_PROGRESS","run",canonical_digest("plan"))
+   path=store.runtime_path("state.json");before=path.read_bytes()
+   for invalid in (None, 0, 1, "false"):
+    with self.assertRaisesRegex(e.ContractError,"STATE_LOCK_MODE"):
+     store.mark_blocked("FAILED","run",canonical_digest("plan"),blocking=invalid)
+    self.assertEqual(path.read_bytes(),before)
+   with store.runtime_path("state.lock").open("rb") as holder:
+    fcntl.flock(holder,fcntl.LOCK_EX)
+    with self.assertRaisesRegex(e.ContractError,"STATE_BUSY"):
+     store.mark_blocked("FAILED","run",canonical_digest("plan"),expected_state_digest=canonical_digest(first),blocking=False)
+    self.assertEqual(path.read_bytes(),before)
+    entered=threading.Event();done=threading.Event();results=[];flock=fcntl.flock
+    def observed_flock(descriptor,mode):
+     if mode==fcntl.LOCK_EX:entered.set()
+     return flock(descriptor,mode)
+    def legacy():
+     try:results.append(store.mark_blocked("LEGACY_BLOCK","run",canonical_digest("plan")))
+     finally:done.set()
+    with mock.patch("tools.data_factory.cell_state.fcntl.flock",side_effect=observed_flock):
+     worker=threading.Thread(target=legacy,daemon=True);worker.start()
+     try:
+      self.assertTrue(entered.wait(1));self.assertFalse(done.wait(.05));self.assertEqual(path.read_bytes(),before)
+     finally:
+      flock(holder,fcntl.LOCK_UN);worker.join(2)
+   self.assertFalse(worker.is_alive());self.assertEqual(results[0]["reason_code"],"LEGACY_BLOCK")
+   with self.assertRaisesRegex(e.ContractError,"STATE_CHANGED"):
+    store.mark_blocked("FAILED","run",canonical_digest("plan"),expected_state_digest=canonical_digest(first),blocking=False)
+   latest=store.read()
+   self.assertEqual(store.mark_blocked("FAILED","run",canonical_digest("plan"),expected_state_digest=canonical_digest(latest),blocking=False)["reason_code"],"FAILED")
+
  def test_cell_state_is_fail_closed_and_durable(self):
   from contextlib import redirect_stderr, redirect_stdout
   from unittest import mock

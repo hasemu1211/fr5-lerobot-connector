@@ -1026,7 +1026,7 @@ class PickupExecutor:
                 candidate = {key: value for key, value in candidate.items() if key != "previous_chunk"}
                 try:
                     self.cell_state_store.mark_blocked("EXECUTION_IN_PROGRESS", payload["run_id"], candidate["digest"],
-                                                       expected_state_digest=canonical_digest(cell))
+                                                       expected_state_digest=canonical_digest(cell), blocking=False)
                 except ContractError:
                     raise
                 except Exception as exc:
@@ -1173,8 +1173,11 @@ class PickupExecutor:
                     raise ContractError("SCENE_OBJECT_NOT_READY")
                 if self.motion_only_binding_digest is None:
                     try:
-                        self.cell_state_store.mark_blocked("EXECUTION_IN_PROGRESS", run["plan"]["run_id"], run["digest"])
+                        options = {"blocking": False} if proposal is not None else {}
+                        self.cell_state_store.mark_blocked("EXECUTION_IN_PROGRESS", run["plan"]["run_id"], run["digest"], **options)
                     except Exception as exc:
+                        if isinstance(exc, ContractError) and exc.code == "STATE_BUSY":
+                            raise
                         raise ContractError("CELL_STATE_ARMING_FAILED") from exc
                 run["execution"] = {"lease_id": payload["lease_id"], "lease_deadline": self.monotonic_clock() + run["plan"]["execution_timeouts_s"]["heartbeat_lease"], "step_index": 0, "grasp_verdict": None, "semantic_verdict": None, "release_verdict": None, "snapshot": None, "active": False, "scene_object": copy.deepcopy(item), "scene_state_digest": execution_scene_digest, "scene_revision": execution_scene_revision, "terminal_phases": [], "phase_event_sequence": 0}
                 if parent_cell_binding is not None:
@@ -1449,7 +1452,7 @@ class PickupExecutor:
         execution["durable_blocked"] = False
         try:
             if self.cell_state_store is not None:
-                options = {}
+                options = {"blocking": False} if "learned_proposal" in run["plan"] else {}
                 if run.get("continuation_requested") or run.get("learned_history"):
                     cell = self.cell_state_store.read()
                     if (cell.get("run_id") != run["plan"]["run_id"] or cell.get("plan_digest") != run["digest"]
