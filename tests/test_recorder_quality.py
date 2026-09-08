@@ -13,6 +13,8 @@ import tempfile
 import threading
 from unittest.mock import patch
 
+from tests.data_factory.rollout.test_gripper_evidence import patched_source
+
 import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools"))
@@ -33,12 +35,14 @@ from validate_lerobot_dataset import (
 class RecorderContractTest(unittest.TestCase):
     def test_robot_control_keeps_gripper_off_realtime_xmlrpc_path(self):
         root = Path(__file__).resolve().parents[1]
-        source = (root / "src/frcobot_ros2/fairino_hardware_v3_9_7/src/fairino_hardware_interface.cpp").read_text()
+        # Verify the shipped contribution, not a mutable local deployment.
+        # Native worker tests exercise these same patched methods separately.
+        source = patched_source("fairino_hardware_v3_9_7/src/fairino_hardware_interface.cpp")
         recorder_source = (root / "tools/fr5_lerobot_recorder.py").read_text()
         setup_source = (
             root / "tools/data_factory/operator/setup/physical.py"
         ).read_text()
-        command_source = (root / "src/frcobot_ros2/fairino_hardware_v3_9_7/src/command_server.cpp").read_text()
+        command_source = patched_source("fairino_hardware_v3_9_7/src/command_server.cpp")
         self.assertIn("JOINT_STATE_QOS_DEPTH = 20", recorder_source)
         self.assertIn("JointState, args.joint_states, self._on_joint_state, joint_state_qos", recorder_source)
         self.assertIn(
@@ -119,8 +123,9 @@ class RecorderContractTest(unittest.TestCase):
         self.assertIn("Holding last valid gripper feedback", worker_body)
         self.assertIn("Realtime gripper feedback recovered", worker_body)
         self.assertIn(
-            "if (motion_done != 0 && feedback_is_plausible)", worker_body,
+            "if (motion_done != 0 && feedback_is_plausible &&", worker_body,
         )
+        self.assertIn("(std::abs(int(feedback) - *position) <= 1 || observed_busy))", worker_body)
         self.assertNotIn(
             "Completed gripper motion has implausible feedback", worker_body,
         )

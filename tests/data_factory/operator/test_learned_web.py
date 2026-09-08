@@ -39,6 +39,7 @@ class LearnedWebTests(unittest.TestCase):
         calls, closed = [], []
         transport, cell, scene = Transport(), Cell(), Scene()
         transport.hardware = transport.hardware_current = transport.hardware_causal = True
+        transport.hardware_selected = True
         def capture(topics, age):
             self.assertEqual(topics, {"camera1": "/up", "camera2": "/wrist"})
             self.assertEqual(age, .3)
