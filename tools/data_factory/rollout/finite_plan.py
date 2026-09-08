@@ -87,7 +87,7 @@ def validate_proposal(value):
         raise ContractError("LEARNED_PROPOSAL_DIGEST")
     if "runtime_inputs" in p:
         inputs = p["runtime_inputs"]
-        causal = isinstance(inputs, dict) and inputs.get("hardware_wire_version") == 3
+        causal = isinstance(inputs, dict) and inputs.get("hardware_wire_version") in (3, 4)
         hardware_key = "gripper_temporal_policy" if causal else "gripper_source_clock"
         if (not isinstance(inputs, dict) or set(inputs) - {"warmup", "hardware_wire_version", "reference_mode"} != {"checkpoint", "device", hardware_key, "clock_binding", "camera_topics", "camera_mapping", "fps"}
                 or any(not isinstance(inputs[k], str) or not inputs[k] for k in ("checkpoint", hardware_key))
@@ -120,7 +120,7 @@ def validate_proposal(value):
         else:
             from .gripper_evidence import validate_clock_binding
             validate_clock_binding(inputs["clock_binding"])
-        if "hardware_wire_version" in inputs and (type(inputs["hardware_wire_version"]) is not int or inputs["hardware_wire_version"] not in (2, 3)):
+        if "hardware_wire_version" in inputs and (type(inputs["hardware_wire_version"]) is not int or inputs["hardware_wire_version"] not in (2, 3, 4)):
             raise ContractError("LEARNED_HARDWARE_SCHEMA")
     if (p["joint_order"] != JOINTS or p["units"] != UNITS or p["action_semantics"] != "ABSOLUTE_JOINT_POSITION"
             or p["source_clock"] != "SYSTEM_TIME"):
