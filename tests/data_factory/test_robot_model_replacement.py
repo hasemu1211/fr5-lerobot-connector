@@ -1,0 +1,117 @@
+"""Opening-coordinate candidate: native CPU compatibility, not contact qualification."""
+from collections import deque
+import copy
+import hashlib
+import json
+from pathlib import Path
+import sys
+import threading
+from types import SimpleNamespace
+import unittest
+import xml.etree.ElementTree as ET
+
+import numpy as np
+
+ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT / "tools"))
+from fr5_lerobot_recorder import FR5LeRobotRecorder
+from tools.fr5_data_factory import ContractError, canonical_digest, validate_home_candidate
+from tools.data_factory.learned_action_adapter import fake_rgb
+from tools.data_factory.rollout.finite_plan import FinitePolicyInference, JOINTS, _limits, compile_program
+from tests.data_factory.operator.fixtures import motion
+
+ORIGINAL = ROOT / "src/fairino_description/urdf/fairino5_v6.urdf"
+CANDIDATE = ORIGINAL.with_name("fairino5_v6_gripper_opening_candidate.urdf")
+ORIGINAL_SHA = "a9108b594739b64eac42a39d9aa961ece688ffd8d06ff5af03df99cbf63ab345"
+
+
+def finger_geometry(root, q):
+    """Evaluate these unrotated parallel box fingers; not a physical estimator."""
+    centers, widths = [], []
+    for side in ("right", "left"):
+        joint = root.find(f"./joint[@name='finger_{side}_joint']")
+        origin = joint.find("origin")
+        assert origin.get("rpy") == "0 0 0"
+        xyz = list(map(float, origin.get("xyz").split()))
+        axis = list(map(float, joint.find("axis").get("xyz").split()))
+        assert axis[1:] == [0., 0.]
+        mimic = joint.find("mimic")
+        position = q if mimic is None else q * float(mimic.get("multiplier", 1)) + float(mimic.get("offset", 0))
+        collision = root.find(f"./link[@name='finger_tip_{side}_link']/collision")
+        assert collision.find("origin").get("rpy") == "0 0 0"
+        centers.append(xyz[0] + axis[0] * position + float(collision.find("origin").get("xyz").split()[0]))
+        widths.append(float(collision.find("geometry/box").get("size").split()[0]))
+    return centers[0] - centers[1] - sum(widths) / 2, sum(centers) / 2
+
+
+class RobotModelReplacementTest(unittest.TestCase):
+    def test_only_finger_coordinate_expression_changes_and_old_model_is_preserved(self):
+        self.assertEqual(hashlib.sha256(ORIGINAL.read_bytes()).hexdigest(), ORIGINAL_SHA)
+        old, new = ET.parse(ORIGINAL).getroot(), ET.parse(CANDIDATE).getroot()
+        self.assertIn("UNQUALIFIED MODEL CANDIDATE", CANDIDATE.read_text())
+        self.assertEqual(_limits(ORIGINAL.read_text()), _limits(CANDIDATE.read_text()))
+        restored = copy.deepcopy(new)
+        for side in ("right", "left"):
+            for tag in ("origin", "axis"):
+                selector = f"./joint[@name='finger_{side}_joint']/{tag}"
+                restored.find(selector).attrib = dict(old.find(selector).attrib)
+        # Includes arm kinematics, every mesh/link/limit, fixed TCP chain and mimic.
+        self.assertEqual(ET.tostring(restored), ET.tostring(old))
+
+    def test_opening_geometry_matches_coordinate_direction_not_a_physical_claim(self):
+        old, new = ET.parse(ORIGINAL).getroot(), ET.parse(CANDIDATE).getroot()
+        profile = json.loads((ROOT / "config/data_factory/motion_qualifications/fr5-place-a-wood-cube-24mm-r001.json").read_text())
+        closed, opened = (profile["gripper_positions_m"][key] for key in ("closed", "open"))
+        # Falsifier: the original model reverses the empirically used command.
+        self.assertLess(finger_geometry(old, opened)[0], finger_geometry(old, closed)[0])
+        self.assertGreater(finger_geometry(new, opened)[0], finger_geometry(new, closed)[0])
+        for q in np.linspace(0., opened, 21):
+            self.assertAlmostEqual(finger_geometry(new, q)[0], finger_geometry(old, opened - q)[0])
+            self.assertAlmostEqual(finger_geometry(new, q)[1], finger_geometry(old, q)[1])
+        self.assertAlmostEqual(finger_geometry(new, opened)[0], .0421)
+        self.assertAlmostEqual(finger_geometry(new, closed)[0], .02362)
+        # These are model numbers, NOT measured custom-tip aperture or attachment.
+
+    def test_native_recording_and_proposals_keep_values_but_old_approval_cannot_rebind(self):
+        recorder = FR5LeRobotRecorder.__new__(FR5LeRobotRecorder)
+        recorder.lock = threading.Lock()
+        recorder.arm_actions, recorder.gripper_actions, recorder.joint_states = deque(), deque(), deque()
+        stamp = SimpleNamespace(header=SimpleNamespace(stamp=SimpleNamespace(sec=10, nanosec=0)))
+        arm = [0.] * 6
+        recorder._on_arm_state(SimpleNamespace(header=stamp.header, joint_names=JOINTS[:6], reference=SimpleNamespace(positions=arm)))
+        recorder._on_gripper_state(SimpleNamespace(header=stamp.header, joint_names=JOINTS[-1:], reference=SimpleNamespace(positions=[.01176])))
+        recorder._on_joint_state(SimpleNamespace(header=stamp.header, name=JOINTS, position=arm + [.01218]))
+        recorded = np.array([*recorder.arm_actions[-1][1], recorder.gripper_actions[-1][1]], dtype=np.float32)
+        feedback = recorder.joint_states[-1][1]
+        np.testing.assert_array_equal(recorded, np.array(arm + [.01176], dtype=np.float32))
+        np.testing.assert_array_equal(feedback, np.array(arm + [.01218], dtype=np.float32))
+        before = (recorded.tobytes(), feedback.tobytes())
+        observation = {"source_clock": "SYSTEM_TIME", "source_timestamps_s": {k: 10. for k in ("state", "camera1", "camera2")},
+                       "observation.state": feedback.tolist(), "observation.images.camera1": fake_rgb(), "observation.images.camera2": fake_rgb()}
+        checkpoint = {"tree_digest": canonical_digest("synthetic-weights"), "training_receipt_digest": canonical_digest("synthetic-receipt"), "runtime": "SYNTHETIC_TEST_ONLY"}
+        proposals = [FinitePolicyInference(lambda _: [recorded.tolist()], checkpoint, source_clock=lambda: 10.).propose(
+            observation, instruction="synthetic coordinate compatibility", robot_description=p.read_text(), period_s=1., velocity_scaling=.03)
+            for p in (ORIGINAL, CANDIDATE)]
+        for proposal in proposals:
+            self.assertEqual(proposal["actions"], [recorded.tolist()])
+            self.assertEqual(proposal["initial_state"], feedback.tolist())
+            self.assertEqual(proposal["checkpoint"], checkpoint)
+        self.assertEqual(before, (recorded.tobytes(), feedback.tobytes()))
+        source = motion()  # Existing declared synthetic fixture; no live approval.
+        source["binding_digests"]["robot_description_digest"] = "sha256:" + ORIGINAL_SHA
+        compile_program(source, proposals[0])
+        with self.assertRaisesRegex(ContractError, "LEARNED_ROBOT_BINDING"):
+            compile_program(source, proposals[1])
+
+    def test_old_home_and_default_selection_remain_bound_to_original_model(self):
+        home = json.loads((ROOT / "config/data_factory/home_candidates/fr5-lab-a-tcp-r002-home-r001.json").read_text())
+        validate_home_candidate(home, urdf=ORIGINAL, expected_robot_system_id=home["robot_system_id"])
+        with self.assertRaisesRegex(ContractError, "HOME_ROBOT_BINDING"):
+            validate_home_candidate(home, urdf=CANDIDATE, expected_robot_system_id=home["robot_system_id"])
+        xacro = (ROOT / "src/fairino5_v6_moveit2_config/config/fairino5_v6_robot.urdf.xacro").read_text()
+        self.assertIn('filename="$(find fairino_description)/urdf/fairino5_v6.urdf"', xacro)
+        self.assertNotIn(CANDIDATE.name, xacro)
+
+
+if __name__ == "__main__":
+    unittest.main()
