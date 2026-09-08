@@ -57,6 +57,11 @@ The public training path SHALL revalidate the frozen inventory authorized by an 
 - **THEN** the shared validator recognizes only that equivalent native expansion in both saved policy and training configurations
 - **AND** unknown extra inputs or altered real camera order, shapes, state/action features or blank count remain rejected without changing checkpoint bytes.
 
+#### Scenario: Native processor reload resaves singleton counts as scalars
+- **WHEN** native processor reload and device movement serialize an admitted singleton count `[N]` as scalar `N`
+- **THEN** the shared checkpoint validator accepts only this count representation with the exact admitted value, without rewriting checkpoint bytes
+- **AND** changed count values, nonfinite counts, other count ranks, missing or extra statistics, and altered operational tensor shapes or values remain rejected; processor configuration and TRAIN lineage checks remain unchanged.
+
 ### Requirement: Learning and pipeline evidence remain distinguishable
 
 The lane SHALL distinguish admitted input, executable pipeline, checkpoint reload, offline validation and physical learning evidence. A completed short probe, including one that finishes learning-rate decay, SHALL NOT alone establish learning effectiveness. A fair checkpoint comparison SHALL bind the same normalization, held-out episodes, seed, batch/precision and sample coverage; repeated model selection on that holdout SHALL be described as validation, not an untouched generalization test.

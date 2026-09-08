@@ -98,6 +98,68 @@ class TrainingCheckpointTest(unittest.TestCase):
 
 
 class CurrentTrainingCheckpointTest(unittest.TestCase):
+    def test_native_processor_resaves_preserve_normalization_with_scalar_counts(self):
+        import numpy as np
+        import torch
+        from lerobot.configs import FeatureType, PolicyFeature
+        from lerobot.policies.act.configuration_act import ACTConfig
+        from lerobot.policies.factory import make_pre_post_processors
+        from lerobot.processor.normalize_processor import NormalizerProcessorStep, UnnormalizerProcessorStep
+        from safetensors.numpy import load_file, save_file
+        from tools.validate_training_checkpoint import validate_normalization_state
+
+        normalization = {"stats": {
+            "observation.state": {"mean": [1.] * 7, "std": [2.] * 7, "count": [15492.]},
+            "action": {"mean": [.01] * 7, "std": [2.] * 7, "count": [15492.]},
+            **{key: {"mean": [[[.5]]] * 3, "std": [[[.25]]] * 3, "count": [2914.]}
+               for key in ("observation.images.up", "observation.images.wrist")},
+        }}
+        config = ACTConfig(device="cpu", input_features={
+            "observation.state": PolicyFeature(type=FeatureType.STATE, shape=(7,)),
+            **{key: PolicyFeature(type=FeatureType.VISUAL, shape=(3, 4, 4))
+               for key in ("observation.images.camera1", "observation.images.camera2")},
+        }, output_features={"action": PolicyFeature(type=FeatureType.ACTION, shape=(7,))})
+        with TemporaryDirectory(prefix="SYNTHETIC_TEST_ONLY-") as directory:
+            policy = Path(directory) / "parent"
+            pre, post = make_pre_post_processors(config, dataset_stats=normalization["stats"])
+            pre.save_pretrained(policy)
+            post.save_pretrained(policy)
+            validate_normalization_state(policy, normalization, profile="act")
+            for generation in range(2):
+                pre, post = make_pre_post_processors(config, pretrained_path=policy)
+                # Native load_state_dict reconstructs singleton stats as Python
+                # scalars; the ordinary device move materializes scalar counts.
+                for pipeline in (pre, post):
+                    for step in pipeline.steps:
+                        if isinstance(step, (NormalizerProcessorStep, UnnormalizerProcessorStep)):
+                            step.to(device="cpu")
+                torch.testing.assert_close(pre({"observation.state": torch.zeros(7)})["observation.state"],
+                                           torch.full((1, 7), -.5))
+                torch.testing.assert_close(post(torch.zeros((1, 1, 7))), torch.full((1, 1, 7), .01))
+                policy = Path(directory) / f"child-{generation}"
+                pre.save_pretrained(policy)
+                post.save_pretrained(policy)
+                validate_normalization_state(policy, normalization, profile="act")
+                for pipeline in ("policy_preprocessor", "policy_postprocessor"):
+                    saved = json.loads((policy / f"{pipeline}.json").read_text())
+                    state = next(step["state_file"] for step in saved["steps"] if "state_file" in step)
+                    tensors = load_file(policy / state)
+                    for key in normalization["stats"]:
+                        self.assertEqual(tensors[f"{key}.count"].shape, ())
+                    for key, value in (
+                        ("action.count", 15493.), ("action.count", [[15492.]]),
+                        ("action.count", []), ("action.count", [15492., 15492.]),
+                        ("action.count", float("nan")), ("action.count", float("inf")),
+                        ("action.mean", [[.01] * 7]), ("action.std", 2.),
+                        ("observation.images.up.mean", [.5] * 3),
+                    ):
+                        with self.subTest(generation=generation, pipeline=pipeline, key=key, value=value):
+                            altered = {**tensors, key: np.asarray(value, dtype=np.float32)}
+                            save_file(altered, policy / state)
+                            with self.assertRaisesRegex(ValueError, "normalization differs"):
+                                validate_normalization_state(policy, normalization, profile="act")
+                    save_file(tensors, policy / state)
+
     def test_saved_config_cannot_bypass_bound_tensors_in_installed_cpu_processors(self):
         import torch
         from lerobot.configs import FeatureType, PolicyFeature

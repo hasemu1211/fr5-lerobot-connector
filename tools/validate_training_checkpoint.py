@@ -267,6 +267,12 @@ def validate_normalization_state(policy_dir: Path, normalization: dict, *, profi
         if state_path.is_symlink():
             raise ValueError("checkpoint normalization state must be a local file")
         actual = load_file(state_path)
+        # Native load_state_dict uses .item() for singleton statistics. A later
+        # processor .to() therefore resaves count [N] as scalar N. Compare only
+        # that count representation canonically; operational tensors stay exact.
+        for key, value in actual.items():
+            if key.endswith(".count") and value.shape == () and key in expected and expected[key].shape == (1,):
+                actual[key] = value.reshape(1)
         if set(actual) != set(expected) or any(
             not np.array_equal(actual[key], value) for key, value in expected.items()
         ):
