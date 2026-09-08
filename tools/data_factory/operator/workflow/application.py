@@ -529,6 +529,8 @@ class CollectionOperatorApplication:
                             review_stored_batch=self.review_stored_batch,
                             export_curator_request=self.export_curator_request,
                             recover_curator_request=self.recover_curator_request,
+                            discover_curator_requests=self.discover_curator_requests,
+                            open_curator_request=self.open_curator_request,
                             inspect_stored_episode=self.inspect_stored_episode,
                             return_stored_review=self.return_stored_review)
         if self.camera_bindings_call is not None:
@@ -1254,6 +1256,7 @@ class CollectionOperatorApplication:
                 operations.append("recover_review_batch")
                 if self.stored_reviews.request_root is not None:
                     operations.append("recover_curator_request")
+                    operations.extend(["discover_curator_requests", "open_curator_request"])
                 if self._stored_review_error is None and stored_reviews["status"] == "READY":
                     operations.append("freeze_review_batch")
                     if self.stored_reviews.request_root is not None:
@@ -2468,6 +2471,12 @@ class CollectionOperatorApplication:
 
     def recover_curator_request(self, payload, _view):
         return self._stored_review_intent(lambda: self.stored_reviews.export_request(payload, recover=True))
+
+    def discover_curator_requests(self, payload, _view):
+        return self._stored_review_intent(lambda: self.stored_reviews.discover_requests(payload))
+
+    def open_curator_request(self, payload, _view):
+        return self._stored_review_intent(lambda: self.stored_reviews.open_request(payload))
 
     def return_stored_review(self, payload, _view):
         return self._stored_review_intent(lambda: self.stored_reviews.return_review(payload))

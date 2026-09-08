@@ -4,6 +4,7 @@ from __future__ import annotations
 import copy
 import fcntl
 import os
+import stat
 import threading
 import uuid
 from datetime import datetime, timezone
@@ -35,6 +36,7 @@ class StoredCandidateReviews:
         self.batch = None
         self.request_root = None if request_root is None else Path(request_root).absolute()
         self.curator_request = None
+        self.request_catalog = {"status": "NOT_CHECKED", "items": [], "next_after": None, "error": None}
         self.inspector = inspection if inspection is not None else NativeInspection(video_only=True)
         self.inspection = {"status": "CLOSED", "target": None}
         self.inspection_dataset = None
@@ -52,7 +54,8 @@ class StoredCandidateReviews:
         return {**copy.deepcopy(self.public), "inspection": copy.deepcopy(inspection),
                 "batch": copy.deepcopy(self.batch), "batch_limit": MAX_REVIEW_BATCH,
                 "review_reasons": list(CANDIDATE_REVIEW_REASONS),
-                "curator_request": copy.deepcopy(self.curator_request)}
+                "curator_request": copy.deepcopy(self.curator_request),
+                "request_catalog": copy.deepcopy(self.request_catalog)}
 
     def _paths(self, run_id):
         if not isinstance(run_id, str) or run_id in {".", ".."} or not SAFE_ID.fullmatch(run_id):
@@ -326,6 +329,93 @@ class StoredCandidateReviews:
         if current != self.entries[self.selected]:
             raise ContractError("INSPECTION_TARGET_CHANGED")
         return current
+
+    def _read_request(self, request_id):
+        from tools.data_factory.curator.core.filesystem import reject_symlink_components
+
+        if (self.request_root is None or not isinstance(request_id, str)
+                or not request_id.startswith("selection-") or not DIGEST.fullmatch("sha256:" + request_id[10:])):
+            raise ContractError("CURATOR_REQUEST_ID")
+        path = reject_symlink_components(self.request_root / f"{request_id}.json", "CURATOR_REQUEST_PATH")
+        descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        with os.fdopen(descriptor, "r", encoding="utf-8") as stream:
+            info = os.fstat(stream.fileno())
+            if not stat.S_ISREG(info.st_mode) or info.st_size > 262144:
+                raise ContractError("CURATOR_REQUEST_FILE")
+            content = stream.read(262145)
+        if len(content) > 262144 or not content.lstrip().startswith("{"):
+            raise ContractError("CURATOR_REQUEST_FILE")
+        request = load_json_strict(content)
+        episodes = request.get("episodes")
+        if (set(request) != {"dataset_id", "dataset_root", "repo_id", "episodes"}
+                or any(not isinstance(request[key], str) for key in ("dataset_id", "dataset_root", "repo_id"))
+                or request["dataset_id"] != request_id or not isinstance(episodes, list)
+                or not 1 <= len(episodes) <= MAX_REVIEW_BATCH):
+            raise ContractError("CURATOR_REQUEST_FILE")
+        for episode in episodes:
+            if (not isinstance(episode, dict)
+                    or set(episode) != {"episode_id", "episode_index", "episode_ledger_path", "human_semantic_evidence_path", "technical_validator_path"}
+                    or not isinstance(episode["episode_id"], str) or not SAFE_ID.fullmatch(episode["episode_id"])
+                    or any(not isinstance(episode[key], str) for key in ("episode_ledger_path", "human_semantic_evidence_path", "technical_validator_path"))
+                    or type(episode["episode_index"]) is not int or episode["episode_index"] < 0):
+                raise ContractError("CURATOR_REQUEST_FILE")
+        return request, canonical_digest(request)
+
+    def discover_requests(self, payload):
+        from tools.data_factory.curator.core.errors import CuratorError
+        from tools.data_factory.curator.core.filesystem import reject_symlink_components
+
+        after = payload.get("after", "")
+        if set(payload) - {"after"} or not isinstance(after, str) or len(after) > 255:
+            raise ContractError("CURATOR_REQUEST_CURSOR")
+        self.request_catalog = {"status": "READY", "items": [], "next_after": None, "error": None}
+        try:
+            root = reject_symlink_components(self.request_root, "CURATOR_REQUEST_PATH")
+            # Directory names only; at most 64 bounded JSON reads, never source/dataset reads.
+            names = sorted(path.stem for path in root.iterdir() if path.suffix == ".json" and path.stem > after) if root.exists() else []
+            for request_id in names[:MAX_REVIEW_BATCH]:
+                item = {"request_id": request_id, "status": "UNAVAILABLE", "error": None}
+                try:
+                    request, digest = self._read_request(request_id)
+                    item.update(status="DISCOVERED_NOT_REVALIDATED", request_digest=digest,
+                        episodes=[{"run_id": e["episode_id"], "episode_index": e["episode_index"]} for e in request["episodes"]])
+                except (ContractError, CuratorError, OSError, ValueError) as exc:
+                    item["error"] = getattr(exc, "code", "CURATOR_REQUEST_IO")
+                self.request_catalog["items"].append(item)
+            if len(names) > MAX_REVIEW_BATCH:
+                self.request_catalog["next_after"] = names[MAX_REVIEW_BATCH - 1]
+        except (ContractError, CuratorError, OSError, ValueError) as exc:
+            self.request_catalog.update(status="UNAVAILABLE", error=getattr(exc, "code", "CURATOR_REQUEST_IO"))
+        return {"request_catalog_status": self.request_catalog["status"]}
+
+    def open_request(self, payload):
+        from tools.data_factory.curator.core.errors import CuratorError
+
+        if (set(payload) != {"request_id", "expected_request_digest"}
+                or not isinstance(payload["request_id"], str)
+                or not isinstance(payload["expected_request_digest"], str)
+                or not DIGEST.fullmatch(payload["expected_request_digest"])):
+            raise ContractError("CURATOR_REQUEST_TARGET")
+        request_id = payload["request_id"]
+        self.curator_request = {"status": "CHECKING", "request_id": request_id, "selection": {"items": []},
+                               "publication": "UNKNOWN", "training_authority": False, "error": None}
+        try:
+            request, digest = self._read_request(request_id)
+            if digest != payload["expected_request_digest"]:
+                raise ContractError("CURATOR_REQUEST_OUTPUT_CHANGED")
+            items = []
+            for episode in request["episodes"]:
+                record = self._load(episode["episode_id"])
+                items.append({"run_id": episode["episode_id"], "selection_digest": canonical_digest(self._target(record))})
+            items.sort(key=lambda item: item["run_id"])
+            if "selection-" + canonical_digest(items)[7:] != request_id:
+                raise ContractError("CURATOR_REQUEST_SELECTION_CHANGED")
+            self.export_request({"items": items}, recover=True)
+            if self._read_request(request_id)[1] != digest:
+                raise ContractError("CURATOR_REQUEST_OUTPUT_CHANGED")
+        except (ContractError, CuratorError, OSError, ValueError) as exc:
+            self.curator_request.update(status="UNAVAILABLE", error=getattr(exc, "code", "CURATOR_REQUEST_IO"))
+        return {"curator_request_status": self.curator_request["status"]}
 
     def export_request(self, payload, *, recover=False):
         """Consume Curator's request producer; recovery never publishes a request."""

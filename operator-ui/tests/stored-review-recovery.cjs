@@ -45,13 +45,17 @@ const {randomUUID} = require("node:crypto");
       function failViewRequest(error) { if (!currentView) throw error; failClose(String(error)); }
     `, context);
   await vm.runInContext("loadView()", context);
-  await vm.runInContext("submitIntent('refresh_stored_reviews', {})", context);
-  await vm.runInContext("submitIntent('select_stored_review', {run_id:selectedRun})", context);
+  if (mode === "discover") await vm.runInContext("submitIntent('discover_curator_requests', {})", context);
+  else {
+    await vm.runInContext("submitIntent('refresh_stored_reviews', {})", context);
+    await vm.runInContext("submitIntent('select_stored_review', {run_id:selectedRun})", context);
+  }
   if (mode === "batch") await vm.runInContext("submitIntent('freeze_review_batch', {run_ids:currentView.stored_reviews.episodes.map(item=>item.run_id)})", context);
   if (mode === "return") await vm.runInContext("submitIntent('inspect_stored_episode', {review_binding_digest:currentView.candidate_review.review_binding_digest})", context);
   methods.length = 0;
   drop = true;
-  if (mode === "request") await vm.runInContext("submitIntent('export_curator_request', {items:currentView.stored_reviews.episodes.map(({run_id,selection_digest})=>({run_id,selection_digest}))})", context);
+  if (mode === "discover") await vm.runInContext("submitIntent('open_curator_request', {request_id:currentView.stored_reviews.request_catalog.items[0].request_id, expected_request_digest:currentView.stored_reviews.request_catalog.items[0].request_digest})", context);
+  else if (mode === "request") await vm.runInContext("submitIntent('export_curator_request', {items:currentView.stored_reviews.episodes.map(({run_id,selection_digest})=>({run_id,selection_digest}))})", context);
   else if (mode === "batch") await vm.runInContext("submitIntent('review_stored_batch', {batch_binding_digest:currentView.stored_reviews.batch.selection.batch_binding_digest,choice:'PASS',reason:null,excluded_run_ids:[]})", context);
   else if (mode === "review") await vm.runInContext("submitIntent('review_candidate', {review_binding_digest:currentView.candidate_review.review_binding_digest,choice:'PASS',reason:null})", context);
   else await vm.runInContext(`submitIntent('${mode === "return" ? "return_stored_review" : "inspect_stored_episode"}', {review_binding_digest:currentView.candidate_review.review_binding_digest})`, context);

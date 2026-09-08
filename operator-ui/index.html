@@ -251,6 +251,13 @@
           </form>
           <p class="cell-help">항목별로 순서대로 기록하며 오류가 나면 멈춥니다. 전체 원자적 성공을 보장하지 않으며, 재접속 시 결과만 확인하고 판정을 재전송하지 않습니다. 원본 보존·학습 승인·로봇 실행은 바꾸지 않습니다.</p>
         </section>
+        <section class="notice" aria-labelledby="curator-request-library-title">
+          <h3 id="curator-request-library-title">저장된 Curator 입력 요청</h3>
+          <button id="discover-curator-requests" type="button" class="secondary-button">저장된 요청 불러오기</button>
+          <p id="curator-request-library-status" role="status"></p>
+          <div id="curator-request-list"></div>
+          <button id="curator-requests-next" type="button" class="secondary-button" hidden>다음 요청 보기</button>
+        </section>
         <section id="curator-request-panel" class="notice" hidden aria-labelledby="curator-request-title">
           <h3 id="curator-request-title">선택한 원본의 Curator 입력 요청</h3>
           <p id="curator-request-status" role="status"></p>

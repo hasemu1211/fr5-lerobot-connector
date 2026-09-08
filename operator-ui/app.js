@@ -1878,6 +1878,16 @@ function renderStoredBatch(view) {
 
 function renderCuratorRequest(view) {
   const stored = view.stored_reviews;
+  const catalog = stored?.request_catalog;
+  document.querySelector("#discover-curator-requests").disabled = !canIntent("discover_curator_requests");
+  document.querySelector("#curator-request-library-status").textContent = catalog?.status === "READY"
+    ? `${catalog.items.length}개 발견 · 아직 현재 원본·판정을 검증하지 않았습니다.`
+    : catalog?.status === "UNAVAILABLE" ? `목록을 확인하지 못했습니다 (${catalog.error}).` : "새 브라우저나 재시작 후에도 저장된 요청을 불러올 수 있습니다.";
+  const listing = (catalog?.items ?? []).map(item => `<div class="batch-item"><span>${escapeHtml(item.request_id)}<small>${item.status === "UNAVAILABLE" ? `파일 확인 불가 · ${escapeHtml(item.error)}` : item.episodes.map(e => `#${e.episode_index} · ${escapeHtml(e.run_id)}`).join(", ")}</small></span>${item.status === "DISCOVERED_NOT_REVALIDATED" ? `<button type="button" class="secondary-button" data-request-open="${escapeHtml(item.request_id)}" ${canIntent("open_curator_request") ? "" : "disabled"}>선택·현재 근거 확인</button>` : ""}</div>`).join("");
+  const list = document.querySelector("#curator-request-list");
+  if (list.dataset.content !== listing) { list.innerHTML = listing; list.dataset.content = listing; }
+  document.querySelector("#curator-requests-next").hidden = !catalog?.next_after;
+  document.querySelector("#curator-requests-next").disabled = !canIntent("discover_curator_requests");
   const panel = document.querySelector("#curator-request-panel");
   if (!panel) return;
   const observed = stored?.curator_request;
@@ -2422,6 +2432,17 @@ document.querySelector("#export-curator-request")?.addEventListener("click", asy
 document.querySelector("#recover-curator-request")?.addEventListener("click", () => {
   const selection = savedRequestSelection ?? currentView?.stored_reviews?.curator_request?.selection;
   if (selection) submitIntent("recover_curator_request", selection);
+});
+document.querySelector("#discover-curator-requests")?.addEventListener("click", () => submitIntent("discover_curator_requests", {}));
+document.querySelector("#curator-requests-next")?.addEventListener("click", () => submitIntent("discover_curator_requests", {after: currentView.stored_reviews.request_catalog.next_after}));
+document.querySelector("#curator-request-list")?.addEventListener("click", async event => {
+  const id = event.target.closest("[data-request-open]")?.dataset.requestOpen;
+  const item = currentView.stored_reviews.request_catalog.items.find(item => item.request_id === id);
+  if (!item?.request_digest) return;
+  savedRequestSelection = null;
+  try { globalThis.localStorage?.removeItem(REQUEST_STORAGE_KEY); } catch (_) {}
+  await submitIntent("open_curator_request", {request_id: id, expected_request_digest: item.request_digest});
+  document.querySelector("#curator-request-panel")?.scrollIntoView({block: "center"});
 });
 document.querySelector("#freeze-review-batch")?.addEventListener("click", () => submitIntent("freeze_review_batch", {run_ids: [...batchDraft]}));
 document.querySelector("#recover-review-batch")?.addEventListener("click", () => {

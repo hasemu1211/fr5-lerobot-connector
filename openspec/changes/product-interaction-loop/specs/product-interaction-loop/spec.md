@@ -372,6 +372,13 @@ The Collection Web surface SHALL let the person choose an exact bounded set of s
 - **AND** explicit recovery of the retained selection never creates a missing request, while an existing conflicting or no-longer-eligible request is preserved and shown as unavailable rather than overwritten
 - **AND** cached views are last-checked observations: polling does not rehash datasets, grant approval or launch Curator or training, and the next native consumer must validate its current inputs again.
 
+#### Scenario: Discover a published request after process and browser restart
+
+- **WHEN** a fresh browser or automation caller has no previous selection descriptor and explicitly loads stored Curator requests
+- **THEN** the existing operator owner lists the server-owned immutable request directory in bounded pages without reading source datasets or inferring current eligibility
+- **AND** the list distinguishes discovered-but-not-revalidated files from malformed, conflicting or symlink entries; selecting a discovered request carries its exact request digest and revalidates the existing source/candidate/ledger selection through the native recovery path
+- **AND** changed request or source bindings fail truthfully, discovery and selection never export or overwrite a request, and no browser path entry, localStorage prerequisite, approval ledger or processing/training authority is introduced.
+
 ### Requirement: Preserve execution awareness during Collection connection recovery
 
 The Collection Web surface SHALL retain its last validated execution facts and current screen when state retrieval fails, clearly label them as stale, and state that current robot motion or stop is unknown. A failed browser request SHALL NOT imply that the lifecycle owner stopped, rolled back or remains healthy. The current constraint is the existing loopback state/intent transport; this behavior grants no offline command authority and changes no physical or approval gates. The next consumer is the existing lifecycle owner, whose fresh canonical view and exact intent CAS remain authoritative.
