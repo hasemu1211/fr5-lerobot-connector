@@ -4743,7 +4743,7 @@ def run_live(payload, cancel, publish, *, resolver=resolve_inputs, executor_fact
                 pending = None
                 if state != result["state"] or isinstance(decision, Exception):
                     cancelled = job.cancel()
-                    return _response(ok=False, code=cancelled["code"], state=cancelled["state"], run_id=payload["run_id"], plan_digest=planned["plan_digest"])
+                    return _response(ok=False, code=cancelled["code"], state=cancelled["state"], run_id=payload["run_id"], plan_digest=planned["plan_digest"], data=learned_run_diagnostic(cancelled, payload=payload))
                 if state == "LEARNED_CHUNK_COMPLETE" and decision == "CONTINUE":
                     def observe_boundary():
                         observed = job.observe_learned_boundary(inputs["camera_topics"])
@@ -4863,7 +4863,7 @@ def run_live(payload, cancel, publish, *, resolver=resolve_inputs, executor_fact
                 pending = None
                 if state != result["state"] or isinstance(release_decision, Exception):
                     cancelled = job.cancel()
-                    return _response(ok=False, code=cancelled["code"], state=cancelled["state"], run_id=payload["run_id"], plan_digest=planned["plan_digest"])
+                    return _response(ok=False, code=cancelled["code"], state=cancelled["state"], run_id=payload["run_id"], plan_digest=planned["plan_digest"], data=learned_run_diagnostic(cancelled, payload=payload))
                 decision, source = release_decision
                 acted = job.release_verdict(decision, operator_id, source=source)
                 if not acted["ok"]:
@@ -4913,7 +4913,7 @@ def run_live(payload, cancel, publish, *, resolver=resolve_inputs, executor_fact
                 pending = None
                 if state != result["state"] or isinstance(decision, Exception):
                     cancelled = job.cancel()
-                    return _response(ok=False, code=cancelled["code"], state=cancelled["state"], run_id=payload["run_id"], plan_digest=planned["plan_digest"])
+                    return _response(ok=False, code=cancelled["code"], state=cancelled["state"], run_id=payload["run_id"], plan_digest=planned["plan_digest"], data=learned_run_diagnostic(cancelled, payload=payload))
                 confirmed = job.confirm(operator_id)
                 if not confirmed["ok"]:
                     return _response(ok=False, code=confirmed["code"], state=confirmed["state"], run_id=payload["run_id"], plan_digest=planned["plan_digest"])

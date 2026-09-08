@@ -236,13 +236,16 @@ class FinitePlanTest(unittest.TestCase):
     def test_public_native_continuation_cancel_does_not_send_next_output(self):
         self._public_native_consumer("live", causal=True, continuation=True, next_choice="CANCEL")
 
+    def test_public_native_next_precontact_cancel_retains_prior_chunk_evidence(self):
+        self._public_native_consumer("live", causal=True, continuation=True, precontact_cancel=True)
+
     def test_public_causal_plan_only_freezes_explicit_serialized_retiming(self):
         self._public_native_consumer("plan_only", causal=True, reference_mode="serialized_retime")
 
     def test_public_causal_plan_only_freezes_explicit_percent_representation(self):
         self._public_native_consumer("plan_only", causal=True, reference_mode="serialized_percent_retime")
 
-    def _public_native_consumer(self, mode, *, causal=False, reference_mode=None, continuation=False, next_choice="APPROVE"):
+    def _public_native_consumer(self, mode, *, causal=False, reference_mode=None, continuation=False, next_choice="APPROVE", precontact_cancel=False):
         from tools.data_factory import run_job
         from tools.data_factory.learned_action_adapter import NativeSmolVLA
         from tests.data_factory.operator.fixtures import PROFILE, JOB, runtime_validated, payload
@@ -328,7 +331,7 @@ class FinitePlanTest(unittest.TestCase):
                 pending = port.offer(request)
                 kind = request["kind"]
                 if kind == "PRECONTACT_HUMAN":
-                    choice = "CONFIRM"
+                    choice = "CANCEL" if precontact_cancel and len(transport.sent) == 1 else "CONFIRM"
                 elif kind == "LEARNED_NEXT_PLAN":
                     self.assertEqual(len(transport.sent), 1)
                     self.assertNotEqual(request["plan_digest"], request["evidence"]["previous_plan_digest"])
@@ -365,7 +368,7 @@ class FinitePlanTest(unittest.TestCase):
                     session.worker.join(2.)
                 self.assertFalse(session.worker.is_alive())
                 result = session.snapshot
-            expected = "CANCELLED_BY_OPERATOR" if continuation and next_choice == "CANCEL" else "PRECOMMIT_SAFETY"
+            expected = "CANCELLED_BY_OPERATOR" if continuation and (next_choice == "CANCEL" or precontact_cancel) else "PRECOMMIT_SAFETY"
             self.assertEqual(result["code"], expected if mode == "live" else "PLANNED",
                              {k: v for k, v in result.items() if k != "data"})
             factory.assert_called_once()
@@ -388,7 +391,7 @@ class FinitePlanTest(unittest.TestCase):
             self.assertLess(calls.index(("executor", "plan")), calls.index(("operator", "decision")))
             self.assertLess(calls.index(("operator", "decision")), calls.index(("recorder", "begin")))
             self.assertLess(calls.index(("recorder", "begin")), calls.index(("executor", "execute")))
-            self.assertEqual(len(transport.sent), 2 if continuation and next_choice == "APPROVE" else 1)
+            self.assertEqual(len(transport.sent), 2 if continuation and next_choice == "APPROVE" and not precontact_cancel else 1)
             self.assertEqual(calls.count(("recorder", "begin")), 1)
             self.assertEqual(calls.count(("native", "warmup")), 1)
             if continuation:
