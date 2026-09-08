@@ -705,13 +705,18 @@ def validate_execution_history(plan, history):
             digest = canonical_digest(old)
             approval = item["approval"]
             if (digest in seen_plans or approval["approval_id"] in approvals
-                    or approval["approval_scope"] != "HUMAN_GATED" or approval["plan_digest"] != digest
+                    or approval["approval_scope"] not in {"HUMAN_GATED", "SCOPED_TASK_GRANT"} or approval["plan_digest"] != digest
                     or approval["run_id"] != plan["run_id"] or old["run_id"] != plan["run_id"]
                     or approval["resolved_job_digest"] != old["resolved_job_digest"]
                     or item["plan_envelope"]["precommit_safety"]["approved_plan_digest"] != digest
                     or old["learned_source_program"] != plan["learned_source_program"]
                     or old["learned_proposal"]["checkpoint"] != plan["learned_proposal"]["checkpoint"]):
                 raise ContractError("LEARNED_HISTORY_BINDING")
+            if approval["approval_scope"] == "SCOPED_TASK_GRANT":
+                from .task_authority import admission
+                grant = approval["task_grant"]
+                if approval != admission(grant, old, digest, grant["deadline_s"] - 1):
+                    raise ContractError("LEARNED_HISTORY_BINDING")
             binding = old.get("learned_continuation")
             expected = {"previous_plan_digest": previous_plan, "previous_trace_digest": previous_trace,
                         "previous_chunk_digest": previous_chunk, "chunk_index": index}

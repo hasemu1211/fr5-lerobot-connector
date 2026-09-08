@@ -677,6 +677,44 @@ class OneJob:
             return self._result(False, "PLAN_SCHEMA")
         return self._prepare_plan(plan["run_id"], plan["motion_program"], plan["scene_binding"], plan["setup_approval"])
 
+    def admit_task(self, grant=None):
+        """Admit an exact finite output using explicit authority, without human fiction."""
+        initial = self.state == "PLANNED" and grant is not None
+        if not initial and (self.state != "LEARNED_CHUNK_COMPLETE" or self.pending_learned_plan is None or self.approval_scope != "SCOPED_TASK_GRANT"):
+            return self._result(False, "TASK_GRANT_STATE")
+        payload = {"run_id": self.run_id, "plan_digest": self.plan_digest}
+        if initial:
+            payload["grant"] = copy.deepcopy(grant)
+        else:
+            payload.update(lease_id=self.lease_id, candidate_plan_digest=self.pending_learned_plan["plan_digest"])
+        try:
+            self._request("executor", "admit_task", payload)
+        except ContractError as exc:
+            return self._result(False, exc.code)
+        if initial:
+            self.approval_scope, self.state = "SCOPED_TASK_GRANT", "APPROVED"
+        else:
+            self.pending_learned_plan["state"] = "APPROVED"
+        return self._result(True, "TASK_PLAN_ADMITTED")
+
+    def task_boundary(self):
+        if self.state != "LEARNED_CHUNK_COMPLETE" or self.approval_scope != "SCOPED_TASK_GRANT":
+            return self._result(False, "TASK_GRANT_STATE")
+        try:
+            response = self._request("executor", "task_boundary", {"run_id": self.run_id,
+                "plan_digest": self.plan_digest, "lease_id": self.lease_id}, allowed_failure=True)
+            handoff = response.get("data", {}).get("task_handoff")
+            if handoff is not None:
+                # The existing cancel/recorder owner handles the unavailable boundary.
+                # Root integration supplies qualified handling and terminal retention.
+                result = self._abort("MECHANICAL_TERMINAL_UNAVAILABLE")
+                return {**result, "task_handoff": copy.deepcopy(handoff)}
+            if not response["ok"]:
+                return self._abort(response["code"])
+            return self._result(True, "TASK_CONTINUE")
+        except ContractError as exc:
+            return self._abort(exc.code)
+
     def approve(self, approval):
         if self.state != "PLANNED" or not isinstance(approval, dict):
             return self._result(False, "APPROVAL_STATE")
@@ -960,7 +998,7 @@ class OneJob:
             self._emit_lifecycle_event("MOTION_STARTING")
             self.lease_id = lease_id  # Arm only when the execute request is about to leave this process.
             response = self._request("executor", "execute", {"run_id": self.run_id, "plan_digest": self.plan_digest, "lease_id": lease_id})
-            if response["state"] not in ({"PRECONTACT_HUMAN"} if "learned_proposal" in self._program else {"EXECUTING"}):
+            if response["state"] not in ({"PRECONTACT_HUMAN"} if "learned_proposal" in self._program and self.approval_scope != "SCOPED_TASK_GRANT" else {"EXECUTING"}):
                 raise ContractError("EXECUTOR_STATE")
         except ContractError as exc:
             return self._abort(exc.code)
@@ -1203,7 +1241,7 @@ class OneJob:
             response = self._request("executor", "execute_next", {"run_id": self.run_id,
                 "plan_digest": self.plan_digest, "lease_id": self.lease_id,
                 "candidate_plan_digest": self.pending_learned_plan["plan_digest"]})
-            if response["state"] != "PRECONTACT_HUMAN":
+            if response["state"] != ("EXECUTING" if self.approval_scope == "SCOPED_TASK_GRANT" else "PRECONTACT_HUMAN"):
                 raise ContractError("LEARNED_CHUNK_STATE")
         except ContractError as exc:
             return self._abort(exc.code)
@@ -1211,8 +1249,8 @@ class OneJob:
         self.plan_digest = self.dry_run_digest = pending["plan_digest"]
         self.plan_envelope, self._program = pending["plan_envelope"], pending["motion_program"]
         self.pending_learned_plan = None
-        self.state = "PRECONTACT_HUMAN"
-        return self._result(True, "PRECONTACT_HUMAN")
+        self.state = response["state"]
+        return self._result(True, self.state)
 
     def semantic_verdict(self, verdict, decided_by, source="HUMAN"):
         if self.state not in {"SEMANTIC_VERDICT", "LEARNED_CHUNK_COMPLETE"} or verdict not in {"PASS", "FAIL"} or not isinstance(decided_by, str) or not SAFE_ID.fullmatch(decided_by):

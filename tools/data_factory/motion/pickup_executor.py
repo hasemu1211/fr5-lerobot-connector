@@ -50,7 +50,7 @@ PHASES = (
 ARM_PHASES = frozenset(PHASES) - {"GRIPPER_CLOSE", "GRIPPER_OPEN"}
 JOINT_ORDER = ["j1", "j2", "j3", "j4", "j5", "j6"]
 COMMAND_FIELDS = {"schema_version", "op_id", "op", "payload"}
-COMMAND_OPS = {"prepare_next", "approve_next", "execute_next", "preflight", "capture_observation", "plan", "approve", "execute", "heartbeat", "confirm", "grasp_verdict", "semantic_verdict", "release_verdict", "cancel", "status"}
+COMMAND_OPS = {"admit_task", "task_boundary", "revoke_task", "prepare_next", "approve_next", "execute_next", "preflight", "capture_observation", "plan", "approve", "execute", "heartbeat", "confirm", "grasp_verdict", "semantic_verdict", "release_verdict", "cancel", "status"}
 ACTIVE_STATES = {"EXECUTING", "PRECONTACT_HUMAN", "GRASP_VERDICT", "SEMANTIC_VERDICT", "LEARNED_CHUNK_COMPLETE", "RELEASE_VERDICT"}
 RECYCLE_PHASES = ("RECYCLE_APPROACH_PTP", "LOWER_LIN", "GRIPPER_OPEN", "RETREAT_LIN", "SAFE_POSE_PTP")
 EXECUTION_RESULT_MARGIN_S = 2.0
@@ -929,6 +929,7 @@ class PickupExecutor:
         self._check_chunk_boundary(run, lease_id)
 
     def _check_chunk_boundary(self, run, lease_id):
+        self._check_task(run)
         # Pure checks are safe while the Scene lock is held; tick/fault is not.
         if run["state"] != "LEARNED_CHUNK_COMPLETE" or "learned_proposal" not in run["plan"]:
             raise ContractError(run.get("failure_code", "LEARNED_CHUNK_STATE"))
@@ -947,6 +948,8 @@ class PickupExecutor:
     def _prepare_next(self, payload):
         run = self._execution_payload(payload, {"run_id", "plan_digest", "lease_id", "motion_program"}, "LEARNED_NEXT_SCHEMA")
         self._chunk_boundary(run, payload["lease_id"])
+        if "task_grant" in run and self._task_termination(run) is not None:
+            raise ContractError("TASK_POLICY_BUDGET_EXHAUSTED")
         run["continuation_requested"] = True
         if "pending_chunk" in run:
             raise ContractError("LEARNED_NEXT_PENDING")
@@ -980,6 +983,93 @@ class PickupExecutor:
         run["pending_chunk"] = {**self._planned_record(response), "previous_chunk": previous_chunk}
         return self._execution_response(run, payload["run_id"], run["digest"], "LEARNED_NEXT_PLANNED")
 
+    def _check_task(self, run):
+        grant = run.get("task_grant")
+        if grant is None:
+            return
+        from tools.data_factory.rollout.task_authority import check_grant
+        if run.get("task_revoked"):
+            raise ContractError("TASK_GRANT_REVOKED")
+        check_grant(grant, run["plan"], self.source_clock())
+        if self.monotonic_clock() >= run["task_deadline"]:
+            raise ContractError("TASK_DEADLINE_EXHAUSTED")
+
+    def _admit_task(self, payload):
+        from tools.data_factory.rollout.task_authority import admission, check_sources
+        initial = "grant" in payload
+        fields = {"run_id", "plan_digest", "grant"} if initial else {"run_id", "plan_digest", "lease_id", "candidate_plan_digest"}
+        run = self._bound(_exact(payload, fields, "TASK_GRANT_SCHEMA"))
+        if initial:
+            if run["state"] != "PLANNED" or "task_grant" in run:
+                raise ContractError("TASK_GRANT_STATE")
+            grant = payload["grant"]
+            receipt = admission(grant, run["plan"], run["digest"], self.source_clock())
+            check_sources(run["plan"])
+            remaining = grant["deadline_s"] - self.source_clock()
+            if remaining <= grant["terminal_reserve_s"] + 5.:
+                raise ContractError("TASK_POLICY_BUDGET_EXHAUSTED")
+            run.update(task_grant=copy.deepcopy(grant), task_deadline=self.monotonic_clock() + remaining)
+            run["approval"], run["state"] = receipt, "APPROVED"
+        else:
+            self._chunk_boundary(run, payload["lease_id"])
+            self._check_task(run)
+            if self._task_termination(run) is not None:
+                raise ContractError("TASK_POLICY_BUDGET_EXHAUSTED")
+            candidate = run.get("pending_chunk")
+            if not candidate or candidate["digest"] != payload["candidate_plan_digest"] or candidate["state"] != "PLANNED":
+                raise ContractError("LEARNED_NEXT_BINDING")
+            check_sources(candidate["plan"])
+            candidate["approval"] = admission(run["task_grant"], candidate["plan"], candidate["digest"], self.source_clock())
+            candidate["state"] = "APPROVED"
+        return self._execution_response(run, payload["run_id"], run["digest"], "TASK_PLAN_ADMITTED") if not initial else _response(
+            ok=True, code="TASK_PLAN_ADMITTED", state="APPROVED", run_id=payload["run_id"], plan_digest=run["digest"])
+
+    def _task_policy_window(self, run):
+        grant = run["task_grant"]
+        remaining = min(grant["deadline_s"] - self.source_clock(), run["task_deadline"] - self.monotonic_clock())
+        return remaining > grant["terminal_reserve_s"] + 5.
+
+    def _task_termination(self, run):
+        grant = run["task_grant"]
+        if len(run.get("learned_history", [])) + 1 >= grant["max_outputs"]:
+            return "TASK_OUTPUT_LIMIT_REACHED"
+        if not self._task_policy_window(run):
+            return "TASK_POLICY_BUDGET_EXHAUSTED"
+        return None
+
+    def _task_boundary(self, payload):
+        run = self._execution_payload(payload, {"run_id", "plan_digest", "lease_id"}, "TASK_GRANT_SCHEMA")
+        self._chunk_boundary(run, payload["lease_id"])
+        if "task_grant" not in run:
+            raise ContractError("TASK_GRANT_REQUIRED")
+        self._check_task(run)
+        reason = self._task_termination(run)
+        if reason is not None:
+            run["task_handoff"] = {"schema_version": "data_factory.learned_task_handoff.v1",
+                "termination_reason": reason, "status": "BLOCKED_UNAVAILABLE",
+                "code": "MECHANICAL_TERMINAL_UNAVAILABLE", "run_id": payload["run_id"],
+                "plan_digest": run["digest"], "grant_digest": run["task_grant"]["grant_digest"],
+                "deadline_s": run["task_grant"]["deadline_s"],
+                "required_dependencies": ["QUALIFIED_MECHANICAL_TERMINAL", "RECORDER_TERMINAL_RETENTION"],
+                "semantic_success": "NOT_MEASURED"}
+            self._fault(run, "MECHANICAL_TERMINAL_UNAVAILABLE")
+        return self._execution_response(run, payload["run_id"], run["digest"], "TASK_CONTINUE")
+
+    def _revoke_task(self, payload):
+        _exact(payload, {"run_id", "grant_digest"}, "TASK_GRANT_SCHEMA")
+        run = self.runs.get(payload["run_id"])
+        if run is None:
+            raise ContractError("TASK_GRANT_SCOPE")
+        if run.get("task_grant", {}).get("grant_digest") != payload["grant_digest"]:
+            raise ContractError("TASK_GRANT_SCOPE")
+        run["task_revoked"] = True
+        if "execution" in run:
+            self._fault(run, "TASK_GRANT_REVOKED")
+        else:
+            run["state"] = "BLOCKED"
+            run["failure_code"] = "TASK_GRANT_REVOKED"
+        return _response(ok=True, code="TASK_GRANT_REVOKED", state=run["state"], run_id=payload["run_id"], plan_digest=run["digest"])
+
     def _approve_next(self, payload):
         fields = {"run_id", "plan_digest", "lease_id", "candidate_plan_digest", "approval"}
         run = self._execution_payload(payload, fields, "LEARNED_NEXT_SCHEMA")
@@ -987,6 +1077,8 @@ class PickupExecutor:
         candidate = run.get("pending_chunk")
         if not candidate or candidate["digest"] != payload["candidate_plan_digest"] or candidate["state"] != "PLANNED":
             raise ContractError("LEARNED_NEXT_BINDING")
+        if "task_grant" in run:
+            raise ContractError("TASK_GRANT_ADMISSION_REQUIRED")
         approval = _exact(payload["approval"], {"approval_id", "approved_by", "approval_expiry", "approval_scope"}, "APPROVAL_SCHEMA")
         if any(not isinstance(approval[k], str) or not SAFE_ID.fullmatch(approval[k]) for k in ("approval_id", "approved_by")):
             raise ContractError("APPROVAL_SCHEMA")
@@ -1006,7 +1098,12 @@ class PickupExecutor:
         candidate = run.get("pending_chunk")
         if not candidate or candidate["digest"] != payload["candidate_plan_digest"] or candidate["state"] != "APPROVED":
             raise ContractError("LEARNED_NEXT_NOT_APPROVED")
-        _future_timestamp(candidate["approval"]["approval_expiry"], self.clock())
+        if "task_grant" not in run:
+            _future_timestamp(candidate["approval"]["approval_expiry"], self.clock())
+        else:
+            self._check_task(run)
+            if self._task_termination(run) is not None:
+                raise ContractError("TASK_POLICY_BUDGET_EXHAUSTED")
         if not self.execution_enabled:
             raise ContractError("LIVE_EXECUTION_BLOCKED")
         plan, execution = candidate["plan"], run["execution"]
@@ -1057,9 +1154,10 @@ class PickupExecutor:
                         next_execution[key] = execution[key]
                 next_execution.update(step_index=0, grasp_verdict=None, semantic_verdict=None, release_verdict=None,
                                       snapshot=None, active=False, terminal_phases=[])
+                task_authority = {key: run[key] for key in ("task_grant", "task_deadline", "task_revoked") if key in run}
                 cancel = run["cancel_event"]
                 run.clear()
-                run.update(candidate, execution=next_execution, cancel_event=cancel, learned_history=history, state="EXECUTING")
+                run.update(candidate, execution=next_execution, cancel_event=cancel, learned_history=history, state="EXECUTING", **task_authority)
         except ContractError:
             # Fault handling may write Scene state. The lock must be released
             # before the sole lease/stop owner processes an expired deadline.
@@ -1119,10 +1217,15 @@ class PickupExecutor:
             raise ContractError("NOT_APPROVED")
         if run.get("precommit_safety", {}).get("status") != "PENDING":
             raise ContractError("PRECOMMIT_SAFETY_REQUIRED")
-        _future_timestamp(run["approval"]["approval_expiry"], self.clock())
+        if "task_grant" in run:
+            self._check_task(run)
+            if not self._task_policy_window(run):
+                raise ContractError("TASK_POLICY_BUDGET_EXHAUSTED")
+        else:
+            _future_timestamp(run["approval"]["approval_expiry"], self.clock())
         proposal = run["plan"].get("learned_proposal")
         if proposal is not None:
-            if run["approval"]["approval_scope"] != "HUMAN_GATED":
+            if run["approval"]["approval_scope"] not in {"HUMAN_GATED", "SCOPED_TASK_GRANT"}:
                 raise ContractError("LEARNED_HUMAN_APPROVAL_REQUIRED")
             if proposal["checkpoint"]["runtime"] == "SYNTHETIC_TEST_ONLY" and self.transport.__class__.__module__ == "tools.data_factory.motion.moveit_transport":
                 raise ContractError("LEARNED_SYNTHETIC_RUNTIME")
@@ -1269,12 +1372,19 @@ class PickupExecutor:
             data["pending_chunk"] = {"plan_digest": pending["digest"], "state": pending["state"],
                                      "plan_envelope": copy.deepcopy(pending["envelope"]),
                                      "previous_chunk": copy.deepcopy(pending["previous_chunk"])}
+        if "task_grant" in run:
+            data["task_authority"] = {"grant": copy.deepcopy(run["task_grant"]), "admission": copy.deepcopy(run["approval"])}
+        if "task_handoff" in run:
+            data["task_handoff"] = copy.deepcopy(run["task_handoff"])
         data["precommit_safety"] = copy.deepcopy(run.get("precommit_safety"))
         if "failure_code" in run:
             data["failure_code"] = run["failure_code"]
         return data
 
     def _check_learned_dispatch(self, run, deadlines=None):
+        self._check_task(run)
+        if "task_grant" in run and run["execution"].get("learned_segment_index", 0) == 0 and not self._task_policy_window(run):
+            raise ContractError("TASK_POLICY_BUDGET_EXHAUSTED")
         execution = run["execution"]
         if run["cancel_event"].is_set():
             raise ContractError(execution.get("_scene_dispatch_fault", "LEARNED_CANCELLED"))
@@ -1292,7 +1402,7 @@ class PickupExecutor:
     @staticmethod
     def _learned_dispatch_deadlines(run):
         execution = run["execution"]
-        return (execution["lease_deadline"], execution["wait_deadline"]
+        return (execution["lease_deadline"], execution.get("wait_deadline")
                 if execution.get("learned_segment_index", 0) == 0 else None)
 
     @contextmanager
@@ -1395,7 +1505,15 @@ class PickupExecutor:
                 self._fault(run, "POST_RESET_SAFE_SNAPSHOT")
             return run["state"]
         step = steps[execution["step_index"]]
-        if step.get("requires_confirmation") == "PRECONTACT_HUMAN" and execution.get("confirmed_step") != execution["step_index"]:
+        if "task_grant" in run:
+            try:
+                from tools.data_factory.rollout.task_authority import check_sources
+                check_sources(run["plan"])
+                self._check_task(run)
+            except ContractError as exc:
+                self._fault(run, exc.code)
+                return run["state"]
+        if "task_grant" not in run and step.get("requires_confirmation") == "PRECONTACT_HUMAN" and execution.get("confirmed_step") != execution["step_index"]:
             run["state"] = "PRECONTACT_HUMAN"
             execution["wait_deadline"] = self.monotonic_clock() + run["plan"]["execution_timeouts_s"]["precontact_confirmation"]
             self._emit_phase_event(run, "HOLD_ENTERED", step, None, {"hold": "PRECONTACT_HUMAN", "step": step})
@@ -1572,6 +1690,11 @@ class PickupExecutor:
     def _tick(self):
         for run in self.runs.values():
             if run["state"] not in ACTIVE_STATES:
+                continue
+            try:
+                self._check_task(run)
+            except ContractError as exc:
+                self._fault(run, exc.code)
                 continue
             execution, now = run["execution"], self.monotonic_clock()
             if now >= execution["lease_deadline"]:

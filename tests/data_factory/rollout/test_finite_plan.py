@@ -36,6 +36,16 @@ APPROVAL = {"source": "HUMAN", "approval_id": "synthetic-approval", "approved_by
             "approval_expiry": "2099-01-01T00:00:00Z", "approval_scope": "HUMAN_GATED"}
 
 
+def task_grant(src, scene, proposal, **changes):
+    from tools.data_factory.rollout.task_authority import task_scope
+    grant = {"schema_version": "data_factory.learned_task_grant.v1", "grant_id": "explicit-task",
+             "issued_by": "operator", "run_id": "run", "scope": task_scope(src, scene, proposal),
+             "deadline_s": 100., "terminal_reserve_s": 10., "max_outputs": 2, "revoked": False}
+    grant.update(changes)
+    grant["grant_digest"] = canonical_digest(grant)
+    return grant
+
+
 def observation():
     return {"source_clock": "SYSTEM_TIME", "source_timestamps_s": {key: 10. for key in ("state", "camera1", "camera2")},
             "observation.state": INITIAL[:], "observation.images.camera1": fake_rgb(), "observation.images.camera2": fake_rgb()}
@@ -236,6 +246,12 @@ class FinitePlanTest(unittest.TestCase):
     def test_public_causal_plan_only_preserves_zero_execution_effects(self):
         self._public_native_consumer("plan_only", causal=True)
 
+    def test_public_native_task_grant_source_change_sends_no_next_goal(self):
+        self._public_native_consumer("live", causal=True, granted=True, source_changed=True)
+
+    def test_public_native_task_grant_runs_two_outputs_without_clicks_and_hands_off(self):
+        self._public_native_consumer("live", causal=True, granted=True)
+
     def test_public_native_continuation_reuses_owner_and_recorder_with_exact_approval(self):
         self._public_native_consumer("live", causal=True, continuation=True)
 
@@ -251,7 +267,7 @@ class FinitePlanTest(unittest.TestCase):
     def test_public_causal_plan_only_freezes_explicit_percent_representation(self):
         self._public_native_consumer("plan_only", causal=True, reference_mode="serialized_percent_retime")
 
-    def _public_native_consumer(self, mode, *, causal=False, reference_mode=None, continuation=False, next_choice="APPROVE", precontact_cancel=False):
+    def _public_native_consumer(self, mode, *, causal=False, reference_mode=None, continuation=False, next_choice="APPROVE", precontact_cancel=False, granted=False, source_changed=False):
         from tools.data_factory import run_job
         from tools.data_factory.learned_action_adapter import NativeSmolVLA
         from tests.data_factory.operator.fixtures import PROFILE, JOB, runtime_validated, payload
@@ -300,6 +316,8 @@ class FinitePlanTest(unittest.TestCase):
             @contextmanager
             def prepare_inference(self):
                 calls.append(("native", "prepare"))
+                if source_changed and calls.count(("native", "prepare")) == 2:
+                    raise ContractError("LEARNED_CHECKPOINT_CHANGED")
                 yield self
             checkpoint = CHECKPOINT
             def __call__(self, value):
@@ -324,6 +342,13 @@ class FinitePlanTest(unittest.TestCase):
                 value["learned_reference_mode"] = reference_mode
             if mode == "live":
                 value.update(run_root=str(root / "runs"), dataset_root=str(root / "unused-dataset"), camera_profile="up-wrist")
+            if granted:
+                bound_proposal = proposal()
+                bound_proposal["period_s"] = 1 / profile["fps"]
+                bound_proposal["runtime_inputs"] = {**run_job._learned_options(value), "clock_binding": clock_binding,
+                    "camera_topics": {"camera1": "/up", "camera2": "/wrist"}, "camera_mapping": mapping,
+                    "fps": profile["fps"], "hardware_wire_version": 3 if causal else 2}
+                value["task_grant"] = task_grant(program, SCENE, bound_proposal)
             value = run_job._run_payload(value)
             factory = mock.Mock(return_value=child)
             def decide(_prompt, choices):
@@ -374,6 +399,30 @@ class FinitePlanTest(unittest.TestCase):
                     session.worker.join(2.)
                 self.assertFalse(session.worker.is_alive())
                 result = session.snapshot
+            if granted and source_changed:
+                self.assertEqual(result["code"], "LEARNED_CHECKPOINT_CHANGED", result)
+                self.assertEqual(len(transport.sent), 1)
+                self.assertEqual(calls.count(("recorder", "begin")), 1)
+                self.assertFalse(any(target == "operator" for target, _ in calls))
+                self.assertNotIn(("recorder", "commit"), calls)
+                return
+            if granted:
+                self.assertEqual(result["code"], "MECHANICAL_TERMINAL_UNAVAILABLE", result)
+                self.assertEqual(result["data"]["task_handoff"]["termination_reason"], "TASK_OUTPUT_LIMIT_REACHED")
+                self.assertEqual(result["data"]["task_handoff"]["status"], "BLOCKED_UNAVAILABLE")
+                self.assertEqual(len(transport.sent), 2)
+                self.assertEqual(calls.count(("native", "prepare")), 2)
+                self.assertEqual(calls.count(("recorder", "begin")), 1)
+                self.assertEqual(calls.count(("executor", "admit_task")), 2)
+                self.assertFalse(any(target == "operator" or op in {"approve", "approve_next", "confirm", "commit"} for target, op in calls))
+                current = executor.runs["run"]
+                self.assertEqual(len(current["learned_history"]), 1)
+                previous = current["learned_history"][0]
+                self.assertNotEqual(previous["approval"]["plan_digest"], current["digest"])
+                self.assertEqual(previous["approval"]["task_grant"], current["approval"]["task_grant"])
+                self.assertEqual(current["task_grant"], value["task_grant"])
+                self.assertEqual(closed, [True])
+                return
             expected = "CANCELLED_BY_OPERATOR" if continuation and (next_choice == "CANCEL" or precontact_cancel) else "PRECOMMIT_SAFETY"
             self.assertEqual(result["code"], expected if mode == "live" else "PLANNED",
                              {k: v for k, v in result.items() if k != "data"})
@@ -1856,6 +1905,126 @@ class FinitePlanTest(unittest.TestCase):
         obs["source_timestamps_s"] = dict.fromkeys(("state", "camera1", "camera2"), now)
         inference = FinitePolicyInference(lambda _: [ACTION[:]], CHECKPOINT, source_clock=lambda: now)
         return compile_program(source(), inference.propose(obs, **OPTIONS))
+
+    def test_task_grant_rechecks_native_source_bytes(self):
+        from tools.data_factory.rollout.task_authority import check_sources
+        from tools.data_factory.training_receipts import tree_digest
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            policy = root / "checkpoint" / "pretrained_model"
+            policy.mkdir(parents=True)
+            processor = policy / "processor.json"
+            processor.write_text('{"scale": 1}')
+            temporal = root / "temporal.json"
+            temporal.write_text('{"bound": true}')
+            p = proposal()
+            p["checkpoint"] = {**CHECKPOINT, "runtime": "lerobot-0.6.1-native", "tree_digest": tree_digest(policy)}
+            p["runtime_inputs"] = {"checkpoint": str(policy.parent), "gripper_temporal_policy": str(temporal),
+                                   "clock_binding": {"bound": True}}
+            plan = {"learned_proposal": p}
+            check_sources(plan)
+            processor.write_text('{"scale": 2}')
+            with self.assertRaisesRegex(ContractError, "LEARNED_CHECKPOINT_CHANGED"):
+                check_sources(plan)
+            processor.write_text('{"scale": 1}')
+            temporal.write_text('{"bound": false}')
+            with self.assertRaisesRegex(ContractError, "TASK_SOURCE_CHANGED"):
+                check_sources(plan)
+
+    def test_task_grant_policy_reserve_handoff_and_monotonic_deadline(self):
+        for rollback in (False, True):
+            with self.subTest(rollback=rollback):
+                job, executor, transport, _, _, now, calls = self.make_job()
+                grant = task_grant(source(), SCENE, job._program["learned_proposal"], max_outputs=10)
+                self.assertTrue(job.admit_task(grant)["ok"])
+                self.assertTrue(job.start()["ok"])
+                now[0] = 10.1
+                self.assertEqual(job.poll()["state"], "LEARNED_CHUNK_COMPLETE")
+                executor.runs["run"]["execution"].update(lease_deadline=200., wait_deadline=200.)
+                if rollback:
+                    executor.source_clock = lambda: 10.1
+                    now[0] = 100.
+                    result = job.poll()
+                    self.assertEqual(result["code"], "TASK_DEADLINE_EXHAUSTED")
+                else:
+                    now[0] = 85.
+                    result = job.task_boundary()
+                    self.assertEqual(result["task_handoff"]["termination_reason"], "TASK_POLICY_BUDGET_EXHAUSTED")
+                    self.assertEqual(result["task_handoff"]["deadline_s"], 100.)
+                self.assertFalse(result["ok"])
+                self.assertEqual(len(transport.sent), 1)
+                self.assertNotIn(("recorder", "commit"), calls)
+
+    def test_task_grant_rejects_illegal_expired_and_revoked_without_goals(self):
+        for change, expected in (({"revoked": True}, "TASK_GRANT_REVOKED"),
+                                 ({"deadline_s": 10.}, "TASK_DEADLINE_EXHAUSTED"),
+                                 ({"scope": {}}, "TASK_GRANT_SCOPE"),
+                                 ({"deadline_s": 24.}, "TASK_POLICY_BUDGET_EXHAUSTED")):
+            with self.subTest(change=change):
+                job, executor, transport, _, _, _, calls = self.make_job()
+                grant = task_grant(source(), SCENE, job._program["learned_proposal"], **change)
+                result = job.admit_task(grant)
+                self.assertEqual(result["code"], expected, result)
+                self.assertEqual(transport.sent, [])
+                self.assertNotIn(("recorder", "begin"), calls)
+
+    def test_task_grant_deadline_and_revocation_fence_active_goal(self):
+        for revoked in (True, False):
+            with self.subTest(revoked=revoked):
+                job, executor, transport, _, _, now, calls = self.make_job()
+                grant = task_grant(source(), SCENE, job._program["learned_proposal"])
+                self.assertTrue(job.admit_task(grant)["ok"])
+                self.assertTrue(job.start()["ok"])
+                deadline = executor.runs["run"]["task_deadline"]
+                self.assertEqual(len(transport.sent), 1)
+                if revoked:
+                    transport.poll_active = lambda: None
+                    response = executor.process({"schema_version": "fr5.pickup_executor.command.v4", "op_id": "revoke",
+                        "op": "revoke_task", "payload": {"run_id": "run", "grant_digest": grant["grant_digest"]}})
+                    self.assertTrue(response["ok"], response)
+                else:
+                    now[0] = 100.
+                result = job.poll()
+                self.assertFalse(result["ok"], result)
+                self.assertEqual(result["code"], "TASK_GRANT_REVOKED" if revoked else "TASK_DEADLINE_EXHAUSTED")
+                self.assertEqual(executor.runs["run"]["task_deadline"], deadline)
+                self.assertFalse(transport.owns_active_goal)
+                self.assertGreaterEqual(transport.cancel_count, 1)
+                self.assertEqual(len(transport.sent), 1)
+                self.assertNotIn(("recorder", "commit"), calls)
+
+    def test_task_grant_same_owner_rejects_changed_stale_and_unresolved_next(self):
+        for failure in ("scope", "stale", "active", "late", "reserve"):
+            with self.subTest(failure=failure):
+                job, executor, transport, _, _, now, calls = self.make_job()
+                grant = task_grant(source(), SCENE, job._program["learned_proposal"])
+                self.assertTrue(job.admit_task(grant)["ok"])
+                self.assertTrue(job.start()["ok"])
+                now[0] = 10.1
+                self.assertEqual(job.poll()["state"], "LEARNED_CHUNK_COMPLETE")
+                candidate = self.next_raw_program(job, now[0])
+                if failure == "scope":
+                    candidate["learned_proposal"]["instruction"] = "different task"
+                    candidate = compile_program(source(), redigest(candidate["learned_proposal"]))
+                elif failure == "stale":
+                    now[0] = 10.5
+                elif failure == "active":
+                    transport.active = True
+                elif failure == "reserve":
+                    now[0] = 86.
+                    # Keep the unrelated heartbeat lease current to isolate task budget.
+                    executor.runs["run"]["execution"].update(lease_deadline=99., wait_deadline=99.)
+                else:
+                    original = executor._compile_plan
+                    def late(*args, **kwargs):
+                        result = original(*args, **kwargs)
+                        now[0] = 100.
+                        return result
+                    executor._compile_plan = late
+                rejected = job.prepare_next_learned(candidate)
+                self.assertFalse(rejected["ok"], rejected)
+                self.assertEqual(len(transport.sent), 1)
+                self.assertNotIn(("recorder", "commit"), calls)
 
     def test_next_chunk_keeps_one_owner_and_exact_approved_history(self):
         from tools.data_factory.rollout.finite_plan import validate_execution_history

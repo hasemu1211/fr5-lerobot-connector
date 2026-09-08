@@ -254,6 +254,12 @@ def _run_payload(value):
         if not isinstance(value["motion_preset"]["digest"], str) or not DIGEST.fullmatch(value["motion_preset"]["digest"]):
             raise ContractError("MOTION_PRESET_BINDING")
     _learned_options(value)
+    if "task_grant" in value:
+        from tools.data_factory.rollout.task_authority import validate_grant
+        if value["mode"] != "live" or _learned_options(value) is None:
+            raise ContractError("TASK_GRANT_SCOPE")
+        validate_grant(value["task_grant"])
+        keys.add("task_grant")
     keys |= set(value) & LEARNED_RUN_KEYS
     supplied_recycle = set(value) & RECYCLE_COORD_KEYS
     supplied_recycle_yaw = RECYCLE_YAW_KEY in value
@@ -291,7 +297,7 @@ def _run_payload(value):
         raise ContractError("RUN_JOB")
     for key in keys - {"job", DESTINATION_KEY} - RECYCLE_COORD_KEYS - {
         RECYCLE_YAW_KEY, TRAJECTORY_SAMPLING_SEED_KEY,
-        TRAJECTORY_DESIGN_KEY, "motion_preset",
+        TRAJECTORY_DESIGN_KEY, "motion_preset", "task_grant",
     }:
         _text(value[key], "RUN_PAYLOAD")
     if supplied_variant and (
@@ -4173,7 +4179,9 @@ def run_live(payload, cancel, publish, *, resolver=resolve_inputs, executor_fact
             f"clearance={summary['clearance']} speed={summary['speed']}{recycle_text}"
         )
         decision_source = "TTY"
-        if decision_provider is not None:
+        if payload.get("task_grant") is not None:
+            decision_source = "SCOPED_TASK_GRANT"
+        elif decision_provider is not None:
             decision = _button_plan_decision(
                 decision_provider,
                 run_id=payload["run_id"], plan_digest=planned["plan_digest"],
@@ -4257,7 +4265,7 @@ def run_live(payload, cancel, publish, *, resolver=resolve_inputs, executor_fact
             if campaign_authorization is not None
             else decision_source if bound_runtime else "HUMAN"
         )
-        approved = job.approve(_approval(
+        approved = job.admit_task(payload["task_grant"]) if payload.get("task_grant") is not None else job.approve(_approval(
             payload["run_id"], planned["plan_digest"], operator_id,
             approval_scope, source=approval_source,
         ))
@@ -4652,6 +4660,37 @@ def run_live(payload, cancel, publish, *, resolver=resolve_inputs, executor_fact
                     **(runtime_projection if bound_runtime else {}),
                     "camera_semantic_authority": False, "training_authorized": False,
                 })
+            if result["state"] == "LEARNED_CHUNK_COMPLETE" and payload.get("task_grant") is not None:
+                boundary = job.task_boundary()
+                if not boundary["ok"]:
+                    return _response(ok=False, code=boundary["code"], state=boundary["state"],
+                        run_id=payload["run_id"], plan_digest=job.plan_digest,
+                        data={**learned_run_diagnostic(boundary, payload=payload),
+                              "task_handoff": boundary.get("task_handoff")})
+                def observe_task_boundary():
+                    captured = job.observe_learned_boundary(inputs["camera_topics"])
+                    if not captured["ok"]:
+                        raise ContractError(captured["code"])
+                    return captured["observation"]
+                try:
+                    next_program = _infer_native_program(native, program["source_program"], executor, cancel,
+                        urdf=payload["urdf"], instruction=program["learned_proposal"]["instruction"],
+                        period_s=1 / inputs["fps"], observation=observe_task_boundary, runtime_inputs=inputs)
+                    acted = job.prepare_next_learned(next_program)
+                    if acted["ok"]:
+                        acted = job.admit_task()
+                    if acted["ok"]:
+                        acted = job.start_next_learned()
+                    if not acted["ok"]:
+                        raise ContractError(acted["code"])
+                    planned, program = acted, next_program
+                    summary = _operator_summary(planned)
+                except Exception as exc:
+                    cancelled = job.cancel()
+                    return _response(ok=False, code=exc.code if isinstance(exc, ContractError) else "LEARNED_NEXT_PREPARATION_FAILED",
+                        state=cancelled["state"], run_id=payload["run_id"], plan_digest=job.plan_digest,
+                        data=learned_run_diagnostic(cancelled, payload=payload))
+                continue
             if result["state"] in {"GRASP_VERDICT", "SEMANTIC_VERDICT", "LEARNED_CHUNK_COMPLETE"}:
                 if pending == "LEARNED_NEXT_PLAN":
                     try:
