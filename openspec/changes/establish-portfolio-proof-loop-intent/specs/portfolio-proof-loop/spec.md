@@ -301,6 +301,12 @@ Portfolio 표현 책임자는 핵심 기술을 새로 소개하거나 설명의 
 - **THEN** 해당 설명과 시각적 근거를 함께 갱신하고 과거 비교의 적용 범위를 보존하며, 같은 수치나 서사를 매체마다 별도로 재작성하도록 강제하지 않는다
 - **AND** 미검증 미래 결과를 현재 성과로 선반영하지 않는다
 
+#### Scenario: Editorial restructuring overlaps newer main documentation
+
+- **WHEN** 오래된 worktree의 문서·포트폴리오를 재구성하는 동안 main에 기술 계약이나 소비 경로가 추가된다
+- **THEN** 공통 기준점 이후 main의 변경을 영향받는 모든 문서와 OpenSpec 계약에 대조하고, 새 계약·근거·명령을 새 정보구조 안에 보존한다
+- **AND** 본문의 반복 설명은 줄이되 기술적 의미를 삭제하지 않으며, 시작 시 검사·각 실행 검사·연속 감시처럼 적용 시점이 다른 보장은 실제 호출 범위로 표현한다
+
 ### Requirement: Work and intent evolve only on evidence
 각 lane의 작업은 다음 lane unblock, 중요한 불확실성 또는 실패 원인 감소, 재현 가능한 evidence 강화, 외부에서 확인 가능한 portfolio proof 생성 중 적어도 하나를 충족해야 한다(SHALL). OpenSpec revision은 새 evidence가 지속 가능한 행동·authority·acceptance·handoff 의미를 흔들 때만 제안해야 한다(SHALL).
 

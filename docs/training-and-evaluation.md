@@ -1,6 +1,15 @@
-# 학습과 평가
+# Policy Learning
 
-[학습 환경 준비](getting-started.md) · [입력 데이터 품질](dataset-quality.md)
+실물 시연으로 SmolVLA를 미세 조정하고, 데이터·학습 설정의 변경을 같은 평가 조건에서 비교한다.
+
+## Observation → Action Chunk
+
+![두 RGB 영상·작업 지시·7D 로봇 상태를 SmolVLA의 맥락 특징으로 변환하고, Action Expert가 50 × 7 동작 묶음을 생성한다.](portfolio/policy-model.drawio.svg)
+
+[NativeSmolVLA의 입력·동작 복원 구현](../tools/data_factory/learned_action_adapter.py)
+
+<details>
+<summary>지원 profile · 카메라와 action 계약</summary>
 
 ## 제공 profile
 
@@ -13,6 +22,25 @@
 | `vqbet-up`, `vqbet-side`, `vqbet-wrist` | 선택한 한 view | 7D scratch 학습과 resume |
 
 FR5 action은 절대 joint-position과 gripper를 포함하는 7D 계약이다. profile은 camera key와 action/state 차원을 맞추지만, 특정 작업의 성공이나 일반화를 보장하지 않는다. task 문자열을 지원한다고 해서 새로운 작업이 자동으로 학습되는 것도 아니다.
+
+</details>
+
+## Split & Normalization
+
+![선택한 시연을 TRAIN과 평가로 분리하고 TRAIN 통계로 학습을 정규화한다. 평가와 출력 복원은 checkpoint에 저장한 같은 통계를 사용한다.](portfolio/normalization.drawio.svg)
+
+그림은 보존된 비교 실험의 분할이다. 데이터 선택을 바꿔도 평가 대상을 유지하고, 평가 시연이 정규화 기준에 섞이지 않도록 실제 trainer의 분할·통계를 검증한다.
+
+| 바꾸는 것 | 보존하는 비교 기준 | 확인하는 결과 |
+| --- | --- | --- |
+| 학습할 데이터의 선택·통합 | 원본 시연 대응과 평가 cohort | 동일 관측에서의 동작 오차 |
+| 학습량·batch·초기 가중치 | 모델 계보·실제 학습 설정 | 계산 비용과 정책 출력 |
+| 학습된 정책 | 작업·실행 조건과 판정 범위 | 실물 실행 결과 |
+
+[Curator](dataset-quality.md#selection--학습-데이터-구성)가 선택한 데이터는 Training Entrypoint의 입력 검증을 거친다. 각 실행의 split·receipt·checkpoint와 평가 보고서가 원본 대응을 이어간다.
+
+<details>
+<summary>학습 입력·승인 · 실행 명령 · 통계 보존</summary>
 
 ## 학습 전 조건
 
@@ -84,9 +112,15 @@ FR5_REPO_ID="$REPO_ID" direnv exec . scripts/train_policy.sh \
 
 실행 시 `fr5_training_split.json`과 `fr5_training_receipt.json`이 output에 연결된다. split v3는 설치된 LeRobot 0.6.1의 선택 episode 기반 분할과 실제 train/held-out index를 기록하며, 별도의 factor 기반 ID/OOD 보장을 뜻하지 않는다. receipt의 `ADMITTED_NOT_TRAINED`는 입력 허가이지 학습 성공이 아니다. Resume은 현재 바이트·승인·선택·feature 연결을 다시 확인하며, 예전 count-only split만 가진 checkpoint는 실행 권한으로 인정하지 않는다.
 
-SmolVLA의 기존 launch 명령에 `--warm-start-from "$PARENT_CHECKPOINT"`를 dataset 이름 앞에 추가하면 검증된 로컬 checkpoint 가중치에서 새 학습을 시작한다. 새 output과 현재 유효한 승인·위임이 필요하며, 부모의 dataset·선택·TRAIN/held-out 분할·feature·TRAIN 정규화가 자식과 같아야 한다. 위임 예산 변경으로 inventory와 split digest가 달라도 나머지 partition 내용은 정확히 비교한다. 부모 checkpoint 전체와 receipt identity 및 optimizer·scheduler·RNG·sample stream·step의 reset 의미가 자식 receipt의 `initialization`에 연결된다. 부모 output 안에 자식을 쓰거나 원본 checkpoint를 수정하지 않는다. 입력이 바뀌면 발행 전 및 native dataset 구성 시 다시 거부한다.
+### Warm-start · Resume · Continuation
 
-Warm-start는 가중치를 이어받지만 optimizer 상태를 이어받는 resume은 아니다. `--resume-from`은 기존 저장 horizon 안에서 같은 run의 optimizer·scheduler·RNG를 복원하는 별도 단독 모드다. 새 output에서 horizon을 늘리거나 batch를 바꾸려면 아래 continuation 모드를 사용한다. 기존 resume이나 짧은 warm-start 처리량 실험을 누적 sample/RNG 연속성의 증거로 표시하지 않는다.
+| 모드 | 이어받는 상태 | 실행 범위 |
+| --- | --- | --- |
+| `--warm-start-from` | checkpoint 가중치 | 새 output, optimizer·scheduler·RNG·sample stream·step 초기화 |
+| `--resume-from` | optimizer·scheduler·RNG를 포함한 기존 run | 저장된 horizon 안에서 재개 |
+| `--continue-from` | 기존 학습 상태와 누적 sample 이력 | 새 output에서 horizon·batch 변경 |
+
+각 모드는 단독으로 사용한다. SmolVLA warm-start 인자는 dataset 이름 앞에 둔다. 새 output과 현재 유효한 승인·위임을 검증하며, 부모의 dataset·선택·TRAIN/held-out·feature·TRAIN 정규화가 자식과 같아야 한다. 위임 예산 변경으로 inventory·split digest가 달라도 나머지 partition 내용을 정확히 비교한다. 부모 checkpoint 전체·receipt identity와 초기화 의미는 자식 receipt의 `initialization`에 남는다. 부모 output 내부의 자식 생성과 원본 수정을 거부하고, 입력은 발행 전과 native dataset 구성 시 다시 검사한다. 짧은 warm-start 처리량 실험은 누적 sample/RNG 연속성의 증거로 사용하지 않는다.
 
 ```bash
 scripts/train_policy.sh --continue-from "$PARENT_CHECKPOINT" \
@@ -97,7 +131,9 @@ scripts/train_policy.sh --continue-from "$PARENT_CHECKPOINT" \
 
 `--steps`는 추가 update 수가 아닌 **절대 종료 step**이다. `preserve`는 부모의 원래 native scheduler horizon과 이후 LR을 보존한다. `hold`는 부모 step까지의 LR을 유지하고 그 시점 LR로 이후 구간을 고정한다. 이는 명시적인 미래 schedule 변경이며 rewarm이나 optimizer reset이 아니다. 이미 hold한 자식의 `preserve`도 기존 hold를 계승한다. 그 밖의 recipe·dataset·분할·TRAIN 정규화는 부모에게서 상속하며 현재 승인과 새 output을 기존 admission 경계에서 검증한다. dry-run은 학습 output을 만들지 않는다.
 
-지원 범위는 native SmolVLA, single process, workers0, deterministic transforms, no AMP/compile/streaming/weighted sampling이다. native optimizer·scheduler·RNG 파일과 함께 `training_state/fr5_continuation_state.json`에 optimizer가 실제 소비한 epoch·offset·누적 sample 수, 원래 horizon·hold 경계, Gaussian RNG cache를 저장한다. 두 번째 resume도 최신 batch와 절대 step의 곱으로 과거 노출량을 다시 계산하지 않는다. 이전 legacy resume으로 누적 이력을 잃은 부모는 거부하며, legacy 파일이 누락한 과거 Gaussian cache는 복구했다고 주장하지 않는다. 평가 cadence를 바꾸면 이후 RNG 소비도 달라지므로 동등성 비교에서는 cadence를 고정한다. CPU-small native 반복 resume과 admission 검증은 완료했으며 실제 policy의 GPU continuation 및 독립 reload 검증은 root 실행 단계에 남아 있다.
+지원 범위는 native SmolVLA, single process, workers0, deterministic transforms, no AMP/compile/streaming/weighted sampling이다. native optimizer·scheduler·RNG 파일과 함께 `training_state/fr5_continuation_state.json`에 optimizer가 실제 소비한 epoch·offset·누적 sample 수, 원래 horizon·hold 경계, Gaussian RNG cache를 저장한다. 두 번째 resume도 최신 batch와 절대 step의 곱으로 과거 노출량을 다시 계산하지 않는다. 이전 legacy resume으로 누적 이력을 잃은 부모는 거부하며, legacy 파일이 누락한 과거 Gaussian cache는 복구했다고 주장하지 않는다. 평가 cadence를 바꾸면 이후 RNG 소비도 달라지므로 동등성 비교에서는 cadence를 고정한다. CPU-small native 반복 resume과 admission 검증은 완료했으며 실제 정책의 GPU continuation·독립 reload는 추가 검증 대상이다.
+
+### TRAIN 정규화와 checkpoint
 
 wrapper는 공식 LeRobot trainer의 parser·optimizer·checkpoint 저장을 사용한다. 설치된 0.6.1은 episode를 나누어도 전역 `meta/stats.json`을 유지하므로, connector는 같은 process의 dataset factory에 좁은 adapter를 적용한다. 실제 train/eval index가 승인 split과 같은지 검사한 뒤 **train episode의 기존 metadata 통계만** 합산해 policy와 processor에 전달한다. dataset이나 설치 패키지를 수정하지 않는다. state/action은 count로 가중한 mean·variance와 min/max를 사용하고, 영상 통계는 기존 `dataset.use_imagenet_stats` 설정에 따라 ImageNet 상수 또는 train episode 통계를 사용한다. 학습용 frame/video 재검사는 이 합산의 일부가 아니다.
 
@@ -105,21 +141,20 @@ launch receipt v2는 normalization algorithm·train episode·실제 통계를 �
 
 resume·offline 평가·Rollout은 같은 `validate_checkpoint` 경계를 사용한다. 저장 tensor가 같아도 processor가 `observation.state`를 제외하거나 feature type·7차원 shape·정규화 mode를 바꾸거나 inline 통계로 덮어쓰면 거부한다. preprocessor의 state/action과 postprocessor의 action을 검사하며, SmolVLA·ACT는 `MEAN_STD`, VQ-BeT는 `MIN_MAX`를 요구한다. Rollout의 실행별 processor 허용 목록과 동작 제한은 Rollout consumer가 담당한다.
 
-임의의 epoch 수, 현재 mutable episode count, 검증되지 않은 metric을 public capability로 기록하지 않는다.
+</details>
 
-## 작은 GPU에서 첫 실행의 의미
+## 정책 비교와 실물 평가
 
-첫 실행은 유효한 native 승인·위임과 단일 GPU ownership 아래 batch 1, data-loader worker 0, 기존 SmolVLA expert-only 설정, local cached weights와 새 output으로 시작한다. 현재 설치 조합에서는 `policy.use_amp=false`와 Accelerator mixed precision `no`를 사용한다. 이는 native BF16/FP32 parameter와 명시적인 dtype 변환을 유지하며 전부 FP32로 학습한다는 뜻이 아니다. AMP fallback의 FP16 GradScaler는 이 모델의 BF16 gradient를 unscale하지 못하므로 AMP flag만으로 precision 적합성을 판단하지 않는다. 실제 finite gradient·parameter 변화·메모리와 독립 reload를 확인한다. download를 금지할 실행은 process에 `HF_HUB_OFFLINE=1`을 지정하고, cache 누락 시 설치나 download로 자동 전환하지 않는다.
+| 평가 | 입력과 출력 | 해석 |
+| --- | --- | --- |
+| Offline loss | 저장한 관측·시연 동작 → flow-matching loss | 해당 정규화 안에서의 학습 목표 오차 |
+| Offline action comparison | 같은 관측·잡음 → 복원한 동작의 MAE·RMSE | 관절·그리퍼별 예측 차이 |
+| Rollout | 현재 관측 → 유한 정책 실행·원본 기록 | 실행 범위의 결과와 사람의 작업 판정 |
 
-재현할 native 실행에는 process 환경 `ACCELERATE_MIXED_PRECISION=no`와 wrapper 인자 `--policy.use_amp=false`를 함께 고정한다. 설치된 SmolVLA config에 `dtype` 속성이 없고 AMP가 꺼져 있을 때 trainer가 `Accelerator(mixed_precision=None)`을 호출하므로 이 환경값이 적용된다. AMP를 켠 채 환경값만 바꾸면 trainer의 명시적인 FP16 설정을 덮어쓰지 못한다. `--policy.dtype` 같은 지원되지 않는 옵션을 만들거나 설치 패키지를 수정하지 않는다.
+MAE는 평균적인 차이, RMSE는 큰 오차에 민감하다. 평균과 일부 구간의 변화가 다를 수 있어 축·시연별 결과를 함께 본다. 반복 사용한 개발용 평가와 독립 실물 시험도 구분한다. 확인된 비교 그래프와 원본 보고서는 [포트폴리오의 Policy Learning](portfolio/README.md)에서 탐색할 수 있다.
 
-짧은 probe에서는 마지막 checkpoint 하나, bounded offline reload 평가, wall time·peak GPU memory·초당 학습 sample·checkpoint bytes를 함께 보존한다. 설치된 LeRobot의 `cosine_decay_with_warmup`은 전체 학습 step이 설정된 decay보다 작으면 warmup과 decay를 비례 축소한다. SmolVLA preset의 warmup 1,000·decay 30,000으로 200-step 실행을 만들면 실제 warmup은 6 step이며 마지막 LR은 floor에 도달한다. 따라서 200-step smoke가 pipeline 증거인 이유는 warmup 안에 있기 때문이 아니라 학습 비교·행동 검증이 없기 때문이다. 같은 held-out으로 반복 선택한 결과는 validation이며 독립 test 일반화로 표시하지 않는다.
-
-`train_config.json`의 nominal scheduler 값만으로 실제 LR 경로를 판단하지 않는다. native config 검증 이후 optimizer parameter group의 LR, scheduler 초기값·전환점·종료값과 저장된 scheduler state를 연결한다. `use_policy_training_preset=true`인 새 실행은 top-level optimizer/scheduler를 policy preset으로 다시 설정하므로 LR 변경에는 `policy.optimizer_lr`를 사용하고 실제 resolved 값을 확인한다. 별도 native scheduler를 비교하려면 `use_policy_training_preset=false`와 optimizer·scheduler 모두가 필요하다. feature profile은 hyperparameter recipe를 소유하지 않는다.
-
-전체 horizon 변경은 같은 초기 step의 LR도 바꾼다. 종료까지 decay한 smoke의 resume은 처음부터 더 긴 horizon으로 실행한 것과 같은 비교군이 아니다. batch 비교도 동일 update 수에서는 sample 노출량이 다르므로 처리량 비교와 학습 효과 비교를 구분한다. 실제 accumulation이 없는 실행의 effective batch를 임의로 부풀리거나 AMP를 BF16으로 단정하지 않는다. 초기 선택·경쟁 가설·변경 조건은 [Learning 설계](../openspec/changes/learning-evaluation-loop/design.md)를 따른다.
-
-[SmolVLA 원 논문](https://huggingface.co/papers/2506.01844)은 작은 policy와 공개 robot data를 이용한 학습을 연구한다. [저자들의 현재 LeRobot 안내](https://huggingface.co/docs/lerobot/smolvla)는 작은 batch부터 시도하고 작업 변형마다 충분한 시연을 확보하도록 설명한다. 안내의 다른 robot·dataset 학습량이나 성공률은 FR5의 episode 수·학습 budget·일반화 보장이 아니다. 성공 data의 조건별 coverage와 held-out 오차도 실패 data와 함께 다음 수집의 근거로 사용한다.
+<details>
+<summary>오프라인 평가 명령 · 보고서 범위 · 지표 비교</summary>
 
 ## 오프라인 평가
 
@@ -144,6 +179,8 @@ report v4의 `episode_metrics`는 승인된 모든 held-out episode의 평가 sa
 
 선별 전략마다 train subset이 달라지면 state/action 정규화 통계도 달라진다. 같은 held-out episode를 평가해도 normalized flow-matching loss의 크기를 그대로 비교해 어느 데이터가 더 유용하다고 결론내릴 수 없다. 각 loss는 해당 정규화 안의 최적화 추이를 설명한다. 전략 간 개선은 각 checkpoint의 저장 postprocessor를 거친 비교 가능한 출력이나 같은 조건의 실물 평가로 확인해야 한다. 점수의 척도를 맞추려고 held-out 데이터까지 통계 계산에 포함하지 않는다.
 
+### 물리 단위 Action Chunk 비교
+
 같은 명령의 checkpoint·dataset 뒤에 `--metric sampled-actions --seed 1000`을 추가하면 저장된 native policy와 postprocessor로 물리 단위 action chunk를 측정한다. 이 모드는 batch 1, worker 0, `--max-batches 0`, AMP 비활성만 지원한다. 추론 전에 승인된 각 held-out episode에서 `floor((길이-1)*q)`, q=0.1/0.5/0.9 frame을 고정하고 짧은 episode의 중복 frame은 제거한다. 미래 action은 정답에만 사용하며, 각 관측마다 policy·processor를 reset하고 같은 CPU float32 noise를 사용한다. 다른 seed 비교에는 새 report 경로를 사용하며 좋은 seed만 골라 비교하지 않는다.
 
 물리 출력 report는 별도 metric `smolvla_sampled_physical_action_error`의 schema 1이다. 관측 tensor hash·좌표, noise hash·값, 예측·기록 action 및 padding, 관절 6축 rad와 gripper m의 개별 MAE/RMSE, episode별·전체 집계를 보존한다. padded target step은 제외하고 비유한 출력은 거부한다. `sampling_complete=true`는 고정 표본을 모두 평가했다는 뜻이며 `evaluation_complete=false`는 전체 held-out frame 평가와 구분한다. 시간 비율은 semantic phase가 아니며, 물리 단위만 같아도 dataset·관측·noise·precision이 다르면 공정한 비교가 되지 않는다. 단위가 다른 축을 한 scalar로 합치거나 이 오차를 실물 성공률로 해석하지 않는다.
@@ -154,13 +191,32 @@ direnv exec . scripts/evaluate_smolvla.sh --check-env
 
 환경 검사 통과는 평가 실행 증거가 아니다. 평가 결과에는 checkpoint·dataset·split identity가 함께 있어야 하며, offline loss가 낮아도 실물 작업 성공이나 semantic authority를 부여하지 않는다. 문서에 경로·episode 수·측정값을 복사해 현재 상태로 만들지 않는다.
 
+</details>
+
 ## 실물 평가 경계
 
 [NativeSmolVLA](../tools/data_factory/learned_action_adapter.py)는 저장된 checkpoint와 전·후처리를 불러와 절대 관절 위치의 동작 묶음을 예측한다. [기존 실행 경로](../tools/data_factory/run_job.py)는 첫 추론의 준비 비용이 새 관측의 유효 시간을 소모하지 않도록 관측 전에 warmup을 수행한다. 이 호출의 출력은 폐기하고 난수 상태를 복원한다.
 
 [Finite plan](../tools/data_factory/rollout/finite_plan.py)은 관측 시각·관절 단위·위치·속도와 실행 시간을 확인해 같은 Motion Executor와 OneJob 기록기로 전달한다. 동작 묶음의 실행 완료는 작업 성공 판정과 구분한다. 현재 소프트웨어 연결과 작업 전체의 후속 실행 범위는 [시스템 아키텍처](architecture.md)에 설명한다. 실물 정책 성공은 같은 작업·조건에서 별도로 평가하며, checkpoint를 실물 `best`로 지정한 결과는 없다.
 
-학습 결과, offline loss, technical validator PASS, human semantic verdict와 training approval은 각각 다른 증거다. 어느 하나를 다른 하나의 대리 지표로 사용하지 않는다.
+<details>
+<summary>제한된 GPU에서의 실행 설정 · 재현 조건</summary>
+
+## 작은 GPU에서 첫 실행의 의미
+
+첫 실행은 유효한 native 승인·위임과 단일 GPU ownership 아래 batch 1, data-loader worker 0, 기존 SmolVLA expert-only 설정, local cached weights와 새 output으로 시작한다. 현재 설치 조합에서는 `policy.use_amp=false`와 Accelerator mixed precision `no`를 사용한다. 이는 native BF16/FP32 parameter와 명시적인 dtype 변환을 유지하며 전부 FP32로 학습한다는 뜻이 아니다. AMP fallback의 FP16 GradScaler는 이 모델의 BF16 gradient를 unscale하지 못하므로 AMP flag만으로 precision 적합성을 판단하지 않는다. 실제 finite gradient·parameter 변화·메모리와 독립 reload를 확인한다. download를 금지할 실행은 process에 `HF_HUB_OFFLINE=1`을 지정하고, cache 누락 시 설치나 download로 자동 전환하지 않는다.
+
+재현할 native 실행에는 process 환경 `ACCELERATE_MIXED_PRECISION=no`와 wrapper 인자 `--policy.use_amp=false`를 함께 고정한다. 설치된 SmolVLA config에 `dtype` 속성이 없고 AMP가 꺼져 있을 때 trainer가 `Accelerator(mixed_precision=None)`을 호출하므로 이 환경값이 적용된다. AMP를 켠 채 환경값만 바꾸면 trainer의 명시적인 FP16 설정을 덮어쓰지 못한다. `--policy.dtype` 같은 지원되지 않는 옵션을 만들거나 설치 패키지를 수정하지 않는다.
+
+짧은 probe에서는 마지막 checkpoint 하나, bounded offline reload 평가, wall time·peak GPU memory·초당 학습 sample·checkpoint bytes를 함께 보존한다. 설치된 LeRobot의 `cosine_decay_with_warmup`은 전체 학습 step이 설정된 decay보다 작으면 warmup과 decay를 비례 축소한다. SmolVLA preset의 warmup 1,000·decay 30,000으로 200-step 실행을 만들면 실제 warmup은 6 step이며 마지막 LR은 floor에 도달한다. 따라서 200-step smoke가 pipeline 증거인 이유는 warmup 안에 있기 때문이 아니라 학습 비교·행동 검증이 없기 때문이다. 같은 held-out으로 반복 선택한 결과는 validation이며 독립 test 일반화로 표시하지 않는다.
+
+`train_config.json`의 nominal scheduler 값만으로 실제 LR 경로를 판단하지 않는다. native config 검증 이후 optimizer parameter group의 LR, scheduler 초기값·전환점·종료값과 저장된 scheduler state를 연결한다. `use_policy_training_preset=true`인 새 실행은 top-level optimizer/scheduler를 policy preset으로 다시 설정하므로 LR 변경에는 `policy.optimizer_lr`를 사용하고 실제 resolved 값을 확인한다. 별도 native scheduler를 비교하려면 `use_policy_training_preset=false`와 optimizer·scheduler 모두가 필요하다. feature profile은 hyperparameter recipe를 소유하지 않는다.
+
+전체 horizon 변경은 같은 초기 step의 LR도 바꾼다. 종료까지 decay한 smoke의 resume은 처음부터 더 긴 horizon으로 실행한 것과 같은 비교군이 아니다. batch 비교도 동일 update 수에서는 sample 노출량이 다르므로 처리량 비교와 학습 효과 비교를 구분한다. 실제 accumulation이 없는 실행의 effective batch를 임의로 부풀리거나 AMP를 BF16으로 단정하지 않는다. 초기 선택·경쟁 가설·변경 조건은 [Learning 설계](../openspec/changes/learning-evaluation-loop/design.md)를 따른다.
+
+[SmolVLA 원 논문](https://huggingface.co/papers/2506.01844)은 작은 policy와 공개 robot data를 이용한 학습을 연구한다. [저자들의 현재 LeRobot 안내](https://huggingface.co/docs/lerobot/smolvla)는 작은 batch부터 시도하고 작업 변형마다 충분한 시연을 확보하도록 설명한다. 안내의 다른 robot·dataset 학습량이나 성공률은 FR5의 episode 수·학습 budget·일반화 보장이 아니다. 성공 data의 조건별 coverage와 held-out 오차도 실패 data와 함께 다음 수집의 근거로 사용한다.
+
+</details>
 
 ## 근거와 다음 소비자
 

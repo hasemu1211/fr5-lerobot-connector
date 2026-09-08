@@ -487,4 +487,17 @@ __all__ = [&quot;check_evaluation_cohort&quot;, &quot;export_training_request&qu
       32
     ]
   }
-]</pre><a href="training-input.html?view=selection#fr5_training_receipt">전체 학습 입력의 기존 발췌 ↗</a></section></main><script src="../source-return.js"></script></body></html>
+]</pre><a href="training-input.html?view=selection#fr5_training_receipt">전체 학습 입력의 기존 발췌 ↗</a></section><section id="published-derivation"><a href="../architecture.html#implementation">← Modules &amp; Data Flow</a><h2>발행된 변환 데이터의 학습 요청</h2><p>부모 시연의 판정·원본 참조를 유지한 요청에 검증된 파생 데이터의 위치와 변환 근거를 연결한다. 기존 학습 사전검토를 통과한 요청만 발행하며 학습 승인은 별도이다.</p><p class="locator">main e4d7ed978cb5d8f082ec4f579b6d392bde604284<br>tools/data_factory/curator/workflow/selection.py · L107–120<br>sha256:59397eb15870c37e22958dac6e26e5945dc081c53847d706e7a865e2c50d83c5</p><pre> 107         if derivation is not None:
+ 108             from .derivation import published_training_evidence
+ 109             evidence = published_training_evidence(derivation)
+ 110             if any(dataset[key] != evidence[&quot;parent_dataset_identity&quot;][key] for key in (&quot;dataset_root&quot;, &quot;repo_id&quot;)):
+ 111                 raise CuratorError(&quot;SELECTION_DATASET_MISMATCH&quot;)
+ 112             derived = evidence[&quot;output&quot;]
+ 113             protected.update((Path(derived[&quot;root&quot;]), Path(derivation[&quot;run_directory&quot;])))
+ 114             if any(target.is_relative_to(path.resolve()) for path in protected):
+ 115                 raise CuratorError(&quot;SELECTION_OUTPUT_OVERLAP&quot;)
+ 116             request.update(dataset_root=derived[&quot;root&quot;], repo_id=derived[&quot;repo_id&quot;], derivation=derivation)
+ 117         # Exercise the actual read-only consumer before publication. Its drafts
+ 118         # stay in memory; this identifier is not a human approval or attribution.
+ 119         # The consumer owns byte identity, metadata, production scope and lineage.
+ 120         prepare_approvals(request, target.parent, &quot;curator-preview-only&quot;)</pre></section></main><script src="../source-return.js"></script></body></html>

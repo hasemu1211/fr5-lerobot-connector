@@ -1957,4 +1957,140 @@ __all__ = [
 1615         ):
 1616             raise ContractError(&quot;PREAPPROVAL_RESOLVED_INPUTS&quot;)
 1617         evidence[&quot;resolved_inputs&quot;] = resolved
-1618     if episode_instruction_binding is not None:</pre></section></main></body></html>
+1618     if episode_instruction_binding is not None:</pre></section><section id="scene-context"><a href="../architecture.html#contracts">← Planning–Execution Interface</a><h2>Scene State · 현재 장면과 실행 당시 원본</h2><p>Collection과 실행기는 같은 SceneStateStore의 물체 상태·위치·출처를 사용한다. 실행 전에는 원본 조건을 별도 근거로 보존해, 장면이 바뀐 뒤에도 어떤 조건에서 실행했는지 대조한다.</p><table class="foundation-table"><thead><tr><th>근거</th><th>보존하는 의미</th></tr></thead><tbody><tr><td>사람의 위치 확인</td><td>현재 장면의 물체 위치와 revision</td></tr><tr><td>수집 release proxy</td><td>적용 조건을 통과한 놓기 계보 · ROBOT_RELEASE_PROXY</td></tr><tr><td>학습 정책의 명령 묶음 완료</td><td>동작 완료 기록 · 물체 상태 UNKNOWN</td></tr></tbody></table><p>현재 구현은 근거가 있는 장면 상태의 공유이다. 별도 비전 인식기와 자동 작업 성공 판정은 포함하지 않는다.</p><h3>Snapshot과 revision 검사</h3><p class="note">main f2b4b95 · tools/data_factory/scene_state.py · L217–254<br>원본 SHA-256: e770ad4aa4fce0db37662ef0f9f779530bd0ae0af82a5322a08452f2672ed9e7</p><pre>217:     def read(self) -&gt; dict:
+218:         path = self._path()
+219:         if not path.exists():
+220:             return {&quot;schema_version&quot;: SCHEMA_V1, &quot;robot_system_id&quot;: self.robot_system_id, &quot;revision&quot;: 0, &quot;objects&quot;: {}, &quot;updated_at&quot;: &quot;1970-01-01T00:00:00Z&quot;}
+221:         if not path.is_file() or path.is_symlink():
+222:             raise ContractError(&quot;SCENE_PATH&quot;)
+223:         try:
+224:             return _validate(decode_json_strict(path.read_text(encoding=&quot;utf-8&quot;), &quot;SCENE_JSON&quot;, path), self.robot_system_id)
+225:         except (OSError, RecoveryError) as exc:
+226:             raise ContractError(&quot;SCENE_JSON&quot;, str(exc)) from exc
+227:
+228:     def snapshot(self) -&gt; dict:
+229:         scene = self.read()
+230:         return {&quot;scene_state&quot;: scene, &quot;scene_state_digest&quot;: canonical_digest(scene)}
+231:
+232:     @staticmethod
+233:     def _flock(descriptor, blocking):
+234:         if type(blocking) is not bool:
+235:             raise ContractError(&quot;SCENE_LOCK_MODE&quot;)
+236:         try:
+237:             fcntl.flock(descriptor, fcntl.LOCK_EX | (0 if blocking else fcntl.LOCK_NB))
+238:         except BlockingIOError as exc:
+239:             raise ContractError(&quot;SCENE_STATE_BUSY&quot;) from exc
+240:
+241:     @contextmanager
+242:     def locked_snapshot(self, expected_digest: str, *, blocking: bool = True):
+243:         if not isinstance(expected_digest, str) or not DIGEST.fullmatch(expected_digest):
+244:             raise ContractError(&quot;SCENE_BINDING&quot;)
+245:         lock_path = self._cell.runtime_path(&quot;scene_state.lock&quot;, create_robot=True)
+246:         descriptor = os.open(lock_path, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
+247:         try:
+248:             self._flock(descriptor, blocking)
+249:             snapshot = self.snapshot()
+250:             if snapshot[&quot;scene_state_digest&quot;] != expected_digest:
+251:                 raise ContractError(&quot;SCENE_STATE_CHANGED&quot;)
+252:             yield snapshot
+253:         finally:
+254:             os.close(descriptor)</pre><h3>놓기 근거와 물체 상태</h3><p class="note">main f2b4b95 · tools/data_factory/scene_state.py · L398–433<br>원본 SHA-256: e770ad4aa4fce0db37662ef0f9f779530bd0ae0af82a5322a08452f2672ed9e7</p><pre>398:             objects = dict(current[&quot;objects&quot;])
+399:             objects[instance_id] = {
+400:                 &quot;instance_id&quot;: instance_id,
+401:                 &quot;object_profile_id&quot;: release_slot[&quot;object_profile_id&quot;],
+402:                 &quot;state&quot;: &quot;ON_SURFACE&quot; if landed else &quot;UNKNOWN&quot;,
+403:                 &quot;pose&quot;: release_slot[&quot;pose&quot;] if landed else None,
+404:                 &quot;source&quot;: (
+405:                     &quot;ROBOT_RELEASE_PROXY&quot;
+406:                     if outcome_source == &quot;CAMPAIGN_CONTROL_PROXY&quot; and landed
+407:                     else &quot;ROBOT_RELEASE&quot; if landed else &quot;ROBOT_ACTION&quot;
+408:                 ),
+409:                 &quot;updated_by&quot;: updated_by,
+410:                 &quot;updated_at&quot;: now,
+411:             }
+412:             slots[release_slot[&quot;slot_id&quot;]] = {
+413:                 &quot;state&quot;: &quot;LANDED_FOR_NEXT_SOURCE&quot; if landed and chain else &quot;CONSUMED_PENDING_REVIEW&quot; if landed else &quot;QUARANTINED&quot;,
+414:                 &quot;role&quot;: release_slot[&quot;role&quot;],
+415:                 &quot;allowed_run_id&quot;: allowed_next_run_id if chain else evidence[&quot;run_id&quot;],
+416:                 &quot;evidence_run_id&quot;: evidence[&quot;run_id&quot;],
+417:                 &quot;evidence_plan_digest&quot;: evidence[&quot;plan_digest&quot;],
+418:                 &quot;evidence_digest&quot;: evidence_digest,
+419:                 &quot;updated_at&quot;: now,
+420:             }
+421:             scene = _validate({
+422:                 &quot;schema_version&quot;: SCHEMA_VERSION,
+423:                 &quot;robot_system_id&quot;: self.robot_system_id,
+424:                 &quot;revision&quot;: current[&quot;revision&quot;] + 1,
+425:                 &quot;objects&quot;: objects,
+426:                 &quot;slot_allocations&quot;: slots,
+427:                 &quot;updated_at&quot;: now,
+428:             }, self.robot_system_id)
+429:             write_json_atomic(self._path(create=True), scene)
+430:             return {
+431:                 &quot;scene_state&quot;: scene,
+432:                 &quot;scene_state_digest&quot;: canonical_digest(scene),
+433:                 &quot;release_evidence_digest&quot;: evidence_digest,</pre><h3>학습 구간 완료 후 물체 상태</h3><p class="note">main f2b4b95 · tools/data_factory/motion/pickup_executor.py · L1322–1341<br>원본 SHA-256: 14be8e25343563062d0f179ac9eec3d5c349f7e2b27f29017076c57d7f21a498</p><pre>1322:         if run[&quot;state&quot;] != &quot;EXECUTING&quot; or (&quot;cancel_event&quot; in run and run[&quot;cancel_event&quot;].is_set()):
+1323:             return run[&quot;state&quot;]
+1324:         execution, steps = run[&quot;execution&quot;], run[&quot;plan&quot;][&quot;steps&quot;]
+1325:         if execution[&quot;step_index&quot;] &gt;= len(steps) and &quot;learned_proposal&quot; in run[&quot;plan&quot;]:
+1326:             # Controller completion and human review do not establish a safe reset.
+1327:             try:
+1328:                 item = execution[&quot;scene_object&quot;]
+1329:                 binding = run[&quot;plan&quot;][&quot;scene_binding&quot;]
+1330:                 execution[&quot;scene_transition&quot;] = self.scene_state_store.update_object(
+1331:                     instance_id=binding[&quot;object_instance_id&quot;], object_profile_id=item[&quot;object_profile_id&quot;],
+1332:                     state=&quot;UNKNOWN&quot;, source=&quot;ROBOT_ACTION&quot;, updated_by=&quot;pickup-executor&quot;,
+1333:                     expected_revision=binding[&quot;revision&quot;],
+1334:                 )
+1335:             except Exception:
+1336:                 self._fault(run, &quot;LEARNED_SCENE_UNCERTAIN&quot;)
+1337:                 return run[&quot;state&quot;]
+1338:             run[&quot;state&quot;] = &quot;COMPLETED&quot;
+1339:             return run[&quot;state&quot;]
+1340:         if execution[&quot;step_index&quot;] &gt;= len(steps):
+1341:             try:</pre><h3>현재 위치 조회와 사람 확인</h3><p class="note">main f2b4b95 · tools/data_factory/operator/composition.py · L3709–3738<br>원본 SHA-256: 1de6d8f15b5e50a88ef17e5f0e524c9c0ccbf3558df56ebcc18fead6b479369c</p><pre>3709:     def object_position_call(selected):
+3710:         chosen = next(item for item in active_catalog()[&quot;combinations&quot;]
+3711:                       if item[&quot;combination_digest&quot;] == selected[&quot;combination_digest&quot;])
+3712:         profile = load_json_strict(_repository_path(repository, chosen[&quot;sources&quot;][&quot;object&quot;]))
+3713:         position = SceneStateStore(
+3714:             repository / &quot;outputs/data_factory/cells&quot;, initial_job[&quot;robot_system_id&quot;],
+3715:         ).object_position(
+3716:             object_profile_id=selected[&quot;object_id&quot;], dimensions_mm=profile[&quot;dimensions_mm&quot;],
+3717:         )
+3718:         # Legacy isolated tests have no physical source to inherit. Once one
+3719:         # exists, disposition cannot hide its current or blocked physical facts.
+3720:         return None if selected[&quot;data_mode&quot;] == &quot;TEST_COLLECTION&quot; and position[&quot;status&quot;] == &quot;MISSING&quot; else position
+3721:
+3722:     def object_position_declare_call(selected, pose, expected):
+3723:         current = object_position_call(selected)
+3724:         if current is None:
+3725:             return None
+3726:         if current[&quot;reason&quot;] == &quot;SCENE_OBJECT_AMBIGUOUS&quot;:
+3727:             raise ContractError(current[&quot;reason&quot;])
+3728:         if current[&quot;binding_digest&quot;] != expected[&quot;binding_digest&quot;]:
+3729:             raise ContractError(&quot;OBJECT_POSITION_CHANGED&quot;)
+3730:         robot_id = initial_job[&quot;robot_system_id&quot;]
+3731:         instance_id = current[&quot;object_instance_id&quot;] or &quot;production-object-&quot; + canonical_digest({
+3732:             &quot;robot_system_id&quot;: robot_id, &quot;object_profile_id&quot;: selected[&quot;object_id&quot;],
+3733:         }).removeprefix(&quot;sha256:&quot;)[:20]
+3734:         SceneStateStore(repository / &quot;outputs/data_factory/cells&quot;, robot_id).update_object(
+3735:             instance_id=instance_id, object_profile_id=selected[&quot;object_id&quot;],
+3736:             state=&quot;ON_SURFACE&quot;, source=&quot;HUMAN&quot;, updated_by=operator_label,
+3737:             pose=pose, expected_revision=current[&quot;scene_revision&quot;],
+3738:             expected_cell_digest=current[&quot;cell_state_digest&quot;],</pre><h3>실행 전 원본 조건 보존</h3><p class="note">main f2b4b95 · tools/data_factory/run_job.py · L1602–1618<br>원본 SHA-256: 61a0f547fea748dc7a4234a3058090701ffdf6f0405666d28dba8f4e2e98427c</p><pre>1602:     if &quot;learned_proposal&quot; in plan:
+1603:         # Retain the original resolved condition before execution can change
+1604:         # SceneStateStore. This is historical input, not current pose authority.
+1605:         resolved = {key: copy.deepcopy(validated.get(key)) for key in (
+1606:             &quot;normalized_job&quot;, &quot;input_digests&quot;, &quot;resolved_job_digest&quot;,
+1607:         )}
+1608:         if (
+1609:             not isinstance(resolved[&quot;normalized_job&quot;], Mapping)
+1610:             or not isinstance(resolved[&quot;input_digests&quot;], Mapping)
+1611:             or canonical_digest({&quot;job&quot;: resolved[&quot;normalized_job&quot;],
+1612:                                  &quot;input_digests&quot;: resolved[&quot;input_digests&quot;]})
+1613:             != resolved[&quot;resolved_job_digest&quot;]
+1614:             or plan.get(&quot;resolved_job_digest&quot;) != resolved[&quot;resolved_job_digest&quot;]
+1615:         ):
+1616:             raise ContractError(&quot;PREAPPROVAL_RESOLVED_INPUTS&quot;)
+1617:         evidence[&quot;resolved_inputs&quot;] = resolved
+1618:     if episode_instruction_binding is not None:</pre></section></main></body></html>

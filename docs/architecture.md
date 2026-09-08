@@ -10,19 +10,20 @@
 
 ### Planning–Execution Interface
 
-![상위 subgoal·context와 기존 작업 조건·유한 정책 실행·진단 출력의 연결 지점. 점선은 상위 연동 확장, 실선은 내부 실행·조건 대응·추천 소비.](portfolio/task-evidence.drawio.svg)
+![상위 subgoal·context와 기존 작업 조건·유한 정책 실행·진단 출력의 연결 지점. 현재 Scene State와 실행 당시 원본 조건을 구분한다. 점선은 상위 연동 확장, 실선은 내부 실행·추천 소비.](portfolio/task-evidence.drawio.svg)
 
 <details>
 <summary>인터페이스 계약과 현재 소비자</summary>
 
 | 계약 | 보존하는 정보 | 현재 소비자 |
 | --- | --- | --- |
+| [Scene State](../tools/data_factory/scene_state.py) | 현재 물체 위치·상태·출처·revision | Collection 계획·실행, 현재 장면의 수집 추천 |
 | [Task Binding](../tools/data_factory/task_recipe.py) | task·공간 역할·workspace·pose | Collection 계획·실행, 기록 instruction |
 | [NativeSmolVLA](../tools/data_factory/learned_action_adapter.py) | 언어 지시·RGB × 2·7D 상태 → action chunk | OneJob의 유한 정책 실행 |
 | [Execution Diagnostic](../tools/data_factory/rollout/evidence_boundary.py) | checkpoint·실행 trace·사람 판정 범위 | Curator의 원본 실행 진단과 조건 대응 |
 | [Collection Recommendation](../tools/data_factory/collection_recommendation.py) | 관측·제안·근거 참조·선택 변경 | CampaignOperator의 draft 갱신 |
 
-그림은 기존 계획의 조건 선택을 갱신하는 v1 경로이다. 현재 장면에서 새 위치·각도를 생성하는 v2 추천은 [획득 전략](data-factory.md)에서 다룬다. [소비 경로 회귀](../tests/data_factory/test_collection_recommendation.py)는 원본 실행의 조건 대응과 추천 적용을 검증한다.
+[SceneStateStore](../tools/data_factory/scene_state.py)는 현재 물체 상태·위치·출처를 공유하고, 실행 시점의 원본 조건은 별도 근거로 보존한다. 현재 장면의 v2 추천과 기존 계획을 갱신하는 v1 경로는 [획득 전략](data-factory.md)에서 다룬다. [소비 경로 회귀](../tests/data_factory/test_collection_recommendation.py)는 원본 실행의 조건 대응과 추천 적용을 검증한다.
 
 현재 입력은 Pick·Pick & Place의 작업·공간 계약이며, 실행 진단의 작업 전체 효과는 UNKNOWN으로 보존한다. 상위 planner·simulator가 이 결과를 소비하는 연동은 확장 방향이다.
 
