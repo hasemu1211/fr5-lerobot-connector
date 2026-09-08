@@ -2,19 +2,20 @@
 
 로봇 데이터의 수집부터 정책 비교까지, 실제 시연과 기술 원리로 살펴보는 포트폴리오이다. FAIRINO FR5를 구현·검증 플랫폼으로 사용한다.
 
-## 열람
+## 포트폴리오 다운로드
 
-전달받은 **`FR5-Portfolio.html` 파일 하나**를 데스크톱 Chrome에서 연다. 설치·압축 해제·서버 없이 영상 재생, 표본 선택, 정책 비교와 근거 열람을 사용할 수 있다. 외부 문헌 링크만 인터넷 연결이 필요하다.
+**[FR5-Portfolio.html 다운로드 · 38.2MB](https://github.com/hasemu1211/fr5-lerobot-connector/releases/download/portfolio-2026-09-08/FR5-Portfolio.html)**
 
-저장소에서 살펴보려면 [index.html](index.html)을 브라우저로 연다. GitHub의 HTML 소스 화면에서는 시연과 상호작용이 실행되지 않는다.
+다운로드한 파일을 데스크톱 Chrome에서 연다. 영상 재생, 표본 선택, 정책 비교와 근거 열람을 파일 하나에서 사용할 수 있다. 설치·압축 해제·서버는 필요하지 않으며 외부 문헌 링크만 인터넷을 사용한다.
 
-| 구간 | 내용 |
-| --- | --- |
-| [시스템](architecture.html) | 폐루프 목적과 모듈의 연결 |
-| [Collection Operator](collection.html) | Pick·Pick & Place 시연, 작업 조건과 기록 원리 |
-| [Recorder · Curator](data.html) | 정책 입출력, 시간 정렬과 영상 변환 |
-| [Policy Learning](learning.html) | SmolVLA 원리와 같은 조건의 정책 비교 |
-| [Acquisition Strategy](acquisition.html) | 데이터·정책 평가를 다음 수집 조건으로 연결하는 방법 |
+- **시연과 수집 원리:** Pick·Pick & Place, 작업 조건과 센서 동기화
+- **데이터와 모방학습:** 영상·상태·목표 동작, 데이터 선별과 SmolVLA
+- **시스템과 비교 결과:** 폐루프 구조, 같은 조건의 정책 비교와 원본 근거
+
+GitHub에서 바로 읽을 기술 문서는 [시스템 아키텍처](../architecture.md), [데이터셋 품질](../dataset-quality.md), [학습과 평가](../training-and-evaluation.md)에 있다.
+
+<details>
+<summary>편집과 단일 파일 생성</summary>
 
 ## 단일 파일 만들기
 
@@ -43,3 +44,5 @@ python3 docs/portfolio/export_single_file.py .agent-local/portfolio/FR5-Portfoli
 작업명은 **Pick · Pick & Place**, 모듈명은 실제 아키텍처의 **Collection Operator · Recorder · Curator · Training Review · Policy Learning**을 일관되게 사용한다. 한국어는 목적과 원리를 설명하며, 원본 코드·데이터 식별자는 보존한다.
 
 새 근거는 기존 `sources/` 연결에 반영한다. 설명용 예시, 실제 시연, 오프라인 정책 비교와 폐루프의 목표를 구분하고, 달성한 범위를 넘어 성능을 주장하지 않는다. 전달 전에는 단일 파일에서 바뀐 구간의 가독성·조작·근거 복귀를 직접 확인한다.
+
+</details>

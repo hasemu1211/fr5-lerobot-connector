@@ -2,22 +2,30 @@
 
 로봇 데이터의 수집·선별·학습·평가를 연결하는 모방학습 데이터 엔진이다. 데이터와 정책 평가에서 찾은 부족한 조건을 다음 수집에 반영해, 정책 개선을 반복해서 검증하는 것이 목표이다. FAIRINO FR5를 구현·검증 플랫폼으로 사용한다.
 
-[포트폴리오](docs/portfolio/README.md) · [시작하기](docs/getting-started.md) · [시스템 아키텍처](docs/portfolio/architecture.html)
+**[포트폴리오 다운로드 · 38.2MB](https://github.com/hasemu1211/fr5-lerobot-connector/releases/download/portfolio-2026-09-08/FR5-Portfolio.html)** · [시스템 아키텍처](docs/architecture.md)
 
-## 주요 기능
+파일 하나를 브라우저에서 열면 시연 영상·원리 설명·정책 비교를 볼 수 있다. 설치와 서버는 필요하지 않다.
 
-| 모듈 | 역할 |
+![Pick & Place 시연의 고정 카메라와 손목 카메라 관측](docs/portfolio/assets/pick-place-latest-poster.jpg)
+
+**Pick & Place 시연 · 21.1초** — 같은 동작을 작업대와 그리퍼 시점에서 기록한다.
+
+## 데이터에서 정책 비교까지
+
+![Collection Operator, Curator, Policy Learning과 다음 수집으로 돌아가는 피드백](docs/portfolio/lifecycle.drawio.svg)
+
+수집 조건에서 원본 시연, 데이터 선택과 checkpoint까지 출처를 연결한다. 같은 평가 데이터를 유지해 정책을 비교하고, 부족한 조건을 다음 수집의 가설로 만든다. 그림은 폐루프의 목표 구조이며 실물 정책 개선은 후속 검증 대상이다.
+
+| 확인할 역량 | 설명 |
 | --- | --- |
-| Collection Operator | 작업 조건을 설계하고 Pick·Pick & Place 시연을 반복 수집한다. |
-| Recorder | 영상·로봇 상태·목표 동작을 동기화해 LeRobot dataset으로 저장한다. |
-| Curator | 시연의 품질·분포를 검토하고 선택한 데이터와 그 근거를 학습 요청으로 전달한다. |
-| Policy Learning | 승인된 데이터로 정책을 학습하고 같은 평가 조건에서 checkpoint를 비교한다. |
+| 로봇 데이터 수집 | [Pick·Pick & Place의 실행과 다중 센서 기록](docs/architecture.md#collection-실행-구조) |
+| 학습 데이터 엔지니어링 | [시간 정렬·품질 판정·선별 데이터의 출처 보존](docs/dataset-quality.md) |
+| 모방학습 실험 | [학습 입력·checkpoint·평가 조건의 일관성](docs/training-and-evaluation.md) |
 
-원본 시연에서 데이터 선택, 학습 입력과 checkpoint까지 출처를 추적할 수 있다. 데이터 검증, 사람의 작업 성공 판정과 학습 사용 승인은 각각 관리한다. 정책 학습과 오프라인 비교는 구현되어 있으며, 폐루프의 실물 정책 개선은 후속 검증 대상이다.
+<details>
+<summary>직접 실행하기 · 기술 문서 · 라이선스</summary>
 
-## 둘러보기와 실행
-
-**프로젝트를 살펴볼 때:** [포트폴리오 안내](docs/portfolio/README.md)에서 시연·원리·정책 비교를 확인한다. 전달용 HTML 파일 하나로 영상과 근거까지 열람할 수 있다.
+## 실행 준비
 
 **직접 실행할 때:** [시작하기](docs/getting-started.md)에서 환경을 준비한다. 다음 명령은 합성 입력으로 Collection 운영 화면을 열며 로봇·카메라·데이터셋을 사용하지 않는다.
 
@@ -43,3 +51,5 @@ direnv exec . python3 -m tools.data_factory.operator_console --effect-scope FAKE
 ## 라이선스
 
 직접 작성한 코드와 문서는 [Apache License 2.0](LICENSE)을 따른다. FAIRINO 하위 모듈과 DH-Robotics CAD mesh의 권리·고지는 [Third-party notices](THIRD_PARTY_NOTICES.md)에 보존한다.
+
+</details>
