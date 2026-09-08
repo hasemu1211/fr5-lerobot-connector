@@ -1223,3 +1223,38 @@ policy, plan or condition lineage.
 - **WHEN** a policy attempt fails, times out or cannot safely hand off to release
 - **THEN** the sole stop owner fences motion and the existing recorder retains available evidence or explicitly reports partial/quarantined retention
 - **AND** the canonical diagnostic and Collection consumer preserve the original failure and condition without treating mechanical recovery or data retention as a successful demonstration
+
+### Requirement: Robot-model replacement preserves historical learning coordinates
+
+A correction to robot geometry SHALL distinguish the model used for collision
+checking from the controller-reference and measured-feedback coordinates stored
+in learning data. A geometry-only replacement SHALL preserve joint order, units,
+command direction and ranges, raw state/action values, checkpoint processors and
+normalization. It SHALL NOT invert gripper data, rewrite historical model or
+qualification digests, or require recollection solely because the collision
+model changes. Historical evidence SHALL remain reproducible with its original
+model and qualification; a prior collision verdict SHALL NOT be relabeled as
+verification under corrected geometry.
+
+Collection and learned execution SHALL reuse the existing URDF selection,
+`robot_description`, JointState and exact model/plan binding interfaces. Model
+versions SHALL be identified by their exact content and consumed consistently;
+individual consumers SHALL NOT introduce compensating coordinate inversions or
+independent gripper-geometry constants. No generic adapter or compatibility
+registry is required for this bounded replacement. A genuinely changed actuator
+coordinate contract SHALL be treated as a separate migration, not silently
+declared compatible because feature names and tensor shapes match.
+
+#### Scenario: Corrected finger geometry retains a recorded opening command
+
+- **WHEN** a candidate model corrects opening direction without changing the physical command contract
+- **THEN** cross-layer verification SHALL establish that increasing the configured opening coordinate increases the modeled fingertip gap while raw recorded values and replayed policy outputs remain unchanged
+- **AND** unchanged arm kinematics, coordinate ranges, saved processors and historical data/checkpoint consumption SHALL be checked before switching the active model
+- **AND** mathematical model consistency SHALL remain distinct from measured physical aperture, contact qualification and task success
+
+#### Scenario: A new model is selected for execution
+
+- **WHEN** a candidate model has a different content digest from the currently qualified model
+- **THEN** the existing execution boundary SHALL require matching current model and qualification evidence and a newly bound plan before sending motion
+- **AND** an old approval or historical model digest SHALL NOT be rewritten or accepted as authorization for the replacement
+- **AND** the prior model and configuration SHALL remain recoverable without rewriting datasets, checkpoints or past run evidence

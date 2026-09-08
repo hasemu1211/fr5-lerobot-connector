@@ -29,6 +29,28 @@
 
 </details>
 
+## Scene & Execution
+
+![Collection의 MoveIt 궤적과 VLA action chunk가 공통 Collision Check를 거친다. PlanningScene의 바닥·후면 벽을 적용하고 읽어 확인하며 궤적 표본과 그리퍼 범위를 검사한다. Bounded Execution은 검사한 계획과 현재 Scene State·시작 상태를 결속해 제어기로 전달한다.](portfolio/execution-safety.drawio.svg)
+
+충돌 검사는 등록된 환경 형상과 궤적 표본을 기준으로 한다.
+
+<details>
+<summary>환경 형상·공통 검사·실행 결속</summary>
+
+| 계약 | 실행에서 확인하는 대상 |
+| --- | --- |
+| [PlanningScene profile](../config/data_factory/planning_scenes/fr5-table-floor-wall-r003.json) | 바닥 높이·여유와 후면 벽 형상. 로봇 기준 좌표·workspace datum과 결속 |
+| [SceneStateStore](../tools/data_factory/scene_state.py) | 물체 위치·상태·revision과 근거. 현재 실행 조건에 결속 |
+| [RosMoveItTransport](../tools/data_factory/motion/moveit_transport.py) | 환경 apply/readback, 직렬화한 궤적의 관절·그리퍼 표본 유효성 |
+| [PickupExecutor](../tools/data_factory/motion/pickup_executor.py) | 검사·승인한 계획 식별값, 시작 관측·장비·장면과 단일 실행 owner |
+
+바닥·후면 벽은 현재 등록된 환경 장애물이다. 큐브의 위치 기록은 충돌 물체 등록이나 grasp attachment를 의미하지 않는다. 검사는 궤적 knot와 구간별 네 보간 표본을 사용하며, 연속 충돌 검증이나 미등록 물체와의 접촉 회피를 보장하지 않는다.
+
+구현 근거: main `44b1ee1` · [Collection 회귀](../tests/data_factory/test_motion.py) · [학습 궤적 충돌 회귀](../tests/data_factory/rollout/test_finite_plan.py)
+
+</details>
+
 ## Collection 실행 구조
 
 Collection Operator는 계획한 위치·각도에 맞춰 시연 수집을 반복한다. OneJob은 한 시연의 동작과 중단을, Recorder는 학습할 구간의 기록과 저장을 맡는다.
