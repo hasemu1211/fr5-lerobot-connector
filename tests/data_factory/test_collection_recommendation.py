@@ -994,6 +994,128 @@ class AcquisitionRolloutTests(unittest.TestCase):
         return recommend_stored_collection(**{ "run_directories": self.runs, "source_commit": COMMIT,
             "acquisition": self.acquisition, "rollout_lifecycle_path": self.lifecycle_path, **changes})
 
+    def use_registered_motion_preset(self):
+        # Reuse the actual catalog registration/digests, not a guessed policy or
+        # a newly qualified profile. Only synthetic run fixtures are changed.
+        catalog = self.acquisition["catalog"]
+        preset = next(p for p in catalog["motion_presets"] if p["qualifications"])
+        motion_id = next(iter(preset["qualifications"]))
+        combo = catalog["combinations"][0]
+        combo["motion_id"] = motion_id
+        redigest(combo, "combination_digest")
+        redigest(catalog, "catalog_digest")
+        self.selection.update(motion_id=motion_id, combination_digest=combo["combination_digest"])
+        self.acquisition["motion_preset"] = {key: preset[key] for key in ("id", "digest")}
+        plan = self.lifecycle["plan_envelope"]["plan"]
+        for bindings in (plan["binding_digests"], plan["learned_source_program"]["binding_digests"]):
+            bindings.update(motion_preset=preset["digest"],
+                motion_qualification=preset["qualifications"][motion_id]["digest"])
+        self.rebind(self.lifecycle)
+        self.preapproval.update(plan_envelope=copy.deepcopy(self.lifecycle["plan_envelope"]),
+            plan_digest=self.lifecycle["plan_digest"], plan_envelope_digest=digest(self.lifecycle["plan_envelope"]))
+        self.preapproval_path.write_text(json.dumps(self.preapproval))
+        self.lifecycle_path.write_text(json.dumps(self.lifecycle))
+        return preset
+
+    def test_registered_preset_uses_qualified_digest_and_revalidates_exact_identity(self):
+        from tools.data_factory.collection_recommendation_io import _acquisition_context, _load_run
+        preset = self.use_registered_motion_preset()
+        before = {p: p.read_bytes() for p in self.root.rglob("*") if p.is_file()}
+        result = self.call()
+        self.assertEqual(result["availability"], "AVAILABLE", result)
+        advice = result["recommendation"]
+        binding = advice["input_snapshot"]["motion_preset"]
+        self.assertEqual(binding, {**self.acquisition["motion_preset"], "qualifications": {
+            self.selection["motion_id"]: preset["qualifications"][self.selection["motion_id"]]["digest"]}})
+        self.assertNotEqual(binding["qualifications"][self.selection["motion_id"]],
+            self.acquisition["catalog"]["combinations"][0]["source_digests"]["motion"])
+        args = dict(acquisition=_acquisition_context(self.acquisition),
+            episode_evidence=[_load_run(r)[0] for r in self.runs],
+            rollout_evidence_analysis=self.lifecycle, rollout_preapproval_evidence=self.preapproval)
+        self.assertEqual(validate_collection_recommendation(advice, **args), advice)
+        self.assertEqual(self.call(), result)
+        changed = copy.deepcopy(advice)
+        changed["input_snapshot"]["motion_preset"]["qualifications"][self.selection["motion_id"]] = digest("tampered")
+        redigest(changed["input_snapshot"], "snapshot_digest")
+        redigest(changed, "recommendation_digest")
+        with self.assertRaisesRegex(ContractError, "INPUT_CHANGED"):
+            validate_collection_recommendation(changed, **args)
+        self.assertEqual(self.call(acquisition={k: v for k, v in self.acquisition.items() if k != "motion_preset"})[
+            "reason_codes"], ["COLLECTION_ACQUISITION_ROLLOUT_CONTEXT_MISMATCH"])
+        self.assertEqual({p: p.read_bytes() for p in self.root.rglob("*") if p.is_file()}, before)
+
+    def test_changed_unregistered_trial_only_and_mismatched_preset_fail_without_writes(self):
+        preset = self.use_registered_motion_preset()
+        before = {p: p.read_bytes() for p in self.root.rglob("*") if p.is_file()}
+        trial = next(p for p in self.acquisition["catalog"]["motion_presets"] if not p["qualifications"])
+        for binding, code in (
+            ({"id": preset["id"], "digest": digest("changed")}, "MOTION_PRESET_BINDING"),
+            ({"id": "missing-preset", "digest": preset["digest"]}, "MOTION_PRESET_BINDING"),
+            ({key: trial[key] for key in ("id", "digest")}, "MOTION_PRESET_QUALIFICATION_REQUIRED"),
+        ):
+            with self.subTest(binding=binding):
+                result = self.call(acquisition={**self.acquisition, "motion_preset": binding})
+                self.assertEqual(result["availability"], "UNAVAILABLE", result)
+                self.assertEqual(result["reason_codes"], [code])
+                self.assertIsNone(result["output_path"])
+        changed = copy.deepcopy(self.acquisition)
+        p = next(p for p in changed["catalog"]["motion_presets"] if p["id"] == preset["id"])
+        p["qualifications"][self.selection["motion_id"]]["digest"] = digest("different-qualified-motion")
+        redigest(changed["catalog"], "catalog_digest")
+        self.assertEqual(self.call(acquisition=changed)["reason_codes"], ["COLLECTION_ACQUISITION_ROLLOUT_CONTEXT_MISMATCH"])
+        self.assertEqual({p: p.read_bytes() for p in self.root.rglob("*") if p.is_file()}, before)
+
+    def test_omitted_and_null_preset_keep_legacy_advice_identical(self):
+        from tools.data_factory.collection_recommendation_io import _acquisition_context, _load_run
+        for lifecycle in (self.lifecycle_path, None):
+            omitted = self.call(rollout_lifecycle_path=lifecycle)
+            explicit = self.call(rollout_lifecycle_path=lifecycle, acquisition={**self.acquisition, "motion_preset": None})
+            self.assertEqual(omitted["availability"], "AVAILABLE", omitted)
+            self.assertEqual(explicit, omitted)
+            self.assertNotIn("motion_preset", omitted["recommendation"]["input_snapshot"])
+        context = _acquisition_context(self.acquisition)
+        evidence = [_load_run(r)[0] for r in self.runs]
+        self.assertEqual(derive_collection_recommendation(acquisition=context, episode_evidence=evidence, source_commit=COMMIT),
+            derive_collection_recommendation(acquisition={**context, "motion_preset": None}, episode_evidence=evidence, source_commit=COMMIT))
+
+    def test_original_program_must_bind_both_qualified_motion_and_nontrial_preset(self):
+        from tools.fr5_data_factory import _motion_preset_trial_digest
+        self.use_registered_motion_preset()
+        original = copy.deepcopy(self.lifecycle)
+        for mismatch in ("base-qualification", "missing-preset", "different-preset", "trial"):
+            with self.subTest(mismatch=mismatch):
+                value = copy.deepcopy(original)
+                plan = value["plan_envelope"]["plan"]
+                for bindings in (plan["binding_digests"], plan["learned_source_program"]["binding_digests"]):
+                    if mismatch == "base-qualification":
+                        bindings["motion_qualification"] = self.acquisition["catalog"]["combinations"][0]["source_digests"]["motion"]
+                    elif mismatch == "missing-preset":
+                        bindings.pop("motion_preset", None)
+                    elif mismatch == "different-preset":
+                        bindings["motion_preset"] = digest("other-preset")
+                    else:
+                        bindings["motion_preset_trial"] = _motion_preset_trial_digest(bindings)
+                self.rebind(value)
+                receipt = {**self.preapproval, "plan_envelope": value["plan_envelope"],
+                    "plan_digest": value["plan_digest"], "plan_envelope_digest": digest(value["plan_envelope"])}
+                self.lifecycle_path.write_text(json.dumps(value))
+                self.preapproval_path.write_text(json.dumps(receipt))
+                before = {p: p.read_bytes() for p in self.root.rglob("*") if p.is_file()}
+                result = self.call()
+                self.assertEqual(result["reason_codes"], ["COLLECTION_ACQUISITION_ROLLOUT_CONTEXT_MISMATCH"])
+                self.assertIsNone(result["output_path"])
+                self.assertEqual({p: p.read_bytes() for p in self.root.rglob("*") if p.is_file()}, before)
+
+    def test_preset_change_invalidates_advice_even_without_rollout_input(self):
+        self.use_registered_motion_preset()
+        result = self.call(rollout_lifecycle_path=None)
+        self.assertEqual(result["availability"], "AVAILABLE", result)
+        previous = result["recommendation"]["recommendation_digest"]
+        changed = self.call(rollout_lifecycle_path=None, acquisition={**self.acquisition, "motion_preset": None},
+            expected_recommendation_digest=previous)
+        self.assertEqual(changed["reason_codes"], ["COLLECTION_ACQUISITION_INPUT_CHANGED"])
+        self.assertIsNone(changed["output_path"])
+
     def test_native_v2_mixed_history_current_target_and_revalidation(self):
         from tools.data_factory.collection_recommendation_io import _acquisition_context, _load_run
         before = {p: p.read_bytes() for p in self.root.rglob("*") if p.is_file()}

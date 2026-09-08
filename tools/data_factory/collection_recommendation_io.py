@@ -85,6 +85,8 @@ def _acquisition_context(value):
     """
     required = {"catalog", "selection", "scene_state_path", "object_instance_id",
                 "requested_count", "normalized_seed", "repeat", "expected_scene_digest"}
+    if isinstance(value, dict) and "motion_preset" in value:
+        required.add("motion_preset")
     if not isinstance(value, dict) or set(value) != required:
         raise ContractError("COLLECTION_ACQUISITION_INPUT_FIELDS")
     if not isinstance(value["scene_state_path"], str) or not value["scene_state_path"]:
@@ -96,7 +98,8 @@ def _acquisition_context(value):
     if canonical_digest(scene) != value["expected_scene_digest"]:
         raise ContractError("COLLECTION_ACQUISITION_SCENE_CHANGED")
     return {**{key: item for key, item in value.items()
-               if key not in {"scene_state_path", "expected_scene_digest"}}, "scene_state": scene}
+               if key not in {"scene_state_path", "expected_scene_digest"}
+               and (key != "motion_preset" or item is not None)}, "scene_state": scene}
 
 
 def _publish(destination: Path, documents: dict) -> None:

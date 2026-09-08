@@ -1225,7 +1225,7 @@ __all__ = [
 ACQUISITION_SCHEMA = "data_factory.collection_recommendation.v2"
 
 
-def _current_rollout_condition(context, selected, lifecycle_result, preapproval):
+def _current_rollout_condition(context, selected, lifecycle_result, preapproval, motion_preset=None):
     """Bind a reviewed finite chunk to its original native source condition.
 
     Original resolver fields own source XY/yaw; the current scene owns present
@@ -1275,11 +1275,17 @@ def _current_rollout_condition(context, selected, lifecycle_result, preapproval)
         raise ContractError("COLLECTION_ACQUISITION_ROLLOUT_TRANSITION_UNSUPPORTED")
     required = {"cell_calibration": "cell", "object_profile": "object", "grasp_profile": "grasp",
                 "collection_profile": "camera_profile", "motion_qualification": "motion"}
+    expected_digests = dict(combination["source_digests"])
+    if motion_preset is not None:
+        expected_digests["motion"] = motion_preset["qualifications"][selected["motion_id"]]
     if (plan.get("resolved_job_digest") != program["resolved_job_digest"]
             or plan.get("binding_digests") != program["binding_digests"]
             or plan.get("robot_system_id") != scene["robot_system_id"]
             or program["robot_system_id"] != scene["robot_system_id"]
-            or any(program["binding_digests"][key] != combination["source_digests"].get(name)
+            or program["binding_digests"].get("motion_preset") != (
+                None if motion_preset is None else motion_preset["digest"])
+            or "motion_preset_trial" in program["binding_digests"]
+            or any(program["binding_digests"][key] != expected_digests.get(name)
                    for key, name in required.items())):
         raise ContractError("COLLECTION_ACQUISITION_ROLLOUT_CONTEXT_MISMATCH")
     if (job["task"] != selected["task_id"] or job["robot_system_id"] != scene["robot_system_id"]
@@ -1315,12 +1321,16 @@ def _derive_acquisition_recommendation(*, acquisition, episode_evidence, source_
         validate_operator_selection, project_assisted_poses, project_direct_poses,
         project_workspace_cycle_poses, resolve_workspace_cycle_selections,
         project_yaw_sample_bindings, project_state_space_cells,
+        selected_motion_preset,
     )
     from tools.data_factory.scene_state import _validate as validate_scene
 
     required = {"catalog", "selection", "scene_state", "object_instance_id",
                 "requested_count", "normalized_seed", "repeat"}
+    if isinstance(acquisition, Mapping) and "motion_preset" in acquisition:
+        required.add("motion_preset")
     context = _exact(acquisition, required, "COLLECTION_ACQUISITION_INPUT_FIELDS")
+    context = {key: value for key, value in context.items() if key != "motion_preset" or value is not None}
     if (not isinstance(source_commit, str) or len(source_commit) != 40
             or any(character not in "0123456789abcdef" for character in source_commit)):
         raise ContractError("COLLECTION_RECOMMENDATION_SOURCE_COMMIT")
@@ -1344,11 +1354,21 @@ def _derive_acquisition_recommendation(*, acquisition, episode_evidence, source_
             or instance["pose"]["place_id"] != selected["workspace_id"]):
         raise ContractError("COLLECTION_ACQUISITION_SOURCE")
     source_pose = instance["pose"]
-    rollout = None if rollout_lifecycle_result is None else _current_rollout_condition(
-        context, selected, rollout_lifecycle_result, rollout_preapproval_evidence,
-    )
     cycle = (resolve_workspace_cycle_selections(catalog, selected, count, require_executable=False)
              if task == "pick_place" else [selected] * count)
+    preset = selected_motion_preset(catalog, context.get("motion_preset"))
+    motion_preset = None
+    if preset is not None:
+        qualifications = {}
+        for endpoint in cycle:
+            qualified = preset["qualifications"].get(endpoint["motion_id"])
+            if qualified is None:
+                raise ContractError("MOTION_PRESET_QUALIFICATION_REQUIRED")
+            qualifications[endpoint["motion_id"]] = qualified["digest"]
+        motion_preset = {**context["motion_preset"], "qualifications": qualifications}
+    rollout = None if rollout_lifecycle_result is None else _current_rollout_condition(
+        context, selected, rollout_lifecycle_result, rollout_preapproval_evidence, motion_preset,
+    )
     combinations = {item["combination_digest"]: item for item in catalog["combinations"]}
     endpoints = {item["workspace_id"]: combinations[item["combination_digest"]] for item in cycle}
     evidence_rows, reports, compatible, excluded = [], [], [], []
@@ -1464,6 +1484,8 @@ def _derive_acquisition_recommendation(*, acquisition, episode_evidence, source_
                                   "object_instance_id": context["object_instance_id"]},
                 "episodes": sorted(evidence_rows, key=lambda row: tuple(row["recording"].values())),
                 "data_quality_analysis_digest": canonical_digest(analysis)}
+    if motion_preset is not None:
+        snapshot["motion_preset"] = motion_preset
     if rollout is not None:
         diagnostic, target = rollout
         target["condition_indices"] = [item["order_index"] for item in conditions if item["source"] == target["source"]]
