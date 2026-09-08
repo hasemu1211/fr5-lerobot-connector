@@ -14,6 +14,46 @@ from tools.data_factory.readiness import RECORDER_READINESS_CONTRACT
 PHASES = ("RECYCLE_APPROACH_PTP", "LOWER_LIN", "GRIPPER_OPEN", "RETREAT_LIN", "SAFE_POSE_PTP")
 
 
+def closure_plateau(plan, snapshot, now, steady_now):
+    """Consume the existing native settled-away proof and calibrated range.
+
+    Hardware completion reason 2 is produced after observed movement and the
+    configured stable-feedback dwell. Reuse it; a new timer, a single in-range
+    sample, or a policy endpoint cannot manufacture that proof here.
+    """
+    from tools.data_factory.rollout.gripper_evidence import check_hardware, identity
+    try:
+        source = plan["learned_source_program"]
+        required = source["gripper_requirements"]
+        controller = snapshot["gripper_controller"]
+        observed = {"snapshot": snapshot, "captured_at_s": now,
+                    "captured_monotonic_s": steady_now}
+        wire = check_hardware(observed, now, steady_now, source["planning"]["max_joint_state_age_s"])
+        feedback, reference = controller["feedback_position_m"], controller["reference_position_m"]
+        accepted = required["acceptable_feedback_m"]
+        # Same reference tolerance/range as PickupExecutor's existing qualified
+        # gripper feedback consumer. No new physical contact threshold.
+        if (controller["ready"] is not True or wire["completion_reason"] != 2
+                or wire["generation"] <= 0
+                or any(type(v) not in (int, float) or not math.isfinite(v) for v in (feedback, reference))
+                or abs(reference-required["command_position_m"]) > 1e-9
+                or abs(wire["raw_reference_m"]-reference) > 1e-9
+                or abs(wire["feedback_m"]-feedback) > 1e-9
+                or feedback <= reference
+                or not accepted["min"] <= feedback <= accepted["max"]):
+            raise ContractError("MECHANICAL_CLOSURE_PLATEAU_UNAVAILABLE")
+        return {"status": "CALIBRATED_CLOSURE_PLATEAU", "source": "NATIVE_SETTLED_AWAY_COMPLETION",
+                "generation": wire["generation"], "incarnation": identity(wire),
+                "command_position_m": reference, "feedback_position_m": feedback,
+                "acceptable_feedback_m": copy.deepcopy(accepted),
+                "gripper_evidence_digest": required["evidence_digest"],
+                "grasp_profile_digest": source["binding_digests"]["grasp_profile"],
+                "object_profile_digest": source["binding_digests"]["object_profile"],
+                "snapshot_digest": canonical_digest(snapshot), "physical_success": False}
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ContractError("MECHANICAL_CLOSURE_PLATEAU_UNAVAILABLE") from exc
+
+
 def check_illumination(sample, parent_plan, now):
     """Check source age at the boundary/send, never extend a source timestamp."""
     if (not isinstance(sample, dict) or sample.get("kind") != "CURRENT_REQUIRED_ILLUMINATION"

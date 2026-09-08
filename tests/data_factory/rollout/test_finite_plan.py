@@ -2178,9 +2178,95 @@ class FinitePlanTest(unittest.TestCase):
             with self.assertRaisesRegex(ContractError, "ROS_EXEC_ACTIVE"):
                 native.capture_scene_illumination(plan)
             native._active = None
+
             with self.assertRaisesRegex(ContractError, "MECHANICAL_ILLUMINATION_UNAVAILABLE"):
                 native.capture_scene_illumination({"learned_proposal": {}})
         self.assertEqual(plan, frozen)
+
+    def test_calibrated_plateau_does_not_determine_axial_release_clearance(self):
+        """Source geometry counterexample; neither pose is a physical observation."""
+        import xml.etree.ElementTree as ET
+        root = Path(__file__).resolve().parents[3]
+        config = root / "config/data_factory"
+        grasp = json.loads((config / "grasps/wood-cube-24mm-top-3p5mm-r001.json").read_text())
+        obj = json.loads((config / "objects/wood-cube-24mm-r001.json").read_text())
+        qualification = json.loads((config / "motion_qualifications/fr5-place-a-wood-cube-24mm-r001.json").read_text())
+        model_bytes = (root / "src/fairino_description/urdf/fairino5_v6.urdf").read_bytes()
+        self.assertEqual("sha256:" + hashlib.sha256(model_bytes).hexdigest(), qualification["robot_description_digest"])
+        model = ET.fromstring(model_bytes)
+        def z(element):
+            return float(element.attrib["xyz"].split()[2])
+        mount = sum(z(model.find(f"joint[@name='{name}']/origin"))
+                    for name in ("gripper_adapter_joint", "gripper_joint"))
+        geometry = grasp["grasp_geometry"]
+        nominal = qualification["tool_to_tcp"]["translation_m"][2] - mount + geometry["datum_to_tcp_grasp"]["translation_m"][2]
+        shift = geometry["depth_from_top_mm"] / 1000
+        half_cube = obj["dimensions_mm"][2] / 2000
+        for side in ("left", "right"):
+            joint = model.find(f"joint[@name='finger_{side}_joint']")
+            collision = model.find(f"link[@name='finger_tip_{side}_link']/collision")
+            center = z(joint.find("origin")) + z(collision.find("origin"))
+            half_tip = float(collision.find("geometry/box").attrib["size"].split()[2]) / 2
+            # Translating the cube along the finger leaves opposed-face width
+            # and thus the calibrated closure reading unchanged in both cases.
+            for datum in (nominal, nominal + shift):
+                self.assertGreater(min(center + half_tip, datum + half_cube)
+                                   - max(center - half_tip, datum - half_cube), 0)
+        self.assertAlmostEqual(nominal, .149352939145247)
+        clearance = geometry["release_clearance_mm"] / 1000
+        self.assertGreater(clearance, 0)
+        self.assertAlmostEqual(clearance - shift, -.0015)
+
+    def test_native_contact_producer_consumes_settled_closure_without_inventing_pose(self):
+        from tools.data_factory.motion.moveit_transport import RosMoveItTransport
+        for rejection in (None, "motion_done_only", "pending", "outside_range", "wrong_reference"):
+            with self.subTest(rejection=rejection):
+                job, executor, native, state, now, sent, _, calls = self.make_held_job(mechanical=True)
+                # No replacement of mechanical_contact_context: the normal task
+                # boundary consumes native serialized hardware feedback below.
+                self.assertIs(native.mechanical_contact_context.__func__, RosMoveItTransport.mechanical_contact_context)
+                source_program = job._program["source_program"]
+                grant = task_grant(source_program, SCENE, job._program["learned_proposal"],
+                                   max_outputs=1, terminal_reserve_s=30.)
+                self.assertTrue(job.admit_task(grant)["ok"])
+                with mock.patch("tools.data_factory.motion.moveit_transport.time.time", side_effect=lambda: now[0]):
+                    self.assertTrue(job.start()["ok"])
+                    while job.state != "LEARNED_CHUNK_COMPLETE":
+                        goal = sent[-1]
+                        if hasattr(goal.trajectory, "joint_trajectory"):
+                            point = goal.trajectory.joint_trajectory.points[-1]
+                            state["joints"] = list(point.positions)
+                        else:
+                            point = goal.trajectory.points[-1]
+                            reference = point.positions[0]
+                            state.update(reference=reference, feedback=.01218 if reference == .01176 else reference)
+                        now[0] = round(now[0] + point.time_from_start.sec + point.time_from_start.nanosec/1e9 + .002, 9)
+                        state["complete"] = True
+                        result = job.poll()
+                        self.assertTrue(result["ok"], result["code"])
+                    count = len(sent)
+                    if rejection == "motion_done_only": state["hardware_override"]["completion_reason"] = 1.
+                    if rejection == "pending": state["hardware_override"]["pending"] = 1.
+                    if rejection == "outside_range": state["feedback"] = .02
+                    if rejection == "wrong_reference": state["reference"] = .021
+                    result = job.task_boundary()
+                self.assertFalse(result["ok"])
+                context = result["execution_evidence"]["mechanical_contact_diagnostic"]
+                contact = context["closure_contact"]
+                if rejection is None:
+                    self.assertEqual(contact["status"], "CALIBRATED_CLOSURE_PLATEAU")
+                    self.assertEqual(contact["feedback_position_m"], .01218)
+                    self.assertEqual(contact["command_position_m"], .01176)
+                    self.assertEqual(contact["gripper_evidence_digest"], source_program["gripper_requirements"]["evidence_digest"])
+                    self.assertEqual(context["relation_status"], "UNOBSERVED_AFTER_LEARNED_MOTION")
+                else:
+                    self.assertEqual(contact["status"], "UNAVAILABLE")
+                self.assertEqual(context["status"], "BLOCKED_UNAVAILABLE")
+                self.assertFalse(context["physical_success"])
+                self.assertNotIn("carried_object", context)
+                self.assertEqual(len(sent), count)
+                self.assertIn(("recorder", "retain"), calls)
+                self.assertNotIn(("recorder", "commit"), calls)
 
     def test_native_mechanical_terminal_same_owner_stages_and_retains(self):
         self._native_mechanical_terminal_case()

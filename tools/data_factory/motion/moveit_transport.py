@@ -153,16 +153,26 @@ class RosMoveItTransport:
     def mechanical_contact_context(self, plan, scene_object, snapshot):
         """Report the native producer's available evidence without inventing grasp.
 
-        The shipped model has no qualified contact transition/uncertainty input.
-        Its joint/controller observations cannot measure object slip or aperture.
-        Preserve that distinction at the actual bounded-task caller.
+        Native stable closure and its calibrated feedback range establish the
+        accepted contact criterion. They do not locate the cube along the tips
+        after arbitrary learned motion; preserve that distinction at the caller.
         """
         diagnostic = {"status": "BLOCKED_UNAVAILABLE", "source_program_digest": canonical_digest(plan["learned_source_program"]),
             "scene_binding": copy.deepcopy(plan["scene_binding"]), "snapshot_digest": canonical_digest(snapshot),
             "scene_object_digest": canonical_digest(scene_object), "physical_success": False,
             "missing_measurements": ["QUALIFIED_OBJECT_TOOL_RELATION_OR_CARRIED_ENVELOPE",
-                "QUALIFIED_CONTACT_TRANSITION_AND_APERTURE_MODEL", "CURRENT_REQUIRED_ILLUMINATION"],
+                "QUALIFIED_CONTACT_TRANSITION_AND_APERTURE_MODEL", "CALIBRATED_CLOSURE_PLATEAU", "CURRENT_REQUIRED_ILLUMINATION"],
             "code": "MECHANICAL_CONTACT_UNAVAILABLE"}
+        from tools.data_factory.motion.mechanical_terminal import closure_plateau
+        try:
+            diagnostic["closure_contact"] = closure_plateau(plan, snapshot, time.time(), self._clock())
+            diagnostic["missing_measurements"].remove("CALIBRATED_CLOSURE_PLATEAU")
+            diagnostic["relation_status"] = "UNOBSERVED_AFTER_LEARNED_MOTION"
+            # This is the source Scene's initial pose, not a measured terminal
+            # pose. No nominal datum-to-tool transform is attached here.
+            diagnostic["initial_scene_pose"] = copy.deepcopy(scene_object.get("pose"))
+        except ContractError as exc:
+            diagnostic["closure_contact"] = {"status": "UNAVAILABLE", "code": exc.code}
         try:
             diagnostic["illumination"] = self.capture_scene_illumination(plan)
             diagnostic["missing_measurements"].remove("CURRENT_REQUIRED_ILLUMINATION")
@@ -180,6 +190,8 @@ class RosMoveItTransport:
                 gap = origins[0]-origins[1]+opened*(axes[0]-axes[1])-sum(widths)/2
                 diagnostic["modeled_full_open_inner_gap_m"] = gap
                 diagnostic["model_opening_direction"] = "INWARD" if axes[0]-axes[1]<0 else "OUTWARD"
+                if axes[0]-axes[1] <= 0:
+                    diagnostic["model_contact_code"] = "MODELED_APERTURE_OPPOSES_OPEN_COMMAND"
             except (ET.ParseError, AttributeError, KeyError, ValueError, IndexError, StopIteration):
                 diagnostic["model_geometry"] = "UNSUPPORTED"
         return diagnostic
