@@ -87,7 +87,7 @@ class RecorderTransactionTest(unittest.TestCase):
         "transaction_id", "episode_index", "metrics", "artifacts", "detail",
     }
 
-    def retention_fixture(self, directory):
+    def retention_fixture(self, directory, *, run_id="run-001"):
         from lerobot.datasets.lerobot_dataset import LeRobotDataset
         import numpy as np
         recorder = self.make_recorder(directory)
@@ -102,7 +102,7 @@ class RecorderTransactionTest(unittest.TestCase):
             repo_id="tests/retention", root=recorder.args.root, fps=30,
             features=features, use_videos=False, image_writer_threads=0,
         )
-        recorder.begin_episode(self.transaction(directory))
+        recorder.begin_episode({**self.transaction(directory), "run_id": run_id})
         for index in range(2):
             recorder.dataset.add_frame({
                 "task": "mechanical release diagnostic",

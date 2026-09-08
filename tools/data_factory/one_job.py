@@ -367,11 +367,13 @@ class OneJob:
         request = {"schema_version": "data_factory.recorder_command.v1", "op_id": self._op_id(op), "op": op}
         if target == "executor":
             request = {"schema_version": "fr5.pickup_executor.command.v4", "op_id": request["op_id"], "op": op, "payload": payload}
+        elif op == "retain":
+            request.update(transaction_id=self.transaction_id, disposition=payload["disposition"])
         elif transaction is not None:
             request["transaction"] = transaction
         caller = self.executor_call if target == "executor" else self.recorder_call
         transported_status = target == "recorder" and op == "status" and callable(getattr(caller, "request", None))
-        transported_commit = target == "recorder" and op == "commit" and callable(getattr(caller, "request_terminal", None))
+        transported_commit = target == "recorder" and op in {"commit", "retain"} and callable(getattr(caller, "request_terminal", None))
         try:
             if transported_commit:
                 response = caller.request_terminal(request)
@@ -394,6 +396,8 @@ class OneJob:
                   {"schema_version", "mode", "op_id", "op", "ok", "code", "run_id", "plan_digest", "state", "data"})
         schema = "data_factory.recorder_response.v1" if target == "recorder" else "fr5.pickup_executor.response.v3"
         allowed = fields | ({"writer_alive", "writer_error", "sampler_alive", "quality", "abort_reason_code"} if target == "recorder" else set())
+        if target == "recorder" and op == "retain":
+            allowed.add("retention")
         if (not isinstance(response, dict) or not fields <= set(response) <= allowed or response.get("schema_version") != schema
                 or response.get("op_id") != request["op_id"] or response.get("op") != op
                 or type(response.get("ok")) is not bool or not isinstance(response.get("state"), str)
@@ -422,6 +426,18 @@ class OneJob:
                 raise ContractError("RECORDER_BINDING")
             elif self.transaction_id is None and response["run_id"] not in {None, self.run_id}:
                 raise ContractError("RECORDER_BINDING")
+            if op == "retain" and (response["ok"] or "retention" in response):
+                receipt = response.get("retention")
+                if (not isinstance(receipt, dict)
+                        or receipt.get("schema_version") != "data_factory.diagnostic_retention.v1"
+                        or receipt.get("transaction_id") != self.transaction_id
+                        or receipt.get("disposition") != payload["disposition"]
+                        or receipt.get("training_eligible") is not False
+                        or receipt.get("quality_accepted") is not False
+                        or response["ok"] and (receipt.get("durable") is not True
+                                                or receipt.get("save_uncertain") is not False)
+                        or response["state"] != "QUARANTINED_COMMIT"):
+                    raise ContractError("RECORDER_RETENTION_RESPONSE")
             if update_state:
                 self.recorder_state = response["state"]
             if transported_status:
@@ -463,8 +479,33 @@ class OneJob:
             raise ContractError(response.get("reason_code" if target == "recorder" else "code") or "%s_RESPONSE" % target.upper())
         return response
 
+    def _retain_failed_rollout(self, code):
+        """Retain terminal evidence only after the existing motion owner settles."""
+        disposition = {"SEMANTIC_FAIL": "semantic_failure", "GRASP_FAIL": "semantic_failure",
+                       "CANCELLED_BY_OPERATOR": "cancel",
+                       "MECHANICAL_TERMINAL_UNAVAILABLE": "infeasible_reset"}.get(code, "uncertain")
+        if "TIMEOUT" in code or "DEADLINE" in code:
+            disposition = "timeout"
+        elif code.startswith("QUALITY_"):
+            disposition = "technical_rejection"
+        error = None
+        try:
+            response = self._request("recorder", "retain", {"disposition": disposition}, allowed_failure=True)
+            if not response["ok"]:
+                error = response["reason_code"]
+        except ContractError as exc:
+            error = exc.code
+            response = None
+        if response is None or not response["ok"]:
+            preserve = getattr(self.recorder_call, "preserve", None)
+            if callable(preserve):
+                preserve()
+        self.state = "QUARANTINED_COMMIT" if self.recorder_state == "QUARANTINED_COMMIT" else "BLOCKED"
+        return self._result(False, code, **({"retention_error": error} if error else {}))
+
     def _abort(self, code):
-        if self.recorder_state == "QUARANTINED_COMMIT":
+        learned = isinstance(self.plan_envelope, dict) and "learned_proposal" in self.plan_envelope.get("plan", {})
+        if self.recorder_state == "QUARANTINED_COMMIT" and not learned:
             self.state = "QUARANTINED_COMMIT"
             return self._result(False, code)
         if self.lease_id and self.executor_state != "COMPLETED":
@@ -479,7 +520,7 @@ class OneJob:
                 self.cancel_error = exc.code
         if self.cancel_error:
             recorder_aborted = False
-            if self.recorder_state in {"RECORDING", "FROZEN"}:
+            if not learned and self.recorder_state in {"RECORDING", "FROZEN"}:
                 try:
                     response = self._request("recorder", "abort", allowed_failure=True)
                     recorder_aborted = bool(
@@ -499,6 +540,10 @@ class OneJob:
                 preserve()
             self.state = "BLOCKED"
             return self._result(False, code)
+        if learned and self.transaction_id is not None and self.recorder_state in {
+            "RECORDING", "FROZEN", "QUARANTINED_COMMIT",
+        }:
+            return self._retain_failed_rollout(code)
         try:
             response = self._request("recorder", "abort", allowed_failure=True)
         except ContractError:
