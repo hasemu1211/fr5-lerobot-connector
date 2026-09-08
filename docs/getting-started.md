@@ -4,7 +4,7 @@ Collection 화면을 살펴보고 수집·학습 환경을 준비하는 안내�
 
 ## 먼저 확인할 범위
 
-지원 기준은 Ubuntu 24.04, ROS 2 Jazzy, Python 3.12, LeRobot 0.6.1이다. 수집 노트북에는 CPU용 의존성만 설치하고, 정책 학습은 별도 NVIDIA 호스트에서 수행한다. 실제 장비의 주소, 카메라 식별자와 로컬 경로는 저장소에 기록하지 말고 `config/fr5.env.example`과 장비별 설정으로 관리한다.
+지원 기준은 Ubuntu 24.04, ROS 2 Jazzy, Python 3.12, LeRobot 0.6.1이다. 수집 전용 환경은 CPU용 의존성으로 준비하고, 정책 학습에는 NVIDIA GPU와 학습용 의존성을 사용한다. 실제 장비의 주소, 카메라 식별자와 로컬 경로는 저장소에 기록하지 말고 `config/fr5.env.example`과 장비별 설정으로 관리한다.
 
 ## 로봇 없는 첫 실행
 
@@ -46,7 +46,7 @@ direnv exec . scripts/setup_doctor.sh
 
 ### 학습 PC
 
-NVIDIA 드라이버가 준비된 별도 호스트에서만 학습 의존성을 설치한다.
+NVIDIA 드라이버가 준비된 환경에서 학습 의존성을 설치한다. GPU가 있는 수집 PC를 사용할 수도 있으며, 수집과 학습의 동시 실행 가능 여부는 메모리·GPU 사용량을 확인해 판단한다.
 
 ```bash
 scripts/setup_training.sh
