@@ -834,6 +834,12 @@ prepared. A changed Scene SHALL reject the new goal without replacing the foreig
 Scene state. A writer arriving during validation SHALL serialize after submission.
 
 Cancellation and deadline checks SHALL remain effective before submission.
+The original absolute lease and applicable confirmation deadline SHALL reach the
+actual native send after compilation, deserialization and evidence checks; work
+inside that interval SHALL NOT renew either deadline. Learned Scene acquisition
+and fault writes SHALL fail promptly with distinct `SCENE_STATE_BUSY` on lock
+contention, retaining the foreign state and zero new sends. Legacy Collection
+locking SHALL retain its existing default behavior.
 Reentrant fault handling SHALL set the existing cancellation event immediately
 and defer Scene-writing fault work until the lock is released. Cancellation after
 submission SHALL cancel that owned goal; it SHALL NOT be reported as zero sends.
@@ -850,6 +856,18 @@ This ordering adds no Scene store, execution owner or task-success authority.
 - **WHEN** a callback requests cancellation during locked validation or submission
 - **THEN** the cancellation event is set immediately without nested Scene locking
 - **AND** fault cleanup completes after unlock, cancelling only an already issued owned goal
+
+#### Scenario: Preparation outlives the original dispatch deadline
+
+- **WHEN** initial or next-chunk compilation, decoding or evidence checks exceed the original lease or confirmation deadline
+- **THEN** the native transport submits zero new goals and releases its unused active handle
+- **AND** concurrent heartbeat updates do not extend that in-flight dispatch deadline
+
+#### Scenario: A foreign owner retains the Scene lock
+
+- **WHEN** learned confirmation or fault cleanup encounters a held Scene lock
+- **THEN** it returns the distinct contention result without waiting for the foreign holder to release it
+- **AND** the foreign Scene bytes and legacy Collection locking behavior remain unchanged
 
 ### Requirement: Current source freshness is independent of retained command completion
 
@@ -897,6 +915,12 @@ Plan-only SHALL only observe. Missing/mismatched policy, native version,
 incarnation or parameter readback SHALL block live consumption. Bootstrap and
 normal caller integration require their own verification; the native wire and
 reader alone SHALL NOT be reported as a qualified live path.
+
+The normal runner and motion child SHALL preserve an explicitly selected
+`gripper_temporal_policy` input end to end, mutually exclusive with the legacy
+`gripper_source_clock` input. The frozen proposal SHALL bind that exact policy
+and hardware wire version 3. Identity-only bootstrap decoding or successful
+parameter readback SHALL NOT substitute for fresh qualified version 3 evidence.
 
 Archived version 1 and 2 evidence SHALL retain its original mapping/proof reader
 semantics without automatic promotion to live evidence. A newly approved live

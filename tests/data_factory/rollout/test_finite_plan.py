@@ -103,11 +103,17 @@ class Transport(T):
                             certificate_sample_system_s=now, certificate_sample_steady_s=now,
                             certificate_generation=0., certificate_incarnation_0=1., certificate_incarnation_1=2.,
                             certificate_incarnation_2=3., certificate_incarnation_3=4.)
-            packet = DynamicJointState(joint_names=[RESOURCE], interface_values=[InterfaceValue(
-                interface_names=list(names), values=[float(wire[k]) for k in names])])
             binding = {"schema_version": "fr5.gripper_source_clock.v1", "incarnation": [1, 2, 3, 4],
                        "calendar_to_system_offset_s": 0., "uncertainty_s": .001,
                        "system_anchor_s": 9., "steady_anchor_s": 9., "valid_until_system_s": 100.}
+            if getattr(self, "hardware_causal", False):
+                from tools.data_factory.rollout.gripper_evidence import CAUSAL_FIELDS
+                names = CAUSAL_FIELDS
+                wire = {**dict.fromkeys(names, 0.), **wire, "version": 3.}
+                binding = {"schema_version": "fr5.gripper_temporal_policy.v1", "incarnation": [1, 2, 3, 4],
+                           "max_age_s": .3, "host_clock_tolerance_s": .001}
+            packet = DynamicJointState(joint_names=[RESOURCE], interface_values=[InterfaceValue(
+                interface_names=list(names), values=[float(wire[k]) for k in names])])
             value["gripper_controller"]["hardware_execution"] = decode_dynamic_state(
                 deserialize_message(serialize_message(packet), DynamicJointState), binding, now)
             for key, names, positions in (("arm_controller", JOINTS[:6], self.current[:6]),
@@ -193,7 +199,13 @@ class FinitePlanTest(unittest.TestCase):
     def test_public_native_plan_only_never_starts_recorder_or_goal(self):
         self._public_native_consumer("plan_only")
 
-    def _public_native_consumer(self, mode):
+    def test_public_causal_live_path_consumes_explicit_policy_without_clock_mapping(self):
+        self._public_native_consumer("live", causal=True)
+
+    def test_public_causal_plan_only_preserves_zero_execution_effects(self):
+        self._public_native_consumer("plan_only", causal=True)
+
+    def _public_native_consumer(self, mode, *, causal=False):
         from tools.data_factory import run_job
         from tools.data_factory.learned_action_adapter import NativeSmolVLA
         from tests.data_factory.operator.fixtures import PROFILE, JOB, runtime_validated, payload
@@ -209,6 +221,7 @@ class FinitePlanTest(unittest.TestCase):
         transport, cell, scene = Transport(), Cell(), Scene()
         transport.hardware = True
         transport.hardware_current = True
+        transport.hardware_causal = causal
         def capture(topics, age):
             self.assertEqual(topics, {"camera1": "/up", "camera2": "/wrist"})
             self.assertEqual(age, .3)
@@ -249,12 +262,14 @@ class FinitePlanTest(unittest.TestCase):
             mapping = {"observation.images.up": "observation.images.camera1", "observation.images.wrist": "observation.images.camera2"}
             (root / "train_config.json").write_text(json.dumps({"rename_map": mapping}))
             clock_binding = transport.snapshot()["gripper_controller"]["hardware_execution"]["clock_binding"]
-            (root / "clock.json").write_text(json.dumps(clock_binding))
+            hardware_key = "gripper_temporal_policy" if causal else "gripper_source_clock"
+            binding_path = root / ("temporal.json" if causal else "clock.json")
+            binding_path.write_text(json.dumps(clock_binding))
             native = Native()
             native.policy_dir = root
             value = {**payload(mode), "run_id": "run",
                      "job": validated["normalized_job"], "urdf": str(root / "robot.urdf"),
-                     "learned_checkpoint": str(root), "gripper_source_clock": str(root / "clock.json")}
+                     "learned_checkpoint": str(root), hardware_key: str(binding_path)}
             if mode == "live":
                 value.update(run_root=str(root / "runs"), dataset_root=str(root / "unused-dataset"), camera_profile="up-wrist")
             value = run_job._run_payload(value)
@@ -324,6 +339,8 @@ class FinitePlanTest(unittest.TestCase):
             self.assertEqual(plan["learned_proposal"]["runtime_inputs"]["device"], "cpu")
             self.assertEqual(plan["learned_proposal"]["runtime_inputs"]["warmup"]["output_disposition"], "DISCARDED")
             self.assertEqual(plan["learned_proposal"]["runtime_inputs"]["clock_binding"], clock_binding)
+            self.assertEqual(plan["learned_proposal"]["runtime_inputs"]["hardware_wire_version"], 3 if causal else 2)
+            self.assertEqual(plan["learned_proposal"]["runtime_inputs"][hardware_key], str(binding_path))
             self.assertEqual(result["data"]["task_effectiveness"], "UNKNOWN")
 
     def make_held_job(self, initial_feedback=.021, *, controller_samples=True, arm_target=.001):

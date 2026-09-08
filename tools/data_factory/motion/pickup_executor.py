@@ -1940,7 +1940,9 @@ def main(argv=None):
     parser.add_argument("--robot-system-id")
     parser.add_argument("--cell-state-root")
     parser.add_argument("--phase-events-root")
-    parser.add_argument("--gripper-source-clock", help="Read a measured same-incarnation clock binding for learned held targets")
+    hardware_binding = parser.add_mutually_exclusive_group()
+    hardware_binding.add_argument("--gripper-source-clock", help="Read a measured same-incarnation clock binding for learned held targets")
+    hardware_binding.add_argument("--gripper-temporal-policy", help="Read an explicit same-incarnation live causal-evidence policy")
     parser.add_argument("--motion-only-binding-digest")
     parser.add_argument("--motion-only-parent-run-id")
     parser.add_argument("--motion-only-parent-plan-digest")
@@ -1984,13 +1986,19 @@ def main(argv=None):
         cell_state_store = None
         scene_state_store = None
     gripper_source_clock = None
-    if args.gripper_source_clock:
+    gripper_temporal_policy = None
+    if args.gripper_source_clock or args.gripper_temporal_policy:
         if not (args.ros_live or args.ros_plan_only):
-            parser.error("--gripper-source-clock requires a ROS transport")
+            parser.error("gripper evidence configuration requires a ROS transport")
         try:
-            from tools.data_factory.rollout.gripper_evidence import validate_clock_binding
-            with open(args.gripper_source_clock, encoding="utf-8") as stream:
-                gripper_source_clock = validate_clock_binding(json.load(stream))
+            if args.gripper_temporal_policy:
+                from tools.data_factory.rollout.gripper_evidence import validate_temporal_policy
+                with open(args.gripper_temporal_policy, encoding="utf-8") as stream:
+                    gripper_temporal_policy = validate_temporal_policy(json.load(stream))
+            else:
+                from tools.data_factory.rollout.gripper_evidence import validate_clock_binding
+                with open(args.gripper_source_clock, encoding="utf-8") as stream:
+                    gripper_source_clock = validate_clock_binding(json.load(stream))
         except (OSError, ValueError, ContractError) as exc:
             parser.error(str(exc))
     transport = None
@@ -2015,6 +2023,8 @@ def main(argv=None):
                 node, allow_clock_configuration=args.ros_live,
                 **({"gripper_source_clock": gripper_source_clock}
                    if gripper_source_clock is not None else {}),
+                **({"gripper_temporal_policy": gripper_temporal_policy}
+                   if gripper_temporal_policy is not None else {}),
             )
         except (ContractError, ImportError, RuntimeError) as exc:
             print(

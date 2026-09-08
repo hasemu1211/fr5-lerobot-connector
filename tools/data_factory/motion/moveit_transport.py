@@ -119,7 +119,7 @@ class RosMoveItTransport:
 
     def __init__(
         self, node, *, graph_timeout_s=1.0, preflight_timeout_s=5.0,
-        clock=time.monotonic, gripper_source_clock=None, allow_clock_configuration=False,
+        clock=time.monotonic, gripper_source_clock=None, gripper_temporal_policy=None, allow_clock_configuration=False,
     ):
         try:
             import rclpy
@@ -206,8 +206,13 @@ class RosMoveItTransport:
         self._gripper_hardware_state = None
         self._gripper_hardware_received_at = None
         from tools.data_factory.rollout.gripper_evidence import validate_clock_binding
+        if gripper_source_clock is not None and gripper_temporal_policy is not None:
+            raise ContractError("LEARNED_RUN_INPUTS")
         self._gripper_source_clock = (validate_clock_binding(gripper_source_clock)
                                       if gripper_source_clock is not None else None)
+        if gripper_temporal_policy is not None:
+            from tools.data_factory.rollout.gripper_evidence import validate_temporal_policy
+            self._gripper_source_clock = validate_temporal_policy(gripper_temporal_policy)
         self._allow_clock_configuration = allow_clock_configuration is True
         self._native_clock_configured_age = None
         self._AsyncParameterClient = AsyncParameterClient
@@ -280,29 +285,38 @@ class RosMoveItTransport:
             raise ContractError("LEARNED_HARDWARE_CLOCK_BINDING")
         from rclpy.parameter import Parameter
         from tools.data_factory.rollout.gripper_evidence import native_clock_parameter, decode_dynamic_state, identity
+        causal = self._gripper_source_clock["schema_version"] == "fr5.gripper_temporal_policy.v1"
+        if causal and self._gripper_source_clock["max_age_s"] != max_age_s:
+            raise ContractError("LEARNED_HARDWARE_TEMPORAL_POLICY")
         deadline = time.monotonic() + self.preflight_timeout_s
         observed = None
         while time.monotonic() < deadline:
             if self._gripper_hardware_state is not None:
                 observed = decode_dynamic_state(self._gripper_hardware_state, self._gripper_source_clock,
                                                 self._gripper_hardware_received_at)
-                if observed["wire"]["version"] in (1, 2):
+                if observed["wire"]["version"] in (1, 2, 3):
                     break
             self._rclpy.spin_once(self.node, timeout_sec=.01)
         if observed is None:
             raise ContractError("LEARNED_HARDWARE_CLOCK_BINDING")
-        if (observed["wire"]["version"] != 2 or observed["wire"]["stopped"] or observed["wire"]["error"]
+        if ((not causal and observed["wire"]["version"] != 2) or observed["wire"]["stopped"] or observed["wire"]["error"]
                 or identity(observed["wire"]) != self._gripper_source_clock["incarnation"]):
             raise ContractError("LEARNED_HARDWARE_INCARNATION")
         client = self._AsyncParameterClient(self.node, "/fr5system")
         if not client.wait_for_services(timeout_sec=self.graph_timeout_s):
             raise ContractError("LEARNED_HARDWARE_CLOCK_BINDING")
-        expected = native_clock_parameter(self._gripper_source_clock, max_age_s)
-        result = self._wait(client.set_parameters_atomically([Parameter("gripper_source_clock_v1", value=expected)]),
+        parameter_name = "gripper_source_clock_v1"
+        if causal:
+            from tools.data_factory.rollout.gripper_evidence import native_temporal_parameter
+            expected = native_temporal_parameter(self._gripper_source_clock)
+            parameter_name = "gripper_temporal_policy_v1"
+        else:
+            expected = native_clock_parameter(self._gripper_source_clock, max_age_s)
+        result = self._wait(client.set_parameters_atomically([Parameter(parameter_name, value=expected)]),
                             self.graph_timeout_s, "LEARNED_HARDWARE_CLOCK_BINDING")
         if not result.result.successful:
             raise ContractError("LEARNED_HARDWARE_CLOCK_BINDING")
-        readback = self._wait(client.get_parameters(["gripper_source_clock_v1"]),
+        readback = self._wait(client.get_parameters([parameter_name]),
                               self.graph_timeout_s, "LEARNED_HARDWARE_CLOCK_BINDING")
         if len(readback.values) != 1 or list(readback.values[0].double_array_value) != expected:
             raise ContractError("LEARNED_HARDWARE_CLOCK_BINDING")
@@ -317,7 +331,8 @@ class RosMoveItTransport:
         try:
             hw = self._gripper_hardware_evidence()
             check_current_bracket(hw["wire"], time.time(), self._clock(), max_age_s)
-            return hw["wire"]["version"] == 2 and hw["wire"]["valid"] == 1
+            version = 3 if self._gripper_source_clock["schema_version"] == "fr5.gripper_temporal_policy.v1" else 2
+            return hw["wire"]["version"] == version and hw["wire"]["valid"] == 1
         except (ContractError, TypeError, KeyError):
             return False
 

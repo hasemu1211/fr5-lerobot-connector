@@ -257,15 +257,16 @@ class Test(unittest.TestCase):
    for args in (("--factory-jsonl","--ros-live"),("--factory-jsonl","--ros-plan-only","--ros-live"),("--factory-jsonl","--robot-system-id","fr5-lab-a")):
     with self.subTest(args=args),self.assertRaises(SystemExit) as caught:e.main(args)
     self.assertEqual(caught.exception.code,2)
-  created=[];stores=[];clock_configuration=[]
+  created=[];stores=[];clock_configuration=[];temporal_configuration=[]
   fail_destroy=[False];fail_transport=[False];ros_ok=[False]
   class Node:
    def destroy_node(self):
     created.append("destroyed")
     if fail_destroy[0]:raise RuntimeError("destroy")
   class Transport:
-   def __init__(self,node,*,allow_clock_configuration=False):
+   def __init__(self,node,*,allow_clock_configuration=False,gripper_temporal_policy=None):
     clock_configuration.append(allow_clock_configuration)
+    temporal_configuration.append(gripper_temporal_policy)
     created.append(node)
     if fail_transport[0]:raise e.ContractError("TRANSPORT")
   class Store:
@@ -285,6 +286,12 @@ class Test(unittest.TestCase):
    with mock.patch.object(e,"run_jsonl",return_value=True):
     self.assertEqual(e.main(("--factory-jsonl","--ros-plan-only")),0)
    self.assertIs(clock_configuration[-1],False);self.assertEqual(stores,[])
+   policy={"schema_version":"fr5.gripper_temporal_policy.v1","incarnation":[1,2,3,4],"max_age_s":.3,"host_clock_tolerance_s":.001}
+   with mock.patch("builtins.open",mock.mock_open(read_data=__import__("json").dumps(policy))),mock.patch.object(e,"run_jsonl",return_value=True):
+    self.assertEqual(e.main(("--factory-jsonl","--ros-plan-only","--gripper-temporal-policy","/synthetic/policy.json")),0)
+    self.assertEqual((clock_configuration[-1],temporal_configuration[-1],stores),(False,policy,[]))
+    self.assertEqual(e.main(("--factory-jsonl","--ros-live","--robot-system-id","fr5-lab-a","--cell-state-root","/tmp/cells","--phase-events-root","/tmp/runs","--gripper-temporal-policy","/synthetic/policy.json")),0)
+    self.assertEqual((clock_configuration[-1],temporal_configuration[-1]),(True,policy))
    created.clear();fail_destroy[0]=False;fail_transport[0]=True
    self.assertEqual(e.main(("--factory-jsonl","--ros-live","--robot-system-id","fr5-lab-a","--cell-state-root","/tmp/cells","--phase-events-root","/tmp/runs")),2)
    self.assertEqual(__import__("json").loads(errors.getvalue().splitlines()[-1])["error"]["code"],"ROS_LIVE_UNAVAILABLE")

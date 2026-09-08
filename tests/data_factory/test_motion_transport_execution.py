@@ -460,6 +460,54 @@ if __name__ == "__main__":
     unittest.main()
 
 class NativeClockPreparationTest(unittest.TestCase):
+    def test_causal_bootstrap_binds_identity_not_legacy_readiness_and_keeps_plan_only_read_only(self):
+        from control_msgs.msg import DynamicJointState, InterfaceValue
+        from tools.data_factory.rollout.gripper_evidence import FIELDS, CAUSAL_FIELDS, RESOURCE, native_temporal_parameter
+        from tools.data_factory.motion.moveit_transport import RosMoveItTransport
+        policy = {"schema_version": "fr5.gripper_temporal_policy.v1", "incarnation": [1, 2, 3, 4],
+                  "max_age_s": .3, "host_clock_tolerance_s": .001}
+        for mode in ("live", "legacy_identity", "plan_only", "wrong_incarnation", "wrong_age", "readback_mismatch"):
+            with self.subTest(mode=mode):
+                t = object.__new__(RosMoveItTransport)
+                t._gripper_source_clock = policy
+                t._allow_clock_configuration = mode != "plan_only"
+                t._native_clock_configured_age = None
+                t.preflight_timeout_s = t.graph_timeout_s = .1
+                t.node = SimpleNamespace()
+                names = FIELDS if mode == "legacy_identity" else CAUSAL_FIELDS
+                wire = dict.fromkeys(names, 0.)
+                wire.update(version=1. if mode == "legacy_identity" else 3., incarnation_0=99. if mode == "wrong_incarnation" else 1.,
+                            incarnation_1=2., incarnation_2=3., incarnation_3=4.)
+                t._gripper_hardware_state = DynamicJointState(joint_names=[RESOURCE], interface_values=[InterfaceValue(
+                    interface_names=list(names), values=[wire[k] for k in names])])
+                t._gripper_hardware_received_at = 10.
+                configured = []
+                def set_parameters(parameters):
+                    configured.append((parameters[0].name, parameters[0].value))
+                    return SimpleNamespace(result=SimpleNamespace(successful=True))
+                def get_parameters(names):
+                    self.assertEqual(names, ["gripper_temporal_policy_v1"])
+                    return SimpleNamespace(values=[SimpleNamespace(double_array_value=
+                        [] if mode == "readback_mismatch" else configured[-1][1])])
+                client = SimpleNamespace(wait_for_services=lambda **_: True,
+                    set_parameters_atomically=set_parameters, get_parameters=get_parameters)
+                t._AsyncParameterClient = lambda *_: client
+                t._wait = lambda result, *_: result
+                if mode in ("wrong_incarnation", "wrong_age", "readback_mismatch"):
+                    with self.assertRaises(ContractError):
+                        t._prepare_native_clock(.2 if mode == "wrong_age" else .3)
+                else:
+                    t._prepare_native_clock(.3)
+                self.assertEqual(len(configured), int(mode in ("live", "legacy_identity", "readback_mismatch")))
+                if configured:
+                    self.assertEqual(configured[0], ("gripper_temporal_policy_v1", native_temporal_parameter(policy)))
+                if mode in ("live", "legacy_identity"):
+                    t._prepare_native_clock(.3)
+                    self.assertEqual(len(configured), 1)
+                # Identity plus parameter readback is not a fresh controller certificate.
+                t._clock = lambda: 10.
+                self.assertFalse(t._native_current_ready(.3))
+
     def test_only_live_preparation_sets_and_reads_back_same_incarnation(self):
         from control_msgs.msg import DynamicJointState, InterfaceValue
         from tools.data_factory.rollout.gripper_evidence import LIVE_FIELDS, RESOURCE

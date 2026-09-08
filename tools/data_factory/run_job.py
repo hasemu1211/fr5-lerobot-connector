@@ -137,7 +137,7 @@ DESTINATION_KEYS = {
     "job", "selected_sheet", "yaw0_sheet", "motion_qualification",
 }
 LIVE_RUN_KEYS = COMMON_RUN_KEYS | {"camera_profile", "dataset_root", "run_root"}
-LEARNED_RUN_KEYS = {"learned_checkpoint", "gripper_source_clock", "learned_device"}
+LEARNED_RUN_KEYS = {"learned_checkpoint", "gripper_source_clock", "gripper_temporal_policy", "learned_device"}
 RESPONSE_KEYS = {"schema_version", "op_id", "op", "ok", "code", "state", "run_id", "plan_digest", "data"}
 EVENT_KEYS = {"schema_version", "event", "sequence", "origin_op_id", "ok", "code", "state", "run_id", "plan_digest", "data"}
 EPISODE_LEDGER_CONTEXT_FIELDS = frozenset({"manifest", "intent"})
@@ -229,13 +229,14 @@ def _learned_options(value):
     supplied = set(value) & LEARNED_RUN_KEYS
     if not supplied:
         return None
-    if not {"learned_checkpoint", "gripper_source_clock"}.issubset(supplied):
+    hardware_keys = supplied & {"gripper_source_clock", "gripper_temporal_policy"}
+    if "learned_checkpoint" not in supplied or len(hardware_keys) != 1:
         raise ContractError("LEARNED_RUN_INPUTS")
     for key in supplied:
         _text(value[key], "LEARNED_RUN_INPUTS")
     if value.get("learned_device", "cpu") not in {"cpu", "cuda"}:
         raise ContractError("LEARNED_RUN_INPUTS")
-    return {"checkpoint": value["learned_checkpoint"], "gripper_source_clock": value["gripper_source_clock"],
+    return {"checkpoint": value["learned_checkpoint"], **{key: value[key] for key in hardware_keys},
             "device": value.get("learned_device", "cpu")}
 
 
@@ -858,10 +859,13 @@ def _bind_trajectory_to_planned_program(
     )
 
 
-def _executor(timeout_s, *, gripper_source_clock=None):
+def _executor(timeout_s, *, gripper_source_clock=None, gripper_temporal_policy=None):
+    if gripper_source_clock is not None and gripper_temporal_policy is not None:
+        raise ContractError("LEARNED_RUN_INPUTS")
     return JsonlProcess(
         [sys.executable, "-u", str(ROOT / "tools/data_factory/motion/pickup_executor.py"), "--factory-jsonl", "--ros-plan-only"]
-        + (["--gripper-source-clock", str(gripper_source_clock)] if gripper_source_clock is not None else []),
+        + (["--gripper-source-clock", str(gripper_source_clock)] if gripper_source_clock is not None else [])
+        + (["--gripper-temporal-policy", str(gripper_temporal_policy)] if gripper_temporal_policy is not None else []),
         timeout_s=timeout_s,
     )
 
@@ -874,8 +878,8 @@ def _live_executor(payload, timeout_s, *, cell_root=None):
             "--factory-jsonl", "--ros-live", "--robot-system-id", payload["expected_robot_system_id"],
             "--cell-state-root", str(cell_root),
             "--phase-events-root", payload["run_root"],
-        ] + (["--gripper-source-clock", payload["gripper_source_clock"]]
-             if "learned_checkpoint" in payload else []),
+        ] + [item for key in ("gripper_source_clock", "gripper_temporal_policy") if key in payload
+             for item in ("--" + key.replace("_", "-"), payload[key])],
         timeout_s=timeout_s,
     )
 
@@ -2418,16 +2422,23 @@ def _native_run_inputs(payload, profile, cancel, *, instruction):
     warmup = native.warmup(instruction=instruction, height=profile["height"], width=profile["width"], cancel_event=cancel)
     if cancel.is_set():
         raise ContractError("LEARNED_CANCELLED")
-    # Read after preparation; never extend a measured command calibration.
-    binding = validate_clock_binding(load_json_strict(Path(options["gripper_source_clock"])))
+    # Bind the explicitly selected protocol after preparation. A temporal policy
+    # does not fabricate or renew an archived controller-clock calibration.
+    causal = "gripper_temporal_policy" in options
+    key = "gripper_temporal_policy" if causal else "gripper_source_clock"
+    validator = validate_clock_binding
+    if causal:
+        from tools.data_factory.rollout.gripper_evidence import validate_temporal_policy
+        validator = validate_temporal_policy
+    binding = validator(load_json_strict(Path(options[key])))
     inputs = {**options, "clock_binding": binding, "camera_topics": topics,
-              "camera_mapping": mapping, "fps": profile["fps"], "warmup": warmup, "hardware_wire_version": 2}
+              "camera_mapping": mapping, "fps": profile["fps"], "warmup": warmup, "hardware_wire_version": 3 if causal else 2}
     return native, inputs
 
 
 def run_learned_plan_only(payload, cancel, publish, *, checkpoint, observation=None, camera_topics=None,
                           instruction, period_s, max_observation_age_s=.3,
-                          device="cpu", held_gripper_targets=False, gripper_source_clock=None,
+                          device="cpu", held_gripper_targets=False, gripper_source_clock=None, gripper_temporal_policy=None,
                           resolver=resolve_inputs, executor_factory=_executor):
     """Native checkpoint-to-existing-planner entry point; no recorder or motion.
 
@@ -2439,8 +2450,9 @@ def run_learned_plan_only(payload, cancel, publish, *, checkpoint, observation=N
     """
     from tools.data_factory.learned_action_adapter import NativeSmolVLA
     def acquire_child(timeout_s):
-        return executor_factory(timeout_s, **({"gripper_source_clock": gripper_source_clock}
-                                if gripper_source_clock is not None else {}))
+        return executor_factory(timeout_s, **{key: value for key, value in (
+            ("gripper_source_clock", gripper_source_clock), ("gripper_temporal_policy", gripper_temporal_policy))
+            if value is not None})
     child, transferred = None, False
     try:
         if observation is not None and camera_topics is not None:
@@ -2501,8 +2513,8 @@ def run_plan_only(payload, cancel, publish, *, resolver=resolve_inputs, executor
             "motion_program_digest": canonical_digest(program),
         }))
         timeout_s = _timeout_s(program)
-        executor = executor_factory(timeout_s, **({"gripper_source_clock": learned["gripper_source_clock"]}
-                                    if learned is not None else {}))
+        executor = executor_factory(timeout_s, **({key: learned[key] for key in
+            ("gripper_source_clock", "gripper_temporal_policy") if key in learned} if learned is not None else {}))
         try:
             if native is not None:
                 program = _infer_native_program(native, program, executor, cancel,
@@ -5189,6 +5201,7 @@ def _parser():
     parser.add_argument("--mode", choices=("plan_only", "live"), default="plan_only")
     parser.add_argument("--learned-checkpoint", help="Explicitly prepare one admitted finite learned plan")
     parser.add_argument("--gripper-source-clock", help="Existing measured hardware source-clock binding JSON")
+    parser.add_argument("--gripper-temporal-policy", help="Explicit live causal-evidence policy JSON; mutually exclusive with source-clock binding")
     parser.add_argument("--learned-device", choices=("cpu", "cuda"), help="Assigned inference device; defaults to cpu")
     for name in ("run-id", "job", "selected-sheet", "yaw0-sheet", "config-root", "motion-qualification", "home-candidate", "urdf", "expected-robot-system-id", "camera-profile", "dataset-root", "run-root"):
         parser.add_argument(f"--{name}")

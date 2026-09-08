@@ -135,9 +135,14 @@ class RunJobTest(unittest.TestCase):
         valid = {**base, "learned_checkpoint": "/synthetic/checkpoint", "gripper_source_clock": "/synthetic/clock.json"}
         self.assertEqual(run_job._run_payload(base), base)
         self.assertEqual(run_job._run_payload(valid), valid)
+        causal = {**base, "learned_checkpoint": "/synthetic/checkpoint", "gripper_temporal_policy": "/synthetic/temporal.json"}
+        self.assertEqual(run_job._run_payload(causal), causal)
+        self.assertEqual(run_job._learned_options(causal), {"checkpoint": "/synthetic/checkpoint", "device": "cpu",
+                         "gripper_temporal_policy": "/synthetic/temporal.json"})
         invalid = [{**base, "learned_device": "cuda"}, {**base, "learned_checkpoint": "/checkpoint"},
                    {**base, "gripper_source_clock": "/clock"}, {**valid, "learned_device": "auto"},
-                   {**valid, "learned_checkpoint": ""}]
+                   {**valid, "learned_checkpoint": ""}, {**valid, "gripper_temporal_policy": "/policy"},
+                   {**base, "gripper_temporal_policy": "/policy"}, {**causal, "gripper_temporal_policy": ""}]
         for value in invalid:
             with self.subTest(value=value), mock.patch.object(run_job, "run_live") as live:
                 session = run_job.RunSession()
@@ -176,6 +181,21 @@ class RunJobTest(unittest.TestCase):
         self.assertEqual(child.call_args.args[0][-2:], ["--gripper-source-clock", "/synthetic/measured-clock.json"])
         self.assertIn("--ros-plan-only", child.call_args.args[0])
         self.assertNotIn("--ros-live", child.call_args.args[0])
+
+    def test_temporal_policy_is_explicit_in_cli_and_both_executor_modes(self):
+        args = run_job._parser().parse_args(["--gripper-temporal-policy", "/synthetic/temporal.json"])
+        self.assertEqual(args.gripper_temporal_policy, "/synthetic/temporal.json")
+        with mock.patch.object(run_job, "JsonlProcess") as child:
+            run_job._executor(3., gripper_temporal_policy="/synthetic/temporal.json")
+            self.assertIn("--ros-plan-only", child.call_args.args[0])
+            self.assertEqual(child.call_args.args[0][-2:], ["--gripper-temporal-policy", "/synthetic/temporal.json"])
+            run_job._live_executor({**payload("live"), "learned_checkpoint": "/checkpoint",
+                                   "gripper_temporal_policy": "/synthetic/temporal.json"}, 3.)
+            self.assertIn("--ros-live", child.call_args.args[0])
+            self.assertEqual(child.call_args.args[0][-2:], ["--gripper-temporal-policy", "/synthetic/temporal.json"])
+        with mock.patch.object(run_job, "JsonlProcess") as child, self.assertRaisesRegex(run_job.ContractError, "LEARNED_RUN_INPUTS"):
+            run_job._executor(3., gripper_temporal_policy="/policy", gripper_source_clock="/clock")
+        child.assert_not_called()
 
     def test_native_observation_failure_and_cancellation_close_the_same_child(self):
         from tools.data_factory.learned_action_adapter import NativeSmolVLA
