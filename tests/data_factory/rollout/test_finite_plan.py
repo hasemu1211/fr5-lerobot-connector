@@ -90,8 +90,21 @@ class Transport(T):
                         feedback_m=self.current[-1], arm_resumed=1., valid=1.)
             date = datetime.fromtimestamp(now - .002, timezone.utc)
             wire.update(zip(CALENDAR, [date.year, date.month, date.day, date.hour, date.minute, date.second, date.microsecond // 1000]))
+            names = FIELDS
+            if getattr(self, "hardware_current", False):
+                from tools.data_factory.rollout.gripper_evidence import LIVE_FIELDS, CURRENT_FIELDS, calendar_s
+                names = LIVE_FIELDS
+                wire.update(dict.fromkeys(CURRENT_FIELDS, 0.))
+                wire.update(version=2., current_valid=1., query_before_controller_s=now-.006,
+                            query_after_controller_s=now, query_before_system_s=now-.006,
+                            query_before_steady_s=now-.006, query_after_system_s=now,
+                            query_after_steady_s=now, current_max_age_s=.3, host_clock_tolerance_s=.001,
+                            certificate_frame=wire["frame"], certificate_source_s=calendar_s(wire),
+                            certificate_sample_system_s=now, certificate_sample_steady_s=now,
+                            certificate_generation=0., certificate_incarnation_0=1., certificate_incarnation_1=2.,
+                            certificate_incarnation_2=3., certificate_incarnation_3=4.)
             packet = DynamicJointState(joint_names=[RESOURCE], interface_values=[InterfaceValue(
-                interface_names=list(FIELDS), values=[float(wire[k]) for k in FIELDS])])
+                interface_names=list(names), values=[float(wire[k]) for k in names])])
             binding = {"schema_version": "fr5.gripper_source_clock.v1", "incarnation": [1, 2, 3, 4],
                        "calendar_to_system_offset_s": 0., "uncertainty_s": .001,
                        "system_anchor_s": 9., "steady_anchor_s": 9., "valid_until_system_s": 100.}
@@ -195,6 +208,7 @@ class FinitePlanTest(unittest.TestCase):
         calls, closed, observed_requests = [], [], []
         transport, cell, scene = Transport(), Cell(), Scene()
         transport.hardware = True
+        transport.hardware_current = True
         def capture(topics, age):
             self.assertEqual(topics, {"camera1": "/up", "camera2": "/wrist"})
             self.assertEqual(age, .3)

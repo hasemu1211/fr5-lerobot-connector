@@ -56,8 +56,8 @@ class NativeGripperEvidenceTest(unittest.TestCase):
         header = patched_source("fairino_hardware_v3_9_7/include/fairino_hardware/gripper_execution_evidence.hpp")
         (path / "gripper_execution_evidence.hpp").write_text(header)
         source = patched_source("fairino_hardware_v3_9_7/src/fairino_hardware_interface.cpp")
-        native = (method(source, "gripper_worker") + method(source, "sample_gripper_evidence")
-                  + method(source, "gripper_release_ready") + method(source, "write"))
+        native = (method(source, "refresh_gripper_freshness") + method(source, "gripper_worker") + method(source, "sample_gripper_evidence")
+                  + method(source, "gripper_release_ready") + method(source, "write") + method(source, "stop_gripper_worker"))
         fixture = Path(__file__).with_name("gripper_native_fixture.cpp").read_text()
         (path / "native.cpp").write_text(fixture.replace("// NATIVE_METHODS", native))
         cls.binary = path / "native"
@@ -127,6 +127,38 @@ class NativeGripperEvidenceTest(unittest.TestCase):
             with self.subTest(scenario=scenario):
                 self.run_native(scenario)
 
+    def test_off_target_old_done_needs_command_activity_or_dwell(self):
+        # Reuse the actual worker with only device telemetry varied. No ROS/network.
+        fixture = Path(__file__).with_name("gripper_native_fixture.cpp").read_text().split("int main(")[0]
+        source = patched_source("fairino_hardware_v3_9_7/src/fairino_hardware_interface.cpp")
+        native = "\n".join(method(source, name) for name in (
+            "refresh_gripper_freshness", "gripper_worker", "sample_gripper_evidence",
+            "gripper_release_ready", "write", "stop_gripper_worker"))
+        main = r'''int main(int argc,char **argv) {
+          using namespace fairino_hardware;
+          FairinoHardwareInterface h; auto &r=*h._ptr_robot;
+          r.clock_mode=true; r.terminal_scenario=std::stoi(argv[1]);
+          if(r.terminal_scenario==4) h._pending_gripper_position=100;
+          h._gripper_evidence.activate(); h._gripper_max_time=160; h._gripper_settle_time_ms=500;
+          h._gripper_thread=std::thread([&]{h.gripper_worker();});
+          auto until=std::chrono::steady_clock::now()+std::chrono::milliseconds(300);
+          while(h._arm_stream_paused && !h._gripper_error && std::chrono::steady_clock::now()<until)
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+          const bool completed=h._gripper_evidence.completed==1;
+          h.stop_gripper_worker();
+          assert(completed==(r.terminal_scenario==2 || r.terminal_scenario==4));
+          assert(r.resumes==int(completed));
+        }'''
+        with tempfile.TemporaryDirectory() as directory:
+            path=Path(directory)
+            (path/"gripper_execution_evidence.hpp").write_text(patched_source(
+                "fairino_hardware_v3_9_7/include/fairino_hardware/gripper_execution_evidence.hpp"))
+            (path/"worker.cpp").write_text(fixture.replace("// NATIVE_METHODS",native)+main)
+            subprocess.run(["g++","-std=c++17","-pthread",str(path/"worker.cpp"),"-o",str(path/"worker")],check=True,capture_output=True)
+            for scenario in (1,2,3,4):
+                with self.subTest(scenario=scenario):
+                    subprocess.run([str(path/"worker"),str(scenario)],check=True,timeout=2,capture_output=True)
+
     def test_invalid_clock_file_rejects_before_ros_initialization(self):
         from tools.data_factory.motion.pickup_executor import main
         with tempfile.TemporaryDirectory() as directory:
@@ -142,7 +174,9 @@ class NativeGripperEvidenceTest(unittest.TestCase):
         from control_msgs.msg import DynamicJointState, InterfaceValue
         from rclpy.serialization import deserialize_message, serialize_message
         for scenario in ("completed", "cached"):
-            packet = self.run_native(scenario)
+            packet = self.run_native("completed")
+            if scenario == "cached":
+                packet["wire"][28:35] = [1970.,1.,1.,0.,0.,9.,0.]
             message = DynamicJointState(joint_names=[RESOURCE], interface_values=[InterfaceValue(
                 interface_names=packet["names"], values=packet["wire"])])
             self.assertEqual(tuple(packet["names"]), FIELDS)

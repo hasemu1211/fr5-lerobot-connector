@@ -33,6 +33,7 @@ struct Robot {
   JointPos last_arm;
   bool stale=false,settled=false,clock_mode=false,delayed=false;
   int delay_ms=10;
+  int terminal_scenario=0;
   std::function<void()> initial_hook,move_hook,poll_hook,resume_hook;
   ROBOT_STATE_PKG state;
   void source_now() {
@@ -46,8 +47,15 @@ struct Robot {
     if (!moves) { if(clock_mode)source_now();if(initial_hook){auto f=std::move(initial_hook);initial_hook=nullptr;f();} }
     else {
       ++polls; state.gripper_position=target+(settled?1:0);state.gripper_motiondone=settled?0:1;
-      if(!stale && !(delayed && polls==1)){if(clock_mode)source_now();else state.robotTime.millisecond=100;state.frame_cnt=2;}
+      if(!stale && !(delayed && polls==1)){if(clock_mode)source_now();else state.robotTime.millisecond=100+polls;state.frame_cnt=2;}
       if(poll_hook){auto f=std::move(poll_hook);poll_hook=nullptr;f();}
+    }
+    if(!moves && terminal_scenario==4) state.gripper_position=99;
+    if(moves && terminal_scenario) {
+      if(terminal_scenario==1 || terminal_scenario==2) state.gripper_position=100;
+      if(terminal_scenario==2) state.gripper_motiondone=polls<3?0:1;
+      if(terminal_scenario==4) {state.gripper_position=99;state.gripper_motiondone=1;}
+      if(terminal_scenario==3) {state.gripper_position=80;state.gripper_motiondone=1;}
     }
     *p=state;return 0;
   }
@@ -63,7 +71,15 @@ struct Result {int send_error=0,controller_error=0;bool reply_received=true;bool
 template<class F> Result send_udp_command_and_observe(F f){return {f(),0,true};}
 struct Parameter {std::vector<double> values;std::vector<double> as_double_array()const{return values;}};
 struct Node {Parameter parameter;Parameter get_parameter(const char *)const{return parameter;}};
+struct PreciseControllerClock {
+  double read(long, const std::function<bool()> &cancel) {
+    if(cancel()) throw std::runtime_error("cancelled");
+    return std::chrono::duration<double>(std::chrono::system_clock::now().time_since_epoch()).count();
+  }
+};
 struct FairinoHardwareInterface {
+  std::thread _gripper_thread;
+  void stop_gripper_worker();
   std::mutex _gripper_mutex;
   std::condition_variable _gripper_cv;
   bool _stop_gripper_thread=false;
@@ -85,6 +101,11 @@ struct FairinoHardwareInterface {
   std::vector<double> _jnt_position_command{.01,-.02,.03,-.04,.05,-.06,.01176};
   std::vector<double> _jnt_torque_command=std::vector<double>(7,0.);
   GripperSourceClock _gripper_source_clock;
+  std::unique_ptr<PreciseControllerClock> _precise_clock;
+  std::array<double,35> _gripper_raw_sample{};
+  std::array<double,67> _gripper_current_sample{};
+  double _last_controller_clock=0.;
+  bool refresh_gripper_freshness();
   std::shared_ptr<Node> node=std::make_shared<Node>();
   auto get_node(){return node;}
   std::array<double,GripperExecutionEvidence::names.size()> _gripper_evidence_values{};
@@ -112,8 +133,8 @@ int main(int argc,char **argv) {
     }
     if(mode=="clock_rebind_expired")r.move_hook=[&]{h.node->parameter.values[9]+=10.;};
     if(mode=="clock_late_resume"){
-      h.node->parameter.values[9]=h.node->parameter.values[7]+.03;
-      r.resume_hook=[]{std::this_thread::sleep_for(std::chrono::milliseconds(40));};
+      h.node->parameter.values[9]=h.node->parameter.values[7]+.12;
+      r.resume_hook=[]{std::this_thread::sleep_for(std::chrono::milliseconds(140));};
     }
     if(mode=="clock_wrong_incarnation")h.node->parameter.values[1]=99.;
     if(mode=="clock_fractional_incarnation")h.node->parameter.values[1]+=.25;
@@ -165,7 +186,7 @@ int main(int argc,char **argv) {
     if(mode=="clock_limit")assert(h._gripper_command_generation==1 && h._last_gripper_command==.01176 && r.arm_sends==0);
   }
   stop();worker.join();assert(finished);
-  bool success=mode=="completed" || mode=="settled" || mode=="cached" || mode=="superseded" ||
+  bool success=mode=="completed" || mode=="settled" || mode=="superseded" ||
     mode=="clock_fresh" || mode=="clock_delayed_fresh" || mode=="clock_max_incarnation" || mode=="clock_superseded" || mode=="clock_stale_read" || mode=="clock_wrong_incarnation_read" || mode=="clock_limit";
   assert((h._gripper_evidence.completed!=0)==success);
   if(mode=="stop_before_move" || mode=="error_before_move")assert(r.moves==0 && r.resumes==0);
@@ -186,9 +207,9 @@ int main(int argc,char **argv) {
   h.sample_gripper_evidence();assert(h._gripper_evidence_values[25]==1.);
   auto old=h._gripper_evidence.incarnation;
   auto values=h._gripper_evidence.snapshot(h._gripper_command_generation,.01176,10.2,20.2,r.state,.021,false,false,!success,false,h._gripper_error,true);
-  if(guarded && success)values=native_values;
+  if(guarded && success)std::copy_n(native_values.begin(),35,values.begin());
   std::cout<<std::setprecision(17)<<"{\"moves\":"<<r.moves<<",\"resumes\":"<<r.resumes<<",\"arm_sends\":"<<r.arm_sends<<",\"released\":"<<(released?"true":"false")<<",\"wire\":[";
   for(size_t i=0;i<values.size();++i){if(i)std::cout<<",";std::cout<<values[i];}std::cout<<"],\"names\":[";
-  for(size_t i=0;i<GripperExecutionEvidence::names.size();++i){if(i)std::cout<<",";std::cout<<"\""<<GripperExecutionEvidence::names[i]<<"\"";}std::cout<<"]}\n";
+  for(size_t i=0;i<35;++i){if(i)std::cout<<",";std::cout<<"\""<<GripperExecutionEvidence::names[i]<<"\"";}std::cout<<"]}\n";
   h._gripper_evidence.activate();assert(h._gripper_evidence.incarnation!=old && h._gripper_evidence.completed==0);
 }

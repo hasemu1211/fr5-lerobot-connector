@@ -89,7 +89,7 @@ index c793c2a..fe3ad76 100644
 diff --git a/fairino_hardware_v3_9_7/include/fairino_hardware/fairino_hardware_interface.hpp b/fairino_hardware_v3_9_7/include/fairino_hardware/fairino_hardware_interface.hpp
 --- a/fairino_hardware_v3_9_7/include/fairino_hardware/fairino_hardware_interface.hpp
 +++ b/fairino_hardware_v3_9_7/include/fairino_hardware/fairino_hardware_interface.hpp
-@@ -2,43 +2,62 @@
+@@ -2,43 +2,63 @@
  #define _FR_HARDWARE_INTERFACE_
  
  #include "rclcpp/rclcpp.hpp"
@@ -101,6 +101,7 @@ diff --git a/fairino_hardware_v3_9_7/include/fairino_hardware/fairino_hardware_i
  #include "visibility_control.h"
  #include <vector>
 +#include "gripper_execution_evidence.hpp"
++#include "precise_controller_clock.hpp"
 +#include <array>
 +#include <string>
 +#include <algorithm>
@@ -153,7 +154,7 @@ diff --git a/fairino_hardware_v3_9_7/include/fairino_hardware/fairino_hardware_i
    // hardware_interface::return_type prepare_command_mode_switch(
    //   const std::vector<std::string> & start_interfaces,
    //   const std::vector<std::string> & stop_interfaces) override;
-@@ -46,25 +65,57 @@
+@@ -46,25 +66,62 @@
    //   const std::vector<std::string>& start_interfaces,
    //   const std::vector<std::string>& stop_interfaces) override;
  
@@ -180,7 +181,12 @@ diff --git a/fairino_hardware_v3_9_7/include/fairino_hardware/fairino_hardware_i
 +  bool _is_gripper{false};
 +  bool _has_arm{false};
 +  bool _require_gripper_source_clock{false};
-+  GripperSourceClock _gripper_source_clock; // Command-pinned, under existing gripper mutex.
++  GripperSourceClock _gripper_source_clock; // Command-pinned; never renewed in flight.
++  std::unique_ptr<PreciseControllerClock> _precise_clock;
++  std::array<double, 35> _gripper_raw_sample{};
++  std::array<double, 67> _gripper_current_sample{};
++  double _last_controller_clock{0.};
++  bool refresh_gripper_freshness();
 +  std::array<size_t, 6> _arm_joint_indices{};
 +  size_t _gripper_joint_index{0};
 +  int _gripper_index{1};
@@ -387,7 +393,7 @@ diff --git a/fairino_hardware_v3_9_7/src/fairino_hardware_interface.cpp b/fairin
      //     info_.joints[i].name, hardware_interface::HW_IF_EFFORT, &_jnt_torque_state.at(i)));
    }
  
-+  if (_is_gripper) for (size_t i = 0; i < GripperExecutionEvidence::names.size(); ++i) {
++  if (_is_gripper) for (size_t i = 0; i < (_require_gripper_source_clock ? GripperExecutionEvidence::names.size() : 35); ++i) {
 +    state_interfaces.emplace_back(hardware_interface::StateInterface(
 +      "fr5_gripper_execution", GripperExecutionEvidence::names[i], &_gripper_evidence_values[i]));
 +  }
@@ -401,13 +407,14 @@ diff --git a/fairino_hardware_v3_9_7/src/fairino_hardware_interface.cpp b/fairin
    for (size_t i = 0; i < info_.joints.size(); ++i) {
      command_interfaces.emplace_back(hardware_interface::CommandInterface(
          info_.joints[i].name, hardware_interface::HW_IF_POSITION, &_jnt_position_command[i]));
-@@ -101,118 +239,706 @@
+@@ -101,118 +239,837 @@
  }
  
  
  
  hardware_interface::CallbackReturn FairinoHardwareInterface::on_activate(const rclcpp_lifecycle::State& previous_state)
  {
++    if (_require_gripper_source_clock && !_precise_clock) return hardware_interface::CallbackReturn::ERROR;
      using namespace std::chrono_literals;
      RCLCPP_INFO(rclcpp::get_logger("FairinoHardwareInterface"), "Starting ...please wait...");
      //做变量的初始化工作
@@ -505,6 +512,9 @@ diff --git a/fairino_hardware_v3_9_7/src/fairino_hardware_interface.cpp b/fairin
 +        _last_gripper_command = _jnt_position_command[_gripper_joint_index];
 +        _gripper_evidence.activate();
 +        _gripper_source_clock = GripperSourceClock{};
++        _gripper_raw_sample.fill(0.);
++        _gripper_current_sample.fill(0.);
++        _last_controller_clock = 0.;
 +        _gripper_command_generation = 0;
 +        _gripper_evidence_values.fill(0.);
 +        RCLCPP_INFO(rclcpp::get_logger("FairinoHardwareInterface"),
@@ -669,6 +679,8 @@ diff --git a/fairino_hardware_v3_9_7/src/fairino_hardware_interface.cpp b/fairin
 +    if (!node) return hardware_interface::CallbackReturn::ERROR;
 +    if (!node->has_parameter("gripper_source_clock_v1"))
 +        node->declare_parameter("gripper_source_clock_v1", std::vector<double>{});
++    try { _precise_clock = std::make_unique<PreciseControllerClock>(_controller_ip); }
++    catch (const std::exception &) { return hardware_interface::CallbackReturn::ERROR; }
 +    return hardware_interface::CallbackReturn::SUCCESS;
 +}
 +
@@ -718,6 +730,77 @@ diff --git a/fairino_hardware_v3_9_7/src/fairino_hardware_interface.cpp b/fairin
 +
 +
 +
++bool FairinoHardwareInterface::refresh_gripper_freshness()
++{
++    auto cancelled = [this] {
++        std::lock_guard<std::mutex> lock(_gripper_mutex);
++        return _stop_gripper_thread || _gripper_error.load() || udp_command_error.load();
++    };
++    if (cancelled() || !_precise_clock) return false;
++    GripperSourceClock policy;
++    try { policy = GripperSourceClock(get_node()->get_parameter("gripper_source_clock_v1").as_double_array()); }
++    catch (const std::exception &) { return false; }
++    const double age = policy.values[10];
++    if (!std::isfinite(age) || age <= 0. || policy.values[0] != 1. || policy.values[6] < 0.) return false;
++    {
++        std::lock_guard<std::mutex> lock(_gripper_mutex);
++        for (size_t i=0; i<4; ++i) if (policy.values[i+1] != double(_gripper_evidence.incarnation[i])) return false;
++        const auto &c = _gripper_current_sample;
++        const double now = std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
++        bool same = c[35] == 1. && c[5] == double(_gripper_command_generation.load()) && _gripper_raw_sample[27] == 1.;
++        for (size_t i : {size_t(6),size_t(7),size_t(8),size_t(21),size_t(22),size_t(23),size_t(24),size_t(25),size_t(26)})
++            same = same && c[i] == _gripper_raw_sample[i];
++        // Reuse only original certified time; reserve the remaining budget for renewal.
++        if (same && now-c[39] < age/4.) return true;
++    }
++    const double s0 = std::chrono::duration<double>(std::chrono::system_clock::now().time_since_epoch()).count();
++    const double m0 = std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
++    const auto timeout_ms = long(std::max(1., std::min(300., age * 250.)));
++    try {
++        const double q0 = _precise_clock->read(timeout_ms, cancelled);
++        if (q0 < _last_controller_clock) throw std::runtime_error("controller clock regressed");
++        std::array<double,35> sample{};
++        while (true) {
++            std::unique_lock<std::mutex> lock(_gripper_mutex);
++            if (_stop_gripper_thread || _gripper_error.load() || udp_command_error.load()) return false;
++            sample = _gripper_raw_sample;
++            const double now = std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
++            if (now - m0 >= age / 2.) return false;
++            std::array<double,7> stamp{sample[12],sample[13],sample[14],sample[15],sample[16],sample[17],sample[18]};
++            // One millisecond on either side excludes ambiguous calendar quantization ties.
++            if (sample[27] == 1. && GripperSourceClock::calendar(stamp) - .001 > q0 && sample[10] >= m0) break;
++            _gripper_cv.wait_for(lock, std::chrono::milliseconds(1));
++        }
++        const double q1 = _precise_clock->read(timeout_ms, cancelled);
++        const double m1 = std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
++        const double s1 = std::chrono::duration<double>(std::chrono::system_clock::now().time_since_epoch()).count();
++        if (q1 <= q0) throw std::runtime_error("controller clock regressed");
++        _last_controller_clock = q1;
++        std::lock_guard<std::mutex> lock(_gripper_mutex);
++        if (_stop_gripper_thread || _gripper_error.load() || udp_command_error.load() ||
++            sample[5] != double(_gripper_command_generation.load())) return false;
++        for (size_t i=0; i<4; ++i) if (sample[1+i] != double(_gripper_evidence.incarnation[i])) return false;
++        std::array<double,67> certificate{};
++        std::copy(sample.begin(), sample.end(), certificate.begin());
++        certificate[0]=2.; certificate[35]=1.; certificate[36]=q0; certificate[37]=q1;
++        certificate[38]=s0; certificate[39]=m0; certificate[40]=s1; certificate[41]=m1; certificate[42]=age;
++        certificate[43]=_gripper_evidence.completed == uint64_t(sample[5]) && sample[5]>0 && _gripper_evidence.proof_system>0 ? 1. : 0.;
++        certificate[44]=_gripper_evidence.proof_system; certificate[45]=_gripper_evidence.proof_steady;
++        std::copy(_gripper_evidence.proof_clock.begin(), _gripper_evidence.proof_clock.end(), certificate.begin()+46);
++        std::array<double,7> source_stamp{sample[12],sample[13],sample[14],sample[15],sample[16],sample[17],sample[18]};
++        certificate[57]=sample[19]; certificate[58]=GripperSourceClock::calendar(source_stamp);
++        certificate[59]=sample[9]; certificate[60]=sample[10]; certificate[61]=sample[5];
++        for(size_t i=0;i<4;++i) certificate[62+i]=sample[1+i];
++        certificate[66]=policy.values[6];
++        if (!current_gripper_fresh(certificate, s1, m1, age)) return false;
++        _gripper_current_sample = certificate;
++        return true;
++    } catch (const std::exception &) {
++        std::lock_guard<std::mutex> lock(_gripper_mutex);
++        _gripper_error = -5; _arm_stream_paused = true;
++        return false;
++    }
++}
 +void FairinoHardwareInterface::sample_gripper_evidence()
 +{
 +    _gripper_evidence_values[27] = 0.;
@@ -728,11 +811,30 @@ diff --git a/fairino_hardware_v3_9_7/src/fairino_hardware_interface.cpp b/fairin
 +    const double steady_s = std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
 +    std::unique_lock<std::mutex> lock(_gripper_mutex, std::try_to_lock);
 +    if (!lock.owns_lock()) return;
-+    _gripper_evidence_values = _gripper_evidence.snapshot(
++    const auto raw = _gripper_evidence.snapshot(
 +      _gripper_command_generation.load(), _last_gripper_command.load(), system_s, steady_s,
 +      state, _gripper_upper_position, _pending_gripper_position.has_value(),
 +      _gripper_rpc_active.load(), _arm_stream_paused.load(), _stop_gripper_thread,
 +      _gripper_error.load() != 0 ? _gripper_error.load() : udp_command_error.load(), result == 0);
++    std::copy(raw.begin(), raw.end(), _gripper_evidence_values.begin());
++    _gripper_raw_sample = raw;
++    if (_require_gripper_source_clock && _precise_clock) {
++        _gripper_evidence_values[0] = 2.;
++        // Never stamp an old certified frame with this read's new receipt times.
++        const auto &c = _gripper_current_sample;
++        bool same = c[35] == 1. && raw[27] == 1.;
++        for (size_t i : {size_t(5), size_t(6), size_t(7), size_t(8), size_t(21), size_t(22), size_t(23), size_t(24), size_t(25), size_t(26)})
++            same = same && c[i] == raw[i];
++        for (size_t i = 1; i <= 4; ++i) same = same && c[i] == raw[i];
++        if (same) {
++            std::array<double,7> stamp{raw[12],raw[13],raw[14],raw[15],raw[16],raw[17],raw[18]};
++            std::array<double,7> old{c[12],c[13],c[14],c[15],c[16],c[17],c[18]};
++            if (stamp < old) { _gripper_error = -5; same = false; }
++        }
++        if (same) _gripper_evidence_values = c;
++        else { _gripper_evidence_values[27] = 0.; _gripper_evidence_values[35] = 0.; }
++    }
++    _gripper_cv.notify_all();
 +}
  
  hardware_interface::return_type FairinoHardwareInterface::read(const rclcpp::Time& time,const rclcpp::Duration& period)
@@ -797,6 +899,14 @@ diff --git a/fairino_hardware_v3_9_7/src/fairino_hardware_interface.cpp b/fairin
 +    }
 +    const double system = std::chrono::duration<double>(std::chrono::system_clock::now().time_since_epoch()).count();
 +    const double steady = std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
++    if (_require_gripper_source_clock && _precise_clock) {
++        if (v[27] != 1.) return false; // wait for this generation's certified read
++        if (!current_gripper_fresh(v, system, steady, _gripper_current_sample[42]) ||
++            v[43] != 1. || v[7] != v[5] || (v[21] != 1. && v[21] != 2.)) {
++            _gripper_error = -5; _arm_stream_paused = true; return false;
++        }
++        return true; // completed proof was established under the original command clock
++    }
 +    const std::array<double, 7> source{v[12], v[13], v[14], v[15], v[16], v[17], v[18]};
 +    const std::array<double, 7> finished{v[28], v[29], v[30], v[31], v[32], v[33], v[34]};
 +    if (v[27] != 1. || v[25] != 0. || v[26] != 0. || v[7] != v[5] ||
@@ -815,6 +925,14 @@ diff --git a/fairino_hardware_v3_9_7/src/fairino_hardware_interface.cpp b/fairin
  {
 -    if(_control_mode == 0){//位置控制模式
 -        if (std::any_of(&_jnt_position_command[0], &_jnt_position_command[5],\
++    if (_require_gripper_source_clock && _precise_clock && _gripper_command_generation.load() == 0) {
++        const double system = std::chrono::duration<double>(std::chrono::system_clock::now().time_since_epoch()).count();
++        const double steady = std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
++        if (_gripper_evidence_values[35] != 1. || _gripper_evidence_values[27] != 1.) return hardware_interface::return_type::OK;
++        if (!current_gripper_fresh(_gripper_evidence_values, system, steady, _gripper_evidence_values[42])) {
++            _gripper_error = -5; _arm_stream_paused = true; return hardware_interface::return_type::ERROR;
++        }
++    }
 +    if (_require_gripper_source_clock && _gripper_command_generation.load() > 0 &&
 +        !_arm_stream_paused.load() && !gripper_release_ready()) {
 +        return (_gripper_error.load() || udp_command_error.load() || _arm_stream_paused.load())
@@ -928,13 +1046,15 @@ diff --git a/fairino_hardware_v3_9_7/src/fairino_hardware_interface.cpp b/fairin
 +{
 +    using namespace std::chrono_literals;
 +    while (true) {
++        if (_require_gripper_source_clock) refresh_gripper_freshness();
 +        std::optional<int> position;
 +        uint64_t command_generation = 0;
 +        {
 +            std::unique_lock<std::mutex> lock(_gripper_mutex);
-+            _gripper_cv.wait(lock, [this] {
-+                return _stop_gripper_thread || _pending_gripper_position.has_value();
-+            });
++            if (_require_gripper_source_clock)
++                _gripper_cv.wait_for(lock, std::chrono::duration<double>(std::max(.001, _gripper_current_sample[42]/8.)),
++                    [this] { return _stop_gripper_thread || _pending_gripper_position.has_value(); });
++            else _gripper_cv.wait(lock, [this] { return _stop_gripper_thread || _pending_gripper_position.has_value(); });
 +            if (_stop_gripper_thread) return;
 +            position = _pending_gripper_position;
 +            _pending_gripper_position.reset();
@@ -1002,13 +1122,16 @@ diff --git a/fairino_hardware_v3_9_7/src/fairino_hardware_interface.cpp b/fairin
 +                    "MoveGripper failed in non-realtime worker, error code: %d", result);
 +                return;
 +            }
++            const double acknowledged_system = std::chrono::duration<double>(std::chrono::system_clock::now().time_since_epoch()).count();
 +            const auto deadline = std::chrono::steady_clock::now() +
 +                std::chrono::milliseconds(_gripper_max_time);
 +            const auto settle_time = std::chrono::milliseconds(_gripper_settle_time_ms);
-+            bool observed_movement = false;
++            bool observed_movement = false, observed_busy = false;
++            auto last_progress_source = GripperExecutionEvidence::source(initial_state);
 +            size_t invalid_feedback_samples = 0;
 +            std::optional<std::chrono::steady_clock::time_point> non_target_stable_since;
 +            while (true) {
++                if (_require_gripper_source_clock) refresh_gripper_freshness();
 +                ROBOT_STATE_PKG state{};
 +                _gripper_rpc_active = true;
 +                const int state_result = _ptr_robot->GetRobotRealTimeState(&state);
@@ -1029,11 +1152,13 @@ diff --git a/fairino_hardware_v3_9_7/src/fairino_hardware_interface.cpp b/fairin
 +                    if (!command_clock.fresh(stamp, _gripper_evidence.incarnation, system, steady)) {
 +                        _gripper_error = -5; return;
 +                    }
-+                    post_command = command_clock.after_command(stamp, _gripper_evidence.command_started);
++                    post_command = command_clock.after_command(stamp, acknowledged_system);
 +                }
 +                const uint8_t feedback = state.gripper_position;
 +                const uint8_t motion_done = state.gripper_motiondone;
-+                const bool feedback_is_plausible = post_command && feedback <= 100 && (opening ?
++                const auto progress_source = GripperExecutionEvidence::source(state);
++                const bool advancing = progress_source > last_progress_source;
++                const bool feedback_is_plausible = post_command && advancing && feedback <= 100 && (opening ?
 +                    (feedback + 1 >= last_feedback && feedback <= *position + 1) :
 +                    (feedback <= last_feedback + 1 && feedback + 1 >= *position));
 +                if (!feedback_is_plausible) {
@@ -1057,18 +1182,25 @@ diff --git a/fairino_hardware_v3_9_7/src/fairino_hardware_interface.cpp b/fairin
 +                    _gripper_position_state =
 +                        _gripper_upper_position * static_cast<double>(feedback) / 100.0;
 +                }
-+                if (motion_done != 0 && feedback_is_plausible) {
++                if (feedback_is_plausible) {
++                    last_progress_source = progress_source;
++                    if (motion_done == 0) observed_busy = true;
++                }
++                if (motion_done != 0 && feedback_is_plausible &&
++                    // Native telemetry is quantized to one percent; retain the existing tick, not JTC tolerance.
++                    (std::abs(int(feedback) - *position) <= 1 || observed_busy)) {
 +                    completion_state = state; completion_reason = 1;
 +                    resume_arm = true;
 +                    break;
 +                }
 +                const auto now = std::chrono::steady_clock::now();
-+                if (feedback_is_plausible && feedback != last_feedback) {
++                const bool moved_this_sample = feedback_is_plausible && feedback != last_feedback;
++                if (moved_this_sample) {
 +                    observed_movement = true;
 +                    last_feedback = feedback;
 +                    non_target_stable_since.reset();
 +                }
-+                if (feedback_is_plausible && observed_movement &&
++                if (feedback_is_plausible && observed_movement && !moved_this_sample &&
 +                    feedback != static_cast<uint8_t>(*position)) {
 +                    if (!non_target_stable_since.has_value()) non_target_stable_since = now;
 +                    if (now - *non_target_stable_since >= settle_time) {
@@ -1079,7 +1211,7 @@ diff --git a/fairino_hardware_v3_9_7/src/fairino_hardware_interface.cpp b/fairin
 +                        resume_arm = true;
 +                        break;
 +                    }
-+                } else if (feedback_is_plausible) {
++                } else {
 +                    non_target_stable_since.reset();
 +                }
 +                std::unique_lock<std::mutex> lock(_gripper_mutex);
@@ -1129,13 +1261,18 @@ diff --git a/fairino_hardware_v3_9_7/src/fairino_hardware_interface.cpp b/fairin
 +                std::lock_guard<std::mutex> lock(_gripper_mutex);
 +                if (!_stop_gripper_thread && _gripper_error.load() == 0 && udp_command_error.load() == 0 &&
 +                    !_pending_gripper_position.has_value() && _gripper_command_generation.load() == command_generation) {
++                    const double proof_system = std::chrono::duration<double>(std::chrono::system_clock::now().time_since_epoch()).count();
++                    const double proof_steady = std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
 +                    if (_require_gripper_source_clock &&
-+                        !command_clock.fresh(GripperExecutionEvidence::source(completion_state), _gripper_evidence.incarnation,
-+                          std::chrono::duration<double>(std::chrono::system_clock::now().time_since_epoch()).count(),
-+                          std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count())) {
++                        !command_clock.fresh(GripperExecutionEvidence::source(completion_state), _gripper_evidence.incarnation, proof_system, proof_steady)) {
 +                        _gripper_error = -5; return;
 +                    }
 +                    _gripper_evidence.complete(command_generation, _gripper_command_generation.load(), completion_reason, completion_state);
++                    if (_require_gripper_source_clock) {
++                        _gripper_evidence.proof_clock = command_clock.values;
++                        _gripper_evidence.proof_system = proof_system;
++                        _gripper_evidence.proof_steady = proof_steady;
++                    }
 +                    _arm_stream_paused = false;
 +                }
 +            }
@@ -1152,7 +1289,7 @@ diff --git a/fairino_hardware_v3_9_7/include/fairino_hardware/gripper_execution_
 new file mode 100644
 --- /dev/null
 +++ b/fairino_hardware_v3_9_7/include/fairino_hardware/gripper_execution_evidence.hpp
-@@ -0,0 +1,121 @@
+@@ -0,0 +1,142 @@
 +#ifndef FAIRINO_GRIPPER_EXECUTION_EVIDENCE_HPP
 +#define FAIRINO_GRIPPER_EXECUTION_EVIDENCE_HPP
 +#include <array>
@@ -1214,32 +1351,53 @@ new file mode 100644
 +  }
 +};
 +
++inline bool current_gripper_fresh(const std::array<double,67> &v, double system, double steady, double age) {
++    for (double x : v) if (!std::isfinite(x)) return false;
++    if (!std::isfinite(age) || age<=0. || v[0]!=2. || v[27]!=1. || v[35]!=1. || v[42]>age || v[42]<=0.) return false;
++    std::array<double,7> stamp{v[12],v[13],v[14],v[15],v[16],v[17],v[18]};
++    const double source=GripperSourceClock::calendar(stamp);
++    for(size_t i=0;i<4;++i) if(v[62+i]!=v[1+i]) return false;
++    return std::isfinite(source) && v[57]==v[19] && v[58]==source && v[59]==v[9] && v[60]==v[10] && v[61]==v[5] &&
++        v[66]>=0. && v[36]<source-.001 && source+.001<v[37] &&
++        0.<=v[39] && v[39]<=v[10] && v[10]<=v[41] && v[41]<=steady && steady-v[39]<=v[42] &&
++        v[38]<=v[9] && v[9]<=v[40] && v[40]<=system && system-v[38]<=v[42] &&
++        std::abs((system-v[38])-(steady-v[39]))<=v[66];
++}
 +// Protected by the existing gripper mutex. No queue, RPC or execution owner.
 +struct GripperExecutionEvidence {
-+  inline static constexpr std::array<const char *, 35> names{
++  inline static constexpr std::array<const char *, 67> names{
 +    "version", "incarnation_0", "incarnation_1", "incarnation_2", "incarnation_3",
 +    "generation", "active_generation", "completed_generation", "raw_reference_m",
 +    "sample_system_s", "sample_steady_s", "command_started_system_s",
 +    "year", "month", "day", "hour", "minute", "second", "millisecond", "frame",
 +    "feedback_m", "completion_reason", "pending", "rpc_active", "arm_resumed",
 +    "stopped", "error", "valid", "completion_year", "completion_month", "completion_day",
-+    "completion_hour", "completion_minute", "completion_second", "completion_millisecond"};
++    "completion_hour", "completion_minute", "completion_second", "completion_millisecond",
++    "current_valid", "query_before_controller_s", "query_after_controller_s",
++    "query_before_system_s", "query_before_steady_s", "query_after_system_s", "query_after_steady_s", "current_max_age_s",
++    "proof_valid", "proof_system_s", "proof_steady_s",
++    "proof_clock_version", "proof_incarnation_0", "proof_incarnation_1", "proof_incarnation_2", "proof_incarnation_3",
++    "proof_offset_s", "proof_uncertainty_s", "proof_system_anchor_s", "proof_steady_anchor_s", "proof_valid_until_s", "proof_max_age_s",
++    "certificate_frame", "certificate_source_s", "certificate_sample_system_s", "certificate_sample_steady_s", "certificate_generation",
++    "certificate_incarnation_0", "certificate_incarnation_1", "certificate_incarnation_2", "certificate_incarnation_3", "host_clock_tolerance_s"};
 +  static constexpr uint64_t MAX_GENERATION = (uint64_t{1} << 53) - 1;
 +  std::array<uint32_t, 4> incarnation{};
 +  uint64_t active{0}, completed{0};
 +  int reason{0}; // 0 unknown, 1 motion_done, 2 settled_away: not task semantics
 +  double command_started{0};
++  std::array<double,11> proof_clock{};
++  double proof_system{0.}, proof_steady{0.};
 +  std::array<double, 7> completion_source{};
 +
 +  void activate() {
 +    std::random_device random;
 +    for (auto &value : incarnation) value = random();
 +    active = completed = 0; reason = 0; command_started = 0;
-+    completion_source.fill(0);
++    completion_source.fill(0); proof_clock.fill(0.); proof_system=proof_steady=0.;
 +  }
 +  void begin(uint64_t generation, double system_time) {
 +    active = generation; reason = 0; command_started = system_time;
-+    completion_source.fill(0);
++    completion_source.fill(0); proof_clock.fill(0.); proof_system=proof_steady=0.;
 +  }
 +  template<class State> static std::array<double, 7> source(const State &state) {
 +    const auto &t = state.robotTime;
@@ -1274,3 +1432,104 @@ new file mode 100644
 +};
 +}
 +#endif
+diff --git a/fairino_hardware_v3_9_7/include/fairino_hardware/precise_controller_clock.hpp b/fairino_hardware_v3_9_7/include/fairino_hardware/precise_controller_clock.hpp
+new file mode 100644
+--- /dev/null
++++ b/fairino_hardware_v3_9_7/include/fairino_hardware/precise_controller_clock.hpp
+@@ -0,0 +1,76 @@
++#ifndef FR5_PRECISE_CONTROLLER_CLOCK_HPP
++#define FR5_PRECISE_CONTROLLER_CLOCK_HPP
++#include <curl/curl.h>
++#include <arpa/inet.h>
++#include <tinyxml2.h>
++#include <cmath>
++#include <functional>
++#include <stdexcept>
++#include <string>
++namespace fairino_hardware {
++// One read-only RPC client in the existing worker; never construct another SDK.
++class PreciseControllerClock {
++  CURL *client_{nullptr};
++  std::string body_, url_;
++  std::function<bool()> cancelled_;
++  static size_t receive(char *data, size_t size, size_t count, void *target) {
++    auto &body = *static_cast<std::string*>(target);
++    if (size && count>65536/size) return 0;
++    const size_t n=size*count;
++    if (body.size()+n>65536) return 0;
++    body.append(data,n); return n;
++  }
++  static int progress(void *self, curl_off_t, curl_off_t, curl_off_t, curl_off_t) {
++    return static_cast<PreciseControllerClock*>(self)->cancelled_() ? 1 : 0;
++  }
++public:
++  explicit PreciseControllerClock(const std::string &ip) {
++    in_addr address{};
++    if(inet_pton(AF_INET,ip.c_str(),&address)!=1) throw std::runtime_error("clock IPv4");
++    static const auto initialized=curl_global_init(CURL_GLOBAL_DEFAULT);
++    if (initialized!=CURLE_OK || !(client_=curl_easy_init())) throw std::runtime_error("clock client");
++    url_="http://"+ip+":20003/RPC2";
++  }
++  ~PreciseControllerClock() { if(client_) curl_easy_cleanup(client_); }
++  PreciseControllerClock(const PreciseControllerClock &)=delete;
++  PreciseControllerClock &operator=(const PreciseControllerClock &)=delete;
++  static double parse(const std::string &body) {
++    tinyxml2::XMLDocument xml;
++    if(xml.Parse(body.data(),body.size())!=tinyxml2::XML_SUCCESS) throw std::runtime_error("clock XML");
++    auto *node=xml.FirstChildElement("methodResponse");
++    for(const char *name:{"params","param","value","array","data"}) node=node?node->FirstChildElement(name):nullptr;
++    auto *code=node?node->FirstChildElement("value"):nullptr;
++    auto *value=code?code->NextSiblingElement("value"):nullptr;
++    auto *status=code?code->FirstChildElement():nullptr;
++    auto *number=value?value->FirstChildElement("double"):nullptr;
++    int error=-1; double ms=0.;
++    if(!code || !value || value->NextSiblingElement() || !status ||
++       (std::string(status->Name())!="int" && std::string(status->Name())!="i4") ||
++       status->QueryIntText(&error)!=tinyxml2::XML_SUCCESS || error || !number ||
++       number->QueryDoubleText(&ms)!=tinyxml2::XML_SUCCESS || !std::isfinite(ms) || ms<=0. || ms>=1e15)
++      throw std::runtime_error("clock response");
++    return ms/1000.;
++  }
++  double read(long timeout_ms, std::function<bool()> cancelled) {
++    cancelled_=std::move(cancelled);
++    if(cancelled_() || timeout_ms<=0) throw std::runtime_error("clock cancelled");
++    body_.clear();
++    curl_easy_setopt(client_,CURLOPT_URL,url_.c_str());
++    curl_easy_setopt(client_,CURLOPT_PROXY,"");
++    curl_easy_setopt(client_,CURLOPT_POSTFIELDS,"<?xml version=\"1.0\"?><methodCall><methodName>GetSystemClock</methodName><params/></methodCall>");
++    curl_easy_setopt(client_,CURLOPT_CONNECTTIMEOUT_MS,timeout_ms);
++    curl_easy_setopt(client_,CURLOPT_TIMEOUT_MS,timeout_ms);
++    curl_easy_setopt(client_,CURLOPT_NOSIGNAL,1L);
++    curl_easy_setopt(client_,CURLOPT_WRITEFUNCTION,receive);
++    curl_easy_setopt(client_,CURLOPT_WRITEDATA,&body_);
++    curl_easy_setopt(client_,CURLOPT_NOPROGRESS,0L);
++    curl_easy_setopt(client_,CURLOPT_XFERINFOFUNCTION,progress);
++    curl_easy_setopt(client_,CURLOPT_XFERINFODATA,this);
++    const auto result=curl_easy_perform(client_);
++    long status=0; curl_easy_getinfo(client_,CURLINFO_RESPONSE_CODE,&status);
++    if(result!=CURLE_OK || status!=200 || cancelled_()) throw std::runtime_error("clock query");
++    return parse(body_);
++  }
++};
++}
++#endif
+diff --git a/fairino_hardware_v3_9_7/CMakeLists.txt b/fairino_hardware_v3_9_7/CMakeLists.txt
+--- a/fairino_hardware_v3_9_7/CMakeLists.txt
++++ b/fairino_hardware_v3_9_7/CMakeLists.txt
+@@ -17,6 +17,8 @@
+ find_package(pluginlib REQUIRED)
+ find_package(rclcpp_lifecycle REQUIRED)
+ find_package(fairino_msgs REQUIRED)
++find_package(CURL REQUIRED)
++find_package(tinyxml2 REQUIRED)
+ 
+ 
+ #set variable
+@@ -66,6 +68,7 @@
+ # 链接库时添加rpath参数
+ target_link_libraries(ros2_cmd_server "-Wl,-rpath,$ORIGIN" ${CMAKE_CURRENT_SOURCE_DIR}/libfairino/lib/libfairino.so.2.3.7)
+ target_link_libraries(fairino_hardware "-Wl,-rpath,$ORIGIN" ${CMAKE_CURRENT_SOURCE_DIR}/libfairino/lib/libfairino.so.2.3.7)
++target_link_libraries(fairino_hardware CURL::libcurl tinyxml2::tinyxml2)
+ 
+ #add dependencies
+ ament_target_dependencies(ros2_cmd_server rclcpp fairino_msgs)

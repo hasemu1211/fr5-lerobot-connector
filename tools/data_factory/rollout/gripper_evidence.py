@@ -21,6 +21,17 @@ FIELDS = (
     "stopped", "error", "valid", "completion_year", "completion_month", "completion_day",
     "completion_hour", "completion_minute", "completion_second", "completion_millisecond",
 )
+CURRENT_FIELDS = (
+    "current_valid", "query_before_controller_s", "query_after_controller_s",
+    "query_before_system_s", "query_before_steady_s", "query_after_system_s", "query_after_steady_s", "current_max_age_s",
+    "proof_valid", "proof_system_s", "proof_steady_s",
+    "proof_clock_version", "proof_incarnation_0", "proof_incarnation_1", "proof_incarnation_2", "proof_incarnation_3",
+    "proof_offset_s", "proof_uncertainty_s", "proof_system_anchor_s", "proof_steady_anchor_s", "proof_valid_until_s", "proof_max_age_s",
+    "certificate_frame", "certificate_source_s", "certificate_sample_system_s", "certificate_sample_steady_s", "certificate_generation",
+    "certificate_incarnation_0", "certificate_incarnation_1", "certificate_incarnation_2", "certificate_incarnation_3", "host_clock_tolerance_s",
+)
+LIVE_FIELDS = FIELDS + CURRENT_FIELDS
+
 CALENDAR = ("year", "month", "day", "hour", "minute", "second", "millisecond")
 CLOCK_FIELDS = {"schema_version", "incarnation", "calendar_to_system_offset_s", "uncertainty_s",
                 "system_anchor_s", "steady_anchor_s", "valid_until_system_s"}
@@ -87,7 +98,7 @@ def decode_dynamic_state(message, binding, received_steady_s):
             raise ValueError()
         values = message.interface_values[names.index(RESOURCE)]
         fields = list(values.interface_names)
-        if len(fields) != len(set(fields)) or set(fields) != set(FIELDS) or len(fields) != len(values.values):
+        if len(fields) != len(set(fields)) or set(fields) not in (set(FIELDS), set(LIVE_FIELDS)) or len(fields) != len(values.values):
             raise ValueError()
         wire = dict(zip(fields, values.values))
         for value in wire.values():
@@ -111,13 +122,34 @@ def calendar_s(wire, prefix=""):
         raise ContractError("LEARNED_HARDWARE_SOURCE_CLOCK") from exc
 
 
+def check_current_bracket(wire, now, steady_now, max_age_s):
+    """Retrospective causal HOST interval; never convert controller deltas to age."""
+    w = wire
+    source = calendar_s(w)
+    s0, s1 = w["query_before_system_s"], w["query_after_system_s"]
+    m0, m1 = w["query_before_steady_s"], w["query_after_steady_s"]
+    age = w["current_max_age_s"]
+    associated = (w["certificate_frame"] == w["frame"] and w["certificate_source_s"] == source
+                  and w["certificate_sample_system_s"] == w["sample_system_s"]
+                  and w["certificate_sample_steady_s"] == w["sample_steady_s"]
+                  and w["certificate_generation"] == w["generation"]
+                  and all(w[f"certificate_incarnation_{i}"] == w[f"incarnation_{i}"] for i in range(4)))
+    if (not associated or w["host_clock_tolerance_s"] < 0 or w["current_valid"] != 1 or not 0 < age <= max_age_s
+            or not w["query_before_controller_s"] < source-.001 < source+.001 < w["query_after_controller_s"]
+            or not 0 <= m0 <= w["sample_steady_s"] <= m1 <= steady_now
+            or not s0 <= w["sample_system_s"] <= s1 <= now
+            or steady_now-m0 > age or now-s0 > age
+            or abs((now-s0)-(steady_now-m0)) > w["host_clock_tolerance_s"]):
+        raise ContractError("LEARNED_HARDWARE_STALE")
+
+
 def check_hardware(evidence, now, steady_now, max_age_s, *, completion=False, allow_pending=False):
     try:
         hw = evidence["snapshot"]["gripper_controller"]["hardware_execution"]
         if not isinstance(hw, dict) or set(hw) != {"wire", "clock_binding", "received_steady_s"}:
             raise ValueError()
         wire = hw["wire"]
-        if not isinstance(wire, dict) or set(wire) != set(FIELDS):
+        if not isinstance(wire, dict) or set(wire) != set(LIVE_FIELDS if wire.get("version") == 2 else FIELDS):
             raise ValueError()
         for value in wire.values():
             number(value)
@@ -130,7 +162,7 @@ def check_hardware(evidence, now, steady_now, max_age_s, *, completion=False, al
         integer(wire["completion_reason"], 2)
         for key in ("pending", "rpc_active", "arm_resumed", "stopped", "valid"):
             integer(wire[key], 1)
-        if wire["version"] != 1 or wire["valid"] != 1:
+        if wire["version"] not in (1, 2) or wire["valid"] != 1:
             raise ContractError("LEARNED_HARDWARE_INVALID")
         if wire["stopped"] or wire["error"]:
             raise ContractError("LEARNED_HARDWARE_UNRESOLVED")
@@ -144,7 +176,9 @@ def check_hardware(evidence, now, steady_now, max_age_s, *, completion=False, al
             raise ContractError("LEARNED_HARDWARE_UNRESOLVED")
         now, steady_now = number(now), number(steady_now)
         uncertainty = mapping["uncertainty_s"]
-        if (not mapping["system_anchor_s"] <= now <= mapping["valid_until_system_s"]
+        if wire["version"] == 2:
+            check_current_bracket(wire, now, steady_now, max_age_s)
+        elif (not mapping["system_anchor_s"] <= now <= mapping["valid_until_system_s"]
                 or abs((now - mapping["system_anchor_s"]) - (steady_now - mapping["steady_anchor_s"])) > uncertainty):
             raise ContractError("LEARNED_HARDWARE_SOURCE_CLOCK")
         # Monotonic age independently rejects frozen SYSTEM/ROS time and newly
@@ -158,7 +192,7 @@ def check_hardware(evidence, now, steady_now, max_age_s, *, completion=False, al
         if not 0 <= now - wire["sample_system_s"] <= max_age_s:
             raise ContractError("LEARNED_HARDWARE_STALE")
         source = calendar_s(wire) + mapping["calendar_to_system_offset_s"]
-        if source + uncertainty > now or now - (source - uncertainty) > max_age_s:
+        if wire["version"] == 1 and (source + uncertainty > now or now - (source - uncertainty) > max_age_s):
             raise ContractError("LEARNED_HARDWARE_STALE")
         if pending:
             if wire["active_generation"] == wire["generation"] and wire["completion_reason"] != 0:
@@ -174,7 +208,31 @@ def check_hardware(evidence, now, steady_now, max_age_s, *, completion=False, al
         else:
             if wire["completed_generation"] != generation or wire["completion_reason"] not in (1, 2):
                 raise ContractError("LEARNED_HARDWARE_COMPLETION")
-            finished = calendar_s(wire, "completion_") + mapping["calendar_to_system_offset_s"]
+            if wire["version"] == 2:
+                # Revalidate the original proof at its recorded instant, not now.
+                proof = validate_clock_binding({
+                    "schema_version": "fr5.gripper_source_clock.v1",
+                    "incarnation": [wire[f"proof_incarnation_{i}"] for i in range(4)],
+                    "calendar_to_system_offset_s": wire["proof_offset_s"],
+                    "uncertainty_s": wire["proof_uncertainty_s"],
+                    "system_anchor_s": wire["proof_system_anchor_s"],
+                    "steady_anchor_s": wire["proof_steady_anchor_s"],
+                    "valid_until_system_s": wire["proof_valid_until_s"],
+                })
+                at, mono = wire["proof_system_s"], wire["proof_steady_s"]
+                uncertainty = proof["uncertainty_s"]
+                if (wire["proof_valid"] != 1 or wire["proof_clock_version"] != 1
+                        or proof["incarnation"] != identity(wire) or proof != mapping
+                        or not proof["system_anchor_s"] <= at <= proof["valid_until_system_s"]
+                        or not 0 <= mono <= wire["sample_steady_s"]
+                        or abs((at-proof["system_anchor_s"])-(mono-proof["steady_anchor_s"])) > uncertainty):
+                    raise ContractError("LEARNED_HARDWARE_COMPLETION")
+                finished = calendar_s(wire, "completion_") + proof["calendar_to_system_offset_s"]
+                if (finished + uncertainty > at or wire["proof_max_age_s"] <= 0
+                        or at-(finished-uncertainty) > wire["proof_max_age_s"]):
+                    raise ContractError("LEARNED_HARDWARE_COMPLETION")
+            else:
+                finished = calendar_s(wire, "completion_") + mapping["calendar_to_system_offset_s"]
             if (finished - uncertainty <= wire["command_started_system_s"] or finished > source
                     or (completion and now - (finished - uncertainty) > max_age_s)):
                 raise ContractError("LEARNED_HARDWARE_COMPLETION")

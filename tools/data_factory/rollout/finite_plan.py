@@ -72,7 +72,7 @@ def validate_proposal(value):
         raise ContractError("LEARNED_PROPOSAL_DIGEST")
     if "runtime_inputs" in p:
         inputs = p["runtime_inputs"]
-        if (not isinstance(inputs, dict) or set(inputs) - {"warmup"} != {"checkpoint", "device", "gripper_source_clock", "clock_binding", "camera_topics", "camera_mapping", "fps"}
+        if (not isinstance(inputs, dict) or set(inputs) - {"warmup", "hardware_wire_version"} != {"checkpoint", "device", "gripper_source_clock", "clock_binding", "camera_topics", "camera_mapping", "fps"}
                 or any(not isinstance(inputs[k], str) or not inputs[k] for k in ("checkpoint", "gripper_source_clock"))
                 or not isinstance(inputs["device"], str) or inputs["device"] not in {"cpu", "cuda"}
                 or not isinstance(inputs["camera_topics"], dict) or set(inputs["camera_topics"]) != {"camera1", "camera2"}
@@ -96,6 +96,8 @@ def validate_proposal(value):
                 raise ContractError("LEARNED_WARMUP_INPUT")
         from .gripper_evidence import validate_clock_binding
         validate_clock_binding(inputs["clock_binding"])
+        if "hardware_wire_version" in inputs and inputs["hardware_wire_version"] != 2:
+            raise ContractError("LEARNED_HARDWARE_SCHEMA")
     if (p["joint_order"] != JOINTS or p["units"] != UNITS or p["action_semantics"] != "ABSOLUTE_JOINT_POSITION"
             or p["source_clock"] != "SYSTEM_TIME"):
         raise ContractError("LEARNED_ACTION_CONTRACT")
@@ -241,6 +243,8 @@ def check_execution_start(step, evidence, now, *, steady_now):
         from .gripper_evidence import check_hardware, identity, integer
         wire = check_hardware(evidence, now, steady_now, step["max_joint_state_age_s"])
         inputs = step["learned_proposal"].get("runtime_inputs")
+        if inputs is not None and inputs.get("hardware_wire_version") == 2 and wire["version"] != 2:
+            raise ContractError("LEARNED_HARDWARE_INVALID")
         if inputs is not None and observed["gripper_controller"]["hardware_execution"]["clock_binding"] != inputs["clock_binding"]:
             raise ContractError("LEARNED_HARDWARE_CLOCK_BINDING")
         if "initial_hardware_binding" in step:

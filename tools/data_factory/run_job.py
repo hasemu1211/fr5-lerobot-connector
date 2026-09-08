@@ -2405,7 +2405,6 @@ def _native_run_inputs(payload, profile, cancel, *, instruction):
     mapping, _ = smolvla_camera_mapping([f"observation.images.{role}" for role in roles])
     topics = {slot.rsplit(".", 1)[-1]: profile["camera_topics"][key.rsplit(".", 1)[-1]]
               for key, slot in mapping.items()}
-    binding = validate_clock_binding(load_json_strict(Path(options["gripper_source_clock"])))
     if cancel.is_set():
         raise ContractError("LEARNED_CANCELLED")
     native = NativeSmolVLA.load(options["checkpoint"], device=options["device"])
@@ -2419,8 +2418,10 @@ def _native_run_inputs(payload, profile, cancel, *, instruction):
     warmup = native.warmup(instruction=instruction, height=profile["height"], width=profile["width"], cancel_event=cancel)
     if cancel.is_set():
         raise ContractError("LEARNED_CANCELLED")
+    # Read after preparation; never extend a measured command calibration.
+    binding = validate_clock_binding(load_json_strict(Path(options["gripper_source_clock"])))
     inputs = {**options, "clock_binding": binding, "camera_topics": topics,
-              "camera_mapping": mapping, "fps": profile["fps"], "warmup": warmup}
+              "camera_mapping": mapping, "fps": profile["fps"], "warmup": warmup, "hardware_wire_version": 2}
     return native, inputs
 
 

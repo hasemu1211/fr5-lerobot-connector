@@ -824,3 +824,53 @@ writes SHALL NOT manufacture a successful transition snapshot.
 - **AND** current scene lookup returns the newer revision separately
 - **AND** neither snapshot retention nor command completion grants landing,
   semantic success, reset safety, recorder commit or training authority
+
+### Requirement: Current source freshness is independent of retained command completion
+
+The existing `require_gripper_source_clock=true` deployment opt-in SHALL select
+native evidence version 2. Its existing gripper worker SHALL bracket an exact
+native sampled frame with two precise read-only controller-clock queries outside
+real-time read/write and gripper mutex ownership. The source calendar interval,
+including millisecond encoding ambiguity, SHALL be strictly enclosed by those
+queries. Freshness SHALL use the worst-case HOST query-start age under the
+existing selected age budget, not a controller delta or future drift estimate.
+The certificate SHALL bind incarnation, generation, calendar, frame and original
+native SYSTEM/STEADY read times. Re-publication SHALL NOT refresh those times.
+
+The worker SHALL service current evidence through idle arm writes and stop with
+its hardware lifecycle. Query failure, clock regression, an expired certificate,
+read failure, stop/error or changed incarnation/generation SHALL prevent further
+arm transmission. A current certificate SHALL NOT establish command completion.
+
+Once the original command-clock and completion checks establish a terminal
+record, its original calibration and validation instant SHALL remain historical
+proof for that generation. Later current certificates SHALL NOT renew that
+command clock, reinterpret its completion time, repair an expired incomplete
+command or change frozen inference/plan provenance. New live learned inputs
+SHALL require version 2; archived version 1 evidence SHALL retain its original
+reader and validation semantics, without automatic promotion to live evidence.
+
+Only the existing LIVE preparation owner MAY set and read back the exact existing
+hardware-node clock parameter using its selected age budget and matching native
+incarnation. Plan-only SHALL only observe. Missing/mismatched native version,
+incarnation or parameter readback SHALL block live consumption.
+
+The finite original command-calibration horizon remains required and is not
+qualified by retrospective current-source brackets. Controller-clock domain,
+reset behavior, native query/sampling latency and device-level command/telemetry
+causality require root-owned deployment evidence; CPU replay is not physical
+qualification. No post-command controller barrier or future-output authority is
+introduced by this requirement.
+
+#### Scenario: Completed command outlives its original calibration
+
+- **WHEN** the original checks established completion and a new exact current sample is certified after that calibration expires
+- **THEN** matching-generation arm readiness may use the new current certificate and unchanged historical terminal proof
+- **AND** absent, expired, wrong-sample or regressed current evidence prevents arm transmission
+
+#### Scenario: A current frame contains an old off-target done flag
+
+- **WHEN** unchanged off-target feedback reports done after command acknowledgment
+- **THEN** that flag alone SHALL NOT complete the native command
+- **AND** fresh done within the existing one-percent native feedback tick of the quantized requested target remains admissible, while off-target completion requires witnessed post-acknowledgment busy-to-done or plausible observed movement followed by the existing stable-away dwell across valid advancing samples
+- **AND** stable-away completion remains mechanical evidence, not grasp, release or task success

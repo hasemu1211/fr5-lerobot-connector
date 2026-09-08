@@ -119,7 +119,7 @@ class RosMoveItTransport:
 
     def __init__(
         self, node, *, graph_timeout_s=1.0, preflight_timeout_s=5.0,
-        clock=time.monotonic, gripper_source_clock=None,
+        clock=time.monotonic, gripper_source_clock=None, allow_clock_configuration=False,
     ):
         try:
             import rclpy
@@ -208,6 +208,9 @@ class RosMoveItTransport:
         from tools.data_factory.rollout.gripper_evidence import validate_clock_binding
         self._gripper_source_clock = (validate_clock_binding(gripper_source_clock)
                                       if gripper_source_clock is not None else None)
+        self._allow_clock_configuration = allow_clock_configuration is True
+        self._native_clock_configured_age = None
+        self._AsyncParameterClient = AsyncParameterClient
         self._gripper_controller_state = None
         self._gripper_controller_received_at = None
         self._robot_description = None
@@ -223,9 +226,9 @@ class RosMoveItTransport:
         self._robot_description_subscription = None
         self._robot_description_client = None
         if hasattr(node, "create_subscription"):
-            if self._gripper_source_clock is not None:
-                self._gripper_hardware_subscription = node.create_subscription(
-                    DynamicJointState, "/dynamic_joint_states", self._on_gripper_hardware_state, 10)
+            # Observe identity before qualification; subscription grants no authority.
+            self._gripper_hardware_subscription = node.create_subscription(
+                DynamicJointState, "/dynamic_joint_states", self._on_gripper_hardware_state, 10)
             self._joint_state_subscription = node.create_subscription(
                 JointState, "/joint_states", self._on_joint_state, 10
             )
@@ -267,6 +270,56 @@ class RosMoveItTransport:
         from tools.data_factory.rollout.gripper_evidence import decode_dynamic_state
         return decode_dynamic_state(self._gripper_hardware_state, self._gripper_source_clock,
                                     self._gripper_hardware_received_at)
+
+    def _prepare_native_clock(self, max_age_s):
+        """Only the existing LIVE child may configure the opt-in hardware node."""
+        if (getattr(self, "_gripper_source_clock", None) is None or not getattr(self, "_allow_clock_configuration", False)
+                or self._native_clock_configured_age == max_age_s):
+            return
+        if self._native_clock_configured_age is not None:
+            raise ContractError("LEARNED_HARDWARE_CLOCK_BINDING")
+        from rclpy.parameter import Parameter
+        from tools.data_factory.rollout.gripper_evidence import native_clock_parameter, decode_dynamic_state, identity
+        deadline = time.monotonic() + self.preflight_timeout_s
+        observed = None
+        while time.monotonic() < deadline:
+            if self._gripper_hardware_state is not None:
+                observed = decode_dynamic_state(self._gripper_hardware_state, self._gripper_source_clock,
+                                                self._gripper_hardware_received_at)
+                if observed["wire"]["version"] in (1, 2):
+                    break
+            self._rclpy.spin_once(self.node, timeout_sec=.01)
+        if observed is None:
+            raise ContractError("LEARNED_HARDWARE_CLOCK_BINDING")
+        if (observed["wire"]["version"] != 2 or observed["wire"]["stopped"] or observed["wire"]["error"]
+                or identity(observed["wire"]) != self._gripper_source_clock["incarnation"]):
+            raise ContractError("LEARNED_HARDWARE_INCARNATION")
+        client = self._AsyncParameterClient(self.node, "/fr5system")
+        if not client.wait_for_services(timeout_sec=self.graph_timeout_s):
+            raise ContractError("LEARNED_HARDWARE_CLOCK_BINDING")
+        expected = native_clock_parameter(self._gripper_source_clock, max_age_s)
+        result = self._wait(client.set_parameters_atomically([Parameter("gripper_source_clock_v1", value=expected)]),
+                            self.graph_timeout_s, "LEARNED_HARDWARE_CLOCK_BINDING")
+        if not result.result.successful:
+            raise ContractError("LEARNED_HARDWARE_CLOCK_BINDING")
+        readback = self._wait(client.get_parameters(["gripper_source_clock_v1"]),
+                              self.graph_timeout_s, "LEARNED_HARDWARE_CLOCK_BINDING")
+        if len(readback.values) != 1 or list(readback.values[0].double_array_value) != expected:
+            raise ContractError("LEARNED_HARDWARE_CLOCK_BINDING")
+        observed = decode_dynamic_state(self._gripper_hardware_state, self._gripper_source_clock,
+                                        self._gripper_hardware_received_at)
+        if identity(observed["wire"]) != self._gripper_source_clock["incarnation"]:
+            raise ContractError("LEARNED_HARDWARE_INCARNATION")
+        self._native_clock_configured_age = max_age_s
+
+    def _native_current_ready(self, max_age_s):
+        from tools.data_factory.rollout.gripper_evidence import check_current_bracket
+        try:
+            hw = self._gripper_hardware_evidence()
+            check_current_bracket(hw["wire"], time.time(), self._clock(), max_age_s)
+            return hw["wire"]["version"] == 2 and hw["wire"]["valid"] == 1
+        except (ContractError, TypeError, KeyError):
+            return False
 
     def _on_joint_state(self, message):
         self._joint_state = message
@@ -824,6 +877,7 @@ class RosMoveItTransport:
         ):
             raise ContractError("ROS_SNAPSHOT_AGE")
         max_age_s = float(max_age_s)
+        self._prepare_native_clock(max_age_s)
         # New DDS participants need discovery time, not a relaxed sample age.
         # After one complete snapshot, retain the short live observation budget.
         timeout = (
@@ -837,6 +891,7 @@ class RosMoveItTransport:
             or self._arm_controller_received_at is None
             or self._gripper_controller_received_at is None
             or self._robot_description is None
+            or (getattr(self, "_native_clock_configured_age", None) is not None and not self._native_current_ready(max_age_s))
             or any(
                 self._clock() - received_at > max_age_s
                 for received_at in (
