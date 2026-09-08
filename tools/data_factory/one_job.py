@@ -203,6 +203,7 @@ class OneJob:
         self.readiness_evidence = None
         self.readiness_failure_evidence = None
         self.plan_envelope = None
+        self.pending_learned_plan = None
         self.frozen_rows = self.rows_after_recycle = None
         self.lifecycle_event_call = None
         self._sequence = 0
@@ -437,13 +438,21 @@ class OneJob:
             expected_run = payload.get("run_id") if isinstance(payload, dict) else None
             if expected_run is not None and response["run_id"] not in ({expected_run} if response["ok"] else {None, expected_run}):
                 raise ContractError("EXECUTOR_BINDING")
-            if self.plan_digest is not None and response["plan_digest"] not in ({self.plan_digest} if response["ok"] else {None, self.plan_digest}):
+            expected_plan = (self.pending_learned_plan["plan_digest"]
+                             if op == "execute_next" and response["ok"] and self.pending_learned_plan is not None
+                             else self.plan_digest)
+            if expected_plan is not None and response["plan_digest"] not in ({expected_plan} if response["ok"] else {None, expected_plan}):
                 raise ContractError("EXECUTOR_BINDING")
             self.executor_state = response["state"]
             if op != "plan" and isinstance(response.get("data"), dict):
                 if self.plan_envelope and "learned_proposal" in self.plan_envelope["plan"]:
                     from tools.data_factory.rollout.finite_plan import validate_execution_trace
-                    validate_execution_trace(self.plan_envelope["plan"], response["data"].get("learned_execution"))
+                    from tools.data_factory.rollout.finite_plan import validate_execution_history
+                    current_plan = (self.pending_learned_plan["plan_envelope"]["plan"]
+                                    if op == "execute_next" and response["ok"] and self.pending_learned_plan is not None
+                                    else self.plan_envelope["plan"])
+                    validate_execution_trace(current_plan, response["data"].get("learned_execution"))
+                    validate_execution_history(current_plan, response["data"].get("learned_history", []))
                 # RGB belongs to this observation caller, not canonical execution
                 # evidence or a later per-chunk plan/approval history.
                 data = ({key: value for key, value in response["data"].items() if key != "observation"}
@@ -1081,6 +1090,84 @@ class OneJob:
             return self._result(True, "LEARNED_OBSERVATION", observation=copy.deepcopy(response["data"]["observation"]))
         except ContractError as exc:
             return self._abort(exc.code)
+
+    def prepare_next_learned(self, motion_program):
+        """Prepare an exact candidate while the old plan/lease/recording stay current."""
+        if self.state != "LEARNED_CHUNK_COMPLETE" or self.pending_learned_plan is not None:
+            return self._result(False, "LEARNED_CHUNK_STATE")
+        status = self.poll()
+        if not status["ok"]:
+            return status
+        try:
+            program = validate_motion_program(copy.deepcopy(motion_program))
+            response = self._request("executor", "prepare_next", {"run_id": self.run_id,
+                "plan_digest": self.plan_digest, "lease_id": self.lease_id, "motion_program": program})
+            pending = response["data"].get("pending_chunk")
+            if not isinstance(pending, dict) or set(pending) != {"plan_digest", "state", "plan_envelope", "previous_chunk"}:
+                raise ContractError("LEARNED_NEXT_BINDING")
+            envelope, digest = pending["plan_envelope"], pending["plan_digest"]
+            if not isinstance(envelope, dict) or set(envelope) != {"plan", "precommit_safety", "precommit_evidence", "operator_summary"}:
+                raise ContractError("LEARNED_NEXT_BINDING")
+            plan = envelope["plan"]
+            if (pending["state"] != "PLANNED" or canonical_digest(plan) != digest
+                    or plan.get("run_id") != self.run_id or plan.get("scene_binding") != self.scene_binding
+                    or plan.get("motion_program_digest") != canonical_digest(program)
+                    or plan.get("resolved_job_digest") != self._program["resolved_job_digest"]
+                    or plan.get("binding_digests") != self._program["binding_digests"]
+                    or plan.get("learned_proposal") != program.get("learned_proposal")
+                    or plan.get("learned_source_program") != self._program.get("source_program")
+                    or plan.get("learned_continuation", {}).get("previous_plan_digest") != self.plan_digest):
+                raise ContractError("LEARNED_NEXT_BINDING")
+            old_digest, old_program = self.plan_digest, self._program
+            try:
+                self.plan_digest, self._program = digest, program
+                safety = self._precommit_safety(envelope["precommit_safety"], terminal=False)
+                self._precommit_evidence(envelope["precommit_evidence"], safety)
+            finally:
+                self.plan_digest, self._program = old_digest, old_program
+            from tools.data_factory.rollout.finite_plan import validate_execution_history
+            validate_execution_history(plan, [*response["data"].get("learned_history", []), pending["previous_chunk"]])
+            self.pending_learned_plan = {**copy.deepcopy(pending), "motion_program": program}
+            return self._result(True, "LEARNED_NEXT_PLANNED", pending_chunk=copy.deepcopy(pending))
+        except (ContractError, KeyError, TypeError) as exc:
+            return self._abort(exc.code if isinstance(exc, ContractError) else "LEARNED_NEXT_BINDING")
+
+    def approve_next_learned(self, approval):
+        if self.state != "LEARNED_CHUNK_COMPLETE" or self.pending_learned_plan is None:
+            return self._result(False, "LEARNED_CHUNK_STATE")
+        status = self.poll()
+        if not status["ok"]:
+            return status
+        try:
+            self._approval(approval, resolved_job_digest=self._program["resolved_job_digest"], include_digest=False)
+            self._request("executor", "approve_next", {"run_id": self.run_id, "plan_digest": self.plan_digest,
+                "lease_id": self.lease_id, "candidate_plan_digest": self.pending_learned_plan["plan_digest"],
+                "approval": {key: approval[key] for key in ("approval_id", "approved_by", "approval_expiry", "approval_scope")}})
+        except (ContractError, KeyError) as exc:
+            return self._result(False, exc.code if isinstance(exc, ContractError) else "APPROVAL_SCHEMA")
+        self.pending_learned_plan["state"] = "APPROVED"
+        return self._result(True, "LEARNED_NEXT_APPROVED")
+
+    def start_next_learned(self):
+        if self.state != "LEARNED_CHUNK_COMPLETE" or self.pending_learned_plan is None or self.pending_learned_plan["state"] != "APPROVED":
+            return self._result(False, "LEARNED_NEXT_NOT_APPROVED")
+        status = self.poll()
+        if not status["ok"]:
+            return status
+        try:
+            response = self._request("executor", "execute_next", {"run_id": self.run_id,
+                "plan_digest": self.plan_digest, "lease_id": self.lease_id,
+                "candidate_plan_digest": self.pending_learned_plan["plan_digest"]})
+            if response["state"] != "PRECONTACT_HUMAN":
+                raise ContractError("LEARNED_CHUNK_STATE")
+        except ContractError as exc:
+            return self._abort(exc.code)
+        pending = self.pending_learned_plan
+        self.plan_digest = self.dry_run_digest = pending["plan_digest"]
+        self.plan_envelope, self._program = pending["plan_envelope"], pending["motion_program"]
+        self.pending_learned_plan = None
+        self.state = "PRECONTACT_HUMAN"
+        return self._result(True, "PRECONTACT_HUMAN")
 
     def semantic_verdict(self, verdict, decided_by, source="HUMAN"):
         if self.state not in {"SEMANTIC_VERDICT", "LEARNED_CHUNK_COMPLETE"} or verdict not in {"PASS", "FAIL"} or not isinstance(decided_by, str) or not SAFE_ID.fullmatch(decided_by):

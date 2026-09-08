@@ -493,3 +493,38 @@ gates. Full-task continuation also needs per-plan identity through the existing
 phase-event and metric consumers: two distinct chunk plans currently collide
 under their phase/segment-only sequence identity. No second ledger or independent
 motion owner is proposed.
+
+## Authority delta still required for an autonomous bounded attempt
+
+The implemented supervised continuation is a software comparison path. It retains
+one task/recorder/stop owner but requires exact approval for each new candidate.
+That preserves today's authority and allows native replay; repeated chunk clicks
+are not the intended user experience or autonomous policy-effectiveness evidence.
+
+The remaining proposal is to extend the existing execution approval contract for
+one explicitly authorized bounded policy attempt, rather than reuse an old plan
+approval for unseen outputs. Root owns that contract decision and physical
+integration. Its reviewable subject would bind the admitted checkpoint and saved
+processors, inference configuration and instruction/task, existing cell/hardware
+incarnation and scene/object/space qualification, and explicit attempt duration
+and stop conditions. Numerical values must come from the actual approved task
+and qualification; this proposal supplies no default expansion of those bounds.
+
+Generated commands would still pass native full-7D limits, fresh observation and
+controller-start checks, collision/scene constraints, source-clock and command
+completion checks, and the same cancellation owner. Runtime changes to policy,
+normalization, units or output adaptation would not inherit the original approval.
+All raw outputs, proposed commands, actually consumed rows, pauses and terminal
+outcomes must remain attributable to that attempt. Task success still requires
+its existing semantic consumer, and reset/commit/training remain separate owners.
+No mandatory vision detector or additional acknowledgment is proposed.
+
+The source-level difference is precise: existing `approve` binds one immutable
+plan, while `prepare_next` cannot obtain execution authority merely by deriving a
+new plan from the same checkpoint. The proposed bounded-policy authority would
+permit successive checked outputs within its explicitly approved attempt bounds.
+It is falsified if an out-of-scope command can pass, if failure cannot stop the
+sole owner, or if task success/utility is inferred from chunk completion. Until
+that contract and the actual continuous-reference producer are qualified, the
+implemented path reports `online_policy_authorized=false` and preserves explicit
+per-candidate approval. No unseen-output authority is implemented here.

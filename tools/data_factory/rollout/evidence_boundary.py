@@ -343,7 +343,7 @@ def build_run_diagnostic(lifecycle_result: Mapping[str, Any]) -> dict[str, Any]:
     This read-only diagnostic can target later collection/re-evaluation; neither
     controller completion nor human semantic PASS grants terminal/reset safety.
     """
-    from tools.data_factory.rollout.finite_plan import validate_execution_trace
+    from tools.data_factory.rollout.finite_plan import validate_execution_trace, validate_execution_history
     try:
         result = copy.deepcopy(dict(lifecycle_result))
         plan = result["plan_envelope"]["plan"]
@@ -352,6 +352,7 @@ def build_run_diagnostic(lifecycle_result: Mapping[str, Any]) -> dict[str, Any]:
                 or result["state"] not in {"ABORTED", "BLOCKED", "QUARANTINED_COMMIT"}):
             raise ContractError("ROLLOUT_RUN_DIAGNOSTIC_BINDING")
         trace = validate_execution_trace(plan, result["execution_evidence"]["learned_execution"])
+        history = validate_execution_history(plan, result["execution_evidence"].get("learned_history", []))
         if trace["status"] not in {"COMPLETED", "FAILED"}:
             raise ContractError("ROLLOUT_RUN_DIAGNOSTIC_TERMINAL")
         recorder = result["recorder_evidence"]
@@ -371,5 +372,7 @@ def build_run_diagnostic(lifecycle_result: Mapping[str, Any]) -> dict[str, Any]:
         "task_effectiveness": UNKNOWN, "physical_qualification": UNKNOWN,
         "training_authorized": False, "online_policy_authorized": False,
     }
+    if history:
+        diagnostic["execution_history"] = history
     diagnostic["diagnostic_digest"] = canonical_digest(diagnostic)
     return diagnostic

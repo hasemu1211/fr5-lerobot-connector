@@ -422,6 +422,8 @@ def validate_execution_trace(plan, trace):
               "scene_outcome", "cell_ready", "online_policy_authorized", "trace_digest"}
     held = p["schema_version"] == HELD_PROPOSAL_SCHEMA
     current_start = "initial_hardware_binding" in plan["steps"][0]
+    if isinstance(trace, dict) and "terminal_observation" in trace:
+        fields.add("terminal_observation")
     if held:
         fields.add("segments")
     elif current_start:
@@ -456,6 +458,16 @@ def validate_execution_trace(plan, trace):
             check_execution_start(plan["steps"][0], start, start["captured_at_s"], steady_now=start["captured_monotonic_s"])
         elif trace["status"] == "COMPLETED" or trace["terminal_phases"]:
             raise ContractError("LEARNED_TRACE_TERMINAL")
+    if "terminal_observation" in trace:
+        terminal = trace["terminal_observation"]
+        if not isinstance(terminal, dict) or set(terminal) != {"captured_at_s", "captured_monotonic_s", "snapshot"}:
+            raise ContractError("LEARNED_TRACE_TERMINAL")
+        if held or not trace["terminal_phases"] or trace["terminal_state"] != _execution_state(plan["steps"][0], terminal, terminal["captured_at_s"]):
+            raise ContractError("LEARNED_TRACE_TERMINAL")
+        from .gripper_evidence import check_hardware, identity
+        wire = check_hardware(terminal, terminal["captured_at_s"], terminal["captured_monotonic_s"], plan["steps"][0]["max_joint_state_age_s"])
+        if identity(wire) != plan["steps"][0]["initial_hardware_binding"]["incarnation"]:
+            raise ContractError("LEARNED_HARDWARE_INCARNATION")
     if held:
         segments = plan["steps"][0]["held_target_segments"]
         evidence = trace["segments"]
@@ -504,6 +516,48 @@ def validate_execution_trace(plan, trace):
             if trace["terminal_state"] != check_segment_observation(segments[len(evidence) - 1], last, last["captured_at_s"], terminal=True):
                 raise ContractError("LEARNED_TRACE_TERMINAL")
     return copy.deepcopy(trace)
+
+
+def validate_execution_history(plan, history):
+    """Validate retained exact chunks in the existing execution evidence owner."""
+    if not isinstance(history, list):
+        raise ContractError("LEARNED_HISTORY_BINDING")
+    previous_plan, previous_trace, previous_chunk = None, None, None
+    seen_plans, approvals = set(), set()
+    for index, item in enumerate(history):
+        try:
+            if set(item) != {"plan_envelope", "approval", "state", "execution_evidence"} or item["state"] != "LEARNED_CHUNK_COMPLETE":
+                raise ContractError("LEARNED_HISTORY_BINDING")
+            old = item["plan_envelope"]["plan"]
+            digest = canonical_digest(old)
+            approval = item["approval"]
+            if (digest in seen_plans or approval["approval_id"] in approvals
+                    or approval["approval_scope"] != "HUMAN_GATED" or approval["plan_digest"] != digest
+                    or approval["run_id"] != plan["run_id"] or old["run_id"] != plan["run_id"]
+                    or approval["resolved_job_digest"] != old["resolved_job_digest"]
+                    or item["plan_envelope"]["precommit_safety"]["approved_plan_digest"] != digest
+                    or old["learned_source_program"] != plan["learned_source_program"]
+                    or old["learned_proposal"]["checkpoint"] != plan["learned_proposal"]["checkpoint"]):
+                raise ContractError("LEARNED_HISTORY_BINDING")
+            binding = old.get("learned_continuation")
+            expected = {"previous_plan_digest": previous_plan, "previous_trace_digest": previous_trace,
+                        "previous_chunk_digest": previous_chunk, "chunk_index": index}
+            if index == 0 and binding is not None or index and canonical_digest(binding) != canonical_digest(expected):
+                raise ContractError("LEARNED_HISTORY_BINDING")
+            trace = validate_execution_trace(old, item["execution_evidence"]["learned_execution"])
+            if trace["failure_code"] is not None or trace["terminal_phases"] != ["LEARNED_CHUNK"]:
+                raise ContractError("LEARNED_HISTORY_BINDING")
+            seen_plans.add(digest)
+            approvals.add(approval["approval_id"])
+            previous_plan, previous_trace, previous_chunk = digest, trace["trace_digest"], canonical_digest(item)
+        except (KeyError, TypeError) as exc:
+            raise ContractError("LEARNED_HISTORY_BINDING") from exc
+    expected = {"previous_plan_digest": previous_plan, "previous_trace_digest": previous_trace,
+                "previous_chunk_digest": previous_chunk, "chunk_index": len(history)}
+    if (history and (canonical_digest(plan.get("learned_continuation")) != canonical_digest(expected) or canonical_digest(plan) in seen_plans)
+            or not history and "learned_continuation" in plan):
+        raise ContractError("LEARNED_HISTORY_BINDING")
+    return copy.deepcopy(history)
 
 
 def proposal_summary(p):

@@ -138,10 +138,14 @@ class Transport(T):
 class Cell:
     def __init__(self):
         self.ready = True
+        self.binding = {}
     def read(self):
-        return {"robot_system_id": "fr5-lab-a", "cell_ready": self.ready}
-    def mark_blocked(self, *_):
+        return {"robot_system_id": "fr5-lab-a", "cell_ready": self.ready, **self.binding}
+    def mark_blocked(self, reason, run_id, plan_digest, *, expected_state_digest=None):
+        if expected_state_digest is not None and canonical_digest(self.read()) != expected_state_digest:
+            raise ContractError("STATE_CHANGED")
         self.ready = False
+        self.binding = {"reason_code": reason, "run_id": run_id, "plan_digest": plan_digest}
 
 
 class Scene:
@@ -1481,6 +1485,252 @@ class FinitePlanTest(unittest.TestCase):
         self.assertEqual(calls.count(("recorder", "freeze")), 1)
         self.assertEqual(job.poll()["code"], "PRECOMMIT_SAFETY")
         self.assertNotIn(("recorder", "commit"), calls)
+
+    def next_raw_program(self, job, now=10.):
+        obs = observation()
+        obs["observation.state"] = ACTION[:]
+        obs["source_timestamps_s"] = dict.fromkeys(("state", "camera1", "camera2"), now)
+        inference = FinitePolicyInference(lambda _: [ACTION[:]], CHECKPOINT, source_clock=lambda: now)
+        return compile_program(source(), inference.propose(obs, **OPTIONS))
+
+    def test_next_chunk_keeps_one_owner_and_exact_approved_history(self):
+        from tools.data_factory.rollout.finite_plan import validate_execution_history
+        job, executor, transport, cell, scene, now, calls = self.start_job()
+        from tools.data_factory.quality.phase_events import PhaseEventWriter, read_phase_events
+        from tools.data_factory.quality.episode_report import build_episode_report
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        sidecar = Path(directory.name) / "phase_events.jsonl"
+        writer = PhaseEventWriter(sidecar, plan=job.plan_envelope["plan"])
+        self.addCleanup(writer.close)
+        executor._phase_event_writer = writer
+        executor.event_clock = lambda: (round(now[0] * 1e9), "SYSTEM_TIME")
+        self.assertTrue(job.confirm("operator")["ok"])
+        now[0] = round(now[0] + .1, 9)
+        self.assertEqual(job.poll()["state"], "LEARNED_CHUNK_COMPLETE")
+        original_plan = copy.deepcopy(job.plan_envelope)
+        transaction, lease, digest = job.transaction_id, job.lease_id, job.plan_digest
+        program = self.next_raw_program(job, now[0])
+        result = job.prepare_next_learned(program)
+        self.assertTrue(result["ok"], result)
+        candidate = result["pending_chunk"]["plan_digest"]
+        self.assertEqual(job.plan_digest, digest)
+        self.assertEqual(job.plan_envelope, original_plan)
+        self.assertEqual(job.state, "LEARNED_CHUNK_COMPLETE")
+        self.assertEqual(len(transport.sent), 1)
+        self.assertEqual(job.start_next_learned()["code"], "LEARNED_NEXT_NOT_APPROVED")
+        self.assertEqual(job.approve_next_learned(APPROVAL)["code"], "LEARNED_APPROVAL_REUSED")
+        approval = {**APPROVAL, "approval_id": "next-exact-approval"}
+        self.assertTrue(job.approve_next_learned(approval)["ok"])
+        result = job.start_next_learned()
+        self.assertTrue(result["ok"], result)
+        self.assertEqual(result["state"], "PRECONTACT_HUMAN")
+        self.assertEqual(job.plan_digest, candidate)
+        self.assertEqual(len(transport.sent), 1)
+        now[0] = round(now[0] + .1, 9)
+        self.assertTrue(job.confirm("operator")["ok"])
+        now[0] = round(now[0] + .1, 9)
+        result = job.poll()
+        self.assertEqual(result["state"], "LEARNED_CHUNK_COMPLETE")
+        self.assertEqual(len(transport.sent), 2)
+        self.assertEqual((job.transaction_id, job.lease_id), (transaction, lease))
+        self.assertEqual(calls.count(("recorder", "begin")), 1)
+        self.assertNotIn(("recorder", "freeze"), calls)
+        self.assertNotIn(("recorder", "commit"), calls)
+        history = result["execution_evidence"]["learned_history"]
+        self.assertEqual(history[0]["plan_envelope"], original_plan)
+        self.assertEqual(history[0]["approval"]["plan_digest"], digest)
+        self.assertEqual(history[0]["execution_evidence"]["learned_execution"]["terminal_phases"], ["LEARNED_CHUNK"])
+        self.assertEqual(validate_execution_history(job.plan_envelope["plan"], history), history)
+        self.assertEqual(job.plan_envelope["plan"]["learned_proposal"]["actions"], program["learned_proposal"]["actions"])
+        self.assertEqual(scene.updates, [])
+        self.assertFalse(cell.ready)
+        self.assertTrue(writer.close())
+        plans = {digest: original_plan["plan"], candidate: job.plan_envelope["plan"]}
+        events = read_phase_events(sidecar, plans=plans)
+        self.assertEqual([event["sequence"] for event in events], list(range(len(events))))
+        self.assertEqual({event["plan_digest"] for event in events}, set(plans))
+        rows = [{"target_ros_s": stamp, "action": ACTION[:], "observation.state": ACTION[:]}
+                for stamp in (10.05, 10.25)]
+        for plan_digest, plan in plans.items():
+            report_dir = Path(directory.name) / plan_digest.replace(":", "-")
+            report_dir.mkdir()
+            evidence = (history[0]["execution_evidence"] if plan_digest == digest else result["execution_evidence"])
+            report = build_episode_report(report_dir / "episode_quality.json", run_id="run",
+                resolved_job_digest=plan["resolved_job_digest"], plan_digest=plan_digest, plan=plan, plans=plans,
+                phase_events_path=sidecar, recorder_rows=rows, recorder_rows_digest=canonical_digest(rows),
+                recorder_ros_clock_type="SYSTEM_TIME", execution_evidence=evidence, stall_epsilon_rad=1e-4,
+                technical_validator={"schema_version": "data_factory.technical_validator_ref.v1", "status": "PASS",
+                                     "result_digest": canonical_digest("synthetic-only")})
+            timing = next(item for item in report["attributes"] if item["attribute"] == "phase_timing_integrity")
+            self.assertEqual(timing["metrics"]["joined_row_count"], 1)
+            self.assertEqual(report["plan_digest"], plan_digest)
+        for mutate in (lambda h: h.clear(), lambda h: h.append(copy.deepcopy(h[0])),
+                       lambda h: h[0]["approval"].update(plan_digest=candidate),
+                       lambda h: h[0]["approval"].update(approved_by="different-operator")):
+            changed = copy.deepcopy(history)
+            mutate(changed)
+            with self.assertRaisesRegex(ContractError, "LEARNED_HISTORY_BINDING"):
+                validate_execution_history(job.plan_envelope["plan"], changed)
+        for number in range(3):
+            request = {"schema_version": "fr5.pickup_executor.command.v4", "op_id": f"history-cache-{number}",
+                       "op": "status", "payload": {"run_id": "run", "plan_digest": candidate}}
+            response = executor.process(request)
+            self.assertTrue(response["ok"])
+            self.assertIs(executor.cache[request["op_id"]][1]["data"]["learned_history"], executor.runs["run"]["learned_history"])
+            response["data"]["learned_history"].clear()
+            self.assertEqual(executor.process(request)["data"]["learned_history"], history)
+        # A third chunk exercises the predecessor chain, not only one transition.
+        self.assertTrue(job.prepare_next_learned(self.next_raw_program(job, now[0]))["ok"])
+        self.assertTrue(job.approve_next_learned({**APPROVAL, "approval_id": "third-exact"})["ok"])
+        next_start = job.start_next_learned()
+        self.assertTrue(next_start["ok"], next_start["code"])
+        self.assertTrue(job.confirm("operator")["ok"])
+        now[0] = round(now[0] + .1, 9)
+        third = job.poll()
+        self.assertEqual(third["state"], "LEARNED_CHUNK_COMPLETE")
+        history = third["execution_evidence"]["learned_history"]
+        self.assertEqual(len(history), 2)
+        self.assertEqual(validate_execution_history(job.plan_envelope["plan"], history), history)
+        with self.assertRaisesRegex(ContractError, "LEARNED_HISTORY_BINDING"):
+            validate_execution_history(job.plan_envelope["plan"], list(reversed(history)))
+        self.assertTrue(job.semantic_verdict("PASS", "operator")["ok"])
+        terminal = job.poll()
+        self.assertEqual(terminal["code"], "PRECOMMIT_SAFETY")
+        diagnostic = learned_run_diagnostic(terminal)
+        self.assertEqual(diagnostic["execution_history"], history)
+        self.assertEqual(diagnostic["task_effectiveness"], "UNKNOWN")
+        self.assertIsNone(diagnostic["episode_ledger"])
+        self.assertNotIn(("recorder", "commit"), calls)
+
+    def test_next_held_chunk_native_transport_keeps_completed_reference_without_new_gripper_goal(self):
+        job, executor, transport, state, now, sent, _, calls = self.make_held_job()
+        self.assertTrue(job.approve(APPROVAL)["ok"])
+        self.assertTrue(job.start()["ok"])
+        self.assertEqual(job.poll()["state"], "PRECONTACT_HUMAN")
+        with mock.patch("tools.data_factory.motion.moveit_transport.time.time", side_effect=lambda: now[0]):
+            self.assertTrue(job.confirm("operator")["ok"])
+            state["complete"] = True
+            job.poll()
+            now[0] += .5
+            state.update(reference=.01176, feedback=.01218)
+            self.assertTrue(job.poll()["ok"])
+            now[0] += .51
+            state["complete"] = True
+            job.poll()
+            state.update(joints=[.001] * 6, complete=True)
+            self.assertEqual(job.poll()["state"], "LEARNED_CHUNK_COMPLETE")
+            self.assertEqual(len(sent), 3)
+            self.assertEqual(transport._gripper_goal_count, 1)
+            before = copy.deepcopy(job.plan_envelope)
+            old = job._program["learned_proposal"]
+            obs = observation()
+            obs["observation.state"] = [.001] * 6 + [.01218]
+            obs["source_timestamps_s"] = dict.fromkeys(("state", "camera1", "camera2"), now[0])
+            actions = [[.002] * 6 + [.01176] for _ in range(4)]
+            inference = FinitePolicyInference(lambda _: actions, CHECKPOINT, source_clock=lambda: now[0])
+            p = inference.propose(obs, **{**OPTIONS, "robot_description": old["robot_description"],
+                "period_s": old["period_s"], "held_gripper_targets": True, "max_observation_age_s": old["max_observation_age_s"]})
+            program = compile_program(job._program["source_program"], p)
+            result = job.prepare_next_learned(program)
+            self.assertTrue(result["ok"], result)
+            candidate = result["pending_chunk"]["plan_envelope"]["plan"]
+            self.assertEqual([s["type"] for s in candidate["steps"][0]["held_target_segments"]], ["ARM"])
+            self.assertEqual(candidate["learned_proposal"]["actions"], actions)
+            self.assertTrue(job.approve_next_learned({**APPROVAL, "approval_id": "next-native"})["ok"])
+            result = job.start_next_learned()
+            self.assertTrue(result["ok"], result)
+            self.assertEqual(len(sent), 3)
+            self.assertTrue(job.confirm("operator")["ok"])
+            self.assertEqual(len(sent), 4)
+            self.assertEqual(transport._gripper_goal_count, 1)
+            points = sent[-1].trajectory.joint_trajectory.points
+            self.assertEqual([list(point.positions) for point in points[1:]], [row[:6] for row in actions])
+            now[0] += .2
+            state.update(joints=[.002] * 6, complete=True)
+            result = job.poll()
+            self.assertEqual(result["state"], "LEARNED_CHUNK_COMPLETE")
+            history = result["execution_evidence"]["learned_history"]
+            self.assertEqual(history[0]["plan_envelope"], before)
+            self.assertEqual(result["execution_evidence"]["learned_execution"]["segments"][0]["start_observation"]["snapshot"]["gripper_controller"]["feedback_position_m"], .01218)
+            self.assertEqual(calls.count(("recorder", "begin")), 1)
+            self.assertNotIn(("recorder", "freeze"), calls)
+            self.assertNotIn(("recorder", "commit"), calls)
+
+    def test_next_chunk_rejects_late_compile_changed_cell_and_superseded_hardware(self):
+        for failure in ("late", "paused_source", "reentrant", "cell", "superseded", "wrong_incarnation", "paused_controller", "cell_race", "cancel"):
+            with self.subTest(failure=failure):
+                job, executor, transport, cell, scene, now, calls = self.start_job()
+                self.assertTrue(job.confirm("operator")["ok"])
+                self.assertEqual(job.poll()["state"], "LEARNED_CHUNK_COMPLETE")
+                original = copy.deepcopy(job.plan_envelope)
+                if failure in {"late", "paused_source", "reentrant"}:
+                    if failure == "paused_source":
+                        executor.source_clock = lambda: 10.
+                    compile_goal = transport.build_learned_trajectory
+                    def slow(p):
+                        result = compile_goal(p)
+                        if failure == "reentrant":
+                            executor.process({"schema_version": "fr5.pickup_executor.command.v4", "op_id": "recursive",
+                                "op": "status", "payload": {"run_id": "run", "plan_digest": job.plan_digest}})
+                        else:
+                            now[0] += .4 if failure == "paused_source" else 100.
+                        return result
+                    transport.build_learned_trajectory = slow
+                result = job.prepare_next_learned(self.next_raw_program(job))
+                if failure in {"late", "paused_source", "reentrant"}:
+                    self.assertFalse(result["ok"])
+                    if failure == "paused_source":
+                        self.assertEqual(result["code"], "LEARNED_STALE_OBSERVATION")
+                    self.assertEqual(job.plan_envelope, original)
+                    self.assertNotIn("pending_chunk", executor.runs["run"])
+                else:
+                    self.assertTrue(result["ok"], result)
+                    self.assertTrue(job.approve_next_learned({**APPROVAL, "approval_id": "next"})["ok"])
+                    preserved_cell = None
+                    if failure == "cell_race":
+                        from tools.data_factory.cell_state import CellStateStore
+                        directory = tempfile.TemporaryDirectory()
+                        self.addCleanup(directory.cleanup)
+                        store = CellStateStore(directory.name, "fr5-lab-a")
+                        store.mark_blocked("EXECUTION_IN_PROGRESS", "run", job.plan_digest)
+                        executor.cell_state_store = store
+                        mark = store.mark_blocked
+                        preserved_cell = []
+                        def intervene(reason, run_id, plan_digest, **options):
+                            if not preserved_cell:
+                                mark("FOREIGN_FAILURE", "foreign-run", canonical_digest("foreign-plan"))
+                                preserved_cell.append(store.runtime_path("state.json").read_bytes())
+                            return mark(reason, run_id, plan_digest, **options)
+                        store.mark_blocked = intervene
+                    elif failure == "cell":
+                        cell.binding["plan_digest"] = canonical_digest("another-plan")
+                    elif failure in {"superseded", "wrong_incarnation", "paused_controller"}:
+                        observe = transport.snapshot
+                        def changed(*args):
+                            value = observe(*args)
+                            hw = value["gripper_controller"]["hardware_execution"]
+                            if failure == "superseded":
+                                hw["wire"]["generation"] = 1.
+                            elif failure == "wrong_incarnation":
+                                hw["wire"]["incarnation_0"] = 2.
+                                hw["clock_binding"]["incarnation"][0] = 2
+                            else:
+                                value["arm_controller"]["speed_scaling"] = 0.
+                            return value
+                        transport.snapshot = changed
+                    else:
+                        executor.runs["run"]["cancel_event"].set()
+                    rejected = job.start_next_learned()
+                    self.assertFalse(rejected["ok"])
+                    if failure == "cell_race":
+                        self.assertEqual(rejected["code"], "STATE_CHANGED")
+                        self.assertEqual(store.runtime_path("state.json").read_bytes(), preserved_cell[0])
+                    if failure == "cell":
+                        self.assertEqual(cell.binding["plan_digest"], canonical_digest("another-plan"))
+                    self.assertEqual(job.plan_envelope, original)
+                self.assertEqual(len(transport.sent), 1)
+                self.assertNotIn(("recorder", "commit"), calls)
 
     def test_retried_command_cannot_bypass_existing_lease_tick(self):
         job, executor, transport, _, _, now, calls = self.start_job()

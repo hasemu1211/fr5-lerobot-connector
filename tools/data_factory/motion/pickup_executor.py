@@ -49,7 +49,7 @@ PHASES = (
 ARM_PHASES = frozenset(PHASES) - {"GRIPPER_CLOSE", "GRIPPER_OPEN"}
 JOINT_ORDER = ["j1", "j2", "j3", "j4", "j5", "j6"]
 COMMAND_FIELDS = {"schema_version", "op_id", "op", "payload"}
-COMMAND_OPS = {"preflight", "capture_observation", "plan", "approve", "execute", "heartbeat", "confirm", "grasp_verdict", "semantic_verdict", "release_verdict", "cancel", "status"}
+COMMAND_OPS = {"prepare_next", "approve_next", "execute_next", "preflight", "capture_observation", "plan", "approve", "execute", "heartbeat", "confirm", "grasp_verdict", "semantic_verdict", "release_verdict", "cancel", "status"}
 ACTIVE_STATES = {"EXECUTING", "PRECONTACT_HUMAN", "GRASP_VERDICT", "SEMANTIC_VERDICT", "LEARNED_CHUNK_COMPLETE", "RELEASE_VERDICT"}
 RECYCLE_PHASES = ("RECYCLE_APPROACH_PTP", "LOWER_LIN", "GRIPPER_OPEN", "RETREAT_LIN", "SAFE_POSE_PTP")
 EXECUTION_RESULT_MARGIN_S = 2.0
@@ -350,7 +350,8 @@ class PickupExecutor:
                 "action_status": action_status,
                 "evidence_digest": canonical_digest(evidence),
             }
-            if not writer.emit(record):
+            emitted = writer.emit(record, plan=run["plan"]) if run.get("learned_history") else writer.emit(record)
+            if not emitted:
                 execution["behavior_report_status"] = "BEHAVIOR_REPORT_UNAVAILABLE"
         except (ContractError, KeyError, TypeError, ValueError, OverflowError):
             execution["behavior_report_status"] = "BEHAVIOR_REPORT_UNAVAILABLE"
@@ -419,6 +420,13 @@ class PickupExecutor:
         result["mode"] = self.mode
         result["op_id"], result["op"] = op_id, op
         snapshot = copy.deepcopy(result)
+        data = snapshot.get("data")
+        history = self.runs.get(snapshot.get("run_id"), {}).get("learned_history")
+        if isinstance(data, dict) and "learned_history" in data and data["learned_history"] == history:
+            # Private history entries are frozen when archived. Share that
+            # immutable prefix across cached receipts; callers still receive
+            # deep copies, avoiding a full history copy per heartbeat in cache.
+            data["learned_history"] = history
         self.cache[op_id] = (request_digest, snapshot)
         if op == "capture_observation" and snapshot["ok"]:
             self._cached_observation = (op_id, self.monotonic_clock())
@@ -527,6 +535,24 @@ class PickupExecutor:
         if self.runs:
             raise ContractError("ONE_JOB_ONLY")
 
+        response = self._compile_plan(payload)
+        if response["ok"]:
+            self.runs[run_id] = self._planned_record(response)
+        return response
+
+    @staticmethod
+    def _planned_record(response):
+        envelope = response["data"]
+        return {"plan": copy.deepcopy(envelope["plan"]), "digest": response["plan_digest"],
+                "precommit_safety": copy.deepcopy(envelope["precommit_safety"]),
+                "precommit_evidence": copy.deepcopy(envelope["precommit_evidence"]),
+                "recycle_plan_digest": envelope["operator_summary"].get("recycle", {}).get("plan_digest"),
+                "envelope": copy.deepcopy(envelope), "state": "PLANNED"}
+
+    def _compile_plan(self, payload, *, chunk_binding=None):
+        # Compilation may read/serialize/check collision but never replaces the
+        # current run, approval, lease or execution owner.
+        run_id = payload["run_id"]
         motion_program = validate_motion_program(copy.deepcopy(payload["motion_program"]))
         scene_binding = validate_scene_binding(payload["scene_binding"])
         self._validate_motion_only_continuation(
@@ -763,6 +789,8 @@ class PickupExecutor:
             plan["learned_source_program"] = copy.deepcopy(motion_program["source_program"])
             # This is a finite probe, never evidence of a reset or scene transition.
             plan["execution_kind"] = "FINITE_LEARNED_PROBE"
+        if chunk_binding is not None:
+            plan["learned_continuation"] = copy.deepcopy(chunk_binding)
         plan_digest = canonical_digest(plan)
         precommit_response = self.transport.precommit_safety(
             copy.deepcopy(plan), motion_program["planning_scene"], copy.deepcopy(observed)
@@ -863,14 +891,6 @@ class PickupExecutor:
                 "safe_staging_joint_positions_rad": copy.deepcopy(planned_steps[-1]["final_joint_state"]),
                 "plan_digest": recycle_plan_digest,
             }
-        self.runs[run_id] = {
-            "plan": copy.deepcopy(plan),
-            "digest": plan_digest,
-            "precommit_safety": copy.deepcopy(precommit),
-            "precommit_evidence": copy.deepcopy(evidence),
-            "recycle_plan_digest": recycle_plan_digest,
-            "state": "PLANNED",
-        }
         return _response(
             code="PLANNED",
             ok=True,
@@ -884,6 +904,135 @@ class PickupExecutor:
                 "operator_summary": operator_summary,
             },
         )
+
+    def _chunk_boundary(self, run, lease_id):
+        self.tick()
+        if run["state"] != "LEARNED_CHUNK_COMPLETE" or "learned_proposal" not in run["plan"]:
+            raise ContractError(run.get("failure_code", "LEARNED_CHUNK_STATE"))
+        if lease_id != run["execution"]["lease_id"]:
+            raise ContractError("LEASE_BINDING")
+        if run["execution"]["active"] or getattr(self.transport, "owns_active_goal", True):
+            raise ContractError("ROS_EXEC_ACTIVE")
+        if run["cancel_event"].is_set():
+            raise ContractError("LEARNED_CANCELLED")
+
+    def _prepare_next(self, payload):
+        run = self._execution_payload(payload, {"run_id", "plan_digest", "lease_id", "motion_program"}, "LEARNED_NEXT_SCHEMA")
+        self._chunk_boundary(run, payload["lease_id"])
+        run["continuation_requested"] = True
+        if "pending_chunk" in run:
+            raise ContractError("LEARNED_NEXT_PENDING")
+        program = validate_motion_program(copy.deepcopy(payload["motion_program"]))
+        proposal, previous = program.get("learned_proposal"), run["plan"]["learned_proposal"]
+        if (proposal is None or program.get("source_program") != run["plan"]["learned_source_program"]
+                or any(proposal.get(key) != previous.get(key) for key in
+                       ("schema_version", "checkpoint", "instruction", "runtime_inputs", "robot_description", "velocity_scaling", "period_s", "max_observation_age_s"))
+                or proposal["proposal_digest"] == previous["proposal_digest"]):
+            raise ContractError("LEARNED_NEXT_BINDING")
+        prepared_source, prepared_steady = self.source_clock(), self.monotonic_clock()
+        prior_data = self._execution_data(run)
+        prior_data.pop("learned_history", None)
+        prior_data.pop("pending_chunk", None)
+        previous_chunk = {"plan_envelope": copy.deepcopy(run["envelope"]), "approval": copy.deepcopy(run["approval"]),
+                          "state": run["state"], "execution_evidence": prior_data}
+        continuation = {"previous_plan_digest": run["digest"], "previous_trace_digest": prior_data["learned_execution"]["trace_digest"],
+                        "previous_chunk_digest": canonical_digest(previous_chunk),
+                        "chunk_index": len(run.get("learned_history", [])) + 1}
+        response = self._compile_plan({"run_id": payload["run_id"], "motion_program": program,
+                                       "scene_binding": run["plan"]["scene_binding"]}, chunk_binding=continuation)
+        # A late/reentrant compile cannot publish a candidate or revive a stop.
+        self._chunk_boundary(run, payload["lease_id"])
+        if not response["ok"]:
+            raise ContractError(response["code"])
+        from tools.data_factory.rollout.finite_plan import check_freshness
+        check_freshness(proposal, self.source_clock())
+        elapsed = self.monotonic_clock() - prepared_steady
+        if elapsed < 0 or max(prepared_source - stamp for stamp in proposal["source_timestamps_s"].values()) + elapsed > proposal["max_observation_age_s"]:
+            raise ContractError("LEARNED_STALE_OBSERVATION")
+        run["pending_chunk"] = {**self._planned_record(response), "previous_chunk": previous_chunk}
+        return self._execution_response(run, payload["run_id"], run["digest"], "LEARNED_NEXT_PLANNED")
+
+    def _approve_next(self, payload):
+        fields = {"run_id", "plan_digest", "lease_id", "candidate_plan_digest", "approval"}
+        run = self._execution_payload(payload, fields, "LEARNED_NEXT_SCHEMA")
+        self._chunk_boundary(run, payload["lease_id"])
+        candidate = run.get("pending_chunk")
+        if not candidate or candidate["digest"] != payload["candidate_plan_digest"] or candidate["state"] != "PLANNED":
+            raise ContractError("LEARNED_NEXT_BINDING")
+        approval = _exact(payload["approval"], {"approval_id", "approved_by", "approval_expiry", "approval_scope"}, "APPROVAL_SCHEMA")
+        if any(not isinstance(approval[k], str) or not SAFE_ID.fullmatch(approval[k]) for k in ("approval_id", "approved_by")):
+            raise ContractError("APPROVAL_SCHEMA")
+        if approval["approval_scope"] != "HUMAN_GATED":
+            raise ContractError("LEARNED_HUMAN_APPROVAL_REQUIRED")
+        if approval["approval_id"] in [run["approval"]["approval_id"], *[item["approval"]["approval_id"] for item in run.get("learned_history", [])]]:
+            raise ContractError("LEARNED_APPROVAL_REUSED")
+        _future_timestamp(approval["approval_expiry"], self.clock())
+        candidate["approval"] = {**copy.deepcopy(approval), "run_id": payload["run_id"],
+                                 "plan_digest": candidate["digest"], "resolved_job_digest": candidate["plan"]["resolved_job_digest"]}
+        candidate["state"] = "APPROVED"
+        return self._execution_response(run, payload["run_id"], run["digest"], "LEARNED_NEXT_APPROVED")
+
+    def _execute_next(self, payload):
+        run = self._execution_payload(payload, {"run_id", "plan_digest", "lease_id", "candidate_plan_digest"}, "LEARNED_NEXT_SCHEMA")
+        self._chunk_boundary(run, payload["lease_id"])
+        candidate = run.get("pending_chunk")
+        if not candidate or candidate["digest"] != payload["candidate_plan_digest"] or candidate["state"] != "APPROVED":
+            raise ContractError("LEARNED_NEXT_NOT_APPROVED")
+        _future_timestamp(candidate["approval"]["approval_expiry"], self.clock())
+        if not self.execution_enabled:
+            raise ContractError("LIVE_EXECUTION_BLOCKED")
+        plan, execution = candidate["plan"], run["execution"]
+        if plan["learned_proposal"]["checkpoint"]["runtime"] == "SYNTHETIC_TEST_ONLY" and self.transport.__class__.__module__ == "tools.data_factory.motion.moveit_transport":
+            raise ContractError("LEARNED_SYNTHETIC_RUNTIME")
+        first = plan["steps"][0]
+        first = first.get("held_target_segments", [first])[0]
+        observed = self.transport.snapshot(plan["planning"]["max_joint_state_age_s"])
+        from tools.data_factory.rollout.finite_plan import check_execution_start
+        captured = {"captured_at_s": self.source_clock(), "captured_monotonic_s": self.monotonic_clock(), "snapshot": observed}
+        check_execution_start(first, captured, self.source_clock(), steady_now=self.monotonic_clock())
+        from tools.data_factory.rollout.gripper_evidence import check_transition
+        terminal = (execution["learned_segments"][-1]["terminal_observation"]
+                    if execution.get("learned_segments") else execution.get("learned_terminal_observation"))
+        check_transition(terminal, captured, command=False)
+        if _gripper_settings(observed["gripper_settings"]) != plan["active_gripper_settings"]:
+            raise ContractError("GRIPPER_SETTINGS_MISMATCH")
+        cell = self.cell_state_store.read() if self.cell_state_store is not None else {}
+        if (cell.get("robot_system_id") != plan["robot_system_id"] or cell.get("cell_ready") is not False
+                or cell.get("reason_code") != "EXECUTION_IN_PROGRESS" or cell.get("run_id") != payload["run_id"]
+                or cell.get("plan_digest") != run["digest"]):
+            raise ContractError("LEARNED_NEXT_CELL_BINDING")
+        if self.scene_state_store is None:
+            raise ContractError("SCENE_STATE_REQUIRED")
+        with self.scene_state_store.locked_snapshot(execution["scene_state_digest"]) as snapshot:
+            if (snapshot["scene_state_digest"] != execution["scene_state_digest"]
+                    or snapshot["scene_state"]["revision"] != execution["scene_revision"]
+                    or snapshot["scene_state"]["objects"].get(plan["scene_binding"]["object_instance_id"]) != execution["scene_object"]):
+                raise ContractError("SCENE_STATE_CHANGED")
+            self._chunk_boundary(run, payload["lease_id"])
+            # Freeze all prior provenance, including its approval, into the
+            # next exact plan's predecessor digest. Never nest earlier history.
+            history = [*run.get("learned_history", []), candidate["previous_chunk"]]
+            candidate = {key: value for key, value in candidate.items() if key != "previous_chunk"}
+            try:
+                self.cell_state_store.mark_blocked("EXECUTION_IN_PROGRESS", payload["run_id"], candidate["digest"],
+                                                   expected_state_digest=canonical_digest(cell))
+            except ContractError:
+                raise
+            except Exception as exc:
+                raise ContractError("CELL_STATE_ARMING_FAILED") from exc
+            self._chunk_boundary(run, payload["lease_id"])
+            next_execution = {key: copy.deepcopy(execution[key]) for key in
+                              ("lease_id", "lease_deadline", "scene_object", "scene_state_digest", "scene_revision", "phase_event_sequence")}
+            for key in ("phase_events_path", "behavior_report_status"):
+                if key in execution:
+                    next_execution[key] = execution[key]
+            next_execution.update(step_index=0, grasp_verdict=None, semantic_verdict=None, release_verdict=None,
+                                  snapshot=None, active=False, terminal_phases=[])
+            cancel = run["cancel_event"]
+            run.clear()
+            run.update(candidate, execution=next_execution, cancel_event=cancel, learned_history=history, state="EXECUTING")
+            self._start_current_step(run)
+        return self._execution_response(run, payload["run_id"], run["digest"], "EXECUTING")
 
     def _approve(self, payload):
         _exact(
@@ -1068,8 +1217,17 @@ class PickupExecutor:
                 trace["segments"] = copy.deepcopy(execution.get("learned_segments", []))
             else:
                 trace["start_observation"] = copy.deepcopy(execution.get("learned_start_observation"))
+            if "learned_terminal_observation" in execution:
+                trace["terminal_observation"] = copy.deepcopy(execution["learned_terminal_observation"])
             trace["trace_digest"] = canonical_digest(trace)
             data["learned_execution"] = trace
+        if "learned_history" in run:
+            data["learned_history"] = copy.deepcopy(run["learned_history"])
+        if "pending_chunk" in run:
+            pending = run["pending_chunk"]
+            data["pending_chunk"] = {"plan_digest": pending["digest"], "state": pending["state"],
+                                     "plan_envelope": copy.deepcopy(pending["envelope"]),
+                                     "previous_chunk": copy.deepcopy(pending["previous_chunk"])}
         data["precommit_safety"] = copy.deepcopy(run.get("precommit_safety"))
         if "failure_code" in run:
             data["failure_code"] = run["failure_code"]
@@ -1222,7 +1380,14 @@ class PickupExecutor:
         execution["durable_blocked"] = False
         try:
             if self.cell_state_store is not None:
-                self.cell_state_store.mark_blocked(code, run["plan"]["run_id"], run["digest"])
+                options = {}
+                if run.get("continuation_requested") or run.get("learned_history"):
+                    cell = self.cell_state_store.read()
+                    if (cell.get("run_id") != run["plan"]["run_id"] or cell.get("plan_digest") != run["digest"]
+                            or cell.get("cell_ready") is not False or cell.get("reason_code") != "EXECUTION_IN_PROGRESS"):
+                        raise ContractError("STATE_CHANGED")
+                    options["expected_state_digest"] = canonical_digest(cell)
+                self.cell_state_store.mark_blocked(code, run["plan"]["run_id"], run["digest"], **options)
                 execution["durable_blocked"] = True
             else:
                 execution["cell_state_error"] = "CELL_STATE_STORE_MISSING"
@@ -1405,7 +1570,17 @@ class PickupExecutor:
                                     or any(abs(a - b) > tolerance for a, b in zip(terminal[:6], target[:6]))
                                     or any(not math.isfinite(float(gripper[k])) or abs(float(gripper[k]) - target[-1]) > completed_step["gripper_tolerance_m"] for k in ("feedback_position_m", "reference_position_m"))):
                                 raise ContractError("LEARNED_TERMINAL_STATE")
+                            from tools.data_factory.rollout.finite_plan import _execution_state
+                            from tools.data_factory.rollout.gripper_evidence import check_hardware, identity
+                            captured = {"captured_at_s": self.source_clock(), "captured_monotonic_s": self.monotonic_clock(), "snapshot": copy.deepcopy(observed)}
+                            _execution_state(completed_step, captured, self.source_clock())
+                            wire = check_hardware(captured, self.source_clock(), self.monotonic_clock(), completed_step["max_joint_state_age_s"])
+                            if identity(wire) != completed_step["initial_hardware_binding"]["incarnation"]:
+                                raise ContractError("LEARNED_HARDWARE_INCARNATION")
+                            if run["state"] != "EXECUTING" or run["cancel_event"].is_set():
+                                continue
                             execution["learned_terminal_snapshot"] = terminal
+                            execution["learned_terminal_observation"] = captured
                         except Exception as exc:
                             self._fault(run, exc.code if isinstance(exc, ContractError) else "LEARNED_TERMINAL_STATE")
                             continue

@@ -748,3 +748,60 @@ checkpoint consumer, requires no ROS node, GPU, model download or physical data:
 ```sh
 direnv exec . python3 -m unittest tests.data_factory.rollout.test_finite_plan tests.data_factory.rollout.test_policy_observation tests.data_factory.test_one_job tests.data_factory.test_run_job
 ```
+
+### Requirement: A pending chunk preserves the current task authority
+
+The sole executor and OneJob SHALL prepare a subsequent learned candidate only
+at `LEARNED_CHUNK_COMPLETE`, with the same run, live lease, recording transaction,
+source program, checkpoint and inference/runtime binding. Preparation SHALL NOT
+replace the current plan or approve or send the candidate. Source and monotonic
+freshness SHALL be checked after compilation; late, reentrant or cancelled work
+SHALL NOT revive the attempt. Only one pending candidate is retained.
+
+A candidate SHALL require its own explicit exact-plan human approval and the
+existing precontact confirmation. Activation SHALL preserve the blocked cell's
+current run/plan binding, unchanged scene snapshot and sole motion owner, and
+validate current native start evidence against both the candidate and previous
+chunk's terminal observation. Cell ownership transfer SHALL compare the full
+previously checked state under the existing store lock before writing; an
+intervening binding or acknowledgment SHALL remain unchanged, including during
+continuation abort handling. Unresolved goals, paused/stale state, changed
+hardware incarnation/generation or cell/scene binding SHALL prevent activation.
+Preparation and activation SHALL NOT grant unseen-output authority.
+
+Before switching plans, existing execution evidence SHALL retain the previous
+plan envelope, exact approval and validated trace, with the complete prior record
+bound into the next plan's predecessor digest. One recorder and global phase sequence SHALL continue.
+Existing report and diagnostic consumers SHALL validate and retain that history;
+missing or reordered history SHALL NOT yield a qualified diagnostic. Initial
+redundant held gripper segments SHALL use the existing preapproval omission and
+same-command evidence; original model actions remain unchanged.
+
+#### Scenario: A completed close reference continues into a new arm chunk
+
+- **WHEN** the native serializer/transport replay reports close reference
+  0.01176 m and bound feedback 0.01218 m, then prepares and exactly approves
+  a new chunk that retains the close reference
+- **THEN** existing planning omits the redundant first gripper segment
+- **AND** all new arm rows reach the same transport without another gripper goal
+- **AND** fresh start and terminal evidence remains linked to the prior command
+- **AND** one recorder transaction and lease continue through both chunks
+
+#### Scenario: Pending work loses freshness or ownership
+
+- **WHEN** compilation outlives source or monotonic freshness, reenters the
+  executor, or the next start observes cancellation, a foreign cell binding,
+  changed incarnation/generation or a paused controller
+- **THEN** no subsequent goal is sent and the old exact plan is not silently replaced
+- **AND** the existing stop/abort owner retains the failure
+
+#### Scenario: The supervised attempt ends without qualified reset evidence
+
+- **WHEN** the operator ends the finite chunk sequence
+- **THEN** existing recorder freeze and terminal safety checks remain authoritative
+- **AND** the diagnostic retains previous exact plans and approvals
+- **AND** absent reset safety prevents commit and task effectiveness remains UNKNOWN
+
+This controlled per-chunk test path is an intermediate software capability.
+It does not satisfy autonomous bounded-task usability or whole-task success,
+and it does not prove continuous raw-reference consumption on the physical FR5.

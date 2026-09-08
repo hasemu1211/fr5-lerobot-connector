@@ -205,9 +205,9 @@ class PhaseEventWriter:
         with self._lock:
             self._error = self._error or code
 
-    def emit(self, event: Mapping[str, Any], *, flush: bool = False) -> bool:
+    def emit(self, event: Mapping[str, Any], *, flush: bool = False, plan: Mapping[str, Any] | None = None) -> bool:
         try:
-            record = validate_phase_event(event, plan=self._plan)
+            record = validate_phase_event(event, plan=self._plan if plan is None else plan)
             line = (json.dumps(record, sort_keys=True, separators=(",", ":"), allow_nan=False) + "\n").encode()
         except (ContractError, TypeError, ValueError):
             self._latch("BEHAVIOR_REPORT_UNAVAILABLE")

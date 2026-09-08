@@ -113,7 +113,8 @@ direnv exec . python3 -m unittest tests.data_factory.rollout.test_policy_observa
 - [x] Consume a run/plan/lease-bound fresh observation at that boundary through OneJob and the native serializers; reject active ownership, stale/late/cancelled observations and unchanged plan replay without new sends.
 - [x] Bound native capture-image cache lifetime and keep image bodies out of canonical execution evidence; preserve operation conflicts, reject stale/retired replay and retain lease enforcement on retries.
 - [x] Preserve repeated chunk identities in shared phase streams through explicit exact-plan lookup and per-plan existing quality attributes/reports; reject malformed/cross-run/replayed bindings and prevent cross-plan terminal or row aliasing.
-- [ ] Retain every subsequent chunk plan and approval through canonical execution evidence before implementing same-task replacement planning/execution; the boundary/read increment alone does not implement closed-loop continuation.
+- [x] Retain prior exact plan envelopes, approvals and validated traces through same-run pending-candidate planning and explicitly approved replacement; preserve one lease/recorder, native start/terminal checks and existing report/diagnostic consumers.
+- [ ] Connect native inference and pending-candidate preview to the normal task interaction loop without claiming per-chunk approval as autonomous task usability; resolve the bounded future-output authority and physical producer contracts first.
 
 - [ ] Resolve the whole-task continuation/terminal distinction with the existing OneJob and authority owners; retain exact-plan limits until any future-output authority is explicitly established.
 - [ ] Compare synchronous same-owner continuation against supervised exact-approved chunks, retaining intervention, total task duration and native gripper/start/prefix evidence.
