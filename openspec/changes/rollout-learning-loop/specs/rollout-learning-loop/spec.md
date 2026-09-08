@@ -825,6 +825,32 @@ writes SHALL NOT manufacture a successful transition snapshot.
 - **AND** neither snapshot retention nor command completion grants landing,
   semantic success, reset safety, recorder commit or training authority
 
+### Requirement: Learned dispatch serializes bound Scene validation and submission
+
+The existing motion owner SHALL hold the existing Scene store lock from bound
+revision, digest and object validation through learned goal submission. This
+applies after initial and next-chunk confirmation, not only when a plan is
+prepared. A changed Scene SHALL reject the new goal without replacing the foreign
+Scene state. A writer arriving during validation SHALL serialize after submission.
+
+Cancellation and deadline checks SHALL remain effective before submission.
+Reentrant fault handling SHALL set the existing cancellation event immediately
+and defer Scene-writing fault work until the lock is released. Cancellation after
+submission SHALL cancel that owned goal; it SHALL NOT be reported as zero sends.
+This ordering adds no Scene store, execution owner or task-success authority.
+
+#### Scenario: Scene changes while awaiting next-chunk confirmation
+
+- **WHEN** another owner changes the bound Scene before the approved next chunk is confirmed
+- **THEN** confirmation rejects with no new transport goal
+- **AND** the other owner's Scene state remains unchanged by rejection handling
+
+#### Scenario: Cancellation arrives inside learned dispatch
+
+- **WHEN** a callback requests cancellation during locked validation or submission
+- **THEN** the cancellation event is set immediately without nested Scene locking
+- **AND** fault cleanup completes after unlock, cancelling only an already issued owned goal
+
 ### Requirement: Current source freshness is independent of retained command completion
 
 The existing `require_gripper_source_clock=true` deployment opt-in SHALL select

@@ -257,14 +257,15 @@ class Test(unittest.TestCase):
    for args in (("--factory-jsonl","--ros-live"),("--factory-jsonl","--ros-plan-only","--ros-live"),("--factory-jsonl","--robot-system-id","fr5-lab-a")):
     with self.subTest(args=args),self.assertRaises(SystemExit) as caught:e.main(args)
     self.assertEqual(caught.exception.code,2)
-  created=[];stores=[]
+  created=[];stores=[];clock_configuration=[]
   fail_destroy=[False];fail_transport=[False];ros_ok=[False]
   class Node:
    def destroy_node(self):
     created.append("destroyed")
     if fail_destroy[0]:raise RuntimeError("destroy")
   class Transport:
-   def __init__(self,node):
+   def __init__(self,node,*,allow_clock_configuration=False):
+    clock_configuration.append(allow_clock_configuration)
     created.append(node)
     if fail_transport[0]:raise e.ContractError("TRANSPORT")
   class Store:
@@ -274,11 +275,16 @@ class Test(unittest.TestCase):
    self.assertTrue(executor.execution_enabled);self.assertEqual(executor.phase_events_root,Path("/tmp/runs"));self.assertIsInstance(executor.transport,Transport);self.assertIsInstance(executor.cell_state_store,Store);self.assertIsInstance(executor.scene_state_store,Store);return True
   with mock.patch.dict(os.environ,{"RCUTILS_LOGGING_USE_STDOUT":"1"}),mock.patch.dict(sys.modules,{"rclpy":fake_rclpy}),mock.patch("sys.stderr",new_callable=io.StringIO) as errors,mock.patch("tools.data_factory.motion.moveit_transport.RosMoveItTransport",Transport),mock.patch("tools.data_factory.cell_state.CellStateStore",Store),mock.patch("tools.data_factory.scene_state.SceneStateStore",Store),mock.patch.object(e,"run_jsonl",side_effect=capture):
    self.assertEqual(e.main(("--factory-jsonl","--ros-live","--robot-system-id","fr5-lab-a","--cell-state-root","/tmp/cells","--phase-events-root","/tmp/runs")),0)
+   self.assertEqual(clock_configuration,[True])
    self.assertEqual(os.environ["RCUTILS_LOGGING_USE_STDOUT"],"0")
    self.assertEqual(stores,[("/tmp/cells","fr5-lab-a")]*2);self.assertEqual(created[:2],["init","fr5_pickup_live"]);self.assertIsInstance(created[2],Node);self.assertEqual(created[3:],["destroyed"])
    created.clear();fail_destroy[0]=True;ros_ok[0]=True
    with self.assertRaisesRegex(RuntimeError,"destroy"):e.main(("--factory-jsonl","--ros-live","--robot-system-id","fr5-lab-a","--cell-state-root","/tmp/cells","--phase-events-root","/tmp/runs"))
    self.assertEqual(created[:2],["init","fr5_pickup_live"]);self.assertEqual(created[-2:],["destroyed","shutdown"])
+   fail_destroy[0]=False;fail_transport[0]=False;stores.clear()
+   with mock.patch.object(e,"run_jsonl",return_value=True):
+    self.assertEqual(e.main(("--factory-jsonl","--ros-plan-only")),0)
+   self.assertIs(clock_configuration[-1],False);self.assertEqual(stores,[])
    created.clear();fail_destroy[0]=False;fail_transport[0]=True
    self.assertEqual(e.main(("--factory-jsonl","--ros-live","--robot-system-id","fr5-lab-a","--cell-state-root","/tmp/cells","--phase-events-root","/tmp/runs")),2)
    self.assertEqual(__import__("json").loads(errors.getvalue().splitlines()[-1])["error"]["code"],"ROS_LIVE_UNAVAILABLE")

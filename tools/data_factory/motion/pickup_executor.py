@@ -2001,8 +2001,11 @@ def main(argv=None):
                 else "fr5_pickup_live" if args.ros_live
                 else "fr5_pickup_plan_only"
             )
-            transport = RosMoveItTransport(node, **({"gripper_source_clock": gripper_source_clock}
-                                                   if gripper_source_clock is not None else {}))
+            transport = RosMoveItTransport(
+                node, allow_clock_configuration=args.ros_live,
+                **({"gripper_source_clock": gripper_source_clock}
+                   if gripper_source_clock is not None else {}),
+            )
         except (ContractError, ImportError, RuntimeError) as exc:
             print(
                 json.dumps(
