@@ -1828,6 +1828,64 @@ class FinitePlanTest(unittest.TestCase):
                     self.assertFalse(results[0]["ok"], results)
                     self.assertEqual(results[0]["code"], "STATE_BUSY")
 
+    def test_initial_scene_lock_does_not_wait_behind_cell_bound_scene_writer(self):
+        import fcntl
+        from tools.data_factory.cell_state import CellStateStore
+        from tools.data_factory.scene_state import SceneStateStore
+
+        with tempfile.TemporaryDirectory() as directory:
+            scene = SceneStateStore(directory, "fr5-lab-a")
+            scene.update_object(instance_id="cube-1", object_profile_id="cube", state="ON_SURFACE",
+                source="HUMAN", updated_by="synthetic-operator",
+                pose={"place_id": "PLACE_A", "yaw_deg": 0., "x_mm": 10., "y_mm": 20.})
+            job, executor, transport, _, _, _, calls = self.make_job(scene_store=scene)
+            self.assertTrue(job.approve(APPROVAL)["ok"])
+            cell = CellStateStore(directory, "fr5-lab-a")
+            cell.acknowledge_ready("synthetic-operator")
+            executor.cell_state_store = cell
+            before = scene.snapshot()
+            cell_before = cell.runtime_path("state.json").read_bytes()
+            cell_wait = threading.Event()
+            lock_calls, writer_errors, results = [], [], []
+            acquire = scene._flock
+            def observe_lock(descriptor, blocking):
+                lock_calls.append(descriptor)
+                if len(lock_calls) == 2:
+                    cell_wait.set()  # Scene acquired; writer now awaits Cell.
+                return acquire(descriptor, blocking)
+            scene._flock = observe_lock
+            def write_scene():
+                try:
+                    scene.update_object(instance_id="cube-1", object_profile_id="cube", state="UNKNOWN",
+                        source="HUMAN", updated_by="synthetic-operator", expected_cell_digest=canonical_digest("stale"))
+                except ContractError as exc:
+                    writer_errors.append(exc.code)
+            with cell.runtime_path("state.lock").open("rb") as holder:
+                fcntl.flock(holder, fcntl.LOCK_EX)
+                writer = threading.Thread(target=write_scene, daemon=True)
+                starter = threading.Thread(target=lambda: results.append(job.start()), daemon=True)
+                writer.start()
+                try:
+                    self.assertTrue(cell_wait.wait(1))
+                    starter.start()
+                    starter.join(1)
+                    returned_while_locked = not starter.is_alive()
+                finally:
+                    fcntl.flock(holder, fcntl.LOCK_UN)
+                    writer.join(2)
+                    if starter.ident is not None:
+                        starter.join(2)
+            self.assertTrue(returned_while_locked)
+            self.assertFalse(writer.is_alive())
+            self.assertFalse(starter.is_alive())
+            self.assertEqual(writer_errors, ["STATE_CHANGED"])
+            self.assertFalse(results[0]["ok"])
+            self.assertEqual(results[0]["code"], "SCENE_STATE_BUSY")
+            self.assertEqual(scene.snapshot(), before)
+            self.assertEqual(cell.runtime_path("state.json").read_bytes(), cell_before)
+            self.assertEqual(transport.sent, [])
+            self.assertNotIn(("recorder", "commit"), calls)
+
     def test_next_chunk_deadline_expiry_releases_actual_scene_lock(self):
         import faulthandler
         import os

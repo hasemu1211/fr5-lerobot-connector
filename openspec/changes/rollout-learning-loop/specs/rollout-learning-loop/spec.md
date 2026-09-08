@@ -873,7 +873,7 @@ This ordering adds no Scene store, execution owner or task-success authority.
 
 #### Scenario: A foreign owner retains the Scene lock
 
-- **WHEN** learned confirmation or fault cleanup encounters a held Scene lock
+- **WHEN** learned initial arming, confirmation or fault cleanup encounters a held Scene lock, including a Scene writer awaiting Cell
 - **THEN** it returns the distinct contention result without waiting for the foreign holder to release it
 - **AND** the foreign Scene bytes and legacy Collection locking behavior remain unchanged
 

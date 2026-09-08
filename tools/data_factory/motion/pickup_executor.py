@@ -1164,7 +1164,8 @@ class PickupExecutor:
                         "source_slot_id": source_slot["slot_id"],
                         "source_slot_digest": canonical_digest(consumed["scene_state"]["slot_allocations"][source_slot["slot_id"]]),
                     }
-            with self.scene_state_store.locked_snapshot(execution_scene_digest) as snapshot:
+            scene_options = {"blocking": False} if proposal is not None else {}
+            with self.scene_state_store.locked_snapshot(execution_scene_digest, **scene_options) as snapshot:
                 scene = snapshot["scene_state"]
                 item = scene["objects"].get(binding["object_instance_id"])
                 if snapshot["scene_state_digest"] != execution_scene_digest or scene["revision"] != execution_scene_revision:
