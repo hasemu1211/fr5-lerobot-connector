@@ -10,39 +10,59 @@
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <sstream>
+#include <stdexcept>
 #include <thread>
 #include "gripper_execution_evidence.hpp"
 #define RCLCPP_INFO(...) ((void)0)
 #define RCLCPP_WARN(...) ((void)0)
 #define RCLCPP_ERROR(...) ((void)0)
+namespace rclcpp {struct Time {};struct Duration {};}
+namespace hardware_interface {enum class return_type {OK, ERROR};}
 namespace fairino_hardware {
 std::atomic<int> udp_command_error{0};
+struct JointPos {double jPos[6]{};};
+struct ExaxisPos {double values[4];};
 struct ROBOT_STATE_PKG {
   struct {int year=1970,mouth=1,day=1,hour=0,minute=0,second=10,millisecond=0;} robotTime;
   uint8_t frame_cnt=1,gripper_position=100,gripper_motiondone=0;
   int gripper_fault=0;
 };
 struct Robot {
-  int moves=0,resumes=0,target=100,polls=0,move_error=0,resume_error=0;
-  bool stale=false,settled=false;
+  int moves=0,resumes=0,target=100,polls=0,move_error=0,resume_error=0,arm_sends=0;
+  JointPos last_arm;
+  bool stale=false,settled=false,clock_mode=false,delayed=false;
+  int delay_ms=10;
   std::function<void()> initial_hook,move_hook,poll_hook,resume_hook;
   ROBOT_STATE_PKG state;
+  void source_now() {
+    const auto ms=std::chrono::duration_cast<std::chrono::milliseconds>(
+      std::chrono::system_clock::now().time_since_epoch()).count()-3;
+    std::time_t seconds=ms/1000;std::tm calendar{};gmtime_r(&seconds,&calendar);
+    state.robotTime={calendar.tm_year+1900,calendar.tm_mon+1,calendar.tm_mday,
+      calendar.tm_hour,calendar.tm_min,calendar.tm_sec,int(ms%1000)};
+  }
   int GetRobotRealTimeState(ROBOT_STATE_PKG *p) {
-    if (!moves) { if(initial_hook){auto f=std::move(initial_hook);initial_hook=nullptr;f();} }
+    if (!moves) { if(clock_mode)source_now();if(initial_hook){auto f=std::move(initial_hook);initial_hook=nullptr;f();} }
     else {
       ++polls; state.gripper_position=target+(settled?1:0);state.gripper_motiondone=settled?0:1;
-      if(!stale){state.robotTime.millisecond=100;state.frame_cnt=2;}
+      if(!stale && !(delayed && polls==1)){if(clock_mode)source_now();else state.robotTime.millisecond=100;state.frame_cnt=2;}
       if(poll_hook){auto f=std::move(poll_hook);poll_hook=nullptr;f();}
     }
     *p=state;return 0;
   }
   int MoveGripper(int,int pos,int,int,int,int,int,int,int,int) {
-    ++moves;target=pos;if(move_hook)move_hook();return move_error;
+    ++moves;target=pos;if(move_hook)move_hook();
+    if(clock_mode)std::this_thread::sleep_for(std::chrono::milliseconds(delay_ms));
+    return move_error;
   }
   int ServoMoveStart(int) {++resumes;if(resume_hook)resume_hook();return resume_error;}
+  int ServoJ(JointPos *value,ExaxisPos *,int,int,double,int,int,int,int){++arm_sends;last_arm=*value;return 0;}
 };
 struct Result {int send_error=0,controller_error=0;bool reply_received=true;bool ok()const{return send_error==0;}};
 template<class F> Result send_udp_command_and_observe(F f){return {f(),0,true};}
+struct Parameter {std::vector<double> values;std::vector<double> as_double_array()const{return values;}};
+struct Node {Parameter parameter;Parameter get_parameter(const char *)const{return parameter;}};
 struct FairinoHardwareInterface {
   std::mutex _gripper_mutex;
   std::condition_variable _gripper_cv;
@@ -57,47 +77,117 @@ struct FairinoHardwareInterface {
   int _gripper_max_time=1000,_gripper_settle_time_ms=0;
   std::unique_ptr<Robot> _ptr_robot=std::make_unique<Robot>();
   GripperExecutionEvidence _gripper_evidence;
+  bool _require_gripper_source_clock=false;
+  bool _has_arm=true,_is_gripper=true;
+  int _control_mode=0;
+  std::array<size_t,6> _arm_joint_indices{0,1,2,3,4,5};
+  size_t _gripper_joint_index=6;
+  std::vector<double> _jnt_position_command{.01,-.02,.03,-.04,.05,-.06,.01176};
+  std::vector<double> _jnt_torque_command=std::vector<double>(7,0.);
+  GripperSourceClock _gripper_source_clock;
+  std::shared_ptr<Node> node=std::make_shared<Node>();
+  auto get_node(){return node;}
   std::array<double,GripperExecutionEvidence::names.size()> _gripper_evidence_values{};
   void gripper_worker();
   void sample_gripper_evidence();
+  bool gripper_release_ready();
+  hardware_interface::return_type write(const rclcpp::Time &,const rclcpp::Duration &);
 };
 // NATIVE_METHODS
 }
 int main(int argc,char **argv) {
   using namespace fairino_hardware;
-  assert(argc==2);std::string mode=argv[1];FairinoHardwareInterface h;
+  assert(argc==2 || argc==3);std::string mode=argv[1];FairinoHardwareInterface h;
   auto &r=*h._ptr_robot;h._gripper_evidence.activate();
+  const bool guarded=mode.find("clock_")==0;
+  if(guarded){
+    assert(argc==3);h._require_gripper_source_clock=true;r.clock_mode=true;
+    h._gripper_evidence.incarnation={1,2,3,4};h._gripper_max_time=120;
+    std::istringstream input(argv[2]);std::string value;
+    while(std::getline(input,value,','))h.node->parameter.values.push_back(std::stod(value));
+    if(mode=="clock_cached")r.stale=true;
+    if(mode=="clock_delayed_fresh")r.delayed=true;
+    if(mode=="clock_expired_move" || mode=="clock_rebind_expired"){
+      h.node->parameter.values[9]=h.node->parameter.values[7]+.02;r.delay_ms=40;
+    }
+    if(mode=="clock_rebind_expired")r.move_hook=[&]{h.node->parameter.values[9]+=10.;};
+    if(mode=="clock_late_resume"){
+      h.node->parameter.values[9]=h.node->parameter.values[7]+.03;
+      r.resume_hook=[]{std::this_thread::sleep_for(std::chrono::milliseconds(40));};
+    }
+    if(mode=="clock_wrong_incarnation")h.node->parameter.values[1]=99.;
+    if(mode=="clock_fractional_incarnation")h.node->parameter.values[1]+=.25;
+    if(mode=="clock_oversized_incarnation")h.node->parameter.values[1]=4294967296.;
+    if(mode=="clock_reordered_incarnation")std::swap(h.node->parameter.values[1],h.node->parameter.values[2]);
+    if(mode=="clock_max_incarnation")h._gripper_evidence.incarnation[0]=UINT32_MAX;
+    if(mode=="clock_paused_binding")h.node->parameter.values[8]-=1.;
+    if(mode=="clock_invalid_calendar")r.initial_hook=[&]{r.state.robotTime.mouth=13;};
+    if(mode=="clock_missing_binding")h.node->parameter.values.clear();
+    if(mode=="clock_invalid_number")h.node->parameter.values[6]=std::numeric_limits<double>::quiet_NaN();
+  }
   auto stop=[&]{std::lock_guard<std::mutex> lock(h._gripper_mutex);h._stop_gripper_thread=true;h._gripper_cv.notify_all();};
   if(mode=="stop_before_move")r.initial_hook=stop;
   if(mode=="error_before_move")r.initial_hook=[&]{udp_command_error=12;};
   if(mode=="stop_during_move")r.move_hook=stop;
   if(mode=="stop_before_resume")r.poll_hook=stop;
+  if(mode=="clock_stop_before_resume")r.poll_hook=stop;
+  if(mode=="clock_error_before_resume")r.poll_hook=[&]{udp_command_error=12;};
   if(mode=="stop_during_resume")r.resume_hook=stop;
+  if(mode=="clock_stop_during_resume")r.resume_hook=stop;
   if(mode=="resume_error")r.resume_error=13;
   if(mode=="move_error")r.move_error=14;
+  if(mode=="clock_move_error")r.move_error=14;
+  if(mode=="clock_resume_error")r.resume_error=13;
   if(mode=="settled")r.settled=true;
   if(mode=="cached")r.stale=true;
-  if(mode=="superseded")r.poll_hook=[&]{std::lock_guard<std::mutex> lock(h._gripper_mutex);
-    h._pending_gripper_position=50;h._gripper_command_generation=2;};
+  if(mode=="superseded" || mode=="clock_superseded")r.poll_hook=[&]{std::lock_guard<std::mutex> lock(h._gripper_mutex);
+    h._pending_gripper_position=50;h._gripper_command_generation=2;
+    h._last_gripper_command=.0105;h._jnt_position_command[6]=.0105;};
   std::atomic<bool> returned=false;
   std::thread worker([&]{h.gripper_worker();returned=true;});
   auto deadline=std::chrono::steady_clock::now()+std::chrono::seconds(2);
   while(!returned && h._arm_stream_paused && !h._gripper_error && std::chrono::steady_clock::now()<deadline)
     std::this_thread::sleep_for(std::chrono::milliseconds(1));
   bool finished=returned || !h._arm_stream_paused || h._gripper_error!=0;
+  std::array<double,GripperExecutionEvidence::names.size()> native_values{};
+  bool released=false;
+  if(guarded && !h._arm_stream_paused && !h._gripper_error){
+    // Completion after read is not permission to stream against the old snapshot.
+    assert(h.write({}, {})==hardware_interface::return_type::OK && r.arm_sends==0);
+    h.sample_gripper_evidence();native_values=h._gripper_evidence_values;
+    if(mode=="clock_stale_read")h._gripper_evidence_values[10]-=1.;
+    if(mode=="clock_wrong_incarnation_read")++h._gripper_evidence.incarnation[0];
+    if(mode=="clock_limit")h._jnt_position_command[6]=.022;
+    const auto result=h.write({}, {});
+    released=result==hardware_interface::return_type::OK && r.arm_sends==1;
+    assert(released==(mode=="clock_fresh" || mode=="clock_delayed_fresh" || mode=="clock_max_incarnation" || mode=="clock_superseded"));
+    if(released)for(size_t i=0;i<6;++i)assert(std::abs(r.last_arm.jPos[i]*M_PI/180.-h._jnt_position_command[i])<1e-12);
+    if(mode=="clock_limit")assert(h._gripper_command_generation==1 && h._last_gripper_command==.01176 && r.arm_sends==0);
+  }
   stop();worker.join();assert(finished);
-  bool success=mode=="completed" || mode=="settled" || mode=="cached" || mode=="superseded";
+  bool success=mode=="completed" || mode=="settled" || mode=="cached" || mode=="superseded" ||
+    mode=="clock_fresh" || mode=="clock_delayed_fresh" || mode=="clock_max_incarnation" || mode=="clock_superseded" || mode=="clock_stale_read" || mode=="clock_wrong_incarnation_read" || mode=="clock_limit";
   assert((h._gripper_evidence.completed!=0)==success);
   if(mode=="stop_before_move" || mode=="error_before_move")assert(r.moves==0 && r.resumes==0);
   if(mode=="stop_during_move" || mode=="stop_before_resume")assert(r.resumes==0);
   if(mode=="stop_during_resume")assert(r.resumes==1 && h._arm_stream_paused);
   if(mode=="superseded")assert(r.moves==2 && r.resumes==1 && h._gripper_evidence.completed==2);
   if(mode=="settled")assert(h._gripper_evidence.reason==2);
+  if(guarded){
+    if(mode=="clock_fresh" || mode=="clock_delayed_fresh" || mode=="clock_max_incarnation" || mode=="clock_stale_read" || mode=="clock_wrong_incarnation_read" || mode=="clock_limit")assert(r.moves==1 && r.resumes==1);
+    else if(mode=="clock_superseded")assert(r.moves==2 && r.resumes==1 && h._gripper_evidence.completed==2);
+    else if(mode=="clock_resume_error" || mode=="clock_late_resume" || mode=="clock_stop_during_resume")assert(r.resumes==1 && h._arm_stream_paused);
+    else assert(r.resumes==0 && h._arm_stream_paused);
+    if(mode=="clock_wrong_incarnation" || mode=="clock_fractional_incarnation" || mode=="clock_oversized_incarnation" ||
+       mode=="clock_reordered_incarnation" || mode=="clock_paused_binding" || mode=="clock_invalid_calendar" ||
+       mode=="clock_missing_binding" || mode=="clock_invalid_number")assert(r.moves==0);
+  }
   // Actual native sampler method, after the thread is joined, retains stop evidence.
   h.sample_gripper_evidence();assert(h._gripper_evidence_values[25]==1.);
   auto old=h._gripper_evidence.incarnation;
   auto values=h._gripper_evidence.snapshot(h._gripper_command_generation,.01176,10.2,20.2,r.state,.021,false,false,!success,false,h._gripper_error,true);
-  std::cout<<std::setprecision(17)<<"{\"moves\":"<<r.moves<<",\"resumes\":"<<r.resumes<<",\"wire\":[";
+  if(guarded && success)values=native_values;
+  std::cout<<std::setprecision(17)<<"{\"moves\":"<<r.moves<<",\"resumes\":"<<r.resumes<<",\"arm_sends\":"<<r.arm_sends<<",\"released\":"<<(released?"true":"false")<<",\"wire\":[";
   for(size_t i=0;i<values.size();++i){if(i)std::cout<<",";std::cout<<values[i];}std::cout<<"],\"names\":[";
   for(size_t i=0;i<GripperExecutionEvidence::names.size();++i){if(i)std::cout<<",";std::cout<<"\""<<GripperExecutionEvidence::names[i]<<"\"";}std::cout<<"]}\n";
   h._gripper_evidence.activate();assert(h._gripper_evidence.incarnation!=old && h._gripper_evidence.completed==0);

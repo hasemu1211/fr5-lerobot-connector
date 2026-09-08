@@ -26,6 +26,20 @@ CLOCK_FIELDS = {"schema_version", "incarnation", "calendar_to_system_offset_s", 
                 "system_anchor_s", "steady_anchor_s", "valid_until_system_s"}
 
 
+def native_clock_parameter(binding, max_age_s):
+    """Encode the existing measured binding for the hardware node's atomic parameter.
+
+    This does not set a ROS parameter, measure a clock or authorize execution.
+    The driver pins this value to its command; updates cannot renew that command.
+    """
+    binding = validate_clock_binding(binding)
+    if number(max_age_s) <= 0:
+        raise ContractError("LEARNED_HARDWARE_CLOCK_BINDING")
+    return [1., *map(float, binding["incarnation"]),
+            *[float(binding[key]) for key in ("calendar_to_system_offset_s", "uncertainty_s",
+              "system_anchor_s", "steady_anchor_s", "valid_until_system_s")], float(max_age_s)]
+
+
 def number(value):
     try:
         if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):

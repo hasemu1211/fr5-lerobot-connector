@@ -336,6 +336,55 @@ completion SHALL fail immediately; these failures are not retryable waits.
 Canonical trace validation SHALL consume the same completion checks and retain
 clock binding and monotonic capture time.
 
+The existing native driver MAY require this same measured clock contract with
+the default-false hardware parameter `require_gripper_source_clock`. When
+enabled, its framework-managed hardware node SHALL expose one atomic
+`gripper_source_clock_v1` double-array parameter. The encoding SHALL be
+`[1, incarnation_0, incarnation_1, incarnation_2, incarnation_3,
+calendar_to_system_offset_s, uncertainty_s, system_anchor_s, steady_anchor_s,
+valid_until_system_s, max_age_s]`; `max_age_s` is the existing observation age
+bound in seconds. The existing Python `native_clock_parameter` function SHALL
+encode a validated binding without setting parameters or granting authority.
+Root retains configuration, measured mapping and deployment ownership.
+
+The sole native gripper worker SHALL pin that value to its current command and
+hardware incarnation. Missing, malformed, expired or inconsistent clock binding
+and stale initial source SHALL reject before `MoveGripper`. Completion SHALL
+require a mapped source interval after command start; a cached pre-command
+motion-done flag SHALL NOT resume the arm. Existing command deadline, stop/error
+and supersession fences SHALL remain. Freshness SHALL be checked before and
+after the resume RPC; a late result SHALL NOT clear the software stream pause.
+Parameter updates SHALL NOT renew a command already in progress.
+
+After guarded gripper completion, the existing native write method SHALL wait
+for a subsequent native gripper snapshot from the read cycle and revalidate its
+incarnation, generation and source/host clock freshness before streaming an arm
+packet. Completion between read and write SHALL NOT bypass this condition.
+The four incarnation words SHALL remain exact uint32 values in the parameter;
+fractional, oversized or reordered identity words SHALL fail comparison against
+the current hardware incarnation. Command generation is not encoded in this
+parameter and retains its existing exact-in-double range bound.
+Out-of-range gripper references SHALL reject before the native clamp when the
+option is enabled. Generation-zero initialization and default scripted behavior
+are unchanged; this option alone SHALL NOT authorize continuous learned output,
+prove controller-start synchronization or establish coherent seven-joint
+physical sampling. An SDK call already in flight cannot be undone by this check.
+
+#### Scenario: Cached completion cannot release native arm streaming
+
+- **WHEN** the opt-in worker receives a fresh initial sample followed by the same
+  pre-command motion-done source calendar
+- **THEN** no resume RPC or arm-stream release is permitted from that completion
+- **AND** the existing deadline or source freshness failure terminates the wait
+- **AND** a fresh post-command sample may complete only the retained generation
+
+#### Scenario: Completion arrives between read and write
+
+- **WHEN** the worker completes after a pending read-cycle snapshot
+- **THEN** the write method waits for the next read without sending an arm packet
+- **AND** a stale snapshot, wrong incarnation or expired pinned clock fails closed
+- **AND** a late resume result or a later parameter update cannot renew the command
+
 #### Scenario: Fresh receipt contains an old completion
 
 - **WHEN** the SDK returns a pre-command completion calendar in a newly sampled

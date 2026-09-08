@@ -59,6 +59,7 @@ direnv exec . python3 -m unittest tests.data_factory.rollout.test_finite_plan te
 - [x] Compare unified-controller interpolation with the configured mixed native samplers using actual serialized proposals; preserve the counterexamples to identical-waypoint equivalence and common-header start coherence.
 - [x] Exercise prior-command versus feedback initialization and immediate staged-release sampling with the installed native sampler; distinguish sample compatibility from completed hardware stages.
 - [x] Retain native JTC source/trajectory clocks and literal reported command output through existing snapshot and learned trace consumers; verify signed durations, unavailable/old output and malformed-record rejection with actual ROS serializers.
+- [x] Prepare opt-in post-command source freshness at the native worker/read-cycle release owner, using the existing measured binding and framework hardware node; verify cached/fresh, expired/rebound, incarnation, stop/error and late-resume cases with actual extracted worker/write methods and ROS serializers.
 - [ ] Root verifies real same-command hardware completion/arm resume and clock mapping after driver integration; JTC tolerance and CPU replay alone remain insufficient.
 - [ ] Implement an explicitly bounded native continuous-reference consumer with original full output, consumed indices and staged-release compatibility retained; do not automatically truncate or snap.
 - [ ] Verify its normal executor/trace consumers and failure/cancellation before any separately assigned physical qualification.
