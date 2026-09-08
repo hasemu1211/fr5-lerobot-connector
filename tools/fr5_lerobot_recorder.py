@@ -31,7 +31,6 @@ from data_factory_recovery import (
     RecoveryError,
     canonical_json_digest,
     claim_staging_directories,
-    committed_content_digests,
     dataset_snapshot,
     dataset_snapshot_unchanged,
     decode_json_strict,
@@ -636,7 +635,6 @@ class FR5LeRobotRecorder(Node):
             "result_path": result_path,
             "guard_path": guard_path,
             "begin_snapshot": manifest["begin_snapshot"],
-            "begin_content_digests": committed_content_digests(root),
             "staging_manifest_digest": manifest_digest,
             "staging_dirs": tuple(staging_dirs.values()),
             "artifacts": {
@@ -1369,8 +1367,6 @@ class FR5LeRobotRecorder(Node):
                     cleanup_error = self._abort_cleanup_error()
                     if cleanup_error:
                         raise RuntimeError(cleanup_error)
-                    if committed_content_digests(self.args.root) != transaction["begin_content_digests"]:
-                        raise RuntimeError("committed source content changed")
                     self.episode_state = self.ABORTED
                     self._write_run_result(self.ABORTED, "DIAGNOSTIC_RETAINED_RELEASED")
                     self._append_event("DIAGNOSTIC_RETAINED_RELEASED")

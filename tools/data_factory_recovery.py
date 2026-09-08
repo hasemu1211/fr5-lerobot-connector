@@ -718,31 +718,14 @@ def _quarantine(guard_path: Path, guard: dict, reason: str, meta_fd: int | None 
     return {"ok": False, "state": state, "reason_code": reason, "run_id": guard["run_id"], "detail": detail}
 
 
-def committed_content_digests(root: Path | str) -> dict[str, str]:
-    """Content proof held by the live native owner, without changing disk schemas."""
-    root = Path(root)
-    snapshot = dataset_snapshot(root)
-    paths = set()
-    for field in ("data_parquet", "committed_videos", "episode_metadata",
-                  "dataset_metadata", "source_provenance"):
-        paths.update(snapshot[field])
-    if (root / "meta/recording_quality.jsonl").exists():
-        paths.add("meta/recording_quality.jsonl")
-    result = {}
-    for relative in sorted(paths):
-        path = root / relative
-        if any(parent.is_symlink() for parent in (path, *path.parents)):
-            raise RecoveryError("RECOVERY_SYMLINK", "unsafe committed content")
-        with path.open("rb") as file:
-            result[relative] = hashlib.file_digest(file, "sha256").hexdigest()
-    return result
-
-
 def validate_native_retention_source(root, runs, transaction, lock, *, retaining=False):
     """Validate the live owner's frozen source before irreversible staging cleanup.
 
     This does not authorize orphan recovery from a persisted retention boolean.
     The caller must also prove the native archive against its settled row buffer.
+    Committed history uses the existing lock and snapshot contract: inventory,
+    sizes, mtimes and totals, not a payload-body audit against writers bypassing
+    the lock and restoring those facts.
     """
     root, runs = Path(root).resolve(), Path(runs).resolve()
     if (lock is None or lock.fd is None or lock.path != root / ".data_factory_transaction.lock"
@@ -779,8 +762,7 @@ def validate_native_retention_source(root, runs, transaction, lock, *, retaining
             raise RecoveryError("RETENTION_SOURCE_QUARANTINED", "source already quarantined")
         _recovery_events(runs / guard["run_id"] / "events.jsonl",
                          dict(guard, state="FROZEN"), run_fd, allow_readiness_trim=True)
-        if (not dataset_snapshot_unchanged(manifest["begin_snapshot"], dataset_snapshot(root))
-                or committed_content_digests(root) != transaction.get("begin_content_digests")):
+        if not dataset_snapshot_unchanged(manifest["begin_snapshot"], dataset_snapshot(root)):
             raise RecoveryError("RECOVERY_SNAPSHOT_CHANGED", "committed source changed")
         return payload_paths
     finally:

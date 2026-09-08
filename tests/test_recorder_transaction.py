@@ -216,6 +216,35 @@ class RecorderTransactionTest(unittest.TestCase):
                 self.assertEqual(approval.read_bytes(), original_approval)
                 recorder._release_transaction_lock()
 
+    def test_begin_does_not_open_historical_payloads(self):
+        # Cover both legacy Collection and native transaction begin. Opening a
+        # historical body is forbidden; the existing snapshot may still stat it.
+        for native in (False, True):
+            with self.subTest(native=native), tempfile.TemporaryDirectory() as directory:
+                recorder = self.make_recorder(directory)
+                payloads = {
+                    recorder.args.root / "data/chunk-000/file-000.parquet",
+                    recorder.args.root / "videos/observation.images.up/chunk-000/file-000.mp4",
+                }
+                for path in payloads:
+                    path.parent.mkdir(parents=True, exist_ok=True)
+                    path.write_bytes(b"historical payload must not be read at begin")
+
+                def forbid_payload_open(original):
+                    def checked(file, *args, **kwargs):
+                        if isinstance(file, (str, bytes, os.PathLike)):
+                            self.assertNotIn(Path(os.fsdecode(file)).resolve(), payloads,
+                                             "begin opened a historical payload body")
+                        return original(file, *args, **kwargs)
+                    return checked
+
+                with mock.patch("builtins.open", forbid_payload_open(open)), mock.patch(
+                        "io.open", forbid_payload_open(io.open)), mock.patch(
+                        "os.open", forbid_payload_open(os.open)):
+                    result = recorder.begin_episode(self.transaction(directory) if native else None)
+                self.assertTrue(result["ok"], result)
+                self.assertTrue(recorder.abort_episode()["ok"])
+
     def test_retention_release_allows_next_native_begin(self):
         with tempfile.TemporaryDirectory() as directory:
             recorder = self.retention_fixture(directory, committed_episode=True, trim_prefix=True)
@@ -242,20 +271,17 @@ class RecorderTransactionTest(unittest.TestCase):
 
     def test_retention_refuses_unsafe_release(self):
         from lerobot.datasets.lerobot_dataset import LeRobotDataset
-        for failure in ("changed", "same_stat_changed", "during_save", "missing_rows",
+        for failure in ("changed", "during_save", "missing_rows",
                         "foreign_owner", "foreign_lock", "invalid_manifest", "committing", "clear",
                         "source_changed", "publication_corrupt", "publication_missing", "guard_unlink", "extra_staging"):
             with self.subTest(failure=failure), tempfile.TemporaryDirectory() as directory:
                 recorder = self.retention_fixture(directory)
                 committed = recorder.args.root / "meta/info.json"
                 initial = committed.read_bytes()
-                stat = committed.stat()
                 guard = Path(recorder._transaction["guard_path"])
                 foreign = None
-                if failure in {"changed", "same_stat_changed"}:
+                if failure == "changed":
                     committed.write_bytes(initial.replace(b'fr5', b'xx5') if b'fr5' in initial else initial.replace(b'30', b'31', 1))
-                    if failure == "same_stat_changed":
-                        os.utime(committed, ns=(stat.st_atime_ns, stat.st_mtime_ns))
                 elif failure == "extra_staging":
                     (Path(recorder._transaction["staging_dirs"][0]) / "unbuffered.png").write_bytes(b"unretained")
                 elif failure == "missing_rows":
