@@ -257,6 +257,28 @@ class TestExecutionTransport(unittest.TestCase):
         self.assertEqual(deserialize_message(serialize_message(sent.trajectory), RobotTrajectory).joint_trajectory.joint_names, ["j1"])
         self.assertEqual(transport.poll_active(), active)
 
+        # Exercise the actual CDR goal decoder, not just a delayed compiler stub.
+        decoded = transport._deserialize_message
+        deadline = clock[0] + .05
+        count = len(clients["/execute_trajectory"].goals)
+        def slow_decode(*args):
+            value = decoded(*args)
+            clock[0] += .1
+            return value
+        def original_deadline():
+            if clock[0] >= deadline:
+                raise ContractError("HEARTBEAT_TIMEOUT")
+        with mock.patch.object(transport, "_deserialize_message", side_effect=slow_decode):
+            with self.assertRaisesRegex(ContractError, "HEARTBEAT_TIMEOUT"):
+                transport.start_phase(arm, dispatch_guard=original_deadline)
+        self.assertEqual(len(clients["/execute_trajectory"].goals), count)
+        self.assertIsNone(transport._active)
+        self.assertFalse(transport._execution_locked)
+        with self.assertRaisesRegex(ContractError, "ROS_EXEC_DISPATCH_GUARD"):
+            transport.start_phase(arm, dispatch_guard=1)
+        self.assertEqual(len(clients["/execute_trajectory"].goals), count)
+        clock[0] = 10.0
+
         gripper_goal = transport._FollowJointTrajectory.Goal()
         gripper = {"phase": "GRIPPER", "type": "GRIPPER", "trajectory_b64": base64.b64encode(serialize_message(gripper_goal)).decode(), "limits": {"execution_timeout_s": 2.0}}
         canceled_result = Future(SimpleNamespace(status=GoalStatus.STATUS_CANCELED, result=SimpleNamespace(error_code=0)))

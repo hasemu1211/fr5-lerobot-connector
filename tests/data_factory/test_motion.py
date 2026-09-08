@@ -467,7 +467,7 @@ class Test(unittest.TestCase):
   case=os.environ.get("FR5_SCENE_DISPATCH_REPLAY")
   if case is None:
    for chunk in (1,2):
-    for failure in ("changed","race","unchanged","writer","lease","wait","cancel","error","reentrant","cancel_after_send"):
+    for failure in ("changed","race","unchanged","writer","lease","wait","cancel","error","reentrant","cancel_after_send","busy","busy_fault","native_compile_lease","native_compile_wait","native_evidence_lease","native_evidence_wait","native_compile_renew","native_valid"):
      with self.subTest(chunk=chunk,failure=failure):
       env=dict(os.environ,FR5_SCENE_DISPATCH_REPLAY=f"{chunk}:{failure}")
       command=[sys.executable,"-m","unittest","tests.data_factory.test_motion.Test.test_learned_dispatch_serializes_scene_writes"]
@@ -493,6 +493,25 @@ class Test(unittest.TestCase):
     self.assertTrue(job.approve_next_learned({**APPROVAL,"approval_id":"next"})["ok"])
     self.assertTrue(job.start_next_learned()["ok"])
     self.assertEqual(job.state,"PRECONTACT_HUMAN")
+   if failure in ("busy","busy_fault"):
+    descriptor=os.open(scene._cell.runtime_path("scene_state.lock"),os.O_RDWR)
+    fcntl.flock(descriptor,fcntl.LOCK_EX)
+    before=scene._path().read_bytes()
+    faulthandler.dump_traceback_later(2.)
+    try:
+     if failure=="busy":
+      result=job.confirm("operator")
+      self.assertFalse(result["ok"])
+      self.assertEqual(result["code"],"SCENE_STATE_BUSY")
+     else:
+      executor._fault(executor.runs["run"],"TEST_CANCEL")
+     self.assertEqual(executor.runs["run"]["state"],"BLOCKED")
+     self.assertEqual(executor.runs["run"]["execution"]["scene_state_error"],"SCENE_STATE_BUSY")
+     self.assertEqual(len(transport.sent),int(chunk)-1)
+     self.assertEqual(scene._path().read_bytes(),before)
+    finally:
+     faulthandler.cancel_dump_traceback_later();os.close(descriptor)
+    return
    sent=len(transport.sent)
    preserved=[]; threads=[]; writer_done=threading.Event(); attempted=threading.Event(); lock_free=[]
    if failure=="changed": preserved.append(update(99.))
@@ -501,9 +520,9 @@ class Test(unittest.TestCase):
     locked=scene.locked_snapshot
     if failure=="wait": executor.runs["run"]["execution"]["wait_deadline"]=now[0]+.1
     @contextmanager
-    def interleaved(digest):
+    def interleaved(digest, **options):
      if failure=="race": preserved.append(update(99.))
-     with locked(digest) as value:
+     with locked(digest, **options) as value:
       if failure in ("lease","wait"): now[0]+=100. if failure=="lease" else .2
       if failure=="cancel": executor._fault(executor.runs["run"],"TEST_CANCEL")
       yield value
@@ -533,6 +552,35 @@ class Test(unittest.TestCase):
     if failure=="error": raise e.ContractError("TEST_START_ERROR")
     if failure=="writer": self.assertFalse(writer_done.is_set())
     return start(*args,**kwargs)
+   native=None
+   if failure.startswith("native_"):
+    from types import SimpleNamespace
+    from unittest import mock
+    from tools.data_factory.motion.moveit_transport import RosMoveItTransport
+    from tools.data_factory.rollout import finite_plan
+    native=object.__new__(RosMoveItTransport)
+    native._active=None;native._execution_locked=False;native._execute_goal_count=0;native._gripper_goal_count=0
+    native._clock=lambda:now[0];native.graph_timeout_s=1.;native._wait=lambda value,*_:value
+    native_send_times=[]
+    def actual_send(goal):
+     native_send_times.append(now[0]);transport.sent.append(goal)
+     return SimpleNamespace(accepted=True,get_result_async=lambda:object())
+    client=SimpleNamespace(send_goal_async=actual_send)
+    def compile_goal(step):
+     if failure.startswith("native_compile"): now[0]+=.1
+     if failure=="native_compile_renew": executor.runs["run"]["execution"]["lease_deadline"]=now[0]+1.
+     return "LEARNED_CHUNK","ARM",object(),client,4.
+    native._compiled_execution_goal=compile_goal
+    check=finite_plan.check_execution_start
+    def checked(*args,**kwargs):
+     result=check(*args,**kwargs)
+     if failure.startswith("native_evidence"): now[0]+=.1
+     return result
+    deadline="wait_deadline" if failure.endswith("wait") else "lease_deadline"
+    if failure!="native_valid": executor.runs["run"]["execution"][deadline]=now[0]+.05
+    def send(*args,**kwargs):
+     with mock.patch("tools.data_factory.motion.moveit_transport.time.time",side_effect=lambda:now[0]),mock.patch.object(finite_plan,"check_execution_start",side_effect=checked):
+      return native.start_phase(*args,**kwargs)
    transport.start_phase=send
    if failure=="cancel_after_send":
     transport.on_start=lambda:executor._fault(executor.runs["run"],"TEST_CANCEL")
@@ -541,13 +589,17 @@ class Test(unittest.TestCase):
    finally: faulthandler.cancel_dump_traceback_later()
    for thread in threads:
     if thread is not None: thread.join(1.);self.assertFalse(thread.is_alive())
-   if failure in ("unchanged","writer"):
+   if failure in ("unchanged","writer","native_valid"):
     self.assertTrue(result["ok"],result)
     self.assertEqual(len(transport.sent),sent+1)
    else:
     self.assertFalse(result["ok"],{k:result[k] for k in ("ok","code","state")})
-    expected={"changed":"SCENE_STATE_CHANGED","race":"SCENE_STATE_CHANGED","lease":"HEARTBEAT_TIMEOUT","wait":"PRECONTACT_TIMEOUT","cancel":"TEST_CANCEL","error":"TEST_START_ERROR","reentrant":"REENTRANT_COMMAND","cancel_after_send":"TEST_CANCEL"}[failure]
+    expected=("PRECONTACT_TIMEOUT" if failure.endswith("wait") else "HEARTBEAT_TIMEOUT") if failure.startswith("native_") else {"changed":"SCENE_STATE_CHANGED","race":"SCENE_STATE_CHANGED","lease":"HEARTBEAT_TIMEOUT","wait":"PRECONTACT_TIMEOUT","cancel":"TEST_CANCEL","error":"TEST_START_ERROR","reentrant":"REENTRANT_COMMAND","cancel_after_send":"TEST_CANCEL"}[failure]
     self.assertEqual(result["code"],expected)
+    if native is not None:
+     self.assertEqual(native_send_times,[])
+     self.assertIsNone(native._active)
+     self.assertFalse(native._execution_locked)
     self.assertEqual(len(transport.sent),sent+int(failure=="cancel_after_send"))
     self.assertFalse(transport.owns_active_goal)
     self.assertEqual(transport.cancel_count,int(failure=="cancel_after_send"))

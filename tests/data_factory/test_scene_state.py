@@ -326,6 +326,13 @@ class SceneStateTest(unittest.TestCase):
                 store.read()
 
     def test_release_transition_updates_object_and_slot_atomically(self):
+        import fcntl, subprocess, sys
+        if os.environ.get("FR5_SCENE_STORE_LOCK_REPLAY") != "1":
+            result = subprocess.run([sys.executable, "-m", "unittest",
+                "tests.data_factory.test_scene_state.SceneStateTest.test_release_transition_updates_object_and_slot_atomically"],
+                env=dict(os.environ, FR5_SCENE_STORE_LOCK_REPLAY="1"), capture_output=True, text=True, timeout=6)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            return
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory) / "outputs/data_factory/cells"
             store = scene_state.SceneStateStore(root, "fr5-lab-a")
@@ -361,6 +368,25 @@ class SceneStateTest(unittest.TestCase):
                     "human_verdict": verdict,
                 }
 
+            descriptor = os.open(store._cell.runtime_path("scene_state.lock"), os.O_RDWR)
+            fcntl.flock(descriptor, fcntl.LOCK_EX)
+            before = store._path().read_bytes()
+            try:
+                with self.assertRaisesRegex(ContractError, "SCENE_STATE_BUSY"):
+                    with store.locked_snapshot(start["scene_state_digest"], blocking=False):
+                        self.fail("foreign lock must exclude a reader")
+                with self.assertRaisesRegex(ContractError, "SCENE_STATE_BUSY"):
+                    store.update_object(instance_id="cube-1", object_profile_id="wood-cube-25mm-r001",
+                        state="UNKNOWN", source="ROBOT_ACTION", updated_by="pickup-executor", blocking=False)
+                with self.assertRaisesRegex(ContractError, "SCENE_STATE_BUSY"):
+                    store.transition_release(instance_id="cube-1", release_slot=slot,
+                        evidence=evidence("UNCERTAIN", []), updated_by="pickup-executor",
+                        expected_digest=start["scene_state_digest"], expected_revision=start["scene_state"]["revision"], blocking=False)
+                self.assertEqual(store._path().read_bytes(), before)
+            finally:
+                os.close(descriptor)
+            with store.locked_snapshot(start["scene_state_digest"], blocking=False) as current:
+                self.assertEqual(current, start)
             terminals = ["RECYCLE_APPROACH_PTP", "LOWER_LIN", "GRIPPER_OPEN", "RETREAT_LIN", "SAFE_POSE_PTP"]
             landed = store.transition_release(
                 instance_id="cube-1", release_slot=slot, evidence=evidence("LANDED", terminals),

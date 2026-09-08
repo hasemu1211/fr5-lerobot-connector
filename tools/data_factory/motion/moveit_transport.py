@@ -501,11 +501,13 @@ class RosMoveItTransport:
         return phase, step_type, goal, client, float(timeout)
 
     def start_phase(
-        self, compiled_step, *, cancel_event=None, cancel_timeout_s=None, start_observation=None,
+        self, compiled_step, *, cancel_event=None, cancel_timeout_s=None, start_observation=None, dispatch_guard=None,
     ):
         """Start one approved serialized action and retain its sole active handle."""
         if self._execution_locked or self._active is not None:
             raise ContractError("ROS_EXEC_ACTIVE")
+        if dispatch_guard is not None and not callable(dispatch_guard):
+            raise ContractError("ROS_EXEC_DISPATCH_GUARD")
         phase, step_type, goal, client, timeout = self._compiled_execution_goal(compiled_step)
         if cancel_event is not None and (
             not callable(getattr(cancel_event, "is_set", None))
@@ -529,8 +531,16 @@ class RosMoveItTransport:
             self._execution_locked = False
             raise ContractError("ROS_EXEC_CANCELLED")
         try:
+            # Compilation and evidence validation can consume the caller's
+            # remaining lease. Check its original deadline at the actual send.
+            if dispatch_guard is not None:
+                dispatch_guard()
             sent = client.send_goal_async(goal)
-        except RuntimeError as exc:
+        except ContractError:
+            self._active = None
+            self._execution_locked = False
+            raise
+        except Exception as exc:
             self._active = None
             self._execution_locked = False
             raise ContractError("ROS_EXEC_GOAL_FAILED", str(exc)) from exc

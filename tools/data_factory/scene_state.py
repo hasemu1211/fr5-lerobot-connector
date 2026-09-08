@@ -229,14 +229,23 @@ class SceneStateStore:
         scene = self.read()
         return {"scene_state": scene, "scene_state_digest": canonical_digest(scene)}
 
+    @staticmethod
+    def _flock(descriptor, blocking):
+        if type(blocking) is not bool:
+            raise ContractError("SCENE_LOCK_MODE")
+        try:
+            fcntl.flock(descriptor, fcntl.LOCK_EX | (0 if blocking else fcntl.LOCK_NB))
+        except BlockingIOError as exc:
+            raise ContractError("SCENE_STATE_BUSY") from exc
+
     @contextmanager
-    def locked_snapshot(self, expected_digest: str):
+    def locked_snapshot(self, expected_digest: str, *, blocking: bool = True):
         if not isinstance(expected_digest, str) or not DIGEST.fullmatch(expected_digest):
             raise ContractError("SCENE_BINDING")
         lock_path = self._cell.runtime_path("scene_state.lock", create_robot=True)
         descriptor = os.open(lock_path, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
         try:
-            fcntl.flock(descriptor, fcntl.LOCK_EX)
+            self._flock(descriptor, blocking)
             snapshot = self.snapshot()
             if snapshot["scene_state_digest"] != expected_digest:
                 raise ContractError("SCENE_STATE_CHANGED")
@@ -255,6 +264,7 @@ class SceneStateStore:
         expected_revision: int,
         allowed_next_run_id: str | None = None,
         parent_cell_binding: dict | None = None,
+        blocking: bool = True,
     ) -> dict:
         """Publish the physical object and its slot in one scene-v2 revision."""
         instance_id = _id(instance_id, "SCENE_OBJECT")
@@ -339,7 +349,7 @@ class SceneStateStore:
         descriptor = os.open(lock_path, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
         cell_descriptor = None
         try:
-            fcntl.flock(descriptor, fcntl.LOCK_EX)
+            self._flock(descriptor, blocking)
             current = self.read()
             if canonical_digest(current) != expected_digest or current["revision"] != expected_revision:
                 raise ContractError("SCENE_STATE_CHANGED")
@@ -350,7 +360,7 @@ class SceneStateStore:
             if parent_cell_binding is not None:
                 cell_descriptor = os.open(self._cell.runtime_path("state.lock", create_robot=True),
                                           os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
-                fcntl.flock(cell_descriptor, fcntl.LOCK_EX)
+                self._flock(cell_descriptor, blocking)
                 parent = self._cell.read()
                 source = slots.get(parent_cell_binding["source_slot_id"])
                 if (parent["cell_ready"] is not False
@@ -609,6 +619,7 @@ class SceneStateStore:
         pose: dict | None = None,
         expected_revision: int | None = None,
         expected_cell_digest: str | None = None,
+        blocking: bool = True,
     ) -> dict:
         instance_id = _id(instance_id, "SCENE_OBJECT")
         object_profile_id = _id(object_profile_id, "SCENE_OBJECT")
@@ -635,11 +646,11 @@ class SceneStateStore:
         descriptor = os.open(lock_path, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
         cell_descriptor = None
         try:
-            fcntl.flock(descriptor, fcntl.LOCK_EX)
+            self._flock(descriptor, blocking)
             if expected_cell_digest is not None:
                 cell_descriptor = os.open(self._cell.runtime_path("state.lock", create_robot=True),
                                           os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
-                fcntl.flock(cell_descriptor, fcntl.LOCK_EX)
+                self._flock(cell_descriptor, blocking)
                 cell = self._cell.read()
                 if canonical_digest(cell) != expected_cell_digest:
                     raise ContractError("STATE_CHANGED")

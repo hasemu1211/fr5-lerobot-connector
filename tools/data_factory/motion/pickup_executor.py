@@ -1014,7 +1014,7 @@ class PickupExecutor:
         if self.scene_state_store is None:
             raise ContractError("SCENE_STATE_REQUIRED")
         try:
-            with self.scene_state_store.locked_snapshot(execution["scene_state_digest"]) as snapshot:
+            with self.scene_state_store.locked_snapshot(execution["scene_state_digest"], blocking=False) as snapshot:
                 if (snapshot["scene_state_digest"] != execution["scene_state_digest"]
                         or snapshot["scene_state"]["revision"] != execution["scene_revision"]
                         or snapshot["scene_state"]["objects"].get(plan["scene_binding"]["object_instance_id"]) != execution["scene_object"]):
@@ -1249,17 +1249,24 @@ class PickupExecutor:
             data["failure_code"] = run["failure_code"]
         return data
 
-    def _check_learned_dispatch(self, run):
+    def _check_learned_dispatch(self, run, deadlines=None):
         execution = run["execution"]
         if run["cancel_event"].is_set():
             raise ContractError(execution.get("_scene_dispatch_fault", "LEARNED_CANCELLED"))
         if run["state"] != "EXECUTING":
             raise ContractError(run.get("failure_code", "LEARNED_CHUNK_STATE"))
+        lease, confirmation = deadlines or self._learned_dispatch_deadlines(run)
         now = self.monotonic_clock()
-        if now >= execution["lease_deadline"]:
+        if now >= lease:
             raise ContractError("HEARTBEAT_TIMEOUT")
-        if execution.get("learned_segment_index", 0) == 0 and now > execution["wait_deadline"]:
+        if confirmation is not None and now > confirmation:
             raise ContractError("PRECONTACT_TIMEOUT")
+
+    @staticmethod
+    def _learned_dispatch_deadlines(run):
+        execution = run["execution"]
+        return (execution["lease_deadline"], execution["wait_deadline"]
+                if execution.get("learned_segment_index", 0) == 0 else None)
 
     @contextmanager
     def _learned_dispatch_scene(self, run):
@@ -1273,7 +1280,7 @@ class PickupExecutor:
         # goal submission. Reentrant stop callbacks only fence until it releases.
         execution["_scene_dispatch_active"] = True
         try:
-            with self.scene_state_store.locked_snapshot(execution["scene_state_digest"]) as snapshot:
+            with self.scene_state_store.locked_snapshot(execution["scene_state_digest"], blocking=False) as snapshot:
                 scene = snapshot["scene_state"]
                 if (snapshot["scene_state_digest"] != execution["scene_state_digest"]
                         or scene["revision"] != execution["scene_revision"]
@@ -1368,6 +1375,7 @@ class PickupExecutor:
             return "PRECONTACT_HUMAN"
         if "held_target_segments" in step:
             step = step["held_target_segments"][execution.get("learned_segment_index", 0)]
+        deadlines = self._learned_dispatch_deadlines(run) if step["phase"] == "LEARNED_CHUNK" else None
         try:
             with self._learned_dispatch_scene(run):
                 observed = self.transport.snapshot(run["plan"]["planning"]["max_joint_state_age_s"])
@@ -1392,8 +1400,9 @@ class PickupExecutor:
                 execution["active"] = True
                 self._emit_phase_event(run, "DISPATCH_REQUESTED", step, "REQUESTED", {"step": step})
                 if step["phase"] == "LEARNED_CHUNK":
-                    self._check_learned_dispatch(run)
-                    self.transport.start_phase(step, cancel_event=run["cancel_event"], cancel_timeout_s=run["plan"]["execution_timeouts_s"]["cancel"], **options)
+                    self._check_learned_dispatch(run, deadlines)
+                    self.transport.start_phase(step, cancel_event=run["cancel_event"], cancel_timeout_s=run["plan"]["execution_timeouts_s"]["cancel"],
+                                               dispatch_guard=lambda: self._check_learned_dispatch(run, deadlines), **options)
                     if run["state"] != "EXECUTING" or run["cancel_event"].is_set():
                         return run["state"]
                 else:
@@ -1457,6 +1466,7 @@ class PickupExecutor:
             item = execution.get("scene_object")
             binding = run["plan"]["scene_binding"]
             if self.scene_state_store is not None and isinstance(item, dict):
+                scene_options = {"blocking": False} if "learned_proposal" in run["plan"] else {}
                 slot = binding.get("release_slot")
                 if slot is None:
                     execution["scene_transition"] = self.scene_state_store.update_object(
@@ -1465,7 +1475,7 @@ class PickupExecutor:
                         state="UNKNOWN",
                         source="ROBOT_ACTION",
                         updated_by="pickup-executor",
-                        expected_revision=binding["revision"],
+                        expected_revision=binding["revision"], **scene_options,
                     )
                 else:
                     snapshot = execution.get("snapshot")
@@ -1495,7 +1505,7 @@ class PickupExecutor:
                         updated_by="pickup-executor",
                         expected_digest=execution.get("scene_state_digest", binding["scene_state_digest"]),
                         expected_revision=execution.get("scene_revision", binding["revision"]),
-                        allowed_next_run_id=binding.get("allowed_next_run_id"),
+                        allowed_next_run_id=binding.get("allowed_next_run_id"), **scene_options,
                     )
         except Exception as exc:
             execution["scene_state_error"] = exc.code if isinstance(exc, ContractError) else "SCENE_STATE_WRITE_FAILED"
