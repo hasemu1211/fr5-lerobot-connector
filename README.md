@@ -1,8 +1,8 @@
 # Closed-Loop Data Engine for Robot Skill Adaptation
 
-실물 demonstration으로 시작하는 VLA skill adaptation. 구현·검증 플랫폼은 FAIRINO FR5이다.
+실물 demonstration과 실행 피드백을 잇는 VLA skill adaptation. 구현·검증 플랫폼은 FAIRINO FR5이다.
 
-**[포트폴리오 다운로드 · 38.7MB](https://github.com/hasemu1211/fr5-lerobot-connector/releases/download/portfolio-2026-09-08/FR5-Portfolio.html)** · [시스템 아키텍처](docs/architecture.md)
+**[포트폴리오 다운로드 · 39.5MB](https://github.com/hasemu1211/fr5-lerobot-connector/releases/download/portfolio-2026-09-08/FR5-Portfolio.html)** · [시스템 아키텍처](docs/architecture.md)
 
 [![Pick & Place 시연의 고정 카메라와 손목 카메라 관측](docs/portfolio/assets/pick-place-latest-poster.jpg)](https://github.com/hasemu1211/fr5-lerobot-connector/releases/download/portfolio-2026-09-08/FR5-Portfolio.html)
 
@@ -19,6 +19,7 @@ Pick & Place · 21.1초
 | 동기 기록 | [영상·관절 상태·그리퍼 명령을 같은 시각의 학습 표본으로 정렬한다.](docs/dataset-quality.md#필수-자동-기준) |
 | 데이터 선별 | [선택한 데이터의 원본과 학습·평가 배정을 유지해 데이터 변경의 영향을 비교한다.](docs/training-and-evaluation.md) |
 | 정책 비교 | [같은 관측에서 생성한 동작을 관절·그리퍼 단위로 비교한다.](docs/training-and-evaluation.md#오프라인-평가) |
+| 조건 피드백 | [실행 근거를 원래 조건에 대응시켜 다음 수집 추천에 사용한다.](docs/architecture.md#task--evidence-contracts) |
 
 <details>
 <summary>직접 실행하기 · 기술 문서 · 라이선스</summary>

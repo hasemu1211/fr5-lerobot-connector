@@ -1,4 +1,41 @@
-<!doctype html><html lang="ko"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>집기와 옮기기의 작업 정의 — 데이터 엔진 근거</title><link rel="stylesheet" href="../site.css"></head><body><main class="source-page"><a href="../collection.html#recording-scope">← 설명으로 돌아가기</a><h1>집기와 옮기기의 작업 정의</h1><p class="note">설명에 사용한 구현·측정 자료의 발췌이다. SHA-256은 발췌 전 원본 파일을 식별한다. 실행 PC의 절대 경로와 계정 정보는 포함하지 않으며, 측정값과 해석 조건을 함께 제시한다.</p><section id="task_recipe"><h2>task_recipe.py</h2><p class="locator">tools/data_factory/task_recipe.py<br>sha256:7ac1782503c12dde1728d0ca41c43f64a19d50cc6bc34bc55f3a87b0de5c691f</p><p class="note">원문 전체.</p><pre>&quot;&quot;&quot;Pure task recipes and spatial bindings for the shared pickup backbone.&quot;&quot;&quot;
+<!doctype html><html lang="ko"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Pick · Pick &amp; Place의 작업 정의 — 데이터 엔진 근거</title><link rel="stylesheet" href="../site.css"></head><body><main class="source-page"><a href="../collection.html#recording-scope">← 설명으로 돌아가기</a><h1>Pick · Pick &amp; Place의 작업 정의</h1><p class="note">설명에 사용한 구현·측정 자료의 발췌이다. SHA-256은 발췌 전 원본 파일을 식별한다. 실행 PC의 절대 경로와 계정 정보는 포함하지 않으며, 측정값과 해석 조건을 함께 제시한다.</p><section id="task-contract"><a href="../architecture.html#contracts">← Task &amp; Evidence Contracts</a><h2>Task Binding · 작업과 공간 역할</h2><p><code>task_binding.v2</code>는 task·SOURCE/DESTINATION·workspace·frame·pose를 결속한다. <code>episode_instruction_binding.v2</code>는 이 task binding에 object profile과 기록할 instruction을 연결한다.</p><p class="locator">main 834c3835d8b7adf6fe3b80018b2ce0beb94393f6<br>tools/data_factory/task_recipe.py<br>sha256:7ac1782503c12dde1728d0ca41c43f64a19d50cc6bc34bc55f3a87b0de5c691f</p><h3>원본 19–56행</h3><pre>  19 RECIPE_SCHEMA = &quot;data_factory.task_recipe.v1&quot;
+  20 CATALOG_SCHEMA = &quot;data_factory.task_recipe_catalog.v1&quot;
+  21 BINDING_SCHEMA = &quot;data_factory.task_binding.v2&quot;
+  22 LEGACY_EPISODE_INSTRUCTION_SCHEMA = &quot;data_factory.episode_instruction_binding.v1&quot;
+  23 EPISODE_INSTRUCTION_SCHEMA = &quot;data_factory.episode_instruction_binding.v2&quot;
+  24 TASK_IDS = (&quot;pickup_e2e&quot;, &quot;pick_place&quot;)
+  25
+  26 _RECIPE_FIELDS = {
+  27     &quot;schema_version&quot;, &quot;task_id&quot;, &quot;spatial_roles&quot;, &quot;recorded_phases&quot;,
+  28     &quot;recording_boundary&quot;, &quot;post_recording_phases&quot;, &quot;task_terminal&quot;,
+  29     &quot;review_checklist_id&quot;, &quot;episode_intent&quot;, &quot;instruction_template&quot;,
+  30     &quot;recipe_digest&quot;,
+  31 }
+  32 _CATALOG_FIELDS = {&quot;schema_version&quot;, &quot;recipes&quot;, &quot;catalog_digest&quot;}
+  33 _BINDING_FIELDS = {
+  34     &quot;schema_version&quot;, &quot;task_id&quot;, &quot;recipe_digest&quot;, &quot;spatial_bindings&quot;,
+  35     &quot;binding_digest&quot;,
+  36 }
+  37 _SPATIAL_FIELDS = {
+  38     &quot;role&quot;, &quot;workspace_id&quot;, &quot;frame_id&quot;, &quot;pose&quot;, &quot;sheet_digest&quot;,
+  39     &quot;family_digest&quot;, &quot;region_binding&quot;,
+  40 }
+  41 _POSE_FIELDS = {&quot;place_id&quot;, &quot;yaw_deg&quot;, &quot;x_mm&quot;, &quot;y_mm&quot;}
+  42 _REGION_FIELDS = {
+  43     &quot;layout_id&quot;, &quot;layout_digest&quot;, &quot;region_id&quot;, &quot;physical_binding_status&quot;,
+  44 }
+  45 _EPISODE_INSTRUCTION_FIELDS = {
+  46     &quot;schema_version&quot;, &quot;task_binding&quot;, &quot;object_profile_id&quot;,
+  47     &quot;object_profile_digest&quot;, &quot;object_description&quot;, &quot;instruction&quot;,
+  48     &quot;binding_digest&quot;,
+  49 }
+  50
+  51
+  52 def _phase(phase: str, internal_phase: str, label: str) -&gt; dict[str, str]:
+  53     return {&quot;phase&quot;: phase, &quot;internal_phase&quot;: internal_phase, &quot;label&quot;: label}
+  54
+  55
+  56 def _recipe(</pre><a href="#task_recipe">전체 정의와 검증 함수 ↗</a></section><section id="task_recipe"><h2>task_recipe.py</h2><p class="locator">tools/data_factory/task_recipe.py<br>sha256:7ac1782503c12dde1728d0ca41c43f64a19d50cc6bc34bc55f3a87b0de5c691f</p><p class="note">원문 전체.</p><pre>&quot;&quot;&quot;Pure task recipes and spatial bindings for the shared pickup backbone.&quot;&quot;&quot;
 from __future__ import annotations
 
 import copy

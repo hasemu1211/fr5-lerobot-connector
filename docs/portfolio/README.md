@@ -1,6 +1,6 @@
 # Closed-Loop Data Engine · 포트폴리오
 
-**[포트폴리오 다운로드 · 38.7MB · 데스크톱 Chrome](https://github.com/hasemu1211/fr5-lerobot-connector/releases/download/portfolio-2026-09-08/FR5-Portfolio.html)**
+**[포트폴리오 다운로드 · 39.5MB · 데스크톱 Chrome](https://github.com/hasemu1211/fr5-lerobot-connector/releases/download/portfolio-2026-09-08/FR5-Portfolio.html)**
 
 [시스템 아키텍처](../architecture.md) · [데이터셋 품질](../dataset-quality.md) · [학습과 평가](../training-and-evaluation.md)
 
@@ -33,7 +33,7 @@ python3 docs/portfolio/export_single_file.py .agent-local/portfolio/FR5-Portfoli
 
 작업명은 **Pick · Pick & Place**, 모듈명은 실제 아키텍처의 **Collection Operator · Recorder · Curator · Training Review · Policy Learning**을 일관되게 사용한다. 한국어는 목적과 원리를 설명하며, 원본 코드·데이터 식별자는 보존한다.
 
-프로젝트의 개발 방향은 **Robot Skill Adaptation**이다. 상위 task planning과 실행 skill의 역할 구분, 실물 demonstration 생성·VLA fine-tuning·평가 기반 데이터 보완을 기존 개요도로 드러낸다. README와 포트폴리오는 같은 그림을 재사용한다. 이 배경을 상위 planner 연동의 구현이나 실물 성능 향상 결과로 쓰지 않는다.
+프로젝트의 개발 방향은 **Robot Skill Adaptation**이다. 상위 task planning과 실행 skill의 역할 구분은 개요도로, 작업 조건·실행 근거·다음 수집의 연결은 실제 계약 도해로 드러낸다. README와 포트폴리오는 같은 그림을 재사용한다. 계약은 native 정의·검증·실제 소비에서 추상화하며 새 schema 정본을 만들지 않는다. 상위 시스템의 입력·피드백 소비는 확장 방향으로 구분하고, 구현된 내부 소비와 연결한다.
 
 새 근거는 기존 `sources/` 연결에 반영한다. 설명용 예시, 실제 시연, 오프라인 정책 비교와 폐루프의 목표를 구분하고, 달성한 범위를 넘어 성능을 주장하지 않는다. 전달 전에는 단일 파일에서 바뀐 구간의 가독성·조작·근거 복귀를 직접 확인한다.
 

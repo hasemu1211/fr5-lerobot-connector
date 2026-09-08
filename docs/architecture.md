@@ -1,26 +1,34 @@
 # 시스템 아키텍처
 
-![폐루프 목표 구조: 수집·선별·학습·평가와 다음 수집으로 돌아가는 데이터·정책 피드백](portfolio/closed-loop.drawio.svg)
+## Task & Evidence Contracts
 
-실선은 데이터 전달, 파란 점선은 다음 수집을 위한 피드백이다. 그림은 기능 책임을 기준으로 한 목표 구조이다.
+실행 결과를 원래 작업·물체·카메라·보정 조건에 연결해, 다음 수집에서도 같은 조건을 찾는다.
 
-| 구성 | 역할 |
-| --- | --- |
-| Collection Operator · Recorder | 작업 조건으로 시연을 실행하고 영상·상태·동작을 함께 기록한다. |
-| Curator · Training Review | 시연의 품질과 분포를 검토하고 선택한 원본과 학습 입력의 대응을 유지한다. |
-| Policy Learning | 승인된 데이터로 정책을 학습하고 같은 조건의 오프라인 결과를 비교한다. |
-| Acquisition Strategy | 관측이 부족하거나 정책이 취약한 조건을 다음 수집 가설로 만든다. |
-
-수집·기록·선별·학습·오프라인 비교와 조건별 수집 추천을 구현했다. 학습 정책의 실물 실행을 통한 재수집·재학습 효과는 검증할 다음 단계이다.
+![Task Binding에서 실행 진단과 수집 추천으로 이어지는 현재 계약, 그리고 상위 task system과의 양방향 확장 방향](portfolio/task-evidence.drawio.svg)
 
 <details>
-<summary>정책 실행의 소프트웨어 연결</summary>
+<summary>인터페이스 계약과 현재 소비자</summary>
 
-학습 정책도 시연 수집과 같은 실행기와 기록기를 사용한다. [NativeSmolVLA](../tools/data_factory/learned_action_adapter.py)는 저장된 모델·전처리·정규화를 불러와 동작 묶음을 예측하고, [finite plan](../tools/data_factory/rollout/finite_plan.py)은 관측 시각·관절 단위·위치와 속도 조건을 확인한다.
+| 계약 | 보존하는 정보 | 현재 소비자 |
+| --- | --- | --- |
+| [Task Binding](../tools/data_factory/task_recipe.py) | task·공간 역할·workspace·pose | Collection 계획·실행, 기록 instruction |
+| [Execution Diagnostic](../tools/data_factory/rollout/evidence_boundary.py) | checkpoint·실행 trace·사람 판정 범위 | Curator의 원본 실행 진단과 조건 대응 |
+| [Collection Recommendation](../tools/data_factory/collection_recommendation.py) | 관측·제안·근거 참조·선택 변경 | CampaignOperator의 draft 갱신 |
 
-[OneJob](../tools/data_factory/one_job.py)은 동작 묶음의 완료와 작업 전체의 완료를 구분한다. 묶음 끝에서 같은 기록기를 유지하고 다음 관측을 읽어, 실행을 조각별 데이터로 끊지 않도록 했다. [경계 회귀](../tests/data_factory/rollout/test_finite_plan.py)는 기록 유지와 관측 결속, 취소·만료·오래된 입력의 거절을 확인한다.
+그림은 기존 계획의 조건 선택을 갱신하는 v1 경로이다. 현재 장면에서 새 위치·각도를 생성하는 v2 추천은 [획득 전략](data-factory.md)에서 다룬다. [소비 경로 회귀](../tests/data_factory/test_collection_recommendation.py)는 원본 실행의 조건 대응과 추천 적용을 검증한다.
 
-현재는 고정된 동작 묶음의 실행과 관측 경계를 연결한 소프트웨어 범위이다. 다음 예측의 계획·승인을 이어 작업 전체를 완료하는 경로와 실물 정책 성공은 별도 검증 대상이다.
+현재 입력은 Pick·Pick & Place의 작업·공간 계약이며, 실행 진단의 작업 전체 효과는 UNKNOWN으로 보존한다. 상위 planner·simulator가 이 결과를 소비하는 연동은 확장 방향이다.
+
+</details>
+
+<details>
+<summary>폐루프 목표 구조와 정책 실행</summary>
+
+![수집·선별·학습·평가와 다음 수집으로 돌아가는 데이터·정책 피드백](portfolio/closed-loop.drawio.svg)
+
+학습 정책은 시연 수집과 같은 실행기·기록기를 사용한다. [NativeSmolVLA](../tools/data_factory/learned_action_adapter.py)는 저장된 모델·전처리·정규화로 동작 묶음을 예측하고, [finite plan](../tools/data_factory/rollout/finite_plan.py)은 관측 시각·관절 단위·위치와 속도 조건을 확인한다.
+
+[OneJob](../tools/data_factory/one_job.py)은 기록을 유지한 채 다음 관측·동작 묶음을 이어가는 소프트웨어 경로를 제공한다. 실행 진단은 원래 조건을 보존해 다음 수집 추천으로 이어진다. 재수집·재학습에 따른 실물 정책 개선은 비교 실험의 목표이다.
 
 </details>
 
