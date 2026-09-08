@@ -452,4 +452,100 @@ class Test(unittest.TestCase):
   self.assertEqual(transition["schema_version"],"data_factory.joint_transition_precommit.v1")
   recovery=isolated.precommit_home_recovery(**transition_args)
   self.assertEqual((recovery["schema_version"],recovery["execute_goal_count"],recovery["gripper_goal_count"],recovery["gripper_goal_count_delta"]),("data_factory.home_recovery_precommit.v1",0,1,0))
+ def test_learned_dispatch_serializes_scene_writes(self):
+  import faulthandler, fcntl, threading
+  # Root-authorized local fixture reuse: avoid a second learned setup and a
+  # module-level cycle (the fixture itself imports this module's transport).
+  from tests.data_factory.rollout.test_finite_plan import FinitePlanTest, APPROVAL
+  from tools.data_factory.scene_state import SceneStateStore
+  case=os.environ.get("FR5_SCENE_DISPATCH_REPLAY")
+  if case is None:
+   for chunk in (1,2):
+    for failure in ("changed","race","unchanged","writer","lease","wait","cancel","error","reentrant","cancel_after_send"):
+     with self.subTest(chunk=chunk,failure=failure):
+      env=dict(os.environ,FR5_SCENE_DISPATCH_REPLAY=f"{chunk}:{failure}")
+      command=[sys.executable,"-m","unittest","tests.data_factory.test_motion.Test.test_learned_dispatch_serializes_scene_writes"]
+      try: result=subprocess.run(command,env=env,capture_output=True,text=True,timeout=6)
+      except subprocess.TimeoutExpired as exc: self.fail(f"Scene dispatch deadlock: {case} {chunk}/{failure} {exc.stderr}")
+      self.assertEqual(result.returncode,0,result.stdout+result.stderr)
+   return
+  chunk,failure=case.split(":")
+  with tempfile.TemporaryDirectory() as directory:
+   scene=SceneStateStore(directory,"fr5-lab-a")
+   def update(x):
+    return scene.update_object(instance_id="cube-1",object_profile_id="cube",state="ON_SURFACE",source="HUMAN",updated_by="operator",pose={"place_id":"PLACE_A","yaw_deg":0.,"x_mm":x,"y_mm":20.})
+   update(10.)
+   fixture=FinitePlanTest()
+   job,executor,transport,cell,_,now,calls=fixture.make_job(scene_store=scene)
+   self.assertTrue(job.approve(APPROVAL)["ok"])
+   self.assertTrue(job.start()["ok"])
+   self.assertEqual(job.poll()["state"],"PRECONTACT_HUMAN")
+   if chunk=="2":
+    self.assertTrue(job.confirm("operator")["ok"])
+    self.assertEqual(job.poll()["state"],"LEARNED_CHUNK_COMPLETE")
+    self.assertTrue(job.prepare_next_learned(fixture.next_raw_program(job))["ok"])
+    self.assertTrue(job.approve_next_learned({**APPROVAL,"approval_id":"next"})["ok"])
+    self.assertTrue(job.start_next_learned()["ok"])
+    self.assertEqual(job.state,"PRECONTACT_HUMAN")
+   sent=len(transport.sent)
+   preserved=[]; threads=[]; writer_done=threading.Event(); attempted=threading.Event(); lock_free=[]
+   if failure=="changed": preserved.append(update(99.))
+   if failure=="unchanged": now[0]=round(now[0]+.1,9)
+   if failure in ("race","lease","wait","cancel"):
+    locked=scene.locked_snapshot
+    if failure=="wait": executor.runs["run"]["execution"]["wait_deadline"]=now[0]+.1
+    @contextmanager
+    def interleaved(digest):
+     if failure=="race": preserved.append(update(99.))
+     with locked(digest) as value:
+      if failure in ("lease","wait"): now[0]+=100. if failure=="lease" else .2
+      if failure=="cancel": executor._fault(executor.runs["run"],"TEST_CANCEL")
+      yield value
+    scene.locked_snapshot=interleaved
+   observe=transport.snapshot
+   def concurrent_writer():
+    descriptor=os.open(scene._cell.runtime_path("scene_state.lock"),os.O_RDWR)
+    try:
+     try: fcntl.flock(descriptor,fcntl.LOCK_EX|fcntl.LOCK_NB);lock_free.append(True)
+     except BlockingIOError: lock_free.append(False)
+    finally: os.close(descriptor);attempted.set()
+    preserved.append(update(99.));writer_done.set()
+   def observed(*args):
+    value=observe(*args)
+    if failure=="writer" and not threads:
+     thread=threading.Thread(target=concurrent_writer,daemon=True);threads.append(thread);thread.start()
+     self.assertTrue(attempted.wait(1.))
+     self.assertEqual(lock_free,[False],"Scene writer entered between validation and dispatch")
+    if failure=="reentrant" and not threads:
+     threads.append(None)
+     result=executor.process({"schema_version":"fr5.pickup_executor.command.v4","op_id":"recursive-scene","op":"status","payload":{"run_id":"run","plan_digest":job.plan_digest}})
+     self.assertEqual(result["code"],"REENTRANT_COMMAND")
+    return value
+   transport.snapshot=observed
+   start=transport.start_phase
+   def send(*args,**kwargs):
+    if failure=="error": raise e.ContractError("TEST_START_ERROR")
+    if failure=="writer": self.assertFalse(writer_done.is_set())
+    return start(*args,**kwargs)
+   transport.start_phase=send
+   if failure=="cancel_after_send":
+    transport.on_start=lambda:executor._fault(executor.runs["run"],"TEST_CANCEL")
+   faulthandler.dump_traceback_later(2.)
+   try: result=job.confirm("operator")
+   finally: faulthandler.cancel_dump_traceback_later()
+   for thread in threads:
+    if thread is not None: thread.join(1.);self.assertFalse(thread.is_alive())
+   if failure in ("unchanged","writer"):
+    self.assertTrue(result["ok"],result)
+    self.assertEqual(len(transport.sent),sent+1)
+   else:
+    self.assertFalse(result["ok"],{k:result[k] for k in ("ok","code","state")})
+    expected={"changed":"SCENE_STATE_CHANGED","race":"SCENE_STATE_CHANGED","lease":"HEARTBEAT_TIMEOUT","wait":"PRECONTACT_TIMEOUT","cancel":"TEST_CANCEL","error":"TEST_START_ERROR","reentrant":"REENTRANT_COMMAND","cancel_after_send":"TEST_CANCEL"}[failure]
+    self.assertEqual(result["code"],expected)
+    self.assertEqual(len(transport.sent),sent+int(failure=="cancel_after_send"))
+    self.assertFalse(transport.owns_active_goal)
+    self.assertEqual(transport.cancel_count,int(failure=="cancel_after_send"))
+   if preserved: self.assertEqual(scene.snapshot(),preserved[-1])
+   self.assertNotIn(("recorder","commit"),calls)
+   self.assertFalse(cell.ready)
 if __name__=="__main__":unittest.main()

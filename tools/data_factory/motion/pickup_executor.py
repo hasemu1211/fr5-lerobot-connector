@@ -12,6 +12,7 @@ import queue
 import sys
 import threading
 import time
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -1248,6 +1249,41 @@ class PickupExecutor:
             data["failure_code"] = run["failure_code"]
         return data
 
+    def _check_learned_dispatch(self, run):
+        execution = run["execution"]
+        if run["cancel_event"].is_set():
+            raise ContractError(execution.get("_scene_dispatch_fault", "LEARNED_CANCELLED"))
+        if run["state"] != "EXECUTING":
+            raise ContractError(run.get("failure_code", "LEARNED_CHUNK_STATE"))
+        now = self.monotonic_clock()
+        if now >= execution["lease_deadline"]:
+            raise ContractError("HEARTBEAT_TIMEOUT")
+        if execution.get("learned_segment_index", 0) == 0 and now > execution["wait_deadline"]:
+            raise ContractError("PRECONTACT_TIMEOUT")
+
+    @contextmanager
+    def _learned_dispatch_scene(self, run):
+        if "learned_proposal" not in run["plan"]:
+            yield
+            return
+        if self.scene_state_store is None:
+            raise ContractError("SCENE_STATE_REQUIRED")
+        execution = run["execution"]
+        # The existing Scene lock orders foreign writes against validation AND
+        # goal submission. Reentrant stop callbacks only fence until it releases.
+        execution["_scene_dispatch_active"] = True
+        try:
+            with self.scene_state_store.locked_snapshot(execution["scene_state_digest"]) as snapshot:
+                scene = snapshot["scene_state"]
+                if (snapshot["scene_state_digest"] != execution["scene_state_digest"]
+                        or scene["revision"] != execution["scene_revision"]
+                        or scene["objects"].get(run["plan"]["scene_binding"]["object_instance_id"]) != execution["scene_object"]):
+                    raise ContractError("SCENE_STATE_CHANGED")
+                self._check_learned_dispatch(run)
+                yield
+        finally:
+            execution.pop("_scene_dispatch_active", None)
+
     def _start_current_step(self, run):
         if run["state"] != "EXECUTING" or ("cancel_event" in run and run["cancel_event"].is_set()):
             return run["state"]
@@ -1333,44 +1369,53 @@ class PickupExecutor:
         if "held_target_segments" in step:
             step = step["held_target_segments"][execution.get("learned_segment_index", 0)]
         try:
-            observed = self.transport.snapshot(run["plan"]["planning"]["max_joint_state_age_s"])
-            if not observed["arm_controller"]["ready"] or not observed["gripper_controller"]["ready"]:
-                raise ContractError("CONTROLLER_NOT_READY")
-            expected = step["start_joint_state"]
-            actual = _joint_positions(observed["joint_positions"])
-            tolerance = run["plan"]["planning"]["goal_tolerances"]["joint_rad"]
-            if any(abs(a - b) > tolerance for a, b in zip(actual, expected)):
-                raise ContractError("START_STATE_MISMATCH")
-            if step["phase"] == "LEARNED_CHUNK":
-                from tools.data_factory.rollout.finite_plan import check_execution_start
-                evidence = {"captured_at_s": self.source_clock(), "captured_monotonic_s": self.monotonic_clock(),
-                            "snapshot": copy.deepcopy(observed)}
-                check_execution_start(step, evidence, self.source_clock(), steady_now=self.monotonic_clock())
-                execution["learned_start_observation"] = evidence
-                options = {"start_observation": evidence}
-                if "action_range" in step:
-                    if execution.get("learned_segments"):
-                        from tools.data_factory.rollout.gripper_evidence import check_transition
-                        check_transition(execution["learned_segments"][-1]["terminal_observation"], evidence, command=False)
-            if step["phase"] == "LEARNED_CHUNK" and (run["state"] != "EXECUTING" or run["cancel_event"].is_set()):
-                return run["state"]
-            execution["active"] = True
-            self._emit_phase_event(run, "DISPATCH_REQUESTED", step, "REQUESTED", {"step": step})
-            if step["phase"] == "LEARNED_CHUNK":
-                self.transport.start_phase(step, cancel_event=run["cancel_event"], cancel_timeout_s=run["plan"]["execution_timeouts_s"]["cancel"], **options)
-                if run["state"] != "EXECUTING" or run["cancel_event"].is_set():
-                    return run["state"]
-            else:
-                self.transport.start_phase(step)
-            self._emit_phase_event(run, "GOAL_ACCEPTED", step, "ACCEPTED", {"accepted": True, "step": step})
+            with self._learned_dispatch_scene(run):
+                observed = self.transport.snapshot(run["plan"]["planning"]["max_joint_state_age_s"])
+                if not observed["arm_controller"]["ready"] or not observed["gripper_controller"]["ready"]:
+                    raise ContractError("CONTROLLER_NOT_READY")
+                expected = step["start_joint_state"]
+                actual = _joint_positions(observed["joint_positions"])
+                tolerance = run["plan"]["planning"]["goal_tolerances"]["joint_rad"]
+                if any(abs(a - b) > tolerance for a, b in zip(actual, expected)):
+                    raise ContractError("START_STATE_MISMATCH")
+                if step["phase"] == "LEARNED_CHUNK":
+                    from tools.data_factory.rollout.finite_plan import check_execution_start
+                    evidence = {"captured_at_s": self.source_clock(), "captured_monotonic_s": self.monotonic_clock(),
+                                "snapshot": copy.deepcopy(observed)}
+                    check_execution_start(step, evidence, self.source_clock(), steady_now=self.monotonic_clock())
+                    execution["learned_start_observation"] = evidence
+                    options = {"start_observation": evidence}
+                    if "action_range" in step:
+                        if execution.get("learned_segments"):
+                            from tools.data_factory.rollout.gripper_evidence import check_transition
+                            check_transition(execution["learned_segments"][-1]["terminal_observation"], evidence, command=False)
+                execution["active"] = True
+                self._emit_phase_event(run, "DISPATCH_REQUESTED", step, "REQUESTED", {"step": step})
+                if step["phase"] == "LEARNED_CHUNK":
+                    self._check_learned_dispatch(run)
+                    self.transport.start_phase(step, cancel_event=run["cancel_event"], cancel_timeout_s=run["plan"]["execution_timeouts_s"]["cancel"], **options)
+                    if run["state"] != "EXECUTING" or run["cancel_event"].is_set():
+                        return run["state"]
+                else:
+                    self.transport.start_phase(step)
+                self._emit_phase_event(run, "GOAL_ACCEPTED", step, "ACCEPTED", {"accepted": True, "step": step})
         except Exception as exc:
             self._fault(run, exc.code if isinstance(exc, ContractError) else "SNAPSHOT_SCHEMA")
+        finally:
+            if "_scene_dispatch_fault" in execution:
+                self._fault(run, execution["_scene_dispatch_fault"])
         return run["state"]
 
     def _fault(self, run, code):
         self._retire_observation_cache()
         if "cancel_event" in run:
             run["cancel_event"].set()
+        execution = run["execution"]
+        if execution.get("_scene_dispatch_active"):
+            # Native start_phase observes this same cancellation event. Scene
+            # writes and sole-owner cancellation finish after the flock releases.
+            return execution.setdefault("_scene_dispatch_fault", code)
+        code = execution.pop("_scene_dispatch_fault", code)
         if run["state"] == "BLOCKED":
             return run["failure_code"]
         run["failure_code"] = code
