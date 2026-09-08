@@ -2,6 +2,7 @@
 import copy
 import functools
 import json
+from pathlib import Path
 import subprocess
 import threading
 import unittest
@@ -10,6 +11,7 @@ from unittest import mock
 from tests.data_factory import test_collection_recommendation as evidence_fixture
 from tests.data_factory.operator import test_object_position as position_fixture
 from tools.data_factory.campaign_authoring import compile_collection_campaign
+from tools.data_factory.operator.catalog import selected_motion_preset
 from tools.data_factory.operator.composition import build_physical_operator_application
 from tools.data_factory.operator.web.bridge import LoopbackBridge
 from tools.fr5_data_factory import ContractError, canonical_digest, load_json_strict
@@ -24,8 +26,14 @@ class AcquisitionAdviceTests(unittest.TestCase):
         self.sequence = 0
         seed_app = self.application("evidence-seed")
         self.send(seed_app, "compile_draft", {"draft_id": seed_app.draft["draft_id"], "data_disposition": "PRODUCTION"})
+        self.fixture, self.runs = self.store_evidence(seed_app)
+        self.source = {"run_directories": self.runs, "scene_state_path": str(self.native.cells / self.native.robot / "scene_state.json")}
+        self.app = self.application("acquisition-consumer")
+
+    def store_evidence(self, seed_app, name="evidence"):
         owner = seed_app._campaign.campaign_operator
-        fixture = evidence_fixture.RecommendationFixture(dataset_root=str(self.root / "evidence-data"), evidence_root=str(self.root / "outputs/data_factory/runs"))
+        fixture = evidence_fixture.RecommendationFixture(dataset_root=str(self.root / (name + "-data")),
+            evidence_root=str(self.root / "outputs/data_factory/runs" if name == "evidence" else self.root / name))
         fixture.hypothesis = copy.deepcopy(owner.hypothesis)
         fixture.draft = copy.deepcopy(owner.draft)
         fixture.manifest, fixture.receipt = compile_collection_campaign(fixture.draft, hypothesis=fixture.hypothesis)
@@ -50,17 +58,16 @@ class AcquisitionAdviceTests(unittest.TestCase):
                            state_initialization_digest=None, scene_observation_digest=canonical_digest("synthetic-observation"))
             evidence_fixture.redigest(runtime, "binding_digest")
             fixture.rebind_episode(episode)
-        self.runs = fixture.store()
-        self.source = {"run_directories": self.runs, "scene_state_path": str(self.native.cells / self.native.robot / "scene_state.json")}
-        self.app = self.application("acquisition-consumer")
+        return fixture, fixture.store()
 
     def send(self, app, op, payload=None):
         self.sequence += 1
         return app.core.consume(self.native.request(app, op, payload or {}, f"acquisition-{self.sequence}"))
 
-    def application(self, session, source=None):
+    def application(self, session, source=None, rollout=None):
         app = self.native.application(session, builder=functools.partial(
-            build_physical_operator_application, collection_evidence_call=source))
+            build_physical_operator_application, collection_evidence_call=source,
+            **({"rollout_lifecycle_path": rollout} if rollout is not None else {})))
         self.send(app, "update_camera_bindings", {"bindings": {
             "usb-Generic_USB2.0_PC_CAMERA-video-index0": "UP", "usb-Generic_USB2.0_PC_CAMERA_2-video-index0": "WRIST"}})
         preset = load_json_strict(self.root / "config/data_factory/motion_presets/demonstration-rhythm-r001.json")
@@ -75,6 +82,78 @@ class AcquisitionAdviceTests(unittest.TestCase):
         advice = self.app.projection()["collection_advice"]
         self.assertEqual(advice["status"], "READY", advice)
         return advice
+
+    def test_original_rollout_condition_applies_and_compiles_after_recovery(self):
+        # Existing physical composition and compiler, synthetic stored outcomes;
+        # no device, model, motion, recorder or approval callback is available.
+        seed = self.application("pickup-source")
+        self.send(seed, "update_draft", {"draft_id": seed.draft["draft_id"], "selection": {"task": "pickup_e2e"}})
+        self.send(seed, "compile_draft", {"draft_id": seed.draft["draft_id"], "data_disposition": "PRODUCTION"})
+        fixture, pickup_runs = self.store_evidence(seed, "pickup-evidence")
+        lifecycle = evidence_fixture.learned_lifecycle(fixture, order=1, reviewed=True)
+        plan = lifecycle["plan_envelope"]["plan"]
+        preset = selected_motion_preset(seed.catalog, seed.draft["motion_preset"])
+        qualification = preset["qualifications"][seed.selection["motion_id"]]["digest"]
+        plan["binding_digests"]["motion_qualification"] = qualification
+        plan["learned_source_program"]["binding_digests"]["motion_qualification"] = qualification
+        plan["binding_digests"]["motion_preset"] = preset["digest"]
+        plan["learned_source_program"]["binding_digests"]["motion_preset"] = preset["digest"]
+        receipt = copy.deepcopy(next(r for r in fixture.hypothesis["resolver_receipts"]
+                                    if r["resolved_job_digest"] == plan["resolved_job_digest"]))
+        inputs = {key: plan["binding_digests"][key] for key in receipt["input_digests"]}
+        resolved = canonical_digest({"job": receipt["normalized_job"], "input_digests": inputs})
+        plan["resolved_job_digest"] = plan["learned_source_program"]["resolved_job_digest"] = resolved
+        plan["scene_binding"] = {"scene_state_digest": canonical_digest("synthetic-original-scene"),
+                                 "revision": 1, "object_instance_id": "cube"}
+        lifecycle["scene_binding"] = copy.deepcopy(plan["scene_binding"])
+        evidence_fixture.AcquisitionRolloutTests.rebind(lifecycle)
+        root = self.root / "outputs/data_factory/runs" / lifecycle["run_id"]
+        root.mkdir()
+        path = root / "learned_lifecycle_result.json"
+        path.write_text(json.dumps(lifecycle))
+        preapproval = {"schema_version": "data_factory.preapproval_evidence.v4",
+            "run_id": lifecycle["run_id"], "plan_digest": lifecycle["plan_digest"],
+            "resolved_job_digest": resolved, "plan_envelope": lifecycle["plan_envelope"],
+            "plan_envelope_digest": canonical_digest(lifecycle["plan_envelope"]),
+            "resolved_inputs": {"normalized_job": receipt["normalized_job"],
+                                "input_digests": inputs, "resolved_job_digest": resolved}}
+        (root / "preapproval_evidence.json").write_text(json.dumps(preapproval))
+        source = {"run_directories": pickup_runs, "scene_state_path": self.source["scene_state_path"],
+                  "rollout_lifecycle_path": str(path)}
+        self.app = self.application("pickup-recollect", source=lambda: source, rollout=path)
+        self.send(self.app, "update_draft", {"draft_id": self.app.draft["draft_id"], "selection": {"task": "pickup_e2e"}})
+        self.send(self.app, "update_draft", {"draft_id": self.app.draft["draft_id"], "normalized_seed": 987})
+        original_pose = {k: receipt["normalized_job"][k] for k in ("place_id", "x_mm", "y_mm", "yaw_deg")}
+        self.assertNotEqual(original_pose, self.app.draft["current_object_pose"])
+        before = self.native.scene.read()["objects"], self.native.cell.read(), path.read_bytes()
+        self.assertEqual(qualification, selected_motion_preset(self.app.catalog, self.app.draft["motion_preset"])
+                         ["qualifications"][self.app.selection["motion_id"]]["digest"])
+        advice = self.refresh()
+        self.assertEqual(advice["recommendation"]["sampling"]["authoring_mode"], "DIRECT_EDIT")
+        self.assertEqual(advice["recommendation"]["object_poses"], [position_fixture.POSE, original_pose])
+        retained = path.read_bytes()
+        unchanged_draft = copy.deepcopy(self.app.draft)
+        path.write_text("{}")
+        with self.assertRaisesRegex(ContractError, "COLLECTION_ADVICE_STALE"):
+            self.send(self.app, "choose_collection_advice", {"choice": "APPLY", "expected_recommendation_digest": advice["recommendation_digest"]})
+        self.assertEqual(self.app.draft, unchanged_draft)
+        path.write_bytes(retained)
+        self.send(self.app, "choose_collection_advice", {"choice": "APPLY", "expected_recommendation_digest": advice["recommendation_digest"]})
+        self.assertEqual(self.app.draft["authoring_mode"], "DIRECT_EDIT")
+        self.assertEqual(self.app.projection()["collection_advice"]["status"], "APPLIED")
+        path.write_text("{}")
+        with self.assertRaisesRegex(ContractError, "COLLECTION_ADVICE_STALE"):
+            self.send(self.app, "compile_draft", {"draft_id": self.app.draft["draft_id"], "data_disposition": "PRODUCTION"})
+        self.assertIsNone(self.app._campaign)
+        path.write_bytes(retained)
+        self.send(self.app, "compile_draft", {"draft_id": self.app.draft["draft_id"], "data_disposition": "PRODUCTION"})
+        owner = self.app._campaign.campaign_operator
+        conditions = {b["base_condition_digest"]: b["coverage_condition"] for b in owner.hypothesis["base_conditions"]}
+        self.assertEqual([{k: conditions[s["base_condition_digest"]][k] for k in original_pose}
+                          for s in owner.manifest["slots"]], [position_fixture.POSE, original_pose])
+        self.assertIsNone(self.app.projection()["campaign_authorization"])
+        self.assertEqual((self.native.scene.read()["objects"], self.native.cell.read(), path.read_bytes()), before)
+        self.native.forbidden.assert_not_called()
 
     def test_native_evidence_apply_and_compile_preserve_pose_and_authority(self):
         from tools.data_factory import collection_recommendation_io as io
@@ -208,3 +287,19 @@ class AcquisitionAdviceTests(unittest.TestCase):
                 bridge.close()
                 thread.join(5)
         self.native.forbidden.assert_not_called()
+
+
+class AcquisitionLaunchTests(unittest.TestCase):
+    def test_cli_forwards_explicit_original_source_without_starting_runtime(self):
+        from tools.data_factory.operator import cli
+        with mock.patch.object(cli, "_serve", return_value=0) as serve:
+            self.assertEqual(cli.main(["--effect-scope", "PHYSICAL", "--no-auto-prepare",
+                                      "--rollout-lifecycle", "/synthetic/learned_lifecycle_result.json"]), 0)
+        self.assertEqual(serve.call_args.kwargs["rollout_lifecycle"], Path("/synthetic/learned_lifecycle_result.json"))
+        self.assertFalse(serve.call_args.kwargs["auto_prepare"])
+
+    def test_rollout_source_cannot_silently_enter_an_unrelated_runtime(self):
+        from tools.data_factory.operator.composition import build_operator_runtime
+        for scope in ("FAKE", "LEARNED_RUN", "TRAINING_REVIEW", "CURATOR_REVIEW"):
+            with self.subTest(scope=scope), self.assertRaisesRegex(ContractError, "COLLECTION_ROLLOUT_CONFIGURATION"):
+                build_operator_runtime(effect_scope=scope, rollout_lifecycle="/synthetic/not-read.json")

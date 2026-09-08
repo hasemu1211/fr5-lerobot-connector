@@ -37,6 +37,19 @@ a causal data deficit. Historical compiled authoring SHALL NOT be reconstructed.
 - **AND** changed, mismatched, controller-only or unsupported review evidence SHALL fail without source, lifecycle, scene, candidate, approval or execution effects
 - **AND** legacy advice without rollout input SHALL retain its existing behavior.
 
+#### Scenario: Collection consumes an explicitly selected original rollout
+- **WHEN** the Collection service is configured with `--rollout-lifecycle` pointing to an original terminal learned run
+- **THEN** advice refresh, choose and compile SHALL consume that same server-owned reference through the existing recommendation owner, without guessing the latest failure or requiring a human to enter a path in the Web UI
+- **AND** applying a direct recommendation SHALL preserve current first pose, caller budget, split, seed, repeat and qualified start-pose selection through existing native direct authoring
+- **AND** compile SHALL revalidate the accepted original request and stored evidence even after its recommendation has changed the editable draft to direct selection
+- **AND** an absent or changed source SHALL NOT be reconstructed, and recommendation application SHALL NOT authorize or start a campaign.
+
+#### Scenario: Acquisition uses the selected qualified motion preset
+- **WHEN** a draft selects an existing motion preset
+- **THEN** acquisition input SHALL retain its exact `id` and `digest`, resolve its existing registered qualification for every selected endpoint, and bind those qualification digests into the recommendation input snapshot
+- **AND** original learned evidence SHALL match both the selected preset digest and its qualified motion digest; an unqualified trial or the base recipe qualification SHALL NOT substitute for that binding
+- **AND** omitted or null preset input SHALL preserve the existing no-preset behavior, and any later selection change SHALL invalidate retained advice.
+
 ### Requirement: Explicit finite serialized reference consumption
 
 The normal learned caller SHALL expose serialized reference retiming only as an

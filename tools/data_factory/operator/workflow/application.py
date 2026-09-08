@@ -495,6 +495,7 @@ class CollectionOperatorApplication:
         )
         self._collection_advice = None
         self._collection_choice = None
+        self._collection_request = None
         self._closed = False
         self._close_lock = threading.Lock()
         self._environment_view = (
@@ -2143,11 +2144,16 @@ class CollectionOperatorApplication:
         if self.collection_evidence_call is not None and source is not None and source.get("scene_state_path") is not None:
             source = dict(self.collection_evidence_call())
         draft = copy.deepcopy(self.draft)
+        selection = self.selection
+        if self._collection_request is not None and self._advice_projection()["status"] == "APPLIED":
+            # Re-derive from the accepted request, not the direct draft it produced.
+            # The choice's current-draft binding rejects later edits separately.
+            selection, draft = copy.deepcopy(self._collection_request)
         if source is not None and source.get("scene_state_path") is not None:
             draft["object_position"] = self._object_position_projection()
             if self.catalog_reload_call is not None:
                 source = {**source, "catalog_digest": self.catalog_reload_call()["catalog_digest"]}
-        advice, candidate = derive_next_draft(source, catalog=self.catalog, selection=self.selection,
+        advice, candidate = derive_next_draft(source, catalog=self.catalog, selection=selection,
                                              draft=draft, paired=self.start_pose_setup is not None,
                                              expected_recommendation_digest=expected_recommendation_digest)
         advice["draft_binding"] = draft_binding(self.catalog, self.selection, self.draft)
@@ -2173,8 +2179,15 @@ class CollectionOperatorApplication:
             raise ContractError("COLLECTION_ADVICE_STALE")
         if payload["choice"] == "APPLY":
             if fresh.get("mode") == "ACQUISITION":
-                for field in ("requested_count", "normalized_seed", "repeat"):
-                    self.update_draft({"draft_id": self.draft["draft_id"], field: fresh["recommendation"]["sampling"][field]}, _view)
+                self._collection_request = copy.deepcopy((self.selection, self.draft))
+                if candidate["authoring_mode"] == "DIRECT_EDIT":
+                    for field in ("authoring_mode", "direct_poses", "direct_pairs"):
+                        self.draft[field] = copy.deepcopy(candidate[field])
+                    self.draft["revision"] += 1
+                    self.selection["policy_id"] = "DIRECT_SELECTION"
+                else:
+                    for field in ("requested_count", "normalized_seed", "repeat"):
+                        self.update_draft({"draft_id": self.draft["draft_id"], field: fresh["recommendation"]["sampling"][field]}, _view)
             else:
                 self.draft = candidate
                 self.selection["policy_id"] = "DIRECT_SELECTION"
@@ -2628,6 +2641,7 @@ class CollectionOperatorApplication:
             close()
         self._campaign = None
         self._environment_view = fresh_environment
+        self._collection_request = None
         self._generation += 1
         if campaign_complete:
             previous["normalized_seed"] = (

@@ -10,8 +10,10 @@ from tools.data_factory.campaign_operator import CampaignOperator, SIDE_EFFECT_C
 from tools.data_factory.collection_recommendation import project_campaign_update_intent
 from tools.data_factory.collection_recommendation_io import recommend_stored_collection
 from tools.data_factory.operator.catalog import (
-    project_direct_poses, selected_state_space_design_profile, validate_operator_pose,
+    project_direct_poses, project_balanced_start_pose_ids,
+    selected_state_space_design_profile, validate_operator_pose,
 )
+from tools.data_factory.collection_seed import derive_domain_seed
 from tools.fr5_data_factory import ContractError, canonical_digest, load_json_strict
 
 POSE_FIELDS = ("place_id", "yaw_deg", "x_mm", "y_mm")
@@ -54,9 +56,13 @@ def derive_next_draft(source, *, catalog, selection, draft, paired, expected_rec
             acquisition = {"catalog": catalog, "selection": selection,
                 "scene_state_path": source["scene_state_path"], "expected_scene_digest": position["scene_state_digest"],
                 "object_instance_id": position["object_instance_id"],
+                **({"motion_preset": copy.deepcopy(draft["motion_preset"])}
+                   if draft.get("motion_preset") is not None else {}),
                 **{key: draft[key] for key in ("requested_count", "normalized_seed", "repeat")}}
         stored = recommend_stored_collection(
             run_directories=source["run_directories"], source_commit=commit,
+            **({"rollout_lifecycle_path": source["rollout_lifecycle_path"]}
+               if source.get("rollout_lifecycle_path") is not None else {}),
             **({"acquisition": acquisition, "expected_recommendation_digest": expected_recommendation_digest}
                if acquisition is not None else {}),
         )
@@ -68,10 +74,22 @@ def derive_next_draft(source, *, catalog, selection, draft, paired, expected_rec
         if acquisition is not None:
             if advice["object_poses"][0] != draft["current_object_pose"] or advice["selection"] != selection:
                 raise ContractError("COLLECTION_ADVICE_PLACEMENT_OR_SPLIT_MISMATCH")
+            candidate = copy.deepcopy(draft)
+            if advice["sampling"]["authoring_mode"] == "DIRECT_EDIT":
+                poses = advice["object_poses"]
+                if (selection["task_id"] != "pickup_e2e"
+                        or project_direct_poses(catalog, selection, poses[0], poses[1:], len(poses)) != poses):
+                    raise ContractError("COLLECTION_ADVICE_SEQUENCE_NOT_REPRESENTABLE")
+                candidate.update(authoring_mode="DIRECT_EDIT", direct_poses=copy.deepcopy(poses[1:]))
+                if paired:
+                    starts = project_balanced_start_pose_ids(draft["selected_start_pose_ids"], len(poses),
+                        normalized_seed=derive_domain_seed(draft["normalized_seed"], "start_pose"))
+                    candidate["direct_pairs"] = [{**pose, "start_pose_id": start} for pose, start in zip(poses, starts)]
+                candidate["revision"] += 1
             result.update(status="READY", reason_codes=[], mode="ACQUISITION",
                           conditions=copy.deepcopy(advice["conditions"]),
                           recommendation_digest=advice["recommendation_digest"], authority=copy.deepcopy(advice["authority"]))
-            return result, copy.deepcopy(draft)
+            return result, candidate
         if any(load_json_strict(Path(run) / "compiled_authoring_evidence.json") != source["authoring"]
                for run in source["run_directories"]):
             raise ContractError("COLLECTION_ADVICE_SOURCE_CHANGED")

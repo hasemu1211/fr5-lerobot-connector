@@ -1406,6 +1406,7 @@ def build_physical_runtime(
     motion_preset: str | None = None,
     dataset_name: str = "fr5_smolvla_up_wrist_30hz",
     auto_prepare: bool = True,
+    rollout_lifecycle: str | Path | None = None,
 ) -> OperatorRuntime:
     now = datetime.now(timezone.utc)
     if (
@@ -1566,6 +1567,7 @@ def build_physical_runtime(
             ),
             initial_data_mode=data_mode,
             initial_motion_preset=motion_preset,
+            rollout_lifecycle_path=rollout_lifecycle,
             camera_environment_call=select_camera_environment,
         )
         bridge = LoopbackBridge(
@@ -1622,6 +1624,8 @@ def build_physical_runtime(
 
 
 def build_operator_runtime(*, effect_scope: str = "FAKE", **kwargs) -> OperatorRuntime:
+    if kwargs.get("rollout_lifecycle") is not None and effect_scope != "PHYSICAL":
+        raise ContractError("COLLECTION_ROLLOUT_CONFIGURATION")
     learned_request = kwargs.pop("learned_request", None)
     if effect_scope == "LEARNED_RUN" or learned_request is not None:
         if (effect_scope != "LEARNED_RUN" or learned_request is None
@@ -3425,6 +3429,7 @@ def build_physical_operator_application(
     initial_catalog: Mapping[str, Any] | None = None,
     initial_camera_devices: Sequence[object] | None = None,
     collection_evidence_call: Callable[[], Mapping[str, Any]] | None = None,
+    rollout_lifecycle_path: str | Path | None = None,
     job_path: str | Path = DEFAULT_JOB,
     gripper_retune_path: str | Path | None = DEFAULT_GRIPPER_RETUNE,
     camera_environment_call: Callable[
@@ -4059,6 +4064,8 @@ def build_physical_operator_application(
                     "discovery": {"availability": "UNAVAILABLE", "reason_codes": [
                         exc.code if isinstance(exc, ContractError) else "COLLECTION_RECOMMENDATION_SOURCE_IO"]}}
         return {"run_directories": discovery["run_directories"], "scene_state_path": scene_state_path,
+                **({"rollout_lifecycle_path": str(rollout_lifecycle_path)}
+                   if rollout_lifecycle_path is not None else {}),
                 "discovery": {"availability": discovery["availability"],
                     "discovery_digest": discovery["discovery_digest"], "run_count": len(discovery["run_directories"]),
                     "excluded": [{"run_id": Path(item["run_directory"]).name, "reason_code": item["reason_code"]}
@@ -4207,10 +4214,13 @@ def build_physical_operator_application(
             [None for _pose in poses]
         )
         advice = draft.get("acquisition_recommendation")
+        advice_selection = None if advice is None else copy.deepcopy(advice["selection"])
+        if advice_selection is not None and advice["sampling"]["authoring_mode"] == "DIRECT_EDIT":
+            advice_selection["policy_id"] = "DIRECT_SELECTION"
         if advice is not None and (
-            advice["selection"] != selected or advice["object_poses"] != poses
+            advice_selection != selected or advice["object_poses"] != poses
             or [item["yaw_sample_binding"] for item in advice["conditions"]] != yaw_bindings[:count]
-            or advice["sampling"] != {"authoring_mode": "ASSISTED", **{
+            or advice["sampling"] != {"authoring_mode": draft["authoring_mode"], **{
                 key: draft[key] for key in ("requested_count", "normalized_seed", "repeat")}}
         ):
             raise ContractError("COLLECTION_ADVICE_COMPILER_MISMATCH")
