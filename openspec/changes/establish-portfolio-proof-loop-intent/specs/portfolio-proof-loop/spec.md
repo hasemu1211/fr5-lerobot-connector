@@ -198,6 +198,21 @@ Data Quality Analysis와 Rollout Evidence Analysis는 각자 canonical output을
 - **WHEN** downstream 작업에 필요한 gate evidence가 없거나 검증되지 않았다
 - **THEN** 해당 외부 효과는 차단되고 다른 gate의 PASS가 이를 대신하지 않는다
 
+### Requirement: Shared scene knowledge preserves evidence and consumer authority
+Collection과 Rollout은 기존 scene owner에서 물체 상태·위치·근거·유효 범위를 공유해야 하며(SHALL), 평가와 Curation은 해당 실행에 결속된 scene snapshot을 소비할 수 있어야 한다(SHALL). 소비자는 별도 위치 정본을 만들거나 과거 snapshot을 현재 상태로 덮어써서는 안 된다(MUST NOT). 제어기 관측, 물체 상태, 충돌 환경과 작업 성공 판정은 서로 다른 책임을 유지해야 한다(SHALL).
+
+검증된 수집 레시피의 실행 기반 놓기 계보는 기존 계약에 따라 다음 시작 위치로 재사용해야 하며(SHALL), 학습 정책의 명령 묶음 완료만으로 물체 착지·목표 도달·semantic 성공을 갱신해서는 안 된다(MUST NOT). 새로운 비전 프로세스나 사람 확인 절차를 공통 조회의 필수 조건으로 추가해서는 안 되며(MUST NOT), 필요한 측정의 도입은 실제 정보 공백과 적용 범위에 근거해야 한다(SHALL). 별도 scene-understanding 패키지 분화는 실제 소비자·변경·검증 경계와 중복 감소로 판단해야 하며(SHALL), 이 요구는 새 저장소나 서비스의 생성을 요구하지 않는다.
+
+#### Scenario: Consumers share one supported scene snapshot
+- **WHEN** Collection 또는 Rollout이 현재 scene을 사용하거나 평가·Curation이 과거 실행을 분석한다
+- **THEN** 기존 owner의 revision·근거와 실행 결속을 보존하고, 현재 실행용 상태와 과거 분석용 snapshot을 구분한다
+- **AND** 분석 소비가 현재 scene이나 motion·semantic·training authority를 변경하지 않는다
+
+#### Scenario: A learned command chunk completes without placement evidence
+- **WHEN** 제어기는 명령 완료를 보고하지만 적용 가능한 물체 놓기 근거가 없다
+- **THEN** 완료된 로봇 동작은 기록하되 목표 물체 위치나 작업 성공을 만들어내지 않는다
+- **AND** 해당 물체 상태를 필요로 하지 않는 독립적인 적격 작업은 계속할 수 있다
+
 ### Requirement: Continuation preserves completed physical effects
 시스템은 검증된 실행의 위치 계보를 기존 scene owner에서 이어받아야 하며(SHALL), UI·분류·저장 실패만으로 완료된 놓기 동작을 재실행하거나 그 위치 증거를 폐기해서는 안 된다(MUST NOT). 새 동작은 현재 scene·cell·exact plan과 단일 motion owner의 조건을 계속 충족해야 한다(SHALL). 물리 상태를 알 수 없는 실패와 후처리 실패는 서로 다른 복구 대상을 가져야 한다(SHALL).
 
