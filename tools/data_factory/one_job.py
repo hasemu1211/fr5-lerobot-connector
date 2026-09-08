@@ -436,7 +436,16 @@ class OneJob:
                         or receipt.get("quality_accepted") is not False
                         or response["ok"] and (receipt.get("durable") is not True
                                                 or receipt.get("save_uncertain") is not False)
-                        or response["state"] != "QUARANTINED_COMMIT"):
+                        or response["state"] not in {"ABORTED", "QUARANTINED_COMMIT"}):
+                    raise ContractError("RECORDER_RETENTION_RESPONSE")
+                if response["state"] == "ABORTED":
+                    if (not response["ok"] or response["reason_code"] != "DIAGNOSTIC_RETAINED_RELEASED"
+                            or receipt.get("staging_state") != "RELEASED"
+                            or receipt.get("quarantined") is not False
+                            or receipt.get("partial") is not False):
+                        raise ContractError("RECORDER_RETENTION_RESPONSE")
+                elif (receipt.get("staging_state", "QUARANTINED") != "QUARANTINED"
+                        or receipt.get("quarantined") is not True):
                     raise ContractError("RECORDER_RETENTION_RESPONSE")
             if update_state:
                 self.recorder_state = response["state"]
@@ -500,7 +509,7 @@ class OneJob:
             preserve = getattr(self.recorder_call, "preserve", None)
             if callable(preserve):
                 preserve()
-        self.state = "QUARANTINED_COMMIT" if self.recorder_state == "QUARANTINED_COMMIT" else "BLOCKED"
+        self.state = self.recorder_state if self.recorder_state in {"ABORTED", "QUARANTINED_COMMIT"} else "BLOCKED"
         return self._result(False, code, **({"retention_error": error} if error else {}))
 
     def _abort(self, code):

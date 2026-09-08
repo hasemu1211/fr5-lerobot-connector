@@ -208,6 +208,7 @@ class Recorder:
                 **({"retention": {"schema_version": "data_factory.diagnostic_retention.v1",
                                   "transaction_id": "tx", "disposition": request["disposition"],
                                   "durable": True, "save_uncertain": False,
+                                  "partial": False, "quarantined": True, "staging_state": "QUARANTINED",
                                   "training_eligible": False, "quality_accepted": False}}
                    if op == "retain" else {})}
 
@@ -1937,33 +1938,47 @@ class FinitePlanTest(unittest.TestCase):
                 with native.prepare_inference():
                     check_runtime_source(p["runtime_inputs"])
 
-    def test_task_dispatch_rechecks_frozen_inputs_after_preparation_and_at_send(self):
-        for delayed_at in ("snapshot", "native_send"):
-            with self.subTest(delayed_at=delayed_at):
-                job, executor, transport, _, _, now, _ = self.make_job()
-                self.assertTrue(job.admit_task(task_grant(source(), SCENE, job._program["learned_proposal"]))["ok"])
-                original_snapshot, original_send = transport.snapshot, transport.start_phase
-                def snapshot_delay(*args):
-                    now[0] = 10.31
-                    return original_snapshot(*args)
-                def send_delay(step, **kwargs):
-                    now[0] = 10.31
-                    kwargs["dispatch_guard"]()
-                    return original_send(step, **kwargs)
-                if delayed_at == "snapshot":
-                    transport.snapshot = snapshot_delay
+    def test_task_dispatch_rechecks_current_state_after_snapshot_and_native_decode(self):
+        for failure in ("old_header", "slow_decode"):
+            with self.subTest(failure=failure):
+                job, executor, transport, _, now, sent, _, _ = self.make_held_job(max_observation_age_s=.3)
+                grant = task_grant(job._program["source_program"], job.scene_binding, job._program["learned_proposal"])
+                self.assertTrue(job.admit_task(grant)["ok"])
+                now[0] += 2.  # Frozen input timestamps stay at 10; current state is separate.
+                snapshot, decode = transport.snapshot, transport._compiled_execution_goal
+                def old_header(*args):
+                    value = snapshot(*args)
+                    value["joint_state_stamp_ns"] = 10_000_000_000
+                    return value
+                def slow_decode(step):
+                    value = decode(step)
+                    now[0] += 1.1
+                    return value
+                if failure == "old_header":
+                    transport.snapshot = old_header
                 else:
-                    transport.start_phase = send_delay
-                result = job.start()
-                self.assertEqual(result["code"], "LEARNED_STALE_OBSERVATION")
-                self.assertEqual(transport.sent, [])
-                self.assertTrue(executor.runs["run"]["cancel_event"].is_set())
+                    transport._compiled_execution_goal = slow_decode
+                with mock.patch('tools.data_factory.motion.moveit_transport.time.time', side_effect=lambda: now[0]):
+                    result = job.start()
+                self.assertEqual(result["code"], "LEARNED_STALE_STATE")
+                self.assertEqual(sent, [])
+                self.assertFalse(transport.owns_active_goal)
 
-    def test_task_admission_does_not_expire_inputs_of_an_already_started_chunk(self):
+    def test_task_plan_uses_current_state_after_recorder_preparation_and_across_segments(self):
+        from tools.data_factory.one_job import RECORDER_READINESS_CONTRACT
         job, executor, _, state, now, sent, _, calls = self.make_held_job(max_observation_age_s=.3)
         plan = copy.deepcopy(executor.runs["run"]["plan"])
         grant = task_grant(job._program["source_program"], job.scene_binding, plan["learned_proposal"])
         self.assertTrue(job.admit_task(grant)["ok"])
+        recorder_call = job.recorder_call
+        def prepare_recorder(request):
+            response = recorder_call(request)
+            if request["op"] == "begin":
+                # The native runner collects this prefix after plan admission.
+                now[0] += (RECORDER_READINESS_CONTRACT["min_durable_rows"]
+                           / RECORDER_READINESS_CONTRACT["target_fps"])
+            return response
+        job.recorder_call = prepare_recorder
         with mock.patch('tools.data_factory.motion.moveit_transport.time.time', side_effect=lambda: now[0]):
             self.assertTrue(job.start()["ok"])
             deadline = executor.runs["run"]["task_deadline"]
@@ -2806,9 +2821,9 @@ class FinitePlanTest(unittest.TestCase):
     def test_failed_learned_job_retains_native_payload_after_motion_stops(self):
         from tests.test_recorder_transaction import RecorderTransactionTest, dataset_snapshot
         from tools.fr5_lerobot_recorder import process_recorder_control_line
-        for fault in (None, "cancel_uncertain", "retention_response"):
+        for fault in (None, "cancel_uncertain", "retention_response", "release_claim"):
             with self.subTest(fault=fault), tempfile.TemporaryDirectory() as directory:
-                job, _, transport, _, _, _, calls = self.start_job()
+                job, _, transport, cell, _, _, calls = self.start_job()
                 self.assertTrue(job.confirm("operator")["ok"])
                 transport.poll_active = lambda: None  # Keep the goal active until cancel.
                 recorder = RecorderTransactionTest().retention_fixture(directory, run_id="run")
@@ -2823,7 +2838,11 @@ class FinitePlanTest(unittest.TestCase):
                         calls.append(("recorder", request["op"]))
                         if fault == "retention_response":
                             raise ContractError("JSONL_PROCESS_EXIT")
-                        return process_recorder_control_line(recorder, json.dumps(request), {})
+                        response = process_recorder_control_line(recorder, json.dumps(request), {})
+                        if fault == "release_claim":
+                            response = copy.deepcopy(response)
+                            response["retention"]["partial"] = True
+                        return response
 
                     def preserve(self):
                         preserved.append(True)
@@ -2852,22 +2871,39 @@ class FinitePlanTest(unittest.TestCase):
                     self.assertEqual(result["state"], "BLOCKED")
                 else:
                     self.assertLess(calls.index(("motion", "cancel")), calls.index(("recorder", "retain")))
-                    if fault == "retention_response":
+                    if fault in {"retention_response", "release_claim"}:
                         self.assertTrue(preserved)
                         self.assertIn("retention_error", result)
                         self.assertEqual(result["state"], "BLOCKED")
+                        if fault == "release_claim":
+                            self.assertEqual(result["retention_error"], "RECORDER_RETENTION_RESPONSE")
                     else:
                         receipt = result["recorder_evidence"]["retention"]
                         self.assertEqual(receipt["disposition"], "cancel")
                         self.assertEqual(receipt["rows"], 2)
                         self.assertTrue(receipt["durable"])
                         self.assertFalse(receipt["training_eligible"])
-                        self.assertEqual(result["state"], "QUARANTINED_COMMIT")
+                        # Releasing recorder staging is not permission to resume
+                        # motion or claim that this failed attempt succeeded.
+                        self.assertEqual(result["state"], "ABORTED")
+                        self.assertEqual(result["recorder_state"], "ABORTED")
+                        self.assertEqual(receipt["staging_state"], "RELEASED")
+                        self.assertFalse(receipt["quarantined"])
+                        self.assertFalse(cell.ready)
                         self.assertTrue(list(Path(receipt["destination"]).rglob("*.parquet")))
                         self.assertFalse(learned_run_diagnostic(result)["training_authorized"])
                         count = len(calls)
                         job.cancel()
                         self.assertEqual(len(calls), count)
+                        next_recorder = RecorderTransactionTest().make_recorder(directory)
+                        next_recorder.dataset = recorder.dataset
+                        begin = {"schema_version": "data_factory.recorder_command.v1", "op_id": "begin-next",
+                                 "op": "begin", "transaction": {
+                                     **RecorderTransactionTest().transaction(directory), "run_id": "next-run"}}
+                        started = process_recorder_control_line(next_recorder, json.dumps(begin), {})
+                        self.assertTrue(started["ok"], started)
+                        self.assertTrue(next_recorder.abort_episode()["ok"])
+                        self.assertEqual(dataset_snapshot(recorder.args.root), before)
                 recorder._release_transaction_lock()
 
     def test_recursive_executor_command_during_send_cannot_dispatch_again(self):

@@ -677,7 +677,8 @@ requirements; original input timestamps SHALL NOT be silently refreshed.
 ### Requirement: Frozen approval and current execution evidence have distinct freshness
 
 A finite proposal SHALL retain its original observation timestamps and prove its
-input-age bound at inference and plan admission. After approval, the sole
+input-age bound at inference and plan admission. After exact-plan admission,
+whether by explicit human approval or a valid bounded task grant, the sole
 executor SHALL admit the current state against the unchanged exact plan rather
 than extend the input-age budget or renew historical image timestamps. Existing
 approval expiry, human/scene/cell/precontact checks, lease and cancellation
@@ -704,6 +705,12 @@ are execution diagnostics, not physical task-effect or semantic success claims.
 - **WHEN** a still-valid exact-plan approval is used after the original inference input-age budget has elapsed
 - **THEN** fresh matching state from the bound incarnation/generation may pass existing execution admission
 - **AND** full model output and original inference timestamps remain unchanged in the canonical evidence
+
+#### Scenario: Recorder preparation precedes a scoped task's first dispatch
+
+- **WHEN** the normal recorder readiness prefix is collected after exact-plan admission under a still-valid bounded task grant
+- **THEN** the sole executor checks current robot, controller, hardware, Scene and Cell evidence before dispatch without reinterpreting frozen inference timestamps as current execution samples
+- **AND** original inference and plan-admission age checks, task deadline, cancellation and per-output admission remain unchanged
 
 #### Scenario: Fresh delivery cannot disguise stale state or another command
 
@@ -1166,6 +1173,13 @@ Durable acknowledgement, partial/corrupt evidence, storage failure and uncertain
 save outcomes SHALL remain explicit and retry-safe; retention SHALL NOT promote
 technical validity, semantic PASS or training approval. Safe stopping precedes
 encoding, and mechanical phases remain outside learned demonstration rows.
+Only the live recorder owner MAY release its exact staging and transaction guard
+after verifying complete durable diagnostic publication against the settled
+source rows/provenance and existing transaction ownership/snapshot contract.
+Normal recording startup SHALL NOT reread historical video/data payload bodies
+for this cleanup. Partial, uncertain or orphan-quarantined transactions remain
+unresolved; an archive receipt alone SHALL NOT authorize orphan cleanup. Released
+recorder staging SHALL NOT clear the robot Cell or assert object continuity.
 Canonical diagnostics and the original-lifecycle Collection consumer SHALL
 support both successful and failed retained attempts without losing original
 policy, plan or condition lineage.

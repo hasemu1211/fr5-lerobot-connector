@@ -1396,12 +1396,9 @@ class PickupExecutor:
             raise ContractError("PRECONTACT_TIMEOUT")
         if now >= run["execution"].get("reference_deadline", math.inf):
             raise ContractError("LEARNED_REFERENCE_TIMEOUT")
-        if "task_grant" in run and execution.get("learned_segment_index", 0) == 0:
-            from tools.data_factory.rollout.finite_plan import check_freshness
-            # Admit each new output against its original inputs at first send.
-            # Later slices retain that output; current state, scene, command and
-            # deadline checks still apply to every slice, without aging images anew.
-            check_freshness(run["plan"]["learned_proposal"], self.source_clock())
+        # Original policy inputs were checked at inference and plan admission.
+        # Recorder preparation and command duration do not renew those inputs or
+        # invalidate the admitted plan. The native send checks current state.
 
     @staticmethod
     def _learned_dispatch_deadlines(run):
