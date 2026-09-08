@@ -86,6 +86,60 @@ class Executor:
 
 
 class RunJobTest(unittest.TestCase):
+    def test_learned_preapproval_retains_exact_original_resolver_inputs(self):
+        validated = runtime_validated(job={**JOB, "x_mm": 12.0, "y_mm": -8.0, "yaw_deg": 25.0})
+        original = copy.deepcopy(validated)
+        for mismatch in (None, "source", "plan"):
+            with self.subTest(mismatch=mismatch), tempfile.TemporaryDirectory() as directory:
+                request = {"run_root": directory, "run_id": "run-1"}
+                root = run_job._prepare_run_dir(request)
+                resolved = copy.deepcopy(original)
+                plan = {"learned_proposal": {},
+                        "resolved_job_digest": resolved["resolved_job_digest"]}
+                if mismatch == "source":
+                    resolved["normalized_job"]["x_mm"] += 1
+                elif mismatch == "plan":
+                    plan["resolved_job_digest"] = run_job.canonical_digest("other-source")
+                digest = run_job.canonical_digest(plan)
+                safety = {
+                    "schema_version": "data_factory.precommit_safety.v1",
+                    "run_id": "run-1", "approved_plan_digest": digest,
+                    "scene_binding_digest": run_job.canonical_digest(SCENE),
+                    "expected_planning_scene_digest": run_job.canonical_digest("scene"),
+                    "post_reset_safe_snapshot_digest": None, "status": "PENDING",
+                }
+                precommit = {
+                    "schema_version": "data_factory.precommit_evidence.v1",
+                    **{key: safety[key] for key in (
+                        "run_id", "approved_plan_digest", "scene_binding_digest",
+                        "expected_planning_scene_digest",
+                    )},
+                }
+                for name in ("planning_scene_readback", "collision_report", "plan_only_no_motion"):
+                    precommit[name] = {"fixture": name}
+                    safety[name + "_digest"] = run_job.canonical_digest(precommit[name])
+                planned = {"plan_digest": digest, "plan_envelope": {
+                    "plan": plan, "precommit_safety": safety,
+                    "precommit_evidence": precommit, "operator_summary": {},
+                }}
+                if mismatch:
+                    with self.assertRaisesRegex(run_job.ContractError, "PREAPPROVAL_RESOLVED_INPUTS"):
+                        run_job._write_preapproval_evidence(request, resolved, planned, None)
+                    self.assertEqual(list(root.iterdir()), [])
+                    continue
+                evidence = run_job._write_preapproval_evidence(request, resolved, planned, None)
+                receipt = {key: original[key] for key in (
+                    "normalized_job", "input_digests", "resolved_job_digest",
+                )}
+                self.assertEqual(evidence["resolved_inputs"], receipt)
+                self.assertEqual(evidence["plan_envelope"]["plan"], plan)
+                self.assertIsNone(evidence["trajectory_variant_binding"])
+                # A later in-memory/current-position update cannot rewrite the
+                # original condition retained before approval and execution.
+                resolved["normalized_job"]["x_mm"] += 2
+                self.assertEqual(evidence["resolved_inputs"], receipt)
+                self.assertEqual(run_job.load_json_strict(root / "preapproval_evidence.json"), evidence)
+
     def test_learned_terminal_retains_original_result_for_diagnostic_consumer(self):
         result = {"run_id": "run-1", "execution_evidence": {"learned_execution": {}}}
         diagnostic = {"lifecycle_result_digest": run_job.canonical_digest(result)}
@@ -472,6 +526,7 @@ class RunJobTest(unittest.TestCase):
                 / "preapproval_evidence.json",
             )
         self.assertEqual(stored, evidence)
+        self.assertNotIn("resolved_inputs", stored)
         self.assertEqual(
             stored["yaw_sample_binding"]["schema_version"],
             YAW_BINDING_SCHEMA,

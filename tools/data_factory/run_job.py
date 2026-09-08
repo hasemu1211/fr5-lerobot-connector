@@ -1599,6 +1599,22 @@ def _write_preapproval_evidence(
             else checked_yaw_sample["binding_digest"]
         ),
     }
+    if "learned_proposal" in plan:
+        # Retain the original resolved condition before execution can change
+        # SceneStateStore. This is historical input, not current pose authority.
+        resolved = {key: copy.deepcopy(validated.get(key)) for key in (
+            "normalized_job", "input_digests", "resolved_job_digest",
+        )}
+        if (
+            not isinstance(resolved["normalized_job"], Mapping)
+            or not isinstance(resolved["input_digests"], Mapping)
+            or canonical_digest({"job": resolved["normalized_job"],
+                                 "input_digests": resolved["input_digests"]})
+            != resolved["resolved_job_digest"]
+            or plan.get("resolved_job_digest") != resolved["resolved_job_digest"]
+        ):
+            raise ContractError("PREAPPROVAL_RESOLVED_INPUTS")
+        evidence["resolved_inputs"] = resolved
     if episode_instruction_binding is not None:
         checked_instruction = validate_episode_instruction_binding(
             episode_instruction_binding,
