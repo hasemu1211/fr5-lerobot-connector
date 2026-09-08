@@ -693,7 +693,263 @@ def _uniform_polygon_point(
 267:             )
 268:             self.assertEqual(descend[&quot;target&quot;][frame][&quot;rotation_columns&quot;], yaw_90)
 269:         self.assertEqual(compiled[&quot;steps&quot;][3:], source[&quot;steps&quot;][3:])
-270: </pre></section><section id="position-distribution"><h2>작업영역의 형상을 반영한 위치 생성</h2><p>고정 main 6a156ec의 순수 함수 safe_convex_polygon과 stratified_convex_polygon_samples를 직접 실행했다. 현재 A/B 작업영역과 같은 [-133.5,133.5] × [-85,85] mm 직사각형, 기존 회귀 검사에 사용된 기울어진 사각형을 같은 mm 축척으로 비교한다. 물체 24 × 24 mm, 여유 4 mm, 5 × 3 분할과 seed 17을 공통으로 사용했다.</p><p>각 회전각·폴리곤에 대해 회전한 물체의 네 모서리와 원래 폴리곤 모든 변의 부호 있는 수직거리를 계산했다. 표시한 모든 배치가 4 mm 이상의 여유를 유지하고, 한 칸에 하나의 중심만 생성됨을 확인했다. 실제 실행은 별도의 등록 영역·보정·장면과 동작 계획 검사를 소비한다.</p><p>이 계산은 표시한 입력에 대한 결과이다. 조사 중 물체보다 작은 영역에서 빈 허용 집합을 판정하지 못하는 반례를 발견해 main에 전달했다. main 0dd7e0b는 계산된 모든 정점이 안쪽으로 이동한 모든 경계 조건을 만족하는지 검사하도록 수정했다. 기존 회귀에는 20 × 20 mm 영역·24 mm 물체·여유 5 mm의 반례와 회전한 같은 영역의 거부가 추가됐다. 위 그림과 수치는 수정 전 6a156ec에서 확인한 유효한 입력의 결과이며, 원래 계산 출처를 유지한다. <a href="#empty-domain-correction">교정 코드와 회귀</a>. 현재 A/B 영역의 24 mm 물체·여유 4 mm는 모든 yaw의 최악 반폭을 적용해도 양의 배치 영역을 유지한다.</p><p class="locator">6a156ec:tools/data_factory/workspace_geometry.py<br>sha256:3c57f4af3a9ae0a973ca15a38b9933d36ec082c3f72112a10d67cb7206f922f7</p><pre>{
+270: </pre></section><section id="position-distribution"><h2>회전한 물체 외곽과 중심 허용 영역</h2><p>길쭉한 물체를 사용해 각도에 따른 차이가 드러나도록 만든 설명용 예시이다. 같은 볼록 작업영역,80 × 24 mm 외곽과8 mm 경계 여유에서0°·45°·90°를 비교한다. main의 safe_convex_polygon과 stratified_convex_polygon_samples를 직접 실행했다.</p><p>각도별3 × 2개 위치 칸에서6개 중심을 생성하고, 그림에는 Y가 가장 낮은 배치와 가장 높은 배치를 표시했다. 회전한 모든 물체 모서리와 모든 경계 변 사이의 거리를 별도로 계산해18개 배치 모두8 mm 이상임을 확인했다. 둥근 모서리와 끝단 색은 방향을 읽기 위한 벡터 표현이며 계산은 직사각형 외곽을 사용한다.</p><p class="locator">5ccc60b447c56bac636083dc2f1e8fe9bd3a8ac9:tools/data_factory/workspace_geometry.py<br>sha256:60c638929640da2ebee4f3851f06303140a4c50266b7d78ea4155a40d33e5ea0</p><pre>{
+  &quot;source&quot;: &quot;5ccc60b447c56bac636083dc2f1e8fe9bd3a8ac9:tools/data_factory/workspace_geometry.py&quot;,
+  &quot;sha256&quot;: &quot;60c638929640da2ebee4f3851f06303140a4c50266b7d78ea4155a40d33e5ea0&quot;,
+  &quot;illustrative&quot;: true,
+  &quot;parameters&quot;: {
+    &quot;polygon_mm&quot;: [
+      [
+        0,
+        0
+      ],
+      [
+        240,
+        20
+      ],
+      [
+        210,
+        190
+      ],
+      [
+        15,
+        160
+      ]
+    ],
+    &quot;object_size_xy_mm&quot;: [
+      80,
+      24
+    ],
+    &quot;margin_mm&quot;: 8,
+    &quot;columns&quot;: 3,
+    &quot;rows&quot;: 2,
+    &quot;seed&quot;: 17
+  },
+  &quot;results&quot;: [
+    {
+      &quot;yaw_deg&quot;: 0,
+      &quot;center_polygon_mm&quot;: [
+        [
+          51.75451111928806,
+          27.673938979135542
+        ],
+        [
+          186.42408109155704,
+          38.896403143491284
+        ],
+        [
+          165.59626589577732,
+          156.9206892529098
+        ],
+        [
+          62.38273729494233,
+          141.04168485278134
+        ]
+      ],
+      &quot;all_samples_xy_row_column&quot;: [
+        [
+          57.0779619583747,
+          28.329743314956048,
+          0,
+          0
+        ],
+        [
+          180.04710899423196,
+          63.513128670433616,
+          0,
+          2
+        ],
+        [
+          69.5779340264568,
+          126.91954947211384,
+          1,
+          0
+        ],
+        [
+          161.39947428483487,
+          144.6360502557149,
+          1,
+          2
+        ],
+        [
+          101.85475158649163,
+          37.13249225059714,
+          0,
+          1
+        ],
+        [
+          123.92480934709309,
+          131.3460557359988,
+          1,
+          1
+        ]
+      ],
+      &quot;shown_samples&quot;: [
+        [
+          57.0779619583747,
+          28.329743314956048,
+          0,
+          0
+        ],
+        [
+          161.39947428483487,
+          144.6360502557149,
+          1,
+          2
+        ]
+      ],
+      &quot;minimum_corner_clearance_mm&quot;: 8.211450499690788
+    },
+    {
+      &quot;yaw_deg&quot;: 45,
+      &quot;center_polygon_mm&quot;: [
+        [
+          47.363570164060995,
+          47.09433069846514
+        ],
+        [
+          184.81026807211506,
+          58.54822219080299
+        ],
+        [
+          170.07638430351062,
+          142.04023021289495
+        ],
+        [
+          54.59921210607578,
+          124.2745114132896
+        ]
+      ],
+      &quot;all_samples_xy_row_column&quot;: [
+        [
+          53.505685447100745,
+          47.75715216319341,
+          0,
+          0
+        ],
+        [
+          179.72683290905172,
+          74.54226641568746,
+          0,
+          2
+        ],
+        [
+          162.51983036179848,
+          132.20654479832905,
+          1,
+          2
+        ],
+        [
+          66.14090419029804,
+          116.36710211076577,
+          1,
+          0
+        ],
+        [
+          101.85475158649163,
+          55.30977710783317,
+          0,
+          1
+        ],
+        [
+          123.92480934709309,
+          121.89654956699025,
+          1,
+          1
+        ]
+      ],
+      &quot;shown_samples&quot;: [
+        [
+          53.505685447100745,
+          47.75715216319341,
+          0,
+          0
+        ],
+        [
+          162.51983036179848,
+          132.20654479832905,
+          1,
+          2
+        ]
+      ],
+      &quot;minimum_corner_clearance_mm&quot;: 8.15045700815159
+    },
+    {
+      &quot;yaw_deg&quot;: 90,
+      &quot;center_polygon_mm&quot;: [
+        [
+          28.60490482007546,
+          51.411471787534495
+        ],
+        [
+          204.6849506567744,
+          66.08480894059274
+        ],
+        [
+          192.11608968432355,
+          137.3083544511477
+        ],
+        [
+          34.38273729494233,
+          113.04168485278134
+        ]
+      ],
+      &quot;all_samples_xy_row_column&quot;: [
+        [
+          38.26788079153725,
+          52.3540924963511,
+          0,
+          0
+        ],
+        [
+          197.57631221700197,
+          78.77200480236658,
+          0,
+          2
+        ],
+        [
+          168.0313627836332,
+          126.48017307020524,
+          1,
+          2
+        ],
+        [
+          56.19695763736848,
+          110.43011743051791,
+          1,
+          0
+        ],
+        [
+          101.85475158649163,
+          60.71195024015506,
+          0,
+          1
+        ],
+        [
+          123.92480934709309,
+          116.96681321422258,
+          1,
+          1
+        ]
+      ],
+      &quot;shown_samples&quot;: [
+        [
+          38.26788079153725,
+          52.3540924963511,
+          0,
+          0
+        ],
+        [
+          168.0313627836332,
+          126.48017307020524,
+          1,
+          2
+        ]
+      ],
+      &quot;minimum_corner_clearance_mm&quot;: 8.136898192639777
+    }
+  ]
+}</pre><details><summary>이전24 mm 물체·두 작업영역의 계산</summary><section id="position-distribution-archive"><h2>작업영역의 형상을 반영한 위치 생성</h2><p>고정 main 6a156ec의 순수 함수 safe_convex_polygon과 stratified_convex_polygon_samples를 직접 실행했다. 현재 A/B 작업영역과 같은 [-133.5,133.5] × [-85,85] mm 직사각형, 기존 회귀 검사에 사용된 기울어진 사각형을 같은 mm 축척으로 비교한다. 물체 24 × 24 mm, 여유 4 mm, 5 × 3 분할과 seed 17을 공통으로 사용했다.</p><p>각 회전각·폴리곤에 대해 회전한 물체의 네 모서리와 원래 폴리곤 모든 변의 부호 있는 수직거리를 계산했다. 표시한 모든 배치가 4 mm 이상의 여유를 유지하고, 한 칸에 하나의 중심만 생성됨을 확인했다. 실제 실행은 별도의 등록 영역·보정·장면과 동작 계획 검사를 소비한다.</p><p>이 계산은 표시한 입력에 대한 결과이다. 조사 중 물체보다 작은 영역에서 빈 허용 집합을 판정하지 못하는 반례를 발견해 main에 전달했다. main 0dd7e0b는 계산된 모든 정점이 안쪽으로 이동한 모든 경계 조건을 만족하는지 검사하도록 수정했다. 기존 회귀에는 20 × 20 mm 영역·24 mm 물체·여유 5 mm의 반례와 회전한 같은 영역의 거부가 추가됐다. 이전 그림과 수치는 수정 전 6a156ec에서 확인한 유효한 입력의 결과이며, 원래 계산 출처를 유지한다. <a href="#empty-domain-correction">교정 코드와 회귀</a>. 현재 A/B 영역의 24 mm 물체·여유 4 mm는 모든 yaw의 최악 반폭을 적용해도 양의 배치 영역을 유지한다.</p><p class="locator">6a156ec:tools/data_factory/workspace_geometry.py<br>sha256:3c57f4af3a9ae0a973ca15a38b9933d36ec082c3f72112a10d67cb7206f922f7</p><pre>{
   &quot;source&quot;: &quot;6a156ec:tools/data_factory/workspace_geometry.py&quot;,
   &quot;sha256&quot;: &quot;3c57f4af3a9ae0a973ca15a38b9933d36ec082c3f72112a10d67cb7206f922f7&quot;,
   &quot;parameters&quot;: {
@@ -1398,7 +1654,7 @@ def _uniform_polygon_point(
       &quot;minimum_corner_edge_clearance_mm&quot;: 4.000378417473627
     }
   ]
-}</pre></section><section id="empty-domain-correction"><h2>작은 영역의 빈 허용 집합 교정</h2><p>Portfolio 조사에서 전달한 20 × 20 mm 영역·24 mm 물체·5 mm 여유의 반례는 main 0dd7e0b에서 교정했다. 인접 경계선 교점으로 만들어진 정점 전부가 모든 안쪽 반평면 조건을 만족해야 유효한 결과로 반환한다. 기존 회귀는 원래 반례와 회전한 반례를 거부하고, 다른 유효 영역의 물체 외곽을 확인한다. 위 도해의6a156ec 계산값과 해당 원본 식별은 그대로 유지한다.</p><h3>tools/data_factory/workspace_geometry.py:168</h3><p class="locator">main dee2d6f · sha256:60c638929640da2ebee4f3851f06303140a4c50266b7d78ea4155a40d33e5ea0</p><pre>168:         delta = (
+}</pre></section></details></section><section id="empty-domain-correction"><h2>작은 영역의 빈 허용 집합 교정</h2><p>Portfolio 조사에서 전달한 20 × 20 mm 영역·24 mm 물체·5 mm 여유의 반례는 main 0dd7e0b에서 교정했다. 인접 경계선 교점으로 만들어진 정점 전부가 모든 안쪽 반평면 조건을 만족해야 유효한 결과로 반환한다. 기존 회귀는 원래 반례와 회전한 반례를 거부하고, 다른 유효 영역의 물체 외곽을 확인한다. 이전24 mm 물체 예시의6a156ec 계산값과 원본 식별은 위 접힌 자료에 유지한다.</p><h3>tools/data_factory/workspace_geometry.py:168</h3><p class="locator">main dee2d6f · sha256:60c638929640da2ebee4f3851f06303140a4c50266b7d78ea4155a40d33e5ea0</p><pre>168:         delta = (
 169:             point[0] - previous_point[0], point[1] - previous_point[1],
 170:         )
 171:         distance = cross(delta, direction) / denominator

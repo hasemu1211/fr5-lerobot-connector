@@ -23,23 +23,7 @@ document.querySelectorAll('[data-screen]').forEach(button => button.addEventList
   }
 }));
 
-function showWorkspace(yaw) {
-  if (!['0', '45', '90'].includes(yaw)) yaw = '0';
-  for (const choice of document.querySelectorAll('[data-yaw]'))
-    choice.setAttribute('aria-pressed', String(choice.dataset.yaw === yaw));
-  for (const image of document.querySelectorAll('[data-workspace-yaw]'))
-    image.hidden = image.dataset.workspaceYaw !== yaw;
-  for (const link of document.querySelectorAll('[data-workspace-source]'))
-    link.setAttribute('href', `sources/collection-catalog.html?view=workspace&yaw=${yaw}#${link.dataset.workspaceSource}`);
-}
-showWorkspace(new URLSearchParams(location.search).get('yaw'));
-if (location.hash === '#all-angle-condition')
+if (location.hash === '#all-angle-condition') {
   document.getElementById('workspace-calculation').open = true;
-if (location.hash === '#all-angle-condition')
   document.getElementById('all-angle-condition').open = true;
-for (const button of document.querySelectorAll('[data-yaw]')) {
-  button.addEventListener('click', () => {
-    showWorkspace(button.dataset.yaw);
-    history.replaceState(null, '', `?yaw=${button.dataset.yaw}#workspace`);
-  });
 }
