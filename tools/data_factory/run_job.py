@@ -2530,6 +2530,13 @@ def learned_run_diagnostic(result, *, payload=None):
         return None
     from tools.data_factory.rollout.evidence_boundary import build_run_diagnostic
     diagnostic = build_run_diagnostic(result)
+    if "mechanical_terminal" in evidence:
+        from tools.data_factory.motion.mechanical_terminal import validate_terminal_evidence
+        diagnostic["mechanical_terminal"] = validate_terminal_evidence(evidence["mechanical_terminal"],result["plan_envelope"]["plan"])
+        diagnostic["diagnostic_digest"] = canonical_digest({k:v for k,v in diagnostic.items() if k!="diagnostic_digest"})
+    elif "mechanical_contact_diagnostic" in evidence:
+        diagnostic["mechanical_contact_diagnostic"] = copy.deepcopy(evidence["mechanical_contact_diagnostic"])
+        diagnostic["diagnostic_digest"] = canonical_digest({k:v for k,v in diagnostic.items() if k!="diagnostic_digest"})
     if payload is not None:
         if result.get("run_id") != payload["run_id"]:
             raise ContractError("LEARNED_RESULT_RUN")
@@ -4674,6 +4681,8 @@ def run_live(payload, cancel, publish, *, resolver=resolve_inputs, executor_fact
                         run_id=payload["run_id"], plan_digest=job.plan_digest,
                         data={**learned_run_diagnostic(boundary, payload=payload),
                               "task_handoff": boundary.get("task_handoff")})
+                if boundary["code"] == "MECHANICAL_TERMINAL_STARTED":
+                    continue
                 def observe_task_boundary():
                     captured = job.observe_learned_boundary(inputs["camera_topics"])
                     if not captured["ok"]:

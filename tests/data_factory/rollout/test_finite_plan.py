@@ -476,7 +476,7 @@ class FinitePlanTest(unittest.TestCase):
             self.assertEqual(plan["learned_proposal"]["runtime_inputs"][hardware_key], str(binding_path))
             self.assertEqual(result["data"]["task_effectiveness"], "UNKNOWN")
 
-    def make_held_job(self, initial_feedback=.021, *, controller_samples=True, arm_target=.001, recorded=None, quantize_gripper=False, max_observation_age_s=5.):
+    def make_held_job(self, initial_feedback=.021, *, controller_samples=True, arm_target=.001, recorded=None, quantize_gripper=False, max_observation_age_s=5., mechanical=False):
         # Reuse this file's lifecycle fixtures with the actual ROS serializers,
         # action dispatch, polling and cancellation; no ROS node is constructed.
         from builtin_interfaces.msg import Duration
@@ -595,6 +595,8 @@ class FinitePlanTest(unittest.TestCase):
         for step in src["steps"]:
             if step["phase"] == "GRIPPER_OPEN":
                 step["gripper_position_m"] = .021
+                if mechanical:
+                    step.update(release_position_m=.0126, release_hold_s=.5)
             if step["phase"] == "GRIPPER_CLOSE":
                 step["gripper_position_m"] = .01176
                 step["limits"]["completion_tolerance_m"] = .01218 - .01176
@@ -610,7 +612,7 @@ class FinitePlanTest(unittest.TestCase):
         job = OneJob(Recorder(calls), executor.process)
         inference = FinitePolicyInference(lambda _: actions, checkpoint if recorded is not None else CHECKPOINT, source_clock=lambda: now[0])
         planned = job.plan_learned("run", src, SCENE, inference, obs, **{**OPTIONS, "robot_description": xml, "period_s": 1 / 30,
-                                  "held_gripper_targets": recorded is None, "serialized_references": recorded is not None,
+                                  "held_gripper_targets": recorded is None and not mechanical, "serialized_references": recorded is not None or mechanical,
                                   "quantize_gripper": quantize_gripper, "max_observation_age_s": max_observation_age_s})
         self.assertTrue(planned["ok"], planned)
         return job, executor, t, state, now, sent, handles, calls
@@ -2123,6 +2125,167 @@ class FinitePlanTest(unittest.TestCase):
                 self.assertFalse(result["ok"])
                 self.assertEqual(len(transport.sent), 1)
                 self.assertNotIn(("recorder", "commit"), calls)
+
+    def test_native_mechanical_terminal_same_owner_stages_and_retains(self):
+        self._native_mechanical_terminal_case()
+
+    def test_native_mechanical_terminal_rejection_boundaries(self):
+        for failure in ("stale_contact","dark","scope","scene","revoke","partial_feedback","incarnation"):
+            with self.subTest(failure=failure):
+                self._native_mechanical_terminal_case(failure)
+
+    def _native_mechanical_terminal_case(self, failure=None):
+        """Explicit simulated contact/FK services; never a live qualification."""
+        from moveit_msgs import msg, srv
+        from geometry_msgs.msg import Pose, PoseStamped
+        from sensor_msgs.msg import JointState
+        from shape_msgs.msg import SolidPrimitive
+        from trajectory_msgs.msg import JointTrajectoryPoint
+        from rclpy.serialization import serialize_message
+        job, executor, transport, state, now, sent, _, calls = self.make_held_job(mechanical=True)
+        for name in ("CollisionObject", "PlanningScene", "PlanningSceneComponents", "RobotState"):
+            setattr(transport, "_"+name, getattr(msg,name))
+        for name in ("ApplyPlanningScene", "GetPlanningScene", "GetStateValidity"):
+            setattr(transport, "_"+name, getattr(srv,name))
+        transport._Pose, transport._SolidPrimitive, transport._JointState = Pose, SolidPrimitive, JointState
+        world, attached, services, starts = {}, [], [], []
+        def service(kind, endpoint, request, code):
+            services.append(endpoint)
+            if kind is srv.ApplyPlanningScene:
+                for obj in request.scene.world.collision_objects:
+                    if obj.operation == obj.REMOVE:
+                        world.pop(obj.id,None)
+                    else:
+                        world[obj.id] = copy.deepcopy(obj)
+                for obj in request.scene.robot_state.attached_collision_objects:
+                    attached[:] = [] if obj.object.operation == obj.object.REMOVE else [copy.deepcopy(obj)]
+                return SimpleNamespace(success=True)
+            if kind is srv.GetPlanningScene:
+                scene=msg.PlanningScene()
+                scene.world.collision_objects=[] if failure=="scene" else list(world.values())
+                scene.robot_state.attached_collision_objects=attached[:]
+                return SimpleNamespace(scene=scene)
+            if kind is srv.GetStateValidity:
+                self.assertTrue(request.robot_state.is_diff)
+                self.assertEqual(request.group_name,"")
+                self.assertEqual(len(attached),0 if "cube-1" in world else 1)
+                return SimpleNamespace(valid=True)
+            if kind is srv.GetPositionFK:
+                pose=PoseStamped()
+                pose.header.frame_id=request.header.frame_id
+                pose.pose.orientation.w=1.
+                pose.pose.position.z=.3
+                return SimpleNamespace(error_code=SimpleNamespace(val=1),fk_link_names=request.fk_link_names,pose_stamped=[pose])
+            self.fail(endpoint)
+        transport._service=service
+        def plan_arm(phase,target,joints,limits,frames,planning,start):
+            starts.append(start[:])
+            trajectory=msg.RobotTrajectory()
+            trajectory.joint_trajectory.joint_names=JOINTS[:6]
+            point=JointTrajectoryPoint(positions=list(joints or start))
+            point.time_from_start.nanosec=100000000
+            trajectory.joint_trajectory.points=[point]
+            return {"terminal_status":"SUCCEEDED","moveit_success":True,
+                    "serialized_trajectory":serialize_message(trajectory),"final_joint_state":list(joints or start)}
+        transport.plan_arm=plan_arm
+        def simulated_contact(plan,scene,snapshot):
+            context={"status":"AVAILABLE","semantics":"MODEL_BASED_EXPECTATION","physical_success":False,
+                "source_program_digest":canonical_digest(plan["learned_source_program"]),
+                "snapshot_digest":canonical_digest(snapshot),"scene_binding":copy.deepcopy(plan["scene_binding"]),
+                "qualification_source_digest":plan["binding_digests"]["motion_qualification"],"valid_until_s":90.,
+                "illumination":{"kind":"CURRENT_REQUIRED_ILLUMINATION","brightness_mean":100.},
+                "carried_object":{"object_id":"cube-1","link_name":"gripper_link",
+                    "touch_links":["finger_tip_right_link","finger_tip_left_link"],"dimensions_m":[.024]*3,
+                    "translation_m":[0.,0.,.1],"rotation_xyzw":[0.,0.,0.,1.]}}
+            if failure=="stale_contact": context["valid_until_s"]=now[0]-.1
+            if failure=="dark": context["illumination"]["brightness_mean"]=0.
+            if failure=="scope": context["source_program_digest"]=canonical_digest("foreign")
+            return context
+        transport.mechanical_contact_context=simulated_contact
+        original=copy.deepcopy(executor.runs["run"]["plan"])
+        grant=task_grant(job._program["source_program"],SCENE,original["learned_proposal"],max_outputs=1,terminal_reserve_s=30.)
+        self.assertTrue(job.admit_task(grant)["ok"])
+        with mock.patch('tools.data_factory.motion.moveit_transport.time.time',side_effect=lambda:now[0]):
+            self.assertTrue(job.start()["ok"])
+            deadline=executor.runs["run"]["task_deadline"]
+            def complete_goal():
+                goal=sent[-1]
+                if hasattr(goal,"trajectory") and hasattr(goal.trajectory,"joint_trajectory"):
+                    point=goal.trajectory.joint_trajectory.points[-1]
+                    state["joints"]=list(point.positions)
+                else:
+                    point=goal.trajectory.points[-1]
+                    value=point.positions[0]
+                    state.update(reference=value,feedback=value)
+                duration=point.time_from_start.sec+point.time_from_start.nanosec/1e9+.002
+                while duration>.2:
+                    now[0]=round(now[0]+.2,9)
+                    duration-=.2
+                    self.assertTrue(job.poll()["ok"])
+                now[0]=round(now[0]+duration,9)
+                state["complete"]=True
+                return job.poll()
+            while job.state != "LEARNED_CHUNK_COMPLETE":
+                completed=complete_goal()
+                self.assertTrue(completed["ok"],completed["code"])
+            learned_count=len(sent)
+            if failure=="revoke":
+                recorder=job.recorder_call
+                def revoke_on_freeze(request):
+                    result=recorder(request)
+                    if request["op"]=="freeze":
+                        executor.runs["run"]["task_revoked"]=True
+                    return result
+                job.recorder_call=revoke_on_freeze
+            result=job.task_boundary()
+            if failure in {"stale_contact","dark","scope","scene","revoke"}:
+                self.assertFalse(result["ok"])
+                self.assertEqual(len(sent),learned_count)
+                self.assertIn(("recorder","retain"),calls)
+                self.assertNotIn(("recorder","commit"),calls)
+                if failure in {"stale_contact","dark","scope"}: self.assertEqual(services,[])
+                return
+            self.assertEqual(result["code"],"MECHANICAL_TERMINAL_STARTED",result)
+            self.assertEqual(job.recorder_state,"FROZEN")
+            self.assertEqual(starts[0],[.001]*6)
+            for index in range(6):
+                if failure=="incarnation" and index==0:
+                    state["hardware_override"]["incarnation_0"]=99.
+                if failure=="partial_feedback" and index==2:
+                    # Complete the partial command with incorrect measured feedback.
+                    original_poll=job.poll
+                    def bad_feedback():
+                        state["feedback"]=.016
+                        return original_poll()
+                    job.poll=bad_feedback
+                result=complete_goal()
+                if failure=="incarnation" and index==0 or failure=="partial_feedback" and index==2:
+                    self.assertFalse(result["ok"])
+                    self.assertEqual(len(sent)-learned_count,index+1)
+                    self.assertIn(("recorder","retain"),calls)
+                    self.assertNotIn(("recorder","commit"),calls)
+                    return
+                if index < 5:
+                    self.assertTrue(result["ok"],(index,result["code"]))
+            terminal=result["execution_evidence"]["mechanical_terminal"]
+            self.assertEqual(terminal["status"],"COMPLETED",(result["code"],terminal.get("failure_code")))
+            self.assertEqual(terminal["terminal_phases"],["RECYCLE_APPROACH_PTP","LOWER_LIN","GRIPPER_OPEN","RETREAT_LIN","SAFE_POSE_PTP"])
+            self.assertEqual(len(sent)-learned_count,6)
+            self.assertEqual([sent[learned_count+i].trajectory.points[-1].positions[0] for i in (2,3)],[.0126,.021])
+            self.assertEqual(executor.runs["run"]["plan"],original)
+            self.assertEqual(executor.runs["run"]["task_deadline"],deadline)
+            self.assertEqual(terminal["plan"]["grant_digest"],grant["grant_digest"])
+            self.assertEqual(result["execution_evidence"]["learned_execution"]["terminal_phases"],["LEARNED_CHUNK"])
+            self.assertEqual(terminal["release_readback"]["physical_landing"],"NOT_OBSERVED")
+            self.assertIn(("recorder","retain"),calls)
+            self.assertNotIn(("recorder","commit"),calls)
+            self.assertEqual(attached,[])
+            self.assertIn("cube-1",world)
+            self.assertIn("/compute_fk",services)
+            diagnostic=learned_run_diagnostic(result)
+            self.assertEqual(diagnostic["mechanical_terminal"],terminal)
+            self.assertEqual(diagnostic["task_effectiveness"],"UNKNOWN")
+            self.assertFalse(diagnostic["training_authorized"])
 
     def test_task_grant_rejects_illegal_expired_and_revoked_without_goals(self):
         for change, expected in (({"revoked": True}, "TASK_GRANT_REVOKED"),

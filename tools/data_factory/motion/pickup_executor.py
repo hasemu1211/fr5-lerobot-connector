@@ -50,7 +50,7 @@ PHASES = (
 ARM_PHASES = frozenset(PHASES) - {"GRIPPER_CLOSE", "GRIPPER_OPEN"}
 JOINT_ORDER = ["j1", "j2", "j3", "j4", "j5", "j6"]
 COMMAND_FIELDS = {"schema_version", "op_id", "op", "payload"}
-COMMAND_OPS = {"admit_task", "task_boundary", "revoke_task", "prepare_next", "approve_next", "execute_next", "preflight", "capture_observation", "plan", "approve", "execute", "heartbeat", "confirm", "grasp_verdict", "semantic_verdict", "release_verdict", "cancel", "status"}
+COMMAND_OPS = {"admit_task", "task_boundary", "execute_terminal", "revoke_task", "prepare_next", "approve_next", "execute_next", "preflight", "capture_observation", "plan", "approve", "execute", "heartbeat", "confirm", "grasp_verdict", "semantic_verdict", "release_verdict", "cancel", "status"}
 ACTIVE_STATES = {"EXECUTING", "PRECONTACT_HUMAN", "GRASP_VERDICT", "SEMANTIC_VERDICT", "LEARNED_CHUNK_COMPLETE", "RELEASE_VERDICT"}
 RECYCLE_PHASES = ("RECYCLE_APPROACH_PTP", "LOWER_LIN", "GRIPPER_OPEN", "RETREAT_LIN", "SAFE_POSE_PTP")
 EXECUTION_RESULT_MARGIN_S = 2.0
@@ -320,6 +320,12 @@ class PickupExecutor:
         return ok
 
     def _emit_phase_event(self, run, event, step, action_status, evidence):
+        if "mechanical_terminal" in run and step["phase"] in RECYCLE_PHASES:
+            terminal=run["mechanical_terminal"]
+            terminal.setdefault("events",[]).append({"terminal_digest":terminal["plan"]["terminal_digest"],
+                "phase":step["phase"], "event":event, "action_status":action_status,
+                "monotonic_time_s":self.monotonic_clock(), "evidence_digest":canonical_digest(evidence)})
+            return  # These out-of-recording events do not describe learned rows.
         writer = self._phase_event_writer
         if writer is None:
             return
@@ -1040,9 +1046,33 @@ class PickupExecutor:
         self._chunk_boundary(run, payload["lease_id"])
         if "task_grant" not in run:
             raise ContractError("TASK_GRANT_REQUIRED")
+        if "mechanical_terminal" in run:
+            raise ContractError("MECHANICAL_TERMINAL_BINDING")
         self._check_task(run)
         reason = self._task_termination(run)
         if reason is not None:
+            capture = getattr(self.transport, "mechanical_contact_context", None)
+            if callable(capture):
+                observed = self.transport.snapshot(run["plan"]["planning"]["max_joint_state_age_s"])
+                if _gripper_settings(observed["gripper_settings"]) != run["plan"]["active_gripper_settings"]:
+                    raise ContractError("GRIPPER_SETTINGS_MISMATCH")
+                contact = capture(copy.deepcopy(run["plan"]), copy.deepcopy(run["execution"]["scene_object"]), observed)
+                run["mechanical_contact_diagnostic"] = copy.deepcopy(contact)
+                if contact.get("status") == "AVAILABLE":
+                    until=contact.get("valid_until_s")
+                    if type(until) not in (int,float) or not math.isfinite(until) or self.source_clock() >= until:
+                        raise ContractError("MECHANICAL_CONTACT_STALE")
+                    from tools.data_factory.motion.mechanical_terminal import compile_terminal
+                    terminal = compile_terminal(self.transport, plan=run["plan"], grant=run["task_grant"],
+                        snapshot=observed, contact=contact,
+                        remaining_s=min(run["task_deadline"] - self.monotonic_clock(),
+                                        run["task_grant"]["deadline_s"] - self.source_clock()))
+                    self._check_chunk_boundary(run, payload["lease_id"])
+                    run["mechanical_terminal"] = {"plan": terminal, "status": "PLANNED", "terminal_phases": []}
+                    run["task_handoff"] = {"status": "PLANNED", "termination_reason": reason,
+                        "terminal_digest": terminal["terminal_digest"], "deadline_s": terminal["deadline_s"],
+                        "semantic_success": "NOT_MEASURED"}
+                    return self._execution_response(run, payload["run_id"], run["digest"], "MECHANICAL_TERMINAL_PLANNED")
             run["task_handoff"] = {"schema_version": "data_factory.learned_task_handoff.v1",
                 "termination_reason": reason, "status": "BLOCKED_UNAVAILABLE",
                 "code": "MECHANICAL_TERMINAL_UNAVAILABLE", "run_id": payload["run_id"],
@@ -1052,6 +1082,62 @@ class PickupExecutor:
                 "semantic_success": "NOT_MEASURED"}
             self._fault(run, "MECHANICAL_TERMINAL_UNAVAILABLE")
         return self._execution_response(run, payload["run_id"], run["digest"], "TASK_CONTINUE")
+
+    def _execute_terminal(self, payload):
+        run = self._execution_payload(payload, {"run_id", "plan_digest", "lease_id", "terminal_digest"}, "MECHANICAL_TERMINAL_SCHEMA")
+        self._chunk_boundary(run, payload["lease_id"])
+        terminal = run.get("mechanical_terminal")
+        if (terminal is None or terminal["status"] != "PLANNED"
+                or terminal["plan"]["terminal_digest"] != payload["terminal_digest"]):
+            raise ContractError("MECHANICAL_TERMINAL_BINDING")
+        self._check_task(run)
+        if self.monotonic_clock() + sum(s["limits"]["execution_timeout_s"] for s in terminal["plan"]["steps"]) >= run["task_deadline"]:
+            raise ContractError("MECHANICAL_TERMINAL_BUDGET")
+        execution = run["execution"]
+        execution.pop("reference_deadline", None)
+        execution.pop("wait_deadline", None)
+        execution["step_index"] = 0
+        terminal["status"] = "EXECUTING"
+        run["state"] = "EXECUTING"
+        self._start_current_step(run)
+        return self._execution_response(run, payload["run_id"], run["digest"], "MECHANICAL_TERMINAL_STARTED")
+
+    @staticmethod
+    def _active_steps(run):
+        terminal = run.get("mechanical_terminal")
+        return terminal["plan"]["steps"] if terminal and terminal["status"] != "PLANNED" else run["plan"]["steps"]
+
+    def _check_mechanical_dispatch(self, run, step):
+        self._check_learned_dispatch(run)
+        terminal = run["mechanical_terminal"]["plan"]
+        contact = terminal["contact_evidence"]
+        if self.source_clock() >= contact["valid_until_s"]:
+            raise ContractError("MECHANICAL_CONTACT_STALE")
+        cell=self.cell_state_store.read()
+        if (cell.get("cell_ready") is not False or cell.get("run_id") != run["plan"]["run_id"]
+                or cell.get("plan_digest") != run["digest"] or cell.get("reason_code") != "EXECUTION_IN_PROGRESS"):
+            raise ContractError("STATE_CHANGED")
+        observed = self.transport.snapshot(run["plan"]["planning"]["max_joint_state_age_s"])
+        if (observed["gripper_settings"] != terminal["initial_snapshot"]["gripper_settings"]
+                or any(abs(a-b) > terminal["planning"]["goal_tolerances"]["joint_rad"]
+                       for a,b in zip(observed["joint_positions"],step["start_joint_state"]))):
+            raise ContractError("MECHANICAL_TERMINAL_STATE")
+
+    def _verify_mechanical_phase(self, run, step, *, partial=False):
+        from tools.data_factory.rollout.gripper_evidence import check_hardware, identity
+        terminal=run["mechanical_terminal"]["plan"]
+        observed=self.transport.snapshot(terminal["planning"]["max_joint_state_age_s"])
+        evidence={"captured_at_s":self.source_clock(), "captured_monotonic_s":self.monotonic_clock(), "snapshot":observed}
+        wire=check_hardware(evidence,self.source_clock(),self.monotonic_clock(),terminal["planning"]["max_joint_state_age_s"])
+        initial=terminal["initial_snapshot"]["gripper_controller"]["hardware_execution"]["wire"]
+        if identity(wire) != identity(initial):
+            raise ContractError("LEARNED_HARDWARE_INCARNATION")
+        target=step["release_position_m"] if partial else step.get("gripper_position_m")
+        if (any(abs(a-b)>terminal["planning"]["goal_tolerances"]["joint_rad"] for a,b in zip(observed["joint_positions"],step["final_joint_state"]))
+                or target is not None and any(abs(observed["gripper_controller"][key]-target)>step["limits"]["completion_tolerance_m"]
+                    for key in ("feedback_position_m","reference_position_m"))):
+            raise ContractError("MECHANICAL_TERMINAL_STATE")
+        run["mechanical_terminal"]["last_observation"]=evidence
 
     def _revoke_task(self, payload):
         _exact(payload, {"run_id", "grant_digest"}, "TASK_GRANT_SCHEMA")
@@ -1374,6 +1460,9 @@ class PickupExecutor:
             data["task_authority"] = {"grant": copy.deepcopy(run["task_grant"]), "admission": copy.deepcopy(run["approval"])}
         if "task_handoff" in run:
             data["task_handoff"] = copy.deepcopy(run["task_handoff"])
+        for key in ("mechanical_terminal", "mechanical_contact_diagnostic"):
+            if key in run:
+                data[key] = copy.deepcopy(run[key])
         data["precommit_safety"] = copy.deepcopy(run.get("precommit_safety"))
         if "failure_code" in run:
             data["failure_code"] = run["failure_code"]
@@ -1381,7 +1470,7 @@ class PickupExecutor:
 
     def _check_learned_dispatch(self, run, deadlines=None):
         self._check_task(run)
-        if "task_grant" in run and run["execution"].get("learned_segment_index", 0) == 0 and not self._task_policy_window(run):
+        if "task_grant" in run and "mechanical_terminal" not in run and run["execution"].get("learned_segment_index", 0) == 0 and not self._task_policy_window(run):
             raise ContractError("TASK_POLICY_BUDGET_EXHAUSTED")
         execution = run["execution"]
         if run["cancel_event"].is_set():
@@ -1432,7 +1521,21 @@ class PickupExecutor:
     def _start_current_step(self, run):
         if run["state"] != "EXECUTING" or ("cancel_event" in run and run["cancel_event"].is_set()):
             return run["state"]
-        execution, steps = run["execution"], run["plan"]["steps"]
+        execution, steps = run["execution"], self._active_steps(run)
+        if execution["step_index"] >= len(steps) and "mechanical_terminal" in run:
+            terminal = run["mechanical_terminal"]
+            try:
+                terminal["completion_evidence"] = self.transport.complete_mechanical_terminal(terminal["plan"])
+                binding = run["plan"]["scene_binding"]
+                execution["scene_transition"] = self.scene_state_store.update_object(
+                    instance_id=binding["object_instance_id"], object_profile_id=execution["scene_object"]["object_profile_id"],
+                    state="UNKNOWN", source="ROBOT_ACTION", updated_by="pickup-executor",
+                    expected_revision=execution["scene_revision"])
+                terminal["status"] = "COMPLETED"
+                run["state"] = "COMPLETED"
+            except Exception as exc:
+                self._fault(run, exc.code if isinstance(exc, ContractError) else "MECHANICAL_TERMINAL_READBACK")
+            return run["state"]
         if execution["step_index"] >= len(steps) and "learned_proposal" in run["plan"]:
             # Controller completion and human review do not establish a safe reset.
             try:
@@ -1526,6 +1629,8 @@ class PickupExecutor:
                 tolerance = run["plan"]["planning"]["goal_tolerances"]["joint_rad"]
                 if any(abs(a - b) > tolerance for a, b in zip(actual, expected)):
                     raise ContractError("START_STATE_MISMATCH")
+                if "mechanical_terminal" in run:
+                    self.transport.check_mechanical_step(run["mechanical_terminal"]["plan"],step,observed)
                 if step["phase"] == "LEARNED_CHUNK":
                     from tools.data_factory.rollout.finite_plan import check_execution_start, execution_step
                     evidence = {"captured_at_s": self.source_clock(), "captured_monotonic_s": self.monotonic_clock(),
@@ -1547,7 +1652,12 @@ class PickupExecutor:
                     if run["state"] != "EXECUTING" or run["cancel_event"].is_set():
                         return run["state"]
                 else:
-                    self.transport.start_phase(step)
+                    if "mechanical_terminal" in run:
+                        self.transport.start_phase(step, cancel_event=run["cancel_event"],
+                            cancel_timeout_s=run["plan"]["execution_timeouts_s"]["cancel"],
+                            dispatch_guard=lambda: self._check_mechanical_dispatch(run, step))
+                    else:
+                        self.transport.start_phase(step)
                 self._emit_phase_event(run, "GOAL_ACCEPTED", step, "ACCEPTED", {"accepted": True, "step": step})
         except Exception as exc:
             self._fault(run, exc.code if isinstance(exc, ContractError) else "SNAPSHOT_SCHEMA")
@@ -1569,13 +1679,15 @@ class PickupExecutor:
         if run["state"] == "BLOCKED":
             return run["failure_code"]
         run["failure_code"] = code
+        if "mechanical_terminal" in run:
+            run["mechanical_terminal"].update(status="FAILED", failure_code=code)
         # Fence callbacks before waiting on the sole transport cancellation owner.
         run["state"] = "BLOCKED"
         execution = run["execution"]
         if execution.get("active") and getattr(self.transport, "owns_active_goal", True):
             try:
                 self.transport.cancel_active(run["plan"]["execution_timeouts_s"]["cancel"])
-                step = run["plan"]["steps"][execution["step_index"]]
+                step = self._active_steps(run)[execution["step_index"]]
                 if "held_target_segments" in step:
                     step = step["held_target_segments"][execution.get("learned_segment_index", 0)]
                 self._emit_phase_event(run, "ACTION_TERMINAL", step, "CANCELLED", {"failure_code": code, "step": step, "terminal_status": "CANCELLED"})
@@ -1703,7 +1815,7 @@ class PickupExecutor:
                 except Exception as exc:
                     code = exc.code if isinstance(exc, ContractError) else "ROS_EXEC_POLL_FAILED"
                     if code == "ROS_EXEC_RESULT_TIMEOUT":
-                        step = run["plan"]["steps"][execution["step_index"]]
+                        step = self._active_steps(run)[execution["step_index"]]
                         if step["phase"] == "GRIPPER_OPEN":
                             code = "GRIPPER_OPEN_TIMEOUT"
                     self._fault(run, code)
@@ -1712,12 +1824,25 @@ class PickupExecutor:
                     continue
                 if active is not None:
                     execution["active"] = False
-                    completed_step = run["plan"]["steps"][execution["step_index"]]
+                    completed_step = self._active_steps(run)[execution["step_index"]]
                     continuation = completed_step.get("continuation_trajectory_b64")
+                    if "mechanical_terminal" in run:
+                        try:
+                            self._verify_mechanical_phase(run,completed_step,
+                                partial=continuation is not None and not execution.get("continuation_dispatched"))
+                        except Exception as exc:
+                            self._fault(run,exc.code if isinstance(exc,ContractError) else "MECHANICAL_TERMINAL_STATE")
+                            continue
                     if continuation is not None and not execution.get("continuation_dispatched"):
                         continued_step = {**completed_step, "trajectory_b64": continuation}
                         try:
-                            self.transport.start_phase(continued_step)
+                            if "mechanical_terminal" in run:
+                                with self._learned_dispatch_scene(run):
+                                    self.transport.start_phase(continued_step, cancel_event=run["cancel_event"],
+                                        cancel_timeout_s=run["plan"]["execution_timeouts_s"]["cancel"],
+                                        dispatch_guard=lambda: self._check_mechanical_dispatch(run, continued_step))
+                            else:
+                                self.transport.start_phase(continued_step)
                         except Exception as exc:
                             self._fault(
                                 run,
@@ -1729,6 +1854,12 @@ class PickupExecutor:
                         execution["active"] = True
                         continue
                     execution.pop("continuation_dispatched", None)
+                    if completed_step["phase"] == "GRIPPER_OPEN" and "mechanical_terminal" in run:
+                        try:
+                            run["mechanical_terminal"]["release_readback"] = self.transport.mechanical_release_readback(run["mechanical_terminal"]["plan"])
+                        except Exception as exc:
+                            self._fault(run, exc.code if isinstance(exc, ContractError) else "MECHANICAL_RELEASE_READBACK")
+                            continue
                     if "held_target_segments" in completed_step:
                         index = execution.get("learned_segment_index", 0)
                         segment = completed_step["held_target_segments"][index]
@@ -1762,7 +1893,7 @@ class PickupExecutor:
                             execution["learned_segment_index"] = index + 1
                             self._start_current_step(run)
                             continue
-                    execution["terminal_phases"].append(completed_step["phase"])
+                    (run["mechanical_terminal"]["terminal_phases"] if "mechanical_terminal" in run else execution["terminal_phases"]).append(completed_step["phase"])
                     if "held_target_segments" not in completed_step:
                         self._emit_phase_event(run, "ACTION_TERMINAL", completed_step, "SUCCEEDED", {"step": completed_step, "terminal_status": "SUCCEEDED"})
                     if completed_step["phase"] in {"GRIPPER_CLOSE", "LIFT_LIN"}:
@@ -1803,7 +1934,7 @@ class PickupExecutor:
                             self._fault(run, exc.code if isinstance(exc, ContractError) else "LEARNED_TERMINAL_STATE")
                             continue
                     execution["step_index"] += 1
-                    pause_after = run["plan"]["steps"][execution["step_index"] - 1].get("pause_after")
+                    pause_after = self._active_steps(run)[execution["step_index"] - 1].get("pause_after")
                     if pause_after in {"GRASP_VERDICT", "SEMANTIC_VERDICT", "LEARNED_CHUNK_COMPLETE"}:
                         run["state"] = pause_after
                         execution["wait_deadline"] = now + run["plan"]["execution_timeouts_s"]["semantic_verdict" if pause_after == "LEARNED_CHUNK_COMPLETE" else pause_after.lower()]

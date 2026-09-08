@@ -478,6 +478,12 @@ class OneJob:
                                     else self.plan_envelope["plan"])
                     validate_execution_trace(current_plan, response["data"].get("learned_execution"))
                     validate_execution_history(current_plan, response["data"].get("learned_history", []))
+                    if "mechanical_terminal" in response["data"]:
+                        from tools.data_factory.motion.mechanical_terminal import validate_terminal_evidence
+                        terminal=validate_terminal_evidence(response["data"]["mechanical_terminal"],current_plan)
+                        prior=(self.execution_evidence or {}).get("mechanical_terminal")
+                        if prior is not None and prior["plan"] != terminal["plan"]:
+                            raise ContractError("MECHANICAL_TERMINAL_BINDING")
                 # RGB belongs to this observation caller, not canonical execution
                 # evidence or a later per-chunk plan/approval history.
                 data = ({key: value for key, value in response["data"].items() if key != "observation"}
@@ -712,10 +718,20 @@ class OneJob:
         try:
             response = self._request("executor", "task_boundary", {"run_id": self.run_id,
                 "plan_digest": self.plan_digest, "lease_id": self.lease_id}, allowed_failure=True)
-            handoff = response.get("data", {}).get("task_handoff")
+            handoff = (response.get("data") or {}).get("task_handoff")
             if handoff is not None:
-                # The existing cancel/recorder owner handles the unavailable boundary.
-                # Root integration supplies qualified handling and terminal retention.
+                if handoff.get("status") == "PLANNED":
+                    status=self._request("recorder","status")
+                    if status["state"] != "RECORDING" or status.get("writer_alive") is not True or status.get("writer_error") is not None:
+                        raise ContractError("RECORDER_WRITER_FAULT")
+                    self._freeze_recorder_with_heartbeats({key:status[key] for key in ("writer_alive","writer_error")})
+                    started = self._request("executor", "execute_terminal", {
+                        "run_id": self.run_id, "plan_digest": self.plan_digest,
+                        "lease_id": self.lease_id, "terminal_digest": handoff["terminal_digest"]})
+                    if started["state"] != "EXECUTING":
+                        raise ContractError("MECHANICAL_TERMINAL_STATE")
+                    self.state = "EXECUTING"
+                    return self._result(True, "MECHANICAL_TERMINAL_STARTED")
                 result = self._abort("MECHANICAL_TERMINAL_UNAVAILABLE")
                 return {**result, "task_handoff": copy.deepcopy(handoff)}
             if not response["ok"]:
@@ -1022,7 +1038,8 @@ class OneJob:
             status = self._request("recorder", "status")
             if self.monotonic_clock() - status_started >= self._program["execution_timeouts_s"]["heartbeat_lease"] / 2:
                 raise ContractError("RECORDER_HEALTH_STALE")
-            if status["state"] != ("FROZEN" if self.state == "SEMANTIC_VERDICT" or self.semantic is not None else "RECORDING"):
+            terminal_active = isinstance(self.execution_evidence,dict) and self.execution_evidence.get("mechanical_terminal",{}).get("status") in {"EXECUTING","COMPLETED"}
+            if status["state"] != ("FROZEN" if self.state == "SEMANTIC_VERDICT" or self.semantic is not None or terminal_active else "RECORDING"):
                 raise ContractError("RECORDER_STATE")
             health = {key: status.get(key) for key in ("writer_alive", "writer_error")}
             sampler_alive = status.get("sampler_alive")
@@ -1069,6 +1086,11 @@ class OneJob:
                 self.state = state
                 return self._result(True, state)
             if state == "COMPLETED":
+                terminal = self.execution_evidence.get("mechanical_terminal")
+                if terminal is not None:
+                    # Safe reset does not admit an unmeasured Pick as a successful
+                    # demonstration. Retain in the same diagnostic transaction.
+                    return self._retain_failed_rollout("MECHANICAL_TERMINAL_COMPLETE")
                 return self._finalize()
             if state != "EXECUTING":
                 raise ContractError("EXECUTOR_STATE")

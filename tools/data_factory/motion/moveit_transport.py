@@ -117,6 +117,177 @@ def _rotation_quaternion(columns):
 class RosMoveItTransport:
     """Build plan-only MoveGroup requests and serialized gripper goals."""
 
+    def mechanical_contact_context(self, plan, scene_object, snapshot):
+        """Report the native producer's available evidence without inventing grasp.
+
+        The shipped model has no qualified contact transition/uncertainty input.
+        Its joint/controller observations cannot measure object slip or aperture.
+        Preserve that distinction at the actual bounded-task caller.
+        """
+        diagnostic = {"status": "BLOCKED_UNAVAILABLE", "source_program_digest": canonical_digest(plan["learned_source_program"]),
+            "scene_binding": copy.deepcopy(plan["scene_binding"]), "snapshot_digest": canonical_digest(snapshot),
+            "scene_object_digest": canonical_digest(scene_object), "physical_success": False,
+            "missing_measurements": ["QUALIFIED_OBJECT_TOOL_RELATION_OR_CARRIED_ENVELOPE",
+                "QUALIFIED_CONTACT_TRANSITION_AND_APERTURE_MODEL", "CURRENT_REQUIRED_ILLUMINATION"],
+            "code": "MECHANICAL_CONTACT_UNAVAILABLE"}
+        description = getattr(self, "_robot_description", None)
+        if isinstance(description,str):
+            try:
+                root = ET.fromstring(description)
+                finger = [root.find(f"joint[@name='finger_{side}_joint']") for side in ("right","left")]
+                origins = [float(j.find("origin").attrib["xyz"].split()[0]) for j in finger]
+                axes = [float(j.find("axis").attrib["xyz"].split()[0]) for j in finger]
+                widths = [float(root.find(f"link[@name='finger_tip_{side}_link']/collision/geometry/box").attrib["size"].split()[0]) for side in ("right","left")]
+                opened = next(s for s in plan["learned_source_program"]["steps"] if s["phase"]=="GRIPPER_OPEN")["gripper_position_m"]
+                gap = origins[0]-origins[1]+opened*(axes[0]-axes[1])-sum(widths)/2
+                diagnostic["modeled_full_open_inner_gap_m"] = gap
+                diagnostic["model_opening_direction"] = "INWARD" if axes[0]-axes[1]<0 else "OUTWARD"
+            except (ET.ParseError, AttributeError, KeyError, ValueError, IndexError, StopIteration):
+                diagnostic["model_geometry"] = "UNSUPPORTED"
+        return diagnostic
+
+    def prepare_mechanical_terminal(self, source, contact):
+        """Keep floor/wall checks and add exactly one supported carried object.
+
+        Applying a MoveIt attachment changes collision accounting only. This
+        method never upgrades the contact producer's physical evidence.
+        """
+        from moveit_msgs.msg import AttachedCollisionObject
+        required = {"object_id", "link_name", "touch_links", "dimensions_m", "translation_m", "rotation_xyzw"}
+        obj = contact.get("carried_object")
+        if not isinstance(obj, dict) or set(obj) != required:
+            raise ContractError("MECHANICAL_CONTACT_GEOMETRY")
+        links = {"finger_tip_right_link", "finger_tip_left_link"}
+        if (obj["link_name"] != "gripper_link" or set(obj["touch_links"]) != links
+                or not isinstance(obj["object_id"], str) or not obj["object_id"]):
+            raise ContractError("MECHANICAL_CONTACT_LINKS")
+        for key, size in (("dimensions_m", 3), ("translation_m", 3), ("rotation_xyzw", 4)):
+            values = obj[key]
+            if (not isinstance(values, list) or len(values) != size
+                    or any(type(v) not in (int, float) or not math.isfinite(v) for v in values)
+                    or key == "dimensions_m" and any(v <= 0 for v in values)):
+                raise ContractError("MECHANICAL_CONTACT_GEOMETRY")
+        if abs(sum(v*v for v in obj["rotation_xyzw"]) - 1) > 1e-9:
+            raise ContractError("MECHANICAL_CONTACT_GEOMETRY")
+        if obj["object_id"] in {source["planning_scene"][key]["id"] for key in ("floor", "wall")}:
+            raise ContractError("MECHANICAL_CONTACT_GEOMETRY")
+        held = self._collision_object(obj["object_id"], obj["dimensions_m"], obj["translation_m"], obj["link_name"])
+        held.primitive_poses[0].orientation.x, held.primitive_poses[0].orientation.y, held.primitive_poses[0].orientation.z, held.primitive_poses[0].orientation.w = obj["rotation_xyzw"]
+        attached = AttachedCollisionObject(link_name=obj["link_name"], object=held, touch_links=sorted(links))
+        removed = self._CollisionObject(id=obj["object_id"], operation=self._CollisionObject.REMOVE)
+        removed.header.frame_id = source["planning_scene"]["frame_id"]
+        request = self._ApplyPlanningScene.Request()
+        request.scene = self._PlanningScene(is_diff=True)
+        request.scene.world.collision_objects = [*self._planning_scene_objects(source["planning_scene"]), removed]
+        request.scene.robot_state.is_diff = True
+        request.scene.robot_state.attached_collision_objects = [attached]
+        response = self._service(self._ApplyPlanningScene, "/apply_planning_scene", request, "PLANNING_SCENE_APPLY")
+        if getattr(response, "success", False) is not True:
+            raise ContractError("PLANNING_SCENE_APPLY")
+        readback=self._read_mechanical_scene(source, attached)
+        self._mechanical_scene_expected=(copy.deepcopy(source),attached,None)
+        return readback
+
+    def check_mechanical_step(self, terminal, step, snapshot):
+        source,attached,released=self._mechanical_scene_expected
+        self._read_mechanical_scene(source,attached,released)
+        self._check_plan_collision({**terminal,"initial_joint_state":snapshot["joint_positions"],
+            "steps":[step],"mechanical_terminal":True},snapshot["gripper_controller"]["feedback_position_m"])
+
+    def _read_mechanical_scene(self, source, attached=None, released=None):
+        query = self._GetPlanningScene.Request()
+        query.components = self._PlanningSceneComponents(components=(
+            self._PlanningSceneComponents.WORLD_OBJECT_GEOMETRY | self._PlanningSceneComponents.ROBOT_STATE_ATTACHED_OBJECTS))
+        result = self._service(self._GetPlanningScene, "/get_planning_scene", query, "PLANNING_SCENE_READ")
+        scene = result.scene
+        expected = self._planning_scene_objects(source["planning_scene"])
+        if released is not None:
+            expected.append(released)
+        if (len(scene.world.collision_objects) != len(expected)
+                or {obj.id for obj in scene.world.collision_objects} != {obj.id for obj in expected}
+                or list(scene.robot_state.attached_collision_objects) != ([] if attached is None else [attached])):
+            raise ContractError("PLANNING_SCENE_MISMATCH")
+        for obj in expected:
+            actual = next(item for item in scene.world.collision_objects if item.id == obj.id)
+            if actual != obj:
+                raise ContractError("PLANNING_SCENE_MISMATCH")
+        return canonical_digest({"world":[str(obj) for obj in sorted(scene.world.collision_objects,key=lambda obj:obj.id)],
+                                 "attached":[str(obj) for obj in scene.robot_state.attached_collision_objects]})
+
+    def check_mechanical_terminal(self, terminal, source):
+        """Collision/no-motion checks accept a measured held start, never open-only."""
+        before = terminal["initial_snapshot"]
+        plan = {**source, "initial_joint_state": before["joint_positions"], "steps": terminal["steps"], "mechanical_terminal": True}
+        collision=self._check_plan_collision(plan, before["gripper_controller"]["feedback_position_m"])
+        current = self.snapshot(source["planning"]["max_joint_state_age_s"])
+        tolerance = source["planning"]["goal_tolerances"]["joint_rad"]
+        opened = next(s for s in source["steps"] if s["phase"] == "GRIPPER_OPEN")
+        if (any(abs(a-b) > tolerance for a,b in zip(current["joint_positions"], before["joint_positions"]))
+                or any(abs(current["gripper_controller"][key] - before["gripper_controller"][key])
+                       > opened["limits"]["completion_tolerance_m"] for key in ("feedback_position_m", "reference_position_m"))):
+            raise ContractError("PLAN_ONLY_MOVED_ROBOT")
+        return {"collision_report":collision,"before_snapshot_digest":canonical_digest(before),
+                "after_snapshot_digest":canonical_digest(current),"status":"PASS"}
+
+    def complete_mechanical_terminal(self, terminal):
+        """Read final commanded state; no learned/physical landing success claim."""
+        current = self.snapshot(terminal["planning"]["max_joint_state_age_s"])
+        safe = terminal["steps"][-1]["final_joint_state"]
+        opened = next(step for step in terminal["steps"] if step["phase"] == "GRIPPER_OPEN")
+        tolerance = terminal["planning"]["goal_tolerances"]["joint_rad"]
+        if (current["arm_controller"]["ready"] is not True or current["gripper_controller"]["ready"] is not True
+                or any(abs(a-b) > tolerance for a,b in zip(current["joint_positions"], safe))
+                or any(abs(current["gripper_controller"][key] - opened["gripper_position_m"])
+                       > opened["limits"]["completion_tolerance_m"] for key in ("feedback_position_m", "reference_position_m"))):
+            raise ContractError("POST_RESET_SAFE_SNAPSHOT")
+        return {"status": "EXPECTED_RESET", "snapshot_digest": canonical_digest(current),
+                "semantic_success": "NOT_MEASURED", "physical_landing": "NOT_OBSERVED"}
+
+    def mechanical_release_readback(self, terminal):
+        """Detach one object at measured FK; this is an expected world pose."""
+        from moveit_msgs.msg import AttachedCollisionObject
+        from moveit_msgs.srv import GetPositionFK
+        snapshot = self.snapshot(terminal["planning"]["max_joint_state_age_s"])
+        obj = terminal["contact_evidence"]["carried_object"]
+        query = GetPositionFK.Request()
+        query.header.frame_id = terminal["planning_scene"]["frame_id"]
+        query.fk_link_names = [obj["link_name"]]
+        query.robot_state = self._RobotState(joint_state=self._JointState(
+            name=[*JOINT_ORDER, "finger_right_joint"],
+            position=[*snapshot["joint_positions"], snapshot["gripper_controller"]["feedback_position_m"]]))
+        result = self._service(GetPositionFK, "/compute_fk", query, "MECHANICAL_FK")
+        if (result.error_code.val != self._moveit_success or list(result.fk_link_names) != [obj["link_name"]]
+                or len(result.pose_stamped) != 1 or result.pose_stamped[0].header.frame_id != query.header.frame_id):
+            raise ContractError("MECHANICAL_FK")
+        pose = result.pose_stamped[0].pose
+        q = [pose.orientation.x, pose.orientation.y, pose.orientation.z, pose.orientation.w]
+        def multiply(a,b):
+            x,y,z,w=a; X,Y,Z,W=b
+            return [w*X+x*W+y*Z-z*Y, w*Y-x*Z+y*W+z*X, w*Z+x*Y-y*X+z*W, w*W-x*X-y*Y-z*Z]
+        if any(not math.isfinite(v) for v in [*q, pose.position.x, pose.position.y, pose.position.z]) or abs(sum(v*v for v in q)-1)>1e-9:
+            raise ContractError("MECHANICAL_FK")
+        rotated = multiply(multiply(q, [*obj["translation_m"],0.]),[-q[0],-q[1],-q[2],q[3]])[:3]
+        translation = [a+b for a,b in zip([pose.position.x,pose.position.y,pose.position.z],rotated)]
+        orientation = multiply(q,obj["rotation_xyzw"])
+        released = self._collision_object(obj["object_id"],obj["dimensions_m"],translation,query.header.frame_id)
+        released.primitive_poses[0].orientation.x, released.primitive_poses[0].orientation.y, released.primitive_poses[0].orientation.z, released.primitive_poses[0].orientation.w = orientation
+        detach = AttachedCollisionObject(link_name=obj["link_name"])
+        detach.object.id = obj["object_id"]
+        detach.object.operation = self._CollisionObject.REMOVE
+        request = self._ApplyPlanningScene.Request()
+        request.scene = self._PlanningScene(is_diff=True)
+        request.scene.robot_state.is_diff = True
+        request.scene.robot_state.attached_collision_objects = [detach]
+        request.scene.world.collision_objects = [released]
+        response = self._service(self._ApplyPlanningScene, "/apply_planning_scene", request, "PLANNING_SCENE_APPLY")
+        if getattr(response,"success",False) is not True:
+            raise ContractError("PLANNING_SCENE_APPLY")
+        self._read_mechanical_scene(terminal,released=released)
+        self._mechanical_scene_expected=(copy.deepcopy(terminal),None,released)
+        return {"semantics":"MODEL_BASED_EXPECTATION", "physical_landing":"NOT_OBSERVED",
+                "object_id":obj["object_id"], "translation_m":translation, "rotation_xyzw":orientation,
+                "snapshot_digest":canonical_digest(snapshot)}
+
     def __init__(
         self, node, *, graph_timeout_s=1.0, preflight_timeout_s=5.0,
         clock=time.monotonic, gripper_source_clock=None, gripper_temporal_policy=None, allow_clock_configuration=False,
@@ -1244,13 +1415,15 @@ class RosMoveItTransport:
             positions = [gripper] if feedback_bounds is None else sorted({gripper, *feedback_bounds.values()})
             for position in positions:
                 request = request_type()
-                request.group_name = "" if "learned_proposal" in plan else plan["frames"]["planning_group"]
+                request.group_name = "" if "learned_proposal" in plan or plan.get("mechanical_terminal") else plan["frames"]["planning_group"]
                 request.robot_state = self._RobotState(
                     joint_state=self._JointState(
                         name=[*JOINT_ORDER, "finger_right_joint"],
                         position=[*map(float, joints), float(position)],
                     )
                 )
+                if plan.get("mechanical_terminal"):
+                    request.robot_state.is_diff = True
                 response = self._service(self._GetStateValidity, "/check_state_validity", request, "COLLISION_SERVICE")
                 evidence = {"label": label, "joints_rad": list(map(float, joints)), "finger_right_joint_m": float(position), "valid": bool(getattr(response, "valid", False))}
                 samples.append(evidence)
@@ -1262,13 +1435,16 @@ class RosMoveItTransport:
             feedback_bounds = step.get("acceptable_feedback_m") if step["type"] == "ARM" else None
             if step["type"] == "GRIPPER":
                 target = step.get("gripper_position_m", plan["gripper_requirements"]["command_position_m"])
-                if "action_range" in step:
-                    start = gripper
-                    for part in range(1, 5):
-                        gripper = start + (target - start) * part / 5
-                        check(f"{step['phase']}:gripper:{part}", step["final_joint_state"])
-                gripper = target
-                check(step["phase"], step["final_joint_state"])
+                targets = ([step["release_position_m"],target]
+                           if plan.get("mechanical_terminal") and "release_position_m" in step else [target])
+                for target in targets:
+                    if "action_range" in step or plan.get("mechanical_terminal"):
+                        start = gripper
+                        for part in range(1, 5):
+                            gripper = start + (target - start) * part / 5
+                            check(f"{step['phase']}:gripper:{part}", step["final_joint_state"])
+                    gripper = target
+                    check(step["phase"], step["final_joint_state"])
                 continue
             try:
                 trajectory = self._deserialize_message(
