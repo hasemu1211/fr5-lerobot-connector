@@ -5,6 +5,7 @@ import hashlib
 import json
 from pathlib import Path
 import sys
+import subprocess
 import threading
 from types import SimpleNamespace
 import unittest
@@ -109,8 +110,69 @@ class RobotModelReplacementTest(unittest.TestCase):
         with self.assertRaisesRegex(ContractError, "HOME_ROBOT_BINDING"):
             validate_home_candidate(home, urdf=CANDIDATE, expected_robot_system_id=home["robot_system_id"])
         xacro = (ROOT / "src/fairino5_v6_moveit2_config/config/fairino5_v6_robot.urdf.xacro").read_text()
-        self.assertIn('filename="$(find fairino_description)/urdf/fairino5_v6.urdf"', xacro)
+        self.assertIn('name="robot_model_file" default="$(find fairino_description)/urdf/fairino5_v6.urdf"', xacro)
+        self.assertIn('filename="$(arg robot_model_file)"', xacro)
         self.assertNotIn(CANDIDATE.name, xacro)
+
+    def test_native_launch_selection_expands_one_model_without_starting_processes(self):
+        # ROS launch uses system Python (lark is deliberately not added to the
+        # training venv). Only resolve native launch/xacro parameters; no launch.
+        script = r'''
+import importlib.util
+from pathlib import Path
+import sys
+from unittest.mock import patch
+import xml.etree.ElementTree as ET
+from xacro import XacroException
+from launch import LaunchContext, LaunchDescription
+from launch.actions import DeclareLaunchArgument
+from moveit_configs_utils import MoveItConfigsBuilder
+
+root = Path(sys.argv[1])
+package = root / "src/fairino5_v6_moveit2_config"
+spec = importlib.util.spec_from_file_location("model_launch", package / "launch/real_robot.launch.py")
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+class SourceBuilder(MoveItConfigsBuilder):
+    def robot_description(self, **kwargs):
+        return super().robot_description(file_path=package / "config/fairino5_v6_robot.urdf.xacro", **kwargs)
+
+def expand(model=None, fake="false"):
+    # ParameterValue caches evaluation within one launch. A new model selection
+    # is a new launch, never a hot swap of the running description.
+    with patch.object(module, "MoveItConfigsBuilder", SourceBuilder), patch.object(module, "generate_demo_launch", return_value=LaunchDescription()) as consume:
+        description = module.generate_launch_description()
+    config = consume.call_args.args[0]
+    argument = next(item for item in description.entities if isinstance(item, DeclareLaunchArgument) and item.name == "robot_model_file")
+    context = LaunchContext()
+    context.launch_configurations["use_fake_hardware"] = fake
+    if model is not None:
+        context.launch_configurations["robot_model_file"] = str(model)
+    argument.execute(context)
+    return ET.fromstring(config.robot_description["robot_description"].evaluate(context))
+
+original = root / "src/fairino_description/urdf/fairino5_v6.urdf"
+candidate = original.with_name("fairino5_v6_gripper_opening_candidate.urdf")
+for fake in ("false", "true"):
+    default, old, new = expand(fake=fake), expand(original, fake), expand(candidate, fake)
+    assert ET.tostring(default) == ET.tostring(old), "default model changed"
+    assert list(map(float, new.find("joint[@name='finger_right_joint']/axis").get("xyz").split())) == [1., 0., 0.]
+    for side in ("right", "left"):
+        for tag in ("origin", "axis"):
+            selector = f"joint[@name='finger_{side}_joint']/{tag}"
+            new.find(selector).attrib = dict(old.find(selector).attrib)
+    assert ET.tostring(new) == ET.tostring(old), "non-finger model/control change"
+try:
+    expand(original.with_name("missing-model.urdf"))
+except XacroException:
+    pass
+else:
+    raise AssertionError("missing model silently fell back")
+print("native launch/xacro: unchanged default, explicit candidate, both hardware modes, no fallback PASS")
+'''
+        result = subprocess.run(["/usr/bin/python3", "-c", script, str(ROOT)],
+                                capture_output=True, text=True, timeout=20)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
 
 if __name__ == "__main__":
