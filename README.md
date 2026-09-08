@@ -2,7 +2,7 @@
 
 실물 demonstration과 실행 피드백을 잇는 VLA skill adaptation. 구현·검증 플랫폼은 FAIRINO FR5이다.
 
-**[포트폴리오 다운로드 · 39.5MB](https://github.com/hasemu1211/fr5-lerobot-connector/releases/download/portfolio-2026-09-08/FR5-Portfolio.html)** · [시스템 아키텍처](docs/architecture.md)
+**[포트폴리오 다운로드](https://github.com/hasemu1211/fr5-lerobot-connector/releases/download/portfolio-2026-09-08/FR5-Portfolio.html)** · [시스템 아키텍처](docs/architecture.md)
 
 [![Pick & Place 시연의 고정 카메라와 손목 카메라 관측](docs/portfolio/assets/pick-place-latest-poster.jpg)](https://github.com/hasemu1211/fr5-lerobot-connector/releases/download/portfolio-2026-09-08/FR5-Portfolio.html)
 
@@ -10,7 +10,7 @@ Pick & Place · 21.1초
 
 ## Robot Skill Adaptation
 
-![상위 계획과 VLA skill의 실행 맥락, 실물 시연 생성·학습·평가와 다음 수집을 연결하는 데이터 엔진의 개발 범위](docs/portfolio/skill-adaptation.drawio.svg)
+![상위 작업 목표를 실행 skill로 구체화하는 확장 맥락과, 실물 시연·정책 실행·평가·다음 수집을 잇는 데이터 엔진](docs/portfolio/skill-adaptation.drawio.svg)
 
 그림은 폐루프의 목표 구조이다. 수집·선별·학습·오프라인 평가와 조건별 수집 추천을 구현했으며, 실물 정책 개선 효과는 후속 검증 대상이다.
 

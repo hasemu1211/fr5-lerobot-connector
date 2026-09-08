@@ -1,10 +1,16 @@
 # 시스템 아키텍처
 
+## Modules & Data Flow
+
+![수집 원본의 분기, 비동기 작업 판정, 학습 요청과 두 승인 경로, Rerun 탐색, 정책 비교와 재수집 피드백](portfolio/system.drawio.svg)
+
+[용어·연구 맥락](#task--skill--policy) · [구현 근거와 소비 조건](../tools/data_factory/)
+
 ## Task & Evidence Contracts
 
-실행 결과를 원래 작업·물체·카메라·보정 조건에 연결해, 다음 수집에서도 같은 조건을 찾는다.
+### Planning–Execution Interface
 
-![Task Binding에서 실행 진단과 수집 추천으로 이어지는 현재 계약, 그리고 상위 task system과의 양방향 확장 방향](portfolio/task-evidence.drawio.svg)
+![상위 subgoal·context와 기존 작업 조건·유한 정책 실행·진단 출력의 연결 지점. 점선은 상위 연동 확장, 실선은 내부 실행·조건 대응·추천 소비.](portfolio/task-evidence.drawio.svg)
 
 <details>
 <summary>인터페이스 계약과 현재 소비자</summary>
@@ -12,23 +18,13 @@
 | 계약 | 보존하는 정보 | 현재 소비자 |
 | --- | --- | --- |
 | [Task Binding](../tools/data_factory/task_recipe.py) | task·공간 역할·workspace·pose | Collection 계획·실행, 기록 instruction |
+| [NativeSmolVLA](../tools/data_factory/learned_action_adapter.py) | 언어 지시·RGB × 2·7D 상태 → action chunk | OneJob의 유한 정책 실행 |
 | [Execution Diagnostic](../tools/data_factory/rollout/evidence_boundary.py) | checkpoint·실행 trace·사람 판정 범위 | Curator의 원본 실행 진단과 조건 대응 |
 | [Collection Recommendation](../tools/data_factory/collection_recommendation.py) | 관측·제안·근거 참조·선택 변경 | CampaignOperator의 draft 갱신 |
 
 그림은 기존 계획의 조건 선택을 갱신하는 v1 경로이다. 현재 장면에서 새 위치·각도를 생성하는 v2 추천은 [획득 전략](data-factory.md)에서 다룬다. [소비 경로 회귀](../tests/data_factory/test_collection_recommendation.py)는 원본 실행의 조건 대응과 추천 적용을 검증한다.
 
 현재 입력은 Pick·Pick & Place의 작업·공간 계약이며, 실행 진단의 작업 전체 효과는 UNKNOWN으로 보존한다. 상위 planner·simulator가 이 결과를 소비하는 연동은 확장 방향이다.
-
-</details>
-
-<details>
-<summary>폐루프 목표 구조와 정책 실행</summary>
-
-![수집·선별·학습·평가와 다음 수집으로 돌아가는 데이터·정책 피드백](portfolio/closed-loop.drawio.svg)
-
-학습 정책은 시연 수집과 같은 실행기·기록기를 사용한다. [NativeSmolVLA](../tools/data_factory/learned_action_adapter.py)는 저장된 모델·전처리·정규화로 동작 묶음을 예측하고, [finite plan](../tools/data_factory/rollout/finite_plan.py)은 관측 시각·관절 단위·위치와 속도 조건을 확인한다.
-
-[OneJob](../tools/data_factory/one_job.py)은 기록을 유지한 채 다음 관측·동작 묶음을 이어가는 소프트웨어 경로를 제공한다. 실행 진단은 원래 조건을 보존해 다음 수집 추천으로 이어진다. 재수집·재학습에 따른 실물 정책 개선은 비교 실험의 목표이다.
 
 </details>
 
@@ -74,6 +70,29 @@ stale view, replay, digest mismatch, unknown enum, owner ambiguity, camera incom
 Catalog는 호환되는 조합을 제시하고, 실제 실행은 workspace·camera·task의 적격화와 해당 계획의 승인을 확인한다. 사람의 작업 성공 판정과 학습 사용 승인은 각 소비 단계에서 별도로 확인한다. 학습된 정책의 실행은 Collection의 시연 실행과 구분한다.
 
 </details>
+
+## Task · Skill · Policy
+
+| 용어 | 이 프로젝트에서의 의미 | 구현 대응 |
+| --- | --- | --- |
+| Task | 달성할 목표. 상위 작업과 실행 단위 모두에서 사용한다. | Pick·Pick & Place의 recipe, 공간 역할, episode instruction |
+| Subgoal | 현재 실행할 구체적인 목표 | 연동 시 수집 지시·기록 구간·학습 단위와 대응할 입력 |
+| Skill | 여러 조건에서 작업을 수행하는 능력 | 실물 demonstration으로 적응시키려는 조작 능력 |
+| Policy | 관측과 지시로 동작을 생성하는 모델 | SmolVLA의 language-conditioned action chunk |
+
+상위 task planning은 작업 목표를 실행 skill의 선택·조합으로 구체화한다. 수집 recipe의 task는 Pick·Pick & Place라는 실행 단위의 지시이다. 아래 연구들은 상위 목표의 구체화와 하위 정책 실행을 분리한다. 입력 표현과 실행 판정 방식은 서로 다르다.
+
+| 참고 연구 | 연결 경계 | 이 프로젝트에서 검토할 대응 |
+| --- | --- | --- |
+| [EmbodiedSkills](https://arxiv.org/html/2609.01281v1) | 실행 제안·조건 검사·유한 실행·결과 검증 | 작업 계약, OneJob, 원본 실행 진단 |
+| [HiRoC](https://arxiv.org/html/2608.05999v1) | 언어 subgoal과 executor의 학습 분포 정렬 | 수집 instruction·기록 구간·정책 입력의 일치 |
+| [VISTA](https://vista-wm.github.io/) | 언어와 목표 이미지로 GoalVLA 조건화 | 현재 언어·관측 계약에 목표 이미지 입력이 추가로 필요 |
+| [Anticipation-VLA](https://arxiv.org/html/2605.01772v1) | 진행 판단에 따른 재귀적 subgoal 갱신 | 현재 실행 상태·사람 판정과 자동 progress 판정의 구분 |
+| [Gemini Robotics ER 2](https://deepmind.google/models/gemini-robotics/embodied-reasoning/) | 작업 조율과 하위 VLA·로봇 API의 실행 | 상위 요청과 원본 실행 피드백의 연동 방향 |
+
+현재 [NativeSmolVLA](../tools/data_factory/learned_action_adapter.py)는 언어 지시·두 카메라 영상·7차원 상태를 입력받는다. 상위 subgoal과 연동하려면 수집 지시·기록 구간·학습 단위가 같은 의미를 가져야 한다. 기존 작업·실행·진단 계약은 이 연동의 기반이며, 상위 planner 어댑터·목표 이미지 입력·자동 progress 판정은 확장 범위이다.
+
+추가 배경: [SayCan](https://say-can.github.io/) · [Hi Robot](https://www.pi.website/research/hirobot) · [π0.5](https://www.pi.website/blog/pi05) · [SmolVLA](https://huggingface.co/blog/smolvla) · [Inner Monologue](https://innermonologue.github.io/)
 
 ## 관련 문서
 

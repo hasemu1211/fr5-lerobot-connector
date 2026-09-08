@@ -1,4 +1,4 @@
-<!doctype html><html lang="ko"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>추천에서 draft 변경 의도로 — 데이터 엔진 근거</title><link rel="stylesheet" href="../site.css"><script src="../source-return.js" defer></script></head><body><main class="source-page"><a href="../architecture.html#feedback">← 설명으로 돌아가기</a><h1>추천에서 draft 변경 의도로</h1><p class="note">설명에 사용한 구현·측정 자료의 발췌이다. SHA-256은 발췌 전 원본 파일을 식별한다. 실행 PC의 절대 경로와 계정 정보는 포함하지 않으며, 측정값과 해석 조건을 함께 제시한다.</p><section id="execution-contract"><a href="../architecture.html#contracts">← Task &amp; Evidence Contracts</a><h2>Execution Diagnostic · 원본 실행과 정책의 결속</h2><p>진단은 OneJob의 원본 lifecycle에서 만든다. 계획·checkpoint·실행 trace와 사람 판정 범위를 보존하며, 작업 전체의 효과는 UNKNOWN으로 남긴다.</p><p class="locator">main 834c3835d8b7adf6fe3b80018b2ce0beb94393f6<br>tools/data_factory/rollout/evidence_boundary.py<br>sha256:98f0e978acc5b89801457276eabe6ff4262564c3ee44dbdcf3cea4de9fa6a97b</p><h3>원본 339–378행</h3><pre> 339 def build_run_diagnostic(lifecycle_result: Mapping[str, Any]) -&gt; dict[str, Any]:
+<!doctype html><html lang="ko"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>추천에서 draft 변경 의도로 — 데이터 엔진 근거</title><link rel="stylesheet" href="../site.css"><script src="../source-return.js" defer></script></head><body><main class="source-page"><a href="../architecture.html#feedback">← 설명으로 돌아가기</a><h1>추천에서 draft 변경 의도로</h1><p class="note">설명에 사용한 구현·측정 자료의 발췌이다. SHA-256은 발췌 전 원본 파일을 식별한다. 실행 PC의 절대 경로와 계정 정보는 포함하지 않으며, 측정값과 해석 조건을 함께 제시한다.</p><section id="execution-contract"><a href="../architecture.html#contracts">← Planning–Execution Interface</a><h2>Execution Diagnostic · 원본 실행과 정책의 결속</h2><p>진단은 OneJob의 원본 lifecycle에서 만든다. 계획·checkpoint·실행 trace와 사람 판정 범위를 보존하며, 작업 전체의 효과는 UNKNOWN으로 남긴다.</p><p class="locator">main 834c3835d8b7adf6fe3b80018b2ce0beb94393f6<br>tools/data_factory/rollout/evidence_boundary.py<br>sha256:98f0e978acc5b89801457276eabe6ff4262564c3ee44dbdcf3cea4de9fa6a97b</p><h3>원본 339–378행</h3><pre> 339 def build_run_diagnostic(lifecycle_result: Mapping[str, Any]) -&gt; dict[str, Any]:
  340     &quot;&quot;&quot;Project a finite learned run without inventing a committed episode/ledger.
  341
  342     The existing OneJob result owns recorder disposition and executor evidence.
@@ -37,7 +37,7 @@
  375     if history:
  376         diagnostic[&quot;execution_history&quot;] = history
  377     diagnostic[&quot;diagnostic_digest&quot;] = canonical_digest(diagnostic)
- 378     return diagnostic</pre></section><section id="feedback-contract"><a href="../architecture.html#contracts">← Task &amp; Evidence Contracts</a><h2>Collection Recommendation · 같은 조건의 다음 수집</h2><p>v1은 기존 계획의 정확한 조건 선택을 갱신한다. 원본 실행을 resolver 입력과 대조하고, coverage와 명시적인 사람의 구간 판정을 소비한다. v2의 현재 장면 기반 수집 추천은 <a href="#current-acquisition">기존 설명</a>에 연결한다.</p><p class="locator">main 834c3835d8b7adf6fe3b80018b2ce0beb94393f6<br>tools/data_factory/collection_recommendation.py<br>sha256:80da5f87a4852e8cd5090cc42059534619cf910166f5b328a50613f0c9575abf</p><h3>원본 36–81행</h3><pre>  36
+ 378     return diagnostic</pre></section><section id="feedback-contract"><a href="../architecture.html#contracts">← Planning–Execution Interface</a><h2>Collection Recommendation · 같은 조건의 다음 수집</h2><p>v1은 기존 계획의 정확한 조건 선택을 갱신한다. 원본 실행을 resolver 입력과 대조하고, coverage와 명시적인 사람의 구간 판정을 소비한다. v2의 현재 장면 기반 수집 추천은 <a href="#current-acquisition">기존 설명</a>에 연결한다.</p><p class="locator">main 834c3835d8b7adf6fe3b80018b2ce0beb94393f6<br>tools/data_factory/collection_recommendation.py<br>sha256:80da5f87a4852e8cd5090cc42059534619cf910166f5b328a50613f0c9575abf</p><h3>원본 36–81행</h3><pre>  36
   37 SCHEMA_VERSION = &quot;data_factory.collection_recommendation.v1&quot;
   38 SNAPSHOT_SCHEMA = &quot;data_factory.collection_recommendation_input_snapshot.v1&quot;
   39 EPISODE_REF_SCHEMA = &quot;data_factory.episode_ref.v1&quot;
@@ -1917,4 +1917,44 @@ __all__ = [
 1051:                if patch[&quot;field&quot;] == &quot;campaign_selection&quot;]
 1052:     if (source[&quot;manifest&quot;][&quot;manifest_digest&quot;] != checked[&quot;input_snapshot&quot;][&quot;campaign&quot;][&quot;manifest_digest&quot;]
 1053:             or selection is None or len(patches) != 1 or patches[0][&quot;value&quot;] != selection):
-1054:         raise ContractError(&quot;COLLECTION_RECOMMENDATION_SELECTION_BINDING&quot;)</pre></section></main></body></html>
+1054:         raise ContractError(&quot;COLLECTION_RECOMMENDATION_SELECTION_BINDING&quot;)</pre></section><section id="policy-interface"><a href="../architecture.html#contracts">← Planning–Execution Interface</a><h2>NativeSmolVLA · instruction → action chunk</h2><p class="locator">main 0ee6d4d · tools/data_factory/learned_action_adapter.py · L446–470<br>sha256:59aea42fe879d700a3b8a9cfed32566826eb5071f348fba87a08784427edecc1</p><pre> 446     def _predict(self, observation):
+ 447         import numpy as np
+ 448         import torch
+ 449         from tools.fr5_data_factory import ContractError
+ 450
+ 451         value = {&quot;observation.state&quot;: torch.tensor(observation[&quot;observation.state&quot;], dtype=torch.float32),
+ 452                  &quot;task&quot;: observation[&quot;task&quot;]}
+ 453         for key in (&quot;observation.images.camera1&quot;, &quot;observation.images.camera2&quot;):
+ 454             frame = _rgb(observation[key])
+ 455             if (key == &quot;observation.images.camera1&quot;
+ 456                     and self.observation_view.get(&quot;representation&quot;) == &quot;baked&quot;
+ 457                     and self.observation_view.get(&quot;transform_application&quot;) == &quot;rollout_once&quot;):
+ 458                 frame = self._transform_raw_up(frame)
+ 459             value[key] = torch.frombuffer(bytearray(frame[&quot;data&quot;]), dtype=torch.uint8).reshape(frame[&quot;shape&quot;]).permute(2, 0, 1).float() / 255
+ 460         self.policy.reset()
+ 461         self.preprocessor.reset()
+ 462         self.postprocessor.reset()
+ 463         with torch.inference_mode():
+ 464             output = self.postprocessor(self.policy.predict_action_chunk(self.preprocessor(value)))
+ 465         if not isinstance(output, torch.Tensor) or output.ndim != 3 or output.shape[0] != 1 or output.shape[2] != 7:
+ 466             raise ContractError(&quot;LEARNED_ACTION_7D&quot;)
+ 467         return output[0].detach().cpu().tolist()
+ 468
+ 469     def _transform_raw_up(self, frame: dict) -&gt; dict:
+ 470         &quot;&quot;&quot;Apply Curator&#x27;s published up-view transform exactly once for raw Rollout input.&quot;&quot;&quot;</pre></section><section id="original-condition"><a href="../architecture.html#contracts">← Planning–Execution Interface</a><h2>Execution Context · 실행 전 원본 조건 보존</h2><p>실행 뒤 장면 상태가 달라져도 원래 수집 조건을 찾도록, 계획 승인 전에 작업 입력과 설정 식별값을 함께 보존한다.</p><p class="locator">main 0ee6d4d · tools/data_factory/run_job.py · L1602–1618<br>sha256:61a0f547fea748dc7a4234a3058090701ffdf6f0405666d28dba8f4e2e98427c</p><pre>1602     if &quot;learned_proposal&quot; in plan:
+1603         # Retain the original resolved condition before execution can change
+1604         # SceneStateStore. This is historical input, not current pose authority.
+1605         resolved = {key: copy.deepcopy(validated.get(key)) for key in (
+1606             &quot;normalized_job&quot;, &quot;input_digests&quot;, &quot;resolved_job_digest&quot;,
+1607         )}
+1608         if (
+1609             not isinstance(resolved[&quot;normalized_job&quot;], Mapping)
+1610             or not isinstance(resolved[&quot;input_digests&quot;], Mapping)
+1611             or canonical_digest({&quot;job&quot;: resolved[&quot;normalized_job&quot;],
+1612                                  &quot;input_digests&quot;: resolved[&quot;input_digests&quot;]})
+1613             != resolved[&quot;resolved_job_digest&quot;]
+1614             or plan.get(&quot;resolved_job_digest&quot;) != resolved[&quot;resolved_job_digest&quot;]
+1615         ):
+1616             raise ContractError(&quot;PREAPPROVAL_RESOLVED_INPUTS&quot;)
+1617         evidence[&quot;resolved_inputs&quot;] = resolved
+1618     if episode_instruction_binding is not None:</pre></section></main></body></html>

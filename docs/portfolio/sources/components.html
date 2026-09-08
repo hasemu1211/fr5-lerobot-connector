@@ -1,4 +1,28 @@
-<!doctype html><html lang="ko"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>외부 구성 요소의 출처 — 데이터 엔진 근거</title><link rel="stylesheet" href="../site.css"></head><body><main class="source-page"><a href="../architecture.html#foundation">← 설명으로 돌아가기</a><h1>외부 구성 요소의 출처</h1><p class="note">설명에 사용한 구현·측정 자료의 발췌이다. SHA-256은 발췌 전 원본 파일을 식별한다. 실행 PC의 절대 경로와 계정 정보는 포함하지 않으며, 측정값과 해석 조건을 함께 제시한다.</p><section id="THIRD_PARTY_NOTICES"><h2>THIRD_PARTY_NOTICES.md</h2><p class="locator">THIRD_PARTY_NOTICES.md<br>sha256:8bef1035c71c98df4ef299b166eff7c1177ba776d15d12322cf274fe4894a0ed</p><p class="note">원문 전체.</p><pre># Third-party components
+<!doctype html><html lang="ko"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>용어·연구·기반 기술 — 데이터 엔진 근거</title><link rel="stylesheet" href="../site.css"></head><body><main class="source-page"><a href="../architecture.html#implementation">← System Architecture</a><h1>용어·연구·기반 기술</h1>
+<section id="robot-learning"><h2>Task · Skill · Policy</h2>
+<table><thead><tr><th>용어</th><th>이 프로젝트에서의 의미</th><th>구현 대응</th></tr></thead><tbody>
+<tr><th>Task</th><td>달성할 목표. 상위 작업과 실행 단위 모두에서 사용한다.</td><td>Pick·Pick &amp; Place의 task recipe, SOURCE·DESTINATION, episode instruction</td></tr>
+<tr><th>Subgoal</th><td>상위 작업을 수행하기 위해 현재 달성할 실행 목표</td><td>연동 시 정책이 학습한 지시·기록 구간과 대응할 대상</td></tr>
+<tr><th>Skill</th><td>여러 조건에서 작업을 수행하는 로봇의 능력</td><td>실물 demonstration으로 적응시키려는 조작 능력</td></tr>
+<tr><th>Policy</th><td>관측과 지시로 동작을 생성하는 모델</td><td>SmolVLA의 language-conditioned action chunk</td></tr>
+</tbody></table>
+<p>상위 task planning은 작업 목표를 실행 skill의 선택·조합으로 구체화한다. 수집 recipe의 task는 Pick·Pick &amp; Place라는 실행 단위의 지시이다. 이 포트폴리오에서 skill adaptation은 로봇·카메라·물체·작업 조건에 맞춘 정책 적응을 뜻한다. 현재 task binding은 수집·실행의 계약이며, 상위 planner와 연결된 skill API는 확장 방향이다.</p>
+<h2>공통 구조와 서로 다른 실행 계약</h2>
+<p>상위 모델은 현재 달성할 subgoal을 정하고, 하위 정책은 관측과 subgoal을 조건으로 동작을 생성한다. 실행 후의 관측·결과는 다음 목표의 선택이나 갱신에 쓰인다. 비교 단위는 입력·실행·피드백의 역할이며, 각 연구의 프로토콜은 별개이다.</p>
+<table><thead><tr><th>참고 연구</th><th>상위 → 하위</th><th>실행·학습의 연결</th></tr></thead><tbody>
+<tr><th><a href="https://arxiv.org/html/2609.01281v1">EmbodiedSkills · 2026</a></th><td>선택한 operation·active subgoal → 유한 VLA 실행</td><td>입출력·선행 조건·실행·결과·실패를 계약으로 묶는다. skill은 인지·계획 같은 연산도 포함한다.</td></tr>
+<tr><th><a href="https://arxiv.org/html/2608.05999v1">HiRoC · 2026</a></th><td>언어 subgoal → subgoal-conditioned executor</td><td>전체 작업 지시로 학습한 정책을 subgoal 지시·동작 데이터로 다시 맞춘다.</td></tr>
+<tr><th><a href="https://vista-wm.github.io/">VISTA · 2026</a></th><td>언어 + 목표 이미지 → GoalVLA</td><td>현재 영상과 목표 영상을 함께 소비하도록 정책의 입력을 구성한다.</td></tr>
+<tr><th><a href="https://arxiv.org/html/2605.01772v1">Anticipation-VLA · 2026</a></th><td>재귀적으로 생성한 언어·시각 subgoal → VLA</td><td>목표 달성·진전·정체를 판단해 실행 목표의 세분화 수준을 조정한다.</td></tr>
+<tr><th><a href="https://deepmind.google/models/gemini-robotics/embodied-reasoning/">Gemini Robotics ER 2 · 2026</a></th><td>작업 계획·tool 호출 → 하위 VLA 또는 로봇 API</td><td>연속 영상으로 진행·완료를 파악하며 실행을 조율한다.</td></tr>
+</tbody></table>
+<h2>우리 시스템의 연결 지점</h2>
+<p>현재 작업 계약은 Pick·Pick &amp; Place의 지시와 물체·공간 조건을 보존한다. NativeSmolVLA는 언어 지시·두 카메라 영상·7차원 상태를 받아 동작 묶음을 생성한다. OneJob 실행 원본은 계획·정책·실행 상태와 사람 판정의 범위를 남기며, Curator는 이 원본을 수집 조건에 대응시켜 다음 수집 추천에 사용한다.</p>
+<p>이 입력·실행·결과 경계를 상위 시스템에 연결하는 것이 확장 방향이다. 상위 subgoal을 받을 때는 수집 instruction·기록 구간·정책 학습 단위가 맞아야 한다. 목표 이미지 입력이나 자동 progress 판정은 현재 계약에 추가로 필요한 기능이다.</p>
+<div class="source-note"><a href="task-recipes.html#task-contract">Task Binding ↗</a><a href="recommendation-core.html#policy-interface">정책 입력·출력 ↗</a><a href="recommendation-core.html#execution-contract">실행 원본 ↗</a><a href="recommendation-core.html#feedback-contract">Curator 소비 ↗</a></div>
+<details><summary>용어의 배경과 추가 참고</summary><p><a href="https://say-can.github.io/">SayCan</a>은 목표에 맞춰 실행 가능한 skill을 선택한다. <a href="https://www.pi.website/research/hirobot">Hi Robot</a>은 상위 언어 명령과 하위 VLA를 분리하며, <a href="https://www.pi.website/blog/pi05">π0.5</a>는 같은 모델에서 subtask와 연속 동작을 생성한다. <a href="https://huggingface.co/blog/smolvla">SmolVLA</a>는 이 프로젝트의 실제 정책 모델이다. <a href="https://innermonologue.github.io/">Inner Monologue</a>는 실행 피드백을 이용한 재계획의 참고 사례이다.</p></details>
+</section>
+<section id="THIRD_PARTY_NOTICES"><h2>THIRD_PARTY_NOTICES.md</h2><p class="locator">THIRD_PARTY_NOTICES.md<br>sha256:8bef1035c71c98df4ef299b166eff7c1177ba776d15d12322cf274fe4894a0ed</p><p class="note">원문 전체.</p><pre># Third-party components
 
 This repository links FAIRINO&#x27;s ROS 2 repository as a submodule, applies a local patch, and includes an FR5-only robot-description subset for the current MoveIt configuration.
 
