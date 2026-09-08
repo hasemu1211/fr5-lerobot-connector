@@ -805,3 +805,22 @@ same-command evidence; original model actions remain unchanged.
 This controlled per-chunk test path is an intermediate software capability.
 It does not satisfy autonomous bounded-task usability or whole-task success,
 and it does not prove continuous raw-reference consumption on the physical FR5.
+
+### Requirement: Existing scene update evidence remains in the execution result
+
+When learned terminal handling or non-release failure successfully updates an
+object to UNKNOWN through the existing SceneStateStore, the executor SHALL retain
+the returned snapshot in its existing `scene_transition` evidence field. That
+snapshot's revision, object evidence and canonical digest describe the update at
+that time; subsequent scene changes SHALL NOT rewrite the historical result.
+The initial plan's scene binding remains unchanged. Revision conflicts or failed
+writes SHALL NOT manufacture a successful transition snapshot.
+
+#### Scenario: A later scene update follows a learned attempt
+
+- **WHEN** terminal handling or failure records an UNKNOWN object snapshot and
+  the existing scene owner later records another supported object state
+- **THEN** OneJob's execution result retains the original UNKNOWN snapshot and digest
+- **AND** current scene lookup returns the newer revision separately
+- **AND** neither snapshot retention nor command completion grants landing,
+  semantic success, reset safety, recorder commit or training authority

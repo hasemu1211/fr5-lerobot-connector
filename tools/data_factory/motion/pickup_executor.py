@@ -1242,7 +1242,7 @@ class PickupExecutor:
             try:
                 item = execution["scene_object"]
                 binding = run["plan"]["scene_binding"]
-                self.scene_state_store.update_object(
+                execution["scene_transition"] = self.scene_state_store.update_object(
                     instance_id=binding["object_instance_id"], object_profile_id=item["object_profile_id"],
                     state="UNKNOWN", source="ROBOT_ACTION", updated_by="pickup-executor",
                     expected_revision=binding["revision"],
@@ -1399,7 +1399,7 @@ class PickupExecutor:
             if self.scene_state_store is not None and isinstance(item, dict):
                 slot = binding.get("release_slot")
                 if slot is None:
-                    self.scene_state_store.update_object(
+                    execution["scene_transition"] = self.scene_state_store.update_object(
                         instance_id=binding["object_instance_id"],
                         object_profile_id=item["object_profile_id"],
                         state="UNKNOWN",

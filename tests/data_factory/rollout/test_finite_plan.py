@@ -1373,9 +1373,9 @@ class FinitePlanTest(unittest.TestCase):
         self.assertEqual(transport.sent, [])
         self.assertEqual(transport.cancel_count, 0)
 
-    def make_job(self, *, hardware=True):
+    def make_job(self, *, hardware=True, scene_store=None):
         calls = []
-        transport, cell, scene = Transport(), Cell(), Scene()
+        transport, cell, scene = Transport(), Cell(), scene_store if scene_store is not None else Scene()
         now = [10.]
         transport.hardware = hardware
         transport.source_clock = lambda: now[0]
@@ -1386,7 +1386,11 @@ class FinitePlanTest(unittest.TestCase):
             return executor.process(request)
         job = OneJob(Recorder(calls), execute)
         inference = FinitePolicyInference(lambda _: [ACTION[:]], CHECKPOINT, source_clock=lambda: now[0])
-        planned = job.plan_learned("run", source(), SCENE, inference, observation(), **OPTIONS)
+        snapshot = scene_store.snapshot() if scene_store is not None else None
+        binding = ({"scene_state_digest": snapshot["scene_state_digest"],
+                    "revision": snapshot["scene_state"]["revision"], "object_instance_id": "cube-1"}
+                   if snapshot is not None else SCENE)
+        planned = job.plan_learned("run", source(), binding, inference, observation(), **OPTIONS)
         self.assertTrue(planned["ok"], planned)
         return job, executor, transport, cell, scene, now, calls
 
@@ -1397,6 +1401,78 @@ class FinitePlanTest(unittest.TestCase):
         self.assertTrue(job.start()["ok"])
         self.assertEqual(job.poll()["state"], "PRECONTACT_HUMAN")
         return values
+
+    def test_scene_transition_retains_real_store_snapshot_for_terminal_and_failure(self):
+        from tools.data_factory.scene_state import SceneStateStore
+        for failure in (False, True):
+            with self.subTest(failure=failure), tempfile.TemporaryDirectory() as directory:
+                store = SceneStateStore(directory, "fr5-lab-a")
+                store.update_object(instance_id="cube-1", object_profile_id="cube", state="ON_SURFACE",
+                    source="HUMAN", updated_by="synthetic-operator",
+                    pose={"place_id": "PLACE_A", "yaw_deg": 0., "x_mm": 10., "y_mm": 20.})
+                job, executor, transport, cell, _, now, calls = self.make_job(scene_store=store)
+                initial_binding = copy.deepcopy(job.scene_binding)
+                self.assertTrue(job.approve(APPROVAL)["ok"])
+                self.assertTrue(job.start()["ok"])
+                self.assertEqual(job.poll()["state"], "PRECONTACT_HUMAN")
+                self.assertTrue(job.confirm("operator")["ok"])
+                if failure:
+                    transport.failure = "SYNTHETIC_TRANSPORT_FAILURE"
+                    result = job.poll()
+                    self.assertEqual(result["code"], "SYNTHETIC_TRANSPORT_FAILURE")
+                else:
+                    self.assertEqual(job.poll()["state"], "LEARNED_CHUNK_COMPLETE")
+                    self.assertTrue(job.semantic_verdict("PASS", "operator")["ok"])
+                    result = job.poll()
+                    self.assertEqual(result["code"], "PRECOMMIT_SAFETY")
+                historical = result["execution_evidence"]["scene_transition"]
+                self.assertEqual(historical, store.snapshot())
+                self.assertEqual(historical["scene_state_digest"], canonical_digest(historical["scene_state"]))
+                self.assertEqual(historical["scene_state"]["revision"], initial_binding["revision"] + 1)
+                item = historical["scene_state"]["objects"]["cube-1"]
+                self.assertEqual((item["state"], item["pose"], item["source"]), ("UNKNOWN", None, "ROBOT_ACTION"))
+                self.assertEqual(job.scene_binding, initial_binding)
+                self.assertFalse(cell.ready)
+                self.assertNotIn(("recorder", "commit"), calls)
+                # The existing JSON response owns a historical snapshot, not a
+                # live view onto whichever scene becomes current later.
+                serialized = json.dumps(result, sort_keys=True)
+                later = store.update_object(instance_id="cube-1", object_profile_id="cube", state="ON_SURFACE",
+                    source="HUMAN", updated_by="synthetic-operator", expected_revision=historical["scene_state"]["revision"],
+                    pose={"place_id": "PLACE_A", "yaw_deg": 30., "x_mm": 40., "y_mm": 50.})
+                self.assertNotEqual(later["scene_state_digest"], historical["scene_state_digest"])
+                self.assertEqual(json.dumps(result, sort_keys=True), serialized)
+                self.assertEqual(executor._execution_data(executor.runs["run"])["scene_transition"], historical)
+                self.assertEqual(learned_run_diagnostic(result)["task_effectiveness"], "UNKNOWN")
+
+    def test_scene_transition_conflict_or_write_failure_cannot_publish_a_snapshot(self):
+        from tools.data_factory.scene_state import SceneStateStore
+        for conflict in (True, False):
+            with self.subTest(conflict=conflict), tempfile.TemporaryDirectory() as directory:
+                store = SceneStateStore(directory, "fr5-lab-a")
+                store.update_object(instance_id="cube-1", object_profile_id="cube", state="ON_SURFACE",
+                    source="HUMAN", updated_by="synthetic-operator",
+                    pose={"place_id": "PLACE_A", "yaw_deg": 0., "x_mm": 10., "y_mm": 20.})
+                job, executor, transport, _, _, _, calls = self.make_job(scene_store=store)
+                self.assertTrue(job.approve(APPROVAL)["ok"])
+                self.assertTrue(job.start()["ok"])
+                self.assertEqual(job.poll()["state"], "PRECONTACT_HUMAN")
+                self.assertTrue(job.confirm("operator")["ok"])
+                self.assertEqual(job.poll()["state"], "LEARNED_CHUNK_COMPLETE")
+                if conflict:
+                    store.update_object(instance_id="cube-1", object_profile_id="cube", state="UNKNOWN",
+                        source="HUMAN", updated_by="other-synthetic-operator", expected_revision=1)
+                else:
+                    store.update_object = mock.Mock(side_effect=OSError("synthetic write failure"))
+                before = store._path().read_bytes()
+                rejected = job.semantic_verdict("PASS", "operator")
+                self.assertFalse(rejected["ok"])
+                self.assertEqual(rejected["code"], "LEARNED_SCENE_UNCERTAIN")
+                self.assertNotIn("scene_transition", rejected["execution_evidence"])
+                self.assertEqual(rejected["execution_evidence"]["scene_state_error"],
+                                 "SCENE_REVISION_CONFLICT" if conflict else "SCENE_STATE_WRITE_FAILED")
+                self.assertEqual(store._path().read_bytes(), before)
+                self.assertNotIn(("recorder", "commit"), calls)
 
     def test_native_program_canonical_validation_and_plan_only_zero_effects(self):
         src = source()
